@@ -120,20 +120,20 @@ def process_message(message: dict):
 
 
 def call_gemini(parts: list) -> str:
-    """نداء Gemini مع أدوات البحث الحي وإعادة المحاولة عند حدوث ضغط 429"""
+    """نداء Gemini مع قراءة كاملة ومستقرة للنصوص وروابط البحث الحي دون انقطاع"""
     payload = {
         "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]},
         "contents": [{"role": "user", "parts": parts}],
         "tools": [
-            {"google_search": {}}  # أداة البحث الحي والربط بمحرك البحث
+            {"google_search": {}}  # تفعيل البحث الحي
         ],
-        "generationConfig": {"temperature": 0.2, "maxOutputTokens": 1500},
+        "generationConfig": {"temperature": 0.2, "maxOutputTokens": 2000},
     }
 
     for attempt in (1, 2):
         r = requests.post(GEMINI_URL, params={"key": GEMINI_API_KEY}, json=payload, timeout=120)
         if r.status_code == 429 and attempt == 1:
-            print("GEMINI 429 — free tier rate limit, retrying in 8s")
+            print("GEMINI 429 — rate limit, retrying in 8s")
             time.sleep(8)
             continue
         if r.status_code >= 400:
@@ -143,8 +143,34 @@ def call_gemini(parts: list) -> str:
 
     try:
         data = r.json()
-        out = data["candidates"][0]["content"]["parts"]
-        return "".join(p.get("text", "") for p in out).strip()
+        candidate = data["candidates"][0]
+        parts_list = candidate["content"]["parts"]
+        
+        full_text = ""
+        # قراءة جميع أجزاء الرد (سواء كانت نصوص عادية أو تفاصيل بحث) لضمان عدم نقصان الرسالة
+        for p in parts_list:
+            if "text" in p:
+                full_text += p["text"]
+        
+        # إذا كان هناك روابط مرافقة من البحث الحي ولم تظهر بالنص، نقوم بدمجها تلقائياً بالأسفل
+        try:
+            grounding_metadata = candidate.get("groundingMetadata", {})
+            web_sources = grounding_metadata.get("groundingChunks", [])
+            if web_sources and "أرخص سعر" in full_text:
+                full_text += "\n\n🔗 روابط المصادر والشراء:\n"
+                added_urls = set()
+                for chunk in web_sources:
+                    web = chunk.get("web", {})
+                    title = web.get("title", "رابط")
+                    url = web.get("uri")
+                    if url and url not in added_urls:
+                        full_text += f"- {title}: {url}\n"
+                        added_urls.add(url)
+        except Exception as ge:
+            print(f"No grounding metadata or error parsing it: {ge}")
+
+        return full_text.strip()
+
     except (KeyError, IndexError, TypeError, ValueError) as e:
         print(f"GEMINI bad response: {e} — {r.text[:400]}")
         return ""
