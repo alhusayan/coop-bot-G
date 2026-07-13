@@ -6,6 +6,7 @@ Deploy: Railway
 """
 
 import os
+import re
 import time
 import base64
 import requests
@@ -60,6 +61,9 @@ SYSTEM_PROMPT = """أنت مساعد ذكي متخصص بأسعار المنتج
 - إذا ما لقيت أسعار بالكويت، قول بصراحة إنك ما حصلت سعر مؤكد واقترح عليه وين يتأكد.
 - لا تستخدم جداول Markdown (الواتساب ما يعرضها)، ولا عناوين # ولا ** غامق Markdown — أسطر وإيموجي بسيطة فقط.
 - خل الرد مختصر — أقل من 15 سطر.
+- لا تكتب أي روابط في ردك إطلاقاً — الروابط تُضاف تلقائياً من النظام.
+- لا تستخدم علامات استشهاد أو أقواس مرجعية مثل [1] أو [4.2.6] نهائياً.
+- في نهاية ردك أضف سطراً أخيراً منفصلاً بهذا الشكل بالضبط: BEST:<دومين المتجر الأرخص> مثل BEST:luluhypermarket.com — هذا السطر للنظام ولن يراه العميل.
 """
 
 
@@ -161,23 +165,34 @@ def call_gemini(parts: list) -> str:
         out = cand["content"]["parts"]
         text = "".join(p.get("text", "") for p in out).strip()
 
-        # روابط المصادر من نتائج البحث الفعلية (Grounding) — احتياط إذا الموديل ما حط رابط
+        # تنظيف احتياطي: حذف أي علامات استشهاد أو روابط تسربت من الموديل
+        text = re.sub(r"\[[\d.,\s]+\]", "", text)
+        text = re.sub(r"https?://\S+", "", text).strip()
+
+        # استخراج دومين الأرخص من سطر BEST: ثم حذفه من النص
+        best_domain = None
+        m = re.search(r"BEST:\s*([\w.-]+)", text)
+        if m:
+            best_domain = m.group(1).lower()
+            text = re.sub(r"\n?BEST:.*", "", text).strip()
+
+        # رابط واحد فقط: رابط الـgrounding المطابق للدومين الأرخص، مفكوكاً لرابط نهائي قصير
         try:
-            if "http" not in text:  # الموديل ما ضمّن رابط بنفسه
-                chunks = cand.get("groundingMetadata", {}).get("groundingChunks", [])
-                links, seen = [], set()
-                for c in chunks:
-                    uri = c.get("web", {}).get("uri")
-                    title = c.get("web", {}).get("title", "")
-                    if uri and uri not in seen:
-                        seen.add(uri)
-                        links.append(f"• {title}: {uri}")
-                    if len(links) == 2:
-                        break
-                if links:
-                    text += "\n\n🔗 مصادر الأسعار:\n" + "\n".join(links)
-        except Exception:
-            pass
+            chunks = cand.get("groundingMetadata", {}).get("groundingChunks", [])
+            target = None
+            for c in chunks:
+                title = (c.get("web", {}).get("title") or "").lower()
+                if best_domain and best_domain.split(".")[0] in title:
+                    target = c.get("web", {}).get("uri")
+                    break
+            if not target and chunks:
+                target = chunks[0].get("web", {}).get("uri")
+            if target:
+                final = requests.head(target, allow_redirects=True, timeout=15).url
+                if len(final) < 200 and "vertexaisearch" not in final:
+                    text += f"\n\n🔗 {final}"
+        except Exception as e:
+            print(f"LINK RESOLVE: {e}")
 
         return text
     except (KeyError, IndexError, TypeError, ValueError) as e:
