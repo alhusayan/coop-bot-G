@@ -1,28 +1,29 @@
 # -*- coding: utf-8 -*-
 """
 بوت واتساب — بحث حي فوري عن أسعار المنتجات في الكويت
-WhatsApp Cloud API (Meta) + FastAPI + Claude API (Live Web Search)
+WhatsApp Cloud API (Meta) + FastAPI + Gemini API (Google Search Grounding + URL Context)
 Deploy: Railway
 """
 
 import os
+import time
 import base64
 import requests
 from collections import deque
 from fastapi import FastAPI, Request, Response, BackgroundTasks
-import anthropic
 
 app = FastAPI()
 
 # ========= مفاتيح التشغيل (تنحط في Railway → Variables، مو هنا) =========
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-WHATSAPP_TOKEN    = os.environ.get("WHATSAPP_TOKEN", "")
-PHONE_NUMBER_ID   = os.environ.get("PHONE_NUMBER_ID", "")
-VERIFY_TOKEN      = os.environ.get("VERIFY_TOKEN", "MY_SECRET_COOP_BOT_TOKEN")
+GEMINI_API_KEY  = os.environ.get("GEMINI_API_KEY", "")
+GEMINI_MODEL    = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+WHATSAPP_TOKEN  = os.environ.get("WHATSAPP_TOKEN", "")
+PHONE_NUMBER_ID = os.environ.get("PHONE_NUMBER_ID", "")
+VERIFY_TOKEN    = os.environ.get("VERIFY_TOKEN", "MY_SECRET_COOP_BOT_TOKEN")
 
-GRAPH_URL = "https://graph.facebook.com/v23.0"
-
-client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+GRAPH_URL  = "https://graph.facebook.com/v23.0"
+GEMINI_URL = (f"https://generativelanguage.googleapis.com/v1beta/models/"
+              f"{GEMINI_MODEL}:generateContent")
 
 # منع الرد المكرر: نحفظ آخر 500 رسالة تمت معالجتها
 processed_ids = deque(maxlen=500)
@@ -31,7 +32,7 @@ SYSTEM_PROMPT = """أنت مساعد ذكي متخصص بأسعار المنتج
 
 مهمتك:
 1. تعرّف على المنتج من الصورة أو من نص الرسالة.
-2. سوّ بحثات حية (Live Web Search) موجّهة — لا تكتفي ببحث واحد عام. سوّ بحثات منفصلة بإضافة اسم المتجر أو نطاقه لاستعلام البحث. المتاجر الكويتية ذات المتاجر الإلكترونية الفعلية (أسعارها منشورة أونلاين):
+2. سوّ بحثات Google موجّهة — لا تكتفي ببحث واحد عام. سوّ بحثات منفصلة بإضافة اسم المتجر أو نطاقه لاستعلام البحث. المتاجر الكويتية ذات المتاجر الإلكترونية الفعلية (أسعارها منشورة أونلاين):
    - جمعية دوت كوم: "اسم المنتج jm3eia.com"
    - توصيل: "اسم المنتج taw9eel.com"
    - أونكوست: "اسم المنتج oncost.com"
@@ -47,7 +48,7 @@ SYSTEM_PROMPT = """أنت مساعد ذكي متخصص بأسعار المنتج
    إذا العميل سأل عن جمعية محددة بالاسم، خصص لها بحث باسمها إلزامياً.
    اختر 5-7 بحثات من الأنسب لنوع المنتج. لولو وكارفور والميرة ومونوبري تظهر غالباً بالبحث العام.
    لعروض وتخفيضات الجمعيات الأسبوعية: ابحث "اسم المنتج عروض جمعيات ilofo" أو "el3rod".
-3. مهم جداً: إذا لقيت المنتج في نتيجة بحث لكن السعر ما ظهر في المقتطف، افتح صفحة المنتج نفسها (web_fetch) واقرأ السعر منها مباشرة قبل ما ترد. لا تقول "السعر يظهر عند الدخول للموقع" إلا بعد ما تحاول تفتح الصفحة فعلياً.
+3. مهم جداً: إذا لقيت المنتج في نتيجة بحث لكن السعر ما ظهر في المقتطف، افتح رابط صفحة المنتج نفسها (عندك أداة قراءة الروابط URL Context) واقرأ السعر منها مباشرة قبل ما ترد. لا تقول "السعر يظهر عند الدخول للموقع" إلا بعد ما تحاول تفتح الصفحة فعلياً.
 4. اعرض النتائج بشكل مرتب وواضح.
 
 قواعد الرد:
@@ -57,7 +58,7 @@ SYSTEM_PROMPT = """أنت مساعد ذكي متخصص بأسعار المنتج
 - رتبها من الأرخص للأغلى، وحط علامة ✅ عند أرخص سعر.
 - إذا السعر من نتيجة بحث مو مؤكدة أو قديمة، نبّه إن السعر تقريبي وقد يختلف.
 - إذا ما لقيت أسعار بالكويت، قول بصراحة إنك ما حصلت سعر مؤكد واقترح عليه وين يتأكد.
-- لا تستخدم جداول Markdown (الواتساب ما يعرضها)، استخدم أسطر وإيموجي بسيطة.
+- لا تستخدم جداول Markdown (الواتساب ما يعرضها)، ولا عناوين # ولا ** غامق Markdown — أسطر وإيموجي بسيطة فقط.
 - خل الرد مختصر — أقل من 15 سطر.
 """
 
@@ -97,59 +98,27 @@ def process_message(message: dict):
     msg_type = message.get("type")
 
     try:
-        content_blocks = []
+        parts = []
 
         if msg_type == "image":
             # رسالة انتظار عشان العميل ما يحس البوت طافي (البحث ياخذ ثواني)
             send_whatsapp_text(from_number, "🔍 لحظة، قاعد أتعرف على المنتج وأدور أسعاره بالكويت...")
 
             image_b64, mime = download_whatsapp_media(message["image"]["id"])
-            content_blocks.append({
-                "type": "image",
-                "source": {"type": "base64", "media_type": mime, "data": image_b64},
-            })
-            content_blocks.append({
-                "type": "text",
-                "text": "تعرف على هذا المنتج وابحث الآن بحثاً حياً عن أسعاره الحالية في الكويت.",
-            })
+            parts.append({"inline_data": {"mime_type": mime, "data": image_b64}})
+            parts.append({"text": "تعرف على هذا المنتج وابحث الآن بحثاً حياً عن أسعاره الحالية في الكويت."})
 
         elif msg_type == "text":
             user_text = message["text"]["body"]
             send_whatsapp_text(from_number, "🔍 ثواني، أدور لك الأسعار الحالية بالكويت...")
-            content_blocks.append({
-                "type": "text",
-                "text": f"العميل يسأل: {user_text}\nابحث الآن بحثاً حياً عن الأسعار الحالية في الكويت ورد عليه.",
-            })
+            parts.append({"text": f"العميل يسأل: {user_text}\nابحث الآن بحثاً حياً عن الأسعار الحالية في الكويت ورد عليه."})
 
         else:
             send_whatsapp_text(from_number, "حياك الله 🌟 دز لي صورة المنتج أو اكتب اسمه، وأدور لك أسعاره الحالية بالكويت فوراً 🛒")
             return
 
-        # ===== استدعاء Claude مع البحث الحي المدمج =====
-        response = client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=1500,
-            system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": content_blocks}],
-            tools=[
-                {
-                    "type": "web_search_20250305",
-                    "name": "web_search",
-                    "max_uses": 10,
-                },
-                {
-                    "type": "web_fetch_20250910",
-                    "name": "web_fetch",
-                    "max_uses": 5,
-                },
-            ],
-            extra_headers={"anthropic-beta": "web-fetch-2025-09-10"},
-        )
-
-        # نجمع كل النصوص من الرد (البحث يرجع عدة أجزاء)
-        reply_text = "".join(
-            block.text for block in response.content if block.type == "text"
-        ).strip()
+        # ===== استدعاء Gemini مع البحث الحي + قراءة الصفحات =====
+        reply_text = call_gemini(parts)
 
         if not reply_text:
             reply_text = "ما قدرت ألقى نتيجة واضحة 😅 جرب صورة أوضح أو اكتب اسم المنتج بالنص."
@@ -162,6 +131,39 @@ def process_message(message: dict):
             send_whatsapp_text(from_number, "صار خلل بسيط 🙏 عيد المحاولة بعد شوي.")
         except Exception:
             pass
+
+
+def call_gemini(parts: list) -> str:
+    """نداء Gemini مع أدوات البحث وقراءة الروابط + إعادة محاولة عند 429"""
+    payload = {
+        "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]},
+        "contents": [{"role": "user", "parts": parts}],
+        "tools": [
+            {"google_search": {}},   # البحث الحي (بديل web_search)
+            {"url_context": {}},     # فتح صفحات المنتجات وقراءة السعر (بديل web_fetch)
+        ],
+        "generationConfig": {"temperature": 0.2, "maxOutputTokens": 1500},
+    }
+
+    for attempt in (1, 2):
+        r = requests.post(GEMINI_URL, params={"key": GEMINI_API_KEY},
+                          json=payload, timeout=150)
+        if r.status_code == 429 and attempt == 1:
+            print("GEMINI 429 — free tier rate limit, retrying in 8s")
+            time.sleep(8)
+            continue
+        if r.status_code >= 400:
+            print(f"GEMINI error {r.status_code}: {r.text[:400]}")
+            return ""
+        break
+
+    try:
+        data = r.json()
+        out = data["candidates"][0]["content"]["parts"]
+        return "".join(p.get("text", "") for p in out).strip()
+    except (KeyError, IndexError, TypeError, ValueError) as e:
+        print(f"GEMINI bad response: {e} — {r.text[:400]}")
+        return ""
 
 
 # ========= أدوات مساعدة =========
@@ -202,4 +204,4 @@ def send_whatsapp_text(to_number: str, text: str):
 
 @app.get("/")
 async def health():
-    return {"status": "running", "bot": "Kuwait Price Bot 🇰🇼"}
+    return {"status": "running", "bot": "Kuwait Price Bot 🇰🇼 (Gemini)"}
