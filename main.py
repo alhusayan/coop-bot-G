@@ -120,12 +120,6 @@ def process_message(message: dict):
                 "type": "web_search_20250305",
                 "name": "web_search",
                 "max_uses": 5,
-                "user_location": {
-                    "type": "approximate",
-                    "city": "Kuwait City",
-                    "country": "KW",
-                    "timezone": "Asia/Kuwait",
-                },
             }],
         )
 
