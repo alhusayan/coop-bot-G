@@ -157,8 +157,29 @@ def call_gemini(parts: list) -> str:
 
     try:
         data = r.json()
-        out = data["candidates"][0]["content"]["parts"]
-        return "".join(p.get("text", "") for p in out).strip()
+        cand = data["candidates"][0]
+        out = cand["content"]["parts"]
+        text = "".join(p.get("text", "") for p in out).strip()
+
+        # روابط المصادر من نتائج البحث الفعلية (Grounding) — احتياط إذا الموديل ما حط رابط
+        try:
+            if "http" not in text:  # الموديل ما ضمّن رابط بنفسه
+                chunks = cand.get("groundingMetadata", {}).get("groundingChunks", [])
+                links, seen = [], set()
+                for c in chunks:
+                    uri = c.get("web", {}).get("uri")
+                    title = c.get("web", {}).get("title", "")
+                    if uri and uri not in seen:
+                        seen.add(uri)
+                        links.append(f"• {title}: {uri}")
+                    if len(links) == 2:
+                        break
+                if links:
+                    text += "\n\n🔗 مصادر الأسعار:\n" + "\n".join(links)
+        except Exception:
+            pass
+
+        return text
     except (KeyError, IndexError, TypeError, ValueError) as e:
         print(f"GEMINI bad response: {e} — {r.text[:400]}")
         return ""
