@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 بوت واتساب — بحث حي فوري عن أسعار المنتجات في الكويت
-WhatsApp Cloud API (Meta) + FastAPI + Gemini API (Google Search Grounding + URL Context)
+WhatsApp Cloud API (Meta) + FastAPI + Gemini API (Google Search Grounding)
 Deploy: Railway
 """
 
@@ -21,9 +21,8 @@ WHATSAPP_TOKEN  = os.environ.get("WHATSAPP_TOKEN", "")
 PHONE_NUMBER_ID = os.environ.get("PHONE_NUMBER_ID", "")
 VERIFY_TOKEN    = os.environ.get("VERIFY_TOKEN", "MY_SECRET_COOP_BOT_TOKEN")
 
-GRAPH_URL  = "https://graph.facebook.com/v23.0"
-GEMINI_URL = (f"https://generativelanguage.googleapis.com/v1beta/models/"
-              f"{GEMINI_MODEL}:generateContent")
+GRAPH_URL  = "https://graph.facebook.com/v20.0"
+GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
 
 # منع الرد المكرر: نحفظ آخر 500 رسالة تمت معالجتها
 processed_ids = deque(maxlen=500)
@@ -48,8 +47,7 @@ SYSTEM_PROMPT = """أنت مساعد ذكي متخصص بأسعار المنتج
    إذا العميل سأل عن جمعية محددة بالاسم، خصص لها بحث باسمها إلزامياً.
    اختر 5-7 بحثات من الأنسب لنوع المنتج. لولو وكارفور والميرة ومونوبري تظهر غالباً بالبحث العام.
    لعروض وتخفيضات الجمعيات الأسبوعية: ابحث "اسم المنتج عروض جمعيات ilofo" أو "el3rod".
-3. مهم جداً: إذا لقيت المنتج في نتيجة بحث لكن السعر ما ظهر في المقتطف، افتح رابط صفحة المنتج نفسها (عندك أداة قراءة الروابط URL Context) واقرأ السعر منها مباشرة قبل ما ترد. لا تقول "السعر يظهر عند الدخول للموقع" إلا بعد ما تحاول تفتح الصفحة فعلياً.
-4. اعرض النتائج بشكل مرتب وواضح.
+3. اعرض النتائج بشكل مرتب وواضح.
 
 قواعد الرد:
 - الأسلوب: كويتي ودّي وسريع، مناسب لمحادثة واتساب.
@@ -102,22 +100,22 @@ def process_message(message: dict):
 
         if msg_type == "image":
             # رسالة انتظار عشان العميل ما يحس البوت طافي (البحث ياخذ ثواني)
-            send_whatsapp_text(from_number, "🔍 لحظة، قاعد أتعرف على المنتج وأدور أسعاره بالكويت...")
+            send_whatsapp_text(from_number, "🔍 لحظة غالي، قاعد أتعرف على المنتج وأدور أسعاره بالكويت الحين...")
 
             image_b64, mime = download_whatsapp_media(message["image"]["id"])
             parts.append({"inline_data": {"mime_type": mime, "data": image_b64}})
-            parts.append({"text": "تعرف على هذا المنتج وابحث الآن بحثاً حياً عن أسعاره الحالية في الكويت."})
+            parts.append({"text": "تعرف على هذا المنتج وابحث الآن بحثاً حياً عن أسعاره الحالية في الكويت لترد على العميل."})
 
         elif msg_type == "text":
             user_text = message["text"]["body"]
-            send_whatsapp_text(from_number, "🔍 ثواني، أدور لك الأسعار الحالية بالكويت...")
+            send_whatsapp_text(from_number, "🔍 ثواني يا خوي، أدور لك الأسعار الحالية بالكويت...")
             parts.append({"text": f"العميل يسأل: {user_text}\nابحث الآن بحثاً حياً عن الأسعار الحالية في الكويت ورد عليه."})
 
         else:
             send_whatsapp_text(from_number, "حياك الله 🌟 دز لي صورة المنتج أو اكتب اسمه، وأدور لك أسعاره الحالية بالكويت فوراً 🛒")
             return
 
-        # ===== استدعاء Gemini مع البحث الحي + قراءة الصفحات =====
+        # ===== استدعاء Gemini مع البحث الحي =====
         reply_text = call_gemini(parts)
 
         if not reply_text:
@@ -128,26 +126,24 @@ def process_message(message: dict):
     except Exception as e:
         print(f"Error processing message: {e}")
         try:
-            send_whatsapp_text(from_number, "صار خلل بسيط 🙏 عيد المحاولة بعد شوي.")
+            send_whatsapp_text(from_number, "صار خلل بسيط بالشبكة 🙏 عيد المحاولة بعد شوي غالي.")
         except Exception:
             pass
 
 
 def call_gemini(parts: list) -> str:
-    """نداء Gemini مع أدوات البحث وقراءة الروابط + إعادة محاولة عند 429"""
+    """نداء Gemini مع أدوات البحث الحي وإعادة المحاولة عند حدوث ضغط 429"""
     payload = {
         "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]},
         "contents": [{"role": "user", "parts": parts}],
         "tools": [
-            {"google_search": {}},   # البحث الحي (بديل web_search)
-            {"url_context": {}},     # فتح صفحات المنتجات وقراءة السعر (بديل web_fetch)
+            {"google_search": {}}  # أداة البحث الحي والربط بمحرك البحث
         ],
         "generationConfig": {"temperature": 0.2, "maxOutputTokens": 1500},
     }
 
     for attempt in (1, 2):
-        r = requests.post(GEMINI_URL, params={"key": GEMINI_API_KEY},
-                          json=payload, timeout=150)
+        r = requests.post(GEMINI_URL, params={"key": GEMINI_API_KEY}, json=payload, timeout=120)
         if r.status_code == 429 and attempt == 1:
             print("GEMINI 429 — free tier rate limit, retrying in 8s")
             time.sleep(8)
@@ -166,7 +162,7 @@ def call_gemini(parts: list) -> str:
         return ""
 
 
-# ========= أدوات مساعدة =========
+# ========= أدوات مساعدة للواتساب =========
 def download_whatsapp_media(media_id: str):
     """يجيب الصورة من سيرفرات Meta ويرجعها base64 مع نوعها"""
     headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
@@ -204,4 +200,4 @@ def send_whatsapp_text(to_number: str, text: str):
 
 @app.get("/")
 async def health():
-    return {"status": "running", "bot": "Kuwait Price Bot 🇰🇼 (Gemini)"}
+    return {"status": "running", "bot": "Kuwait Price Bot 🇰🇼 (Gemini 2.5)"}
