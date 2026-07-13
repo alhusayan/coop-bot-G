@@ -100,7 +100,7 @@ def process_message(message: dict):
 
         if msg_type == "image":
             # رسالة انتظار عشان العميل ما يحس البوت طافي (البحث ياخذ ثواني)
-            send_whatsapp_text(from_number, "🔍 لحظة غالي، قاعد أتعرف على المنتج وأدور أسعاره بالكويت الحين...")
+            send_whatsapp_text(from_number, 💸 "ثواني بس.. قاعد أحوس بمواقع الكويت الحين عشان أطلع لك أقوى صيدة وأرخص سعر!")
 
             image_b64, mime = download_whatsapp_media(message["image"]["id"])
             parts.append({"inline_data": {"mime_type": mime, "data": image_b64}})
