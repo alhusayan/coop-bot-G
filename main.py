@@ -6,7 +6,8 @@ import os
 app = FastAPI()
 
 # إعداد مفاتيح التشغيل (يفضل وضعها في أرقام البيئة بـ Railway لاحقاً)
-GEMINI_API_KEY = "ضع_هنا_مفتاح_جيميني_الخاص_بك"
+# حط الرمز اللي نسخته الحين من شاشة الجيميني اهني
+GEMINI_API_KEY = "AQ.Ab8RN6Lv7pFuQMjc3WDieObUmzB7HF9X2tcANBjOG_hYV6LazA"
 WHATSAPP_TOKEN = "EAATIdbdhPsBR9pvRn9o1IBDTP3yrLaREQTfGmZaFa4OC6E6ZC1JaC0udX1Hobs83IHXw1wlU0EugfH72fBMVZB6ATi05yvCrL9Rb2omEmJwXW574zqu4xqzg787W9QngFZAYbYY9EpHIeWYJuaubLHyatZCzMh802Jt" # التوكن الظاهر بصورتك
 PHONE_NUMBER_ID = "1228772913651661" # المعرف الظاهر بصورتك
 VERIFY_TOKEN = "MY_SECRET_COOP_BOT_TOKEN" # كلمة سر من اختيارك لتأكيد الربط مع فيسبوك
