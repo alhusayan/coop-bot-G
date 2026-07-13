@@ -1,0 +1,426 @@
+"""استخراج بيانات المنتج من الصورة عبر Claude Haiku
+نقاط مهمة:
+- temperature = 0 → نفس الصورة تعطي نفس النتيجة كل مرة (يحل مشكلة "مرة يلقاه ومرة لا")
+- الاسم يُستخرج باللغتين للمطابقة عبر المصادر
+- الرد JSON فقط، مع تنظيف أي Markdown fences قبل الـ parse
+"""
+import os
+import json
+import base64
+
+import httpx
+
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+AI_MODEL = os.environ.get("AI_MODEL", "claude-haiku-4-5-20251001")
+SEARCH_MODEL = os.environ.get("SEARCH_MODEL", AI_MODEL)
+
+SEARCH_PRICES_PROMPT = """ابحث عن السعر الحالي لهذا المنتج في مواقع البقالة الكويتية:
+
+المنتج: {query}
+
+المصادر المعتمدة (ابحث فيها فقط):
+- جمعية دوت كوم (jm3eia.com)
+- طلبات مارت (talabat.com)
+- كارفور الكويت
+- نينجا الكويت
+- أسواق التميمي أو اللولو إن وجدت
+
+أرجع JSON فقط — مصفوفة بدون أي نص قبلها أو بعدها:
+[{{"store": "اسم المتجر بالعربي", "price": 0.000, "product_name": "اسم المنتج كما وجدته", "url": "رابط الصفحة"}}]
+
+قواعد صارمة:
+- أدرج فقط أسعاراً شفتها فعلاً في نتيجة بحث أو صفحة، لنفس المنتج (نفس الماركة والحجم) أو الأقرب له جداً.
+- السعر رقم عشري بالدينار الكويتي فقط، بين 0.05 و 500.
+- لا تخمّن سعراً أبداً. إذا ما لقيت شي موثوق أرجع: []
+- أقصى 4 نتائج.
+"""
+
+
+def _parse_price_results(text: str) -> list:
+    """تحليل مصفوفة نتائج البحث مع تحقق صارم من كل عنصر"""
+    start, end = text.find("["), text.rfind("]")
+    if start == -1 or end == -1:
+        return []
+    try:
+        data = json.loads(text[start:end + 1])
+    except json.JSONDecodeError:
+        return []
+    out = []
+    for item in data if isinstance(data, list) else []:
+        if not isinstance(item, dict):
+            continue
+        store = str(item.get("store") or "").strip()
+        try:
+            price = float(item.get("price"))
+        except (TypeError, ValueError):
+            continue
+        if not store or not (0.05 <= price <= 500):
+            continue
+        out.append({
+            "store": store,
+            "price": price,
+            "product_name": str(item.get("product_name") or "").strip(),
+            "url": str(item.get("url") or "").strip(),
+        })
+    return out[:4]
+
+
+async def search_prices_online(product_query: str, max_searches: int = 5) -> list:
+    """بحث حي عن أسعار المنتج بمواقع البقالة الكويتية — يُستخدم فقط
+    لما القاعدة المحلية ما تلقى المنتج (fallback)"""
+    if not ANTHROPIC_API_KEY or not product_query.strip():
+        return []
+    payload = {
+        "model": SEARCH_MODEL,
+        "max_tokens": 1200,
+        "temperature": 0,
+        "tools": [{"type": "web_search_20250305", "name": "web_search",
+                   "max_uses": max_searches}],
+        "messages": [{"role": "user",
+                      "content": SEARCH_PRICES_PROMPT.format(query=product_query)}],
+    }
+    try:
+        async with httpx.AsyncClient(timeout=120) as client:
+            resp = await client.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": ANTHROPIC_API_KEY,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json=payload,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+    except httpx.HTTPError as e:
+        print("ONLINE SEARCH ERROR:", repr(e))
+        return []
+    text = "".join(
+        block.get("text", "")
+        for block in data.get("content", [])
+        if block.get("type") == "text"
+    )
+    results = _parse_price_results(text)
+    print("ONLINE SEARCH:", json.dumps(results, ensure_ascii=False))
+    return results
+
+EXTRACTION_PROMPT = """أنت نظام استخراج بيانات منتجات من صور. الصور نوعان:
+1. لقطات شاشة من تطبيقات/مواقع تسوق كويتية (فيها اسم مكتوب وسعر ورمز منتج)
+2. صور حقيقية لمنتجات على رفوف الجمعيات (اقرأ العبوة نفسها: الماركة، النوع، الحجم)
+
+استخرج وأرجع JSON فقط — بدون أي نص قبله أو بعده، وبدون Markdown:
+
+{
+  "product_name_ar": "الماركة + نوع المنتج بالعربي + الحجم. أو null",
+  "product_name_en": "اسم المنتج بالإنجليزي. إذا العبوة عربية فقط، ترجمه للإنجليزي. أو null",
+  "category_ar": "فئة المنتج بكلمتين-ثلاث عربية شائعة (مسحوق غسيل، مياه معدنية، دجاج مجمد، معجون اسنان، شامبو...) — استنتجها من شكل المنتج حتى لو مو مكتوبة على العبوة. أو null",
+  "brand": "الماركة كما هي مكتوبة على العبوة، أو null",
+  "size_value": "رقم الحجم/الوزن فقط مثل 1 أو 500، أو null",
+  "size_unit": "وحدة الحجم مثل كجم / جم / لتر / مل / حبة، أو null",
+  "price_seen": "السعر الظاهر بالصورة كرقم عشري فقط بدون عملة مثل 0.590، أو null",
+  "error": null
+}
+
+قاعدة حاسمة للاسم العربي: **ترجم المعنى، لا تكتب الإنجليزي بأحرف عربية**.
+- "Ariel Fast Dissolving 3Kg" → "أريال مسحوق غسيل سريع الذوبان 3 كجم" ✅
+- "أريل فاست ديسولفينج 3 كجم" ❌ (تعريب صوتي — ممنوع)
+- "Sadia Whole Chicken" → "ساديا دجاج كامل" ✅ وليس "هول تشيكن" ❌
+الماركة نفسها فقط (Ariel، Sadia) تنكتب بتعريبها المعروف.
+
+قواعد صارمة:
+- أرجع الاسم باللغتين دائماً — هذا ضروري للمطابقة، ترجم الناقص منهما.
+- حوّل أي أرقام عربية (١٢٣) إلى إنجليزية (123) في كل الحقول.
+- اكتب الوحدة دائماً بصيغة موحدة: كجم، جم، لتر، مل، حبة.
+- بالصور الحقيقية: ركّز على الماركة والنوع والوزن المكتوب على العبوة (Net Weight).
+- لا تخمّن معلومات غير مقروءة — الحقل غير الواضح = null.
+- إذا الصورة ما فيها أي منتج واضح، أرجع: {"error": "no_product"}
+"""
+
+# تحويل الأرقام العربية إلى إنجليزية (طبقة أمان إضافية بعد الموديل)
+AR_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789")
+
+
+def _clean_json(text: str) -> dict:
+    """تنظيف رد الموديل من أي fences أو نص زائد ثم parse"""
+    text = text.strip()
+    if text.startswith("```"):
+        # إزالة ```json ... ```
+        text = text.split("```")[1]
+        if text.startswith("json"):
+            text = text[4:]
+    # أحياناً يسبق الـ JSON جملة قصيرة — نقتطع من أول { إلى آخر }
+    start, end = text.find("{"), text.rfind("}")
+    if start == -1 or end == -1:
+        return {"error": "bad_json"}
+    try:
+        return json.loads(text[start:end + 1])
+    except json.JSONDecodeError:
+        return {"error": "bad_json"}
+
+
+def _normalize_extraction(data: dict) -> dict:
+    """توحيد المخرجات: أرقام إنجليزية، تحويل السعر لرقم، تنظيف الرمز"""
+    out = {}
+    for k, v in data.items():
+        if isinstance(v, str):
+            v = v.translate(AR_DIGITS).strip()
+            if v in ("", "null", "None"):
+                v = None
+        out[k] = v
+
+    # السعر → float
+    if out.get("price_seen") is not None:
+        try:
+            out["price_seen"] = float(str(out["price_seen"]).replace("د.ك", "").strip())
+        except (ValueError, TypeError):
+            out["price_seen"] = None
+
+    return out
+
+
+async def extract_product_from_image(image_bytes: bytes, mime_type: str = "image/jpeg") -> dict:
+    """ترسل الصورة لـ Haiku وترجع dict موحّد بالحقول المستخرجة"""
+    if not ANTHROPIC_API_KEY:
+        return {"error": "no_api_key"}
+
+    b64 = base64.standard_b64encode(image_bytes).decode()
+
+    payload = {
+        "model": AI_MODEL,
+        "max_tokens": 500,
+        "temperature": 0,  # ← الأهم: نتيجة ثابتة لنفس الصورة
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "image",
+                 "source": {"type": "base64", "media_type": mime_type, "data": b64}},
+                {"type": "text", "text": EXTRACTION_PROMPT},
+            ],
+        }],
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": ANTHROPIC_API_KEY,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json=payload,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+    except httpx.HTTPError as e:
+        print("AI HTTP ERROR:", repr(e))
+        return {"error": "api_error"}
+
+    text = "".join(
+        block.get("text", "")
+        for block in data.get("content", [])
+        if block.get("type") == "text"
+    )
+    parsed = _clean_json(text)
+    if parsed.get("error"):
+        return parsed
+    return _normalize_extraction(parsed)
+
+
+EVALUATION_PROMPT = """أنت مستشار شراء كويتي خبير وصريح. قيّم هذا المنتج للمشتري:
+
+المنتج: {query}
+{price_line}
+
+ابحث عن: تقييمات المستخدمين، المشاكل الشائعة المعروفة، هل السعر عادل بسوق الكويت، وأفضل بديل أو اثنين بنفس الفئة السعرية.
+
+أرجع JSON فقط — بدون أي نص قبله أو بعده:
+{{
+  "verdict": "جملة حكم وحدة صريحة بالكويتي: يستاهل / لا تشتريه / يستاهل بس بشرط...",
+  "score": 8,
+  "pros": ["ميزة 1", "ميزة 2", "ميزة 3"],
+  "cons": ["عيب 1", "عيب 2"],
+  "price_opinion": "رأي بجملة: السعر عادل/مبالغ فيه/فرصة — مقارنة بسوق الكويت",
+  "alternatives": ["بديل 1 بسعره التقريبي", "بديل 2 بسعره التقريبي"]
+}}
+
+قواعد:
+- score من 1 إلى 10 بناءً على القيمة مقابل السعر والجودة والموثوقية.
+- كن صريحاً — إذا المنتج عليه مشاكل معروفة (موديل سيارة بمشكلة قير مثلاً) قلها بوضوح، هذا أهم شي بالتقييم.
+- pros ثلاث نقاط قصيرة كحد أقصى، cons اثنتين كحد أقصى، كل نقطة أقل من 10 كلمات.
+- alternatives فقط إذا فيه بدائل منطقية فعلاً، وإلا [].
+- لا تخترع معلومات — اللي ما تلقاه لا تذكره.
+"""
+
+
+def _parse_evaluation(text: str) -> dict:
+    start, end = text.find("{"), text.rfind("}")
+    if start == -1 or end == -1:
+        return {}
+    try:
+        data = json.loads(text[start:end + 1])
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(data, dict) or not data.get("verdict"):
+        return {}
+    try:
+        data["score"] = max(1, min(10, int(data.get("score", 0))))
+    except (TypeError, ValueError):
+        data["score"] = None
+    for k in ("pros", "cons", "alternatives"):
+        v = data.get(k)
+        data[k] = [str(x).strip() for x in v][:3] if isinstance(v, list) else []
+    return data
+
+
+async def evaluate_product(product_query: str, price_seen=None, max_searches: int = 5) -> dict:
+    """تقييم شرائي صريح للمنتج بالبحث الحي — يُستدعى بالطلب فقط (يكلّف بحث)"""
+    if not ANTHROPIC_API_KEY or not product_query.strip():
+        return {}
+    price_line = f"السعر المعروض عليه: {price_seen:.3f} د.ك" if price_seen else ""
+    payload = {
+        "model": SEARCH_MODEL,
+        "max_tokens": 1200,
+        "temperature": 0,
+        "tools": [{"type": "web_search_20250305", "name": "web_search",
+                   "max_uses": max_searches}],
+        "messages": [{"role": "user",
+                      "content": EVALUATION_PROMPT.format(query=product_query,
+                                                          price_line=price_line)}],
+    }
+    try:
+        async with httpx.AsyncClient(timeout=120) as client:
+            resp = await client.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": ANTHROPIC_API_KEY,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json=payload,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+    except httpx.HTTPError as e:
+        print("EVAL ERROR:", repr(e))
+        return {}
+    text = "".join(
+        block.get("text", "")
+        for block in data.get("content", [])
+        if block.get("type") == "text"
+    )
+    result = _parse_evaluation(text)
+    print("EVAL:", json.dumps(result, ensure_ascii=False))
+    return result
+
+
+SMART_CARD_PROMPT = """أنت مستشار شراء كويتي محترف. المطلوب تقرير شراء كامل عن هذا المنتج بضربة وحدة:
+
+المنتج: {query}
+{price_line}
+
+ابحث عن:
+1. أسعاره الحالية في الكويت (إكسايت، بست اليوسفي، أوان، ديجومارت، المتاجر المتخصصة، الوكيل الرسمي — حسب نوع المنتج). للسيارات: سعر الوكالة وسعر المستعمل التقريبي.
+2. تقييمات المستخدمين والمشاكل الشائعة المعروفة.
+3. أفضل بديل أو اثنين بنفس الفئة السعرية.
+
+أرجع JSON فقط — بدون أي نص قبله أو بعده:
+{{
+  "product_name": "اسم المنتج الكامل الواضح",
+  "prices": [{{"store": "اسم المتجر بالعربي", "price": 0.000, "url": "الرابط"}}],
+  "verdict": "جملة حكم وحدة صريحة بالكويتي",
+  "score": 8,
+  "pros": ["ميزة", "ميزة", "ميزة"],
+  "cons": ["عيب", "عيب"],
+  "price_opinion": "السعر العادل بالكويت بجملة وحدة",
+  "alternatives": ["بديل بسعره التقريبي"]
+}}
+
+قواعد صارمة:
+- الأسعار: فقط اللي شفتها فعلاً بنتيجة أو صفحة، بالدينار الكويتي، لنفس المنتج. لا تخمّن. إذا ما لقيت أسعار: []
+- كن صريحاً بالعيوب — المشاكل المعروفة أهم معلومة بالتقرير.
+- pros أقصاها 3 و cons أقصاها 2، كل نقطة أقل من 10 كلمات.
+- score من 1 إلى 10 (قيمة مقابل سعر + جودة + موثوقية).
+- أقصى 4 أسعار و 2 بدائل.
+"""
+
+
+def _parse_smart_card(text: str) -> dict:
+    start, end = text.find("{"), text.rfind("}")
+    if start == -1 or end == -1:
+        return {}
+    try:
+        data = json.loads(text[start:end + 1])
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    # الأسعار — نفس تحقق البحث القديم
+    prices = []
+    for item in data.get("prices") or []:
+        if not isinstance(item, dict):
+            continue
+        store = str(item.get("store") or "").strip()
+        try:
+            price = float(item.get("price"))
+        except (TypeError, ValueError):
+            continue
+        if store and 0.05 <= price <= 100000:   # سقف أعلى — فيه سيارات
+            prices.append({"store": store, "price": price,
+                           "url": str(item.get("url") or "").strip()})
+    data["prices"] = prices[:4]
+    # التقييم
+    try:
+        data["score"] = max(1, min(10, int(data.get("score", 0))))
+    except (TypeError, ValueError):
+        data["score"] = None
+    for k in ("pros", "cons", "alternatives"):
+        v = data.get(k)
+        data[k] = [str(x).strip() for x in v][:3] if isinstance(v, list) else []
+    data["product_name"] = str(data.get("product_name") or "").strip()
+    data["verdict"] = str(data.get("verdict") or "").strip()
+    # البطاقة مفيدة إذا فيها أسعار أو حكم
+    if not data["prices"] and not data["verdict"]:
+        return {}
+    return data
+
+
+async def smart_card_online(product_query: str, price_seen=None, max_searches: int = 7) -> dict:
+    """بحث موحّد: أسعار الكويت + تقييم صريح + بدائل — نداء واحد بدل اثنين"""
+    if not ANTHROPIC_API_KEY or not product_query.strip():
+        return {}
+    price_line = f"السعر المعروض على المشتري: {price_seen:.3f} د.ك" if price_seen else ""
+    payload = {
+        "model": SEARCH_MODEL,
+        "max_tokens": 1500,
+        "temperature": 0,
+        "tools": [{"type": "web_search_20250305", "name": "web_search",
+                   "max_uses": max_searches}],
+        "messages": [{"role": "user",
+                      "content": SMART_CARD_PROMPT.format(query=product_query,
+                                                          price_line=price_line)}],
+    }
+    try:
+        async with httpx.AsyncClient(timeout=150) as client:
+            resp = await client.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": ANTHROPIC_API_KEY,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json=payload,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+    except httpx.HTTPError as e:
+        print("SMART CARD ERROR:", repr(e))
+        return {}
+    text = "".join(
+        block.get("text", "")
+        for block in data.get("content", [])
+        if block.get("type") == "text"
+    )
+    card = _parse_smart_card(text)
+    print("SMART CARD:", json.dumps(card, ensure_ascii=False))
+    return card
