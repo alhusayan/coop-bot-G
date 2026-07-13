@@ -27,6 +27,23 @@ client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 # منع الرد المكرر: نحفظ آخر 500 رسالة تمت معالجتها
 processed_ids = deque(maxlen=500)
 
+# حد يومي لكل رقم (حماية الرصيد من الاستخدام المفرط)
+DAILY_LIMIT = 15
+daily_usage = {}  # {"9655xxxxxxx": {"date": "2026-07-13", "count": 3}}
+
+def check_daily_limit(number: str) -> bool:
+    """True = مسموح، False = تجاوز الحد اليومي"""
+    from datetime import date
+    today = str(date.today())
+    record = daily_usage.get(number)
+    if not record or record["date"] != today:
+        daily_usage[number] = {"date": today, "count": 1}
+        return True
+    if record["count"] >= DAILY_LIMIT:
+        return False
+    record["count"] += 1
+    return True
+
 SYSTEM_PROMPT = """أنت مساعد ذكي متخصص بأسعار المنتجات في دولة الكويت، ترد على عملاء واتساب.
 
 مهمتك:
@@ -42,7 +59,11 @@ SYSTEM_PROMPT = """أنت مساعد ذكي متخصص بأسعار المنتج
    - هاي آند باي: "اسم المنتج HiandBuy"
    - سيفكو: "اسم المنتج Saveco Kuwait"
    - وبحث عام: "اسم المنتج سعر الكويت"
-   اختر 5-7 من الأنسب لنوع المنتج (مواد غذائية، تنظيف، إلخ). لولو وكارفور والميرة ومونوبري تظهر غالباً بالبحث العام.
+   الجمعيات التعاونية (مشرف، الروضة وحولي، العديلية، صباح السالم، سلوى، بيان، الزهراء وغيرها):
+   متاجرها الإلكترونية موجودة على منصة طلبات Talabat — ابحث: "اسم المنتج talabat جمعية" أو "اسم المنتج طلبات جمعية مشرف" (أو أي جمعية يطلبها العميل بالاسم). أسعار طلبات هي أسعار فعلية قابلة للطلب من فروع الجمعيات نفسها.
+   إذا العميل سأل عن جمعية محددة بالاسم، خصص لها بحث باسمها إلزامياً.
+   اختر 3-4 بحثات فقط — الأنسب لنوع المنتج (عندك ميزانية 4 بحثات، استغلها بذكاء). لولو وكارفور والميرة ومونوبري تظهر غالباً بالبحث العام.
+   لعروض وتخفيضات الجمعيات الأسبوعية: ابحث "اسم المنتج عروض جمعيات ilofo" أو "el3rod".
 3. مهم جداً: إذا لقيت المنتج في نتيجة بحث لكن السعر ما ظهر في المقتطف، افتح صفحة المنتج نفسها (web_fetch) واقرأ السعر منها مباشرة قبل ما ترد. لا تقول "السعر يظهر عند الدخول للموقع" إلا بعد ما تحاول تفتح الصفحة فعلياً.
 4. اعرض النتائج بشكل مرتب وواضح.
 
@@ -92,6 +113,11 @@ def process_message(message: dict):
     from_number = message["from"]
     msg_type = message.get("type")
 
+    # فحص الحد اليومي قبل أي معالجة مكلفة
+    if msg_type in ("image", "text") and not check_daily_limit(from_number):
+        send_whatsapp_text(from_number, "وصلت الحد اليومي للاستعلامات (15) 🙏 عاود باچر وحياك الله!")
+        return
+
     try:
         content_blocks = []
 
@@ -123,20 +149,21 @@ def process_message(message: dict):
 
         # ===== استدعاء Claude مع البحث الحي المدمج =====
         response = client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=1500,
+            model="claude-haiku-4-5-20251001",
+            max_tokens=800,
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": content_blocks}],
             tools=[
                 {
                     "type": "web_search_20250305",
                     "name": "web_search",
-                    "max_uses": 8,
+                    "max_uses": 4,
                 },
                 {
                     "type": "web_fetch_20250910",
                     "name": "web_fetch",
-                    "max_uses": 5,
+                    "max_uses": 2,
+                    "max_content_tokens": 8000,
                 },
             ],
             extra_headers={"anthropic-beta": "web-fetch-2025-09-10"},
