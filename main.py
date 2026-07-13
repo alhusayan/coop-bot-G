@@ -54,10 +54,13 @@ SYSTEM_PROMPT = """أنت مساعد ذكي متخصص بأسعار المنتج
 
 قواعد الرد:
 - الأسلوب: كويتي ودّي وسريع، مناسب لمحادثة واتساب.
-- ابدأ باسم المنتج اللي تعرفت عليه.
-- اعرض الأسعار كقائمة بسيطة: اسم المتجر — السعر بالدينار الكويتي (د.ك).
-- رتبها من الأرخص للأغلى، وحط علامة ✅ عند أرخص سعر.
-- إذا السعر من نتيجة بحث مو مؤكدة أو قديمة، نبّه إن السعر تقريبي وقد يختلف.
+- اعرض الأسعار بهذا الشكل الإلزامي بالضبط، سطر لكل متجر، بدون ترقيم وبدون أقواس مربعة:
+📦 اسم المنتج
+✅ المتجر الأرخص — السعر د.ك
+• المتجر الثاني — السعر د.ك
+• المتجر الثالث — السعر د.ك
+- إذا فيه أحجام مختلفة، اذكر الحجم داخل سطر المتجر نفسه، ولا تسوّ أقساماً منفصلة لكل حجم.
+- إذا السعر من نتيجة بحث مو مؤكدة أو قديمة، نبّه بسطر واحد إن السعر تقريبي وقد يختلف.
 - إذا ما لقيت أسعار بالكويت، قول بصراحة إنك ما حصلت سعر مؤكد واقترح عليه وين يتأكد.
 - لا تستخدم جداول Markdown (الواتساب ما يعرضها)، ولا عناوين # ولا ** غامق Markdown — أسطر وإيموجي بسيطة فقط.
 - خل الرد مختصر — أقل من 15 سطر.
@@ -122,12 +125,16 @@ def process_message(message: dict):
             return
 
         # ===== استدعاء Gemini مع البحث الحي =====
-        reply_text = call_gemini(parts)
+        reply_text, best_url = call_gemini(parts)
 
         if not reply_text:
             reply_text = "ما قدرت ألقى نتيجة واضحة 😅 جرب صورة أوضح أو اكتب اسم المنتج بالنص."
 
-        send_whatsapp_text(from_number, reply_text)
+        # الرابط داخل زر مدمج — بدون رابط ظاهر في النص
+        if best_url:
+            send_whatsapp_cta(from_number, reply_text, best_url)
+        else:
+            send_whatsapp_text(from_number, reply_text)
 
     except Exception as e:
         print(f"Error processing message: {e}")
@@ -137,8 +144,8 @@ def process_message(message: dict):
             pass
 
 
-def call_gemini(parts: list) -> str:
-    """نداء Gemini مع أدوات البحث الحي وإعادة المحاولة عند حدوث ضغط 429"""
+def call_gemini(parts: list):
+    """نداء Gemini مع البحث الحي. يرجع (نص الرد, رابط الأرخص أو None)"""
     payload = {
         "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]},
         "contents": [{"role": "user", "parts": parts}],
@@ -156,7 +163,7 @@ def call_gemini(parts: list) -> str:
             continue
         if r.status_code >= 400:
             print(f"GEMINI error {r.status_code}: {r.text[:400]}")
-            return ""
+            return "", None
         break
 
     try:
@@ -165,9 +172,14 @@ def call_gemini(parts: list) -> str:
         out = cand["content"]["parts"]
         text = "".join(p.get("text", "") for p in out).strip()
 
-        # تنظيف احتياطي: حذف أي علامات استشهاد أو روابط تسربت من الموديل
-        text = re.sub(r"\[[\d.,\s]+\]", "", text)
-        text = re.sub(r"https?://\S+", "", text).strip()
+        # تنظيف احتياطي دقيق: استشهادات ملتصقة بنهاية الكلمات فقط + روابط
+        text = re.sub(r"(?<=\S)\[[\d]+(?:[.,][\d]+)*\]", "", text)   # مثل كلمة[4.2.6]
+        text = re.sub(r"https?://\S+", "", text)
+        # ترتيب: حذف أسطر صارت بلا محتوى وأسطر فارغة متكررة
+        lines = [l.rstrip() for l in text.splitlines()]
+        lines = [l for l in lines if l.strip() not in (".", "-", "•", "*")]
+        text = "\n".join(lines)
+        text = re.sub(r"\n{3,}", "\n\n", text).strip()
 
         # استخراج دومين الأرخص من سطر BEST: ثم حذفه من النص
         best_domain = None
@@ -176,7 +188,8 @@ def call_gemini(parts: list) -> str:
             best_domain = m.group(1).lower()
             text = re.sub(r"\n?BEST:.*", "", text).strip()
 
-        # رابط واحد فقط: رابط الـgrounding المطابق للدومين الأرخص، مفكوكاً لرابط نهائي قصير
+        # رابط الأرخص: من نتائج الـgrounding المطابقة للدومين، مفكوكاً لرابط نهائي قصير
+        best_url = None
         try:
             chunks = cand.get("groundingMetadata", {}).get("groundingChunks", [])
             target = None
@@ -189,15 +202,15 @@ def call_gemini(parts: list) -> str:
                 target = chunks[0].get("web", {}).get("uri")
             if target:
                 final = requests.head(target, allow_redirects=True, timeout=15).url
-                if len(final) < 200 and "vertexaisearch" not in final:
-                    text += f"\n\n🔗 {final}"
+                if len(final) < 500 and "vertexaisearch" not in final:
+                    best_url = final
         except Exception as e:
             print(f"LINK RESOLVE: {e}")
 
-        return text
+        return text, best_url
     except (KeyError, IndexError, TypeError, ValueError) as e:
         print(f"GEMINI bad response: {e} — {r.text[:400]}")
-        return ""
+        return "", None
 
 
 # ========= أدوات مساعدة للواتساب =========
@@ -234,6 +247,34 @@ def send_whatsapp_text(to_number: str, text: str):
         r = requests.post(url, json=payload, headers=headers, timeout=30)
         if r.status_code >= 400:
             print(f"WhatsApp send error: {r.status_code} {r.text}")
+
+
+def send_whatsapp_cta(to_number: str, text: str, url: str, button_title: str = "🛒 شوف أرخص سعر"):
+    """رسالة نصية مع زر مدمج يفتح الرابط — بدون رابط ظاهر بالنص"""
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to_number,
+        "type": "interactive",
+        "interactive": {
+            "type": "cta_url",
+            "body": {"text": text[:1024]},   # حد واتساب لنص هذا النوع
+            "action": {
+                "name": "cta_url",
+                "parameters": {"display_text": button_title[:25], "url": url},
+            },
+        },
+    }
+    r = requests.post(
+        f"{GRAPH_URL}/{PHONE_NUMBER_ID}/messages",
+        json=payload,
+        headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}",
+                 "Content-Type": "application/json"},
+        timeout=30,
+    )
+    if r.status_code >= 400:
+        print(f"CTA send error: {r.status_code} {r.text}")
+        # احتياط: لو فشل الزر نرسل رسالة عادية بالرابط عشان ما يضيع الرد
+        send_whatsapp_text(to_number, text + f"\n\n🔗 {url}")
 
 
 @app.get("/")
