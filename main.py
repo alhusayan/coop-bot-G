@@ -16,7 +16,7 @@ app = FastAPI()
 
 # ========= مفاتيح التشغيل (تنحط في Railway → Variables، مو هنا) =========
 GEMINI_API_KEY  = os.environ.get("GEMINI_API_KEY", "")
-GEMINI_MODEL    = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash") # تم ضبطه على النسخة المستقرة المعتمدة لحسابك
+GEMINI_MODEL    = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")
 WHATSAPP_TOKEN  = os.environ.get("WHATSAPP_TOKEN", "")
 PHONE_NUMBER_ID = os.environ.get("PHONE_NUMBER_ID", "")
 VERIFY_TOKEN    = os.environ.get("VERIFY_TOKEN", "MY_SECRET_COOP_BOT_TOKEN")
@@ -27,25 +27,39 @@ GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_M
 # منع الرد المكرر: نحفظ آخر 500 رسالة تمت معالجتها
 processed_ids = deque(maxlen=500)
 
-SYSTEM_PROMPT = """أنت "مساعد المشتري وصياد العروض" في دولة الكويت، ترد على عملاء واتساب بأسلوب كويتي ودود وسريع.
+SYSTEM_PROMPT = """أنت مساعد ذكي متخصص بأسعار المنتجات في دولة الكويت، ترد على عملاء واتساب.
 
-مهمتك الأساسية:
-1. تعرف على المنتج بدقة من الصورة أو النص (الاسم، الحجم، والوزن إن وجد).
-2. ابحث بحثاً حياً بالإنترنت عن أسعاره الحالية والخصومات في الجمعيات التعاونية والهايبرماركتس ومنصات التوصيل الكويتية (مثل talabat, jm3eia.com, taw9eel.com, لولو، كارفور، سيتي هايبر).
-3. رتب الأسعار التي عثرت عليها من الأرخص للأعلى بأسطر بسيطة ومتباعدة.
+مهمتك:
+1. تعرّف على المنتج من الصورة أو من نص الرسالة.
+2. سوّ بحثات Google موجّهة — لا تكتفي ببحث واحد عام. سوّ بحثات منفصلة بإضافة اسم المتجر أو نطاقه لاستعلام البحث. المتاجر الكويتية ذات المتاجر الإلكترونية الفعلية (أسعارها منشورة أونلاين):
+   - جمعية دوت كوم: "اسم المنتج jm3eia.com"
+   - توصيل: "اسم المنتج taw9eel.com"
+   - أونكوست: "اسم المنتج oncost.com"
+   - جراند هايبر: "اسم المنتج grandhyper.com"
+   - سيتي هايبر: "اسم المنتج cchyper.com"
+   - سلطان سنتر: "اسم المنتج sultan-center.com"
+   - دروبز: "اسم المنتج Dropz Kuwait"
+   - هاي آند باي: "اسم المنتج HiandBuy"
+   - سيفكو: "اسم المنتج Saveco Kuwait"
+   - مقاضي: "اسم المنتج maqadhe.com"
+   - مكاني: "اسم المنتج Makani"
+   - وبحث عام: "اسم المنتج سعر الكويت"
+   الجمعيات التعاونية (مشرف، الروضة وحولي، العديلية، صباح السالم، سلوى، بيان، الزهراء وغيرها):
+   متاجرها الإلكترونية موجودة على منصة طلبات Talabat — ابحث: "اسم المنتج talabat جمعية" أو "اسم المنتج طلبات جمعية مشرف" (أو أي جمعية يطلبها العميل بالاسم). أسعار طلبات هي أسعار فعلية قابلة للطلب من فروع الجمعيات نفسها.
+   إذا العميل سأل عن جمعية محددة بالاسم، خصص لها بحث باسمها إلزامياً.
+   اختر 5-7 بحثات من الأنسب لنوع المنتج. لولو وكارفور والميرة ومونوبري تظهر غالباً بالبحث العام.
+   لعروض وتخفيضات الجمعيات الأسبوعية: ابحث "اسم المنتج عروض جمعيات ilofo" أو "el3rod".
+3. اعرض النتائج بشكل مرتب وواضح.
 
-⚠️ قواعد التنسيق الصارمة ومنع الأخطاء:
-- ممنوع منعاً باتاً طباعة أو إظهار أي كود برمجي، أو نصوص JSON، أو رموز تقنية داخل ردك (مثل {"google_search_results": ...} أو الأقواس المتعرجة). ردك يجب أن يتكون من لغة عربية ولهجة كويتية صافية ومقروءة للمستخدم العادي فقط.
-- لا تستخدم جداول أو خطوط Markdown الثقيلة (** غامق أو # عناوين). اجعل الأسطر متباعدة ومريحة للعين بالواتساب باستخدام الرموز التعبيرية (Emojis) فقط.
-
-طريقة صياغة الرد للعميل:
-- ابدأ بترحيب سريع وبشر العميل بالصيد (مثال: "هلا بالصياد! 🎣 لقيت لك الأسعار الحين:").
-- اذكر اسم المنتج بوضوح.
-- اعرض الأسعار كقائمة بسيطة: اسم المتجر — السعر د.ك.
-- ضع علامة ✅ بجانب السعر الأرخص على الإطلاق.
-- اذكر بوضوح أي عروض أو مهرجانات أسبوعية نشطة للمنتج إن وجدت.
-- 🔗 رابط أفضل سعر: ابحث في نتائج البحث الحية عن رابط الويب الفعلي (URL) المتوفر الخاص بأرخص سعر عثرت عليه، واكتبه بوضوح في نهاية الرسالة على سطر مستقل ليكون قابلاً للنقر (مثال: "رابط أرخص سعر للشراء المباشر: [ضع الرابط هنا]").
-- اجعل الرد كله مختصراً وجذاباً (أقل من 12 سطر).
+قواعد الرد:
+- الأسلوب: كويتي ودّي وسريع، مناسب لمحادثة واتساب.
+- ابدأ باسم المنتج اللي تعرفت عليه.
+- اعرض الأسعار كقائمة بسيطة: اسم المتجر — السعر بالدينار الكويتي (د.ك).
+- رتبها من الأرخص للأغلى، وحط علامة ✅ عند أرخص سعر.
+- إذا السعر من نتيجة بحث مو مؤكدة أو قديمة، نبّه إن السعر تقريبي وقد يختلف.
+- إذا ما لقيت أسعار بالكويت، قول بصراحة إنك ما حصلت سعر مؤكد واقترح عليه وين يتأكد.
+- لا تستخدم جداول Markdown (الواتساب ما يعرضها)، ولا عناوين # ولا ** غامق Markdown — أسطر وإيموجي بسيطة فقط.
+- خل الرد مختصر — أقل من 15 سطر.
 """
 
 
@@ -87,7 +101,7 @@ def process_message(message: dict):
         parts = []
 
         if msg_type == "image":
-            # رسالة انتظار عشان العميل ما يحس البوت طافي
+            # رسالة انتظار عشان العميل ما يحس البوت طافي (البحث ياخذ ثواني)
             send_whatsapp_text(from_number, "ثواني بس.. قاعد أحوس بمواقع الكويت الحين عشان أطلع لك أقوى صيدة وأرخص سعر!")
 
             image_b64, mime = download_whatsapp_media(message["image"]["id"])
@@ -120,20 +134,20 @@ def process_message(message: dict):
 
 
 def call_gemini(parts: list) -> str:
-    """نداء Gemini مع قراءة كاملة ومستقرة للنصوص وروابط البحث الحي دون انقطاع"""
+    """نداء Gemini مع أدوات البحث الحي وإعادة المحاولة عند حدوث ضغط 429"""
     payload = {
         "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]},
         "contents": [{"role": "user", "parts": parts}],
         "tools": [
-            {"google_search": {}}  # تفعيل البحث الحي
+            {"google_search": {}}  # أداة البحث الحي والربط بمحرك البحث
         ],
-        "generationConfig": {"temperature": 0.2, "maxOutputTokens": 2000},
+        "generationConfig": {"temperature": 0.2, "maxOutputTokens": 1500},
     }
 
     for attempt in (1, 2):
         r = requests.post(GEMINI_URL, params={"key": GEMINI_API_KEY}, json=payload, timeout=120)
         if r.status_code == 429 and attempt == 1:
-            print("GEMINI 429 — rate limit, retrying in 8s")
+            print("GEMINI 429 — free tier rate limit, retrying in 8s")
             time.sleep(8)
             continue
         if r.status_code >= 400:
@@ -143,34 +157,8 @@ def call_gemini(parts: list) -> str:
 
     try:
         data = r.json()
-        candidate = data["candidates"][0]
-        parts_list = candidate["content"]["parts"]
-        
-        full_text = ""
-        # قراءة جميع أجزاء الرد (سواء كانت نصوص عادية أو تفاصيل بحث) لضمان عدم نقصان الرسالة
-        for p in parts_list:
-            if "text" in p:
-                full_text += p["text"]
-        
-        # إذا كان هناك روابط مرافقة من البحث الحي ولم تظهر بالنص، نقوم بدمجها تلقائياً بالأسفل
-        try:
-            grounding_metadata = candidate.get("groundingMetadata", {})
-            web_sources = grounding_metadata.get("groundingChunks", [])
-            if web_sources and "أرخص سعر" in full_text:
-                full_text += "\n\n🔗 روابط المصادر والشراء:\n"
-                added_urls = set()
-                for chunk in web_sources:
-                    web = chunk.get("web", {})
-                    title = web.get("title", "رابط")
-                    url = web.get("uri")
-                    if url and url not in added_urls:
-                        full_text += f"- {title}: {url}\n"
-                        added_urls.add(url)
-        except Exception as ge:
-            print(f"No grounding metadata or error parsing it: {ge}")
-
-        return full_text.strip()
-
+        out = data["candidates"][0]["content"]["parts"]
+        return "".join(p.get("text", "") for p in out).strip()
     except (KeyError, IndexError, TypeError, ValueError) as e:
         print(f"GEMINI bad response: {e} — {r.text[:400]}")
         return ""
@@ -192,21 +180,18 @@ def download_whatsapp_media(media_id: str):
 
 
 def send_whatsapp_text(to_number: str, text: str):
-    """يرسل رد نصي، ويضمن تنظيف رقم الهاتف وإرساله بالصيغة الصحيحة"""
+    """يرسل رد نصي، ويقسم الرسائل الطويلة (حد الواتساب 4096 حرف)"""
     url = f"{GRAPH_URL}/{PHONE_NUMBER_ID}/messages"
     headers = {
         "Authorization": f"Bearer {WHATSAPP_TOKEN}",
         "Content-Type": "application/json",
     }
 
-    # تنظيف رقم التليفون (إزالة أي علامات زائد أو مسافات إن وجدت)
-    clean_number = str(to_number).replace("+", "").strip()
-
     chunks = [text[i:i + 3900] for i in range(0, len(text), 3900)] or [text]
     for chunk in chunks:
         payload = {
             "messaging_product": "whatsapp",
-            "to": clean_number,
+            "to": to_number,
             "type": "text",
             "text": {"body": chunk},
         }
@@ -217,4 +202,4 @@ def send_whatsapp_text(to_number: str, text: str):
 
 @app.get("/")
 async def health():
-    return {"status": "running", "bot": "Kuwait Price Bot 🇰🇼 (Gemini)"}
+    return {"status": "running", "bot": "Kuwait Price Bot 🇰🇼 (Gemini 2.5)"}
