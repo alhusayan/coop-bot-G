@@ -16,7 +16,7 @@ app = FastAPI()
 
 # ========= مفاتيح التشغيل (تنحط في Railway → Variables، مو هنا) =========
 GEMINI_API_KEY  = os.environ.get("GEMINI_API_KEY", "")
-GEMINI_MODEL    = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+GEMINI_MODEL    = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")
 WHATSAPP_TOKEN  = os.environ.get("WHATSAPP_TOKEN", "")
 PHONE_NUMBER_ID = os.environ.get("PHONE_NUMBER_ID", "")
 VERIFY_TOKEN    = os.environ.get("VERIFY_TOKEN", "MY_SECRET_COOP_BOT_TOKEN")
