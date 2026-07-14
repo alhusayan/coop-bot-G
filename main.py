@@ -31,8 +31,8 @@ SYSTEM_PROMPT = """أنت مساعد ذكي متخصص بأسعار المنتج
 
 مهمتك:
 1. تعرّف على المنتج من الصورة أو من نص الرسالة.
-2. سوّ بحثات Google موجّهة للمتاجر الكويتية (مثل: jm3eia.com, farmazone, boots, taw9eel.com, lulu, carrefour, talabat).
-3. اعرض النتائج بشكل مرتب وواضح، واستخرج الرابط المباشر لصفحة الشراء للمتجر الأرخص.
+2. سوّ بحثات Google موجّهة للمتاجر الكويتية (مثل: jm3eia.com, farmazone, kw.boots.com, taw9eel.com, lulu, carrefour, talabat).
+3. اعرض النتائج بشكل مرتب وواضح.
 
 قواعد الرد:
 - لا مقدمات ولا ترحيب — ابدأ مباشرة بسطر 📦 اسم المنتج.
@@ -42,9 +42,11 @@ SYSTEM_PROMPT = """أنت مساعد ذكي متخصص بأسعار المنتج
 • المتجر الثالث — السعر د.ك
 - إذا فيه أحجام، اذكر الحجم داخل سطر المتجر.
 - لا تستخدم جداول أو عناوين غامقة (Markdown).
-- **الرابط الإلزامي المشفر:** في نهاية ردك تماماً (بسطر منفصل)، يجب أن تكتب الرابط المباشر لصفحة المتجر الأرخص بهذا الشكل المشفر الإلزامي:
-URL_START:https://www.example.com/product-page:URL_END
-(لا تكتب أي كلمة أخرى مثل LINK أو غيرها، فقط السطر المشفر).
+- **الرابط الإلزامي:** في نهاية ردك تماماً (بسطر منفصل)، اكتب الاسم الأساسي للمتجر الأرخص باللغة الإنجليزية بدون www أو .com بهذا الشكل الإلزامي:
+STORE:boots 
+أو STORE:farmazone 
+أو STORE:taw9eel
+(فقط اكتب STORE: واسم المتجر، لا تكتب أي روابط أو كلمات أخرى بعدها).
 """
 
 @app.get("/webhook")
@@ -116,7 +118,7 @@ def process_message(message: dict):
 
 
 def call_gemini(parts: list):
-    """نداء Gemini وسحب الرابط المباشر بدون فحص أو تحويل لجوجل"""
+    """نداء Gemini وسحب الرابط المباشر من مصادر بحث جوجل الحقيقية"""
     payload = {
         "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]},
         "contents": [{"role": "user", "parts": parts}],
@@ -139,28 +141,35 @@ def call_gemini(parts: list):
         out = cand["content"]["parts"]
         text = "".join(p.get("text", "") for p in out).strip()
 
-        # تنظيف من المراجع المزعجة
+        # تنظيف المراجع 
         text = re.sub(r"(?<=\S)\[[\d]+(?:[.,][\d]+)*\]", "", text)
 
+        best_domain = ""
         best_url = None
         
-        # 1. سحب الرابط المشفر من النص
-        match = re.search(r"URL_START:\s*(https?://[^\s:]+)\s*:URL_END", text, re.IGNORECASE)
+        # 1. سحب اسم المتجر الأرخص من النص
+        match = re.search(r"STORE:\s*([\w.-]+)", text, re.IGNORECASE)
         if match:
-            best_url = match.group(1).strip().rstrip('.,;:"\'')
-            # مسح سطر الرابط المشفر بالكامل من النص حتى لا يراه العميل
-            text = re.sub(r"URL_START:.*?:URL_END", "", text, flags=re.IGNORECASE).strip()
+            best_domain = match.group(1).strip().lower()
+            # مسح السطر بالكامل عشان ما يشوفه العميل
+            text = re.sub(r"STORE:.*", "", text, flags=re.IGNORECASE).strip()
 
-        # مسح أي كلمة LINK معلقة بالغلط
-        text = re.sub(r"LINK\s*", "", text, flags=re.IGNORECASE).strip()
+        # 2. سحب الرابط الأصلي مباشرة من نتائج جوجل المخفية بالخلفية
+        chunks = cand.get("groundingMetadata", {}).get("groundingChunks", [])
+        
+        if best_domain:
+            for c in chunks:
+                uri = c.get("web", {}).get("uri", "")
+                if best_domain in uri.lower() and "google.com" not in uri:
+                    best_url = uri
+                    break
 
-        # 2. خطة إنقاذ من الـ Grounding مباشرة لو فشل التشفير
-        if not best_url:
-            chunks = cand.get("groundingMetadata", {}).get("groundingChunks", [])
+        # 3. خطة إنقاذ: إذا ما طابق الاسم، نسحب أول رابط حقيقي متوفر
+        if not best_url and chunks:
             for c in chunks:
                 uri = c.get("web", {}).get("uri", "")
                 if uri and uri.startswith("http") and "google.com" not in uri:
-                    best_url = uri.rstrip('.,;:"\'')
+                    best_url = uri
                     break
         
         # تنظيف نهائي للأسطر الفارغة
@@ -209,7 +218,7 @@ def send_whatsapp_cta(to_number: str, text: str, url: str):
             "body": {"text": body},
             "action": {
                 "name": "cta_url",
-                "parameters": {"display_text": "🛒 شوف أرخص سعر", "url": url[:1000]}, # واتساب يقبل رابط لغاية 1000 حرف
+                "parameters": {"display_text": "🛒 شوف أرخص سعر", "url": url[:1000]}, 
             },
         },
     }
@@ -229,4 +238,4 @@ def send_whatsapp_cta(to_number: str, text: str, url: str):
 
 @app.get("/")
 async def health():
-    return {"status": "running", "bot": "Kuwait Price Bot 🇰🇼 (Direct Shop Links)"}
+    return {"status": "running", "bot": "Kuwait Price Bot 🇰🇼 (Real Grounded Links Only)"}
