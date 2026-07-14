@@ -10,7 +10,6 @@ import re
 import time
 import base64
 import requests
-import urllib.parse  # 👈 أضفنا هذي المكتبة لصناعة روابط الإنقاذ
 from collections import deque
 from fastapi import FastAPI, Request, Response, BackgroundTasks
 
@@ -32,22 +31,20 @@ SYSTEM_PROMPT = """أنت مساعد ذكي متخصص بأسعار المنتج
 
 مهمتك:
 1. تعرّف على المنتج من الصورة أو من نص الرسالة.
-2. سوّ بحثات Google موجّهة للمتاجر الكويتية (مثل: jm3eia.com, taw9eel.com, oncost.com, lulu, carrefour, talabat الجمعيات).
-3. اعرض النتائج بشكل مرتب وواضح.
+2. سوّ بحثات Google موجّهة للمتاجر الكويتية (مثل: jm3eia.com, farmazone, boots, taw9eel.com, lulu, carrefour, talabat).
+3. اعرض النتائج بشكل مرتب وواضح، واستخرج الرابط المباشر لصفحة الشراء للمتجر الأرخص.
 
 قواعد الرد:
-- لا مقدمات ولا ترحيب — ابدأ مباشرة بسطر 📦 اسم المنتج (إلا إذا العميل سلم عليك).
+- لا مقدمات ولا ترحيب — ابدأ مباشرة بسطر 📦 اسم المنتج.
 - اعرض الأسعار بهذا الشكل الإلزامي بالضبط:
-📦 اسم المنتج
 ✅ المتجر الأرخص — السعر د.ك
 • المتجر الثاني — السعر د.ك
 • المتجر الثالث — السعر د.ك
 - إذا فيه أحجام، اذكر الحجم داخل سطر المتجر.
 - لا تستخدم جداول أو عناوين غامقة (Markdown).
-- خل الرد مختصر جداً.
-- **مهم جداً جداً:** في نهاية ردك تماماً (بسطر منفصل)، يجب أن تكتب الرابط المباشر لأرخص متجر بهذا الشكل الإلزامي لكي يتم تحويله لزر:
-LINK: https://www.example.com
-(لا تكتب أي شيء آخر بعد الرابط).
+- **الرابط الإلزامي المشفر:** في نهاية ردك تماماً (بسطر منفصل)، يجب أن تكتب الرابط المباشر لصفحة المتجر الأرخص بهذا الشكل المشفر الإلزامي:
+URL_START:https://www.example.com/product-page:URL_END
+(لا تكتب أي كلمة أخرى مثل LINK أو غيرها، فقط السطر المشفر).
 """
 
 @app.get("/webhook")
@@ -103,7 +100,7 @@ def process_message(message: dict):
         if not reply_text:
             reply_text = "ما قدرت ألقى نتيجة واضحة 😅 جرب صورة أوضح أو اكتب اسم المنتج بالنص."
 
-        print(f"REPLY LEN: {len(reply_text)} | URL EXTRACTED: {best_url}")
+        print(f"REPLY LEN: {len(reply_text)} | FINAL URL EXTRACTED: {best_url}")
 
         if best_url:
             send_whatsapp_cta(from_number, reply_text, best_url)
@@ -119,7 +116,7 @@ def process_message(message: dict):
 
 
 def call_gemini(parts: list):
-    """نداء Gemini وصيد الرابط السريع مع فلتر فحص الـ 404"""
+    """نداء Gemini وسحب الرابط المباشر بدون فحص أو تحويل لجوجل"""
     payload = {
         "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]},
         "contents": [{"role": "user", "parts": parts}],
@@ -145,59 +142,32 @@ def call_gemini(parts: list):
         # تنظيف من المراجع المزعجة
         text = re.sub(r"(?<=\S)\[[\d]+(?:[.,][\d]+)*\]", "", text)
 
-        # استخراج اسم المنتج للبحث البديل لو خربت الروابط
-        product_name = "المنتج"
-        first_line = text.split('\n')[0]
-        if "📦" in first_line:
-            product_name = first_line.replace("📦", "").strip()
-
-        # 1. صيد الرابط المكتوب صراحة بالنص
         best_url = None
-        match = re.search(r"LINK:\s*(https?://[^\s]+)", text, re.IGNORECASE)
+        
+        # 1. سحب الرابط المشفر من النص
+        match = re.search(r"URL_START:\s*(https?://[^\s:]+)\s*:URL_END", text, re.IGNORECASE)
         if match:
-            # تنظيف الرابط من أي نقطة أو فاصلة بالخطأ في النهاية
             best_url = match.group(1).strip().rstrip('.,;:"\'')
-            text = re.sub(r"LINK:\s*https?://[^\s]+", "", text, flags=re.IGNORECASE).strip()
+            # مسح سطر الرابط المشفر بالكامل من النص حتى لا يراه العميل
+            text = re.sub(r"URL_START:.*?:URL_END", "", text, flags=re.IGNORECASE).strip()
 
-        # 2. جمع كل الروابط المتوفرة (الأساسي + روابط البحث المخفية) لفحصها
-        urls_to_test = []
-        if best_url:
-            urls_to_test.append(best_url)
-            
-        chunks = cand.get("groundingMetadata", {}).get("groundingChunks", [])
-        for c in chunks:
-            uri = c.get("web", {}).get("uri", "")
-            if uri and uri.startswith("http") and "google.com" not in uri:
-                clean_uri = uri.rstrip('.,;:"\'')
-                if clean_uri not in urls_to_test:
-                    urls_to_test.append(clean_uri)
+        # مسح أي كلمة LINK معلقة بالغلط
+        text = re.sub(r"LINK\s*", "", text, flags=re.IGNORECASE).strip()
 
-        # 3. الفلتر الذكي: فحص الروابط بالترتيب وتجاوز الـ 404
-        final_url = None
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-        for url in urls_to_test:
-            try:
-                # طلب خفيف وسريع للتأكد من حالة الصفحة
-                res = requests.get(url, headers=headers, timeout=3, stream=True)
-                # إذا الصفحة ميتة (404) نتركه ونجرب اللي بعده
-                if res.status_code not in [404, 410, 400]:
-                    final_url = url
+        # 2. خطة إنقاذ من الـ Grounding مباشرة لو فشل التشفير
+        if not best_url:
+            chunks = cand.get("groundingMetadata", {}).get("groundingChunks", [])
+            for c in chunks:
+                uri = c.get("web", {}).get("uri", "")
+                if uri and uri.startswith("http") and "google.com" not in uri:
+                    best_url = uri.rstrip('.,;:"\'')
                     break
-            except Exception:
-                # إذا الموقع عليه حماية (Cloudflare) بيعطي خطأ، نفترضه شغال وناخذه
-                final_url = url
-                break
-
-        # 4. خطة الإنقاذ: لو كل الروابط ميتة، اصنع رابط بحث جوجل نظيف للمنتج
-        if not final_url:
-            safe_term = urllib.parse.quote(f"{product_name} الكويت")
-            final_url = f"https://www.google.com/search?q={safe_term}"
-
+        
         # تنظيف نهائي للأسطر الفارغة
         lines = [l.rstrip() for l in text.splitlines()]
         text = "\n".join([l for l in lines if l])
 
-        return text, final_url
+        return text, best_url
     except Exception as e:
         print(f"GEMINI PARSE ERROR: {e}")
         return "", None
@@ -221,12 +191,12 @@ def send_whatsapp_text(to_number: str, text: str):
 
 
 def send_whatsapp_cta(to_number: str, text: str, url: str):
-    """إرسال النص مع زر انتقال، وإذا فشل الزر يعوض برابط نصي"""
+    """إرسال النص مع زر انتقال مباشر للمتجر"""
     clean_number = str(to_number).replace("+", "").strip()
     
     if len(text) > 1000:
         send_whatsapp_text(clean_number, text)
-        body = "اضغط الزر تحت لزيارة أرخص متجر 👇"
+        body = "اضغط الزر تحت لزيارة صفحة المنتج 👇"
     else:
         body = text
 
@@ -239,7 +209,7 @@ def send_whatsapp_cta(to_number: str, text: str, url: str):
             "body": {"text": body},
             "action": {
                 "name": "cta_url",
-                "parameters": {"display_text": "🛒 شوف أرخص سعر", "url": url},
+                "parameters": {"display_text": "🛒 شوف أرخص سعر", "url": url[:1000]}, # واتساب يقبل رابط لغاية 1000 حرف
             },
         },
     }
@@ -249,14 +219,14 @@ def send_whatsapp_cta(to_number: str, text: str, url: str):
         headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"},
         timeout=30,
     )
-    # إذا رفض فيسبوك الرابط لسبب ما، نحطه كرابط عادي للعميل عشان ما يخسره
+    # لو فشل الزر لسبب ما نحط الرابط كنص عشان ما تضيع الصيدة
     if r.status_code >= 400:
         if len(text) <= 1000:
-            send_whatsapp_text(clean_number, text + f"\n\n🔗 رابط الشراء:\n{url}")
+            send_whatsapp_text(clean_number, text + f"\n\n🔗 رابط الشراء المباشر:\n{url}")
         else:
-            send_whatsapp_text(clean_number, f"🔗 رابط الشراء:\n{url}")
+            send_whatsapp_text(clean_number, f"🔗 رابط الشراء المباشر:\n{url}")
 
 
 @app.get("/")
 async def health():
-    return {"status": "running", "bot": "Kuwait Price Bot 🇰🇼 (Smart URL Validator)"}
+    return {"status": "running", "bot": "Kuwait Price Bot 🇰🇼 (Direct Shop Links)"}
