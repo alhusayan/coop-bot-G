@@ -31,7 +31,7 @@ SYSTEM_PROMPT = """أنت مساعد ذكي متخصص بأسعار المنتج
 
 مهمتك:
 1. تعرّف على المنتج من الصورة أو من نص الرسالة.
-2. سوّ بحثات Google موجّهة للمتاجر الكويتية (مثل: jm3eia.com, farmazone, kw.boots.com, taw9eel.com, lulu, carrefour, talabat).
+2. سوّ بحثات Google موجّهة للمتاجر الكويتية (مثل: jm3eia.com, farmazone, boots, taw9eel.com, lulu, carrefour, talabat).
 3. اعرض النتائج بشكل مرتب وواضح.
 
 قواعد الرد:
@@ -42,11 +42,10 @@ SYSTEM_PROMPT = """أنت مساعد ذكي متخصص بأسعار المنتج
 • المتجر الثالث — السعر د.ك
 - إذا فيه أحجام، اذكر الحجم داخل سطر المتجر.
 - لا تستخدم جداول أو عناوين غامقة (Markdown).
-- **الرابط الإلزامي:** في نهاية ردك تماماً (بسطر منفصل)، اكتب الاسم الأساسي للمتجر الأرخص باللغة الإنجليزية بدون www أو .com بهذا الشكل الإلزامي:
-STORE:boots 
-أو STORE:farmazone 
-أو STORE:taw9eel
-(فقط اكتب STORE: واسم المتجر، لا تكتب أي روابط أو كلمات أخرى بعدها).
+- **الرابط الإلزامي:** يجب أن تضع الرابط المباشر للمتجر الأرخص في نهاية الرد.
+- **قاعدة صارمة:** انسخ الرابط (Copy & Paste) من نتائج البحث. ممنوع تخمين أو تأليف الرابط.
+- الصيغة الإلزامية في نهاية الرد بسطر منفصل:
+URL_START:الرابط_هنا:URL_END
 """
 
 @app.get("/webhook")
@@ -102,7 +101,7 @@ def process_message(message: dict):
         if not reply_text:
             reply_text = "ما قدرت ألقى نتيجة واضحة 😅 جرب صورة أوضح أو اكتب اسم المنتج بالنص."
 
-        print(f"REPLY LEN: {len(reply_text)} | FINAL URL EXTRACTED: {best_url}")
+        print(f"REPLY LEN: {len(reply_text)} | URL: {best_url}")
 
         if best_url:
             send_whatsapp_cta(from_number, reply_text, best_url)
@@ -118,7 +117,7 @@ def process_message(message: dict):
 
 
 def call_gemini(parts: list):
-    """نداء Gemini وسحب الرابط المباشر من مصادر بحث جوجل الحقيقية"""
+    """النداء الهجين: يدمج الرابط من النص مع تأكيد البيانات المخفية لمكافحة الهلوسة"""
     payload = {
         "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]},
         "contents": [{"role": "user", "parts": parts}],
@@ -141,37 +140,46 @@ def call_gemini(parts: list):
         out = cand["content"]["parts"]
         text = "".join(p.get("text", "") for p in out).strip()
 
-        # تنظيف المراجع 
+        # تنظيف الاستشهادات المزعجة
         text = re.sub(r"(?<=\S)\[[\d]+(?:[.,][\d]+)*\]", "", text)
 
-        best_domain = ""
         best_url = None
         
-        # 1. سحب اسم المتجر الأرخص من النص
-        match = re.search(r"STORE:\s*([\w.-]+)", text, re.IGNORECASE)
+        # 1. سحب الرابط اللي كتبه البوت بالنص (عشان ما يختفي الزر)
+        match = re.search(r"URL_START:\s*(https?://[^\s]+)", text, re.IGNORECASE)
         if match:
-            best_domain = match.group(1).strip().lower()
-            # مسح السطر بالكامل عشان ما يشوفه العميل
-            text = re.sub(r"STORE:.*", "", text, flags=re.IGNORECASE).strip()
+            # تنظيف الرابط من أي حروف زايدة
+            best_url = match.group(1).replace(":URL_END", "").replace("URL_END", "").strip()
+            # مسح السطر المشفر بالكامل لكي لا يظهر للعميل
+            text = re.sub(r"URL_START:.*", "", text, flags=re.IGNORECASE | re.DOTALL).strip()
 
-        # 2. سحب الرابط الأصلي مباشرة من نتائج جوجل المخفية بالخلفية
+        # 2. سحب الروابط الحقيقية 100% من بيانات جوجل المخفية
         chunks = cand.get("groundingMetadata", {}).get("groundingChunks", [])
-        
-        if best_domain:
-            for c in chunks:
-                uri = c.get("web", {}).get("uri", "")
-                if best_domain in uri.lower() and "google.com" not in uri:
-                    best_url = uri
-                    break
+        real_urls = []
+        for c in chunks:
+            uri = c.get("web", {}).get("uri", "")
+            if uri and uri.startswith("http") and "google.com" not in uri:
+                real_urls.append(uri)
 
-        # 3. خطة إنقاذ: إذا ما طابق الاسم، نسحب أول رابط حقيقي متوفر
-        if not best_url and chunks:
-            for c in chunks:
-                uri = c.get("web", {}).get("uri", "")
-                if uri and uri.startswith("http") and "google.com" not in uri:
-                    best_url = uri
-                    break
-        
+        # 3. نظام "جهاز كشف الكذب" (مكافحة الهلوسة)
+        if best_url and real_urls:
+            # إذا البوت كتب رابط مو موجود بالبحث الحقيقي (يعني قام يهلوس)
+            if best_url not in real_urls:
+                try:
+                    # نطلع اسم المتجر من الرابط اللي ألفه (مثلاً kw.boots.com يعطينا boots)
+                    domain_parts = best_url.split('/')[2].split('.')
+                    domain_core = domain_parts[-2] if len(domain_parts) >= 2 else domain_parts[0]
+                except:
+                    domain_core = "xxx"
+                
+                # نبحث عن أقرب رابط حقيقي لنفس المتجر ونستبدله!
+                matched_real = next((u for u in real_urls if domain_core.lower() in u.lower()), None)
+                best_url = matched_real if matched_real else real_urls[0]
+                
+        elif not best_url and real_urls:
+            # إذا البوت نسى يكتب الرابط بالنص، نسحب أول رابط حقيقي متوفر كخطة إنقاذ
+            best_url = real_urls[0]
+
         # تنظيف نهائي للأسطر الفارغة
         lines = [l.rstrip() for l in text.splitlines()]
         text = "\n".join([l for l in lines if l])
@@ -200,7 +208,6 @@ def send_whatsapp_text(to_number: str, text: str):
 
 
 def send_whatsapp_cta(to_number: str, text: str, url: str):
-    """إرسال النص مع زر انتقال مباشر للمتجر"""
     clean_number = str(to_number).replace("+", "").strip()
     
     if len(text) > 1000:
@@ -228,7 +235,6 @@ def send_whatsapp_cta(to_number: str, text: str, url: str):
         headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"},
         timeout=30,
     )
-    # لو فشل الزر لسبب ما نحط الرابط كنص عشان ما تضيع الصيدة
     if r.status_code >= 400:
         if len(text) <= 1000:
             send_whatsapp_text(clean_number, text + f"\n\n🔗 رابط الشراء المباشر:\n{url}")
@@ -238,4 +244,4 @@ def send_whatsapp_cta(to_number: str, text: str, url: str):
 
 @app.get("/")
 async def health():
-    return {"status": "running", "bot": "Kuwait Price Bot 🇰🇼 (Real Grounded Links Only)"}
+    return {"status": "running", "bot": "Kuwait Price Bot 🇰🇼 (Hybrid URL Bulletproof)"}
