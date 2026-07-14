@@ -98,11 +98,12 @@ async def receive_message(request: Request, background_tasks: BackgroundTasks):
 
     return {"status": "ok"}
 
-print(f"REPLY LEN: {len(reply_text)} | URL: {bool(best_url)}")
 # ========= 3. معالجة الرسالة: بحث حي + رد =========
 def process_message(message: dict):
     from_number = message["from"]
     msg_type = message.get("type")
+   print(f"REPLY LEN: {len(reply_text)} | URL: {bool(best_url)}")
+
 
     try:
         parts = []
