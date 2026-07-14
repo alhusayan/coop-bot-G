@@ -17,7 +17,7 @@ app = FastAPI()
 
 # ========= مفاتيح التشغيل (تنحط في Railway → Variables، مو هنا) =========
 GEMINI_API_KEY  = os.environ.get("GEMINI_API_KEY", "")
-GEMINI_MODEL    = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")
+GEMINI_MODEL    = os.environ.get("GEMINI_MODEL", "gemini-1.5-flash") # تم تثبيته للنسخة المستقرة المعتمدة لحسابك
 WHATSAPP_TOKEN  = os.environ.get("WHATSAPP_TOKEN", "")
 PHONE_NUMBER_ID = os.environ.get("PHONE_NUMBER_ID", "")
 VERIFY_TOKEN    = os.environ.get("VERIFY_TOKEN", "MY_SECRET_COOP_BOT_TOKEN")
@@ -109,7 +109,7 @@ def process_message(message: dict):
         parts = []
 
         if msg_type == "image":
-            # رسالة انتظار عشان العميل ما يحس البوت طافي (البحث ياخذ ثواني)
+            # رسالة انتظار لتبيه العميل بالبحث
             send_whatsapp_text(from_number, "ثواني بس.. قاعد أحوس بمواقع الكويت الحين عشان أطلع لك أقوى صيدة وأرخص سعر!")
 
             image_b64, mime = download_whatsapp_media(message["image"]["id"])
@@ -131,10 +131,10 @@ def process_message(message: dict):
         if not reply_text:
             reply_text = "ما قدرت ألقى نتيجة واضحة 😅 جرب صورة أوضح أو اكتب اسم المنتج بالنص."
 
-        # ===== سطر التشخيص: طول الرد وهل فيه رابط (يظهر في Deploy Logs) =====
-        print(f"REPLY LEN: {len(reply_text)} | URL: {bool(best_url)}")
+        # ===== سطر التشخيص للـ Deploy Logs =====
+        print(f"REPLY LEN: {len(reply_text)} | URL: {best_url}")
 
-        # الرابط داخل زر مدمج — بدون رابط ظاهر في النص
+        # إرسال الرابط كزر مدمج CTA
         if best_url:
             send_whatsapp_cta(from_number, reply_text, best_url)
         else:
@@ -149,7 +149,7 @@ def process_message(message: dict):
 
 
 def call_gemini(parts: list):
-    """نداء Gemini مع البحث الحي. يرجع (نص الرد, رابط الأرخص أو None)"""
+    """نداء Gemini مع البحث الحي وبنية قوية لتتبع الروابط وفكها بأمان"""
     payload = {
         "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]},
         "contents": [{"role": "user", "parts": parts}],
@@ -176,37 +176,64 @@ def call_gemini(parts: list):
         out = cand["content"]["parts"]
         text = "".join(p.get("text", "") for p in out).strip()
 
-        # تنظيف احتياطي دقيق: استشهادات ملتصقة بنهاية الكلمات فقط + روابط
-        text = re.sub(r"(?<=\S)\[[\d]+(?:[.,][\d]+)*\]", "", text)   # مثل كلمة[4.2.6]
+        # تنظيف احتياطي دقيق: الاستشهادات والروابط العادية
+        text = re.sub(r"(?<=\S)\[[\d]+(?:[.,][\d]+)*\]", "", text)
         text = re.sub(r"https?://\S+", "", text)
-        # ترتيب: حذف أسطر صارت بلا محتوى وأسطر فارغة متكررة
         lines = [l.rstrip() for l in text.splitlines()]
         lines = [l for l in lines if l.strip() not in (".", "-", "•", "*")]
         text = "\n".join(lines)
         text = re.sub(r"\n{3,}", "\n\n", text).strip()
 
-        # استخراج دومين الأرخص من سطر BEST: ثم حذفه من النص
+        # استخراج الدومين الأرخص
         best_domain = None
         m = re.search(r"BEST:\s*([\w.-]+)", text)
         if m:
-            best_domain = m.group(1).lower()
+            best_domain = m.group(1).lower().strip()
+            # استخلاص الاسم الأساسي للمتجر فقط لتوسيع مطابقة البحث (مثال luluhypermarket.com -> lulu)
+            best_domain_clean = best_domain.split(".")[0]
             text = re.sub(r"\n?BEST:.*", "", text).strip()
+        else:
+            best_domain_clean = ""
 
-        # رابط الأرخص: من نتائج الـgrounding المطابقة للدومين، مفكوكاً لرابط نهائي قصير
+        # صيد الرابط وتتبعه بأمان
         best_url = None
         try:
             chunks = cand.get("groundingMetadata", {}).get("groundingChunks", [])
             target = None
+            
+            # محاولة البحث المرنة عن الدومين الأرخص داخل الروابط أو العناوين
             for c in chunks:
+                uri = c.get("web", {}).get("uri", "")
                 title = (c.get("web", {}).get("title") or "").lower()
-                if best_domain and best_domain.split(".")[0] in title:
-                    target = c.get("web", {}).get("uri")
+                if best_domain_clean and (best_domain_clean in uri.lower() or best_domain_clean in title):
+                    target = uri
                     break
+            
+            # خطة بديلة 1: إذا لم يتم العثور على مطابقة صريحة، اختر أول رابط صالح بالنتائج
             if not target and chunks:
-                target = chunks[0].get("web", {}).get("uri")
+                for c in chunks:
+                    uri = c.get("web", {}).get("uri", "")
+                    if uri and "google" not in uri:
+                        target = uri
+                        break
+            
+            # فك تتبع الروابط وعمليات التوجيه بأمان
             if target:
-                final = requests.head(target, allow_redirects=True, timeout=15).url
-                if len(final) < 500 and "vertexaisearch" not in final:
+                headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+                try:
+                    # محاولة استخدام HEAD أولاً لتوفير البيانات
+                    res = requests.head(target, allow_redirects=True, timeout=10, headers=headers)
+                    final = res.url
+                except Exception:
+                    # في حال فشل الـ HEAD بسبب الحماية، نستخدم GET الخفيف لجلب الرابط الفعلي
+                    try:
+                        res = requests.get(target, allow_redirects=True, timeout=10, headers=headers, stream=True)
+                        final = res.url
+                    except Exception:
+                        final = target # كخيار أخير إذا تعطل الفك
+                
+                # التحقق من صلاحية الرابط النهائي لزر واتساب (أقل من 500 حرف وخالٍ من الروابط البرمجية السحابية لـ vertex)
+                if final and len(final) < 500 and "vertexaisearch" not in final:
                     best_url = final
         except Exception as e:
             print(f"LINK RESOLVE: {e}")
@@ -240,11 +267,14 @@ def send_whatsapp_text(to_number: str, text: str):
         "Content-Type": "application/json",
     }
 
+    # تنظيف رقم المتلقي
+    clean_number = str(to_number).replace("+", "").strip()
+
     chunks = [text[i:i + 3900] for i in range(0, len(text), 3900)] or [text]
     for chunk in chunks:
         payload = {
             "messaging_product": "whatsapp",
-            "to": to_number,
+            "to": clean_number,
             "type": "text",
             "text": {"body": chunk},
         }
@@ -254,16 +284,18 @@ def send_whatsapp_text(to_number: str, text: str):
 
 
 def send_whatsapp_cta(to_number: str, text: str, url: str, button_title: str = "🛒 شوف أرخص سعر"):
-    """رسالة مع زر مدمج. إذا النص أطول من حد الزر (1024): النص كامل برسالة عادية + الزر برسالة قصيرة بعدها — بدون أي قص"""
+    """رسالة مع زر مدمج CTA. يدعم تنظيف الأرقام ويتعامل مع النصوص الطويلة لمنع تعليق الزر"""
+    clean_number = str(to_number).replace("+", "").strip()
+    
     if len(text) > 1000:
-        send_whatsapp_text(to_number, text)              # النص كامل بلا قص
-        body = "اضغط الزر وتوجه لأرخص سعر 👇"            # رسالة الزر القصيرة
+        send_whatsapp_text(clean_number, text)                # يرسل النص كاملاً أولاً
+        body = "اضغط الزر وتوجه لأرخص سعر 👇"            # نص مخصص للزر
     else:
         body = text
 
     payload = {
         "messaging_product": "whatsapp",
-        "to": to_number,
+        "to": clean_number,
         "type": "interactive",
         "interactive": {
             "type": "cta_url",
@@ -283,13 +315,13 @@ def send_whatsapp_cta(to_number: str, text: str, url: str, button_title: str = "
     )
     if r.status_code >= 400:
         print(f"CTA send error: {r.status_code} {r.text}")
-        # احتياط: لو فشل الزر نرسل رسالة عادية بالرابط عشان ما يضيع الرد
+        # خيار أمان احتياطي: إذا فشل الزر لأي سبب برمجي خارجي، يتم إرسال الرابط كنص عادي حتى لا يفقد المستخدم المعلومة
         if len(text) <= 1000:
-            send_whatsapp_text(to_number, text + f"\n\n🔗 {url}")
+            send_whatsapp_text(clean_number, text + f"\n\n🔗 {url}")
         else:
-            send_whatsapp_text(to_number, f"🔗 {url}")
+            send_whatsapp_text(clean_number, f"🔗 {url}")
 
 
 @app.get("/")
 async def health():
-    return {"status": "running", "bot": "Kuwait Price Bot 🇰🇼 (Gemini 2.5)"}
+    return {"status": "running", "bot": "Kuwait Price Bot 🇰🇼 (Gemini 1.5 - Secure URL Core)"}
