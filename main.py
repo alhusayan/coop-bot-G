@@ -103,6 +103,28 @@ async def receive_message(request: Request, background_tasks: BackgroundTasks):
 
 
 # ========= 3. معالجة الرسالة: بحث حي + رد =========
+
+def is_product_query(user_text: str) -> bool:
+    """فلتر سريع بدون بحث: هل الرسالة استعلام عن منتج/سعر؟"""
+    payload = {
+        "contents": [{"role": "user", "parts": [{"text":
+            f'رسالة من عميل: "{user_text}"\n'
+            'هل هذه الرسالة استفسار عن منتج أو سعر أو مقارنة أسعار أو عرض؟ '
+            'جاوب بكلمة واحدة فقط: نعم أو لا.'}]}],
+        "generationConfig": {"temperature": 0, "maxOutputTokens": 5},
+    }
+    try:
+        r = requests.post(GEMINI_URL, params={"key": GEMINI_API_KEY}, json=payload, timeout=15)
+        if r.status_code == 200:
+            ans = r.json()["candidates"][0]["content"]["parts"][0].get("text", "")
+            return "نعم" in ans
+    except Exception as e:
+        print(f"FILTER ERROR: {e}")
+    return True  # عند الشك أو الفشل: نعاملها كمنتج (أهون من طرد عميل جاد)
+
+
+OFF_TOPIC_REPLY = "أنا مختص بأسعار المنتجات بس 🙏 دز لي صورة منتج أو اكتب اسمه وأدور لك أرخص سعر بالكويت 🛒"
+
 def process_message(message: dict):
     from_number = message["from"]
     msg_type = message.get("type")
@@ -120,6 +142,10 @@ def process_message(message: dict):
 
         elif msg_type == "text":
             user_text = message["text"]["body"]
+            # فلتر أولي سريع: منتج أو سالفة؟ (قبل أي وعد بالبحث)
+            if not is_product_query(user_text):
+                send_whatsapp_text(from_number, OFF_TOPIC_REPLY)
+                return
             send_whatsapp_text(from_number, "🔍 ثواني يا خوي، أدور لك الأسعار الحالية بالكويت...")
             parts.append({"text": f"العميل يسأل: {user_text}\nابحث الآن بحثاً حياً عن الأسعار الحالية في الكويت ورد عليه."})
 
