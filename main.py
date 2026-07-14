@@ -10,6 +10,7 @@ import re
 import time
 import base64
 import requests
+import urllib.parse  # 👈 أضفنا هذي المكتبة لصناعة روابط الإنقاذ
 from collections import deque
 from fastapi import FastAPI, Request, Response, BackgroundTasks
 
@@ -118,7 +119,7 @@ def process_message(message: dict):
 
 
 def call_gemini(parts: list):
-    """نداء Gemini وصيد الرابط السريع بدون فحص يسبب بلوك"""
+    """نداء Gemini وصيد الرابط السريع مع فلتر فحص الـ 404"""
     payload = {
         "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]},
         "contents": [{"role": "user", "parts": parts}],
@@ -144,29 +145,59 @@ def call_gemini(parts: list):
         # تنظيف من المراجع المزعجة
         text = re.sub(r"(?<=\S)\[[\d]+(?:[.,][\d]+)*\]", "", text)
 
+        # استخراج اسم المنتج للبحث البديل لو خربت الروابط
+        product_name = "المنتج"
+        first_line = text.split('\n')[0]
+        if "📦" in first_line:
+            product_name = first_line.replace("📦", "").strip()
+
+        # 1. صيد الرابط المكتوب صراحة بالنص
         best_url = None
-        # 1. صيد الرابط المكتوب صراحة بالنص (LINK: http...)
         match = re.search(r"LINK:\s*(https?://[^\s]+)", text, re.IGNORECASE)
         if match:
-            best_url = match.group(1).strip()
-            # إخفاء الرابط من النص لكي لا يظهر للعميل (لأنه سيكون داخل الزر)
+            # تنظيف الرابط من أي نقطة أو فاصلة بالخطأ في النهاية
+            best_url = match.group(1).strip().rstrip('.,;:"\'')
             text = re.sub(r"LINK:\s*https?://[^\s]+", "", text, flags=re.IGNORECASE).strip()
 
-        # 2. خطة إنقاذ: إذا ما كتبه بالنص، نسحبه من بيانات البحث الخفية فوراً
-        if not best_url:
-            chunks = cand.get("groundingMetadata", {}).get("groundingChunks", [])
-            for c in chunks:
-                uri = c.get("web", {}).get("uri", "")
-                # ناخذ أول رابط حقيقي مو محرك بحث
-                if uri and uri.startswith("http") and "google.com" not in uri:
-                    best_url = uri
+        # 2. جمع كل الروابط المتوفرة (الأساسي + روابط البحث المخفية) لفحصها
+        urls_to_test = []
+        if best_url:
+            urls_to_test.append(best_url)
+            
+        chunks = cand.get("groundingMetadata", {}).get("groundingChunks", [])
+        for c in chunks:
+            uri = c.get("web", {}).get("uri", "")
+            if uri and uri.startswith("http") and "google.com" not in uri:
+                clean_uri = uri.rstrip('.,;:"\'')
+                if clean_uri not in urls_to_test:
+                    urls_to_test.append(clean_uri)
+
+        # 3. الفلتر الذكي: فحص الروابط بالترتيب وتجاوز الـ 404
+        final_url = None
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        for url in urls_to_test:
+            try:
+                # طلب خفيف وسريع للتأكد من حالة الصفحة
+                res = requests.get(url, headers=headers, timeout=3, stream=True)
+                # إذا الصفحة ميتة (404) نتركه ونجرب اللي بعده
+                if res.status_code not in [404, 410, 400]:
+                    final_url = url
                     break
-        
+            except Exception:
+                # إذا الموقع عليه حماية (Cloudflare) بيعطي خطأ، نفترضه شغال وناخذه
+                final_url = url
+                break
+
+        # 4. خطة الإنقاذ: لو كل الروابط ميتة، اصنع رابط بحث جوجل نظيف للمنتج
+        if not final_url:
+            safe_term = urllib.parse.quote(f"{product_name} الكويت")
+            final_url = f"https://www.google.com/search?q={safe_term}"
+
         # تنظيف نهائي للأسطر الفارغة
         lines = [l.rstrip() for l in text.splitlines()]
         text = "\n".join([l for l in lines if l])
 
-        return text, best_url
+        return text, final_url
     except Exception as e:
         print(f"GEMINI PARSE ERROR: {e}")
         return "", None
@@ -228,4 +259,4 @@ def send_whatsapp_cta(to_number: str, text: str, url: str):
 
 @app.get("/")
 async def health():
-    return {"status": "running", "bot": "Kuwait Price Bot 🇰🇼 (Gemini 1.5 - No Reset Error)"}
+    return {"status": "running", "bot": "Kuwait Price Bot 🇰🇼 (Smart URL Validator)"}
