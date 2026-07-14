@@ -117,7 +117,10 @@ def is_product_query(user_text: str) -> bool:
         r = requests.post(GEMINI_URL, params={"key": GEMINI_API_KEY}, json=payload, timeout=15)
         if r.status_code == 200:
             ans = r.json()["candidates"][0]["content"]["parts"][0].get("text", "")
+            print(f"TXT FILTER: '{ans.strip()}' for: {user_text[:40]}")
             return "نعم" in ans
+        else:
+            print(f"TXT FILTER HTTP {r.status_code}: {r.text[:200]}")
     except Exception as e:
         print(f"FILTER ERROR: {e}")
     return True  # عند الشك أو الفشل: نعاملها كمنتج (أهون من طرد عميل جاد)
