@@ -54,6 +54,7 @@ SYSTEM_PROMPT = """أنت مساعد ذكي متخصص بأسعار المنتج
 
 قواعد الرد:
 - الأسلوب: كويتي ودّي وسريع، مناسب لمحادثة واتساب.
+- لا مقدمات ولا ترحيب — ابدأ مباشرة بسطر 📦 اسم المنتج. التحية فقط إذا العميل حياك بدون سؤال.
 - اعرض الأسعار بهذا الشكل الإلزامي بالضبط، سطر لكل متجر، بدون ترقيم وبدون أقواس مربعة:
 📦 اسم المنتج
 ✅ المتجر الأرخص — السعر د.ك
@@ -63,7 +64,7 @@ SYSTEM_PROMPT = """أنت مساعد ذكي متخصص بأسعار المنتج
 - إذا السعر من نتيجة بحث مو مؤكدة أو قديمة، نبّه بسطر واحد إن السعر تقريبي وقد يختلف.
 - إذا ما لقيت أسعار بالكويت، قول بصراحة إنك ما حصلت سعر مؤكد واقترح عليه وين يتأكد.
 - لا تستخدم جداول Markdown (الواتساب ما يعرضها)، ولا عناوين # ولا ** غامق Markdown — أسطر وإيموجي بسيطة فقط.
-- خل الرد مختصر — أقل من 15 سطر.
+- خل الرد مختصر — أقل من 12 سطر، وأنهِ ردك دائماً بجملة مكتملة.
 - لا تكتب أي روابط في ردك إطلاقاً — الروابط تُضاف تلقائياً من النظام.
 - لا تستخدم علامات استشهاد أو أقواس مرجعية مثل [1] أو [4.2.6] نهائياً.
 - في نهاية ردك أضف سطراً أخيراً منفصلاً بهذا الشكل بالضبط: BEST:<دومين المتجر الأرخص> مثل BEST:luluhypermarket.com — هذا السطر للنظام ولن يراه العميل.
@@ -98,11 +99,11 @@ async def receive_message(request: Request, background_tasks: BackgroundTasks):
 
     return {"status": "ok"}
 
+
 # ========= 3. معالجة الرسالة: بحث حي + رد =========
 def process_message(message: dict):
     from_number = message["from"]
     msg_type = message.get("type")
-
 
     try:
         parts = []
@@ -130,6 +131,9 @@ def process_message(message: dict):
         if not reply_text:
             reply_text = "ما قدرت ألقى نتيجة واضحة 😅 جرب صورة أوضح أو اكتب اسم المنتج بالنص."
 
+        # ===== سطر التشخيص: طول الرد وهل فيه رابط (يظهر في Deploy Logs) =====
+        print(f"REPLY LEN: {len(reply_text)} | URL: {bool(best_url)}")
+
         # الرابط داخل زر مدمج — بدون رابط ظاهر في النص
         if best_url:
             send_whatsapp_cta(from_number, reply_text, best_url)
@@ -152,7 +156,7 @@ def call_gemini(parts: list):
         "tools": [
             {"google_search": {}}  # أداة البحث الحي والربط بمحرك البحث
         ],
-        "generationConfig": {"temperature": 0.2, "maxOutputTokens": 1500},
+        "generationConfig": {"temperature": 0.2, "maxOutputTokens": 2500},
     }
 
     for attempt in (1, 2):
@@ -250,14 +254,20 @@ def send_whatsapp_text(to_number: str, text: str):
 
 
 def send_whatsapp_cta(to_number: str, text: str, url: str, button_title: str = "🛒 شوف أرخص سعر"):
-    """رسالة نصية مع زر مدمج يفتح الرابط — بدون رابط ظاهر بالنص"""
+    """رسالة مع زر مدمج. إذا النص أطول من حد الزر (1024): النص كامل برسالة عادية + الزر برسالة قصيرة بعدها — بدون أي قص"""
+    if len(text) > 1000:
+        send_whatsapp_text(to_number, text)              # النص كامل بلا قص
+        body = "اضغط الزر وتوجه لأرخص سعر 👇"            # رسالة الزر القصيرة
+    else:
+        body = text
+
     payload = {
         "messaging_product": "whatsapp",
         "to": to_number,
         "type": "interactive",
         "interactive": {
             "type": "cta_url",
-            "body": {"text": text[:1024]},   # حد واتساب لنص هذا النوع
+            "body": {"text": body},
             "action": {
                 "name": "cta_url",
                 "parameters": {"display_text": button_title[:25], "url": url},
@@ -274,7 +284,10 @@ def send_whatsapp_cta(to_number: str, text: str, url: str, button_title: str = "
     if r.status_code >= 400:
         print(f"CTA send error: {r.status_code} {r.text}")
         # احتياط: لو فشل الزر نرسل رسالة عادية بالرابط عشان ما يضيع الرد
-        send_whatsapp_text(to_number, text + f"\n\n🔗 {url}")
+        if len(text) <= 1000:
+            send_whatsapp_text(to_number, text + f"\n\n🔗 {url}")
+        else:
+            send_whatsapp_text(to_number, f"🔗 {url}")
 
 
 @app.get("/")
