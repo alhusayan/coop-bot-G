@@ -28,7 +28,7 @@ GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_M
 # منع الرد المكرر: نحفظ آخر 500 رسالة تمت معالجتها
 processed_ids = deque(maxlen=500)
 
-SYSTEM_PROMPT = """دورلي احسن سعر بالكويت وعطني رابط المنتج للشراء
+SYSTEM_PROMPT = """بشكل مختصر جدا وسريع وضع علامة صح علافضل سعرا ،   دورلي احسن سعر بالكويت وعطني رابط المنتج الافضل سعىرا للشراء
 """
 
 
