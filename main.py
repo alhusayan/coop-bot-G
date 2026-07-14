@@ -118,7 +118,7 @@ def process_message(message: dict):
 
 
 def call_gemini(parts: list):
-    """نداء Gemini وسحب الرابط المباشر من مصادر بحث جوجل الحقيقية"""
+    """النداء الذكي: صيد الروابط من المخ (Grounding) أولاً، ثم النص ثانياً"""
     payload = {
         "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]},
         "contents": [{"role": "user", "parts": parts}],
@@ -126,53 +126,35 @@ def call_gemini(parts: list):
         "generationConfig": {"temperature": 0.2, "maxOutputTokens": 1500},
     }
 
-    for attempt in (1, 2):
-        r = requests.post(GEMINI_URL, params={"key": GEMINI_API_KEY}, json=payload, timeout=120)
-        if r.status_code == 429 and attempt == 1:
-            time.sleep(8)
-            continue
-        if r.status_code >= 400:
-            return "", None
-        break
-
+    # (نفس طلب الـ requests المعتاد...)
+    r = requests.post(GEMINI_URL, params={"key": GEMINI_API_KEY}, json=payload, timeout=120)
+    
     try:
         data = r.json()
         cand = data["candidates"][0]
         out = cand["content"]["parts"]
         text = "".join(p.get("text", "") for p in out).strip()
 
-        # تنظيف المراجع 
-        text = re.sub(r"(?<=\S)\[[\d]+(?:[.,][\d]+)*\]", "", text)
-
-        best_domain = ""
         best_url = None
         
-        # 1. سحب اسم المتجر الأرخص من النص
-        match = re.search(r"STORE:\s*([\w.-]+)", text, re.IGNORECASE)
-        if match:
-            best_domain = match.group(1).strip().lower()
-            # مسح السطر بالكامل عشان ما يشوفه العميل
-            text = re.sub(r"STORE:.*", "", text, flags=re.IGNORECASE).strip()
-
-        # 2. سحب الرابط الأصلي مباشرة من نتائج جوجل المخفية بالخلفية
+        # 1. صيد الروابط الحقيقية من "مخ جوجل" (Grounding Metadata) - هذي أقوى من النص!
         chunks = cand.get("groundingMetadata", {}).get("groundingChunks", [])
+        for c in chunks:
+            uri = c.get("web", {}).get("uri", "")
+            # نستبعد روابط جوجل ونبحث عن رابط مباشر
+            if uri and uri.startswith("http") and "google.com" not in uri and "vertexaisearch" not in uri:
+                best_url = uri
+                break
         
-        if best_domain:
-            for c in chunks:
-                uri = c.get("web", {}).get("uri", "")
-                if best_domain in uri.lower() and "google.com" not in uri:
-                    best_url = uri
-                    break
+        # 2. لو ما لقى رابط بالمخ، يحاول يصيده من النص المشفر كخطة بديلة
+        if not best_url:
+            match = re.search(r"URL_START:\s*(https?://[^\s:]+)\s*:URL_END", text, re.IGNORECASE)
+            if match:
+                best_url = match.group(1).strip().rstrip('.,;:"\'')
+                text = re.sub(r"URL_START:.*?:URL_END", "", text, flags=re.IGNORECASE | re.DOTALL).strip()
 
-        # 3. خطة إنقاذ: إذا ما طابق الاسم، نسحب أول رابط حقيقي متوفر
-        if not best_url and chunks:
-            for c in chunks:
-                uri = c.get("web", {}).get("uri", "")
-                if uri and uri.startswith("http") and "google.com" not in uri:
-                    best_url = uri
-                    break
-        
-        # تنظيف نهائي للأسطر الفارغة
+        # تنظيف نهائي للنص
+        text = re.sub(r"(?<=\S)\[[\d]+(?:[.,][\d]+)*\]", "", text)
         lines = [l.rstrip() for l in text.splitlines()]
         text = "\n".join([l for l in lines if l])
 
