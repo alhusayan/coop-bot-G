@@ -125,6 +125,30 @@ def is_product_query(user_text: str) -> bool:
 
 OFF_TOPIC_REPLY = "أنا مختص بأسعار المنتجات بس 🙏 دز لي صورة منتج أو اكتب اسمه وأدور لك أرخص سعر بالكويت 🛒"
 
+def is_product_image(image_b64: str, mime: str) -> bool:
+    """فلتر رؤية سريع بدون بحث: هل الصورة منتج/سكرين شوت تسوق؟"""
+    payload = {
+        "contents": [{"role": "user", "parts": [
+            {"inline_data": {"mime_type": mime, "data": image_b64}},
+            {"text": "هل هذه الصورة تعرض منتجاً تجارياً أو سكرين شوت من متجر/موقع تسوق فيه منتج؟ "
+                     "(سلع، أطعمة، أجهزة، سيارات، أغراض تنشرى...) "
+                     "الصور الشخصية والسيلفي والمناظر والوجوه ليست منتجات. "
+                     "جاوب بكلمة واحدة فقط: نعم أو لا."}
+        ]}],
+        "generationConfig": {"temperature": 0, "maxOutputTokens": 5},
+    }
+    try:
+        r = requests.post(GEMINI_URL, params={"key": GEMINI_API_KEY}, json=payload, timeout=20)
+        if r.status_code == 200:
+            ans = r.json()["candidates"][0]["content"]["parts"][0].get("text", "")
+            return "نعم" in ans
+    except Exception as e:
+        print(f"IMG FILTER ERROR: {e}")
+    return True  # عند الشك: نكمل كمنتج
+
+
+OFF_TOPIC_IMAGE_REPLY = "هذي مو صورة منتج 😅 صوّر لي منتج أو خذ سكرين شوت من متجر، وأدور لك أرخص سعر بالكويت 🛒"
+
 def process_message(message: dict):
     from_number = message["from"]
     msg_type = message.get("type")
@@ -133,10 +157,14 @@ def process_message(message: dict):
         parts = []
 
         if msg_type == "image":
-            # رسالة انتظار عشان العميل ما يحس البوت طافي
-            send_whatsapp_text(from_number, "ثواني بس.. قاعد أحوس بمواقع الكويت الحين عشان أطلع لك أقوى صيدة وأرخص سعر!")
-
             image_b64, mime = download_whatsapp_media(message["image"]["id"])
+
+            # فلتر أولي: هل هي صورة منتج أصلاً؟ (قبل أي وعد بالبحث)
+            if not is_product_image(image_b64, mime):
+                send_whatsapp_text(from_number, OFF_TOPIC_IMAGE_REPLY)
+                return
+
+            send_whatsapp_text(from_number, "ثواني بس.. قاعد أحوس بمواقع الكويت الحين عشان أطلع لك أقوى صيدة وأرخص سعر!")
             parts.append({"inline_data": {"mime_type": mime, "data": image_b64}})
             parts.append({"text": "تعرف على هذا المنتج وابحث الآن بحثاً حياً عن أسعاره الحالية في الكويت لترد على العميل."})
 
