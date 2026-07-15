@@ -83,7 +83,7 @@ def process_message(message: dict):
 
         if msg_type == "image":
             # رسالة انتظار عشان العميل ما يحس البوت طافي (البحث ياخذ ثواني)
-            send_whatsapp_text(from_number, "ثواني بس.. ابجث واقارن لك الأسعار!")
+            send_whatsapp_text(from_number, "ثواني بس.. ابحث واقارن لك الأسعار!")
 
             image_b64, mime = download_whatsapp_media(message["image"]["id"])
             parts.append({"inline_data": {"mime_type": mime, "data": image_b64}})
@@ -91,7 +91,7 @@ def process_message(message: dict):
 
         elif msg_type == "text":
             user_text = message["text"]["body"]
-            send_whatsapp_text(from_number, "🔍 ثواني يا خوي، أدور لك الأسعار الحالية بالكويت...")
+            send_whatsapp_text(from_number, "🔍 ثواني ، أدور لك الأسعار الحالية بالكويت...")
             parts.append({"text": f"العميل يسأل: {user_text}\nابحث الآن بحثاً حياً عن الأسعار الحالية في الكويت ورد عليه."})
 
         else:
