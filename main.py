@@ -33,7 +33,7 @@ SYSTEM_PROMPT = """
 اعمله شكل ترقيم 
 اترك مسافة سطر بين كل رقم والثاني
 ضع علامة صح على السعر الافضل
-حط لنك على شكل علامة تحويل رابط تشتغل على رسائل الواتساب جنب افضل سعر تحصل عليه عشان اذا ضغط عليه يحوله مباشرة على المنتج في المتجر الارخص
+
 ابحث عن المنتجات للبيع فقط وليس الايجار
 اكتب اسم المنتج باختصار من غير شرح
 خلك نصوح
@@ -83,7 +83,7 @@ def process_message(message: dict):
 
         if msg_type == "image":
             # رسالة انتظار عشان العميل ما يحس البوت طافي (البحث ياخذ ثواني)
-            send_whatsapp_text(from_number, "ثواني بس.. قاعد أحوس بمواقع الكويت الحين عشان أطلع لك أقوى صيدة وأرخص سعر!")
+            send_whatsapp_text(from_number, "ثواني بس.. ابجث واقارن لك الأسعار!")
 
             image_b64, mime = download_whatsapp_media(message["image"]["id"])
             parts.append({"inline_data": {"mime_type": mime, "data": image_b64}})
@@ -226,7 +226,7 @@ def send_whatsapp_text(to_number: str, text: str):
             print(f"WhatsApp send error: {r.status_code} {r.text}")
 
 
-def send_whatsapp_cta(to_number: str, text: str, url: str, button_title: str = "🛒 شوف أرخص سعر"):
+def send_whatsapp_cta(to_number: str, text: str, url: str, button_title: str = "🛒 ابدأ بالتسوق"):
     """رسالة مع زر مدمج. إذا النص أطول من حد الزر (1024): النص كامل برسالة عادية + الزر برسالة قصيرة بعدها — بدون أي قص"""
     if len(text) > 1000:
         send_whatsapp_text(to_number, text)              # النص كامل بلا قص
