@@ -30,7 +30,6 @@ processed_ids = deque(maxlen=500)
 
 SYSTEM_PROMPT = """
 أنت المساعد الشخصي الذكي لصاحب هذا الرقم. مهمتك هي البحث عن أسعار المنتجات في الكويت بدقة متناهية وبأسلوب كويتي بسيط ومباشر.
-- وقبل سطر BEST أضف سطراً آخر: BESTIDX:<رقم المصدر من نتائج بحثك الذي أخذت منه أرخص سعر، الترقيم يبدأ من 1> — وإذا غير متأكد اكتب BESTIDX:0
 
 التزم بالقواعد التالية حرفياً:
 1. الشخصية: أنت لست مجرد بوت، أنت المساعد الشخصي لصاحب الرقم، لذا رد بأسلوب كويتي عفوي ومباشر (بدون تكلف أو لغة عربية فصحى).
@@ -167,38 +166,32 @@ def call_gemini(parts: list):
         text = "\n".join(lines)
         text = re.sub(r"\n{3,}", "\n\n", text).strip()
 
-# استخراج مؤشرات الأرخص من سطري BESTIDX و BEST ثم حذفهما
-        best_domain, best_idx = None, 0
-        m = re.search(r"BESTIDX:\s*(\d+)", text)
-        if m:
-            best_idx = int(m.group(1))
-            text = re.sub(r"\n?BESTIDX:.*", "", text).strip()
+        # استخراج دومين الأرخص من سطر BEST: ثم حذفه من النص
+        best_domain = None
         m = re.search(r"BEST:\s*([\w.-]+)", text)
         if m:
             best_domain = m.group(1).lower()
             text = re.sub(r"\n?BEST:.*", "", text).strip()
 
-        # اختيار الرابط: 1) برقم المصدر من Gemini  2) بمطابقة الدومين  3) لا رابط (بدل رابط غلط)
+        # رابط الأرخص: من نتائج الـgrounding المطابقة للدومين، مفكوكاً لرابط نهائي قصير
         best_url = None
         try:
             chunks = cand.get("groundingMetadata", {}).get("groundingChunks", [])
             target = None
-            if 0 < best_idx <= len(chunks):
-                target = chunks[best_idx - 1].get("web", {}).get("uri")
-            if not target and best_domain:
-                key = best_domain.split(".")[0]
-                for c in chunks:
-                    w = c.get("web", {})
-                    hay = ((w.get("title") or "") + " " + (w.get("uri") or "")).lower()
-                    if key in hay:
-                        target = w.get("uri")
-                        break
+            for c in chunks:
+                title = (c.get("web", {}).get("title") or "").lower()
+                if best_domain and best_domain.split(".")[0] in title:
+                    target = c.get("web", {}).get("uri")
+                    break
+            if not target and chunks:
+                target = chunks[0].get("web", {}).get("uri")
             if target:
                 final = requests.head(target, allow_redirects=True, timeout=15).url
                 if len(final) < 500 and "vertexaisearch" not in final:
                     best_url = final
         except Exception as e:
             print(f"LINK RESOLVE: {e}")
+
         return text, best_url
     except (KeyError, IndexError, TypeError, ValueError) as e:
         print(f"GEMINI bad response: {e} — {r.text[:400]}")
