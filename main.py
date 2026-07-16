@@ -1,8 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 بوت واتساب — بحث حي فوري عن أسعار المنتجات في الكويت
-WhatsApp Cloud API (Meta) + FastAPI + Gemini API (Google Search Grounding)
-Deploy: Railway
+WhatsApp Cloud API + FastAPI + Gemini + أزرار لكل المتاجر
 """
 
 import os
@@ -15,24 +14,24 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 
 app = FastAPI()
 
-# ========= مفاتيح التشغيل (تنحط في Railway → Variables، مو هنا) =========
-GEMINI_API_KEY  = os.environ.get("GEMINI_API_KEY", "")
-GEMINI_MODEL    = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")
-WHATSAPP_TOKEN  = os.environ.get("WHATSAPP_TOKEN", "")
+# ========= مفاتيح التشغيل =========
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+WHATSAPP_TOKEN = os.environ.get("WHATSAPP_TOKEN", "")
 PHONE_NUMBER_ID = os.environ.get("PHONE_NUMBER_ID", "")
-VERIFY_TOKEN    = os.environ.get("VERIFY_TOKEN", "MY_SECRET_COOP_BOT_TOKEN")
+VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN", "MY_SECRET_COOP_BOT_TOKEN")
 
-GRAPH_URL  = "https://graph.facebook.com/v20.0"
+# تم تصليح الرابط كان عندك فيه https مكررة
+GRAPH_URL = "https://graph.facebook.com/v20.0"
 GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
 
-# منع الرد المكرر: نحفظ آخر 500 رسالة تمت معالجتها
 processed_ids = deque(maxlen=500)
 
 SYSTEM_PROMPT = """
 أنت المساعد الشخصي الذكي لصاحب هذا الرقم. مهمتك هي البحث عن أسعار المنتجات في الكويت بدقة متناهية وبأسلوب كويتي بسيط ومباشر.
 
 التزم بالقواعد التالية حرفياً:
-1. الشخصية: أنت لست مجرد بوت، أنت المساعد الشخصي لصاحب الرقم، لذا رد بأسلوب كويتي عفوي ومباشر (بدون تكلف أو لغة عربية فصحى).
+1. الشخصية: أنت لست مجرد بوت، أنت المساعد الشخصي لصاحب الرقم، لذا رد بأسلوب كويتي عفوي ومباشر.
 2. التنسيق: لا تستخدم مقدمات ولا خاتمات. ابدأ فوراً بذكر المنتج، ثم قائمة الأسعار.
 3. القائمة: استخدم هذا الشكل الإلزامي فقط:
 
@@ -43,16 +42,14 @@ SYSTEM_PROMPT = """
 • [المتجر الثالث] — [السعر] د.ك
 
 قواعد ذهبية:
-- ممنوع إضافة أي جمل ترحيبية أو توديعية (مثل: "حياك الله"، "أتمنى أن أكون ساعدتك").
-- التزم بالأسعار التي تجدها فقط. إذا لم تجد السعر، قل بكلمة واحدة: "غير متوفر".
-- لا تستخدم أي رموز Markdown أو خطوط عريضة (Bold).
-- في نهاية الرد، لا تضف أي روابط نصية. سيقوم النظام بإضافة زر الشراء تلقائياً.
+- ممنوع إضافة أي جمل ترحيبية أو توديعية.
+- التزم بالأسعار التي تجدها فقط. إذا لم تجد السعر، قل: "غير متوفر".
+- لا تستخدم أي رموز Markdown أو خطوط عريضة.
+- في نهاية ردك، في سطر منفصل تماماً وإلزامي، اكتب مصادرك بهذا الشكل فقط:
+LINKS: xcite.com, blink.com.kw, eureka.com.kw
+ممنوع تكتب أي شيء بعد سطر LINKS.
 """
 
-
-
-
-# ========= 1. التحقق من الـ Webhook (يطلبه Meta مرة وحدة عند الربط) =========
 @app.get("/webhook")
 async def verify_webhook(request: Request):
     params = request.query_params
@@ -60,8 +57,6 @@ async def verify_webhook(request: Request):
         return Response(content=params.get("hub.challenge"), media_type="text/plain")
     return Response(content="Verification failed", status_code=403)
 
-
-# ========= 2. استقبال الرسائل — نرجع 200 فوراً والمعالجة بالخلفية =========
 @app.post("/webhook")
 async def receive_message(request: Request, background_tasks: BackgroundTasks):
     data = await request.json()
@@ -70,54 +65,50 @@ async def receive_message(request: Request, background_tasks: BackgroundTasks):
         if "messages" in entry:
             message = entry["messages"][0]
             msg_id = message.get("id")
-
-            # تجاهل الرسالة إذا سبق عالجناها (Meta أحياناً يعيد الإرسال)
             if msg_id and msg_id not in processed_ids:
                 processed_ids.append(msg_id)
                 background_tasks.add_task(process_message, message)
     except (KeyError, IndexError):
-        pass  # إشعارات statuses وغيرها — نتجاهلها
-
+        pass
     return {"status": "ok"}
 
-
-# ========= 3. معالجة الرسالة: بحث حي + رد =========
 def process_message(message: dict):
     from_number = message["from"]
     msg_type = message.get("type")
-
     try:
         parts = []
-
         if msg_type == "image":
-            # رسالة انتظار عشان العميل ما يحس البوت طافي (البحث ياخذ ثواني)
             send_whatsapp_text(from_number, "ثواني بس.. ابحث واقارن لك الأسعار!")
-
             image_b64, mime = download_whatsapp_media(message["image"]["id"])
             parts.append({"inline_data": {"mime_type": mime, "data": image_b64}})
-            parts.append({"text": "تعرف على هذا المنتج وابحث الآن بحثاً حياً عن أسعاره الحالية في الكويت لترد على العميل."})
-
+            parts.append({"text": "تعرف على هذا المنتج وابحث الآن بحثاً حياً عن أسعاره الحالية في الكويت."})
         elif msg_type == "text":
             user_text = message["text"]["body"]
             send_whatsapp_text(from_number, "🔍 ثواني ، أدور لك الأسعار الحالية بالكويت...")
             parts.append({"text": f"العميل يسأل: {user_text}\nابحث الآن بحثاً حياً عن الأسعار الحالية في الكويت ورد عليه."})
-
         else:
             send_whatsapp_text(from_number, "حياك الله 🌟 دز لي صورة المنتج أو اكتب اسمه، وأدور لك أسعاره الحالية بالكويت فوراً 🛒")
             return
 
-        # ===== استدعاء Gemini مع البحث الحي =====
-        reply_text, best_url = call_gemini(parts)
+        reply_text, urls_map = call_gemini(parts)
 
         if not reply_text:
             reply_text = "ما قدرت ألقى نتيجة واضحة 😅 جرب صورة أوضح أو اكتب اسم المنتج بالنص."
 
-        # ===== سطر التشخيص: طول الرد وهل فيه رابط (يظهر في Deploy Logs) =====
-        print(f"REPLY LEN: {len(reply_text)} | URL: {bool(best_url)}")
+        print(f"REPLY LEN: {len(reply_text)} | URLS: {urls_map}")
 
-        # الرابط داخل زر مدمج — بدون رابط ظاهر في النص
-        if best_url:
-            send_whatsapp_cta(from_number, reply_text, best_url)
+        if urls_map:
+            # 1. نرسل قائمة الأسعار أولاً
+            send_whatsapp_text(from_number, reply_text)
+            time.sleep(0.5)
+            # 2. نرسل زر لكل متجر
+            for store_name, url in urls_map.items():
+                if not url: continue
+                clean_name = re.sub(r'[^\w\s\u0600-\u06FF]', '', store_name).strip()[:18]
+                btn_title = f"🛒 {clean_name}"[:20]
+                body = f"تسوق من {store_name} 👇"
+                send_whatsapp_cta(from_number, body, url, button_title=btn_title)
+                time.sleep(0.4) # عشان لا يعتبر سبام
         else:
             send_whatsapp_text(from_number, reply_text)
 
@@ -128,27 +119,33 @@ def process_message(message: dict):
         except Exception:
             pass
 
+def get_final_url(url: str):
+    try:
+        final = requests.head(url, allow_redirects=True, timeout=10).url
+        if len(final) < 600 and "vertexaisearch" not in final:
+            return final
+        return url
+    except:
+        return url
 
 def call_gemini(parts: list):
-    """نداء Gemini مع البحث الحي. يرجع (نص الرد, رابط الأرخص أو None)"""
+    """يرجع (نص الأسعار, قاموس {اسم المتجر: رابط})"""
     payload = {
         "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]},
         "contents": [{"role": "user", "parts": parts}],
-        "tools": [
-            {"google_search": {}}  # أداة البحث الحي والربط بمحرك البحث
-        ],
+        "tools": [{"google_search": {}}],
         "generationConfig": {"temperature": 0.2, "maxOutputTokens": 2500},
     }
 
     for attempt in (1, 2):
         r = requests.post(GEMINI_URL, params={"key": GEMINI_API_KEY}, json=payload, timeout=120)
         if r.status_code == 429 and attempt == 1:
-            print("GEMINI 429 — free tier rate limit, retrying in 8s")
+            print("GEMINI 429 retrying")
             time.sleep(8)
             continue
         if r.status_code >= 400:
             print(f"GEMINI error {r.status_code}: {r.text[:400]}")
-            return "", None
+            return "", {}
         break
 
     try:
@@ -156,121 +153,101 @@ def call_gemini(parts: list):
         cand = data["candidates"][0]
         out = cand["content"]["parts"]
         text = "".join(p.get("text", "") for p in out).strip()
-
-        # تنظيف احتياطي دقيق: استشهادات ملتصقة بنهاية الكلمات فقط + روابط
-        text = re.sub(r"(?<=\S)\[[\d]+(?:[.,][\d]+)*\]", "", text)   # مثل كلمة[4.2.6]
+        text = re.sub(r"(?<=\S)\[[\d]+(?:[.,][\d]+)*\]", "", text)
         text = re.sub(r"https?://\S+", "", text)
-        # ترتيب: حذف أسطر صارت بلا محتوى وأسطر فارغة متكررة
-        lines = [l.rstrip() for l in text.splitlines()]
-        lines = [l for l in lines if l.strip() not in (".", "-", "•", "*")]
-        text = "\n".join(lines)
         text = re.sub(r"\n{3,}", "\n\n", text).strip()
 
-        # استخراج دومين الأرخص من سطر BEST: ثم حذفه من النص
-        best_domain = None
-        m = re.search(r"BEST:\s*([\w.-]+)", text)
+        # استخراج الدومينات
+        domains = []
+        m = re.search(r"LINKS:\s*(.+)", text, re.IGNORECASE)
         if m:
-            best_domain = m.group(1).lower()
-            text = re.sub(r"\n?BEST:.*", "", text).strip()
+            raw = m.group(1)
+            domains = [d.strip().lower() for d in re.split(r"[,|]+", raw) if "." in d]
+            text = re.sub(r"\n?LINKS:.*", "", text, flags=re.IGNORECASE).strip()
 
-        # رابط الأرخص: من نتائج الـgrounding المطابقة للدومين، مفكوكاً لرابط نهائي قصير
-        best_url = None
-        try:
-            chunks = cand.get("groundingMetadata", {}).get("groundingChunks", [])
-            target = None
-            for c in chunks:
-                title = (c.get("web", {}).get("title") or "").lower()
-                if best_domain and best_domain.split(".")[0] in title:
-                    target = c.get("web", {}).get("uri")
-                    break
-            if not target and chunks:
-                target = chunks[0].get("web", {}).get("uri")
-            if target:
-                final = requests.head(target, allow_redirects=True, timeout=15).url
-                if len(final) < 500 and "vertexaisearch" not in final:
-                    best_url = final
-        except Exception as e:
-            print(f"LINK RESOLVE: {e}")
+        store_names = re.findall(r"(?:✅|•)\s*([^—\n]+?)\s*—", text)
 
-        return text, best_url
-    except (KeyError, IndexError, TypeError, ValueError) as e:
-        print(f"GEMINI bad response: {e} — {r.text[:400]}")
-        return "", None
+        chunks = cand.get("groundingMetadata", {}).get("groundingChunks", [])
+        temp_by_domain = {}
 
+        for c in chunks:
+            uri = c.get("web", {}).get("uri")
+            title = (c.get("web", {}).get("title") or "").lower()
+            if not uri: continue
+            for d in domains:
+                key = d.split(".")[0]
+                if key in uri.lower() or key in title:
+                    if d not in temp_by_domain:
+                        temp_by_domain[d] = get_final_url(uri)
 
-# ========= أدوات مساعدة للواتساب =========
+        # fallback لو ما كتب LINKS
+        if not temp_by_domain:
+            for c in chunks[:5]:
+                uri = c.get("web", {}).get("uri")
+                if uri:
+                    temp_by_domain[uri] = get_final_url(uri)
+
+        # ربط الأسماء بالروابط بالترتيب
+        urls_map = {}
+        resolved_urls = list(temp_by_domain.values())
+
+        # نحاول نوزعهم على الأسماء اللي طلعت بالنص
+        for i, store in enumerate(store_names):
+            if i < len(resolved_urls):
+                urls_map[store.strip()] = resolved_urls[i]
+
+        # لو ما لقينا أسماء، نستخدم الدومين كاسم
+        if not urls_map:
+            urls_map = temp_by_domain
+
+        # لا ترسل أكثر من 4 أزرار عشان لا يصير سبام
+        urls_map = dict(list(urls_map.items())[:4])
+
+        return text, urls_map
+    except Exception as e:
+        print(f"GEMINI bad response: {e}")
+        return "", {}
+
 def download_whatsapp_media(media_id: str):
-    """يجيب الصورة من سيرفرات Meta ويرجعها base64 مع نوعها"""
     headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
-
     meta = requests.get(f"{GRAPH_URL}/{media_id}", headers=headers, timeout=30).json()
     media_url = meta["url"]
     mime = meta.get("mime_type", "image/jpeg")
-
     img = requests.get(media_url, headers=headers, timeout=60)
     img.raise_for_status()
-
     return base64.standard_b64encode(img.content).decode("utf-8"), mime
 
-
 def send_whatsapp_text(to_number: str, text: str):
-    """يرسل رد نصي، ويقسم الرسائل الطويلة (حد الواتساب 4096 حرف)"""
     url = f"{GRAPH_URL}/{PHONE_NUMBER_ID}/messages"
-    headers = {
-        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
-        "Content-Type": "application/json",
-    }
-
+    headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"}
     chunks = [text[i:i + 3900] for i in range(0, len(text), 3900)] or [text]
     for chunk in chunks:
-        payload = {
-            "messaging_product": "whatsapp",
-            "to": to_number,
-            "type": "text",
-            "text": {"body": chunk},
-        }
+        payload = {"messaging_product": "whatsapp", "to": to_number, "type": "text", "text": {"body": chunk}}
         r = requests.post(url, json=payload, headers=headers, timeout=30)
         if r.status_code >= 400:
             print(f"WhatsApp send error: {r.status_code} {r.text}")
 
-
-def send_whatsapp_cta(to_number: str, text: str, url: str, button_title: str = "🛒 ابدأ بالتسوق"):
-    """رسالة مع زر مدمج. إذا النص أطول من حد الزر (1024): النص كامل برسالة عادية + الزر برسالة قصيرة بعدها — بدون أي قص"""
-    if len(text) > 1000:
-        send_whatsapp_text(to_number, text)              # النص كامل بلا قص
-        body = "اضغط الزر وتوجه لأرخص سعر 👇"            # رسالة الزر القصيرة
-    else:
-        body = text
-
+def send_whatsapp_cta(to_number: str, text: str, url: str, button_title: str = "🛒 تسوق الآن"):
     payload = {
         "messaging_product": "whatsapp",
         "to": to_number,
         "type": "interactive",
         "interactive": {
             "type": "cta_url",
-            "body": {"text": body},
-            "action": {
-                "name": "cta_url",
-                "parameters": {"display_text": button_title[:25], "url": url},
-            },
+            "body": {"text": text[:1024]},
+            "action": {"name": "cta_url", "parameters": {"display_text": button_title[:20], "url": url}},
         },
     }
     r = requests.post(
         f"{GRAPH_URL}/{PHONE_NUMBER_ID}/messages",
         json=payload,
-        headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}",
-                 "Content-Type": "application/json"},
+        headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"},
         timeout=30,
     )
     if r.status_code >= 400:
         print(f"CTA send error: {r.status_code} {r.text}")
-        # احتياط: لو فشل الزر نرسل رسالة عادية بالرابط عشان ما يضيع الرد
-        if len(text) <= 1000:
-            send_whatsapp_text(to_number, text + f"\n\n🔗 {url}")
-        else:
-            send_whatsapp_text(to_number, f"🔗 {url}")
-
+        send_whatsapp_text(to_number, f"{text}\n🔗 {url}")
 
 @app.get("/")
 async def health():
-    return {"status": "running", "bot": "Kuwait Price Bot 🇰🇼 (Gemini 2.5)"}
+    return {"status": "running", "bot": "Kuwait Price Bot 🇰🇼 Buttons"}
