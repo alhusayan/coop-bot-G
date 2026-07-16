@@ -28,7 +28,7 @@ GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_M
 # منع الرد المكرر: نحفظ آخر 500 رسالة تمت معالجتها
 processed_ids = deque(maxlen=500)
 
-SYSTEM_PROMPT = """
+
 SYSTEM_PROMPT = """أنت المساعد الشخصي الذكي لصاحب هذا الرقم. مهمتك هي البحث عن أسعار المنتجات في الكويت بدقة متناهية وبأسلوب كويتي بسيط ومباشر.
 
 التزم بالقواعد التالية حرفياً:
