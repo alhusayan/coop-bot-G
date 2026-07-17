@@ -11,9 +11,7 @@ WHATSAPP_TOKEN = os.environ.get("WHATSAPP_TOKEN", "")
 PHONE_NUMBER_ID = os.environ.get("PHONE_NUMBER_ID", "")
 VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN", "MY_SECRET_COOP_BOT_TOKEN")
 
-GRAPH_URL = "https://graph.
-facebook.com/v20.0%22
- 
+GRAPH_URL = "https://graph.facebook.com/v20.0"
 GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
 
 processed_ids = deque(maxlen=500)
@@ -34,7 +32,9 @@ SYSTEM_PROMPT = """
 - لا تستخدم أي رموز Markdown أو خطوط عريضة.
 - في نهاية ردك، في سطر منفصل تماماً وإلزامي، اكتب مصادرك بهذا الشكل فقط:
 LINKS: xcite.com, blink.com.kw, eureka.com.kw
-ممنوع تكتب أي شيء بعد سطر LINKS.
+ممنوع تكتب أي شيء بعد سطرLINKS.
+قاعدة إلزامية إضافية: اكتب LINKS بنفس ترتيب المتاجر اللي ذكرتها في القائمة تماماً. إذا بدأت ب بست اليوسفي ثم يوريكا ثم بلينك، لازم LINKS يكون best.com.kw, eureka.com.kw, blink.com.kw بنفس الترتيب.
+
 """
 
 @app.get("/webhook")
@@ -118,56 +118,46 @@ def call_gemini(parts: list):
         "tools": [{"google_search": {}}],
         "generationConfig": {"temperature": 0.2, "maxOutputTokens": 2500},
     }
-    for attempt in (1, 2):
-        r = requests.post(GEMINI_URL, params={"key": GEMINI_API_KEY}, json=payload, timeout=120)
-        if r.status_code == 429 and attempt == 1:
-            time.sleep(8); continue
-        if r.status_code >= 400:
-            print(f"GEMINI error {r.status_code}: {r.text[:400]}")
-            return "", {}
-        break
+    r = requests.post(GEMINI_URL, params={"key": GEMINI_API_KEY}, json=payload, timeout=120)
+    if r.status_code >= 400: return "", {}
     try:
         data = r.json()
         cand = data["candidates"][0]
-        out = cand["content"]["parts"]
-        text = "".join(p.get("text", "") for p in out).strip()
-        text = re.sub(r"(?<=\S)\[[\d]+(?:[.,][\d]+)*\]", "", text)
+        text = "".join(p.get("text","") for p in cand["content"]["parts"]).strip()
         text = re.sub(r"https?://\S+", "", text)
-        text = re.sub(r"\n{3,}", "\n\n", text).strip()
+
         domains = []
         m = re.search(r"LINKS:\s*(.+)", text, re.IGNORECASE)
         if m:
             raw = m.group(1)
             domains = [d.strip().lower() for d in re.split(r"[,|]+", raw) if "." in d]
             text = re.sub(r"\n?LINKS:.*", "", text, flags=re.IGNORECASE).strip()
+
         store_names = re.findall(r"(?:✅|•)\s*([^—\n]+?)\s*—", text)
         chunks = cand.get("groundingMetadata", {}).get("groundingChunks", [])
-        temp_by_domain = {}
-        for c in chunks:
-            uri = c.get("web", {}).get("uri")
-            title = (c.get("web", {}).get("title") or "").lower()
-            if not uri: continue
-            for d in domains:
-                key = d.split(".")[0]
-                if key in uri.lower() or key in title:
-                    if d not in temp_by_domain:
-                        temp_by_domain[d] = get_final_url(uri)
-        if not temp_by_domain:
-            for c in chunks[:5]:
-                uri = c.get("web", {}).get("uri")
-                if uri: temp_by_domain[uri] = get_final_url(uri)
+
         urls_map = {}
-        resolved_urls = list(temp_by_domain.values())
+        # الربط الصحيح: كل اسم مع الدومين اللي بنفس مكانه
         for i, store in enumerate(store_names):
-            if i < len(resolved_urls):
-                urls_map[store.strip()] = resolved_urls[i]
-        if not urls_map: urls_map = temp_by_domain
-        urls_map = dict(list(urls_map.items())[:4])
-        return text, urls_map
+            if i >= len(domains): break
+            target_domain = domains[i].split(".")[0] # best, eureka, blink
+            found_url = ""
+            for c in chunks:
+                uri = c.get("web",{}).get("uri","")
+                title = (c.get("web",{}).get("title") or "").lower()
+                if target_domain in uri.lower() or target_domain in title:
+                    found_url = get_final_url(uri)
+                    if found_url: break
+            if not found_url and i < len(chunks):
+                # fallback: خذ نفس ترتيب الـ chunks
+                found_url = get_final_url(chunks[i].get("web",{}).get("uri",""))
+            if found_url:
+                urls_map[store.strip()] = found_url
+
+        return text, dict(list(urls_map.items())[:4])
     except Exception as e:
         print(f"GEMINI bad response: {e}")
         return "", {}
-
 def download_whatsapp_media(media_id: str):
     headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
     meta = requests.get(f"{GRAPH_URL}/{media_id}", headers=headers, timeout=30).json()
