@@ -11,35 +11,30 @@ WHATSAPP_TOKEN = os.environ.get("WHATSAPP_TOKEN", "")
 PHONE_NUMBER_ID = os.environ.get("PHONE_NUMBER_ID", "")
 VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN", "MY_SECRET_COOP_BOT_TOKEN")
 
-GRAPH_URL = "https://graph.facebook.com/v20.0"
+GRAPH_URL = "https://graph.
+facebook.com/v20.0%22
+ 
 GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
 
 processed_ids = deque(maxlen=500)
 
 SYSTEM_PROMPT = """
 أنت المساعد الشخصي الذكي لصاحب هذا الرقم. مهمتك هي البحث عن أسعار المنتجات في الكويت بدقة متناهية وبأسلوب كويتي بسيط ومباشر.
-
 التزم بالقواعد التالية حرفياً:
-1. الشخصية: أنت لست مجرد بوت، أنت المساعد الشخصي لصاحب الرقم، رد بأسلوب كويتي عفوي ومباشر.
+1. الشخصية: أنت لست مجرد بوت، أنت المساعد الشخصي لصاحب الرقم، لذا رد بأسلوب كويتي عفوي ومباشر.
 2. التنسيق: لا تستخدم مقدمات ولا خاتمات. ابدأ فوراً بذكر المنتج، ثم قائمة الأسعار.
 3. القائمة: استخدم هذا الشكل الإلزامي فقط:
-
 📦 [اسم المنتج]
-
 ✅ [اسم المتجر الأرخص] — [السعر] د.ك
-- [المتجر الثاني] — [السعر] د.ك
-- [المتجر الثالث] — [السعر] د.ك
-
+• [المتجر الثاني] — [السعر] د.ك
+• [المتجر الثالث] — [السعر] د.ك
 قواعد ذهبية:
 - ممنوع إضافة أي جمل ترحيبية أو توديعية.
-- التزم بالأسعار التي تجدها فقط.
-- لا تستخدم أي رموز Markdown.
-
-قاعدة الروابط الإلزامية - حل عام:
-في النهاية اكتب مصادرك بهذا الشكل الحرفي تماماً، نفس اسم المتجر = الدومين:
-LINKS: بست اليوسفي=best.com.kw, يوريكا=eureka.com.kw, بلينك=blink.com.kw
-
-ممنوع تكتب رابط كامل، اكتب دومين فقط ومربوط بالاسم. ينطبق على أي متجر كارفور=carrefourkuwait.com, لولو=luluhypermarket.com وغيرهم.
+- التزم بالأسعار التي تجدها فقط. إذا لم تجد السعر، قل: "غير متوفر".
+- لا تستخدم أي رموز Markdown أو خطوط عريضة.
+- في نهاية ردك، في سطر منفصل تماماً وإلزامي، اكتب مصادرك بهذا الشكل فقط:
+LINKS: xcite.com, blink.com.kw, eureka.com.kw
+ممنوع تكتب أي شيء بعد سطر LINKS.
 """
 
 @app.get("/webhook")
@@ -110,14 +105,11 @@ def process_message(message: dict, bot_phone_id: str):
 
 def get_final_url(url: str):
     try:
-        r = requests.get(url, allow_redirects=True, timeout=10, stream=True)
-        final = r.url
-        # اذا الصفحة مو موجودة لا ترسلها
-        if r.status_code >= 400: return ""
-        if "vertexaisearch" in final: return ""
-        r.close()
-        return final if len(final) < 700 else ""
-    except: return ""
+        final = requests.head(url, allow_redirects=True, timeout=10).url
+        if len(final) < 600 and "vertexaisearch" not in final:
+            return final
+        return url
+    except: return url
 
 def call_gemini(parts: list):
     payload = {
@@ -126,46 +118,55 @@ def call_gemini(parts: list):
         "tools": [{"google_search": {}}],
         "generationConfig": {"temperature": 0.2, "maxOutputTokens": 2500},
     }
-    r = requests.post(GEMINI_URL, params={"key": GEMINI_API_KEY}, json=payload, timeout=120)
-    if r.status_code >= 400: return "", {}
+    for attempt in (1, 2):
+        r = requests.post(GEMINI_URL, params={"key": GEMINI_API_KEY}, json=payload, timeout=120)
+        if r.status_code == 429 and attempt == 1:
+            time.sleep(8); continue
+        if r.status_code >= 400:
+            print(f"GEMINI error {r.status_code}: {r.text[:400]}")
+            return "", {}
+        break
     try:
         data = r.json()
         cand = data["candidates"][0]
-        raw = "".join(p.get("text","") for p in cand["content"]["parts"]).strip()
-
-        m = re.search(r"LINKS:\s*(.+)", raw, re.I | re.DOTALL)
-        links_raw = m.group(1).strip() if m else ""
-        text = re.sub(r"LINKS:.*", "", raw, flags=re.I).strip()
+        out = cand["content"]["parts"]
+        text = "".join(p.get("text", "") for p in out).strip()
+        text = re.sub(r"(?<=\S)\[[\d]+(?:[.,][\d]+)*\]", "", text)
         text = re.sub(r"https?://\S+", "", text)
-
-        # فك LINKS: اسم=دومين
-        pairs = [] # [(بست اليوسفي, best.com.kw),...]
-        if links_raw:
-            for chunk in re.split(r"[,|\n]+", links_raw):
-                if "=" in chunk:
-                    n,d = chunk.split("=",1)
-                    n=n.strip(" ✅•-"); d=d.strip().lower()
-                    if "." in d: pairs.append((n,d))
-
-        chunks = cand.get("groundingMetadata",{}).get("groundingChunks",[])
-        urls_map = {}
-        for store_name, domain in pairs:
-            key = domain.split(".")[0] # best, eureka, carrefour
-            real_url = ""
-            for c in chunks:
-                uri = c.get("web",{}).get("uri","")
-                title = (c.get("web",{}).get("title") or "").lower()
+        text = re.sub(r"\n{3,}", "\n\n", text).strip()
+        domains = []
+        m = re.search(r"LINKS:\s*(.+)", text, re.IGNORECASE)
+        if m:
+            raw = m.group(1)
+            domains = [d.strip().lower() for d in re.split(r"[,|]+", raw) if "." in d]
+            text = re.sub(r"\n?LINKS:.*", "", text, flags=re.IGNORECASE).strip()
+        store_names = re.findall(r"(?:✅|•)\s*([^—\n]+?)\s*—", text)
+        chunks = cand.get("groundingMetadata", {}).get("groundingChunks", [])
+        temp_by_domain = {}
+        for c in chunks:
+            uri = c.get("web", {}).get("uri")
+            title = (c.get("web", {}).get("title") or "").lower()
+            if not uri: continue
+            for d in domains:
+                key = d.split(".")[0]
                 if key in uri.lower() or key in title:
-                    real_url = get_final_url(uri)
-                    if real_url: break
-            # اذا ما لقينا رابط حقيقي، لا ترسل رابط مزيف، سوي رابط بحث بدل 404
-            if not real_url:
-                real_url = f"https://{domain}/search?q={store_name}" # fallback آمن ما يعطي 404
-            urls_map[store_name] = real_url
-
+                    if d not in temp_by_domain:
+                        temp_by_domain[d] = get_final_url(uri)
+        if not temp_by_domain:
+            for c in chunks[:5]:
+                uri = c.get("web", {}).get("uri")
+                if uri: temp_by_domain[uri] = get_final_url(uri)
+        urls_map = {}
+        resolved_urls = list(temp_by_domain.values())
+        for i, store in enumerate(store_names):
+            if i < len(resolved_urls):
+                urls_map[store.strip()] = resolved_urls[i]
+        if not urls_map: urls_map = temp_by_domain
+        urls_map = dict(list(urls_map.items())[:4])
         return text, urls_map
     except Exception as e:
-        print(f"err {e}"); return "", {}
+        print(f"GEMINI bad response: {e}")
+        return "", {}
 
 def download_whatsapp_media(media_id: str):
     headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
