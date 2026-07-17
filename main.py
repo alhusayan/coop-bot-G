@@ -33,8 +33,14 @@ SYSTEM_PROMPT = """
 - في نهاية ردك، في سطر منفصل تماماً وإلزامي، اكتب مصادرك بهذا الشكل فقط:
 LINKS: xcite.com, blink.com.kw, eureka.com.kw
 ممنوع تكتب أي شيء بعد سطر LINKS.
-قاعدة إلزامية إضافية: اكتب LINKS بنفس ترتيب المتاجر اللي ذكرتها في القائمة تماماً. إذا بدأت ب بست اليوسفي ثم يوريكا ثم بلينك، لازم LINKS يكون best.com.kw, eureka.com.kw, blink.com.kw بنفس الترتيب.
+SYSTEM_PROMPT = """
+أنت المساعد الشخصي الذكي...
+نفس برومبتك القديم بس بدل سطر LINKS الأخير بهذا:
 
+قاعدة إلزامية جداً: في نهاية ردك اكتب مصادرك بهذا الشكل الحرفي تماماً، اسم المتجر نفسه اللي كتبته في القائمة = رابط المنتج:
+LINKS: بست اليوسفي=https://best.com.kw/product/xxx, يوريكا=https://eureka.com.kw/yyy, بلينك=https://blink.com.kw/zzz
+
+ممنوع تكتب دومين فقط، لازم رابط كامل، وممنوع تغير اسم المتجر، اكتبه نفسه.
 """
 
 
@@ -124,41 +130,44 @@ def call_gemini(parts: list):
     try:
         data = r.json()
         cand = data["candidates"][0]
-        text = "".join(p.get("text","") for p in cand["content"]["parts"]).strip()
-        text = re.sub(r"https?://\S+", "", text)
+        raw_text = "".join(p.get("text","") for p in cand["content"]["parts"]).strip()
 
-        domains = []
-        m = re.search(r"LINKS:\s*(.+)", text, re.IGNORECASE)
+        # 1. اسحب سطر LINKS قبل ما نمسح الروابط
+        links_raw = ""
+        m = re.search(r"LINKS:\s*(.+)", raw_text, re.IGNORECASE | re.DOTALL)
         if m:
-            raw = m.group(1)
-            domains = [d.strip().lower() for d in re.split(r"[,|]+", raw) if "." in d]
-            text = re.sub(r"\n?LINKS:.*", "", text, flags=re.IGNORECASE).strip()
+            links_raw = m.group(1).strip()
 
-        store_names = re.findall(r"(?:✅|•)\s*([^—\n]+?)\s*—", text)
-        chunks = cand.get("groundingMetadata", {}).get("groundingChunks", [])
+        # 2. نظف النص للعرض
+        text = re.sub(r"LINKS:.*", "", raw_text, flags=re.I).strip()
+        text = re.sub(r"https?://\S+", "", text)
+        text = re.sub(r"\n{3,}", "\n\n", text).strip()
 
+        # 3. حل عام: اسم=رابط
         urls_map = {}
-        # الربط الصحيح: كل اسم مع الدومين اللي بنفس مكانه
-        for i, store in enumerate(store_names):
-            if i >= len(domains): break
-            target_domain = domains[i].split(".")[0] # best, eureka, blink
-            found_url = ""
-            for c in chunks:
-                uri = c.get("web",{}).get("uri","")
-                title = (c.get("web",{}).get("title") or "").lower()
-                if target_domain in uri.lower() or target_domain in title:
-                    found_url = get_final_url(uri)
-                    if found_url: break
-            if not found_url and i < len(chunks):
-                # fallback: خذ نفس ترتيب الـ chunks
-                found_url = get_final_url(chunks[i].get("web",{}).get("uri",""))
-            if found_url:
-                urls_map[store.strip()] = found_url
+        if links_raw:
+            # يفصل بـ, أو |
+            for chunk in re.split(r"[,|]\s*", links_raw):
+                if "=" not in chunk and ":" not in chunk: continue
+                # يدعم = و :
+                if "=" in chunk:
+                    name, url = chunk.split("=", 1)
+                else:
+                    # آخر : هو الفاصل بين الاسم والرابط
+                    if "https://" in chunk:
+                        idx = chunk.rfind("https://")
+                        name = chunk[:idx].rstrip(" :")
+                        url = chunk[idx:]
+                    else:
+                        name, url = chunk.split(":", 1)
+                name = re.sub(r'[✅•]', '', name).strip()
+                url = url.strip()
+                if url and "." in url:
+                    urls_map[name] = get_final_url(url)
 
         return text, dict(list(urls_map.items())[:4])
     except Exception as e:
-        print(f"GEMINI bad response: {e}")
-        return "", {}
+        print(f"GEMINI err {e}"); return "", {}
 
 def download_whatsapp_media(media_id: str):
     headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
