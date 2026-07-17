@@ -27,24 +27,20 @@ SYSTEM_PROMPT = """
 📦 [اسم المنتج]
 
 ✅ [اسم المتجر الأرخص] — [السعر] د.ك
-• [المتجر الثاني] — [السعر] د.ك
-• [المتجر الثالث] — [السعر] د.ك
+- [المتجر الثاني] — [السعر] د.ك
+- [المتجر الثالث] — [السعر] د.ك
 
 قواعد ذهبية:
 - ممنوع إضافة أي جمل ترحيبية أو توديعية.
-- التزم بالأسعار التي تجدها فقط. إذا لم تجد السعر، قل: "غير متوفر".
-- لا تستخدم أي رموز Markdown أو خطوط عريضة.
+- التزم بالأسعار التي تجدها فقط.
+- لا تستخدم أي رموز Markdown.
 
-قاعدة الروابط الإلزامية - عامة لكل المتاجر:
-- في نهاية ردك، في سطر منفصل تماماً وإلزامي، اكتب مصادرك بهذا الشكل الحرفي تماماً، نفس اسم المتجر اللي كتبته في القائمة = رابط المنتج الكامل:
-LINKS: بست اليوسفي=https://best.com.kw/product/xxx, يوريكا=https://eureka.com.kw/yyy, بلينك=https://blink.com.kw/zzz
+قاعدة الروابط الإلزامية - حل عام:
+في النهاية اكتب مصادرك بهذا الشكل الحرفي تماماً، نفس اسم المتجر = الدومين:
+LINKS: بست اليوسفي=best.com.kw, يوريكا=eureka.com.kw, بلينك=blink.com.kw
 
-- ممنوع تكتب دومين فقط، لازم رابط كامل يبدأ بـ https://
-- ممنوع تغير اسم المتجر، اكتبه نفسه بالضبط كما في القائمة
-- هذا الحل يعمل مع أي متجر: كارفور، لولو، سلطان، سيتي سنتر، اكسايت وغيرهم
-- ممنوع تكتب أي شيء بعد سطر LINKS.
+ممنوع تكتب رابط كامل، اكتب دومين فقط ومربوط بالاسم. ينطبق على أي متجر كارفور=carrefourkuwait.com, لولو=luluhypermarket.com وغيرهم.
 """
-
 
 @app.get("/webhook")
 async def verify_webhook(request: Request):
@@ -114,11 +110,14 @@ def process_message(message: dict, bot_phone_id: str):
 
 def get_final_url(url: str):
     try:
-        final = requests.head(url, allow_redirects=True, timeout=10).url
-        if len(final) < 600 and "vertexaisearch" not in final:
-            return final
-        return url
-    except: return url
+        r = requests.get(url, allow_redirects=True, timeout=10, stream=True)
+        final = r.url
+        # اذا الصفحة مو موجودة لا ترسلها
+        if r.status_code >= 400: return ""
+        if "vertexaisearch" in final: return ""
+        r.close()
+        return final if len(final) < 700 else ""
+    except: return ""
 
 def call_gemini(parts: list):
     payload = {
@@ -132,44 +131,41 @@ def call_gemini(parts: list):
     try:
         data = r.json()
         cand = data["candidates"][0]
-        raw_text = "".join(p.get("text","") for p in cand["content"]["parts"]).strip()
+        raw = "".join(p.get("text","") for p in cand["content"]["parts"]).strip()
 
-        # 1. اسحب سطر LINKS قبل ما نمسح الروابط
-        links_raw = ""
-        m = re.search(r"LINKS:\s*(.+)", raw_text, re.IGNORECASE | re.DOTALL)
-        if m:
-            links_raw = m.group(1).strip()
-
-        # 2. نظف النص للعرض
-        text = re.sub(r"LINKS:.*", "", raw_text, flags=re.I).strip()
+        m = re.search(r"LINKS:\s*(.+)", raw, re.I | re.DOTALL)
+        links_raw = m.group(1).strip() if m else ""
+        text = re.sub(r"LINKS:.*", "", raw, flags=re.I).strip()
         text = re.sub(r"https?://\S+", "", text)
-        text = re.sub(r"\n{3,}", "\n\n", text).strip()
 
-        # 3. حل عام: اسم=رابط
-        urls_map = {}
+        # فك LINKS: اسم=دومين
+        pairs = [] # [(بست اليوسفي, best.com.kw),...]
         if links_raw:
-            # يفصل بـ, أو |
-            for chunk in re.split(r"[,|]\s*", links_raw):
-                if "=" not in chunk and ":" not in chunk: continue
-                # يدعم = و :
+            for chunk in re.split(r"[,|\n]+", links_raw):
                 if "=" in chunk:
-                    name, url = chunk.split("=", 1)
-                else:
-                    # آخر : هو الفاصل بين الاسم والرابط
-                    if "https://" in chunk:
-                        idx = chunk.rfind("https://")
-                        name = chunk[:idx].rstrip(" :")
-                        url = chunk[idx:]
-                    else:
-                        name, url = chunk.split(":", 1)
-                name = re.sub(r'[✅•]', '', name).strip()
-                url = url.strip()
-                if url and "." in url:
-                    urls_map[name] = get_final_url(url)
+                    n,d = chunk.split("=",1)
+                    n=n.strip(" ✅•-"); d=d.strip().lower()
+                    if "." in d: pairs.append((n,d))
 
-        return text, dict(list(urls_map.items())[:4])
+        chunks = cand.get("groundingMetadata",{}).get("groundingChunks",[])
+        urls_map = {}
+        for store_name, domain in pairs:
+            key = domain.split(".")[0] # best, eureka, carrefour
+            real_url = ""
+            for c in chunks:
+                uri = c.get("web",{}).get("uri","")
+                title = (c.get("web",{}).get("title") or "").lower()
+                if key in uri.lower() or key in title:
+                    real_url = get_final_url(uri)
+                    if real_url: break
+            # اذا ما لقينا رابط حقيقي، لا ترسل رابط مزيف، سوي رابط بحث بدل 404
+            if not real_url:
+                real_url = f"https://{domain}/search?q={store_name}" # fallback آمن ما يعطي 404
+            urls_map[store_name] = real_url
+
+        return text, urls_map
     except Exception as e:
-        print(f"GEMINI err {e}"); return "", {}
+        print(f"err {e}"); return "", {}
 
 def download_whatsapp_media(media_id: str):
     headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
