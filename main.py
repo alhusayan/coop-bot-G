@@ -33,7 +33,11 @@ SYSTEM_PROMPT = """
 - في نهاية ردك، في سطر منفصل تماماً وإلزامي، اكتب مصادرك بهذا الشكل فقط:
 LINKS: xcite.com, blink.com.kw, eureka.com.kw
 ممنوع تكتب أي شيء بعد سطرLINKS.
-قاعدة إلزامية إضافية: اكتب LINKS بنفس ترتيب المتاجر اللي ذكرتها في القائمة تماماً. إذا بدأت ب بست اليوسفي ثم يوريكا ثم بلينك، لازم LINKS يكون best.com.kw, eureka.com.kw, blink.com.kw بنفس الترتيب.
+- ابحث في جميع المتاجر: jm3eia.com, taw9eel.com, oncost.com, grandhyper.com, cchyper.com, sultan-center.com, Dropz, HiandBuy, Saveco, maqadhe.com, Makani, xcite, eureka, best, blink, carrefour, lulu والجمعيات التعاونية (مشرف، الروضة وحولي، العديلية، صباح السالم، سلوى، بيان، الزهراء وغيرها).
+- في نهاية ردك، في سطر منفصل تماماً وإلزامي، اكتب مصادرك بهذا الشكل فقط:
+LINKS: xcite.com, blink.com.kw, eureka.com.kw, jm3eia.com, taw9eel.com
+ممنوع تكتب أي شيء بعد سطر LINKS.
+قاعدة إلزامية إضافية: اكتب LINKS بنفس ترتيب المتاجر اللي ذكرتها في القائمة تماماً.
 
 """
 
