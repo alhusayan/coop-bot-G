@@ -19,7 +19,7 @@ GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_M
 processed_ids = deque(maxlen=1000)
 CARTS = {}
 IMAGE_BUFFER = defaultdict(lambda: {"images": [], "time": 0, "bot_id": ""})
-BUFFER_SECONDS = 4          # كان 10 — أهم مصدر بطء للصورة الواحدة
+BUFFER_SECONDS = 4
 RESOLVER = ThreadPoolExecutor(max_workers=6)   # فك الروابط بالتوازي
 WORKERS = ThreadPoolExecutor(max_workers=3)    # منتجات السلة بالتوازي
 
@@ -31,13 +31,17 @@ SYSTEM_PROMPT = """
 ✅ [المتجر الأرخص] — [السعر] د.ك
 • [المتجر الثاني] — [السعر] د.ك
 • [المتجر الثالث] — [السعر] د.ك
-في النهاية سطر واحد إلزامي يربط كل متجر ذكرته بدومين موقعه، بنفس ترتيب القائمة:
-LINKS: اسم المتجر الأول=دومينه.com, اسم المتجر الثاني=دومينه.com, اسم المتجر الثالث=دومينه.com
-مثال: LINKS: إكسايت=xcite.com, بلينك=blink.com.kw, يوريكا=eureka.com.kw
-ممنوع روابط ظاهرة في النص. ممنوع Markdown.
+
+ثم سطر أخير إلزامي في كل رد فيه أسعار — لا تنسه أبداً:
+LINKS: اسم المتجر الأول=دومينه, اسم المتجر الثاني=دومينه, اسم المتجر الثالث=دومينه
+مثال حرفي: LINKS: إكسايت=xcite.com, بلينك=blink.com.kw, يوريكا=eureka.com.kw
+بنفس ترتيب قائمة الأسعار. الدومين هو موقع المتجر الفعلي الذي وجدت السعر فيه.
+
+ممنوع روابط ظاهرة في النص. ممنوع Markdown أو نجوم.
 """
 
 
+# ================= أدوات الروابط =================
 def get_final_url(url: str):
     try:
         r = requests.head(url, allow_redirects=True, timeout=8, headers=HEADERS)
@@ -53,12 +57,17 @@ def get_final_url(url: str):
 
 
 def resolve_all(uris: list) -> list:
-    """يفك كل روابط الـgrounding بالتوازي — بدل التسلسلي البطيء"""
     return list(RESOLVER.map(get_final_url, uris))
 
 
+def domain_key(dom: str) -> str:
+    """xcite.com -> xcite | blink.com.kw -> blink — مفتاح مرن للمطابقة"""
+    return dom.replace("www.", "").split(".")[0]
+
+
+# ================= Gemini =================
 def call_gemini(parts: list):
-    """يرجع (النص, {اسم المتجر: رابطه النهائي}) — المطابقة على الرابط المفكوك وليس التخمين"""
+    """يرجع (النص, {اسم المتجر: رابطه النهائي})"""
     payload = {
         "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]},
         "contents": [{"role": "user", "parts": parts}],
@@ -75,7 +84,7 @@ def call_gemini(parts: list):
         cand = data["candidates"][0]
         text = "".join(p.get("text", "") for p in cand["content"]["parts"]).strip()
 
-# أزواج (اسم المتجر = الدومين) من سطر LINKS — يقبل الصيغتين
+        # ===== أزواج (اسم المتجر = الدومين) — يقبل صيغة الأزواج والصيغة القديمة (دومينات فقط) =====
         pairs = []
         m = re.search(r"LINKS:\s*(.+)", text, re.I)
         if m:
@@ -83,37 +92,40 @@ def call_gemini(parts: list):
             print(f"LINKS RAW: {raw[:200]}")
             for part in re.split(r"[,،]+", raw):
                 part = part.strip()
+                if not part:
+                    continue
                 if "=" in part:
                     name, dom = part.split("=", 1)
                     name, dom = name.strip(), dom.strip().lower()
                 else:
-                    dom = part.lower()          # الصيغة القديمة: دومين فقط
-                    name = dom.split(".")[0]
+                    dom = part.lower()
+                    name = domain_key(dom)
                 if "." in dom:
                     pairs.append((name, dom))
             text = re.sub(r"\n?LINKS:.*", "", text, flags=re.I).strip()
         else:
             print("LINKS RAW: <missing>")
+
+        # تنظيف النص
         text = re.sub(r"https?://\S+", "", text)
         text = text.replace("**", "").replace("*", "")
         text = re.sub(r"\n{3,}", "\n\n", text).strip()
 
-        # ===== الإصلاح الجذري للروابط =====
-        # روابط الـgrounding هي روابط تحويل مبهمة — الدومين لا يظهر فيها أبداً.
-        # الطريقة الصحيحة: نفكها كلها بالتوازي أولاً، ثم نطابق الدومين على الرابط *النهائي*.
+        # ===== الروابط: فك متوازٍ ثم مطابقة الدومين على الرابط النهائي =====
         urls_map = {}
         chunks = cand.get("groundingMetadata", {}).get("groundingChunks", [])
         uris = [c.get("web", {}).get("uri") for c in chunks if c.get("web", {}).get("uri")]
-if uris and pairs:
+        if uris and pairs:
             finals = resolve_all(uris[:8])
             print(f"PAIRS: {pairs} | CHUNKS: {len(uris)} | FINALS: {[f[:60] for f in finals if f]}")
             for name, dom in pairs:
-                ...
-                key = dom.replace("www.", "")
+                key = domain_key(dom)
                 for f in finals:
                     if f and key in f.lower().replace("www.", ""):
                         urls_map[name] = f
                         break
+        else:
+            print(f"LINK SKIP: uris={len(uris)} pairs={len(pairs)}")
         # لا خطة بديلة بروابط عشوائية — رابط غلط أسوأ من بلا رابط
 
         return text, dict(list(urls_map.items())[:3])
@@ -122,6 +134,7 @@ if uris and pairs:
         return "", {}
 
 
+# ================= أدوات عامة =================
 def extract_products(text: str):
     text = re.sub(r'^[•\-\*\d\.\)\s]+', '', text, flags=re.M)
     parts = re.split(r'\s*(?:\n+|\+|,|،| و | & )\s*', text.strip())
@@ -145,7 +158,9 @@ def send_whatsapp_text(to, text, bot_id):
     h = {"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"}
     payload = {"messaging_product": "whatsapp", "to": to, "type": "text", "text": {"body": text[:3900]}}
     try:
-        requests.post(url, json=payload, headers=h, timeout=15)
+        r = requests.post(url, json=payload, headers=h, timeout=15)
+        if r.status_code >= 400:
+            print(f"TEXT ERROR {r.status_code}: {r.text[:200]}")
     except Exception as e:
         print(f"send err {e}")
 
@@ -163,13 +178,17 @@ def send_whatsapp_cta(to, body, link, bot_id, title):
             "action": {"name": "cta_url", "parameters": {"display_text": title[:20], "url": link}}
         }
     }
-try:
+    try:
         r = requests.post(url, json=payload, headers=h, timeout=15)
         if r.status_code >= 400:
-            print(f"CTA ERROR {r.status_code}: {r.text[:200]}")
+            print(f"CTA ERROR {r.status_code}: {r.text[:300]}")
+            # احتياط: لا نخلي الرابط يضيع
+            send_whatsapp_text(to, f"{body}\n🔗 {link}", bot_id)
     except Exception as e:
         print(f"CTA send err {e}")
 
+
+# ================= Webhook =================
 @app.get("/webhook")
 async def verify(request: Request):
     p = request.query_params
@@ -209,6 +228,7 @@ async def receive(request: Request, background_tasks: BackgroundTasks):
     return {"status": "ok"}
 
 
+# ================= معالجة الصور =================
 async def process_image_buffer(from_number: str):
     await asyncio.sleep(BUFFER_SECONDS)
     data = IMAGE_BUFFER.pop(from_number, None)
@@ -242,7 +262,7 @@ def process_single_image(message, bot_id):
 
 
 def fetch_product_from_image(msg):
-    """نداء واحد فقط للصورة: تحديد + بحث سعر معاً — كان نداءين متتاليين (أبطأ نقطة بالسلة)"""
+    """نداء واحد للصورة: تحديد + بحث سعر معاً"""
     try:
         b64, mime = download_whatsapp_media(msg["image"]["id"])
         txt, urls = call_gemini([
@@ -286,7 +306,6 @@ def finalize_cart(from_number, bot_id, items):
 
 def process_multi_images(messages, from_number, bot_id):
     send_whatsapp_text(from_number, f"تمام لقطت {len(messages)} منتجات، قاعد أسوي لك سلة بأرخص خلطة...", bot_id)
-    # بالتوازي: 3 منتجات بنفس الوقت بدل الواحد ورا الثاني، ونداء واحد لكل منتج بدل اثنين
     items = list(WORKERS.map(fetch_product_from_image, messages))
     finalize_cart(from_number, bot_id, items)
 
@@ -309,6 +328,7 @@ def process_text_message(message, bot_id):
         finalize_cart(from_number, bot_id, items)
 
 
+# ================= صفحة السلة =================
 @app.get("/cart/{cart_id}", response_class=HTMLResponse)
 async def cart_page(cart_id: str):
     cart = CARTS.get(cart_id)
@@ -327,4 +347,4 @@ async def cart_page(cart_id: str):
 
 @app.get("/")
 async def health():
-    return {"status": "v5 fast + accurate links", "number": "5250"}
+    return {"status": "v6 diagnostics + tolerant links", "number": "5250"}
