@@ -75,18 +75,25 @@ def call_gemini(parts: list):
         cand = data["candidates"][0]
         text = "".join(p.get("text", "") for p in cand["content"]["parts"]).strip()
 
-        # أزواج (اسم المتجر = الدومين) من سطر LINKS
+# أزواج (اسم المتجر = الدومين) من سطر LINKS — يقبل الصيغتين
         pairs = []
         m = re.search(r"LINKS:\s*(.+)", text, re.I)
         if m:
-            for part in re.split(r"[,،]+", m.group(1)):
+            raw = m.group(1)
+            print(f"LINKS RAW: {raw[:200]}")
+            for part in re.split(r"[,،]+", raw):
+                part = part.strip()
                 if "=" in part:
                     name, dom = part.split("=", 1)
                     name, dom = name.strip(), dom.strip().lower()
-                    if "." in dom:
-                        pairs.append((name, dom))
+                else:
+                    dom = part.lower()          # الصيغة القديمة: دومين فقط
+                    name = dom.split(".")[0]
+                if "." in dom:
+                    pairs.append((name, dom))
             text = re.sub(r"\n?LINKS:.*", "", text, flags=re.I).strip()
-
+        else:
+            print("LINKS RAW: <missing>")
         text = re.sub(r"https?://\S+", "", text)
         text = text.replace("**", "").replace("*", "")
         text = re.sub(r"\n{3,}", "\n\n", text).strip()
@@ -97,9 +104,11 @@ def call_gemini(parts: list):
         urls_map = {}
         chunks = cand.get("groundingMetadata", {}).get("groundingChunks", [])
         uris = [c.get("web", {}).get("uri") for c in chunks if c.get("web", {}).get("uri")]
-        if uris and pairs:
+if uris and pairs:
             finals = resolve_all(uris[:8])
+            print(f"PAIRS: {pairs} | CHUNKS: {len(uris)} | FINALS: {[f[:60] for f in finals if f]}")
             for name, dom in pairs:
+                ...
                 key = dom.replace("www.", "")
                 for f in finals:
                     if f and key in f.lower().replace("www.", ""):
@@ -154,11 +163,12 @@ def send_whatsapp_cta(to, body, link, bot_id, title):
             "action": {"name": "cta_url", "parameters": {"display_text": title[:20], "url": link}}
         }
     }
-    try:
-        requests.post(url, json=payload, headers=h, timeout=15)
+try:
+        r = requests.post(url, json=payload, headers=h, timeout=15)
+        if r.status_code >= 400:
+            print(f"CTA ERROR {r.status_code}: {r.text[:200]}")
     except Exception as e:
         print(f"CTA send err {e}")
-
 
 @app.get("/webhook")
 async def verify(request: Request):
