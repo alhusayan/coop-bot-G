@@ -8,22 +8,22 @@ from fastapi.responses import HTMLResponse
 app = FastAPI()
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")
 WHATSAPP_TOKEN = os.environ.get("WHATSAPP_TOKEN", "")
 PHONE_NUMBER_ID = os.environ.get("PHONE_NUMBER_ID", "")
 VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN", "MY_SECRET_COOP_BOT_TOKEN")
 
-GRAPH_URL = "https://graph.facebook.com/v20.0" # كان عندك https مكررة
+GRAPH_URL = "https://graph.facebook.com/v20.0"
 GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
 
 processed_ids = deque(maxlen=1000)
 CARTS = {}
 IMAGE_BUFFER = defaultdict(lambda: {"images": [], "time": 0, "bot_id": ""})
-PENDING_IG = {} # رقم -> اسم المنتج الأخير
 BUFFER_SECONDS = 4
-RESOLVER = ThreadPoolExecutor(max_workers=6)
-WORKERS = ThreadPoolExecutor(max_workers=3)
-HEADERS = {"User-Agent": "Mozilla/5.0"}
+RESOLVER = ThreadPoolExecutor(max_workers=6)   # فك الروابط بالتوازي
+WORKERS = ThreadPoolExecutor(max_workers=3)    # منتجات السلة بالتوازي
+
+HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
 SYSTEM_PROMPT = """
 أنت مساعد تسوق كويتي. رد بهذا الشكل فقط:
@@ -31,231 +31,320 @@ SYSTEM_PROMPT = """
 ✅ [المتجر الأرخص] — [السعر] د.ك
 • [المتجر الثاني] — [السعر] د.ك
 • [المتجر الثالث] — [السعر] د.ك
-ثم سطر أخير إلزامي:
+
+ثم سطر أخير إلزامي في كل رد فيه أسعار — لا تنسه أبداً:
 LINKS: اسم المتجر الأول=دومينه, اسم المتجر الثاني=دومينه, اسم المتجر الثالث=دومينه
-مثال: LINKS: إكسايت=xcite.com, بلينك=blink.com.kw, يوريكا=eureka.com.kw
-ممنوع روابط ظاهرة. ممنوع Markdown.
+مثال حرفي: LINKS: إكسايت=xcite.com, بلينك=blink.com.kw, يوريكا=eureka.com.kw
+بنفس ترتيب قائمة الأسعار. الدومين هو موقع المتجر الفعلي الذي وجدت السعر فيه.
+
+ممنوع روابط ظاهرة في النص. ممنوع Markdown أو نجوم.
 """
 
-SYSTEM_PROMPT_IG = """
-أنت تبحث فقط في انستغرام الكويت. مهمتك تجيب عروض وستوريات وريلز حقيقية.
-رد بهذا الشكل فقط:
-📸 عروض انستغرام لـ [المنتج]
-- [وصف قصير للعرض 1]
-- [وصف قصير للعرض 2]
-ثم سطر: LINKS: وصف العرض 1=instagram.com/p/xxx, وصف العرض 2=instagram.com/reel/yyy
-ممنوع تختَرع روابط، استخدم فقط ما تجده في نتائج البحث.
-"""
 
+# ================= أدوات الروابط =================
 def get_final_url(url: str):
     try:
         r = requests.head(url, allow_redirects=True, timeout=8, headers=HEADERS)
         if r.status_code == 405:
-            r = requests.get(url, allow_redirects=True, timeout=8, stream=True, headers=HEADERS); r.close()
+            r = requests.get(url, allow_redirects=True, timeout=8, stream=True, headers=HEADERS)
+            r.close()
         final = r.url
-        if "vertexaisearch" in final or "grounding-api-redirect" in final: return ""
+        if "vertexaisearch" in final or "grounding-api-redirect" in final:
+            return ""
         return final if len(final) < 700 else ""
-    except: return ""
+    except Exception:
+        return ""
 
-def resolve_all(uris): return list(RESOLVER.map(get_final_url, uris))
-def domain_key(dom): return dom.replace("www.","").split(".")[0]
 
-def call_gemini(parts, system=SYSTEM_PROMPT):
+def resolve_all(uris: list) -> list:
+    return list(RESOLVER.map(get_final_url, uris))
+
+
+def domain_key(dom: str) -> str:
+    """xcite.com -> xcite | blink.com.kw -> blink — مفتاح مرن للمطابقة"""
+    return dom.replace("www.", "").split(".")[0]
+
+
+# ================= Gemini =================
+def call_gemini(parts: list):
+    """يرجع (النص, {اسم المتجر: رابطه النهائي})"""
     payload = {
-        "systemInstruction": {"parts": [{"text": system}]},
+        "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]},
         "contents": [{"role": "user", "parts": parts}],
         "tools": [{"google_search": {}}],
         "generationConfig": {"temperature": 0.2, "maxOutputTokens": 2000},
     }
     try:
         r = requests.post(GEMINI_URL, params={"key": GEMINI_API_KEY}, json=payload, timeout=90)
-        if r.status_code >= 400: return "", {}
-        data = r.json(); cand = data["candidates"][0]
-        text = "".join(p.get("text","") for p in cand["content"]["parts"]).strip()
-        pairs=[]
-        m=re.search(r"LINKS:\s*(.+)", text, re.I)
+        if r.status_code >= 400:
+            print(f"GEMINI {r.status_code}: {r.text[:200]}")
+            return "", {}
+
+        data = r.json()
+        cand = data["candidates"][0]
+        text = "".join(p.get("text", "") for p in cand["content"]["parts"]).strip()
+
+        # ===== أزواج (اسم المتجر = الدومين) — يقبل صيغة الأزواج والصيغة القديمة (دومينات فقط) =====
+        pairs = []
+        m = re.search(r"LINKS:\s*(.+)", text, re.I)
         if m:
-            raw=m.group(1)
+            raw = m.group(1)
+            print(f"LINKS RAW: {raw[:200]}")
             for part in re.split(r"[,،]+", raw):
-                part=part.strip()
+                part = part.strip()
+                if not part:
+                    continue
                 if "=" in part:
-                    name,dom=part.split("=",1); name,dom=name.strip(),dom.strip().lower()
-                    if "." in dom: pairs.append((name,dom))
-            text=re.sub(r"\n?LINKS:.*","",text,flags=re.I).strip()
-        text=re.sub(r"https?://\S+","",text).replace("**","").strip()
-        urls_map={}; chunks=cand.get("groundingMetadata",{}).get("groundingChunks",[])
-        uris=[c.get("web",{}).get("uri") for c in chunks if c.get("web",{}).get("uri")]
+                    name, dom = part.split("=", 1)
+                    name, dom = name.strip(), dom.strip().lower()
+                else:
+                    dom = part.lower()
+                    name = domain_key(dom)
+                if "." in dom:
+                    pairs.append((name, dom))
+            text = re.sub(r"\n?LINKS:.*", "", text, flags=re.I).strip()
+        else:
+            print("LINKS RAW: <missing>")
+
+        # تنظيف النص
+        text = re.sub(r"https?://\S+", "", text)
+        text = text.replace("**", "").replace("*", "")
+        text = re.sub(r"\n{3,}", "\n\n", text).strip()
+
+        # ===== الروابط: فك متوازٍ ثم مطابقة الدومين على الرابط النهائي =====
+        urls_map = {}
+        chunks = cand.get("groundingMetadata", {}).get("groundingChunks", [])
+        uris = [c.get("web", {}).get("uri") for c in chunks if c.get("web", {}).get("uri")]
         if uris and pairs:
-            finals=resolve_all(uris[:8])
-            for name,dom in pairs:
-                key=domain_key(dom)
+            finals = resolve_all(uris[:8])
+            print(f"PAIRS: {pairs} | CHUNKS: {len(uris)} | FINALS: {[f[:60] for f in finals if f]}")
+            for name, dom in pairs:
+                key = domain_key(dom)
                 for f in finals:
-                    if f and key in f.lower(): urls_map[name]=f; break
+                    if f and key in f.lower().replace("www.", ""):
+                        urls_map[name] = f
+                        break
+        else:
+            print(f"LINK SKIP: uris={len(uris)} pairs={len(pairs)}")
+        # لا خطة بديلة بروابط عشوائية — رابط غلط أسوأ من بلا رابط
+
         return text, dict(list(urls_map.items())[:3])
-    except Exception as e: print(f"Gemini err {e}"); return "", {}
+    except Exception as e:
+        print(f"Gemini err {e}")
+        return "", {}
 
-def search_instagram(product):
-    txt, urls = call_gemini([{"text": f"ابحث فقط في instagram.com عن ستوريات واعلانات وريلز لعروض {product} في الكويت"}], system=SYSTEM_PROMPT_IG)
-    return txt, urls
 
-def extract_products(text):
-    text=re.sub(r'^[•\-\*\d\.\)\s]+','',text,flags=re.M)
-    parts=re.split(r'\s*(?:\n+|\+|,|،| و | & )\s*',text.strip())
-    parts=[p.strip() for p in parts if len(p.strip())>2]
-    return parts[:6] if len(parts)>1 else [text.strip()]
+# ================= أدوات عامة =================
+def extract_products(text: str):
+    text = re.sub(r'^[•\-\*\d\.\)\s]+', '', text, flags=re.M)
+    parts = re.split(r'\s*(?:\n+|\+|,|،| و | & )\s*', text.strip())
+    parts = [p.strip() for p in parts if len(p.strip()) > 2]
+    if len(parts) <= 1:
+        return [text.strip()]
+    return parts[:6]
 
-def download_whatsapp_media(mid):
-    h={"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
-    meta=requests.get(f"{GRAPH_URL}/{mid}",headers=h,timeout=20).json()
-    img=requests.get(meta["url"],headers=h,timeout=30)
-    return base64.b64encode(img.content).decode(), meta.get("mime_type","image/jpeg")
 
-def send_whatsapp_text(to,text,bot_id):
-    url=f"{GRAPH_URL}/{bot_id}/messages"; h={"Authorization":f"Bearer {WHATSAPP_TOKEN}","Content-Type":"application/json"}
-    payload={"messaging_product":"whatsapp","to":to,"type":"text","text":{"body":text[:3900]}}
-    try: requests.post(url,json=payload,headers=h,timeout=15)
-    except: pass
+def download_whatsapp_media(media_id: str):
+    h = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
+    meta = requests.get(f"{GRAPH_URL}/{media_id}", headers=h, timeout=20).json()
+    url = meta["url"]
+    mime = meta.get("mime_type", "image/jpeg")
+    img = requests.get(url, headers=h, timeout=30)
+    return base64.b64encode(img.content).decode(), mime
 
-def send_whatsapp_cta(to,body,link,bot_id,title):
-    url=f"{GRAPH_URL}/{bot_id}/messages"; h={"Authorization":f"Bearer {WHATSAPP_TOKEN}","Content-Type":"application/json"}
-    payload={"messaging_product":"whatsapp","to":to,"type":"interactive","interactive":{"type":"cta_url","body":{"text":body[:1024]},"action":{"name":"cta_url","parameters":{"display_text":title[:20],"url":link}}}}
-    try: requests.post(url,json=payload,headers=h,timeout=15)
-    except: pass
 
-def send_instagram_choice(to,bot_id,product):
-    PENDING_IG[to]=product
-    url=f"{GRAPH_URL}/{bot_id}/messages"; h={"Authorization":f"Bearer {WHATSAPP_TOKEN}","Content-Type":"application/json"}
-    payload={
-        "messaging_product":"whatsapp","to":to,"type":"interactive",
-        "interactive":{
-            "type":"button",
-            "body":{"text":f"تبي أدور لك ستوريات وعروض انستغرام لـ {product}؟"},
-            "action":{"buttons":[
-                {"type":"reply","reply":{"id":f"ig_yes:{product[:20]}","title":"📸 إيه دور"}},
-                {"type":"reply","reply":{"id":"ig_no","title":"لا شكرا"}}
-            ]}
+def send_whatsapp_text(to, text, bot_id):
+    url = f"{GRAPH_URL}/{bot_id}/messages"
+    h = {"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"}
+    payload = {"messaging_product": "whatsapp", "to": to, "type": "text", "text": {"body": text[:3900]}}
+    try:
+        r = requests.post(url, json=payload, headers=h, timeout=15)
+        if r.status_code >= 400:
+            print(f"TEXT ERROR {r.status_code}: {r.text[:200]}")
+    except Exception as e:
+        print(f"send err {e}")
+
+
+def send_whatsapp_cta(to, body, link, bot_id, title):
+    url = f"{GRAPH_URL}/{bot_id}/messages"
+    h = {"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"}
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to,
+        "type": "interactive",
+        "interactive": {
+            "type": "cta_url",
+            "body": {"text": body[:1024]},
+            "action": {"name": "cta_url", "parameters": {"display_text": title[:20], "url": link}}
         }
     }
-    try: requests.post(url,json=payload,headers=h,timeout=15)
-    except: pass
+    try:
+        r = requests.post(url, json=payload, headers=h, timeout=15)
+        if r.status_code >= 400:
+            print(f"CTA ERROR {r.status_code}: {r.text[:300]}")
+            # احتياط: لا نخلي الرابط يضيع
+            send_whatsapp_text(to, f"{body}\n🔗 {link}", bot_id)
+    except Exception as e:
+        print(f"CTA send err {e}")
 
+
+# ================= Webhook =================
 @app.get("/webhook")
 async def verify(request: Request):
-    p=request.query_params
-    if p.get("hub.mode")=="subscribe" and p.get("hub.verify_token")==VERIFY_TOKEN:
+    p = request.query_params
+    if p.get("hub.mode") == "subscribe" and p.get("hub.verify_token") == VERIFY_TOKEN:
         return Response(content=p.get("hub.challenge"), media_type="text/plain")
-    return Response("fail",403)
+    return Response("fail", 403)
+
 
 @app.post("/webhook")
 async def receive(request: Request, background_tasks: BackgroundTasks):
-    data=await request.json()
+    data = await request.json()
     try:
-        value=data["entry"][0]["changes"][0]["value"]
-        if "messages" not in value: return {"status":"ok"}
-        msg=value["messages"][0]; mid=msg.get("id")
-        if mid in processed_ids: return {"status":"dup"}
+        value = data["entry"][0]["changes"][0]["value"]
+        if "messages" not in value:
+            return {"status": "ok"}
+
+        msg = value["messages"][0]
+        mid = msg.get("id")
+        if mid in processed_ids:
+            return {"status": "dup"}
+
         processed_ids.append(mid)
-        bot_id=value.get("metadata",{}).get("phone_number_id",PHONE_NUMBER_ID)
-        from_number=msg["from"]
-        if msg.get("type")=="image":
-            IMAGE_BUFFER[from_number]["images"].append(msg); IMAGE_BUFFER[from_number]["time"]=time.time(); IMAGE_BUFFER[from_number]["bot_id"]=bot_id
-            if len(IMAGE_BUFFER[from_number]["images"])==1:
-                background_tasks.add_task(process_image_buffer,from_number)
-        elif msg.get("type")=="interactive":
-            background_tasks.add_task(process_interactive,msg,bot_id)
-        else:
-            background_tasks.add_task(process_text_message,msg,bot_id)
-    except Exception as e: print(f"webhook err {e}")
-    return {"status":"ok"}
+        bot_id = value.get("metadata", {}).get("phone_number_id", PHONE_NUMBER_ID)
+        from_number = msg["from"]
 
-async def process_image_buffer(from_number):
+        if msg.get("type") == "image":
+            IMAGE_BUFFER[from_number]["images"].append(msg)
+            IMAGE_BUFFER[from_number]["time"] = time.time()
+            IMAGE_BUFFER[from_number]["bot_id"] = bot_id
+            if len(IMAGE_BUFFER[from_number]["images"]) == 1:
+                background_tasks.add_task(process_image_buffer, from_number)
+        else:
+            background_tasks.add_task(process_text_message, msg, bot_id)
+
+    except Exception as e:
+        print(f"webhook err {e}")
+    return {"status": "ok"}
+
+
+# ================= معالجة الصور =================
+async def process_image_buffer(from_number: str):
     await asyncio.sleep(BUFFER_SECONDS)
-    data=IMAGE_BUFFER.pop(from_number,None)
-    if not data: return
-    if len(data["images"])==1: await asyncio.to_thread(process_single_image,data["images"][0],data["bot_id"])
-    else: await asyncio.to_thread(process_multi_images,data["images"],from_number,data["bot_id"])
+    data = IMAGE_BUFFER.pop(from_number, None)
+    if not data:
+        return
+    images = data["images"]
+    bot_id = data["bot_id"]
 
-def process_single_image(message,bot_id):
-    from_number=message["from"]
-    send_whatsapp_text(from_number,"ثواني بس.. أحدد المنتج وأدور لك الأرخص!",bot_id)
-    b64,mime=download_whatsapp_media(message["image"]["id"])
-    txt,urls=call_gemini([{"inline_data":{"mime_type":mime,"data":b64}},{"text":"ما هذا المنتج؟ ابحث عن سعره الحالي في الكويت"}])
-    if not txt: txt="ما قدرت أحدد المنتج"
-    send_whatsapp_text(from_number,txt,bot_id)
-    for n,u in urls.items():
-        if u: send_whatsapp_cta(from_number,f"تسوق من {n} 👇",u,bot_id,f"🛒 {n[:18]}")
-    # حفظ للانستغرام
-    name_m=re.search(r"📦\s*(.+)",txt); pname=(name_m.group(1).strip() if name_m else "المنتج")[:30]
-    send_instagram_choice(from_number,bot_id,pname)
-
-def process_interactive(message,bot_id):
-    from_number=message["from"]
-    br=message["interactive"].get("button_reply",{})
-    bid=br.get("id","")
-    if bid.startswith("ig_yes"):
-        product=bid.split(":",1)[1] if ":" in bid else PENDING_IG.get(from_number,"")
-        if not product: product=PENDING_IG.get(from_number,"منتج")
-        send_whatsapp_text(from_number,f"🔍 أدور لك عروض انستغرام لـ {product}...",bot_id)
-        txt,urls=search_instagram(product)
-        if urls:
-            send_whatsapp_text(from_number,txt or f"📸 عروض انستغرام لـ {product}",bot_id)
-            for n,u in urls.items():
-                if u: send_whatsapp_cta(from_number,f"شوف عرض {n} 👇",u,bot_id,f"📸 {n[:18]}")
-        else:
-            send_whatsapp_text(from_number,f"ما لقيت عروض انستغرام واضحة لـ {product} 😅",bot_id)
+    if len(images) == 1:
+        await asyncio.to_thread(process_single_image, images[0], bot_id)
     else:
-        send_whatsapp_text(from_number,"تمام 👍",bot_id)
+        await asyncio.to_thread(process_multi_images, images, from_number, bot_id)
+
+
+def process_single_image(message, bot_id):
+    from_number = message["from"]
+    send_whatsapp_text(from_number, "ثواني بس.. أحدد المنتج وأدور لك الأرخص!", bot_id)
+    b64, mime = download_whatsapp_media(message["image"]["id"])
+    txt, urls = call_gemini([
+        {"inline_data": {"mime_type": mime, "data": b64}},
+        {"text": "ما هذا المنتج؟ ابحث عن سعره الحالي في الكويت"}
+    ])
+
+    if not txt:
+        txt = "ما قدرت أحدد المنتج، جرب صورة أوضح"
+    send_whatsapp_text(from_number, txt, bot_id)
+
+    for n, u in urls.items():
+        if u:
+            send_whatsapp_cta(from_number, f"تسوق من {n} 👇", u, bot_id, f"🛒 {n[:18]}")
+
 
 def fetch_product_from_image(msg):
+    """نداء واحد للصورة: تحديد + بحث سعر معاً"""
     try:
-        b64,mime=download_whatsapp_media(msg["image"]["id"])
-        txt,urls=call_gemini([{"inline_data":{"mime_type":mime,"data":b64}},{"text":"حدد المنتج وابحث عن سعره"}])
-        name_m=re.search(r"📦\s*(.+)",txt); name=(name_m.group(1).strip() if name_m else "منتج")[:50]
-        pm=re.search(r"✅.*?(?:—|-|–)\s*([\d\.]+)",txt); price=float(pm.group(1)) if pm else 0
-        curl=list(urls.values())[0] if urls else ""; cstore=list(urls.keys())[0] if urls else "متجر"
-        return {"name":name,"store":cstore,"price":price,"url":curl,"all_urls":urls}
-    except: return {"name":"منتج","store":"متجر","price":0,"url":"","all_urls":{}}
+        b64, mime = download_whatsapp_media(msg["image"]["id"])
+        txt, urls = call_gemini([
+            {"inline_data": {"mime_type": mime, "data": b64}},
+            {"text": "حدد المنتج في الصورة وابحث عن سعره الحالي في الكويت في نفس الرد."}
+        ])
+        name_m = re.search(r"📦\s*(.+)", txt)
+        name = (name_m.group(1).strip() if name_m else "منتج")[:50]
+        price_m = re.search(r"✅.*?(?:—|-|–)\s*([\d\.]+)", txt)
+        price = float(price_m.group(1)) if price_m else 0
+        curl = list(urls.values())[0] if urls else ""
+        cstore = list(urls.keys())[0] if urls else "متجر"
+        return {"name": name, "store": cstore, "price": price, "url": curl, "all_urls": urls}
+    except Exception as e:
+        print(f"img item err {e}")
+        return {"name": "منتج", "store": "متجر", "price": 0, "url": "", "all_urls": {}}
+
 
 def fetch_product_from_text(prod):
     try:
-        txt,urls=call_gemini([{"text":f"ابحث عن سعر {prod} في الكويت"}])
-        m=re.search(r"✅.*?(?:—|-|–)\s*([\d\.]+)",txt); price=float(m.group(1)) if m else 0
-        curl=list(urls.values())[0] if urls else ""; cstore=list(urls.keys())[0] if urls else "متجر"
-        return {"name":prod,"store":cstore,"price":price,"url":curl,"all_urls":urls}
-    except: return {"name":prod,"store":"متجر","price":0,"url":"","all_urls":{}}
+        txt, urls = call_gemini([{"text": f"ابحث عن سعر {prod} في الكويت"}])
+        m = re.search(r"✅.*?(?:—|-|–)\s*([\d\.]+)", txt)
+        price = float(m.group(1)) if m else 0
+        curl = list(urls.values())[0] if urls else ""
+        cstore = list(urls.keys())[0] if urls else "متجر"
+        return {"name": prod, "store": cstore, "price": price, "url": curl, "all_urls": urls}
+    except Exception as e:
+        print(f"txt item err {e}")
+        return {"name": prod, "store": "متجر", "price": 0, "url": "", "all_urls": {}}
 
-def finalize_cart(from_number,bot_id,items):
-    total=sum(it["price"] for it in items); cart_id=uuid.uuid4().hex[:8]
-    CARTS[cart_id]={"products":items,"total":total}
-    summ="\n".join([f"• {it['name']} - {it['price']} د.ك ({it['store']})" for it in items])
-    send_whatsapp_text(from_number,f"🛒 سلتك جاهزة:\n{summ}\n\n💰 الإجمالي: {total:.3f} د.ك",bot_id)
-    domain=os.environ.get("RAILWAY_PUBLIC_DOMAIN","fanzia.up.railway.app")
-    send_whatsapp_cta(from_number,"افتح السلة",f"https://{domain}/cart/{cart_id}",bot_id,"🛒 افتح السلة")
 
-def process_multi_images(messages,from_number,bot_id):
-    send_whatsapp_text(from_number,f"تمام لقطت {len(messages)} منتجات، أسوي سلة...",bot_id)
-    items=list(WORKERS.map(fetch_product_from_image,messages)); finalize_cart(from_number,bot_id,items)
+def finalize_cart(from_number, bot_id, items):
+    total = sum(it["price"] for it in items)
+    cart_id = uuid.uuid4().hex[:8]
+    CARTS[cart_id] = {"products": items, "total": total}
+    summ = "\n".join([f"• {it['name']} - {it['price']} د.ك ({it['store']})" for it in items])
+    send_whatsapp_text(from_number, f"🛒 سلتك جاهزة:\n{summ}\n\n💰 الإجمالي بأرخص خلطة: {total:.3f} د.ك", bot_id)
+    domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "fanzia.up.railway.app")
+    send_whatsapp_cta(from_number, "افتح السلة وكمّل الشراء", f"https://{domain}/cart/{cart_id}", bot_id, "🛒 افتح السلة")
 
-def process_text_message(message,bot_id):
-    from_number=message["from"]; user_text=message["text"]["body"]; products=extract_products(user_text)
-    if len(products)==1:
-        send_whatsapp_text(from_number,f"🔍 أدور لك على {products[0]}...",bot_id)
-        txt,urls=call_gemini([{"text":f"ابحث عن سعر {products[0]} في الكويت"}])
-        send_whatsapp_text(from_number,txt or "ما لقيت",bot_id)
-        for n,u in urls.items():
-            if u: send_whatsapp_cta(from_number,f"تسوق من {n} 👇",u,bot_id,f"🛒 {n[:18]}")
-        send_instagram_choice(from_number,bot_id,products[0])
+
+def process_multi_images(messages, from_number, bot_id):
+    send_whatsapp_text(from_number, f"تمام لقطت {len(messages)} منتجات، قاعد أسوي لك سلة بأرخص خلطة...", bot_id)
+    items = list(WORKERS.map(fetch_product_from_image, messages))
+    finalize_cart(from_number, bot_id, items)
+
+
+def process_text_message(message, bot_id):
+    from_number = message["from"]
+    user_text = message["text"]["body"]
+    products = extract_products(user_text)
+
+    if len(products) == 1:
+        send_whatsapp_text(from_number, f"🔍 أدور لك على {products[0]}...", bot_id)
+        txt, urls = call_gemini([{"text": f"ابحث عن سعر {products[0]} في الكويت"}])
+        send_whatsapp_text(from_number, txt or "ما لقيت", bot_id)
+        for n, u in urls.items():
+            if u:
+                send_whatsapp_cta(from_number, f"تسوق من {n} 👇", u, bot_id, f"🛒 {n[:18]}")
     else:
-        send_whatsapp_text(from_number,f"تمام لقيت {len(products)} منتجات، أسوي سلة...",bot_id)
-        items=list(WORKERS.map(fetch_product_from_text,products)); finalize_cart(from_number,bot_id,items)
+        send_whatsapp_text(from_number, f"تمام لقيت {len(products)} منتجات، أسوي لك سلة تخلط أرخص المتاجر...", bot_id)
+        items = list(WORKERS.map(fetch_product_from_text, products))
+        finalize_cart(from_number, bot_id, items)
 
+
+# ================= صفحة السلة =================
 @app.get("/cart/{cart_id}", response_class=HTMLResponse)
 async def cart_page(cart_id: str):
-    cart=CARTS.get(cart_id)
-    if not cart: return HTMLResponse("<h1>السلة انتهت</h1>",404)
-    rows="".join([f"<div class='p-4 border-b flex justify-between'><div><b>{it['name']}</b><br><span class='text-sm text-gray-500'>{it['store']} - {it['price']} د.ك</span></div><a href='{it['url']}' target='_blank' class='bg-black text-white px-4 py-2 rounded'>شراء</a></div>" for it in cart["products"]])
-    html=f"<html dir='rtl'><head><meta name='viewport' content='width=device-width'><script src='https://cdn.tailwindcss.com'></script></head><body class='bg-gray-50'><div class='max-w-lg mx-auto bg-white min-h-screen'><div class='p-5 bg-black text-white'><h1 class='text-xl font-bold'>🛒 سلتك</h1></div>{rows}<div class='p-5 font-bold'>الإجمالي: {cart['total']:.3f} د.ك</div></div></body></html>"
+    cart = CARTS.get(cart_id)
+    if not cart:
+        return HTMLResponse("<h1>السلة انتهت</h1>", 404)
+
+    rows = ""
+    for it in cart["products"]:
+        btns = "".join([f"<a href='{u}' target='_blank' class='text-xs bg-gray-100 px-2 py-1 rounded mr-1'>{n}</a>" for n, u in it['all_urls'].items() if u])
+        rows += f"<div class='p-4 border-b flex justify-between items-start'><div><b>{it['name']}</b><br><span class='text-sm text-gray-500'>{it['store']} - {it['price']} د.ك</span><div class='mt-2 flex flex-wrap gap-1'>{btns}</div></div><a href='{it['url']}' target='_blank' class='bg-black text-white px-4 py-2 rounded'>شراء</a></div>"
+
+    html = f"""<html dir='rtl'><head><meta name='viewport' content='width=device-width,initial-scale=1'><script src='https://cdn.tailwindcss.com'></script></head><body class='bg-gray-50'><div class='max-w-lg mx-auto bg-white min-h-screen'><div class='p-5 bg-black text-white'><h1 class='text-xl font-bold'>🛒 سلتك</h1><p class='text-sm opacity-70'>أرخص خلطة متاجر - تسمح بالخلط</p></div>{rows}<div class='p-5'><div class='flex justify-between text-lg font-bold'><span>الإجمالي</span><span>{cart['total']:.3f} د.ك</span></div></div></div></body></html>"""
+
     return HTMLResponse(html)
 
+
 @app.get("/")
-async def health(): return {"status":"v7 with IG choice"}
+async def health():
+    return {"status": "v6 diagnostics + tolerant links", "number": "5250"}
