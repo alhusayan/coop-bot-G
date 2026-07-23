@@ -32,9 +32,6 @@ SYSTEM_PROMPT = """
 • [المتجر الثاني] — [السعر] د.ك
 • [المتجر الثالث] — [السعر] د.ك
 
-وإذا وجدت المنتج ضمن عروض الجمعيات التعاونية الكويتية الحالية أضف سطراً:
-🏪 عرض جمعية: [اسم الجمعية] — [السعر] د.ك
-
 ثم سطر أخير إلزامي في كل رد فيه أسعار — لا تنسه أبداً:
 LINKS: اسم المتجر الأول=دومينه, اسم المتجر الثاني=دومينه, اسم المتجر الثالث=دومينه
 مثال حرفي: LINKS: إكسايت=xcite.com, بلينك=blink.com.kw, يوريكا=eureka.com.kw
@@ -42,14 +39,6 @@ LINKS: اسم المتجر الأول=دومينه, اسم المتجر الثا
 
 ممنوع روابط ظاهرة في النص. ممنوع Markdown أو نجوم.
 """
-
-OFFERS_PROMPT = """أنت خبير عروض الجمعيات التعاونية في الكويت.
-ابحث في الإنترنت (خصوصاً موقع tsawq.net ومواقع الأخبار الكويتية) عن مهرجانات وعروض الجمعيات التعاونية الفعالة حالياً في الكويت.
-رد بهذا الشكل فقط:
-🏪 عروض الجمعيات الحالية:
-• [اسم الجمعية] — [نوع العرض/المهرجان] — [مدة العرض إن وجدت]
-(حتى عشرة أسطر، الأحدث أولاً)
-ممنوع الروابط الظاهرة. ممنوع Markdown أو نجوم. إذا ما لقيت شيئاً محدثاً قل ذلك بجملة واحدة."""
 
 
 # ================= أدوات الروابط =================
@@ -77,10 +66,10 @@ def domain_key(dom: str) -> str:
 
 
 # ================= Gemini =================
-def call_gemini(parts: list, system: str = SYSTEM_PROMPT):
-    """يرجع (النص, {اسم المتجر: رابطه النهائي}) — Gemini + بحث جوجل فقط"""
+def call_gemini(parts: list):
+    """يرجع (النص, {اسم المتجر: رابطه النهائي})"""
     payload = {
-        "systemInstruction": {"parts": [{"text": system}]},
+        "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]},
         "contents": [{"role": "user", "parts": parts}],
         "tools": [{"google_search": {}}],
         "generationConfig": {"temperature": 0.2, "maxOutputTokens": 2000},
@@ -143,16 +132,6 @@ def call_gemini(parts: list, system: str = SYSTEM_PROMPT):
     except Exception as e:
         print(f"Gemini err {e}")
         return "", {}
-
-
-def gemini_coop_offers(query: str = "") -> str:
-    """عروض الجمعيات عبر بحث Gemini فقط — بدون أي API خارجي آخر"""
-    if query:
-        ask = f"هل منتج ({query}) موجود ضمن عروض الجمعيات التعاونية الحالية في الكويت؟ ابحث وأجب باختصار."
-    else:
-        ask = "ما هي عروض ومهرجانات الجمعيات التعاونية الفعالة حالياً في الكويت؟"
-    txt, _ = call_gemini([{"text": ask}], system=OFFERS_PROMPT)
-    return txt
 
 
 # ================= أدوات عامة =================
@@ -270,7 +249,7 @@ def process_single_image(message, bot_id):
     b64, mime = download_whatsapp_media(message["image"]["id"])
     txt, urls = call_gemini([
         {"inline_data": {"mime_type": mime, "data": b64}},
-        {"text": "ما هذا المنتج؟ ابحث عن سعره الحالي في الكويت في المتاجر الإلكترونية، وتحقق أيضاً إن كان ضمن عروض الجمعيات التعاونية الحالية."}
+        {"text": "ما هذا المنتج؟ ابحث عن سعره الحالي في الكويت"}
     ])
 
     if not txt:
@@ -334,21 +313,11 @@ def process_multi_images(messages, from_number, bot_id):
 def process_text_message(message, bot_id):
     from_number = message["from"]
     user_text = message["text"]["body"]
-    t = user_text.strip()
-
-    # ===== أمر عروض الجمعيات — بحث Gemini فقط =====
-    if t in ("العروض", "عروض", "عروض الجمعيات"):
-        send_whatsapp_text(from_number, "🏪 أدور لك على أحدث عروض الجمعيات...", bot_id)
-        txt = gemini_coop_offers()
-        send_whatsapp_text(from_number, txt or "ما لقيت عروض محدثة حالياً", bot_id)
-        return
-
-    # ===== البحث العادي =====
     products = extract_products(user_text)
 
     if len(products) == 1:
         send_whatsapp_text(from_number, f"🔍 أدور لك على {products[0]}...", bot_id)
-        txt, urls = call_gemini([{"text": f"ابحث عن سعر {products[0]} في الكويت في المتاجر الإلكترونية، وتحقق أيضاً إن كان ضمن عروض الجمعيات التعاونية الحالية."}])
+        txt, urls = call_gemini([{"text": f"ابحث عن سعر {products[0]} في الكويت"}])
         send_whatsapp_text(from_number, txt or "ما لقيت", bot_id)
         for n, u in urls.items():
             if u:
@@ -378,4 +347,4 @@ async def cart_page(cart_id: str):
 
 @app.get("/")
 async def health():
-    return {"status": "v7 gemini-only intelligence", "number": "5250"}
+    return {"status": "v6 diagnostics + tolerant links", "number": "5250"}
