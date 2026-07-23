@@ -41,150 +41,6 @@ LINKS: اسم المتجر الأول=دومينه, اسم المتجر الثا
 """
 
 
-# ================= عروض الجمعيات من الانستجرام =================
-IG_USER_ID = os.environ.get("IG_USER_ID", "")
-IG_TOKEN = os.environ.get("IG_TOKEN", "") or WHATSAPP_TOKEN
-COOP_ACCOUNTS = [a.strip().lstrip("@") for a in os.environ.get("COOP_ACCOUNTS", "").split(",") if a.strip()]
-OFFERS_REFRESH_HOURS = int(os.environ.get("OFFERS_REFRESH_HOURS", "8"))
-POSTS_PER_COOP = int(os.environ.get("POSTS_PER_COOP", "3"))
-
-OFFERS = {"text": "", "updated": 0}
-
-EXTRACT_PROMPT = """هذه صورة فلاير عروض من جمعية تعاونية كويتية.
-استخرج كل المنتجات وأسعارها، سطر لكل منتج بهذه الصيغة فقط:
-اسم المنتج | السعر د.ك
-لا تكتب أي شيء آخر ولا مقدمات.
-إذا الصورة ليست فلاير عروض فيه منتجات وأسعار (مثل شعار أو تهنئة أو إعلان عام) رد بكلمة واحدة فقط: NONE"""
-
-
-def call_gemini_raw(parts, temperature=0.1, max_tokens=3000):
-    """نداء Gemini بدون بحث جوجل — للاستخراج من الفلايرات والبحث في العروض المخزنة"""
-    payload = {
-        "contents": [{"role": "user", "parts": parts}],
-        "generationConfig": {"temperature": temperature, "maxOutputTokens": max_tokens},
-    }
-    try:
-        r = requests.post(GEMINI_URL, params={"key": GEMINI_API_KEY}, json=payload, timeout=90)
-        if r.status_code >= 400:
-            print(f"GEMINI RAW {r.status_code}: {r.text[:200]}")
-            return ""
-        data = r.json()
-        return "".join(p.get("text", "") for p in data["candidates"][0]["content"]["parts"]).strip()
-    except Exception as e:
-        print(f"gemini raw err {e}")
-        return ""
-
-
-def fetch_coop_posts(username: str, limit: int = 3):
-    """يجيب آخر منشورات جمعية (حساب Business عام) عبر Business Discovery API"""
-    fields = (f"business_discovery.username({username})"
-              f"{{media.limit({limit})"
-              f"{{media_url,caption,timestamp,media_type,children{{media_url,media_type}}}}}}")
-    try:
-        r = requests.get(f"{GRAPH_URL}/{IG_USER_ID}",
-                         params={"fields": fields, "access_token": IG_TOKEN}, timeout=20)
-        data = r.json()
-        if "error" in data:
-            print(f"IG {username}: {data['error'].get('message', '')[:150]}")
-            return []
-        media = data.get("business_discovery", {}).get("media", {}).get("data", [])
-        posts = []
-        for m in media:
-            urls = []
-            if m.get("media_type") == "CAROUSEL_ALBUM":
-                for ch in m.get("children", {}).get("data", []):
-                    if ch.get("media_type") == "IMAGE" and ch.get("media_url"):
-                        urls.append(ch["media_url"])
-            elif m.get("media_type") == "IMAGE" and m.get("media_url"):
-                urls.append(m["media_url"])
-            if urls:
-                posts.append({"urls": urls[:4], "caption": m.get("caption", "")})
-        return posts
-    except Exception as e:
-        print(f"IG fetch err {username}: {e}")
-        return []
-
-
-def extract_offers_from_image(img_url: str) -> str:
-    """ينزل صورة الفلاير ويستخرج منها المنتجات والأسعار عبر Gemini vision"""
-    try:
-        img = requests.get(img_url, timeout=30, headers=HEADERS)
-        if img.status_code >= 400 or len(img.content) < 1000:
-            return ""
-        mime = img.headers.get("Content-Type", "image/jpeg").split(";")[0]
-        if not mime.startswith("image/"):
-            mime = "image/jpeg"
-        b64 = base64.b64encode(img.content).decode()
-        txt = call_gemini_raw([
-            {"inline_data": {"mime_type": mime, "data": b64}},
-            {"text": EXTRACT_PROMPT}
-        ])
-        if not txt or "NONE" in txt[:10].upper():
-            return ""
-        return txt
-    except Exception as e:
-        print(f"extract err {e}")
-        return ""
-
-
-def refresh_offers():
-    """يلف على حسابات الجمعيات ويحدّث قاعدة العروض"""
-    if not IG_USER_ID or not COOP_ACCOUNTS:
-        print("OFFERS SKIP: IG_USER_ID أو COOP_ACCOUNTS غير مضبوطين في المتغيرات")
-        return
-    print(f"OFFERS: بدء التحديث من {len(COOP_ACCOUNTS)} جمعية...")
-    blocks = []
-    for coop in COOP_ACCOUNTS:
-        posts = fetch_coop_posts(coop, limit=POSTS_PER_COOP)
-        coop_lines = []
-        for p in posts:
-            for u in p["urls"]:
-                ext = extract_offers_from_image(u)
-                if ext:
-                    coop_lines.append(ext)
-                time.sleep(1)  # رفق بحصة Gemini المجانية
-        if coop_lines:
-            blocks.append(f"🏪 {coop}:\n" + "\n".join(coop_lines))
-    if blocks:
-        OFFERS["text"] = "\n\n".join(blocks)
-        OFFERS["updated"] = time.time()
-    print(f"OFFERS: انتهى — {len(OFFERS['text'])} حرف من {len(blocks)} جمعية")
-
-
-async def offers_scheduler():
-    while True:
-        try:
-            await asyncio.to_thread(refresh_offers)
-        except Exception as e:
-            print(f"scheduler err {e}")
-        await asyncio.sleep(OFFERS_REFRESH_HOURS * 3600)
-
-
-@app.on_event("startup")
-async def startup():
-    asyncio.create_task(offers_scheduler())
-
-
-def search_in_offers(query: str) -> str:
-    """يدور المنتج داخل عروض الجمعيات المستخرجة من الفلايرات"""
-    if not OFFERS["text"]:
-        return ""
-    prompt = f"""هذه قائمة عروض الجمعيات التعاونية الحالية في الكويت (مستخرجة من فلايراتهم):
-
-{OFFERS['text'][:15000]}
-
-السؤال: هل يوجد "{query}" أو منتج مطابق/مشابه جداً له في القائمة أعلاه؟
-إذا موجود، رد بهذا الشكل فقط بدون أي إضافات:
-🏪 عروض الجمعيات:
-• [اسم الجمعية] — [اسم المنتج] — [السعر] د.ك
-(أقصى ثلاثة أسطر، الأرخص أولاً)
-إذا غير موجود رد بكلمة واحدة فقط: NONE"""
-    txt = call_gemini_raw([{"text": prompt}], max_tokens=500)
-    if not txt or "NONE" in txt[:10].upper():
-        return ""
-    return txt
-
-
 # ================= أدوات الروابط =================
 def get_final_url(url: str):
     try:
@@ -398,14 +254,6 @@ def process_single_image(message, bot_id):
 
     if not txt:
         txt = "ما قدرت أحدد المنتج، جرب صورة أوضح"
-    else:
-        # نستخرج اسم المنتج من رد Gemini وندور عليه في عروض الجمعيات
-        name_m = re.search(r"📦\s*(.+)", txt)
-        if name_m:
-            coop = search_in_offers(name_m.group(1).strip())
-            if coop:
-                txt += f"\n\n{coop}"
-
     send_whatsapp_text(from_number, txt, bot_id)
 
     for n, u in urls.items():
@@ -465,40 +313,12 @@ def process_multi_images(messages, from_number, bot_id):
 def process_text_message(message, bot_id):
     from_number = message["from"]
     user_text = message["text"]["body"]
-    t = user_text.strip()
-
-    # ===== أوامر عروض الجمعيات =====
-    if t in ("العروض", "عروض", "عروض الجمعيات"):
-        if not OFFERS["text"]:
-            send_whatsapp_text(from_number, "ما في عروض محدثة حالياً، جرب بعد شوي أو اكتب: تحديث_العروض", bot_id)
-        else:
-            age_h = int((time.time() - OFFERS["updated"]) / 3600)
-            send_whatsapp_text(from_number, f"🏪 عروض الجمعيات (آخر تحديث قبل {age_h} ساعة):\n\n{OFFERS['text'][:3700]}", bot_id)
-        return
-
-    if t == "تحديث_العروض":
-        send_whatsapp_text(from_number, "قاعد أسحب أحدث الفلايرات من انستجرام الجمعيات وأستخرج العروض... تاخذ دقيقة تقريباً", bot_id)
-        refresh_offers()
-        if OFFERS["text"]:
-            send_whatsapp_text(from_number, f"تم التحديث ✅ اكتب (العروض) عشان تشوفها", bot_id)
-        else:
-            send_whatsapp_text(from_number, "ما قدرت أجيب عروض — تأكد من IG_USER_ID و COOP_ACCOUNTS في Railway", bot_id)
-        return
-
-    # ===== البحث العادي =====
     products = extract_products(user_text)
 
     if len(products) == 1:
         send_whatsapp_text(from_number, f"🔍 أدور لك على {products[0]}...", bot_id)
         txt, urls = call_gemini([{"text": f"ابحث عن سعر {products[0]} في الكويت"}])
-        body = txt or "ما لقيت"
-
-        # نضيف نتيجة عروض الجمعيات من الفلايرات إن وجدت
-        coop = search_in_offers(products[0])
-        if coop:
-            body += f"\n\n{coop}"
-
-        send_whatsapp_text(from_number, body, bot_id)
+        send_whatsapp_text(from_number, txt or "ما لقيت", bot_id)
         for n, u in urls.items():
             if u:
                 send_whatsapp_cta(from_number, f"تسوق من {n} 👇", u, bot_id, f"🛒 {n[:18]}")
@@ -527,10 +347,4 @@ async def cart_page(cart_id: str):
 
 @app.get("/")
 async def health():
-    return {
-        "status": "v7 instagram coop offers",
-        "number": "5250",
-        "coops": COOP_ACCOUNTS,
-        "offers_chars": len(OFFERS["text"]),
-        "offers_updated": OFFERS["updated"],
-    }
+    return {"status": "v6 diagnostics + tolerant links", "number": "5250"}
