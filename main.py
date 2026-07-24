@@ -8,12 +8,12 @@ from fastapi.responses import HTMLResponse
 app = FastAPI()
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash") # خلك على 2.0
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
 WHATSAPP_TOKEN = os.environ.get("WHATSAPP_TOKEN", "")
 PHONE_NUMBER_ID = os.environ.get("PHONE_NUMBER_ID", "")
 VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN", "MY_SECRET_COOP_BOT_TOKEN")
 
-GRAPH_URL = "https://graph.facebook.com/v20.0" # تم تصليحه
+GRAPH_URL = "https://graph.facebook.com/v20.0" # مصلح
 GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
 
 processed_ids = deque(maxlen=1000)
@@ -29,23 +29,12 @@ SYSTEM_PROMPT = """
 أنت مساعد تسوق كويتي. رد بهذا الشكل فقط:
 📦 [اسم المنتج]
 ✅ [المتجر الأرخص] — [السعر] د.ك
-• [المتجر الثاني] — [السعر] د.ك
-• [المتجر الثالث] — [السعر] د.ك
+- [المتجر الثاني] — [السعر] د.ك
+- [المتجر الثالث] — [السعر] د.ك
 ثم سطر أخير إلزامي:
 LINKS: اسم المتجر الأول=دومينه, اسم المتجر الثاني=دومينه, اسم المتجر الثالث=دومينه
 مثال: LINKS: إكسايت=xcite.com, بلينك=blink.com.kw, يوريكا=eureka.com.kw
 ممنوع روابط ظاهرة. ممنوع Markdown.
-"""
-
-SYSTEM_PROMPT_IG = """
-أنت تبحث فقط في انستغرام الكويت عن طريق Google.
-مهمتك: ابحث site:instagram.com عن ريلز وستوريات واعلانات لنفس المنتج.
-رد بهذا الشكل فقط:
-📸 عروض انستغرام لـ [المنتج]
-- [وصف العرض 1]
-- [وصف العرض 2]
-ثم سطر: LINKS: وصف1=instagram.com/reel/xxx, وصف2=instagram.com/p/yyy
-ممنوع تختَرع روابط، استخدم فقط ما تجده.
 """
 
 def get_final_url(url: str):
@@ -96,9 +85,45 @@ def call_gemini(parts, system=SYSTEM_PROMPT):
     except Exception as e:
         print(f"Gemini err {e}"); return "", {}
 
-def search_instagram(product):
-    # يدور بالانستغرام عن طريق Gemini API
-    return call_gemini([{"text": f"ابحث فقط site:instagram.com عن اعلانات وستوريات وريلز لـ {product} الكويت"}], system=SYSTEM_PROMPT_IG)
+# ================= الجديد: بحث انستغرام عن طريق Meta API =================
+def search_instagram_via_meta(product: str):
+    """يبحث في مكتبة اعلانات Meta عن اعلانات انستغرام لنفس المنتج بالكويت"""
+    try:
+        # Ad Library API - يجيب اعلانات انستغرام الحقيقية اللي شغالة بالكويت
+        params = {
+            "search_terms": product,
+            "ad_reached_countries": '["KW"]',
+            "ad_type": "ALL",
+            "ad_active_status": "ALL",
+            "media_type": "all",
+            "fields": "page_name,ad_snapshot_url,ad_creative_bodies,instagram_actor_name,ad_creative_link_titles",
+            "limit": 5,
+        }
+        headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
+        r = requests.get(f"{GRAPH_URL}/ads_archive", params=params, headers=headers, timeout=20)
+        print(f"META ADS status {r.status_code}: {r.text[:500]}")
+        if r.status_code!= 200:
+            return None, {}
+
+        data = r.json().get("data", [])
+        if not data:
+            return f"ما لقيت إعلانات ممولة حالياً لـ {product} في الكويت", {}
+
+        # نحول اعلانات Meta لأزرار واتساب
+        txt = f"📸 إعلانات انستغرام لـ {product} (من مكتبة إعلانات Meta):\n"
+        urls_map = {}
+        for i, ad in enumerate(data[:3]):
+            page = ad.get("page_name") or ad.get("instagram_actor_name") or f"إعلان {i+1}"
+            body = (ad.get("ad_creative_bodies") or [""])[0][:40] if ad.get("ad_creative_bodies") else page
+            snapshot = ad.get("ad_snapshot_url")
+            if snapshot:
+                txt += f"\n- {page}: {body}\n"
+                urls_map[f"{page}"] = snapshot
+
+        return txt, urls_map
+    except Exception as e:
+        print(f"META IG err {e}")
+        return None, {}
 
 def extract_products(text):
     text=re.sub(r'^[•\-\*\d\.\)\s]+','',text,flags=re.M)
@@ -131,7 +156,7 @@ def send_instagram_choice(to,bot_id,product):
         "messaging_product":"whatsapp","to":to,"type":"interactive",
         "interactive":{
             "type":"button",
-            "body":{"text":f"تبي أدور لك إعلانات نفس المنتج في انستغرام؟\n{product}"},
+            "body":{"text":f"تبي أدور لك إعلانات انستغرام لنفس المنتج؟\n{product}"},
             "action":{"buttons":[
                 {"type":"reply","reply":{"id":f"ig_yes:{product[:20]}","title":"📸 إيه دور"}},
                 {"type":"reply","reply":{"id":"ig_no","title":"لا شكرا"}}
@@ -194,14 +219,14 @@ def process_interactive(message,bot_id):
     if bid.startswith("ig_yes"):
         product=bid.split(":",1)[1] if ":" in bid else PENDING_IG.get(from_number,"")
         if not product: product=PENDING_IG.get(from_number,"المنتج")
-        send_whatsapp_text(from_number,f"🔍 أدور لك إعلانات انستغرام لـ {product} عن طريق Gemini...",bot_id)
-        txt,urls=search_instagram(product)
+        send_whatsapp_text(from_number,f"🔍 أدور لك إعلانات انستغرام لـ {product} عن طريق Meta API...",bot_id)
+        txt,urls=search_instagram_via_meta(product)
         if urls:
-            send_whatsapp_text(from_number,txt or f"📸 عروض انستغرام لـ {product}",bot_id)
+            send_whatsapp_text(from_number,txt,bot_id)
             for n,u in urls.items():
-                if u: send_whatsapp_cta(from_number,f"شوف عرض {n} 👇",u,bot_id,f"📸 {n[:18]}")
+                if u: send_whatsapp_cta(from_number,f"شوف إعلان {n} 👇",u,bot_id,f"📸 {n[:18]}")
         else:
-            send_whatsapp_text(from_number,f"ما لقيت إعلانات انستغرام واضحة لـ {product} 😅",bot_id)
+            send_whatsapp_text(from_number,txt or f"ما لقيت إعلانات انستغرام ممولة لـ {product} حالياً في الكويت، لكن تقدر تبحث في انستغرام مباشرة",bot_id)
 
 def fetch_product_from_image(msg):
     try:
@@ -254,4 +279,4 @@ async def cart_page(cart_id: str):
     return HTMLResponse(f"<html dir='rtl'><head><meta name='viewport' content='width=device-width'><script src='https://cdn.tailwindcss.com'></script></head><body><div class='max-w-lg mx-auto bg-white'><div class='p-5 bg-black text-white'><h1>🛒 سلتك</h1></div>{rows}</div></body></html>")
 
 @app.get("/")
-async def health(): return {"status":"v7 with IG via Gemini"}
+async def health(): return {"status":"v8 IG via Meta Ad Library"}
