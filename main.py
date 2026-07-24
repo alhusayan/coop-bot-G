@@ -59,52 +59,56 @@ def call_gemini(parts, system=SYSTEM_PROMPT):
     }
     try:
         r = requests.post(GEMINI_URL, params={"key": GEMINI_API_KEY}, json=payload, timeout=90)
-        if r.status_code >= 400: return "", {}
         data = r.json(); cand = data["candidates"][0]
         text = "".join(p.get("text","") for p in cand["content"]["parts"]).strip()
+
+        # 1- نحاول ناخذ LINKS:
         pairs=[]
         m=re.search(r"LINKS:\s*(.+)", text, re.I)
         if m:
             raw=m.group(1)
             for part in re.split(r"[,،]+", raw):
-                part=part.strip()
                 if "=" in part:
-                    name,dom=part.split("=",1); name,dom=name.strip(),dom.strip().lower()
-                    if "." in dom: pairs.append((name,dom))
-            text=re.sub(r"\n?LINKS:.*","",text,flags=re.I).strip()
-        text=re.sub(r"https?://\S+","",text).replace("**","").strip()
-        urls_map={}; chunks=cand.get("groundingMetadata",{}).get("groundingChunks",[])
+                    name,dom=part.split("=",1)
+                    pairs.append((name.strip(), dom.strip()))
+
+        chunks=cand.get("groundingMetadata",{}).get("groundingChunks",[])
         uris=[c.get("web",{}).get("uri") for c in chunks if c.get("web",{}).get("uri")]
-        if uris and pairs:
-            finals=resolve_all(uris[:8])
-            for name,dom in pairs:
-                key=domain_key(dom)
-                for f in finals:
-                    if f and key in f.lower(): urls_map[name]=f; break
-        # لو الروابط انستغرام مباشرة
+        finals=resolve_all(uris[:10]) if uris else []
+
+        urls_map={}
+        # اذا فيه LINKS نطابقها
+        for name,dom in pairs:
+            key=domain_key(dom)
+            for f in finals:
+                if f and key in f.lower(): urls_map[name]=f; break
+
+        # 2- FIX الجديد: اذا ما فيه LINKS أو الروابط انستغرام، خذها مباشرة من جوجل
         if not urls_map:
-            for u in re.findall(r"https?://(?:www\.)?instagram\.com/[^\s]+", str(chunks)):
-                urls_map[u.split("/")[-2][:20]] = u
+            insta_links = [f for f in finals if "instagram.com" in f]
+            # لو ما لقينا في finals دور في uris الأصلية
+            if not insta_links:
+                insta_links = [u for u in uris if "instagram.com" in u]
+
+            for i, link in enumerate(insta_links[:5]):
+                # نسمي الزر باسم المحل من النص
+                urls_map[f"عرض انستغرام {i+1}"] = link
+
+        text=re.sub(r"\n?LINKS:.*","",text,flags=re.I).strip()
+        text=re.sub(r"https?://\S+","",text).replace("**","").strip()
         return text, dict(list(urls_map.items())[:5])
     except Exception as e:
         print(f"Gemini err {e}"); return "", {}
 
-# ===== التعديل الجديد: بحث انستغرام عن طريق google_search مثل Meta AI =====
 def search_instagram_offers(product: str):
-    system = """
-    أنت باحث عروض انستغرام في الكويت.
-    ابحث عن 5 عروض انستغرام حقيقية لنفس اسم المنتج المطلوب فقط - أي منتج كان (ساعة، مزيل عرق، جوتي).
-    لا تحصر البحث في متاجر محددة، ابحث في كل انستغرام.
-    رد بهذا الشكل:
-    📸 [اسم المحل] - [الموديل] ب [السعر] د.ك
-    ثم سطر إلزامي:
-    LINKS: اسم المحل=instagram.com/p/xxxx, اسم المحل الثاني=instagram.com/p/yyyy
+    system = f"""
+    ابحث عن 5 عروض انستغرام حقيقية في الكويت لـ {product}.
+    مهم جدا: لازم ترجع روابط حقيقية من instagram.com/p/ أو /reel/
+    رد بهالشكل فقط:
+    📸 اسم المحل - {product} ب السعر د.ك
+    وبالأخير سطر إلزامي جدا: LINKS: اسم المحل=instagram.com/p/xxx
     """
     txt, urls = call_gemini([{"text": f"{product} عروض انستغرام الكويت site:instagram.com"}], system=system)
-    if not urls:
-        # fallback لو ما طلع LINKS
-        txt2, urls2 = call_gemini([{"text": f"site:instagram.com {product} الكويت للبيع"}], system=system)
-        return txt2, urls2
     return txt, urls
 
 def extract_products(text):
