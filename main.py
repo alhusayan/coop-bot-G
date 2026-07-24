@@ -101,21 +101,53 @@ def call_gemini(parts, system=SYSTEM_PROMPT):
         print(f"Gemini err {e}"); return "", {}
 
 def search_instagram_offers(product: str):
-    system = f"""
-    ابحث عن 5 عروض انستغرام حقيقية في الكويت لـ {product}.
-    مهم جدا: لازم ترجع روابط حقيقية من instagram.com/p/ أو /reel/
-    رد بهالشكل فقط:
-    📸 اسم المحل - {product} ب السعر د.ك
-    وبالأخير سطر إلزامي جدا: LINKS: اسم المحل=instagram.com/p/xxx
-    """
-    txt, urls = call_gemini([{"text": f"{product} عروض انستغرام الكويت site:instagram.com"}], system=system)
-    return txt, urls
+    system = f"ابحث عن 5 عروض انستغرام حقيقية في الكويت لـ {product}. رجع أسماء المحلات وأسعارها"
+    payload = {
+        "systemInstruction": {"parts": [{"text": system}]},
+        "contents": [{"role": "user", "parts": [{"text": f"{product} site:instagram.com"}]}],
+        "tools": [{"google_search": {}}],
+        "generationConfig": {"temperature": 0.2, "maxOutputTokens": 2000},
+    }
+    r = requests.post(GEMINI_URL, params={"key": GEMINI_API_KEY}, json=payload, timeout=90).json()
+    cand = r["candidates"][0]
+    text = "".join(p.get("text","") for p in cand["content"]["parts"])
 
-def extract_products(text):
-    text=re.sub(r'^[•\-\*\d\.\)\s]+','',text,flags=re.M)
-    parts=re.split(r'\s*(?:\n+|\+|,|،| و | & )\s*',text.strip())
-    parts=[p.strip() for p in parts if len(p.strip())>2]
-    return parts[:6] if len(parts)>1 else [text.strip()]
+    chunks = cand.get("groundingMetadata",{}).get("groundingChunks",[])
+    uris = [c.get("web",{}).get("uri") for c in chunks if c.get("web",{}).get("uri")]
+    finals = resolve_all(uris[:10])
+
+    insta_links = [f for f in finals if f and "instagram.com" in f]
+    if not insta_links: # fallback
+        insta_links = [u for u in uris if "instagram.com" in u]
+
+    # نظف النص بدون ما تمسح الروابط
+    clean_text = re.sub(r"https?://\S+","",text).replace("**","").strip()
+    clean_text = re.sub(r"LINKS:.*","",clean_text, flags=re.I).strip()
+
+    urls_map = {}
+    for i, link in enumerate(insta_links[:5]):
+        urls_map[f"عرض {i+1}"] = link
+
+    return clean_text, urls_map
+
+def process_interactive(message,bot_id):
+    from_number=message["from"]
+    bid=message["interactive"].get("button_reply",{}).get("id","")
+    if bid.startswith("ig_yes"):
+        product=PENDING_IG.get(from_number,"المنتج")
+        send_whatsapp_text(from_number,f"🔍 أدور لك عروض انستغرام لـ {product}...",bot_id)
+        txt,urls=search_instagram_offers(product)
+
+        if txt:
+            send_whatsapp_text(from_number, txt, bot_id)
+
+        # الحين هذا اللي يخلي الروابط تنعص
+        if urls:
+            for name, link in urls.items():
+                if link:
+                    send_whatsapp_cta(from_number, f"شوف {name} 👇", link, bot_id, f"📸 {name[:15]}")
+        else:
+            send_whatsapp_text(from_number, "ما لقيت روابط انستغرام مباشرة، بس هذي أسامي المحلات اللي تبيعها", bot_id)
 
 def download_whatsapp_media(mid):
     h={"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
