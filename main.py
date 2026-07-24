@@ -91,45 +91,16 @@ def call_gemini(parts, system=SYSTEM_PROMPT):
 
 # ===== الجديد: بحث انستغرام عن طريق Meta API الحقيقي =====
 def search_instagram_via_meta(product: str):
-    if not FB_IG_TOKEN or not IG_USER_ID:
-        return None, {}
-    headers = {"Authorization": f"Bearer {FB_IG_TOKEN}"}
-
-    # حسابات متاجر الكويت الحقيقية على انستغرام
-    STORES = ["xcitealghanim", "eureka.kw", "blink.com.kw", "bestalkw", "luluhyperkw"]
-
-    found_urls = {}
-    try:
-        for username in STORES[:4]: # نبحث في 4 متاجر عشان ما نبطئ
-            url = f"{GRAPH_URL}/{IG_USER_ID}"
-            params = {
-                "fields": f"business_discovery.username({username}){{media{{caption,permalink,like_count,timestamp}} }}",
-            }
-            r = requests.get(url, params=params, headers=headers, timeout=15)
-            if r.status_code!= 200:
-                print(f"{username} err {r.text[:200]}")
-                continue
-
-            media = r.json().get("business_discovery", {}).get("media", {}).get("data", [])
-            for m in media:
-                cap = (m.get("caption") or "").lower()
-                # اذا اسم المنتج موجود في كابشن البوست
-                if product.split()[0].lower() in cap or product.split()[-1].lower() in cap:
-                    title = f"{username} - {cap[:25]}"
-                    found_urls[title] = m.get("permalink")
-                    if len(found_urls) >= 3:
-                        break
-            if len(found_urls) >= 3:
-                break
-
-        if found_urls:
-            txt = f"📸 عروض انستغرام لنفس المنتج {product} من متاجر الكويت:\n"
-            return txt, found_urls
-        else:
-            return f"دورت في {', '.join(STORES)} وما لقيت {product} بالضبط، بس تقدر تشوف حساباتهم", {}
-
-    except Exception as e:
-        print(f"IG discovery err {e}")
+    # هذا يدور في كل انستغرام عن نفس اسم المنتج، مو متجر محدد
+    system = "انت باحث انستغرام. ابحث عن بوستات انستغرام تبيع نفس المنتج. رجع 3 روابط حقيقية من instagram.com/p/ او /reel/ . اذا لقيت ارجع LINKS: اسم البوست=الرابط"
+    
+    query = f"site:instagram.com {product} للبيع الكويت عرض"
+    text, urls = call_gemini([{"text": query}], system=system)
+    
+    # urls الحين فيها روابط انستغرام حقيقية لنفس المنتج، اي منتج كان
+    if urls:
+        return f"📸 لقيت عروض انستغرام لنفس المنتج {product}:", urls
+    else:
         return None, {}
 
 def extract_products(text):
