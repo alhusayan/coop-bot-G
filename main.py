@@ -90,19 +90,38 @@ def call_gemini(parts, system=SYSTEM_PROMPT):
         print(f"Gemini err {e}"); return "", {}
 
 # ===== الجديد: بحث انستغرام عن طريق Meta API الحقيقي =====
-def search_instagram_via_meta(product: str):
-    # هذا يدور في كل انستغرام عن نفس اسم المنتج، مو متجر محدد
-    system = "انت باحث انستغرام. ابحث عن بوستات انستغرام تبيع نفس المنتج. رجع 3 روابط حقيقية من instagram.com/p/ او /reel/ . اذا لقيت ارجع LINKS: اسم البوست=الرابط"
-    
-    query = f"site:instagram.com {product} للبيع الكويت عرض"
-    text, urls = call_gemini([{"text": query}], system=system)
-    
-    # urls الحين فيها روابط انستغرام حقيقية لنفس المنتج، اي منتج كان
-    if urls:
-        return f"📸 لقيت عروض انستغرام لنفس المنتج {product}:", urls
-    else:
-        return None, {}
+def search_instagram_offers(product: str):
+    # نفس طريقة Meta AI اللي بالصورة الأولى - يدور بجوجل
+    system_prompt = """
+    أنت باحث عروض انستغرام في الكويت.
+    مهمتك تجيب 5 عروض انستغرام حقيقية لنفس المنتج المطلوب.
+    لا تذكر متاجر محددة، ابحث عن أي عرض بنفس اسم المنتج.
+    الرد يكون:
+    📸 [اسم المحل] - [الموديل] ب [السعر]
+    وبالأخير سطر إلزامي: LINKS: اسم المحل=instagram.com/p/xxxx
+    """
+    query = f"{product} عروض انستغرام الكويت"
+    # هذي نفس call_gemini اللي عندك وفيها google_search
+    text, urls = call_gemini([{"text": query}], system=system_prompt)
+    return text, urls
 
+def process_interactive(message, bot_id):
+    from_number = message["from"]
+    bid = message["interactive"].get("button_reply",{}).get("id","")
+    if bid.startswith("ig_yes"):
+        product = PENDING_IG.get(from_number, "المنتج")
+        send_whatsapp_text(from_number, f"🔍 أدور لك عروض انستغرام لـ {product}...", bot_id)
+        
+        # الحين يدور مثل Meta AI بالضبط
+        txt, urls = search_instagram_offers(product)
+        
+        if urls:
+            send_whatsapp_text(from_number, txt, bot_id)
+            for name, link in urls.items():
+                if link:
+                    send_whatsapp_cta(from_number, f"شوف عرض {name} 👇", link, bot_id, f"📸 {name[:18]}")
+        else:
+            send_whatsapp_text(from_number, txt or f"ما لقيت عروض انستغرام لـ {product}", bot_id)
 def extract_products(text):
     text=re.sub(r'^[•\-\*\d\.\)\s]+','',text,flags=re.M)
     parts=re.split(r'\s*(?:\n+|\+|,|،| و | & )\s*',text.strip())
