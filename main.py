@@ -13,7 +13,11 @@ WHATSAPP_TOKEN = os.environ.get("WHATSAPP_TOKEN", "")
 PHONE_NUMBER_ID = os.environ.get("PHONE_NUMBER_ID", "")
 VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN", "MY_SECRET_COOP_BOT_TOKEN")
 
-GRAPH_URL = "https://graph.facebook.com/v20.0" # مصلح
+# الجديد
+FB_IG_TOKEN = os.environ.get("FB_IG_TOKEN", "") # توكن الانستغرام الجديد
+IG_USER_ID = os.environ.get("IG_USER_ID", "") # 1784xxxx
+
+GRAPH_URL = "https://graph.facebook.com/v25.0" # حدثناه نفس اللي عندك
 GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
 
 processed_ids = deque(maxlen=1000)
@@ -85,44 +89,44 @@ def call_gemini(parts, system=SYSTEM_PROMPT):
     except Exception as e:
         print(f"Gemini err {e}"); return "", {}
 
-# ================= الجديد: بحث انستغرام عن طريق Meta API =================
+# ===== الجديد: بحث انستغرام عن طريق Meta API الحقيقي =====
 def search_instagram_via_meta(product: str):
-    """يبحث في مكتبة اعلانات Meta عن اعلانات انستغرام لنفس المنتج بالكويت"""
+    if not FB_IG_TOKEN or not IG_USER_ID:
+        print("IG creds missing"); return None, {}
+    headers = {"Authorization": f"Bearer {FB_IG_TOKEN}"}
     try:
-        # Ad Library API - يجيب اعلانات انستغرام الحقيقية اللي شغالة بالكويت
-        params = {
-            "search_terms": product,
-            "ad_reached_countries": '["KW"]',
-            "ad_type": "ALL",
-            "ad_active_status": "ALL",
-            "media_type": "all",
-            "fields": "page_name,ad_snapshot_url,ad_creative_bodies,instagram_actor_name,ad_creative_link_titles",
-            "limit": 5,
-        }
-        headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
-        r = requests.get(f"{GRAPH_URL}/ads_archive", params=params, headers=headers, timeout=20)
-        print(f"META ADS status {r.status_code}: {r.text[:500]}")
-        if r.status_code!= 200:
-            return None, {}
+        # نظف الكلمة لهاشتاق
+        q = re.sub(r'[^\w]', '', product.split()[0]) or "kuwait"
+        q = q[:20]
 
-        data = r.json().get("data", [])
-        if not data:
-            return f"ما لقيت إعلانات ممولة حالياً لـ {product} في الكويت", {}
+        # 1- دور ID الهاشتاق
+        r1 = requests.get(f"{GRAPH_URL}/ig_hashtag_search", params={"user_id": IG_USER_ID, "q": q}, headers=headers, timeout=15)
+        print(f"HASHTAG SEARCH {r1.status_code}: {r1.text[:300]}")
+        if r1.status_code!= 200: return None, {}
+        data1 = r1.json().get("data", [])
+        if not data1: return f"ما لقيت هاشتاق #{q}", {}
 
-        # نحول اعلانات Meta لأزرار واتساب
-        txt = f"📸 إعلانات انستغرام لـ {product} (من مكتبة إعلانات Meta):\n"
-        urls_map = {}
-        for i, ad in enumerate(data[:3]):
-            page = ad.get("page_name") or ad.get("instagram_actor_name") or f"إعلان {i+1}"
-            body = (ad.get("ad_creative_bodies") or [""])[0][:40] if ad.get("ad_creative_bodies") else page
-            snapshot = ad.get("ad_snapshot_url")
-            if snapshot:
-                txt += f"\n- {page}: {body}\n"
-                urls_map[f"{page}"] = snapshot
+        hid = data1[0]["id"]
 
-        return txt, urls_map
+        # 2- جيب بوستات الهاشتاق
+        r2 = requests.get(f"{GRAPH_URL}/{hid}/recent_media", params={"user_id": IG_USER_ID, "fields": "permalink,caption,media_type,like_count"}, headers=headers, timeout=15)
+        print(f"HASHTAG MEDIA {r2.status_code}")
+        if r2.status_code!= 200: return None, {}
+
+        posts = r2.json().get("data", [])[:5]
+        if not posts: return f"ما لقيت بوستات لهاشتاق #{q}", {}
+
+        txt = f"📸 عروض انستغرام لـ {product} (هاشتاق #{q}):\n"
+        urls = {}
+        for p in posts:
+            cap = (p.get("caption") or "عرض انستغرام")[:30]
+            link = p.get("permalink")
+            if link:
+                urls[cap] = link
+        return txt, urls
+
     except Exception as e:
-        print(f"META IG err {e}")
+        print(f"IG META err {e}")
         return None, {}
 
 def extract_products(text):
@@ -156,7 +160,7 @@ def send_instagram_choice(to,bot_id,product):
         "messaging_product":"whatsapp","to":to,"type":"interactive",
         "interactive":{
             "type":"button",
-            "body":{"text":f"تبي أدور لك إعلانات انستغرام لنفس المنتج؟\n{product}"},
+            "body":{"text":f"تبي أدور لك إعلانات نفس المنتج في انستغرام؟\n{product}"},
             "action":{"buttons":[
                 {"type":"reply","reply":{"id":f"ig_yes:{product[:20]}","title":"📸 إيه دور"}},
                 {"type":"reply","reply":{"id":"ig_no","title":"لا شكرا"}}
@@ -217,16 +221,15 @@ def process_interactive(message,bot_id):
     from_number=message["from"]
     bid=message["interactive"].get("button_reply",{}).get("id","")
     if bid.startswith("ig_yes"):
-        product=bid.split(":",1)[1] if ":" in bid else PENDING_IG.get(from_number,"")
-        if not product: product=PENDING_IG.get(from_number,"المنتج")
+        product=PENDING_IG.get(from_number,"المنتج")
         send_whatsapp_text(from_number,f"🔍 أدور لك إعلانات انستغرام لـ {product} عن طريق Meta API...",bot_id)
         txt,urls=search_instagram_via_meta(product)
         if urls:
             send_whatsapp_text(from_number,txt,bot_id)
             for n,u in urls.items():
-                if u: send_whatsapp_cta(from_number,f"شوف إعلان {n} 👇",u,bot_id,f"📸 {n[:18]}")
+                send_whatsapp_cta(from_number,f"شوف عرض {n} 👇",u,bot_id,f"📸 {n[:18]}")
         else:
-            send_whatsapp_text(from_number,txt or f"ما لقيت إعلانات انستغرام ممولة لـ {product} حالياً في الكويت، لكن تقدر تبحث في انستغرام مباشرة",bot_id)
+            send_whatsapp_text(from_number,txt or f"ما لقيت عروض انستغرام لـ {product} حالياً",bot_id)
 
 def fetch_product_from_image(msg):
     try:
@@ -279,4 +282,4 @@ async def cart_page(cart_id: str):
     return HTMLResponse(f"<html dir='rtl'><head><meta name='viewport' content='width=device-width'><script src='https://cdn.tailwindcss.com'></script></head><body><div class='max-w-lg mx-auto bg-white'><div class='p-5 bg-black text-white'><h1>🛒 سلتك</h1></div>{rows}</div></body></html>")
 
 @app.get("/")
-async def health(): return {"status":"v8 IG via Meta Ad Library"}
+async def health(): return {"status":"v9 IG via Meta Hashtag API - Ready"}
