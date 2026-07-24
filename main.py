@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
-import os, re, time, base64, requests, uuid, asyncio
+import os, re, time, base64, requests, uuid, asyncio, io
 from collections import deque, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from fastapi import FastAPI, Request, Response, BackgroundTasks
 from fastapi.responses import HTMLResponse
+from PIL import Image
 
 app = FastAPI()
 
@@ -13,7 +14,7 @@ WHATSAPP_TOKEN = os.environ.get("WHATSAPP_TOKEN", "")
 PHONE_NUMBER_ID = os.environ.get("PHONE_NUMBER_ID", "")
 VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN", "MY_SECRET_COOP_BOT_TOKEN")
 
-GRAPH_URL = "https://graph.facebook.com/v25.0" # تم التصليح - كان عندك https مكررة
+GRAPH_URL = "https://graph.facebook.com/v25.0"
 GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
 
 processed_ids = deque(maxlen=1000)
@@ -50,6 +51,12 @@ def get_final_url(url: str):
 def resolve_all(uris): return list(RESOLVER.map(get_final_url, uris))
 def domain_key(dom): return dom.replace("www.","").split(".")[0]
 
+def extract_products(text):
+    text=re.sub(r'^[•\-\*\d\.\)\s]+','',text,flags=re.M)
+    parts=re.split(r'\s*(?:\n+|\+|,|،| و | & )\s*',text.strip())
+    parts=[p.strip() for p in parts if len(p.strip())>2]
+    return parts[:6] if len(parts)>1 else [text.strip()]
+
 def call_gemini(parts, system=SYSTEM_PROMPT):
     payload = {
         "systemInstruction": {"parts": [{"text": system}]},
@@ -59,10 +66,13 @@ def call_gemini(parts, system=SYSTEM_PROMPT):
     }
     try:
         r = requests.post(GEMINI_URL, params={"key": GEMINI_API_KEY}, json=payload, timeout=90)
-        data = r.json(); cand = data["candidates"][0]
+        data = r.json()
+        if "candidates" not in data or not data["candidates"]:
+            print(f"Gemini no candidates: {data}")
+            return "", {}
+        cand = data["candidates"][0]
         text = "".join(p.get("text","") for p in cand["content"]["parts"]).strip()
 
-        # 1- نحاول ناخذ LINKS:
         pairs=[]
         m=re.search(r"LINKS:\s*(.+)", text, re.I)
         if m:
@@ -77,21 +87,16 @@ def call_gemini(parts, system=SYSTEM_PROMPT):
         finals=resolve_all(uris[:10]) if uris else []
 
         urls_map={}
-        # اذا فيه LINKS نطابقها
         for name,dom in pairs:
             key=domain_key(dom)
             for f in finals:
                 if f and key in f.lower(): urls_map[name]=f; break
 
-        # 2- FIX الجديد: اذا ما فيه LINKS أو الروابط انستغرام، خذها مباشرة من جوجل
         if not urls_map:
             insta_links = [f for f in finals if "instagram.com" in f]
-            # لو ما لقينا في finals دور في uris الأصلية
             if not insta_links:
                 insta_links = [u for u in uris if "instagram.com" in u]
-
             for i, link in enumerate(insta_links[:5]):
-                # نسمي الزر باسم المحل من النص
                 urls_map[f"عرض انستغرام {i+1}"] = link
 
         text=re.sub(r"\n?LINKS:.*","",text,flags=re.I).strip()
@@ -101,9 +106,9 @@ def call_gemini(parts, system=SYSTEM_PROMPT):
         print(f"Gemini err {e}"); return "", {}
 
 def search_instagram_offers(product: str):
-    product = product[:60] # قص الاسم
+    product = product[:60]
     try:
-        system = f"ابحث عن 5 عروض انستغرام حقيقية في الكويت لـ {product}"
+        system = f"ابحث عن 5 عروض انستغرام حقيقية في الكويت لـ {product}. لازم ترجع روابط instagram.com"
         payload = {
             "systemInstruction": {"parts": [{"text": system}]},
             "contents": [{"role": "user", "parts": [{"text": f"{product} site:instagram.com"}]}],
@@ -111,53 +116,38 @@ def search_instagram_offers(product: str):
             "generationConfig": {"temperature": 0.2, "maxOutputTokens": 1000},
         }
         r_json = requests.post(GEMINI_URL, params={"key": GEMINI_API_KEY}, json=payload, timeout=90).json()
-        if "candidates" not in r_json:
-            print(f"IG err: {r_json}")
+        if "candidates" not in r_json or not r_json["candidates"]:
+            print(f"IG no candidates: {r_json}")
             return f"📸 عروض انستغرام لـ {product}", {}
 
         cand = r_json["candidates"][0]
         text = "".join(p.get("text","") for p in cand["content"]["parts"])
         chunks = cand.get("groundingMetadata",{}).get("groundingChunks",[])
         uris = [c.get("web",{}).get("uri") for c in chunks if c.get("web",{}).get("uri")]
-        finals = resolve_all([u for u in uris if "instagram.com" in u][:5])
+        finals = resolve_all([u for u in uris if "instagram.com" in u][:8])
+
+        insta_links = [f for f in finals if f and "instagram.com" in f]
+        if not insta_links:
+            insta_links = [u for u in uris if "instagram.com" in u]
 
         clean_text = re.sub(r"https?://\S+","",text).replace("**","").strip()
-        urls_map = {f"عرض {i+1}": link for i, link in enumerate(finals[:5]) if link}
-        return clean_text or f"📸 لقيت عروض لـ {product}", urls_map
+        clean_text = re.sub(r"LINKS:.*","",clean_text, flags=re.I).strip()
+        if not clean_text:
+            clean_text = f"📸 لقيت {len(insta_links)} عروض انستغرام لـ {product}:"
+
+        urls_map = {f"عرض انستغرام {i+1}": link for i, link in enumerate(insta_links[:5])}
+        return clean_text, urls_map
     except Exception as e:
-        print(f"IG crash {e}")
-        return "ما لقيت عروض حاليا", {}
-def process_interactive(message,bot_id):
-    from_number=message["from"]
-    bid=message["interactive"].get("button_reply",{}).get("id","")
-    if bid.startswith("ig_yes"):
-        product=PENDING_IG.get(from_number,"المنتج")
-        send_whatsapp_text(from_number,f"🔍 أدور لك عروض انستغرام لـ {product}...",bot_id)
-        txt,urls=search_instagram_offers(product)
-
-        if txt:
-            send_whatsapp_text(from_number, txt, bot_id)
-
-        # الحين هذا اللي يخلي الروابط تنعص
-        if urls:
-            for name, link in urls.items():
-                if link:
-                    send_whatsapp_cta(from_number, f"شوف {name} 👇", link, bot_id, f"📸 {name[:15]}")
-        else:
-            send_whatsapp_text(from_number, "ما لقيت روابط انستغرام مباشرة، بس هذي أسامي المحلات اللي تبيعها", bot_id)
-
-from PIL import Image
-import io
+        print(f"IG err {e}")
+        return "ما لقيت عروض انستغرام حاليا", {}
 
 def download_whatsapp_media(mid):
     h={"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
     meta=requests.get(f"{GRAPH_URL}/{mid}",headers=h,timeout=20).json()
     content=requests.get(meta["url"],headers=h,timeout=30).content
-
-    # تصغير الصورة عشان لا تطوف 131k token
     try:
         im = Image.open(io.BytesIO(content))
-        im.thumbnail((1024, 1024)) # اكبر حجم 1024
+        im.thumbnail((1024, 1024))
         if im.mode in ("RGBA", "P"):
             im = im.convert("RGB")
         buf = io.BytesIO()
@@ -165,7 +155,6 @@ def download_whatsapp_media(mid):
         content = buf.getvalue()
     except Exception as e:
         print(f"resize err {e}")
-
     return base64.b64encode(content).decode(), "image/jpeg"
 
 def send_whatsapp_text(to,text,bot_id):
@@ -250,12 +239,13 @@ def process_interactive(message,bot_id):
     if bid.startswith("ig_yes"):
         product=PENDING_IG.get(from_number,"المنتج")
         send_whatsapp_text(from_number,f"🔍 أدور لك عروض انستغرام لـ {product}...",bot_id)
-        # صار يستخدم نفس محرك Meta AI - google_search
         txt,urls=search_instagram_offers(product)
-        if urls:
+        if txt:
             send_whatsapp_text(from_number,txt,bot_id)
-            for n,u in urls.items():
-                send_whatsapp_cta(from_number,f"شوف عرض {n} 👇",u,bot_id,f"📸 {n[:18]}")
+        if urls:
+            for name, link in urls.items():
+                if link:
+                    send_whatsapp_cta(from_number,f"شوف {name} 👇",link,bot_id,f"📸 {name[:15]}")
         else:
             send_whatsapp_text(from_number,txt or f"ما لقيت عروض انستغرام لـ {product} حالياً",bot_id)
 
@@ -310,4 +300,4 @@ async def cart_page(cart_id: str):
     return HTMLResponse(f"<html dir='rtl'><head><meta name='viewport' content='width=device-width'><script src='https://cdn.tailwindcss.com'></script></head><body><div class='max-w-lg mx-auto bg-white'><div class='p-5 bg-black text-white'><h1>🛒 سلتك</h1></div>{rows}</div></body></html>")
 
 @app.get("/")
-async def health(): return {"status":"v10 IG via Google Search - Ready - No FB_IG_TOKEN needed"}
+async def health(): return {"status":"v11 - fixed GRAPH_URL + resize image + clickable IG links"}
