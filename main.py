@@ -101,43 +101,32 @@ def call_gemini(parts, system=SYSTEM_PROMPT):
         print(f"Gemini err {e}"); return "", {}
 
 def search_instagram_offers(product: str):
+    product = product[:60] # قص الاسم
     try:
-        system = f"ابحث عن 5 عروض انستغرام حقيقية في الكويت لـ {product}. لازم روابط instagram.com"
+        system = f"ابحث عن 5 عروض انستغرام حقيقية في الكويت لـ {product}"
         payload = {
             "systemInstruction": {"parts": [{"text": system}]},
             "contents": [{"role": "user", "parts": [{"text": f"{product} site:instagram.com"}]}],
             "tools": [{"google_search": {}}],
-            "generationConfig": {"temperature": 0.2, "maxOutputTokens": 2000},
+            "generationConfig": {"temperature": 0.2, "maxOutputTokens": 1000},
         }
         r_json = requests.post(GEMINI_URL, params={"key": GEMINI_API_KEY}, json=payload, timeout=90).json()
-
-        # حماية من الـ KeyError اللي طاح عندك باللوج
-        if "candidates" not in r_json or not r_json["candidates"]:
-            print(f"IG no candidates: {r_json}")
-            return "ما لقيت عروض انستغرام حاليا", {}
+        if "candidates" not in r_json:
+            print(f"IG err: {r_json}")
+            return f"📸 عروض انستغرام لـ {product}", {}
 
         cand = r_json["candidates"][0]
         text = "".join(p.get("text","") for p in cand["content"]["parts"])
         chunks = cand.get("groundingMetadata",{}).get("groundingChunks",[])
         uris = [c.get("web",{}).get("uri") for c in chunks if c.get("web",{}).get("uri")]
-
-        finals = resolve_all(uris[:10]) if uris else []
-        insta_links = [f for f in finals if f and "instagram.com" in f]
-        if not insta_links:
-            insta_links = [u for u in uris if "instagram.com" in u]
+        finals = resolve_all([u for u in uris if "instagram.com" in u][:5])
 
         clean_text = re.sub(r"https?://\S+","",text).replace("**","").strip()
-        clean_text = re.sub(r"LINKS:.*","",clean_text, flags=re.I).strip()
-        if not clean_text:
-            clean_text = f"📸 لقيت {len(insta_links)} عروض انستغرام لـ {product}:"
-
-        urls_map = {f"عرض انستغرام {i+1}": link for i, link in enumerate(insta_links[:5])}
-        return clean_text, urls_map
-
+        urls_map = {f"عرض {i+1}": link for i, link in enumerate(finals[:5]) if link}
+        return clean_text or f"📸 لقيت عروض لـ {product}", urls_map
     except Exception as e:
-        print(f"search_instagram_offers err {e}")
-        return "ما لقيت عروض انستغرام حاليا، جرب بعد شوي", {}
-
+        print(f"IG crash {e}")
+        return "ما لقيت عروض حاليا", {}
 def process_interactive(message,bot_id):
     from_number=message["from"]
     bid=message["interactive"].get("button_reply",{}).get("id","")
@@ -157,11 +146,27 @@ def process_interactive(message,bot_id):
         else:
             send_whatsapp_text(from_number, "ما لقيت روابط انستغرام مباشرة، بس هذي أسامي المحلات اللي تبيعها", bot_id)
 
+from PIL import Image
+import io
+
 def download_whatsapp_media(mid):
     h={"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
     meta=requests.get(f"{GRAPH_URL}/{mid}",headers=h,timeout=20).json()
-    img=requests.get(meta["url"],headers=h,timeout=30)
-    return base64.b64encode(img.content).decode(), meta.get("mime_type","image/jpeg")
+    content=requests.get(meta["url"],headers=h,timeout=30).content
+
+    # تصغير الصورة عشان لا تطوف 131k token
+    try:
+        im = Image.open(io.BytesIO(content))
+        im.thumbnail((1024, 1024)) # اكبر حجم 1024
+        if im.mode in ("RGBA", "P"):
+            im = im.convert("RGB")
+        buf = io.BytesIO()
+        im.save(buf, format="JPEG", quality=75)
+        content = buf.getvalue()
+    except Exception as e:
+        print(f"resize err {e}")
+
+    return base64.b64encode(content).decode(), "image/jpeg"
 
 def send_whatsapp_text(to,text,bot_id):
     url=f"{GRAPH_URL}/{bot_id}/messages"; h={"Authorization":f"Bearer {WHATSAPP_TOKEN}","Content-Type":"application/json"}
