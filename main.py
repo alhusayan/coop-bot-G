@@ -101,34 +101,42 @@ def call_gemini(parts, system=SYSTEM_PROMPT):
         print(f"Gemini err {e}"); return "", {}
 
 def search_instagram_offers(product: str):
-    system = f"ابحث عن 5 عروض انستغرام حقيقية في الكويت لـ {product}. رجع أسماء المحلات وأسعارها"
-    payload = {
-        "systemInstruction": {"parts": [{"text": system}]},
-        "contents": [{"role": "user", "parts": [{"text": f"{product} site:instagram.com"}]}],
-        "tools": [{"google_search": {}}],
-        "generationConfig": {"temperature": 0.2, "maxOutputTokens": 2000},
-    }
-    r = requests.post(GEMINI_URL, params={"key": GEMINI_API_KEY}, json=payload, timeout=90).json()
-    cand = r["candidates"][0]
-    text = "".join(p.get("text","") for p in cand["content"]["parts"])
+    try:
+        system = f"ابحث عن 5 عروض انستغرام حقيقية في الكويت لـ {product}. لازم روابط instagram.com"
+        payload = {
+            "systemInstruction": {"parts": [{"text": system}]},
+            "contents": [{"role": "user", "parts": [{"text": f"{product} site:instagram.com"}]}],
+            "tools": [{"google_search": {}}],
+            "generationConfig": {"temperature": 0.2, "maxOutputTokens": 2000},
+        }
+        r_json = requests.post(GEMINI_URL, params={"key": GEMINI_API_KEY}, json=payload, timeout=90).json()
 
-    chunks = cand.get("groundingMetadata",{}).get("groundingChunks",[])
-    uris = [c.get("web",{}).get("uri") for c in chunks if c.get("web",{}).get("uri")]
-    finals = resolve_all(uris[:10])
+        # حماية من الـ KeyError اللي طاح عندك باللوج
+        if "candidates" not in r_json or not r_json["candidates"]:
+            print(f"IG no candidates: {r_json}")
+            return "ما لقيت عروض انستغرام حاليا", {}
 
-    insta_links = [f for f in finals if f and "instagram.com" in f]
-    if not insta_links: # fallback
-        insta_links = [u for u in uris if "instagram.com" in u]
+        cand = r_json["candidates"][0]
+        text = "".join(p.get("text","") for p in cand["content"]["parts"])
+        chunks = cand.get("groundingMetadata",{}).get("groundingChunks",[])
+        uris = [c.get("web",{}).get("uri") for c in chunks if c.get("web",{}).get("uri")]
 
-    # نظف النص بدون ما تمسح الروابط
-    clean_text = re.sub(r"https?://\S+","",text).replace("**","").strip()
-    clean_text = re.sub(r"LINKS:.*","",clean_text, flags=re.I).strip()
+        finals = resolve_all(uris[:10]) if uris else []
+        insta_links = [f for f in finals if f and "instagram.com" in f]
+        if not insta_links:
+            insta_links = [u for u in uris if "instagram.com" in u]
 
-    urls_map = {}
-    for i, link in enumerate(insta_links[:5]):
-        urls_map[f"عرض {i+1}"] = link
+        clean_text = re.sub(r"https?://\S+","",text).replace("**","").strip()
+        clean_text = re.sub(r"LINKS:.*","",clean_text, flags=re.I).strip()
+        if not clean_text:
+            clean_text = f"📸 لقيت {len(insta_links)} عروض انستغرام لـ {product}:"
 
-    return clean_text, urls_map
+        urls_map = {f"عرض انستغرام {i+1}": link for i, link in enumerate(insta_links[:5])}
+        return clean_text, urls_map
+
+    except Exception as e:
+        print(f"search_instagram_offers err {e}")
+        return "ما لقيت عروض انستغرام حاليا، جرب بعد شوي", {}
 
 def process_interactive(message,bot_id):
     from_number=message["from"]
