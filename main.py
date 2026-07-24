@@ -92,41 +92,44 @@ def call_gemini(parts, system=SYSTEM_PROMPT):
 # ===== الجديد: بحث انستغرام عن طريق Meta API الحقيقي =====
 def search_instagram_via_meta(product: str):
     if not FB_IG_TOKEN or not IG_USER_ID:
-        print("IG creds missing"); return None, {}
+        return None, {}
     headers = {"Authorization": f"Bearer {FB_IG_TOKEN}"}
+
+    # حسابات متاجر الكويت الحقيقية على انستغرام
+    STORES = ["xcitealghanim", "eureka.kw", "blink.com.kw", "bestalkw", "luluhyperkw"]
+
+    found_urls = {}
     try:
-        # نظف الكلمة لهاشتاق
-        q = re.sub(r'[^\w]', '', product.split()[0]) or "kuwait"
-        q = q[:20]
+        for username in STORES[:4]: # نبحث في 4 متاجر عشان ما نبطئ
+            url = f"{GRAPH_URL}/{IG_USER_ID}"
+            params = {
+                "fields": f"business_discovery.username({username}){{media{{caption,permalink,like_count,timestamp}} }}",
+            }
+            r = requests.get(url, params=params, headers=headers, timeout=15)
+            if r.status_code!= 200:
+                print(f"{username} err {r.text[:200]}")
+                continue
 
-        # 1- دور ID الهاشتاق
-        r1 = requests.get(f"{GRAPH_URL}/ig_hashtag_search", params={"user_id": IG_USER_ID, "q": q}, headers=headers, timeout=15)
-        print(f"HASHTAG SEARCH {r1.status_code}: {r1.text[:300]}")
-        if r1.status_code!= 200: return None, {}
-        data1 = r1.json().get("data", [])
-        if not data1: return f"ما لقيت هاشتاق #{q}", {}
+            media = r.json().get("business_discovery", {}).get("media", {}).get("data", [])
+            for m in media:
+                cap = (m.get("caption") or "").lower()
+                # اذا اسم المنتج موجود في كابشن البوست
+                if product.split()[0].lower() in cap or product.split()[-1].lower() in cap:
+                    title = f"{username} - {cap[:25]}"
+                    found_urls[title] = m.get("permalink")
+                    if len(found_urls) >= 3:
+                        break
+            if len(found_urls) >= 3:
+                break
 
-        hid = data1[0]["id"]
-
-        # 2- جيب بوستات الهاشتاق
-        r2 = requests.get(f"{GRAPH_URL}/{hid}/recent_media", params={"user_id": IG_USER_ID, "fields": "permalink,caption,media_type,like_count"}, headers=headers, timeout=15)
-        print(f"HASHTAG MEDIA {r2.status_code}")
-        if r2.status_code!= 200: return None, {}
-
-        posts = r2.json().get("data", [])[:5]
-        if not posts: return f"ما لقيت بوستات لهاشتاق #{q}", {}
-
-        txt = f"📸 عروض انستغرام لـ {product} (هاشتاق #{q}):\n"
-        urls = {}
-        for p in posts:
-            cap = (p.get("caption") or "عرض انستغرام")[:30]
-            link = p.get("permalink")
-            if link:
-                urls[cap] = link
-        return txt, urls
+        if found_urls:
+            txt = f"📸 عروض انستغرام لنفس المنتج {product} من متاجر الكويت:\n"
+            return txt, found_urls
+        else:
+            return f"دورت في {', '.join(STORES)} وما لقيت {product} بالضبط، بس تقدر تشوف حساباتهم", {}
 
     except Exception as e:
-        print(f"IG META err {e}")
+        print(f"IG discovery err {e}")
         return None, {}
 
 def extract_products(text):
