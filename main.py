@@ -8,18 +8,17 @@ from fastapi.responses import HTMLResponse
 app = FastAPI()
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash") # خلك على 2.5
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash") # خلك على 3.6
 WHATSAPP_TOKEN = os.environ.get("WHATSAPP_TOKEN", "")
 PHONE_NUMBER_ID = os.environ.get("PHONE_NUMBER_ID", "")
 VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN", "MY_SECRET_COOP_BOT_TOKEN")
 
-GRAPH_URL = "https://graph.facebook.com/v20.0" # تم تصليحه
+GRAPH_URL = "https://graph.facebook.com/v20.0"
 GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
 
 processed_ids = deque(maxlen=1000)
 CARTS = {}
 IMAGE_BUFFER = defaultdict(lambda: {"images": [], "time": 0, "bot_id": ""})
-PENDING_IG = {}
 BUFFER_SECONDS = 4
 RESOLVER = ThreadPoolExecutor(max_workers=6)
 WORKERS = ThreadPoolExecutor(max_workers=3)
@@ -35,17 +34,6 @@ SYSTEM_PROMPT = """
 LINKS: اسم المتجر الأول=دومينه, اسم المتجر الثاني=دومينه, اسم المتجر الثالث=دومينه
 مثال: LINKS: إكسايت=xcite.com, بلينك=blink.com.kw, يوريكا=eureka.com.kw
 ممنوع روابط ظاهرة. ممنوع Markdown.
-"""
-
-SYSTEM_PROMPT_IG = """
-أنت تبحث فقط في انستغرام الكويت عن طريق Google.
-مهمتك: ابحث site:instagram.com عن ريلز وستوريات واعلانات لنفس المنتج.
-رد بهذا الشكل فقط:
-📸 عروض انستغرام لـ [المنتج]
-- [وصف العرض 1]
-- [وصف العرض 2]
-ثم سطر: LINKS: وصف1=instagram.com/reel/xxx, وصف2=instagram.com/p/yyy
-ممنوع تختَرع روابط، استخدم فقط ما تجده.
 """
 
 def get_final_url(url: str):
@@ -96,10 +84,6 @@ def call_gemini(parts, system=SYSTEM_PROMPT):
     except Exception as e:
         print(f"Gemini err {e}"); return "", {}
 
-def search_instagram(product):
-    # يدور بالانستغرام عن طريق Gemini API
-    return call_gemini([{"text": f"ابحث فقط site:instagram.com عن اعلانات وستوريات وريلز لـ {product} الكويت"}], system=SYSTEM_PROMPT_IG)
-
 def extract_products(text):
     text=re.sub(r'^[•\-\*\d\.\)\s]+','',text,flags=re.M)
     parts=re.split(r'\s*(?:\n+|\+|,|،| و | & )\s*',text.strip())
@@ -124,22 +108,6 @@ def send_whatsapp_cta(to,body,link,bot_id,title):
     try: requests.post(url,json=payload,headers=h,timeout=15)
     except: pass
 
-def send_instagram_choice(to,bot_id,product):
-    PENDING_IG[to]=product
-    url=f"{GRAPH_URL}/{bot_id}/messages"; h={"Authorization":f"Bearer {WHATSAPP_TOKEN}","Content-Type":"application/json"}
-    payload={
-        "messaging_product":"whatsapp","to":to,"type":"interactive",
-        "interactive":{
-            "type":"button",
-            "body":{"text":f"تبي أدور لك إعلانات نفس المنتج في انستغرام؟\n{product}"},
-            "action":{"buttons":[
-                {"type":"reply","reply":{"id":f"ig_yes:{product[:20]}","title":"📸 إيه دور"}},
-                {"type":"reply","reply":{"id":"ig_no","title":"لا شكرا"}}
-            ]}
-        }
-    }
-    requests.post(url,json=payload,headers=h,timeout=15)
-
 @app.get("/webhook")
 async def verify(request: Request):
     p=request.query_params
@@ -162,9 +130,7 @@ async def receive(request: Request, background_tasks: BackgroundTasks):
             IMAGE_BUFFER[from_number]["images"].append(msg); IMAGE_BUFFER[from_number]["time"]=time.time(); IMAGE_BUFFER[from_number]["bot_id"]=bot_id
             if len(IMAGE_BUFFER[from_number]["images"])==1:
                 background_tasks.add_task(process_image_buffer,from_number)
-        elif msg.get("type")=="interactive":
-            background_tasks.add_task(process_interactive,msg,bot_id)
-        else:
+        elif msg.get("type")=="text":
             background_tasks.add_task(process_text_message,msg,bot_id)
     except Exception as e: print(f"webhook err {e}")
     return {"status":"ok"}
@@ -185,23 +151,6 @@ def process_single_image(message,bot_id):
     send_whatsapp_text(from_number,txt,bot_id)
     for n,u in urls.items():
         if u: send_whatsapp_cta(from_number,f"تسوق من {n} 👇",u,bot_id,f"🛒 {n[:18]}")
-    m=re.search(r"📦\s*(.+)",txt); pname=(m.group(1).strip() if m else "المنتج")[:30]
-    send_instagram_choice(from_number,bot_id,pname)
-
-def process_interactive(message,bot_id):
-    from_number=message["from"]
-    bid=message["interactive"].get("button_reply",{}).get("id","")
-    if bid.startswith("ig_yes"):
-        product=bid.split(":",1)[1] if ":" in bid else PENDING_IG.get(from_number,"")
-        if not product: product=PENDING_IG.get(from_number,"المنتج")
-        send_whatsapp_text(from_number,f"🔍 أدور لك إعلانات انستغرام لـ {product} عن طريق Gemini...",bot_id)
-        txt,urls=search_instagram(product)
-        if urls:
-            send_whatsapp_text(from_number,txt or f"📸 عروض انستغرام لـ {product}",bot_id)
-            for n,u in urls.items():
-                if u: send_whatsapp_cta(from_number,f"شوف عرض {n} 👇",u,bot_id,f"📸 {n[:18]}")
-        else:
-            send_whatsapp_text(from_number,f"ما لقيت إعلانات انستغرام واضحة لـ {product} 😅",bot_id)
 
 def fetch_product_from_image(msg):
     try:
@@ -241,7 +190,6 @@ def process_text_message(message,bot_id):
         send_whatsapp_text(from_number,txt or "ما لقيت",bot_id)
         for n,u in urls.items():
             if u: send_whatsapp_cta(from_number,f"تسوق من {n} 👇",u,bot_id,f"🛒 {n[:18]}")
-        send_instagram_choice(from_number,bot_id,products[0])
     else:
         send_whatsapp_text(from_number,f"تمام لقيت {len(products)} منتجات، أسوي سلة...",bot_id)
         items=list(WORKERS.map(fetch_product_from_text,products)); finalize_cart(from_number,bot_id,items)
@@ -254,4 +202,4 @@ async def cart_page(cart_id: str):
     return HTMLResponse(f"<html dir='rtl'><head><meta name='viewport' content='width=device-width'><script src='https://cdn.tailwindcss.com'></script></head><body><div class='max-w-lg mx-auto bg-white'><div class='p-5 bg-black text-white'><h1>🛒 سلتك</h1></div>{rows}</div></body></html>")
 
 @app.get("/")
-async def health(): return {"status":"v7 with IG via Gemini"}
+async def health(): return {"status":"v8 no IG"}
