@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-import os, re, time, base64, requests, uuid, asyncio
+import os, re, time, base64, requests, uuid, asyncio, urllib.parse
 from collections import deque, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from fastapi import FastAPI, Request, Response, BackgroundTasks
@@ -19,23 +19,59 @@ GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_M
 processed_ids = deque(maxlen=1000)
 CARTS = {}
 IMAGE_BUFFER = defaultdict(lambda: {"images": [], "time": 0, "bot_id": ""})
+LOCATION_CONTEXT = {}
 BUFFER_SECONDS = 4
 RESOLVER = ThreadPoolExecutor(max_workers=6)
 WORKERS = ThreadPoolExecutor(max_workers=3)
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
+# --- إعدادات الخريطة ---
+ONLINE_ONLY_KEYWORDS = ["blink", "بلينك", "ubuy", "يوباي", "amazon", "أمازون", "noon", "نون", "trendyol", "ترنديول", "alibaba", "temu"]
+
+# كل اسم متجر -> شنو ندور عنه بقوقل ماب
+STORE_MAPS = {
+    "xcite": "Xcite by Alghanim",
+    "إكسايت": "Xcite by Alghanim",
+    "اكسايت": "Xcite by Alghanim",
+    "eureka": "Eureka Kuwait",
+    "يوريكا": "Eureka Kuwait",
+    "best": "Best Al Yousifi",
+    "اليوسفي": "Best Al Yousifi",
+    "ghanim": "Alghanim Electronics",
+    "الغانم": "Xcite by Alghanim",
+    "lulu": "Lulu Hypermarket",
+    "لولو": "Lulu Hypermarket",
+    "carrefour": "Carrefour Kuwait",
+    "كارفور": "Carrefour Kuwait",
+    "jarir": "Jarir Bookstore Kuwait",
+    "جرير": "Jarir Bookstore Kuwait",
+    "sharaf": "Sharaf DG Kuwait",
+    "شرف": "Sharaf DG Kuwait",
+    "extra": "Extra Stores Kuwait",
+    "اكسترا": "Extra Stores Kuwait",
+}
+
+def resolve_physical_store(store_name: str):
+    low = store_name.lower().strip()
+    for kw in ONLINE_ONLY_KEYWORDS:
+        if kw in low:
+            return None # اونلاين بس، ماله فرع
+    for k, v in STORE_MAPS.items():
+        if k in low:
+            return v
+    # اذا المتجر مو معروف ومو اونلاين، نفترض له فرع وندور عليه
+    return f"{store_name} Kuwait"
+
 SYSTEM_PROMPT = """
 أنت مساعد تسوق كويتي. رد بهذا الشكل فقط:
 📦 [اسم المنتج]
 ✅ [المتجر الأرخص] — [السعر] د.ك
-• [المتجر الثاني] — [السعر] د.ك
-• [المتجر الثالث] — [السعر] د.ك
+- [المتجر الثاني] — [السعر] د.ك
+- [المتجر الثالث] — [السعر] د.ك
 ثم سطر أخير إلزامي:
 LINKS: اسم المتجر الأول=دومينه, اسم المتجر الثاني=دومينه, اسم المتجر الثالث=دومينه
 مثال: LINKS: إكسايت=xcite.com, بلينك=blink.com.kw, يوريكا=eureka.com.kw
 ممنوع روابط ظاهرة. ممنوع Markdown.
-
-اذا كان المنتج عقار او سيارة فيجب عليك الرد بشكل مختلف : بتقييم متوسط ونطاق سعر السلعة بشكل مختصر جدا، 
 """
 
 def get_final_url(url: str):
@@ -110,6 +146,24 @@ def send_whatsapp_cta(to,body,link,bot_id,title):
     try: requests.post(url,json=payload,headers=h,timeout=15)
     except: pass
 
+def send_location_choice(to,bot_id):
+    ctx = LOCATION_CONTEXT.get(to, {})
+    product = ctx.get("product","المنتج")
+    url=f"{GRAPH_URL}/{bot_id}/messages"; h={"Authorization":f"Bearer {WHATSAPP_TOKEN}","Content-Type":"application/json"}
+    payload={
+        "messaging_product":"whatsapp","to":to,"type":"interactive",
+        "interactive":{
+            "type":"button",
+            "body":{"text":f"تبي تشتري {product} من محل قريب منك؟"},
+            "action":{"buttons":[
+                {"type":"reply","reply":{"id":"loc_yes","title":"📍 إيه، أقرب محل"}},
+                {"type":"reply","reply":{"id":"loc_no","title":"لا، اونلاين بس"}}
+            ]}
+        }
+    }
+    try: requests.post(url,json=payload,headers=h,timeout=15)
+    except: pass
+
 @app.get("/webhook")
 async def verify(request: Request):
     p=request.query_params
@@ -127,13 +181,16 @@ async def receive(request: Request, background_tasks: BackgroundTasks):
         if mid in processed_ids: return {"status":"dup"}
         processed_ids.append(mid)
         bot_id=value.get("metadata",{}).get("phone_number_id",PHONE_NUMBER_ID)
-        from_number=msg["from"]
         if msg.get("type")=="image":
-            IMAGE_BUFFER[from_number]["images"].append(msg); IMAGE_BUFFER[from_number]["time"]=time.time(); IMAGE_BUFFER[from_number]["bot_id"]=bot_id
-            if len(IMAGE_BUFFER[from_number]["images"])==1:
-                background_tasks.add_task(process_image_buffer,from_number)
+            IMAGE_BUFFER[msg["from"]]["images"].append(msg); IMAGE_BUFFER[msg["from"]]["time"]=time.time(); IMAGE_BUFFER[msg["from"]]["bot_id"]=bot_id
+            if len(IMAGE_BUFFER[msg["from"]]["images"])==1:
+                background_tasks.add_task(process_image_buffer,msg["from"])
         elif msg.get("type")=="text":
             background_tasks.add_task(process_text_message,msg,bot_id)
+        elif msg.get("type")=="location":
+            background_tasks.add_task(process_location_message,msg,bot_id)
+        elif msg.get("type")=="interactive":
+            background_tasks.add_task(process_interactive_location,msg,bot_id)
     except Exception as e: print(f"webhook err {e}")
     return {"status":"ok"}
 
@@ -153,7 +210,46 @@ def process_single_image(message,bot_id):
     send_whatsapp_text(from_number,txt,bot_id)
     for n,u in urls.items():
         if u: send_whatsapp_cta(from_number,f"تسوق من {n} 👇",u,bot_id,f"🛒 {n[:18]}")
+    m=re.search(r"📦\s*(.+)",txt); pname=(m.group(1).strip() if m else "المنتج")[:35]
+    LOCATION_CONTEXT[from_number]={"product":pname,"stores":list(urls.keys())}
+    send_location_choice(from_number,bot_id)
 
+def process_interactive_location(message,bot_id):
+    from_number=message["from"]
+    bid=message["interactive"].get("button_reply",{}).get("id","")
+    if bid=="loc_yes":
+        send_whatsapp_text(from_number,"تمام 👌 دزلي موقعك: اضغط 📎 > Location > Send your current location",bot_id)
+    elif bid=="loc_no":
+        send_whatsapp_text(from_number,"تمام 👍 تبي اونلاين بس، اذا غيرت رايك دزلي موقعك بأي وقت",bot_id)
+
+def process_location_message(message,bot_id):
+    from_number=message["from"]
+    loc=message.get("location",{})
+    lat=loc.get("latitude"); lng=loc.get("longitude")
+    if lat is None or lng is None: return
+    ctx=LOCATION_CONTEXT.get(from_number,{})
+    product=ctx.get("product","المنتج")
+    stores=ctx.get("stores",[]) or ["إكسايت","يوريكا"]
+
+    physical_links = []
+    for store in stores:
+        maps_q = resolve_physical_store(store)
+        if maps_q:
+            physical_links.append((store, maps_q))
+
+    if not physical_links:
+        send_whatsapp_text(from_number,f"لاحظت ان {', '.join(stores)} كلها متاجر اونلاين 📦 مالها فروع فعلية.\nبس هذي أقرب محلات تبيع {product} من مكانك:",bot_id)
+        physical_links = [("إكسايت","Xcite by Alghanim"), ("يوريكا","Eureka Kuwait"), ("لولو","Lulu Hypermarket Kuwait")]
+
+    else:
+        send_whatsapp_text(from_number,f"📍 أقرب فروع لـ {product} من موقعك:",bot_id)
+
+    for display_name, maps_query in physical_links[:3]:
+        q = urllib.parse.quote(maps_query)
+        maps_url = f"https://www.google.com/maps/search/{q}/@{lat},{lng},13z"
+        send_whatsapp_cta(from_number,f"فرع {display_name} الأقرب 👇",maps_url,bot_id,"📍 فتح الخريطة")
+
+# باقي دوال السلة نفسها
 def fetch_product_from_image(msg):
     try:
         b64,mime=download_whatsapp_media(msg["image"]["id"])
@@ -179,6 +275,9 @@ def finalize_cart(from_number,bot_id,items):
     send_whatsapp_text(from_number,f"🛒 سلتك جاهزة:\n{summ}\n\n💰 الإجمالي: {total:.3f} د.ك",bot_id)
     domain=os.environ.get("RAILWAY_PUBLIC_DOMAIN","fanzia.up.railway.app")
     send_whatsapp_cta(from_number,"افتح السلة",f"https://{domain}/cart/{cart_id}",bot_id,"🛒 افتح السلة")
+    all_stores = list(set([it['store'] for it in items if it['store']!="متجر"])) or ["إكسايت","يوريكا"]
+    LOCATION_CONTEXT[from_number]={"product":"منتجات السلة","stores":all_stores}
+    send_location_choice(from_number,bot_id)
 
 def process_multi_images(messages,from_number,bot_id):
     send_whatsapp_text(from_number,f"تمام لقطت {len(messages)} منتجات، أسوي سلة...",bot_id)
@@ -192,6 +291,8 @@ def process_text_message(message,bot_id):
         send_whatsapp_text(from_number,txt or "ما لقيت",bot_id)
         for n,u in urls.items():
             if u: send_whatsapp_cta(from_number,f"تسوق من {n} 👇",u,bot_id,f"🛒 {n[:18]}")
+        LOCATION_CONTEXT[from_number]={"product":products[0][:35],"stores":list(urls.keys())}
+        send_location_choice(from_number,bot_id)
     else:
         send_whatsapp_text(from_number,f"تمام لقيت {len(products)} منتجات، أسوي سلة...",bot_id)
         items=list(WORKERS.map(fetch_product_from_text,products)); finalize_cart(from_number,bot_id,items)
@@ -204,4 +305,4 @@ async def cart_page(cart_id: str):
     return HTMLResponse(f"<html dir='rtl'><head><meta name='viewport' content='width=device-width'><script src='https://cdn.tailwindcss.com'></script></head><body><div class='max-w-lg mx-auto bg-white'><div class='p-5 bg-black text-white'><h1>🛒 سلتك</h1></div>{rows}</div></body></html>")
 
 @app.get("/")
-async def health(): return {"status":"v8 without IG"}
+async def health(): return {"status":"v10 maps with online filter"}
