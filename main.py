@@ -1,20 +1,19 @@
 # -*- coding: utf-8 -*-
-import os, re, time, base64, requests, uuid, asyncio, io
+import os, re, time, base64, requests, uuid, asyncio
 from collections import deque, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from fastapi import FastAPI, Request, Response, BackgroundTasks
 from fastapi.responses import HTMLResponse
-from PIL import Image
 
 app = FastAPI()
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash") # خلك على 2.0
 WHATSAPP_TOKEN = os.environ.get("WHATSAPP_TOKEN", "")
 PHONE_NUMBER_ID = os.environ.get("PHONE_NUMBER_ID", "")
 VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN", "MY_SECRET_COOP_BOT_TOKEN")
 
-GRAPH_URL = "https://graph.facebook.com/v25.0"
+GRAPH_URL = "https://graph.facebook.com/v20.0" # تم تصليحه
 GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
 
 processed_ids = deque(maxlen=1000)
@@ -30,12 +29,23 @@ SYSTEM_PROMPT = """
 أنت مساعد تسوق كويتي. رد بهذا الشكل فقط:
 📦 [اسم المنتج]
 ✅ [المتجر الأرخص] — [السعر] د.ك
-- [المتجر الثاني] — [السعر] د.ك
-- [المتجر الثالث] — [السعر] د.ك
+• [المتجر الثاني] — [السعر] د.ك
+• [المتجر الثالث] — [السعر] د.ك
 ثم سطر أخير إلزامي:
 LINKS: اسم المتجر الأول=دومينه, اسم المتجر الثاني=دومينه, اسم المتجر الثالث=دومينه
 مثال: LINKS: إكسايت=xcite.com, بلينك=blink.com.kw, يوريكا=eureka.com.kw
 ممنوع روابط ظاهرة. ممنوع Markdown.
+"""
+
+SYSTEM_PROMPT_IG = """
+أنت تبحث فقط في انستغرام الكويت عن طريق Google.
+مهمتك: ابحث site:instagram.com عن ريلز وستوريات واعلانات لنفس المنتج.
+رد بهذا الشكل فقط:
+📸 عروض انستغرام لـ [المنتج]
+- [وصف العرض 1]
+- [وصف العرض 2]
+ثم سطر: LINKS: وصف1=instagram.com/reel/xxx, وصف2=instagram.com/p/yyy
+ممنوع تختَرع روابط، استخدم فقط ما تجده.
 """
 
 def get_final_url(url: str):
@@ -51,12 +61,6 @@ def get_final_url(url: str):
 def resolve_all(uris): return list(RESOLVER.map(get_final_url, uris))
 def domain_key(dom): return dom.replace("www.","").split(".")[0]
 
-def extract_products(text):
-    text=re.sub(r'^[•\-\*\d\.\)\s]+','',text,flags=re.M)
-    parts=re.split(r'\s*(?:\n+|\+|,|،| و | & )\s*',text.strip())
-    parts=[p.strip() for p in parts if len(p.strip())>2]
-    return parts[:6] if len(parts)>1 else [text.strip()]
-
 def call_gemini(parts, system=SYSTEM_PROMPT):
     payload = {
         "systemInstruction": {"parts": [{"text": system}]},
@@ -66,96 +70,47 @@ def call_gemini(parts, system=SYSTEM_PROMPT):
     }
     try:
         r = requests.post(GEMINI_URL, params={"key": GEMINI_API_KEY}, json=payload, timeout=90)
-        data = r.json()
-        if "candidates" not in data or not data["candidates"]:
-            print(f"Gemini no candidates: {data}")
-            return "", {}
-        cand = data["candidates"][0]
+        if r.status_code >= 400: return "", {}
+        data = r.json(); cand = data["candidates"][0]
         text = "".join(p.get("text","") for p in cand["content"]["parts"]).strip()
-
         pairs=[]
         m=re.search(r"LINKS:\s*(.+)", text, re.I)
         if m:
             raw=m.group(1)
             for part in re.split(r"[,،]+", raw):
+                part=part.strip()
                 if "=" in part:
-                    name,dom=part.split("=",1)
-                    pairs.append((name.strip(), dom.strip()))
-
-        chunks=cand.get("groundingMetadata",{}).get("groundingChunks",[])
-        uris=[c.get("web",{}).get("uri") for c in chunks if c.get("web",{}).get("uri")]
-        finals=resolve_all(uris[:10]) if uris else []
-
-        urls_map={}
-        for name,dom in pairs:
-            key=domain_key(dom)
-            for f in finals:
-                if f and key in f.lower(): urls_map[name]=f; break
-
-        if not urls_map:
-            insta_links = [f for f in finals if "instagram.com" in f]
-            if not insta_links:
-                insta_links = [u for u in uris if "instagram.com" in u]
-            for i, link in enumerate(insta_links[:5]):
-                urls_map[f"عرض انستغرام {i+1}"] = link
-
-        text=re.sub(r"\n?LINKS:.*","",text,flags=re.I).strip()
+                    name,dom=part.split("=",1); name,dom=name.strip(),dom.strip().lower()
+                    if "." in dom: pairs.append((name,dom))
+            text=re.sub(r"\n?LINKS:.*","",text,flags=re.I).strip()
         text=re.sub(r"https?://\S+","",text).replace("**","").strip()
-        return text, dict(list(urls_map.items())[:5])
+        urls_map={}; chunks=cand.get("groundingMetadata",{}).get("groundingChunks",[])
+        uris=[c.get("web",{}).get("uri") for c in chunks if c.get("web",{}).get("uri")]
+        if uris and pairs:
+            finals=resolve_all(uris[:8])
+            for name,dom in pairs:
+                key=domain_key(dom)
+                for f in finals:
+                    if f and key in f.lower(): urls_map[name]=f; break
+        return text, dict(list(urls_map.items())[:3])
     except Exception as e:
         print(f"Gemini err {e}"); return "", {}
 
-def search_instagram_offers(product: str):
-    product = product[:60]
-    try:
-        system = f"ابحث عن 5 عروض انستغرام حقيقية في الكويت لـ {product}. لازم ترجع روابط instagram.com"
-        payload = {
-            "systemInstruction": {"parts": [{"text": system}]},
-            "contents": [{"role": "user", "parts": [{"text": f"{product} site:instagram.com"}]}],
-            "tools": [{"google_search": {}}],
-            "generationConfig": {"temperature": 0.2, "maxOutputTokens": 1000},
-        }
-        r_json = requests.post(GEMINI_URL, params={"key": GEMINI_API_KEY}, json=payload, timeout=90).json()
-        if "candidates" not in r_json or not r_json["candidates"]:
-            print(f"IG no candidates: {r_json}")
-            return f"📸 عروض انستغرام لـ {product}", {}
+def search_instagram(product):
+    # يدور بالانستغرام عن طريق Gemini API
+    return call_gemini([{"text": f"ابحث فقط site:instagram.com عن اعلانات وستوريات وريلز لـ {product} الكويت"}], system=SYSTEM_PROMPT_IG)
 
-        cand = r_json["candidates"][0]
-        text = "".join(p.get("text","") for p in cand["content"]["parts"])
-        chunks = cand.get("groundingMetadata",{}).get("groundingChunks",[])
-        uris = [c.get("web",{}).get("uri") for c in chunks if c.get("web",{}).get("uri")]
-        finals = resolve_all([u for u in uris if "instagram.com" in u][:8])
-
-        insta_links = [f for f in finals if f and "instagram.com" in f]
-        if not insta_links:
-            insta_links = [u for u in uris if "instagram.com" in u]
-
-        clean_text = re.sub(r"https?://\S+","",text).replace("**","").strip()
-        clean_text = re.sub(r"LINKS:.*","",clean_text, flags=re.I).strip()
-        if not clean_text:
-            clean_text = f"📸 لقيت {len(insta_links)} عروض انستغرام لـ {product}:"
-
-        urls_map = {f"عرض انستغرام {i+1}": link for i, link in enumerate(insta_links[:5])}
-        return clean_text, urls_map
-    except Exception as e:
-        print(f"IG err {e}")
-        return "ما لقيت عروض انستغرام حاليا", {}
+def extract_products(text):
+    text=re.sub(r'^[•\-\*\d\.\)\s]+','',text,flags=re.M)
+    parts=re.split(r'\s*(?:\n+|\+|,|،| و | & )\s*',text.strip())
+    parts=[p.strip() for p in parts if len(p.strip())>2]
+    return parts[:6] if len(parts)>1 else [text.strip()]
 
 def download_whatsapp_media(mid):
     h={"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
     meta=requests.get(f"{GRAPH_URL}/{mid}",headers=h,timeout=20).json()
-    content=requests.get(meta["url"],headers=h,timeout=30).content
-    try:
-        im = Image.open(io.BytesIO(content))
-        im.thumbnail((1024, 1024))
-        if im.mode in ("RGBA", "P"):
-            im = im.convert("RGB")
-        buf = io.BytesIO()
-        im.save(buf, format="JPEG", quality=75)
-        content = buf.getvalue()
-    except Exception as e:
-        print(f"resize err {e}")
-    return base64.b64encode(content).decode(), "image/jpeg"
+    img=requests.get(meta["url"],headers=h,timeout=30)
+    return base64.b64encode(img.content).decode(), meta.get("mime_type","image/jpeg")
 
 def send_whatsapp_text(to,text,bot_id):
     url=f"{GRAPH_URL}/{bot_id}/messages"; h={"Authorization":f"Bearer {WHATSAPP_TOKEN}","Content-Type":"application/json"}
@@ -237,17 +192,16 @@ def process_interactive(message,bot_id):
     from_number=message["from"]
     bid=message["interactive"].get("button_reply",{}).get("id","")
     if bid.startswith("ig_yes"):
-        product=PENDING_IG.get(from_number,"المنتج")
-        send_whatsapp_text(from_number,f"🔍 أدور لك عروض انستغرام لـ {product}...",bot_id)
-        txt,urls=search_instagram_offers(product)
-        if txt:
-            send_whatsapp_text(from_number,txt,bot_id)
+        product=bid.split(":",1)[1] if ":" in bid else PENDING_IG.get(from_number,"")
+        if not product: product=PENDING_IG.get(from_number,"المنتج")
+        send_whatsapp_text(from_number,f"🔍 أدور لك إعلانات انستغرام لـ {product} عن طريق Gemini...",bot_id)
+        txt,urls=search_instagram(product)
         if urls:
-            for name, link in urls.items():
-                if link:
-                    send_whatsapp_cta(from_number,f"شوف {name} 👇",link,bot_id,f"📸 {name[:15]}")
+            send_whatsapp_text(from_number,txt or f"📸 عروض انستغرام لـ {product}",bot_id)
+            for n,u in urls.items():
+                if u: send_whatsapp_cta(from_number,f"شوف عرض {n} 👇",u,bot_id,f"📸 {n[:18]}")
         else:
-            send_whatsapp_text(from_number,txt or f"ما لقيت عروض انستغرام لـ {product} حالياً",bot_id)
+            send_whatsapp_text(from_number,f"ما لقيت إعلانات انستغرام واضحة لـ {product} 😅",bot_id)
 
 def fetch_product_from_image(msg):
     try:
@@ -300,4 +254,4 @@ async def cart_page(cart_id: str):
     return HTMLResponse(f"<html dir='rtl'><head><meta name='viewport' content='width=device-width'><script src='https://cdn.tailwindcss.com'></script></head><body><div class='max-w-lg mx-auto bg-white'><div class='p-5 bg-black text-white'><h1>🛒 سلتك</h1></div>{rows}</div></body></html>")
 
 @app.get("/")
-async def health(): return {"status":"v11 - fixed GRAPH_URL + resize image + clickable IG links"}
+async def health(): return {"status":"v7 with IG via Gemini"}
