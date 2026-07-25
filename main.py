@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-import os, re, time, base64, requests, uuid, asyncio, hashlib
+import os, re, time, base64, requests, uuid, asyncio
 from collections import deque, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from fastapi import FastAPI, Request, Response, BackgroundTasks
@@ -8,7 +8,7 @@ from fastapi.responses import HTMLResponse
 app = FastAPI()
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash") # خلك على 2.5
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 WHATSAPP_TOKEN = os.environ.get("WHATSAPP_TOKEN", "")
 PHONE_NUMBER_ID = os.environ.get("PHONE_NUMBER_ID", "")
 VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN", "MY_SECRET_COOP_BOT_TOKEN")
@@ -24,41 +24,9 @@ RESOLVER = ThreadPoolExecutor(max_workers=6)
 WORKERS = ThreadPoolExecutor(max_workers=3)
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
-# ===== كاش النتائج: نفس السؤال/الصورة = نفس الجواب =====
-CACHE = {}
-CACHE_TTL = 6 * 3600  # 6 ساعات
-
-def cache_key(parts):
-    h = hashlib.sha256()
-    for p in parts:
-        if "text" in p: h.update(p["text"].encode())
-        if "inline_data" in p: h.update(p["inline_data"]["data"][:500].encode())
-    return h.hexdigest()
-
-def cache_get(key):
-    item = CACHE.get(key)
-    if item and time.time() - item[0] < CACHE_TTL:
-        return item[1], item[2]
-    CACHE.pop(key, None)
-    return None
-
-def cache_set(key, text, urls):
-    if len(CACHE) > 500:
-        oldest = min(CACHE, key=lambda k: CACHE[k][0]); CACHE.pop(oldest, None)
-    CACHE[key] = (time.time(), text, urls)
-
 SYSTEM_PROMPT = """
-أنت مساعد تسوق كويتي دقيق جداً.
-
-خطوات إلزامية:
-1. حدد المنتج بالاسم الإنجليزي الرسمي الدقيق (مثال: Apple Watch Ultra 2 وليس "ساعة ذكية")
-2. ابحث بالاسم الإنجليزي + Kuwait price في جميع المتاجر الكويتية الأونلاين المناسبة لنوع المنتج (أمثلة فقط وليست حصراً: xcite, blink, eureka, best.com.kw, alghanim, lulu, carrefour, taw9eel, ubuy, dabdoob, boutiqaat...)
-3. قارن بين أكبر عدد ممكن من المتاجر واختر أرخص 3 أسعار وجدتها فعلياً.
-4. اذكر فقط الأسعار التي وجدتها فعلياً في نتائج البحث. ممنوع تخمين أو تقدير أي سعر.
-5. إذا لم تجد سعراً لمتجر، لا تذكره أبداً. المتاجر الكويتية أولوية على مواقع الشحن الدولي.
-
-رد بهذا الشكل فقط:
-📦 [اسم المنتج بالعربي] ([الاسم الإنجليزي الرسمي])
+أنت مساعد تسوق كويتي. رد بهذا الشكل فقط:
+📦 [اسم المنتج]
 ✅ [المتجر الأرخص] — [السعر] د.ك
 • [المتجر الثاني] — [السعر] د.ك
 • [المتجر الثالث] — [السعر] د.ك
@@ -81,54 +49,12 @@ def get_final_url(url: str):
 def resolve_all(uris): return list(RESOLVER.map(get_final_url, uris))
 def domain_key(dom): return dom.replace("www.","").split(".")[0]
 
-def is_product_page(url):
-    """يتأكد إن الرابط صفحة منتج مو الصفحة الرئيسية أو صفحة عامة"""
-    try:
-        from urllib.parse import urlparse
-        p = urlparse(url).path.strip("/").lower()
-        if not p: return False
-        if p in ("ar","en","home","shop","store","ar/home","en/home","index.html","index.php"): return False
-        # صفحة المنتج عادة فيها slug طويل أو مسار متعدد المستويات
-        return len(p) > 10 or "/" in p
-    except: return False
-
-def search_product_url(dom, pname):
-    """يبحث بالسيرفر عن صفحة المنتج المباشرة داخل موقع المتجر (بدل ما نعطي المستخدم رابط بحث)"""
-    from urllib.parse import unquote, urlparse, parse_qs
-    key = domain_key(dom)
-    def ddg(q):
-        out=[]
-        try:
-            r = requests.get("https://html.duckduckgo.com/html/", params={"q": q}, headers=HEADERS, timeout=10)
-            for m in re.finditer(r'href="([^"]+)"', r.text):
-                href = m.group(1)
-                if "uddg=" in href:
-                    u = unquote(parse_qs(urlparse(href).query).get("uddg", [""])[0])
-                    if u.startswith("http") and key in u.lower(): out.append(u)
-                elif href.startswith("http") and key in href.lower() and "duckduckgo" not in href:
-                    out.append(href)
-        except Exception as e:
-            print(f"ddg err {e}")
-        return out
-    # محاولة 1: بحث مقيد بالموقع
-    candidates = ddg(f"site:{dom} {pname}".strip())
-    # محاولة 2: إذا ما في نتائج، بحث عادي بالدومين + المنتج
-    if not candidates:
-        candidates = ddg(f"{dom} {pname}".strip())
-    for u in candidates:
-        if is_product_page(u): return u
-    return ""
-
-def call_gemini(parts, system=SYSTEM_PROMPT, use_cache=True):
-    key = cache_key(parts) if use_cache else None
-    if key:
-        cached = cache_get(key)
-        if cached: return cached
+def call_gemini(parts, system=SYSTEM_PROMPT):
     payload = {
         "systemInstruction": {"parts": [{"text": system}]},
         "contents": [{"role": "user", "parts": parts}],
         "tools": [{"google_search": {}}],
-        "generationConfig": {"temperature": 0.0, "maxOutputTokens": 2000},
+        "generationConfig": {"temperature": 0.2, "maxOutputTokens": 2000},
     }
     try:
         r = requests.post(GEMINI_URL, params={"key": GEMINI_API_KEY}, json=payload, timeout=90)
@@ -146,41 +72,15 @@ def call_gemini(parts, system=SYSTEM_PROMPT, use_cache=True):
                     if "." in dom: pairs.append((name,dom))
             text=re.sub(r"\n?LINKS:.*","",text,flags=re.I).strip()
         text=re.sub(r"https?://\S+","",text).replace("**","").strip()
-        # استخراج اسم المنتج الإنجليزي من سطر 📦 لاستخدامه في روابط الـ fallback
-        pname=""
-        nm=re.search(r"📦\s*(.+)",text)
-        if nm:
-            en=re.search(r"\(([^)]+)\)",nm.group(1))
-            pname=(en.group(1) if en else nm.group(1)).strip()
-        chunks=cand.get("groundingMetadata",{}).get("groundingChunks",[])
+        urls_map={}; chunks=cand.get("groundingMetadata",{}).get("groundingChunks",[])
         uris=[c.get("web",{}).get("uri") for c in chunks if c.get("web",{}).get("uri")]
-        finals=resolve_all(uris[:12]) if (uris and pairs) else []
-        # المرحلة 1: مطابقة روابط الـ grounding المباشرة (نقبل فقط صفحات المنتجات)
-        matched_map={}
-        missing=[]
-        for name,dom in pairs:
-            key2=domain_key(dom)
-            m2=""
-            for f in finals:
-                if f and key2 in f.lower() and is_product_page(f): m2=f; break
-            if m2: matched_map[name]=m2
-            else: missing.append((name,dom))
-        # المرحلة 2: بحث بالسيرفر عن رابط المنتج المباشر للمتاجر الناقصة (بالتوازي)
-        if missing:
-            found=list(RESOLVER.map(lambda p: search_product_url(p[1], pname), missing))
-            for (name,dom),u in zip(missing,found):
-                if u:
-                    matched_map[name]=u
-                else:
-                    # المرحلة 3: آخر حل — بحث قوقل عادي (اسم المتجر + المنتج) بدون site: عشان ما يطلع فاضي أبداً
-                    q=requests.utils.quote(f"{name} {pname} الكويت".strip())
-                    matched_map[name]=f"https://www.google.com/search?q={q}"
-        # نحافظ على ترتيب سطر LINKS (الأرخص أولاً)
-        urls_map={name:matched_map[name] for name,_ in pairs if name in matched_map}
-        urls = dict(list(urls_map.items())[:3])
-        if key and text and urls:  # نخزن بالكاش فقط النتائج الناجحة اللي فيها روابط
-            cache_set(key, text, urls)
-        return text, urls
+        if uris and pairs:
+            finals=resolve_all(uris[:8])
+            for name,dom in pairs:
+                key=domain_key(dom)
+                for f in finals:
+                    if f and key in f.lower(): urls_map[name]=f; break
+        return text, dict(list(urls_map.items())[:3])
     except Exception as e:
         print(f"Gemini err {e}"); return "", {}
 
@@ -246,7 +146,7 @@ def process_single_image(message,bot_id):
     from_number=message["from"]
     send_whatsapp_text(from_number,"ثواني بس.. أحدد المنتج وأدور لك الأرخص!",bot_id)
     b64,mime=download_whatsapp_media(message["image"]["id"])
-    txt,urls=call_gemini([{"inline_data":{"mime_type":mime,"data":b64}},{"text":"ما هذا المنتج؟ حدد اسمه الإنجليزي الرسمي ثم ابحث عن سعره الحالي في الكويت"}])
+    txt,urls=call_gemini([{"inline_data":{"mime_type":mime,"data":b64}},{"text":"ما هذا المنتج؟ ابحث عن سعره الحالي في الكويت"}])
     if not txt: txt="ما قدرت أحدد المنتج"
     send_whatsapp_text(from_number,txt,bot_id)
     for n,u in urls.items():
@@ -255,7 +155,7 @@ def process_single_image(message,bot_id):
 def fetch_product_from_image(msg):
     try:
         b64,mime=download_whatsapp_media(msg["image"]["id"])
-        txt,urls=call_gemini([{"inline_data":{"mime_type":mime,"data":b64}},{"text":"حدد المنتج باسمه الإنجليزي الرسمي وابحث عن سعره في الكويت"}])
+        txt,urls=call_gemini([{"inline_data":{"mime_type":mime,"data":b64}},{"text":"حدد المنتج وابحث عن سعره"}])
         name_m=re.search(r"📦\s*(.+)",txt); name=(name_m.group(1).strip() if name_m else "منتج")[:50]
         pm=re.search(r"✅.*?(?:—|-|–)\s*([\d\.]+)",txt); price=float(pm.group(1)) if pm else 0
         curl=list(urls.values())[0] if urls else ""; cstore=list(urls.keys())[0] if urls else "متجر"
@@ -302,4 +202,4 @@ async def cart_page(cart_id: str):
     return HTMLResponse(f"<html dir='rtl'><head><meta name='viewport' content='width=device-width'><script src='https://cdn.tailwindcss.com'></script></head><body><div class='max-w-lg mx-auto bg-white'><div class='p-5 bg-black text-white'><h1>🛒 سلتك</h1></div>{rows}</div></body></html>")
 
 @app.get("/")
-async def health(): return {"status":"v12 smart fallback"}
+async def health(): return {"status":"v8 without IG"}
