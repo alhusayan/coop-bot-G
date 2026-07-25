@@ -108,14 +108,25 @@ def call_gemini(parts, system=SYSTEM_PROMPT, use_cache=True):
                     if "." in dom: pairs.append((name,dom))
             text=re.sub(r"\n?LINKS:.*","",text,flags=re.I).strip()
         text=re.sub(r"https?://\S+","",text).replace("**","").strip()
+        # استخراج اسم المنتج الإنجليزي من سطر 📦 لاستخدامه في روابط الـ fallback
+        pname=""
+        nm=re.search(r"📦\s*(.+)",text)
+        if nm:
+            en=re.search(r"\(([^)]+)\)",nm.group(1))
+            pname=(en.group(1) if en else nm.group(1)).strip()
         urls_map={}; chunks=cand.get("groundingMetadata",{}).get("groundingChunks",[])
         uris=[c.get("web",{}).get("uri") for c in chunks if c.get("web",{}).get("uri")]
-        if uris and pairs:
-            finals=resolve_all(uris[:8])
-            for name,dom in pairs:
-                key2=domain_key(dom)
-                for f in finals:
-                    if f and key2 in f.lower(): urls_map[name]=f; break
+        finals=resolve_all(uris[:12]) if (uris and pairs) else []
+        for name,dom in pairs:
+            key2=domain_key(dom)
+            matched=""
+            for f in finals:
+                if f and key2 in f.lower(): matched=f; break
+            if not matched:
+                # fallback: رابط بحث قوقل داخل موقع المتجر نفسه
+                q=requests.utils.quote(f"site:{dom} {pname}".strip())
+                matched=f"https://www.google.com/search?q={q}"
+            urls_map[name]=matched
         urls = dict(list(urls_map.items())[:3])
         if key and text and urls:  # نخزن بالكاش فقط النتائج الناجحة اللي فيها روابط
             cache_set(key, text, urls)
