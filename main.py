@@ -81,23 +81,42 @@ def get_final_url(url: str):
 def resolve_all(uris): return list(RESOLVER.map(get_final_url, uris))
 def domain_key(dom): return dom.replace("www.","").split(".")[0]
 
+def is_product_page(url):
+    """يتأكد إن الرابط صفحة منتج مو الصفحة الرئيسية أو صفحة عامة"""
+    try:
+        from urllib.parse import urlparse
+        p = urlparse(url).path.strip("/").lower()
+        if not p: return False
+        if p in ("ar","en","home","shop","store","ar/home","en/home","index.html","index.php"): return False
+        # صفحة المنتج عادة فيها slug طويل أو مسار متعدد المستويات
+        return len(p) > 10 or "/" in p
+    except: return False
+
 def search_product_url(dom, pname):
     """يبحث بالسيرفر عن صفحة المنتج المباشرة داخل موقع المتجر (بدل ما نعطي المستخدم رابط بحث)"""
     from urllib.parse import unquote, urlparse, parse_qs
     key = domain_key(dom)
-    try:
-        q = f"site:{dom} {pname}".strip()
-        r = requests.get("https://html.duckduckgo.com/html/", params={"q": q}, headers=HEADERS, timeout=10)
-        for m in re.finditer(r'href="([^"]+)"', r.text):
-            href = m.group(1)
-            if "uddg=" in href:
-                u = unquote(parse_qs(urlparse(href).query).get("uddg", [""])[0])
-                if u.startswith("http") and key in u.lower():
-                    return u
-            elif href.startswith("http") and key in href.lower() and "duckduckgo" not in href:
-                return href
-    except Exception as e:
-        print(f"ddg err {e}")
+    def ddg(q):
+        out=[]
+        try:
+            r = requests.get("https://html.duckduckgo.com/html/", params={"q": q}, headers=HEADERS, timeout=10)
+            for m in re.finditer(r'href="([^"]+)"', r.text):
+                href = m.group(1)
+                if "uddg=" in href:
+                    u = unquote(parse_qs(urlparse(href).query).get("uddg", [""])[0])
+                    if u.startswith("http") and key in u.lower(): out.append(u)
+                elif href.startswith("http") and key in href.lower() and "duckduckgo" not in href:
+                    out.append(href)
+        except Exception as e:
+            print(f"ddg err {e}")
+        return out
+    # محاولة 1: بحث مقيد بالموقع
+    candidates = ddg(f"site:{dom} {pname}".strip())
+    # محاولة 2: إذا ما في نتائج، بحث عادي بالدومين + المنتج
+    if not candidates:
+        candidates = ddg(f"{dom} {pname}".strip())
+    for u in candidates:
+        if is_product_page(u): return u
     return ""
 
 def call_gemini(parts, system=SYSTEM_PROMPT, use_cache=True):
@@ -136,14 +155,14 @@ def call_gemini(parts, system=SYSTEM_PROMPT, use_cache=True):
         chunks=cand.get("groundingMetadata",{}).get("groundingChunks",[])
         uris=[c.get("web",{}).get("uri") for c in chunks if c.get("web",{}).get("uri")]
         finals=resolve_all(uris[:12]) if (uris and pairs) else []
-        # المرحلة 1: مطابقة روابط الـ grounding المباشرة
+        # المرحلة 1: مطابقة روابط الـ grounding المباشرة (نقبل فقط صفحات المنتجات)
         matched_map={}
         missing=[]
         for name,dom in pairs:
             key2=domain_key(dom)
             m2=""
             for f in finals:
-                if f and key2 in f.lower(): m2=f; break
+                if f and key2 in f.lower() and is_product_page(f): m2=f; break
             if m2: matched_map[name]=m2
             else: missing.append((name,dom))
         # المرحلة 2: بحث بالسيرفر عن رابط المنتج المباشر للمتاجر الناقصة (بالتوازي)
@@ -153,8 +172,8 @@ def call_gemini(parts, system=SYSTEM_PROMPT, use_cache=True):
                 if u:
                     matched_map[name]=u
                 else:
-                    # المرحلة 3: آخر حل — رابط بحث قوقل داخل الموقع
-                    q=requests.utils.quote(f"site:{dom} {pname}".strip())
+                    # المرحلة 3: آخر حل — بحث قوقل عادي (اسم المتجر + المنتج) بدون site: عشان ما يطلع فاضي أبداً
+                    q=requests.utils.quote(f"{name} {pname} الكويت".strip())
                     matched_map[name]=f"https://www.google.com/search?q={q}"
         # نحافظ على ترتيب سطر LINKS (الأرخص أولاً)
         urls_map={name:matched_map[name] for name,_ in pairs if name in matched_map}
@@ -283,4 +302,4 @@ async def cart_page(cart_id: str):
     return HTMLResponse(f"<html dir='rtl'><head><meta name='viewport' content='width=device-width'><script src='https://cdn.tailwindcss.com'></script></head><body><div class='max-w-lg mx-auto bg-white'><div class='p-5 bg-black text-white'><h1>🛒 سلتك</h1></div>{rows}</div></body></html>")
 
 @app.get("/")
-async def health(): return {"status":"v10 direct links"}
+async def health(): return {"status":"v12 smart fallback"}
