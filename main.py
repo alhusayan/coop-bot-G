@@ -1,24 +1,24 @@
 # -*- coding: utf-8 -*-
-import os, re, time, base64, requests, uuid, asyncio, urllib.parse
+import os, re, time, base64, requests, uuid, asyncio
 from collections import deque, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from fastapi import FastAPI, Request, Response, BackgroundTasks
 from fastapi.responses import HTMLResponse
 
 app = FastAPI()
+
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 WHATSAPP_TOKEN = os.environ.get("WHATSAPP_TOKEN", "")
 PHONE_NUMBER_ID = os.environ.get("PHONE_NUMBER_ID", "")
 VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN", "MY_SECRET_COOP_BOT_TOKEN")
+
 GRAPH_URL = "https://graph.facebook.com/v20.0"
 GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
 
 processed_ids = deque(maxlen=1000)
 CARTS = {}
 IMAGE_BUFFER = defaultdict(lambda: {"images": [], "time": 0, "bot_id": ""})
-LOCATION_CONTEXT = {}
-AWAITING_LOCATION = set()
 BUFFER_SECONDS = 4
 RESOLVER = ThreadPoolExecutor(max_workers=6)
 WORKERS = ThreadPoolExecutor(max_workers=3)
@@ -28,11 +28,14 @@ SYSTEM_PROMPT = """
 أنت مساعد تسوق كويتي. رد بهذا الشكل فقط:
 📦 [اسم المنتج]
 ✅ [المتجر الأرخص] — [السعر] د.ك
-- [المتجر الثاني] — [السعر] د.ك
-- [المتجر الثالث] — [السعر] د.ك
+• [المتجر الثاني] — [السعر] د.ك
+• [المتجر الثالث] — [السعر] د.ك
 ثم سطر أخير إلزامي:
 LINKS: اسم المتجر الأول=دومينه, اسم المتجر الثاني=دومينه, اسم المتجر الثالث=دومينه
+مثال: LINKS: إكسايت=xcite.com, بلينك=blink.com.kw, يوريكا=eureka.com.kw
 ممنوع روابط ظاهرة. ممنوع Markdown.
+
+اذا كان المنتج عقار او سيارة فيجب عليك الرد بشكل مختلف : بتقييم متوسط ونطاق سعر السلعة بشكل مختصر جدا، 
 """
 
 def get_final_url(url: str):
@@ -40,7 +43,9 @@ def get_final_url(url: str):
         r = requests.head(url, allow_redirects=True, timeout=8, headers=HEADERS)
         if r.status_code == 405:
             r = requests.get(url, allow_redirects=True, timeout=8, stream=True, headers=HEADERS); r.close()
-        return r.url if len(r.url) < 700 else ""
+        final = r.url
+        if "vertexaisearch" in final or "grounding-api-redirect" in final: return ""
+        return final if len(final) < 700 else ""
     except: return ""
 
 def resolve_all(uris): return list(RESOLVER.map(get_final_url, uris))
@@ -58,10 +63,12 @@ def call_gemini(parts, system=SYSTEM_PROMPT):
         if r.status_code >= 400: return "", {}
         data = r.json(); cand = data["candidates"][0]
         text = "".join(p.get("text","") for p in cand["content"]["parts"]).strip()
-        pairs=[]; m=re.search(r"LINKS:\s*(.+)", text, re.I)
+        pairs=[]
+        m=re.search(r"LINKS:\s*(.+)", text, re.I)
         if m:
             raw=m.group(1)
             for part in re.split(r"[,،]+", raw):
+                part=part.strip()
                 if "=" in part:
                     name,dom=part.split("=",1); name,dom=name.strip(),dom.strip().lower()
                     if "." in dom: pairs.append((name,dom))
@@ -76,12 +83,14 @@ def call_gemini(parts, system=SYSTEM_PROMPT):
                 for f in finals:
                     if f and key in f.lower(): urls_map[name]=f; break
         return text, dict(list(urls_map.items())[:3])
-    except: return "", {}
+    except Exception as e:
+        print(f"Gemini err {e}"); return "", {}
 
 def extract_products(text):
     text=re.sub(r'^[•\-\*\d\.\)\s]+','',text,flags=re.M)
     parts=re.split(r'\s*(?:\n+|\+|,|،| و | & )\s*',text.strip())
-    return [p.strip() for p in parts if len(p.strip())>2][:6] or [text.strip()]
+    parts=[p.strip() for p in parts if len(p.strip())>2]
+    return parts[:6] if len(parts)>1 else [text.strip()]
 
 def download_whatsapp_media(mid):
     h={"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
@@ -91,28 +100,15 @@ def download_whatsapp_media(mid):
 
 def send_whatsapp_text(to,text,bot_id):
     url=f"{GRAPH_URL}/{bot_id}/messages"; h={"Authorization":f"Bearer {WHATSAPP_TOKEN}","Content-Type":"application/json"}
-    requests.post(url,json={"messaging_product":"whatsapp","to":to,"type":"text","text":{"body":text[:3900]}},headers=h,timeout=15)
+    payload={"messaging_product":"whatsapp","to":to,"type":"text","text":{"body":text[:3900]}}
+    try: requests.post(url,json=payload,headers=h,timeout=15)
+    except: pass
 
 def send_whatsapp_cta(to,body,link,bot_id,title):
     url=f"{GRAPH_URL}/{bot_id}/messages"; h={"Authorization":f"Bearer {WHATSAPP_TOKEN}","Content-Type":"application/json"}
     payload={"messaging_product":"whatsapp","to":to,"type":"interactive","interactive":{"type":"cta_url","body":{"text":body[:1024]},"action":{"name":"cta_url","parameters":{"display_text":title[:20],"url":link}}}}
-    requests.post(url,json=payload,headers=h,timeout=15)
-
-def send_location_choice(to,bot_id):
-    product = LOCATION_CONTEXT.get(to,{}).get("product","المنتج")
-    url=f"{GRAPH_URL}/{bot_id}/messages"; h={"Authorization":f"Bearer {WHATSAPP_TOKEN}","Content-Type":"application/json"}
-    payload={
-        "messaging_product":"whatsapp","to":to,"type":"interactive",
-        "interactive":{
-            "type":"button",
-            "body":{"text":f"تبي تشوف أقرب مكان يبيع {product} من موقعك؟"},
-            "action":{"buttons":[
-                {"type":"reply","reply":{"id":"loc_yes","title":"📍 إيه، أقرب محل"}},
-                {"type":"reply","reply":{"id":"loc_no","title":"لا، اونلاين بس"}}
-            ]}
-        }
-    }
-    requests.post(url,json=payload,headers=h,timeout=15)
+    try: requests.post(url,json=payload,headers=h,timeout=15)
+    except: pass
 
 @app.get("/webhook")
 async def verify(request: Request):
@@ -131,16 +127,13 @@ async def receive(request: Request, background_tasks: BackgroundTasks):
         if mid in processed_ids: return {"status":"dup"}
         processed_ids.append(mid)
         bot_id=value.get("metadata",{}).get("phone_number_id",PHONE_NUMBER_ID)
+        from_number=msg["from"]
         if msg.get("type")=="image":
-            IMAGE_BUFFER[msg["from"]]["images"].append(msg); IMAGE_BUFFER[msg["from"]]["time"]=time.time(); IMAGE_BUFFER[msg["from"]]["bot_id"]=bot_id
-            if len(IMAGE_BUFFER[msg["from"]]["images"])==1:
-                background_tasks.add_task(process_image_buffer,msg["from"])
+            IMAGE_BUFFER[from_number]["images"].append(msg); IMAGE_BUFFER[from_number]["time"]=time.time(); IMAGE_BUFFER[from_number]["bot_id"]=bot_id
+            if len(IMAGE_BUFFER[from_number]["images"])==1:
+                background_tasks.add_task(process_image_buffer,from_number)
         elif msg.get("type")=="text":
             background_tasks.add_task(process_text_message,msg,bot_id)
-        elif msg.get("type")=="location":
-            background_tasks.add_task(process_location_message,msg,bot_id)
-        elif msg.get("type")=="interactive":
-            background_tasks.add_task(process_interactive_location,msg,bot_id)
     except Exception as e: print(f"webhook err {e}")
     return {"status":"ok"}
 
@@ -160,39 +153,6 @@ def process_single_image(message,bot_id):
     send_whatsapp_text(from_number,txt,bot_id)
     for n,u in urls.items():
         if u: send_whatsapp_cta(from_number,f"تسوق من {n} 👇",u,bot_id,f"🛒 {n[:18]}")
-    m=re.search(r"📦\s*(.+)",txt); pname=(m.group(1).strip() if m else "المنتج")[:50]
-    LOCATION_CONTEXT[from_number]={"product":pname}
-    send_location_choice(from_number,bot_id)
-
-def process_interactive_location(message,bot_id):
-    from_number=message["from"]
-    bid=message["interactive"].get("button_reply",{}).get("id","")
-    if bid=="loc_yes":
-        AWAITING_LOCATION.add(from_number)
-        send_whatsapp_text(from_number,"تمام 👌\nدزلي موقعك بالضغط على + > Location > Share current location\nأو اكتب اسم منطقتك مثل: السالمية، الرياض، دبي",bot_id)
-    else:
-        AWAITING_LOCATION.discard(from_number)
-
-def process_location_message(message,bot_id):
-    from_number=message["from"]
-    lat=message["location"]["latitude"]; lng=message["location"]["longitude"]
-    product=LOCATION_CONTEXT.get(from_number,{}).get("product","هذا المنتج")
-    AWAITING_LOCATION.discard(from_number)
-
-    # مفتوح 100% - يبحث عن اسم المنتج نفسه حول موقعك
-    q = urllib.parse.quote(product)
-    maps_url = f"https://www.google.com/maps/search/{q}/@{lat},{lng},15z"
-
-    send_whatsapp_text(from_number,f"📍 أقرب أماكن تبيع {product} من موقعك الحالي:",bot_id)
-    send_whatsapp_cta(from_number,f"دور على {product} حواليك 👇",maps_url,bot_id,"📍 فتح الخريطة")
-
-def process_area_text(from_number, area, bot_id):
-    product=LOCATION_CONTEXT.get(from_number,{}).get("product","هذا المنتج")
-    q = urllib.parse.quote(f"{product} in {area}")
-    maps_url = f"https://www.google.com/maps/search/{q}"
-    send_whatsapp_text(from_number,f"📍 أماكن تبيع {product} في {area}:",bot_id)
-    send_whatsapp_cta(from_number,f"دور على {product} في {area} 👇",maps_url,bot_id,"📍 فتح الخريطة")
-    AWAITING_LOCATION.discard(from_number)
 
 def fetch_product_from_image(msg):
     try:
@@ -201,56 +161,47 @@ def fetch_product_from_image(msg):
         name_m=re.search(r"📦\s*(.+)",txt); name=(name_m.group(1).strip() if name_m else "منتج")[:50]
         pm=re.search(r"✅.*?(?:—|-|–)\s*([\d\.]+)",txt); price=float(pm.group(1)) if pm else 0
         curl=list(urls.values())[0] if urls else ""; cstore=list(urls.keys())[0] if urls else "متجر"
-        return {"name":name,"store":cstore,"price":price,"url":curl}
-    except: return {"name":"منتج","store":"متجر","price":0,"url":""}
+        return {"name":name,"store":cstore,"price":price,"url":curl,"all_urls":urls}
+    except: return {"name":"منتج","store":"متجر","price":0,"url":"","all_urls":{}}
 
 def fetch_product_from_text(prod):
     try:
         txt,urls=call_gemini([{"text":f"ابحث عن سعر {prod} في الكويت"}])
         m=re.search(r"✅.*?(?:—|-|–)\s*([\d\.]+)",txt); price=float(m.group(1)) if m else 0
         curl=list(urls.values())[0] if urls else ""; cstore=list(urls.keys())[0] if urls else "متجر"
-        return {"name":prod,"store":cstore,"price":price,"url":curl}
-    except: return {"name":prod,"store":"متجر","price":0,"url":""}
+        return {"name":prod,"store":cstore,"price":price,"url":curl,"all_urls":urls}
+    except: return {"name":prod,"store":"متجر","price":0,"url":"","all_urls":{}}
 
 def finalize_cart(from_number,bot_id,items):
     total=sum(it["price"] for it in items); cart_id=uuid.uuid4().hex[:8]
     CARTS[cart_id]={"products":items,"total":total}
-    summ="\n".join([f"• {it['name']} - {it['price']} د.ك" for it in items])
-    send_whatsapp_text(from_number,f"🛒 سلتك:\n{summ}\n\n💰 {total:.3f} د.ك",bot_id)
+    summ="\n".join([f"• {it['name']} - {it['price']} د.ك ({it['store']})" for it in items])
+    send_whatsapp_text(from_number,f"🛒 سلتك جاهزة:\n{summ}\n\n💰 الإجمالي: {total:.3f} د.ك",bot_id)
     domain=os.environ.get("RAILWAY_PUBLIC_DOMAIN","fanzia.up.railway.app")
     send_whatsapp_cta(from_number,"افتح السلة",f"https://{domain}/cart/{cart_id}",bot_id,"🛒 افتح السلة")
-    LOCATION_CONTEXT[from_number]={"product":items[0]["name"] if items else "المنتجات"}
-    send_location_choice(from_number,bot_id)
 
 def process_multi_images(messages,from_number,bot_id):
-    send_whatsapp_text(from_number,f"تمام لقطت {len(messages)} منتجات...",bot_id)
+    send_whatsapp_text(from_number,f"تمام لقطت {len(messages)} منتجات، أسوي سلة...",bot_id)
     items=list(WORKERS.map(fetch_product_from_image,messages)); finalize_cart(from_number,bot_id,items)
 
 def process_text_message(message,bot_id):
-    from_number=message["from"]; user_text=message["text"]["body"]
-    if from_number in AWAITING_LOCATION and len(user_text) < 35:
-        if "سعر" not in user_text and "جم" not in user_text:
-            process_area_text(from_number, user_text, bot_id)
-            return
-    products=extract_products(user_text)
+    from_number=message["from"]; user_text=message["text"]["body"]; products=extract_products(user_text)
     if len(products)==1:
         send_whatsapp_text(from_number,f"🔍 أدور لك على {products[0]}...",bot_id)
         txt,urls=call_gemini([{"text":f"ابحث عن سعر {products[0]} في الكويت"}])
         send_whatsapp_text(from_number,txt or "ما لقيت",bot_id)
         for n,u in urls.items():
             if u: send_whatsapp_cta(from_number,f"تسوق من {n} 👇",u,bot_id,f"🛒 {n[:18]}")
-        LOCATION_CONTEXT[from_number]={"product":products[0][:50]}
-        send_location_choice(from_number,bot_id)
     else:
-        send_whatsapp_text(from_number,f"تمام لقيت {len(products)} منتجات...",bot_id)
+        send_whatsapp_text(from_number,f"تمام لقيت {len(products)} منتجات، أسوي سلة...",bot_id)
         items=list(WORKERS.map(fetch_product_from_text,products)); finalize_cart(from_number,bot_id,items)
 
 @app.get("/cart/{cart_id}", response_class=HTMLResponse)
 async def cart_page(cart_id: str):
     cart=CARTS.get(cart_id)
     if not cart: return HTMLResponse("<h1>السلة انتهت</h1>",404)
-    rows="".join([f"<div class='p-4 border-b flex justify-between'><div><b>{it['name']}</b></div><a href='{it['url']}' target='_blank' class='bg-black text-white px-4 py-2 rounded'>شراء</a></div>" for it in cart["products"]])
-    return HTMLResponse(f"<html dir='rtl'><head><meta name='viewport' content='width=device-width'><script src='https://cdn.tailwindcss.com'></script></head><body><div class='max-w-lg mx-auto'><div class='p-5 bg-black text-white'><h1>🛒 سلتك</h1></div>{rows}</div></body></html>")
+    rows="".join([f"<div class='p-4 border-b flex justify-between'><div><b>{it['name']}</b><br><span class='text-sm text-gray-500'>{it['store']} - {it['price']} د.ك</span></div><a href='{it['url']}' target='_blank' class='bg-black text-white px-4 py-2 rounded'>شراء</a></div>" for it in cart["products"]])
+    return HTMLResponse(f"<html dir='rtl'><head><meta name='viewport' content='width=device-width'><script src='https://cdn.tailwindcss.com'></script></head><body><div class='max-w-lg mx-auto bg-white'><div class='p-5 bg-black text-white'><h1>🛒 سلتك</h1></div>{rows}</div></body></html>")
 
 @app.get("/")
-async def health(): return {"status":"v12 open maps worldwide"}
+async def health(): return {"status":"v8 without IG"}
