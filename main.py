@@ -19,6 +19,8 @@ GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_M
 processed_ids = deque(maxlen=1000)
 CARTS = {}
 IMAGE_BUFFER = defaultdict(lambda: {"images": [], "time": 0, "bot_id": ""})
+LAST_SEARCH = {} # لحفظ المتاجر الخاصة بآخر بحث لكل مستخدم
+
 BUFFER_SECONDS = 4
 RESOLVER = ThreadPoolExecutor(max_workers=6)
 WORKERS = ThreadPoolExecutor(max_workers=3)
@@ -128,12 +130,16 @@ async def receive(request: Request, background_tasks: BackgroundTasks):
         processed_ids.append(mid)
         bot_id=value.get("metadata",{}).get("phone_number_id",PHONE_NUMBER_ID)
         from_number=msg["from"]
+        
         if msg.get("type")=="image":
             IMAGE_BUFFER[from_number]["images"].append(msg); IMAGE_BUFFER[from_number]["time"]=time.time(); IMAGE_BUFFER[from_number]["bot_id"]=bot_id
             if len(IMAGE_BUFFER[from_number]["images"])==1:
                 background_tasks.add_task(process_image_buffer,from_number)
         elif msg.get("type")=="text":
             background_tasks.add_task(process_text_message,msg,bot_id)
+        elif msg.get("type")=="location":
+            background_tasks.add_task(process_location_message,msg,bot_id)
+            
     except Exception as e: print(f"webhook err {e}")
     return {"status":"ok"}
 
@@ -151,8 +157,15 @@ def process_single_image(message,bot_id):
     txt,urls=call_gemini([{"inline_data":{"mime_type":mime,"data":b64}},{"text":"ما هذا المنتج؟ ابحث عن سعره الحالي في الكويت"}])
     if not txt: txt="ما قدرت أحدد المنتج"
     send_whatsapp_text(from_number,txt,bot_id)
+    
+    if urls:
+        LAST_SEARCH[from_number] = {"stores": list(urls.keys())}
+
     for n,u in urls.items():
         if u: send_whatsapp_cta(from_number,f"تسوق من {n} 👇",u,bot_id,f"🛒 {n[:18]}")
+        
+    if urls:
+        send_whatsapp_text(from_number,"📍 تبي تشتري من أقرب فرع لك؟ دز لي موقعك (Location) بالواتساب الحين وأضبطك بالخريطة!", bot_id)
 
 def fetch_product_from_image(msg):
     try:
@@ -190,11 +203,38 @@ def process_text_message(message,bot_id):
         send_whatsapp_text(from_number,f"🔍 أدور لك على {products[0]}...",bot_id)
         txt,urls=call_gemini([{"text":f"ابحث عن سعر {products[0]} في الكويت"}])
         send_whatsapp_text(from_number,txt or "ما لقيت",bot_id)
+        
+        if urls:
+            LAST_SEARCH[from_number] = {"stores": list(urls.keys())}
+            
         for n,u in urls.items():
             if u: send_whatsapp_cta(from_number,f"تسوق من {n} 👇",u,bot_id,f"🛒 {n[:18]}")
+            
+        if urls:
+            send_whatsapp_text(from_number,"📍 تبي تشتري من أقرب فرع لك؟ دز لي موقعك (Location) بالواتساب الحين وأضبطك بالخريطة!", bot_id)
     else:
         send_whatsapp_text(from_number,f"تمام لقيت {len(products)} منتجات، أسوي سلة...",bot_id)
         items=list(WORKERS.map(fetch_product_from_text,products)); finalize_cart(from_number,bot_id,items)
+
+def process_location_message(message, bot_id):
+    from_number = message["from"]
+    lat = message["location"]["latitude"]
+    lng = message["location"]["longitude"]
+
+    last_search = LAST_SEARCH.get(from_number)
+    if not last_search or not last_search.get("stores"):
+        send_whatsapp_text(from_number, "ما عندي منتج محفوظ حالياً 😅. ابحث عن منتج أول، وبعدها دز موقعك!", bot_id)
+        return
+
+    stores = last_search["stores"]
+    reply = "📍 تفضل هذي روابط جوجل ماب لأقرب فروع حولك:\n\n"
+    
+    for store in stores:
+        safe_store_name = store.replace(' ', '+')
+        maps_url = f"https://www.google.com/maps/search/{safe_store_name}/@{lat},{lng},14z"
+        reply += f"🗺️ {store}:\n{maps_url}\n\n"
+
+    send_whatsapp_text(from_number, reply.strip(), bot_id)
 
 @app.get("/cart/{cart_id}", response_class=HTMLResponse)
 async def cart_page(cart_id: str):
