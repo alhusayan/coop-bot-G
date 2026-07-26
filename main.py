@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-import os, re, time, base64, requests, uuid, asyncio
+import os, re, time, base64, requests, uuid, asyncio, urllib.parse
 from collections import deque, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from fastapi import FastAPI, Request, Response, BackgroundTasks
@@ -27,11 +27,11 @@ WORKERS = ThreadPoolExecutor(max_workers=3)
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
 SYSTEM_PROMPT = """
-أنت مساعد تسوق كويتي. رد بهذا الشكل فقط:
+أنت مساعد تسوق. رد بهذا الشكل فقط:
 📦 [اسم المنتج]
-✅ [المتجر الأرخص] — [السعر] د.ك
-• [المتجر الثاني] — [السعر] د.ك
-• [المتجر الثالث] — [السعر] د.ك
+✅ [المتجر الأرخص] — [السعر]
+• [المتجر الثاني] — [السعر]
+• [المتجر الثالث] — [السعر]
 ثم سطر أخير إلزامي:
 LINKS: اسم المتجر الأول=دومينه, اسم المتجر الثاني=دومينه, اسم المتجر الثالث=دومينه
 مثال: LINKS: إكسايت=xcite.com, بلينك=blink.com.kw, يوريكا=eureka.com.kw
@@ -154,11 +154,10 @@ def process_single_image(message,bot_id):
     from_number=message["from"]
     send_whatsapp_text(from_number,"ثواني بس.. أحدد المنتج وأدور لك الأرخص!",bot_id)
     b64,mime=download_whatsapp_media(message["image"]["id"])
-    txt,urls=call_gemini([{"inline_data":{"mime_type":mime,"data":b64}},{"text":"ما هذا المنتج؟ ابحث عن سعره الحالي في الكويت"}])
+    txt,urls=call_gemini([{"inline_data":{"mime_type":mime,"data":b64}},{"text":"ما هذا المنتج؟ ابحث عن سعره الحالي"}])
     if not txt: txt="ما قدرت أحدد المنتج"
     send_whatsapp_text(from_number,txt,bot_id)
     
-    # استخراج اسم المنتج من الرد وحفظه للبحث بالخريطة لاحقاً
     name_m = re.search(r"📦\s*(.+)", txt)
     product_name = name_m.group(1).strip() if name_m else "المنتج"
     LAST_SEARCH[from_number] = {"product": product_name}
@@ -166,7 +165,6 @@ def process_single_image(message,bot_id):
     for n,u in urls.items():
         if u: send_whatsapp_cta(from_number,f"تسوق من {n} 👇",u,bot_id,f"🛒 {n[:18]}")
 
-    # التنبيه المضاف للموقع
     if urls:
         send_whatsapp_text(from_number, "📍 تبي تشتري المنتج من مكان قريب منك؟ دز لي موقعك (Location) بالواتساب الحين وأطلع لك أقرب مكان يبيعه بالخريطة!", bot_id)
 
@@ -182,7 +180,7 @@ def fetch_product_from_image(msg):
 
 def fetch_product_from_text(prod):
     try:
-        txt,urls=call_gemini([{"text":f"ابحث عن سعر {prod} في الكويت"}])
+        txt,urls=call_gemini([{"text":f"ابحث عن سعر {prod}"}])
         m=re.search(r"✅.*?(?:—|-|–)\s*([\d\.]+)",txt); price=float(m.group(1)) if m else 0
         curl=list(urls.values())[0] if urls else ""; cstore=list(urls.keys())[0] if urls else "متجر"
         return {"name":prod,"store":cstore,"price":price,"url":curl,"all_urls":urls}
@@ -191,8 +189,8 @@ def fetch_product_from_text(prod):
 def finalize_cart(from_number,bot_id,items):
     total=sum(it["price"] for it in items); cart_id=uuid.uuid4().hex[:8]
     CARTS[cart_id]={"products":items,"total":total}
-    summ="\n".join([f"• {it['name']} - {it['price']} د.ك ({it['store']})" for it in items])
-    send_whatsapp_text(from_number,f"🛒 سلتك جاهزة:\n{summ}\n\n💰 الإجمالي: {total:.3f} د.ك",bot_id)
+    summ="\n".join([f"• {it['name']} - {it['price']} ({it['store']})" for it in items])
+    send_whatsapp_text(from_number,f"🛒 سلتك جاهزة:\n{summ}\n\n💰 الإجمالي: {total:.3f}",bot_id)
     domain=os.environ.get("RAILWAY_PUBLIC_DOMAIN","fanzia.up.railway.app")
     send_whatsapp_cta(from_number,"افتح السلة",f"https://{domain}/cart/{cart_id}",bot_id,"🛒 افتح السلة")
 
@@ -204,21 +202,18 @@ def process_text_message(message,bot_id):
     from_number=message["from"]; user_text=message["text"]["body"]; products=extract_products(user_text)
     if len(products)==1:
         send_whatsapp_text(from_number,f"🔍 أدور لك على {products[0]}...",bot_id)
-        txt,urls=call_gemini([{"text":f"ابحث عن سعر {products[0]} في الكويت"}])
+        txt,urls=call_gemini([{"text":f"ابحث عن سعر {products[0]}"}])
         send_whatsapp_text(from_number,txt or "ما لقيت",bot_id)
         
-        # حفظ اسم المنتج لاستخدامه لاحقاً إذا أرسل المستخدم موقعه
         LAST_SEARCH[from_number] = {"product": products[0]}
             
         for n,u in urls.items():
             if u: send_whatsapp_cta(from_number,f"تسوق من {n} 👇",u,bot_id,f"🛒 {n[:18]}")
 
-        # التنبيه المضاف للموقع
         if urls:
             send_whatsapp_text(from_number, "📍 تبي تشتري المنتج من مكان قريب منك؟ دز لي موقعك (Location) بالواتساب الحين وأطلع لك أقرب مكان يبيعه بالخريطة!", bot_id)
             
     else:
-        # حفظ أول منتج في السلة في حال أرسل الموقع لاحقاً
         LAST_SEARCH[from_number] = {"product": products[0]}
         send_whatsapp_text(from_number,f"تمام لقيت {len(products)} منتجات، أسوي سلة...",bot_id)
         items=list(WORKERS.map(fetch_product_from_text,products)); finalize_cart(from_number,bot_id,items)
@@ -235,17 +230,33 @@ def process_location_message(message, bot_id):
 
     product = last_search["product"]
     
-    # استخدام Gemini لاستنتاج نوع المتجر المناسب للمنتج
-    prompt_category = "أنت مساعد يصنف المنتجات. أعطني نوع المتجر أو المكان الذي يبيع هذا المنتج بكلمة أو كلمتين فقط. أمثلة: جمعية تعاونية, صيدلية, مكتبة, محل الكترونيات, قطع غيار سيارات, ملحمة. الرد يجب أن يكون الكلمة فقط بدون أي إضافات."
+    # تفكير ذكي عالمي لاستخراج فئة المتجر بدقة وتجنب العشوائية
+    prompt_category = """أنت خبير بحث في خرائط جوجل عالمياً.
+بناءً على اسم المنتج، أعطني "عبارة بحث" (Search Term) دقيقة ومناسبة لخرائط جوجل تعمل في أي مكان في العالم.
+
+قواعد هامة جداً:
+- استخدم مصطلحات عالمية ويفضل باللغة الإنجليزية لضمان دقة البحث في أي دولة.
+- للإلكترونيات الذكية (مثل ساعة أبل، لابتوب، جوال): (Apple Store OR Electronics store).
+- للملابس والمعدات الرياضية مثل مضارب التنس أو البادل: (Sporting goods store).
+- لمعدات وملابس التزلج: (Ski shop OR Sporting goods store).
+- للأدوية والمكملات: (Pharmacy).
+- للمواد الغذائية واللحوم: (Supermarket OR Grocery store).
+- لألعاب الفيديو: (Video game store).
+- للأجهزة الكهربائية المنزلية: (Home appliances).
+- إذا لم تكن متأكداً، اكتب مصطلح فئة المتجر الأقرب باللغة الإنجليزية.
+
+أعطني عبارة البحث فقط بدون أي إضافات أو شرح."""
+
     category_text, _ = call_gemini([{"text": f"المنتج: {product}"}], system=prompt_category)
     
-    # تنظيف الرد (إذا فشل أو أرجع نتيجة فارغة نعتبره جمعية تعاونية كخيار افتراضي آمن)
-    category = category_text.strip() if category_text else "جمعية تعاونية"
+    # تنظيف الرد، وإذا لم يرد الذكاء الاصطناعي نستخدم اسم المنتج للبحث المباشر
+    category = category_text.strip() if category_text else product
 
-    safe_category = category.replace(' ', '+')
-    maps_url = f"https://www.google.com/maps/search/{safe_category}/@{lat},{lng},14z"
+    # تشفير الرابط والصيغة المستقرة للواتساب لمنع كسر الرابط
+    safe_category = urllib.parse.quote(category)
+    maps_url = f"https://maps.google.com/maps?q={safe_category}&ll={lat},{lng}&z=14"
     
-    reply = f"📍 بحثك الأخير كان عن ({product})\n\nغالباً تحصله في أقرب ({category}) لك. تفضل الرابط:\n🗺️ {maps_url}"
+    reply = f"📍 بحثك الأخير كان عن ({product})\n\nأفضل الأماكن القريبة منك لبيعه:\n🗺️ {maps_url}"
 
     send_whatsapp_text(from_number, reply, bot_id)
 
@@ -253,8 +264,8 @@ def process_location_message(message, bot_id):
 async def cart_page(cart_id: str):
     cart=CARTS.get(cart_id)
     if not cart: return HTMLResponse("<h1>السلة انتهت</h1>",404)
-    rows="".join([f"<div class='p-4 border-b flex justify-between'><div><b>{it['name']}</b><br><span class='text-sm text-gray-500'>{it['store']} - {it['price']} د.ك</span></div><a href='{it['url']}' target='_blank' class='bg-black text-white px-4 py-2 rounded'>شراء</a></div>" for it in cart["products"]])
+    rows="".join([f"<div class='p-4 border-b flex justify-between'><div><b>{it['name']}</b><br><span class='text-sm text-gray-500'>{it['store']} - {it['price']}</span></div><a href='{it['url']}' target='_blank' class='bg-black text-white px-4 py-2 rounded'>شراء</a></div>" for it in cart["products"]])
     return HTMLResponse(f"<html dir='rtl'><head><meta name='viewport' content='width=device-width'><script src='https://cdn.tailwindcss.com'></script></head><body><div class='max-w-lg mx-auto bg-white'><div class='p-5 bg-black text-white'><h1>🛒 سلتك</h1></div>{rows}</div></body></html>")
 
 @app.get("/")
-async def health(): return {"status":"v10 with Smart Location Category and Prompts"}
+async def health(): return {"status":"v12 Global Smart Category Maps"}
