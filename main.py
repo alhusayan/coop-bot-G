@@ -19,7 +19,7 @@ GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_M
 processed_ids = deque(maxlen=1000)
 CARTS = {}
 IMAGE_BUFFER = defaultdict(lambda: {"images": [], "time": 0, "bot_id": ""})
-LAST_SEARCH = {} # لحفظ المتاجر الخاصة بآخر بحث لكل مستخدم
+LAST_SEARCH = {} # لحفظ اسم آخر منتج بحث عنه المستخدم
 
 BUFFER_SECONDS = 4
 RESOLVER = ThreadPoolExecutor(max_workers=6)
@@ -158,14 +158,13 @@ def process_single_image(message,bot_id):
     if not txt: txt="ما قدرت أحدد المنتج"
     send_whatsapp_text(from_number,txt,bot_id)
     
-    if urls:
-        LAST_SEARCH[from_number] = {"stores": list(urls.keys())}
+    # استخراج اسم المنتج من الرد وحفظه للبحث بالخريطة لاحقاً
+    name_m = re.search(r"📦\s*(.+)", txt)
+    product_name = name_m.group(1).strip() if name_m else "المنتج"
+    LAST_SEARCH[from_number] = {"product": product_name}
 
     for n,u in urls.items():
         if u: send_whatsapp_cta(from_number,f"تسوق من {n} 👇",u,bot_id,f"🛒 {n[:18]}")
-        
-    if urls:
-        send_whatsapp_text(from_number,"📍 تبي تشتري من أقرب فرع لك؟ دز لي موقعك (Location) بالواتساب الحين وأضبطك بالخريطة!", bot_id)
 
 def fetch_product_from_image(msg):
     try:
@@ -204,15 +203,15 @@ def process_text_message(message,bot_id):
         txt,urls=call_gemini([{"text":f"ابحث عن سعر {products[0]} في الكويت"}])
         send_whatsapp_text(from_number,txt or "ما لقيت",bot_id)
         
-        if urls:
-            LAST_SEARCH[from_number] = {"stores": list(urls.keys())}
+        # حفظ اسم المنتج لاستخدامه لاحقاً إذا أرسل المستخدم موقعه
+        LAST_SEARCH[from_number] = {"product": products[0]}
             
         for n,u in urls.items():
             if u: send_whatsapp_cta(from_number,f"تسوق من {n} 👇",u,bot_id,f"🛒 {n[:18]}")
             
-        if urls:
-            send_whatsapp_text(from_number,"📍 تبي تشتري من أقرب فرع لك؟ دز لي موقعك (Location) بالواتساب الحين وأضبطك بالخريطة!", bot_id)
     else:
+        # حفظ أول منتج في السلة في حال أرسل الموقع لاحقاً
+        LAST_SEARCH[from_number] = {"product": products[0]}
         send_whatsapp_text(from_number,f"تمام لقيت {len(products)} منتجات، أسوي سلة...",bot_id)
         items=list(WORKERS.map(fetch_product_from_text,products)); finalize_cart(from_number,bot_id,items)
 
@@ -222,19 +221,25 @@ def process_location_message(message, bot_id):
     lng = message["location"]["longitude"]
 
     last_search = LAST_SEARCH.get(from_number)
-    if not last_search or not last_search.get("stores"):
-        send_whatsapp_text(from_number, "ما عندي منتج محفوظ حالياً 😅. ابحث عن منتج أول، وبعدها دز موقعك!", bot_id)
+    if not last_search or not last_search.get("product"):
+        send_whatsapp_text(from_number, "ما عندي منتج محفوظ حالياً 😅. ابحث عن منتج أول، وبعدها دز موقعك عشان أدلك على أقرب مكان يبيعه!", bot_id)
         return
 
-    stores = last_search["stores"]
-    reply = "📍 تفضل هذي روابط جوجل ماب لأقرب فروع حولك:\n\n"
+    product = last_search["product"]
     
-    for store in stores:
-        safe_store_name = store.replace(' ', '+')
-        maps_url = f"https://www.google.com/maps/search/{safe_store_name}/@{lat},{lng},14z"
-        reply += f"🗺️ {store}:\n{maps_url}\n\n"
+    # استخدام Gemini لاستنتاج نوع المتجر المناسب للمنتج
+    prompt_category = "أنت مساعد يصنف المنتجات. أعطني نوع المتجر أو المكان الذي يبيع هذا المنتج بكلمة أو كلمتين فقط. أمثلة: جمعية تعاونية, صيدلية, مكتبة, محل الكترونيات, قطع غيار سيارات, ملحمة. الرد يجب أن يكون الكلمة فقط بدون أي إضافات."
+    category_text, _ = call_gemini([{"text": f"المنتج: {product}"}], system=prompt_category)
+    
+    # تنظيف الرد (إذا فشل أو أرجع نتيجة فارغة نعتبره جمعية تعاونية كخيار افتراضي آمن)
+    category = category_text.strip() if category_text else "جمعية تعاونية"
 
-    send_whatsapp_text(from_number, reply.strip(), bot_id)
+    safe_category = category.replace(' ', '+')
+    maps_url = f"https://www.google.com/maps/search/{safe_category}/@{lat},{lng},14z"
+    
+    reply = f"📍 بحثك الأخير كان عن ({product})\n\nغالباً تحصله في أقرب ({category}) لك. تفضل الرابط:\n🗺️ {maps_url}"
+
+    send_whatsapp_text(from_number, reply, bot_id)
 
 @app.get("/cart/{cart_id}", response_class=HTMLResponse)
 async def cart_page(cart_id: str):
@@ -244,4 +249,4 @@ async def cart_page(cart_id: str):
     return HTMLResponse(f"<html dir='rtl'><head><meta name='viewport' content='width=device-width'><script src='https://cdn.tailwindcss.com'></script></head><body><div class='max-w-lg mx-auto bg-white'><div class='p-5 bg-black text-white'><h1>🛒 سلتك</h1></div>{rows}</div></body></html>")
 
 @app.get("/")
-async def health(): return {"status":"v8 without IG"}
+async def health(): return {"status":"v9 with Smart Location Category"}
