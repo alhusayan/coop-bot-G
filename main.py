@@ -230,7 +230,6 @@ def process_location_message(message, bot_id):
 
     product = last_search["product"]
     
-    # تفكير ذكي ودقيق لاستخراج اسم المتاجر الصحيحة وتجنب العشوائية
     prompt_category = """أنت خبير تسوق في السوق الكويتي. 
 بناءً على اسم المنتج، أعطني "عبارة بحث" (Search Term) دقيقة جداً لخرائط جوجل تجلب المتاجر الصحيحة وتستبعد العشوائية.
 
@@ -247,17 +246,16 @@ def process_location_message(message, bot_id):
 أعطني عبارة البحث فقط بدون أي إضافات أو شرح."""
 
     category_text, _ = call_gemini([{"text": f"المنتج: {product}"}], system=prompt_category)
-    
-    # تنظيف الرد، وإذا لم يرد الذكاء الاصطناعي نستخدم اسم المنتج للبحث المباشر
     category = category_text.strip() if category_text else product
 
-    # تشفير الرابط والصيغة المستقرة للواتساب لمنع كسر الرابط
+    # الرابط الجديد بصيغة أنظف
     safe_category = urllib.parse.quote(category)
-    maps_url = f"https://maps.google.com/maps?q={safe_category}&ll={lat},{lng}&z=14"
+    maps_url = f"https://www.google.com/maps/search/{safe_category}/@{lat},{lng},15z"
     
-    reply = f"📍 بحثك الأخير كان عن ({product})\n\nأفضل الأماكن القريبة منك لبيعه:\n🗺️ {maps_url}"
+    body = f"📍 بحثك الأخير كان عن ({product})\n\nجهزت لك أقرب المحلات اللي تبيعه حولك، اضغط الزر وافتح الخريطة 👇"
 
-    send_whatsapp_text(from_number, reply, bot_id)
+    # هذا هو التعديل الجمالي - زر بدل رابط طويل
+    send_whatsapp_cta(from_number, body, maps_url, bot_id, "📍 افتح الخريطة")
 
 @app.get("/cart/{cart_id}", response_class=HTMLResponse)
 async def cart_page(cart_id: str):
