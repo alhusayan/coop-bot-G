@@ -166,6 +166,10 @@ def process_single_image(message,bot_id):
     for n,u in urls.items():
         if u: send_whatsapp_cta(from_number,f"تسوق من {n} 👇",u,bot_id,f"🛒 {n[:18]}")
 
+    # التنبيه المضاف للموقع
+    if urls:
+        send_whatsapp_text(from_number, "📍 تبي تشتري المنتج من مكان قريب منك؟ دز لي موقعك (Location) بالواتساب الحين وأطلع لك أقرب مكان يبيعه بالخريطة!", bot_id)
+
 def fetch_product_from_image(msg):
     try:
         b64,mime=download_whatsapp_media(msg["image"]["id"])
@@ -208,6 +212,10 @@ def process_text_message(message,bot_id):
             
         for n,u in urls.items():
             if u: send_whatsapp_cta(from_number,f"تسوق من {n} 👇",u,bot_id,f"🛒 {n[:18]}")
+
+        # التنبيه المضاف للموقع
+        if urls:
+            send_whatsapp_text(from_number, "📍 تبي تشتري المنتج من مكان قريب منك؟ دز لي موقعك (Location) بالواتساب الحين وأطلع لك أقرب مكان يبيعه بالخريطة!", bot_id)
             
     else:
         # حفظ أول منتج في السلة في حال أرسل الموقع لاحقاً
@@ -249,4 +257,4 @@ async def cart_page(cart_id: str):
     return HTMLResponse(f"<html dir='rtl'><head><meta name='viewport' content='width=device-width'><script src='https://cdn.tailwindcss.com'></script></head><body><div class='max-w-lg mx-auto bg-white'><div class='p-5 bg-black text-white'><h1>🛒 سلتك</h1></div>{rows}</div></body></html>")
 
 @app.get("/")
-async def health(): return {"status":"v9 with Smart Location Category"}
+async def health(): return {"status":"v10 with Smart Location Category and Prompts"}
