@@ -34,6 +34,7 @@ SYSTEM_PROMPT = """
 【الحالة 1】منتج محدد بعلامة تجارية واضحة (مثل: آيفون 15 برو، بيبسي، ساعة أبل الترا، بلايستيشن 5):
 قارن الأسعار واختر الأرخص، ورد بهذا الشكل فقط:
 📦 [اسم المنتج]
+
 ✅ [المتجر الأرخص] — [السعر] د.ك
 • [المتجر الثاني] — [السعر] د.ك
 • [المتجر الثالث] — [السعر] د.ك
@@ -42,12 +43,23 @@ SYSTEM_PROMPT = """
 لا تبحث عن الأرخص! ابحث عن الأفضل تقييماً في الكويت بسعر مناسب (أفضل قيمة مقابل السعر).
 اعتمد على تقييمات Google والمراجعات الفعلية، ورد بهذا الشكل فقط:
 📦 [وصف الطلب]
+
 🏆 [اسم الخيار الأفضل + مكانه/متجره] — [السعر] د.ك ⭐ [التقييم من 5]
 • [خيار ثاني قوي] — [السعر] د.ك ⭐ [التقييم من 5]
 • [خيار ثالث] — [السعر] د.ك ⭐ [التقييم من 5]
 ثم سطر واحد قصير يشرح ليش الخيار الأول هو الأفضل (تقييم عالي + سعر مناسب).
 
-في الحالتين، سطر أخير إلزامي:
+【الحالة 3】طلب خدمة (فني، بنشر، تبديل بطارية، سباك، كهربائي، تنظيف، صالون، توصيل، ونش...):
+ابحث عن أفضل مزودي الخدمة تقييماً في المنطقة المطلوبة، ورد بهذا الشكل فقط:
+📦 [وصف الخدمة + المنطقة]
+
+🏆 [اسم المزود] (هاتف: [الرقم]) — [المنطقة] — [السعر التقريبي] د.ك ⭐ [التقييم من 5]
+• [مزود ثاني] (هاتف: [الرقم]) — [المنطقة] — [السعر] د.ك ⭐ [التقييم]
+• [مزود ثالث] (هاتف: [الرقم]) — [المنطقة] — [السعر] د.ك ⭐ [التقييم]
+ثم سطر واحد قصير عن ميزة الخيار الأول (سرعة، خدمة 24 ساعة، كفالة...).
+⛔ قاعدة صارمة جداً للأرقام: لا تكتب أي رقم هاتف إلا إذا ظهر الرقم حرفياً في نتائج بحث Google. ممنوع منعاً باتاً تأليف أو تخمين أي رقم. إذا ما لقيت رقم المزود في نتائج البحث اكتب مكانه (الرقم بالرابط) فقط. رقم غلط أسوأ ألف مرة من عدم وجود رقم.
+
+في كل الحالات، سطر أخير إلزامي:
 LINKS: اسم الأول=الدومين الحقيقي, اسم الثاني=الدومين الحقيقي, اسم الثالث=الدومين الحقيقي
 مثال: LINKS: إكسايت=xcite.com, بلينك=blink.com.kw, يوريكا=eureka.com.kw
 لا تخمّن الدومين، ولا تذكر متجراً أو خياراً من دون مصدر بحث.
@@ -259,6 +271,36 @@ def send_whatsapp_cta(to,body,link,bot_id,title):
         print(f"WhatsApp CTA exception: {e} | {link[:180]}")
         return False
 
+def send_whatsapp_contacts(to, contacts, bot_id):
+    """إرسال بطاقات جهات اتصال (يقدر العميل يحفظها أو يتصل مباشرة)"""
+    url=f"{GRAPH_URL}/{bot_id}/messages"; h={"Authorization":f"Bearer {WHATSAPP_TOKEN}","Content-Type":"application/json"}
+    payload={"messaging_product":"whatsapp","to":to,"type":"contacts","contacts":contacts}
+    try:
+        r = requests.post(url,json=payload,headers=h,timeout=15)
+        if not r.ok:
+            print(f"WhatsApp contacts error {r.status_code}: {r.text[:500]}")
+        return r.ok
+    except Exception as e:
+        print(f"WhatsApp contacts exception: {e}")
+        return False
+
+def extract_service_contacts(txt):
+    """يستخرج (اسم المزود + رقمه) من سطور 🏆 و • إذا كان الرد عن خدمة"""
+    contacts=[]
+    for line in (txt or "").splitlines():
+        m=re.match(r"^\s*(?:🏆|•)\s*(.+?)\s*\(\s*هاتف\s*:\s*([\d\s\-]+)\)",line)
+        if not m: continue
+        name=m.group(1).strip()[:25]
+        num=re.sub(r"\D","",m.group(2))
+        # أرقام الكويت: 8 خانات تبدأ بـ 2 أو 5 أو 6 أو 9
+        if len(num)==8 and num[0] in "2569":
+            contacts.append({
+                "name":{"formatted_name":name,"first_name":name},
+                "phones":[{"phone":f"+965{num}","type":"WORK","wa_id":f"965{num}"}]
+            })
+        if len(contacts)==3: break
+    return contacts
+
 @app.get("/webhook")
 async def verify(request: Request):
     p=request.query_params
@@ -353,6 +395,11 @@ def process_text_message(message,bot_id):
         send_whatsapp_text(from_number,txt or "ما لقيت",bot_id)
         
         LAST_SEARCH[from_number] = {"product": products[0]}
+
+        # إذا الرد كان عن خدمة وفيه أرقام، نرسلها كبطاقات جهات اتصال جاهزة للحفظ والاتصال
+        contacts = extract_service_contacts(txt)
+        if contacts:
+            send_whatsapp_contacts(from_number, contacts, bot_id)
             
         for n,u in urls.items():
             if u: send_whatsapp_cta(from_number,f"تسوق من {n} 👇",u,bot_id,f"🛒 {n[:18]}")
