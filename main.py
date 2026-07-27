@@ -355,7 +355,7 @@ def process_single_image(message,bot_id):
         if u: send_whatsapp_cta(from_number,f"تسوق من {n} 👇",u,bot_id,f"🛒 {n[:18]}")
 
     if product_name and product_name != "المنتج":
-        send_whatsapp_text(from_number, "📍 تبي تشتري المنتج من مكان قريب منك؟ دز لي موقعك (Location) بالواتساب الحين وأطلع لك أقرب مكان يبيعه بالخريطة!", bot_id)
+        send_whatsapp_text(from_number, "تبي أقرب محل يبيعه؟ 📍\n\nسهلة، ٣ خطوات:\n1️⃣ اضغط ➕ (أيفون) أو 📎 (أندرويد) جنب خانة الكتابة\n2️⃣ اختر الموقع Location\n3️⃣ اضغط إرسال موقعك الحالي\n\nوعلى طول أرد لك بأقرب المحلات على الخريطة 👇", bot_id)
 
 def fetch_product_from_image(msg):
     try:
