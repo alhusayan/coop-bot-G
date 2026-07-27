@@ -1317,3 +1317,5 @@ async def health() -> Dict[str, Any]:
         "version": "v13",
         "gemini_model": GEMINI_MODEL,
         "graph_version": WHATSAPP_GRAPH_VERSION,
+    }
+
