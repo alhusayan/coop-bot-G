@@ -34,7 +34,7 @@ from fastapi.responses import HTMLResponse
 # Application and logging
 # -----------------------------------------------------------------------------
 
-app = FastAPI(title="Kuwait Shopping WhatsApp Bot", version="13.0")
+app = FastAPI(title="Kuwait Shopping WhatsApp Bot", version="15.0")
 
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO").upper(),
@@ -168,76 +168,20 @@ GROUNDING_RETRY_INSTRUCTION = """
 
 MAP_CATEGORY_PROMPT = """
 أنت خبير تسوق في السوق الكويتي.
-بناءً على اسم المنتج، أعطني عبارة بحث قصيرة ودقيقة لخرائط Google تجلب الأماكن الصحيحة حول موقع المستخدم.
+بناءً على اسم المنتج، أعطني "عبارة بحث" (Search Term) دقيقة جداً لخرائط جوجل تجلب المتاجر الصحيحة وتستبعد العشوائية.
 
-القواعد:
-- الإلكترونيات الذكية والجوالات واللابتوبات: Xcite OR Eureka OR Best Al Yousifi
-- الأجهزة المنزلية: Xcite OR Eureka OR Best Al Yousifi
-- الأدوية والمكملات: صيدلية OR Pharmacy
-- المواد الغذائية واللحوم: جمعية تعاونية OR Supermarket
-- ألعاب الفيديو: Video games store OR محل ألعاب فيديو
-- الكهرباء والإضاءة: Electrical supply OR مواد كهربائية
-- الملابس والمعدات الرياضية: Intersport OR Go Sport OR محل رياضي
-- مستحضرات التجميل والعطور: Cosmetics OR Perfume store
-- إذا لم تكن متأكداً، استخدم اسم المنتج نفسه.
+قواعد هامة:
+- للإلكترونيات الذكية (ساعة أبل، جوالات، لابتوب): اكتب أسماء الوكلاء الموثوقين هكذا (Xcite OR Eureka OR Best Al Yousifi) ولا تكتب "محل الكترونيات" أبداً.
+- للأجهزة المنزلية (ثلاجة، غسالة): (Xcite OR Eureka).
+- للأدوية والمكملات: (صيدلية Pharmacy).
+- للمواد الغذائية واللحوم: (جمعية تعاونية Supermarket).
+- لألعاب الفيديو: (محل العاب فيديو Video games).
+- للكهربائيات الثقيلة والإضاءة: (مواد كهربائية Electrical supply).
+- للملابس والمعدات الرياضية (مثل مضارب التنس والبادل): (Intersport OR Go Sport OR محلات رياضية).
+- إذا لم تكن متأكداً، اكتب اسم المنتج نفسه.
 
-أعد عبارة البحث فقط من دون شرح أو علامات اقتباس.
+أعطني عبارة البحث فقط بدون أي إضافات أو شرح.
 """.strip()
-
-
-def build_maps_search_term(product: str) -> str:
-    """Return a deterministic Google Maps query for common Kuwait searches.
-
-    Food and drink rules intentionally come before pharmacy/general retail rules
-    so words such as coffee or shawarma can never be misclassified by Gemini.
-    """
-    text = (product or "").strip().lower()
-
-    rules = [
-        # Cafes and drinks
-        (("قهوة", "كافيه", "كوفي", "فلات وايت", "flat white",
-          "لاتيه", "latte", "كابتشينو", "cappuccino", "اسبريسو",
-          "espresso", "موكا", "americano", "أمريكانو"),
-         "كافيه قهوة Coffee shop Cafe"),
-
-        # Restaurants / prepared food
-        (("شاورما", "shawarma"), "مطعم شاورما Shawarma restaurant"),
-        (("برجر", "burger"), "مطعم برجر Burger restaurant"),
-        (("بيتزا", "pizza"), "مطعم بيتزا Pizza restaurant"),
-        (("مشويات", "كباب", "kebab", "grill"),
-         "مطعم مشويات Kebab Grill restaurant"),
-        (("مطعم", "وجبة", "أكل", "دجاج", "chicken", "ساندويتش",
-          "ساندويش", "فطور", "غداء", "عشاء"),
-         "مطعم Restaurant"),
-
-        # Health — only explicit medicine/pharmacy terms
-        (("دواء", "علاج", "حبوب", "كبسولات", "صيدلية", "pharmacy",
-          "medicine", "medication", "vitamin", "فيتامين", "مكمل"),
-         "صيدلية Pharmacy"),
-
-        # Retail categories
-        (("عطر", "برفان", "perfume", "fragrance"),
-         "محل عطور Perfume store"),
-        (("مكياج", "كوزمتك", "cosmetics", "makeup"),
-         "مستحضرات تجميل Cosmetics store"),
-        (("ايفون", "iphone", "سامسونج", "جوال", "موبايل", "لابتوب",
-          "كمبيوتر", "ساعة ابل", "apple watch"),
-         "Xcite Eureka Best Al Yousifi electronics"),
-        (("ثلاجة", "غسالة", "مكيف", "فرن", "تلفزيون", "شاشة"),
-         "Xcite Eureka Best Al Yousifi appliances"),
-        (("مضرب", "تنس", "بادل", "رياضي", "sports"),
-         "محل رياضي Sports store"),
-        (("لحم", "دجاج نيء", "خضار", "فاكهة", "مواد غذائية",
-          "بقالة", "جمعية", "سوبرماركت"),
-         "جمعية تعاونية Supermarket"),
-    ]
-
-    for keywords, query in rules:
-        if any(keyword in text for keyword in keywords):
-            return query
-
-    # The product name is safer than asking an LLM to invent a category.
-    return product.strip() or "متاجر Shops"
 
 
 # -----------------------------------------------------------------------------
@@ -1256,10 +1200,17 @@ def process_location_message(
         )
         return
 
-    # Use deterministic local classification for Maps. Gemini occasionally
-    # misclassified food searches as pharmacies or unrelated businesses.
-    category = build_maps_search_term(product)
-    logger.info("Maps category: product=%r category=%r", product, category)
+    # Use the AI-generated Maps search term from the second/original Maps flow.
+    # There is intentionally no fixed keyword classification in this version.
+    category_text, _ = call_gemini(
+        [{"text": f"المنتج: {product}"}],
+        system=MAP_CATEGORY_PROMPT,
+        use_search=False,
+        max_output_tokens=120,
+    )
+    category = category_text.strip() if category_text else product
+    category = category.strip().strip('"').strip("'")
+    logger.info("AI Maps category: product=%r category=%r", product, category)
 
     safe_category = urllib.parse.quote(category, safe="")
     maps_url = (
@@ -1363,7 +1314,7 @@ async def cart_page(cart_id: str) -> HTMLResponse:
 async def health() -> Dict[str, Any]:
     return {
         "status": "ok",
-        "version": "v14",
+        "version": "v15-merged-maps",
         "gemini_model": GEMINI_MODEL,
         "graph_version": WHATSAPP_GRAPH_VERSION,
     }
