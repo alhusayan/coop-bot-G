@@ -185,6 +185,61 @@ MAP_CATEGORY_PROMPT = """
 """.strip()
 
 
+def build_maps_search_term(product: str) -> str:
+    """Return a deterministic Google Maps query for common Kuwait searches.
+
+    Food and drink rules intentionally come before pharmacy/general retail rules
+    so words such as coffee or shawarma can never be misclassified by Gemini.
+    """
+    text = (product or "").strip().lower()
+
+    rules = [
+        # Cafes and drinks
+        (("قهوة", "كافيه", "كوفي", "فلات وايت", "flat white",
+          "لاتيه", "latte", "كابتشينو", "cappuccino", "اسبريسو",
+          "espresso", "موكا", "americano", "أمريكانو"),
+         "كافيه قهوة Coffee shop Cafe"),
+
+        # Restaurants / prepared food
+        (("شاورما", "shawarma"), "مطعم شاورما Shawarma restaurant"),
+        (("برجر", "burger"), "مطعم برجر Burger restaurant"),
+        (("بيتزا", "pizza"), "مطعم بيتزا Pizza restaurant"),
+        (("مشويات", "كباب", "kebab", "grill"),
+         "مطعم مشويات Kebab Grill restaurant"),
+        (("مطعم", "وجبة", "أكل", "دجاج", "chicken", "ساندويتش",
+          "ساندويش", "فطور", "غداء", "عشاء"),
+         "مطعم Restaurant"),
+
+        # Health — only explicit medicine/pharmacy terms
+        (("دواء", "علاج", "حبوب", "كبسولات", "صيدلية", "pharmacy",
+          "medicine", "medication", "vitamin", "فيتامين", "مكمل"),
+         "صيدلية Pharmacy"),
+
+        # Retail categories
+        (("عطر", "برفان", "perfume", "fragrance"),
+         "محل عطور Perfume store"),
+        (("مكياج", "كوزمتك", "cosmetics", "makeup"),
+         "مستحضرات تجميل Cosmetics store"),
+        (("ايفون", "iphone", "سامسونج", "جوال", "موبايل", "لابتوب",
+          "كمبيوتر", "ساعة ابل", "apple watch"),
+         "Xcite Eureka Best Al Yousifi electronics"),
+        (("ثلاجة", "غسالة", "مكيف", "فرن", "تلفزيون", "شاشة"),
+         "Xcite Eureka Best Al Yousifi appliances"),
+        (("مضرب", "تنس", "بادل", "رياضي", "sports"),
+         "محل رياضي Sports store"),
+        (("لحم", "دجاج نيء", "خضار", "فاكهة", "مواد غذائية",
+          "بقالة", "جمعية", "سوبرماركت"),
+         "جمعية تعاونية Supermarket"),
+    ]
+
+    for keywords, query in rules:
+        if any(keyword in text for keyword in keywords):
+            return query
+
+    # The product name is safer than asking an LLM to invent a category.
+    return product.strip() or "متاجر Shops"
+
+
 # -----------------------------------------------------------------------------
 # General helpers
 # -----------------------------------------------------------------------------
@@ -1201,16 +1256,10 @@ def process_location_message(
         )
         return
 
-    category_text, _ = call_gemini(
-        [{"text": f"المنتج: {product}"}],
-        system=MAP_CATEGORY_PROMPT,
-        use_search=False,
-        max_output_tokens=150,
-    )
-
-    category = re.sub(r"[\r\n]+", " ", category_text or product).strip()
-    if not category:
-        category = product
+    # Use deterministic local classification for Maps. Gemini occasionally
+    # misclassified food searches as pharmacies or unrelated businesses.
+    category = build_maps_search_term(product)
+    logger.info("Maps category: product=%r category=%r", product, category)
 
     safe_category = urllib.parse.quote(category, safe="")
     maps_url = (
@@ -1314,8 +1363,7 @@ async def cart_page(cart_id: str) -> HTMLResponse:
 async def health() -> Dict[str, Any]:
     return {
         "status": "ok",
-        "version": "v13",
+        "version": "v14",
         "gemini_model": GEMINI_MODEL,
         "graph_version": WHATSAPP_GRAPH_VERSION,
     }
-
