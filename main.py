@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-WhatsApp Kuwait Shopping Bot - v13
+WhatsApp Kuwait Shopping Bot - v14
 
 Main fixes:
 1) Store buttons no longer depend only on Gemini's LINKS line.
@@ -9,6 +9,7 @@ Main fixes:
 4) The nearby-location CTA request is sent even when store buttons are unavailable.
 5) Gemini and WhatsApp API errors are written clearly to Railway logs.
 6) Cart HTML is escaped and products without a URL show an unavailable button.
+7) Improved Google Maps logic to return highly accurate, single-term local search categories without OR operators.
 """
 
 import asyncio
@@ -34,7 +35,7 @@ from fastapi.responses import HTMLResponse
 # Application and logging
 # -----------------------------------------------------------------------------
 
-app = FastAPI(title="Kuwait Shopping WhatsApp Bot", version="15.0")
+app = FastAPI(title="Kuwait Shopping WhatsApp Bot", version="15.1")
 
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO").upper(),
@@ -167,20 +168,23 @@ GROUNDING_RETRY_INSTRUCTION = """
 """.strip()
 
 MAP_CATEGORY_PROMPT = """
-أنت خبير تسوق في السوق الكويتي.
-بناءً على اسم المنتج، أعطني "عبارة بحث" (Search Term) دقيقة جداً لخرائط جوجل تجلب المتاجر الصحيحة وتستبعد العشوائية.
+أنت خبير في خرائط جوجل (Google Maps) داخل الكويت.
+مهمتك استنتاج "أفضل عبارة بحث" (Search Query) للبحث في الخرائط لإيجاد المتاجر التي تبيع المنتج أو الخدمة التي يطلبها المستخدم.
 
-قواعد هامة:
-- للإلكترونيات الذكية (ساعة أبل، جوالات، لابتوب): اكتب أسماء الوكلاء الموثوقين هكذا (Xcite OR Eureka OR Best Al Yousifi) ولا تكتب "محل الكترونيات" أبداً.
-- للأجهزة المنزلية (ثلاجة، غسالة): (Xcite OR Eureka).
-- للأدوية والمكملات: (صيدلية Pharmacy).
-- للمواد الغذائية واللحوم: (جمعية تعاونية Supermarket).
-- لألعاب الفيديو: (محل العاب فيديو Video games).
-- للكهربائيات الثقيلة والإضاءة: (مواد كهربائية Electrical supply).
-- للملابس والمعدات الرياضية (مثل مضارب التنس والبادل): (Intersport OR Go Sport OR محلات رياضية).
-- إذا لم تكن متأكداً، اكتب اسم المنتج نفسه.
-
-أعطني عبارة البحث فقط بدون أي إضافات أو شرح.
+قواعد ذهبية لاستخراج عبارة البحث:
+1. لا تستخدم معاملات مثل OR أبداً. الخرائط لا تفهمها جيداً. استخدم عبارة واحدة دقيقة ومباشرة.
+2. استخدم الفئات التجارية المعتمدة في الخرائط أو أسماء أكبر المتاجر المعروفة في الكويت.
+3. أمثلة:
+   - الهواتف، اللابتوبات، الإلكترونيات (مثل آيفون، ايباد) ➔ "Xcite" أو "Eureka" أو "محل هواتف"
+   - الأجهزة المنزلية الكبيرة (ثلاجة، غسالة) ➔ "Eureka" أو "Xcite"
+   - العطور والمكياج والعناية ➔ "محل عطور" أو "Sephora"
+   - الأدوية، الفيتامينات، مستحضرات طبية ➔ "صيدلية"
+   - المواد الغذائية، اللحوم، الدجاج، الخضار ➔ "جمعية تعاونية" أو "سوبر ماركت"
+   - الملابس والمعدات الرياضية (مضرب بادل، حذاء ركض) ➔ "Intersport" أو "محل رياضة"
+   - القهوة ومشروبات الكافيهات ➔ "مقهى"
+   - ألعاب الفيديو (بلايستيشن، نينتندو) ➔ "الرحاب" أو "محل ألعاب فيديو"
+   - إذا كان الطلب اسم مكان محدد سلفاً (مثل مطعم معين، أو اسم براند محدد كـ Zara) ➔ اكتب اسم البراند كما هو.
+4. اكتب عبارة البحث النهائية فقط، بدون أي مقدمات، ولا علامات تنصيص.
 """.strip()
 
 
@@ -656,7 +660,7 @@ def send_whatsapp_payload(
             timeout=20,
         )
     except requests.RequestException as exc:
-        logger.exception("WhatsApp %s exception: %s", action_name, exc)
+        logger.exception("WhatsApp %s exception: %s", exc)
         return False
 
     if not response.ok:
@@ -1200,27 +1204,32 @@ def process_location_message(
         )
         return
 
-    # Use the AI-generated Maps search term from the second/original Maps flow.
-    # There is intentionally no fixed keyword classification in this version.
+    # Use the AI-generated Maps search term from the improved Maps flow.
     category_text, _ = call_gemini(
-        [{"text": f"المنتج: {product}"}],
+        [{"text": f"المنتج الذي يبحث عنه المستخدم: {product}"}],
         system=MAP_CATEGORY_PROMPT,
         use_search=False,
-        max_output_tokens=120,
+        max_output_tokens=50,
     )
+    
     category = category_text.strip() if category_text else product
-    category = category.strip().strip('"').strip("'")
+    # Cleaning the AI output completely to avoid URL breaks
+    category = re.sub(r'[\"\'\*]', '', category).strip()
+    category = category.split('\n')[0][:60]  # Take only the first line, max 60 chars
+    
     logger.info("AI Maps category: product=%r category=%r", product, category)
 
     safe_category = urllib.parse.quote(category, safe="")
+    
+    # URL uses zoom 14z to widen the radius slightly, preventing "no results" issues
     maps_url = (
         f"https://www.google.com/maps/search/{safe_category}/"
-        f"@{latitude},{longitude},15z"
+        f"@{latitude},{longitude},14z?hl=ar"
     )
 
     body = (
         f"📍 بحثك الأخير كان عن ({product})\n\n"
-        "جهزت لك بحثاً عن أقرب الأماكن المناسبة حولك. "
+        "جهزت لك بحثاً دقيقاً عن أقرب الأماكن المناسبة حولك. "
         "اضغط الزر وافتح الخريطة 👇"
     )
 
@@ -1314,7 +1323,7 @@ async def cart_page(cart_id: str) -> HTMLResponse:
 async def health() -> Dict[str, Any]:
     return {
         "status": "ok",
-        "version": "v15-merged-maps",
+        "version": "v15.1-improved-maps",
         "gemini_model": GEMINI_MODEL,
         "graph_version": WHATSAPP_GRAPH_VERSION,
     }
