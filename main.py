@@ -27,16 +27,30 @@ WORKERS = ThreadPoolExecutor(max_workers=3)
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
 SYSTEM_PROMPT = """
-أنت مساعد تسوق كويتي. استخدم بحث Google فعلياً للأسعار الحالية في الكويت.
-رد بهذا الشكل فقط:
+أنت مساعد تسوق كويتي. استخدم بحث Google فعلياً للأسعار والتقييمات الحالية في الكويت.
+
+أولاً حدد نوع الطلب:
+
+【الحالة 1】منتج محدد بعلامة تجارية واضحة (مثل: آيفون 15 برو، بيبسي، ساعة أبل الترا، بلايستيشن 5):
+قارن الأسعار واختر الأرخص، ورد بهذا الشكل فقط:
 📦 [اسم المنتج]
 ✅ [المتجر الأرخص] — [السعر] د.ك
 • [المتجر الثاني] — [السعر] د.ك
 • [المتجر الثالث] — [السعر] د.ك
-ثم سطر أخير إلزامي:
-LINKS: اسم المتجر الأول=الدومين الحقيقي, اسم المتجر الثاني=الدومين الحقيقي, اسم المتجر الثالث=الدومين الحقيقي
+
+【الحالة 2】طلب عام بدون براند محدد (مثل: قهوة فلات وايت حار، عطر رجالي، لابتوب للدراسة، سماعات للجيم، برجر):
+لا تبحث عن الأرخص! ابحث عن الأفضل تقييماً في الكويت بسعر مناسب (أفضل قيمة مقابل السعر).
+اعتمد على تقييمات Google والمراجعات الفعلية، ورد بهذا الشكل فقط:
+📦 [وصف الطلب]
+🏆 [اسم الخيار الأفضل + مكانه/متجره] — [السعر] د.ك ⭐ [التقييم من 5]
+• [خيار ثاني قوي] — [السعر] د.ك ⭐ [التقييم من 5]
+• [خيار ثالث] — [السعر] د.ك ⭐ [التقييم من 5]
+ثم سطر واحد قصير يشرح ليش الخيار الأول هو الأفضل (تقييم عالي + سعر مناسب).
+
+في الحالتين، سطر أخير إلزامي:
+LINKS: اسم الأول=الدومين الحقيقي, اسم الثاني=الدومين الحقيقي, اسم الثالث=الدومين الحقيقي
 مثال: LINKS: إكسايت=xcite.com, بلينك=blink.com.kw, يوريكا=eureka.com.kw
-لا تخمّن الدومين، ولا تذكر متجراً من دون مصدر بحث.
+لا تخمّن الدومين، ولا تذكر متجراً أو خياراً من دون مصدر بحث.
 ممنوع روابط ظاهرة. ممنوع Markdown.
 
 إذا كان المنتج عقاراً أو سيارة، أعطِ تقييماً متوسطاً ونطاق سعر مختصراً جداً.
@@ -71,7 +85,7 @@ def normalize_name(value):
 def extract_store_names(text):
     stores = []
     for line in (text or "").splitlines():
-        m = re.match(r"^\s*(?:✅|•)\s*(.+?)\s*(?:—|–|-)\s*[\d.,]+", line)
+        m = re.match(r"^\s*(?:✅|🏆|•)\s*(.+?)\s*(?:—|–|-)\s*[\d.,]+", line)
         if m:
             name = m.group(1).strip()
             if name and name not in stores:
@@ -306,15 +320,15 @@ def fetch_product_from_image(msg):
         b64,mime=download_whatsapp_media(msg["image"]["id"])
         txt,urls=call_gemini([{"inline_data":{"mime_type":mime,"data":b64}},{"text":"حدد المنتج وابحث عن سعره"}])
         name_m=re.search(r"📦\s*(.+)",txt); name=(name_m.group(1).strip() if name_m else "منتج")[:50]
-        pm=re.search(r"✅.*?(?:—|-|–)\s*([\d\.]+)",txt); price=float(pm.group(1)) if pm else 0
+        pm=re.search(r"(?:✅|🏆).*?(?:—|-|–)\s*([\d\.]+)",txt); price=float(pm.group(1)) if pm else 0
         curl=list(urls.values())[0] if urls else ""; cstore=list(urls.keys())[0] if urls else "متجر"
         return {"name":name,"store":cstore,"price":price,"url":curl,"all_urls":urls}
     except: return {"name":"منتج","store":"متجر","price":0,"url":"","all_urls":{}}
 
 def fetch_product_from_text(prod):
     try:
-        txt,urls=call_gemini([{"text":f"ابحث عن سعر {prod} في الكويت"}])
-        m=re.search(r"✅.*?(?:—|-|–)\s*([\d\.]+)",txt); price=float(m.group(1)) if m else 0
+        txt,urls=call_gemini([{"text":f"ابحث عن {prod} في الكويت"}])
+        m=re.search(r"(?:✅|🏆).*?(?:—|-|–)\s*([\d\.]+)",txt); price=float(m.group(1)) if m else 0
         curl=list(urls.values())[0] if urls else ""; cstore=list(urls.keys())[0] if urls else "متجر"
         return {"name":prod,"store":cstore,"price":price,"url":curl,"all_urls":urls}
     except: return {"name":prod,"store":"متجر","price":0,"url":"","all_urls":{}}
@@ -335,7 +349,7 @@ def process_text_message(message,bot_id):
     from_number=message["from"]; user_text=message["text"]["body"]; products=extract_products(user_text)
     if len(products)==1:
         send_whatsapp_text(from_number,f"🔍 أدور لك على {products[0]}...",bot_id)
-        txt,urls=call_gemini([{"text":f"ابحث عن سعر {products[0]} في الكويت"}])
+        txt,urls=call_gemini([{"text":f"ابحث عن {products[0]} في الكويت"}])
         send_whatsapp_text(from_number,txt or "ما لقيت",bot_id)
         
         LAST_SEARCH[from_number] = {"product": products[0]}
@@ -373,6 +387,7 @@ def process_location_message(message, bot_id):
 - لألعاب الفيديو: (محل العاب فيديو Video games).
 - للكهربائيات الثقيلة والإضاءة: (مواد كهربائية Electrical supply).
 - للملابس والمعدات الرياضية (مثل مضارب التنس والبادل): (Intersport OR Go Sport OR محلات رياضية).
+- للطلبات العامة (قهوة، مطاعم، عطور): اكتب نوع المكان مع كلمة "الأعلى تقييماً" مثل (كافيه specialty coffee) أو (محل عطور perfume shop).
 - إذا لم تكن متأكداً، اكتب اسم المنتج نفسه.
 
 أعطني عبارة البحث فقط بدون أي إضافات أو شرح."""
@@ -397,4 +412,4 @@ async def cart_page(cart_id: str):
     return HTMLResponse(f"<html dir='rtl'><head><meta name='viewport' content='width=device-width'><script src='https://cdn.tailwindcss.com'></script></head><body><div class='max-w-lg mx-auto bg-white'><div class='p-5 bg-black text-white'><h1>🛒 سلتك</h1></div>{rows}</div></body></html>")
 
 @app.get("/")
-async def health(): return {"status":"v11 Smart Category Maps Fix"}
+async def health(): return {"status":"v12 Best-Rated Recommendations"}
