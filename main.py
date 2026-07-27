@@ -19,71 +19,101 @@ GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_M
 processed_ids = deque(maxlen=1000)
 CARTS = {}
 IMAGE_BUFFER = defaultdict(lambda: {"images": [], "time": 0, "bot_id": ""})
-LAST_SEARCH = {} # لحفظ اسم آخر منتج بحث عنه المستخدم
+LAST_SEARCH = {}
 
 BUFFER_SECONDS = 4
-RESOLVER = ThreadPoolExecutor(max_workers=6)
+RESOLVER = ThreadPoolExecutor(max_workers=8)
 WORKERS = ThreadPoolExecutor(max_workers=3)
-HEADERS = {"User-Agent": "Mozilla/5.0"}
+HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
 SYSTEM_PROMPT = """
-أنت مساعد تسوق كويتي. رد بهذا الشكل فقط:
-📦 [اسم المنتج]
-✅ [المتجر الأرخص] — [السعر] د.ك
-• [المتجر الثاني] — [السعر] د.ك
-• [المتجر الثالث] — [السعر] د.ك
-ثم سطر أخير إلزامي:
-LINKS: اسم المتجر الأول=دومينه, اسم المتجر الثاني=دومينه, اسم المتجر الثالث=دومينه
-مثال: LINKS: إكسايت=xcite.com, بلينك=blink.com.kw, يوريكا=eureka.com.kw
-ممنوع روابط ظاهرة. ممنوع Markdown.
+أنت مساعد تسوق كويتي محترف. وظيفتك الوحيدة هي إيجاد أرخص سعر للمنتج في الكويت.
 
-اذا كان المنتج عقار او سيارة فيجب عليك الرد بشكل مختلف : بتقييم متوسط ونطاق سعر السلعة بشكل مختصر جدا، 
+قواعد صارمة جداً لا تخرج عنها:
+1. الرد يكون دائماً بهذا الشكل الحرفي فقط:
+📦 [اسم المنتج الكامل الواضح]
+✅ [اسم المتجر الأرخص] — [السعر] د.ك
+- [المتجر الثاني] — [السعر] د.ك
+- [المتجر الثالث] — [السعر] د.ك
+
+2. في السطر الأخير فقط، يجب أن تكتب سطر الروابط بهذا الشكل الحرفي بدون أي https:
+LINKS: اسم المتجر الأول=domain.com, اسم المتجر الثاني=domain.com, اسم المتجر الثالث=domain.com
+مثال: LINKS: اكسايت=xcite.com, بلينك=blink.com.kw, يوريكا=eureka.com.kw
+
+3. ممنوع تضع أي رابط كامل https:// في الرد. فقط الدومين في سطر LINKS.
+4. ممنوع Markdown مثل **.
+5. استثناء وحيد: اذا كان المنتج عقار حقيقي او سيارة حقيقية فقط، رد بتقييم متوسط ونطاق سعري مختصر جداً وبدون سطر LINKS.
 """
 
 def get_final_url(url: str):
+    if not url: return ""
     try:
-        r = requests.head(url, allow_redirects=True, timeout=8, headers=HEADERS)
-        if r.status_code == 405:
-            r = requests.get(url, allow_redirects=True, timeout=8, stream=True, headers=HEADERS); r.close()
-        final = r.url
-        if "vertexaisearch" in final or "grounding-api-redirect" in final: return ""
-        return final if len(final) < 700 else ""
-    except: return ""
+        try:
+            r = requests.head(url, allow_redirects=True, timeout=10, headers=HEADERS)
+            if r.status_code in [405, 403, 999] or not r.url:
+                raise Exception("need GET")
+            final = r.url
+        except:
+            r = requests.get(url, allow_redirects=True, timeout=10, headers=HEADERS, stream=True)
+            final = r.url
+            r.close()
+
+        if "vertexaisearch" in final or "grounding-api-redirect" in final: return url
+        return final if len(final) < 700 else url
+    except: return url
 
 def resolve_all(uris): return list(RESOLVER.map(get_final_url, uris))
-def domain_key(dom): return dom.replace("www.","").split(".")[0]
+def domain_key(dom): return dom.replace("www.","").split(".")[0].split("/")[0]
 
-def call_gemini(parts, system=SYSTEM_PROMPT):
+def call_gemini(parts, system=SYSTEM_PROMPT, use_search=True):
     payload = {
         "systemInstruction": {"parts": [{"text": system}]},
         "contents": [{"role": "user", "parts": parts}],
-        "tools": [{"google_search": {}}],
         "generationConfig": {"temperature": 0.2, "maxOutputTokens": 2000},
     }
+    if use_search:
+        payload["tools"] = [{"google_search": {}}]
+
     try:
         r = requests.post(GEMINI_URL, params={"key": GEMINI_API_KEY}, json=payload, timeout=90)
-        if r.status_code >= 400: return "", {}
-        data = r.json(); cand = data["candidates"][0]
+        if r.status_code >= 400:
+            print(f"Gemini HTTP {r.status_code}: {r.text[:500]}")
+            return "", {}
+        data = r.json()
+        cand = data["candidates"][0]
         text = "".join(p.get("text","") for p in cand["content"]["parts"]).strip()
+
         pairs=[]
-        m=re.search(r"LINKS:\s*(.+)", text, re.I)
+        m = re.search(r"(?:LINKS|الروابط)\s*[:=]\s*(.+)", text, re.I | re.S)
         if m:
-            raw=m.group(1)
-            for part in re.split(r"[,،]+", raw):
+            raw = m.group(1).split("\n")[0]
+            for part in re.split(r'[,،;]+', raw):
                 part=part.strip()
                 if "=" in part:
-                    name,dom=part.split("=",1); name,dom=name.strip(),dom.strip().lower()
-                    if "." in dom: pairs.append((name,dom))
-            text=re.sub(r"\n?LINKS:.*","",text,flags=re.I).strip()
-        text=re.sub(r"https?://\S+","",text).replace("**","").strip()
-        urls_map={}; chunks=cand.get("groundingMetadata",{}).get("groundingChunks",[])
-        uris=[c.get("web",{}).get("uri") for c in chunks if c.get("web",{}).get("uri")]
-        if uris and pairs:
-            finals=resolve_all(uris[:8])
-            for name,dom in pairs:
-                key=domain_key(dom)
-                for f in finals:
-                    if f and key in f.lower(): urls_map[name]=f; break
+                    name,dom = part.split("=",1)
+                    name,dom = name.strip(), dom.strip().lower().replace("https://","").replace("http://","").split("/")[0]
+                    if "." in dom and len(dom) > 3:
+                        pairs.append((name,dom))
+            text = re.sub(r"\n?LINKS:.*", "", text, flags=re.I).strip()
+            text = re.sub(r"\n?الروابط:.*", "", text, flags=re.I).strip()
+
+        text = re.sub(r"https?://\S+","",text).replace("**","").strip()
+
+        urls_map={}
+        if use_search and pairs:
+            chunks = cand.get("groundingMetadata",{}).get("groundingChunks",[])
+            uris = [c.get("web",{}).get("uri") for c in chunks if c.get("web",{}).get("uri")]
+            if uris:
+                finals = resolve_all(uris[:10])
+                for name,dom in pairs:
+                    key = domain_key(dom)
+                    for f in finals:
+                        if f and key in f.lower():
+                            urls_map[name]=f
+                            break
+                    if name not in urls_map:
+                        urls_map[name] = f"https://{dom}"
+
         return text, dict(list(urls_map.items())[:3])
     except Exception as e:
         print(f"Gemini err {e}"); return "", {}
@@ -130,7 +160,7 @@ async def receive(request: Request, background_tasks: BackgroundTasks):
         processed_ids.append(mid)
         bot_id=value.get("metadata",{}).get("phone_number_id",PHONE_NUMBER_ID)
         from_number=msg["from"]
-        
+
         if msg.get("type")=="image":
             IMAGE_BUFFER[from_number]["images"].append(msg); IMAGE_BUFFER[from_number]["time"]=time.time(); IMAGE_BUFFER[from_number]["bot_id"]=bot_id
             if len(IMAGE_BUFFER[from_number]["images"])==1:
@@ -139,7 +169,7 @@ async def receive(request: Request, background_tasks: BackgroundTasks):
             background_tasks.add_task(process_text_message,msg,bot_id)
         elif msg.get("type")=="location":
             background_tasks.add_task(process_location_message,msg,bot_id)
-            
+
     except Exception as e: print(f"webhook err {e}")
     return {"status":"ok"}
 
@@ -157,7 +187,7 @@ def process_single_image(message,bot_id):
     txt,urls=call_gemini([{"inline_data":{"mime_type":mime,"data":b64}},{"text":"ما هذا المنتج؟ ابحث عن سعره الحالي في الكويت"}])
     if not txt: txt="ما قدرت أحدد المنتج"
     send_whatsapp_text(from_number,txt,bot_id)
-    
+
     name_m = re.search(r"📦\s*(.+)", txt)
     product_name = name_m.group(1).strip() if name_m else "المنتج"
     LAST_SEARCH[from_number] = {"product": product_name}
@@ -165,8 +195,7 @@ def process_single_image(message,bot_id):
     for n,u in urls.items():
         if u: send_whatsapp_cta(from_number,f"تسوق من {n} 👇",u,bot_id,f"🛒 {n[:18]}")
 
-    if urls:
-        send_whatsapp_text(from_number, "📍 تبي تشتري المنتج من مكان قريب منك؟ دز لي موقعك (Location) بالواتساب الحين وأطلع لك أقرب مكان يبيعه بالخريطة!", bot_id)
+    send_whatsapp_text(from_number, "📍 تبي تشتري المنتج من مكان قريب منك؟ دز لي موقعك (Location) بالواتساب الحين وأطلع لك أقرب مكان يبيعه بالخريطة!", bot_id)
 
 def fetch_product_from_image(msg):
     try:
@@ -193,6 +222,7 @@ def finalize_cart(from_number,bot_id,items):
     send_whatsapp_text(from_number,f"🛒 سلتك جاهزة:\n{summ}\n\n💰 الإجمالي: {total:.3f} د.ك",bot_id)
     domain=os.environ.get("RAILWAY_PUBLIC_DOMAIN","fanzia.up.railway.app")
     send_whatsapp_cta(from_number,"افتح السلة",f"https://{domain}/cart/{cart_id}",bot_id,"🛒 افتح السلة")
+    send_whatsapp_text(from_number, "📍 تبي أقرب محل يبيع منتجات سلتك؟ دز موقعك الحين!", bot_id)
 
 def process_multi_images(messages,from_number,bot_id):
     send_whatsapp_text(from_number,f"تمام لقطت {len(messages)} منتجات، أسوي سلة...",bot_id)
@@ -204,15 +234,10 @@ def process_text_message(message,bot_id):
         send_whatsapp_text(from_number,f"🔍 أدور لك على {products[0]}...",bot_id)
         txt,urls=call_gemini([{"text":f"ابحث عن سعر {products[0]} في الكويت"}])
         send_whatsapp_text(from_number,txt or "ما لقيت",bot_id)
-        
         LAST_SEARCH[from_number] = {"product": products[0]}
-            
         for n,u in urls.items():
             if u: send_whatsapp_cta(from_number,f"تسوق من {n} 👇",u,bot_id,f"🛒 {n[:18]}")
-
-        if urls:
-            send_whatsapp_text(from_number, "📍 تبي تشتري المنتج من مكان قريب منك؟ دز لي موقعك (Location) بالواتساب الحين وأطلع لك أقرب مكان يبيعه بالخريطة!", bot_id)
-            
+        send_whatsapp_text(from_number, "📍 تبي تشتري المنتج من مكان قريب منك؟ دز لي موقعك (Location) بالواتساب الحين وأطلع لك أقرب مكان يبيعه بالخريطة!", bot_id)
     else:
         LAST_SEARCH[from_number] = {"product": products[0]}
         send_whatsapp_text(from_number,f"تمام لقيت {len(products)} منتجات، أسوي سلة...",bot_id)
@@ -222,39 +247,23 @@ def process_location_message(message, bot_id):
     from_number = message["from"]
     lat = message["location"]["latitude"]
     lng = message["location"]["longitude"]
-
     last_search = LAST_SEARCH.get(from_number)
     if not last_search or not last_search.get("product"):
         send_whatsapp_text(from_number, "ما عندي منتج محفوظ حالياً 😅. ابحث عن منتج أول، وبعدها دز موقعك عشان أدلك على أقرب مكان يبيعه!", bot_id)
         return
-
     product = last_search["product"]
-    
-    prompt_category = """أنت خبير تسوق في السوق الكويتي. 
-بناءً على اسم المنتج، أعطني "عبارة بحث" (Search Term) دقيقة جداً لخرائط جوجل تجلب المتاجر الصحيحة وتستبعد العشوائية.
-
-قواعد هامة:
-- للإلكترونيات الذكية (ساعة أبل، جوالات، لابتوب): اكتب أسماء الوكلاء الموثوقين هكذا (Xcite OR Eureka OR Best Al Yousifi) ولا تكتب "محل الكترونيات" أبداً.
-- للأجهزة المنزلية (ثلاجة، غسالة): (Xcite OR Eureka).
-- للأدوية والمكملات: (صيدلية Pharmacy).
-- للمواد الغذائية واللحوم: (جمعية تعاونية Supermarket).
-- لألعاب الفيديو: (محل العاب فيديو Video games).
-- للكهربائيات الثقيلة والإضاءة: (مواد كهربائية Electrical supply).
-- للملابس والمعدات الرياضية (مثل مضارب التنس والبادل): (Intersport OR Go Sport OR محلات رياضية).
-- إذا لم تكن متأكداً، اكتب اسم المنتج نفسه.
-
-أعطني عبارة البحث فقط بدون أي إضافات أو شرح."""
-
-    category_text, _ = call_gemini([{"text": f"المنتج: {product}"}], system=prompt_category)
-    category = category_text.strip() if category_text else product
-
-    # الرابط الجديد بصيغة أنظف
+    prompt_category = """أنت خبير خرائط في الكويت. اعطني عبارة بحث واحدة فقط لخرائط جوجل.
+- للإلكترونيات: Xcite OR Eureka OR Best
+- للصيدليات: Pharmacy صيدلية
+- للسوبرماركت: Cooperative Supermarket جمعية
+- للرياضة: Intersport OR Go Sport
+- للباقي: اسم المنتج نفسه
+عبارة البحث فقط بدون شرح."""
+    category_text, _ = call_gemini([{"text": f"المنتج: {product}"}], system=prompt_category, use_search=False)
+    category = category_text.strip().split("\n")[0] if category_text else product
     safe_category = urllib.parse.quote(category)
     maps_url = f"https://www.google.com/maps/search/{safe_category}/@{lat},{lng},15z"
-    
     body = f"📍 بحثك الأخير كان عن ({product})\n\nجهزت لك أقرب المحلات اللي تبيعه حولك، اضغط الزر وافتح الخريطة 👇"
-
-    # هذا هو التعديل الجمالي - زر بدل رابط طويل
     send_whatsapp_cta(from_number, body, maps_url, bot_id, "📍 افتح الخريطة")
 
 @app.get("/cart/{cart_id}", response_class=HTMLResponse)
@@ -265,4 +274,4 @@ async def cart_page(cart_id: str):
     return HTMLResponse(f"<html dir='rtl'><head><meta name='viewport' content='width=device-width'><script src='https://cdn.tailwindcss.com'></script></head><body><div class='max-w-lg mx-auto bg-white'><div class='p-5 bg-black text-white'><h1>🛒 سلتك</h1></div>{rows}</div></body></html>")
 
 @app.get("/")
-async def health(): return {"status":"v11 Smart Category Maps Fix"}
+async def health(): return {"status":"v12 fixed links & map CTA"}
