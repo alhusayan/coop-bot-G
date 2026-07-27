@@ -19,101 +19,192 @@ GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_M
 processed_ids = deque(maxlen=1000)
 CARTS = {}
 IMAGE_BUFFER = defaultdict(lambda: {"images": [], "time": 0, "bot_id": ""})
-LAST_SEARCH = {}
+LAST_SEARCH = {} # لحفظ اسم آخر منتج بحث عنه المستخدم
 
 BUFFER_SECONDS = 4
-RESOLVER = ThreadPoolExecutor(max_workers=8)
+RESOLVER = ThreadPoolExecutor(max_workers=6)
 WORKERS = ThreadPoolExecutor(max_workers=3)
-HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+HEADERS = {"User-Agent": "Mozilla/5.0"}
 
 SYSTEM_PROMPT = """
-أنت مساعد تسوق كويتي محترف. وظيفتك الوحيدة هي إيجاد أرخص سعر للمنتج في الكويت.
+أنت مساعد تسوق كويتي. استخدم بحث Google فعلياً للأسعار الحالية في الكويت.
+رد بهذا الشكل فقط:
+📦 [اسم المنتج]
+✅ [المتجر الأرخص] — [السعر] د.ك
+• [المتجر الثاني] — [السعر] د.ك
+• [المتجر الثالث] — [السعر] د.ك
+ثم سطر أخير إلزامي:
+LINKS: اسم المتجر الأول=الدومين الحقيقي, اسم المتجر الثاني=الدومين الحقيقي, اسم المتجر الثالث=الدومين الحقيقي
+مثال: LINKS: إكسايت=xcite.com, بلينك=blink.com.kw, يوريكا=eureka.com.kw
+لا تخمّن الدومين، ولا تذكر متجراً من دون مصدر بحث.
+ممنوع روابط ظاهرة. ممنوع Markdown.
 
-قواعد صارمة جداً لا تخرج عنها:
-1. الرد يكون دائماً بهذا الشكل الحرفي فقط:
-📦 [اسم المنتج الكامل الواضح]
-✅ [اسم المتجر الأرخص] — [السعر] د.ك
-- [المتجر الثاني] — [السعر] د.ك
-- [المتجر الثالث] — [السعر] د.ك
-
-2. في السطر الأخير فقط، يجب أن تكتب سطر الروابط بهذا الشكل الحرفي بدون أي https:
-LINKS: اسم المتجر الأول=domain.com, اسم المتجر الثاني=domain.com, اسم المتجر الثالث=domain.com
-مثال: LINKS: اكسايت=xcite.com, بلينك=blink.com.kw, يوريكا=eureka.com.kw
-
-3. ممنوع تضع أي رابط كامل https:// في الرد. فقط الدومين في سطر LINKS.
-4. ممنوع Markdown مثل **.
-5. استثناء وحيد: اذا كان المنتج عقار حقيقي او سيارة حقيقية فقط، رد بتقييم متوسط ونطاق سعري مختصر جداً وبدون سطر LINKS.
+إذا كان المنتج عقاراً أو سيارة، أعطِ تقييماً متوسطاً ونطاق سعر مختصراً جداً.
 """
 
 def get_final_url(url: str):
-    if not url: return ""
+    """Resolve redirects, but keep Gemini's original grounding URL as fallback."""
+    if not url or not url.startswith(("http://", "https://")):
+        return ""
     try:
-        try:
-            r = requests.head(url, allow_redirects=True, timeout=10, headers=HEADERS)
-            if r.status_code in [405, 403, 999] or not r.url:
-                raise Exception("need GET")
-            final = r.url
-        except:
-            r = requests.get(url, allow_redirects=True, timeout=10, headers=HEADERS, stream=True)
-            final = r.url
-            r.close()
+        r = requests.get(url, allow_redirects=True, timeout=12, stream=True, headers=HEADERS)
+        final = r.url or url
+        r.close()
+        return final if final.startswith(("http://", "https://")) else url
+    except Exception as e:
+        print(f"URL resolve err: {e} | {url[:180]}")
+        return url
 
-        if "vertexaisearch" in final or "grounding-api-redirect" in final: return url
-        return final if len(final) < 700 else url
-    except: return url
+def resolve_all(uris):
+    return list(RESOLVER.map(get_final_url, uris))
 
-def resolve_all(uris): return list(RESOLVER.map(get_final_url, uris))
-def domain_key(dom): return dom.replace("www.","").split(".")[0].split("/")[0]
+def clean_domain(dom):
+    dom = re.sub(r"^https?://", "", (dom or "").strip().lower())
+    return dom.replace("www.", "").split("/")[0]
 
-def call_gemini(parts, system=SYSTEM_PROMPT, use_search=True):
+def domain_key(dom):
+    return clean_domain(dom).split(".")[0]
+
+def normalize_name(value):
+    return re.sub(r"[^\w\u0600-\u06FF]+", "", (value or "").lower())
+
+def extract_store_names(text):
+    stores = []
+    for line in (text or "").splitlines():
+        m = re.match(r"^\s*(?:✅|•)\s*(.+?)\s*(?:—|–|-)\s*[\d.,]+", line)
+        if m:
+            name = m.group(1).strip()
+            if name and name not in stores:
+                stores.append(name)
+    return stores[:3]
+
+def source_label(title, url):
+    title = (title or "").strip()
+    if title:
+        return title[:40]
+    try:
+        host = urllib.parse.urlparse(url).netloc.replace("www.", "")
+        return host.split(".")[0] or "المتجر"
+    except Exception:
+        return "المتجر"
+
+def call_gemini(parts, system=SYSTEM_PROMPT):
     payload = {
         "systemInstruction": {"parts": [{"text": system}]},
         "contents": [{"role": "user", "parts": parts}],
+        "tools": [{"google_search": {}}],
         "generationConfig": {"temperature": 0.2, "maxOutputTokens": 2000},
     }
-    if use_search:
-        payload["tools"] = [{"google_search": {}}]
-
     try:
         r = requests.post(GEMINI_URL, params={"key": GEMINI_API_KEY}, json=payload, timeout=90)
         if r.status_code >= 400:
             print(f"Gemini HTTP {r.status_code}: {r.text[:500]}")
             return "", {}
+
         data = r.json()
-        cand = data["candidates"][0]
-        text = "".join(p.get("text","") for p in cand["content"]["parts"]).strip()
+        candidates = data.get("candidates") or []
+        if not candidates:
+            print(f"Gemini returned no candidates: {str(data)[:500]}")
+            return "", {}
 
-        pairs=[]
-        m = re.search(r"(?:LINKS|الروابط)\s*[:=]\s*(.+)", text, re.I | re.S)
+        cand = candidates[0]
+        text = "".join(p.get("text", "") for p in cand.get("content", {}).get("parts", [])).strip()
+
+        # LINKS is helpful, but URL extraction no longer depends on it alone.
+        pairs = []
+        m = re.search(r"(?im)^\s*LINKS\s*:\s*(.+)$", text)
         if m:
-            raw = m.group(1).split("\n")[0]
-            for part in re.split(r'[,،;]+', raw):
-                part=part.strip()
+            raw = m.group(1)
+            for part in re.split(r"[,،]+", raw):
+                part = part.strip()
                 if "=" in part:
-                    name,dom = part.split("=",1)
-                    name,dom = name.strip(), dom.strip().lower().replace("https://","").replace("http://","").split("/")[0]
-                    if "." in dom and len(dom) > 3:
-                        pairs.append((name,dom))
-            text = re.sub(r"\n?LINKS:.*", "", text, flags=re.I).strip()
-            text = re.sub(r"\n?الروابط:.*", "", text, flags=re.I).strip()
+                    name, dom = part.split("=", 1)
+                    name, dom = name.strip(), clean_domain(dom)
+                    if name and "." in dom:
+                        pairs.append((name, dom))
+            text = re.sub(r"(?im)^\s*LINKS\s*:.*$", "", text).strip()
 
-        text = re.sub(r"https?://\S+","",text).replace("**","").strip()
+        text = re.sub(r"https?://\S+", "", text).replace("**", "").strip()
+        metadata = cand.get("groundingMetadata", {}) or {}
+        chunks = metadata.get("groundingChunks", []) or []
+        uris = [(c.get("web") or {}).get("uri", "") for c in chunks]
+        finals = resolve_all(uris[:15]) if uris else []
 
-        urls_map={}
-        if use_search and pairs:
-            chunks = cand.get("groundingMetadata",{}).get("groundingChunks",[])
-            uris = [c.get("web",{}).get("uri") for c in chunks if c.get("web",{}).get("uri")]
-            if uris:
-                finals = resolve_all(uris[:10])
-                for name,dom in pairs:
-                    key = domain_key(dom)
-                    for f in finals:
-                        if f and key in f.lower():
-                            urls_map[name]=f
-                            break
-                    if name not in urls_map:
-                        urls_map[name] = f"https://{dom}"
+        records = []
+        for i, chunk in enumerate(chunks[:15]):
+            web = chunk.get("web") or {}
+            raw_uri = web.get("uri", "")
+            final_uri = finals[i] if i < len(finals) else raw_uri
+            records.append({
+                "title": web.get("title", ""),
+                "raw": raw_uri,
+                "url": final_uri or raw_uri,
+            })
 
+        urls_map = {}
+        used_urls = set()
+        stores = extract_store_names(text)
+
+        # Best mapping: connect each displayed store to groundingSupports.
+        supports = metadata.get("groundingSupports", []) or []
+        for store in stores:
+            store_norm = normalize_name(store)
+            for support in supports:
+                segment = (support.get("segment") or {}).get("text", "")
+                if store_norm and store_norm in normalize_name(segment):
+                    for idx in support.get("groundingChunkIndices", []) or []:
+                        if 0 <= idx < len(records):
+                            url = records[idx]["url"]
+                            if url and url not in used_urls:
+                                urls_map[store] = url
+                                used_urls.add(url)
+                                break
+                if store in urls_map:
+                    break
+
+        # Fallback: match the mandatory LINKS domains against raw/final URLs and titles.
+        for name, dom in pairs:
+            if name in urls_map:
+                continue
+            key = domain_key(dom)
+            for rec in records:
+                haystack = f"{rec['title']} {rec['raw']} {rec['url']}".lower()
+                if rec["url"] and key and key in haystack and rec["url"] not in used_urls:
+                    urls_map[name] = rec["url"]
+                    used_urls.add(rec["url"])
+                    break
+
+        # Last fallback: match store names directly against source titles.
+        for store in stores:
+            if store in urls_map:
+                continue
+            store_norm = normalize_name(store)
+            for rec in records:
+                if rec["url"] and store_norm and store_norm in normalize_name(rec["title"]):
+                    if rec["url"] not in used_urls:
+                        urls_map[store] = rec["url"]
+                        used_urls.add(rec["url"])
+                        break
+
+        # If Gemini omitted LINKS/support mapping, still expose up to 3 grounded sources.
+        if not urls_map:
+            for rec in records:
+                url = rec["url"]
+                if not url or url in used_urls:
+                    continue
+                label = source_label(rec["title"], url)
+                if label not in urls_map:
+                    urls_map[label] = url
+                    used_urls.add(url)
+                if len(urls_map) == 3:
+                    break
+
+        print({
+            "stores": stores,
+            "links_pairs": pairs,
+            "grounding_chunks": len(chunks),
+            "resolved_buttons": list(urls_map.keys()),
+        })
         return text, dict(list(urls_map.items())[:3])
     except Exception as e:
         print(f"Gemini err {e}"); return "", {}
@@ -133,14 +224,26 @@ def download_whatsapp_media(mid):
 def send_whatsapp_text(to,text,bot_id):
     url=f"{GRAPH_URL}/{bot_id}/messages"; h={"Authorization":f"Bearer {WHATSAPP_TOKEN}","Content-Type":"application/json"}
     payload={"messaging_product":"whatsapp","to":to,"type":"text","text":{"body":text[:3900]}}
-    try: requests.post(url,json=payload,headers=h,timeout=15)
-    except: pass
+    try:
+        r = requests.post(url,json=payload,headers=h,timeout=15)
+        if not r.ok:
+            print(f"WhatsApp text error {r.status_code}: {r.text[:500]}")
+        return r.ok
+    except Exception as e:
+        print(f"WhatsApp text exception: {e}")
+        return False
 
 def send_whatsapp_cta(to,body,link,bot_id,title):
     url=f"{GRAPH_URL}/{bot_id}/messages"; h={"Authorization":f"Bearer {WHATSAPP_TOKEN}","Content-Type":"application/json"}
     payload={"messaging_product":"whatsapp","to":to,"type":"interactive","interactive":{"type":"cta_url","body":{"text":body[:1024]},"action":{"name":"cta_url","parameters":{"display_text":title[:20],"url":link}}}}
-    try: requests.post(url,json=payload,headers=h,timeout=15)
-    except: pass
+    try:
+        r = requests.post(url,json=payload,headers=h,timeout=15)
+        if not r.ok:
+            print(f"WhatsApp CTA error {r.status_code}: {r.text[:500]} | {link[:180]}")
+        return r.ok
+    except Exception as e:
+        print(f"WhatsApp CTA exception: {e} | {link[:180]}")
+        return False
 
 @app.get("/webhook")
 async def verify(request: Request):
@@ -160,7 +263,7 @@ async def receive(request: Request, background_tasks: BackgroundTasks):
         processed_ids.append(mid)
         bot_id=value.get("metadata",{}).get("phone_number_id",PHONE_NUMBER_ID)
         from_number=msg["from"]
-
+        
         if msg.get("type")=="image":
             IMAGE_BUFFER[from_number]["images"].append(msg); IMAGE_BUFFER[from_number]["time"]=time.time(); IMAGE_BUFFER[from_number]["bot_id"]=bot_id
             if len(IMAGE_BUFFER[from_number]["images"])==1:
@@ -169,7 +272,7 @@ async def receive(request: Request, background_tasks: BackgroundTasks):
             background_tasks.add_task(process_text_message,msg,bot_id)
         elif msg.get("type")=="location":
             background_tasks.add_task(process_location_message,msg,bot_id)
-
+            
     except Exception as e: print(f"webhook err {e}")
     return {"status":"ok"}
 
@@ -187,7 +290,7 @@ def process_single_image(message,bot_id):
     txt,urls=call_gemini([{"inline_data":{"mime_type":mime,"data":b64}},{"text":"ما هذا المنتج؟ ابحث عن سعره الحالي في الكويت"}])
     if not txt: txt="ما قدرت أحدد المنتج"
     send_whatsapp_text(from_number,txt,bot_id)
-
+    
     name_m = re.search(r"📦\s*(.+)", txt)
     product_name = name_m.group(1).strip() if name_m else "المنتج"
     LAST_SEARCH[from_number] = {"product": product_name}
@@ -195,7 +298,8 @@ def process_single_image(message,bot_id):
     for n,u in urls.items():
         if u: send_whatsapp_cta(from_number,f"تسوق من {n} 👇",u,bot_id,f"🛒 {n[:18]}")
 
-    send_whatsapp_text(from_number, "📍 تبي تشتري المنتج من مكان قريب منك؟ دز لي موقعك (Location) بالواتساب الحين وأطلع لك أقرب مكان يبيعه بالخريطة!", bot_id)
+    if product_name and product_name != "المنتج":
+        send_whatsapp_text(from_number, "📍 تبي تشتري المنتج من مكان قريب منك؟ دز لي موقعك (Location) بالواتساب الحين وأطلع لك أقرب مكان يبيعه بالخريطة!", bot_id)
 
 def fetch_product_from_image(msg):
     try:
@@ -222,7 +326,6 @@ def finalize_cart(from_number,bot_id,items):
     send_whatsapp_text(from_number,f"🛒 سلتك جاهزة:\n{summ}\n\n💰 الإجمالي: {total:.3f} د.ك",bot_id)
     domain=os.environ.get("RAILWAY_PUBLIC_DOMAIN","fanzia.up.railway.app")
     send_whatsapp_cta(from_number,"افتح السلة",f"https://{domain}/cart/{cart_id}",bot_id,"🛒 افتح السلة")
-    send_whatsapp_text(from_number, "📍 تبي أقرب محل يبيع منتجات سلتك؟ دز موقعك الحين!", bot_id)
 
 def process_multi_images(messages,from_number,bot_id):
     send_whatsapp_text(from_number,f"تمام لقطت {len(messages)} منتجات، أسوي سلة...",bot_id)
@@ -234,10 +337,14 @@ def process_text_message(message,bot_id):
         send_whatsapp_text(from_number,f"🔍 أدور لك على {products[0]}...",bot_id)
         txt,urls=call_gemini([{"text":f"ابحث عن سعر {products[0]} في الكويت"}])
         send_whatsapp_text(from_number,txt or "ما لقيت",bot_id)
+        
         LAST_SEARCH[from_number] = {"product": products[0]}
+            
         for n,u in urls.items():
             if u: send_whatsapp_cta(from_number,f"تسوق من {n} 👇",u,bot_id,f"🛒 {n[:18]}")
+
         send_whatsapp_text(from_number, "📍 تبي تشتري المنتج من مكان قريب منك؟ دز لي موقعك (Location) بالواتساب الحين وأطلع لك أقرب مكان يبيعه بالخريطة!", bot_id)
+            
     else:
         LAST_SEARCH[from_number] = {"product": products[0]}
         send_whatsapp_text(from_number,f"تمام لقيت {len(products)} منتجات، أسوي سلة...",bot_id)
@@ -247,23 +354,39 @@ def process_location_message(message, bot_id):
     from_number = message["from"]
     lat = message["location"]["latitude"]
     lng = message["location"]["longitude"]
+
     last_search = LAST_SEARCH.get(from_number)
     if not last_search or not last_search.get("product"):
         send_whatsapp_text(from_number, "ما عندي منتج محفوظ حالياً 😅. ابحث عن منتج أول، وبعدها دز موقعك عشان أدلك على أقرب مكان يبيعه!", bot_id)
         return
+
     product = last_search["product"]
-    prompt_category = """أنت خبير خرائط في الكويت. اعطني عبارة بحث واحدة فقط لخرائط جوجل.
-- للإلكترونيات: Xcite OR Eureka OR Best
-- للصيدليات: Pharmacy صيدلية
-- للسوبرماركت: Cooperative Supermarket جمعية
-- للرياضة: Intersport OR Go Sport
-- للباقي: اسم المنتج نفسه
-عبارة البحث فقط بدون شرح."""
-    category_text, _ = call_gemini([{"text": f"المنتج: {product}"}], system=prompt_category, use_search=False)
-    category = category_text.strip().split("\n")[0] if category_text else product
+    
+    prompt_category = """أنت خبير تسوق في السوق الكويتي. 
+بناءً على اسم المنتج، أعطني "عبارة بحث" (Search Term) دقيقة جداً لخرائط جوجل تجلب المتاجر الصحيحة وتستبعد العشوائية.
+
+قواعد هامة:
+- للإلكترونيات الذكية (ساعة أبل، جوالات، لابتوب): اكتب أسماء الوكلاء الموثوقين هكذا (Xcite OR Eureka OR Best Al Yousifi) ولا تكتب "محل الكترونيات" أبداً.
+- للأجهزة المنزلية (ثلاجة، غسالة): (Xcite OR Eureka).
+- للأدوية والمكملات: (صيدلية Pharmacy).
+- للمواد الغذائية واللحوم: (جمعية تعاونية Supermarket).
+- لألعاب الفيديو: (محل العاب فيديو Video games).
+- للكهربائيات الثقيلة والإضاءة: (مواد كهربائية Electrical supply).
+- للملابس والمعدات الرياضية (مثل مضارب التنس والبادل): (Intersport OR Go Sport OR محلات رياضية).
+- إذا لم تكن متأكداً، اكتب اسم المنتج نفسه.
+
+أعطني عبارة البحث فقط بدون أي إضافات أو شرح."""
+
+    category_text, _ = call_gemini([{"text": f"المنتج: {product}"}], system=prompt_category)
+    category = category_text.strip() if category_text else product
+
+    # الرابط الجديد بصيغة أنظف
     safe_category = urllib.parse.quote(category)
     maps_url = f"https://www.google.com/maps/search/{safe_category}/@{lat},{lng},15z"
+    
     body = f"📍 بحثك الأخير كان عن ({product})\n\nجهزت لك أقرب المحلات اللي تبيعه حولك، اضغط الزر وافتح الخريطة 👇"
+
+    # هذا هو التعديل الجمالي - زر بدل رابط طويل
     send_whatsapp_cta(from_number, body, maps_url, bot_id, "📍 افتح الخريطة")
 
 @app.get("/cart/{cart_id}", response_class=HTMLResponse)
@@ -274,4 +397,4 @@ async def cart_page(cart_id: str):
     return HTMLResponse(f"<html dir='rtl'><head><meta name='viewport' content='width=device-width'><script src='https://cdn.tailwindcss.com'></script></head><body><div class='max-w-lg mx-auto bg-white'><div class='p-5 bg-black text-white'><h1>🛒 سلتك</h1></div>{rows}</div></body></html>")
 
 @app.get("/")
-async def health(): return {"status":"v12 fixed links & map CTA"}
+async def health(): return {"status":"v11 Smart Category Maps Fix"}
