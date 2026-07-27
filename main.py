@@ -26,6 +26,9 @@ RESOLVER = ThreadPoolExecutor(max_workers=6)
 WORKERS = ThreadPoolExecutor(max_workers=3)
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
+# رسالة طلب اللوكيشن مع خطوات واضحة (تُستخدم في مكانين)
+LOCATION_PROMPT_MSG = "تبي أقرب محل يبيعه؟ 📍\n\nسهلة، ٣ خطوات:\n1️⃣ اضغط ➕ (أيفون) أو 📎 (أندرويد) جنب خانة الكتابة\n2️⃣ اختر الموقع Location\n3️⃣ اضغط إرسال موقعك الحالي\n\nوعلى طول أرد لك بأقرب المحلات على الخريطة 👇"
+
 SYSTEM_PROMPT = """
 أنت مساعد تسوق كويتي. استخدم بحث Google فعلياً للأسعار والتقييمات الحالية في الكويت.
 
@@ -355,7 +358,7 @@ def process_single_image(message,bot_id):
         if u: send_whatsapp_cta(from_number,f"تسوق من {n} 👇",u,bot_id,f"🛒 {n[:18]}")
 
     if product_name and product_name != "المنتج":
-        send_whatsapp_text(from_number, "تبي أقرب محل يبيعه؟ 📍\n\nسهلة، ٣ خطوات:\n1️⃣ اضغط ➕ (أيفون) أو 📎 (أندرويد) جنب خانة الكتابة\n2️⃣ اختر الموقع Location\n3️⃣ اضغط إرسال موقعك الحالي\n\nوعلى طول أرد لك بأقرب المحلات على الخريطة 👇", bot_id)
+        send_whatsapp_text(from_number, LOCATION_PROMPT_MSG, bot_id)
 
 def fetch_product_from_image(msg):
     try:
@@ -404,7 +407,7 @@ def process_text_message(message,bot_id):
         for n,u in urls.items():
             if u: send_whatsapp_cta(from_number,f"تسوق من {n} 👇",u,bot_id,f"🛒 {n[:18]}")
 
-        send_whatsapp_text(from_number, "📍 تبي تشتري المنتج من مكان قريب منك؟ دز لي موقعك (Location) بالواتساب الحين وأطلع لك أقرب مكان يبيعه بالخريطة!", bot_id)
+        send_whatsapp_text(from_number, LOCATION_PROMPT_MSG, bot_id)
             
     else:
         LAST_SEARCH[from_number] = {"product": products[0]}
@@ -459,4 +462,4 @@ async def cart_page(cart_id: str):
     return HTMLResponse(f"<html dir='rtl'><head><meta name='viewport' content='width=device-width'><script src='https://cdn.tailwindcss.com'></script></head><body><div class='max-w-lg mx-auto bg-white'><div class='p-5 bg-black text-white'><h1>🛒 سلتك</h1></div>{rows}</div></body></html>")
 
 @app.get("/")
-async def health(): return {"status":"v12 Best-Rated Recommendations"}
+async def health(): return {"status":"v13 Location Onboarding"}
