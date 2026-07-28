@@ -44,6 +44,15 @@ def result_quality(txt, urls):
     """(عدد المتاجر بأسعار، عدد اللنكات)"""
     return len(extract_store_names(txt or "")), len(urls or {})
 
+def fallback_search_url(query):
+    """زر مضمون دايماً: بحث جوجل عن المتجر/المنتج إذا ما توفر لنك مباشر"""
+    return "https://www.google.com/search?q=" + urllib.parse.quote(f"{query} الكويت اونلاين")
+
+def best_store_name(txt):
+    """اسم أفضل متجر من سطر 🏪 إن وجد"""
+    m = re.search(r"^\s*🏪\s*[^:：]*[:：]\s*(.+?)\s*$", txt or "", flags=re.M)
+    return m.group(1).strip() if m else ""
+
 def cache_key(query, lang):
     norm = re.sub(r"[^\w\u0600-\u06FF]+", "", (query or "").lower())
     return hashlib.sha256(f"{norm}|{lang}".encode()).hexdigest()
@@ -232,6 +241,13 @@ def normalize_name(value):
 def extract_store_names(text):
     stores = []
     for line in (text or "").splitlines():
+        # سطر أفضل متجر بالسلة: 🏪 أفضل متجر واحد: X
+        m = re.match(r"^\s*🏪\s*[^:：]*[:：]\s*(.+?)\s*$", line)
+        if m:
+            name = m.group(1).strip()
+            if name and name not in stores:
+                stores.insert(0, name)  # الأولوية له بالربط
+            continue
         m = re.match(r"^\s*(?:✅|🏆|•)\s*(.+?)\s*(?:—|–|-)\s*[\d.,]+", line)
         if m:
             name = m.group(1).strip()
@@ -622,8 +638,15 @@ def process_single_image(message,bot_id,lang="ar"):
 
     LAST_SEARCH[from_number] = {"product": product_name or "المنتج"}
 
+    sent_any=False
     for n,u in urls.items():
-        if u: send_whatsapp_cta(from_number,T(lang,"shop_from",n=n),u,bot_id,f"🛒 {n[:18]}")
+        if u:
+            send_whatsapp_cta(from_number,T(lang,"shop_from",n=n),u,bot_id,f"🛒 {n[:18]}")
+            sent_any=True
+    if not sent_any and txt and product_name and product_name != "المنتج":
+        stores=extract_store_names(txt)
+        target=stores[0] if stores else product_name
+        send_whatsapp_cta(from_number,T(lang,"shop_from",n=target),fallback_search_url(f"{product_name} {target}" if stores else product_name),bot_id,f"🛒 {target[:18]}")
 
     if product_name and product_name != "المنتج":
         send_whatsapp_location_request(from_number, T(lang,"location_prompt"), bot_id)
@@ -664,8 +687,16 @@ def process_cart(products, from_number, bot_id, lang="ar"):
     LAST_SEARCH[from_number] = {"product": products[0]}
 
     # زر واحد (أو اثنين كحد أقصى) لأفضل متجر — الهدف: طلب واحد وتوصيلة وحدة
+    sent_any = False
     for n, u in list(urls.items())[:2]:
-        if u: send_whatsapp_cta(from_number, T(lang,"shop_from",n=n), u, bot_id, f"🛒 {n[:18]}")
+        if u:
+            send_whatsapp_cta(from_number, T(lang,"shop_from",n=n), u, bot_id, f"🛒 {n[:18]}")
+            sent_any = True
+    # ضمانة: لو ما توفر لنك مباشر، زر يفتح بحث جوجل عن أفضل متجر
+    if not sent_any:
+        store = best_store_name(txt) or (products[0] if products else "")
+        if store:
+            send_whatsapp_cta(from_number, T(lang,"shop_from",n=store), fallback_search_url(store), bot_id, f"🛒 {store[:18]}")
 
 def process_multi_images(messages,from_number,bot_id,lang="ar"):
     send_whatsapp_text(from_number,T(lang,"multi_images",c=len(messages)),bot_id)
@@ -712,8 +743,15 @@ def process_text_message(message,bot_id):
         if contacts:
             send_whatsapp_contacts(from_number, contacts, bot_id)
             
+        sent_any=False
         for n,u in urls.items():
-            if u: send_whatsapp_cta(from_number,T(lang,"shop_from",n=n),u,bot_id,f"🛒 {n[:18]}")
+            if u:
+                send_whatsapp_cta(from_number,T(lang,"shop_from",n=n),u,bot_id,f"🛒 {n[:18]}")
+                sent_any=True
+        if not sent_any and txt:
+            stores=extract_store_names(txt)
+            target=stores[0] if stores else products[0]
+            send_whatsapp_cta(from_number,T(lang,"shop_from",n=target),fallback_search_url(f"{products[0]} {target}" if stores else products[0]),bot_id,f"🛒 {target[:18]}")
 
         send_whatsapp_location_request(from_number, T(lang,"location_prompt"), bot_id)
             
@@ -763,4 +801,4 @@ def process_location_message(message, bot_id):
     send_whatsapp_cta(from_number, body, maps_url, bot_id, T(lang,"maps_btn"))
 
 @app.get("/")
-async def health(): return {"status":"v19 Smart One-Store Cart"}
+async def health(): return {"status":"v20 Guaranteed Links"}
