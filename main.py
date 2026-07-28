@@ -50,14 +50,13 @@ def fallback_search_url(query):
 
 # ===== خط تدقيق اللنكات: نضمن إن الزر يوصل لصفحة المنتج مو القسم =====
 PRODUCT_URL_HINTS = ("/p/", "/product/", "/products/", "/dp/", "/item/", "/buy/", "/pd/", "-p-", "sku=", "/prod/")
-CATEGORY_URL_HINTS = ("/c/", "/category/", "/categories/", "/collections", "/brand", "/brands", "/search", "?q=", "/stores", "/shop-by", "/deals", "/offers", "/sale", "/compare", "compare?", "/landing")
-# علامات صفحة الشراء داخل الـ HTML — تشمل علامات SEO اللي تكون موجودة حتى في مواقع الجافاسكريبت
+CATEGORY_URL_HINTS = ("/c/", "/category/", "/categories/", "/collections", "/brand", "/brands", "/search", "?q=", "/stores", "/shop-by", "/deals", "/offers", "/sale")
+# علامات صفحة الشراء داخل الـ HTML نفسه
 BUY_PAGE_SIGNS = (
-    "add to cart", "add-to-cart", "addtocart", "buy now", "buy-now", "buynow",
+    "add to cart", "add-to-cart", "addtocart", "buy now", "buy-now",
     "أضف إلى السلة", "اضف الى السلة", "أضف للسلة", "اضافه للسله", "إضافة إلى السلة",
     "اشتري الآن", "اشتري الان", "اشتر الآن",
-    "og:type", "schema.org/product", '"@type":"product', '"@type": "product',
-    '"offers"', '"sku"', "product:price", "itemprop=\"price\"",
+    'og:type" content="product', "schema.org/product", '"@type":"product', '"@type": "product',
 )
 # مواقع التوصيل: صفحة المطعم/المتجر هي أفضل وجهة ممكنة — نقبلها بدون فحص
 MARKETPLACE_OK_DOMAINS = ("talabat", "deliveroo", "cari.", "carriage", "jahez", "snoonu")
@@ -76,45 +75,20 @@ def fetch_page_snippet(url, limit=80000):
     except Exception:
         return ""
 
-# علامات نفاد الكمية — زر يوصل لمنتج Sold Out أسوأ من عدمه
-OUT_OF_STOCK_SIGNS = (
-    "sold out", "sold-out", "out of stock", "outofstock", "currently unavailable",
-    "نفدت الكمية", "نفذت الكمية", "غير متوفر حاليا", "غير متوفر حالياً", "انتهت الكمية",
-    "notify me when available", "أعلمني عند التوفر", "اشعرني عند التوفر",
-    '"availability":"http://schema.org/outofstock', '"availability": "http://schema.org/outofstock',
-)
-
-def english_query(product):
-    """يستخرج الاسم الإنجليزي من صيغة 'عربي (English)' — للإصلاح داخل المواقع المفهرسة بالإنجليزي.
-    إن لم يوجد قوس، نجمع الكلمات اللاتينية والأرقام من الاسم."""
-    m = re.search(r"\(([^)]+)\)", product or "")
-    if m and re.search(r"[a-zA-Z]", m.group(1)):
-        return m.group(1).strip()
-    latin = " ".join(re.findall(r"[A-Za-z0-9][\w\-\.]*", product or "")).strip()
-    # لازم يكون فيه حروف فعلية مو أرقام بس، وإلا نرجع الاسم الأصلي كامل
-    if len(latin) >= 4 and re.search(r"[A-Za-z]", latin):
-        return latin
-    return product or ""
-
-def evaluate_link(url):
-    """يفحص الرابط: 'ok'، 'soldout' نافد، 'category' قسم مؤكد.
-    القاعدة الذهبية: الشك لصالح اللنك الأصلي — نرفض فقط اللي ثابت إنه خربان،
-    لأن مواقع الجافاسكريبت ما تظهر أزرار الشراء في الـ HTML الخام."""
+def is_product_page(url):
+    """هل هذا الرابط صفحة شراء منتج فعلاً؟"""
     u = (url or "").lower()
     if not u.startswith("http"):
-        return "category"
-    if any(m in clean_domain(u) for m in MARKETPLACE_OK_DOMAINS):
-        return "ok"  # مواقع التوصيل: صفحة المطعم مقبولة
-    if any(h in u for h in CATEGORY_URL_HINTS):
-        return "category"  # قسم مؤكد من شكل الرابط
+        return False
+    if any(h in u for h in PRODUCT_URL_HINTS):
+        return True
     html = fetch_page_snippet(url)
-    if html and any(s in html for s in OUT_OF_STOCK_SIGNS):
-        return "soldout"  # نافد مؤكد
-    # صفحة منتج بشكل الرابط، أو فيها علامات شراء/منتج، أو غامضة — كلها تعدي
-    return "ok"
-
-def is_product_page(url):
-    return evaluate_link(url) == "ok"
+    if not html:
+        # ما قدرنا نفحص — إذا شكل الرابط قسم نرفضه، غير كذا نقبله
+        return not any(h in u for h in CATEGORY_URL_HINTS)
+    return any(s in html for s in BUY_PAGE_SIGNS) and not (
+        any(h in u for h in CATEGORY_URL_HINTS) and "@type" not in html
+    )
 
 def ddg_site_search(domain, product):
     """بحث DuckDuckGo مقيّد بموقع المتجر — للعثور على صفحة المنتج بالضبط"""
@@ -135,25 +109,21 @@ def ddg_site_search(domain, product):
         return []
 
 def refine_link(store, url, product):
-    """يحوّل لنك القسم/النافد إلى صفحة منتج قدر الإمكان — بدون ما نطرد العميل لجوجل إلا للضرورة"""
+    """يحوّل لنك القسم/الرئيسية إلى صفحة المنتج بالضبط قدر الإمكان"""
     try:
         dom = clean_domain(url)
-        status = evaluate_link(url)
-        if status == "ok":
+        if any(m in dom for m in MARKETPLACE_OK_DOMAINS):
+            return url  # صفحة المطعم/المتجر مقبولة في مواقع التوصيل
+        if is_product_page(url):
             return url
-        print(f"LINK {status}: {store}: {url[:70]}")
-        q_en = english_query(product)
-        for cand in ddg_site_search(dom, q_en):
-            if evaluate_link(cand) == "ok":
-                print(f"LINK FIXED: {store}: -> {cand[:90]}")
+        # الرابط قسم أو رئيسية → ندور صفحة المنتج داخل نفس الموقع
+        for cand in ddg_site_search(dom, product):
+            if is_product_page(cand):
+                print(f"LINK FIXED: {store}: {url[:70]} -> {cand[:90]}")
                 return cand
-        if status == "category":
-            # ما لقينا صفحة المنتج؟ لنك القسم الأصلي أفضل من جوجل — العميل داخل المتجر الصح
-            print(f"LINK kept (category): {store}")
-            return url
-        # نافد الكمية وصفحته عديمة الفائدة → بحث جوجل عادي كآخر حل
-        print(f"LINK -> google search (soldout): {store}")
-        return "https://www.google.com/search?q=" + urllib.parse.quote(f"{q_en} {store} Kuwait")
+        # آخر حل: بحث جوجل مقيّد بالموقع — العميل على بعد ضغطة وحدة من المنتج
+        print(f"LINK -> site search: {store}: {url[:70]}")
+        return "https://www.google.com/search?q=" + urllib.parse.quote(f"{product} site:{dom}")
     except Exception as e:
         print(f"refine err {e}")
         return url
@@ -238,16 +208,13 @@ def cache_put(query, lang, txt, urls):
 
 # برومبت تحديد الاسم القياسي للمنتج من الصورة (بدون بحث — سريع ورخيص)
 IDENTIFY_SYSTEM = """أنت خبير تعرف على المنتجات. انظر للصورة واكتب الاسم التجاري القياسي للمنتج بصيغة ثابتة دائماً:
-[الاسم بالعربي] ([الاسم بالإنجليزي])
+[البراند] [نوع المنتج] [رقم الموديل باللاتيني إن ظهر] [اللون/النكهة] [الحجم/الوزن إن ظهر]
 
-الاسم بالعربي: البراند + نوع المنتج + رقم الموديل + اللون/النكهة + الحجم إن ظهر.
-الاسم بالإنجليزي بين الأقواس: نفس المنتج بالاسم الذي تستخدمه المتاجر الإلكترونية — مهم جداً لأن أغلب مواقع المتاجر الكويتية مفهرسة بالإنجليزي.
 رقم الموديل هو أهم عنصر — دور عليه على العبوة أو الذراع أو الملصق (مثل RB3721، SM-S928، MQ2V3).
-رقم الجيل مهم جداً أيضاً (مثل Ultra 2، Ultra 3، آيفون 16): اذكره إن كان ظاهراً أو مؤكداً من شكل المنتج، وإذا لم يكن واضحاً من الصورة لا تخمّنه — اكتب الاسم بدون رقم الجيل.
 أمثلة على الصيغة:
-- أبل واتش الترا 2 تيتانيوم 49 مم (Apple Watch Ultra 2 Titanium 49mm)
-- برينجلز كاتشب 200 جرام (Pringles Ketchup 200g)
-سطر واحد فقط. بدون شرح أو مقدمات أو رموز إضافية."""
+- ريبان نظارة شمسية RB3721 اسود 59 مم
+- برينجلز كاتشب 200 جرام
+سطر واحد فقط. بدون أقواس أو شرح أو مقدمات أو رموز."""
 
 # برومبت السلة الذكية: أفضل متجر واحد يوفر السلة كلها بأقل إجمالي
 CART_SYSTEM = """أنت مساعد تسوق كويتي. ستستلم قائمة منتجات (سلة واحدة). استخدم بحث Google فعلياً للأسعار الحالية في الكويت.
@@ -340,8 +307,6 @@ SYSTEM_PROMPT = """
 ✅ [المتجر الأرخص] — [السعر] د.ك
 • [المتجر الثاني] — [السعر] د.ك
 • [المتجر الثالث] — [السعر] د.ك
-⚠️ قاعدة الموديل الواحد: كل الأسعار في المقارنة يجب أن تكون لنفس المنتج بنفس الجيل والموديل والحجم بالضبط — ممنوع مقارنة أجيال مختلفة (مثلاً Ultra 2 مع Ultra 3 أو آيفون 15 مع 16). إذا لم يحدد المستخدم الجيل، قارن أحدث جيل واذكر رقم الجيل صراحة في سطر 📦.
-⚠️ لا تدرج متجراً إذا كان المنتج نافد الكمية (Sold Out / غير متوفر) لديه حسب نتائج البحث.
 
 【الحالة 2】طلب عام بدون براند محدد (مثل: قهوة فلات وايت حار، عطر رجالي، لابتوب للدراسة، سماعات للجيم، برجر):
 لا تبحث عن الأرخص! ابحث عن الأفضل تقييماً في الكويت بسعر مناسب (أفضل قيمة مقابل السعر).
@@ -963,4 +928,4 @@ def process_location_message(message, bot_id):
     send_whatsapp_cta(from_number, body, maps_url, bot_id, T(lang,"maps_btn"))
 
 @app.get("/")
-async def health(): return {"status":"v26 Lenient Link Repair"}
+async def health(): return {"status":"v23 Product-Page Links"}
