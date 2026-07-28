@@ -21,13 +21,69 @@ CARTS = {}
 IMAGE_BUFFER = defaultdict(lambda: {"images": [], "time": 0, "bot_id": ""})
 LAST_SEARCH = {} # لحفظ اسم آخر منتج بحث عنه المستخدم
 
+# ===== نظام اللغة: كل رقم تلفون وله لغته =====
+USER_LANG = {}       # from_number -> "ar" | "en"
+PENDING_IMAGES = defaultdict(lambda: {"images": [], "bot_id": ""})  # صور معلقة بانتظار اختيار اللغة
+
 BUFFER_SECONDS = 4
 RESOLVER = ThreadPoolExecutor(max_workers=6)
 WORKERS = ThreadPoolExecutor(max_workers=3)
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
-# رسالة طلب اللوكيشن (تُرسل مع زر واتساب الرسمي لمشاركة الموقع)
-LOCATION_PROMPT_MSG = "تبي أقرب محل يبيعه؟ 📍\n\nاضغط الزر تحت ودز موقعك، وعلى طول أرد لك بأقرب المحلات على الخريطة 👇"
+# ===== نصوص البوت بالعربي والإنجليزي =====
+MSG = {
+    "ar": {
+        "identifying": "ثواني بس.. أحدد المنتج وأدور لك الأفضل!",
+        "searching": "🔍 أدور لك على {q}...",
+        "not_found": "ما لقيت",
+        "cant_identify": "ما قدرت أحدد المنتج",
+        "shop_from": "تسوق من {n} 👇",
+        "location_prompt": "تبي أقرب محل يبيعه؟ 📍\n\nاضغط الزر تحت ودز موقعك، وعلى طول أرد لك بأقرب المحلات على الخريطة 👇",
+        "multi_text": "تمام لقيت {c} منتجات، أسوي سلة...",
+        "multi_images": "تمام لقطت {c} منتجات، أسوي سلة...",
+        "cart_ready": "🛒 سلتك جاهزة:\n{items}\n\n💰 الإجمالي: {total} د.ك",
+        "open_cart_body": "افتح السلة",
+        "open_cart_btn": "🛒 افتح السلة",
+        "no_saved_product": "ما عندي منتج محفوظ حالياً 😅. ابحث عن منتج أول، وبعدها دز موقعك عشان أدلك على أقرب مكان يبيعه!",
+        "maps_body": "📍 بحثك الأخير كان عن ({p})\n\nجهزت لك أقرب المحلات اللي تبيعه حولك، اضغط الزر وافتح الخريطة 👇",
+        "maps_btn": "📍 افتح الخريطة",
+        "lang_saved": "تمام، بكلمك عربي من هني ورايح 🇰🇼\nدز صورة منتج أو اكتب اسمه وأنا حاضر!",
+    },
+    "en": {
+        "identifying": "One sec.. identifying the product and finding you the best deal!",
+        "searching": "🔍 Looking up {q}...",
+        "not_found": "Couldn't find it",
+        "cant_identify": "Couldn't identify the product",
+        "shop_from": "Shop from {n} 👇",
+        "location_prompt": "Want the nearest store that sells it? 📍\n\nTap the button below to share your location, and I'll instantly send you the closest stores on a map 👇",
+        "multi_text": "Got it, found {c} products. Building your cart...",
+        "multi_images": "Nice, spotted {c} products. Building your cart...",
+        "cart_ready": "🛒 Your cart is ready:\n{items}\n\n💰 Total: {total} KWD",
+        "open_cart_body": "Open your cart",
+        "open_cart_btn": "🛒 Open Cart",
+        "no_saved_product": "I don't have a saved product yet 😅. Search for a product first, then share your location and I'll point you to the nearest store!",
+        "maps_body": "📍 Your last search was ({p})\n\nI've lined up the closest stores around you. Tap the button to open the map 👇",
+        "maps_btn": "📍 Open Map",
+        "lang_saved": "Great, I'll speak English with you from now on 🇬🇧\nSend a product photo or type its name and I'm on it!",
+    },
+}
+
+# تعليمة اللغة اللي تنضاف على كل طلب لـ Gemini
+LANG_INSTR = {
+    "ar": "رد باللغة العربية فقط.",
+    "en": "Respond ONLY in English. Keep the exact same response format and emojis, but translate all labels to English — including writing (Phone: NUMBER) instead of (هاتف: رقم). Keep prices in KWD.",
+}
+
+def T(lang, key, **kw):
+    return MSG.get(lang, MSG["ar"])[key].format(**kw) if kw else MSG.get(lang, MSG["ar"])[key]
+
+def detect_lang(text):
+    """عربي إذا فيه حروف عربية، إنجليزي إذا فيه حروف لاتينية، وإلا None"""
+    if re.search(r"[\u0600-\u06FF]", text or ""):
+        return "ar"
+    if re.search(r"[A-Za-z]", text or ""):
+        return "en"
+    return None
 
 SYSTEM_PROMPT = """
 أنت مساعد تسوق كويتي. استخدم بحث Google فعلياً للأسعار والتقييمات الحالية في الكويت.
@@ -67,6 +123,8 @@ LINKS: اسم الأول=الدومين الحقيقي, اسم الثاني=ال
 مثال: LINKS: إكسايت=xcite.com, بلينك=blink.com.kw, يوريكا=eureka.com.kw
 لا تخمّن الدومين، ولا تذكر متجراً أو خياراً من دون مصدر بحث.
 ممنوع روابط ظاهرة. ممنوع Markdown.
+
+لغة الرد: التزم بلغة الرد المطلوبة في رسالة المستخدم (عربي أو إنجليزي) مع الحفاظ على نفس التنسيق تماماً.
 
 إذا كان المنتج عقاراً أو سيارة، أعطِ تقييماً متوسطاً ونطاق سعر مختصراً جداً.
 """
@@ -287,6 +345,28 @@ def send_whatsapp_location_request(to, body, bot_id):
         print(f"WhatsApp location request exception: {e}")
         return False
 
+def send_whatsapp_buttons(to, body, buttons, bot_id):
+    """أزرار رد سريعة (Reply Buttons) — حد أقصى 3 أزرار"""
+    url=f"{GRAPH_URL}/{bot_id}/messages"; h={"Authorization":f"Bearer {WHATSAPP_TOKEN}","Content-Type":"application/json"}
+    btns=[{"type":"reply","reply":{"id":b["id"],"title":b["title"][:20]}} for b in buttons[:3]]
+    payload={"messaging_product":"whatsapp","to":to,"type":"interactive","interactive":{"type":"button","body":{"text":body[:1024]},"action":{"buttons":btns}}}
+    try:
+        r = requests.post(url,json=payload,headers=h,timeout=15)
+        if not r.ok:
+            print(f"WhatsApp buttons error {r.status_code}: {r.text[:500]}")
+        return r.ok
+    except Exception as e:
+        print(f"WhatsApp buttons exception: {e}")
+        return False
+
+def send_language_choice(to, bot_id):
+    """رسالة اختيار اللغة — تُرسل مرة واحدة فقط لمن يبدأ بصورة"""
+    body = "🌐 اختر لغتك المفضلة\nChoose your preferred language"
+    send_whatsapp_buttons(to, body, [
+        {"id": "lang_ar", "title": "العربية 🇰🇼"},
+        {"id": "lang_en", "title": "English 🇬🇧"},
+    ], bot_id)
+
 def send_whatsapp_contacts(to, contacts, bot_id):
     """إرسال بطاقات جهات اتصال (يقدر العميل يحفظها أو يتصل مباشرة)"""
     url=f"{GRAPH_URL}/{bot_id}/messages"; h={"Authorization":f"Bearer {WHATSAPP_TOKEN}","Content-Type":"application/json"}
@@ -301,10 +381,10 @@ def send_whatsapp_contacts(to, contacts, bot_id):
         return False
 
 def extract_service_contacts(txt):
-    """يستخرج (اسم المزود + رقمه) من سطور 🏆 و • إذا كان الرد عن خدمة"""
+    """يستخرج (اسم المزود + رقمه) من سطور 🏆 و • إذا كان الرد عن خدمة (عربي أو إنجليزي)"""
     contacts=[]
     for line in (txt or "").splitlines():
-        m=re.match(r"^\s*(?:🏆|•)\s*(.+?)\s*\(\s*هاتف\s*:\s*([\d\s\-]+)\)",line)
+        m=re.match(r"^\s*(?:🏆|•)\s*(.+?)\s*\(\s*(?:هاتف|Phone|phone|Tel|tel)\s*:\s*([\d\s\-]+)\)",line)
         if not m: continue
         name=m.group(1).strip()[:25]
         num=re.sub(r"\D","",m.group(2))
@@ -337,30 +417,59 @@ async def receive(request: Request, background_tasks: BackgroundTasks):
         from_number=msg["from"]
         
         if msg.get("type")=="image":
-            IMAGE_BUFFER[from_number]["images"].append(msg); IMAGE_BUFFER[from_number]["time"]=time.time(); IMAGE_BUFFER[from_number]["bot_id"]=bot_id
-            if len(IMAGE_BUFFER[from_number]["images"])==1:
-                background_tasks.add_task(process_image_buffer,from_number)
+            if from_number not in USER_LANG:
+                # أول تعامل معنا وبدأ بصورة: نعلق الصور ونسأله عن لغته مرة وحدة بس
+                pend=PENDING_IMAGES[from_number]
+                pend["images"].append(msg); pend["bot_id"]=bot_id
+                if len(pend["images"])==1:
+                    background_tasks.add_task(asyncio.to_thread, send_language_choice, from_number, bot_id)
+            else:
+                IMAGE_BUFFER[from_number]["images"].append(msg); IMAGE_BUFFER[from_number]["time"]=time.time(); IMAGE_BUFFER[from_number]["bot_id"]=bot_id
+                if len(IMAGE_BUFFER[from_number]["images"])==1:
+                    background_tasks.add_task(process_image_buffer,from_number)
         elif msg.get("type")=="text":
             background_tasks.add_task(process_text_message,msg,bot_id)
+        elif msg.get("type")=="interactive":
+            background_tasks.add_task(process_interactive_message,msg,bot_id)
         elif msg.get("type")=="location":
             background_tasks.add_task(process_location_message,msg,bot_id)
             
     except Exception as e: print(f"webhook err {e}")
     return {"status":"ok"}
 
+def process_interactive_message(message, bot_id):
+    """يعالج ضغطات الأزرار — حالياً أزرار اختيار اللغة"""
+    from_number=message["from"]
+    reply=(message.get("interactive") or {}).get("button_reply") or {}
+    btn_id=reply.get("id","")
+    if btn_id not in ("lang_ar","lang_en"):
+        return
+    lang = "ar" if btn_id=="lang_ar" else "en"
+    USER_LANG[from_number]=lang
+    pend=PENDING_IMAGES.pop(from_number,None)
+    if pend and pend["images"]:
+        # نكمل معالجة الصور اللي كانت بالانتظار بلغته المختارة
+        if len(pend["images"])==1:
+            process_single_image(pend["images"][0], pend["bot_id"], lang)
+        else:
+            process_multi_images(pend["images"], from_number, pend["bot_id"], lang)
+    else:
+        send_whatsapp_text(from_number, T(lang,"lang_saved"), bot_id)
+
 async def process_image_buffer(from_number):
     await asyncio.sleep(BUFFER_SECONDS)
     data=IMAGE_BUFFER.pop(from_number,None)
     if not data: return
-    if len(data["images"])==1: await asyncio.to_thread(process_single_image,data["images"][0],data["bot_id"])
-    else: await asyncio.to_thread(process_multi_images,data["images"],from_number,data["bot_id"])
+    lang=USER_LANG.get(from_number,"ar")
+    if len(data["images"])==1: await asyncio.to_thread(process_single_image,data["images"][0],data["bot_id"],lang)
+    else: await asyncio.to_thread(process_multi_images,data["images"],from_number,data["bot_id"],lang)
 
-def process_single_image(message,bot_id):
+def process_single_image(message,bot_id,lang="ar"):
     from_number=message["from"]
-    send_whatsapp_text(from_number,"ثواني بس.. أحدد المنتج وأدور لك الأرخص!",bot_id)
+    send_whatsapp_text(from_number,T(lang,"identifying"),bot_id)
     b64,mime=download_whatsapp_media(message["image"]["id"])
-    txt,urls=call_gemini([{"inline_data":{"mime_type":mime,"data":b64}},{"text":"ما هذا المنتج؟ ابحث عن سعره الحالي في الكويت"}])
-    if not txt: txt="ما قدرت أحدد المنتج"
+    txt,urls=call_gemini([{"inline_data":{"mime_type":mime,"data":b64}},{"text":f"ما هذا المنتج؟ ابحث عن سعره الحالي في الكويت. {LANG_INSTR[lang]}"}])
+    if not txt: txt=T(lang,"cant_identify")
     send_whatsapp_text(from_number,txt,bot_id)
     
     name_m = re.search(r"📦\s*(.+)", txt)
@@ -368,47 +477,62 @@ def process_single_image(message,bot_id):
     LAST_SEARCH[from_number] = {"product": product_name}
 
     for n,u in urls.items():
-        if u: send_whatsapp_cta(from_number,f"تسوق من {n} 👇",u,bot_id,f"🛒 {n[:18]}")
+        if u: send_whatsapp_cta(from_number,T(lang,"shop_from",n=n),u,bot_id,f"🛒 {n[:18]}")
 
     if product_name and product_name != "المنتج":
-        send_whatsapp_location_request(from_number, LOCATION_PROMPT_MSG, bot_id)
+        send_whatsapp_location_request(from_number, T(lang,"location_prompt"), bot_id)
 
-def fetch_product_from_image(msg):
+def fetch_product_from_image(msg,lang="ar"):
     try:
         b64,mime=download_whatsapp_media(msg["image"]["id"])
-        txt,urls=call_gemini([{"inline_data":{"mime_type":mime,"data":b64}},{"text":"حدد المنتج وابحث عن سعره"}])
+        txt,urls=call_gemini([{"inline_data":{"mime_type":mime,"data":b64}},{"text":f"حدد المنتج وابحث عن سعره. {LANG_INSTR[lang]}"}])
         name_m=re.search(r"📦\s*(.+)",txt); name=(name_m.group(1).strip() if name_m else "منتج")[:50]
         pm=re.search(r"(?:✅|🏆).*?(?:—|-|–)\s*([\d\.]+)",txt); price=float(pm.group(1)) if pm else 0
         curl=list(urls.values())[0] if urls else ""; cstore=list(urls.keys())[0] if urls else "متجر"
         return {"name":name,"store":cstore,"price":price,"url":curl,"all_urls":urls}
     except: return {"name":"منتج","store":"متجر","price":0,"url":"","all_urls":{}}
 
-def fetch_product_from_text(prod):
+def fetch_product_from_text(prod,lang="ar"):
     try:
-        txt,urls=call_gemini([{"text":f"ابحث عن {prod} في الكويت"}])
+        txt,urls=call_gemini([{"text":f"ابحث عن {prod} في الكويت. {LANG_INSTR[lang]}"}])
         m=re.search(r"(?:✅|🏆).*?(?:—|-|–)\s*([\d\.]+)",txt); price=float(m.group(1)) if m else 0
         curl=list(urls.values())[0] if urls else ""; cstore=list(urls.keys())[0] if urls else "متجر"
         return {"name":prod,"store":cstore,"price":price,"url":curl,"all_urls":urls}
     except: return {"name":prod,"store":"متجر","price":0,"url":"","all_urls":{}}
 
-def finalize_cart(from_number,bot_id,items):
+def finalize_cart(from_number,bot_id,items,lang="ar"):
     total=sum(it["price"] for it in items); cart_id=uuid.uuid4().hex[:8]
     CARTS[cart_id]={"products":items,"total":total}
-    summ="\n".join([f"• {it['name']} - {it['price']} د.ك ({it['store']})" for it in items])
-    send_whatsapp_text(from_number,f"🛒 سلتك جاهزة:\n{summ}\n\n💰 الإجمالي: {total:.3f} د.ك",bot_id)
+    unit = "د.ك" if lang=="ar" else "KWD"
+    summ="\n".join([f"• {it['name']} - {it['price']} {unit} ({it['store']})" for it in items])
+    send_whatsapp_text(from_number,T(lang,"cart_ready",items=summ,total=f"{total:.3f}"),bot_id)
     domain=os.environ.get("RAILWAY_PUBLIC_DOMAIN","fanzia.up.railway.app")
-    send_whatsapp_cta(from_number,"افتح السلة",f"https://{domain}/cart/{cart_id}",bot_id,"🛒 افتح السلة")
+    send_whatsapp_cta(from_number,T(lang,"open_cart_body"),f"https://{domain}/cart/{cart_id}",bot_id,T(lang,"open_cart_btn"))
 
-def process_multi_images(messages,from_number,bot_id):
-    send_whatsapp_text(from_number,f"تمام لقطت {len(messages)} منتجات، أسوي سلة...",bot_id)
-    items=list(WORKERS.map(fetch_product_from_image,messages)); finalize_cart(from_number,bot_id,items)
+def process_multi_images(messages,from_number,bot_id,lang="ar"):
+    send_whatsapp_text(from_number,T(lang,"multi_images",c=len(messages)),bot_id)
+    items=list(WORKERS.map(lambda m: fetch_product_from_image(m,lang),messages)); finalize_cart(from_number,bot_id,items,lang)
 
 def process_text_message(message,bot_id):
-    from_number=message["from"]; user_text=message["text"]["body"]; products=extract_products(user_text)
+    from_number=message["from"]; user_text=message["text"]["body"]
+    # كشف اللغة من الرسالة النصية — النص دايماً يحدّث لغة المستخدم بالاتجاهين
+    detected=detect_lang(user_text)
+    if detected:
+        USER_LANG[from_number]=detected
+    lang=USER_LANG.get(from_number,"ar")
+    # إذا كان عنده صور معلقة بانتظار اختيار اللغة، نعالجها الحين بنفس لغة رسالته
+    pend=PENDING_IMAGES.pop(from_number,None)
+    if pend and pend["images"]:
+        if len(pend["images"])==1:
+            process_single_image(pend["images"][0], pend["bot_id"], lang)
+        else:
+            process_multi_images(pend["images"], from_number, pend["bot_id"], lang)
+
+    products=extract_products(user_text)
     if len(products)==1:
-        send_whatsapp_text(from_number,f"🔍 أدور لك على {products[0]}...",bot_id)
-        txt,urls=call_gemini([{"text":f"ابحث عن {products[0]} في الكويت"}])
-        send_whatsapp_text(from_number,txt or "ما لقيت",bot_id)
+        send_whatsapp_text(from_number,T(lang,"searching",q=products[0]),bot_id)
+        txt,urls=call_gemini([{"text":f"ابحث عن {products[0]} في الكويت. {LANG_INSTR[lang]}"}])
+        send_whatsapp_text(from_number,txt or T(lang,"not_found"),bot_id)
         
         LAST_SEARCH[from_number] = {"product": products[0]}
 
@@ -418,23 +542,24 @@ def process_text_message(message,bot_id):
             send_whatsapp_contacts(from_number, contacts, bot_id)
             
         for n,u in urls.items():
-            if u: send_whatsapp_cta(from_number,f"تسوق من {n} 👇",u,bot_id,f"🛒 {n[:18]}")
+            if u: send_whatsapp_cta(from_number,T(lang,"shop_from",n=n),u,bot_id,f"🛒 {n[:18]}")
 
-        send_whatsapp_location_request(from_number, LOCATION_PROMPT_MSG, bot_id)
+        send_whatsapp_location_request(from_number, T(lang,"location_prompt"), bot_id)
             
     else:
         LAST_SEARCH[from_number] = {"product": products[0]}
-        send_whatsapp_text(from_number,f"تمام لقيت {len(products)} منتجات، أسوي سلة...",bot_id)
-        items=list(WORKERS.map(fetch_product_from_text,products)); finalize_cart(from_number,bot_id,items)
+        send_whatsapp_text(from_number,T(lang,"multi_text",c=len(products)),bot_id)
+        items=list(WORKERS.map(lambda p: fetch_product_from_text(p,lang),products)); finalize_cart(from_number,bot_id,items,lang)
 
 def process_location_message(message, bot_id):
     from_number = message["from"]
     lat = message["location"]["latitude"]
     lng = message["location"]["longitude"]
+    lang = USER_LANG.get(from_number, "ar")
 
     last_search = LAST_SEARCH.get(from_number)
     if not last_search or not last_search.get("product"):
-        send_whatsapp_text(from_number, "ما عندي منتج محفوظ حالياً 😅. ابحث عن منتج أول، وبعدها دز موقعك عشان أدلك على أقرب مكان يبيعه!", bot_id)
+        send_whatsapp_text(from_number, T(lang,"no_saved_product"), bot_id)
         return
 
     product = last_search["product"]
@@ -462,10 +587,10 @@ def process_location_message(message, bot_id):
     safe_category = urllib.parse.quote(category)
     maps_url = f"https://www.google.com/maps/search/{safe_category}/@{lat},{lng},15z"
     
-    body = f"📍 بحثك الأخير كان عن ({product})\n\nجهزت لك أقرب المحلات اللي تبيعه حولك، اضغط الزر وافتح الخريطة 👇"
+    body = T(lang,"maps_body",p=product)
 
-    # هذا هو التعديل الجمالي - زر بدل رابط طويل
-    send_whatsapp_cta(from_number, body, maps_url, bot_id, "📍 افتح الخريطة")
+    # زر بدل رابط طويل
+    send_whatsapp_cta(from_number, body, maps_url, bot_id, T(lang,"maps_btn"))
 
 @app.get("/cart/{cart_id}", response_class=HTMLResponse)
 async def cart_page(cart_id: str):
@@ -475,4 +600,4 @@ async def cart_page(cart_id: str):
     return HTMLResponse(f"<html dir='rtl'><head><meta name='viewport' content='width=device-width'><script src='https://cdn.tailwindcss.com'></script></head><body><div class='max-w-lg mx-auto bg-white'><div class='p-5 bg-black text-white'><h1>🛒 سلتك</h1></div>{rows}</div></body></html>")
 
 @app.get("/")
-async def health(): return {"status":"v14 Native Location Button"}
+async def health(): return {"status":"v15 Bilingual AR/EN"}
