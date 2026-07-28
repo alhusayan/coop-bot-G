@@ -24,6 +24,8 @@ LAST_SEARCH = {} # لحفظ اسم آخر منتج بحث عنه المستخد�
 # ===== نظام اللغة: كل رقم تلفون وله لغته =====
 USER_LANG = {}       # from_number -> "ar" | "en"
 PENDING_IMAGES = defaultdict(lambda: {"images": [], "bot_id": ""})  # صور معلقة بانتظار اختيار اللغة
+MSG_COUNT = defaultdict(int)  # عداد رسائل كل مستخدم — كل 10 رسائل نعرض عليه اختيار اللغة
+LANG_MENU_EVERY = 10
 
 BUFFER_SECONDS = 4
 RESOLVER = ThreadPoolExecutor(max_workers=6)
@@ -121,6 +123,7 @@ SYSTEM_PROMPT = """
 في كل الحالات، سطر أخير إلزامي:
 LINKS: اسم الأول=الدومين الحقيقي, اسم الثاني=الدومين الحقيقي, اسم الثالث=الدومين الحقيقي
 مثال: LINKS: إكسايت=xcite.com, بلينك=blink.com.kw, يوريكا=eureka.com.kw
+المتاجر مفتوحة وغير محصورة: قارن بين كل المتاجر التي تبيع المنتج في الكويت — وكلاء، هايبرماركتات (كارفور، لولو...)، متاجر عالمية (إيكيا وغيرها)، متاجر أونلاين محلية — واختر فعلياً حسب نتائج البحث لا حسب الشهرة.
 لا تخمّن الدومين، ولا تذكر متجراً أو خياراً من دون مصدر بحث.
 ممنوع روابط ظاهرة. ممنوع Markdown.
 
@@ -360,12 +363,17 @@ def send_whatsapp_buttons(to, body, buttons, bot_id):
         return False
 
 def send_language_choice(to, bot_id):
-    """رسالة اختيار اللغة — تُرسل مرة واحدة فقط لمن يبدأ بصورة"""
+    """رسالة اختيار اللغة — أزرار ضغط"""
     body = "🌐 اختر لغتك المفضلة\nChoose your preferred language"
     send_whatsapp_buttons(to, body, [
         {"id": "lang_ar", "title": "العربية 🇰🇼"},
         {"id": "lang_en", "title": "English 🇬🇧"},
     ], bot_id)
+
+async def delayed_language_choice(from_number, bot_id):
+    """تُرسل قائمة اللغة الدورية بعد مهلة قصيرة حتى توصل بعد رد البوت الأساسي"""
+    await asyncio.sleep(12)
+    await asyncio.to_thread(send_language_choice, from_number, bot_id)
 
 def send_whatsapp_contacts(to, contacts, bot_id):
     """إرسال بطاقات جهات اتصال (يقدر العميل يحفظها أو يتصل مباشرة)"""
@@ -415,6 +423,12 @@ async def receive(request: Request, background_tasks: BackgroundTasks):
         processed_ids.append(mid)
         bot_id=value.get("metadata",{}).get("phone_number_id",PHONE_NUMBER_ID)
         from_number=msg["from"]
+
+        # عداد الرسائل: كل 10 رسائل (نص/صورة/لوكيشن) نعرض قائمة اللغة بنهاية الرد
+        if msg.get("type") in ("text","image","location"):
+            MSG_COUNT[from_number]+=1
+            if MSG_COUNT[from_number] % LANG_MENU_EVERY == 0:
+                background_tasks.add_task(delayed_language_choice, from_number, bot_id)
         
         if msg.get("type")=="image":
             if from_number not in USER_LANG:
@@ -564,19 +578,20 @@ def process_location_message(message, bot_id):
 
     product = last_search["product"]
     
-    prompt_category = """أنت خبير تسوق في السوق الكويتي. 
-بناءً على اسم المنتج، أعطني "عبارة بحث" (Search Term) دقيقة جداً لخرائط جوجل تجلب المتاجر الصحيحة وتستبعد العشوائية.
+    prompt_category = """أنت خبير تسوق في السوق الكويتي.
+بناءً على اسم المنتج، أعطني "عبارة بحث" (Search Term) لخرائط جوجل تجلب كل المتاجر التي تبيع هذا النوع من المنتجات.
 
 قواعد هامة:
-- للإلكترونيات الذكية (ساعة أبل، جوالات، لابتوب): اكتب أسماء الوكلاء الموثوقين هكذا (Xcite OR Eureka OR Best Al Yousifi) ولا تكتب "محل الكترونيات" أبداً.
-- للأجهزة المنزلية (ثلاجة، غسالة): (Xcite OR Eureka).
-- للأدوية والمكملات: (صيدلية Pharmacy).
-- للمواد الغذائية واللحوم: (جمعية تعاونية Supermarket).
-- لألعاب الفيديو: (محل العاب فيديو Video games).
-- للكهربائيات الثقيلة والإضاءة: (مواد كهربائية Electrical supply).
-- للملابس والمعدات الرياضية (مثل مضارب التنس والبادل): (Intersport OR Go Sport OR محلات رياضية).
-- للطلبات العامة (قهوة، مطاعم، عطور): اكتب نوع المكان مع كلمة "الأعلى تقييماً" مثل (كافيه specialty coffee) أو (محل عطور perfume shop).
-- إذا لم تكن متأكداً، اكتب اسم المنتج نفسه.
+- ⛔ ممنوع حصر البحث بأسماء متاجر أو علامات تجارية معينة. استخدم نوع المتجر العام فقط، حتى تظهر كل الخيارات القريبة من المستخدم: الوكلاء، الهايبرماركتات العالمية، الجمعيات، والمحلات المحلية — بدون استثناء أحد.
+- اكتب نوع المتجر بالعربي والإنجليزي معاً حتى تلتقط الخريطة كل النتائج.
+- للمواد الغذائية والتموينية: (سوبرماركت OR هايبرماركت OR جمعية تعاونية OR supermarket OR hypermarket) — حتى تشمل الجمعيات والهايبرات الكبيرة معاً.
+- للإلكترونيات والأجهزة: (محل الكترونيات OR electronics store).
+- للأدوية والمكملات: (صيدلية OR pharmacy).
+- للملابس والمعدات الرياضية: (محل رياضة OR sporting goods store).
+- للأثاث والمفروشات: (محل أثاث OR furniture store).
+- للعطور ومستحضرات التجميل: (محل عطور OR perfume shop).
+- لأي فئة أخرى: استنتج نوع المحل المناسب واكتبه بالعربي والإنجليزي بنفس الأسلوب.
+- إذا لم تكن متأكداً من الفئة، اكتب اسم المنتج نفسه.
 
 أعطني عبارة البحث فقط بدون أي إضافات أو شرح."""
 
@@ -600,4 +615,4 @@ async def cart_page(cart_id: str):
     return HTMLResponse(f"<html dir='rtl'><head><meta name='viewport' content='width=device-width'><script src='https://cdn.tailwindcss.com'></script></head><body><div class='max-w-lg mx-auto bg-white'><div class='p-5 bg-black text-white'><h1>🛒 سلتك</h1></div>{rows}</div></body></html>")
 
 @app.get("/")
-async def health(): return {"status":"v15 Bilingual AR/EN"}
+async def health(): return {"status":"v17 Open Stores + Periodic Lang Menu"}
