@@ -50,7 +50,7 @@ def fallback_search_url(query):
 
 # ===== خط تدقيق اللنكات: نضمن إن الزر يوصل لصفحة المنتج مو القسم =====
 PRODUCT_URL_HINTS = ("/p/", "/product/", "/products/", "/dp/", "/item/", "/buy/", "/pd/", "-p-", "sku=", "/prod/")
-CATEGORY_URL_HINTS = ("/c/", "/category/", "/categories/", "/collections", "/brand", "/brands", "/search", "?q=", "/stores", "/shop-by", "/deals", "/offers", "/sale")
+CATEGORY_URL_HINTS = ("/c/", "/category/", "/categories/", "/collections", "/brand", "/brands", "/search", "?q=", "/stores", "/shop-by", "/deals", "/offers", "/sale", "/compare", "compare?", "/landing")
 # علامات صفحة الشراء داخل الـ HTML نفسه
 BUY_PAGE_SIGNS = (
     "add to cart", "add-to-cart", "addtocart", "buy now", "buy-now",
@@ -83,22 +83,36 @@ OUT_OF_STOCK_SIGNS = (
     '"availability":"http://schema.org/outofstock', '"availability": "http://schema.org/outofstock',
 )
 
+def english_query(product):
+    """يستخرج الاسم الإنجليزي من صيغة 'عربي (English)' — للإصلاح داخل المواقع المفهرسة بالإنجليزي.
+    إن لم يوجد قوس، نجمع الكلمات اللاتينية والأرقام من الاسم."""
+    m = re.search(r"\(([^)]+)\)", product or "")
+    if m and re.search(r"[a-zA-Z]", m.group(1)):
+        return m.group(1).strip()
+    latin = " ".join(re.findall(r"[A-Za-z0-9][\w\-\.]*", product or "")).strip()
+    # لازم يكون فيه حروف فعلية مو أرقام بس، وإلا نرجع الاسم الأصلي كامل
+    if len(latin) >= 4 and re.search(r"[A-Za-z]", latin):
+        return latin
+    return product or ""
+
 def evaluate_link(url):
-    """يفحص الرابط بجلبة وحدة: 'ok' صفحة شراء متوفرة، 'soldout' نافد، 'category' قسم/بحث"""
+    """يفحص الرابط بجلبة وحدة: 'ok' صفحة شراء متوفرة، 'soldout' نافد، 'category' قسم/بحث/مقارنة"""
     u = (url or "").lower()
     if not u.startswith("http"):
         return "category"
     if any(m in clean_domain(u) for m in MARKETPLACE_OK_DOMAINS):
         return "ok"  # مواقع التوصيل: صفحة المطعم مقبولة
+    if any(h in u for h in CATEGORY_URL_HINTS):
+        return "category"
     html = fetch_page_snippet(url)
     if html and any(s in html for s in OUT_OF_STOCK_SIGNS):
         return "soldout"
     if any(h in u for h in PRODUCT_URL_HINTS):
         return "ok"
-    if html and any(s in html for s in BUY_PAGE_SIGNS):
-        return "ok"
-    if any(h in u for h in CATEGORY_URL_HINTS):
-        return "category"
+    if html:
+        # فحصنا الصفحة فعلاً: لازم نلقى علامات شراء وإلا فهي صفحة عرض/مقارنة/رئيسية
+        return "ok" if any(s in html for s in BUY_PAGE_SIGNS) else "category"
+    # ما قدرنا نفحص (الموقع حاجب الجلب) — نتساهل
     return "ok"
 
 def is_product_page(url):
@@ -129,15 +143,16 @@ def refine_link(store, url, product):
         status = evaluate_link(url)
         if status == "ok":
             return url
-        # قسم أو نافد الكمية → ندور صفحة منتج متوفرة داخل نفس الموقع
+        # قسم أو نافد الكمية → ندور صفحة منتج متوفرة داخل نفس الموقع بالاسم الإنجليزي
         print(f"LINK {status}: {store}: {url[:70]}")
-        for cand in ddg_site_search(dom, product):
+        q_en = english_query(product)
+        for cand in ddg_site_search(dom, q_en):
             if evaluate_link(cand) == "ok":
                 print(f"LINK FIXED: {store}: -> {cand[:90]}")
                 return cand
-        # آخر حل: بحث جوجل مقيّد بالموقع — العميل على بعد ضغطة وحدة من المنتج
-        print(f"LINK -> site search: {store}")
-        return "https://www.google.com/search?q=" + urllib.parse.quote(f"{product} site:{dom}")
+        # آخر حل: بحث جوجل عادي (بدون site:) بالمنتج + المتجر — مثبت إنه يعطي نتائج تسوق
+        print(f"LINK -> google search: {store}")
+        return "https://www.google.com/search?q=" + urllib.parse.quote(f"{q_en} {store} Kuwait")
     except Exception as e:
         print(f"refine err {e}")
         return url
@@ -222,14 +237,16 @@ def cache_put(query, lang, txt, urls):
 
 # برومبت تحديد الاسم القياسي للمنتج من الصورة (بدون بحث — سريع ورخيص)
 IDENTIFY_SYSTEM = """أنت خبير تعرف على المنتجات. انظر للصورة واكتب الاسم التجاري القياسي للمنتج بصيغة ثابتة دائماً:
-[البراند] [نوع المنتج] [رقم الموديل باللاتيني إن ظهر] [اللون/النكهة] [الحجم/الوزن إن ظهر]
+[الاسم بالعربي] ([الاسم بالإنجليزي])
 
+الاسم بالعربي: البراند + نوع المنتج + رقم الموديل + اللون/النكهة + الحجم إن ظهر.
+الاسم بالإنجليزي بين الأقواس: نفس المنتج بالاسم الذي تستخدمه المتاجر الإلكترونية — مهم جداً لأن أغلب مواقع المتاجر الكويتية مفهرسة بالإنجليزي.
 رقم الموديل هو أهم عنصر — دور عليه على العبوة أو الذراع أو الملصق (مثل RB3721، SM-S928، MQ2V3).
 رقم الجيل مهم جداً أيضاً (مثل Ultra 2، Ultra 3، آيفون 16): اذكره إن كان ظاهراً أو مؤكداً من شكل المنتج، وإذا لم يكن واضحاً من الصورة لا تخمّنه — اكتب الاسم بدون رقم الجيل.
 أمثلة على الصيغة:
-- ريبان نظارة شمسية RB3721 اسود 59 مم
-- برينجلز كاتشب 200 جرام
-سطر واحد فقط. بدون أقواس أو شرح أو مقدمات أو رموز."""
+- أبل واتش الترا 2 تيتانيوم 49 مم (Apple Watch Ultra 2 Titanium 49mm)
+- برينجلز كاتشب 200 جرام (Pringles Ketchup 200g)
+سطر واحد فقط. بدون شرح أو مقدمات أو رموز إضافية."""
 
 # برومبت السلة الذكية: أفضل متجر واحد يوفر السلة كلها بأقل إجمالي
 CART_SYSTEM = """أنت مساعد تسوق كويتي. ستستلم قائمة منتجات (سلة واحدة). استخدم بحث Google فعلياً للأسعار الحالية في الكويت.
@@ -945,4 +962,4 @@ def process_location_message(message, bot_id):
     send_whatsapp_cta(from_number, body, maps_url, bot_id, T(lang,"maps_btn"))
 
 @app.get("/")
-async def health(): return {"status":"v24 Same-Model + In-Stock"}
+async def health(): return {"status":"v25 Bilingual Names + Strict Links"}
