@@ -53,32 +53,80 @@ def best_store_name(txt):
     m = re.search(r"^\s*🏪\s*[^:：]*[:：]\s*(.+?)\s*$", txt or "", flags=re.M)
     return m.group(1).strip() if m else ""
 
+def normalize_ar(text):
+    """توحيد الحروف العربية والمسافات حتى تتطابق الصيغ المختلفة لنفس المنتج"""
+    t = (text or "").lower()
+    t = re.sub(r"[أإآ]", "ا", t)
+    t = t.replace("ة", "ه").replace("ى", "ي").replace("ئ", "ي").replace("ؤ", "و")
+    t = t.replace("ري بان", "ريبان").replace("راي بان", "ريبان").replace("ray ban", "rayban").replace("ray-ban", "rayban")
+    return t
+
+def norm_tokens(query):
+    """كلمات الطلب بعد التوحيد — لقياس التشابه بين طلبين"""
+    t = normalize_ar(query)
+    toks = re.findall(r"[\w\u0600-\u06FF]+", t)
+    # نشيل ال التعريف من بداية الكلمات الطويلة
+    toks = [w[2:] if w.startswith("ال") and len(w) > 4 else w for w in toks]
+    return set(toks)
+
+def has_model_token(a, b):
+    """هل يشترك الطلبان بكلمة موديل (حروف+أرقام مثل rb3721)؟ دليل قوي إنهما نفس المنتج"""
+    def models(s): return {t for t in s if re.search(r"\d", t) and re.search(r"[a-z\u0600-\u06FF]", t) and len(t) >= 4}
+    return bool(models(a) & models(b))
+
 def cache_key(query, lang):
-    norm = re.sub(r"[^\w\u0600-\u06FF]+", "", (query or "").lower())
+    norm = re.sub(r"[^\w\u0600-\u06FF]+", "", normalize_ar(query))
     return hashlib.sha256(f"{norm}|{lang}".encode()).hexdigest()
 
 def cache_get(query, lang):
-    k = cache_key(query, lang)
-    hit = SEARCH_CACHE.get(k)
-    if hit and (time.time() - hit["ts"]) < CACHE_TTL:
-        print(f"CACHE HIT: {query[:60]}")
+    now = time.time()
+    # 1) مطابقة حرفية (بعد التوحيد)
+    hit = SEARCH_CACHE.get(cache_key(query, lang))
+    if hit and (now - hit["ts"]) < CACHE_TTL:
+        print(f"CACHE HIT (exact): {query[:60]}")
         return hit["txt"], dict(hit["urls"])
+    # 2) مطابقة ضبابية: تشابه الكلمات + وزن ذهبي لرقم الموديل
+    qt = norm_tokens(query)
+    if not qt:
+        return None
+    best, best_score = None, 0.0
+    for entry in SEARCH_CACHE.values():
+        if entry.get("lang") != lang or (now - entry["ts"]) >= CACHE_TTL:
+            continue
+        et = entry.get("tokens") or set()
+        if not et:
+            continue
+        inter = len(qt & et)
+        score = inter / len(qt | et)
+        if has_model_token(qt, et):
+            score += 0.30
+        if score > best_score:
+            best, best_score = entry, score
+    if best and best_score >= 0.60:
+        print(f"CACHE HIT (fuzzy {best_score:.2f}): {query[:50]} ~ {best.get('query','')[:50]}")
+        return best["txt"], dict(best["urls"])
     return None
 
 def cache_put(query, lang, txt, urls):
     if not txt:
         return
     if len(SEARCH_CACHE) >= CACHE_MAX:
-        # نحذف الأقدم
         oldest = min(SEARCH_CACHE, key=lambda k: SEARCH_CACHE[k]["ts"])
         SEARCH_CACHE.pop(oldest, None)
-    SEARCH_CACHE[cache_key(query, lang)] = {"txt": txt, "urls": dict(urls), "ts": time.time()}
+    SEARCH_CACHE[cache_key(query, lang)] = {
+        "txt": txt, "urls": dict(urls), "ts": time.time(),
+        "tokens": norm_tokens(query), "query": query, "lang": lang,
+    }
 
 # برومبت تحديد الاسم القياسي للمنتج من الصورة (بدون بحث — سريع ورخيص)
-IDENTIFY_SYSTEM = """أنت خبير تعرف على المنتجات. انظر للصورة واكتب الاسم التجاري القياسي الكامل للمنتج فقط:
-البراند + اسم المنتج + النكهة/اللون إن وجد + الحجم/الوزن إن ظهر على العبوة.
-مثال: برينجلز بنكهة الكاتشب 200 جرام
-سطر واحد فقط. بدون أي شرح أو مقدمات أو رموز."""
+IDENTIFY_SYSTEM = """أنت خبير تعرف على المنتجات. انظر للصورة واكتب الاسم التجاري القياسي للمنتج بصيغة ثابتة دائماً:
+[البراند] [نوع المنتج] [رقم الموديل باللاتيني إن ظهر] [اللون/النكهة] [الحجم/الوزن إن ظهر]
+
+رقم الموديل هو أهم عنصر — دور عليه على العبوة أو الذراع أو الملصق (مثل RB3721، SM-S928، MQ2V3).
+أمثلة على الصيغة:
+- ريبان نظارة شمسية RB3721 اسود 59 مم
+- برينجلز كاتشب 200 جرام
+سطر واحد فقط. بدون أقواس أو شرح أو مقدمات أو رموز."""
 
 # برومبت السلة الذكية: أفضل متجر واحد يوفر السلة كلها بأقل إجمالي
 CART_SYSTEM = """أنت مساعد تسوق كويتي. ستستلم قائمة منتجات (سلة واحدة). استخدم بحث Google فعلياً للأسعار الحالية في الكويت.
@@ -202,15 +250,6 @@ LINKS: اسم الأول=الدومين الحقيقي, اسم الثاني=ال
 
 إذا كان المنتج عقاراً أو سيارة، أعطِ تقييماً متوسطاً ونطاق سعر مختصراً جداً.
 """
-
-# برومبت دمج نتيجتي البحث في رد نهائي واحد
-MERGE_SYSTEM = """أنت مدقق نتائج تسوق. ستستلم نتيجتي بحث لنفس الطلب في الكويت. ادمجهما في رد نهائي واحد أفضل وأكمل من الاثنين:
-- خذ اتحاد كل المتاجر/الخيارات من النتيجتين بدون تكرار (اعرض حتى 5 إذا توفرت).
-- إذا ظهر نفس المتجر أو المكان بسعرين مختلفين، اعتمد السعر الأرخص.
-- الترتيب: في مقارنة الأسعار رتب من الأرخص للأغلى (الأرخص بعلامة ✅ والباقي بعلامة •)، وفي التوصيات والخدمات رتب من الأعلى تقييماً (الأفضل بعلامة 🏆 والباقي بعلامة •).
-- حافظ حرفياً على نفس تنسيق السطور: سطر 📦 ثم سطور المتاجر ثم السطر الختامي القصير إن وجد.
-- أرقام الهواتف: انقلها فقط كما وردت في النتيجتين، وممنوع اختراع أي رقم أو سعر أو متجر غير موجود فيهما.
-- لا تكتب سطر LINKS. ممنوع الروابط. ممنوع Markdown. لا تكتب أي شرح خارج التنسيق."""
 
 def get_final_url(url: str):
     """Resolve redirects, but keep Gemini's original grounding URL as fallback."""
@@ -387,59 +426,55 @@ def call_gemini(parts, system=SYSTEM_PROMPT, use_search=True):
     except Exception as e:
         print(f"Gemini err {e}"); return "", {}
 
-def dual_search(parts, lang):
-    """بحثان متوازيان لنفس الطلب + دمج النتيجتين في رد واحد أكمل وأدق.
-    اللنكات: اتحاد لنكات البحثين معاً."""
+# عدد جولات البحث المتوازية لكل طلب — قابل للتعديل من Railway
+SEARCH_RUNS = int(os.environ.get("SEARCH_RUNS", "4"))
+
+def answer_score(txt, urls):
+    """تقييم قوة الجواب: المتاجر أهم شي، ثم اللنكات، ثم سلامة التنسيق"""
+    stores, links = result_quality(txt, urls)
+    score = stores * 2 + links * 3
+    if txt and "📦" in txt:
+        score += 1
+    return score
+
+def best_of_search(parts, lang):
+    """بطولة داخلية: SEARCH_RUNS بحوث متوازية لنفس الطلب، نقيّمها كلها ونرسل الأقوى.
+    اللنكات: اتحاد لنكات كل الجولات (أولوية لنكات الجواب الفائز)."""
     try:
-        futs = [SEARCH_POOL.submit(call_gemini, parts) for _ in range(2)]
-        (t1, u1), (t2, u2) = futs[0].result(), futs[1].result()
+        futs = [SEARCH_POOL.submit(call_gemini, parts) for _ in range(SEARCH_RUNS)]
+        results = [f.result() for f in futs]
     except Exception as e:
-        print(f"dual_search err {e}")
+        print(f"best_of_search err {e}")
         return call_gemini(parts)
 
-    # اتحاد اللنكات من البحثين (الأولوية للبحث الأول عند التعارض)
-    merged_urls = dict(u2); merged_urls.update(u1)
+    results = [(t, u) for (t, u) in results if t]
+    if not results:
+        return "", {}
+
+    scored = sorted(results, key=lambda r: answer_score(r[0], r[1]), reverse=True)
+    best_txt, best_urls = scored[0]
+
+    # اتحاد اللنكات: الفائز أولاً، ثم بقية الجولات تكمل النواقص
+    merged_urls = dict(best_urls)
+    for _, u in scored[1:]:
+        for n, link in u.items():
+            if n not in merged_urls and link not in merged_urls.values():
+                merged_urls[n] = link
     merged_urls = dict(list(merged_urls.items())[:4])
 
-    # إذا وحدة من النتيجتين فشلت، نرجع الثانية مباشرة
-    if not t1 and not t2:
-        return "", merged_urls
-    if not t1:
-        return t2, merged_urls
-    if not t2:
-        return t1, merged_urls
-    # إذا النتيجتان متطابقتان تقريباً، لا داعي لمكالمة دمج
-    if normalize_name(t1) == normalize_name(t2):
-        return t1, merged_urls
-
-    merge_input = f"النتيجة الأولى:\n{t1}\n\n---\n\nالنتيجة الثانية:\n{t2}\n\nادمجهما الآن. {LANG_INSTR[lang]}"
-    merged_txt, _ = call_gemini([{"text": merge_input}], system=MERGE_SYSTEM, use_search=False)
-    if not merged_txt:
-        # فشل الدمج؟ نرجع النتيجة الأغنى (الأكثر سطور متاجر)
-        merged_txt = t1 if len(extract_store_names(t1)) >= len(extract_store_names(t2)) else t2
-    return merged_txt, merged_urls
+    print({"tournament": [answer_score(t, u) for t, u in scored], "winner_stores": result_quality(best_txt, best_urls)[0], "total_links": len(merged_urls)})
+    return best_txt, merged_urls
 
 def search_product(query, lang):
-    """البوابة الموحدة للبحث: كاش أولاً، وإلا بحث مزدوج + دمج.
+    """البوابة الموحدة للبحث: كاش أولاً، وإلا بطولة 4 بحوث ونرسل الأقوى.
     لا نحفظ بالكاش إلا نتيجة قوية — النتائج الضعيفة تُرسل لكن لا تُخزّن،
     حتى ياخذ الطلب التالي فرصة بحث جديدة بدل تكرار نتيجة سيئة."""
     cached = cache_get(query, lang)
     if cached:
         return cached
 
-    txt, urls = dual_search([{"text": f"ابحث عن {query} في الكويت. {LANG_INSTR[lang]}"}], lang)
+    txt, urls = best_of_search([{"text": f"ابحث عن {query} في الكويت. {LANG_INSTR[lang]}"}], lang)
     stores, links = result_quality(txt, urls)
-
-    # بحث إنقاذ: إذا الدمج طلع فقير جداً (أقل من متجرين)، نحاول مرة ثالثة ونضم
-    if stores < 2:
-        print(f"RESCUE SEARCH: stores={stores} links={links} | {query[:60]}")
-        t3, u3 = call_gemini([{"text": f"ابحث عن {query} في الكويت. {LANG_INSTR[lang]}"}])
-        s3, _ = result_quality(t3, u3)
-        if s3 > stores:
-            txt = t3
-        merged = dict(u3); merged.update(urls)
-        urls = dict(list(merged.items())[:4])
-        stores, links = result_quality(txt, urls)
 
     if stores >= CACHE_MIN_STORES and links >= CACHE_MIN_LINKS:
         cache_put(query, lang, txt, urls)
@@ -629,7 +664,7 @@ def process_single_image(message,bot_id,lang="ar"):
         txt,urls=search_product(product_name, lang)
     else:
         # ما قدرنا نحدد الاسم؟ نرجع لبحث الصورة المباشر (بدون كاش)
-        txt,urls=dual_search([{"inline_data":{"mime_type":mime,"data":b64}},{"text":f"ما هذا المنتج؟ ابحث عن سعره الحالي في الكويت. {LANG_INSTR[lang]}"}], lang)
+        txt,urls=best_of_search([{"inline_data":{"mime_type":mime,"data":b64}},{"text":f"ما هذا المنتج؟ ابحث عن سعره الحالي في الكويت. {LANG_INSTR[lang]}"}], lang)
         name_m = re.search(r"📦\s*(.+)", txt or "")
         product_name = name_m.group(1).strip() if name_m else "المنتج"
 
@@ -801,4 +836,4 @@ def process_location_message(message, bot_id):
     send_whatsapp_cta(from_number, body, maps_url, bot_id, T(lang,"maps_btn"))
 
 @app.get("/")
-async def health(): return {"status":"v20 Guaranteed Links"}
+async def health(): return {"status":"v22 Best-of-4 Tournament"}
