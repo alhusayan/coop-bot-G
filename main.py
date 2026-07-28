@@ -51,12 +51,13 @@ def fallback_search_url(query):
 # ===== خط تدقيق اللنكات: نضمن إن الزر يوصل لصفحة المنتج مو القسم =====
 PRODUCT_URL_HINTS = ("/p/", "/product/", "/products/", "/dp/", "/item/", "/buy/", "/pd/", "-p-", "sku=", "/prod/")
 CATEGORY_URL_HINTS = ("/c/", "/category/", "/categories/", "/collections", "/brand", "/brands", "/search", "?q=", "/stores", "/shop-by", "/deals", "/offers", "/sale", "/compare", "compare?", "/landing")
-# علامات صفحة الشراء داخل الـ HTML نفسه
+# علامات صفحة الشراء داخل الـ HTML — تشمل علامات SEO اللي تكون موجودة حتى في مواقع الجافاسكريبت
 BUY_PAGE_SIGNS = (
-    "add to cart", "add-to-cart", "addtocart", "buy now", "buy-now",
+    "add to cart", "add-to-cart", "addtocart", "buy now", "buy-now", "buynow",
     "أضف إلى السلة", "اضف الى السلة", "أضف للسلة", "اضافه للسله", "إضافة إلى السلة",
     "اشتري الآن", "اشتري الان", "اشتر الآن",
-    'og:type" content="product', "schema.org/product", '"@type":"product', '"@type": "product',
+    "og:type", "schema.org/product", '"@type":"product', '"@type": "product',
+    '"offers"', '"sku"', "product:price", "itemprop=\"price\"",
 )
 # مواقع التوصيل: صفحة المطعم/المتجر هي أفضل وجهة ممكنة — نقبلها بدون فحص
 MARKETPLACE_OK_DOMAINS = ("talabat", "deliveroo", "cari.", "carriage", "jahez", "snoonu")
@@ -96,23 +97,20 @@ def english_query(product):
     return product or ""
 
 def evaluate_link(url):
-    """يفحص الرابط بجلبة وحدة: 'ok' صفحة شراء متوفرة، 'soldout' نافد، 'category' قسم/بحث/مقارنة"""
+    """يفحص الرابط: 'ok'، 'soldout' نافد، 'category' قسم مؤكد.
+    القاعدة الذهبية: الشك لصالح اللنك الأصلي — نرفض فقط اللي ثابت إنه خربان،
+    لأن مواقع الجافاسكريبت ما تظهر أزرار الشراء في الـ HTML الخام."""
     u = (url or "").lower()
     if not u.startswith("http"):
         return "category"
     if any(m in clean_domain(u) for m in MARKETPLACE_OK_DOMAINS):
         return "ok"  # مواقع التوصيل: صفحة المطعم مقبولة
     if any(h in u for h in CATEGORY_URL_HINTS):
-        return "category"
+        return "category"  # قسم مؤكد من شكل الرابط
     html = fetch_page_snippet(url)
     if html and any(s in html for s in OUT_OF_STOCK_SIGNS):
-        return "soldout"
-    if any(h in u for h in PRODUCT_URL_HINTS):
-        return "ok"
-    if html:
-        # فحصنا الصفحة فعلاً: لازم نلقى علامات شراء وإلا فهي صفحة عرض/مقارنة/رئيسية
-        return "ok" if any(s in html for s in BUY_PAGE_SIGNS) else "category"
-    # ما قدرنا نفحص (الموقع حاجب الجلب) — نتساهل
+        return "soldout"  # نافد مؤكد
+    # صفحة منتج بشكل الرابط، أو فيها علامات شراء/منتج، أو غامضة — كلها تعدي
     return "ok"
 
 def is_product_page(url):
@@ -137,21 +135,24 @@ def ddg_site_search(domain, product):
         return []
 
 def refine_link(store, url, product):
-    """يحوّل لنك القسم/الرئيسية/النافد إلى صفحة منتج متوفرة قدر الإمكان"""
+    """يحوّل لنك القسم/النافد إلى صفحة منتج قدر الإمكان — بدون ما نطرد العميل لجوجل إلا للضرورة"""
     try:
         dom = clean_domain(url)
         status = evaluate_link(url)
         if status == "ok":
             return url
-        # قسم أو نافد الكمية → ندور صفحة منتج متوفرة داخل نفس الموقع بالاسم الإنجليزي
         print(f"LINK {status}: {store}: {url[:70]}")
         q_en = english_query(product)
         for cand in ddg_site_search(dom, q_en):
             if evaluate_link(cand) == "ok":
                 print(f"LINK FIXED: {store}: -> {cand[:90]}")
                 return cand
-        # آخر حل: بحث جوجل عادي (بدون site:) بالمنتج + المتجر — مثبت إنه يعطي نتائج تسوق
-        print(f"LINK -> google search: {store}")
+        if status == "category":
+            # ما لقينا صفحة المنتج؟ لنك القسم الأصلي أفضل من جوجل — العميل داخل المتجر الصح
+            print(f"LINK kept (category): {store}")
+            return url
+        # نافد الكمية وصفحته عديمة الفائدة → بحث جوجل عادي كآخر حل
+        print(f"LINK -> google search (soldout): {store}")
         return "https://www.google.com/search?q=" + urllib.parse.quote(f"{q_en} {store} Kuwait")
     except Exception as e:
         print(f"refine err {e}")
@@ -962,4 +963,4 @@ def process_location_message(message, bot_id):
     send_whatsapp_cta(from_number, body, maps_url, bot_id, T(lang,"maps_btn"))
 
 @app.get("/")
-async def health(): return {"status":"v25 Bilingual Names + Strict Links"}
+async def health(): return {"status":"v26 Lenient Link Repair"}
