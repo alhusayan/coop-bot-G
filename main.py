@@ -24,12 +24,11 @@ LAST_SEARCH = {} # لحفظ اسم آخر منتج بحث عنه المستخد�
 # ===== نظام اللغة: كل رقم تلفون وله لغته =====
 USER_LANG = {}       # from_number -> "ar" | "en"
 PENDING_IMAGES = defaultdict(lambda: {"images": [], "bot_id": ""})  # صور معلقة بانتظار اختيار اللغة
-MSG_COUNT = defaultdict(int)  # عداد رسائل كل مستخدم — كل 10 رسائل نعرض عليه اختيار اللغة
-LANG_MENU_EVERY = 10
 
 BUFFER_SECONDS = 4
 RESOLVER = ThreadPoolExecutor(max_workers=6)
 WORKERS = ThreadPoolExecutor(max_workers=3)
+SEARCH_POOL = ThreadPoolExecutor(max_workers=4)  # للبحث المزدوج المتوازي
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
 # ===== نصوص البوت بالعربي والإنجليزي =====
@@ -123,7 +122,6 @@ SYSTEM_PROMPT = """
 في كل الحالات، سطر أخير إلزامي:
 LINKS: اسم الأول=الدومين الحقيقي, اسم الثاني=الدومين الحقيقي, اسم الثالث=الدومين الحقيقي
 مثال: LINKS: إكسايت=xcite.com, بلينك=blink.com.kw, يوريكا=eureka.com.kw
-المتاجر مفتوحة وغير محصورة: قارن بين كل المتاجر التي تبيع المنتج في الكويت — وكلاء، هايبرماركتات (كارفور، لولو...)، متاجر عالمية (إيكيا وغيرها)، متاجر أونلاين محلية — واختر فعلياً حسب نتائج البحث لا حسب الشهرة.
 لا تخمّن الدومين، ولا تذكر متجراً أو خياراً من دون مصدر بحث.
 ممنوع روابط ظاهرة. ممنوع Markdown.
 
@@ -131,6 +129,15 @@ LINKS: اسم الأول=الدومين الحقيقي, اسم الثاني=ال
 
 إذا كان المنتج عقاراً أو سيارة، أعطِ تقييماً متوسطاً ونطاق سعر مختصراً جداً.
 """
+
+# برومبت دمج نتيجتي البحث في رد نهائي واحد
+MERGE_SYSTEM = """أنت مدقق نتائج تسوق. ستستلم نتيجتي بحث لنفس الطلب في الكويت. ادمجهما في رد نهائي واحد أفضل وأكمل من الاثنين:
+- خذ اتحاد كل المتاجر/الخيارات من النتيجتين بدون تكرار (اعرض حتى 5 إذا توفرت).
+- إذا ظهر نفس المتجر أو المكان بسعرين مختلفين، اعتمد السعر الأرخص.
+- الترتيب: في مقارنة الأسعار رتب من الأرخص للأغلى (الأرخص بعلامة ✅ والباقي بعلامة •)، وفي التوصيات والخدمات رتب من الأعلى تقييماً (الأفضل بعلامة 🏆 والباقي بعلامة •).
+- حافظ حرفياً على نفس تنسيق السطور: سطر 📦 ثم سطور المتاجر ثم السطر الختامي القصير إن وجد.
+- أرقام الهواتف: انقلها فقط كما وردت في النتيجتين، وممنوع اختراع أي رقم أو سعر أو متجر غير موجود فيهما.
+- لا تكتب سطر LINKS. ممنوع الروابط. ممنوع Markdown. لا تكتب أي شرح خارج التنسيق."""
 
 def get_final_url(url: str):
     """Resolve redirects, but keep Gemini's original grounding URL as fallback."""
@@ -166,7 +173,7 @@ def extract_store_names(text):
             name = m.group(1).strip()
             if name and name not in stores:
                 stores.append(name)
-    return stores[:3]
+    return stores[:5]
 
 def source_label(title, url):
     title = (title or "").strip()
@@ -178,13 +185,14 @@ def source_label(title, url):
     except Exception:
         return "المتجر"
 
-def call_gemini(parts, system=SYSTEM_PROMPT):
+def call_gemini(parts, system=SYSTEM_PROMPT, use_search=True):
     payload = {
         "systemInstruction": {"parts": [{"text": system}]},
         "contents": [{"role": "user", "parts": parts}],
-        "tools": [{"google_search": {}}],
-        "generationConfig": {"temperature": 0.2, "maxOutputTokens": 2000},
+        "generationConfig": {"temperature": 0, "maxOutputTokens": 2000},
     }
+    if use_search:
+        payload["tools"] = [{"google_search": {}}]
     try:
         r = requests.post(GEMINI_URL, params={"key": GEMINI_API_KEY}, json=payload, timeout=90)
         if r.status_code >= 400:
@@ -295,9 +303,41 @@ def call_gemini(parts, system=SYSTEM_PROMPT):
             "grounding_chunks": len(chunks),
             "resolved_buttons": list(urls_map.keys()),
         })
-        return text, dict(list(urls_map.items())[:3])
+        return text, dict(list(urls_map.items())[:4])
     except Exception as e:
         print(f"Gemini err {e}"); return "", {}
+
+def dual_search(parts, lang):
+    """بحثان متوازيان لنفس الطلب + دمج النتيجتين في رد واحد أكمل وأدق.
+    اللنكات: اتحاد لنكات البحثين معاً."""
+    try:
+        futs = [SEARCH_POOL.submit(call_gemini, parts) for _ in range(2)]
+        (t1, u1), (t2, u2) = futs[0].result(), futs[1].result()
+    except Exception as e:
+        print(f"dual_search err {e}")
+        return call_gemini(parts)
+
+    # اتحاد اللنكات من البحثين (الأولوية للبحث الأول عند التعارض)
+    merged_urls = dict(u2); merged_urls.update(u1)
+    merged_urls = dict(list(merged_urls.items())[:4])
+
+    # إذا وحدة من النتيجتين فشلت، نرجع الثانية مباشرة
+    if not t1 and not t2:
+        return "", merged_urls
+    if not t1:
+        return t2, merged_urls
+    if not t2:
+        return t1, merged_urls
+    # إذا النتيجتان متطابقتان تقريباً، لا داعي لمكالمة دمج
+    if normalize_name(t1) == normalize_name(t2):
+        return t1, merged_urls
+
+    merge_input = f"النتيجة الأولى:\n{t1}\n\n---\n\nالنتيجة الثانية:\n{t2}\n\nادمجهما الآن. {LANG_INSTR[lang]}"
+    merged_txt, _ = call_gemini([{"text": merge_input}], system=MERGE_SYSTEM, use_search=False)
+    if not merged_txt:
+        # فشل الدمج؟ نرجع النتيجة الأغنى (الأكثر سطور متاجر)
+        merged_txt = t1 if len(extract_store_names(t1)) >= len(extract_store_names(t2)) else t2
+    return merged_txt, merged_urls
 
 def extract_products(text):
     text=re.sub(r'^[•\-\*\d\.\)\s]+','',text,flags=re.M)
@@ -363,17 +403,12 @@ def send_whatsapp_buttons(to, body, buttons, bot_id):
         return False
 
 def send_language_choice(to, bot_id):
-    """رسالة اختيار اللغة — أزرار ضغط"""
+    """رسالة اختيار اللغة — تُرسل مرة واحدة فقط لمن يبدأ بصورة"""
     body = "🌐 اختر لغتك المفضلة\nChoose your preferred language"
     send_whatsapp_buttons(to, body, [
         {"id": "lang_ar", "title": "العربية 🇰🇼"},
         {"id": "lang_en", "title": "English 🇬🇧"},
     ], bot_id)
-
-async def delayed_language_choice(from_number, bot_id):
-    """تُرسل قائمة اللغة الدورية بعد مهلة قصيرة حتى توصل بعد رد البوت الأساسي"""
-    await asyncio.sleep(12)
-    await asyncio.to_thread(send_language_choice, from_number, bot_id)
 
 def send_whatsapp_contacts(to, contacts, bot_id):
     """إرسال بطاقات جهات اتصال (يقدر العميل يحفظها أو يتصل مباشرة)"""
@@ -423,12 +458,6 @@ async def receive(request: Request, background_tasks: BackgroundTasks):
         processed_ids.append(mid)
         bot_id=value.get("metadata",{}).get("phone_number_id",PHONE_NUMBER_ID)
         from_number=msg["from"]
-
-        # عداد الرسائل: كل 10 رسائل (نص/صورة/لوكيشن) نعرض قائمة اللغة بنهاية الرد
-        if msg.get("type") in ("text","image","location"):
-            MSG_COUNT[from_number]+=1
-            if MSG_COUNT[from_number] % LANG_MENU_EVERY == 0:
-                background_tasks.add_task(delayed_language_choice, from_number, bot_id)
         
         if msg.get("type")=="image":
             if from_number not in USER_LANG:
@@ -482,7 +511,8 @@ def process_single_image(message,bot_id,lang="ar"):
     from_number=message["from"]
     send_whatsapp_text(from_number,T(lang,"identifying"),bot_id)
     b64,mime=download_whatsapp_media(message["image"]["id"])
-    txt,urls=call_gemini([{"inline_data":{"mime_type":mime,"data":b64}},{"text":f"ما هذا المنتج؟ ابحث عن سعره الحالي في الكويت. {LANG_INSTR[lang]}"}])
+    # بحث مزدوج + دمج للحصول على أكمل نتيجة وكل اللنكات
+    txt,urls=dual_search([{"inline_data":{"mime_type":mime,"data":b64}},{"text":f"ما هذا المنتج؟ ابحث عن سعره الحالي في الكويت. {LANG_INSTR[lang]}"}], lang)
     if not txt: txt=T(lang,"cant_identify")
     send_whatsapp_text(from_number,txt,bot_id)
     
@@ -529,6 +559,13 @@ def process_multi_images(messages,from_number,bot_id,lang="ar"):
 
 def process_text_message(message,bot_id):
     from_number=message["from"]; user_text=message["text"]["body"]
+
+    # أمر تغيير اللغة — يشتغل أي وقت: "لغة" / "language" / "lang" / "/lang" ...
+    cmd=re.sub(r"[^\w\u0600-\u06FF]","",user_text.strip().lower())
+    if cmd in ("لغة","اللغة","غيراللغة","language","lang","changelanguage"):
+        send_language_choice(from_number, bot_id)
+        return
+
     # كشف اللغة من الرسالة النصية — النص دايماً يحدّث لغة المستخدم بالاتجاهين
     detected=detect_lang(user_text)
     if detected:
@@ -545,7 +582,8 @@ def process_text_message(message,bot_id):
     products=extract_products(user_text)
     if len(products)==1:
         send_whatsapp_text(from_number,T(lang,"searching",q=products[0]),bot_id)
-        txt,urls=call_gemini([{"text":f"ابحث عن {products[0]} في الكويت. {LANG_INSTR[lang]}"}])
+        # بحث مزدوج + دمج للحصول على أكمل نتيجة وأدق الأسعار وكل اللنكات
+        txt,urls=dual_search([{"text":f"ابحث عن {products[0]} في الكويت. {LANG_INSTR[lang]}"}], lang)
         send_whatsapp_text(from_number,txt or T(lang,"not_found"),bot_id)
         
         LAST_SEARCH[from_number] = {"product": products[0]}
@@ -578,20 +616,19 @@ def process_location_message(message, bot_id):
 
     product = last_search["product"]
     
-    prompt_category = """أنت خبير تسوق في السوق الكويتي.
-بناءً على اسم المنتج، أعطني "عبارة بحث" (Search Term) لخرائط جوجل تجلب كل المتاجر التي تبيع هذا النوع من المنتجات.
+    prompt_category = """أنت خبير تسوق في السوق الكويتي. 
+بناءً على اسم المنتج، أعطني "عبارة بحث" (Search Term) دقيقة جداً لخرائط جوجل تجلب المتاجر الصحيحة وتستبعد العشوائية.
 
 قواعد هامة:
-- ⛔ ممنوع حصر البحث بأسماء متاجر أو علامات تجارية معينة. استخدم نوع المتجر العام فقط، حتى تظهر كل الخيارات القريبة من المستخدم: الوكلاء، الهايبرماركتات العالمية، الجمعيات، والمحلات المحلية — بدون استثناء أحد.
-- اكتب نوع المتجر بالعربي والإنجليزي معاً حتى تلتقط الخريطة كل النتائج.
-- للمواد الغذائية والتموينية: (سوبرماركت OR هايبرماركت OR جمعية تعاونية OR supermarket OR hypermarket) — حتى تشمل الجمعيات والهايبرات الكبيرة معاً.
-- للإلكترونيات والأجهزة: (محل الكترونيات OR electronics store).
-- للأدوية والمكملات: (صيدلية OR pharmacy).
-- للملابس والمعدات الرياضية: (محل رياضة OR sporting goods store).
-- للأثاث والمفروشات: (محل أثاث OR furniture store).
-- للعطور ومستحضرات التجميل: (محل عطور OR perfume shop).
-- لأي فئة أخرى: استنتج نوع المحل المناسب واكتبه بالعربي والإنجليزي بنفس الأسلوب.
-- إذا لم تكن متأكداً من الفئة، اكتب اسم المنتج نفسه.
+- للإلكترونيات الذكية (ساعة أبل، جوالات، لابتوب): اكتب أسماء الوكلاء الموثوقين هكذا (Xcite OR Eureka OR Best Al Yousifi) ولا تكتب "محل الكترونيات" أبداً.
+- للأجهزة المنزلية (ثلاجة، غسالة): (Xcite OR Eureka).
+- للأدوية والمكملات: (صيدلية Pharmacy).
+- للمواد الغذائية واللحوم: (جمعية تعاونية Supermarket).
+- لألعاب الفيديو: (محل العاب فيديو Video games).
+- للكهربائيات الثقيلة والإضاءة: (مواد كهربائية Electrical supply).
+- للملابس والمعدات الرياضية (مثل مضارب التنس والبادل): (Intersport OR Go Sport OR محلات رياضية).
+- للطلبات العامة (قهوة، مطاعم، عطور): اكتب نوع المكان مع كلمة "الأعلى تقييماً" مثل (كافيه specialty coffee) أو (محل عطور perfume shop).
+- إذا لم تكن متأكداً، اكتب اسم المنتج نفسه.
 
 أعطني عبارة البحث فقط بدون أي إضافات أو شرح."""
 
@@ -615,4 +652,4 @@ async def cart_page(cart_id: str):
     return HTMLResponse(f"<html dir='rtl'><head><meta name='viewport' content='width=device-width'><script src='https://cdn.tailwindcss.com'></script></head><body><div class='max-w-lg mx-auto bg-white'><div class='p-5 bg-black text-white'><h1>🛒 سلتك</h1></div>{rows}</div></body></html>")
 
 @app.get("/")
-async def health(): return {"status":"v17 Open Stores + Periodic Lang Menu"}
+async def health(): return {"status":"v16 Dual Search Merge"}
