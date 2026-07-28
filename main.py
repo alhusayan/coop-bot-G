@@ -31,10 +31,18 @@ WORKERS = ThreadPoolExecutor(max_workers=3)
 SEARCH_POOL = ThreadPoolExecutor(max_workers=4)  # للبحث المزدوج المتوازي
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
-# ===== كاش النتائج: نفس المنتج خلال 6 ساعات = نفس الجواب حرفياً بنفس اللنكات =====
+# ===== كاش النتائج: نفس المنتج = نفس الجواب واللنكات طوال مدة الكاش =====
 SEARCH_CACHE = {}          # key -> {"txt":..., "urls":..., "ts":...}
-CACHE_TTL = 6 * 3600       # 6 ساعات
+CACHE_TTL = int(os.environ.get("CACHE_TTL_HOURS", "2")) * 3600  # قابلة للتعديل من Railway بدون كود
 CACHE_MAX = 500            # حد أقصى للذاكرة
+
+# حارس الجودة: لا نحفظ بالكاش إلا نتيجة قوية (3+ متاجر بأسعار ولنك واحد على الأقل)
+CACHE_MIN_STORES = 3
+CACHE_MIN_LINKS = 1
+
+def result_quality(txt, urls):
+    """(عدد المتاجر بأسعار، عدد اللنكات)"""
+    return len(extract_store_names(txt or "")), len(urls or {})
 
 def cache_key(query, lang):
     norm = re.sub(r"[^\w\u0600-\u06FF]+", "", (query or "").lower())
@@ -372,13 +380,31 @@ def dual_search(parts, lang):
     return merged_txt, merged_urls
 
 def search_product(query, lang):
-    """البوابة الموحدة للبحث: كاش أولاً، وإلا بحث مزدوج + دمج + حفظ بالكاش.
-    نفس المنتج خلال 6 ساعات = نفس الجواب واللنكات لأي مستخدم."""
+    """البوابة الموحدة للبحث: كاش أولاً، وإلا بحث مزدوج + دمج.
+    لا نحفظ بالكاش إلا نتيجة قوية — النتائج الضعيفة تُرسل لكن لا تُخزّن،
+    حتى ياخذ الطلب التالي فرصة بحث جديدة بدل تكرار نتيجة سيئة."""
     cached = cache_get(query, lang)
     if cached:
         return cached
+
     txt, urls = dual_search([{"text": f"ابحث عن {query} في الكويت. {LANG_INSTR[lang]}"}], lang)
-    cache_put(query, lang, txt, urls)
+    stores, links = result_quality(txt, urls)
+
+    # بحث إنقاذ: إذا الدمج طلع فقير جداً (أقل من متجرين)، نحاول مرة ثالثة ونضم
+    if stores < 2:
+        print(f"RESCUE SEARCH: stores={stores} links={links} | {query[:60]}")
+        t3, u3 = call_gemini([{"text": f"ابحث عن {query} في الكويت. {LANG_INSTR[lang]}"}])
+        s3, _ = result_quality(t3, u3)
+        if s3 > stores:
+            txt = t3
+        merged = dict(u3); merged.update(urls)
+        urls = dict(list(merged.items())[:4])
+        stores, links = result_quality(txt, urls)
+
+    if stores >= CACHE_MIN_STORES and links >= CACHE_MIN_LINKS:
+        cache_put(query, lang, txt, urls)
+    else:
+        print(f"NOT CACHED (quality low): stores={stores} links={links} | {query[:60]}")
     return txt, urls
 
 def extract_products(text):
@@ -704,4 +730,4 @@ async def cart_page(cart_id: str):
     return HTMLResponse(f"<html dir='rtl'><head><meta name='viewport' content='width=device-width'><script src='https://cdn.tailwindcss.com'></script></head><body><div class='max-w-lg mx-auto bg-white'><div class='p-5 bg-black text-white'><h1>🛒 سلتك</h1></div>{rows}</div></body></html>")
 
 @app.get("/")
-async def health(): return {"status":"v17 Cache + Canonical Names"}
+async def health(): return {"status":"v18 Quality-Gated Cache"}
