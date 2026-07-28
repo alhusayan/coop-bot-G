@@ -26,8 +26,8 @@ RESOLVER = ThreadPoolExecutor(max_workers=6)
 WORKERS = ThreadPoolExecutor(max_workers=3)
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
-# رسالة طلب اللوكيشن مع خطوات واضحة (تُستخدم في مكانين)
-LOCATION_PROMPT_MSG = "تبي أقرب محل يبيعه؟ 📍\n\nسهلة، ٣ خطوات:\n1️⃣ اضغط ➕ (أيفون) أو 📎 (أندرويد) جنب خانة الكتابة\n2️⃣ اختر الموقع Location\n3️⃣ اضغط إرسال موقعك الحالي\n\nوعلى طول أرد لك بأقرب المحلات على الخريطة 👇"
+# رسالة طلب اللوكيشن (تُرسل مع زر واتساب الرسمي لمشاركة الموقع)
+LOCATION_PROMPT_MSG = "تبي أقرب محل يبيعه؟ 📍\n\nاضغط الزر تحت ودز موقعك، وعلى طول أرد لك بأقرب المحلات على الخريطة 👇"
 
 SYSTEM_PROMPT = """
 أنت مساعد تسوق كويتي. استخدم بحث Google فعلياً للأسعار والتقييمات الحالية في الكويت.
@@ -274,6 +274,19 @@ def send_whatsapp_cta(to,body,link,bot_id,title):
         print(f"WhatsApp CTA exception: {e} | {link[:180]}")
         return False
 
+def send_whatsapp_location_request(to, body, bot_id):
+    """زر واتساب الرسمي لطلب الموقع — ضغطة وحدة تفتح شاشة مشاركة اللوكيشن"""
+    url=f"{GRAPH_URL}/{bot_id}/messages"; h={"Authorization":f"Bearer {WHATSAPP_TOKEN}","Content-Type":"application/json"}
+    payload={"messaging_product":"whatsapp","to":to,"type":"interactive","interactive":{"type":"location_request_message","body":{"text":body[:1024]},"action":{"name":"send_location"}}}
+    try:
+        r = requests.post(url,json=payload,headers=h,timeout=15)
+        if not r.ok:
+            print(f"WhatsApp location request error {r.status_code}: {r.text[:500]}")
+        return r.ok
+    except Exception as e:
+        print(f"WhatsApp location request exception: {e}")
+        return False
+
 def send_whatsapp_contacts(to, contacts, bot_id):
     """إرسال بطاقات جهات اتصال (يقدر العميل يحفظها أو يتصل مباشرة)"""
     url=f"{GRAPH_URL}/{bot_id}/messages"; h={"Authorization":f"Bearer {WHATSAPP_TOKEN}","Content-Type":"application/json"}
@@ -358,7 +371,7 @@ def process_single_image(message,bot_id):
         if u: send_whatsapp_cta(from_number,f"تسوق من {n} 👇",u,bot_id,f"🛒 {n[:18]}")
 
     if product_name and product_name != "المنتج":
-        send_whatsapp_text(from_number, LOCATION_PROMPT_MSG, bot_id)
+        send_whatsapp_location_request(from_number, LOCATION_PROMPT_MSG, bot_id)
 
 def fetch_product_from_image(msg):
     try:
@@ -407,7 +420,7 @@ def process_text_message(message,bot_id):
         for n,u in urls.items():
             if u: send_whatsapp_cta(from_number,f"تسوق من {n} 👇",u,bot_id,f"🛒 {n[:18]}")
 
-        send_whatsapp_text(from_number, LOCATION_PROMPT_MSG, bot_id)
+        send_whatsapp_location_request(from_number, LOCATION_PROMPT_MSG, bot_id)
             
     else:
         LAST_SEARCH[from_number] = {"product": products[0]}
@@ -462,4 +475,4 @@ async def cart_page(cart_id: str):
     return HTMLResponse(f"<html dir='rtl'><head><meta name='viewport' content='width=device-width'><script src='https://cdn.tailwindcss.com'></script></head><body><div class='max-w-lg mx-auto bg-white'><div class='p-5 bg-black text-white'><h1>🛒 سلتك</h1></div>{rows}</div></body></html>")
 
 @app.get("/")
-async def health(): return {"status":"v13 Location Onboarding"}
+async def health(): return {"status":"v14 Native Location Button"}
