@@ -75,20 +75,34 @@ def fetch_page_snippet(url, limit=80000):
     except Exception:
         return ""
 
-def is_product_page(url):
-    """هل هذا الرابط صفحة شراء منتج فعلاً؟"""
+# علامات نفاد الكمية — زر يوصل لمنتج Sold Out أسوأ من عدمه
+OUT_OF_STOCK_SIGNS = (
+    "sold out", "sold-out", "out of stock", "outofstock", "currently unavailable",
+    "نفدت الكمية", "نفذت الكمية", "غير متوفر حاليا", "غير متوفر حالياً", "انتهت الكمية",
+    "notify me when available", "أعلمني عند التوفر", "اشعرني عند التوفر",
+    '"availability":"http://schema.org/outofstock', '"availability": "http://schema.org/outofstock',
+)
+
+def evaluate_link(url):
+    """يفحص الرابط بجلبة وحدة: 'ok' صفحة شراء متوفرة، 'soldout' نافد، 'category' قسم/بحث"""
     u = (url or "").lower()
     if not u.startswith("http"):
-        return False
-    if any(h in u for h in PRODUCT_URL_HINTS):
-        return True
+        return "category"
+    if any(m in clean_domain(u) for m in MARKETPLACE_OK_DOMAINS):
+        return "ok"  # مواقع التوصيل: صفحة المطعم مقبولة
     html = fetch_page_snippet(url)
-    if not html:
-        # ما قدرنا نفحص — إذا شكل الرابط قسم نرفضه، غير كذا نقبله
-        return not any(h in u for h in CATEGORY_URL_HINTS)
-    return any(s in html for s in BUY_PAGE_SIGNS) and not (
-        any(h in u for h in CATEGORY_URL_HINTS) and "@type" not in html
-    )
+    if html and any(s in html for s in OUT_OF_STOCK_SIGNS):
+        return "soldout"
+    if any(h in u for h in PRODUCT_URL_HINTS):
+        return "ok"
+    if html and any(s in html for s in BUY_PAGE_SIGNS):
+        return "ok"
+    if any(h in u for h in CATEGORY_URL_HINTS):
+        return "category"
+    return "ok"
+
+def is_product_page(url):
+    return evaluate_link(url) == "ok"
 
 def ddg_site_search(domain, product):
     """بحث DuckDuckGo مقيّد بموقع المتجر — للعثور على صفحة المنتج بالضبط"""
@@ -109,20 +123,20 @@ def ddg_site_search(domain, product):
         return []
 
 def refine_link(store, url, product):
-    """يحوّل لنك القسم/الرئيسية إلى صفحة المنتج بالضبط قدر الإمكان"""
+    """يحوّل لنك القسم/الرئيسية/النافد إلى صفحة منتج متوفرة قدر الإمكان"""
     try:
         dom = clean_domain(url)
-        if any(m in dom for m in MARKETPLACE_OK_DOMAINS):
-            return url  # صفحة المطعم/المتجر مقبولة في مواقع التوصيل
-        if is_product_page(url):
+        status = evaluate_link(url)
+        if status == "ok":
             return url
-        # الرابط قسم أو رئيسية → ندور صفحة المنتج داخل نفس الموقع
+        # قسم أو نافد الكمية → ندور صفحة منتج متوفرة داخل نفس الموقع
+        print(f"LINK {status}: {store}: {url[:70]}")
         for cand in ddg_site_search(dom, product):
-            if is_product_page(cand):
-                print(f"LINK FIXED: {store}: {url[:70]} -> {cand[:90]}")
+            if evaluate_link(cand) == "ok":
+                print(f"LINK FIXED: {store}: -> {cand[:90]}")
                 return cand
         # آخر حل: بحث جوجل مقيّد بالموقع — العميل على بعد ضغطة وحدة من المنتج
-        print(f"LINK -> site search: {store}: {url[:70]}")
+        print(f"LINK -> site search: {store}")
         return "https://www.google.com/search?q=" + urllib.parse.quote(f"{product} site:{dom}")
     except Exception as e:
         print(f"refine err {e}")
@@ -211,6 +225,7 @@ IDENTIFY_SYSTEM = """أنت خبير تعرف على المنتجات. انظر 
 [البراند] [نوع المنتج] [رقم الموديل باللاتيني إن ظهر] [اللون/النكهة] [الحجم/الوزن إن ظهر]
 
 رقم الموديل هو أهم عنصر — دور عليه على العبوة أو الذراع أو الملصق (مثل RB3721، SM-S928، MQ2V3).
+رقم الجيل مهم جداً أيضاً (مثل Ultra 2، Ultra 3، آيفون 16): اذكره إن كان ظاهراً أو مؤكداً من شكل المنتج، وإذا لم يكن واضحاً من الصورة لا تخمّنه — اكتب الاسم بدون رقم الجيل.
 أمثلة على الصيغة:
 - ريبان نظارة شمسية RB3721 اسود 59 مم
 - برينجلز كاتشب 200 جرام
@@ -307,6 +322,8 @@ SYSTEM_PROMPT = """
 ✅ [المتجر الأرخص] — [السعر] د.ك
 • [المتجر الثاني] — [السعر] د.ك
 • [المتجر الثالث] — [السعر] د.ك
+⚠️ قاعدة الموديل الواحد: كل الأسعار في المقارنة يجب أن تكون لنفس المنتج بنفس الجيل والموديل والحجم بالضبط — ممنوع مقارنة أجيال مختلفة (مثلاً Ultra 2 مع Ultra 3 أو آيفون 15 مع 16). إذا لم يحدد المستخدم الجيل، قارن أحدث جيل واذكر رقم الجيل صراحة في سطر 📦.
+⚠️ لا تدرج متجراً إذا كان المنتج نافد الكمية (Sold Out / غير متوفر) لديه حسب نتائج البحث.
 
 【الحالة 2】طلب عام بدون براند محدد (مثل: قهوة فلات وايت حار، عطر رجالي، لابتوب للدراسة، سماعات للجيم، برجر):
 لا تبحث عن الأرخص! ابحث عن الأفضل تقييماً في الكويت بسعر مناسب (أفضل قيمة مقابل السعر).
@@ -928,4 +945,4 @@ def process_location_message(message, bot_id):
     send_whatsapp_cta(from_number, body, maps_url, bot_id, T(lang,"maps_btn"))
 
 @app.get("/")
-async def health(): return {"status":"v23 Product-Page Links"}
+async def health(): return {"status":"v24 Same-Model + In-Stock"}
