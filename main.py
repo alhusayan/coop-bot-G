@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-import os, re, time, base64, requests, uuid, asyncio, urllib.parse
+import os, re, time, base64, requests, uuid, asyncio, urllib.parse, hashlib
 from collections import deque, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from fastapi import FastAPI, Request, Response, BackgroundTasks
@@ -30,6 +30,38 @@ RESOLVER = ThreadPoolExecutor(max_workers=6)
 WORKERS = ThreadPoolExecutor(max_workers=3)
 SEARCH_POOL = ThreadPoolExecutor(max_workers=4)  # للبحث المزدوج المتوازي
 HEADERS = {"User-Agent": "Mozilla/5.0"}
+
+# ===== كاش النتائج: نفس المنتج خلال 6 ساعات = نفس الجواب حرفياً بنفس اللنكات =====
+SEARCH_CACHE = {}          # key -> {"txt":..., "urls":..., "ts":...}
+CACHE_TTL = 6 * 3600       # 6 ساعات
+CACHE_MAX = 500            # حد أقصى للذاكرة
+
+def cache_key(query, lang):
+    norm = re.sub(r"[^\w\u0600-\u06FF]+", "", (query or "").lower())
+    return hashlib.sha256(f"{norm}|{lang}".encode()).hexdigest()
+
+def cache_get(query, lang):
+    k = cache_key(query, lang)
+    hit = SEARCH_CACHE.get(k)
+    if hit and (time.time() - hit["ts"]) < CACHE_TTL:
+        print(f"CACHE HIT: {query[:60]}")
+        return hit["txt"], dict(hit["urls"])
+    return None
+
+def cache_put(query, lang, txt, urls):
+    if not txt:
+        return
+    if len(SEARCH_CACHE) >= CACHE_MAX:
+        # نحذف الأقدم
+        oldest = min(SEARCH_CACHE, key=lambda k: SEARCH_CACHE[k]["ts"])
+        SEARCH_CACHE.pop(oldest, None)
+    SEARCH_CACHE[cache_key(query, lang)] = {"txt": txt, "urls": dict(urls), "ts": time.time()}
+
+# برومبت تحديد الاسم القياسي للمنتج من الصورة (بدون بحث — سريع ورخيص)
+IDENTIFY_SYSTEM = """أنت خبير تعرف على المنتجات. انظر للصورة واكتب الاسم التجاري القياسي الكامل للمنتج فقط:
+البراند + اسم المنتج + النكهة/اللون إن وجد + الحجم/الوزن إن ظهر على العبوة.
+مثال: برينجلز بنكهة الكاتشب 200 جرام
+سطر واحد فقط. بدون أي شرح أو مقدمات أو رموز."""
 
 # ===== نصوص البوت بالعربي والإنجليزي =====
 MSG = {
@@ -339,6 +371,16 @@ def dual_search(parts, lang):
         merged_txt = t1 if len(extract_store_names(t1)) >= len(extract_store_names(t2)) else t2
     return merged_txt, merged_urls
 
+def search_product(query, lang):
+    """البوابة الموحدة للبحث: كاش أولاً، وإلا بحث مزدوج + دمج + حفظ بالكاش.
+    نفس المنتج خلال 6 ساعات = نفس الجواب واللنكات لأي مستخدم."""
+    cached = cache_get(query, lang)
+    if cached:
+        return cached
+    txt, urls = dual_search([{"text": f"ابحث عن {query} في الكويت. {LANG_INSTR[lang]}"}], lang)
+    cache_put(query, lang, txt, urls)
+    return txt, urls
+
 def extract_products(text):
     text=re.sub(r'^[•\-\*\d\.\)\s]+','',text,flags=re.M)
     parts=re.split(r'\s*(?:\n+|\+|,|،| و | & )\s*',text.strip())
@@ -511,14 +553,24 @@ def process_single_image(message,bot_id,lang="ar"):
     from_number=message["from"]
     send_whatsapp_text(from_number,T(lang,"identifying"),bot_id)
     b64,mime=download_whatsapp_media(message["image"]["id"])
-    # بحث مزدوج + دمج للحصول على أكمل نتيجة وكل اللنكات
-    txt,urls=dual_search([{"inline_data":{"mime_type":mime,"data":b64}},{"text":f"ما هذا المنتج؟ ابحث عن سعره الحالي في الكويت. {LANG_INSTR[lang]}"}], lang)
+
+    # الخطوة 1: تحديد الاسم القياسي للمنتج (مكالمة سريعة بدون بحث)
+    ident,_=call_gemini([{"inline_data":{"mime_type":mime,"data":b64}},{"text":"ما اسم هذا المنتج؟"}], system=IDENTIFY_SYSTEM, use_search=False)
+    product_name = ident.strip().splitlines()[0].strip() if ident else ""
+
+    if product_name:
+        # الخطوة 2: بحث موحد بالاسم — يشترك بالكاش مع البحث النصي لنفس المنتج
+        txt,urls=search_product(product_name, lang)
+    else:
+        # ما قدرنا نحدد الاسم؟ نرجع لبحث الصورة المباشر (بدون كاش)
+        txt,urls=dual_search([{"inline_data":{"mime_type":mime,"data":b64}},{"text":f"ما هذا المنتج؟ ابحث عن سعره الحالي في الكويت. {LANG_INSTR[lang]}"}], lang)
+        name_m = re.search(r"📦\s*(.+)", txt or "")
+        product_name = name_m.group(1).strip() if name_m else "المنتج"
+
     if not txt: txt=T(lang,"cant_identify")
     send_whatsapp_text(from_number,txt,bot_id)
-    
-    name_m = re.search(r"📦\s*(.+)", txt)
-    product_name = name_m.group(1).strip() if name_m else "المنتج"
-    LAST_SEARCH[from_number] = {"product": product_name}
+
+    LAST_SEARCH[from_number] = {"product": product_name or "المنتج"}
 
     for n,u in urls.items():
         if u: send_whatsapp_cta(from_number,T(lang,"shop_from",n=n),u,bot_id,f"🛒 {n[:18]}")
@@ -582,8 +634,8 @@ def process_text_message(message,bot_id):
     products=extract_products(user_text)
     if len(products)==1:
         send_whatsapp_text(from_number,T(lang,"searching",q=products[0]),bot_id)
-        # بحث مزدوج + دمج للحصول على أكمل نتيجة وأدق الأسعار وكل اللنكات
-        txt,urls=dual_search([{"text":f"ابحث عن {products[0]} في الكويت. {LANG_INSTR[lang]}"}], lang)
+        # البوابة الموحدة: كاش ← وإلا بحث مزدوج + دمج
+        txt,urls=search_product(products[0], lang)
         send_whatsapp_text(from_number,txt or T(lang,"not_found"),bot_id)
         
         LAST_SEARCH[from_number] = {"product": products[0]}
@@ -652,4 +704,4 @@ async def cart_page(cart_id: str):
     return HTMLResponse(f"<html dir='rtl'><head><meta name='viewport' content='width=device-width'><script src='https://cdn.tailwindcss.com'></script></head><body><div class='max-w-lg mx-auto bg-white'><div class='p-5 bg-black text-white'><h1>🛒 سلتك</h1></div>{rows}</div></body></html>")
 
 @app.get("/")
-async def health(): return {"status":"v16 Dual Search Merge"}
+async def health(): return {"status":"v17 Cache + Canonical Names"}
