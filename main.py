@@ -17,7 +17,7 @@ GRAPH_URL = "https://graph.facebook.com/v20.0"
 GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
 
 processed_ids = deque(maxlen=1000)
-CARTS = {}
+# CARTS أزيلت — السلة صارت رسالة واتساب مباشرة بدون صفحة ويب
 IMAGE_BUFFER = defaultdict(lambda: {"images": [], "time": 0, "bot_id": ""})
 LAST_SEARCH = {} # لحفظ اسم آخر منتج بحث عنه المستخدم
 
@@ -70,6 +70,30 @@ IDENTIFY_SYSTEM = """أنت خبير تعرف على المنتجات. انظر 
 البراند + اسم المنتج + النكهة/اللون إن وجد + الحجم/الوزن إن ظهر على العبوة.
 مثال: برينجلز بنكهة الكاتشب 200 جرام
 سطر واحد فقط. بدون أي شرح أو مقدمات أو رموز."""
+
+# برومبت السلة الذكية: أفضل متجر واحد يوفر السلة كلها بأقل إجمالي
+CART_SYSTEM = """أنت مساعد تسوق كويتي. ستستلم قائمة منتجات (سلة واحدة). استخدم بحث Google فعلياً للأسعار الحالية في الكويت.
+
+مهمتك: حدد أفضل متجر واحد يوفر أكبر عدد من منتجات السلة بأقل إجمالي — حتى يطلب المستخدم كل شي من مكان واحد بتوصيلة وحدة.
+
+رد بهذا الشكل فقط:
+🛒 سلتك ([العدد] منتجات)
+
+🏪 أفضل متجر واحد: [اسم المتجر]
+• [المنتج الأول] — [السعر] د.ك
+• [المنتج الثاني] — [السعر] د.ك
+💰 الإجمالي: [المجموع] د.ك
+
+إذا كان منتج غير متوفر في هذا المتجر أضف سطراً:
+⚠️ مو متوفر هنا: [اسم المنتج] (أرخص بديل: [متجر آخر] — [السعر] د.ك)
+
+إذا كان شراء كل منتج من أرخص متجر له أوفر بفرق ملموس (أكثر من 10%) أضف سطراً واحداً:
+💡 التفريق أوفر: [المجموع] د.ك بس من [العدد] متاجر مختلفة
+
+سطر أخير إلزامي:
+LINKS: [اسم أفضل متجر]=[الدومين الحقيقي]
+لا تخمّن الدومين ولا الأسعار — كل رقم لازم يكون من نتائج البحث.
+ممنوع روابط ظاهرة. ممنوع Markdown."""
 
 # ===== نصوص البوت بالعربي والإنجليزي =====
 MSG = {
@@ -604,36 +628,53 @@ def process_single_image(message,bot_id,lang="ar"):
     if product_name and product_name != "المنتج":
         send_whatsapp_location_request(from_number, T(lang,"location_prompt"), bot_id)
 
-def fetch_product_from_image(msg,lang="ar"):
+def identify_image_product(msg):
+    """يحدد الاسم القياسي لمنتج من صورة (بدون بحث — سريع)"""
     try:
         b64,mime=download_whatsapp_media(msg["image"]["id"])
-        txt,urls=call_gemini([{"inline_data":{"mime_type":mime,"data":b64}},{"text":f"حدد المنتج وابحث عن سعره. {LANG_INSTR[lang]}"}])
-        name_m=re.search(r"📦\s*(.+)",txt); name=(name_m.group(1).strip() if name_m else "منتج")[:50]
-        pm=re.search(r"(?:✅|🏆).*?(?:—|-|–)\s*([\d\.]+)",txt); price=float(pm.group(1)) if pm else 0
-        curl=list(urls.values())[0] if urls else ""; cstore=list(urls.keys())[0] if urls else "متجر"
-        return {"name":name,"store":cstore,"price":price,"url":curl,"all_urls":urls}
-    except: return {"name":"منتج","store":"متجر","price":0,"url":"","all_urls":{}}
+        ident,_=call_gemini([{"inline_data":{"mime_type":mime,"data":b64}},{"text":"ما اسم هذا المنتج؟"}], system=IDENTIFY_SYSTEM, use_search=False)
+        return ident.strip().splitlines()[0].strip() if ident else ""
+    except Exception as e:
+        print(f"identify err {e}")
+        return ""
 
-def fetch_product_from_text(prod,lang="ar"):
-    try:
-        txt,urls=call_gemini([{"text":f"ابحث عن {prod} في الكويت. {LANG_INSTR[lang]}"}])
-        m=re.search(r"(?:✅|🏆).*?(?:—|-|–)\s*([\d\.]+)",txt); price=float(m.group(1)) if m else 0
-        curl=list(urls.values())[0] if urls else ""; cstore=list(urls.keys())[0] if urls else "متجر"
-        return {"name":prod,"store":cstore,"price":price,"url":curl,"all_urls":urls}
-    except: return {"name":prod,"store":"متجر","price":0,"url":"","all_urls":{}}
+def process_cart(products, from_number, bot_id, lang="ar"):
+    """السلة الذكية: بحث واحد للسلة كلها، وأفضل متجر واحد يوفرها بأقل إجمالي.
+    مع كاش بنفس منطق المنتج الواحد."""
+    cart_query = "cart:" + "،".join(sorted(p.strip() for p in products if p.strip()))
 
-def finalize_cart(from_number,bot_id,items,lang="ar"):
-    total=sum(it["price"] for it in items); cart_id=uuid.uuid4().hex[:8]
-    CARTS[cart_id]={"products":items,"total":total}
-    unit = "د.ك" if lang=="ar" else "KWD"
-    summ="\n".join([f"• {it['name']} - {it['price']} {unit} ({it['store']})" for it in items])
-    send_whatsapp_text(from_number,T(lang,"cart_ready",items=summ,total=f"{total:.3f}"),bot_id)
-    domain=os.environ.get("RAILWAY_PUBLIC_DOMAIN","fanzia.up.railway.app")
-    send_whatsapp_cta(from_number,T(lang,"open_cart_body"),f"https://{domain}/cart/{cart_id}",bot_id,T(lang,"open_cart_btn"))
+    cached = cache_get(cart_query, lang)
+    if cached:
+        txt, urls = cached
+    else:
+        listing = "\n".join(f"- {p}" for p in products)
+        parts = [{"text": f"سلة المنتجات:\n{listing}\n\nحدد أفضل متجر واحد يوفرها بأقل إجمالي. {LANG_INSTR[lang]}"}]
+        txt, urls = call_gemini(parts, system=CART_SYSTEM)
+        if not txt:
+            # محاولة ثانية قبل الاستسلام
+            txt, urls = call_gemini(parts, system=CART_SYSTEM)
+        if txt and urls:
+            cache_put(cart_query, lang, txt, urls)
+
+    if not txt:
+        send_whatsapp_text(from_number, T(lang,"not_found"), bot_id)
+        return
+
+    send_whatsapp_text(from_number, txt, bot_id)
+    LAST_SEARCH[from_number] = {"product": products[0]}
+
+    # زر واحد (أو اثنين كحد أقصى) لأفضل متجر — الهدف: طلب واحد وتوصيلة وحدة
+    for n, u in list(urls.items())[:2]:
+        if u: send_whatsapp_cta(from_number, T(lang,"shop_from",n=n), u, bot_id, f"🛒 {n[:18]}")
 
 def process_multi_images(messages,from_number,bot_id,lang="ar"):
     send_whatsapp_text(from_number,T(lang,"multi_images",c=len(messages)),bot_id)
-    items=list(WORKERS.map(lambda m: fetch_product_from_image(m,lang),messages)); finalize_cart(from_number,bot_id,items,lang)
+    # نحدد أسماء كل الصور بالتوازي (مكالمات سريعة بدون بحث)، ثم بحث سلة واحد
+    names=[n for n in WORKERS.map(identify_image_product,messages) if n]
+    if not names:
+        send_whatsapp_text(from_number,T(lang,"cant_identify"),bot_id)
+        return
+    process_cart(names, from_number, bot_id, lang)
 
 def process_text_message(message,bot_id):
     from_number=message["from"]; user_text=message["text"]["body"]
@@ -677,9 +718,8 @@ def process_text_message(message,bot_id):
         send_whatsapp_location_request(from_number, T(lang,"location_prompt"), bot_id)
             
     else:
-        LAST_SEARCH[from_number] = {"product": products[0]}
         send_whatsapp_text(from_number,T(lang,"multi_text",c=len(products)),bot_id)
-        items=list(WORKERS.map(lambda p: fetch_product_from_text(p,lang),products)); finalize_cart(from_number,bot_id,items,lang)
+        process_cart(products, from_number, bot_id, lang)
 
 def process_location_message(message, bot_id):
     from_number = message["from"]
@@ -722,12 +762,5 @@ def process_location_message(message, bot_id):
     # زر بدل رابط طويل
     send_whatsapp_cta(from_number, body, maps_url, bot_id, T(lang,"maps_btn"))
 
-@app.get("/cart/{cart_id}", response_class=HTMLResponse)
-async def cart_page(cart_id: str):
-    cart=CARTS.get(cart_id)
-    if not cart: return HTMLResponse("<h1>السلة انتهت</h1>",404)
-    rows="".join([f"<div class='p-4 border-b flex justify-between'><div><b>{it['name']}</b><br><span class='text-sm text-gray-500'>{it['store']} - {it['price']} د.ك</span></div><a href='{it['url']}' target='_blank' class='bg-black text-white px-4 py-2 rounded'>شراء</a></div>" for it in cart["products"]])
-    return HTMLResponse(f"<html dir='rtl'><head><meta name='viewport' content='width=device-width'><script src='https://cdn.tailwindcss.com'></script></head><body><div class='max-w-lg mx-auto bg-white'><div class='p-5 bg-black text-white'><h1>🛒 سلتك</h1></div>{rows}</div></body></html>")
-
 @app.get("/")
-async def health(): return {"status":"v18 Quality-Gated Cache"}
+async def health(): return {"status":"v19 Smart One-Store Cart"}
