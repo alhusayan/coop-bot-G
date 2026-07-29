@@ -48,94 +48,6 @@ def fallback_search_url(query):
     """زر مضمون دايماً: بحث جوجل عن المتجر/المنتج إذا ما توفر لنك مباشر"""
     return "https://www.google.com/search?q=" + urllib.parse.quote(f"{query} الكويت اونلاين")
 
-# ===== خط تدقيق اللنكات: نضمن إن الزر يوصل لصفحة المنتج مو القسم =====
-PRODUCT_URL_HINTS = ("/p/", "/product/", "/products/", "/dp/", "/item/", "/buy/", "/pd/", "-p-", "sku=", "/prod/")
-CATEGORY_URL_HINTS = ("/c/", "/category/", "/categories/", "/collections", "/brand", "/brands", "/search", "?q=", "/stores", "/shop-by", "/deals", "/offers", "/sale")
-# علامات صفحة الشراء داخل الـ HTML نفسه
-BUY_PAGE_SIGNS = (
-    "add to cart", "add-to-cart", "addtocart", "buy now", "buy-now",
-    "أضف إلى السلة", "اضف الى السلة", "أضف للسلة", "اضافه للسله", "إضافة إلى السلة",
-    "اشتري الآن", "اشتري الان", "اشتر الآن",
-    'og:type" content="product', "schema.org/product", '"@type":"product', '"@type": "product',
-)
-# مواقع التوصيل: صفحة المطعم/المتجر هي أفضل وجهة ممكنة — نقبلها بدون فحص
-MARKETPLACE_OK_DOMAINS = ("talabat", "deliveroo", "cari.", "carriage", "jahez", "snoonu")
-
-def fetch_page_snippet(url, limit=80000):
-    """يقرأ أول جزء من الصفحة للفحص — بدون تحميلها كاملة"""
-    try:
-        r = requests.get(url, timeout=10, headers=HEADERS, stream=True, allow_redirects=True)
-        chunks, size = [], 0
-        for ch in r.iter_content(8192):
-            if not ch: break
-            chunks.append(ch); size += len(ch)
-            if size >= limit: break
-        r.close()
-        return b"".join(chunks).decode("utf-8", "ignore").lower()
-    except Exception:
-        return ""
-
-def is_product_page(url):
-    """هل هذا الرابط صفحة شراء منتج فعلاً؟"""
-    u = (url or "").lower()
-    if not u.startswith("http"):
-        return False
-    if any(h in u for h in PRODUCT_URL_HINTS):
-        return True
-    html = fetch_page_snippet(url)
-    if not html:
-        # ما قدرنا نفحص — إذا شكل الرابط قسم نرفضه، غير كذا نقبله
-        return not any(h in u for h in CATEGORY_URL_HINTS)
-    return any(s in html for s in BUY_PAGE_SIGNS) and not (
-        any(h in u for h in CATEGORY_URL_HINTS) and "@type" not in html
-    )
-
-def ddg_site_search(domain, product):
-    """بحث DuckDuckGo مقيّد بموقع المتجر — للعثور على صفحة المنتج بالضبط"""
-    try:
-        r = requests.get("https://html.duckduckgo.com/html/",
-                         params={"q": f"site:{domain} {product}"},
-                         headers=HEADERS, timeout=10)
-        found = []
-        for enc in re.findall(r'uddg=([^&"\']+)', r.text):
-            u = urllib.parse.unquote(enc)
-            if u.startswith("http") and domain in clean_domain(u) and u not in found:
-                found.append(u)
-            if len(found) == 3:
-                break
-        return found
-    except Exception as e:
-        print(f"ddg err {e}")
-        return []
-
-def refine_link(store, url, product):
-    """يحوّل لنك القسم/الرئيسية إلى صفحة المنتج بالضبط قدر الإمكان"""
-    try:
-        dom = clean_domain(url)
-        if any(m in dom for m in MARKETPLACE_OK_DOMAINS):
-            return url  # صفحة المطعم/المتجر مقبولة في مواقع التوصيل
-        if is_product_page(url):
-            return url
-        # الرابط قسم أو رئيسية → ندور صفحة المنتج داخل نفس الموقع
-        for cand in ddg_site_search(dom, product):
-            if is_product_page(cand):
-                print(f"LINK FIXED: {store}: {url[:70]} -> {cand[:90]}")
-                return cand
-        # آخر حل: بحث جوجل مقيّد بالموقع — العميل على بعد ضغطة وحدة من المنتج
-        print(f"LINK -> site search: {store}: {url[:70]}")
-        return "https://www.google.com/search?q=" + urllib.parse.quote(f"{product} site:{dom}")
-    except Exception as e:
-        print(f"refine err {e}")
-        return url
-
-def refine_links(product, urls_map):
-    """تدقيق كل الأزرار بالتوازي قبل الإرسال"""
-    if not urls_map or not product:
-        return urls_map
-    items = list(urls_map.items())
-    fixed = list(RESOLVER.map(lambda kv: (kv[0], refine_link(kv[0], kv[1], product)), items))
-    return dict(fixed)
-
 def best_store_name(txt):
     """اسم أفضل متجر من سطر 🏪 إن وجد"""
     m = re.search(r"^\s*🏪\s*[^:：]*[:：]\s*(.+?)\s*$", txt or "", flags=re.M)
@@ -562,8 +474,6 @@ def search_product(query, lang):
         return cached
 
     txt, urls = best_of_search([{"text": f"ابحث عن {query} في الكويت. {LANG_INSTR[lang]}"}], lang)
-    # تدقيق اللنكات: نضمن إنها صفحات منتج مو أقسام — قبل الحفظ بالكاش
-    urls = refine_links(query, urls)
     stores, links = result_quality(txt, urls)
 
     if stores >= CACHE_MIN_STORES and links >= CACHE_MIN_LINKS:
@@ -757,8 +667,6 @@ def process_single_image(message,bot_id,lang="ar"):
         txt,urls=best_of_search([{"inline_data":{"mime_type":mime,"data":b64}},{"text":f"ما هذا المنتج؟ ابحث عن سعره الحالي في الكويت. {LANG_INSTR[lang]}"}], lang)
         name_m = re.search(r"📦\s*(.+)", txt or "")
         product_name = name_m.group(1).strip() if name_m else "المنتج"
-        if product_name != "المنتج":
-            urls = refine_links(product_name, urls)
 
     if not txt: txt=T(lang,"cant_identify")
     send_whatsapp_text(from_number,txt,bot_id)
@@ -928,4 +836,4 @@ def process_location_message(message, bot_id):
     send_whatsapp_cta(from_number, body, maps_url, bot_id, T(lang,"maps_btn"))
 
 @app.get("/")
-async def health(): return {"status":"v23 Product-Page Links"}
+async def health(): return {"status":"v22 Best-of-4 Tournament"}
