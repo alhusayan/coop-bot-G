@@ -28,7 +28,7 @@ PENDING_IMAGES = defaultdict(lambda: {"images": [], "bot_id": ""})  # صور م�
 BUFFER_SECONDS = 4
 RESOLVER = ThreadPoolExecutor(max_workers=6)
 WORKERS = ThreadPoolExecutor(max_workers=3)
-SEARCH_POOL = ThreadPoolExecutor(max_workers=4)  # للبحث المزدوج المتوازي
+SEARCH_POOL = ThreadPoolExecutor(max_workers=8)  # للبحث المزدوج المتوازي
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
 # ===== كاش النتائج: نفس المنتج = نفس الجواب واللنكات طوال مدة الكاش =====
@@ -127,30 +127,6 @@ IDENTIFY_SYSTEM = """أنت خبير تعرف على المنتجات. انظر 
 - ريبان نظارة شمسية RB3721 اسود 59 مم
 - برينجلز كاتشب 200 جرام
 سطر واحد فقط. بدون أقواس أو شرح أو مقدمات أو رموز."""
-
-# برومبت السلة الذكية: أفضل متجر واحد يوفر السلة كلها بأقل إجمالي
-CART_SYSTEM = """أنت مساعد تسوق كويتي. ستستلم قائمة منتجات (سلة واحدة). استخدم بحث Google فعلياً للأسعار الحالية في الكويت.
-
-مهمتك: حدد أفضل متجر واحد يوفر أكبر عدد من منتجات السلة بأقل إجمالي — حتى يطلب المستخدم كل شي من مكان واحد بتوصيلة وحدة.
-
-رد بهذا الشكل فقط:
-🛒 سلتك ([العدد] منتجات)
-
-🏪 أفضل متجر واحد: [اسم المتجر]
-• [المنتج الأول] — [السعر] د.ك
-• [المنتج الثاني] — [السعر] د.ك
-💰 الإجمالي: [المجموع] د.ك
-
-إذا كان منتج غير متوفر في هذا المتجر أضف سطراً:
-⚠️ مو متوفر هنا: [اسم المنتج] (أرخص بديل: [متجر آخر] — [السعر] د.ك)
-
-إذا كان شراء كل منتج من أرخص متجر له أوفر بفرق ملموس (أكثر من 10%) أضف سطراً واحداً:
-💡 التفريق أوفر: [المجموع] د.ك بس من [العدد] متاجر مختلفة
-
-سطر أخير إلزامي:
-LINKS: [اسم أفضل متجر]=[الدومين الحقيقي]
-لا تخمّن الدومين ولا الأسعار — كل رقم لازم يكون من نتائج البحث.
-ممنوع روابط ظاهرة. ممنوع Markdown."""
 
 # ===== نصوص البوت بالعربي والإنجليزي =====
 MSG = {
@@ -697,41 +673,36 @@ def identify_image_product(msg):
         return ""
 
 def process_cart(products, from_number, bot_id, lang="ar"):
-    """السلة الذكية: بحث واحد للسلة كلها، وأفضل متجر واحد يوفرها بأقل إجمالي.
-    مع كاش بنفس منطق المنتج الواحد."""
-    cart_query = "cart:" + "،".join(sorted(p.strip() for p in products if p.strip()))
+    """السلة بطريقتنا: كل منتج ياخذ بحثه الكامل (كاش ← بطولة) ورده الخاص،
+    ومعه زر CTA واحد فقط — الخيار الأفضل (✅ الأرخص أو 🏆 الأعلى تقييماً)."""
+    results = list(WORKERS.map(lambda p: (p, *search_product(p, lang)), products))
 
-    cached = cache_get(cart_query, lang)
-    if cached:
-        txt, urls = cached
-    else:
-        listing = "\n".join(f"- {p}" for p in products)
-        parts = [{"text": f"سلة المنتجات:\n{listing}\n\nحدد أفضل متجر واحد يوفرها بأقل إجمالي. {LANG_INSTR[lang]}"}]
-        txt, urls = call_gemini(parts, system=CART_SYSTEM)
+    any_ok = False
+    for p, txt, urls in results:
         if not txt:
-            # محاولة ثانية قبل الاستسلام
-            txt, urls = call_gemini(parts, system=CART_SYSTEM)
-        if txt and urls:
-            cache_put(cart_query, lang, txt, urls)
+            continue
+        any_ok = True
+        send_whatsapp_text(from_number, txt, bot_id)
 
-    if not txt:
-        send_whatsapp_text(from_number, T(lang,"not_found"), bot_id)
+        # الزر الواحد: نحاول نطابق أول متجر بالرد (الأفضل)، وإلا أول لنك متوفر
+        stores = extract_store_names(txt)
+        best_name = stores[0] if stores else None
+        best_url = urls.get(best_name, "") if best_name else ""
+        if not best_url:
+            pair = next(((n, u) for n, u in urls.items() if u), None)
+            if pair:
+                best_name, best_url = pair
+        if best_url:
+            send_whatsapp_cta(from_number, T(lang, "shop_from", n=best_name), best_url, bot_id, f"🛒 {best_name[:18]}")
+        else:
+            # ضمانة: زر بحث جوجل عن المنتج مع أفضل متجر مذكور
+            target = best_name or p
+            send_whatsapp_cta(from_number, T(lang, "shop_from", n=target), fallback_search_url(f"{p} {target}" if best_name else p), bot_id, f"🛒 {target[:18]}")
+
+    if not any_ok:
+        send_whatsapp_text(from_number, T(lang, "not_found"), bot_id)
         return
-
-    send_whatsapp_text(from_number, txt, bot_id)
     LAST_SEARCH[from_number] = {"product": products[0]}
-
-    # زر واحد (أو اثنين كحد أقصى) لأفضل متجر — الهدف: طلب واحد وتوصيلة وحدة
-    sent_any = False
-    for n, u in list(urls.items())[:2]:
-        if u:
-            send_whatsapp_cta(from_number, T(lang,"shop_from",n=n), u, bot_id, f"🛒 {n[:18]}")
-            sent_any = True
-    # ضمانة: لو ما توفر لنك مباشر، زر يفتح بحث جوجل عن أفضل متجر
-    if not sent_any:
-        store = best_store_name(txt) or (products[0] if products else "")
-        if store:
-            send_whatsapp_cta(from_number, T(lang,"shop_from",n=store), fallback_search_url(store), bot_id, f"🛒 {store[:18]}")
 
 def process_multi_images(messages,from_number,bot_id,lang="ar"):
     send_whatsapp_text(from_number,T(lang,"multi_images",c=len(messages)),bot_id)
@@ -836,4 +807,4 @@ def process_location_message(message, bot_id):
     send_whatsapp_cta(from_number, body, maps_url, bot_id, T(lang,"maps_btn"))
 
 @app.get("/")
-async def health(): return {"status":"v22 Best-of-4 Tournament"}
+async def health(): return {"status":"v23 Per-Product Cart, Best CTA Only"}
