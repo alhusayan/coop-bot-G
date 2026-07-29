@@ -584,8 +584,13 @@ async def receive(request: Request, background_tasks: BackgroundTasks):
         from_number=msg["from"]
         
         if msg.get("type")=="image":
+            # الكابشن (النص المرفق مع الصورة) يحدد اللغة تلقائياً — ما نحتاج نسأل
+            caption = (msg.get("image",{}) or {}).get("caption","").strip()
+            cap_lang = detect_lang(caption) if caption else None
+            if cap_lang:
+                USER_LANG[from_number] = cap_lang
             if from_number not in USER_LANG:
-                # أول تعامل معنا وبدأ بصورة: نعلق الصور ونسأله عن لغته مرة وحدة بس
+                # أول تعامل معنا وبدأ بصورة بدون نص: نعلق الصور ونسأله عن لغته مرة وحدة بس
                 pend=PENDING_IMAGES[from_number]
                 pend["images"].append(msg); pend["bot_id"]=bot_id
                 if len(pend["images"])==1:
@@ -633,6 +638,7 @@ async def process_image_buffer(from_number):
 
 def process_single_image(message,bot_id,lang="ar"):
     from_number=message["from"]
+    caption=(message.get("image",{}) or {}).get("caption","").strip()
     send_whatsapp_text(from_number,T(lang,"identifying"),bot_id)
     b64,mime=download_whatsapp_media(message["image"]["id"])
 
@@ -640,19 +646,31 @@ def process_single_image(message,bot_id,lang="ar"):
     ident,_=call_gemini([{"inline_data":{"mime_type":mime,"data":b64}},{"text":"ما اسم هذا المنتج؟"}], system=IDENTIFY_SYSTEM, use_search=False)
     product_name = ident.strip().splitlines()[0].strip() if ident else ""
 
-    if product_name:
-        # الخطوة 2: بحث موحد بالاسم — يشترك بالكاش مع البحث النصي لنفس المنتج
+    if product_name and caption:
+        # صورة + طلب مكتوب: ننفذ طلبه على المنتج المحدد (تصليح، سعر، بدائل، قطع...)
+        # البرومبت الرئيسي نفسه يصنف الطلب (سعر/توصية/خدمة) ويرد بالتنسيق المناسب
+        request_query = f"{caption} — {product_name}"
+        txt,urls=search_product(request_query, lang)
+        LAST_SEARCH[from_number] = {"product": request_query}
+    elif product_name:
+        # صورة بدون نص: السلوك المعتاد — مقارنة أسعار
         txt,urls=search_product(product_name, lang)
+        LAST_SEARCH[from_number] = {"product": product_name}
     else:
         # ما قدرنا نحدد الاسم؟ نرجع لبحث الصورة المباشر (بدون كاش)
-        txt,urls=best_of_search([{"inline_data":{"mime_type":mime,"data":b64}},{"text":f"ما هذا المنتج؟ ابحث عن سعره الحالي في الكويت. {LANG_INSTR[lang]}"}], lang)
+        req = caption if caption else "ما هذا المنتج؟ ابحث عن سعره الحالي في الكويت."
+        txt,urls=best_of_search([{"inline_data":{"mime_type":mime,"data":b64}},{"text":f"{req} {LANG_INSTR[lang]}"}], lang)
         name_m = re.search(r"📦\s*(.+)", txt or "")
         product_name = name_m.group(1).strip() if name_m else "المنتج"
+        LAST_SEARCH[from_number] = {"product": f"{caption} — {product_name}" if caption else product_name}
 
     if not txt: txt=T(lang,"cant_identify")
     send_whatsapp_text(from_number,txt,bot_id)
 
-    LAST_SEARCH[from_number] = {"product": product_name or "المنتج"}
+    # إذا الرد كان عن خدمة (تصليح مثلاً) وفيه أرقام، نرسلها بطاقات جهات اتصال
+    contacts = extract_service_contacts(txt)
+    if contacts:
+        send_whatsapp_contacts(from_number, contacts, bot_id)
 
     sent_any=False
     for n,u in urls.items():
@@ -812,4 +830,4 @@ def process_location_message(message, bot_id):
     send_whatsapp_cta(from_number, body, maps_url, bot_id, T(lang,"maps_btn"))
 
 @app.get("/")
-async def health(): return {"status":"v24 ClicFlyer Offers Source"}
+async def health(): return {"status":"v25 Image + Caption Requests"}
