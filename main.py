@@ -609,8 +609,8 @@ def call_gemini(parts, system=SYSTEM_PROMPT, use_search=True, max_tokens=800, mo
         print(f"Gemini err {e}"); return "", {}
 
 # عدد جولات البحث المتوازية لكل طلب — قابل للتعديل من Railway
-SEARCH_RUNS = int(os.environ.get("SEARCH_RUNS", "4"))
- 
+SEARCH_RUNS = int(os.environ.get("SEARCH_RUNS", "2"))  # 2 = توازن الحصة المجانية، ارفعه 4 مع الفوترة
+
 def answer_score(txt, urls):
     """تقييم قوة الجواب: المتاجر أهم شي، ثم اللنكات، ثم سلامة التنسيق"""
     stores, links = result_quality(txt, urls)
@@ -618,7 +618,7 @@ def answer_score(txt, urls):
     if txt and "📦" in txt:
         score += 1
     return score
- 
+
 def best_of_search(parts, lang):
     """بطولة داخلية: SEARCH_RUNS بحوث متوازية لنفس الطلب، نقيّمها كلها ونرسل الأقوى.
     اللنكات: اتحاد لنكات كل الجولات (أولوية لنكات الجواب الفائز)."""
@@ -628,14 +628,14 @@ def best_of_search(parts, lang):
     except Exception as e:
         print(f"best_of_search err {e}")
         return call_gemini(parts)
- 
+
     results = [(t, u) for (t, u) in results if t]
     if not results:
         return "", {}
- 
+
     scored = sorted(results, key=lambda r: answer_score(r[0], r[1]), reverse=True)
     best_txt, best_urls = scored[0]
- 
+
     # اتحاد اللنكات: الفائز أولاً، ثم بقية الجولات تكمل النواقص
     merged_urls = dict(best_urls)
     for _, u in scored[1:]:
@@ -643,10 +643,10 @@ def best_of_search(parts, lang):
             if n not in merged_urls and link not in merged_urls.values():
                 merged_urls[n] = link
     merged_urls = dict(list(merged_urls.items())[:4])
- 
+
     print({"tournament": [answer_score(t, u) for t, u in scored], "winner_stores": result_quality(best_txt, best_urls)[0], "total_links": len(merged_urls)})
     return best_txt, merged_urls
- 
+
 def search_product(query, lang, prompt_text=None):
     """البوابة الموحدة للبحث: كاش أولاً، وإلا بطولة 4 بحوث ونرسل الأقوى.
     prompt_text: صياغة مخصصة للطلب (مثل صورة + سؤال) — الافتراضي بحث سعر عادي.
@@ -654,11 +654,11 @@ def search_product(query, lang, prompt_text=None):
     cached = cache_get(query, lang)
     if cached:
         return cached
- 
+
     text_part = prompt_text or f"ابحث عن {query} في الكويت. {LANG_INSTR[lang]}"
     txt, urls = best_of_search([{"text": text_part}], lang)
     stores, links = result_quality(txt, urls)
- 
+
     if stores >= CACHE_MIN_STORES and links >= CACHE_MIN_LINKS:
         cache_put(query, lang, txt, urls)
     elif stores == 0 and txt and len(txt) >= 120:
@@ -667,43 +667,42 @@ def search_product(query, lang, prompt_text=None):
     else:
         print(f"NOT CACHED (quality low): stores={stores} links={links} | {query[:60]}")
     return txt, urls
- 
+
 def extract_products(text):
     text=re.sub(r'^[•\-\*\d\.\)\s]+','',text,flags=re.M)
     parts=re.split(r'\s*(?:\n+|\+|,|،| و | & )\s*',text.strip())
     parts=[p.strip() for p in parts if len(p.strip())>2]
     return parts[:6] if len(parts)>1 else [text.strip()]
- 
+
 def download_whatsapp_media(mid):
     h={"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
-    meta=requests.get(f"{GRAPH_URL}/{mid}",headers=h,timeout=20).json()
-    img=requests.get(meta["url"],headers=h,timeout=30)
+    meta=SESSION.get(f"{GRAPH_URL}/{mid}",headers=h,timeout=20).json()
+    img=SESSION.get(meta["url"],headers=h,timeout=30)
     return base64.b64encode(img.content).decode(), meta.get("mime_type","image/jpeg")
- 
+
 def send_whatsapp_text(to,text,bot_id):
     url=f"{GRAPH_URL}/{bot_id}/messages"; h={"Authorization":f"Bearer {WHATSAPP_TOKEN}","Content-Type":"application/json"}
     payload={"messaging_product":"whatsapp","to":to,"type":"text","text":{"body":text[:3900]}}
     try:
-        r = requests.post(url,json=payload,headers=h,timeout=15)
+        r = SESSION.post(url,json=payload,headers=h,timeout=10)
         if not r.ok:
             print(f"WhatsApp text error {r.status_code}: {r.text[:500]}")
         return r.ok
     except Exception as e:
         print(f"WhatsApp text exception: {e}")
         return False
- 
+
 def send_whatsapp_cta(to,body,link,bot_id,title):
     url=f"{GRAPH_URL}/{bot_id}/messages"; h={"Authorization":f"Bearer {WHATSAPP_TOKEN}","Content-Type":"application/json"}
     payload={"messaging_product":"whatsapp","to":to,"type":"interactive","interactive":{"type":"cta_url","body":{"text":body[:1024]},"action":{"name":"cta_url","parameters":{"display_text":title[:20],"url":link}}}}
     try:
-        r = requests.post(url,json=payload,headers=h,timeout=15)
+        r = SESSION.post(url,json=payload,headers=h,timeout=10)
         if not r.ok:
             print(f"WhatsApp CTA error {r.status_code}: {r.text[:500]} | {link[:180]}")
         return r.ok
     except Exception as e:
         print(f"WhatsApp CTA exception: {e} | {link[:180]}")
         return False
-
 
 def send_whatsapp_location_request(to, body, bot_id):
     """زر واتساب الرسمي لطلب الموقع — ضغطة وحدة تفتح شاشة مشاركة اللوكيشن"""
@@ -718,47 +717,213 @@ def send_whatsapp_location_request(to, body, bot_id):
         print(f"WhatsApp location request exception: {e}")
         return False
 
+def _contains_any(text, words):
+    return any(w in text for w in words)
+
+# عبارات خرائط قصيرة ومقصودة. لا نستخدم OR لأن Google Maps قد يفسره بشكل سيئ
+# ويعرض مجمعات أو محلات لا علاقة لها بالمنتج.
+MAP_CATEGORIES = {
+    "grocery": {
+        "ar": "سوبرماركت وهايبرماركت",
+        "en": "supermarket hypermarket",
+    },
+    "pharmacy": {
+        "ar": "صيدليات",
+        "en": "pharmacy",
+    },
+    "consumer_electronics": {
+        "ar": "محلات إلكترونيات وأجهزة ذكية",
+        "en": "consumer electronics store",
+    },
+    "mobile": {
+        "ar": "محلات هواتف وإكسسوارات موبايل",
+        "en": "mobile phone store",
+    },
+    "computer": {
+        "ar": "محلات كمبيوتر ولابتوبات",
+        "en": "computer store",
+    },
+    "gaming": {
+        "ar": "محلات ألعاب فيديو وأجهزة ألعاب",
+        "en": "video game store",
+    },
+    "satellite": {
+        "ar": "محلات ستلايت ورسيفرات وريموتات",
+        "en": "satellite receiver store",
+    },
+    "home_appliances": {
+        "ar": "محلات أجهزة منزلية",
+        "en": "home appliance store",
+    },
+    "small_appliances": {
+        "ar": "محلات أجهزة منزلية صغيرة",
+        "en": "small home appliance store",
+    },
+    "air_conditioning": {
+        "ar": "محلات تكييف وتبريد",
+        "en": "air conditioning store",
+    },
+    "sports": {
+        "ar": "محلات أدوات ومعدات رياضية",
+        "en": "sporting goods store",
+    },
+    "tennis_padel": {
+        "ar": "محلات تنس وبادل ومضارب رياضية",
+        "en": "tennis padel sporting goods store",
+    },
+    "optics": {
+        "ar": "محلات نظارات وعدسات",
+        "en": "optician eyewear store",
+    },
+    "perfume": {
+        "ar": "محلات عطور وبخور",
+        "en": "perfume store",
+    },
+    "beauty": {
+        "ar": "محلات مستحضرات تجميل وعناية",
+        "en": "beauty cosmetics store",
+    },
+    "baby": {
+        "ar": "محلات مستلزمات أطفال",
+        "en": "baby store",
+    },
+    "auto_parts": {
+        "ar": "محلات قطع غيار وإكسسوارات سيارات",
+        "en": "auto parts store",
+    },
+    "tires_batteries": {
+        "ar": "محلات إطارات وبطاريات سيارات",
+        "en": "tire battery shop",
+    },
+    "tools": {
+        "ar": "محلات أدوات وعدد ومواد بناء",
+        "en": "hardware tools store",
+    },
+    "lighting_electrical": {
+        "ar": "محلات إنارة ومواد كهربائية",
+        "en": "lighting electrical supply store",
+    },
+    "furniture": {
+        "ar": "محلات أثاث ومفروشات",
+        "en": "furniture store",
+    },
+    "kitchenware": {
+        "ar": "محلات أدوات مطبخ وأواني منزلية",
+        "en": "kitchenware store",
+    },
+    "pet": {
+        "ar": "محلات حيوانات أليفة ومستلزماتها",
+        "en": "pet store",
+    },
+    "medical": {
+        "ar": "محلات مستلزمات وأجهزة طبية",
+        "en": "medical supply store",
+    },
+    "office": {
+        "ar": "محلات قرطاسية ومستلزمات مكتبية",
+        "en": "office stationery store",
+    },
+}
+
+def deterministic_map_category(product, offer_text=""):
+    """تصنيف محلي سريع ودقيق قبل سؤال Gemini."""
+    t = normalize_ar(f"{product} {offer_text}")
+
+    # الترتيب مهم: الفئات المتخصصة أولاً حتى لا تقع تحت فئة عامة.
+    rules = [
+        ("satellite", ("ريموت رسيفر", "ريموت ستلايت", "رسيفر", "ستلايت", "بي ان", "bein", "lnb", "دش")),
+        ("tennis_padel", ("مضرب تنس", "مضرب بادل", "تنس", "بادل", "tennis", "padel")),
+        ("gaming", ("بلايستيشن", "playstation", "اكس بوكس", "xbox", "نينتندو", "nintendo", "العاب فيديو", "يد تحكم", "ذراع تحكم")),
+        ("computer", ("لابتوب", "لاب توب", "كمبيوتر", "حاسوب", "ماك بوك", "macbook", "طابعه", "طابعة", "راوتر", "كيبورد", "ماوس")),
+        ("mobile", ("ايفون", "iphone", "جوال", "موبايل", "هاتف", "سامسونج جالكسي", "شاحن موبايل", "كفر هاتف")),
+        ("air_conditioning", ("مكيف", "تكييف", "كومبروسر تكييف", "وحده تكييف")),
+        ("small_appliances", ("مكواه", "مكواة", "خلاط", "قلايه هوائيه", "قلاية هوائية", "اير فراير", "air fryer", "توستر", "غلايه", "غلاية", "ماكينه قهوه", "ماكينة قهوة", "سيشوار", "مجفف شعر", "مكنسه يدويه")),
+        ("home_appliances", ("ثلاجه", "ثلاجة", "غساله", "غسالة", "نشافه", "نشاف", "فرن", "ميكروويف", "فريزر", "غساله صحون", "غسالة صحون", "مكنسه", "مكنسة")),
+        ("consumer_electronics", ("سماعه", "سماعات", "headphone", "earbud", "تلفزيون", "شاشه", "شاشة", "كاميرا", "ساعة ذكية", "smart watch", "بروجكتر", "projector")),
+        ("pharmacy", ("دواء", "حبوب", "مرهم", "كريم علاجي", "فيتامين", "مكمل غذائي", "صيدليه", "صيدلية", "شراب سعال", "مسكن")),
+        ("medical", ("جهاز ضغط", "جهاز سكر", "كرسي متحرك", "عكاز", "سماعه طبيه", "سماعة طبية", "مستلزمات طبيه", "مستلزمات طبية")),
+        ("optics", ("نظاره", "نظارة", "نظارات", "عدسات لاصقه", "عدسات لاصقة", "اطار نظاره", "إطار نظارة")),
+        ("perfume", ("عطر", "بخور", "دهن عود", "عود معطر")),
+        ("beauty", ("مكياج", "روج", "ماسكرا", "كريم تجميل", "سيروم بشره", "سيروم بشرة", "عنايه بالبشره", "عناية بالبشرة")),
+        ("baby", ("حفاض", "حفاظ", "رضاعه", "رضاعة", "حليب اطفال", "عربانه طفل", "عربة طفل")),
+        ("tires_batteries", ("تاير", "اطار سياره", "إطار سيارة", "اطارات", "إطارات", "بطاريه سياره", "بطارية سيارة")),
+        ("auto_parts", ("قطع غيار", "فلتر زيت", "زيت محرك", "اكسسوارات سياره", "إكسسوارات سيارة", "مساحات سياره", "مساحات سيارة")),
+        ("lighting_electrical", ("لمبه", "لمبة", "اناره", "إنارة", "ثريا", "كشاف", "مفتاح كهرباء", "فيش كهرباء", "سلك كهرباء")),
+        ("tools", ("دريل", "مثقاب", "شنيور", "مطرقه", "مطرقة", "مفك", "عدة", "صندوق عده", "صندوق عدة", "مواد بناء")),
+        ("kitchenware", ("قدر", "مقلاه", "مقلاة", "سكين مطبخ", "طقم صحون", "اواني", "أواني", "ادوات مطبخ", "أدوات مطبخ")),
+        ("furniture", ("كنبه", "كنبة", "طاولة", "كرسي مكتب", "سرير", "مرتبه", "مرتبة", "اثاث", "أثاث")),
+        ("sports", ("حذاء رياضي", "كره قدم", "كرة قدم", "معدات رياضيه", "معدات رياضية", "دمبل", "ملابس رياضيه", "ملابس رياضية")),
+        ("pet", ("طعام قطط", "طعام كلاب", "رمل قطط", "قفص طيور", "حيوانات اليفه", "حيوانات أليفة")),
+        ("office", ("قلم", "دفتر", "ورق تصوير", "حبر طابعه", "حبر طابعة", "قرطاسيه", "قرطاسية")),
+        ("grocery", (
+            "كاتشب", "كاكاو", "شوكولاته", "شوكولاتة", "قهوه", "قهوة", "شاي", "مياه", "ماء",
+            "عصير", "حليب", "لبن", "رز", "ارز", "أرز", "سكر", "طحين", "دقيق", "زيت طبخ",
+            "مكرونه", "مكرونة", "صلصه", "صلصة", "مايونيز", "تونه", "تونة", "بسكويت", "شيبس",
+            "منظف", "مسحوق غسيل", "سائل صحون", "مناديل", "شامبو", "صابون", "معجون اسنان", "معجون أسنان"
+        )),
+    ]
+    for category_id, words in rules:
+        if _contains_any(t, words):
+            return category_id
+    return ""
+
 def classify_map_query(product, lang="ar", offer_text=""):
-    """يحّول اسم المنتج إلى نوع المكان المنطقي الذي يبيعه، بدل البحث عن الاسم حرفياً في الخرائط."""
-    cache_key_value = hashlib.sha256(f"{normalize_ar(product)}|{lang}".encode()).hexdigest()
+    """يعيد نوع متجر متخصص فقط، من قائمة مغلقة، ولا يعيد اسم المنتج أو مولاً أو سوقاً عاماً."""
+    cache_key_value = hashlib.sha256(f"{normalize_ar(product)}|{normalize_ar(offer_text)}|{lang}".encode()).hexdigest()
     hit = MAP_QUERY_CACHE.get(cache_key_value)
     if hit and time.time() - hit["ts"] < CACHE_TTL:
         return hit["query"]
 
-    t = normalize_ar(product)
-    rules = [
-        (("كاتشب","كاكاو","شوكولاته","قهوه","مياه","عصير","حليب","رز","سكر","طحين","منظف","شامبو","حفاض"), "جمعية تعاونية OR هايبر ماركت OR سوبرماركت"),
-        (("دواء","حبوب","كريم","مرهم","فيتامين","مكمل","صيدليه"), "صيدلية Pharmacy"),
-        (("ايفون","سامسونج","جوال","هاتف","لابتوب","تابلت","سماعه","سماعات","تلفزيون","ريموت","رسيفر","بلايستيشن","اكس بوكس","كاميرا"), "Xcite OR Eureka OR Blink OR Best Al Yousifi OR إلكترونيات"),
-        (("ثلاجه","غساله","مكيف","فرن","ميكروويف","مكنسه","غسالة","ثلاجة"), "Xcite OR Eureka OR Best Al Yousifi OR أجهزة منزلية"),
-        (("مضرب","تنس","بادل","كره قدم","حذاء رياضي"), "Intersport OR Go Sport OR محلات رياضية"),
-        (("عطر","بخور","مكياج","روج"), "محلات عطور OR مستحضرات تجميل"),
-        (("نظاره","نظارات","عدسات"), "محلات نظارات Optics"),
-        (("قطع غيار","بطاريه سياره","زيت محرك","تاير","اطارات"), "محلات قطع غيار سيارات OR كراجات"),
-    ]
-    for words, query in rules:
-        if any(w in t for w in words):
-            MAP_QUERY_CACHE[cache_key_value] = {"query": query, "ts": time.time()}
-            return query
+    category_id = deterministic_map_category(product, offer_text)
 
-    # عند عدم وجود قاعدة واضحة، نخلي Gemini يصنف المكان فقط، لا يبحث عن المنتج نفسه.
-    sys = """أنت خبير بالسوق الكويتي. حوّل اسم المنتج إلى عبارة قصيرة جداً لبحث Google Maps عن نوع المتاجر الفعلية التي غالباً تبيع هذا المنتج. لا تكرر اسم المنتج ولا الموديل. أمثلة: كاتشب = جمعية تعاونية OR هايبر ماركت OR سوبرماركت؛ ريموت رسيفر = محلات ستلايت ورسيفرات OR إلكترونيات؛ سماعات = Xcite OR Eureka OR Blink OR إلكترونيات؛ دواء = صيدلية Pharmacy. اكتب عبارة البحث فقط."""
-    result, _ = call_gemini([{"text": f"المنتج: {product}"}], system=sys, use_search=False, max_tokens=60, model=IDENTIFY_MODEL)
-    query = result.strip().splitlines()[0] if result else "متاجر الكويت"
-    if len(query) > 140:
-        query = "متاجر الكويت"
-    MAP_QUERY_CACHE[cache_key_value] = {"query": query, "ts": time.time()}
+    if not category_id:
+        allowed_ids = ", ".join(MAP_CATEGORIES.keys())
+        sys = f"""أنت مصنف منتجات للسوق الكويتي. اختر نوع المتجر المتخصص الذي يبيع المنتج عادة.
+أجب بمعرّف واحد فقط من هذه القائمة المغلقة:
+{allowed_ids}
+
+قواعد صارمة:
+- لا تكتب اسم المنتج أو البراند أو الموديل.
+- لا تكتب اسم مول أو سوق عام أو جمعية بعينها.
+- لا تختر jewelry أو gold أو mall لأنها غير موجودة أصلاً.
+- المكواة والخلاط والقلاية = small_appliances.
+- الريموت والرسيفر والستلايت = satellite.
+- الأغذية والمنظفات اليومية = grocery.
+- السماعات والتلفزيون والكاميرا = consumer_electronics.
+- عند الشك اختر أقرب فئة متخصصة، وليس متاجر عامة."""
+        result, _ = call_gemini(
+            [{"text": f"المنتج: {product}\nسياق الأسعار والمتاجر: {offer_text[:1200]}"}],
+            system=sys,
+            use_search=False,
+            max_tokens=20,
+            model=IDENTIFY_MODEL,
+        )
+        candidate = re.sub(r"[^a-z_]", "", (result or "").strip().lower())
+        category_id = candidate if candidate in MAP_CATEGORIES else "consumer_electronics"
+
+    query = MAP_CATEGORIES[category_id]["en" if lang == "en" else "ar"]
+    MAP_QUERY_CACHE[cache_key_value] = {
+        "query": query,
+        "category": category_id,
+        "ts": time.time(),
+    }
+    print({"map_product": product[:90], "map_category": category_id, "map_query": query})
     return query
 
 def google_maps_search_url(query):
-    clean_query = (query or "متاجر الكويت").strip()
-    return "https://www.google.com/maps/search/" + urllib.parse.quote(f"{clean_query} الكويت")
+    # عبارة واحدة واضحة فقط. لا OR ولا اسم منتج ولا اسم مول.
+    clean_query = re.sub(r"\s+", " ", (query or "متاجر متخصصة").strip())
+    return "https://www.google.com/maps/search/?api=1&query=" + urllib.parse.quote(f"{clean_query} الكويت")
 
 def send_product_maps_button(to, product, bot_id, lang="ar", offer_text=""):
-    """الخريطة تبحث عن نوع المحل المناسب، وليس اسم الجهاز/المنتج الطويل."""
+    """يفتح أقرب المتاجر المتخصصة المناسبة لفئة المنتج."""
     map_query = classify_map_query(product, lang, offer_text)
     maps_url = google_maps_search_url(map_query)
-    return send_whatsapp_cta(to, T(lang, "product_maps_body"), maps_url, bot_id, T(lang, "maps_btn"))
+    if lang == "ar":
+        body = f"📍 أقرب {map_query} حولك — وهي الأماكن المتخصصة غالباً ببيع هالنوع من المنتجات 👇"
+    else:
+        body = f"📍 Nearby {map_query} most likely to sell this type of product 👇"
+    return send_whatsapp_cta(to, body, maps_url, bot_id, T(lang, "maps_btn"))
 
 def send_whatsapp_buttons(to, body, buttons, bot_id):
     """أزرار رد سريعة (Reply Buttons) — حد أقصى 3 أزرار"""
@@ -1030,45 +1195,27 @@ def process_text_message(message,bot_id):
         process_cart(products, from_number, bot_id, lang)
 
 def process_location_message(message, bot_id):
+    """مسار احتياطي لمن يرسل موقعه يدوياً: يستخدم نفس تصنيف المتاجر المتخصصة."""
     from_number = message["from"]
     lat = message["location"]["latitude"]
     lng = message["location"]["longitude"]
     lang = USER_LANG.get(from_number, "ar")
- 
+
     last_search = LAST_SEARCH.get(from_number)
     if not last_search or not last_search.get("product"):
         send_whatsapp_text(from_number, T(lang,"no_saved_product"), bot_id)
         return
- 
+
     product = last_search["product"]
-    
-    prompt_category = """أنت خبير تسوق في السوق الكويتي. 
-بناءً على اسم المنتج، أعطني "عبارة بحث" (Search Term) دقيقة جداً لخرائط جوجل تجلب المتاجر الصحيحة وتستبعد العشوائية.
- 
-قواعد هامة:
-- للإلكترونيات الذكية (ساعة أبل، جوالات، لابتوب): اكتب أسماء الوكلاء الموثوقين هكذا (Xcite OR Eureka OR Best Al Yousifi) ولا تكتب "محل الكترونيات" أبداً.
-- للأجهزة المنزلية (ثلاجة، غسالة): (Xcite OR Eureka).
-- للأدوية والمكملات: (صيدلية Pharmacy).
-- للمواد الغذائية واللحوم: (جمعية تعاونية Supermarket).
-- لألعاب الفيديو: (محل العاب فيديو Video games).
-- للكهربائيات الثقيلة والإضاءة: (مواد كهربائية Electrical supply).
-- للملابس والمعدات الرياضية (مثل مضارب التنس والبادل): (Intersport OR Go Sport OR محلات رياضية).
-- للطلبات العامة (قهوة، مطاعم، عطور): اكتب نوع المكان مع كلمة "الأعلى تقييماً" مثل (كافيه specialty coffee) أو (محل عطور perfume shop).
-- إذا لم تكن متأكداً، اكتب اسم المنتج نفسه.
- 
-أعطني عبارة البحث فقط بدون أي إضافات أو شرح."""
- 
-    category_text, _ = call_gemini([{"text": f"المنتج: {product}"}], system=prompt_category)
-    category = category_text.strip() if category_text else product
- 
-    # الرابط الجديد بصيغة أنظف
+    category = classify_map_query(product, lang)
     safe_category = urllib.parse.quote(category)
     maps_url = f"https://www.google.com/maps/search/{safe_category}/@{lat},{lng},15z"
-    
-    body = T(lang,"maps_body",p=product)
- 
-    # زر بدل رابط طويل
+
+    if lang == "ar":
+        body = f"📍 بحثت لك عن أقرب {category} حول موقعك، لأنها الأنسب لبيع هذا النوع من المنتجات 👇"
+    else:
+        body = f"📍 I found nearby {category} around your location, the most relevant stores for this product type 👇"
     send_whatsapp_cta(from_number, body, maps_url, bot_id, T(lang,"maps_btn"))
- 
+
 @app.get("/")
-async def health(): return {"status":"v26 Any Product Question"}
+async def health(): return {"status":"v30 Smart Maps + Direct Product Links"}
