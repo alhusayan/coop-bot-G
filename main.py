@@ -608,20 +608,50 @@ def call_gemini(parts, system=SYSTEM_PROMPT, use_search=True, max_tokens=800, mo
     except Exception as e:
         print(f"Gemini err {e}"); return "", {}
 
-# عدد جولات البحث المتوازية لكل طلب — قابل للتعديل من Railway
-SEARCH_RUNS = int(os.environ.get("SEARCH_RUNS", "2"))  # 2 = توازن الحصة المجانية، ارفعه 4 مع الفوترة
+# ثلاث جولات بحث متوازية لكل منتج؛ الفائز يجب أن يملك أفضل روابط مباشرة للمنتج.
+SEARCH_RUNS = int(os.environ.get("SEARCH_RUNS", "3"))
 
-def answer_score(txt, urls):
-    """تقييم قوة الجواب: المتاجر أهم شي، ثم اللنكات، ثم سلامة التنسيق"""
+def direct_links_in_answer(product, txt, urls):
+    """يفحص روابط الجولة نفسها بدون أي مكالمة بحث إضافية.
+    يرجع: عدد الروابط المباشرة المؤكدة + قاموسها حسب المتجر.
+    لا يعتبر Google Search أو الصفحة الرئيسية أو صفحة القسم رابط منتج."""
+    direct = {}
+    _, offers = parse_answer_lines(txt)
+    for _, store in offers:
+        candidate = (urls or {}).get(store, "")
+        if not candidate:
+            sn = normalize_name(store)
+            for k, v in (urls or {}).items():
+                if v and sn and (sn in normalize_name(k) or normalize_name(k) in sn):
+                    candidate = v
+                    break
+        if not candidate:
+            continue
+        # نستخدم اسم المتجر كسياق إضافي، والاختبار الأساسي من اسم المنتج ومسار الرابط.
+        score = candidate_product_score(product, store, candidate)
+        if score >= 6:
+            direct[store] = candidate
+    return len(direct), direct
+
+def answer_score(product, txt, urls):
+    """انتخاب أفضل جولة: الرابط المباشر أولاً، ثم عدد العروض وجودة التنسيق."""
     stores, links = result_quality(txt, urls)
-    score = stores * 2 + links * 3
+    direct_count, _ = direct_links_in_answer(product, txt, urls)
+
+    # وجود رابط مباشر أهم من أي شيء؛ كل رابط مباشر يساوي فارقاً كبيراً.
+    score = direct_count * 100
+    score += stores * 5
+    score += links * 2
     if txt and "📦" in txt:
-        score += 1
+        score += 2
+    if direct_count == 0:
+        score -= 50
     return score
 
-def best_of_search(parts, lang):
-    """بطولة داخلية: SEARCH_RUNS بحوث متوازية لنفس الطلب، نقيّمها كلها ونرسل الأقوى.
-    اللنكات: اتحاد لنكات كل الجولات (أولوية لنكات الجواب الفائز)."""
+def best_of_search(parts, lang, product=""):
+    """يجري 3 بحوث متوازية وينتخب الجولة صاحبة أكثر روابط منتجات مباشرة.
+    عند التعادل يختار الأكثر عروضاً والأفضل تنسيقاً.
+    يدمج فقط الروابط المباشرة المطابقة لمتاجر الجواب الفائز."""
     try:
         futs = [SEARCH_POOL.submit(call_gemini, parts) for _ in range(SEARCH_RUNS)]
         results = [f.result() for f in futs]
@@ -633,19 +663,54 @@ def best_of_search(parts, lang):
     if not results:
         return "", {}
 
-    scored = sorted(results, key=lambda r: answer_score(r[0], r[1]), reverse=True)
-    best_txt, best_urls = scored[0]
+    product_for_score = product or " ".join(
+        p.get("text", "") for p in parts if isinstance(p, dict) and p.get("text")
+    )
 
-    # اتحاد اللنكات: الفائز أولاً، ثم بقية الجولات تكمل النواقص
-    merged_urls = dict(best_urls)
-    for _, u in scored[1:]:
-        for n, link in u.items():
-            if n not in merged_urls and link not in merged_urls.values():
-                merged_urls[n] = link
-    merged_urls = dict(list(merged_urls.items())[:4])
+    ranked = []
+    for txt, urls in results:
+        direct_count, direct_map = direct_links_in_answer(product_for_score, txt, urls)
+        ranked.append({
+            "txt": txt,
+            "urls": urls,
+            "direct_count": direct_count,
+            "direct_map": direct_map,
+            "score": answer_score(product_for_score, txt, urls),
+        })
+    ranked.sort(key=lambda x: x["score"], reverse=True)
+    winner = ranked[0]
+    best_txt = winner["txt"]
 
-    print({"tournament": [answer_score(t, u) for t, u in scored], "winner_stores": result_quality(best_txt, best_urls)[0], "total_links": len(merged_urls)})
-    return best_txt, merged_urls
+    # نعرض روابط متاجر الجواب الفائز فقط، ونأخذ أفضل رابط مباشر لها من أي جولة.
+    _, winning_offers = parse_answer_lines(best_txt)
+    winning_stores = [store for _, store in winning_offers]
+    merged_urls = dict(winner["direct_map"])
+
+    for store in winning_stores:
+        if store in merged_urls:
+            continue
+        sn = normalize_name(store)
+        best_candidate, best_candidate_score = "", -100
+        for row in ranked:
+            for other_store, link in row["direct_map"].items():
+                on = normalize_name(other_store)
+                if sn and (sn in on or on in sn):
+                    sc = candidate_product_score(product_for_score, store, link)
+                    if sc > best_candidate_score:
+                        best_candidate, best_candidate_score = link, sc
+        if best_candidate and best_candidate_score >= 6:
+            merged_urls[store] = best_candidate
+
+    print({
+        "tournament": [
+            {"score": r["score"], "direct": r["direct_count"], "stores": result_quality(r["txt"], r["urls"])[0]}
+            for r in ranked
+        ],
+        "winner_direct_links": winner["direct_count"],
+        "winner_stores": winning_stores,
+        "returned_direct_links": list(merged_urls.keys()),
+    })
+    return best_txt, dict(list(merged_urls.items())[:4])
 
 def search_product(query, lang, prompt_text=None):
     """البوابة الموحدة للبحث: كاش أولاً، وإلا بطولة 4 بحوث ونرسل الأقوى.
@@ -656,7 +721,7 @@ def search_product(query, lang, prompt_text=None):
         return cached
 
     text_part = prompt_text or f"ابحث عن {query} في الكويت. {LANG_INSTR[lang]}"
-    txt, urls = best_of_search([{"text": text_part}], lang)
+    txt, urls = best_of_search([{"text": text_part}], lang, product=query)
     stores, links = result_quality(txt, urls)
 
     if stores >= CACHE_MIN_STORES and links >= CACHE_MIN_LINKS:
@@ -1072,7 +1137,7 @@ def process_single_image(message,bot_id,lang="ar"):
     else:
         # ما قدرنا نحدد الاسم؟ نرجع لبحث الصورة المباشر (بدون كاش)
         req = caption if caption else "ما هذا المنتج؟ ابحث عن سعره الحالي في الكويت."
-        txt,urls=best_of_search([{"inline_data":{"mime_type":mime,"data":b64}},{"text":f"{req} {LANG_INSTR[lang]}"}], lang)
+        txt,urls=best_of_search([{"inline_data":{"mime_type":mime,"data":b64}},{"text":f"{req} {LANG_INSTR[lang]}"}], lang, product=caption or req)
         name_m = re.search(r"📦\s*(.+)", txt or "")
         product_name = name_m.group(1).strip() if name_m else "المنتج"
         LAST_SEARCH[from_number] = {"product": f"{caption} — {product_name}" if caption else product_name}
