@@ -179,39 +179,6 @@ IDENTIFY_SYSTEM = """أنت خبير تعرف على المنتجات. انظر 
 - برينجلز كاتشب 200 جرام
 سطر واحد فقط. بدون أقواس أو شرح أو مقدمات أو رموز."""
 
-# برومبت عبارة بحث الخرائط — يُستخدم لزر "أقرب محل" بدون ما نحتاج موقع المستخدم
-MAPS_CATEGORY_SYSTEM = """أنت خبير تسوق في السوق الكويتي. 
-بناءً على اسم المنتج، أعطني "عبارة بحث" (Search Term) دقيقة جداً لخرائط جوجل تجلب المتاجر الصحيحة وتستبعد العشوائية.
-
-قواعد هامة:
-- للإلكترونيات الذكية (ساعة أبل، جوالات، لابتوب): اكتب أسماء الوكلاء الموثوقين هكذا (Xcite OR Eureka OR Best Al Yousifi) ولا تكتب "محل الكترونيات" أبداً.
-- للأجهزة المنزلية (ثلاجة، غسالة): (Xcite OR Eureka).
-- للأدوية والمكملات: (صيدلية Pharmacy).
-- للمواد الغذائية واللحوم: (جمعية تعاونية Supermarket).
-- لألعاب الفيديو: (محل العاب فيديو Video games).
-- للكهربائيات الثقيلة والإضاءة: (مواد كهربائية Electrical supply).
-- للملابس والمعدات الرياضية (مثل مضارب التنس والبادل): (Intersport OR Go Sport OR محلات رياضية).
-- للطلبات العامة (قهوة، مطاعم، عطور): اكتب نوع المكان مع كلمة "الأعلى تقييماً" مثل (كافيه specialty coffee) أو (محل عطور perfume shop).
-- إذا لم تكن متأكداً، اكتب اسم المنتج نفسه.
-
-أعطني عبارة البحث فقط بدون أي إضافات أو شرح."""
-
-def maps_category(product):
-    """عبارة بحث الخرائط للمنتج — بموديل خفيف سريع، ومع كاش خاص فما تنحسب إلا مرة"""
-    cached = cache_get(f"maps:{product}", "maps")
-    if cached:
-        return cached[0]
-    cat, _ = call_gemini([{"text": f"المنتج: {product}"}], system=MAPS_CATEGORY_SYSTEM,
-                         use_search=False, max_tokens=60, model=IDENTIFY_MODEL)
-    cat = (cat or "").strip().splitlines()[0].strip() if cat else ""
-    cat = cat or product
-    cache_put(f"maps:{product}", "maps", cat, {})
-    return cat
-
-def maps_search_url(query):
-    """رابط بحث خرائط بدون إحداثيات — الخرائط تفتح تلقائياً على موقع المستخدم"""
-    return "https://www.google.com/maps/search/" + urllib.parse.quote(query)
-
 # ===== نصوص البوت بالعربي والإنجليزي =====
 MSG = {
     "ar": {
@@ -230,7 +197,6 @@ MSG = {
         "maps_body": "📍 بحثك الأخير كان عن ({p})\n\nجهزت لك أقرب المحلات اللي تبيعه حولك، اضغط الزر وافتح الخريطة 👇",
         "maps_btn": "📍 افتح الخريطة",
         "service_maps_body": "📍 أقرب مزودي هالخدمة حولك على الخريطة 👇",
-        "nearby_body": "📍 تبي أقرب محل يبيعه؟ اضغط وتفتح لك الخريطة على موقعك 👇",
         "lang_saved": "تمام، بكلمك عربي من هني ورايح 🇰🇼\nدز صورة منتج أو اكتب اسمه وأنا حاضر!",
     },
     "en": {
@@ -249,7 +215,6 @@ MSG = {
         "maps_body": "📍 Your last search was ({p})\n\nI've lined up the closest stores around you. Tap the button to open the map 👇",
         "maps_btn": "📍 Open Map",
         "service_maps_body": "📍 The nearest providers for this service, on the map 👇",
-        "nearby_body": "📍 Want the nearest store that sells it? Tap to open the map around you 👇",
         "lang_saved": "Great, I'll speak English with you from now on 🇬🇧\nSend a product photo or type its name and I'm on it!",
     },
 }
@@ -786,9 +751,8 @@ def process_single_image(message,bot_id,lang="ar"):
     # منتج: التنسيق الجديد — اسم المنتج ثم أزرار (المتجر — السعر) مباشرة
     send_product_answer(from_number, bot_id, lang, txt, urls, product_name)
 
-    # زر خريطة مباشر — بدون طلب لوكيشن: الخرائط تفتح تلقائياً على موقع المستخدم
     if product_name and product_name != "المنتج":
-        send_whatsapp_cta(from_number, T(lang,"nearby_body"), maps_search_url(maps_category(product_name)), bot_id, T(lang,"maps_btn"))
+        send_whatsapp_location_request(from_number, T(lang,"location_prompt"), bot_id)
 
 def identify_image_product(msg):
     """يحدد الاسم القياسي لمنتج من صورة (بدون بحث — سريع)"""
@@ -876,8 +840,7 @@ def process_text_message(message,bot_id):
         # منتج: التنسيق الجديد — اسم المنتج ثم أزرار (المتجر — السعر) مباشرة بدون تكرار
         send_product_answer(from_number, bot_id, lang, txt, urls, products[0])
 
-        # زر خريطة مباشر — بدون طلب لوكيشن: الخرائط تفتح تلقائياً على موقع المستخدم
-        send_whatsapp_cta(from_number, T(lang,"nearby_body"), maps_search_url(maps_category(products[0])), bot_id, T(lang,"maps_btn"))
+        send_whatsapp_location_request(from_number, T(lang,"location_prompt"), bot_id)
             
     else:
         send_whatsapp_text(from_number,T(lang,"multi_text",c=len(products)),bot_id)
@@ -896,7 +859,24 @@ def process_location_message(message, bot_id):
 
     product = last_search["product"]
     
-    category = maps_category(product)
+    prompt_category = """أنت خبير تسوق في السوق الكويتي. 
+بناءً على اسم المنتج، أعطني "عبارة بحث" (Search Term) دقيقة جداً لخرائط جوجل تجلب المتاجر الصحيحة وتستبعد العشوائية.
+
+قواعد هامة:
+- للإلكترونيات الذكية (ساعة أبل، جوالات، لابتوب): اكتب أسماء الوكلاء الموثوقين هكذا (Xcite OR Eureka OR Best Al Yousifi) ولا تكتب "محل الكترونيات" أبداً.
+- للأجهزة المنزلية (ثلاجة، غسالة): (Xcite OR Eureka).
+- للأدوية والمكملات: (صيدلية Pharmacy).
+- للمواد الغذائية واللحوم: (جمعية تعاونية Supermarket).
+- لألعاب الفيديو: (محل العاب فيديو Video games).
+- للكهربائيات الثقيلة والإضاءة: (مواد كهربائية Electrical supply).
+- للملابس والمعدات الرياضية (مثل مضارب التنس والبادل): (Intersport OR Go Sport OR محلات رياضية).
+- للطلبات العامة (قهوة، مطاعم، عطور): اكتب نوع المكان مع كلمة "الأعلى تقييماً" مثل (كافيه specialty coffee) أو (محل عطور perfume shop).
+- إذا لم تكن متأكداً، اكتب اسم المنتج نفسه.
+
+أعطني عبارة البحث فقط بدون أي إضافات أو شرح."""
+
+    category_text, _ = call_gemini([{"text": f"المنتج: {product}"}], system=prompt_category)
+    category = category_text.strip() if category_text else product
 
     # الرابط الجديد بصيغة أنظف
     safe_category = urllib.parse.quote(category)
@@ -908,4 +888,4 @@ def process_location_message(message, bot_id):
     send_whatsapp_cta(from_number, body, maps_url, bot_id, T(lang,"maps_btn"))
 
 @app.get("/")
-async def health(): return {"status":"v29 Zero-Friction Maps"}
+async def health(): return {"status":"v28 Speed Pass"}
