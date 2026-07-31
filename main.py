@@ -14,7 +14,18 @@ PHONE_NUMBER_ID = os.environ.get("PHONE_NUMBER_ID", "")
 VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN", "MY_SECRET_COOP_BOT_TOKEN")
 
 GRAPH_URL = "https://graph.facebook.com/v20.0"
-GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+
+# موديل أسرع وأرخص لمهمة تحديد اسم المنتج من الصورة (ما تحتاج ذكاء البحث)
+IDENTIFY_MODEL = os.environ.get("IDENTIFY_MODEL", "gemini-2.5-flash-lite")
+
+def gemini_url(model=None):
+    return f"https://generativelanguage.googleapis.com/v1beta/models/{model or GEMINI_MODEL}:generateContent"
+
+# جلسة HTTP مشتركة: تعيد استخدام اتصالات TLS بدل فتح اتصال جديد كل مرة — أسرع بكل نداء
+SESSION = requests.Session()
+_adapter = requests.adapters.HTTPAdapter(pool_connections=20, pool_maxsize=20)
+SESSION.mount("https://", _adapter)
+SESSION.mount("http://", _adapter)
 
 processed_ids = deque(maxlen=1000)
 # CARTS أزيلت — السلة صارت رسالة واتساب مباشرة بدون صفحة ويب
@@ -25,7 +36,7 @@ LAST_SEARCH = {} # لحفظ اسم آخر منتج بحث عنه المستخد�
 USER_LANG = {}       # from_number -> "ar" | "en"
 PENDING_IMAGES = defaultdict(lambda: {"images": [], "bot_id": ""})  # صور معلقة بانتظار اختيار اللغة
 
-BUFFER_SECONDS = 4
+BUFFER_SECONDS = 2
 RESOLVER = ThreadPoolExecutor(max_workers=6)
 WORKERS = ThreadPoolExecutor(max_workers=3)
 SEARCH_POOL = ThreadPoolExecutor(max_workers=8)  # للبحث المزدوج المتوازي
@@ -238,6 +249,10 @@ SYSTEM_PROMPT = """
 • [المتجر الثاني] — [السعر] د.ك
 • [المتجر الثالث] — [السعر] د.ك
 
+🛒 مصدر العروض ClicFlyer — قاعدة إلزامية لمنتجات التموينات:
+لأي منتج بقالة أو تموينات (أغذية، مشروبات، منظفات، عناية شخصية، أدوات منزلية استهلاكية)، نفّذ دائماً بحثاً إضافياً في clicflyer.com (استخدم site:clicflyer.com مع اسم المنتج) — فهو يجمع أحدث عروض الهايبرماركتات والجمعيات التعاونية في الكويت.
+- إذا وجدت عرضاً سارياً أرخص من الأسعار العادية، حطه في أول المقارنة واكتب اسم المتجر صاحب العرض مع كلمة (عرض)، مثال: ✅ كارفور (عرض) — 0.750 د.ك
+- عروض ClicFlyer السارية لها أولوية لأنها الأحدث، ولا تذكر أبداً عرضاً منتهي الصلاحية.
 
 【الحالة 2】طلب عام بدون براند محدد (مثل: قهوة فلات وايت حار، عطر رجالي، لابتوب للدراسة، سماعات للجيم، برجر):
 لا تبحث عن الأرخص! ابحث عن الأفضل تقييماً في الكويت بسعر مناسب (أفضل قيمة مقابل السعر).
@@ -283,7 +298,7 @@ def get_final_url(url: str):
     if not url or not url.startswith(("http://", "https://")):
         return ""
     try:
-        r = requests.get(url, allow_redirects=True, timeout=12, stream=True, headers=HEADERS)
+        r = SESSION.get(url, allow_redirects=True, timeout=6, stream=True, headers=HEADERS)
         final = r.url or url
         r.close()
         return final if final.startswith(("http://", "https://")) else url
@@ -331,16 +346,16 @@ def source_label(title, url):
     except Exception:
         return "المتجر"
 
-def call_gemini(parts, system=SYSTEM_PROMPT, use_search=True):
+def call_gemini(parts, system=SYSTEM_PROMPT, use_search=True, max_tokens=800, model=None):
     payload = {
         "systemInstruction": {"parts": [{"text": system}]},
         "contents": [{"role": "user", "parts": parts}],
-        "generationConfig": {"temperature": 0, "maxOutputTokens": 2000},
+        "generationConfig": {"temperature": 0, "maxOutputTokens": max_tokens},
     }
     if use_search:
         payload["tools"] = [{"google_search": {}}]
     try:
-        r = requests.post(GEMINI_URL, params={"key": GEMINI_API_KEY}, json=payload, timeout=90)
+        r = SESSION.post(gemini_url(model), params={"key": GEMINI_API_KEY}, json=payload, timeout=90)
         if r.status_code >= 400:
             print(f"Gemini HTTP {r.status_code}: {r.text[:500]}")
             return "", {}
@@ -372,10 +387,10 @@ def call_gemini(parts, system=SYSTEM_PROMPT, use_search=True):
         metadata = cand.get("groundingMetadata", {}) or {}
         chunks = metadata.get("groundingChunks", []) or []
         uris = [(c.get("web") or {}).get("uri", "") for c in chunks]
-        finals = resolve_all(uris[:15]) if uris else []
+        finals = resolve_all(uris[:8]) if uris else []
 
         records = []
-        for i, chunk in enumerate(chunks[:15]):
+        for i, chunk in enumerate(chunks[:8]):
             web = chunk.get("web") or {}
             raw_uri = web.get("uri", "")
             final_uri = finals[i] if i < len(finals) else raw_uri
@@ -521,15 +536,15 @@ def extract_products(text):
 
 def download_whatsapp_media(mid):
     h={"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
-    meta=requests.get(f"{GRAPH_URL}/{mid}",headers=h,timeout=20).json()
-    img=requests.get(meta["url"],headers=h,timeout=30)
+    meta=SESSION.get(f"{GRAPH_URL}/{mid}",headers=h,timeout=20).json()
+    img=SESSION.get(meta["url"],headers=h,timeout=30)
     return base64.b64encode(img.content).decode(), meta.get("mime_type","image/jpeg")
 
 def send_whatsapp_text(to,text,bot_id):
     url=f"{GRAPH_URL}/{bot_id}/messages"; h={"Authorization":f"Bearer {WHATSAPP_TOKEN}","Content-Type":"application/json"}
     payload={"messaging_product":"whatsapp","to":to,"type":"text","text":{"body":text[:3900]}}
     try:
-        r = requests.post(url,json=payload,headers=h,timeout=15)
+        r = SESSION.post(url,json=payload,headers=h,timeout=10)
         if not r.ok:
             print(f"WhatsApp text error {r.status_code}: {r.text[:500]}")
         return r.ok
@@ -541,7 +556,7 @@ def send_whatsapp_cta(to,body,link,bot_id,title):
     url=f"{GRAPH_URL}/{bot_id}/messages"; h={"Authorization":f"Bearer {WHATSAPP_TOKEN}","Content-Type":"application/json"}
     payload={"messaging_product":"whatsapp","to":to,"type":"interactive","interactive":{"type":"cta_url","body":{"text":body[:1024]},"action":{"name":"cta_url","parameters":{"display_text":title[:20],"url":link}}}}
     try:
-        r = requests.post(url,json=payload,headers=h,timeout=15)
+        r = SESSION.post(url,json=payload,headers=h,timeout=10)
         if not r.ok:
             print(f"WhatsApp CTA error {r.status_code}: {r.text[:500]} | {link[:180]}")
         return r.ok
@@ -554,7 +569,7 @@ def send_whatsapp_location_request(to, body, bot_id):
     url=f"{GRAPH_URL}/{bot_id}/messages"; h={"Authorization":f"Bearer {WHATSAPP_TOKEN}","Content-Type":"application/json"}
     payload={"messaging_product":"whatsapp","to":to,"type":"interactive","interactive":{"type":"location_request_message","body":{"text":body[:1024]},"action":{"name":"send_location"}}}
     try:
-        r = requests.post(url,json=payload,headers=h,timeout=15)
+        r = SESSION.post(url,json=payload,headers=h,timeout=10)
         if not r.ok:
             print(f"WhatsApp location request error {r.status_code}: {r.text[:500]}")
         return r.ok
@@ -568,7 +583,7 @@ def send_whatsapp_buttons(to, body, buttons, bot_id):
     btns=[{"type":"reply","reply":{"id":b["id"],"title":b["title"][:20]}} for b in buttons[:3]]
     payload={"messaging_product":"whatsapp","to":to,"type":"interactive","interactive":{"type":"button","body":{"text":body[:1024]},"action":{"buttons":btns}}}
     try:
-        r = requests.post(url,json=payload,headers=h,timeout=15)
+        r = SESSION.post(url,json=payload,headers=h,timeout=10)
         if not r.ok:
             print(f"WhatsApp buttons error {r.status_code}: {r.text[:500]}")
         return r.ok
@@ -589,7 +604,7 @@ def send_whatsapp_contacts(to, contacts, bot_id):
     url=f"{GRAPH_URL}/{bot_id}/messages"; h={"Authorization":f"Bearer {WHATSAPP_TOKEN}","Content-Type":"application/json"}
     payload={"messaging_product":"whatsapp","to":to,"type":"contacts","contacts":contacts}
     try:
-        r = requests.post(url,json=payload,headers=h,timeout=15)
+        r = SESSION.post(url,json=payload,headers=h,timeout=10)
         if not r.ok:
             print(f"WhatsApp contacts error {r.status_code}: {r.text[:500]}")
         return r.ok
@@ -693,7 +708,7 @@ def process_single_image(message,bot_id,lang="ar"):
     b64,mime=download_whatsapp_media(message["image"]["id"])
 
     # الخطوة 1: تحديد الاسم القياسي للمنتج (مكالمة سريعة بدون بحث)
-    ident,_=call_gemini([{"inline_data":{"mime_type":mime,"data":b64}},{"text":"ما اسم هذا المنتج؟"}], system=IDENTIFY_SYSTEM, use_search=False)
+    ident,_=call_gemini([{"inline_data":{"mime_type":mime,"data":b64}},{"text":"ما اسم هذا المنتج؟"}], system=IDENTIFY_SYSTEM, use_search=False, max_tokens=100, model=IDENTIFY_MODEL)
     product_name = ident.strip().splitlines()[0].strip() if ident else ""
 
     if product_name and caption:
@@ -743,7 +758,7 @@ def identify_image_product(msg):
     """يحدد الاسم القياسي لمنتج من صورة (بدون بحث — سريع)"""
     try:
         b64,mime=download_whatsapp_media(msg["image"]["id"])
-        ident,_=call_gemini([{"inline_data":{"mime_type":mime,"data":b64}},{"text":"ما اسم هذا المنتج؟"}], system=IDENTIFY_SYSTEM, use_search=False)
+        ident,_=call_gemini([{"inline_data":{"mime_type":mime,"data":b64}},{"text":"ما اسم هذا المنتج؟"}], system=IDENTIFY_SYSTEM, use_search=False, max_tokens=100, model=IDENTIFY_MODEL)
         return ident.strip().splitlines()[0].strip() if ident else ""
     except Exception as e:
         print(f"identify err {e}")
@@ -873,4 +888,4 @@ def process_location_message(message, bot_id):
     send_whatsapp_cta(from_number, body, maps_url, bot_id, T(lang,"maps_btn"))
 
 @app.get("/")
-async def health(): return {"status":"v27 Compact Answers"}
+async def health(): return {"status":"v28 Speed Pass"}
