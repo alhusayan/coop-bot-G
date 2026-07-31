@@ -14,7 +14,7 @@ FAST_MODE = os.environ.get("FAST_MODE", "1") == "1"
 # وضع السرعة يستخدم Flash-Lite. ضع FAST_MODE=0 للعودة للجودة القصوى.
 GEMINI_MODEL = os.environ.get(
     "GEMINI_MODEL",
-    "gemini-2.5-flash-lite" if FAST_MODE else "gemini-2.5-flash",
+    "gemini-3.5-flash-lite" if FAST_MODE else "gemini-3.6-flash",
 )
 WHATSAPP_TOKEN = os.environ.get("WHATSAPP_TOKEN", "")
 PHONE_NUMBER_ID = os.environ.get("PHONE_NUMBER_ID", "")
