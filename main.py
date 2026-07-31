@@ -140,6 +140,7 @@ MSG = {
         "searching": "🔍 أدور لك على {q}...",
         "not_found": "ما لقيت",
         "cant_identify": "ما قدرت أحدد المنتج",
+        "shop_from": "تسوق من {n} 👇",
         "multi_text": "تمام لقيت {c} منتجات، أسوي سلة...",
         "multi_images": "تمام لقطت {c} منتجات، أسوي سلة...",
         "maps_body": "📍 تبي أقرب مكان؟\n\nاضغط الزر والخريطة بتفتح على أقرب الأماكن حولك 👇",
@@ -153,6 +154,7 @@ MSG = {
         "searching": "🔍 Looking up {q}...",
         "not_found": "Couldn't find it",
         "cant_identify": "Couldn't identify the product",
+        "shop_from": "Shop from {n} 👇",
         "multi_text": "Got it, found {c} products. Building your cart...",
         "multi_images": "Nice, spotted {c} products. Building your cart...",
         "maps_body": "📍 Want the nearest place?\n\nTap the button and the map will open on the closest spots around you 👇",
@@ -438,7 +440,7 @@ def send_maps_button(from_number, product, bot_id, lang):
 
 def send_product_result(from_number, txt, urls, bot_id, lang, query, best_only=False):
     """التنسيق:
-    - منتج: رسالة اسم المنتج فقط، ثم CTA لكل متجر (السطر نفسه = اسم + سعر، ✅ للأفضل) — بدون تكرار.
+    - منتج: رسالة اسم المنتج (+ المتاجر بدون لنك نصاً)، ثم زر CTA لكل لنك مباشر فقط — بدون جوجل نهائياً.
     - خدمة: الرسالة كاملة (أسماء + أرقام) بس — بدون لنكات وبدون بطاقات — والخريطة تجي بعدها.
     - معلوماتي: الرسالة كاملة بدون أي أزرار.
     يرجع True إذا نحتاج نرسل زر الخريطة بعدها."""
@@ -458,27 +460,51 @@ def send_product_result(from_number, txt, urls, bot_id, lang, query, best_only=F
         send_whatsapp_text(from_number, txt, bot_id)
         return False
 
-    # 3) منتج: اسم المنتج ثم اللنكات مباشرة
+    # 3) منتج — طريقة النسخة القديمة: أزرار للنكات المباشرة فقط، صفر تحويل لجوجل.
+    #    متجر له لنك مباشر ← زر CTA بسطره (اسم + سعر).
+    #    متجر بدون لنك ← سطره يظهر نصاً تحت اسم المنتج (ما نضيع سعره، وما نسوي له زر جوجل).
     title = product_title(txt, query)
-    if title:
-        send_whatsapp_text(from_number, title, bot_id)
 
-    # جملة البحث المختصرة للضمانة: اسم المنتج من سطر 📦 (أنظف من الطلب الكامل)
-    core = title[2:].strip() if title.startswith("📦") else query
-    fq = short_query(core) or short_query(query)
+    linked, unlinked, used = [], [], set()
+    for o in offers:
+        u = match_url(o["name"], urls)
+        if u and u not in used:
+            linked.append((o, u))
+            used.add(u)
+        else:
+            unlinked.append(o)
 
     if best_only:
-        best = next((o for o in offers if o["best"]), offers[0])
-        offers = [best]
+        # السلة: زر واحد للأفضل إن كان له لنك مباشر، وإلا سطره نصاً فقط
+        pick = next(((o, u) for o, u in linked if o["best"]), linked[0] if linked else None)
+        if pick:
+            send_whatsapp_text(from_number, title or f"📦 {query}", bot_id)
+            send_whatsapp_cta(from_number, pick[0]["line"], pick[1], bot_id, f"🛒 {pick[0]['name'][:18]}")
+        else:
+            best = next((o for o in offers if o["best"]), offers[0])
+            send_whatsapp_text(from_number, f"{title or f'📦 {query}'}\n\n{best['line']}", bot_id)
+        return True
 
-    for o in offers:
-        url = match_url(o["name"], urls)
-        if not url:
-            # متجر خربان (مثل "التوصيل") بدون لنك مباشر؟ نتجاهله بدل زر بحث عشوائي
-            if is_junk_store(o["name"]):
-                continue
-            url = fallback_search_url(fq, o["name"])
-        send_whatsapp_cta(from_number, o["line"], url, bot_id, f"🛒 {o['name'][:18]}")
+    # الرسالة الأولى: اسم المنتج + سطور المتاجر اللي ما لها لنك مباشر (نص فقط)
+    head = title or f"📦 {query}"
+    if unlinked:
+        head += "\n\n" + "\n".join(o["line"] for o in unlinked)
+    send_whatsapp_text(from_number, head, bot_id)
+
+    # أزرار اللنكات المباشرة فقط
+    for o, u in linked:
+        send_whatsapp_cta(from_number, o["line"], u, bot_id, f"🛒 {o['name'][:18]}")
+
+    # لنكات مباشرة إضافية من البحث ما انربطت بأي سطر (مثل سلوك النسخة القديمة: كل urls تنرسل)
+    extra = 0
+    for n, u in urls.items():
+        if not u or u in used or is_junk_store(n):
+            continue
+        send_whatsapp_cta(from_number, T(lang, "shop_from", n=n), u, bot_id, f"🛒 {n[:18]}")
+        used.add(u)
+        extra += 1
+        if len(linked) + extra >= 4:
+            break
 
     return True
 
@@ -953,4 +979,4 @@ def process_location_message(message, bot_id):
     send_whatsapp_cta(from_number, body, maps_url, bot_id, T(lang,"maps_btn"))
 
 @app.get("/")
-async def health(): return {"status":"v30 Smart Fallback"}
+async def health(): return {"status":"v31 Direct Links Only"}
