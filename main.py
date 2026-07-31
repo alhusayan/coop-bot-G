@@ -50,7 +50,7 @@ CACHE_TTL = int(os.environ.get("CACHE_TTL_HOURS", "2")) * 3600  # قابلة ل�
 CACHE_MAX = 500            # حد أقصى للذاكرة
 
 # حارس الجودة: لا نحفظ بالكاش إلا نتيجة قوية (3+ متاجر بأسعار ولنك واحد على الأقل)
-CACHE_MIN_STORES = 3
+CACHE_MIN_STORES = 1
 CACHE_MIN_LINKS = 1
 
 def result_quality(txt, urls):
@@ -213,34 +213,51 @@ def find_exact_product_url(product, store, current_url=""):
     return verified
 
 def url_for_store(store, urls, product):
-    """رابط المنتج المباشر المؤكد، أو فارغ."""
+    """يعيد الرابط الموثق الموجود في النتيجة فقط؛ لا يصنع بحث Google ولا رابط قسم."""
+    url = get_mapped_store_url(store, urls)
+    return url if url and not url_is_generic(url) else ""
+
+def get_mapped_store_url(store, urls):
+    """يطابق اسم المتجر مع قاموس الروابط حتى لو اختلفت المسافات أو الصياغة قليلاً."""
     url = (urls or {}).get(store, "")
-    if not url:
-        sn = normalize_name(store)
-        for k, v in (urls or {}).items():
-            if v and sn and (sn in normalize_name(k) or normalize_name(k) in sn):
-                url = v
-                break
-    return find_exact_product_url(product, store, url)
+    if url:
+        return url
+    sn = normalize_name(store)
+    for k, v in (urls or {}).items():
+        kn = normalize_name(k)
+        if v and sn and (sn in kn or kn in sn):
+            return v
+    return ""
+
 
 def send_product_answer(from_number, bot_id, lang, txt, urls, product, best_only=False):
-    """يرسل زر شراء فقط عندما يكون الرابط صفحة المنتج نفسها ومؤكداً."""
+    """يعرض فقط المتاجر التي لديها رابط مباشر مؤكد للمنتج؛ أي متجر بلا رابط يُحذف نهائياً."""
     name_line, offers = parse_answer_lines(txt)
-    send_whatsapp_text(from_number, name_line or txt.splitlines()[0], bot_id)
-    if not offers:
-        if txt and txt != name_line:
-            send_whatsapp_text(from_number, txt, bot_id)
-        return
 
-    selected = offers[:1] if best_only else offers[:4]
-    for line, store in selected:
-        direct_url = url_for_store(store, urls, product)
-        if direct_url:
-            send_whatsapp_cta(from_number, line, direct_url, bot_id, f"🛒 {store[:18]}")
-        else:
-            # نعرض السعر والمتجر، لكن لا نخدع المستخدم بزر يفتح Google أو قسماً عاماً.
-            suffix = "\n🔗 الرابط المباشر للمنتج غير متوفر حالياً" if lang == "ar" else "\n🔗 Direct product link is currently unavailable"
-            send_whatsapp_text(from_number, line + suffix, bot_id)
+    verified = []
+    used_urls = set()
+    for line, store in offers:
+        direct_url = get_mapped_store_url(store, urls)
+        if not direct_url or url_is_generic(direct_url) or direct_url in used_urls:
+            continue
+        verified.append((line, store, direct_url))
+        used_urls.add(direct_url)
+
+    if not verified:
+        msg = (
+            "ما لقيت نتائج موثوقة برابط مباشر لهذا المنتج حالياً."
+            if lang == "ar"
+            else "I couldn't find reliable results with direct product links right now."
+        )
+        send_whatsapp_text(from_number, name_line or f"📦 {product}", bot_id)
+        send_whatsapp_text(from_number, msg, bot_id)
+        return False
+
+    send_whatsapp_text(from_number, name_line or f"📦 {product}", bot_id)
+    chosen = verified[:1] if best_only else verified[:3]
+    for line, store, direct_url in chosen:
+        send_whatsapp_cta(from_number, line, direct_url, bot_id, f"🛒 {store[:18]}")
+    return True
 
 def normalize_ar(text):
     """توحيد الحروف العربية والمسافات حتى تتطابق الصيغ المختلفة لنفس المنتج"""
@@ -608,45 +625,140 @@ def call_gemini(parts, system=SYSTEM_PROMPT, use_search=True, max_tokens=800, mo
     except Exception as e:
         print(f"Gemini err {e}"); return "", {}
 
-# عدد جولات البحث المتوازية لكل طلب — قابل للتعديل من Railway
-SEARCH_RUNS = int(os.environ.get("SEARCH_RUNS", "4"))
- 
+# عدد جولات البحث المتوازية لكل طلب — الافتراضي 3 كما هو مطلوب
+SEARCH_RUNS = int(os.environ.get("SEARCH_RUNS", "3"))
+MAX_VERIFIED_OFFERS = int(os.environ.get("MAX_VERIFIED_OFFERS", "3"))
+
+
 def answer_score(txt, urls):
-    """تقييم قوة الجواب: المتاجر أهم شي، ثم اللنكات، ثم سلامة التنسيق"""
+    """تقييم أولي للجولة قبل فحص الروابط المباشرة."""
     stores, links = result_quality(txt, urls)
-    score = stores * 2 + links * 3
+    score = stores * 2 + links * 2
     if txt and "📦" in txt:
         score += 1
     return score
- 
-def best_of_search(parts, lang):
-    """بطولة داخلية: SEARCH_RUNS بحوث متوازية لنفس الطلب، نقيّمها كلها ونرسل الأقوى.
-    اللنكات: اتحاد لنكات كل الجولات (أولوية لنكات الجواب الفائز)."""
+
+
+def _price_from_offer_line(line):
+    """استخراج السعر للمساعدة في ترتيب العروض الموثقة."""
+    m = re.search(r"(?:—|–|-)\s*([\d.,]+)", line or "")
+    if not m:
+        return 10**9
+    try:
+        return float(m.group(1).replace(",", ""))
+    except Exception:
+        return 10**9
+
+
+def _rebuild_verified_answer(product_hint, results):
+    """
+    يجمع مرشحي المتاجر من جميع جولات البحث، ويتحقق من رابط المنتج لكل متجر.
+    أي متجر بلا رابط مباشر مؤكد يُستبعد، ثم تُستكمل القائمة من الجولات الأخرى.
+    """
+    candidates = []
+    seen_candidate_stores = set()
+    name_line = ""
+    recommendation_mode = False
+
+    # نبدأ بالجولات الأقوى، ثم نأخذ متاجر إضافية من بقية الجولات.
+    ranked = sorted(results, key=lambda r: answer_score(r[0], r[1]), reverse=True)
+    for txt, urls in ranked:
+        round_name, offers = parse_answer_lines(txt)
+        if round_name and not name_line:
+            name_line = round_name
+        if any(line.lstrip().startswith("🏆") for line, _ in offers):
+            recommendation_mode = True
+
+        for position, (line, store) in enumerate(offers):
+            skey = normalize_name(store)
+            if not skey or skey in seen_candidate_stores:
+                continue
+            seen_candidate_stores.add(skey)
+            candidates.append({
+                "line": line,
+                "store": store,
+                "current_url": get_mapped_store_url(store, urls),
+                "round_score": answer_score(txt, urls),
+                "position": position,
+                "price": _price_from_offer_line(line),
+            })
+
+    # نتحقق بالتوازي لأن كل متجر قد يحتاج بحثاً موجهاً عن صفحة المنتج.
+    def verify(item):
+        direct = find_exact_product_url(product_hint, item["store"], item["current_url"])
+        return item, direct
+
+    verified = []
+    if candidates:
+        verify_workers = min(8, max(1, len(candidates)))
+        with ThreadPoolExecutor(max_workers=verify_workers) as pool:
+            for item, direct in pool.map(verify, candidates):
+                if direct and not url_is_generic(direct):
+                    item = dict(item)
+                    item["url"] = direct
+                    verified.append(item)
+
+    # الأقوى أولاً، ثم الأرخص. بهذه الطريقة لا نعتمد على جولة واحدة فقط.
+    verified.sort(key=lambda x: (-x["round_score"], x["price"], x["position"]))
+
+    final = []
+    used_stores = set()
+    used_urls = set()
+    for item in verified:
+        skey = normalize_name(item["store"])
+        if skey in used_stores or item["url"] in used_urls:
+            continue
+        final.append(item)
+        used_stores.add(skey)
+        used_urls.add(item["url"])
+        if len(final) >= MAX_VERIFIED_OFFERS:
+            break
+
+    if not final:
+        title = name_line or f"📦 {product_hint}"
+        return title + "\n\nما لقيت نتائج موثوقة برابط مباشر لهذا المنتج حالياً.", {}
+
+    rebuilt = [name_line or f"📦 {product_hint}", ""]
+    final_urls = {}
+    for i, item in enumerate(final):
+        line = re.sub(r"^\s*(?:✅|🏆|•)\s*", "", item["line"]).strip()
+        marker = ("🏆" if recommendation_mode else "✅") if i == 0 else "•"
+        rebuilt.append(f"{marker} {line}")
+        final_urls[item["store"]] = item["url"]
+
+    print({
+        "verified_election": True,
+        "candidates": len(candidates),
+        "verified": len(verified),
+        "selected": [x["store"] for x in final],
+    })
+    return "\n".join(rebuilt).strip(), final_urls
+
+
+def best_of_search(parts, lang, product_hint=""):
+    """
+    ينفذ 3 جولات بحث. في طلبات المنتجات لا يفوز متجر إلا بوجود رابط مباشر مؤكد.
+    إذا متجر بلا رابط يُحذف، ونأخذ بديلاً من بقية الجولات.
+    """
     try:
         futs = [SEARCH_POOL.submit(call_gemini, parts) for _ in range(SEARCH_RUNS)]
         results = [f.result() for f in futs]
     except Exception as e:
         print(f"best_of_search err {e}")
-        return call_gemini(parts)
- 
+        results = [call_gemini(parts)]
+
     results = [(t, u) for (t, u) in results if t]
     if not results:
         return "", {}
- 
+
+    # إذا كان الطلب مقارنة منتج، نبني نتيجة جديدة فقط من المتاجر ذات الروابط المباشرة.
+    if product_hint and any(parse_answer_lines(t)[1] for t, _ in results):
+        return _rebuild_verified_answer(product_hint, results)
+
+    # الخدمات والأسئلة المعلوماتية تبقى على نظام اختيار أفضل جواب دون فلترة متاجر.
     scored = sorted(results, key=lambda r: answer_score(r[0], r[1]), reverse=True)
-    best_txt, best_urls = scored[0]
- 
-    # اتحاد اللنكات: الفائز أولاً، ثم بقية الجولات تكمل النواقص
-    merged_urls = dict(best_urls)
-    for _, u in scored[1:]:
-        for n, link in u.items():
-            if n not in merged_urls and link not in merged_urls.values():
-                merged_urls[n] = link
-    merged_urls = dict(list(merged_urls.items())[:4])
- 
-    print({"tournament": [answer_score(t, u) for t, u in scored], "winner_stores": result_quality(best_txt, best_urls)[0], "total_links": len(merged_urls)})
-    return best_txt, merged_urls
- 
+    return scored[0]
+
 def search_product(query, lang, prompt_text=None):
     """البوابة الموحدة للبحث: كاش أولاً، وإلا بطولة 4 بحوث ونرسل الأقوى.
     prompt_text: صياغة مخصصة للطلب (مثل صورة + سؤال) — الافتراضي بحث سعر عادي.
@@ -656,7 +768,7 @@ def search_product(query, lang, prompt_text=None):
         return cached
  
     text_part = prompt_text or f"ابحث عن {query} في الكويت. {LANG_INSTR[lang]}"
-    txt, urls = best_of_search([{"text": text_part}], lang)
+    txt, urls = best_of_search([{"text": text_part}], lang, product_hint=query)
     stores, links = result_quality(txt, urls)
  
     if stores >= CACHE_MIN_STORES and links >= CACHE_MIN_LINKS:
@@ -1071,4 +1183,4 @@ def process_location_message(message, bot_id):
     send_whatsapp_cta(from_number, body, maps_url, bot_id, T(lang,"maps_btn"))
  
 @app.get("/")
-async def health(): return {"status":"v26 Any Product Question"}
+async def health(): return {"status":"v35 Verified Stores Only"}
