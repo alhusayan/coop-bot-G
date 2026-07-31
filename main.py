@@ -136,14 +136,15 @@ MSG = {
         "not_found": "ما لقيت",
         "cant_identify": "ما قدرت أحدد المنتج",
         "shop_from": "تسوق من {n} 👇",
-        "location_prompt": "تبي أقرب محل يبيعه؟ 📍\n\nاضغط الزر تحت ودز موقعك، وعلى طول أرد لك بأقرب المحلات على الخريطة 👇",
+        "offer_btn": "🛒 افتح العرض",
+        "nearest_body": "📍 أقرب محل يبيع {p}",
         "multi_text": "تمام لقيت {c} منتجات، أسوي سلة...",
         "multi_images": "تمام لقطت {c} منتجات، أسوي سلة...",
         "cart_ready": "🛒 سلتك جاهزة:\n{items}\n\n💰 الإجمالي: {total} د.ك",
         "open_cart_body": "افتح السلة",
         "open_cart_btn": "🛒 افتح السلة",
-        "no_saved_product": "ما عندي منتج محفوظ حالياً 😅. ابحث عن منتج أول، وبعدها دز موقعك عشان أدلك على أقرب مكان يبيعه!",
-        "maps_body": "📍 بحثك الأخير كان عن ({p})\n\nجهزت لك أقرب المحلات اللي تبيعه حولك، اضغط الزر وافتح الخريطة 👇",
+        "no_saved_product": "ما عندي منتج محفوظ حالياً 😅. ابحث عن منتج أول.",
+        "maps_body": "📍 أقرب النتائج لـ ({p})",
         "maps_btn": "📍 افتح الخريطة",
         "lang_saved": "تمام، بكلمك عربي من هني ورايح 🇰🇼\nدز صورة منتج أو اكتب اسمه وأنا حاضر!",
     },
@@ -153,14 +154,15 @@ MSG = {
         "not_found": "Couldn't find it",
         "cant_identify": "Couldn't identify the product",
         "shop_from": "Shop from {n} 👇",
-        "location_prompt": "Want the nearest store that sells it? 📍\n\nTap the button below to share your location, and I'll instantly send you the closest stores on a map 👇",
+        "offer_btn": "🛒 Open offer",
+        "nearest_body": "📍 Nearest store selling {p}",
         "multi_text": "Got it, found {c} products. Building your cart...",
         "multi_images": "Nice, spotted {c} products. Building your cart...",
         "cart_ready": "🛒 Your cart is ready:\n{items}\n\n💰 Total: {total} KWD",
         "open_cart_body": "Open your cart",
         "open_cart_btn": "🛒 Open Cart",
-        "no_saved_product": "I don't have a saved product yet 😅. Search for a product first, then share your location and I'll point you to the nearest store!",
-        "maps_body": "📍 Your last search was ({p})\n\nI've lined up the closest stores around you. Tap the button to open the map 👇",
+        "no_saved_product": "I don't have a saved product yet 😅. Search for a product first.",
+        "maps_body": "📍 Nearest results for ({p})",
         "maps_btn": "📍 Open Map",
         "lang_saved": "Great, I'll speak English with you from now on 🇬🇧\nSend a product photo or type its name and I'm on it!",
     },
@@ -212,14 +214,14 @@ SYSTEM_PROMPT = """
 ثم سطر واحد قصير يشرح ليش الخيار الأول هو الأفضل (تقييم عالي + سعر مناسب).
 
 【الحالة 3】طلب خدمة (فني، بنشر، تبديل بطارية، سباك، كهربائي، تنظيف، صالون، توصيل، ونش...):
-ابحث عن أفضل مزودي الخدمة تقييماً في المنطقة المطلوبة، ورد بهذا الشكل فقط:
+ابحث عن أفضل مزود خدمة واحد فقط في المنطقة المطلوبة، ويجب أن يكون رقم هاتفه ظاهراً حرفياً في نتائج Google.
+رد بهذا الشكل فقط:
 📦 [وصف الخدمة + المنطقة]
 
-🏆 [اسم المزود] (هاتف: [الرقم]) — [المنطقة] — [السعر التقريبي] د.ك ⭐ [التقييم من 5]
-• [مزود ثاني] (هاتف: [الرقم]) — [المنطقة] — [السعر] د.ك ⭐ [التقييم]
-• [مزود ثالث] (هاتف: [الرقم]) — [المنطقة] — [السعر] د.ك ⭐ [التقييم]
-ثم سطر واحد قصير عن ميزة الخيار الأول (سرعة، خدمة 24 ساعة، كفالة...).
-⛔ قاعدة صارمة جداً للأرقام: لا تكتب أي رقم هاتف إلا إذا ظهر الرقم حرفياً في نتائج بحث Google. ممنوع منعاً باتاً تأليف أو تخمين أي رقم. إذا ما لقيت رقم المزود في نتائج البحث اكتب مكانه (الرقم بالرابط) فقط. رقم غلط أسوأ ألف مرة من عدم وجود رقم.
+🏆 [اسم المزود] (هاتف: [الرقم])
+
+لا تذكر السعر أو التقييم أو الوصف أو مزوداً ثانياً أو ثالثاً.
+⛔ قاعدة صارمة جداً للأرقام: لا تكتب أي رقم هاتف إلا إذا ظهر الرقم حرفياً في نتائج بحث Google. ممنوع منعاً باتاً تأليف أو تخمين أي رقم. إذا لم تجد مزوداً برقم ظاهر، قل: لم أجد رقماً موثوقاً.
 
 【الحالة 4】سؤال معلوماتي عن منتج (المكونات، السعرات، المواصفات، طريقة الاستخدام، الفرق بين موديلين، هل يناسب كذا، بلد المنشأ، الكفالة...):
 أجب على السؤال نفسه مباشرة — لا تعرض مقارنة أسعار إطلاقاً.
@@ -228,9 +230,10 @@ SYSTEM_PROMPT = """
 
 ثم الإجابة المباشرة على السؤال في سطور قصيرة واضحة (يمكن استخدام • للتعداد). اعتمد على نتائج البحث والمصادر الرسمية، وإذا كانت معلومة غير متوفرة قل ذلك بصراحة ولا تخترعها.
 
-في الحالات 1 و2 و3، سطر أخير إلزامي:
+في الحالتين 1 و2 فقط، سطر أخير إلزامي:
 LINKS: اسم الأول=الدومين الحقيقي, اسم الثاني=الدومين الحقيقي, اسم الثالث=الدومين الحقيقي
 مثال: LINKS: إكسايت=xcite.com, بلينك=blink.com.kw, يوريكا=eureka.com.kw
+في الحالة 3: لا تضف LINKS إطلاقاً.
 في الحالة 4: سطر LINKS اختياري — أضفه فقط إذا كان هناك رابط مصدر مفيد (مثل صفحة المنتج الرسمية).
 لا تخمّن الدومين، ولا تذكر متجراً أو خياراً من دون مصدر بحث.
 ممنوع روابط ظاهرة. ممنوع Markdown.
@@ -511,18 +514,147 @@ def send_whatsapp_cta(to,body,link,bot_id,title):
         print(f"WhatsApp CTA exception: {e} | {link[:180]}")
         return False
 
-def send_whatsapp_location_request(to, body, bot_id):
-    """زر واتساب الرسمي لطلب الموقع — ضغطة وحدة تفتح شاشة مشاركة اللوكيشن"""
-    url=f"{GRAPH_URL}/{bot_id}/messages"; h={"Authorization":f"Bearer {WHATSAPP_TOKEN}","Content-Type":"application/json"}
-    payload={"messaging_product":"whatsapp","to":to,"type":"interactive","interactive":{"type":"location_request_message","body":{"text":body[:1024]},"action":{"name":"send_location"}}}
-    try:
-        r = requests.post(url,json=payload,headers=h,timeout=15)
-        if not r.ok:
-            print(f"WhatsApp location request error {r.status_code}: {r.text[:500]}")
-        return r.ok
-    except Exception as e:
-        print(f"WhatsApp location request exception: {e}")
+
+def extract_result_title(txt, fallback=""):
+    """يستخرج اسم المنتج/الطلب من سطر 📦 فقط."""
+    m = re.search(r"^\s*📦\s*(.+?)\s*$", txt or "", flags=re.M)
+    return (m.group(1).strip() if m else (fallback or "").strip())
+
+
+def extract_offer_rows(txt):
+    """يستخرج اسم المتجر والسعر من نتائج المنتجات، بدون الوصف والتقييم."""
+    rows = []
+    for line in (txt or "").splitlines():
+        m = re.match(
+            r"^\s*(✅|🏆|•)\s*(.+?)\s*(?:—|–|-)\s*([0-9][0-9.,]*)\s*(?:د\.?\s*ك|KWD|KD)\b",
+            line,
+            flags=re.I,
+        )
+        if not m:
+            continue
+        name = m.group(2).strip()
+        # أسطر الخدمات فيها هاتف داخل الاسم قبل السعر؛ لا نعتبرها عروض منتجات.
+        if re.search(r"\b(?:هاتف|Phone|Tel)\s*:", name, flags=re.I):
+            continue
+        rows.append({
+            "name": name,
+            "price": m.group(3).strip(),
+            "best": len(rows) == 0,
+        })
+    return rows[:4]
+
+
+def extract_best_service(txt):
+    """يستخرج مزود الخدمة الأول ورقم الهاتف فقط."""
+    m = re.search(
+        r"^\s*(?:🏆|✅|•)\s*(.+?)\s*\(\s*(?:هاتف|Phone|Tel)\s*:\s*([^\)]+)\)",
+        txt or "",
+        flags=re.I | re.M,
+    )
+    if not m:
+        return None
+    name = m.group(1).strip()
+    phone_raw = m.group(2).strip()
+    digits = re.sub(r"\D", "", phone_raw)
+    # نعرض الرقم كما وجدناه، لكن نرفض النصوص التي لا تحتوي رقماً فعلياً.
+    if len(digits) < 7:
+        return None
+    if len(digits) == 8:
+        phone = digits
+    elif digits.startswith("965") and len(digits) == 11:
+        phone = f"+{digits}"
+    else:
+        phone = phone_raw
+    return {"name": name, "phone": phone}
+
+
+def google_maps_search_url(query):
+    """يفتح بحث خرائط Google؛ التطبيق/المتصفح يستخدم موقع الجهاز تلقائياً."""
+    q = urllib.parse.quote((query or "").strip())
+    return f"https://www.google.com/maps/search/?api=1&query={q}"
+
+
+def find_offer_url(store_name, urls):
+    """مطابقة مرنة بين اسم المتجر في النتيجة واسم مفتاح الرابط."""
+    if not urls:
+        return ""
+    if store_name in urls:
+        return urls.get(store_name, "")
+    target = normalize_name(store_name)
+    for name, url in urls.items():
+        key = normalize_name(name)
+        if target and key and (target in key or key in target):
+            return url
+    return ""
+
+
+def send_service_result(to, txt, bot_id, lang="ar"):
+    """الخدمة: رسالة واحدة فقط فيها الاسم والرقم، ومعها زر الخريطة."""
+    service = extract_best_service(txt)
+    if not service:
         return False
+    body = f"🏆 {service['name']}\n📞 {service['phone']}"
+    query = f"{service['name']} الكويت"
+    send_whatsapp_cta(
+        to,
+        body,
+        google_maps_search_url(query),
+        bot_id,
+        T(lang, "maps_btn"),
+    )
+    return True
+
+
+def send_product_result(to, txt, urls, bot_id, query, lang="ar", best_only=False, include_map=True):
+    """
+    المنتجات: رسالة اسم المنتج فقط، ثم كل متجر في CTA مستقل يحتوي الاسم والسعر.
+    الخيار الأول يحمل ✅، ولا نكرر وصف Gemini أو التقييمات.
+    """
+    if send_service_result(to, txt, bot_id, lang):
+        return "service"
+
+    offers = extract_offer_rows(txt)
+    if not offers:
+        # سؤال معلوماتي: نرسل إجابة Gemini كما هي.
+        send_whatsapp_text(to, txt or T(lang, "not_found"), bot_id)
+        return "info"
+
+    title = extract_result_title(txt, query)
+    send_whatsapp_text(to, f"📦 {title}", bot_id)
+
+    sent = 0
+    used_urls = set()
+    currency = "د.ك" if lang == "ar" else "KWD"
+    for idx, offer in enumerate(offers):
+        if best_only and idx > 0:
+            break
+        store = offer["name"]
+        url = find_offer_url(store, urls)
+        if not url:
+            url = fallback_search_url(f"{title} {store}")
+        if url in used_urls:
+            continue
+        used_urls.add(url)
+        mark = "✅" if idx == 0 else "•"
+        body = f"{mark} {store} — {offer['price']} {currency}"
+        send_whatsapp_cta(to, body, url, bot_id, T(lang, "offer_btn"))
+        sent += 1
+
+    if sent == 0:
+        # ضمانة نادرة إذا فشل استخراج/مطابقة الروابط.
+        target = offers[0]["name"] if offers else title
+        body = f"✅ {target}"
+        send_whatsapp_cta(to, body, fallback_search_url(f"{title} {target}"), bot_id, T(lang, "offer_btn"))
+
+    if include_map:
+        send_whatsapp_cta(
+            to,
+            T(lang, "nearest_body", p=title),
+            google_maps_search_url(f"{title} الكويت"),
+            bot_id,
+            T(lang, "maps_btn"),
+        )
+    return "product"
 
 def send_whatsapp_buttons(to, body, buttons, bot_id):
     """أزرار رد سريعة (Reply Buttons) — حد أقصى 3 أزرار"""
@@ -546,35 +678,7 @@ def send_language_choice(to, bot_id):
         {"id": "lang_en", "title": "English 🇬🇧"},
     ], bot_id)
 
-def send_whatsapp_contacts(to, contacts, bot_id):
-    """إرسال بطاقات جهات اتصال (يقدر العميل يحفظها أو يتصل مباشرة)"""
-    url=f"{GRAPH_URL}/{bot_id}/messages"; h={"Authorization":f"Bearer {WHATSAPP_TOKEN}","Content-Type":"application/json"}
-    payload={"messaging_product":"whatsapp","to":to,"type":"contacts","contacts":contacts}
-    try:
-        r = requests.post(url,json=payload,headers=h,timeout=15)
-        if not r.ok:
-            print(f"WhatsApp contacts error {r.status_code}: {r.text[:500]}")
-        return r.ok
-    except Exception as e:
-        print(f"WhatsApp contacts exception: {e}")
-        return False
 
-def extract_service_contacts(txt):
-    """يستخرج (اسم المزود + رقمه) من سطور 🏆 و • إذا كان الرد عن خدمة (عربي أو إنجليزي)"""
-    contacts=[]
-    for line in (txt or "").splitlines():
-        m=re.match(r"^\s*(?:🏆|•)\s*(.+?)\s*\(\s*(?:هاتف|Phone|phone|Tel|tel)\s*:\s*([\d\s\-]+)\)",line)
-        if not m: continue
-        name=m.group(1).strip()[:25]
-        num=re.sub(r"\D","",m.group(2))
-        # أرقام الكويت: 8 خانات تبدأ بـ 2 أو 5 أو 6 أو 9
-        if len(num)==8 and num[0] in "2569":
-            contacts.append({
-                "name":{"formatted_name":name,"first_name":name},
-                "phones":[{"phone":f"+965{num}","type":"WORK","wa_id":f"965{num}"}]
-            })
-        if len(contacts)==3: break
-    return contacts
 
 @app.get("/webhook")
 async def verify(request: Request):
@@ -676,31 +780,10 @@ def process_single_image(message,bot_id,lang="ar"):
         product_name = name_m.group(1).strip() if name_m else "المنتج"
         LAST_SEARCH[from_number] = {"product": f"{caption} — {product_name}" if caption else product_name}
 
-    if not txt: txt=T(lang,"cant_identify")
-    send_whatsapp_text(from_number,txt,bot_id)
-
-    # إذا الرد كان عن خدمة (تصليح مثلاً) وفيه أرقام، نرسلها بطاقات جهات اتصال
-    contacts = extract_service_contacts(txt)
-    if contacts:
-        send_whatsapp_contacts(from_number, contacts, bot_id)
-
-    # رد معلوماتي (حالة 4: مكونات/مواصفات...)؟ ما له أزرار تسوق ولا طلب لوكيشن
-    is_info_answer = not extract_store_names(txt) and not contacts
-    if is_info_answer:
-        return
-
-    sent_any=False
-    for n,u in urls.items():
-        if u:
-            send_whatsapp_cta(from_number,T(lang,"shop_from",n=n),u,bot_id,f"🛒 {n[:18]}")
-            sent_any=True
-    if not sent_any and txt and product_name and product_name != "المنتج":
-        stores=extract_store_names(txt)
-        target=stores[0] if stores else product_name
-        send_whatsapp_cta(from_number,T(lang,"shop_from",n=target),fallback_search_url(f"{product_name} {target}" if stores else product_name),bot_id,f"🛒 {target[:18]}")
-
-    if product_name and product_name != "المنتج":
-        send_whatsapp_location_request(from_number, T(lang,"location_prompt"), bot_id)
+    if not txt:
+        txt = T(lang, "cant_identify")
+    display_query = extract_result_title(txt, product_name or caption or "المنتج")
+    send_product_result(from_number, txt, urls, bot_id, display_query, lang, best_only=False, include_map=True)
 
 def identify_image_product(msg):
     """يحدد الاسم القياسي لمنتج من صورة (بدون بحث — سريع)"""
@@ -722,22 +805,8 @@ def process_cart(products, from_number, bot_id, lang="ar"):
         if not txt:
             continue
         any_ok = True
-        send_whatsapp_text(from_number, txt, bot_id)
-
-        # الزر الواحد: نحاول نطابق أول متجر بالرد (الأفضل)، وإلا أول لنك متوفر
-        stores = extract_store_names(txt)
-        best_name = stores[0] if stores else None
-        best_url = urls.get(best_name, "") if best_name else ""
-        if not best_url:
-            pair = next(((n, u) for n, u in urls.items() if u), None)
-            if pair:
-                best_name, best_url = pair
-        if best_url:
-            send_whatsapp_cta(from_number, T(lang, "shop_from", n=best_name), best_url, bot_id, f"🛒 {best_name[:18]}")
-        else:
-            # ضمانة: زر بحث جوجل عن المنتج مع أفضل متجر مذكور
-            target = best_name or p
-            send_whatsapp_cta(from_number, T(lang, "shop_from", n=target), fallback_search_url(f"{p} {target}" if best_name else p), bot_id, f"🛒 {target[:18]}")
+        # في السلة نحافظ على زر واحد فقط لكل منتج حتى لا تتضخم الرسائل.
+        send_product_result(from_number, txt, urls, bot_id, p, lang, best_only=True, include_map=False)
 
     if not any_ok:
         send_whatsapp_text(from_number, T(lang, "not_found"), bot_id)
@@ -780,30 +849,8 @@ def process_text_message(message,bot_id):
         send_whatsapp_text(from_number,T(lang,"searching",q=products[0]),bot_id)
         # البوابة الموحدة: كاش ← وإلا بحث مزدوج + دمج
         txt,urls=search_product(products[0], lang)
-        send_whatsapp_text(from_number,txt or T(lang,"not_found"),bot_id)
-        
         LAST_SEARCH[from_number] = {"product": products[0]}
-
-        # إذا الرد كان عن خدمة وفيه أرقام، نرسلها كبطاقات جهات اتصال جاهزة للحفظ والاتصال
-        contacts = extract_service_contacts(txt)
-        if contacts:
-            send_whatsapp_contacts(from_number, contacts, bot_id)
-
-        # رد معلوماتي (حالة 4)؟ نكتفي بالإجابة — بدون أزرار تسوق ولا لوكيشن
-        if not extract_store_names(txt) and not contacts:
-            return
-
-        sent_any=False
-        for n,u in urls.items():
-            if u:
-                send_whatsapp_cta(from_number,T(lang,"shop_from",n=n),u,bot_id,f"🛒 {n[:18]}")
-                sent_any=True
-        if not sent_any and txt:
-            stores=extract_store_names(txt)
-            target=stores[0] if stores else products[0]
-            send_whatsapp_cta(from_number,T(lang,"shop_from",n=target),fallback_search_url(f"{products[0]} {target}" if stores else products[0]),bot_id,f"🛒 {target[:18]}")
-
-        send_whatsapp_location_request(from_number, T(lang,"location_prompt"), bot_id)
+        send_product_result(from_number, txt or T(lang,"not_found"), urls, bot_id, products[0], lang, best_only=False, include_map=True)
             
     else:
         send_whatsapp_text(from_number,T(lang,"multi_text",c=len(products)),bot_id)
@@ -851,4 +898,4 @@ def process_location_message(message, bot_id):
     send_whatsapp_cta(from_number, body, maps_url, bot_id, T(lang,"maps_btn"))
 
 @app.get("/")
-async def health(): return {"status":"v26 Any Product Question"}
+async def health(): return {"status":"v27 Clean CTA Results"}
