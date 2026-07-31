@@ -57,22 +57,16 @@ def result_quality(txt, urls):
     """(عدد المتاجر بأسعار، عدد اللنكات)"""
     return len(extract_store_names(txt or "")), len(urls or {})
 
-def store_domain_search_url(product, store, current_url=""):
-    """آخر حل آمن: بحث Google داخل موقع المتجر نفسه عن المنتج الدقيق."""
-    domain = clean_domain(urllib.parse.urlparse(current_url).netloc) if current_url else ""
-    site = f" site:{domain}" if domain else ""
-    q = f'"{product}" {store}{site} الكويت'
-    return "https://www.google.com/search?q=" + urllib.parse.quote(q)
-
 def fallback_search_url(query):
-    return "https://www.google.com/search?q=" + urllib.parse.quote(f'"{query}" الكويت')
+    """لم نعد نستخدم بحث Google كزر متجر؛ الرابط إما صفحة المنتج المؤكدة أو لا يوجد زر."""
+    return ""
 
 def best_store_name(txt):
     m = re.search(r"^\s*🏪\s*[^:：]*[:：]\s*(.+?)\s*$", txt or "", flags=re.M)
     return m.group(1).strip() if m else ""
 
 def parse_answer_lines(txt):
-    """يفكك رد Gemini: (سطر الاسم، عروض المتاجر)."""
+    """يفكك رد Gemini إلى اسم المنتج وعروض المتاجر."""
     name_line = ""
     offers = []
     for line in (txt or "").splitlines():
@@ -88,91 +82,138 @@ def parse_answer_lines(txt):
     return name_line, offers
 
 def product_tokens(text):
-    """كلمات مفيدة لتقييم هل الرابط صفحة المنتج نفسها."""
+    """كلمات مهمة للتحقق من أن الصفحة تخص المنتج نفسه."""
     t = normalize_ar(text)
     toks = re.findall(r"[a-z0-9\u0600-\u06FF]+", t)
-    stop = {"في","من","الى","على","الكويت","كويت","جهاز","منتج","علبه","علبة","حجم","جرام","جم","مل","لتر","اسود","ابيض"}
+    stop = {
+        "في","من","الى","على","الكويت","كويت","جهاز","منتج","علبه","علبة",
+        "حجم","جرام","جم","مل","لتر","اسود","ابيض","عرض","عبوه","عبوة",
+        "حبات","حبه","حبة","مع","والسماعه","والسماعة"
+    }
     return [x for x in toks if len(x) >= 3 and x not in stop]
 
 def url_is_generic(url):
+    """يرفض الصفحة الرئيسية، الأقسام، نتائج البحث، وروابط Google."""
     if not url:
         return True
-    u = url.lower()
-    bad = ("google.com/search", "/search", "?q=", "/category", "/categories", "/collections",
-           "/department", "/headphones-earbuds", "/electronics", "0-results", "no-results")
-    path = urllib.parse.urlparse(u).path.strip("/")
-    return any(x in u for x in bad) or path == ""
+    u = urllib.parse.unquote(url).lower()
+    parsed = urllib.parse.urlparse(u)
+    path = parsed.path.strip("/")
+    bad = (
+        "google.com/search", "google.com/url", "/search", "?q=", "?s=", "?query=",
+        "/category", "/categories", "/collection", "/collections", "/department",
+        "/departments", "/headphones-earbuds", "/electronics", "/catalogsearch",
+        "/shop/", "0-results", "no-results", "not-found", "404"
+    )
+    return any(x in u for x in bad) or not path
 
-def candidate_product_score(product, title, url):
-    """درجة تحفظية: نرفض الصفحة العامة ونفضل العنوان/الرابط المطابق للموديل والبراند."""
-    if not url or "google.com/search" in url.lower():
-        return -99
-    score = 0
+def domain_matches_store(url, store, expected_domain=""):
+    host = clean_domain(urllib.parse.urlparse(url).netloc)
+    if not host:
+        return False
+    if expected_domain:
+        return domain_key(expected_domain) == domain_key(host)
+    # بدون دومين معروف لا نفرض تطابق الاسم العربي مع الدومين؛ يكفي أن يكون رابط ويب حقيقي.
+    return True
+
+def candidate_product_score(product, title, url, expected_domain=""):
+    """درجة صارمة لقبول صفحة منتج مباشرة فقط."""
+    if not url or url_is_generic(url):
+        return -100
+    if not domain_matches_store(url, "", expected_domain):
+        return -100
+
     hay = normalize_ar(f"{title} {urllib.parse.unquote(url)}")
     toks = product_tokens(product)
     models = [x for x in toks if re.search(r"\d", x)]
-    for tok in toks:
+    words = [x for x in toks if not re.search(r"\d", x)]
+
+    score = 0
+    matched_words = 0
+    for tok in words:
         if tok in hay:
             score += 2
+            matched_words += 1
     for model in models:
         if model in hay:
-            score += 6
-    if url_is_generic(url):
-        score -= 8
+            score += 10
+        else:
+            score -= 5
+
     path = urllib.parse.urlparse(url).path.strip("/")
+    # صفحات المنتجات عادة فيها مسار تفصيلي أو slug طويل.
     if path.count("/") >= 1:
-        score += 1
+        score += 2
+    if len(path) >= 18:
+        score += 2
+
+    # يجب أن يتطابق على الأقل جزء معتبر من الاسم، أو رقم الموديل إن وجد.
+    if models and not any(m in hay for m in models):
+        return -100
+    if not models and words and matched_words < min(2, len(words)):
+        return -100
     return score
 
+def resolve_grounded_product_candidates(product, store, current_url=""):
+    """بحث إضافي موجه يرجع روابط Grounding المرشحة فقط، ولا يصنع أي رابط."""
+    domain = clean_domain(urllib.parse.urlparse(current_url).netloc) if current_url else ""
+    site = f" site:{domain}" if domain else ""
+    system = """أنت باحث صفحات منتجات. ابحث عن صفحة المنتج نفسها في متجر الكويت المذكور.
+ممنوع الصفحة الرئيسية أو القسم أو نتائج البحث أو Google Shopping. استخدم Google Search فقط للوصول إلى صفحة المنتج الأصلية.
+لا تخترع روابط ولا تكتب رابطاً في النص."""
+    prompt = f'ابحث عن صفحة المنتج الأصلية الدقيقة: "{product}" في متجر "{store}"{site}.'
+    payload = {
+        "systemInstruction": {"parts": [{"text": system}]},
+        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0, "maxOutputTokens": 60},
+        "tools": [{"google_search": {}}],
+    }
+    candidates = []
+    try:
+        r = SESSION.post(gemini_url(), params={"key": GEMINI_API_KEY}, json=payload, timeout=60)
+        data = r.json() if r.ok else {}
+        cand = (data.get("candidates") or [{}])[0]
+        chunks = (cand.get("groundingMetadata") or {}).get("groundingChunks") or []
+        raws = []
+        for chunk in chunks[:12]:
+            web = chunk.get("web") or {}
+            if web.get("uri"):
+                raws.append((web.get("title", ""), web.get("uri", "")))
+        finals = resolve_all([u for _, u in raws]) if raws else []
+        for i, (title, raw) in enumerate(raws):
+            url = finals[i] if i < len(finals) else raw
+            candidates.append((title, url))
+    except Exception as e:
+        print(f"direct candidate search err: {e}")
+    return candidates
+
 def find_exact_product_url(product, store, current_url=""):
-    """يبحث مرة إضافية عن صفحة المنتج الدقيقة داخل متجر بعينه، ويمنع روابط الأقسام العامة."""
+    """يعيد رابط صفحة منتج مؤكدة فقط. عند عدم التأكد يعيد نصاً فارغاً، وليس بحث Google."""
     domain = clean_domain(urllib.parse.urlparse(current_url).netloc) if current_url else ""
     key = hashlib.sha256(f"{normalize_ar(product)}|{normalize_ar(store)}|{domain}".encode()).hexdigest()
     hit = DIRECT_URL_CACHE.get(key)
     if hit and time.time() - hit["ts"] < CACHE_TTL:
         return hit["url"]
 
-    # الرابط الحالي مقبول إذا كان واضحاً أنه صفحة منتج ومطابقاً للاسم.
-    if current_url and candidate_product_score(product, store, current_url) >= 2 and not url_is_generic(current_url):
-        DIRECT_URL_CACHE[key] = {"url": current_url, "ts": time.time()}
-        return current_url
+    candidates = []
+    if current_url:
+        candidates.append((store, current_url))
+    candidates.extend(resolve_grounded_product_candidates(product, store, current_url))
 
-    site_hint = f" داخل الموقع {domain}" if domain else ""
-    sys = """أنت محرك بحث دقيق لصفحات المنتجات في متاجر الكويت. ابحث عن صفحة المنتج نفسها، لا الصفحة الرئيسية ولا القسم ولا صفحة نتائج البحث. استخدم Google Search. لا تخترع رابطاً. اكتب كلمة FOUND فقط إذا وجدت صفحة المنتج الدقيقة، وإلا اكتب NOT_FOUND."""
-    prompt = f"ابحث عن صفحة المنتج الدقيقة: {product} في متجر {store}{site_hint}."
-    payload = {
-        "systemInstruction": {"parts": [{"text": sys}]},
-        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0, "maxOutputTokens": 40},
-        "tools": [{"google_search": {}}],
-    }
-    best_url, best_score = "", -99
-    try:
-        r = SESSION.post(gemini_url(), params={"key": GEMINI_API_KEY}, json=payload, timeout=60)
-        data = r.json() if r.ok else {}
-        cand = (data.get("candidates") or [{}])[0]
-        chunks = (cand.get("groundingMetadata") or {}).get("groundingChunks") or []
-        for chunk in chunks[:10]:
-            web = chunk.get("web") or {}
-            raw = web.get("uri", "")
-            url = get_final_url(raw) if raw else ""
-            title = web.get("title", "")
-            if domain and domain_key(domain) not in f"{title} {url}".lower():
-                continue
-            sc = candidate_product_score(product, title, url)
-            if sc > best_score:
-                best_url, best_score = url, sc
-    except Exception as e:
-        print(f"exact product URL err: {e}")
+    best_url, best_score = "", -100
+    for title, url in candidates:
+        sc = candidate_product_score(product, title, url, domain)
+        if sc > best_score:
+            best_url, best_score = url, sc
 
-    # لا نرسل صفحة قسم خاطئة. عند عدم اليقين نرسل بحثاً مقيداً بموقع المتجر والمنتج.
-    if best_score < 3 or url_is_generic(best_url):
-        best_url = store_domain_search_url(product, store, current_url)
-    DIRECT_URL_CACHE[key] = {"url": best_url, "ts": time.time()}
-    return best_url
+    # حد قبول مرتفع حتى لا نرسل صفحة قسم أو منتج مختلف.
+    verified = best_url if best_score >= 6 else ""
+    DIRECT_URL_CACHE[key] = {"url": verified, "ts": time.time()}
+    print({"direct_link_store": store, "product": product[:70], "verified": bool(verified), "score": best_score, "url": verified[:180]})
+    return verified
 
 def url_for_store(store, urls, product):
-    """يرجع صفحة المنتج الدقيقة، لا صفحة القسم."""
+    """رابط المنتج المباشر المؤكد، أو فارغ."""
     url = (urls or {}).get(store, "")
     if not url:
         sn = normalize_name(store)
@@ -183,17 +224,23 @@ def url_for_store(store, urls, product):
     return find_exact_product_url(product, store, url)
 
 def send_product_answer(from_number, bot_id, lang, txt, urls, product, best_only=False):
-    """التنسيق الجديد بدون تكرار: رسالة اسم المنتج، ثم زر لكل متجر
-    وجسم الزر نفسه هو (✅/🏆 المتجر — السعر) — الأفضل أول واحد."""
+    """يرسل زر شراء فقط عندما يكون الرابط صفحة المنتج نفسها ومؤكداً."""
     name_line, offers = parse_answer_lines(txt)
     send_whatsapp_text(from_number, name_line or txt.splitlines()[0], bot_id)
     if not offers:
-        # ما فيه سطور عروض (رد حر) — نرسل النص كما هو
         if txt and txt != name_line:
             send_whatsapp_text(from_number, txt, bot_id)
         return
-    for line, store in (offers[:1] if best_only else offers[:4]):
-        send_whatsapp_cta(from_number, line, url_for_store(store, urls, product), bot_id, f"🛒 {store[:18]}")
+
+    selected = offers[:1] if best_only else offers[:4]
+    for line, store in selected:
+        direct_url = url_for_store(store, urls, product)
+        if direct_url:
+            send_whatsapp_cta(from_number, line, direct_url, bot_id, f"🛒 {store[:18]}")
+        else:
+            # نعرض السعر والمتجر، لكن لا نخدع المستخدم بزر يفتح Google أو قسماً عاماً.
+            suffix = "\n🔗 الرابط المباشر للمنتج غير متوفر حالياً" if lang == "ar" else "\n🔗 Direct product link is currently unavailable"
+            send_whatsapp_text(from_number, line + suffix, bot_id)
 
 def normalize_ar(text):
     """توحيد الحروف العربية والمسافات حتى تتطابق الصيغ المختلفة لنفس المنتج"""
