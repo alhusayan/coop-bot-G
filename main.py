@@ -315,6 +315,22 @@ STORE_DOMAINS = {
     "wibi": "wibi.com.kw",
     "ويبي": "wibi.com.kw",
     "اتكير": "itcare-kw.com",
+    # تطبيقات التوصيل والبقالة
+    "طلبات": "talabat.com",
+    "طلباتمارت": "talabat.com",
+    "talabat": "talabat.com",
+    "ديليفرو": "deliveroo.com.kw",
+    "deliveroo": "deliveroo.com.kw",
+    "كريم": "careemnow.com",
+    "انستاشوب": "instashop.com",
+    "سنابس": "snaps.company",
+    "جاهز": "jahez.net",
+    # شركات أغذية كويتية
+    "مطاحن": "kuwaitflourmills.com",
+    "المطاحن": "kuwaitflourmills.com",
+    "الميره": "almeera.com.kw",
+    "مزاد": "mezzan.com",
+    "الوطنيهللاغذيه": "knfc.com.kw",
 }
 
 def store_domain(name):
@@ -326,6 +342,19 @@ def store_domain(name):
         if k in n or n in k:
             return d
     return ""
+
+# أسماء "متاجر" خربانة يطلعها Gemini أحياناً — مو متاجر حقيقية فما نسوي لها زر بحث عام
+JUNK_STORE = re.compile(r"^(التوصيل|توصيل|delivery|اونلاين|أونلاين|online|الموقعالرسمي|official)", re.I)
+
+def is_junk_store(name):
+    return bool(JUNK_STORE.match(normalize_name(normalize_ar(name))))
+
+def short_query(q):
+    """يختصر جملة البحث للضمانة: بدون أقواس، اللي قبل الشرطة فقط، وأول 6 كلمات.
+    الجمل الطويلة (اسم كامل + تغليف + شركة) تخرب بحث جوجل."""
+    q = re.sub(r"\([^)]*\)", " ", q or "")
+    q = re.split(r"\s+[-—–]\s+", q)[0]
+    return " ".join(q.split()[:6]).strip()
 
 def extract_store_names(text):
     stores = []
@@ -434,12 +463,21 @@ def send_product_result(from_number, txt, urls, bot_id, lang, query, best_only=F
     if title:
         send_whatsapp_text(from_number, title, bot_id)
 
+    # جملة البحث المختصرة للضمانة: اسم المنتج من سطر 📦 (أنظف من الطلب الكامل)
+    core = title[2:].strip() if title.startswith("📦") else query
+    fq = short_query(core) or short_query(query)
+
     if best_only:
         best = next((o for o in offers if o["best"]), offers[0])
         offers = [best]
 
     for o in offers:
-        url = match_url(o["name"], urls) or fallback_search_url(query, o["name"])
+        url = match_url(o["name"], urls)
+        if not url:
+            # متجر خربان (مثل "التوصيل") بدون لنك مباشر؟ نتجاهله بدل زر بحث عشوائي
+            if is_junk_store(o["name"]):
+                continue
+            url = fallback_search_url(fq, o["name"])
         send_whatsapp_cta(from_number, o["line"], url, bot_id, f"🛒 {o['name'][:18]}")
 
     return True
@@ -915,4 +953,4 @@ def process_location_message(message, bot_id):
     send_whatsapp_cta(from_number, body, maps_url, bot_id, T(lang,"maps_btn"))
 
 @app.get("/")
-async def health(): return {"status":"v29 Store Aliases"}
+async def health(): return {"status":"v30 Smart Fallback"}
