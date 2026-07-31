@@ -147,11 +147,16 @@ def candidate_product_score(product, title, url, expected_domain=""):
     if len(path) >= 18:
         score += 2
 
-    # يجب أن يتطابق على الأقل جزء معتبر من الاسم، أو رقم الموديل إن وجد.
+    # رقم الموديل أقوى دليل. إذا لم يوجد موديل، يكفي تطابق كلمة مميزة واحدة
+    # مع مسار منتج تفصيلي؛ هذا مهم للمنتجات التي اسمها عربي لكن رابطها إنجليزي.
     if models and not any(m in hay for m in models):
         return -100
-    if not models and words and matched_words < min(2, len(words)):
-        return -100
+    if not models and words and matched_words == 0:
+        # لا نقبل إلا إذا كان المسار واضحاً كصفحة منتج تفصيلية، وليس قسماً عاماً.
+        product_markers = ("/product/", "/products/", "/p/", "/item/", "/dp/", "product_id=")
+        if not any(m in urllib.parse.unquote(url).lower() for m in product_markers):
+            return -100
+        score += 1
     return score
 
 def resolve_grounded_product_candidates(product, store, current_url=""):
@@ -648,6 +653,30 @@ def answer_score(product, txt, urls):
         score -= 50
     return score
 
+def raw_url_for_store(store, urls):
+    """يرجع أي رابط مؤسس على مصدر البحث للمتجر كـ seed فقط؛ لا يُرسل للمستخدم مباشرة."""
+    url = (urls or {}).get(store, "")
+    if url:
+        return url
+    sn = normalize_name(store)
+    for k, v in (urls or {}).items():
+        kn = normalize_name(k)
+        if v and sn and (sn in kn or kn in sn):
+            return v
+    return ""
+
+def rescue_links_for_result(product, txt, urls):
+    """عند فشل الجولات في إحضار رابط مباشر، نجرب إنقاذ الروابط لمتاجر نفس الجواب.
+    يستخدم دومين المصدر كقيد ثم يقبل فقط صفحة منتج مؤكدة."""
+    rescued = {}
+    _, offers = parse_answer_lines(txt)
+    for _, store in offers[:4]:
+        seed = raw_url_for_store(store, urls)
+        direct = find_exact_product_url(product, store, seed)
+        if direct:
+            rescued[store] = direct
+    return rescued
+
 def best_of_search(parts, lang, product=""):
     """يجري 3 بحوث متوازية وينتخب الجولة صاحبة أكثر روابط منتجات مباشرة.
     عند التعادل يختار الأكثر عروضاً والأفضل تنسيقاً.
@@ -678,6 +707,17 @@ def best_of_search(parts, lang, product=""):
             "score": answer_score(product_for_score, txt, urls),
         })
     ranked.sort(key=lambda x: x["score"], reverse=True)
+
+    # إذا لم تملك أي جولة رابطاً مباشراً، لا نستسلم: ننقذ روابط كل جولة
+    # ثم نعيد الانتخابات بناءً على الروابط المؤكدة فعلياً.
+    if not any(r["direct_count"] > 0 for r in ranked):
+        for row in ranked:
+            rescued = rescue_links_for_result(product_for_score, row["txt"], row["urls"])
+            row["direct_map"] = rescued
+            row["direct_count"] = len(rescued)
+            row["score"] = answer_score(product_for_score, row["txt"], rescued)
+        ranked.sort(key=lambda x: x["score"], reverse=True)
+
     winner = ranked[0]
     best_txt = winner["txt"]
 
@@ -701,6 +741,14 @@ def best_of_search(parts, lang, product=""):
         if best_candidate and best_candidate_score >= 6:
             merged_urls[store] = best_candidate
 
+    # نحتفظ برابط المصدر كـ seed داخلي للمتاجر التي لم تُنقذ بعد.
+    # url_for_store لن يرسله للمستخدم؛ سيستخدمه فقط لمعرفة الدومين ثم يبحث عن صفحة المنتج.
+    for store in winning_stores:
+        if store not in merged_urls:
+            seed = raw_url_for_store(store, winner["urls"])
+            if seed:
+                merged_urls[store] = seed
+
     print({
         "tournament": [
             {"score": r["score"], "direct": r["direct_count"], "stores": result_quality(r["txt"], r["urls"])[0]}
@@ -708,7 +756,7 @@ def best_of_search(parts, lang, product=""):
         ],
         "winner_direct_links": winner["direct_count"],
         "winner_stores": winning_stores,
-        "returned_direct_links": list(merged_urls.keys()),
+        "returned_link_seeds": list(merged_urls.keys()),
     })
     return best_txt, dict(list(merged_urls.items())[:4])
 
