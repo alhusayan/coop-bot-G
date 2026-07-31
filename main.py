@@ -221,9 +221,17 @@ SYSTEM_PROMPT = """
 ثم سطر واحد قصير عن ميزة الخيار الأول (سرعة، خدمة 24 ساعة، كفالة...).
 ⛔ قاعدة صارمة جداً للأرقام: لا تكتب أي رقم هاتف إلا إذا ظهر الرقم حرفياً في نتائج بحث Google. ممنوع منعاً باتاً تأليف أو تخمين أي رقم. إذا ما لقيت رقم المزود في نتائج البحث اكتب مكانه (الرقم بالرابط) فقط. رقم غلط أسوأ ألف مرة من عدم وجود رقم.
 
-في كل الحالات، سطر أخير إلزامي:
+【الحالة 4】سؤال معلوماتي عن منتج (المكونات، السعرات، المواصفات، طريقة الاستخدام، الفرق بين موديلين، هل يناسب كذا، بلد المنشأ، الكفالة...):
+أجب على السؤال نفسه مباشرة — لا تعرض مقارنة أسعار إطلاقاً.
+رد بهذا الشكل:
+📦 [اسم المنتج]
+
+ثم الإجابة المباشرة على السؤال في سطور قصيرة واضحة (يمكن استخدام • للتعداد). اعتمد على نتائج البحث والمصادر الرسمية، وإذا كانت معلومة غير متوفرة قل ذلك بصراحة ولا تخترعها.
+
+في الحالات 1 و2 و3، سطر أخير إلزامي:
 LINKS: اسم الأول=الدومين الحقيقي, اسم الثاني=الدومين الحقيقي, اسم الثالث=الدومين الحقيقي
 مثال: LINKS: إكسايت=xcite.com, بلينك=blink.com.kw, يوريكا=eureka.com.kw
+في الحالة 4: سطر LINKS اختياري — أضفه فقط إذا كان هناك رابط مصدر مفيد (مثل صفحة المنتج الرسمية).
 لا تخمّن الدومين، ولا تذكر متجراً أو خياراً من دون مصدر بحث.
 ممنوع روابط ظاهرة. ممنوع Markdown.
 
@@ -446,18 +454,22 @@ def best_of_search(parts, lang):
     print({"tournament": [answer_score(t, u) for t, u in scored], "winner_stores": result_quality(best_txt, best_urls)[0], "total_links": len(merged_urls)})
     return best_txt, merged_urls
 
-def search_product(query, lang):
+def search_product(query, lang, prompt_text=None):
     """البوابة الموحدة للبحث: كاش أولاً، وإلا بطولة 4 بحوث ونرسل الأقوى.
-    لا نحفظ بالكاش إلا نتيجة قوية — النتائج الضعيفة تُرسل لكن لا تُخزّن،
-    حتى ياخذ الطلب التالي فرصة بحث جديدة بدل تكرار نتيجة سيئة."""
+    prompt_text: صياغة مخصصة للطلب (مثل صورة + سؤال) — الافتراضي بحث سعر عادي.
+    لا نحفظ بالكاش إلا نتيجة قوية: مقارنة فيها متاجر ولنكات، أو إجابة معلوماتية وافية."""
     cached = cache_get(query, lang)
     if cached:
         return cached
 
-    txt, urls = best_of_search([{"text": f"ابحث عن {query} في الكويت. {LANG_INSTR[lang]}"}], lang)
+    text_part = prompt_text or f"ابحث عن {query} في الكويت. {LANG_INSTR[lang]}"
+    txt, urls = best_of_search([{"text": text_part}], lang)
     stores, links = result_quality(txt, urls)
 
     if stores >= CACHE_MIN_STORES and links >= CACHE_MIN_LINKS:
+        cache_put(query, lang, txt, urls)
+    elif stores == 0 and txt and len(txt) >= 120:
+        # إجابة معلوماتية (حالة 4) وافية — تستاهل الكاش بعد
         cache_put(query, lang, txt, urls)
     else:
         print(f"NOT CACHED (quality low): stores={stores} links={links} | {query[:60]}")
@@ -584,8 +596,13 @@ async def receive(request: Request, background_tasks: BackgroundTasks):
         from_number=msg["from"]
         
         if msg.get("type")=="image":
+            # الكابشن (النص المرفق مع الصورة) يحدد اللغة تلقائياً — ما نحتاج نسأل
+            caption = (msg.get("image",{}) or {}).get("caption","").strip()
+            cap_lang = detect_lang(caption) if caption else None
+            if cap_lang:
+                USER_LANG[from_number] = cap_lang
             if from_number not in USER_LANG:
-                # أول تعامل معنا وبدأ بصورة: نعلق الصور ونسأله عن لغته مرة وحدة بس
+                # أول تعامل معنا وبدأ بصورة بدون نص: نعلق الصور ونسأله عن لغته مرة وحدة بس
                 pend=PENDING_IMAGES[from_number]
                 pend["images"].append(msg); pend["bot_id"]=bot_id
                 if len(pend["images"])==1:
@@ -633,6 +650,7 @@ async def process_image_buffer(from_number):
 
 def process_single_image(message,bot_id,lang="ar"):
     from_number=message["from"]
+    caption=(message.get("image",{}) or {}).get("caption","").strip()
     send_whatsapp_text(from_number,T(lang,"identifying"),bot_id)
     b64,mime=download_whatsapp_media(message["image"]["id"])
 
@@ -640,19 +658,36 @@ def process_single_image(message,bot_id,lang="ar"):
     ident,_=call_gemini([{"inline_data":{"mime_type":mime,"data":b64}},{"text":"ما اسم هذا المنتج؟"}], system=IDENTIFY_SYSTEM, use_search=False)
     product_name = ident.strip().splitlines()[0].strip() if ident else ""
 
-    if product_name:
-        # الخطوة 2: بحث موحد بالاسم — يشترك بالكاش مع البحث النصي لنفس المنتج
+    if product_name and caption:
+        # صورة + طلب مكتوب: أي سؤال عن المنتج (سعر، تصليح، مكونات، مواصفات...)
+        request_query = f"{caption} — {product_name}"
+        prompt_text = f"المنتج في الصورة: {product_name}\nطلب المستخدم عنه: {caption}\nصنّف الطلب (مقارنة سعر / توصية / خدمة / سؤال معلوماتي) وأجب عليه مباشرة بالتنسيق المناسب. {LANG_INSTR[lang]}"
+        txt,urls=search_product(request_query, lang, prompt_text=prompt_text)
+        LAST_SEARCH[from_number] = {"product": request_query}
+    elif product_name:
+        # صورة بدون نص: السلوك المعتاد — مقارنة أسعار
         txt,urls=search_product(product_name, lang)
+        LAST_SEARCH[from_number] = {"product": product_name}
     else:
         # ما قدرنا نحدد الاسم؟ نرجع لبحث الصورة المباشر (بدون كاش)
-        txt,urls=best_of_search([{"inline_data":{"mime_type":mime,"data":b64}},{"text":f"ما هذا المنتج؟ ابحث عن سعره الحالي في الكويت. {LANG_INSTR[lang]}"}], lang)
+        req = caption if caption else "ما هذا المنتج؟ ابحث عن سعره الحالي في الكويت."
+        txt,urls=best_of_search([{"inline_data":{"mime_type":mime,"data":b64}},{"text":f"{req} {LANG_INSTR[lang]}"}], lang)
         name_m = re.search(r"📦\s*(.+)", txt or "")
         product_name = name_m.group(1).strip() if name_m else "المنتج"
+        LAST_SEARCH[from_number] = {"product": f"{caption} — {product_name}" if caption else product_name}
 
     if not txt: txt=T(lang,"cant_identify")
     send_whatsapp_text(from_number,txt,bot_id)
 
-    LAST_SEARCH[from_number] = {"product": product_name or "المنتج"}
+    # إذا الرد كان عن خدمة (تصليح مثلاً) وفيه أرقام، نرسلها بطاقات جهات اتصال
+    contacts = extract_service_contacts(txt)
+    if contacts:
+        send_whatsapp_contacts(from_number, contacts, bot_id)
+
+    # رد معلوماتي (حالة 4: مكونات/مواصفات...)؟ ما له أزرار تسوق ولا طلب لوكيشن
+    is_info_answer = not extract_store_names(txt) and not contacts
+    if is_info_answer:
+        return
 
     sent_any=False
     for n,u in urls.items():
@@ -753,7 +788,11 @@ def process_text_message(message,bot_id):
         contacts = extract_service_contacts(txt)
         if contacts:
             send_whatsapp_contacts(from_number, contacts, bot_id)
-            
+
+        # رد معلوماتي (حالة 4)؟ نكتفي بالإجابة — بدون أزرار تسوق ولا لوكيشن
+        if not extract_store_names(txt) and not contacts:
+            return
+
         sent_any=False
         for n,u in urls.items():
             if u:
@@ -812,4 +851,4 @@ def process_location_message(message, bot_id):
     send_whatsapp_cta(from_number, body, maps_url, bot_id, T(lang,"maps_btn"))
 
 @app.get("/")
-async def health(): return {"status":"v24 ClicFlyer Offers Source"}
+async def health(): return {"status":"v26 Any Product Question"}
