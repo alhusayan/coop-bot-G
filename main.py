@@ -31,6 +31,8 @@ processed_ids = deque(maxlen=1000)
 # CARTS أزيلت — السلة صارت رسالة واتساب مباشرة بدون صفحة ويب
 IMAGE_BUFFER = defaultdict(lambda: {"images": [], "time": 0, "bot_id": ""})
 LAST_SEARCH = {} # لحفظ اسم آخر منتج بحث عنه المستخدم
+MAP_QUERY_CACHE = {}
+DIRECT_URL_CACHE = {}
 
 # ===== نظام اللغة: كل رقم تلفون وله لغته =====
 USER_LANG = {}       # from_number -> "ar" | "en"
@@ -55,17 +57,22 @@ def result_quality(txt, urls):
     """(عدد المتاجر بأسعار، عدد اللنكات)"""
     return len(extract_store_names(txt or "")), len(urls or {})
 
+def store_domain_search_url(product, store, current_url=""):
+    """آخر حل آمن: بحث Google داخل موقع المتجر نفسه عن المنتج الدقيق."""
+    domain = clean_domain(urllib.parse.urlparse(current_url).netloc) if current_url else ""
+    site = f" site:{domain}" if domain else ""
+    q = f'"{product}" {store}{site} الكويت'
+    return "https://www.google.com/search?q=" + urllib.parse.quote(q)
+
 def fallback_search_url(query):
-    """زر مضمون دايماً: بحث جوجل عن المتجر/المنتج إذا ما توفر لنك مباشر"""
-    return "https://www.google.com/search?q=" + urllib.parse.quote(f"{query} الكويت اونلاين")
+    return "https://www.google.com/search?q=" + urllib.parse.quote(f'"{query}" الكويت')
 
 def best_store_name(txt):
-    """اسم أفضل متجر من سطر 🏪 إن وجد"""
     m = re.search(r"^\s*🏪\s*[^:：]*[:：]\s*(.+?)\s*$", txt or "", flags=re.M)
     return m.group(1).strip() if m else ""
 
 def parse_answer_lines(txt):
-    """يفكك رد Gemini: (سطر الاسم 📦، قائمة العروض [(نص السطر، اسم المتجر)])"""
+    """يفكك رد Gemini: (سطر الاسم، عروض المتاجر)."""
     name_line = ""
     offers = []
     for line in (txt or "").splitlines():
@@ -80,16 +87,100 @@ def parse_answer_lines(txt):
             offers.append((line, m.group(1).strip()))
     return name_line, offers
 
+def product_tokens(text):
+    """كلمات مفيدة لتقييم هل الرابط صفحة المنتج نفسها."""
+    t = normalize_ar(text)
+    toks = re.findall(r"[a-z0-9\u0600-\u06FF]+", t)
+    stop = {"في","من","الى","على","الكويت","كويت","جهاز","منتج","علبه","علبة","حجم","جرام","جم","مل","لتر","اسود","ابيض"}
+    return [x for x in toks if len(x) >= 3 and x not in stop]
+
+def url_is_generic(url):
+    if not url:
+        return True
+    u = url.lower()
+    bad = ("google.com/search", "/search", "?q=", "/category", "/categories", "/collections",
+           "/department", "/headphones-earbuds", "/electronics", "0-results", "no-results")
+    path = urllib.parse.urlparse(u).path.strip("/")
+    return any(x in u for x in bad) or path == ""
+
+def candidate_product_score(product, title, url):
+    """درجة تحفظية: نرفض الصفحة العامة ونفضل العنوان/الرابط المطابق للموديل والبراند."""
+    if not url or "google.com/search" in url.lower():
+        return -99
+    score = 0
+    hay = normalize_ar(f"{title} {urllib.parse.unquote(url)}")
+    toks = product_tokens(product)
+    models = [x for x in toks if re.search(r"\d", x)]
+    for tok in toks:
+        if tok in hay:
+            score += 2
+    for model in models:
+        if model in hay:
+            score += 6
+    if url_is_generic(url):
+        score -= 8
+    path = urllib.parse.urlparse(url).path.strip("/")
+    if path.count("/") >= 1:
+        score += 1
+    return score
+
+def find_exact_product_url(product, store, current_url=""):
+    """يبحث مرة إضافية عن صفحة المنتج الدقيقة داخل متجر بعينه، ويمنع روابط الأقسام العامة."""
+    domain = clean_domain(urllib.parse.urlparse(current_url).netloc) if current_url else ""
+    key = hashlib.sha256(f"{normalize_ar(product)}|{normalize_ar(store)}|{domain}".encode()).hexdigest()
+    hit = DIRECT_URL_CACHE.get(key)
+    if hit and time.time() - hit["ts"] < CACHE_TTL:
+        return hit["url"]
+
+    # الرابط الحالي مقبول إذا كان واضحاً أنه صفحة منتج ومطابقاً للاسم.
+    if current_url and candidate_product_score(product, store, current_url) >= 2 and not url_is_generic(current_url):
+        DIRECT_URL_CACHE[key] = {"url": current_url, "ts": time.time()}
+        return current_url
+
+    site_hint = f" داخل الموقع {domain}" if domain else ""
+    sys = """أنت محرك بحث دقيق لصفحات المنتجات في متاجر الكويت. ابحث عن صفحة المنتج نفسها، لا الصفحة الرئيسية ولا القسم ولا صفحة نتائج البحث. استخدم Google Search. لا تخترع رابطاً. اكتب كلمة FOUND فقط إذا وجدت صفحة المنتج الدقيقة، وإلا اكتب NOT_FOUND."""
+    prompt = f"ابحث عن صفحة المنتج الدقيقة: {product} في متجر {store}{site_hint}."
+    payload = {
+        "systemInstruction": {"parts": [{"text": sys}]},
+        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0, "maxOutputTokens": 40},
+        "tools": [{"google_search": {}}],
+    }
+    best_url, best_score = "", -99
+    try:
+        r = SESSION.post(gemini_url(), params={"key": GEMINI_API_KEY}, json=payload, timeout=60)
+        data = r.json() if r.ok else {}
+        cand = (data.get("candidates") or [{}])[0]
+        chunks = (cand.get("groundingMetadata") or {}).get("groundingChunks") or []
+        for chunk in chunks[:10]:
+            web = chunk.get("web") or {}
+            raw = web.get("uri", "")
+            url = get_final_url(raw) if raw else ""
+            title = web.get("title", "")
+            if domain and domain_key(domain) not in f"{title} {url}".lower():
+                continue
+            sc = candidate_product_score(product, title, url)
+            if sc > best_score:
+                best_url, best_score = url, sc
+    except Exception as e:
+        print(f"exact product URL err: {e}")
+
+    # لا نرسل صفحة قسم خاطئة. عند عدم اليقين نرسل بحثاً مقيداً بموقع المتجر والمنتج.
+    if best_score < 3 or url_is_generic(best_url):
+        best_url = store_domain_search_url(product, store, current_url)
+    DIRECT_URL_CACHE[key] = {"url": best_url, "ts": time.time()}
+    return best_url
+
 def url_for_store(store, urls, product):
-    """لنك المتجر: مطابقة مباشرة، ثم ضبابية، ثم زر البحث المضمون"""
-    url = (urls or {}).get(store)
-    if url:
-        return url
-    sn = normalize_name(store)
-    for k, v in (urls or {}).items():
-        if v and sn and (sn in normalize_name(k) or normalize_name(k) in sn):
-            return v
-    return fallback_search_url(f"{product} {store}")
+    """يرجع صفحة المنتج الدقيقة، لا صفحة القسم."""
+    url = (urls or {}).get(store, "")
+    if not url:
+        sn = normalize_name(store)
+        for k, v in (urls or {}).items():
+            if v and sn and (sn in normalize_name(k) or normalize_name(k) in sn):
+                url = v
+                break
+    return find_exact_product_url(product, store, url)
 
 def send_product_answer(from_number, bot_id, lang, txt, urls, product, best_only=False):
     """التنسيق الجديد بدون تكرار: رسالة اسم المنتج، ثم زر لكل متجر
@@ -579,23 +670,47 @@ def send_whatsapp_location_request(to, body, bot_id):
         print(f"WhatsApp location request exception: {e}")
         return False
 
+def classify_map_query(product, lang="ar", offer_text=""):
+    """يحّول اسم المنتج إلى نوع المكان المنطقي الذي يبيعه، بدل البحث عن الاسم حرفياً في الخرائط."""
+    cache_key_value = hashlib.sha256(f"{normalize_ar(product)}|{lang}".encode()).hexdigest()
+    hit = MAP_QUERY_CACHE.get(cache_key_value)
+    if hit and time.time() - hit["ts"] < CACHE_TTL:
+        return hit["query"]
+
+    t = normalize_ar(product)
+    rules = [
+        (("كاتشب","كاكاو","شوكولاته","قهوه","مياه","عصير","حليب","رز","سكر","طحين","منظف","شامبو","حفاض"), "جمعية تعاونية OR هايبر ماركت OR سوبرماركت"),
+        (("دواء","حبوب","كريم","مرهم","فيتامين","مكمل","صيدليه"), "صيدلية Pharmacy"),
+        (("ايفون","سامسونج","جوال","هاتف","لابتوب","تابلت","سماعه","سماعات","تلفزيون","ريموت","رسيفر","بلايستيشن","اكس بوكس","كاميرا"), "Xcite OR Eureka OR Blink OR Best Al Yousifi OR إلكترونيات"),
+        (("ثلاجه","غساله","مكيف","فرن","ميكروويف","مكنسه","غسالة","ثلاجة"), "Xcite OR Eureka OR Best Al Yousifi OR أجهزة منزلية"),
+        (("مضرب","تنس","بادل","كره قدم","حذاء رياضي"), "Intersport OR Go Sport OR محلات رياضية"),
+        (("عطر","بخور","مكياج","روج"), "محلات عطور OR مستحضرات تجميل"),
+        (("نظاره","نظارات","عدسات"), "محلات نظارات Optics"),
+        (("قطع غيار","بطاريه سياره","زيت محرك","تاير","اطارات"), "محلات قطع غيار سيارات OR كراجات"),
+    ]
+    for words, query in rules:
+        if any(w in t for w in words):
+            MAP_QUERY_CACHE[cache_key_value] = {"query": query, "ts": time.time()}
+            return query
+
+    # عند عدم وجود قاعدة واضحة، نخلي Gemini يصنف المكان فقط، لا يبحث عن المنتج نفسه.
+    sys = """أنت خبير بالسوق الكويتي. حوّل اسم المنتج إلى عبارة قصيرة جداً لبحث Google Maps عن نوع المتاجر الفعلية التي غالباً تبيع هذا المنتج. لا تكرر اسم المنتج ولا الموديل. أمثلة: كاتشب = جمعية تعاونية OR هايبر ماركت OR سوبرماركت؛ ريموت رسيفر = محلات ستلايت ورسيفرات OR إلكترونيات؛ سماعات = Xcite OR Eureka OR Blink OR إلكترونيات؛ دواء = صيدلية Pharmacy. اكتب عبارة البحث فقط."""
+    result, _ = call_gemini([{"text": f"المنتج: {product}"}], system=sys, use_search=False, max_tokens=60, model=IDENTIFY_MODEL)
+    query = result.strip().splitlines()[0] if result else "متاجر الكويت"
+    if len(query) > 140:
+        query = "متاجر الكويت"
+    MAP_QUERY_CACHE[cache_key_value] = {"query": query, "ts": time.time()}
+    return query
+
 def google_maps_search_url(query):
-    """رابط بحث خرائط Google يعتمد على موقع الهاتف عند فتحه — بدون طلب اللوكيشن داخل واتساب."""
-    clean_query = (query or "").strip()
-    if not clean_query:
-        clean_query = "متاجر الكويت"
+    clean_query = (query or "متاجر الكويت").strip()
     return "https://www.google.com/maps/search/" + urllib.parse.quote(f"{clean_query} الكويت")
 
-def send_product_maps_button(to, product, bot_id, lang="ar"):
-    """يرسل زر الخريطة مباشرة؛ Google Maps يعرض الأقرب حسب موقع الجهاز وصلاحياته."""
-    maps_url = google_maps_search_url(product)
-    return send_whatsapp_cta(
-        to,
-        T(lang, "product_maps_body"),
-        maps_url,
-        bot_id,
-        T(lang, "maps_btn"),
-    )
+def send_product_maps_button(to, product, bot_id, lang="ar", offer_text=""):
+    """الخريطة تبحث عن نوع المحل المناسب، وليس اسم الجهاز/المنتج الطويل."""
+    map_query = classify_map_query(product, lang, offer_text)
+    maps_url = google_maps_search_url(map_query)
+    return send_whatsapp_cta(to, T(lang, "product_maps_body"), maps_url, bot_id, T(lang, "maps_btn"))
 
 def send_whatsapp_buttons(to, body, buttons, bot_id):
     """أزرار رد سريعة (Reply Buttons) — حد أقصى 3 أزرار"""
@@ -772,7 +887,7 @@ def process_single_image(message,bot_id,lang="ar"):
     send_product_answer(from_number, bot_id, lang, txt, urls, product_name)
 
     if product_name and product_name != "المنتج":
-        send_product_maps_button(from_number, product_name, bot_id, lang)
+        send_product_maps_button(from_number, product_name, bot_id, lang, txt)
 
 def identify_image_product(msg):
     """يحدد الاسم القياسي لمنتج من صورة (بدون بحث — سريع)"""
@@ -860,7 +975,7 @@ def process_text_message(message,bot_id):
         # منتج: التنسيق الجديد — اسم المنتج ثم أزرار (المتجر — السعر) مباشرة بدون تكرار
         send_product_answer(from_number, bot_id, lang, txt, urls, products[0])
 
-        send_product_maps_button(from_number, products[0], bot_id, lang)
+        send_product_maps_button(from_number, products[0], bot_id, lang, txt)
             
     else:
         send_whatsapp_text(from_number,T(lang,"multi_text",c=len(products)),bot_id)
@@ -908,4 +1023,4 @@ def process_location_message(message, bot_id):
     send_whatsapp_cta(from_number, body, maps_url, bot_id, T(lang,"maps_btn"))
 
 @app.get("/")
-async def health(): return {"status":"v29 Direct Maps"}
+async def health(): return {"status":"v30 Smart Maps + Direct Product Links"}
