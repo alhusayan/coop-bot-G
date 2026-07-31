@@ -188,6 +188,7 @@ MSG = {
         "cant_identify": "ما قدرت أحدد المنتج",
         "shop_from": "تسوق من {n} 👇",
         "location_prompt": "تبي أقرب محل يبيعه؟ 📍\n\nاضغط الزر تحت ودز موقعك، وعلى طول أرد لك بأقرب المحلات على الخريطة 👇",
+        "product_maps_body": "📍 أقرب المحلات اللي تبيع هالمنتج حولك على الخريطة 👇",
         "multi_text": "تمام لقيت {c} منتجات، أسوي سلة...",
         "multi_images": "تمام لقطت {c} منتجات، أسوي سلة...",
         "cart_ready": "🛒 سلتك جاهزة:\n{items}\n\n💰 الإجمالي: {total} د.ك",
@@ -206,6 +207,7 @@ MSG = {
         "cant_identify": "Couldn't identify the product",
         "shop_from": "Shop from {n} 👇",
         "location_prompt": "Want the nearest store that sells it? 📍\n\nTap the button below to share your location, and I'll instantly send you the closest stores on a map 👇",
+        "product_maps_body": "📍 Find the nearest stores selling this product on the map 👇",
         "multi_text": "Got it, found {c} products. Building your cart...",
         "multi_images": "Nice, spotted {c} products. Building your cart...",
         "cart_ready": "🛒 Your cart is ready:\n{items}\n\n💰 Total: {total} KWD",
@@ -577,6 +579,24 @@ def send_whatsapp_location_request(to, body, bot_id):
         print(f"WhatsApp location request exception: {e}")
         return False
 
+def google_maps_search_url(query):
+    """رابط بحث خرائط Google يعتمد على موقع الهاتف عند فتحه — بدون طلب اللوكيشن داخل واتساب."""
+    clean_query = (query or "").strip()
+    if not clean_query:
+        clean_query = "متاجر الكويت"
+    return "https://www.google.com/maps/search/" + urllib.parse.quote(f"{clean_query} الكويت")
+
+def send_product_maps_button(to, product, bot_id, lang="ar"):
+    """يرسل زر الخريطة مباشرة؛ Google Maps يعرض الأقرب حسب موقع الجهاز وصلاحياته."""
+    maps_url = google_maps_search_url(product)
+    return send_whatsapp_cta(
+        to,
+        T(lang, "product_maps_body"),
+        maps_url,
+        bot_id,
+        T(lang, "maps_btn"),
+    )
+
 def send_whatsapp_buttons(to, body, buttons, bot_id):
     """أزرار رد سريعة (Reply Buttons) — حد أقصى 3 أزرار"""
     url=f"{GRAPH_URL}/{bot_id}/messages"; h={"Authorization":f"Bearer {WHATSAPP_TOKEN}","Content-Type":"application/json"}
@@ -752,7 +772,7 @@ def process_single_image(message,bot_id,lang="ar"):
     send_product_answer(from_number, bot_id, lang, txt, urls, product_name)
 
     if product_name and product_name != "المنتج":
-        send_whatsapp_location_request(from_number, T(lang,"location_prompt"), bot_id)
+        send_product_maps_button(from_number, product_name, bot_id, lang)
 
 def identify_image_product(msg):
     """يحدد الاسم القياسي لمنتج من صورة (بدون بحث — سريع)"""
@@ -840,7 +860,7 @@ def process_text_message(message,bot_id):
         # منتج: التنسيق الجديد — اسم المنتج ثم أزرار (المتجر — السعر) مباشرة بدون تكرار
         send_product_answer(from_number, bot_id, lang, txt, urls, products[0])
 
-        send_whatsapp_location_request(from_number, T(lang,"location_prompt"), bot_id)
+        send_product_maps_button(from_number, products[0], bot_id, lang)
             
     else:
         send_whatsapp_text(from_number,T(lang,"multi_text",c=len(products)),bot_id)
@@ -888,4 +908,4 @@ def process_location_message(message, bot_id):
     send_whatsapp_cta(from_number, body, maps_url, bot_id, T(lang,"maps_btn"))
 
 @app.get("/")
-async def health(): return {"status":"v28 Speed Pass"}
+async def health(): return {"status":"v29 Direct Maps"}
