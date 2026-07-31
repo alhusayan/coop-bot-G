@@ -1,14 +1,21 @@
 # -*- coding: utf-8 -*-
-import os, re, time, base64, requests, uuid, asyncio, urllib.parse, hashlib
+import os, re, time, base64, requests, uuid, asyncio, urllib.parse, hashlib, threading
 from collections import deque, defaultdict
 from concurrent.futures import ThreadPoolExecutor
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from fastapi import FastAPI, Request, Response, BackgroundTasks
 from fastapi.responses import HTMLResponse
 
 app = FastAPI()
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+FAST_MODE = os.environ.get("FAST_MODE", "1") == "1"
+# وضع السرعة يستخدم Flash-Lite. ضع FAST_MODE=0 للعودة للجودة القصوى.
+GEMINI_MODEL = os.environ.get(
+    "GEMINI_MODEL",
+    "gemini-2.5-flash-lite" if FAST_MODE else "gemini-2.5-flash",
+)
 WHATSAPP_TOKEN = os.environ.get("WHATSAPP_TOKEN", "")
 PHONE_NUMBER_ID = os.environ.get("PHONE_NUMBER_ID", "")
 VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN", "MY_SECRET_COOP_BOT_TOKEN")
@@ -22,11 +29,31 @@ LAST_SEARCH = {}
 USER_LANG = {}
 PENDING_IMAGES = defaultdict(lambda: {"images": [], "bot_id": ""})
 
-BUFFER_SECONDS = 4
-RESOLVER = ThreadPoolExecutor(max_workers=6)
-WORKERS = ThreadPoolExecutor(max_workers=3)
+# 1.2 ثانية تكفي غالباً لتجميع الصور المتتابعة بدل انتظار 4 ثوانٍ كاملة.
+BUFFER_SECONDS = float(os.environ.get("BUFFER_SECONDS", "1.2" if FAST_MODE else "4"))
+RESOLVER = ThreadPoolExecutor(max_workers=8)
+WORKERS = ThreadPoolExecutor(max_workers=6)
 SEARCH_POOL = ThreadPoolExecutor(max_workers=8)
 HEADERS = {"User-Agent": "Mozilla/5.0"}
+MAX_OUTPUT_TOKENS = int(os.environ.get("MAX_OUTPUT_TOKENS", "650"))
+THINKING_BUDGET = int(os.environ.get("THINKING_BUDGET", "0" if FAST_MODE else "-1"))
+MAX_GROUNDING_CHUNKS = int(os.environ.get("MAX_GROUNDING_CHUNKS", "10"))
+RESOLVE_LINKS = os.environ.get("RESOLVE_LINKS", "0" if FAST_MODE else "1") == "1"
+
+# اتصال HTTP دائم لكل Thread: يوفر وقت فتح اتصال TLS جديد في كل طلب.
+_HTTP_LOCAL = threading.local()
+def http_session():
+    session = getattr(_HTTP_LOCAL, "session", None)
+    if session is None:
+        session = requests.Session()
+        retry = Retry(total=1, connect=1, read=0, backoff_factor=0.1,
+                      status_forcelist=(429, 500, 502, 503, 504),
+                      allowed_methods=frozenset(["GET"]))
+        adapter = HTTPAdapter(pool_connections=20, pool_maxsize=20, max_retries=retry)
+        session.mount("https://", adapter)
+        session.mount("http://", adapter)
+        _HTTP_LOCAL.session = session
+    return session
 
 SEARCH_CACHE = {}
 CACHE_TTL = int(os.environ.get("CACHE_TTL_HOURS", "2")) * 3600
@@ -82,12 +109,23 @@ def url_for_store(store, urls, product):
 
 def send_product_answer(from_number, bot_id, lang, txt, urls, product, best_only=False):
     name_line, offers = parse_answer_lines(txt)
-    send_whatsapp_text(from_number, name_line or txt.splitlines()[0], bot_id)
     if not offers:
-        if txt and txt!= name_line:
-            send_whatsapp_text(from_number, txt, bot_id)
+        send_whatsapp_text(from_number, txt or name_line, bot_id)
         return
-    for line, store in (offers[:1] if best_only else offers[:4]):
+
+    selected = offers[:1] if best_only else offers[:4]
+    # أول رسالة تحمل اسم المنتج وكل الأسعار دفعة واحدة، ومعها رابط الأرخص.
+    # هذا يوفر طلب WhatsApp إضافياً ويجعل النتيجة تظهر للمستخدم فوراً.
+    first_line, first_store = selected[0]
+    summary = "\n".join(([name_line] if name_line else []) + [line for line, _ in selected])
+    send_whatsapp_cta(
+        from_number,
+        summary,
+        url_for_store(first_store, urls, product),
+        bot_id,
+        f"🛒 {first_store[:18]}",
+    )
+    for line, store in selected[1:]:
         send_whatsapp_cta(from_number, line, url_for_store(store, urls, product), bot_id, f"🛒 {store[:18]}")
 
 def normalize_ar(text):
@@ -197,13 +235,23 @@ SYSTEM_PROMPT = """
 def get_final_url(url: str):
     if not url or not url.startswith(("http://", "https://")): return ""
     try:
-        r = requests.get(url, allow_redirects=True, timeout=12, stream=True, headers=HEADERS)
+        # نحل الروابط المختارة فقط، وليس كل نتائج Grounding.
+        r = http_session().get(url, allow_redirects=True, timeout=(2.5, 6),
+                               stream=True, headers=HEADERS)
         final = r.url or url
         r.close()
         return final if final.startswith(("http://", "https://")) else url
-    except: return url
+    except Exception:
+        return url
 
-def resolve_all(uris): return list(RESOLVER.map(get_final_url, uris))
+def resolve_url_map(urls_map):
+    if not urls_map: return {}
+    items = list(urls_map.items())[:4]
+    # روابط Grounding نفسها قابلة للنقر وتحوّل للمتجر؛ لا ننتظر فكها في وضع السرعة.
+    if not RESOLVE_LINKS:
+        return dict(items)
+    finals = list(RESOLVER.map(get_final_url, [u for _, u in items]))
+    return {name: (finals[i] or url) for i, (name, url) in enumerate(items)}
 def clean_domain(dom): return re.sub(r"^https?://", "", (dom or "").strip().lower()).replace("www.", "").split("/")[0]
 def domain_key(dom): return clean_domain(dom).split(".")[0]
 def normalize_name(value): return re.sub(r"[^\w\u0600-\u06FF]+", "", (value or "").lower())
@@ -229,10 +277,24 @@ def source_label(title, url):
     except: return "المتجر"
 
 def call_gemini(parts, system=SYSTEM_PROMPT, use_search=True):
-    payload = {"systemInstruction": {"parts": [{"text": system}]}, "contents": [{"role": "user", "parts": parts}], "generationConfig": {"temperature": 0, "maxOutputTokens": 2000}}
+    payload = {
+        "systemInstruction": {"parts": [{"text": system}]},
+        "contents": [{"role": "user", "parts": parts}],
+        "generationConfig": {
+            "temperature": 0,
+            "maxOutputTokens": MAX_OUTPUT_TOKENS,
+            # نتائج الأسعار لا تحتاج تفكيراً طويلاً؛ إيقافه يسرّع 2.5 Flash بوضوح.
+            "thinkingConfig": {"thinkingBudget": THINKING_BUDGET},
+        },
+    }
     if use_search: payload["tools"] = [{"google_search": {}}]
     try:
-        r = requests.post(GEMINI_URL, params={"key": GEMINI_API_KEY}, json=payload, timeout=90)
+        r = http_session().post(
+            GEMINI_URL,
+            params={"key": GEMINI_API_KEY},
+            json=payload,
+            timeout=(5, 50),
+        )
         if r.status_code >= 400: return "", {}
         data = r.json()
         cand = (data.get("candidates") or [None])[0]
@@ -252,12 +314,12 @@ def call_gemini(parts, system=SYSTEM_PROMPT, use_search=True):
         text = re.sub(r"https?://\S+", "", text).replace("**", "").strip()
         metadata = cand.get("groundingMetadata", {}) or {}
         chunks = metadata.get("groundingChunks", []) or []
-        uris = [(c.get("web") or {}).get("uri", "") for c in chunks]
-        finals = resolve_all(uris[:15]) if uris else []
         records = []
-        for i, chunk in enumerate(chunks[:15]):
+        # مهم: لا ننتظر Redirect لكل 15 رابط. نختار الروابط أولاً ثم نحل 4 فقط.
+        for chunk in chunks[:MAX_GROUNDING_CHUNKS]:
             web = chunk.get("web") or {}
-            records.append({"title": web.get("title", ""), "raw": web.get("uri", ""), "url": finals[i] if i < len(finals) else web.get("uri", "")})
+            raw_url = web.get("uri", "")
+            records.append({"title": web.get("title", ""), "raw": raw_url, "url": raw_url})
         urls_map = {}; used_urls = set(); stores = extract_store_names(text)
         supports = metadata.get("groundingSupports", []) or []
         for store in stores:
@@ -284,16 +346,18 @@ def call_gemini(parts, system=SYSTEM_PROMPT, use_search=True):
                 if label not in urls_map:
                     urls_map[label] = rec["url"]; used_urls.add(rec["url"])
                 if len(urls_map) == 3: break
-        return text, dict(list(urls_map.items())[:4])
+        return text, resolve_url_map(dict(list(urls_map.items())[:4]))
     except Exception as e:
         print(f"Gemini err {e}"); return "", {}
 
-SEARCH_RUNS = int(os.environ.get("SEARCH_RUNS", "2"))
+SEARCH_RUNS = int(os.environ.get("SEARCH_RUNS", "1" if FAST_MODE else "2"))
 def answer_score(txt, urls):
     s, l = result_quality(txt, urls)
     return s*2 + l*3 + (1 if txt and "📦" in txt else 0)
 
 def best_of_search(parts, lang):
+    if SEARCH_RUNS <= 1:
+        return call_gemini(parts)
     try:
         futs = [SEARCH_POOL.submit(call_gemini, parts) for _ in range(SEARCH_RUNS)]
         results = [f.result() for f in futs]
@@ -319,13 +383,29 @@ def search_product(query, lang, prompt_text=None):
     return txt, urls
 
 def get_smart_maps_query(product):
-    """نفس طريقتك القديمة بالضبط لاختيار عبارة الخريطة الذكية"""
-    try:
-        cat_text, _ = call_gemini([{"text": f"المنتج: {product}"}], system=PROMPT_CATEGORY, use_search=False)
-        cat = cat_text.strip().splitlines()[0].strip() if cat_text else product
-        return cat if cat else product
-    except:
-        return product
+    """تصنيف محلي فوري للخريطة؛ يلغي طلب Gemini إضافياً بعد كل بحث."""
+    raw = (product or "").strip()
+    t = normalize_ar(raw)
+
+    if any(k in t for k in ("ايفون", "iphone", "سامسونج", "جوال", "موبايل", "هاتف", "لابتوب", "macbook", "ماكبوك", "ابل واتش", "apple watch", "ساعه ابل")):
+        return f"{raw} (Xcite OR Eureka OR Best Al Yousifi)"
+    if any(k in t for k in ("ثلاجه", "غساله", "نشافه", "فريزر", "مكيف", "فرن", "dishwasher", "refrigerator", "washing machine")):
+        return f"{raw} (Xcite OR Eureka)"
+    if any(k in t for k in ("دواء", "حبوب", "فيتامين", "مكمل", "كريم", "صيدليه", "medicine", "supplement", "pharmacy")):
+        return f"{raw} صيدلية Pharmacy"
+    if any(k in t for k in ("لحم", "دجاج", "برغر", "برجر", "حليب", "جبن", "قهوه", "رز", "سكر", "زيت", "food", "meat", "milk")):
+        return f"{raw} جمعية تعاونية Supermarket"
+    if any(k in t for k in ("بلايستيشن", "اكس بوكس", "نينتندو", "video game", "gaming")):
+        return f"{raw} محل العاب فيديو Video games"
+    if any(k in t for k in ("مضرب", "تنس", "بادل", "كره قدم", "حذاء رياضي", "sports", "tennis", "padel")):
+        return f"{raw} (Intersport OR Go Sport OR محلات رياضية)"
+    if any(k in t for k in ("كهرباء", "اضاءه", "لمبه", "كيبل", "قاطع", "electrical", "lighting")):
+        return f"{raw} مواد كهربائية Electrical supply"
+    if any(k in t for k in ("عطر", "بخور", "perfume")):
+        return f"{raw} محل عطور perfume shop"
+    if any(k in t for k in ("تصليح", "فني", "تركيب", "تنظيف", "صيانة", "repair", "service", "maintenance")):
+        return f"{raw} الكويت الأعلى تقييماً"
+    return f"{raw} الكويت"
 
 def extract_products(text):
     text=re.sub(r'^[•\-\*\d\.\)\s]+','',text,flags=re.M)
@@ -335,27 +415,27 @@ def extract_products(text):
 
 def download_whatsapp_media(mid):
     h={"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
-    meta=requests.get(f"{GRAPH_URL}/{mid}",headers=h,timeout=20).json()
-    img=requests.get(meta["url"],headers=h,timeout=30)
+    meta=http_session().get(f"{GRAPH_URL}/{mid}",headers=h,timeout=(3,15)).json()
+    img=http_session().get(meta["url"],headers=h,timeout=(3,20))
     return base64.b64encode(img.content).decode(), meta.get("mime_type","image/jpeg")
 
 def send_whatsapp_text(to,text,bot_id):
     url=f"{GRAPH_URL}/{bot_id}/messages"; h={"Authorization":f"Bearer {WHATSAPP_TOKEN}","Content-Type":"application/json"}
     payload={"messaging_product":"whatsapp","to":to,"type":"text","text":{"body":text[:3900]}}
-    try: requests.post(url,json=payload,headers=h,timeout=15)
+    try: http_session().post(url,json=payload,headers=h,timeout=(3,12))
     except: pass
 
 def send_whatsapp_cta(to,body,link,bot_id,title):
     url=f"{GRAPH_URL}/{bot_id}/messages"; h={"Authorization":f"Bearer {WHATSAPP_TOKEN}","Content-Type":"application/json"}
     payload={"messaging_product":"whatsapp","to":to,"type":"interactive","interactive":{"type":"cta_url","body":{"text":body[:1024]},"action":{"name":"cta_url","parameters":{"display_text":title[:20],"url":link}}}}
-    try: requests.post(url,json=payload,headers=h,timeout=15)
+    try: http_session().post(url,json=payload,headers=h,timeout=(3,12))
     except: pass
 
 def send_whatsapp_buttons(to, body, buttons, bot_id):
     url=f"{GRAPH_URL}/{bot_id}/messages"; h={"Authorization":f"Bearer {WHATSAPP_TOKEN}","Content-Type":"application/json"}
     btns=[{"type":"reply","reply":{"id":b["id"],"title":b["title"][:20]}} for b in buttons[:3]]
     payload={"messaging_product":"whatsapp","to":to,"type":"interactive","interactive":{"type":"button","body":{"text":body[:1024]},"action":{"buttons":btns}}}
-    try: requests.post(url,json=payload,headers=h,timeout=15)
+    try: http_session().post(url,json=payload,headers=h,timeout=(3,12))
     except: pass
 
 def send_language_choice(to, bot_id):
@@ -553,4 +633,4 @@ def process_location_message(message, bot_id):
     send_whatsapp_cta(from_number, T(lang,"maps_body",p=product), maps_url, bot_id, T(lang,"maps_btn"))
 
 @app.get("/")
-async def health(): return {"status":"v29 Smart Maps Without Location Request"}
+async def health(): return {"status":"v30 Fast Mode" , "fast_mode": FAST_MODE, "model": GEMINI_MODEL}
