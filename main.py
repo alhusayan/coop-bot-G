@@ -1034,17 +1034,17 @@ def process_location_message(message, bot_id):
     lat = message["location"]["latitude"]
     lng = message["location"]["longitude"]
     lang = USER_LANG.get(from_number, "ar")
-
+ 
     last_search = LAST_SEARCH.get(from_number)
     if not last_search or not last_search.get("product"):
         send_whatsapp_text(from_number, T(lang,"no_saved_product"), bot_id)
         return
-
+ 
     product = last_search["product"]
     
     prompt_category = """أنت خبير تسوق في السوق الكويتي. 
 بناءً على اسم المنتج، أعطني "عبارة بحث" (Search Term) دقيقة جداً لخرائط جوجل تجلب المتاجر الصحيحة وتستبعد العشوائية.
-
+ 
 قواعد هامة:
 - للإلكترونيات الذكية (ساعة أبل، جوالات، لابتوب): اكتب أسماء الوكلاء الموثوقين هكذا (Xcite OR Eureka OR Best Al Yousifi) ولا تكتب "محل الكترونيات" أبداً.
 - للأجهزة المنزلية (ثلاجة، غسالة): (Xcite OR Eureka).
@@ -1055,20 +1055,20 @@ def process_location_message(message, bot_id):
 - للملابس والمعدات الرياضية (مثل مضارب التنس والبادل): (Intersport OR Go Sport OR محلات رياضية).
 - للطلبات العامة (قهوة، مطاعم، عطور): اكتب نوع المكان مع كلمة "الأعلى تقييماً" مثل (كافيه specialty coffee) أو (محل عطور perfume shop).
 - إذا لم تكن متأكداً، اكتب اسم المنتج نفسه.
-
+ 
 أعطني عبارة البحث فقط بدون أي إضافات أو شرح."""
-
+ 
     category_text, _ = call_gemini([{"text": f"المنتج: {product}"}], system=prompt_category)
     category = category_text.strip() if category_text else product
-
+ 
     # الرابط الجديد بصيغة أنظف
     safe_category = urllib.parse.quote(category)
     maps_url = f"https://www.google.com/maps/search/{safe_category}/@{lat},{lng},15z"
     
     body = T(lang,"maps_body",p=product)
-
+ 
     # زر بدل رابط طويل
     send_whatsapp_cta(from_number, body, maps_url, bot_id, T(lang,"maps_btn"))
-
+ 
 @app.get("/")
-async def health(): return {"status":"v30 Smart Maps + Direct Product Links"}
+async def health(): return {"status":"v26 Any Product Question"}
