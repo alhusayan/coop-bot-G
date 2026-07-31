@@ -43,9 +43,15 @@ def result_quality(txt, urls):
     """(عدد المتاجر بأسعار، عدد اللنكات)"""
     return len(extract_store_names(txt or "")), len(urls or {})
 
-def fallback_search_url(query):
-    """زر مضمون دايماً: بحث جوجل عن المتجر/المنتج إذا ما توفر لنك مباشر"""
-    return "https://www.google.com/search?q=" + urllib.parse.quote(f"{query} الكويت اونلاين")
+def fallback_search_url(query, store=""):
+    """زر مضمون دايماً إذا ما توفر لنك مباشر:
+    - متجر معروف بالقاموس؟ بحث داخل موقع المتجر نفسه فقط (site:) — نتائج من صفحاته بس.
+    - غير ذلك: بحث جوجل عام عن المنتج بالمتجر."""
+    dom = store_domain(store) if store else ""
+    if dom:
+        return "https://www.google.com/search?q=" + urllib.parse.quote(f"site:{dom} {query}")
+    q = f"{query} {store} الكويت اونلاين".strip() if store else f"{query} الكويت اونلاين"
+    return "https://www.google.com/search?q=" + urllib.parse.quote(q)
 
 def best_store_name(txt):
     """اسم أفضل متجر من سطر 🏪 إن وجد"""
@@ -134,12 +140,12 @@ MSG = {
         "searching": "🔍 أدور لك على {q}...",
         "not_found": "ما لقيت",
         "cant_identify": "ما قدرت أحدد المنتج",
-        "location_prompt": "تبي أقرب محل؟ 📍\n\nاضغط الزر تحت ودز موقعك، وعلى طول أرد لك بأقرب الأماكن على الخريطة 👇",
         "multi_text": "تمام لقيت {c} منتجات، أسوي سلة...",
         "multi_images": "تمام لقطت {c} منتجات، أسوي سلة...",
-        "no_saved_product": "ما عندي منتج محفوظ حالياً 😅. ابحث عن منتج أول، وبعدها دز موقعك عشان أدلك على أقرب مكان يبيعه!",
-        "maps_body": "📍 بحثك الأخير كان عن ({p})\n\nجهزت لك أقرب الأماكن حولك، اضغط الزر وافتح الخريطة 👇",
+        "maps_body": "📍 تبي أقرب مكان؟\n\nاضغط الزر والخريطة بتفتح على أقرب الأماكن حولك 👇",
         "maps_btn": "📍 افتح الخريطة",
+        "maps_body_loc": "📍 بحثك الأخير كان عن ({p})\n\nجهزت لك أقرب الأماكن حولك، اضغط الزر وافتح الخريطة 👇",
+        "no_saved_product": "ما عندي منتج محفوظ حالياً 😅. ابحث عن منتج أول، وبعدها أدلك على أقرب مكان يبيعه!",
         "lang_saved": "تمام، بكلمك عربي من هني ورايح 🇰🇼\nدز صورة منتج أو اكتب اسمه وأنا حاضر!",
     },
     "en": {
@@ -147,12 +153,12 @@ MSG = {
         "searching": "🔍 Looking up {q}...",
         "not_found": "Couldn't find it",
         "cant_identify": "Couldn't identify the product",
-        "location_prompt": "Want the nearest place? 📍\n\nTap the button below to share your location, and I'll instantly send you the closest spots on a map 👇",
         "multi_text": "Got it, found {c} products. Building your cart...",
         "multi_images": "Nice, spotted {c} products. Building your cart...",
-        "no_saved_product": "I don't have a saved product yet 😅. Search for a product first, then share your location and I'll point you to the nearest store!",
-        "maps_body": "📍 Your last search was ({p})\n\nI've lined up the closest places around you. Tap the button to open the map 👇",
+        "maps_body": "📍 Want the nearest place?\n\nTap the button and the map will open on the closest spots around you 👇",
         "maps_btn": "📍 Open Map",
+        "maps_body_loc": "📍 Your last search was ({p})\n\nI've lined up the closest places around you. Tap the button to open the map 👇",
+        "no_saved_product": "I don't have a saved product yet 😅. Search for a product first, then I'll point you to the nearest store!",
         "lang_saved": "Great, I'll speak English with you from now on 🇬🇧\nSend a product photo or type its name and I'm on it!",
     },
 }
@@ -231,6 +237,23 @@ LINKS: اسم الأول=الدومين الحقيقي, اسم الثاني=ال
 إذا كان المنتج عقاراً أو سيارة، أعطِ تقييماً متوسطاً ونطاق سعر مختصراً جداً.
 """
 
+MAPS_CATEGORY_SYSTEM = """أنت خبير تسوق في السوق الكويتي. 
+بناءً على اسم المنتج أو الخدمة، أعطني "عبارة بحث" (Search Term) دقيقة جداً لخرائط جوجل تجلب الأماكن الصحيحة وتستبعد العشوائية.
+
+قواعد هامة:
+- للإلكترونيات الذكية (ساعة أبل، جوالات، لابتوب): اكتب أسماء الوكلاء الموثوقين هكذا (Xcite OR Eureka OR Best Al Yousifi) ولا تكتب "محل الكترونيات" أبداً.
+- للأجهزة المنزلية (ثلاجة، غسالة): (Xcite OR Eureka).
+- للأدوية والمكملات: (صيدلية Pharmacy).
+- للمواد الغذائية واللحوم: (جمعية تعاونية Supermarket).
+- لألعاب الفيديو: (محل العاب فيديو Video games).
+- للكهربائيات الثقيلة والإضاءة: (مواد كهربائية Electrical supply).
+- للملابس والمعدات الرياضية (مثل مضارب التنس والبادل): (Intersport OR Go Sport OR محلات رياضية).
+- للخدمات (بنشر، تبديل بطارية، سباك، كهربائي، تنظيف، ونش): اكتب نوع الخدمة بالعربي والإنجليزي مثل (بنشر Tyre repair) أو (ونش Towing service).
+- للطلبات العامة (قهوة، مطاعم، عطور): اكتب نوع المكان مع كلمة "الأعلى تقييماً" مثل (كافيه specialty coffee) أو (محل عطور perfume shop).
+- إذا لم تكن متأكداً، اكتب اسم المنتج نفسه.
+
+أعطني عبارة البحث فقط بدون أي إضافات أو شرح."""
+
 def get_final_url(url: str):
     """Resolve redirects, but keep Gemini's original grounding URL as fallback."""
     if not url or not url.startswith(("http://", "https://")):
@@ -256,6 +279,53 @@ def domain_key(dom):
 
 def normalize_name(value):
     return re.sub(r"[^\w\u0600-\u06FF]+", "", (value or "").lower())
+
+# ===== قاموس المتاجر الكويتية: الاسم العربي ↔ الدومين الإنجليزي =====
+# يحل مشكلة عدم تطابق الأسماء (اليوسفي ↔ best.com.kw) — قابل للتوسعة بأي وقت
+STORE_DOMAINS = {
+    "اليوسفي": "best.com.kw",
+    "بستاليوسفي": "best.com.kw",
+    "بست": "best.com.kw",
+    "اكسايت": "xcite.com",
+    "اكسايتالغانم": "xcite.com",
+    "الغانم": "xcite.com",
+    "xcite": "xcite.com",
+    "نون": "noon.com",
+    "noon": "noon.com",
+    "بلينك": "blink.com.kw",
+    "blink": "blink.com.kw",
+    "يوريكا": "eureka.com.kw",
+    "eureka": "eureka.com.kw",
+    "جرير": "jarir.com",
+    "مكتبهجرير": "jarir.com",
+    "كارفور": "carrefourkuwait.com",
+    "carrefour": "carrefourkuwait.com",
+    "لولو": "luluhypermarket.com",
+    "لولوهايبرماركت": "luluhypermarket.com",
+    "امازون": "amazon.ae",
+    "amazon": "amazon.ae",
+    "نمشي": "namshi.com",
+    "شيان": "shein.com",
+    "هومسنتر": "homecentre.com",
+    "سيفكو": "saveco.com",
+    "سلطانسنتر": "sultan-center.com",
+    "التميمي": "danubeonline.com",
+    "بوتيكات": "boutiqaat.com",
+    "الدوليللاتصالات": "alkoutint.com",
+    "wibi": "wibi.com.kw",
+    "ويبي": "wibi.com.kw",
+    "اتكير": "itcare-kw.com",
+}
+
+def store_domain(name):
+    """يرجع دومين المتجر إذا كان معروفاً بالقاموس (مطابقة بعد توحيد الحروف)"""
+    n = normalize_name(normalize_ar(name))
+    if not n:
+        return ""
+    for k, d in STORE_DOMAINS.items():
+        if k in n or n in k:
+            return d
+    return ""
 
 def extract_store_names(text):
     stores = []
@@ -304,7 +374,7 @@ def product_title(txt, fallback=""):
     return f"📦 {fallback}" if fallback else ""
 
 def match_url(name, urls):
-    """يربط اسم المتجر بلنكه — مطابقة مباشرة ثم ضبابية"""
+    """يربط اسم المتجر بلنكه — مطابقة مباشرة ثم ضبابية ثم بالدومين (عربي ↔ إنجليزي)"""
     if not urls:
         return ""
     if name in urls:
@@ -314,14 +384,35 @@ def match_url(name, urls):
         kk = normalize_name(k)
         if nn and kk and (nn in kk or kk in nn):
             return v
+    # مطابقة بالدومين: اسم عربي مثل "اليوسفي" يمسك لنك best.com.kw
+    dom = store_domain(name)
+    if dom:
+        key = domain_key(dom)
+        for k, v in urls.items():
+            if key and (key in (v or "").lower() or key in normalize_name(k)):
+                return v
     return ""
 
+def maps_search_url(product, lat=None, lng=None):
+    """رابط خرائط جوجل عن الفئة الصح. بدون إحداثيات = جوجل ماب يفتح على موقع المستخدم تلقائياً."""
+    category_text, _ = call_gemini([{"text": f"المنتج: {product}"}], system=MAPS_CATEGORY_SYSTEM, use_search=False)
+    category = category_text.strip().splitlines()[0].strip() if category_text else product
+    safe_category = urllib.parse.quote(category)
+    if lat is not None and lng is not None:
+        return f"https://www.google.com/maps/search/{safe_category}/@{lat},{lng},15z"
+    return f"https://www.google.com/maps/search/{safe_category}"
+
+def send_maps_button(from_number, product, bot_id, lang):
+    """زر الخريطة المباشر — بدون طلب لوكيشن، جوجل ماب هو اللي يحدد موقع المستخدم"""
+    url = maps_search_url(product)
+    send_whatsapp_cta(from_number, T(lang, "maps_body"), url, bot_id, T(lang, "maps_btn"))
+
 def send_product_result(from_number, txt, urls, bot_id, lang, query, best_only=False):
-    """التنسيق الجديد:
+    """التنسيق:
     - منتج: رسالة اسم المنتج فقط، ثم CTA لكل متجر (السطر نفسه = اسم + سعر، ✅ للأفضل) — بدون تكرار.
     - خدمة: الرسالة كاملة (أسماء + أرقام) بس — بدون لنكات وبدون بطاقات — والخريطة تجي بعدها.
     - معلوماتي: الرسالة كاملة بدون أي أزرار.
-    يرجع True إذا نحتاج نرسل زر اللوكيشن بعدها."""
+    يرجع True إذا نحتاج نرسل زر الخريطة بعدها."""
     if not txt:
         send_whatsapp_text(from_number, T(lang, "not_found"), bot_id)
         return False
@@ -348,7 +439,7 @@ def send_product_result(from_number, txt, urls, bot_id, lang, query, best_only=F
         offers = [best]
 
     for o in offers:
-        url = match_url(o["name"], urls) or fallback_search_url(f"{query} {o['name']}")
+        url = match_url(o["name"], urls) or fallback_search_url(query, o["name"])
         send_whatsapp_cta(from_number, o["line"], url, bot_id, f"🛒 {o['name'][:18]}")
 
     return True
@@ -451,6 +542,21 @@ def call_gemini(parts, system=SYSTEM_PROMPT, use_search=True):
                         urls_map[store] = rec["url"]
                         used_urls.add(rec["url"])
                         break
+
+        # Alias fallback: Arabic store names ↔ English domains (اليوسفي ↔ best.com.kw).
+        for store in stores:
+            if store in urls_map:
+                continue
+            dom = store_domain(store)
+            if not dom:
+                continue
+            key = domain_key(dom)
+            for rec in records:
+                haystack = f"{rec['title']} {rec['raw']} {rec['url']}".lower()
+                if rec["url"] and key and key in haystack and rec["url"] not in used_urls:
+                    urls_map[store] = rec["url"]
+                    used_urls.add(rec["url"])
+                    break
 
         # If Gemini omitted LINKS/support mapping, still expose up to 3 grounded sources.
         if not urls_map:
@@ -579,19 +685,6 @@ def send_whatsapp_cta(to,body,link,bot_id,title):
         return r.ok
     except Exception as e:
         print(f"WhatsApp CTA exception: {e} | {link[:180]}")
-        return False
-
-def send_whatsapp_location_request(to, body, bot_id):
-    """زر واتساب الرسمي لطلب الموقع — ضغطة وحدة تفتح شاشة مشاركة اللوكيشن"""
-    url=f"{GRAPH_URL}/{bot_id}/messages"; h={"Authorization":f"Bearer {WHATSAPP_TOKEN}","Content-Type":"application/json"}
-    payload={"messaging_product":"whatsapp","to":to,"type":"interactive","interactive":{"type":"location_request_message","body":{"text":body[:1024]},"action":{"name":"send_location"}}}
-    try:
-        r = requests.post(url,json=payload,headers=h,timeout=15)
-        if not r.ok:
-            print(f"WhatsApp location request error {r.status_code}: {r.text[:500]}")
-        return r.ok
-    except Exception as e:
-        print(f"WhatsApp location request exception: {e}")
         return False
 
 def send_whatsapp_buttons(to, body, buttons, bot_id):
@@ -723,10 +816,11 @@ def process_single_image(message,bot_id,lang="ar"):
         send_whatsapp_text(from_number,T(lang,"cant_identify"),bot_id)
         return
 
-    # التنسيق الجديد: اسم المنتج ثم اللنكات مباشرة (أو خدمة: رسالة الأرقام + الخريطة)
-    need_location = send_product_result(from_number, txt, urls, bot_id, lang, query)
-    if need_location and product_name and product_name != "المنتج":
-        send_whatsapp_location_request(from_number, T(lang,"location_prompt"), bot_id)
+    # التنسيق: اسم المنتج ثم اللنكات مباشرة (أو خدمة: رسالة الأرقام)
+    need_map = send_product_result(from_number, txt, urls, bot_id, lang, query)
+    if need_map and product_name and product_name != "المنتج":
+        # زر الخريطة المباشر — جوجل ماب يحدد الموقع بنفسه
+        send_maps_button(from_number, query, bot_id, lang)
 
 def identify_image_product(msg):
     """يحدد الاسم القياسي لمنتج من صورة (بدون بحث — سريع)"""
@@ -793,16 +887,18 @@ def process_text_message(message,bot_id):
         txt,urls=search_product(products[0], lang)
         LAST_SEARCH[from_number] = {"product": products[0]}
 
-        # التنسيق الجديد: اسم المنتج ثم اللنكات مباشرة (أو خدمة: رسالة الأرقام + الخريطة)
-        need_location = send_product_result(from_number, txt, urls, bot_id, lang, products[0])
-        if need_location:
-            send_whatsapp_location_request(from_number, T(lang,"location_prompt"), bot_id)
+        # التنسيق: اسم المنتج ثم اللنكات مباشرة (أو خدمة: رسالة الأرقام)
+        need_map = send_product_result(from_number, txt, urls, bot_id, lang, products[0])
+        if need_map:
+            # زر الخريطة المباشر — جوجل ماب يحدد الموقع بنفسه
+            send_maps_button(from_number, products[0], bot_id, lang)
             
     else:
         send_whatsapp_text(from_number,T(lang,"multi_text",c=len(products)),bot_id)
         process_cart(products, from_number, bot_id, lang)
 
 def process_location_message(message, bot_id):
+    """احتياط: إذا المستخدم دز موقعه بنفسه، نفتح الخريطة على إحداثياته بالضبط"""
     from_number = message["from"]
     lat = message["location"]["latitude"]
     lng = message["location"]["longitude"]
@@ -814,35 +910,9 @@ def process_location_message(message, bot_id):
         return
 
     product = last_search["product"]
-    
-    prompt_category = """أنت خبير تسوق في السوق الكويتي. 
-بناءً على اسم المنتج أو الخدمة، أعطني "عبارة بحث" (Search Term) دقيقة جداً لخرائط جوجل تجلب الأماكن الصحيحة وتستبعد العشوائية.
-
-قواعد هامة:
-- للإلكترونيات الذكية (ساعة أبل، جوالات، لابتوب): اكتب أسماء الوكلاء الموثوقين هكذا (Xcite OR Eureka OR Best Al Yousifi) ولا تكتب "محل الكترونيات" أبداً.
-- للأجهزة المنزلية (ثلاجة، غسالة): (Xcite OR Eureka).
-- للأدوية والمكملات: (صيدلية Pharmacy).
-- للمواد الغذائية واللحوم: (جمعية تعاونية Supermarket).
-- لألعاب الفيديو: (محل العاب فيديو Video games).
-- للكهربائيات الثقيلة والإضاءة: (مواد كهربائية Electrical supply).
-- للملابس والمعدات الرياضية (مثل مضارب التنس والبادل): (Intersport OR Go Sport OR محلات رياضية).
-- للخدمات (بنشر، تبديل بطارية، سباك، كهربائي، تنظيف، ونش): اكتب نوع الخدمة بالعربي والإنجليزي مثل (بنشر Tyre repair) أو (ونش Towing service).
-- للطلبات العامة (قهوة، مطاعم، عطور): اكتب نوع المكان مع كلمة "الأعلى تقييماً" مثل (كافيه specialty coffee) أو (محل عطور perfume shop).
-- إذا لم تكن متأكداً، اكتب اسم المنتج نفسه.
-
-أعطني عبارة البحث فقط بدون أي إضافات أو شرح."""
-
-    category_text, _ = call_gemini([{"text": f"المنتج: {product}"}], system=prompt_category)
-    category = category_text.strip() if category_text else product
-
-    # الرابط الجديد بصيغة أنظف
-    safe_category = urllib.parse.quote(category)
-    maps_url = f"https://www.google.com/maps/search/{safe_category}/@{lat},{lng},15z"
-    
-    body = T(lang,"maps_body",p=product)
-
-    # زر بدل رابط طويل
+    maps_url = maps_search_url(product, lat, lng)
+    body = T(lang,"maps_body_loc",p=product)
     send_whatsapp_cta(from_number, body, maps_url, bot_id, T(lang,"maps_btn"))
 
 @app.get("/")
-async def health(): return {"status":"v27 Direct CTA Cards"}
+async def health(): return {"status":"v29 Store Aliases"}
