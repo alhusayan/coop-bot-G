@@ -53,46 +53,6 @@ def best_store_name(txt):
     m = re.search(r"^\s*🏪\s*[^:：]*[:：]\s*(.+?)\s*$", txt or "", flags=re.M)
     return m.group(1).strip() if m else ""
 
-def parse_answer_lines(txt):
-    """يفكك رد Gemini: (سطر الاسم 📦، قائمة العروض [(نص السطر، اسم المتجر)])"""
-    name_line = ""
-    offers = []
-    for line in (txt or "").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        if line.startswith("📦") and not name_line:
-            name_line = line
-            continue
-        m = re.match(r"^(?:✅|🏆|•)\s*(.+?)\s*(?:—|–|-)\s*[\d.,]", line)
-        if m:
-            offers.append((line, m.group(1).strip()))
-    return name_line, offers
-
-def url_for_store(store, urls, product):
-    """لنك المتجر: مطابقة مباشرة، ثم ضبابية، ثم زر البحث المضمون"""
-    url = (urls or {}).get(store)
-    if url:
-        return url
-    sn = normalize_name(store)
-    for k, v in (urls or {}).items():
-        if v and sn and (sn in normalize_name(k) or normalize_name(k) in sn):
-            return v
-    return fallback_search_url(f"{product} {store}")
-
-def send_product_answer(from_number, bot_id, lang, txt, urls, product, best_only=False):
-    """التنسيق الجديد بدون تكرار: رسالة اسم المنتج، ثم زر لكل متجر
-    وجسم الزر نفسه هو (✅/🏆 المتجر — السعر) — الأفضل أول واحد."""
-    name_line, offers = parse_answer_lines(txt)
-    send_whatsapp_text(from_number, name_line or txt.splitlines()[0], bot_id)
-    if not offers:
-        # ما فيه سطور عروض (رد حر) — نرسل النص كما هو
-        if txt and txt != name_line:
-            send_whatsapp_text(from_number, txt, bot_id)
-        return
-    for line, store in (offers[:1] if best_only else offers[:4]):
-        send_whatsapp_cta(from_number, line, url_for_store(store, urls, product), bot_id, f"🛒 {store[:18]}")
-
 def normalize_ar(text):
     """توحيد الحروف العربية والمسافات حتى تتطابق الصيغ المختلفة لنفس المنتج"""
     t = (text or "").lower()
@@ -185,7 +145,6 @@ MSG = {
         "no_saved_product": "ما عندي منتج محفوظ حالياً 😅. ابحث عن منتج أول، وبعدها دز موقعك عشان أدلك على أقرب مكان يبيعه!",
         "maps_body": "📍 بحثك الأخير كان عن ({p})\n\nجهزت لك أقرب المحلات اللي تبيعه حولك، اضغط الزر وافتح الخريطة 👇",
         "maps_btn": "📍 افتح الخريطة",
-        "service_maps_body": "📍 أقرب مزودي هالخدمة حولك على الخريطة 👇",
         "lang_saved": "تمام، بكلمك عربي من هني ورايح 🇰🇼\nدز صورة منتج أو اكتب اسمه وأنا حاضر!",
     },
     "en": {
@@ -203,7 +162,6 @@ MSG = {
         "no_saved_product": "I don't have a saved product yet 😅. Search for a product first, then share your location and I'll point you to the nearest store!",
         "maps_body": "📍 Your last search was ({p})\n\nI've lined up the closest stores around you. Tap the button to open the map 👇",
         "maps_btn": "📍 Open Map",
-        "service_maps_body": "📍 The nearest providers for this service, on the map 👇",
         "lang_saved": "Great, I'll speak English with you from now on 🇬🇧\nSend a product photo or type its name and I'm on it!",
     },
 }
@@ -458,7 +416,7 @@ def call_gemini(parts, system=SYSTEM_PROMPT, use_search=True):
         print(f"Gemini err {e}"); return "", {}
 
 # عدد جولات البحث المتوازية لكل طلب — قابل للتعديل من Railway
-SEARCH_RUNS = int(os.environ.get("SEARCH_RUNS", "2"))  # 2 = توازن الحصة المجانية، ارفعه 4 مع الفوترة
+SEARCH_RUNS = int(os.environ.get("SEARCH_RUNS", "4"))
 
 def answer_score(txt, urls):
     """تقييم قوة الجواب: المتاجر أهم شي، ثم اللنكات، ثم سلامة التنسيق"""
@@ -718,27 +676,28 @@ def process_single_image(message,bot_id,lang="ar"):
         product_name = name_m.group(1).strip() if name_m else "المنتج"
         LAST_SEARCH[from_number] = {"product": f"{caption} — {product_name}" if caption else product_name}
 
-    if not txt:
-        send_whatsapp_text(from_number, T(lang,"cant_identify"), bot_id)
-        return
+    if not txt: txt=T(lang,"cant_identify")
+    send_whatsapp_text(from_number,txt,bot_id)
 
-    request_for_maps = (LAST_SEARCH.get(from_number) or {}).get("product") or product_name
-
-    # خدمة (تصليح مثلاً)؟ رسالة وحدة فيها الأسماء والأرقام + زر خريطة — وبس
+    # إذا الرد كان عن خدمة (تصليح مثلاً) وفيه أرقام، نرسلها بطاقات جهات اتصال
     contacts = extract_service_contacts(txt)
     if contacts:
-        send_whatsapp_text(from_number, txt, bot_id)
-        maps_url = "https://www.google.com/maps/search/" + urllib.parse.quote(request_for_maps)
-        send_whatsapp_cta(from_number, T(lang,"service_maps_body"), maps_url, bot_id, T(lang,"maps_btn"))
+        send_whatsapp_contacts(from_number, contacts, bot_id)
+
+    # رد معلوماتي (حالة 4: مكونات/مواصفات...)؟ ما له أزرار تسوق ولا طلب لوكيشن
+    is_info_answer = not extract_store_names(txt) and not contacts
+    if is_info_answer:
         return
 
-    # رد معلوماتي (حالة 4: مكونات/مواصفات...)؟ الإجابة فقط
-    if not extract_store_names(txt):
-        send_whatsapp_text(from_number, txt, bot_id)
-        return
-
-    # منتج: التنسيق الجديد — اسم المنتج ثم أزرار (المتجر — السعر) مباشرة
-    send_product_answer(from_number, bot_id, lang, txt, urls, product_name)
+    sent_any=False
+    for n,u in urls.items():
+        if u:
+            send_whatsapp_cta(from_number,T(lang,"shop_from",n=n),u,bot_id,f"🛒 {n[:18]}")
+            sent_any=True
+    if not sent_any and txt and product_name and product_name != "المنتج":
+        stores=extract_store_names(txt)
+        target=stores[0] if stores else product_name
+        send_whatsapp_cta(from_number,T(lang,"shop_from",n=target),fallback_search_url(f"{product_name} {target}" if stores else product_name),bot_id,f"🛒 {target[:18]}")
 
     if product_name and product_name != "المنتج":
         send_whatsapp_location_request(from_number, T(lang,"location_prompt"), bot_id)
@@ -763,8 +722,22 @@ def process_cart(products, from_number, bot_id, lang="ar"):
         if not txt:
             continue
         any_ok = True
-        # نفس التنسيق الجديد، بس زر واحد فقط — الأفضل
-        send_product_answer(from_number, bot_id, lang, txt, urls, p, best_only=True)
+        send_whatsapp_text(from_number, txt, bot_id)
+
+        # الزر الواحد: نحاول نطابق أول متجر بالرد (الأفضل)، وإلا أول لنك متوفر
+        stores = extract_store_names(txt)
+        best_name = stores[0] if stores else None
+        best_url = urls.get(best_name, "") if best_name else ""
+        if not best_url:
+            pair = next(((n, u) for n, u in urls.items() if u), None)
+            if pair:
+                best_name, best_url = pair
+        if best_url:
+            send_whatsapp_cta(from_number, T(lang, "shop_from", n=best_name), best_url, bot_id, f"🛒 {best_name[:18]}")
+        else:
+            # ضمانة: زر بحث جوجل عن المنتج مع أفضل متجر مذكور
+            target = best_name or p
+            send_whatsapp_cta(from_number, T(lang, "shop_from", n=target), fallback_search_url(f"{p} {target}" if best_name else p), bot_id, f"🛒 {target[:18]}")
 
     if not any_ok:
         send_whatsapp_text(from_number, T(lang, "not_found"), bot_id)
@@ -807,27 +780,28 @@ def process_text_message(message,bot_id):
         send_whatsapp_text(from_number,T(lang,"searching",q=products[0]),bot_id)
         # البوابة الموحدة: كاش ← وإلا بحث مزدوج + دمج
         txt,urls=search_product(products[0], lang)
+        send_whatsapp_text(from_number,txt or T(lang,"not_found"),bot_id)
+        
         LAST_SEARCH[from_number] = {"product": products[0]}
 
-        if not txt:
-            send_whatsapp_text(from_number, T(lang,"not_found"), bot_id)
-            return
-
-        # خدمة؟ رسالة وحدة (الأسماء والأرقام كما هي) + زر خريطة يفتح على موقعه — وبس
+        # إذا الرد كان عن خدمة وفيه أرقام، نرسلها كبطاقات جهات اتصال جاهزة للحفظ والاتصال
         contacts = extract_service_contacts(txt)
         if contacts:
-            send_whatsapp_text(from_number, txt, bot_id)
-            maps_url = "https://www.google.com/maps/search/" + urllib.parse.quote(products[0])
-            send_whatsapp_cta(from_number, T(lang,"service_maps_body"), maps_url, bot_id, T(lang,"maps_btn"))
-            return
+            send_whatsapp_contacts(from_number, contacts, bot_id)
 
         # رد معلوماتي (حالة 4)؟ نكتفي بالإجابة — بدون أزرار تسوق ولا لوكيشن
-        if not extract_store_names(txt):
-            send_whatsapp_text(from_number, txt, bot_id)
+        if not extract_store_names(txt) and not contacts:
             return
 
-        # منتج: التنسيق الجديد — اسم المنتج ثم أزرار (المتجر — السعر) مباشرة بدون تكرار
-        send_product_answer(from_number, bot_id, lang, txt, urls, products[0])
+        sent_any=False
+        for n,u in urls.items():
+            if u:
+                send_whatsapp_cta(from_number,T(lang,"shop_from",n=n),u,bot_id,f"🛒 {n[:18]}")
+                sent_any=True
+        if not sent_any and txt:
+            stores=extract_store_names(txt)
+            target=stores[0] if stores else products[0]
+            send_whatsapp_cta(from_number,T(lang,"shop_from",n=target),fallback_search_url(f"{products[0]} {target}" if stores else products[0]),bot_id,f"🛒 {target[:18]}")
 
         send_whatsapp_location_request(from_number, T(lang,"location_prompt"), bot_id)
             
@@ -877,4 +851,4 @@ def process_location_message(message, bot_id):
     send_whatsapp_cta(from_number, body, maps_url, bot_id, T(lang,"maps_btn"))
 
 @app.get("/")
-async def health(): return {"status":"v27 Compact Answers"}
+async def health(): return {"status":"v26 Any Product Question"}
