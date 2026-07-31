@@ -14,31 +14,18 @@ PHONE_NUMBER_ID = os.environ.get("PHONE_NUMBER_ID", "")
 VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN", "MY_SECRET_COOP_BOT_TOKEN")
 
 GRAPH_URL = "https://graph.facebook.com/v20.0"
-
-# موديل أسرع وأرخص لمهمة تحديد اسم المنتج من الصورة (ما تحتاج ذكاء البحث)
-IDENTIFY_MODEL = os.environ.get("IDENTIFY_MODEL", "gemini-2.5-flash-lite")
-
-def gemini_url(model=None):
-    return f"https://generativelanguage.googleapis.com/v1beta/models/{model or GEMINI_MODEL}:generateContent"
-
-# جلسة HTTP مشتركة: تعيد استخدام اتصالات TLS بدل فتح اتصال جديد كل مرة — أسرع بكل نداء
-SESSION = requests.Session()
-_adapter = requests.adapters.HTTPAdapter(pool_connections=20, pool_maxsize=20)
-SESSION.mount("https://", _adapter)
-SESSION.mount("http://", _adapter)
+GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
 
 processed_ids = deque(maxlen=1000)
 # CARTS أزيلت — السلة صارت رسالة واتساب مباشرة بدون صفحة ويب
 IMAGE_BUFFER = defaultdict(lambda: {"images": [], "time": 0, "bot_id": ""})
 LAST_SEARCH = {} # لحفظ اسم آخر منتج بحث عنه المستخدم
-MAP_QUERY_CACHE = {}
-DIRECT_URL_CACHE = {}
 
 # ===== نظام اللغة: كل رقم تلفون وله لغته =====
 USER_LANG = {}       # from_number -> "ar" | "en"
 PENDING_IMAGES = defaultdict(lambda: {"images": [], "bot_id": ""})  # صور معلقة بانتظار اختيار اللغة
 
-BUFFER_SECONDS = 2
+BUFFER_SECONDS = 4
 RESOLVER = ThreadPoolExecutor(max_workers=6)
 WORKERS = ThreadPoolExecutor(max_workers=3)
 SEARCH_POOL = ThreadPoolExecutor(max_workers=8)  # للبحث المزدوج المتوازي
@@ -58,15 +45,16 @@ def result_quality(txt, urls):
     return len(extract_store_names(txt or "")), len(urls or {})
 
 def fallback_search_url(query):
-    """لم نعد نستخدم بحث Google كزر متجر؛ الرابط إما صفحة المنتج المؤكدة أو لا يوجد زر."""
-    return ""
+    """زر مضمون دايماً: بحث جوجل عن المتجر/المنتج إذا ما توفر لنك مباشر"""
+    return "https://www.google.com/search?q=" + urllib.parse.quote(f"{query} الكويت اونلاين")
 
 def best_store_name(txt):
+    """اسم أفضل متجر من سطر 🏪 إن وجد"""
     m = re.search(r"^\s*🏪\s*[^:：]*[:：]\s*(.+?)\s*$", txt or "", flags=re.M)
     return m.group(1).strip() if m else ""
 
 def parse_answer_lines(txt):
-    """يفكك رد Gemini إلى اسم المنتج وعروض المتاجر."""
+    """يفكك رد Gemini: (سطر الاسم 📦، قائمة العروض [(نص السطر، اسم المتجر)])"""
     name_line = ""
     offers = []
     for line in (txt or "").splitlines():
@@ -81,166 +69,29 @@ def parse_answer_lines(txt):
             offers.append((line, m.group(1).strip()))
     return name_line, offers
 
-def product_tokens(text):
-    """كلمات مهمة للتحقق من أن الصفحة تخص المنتج نفسه."""
-    t = normalize_ar(text)
-    toks = re.findall(r"[a-z0-9\u0600-\u06FF]+", t)
-    stop = {
-        "في","من","الى","على","الكويت","كويت","جهاز","منتج","علبه","علبة",
-        "حجم","جرام","جم","مل","لتر","اسود","ابيض","عرض","عبوه","عبوة",
-        "حبات","حبه","حبة","مع","والسماعه","والسماعة"
-    }
-    return [x for x in toks if len(x) >= 3 and x not in stop]
-
-def url_is_generic(url):
-    """يرفض الصفحة الرئيسية، الأقسام، نتائج البحث، وروابط Google."""
-    if not url:
-        return True
-    u = urllib.parse.unquote(url).lower()
-    parsed = urllib.parse.urlparse(u)
-    path = parsed.path.strip("/")
-    bad = (
-        "google.com/search", "google.com/url", "/search", "?q=", "?s=", "?query=",
-        "/category", "/categories", "/collection", "/collections", "/department",
-        "/departments", "/headphones-earbuds", "/electronics", "/catalogsearch",
-        "/shop/", "0-results", "no-results", "not-found", "404"
-    )
-    return any(x in u for x in bad) or not path
-
-def domain_matches_store(url, store, expected_domain=""):
-    host = clean_domain(urllib.parse.urlparse(url).netloc)
-    if not host:
-        return False
-    if expected_domain:
-        return domain_key(expected_domain) == domain_key(host)
-    # بدون دومين معروف لا نفرض تطابق الاسم العربي مع الدومين؛ يكفي أن يكون رابط ويب حقيقي.
-    return True
-
-def candidate_product_score(product, title, url, expected_domain=""):
-    """درجة صارمة لقبول صفحة منتج مباشرة فقط."""
-    if not url or url_is_generic(url):
-        return -100
-    if not domain_matches_store(url, "", expected_domain):
-        return -100
-
-    hay = normalize_ar(f"{title} {urllib.parse.unquote(url)}")
-    toks = product_tokens(product)
-    models = [x for x in toks if re.search(r"\d", x)]
-    words = [x for x in toks if not re.search(r"\d", x)]
-
-    score = 0
-    matched_words = 0
-    for tok in words:
-        if tok in hay:
-            score += 2
-            matched_words += 1
-    for model in models:
-        if model in hay:
-            score += 10
-        else:
-            score -= 5
-
-    path = urllib.parse.urlparse(url).path.strip("/")
-    # صفحات المنتجات عادة فيها مسار تفصيلي أو slug طويل.
-    if path.count("/") >= 1:
-        score += 2
-    if len(path) >= 18:
-        score += 2
-
-    # يجب أن يتطابق على الأقل جزء معتبر من الاسم، أو رقم الموديل إن وجد.
-    if models and not any(m in hay for m in models):
-        return -100
-    if not models and words and matched_words < min(2, len(words)):
-        return -100
-    return score
-
-def resolve_grounded_product_candidates(product, store, current_url=""):
-    """بحث إضافي موجه يرجع روابط Grounding المرشحة فقط، ولا يصنع أي رابط."""
-    domain = clean_domain(urllib.parse.urlparse(current_url).netloc) if current_url else ""
-    site = f" site:{domain}" if domain else ""
-    system = """أنت باحث صفحات منتجات. ابحث عن صفحة المنتج نفسها في متجر الكويت المذكور.
-ممنوع الصفحة الرئيسية أو القسم أو نتائج البحث أو Google Shopping. استخدم Google Search فقط للوصول إلى صفحة المنتج الأصلية.
-لا تخترع روابط ولا تكتب رابطاً في النص."""
-    prompt = f'ابحث عن صفحة المنتج الأصلية الدقيقة: "{product}" في متجر "{store}"{site}.'
-    payload = {
-        "systemInstruction": {"parts": [{"text": system}]},
-        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0, "maxOutputTokens": 60},
-        "tools": [{"google_search": {}}],
-    }
-    candidates = []
-    try:
-        r = SESSION.post(gemini_url(), params={"key": GEMINI_API_KEY}, json=payload, timeout=60)
-        data = r.json() if r.ok else {}
-        cand = (data.get("candidates") or [{}])[0]
-        chunks = (cand.get("groundingMetadata") or {}).get("groundingChunks") or []
-        raws = []
-        for chunk in chunks[:12]:
-            web = chunk.get("web") or {}
-            if web.get("uri"):
-                raws.append((web.get("title", ""), web.get("uri", "")))
-        finals = resolve_all([u for _, u in raws]) if raws else []
-        for i, (title, raw) in enumerate(raws):
-            url = finals[i] if i < len(finals) else raw
-            candidates.append((title, url))
-    except Exception as e:
-        print(f"direct candidate search err: {e}")
-    return candidates
-
-def find_exact_product_url(product, store, current_url=""):
-    """يعيد رابط صفحة منتج مؤكدة فقط. عند عدم التأكد يعيد نصاً فارغاً، وليس بحث Google."""
-    domain = clean_domain(urllib.parse.urlparse(current_url).netloc) if current_url else ""
-    key = hashlib.sha256(f"{normalize_ar(product)}|{normalize_ar(store)}|{domain}".encode()).hexdigest()
-    hit = DIRECT_URL_CACHE.get(key)
-    if hit and time.time() - hit["ts"] < CACHE_TTL:
-        return hit["url"]
-
-    candidates = []
-    if current_url:
-        candidates.append((store, current_url))
-    candidates.extend(resolve_grounded_product_candidates(product, store, current_url))
-
-    best_url, best_score = "", -100
-    for title, url in candidates:
-        sc = candidate_product_score(product, title, url, domain)
-        if sc > best_score:
-            best_url, best_score = url, sc
-
-    # حد قبول مرتفع حتى لا نرسل صفحة قسم أو منتج مختلف.
-    verified = best_url if best_score >= 6 else ""
-    DIRECT_URL_CACHE[key] = {"url": verified, "ts": time.time()}
-    print({"direct_link_store": store, "product": product[:70], "verified": bool(verified), "score": best_score, "url": verified[:180]})
-    return verified
-
 def url_for_store(store, urls, product):
-    """رابط المنتج المباشر المؤكد، أو فارغ."""
-    url = (urls or {}).get(store, "")
-    if not url:
-        sn = normalize_name(store)
-        for k, v in (urls or {}).items():
-            if v and sn and (sn in normalize_name(k) or normalize_name(k) in sn):
-                url = v
-                break
-    return find_exact_product_url(product, store, url)
+    """لنك المتجر: مطابقة مباشرة، ثم ضبابية، ثم زر البحث المضمون"""
+    url = (urls or {}).get(store)
+    if url:
+        return url
+    sn = normalize_name(store)
+    for k, v in (urls or {}).items():
+        if v and sn and (sn in normalize_name(k) or normalize_name(k) in sn):
+            return v
+    return fallback_search_url(f"{product} {store}")
 
 def send_product_answer(from_number, bot_id, lang, txt, urls, product, best_only=False):
-    """يرسل زر شراء فقط عندما يكون الرابط صفحة المنتج نفسها ومؤكداً."""
+    """التنسيق الجديد بدون تكرار: رسالة اسم المنتج، ثم زر لكل متجر
+    وجسم الزر نفسه هو (✅/🏆 المتجر — السعر) — الأفضل أول واحد."""
     name_line, offers = parse_answer_lines(txt)
     send_whatsapp_text(from_number, name_line or txt.splitlines()[0], bot_id)
     if not offers:
+        # ما فيه سطور عروض (رد حر) — نرسل النص كما هو
         if txt and txt != name_line:
             send_whatsapp_text(from_number, txt, bot_id)
         return
-
-    selected = offers[:1] if best_only else offers[:4]
-    for line, store in selected:
-        direct_url = url_for_store(store, urls, product)
-        if direct_url:
-            send_whatsapp_cta(from_number, line, direct_url, bot_id, f"🛒 {store[:18]}")
-        else:
-            # نعرض السعر والمتجر، لكن لا نخدع المستخدم بزر يفتح Google أو قسماً عاماً.
-            suffix = "\n🔗 الرابط المباشر للمنتج غير متوفر حالياً" if lang == "ar" else "\n🔗 Direct product link is currently unavailable"
-            send_whatsapp_text(from_number, line + suffix, bot_id)
+    for line, store in (offers[:1] if best_only else offers[:4]):
+        send_whatsapp_cta(from_number, line, url_for_store(store, urls, product), bot_id, f"🛒 {store[:18]}")
 
 def normalize_ar(text):
     """توحيد الحروف العربية والمسافات حتى تتطابق الصيغ المختلفة لنفس المنتج"""
@@ -326,7 +177,6 @@ MSG = {
         "cant_identify": "ما قدرت أحدد المنتج",
         "shop_from": "تسوق من {n} 👇",
         "location_prompt": "تبي أقرب محل يبيعه؟ 📍\n\nاضغط الزر تحت ودز موقعك، وعلى طول أرد لك بأقرب المحلات على الخريطة 👇",
-        "product_maps_body": "📍 أقرب المحلات اللي تبيع هالمنتج حولك على الخريطة 👇",
         "multi_text": "تمام لقيت {c} منتجات، أسوي سلة...",
         "multi_images": "تمام لقطت {c} منتجات، أسوي سلة...",
         "cart_ready": "🛒 سلتك جاهزة:\n{items}\n\n💰 الإجمالي: {total} د.ك",
@@ -345,7 +195,6 @@ MSG = {
         "cant_identify": "Couldn't identify the product",
         "shop_from": "Shop from {n} 👇",
         "location_prompt": "Want the nearest store that sells it? 📍\n\nTap the button below to share your location, and I'll instantly send you the closest stores on a map 👇",
-        "product_maps_body": "📍 Find the nearest stores selling this product on the map 👇",
         "multi_text": "Got it, found {c} products. Building your cart...",
         "multi_images": "Nice, spotted {c} products. Building your cart...",
         "cart_ready": "🛒 Your cart is ready:\n{items}\n\n💰 Total: {total} KWD",
@@ -438,7 +287,7 @@ def get_final_url(url: str):
     if not url or not url.startswith(("http://", "https://")):
         return ""
     try:
-        r = SESSION.get(url, allow_redirects=True, timeout=6, stream=True, headers=HEADERS)
+        r = requests.get(url, allow_redirects=True, timeout=12, stream=True, headers=HEADERS)
         final = r.url or url
         r.close()
         return final if final.startswith(("http://", "https://")) else url
@@ -486,16 +335,16 @@ def source_label(title, url):
     except Exception:
         return "المتجر"
 
-def call_gemini(parts, system=SYSTEM_PROMPT, use_search=True, max_tokens=800, model=None):
+def call_gemini(parts, system=SYSTEM_PROMPT, use_search=True):
     payload = {
         "systemInstruction": {"parts": [{"text": system}]},
         "contents": [{"role": "user", "parts": parts}],
-        "generationConfig": {"temperature": 0, "maxOutputTokens": max_tokens},
+        "generationConfig": {"temperature": 0, "maxOutputTokens": 2000},
     }
     if use_search:
         payload["tools"] = [{"google_search": {}}]
     try:
-        r = SESSION.post(gemini_url(model), params={"key": GEMINI_API_KEY}, json=payload, timeout=90)
+        r = requests.post(GEMINI_URL, params={"key": GEMINI_API_KEY}, json=payload, timeout=90)
         if r.status_code >= 400:
             print(f"Gemini HTTP {r.status_code}: {r.text[:500]}")
             return "", {}
@@ -527,10 +376,10 @@ def call_gemini(parts, system=SYSTEM_PROMPT, use_search=True, max_tokens=800, mo
         metadata = cand.get("groundingMetadata", {}) or {}
         chunks = metadata.get("groundingChunks", []) or []
         uris = [(c.get("web") or {}).get("uri", "") for c in chunks]
-        finals = resolve_all(uris[:8]) if uris else []
+        finals = resolve_all(uris[:15]) if uris else []
 
         records = []
-        for i, chunk in enumerate(chunks[:8]):
+        for i, chunk in enumerate(chunks[:15]):
             web = chunk.get("web") or {}
             raw_uri = web.get("uri", "")
             final_uri = finals[i] if i < len(finals) else raw_uri
@@ -609,8 +458,8 @@ def call_gemini(parts, system=SYSTEM_PROMPT, use_search=True, max_tokens=800, mo
         print(f"Gemini err {e}"); return "", {}
 
 # عدد جولات البحث المتوازية لكل طلب — قابل للتعديل من Railway
-SEARCH_RUNS = int(os.environ.get("SEARCH_RUNS", "4"))
- 
+SEARCH_RUNS = int(os.environ.get("SEARCH_RUNS", "2"))  # 2 = توازن الحصة المجانية، ارفعه 4 مع الفوترة
+
 def answer_score(txt, urls):
     """تقييم قوة الجواب: المتاجر أهم شي، ثم اللنكات، ثم سلامة التنسيق"""
     stores, links = result_quality(txt, urls)
@@ -618,7 +467,7 @@ def answer_score(txt, urls):
     if txt and "📦" in txt:
         score += 1
     return score
- 
+
 def best_of_search(parts, lang):
     """بطولة داخلية: SEARCH_RUNS بحوث متوازية لنفس الطلب، نقيّمها كلها ونرسل الأقوى.
     اللنكات: اتحاد لنكات كل الجولات (أولوية لنكات الجواب الفائز)."""
@@ -628,14 +477,14 @@ def best_of_search(parts, lang):
     except Exception as e:
         print(f"best_of_search err {e}")
         return call_gemini(parts)
- 
+
     results = [(t, u) for (t, u) in results if t]
     if not results:
         return "", {}
- 
+
     scored = sorted(results, key=lambda r: answer_score(r[0], r[1]), reverse=True)
     best_txt, best_urls = scored[0]
- 
+
     # اتحاد اللنكات: الفائز أولاً، ثم بقية الجولات تكمل النواقص
     merged_urls = dict(best_urls)
     for _, u in scored[1:]:
@@ -643,10 +492,10 @@ def best_of_search(parts, lang):
             if n not in merged_urls and link not in merged_urls.values():
                 merged_urls[n] = link
     merged_urls = dict(list(merged_urls.items())[:4])
- 
+
     print({"tournament": [answer_score(t, u) for t, u in scored], "winner_stores": result_quality(best_txt, best_urls)[0], "total_links": len(merged_urls)})
     return best_txt, merged_urls
- 
+
 def search_product(query, lang, prompt_text=None):
     """البوابة الموحدة للبحث: كاش أولاً، وإلا بطولة 4 بحوث ونرسل الأقوى.
     prompt_text: صياغة مخصصة للطلب (مثل صورة + سؤال) — الافتراضي بحث سعر عادي.
@@ -654,11 +503,11 @@ def search_product(query, lang, prompt_text=None):
     cached = cache_get(query, lang)
     if cached:
         return cached
- 
+
     text_part = prompt_text or f"ابحث عن {query} في الكويت. {LANG_INSTR[lang]}"
     txt, urls = best_of_search([{"text": text_part}], lang)
     stores, links = result_quality(txt, urls)
- 
+
     if stores >= CACHE_MIN_STORES and links >= CACHE_MIN_LINKS:
         cache_put(query, lang, txt, urls)
     elif stores == 0 and txt and len(txt) >= 120:
@@ -667,19 +516,19 @@ def search_product(query, lang, prompt_text=None):
     else:
         print(f"NOT CACHED (quality low): stores={stores} links={links} | {query[:60]}")
     return txt, urls
- 
+
 def extract_products(text):
     text=re.sub(r'^[•\-\*\d\.\)\s]+','',text,flags=re.M)
     parts=re.split(r'\s*(?:\n+|\+|,|،| و | & )\s*',text.strip())
     parts=[p.strip() for p in parts if len(p.strip())>2]
     return parts[:6] if len(parts)>1 else [text.strip()]
- 
+
 def download_whatsapp_media(mid):
     h={"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
     meta=requests.get(f"{GRAPH_URL}/{mid}",headers=h,timeout=20).json()
     img=requests.get(meta["url"],headers=h,timeout=30)
     return base64.b64encode(img.content).decode(), meta.get("mime_type","image/jpeg")
- 
+
 def send_whatsapp_text(to,text,bot_id):
     url=f"{GRAPH_URL}/{bot_id}/messages"; h={"Authorization":f"Bearer {WHATSAPP_TOKEN}","Content-Type":"application/json"}
     payload={"messaging_product":"whatsapp","to":to,"type":"text","text":{"body":text[:3900]}}
@@ -691,7 +540,7 @@ def send_whatsapp_text(to,text,bot_id):
     except Exception as e:
         print(f"WhatsApp text exception: {e}")
         return False
- 
+
 def send_whatsapp_cta(to,body,link,bot_id,title):
     url=f"{GRAPH_URL}/{bot_id}/messages"; h={"Authorization":f"Bearer {WHATSAPP_TOKEN}","Content-Type":"application/json"}
     payload={"messaging_product":"whatsapp","to":to,"type":"interactive","interactive":{"type":"cta_url","body":{"text":body[:1024]},"action":{"name":"cta_url","parameters":{"display_text":title[:20],"url":link}}}}
@@ -704,13 +553,12 @@ def send_whatsapp_cta(to,body,link,bot_id,title):
         print(f"WhatsApp CTA exception: {e} | {link[:180]}")
         return False
 
-
 def send_whatsapp_location_request(to, body, bot_id):
     """زر واتساب الرسمي لطلب الموقع — ضغطة وحدة تفتح شاشة مشاركة اللوكيشن"""
     url=f"{GRAPH_URL}/{bot_id}/messages"; h={"Authorization":f"Bearer {WHATSAPP_TOKEN}","Content-Type":"application/json"}
     payload={"messaging_product":"whatsapp","to":to,"type":"interactive","interactive":{"type":"location_request_message","body":{"text":body[:1024]},"action":{"name":"send_location"}}}
     try:
-        r = SESSION.post(url,json=payload,headers=h,timeout=10)
+        r = requests.post(url,json=payload,headers=h,timeout=15)
         if not r.ok:
             print(f"WhatsApp location request error {r.status_code}: {r.text[:500]}")
         return r.ok
@@ -718,55 +566,13 @@ def send_whatsapp_location_request(to, body, bot_id):
         print(f"WhatsApp location request exception: {e}")
         return False
 
-def classify_map_query(product, lang="ar", offer_text=""):
-    """يحّول اسم المنتج إلى نوع المكان المنطقي الذي يبيعه، بدل البحث عن الاسم حرفياً في الخرائط."""
-    cache_key_value = hashlib.sha256(f"{normalize_ar(product)}|{lang}".encode()).hexdigest()
-    hit = MAP_QUERY_CACHE.get(cache_key_value)
-    if hit and time.time() - hit["ts"] < CACHE_TTL:
-        return hit["query"]
-
-    t = normalize_ar(product)
-    rules = [
-        (("كاتشب","كاكاو","شوكولاته","قهوه","مياه","عصير","حليب","رز","سكر","طحين","منظف","شامبو","حفاض"), "جمعية تعاونية OR هايبر ماركت OR سوبرماركت"),
-        (("دواء","حبوب","كريم","مرهم","فيتامين","مكمل","صيدليه"), "صيدلية Pharmacy"),
-        (("ايفون","سامسونج","جوال","هاتف","لابتوب","تابلت","سماعه","سماعات","تلفزيون","ريموت","رسيفر","بلايستيشن","اكس بوكس","كاميرا"), "Xcite OR Eureka OR Blink OR Best Al Yousifi OR إلكترونيات"),
-        (("ثلاجه","غساله","مكيف","فرن","ميكروويف","مكنسه","غسالة","ثلاجة"), "Xcite OR Eureka OR Best Al Yousifi OR أجهزة منزلية"),
-        (("مضرب","تنس","بادل","كره قدم","حذاء رياضي"), "Intersport OR Go Sport OR محلات رياضية"),
-        (("عطر","بخور","مكياج","روج"), "محلات عطور OR مستحضرات تجميل"),
-        (("نظاره","نظارات","عدسات"), "محلات نظارات Optics"),
-        (("قطع غيار","بطاريه سياره","زيت محرك","تاير","اطارات"), "محلات قطع غيار سيارات OR كراجات"),
-    ]
-    for words, query in rules:
-        if any(w in t for w in words):
-            MAP_QUERY_CACHE[cache_key_value] = {"query": query, "ts": time.time()}
-            return query
-
-    # عند عدم وجود قاعدة واضحة، نخلي Gemini يصنف المكان فقط، لا يبحث عن المنتج نفسه.
-    sys = """أنت خبير بالسوق الكويتي. حوّل اسم المنتج إلى عبارة قصيرة جداً لبحث Google Maps عن نوع المتاجر الفعلية التي غالباً تبيع هذا المنتج. لا تكرر اسم المنتج ولا الموديل. أمثلة: كاتشب = جمعية تعاونية OR هايبر ماركت OR سوبرماركت؛ ريموت رسيفر = محلات ستلايت ورسيفرات OR إلكترونيات؛ سماعات = Xcite OR Eureka OR Blink OR إلكترونيات؛ دواء = صيدلية Pharmacy. اكتب عبارة البحث فقط."""
-    result, _ = call_gemini([{"text": f"المنتج: {product}"}], system=sys, use_search=False, max_tokens=60, model=IDENTIFY_MODEL)
-    query = result.strip().splitlines()[0] if result else "متاجر الكويت"
-    if len(query) > 140:
-        query = "متاجر الكويت"
-    MAP_QUERY_CACHE[cache_key_value] = {"query": query, "ts": time.time()}
-    return query
-
-def google_maps_search_url(query):
-    clean_query = (query or "متاجر الكويت").strip()
-    return "https://www.google.com/maps/search/" + urllib.parse.quote(f"{clean_query} الكويت")
-
-def send_product_maps_button(to, product, bot_id, lang="ar", offer_text=""):
-    """الخريطة تبحث عن نوع المحل المناسب، وليس اسم الجهاز/المنتج الطويل."""
-    map_query = classify_map_query(product, lang, offer_text)
-    maps_url = google_maps_search_url(map_query)
-    return send_whatsapp_cta(to, T(lang, "product_maps_body"), maps_url, bot_id, T(lang, "maps_btn"))
-
 def send_whatsapp_buttons(to, body, buttons, bot_id):
     """أزرار رد سريعة (Reply Buttons) — حد أقصى 3 أزرار"""
     url=f"{GRAPH_URL}/{bot_id}/messages"; h={"Authorization":f"Bearer {WHATSAPP_TOKEN}","Content-Type":"application/json"}
     btns=[{"type":"reply","reply":{"id":b["id"],"title":b["title"][:20]}} for b in buttons[:3]]
     payload={"messaging_product":"whatsapp","to":to,"type":"interactive","interactive":{"type":"button","body":{"text":body[:1024]},"action":{"buttons":btns}}}
     try:
-        r = SESSION.post(url,json=payload,headers=h,timeout=10)
+        r = requests.post(url,json=payload,headers=h,timeout=15)
         if not r.ok:
             print(f"WhatsApp buttons error {r.status_code}: {r.text[:500]}")
         return r.ok
@@ -787,7 +593,7 @@ def send_whatsapp_contacts(to, contacts, bot_id):
     url=f"{GRAPH_URL}/{bot_id}/messages"; h={"Authorization":f"Bearer {WHATSAPP_TOKEN}","Content-Type":"application/json"}
     payload={"messaging_product":"whatsapp","to":to,"type":"contacts","contacts":contacts}
     try:
-        r = SESSION.post(url,json=payload,headers=h,timeout=10)
+        r = requests.post(url,json=payload,headers=h,timeout=15)
         if not r.ok:
             print(f"WhatsApp contacts error {r.status_code}: {r.text[:500]}")
         return r.ok
@@ -891,7 +697,7 @@ def process_single_image(message,bot_id,lang="ar"):
     b64,mime=download_whatsapp_media(message["image"]["id"])
 
     # الخطوة 1: تحديد الاسم القياسي للمنتج (مكالمة سريعة بدون بحث)
-    ident,_=call_gemini([{"inline_data":{"mime_type":mime,"data":b64}},{"text":"ما اسم هذا المنتج؟"}], system=IDENTIFY_SYSTEM, use_search=False, max_tokens=100, model=IDENTIFY_MODEL)
+    ident,_=call_gemini([{"inline_data":{"mime_type":mime,"data":b64}},{"text":"ما اسم هذا المنتج؟"}], system=IDENTIFY_SYSTEM, use_search=False)
     product_name = ident.strip().splitlines()[0].strip() if ident else ""
 
     if product_name and caption:
@@ -935,13 +741,13 @@ def process_single_image(message,bot_id,lang="ar"):
     send_product_answer(from_number, bot_id, lang, txt, urls, product_name)
 
     if product_name and product_name != "المنتج":
-        send_product_maps_button(from_number, product_name, bot_id, lang, txt)
+        send_whatsapp_location_request(from_number, T(lang,"location_prompt"), bot_id)
 
 def identify_image_product(msg):
     """يحدد الاسم القياسي لمنتج من صورة (بدون بحث — سريع)"""
     try:
         b64,mime=download_whatsapp_media(msg["image"]["id"])
-        ident,_=call_gemini([{"inline_data":{"mime_type":mime,"data":b64}},{"text":"ما اسم هذا المنتج؟"}], system=IDENTIFY_SYSTEM, use_search=False, max_tokens=100, model=IDENTIFY_MODEL)
+        ident,_=call_gemini([{"inline_data":{"mime_type":mime,"data":b64}},{"text":"ما اسم هذا المنتج؟"}], system=IDENTIFY_SYSTEM, use_search=False)
         return ident.strip().splitlines()[0].strip() if ident else ""
     except Exception as e:
         print(f"identify err {e}")
@@ -1023,7 +829,7 @@ def process_text_message(message,bot_id):
         # منتج: التنسيق الجديد — اسم المنتج ثم أزرار (المتجر — السعر) مباشرة بدون تكرار
         send_product_answer(from_number, bot_id, lang, txt, urls, products[0])
 
-        send_product_maps_button(from_number, products[0], bot_id, lang, txt)
+        send_whatsapp_location_request(from_number, T(lang,"location_prompt"), bot_id)
             
     else:
         send_whatsapp_text(from_number,T(lang,"multi_text",c=len(products)),bot_id)
@@ -1034,17 +840,17 @@ def process_location_message(message, bot_id):
     lat = message["location"]["latitude"]
     lng = message["location"]["longitude"]
     lang = USER_LANG.get(from_number, "ar")
- 
+
     last_search = LAST_SEARCH.get(from_number)
     if not last_search or not last_search.get("product"):
         send_whatsapp_text(from_number, T(lang,"no_saved_product"), bot_id)
         return
- 
+
     product = last_search["product"]
     
     prompt_category = """أنت خبير تسوق في السوق الكويتي. 
 بناءً على اسم المنتج، أعطني "عبارة بحث" (Search Term) دقيقة جداً لخرائط جوجل تجلب المتاجر الصحيحة وتستبعد العشوائية.
- 
+
 قواعد هامة:
 - للإلكترونيات الذكية (ساعة أبل، جوالات، لابتوب): اكتب أسماء الوكلاء الموثوقين هكذا (Xcite OR Eureka OR Best Al Yousifi) ولا تكتب "محل الكترونيات" أبداً.
 - للأجهزة المنزلية (ثلاجة، غسالة): (Xcite OR Eureka).
@@ -1055,20 +861,20 @@ def process_location_message(message, bot_id):
 - للملابس والمعدات الرياضية (مثل مضارب التنس والبادل): (Intersport OR Go Sport OR محلات رياضية).
 - للطلبات العامة (قهوة، مطاعم، عطور): اكتب نوع المكان مع كلمة "الأعلى تقييماً" مثل (كافيه specialty coffee) أو (محل عطور perfume shop).
 - إذا لم تكن متأكداً، اكتب اسم المنتج نفسه.
- 
+
 أعطني عبارة البحث فقط بدون أي إضافات أو شرح."""
- 
+
     category_text, _ = call_gemini([{"text": f"المنتج: {product}"}], system=prompt_category)
     category = category_text.strip() if category_text else product
- 
+
     # الرابط الجديد بصيغة أنظف
     safe_category = urllib.parse.quote(category)
     maps_url = f"https://www.google.com/maps/search/{safe_category}/@{lat},{lng},15z"
     
     body = T(lang,"maps_body",p=product)
- 
+
     # زر بدل رابط طويل
     send_whatsapp_cta(from_number, body, maps_url, bot_id, T(lang,"maps_btn"))
- 
+
 @app.get("/")
-async def health(): return {"status":"v26 Any Product Question"}
+async def health(): return {"status":"v27 Compact Answers"}
