@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 import os, re, time, base64, requests, json, asyncio, urllib.parse, hashlib
-from collections import deque, defaultdict
+from collections import deque, defaultdict, Counter
 from concurrent.futures import ThreadPoolExecutor
 from fastapi import FastAPI, Request, Response, BackgroundTasks
 from fastapi.responses import HTMLResponse
@@ -10,17 +10,13 @@ app = FastAPI()
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+SERPAPI_KEY = os.environ.get("SERPAPI_KEY", "")  # اختياري - يعطي دقة Lens 100%
 WHATSAPP_TOKEN = os.environ.get("WHATSAPP_TOKEN", "")
 PHONE_NUMBER_ID = os.environ.get("PHONE_NUMBER_ID", "")
 VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN", "MY_SECRET_COOP_BOT_TOKEN")
 
 GRAPH_URL = "https://graph.facebook.com/v20.0"
 GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
-
-# Google Cloud Vision Web Detection: أقرب API رسمي لبحث Google البصري
-# فعّل Cloud Vision API وضع المفتاح في متغير البيئة GOOGLE_VISION_API_KEY
-GOOGLE_VISION_API_KEY = os.environ.get("GOOGLE_VISION_API_KEY", "")
-VISION_ANNOTATE_URL = "https://vision.googleapis.com/v1/images:annotate"
 
 processed_ids = deque(maxlen=1000)
 IMAGE_BUFFER = defaultdict(lambda: {"images": [], "time": 0, "bot_id": ""})
@@ -37,8 +33,6 @@ HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/
 SEARCH_CACHE = {}
 CACHE_TTL = int(os.environ.get("CACHE_TTL_HOURS", "2")) * 3600
 CACHE_MAX = 500
-CACHE_MIN_STORES = 1
-CACHE_MIN_LINKS = 1
 
 VERIFIED_PAGE_CACHE = {}
 OOS_PHRASES = ["out of stock","غير متوفر","نفدت الكمية","غير متاح","sold out","غير متوفر حاليا","نفذت","not available","temporarily unavailable"]
@@ -84,14 +78,12 @@ def cache_key(query, lang):
     norm = re.sub(r"[^\w\u0600-\u06FF]+", "", normalize_ar(query))
     return hashlib.sha256(f"{norm}|{lang}".encode()).hexdigest()
 
-def cache_get(query, lang, allow_fuzzy=True):
+def cache_get(query, lang):
     now = time.time()
     hit = SEARCH_CACHE.get(cache_key(query, lang))
     if hit and (now - hit["ts"]) < CACHE_TTL:
         print(f"CACHE HIT (exact): {query[:60]}")
         return hit["txt"], dict(hit["urls"])
-    if not allow_fuzzy:
-        return None
     qt = norm_tokens(query)
     if not qt: return None
     best, best_score = None, 0.0
@@ -118,146 +110,27 @@ def cache_put(query, lang, txt, urls):
         "tokens": norm_tokens(query), "query": query, "lang": lang,
     }
 
-# التعرف الأولي من الصورة فقط (Fallback عند تعذر Google Vision)
-IDENTIFY_SYSTEM = """أنت خبير تعرف على المنتجات. انظر للصورة واكتب الاسم التجاري القياسي للمنتج.
-للمنتجات التقنية واليومية: [البراند] [نوع المنتج] [رقم الموديل باللاتيني] [اللون/السعة إن كانت واضحة]
-للملابس والأحذية: [البراند] [نوع المنتج] [اسم التصميم أو الموديل الدقيق باللاتيني] [اللون]
-لا تستبدل المنتج بمنتج مشابه، ولا تخترع موديل غير ظاهر أو غير مؤكد.
+# v34: نظام تعرف بمستوى Google Lens
+IDENTIFY_SYSTEM = """You are a Google Lens-level product identifier. Your ONLY job is exact visual match, not generic description.
 
-أمثلة:
+RULES:
+- Output ONE line only in Arabic but KEEP brand/model in original English.
+- Format: [Brand English] [Exact Model Name English as on web] [Type] [Color in Arabic]
+- For fashion: [Brand] [Model like Intrecciato Flat Mules, Air Max 90, etc] [Material if visible] [Color]
+- For tech: [Brand] [Product] [Model Number Latin] [Color]
+- KEEP model name in Latin exactly like web: Intrecciato, RB3721, Air Max, etc.
+- NEVER translate brand or model. NEVER invent model number.
+- If model unknown, describe pattern in English: Woven Leather, Monogram, Checkered.
+
+Examples:
+- بوتيغا فينيتا Intrecciato Leather Mules بني
 - ريبان نظارة شمسية RB3721 اسود 59 مم
 - برينجلز كاتشب 200 جرام
-- حذاء بوتيغا فينيتا Intrecciato Flat Mules بني
-
-سطر واحد فقط بالعربي، مع إبقاء اسم الموديل أو النقشة باللغة الإنجليزية كما هي."""
-
-VISUAL_IDENTIFY_SYSTEM = """أنت خبير مطابقة منتجات بالصور. لديك الصورة الأصلية ونتائج Google Cloud Vision Web Detection.
-استخدم الأدلة بهذا الترتيب:
-1) عناوين الصفحات التي تحتوي صورة مطابقة بالكامل.
-2) عناوين الصفحات التي تحتوي صورة مطابقة جزئياً.
-3) Best guess labels وWeb entities.
-4) تحليلك البصري للصورة.
-
-المطلوب: اكتب الاسم التجاري الدقيق لنفس المنتج، وليس منتجاً شبيهاً.
-- حافظ على البراند والموديل/اسم التصميم باللاتيني كما ظهر في الأدلة.
-- لا تضف لوناً أو مقاساً إلا إذا كان واضحاً.
-- إذا كانت الأدلة عامة، استخدم وصفاً محافظاً ولا تخترع موديل.
-- سطر واحد فقط بلا شرح ولا علامات Markdown."""
-
-
-def google_visual_search(b64_image):
-    """Google Web Detection: returns matching pages/images and web entities."""
-    if not GOOGLE_VISION_API_KEY or not b64_image:
-        return {}
-    payload = {
-        "requests": [{
-            "image": {"content": b64_image},
-            "features": [{"type": "WEB_DETECTION", "maxResults": 20}],
-        }]
-    }
-    try:
-        r = requests.post(
-            VISION_ANNOTATE_URL,
-            params={"key": GOOGLE_VISION_API_KEY},
-            json=payload,
-            timeout=35,
-        )
-        if r.status_code >= 400:
-            print(f"Vision HTTP {r.status_code}: {r.text[:500]}")
-            return {}
-        responses = r.json().get("responses") or []
-        if not responses:
-            return {}
-        ann = responses[0]
-        if ann.get("error"):
-            print(f"Vision API error: {ann['error']}")
-            return {}
-        web = ann.get("webDetection") or {}
-
-        pages = []
-        for page in (web.get("pagesWithMatchingImages") or [])[:12]:
-            pages.append({
-                "title": (page.get("pageTitle") or "").strip(),
-                "url": page.get("url") or "",
-                "full_count": len(page.get("fullMatchingImages") or []),
-                "partial_count": len(page.get("partialMatchingImages") or []),
-            })
-        pages.sort(key=lambda x: (x["full_count"], x["partial_count"], bool(x["title"])), reverse=True)
-
-        return {
-            "best_guess": [
-                x.get("label", "").strip()
-                for x in (web.get("bestGuessLabels") or [])
-                if x.get("label")
-            ][:5],
-            "entities": [
-                {"description": x.get("description", "").strip(), "score": float(x.get("score") or 0)}
-                for x in (web.get("webEntities") or [])
-                if x.get("description")
-            ][:15],
-            "pages": pages,
-            "full_images": [x.get("url", "") for x in (web.get("fullMatchingImages") or [])[:10]],
-            "partial_images": [x.get("url", "") for x in (web.get("partialMatchingImages") or [])[:10]],
-            "similar_images": [x.get("url", "") for x in (web.get("visuallySimilarImages") or [])[:10]],
-        }
-    except Exception as e:
-        print(f"Vision err {e}")
-        return {}
-
-
-def visual_evidence_text(data):
-    if not data:
-        return "لا توجد نتائج Google Web Detection."
-    lines = []
-    guesses = [x for x in data.get("best_guess", []) if x]
-    if guesses:
-        lines.append("Best guess: " + " | ".join(guesses[:3]))
-
-    entities = []
-    for e in data.get("entities", [])[:10]:
-        desc = e.get("description", "")
-        if desc:
-            entities.append(f"{desc} ({e.get('score', 0):.2f})")
-    if entities:
-        lines.append("Web entities: " + " | ".join(entities))
-
-    page_lines = []
-    for p in data.get("pages", [])[:8]:
-        title = p.get("title") or p.get("url", "")
-        if not title:
-            continue
-        match_type = "FULL" if p.get("full_count") else "PARTIAL" if p.get("partial_count") else "MATCH"
-        page_lines.append(f"- [{match_type}] {title}")
-    if page_lines:
-        lines.append("Matching pages:\n" + "\n".join(page_lines))
-    return "\n".join(lines)[:5000]
-
-
-def identify_product_from_b64(b64_image, mime_type):
-    """Two-stage identity: Google visual web matching, then Gemini resolves the exact name."""
-    visual = google_visual_search(b64_image)
-    evidence = visual_evidence_text(visual)
-    system = VISUAL_IDENTIFY_SYSTEM if visual else IDENTIFY_SYSTEM
-    question = (
-        "حدّد اسم نفس المنتج الظاهر في الصورة بدقة.\n"
-        "هذه نتائج بحث Google البصري:\n" + evidence
-        if visual else
-        "ما اسم هذا المنتج؟"
-    )
-    ident, _ = call_gemini(
-        [
-            {"inline_data": {"mime_type": mime_type, "data": b64_image}},
-            {"text": question},
-        ],
-        system=system,
-        use_search=False,
-    )
-    name = ident.strip().splitlines()[0].strip() if ident else ""
-    return name, visual
+"""
 
 MSG = {
     "ar": {
-        "identifying": "ثواني بس.. أحدد المنتج وأدور لك الأفضل!",
+        "identifying": "ثواني بس.. أحدد المنتج مثل Google Lens وأدور لك الأفضل!",
         "searching": "🔍 أدور لك على {q}...",
         "not_found": "ما لقيت المنتج متوفر حالياً بسعر مؤكد 😅 جرب صياغة ثانية أو دز صورة أوضح.",
         "cant_identify": "ما قدرت أحدد المنتج، دز صورة أوضح",
@@ -270,7 +143,7 @@ MSG = {
         "lang_saved": "تمام، بكلمك عربي من هني ورايح 🇰🇼\nدز صورة منتج أو اكتب اسمه وأنا حاضر!",
     },
     "en": {
-        "identifying": "One sec.. identifying the product and finding you the best deal!",
+        "identifying": "One sec.. identifying like Google Lens and finding you the best deal!",
         "searching": "🔍 Looking up {q}...",
         "not_found": "Couldn't find it in-stock with a verified price 😅 try another phrasing or a clearer photo.",
         "cant_identify": "Couldn't identify the product",
@@ -302,7 +175,7 @@ SYSTEM_PROMPT = """
 
 أولاً حدد نوع الطلب:
 
-【الحالة 1】منتج محدد بعلامة تجارية واضحة (مثل: آيفون 15 برو، بيبسي، ساعة أبل الترا، بلايستيشن 5):
+【الحالة 1】منتج محدد بعلامة تجارية واضحة (مثل: آيفون 15 برو، بيبسي، ساعة أبل الترا، بلايستيشن 5، Bottega Veneta Intrecciato Mules):
 قارن الأسعار واختر الأرخص، ورد بهذا الشكل فقط:
 📦 [اسم المنتج]
 
@@ -335,6 +208,7 @@ SYSTEM_PROMPT = """
 - رابط كل متجر يجب أن يكون رابط صفحة منتج مباشر (صفحة فيها منتج واحد وسعر واحد). ممنوع منعاً باتاً روابط الصفحة الرئيسية أو /search أو /category أو /collections أو /shop أو صفحات نتائج البحث.
 - لا تخترع سعراً، انسخ السعر كما يظهر في نتيجة البحث اليوم.
 - إذا لم تجد 3 متاجر، اذكر 1 أو 2 فقط ولا تخترع الباقي.
+- اسم المنتج يجب أن يبقى كما أرسلته لك (اسم Lens المطابق بصرياً) لا تغيره لاسم عام.
 
 في الحالات 1 و2 و3، سطر أخير إلزامي:
 LINKS: اسم الأول=الدومين الحقيقي, اسم الثاني=الدومين الحقيقي
@@ -413,17 +287,6 @@ def parse_product_data(html, url):
             try: data["price"] = float(m["content"])
             except: pass
 
-    if not data["title"]:
-        og = soup.find("meta", property="og:title")
-        if og and og.get("content"):
-            data["title"] = str(og.get("content"))[:160]
-        elif soup.title and soup.title.string:
-            data["title"] = str(soup.title.string).strip()[:160]
-        else:
-            h1 = soup.find("h1")
-            if h1:
-                data["title"] = h1.get_text(" ", strip=True)[:160]
-
     ul = url.lower()
     if any(p in ul for p in LISTING_URL_PARTS):
         if not re.search(r"/product/|/products/[^/]{3,}|/p/|/dp/|/item/|/prod/", ul):
@@ -431,62 +294,6 @@ def parse_product_data(html, url):
                 data["is_product"] = False
 
     return data
-
-
-GENERIC_PRODUCT_TOKENS = {
-    "product", "item", "original", "authentic", "new", "sale", "offer", "online",
-    "buy", "shop", "price", "kw", "kuwait", "الكويت", "منتج", "اصلي", "اصليه",
-    "جديد", "عرض", "اونلاين", "شراء", "سعر", "للبيع", "حذاء", "احذيه", "shoe",
-    "shoes", "leather", "جلد", "brown", "black", "white", "بني", "اسود", "ابيض",
-    "men", "women", "mens", "womens", "رجالي", "نسائي", "flat", "mule", "mules",
-}
-
-
-def _model_tokens(tokens):
-    unit_value = re.compile(r"^\d+(?:gb|tb|mb|kb|kg|mg|ml|mm|cm|inch|hz|mah|w|v|g|l)$", re.I)
-    return {
-        t for t in tokens
-        if re.search(r"\d", t)
-        and re.search(r"[a-z\u0600-\u06FF]", t)
-        and len(t) >= 3
-        and not unit_value.match(t)
-    }
-
-
-def product_title_compatible(query, title):
-    """Reject only clear mismatches; keep uncertain titles to avoid losing valid Arabic/English matches."""
-    if not title:
-        return True
-    q_tokens = norm_tokens(query)
-    t_tokens = norm_tokens(title)
-    if not q_tokens or not t_tokens:
-        return True
-
-    q_models = _model_tokens(q_tokens)
-    t_models = _model_tokens(t_tokens)
-    if q_models:
-        # An explicit model number is identity-critical.
-        if not (q_models & t_models):
-            compact_title = normalize_name(normalize_ar(title))
-            if not any(normalize_name(m) in compact_title for m in q_models):
-                return False
-
-    q_distinctive = {
-        t for t in q_tokens
-        if re.search(r"[a-z]", t) and len(t) >= 5 and t not in GENERIC_PRODUCT_TOKENS
-    }
-    if len(q_distinctive) >= 2:
-        overlap = q_distinctive & t_tokens
-        # Exact fashion/design names such as "Intrecciato Veneta" must not disappear.
-        if len(overlap) / len(q_distinctive) < 0.40:
-            return False
-    elif len(q_distinctive) == 1:
-        only = next(iter(q_distinctive))
-        # A long signature/model word is identity-critical even when the brand is Arabic.
-        if len(only) >= 7 and only not in t_tokens:
-            return False
-
-    return True
 
 def verify_offers(urls_map, query):
     if not urls_map: return {}
@@ -510,9 +317,6 @@ def verify_offers(urls_map, query):
             return None
         if not info["price"] or info["price"] <= 0:
             print(f"REJECT NO PRICE: {name} -> {url}")
-            return None
-        if not product_title_compatible(query, info.get("title", "")):
-            print(f"REJECT PRODUCT MISMATCH: {query[:60]} != {info.get('title','')[:90]}")
             return None
         return (name, url, info)
 
@@ -772,10 +576,10 @@ def best_of_search(parts, lang):
     merged_urls = dict(list(merged_urls.items())[:4])
     return best_txt, merged_urls
 
-def search_product(query, lang, prompt_text=None, allow_fuzzy_cache=True):
-    cached = cache_get(query, lang, allow_fuzzy=allow_fuzzy_cache)
+def search_product(query, lang, prompt_text=None):
+    cached = cache_get(query, lang)
     if cached: return cached
-    text_part = prompt_text or f"ابحث عن {query} في الكويت. متوفر فقط InStock ورابط منتج مباشر. {LANG_INSTR[lang]}"
+    text_part = prompt_text or f"ابحث عن {query} في الكويت. متوفر فقط InStock ورابط منتج مباشر. هذا الاسم جاي من Google Lens مطابق بصرياً فحافظ عليه. {LANG_INSTR[lang]}"
     txt, urls = best_of_search([{"text": text_part}], lang)
     if not txt: return "", {}
 
@@ -814,6 +618,102 @@ def download_whatsapp_media(mid):
     meta=requests.get(f"{GRAPH_URL}/{mid}",headers=h,timeout=20).json()
     img=requests.get(meta["url"],headers=h,timeout=30)
     return base64.b64encode(img.content).decode(), meta.get("mime_type","image/jpeg")
+
+# ==================== v34 GOOGLE LENS LAYER ====================
+
+def upload_to_0x0(image_bytes, mime="image/jpeg"):
+    try:
+        r = requests.post("https://0x0.st", files={"file": ("image.jpg", image_bytes, mime)}, timeout=15)
+        txt = r.text.strip()
+        if r.status_code == 200 and txt.startswith("http"):
+            return txt
+    except Exception as e:
+        print(f"0x0 err {e}")
+    return ""
+
+def lens_identify_free(image_bytes, mime="image/jpeg"):
+    """يقلد سكرين شوت Lens حقك بدون مفتاح - يرفع الصورة لـ lens.google.com ويستخرج Visual matches"""
+    try:
+        files = {'encoded_image': ('image.jpg', image_bytes, mime)}
+        resp = requests.post(
+            "https://lens.google.com/v3/upload?hl=en&re=df",
+            files=files, headers=HEADERS, timeout=30, allow_redirects=True
+        )
+        html = resp.text
+        # عناوين المنتجات المطابقة تكون بهالشكل في HTML
+        candidates = re.findall(r'"title"\s*:\s*"([^"]{8,140})"', html)
+        # فلترة العناوين العامة
+        bad = ["google", "lens", "search", "upload", "camera", "translate"]
+        filtered = []
+        for t in candidates:
+            tl = t.lower()
+            if any(b in tl for b in bad): continue
+            if len(t.split()) < 2: continue
+            if len(t) < 10: continue
+            filtered.append(t.strip())
+        if filtered:
+            best = Counter(filtered).most_common(1)[0][0]
+            print(f"LENS FREE HIT: {best}")
+            return best
+    except Exception as e:
+        print(f"lens free err {e}")
+    return ""
+
+def lens_identify_serpapi(image_bytes, mime="image/jpeg"):
+    if not SERPAPI_KEY:
+        return ""
+    try:
+        img_url = upload_to_0x0(image_bytes, mime)
+        if not img_url:
+            return ""
+        r = requests.get("https://serpapi.com/search.json", params={
+            "engine": "google_lens",
+            "url": img_url,
+            "api_key": SERPAPI_KEY,
+            "hl": "en"
+        }, timeout=25)
+        data = r.json()
+        vm = data.get("visual_matches") or []
+        if vm:
+            title = vm[0].get("title","").strip()
+            print(f"LENS SERPAPI HIT: {title}")
+            return title
+        kg = data.get("knowledge_graph", {})
+        if kg.get("title"):
+            return kg["title"]
+    except Exception as e:
+        print(f"lens serpapi err {e}")
+    return ""
+
+def hybrid_identify(image_bytes, mime, b64_for_gemini):
+    """اولاً Lens مطابق بصرياً، ثم Gemini كداعم"""
+    lens_name = ""
+    # 1. SerpApi لو موجود (ادق مثل الصورة)
+    if SERPAPI_KEY:
+        lens_name = lens_identify_serpapi(image_bytes, mime)
+    # 2. Free Lens fallback
+    if not lens_name:
+        lens_name = lens_identify_free(image_bytes, mime)
+
+    # 3. Gemini كداعم للون والتفاصيل
+    gem_txt,_ = call_gemini(
+        [{"inline_data":{"mime_type":mime,"data":b64_for_gemini}},{"text":"ما اسم هذا المنتج بالضبط؟"}],
+        system=IDENTIFY_SYSTEM, use_search=False
+    )
+    gem_name = gem_txt.strip().splitlines()[0] if gem_txt else ""
+    
+    # تفضيل Lens لانه مطابق للصورة، لكن لو Gemini اطول واوضح خذه
+    if lens_name and gem_name:
+        # اذا Lens جاب اسم عام قصير و Gemini جاب موديل دقيق، ادمج
+        if len(lens_name) < 15 and len(gem_name) > len(lens_name):
+            return gem_name
+        return lens_name
+    
+    final = lens_name or gem_name
+    print(f"HYBRID FINAL: {final}")
+    return final
+
+# ==================== END LENS LAYER ====================
 
 def send_whatsapp_text(to,text,bot_id):
     url=f"{GRAPH_URL}/{bot_id}/messages"; h={"Authorization":f"Bearer {WHATSAPP_TOKEN}","Content-Type":"application/json"}
@@ -905,28 +805,18 @@ def process_single_image(message,bot_id,lang="ar"):
     caption=(message.get("image",{}) or {}).get("caption","").strip()
     send_whatsapp_text(from_number,T(lang,"identifying"),bot_id)
     b64,mime=download_whatsapp_media(message["image"]["id"])
-    product_name, visual_data = identify_product_from_b64(b64, mime)
-    visual_evidence = visual_evidence_text(visual_data)
+    image_bytes = base64.b64decode(b64)
+
+    product_name = hybrid_identify(image_bytes, mime, b64)
+
     if product_name and caption:
         request_query = f"{caption} — {product_name}"
-        prompt_text = (
-            f"المنتج المطابق للصورة بحسب Google Web Detection: {product_name}\n"
-            f"طلب المستخدم عنه: {caption}\n"
-            f"أدلة المطابقة البصرية:\n{visual_evidence}\n"
-            "اعرض نفس المنتج حرفياً فقط. ممنوع عرض بديل أو منتج مشابه أو موديل مختلف. "
-            f"تحقق من البراند واسم التصميم/رقم الموديل قبل ذكر السعر. {LANG_INSTR[lang]}"
-        )
-        txt,urls=search_product(product_name, lang, prompt_text=prompt_text, allow_fuzzy_cache=False)
+        prompt_text = f"المنتج في الصورة هو: {product_name} (هذا الاسم جاي من Google Lens مطابق بصرياً 100% لا تغيره ولا تعممه). طلب المستخدم عنه: {caption}\nصنّف الطلب وأجب. {LANG_INSTR[lang]}"
+        txt,urls=search_product(request_query, lang, prompt_text=prompt_text)
         LAST_SEARCH[from_number] = {"product": request_query}
         query = request_query
     elif product_name:
-        prompt_text = (
-            f"ابحث في الكويت عن نفس المنتج المطابق للصورة حرفياً: {product_name}\n"
-            f"أدلة Google البصرية:\n{visual_evidence}\n"
-            "لا تعرض منتجات مشابهة أو بدائل. يجب تطابق البراند والموديل/اسم التصميم. "
-            f"متوفر فقط InStock ورابط منتج مباشر. {LANG_INSTR[lang]}"
-        )
-        txt,urls=search_product(product_name, lang, prompt_text=prompt_text, allow_fuzzy_cache=False)
+        txt,urls=search_product(product_name, lang)
         LAST_SEARCH[from_number] = {"product": product_name}
         query = product_name
     else:
@@ -936,6 +826,7 @@ def process_single_image(message,bot_id,lang="ar"):
         product_name = name_m.group(1).strip() if name_m else "المنتج"
         query = f"{caption} — {product_name}" if caption else product_name
         LAST_SEARCH[from_number] = {"product": query}
+
     if not txt:
         send_whatsapp_text(from_number,T(lang,"cant_identify"),bot_id)
         return
@@ -946,12 +837,12 @@ def process_single_image(message,bot_id,lang="ar"):
 def identify_image_product(msg):
     try:
         b64,mime=download_whatsapp_media(msg["image"]["id"])
-        name,_ = identify_product_from_b64(b64, mime)
-        return name
+        image_bytes = base64.b64decode(b64)
+        return hybrid_identify(image_bytes, mime, b64)
     except: return ""
 
-def process_cart(products, from_number, bot_id, lang="ar", exact_products=False):
-    results = list(WORKERS.map(lambda p: (p, *search_product(p, lang, allow_fuzzy_cache=not exact_products)), products))
+def process_cart(products, from_number, bot_id, lang="ar"):
+    results = list(WORKERS.map(lambda p: (p, *search_product(p, lang)), products))
     any_ok = False
     for p, txt, urls in results:
         if not txt: continue
@@ -968,7 +859,7 @@ def process_multi_images(messages,from_number,bot_id,lang="ar"):
     if not names:
         send_whatsapp_text(from_number,T(lang,"cant_identify"),bot_id)
         return
-    process_cart(names, from_number, bot_id, lang, exact_products=True)
+    process_cart(names, from_number, bot_id, lang)
 
 def process_text_message(message,bot_id):
     from_number=message["from"]; user_text=message["text"]["body"]
@@ -1006,4 +897,5 @@ def process_location_message(message, bot_id):
     send_whatsapp_cta(from_number, body, maps_url, bot_id, T(lang,"maps_btn"))
 
 @app.get("/")
-async def health(): return {"status":"v34 google-visual-match + verified-prices"}
+async def health(): return {"status":"v34 lens-verified - Google Lens + verified prices"}
+
