@@ -17,6 +17,13 @@ VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN", "MY_SECRET_COOP_BOT_TOKEN")
 GRAPH_URL = "https://graph.facebook.com/v20.0"
 GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
 
+# Google Cloud Vision API — نفس محرك Google Lens
+# فعّله: console.cloud.google.com ← Enable Cloud Vision API ← Create API Key
+# ضعه في Railway: GOOGLE_VISION_API_KEY=your_key
+# مجاني أول 1000 صورة/شهر، بعدها $3.5 لكل 1000
+VISION_API_KEY = os.environ.get("GOOGLE_VISION_API_KEY", "")
+VISION_URL = "https://vision.googleapis.com/v1/images:annotate"
+
 processed_ids = deque(maxlen=1000)
 IMAGE_BUFFER = defaultdict(lambda: {"images": [], "time": 0, "bot_id": ""})
 LAST_SEARCH = {}
@@ -937,52 +944,209 @@ def parse_ident(ident):
     full = f"{ar} {en}".strip()
     return ar, full
 
-def process_single_image(message,bot_id,lang="ar"):
-    from_number=message["from"]
-    caption=(message.get("image",{}) or {}).get("caption","").strip()
-    send_whatsapp_text(from_number,T(lang,"identifying"),bot_id)
-    b64,mime=download_whatsapp_media(message["image"]["id"])
-    ident,_=call_gemini([{"inline_data":{"mime_type":mime,"data":b64}},{"text":"ابحث عن هذا المنتج في جوجل وحدد اسمه التجاري الدقيق بسطرين: عربي ثم إنجليزي"}], system=IDENTIFY_SYSTEM, use_search=True)
-    product_name, product_full = parse_ident(ident)
-    img = [{"inline_data": {"mime_type": mime, "data": b64}}]  # نفس الصورة تنضاف لكل بحث (Google Lens approach)
+# ===== Google Lens: ترسل الصورة مباشرة لجوجل وياخذ نتائجه =====
 
-    if product_name and caption:
-        request_query = f"{caption} — {product_full}"
-        prompt_text = (f"الصورة تظهر: {product_full}\n"
-                       f"طلب المستخدم عنه: {caption}\n"
-                       f"صنّف الطلب وأجب. استخدم الصورة للتأكد من النوع الدقيق. {LANG_INSTR[lang]}")
-        txt,urls=search_product(request_query, lang, prompt_text=prompt_text, image_parts=img)
-        LAST_SEARCH[from_number] = {"product": request_query}
-        query = request_query
-    elif product_name:
-        # البحث البصري: نبعث الصورة + الاسم = Gemini يطابق بصرياً مثل Google Lens
-        prompt_text = (f"الصورة تظهر: {product_full}\n"
-                       f"ابحث عن هذا المنتج تحديداً في الكويت — استخدم الصورة للتأكد من النوع الدقيق "
-                       f"(مثلاً: سليبر/mules مو sneakers). InStock فقط، رابط منتج مباشر، حتى 6 متاجر. {LANG_INSTR[lang]}")
-        txt,urls=search_product(product_full, lang, prompt_text=prompt_text, image_parts=img)
-        LAST_SEARCH[from_number] = {"product": product_full}
-        query = product_full
-    else:
-        req = caption if caption else "ما هذا المنتج؟ ابحث عن سعره الحالي في الكويت."
-        txt,urls=best_of_search([{"inline_data":{"mime_type":mime,"data":b64}},{"text":f"{req} {LANG_INSTR[lang]}"}], lang)
-        name_m = re.search(r"📦\s*(.+)", txt or "")
-        product_name = name_m.group(1).strip() if name_m else "المنتج"
-        query = f"{caption} — {product_name}" if caption else product_name
+def google_lens_search(b64):
+    """
+    يرسل الصورة لـ Google Cloud Vision Web Detection — نفس محرك Google Lens.
+    يرجع: اسم المنتج الدقيق (إنجليزي) + روابط صفحات تبيعه (جوجل أكد تطابقها بصرياً).
+    إذا ما في مفتاح API يرجع None والبوت يرجع لـ Gemini.
+    """
+    if not VISION_API_KEY:
+        return None
+    payload = {
+        "requests": [{
+            "image": {"content": b64},
+            "features": [{"type": "WEB_DETECTION", "maxResults": 20}]
+        }]
+    }
+    try:
+        r = requests.post(f"{VISION_URL}?key={VISION_API_KEY}", json=payload, timeout=15)
+        if not r.ok:
+            print(f"Vision API {r.status_code}: {r.text[:200]}")
+            return None
+        ann = r.json()["responses"][0].get("webDetection", {})
+
+        # أفضل تخمين جوجل للمنتج — هذا هو Google Lens identification
+        labels = [e["label"] for e in ann.get("bestGuessLabels", [])]
+        product_en = labels[0] if labels else ""
+
+        # كيانات المنتج (براند، اسم، فئة) مرتبة بالثقة
+        entities = [e["description"] for e in
+                    sorted(ann.get("webEntities", []), key=lambda x: x.get("score", 0), reverse=True)
+                    if e.get("score", 0) > 0.4]
+
+        # الصفحات اللي جوجل أكد بصرياً إن فيها نفس المنتج — هذه ذهب خالص
+        pages = [p["url"] for p in ann.get("pagesWithMatchingImages", []) if p.get("url")]
+
+        print(f"LENS: label={product_en} | entities={entities[:3]} | pages={len(pages)}")
+        return {
+            "product_en": product_en,
+            "entities": entities[:6],
+            "page_urls": pages[:15]
+        }
+    except Exception as e:
+        print(f"Vision API exception: {e}")
+        return None
+
+def translate_to_arabic(text_en):
+    """ترجمة سريعة للعربي — مكالمة Gemini صغيرة بدون بحث"""
+    if not text_en: return ""
+    txt, _ = call_gemini(
+        [{"text": f"ترجم هذا الاسم للعربي (سطر واحد فقط: براند + نوع المنتج الدقيق + اللون/المواصفات): {text_en}"}],
+        system="أجب بسطر عربي واحد فقط. بدون شرح.",
+        use_search=False
+    )
+    return (txt or "").strip().splitlines()[0].strip() or text_en
+
+def lens_urls_to_verified(product_name, page_urls, lang):
+    """
+    يحوّل روابط Google Lens مباشرة لنتائج موثقة.
+    جوجل أكد بصرياً أن هذه الصفحات تبيع نفس المنتج،
+    فلا نحتاج match judge — فقط نتحقق من السعر والتوفر.
+    """
+    if not page_urls:
+        return {}, {}
+
+    # نبني قاموس اسم المتجر → URL
+    urls_map = {}
+    for url in page_urls:
+        host = url_host_key(url)
+        disp = DOMAIN_DISPLAY.get(host, host.capitalize() if host else "")
+        if disp and disp not in urls_map:
+            urls_map[disp] = url
+
+    if not urls_map:
+        return {}, {}
+
+    # تحقق من الأسعار والتوفر (آليتنا الصارمة — بدون match judge لأن جوجل وثّق المطابقة)
+    verified = verify_offers(urls_map, product_name)
+
+    # دمج التكرار لكل دومين
+    by_dom = {}
+    for name, info in verified.items():
+        dom = url_host_key(info["url"]) or info["url"]
+        if dom not in by_dom or info["price"] < by_dom[dom][1]["price"]:
+            by_dom[dom] = (name, info)
+
+    return by_dom, urls_map
+
+def process_single_image(message, bot_id, lang="ar"):
+    from_number = message["from"]
+    caption = (message.get("image", {}) or {}).get("caption", "").strip()
+    send_whatsapp_text(from_number, T(lang, "identifying"), bot_id)
+    b64, mime = download_whatsapp_media(message["image"]["id"])
+
+    # ================================================================
+    # المسار الأول: Google Lens مباشرة
+    # ================================================================
+    lens = google_lens_search(b64)
+
+    if lens and lens["product_en"]:
+        product_en = lens["product_en"]
+        product_ar = translate_to_arabic(product_en)
+        product_full = f"{product_ar} {product_en}".strip()
+        query = f"{caption} — {product_full}" if caption else product_full
         LAST_SEARCH[from_number] = {"product": query}
+
+        if caption:
+            # طلب مكتوب + صورة: بحث بالنص الموجّه
+            prompt = (f"المنتج في الصورة: {product_full}\n"
+                      f"طلب المستخدم: {caption}\nصنّف وأجب. {LANG_INSTR[lang]}")
+            txt, urls = search_product(query, lang, prompt_text=prompt)
+        else:
+            # صورة فقط: استخدم روابط Google Lens أولاً (جوجل وثّق تطابقها)
+            by_dom, raw_urls = lens_urls_to_verified(product_full, lens["page_urls"], lang)
+
+            if len(by_dom) >= 2:
+                # بنينا نتائج من Google Lens مباشرة — لا حاجة لبحث إضافي
+                cur = "د.ك" if lang == "ar" else "KWD"
+                sorted_v = sorted(by_dom.values(), key=lambda x: x[1]["price"])[:TARGET_RESULTS]
+                lines = [f"📦 {product_ar}", ""]
+                new_urls = {}
+                for i, (name, info) in enumerate(sorted_v):
+                    disp = display_store_name(name, info["url"])
+                    lines.append(f"{'✅' if i == 0 else '•'} {disp} — {format_price(info['price'])} {cur}")
+                    new_urls[disp] = info["url"]
+                # تكملة من بحث نصي إذا أقل من 4
+                if len(sorted_v) < TARGET_RESULTS:
+                    txt2, _ = search_product(product_full, lang)
+                    need = TARGET_RESULTS - len(sorted_v)
+                    seen = {normalize_name(normalize_ar(n)) for n in new_urls}
+                    for o in extract_store_offers(txt2):
+                        if is_placeholder_name(o["name"]) or is_junk_store(o["name"]): continue
+                        nn = normalize_name(normalize_ar(o["name"]))
+                        if not nn or any((nn in s or s in nn) for s in seen if s): continue
+                        line = re.sub(r"^\s*(?:✅|🏆)\s*", "", o["line"])
+                        line = re.sub(r"(\d+(?:\.\d+)?)(\s*(?:د\.?\s*ك|KWD|KD))", r"~\1\2", line, count=1)
+                        lines.append(f"• {line}")
+                        seen.add(nn)
+                        if len(lines) - 2 - len(sorted_v) >= need: break
+                    if len(lines) > len(sorted_v) + 2:
+                        lines.append(T(lang, "approx_note"))
+                cache_put(product_full, lang, "\n".join(lines), new_urls)
+                txt, urls = "\n".join(lines), new_urls
+            else:
+                # روابط Lens غير كافية — ابحث نصياً بالاسم الدقيق
+                txt, urls = search_product(product_full, lang)
+
+        product_name = product_ar
+
+    # ================================================================
+    # المسار الثاني: Fallback — Gemini مع بحث (إذا ما في Vision API key)
+    # ================================================================
+    else:
+        ident, _ = call_gemini(
+            [{"inline_data": {"mime_type": mime, "data": b64}},
+             {"text": "ابحث عن هذا المنتج في جوجل وحدد اسمه التجاري الدقيق بسطرين: عربي ثم إنجليزي"}],
+            system=IDENTIFY_SYSTEM, use_search=True
+        )
+        product_name, product_full = parse_ident(ident)
+
+        if product_name and caption:
+            query = f"{caption} — {product_full}"
+            prompt = (f"المنتج في الصورة: {product_full}\n"
+                      f"طلب المستخدم: {caption}\nصنّف وأجب. {LANG_INSTR[lang]}")
+            txt, urls = search_product(query, lang, prompt_text=prompt)
+        elif product_name:
+            query = product_full
+            txt, urls = search_product(product_full, lang)
+        else:
+            req = caption if caption else "ما هذا المنتج؟ ابحث عن سعره الحالي في الكويت."
+            txt, urls = best_of_search(
+                [{"inline_data": {"mime_type": mime, "data": b64}},
+                 {"text": f"{req} {LANG_INSTR[lang]}"}], lang)
+            name_m = re.search(r"📦\s*(.+)", txt or "")
+            product_name = name_m.group(1).strip() if name_m else "المنتج"
+            query = f"{caption} — {product_name}" if caption else product_name
+
+        LAST_SEARCH[from_number] = {"product": query}
+
     if not txt:
-        send_whatsapp_text(from_number,T(lang,"cant_identify"),bot_id)
+        send_whatsapp_text(from_number, T(lang, "cant_identify"), bot_id)
         return
-    need_map = send_product_result(from_number, txt, urls, bot_id, lang, query)
-    if need_map and product_name and product_name!= "المنتج":
-        send_maps_button(from_number, query, bot_id, lang)
+    need_map = send_product_result(from_number, txt, urls, bot_id, lang,
+                                   LAST_SEARCH[from_number]["product"])
+    if need_map and product_name and product_name != "المنتج":
+        send_maps_button(from_number, LAST_SEARCH[from_number]["product"], bot_id, lang)
 
 def identify_image_product(msg):
+    """يحدد المنتج من صورة — Google Lens أولاً، Gemini كاحتياط"""
     try:
-        b64,mime=download_whatsapp_media(msg["image"]["id"])
-        ident,_=call_gemini([{"inline_data":{"mime_type":mime,"data":b64}},{"text":"ابحث عن هذا المنتج في جوجل وحدد اسمه التجاري الدقيق بسطرين: عربي ثم إنجليزي"}], system=IDENTIFY_SYSTEM, use_search=True)
+        b64, mime = download_whatsapp_media(msg["image"]["id"])
+        lens = google_lens_search(b64)
+        if lens and lens["product_en"]:
+            ar = translate_to_arabic(lens["product_en"])
+            return f"{ar} {lens['product_en']}".strip()
+        ident, _ = call_gemini(
+            [{"inline_data": {"mime_type": mime, "data": b64}},
+             {"text": "ابحث عن هذا المنتج في جوجل وحدد اسمه التجاري الدقيق بسطرين: عربي ثم إنجليزي"}],
+            system=IDENTIFY_SYSTEM, use_search=True
+        )
         _, full = parse_ident(ident)
         return full
-    except: return ""
+    except Exception as e:
+        print(f"identify err {e}"); return ""
 
 def process_cart(products, from_number, bot_id, lang="ar"):
     results = list(WORKERS.map(lambda p: (p, *search_product(p, lang)), products))
