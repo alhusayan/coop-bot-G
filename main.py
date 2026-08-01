@@ -24,19 +24,23 @@ USER_LANG = {}
 PENDING_IMAGES = defaultdict(lambda: {"images": [], "bot_id": ""})
 
 BUFFER_SECONDS = 4
-RESOLVER = ThreadPoolExecutor(max_workers=6)
-WORKERS = ThreadPoolExecutor(max_workers=3)
-SEARCH_POOL = ThreadPoolExecutor(max_workers=8)
+RESOLVER = ThreadPoolExecutor(max_workers=8)
+WORKERS = ThreadPoolExecutor(max_workers=5)
+SEARCH_POOL = ThreadPoolExecutor(max_workers=10)
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
 SEARCH_CACHE = {}
 CACHE_TTL = int(os.environ.get("CACHE_TTL_HOURS", "2")) * 3600
-CACHE_MAX = 500
-CACHE_MIN_STORES = 1 # بعد التحقق، متجر واحد موثوق كافي
+CACHE_MAX = 800
+CACHE_MIN_STORES = 1
 CACHE_MIN_LINKS = 1
 
-# ===== كاش صفحات المتاجر المتحقق منها =====
-VERIFIED_PAGE_CACHE = {} # url -> {"data": {...}, "ts":...}
+# ===== جديد: للنتائج الاكثر =====
+MAX_STORES = 7
+MAX_URLS_MERGED = 10
+SEARCH_RUNS = int(os.environ.get("SEARCH_RUNS", "6"))
+
+VERIFIED_PAGE_CACHE = {}
 OOS_PHRASES = ["out of stock","غير متوفر","نفدت الكمية","غير متاح","sold out","غير متوفر حاليا","نفذت","not available","temporarily unavailable"]
 LISTING_URL_PARTS = ["/search","/s?","/category","/categories","/collection","/collections","/shop/category","?q=","/search_results","/shop/","/listing","/c/"]
 
@@ -174,6 +178,11 @@ SYSTEM_PROMPT = """
 ✅ [المتجر الأرخص] — [السعر] د.ك
 • [المتجر الثاني] — [السعر] د.ك
 • [المتجر الثالث] — [السعر] د.ك
+• [المتجر الرابع] — [السعر] د.ك
+• [المتجر الخامس] — [السعر] د.ك
+• [المتجر السادس] — [السعر] د.ك
+
+حاول تجيب 5 الى 7 متاجر مختلفة اذا تقدر: Xcite, Eureka, Blink, Noon, Jarir, Lulu, Carrefour, Amazon.ae, Best Al-Yousifi
 
 🛒 مصدر العروض ClicFlyer — قاعدة إلزامية لمنتجات التموينات:
 لأي منتج بقالة أو تموينات (أغذية، مشروبات، منظفات، عناية شخصية)، نفّذ دائماً بحثاً إضافياً في clicflyer.com (استخدم site:clicflyer.com مع اسم المنتج).
@@ -185,6 +194,8 @@ SYSTEM_PROMPT = """
 🏆 [اسم الخيار الأفضل + مكانه/متجره] — [السعر] د.ك ⭐ [التقييم من 5]
 • [خيار ثاني] — [السعر] د.ك ⭐ [التقييم]
 • [خيار ثالث] — [السعر] د.ك ⭐ [التقييم]
+• [خيار رابع] — [السعر] د.ك ⭐ [التقييم]
+• [خيار خامس] — [السعر] د.ك ⭐ [التقييم]
 
 【الحالة 3】طلب خدمة (فني، بنشر، تبديل بطارية، سباك...):
 📦 [وصف الخدمة + المنطقة]
@@ -195,11 +206,11 @@ SYSTEM_PROMPT = """
 【الحالة 4】سؤال معلوماتي عن منتج (المكونات، السعرات، المواصفات...):
 أجب على السؤال نفسه مباشرة — لا تعرض مقارنة أسعار.
 
-قواعد جودة صارمة جداً (مخالفتها فشل):
-- اذكر فقط المنتجات المتوفرة فعلاً InStock. إذا كان المنتج غير متوفر لا تذكره إطلاقاً.
-- رابط كل متجر يجب أن يكون رابط صفحة منتج مباشر (صفحة فيها منتج واحد وسعر واحد). ممنوع منعاً باتاً روابط الصفحة الرئيسية أو /search أو /category أو /collections أو /shop أو صفحات نتائج البحث.
+قواعد جودة صارمة جداً:
+- اذكر فقط المنتجات المتوفرة فعلاً InStock.
+- رابط كل متجر يجب أن يكون رابط صفحة منتج مباشر (صفحة فيها منتج واحد وسعر واحد). ممنوع روابط الصفحة الرئيسية أو /search أو /category
 - لا تخترع سعراً، انسخ السعر كما يظهر في نتيجة البحث اليوم.
-- إذا لم تجد 3 متاجر، اذكر 1 أو 2 فقط ولا تخترع الباقي.
+- حاول تجيب 5 متاجر على الأقل، اذا ما لقيت اذكر الموجود ولا تخترع.
 
 في الحالات 1 و2 و3، سطر أخير إلزامي:
 LINKS: اسم الأول=الدومين الحقيقي, اسم الثاني=الدومين الحقيقي
@@ -218,7 +229,6 @@ MAPS_CATEGORY_SYSTEM = """أنت خبير تسوق في السوق الكويت�
 - للخدمات: نوع الخدمة بالعربي والإنجليزي مثل (بنشر Tyre repair)
 أعطني عبارة البحث فقط."""
 
-# ===== طبقة التحقق من الصفحة الحقيقية =====
 def fetch_html(url):
     if not url or not url.startswith("http"): return ""
     try:
@@ -234,14 +244,12 @@ def parse_product_data(html, url):
     soup = BeautifulSoup(html, 'lxml')
     data = {"price": None, "available": True, "is_product": True, "title": ""}
     ld_products = 0
-
     for script in soup.find_all("script", type="application/ld+json"):
         try:
             raw = script.string
             if not raw: continue
             j = json.loads(raw)
             objs = j if isinstance(j, list) else [j]
-            # flatten @graph
             flat = []
             for o in objs:
                 if isinstance(o, dict) and o.get("@graph"):
@@ -265,33 +273,22 @@ def parse_product_data(html, url):
                     if not data["title"]:
                         data["title"] = str(obj.get("name",""))[:80]
         except: continue
-
-    # اذا الصفحة فيها اكثر من 4 منتجات = صفحة قائمة
     if ld_products >= 4:
         data["is_product"] = False
-
-    # تحقق نصي للـ OOS
     low_text = soup.get_text(" ", strip=True).lower()[:6000]
     if any(ph in low_text for ph in OOS_PHRASES):
-        # تأكد انه مو "متوفر" و "غير متوفر" بنفس الصفحة - نعطي اولوية لـ OOS اذا تكررت
         if low_text.count("غير متوفر") > 0 or low_text.count("out of stock") > 0:
             data["available"] = False
-
-    # fallback سعر من meta
     if not data["price"]:
         m = soup.find("meta", property="product:price:amount")
         if m and m.get("content"):
             try: data["price"] = float(m["content"])
             except: pass
-
-    # لو الرابط واضح انه قائمة
     ul = url.lower()
     if any(p in ul for p in LISTING_URL_PARTS):
-        # استثناء: روابط المنتجات الحقيقية غالباً فيها /product/ /p/ /dp/ /item/
         if not re.search(r"/product/|/products/[^/]{3,}|/p/|/dp/|/item/|/prod/", ul):
             if ld_products!= 1:
                 data["is_product"] = False
-
     return data
 
 def verify_offers(urls_map, query):
@@ -317,9 +314,7 @@ def verify_offers(urls_map, query):
         if not info["price"] or info["price"] <= 0:
             print(f"REJECT NO PRICE: {name} -> {url}")
             return None
-        # فلتر منطقي للسعر - اذا المنتج نظارة وسعره 0.5 دك اكيد غلط
         return (name, url, info)
-
     results = list(RESOLVER.map(_check, urls_map.items()))
     for r in results:
         if r:
@@ -373,7 +368,7 @@ def extract_store_names(text):
         if m:
             name = m.group(1).strip()
             if name and name not in stores: stores.append(name)
-    return stores[:5]
+    return stores[:MAX_STORES]
 
 def is_service_answer(txt): return bool(re.search(r"(?:🏆|•)\s*.+?\(\s*(?:هاتف|Phone|phone|Tel|tel)\s*:", txt or ""))
 def extract_store_offers(txt):
@@ -387,7 +382,7 @@ def extract_store_offers(txt):
         best = m.group(1) in ("✅", "🏆")
         body = s if best else s.lstrip("•").strip()
         offers.append({"line": body, "name": name, "best": best})
-    return offers[:4]
+    return offers[:MAX_STORES]
 
 def product_title(txt, fallback=""):
     m = re.search(r"^\s*📦\s*(.+)$", txt or "", flags=re.M)
@@ -450,7 +445,7 @@ def call_gemini(parts, system=SYSTEM_PROMPT, use_search=True):
     payload = {
         "systemInstruction": {"parts": [{"text": system}]},
         "contents": [{"role": "user", "parts": parts}],
-        "generationConfig": {"temperature": 0, "maxOutputTokens": 2000},
+        "generationConfig": {"temperature": 0, "maxOutputTokens": 2500},
     }
     if use_search: payload["tools"] = [{"google_search": {}}]
     try:
@@ -478,9 +473,9 @@ def call_gemini(parts, system=SYSTEM_PROMPT, use_search=True):
         metadata = cand.get("groundingMetadata", {}) or {}
         chunks = metadata.get("groundingChunks", []) or []
         uris = [(c.get("web") or {}).get("uri", "") for c in chunks]
-        finals = resolve_all(uris[:15]) if uris else []
+        finals = resolve_all(uris[:20]) if uris else []
         records = []
-        for i, chunk in enumerate(chunks[:15]):
+        for i, chunk in enumerate(chunks[:20]):
             web = chunk.get("web") or {}
             raw_uri = web.get("uri", "")
             final_uri = finals[i] if i < len(finals) else raw_uri
@@ -513,15 +508,6 @@ def call_gemini(parts, system=SYSTEM_PROMPT, use_search=True):
                     break
         for store in stores:
             if store in urls_map: continue
-            store_norm = normalize_name(store)
-            for rec in records:
-                if rec["url"] and store_norm and store_norm in normalize_name(rec["title"]):
-                    if rec["url"] not in used_urls:
-                        urls_map[store] = rec["url"]
-                        used_urls.add(rec["url"])
-                        break
-        for store in stores:
-            if store in urls_map: continue
             dom = store_domain(store)
             if not dom: continue
             key = domain_key(dom)
@@ -531,7 +517,7 @@ def call_gemini(parts, system=SYSTEM_PROMPT, use_search=True):
                     urls_map[store] = rec["url"]
                     used_urls.add(rec["url"])
                     break
-        if not urls_map:
+        if len(urls_map) < MAX_STORES:
             for rec in records:
                 url = rec["url"]
                 if not url or url in used_urls: continue
@@ -539,8 +525,8 @@ def call_gemini(parts, system=SYSTEM_PROMPT, use_search=True):
                 if label not in urls_map:
                     urls_map[label] = url
                     used_urls.add(url)
-                if len(urls_map) == 3: break
-        return text, dict(list(urls_map.items())[:4])
+                if len(urls_map) >= MAX_STORES: break
+        return text, dict(list(urls_map.items())[:MAX_STORES])
     except Exception as e:
         print(f"Gemini err {e}"); return "", {}
 
@@ -552,12 +538,11 @@ def source_label(title, url):
         return host.split(".")[0] or "المتجر"
     except: return "المتجر"
 
-SEARCH_RUNS = int(os.environ.get("SEARCH_RUNS", "4"))
 def answer_score(txt, urls):
     stores, links = result_quality(txt, urls)
     return stores * 2 + links * 3 + (1 if txt and "📦" in txt else 0)
 
-def best_of_search(parts, lang):
+def best_of_search(parts, lang="ar"):
     try:
         futs = [SEARCH_POOL.submit(call_gemini, parts) for _ in range(SEARCH_RUNS)]
         results = [f.result() for f in futs]
@@ -573,42 +558,72 @@ def best_of_search(parts, lang):
         for n, link in u.items():
             if n not in merged_urls and link not in merged_urls.values():
                 merged_urls[n] = link
-    merged_urls = dict(list(merged_urls.items())[:4])
+    merged_urls = dict(list(merged_urls.items())[:MAX_URLS_MERGED])
     return best_txt, merged_urls
 
 def search_product(query, lang, prompt_text=None):
     cached = cache_get(query, lang)
     if cached: return cached
-    text_part = prompt_text or f"ابحث عن {query} في الكويت. متوفر فقط InStock ورابط منتج مباشر. {LANG_INSTR[lang]}"
-    txt, urls = best_of_search([{"text": text_part}], lang)
-    if not txt: return "", {}
 
-    # اذا خدمة أو سؤال معلوماتي - لا نحتاج تحقق اسعار
-    if is_service_answer(txt) or not extract_store_offers(txt):
-        stores, links = result_quality(txt, urls)
-        if len(txt) >= 80:
-            cache_put(query, lang, txt, urls)
-        return txt, urls
+    base_prompt = prompt_text or f"ابحث عن {query} في الكويت. متوفر فقط InStock ورابط منتج مباشر. {LANG_INSTR[lang]}"
 
-    # تحقق حقيقي من الصفحات
-    verified = verify_offers(urls, query)
+    variants = [
+        base_prompt,
+        f"{query} افضل سعر في الكويت Xcite Eureka Blink Noon Jarir Amazon Lulu Carrefour - قارن الاسعار {LANG_INSTR[lang]}",
+        f"{query} شراء اونلاين الكويت سعر متوفر {LANG_INSTR[lang]}",
+    ]
+    q_norm = normalize_ar(query)
+    grocery_words = ["بيبسي","شيبس","حليب","قهوه","قهوة","شاي","سكر","رز","زيت","صابون","شامبو","برينجلز","كيتكات","نسكافيه","تونه","ماء","عصير","بسكوت"]
+    if any(w in q_norm for w in grocery_words):
+        variants.append(f"site:clicflyer.com {query} عروض الكويت {LANG_INSTR[lang]}")
+
+    futs = []
+    for v in variants:
+        futs.append(SEARCH_POOL.submit(call_gemini, [{"text": v}]))
+        futs.append(SEARCH_POOL.submit(call_gemini, [{"text": v}]))
+
+    results = []
+    for f in futs:
+        try:
+            t,u = f.result(timeout=90)
+            if t: results.append((t,u))
+        except: pass
+
+    if not results: return "", {}
+
+    results_sorted = sorted(results, key=lambda r: answer_score(r[0], r[1]), reverse=True)
+    best_txt = results_sorted[0][0]
+
+    merged_urls = {}
+    for _, u in results_sorted:
+        for k,v in u.items():
+            if k not in merged_urls and v not in merged_urls.values():
+                merged_urls[k] = v
+    merged_urls = dict(list(merged_urls.items())[:MAX_URLS_MERGED])
+
+    if is_service_answer(best_txt) or not extract_store_offers(best_txt):
+        if len(best_txt) >= 80:
+            cache_put(query, lang, best_txt, merged_urls)
+        return best_txt, merged_urls
+
+    verified = verify_offers(merged_urls, query)
     if verified:
         sorted_v = sorted(verified.items(), key=lambda x: x[1]["price"])
-        title = product_title(txt, query)
+        title = product_title(best_txt, query)
         lines = [title, ""]
         new_urls = {}
-        for i, (name, info) in enumerate(sorted_v[:4]):
+        for i, (name, info) in enumerate(sorted_v[:MAX_STORES]):
             prefix = "✅" if i == 0 else "•"
             lines.append(f"{prefix} {name} — {format_price(info['price'])} د.ك")
             new_urls[name] = info["url"]
         final_txt = "\n".join(lines)
         cache_put(query, lang, final_txt, new_urls)
-        print(f"VERIFIED OK: {query} -> {len(new_urls)} stores")
+        print(f"VERIFIED OK: {query} -> {len(new_urls)} stores from {len(merged_urls)} raw")
         return final_txt, new_urls
     else:
-        print(f"VERIFIED FAIL - all links rejected for: {query}")
-        # لا نحفظ بالكاش - نرجع الاصلي كـ fallback لكن بدون كاش
-        return txt, urls
+        print(f"VERIFIED FAIL - returning raw merged for: {query}")
+        cache_put(query, lang, best_txt, merged_urls)
+        return best_txt, merged_urls
 
 def extract_products(text):
     text=re.sub(r'^[•\-\*\d\.\)\s]+','',text,flags=re.M)
@@ -801,4 +816,4 @@ def process_location_message(message, bot_id):
     send_whatsapp_cta(from_number, body, maps_url, bot_id, T(lang,"maps_btn"))
 
 @app.get("/")
-async def health(): return {"status":"v31 verified-prices - listing & OOS filtered"}
+async def health(): return {"status":"v32 more-results - 7 stores merged verified + fallback"}
