@@ -22,6 +22,7 @@ IMAGE_BUFFER = defaultdict(lambda: {"images": [], "time": 0, "bot_id": ""})
 LAST_SEARCH = {}
 USER_LANG = {}
 PENDING_IMAGES = defaultdict(lambda: {"images": [], "bot_id": ""})
+PENDING_ALT = {}  # from_number -> {"product":...} بانتظار رد نعم/لا على عرض البديل
 
 BUFFER_SECONDS = 4
 RESOLVER = ThreadPoolExecutor(max_workers=10)  # رفعناها: نتحقق من 8-10 صفحات بالتوازي
@@ -137,6 +138,12 @@ MSG = {
         "no_saved_product": "ما عندي منتج محفوظ حالياً 😅. ابحث عن منتج أول، وبعدها أدلك على أقرب مكان يبيعه!",
         "lang_saved": "تمام، بكلمك عربي من هني ورايح 🇰🇼\nدز صورة منتج أو اكتب اسمه وأنا حاضر!",
         "approx_note": "(~ سعر تقريبي من البحث غير مؤكد)",
+        "alt_ask": "😕 ({p})\n\nهذا المنتج غير متوفر حالياً بالمتاجر المعتمدة في الكويت.\n\nتبي أدور لك أقرب بديل له؟ 👇",
+        "alt_yes_btn": "نعم دور بديل ✅",
+        "alt_no_btn": "لا شكراً",
+        "alt_searching": "🔍 تمام، أدور لك أقرب بديل متوفر...",
+        "alt_found": "🔁 هذا أقرب بديل متوفر لقيته:",
+        "alt_ok": "تمام 👍 إذا تبي أي شي ثاني أنا حاضر!",
     },
     "en": {
         "identifying": "One sec.. identifying the product and finding you the best deal!",
@@ -151,6 +158,12 @@ MSG = {
         "no_saved_product": "I don't have a saved product yet 😅. Search for a product first, then I'll point you to the nearest store!",
         "lang_saved": "Great, I'll speak English with you from now on 🇬🇧\nSend a product photo or type its name and I'm on it!",
         "approx_note": "(~ approximate price from search, unverified)",
+        "alt_ask": "😕 ({p})\n\nThis product isn't currently available at approved stores in Kuwait.\n\nWant me to find the closest alternative? 👇",
+        "alt_yes_btn": "Yes, find one ✅",
+        "alt_no_btn": "No thanks",
+        "alt_searching": "🔍 On it, looking for the closest in-stock alternative...",
+        "alt_found": "🔁 Here's the closest available alternative I found:",
+        "alt_ok": "Got it 👍 I'm here if you need anything else!",
     },
 }
 
@@ -416,6 +429,42 @@ def extract_store_names(text):
     return stores[:8]
 
 def is_service_answer(txt): return bool(re.search(r"(?:🏆|•)\s*.+?\(\s*(?:هاتف|Phone|phone|Tel|tel)\s*:", txt or ""))
+
+# ===== كشف "المنتج غير متوفر" وعرض البديل =====
+UNAVAIL_RX = re.compile(r"(غير متوفر|غير متاح|لم أجد|لم اجد|ما لقيت|لا يتوفر|not available|couldn't find|could not find|out of stock|no stock)", re.I)
+
+def is_unavailable_answer(txt):
+    """رد بدون أي أسعار وفيه عبارة عدم توفر = المنتج مو موجود بالمتاجر"""
+    return bool(txt) and not extract_store_offers(txt) and bool(UNAVAIL_RX.search(txt))
+
+def offer_alternative(from_number, product, bot_id, lang):
+    """يسأل العميل بأزرار نعم/لا إذا يبي أقرب بديل — ما نسأل مرتين (البديل مالله بديل)"""
+    if (product or "").startswith("بديل "):
+        send_whatsapp_text(from_number, T(lang, "not_found"), bot_id)
+        return
+    PENDING_ALT[from_number] = {"product": product}
+    send_whatsapp_buttons(from_number, T(lang, "alt_ask", p=product), [
+        {"id": "alt_yes", "title": T(lang, "alt_yes_btn")},
+        {"id": "alt_no", "title": T(lang, "alt_no_btn")},
+    ], bot_id)
+
+def run_alternative_search(from_number, product, bot_id, lang):
+    """البحث عن أقرب بديل متوفر وعرضه بنفس شكل المنتجات (تحقق + أزرار + خريطة)"""
+    send_whatsapp_text(from_number, T(lang, "alt_searching"), bot_id)
+    alt_query = f"بديل {product}"
+    prompt = (f"المنتج التالي غير متوفر في متاجر الكويت: ({product}).\n"
+              f"مهمتك: ابحث عن أقرب منتج بديل له متوفر فعلاً InStock في متاجر الكويت الإلكترونية — "
+              f"نفس نوع المنتج ونفس الاستخدام والحجم تقريباً، من براند آخر أو موديل مشابه.\n"
+              f"رد بتنسيق مقارنة الأسعار المعتاد بالضبط: 📦 اسم المنتج البديل ثم قائمة المتاجر بالأسعار، "
+              f"مع سطر LINKS بأسماء المتاجر الحقيقية ودوميناتها. {LANG_INSTR[lang]}")
+    txt, urls = search_product(alt_query, lang, prompt_text=prompt)
+    if txt and extract_store_offers(txt):
+        send_whatsapp_text(from_number, T(lang, "alt_found"), bot_id)
+    LAST_SEARCH[from_number] = {"product": alt_query}
+    need_map = send_product_result(from_number, txt, urls, bot_id, lang, alt_query)
+    if need_map:
+        send_maps_button(from_number, alt_query, bot_id, lang)
+
 def extract_store_offers(txt):
     offers = []
     for line in (txt or "").splitlines():
@@ -462,13 +511,18 @@ def send_maps_button(from_number, product, bot_id, lang):
 
 def send_product_result(from_number, txt, urls, bot_id, lang, query, best_only=False):
     if not txt:
-        send_whatsapp_text(from_number, T(lang, "not_found"), bot_id)
+        # ما رجع شي أصلاً — نعتبره غير متوفر ونعرض البديل
+        offer_alternative(from_number, query, bot_id, lang)
         return False
     if is_service_answer(txt):
         send_whatsapp_text(from_number, txt, bot_id)
         return True
     offers = extract_store_offers(txt)
     if not offers:
+        if is_unavailable_answer(txt):
+            # المنتج غير متوفر: ما نعرض اعتذار Gemini — نسأل العميل إذا يبي بديل
+            offer_alternative(from_number, query, bot_id, lang)
+            return False
         send_whatsapp_text(from_number, txt, bot_id)
         return False
     title = product_title(txt, query)
@@ -519,6 +573,8 @@ def call_gemini(parts, system=SYSTEM_PROMPT, use_search=True):
                     name, dom = name.strip(), clean_domain(dom)
                     if name and "." in dom: pairs.append((name, dom))
             text = re.sub(r"(?im)^\s*LINKS\s*:.*$", "", text).strip()
+        # حتى لو سطر LINKS طلع فاضي (المنتج غير متوفر) نشيله — لا يظهر للعميل أبداً
+        text = re.sub(r"(?im)^\s*LINKS\s*:?\s*$", "", text).strip()
         text = re.sub(r"https?://\S+", "", text).replace("**", "").strip()
         metadata = cand.get("groundingMetadata", {}) or {}
         chunks = metadata.get("groundingChunks", []) or []
@@ -784,6 +840,15 @@ def process_interactive_message(message, bot_id):
     from_number=message["from"]
     reply=(message.get("interactive") or {}).get("button_reply") or {}
     btn_id=reply.get("id","")
+    # أزرار البديل: نعم/لا
+    if btn_id in ("alt_yes","alt_no"):
+        pend = PENDING_ALT.pop(from_number, None)
+        lang = USER_LANG.get(from_number, "ar")
+        if btn_id == "alt_no" or not pend:
+            send_whatsapp_text(from_number, T(lang, "alt_ok"), bot_id)
+            return
+        run_alternative_search(from_number, pend["product"], bot_id, lang)
+        return
     if btn_id not in ("lang_ar","lang_en"): return
     lang = "ar" if btn_id=="lang_ar" else "en"
     USER_LANG[from_number]=lang
@@ -896,4 +961,4 @@ def process_location_message(message, bot_id):
     send_whatsapp_cta(from_number, body, maps_url, bot_id, T(lang,"maps_btn"))
 
 @app.get("/")
-async def health(): return {"status":"v33 real store names + domain dedup"}
+async def health(): return {"status":"v34 alternative product flow"}
