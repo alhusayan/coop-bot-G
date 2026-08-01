@@ -141,6 +141,7 @@ MSG = {
         "not_found": "ما لقيت",
         "cant_identify": "ما قدرت أحدد المنتج",
         "shop_from": "تسوق من {n} 👇",
+        "approx_note": "~ = سعر تقريبي من البحث (غير مؤكد)",
         "multi_text": "تمام لقيت {c} منتجات، أسوي سلة...",
         "multi_images": "تمام لقطت {c} منتجات، أسوي سلة...",
         "maps_body": "📍 تبي أقرب مكان؟\n\nاضغط الزر والخريطة بتفتح على أقرب الأماكن حولك 👇",
@@ -155,6 +156,7 @@ MSG = {
         "not_found": "Couldn't find it",
         "cant_identify": "Couldn't identify the product",
         "shop_from": "Shop from {n} 👇",
+        "approx_note": "~ = approximate price from search (unverified)",
         "multi_text": "Got it, found {c} products. Building your cart...",
         "multi_images": "Nice, spotted {c} products. Building your cart...",
         "maps_body": "📍 Want the nearest place?\n\nTap the button and the map will open on the closest spots around you 👇",
@@ -321,6 +323,15 @@ STORE_DOMAINS = {
     "طلبات": "talabat.com",
     "طلباتمارت": "talabat.com",
     "talabat": "talabat.com",
+    "توصيل": "taw9eel.com",
+    "التوصيل": "taw9eel.com",
+    "taw9eel": "taw9eel.com",
+    "تريكارت": "trikart.com",
+    "trikart": "trikart.com",
+    "يوباي": "ubuy.com.kw",
+    "ubuy": "ubuy.com.kw",
+    "ديزرتكارت": "desertcart.com.kw",
+    "desertcart": "desertcart.com.kw",
     "ديليفرو": "deliveroo.com.kw",
     "deliveroo": "deliveroo.com.kw",
     "كريم": "careemnow.com",
@@ -345,8 +356,8 @@ def store_domain(name):
             return d
     return ""
 
-# أسماء "متاجر" خربانة يطلعها Gemini أحياناً — مو متاجر حقيقية فما نسوي لها زر بحث عام
-JUNK_STORE = re.compile(r"^(التوصيل|توصيل|delivery|اونلاين|أونلاين|online|الموقعالرسمي|official)", re.I)
+# أسماء "متاجر" خربانة يطلعها Gemini أحياناً — مو متاجر حقيقية فما نسوي لها زر
+JUNK_STORE = re.compile(r"^(delivery|اونلاين|أونلاين|online|الموقعالرسمي|official)", re.I)
 
 def is_junk_store(name):
     return bool(JUNK_STORE.match(normalize_name(normalize_ar(name))))
@@ -405,7 +416,10 @@ def product_title(txt, fallback=""):
     return f"📦 {fallback}" if fallback else ""
 
 # ===== التحقق الحي من صفحات المنتجات: السعر الفعلي + التوفر =====
-# سعر جوجل ممكن يكون قديم — مصدر الحقيقة هو الصفحة اللي بيفتحها الزر نفسها.
+# القاعدة الصارمة: ما نكتب سعراً جنب زر إلا إذا قريناه من الصفحة نفسها.
+# المستويات: 2 = صفحة منتج بسعر موثق | 1 = الصفحة تفتح بس السعر غير مؤكد (زر بدون سعر) | 0 = نافد/خربان (يُحذف)
+
+JINA_KEY = os.environ.get("JINA_API_KEY", "")  # اختياري: مفتاح مجاني من jina.ai يرفع حد الطلبات
 
 OOS_SIGNS = [
     "out of stock", "sold out", "currently unavailable", "outofstock",
@@ -415,6 +429,46 @@ OOS_SIGNS = [
 ]
 INS_SIGNS = ['schema.org/instock', '"instock"', 'availability":"instock', "availability':'instock"]
 
+def fetch_page_text(url):
+    """نص الصفحة: مباشرة أولاً، وإذا الموقع يعتمد جافاسكريبت (إكسايت/تريكارت/بلينك...)
+    نستخدم قارئ Jina المصيّر اللي يرجع النص الظاهر للمستخدم فعلياً — السعر والتوفر الحقيقيين."""
+    try:
+        r = requests.get(url, timeout=8, headers=HEADERS, allow_redirects=True)
+        if r.ok and len(r.text) > 500:
+            html = r.text[:600000]
+            # إذا الـHTML المباشر فيه إشارات سعر/منتج نكتفي فيه (أسرع)
+            if re.search(r'"@type"\s*:\s*"Product"|itemprop=["\']price|(?:KWD|KD|د\.?\s*ك)\s*:?\s*\d', html, re.I):
+                return html, "direct"
+    except Exception as e:
+        print(f"fetch direct err {e} | {url[:100]}")
+    try:
+        h = {"User-Agent": "Mozilla/5.0"}
+        if JINA_KEY:
+            h["Authorization"] = f"Bearer {JINA_KEY}"
+        rr = requests.get("https://r.jina.ai/" + url, timeout=14, headers=h)
+        if rr.ok and len(rr.text) > 300:
+            return rr.text[:300000], "jina"
+    except Exception as e:
+        print(f"fetch jina err {e} | {url[:100]}")
+    return "", ""
+
+def looks_like_product_page(url, html):
+    """صفحة منتج واحدة؟ صفحات البحث والتصنيفات ممنوع نوثق منها سعر (أسعارها لمنتجات ثانية)"""
+    u = (url or "").lower()
+    if re.search(r"/(search|category|categories|collections|catalogsearch|brands?)(/|\?|$)", u) or "?q=" in u or "search?" in u or "/c/" in u:
+        return False
+    low = (html or "").lower()
+    # صفحة فيها أسعار كثيرة = صفحة تصنيف/قائمة منتجات
+    price_hits = len(re.findall(r"(?:kwd|kd|د\.?\s*ك)\s*:?\s*\d|\d\s*(?:د\.?\s*ك|kwd|kd)", low))
+    if price_hits > 12:
+        return False
+    if re.search(r'"@type"\s*:\s*"product"', low) or 'og:type" content="product' in low \
+       or 'itemprop="price"' in low or "itemprop='price'" in low:
+        return True
+    if re.search(r"(add to cart|add-to-cart|أضف إلى السلة|اضف الى السلة|اضف للسلة|أضف للسلة)", low):
+        return True
+    return False
+
 def page_prices(html):
     """كل الأسعار المرشحة بالصفحة مع وزن الثقة: بيانات منظمة (JSON-LD/meta) أوثق من نص حر"""
     cands = []
@@ -422,43 +476,39 @@ def page_prices(html):
         cands.append((float(m.group(1)), 2))
     for m in re.finditer(r'itemprop=["\']price["\'][^>]*content=["\'](\d+(?:\.\d+)?)', html):
         cands.append((float(m.group(1)), 2))
-    for m in re.finditer(r'(?:KWD|KD|د\.?\s*ك)\s*:?\s*(\d+(?:\.\d+)?)', html):
+    for m in re.finditer(r'(?:KWD|KD|د\.?\s*ك)\s*:?\s*(\d+(?:\.\d+)?)', html, re.I):
         cands.append((float(m.group(1)), 1))
-    for m in re.finditer(r'(\d+(?:\.\d+)?)\s*(?:د\.?\s*ك|KWD|KD)', html):
+    for m in re.finditer(r'(\d+(?:\.\d+)?)\s*(?:د\.?\s*ك|KWD|KD)', html, re.I):
         cands.append((float(m.group(1)), 1))
     return [(v, w) for v, w in cands if 0.05 <= v <= 50000]
 
 def verify_product_page(url, claimed=None):
-    """يفتح صفحة المنتج ويرجع: هل نجح الفتح، السعر الحي، هل متوفر بالمخزون"""
-    res = {"ok": False, "price": None, "in_stock": True}
+    """يرجع {'level': 0|1|2, 'price': float|None} حسب القاعدة الصارمة أعلاه"""
     if not url:
-        return res
-    try:
-        r = requests.get(url, timeout=8, headers=HEADERS, allow_redirects=True)
-        if r.status_code >= 400:
-            return res
-        html = r.text[:500000]
-        low = html.lower()
-        res["ok"] = True
-
-        # فحص التوفر: علامة نفاد بدون أي علامة توفر منظمة = خلص المخزون
-        if any(s in low for s in OOS_SIGNS) and not any(s in low for s in INS_SIGNS):
-            res["in_stock"] = False
-
-        cands = page_prices(html)
-        if cands:
-            if claimed:
-                # نختار السعر الأقرب للسعر المزعوم (مع ميزة للبيانات المنظمة) — يفلتر أسعار منتجات ثانية بالصفحة
-                best = min(cands, key=lambda t: abs(math.log((t[0] + 1e-9) / claimed)) - 0.15 * t[1])
-                if claimed / 3 <= best[0] <= claimed * 3:
-                    res["price"] = best[0]
-            else:
-                structured = [t for t in cands if t[1] == 2]
-                if structured:
-                    res["price"] = structured[0][0]
-    except Exception as e:
-        print(f"verify err {e} | {url[:120]}")
-    return res
+        return {"level": 0, "price": None}
+    html, src = fetch_page_text(url)
+    if not html:
+        # ما قدرنا نقرأ الصفحة — زر بدون ادعاء سعر (أأمن ألف مرة من سعر غلط)
+        return {"level": 1, "price": None}
+    low = html.lower()
+    if any(s in low for s in OOS_SIGNS) and not any(s in low for s in INS_SIGNS):
+        print(f"OOS/blocked page ({src}): {url[:100]}")
+        return {"level": 0, "price": None}
+    if not looks_like_product_page(url, html):
+        print(f"not a product page ({src}): {url[:100]}")
+        return {"level": 1, "price": None}
+    cands = page_prices(html)
+    if cands:
+        if claimed:
+            best = min(cands, key=lambda t: abs(math.log((t[0] + 1e-9) / claimed)) - 0.15 * t[1])
+            # نقبل فقط ضمن ضعف السعر المزعوم صعوداً ونزولاً — يفلتر أسعار منتجات ثانية بالصفحة
+            if claimed / 2 <= best[0] <= claimed * 2:
+                return {"level": 2, "price": best[0]}
+        else:
+            structured = [t for t in cands if t[1] == 2]
+            if structured:
+                return {"level": 2, "price": structured[0][0]}
+    return {"level": 1, "price": None}
 
 def line_claimed_price(line):
     m = re.search(r'(\d+(?:\.\d+)?)\s*(?:د\.?\s*ك|KWD|KD)', line or "")
@@ -466,6 +516,10 @@ def line_claimed_price(line):
 
 def line_set_price(line, price):
     return re.sub(r'(\d+(?:\.\d+)?)(?=\s*(?:د\.?\s*ك|KWD|KD))', f"{price:.3f}", line, count=1)
+
+def line_mark_approx(line):
+    """يحط ~ قبل السعر غير المؤكد"""
+    return re.sub(r'(\d+(?:\.\d+)?)(\s*(?:د\.?\s*ك|KWD|KD))', r'~\1\2', line, count=1)
 
 def match_url(name, urls):
     """يربط اسم المتجر بلنكه — مطابقة مباشرة ثم ضبابية ثم بالدومين (عربي ↔ إنجليزي)"""
@@ -536,80 +590,83 @@ def send_product_result(from_number, txt, urls, bot_id, lang, query, best_only=F
         else:
             unlinked.append(o)
 
-    # ===== التحقق الحي (بالتوازي): السعر من الصفحة نفسها هو مصدر الحقيقة =====
+    # ===== التحقق الحي (بالتوازي): ما نكتب سعراً جنب زر إلا إذا قريناه من الصفحة نفسها =====
+    verified, plain = [], []   # verified: سعر موثق من الصفحة | plain: زر بدون ادعاء سعر
     if linked:
         checks = list(RESOLVER.map(
             lambda t: verify_product_page(t[1], line_claimed_price(t[0]["line"])), linked))
-        fresh = []
         for (o, u), c in zip(linked, checks):
-            if c["ok"] and not c["in_stock"]:
-                print(f"DROPPED (out of stock): {o['name']} | {u[:100]}")
+            if c["level"] == 0:
+                print(f"DROPPED (OOS/dead): {o['name']} | {u[:100]}")
                 continue
             o = dict(o)
-            live = c["price"]
-            claimed = line_claimed_price(o["line"])
-            if live is not None:
-                if claimed is None or abs(live - claimed) > 0.001:
-                    print(f"PRICE FIXED: {o['name']} {claimed} -> {live}")
-                o["line"] = line_set_price(o["line"], live)
-                o["price"] = live
-                o["verified"] = True
+            if c["level"] == 2:
+                claimed = line_claimed_price(o["line"])
+                if claimed is None or abs(c["price"] - claimed) > 0.001:
+                    print(f"PRICE FIXED: {o['name']} {claimed} -> {c['price']}")
+                o["line"] = line_set_price(o["line"], c["price"])
+                o["price"] = c["price"]
+                verified.append((o, u))
             else:
-                o["price"] = claimed
-                o["verified"] = False
-            fresh.append((o, u))
-        linked = fresh
+                # الصفحة تفتح بس ما قدرنا نوثق سعرها (تصنيف/بحث/محجوبة) — زر بدون سعر، ولا نكذب على العميل
+                plain.append((o["name"], u))
 
-    # ===== إعادة ترتيب ✅ حسب الأسعار الموثقة (لمقارنات الأسعار — التوصيات بالتقييم ⭐ تبقى) =====
-    if linked and "⭐" not in txt:
-        for o, _ in linked:
+    # ✅ حصرياً للأسعار الموثقة، مرتبة من الأرخص (توصيات التقييم ⭐ تبقى بترتيبها)
+    if verified and "⭐" not in txt:
+        for o, _ in verified:
             o["line"] = re.sub(r"^\s*(?:✅|🏆)\s*", "", o["line"])
-        linked.sort(key=lambda t: (t[0].get("price") is None, t[0].get("price") or 9e9))
-        if linked[0][0].get("price") is not None:
-            linked[0][0]["line"] = "✅ " + linked[0][0]["line"]
-            # ما دام الأفضل الموثق تحدد، نشيل ✅/🏆 من السطور غير المرتبطة حتى ما يصير ✅ مكرر
-            for o in unlinked:
-                o["line"] = re.sub(r"^\s*(?:✅|🏆)\s*", "", o["line"])
+        verified.sort(key=lambda t: t[0]["price"])
+        verified[0][0]["line"] = "✅ " + verified[0][0]["line"]
+        for o in unlinked:
+            o["line"] = re.sub(r"^\s*(?:✅|🏆)\s*", "", o["line"])
 
     if best_only:
-        # السلة: زر واحد للأفضل الموثق إن وجد، وإلا سطر الأفضل نصاً فقط
-        pick = linked[0] if linked else None
-        if pick:
+        # السلة: الأولوية للموثق الأرخص، ثم زر بدون سعر، ثم نص تقريبي فقط
+        if verified:
             send_whatsapp_text(from_number, title or f"📦 {query}", bot_id)
-            send_whatsapp_cta(from_number, pick[0]["line"], pick[1], bot_id, f"🛒 {pick[0]['name'][:18]}")
+            o, u = verified[0]
+            send_whatsapp_cta(from_number, o["line"], u, bot_id, f"🛒 {o['name'][:18]}")
+        elif plain:
+            send_whatsapp_text(from_number, title or f"📦 {query}", bot_id)
+            n, u = plain[0]
+            send_whatsapp_cta(from_number, T(lang, "shop_from", n=n), u, bot_id, f"🛒 {n[:18]}")
         elif offers:
             best = next((o for o in offers if o["best"]), offers[0])
-            send_whatsapp_text(from_number, f"{title or f'📦 {query}'}\n\n{best['line']}", bot_id)
+            send_whatsapp_text(from_number, f"{title or f'📦 {query}'}\n\n{line_mark_approx(best['line'])}\n{T(lang, 'approx_note')}", bot_id)
         return True
 
-    # الرسالة الأولى: اسم المنتج + سطور المتاجر اللي ما لها لنك مباشر (نص فقط — أسعارها غير موثقة)
+    # الرسالة الأولى: اسم المنتج + المتاجر غير المرتبطة بأسعار تقريبية معلّمة بـ~
     head = title or f"📦 {query}"
     if unlinked:
-        head += "\n\n" + "\n".join(o["line"] for o in unlinked)
-    if not linked and not unlinked:
-        head = txt  # احتياط: لا شي انفلتر — نرسل النص الأصلي
+        head += "\n\n" + "\n".join(line_mark_approx(o["line"]) for o in unlinked)
+        head += f"\n\n{T(lang, 'approx_note')}"
+    if not verified and not plain and not unlinked:
+        head = txt  # احتياط نادر
     send_whatsapp_text(from_number, head, bot_id)
 
-    # أزرار اللنكات المباشرة الموثقة (الأرخص أولاً)
-    for o, u in linked:
+    # الأزرار: الموثقة أولاً (الأرخص فالأغلى) بسعرها داخل الرسالة، ثم أزرار بدون سعر
+    for o, u in verified:
         send_whatsapp_cta(from_number, o["line"], u, bot_id, f"🛒 {o['name'][:18]}")
+    sent = len(verified)
+    for n, u in plain:
+        if sent >= 4:
+            break
+        send_whatsapp_cta(from_number, T(lang, "shop_from", n=n), u, bot_id, f"🛒 {n[:18]}")
+        sent += 1
 
-    # لنكات مباشرة إضافية من البحث ما انربطت بأي سطر — نتحقق من مخزونها قبل الإرسال
-    extras = [(n, u) for n, u in urls.items() if u and u not in used and not is_junk_store(n)]
-    if extras and len(linked) < 4:
-        extra_checks = list(RESOLVER.map(lambda t: verify_product_page(t[1]), extras))
-        sent_extra = 0
-        for (n, u), c in zip(extras, extra_checks):
-            if c["ok"] and not c["in_stock"]:
-                continue
-            body = T(lang, "shop_from", n=n)
-            if c.get("price") is not None:
-                body = f"{n} — {c['price']:.3f} د.ك" if lang == "ar" else f"{n} — {c['price']:.3f} KWD"
-            send_whatsapp_cta(from_number, body, u, bot_id, f"🛒 {n[:18]}")
-            used.add(u)
-            sent_extra += 1
-            if len(linked) + sent_extra >= 4:
-                break
+    # لنكات إضافية من البحث ما انربطت بأي سطر — نفس المعايير الصارمة بالضبط
+    if sent < 4:
+        extras = [(n, u) for n, u in urls.items() if u and u not in used and not is_junk_store(n)]
+        if extras:
+            extra_checks = list(RESOLVER.map(lambda t: verify_product_page(t[1]), extras))
+            cur = "د.ك" if lang == "ar" else "KWD"
+            for (n, u), c in zip(extras, extra_checks):
+                if sent >= 4 or c["level"] == 0:
+                    continue
+                body = f"{n} — {c['price']:.3f} {cur}" if c["level"] == 2 else T(lang, "shop_from", n=n)
+                send_whatsapp_cta(from_number, body, u, bot_id, f"🛒 {n[:18]}")
+                used.add(u)
+                sent += 1
 
     return True
 
@@ -1084,4 +1141,4 @@ def process_location_message(message, bot_id):
     send_whatsapp_cta(from_number, body, maps_url, bot_id, T(lang,"maps_btn"))
 
 @app.get("/")
-async def health(): return {"status":"v32 Live Price Verification"}
+async def health(): return {"status":"v33 Strict Verified Prices"}
