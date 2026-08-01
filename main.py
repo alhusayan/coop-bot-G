@@ -211,8 +211,9 @@ SYSTEM_PROMPT = """
 - لا تخترع سعراً، انسخ السعر كما يظهر في نتيجة البحث اليوم.
 - إذا لم تجد متاجر كافية، اذكر الموجود فقط ولا تخترع الباقي.
 
-في الحالات 1 و2 و3، سطر أخير إلزامي:
-LINKS: اسم الأول=الدومين الحقيقي, اسم الثاني=الدومين الحقيقي (اذكر دومين كل متجر ذكرته)
+في الحالات 1 و2 و3، سطر أخير إلزامي بأسماء المتاجر الحقيقية التي ذكرتها أنت في القائمة:
+LINKS: لولو هايبرماركت=luluhypermarket.com, نون=noon.com, إكسايت=xcite.com
+⛔ ممنوع منعاً باتاً كتابة عبارات مثل "اسم الأول" أو "المتجر الثاني" — اكتب الاسم التجاري الفعلي لكل متجر.
 في الحالة 4: سطر LINKS اختياري.
 ممنوع روابط ظاهرة. ممنوع Markdown.
 لغة الرد: التزم بلغة الرد المطلوبة في رسالة المستخدم.
@@ -360,6 +361,41 @@ def store_domain(name):
     return ""
 JUNK_STORE = re.compile(r"^(delivery|اونلاين|أونلاين|online|الموقعالرسمي|official)", re.I)
 def is_junk_store(name): return bool(JUNK_STORE.match(normalize_name(normalize_ar(name))))
+
+# أسماء قوالب ينسخها Gemini بالغلط من البرومبت ("اسم الأول"...) — نستبدلها باسم المتجر الحقيقي من الدومين
+def is_placeholder_name(name):
+    x = normalize_name(normalize_ar(name))
+    if not x: return True
+    if x.startswith("اسمال") or x.startswith("المتجرال") or x.startswith("متجرال"): return True
+    return x in {"اسم","المتجر","متجر","الاول","الثاني","الثالث","الرابع","الخامس","السادس",
+                 "storename","firststore","secondstore","store","name"}
+
+DOMAIN_DISPLAY = {
+    "luluhypermarket": "لولو هايبرماركت", "xcite": "إكسايت", "best": "اليوسفي", "noon": "نون",
+    "blink": "بلينك", "eureka": "يوريكا", "jarir": "جرير", "carrefourkuwait": "كارفور",
+    "taw9eel": "توصيل Taw9eel", "talabat": "طلبات", "trikart": "تريكارت", "ubuy": "يوباي",
+    "desertcart": "ديزرت كارت", "amazon": "أمازون", "boutiqaat": "بوتيكات", "wibi": "ويبي",
+    "kuwaitflourmills": "مطاحن الكويت", "deliveroo": "ديليفرو",
+}
+
+def url_host_key(url):
+    """مفتاح المتجر من الدومين — يتجاهل السب-دومين (gcc.luluhypermarket.com ← luluhypermarket)"""
+    try:
+        host = urllib.parse.urlparse(url).netloc.replace("www.", "").lower()
+    except Exception:
+        return ""
+    for k in DOMAIN_DISPLAY:
+        if k in host:
+            return k
+    parts = host.split(".")
+    return parts[-2] if len(parts) >= 2 else (parts[0] if parts else "")
+
+def display_store_name(name, url):
+    """اسم العرض النهائي: إذا الاسم قالب أو خربان، نستبدله باسم المتجر الحقيقي من دومين اللنك"""
+    host = url_host_key(url)
+    if not name or is_placeholder_name(name) or is_junk_store(name):
+        return DOMAIN_DISPLAY.get(host, host.capitalize() if host else "المتجر")
+    return name
 def short_query(q):
     q = re.sub(r"\([^)]*\)", " ", q or "")
     q = re.split(r"\s+[-—–]\s+", q)[0]
@@ -622,21 +658,33 @@ def search_product(query, lang, prompt_text=None):
 
     if verified:
         cur = "د.ك" if lang == "ar" else "KWD"
-        sorted_v = sorted(verified.items(), key=lambda x: x[1]["price"])[:TARGET_RESULTS]
+        # ===== دمج التكرار: متجر واحد لكل دومين (نفس المتجر ممكن يدخل باسمين) — نخلي الأرخص =====
+        by_dom = {}
+        for name, info in verified.items():
+            dom = url_host_key(info["url"]) or info["url"]
+            prev = by_dom.get(dom)
+            if not prev or info["price"] < prev[1]["price"]:
+                by_dom[dom] = (name, info)
+        sorted_v = sorted(by_dom.values(), key=lambda x: x[1]["price"])[:TARGET_RESULTS]
         title = product_title(txt, query)
         lines = [title, ""]
         new_urls = {}
         for i, (name, info) in enumerate(sorted_v):
+            disp = display_store_name(name, info["url"])
+            if disp in new_urls:
+                disp = f"{disp} 2"
             prefix = "✅" if i == 0 else "•"
-            lines.append(f"{prefix} {name} — {format_price(info['price'])} {cur}")
-            new_urls[name] = info["url"]
+            lines.append(f"{prefix} {disp} — {format_price(info['price'])} {cur}")
+            new_urls[disp] = info["url"]
 
         # ===== تكملة العرض إلى 4 خيارات: متاجر البحث غير الموثقة كسطور تقريبية (~) بدون أزرار =====
         need = TARGET_RESULTS - len(sorted_v)
         approx = []
         if need > 0:
-            seen = {normalize_name(normalize_ar(n)) for n, _ in sorted_v}
+            seen = {normalize_name(normalize_ar(n)) for n in new_urls}
+            seen |= {normalize_name(normalize_ar(n)) for n, _ in sorted_v}
             for o in extract_store_offers(txt):
+                if is_placeholder_name(o["name"]) or is_junk_store(o["name"]): continue
                 nn = normalize_name(normalize_ar(o["name"]))
                 if not nn or any((nn in s or s in nn) for s in seen if s): continue
                 line = re.sub(r"^\s*(?:✅|🏆)\s*", "", o["line"])
@@ -848,4 +896,4 @@ def process_location_message(message, bot_id):
     send_whatsapp_cta(from_number, body, maps_url, bot_id, T(lang,"maps_btn"))
 
 @app.get("/")
-async def health(): return {"status":"v32 four verified results + backfill"}
+async def health(): return {"status":"v33 real store names + domain dedup"}
