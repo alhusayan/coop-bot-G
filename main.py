@@ -24,7 +24,7 @@ USER_LANG = {}
 PENDING_IMAGES = defaultdict(lambda: {"images": [], "bot_id": ""})
 
 BUFFER_SECONDS = 4
-RESOLVER = ThreadPoolExecutor(max_workers=6)
+RESOLVER = ThreadPoolExecutor(max_workers=10)  # رفعناها: نتحقق من 8-10 صفحات بالتوازي
 WORKERS = ThreadPoolExecutor(max_workers=3)
 SEARCH_POOL = ThreadPoolExecutor(max_workers=8)
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
@@ -32,11 +32,14 @@ HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/
 SEARCH_CACHE = {}
 CACHE_TTL = int(os.environ.get("CACHE_TTL_HOURS", "2")) * 3600
 CACHE_MAX = 500
-CACHE_MIN_STORES = 1 # بعد التحقق، متجر واحد موثوق كافي
+CACHE_MIN_STORES = 1
 CACHE_MIN_LINKS = 1
 
+# كم متجر موثق نستهدف بكل رد
+TARGET_RESULTS = int(os.environ.get("TARGET_RESULTS", "4"))
+
 # ===== كاش صفحات المتاجر المتحقق منها =====
-VERIFIED_PAGE_CACHE = {} # url -> {"data": {...}, "ts":...}
+VERIFIED_PAGE_CACHE = {}
 OOS_PHRASES = ["out of stock","غير متوفر","نفدت الكمية","غير متاح","sold out","غير متوفر حاليا","نفذت","not available","temporarily unavailable"]
 LISTING_URL_PARTS = ["/search","/s?","/category","/categories","/collection","/collections","/shop/category","?q=","/search_results","/shop/","/listing","/c/"]
 
@@ -133,6 +136,7 @@ MSG = {
         "maps_body_loc": "📍 بحثك الأخير كان عن ({p})\n\nجهزت لك أقرب الأماكن حولك، اضغط الزر وافتح الخريطة 👇",
         "no_saved_product": "ما عندي منتج محفوظ حالياً 😅. ابحث عن منتج أول، وبعدها أدلك على أقرب مكان يبيعه!",
         "lang_saved": "تمام، بكلمك عربي من هني ورايح 🇰🇼\nدز صورة منتج أو اكتب اسمه وأنا حاضر!",
+        "approx_note": "(~ سعر تقريبي من البحث غير مؤكد)",
     },
     "en": {
         "identifying": "One sec.. identifying the product and finding you the best deal!",
@@ -146,6 +150,7 @@ MSG = {
         "maps_body_loc": "📍 Your last search was ({p})\n\nI've lined up the closest places around you. Tap the button to open the map 👇",
         "no_saved_product": "I don't have a saved product yet 😅. Search for a product first, then I'll point you to the nearest store!",
         "lang_saved": "Great, I'll speak English with you from now on 🇬🇧\nSend a product photo or type its name and I'm on it!",
+        "approx_note": "(~ approximate price from search, unverified)",
     },
 }
 
@@ -174,6 +179,10 @@ SYSTEM_PROMPT = """
 ✅ [المتجر الأرخص] — [السعر] د.ك
 • [المتجر الثاني] — [السعر] د.ك
 • [المتجر الثالث] — [السعر] د.ك
+• [المتجر الرابع] — [السعر] د.ك
+• [المتجر الخامس] — [السعر] د.ك
+• [المتجر السادس] — [السعر] د.ك
+اذكر أكبر عدد ممكن من المتاجر المختلفة (حتى 6) ما دامت من نتائج البحث الفعلية — التنوع مهم.
 
 🛒 مصدر العروض ClicFlyer — قاعدة إلزامية لمنتجات التموينات:
 لأي منتج بقالة أو تموينات (أغذية، مشروبات، منظفات، عناية شخصية)، نفّذ دائماً بحثاً إضافياً في clicflyer.com (استخدم site:clicflyer.com مع اسم المنتج).
@@ -185,6 +194,7 @@ SYSTEM_PROMPT = """
 🏆 [اسم الخيار الأفضل + مكانه/متجره] — [السعر] د.ك ⭐ [التقييم من 5]
 • [خيار ثاني] — [السعر] د.ك ⭐ [التقييم]
 • [خيار ثالث] — [السعر] د.ك ⭐ [التقييم]
+• [خيار رابع] — [السعر] د.ك ⭐ [التقييم]
 
 【الحالة 3】طلب خدمة (فني، بنشر، تبديل بطارية، سباك...):
 📦 [وصف الخدمة + المنطقة]
@@ -199,10 +209,10 @@ SYSTEM_PROMPT = """
 - اذكر فقط المنتجات المتوفرة فعلاً InStock. إذا كان المنتج غير متوفر لا تذكره إطلاقاً.
 - رابط كل متجر يجب أن يكون رابط صفحة منتج مباشر (صفحة فيها منتج واحد وسعر واحد). ممنوع منعاً باتاً روابط الصفحة الرئيسية أو /search أو /category أو /collections أو /shop أو صفحات نتائج البحث.
 - لا تخترع سعراً، انسخ السعر كما يظهر في نتيجة البحث اليوم.
-- إذا لم تجد 3 متاجر، اذكر 1 أو 2 فقط ولا تخترع الباقي.
+- إذا لم تجد متاجر كافية، اذكر الموجود فقط ولا تخترع الباقي.
 
 في الحالات 1 و2 و3، سطر أخير إلزامي:
-LINKS: اسم الأول=الدومين الحقيقي, اسم الثاني=الدومين الحقيقي
+LINKS: اسم الأول=الدومين الحقيقي, اسم الثاني=الدومين الحقيقي (اذكر دومين كل متجر ذكرته)
 في الحالة 4: سطر LINKS اختياري.
 ممنوع روابط ظاهرة. ممنوع Markdown.
 لغة الرد: التزم بلغة الرد المطلوبة في رسالة المستخدم.
@@ -241,7 +251,6 @@ def parse_product_data(html, url):
             if not raw: continue
             j = json.loads(raw)
             objs = j if isinstance(j, list) else [j]
-            # flatten @graph
             flat = []
             for o in objs:
                 if isinstance(o, dict) and o.get("@graph"):
@@ -266,28 +275,22 @@ def parse_product_data(html, url):
                         data["title"] = str(obj.get("name",""))[:80]
         except: continue
 
-    # اذا الصفحة فيها اكثر من 4 منتجات = صفحة قائمة
     if ld_products >= 4:
         data["is_product"] = False
 
-    # تحقق نصي للـ OOS
     low_text = soup.get_text(" ", strip=True).lower()[:6000]
     if any(ph in low_text for ph in OOS_PHRASES):
-        # تأكد انه مو "متوفر" و "غير متوفر" بنفس الصفحة - نعطي اولوية لـ OOS اذا تكررت
         if low_text.count("غير متوفر") > 0 or low_text.count("out of stock") > 0:
             data["available"] = False
 
-    # fallback سعر من meta
     if not data["price"]:
         m = soup.find("meta", property="product:price:amount")
         if m and m.get("content"):
             try: data["price"] = float(m["content"])
             except: pass
 
-    # لو الرابط واضح انه قائمة
     ul = url.lower()
     if any(p in ul for p in LISTING_URL_PARTS):
-        # استثناء: روابط المنتجات الحقيقية غالباً فيها /product/ /p/ /dp/ /item/
         if not re.search(r"/product/|/products/[^/]{3,}|/p/|/dp/|/item/|/prod/", ul):
             if ld_products!= 1:
                 data["is_product"] = False
@@ -317,7 +320,6 @@ def verify_offers(urls_map, query):
         if not info["price"] or info["price"] <= 0:
             print(f"REJECT NO PRICE: {name} -> {url}")
             return None
-        # فلتر منطقي للسعر - اذا المنتج نظارة وسعره 0.5 دك اكيد غلط
         return (name, url, info)
 
     results = list(RESOLVER.map(_check, urls_map.items()))
@@ -348,13 +350,15 @@ STORE_DOMAINS = {
     "نون": "noon.com", "بلينك": "blink.com.kw", "يوريكا": "eureka.com.kw", "جرير": "jarir.com",
     "كارفور": "carrefourkuwait.com", "لولو": "luluhypermarket.com", "امازون": "amazon.ae",
     "طلبات": "talabat.com", "ديليفرو": "deliveroo.com.kw", "بوتيكات": "boutiqaat.com",
+    "توصيل": "taw9eel.com", "تريكارت": "trikart.com", "يوباي": "ubuy.com.kw", "ديزرتكارت": "desertcart.com.kw",
+    "مطاحن": "kuwaitflourmills.com", "ويبي": "wibi.com.kw",
 }
 def store_domain(name):
     n = normalize_name(normalize_ar(name))
     for k, d in STORE_DOMAINS.items():
         if k in n or n in k: return d
     return ""
-JUNK_STORE = re.compile(r"^(التوصيل|توصيل|delivery|اونلاين|أونلاين|online|الموقعالرسمي|official)", re.I)
+JUNK_STORE = re.compile(r"^(delivery|اونلاين|أونلاين|online|الموقعالرسمي|official)", re.I)
 def is_junk_store(name): return bool(JUNK_STORE.match(normalize_name(normalize_ar(name))))
 def short_query(q):
     q = re.sub(r"\([^)]*\)", " ", q or "")
@@ -373,7 +377,7 @@ def extract_store_names(text):
         if m:
             name = m.group(1).strip()
             if name and name not in stores: stores.append(name)
-    return stores[:5]
+    return stores[:8]
 
 def is_service_answer(txt): return bool(re.search(r"(?:🏆|•)\s*.+?\(\s*(?:هاتف|Phone|phone|Tel|tel)\s*:", txt or ""))
 def extract_store_offers(txt):
@@ -387,7 +391,7 @@ def extract_store_offers(txt):
         best = m.group(1) in ("✅", "🏆")
         body = s if best else s.lstrip("•").strip()
         offers.append({"line": body, "name": name, "best": best})
-    return offers[:4]
+    return offers[:8]
 
 def product_title(txt, fallback=""):
     m = re.search(r"^\s*📦\s*(.+)$", txt or "", flags=re.M)
@@ -432,7 +436,12 @@ def send_product_result(from_number, txt, urls, bot_id, lang, query, best_only=F
         send_whatsapp_text(from_number, txt, bot_id)
         return False
     title = product_title(txt, query)
-    if title: send_whatsapp_text(from_number, title, bot_id)
+    # الرسالة الأولى: اسم المنتج + السطور التقريبية (~) إن وجدت — تكملة الـ4 خيارات
+    approx_lines = [l.strip() for l in txt.splitlines() if "~" in l]
+    head = title or f"📦 {query}"
+    if approx_lines and not best_only:
+        head += "\n\n" + "\n".join(approx_lines)
+    send_whatsapp_text(from_number, head, bot_id)
     core = title[2:].strip() if title.startswith("📦") else query
     fq = short_query(core) or short_query(query)
     if best_only:
@@ -540,7 +549,8 @@ def call_gemini(parts, system=SYSTEM_PROMPT, use_search=True):
                     urls_map[label] = url
                     used_urls.add(url)
                 if len(urls_map) == 3: break
-        return text, dict(list(urls_map.items())[:4])
+        # وسعنا القمع: نرجع حتى 8 لنكات مرشحة — التحقق بيفلترها والباقي يعوض المرفوض
+        return text, dict(list(urls_map.items())[:8])
     except Exception as e:
         print(f"Gemini err {e}"); return "", {}
 
@@ -573,13 +583,14 @@ def best_of_search(parts, lang):
         for n, link in u.items():
             if n not in merged_urls and link not in merged_urls.values():
                 merged_urls[n] = link
-    merged_urls = dict(list(merged_urls.items())[:4])
+    # اتحاد لنكات كل الجولات: حتى 10 مرشحين للتحقق — يضمن بقاء 4+ بعد الفلترة
+    merged_urls = dict(list(merged_urls.items())[:10])
     return best_txt, merged_urls
 
 def search_product(query, lang, prompt_text=None):
     cached = cache_get(query, lang)
     if cached: return cached
-    text_part = prompt_text or f"ابحث عن {query} في الكويت. متوفر فقط InStock ورابط منتج مباشر. {LANG_INSTR[lang]}"
+    text_part = prompt_text or f"ابحث عن {query} في الكويت. متوفر فقط InStock ورابط منتج مباشر. اذكر أكبر عدد من المتاجر المختلفة (حتى 6). {LANG_INSTR[lang]}"
     txt, urls = best_of_search([{"text": text_part}], lang)
     if not txt: return "", {}
 
@@ -592,18 +603,54 @@ def search_product(query, lang, prompt_text=None):
 
     # تحقق حقيقي من الصفحات
     verified = verify_offers(urls, query)
+
+    # ===== جولة الاستكمال: ما وصلنا 4 متاجر موثقة؟ نطلب متاجر إضافية "غير" اللي عندنا ونتحقق منها =====
+    if len(verified) < TARGET_RESULTS:
+        exclude = "، ".join(sorted(set(list(verified.keys()) + list(urls.keys())))[:10])
+        extra_prompt = (f"ابحث عن {query} في الكويت في متاجر إلكترونية أخرى مختلفة تماماً عن هذه: ({exclude}). "
+                        f"متوفر فقط InStock ورابط صفحة منتج مباشر. اذكر حتى 6 متاجر مختلفة بنفس التنسيق. {LANG_INSTR[lang]}")
+        txt2, urls2 = call_gemini([{"text": extra_prompt}])
+        if urls2:
+            have_urls = {v["url"] for v in verified.values()} | set(urls.values())
+            pool = {n: u for n, u in urls2.items() if u and u not in have_urls}
+            if pool:
+                more = verify_offers(pool, query)
+                for n, info in more.items():
+                    if n not in verified and info["url"] not in {v["url"] for v in verified.values()}:
+                        verified[n] = info
+        print(f"BACKFILL ROUND: now {len(verified)} verified for {query[:50]}")
+
     if verified:
-        sorted_v = sorted(verified.items(), key=lambda x: x[1]["price"])
+        cur = "د.ك" if lang == "ar" else "KWD"
+        sorted_v = sorted(verified.items(), key=lambda x: x[1]["price"])[:TARGET_RESULTS]
         title = product_title(txt, query)
         lines = [title, ""]
         new_urls = {}
-        for i, (name, info) in enumerate(sorted_v[:4]):
+        for i, (name, info) in enumerate(sorted_v):
             prefix = "✅" if i == 0 else "•"
-            lines.append(f"{prefix} {name} — {format_price(info['price'])} د.ك")
+            lines.append(f"{prefix} {name} — {format_price(info['price'])} {cur}")
             new_urls[name] = info["url"]
+
+        # ===== تكملة العرض إلى 4 خيارات: متاجر البحث غير الموثقة كسطور تقريبية (~) بدون أزرار =====
+        need = TARGET_RESULTS - len(sorted_v)
+        approx = []
+        if need > 0:
+            seen = {normalize_name(normalize_ar(n)) for n, _ in sorted_v}
+            for o in extract_store_offers(txt):
+                nn = normalize_name(normalize_ar(o["name"]))
+                if not nn or any((nn in s or s in nn) for s in seen if s): continue
+                line = re.sub(r"^\s*(?:✅|🏆)\s*", "", o["line"])
+                line = re.sub(r"(\d+(?:\.\d+)?)(\s*(?:د\.?\s*ك|KWD|KD))", r"~\1\2", line, count=1)
+                approx.append(f"• {line}")
+                seen.add(nn)
+                if len(approx) >= need: break
+            if approx:
+                lines.append("")
+                lines.extend(approx)
+                lines.append(T(lang, "approx_note"))
         final_txt = "\n".join(lines)
         cache_put(query, lang, final_txt, new_urls)
-        print(f"VERIFIED OK: {query} -> {len(new_urls)} stores")
+        print(f"VERIFIED OK: {query[:50]} -> {len(new_urls)} verified + {len(approx)} approx")
         return final_txt, new_urls
     else:
         print(f"VERIFIED FAIL - all links rejected for: {query}")
@@ -801,4 +848,4 @@ def process_location_message(message, bot_id):
     send_whatsapp_cta(from_number, body, maps_url, bot_id, T(lang,"maps_btn"))
 
 @app.get("/")
-async def health(): return {"status":"v31 verified-prices - listing & OOS filtered"}
+async def health(): return {"status":"v32 four verified results + backfill"}
