@@ -116,13 +116,27 @@ def cache_put(query, lang, txt, urls):
         "tokens": norm_tokens(query), "query": query, "lang": lang,
     }
 
-IDENTIFY_SYSTEM = """أنت خبير تعرف على المنتجات. انظر للصورة واكتب الاسم التجاري القياسي للمنتج بصيغة ثابتة دائماً:
-[البراند] [نوع المنتج] [رقم الموديل باللاتيني إن ظهر] [اللون/النكهة] [الحجم/الوزن إن ظهر]
-رقم الموديل هو أهم عنصر — دور عليه على العبوة أو الذراع أو الملصق (مثل RB3721، SM-S928، MQ2V3).
+IDENTIFY_SYSTEM = """أنت محرك بحث بصري متخصص مثل Google Lens. انظر للصورة واستخدم بحث Google للعثور على الاسم التجاري الدقيق للمنتج.
+
+اتبع هذا التفكير بالترتيب:
+1. حلل الصورة: ما الفئة الدقيقة للمنتج؟
+   ⚠️ كن دقيقاً في التفريق: حذاء مولز/سليبر مفتوح من الخلف ≠ سنيكرز، بخاخ ≠ رول أون، ساعة ultra 3 ≠ ultra 2
+2. ابحث بجوجل عن البراند والموديل الظاهرين لتأكيد الاسم الدقيق من نتائج البحث
+3. إذا وجدت رقم موديل محدد (مثل RB3721، Intrecciato، SM-S928) استخدمه
+
+رد بسطرين فقط — بدون شرح أو مقدمات:
+السطر الأول بالعربي: [البراند] [نوع المنتج الدقيق] [الموديل/الكولكشن إن وُجد] [اللون/النكهة] [الحجم إن ظهر]
+السطر الثاني بالإنجليزي: نفس المعلومات بدقة للبحث الدولي
+
 أمثلة:
-- ريبان نظارة شمسية RB3721 اسود 59 مم
-- برينجلز كاتشب 200 جرام
-سطر واحد فقط."""
+بوتيغا فينيتا حذاء مولز إنتريكاتو جلد نسائي بني
+Bottega Veneta Intrecciato leather mules women brown
+
+آبل ساعة ألترا 3 تيتانيوم أسود
+Apple Watch Ultra 3 Black Titanium
+
+ريبان نظارة شمسية RB3721 أسود 59 مم
+Ray-Ban sunglasses RB3721 black 59mm"""
 
 MSG = {
     "ar": {
@@ -232,6 +246,28 @@ LINKS: لولو هايبرماركت=luluhypermarket.com, نون=noon.com, إك�
 لغة الرد: التزم بلغة الرد المطلوبة في رسالة المستخدم.
 """
 
+MATCH_JUDGE_SYSTEM = """أنت حكم مطابقة منتجات صارم. سأعطيك اسم المنتج المطلوب وقائمة عناوين صفحات متاجر.
+لكل عنوان قرر: هل الصفحة تبيع نفس المنتج المطلوب؟
+- نفس الفئة والنوع الدقيق إلزامي: mules/سليبر ≠ sneakers، صندل ≠ حذاء رياضي، بخاخ ≠ رول أون، ساعة الترا 3 ≠ الترا 2.
+- نفس البراند إن كان البراند مذكوراً في الطلب.
+- اختلاف اللون أو المقاس أو التغليف مقبول.
+أجب بسطر JSON واحد فقط بدون أي شرح: {"matches": [true, false, ...]} بنفس ترتيب العناوين."""
+
+def judge_matches(query, titles):
+    """يرجع قائمة true/false لكل عنوان — فشل الحكم = ما نرفض أحد بالغلط"""
+    if not titles: return []
+    listing = "\n".join(f"{i+1}. {t}" for i, t in enumerate(titles))
+    prompt = f"المنتج المطلوب: {query}\n\nعناوين الصفحات:\n{listing}"
+    txt, _ = call_gemini([{"text": prompt}], system=MATCH_JUDGE_SYSTEM, use_search=False)
+    try:
+        m = re.search(r"\{.*\}", txt or "", re.S)
+        arr = json.loads(m.group(0)).get("matches", [])
+        if len(arr) == len(titles):
+            return [bool(x) for x in arr]
+    except Exception as e:
+        print(f"judge parse err {e}: {(txt or '')[:200]}")
+    return [True] * len(titles)
+
 MAPS_CATEGORY_SYSTEM = """أنت خبير تسوق في السوق الكويتي.
 بناءً على اسم المنتج أو الخدمة، أعطني "عبارة بحث" دقيقة جداً لخرائط جوجل.
 قواعد:
@@ -287,6 +323,11 @@ def parse_product_data(html, url):
                         data["available"] = False
                     if not data["title"]:
                         data["title"] = str(obj.get("name",""))[:80]
+                        b = obj.get("brand")
+                        if isinstance(b, dict): b = b.get("name","")
+                        b = str(b or "").strip()
+                        if b and b.lower() not in data["title"].lower():
+                            data["title"] = f"{b} {data['title']}"[:100]
         except: continue
 
     if ld_products >= 4:
@@ -679,11 +720,14 @@ def best_of_search(parts, lang):
     merged_urls = dict(list(merged_urls.items())[:10])
     return best_txt, merged_urls
 
-def search_product(query, lang, prompt_text=None):
+def search_product(query, lang, prompt_text=None, image_parts=None):
+    """البوابة الموحدة للبحث.
+    image_parts: قائمة inline_data تُضاف قبل النص — تشغّل البحث البصري مثل Google Lens."""
     cached = cache_get(query, lang)
     if cached: return cached
     text_part = prompt_text or f"ابحث عن {query} في الكويت. متوفر فقط InStock ورابط منتج مباشر. اذكر أكبر عدد من المتاجر المختلفة (حتى 6). {LANG_INSTR[lang]}"
-    txt, urls = best_of_search([{"text": text_part}], lang)
+    parts = list(image_parts or []) + [{"text": text_part}]
+    txt, urls = best_of_search(parts, lang)
     if not txt: return "", {}
 
     # اذا خدمة أو سؤال معلوماتي - لا نحتاج تحقق اسعار
@@ -711,6 +755,23 @@ def search_product(query, lang, prompt_text=None):
                     if n not in verified and info["url"] not in {v["url"] for v in verified.values()}:
                         verified[n] = info
         print(f"BACKFILL ROUND: now {len(verified)} verified for {query[:50]}")
+
+    # ===== حكم المطابقة: هل كل صفحة موثقة تبيع فعلاً نفس المنتج المطلوب؟ =====
+    # (يمنع حالة: صفحة منتج سليمة بسعر صحيح — بس لمنتج ثاني من نفس البراند)
+    had_candidates = bool(verified)
+    if verified:
+        idx = [n for n in verified if len((verified[n].get("title") or "").strip()) > 5]
+        if idx:
+            titles = [verified[n]["title"] for n in idx]
+            ok = judge_matches(query, titles)
+            for n, good in zip(idx, ok):
+                if not good:
+                    print(f"REJECT MISMATCH: {n} -> {verified[n]['title'][:70]}")
+                    verified.pop(n, None)
+    if had_candidates and not verified:
+        # كل الصفحات كانت لمنتجات ثانية = المنتج نفسه مو موجود أونلاين → تدفق البديل
+        print(f"ALL MISMATCHED -> treat as unavailable: {query[:60]}")
+        return "", {}
 
     if verified:
         cur = "د.ك" if lang == "ar" else "KWD"
@@ -867,23 +928,40 @@ async def process_image_buffer(from_number):
     if len(data["images"])==1: await asyncio.to_thread(process_single_image,data["images"][0],data["bot_id"],lang)
     else: await asyncio.to_thread(process_multi_images,data["images"],from_number,data["bot_id"],lang)
 
+def parse_ident(ident):
+    """يفكك رد التعرف: (الاسم بالعربي للعرض، الاسم الكامل عربي+إنجليزي للبحث)"""
+    lines = [l.strip() for l in (ident or "").strip().splitlines() if l.strip()]
+    if not lines: return "", ""
+    ar = lines[0]
+    en = lines[1] if len(lines) > 1 else ""
+    full = f"{ar} {en}".strip()
+    return ar, full
+
 def process_single_image(message,bot_id,lang="ar"):
     from_number=message["from"]
     caption=(message.get("image",{}) or {}).get("caption","").strip()
     send_whatsapp_text(from_number,T(lang,"identifying"),bot_id)
     b64,mime=download_whatsapp_media(message["image"]["id"])
-    ident,_=call_gemini([{"inline_data":{"mime_type":mime,"data":b64}},{"text":"ما اسم هذا المنتج؟"}], system=IDENTIFY_SYSTEM, use_search=False)
-    product_name = ident.strip().splitlines()[0].strip() if ident else ""
+    ident,_=call_gemini([{"inline_data":{"mime_type":mime,"data":b64}},{"text":"ابحث عن هذا المنتج في جوجل وحدد اسمه التجاري الدقيق بسطرين: عربي ثم إنجليزي"}], system=IDENTIFY_SYSTEM, use_search=True)
+    product_name, product_full = parse_ident(ident)
+    img = [{"inline_data": {"mime_type": mime, "data": b64}}]  # نفس الصورة تنضاف لكل بحث (Google Lens approach)
+
     if product_name and caption:
-        request_query = f"{caption} — {product_name}"
-        prompt_text = f"المنتج في الصورة: {product_name}\nطلب المستخدم عنه: {caption}\nصنّف الطلب وأجب. {LANG_INSTR[lang]}"
-        txt,urls=search_product(request_query, lang, prompt_text=prompt_text)
+        request_query = f"{caption} — {product_full}"
+        prompt_text = (f"الصورة تظهر: {product_full}\n"
+                       f"طلب المستخدم عنه: {caption}\n"
+                       f"صنّف الطلب وأجب. استخدم الصورة للتأكد من النوع الدقيق. {LANG_INSTR[lang]}")
+        txt,urls=search_product(request_query, lang, prompt_text=prompt_text, image_parts=img)
         LAST_SEARCH[from_number] = {"product": request_query}
         query = request_query
     elif product_name:
-        txt,urls=search_product(product_name, lang)
-        LAST_SEARCH[from_number] = {"product": product_name}
-        query = product_name
+        # البحث البصري: نبعث الصورة + الاسم = Gemini يطابق بصرياً مثل Google Lens
+        prompt_text = (f"الصورة تظهر: {product_full}\n"
+                       f"ابحث عن هذا المنتج تحديداً في الكويت — استخدم الصورة للتأكد من النوع الدقيق "
+                       f"(مثلاً: سليبر/mules مو sneakers). InStock فقط، رابط منتج مباشر، حتى 6 متاجر. {LANG_INSTR[lang]}")
+        txt,urls=search_product(product_full, lang, prompt_text=prompt_text, image_parts=img)
+        LAST_SEARCH[from_number] = {"product": product_full}
+        query = product_full
     else:
         req = caption if caption else "ما هذا المنتج؟ ابحث عن سعره الحالي في الكويت."
         txt,urls=best_of_search([{"inline_data":{"mime_type":mime,"data":b64}},{"text":f"{req} {LANG_INSTR[lang]}"}], lang)
@@ -901,8 +979,9 @@ def process_single_image(message,bot_id,lang="ar"):
 def identify_image_product(msg):
     try:
         b64,mime=download_whatsapp_media(msg["image"]["id"])
-        ident,_=call_gemini([{"inline_data":{"mime_type":mime,"data":b64}},{"text":"ما اسم هذا المنتج؟"}], system=IDENTIFY_SYSTEM, use_search=False)
-        return ident.strip().splitlines()[0].strip() if ident else ""
+        ident,_=call_gemini([{"inline_data":{"mime_type":mime,"data":b64}},{"text":"ابحث عن هذا المنتج في جوجل وحدد اسمه التجاري الدقيق بسطرين: عربي ثم إنجليزي"}], system=IDENTIFY_SYSTEM, use_search=True)
+        _, full = parse_ident(ident)
+        return full
     except: return ""
 
 def process_cart(products, from_number, bot_id, lang="ar"):
@@ -961,4 +1040,4 @@ def process_location_message(message, bot_id):
     send_whatsapp_cta(from_number, body, maps_url, bot_id, T(lang,"maps_btn"))
 
 @app.get("/")
-async def health(): return {"status":"v34 alternative product flow"}
+async def health(): return {"status":"v36 visual search Google Lens style"}
