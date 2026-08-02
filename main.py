@@ -6,10 +6,10 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v62-lens-primary-70-20260802"
+BUILD_ID = "v63-strict-local-global-20260802"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
-print("LENS MODE: PRIMARY (~70%) — Lens is the default for most visual searches")
+print("LENS MODE: PRIMARY (~70%) + STRICT LOCAL/GLOBAL SEPARATION")
 print("=" * 70)
 
 
@@ -307,7 +307,7 @@ def has_model_token(a, b):
 
 def cache_key(query, lang):
     norm = re.sub(r"[^\w\u0600-\u06FF]+", "", normalize_ar(query))
-    return hashlib.sha256(f"v50|{norm}|{lang}".encode()).hexdigest()
+    return hashlib.sha256(f"v63|{norm}|{lang}".encode()).hexdigest()
 
 def cache_ttl_for(query, txt=""):
     q_norm = normalize_ar(query)
@@ -1492,18 +1492,75 @@ KUWAIT_STORE_HINTS = (
 )
 
 
+COUNTRY_URL_HINTS = {
+    "kw": ("-kw.", "-kw/", "/kw/", "kuwait-", "kuwait/", "kw-en", "kw-ar", "_kw", "bcute-kw"),
+    "sa": ("-sa.", "-sa/", "/sa/", "saudi-", "saudi/", "ksa", "sa-en", "sa-ar"),
+    "ae": ("-ae.", "-ae/", "/ae/", "uae-", "uae/", "ae-en", "ae-ar"),
+    "gb": ("-uk.", "-uk/", "/uk/", "united-kingdom", "gb-en"),
+}
+
+COUNTRY_CURRENCY_MARKERS = {
+    "kw": ("kwd", "د.ك", " kd", "kuwait dinar"),
+    "sa": ("sar", "ر.س", "saudi riyal"),
+    "ae": ("aed", "د.إ", "uae dirham"),
+    "gb": ("gbp", "£", "pound"),
+    "us": ("usd", "$", "us dollar"),
+}
+
 def is_local_lens_result(item):
+    """Classify a Lens/search result as belonging to the user's current market.
+
+    Covers non-standard Kuwaiti domains such as bcute-kw.com, local URL paths,
+    KWD price markers, and store/source text—not only .kw domains.
+    """
     m = current_market()
-    cc = m.get("country", DEFAULT_COUNTRY)
-    hay = " ".join(str(item.get(k) or "") for k in ("title","source","link","domain","snippet")).lower()
-    host = urllib.parse.urlparse(str(item.get("link") or "")).netloc.lower()
+    cc = (m.get("country") or DEFAULT_COUNTRY).lower()
+    fields = ("title", "source", "link", "domain", "snippet", "price", "currency")
+    hay = " ".join(str(item.get(k) or "") for k in fields).lower()
+    link = str(item.get("link") or "").lower()
+    try:
+        host = urllib.parse.urlparse(link).netloc.lower().replace("www.", "")
+    except Exception:
+        host = ""
+
     if any(tld in host for tld in COUNTRY_TLDS.get(cc, [])):
         return True
+    if any(hint in f"{host}{link}" for hint in COUNTRY_URL_HINTS.get(cc, ())):
+        return True
+
     country_name = str(m.get("country_name") or "").lower()
     city = str(m.get("city") or "").lower()
-    return bool((country_name and country_name in hay) or (city and city in hay))
+    if (country_name and country_name in hay) or (city and city in hay):
+        return True
 
-def lens_priced_offers(lens_context, lang="ar", local_only=True):
+    if cc == "kw" and any(h in hay for h in KUWAIT_STORE_HINTS):
+        return True
+
+    # A local-currency marker is useful when Lens omitted the country but gave a product card.
+    if any(marker in hay for marker in COUNTRY_CURRENCY_MARKERS.get(cc, ())):
+        return True
+    return False
+
+
+def is_foreign_lens_result(item):
+    """True only when the result is clearly not local. Unknown results remain false."""
+    if is_local_lens_result(item):
+        return False
+    m = current_market()
+    cc = (m.get("country") or DEFAULT_COUNTRY).lower()
+    hay = " ".join(str(item.get(k) or "") for k in ("title","source","link","domain","snippet","price","currency")).lower()
+    host = urllib.parse.urlparse(str(item.get("link") or "")).netloc.lower()
+    for other_cc, tlds in COUNTRY_TLDS.items():
+        if other_cc != cc and any(tld in host for tld in tlds):
+            return True
+    for other_cc, markers in COUNTRY_CURRENCY_MARKERS.items():
+        if other_cc != cc and any(marker in hay for marker in markers):
+            return True
+    # In explicit global mode, a valid non-local product URL is accepted as foreign.
+    return bool(host)
+
+
+def lens_priced_offers(lens_context, lang="ar", local_only=True, exclude_local=False):
     """Use Google Lens product cards directly.
 
     Lens already supplies a visual match, direct product URL, displayed price and stock state.
@@ -1524,6 +1581,9 @@ def lens_priced_offers(lens_context, lang="ar", local_only=True):
         if not title or not is_lens_product_url(url, item) or url in used_urls:
             continue
         if local_only and not is_local_lens_result(item):
+            continue
+        if exclude_local and is_local_lens_result(item):
+            print(f"GLOBAL EXCLUDE LOCAL LENS: {title} -> {url}")
             continue
         if in_stock is False:
             print(f"LENS PRODUCT OOS SKIP: {title} -> {url}")
@@ -1552,7 +1612,7 @@ def lens_priced_offers(lens_context, lang="ar", local_only=True):
         offers[name] = {
             "url": url,
             "price": numeric,
-            "price_text": format_lens_price(price_text, price_value, lang),
+            "price_text": format_lens_price(price_text, price_value, lang) if not exclude_local else (str(price_text).strip() or (f"{format_price(price_value)} {currency}" if price_value not in (None, "") else "")),
             "is_local": is_local_lens_result(item),
             "title": title,
             "position": int(item.get("position") or i),
@@ -1574,7 +1634,7 @@ def lens_priced_offers(lens_context, lang="ar", local_only=True):
     return dict(ranked[:MAX_STORES])
 
 
-def verify_lens_direct_matches(lens_context, local_only=True):
+def verify_lens_direct_matches(lens_context, local_only=True, exclude_local=False):
     """Fallback verifier for Lens URLs that had no price card."""
     if not lens_context:
         return {}
@@ -1586,6 +1646,9 @@ def verify_lens_direct_matches(lens_context, local_only=True):
         if not title or not is_lens_product_url(url, m):
             continue
         if local_only and not is_local_lens_result(m):
+            continue
+        if exclude_local and is_local_lens_result(m):
+            print(f"GLOBAL EXCLUDE LOCAL VERIFY: {title} -> {url}")
             continue
         candidates[source] = url
     verified = verify_offers(candidates, (lens_context.get("chosen") or {}).get("title", ""))
@@ -1602,7 +1665,7 @@ def _new_layer_search(query, lang, prompt_text=None, source_image_b64=None, sour
 
     # For image requests, use the product cards returned by Google Lens itself first.
     # This preserves the many visually close results Google shows instead of demanding one exact SKU.
-    lens_cards = lens_priced_offers(lens_context, lang, local_only=not allow_global)
+    lens_cards = lens_priced_offers(lens_context, lang, local_only=not allow_global, exclude_local=allow_global)
     if lens_cards:
         display_name = (lens_context.get("chosen") or {}).get("title") or query
         lines = [f"📦 {display_name}", ""]
@@ -1616,7 +1679,7 @@ def _new_layer_search(query, lang, prompt_text=None, source_image_b64=None, sour
         return "\n".join(lines), new_urls
 
     # If Lens returned direct pages without price metadata, try our HTML verifier once.
-    lens_verified = verify_lens_direct_matches(lens_context, local_only=not allow_global)
+    lens_verified = verify_lens_direct_matches(lens_context, local_only=not allow_global, exclude_local=allow_global)
     if lens_verified:
         sorted_v = sorted(lens_verified.items(), key=lambda x: x[1]["price"])
         display_name = (lens_context.get("chosen") or {}).get("title") or query
@@ -1792,7 +1855,7 @@ def _old_layer_search(query, lang, prompt_text=None, lens_context=None, allow_gl
         return "", {}
     if allow_global:
         base_prompt = (
-            f"ابحث عالميًا عن {query}. اقبل المتاجر الدولية الموثوقة فقط، مع سعر رقمي واضح ورابط صفحة المنتج المباشر، واذكر العملة الأصلية. {LANG_INSTR[lang]}"
+            f"ابحث عالميًا عن {query}. استبعد تمامًا أي متجر داخل {current_market().get('country_name', 'بلد المستخدم')}، لأن البحث المحلي انتهى بالفعل. اقبل المتاجر الأجنبية الموثوقة فقط، مع سعر رقمي واضح ورابط صفحة المنتج المباشر، واذكر العملة الأصلية. {LANG_INSTR[lang]}"
         )
     else:
         base_prompt = prompt_text or (
@@ -1842,6 +1905,12 @@ def _old_layer_search(query, lang, prompt_text=None, lens_context=None, allow_gl
                 merged_urls[name] = url
 
     verified = verify_offers(merged_urls, query)
+    if allow_global and verified:
+        verified = {
+            name: info for name, info in verified.items()
+            if not is_local_lens_result({"link": info.get("url", ""), "source": name, "title": info.get("title", "")})
+        }
+        print(f"GLOBAL OLD LAYER AFTER LOCAL EXCLUSION: {list(verified)}")
     if lens_context:
         verified = filter_verified_with_lens(verified, lens_context)
     if not verified:
@@ -2121,7 +2190,26 @@ def run_global_search(phone, item):
         query, lang, prompt_text=item.get("prompt_text"),
         lens_context=item.get("lens_context"), allow_global=True,
     )
-    if not txt or not extract_store_offers(txt):
+    if txt and urls:
+        filtered_urls = {}
+        for name, url in urls.items():
+            local = is_local_lens_result({"link": url, "source": name, "title": name})
+            if local:
+                print(f"GLOBAL FINAL GUARD REJECT LOCAL: {name} -> {url}")
+            else:
+                filtered_urls[name] = url
+        if len(filtered_urls) != len(urls):
+            # Remove offer lines whose CTA was rejected, so text and buttons stay consistent.
+            kept_names = {normalize_name(n) for n in filtered_urls}
+            kept_lines = []
+            for line in (txt or "").splitlines():
+                offer_match = re.match(r"^(?:✅|🏆|•)\s*(.+?)\s*(?:—|–|-)\s*", line.strip())
+                if offer_match and normalize_name(offer_match.group(1)) not in kept_names:
+                    continue
+                kept_lines.append(line)
+            txt = "\n".join(kept_lines).strip()
+            urls = filtered_urls
+    if not txt or not extract_store_offers(txt) or not urls:
         send_whatsapp_text(phone, T(lang, "global_none"), bot_id)
         return
     send_product_result(phone, txt, urls, bot_id, lang, query)
