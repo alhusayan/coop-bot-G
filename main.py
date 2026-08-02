@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v54-evidence-judge-20260802"
+BUILD_ID = "v56-language-location-3days-20260802"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("LENS MODE: DIRECT — NO STRICT VISUAL SELECTION")
@@ -30,6 +30,13 @@ processed_ids = deque(maxlen=1000)
 IMAGE_BUFFER = defaultdict(lambda: {"images": [], "time": 0, "bot_id": ""})
 LAST_SEARCH = {}
 USER_LANG = {}
+# اللغة والموقع يُطلبان في أول استخدام. الموقع يُجدَّد كل 3 أيام.
+USER_MARKET = {}
+USER_LOCATION_TS = {}
+PENDING_ONBOARDING = {}
+LOCATION_TTL_SECONDS = max(3600, int(os.environ.get("LOCATION_TTL_HOURS", "72")) * 3600)
+MARKET_CTX = threading.local()
+DEFAULT_COUNTRY = os.environ.get("DEFAULT_COUNTRY", "kw").strip().lower() or "kw"
 PENDING_IMAGES = defaultdict(lambda: {"images": [], "bot_id": ""})
 
 BUFFER_SECONDS = 4
@@ -72,12 +79,95 @@ LENS_IMAGE_TTL = max(120, int(os.environ.get("LENS_IMAGE_TTL_SECONDS", "600")))
 LENS_IMAGE_STORE = {}
 LENS_IMAGE_LOCK = threading.Lock()
 
+
+# ---- Global market detection -------------------------------------------------
+# Longest-prefix matching. This covers all international calling-code zones; ambiguous
+# +1 and +7 default to the most common market unless the user shares location.
+CALLING_CODE_TO_COUNTRY = {
+    "965":"kw","966":"sa","971":"ae","973":"bh","974":"qa","968":"om","964":"iq","962":"jo","961":"lb","963":"sy","967":"ye","970":"ps",
+    "20":"eg","212":"ma","213":"dz","216":"tn","218":"ly","249":"sd","252":"so","253":"dj","269":"km","222":"mr",
+    "90":"tr","98":"ir","92":"pk","91":"in","880":"bd","94":"lk","977":"np","93":"af","960":"mv","975":"bt",
+    "86":"cn","852":"hk","853":"mo","886":"tw","81":"jp","82":"kr","850":"kp","65":"sg","60":"my","62":"id","63":"ph","66":"th","84":"vn","855":"kh","856":"la","95":"mm","673":"bn","670":"tl","976":"mn",
+    "44":"gb","353":"ie","33":"fr","49":"de","39":"it","34":"es","351":"pt","31":"nl","32":"be","352":"lu","41":"ch","43":"at","45":"dk","46":"se","47":"no","358":"fi","354":"is","30":"gr","357":"cy","356":"mt",
+    "48":"pl","420":"cz","421":"sk","36":"hu","40":"ro","359":"bg","385":"hr","386":"si","381":"rs","382":"me","387":"ba","389":"mk","355":"al","383":"xk","373":"md","380":"ua","375":"by","370":"lt","371":"lv","372":"ee","7":"ru",
+    "1":"us","52":"mx","55":"br","54":"ar","56":"cl","57":"co","58":"ve","51":"pe","593":"ec","591":"bo","595":"py","598":"uy","592":"gy","597":"sr","500":"fk",
+    "61":"au","64":"nz","675":"pg","679":"fj","677":"sb","678":"vu","685":"ws","676":"to","686":"ki","688":"tv","691":"fm","692":"mh","680":"pw","674":"nr",
+    "27":"za","234":"ng","233":"gh","254":"ke","255":"tz","256":"ug","250":"rw","257":"bi","251":"et","291":"er","260":"zm","263":"zw","267":"bw","264":"na","258":"mz","261":"mg","230":"mu","248":"sc","266":"ls","268":"sz","265":"mw","244":"ao","243":"cd","242":"cg","241":"ga","237":"cm","225":"ci","221":"sn","223":"ml","226":"bf","227":"ne","228":"tg","229":"bj","231":"lr","232":"sl","224":"gn","245":"gw","240":"gq","235":"td","236":"cf","239":"st","238":"cv",
+    "972":"il","994":"az","995":"ge","374":"am","992":"tj","993":"tm","996":"kg","998":"uz","976":"mn","977":"np","7":"ru"
+}
+COUNTRY_NAMES = {
+    "kw":"Kuwait","sa":"Saudi Arabia","ae":"United Arab Emirates","bh":"Bahrain","qa":"Qatar","om":"Oman","iq":"Iraq","jo":"Jordan","lb":"Lebanon","eg":"Egypt","tr":"Turkey",
+    "us":"United States","ca":"Canada","gb":"United Kingdom","fr":"France","de":"Germany","it":"Italy","es":"Spain","pt":"Portugal","nl":"Netherlands","be":"Belgium","ch":"Switzerland","at":"Austria",
+    "in":"India","cn":"China","jp":"Japan","kr":"South Korea","sg":"Singapore","my":"Malaysia","id":"Indonesia","ph":"Philippines","th":"Thailand","vn":"Vietnam","pk":"Pakistan","bd":"Bangladesh",
+    "au":"Australia","nz":"New Zealand","za":"South Africa","ng":"Nigeria","ke":"Kenya","ma":"Morocco","dz":"Algeria","tn":"Tunisia","ru":"Russia","ua":"Ukraine","br":"Brazil","mx":"Mexico","ar":"Argentina"
+}
+COUNTRY_CURRENCIES = {
+    "kw":"KWD","sa":"SAR","ae":"AED","bh":"BHD","qa":"QAR","om":"OMR","iq":"IQD","jo":"JOD","lb":"LBP","eg":"EGP","tr":"TRY",
+    "us":"USD","ca":"CAD","gb":"GBP","fr":"EUR","de":"EUR","it":"EUR","es":"EUR","pt":"EUR","nl":"EUR","be":"EUR","ch":"CHF","at":"EUR",
+    "in":"INR","cn":"CNY","jp":"JPY","kr":"KRW","sg":"SGD","my":"MYR","id":"IDR","ph":"PHP","th":"THB","vn":"VND","pk":"PKR","bd":"BDT",
+    "au":"AUD","nz":"NZD","za":"ZAR","ng":"NGN","ke":"KES","ma":"MAD","dz":"DZD","tn":"TND","ru":"RUB","ua":"UAH","br":"BRL","mx":"MXN","ar":"ARS"
+}
+COUNTRY_TLDS = {"kw":[".kw"],"sa":[".sa"],"ae":[".ae"],"bh":[".bh"],"qa":[".qa"],"om":[".om"],"tr":[".tr"],"gb":[".uk"],"us":[".us"],"ca":[".ca"],"in":[".in"],"cn":[".cn"],"jp":[".jp"],"au":[".au"],"nz":[".nz"],"de":[".de"],"fr":[".fr"],"it":[".it"],"es":[".es"]}
+
+def infer_country_from_phone(phone):
+    digits = re.sub(r"\D", "", phone or "")
+    for prefix in sorted(CALLING_CODE_TO_COUNTRY, key=len, reverse=True):
+        if digits.startswith(prefix):
+            return CALLING_CODE_TO_COUNTRY[prefix]
+    return DEFAULT_COUNTRY
+
+def market_for_user(from_number):
+    market = dict(USER_MARKET.get(from_number) or {})
+    cc = (market.get("country") or DEFAULT_COUNTRY).lower()
+    market["country"] = cc
+    market.setdefault("country_name", COUNTRY_NAMES.get(cc, cc.upper()))
+    market.setdefault("currency", COUNTRY_CURRENCIES.get(cc, ""))
+    return market
+
+def activate_market(from_number):
+    market = market_for_user(from_number)
+    MARKET_CTX.value = market
+    USER_MARKET[from_number] = market
+    return market
+
+def current_market():
+    return getattr(MARKET_CTX, "value", None) or {"country":DEFAULT_COUNTRY,"country_name":COUNTRY_NAMES.get(DEFAULT_COUNTRY,"Kuwait"),"currency":COUNTRY_CURRENCIES.get(DEFAULT_COUNTRY,"KWD")}
+
+def currency_label(lang="ar"):
+    code = current_market().get("currency") or ""
+    if lang == "en" or code != "KWD":
+        return code or ""
+    return "د.ك"
+
+def market_instruction():
+    m = current_market()
+    city = m.get("city") or ""
+    place = f"{city}, {m['country_name']}" if city else m["country_name"]
+    currency = m.get("currency") or "local currency"
+    return (f"\nIMPORTANT CURRENT USER MARKET: {place} (country code {m['country']}). "
+            f"Return stores that sell/deliver in {place}, and prices in {currency}. "
+            "Reject India, China, or any other foreign-country result unless it explicitly delivers to the current market and no local result exists. "
+            "Ignore any older Kuwait-specific instruction when the current market is not Kuwait.\n")
+
+def reverse_geocode_market(lat, lng):
+    # No API key required. Failure is harmless: coordinates still localise Google Maps.
+    try:
+        r = requests.get("https://api.bigdatacloud.net/data/reverse-geocode-client", params={"latitude":lat,"longitude":lng,"localityLanguage":"en"}, timeout=8)
+        if r.ok:
+            j = r.json()
+            cc = str(j.get("countryCode") or "").lower()
+            if cc:
+                return {"country":cc,"country_name":j.get("countryName") or COUNTRY_NAMES.get(cc,cc.upper()),"city":j.get("city") or j.get("locality") or "","currency":COUNTRY_CURRENCIES.get(cc,"")}
+    except Exception as e:
+        print(f"REVERSE GEOCODE ERR: {e}")
+    return {}
+
 GROCERY_WORDS = [
     "بيبسي","شيبس","حليب","قهوه","قهوة","شاي","سكر","رز","زيت","صابون","شامبو",
     "برينجلز","كيتكات","نسكافيه","تونه","ماء","عصير","بسكوت","منظف","معجون","حفاض"
 ]
 
-print("STARTING COOP BOT BUILD: v54-evidence-judge-20260802")
+print("STARTING COOP BOT BUILD: v55-global-market-20260802")
 print(
     f"ECONOMIC CONFIG search_model={GEMINI_SEARCH_MODEL} fast_model={GEMINI_FAST_MODEL} "
     f"max_stores={MAX_STORES} search_attempts={MAX_SEARCH_ATTEMPTS} "
@@ -118,7 +208,7 @@ def format_lens_price(price_text, price_value, lang="ar"):
                 numeric = None
     if numeric is None:
         return str(price_text or "").strip()
-    currency = "KWD" if lang == "en" else "د.ك"
+    currency = currency_label(lang)
     return f"{format_price(numeric)} {currency}"
 
 def is_direct_store_url(url):
@@ -209,6 +299,15 @@ def _cache_db_init():
             """)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_search_cache_expiry ON search_cache(expires_at)")
             conn.execute("DELETE FROM search_cache WHERE expires_at <= ?", (time.time(),))
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS user_preferences (
+                    phone TEXT PRIMARY KEY,
+                    lang TEXT,
+                    market_json TEXT NOT NULL DEFAULT '{}',
+                    location_ts REAL NOT NULL DEFAULT 0,
+                    updated_at REAL NOT NULL
+                )
+            """)
     except Exception as e:
         print(f"CACHE DB INIT ERR: {e}")
 
@@ -267,6 +366,58 @@ def _cache_db_put(key, entry):
         print(f"CACHE DB PUT ERR: {e}")
 
 _cache_db_init()
+
+def load_user_preferences(phone):
+    if phone in USER_LANG or phone in USER_MARKET or phone in USER_LOCATION_TS:
+        return
+    try:
+        with CACHE_DB_LOCK, _cache_db_connect() as conn:
+            row = conn.execute(
+                "SELECT lang, market_json, location_ts FROM user_preferences WHERE phone=?",
+                (phone,),
+            ).fetchone()
+        if not row:
+            return
+        lang, market_json, location_ts = row
+        if lang:
+            USER_LANG[phone] = lang
+        try:
+            market = json.loads(market_json or "{}")
+            if market:
+                USER_MARKET[phone] = market
+        except Exception:
+            pass
+        USER_LOCATION_TS[phone] = float(location_ts or 0)
+    except Exception as e:
+        print(f"USER PREF GET ERR: {e}")
+
+def save_user_preferences(phone):
+    try:
+        with CACHE_DB_LOCK, _cache_db_connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO user_preferences(phone, lang, market_json, location_ts, updated_at)
+                VALUES(?,?,?,?,?)
+                ON CONFLICT(phone) DO UPDATE SET
+                    lang=excluded.lang,
+                    market_json=excluded.market_json,
+                    location_ts=excluded.location_ts,
+                    updated_at=excluded.updated_at
+                """,
+                (phone, USER_LANG.get(phone), json.dumps(USER_MARKET.get(phone) or {}, ensure_ascii=False),
+                 float(USER_LOCATION_TS.get(phone, 0)), time.time()),
+            )
+    except Exception as e:
+        print(f"USER PREF PUT ERR: {e}")
+
+def location_is_valid(phone):
+    load_user_preferences(phone)
+    market = USER_MARKET.get(phone) or {}
+    ts = float(USER_LOCATION_TS.get(phone, 0) or 0)
+    return bool(market.get("country") and market.get("lat") is not None and market.get("lng") is not None and (time.time() - ts) < LOCATION_TTL_SECONDS)
+
+def cache_pending_message(phone, message, bot_id):
+    PENDING_ONBOARDING[phone] = {"message": message, "bot_id": bot_id, "ts": time.time()}
 
 def cache_get(query, lang):
     now = time.time()
@@ -623,7 +774,7 @@ def google_lens_lookup(image_b64, mime_type, lang="ar", query_hint=""):
         "type": "products",
         "url": public_url,
         "api_key": SERPAPI_API_KEY,
-        "country": "kw",
+        "country": current_market().get("country", DEFAULT_COUNTRY),
         "hl": "en",
         "auto_crop": "true",
         "safe": "active",
@@ -1024,7 +1175,8 @@ def maps_search_url(product, lat=None, lng=None):
     return f"https://www.google.com/maps/search/{safe_category}"
 
 def send_maps_button(from_number, product, bot_id, lang):
-    url = maps_search_url(product)
+    m = market_for_user(from_number)
+    url = maps_search_url(product, m.get("lat"), m.get("lng")) if m.get("lat") is not None and m.get("lng") is not None else maps_search_url(product)
     send_whatsapp_cta(from_number, T(lang, "maps_body"), url, bot_id, T(lang, "maps_btn"))
 
 def send_product_result(from_number, txt, urls, bot_id, lang, query, best_only=False):
@@ -1068,7 +1220,7 @@ def call_gemini(parts, system=SYSTEM_PROMPT, use_search=True):
     model = GEMINI_SEARCH_MODEL if use_search else GEMINI_FAST_MODEL
     gemini_url = f"{GEMINI_BASE_URL}/{model}:generateContent"
     payload = {
-        "systemInstruction": {"parts": [{"text": system}]},
+        "systemInstruction": {"parts": [{"text": system + (market_instruction() if use_search else "")}]},
         "contents": [{"role": "user", "parts": parts}],
         "generationConfig": {
             "temperature": 0,
@@ -1193,11 +1345,11 @@ def bilingual_search_instruction(query, lang):
     """يجبر البحث في الفهرسة العربية والإنجليزية مع إبقاء الرد بلغة المستخدم."""
     response_rule = LANG_INSTR[lang]
     return (
-        f"ابحث عن المنتج التالي في الكويت باستخدام العربية والإنجليزية معاً: {query}. "
+        f"ابحث عن المنتج التالي في {current_market().get('country_name', 'Kuwait')} باستخدام العربية والإنجليزية معاً: {query}. "
         "حوّل الاسم داخلياً إلى مرادف عربي ومرادف إنجليزي، وجرّب اسم البراند باللاتيني والعربي، "
         "ولا تعتبر عدم ظهور نتيجة بلغة واحدة فشلاً قبل تجربة اللغة الأخرى. "
-        "ابدأ بنتائج المتاجر الكويتية المعروفة حتى لو كانت متأخرة في Google، وافحص نتائج أعمق قبل المتاجر الأجنبية. "
-        "اعرض فقط نتائج لها سعر رقمي بالدينار الكويتي ورابط صفحة منتج مباشر داخل المتجر. "
+        f"ابدأ بنتائج المتاجر المحلية في {current_market().get('country_name', 'Kuwait')} حتى لو كانت متأخرة في Google، وافحص نتائج أعمق قبل المتاجر الأجنبية. "
+        f"اعرض فقط نتائج لها سعر رقمي بعملة {current_market().get('currency', 'البلد')} ورابط صفحة منتج مباشر داخل المتجر. "
         f"{response_rule}"
     )
 
@@ -1269,19 +1421,16 @@ KUWAIT_STORE_HINTS = (
 )
 
 
-def is_kuwait_lens_result(item):
-    """Detect Kuwait merchants even when Google Lens ranks them after foreign stores."""
-    text = " ".join([
-        str(item.get("source") or ""), str(item.get("link") or ""),
-        str(item.get("title") or ""), str(item.get("currency") or ""),
-        str(item.get("price") or "")
-    ]).lower()
-    try:
-        host = urllib.parse.urlparse(item.get("link") or "").netloc.lower()
-    except Exception:
-        host = ""
-    return host.endswith(".kw") or any(h in text for h in KUWAIT_STORE_HINTS)
-
+def is_local_lens_result(item):
+    m = current_market()
+    cc = m.get("country", DEFAULT_COUNTRY)
+    hay = " ".join(str(item.get(k) or "") for k in ("title","source","link","domain","snippet")).lower()
+    host = urllib.parse.urlparse(str(item.get("link") or "")).netloc.lower()
+    if any(tld in host for tld in COUNTRY_TLDS.get(cc, [])):
+        return True
+    country_name = str(m.get("country_name") or "").lower()
+    city = str(m.get("city") or "").lower()
+    return bool((country_name and country_name in hay) or (city and city in hay))
 
 def lens_priced_offers(lens_context, lang="ar"):
     """Use Google Lens product cards directly.
@@ -1308,11 +1457,15 @@ def lens_priced_offers(lens_context, lang="ar"):
             continue
         if not price_text and price_value in (None, ""):
             continue
-        # Kuwait localization usually returns KWD. Keep only KWD-like cards so the WhatsApp
-        # result remains comparable; foreign-currency Lens cards can still be found by fallback search.
+        # Keep cards in the user's current market currency. If SerpApi omitted the currency
+        # but supplied a numeric price, retain the card and let the local-result score decide.
         price_hay = f"{price_text} {currency}".lower()
-        if not any(x in price_hay for x in ("kwd", "د.ك", "kd")):
-            continue
+        expected_currency = (current_market().get("currency") or "").lower()
+        currency_aliases = {expected_currency}
+        if expected_currency == "kwd": currency_aliases.update({"د.ك", "kd"})
+        if expected_currency and price_hay.strip() and not any(x and x in price_hay for x in currency_aliases):
+            if price_value in (None, ""):
+                continue
         name = _lens_source_name(item, i)
         base = name
         n = 2
@@ -1327,7 +1480,7 @@ def lens_priced_offers(lens_context, lang="ar"):
             "url": url,
             "price": numeric,
             "price_text": format_lens_price(price_text, price_value, lang),
-            "is_kuwait": is_kuwait_lens_result(item),
+            "is_local": is_local_lens_result(item),
             "title": title,
             "position": int(item.get("position") or i),
             "exact": bool(item.get("exact")),
@@ -1338,7 +1491,7 @@ def lens_priced_offers(lens_context, lang="ar"):
     ranked = sorted(
         offers.items(),
         key=lambda kv: (
-            0 if kv[1].get("is_kuwait") else 1,
+            0 if kv[1].get("is_local") else 1,
             0 if kv[1].get("exact") else 1,
             kv[1].get("position", 999),
         ),
@@ -1394,7 +1547,7 @@ def _new_layer_search(query, lang, prompt_text=None, source_image_b64=None, sour
         new_urls = {}
         for i, (name, info) in enumerate(sorted_v[:MAX_STORES]):
             prefix = "✅" if i == 0 else "•"
-            currency = "KWD" if lang == "en" else "د.ك"
+            currency = currency_label(lang)
             lines.append(f"{prefix} {name} — {format_price(info['price'])} {currency}")
             new_urls[name] = info["url"]
         return "\n".join(lines), new_urls
@@ -1462,7 +1615,7 @@ def _new_layer_search(query, lang, prompt_text=None, source_image_b64=None, sour
                 new_urls = {}
                 for i, (name, info) in enumerate(sorted_v[:MAX_STORES]):
                     prefix = "✅" if i == 0 else "•"
-                    currency = "KWD" if lang == "en" else "د.ك"
+                    currency = currency_label(lang)
                     lines.append(f"{prefix} {name} — {format_price(info['price'])} {currency}")
                     new_urls[name] = info["url"]
                 final_txt = "\n".join(lines)
@@ -1542,7 +1695,7 @@ def _result_offers(txt, urls, layer, lens_context=None):
             "line": offer.get("line", ""),
             "layer": layer,
             "host": host,
-            "is_kuwait": host.endswith(".kw") or host.endswith(".com.kw") or any(h in (host + " " + offer.get("name", "").lower()) for h in KUWAIT_STORE_HINTS),
+            "is_local": is_local_lens_result({"link": url, "source": offer.get("name", ""), "title": title}),
             "exact": False,
             "lens_position": 999,
         }
@@ -1561,13 +1714,21 @@ def _old_layer_search(query, lang, prompt_text=None, lens_context=None):
     if not OLD_LAYER_ENABLED:
         return "", {}
     base_prompt = prompt_text or (
-        f"ابحث عن {query} في الكويت. متوفر فقط وبسعر رقمي واضح ورابط صفحة منتج مباشر. {LANG_INSTR[lang]}"
+        f"ابحث عن {query} في {current_market().get('country_name', 'Kuwait')}. متوفر فقط وبسعر رقمي واضح ورابط صفحة منتج مباشر. {LANG_INSTR[lang]}"
     )
-    variants = [
-        base_prompt,
-        f"{query} افضل سعر في الكويت Xcite Eureka Blink Noon Jarir Lulu Carrefour Best Al Yousifi جمعية دوت كوم - قارن الاسعار {LANG_INSTR[lang]}",
-        f"{query} شراء اونلاين الكويت سعر متوفر متجر كويتي صفحة المنتج مباشرة {LANG_INSTR[lang]}",
-    ]
+    market_name = current_market().get("country_name", "Kuwait")
+    if current_market().get("country") == "kw":
+        variants = [
+            base_prompt,
+            f"{query} افضل سعر في الكويت Xcite Eureka Blink Noon Jarir Lulu Carrefour Best Al Yousifi جمعية دوت كوم - قارن الاسعار {LANG_INSTR[lang]}",
+            f"{query} شراء اونلاين الكويت سعر متوفر متجر كويتي صفحة المنتج مباشرة {LANG_INSTR[lang]}",
+        ]
+    else:
+        variants = [
+            base_prompt,
+            f"{query} best price in {market_name} local stores direct product page {LANG_INSTR[lang]}",
+            f"{query} buy online {market_name} local delivery price in {current_market().get('currency','local currency')} {LANG_INSTR[lang]}",
+        ]
     futures = []
     for variant in variants:
         for _ in range(OLD_LAYER_DUPLICATES):
@@ -1601,7 +1762,7 @@ def _old_layer_search(query, lang, prompt_text=None, lens_context=None):
 
     sorted_v = sorted(verified.items(), key=lambda x: x[1]["price"])
     title = product_title(best_txt, query)
-    currency = "KWD" if lang == "en" else "د.ك"
+    currency = currency_label(lang)
     lines = [title, ""]
     new_urls = {}
     for i, (name, info) in enumerate(sorted_v[:max(MAX_STORES * 2, 6)]):
@@ -1648,7 +1809,7 @@ def _merge_two_layers(query, lang, new_result, old_result, lens_context=None):
     def rank(o):
         quality = 0
         quality += 100 if o.get("exact") else 0
-        quality += 40 if o.get("is_kuwait") else 0
+        quality += 40 if o.get("is_local") else 0
         quality += _store_priority_value(o.get("name", ""), o.get("url", "")) * 2
         quality += 12 if o.get("layer") == "new" else 8
         quality += max(0, 20 - min(int(o.get("lens_position", 999)), 20))
@@ -1659,7 +1820,7 @@ def _merge_two_layers(query, lang, new_result, old_result, lens_context=None):
     display_title = ((lens_context or {}).get("chosen") or {}).get("title") or \
                     product_title(new_txt, "").replace("📦", "").strip() or \
                     product_title(old_txt, query).replace("📦", "").strip() or query
-    currency = "KWD" if lang == "en" else "د.ك"
+    currency = currency_label(lang)
     lines = [f"📦 {display_title}", ""]
     urls = {}
     for i, offer in enumerate(chosen):
@@ -1729,6 +1890,52 @@ def send_language_choice(to, bot_id):
     body = "🌐 اختر لغتك المفضلة\nChoose your preferred language"
     send_whatsapp_buttons(to, body, [{"id": "lang_ar", "title": "العربية 🇰🇼"},{"id": "lang_en", "title": "English 🇬🇧"}], bot_id)
 
+def send_location_request(to, bot_id, lang="ar", refresh=False):
+    if lang == "en":
+        body = "📍 Please share your current location so I can show stores and prices near you."
+        if refresh:
+            body = "📍 It has been 3 days. Please update your current location before the next search."
+    else:
+        body = "📍 دز موقعك الحالي عشان أطلع لك المتاجر والأسعار في البلد والمنطقة اللي أنت فيها."
+        if refresh:
+            body = "📍 مرّت 3 أيام. دز موقعك الحالي من جديد قبل البحث عشان أتأكد من البلد والمنطقة."
+    url=f"{GRAPH_URL}/{bot_id}/messages"
+    h={"Authorization":f"Bearer {WHATSAPP_TOKEN}","Content-Type":"application/json"}
+    payload={
+        "messaging_product":"whatsapp",
+        "to":to,
+        "type":"interactive",
+        "interactive":{
+            "type":"location_request_message",
+            "body":{"text":body[:1024]},
+            "action":{"name":"send_location"}
+        }
+    }
+    try:
+        r=requests.post(url,json=payload,headers=h,timeout=15)
+        if r.ok:
+            return True
+        print(f"LOCATION REQUEST ERR {r.status_code}: {r.text[:300]}")
+    except Exception as e:
+        print(f"LOCATION REQUEST ERR: {e}")
+    # fallback if the interactive location request is not available for the account/version
+    return send_whatsapp_text(to, body + ("\n\nمن واتساب: + ثم الموقع." if lang == "ar" else "\n\nIn WhatsApp: tap +, then Location."), bot_id)
+
+def route_pending_after_location(phone):
+    pending = PENDING_ONBOARDING.pop(phone, None)
+    if not pending:
+        return
+    msg = pending.get("message") or {}
+    bot_id = pending.get("bot_id") or PHONE_NUMBER_ID
+    typ = msg.get("type")
+    if typ == "image":
+        IMAGE_BUFFER[phone]["images"].append(msg)
+        IMAGE_BUFFER[phone]["time"] = time.time()
+        IMAGE_BUFFER[phone]["bot_id"] = bot_id
+        asyncio.run(process_image_buffer(phone))
+    elif typ == "text":
+        process_text_message(msg, bot_id, onboarding_checked=True)
+
 @app.get("/lens-image/{token}")
 async def lens_image(token: str):
     _cleanup_lens_images()
@@ -1756,25 +1963,36 @@ async def receive(request: Request, background_tasks: BackgroundTasks):
         processed_ids.append(mid)
         bot_id=value.get("metadata",{}).get("phone_number_id",PHONE_NUMBER_ID)
         from_number=msg["from"]
-        if msg.get("type")=="image":
-            caption = (msg.get("image",{}) or {}).get("caption","").strip()
-            cap_lang = detect_lang(caption) if caption else None
-            if cap_lang: USER_LANG[from_number] = cap_lang
-            if from_number not in USER_LANG:
-                pend=PENDING_IMAGES[from_number]
-                pend["images"].append(msg); pend["bot_id"]=bot_id
-                if len(pend["images"])==1:
-                    background_tasks.add_task(asyncio.to_thread, send_language_choice, from_number, bot_id)
-            else:
-                IMAGE_BUFFER[from_number]["images"].append(msg); IMAGE_BUFFER[from_number]["time"]=time.time(); IMAGE_BUFFER[from_number]["bot_id"]=bot_id
-                if len(IMAGE_BUFFER[from_number]["images"])==1:
-                    background_tasks.add_task(process_image_buffer,from_number)
-        elif msg.get("type")=="text":
-            background_tasks.add_task(process_text_message,msg,bot_id)
-        elif msg.get("type")=="interactive":
+        load_user_preferences(from_number)
+        typ=msg.get("type")
+
+        # Language choices and shared locations must always pass through.
+        if typ == "interactive":
             background_tasks.add_task(process_interactive_message,msg,bot_id)
-        elif msg.get("type")=="location":
+            return {"status":"ok"}
+        if typ == "location":
             background_tasks.add_task(process_location_message,msg,bot_id)
+            return {"status":"ok"}
+
+        # First use: keep the request, ask for language, then ask for location.
+        if from_number not in USER_LANG:
+            cache_pending_message(from_number, msg, bot_id)
+            background_tasks.add_task(asyncio.to_thread, send_language_choice, from_number, bot_id)
+            return {"status":"ok"}
+
+        # Every 3 days: pause the request and refresh location before searching.
+        if not location_is_valid(from_number):
+            cache_pending_message(from_number, msg, bot_id)
+            refresh = bool(USER_LOCATION_TS.get(from_number, 0))
+            background_tasks.add_task(asyncio.to_thread, send_location_request, from_number, bot_id, USER_LANG.get(from_number,"ar"), refresh)
+            return {"status":"ok"}
+
+        if typ=="image":
+            IMAGE_BUFFER[from_number]["images"].append(msg); IMAGE_BUFFER[from_number]["time"]=time.time(); IMAGE_BUFFER[from_number]["bot_id"]=bot_id
+            if len(IMAGE_BUFFER[from_number]["images"])==1:
+                background_tasks.add_task(process_image_buffer,from_number)
+        elif typ=="text":
+            background_tasks.add_task(process_text_message,msg,bot_id,True)
     except Exception as e: print(f"webhook err {e}")
     return {"status":"ok"}
 
@@ -1782,15 +2000,13 @@ def process_interactive_message(message, bot_id):
     from_number=message["from"]
     reply=(message.get("interactive") or {}).get("button_reply") or {}
     btn_id=reply.get("id","")
-    if btn_id not in ("lang_ar","lang_en"): return
+    if btn_id not in ("lang_ar","lang_en"):
+        return
     lang = "ar" if btn_id=="lang_ar" else "en"
     USER_LANG[from_number]=lang
-    pend=PENDING_IMAGES.pop(from_number,None)
-    if pend and pend["images"]:
-        if len(pend["images"])==1: process_single_image(pend["images"][0], pend["bot_id"], lang)
-        else: process_multi_images(pend["images"], from_number, pend["bot_id"], lang)
-    else:
-        send_whatsapp_text(from_number, T(lang,"lang_saved"), bot_id)
+    save_user_preferences(from_number)
+    # Do not run the stored search yet. Location is mandatory after language selection.
+    send_location_request(from_number, bot_id, lang, refresh=False)
 
 async def process_image_buffer(from_number):
     await asyncio.sleep(BUFFER_SECONDS)
@@ -1884,6 +2100,7 @@ def choose_image_identity(image_b64, mime_type, lens, vision_name):
 
 def process_single_image(message,bot_id,lang="ar"):
     from_number=message["from"]
+    activate_market(from_number)
     caption=(message.get("image",{}) or {}).get("caption","").strip()
     send_whatsapp_text(from_number,T(lang,"identifying"),bot_id)
     b64,mime=download_whatsapp_media(message["image"]["id"])
@@ -1962,8 +2179,15 @@ def send_last_search_map(from_number, bot_id, lang):
         return
     send_maps_button(from_number, last_search["product"], bot_id, lang)
 
-def process_text_message(message,bot_id):
-    from_number=message["from"]; user_text=message["text"]["body"]
+def process_text_message(message,bot_id,onboarding_checked=False):
+    from_number=message["from"]
+    load_user_preferences(from_number)
+    if not onboarding_checked:
+        if from_number not in USER_LANG:
+            cache_pending_message(from_number, message, bot_id); send_language_choice(from_number, bot_id); return
+        if not location_is_valid(from_number):
+            cache_pending_message(from_number, message, bot_id); send_location_request(from_number, bot_id, USER_LANG.get(from_number,"ar"), bool(USER_LOCATION_TS.get(from_number,0))); return
+    activate_market(from_number); user_text=message["text"]["body"]
     cmd=re.sub(r"[^\w\u0600-\u06FF]","",user_text.strip().lower())
     if cmd in ("لغة","اللغة","غيراللغة","language","lang","changelanguage"):
         send_language_choice(from_number, bot_id); return
@@ -1991,15 +2215,22 @@ def process_text_message(message,bot_id):
 
 def process_location_message(message, bot_id):
     from_number = message["from"]
+    load_user_preferences(from_number)
     lat = message["location"]["latitude"]; lng = message["location"]["longitude"]
+    geo = reverse_geocode_market(lat, lng)
+    market = market_for_user(from_number)
+    market.update(geo)
+    market.update({"lat":lat,"lng":lng})
+    USER_MARKET[from_number]=market
+    USER_LOCATION_TS[from_number]=time.time()
+    MARKET_CTX.value=market
+    save_user_preferences(from_number)
+    print(f"USER MARKET UPDATED: {from_number} -> {market}; valid_for_hours={LOCATION_TTL_SECONDS/3600:.0f}")
     lang = USER_LANG.get(from_number, "ar")
-    last_search = LAST_SEARCH.get(from_number)
-    if not last_search or not last_search.get("product"):
-        send_whatsapp_text(from_number, T(lang,"no_saved_product"), bot_id); return
-    product = last_search["product"]
-    maps_url = maps_search_url(product, lat, lng)
-    body = T(lang,"maps_body_loc",p=product)
-    send_whatsapp_cta(from_number, body, maps_url, bot_id, T(lang,"maps_btn"))
+    city = market.get("city") or market.get("country_name") or market.get("country", "").upper()
+    msg = f"تم حفظ موقعك: {city} ✅\nراح أطلب تحديثه بعد 3 أيام." if lang == "ar" else f"Location saved: {city} ✅\nI’ll ask you to update it again after 3 days."
+    send_whatsapp_text(from_number, msg, bot_id)
+    route_pending_after_location(from_number)
 
 @app.get("/")
-async def health(): return {"status":"v53 TWO-LAYER SEARCH + RESULT RANKING", "build":BUILD_ID}
+async def health(): return {"status":"v56 LANGUAGE + LOCATION EVERY 3 DAYS", "build":BUILD_ID, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
