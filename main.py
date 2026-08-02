@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v53-two-layer-search-20260802"
+BUILD_ID = "v54-evidence-judge-20260802"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("LENS MODE: DIRECT — NO STRICT VISUAL SELECTION")
@@ -77,7 +77,7 @@ GROCERY_WORDS = [
     "برينجلز","كيتكات","نسكافيه","تونه","ماء","عصير","بسكوت","منظف","معجون","حفاض"
 ]
 
-print("STARTING COOP BOT BUILD: v53-two-layer-search-20260802")
+print("STARTING COOP BOT BUILD: v54-evidence-judge-20260802")
 print(
     f"ECONOMIC CONFIG search_model={GEMINI_SEARCH_MODEL} fast_model={GEMINI_FAST_MODEL} "
     f"max_stores={MAX_STORES} search_attempts={MAX_SEARCH_ATTEMPTS} "
@@ -1829,38 +1829,83 @@ def identify_product_with_retry(b64, mime, lang="ar"):
     return ""
 
 
+
+def choose_image_identity(image_b64, mime_type, lens, vision_name):
+    """Arbitrate between Google Lens and direct vision/OCR.
+
+    Rules: text printed on a package, barcode/model/brand and product type are stronger
+    evidence than visual similarity. Lens is stronger for unlabelled fashion/objects.
+    """
+    lens_title = ((lens.get("chosen") or {}).get("title") or lens.get("query") or "").strip()
+    vision_name = (vision_name or "").strip()
+    if not lens_title:
+        return vision_name, None, "VISION_ONLY"
+    if not vision_name:
+        return lens_title, lens, "LENS_ONLY"
+
+    judge_system = """أنت حكم دقيق لهوية المنتجات. الصورة هي المرجع النهائي.
+قارن بين اقتراح Google Lens واقتراح قارئ النص/الملصق.
+قواعد إلزامية:
+1) إذا كانت الصورة لعبوة أو منتج عليه ملصق واضح، فاسم البراند والنص المطبوع ونوع المنتج والوزن أقوى من التشابه الشكلي.
+2) لا تعتبر منتجين متطابقين لمجرد اشتراكهما في مكون مثل الزعفران أو اللون أو الفئة.
+3) إذا قال اقتراح إن المنتج كيك/حلويات والآخر زعفران خام أو بهارات فهما مختلفان قطعاً.
+4) للملابس والأحذية والحقائب غير المعلّمة بوضوح، أعط Lens وزناً أكبر.
+5) اختر MERGE فقط إذا كان الاقتراحان لنفس المنتج فعلاً ولا يوجد تعارض.
+أرجع JSON فقط بهذا الشكل:
+{"winner":"VISION"|"LENS"|"MERGE","confidence":0-100,"final_name":"اسم بحث دقيق بالعربي | English","reason":"سبب قصير"}
+"""
+    prompt = (
+        f"Google Lens candidate: {lens_title}\n"
+        f"Direct vision/OCR candidate: {vision_name}\n"
+        "احكم بالاعتماد على الصورة نفسها، وليس على ترتيب Lens."
+    )
+    raw, _ = call_gemini([
+        {"inline_data": {"mime_type": mime_type, "data": image_b64}},
+        {"text": prompt},
+    ], system=judge_system, use_search=False)
+    try:
+        data = json.loads(re.search(r"\{.*\}", raw or "", flags=re.S).group(0))
+    except Exception:
+        print(f"IDENTITY JUDGE PARSE FAIL: {raw}")
+        return vision_name, None, "VISION_SAFE_FALLBACK"
+
+    winner = str(data.get("winner", "VISION")).upper()
+    confidence = int(float(data.get("confidence", 0) or 0))
+    final_name = str(data.get("final_name") or "").strip()
+    reason = str(data.get("reason") or "").strip()
+    print(f"IDENTITY JUDGE: winner={winner} confidence={confidence} reason={reason}")
+
+    # Low confidence must never let Lens override readable package evidence.
+    if winner == "LENS" and confidence >= 78:
+        return final_name or lens_title, lens, "LENS"
+    if winner == "MERGE" and confidence >= 82:
+        return final_name or f"{vision_name} | {lens_title}", lens, "MERGE"
+    return final_name or vision_name, None, "VISION"
+
 def process_single_image(message,bot_id,lang="ar"):
     from_number=message["from"]
     caption=(message.get("image",{}) or {}).get("caption","").strip()
     send_whatsapp_text(from_number,T(lang,"identifying"),bot_id)
     b64,mime=download_whatsapp_media(message["image"]["id"])
 
-    # 1) Google Lens يحدد المنتج بصرياً.
+    # Run both identifiers every time. Lens supplies candidates; direct vision/OCR reads labels.
     lens = google_lens_lookup(b64, mime, lang, caption)
-    lens_name = lens.get("query", "")
-
-    # 2) إذا Lens لم يرجع شيئاً، نرجع للتعرف السابق كخطة احتياطية.
-    fallback_name = ""
-    if not lens_name:
-        fallback_name = identify_product_with_retry(b64, mime, lang)
-
-    aliases = lens.get("aliases") or split_product_aliases(fallback_name)
-    chosen_title = ((lens.get("chosen") or {}).get("title") or "").strip()
-    # اسم Lens المختار أولاً؛ الأسماء الأخرى مرادفات احتياطية فقط.
-    combined_name = chosen_title or (" | ".join(aliases) if aliases else fallback_name)
+    vision_name = identify_product_with_retry(b64, mime, lang)
+    combined_name, active_lens, identity_source = choose_image_identity(b64, mime, lens, vision_name)
+    print(f"FINAL IMAGE IDENTITY [{identity_source}]: {combined_name}")
 
     if combined_name and caption:
         request_query = f"{caption} — {combined_name}"
         prompt_text = (
-            f"Google Lens/تحليل الصورة حدد المنتج بهذه الأسماء: {combined_name}\n"
-            f"طلب المستخدم عنه: {caption}\n"
-            "ابحث عن نفس المنتج المحدد، ثم طبّق قواعد المتاجر والأسعار والروابط المباشرة. "
+            f"هوية المنتج التي اعتمدها الحكم: {combined_name}\n"
+            f"طلب المستخدم: {caption}\n"
+            "ابحث عن نفس المنتج فقط. لا توسع البحث إلى منتج يشاركه المكون أو اللون أو الفئة. "
             f"{LANG_INSTR[lang]}"
         )
-        txt,urls=search_product(request_query, lang, prompt_text=prompt_text, lens_context=lens)
+        txt,urls=search_product(request_query, lang, prompt_text=prompt_text, lens_context=active_lens)
         query = request_query
     elif combined_name:
-        txt,urls=search_product(combined_name, lang, lens_context=lens)
+        txt,urls=search_product(combined_name, lang, lens_context=active_lens)
         query = combined_name
     else:
         txt, urls = "", {}
