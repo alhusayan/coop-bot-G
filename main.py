@@ -63,7 +63,7 @@ AUTO_SEND_PRODUCT_MAPS = env_bool("AUTO_SEND_PRODUCT_MAPS", True)
 SERPAPI_API_KEY = os.environ.get("SERPAPI_API_KEY", "").strip()
 PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "").strip().rstrip("/")
 ENABLE_GOOGLE_LENS = env_bool("ENABLE_GOOGLE_LENS", True)
-LENS_RESULT_LIMIT = max(3, int(os.environ.get("LENS_RESULT_LIMIT", "12")))
+LENS_RESULT_LIMIT = max(12, int(os.environ.get("LENS_RESULT_LIMIT", "40")))
 LENS_IMAGE_TTL = max(120, int(os.environ.get("LENS_IMAGE_TTL_SECONDS", "600")))
 LENS_IMAGE_STORE = {}
 LENS_IMAGE_LOCK = threading.Lock()
@@ -73,7 +73,7 @@ GROCERY_WORDS = [
     "برينجلز","كيتكات","نسكافيه","تونه","ماء","عصير","بسكوت","منظف","معجون","حفاض"
 ]
 
-print("STARTING COOP BOT BUILD: v51-lens-cta-fix-20260802")
+print("STARTING COOP BOT BUILD: v52-kw-priority-fils-20260802")
 print(
     f"ECONOMIC CONFIG search_model={GEMINI_SEARCH_MODEL} fast_model={GEMINI_FAST_MODEL} "
     f"max_stores={MAX_STORES} search_attempts={MAX_SEARCH_ATTEMPTS} "
@@ -85,13 +85,37 @@ OOS_PHRASES = ["out of stock","غير متوفر","نفدت الكمية","غي�
 LISTING_URL_PARTS = ["/search","/s?","/category","/categories","/collection","/collections","/shop/category","?q=","/search_results","/shop/","/listing","/c/"]
 
 def format_price(p):
+    """KWD formatting: values below 1 KD always keep all three fils digits."""
     try:
         pf = float(p)
+        if pf < 1:
+            return f"{pf:.3f}"
         if pf < 100:
             return f"{pf:.3f}".rstrip('0').rstrip('.')
         return f"{pf:.2f}".rstrip('0').rstrip('.')
-    except:
+    except Exception:
         return str(p)
+
+
+def format_lens_price(price_text, price_value, lang="ar"):
+    """Normalise Lens prices so 0.75 KWD becomes 0.750 د.ك, without rounding to 1 KD."""
+    numeric = None
+    try:
+        if price_value not in (None, ""):
+            numeric = float(price_value)
+    except Exception:
+        numeric = None
+    if numeric is None:
+        m = re.search(r"(?<!\d)(\d+(?:[.,]\d{1,3})?)(?!\d)", str(price_text or "").replace(",", ""))
+        if m:
+            try:
+                numeric = float(m.group(1))
+            except Exception:
+                numeric = None
+    if numeric is None:
+        return str(price_text or "").strip()
+    currency = "KWD" if lang == "en" else "د.ك"
+    return f"{format_price(numeric)} {currency}"
 
 def is_direct_store_url(url):
     """يمنع روابط Google والبحث والتصنيفات؛ يقبل روابط المتاجر المباشرة فقط."""
@@ -1168,6 +1192,7 @@ def bilingual_search_instruction(query, lang):
         f"ابحث عن المنتج التالي في الكويت باستخدام العربية والإنجليزية معاً: {query}. "
         "حوّل الاسم داخلياً إلى مرادف عربي ومرادف إنجليزي، وجرّب اسم البراند باللاتيني والعربي، "
         "ولا تعتبر عدم ظهور نتيجة بلغة واحدة فشلاً قبل تجربة اللغة الأخرى. "
+        "ابدأ بنتائج المتاجر الكويتية المعروفة حتى لو كانت متأخرة في Google، وافحص نتائج أعمق قبل المتاجر الأجنبية. "
         "اعرض فقط نتائج لها سعر رقمي بالدينار الكويتي ورابط صفحة منتج مباشر داخل المتجر. "
         f"{response_rule}"
     )
@@ -1231,7 +1256,30 @@ def _lens_source_name(item, index):
         return f"Lens {index}"
 
 
-def lens_priced_offers(lens_context):
+KUWAIT_STORE_HINTS = (
+    ".com.kw", ".kw", "kuwait", "الكويت", "xcite", "eureka", "best al yousifi",
+    "best alyousifi", "jarir", "level shoes", "future store", "blink", "noon kuwait",
+    "carrefour kuwait", "lulu kuwait", "jm3eia", "جمعية", "intersport kuwait",
+    "decathlon kuwait", "boutiqaat", "boots kuwait", "yiaco", "royal pharmacy",
+    "talabat kuwait", "keeta kuwait"
+)
+
+
+def is_kuwait_lens_result(item):
+    """Detect Kuwait merchants even when Google Lens ranks them after foreign stores."""
+    text = " ".join([
+        str(item.get("source") or ""), str(item.get("link") or ""),
+        str(item.get("title") or ""), str(item.get("currency") or ""),
+        str(item.get("price") or "")
+    ]).lower()
+    try:
+        host = urllib.parse.urlparse(item.get("link") or "").netloc.lower()
+    except Exception:
+        host = ""
+    return host.endswith(".kw") or any(h in text for h in KUWAIT_STORE_HINTS)
+
+
+def lens_priced_offers(lens_context, lang="ar"):
     """Use Google Lens product cards directly.
 
     Lens already supplies a visual match, direct product URL, displayed price and stock state.
@@ -1274,15 +1322,23 @@ def lens_priced_offers(lens_context):
         offers[name] = {
             "url": url,
             "price": numeric,
-            "price_text": price_text or (f"{price_value} {currency}".strip()),
+            "price_text": format_lens_price(price_text, price_value, lang),
+            "is_kuwait": is_kuwait_lens_result(item),
             "title": title,
             "position": int(item.get("position") or i),
             "exact": bool(item.get("exact")),
             "image_url": item.get("image") or item.get("thumbnail") or "",
         }
         used_urls.add(url)
-    # Google Lens ranking is the visual relevance signal. Exact matches come first, then position.
-    ranked = sorted(offers.items(), key=lambda kv: (0 if kv[1].get("exact") else 1, kv[1].get("position", 999)))
+    # Kuwait merchants come first even if Google placed them fifth/sixth; then exactness and Lens position.
+    ranked = sorted(
+        offers.items(),
+        key=lambda kv: (
+            0 if kv[1].get("is_kuwait") else 1,
+            0 if kv[1].get("exact") else 1,
+            kv[1].get("position", 999),
+        ),
+    )
     return dict(ranked[:MAX_STORES])
 
 
@@ -1312,7 +1368,7 @@ def search_product(query, lang, prompt_text=None, source_image_b64=None, source_
 
     # For image requests, use the product cards returned by Google Lens itself first.
     # This preserves the many visually close results Google shows instead of demanding one exact SKU.
-    lens_cards = lens_priced_offers(lens_context)
+    lens_cards = lens_priced_offers(lens_context, lang)
     if lens_cards:
         display_name = (lens_context.get("chosen") or {}).get("title") or query
         lines = [f"📦 {display_name}", ""]
@@ -1704,4 +1760,4 @@ def process_location_message(message, bot_id):
     send_whatsapp_cta(from_number, body, maps_url, bot_id, T(lang,"maps_btn"))
 
 @app.get("/")
-async def health(): return {"status":"v51 LENS PRODUCTS + CTA FIX", "build":"v51-lens-cta-fix-20260802"}
+async def health(): return {"status":"v52 KUWAIT PRIORITY + FILS", "build":"v52-kw-priority-fils-20260802"}
