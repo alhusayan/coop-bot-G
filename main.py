@@ -6,10 +6,10 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v57-smart-cost-router-20260802"
+BUILD_ID = "v58-local-then-global-20260802"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
-print("LENS MODE: DIRECT — NO STRICT VISUAL SELECTION")
+print("LENS MODE: LOCAL FIRST — ASK BEFORE GLOBAL")
 print("=" * 70)
 
 
@@ -34,6 +34,8 @@ USER_LANG = {}
 USER_MARKET = {}
 USER_LOCATION_TS = {}
 PENDING_ONBOARDING = {}
+PENDING_GLOBAL_SEARCH = {}
+GLOBAL_PENDING_TTL = max(300, int(os.environ.get("GLOBAL_PENDING_TTL_SECONDS", "900")))
 LOCATION_TTL_SECONDS = max(3600, int(os.environ.get("LOCATION_TTL_HOURS", "72")) * 3600)
 MARKET_CTX = threading.local()
 DEFAULT_COUNTRY = os.environ.get("DEFAULT_COUNTRY", "kw").strip().lower() or "kw"
@@ -167,7 +169,7 @@ GROCERY_WORDS = [
     "برينجلز","كيتكات","نسكافيه","تونه","ماء","عصير","بسكوت","منظف","معجون","حفاض"
 ]
 
-print("STARTING COOP BOT BUILD: v57-smart-cost-router-20260802")
+print("STARTING COOP BOT BUILD: v58-local-then-global-20260802")
 print(
     f"ECONOMIC CONFIG search_model={GEMINI_SEARCH_MODEL} fast_model={GEMINI_FAST_MODEL} "
     f"max_stores={MAX_STORES} search_attempts={MAX_SEARCH_ATTEMPTS} "
@@ -494,6 +496,11 @@ MSG = {
         "maps_body_loc": "📍 بحثك الأخير كان عن ({p})\n\nجهزت لك أقرب الأماكن حولك، اضغط الزر وافتح الخريطة 👇",
         "no_saved_product": "ما عندي منتج محفوظ حالياً 😅. ابحث عن منتج أول، وبعدها أدلك على أقرب مكان يبيعه!",
         "lang_saved": "تمام، بكلمك عربي من هني ورايح 🇰🇼\nدز صورة منتج أو اكتب اسمه وأنا حاضر!",
+        "ask_global": "ما لقيت نتيجة محلية مؤكدة لهذا المنتج في موقعك الحالي. تبي أدور لك في المتاجر العالمية؟ 🌍",
+        "global_yes": "نعم، ابحث عالميًا 🌍",
+        "global_no": "لا، محلي فقط",
+        "global_searching": "🌍 أدور لك عالميًا على أفضل النتائج المطابقة...",
+        "global_none": "حتى بالبحث العالمي ما لقيت نتيجة مؤكدة ومباشرة لهذا المنتج.",
     },
     "en": {
         "identifying": "One sec.. identifying the product and finding you the best deal!",
@@ -507,6 +514,11 @@ MSG = {
         "maps_body_loc": "📍 Your last search was ({p})\n\nI've lined up the closest places around you. Tap the button to open the map 👇",
         "no_saved_product": "I don't have a saved product yet 😅. Search for a product first, then I'll point you to the nearest store!",
         "lang_saved": "Great, I'll speak English with you from now on 🇬🇧\nSend a product photo or type its name and I'm on it!",
+        "ask_global": "I couldn't find a verified local result in your current market. Search international stores instead? 🌍",
+        "global_yes": "Yes, search globally 🌍",
+        "global_no": "No, local only",
+        "global_searching": "🌍 Searching international stores for the closest matches...",
+        "global_none": "I still couldn't find a verified direct result globally.",
     },
 }
 
@@ -1432,7 +1444,7 @@ def is_local_lens_result(item):
     city = str(m.get("city") or "").lower()
     return bool((country_name and country_name in hay) or (city and city in hay))
 
-def lens_priced_offers(lens_context, lang="ar"):
+def lens_priced_offers(lens_context, lang="ar", local_only=True):
     """Use Google Lens product cards directly.
 
     Lens already supplies a visual match, direct product URL, displayed price and stock state.
@@ -1451,6 +1463,8 @@ def lens_priced_offers(lens_context, lang="ar"):
         currency = (item.get("currency") or "").strip()
         in_stock = item.get("in_stock")
         if not title or not is_direct_store_url(url) or url in used_urls:
+            continue
+        if local_only and not is_local_lens_result(item):
             continue
         if in_stock is False:
             print(f"LENS PRODUCT OOS SKIP: {title} -> {url}")
@@ -1499,7 +1513,7 @@ def lens_priced_offers(lens_context, lang="ar"):
     return dict(ranked[:MAX_STORES])
 
 
-def verify_lens_direct_matches(lens_context):
+def verify_lens_direct_matches(lens_context, local_only=True):
     """Fallback verifier for Lens URLs that had no price card."""
     if not lens_context:
         return {}
@@ -1510,6 +1524,8 @@ def verify_lens_direct_matches(lens_context):
         source = (m.get("source") or f"Lens {i}").strip()
         if not title or not is_direct_store_url(url):
             continue
+        if local_only and not is_local_lens_result(m):
+            continue
         candidates[source] = url
     verified = verify_offers(candidates, (lens_context.get("chosen") or {}).get("title", ""))
     if verified:
@@ -1517,7 +1533,7 @@ def verify_lens_direct_matches(lens_context):
     return verified
 
 
-def _new_layer_search(query, lang, prompt_text=None, source_image_b64=None, source_image_mime=None, lens_context=None):
+def _new_layer_search(query, lang, prompt_text=None, source_image_b64=None, source_image_mime=None, lens_context=None, allow_global=False):
     # نتائج الصور تعتمد على الصورة نفسها، لذلك لا نستخدم كاش النص وحده.
     cached = None if source_image_b64 else cache_get(query, lang)
     if cached:
@@ -1525,7 +1541,7 @@ def _new_layer_search(query, lang, prompt_text=None, source_image_b64=None, sour
 
     # For image requests, use the product cards returned by Google Lens itself first.
     # This preserves the many visually close results Google shows instead of demanding one exact SKU.
-    lens_cards = lens_priced_offers(lens_context, lang)
+    lens_cards = lens_priced_offers(lens_context, lang, local_only=not allow_global)
     if lens_cards:
         display_name = (lens_context.get("chosen") or {}).get("title") or query
         lines = [f"📦 {display_name}", ""]
@@ -1539,7 +1555,7 @@ def _new_layer_search(query, lang, prompt_text=None, source_image_b64=None, sour
         return "\n".join(lines), new_urls
 
     # If Lens returned direct pages without price metadata, try our HTML verifier once.
-    lens_verified = verify_lens_direct_matches(lens_context)
+    lens_verified = verify_lens_direct_matches(lens_context, local_only=not allow_global)
     if lens_verified:
         sorted_v = sorted(lens_verified.items(), key=lambda x: x[1]["price"])
         display_name = (lens_context.get("chosen") or {}).get("title") or query
@@ -1709,15 +1725,26 @@ def _result_offers(txt, urls, layer, lens_context=None):
     return out
 
 
-def _old_layer_search(query, lang, prompt_text=None, lens_context=None):
+def _old_layer_search(query, lang, prompt_text=None, lens_context=None, allow_global=False):
     """Second layer: the broad multi-query search logic from the older bot."""
     if not OLD_LAYER_ENABLED:
         return "", {}
-    base_prompt = prompt_text or (
-        f"ابحث عن {query} في {current_market().get('country_name', 'Kuwait')}. متوفر فقط وبسعر رقمي واضح ورابط صفحة منتج مباشر. {LANG_INSTR[lang]}"
-    )
+    if allow_global:
+        base_prompt = (
+            f"ابحث عالميًا عن {query}. اقبل المتاجر الدولية الموثوقة فقط، مع سعر رقمي واضح ورابط صفحة المنتج المباشر، واذكر العملة الأصلية. {LANG_INSTR[lang]}"
+        )
+    else:
+        base_prompt = prompt_text or (
+            f"ابحث عن {query} في {current_market().get('country_name', 'Kuwait')}. متوفر فقط وبسعر رقمي واضح ورابط صفحة منتج مباشر. {LANG_INSTR[lang]}"
+        )
     market_name = current_market().get("country_name", "Kuwait")
-    if current_market().get("country") == "kw":
+    if allow_global:
+        variants = [
+            base_prompt,
+            f"{query} buy online worldwide exact product direct page price {LANG_INSTR[lang]}",
+            f"{query} international stores exact visual match direct product link {LANG_INSTR[lang]}",
+        ]
+    elif current_market().get("country") == "kw":
         variants = [
             base_prompt,
             f"{query} افضل سعر في الكويت Xcite Eureka Blink Noon Jarir Lulu Carrefour Best Al Yousifi جمعية دوت كوم - قارن الاسعار {LANG_INSTR[lang]}",
@@ -1831,7 +1858,7 @@ def _merge_two_layers(query, lang, new_result, old_result, lens_context=None):
     return "\n".join(lines), urls
 
 
-def search_product(query, lang, prompt_text=None, source_image_b64=None, source_image_mime=None, lens_context=None):
+def search_product(query, lang, prompt_text=None, source_image_b64=None, source_image_mime=None, lens_context=None, allow_global=False):
     """Two-layer search: new Lens/priority method first, old broad method second, then rank both."""
     cached = None if source_image_b64 or lens_context else cache_get(query, lang)
     if cached:
@@ -1840,7 +1867,7 @@ def search_product(query, lang, prompt_text=None, source_image_b64=None, source_
     new_result = _new_layer_search(
         query, lang, prompt_text=prompt_text,
         source_image_b64=source_image_b64, source_image_mime=source_image_mime,
-        lens_context=lens_context,
+        lens_context=lens_context, allow_global=allow_global,
     )
     print(f"NEW LAYER DONE offers={len(extract_store_offers(new_result[0])) if new_result[0] else 0}")
 
@@ -1848,7 +1875,7 @@ def search_product(query, lang, prompt_text=None, source_image_b64=None, source_
     if new_result[0] and (is_service_answer(new_result[0]) or is_informational_answer(new_result[0])):
         return new_result
 
-    old_result = _old_layer_search(query, lang, prompt_text=prompt_text, lens_context=lens_context)
+    old_result = _old_layer_search(query, lang, prompt_text=prompt_text, lens_context=lens_context, allow_global=allow_global)
     print(f"OLD LAYER DONE offers={len(extract_store_offers(old_result[0])) if old_result[0] else 0}")
     final_txt, final_urls = _merge_two_layers(query, lang, new_result, old_result, lens_context)
     if final_txt and not source_image_b64 and not lens_context:
@@ -1996,10 +2023,53 @@ async def receive(request: Request, background_tasks: BackgroundTasks):
     except Exception as e: print(f"webhook err {e}")
     return {"status":"ok"}
 
+
+
+def _store_pending_global(phone, bot_id, lang, query, lens_context, prompt_text=None):
+    PENDING_GLOBAL_SEARCH[phone] = {
+        "bot_id": bot_id, "lang": lang, "query": query,
+        "lens_context": lens_context or {}, "prompt_text": prompt_text,
+        "ts": time.time(),
+    }
+
+def _pop_pending_global(phone):
+    item = PENDING_GLOBAL_SEARCH.pop(phone, None)
+    if not item:
+        return None
+    if time.time() - item.get("ts", 0) > GLOBAL_PENDING_TTL:
+        return None
+    return item
+
+def send_global_choice(phone, bot_id, lang):
+    send_whatsapp_buttons(phone, T(lang, "ask_global"), [
+        {"id": "global_yes", "title": T(lang, "global_yes")[:20]},
+        {"id": "global_no", "title": T(lang, "global_no")[:20]},
+    ], bot_id)
+
+def run_global_search(phone, item):
+    bot_id = item["bot_id"]; lang = item["lang"]; query = item["query"]
+    send_whatsapp_text(phone, T(lang, "global_searching"), bot_id)
+    txt, urls = search_product(
+        query, lang, prompt_text=item.get("prompt_text"),
+        lens_context=item.get("lens_context"), allow_global=True,
+    )
+    if not txt or not extract_store_offers(txt):
+        send_whatsapp_text(phone, T(lang, "global_none"), bot_id)
+        return
+    send_product_result(phone, txt, urls, bot_id, lang, query)
+
 def process_interactive_message(message, bot_id):
     from_number=message["from"]
     reply=(message.get("interactive") or {}).get("button_reply") or {}
     btn_id=reply.get("id","")
+    if btn_id == "global_yes":
+        item = _pop_pending_global(from_number)
+        if item:
+            run_global_search(from_number, item)
+        return
+    if btn_id == "global_no":
+        PENDING_GLOBAL_SEARCH.pop(from_number, None)
+        return
     if btn_id not in ("lang_ar","lang_en"):
         return
     lang = "ar" if btn_id=="lang_ar" else "en"
@@ -2223,8 +2293,12 @@ def process_single_image(message,bot_id,lang="ar"):
 
     if query:
         LAST_SEARCH[from_number] = {"product": query}
-    if not txt:
-        send_whatsapp_text(from_number,T(lang,"cant_identify"),bot_id)
+    if not txt or not extract_store_offers(txt):
+        if active_lens and (active_lens.get("matches") or []):
+            _store_pending_global(from_number, bot_id, lang, query, active_lens, prompt_text if caption else None)
+            send_global_choice(from_number, bot_id, lang)
+        else:
+            send_whatsapp_text(from_number,T(lang,"cant_identify"),bot_id)
         return
     result_type = send_product_result(from_number, txt, urls, bot_id, lang, query)
     if query and (result_type == "service" or (result_type == "product" and AUTO_SEND_PRODUCT_MAPS)):
