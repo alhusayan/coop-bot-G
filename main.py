@@ -123,7 +123,7 @@ def has_model_token(a, b):
 
 def cache_key(query, lang):
     norm = re.sub(r"[^\w\u0600-\u06FF]+", "", normalize_ar(query))
-    return hashlib.sha256(f"v37|{norm}|{lang}".encode()).hexdigest()
+    return hashlib.sha256(f"v40|{norm}|{lang}".encode()).hexdigest()
 
 def cache_ttl_for(query, txt=""):
     q_norm = normalize_ar(query)
@@ -270,13 +270,13 @@ def cache_put(query, lang, txt, urls):
     SEARCH_CACHE[key] = entry
     _cache_db_put(key, entry)
 
-IDENTIFY_SYSTEM = """أنت خبير تعرف على المنتجات. انظر للصورة واكتب الاسم التجاري القياسي للمنتج بصيغة ثابتة دائماً:
-[البراند] [نوع المنتج] [رقم الموديل باللاتيني إن ظهر] [اللون/النكهة] [الحجم/الوزن إن ظهر]
-رقم الموديل هو أهم عنصر — دور عليه على العبوة أو الذراع أو الملصق (مثل RB3721، SM-S928، MQ2V3).
-أمثلة:
-- ريبان نظارة شمسية RB3721 اسود 59 مم
-- برينجلز كاتشب 200 جرام
-سطر واحد فقط."""
+IDENTIFY_SYSTEM = """أنت خبير تعرف على المنتجات من الصور للسوق الكويتي.
+أرجع دائماً اسمين قابلين للبحث بهذا الشكل فقط:
+[الاسم التجاري بالعربية] | [commercial product name in English]
+ضع البراند ورقم الموديل إن ظهر. استنتج نوع المنتج من الشعار والشكل والنص الظاهر.
+لا ترفض التحديد لمجرد أن الصورة غير كاملة؛ أعطِ أقرب اسم تجاري مفيد للبحث.
+مثال: ريموت بي إن سبورت | beIN Sports remote control
+سطر واحد فقط، بدون شرح."""
 
 MSG = {
     "ar": {
@@ -333,7 +333,9 @@ SYSTEM_PROMPT = """
 • [المتجر الثاني] — [السعر] د.ك
 • [المتجر الثالث] — [السعر] د.ك
 
-حاول تجيب 3 متاجر مختلفة فقط إذا تقدر: Xcite, Eureka, Blink, Noon, Jarir, Lulu, Carrefour, Amazon.ae, Best Al-Yousifi
+الأولوية دائماً للمتاجر الكبيرة والمعروفة في الكويت، ثم المتاجر المتخصصة حسب نوع المنتج.
+ابدأ بالمتاجر الشاملة: جمعية دوت كوم، كيتا، طلبات، نون، لولو، كارفور، ثم أضف المتاجر المتخصصة المناسبة للقسم.
+لا تعرض متجراً غير معروف إذا وُجد متجر كويتي معروف يبيع نفس المنتج بسعر موثق.
 
 【الحالة 2】طلب عام بدون براند محدد (مثل: قهوة فلات وايت حار، عطر رجالي، لابتوب للدراسة):
 لا تبحث عن الأرخص! ابحث عن الأفضل تقييماً في الكويت بسعر مناسب.
@@ -479,7 +481,45 @@ STORE_DOMAINS = {
     "نون": "noon.com", "بلينك": "blink.com.kw", "يوريكا": "eureka.com.kw", "جرير": "jarir.com",
     "كارفور": "carrefourkuwait.com", "لولو": "luluhypermarket.com", "امازون": "amazon.ae",
     "طلبات": "talabat.com", "ديليفرو": "deliveroo.com.kw", "بوتيكات": "boutiqaat.com",
+    "جمعية دوت كوم": "jm3eia.com", "جمعيه دوت كوم": "jm3eia.com", "جميعة": "jm3eia.com", "jm3eia": "jm3eia.com",
+    "كيتا": "mykeeta.com", "keeta": "mykeeta.com",
+    "انترسبورت": "intersport.com.kw", "إنترسبورت": "intersport.com.kw", "intersport": "intersport.com.kw",
+    "ديكاثلون": "decathlon.com.kw", "decathlon": "decathlon.com.kw",
 }
+
+
+def priority_stores_for(query):
+    """يرتب أهم المتاجر الكويتية حسب فئة المنتج ويُستخدم داخل طلب البحث."""
+    q = normalize_ar(query)
+    general = ["جمعية دوت كوم", "طلبات", "كيتا", "نون", "لولو", "كارفور"]
+
+    rules = [
+        (("ايفون", "سامسونج", "لابتوب", "تابلت", "بلايستيشن", "اكس بوكس", "تلفزيون", "الكترون", "هاتف", "ساعه ابل", "سماعه"),
+         ["Xcite", "Eureka", "Best Al-Yousifi", "Blink", "Jarir", "Noon"]),
+        (("ثلاجه", "غساله", "فرن", "مكيف", "جلايه", "مكنسه", "قلايه", "ميكرويف"),
+         ["Xcite", "Eureka", "Best Al-Yousifi", "Lulu", "Carrefour", "Noon"]),
+        (("عطر", "برفان", "مكياج", "كريم", "سيروم", "عنايه", "شامبو"),
+         ["Boutiqaat", "Bloomingdale's Kuwait", "Faces", "Sephora", "Noon", "جمعية دوت كوم"]),
+        (("دواء", "صيدليه", "فيتامين", "مكمل", "حفاض", "حفاظ"),
+         ["Boots Kuwait", "YIACO", "Royal Pharmacy", "جمعية دوت كوم", "Talabat"]),
+        (("بيبسي", "شيبس", "حليب", "قهوه", "شاي", "سكر", "رز", "زيت", "ماء", "عصير", "بسكوت", "منظف", "صابون"),
+         ["جمعية دوت كوم", "Lulu", "Carrefour", "Talabat", "Keeta"]),
+        (("مطعم", "وجبه", "برجر", "بيتزا", "قهوه", "فلات وايت", "شاورما", "دجاج"),
+         ["Keeta", "Talabat", "Deliveroo"]),
+        (("ملابس", "قميص", "بنطلون", "حذاء", "كاب", "قبعه", "شنطه", "رياضه"),
+         ["Intersport Kuwait", "Decathlon Kuwait", "Sun & Sand Sports", "Foot Locker", "Noon", "Namshi"]),
+        (("اثاث", "كرسي", "طاوله", "سرير", "كنب", "مرتبه"),
+         ["IKEA Kuwait", "The One", "Home Centre", "Noon", "Lulu"]),
+        (("اطفال", "لعبه", "العاب", "عربانه", "رضاعه"),
+         ["Toys R Us Kuwait", "Mothercare", "Centrepoint", "Noon", "جمعية دوت كوم"]),
+        (("سياره", "بطاريه", "اطار", "زيت محرك", "اكسسوار"),
+         ["Tires Plus", "AlMailem", "Xcite", "Noon"]),
+    ]
+    for words, stores in rules:
+        if any(w in q for w in words):
+            return stores
+    return general
+
 def store_domain(name):
     n = normalize_name(normalize_ar(name))
     for k, d in STORE_DOMAINS.items():
@@ -587,10 +627,10 @@ def maps_category_for(product):
         (("ذهب", "مجوهرات", "خاتم", "سلسله", "سلسلة", "jewelry", "jewellery"),
          "محل مجوهرات Jewelry store"),
         (("ملابس", "تيشيرت", "قميص", "بنطلون", "فستان", "جاكيت", "قبعه", "قبعة", "كاب", "shirt", "dress", "cap", "clothing"),
-         "متجر ملابس Fashion store"),
-        (("حذاء", "جوتي", "سنيكر", "shoe", "sneaker"), "متجر أحذية Shoe store"),
+         "Intersport OR Decathlon OR Sun and Sand Sports OR متجر ملابس Fashion store"),
+        (("حذاء", "جوتي", "سنيكر", "shoe", "sneaker"), "Intersport OR Decathlon OR Foot Locker OR متجر أحذية Shoe store"),
         (("مضرب", "كره", "كرة", "تنس", "بادل", "جيم", "رياضه", "رياضة", "under armour", "nike", "adidas", "sports"),
-         "متجر أدوات وملابس رياضية Sports store"),
+         "Intersport OR Decathlon OR Sun and Sand Sports OR متجر رياضي Sports store"),
         (("ايفون", "آيفون", "سامسونج", "لابتوب", "بلايستيشن", "تلفزيون", "الكترون", "هاتف", "جوال", "كاميرا",
           "iphone", "samsung", "laptop", "playstation", "television", "electronics"),
          "متجر إلكترونيات Electronics store"),
@@ -820,41 +860,65 @@ def split_product_aliases(product_name):
     return unique[:2]
 
 
+def _query_candidates(query):
+    """يبني صيغ بحث منفصلة؛ العربية أولاً لأنها غالباً أفضل في فهرسة متاجر الكويت."""
+    raw_parts = [p.strip() for p in re.split(r"\s*[|｜]\s*", query or "") if p.strip()]
+    ar_parts = [p for p in raw_parts if re.search(r"[\u0600-\u06FF]", p)]
+    en_parts = [p for p in raw_parts if re.search(r"[A-Za-z]", p)]
+    candidates = ar_parts + en_parts
+    if query and query.strip() not in candidates:
+        candidates.append(query.strip())
+    unique = []
+    for item in candidates:
+        if item and item not in unique:
+            unique.append(item)
+    return unique or [query]
+
+
 def search_product(query, lang, prompt_text=None):
     cached = cache_get(query, lang)
     if cached:
         return cached
 
-    base_prompt = prompt_text or bilingual_search_instruction(query, lang)
-    if prompt_text:
-        base_prompt = (
-            f"{prompt_text}\n"
-            f"{bilingual_search_instruction(query, lang)}"
-        )
-
+    candidates = _query_candidates(query)
     best_txt, best_urls = "", {}
+
     for attempt in range(1, MAX_SEARCH_ATTEMPTS + 1):
-        if attempt == 1:
-            current_prompt = base_prompt
+        search_term = candidates[(attempt - 1) % len(candidates)]
+        if attempt == 1 and prompt_text:
+            context = f"{prompt_text}\n"
         else:
-            language_focus = (
-                "ابدأ هذه المحاولة بالصياغة العربية والتهجئة العربية للبراند، ثم جرّب الإنجليزية."
-                if attempt % 2 == 0 else
-                "ابدأ هذه المحاولة بالاسم الإنجليزي والبراند باللاتيني، ثم جرّب المرادف العربي."
+            context = ""
+
+        # المحاولة الأولى تكون حصراً داخل المتاجر ذات الأولوية.
+        # إذا لم نجد نتيجة صالحة، تنتقل المحاولات التالية إلى بحث عام في متاجر الكويت المعروفة.
+        priority_stores = priority_stores_for(search_term)
+        stores_hint = "، ".join(priority_stores)
+        if attempt == 1:
+            search_scope = (
+                f"ابحث حصراً أولاً داخل هذه المتاجر وبنفس ترتيب الأولوية: {stores_hint}. "
+                "لا تعرض أي متجر خارج هذه القائمة في هذه المحاولة. "
             )
-            current_prompt = (
-                f"محاولة بحث إضافية رقم {attempt} عن: {query}. {language_focus} "
-                "غيّر كلمات البحث وابحث في متاجر كويتية أخرى. المطلوب نتيجة واحدة صحيحة على الأقل: "
-                "اسم المنتج، سعر رقمي بالدينار الكويتي، ورابط صفحة المنتج المباشرة داخل المتجر. "
-                "ممنوع روابط Google وممنوع صفحة البحث أو التصنيف وممنوع كتابة متوفر بدل السعر. "
-                f"{LANG_INSTR[lang]}"
+        else:
+            search_scope = (
+                f"لم توجد نتيجة صالحة في متاجر الأولوية ({stores_hint}). "
+                "اعمل الآن بحثاً عاماً في متاجر الكويت المعروفة والمتخصصة فقط، "
+                "وتجنب الإعلانات المبوبة والمتاجر المجهولة. "
             )
+        current_prompt = (
+            f"{context}ابحث في الكويت عن هذا الاسم تحديداً: {search_term}. "
+            f"{search_scope}"
+            "استخدم الاسم كما هو، ويمكن تجربة تهجئات قريبة لنفس المنتج فقط. "
+            "أعطني حتى 3 متاجر فقط، وكل نتيجة يجب أن تحتوي سعراً رقمياً بالدينار الكويتي "
+            "ورابط صفحة المنتج المباشرة داخل المتجر. ممنوع روابط Google وصفحات البحث والتصنيف. "
+            "لا تكتب متوفر أو InStock بدلاً من السعر. "
+            f"{LANG_INSTR[lang]}"
+        )
 
         txt, urls = call_gemini([{"text": current_prompt}])
         urls = direct_urls_only(urls)
         offers = extract_store_offers(txt)
 
-        # الخدمات أو الإجابات المعلوماتية الصحيحة لا تحتاج أسعار منتجات.
         if is_service_answer(txt):
             if len(txt) >= 40:
                 cache_put(query, lang, txt, urls)
@@ -863,47 +927,43 @@ def search_product(query, lang, prompt_text=None):
             return txt, urls
 
         if txt and offers and urls:
-            verified = verify_offers(urls, query)
+            verified = verify_offers(urls, search_term)
             if verified:
                 sorted_v = sorted(verified.items(), key=lambda x: x[1]["price"])
-                title = product_title(txt, query)
+                title = product_title(txt, search_term)
                 lines = [title, ""]
                 new_urls = {}
                 for i, (name, info) in enumerate(sorted_v[:MAX_STORES]):
                     prefix = "✅" if i == 0 else "•"
-                    lines.append(f"{prefix} {name} — {format_price(info['price'])} د.ك")
+                    currency = "KWD" if lang == "en" else "د.ك"
+                    lines.append(f"{prefix} {name} — {format_price(info['price'])} {currency}")
                     new_urls[name] = info["url"]
                 final_txt = "\n".join(lines)
                 cache_put(query, lang, final_txt, new_urls)
-                print(f"VERIFIED OK attempt={attempt}: {query} -> {len(new_urls)} stores")
                 return final_txt, new_urls
 
-            # بعض المتاجر تمنع قراءة الصفحة آلياً؛ نقبل السعر النصي فقط مع رابط مباشر مطابق.
+            # بعض المتاجر تمنع فحص HTML؛ نقبل العرض فقط مع رابط منتج مباشر حقيقي.
             kept = []
-            clean_urls = {}
             for offer in offers:
                 matched = match_url(offer["name"], urls)
                 if matched and is_direct_store_url(matched):
                     kept.append(offer)
-                    clean_urls[offer["name"]] = matched
             if kept:
-                title = product_title(txt, query)
+                title = product_title(txt, search_term)
                 lines = [title, ""]
+                clean_urls = {}
                 for i, offer in enumerate(kept[:MAX_STORES]):
                     prefix = "✅" if i == 0 else "•"
                     body = re.sub(r"^(?:✅|🏆|•)\s*", "", offer["line"]).strip()
                     lines.append(f"{prefix} {body}")
+                    clean_urls[offer["name"]] = match_url(offer["name"], urls)
                 final_txt = "\n".join(lines)
                 cache_put(query, lang, final_txt, clean_urls)
-                print(f"DIRECT RESULT attempt={attempt}: {query} -> {len(clean_urls)} pages")
                 return final_txt, clean_urls
 
-        if txt and len(extract_store_offers(txt)) > len(extract_store_offers(best_txt)):
-            best_txt, best_urls = txt, urls
-        print(f"SEARCH ATTEMPT {attempt} FAILED: {query}")
+        best_txt, best_urls = txt or best_txt, urls or best_urls
+        print(f"SEARCH ATTEMPT {attempt} FAILED term={search_term}")
 
-    # لا نخزن الفشل في الكاش حتى يتمكن الطلب التالي من المحاولة مجدداً.
-    print(f"ALL SEARCH ATTEMPTS FAILED: {query}")
     return "", {}
 
 def extract_products(text):
@@ -1004,14 +1064,11 @@ async def process_image_buffer(from_number):
     else: await asyncio.to_thread(process_multi_images,data["images"],from_number,data["bot_id"],lang)
 
 def identify_product_with_retry(b64, mime, lang="ar"):
-    """يعيد تحليل الصورة بصيغ مختلفة، ولا يرجع رسالة فشل صادرة من النموذج كاسم منتج."""
-    # التعرف لا يعتمد على لغة المستخدم: نجرب العربية والإنجليزية وصيغة ثنائية اللغة.
-    # هذا يحل المنتجات التي تكون نتائجها مفهرسة في الكويت بلغة واحدة أكثر من الأخرى.
+    """يحدد الاسم بالعربي والإنجليزي دائماً، بغض النظر عن لغة واجهة المستخدم."""
     prompts = [
-        "حدد المنتج بدقة. اكتب أفضل اسم بحث تجاري بالعربية، مع البراند والموديل إن ظهر. سطر واحد فقط.",
-        "Identify the product precisely. Write the best commercial search name in English, including brand and model if visible. One line only.",
-        "Identify the product from logo, shape and visible text. Return Arabic name then English name separated by |. Include brand/model when possible. One line only.",
-        "افحص الصورة من جديد واستنتج أقرب اسم منتج قابل للبحث حتى لو لم يظهر الاسم كاملاً. اكتب الاسم بالعربية والإنجليزية مفصولين بعلامة | فقط.",
+        "حدد المنتج من الشعار والشكل والنص. اكتب الاسم العربي ثم الإنجليزي مفصولين بـ |.",
+        "افحص الصورة بدقة أكبر، خصوصاً الشعار والأزرار ورقم الموديل. اكتب Arabic name | English name.",
+        "استنتج أقرب اسم تجاري قابل للبحث في الكويت حتى لو الصورة جزئية. Arabic | English only.",
     ]
     bad_phrases = (
         "ما قدرت", "لا استطيع", "لا أستطيع", "غير واضح", "لا يمكن تحديد",
@@ -1019,14 +1076,16 @@ def identify_product_with_retry(b64, mime, lang="ar"):
         "unknown product", "not sure"
     )
     for attempt in range(MAX_IDENTIFY_ATTEMPTS):
-        prompt = prompts[min(attempt, len(prompts) - 1)]
         ident, _ = call_gemini(
-            [{"inline_data": {"mime_type": mime, "data": b64}}, {"text": prompt}],
+            [{"inline_data": {"mime_type": mime, "data": b64}}, {"text": prompts[min(attempt, len(prompts)-1)]}],
             system=IDENTIFY_SYSTEM,
             use_search=False,
         )
         candidate = ident.strip().splitlines()[0].strip() if ident else ""
         if candidate and not any(p in candidate.lower() for p in bad_phrases):
+            if "|" not in candidate:
+                # لا نرفض الاسم الأحادي؛ البحث سيبدأ به ثم يحاول الصياغة الأخرى في المحاولات التالية.
+                candidate = candidate.strip()
             print(f"IMAGE IDENTIFIED attempt={attempt + 1}: {candidate}")
             return candidate
         print(f"IMAGE IDENTIFY ATTEMPT {attempt + 1} FAILED")
@@ -1166,4 +1225,4 @@ def process_location_message(message, bot_id):
     send_whatsapp_cta(from_number, body, maps_url, bot_id, T(lang,"maps_btn"))
 
 @app.get("/")
-async def health(): return {"status":"v37 retries + classified maps"}
+async def health(): return {"status":"v40 retries + classified maps"}
