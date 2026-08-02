@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v58-local-then-global-20260802"
+BUILD_ID = "v59-force-lens-fashion-20260802"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("LENS MODE: LOCAL FIRST — ASK BEFORE GLOBAL")
@@ -169,7 +169,7 @@ GROCERY_WORDS = [
     "برينجلز","كيتكات","نسكافيه","تونه","ماء","عصير","بسكوت","منظف","معجون","حفاض"
 ]
 
-print("STARTING COOP BOT BUILD: v58-local-then-global-20260802")
+print("STARTING COOP BOT BUILD: v59-force-lens-fashion-20260802")
 print(
     f"ECONOMIC CONFIG search_model={GEMINI_SEARCH_MODEL} fast_model={GEMINI_FAST_MODEL} "
     f"max_stores={MAX_STORES} search_attempts={MAX_SEARCH_ATTEMPTS} "
@@ -882,6 +882,8 @@ def _meaningful_lens_tokens(text):
     stop = {
         "women","woman","men","man","size","new","used","authentic","leather","جلد",
         "mules","mule","shoes","shoe","slippers","slipper","sandals","sandal",
+        "shirt","blouse","top","dress","pajama","pajamas","pyjama","pyjamas",
+        "nightwear","sleepwear","set","women's","womens","ملابس","قميص","بيجامه","بيجامة",
         "for","the","and","in","with","kw","kuwait","uae","كويت","نسائي","رجالي",
     }
     out=[]
@@ -911,12 +913,21 @@ def _lens_offer_compatible(info, url, lens_context):
         if brand in chosen_title and not any(normalize_ar(a) in candidate_hay for a in aliases):
             return False
 
-    # At least one discriminative Lens token must occur in the candidate itself.
+    # Identity tokens are mandatory. For fashion, one generic overlap is not enough:
+    # require either the brand/model token, or two discriminative tokens from Lens.
     desired_tokens = _meaningful_lens_tokens(chosen_title)
     descriptor_tokens = [t for t in desired_tokens if t not in ("bottega", "veneta")]
-    if descriptor_tokens and not any(t in candidate_hay for t in descriptor_tokens):
-        print(f"LENS TOKEN REJECT: wanted={descriptor_tokens} candidate={candidate_hay[:180]}")
-        return False
+    matched_tokens = [t for t in descriptor_tokens if t in candidate_hay]
+    fashion_words = (
+        "shirt","blouse","dress","pajama","pyjama","nightwear","sleepwear","satin",
+        "printed","striped","قميص","فستان","بيجامه","بيجامة","ساتان","مخطط"
+    )
+    is_fashion = any(normalize_ar(w) in chosen_title for w in fashion_words)
+    if descriptor_tokens:
+        needed = 2 if is_fashion and len(descriptor_tokens) >= 2 else 1
+        if len(matched_tokens) < needed:
+            print(f"LENS TOKEN REJECT: wanted={descriptor_tokens} matched={matched_tokens} candidate={candidate_hay[:180]}")
+            return False
 
     heel = (sig.get("heel") or "UNKNOWN").upper()
     high_words = ("high heel", "high heels", "stiletto", "kitten heel", "heeled", "pump", "كعب عالي", "كعب ذهبي")
@@ -2177,7 +2188,13 @@ def should_use_google_lens(vision_name, caption=""):
         "اثاث", "كرسي", "طاوله", "ديكور", "لعبه", "سياره", "قطعه غيار",
         "shoe", "mule", "slipper", "sandal", "sneaker", "dress", "shirt",
         "jacket", "cap", "hat", "bag", "handbag", "glasses", "sunglasses",
-        "watch", "ring", "necklace", "furniture", "chair", "table", "decor"
+        "watch", "ring", "necklace", "furniture", "chair", "table", "decor",
+        # Fashion terms that the old router missed. These must always use Lens because
+        # colour/pattern/cut matter more than a generic Vision label.
+        "بيجامه", "بيجامة", "بجامه", "بجامة", "ملابس نوم", "روب", "بلوزه", "بلوزة",
+        "توب", "طقم نسائي", "قميص نسائي", "ساتان", "مخطط", "مخططه", "مخططة",
+        "pajama", "pajamas", "pyjama", "pyjamas", "nightwear", "sleepwear",
+        "blouse", "top", "co-ord", "coord", "satin", "printed", "striped"
     )
     return any(x in q for x in visual_categories)
 
