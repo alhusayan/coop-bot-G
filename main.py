@@ -108,6 +108,14 @@ def is_direct_store_url(url):
         # بعض المتاجر تستخدم /shop/ داخل صفحة المنتج؛ نسمح فقط إذا ظهر نمط منتج واضح.
         if not re.search(r"/product/|/products/[^/]{3,}|/p/|/dp/|/item/|/prod/", path_q):
             return False
+    # صفحات البراند/القسم ليست صفحات منتج حتى لو كان الرابط طويلاً.
+    collection_patterns = (
+        r"/designers/[^/]+/shoes/?$", r"/designers/[^/]+/[^/]+/?$",
+        r"/brand/[^/]+/?$", r"/brands/[^/]+/?$", r"/mules/?$",
+        r"/shoes/?$", r"/women/?$", r"/men/?$"
+    )
+    if any(re.search(p, parsed.path.lower()) for p in collection_patterns):
+        return False
     return True
 
 def direct_urls_only(urls):
@@ -132,7 +140,7 @@ def has_model_token(a, b):
 
 def cache_key(query, lang):
     norm = re.sub(r"[^\w\u0600-\u06FF]+", "", normalize_ar(query))
-    return hashlib.sha256(f"v44|{norm}|{lang}".encode()).hexdigest()
+    return hashlib.sha256(f"v46|{norm}|{lang}".encode()).hexdigest()
 
 def cache_ttl_for(query, txt=""):
     q_norm = normalize_ar(query)
@@ -531,13 +539,33 @@ def _lens_items(data):
                 "title": title,
                 "link": link,
                 "source": source,
+                "position": int(x.get("position") or len(items) + 1),
                 "exact": bool(x.get("exact_matches")),
+                "thumbnail": (x.get("thumbnail") or x.get("image") or "").strip(),
+                "image": (x.get("image") or x.get("thumbnail") or "").strip(),
                 "price": ((x.get("price") or {}).get("value") if isinstance(x.get("price"), dict) else ""),
             })
     return items[:LENS_RESULT_LIMIT]
 
+def _download_lens_candidate(url):
+    """ينزّل صورة مصغرة من نتائج Lens للمقارنة المؤقتة فقط."""
+    if not url or not url.startswith(("http://", "https://")):
+        return None
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=12)
+        ctype = (r.headers.get("content-type") or "image/jpeg").split(";")[0]
+        if r.status_code != 200 or not r.content or len(r.content) > 5 * 1024 * 1024:
+            return None
+        if not ctype.startswith("image/"):
+            ctype = "image/jpeg"
+        return base64.b64encode(r.content).decode(), ctype
+    except Exception as e:
+        print(f"LENS CANDIDATE IMAGE ERR: {e}")
+        return None
+
+
 def google_lens_lookup(image_b64, mime_type, lang="ar", query_hint=""):
-    """يستخدم Google Lens أولاً لتحديد المنتج بصرياً، ولا يستبدل محرك الأسعار الحالي."""
+    """Google Lens يجلب التطابقات البصرية، ثم نختار النتيجة الأقرب للصورة نفسها قبل بحث الأسعار."""
     if not ENABLE_GOOGLE_LENS or not SERPAPI_API_KEY or not PUBLIC_BASE_URL:
         print("GOOGLE LENS SKIPPED: missing SERPAPI_API_KEY or PUBLIC_BASE_URL")
         return {"aliases": [], "matches": [], "query": ""}
@@ -545,19 +573,23 @@ def google_lens_lookup(image_b64, mime_type, lang="ar", query_hint=""):
     if not public_url:
         print("GOOGLE LENS SKIPPED: could not publish image")
         return {"aliases": [], "matches": [], "query": ""}
+
     params = {
         "engine": "google_lens",
-        "type": "products",
+        # visual_matches أهم من products: نريد الشكل أولاً، ثم محركنا الحالي يجلب أسعار الكويت.
+        "type": "visual_matches",
         "url": public_url,
         "api_key": SERPAPI_API_KEY,
         "country": "kw",
-        "hl": "en" if lang == "en" else "ar",
+        "hl": "en",  # الإنجليزية غالباً تعطي أسماء موديلات أدق؛ لغة الرد تبقى مستقلة.
         "auto_crop": "true",
         "safe": "active",
         "output": "json",
     }
+    # لا نضيف q إلا إذا كتب المستخدم وصفاً؛ الاسم التلقائي قد يوجّه Lens لمنتج خاطئ.
     if query_hint:
         params["q"] = query_hint[:120]
+
     try:
         r = requests.get("https://serpapi.com/search.json", params=params, timeout=60)
         if r.status_code >= 400:
@@ -572,27 +604,122 @@ def google_lens_lookup(image_b64, mime_type, lang="ar", query_hint=""):
             print("GOOGLE LENS: no visual matches")
             return {"aliases": [], "matches": [], "query": ""}
 
-        # نحول أفضل عناوين Lens إلى اسم منتج نظيف بالعربي والإنجليزي.
+        # نقارن الصورة الأصلية بصور أول نتائج Lens فعلياً، وليس بالعناوين وحدها.
+        candidates = matches[:6]
+        parts = [
+            {"inline_data": {"mime_type": mime_type, "data": image_b64}},
+            {"text": "الصورة الأولى هي صورة المستخدم الأصلية. قارنها بصور المرشحين التالية."},
+        ]
+        loaded = []
+        for idx, m in enumerate(candidates, 1):
+            downloaded = _download_lens_candidate(m.get("thumbnail") or m.get("image"))
+            if downloaded:
+                cand_b64, cand_mime = downloaded
+                parts.append({"text": f"المرشح {idx}: {m['title']} | المصدر: {m['source']}"})
+                parts.append({"inline_data": {"mime_type": cand_mime, "data": cand_b64}})
+                loaded.append(idx)
+
         evidence = "\n".join(
             f"{i+1}. {m['title']} | {m['source']} | exact={m['exact']}"
-            for i, m in enumerate(matches[:8])
+            for i, m in enumerate(candidates)
         )
+        parts.append({"text": "قائمة المرشحين:\n" + evidence})
         system = (
-            "أنت خبير مطابقة منتجات. هذه النتائج جاءت من Google Lens لصورة واحدة. "
-            "استخرج الاسم التجاري الأقرب لنفس المنتج، لا مجرد نفس الفئة. "
-            "أعطني سطراً واحداً فقط: الاسم العربي | الاسم الإنجليزي. "
-            "ضمّن البراند والموديل واللون/الخامة والحجم إذا تكرر بوضوح، ولا تخترع."
+            "أنت مدقق Google Lens صارم. اختر المرشح المطابق للصورة الأصلية فعلاً، ثم استخرج بصمة شكلية قصيرة. "
+            "قارن النوع، اللون، النقشة، الخامة، شكل المقدمة، وهل المنتج مسطح أو بكعب. "
+            "تشابه البراند أو كلمة عامة مثل mules لا يكفي. إذا لا يوجد تطابق واضح اكتب NONE. "
+            "الرد سطر واحد فقط بهذا الشكل: "
+            "INDEX | Arabic product name | English product name | COLOR | PATTERN | HEEL | TYPE. "
+            "HEEL واحدة من FLAT, LOW, HIGH, NONE, UNKNOWN. TYPE مثل MULES, SLIPPERS, SHOES, BAG. "
+            "لا تخترع موديل غير مدعوم بالصورة أو عنوان المرشح."
         )
-        txt, _ = call_gemini([{"text": evidence}], system=system, use_search=False)
-        aliases = split_product_aliases((txt or "").strip().splitlines()[0] if txt else "")
-        if not aliases:
-            aliases = [m["title"] for m in matches[:3]]
-        query = " | ".join(aliases[:4])
-        print(f"GOOGLE LENS IDENTIFIED: {query}")
-        return {"aliases": aliases[:4], "matches": matches, "query": query}
+        txt, _ = call_gemini(parts, system=system, use_search=False)
+        line = (txt or "").strip().splitlines()[0] if txt else ""
+        print(f"LENS VISUAL SELECTION RAW: {line}")
+        if not line or line.upper().startswith("NONE"):
+            print("GOOGLE LENS: no strict visual candidate")
+            return {"aliases": [], "matches": matches, "query": ""}
+
+        fields = [x.strip() for x in line.split("|")]
+        if len(fields) < 3 or not fields[0].isdigit():
+            print("GOOGLE LENS: invalid visual selection format")
+            return {"aliases": [], "matches": matches, "query": ""}
+        chosen_index = int(fields[0])
+        if chosen_index < 1 or chosen_index > len(candidates):
+            return {"aliases": [], "matches": matches, "query": ""}
+
+        ar_name = fields[1] if len(fields) > 1 else ""
+        en_name = fields[2] if len(fields) > 2 else ""
+        signature = {
+            "color": fields[3].lower() if len(fields) > 3 else "",
+            "pattern": fields[4].lower() if len(fields) > 4 else "",
+            "heel": fields[5].upper() if len(fields) > 5 else "UNKNOWN",
+            "type": fields[6].upper() if len(fields) > 6 else "",
+        }
+        chosen = candidates[chosen_index - 1]
+        aliases = []
+        for value in (ar_name, en_name, chosen.get("title", "")):
+            value = value.strip()
+            if value and value.upper() != "NONE" and value not in aliases:
+                aliases.append(value)
+        query = " | ".join(aliases[:3])
+        print(f"GOOGLE LENS STRICT MATCH #{chosen_index}: {query}")
+        return {"aliases": aliases[:3], "matches": matches, "query": query, "chosen": chosen, "signature": signature}
     except Exception as e:
         print(f"GOOGLE LENS EXCEPTION: {e}")
         return {"aliases": [], "matches": [], "query": ""}
+
+def _lens_offer_compatible(info, url, lens_context):
+    """فلتر نصي محافظ بعد Lens: يمنع اختلافات واضحة من دون قتل محرك الأسعار."""
+    if not lens_context:
+        return True
+    sig = lens_context.get("signature") or {}
+    chosen = lens_context.get("chosen") or {}
+    hay = normalize_ar(" ".join([str(info.get("title", "")), str(url), str(chosen.get("title", ""))])).lower()
+
+    heel = (sig.get("heel") or "UNKNOWN").upper()
+    high_words = ("high heel", "high heels", "stiletto", "كعب عالي", "كعب ذهبي", "heeled", "pump")
+    if heel in ("FLAT", "NONE") and any(normalize_ar(w) in hay for w in high_words):
+        return False
+
+    pattern = normalize_ar(sig.get("pattern") or "")
+    if pattern and pattern not in ("unknown", "none", "غير معروف"):
+        pattern_groups = {
+            "woven": ("woven", "intrecciato", "weave", "منسوج", "ضفيره"),
+            "intrecciato": ("woven", "intrecciato", "weave", "منسوج", "ضفيره"),
+            "braided": ("braided", "woven", "intrecciato", "مضفر", "منسوج"),
+        }
+        keys = pattern_groups.get(pattern, (pattern,))
+        # نرفض فقط إذا عنوان الصفحة يذكر نمطاً متعارضاً صريحاً، ولا نشترط وجود الوصف دائماً.
+        conflicting = ("patent", "satin", "mesh", "laminated", "smooth leather")
+        if not any(normalize_ar(k) in hay for k in keys) and any(normalize_ar(c) in hay for c in conflicting):
+            return False
+
+    color = normalize_ar(sig.get("color") or "")
+    if color and color not in ("unknown", "none", "غير معروف"):
+        color_map = {
+            "brown": ("brown", "tan", "cognac", "camel", "بني", "جملي"),
+            "black": ("black", "اسود"),
+            "green": ("green", "اخضر"),
+            "white": ("white", "ابيض"),
+        }
+        wanted = color_map.get(color, (color,))
+        other_colors = ("black", "green", "white", "red", "blue", "silver", "gold", "اسود", "اخضر", "ابيض", "احمر", "ازرق")
+        if any(normalize_ar(c) in hay for c in other_colors) and not any(normalize_ar(c) in hay for c in wanted):
+            return False
+    return True
+
+
+def filter_verified_with_lens(verified, lens_context):
+    if not lens_context:
+        return verified
+    kept = {}
+    for name, info in (verified or {}).items():
+        if _lens_offer_compatible(info, info.get("url", ""), lens_context):
+            kept[name] = info
+        else:
+            print(f"LENS PRICE REJECT: {name} -> {info.get('title','')} -> {info.get('url','')}")
+    return kept
 
 def rank_verified_by_image(source_b64, source_mime, verified):
     """تم تعطيل فلتر Gemini البصري؛ Lens يحدد الاسم أولاً، والأسعار تبقى من محرك البحث المجرب."""
@@ -1035,7 +1162,7 @@ def is_informational_answer(txt):
     return len(txt.strip()) >= 80
 
 
-def search_product(query, lang, prompt_text=None, source_image_b64=None, source_image_mime=None):
+def search_product(query, lang, prompt_text=None, source_image_b64=None, source_image_mime=None, lens_context=None):
     # نتائج الصور تعتمد على الصورة نفسها، لذلك لا نستخدم كاش النص وحده.
     cached = None if source_image_b64 else cache_get(query, lang)
     if cached:
@@ -1068,7 +1195,9 @@ def search_product(query, lang, prompt_text=None, source_image_b64=None, source_
             )
         current_prompt = (
             f"{context}ابحث في الكويت عن هذا الاسم تحديداً: {search_term}. "
-            f"{search_scope}"
+            + ((f"الاسم المختار من Google Lens هو: {(lens_context.get('chosen') or {}).get('title','')}. "
+                "لا توسع البحث إلى موديلات أخرى من نفس البراند، ولا تقبل اختلافاً واضحاً في اللون أو النقشة أو وجود الكعب. ") if lens_context else "")
+            + f"{search_scope}"
             "استخدم الاسم كما هو، ويمكن تجربة تهجئات قريبة لنفس المنتج فقط. "
             "أعطني حتى 3 متاجر فقط، وكل نتيجة يجب أن تحتوي سعراً رقمياً بالدينار الكويتي "
             "ورابط صفحة المنتج المباشرة داخل المتجر. ممنوع روابط Google وصفحات البحث والتصنيف. "
@@ -1093,6 +1222,7 @@ def search_product(query, lang, prompt_text=None, source_image_b64=None, source_
 
         if txt and offers and urls:
             verified = verify_offers(urls, search_term)
+            verified = filter_verified_with_lens(verified, lens_context)
             if verified:
                 # Google Lens استُخدم قبل البحث لتحديد المنتج. لا نحذف نتائج الأسعار بسبب تقييم بصري تخميني.
                 sorted_v = sorted(verified.items(), key=lambda x: x[1]["price"])
@@ -1285,7 +1415,9 @@ def process_single_image(message,bot_id,lang="ar"):
         fallback_name = identify_product_with_retry(b64, mime, lang)
 
     aliases = lens.get("aliases") or split_product_aliases(fallback_name)
-    combined_name = " | ".join(aliases) if aliases else fallback_name
+    chosen_title = ((lens.get("chosen") or {}).get("title") or "").strip()
+    # اسم Lens المختار أولاً؛ الأسماء الأخرى مرادفات احتياطية فقط.
+    combined_name = chosen_title or (" | ".join(aliases) if aliases else fallback_name)
 
     if combined_name and caption:
         request_query = f"{caption} — {combined_name}"
@@ -1295,10 +1427,10 @@ def process_single_image(message,bot_id,lang="ar"):
             "ابحث عن نفس المنتج المحدد، ثم طبّق قواعد المتاجر والأسعار والروابط المباشرة. "
             f"{LANG_INSTR[lang]}"
         )
-        txt,urls=search_product(request_query, lang, prompt_text=prompt_text)
+        txt,urls=search_product(request_query, lang, prompt_text=prompt_text, lens_context=lens)
         query = request_query
     elif combined_name:
-        txt,urls=search_product(combined_name, lang)
+        txt,urls=search_product(combined_name, lang, lens_context=lens)
         query = combined_name
     else:
         txt, urls = "", {}
@@ -1395,4 +1527,4 @@ def process_location_message(message, bot_id):
     send_whatsapp_cta(from_number, body, maps_url, bot_id, T(lang,"maps_btn"))
 
 @app.get("/")
-async def health(): return {"status":"v44 Google Lens identification + preserved price search"}
+async def health(): return {"status":"v46 Google Lens identification + preserved price search"}
