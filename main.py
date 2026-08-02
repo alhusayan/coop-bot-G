@@ -73,7 +73,7 @@ GROCERY_WORDS = [
     "برينجلز","كيتكات","نسكافيه","تونه","ماء","عصير","بسكوت","منظف","معجون","حفاض"
 ]
 
-print("STARTING COOP BOT BUILD: v50-lens-products-20260802")
+print("STARTING COOP BOT BUILD: v51-lens-cta-fix-20260802")
 print(
     f"ECONOMIC CONFIG search_model={GEMINI_SEARCH_MODEL} fast_model={GEMINI_FAST_MODEL} "
     f"max_stores={MAX_STORES} search_attempts={MAX_SEARCH_ATTEMPTS} "
@@ -855,12 +855,15 @@ def extract_store_names(text):
         m = re.match(r"^\s*🏪\s*[^:：]*[:：]\s*(.+?)\s*$", line)
         if m:
             name = m.group(1).strip()
-            if name and name not in stores: stores.insert(0, name)
+            if name and name not in stores:
+                stores.insert(0, name)
             continue
-        m = re.match(r"^\s*(?:✅|🏆|•)\s*(.+?)\s*(?:—|–|-)\s*[\d.,]+", line)
-        if m:
+        # Accept both formats: "Store — 3.500 KWD" and "Store — KWD 143*".
+        m = re.match(r"^\s*(?:✅|🏆|•)\s*(.+?)\s*(?:—|–|-)\s*(.+)$", line)
+        if m and re.search(r"\d", m.group(2)):
             name = m.group(1).strip()
-            if name and name not in stores: stores.append(name)
+            if name and name not in stores:
+                stores.append(name)
     return stores[:MAX_STORES]
 
 def is_service_answer(txt): return bool(re.search(r"(?:🏆|•)\s*.+?\(\s*(?:هاتف|Phone|phone|Tel|tel)\s*:", txt or ""))
@@ -868,9 +871,12 @@ def extract_store_offers(txt):
     offers = []
     for line in (txt or "").splitlines():
         s = line.strip()
-        m = re.match(r"^(✅|🏆|•)\s*(.+?)\s*(?:—|–|-)\s*[\d.,]+", s)
-        if not m: continue
-        if re.search(r"\(\s*(?:هاتف|Phone|phone|Tel|tel)\s*:", s): continue
+        # Price may appear before or after KWD and may include an asterisk from Lens.
+        m = re.match(r"^(✅|🏆|•)\s*(.+?)\s*(?:—|–|-)\s*(.+)$", s)
+        if not m or not re.search(r"\d", m.group(3)):
+            continue
+        if re.search(r"\(\s*(?:هاتف|Phone|phone|Tel|tel)\s*:", s):
+            continue
         name = m.group(2).strip()
         best = m.group(1) in ("✅", "🏆")
         body = s if best else s.lstrip("•").strip()
@@ -1698,4 +1704,4 @@ def process_location_message(message, bot_id):
     send_whatsapp_cta(from_number, body, maps_url, bot_id, T(lang,"maps_btn"))
 
 @app.get("/")
-async def health(): return {"status":"v50 LENS PRODUCTS FIRST", "build":"v50-lens-products-20260802"}
+async def health(): return {"status":"v51 LENS PRODUCTS + CTA FIX", "build":"v51-lens-cta-fix-20260802"}
