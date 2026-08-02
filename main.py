@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v56-language-location-3days-20260802"
+BUILD_ID = "v57-smart-cost-router-20260802"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("LENS MODE: DIRECT — NO STRICT VISUAL SELECTION")
@@ -167,7 +167,7 @@ GROCERY_WORDS = [
     "برينجلز","كيتكات","نسكافيه","تونه","ماء","عصير","بسكوت","منظف","معجون","حفاض"
 ]
 
-print("STARTING COOP BOT BUILD: v55-global-market-20260802")
+print("STARTING COOP BOT BUILD: v57-smart-cost-router-20260802")
 print(
     f"ECONOMIC CONFIG search_model={GEMINI_SEARCH_MODEL} fast_model={GEMINI_FAST_MODEL} "
     f"max_stores={MAX_STORES} search_attempts={MAX_SEARCH_ATTEMPTS} "
@@ -2046,6 +2046,71 @@ def identify_product_with_retry(b64, mime, lang="ar"):
 
 
 
+
+def _identity_tokens(text):
+    t = normalize_ar(text or "")
+    return {x for x in re.findall(r"[a-z0-9\u0600-\u06ff]+", t) if len(x) > 2}
+
+
+def identity_candidates_agree(vision_name, lens_title):
+    """True when Lens and direct vision clearly describe the same product.
+
+    Avoids a paid judge call when brand/model/type already overlap sufficiently.
+    """
+    a, b = _identity_tokens(vision_name), _identity_tokens(lens_title)
+    if not a or not b:
+        return False
+    inter = a & b
+    # A model/SKU overlap is decisive.
+    model_a = {x for x in a if any(c.isdigit() for c in x)}
+    model_b = {x for x in b if any(c.isdigit() for c in x)}
+    if model_a & model_b:
+        return True
+    return len(inter) >= 2 and (len(inter) / max(1, min(len(a), len(b)))) >= 0.45
+
+
+def should_use_google_lens(vision_name, caption=""):
+    """Route only visually-led products to Lens.
+
+    Packages, groceries, medicines and electronics with readable brand/model stay on
+    direct vision/OCR. Lens is reserved for fashion and objects where appearance is
+    the strongest evidence, or when direct vision failed/gave a generic answer.
+    """
+    raw = f"{vision_name or ''} {caption or ''}".strip()
+    q = normalize_ar(raw)
+    if not vision_name:
+        return True
+
+    uncertain = (
+        "غير معروف", "منتج غير", "unknown", "unidentified", "possibly", "ربما",
+        "قد يكون", "عام", "generic", "لا استطيع", "لا أستطيع"
+    )
+    if any(x in q for x in uncertain) or len(_identity_tokens(vision_name)) < 2:
+        return True
+
+    # Strong textual identity: model/SKU or packaged consumable. Lens usually adds cost,
+    # not accuracy, in these cases.
+    has_model = bool(re.search(r"\b(?=[a-z0-9-]{4,}\b)(?=[a-z0-9-]*[a-z])(?=[a-z0-9-]*\d)[a-z0-9-]+\b", raw, re.I))
+    packaged = (
+        "كرتون", "علبه", "عبوه", "جرام", "كيلو", "مل", "لتر", "حليب", "عصير",
+        "شيبس", "بسكوت", "كيك", "قهوه", "شاي", "دواء", "كريم", "شامبو",
+        "حبوب", "مكمل", "صلصه", "بهارات", "زعفران", "هيل", "منظف",
+        "bottle", "pack", "box", "gram", "kg", "ml", "liter", "medicine",
+        "shampoo", "cream", "snack", "cake", "coffee", "tea", "spice"
+    )
+    if has_model or any(x in q for x in packaged):
+        return False
+
+    visual_categories = (
+        "حذاء", "شبشب", "صندل", "نعال", "ملابس", "قميص", "بنطلون", "فستان",
+        "جاكيت", "قبعه", "شنطه", "حقيبه", "نظاره", "ساعه", "خاتم", "قلاده",
+        "اثاث", "كرسي", "طاوله", "ديكور", "لعبه", "سياره", "قطعه غيار",
+        "shoe", "mule", "slipper", "sandal", "sneaker", "dress", "shirt",
+        "jacket", "cap", "hat", "bag", "handbag", "glasses", "sunglasses",
+        "watch", "ring", "necklace", "furniture", "chair", "table", "decor"
+    )
+    return any(x in q for x in visual_categories)
+
 def choose_image_identity(image_b64, mime_type, lens, vision_name):
     """Arbitrate between Google Lens and direct vision/OCR.
 
@@ -2105,16 +2170,44 @@ def process_single_image(message,bot_id,lang="ar"):
     send_whatsapp_text(from_number,T(lang,"identifying"),bot_id)
     b64,mime=download_whatsapp_media(message["image"]["id"])
 
-    # Run both identifiers every time. Lens supplies candidates; direct vision/OCR reads labels.
-    lens = google_lens_lookup(b64, mime, lang, caption)
+    # COST ROUTER:
+    # 1) Direct vision/OCR first (cheap and strongest for labels, packages and models).
+    # 2) Lens only for visually-led categories, generic/failed recognition, or no readable identity.
+    # 3) Judge only when both engines disagree; skip it when they already agree.
     vision_name = identify_product_with_retry(b64, mime, lang)
-    combined_name, active_lens, identity_source = choose_image_identity(b64, mime, lens, vision_name)
+    use_lens = should_use_google_lens(vision_name, caption)
+    lens = {"aliases": [], "matches": [], "query": ""}
+    active_lens = None
+    identity_source = "VISION"
+    combined_name = vision_name
+
+    print(f"SMART ROUTER: vision={vision_name!r} use_lens={use_lens}")
+    if use_lens:
+        lens = google_lens_lookup(b64, mime, lang, caption or vision_name)
+        lens_title = ((lens.get("chosen") or {}).get("title") or lens.get("query") or "").strip()
+        if lens_title and vision_name:
+            if identity_candidates_agree(vision_name, lens_title):
+                combined_name = vision_name
+                active_lens = lens
+                identity_source = "VISION+LENS_AGREE"
+                print("IDENTITY JUDGE SKIPPED: candidates already agree")
+            else:
+                combined_name, active_lens, identity_source = choose_image_identity(
+                    b64, mime, lens, vision_name
+                )
+        elif lens_title:
+            combined_name, active_lens, identity_source = lens_title, lens, "LENS_ONLY"
+        else:
+            combined_name, active_lens, identity_source = vision_name, None, "VISION_LENS_EMPTY"
+    else:
+        print("GOOGLE LENS SKIPPED BY SMART ROUTER")
+
     print(f"FINAL IMAGE IDENTITY [{identity_source}]: {combined_name}")
 
     if combined_name and caption:
         request_query = f"{caption} — {combined_name}"
         prompt_text = (
-            f"هوية المنتج التي اعتمدها الحكم: {combined_name}\n"
+            f"هوية المنتج المعتمدة: {combined_name}\n"
             f"طلب المستخدم: {caption}\n"
             "ابحث عن نفس المنتج فقط. لا توسع البحث إلى منتج يشاركه المكون أو اللون أو الفئة. "
             f"{LANG_INSTR[lang]}"
@@ -2233,4 +2326,4 @@ def process_location_message(message, bot_id):
     route_pending_after_location(from_number)
 
 @app.get("/")
-async def health(): return {"status":"v56 LANGUAGE + LOCATION EVERY 3 DAYS", "build":BUILD_ID, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
+async def health(): return {"status":"v57 SMART COST ROUTER + LOCATION EVERY 3 DAYS", "build":BUILD_ID, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
