@@ -140,7 +140,7 @@ def has_model_token(a, b):
 
 def cache_key(query, lang):
     norm = re.sub(r"[^\w\u0600-\u06FF]+", "", normalize_ar(query))
-    return hashlib.sha256(f"v46|{norm}|{lang}".encode()).hexdigest()
+    return hashlib.sha256(f"v47|{norm}|{lang}".encode()).hexdigest()
 
 def cache_ttl_for(query, txt=""):
     q_norm = normalize_ar(query)
@@ -565,10 +565,15 @@ def _download_lens_candidate(url):
 
 
 def google_lens_lookup(image_b64, mime_type, lang="ar", query_hint=""):
-    """Google Lens يجلب التطابقات البصرية، ثم نختار النتيجة الأقرب للصورة نفسها قبل بحث الأسعار."""
+    """يستخدم أفضل نتيجة Google Lens مباشرة، ثم يستخرج وصفاً شكلياً من الصورة الأصلية فقط.
+
+    لا نطلب من Gemini اختيار صورة من صور Lens؛ لأن الصور المصغرة قد لا تُحمّل أو قد تجعل المقارنة
+    المتشددة ترجع NONE رغم أن Lens عرّف المنتج بصورة صحيحة.
+    """
     if not ENABLE_GOOGLE_LENS or not SERPAPI_API_KEY or not PUBLIC_BASE_URL:
         print("GOOGLE LENS SKIPPED: missing SERPAPI_API_KEY or PUBLIC_BASE_URL")
         return {"aliases": [], "matches": [], "query": ""}
+
     public_url = publish_image_for_lens(image_b64, mime_type)
     if not public_url:
         print("GOOGLE LENS SKIPPED: could not publish image")
@@ -576,17 +581,15 @@ def google_lens_lookup(image_b64, mime_type, lang="ar", query_hint=""):
 
     params = {
         "engine": "google_lens",
-        # visual_matches أهم من products: نريد الشكل أولاً، ثم محركنا الحالي يجلب أسعار الكويت.
         "type": "visual_matches",
         "url": public_url,
         "api_key": SERPAPI_API_KEY,
         "country": "kw",
-        "hl": "en",  # الإنجليزية غالباً تعطي أسماء موديلات أدق؛ لغة الرد تبقى مستقلة.
+        "hl": "en",
         "auto_crop": "true",
         "safe": "active",
         "output": "json",
     }
-    # لا نضيف q إلا إذا كتب المستخدم وصفاً؛ الاسم التلقائي قد يوجّه Lens لمنتج خاطئ.
     if query_hint:
         params["q"] = query_hint[:120]
 
@@ -599,72 +602,73 @@ def google_lens_lookup(image_b64, mime_type, lang="ar", query_hint=""):
         if data.get("error"):
             print(f"GOOGLE LENS ERROR: {data.get('error')}")
             return {"aliases": [], "matches": [], "query": ""}
+
         matches = _lens_items(data)
         if not matches:
             print("GOOGLE LENS: no visual matches")
             return {"aliases": [], "matches": [], "query": ""}
 
-        # نقارن الصورة الأصلية بصور أول نتائج Lens فعلياً، وليس بالعناوين وحدها.
-        candidates = matches[:6]
-        parts = [
+        # اطبع أول النتائج حتى نعرف فعلياً ماذا أعاد Lens.
+        for i, m in enumerate(matches[:5], 1):
+            print(f"LENS MATCH {i}: {m.get('title','')} | {m.get('source','')} | exact={m.get('exact', False)}")
+
+        # نختار أول نتيجة Visual Match ذات عنوان واضح. exact_matches تحصل على أولوية،
+        # ثم ترتيب Google Lens نفسه. نستبعد العناوين العامة جداً فقط.
+        generic = re.compile(r"^(mules?|shoes?|slippers?|sandals?|footwear|بوتيغا فينيتا|bottega veneta)$", re.I)
+        ranked = []
+        for m in matches:
+            title = (m.get("title") or "").strip()
+            if not title or generic.match(title):
+                continue
+            score = 1000 if m.get("exact") else 0
+            score += max(0, 200 - int(m.get("position") or 99) * 10)
+            score += min(len(title), 120) / 10
+            if m.get("thumbnail") or m.get("image"):
+                score += 10
+            ranked.append((score, m))
+        chosen = max(ranked, key=lambda x: x[0])[1] if ranked else matches[0]
+        chosen_title = (chosen.get("title") or "").strip()
+
+        # Gemini هنا لا يقرر أي نتيجة Lens صحيحة. فقط يصف الصورة الأصلية ويترجم الاسم.
+        # هذا يمنحنا اللون/النقشة/الكعب لحماية نتائج الأسعار من المنتجات المختلفة.
+        sig_system = (
+            "أنت خبير منتجات. الصورة هي المرجع الوحيد. استخرج اسماً عربياً وإنجليزياً ووصفاً شكلياً محافظاً. "
+            "لا تخترع رقم موديل. حدد اللون الأساسي، النقشة أو الخامة الظاهرة، وهل المنتج مسطح أو بكعب. "
+            "الرد سطر واحد فقط: Arabic name | English name | COLOR | PATTERN | HEEL | TYPE. "
+            "HEEL واحدة من FLAT, LOW, HIGH, NONE, UNKNOWN. TYPE مثل MULES, SLIPPERS, SHOES, BAG, ELECTRONICS."
+        )
+        sig_txt, _ = call_gemini([
             {"inline_data": {"mime_type": mime_type, "data": image_b64}},
-            {"text": "الصورة الأولى هي صورة المستخدم الأصلية. قارنها بصور المرشحين التالية."},
-        ]
-        loaded = []
-        for idx, m in enumerate(candidates, 1):
-            downloaded = _download_lens_candidate(m.get("thumbnail") or m.get("image"))
-            if downloaded:
-                cand_b64, cand_mime = downloaded
-                parts.append({"text": f"المرشح {idx}: {m['title']} | المصدر: {m['source']}"})
-                parts.append({"inline_data": {"mime_type": cand_mime, "data": cand_b64}})
-                loaded.append(idx)
+            {"text": f"Google Lens title hint: {chosen_title}"},
+        ], system=sig_system, use_search=False)
+        fields = [x.strip() for x in ((sig_txt or "").strip().splitlines()[0] if sig_txt else "").split("|")]
 
-        evidence = "\n".join(
-            f"{i+1}. {m['title']} | {m['source']} | exact={m['exact']}"
-            for i, m in enumerate(candidates)
-        )
-        parts.append({"text": "قائمة المرشحين:\n" + evidence})
-        system = (
-            "أنت مدقق Google Lens صارم. اختر المرشح المطابق للصورة الأصلية فعلاً، ثم استخرج بصمة شكلية قصيرة. "
-            "قارن النوع، اللون، النقشة، الخامة، شكل المقدمة، وهل المنتج مسطح أو بكعب. "
-            "تشابه البراند أو كلمة عامة مثل mules لا يكفي. إذا لا يوجد تطابق واضح اكتب NONE. "
-            "الرد سطر واحد فقط بهذا الشكل: "
-            "INDEX | Arabic product name | English product name | COLOR | PATTERN | HEEL | TYPE. "
-            "HEEL واحدة من FLAT, LOW, HIGH, NONE, UNKNOWN. TYPE مثل MULES, SLIPPERS, SHOES, BAG. "
-            "لا تخترع موديل غير مدعوم بالصورة أو عنوان المرشح."
-        )
-        txt, _ = call_gemini(parts, system=system, use_search=False)
-        line = (txt or "").strip().splitlines()[0] if txt else ""
-        print(f"LENS VISUAL SELECTION RAW: {line}")
-        if not line or line.upper().startswith("NONE"):
-            print("GOOGLE LENS: no strict visual candidate")
-            return {"aliases": [], "matches": matches, "query": ""}
-
-        fields = [x.strip() for x in line.split("|")]
-        if len(fields) < 3 or not fields[0].isdigit():
-            print("GOOGLE LENS: invalid visual selection format")
-            return {"aliases": [], "matches": matches, "query": ""}
-        chosen_index = int(fields[0])
-        if chosen_index < 1 or chosen_index > len(candidates):
-            return {"aliases": [], "matches": matches, "query": ""}
-
-        ar_name = fields[1] if len(fields) > 1 else ""
-        en_name = fields[2] if len(fields) > 2 else ""
+        ar_name = fields[0] if len(fields) > 0 else ""
+        en_name = fields[1] if len(fields) > 1 else ""
         signature = {
-            "color": fields[3].lower() if len(fields) > 3 else "",
-            "pattern": fields[4].lower() if len(fields) > 4 else "",
-            "heel": fields[5].upper() if len(fields) > 5 else "UNKNOWN",
-            "type": fields[6].upper() if len(fields) > 6 else "",
+            "color": fields[2].lower() if len(fields) > 2 else "",
+            "pattern": fields[3].lower() if len(fields) > 3 else "",
+            "heel": fields[4].upper() if len(fields) > 4 else "UNKNOWN",
+            "type": fields[5].upper() if len(fields) > 5 else "",
         }
-        chosen = candidates[chosen_index - 1]
+
         aliases = []
-        for value in (ar_name, en_name, chosen.get("title", "")):
-            value = value.strip()
-            if value and value.upper() != "NONE" and value not in aliases:
+        # عنوان Lens أولاً لأنه أساس التعرف، ثم الترجمتان من الصورة الأصلية.
+        for value in (chosen_title, en_name, ar_name):
+            value = (value or "").strip()
+            if value and value.upper() not in ("NONE", "UNKNOWN") and value not in aliases:
                 aliases.append(value)
+
         query = " | ".join(aliases[:3])
-        print(f"GOOGLE LENS STRICT MATCH #{chosen_index}: {query}")
-        return {"aliases": aliases[:3], "matches": matches, "query": query, "chosen": chosen, "signature": signature}
+        print(f"GOOGLE LENS DIRECT MATCH: {query}")
+        print(f"GOOGLE LENS SIGNATURE: {signature}")
+        return {
+            "aliases": aliases[:3],
+            "matches": matches,
+            "query": query,
+            "chosen": chosen,
+            "signature": signature,
+        }
     except Exception as e:
         print(f"GOOGLE LENS EXCEPTION: {e}")
         return {"aliases": [], "matches": [], "query": ""}
@@ -1527,4 +1531,4 @@ def process_location_message(message, bot_id):
     send_whatsapp_cta(from_number, body, maps_url, bot_id, T(lang,"maps_btn"))
 
 @app.get("/")
-async def health(): return {"status":"v46 Google Lens identification + preserved price search"}
+async def health(): return {"status":"v47 Google Lens identification + preserved price search"}
