@@ -6,10 +6,10 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v60-fashion-lens-only-20260802"
+BUILD_ID = "v61-lens-exact-local-20260802"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
-print("LENS MODE: FASHION ALWAYS LENS — NO OLD GENERIC FALLBACK")
+print("LENS MODE: EXACT/VISUAL LENS RESULTS FIRST — LOCAL EXACT DOMINATES")
 print("=" * 70)
 
 
@@ -244,6 +244,44 @@ def is_direct_store_url(url):
     if any(re.search(p, parsed.path.lower()) for p in collection_patterns):
         return False
     return True
+
+def is_lens_product_url(url, item=None):
+    """Trust a Google Lens shopping/visual card more than our generic URL heuristics.
+
+    Some stores (notably luxury/fashion sites) use SEO product URLs without /product/.
+    A Lens result with a source, product title and price is accepted unless it is clearly
+    a search/category/brand page or a Google redirect.
+    """
+    if not url or not url.startswith(("http://", "https://")):
+        return False
+    try:
+        p = urllib.parse.urlparse(url)
+        host = p.netloc.lower().replace("www.", "")
+        path_q = (p.path + ("?" + p.query if p.query else "")).lower()
+    except Exception:
+        return False
+    if any(host == h or host.endswith("." + h) for h in (
+        "google.com", "google.com.kw", "googleusercontent.com", "gstatic.com", "bing.com", "yahoo.com"
+    )):
+        return False
+    if not p.path or p.path == "/":
+        return False
+    hard_listing = ("/search", "?q=", "/category/", "/categories/", "/collections/", "/listing")
+    if any(x in path_q for x in hard_listing):
+        return False
+    collection_patterns = (
+        r"/designers/[^/]+/shoes/?$", r"/designers/[^/]+/[^/]+/?$",
+        r"/brand/[^/]+/?$", r"/brands/[^/]+/?$", r"/mules/?$",
+        r"/shoes/?$", r"/women/?$", r"/men/?$", r"/pyjamas/?$", r"/pajamas/?$"
+    )
+    if any(re.search(x, p.path.lower()) for x in collection_patterns):
+        return False
+    # Lens product/visual card evidence: source + title, and preferably price.
+    if item:
+        if not (str(item.get("title") or "").strip() and str(item.get("source") or "").strip()):
+            return False
+    return True
+
 
 def direct_urls_only(urls):
     return {name: url for name, url in (urls or {}).items() if is_direct_store_url(url)}
@@ -738,7 +776,8 @@ def _lens_items(data):
                 "link": link,
                 "source": source,
                 "position": int(x.get("position") or len(items) + 1),
-                "exact": bool(x.get("exact_matches")),
+                "section": key,
+                "exact": key == "exact_matches" or bool(x.get("exact_match")),
                 "thumbnail": (x.get("thumbnail") or x.get("image") or "").strip(),
                 "image": (x.get("image") or x.get("thumbnail") or "").strip(),
                 "price": ((x.get("price") or {}).get("value") if isinstance(x.get("price"), dict) else str(x.get("price") or "")),
@@ -822,8 +861,15 @@ def google_lens_lookup(image_b64, mime_type, lang="ar", query_hint=""):
             title = (m.get("title") or "").strip()
             if not title or generic.match(title):
                 continue
-            score = 1000 if m.get("exact") else 0
-            score += max(0, 200 - int(m.get("position") or 99) * 10)
+            # A local exact/visual match with a shopping price is the strongest evidence.
+            score = 2000 if m.get("exact") else 0
+            if is_local_lens_result(m):
+                score += 1500
+            if m.get("price") or m.get("price_value") not in (None, ""):
+                score += 700
+            if m.get("section") == "visual_matches":
+                score += 250
+            score += max(0, 300 - int(m.get("position") or 99) * 12)
             score += min(len(title), 120) / 10
             if m.get("thumbnail") or m.get("image"):
                 score += 10
@@ -1473,7 +1519,7 @@ def lens_priced_offers(lens_context, lang="ar", local_only=True):
         price_value = item.get("price_value")
         currency = (item.get("currency") or "").strip()
         in_stock = item.get("in_stock")
-        if not title or not is_direct_store_url(url) or url in used_urls:
+        if not title or not is_lens_product_url(url, item) or url in used_urls:
             continue
         if local_only and not is_local_lens_result(item):
             continue
@@ -1509,6 +1555,7 @@ def lens_priced_offers(lens_context, lang="ar", local_only=True):
             "title": title,
             "position": int(item.get("position") or i),
             "exact": bool(item.get("exact")),
+            "section": item.get("section") or "",
             "image_url": item.get("image") or item.get("thumbnail") or "",
         }
         used_urls.add(url)
@@ -1518,6 +1565,7 @@ def lens_priced_offers(lens_context, lang="ar", local_only=True):
         key=lambda kv: (
             0 if kv[1].get("is_local") else 1,
             0 if kv[1].get("exact") else 1,
+            0 if kv[1].get("section") == "visual_matches" else 1,
             kv[1].get("position", 999),
         ),
     )
@@ -1533,7 +1581,7 @@ def verify_lens_direct_matches(lens_context, local_only=True):
         url = (m.get("link") or "").strip()
         title = (m.get("title") or "").strip()
         source = (m.get("source") or f"Lens {i}").strip()
-        if not title or not is_direct_store_url(url):
+        if not title or not is_lens_product_url(url, m):
             continue
         if local_only and not is_local_lens_result(m):
             continue
@@ -1562,7 +1610,7 @@ def _new_layer_search(query, lang, prompt_text=None, source_image_b64=None, sour
             shown_price = info.get("price_text") or format_price(info.get("price"))
             lines.append(f"{prefix} {name} — {shown_price}")
             new_urls[name] = info["url"]
-        print(f"LENS PRODUCT CARDS USED: {list(new_urls)}")
+        print(f"LENS EXACT/VISUAL CARDS USED: {list(new_urls)}")
         return "\n".join(lines), new_urls
 
     # If Lens returned direct pages without price metadata, try our HTML verifier once.
@@ -1888,8 +1936,9 @@ def search_product(query, lang, prompt_text=None, source_image_b64=None, source_
 
     # For fashion identified by Lens, generic old-layer results are dangerous (e.g. any pajama).
     # Keep only exact/local Lens results. If none exist, the caller asks before global search.
-    if lens_context and lens_context.get("force_lens_only") and not allow_global:
-        print("OLD LAYER SKIPPED: FASHION LENS-ONLY LOCAL MODE")
+    if lens_context and lens_context.get("force_lens_only"):
+        mode = "GLOBAL" if allow_global else "LOCAL"
+        print(f"OLD LAYER SKIPPED: FASHION LENS-ONLY {mode} MODE")
         return new_result
 
     old_result = _old_layer_search(query, lang, prompt_text=prompt_text, lens_context=lens_context, allow_global=allow_global)
@@ -2454,4 +2503,4 @@ def process_location_message(message, bot_id):
     route_pending_after_location(from_number)
 
 @app.get("/")
-async def health(): return {"status":"v60 FASHION ALWAYS LENS + LOCAL THEN GLOBAL", "build":BUILD_ID, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
+async def health(): return {"status":"v61 LENS EXACT LOCAL FIRST", "build":BUILD_ID, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
