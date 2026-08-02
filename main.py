@@ -6,10 +6,10 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v59-force-lens-fashion-20260802"
+BUILD_ID = "v60-fashion-lens-only-20260802"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
-print("LENS MODE: LOCAL FIRST — ASK BEFORE GLOBAL")
+print("LENS MODE: FASHION ALWAYS LENS — NO OLD GENERIC FALLBACK")
 print("=" * 70)
 
 
@@ -169,7 +169,7 @@ GROCERY_WORDS = [
     "برينجلز","كيتكات","نسكافيه","تونه","ماء","عصير","بسكوت","منظف","معجون","حفاض"
 ]
 
-print("STARTING COOP BOT BUILD: v59-force-lens-fashion-20260802")
+print("STARTING COOP BOT BUILD: v60-fashion-lens-only-20260802")
 print(
     f"ECONOMIC CONFIG search_model={GEMINI_SEARCH_MODEL} fast_model={GEMINI_FAST_MODEL} "
     f"max_stores={MAX_STORES} search_attempts={MAX_SEARCH_ATTEMPTS} "
@@ -1886,6 +1886,12 @@ def search_product(query, lang, prompt_text=None, source_image_b64=None, source_
     if new_result[0] and (is_service_answer(new_result[0]) or is_informational_answer(new_result[0])):
         return new_result
 
+    # For fashion identified by Lens, generic old-layer results are dangerous (e.g. any pajama).
+    # Keep only exact/local Lens results. If none exist, the caller asks before global search.
+    if lens_context and lens_context.get("force_lens_only") and not allow_global:
+        print("OLD LAYER SKIPPED: FASHION LENS-ONLY LOCAL MODE")
+        return new_result
+
     old_result = _old_layer_search(query, lang, prompt_text=prompt_text, lens_context=lens_context, allow_global=allow_global)
     print(f"OLD LAYER DONE offers={len(extract_store_offers(old_result[0])) if old_result[0] else 0}")
     final_txt, final_urls = _merge_two_layers(query, lang, new_result, old_result, lens_context)
@@ -2150,6 +2156,25 @@ def identity_candidates_agree(vision_name, lens_title):
     return len(inter) >= 2 and (len(inter) / max(1, min(len(a), len(b)))) >= 0.45
 
 
+
+
+def is_fashion_identity(vision_name, caption=""):
+    """Return True for any apparel/fashion item where exact visual design matters."""
+    q = normalize_ar(f"{vision_name or ''} {caption or ''}")
+    fashion_terms = (
+        "ملابس", "قميص", "قميص نسائي", "بلوزه", "بلوزة", "توب", "فستان",
+        "بنطلون", "تنوره", "تنورة", "جاكيت", "معطف", "عبايه", "عباية",
+        "بيجامه", "بيجامة", "بجامه", "بجامة", "ملابس نوم", "روب", "طقم نسائي",
+        "ساتان", "مخطط", "مخططه", "مخططة", "مطبوع", "موضة", "ازياء", "أزياء",
+        "حذاء", "شبشب", "صندل", "نعال", "سنيكر", "شنطه", "شنطة", "حقيبه", "حقيبة",
+        "shirt", "women's shirt", "womens shirt", "blouse", "top", "dress", "skirt",
+        "pants", "trousers", "jacket", "coat", "abaya", "pajama", "pajamas",
+        "pyjama", "pyjamas", "nightwear", "sleepwear", "robe", "satin", "printed",
+        "striped", "fashion", "apparel", "clothing", "shoe", "mule", "slipper",
+        "sandal", "sneaker", "bag", "handbag", "co-ord", "coord"
+    )
+    return any(term in q for term in fashion_terms)
+
 def should_use_google_lens(vision_name, caption=""):
     """Route only visually-led products to Lens.
 
@@ -2160,6 +2185,10 @@ def should_use_google_lens(vision_name, caption=""):
     raw = f"{vision_name or ''} {caption or ''}".strip()
     q = normalize_ar(raw)
     if not vision_name:
+        return True
+
+    # Fashion is always routed to Lens before any model/package shortcut.
+    if is_fashion_identity(vision_name, caption):
         return True
 
     uncertain = (
@@ -2262,17 +2291,25 @@ def process_single_image(message,bot_id,lang="ar"):
     # 2) Lens only for visually-led categories, generic/failed recognition, or no readable identity.
     # 3) Judge only when both engines disagree; skip it when they already agree.
     vision_name = identify_product_with_retry(b64, mime, lang)
-    use_lens = should_use_google_lens(vision_name, caption)
+    force_fashion_lens = is_fashion_identity(vision_name, caption)
+    use_lens = force_fashion_lens or should_use_google_lens(vision_name, caption)
     lens = {"aliases": [], "matches": [], "query": ""}
     active_lens = None
     identity_source = "VISION"
     combined_name = vision_name
 
-    print(f"SMART ROUTER: vision={vision_name!r} use_lens={use_lens}")
+    print(f"SMART ROUTER: vision={vision_name!r} use_lens={use_lens} force_fashion={force_fashion_lens}")
     if use_lens:
         lens = google_lens_lookup(b64, mime, lang, caption or vision_name)
         lens_title = ((lens.get("chosen") or {}).get("title") or lens.get("query") or "").strip()
-        if lens_title and vision_name:
+        if force_fashion_lens and lens_title:
+            # Exact design/pattern matters in fashion. Never downgrade to the generic Vision label.
+            lens["force_lens_only"] = True
+            combined_name = lens_title
+            active_lens = lens
+            identity_source = "LENS_FASHION_FORCED"
+            print(f"FASHION LENS FORCED: {lens_title}")
+        elif lens_title and vision_name:
             if identity_candidates_agree(vision_name, lens_title):
                 combined_name = vision_name
                 active_lens = lens
@@ -2417,4 +2454,4 @@ def process_location_message(message, bot_id):
     route_pending_after_location(from_number)
 
 @app.get("/")
-async def health(): return {"status":"v57 SMART COST ROUTER + LOCATION EVERY 3 DAYS", "build":BUILD_ID, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
+async def health(): return {"status":"v60 FASHION ALWAYS LENS + LOCAL THEN GLOBAL", "build":BUILD_ID, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
