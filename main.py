@@ -53,7 +53,7 @@ MAX_SEARCH_ATTEMPTS = max(2, int(os.environ.get("MAX_SEARCH_ATTEMPTS", "3")))
 MAX_IDENTIFY_ATTEMPTS = max(2, int(os.environ.get("MAX_IDENTIFY_ATTEMPTS", "3")))
 AUTO_SEND_PRODUCT_MAPS = env_bool("AUTO_SEND_PRODUCT_MAPS", True)
 ENABLE_IMAGE_MATCH = env_bool("ENABLE_IMAGE_MATCH", True)
-IMAGE_MATCH_MIN_SCORE = int(os.environ.get("IMAGE_MATCH_MIN_SCORE", "60"))
+IMAGE_MATCH_MIN_SCORE = int(os.environ.get("IMAGE_MATCH_MIN_SCORE", "75"))
 
 GROCERY_WORDS = [
     "بيبسي","شيبس","حليب","قهوه","قهوة","شاي","سكر","رز","زيت","صابون","شامبو",
@@ -125,7 +125,7 @@ def has_model_token(a, b):
 
 def cache_key(query, lang):
     norm = re.sub(r"[^\w\u0600-\u06FF]+", "", normalize_ar(query))
-    return hashlib.sha256(f"v42|{norm}|{lang}".encode()).hexdigest()
+    return hashlib.sha256(f"v43|{norm}|{lang}".encode()).hexdigest()
 
 def cache_ttl_for(query, txt=""):
     q_norm = normalize_ar(query)
@@ -507,8 +507,10 @@ def rank_verified_by_image(source_b64, source_mime, verified):
     parts = [
         {"text": (
             "الصورة الأولى هي صورة المنتج التي أرسلها المستخدم. بعدها صور مرشحة مرقمة. "
-            "قارن الهوية البصرية للمنتج نفسه: الشعار، الشكل، اللون، العبوة، النقوش، الأزرار، رقم الموديل والحجم. "
-            "تجاهل اختلاف الخلفية والزاوية والإضاءة. أرجع JSON فقط بالشكل "
+            "قارن الهوية البصرية للمنتج نفسه بدقة شديدة: الشعار، الشكل، اللون، الخامة، النقشة، نوع المقدمة، ارتفاع الكعب، "
+            "فتحة الأصابع، شكل النعل، العبوة، الأزرار، رقم الموديل والحجم. اختلاف اللون الجوهري أو نوع الكعب أو شكل المقدمة "
+            "أو تصميم الجزء العلوي يعني أنه منتج مختلف، حتى لو كان من نفس البراند ونفس الفئة. "
+            "تجاهل فقط اختلاف الخلفية والزاوية والإضاءة. أرجع JSON فقط بالشكل "
             "{\"scores\":[{\"index\":1,\"score\":0,\"same_product\":false}]}. "
             "score من 0 إلى 100، وsame_product=true فقط عندما تبدو الصورة لنفس المنتج أو نفس الموديل/النسخة بدقة."
         )},
@@ -541,13 +543,21 @@ def rank_verified_by_image(source_b64, source_mime, verified):
             enriched["same_product"] = False
             ranked.append((name, enriched))
     ranked.sort(key=lambda x: (x[1].get("same_product", False), x[1].get("image_score", -1), -x[1].get("price", 0)), reverse=True)
-    strong = [(n, i) for n, i in ranked if i.get("same_product") or i.get("image_score", 0) >= IMAGE_MATCH_MIN_SCORE]
+    # قبول صارم: لا تكفي نفس الفئة أو نفس البراند. يجب أن يؤكد النموذج أنه نفس المنتج
+    # مع درجة مرتفعة، أو أن تكون الدرجة شبه مؤكدة جداً.
+    strong = [
+        (n, i) for n, i in ranked
+        if (i.get("same_product") and i.get("image_score", 0) >= IMAGE_MATCH_MIN_SCORE)
+        or i.get("image_score", 0) >= 92
+    ]
+    print("IMAGE MATCH SCORES: " + ", ".join(
+        f"{n}={i.get('image_score')} same={i.get('same_product')}" for n, i in ranked
+    ))
     if strong:
-        print("IMAGE MATCH SCORES: " + ", ".join(f"{n}={i.get('image_score')}" for n, i in ranked))
         return dict(strong)
-    # إذا لم توجد مطابقة قوية، لا نخفي كل النتائج؛ نعيد الأعلى مع تسجيل التحذير
-    print("IMAGE MATCH: no candidate reached threshold; keeping ranked results")
-    return dict(ranked)
+    # لا نرسل نتيجة مختلفة بصرياً لمجرد أن الاسم أو البراند قريب.
+    print("IMAGE MATCH HARD REJECT: no candidate passed visual threshold")
+    return {}
 
 def get_final_url(url: str):
     if not url or not url.startswith(("http://", "https://")): return ""
@@ -1347,4 +1357,4 @@ def process_location_message(message, bot_id):
     send_whatsapp_cta(from_number, body, maps_url, bot_id, T(lang,"maps_btn"))
 
 @app.get("/")
-async def health(): return {"status":"v42 visual product matching + retries + classified maps"}
+async def health(): return {"status":"v43 visual product matching + retries + classified maps"}
