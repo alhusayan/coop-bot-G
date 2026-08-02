@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v48-direct-20260802"
+BUILD_ID = "v49-exact-guard-20260802"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("LENS MODE: DIRECT — NO STRICT VISUAL SELECTION")
@@ -146,7 +146,7 @@ def has_model_token(a, b):
 
 def cache_key(query, lang):
     norm = re.sub(r"[^\w\u0600-\u06FF]+", "", normalize_ar(query))
-    return hashlib.sha256(f"v48|{norm}|{lang}".encode()).hexdigest()
+    return hashlib.sha256(f"v49|{norm}|{lang}".encode()).hexdigest()
 
 def cache_ttl_for(query, txt=""):
     q_norm = normalize_ar(query)
@@ -679,46 +679,83 @@ def google_lens_lookup(image_b64, mime_type, lang="ar", query_hint=""):
         print(f"GOOGLE LENS EXCEPTION: {e}")
         return {"aliases": [], "matches": [], "query": ""}
 
+def _meaningful_lens_tokens(text):
+    """Extract discriminative tokens from the chosen Lens title, excluding generic words and sizes."""
+    raw = normalize_ar(text or "").lower()
+    toks = re.findall(r"[a-z0-9؀-ۿ]+", raw)
+    stop = {
+        "women","woman","men","man","size","new","used","authentic","leather","جلد",
+        "mules","mule","shoes","shoe","slippers","slipper","sandals","sandal",
+        "for","the","and","in","with","kw","kuwait","uae","كويت","نسائي","رجالي",
+    }
+    out=[]
+    for t in toks:
+        if t in stop or t.isdigit() or len(t) < 3:
+            continue
+        if t not in out:
+            out.append(t)
+    return out
+
+
 def _lens_offer_compatible(info, url, lens_context):
-    """فلتر نصي محافظ بعد Lens: يمنع اختلافات واضحة من دون قتل محرك الأسعار."""
+    """Strict guard for image searches. Candidate title/URL alone must match the Lens identity."""
     if not lens_context:
         return True
     sig = lens_context.get("signature") or {}
     chosen = lens_context.get("chosen") or {}
-    hay = normalize_ar(" ".join([str(info.get("title", "")), str(url), str(chosen.get("title", ""))])).lower()
+    candidate_hay = normalize_ar(" ".join([str(info.get("title", "")), str(url)])).lower()
+    chosen_title = normalize_ar(str(chosen.get("title", ""))).lower()
+
+    # Brand is mandatory when Lens returned a clear brand.
+    brand_aliases = {
+        "bottega veneta": ("bottega", "veneta", "بوتيغا", "بوتيقا"),
+        "under armour": ("under", "armour", "اندر", "ارمور"),
+    }
+    for brand, aliases in brand_aliases.items():
+        if brand in chosen_title and not any(normalize_ar(a) in candidate_hay for a in aliases):
+            return False
+
+    # At least one discriminative Lens token must occur in the candidate itself.
+    desired_tokens = _meaningful_lens_tokens(chosen_title)
+    descriptor_tokens = [t for t in desired_tokens if t not in ("bottega", "veneta")]
+    if descriptor_tokens and not any(t in candidate_hay for t in descriptor_tokens):
+        print(f"LENS TOKEN REJECT: wanted={descriptor_tokens} candidate={candidate_hay[:180]}")
+        return False
 
     heel = (sig.get("heel") or "UNKNOWN").upper()
-    high_words = ("high heel", "high heels", "stiletto", "كعب عالي", "كعب ذهبي", "heeled", "pump")
-    if heel in ("FLAT", "NONE") and any(normalize_ar(w) in hay for w in high_words):
+    high_words = ("high heel", "high heels", "stiletto", "kitten heel", "heeled", "pump", "كعب عالي", "كعب ذهبي")
+    if heel in ("FLAT", "NONE") and any(normalize_ar(w) in candidate_hay for w in high_words):
         return False
 
     pattern = normalize_ar(sig.get("pattern") or "")
     if pattern and pattern not in ("unknown", "none", "غير معروف"):
         pattern_groups = {
-            "woven": ("woven", "intrecciato", "weave", "منسوج", "ضفيره"),
-            "intrecciato": ("woven", "intrecciato", "weave", "منسوج", "ضفيره"),
+            "woven": ("woven", "intrecciato", "weave", "handwoven", "منسوج", "ضفيره"),
+            "intrecciato": ("woven", "intrecciato", "weave", "handwoven", "منسوج", "ضفيره"),
             "braided": ("braided", "woven", "intrecciato", "مضفر", "منسوج"),
         }
         keys = pattern_groups.get(pattern, (pattern,))
-        # نرفض فقط إذا عنوان الصفحة يذكر نمطاً متعارضاً صريحاً، ولا نشترط وجود الوصف دائماً.
-        conflicting = ("patent", "satin", "mesh", "laminated", "smooth leather")
-        if not any(normalize_ar(k) in hay for k in keys) and any(normalize_ar(c) in hay for c in conflicting):
+        # For an explicitly woven item, require the candidate itself to say so.
+        if pattern in pattern_groups and not any(normalize_ar(k) in candidate_hay for k in keys):
             return False
 
     color = normalize_ar(sig.get("color") or "")
     if color and color not in ("unknown", "none", "غير معروف"):
         color_map = {
-            "brown": ("brown", "tan", "cognac", "camel", "بني", "جملي"),
+            "brown": ("brown", "tan", "cognac", "camel", "burgundy", "بني", "جملي"),
             "black": ("black", "اسود"),
             "green": ("green", "اخضر"),
-            "white": ("white", "ابيض"),
+            "white": ("white", "ivory", "cream", "ابيض"),
         }
-        wanted = color_map.get(color, (color,))
-        other_colors = ("black", "green", "white", "red", "blue", "silver", "gold", "اسود", "اخضر", "ابيض", "احمر", "ازرق")
-        if any(normalize_ar(c) in hay for c in other_colors) and not any(normalize_ar(c) in hay for c in wanted):
+        wanted = tuple(normalize_ar(x) for x in color_map.get(color, (color,)))
+        explicit_colors = tuple(normalize_ar(x) for x in (
+            "black","green","white","red","blue","silver","gold","pink","purple",
+            "اسود","اخضر","ابيض","احمر","ازرق","ذهبي","وردي","بنفسجي"
+        ))
+        if any(c in candidate_hay for c in explicit_colors) and not any(c in candidate_hay for c in wanted):
             return False
-    return True
 
+    return True
 
 def filter_verified_with_lens(verified, lens_context):
     if not lens_context:
@@ -1172,11 +1209,45 @@ def is_informational_answer(txt):
     return len(txt.strip()) >= 80
 
 
+def verify_lens_direct_matches(lens_context):
+    """Verify Lens-returned product pages before any broad price search."""
+    if not lens_context:
+        return {}
+    candidates = {}
+    for i, m in enumerate((lens_context.get("matches") or [])[:8], 1):
+        url = (m.get("link") or "").strip()
+        title = (m.get("title") or "").strip()
+        source = (m.get("source") or f"Lens {i}").strip()
+        if not title or not is_direct_store_url(url):
+            continue
+        candidates[source] = url
+    verified = verify_offers(candidates, (lens_context.get("chosen") or {}).get("title", ""))
+    verified = filter_verified_with_lens(verified, lens_context)
+    if verified:
+        print(f"LENS DIRECT VERIFIED: {list(verified)}")
+    return verified
+
+
 def search_product(query, lang, prompt_text=None, source_image_b64=None, source_image_mime=None, lens_context=None):
     # نتائج الصور تعتمد على الصورة نفسها، لذلك لا نستخدم كاش النص وحده.
     cached = None if source_image_b64 else cache_get(query, lang)
     if cached:
         return cached
+
+    # First use the actual product URLs returned by Google Lens. This avoids replacing
+    # the identified item with another model from the same brand during price search.
+    lens_verified = verify_lens_direct_matches(lens_context)
+    if lens_verified:
+        sorted_v = sorted(lens_verified.items(), key=lambda x: x[1]["price"])
+        display_name = (lens_context.get("chosen") or {}).get("title") or query
+        lines = [f"📦 {display_name}", ""]
+        new_urls = {}
+        for i, (name, info) in enumerate(sorted_v[:MAX_STORES]):
+            prefix = "✅" if i == 0 else "•"
+            currency = "KWD" if lang == "en" else "د.ك"
+            lines.append(f"{prefix} {name} — {format_price(info['price'])} {currency}")
+            new_urls[name] = info["url"]
+        return "\n".join(lines), new_urls
 
     candidates = _query_candidates(query)
     best_txt, best_urls = "", {}
@@ -1248,6 +1319,12 @@ def search_product(query, lang, prompt_text=None, source_image_b64=None, source_
                 if not source_image_b64:
                     cache_put(query, lang, final_txt, new_urls)
                 return final_txt, new_urls
+
+            # For image/Lens searches, never fall back to an unverified page. A direct URL
+            # can still be a different SKU, a sold-out page, or a collection page.
+            if lens_context:
+                print("LENS STRICT: no verified exact product; skipping unverified CTA fallback")
+                continue
 
             # بعض المتاجر تمنع فحص HTML؛ نقبل العرض فقط مع رابط منتج مباشر حقيقي.
             kept = []
@@ -1537,4 +1614,4 @@ def process_location_message(message, bot_id):
     send_whatsapp_cta(from_number, body, maps_url, bot_id, T(lang,"maps_btn"))
 
 @app.get("/")
-async def health(): return {"status":"v48 LENS DIRECT DIAGNOSTIC", "build":"v48-direct-20260802"}
+async def health(): return {"status":"v49 LENS EXACT GUARD", "build":"v49-exact-guard-20260802"}
