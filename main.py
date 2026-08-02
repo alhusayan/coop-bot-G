@@ -52,6 +52,8 @@ ENABLE_SEARCH_RETRY = env_bool("ENABLE_SEARCH_RETRY", True)
 MAX_SEARCH_ATTEMPTS = max(2, int(os.environ.get("MAX_SEARCH_ATTEMPTS", "3")))
 MAX_IDENTIFY_ATTEMPTS = max(2, int(os.environ.get("MAX_IDENTIFY_ATTEMPTS", "3")))
 AUTO_SEND_PRODUCT_MAPS = env_bool("AUTO_SEND_PRODUCT_MAPS", True)
+ENABLE_IMAGE_MATCH = env_bool("ENABLE_IMAGE_MATCH", True)
+IMAGE_MATCH_MIN_SCORE = int(os.environ.get("IMAGE_MATCH_MIN_SCORE", "60"))
 
 GROCERY_WORDS = [
     "بيبسي","شيبس","حليب","قهوه","قهوة","شاي","سكر","رز","زيت","صابون","شامبو",
@@ -123,7 +125,7 @@ def has_model_token(a, b):
 
 def cache_key(query, lang):
     norm = re.sub(r"[^\w\u0600-\u06FF]+", "", normalize_ar(query))
-    return hashlib.sha256(f"v41|{norm}|{lang}".encode()).hexdigest()
+    return hashlib.sha256(f"v42|{norm}|{lang}".encode()).hexdigest()
 
 def cache_ttl_for(query, txt=""):
     q_norm = normalize_ar(query)
@@ -380,7 +382,7 @@ def fetch_html(url):
 def parse_product_data(html, url):
     if not html: return None
     soup = BeautifulSoup(html, 'lxml')
-    data = {"price": None, "available": True, "is_product": True, "title": ""}
+    data = {"price": None, "available": True, "is_product": True, "title": "", "image_url": ""}
     ld_products = 0
     for script in soup.find_all("script", type="application/ld+json"):
         try:
@@ -410,6 +412,14 @@ def parse_product_data(html, url):
                         data["available"] = False
                     if not data["title"]:
                         data["title"] = str(obj.get("name",""))[:80]
+                    if not data["image_url"]:
+                        image = obj.get("image")
+                        if isinstance(image, list) and image:
+                            image = image[0]
+                        if isinstance(image, dict):
+                            image = image.get("url") or image.get("contentUrl")
+                        if isinstance(image, str) and image.startswith("http"):
+                            data["image_url"] = image
         except: continue
     if ld_products >= 4:
         data["is_product"] = False
@@ -422,6 +432,12 @@ def parse_product_data(html, url):
         if m and m.get("content"):
             try: data["price"] = float(m["content"])
             except: pass
+    if not data["image_url"]:
+        for attrs in ({"property": "og:image"}, {"name": "twitter:image"}, {"property": "twitter:image"}):
+            m = soup.find("meta", attrs=attrs)
+            if m and m.get("content") and str(m.get("content")).startswith("http"):
+                data["image_url"] = str(m.get("content"))
+                break
     ul = url.lower()
     if any(p in ul for p in LISTING_URL_PARTS):
         if not re.search(r"/product/|/products/[^/]{3,}|/p/|/dp/|/item/|/prod/", ul):
@@ -457,8 +473,81 @@ def verify_offers(urls_map, query):
     for r in results:
         if r:
             name, url, info = r
-            verified[name] = {"url": url, "price": info["price"], "title": info["title"]}
+            verified[name] = {"url": url, "price": info["price"], "title": info["title"], "image_url": info.get("image_url", "")}
     return verified
+
+def download_image_for_match(url):
+    if not url or not url.startswith(("http://", "https://")):
+        return None
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=15)
+        ctype = (r.headers.get("Content-Type") or "image/jpeg").split(";")[0].strip()
+        if r.status_code != 200 or not ctype.startswith("image/") or len(r.content) < 500:
+            return None
+        # منع إرسال ملفات ضخمة إلى Gemini
+        if len(r.content) > 5 * 1024 * 1024:
+            return None
+        return base64.b64encode(r.content).decode(), ctype
+    except Exception as e:
+        print(f"IMAGE DOWNLOAD ERR: {e} {url[:100]}")
+        return None
+
+def rank_verified_by_image(source_b64, source_mime, verified):
+    """يقارن صورة المستخدم بصورة كل صفحة منتج في اتصال Vision واحد، ثم يرتب النتائج حسب التشابه."""
+    if not ENABLE_IMAGE_MATCH or not source_b64 or not verified:
+        return verified
+    candidates = []
+    for name, info in verified.items():
+        img = download_image_for_match(info.get("image_url", ""))
+        if img:
+            candidates.append((name, info, img[0], img[1]))
+    if not candidates:
+        print("IMAGE MATCH SKIPPED: no candidate product images")
+        return verified
+    parts = [
+        {"text": (
+            "الصورة الأولى هي صورة المنتج التي أرسلها المستخدم. بعدها صور مرشحة مرقمة. "
+            "قارن الهوية البصرية للمنتج نفسه: الشعار، الشكل، اللون، العبوة، النقوش، الأزرار، رقم الموديل والحجم. "
+            "تجاهل اختلاف الخلفية والزاوية والإضاءة. أرجع JSON فقط بالشكل "
+            "{\"scores\":[{\"index\":1,\"score\":0,\"same_product\":false}]}. "
+            "score من 0 إلى 100، وsame_product=true فقط عندما تبدو الصورة لنفس المنتج أو نفس الموديل/النسخة بدقة."
+        )},
+        {"inline_data": {"mime_type": source_mime, "data": source_b64}},
+    ]
+    for idx, (name, info, b64, mime) in enumerate(candidates, 1):
+        parts.append({"text": f"المرشح رقم {idx}: {name} | {info.get('title','')}"})
+        parts.append({"inline_data": {"mime_type": mime, "data": b64}})
+    txt, _ = call_gemini(parts, system="أنت نظام مطابقة صور منتجات دقيق. أخرج JSON فقط بلا Markdown.", use_search=False)
+    try:
+        raw = re.sub(r"^```(?:json)?|```$", "", (txt or "").strip(), flags=re.I | re.M).strip()
+        data = json.loads(raw)
+        score_map = {int(x.get("index")): (float(x.get("score", 0)), bool(x.get("same_product", False))) for x in data.get("scores", [])}
+    except Exception as e:
+        print(f"IMAGE MATCH PARSE ERR: {e} response={txt[:300] if txt else ''}")
+        return verified
+    ranked = []
+    candidate_names = {name for name, *_ in candidates}
+    for idx, (name, info, _, _) in enumerate(candidates, 1):
+        score, same = score_map.get(idx, (0, False))
+        enriched = dict(info)
+        enriched["image_score"] = score
+        enriched["same_product"] = same
+        ranked.append((name, enriched))
+    # النتائج التي لا نستطيع استخراج صورتها تبقى في النهاية، ولا تتفوق على المطابقة المرئية
+    for name, info in verified.items():
+        if name not in candidate_names:
+            enriched = dict(info)
+            enriched["image_score"] = -1
+            enriched["same_product"] = False
+            ranked.append((name, enriched))
+    ranked.sort(key=lambda x: (x[1].get("same_product", False), x[1].get("image_score", -1), -x[1].get("price", 0)), reverse=True)
+    strong = [(n, i) for n, i in ranked if i.get("same_product") or i.get("image_score", 0) >= IMAGE_MATCH_MIN_SCORE]
+    if strong:
+        print("IMAGE MATCH SCORES: " + ", ".join(f"{n}={i.get('image_score')}" for n, i in ranked))
+        return dict(strong)
+    # إذا لم توجد مطابقة قوية، لا نخفي كل النتائج؛ نعيد الأعلى مع تسجيل التحذير
+    print("IMAGE MATCH: no candidate reached threshold; keeping ranked results")
+    return dict(ranked)
 
 def get_final_url(url: str):
     if not url or not url.startswith(("http://", "https://")): return ""
@@ -897,8 +986,9 @@ def is_informational_answer(txt):
     return len(txt.strip()) >= 80
 
 
-def search_product(query, lang, prompt_text=None):
-    cached = cache_get(query, lang)
+def search_product(query, lang, prompt_text=None, source_image_b64=None, source_image_mime=None):
+    # نتائج الصور تعتمد على الصورة نفسها، لذلك لا نستخدم كاش النص وحده.
+    cached = None if source_image_b64 else cache_get(query, lang)
     if cached:
         return cached
 
@@ -955,7 +1045,11 @@ def search_product(query, lang, prompt_text=None):
         if txt and offers and urls:
             verified = verify_offers(urls, search_term)
             if verified:
-                sorted_v = sorted(verified.items(), key=lambda x: x[1]["price"])
+                if source_image_b64:
+                    verified = rank_verified_by_image(source_image_b64, source_image_mime or "image/jpeg", verified)
+                    sorted_v = sorted(verified.items(), key=lambda x: (-x[1].get("image_score", -1), x[1]["price"]))
+                else:
+                    sorted_v = sorted(verified.items(), key=lambda x: x[1]["price"])
                 title = product_title(txt, search_term)
                 lines = [title, ""]
                 new_urls = {}
@@ -965,7 +1059,8 @@ def search_product(query, lang, prompt_text=None):
                     lines.append(f"{prefix} {name} — {format_price(info['price'])} {currency}")
                     new_urls[name] = info["url"]
                 final_txt = "\n".join(lines)
-                cache_put(query, lang, final_txt, new_urls)
+                if not source_image_b64:
+                    cache_put(query, lang, final_txt, new_urls)
                 return final_txt, new_urls
 
             # بعض المتاجر تمنع فحص HTML؛ نقبل العرض فقط مع رابط منتج مباشر حقيقي.
@@ -984,7 +1079,8 @@ def search_product(query, lang, prompt_text=None):
                     lines.append(f"{prefix} {body}")
                     clean_urls[offer["name"]] = match_url(offer["name"], urls)
                 final_txt = "\n".join(lines)
-                cache_put(query, lang, final_txt, clean_urls)
+                if not source_image_b64:
+                    cache_put(query, lang, final_txt, clean_urls)
                 return final_txt, clean_urls
 
         best_txt, best_urls = txt or best_txt, urls or best_urls
@@ -1132,11 +1228,11 @@ def process_single_image(message,bot_id,lang="ar"):
             f"المنتج في الصورة له الأسماء/المرادفات التالية: {combined_name}\n"
             f"طلب المستخدم عنه: {caption}\nصنّف الطلب وأجب. {LANG_INSTR[lang]}"
         )
-        txt,urls=search_product(request_query, lang, prompt_text=prompt_text)
+        txt,urls=search_product(request_query, lang, prompt_text=prompt_text, source_image_b64=b64, source_image_mime=mime)
         LAST_SEARCH[from_number] = {"product": request_query}
         query = request_query
     elif combined_name:
-        txt,urls=search_product(combined_name, lang)
+        txt,urls=search_product(combined_name, lang, source_image_b64=b64, source_image_mime=mime)
         LAST_SEARCH[from_number] = {"product": combined_name}
         query = combined_name
     else:
@@ -1251,4 +1347,4 @@ def process_location_message(message, bot_id):
     send_whatsapp_cta(from_number, body, maps_url, bot_id, T(lang,"maps_btn"))
 
 @app.get("/")
-async def health(): return {"status":"v41 retries + classified maps"}
+async def health(): return {"status":"v42 visual product matching + retries + classified maps"}
