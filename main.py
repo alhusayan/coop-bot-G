@@ -123,7 +123,7 @@ def has_model_token(a, b):
 
 def cache_key(query, lang):
     norm = re.sub(r"[^\w\u0600-\u06FF]+", "", normalize_ar(query))
-    return hashlib.sha256(f"v36|{norm}|{lang}".encode()).hexdigest()
+    return hashlib.sha256(f"v37|{norm}|{lang}".encode()).hexdigest()
 
 def cache_ttl_for(query, txt=""):
     q_norm = normalize_ar(query)
@@ -798,24 +798,52 @@ def best_of_search(parts, lang="ar"):
     print("SEARCH RETRY: first call returned empty")
     return call_gemini(parts)
 
+def bilingual_search_instruction(query, lang):
+    """يجبر البحث في الفهرسة العربية والإنجليزية مع إبقاء الرد بلغة المستخدم."""
+    response_rule = LANG_INSTR[lang]
+    return (
+        f"ابحث عن المنتج التالي في الكويت باستخدام العربية والإنجليزية معاً: {query}. "
+        "حوّل الاسم داخلياً إلى مرادف عربي ومرادف إنجليزي، وجرّب اسم البراند باللاتيني والعربي، "
+        "ولا تعتبر عدم ظهور نتيجة بلغة واحدة فشلاً قبل تجربة اللغة الأخرى. "
+        "اعرض فقط نتائج لها سعر رقمي بالدينار الكويتي ورابط صفحة منتج مباشر داخل المتجر. "
+        f"{response_rule}"
+    )
+
+
+def split_product_aliases(product_name):
+    """ينظف الاسم الثنائي الناتج من تحليل الصورة ويحتفظ بالاسمين للبحث."""
+    parts = [p.strip() for p in re.split(r"\s*[|｜]\s*", product_name or "") if p.strip()]
+    unique = []
+    for part in parts:
+        if part not in unique:
+            unique.append(part)
+    return unique[:2]
+
+
 def search_product(query, lang, prompt_text=None):
     cached = cache_get(query, lang)
     if cached:
         return cached
 
-    base_prompt = prompt_text or (
-        f"ابحث عن {query} في الكويت. أعطني أفضل 3 نتائج فقط، وكل نتيجة يجب أن تحتوي "
-        f"سعراً رقمياً واضحاً بالدينار الكويتي ورابط صفحة المنتج المباشرة. "
-        f"لا تذكر نتيجة بلا سعر ولا تستخدم روابط Google أو صفحات البحث والتصنيفات. {LANG_INSTR[lang]}"
-    )
+    base_prompt = prompt_text or bilingual_search_instruction(query, lang)
+    if prompt_text:
+        base_prompt = (
+            f"{prompt_text}\n"
+            f"{bilingual_search_instruction(query, lang)}"
+        )
 
     best_txt, best_urls = "", {}
     for attempt in range(1, MAX_SEARCH_ATTEMPTS + 1):
         if attempt == 1:
             current_prompt = base_prompt
         else:
+            language_focus = (
+                "ابدأ هذه المحاولة بالصياغة العربية والتهجئة العربية للبراند، ثم جرّب الإنجليزية."
+                if attempt % 2 == 0 else
+                "ابدأ هذه المحاولة بالاسم الإنجليزي والبراند باللاتيني، ثم جرّب المرادف العربي."
+            )
             current_prompt = (
-                f"محاولة بحث إضافية رقم {attempt} عن: {query}. "
+                f"محاولة بحث إضافية رقم {attempt} عن: {query}. {language_focus} "
                 "غيّر كلمات البحث وابحث في متاجر كويتية أخرى. المطلوب نتيجة واحدة صحيحة على الأقل: "
                 "اسم المنتج، سعر رقمي بالدينار الكويتي، ورابط صفحة المنتج المباشرة داخل المتجر. "
                 "ممنوع روابط Google وممنوع صفحة البحث أو التصنيف وممنوع كتابة متوفر بدل السعر. "
@@ -977,10 +1005,13 @@ async def process_image_buffer(from_number):
 
 def identify_product_with_retry(b64, mime, lang="ar"):
     """يعيد تحليل الصورة بصيغ مختلفة، ولا يرجع رسالة فشل صادرة من النموذج كاسم منتج."""
+    # التعرف لا يعتمد على لغة المستخدم: نجرب العربية والإنجليزية وصيغة ثنائية اللغة.
+    # هذا يحل المنتجات التي تكون نتائجها مفهرسة في الكويت بلغة واحدة أكثر من الأخرى.
     prompts = [
-        "حدد اسم المنتج الظاهر في الصورة بدقة. اكتب البراند ونوع المنتج والموديل والحجم إن ظهر. سطر واحد فقط.",
-        "افحص الصورة مرة أخرى وركز على الشعار والكتابة والعبوة ورقم الموديل. أعطني أفضل اسم بحث تجاري ممكن. سطر واحد فقط.",
-        "حتى لو لم يظهر الاسم كاملاً، استنتج فئة المنتج والبراند من الشعار والشكل، واكتب عبارة بحث مفيدة ودقيقة. سطر واحد فقط.",
+        "حدد المنتج بدقة. اكتب أفضل اسم بحث تجاري بالعربية، مع البراند والموديل إن ظهر. سطر واحد فقط.",
+        "Identify the product precisely. Write the best commercial search name in English, including brand and model if visible. One line only.",
+        "Identify the product from logo, shape and visible text. Return Arabic name then English name separated by |. Include brand/model when possible. One line only.",
+        "افحص الصورة من جديد واستنتج أقرب اسم منتج قابل للبحث حتى لو لم يظهر الاسم كاملاً. اكتب الاسم بالعربية والإنجليزية مفصولين بعلامة | فقط.",
     ]
     bad_phrases = (
         "ما قدرت", "لا استطيع", "لا أستطيع", "غير واضح", "لا يمكن تحديد",
@@ -1008,16 +1039,21 @@ def process_single_image(message,bot_id,lang="ar"):
     send_whatsapp_text(from_number,T(lang,"identifying"),bot_id)
     b64,mime=download_whatsapp_media(message["image"]["id"])
     product_name = identify_product_with_retry(b64, mime, lang)
-    if product_name and caption:
-        request_query = f"{caption} — {product_name}"
-        prompt_text = f"المنتج في الصورة: {product_name}\nطلب المستخدم عنه: {caption}\nصنّف الطلب وأجب. {LANG_INSTR[lang]}"
+    aliases = split_product_aliases(product_name)
+    combined_name = " | ".join(aliases) if aliases else product_name
+    if combined_name and caption:
+        request_query = f"{caption} — {combined_name}"
+        prompt_text = (
+            f"المنتج في الصورة له الأسماء/المرادفات التالية: {combined_name}\n"
+            f"طلب المستخدم عنه: {caption}\nصنّف الطلب وأجب. {LANG_INSTR[lang]}"
+        )
         txt,urls=search_product(request_query, lang, prompt_text=prompt_text)
         LAST_SEARCH[from_number] = {"product": request_query}
         query = request_query
-    elif product_name:
-        txt,urls=search_product(product_name, lang)
-        LAST_SEARCH[from_number] = {"product": product_name}
-        query = product_name
+    elif combined_name:
+        txt,urls=search_product(combined_name, lang)
+        LAST_SEARCH[from_number] = {"product": combined_name}
+        query = combined_name
     else:
         req = caption if caption else ("Identify this product and find its current price in Kuwait." if lang == "en" else "حدد هذا المنتج وابحث عن سعره الحالي في الكويت.")
         txt, urls = "", {}
@@ -1130,4 +1166,4 @@ def process_location_message(message, bot_id):
     send_whatsapp_cta(from_number, body, maps_url, bot_id, T(lang,"maps_btn"))
 
 @app.get("/")
-async def health(): return {"status":"v36 retries + classified maps"}
+async def health(): return {"status":"v37 retries + classified maps"}
