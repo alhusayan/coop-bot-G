@@ -1957,4 +1957,4 @@ def process_location_message(message, bot_id):
     send_whatsapp_cta(from_number, body, maps_url, bot_id, T(lang,"maps_btn"))
 
 @app.get("/")
-async def health(): return {"status":"v52 KUWAIT PRIORITY + FILS", "build":"v52-kw-priority-fils-20260802"}
+async def health(): return {"status":"v53 TWO-LAYER SEARCH + RESULT RANKING", "build":BUILD_ID}
