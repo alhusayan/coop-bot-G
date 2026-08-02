@@ -52,8 +52,15 @@ ENABLE_SEARCH_RETRY = env_bool("ENABLE_SEARCH_RETRY", True)
 MAX_SEARCH_ATTEMPTS = max(2, int(os.environ.get("MAX_SEARCH_ATTEMPTS", "3")))
 MAX_IDENTIFY_ATTEMPTS = max(2, int(os.environ.get("MAX_IDENTIFY_ATTEMPTS", "3")))
 AUTO_SEND_PRODUCT_MAPS = env_bool("AUTO_SEND_PRODUCT_MAPS", True)
-ENABLE_IMAGE_MATCH = env_bool("ENABLE_IMAGE_MATCH", True)
-IMAGE_MATCH_MIN_SCORE = int(os.environ.get("IMAGE_MATCH_MIN_SCORE", "75"))
+# Google Lens عبر SerpApi. لا توجد Google Lens API عامة رسمية للاستخدام الخادمي،
+# لذلك نستخدم SerpApi للوصول إلى نتائج Lens المنظمة.
+SERPAPI_API_KEY = os.environ.get("SERPAPI_API_KEY", "").strip()
+PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "").strip().rstrip("/")
+ENABLE_GOOGLE_LENS = env_bool("ENABLE_GOOGLE_LENS", True)
+LENS_RESULT_LIMIT = max(3, int(os.environ.get("LENS_RESULT_LIMIT", "12")))
+LENS_IMAGE_TTL = max(120, int(os.environ.get("LENS_IMAGE_TTL_SECONDS", "600")))
+LENS_IMAGE_STORE = {}
+LENS_IMAGE_LOCK = threading.Lock()
 
 GROCERY_WORDS = [
     "بيبسي","شيبس","حليب","قهوه","قهوة","شاي","سكر","رز","زيت","صابون","شامبو",
@@ -125,7 +132,7 @@ def has_model_token(a, b):
 
 def cache_key(query, lang):
     norm = re.sub(r"[^\w\u0600-\u06FF]+", "", normalize_ar(query))
-    return hashlib.sha256(f"v43|{norm}|{lang}".encode()).hexdigest()
+    return hashlib.sha256(f"v44|{norm}|{lang}".encode()).hexdigest()
 
 def cache_ttl_for(query, txt=""):
     q_norm = normalize_ar(query)
@@ -476,88 +483,120 @@ def verify_offers(urls_map, query):
             verified[name] = {"url": url, "price": info["price"], "title": info["title"], "image_url": info.get("image_url", "")}
     return verified
 
-def download_image_for_match(url):
-    if not url or not url.startswith(("http://", "https://")):
-        return None
+def _cleanup_lens_images():
+    now = time.time()
+    with LENS_IMAGE_LOCK:
+        expired = [k for k, v in LENS_IMAGE_STORE.items() if v.get("expires_at", 0) <= now]
+        for k in expired:
+            LENS_IMAGE_STORE.pop(k, None)
+
+def publish_image_for_lens(image_b64, mime_type):
+    """يحفظ صورة واتساب مؤقتاً ويعيد رابطاً عاماً تستطيع Google Lens قراءته."""
+    if not PUBLIC_BASE_URL or not image_b64:
+        return ""
     try:
-        r = requests.get(url, headers=HEADERS, timeout=15)
-        ctype = (r.headers.get("Content-Type") or "image/jpeg").split(";")[0].strip()
-        if r.status_code != 200 or not ctype.startswith("image/") or len(r.content) < 500:
-            return None
-        # منع إرسال ملفات ضخمة إلى Gemini
-        if len(r.content) > 5 * 1024 * 1024:
-            return None
-        return base64.b64encode(r.content).decode(), ctype
+        raw = base64.b64decode(image_b64)
+    except Exception:
+        return ""
+    if not raw or len(raw) > 15 * 1024 * 1024:
+        return ""
+    _cleanup_lens_images()
+    token = hashlib.sha256(raw + os.urandom(16)).hexdigest()[:32]
+    with LENS_IMAGE_LOCK:
+        LENS_IMAGE_STORE[token] = {
+            "content": raw,
+            "mime": mime_type or "image/jpeg",
+            "expires_at": time.time() + LENS_IMAGE_TTL,
+        }
+    return f"{PUBLIC_BASE_URL}/lens-image/{token}"
+
+def _lens_items(data):
+    items = []
+    seen = set()
+    for key in ("visual_matches", "exact_matches", "products"):
+        values = data.get(key) or []
+        if isinstance(values, dict):
+            values = values.get("results") or []
+        for x in values:
+            if not isinstance(x, dict):
+                continue
+            title = (x.get("title") or "").strip()
+            link = (x.get("link") or "").strip()
+            source = (x.get("source") or "").strip()
+            sig = (title.lower(), link.lower())
+            if not title or sig in seen:
+                continue
+            seen.add(sig)
+            items.append({
+                "title": title,
+                "link": link,
+                "source": source,
+                "exact": bool(x.get("exact_matches")),
+                "price": ((x.get("price") or {}).get("value") if isinstance(x.get("price"), dict) else ""),
+            })
+    return items[:LENS_RESULT_LIMIT]
+
+def google_lens_lookup(image_b64, mime_type, lang="ar", query_hint=""):
+    """يستخدم Google Lens أولاً لتحديد المنتج بصرياً، ولا يستبدل محرك الأسعار الحالي."""
+    if not ENABLE_GOOGLE_LENS or not SERPAPI_API_KEY or not PUBLIC_BASE_URL:
+        print("GOOGLE LENS SKIPPED: missing SERPAPI_API_KEY or PUBLIC_BASE_URL")
+        return {"aliases": [], "matches": [], "query": ""}
+    public_url = publish_image_for_lens(image_b64, mime_type)
+    if not public_url:
+        print("GOOGLE LENS SKIPPED: could not publish image")
+        return {"aliases": [], "matches": [], "query": ""}
+    params = {
+        "engine": "google_lens",
+        "type": "products",
+        "url": public_url,
+        "api_key": SERPAPI_API_KEY,
+        "country": "kw",
+        "hl": "en" if lang == "en" else "ar",
+        "auto_crop": "true",
+        "safe": "active",
+        "output": "json",
+    }
+    if query_hint:
+        params["q"] = query_hint[:120]
+    try:
+        r = requests.get("https://serpapi.com/search.json", params=params, timeout=60)
+        if r.status_code >= 400:
+            print(f"GOOGLE LENS HTTP {r.status_code}: {r.text[:300]}")
+            return {"aliases": [], "matches": [], "query": ""}
+        data = r.json()
+        if data.get("error"):
+            print(f"GOOGLE LENS ERROR: {data.get('error')}")
+            return {"aliases": [], "matches": [], "query": ""}
+        matches = _lens_items(data)
+        if not matches:
+            print("GOOGLE LENS: no visual matches")
+            return {"aliases": [], "matches": [], "query": ""}
+
+        # نحول أفضل عناوين Lens إلى اسم منتج نظيف بالعربي والإنجليزي.
+        evidence = "\n".join(
+            f"{i+1}. {m['title']} | {m['source']} | exact={m['exact']}"
+            for i, m in enumerate(matches[:8])
+        )
+        system = (
+            "أنت خبير مطابقة منتجات. هذه النتائج جاءت من Google Lens لصورة واحدة. "
+            "استخرج الاسم التجاري الأقرب لنفس المنتج، لا مجرد نفس الفئة. "
+            "أعطني سطراً واحداً فقط: الاسم العربي | الاسم الإنجليزي. "
+            "ضمّن البراند والموديل واللون/الخامة والحجم إذا تكرر بوضوح، ولا تخترع."
+        )
+        txt, _ = call_gemini([{"text": evidence}], system=system, use_search=False)
+        aliases = split_product_aliases((txt or "").strip().splitlines()[0] if txt else "")
+        if not aliases:
+            aliases = [m["title"] for m in matches[:3]]
+        query = " | ".join(aliases[:4])
+        print(f"GOOGLE LENS IDENTIFIED: {query}")
+        return {"aliases": aliases[:4], "matches": matches, "query": query}
     except Exception as e:
-        print(f"IMAGE DOWNLOAD ERR: {e} {url[:100]}")
-        return None
+        print(f"GOOGLE LENS EXCEPTION: {e}")
+        return {"aliases": [], "matches": [], "query": ""}
 
 def rank_verified_by_image(source_b64, source_mime, verified):
-    """يقارن صورة المستخدم بصورة كل صفحة منتج في اتصال Vision واحد، ثم يرتب النتائج حسب التشابه."""
-    if not ENABLE_IMAGE_MATCH or not source_b64 or not verified:
-        return verified
-    candidates = []
-    for name, info in verified.items():
-        img = download_image_for_match(info.get("image_url", ""))
-        if img:
-            candidates.append((name, info, img[0], img[1]))
-    if not candidates:
-        print("IMAGE MATCH SKIPPED: no candidate product images")
-        return verified
-    parts = [
-        {"text": (
-            "الصورة الأولى هي صورة المنتج التي أرسلها المستخدم. بعدها صور مرشحة مرقمة. "
-            "قارن الهوية البصرية للمنتج نفسه بدقة شديدة: الشعار، الشكل، اللون، الخامة، النقشة، نوع المقدمة، ارتفاع الكعب، "
-            "فتحة الأصابع، شكل النعل، العبوة، الأزرار، رقم الموديل والحجم. اختلاف اللون الجوهري أو نوع الكعب أو شكل المقدمة "
-            "أو تصميم الجزء العلوي يعني أنه منتج مختلف، حتى لو كان من نفس البراند ونفس الفئة. "
-            "تجاهل فقط اختلاف الخلفية والزاوية والإضاءة. أرجع JSON فقط بالشكل "
-            "{\"scores\":[{\"index\":1,\"score\":0,\"same_product\":false}]}. "
-            "score من 0 إلى 100، وsame_product=true فقط عندما تبدو الصورة لنفس المنتج أو نفس الموديل/النسخة بدقة."
-        )},
-        {"inline_data": {"mime_type": source_mime, "data": source_b64}},
-    ]
-    for idx, (name, info, b64, mime) in enumerate(candidates, 1):
-        parts.append({"text": f"المرشح رقم {idx}: {name} | {info.get('title','')}"})
-        parts.append({"inline_data": {"mime_type": mime, "data": b64}})
-    txt, _ = call_gemini(parts, system="أنت نظام مطابقة صور منتجات دقيق. أخرج JSON فقط بلا Markdown.", use_search=False)
-    try:
-        raw = re.sub(r"^```(?:json)?|```$", "", (txt or "").strip(), flags=re.I | re.M).strip()
-        data = json.loads(raw)
-        score_map = {int(x.get("index")): (float(x.get("score", 0)), bool(x.get("same_product", False))) for x in data.get("scores", [])}
-    except Exception as e:
-        print(f"IMAGE MATCH PARSE ERR: {e} response={txt[:300] if txt else ''}")
-        return verified
-    ranked = []
-    candidate_names = {name for name, *_ in candidates}
-    for idx, (name, info, _, _) in enumerate(candidates, 1):
-        score, same = score_map.get(idx, (0, False))
-        enriched = dict(info)
-        enriched["image_score"] = score
-        enriched["same_product"] = same
-        ranked.append((name, enriched))
-    # النتائج التي لا نستطيع استخراج صورتها تبقى في النهاية، ولا تتفوق على المطابقة المرئية
-    for name, info in verified.items():
-        if name not in candidate_names:
-            enriched = dict(info)
-            enriched["image_score"] = -1
-            enriched["same_product"] = False
-            ranked.append((name, enriched))
-    ranked.sort(key=lambda x: (x[1].get("same_product", False), x[1].get("image_score", -1), -x[1].get("price", 0)), reverse=True)
-    # قبول صارم: لا تكفي نفس الفئة أو نفس البراند. يجب أن يؤكد النموذج أنه نفس المنتج
-    # مع درجة مرتفعة، أو أن تكون الدرجة شبه مؤكدة جداً.
-    strong = [
-        (n, i) for n, i in ranked
-        if (i.get("same_product") and i.get("image_score", 0) >= IMAGE_MATCH_MIN_SCORE)
-        or i.get("image_score", 0) >= 92
-    ]
-    print("IMAGE MATCH SCORES: " + ", ".join(
-        f"{n}={i.get('image_score')} same={i.get('same_product')}" for n, i in ranked
-    ))
-    if strong:
-        return dict(strong)
-    # لا نرسل نتيجة مختلفة بصرياً لمجرد أن الاسم أو البراند قريب.
-    print("IMAGE MATCH HARD REJECT: no candidate passed visual threshold")
-    return {}
+    """تم تعطيل فلتر Gemini البصري؛ Lens يحدد الاسم أولاً، والأسعار تبقى من محرك البحث المجرب."""
+    return verified
 
 def get_final_url(url: str):
     if not url or not url.startswith(("http://", "https://")): return ""
@@ -1055,11 +1094,8 @@ def search_product(query, lang, prompt_text=None, source_image_b64=None, source_
         if txt and offers and urls:
             verified = verify_offers(urls, search_term)
             if verified:
-                if source_image_b64:
-                    verified = rank_verified_by_image(source_image_b64, source_image_mime or "image/jpeg", verified)
-                    sorted_v = sorted(verified.items(), key=lambda x: (-x[1].get("image_score", -1), x[1]["price"]))
-                else:
-                    sorted_v = sorted(verified.items(), key=lambda x: x[1]["price"])
+                # Google Lens استُخدم قبل البحث لتحديد المنتج. لا نحذف نتائج الأسعار بسبب تقييم بصري تخميني.
+                sorted_v = sorted(verified.items(), key=lambda x: x[1]["price"])
                 title = product_title(txt, search_term)
                 lines = [title, ""]
                 new_urls = {}
@@ -1132,6 +1168,15 @@ def send_whatsapp_buttons(to, body, buttons, bot_id):
 def send_language_choice(to, bot_id):
     body = "🌐 اختر لغتك المفضلة\nChoose your preferred language"
     send_whatsapp_buttons(to, body, [{"id": "lang_ar", "title": "العربية 🇰🇼"},{"id": "lang_en", "title": "English 🇬🇧"}], bot_id)
+
+@app.get("/lens-image/{token}")
+async def lens_image(token: str):
+    _cleanup_lens_images()
+    with LENS_IMAGE_LOCK:
+        item = LENS_IMAGE_STORE.get(token)
+    if not item:
+        return Response("not found", status_code=404)
+    return Response(content=item["content"], media_type=item.get("mime", "image/jpeg"), headers={"Cache-Control": "no-store"})
 
 @app.get("/webhook")
 async def verify(request: Request):
@@ -1229,51 +1274,44 @@ def process_single_image(message,bot_id,lang="ar"):
     caption=(message.get("image",{}) or {}).get("caption","").strip()
     send_whatsapp_text(from_number,T(lang,"identifying"),bot_id)
     b64,mime=download_whatsapp_media(message["image"]["id"])
-    product_name = identify_product_with_retry(b64, mime, lang)
-    aliases = split_product_aliases(product_name)
-    combined_name = " | ".join(aliases) if aliases else product_name
+
+    # 1) Google Lens يحدد المنتج بصرياً.
+    lens = google_lens_lookup(b64, mime, lang, caption)
+    lens_name = lens.get("query", "")
+
+    # 2) إذا Lens لم يرجع شيئاً، نرجع للتعرف السابق كخطة احتياطية.
+    fallback_name = ""
+    if not lens_name:
+        fallback_name = identify_product_with_retry(b64, mime, lang)
+
+    aliases = lens.get("aliases") or split_product_aliases(fallback_name)
+    combined_name = " | ".join(aliases) if aliases else fallback_name
+
     if combined_name and caption:
         request_query = f"{caption} — {combined_name}"
         prompt_text = (
-            f"المنتج في الصورة له الأسماء/المرادفات التالية: {combined_name}\n"
-            f"طلب المستخدم عنه: {caption}\nصنّف الطلب وأجب. {LANG_INSTR[lang]}"
+            f"Google Lens/تحليل الصورة حدد المنتج بهذه الأسماء: {combined_name}\n"
+            f"طلب المستخدم عنه: {caption}\n"
+            "ابحث عن نفس المنتج المحدد، ثم طبّق قواعد المتاجر والأسعار والروابط المباشرة. "
+            f"{LANG_INSTR[lang]}"
         )
-        txt,urls=search_product(request_query, lang, prompt_text=prompt_text, source_image_b64=b64, source_image_mime=mime)
-        LAST_SEARCH[from_number] = {"product": request_query}
+        txt,urls=search_product(request_query, lang, prompt_text=prompt_text)
         query = request_query
     elif combined_name:
-        txt,urls=search_product(combined_name, lang, source_image_b64=b64, source_image_mime=mime)
-        LAST_SEARCH[from_number] = {"product": combined_name}
+        txt,urls=search_product(combined_name, lang)
         query = combined_name
     else:
-        req = caption if caption else ("Identify this product and find its current price in Kuwait." if lang == "en" else "حدد هذا المنتج وابحث عن سعره الحالي في الكويت.")
         txt, urls = "", {}
-        for attempt in range(1, MAX_SEARCH_ATTEMPTS + 1):
-            extra = (
-                "Look carefully at the logo, packaging, model number and product shape. Return at least one result with a numeric KWD price and a direct product-page link."
-                if lang == "en" else
-                "دقق في الشعار والعبوة ورقم الموديل وشكل المنتج. أعطني نتيجة واحدة على الأقل بسعر رقمي د.ك ورابط صفحة المنتج المباشرة."
-            )
-            txt, urls = call_gemini(
-                [{"inline_data": {"mime_type": mime, "data": b64}}, {"text": f"{req}\n{extra}\n{LANG_INSTR[lang]}"}],
-                use_search=True,
-            )
-            urls = direct_urls_only(urls)
-            if extract_store_offers(txt) and urls:
-                break
-            print(f"IMAGE GROUNDED SEARCH ATTEMPT {attempt} FAILED")
-        name_m = re.search(r"📦\s*(.+)", txt or "")
-        product_name = name_m.group(1).strip() if name_m else ""
-        query = f"{caption} — {product_name}".strip(" —") if caption else product_name
-        if query:
-            LAST_SEARCH[from_number] = {"product": query}
+        query = caption
+
+    if query:
+        LAST_SEARCH[from_number] = {"product": query}
     if not txt:
         send_whatsapp_text(from_number,T(lang,"cant_identify"),bot_id)
         return
     result_type = send_product_result(from_number, txt, urls, bot_id, lang, query)
-    if product_name and product_name != "المنتج":
-        if result_type == "service" or (result_type == "product" and AUTO_SEND_PRODUCT_MAPS):
-            send_maps_button(from_number, query, bot_id, lang)
+    if query and (result_type == "service" or (result_type == "product" and AUTO_SEND_PRODUCT_MAPS)):
+        send_maps_button(from_number, query, bot_id, lang)
 
 def identify_image_product(msg):
     try:
@@ -1357,4 +1395,4 @@ def process_location_message(message, bot_id):
     send_whatsapp_cta(from_number, body, maps_url, bot_id, T(lang,"maps_btn"))
 
 @app.get("/")
-async def health(): return {"status":"v43 visual product matching + retries + classified maps"}
+async def health(): return {"status":"v44 Google Lens identification + preserved price search"}
