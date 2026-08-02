@@ -1,3 +1,6 @@
+coop_bot_v57_smart_cost_router.py
+
+
 # -*- coding: utf-8 -*-
 import os, re, time, base64, requests, json, asyncio, urllib.parse, hashlib, sqlite3, threading
 from collections import deque, defaultdict
@@ -6,10 +9,10 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v61-lens-exact-local-20260802"
+BUILD_ID = "v57-smart-cost-router-20260802"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
-print("LENS MODE: EXACT/VISUAL LENS RESULTS FIRST — LOCAL EXACT DOMINATES")
+print("LENS MODE: DIRECT — NO STRICT VISUAL SELECTION")
 print("=" * 70)
 
 
@@ -34,8 +37,6 @@ USER_LANG = {}
 USER_MARKET = {}
 USER_LOCATION_TS = {}
 PENDING_ONBOARDING = {}
-PENDING_GLOBAL_SEARCH = {}
-GLOBAL_PENDING_TTL = max(300, int(os.environ.get("GLOBAL_PENDING_TTL_SECONDS", "900")))
 LOCATION_TTL_SECONDS = max(3600, int(os.environ.get("LOCATION_TTL_HOURS", "72")) * 3600)
 MARKET_CTX = threading.local()
 DEFAULT_COUNTRY = os.environ.get("DEFAULT_COUNTRY", "kw").strip().lower() or "kw"
@@ -169,7 +170,7 @@ GROCERY_WORDS = [
     "برينجلز","كيتكات","نسكافيه","تونه","ماء","عصير","بسكوت","منظف","معجون","حفاض"
 ]
 
-print("STARTING COOP BOT BUILD: v60-fashion-lens-only-20260802")
+print("STARTING COOP BOT BUILD: v57-smart-cost-router-20260802")
 print(
     f"ECONOMIC CONFIG search_model={GEMINI_SEARCH_MODEL} fast_model={GEMINI_FAST_MODEL} "
     f"max_stores={MAX_STORES} search_attempts={MAX_SEARCH_ATTEMPTS} "
@@ -244,44 +245,6 @@ def is_direct_store_url(url):
     if any(re.search(p, parsed.path.lower()) for p in collection_patterns):
         return False
     return True
-
-def is_lens_product_url(url, item=None):
-    """Trust a Google Lens shopping/visual card more than our generic URL heuristics.
-
-    Some stores (notably luxury/fashion sites) use SEO product URLs without /product/.
-    A Lens result with a source, product title and price is accepted unless it is clearly
-    a search/category/brand page or a Google redirect.
-    """
-    if not url or not url.startswith(("http://", "https://")):
-        return False
-    try:
-        p = urllib.parse.urlparse(url)
-        host = p.netloc.lower().replace("www.", "")
-        path_q = (p.path + ("?" + p.query if p.query else "")).lower()
-    except Exception:
-        return False
-    if any(host == h or host.endswith("." + h) for h in (
-        "google.com", "google.com.kw", "googleusercontent.com", "gstatic.com", "bing.com", "yahoo.com"
-    )):
-        return False
-    if not p.path or p.path == "/":
-        return False
-    hard_listing = ("/search", "?q=", "/category/", "/categories/", "/collections/", "/listing")
-    if any(x in path_q for x in hard_listing):
-        return False
-    collection_patterns = (
-        r"/designers/[^/]+/shoes/?$", r"/designers/[^/]+/[^/]+/?$",
-        r"/brand/[^/]+/?$", r"/brands/[^/]+/?$", r"/mules/?$",
-        r"/shoes/?$", r"/women/?$", r"/men/?$", r"/pyjamas/?$", r"/pajamas/?$"
-    )
-    if any(re.search(x, p.path.lower()) for x in collection_patterns):
-        return False
-    # Lens product/visual card evidence: source + title, and preferably price.
-    if item:
-        if not (str(item.get("title") or "").strip() and str(item.get("source") or "").strip()):
-            return False
-    return True
-
 
 def direct_urls_only(urls):
     return {name: url for name, url in (urls or {}).items() if is_direct_store_url(url)}
@@ -534,11 +497,6 @@ MSG = {
         "maps_body_loc": "📍 بحثك الأخير كان عن ({p})\n\nجهزت لك أقرب الأماكن حولك، اضغط الزر وافتح الخريطة 👇",
         "no_saved_product": "ما عندي منتج محفوظ حالياً 😅. ابحث عن منتج أول، وبعدها أدلك على أقرب مكان يبيعه!",
         "lang_saved": "تمام، بكلمك عربي من هني ورايح 🇰🇼\nدز صورة منتج أو اكتب اسمه وأنا حاضر!",
-        "ask_global": "ما لقيت نتيجة محلية مؤكدة لهذا المنتج في موقعك الحالي. تبي أدور لك في المتاجر العالمية؟ 🌍",
-        "global_yes": "نعم، ابحث عالميًا 🌍",
-        "global_no": "لا، محلي فقط",
-        "global_searching": "🌍 أدور لك عالميًا على أفضل النتائج المطابقة...",
-        "global_none": "حتى بالبحث العالمي ما لقيت نتيجة مؤكدة ومباشرة لهذا المنتج.",
     },
     "en": {
         "identifying": "One sec.. identifying the product and finding you the best deal!",
@@ -552,11 +510,6 @@ MSG = {
         "maps_body_loc": "📍 Your last search was ({p})\n\nI've lined up the closest places around you. Tap the button to open the map 👇",
         "no_saved_product": "I don't have a saved product yet 😅. Search for a product first, then I'll point you to the nearest store!",
         "lang_saved": "Great, I'll speak English with you from now on 🇬🇧\nSend a product photo or type its name and I'm on it!",
-        "ask_global": "I couldn't find a verified local result in your current market. Search international stores instead? 🌍",
-        "global_yes": "Yes, search globally 🌍",
-        "global_no": "No, local only",
-        "global_searching": "🌍 Searching international stores for the closest matches...",
-        "global_none": "I still couldn't find a verified direct result globally.",
     },
 }
 
@@ -776,8 +729,7 @@ def _lens_items(data):
                 "link": link,
                 "source": source,
                 "position": int(x.get("position") or len(items) + 1),
-                "section": key,
-                "exact": key == "exact_matches" or bool(x.get("exact_match")),
+                "exact": bool(x.get("exact_matches")),
                 "thumbnail": (x.get("thumbnail") or x.get("image") or "").strip(),
                 "image": (x.get("image") or x.get("thumbnail") or "").strip(),
                 "price": ((x.get("price") or {}).get("value") if isinstance(x.get("price"), dict) else str(x.get("price") or "")),
@@ -861,15 +813,8 @@ def google_lens_lookup(image_b64, mime_type, lang="ar", query_hint=""):
             title = (m.get("title") or "").strip()
             if not title or generic.match(title):
                 continue
-            # A local exact/visual match with a shopping price is the strongest evidence.
-            score = 2000 if m.get("exact") else 0
-            if is_local_lens_result(m):
-                score += 1500
-            if m.get("price") or m.get("price_value") not in (None, ""):
-                score += 700
-            if m.get("section") == "visual_matches":
-                score += 250
-            score += max(0, 300 - int(m.get("position") or 99) * 12)
+            score = 1000 if m.get("exact") else 0
+            score += max(0, 200 - int(m.get("position") or 99) * 10)
             score += min(len(title), 120) / 10
             if m.get("thumbnail") or m.get("image"):
                 score += 10
@@ -928,8 +873,6 @@ def _meaningful_lens_tokens(text):
     stop = {
         "women","woman","men","man","size","new","used","authentic","leather","جلد",
         "mules","mule","shoes","shoe","slippers","slipper","sandals","sandal",
-        "shirt","blouse","top","dress","pajama","pajamas","pyjama","pyjamas",
-        "nightwear","sleepwear","set","women's","womens","ملابس","قميص","بيجامه","بيجامة",
         "for","the","and","in","with","kw","kuwait","uae","كويت","نسائي","رجالي",
     }
     out=[]
@@ -959,21 +902,12 @@ def _lens_offer_compatible(info, url, lens_context):
         if brand in chosen_title and not any(normalize_ar(a) in candidate_hay for a in aliases):
             return False
 
-    # Identity tokens are mandatory. For fashion, one generic overlap is not enough:
-    # require either the brand/model token, or two discriminative tokens from Lens.
+    # At least one discriminative Lens token must occur in the candidate itself.
     desired_tokens = _meaningful_lens_tokens(chosen_title)
     descriptor_tokens = [t for t in desired_tokens if t not in ("bottega", "veneta")]
-    matched_tokens = [t for t in descriptor_tokens if t in candidate_hay]
-    fashion_words = (
-        "shirt","blouse","dress","pajama","pyjama","nightwear","sleepwear","satin",
-        "printed","striped","قميص","فستان","بيجامه","بيجامة","ساتان","مخطط"
-    )
-    is_fashion = any(normalize_ar(w) in chosen_title for w in fashion_words)
-    if descriptor_tokens:
-        needed = 2 if is_fashion and len(descriptor_tokens) >= 2 else 1
-        if len(matched_tokens) < needed:
-            print(f"LENS TOKEN REJECT: wanted={descriptor_tokens} matched={matched_tokens} candidate={candidate_hay[:180]}")
-            return False
+    if descriptor_tokens and not any(t in candidate_hay for t in descriptor_tokens):
+        print(f"LENS TOKEN REJECT: wanted={descriptor_tokens} candidate={candidate_hay[:180]}")
+        return False
 
     heel = (sig.get("heel") or "UNKNOWN").upper()
     high_words = ("high heel", "high heels", "stiletto", "kitten heel", "heeled", "pump", "كعب عالي", "كعب ذهبي")
@@ -1501,7 +1435,7 @@ def is_local_lens_result(item):
     city = str(m.get("city") or "").lower()
     return bool((country_name and country_name in hay) or (city and city in hay))
 
-def lens_priced_offers(lens_context, lang="ar", local_only=True):
+def lens_priced_offers(lens_context, lang="ar"):
     """Use Google Lens product cards directly.
 
     Lens already supplies a visual match, direct product URL, displayed price and stock state.
@@ -1519,9 +1453,7 @@ def lens_priced_offers(lens_context, lang="ar", local_only=True):
         price_value = item.get("price_value")
         currency = (item.get("currency") or "").strip()
         in_stock = item.get("in_stock")
-        if not title or not is_lens_product_url(url, item) or url in used_urls:
-            continue
-        if local_only and not is_local_lens_result(item):
+        if not title or not is_direct_store_url(url) or url in used_urls:
             continue
         if in_stock is False:
             print(f"LENS PRODUCT OOS SKIP: {title} -> {url}")
@@ -1555,7 +1487,6 @@ def lens_priced_offers(lens_context, lang="ar", local_only=True):
             "title": title,
             "position": int(item.get("position") or i),
             "exact": bool(item.get("exact")),
-            "section": item.get("section") or "",
             "image_url": item.get("image") or item.get("thumbnail") or "",
         }
         used_urls.add(url)
@@ -1565,14 +1496,13 @@ def lens_priced_offers(lens_context, lang="ar", local_only=True):
         key=lambda kv: (
             0 if kv[1].get("is_local") else 1,
             0 if kv[1].get("exact") else 1,
-            0 if kv[1].get("section") == "visual_matches" else 1,
             kv[1].get("position", 999),
         ),
     )
     return dict(ranked[:MAX_STORES])
 
 
-def verify_lens_direct_matches(lens_context, local_only=True):
+def verify_lens_direct_matches(lens_context):
     """Fallback verifier for Lens URLs that had no price card."""
     if not lens_context:
         return {}
@@ -1581,9 +1511,7 @@ def verify_lens_direct_matches(lens_context, local_only=True):
         url = (m.get("link") or "").strip()
         title = (m.get("title") or "").strip()
         source = (m.get("source") or f"Lens {i}").strip()
-        if not title or not is_lens_product_url(url, m):
-            continue
-        if local_only and not is_local_lens_result(m):
+        if not title or not is_direct_store_url(url):
             continue
         candidates[source] = url
     verified = verify_offers(candidates, (lens_context.get("chosen") or {}).get("title", ""))
@@ -1592,7 +1520,7 @@ def verify_lens_direct_matches(lens_context, local_only=True):
     return verified
 
 
-def _new_layer_search(query, lang, prompt_text=None, source_image_b64=None, source_image_mime=None, lens_context=None, allow_global=False):
+def _new_layer_search(query, lang, prompt_text=None, source_image_b64=None, source_image_mime=None, lens_context=None):
     # نتائج الصور تعتمد على الصورة نفسها، لذلك لا نستخدم كاش النص وحده.
     cached = None if source_image_b64 else cache_get(query, lang)
     if cached:
@@ -1600,7 +1528,7 @@ def _new_layer_search(query, lang, prompt_text=None, source_image_b64=None, sour
 
     # For image requests, use the product cards returned by Google Lens itself first.
     # This preserves the many visually close results Google shows instead of demanding one exact SKU.
-    lens_cards = lens_priced_offers(lens_context, lang, local_only=not allow_global)
+    lens_cards = lens_priced_offers(lens_context, lang)
     if lens_cards:
         display_name = (lens_context.get("chosen") or {}).get("title") or query
         lines = [f"📦 {display_name}", ""]
@@ -1610,11 +1538,11 @@ def _new_layer_search(query, lang, prompt_text=None, source_image_b64=None, sour
             shown_price = info.get("price_text") or format_price(info.get("price"))
             lines.append(f"{prefix} {name} — {shown_price}")
             new_urls[name] = info["url"]
-        print(f"LENS EXACT/VISUAL CARDS USED: {list(new_urls)}")
+        print(f"LENS PRODUCT CARDS USED: {list(new_urls)}")
         return "\n".join(lines), new_urls
 
     # If Lens returned direct pages without price metadata, try our HTML verifier once.
-    lens_verified = verify_lens_direct_matches(lens_context, local_only=not allow_global)
+    lens_verified = verify_lens_direct_matches(lens_context)
     if lens_verified:
         sorted_v = sorted(lens_verified.items(), key=lambda x: x[1]["price"])
         display_name = (lens_context.get("chosen") or {}).get("title") or query
@@ -1784,26 +1712,15 @@ def _result_offers(txt, urls, layer, lens_context=None):
     return out
 
 
-def _old_layer_search(query, lang, prompt_text=None, lens_context=None, allow_global=False):
+def _old_layer_search(query, lang, prompt_text=None, lens_context=None):
     """Second layer: the broad multi-query search logic from the older bot."""
     if not OLD_LAYER_ENABLED:
         return "", {}
-    if allow_global:
-        base_prompt = (
-            f"ابحث عالميًا عن {query}. اقبل المتاجر الدولية الموثوقة فقط، مع سعر رقمي واضح ورابط صفحة المنتج المباشر، واذكر العملة الأصلية. {LANG_INSTR[lang]}"
-        )
-    else:
-        base_prompt = prompt_text or (
-            f"ابحث عن {query} في {current_market().get('country_name', 'Kuwait')}. متوفر فقط وبسعر رقمي واضح ورابط صفحة منتج مباشر. {LANG_INSTR[lang]}"
-        )
+    base_prompt = prompt_text or (
+        f"ابحث عن {query} في {current_market().get('country_name', 'Kuwait')}. متوفر فقط وبسعر رقمي واضح ورابط صفحة منتج مباشر. {LANG_INSTR[lang]}"
+    )
     market_name = current_market().get("country_name", "Kuwait")
-    if allow_global:
-        variants = [
-            base_prompt,
-            f"{query} buy online worldwide exact product direct page price {LANG_INSTR[lang]}",
-            f"{query} international stores exact visual match direct product link {LANG_INSTR[lang]}",
-        ]
-    elif current_market().get("country") == "kw":
+    if current_market().get("country") == "kw":
         variants = [
             base_prompt,
             f"{query} افضل سعر في الكويت Xcite Eureka Blink Noon Jarir Lulu Carrefour Best Al Yousifi جمعية دوت كوم - قارن الاسعار {LANG_INSTR[lang]}",
@@ -1917,7 +1834,7 @@ def _merge_two_layers(query, lang, new_result, old_result, lens_context=None):
     return "\n".join(lines), urls
 
 
-def search_product(query, lang, prompt_text=None, source_image_b64=None, source_image_mime=None, lens_context=None, allow_global=False):
+def search_product(query, lang, prompt_text=None, source_image_b64=None, source_image_mime=None, lens_context=None):
     """Two-layer search: new Lens/priority method first, old broad method second, then rank both."""
     cached = None if source_image_b64 or lens_context else cache_get(query, lang)
     if cached:
@@ -1926,7 +1843,7 @@ def search_product(query, lang, prompt_text=None, source_image_b64=None, source_
     new_result = _new_layer_search(
         query, lang, prompt_text=prompt_text,
         source_image_b64=source_image_b64, source_image_mime=source_image_mime,
-        lens_context=lens_context, allow_global=allow_global,
+        lens_context=lens_context,
     )
     print(f"NEW LAYER DONE offers={len(extract_store_offers(new_result[0])) if new_result[0] else 0}")
 
@@ -1934,14 +1851,7 @@ def search_product(query, lang, prompt_text=None, source_image_b64=None, source_
     if new_result[0] and (is_service_answer(new_result[0]) or is_informational_answer(new_result[0])):
         return new_result
 
-    # For fashion identified by Lens, generic old-layer results are dangerous (e.g. any pajama).
-    # Keep only exact/local Lens results. If none exist, the caller asks before global search.
-    if lens_context and lens_context.get("force_lens_only"):
-        mode = "GLOBAL" if allow_global else "LOCAL"
-        print(f"OLD LAYER SKIPPED: FASHION LENS-ONLY {mode} MODE")
-        return new_result
-
-    old_result = _old_layer_search(query, lang, prompt_text=prompt_text, lens_context=lens_context, allow_global=allow_global)
+    old_result = _old_layer_search(query, lang, prompt_text=prompt_text, lens_context=lens_context)
     print(f"OLD LAYER DONE offers={len(extract_store_offers(old_result[0])) if old_result[0] else 0}")
     final_txt, final_urls = _merge_two_layers(query, lang, new_result, old_result, lens_context)
     if final_txt and not source_image_b64 and not lens_context:
@@ -2089,53 +1999,10 @@ async def receive(request: Request, background_tasks: BackgroundTasks):
     except Exception as e: print(f"webhook err {e}")
     return {"status":"ok"}
 
-
-
-def _store_pending_global(phone, bot_id, lang, query, lens_context, prompt_text=None):
-    PENDING_GLOBAL_SEARCH[phone] = {
-        "bot_id": bot_id, "lang": lang, "query": query,
-        "lens_context": lens_context or {}, "prompt_text": prompt_text,
-        "ts": time.time(),
-    }
-
-def _pop_pending_global(phone):
-    item = PENDING_GLOBAL_SEARCH.pop(phone, None)
-    if not item:
-        return None
-    if time.time() - item.get("ts", 0) > GLOBAL_PENDING_TTL:
-        return None
-    return item
-
-def send_global_choice(phone, bot_id, lang):
-    send_whatsapp_buttons(phone, T(lang, "ask_global"), [
-        {"id": "global_yes", "title": T(lang, "global_yes")[:20]},
-        {"id": "global_no", "title": T(lang, "global_no")[:20]},
-    ], bot_id)
-
-def run_global_search(phone, item):
-    bot_id = item["bot_id"]; lang = item["lang"]; query = item["query"]
-    send_whatsapp_text(phone, T(lang, "global_searching"), bot_id)
-    txt, urls = search_product(
-        query, lang, prompt_text=item.get("prompt_text"),
-        lens_context=item.get("lens_context"), allow_global=True,
-    )
-    if not txt or not extract_store_offers(txt):
-        send_whatsapp_text(phone, T(lang, "global_none"), bot_id)
-        return
-    send_product_result(phone, txt, urls, bot_id, lang, query)
-
 def process_interactive_message(message, bot_id):
     from_number=message["from"]
     reply=(message.get("interactive") or {}).get("button_reply") or {}
     btn_id=reply.get("id","")
-    if btn_id == "global_yes":
-        item = _pop_pending_global(from_number)
-        if item:
-            run_global_search(from_number, item)
-        return
-    if btn_id == "global_no":
-        PENDING_GLOBAL_SEARCH.pop(from_number, None)
-        return
     if btn_id not in ("lang_ar","lang_en"):
         return
     lang = "ar" if btn_id=="lang_ar" else "en"
@@ -2205,25 +2072,6 @@ def identity_candidates_agree(vision_name, lens_title):
     return len(inter) >= 2 and (len(inter) / max(1, min(len(a), len(b)))) >= 0.45
 
 
-
-
-def is_fashion_identity(vision_name, caption=""):
-    """Return True for any apparel/fashion item where exact visual design matters."""
-    q = normalize_ar(f"{vision_name or ''} {caption or ''}")
-    fashion_terms = (
-        "ملابس", "قميص", "قميص نسائي", "بلوزه", "بلوزة", "توب", "فستان",
-        "بنطلون", "تنوره", "تنورة", "جاكيت", "معطف", "عبايه", "عباية",
-        "بيجامه", "بيجامة", "بجامه", "بجامة", "ملابس نوم", "روب", "طقم نسائي",
-        "ساتان", "مخطط", "مخططه", "مخططة", "مطبوع", "موضة", "ازياء", "أزياء",
-        "حذاء", "شبشب", "صندل", "نعال", "سنيكر", "شنطه", "شنطة", "حقيبه", "حقيبة",
-        "shirt", "women's shirt", "womens shirt", "blouse", "top", "dress", "skirt",
-        "pants", "trousers", "jacket", "coat", "abaya", "pajama", "pajamas",
-        "pyjama", "pyjamas", "nightwear", "sleepwear", "robe", "satin", "printed",
-        "striped", "fashion", "apparel", "clothing", "shoe", "mule", "slipper",
-        "sandal", "sneaker", "bag", "handbag", "co-ord", "coord"
-    )
-    return any(term in q for term in fashion_terms)
-
 def should_use_google_lens(vision_name, caption=""):
     """Route only visually-led products to Lens.
 
@@ -2234,10 +2082,6 @@ def should_use_google_lens(vision_name, caption=""):
     raw = f"{vision_name or ''} {caption or ''}".strip()
     q = normalize_ar(raw)
     if not vision_name:
-        return True
-
-    # Fashion is always routed to Lens before any model/package shortcut.
-    if is_fashion_identity(vision_name, caption):
         return True
 
     uncertain = (
@@ -2266,13 +2110,7 @@ def should_use_google_lens(vision_name, caption=""):
         "اثاث", "كرسي", "طاوله", "ديكور", "لعبه", "سياره", "قطعه غيار",
         "shoe", "mule", "slipper", "sandal", "sneaker", "dress", "shirt",
         "jacket", "cap", "hat", "bag", "handbag", "glasses", "sunglasses",
-        "watch", "ring", "necklace", "furniture", "chair", "table", "decor",
-        # Fashion terms that the old router missed. These must always use Lens because
-        # colour/pattern/cut matter more than a generic Vision label.
-        "بيجامه", "بيجامة", "بجامه", "بجامة", "ملابس نوم", "روب", "بلوزه", "بلوزة",
-        "توب", "طقم نسائي", "قميص نسائي", "ساتان", "مخطط", "مخططه", "مخططة",
-        "pajama", "pajamas", "pyjama", "pyjamas", "nightwear", "sleepwear",
-        "blouse", "top", "co-ord", "coord", "satin", "printed", "striped"
+        "watch", "ring", "necklace", "furniture", "chair", "table", "decor"
     )
     return any(x in q for x in visual_categories)
 
@@ -2340,25 +2178,17 @@ def process_single_image(message,bot_id,lang="ar"):
     # 2) Lens only for visually-led categories, generic/failed recognition, or no readable identity.
     # 3) Judge only when both engines disagree; skip it when they already agree.
     vision_name = identify_product_with_retry(b64, mime, lang)
-    force_fashion_lens = is_fashion_identity(vision_name, caption)
-    use_lens = force_fashion_lens or should_use_google_lens(vision_name, caption)
+    use_lens = should_use_google_lens(vision_name, caption)
     lens = {"aliases": [], "matches": [], "query": ""}
     active_lens = None
     identity_source = "VISION"
     combined_name = vision_name
 
-    print(f"SMART ROUTER: vision={vision_name!r} use_lens={use_lens} force_fashion={force_fashion_lens}")
+    print(f"SMART ROUTER: vision={vision_name!r} use_lens={use_lens}")
     if use_lens:
         lens = google_lens_lookup(b64, mime, lang, caption or vision_name)
         lens_title = ((lens.get("chosen") or {}).get("title") or lens.get("query") or "").strip()
-        if force_fashion_lens and lens_title:
-            # Exact design/pattern matters in fashion. Never downgrade to the generic Vision label.
-            lens["force_lens_only"] = True
-            combined_name = lens_title
-            active_lens = lens
-            identity_source = "LENS_FASHION_FORCED"
-            print(f"FASHION LENS FORCED: {lens_title}")
-        elif lens_title and vision_name:
+        if lens_title and vision_name:
             if identity_candidates_agree(vision_name, lens_title):
                 combined_name = vision_name
                 active_lens = lens
@@ -2396,12 +2226,8 @@ def process_single_image(message,bot_id,lang="ar"):
 
     if query:
         LAST_SEARCH[from_number] = {"product": query}
-    if not txt or not extract_store_offers(txt):
-        if active_lens and (active_lens.get("matches") or []):
-            _store_pending_global(from_number, bot_id, lang, query, active_lens, prompt_text if caption else None)
-            send_global_choice(from_number, bot_id, lang)
-        else:
-            send_whatsapp_text(from_number,T(lang,"cant_identify"),bot_id)
+    if not txt:
+        send_whatsapp_text(from_number,T(lang,"cant_identify"),bot_id)
         return
     result_type = send_product_result(from_number, txt, urls, bot_id, lang, query)
     if query and (result_type == "service" or (result_type == "product" and AUTO_SEND_PRODUCT_MAPS)):
@@ -2503,4 +2329,4 @@ def process_location_message(message, bot_id):
     route_pending_after_location(from_number)
 
 @app.get("/")
-async def health(): return {"status":"v61 LENS EXACT LOCAL FIRST", "build":BUILD_ID, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
+async def health(): return {"status":"v57 SMART COST ROUTER + LOCATION EVERY 3 DAYS", "build":BUILD_ID, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
