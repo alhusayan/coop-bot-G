@@ -6,6 +6,12 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
+BUILD_ID = "v48-direct-20260802"
+print("=" * 70)
+print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
+print("LENS MODE: DIRECT — NO STRICT VISUAL SELECTION")
+print("=" * 70)
+
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
@@ -140,7 +146,7 @@ def has_model_token(a, b):
 
 def cache_key(query, lang):
     norm = re.sub(r"[^\w\u0600-\u06FF]+", "", normalize_ar(query))
-    return hashlib.sha256(f"v47|{norm}|{lang}".encode()).hexdigest()
+    return hashlib.sha256(f"v48|{norm}|{lang}".encode()).hexdigest()
 
 def cache_ttl_for(query, txt=""):
     q_norm = normalize_ar(query)
@@ -1531,4 +1537,4 @@ def process_location_message(message, bot_id):
     send_whatsapp_cta(from_number, body, maps_url, bot_id, T(lang,"maps_btn"))
 
 @app.get("/")
-async def health(): return {"status":"v47 Google Lens identification + preserved price search"}
+async def health(): return {"status":"v48 LENS DIRECT DIAGNOSTIC", "build":"v48-direct-20260802"}
