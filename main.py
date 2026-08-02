@@ -123,7 +123,7 @@ def has_model_token(a, b):
 
 def cache_key(query, lang):
     norm = re.sub(r"[^\w\u0600-\u06FF]+", "", normalize_ar(query))
-    return hashlib.sha256(f"v40|{norm}|{lang}".encode()).hexdigest()
+    return hashlib.sha256(f"v41|{norm}|{lang}".encode()).hexdigest()
 
 def cache_ttl_for(query, txt=""):
     q_norm = normalize_ar(query)
@@ -875,6 +875,28 @@ def _query_candidates(query):
     return unique or [query]
 
 
+def is_no_result_answer(txt):
+    """يميز رسائل عدم العثور حتى لا تُرسل للمستخدم قبل استنفاد كل المحاولات."""
+    t = normalize_ar(txt or "")
+    phrases = (
+        "لم يتم العثور", "لم اعثر", "ما لقيت", "تعذر العثور", "لا توجد نتائج",
+        "غير موجود ضمن نتائج البحث", "لم اجد", "عذرا",
+        "could not find", "couldn't find", "no results", "not found",
+        "unable to find", "was not found", "couldn’t find"
+    )
+    return any(normalize_ar(p) in t for p in phrases)
+
+
+def is_informational_answer(txt):
+    """يسمح فقط بالإجابة المعلوماتية الحقيقية، وليس اعتذار عدم العثور."""
+    if not txt or is_no_result_answer(txt):
+        return False
+    if extract_store_offers(txt) or is_service_answer(txt) or "📦" in txt:
+        return False
+    # أسئلة معلوماتية غالباً تحتوي شرحاً أطول ولا تحتوي لغة فشل البحث.
+    return len(txt.strip()) >= 80
+
+
 def search_product(query, lang, prompt_text=None):
     cached = cache_get(query, lang)
     if cached:
@@ -897,13 +919,13 @@ def search_product(query, lang, prompt_text=None):
         if attempt == 1:
             search_scope = (
                 f"ابحث حصراً أولاً داخل هذه المتاجر وبنفس ترتيب الأولوية: {stores_hint}. "
-                "لا تعرض أي متجر خارج هذه القائمة في هذه المحاولة. "
+                "لا تعرض أي متجر خارج هذه القائمة في هذه المحاولة، وإذا لم تجد فلا تكتب اعتذاراً مطولاً؛ أرجع بلا نتائج لننتقل للبحث العام. "
             )
         else:
             search_scope = (
                 f"لم توجد نتيجة صالحة في متاجر الأولوية ({stores_hint}). "
-                "اعمل الآن بحثاً عاماً في متاجر الكويت المعروفة والمتخصصة فقط، "
-                "وتجنب الإعلانات المبوبة والمتاجر المجهولة. "
+                "اعمل الآن بحثاً عاماً واسعاً في جميع متاجر الكويت التي تبيع المنتج، بما فيها المتاجر المتخصصة، "
+                "مع تجنب الإعلانات المبوبة فقط مثل OpenSooq. لا تستبعد المتجر لمجرد أنه ليس ضمن القائمة الأولى. "
             )
         current_prompt = (
             f"{context}ابحث في الكويت عن هذا الاسم تحديداً: {search_term}. "
@@ -923,8 +945,12 @@ def search_product(query, lang, prompt_text=None):
             if len(txt) >= 40:
                 cache_put(query, lang, txt, urls)
             return txt, urls
-        if txt and not offers and "📦" not in txt:
+        # لا نرسل اعتذار Gemini مباشرة؛ نكمل باقي المحاولات والبحث العام.
+        if is_informational_answer(txt):
             return txt, urls
+        if is_no_result_answer(txt) or (txt and not offers):
+            print(f"SEARCH ATTEMPT {attempt} NO RESULT: {search_term}")
+            continue
 
         if txt and offers and urls:
             verified = verify_offers(urls, search_term)
@@ -1225,4 +1251,4 @@ def process_location_message(message, bot_id):
     send_whatsapp_cta(from_number, body, maps_url, bot_id, T(lang,"maps_btn"))
 
 @app.get("/")
-async def health(): return {"status":"v40 retries + classified maps"}
+async def health(): return {"status":"v41 retries + classified maps"}
