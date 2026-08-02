@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v49-exact-guard-20260802"
+BUILD_ID = "v53-two-layer-search-20260802"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("LENS MODE: DIRECT — NO STRICT VISUAL SELECTION")
@@ -35,6 +35,8 @@ PENDING_IMAGES = defaultdict(lambda: {"images": [], "bot_id": ""})
 BUFFER_SECONDS = 4
 RESOLVER = ThreadPoolExecutor(max_workers=8)
 WORKERS = ThreadPoolExecutor(max_workers=5)
+OLD_SEARCH_POOL = ThreadPoolExecutor(max_workers=8)
+OLD_LAYER_DUPLICATES = max(1, int(os.environ.get("OLD_LAYER_DUPLICATES", "2")))
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
 def env_bool(name, default=False):
@@ -42,6 +44,8 @@ def env_bool(name, default=False):
     if value is None:
         return default
     return value.strip().lower() in ("1", "true", "yes", "on")
+
+OLD_LAYER_ENABLED = env_bool("OLD_LAYER_ENABLED", True)
 
 SEARCH_CACHE = {}
 # كاش مختلف حسب نوع الطلب: المنتجات 12 ساعة، التموينات 4 ساعات، الخدمات 7 أيام.
@@ -73,7 +77,7 @@ GROCERY_WORDS = [
     "برينجلز","كيتكات","نسكافيه","تونه","ماء","عصير","بسكوت","منظف","معجون","حفاض"
 ]
 
-print("STARTING COOP BOT BUILD: v52-kw-priority-fils-20260802")
+print("STARTING COOP BOT BUILD: v53-two-layer-search-20260802")
 print(
     f"ECONOMIC CONFIG search_model={GEMINI_SEARCH_MODEL} fast_model={GEMINI_FAST_MODEL} "
     f"max_stores={MAX_STORES} search_attempts={MAX_SEARCH_ATTEMPTS} "
@@ -1360,7 +1364,7 @@ def verify_lens_direct_matches(lens_context):
     return verified
 
 
-def search_product(query, lang, prompt_text=None, source_image_b64=None, source_image_mime=None, lens_context=None):
+def _new_layer_search(query, lang, prompt_text=None, source_image_b64=None, source_image_mime=None, lens_context=None):
     # نتائج الصور تعتمد على الصورة نفسها، لذلك لا نستخدم كاش النص وحده.
     cached = None if source_image_b64 else cache_get(query, lang)
     if cached:
@@ -1496,6 +1500,199 @@ def search_product(query, lang, prompt_text=None, source_image_b64=None, source_
         print(f"SEARCH ATTEMPT {attempt} FAILED term={search_term}")
 
     return "", {}
+
+
+def _extract_numeric_price(line):
+    """Extract a KWD price whether currency appears before or after the number."""
+    text = str(line or "").replace(",", "")
+    patterns = (
+        r"(?:KWD|د\.ك|KD)\s*([0-9]+(?:\.[0-9]{1,3})?)",
+        r"([0-9]+(?:\.[0-9]{1,3})?)\s*(?:KWD|د\.ك|KD)",
+        r"—\s*([0-9]+(?:\.[0-9]{1,3})?)",
+    )
+    for pattern in patterns:
+        m = re.search(pattern, text, flags=re.I)
+        if m:
+            try:
+                return float(m.group(1))
+            except Exception:
+                pass
+    return None
+
+
+def _result_offers(txt, urls, layer, lens_context=None):
+    """Convert a formatted bot result into comparable offer records."""
+    out = []
+    if not txt:
+        return out
+    title = product_title(txt, "").replace("📦", "").strip()
+    for offer in extract_store_offers(txt):
+        url = match_url(offer.get("name", ""), urls or {})
+        if not is_direct_store_url(url):
+            continue
+        price = _extract_numeric_price(offer.get("line", ""))
+        if price is None or price <= 0:
+            continue
+        host = urllib.parse.urlparse(url).netloc.lower().replace("www.", "")
+        item = {
+            "name": offer.get("name", "").strip(),
+            "url": url,
+            "price": price,
+            "title": title,
+            "line": offer.get("line", ""),
+            "layer": layer,
+            "host": host,
+            "is_kuwait": host.endswith(".kw") or host.endswith(".com.kw") or any(h in (host + " " + offer.get("name", "").lower()) for h in KUWAIT_STORE_HINTS),
+            "exact": False,
+            "lens_position": 999,
+        }
+        if lens_context:
+            for m in lens_context.get("matches") or []:
+                if (m.get("link") or "").strip() == url:
+                    item["exact"] = bool(m.get("exact"))
+                    item["lens_position"] = int(m.get("position") or 999)
+                    break
+        out.append(item)
+    return out
+
+
+def _old_layer_search(query, lang, prompt_text=None, lens_context=None):
+    """Second layer: the broad multi-query search logic from the older bot."""
+    if not OLD_LAYER_ENABLED:
+        return "", {}
+    base_prompt = prompt_text or (
+        f"ابحث عن {query} في الكويت. متوفر فقط وبسعر رقمي واضح ورابط صفحة منتج مباشر. {LANG_INSTR[lang]}"
+    )
+    variants = [
+        base_prompt,
+        f"{query} افضل سعر في الكويت Xcite Eureka Blink Noon Jarir Lulu Carrefour Best Al Yousifi جمعية دوت كوم - قارن الاسعار {LANG_INSTR[lang]}",
+        f"{query} شراء اونلاين الكويت سعر متوفر متجر كويتي صفحة المنتج مباشرة {LANG_INSTR[lang]}",
+    ]
+    futures = []
+    for variant in variants:
+        for _ in range(OLD_LAYER_DUPLICATES):
+            futures.append(OLD_SEARCH_POOL.submit(call_gemini, [{"text": variant}]))
+    results = []
+    for future in futures:
+        try:
+            txt, urls = future.result(timeout=90)
+            urls = direct_urls_only(urls)
+            if txt and urls and extract_store_offers(txt):
+                results.append((txt, urls))
+        except Exception as exc:
+            print(f"OLD LAYER FUTURE ERR: {exc}")
+    if not results:
+        print("OLD LAYER: no usable result")
+        return "", {}
+
+    merged_urls = {}
+    best_txt = max(results, key=lambda r: (len(extract_store_offers(r[0])), len(r[1])))[0]
+    for _, urls in results:
+        for name, url in urls.items():
+            if name not in merged_urls and url not in merged_urls.values():
+                merged_urls[name] = url
+
+    verified = verify_offers(merged_urls, query)
+    if lens_context:
+        verified = filter_verified_with_lens(verified, lens_context)
+    if not verified:
+        print("OLD LAYER: no verified direct offers")
+        return "", {}
+
+    sorted_v = sorted(verified.items(), key=lambda x: x[1]["price"])
+    title = product_title(best_txt, query)
+    currency = "KWD" if lang == "en" else "د.ك"
+    lines = [title, ""]
+    new_urls = {}
+    for i, (name, info) in enumerate(sorted_v[:max(MAX_STORES * 2, 6)]):
+        prefix = "✅" if i == 0 else "•"
+        lines.append(f"{prefix} {name} — {format_price(info['price'])} {currency}")
+        new_urls[name] = info["url"]
+    print(f"OLD LAYER VERIFIED: {list(new_urls)}")
+    return "\n".join(lines), new_urls
+
+
+def _store_priority_value(name, url):
+    text = f"{name} {url}".lower()
+    priorities = (
+        "jm3eia", "جمعية", "xcite", "eureka", "best", "yousifi", "blink",
+        "jarir", "lulu", "carrefour", "noon", "intersport", "decathlon",
+        "boutiqaat", "boots", "yiaco", "levelshoes", "future", "talabat", "keeta"
+    )
+    for i, token in enumerate(priorities):
+        if token in text:
+            return len(priorities) - i
+    return 0
+
+
+def _merge_two_layers(query, lang, new_result, old_result, lens_context=None):
+    new_txt, new_urls = new_result
+    old_txt, old_urls = old_result
+    new_offers = _result_offers(new_txt, new_urls, "new", lens_context)
+    old_offers = _result_offers(old_txt, old_urls, "old", lens_context)
+    all_offers = new_offers + old_offers
+    if not all_offers:
+        return new_result if new_txt else old_result
+
+    # Deduplicate exact URLs first, then same store+price. Prefer Lens/new-layer metadata.
+    dedup = {}
+    for offer in all_offers:
+        key = offer["url"].split("?")[0].rstrip("/").lower()
+        previous = dedup.get(key)
+        if previous is None:
+            dedup[key] = offer
+        elif offer["layer"] == "new" and previous["layer"] != "new":
+            dedup[key] = offer
+
+    offers = list(dedup.values())
+    def rank(o):
+        quality = 0
+        quality += 100 if o.get("exact") else 0
+        quality += 40 if o.get("is_kuwait") else 0
+        quality += _store_priority_value(o.get("name", ""), o.get("url", "")) * 2
+        quality += 12 if o.get("layer") == "new" else 8
+        quality += max(0, 20 - min(int(o.get("lens_position", 999)), 20))
+        return (-quality, o.get("price", 10**9))
+    offers.sort(key=rank)
+    chosen = offers[:MAX_STORES]
+
+    display_title = ((lens_context or {}).get("chosen") or {}).get("title") or \
+                    product_title(new_txt, "").replace("📦", "").strip() or \
+                    product_title(old_txt, query).replace("📦", "").strip() or query
+    currency = "KWD" if lang == "en" else "د.ك"
+    lines = [f"📦 {display_title}", ""]
+    urls = {}
+    for i, offer in enumerate(chosen):
+        prefix = "✅" if i == 0 else "•"
+        lines.append(f"{prefix} {offer['name']} — {format_price(offer['price'])} {currency}")
+        urls[offer["name"]] = offer["url"]
+    print("TWO LAYER FINAL:", [(o["layer"], o["name"], o["price"]) for o in chosen])
+    return "\n".join(lines), urls
+
+
+def search_product(query, lang, prompt_text=None, source_image_b64=None, source_image_mime=None, lens_context=None):
+    """Two-layer search: new Lens/priority method first, old broad method second, then rank both."""
+    cached = None if source_image_b64 or lens_context else cache_get(query, lang)
+    if cached:
+        return cached
+
+    new_result = _new_layer_search(
+        query, lang, prompt_text=prompt_text,
+        source_image_b64=source_image_b64, source_image_mime=source_image_mime,
+        lens_context=lens_context,
+    )
+    print(f"NEW LAYER DONE offers={len(extract_store_offers(new_result[0])) if new_result[0] else 0}")
+
+    # Services and genuine informational answers should not be forced through product comparison.
+    if new_result[0] and (is_service_answer(new_result[0]) or is_informational_answer(new_result[0])):
+        return new_result
+
+    old_result = _old_layer_search(query, lang, prompt_text=prompt_text, lens_context=lens_context)
+    print(f"OLD LAYER DONE offers={len(extract_store_offers(old_result[0])) if old_result[0] else 0}")
+    final_txt, final_urls = _merge_two_layers(query, lang, new_result, old_result, lens_context)
+    if final_txt and not source_image_b64 and not lens_context:
+        cache_put(query, lang, final_txt, final_urls)
+    return final_txt, final_urls
 
 def extract_products(text):
     text=re.sub(r'^[•\-\*\d\.\)\s]+','',text,flags=re.M)
