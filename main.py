@@ -49,7 +49,7 @@ CACHE_DB_LOCK = threading.Lock()
 MAX_STORES = int(os.environ.get("MAX_STORES", "3"))
 MAX_URLS_MERGED = int(os.environ.get("MAX_URLS_MERGED", "5"))
 ENABLE_SEARCH_RETRY = env_bool("ENABLE_SEARCH_RETRY", False)
-AUTO_SEND_PRODUCT_MAPS = env_bool("AUTO_SEND_PRODUCT_MAPS", False)
+AUTO_SEND_PRODUCT_MAPS = env_bool("AUTO_SEND_PRODUCT_MAPS", True)
 
 GROCERY_WORDS = [
     "بيبسي","شيبس","حليب","قهوه","قهوة","شاي","سكر","رز","زيت","صابون","شامبو",
@@ -74,12 +74,32 @@ def format_price(p):
     except:
         return str(p)
 
-def fallback_search_url(query, store=""):
-    dom = store_domain(store) if store else ""
-    if dom:
-        return "https://www.google.com/search?q=" + urllib.parse.quote(f"site:{dom} {query}")
-    q = f"{query} {store} الكويت اونلاين".strip() if store else f"{query} الكويت اونلاين"
-    return "https://www.google.com/search?q=" + urllib.parse.quote(q)
+def is_direct_store_url(url):
+    """يمنع روابط Google والبحث والتصنيفات؛ يقبل روابط المتاجر المباشرة فقط."""
+    if not url or not url.startswith(("http://", "https://")):
+        return False
+    try:
+        parsed = urllib.parse.urlparse(url)
+        host = parsed.netloc.lower().replace("www.", "")
+        path_q = (parsed.path + ("?" + parsed.query if parsed.query else "")).lower()
+    except Exception:
+        return False
+    blocked_hosts = (
+        "google.com", "google.com.kw", "googleusercontent.com", "gstatic.com",
+        "bing.com", "yahoo.com"
+    )
+    if any(host == h or host.endswith("." + h) for h in blocked_hosts):
+        return False
+    if not parsed.path or parsed.path == "/":
+        return False
+    if any(part in path_q for part in LISTING_URL_PARTS):
+        # بعض المتاجر تستخدم /shop/ داخل صفحة المنتج؛ نسمح فقط إذا ظهر نمط منتج واضح.
+        if not re.search(r"/product/|/products/[^/]{3,}|/p/|/dp/|/item/|/prod/", path_q):
+            return False
+    return True
+
+def direct_urls_only(urls):
+    return {name: url for name, url in (urls or {}).items() if is_direct_store_url(url)}
 
 def normalize_ar(text):
     t = (text or "").lower()
@@ -100,7 +120,7 @@ def has_model_token(a, b):
 
 def cache_key(query, lang):
     norm = re.sub(r"[^\w\u0600-\u06FF]+", "", normalize_ar(query))
-    return hashlib.sha256(f"{norm}|{lang}".encode()).hexdigest()
+    return hashlib.sha256(f"v35|{norm}|{lang}".encode()).hexdigest()
 
 def cache_ttl_for(query, txt=""):
     q_norm = normalize_ar(query)
@@ -332,7 +352,9 @@ SYSTEM_PROMPT = """
 أجب على السؤال نفسه مباشرة — لا تعرض مقارنة أسعار.
 
 قواعد جودة صارمة جداً:
-- اذكر فقط المنتجات المتوفرة فعلاً InStock.
+- اذكر فقط المنتجات المتوفرة فعلاً. لا تكتب كلمة InStock أو متوفر مكان السعر.
+- أي متجر لا يظهر له سعر رقمي واضح بالدينار الكويتي احذفه من النتيجة.
+- ممنوع أن يكون الرد عبارة عن أسماء متاجر مع كلمة متوفر فقط؛ كل سطر عرض يجب أن يحتوي سعراً رقمياً.
 - رابط كل متجر يجب أن يكون رابط صفحة منتج مباشر (صفحة فيها منتج واحد وسعر واحد). ممنوع روابط الصفحة الرئيسية أو /search أو /category
 - لا تخترع سعراً، انسخ السعر كما يظهر في نتيجة البحث اليوم.
 - حاول تجيب 3 متاجر فقط، وإذا ما لقيت اذكر الموجود ولا تخترع.
@@ -586,13 +608,18 @@ def send_product_result(from_number, txt, urls, bot_id, lang, query, best_only=F
     if best_only:
         best = next((o for o in offers if o["best"]), offers[0])
         offers = [best]
+    sent = 0
     for o in offers[:MAX_STORES]:
         url = match_url(o["name"], urls)
-        if not url:
-            if is_junk_store(o["name"]):
-                continue
-            url = fallback_search_url(fq, o["name"])
+        # ممنوع تماماً تحويل المستخدم إلى Google أو صفحة بحث أو تصنيف.
+        if not is_direct_store_url(url):
+            print(f"SKIP NON-DIRECT CTA: {o['name']} -> {url}")
+            continue
         send_whatsapp_cta(from_number, o["line"], url, bot_id, f"🛒 {o['name'][:18]}")
+        sent += 1
+    if sent == 0:
+        send_whatsapp_text(from_number, T(lang, "not_found"), bot_id)
+        return "none"
     return "product"
 
 GEMINI_STATS = {"search_calls": 0, "plain_calls": 0}
@@ -738,19 +765,28 @@ def search_product(query, lang, prompt_text=None):
         f"وكل رابط يجب أن يكون صفحة منتج مباشرة.{grocery_hint} {LANG_INSTR[lang]}"
     )
 
-    # أهم تعديل اقتصادي: اتصال Gemini Grounded Search واحد فقط لكل بحث غير موجود في الكاش.
+    # اتصال واحد عادةً. نعيد مرة واحدة فقط إذا لم نحصل على أي سعر رقمي؛
+    # هذا يمنع إرسال نتائج مثل "متوفر InStock" بلا أسعار أو أزرار.
     txt, merged_urls = call_gemini([{"text": single_prompt}])
-    if not txt and ENABLE_SEARCH_RETRY:
+    priced = bool(extract_store_offers(txt))
+    should_retry = (not txt) or (not priced and not is_service_answer(txt) and "📦" in (txt or ""))
+    if should_retry:
         fallback_prompt = (
-            f"ابحث مرة أخيرة عن {query} في الكويت وأعطني المتوفر فقط مع 3 نتائج كحد أقصى. "
+            f"النتيجة السابقة لم تحتوِ أسعاراً رقمية صالحة. ابحث عن {query} في الكويت مرة أخيرة. "
+            "أعطني فقط متاجر يظهر فيها سعر رقمي واضح بالدينار الكويتي وصفحة منتج مباشرة. "
+            "احذف أي متجر بلا سعر. لا تكتب InStock أو متوفر مكان السعر. حد أقصى 3 نتائج. "
             f"{LANG_INSTR[lang]}"
         )
-        txt, merged_urls = call_gemini([{"text": fallback_prompt}])
+        retry_txt, retry_urls = call_gemini([{"text": fallback_prompt}])
+        if extract_store_offers(retry_txt) or (retry_txt and not txt):
+            txt, merged_urls = retry_txt, retry_urls
 
     if not txt:
         return "", {}
 
-    merged_urls = dict(list((merged_urls or {}).items())[:MAX_URLS_MERGED])
+    # احتفظ فقط بروابط صفحات المتاجر المباشرة؛ لا Google ولا صفحات بحث.
+    merged_urls = direct_urls_only(merged_urls)
+    merged_urls = dict(list(merged_urls.items())[:MAX_URLS_MERGED])
 
     if is_service_answer(txt) or not extract_store_offers(txt):
         if len(txt) >= 40:
@@ -772,9 +808,32 @@ def search_product(query, lang, prompt_text=None):
         print(f"VERIFIED OK: {query} -> {len(new_urls)} stores from {len(merged_urls)} raw")
         return final_txt, new_urls
 
-    print(f"VERIFIED FAIL - returning raw result for: {query}")
-    cache_put(query, lang, txt, merged_urls)
-    return txt, merged_urls
+    # إذا تعذر التحقق، نسمح فقط بالعروض التي لها رابط متجر مباشر فعلي.
+    # لا ننشئ fallback إلى Google أبداً.
+    direct_urls = direct_urls_only(merged_urls)
+    if direct_urls:
+        valid_names = {normalize_name(k) for k in direct_urls}
+        kept = []
+        for offer in extract_store_offers(txt):
+            matched = match_url(offer["name"], direct_urls)
+            if matched and is_direct_store_url(matched):
+                kept.append(offer)
+        if kept:
+            title = product_title(txt, query)
+            lines = [title, ""]
+            clean_urls = {}
+            for i, offer in enumerate(kept[:MAX_STORES]):
+                prefix = "✅" if i == 0 else "•"
+                body = re.sub(r"^(?:✅|🏆|•)\s*", "", offer["line"]).strip()
+                lines.append(f"{prefix} {body}")
+                clean_urls[offer["name"]] = match_url(offer["name"], direct_urls)
+            final_txt = "\n".join(lines)
+            cache_put(query, lang, final_txt, clean_urls)
+            print(f"DIRECT UNVERIFIED OK: {query} -> {len(clean_urls)} direct pages")
+            return final_txt, clean_urls
+
+    print(f"NO DIRECT PRODUCT PAGE - rejecting result for: {query}")
+    return "", {}
 
 def extract_products(text):
     text=re.sub(r'^[•\-\*\d\.\)\s]+','',text,flags=re.M)
@@ -988,4 +1047,4 @@ def process_location_message(message, bot_id):
     send_whatsapp_cta(from_number, body, maps_url, bot_id, T(lang,"maps_btn"))
 
 @app.get("/")
-async def health(): return {"status":"v33 economic - one grounded search + persistent cache + maps without AI"}
+async def health(): return {"status":"v34 economic - priced CTA results + automatic maps"}
