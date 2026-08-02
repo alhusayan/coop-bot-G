@@ -73,6 +73,7 @@ GROCERY_WORDS = [
     "برينجلز","كيتكات","نسكافيه","تونه","ماء","عصير","بسكوت","منظف","معجون","حفاض"
 ]
 
+print("STARTING COOP BOT BUILD: v50-lens-products-20260802")
 print(
     f"ECONOMIC CONFIG search_model={GEMINI_SEARCH_MODEL} fast_model={GEMINI_FAST_MODEL} "
     f"max_stores={MAX_STORES} search_attempts={MAX_SEARCH_ATTEMPTS} "
@@ -146,7 +147,7 @@ def has_model_token(a, b):
 
 def cache_key(query, lang):
     norm = re.sub(r"[^\w\u0600-\u06FF]+", "", normalize_ar(query))
-    return hashlib.sha256(f"v49|{norm}|{lang}".encode()).hexdigest()
+    return hashlib.sha256(f"v50|{norm}|{lang}".encode()).hexdigest()
 
 def cache_ttl_for(query, txt=""):
     q_norm = normalize_ar(query)
@@ -549,7 +550,11 @@ def _lens_items(data):
                 "exact": bool(x.get("exact_matches")),
                 "thumbnail": (x.get("thumbnail") or x.get("image") or "").strip(),
                 "image": (x.get("image") or x.get("thumbnail") or "").strip(),
-                "price": ((x.get("price") or {}).get("value") if isinstance(x.get("price"), dict) else ""),
+                "price": ((x.get("price") or {}).get("value") if isinstance(x.get("price"), dict) else str(x.get("price") or "")),
+                "price_value": ((x.get("price") or {}).get("extracted_value") if isinstance(x.get("price"), dict) else x.get("extracted_price")),
+                "currency": ((x.get("price") or {}).get("currency") if isinstance(x.get("price"), dict) else ""),
+                "in_stock": x.get("in_stock"),
+                "condition": (x.get("condition") or "").strip(),
             })
     return items[:LENS_RESULT_LIMIT]
 
@@ -587,7 +592,7 @@ def google_lens_lookup(image_b64, mime_type, lang="ar", query_hint=""):
 
     params = {
         "engine": "google_lens",
-        "type": "visual_matches",
+        "type": "products",
         "url": public_url,
         "api_key": SERPAPI_API_KEY,
         "country": "kw",
@@ -1209,8 +1214,74 @@ def is_informational_answer(txt):
     return len(txt.strip()) >= 80
 
 
+def _lens_source_name(item, index):
+    source = (item.get("source") or "").strip()
+    if source:
+        return source[:40]
+    try:
+        host = urllib.parse.urlparse(item.get("link") or "").netloc.replace("www.", "")
+        return (host.split(".")[0] or f"Lens {index}")[:40]
+    except Exception:
+        return f"Lens {index}"
+
+
+def lens_priced_offers(lens_context):
+    """Use Google Lens product cards directly.
+
+    Lens already supplies a visual match, direct product URL, displayed price and stock state.
+    We therefore do not force the page through our HTML parser first; that parser can wrongly
+    reject JS-heavy stores or replace a visually good alternative with a different SKU.
+    """
+    if not lens_context:
+        return {}
+    offers = {}
+    used_urls = set()
+    for i, item in enumerate(lens_context.get("matches") or [], 1):
+        url = (item.get("link") or "").strip()
+        title = (item.get("title") or "").strip()
+        price_text = (item.get("price") or "").strip()
+        price_value = item.get("price_value")
+        currency = (item.get("currency") or "").strip()
+        in_stock = item.get("in_stock")
+        if not title or not is_direct_store_url(url) or url in used_urls:
+            continue
+        if in_stock is False:
+            print(f"LENS PRODUCT OOS SKIP: {title} -> {url}")
+            continue
+        if not price_text and price_value in (None, ""):
+            continue
+        # Kuwait localization usually returns KWD. Keep only KWD-like cards so the WhatsApp
+        # result remains comparable; foreign-currency Lens cards can still be found by fallback search.
+        price_hay = f"{price_text} {currency}".lower()
+        if not any(x in price_hay for x in ("kwd", "د.ك", "kd")):
+            continue
+        name = _lens_source_name(item, i)
+        base = name
+        n = 2
+        while name in offers:
+            name = f"{base} {n}"; n += 1
+        numeric = None
+        try:
+            numeric = float(price_value) if price_value not in (None, "") else None
+        except Exception:
+            numeric = None
+        offers[name] = {
+            "url": url,
+            "price": numeric,
+            "price_text": price_text or (f"{price_value} {currency}".strip()),
+            "title": title,
+            "position": int(item.get("position") or i),
+            "exact": bool(item.get("exact")),
+            "image_url": item.get("image") or item.get("thumbnail") or "",
+        }
+        used_urls.add(url)
+    # Google Lens ranking is the visual relevance signal. Exact matches come first, then position.
+    ranked = sorted(offers.items(), key=lambda kv: (0 if kv[1].get("exact") else 1, kv[1].get("position", 999)))
+    return dict(ranked[:MAX_STORES])
+
+
 def verify_lens_direct_matches(lens_context):
-    """Verify Lens-returned product pages before any broad price search."""
+    """Fallback verifier for Lens URLs that had no price card."""
     if not lens_context:
         return {}
     candidates = {}
@@ -1222,9 +1293,8 @@ def verify_lens_direct_matches(lens_context):
             continue
         candidates[source] = url
     verified = verify_offers(candidates, (lens_context.get("chosen") or {}).get("title", ""))
-    verified = filter_verified_with_lens(verified, lens_context)
     if verified:
-        print(f"LENS DIRECT VERIFIED: {list(verified)}")
+        print(f"LENS HTML VERIFIED: {list(verified)}")
     return verified
 
 
@@ -1234,8 +1304,22 @@ def search_product(query, lang, prompt_text=None, source_image_b64=None, source_
     if cached:
         return cached
 
-    # First use the actual product URLs returned by Google Lens. This avoids replacing
-    # the identified item with another model from the same brand during price search.
+    # For image requests, use the product cards returned by Google Lens itself first.
+    # This preserves the many visually close results Google shows instead of demanding one exact SKU.
+    lens_cards = lens_priced_offers(lens_context)
+    if lens_cards:
+        display_name = (lens_context.get("chosen") or {}).get("title") or query
+        lines = [f"📦 {display_name}", ""]
+        new_urls = {}
+        for i, (name, info) in enumerate(lens_cards.items()):
+            prefix = "✅" if i == 0 else "•"
+            shown_price = info.get("price_text") or format_price(info.get("price"))
+            lines.append(f"{prefix} {name} — {shown_price}")
+            new_urls[name] = info["url"]
+        print(f"LENS PRODUCT CARDS USED: {list(new_urls)}")
+        return "\n".join(lines), new_urls
+
+    # If Lens returned direct pages without price metadata, try our HTML verifier once.
     lens_verified = verify_lens_direct_matches(lens_context)
     if lens_verified:
         sorted_v = sorted(lens_verified.items(), key=lambda x: x[1]["price"])
@@ -1614,4 +1698,4 @@ def process_location_message(message, bot_id):
     send_whatsapp_cta(from_number, body, maps_url, bot_id, T(lang,"maps_btn"))
 
 @app.get("/")
-async def health(): return {"status":"v49 LENS EXACT GUARD", "build":"v49-exact-guard-20260802"}
+async def health(): return {"status":"v50 LENS PRODUCTS FIRST", "build":"v50-lens-products-20260802"}
