@@ -48,7 +48,9 @@ CACHE_DB_LOCK = threading.Lock()
 # النسخة الاقتصادية: 3 نتائج فقط واتصال بحث واحد في الوضع الطبيعي.
 MAX_STORES = int(os.environ.get("MAX_STORES", "3"))
 MAX_URLS_MERGED = int(os.environ.get("MAX_URLS_MERGED", "5"))
-ENABLE_SEARCH_RETRY = env_bool("ENABLE_SEARCH_RETRY", False)
+ENABLE_SEARCH_RETRY = env_bool("ENABLE_SEARCH_RETRY", True)
+MAX_SEARCH_ATTEMPTS = max(2, int(os.environ.get("MAX_SEARCH_ATTEMPTS", "3")))
+MAX_IDENTIFY_ATTEMPTS = max(2, int(os.environ.get("MAX_IDENTIFY_ATTEMPTS", "3")))
 AUTO_SEND_PRODUCT_MAPS = env_bool("AUTO_SEND_PRODUCT_MAPS", True)
 
 GROCERY_WORDS = [
@@ -58,7 +60,8 @@ GROCERY_WORDS = [
 
 print(
     f"ECONOMIC CONFIG search_model={GEMINI_SEARCH_MODEL} fast_model={GEMINI_FAST_MODEL} "
-    f"max_stores={MAX_STORES} retry={ENABLE_SEARCH_RETRY} auto_maps={AUTO_SEND_PRODUCT_MAPS}"
+    f"max_stores={MAX_STORES} search_attempts={MAX_SEARCH_ATTEMPTS} "
+    f"identify_attempts={MAX_IDENTIFY_ATTEMPTS} auto_maps={AUTO_SEND_PRODUCT_MAPS}"
 )
 
 VERIFIED_PAGE_CACHE = {}
@@ -120,7 +123,7 @@ def has_model_token(a, b):
 
 def cache_key(query, lang):
     norm = re.sub(r"[^\w\u0600-\u06FF]+", "", normalize_ar(query))
-    return hashlib.sha256(f"v35|{norm}|{lang}".encode()).hexdigest()
+    return hashlib.sha256(f"v36|{norm}|{lang}".encode()).hexdigest()
 
 def cache_ttl_for(query, txt=""):
     q_norm = normalize_ar(query)
@@ -280,7 +283,7 @@ MSG = {
         "identifying": "ثواني بس.. أحدد المنتج وأدور لك الأفضل!",
         "searching": "🔍 أدور لك على {q}...",
         "not_found": "ما لقيت المنتج متوفر حالياً بسعر مؤكد 😅 جرب صياغة ثانية أو دز صورة أوضح.",
-        "cant_identify": "ما قدرت أحدد المنتج، دز صورة أوضح",
+        "cant_identify": "بحثت أكثر من مرة، لكن ما قدرت أحدد المنتج أو ألقى له نتيجة مؤكدة. دز صورة أوضح أو اكتب اسم المنتج.",
         "multi_text": "تمام لقيت {c} منتجات، أسوي سلة...",
         "multi_images": "تمام لقطت {c} منتجات، أسوي سلة...",
         "maps_body": "📍 تبي أقرب مكان؟\n\nاضغط الزر والخريطة بتفتح على أقرب الأماكن حولك 👇",
@@ -293,7 +296,7 @@ MSG = {
         "identifying": "One sec.. identifying the product and finding you the best deal!",
         "searching": "🔍 Looking up {q}...",
         "not_found": "Couldn't find it in-stock with a verified price 😅 try another phrasing or a clearer photo.",
-        "cant_identify": "Couldn't identify the product",
+        "cant_identify": "I searched several times but couldn’t identify the product or find a verified result. Send a clearer photo or type the product name.",
         "multi_text": "Got it, found {c} products. Building your cart...",
         "multi_images": "Nice, spotted {c} products. Building your cart...",
         "maps_body": "📍 Want the nearest place?\n\nTap the button and the map will open on the closest spots around you 👇",
@@ -331,10 +334,6 @@ SYSTEM_PROMPT = """
 • [المتجر الثالث] — [السعر] د.ك
 
 حاول تجيب 3 متاجر مختلفة فقط إذا تقدر: Xcite, Eureka, Blink, Noon, Jarir, Lulu, Carrefour, Amazon.ae, Best Al-Yousifi
-
-🛒 مصدر العروض ClicFlyer — قاعدة إلزامية لمنتجات التموينات:
-لأي منتج بقالة أو تموينات (أغذية، مشروبات، منظفات، عناية شخصية)، ابحث ضمن نفس طلب البحث في clicflyer.com أيضاً (استخدم site:clicflyer.com مع اسم المنتج).
-- إذا وجدت عرضاً سارياً أرخص، حطه أول القائمة واكتب (عرض).
 
 【الحالة 2】طلب عام بدون براند محدد (مثل: قهوة فلات وايت حار، عطر رجالي، لابتوب للدراسة):
 لا تبحث عن الأرخص! ابحث عن الأفضل تقييماً في الكويت بسعر مناسب.
@@ -541,41 +540,90 @@ def match_url(name, urls):
     return ""
 
 def maps_category_for(product):
-    """تصنيف محلي سريع للخريطة بدون أي اتصال Gemini إضافي."""
+    """اختيار نوع المتاجر في خرائط Google حسب تصنيف المنتج، بدون اتصال Gemini."""
     q = normalize_ar(product)
-    service_intent = any(w in q for w in ("فني", "تصليح", "صيانه", "صيانة", "تركيب", "عطل", "خدمه", "خدمة"))
+    service_intent = any(w in q for w in (
+        "فني", "تصليح", "صيانه", "صيانة", "تركيب", "عطل", "خدمه", "خدمة",
+        "repair", "service", "installation", "technician"
+    ))
 
-    # كلمات تدل على خدمة بحد ذاتها.
-    direct_service_rules = [
-        (("بنشر", "تبديل بطاريه", "تبديل بطارية"), "بنشر تبديل إطارات بطارية Tyre repair"),
-        (("سباك",), "سباك Plumbing service"),
-        (("كهربائي",), "كهربائي Electrician"),
-        (("فني زجاج", "فني مرايا"), "فني زجاج ومرايا Glass repair"),
-        (("نجار",), "نجار Carpenter"),
-        (("غسيل سياره", "تلميع سياره"), "Car wash detailing"),
+    service_rules = [
+        (("بنشر", "اطارات", "إطارات", "تبديل بطاريه", "تبديل بطارية", "tyre", "tire", "car battery"),
+         "محل إطارات وبطاريات سيارات Tyre and car battery shop"),
+        (("سباك", "plumber", "plumbing"), "سباك Plumbing service"),
+        (("كهربائي", "electrician"), "كهربائي Electrician"),
+        (("فني زجاج", "فني مرايا", "glass repair"), "فني زجاج ومرايا Glass repair"),
+        (("نجار", "carpenter"), "نجار Carpenter"),
+        (("غسيل سياره", "غسيل سيارة", "تلميع سياره", "car wash", "detailing"), "Car wash detailing"),
+        (("مفتاح", "اقفال", "أقفال", "locksmith"), "محل مفاتيح وأقفال Locksmith"),
+        (("مكافحة حشرات", "pest control"), "مكافحة حشرات Pest control"),
     ]
-    for words, category in direct_service_rules:
+    for words, category in service_rules:
         if any(w in q for w in words):
             return category
 
-    # الكلمات التالية قد تكون منتجاً أو خدمة؛ لا نعاملها كخدمة إلا مع نية صريحة.
     if service_intent:
-        if any(w in q for w in ("تكييف", "مكيف", "سنترال")):
+        if any(w in q for w in ("تكييف", "مكيف", "سنترال", "air condition")):
             return "فني تكييف Air conditioning repair"
-        if any(w in q for w in ("زجاج", "مرايا", "المنيوم", "الومنيوم")):
-            return "فني زجاج ومرايا Glass repair"
-        if any(w in q for w in ("كهرباء", "افياش", "إنارة", "اناره")):
+        if any(w in q for w in ("زجاج", "مرايا", "المنيوم", "الومنيوم", "aluminium")):
+            return "فني زجاج وألمنيوم Glass and aluminium repair"
+        if any(w in q for w in ("كهرباء", "افياش", "إنارة", "اناره", "electrical")):
             return "كهربائي Electrician"
+        if any(w in q for w in ("غساله", "ثلاجه", "فرن", "جلايه", "مكنسه", "appliance")):
+            return "صيانة أجهزة منزلية Home appliance repair"
 
-    if any(w in q for w in ("ثلاجه", "غساله", "فرن", "مكيف", "جلايه", "مكنسه")):
-        return "Xcite OR Eureka home appliances"
-    if any(w in q for w in ("ايفون", "سامسونج", "لابتوب", "بلايستيشن", "تلفزيون", "ساعه ابل", "الكترون")):
-        return "Xcite OR Eureka OR Best Al Yousifi electronics"
-    if any(w in q for w in ("دواء", "صيدليه", "فيتامين", "كريم", "شامبو", "حفاظ", "حفاض")):
-        return "صيدلية Pharmacy"
-    if any(w in q for w in GROCERY_WORDS):
-        return "جمعية تعاونية Supermarket"
-    return product
+    category_rules = [
+        (("عطر", "عطور", "برفان", "perfume", "eau de parfum", "eau de toilette"),
+         "محل عطور Perfume store"),
+        (("مكياج", "روج", "فاونديشن", "ماسكرا", "كونسيلر", "مستحضرات تجميل", "cosmetic", "makeup"),
+         "متجر مستحضرات تجميل Cosmetics store"),
+        (("كريم", "سيروم", "واقي شمس", "عناية بالبشره", "عناية بالبشرة", "skincare"),
+         "صيدلية أو متجر عناية بالبشرة Pharmacy skincare store"),
+        (("دواء", "صيدليه", "صيدلية", "فيتامين", "مكمل", "حفاض", "حفاظ", "pharmacy", "medicine"),
+         "صيدلية Pharmacy"),
+        (("نظاره", "نظارة", "عدسات", "sunglasses", "eyeglasses", "contact lens"),
+         "محل نظارات Optician"),
+        (("ساعه", "ساعة", "رولكس", "watch"), "محل ساعات Watch store"),
+        (("ذهب", "مجوهرات", "خاتم", "سلسله", "سلسلة", "jewelry", "jewellery"),
+         "محل مجوهرات Jewelry store"),
+        (("ملابس", "تيشيرت", "قميص", "بنطلون", "فستان", "جاكيت", "قبعه", "قبعة", "كاب", "shirt", "dress", "cap", "clothing"),
+         "متجر ملابس Fashion store"),
+        (("حذاء", "جوتي", "سنيكر", "shoe", "sneaker"), "متجر أحذية Shoe store"),
+        (("مضرب", "كره", "كرة", "تنس", "بادل", "جيم", "رياضه", "رياضة", "under armour", "nike", "adidas", "sports"),
+         "متجر أدوات وملابس رياضية Sports store"),
+        (("ايفون", "آيفون", "سامسونج", "لابتوب", "بلايستيشن", "تلفزيون", "الكترون", "هاتف", "جوال", "كاميرا",
+          "iphone", "samsung", "laptop", "playstation", "television", "electronics"),
+         "متجر إلكترونيات Electronics store"),
+        (("ثلاجه", "ثلاجة", "غساله", "غسالة", "فرن", "مكيف", "جلايه", "جلاية", "مكنسه", "مكنسة"),
+         "متجر أجهزة منزلية Home appliances store"),
+        (("كنب", "صوفا", "طاولة", "كرسي", "اثاث", "أثاث", "مرتبه", "مرتبة", "furniture", "mattress"),
+         "متجر أثاث Furniture store"),
+        (("ادوات منزليه", "أدوات منزلية", "صحون", "قدور", "مطبخ", "kitchenware", "homeware"),
+         "متجر أدوات منزلية Homeware store"),
+        (("العاب اطفال", "ألعاب أطفال", "لعبه", "لعبة", "toy"), "متجر ألعاب أطفال Toy store"),
+        (("عربانه", "عربة أطفال", "كرسي طفل", "رضاعه", "رضاعة", "baby"),
+         "متجر مستلزمات أطفال Baby store"),
+        (("قطع غيار", "زيت محرك", "اكسسوارات سياره", "إكسسوارات سيارة", "car accessories", "auto parts"),
+         "متجر قطع غيار وإكسسوارات سيارات Auto parts store"),
+        (("دريل", "عدد", "ادوات", "أدوات", "مسمار", "صبغ", "دهان", "hardware", "tools"),
+         "متجر عدد وأدوات Hardware store"),
+        (("اكل قطط", "أكل قطط", "اكل كلاب", "أكل كلاب", "حيوانات", "pet"),
+         "متجر مستلزمات حيوانات أليفة Pet store"),
+        (("كتاب", "روايه", "رواية", "قرطاسيه", "قرطاسية", "book", "stationery"),
+         "مكتبة Bookstore stationery"),
+    ]
+    for words, category in category_rules:
+        if any(w in q for w in words):
+            return category
+
+    if any(w in q for w in GROCERY_WORDS) or any(w in q for w in (
+        "مياه", "مشروب", "اغذيه", "أغذية", "طعام", "شوكولاته", "شوكولاتة",
+        "مناديل", "منظف", "غسيل", "grocery", "food", "beverage"
+    )):
+        return "جمعية تعاونية أو سوبرماركت Supermarket"
+
+    # بدل البحث عن اسم المنتج وحده، نضيف صيغة متجر حتى تكون نتائج الخريطة أماكن بيع.
+    return f"متجر يبيع {product} الكويت"
 
 def maps_search_url(product, lat=None, lng=None):
     category = maps_category_for(product)
@@ -755,84 +803,79 @@ def search_product(query, lang, prompt_text=None):
     if cached:
         return cached
 
-    q_norm = normalize_ar(query)
-    grocery_hint = ""
-    if any(w in q_norm for w in GROCERY_WORDS):
-        grocery_hint = " ابحث ضمن نفس العملية أيضاً في عروض ClicFlyer إن وُجد عرض سارٍ."
-
-    single_prompt = prompt_text or (
-        f"ابحث عن {query} في الكويت. أعطني أفضل 3 نتائج فقط، متوفر InStock، "
-        f"وكل رابط يجب أن يكون صفحة منتج مباشرة.{grocery_hint} {LANG_INSTR[lang]}"
+    base_prompt = prompt_text or (
+        f"ابحث عن {query} في الكويت. أعطني أفضل 3 نتائج فقط، وكل نتيجة يجب أن تحتوي "
+        f"سعراً رقمياً واضحاً بالدينار الكويتي ورابط صفحة المنتج المباشرة. "
+        f"لا تذكر نتيجة بلا سعر ولا تستخدم روابط Google أو صفحات البحث والتصنيفات. {LANG_INSTR[lang]}"
     )
 
-    # اتصال واحد عادةً. نعيد مرة واحدة فقط إذا لم نحصل على أي سعر رقمي؛
-    # هذا يمنع إرسال نتائج مثل "متوفر InStock" بلا أسعار أو أزرار.
-    txt, merged_urls = call_gemini([{"text": single_prompt}])
-    priced = bool(extract_store_offers(txt))
-    should_retry = (not txt) or (not priced and not is_service_answer(txt) and "📦" in (txt or ""))
-    if should_retry:
-        fallback_prompt = (
-            f"النتيجة السابقة لم تحتوِ أسعاراً رقمية صالحة. ابحث عن {query} في الكويت مرة أخيرة. "
-            "أعطني فقط متاجر يظهر فيها سعر رقمي واضح بالدينار الكويتي وصفحة منتج مباشرة. "
-            "احذف أي متجر بلا سعر. لا تكتب InStock أو متوفر مكان السعر. حد أقصى 3 نتائج. "
-            f"{LANG_INSTR[lang]}"
-        )
-        retry_txt, retry_urls = call_gemini([{"text": fallback_prompt}])
-        if extract_store_offers(retry_txt) or (retry_txt and not txt):
-            txt, merged_urls = retry_txt, retry_urls
+    best_txt, best_urls = "", {}
+    for attempt in range(1, MAX_SEARCH_ATTEMPTS + 1):
+        if attempt == 1:
+            current_prompt = base_prompt
+        else:
+            current_prompt = (
+                f"محاولة بحث إضافية رقم {attempt} عن: {query}. "
+                "غيّر كلمات البحث وابحث في متاجر كويتية أخرى. المطلوب نتيجة واحدة صحيحة على الأقل: "
+                "اسم المنتج، سعر رقمي بالدينار الكويتي، ورابط صفحة المنتج المباشرة داخل المتجر. "
+                "ممنوع روابط Google وممنوع صفحة البحث أو التصنيف وممنوع كتابة متوفر بدل السعر. "
+                f"{LANG_INSTR[lang]}"
+            )
 
-    if not txt:
-        return "", {}
+        txt, urls = call_gemini([{"text": current_prompt}])
+        urls = direct_urls_only(urls)
+        offers = extract_store_offers(txt)
 
-    # احتفظ فقط بروابط صفحات المتاجر المباشرة؛ لا Google ولا صفحات بحث.
-    merged_urls = direct_urls_only(merged_urls)
-    merged_urls = dict(list(merged_urls.items())[:MAX_URLS_MERGED])
+        # الخدمات أو الإجابات المعلوماتية الصحيحة لا تحتاج أسعار منتجات.
+        if is_service_answer(txt):
+            if len(txt) >= 40:
+                cache_put(query, lang, txt, urls)
+            return txt, urls
+        if txt and not offers and "📦" not in txt:
+            return txt, urls
 
-    if is_service_answer(txt) or not extract_store_offers(txt):
-        if len(txt) >= 40:
-            cache_put(query, lang, txt, merged_urls)
-        return txt, merged_urls
+        if txt and offers and urls:
+            verified = verify_offers(urls, query)
+            if verified:
+                sorted_v = sorted(verified.items(), key=lambda x: x[1]["price"])
+                title = product_title(txt, query)
+                lines = [title, ""]
+                new_urls = {}
+                for i, (name, info) in enumerate(sorted_v[:MAX_STORES]):
+                    prefix = "✅" if i == 0 else "•"
+                    lines.append(f"{prefix} {name} — {format_price(info['price'])} د.ك")
+                    new_urls[name] = info["url"]
+                final_txt = "\n".join(lines)
+                cache_put(query, lang, final_txt, new_urls)
+                print(f"VERIFIED OK attempt={attempt}: {query} -> {len(new_urls)} stores")
+                return final_txt, new_urls
 
-    verified = verify_offers(merged_urls, query)
-    if verified:
-        sorted_v = sorted(verified.items(), key=lambda x: x[1]["price"])
-        title = product_title(txt, query)
-        lines = [title, ""]
-        new_urls = {}
-        for i, (name, info) in enumerate(sorted_v[:MAX_STORES]):
-            prefix = "✅" if i == 0 else "•"
-            lines.append(f"{prefix} {name} — {format_price(info['price'])} د.ك")
-            new_urls[name] = info["url"]
-        final_txt = "\n".join(lines)
-        cache_put(query, lang, final_txt, new_urls)
-        print(f"VERIFIED OK: {query} -> {len(new_urls)} stores from {len(merged_urls)} raw")
-        return final_txt, new_urls
-
-    # إذا تعذر التحقق، نسمح فقط بالعروض التي لها رابط متجر مباشر فعلي.
-    # لا ننشئ fallback إلى Google أبداً.
-    direct_urls = direct_urls_only(merged_urls)
-    if direct_urls:
-        valid_names = {normalize_name(k) for k in direct_urls}
-        kept = []
-        for offer in extract_store_offers(txt):
-            matched = match_url(offer["name"], direct_urls)
-            if matched and is_direct_store_url(matched):
-                kept.append(offer)
-        if kept:
-            title = product_title(txt, query)
-            lines = [title, ""]
+            # بعض المتاجر تمنع قراءة الصفحة آلياً؛ نقبل السعر النصي فقط مع رابط مباشر مطابق.
+            kept = []
             clean_urls = {}
-            for i, offer in enumerate(kept[:MAX_STORES]):
-                prefix = "✅" if i == 0 else "•"
-                body = re.sub(r"^(?:✅|🏆|•)\s*", "", offer["line"]).strip()
-                lines.append(f"{prefix} {body}")
-                clean_urls[offer["name"]] = match_url(offer["name"], direct_urls)
-            final_txt = "\n".join(lines)
-            cache_put(query, lang, final_txt, clean_urls)
-            print(f"DIRECT UNVERIFIED OK: {query} -> {len(clean_urls)} direct pages")
-            return final_txt, clean_urls
+            for offer in offers:
+                matched = match_url(offer["name"], urls)
+                if matched and is_direct_store_url(matched):
+                    kept.append(offer)
+                    clean_urls[offer["name"]] = matched
+            if kept:
+                title = product_title(txt, query)
+                lines = [title, ""]
+                for i, offer in enumerate(kept[:MAX_STORES]):
+                    prefix = "✅" if i == 0 else "•"
+                    body = re.sub(r"^(?:✅|🏆|•)\s*", "", offer["line"]).strip()
+                    lines.append(f"{prefix} {body}")
+                final_txt = "\n".join(lines)
+                cache_put(query, lang, final_txt, clean_urls)
+                print(f"DIRECT RESULT attempt={attempt}: {query} -> {len(clean_urls)} pages")
+                return final_txt, clean_urls
 
-    print(f"NO DIRECT PRODUCT PAGE - rejecting result for: {query}")
+        if txt and len(extract_store_offers(txt)) > len(extract_store_offers(best_txt)):
+            best_txt, best_urls = txt, urls
+        print(f"SEARCH ATTEMPT {attempt} FAILED: {query}")
+
+    # لا نخزن الفشل في الكاش حتى يتمكن الطلب التالي من المحاولة مجدداً.
+    print(f"ALL SEARCH ATTEMPTS FAILED: {query}")
     return "", {}
 
 def extract_products(text):
@@ -932,13 +975,39 @@ async def process_image_buffer(from_number):
     if len(data["images"])==1: await asyncio.to_thread(process_single_image,data["images"][0],data["bot_id"],lang)
     else: await asyncio.to_thread(process_multi_images,data["images"],from_number,data["bot_id"],lang)
 
+def identify_product_with_retry(b64, mime, lang="ar"):
+    """يعيد تحليل الصورة بصيغ مختلفة، ولا يرجع رسالة فشل صادرة من النموذج كاسم منتج."""
+    prompts = [
+        "حدد اسم المنتج الظاهر في الصورة بدقة. اكتب البراند ونوع المنتج والموديل والحجم إن ظهر. سطر واحد فقط.",
+        "افحص الصورة مرة أخرى وركز على الشعار والكتابة والعبوة ورقم الموديل. أعطني أفضل اسم بحث تجاري ممكن. سطر واحد فقط.",
+        "حتى لو لم يظهر الاسم كاملاً، استنتج فئة المنتج والبراند من الشعار والشكل، واكتب عبارة بحث مفيدة ودقيقة. سطر واحد فقط.",
+    ]
+    bad_phrases = (
+        "ما قدرت", "لا استطيع", "لا أستطيع", "غير واضح", "لا يمكن تحديد",
+        "couldn't identify", "cannot identify", "can't identify", "unable to identify",
+        "unknown product", "not sure"
+    )
+    for attempt in range(MAX_IDENTIFY_ATTEMPTS):
+        prompt = prompts[min(attempt, len(prompts) - 1)]
+        ident, _ = call_gemini(
+            [{"inline_data": {"mime_type": mime, "data": b64}}, {"text": prompt}],
+            system=IDENTIFY_SYSTEM,
+            use_search=False,
+        )
+        candidate = ident.strip().splitlines()[0].strip() if ident else ""
+        if candidate and not any(p in candidate.lower() for p in bad_phrases):
+            print(f"IMAGE IDENTIFIED attempt={attempt + 1}: {candidate}")
+            return candidate
+        print(f"IMAGE IDENTIFY ATTEMPT {attempt + 1} FAILED")
+    return ""
+
+
 def process_single_image(message,bot_id,lang="ar"):
     from_number=message["from"]
     caption=(message.get("image",{}) or {}).get("caption","").strip()
     send_whatsapp_text(from_number,T(lang,"identifying"),bot_id)
     b64,mime=download_whatsapp_media(message["image"]["id"])
-    ident,_=call_gemini([{"inline_data":{"mime_type":mime,"data":b64}},{"text":"ما اسم هذا المنتج؟"}], system=IDENTIFY_SYSTEM, use_search=False)
-    product_name = ident.strip().splitlines()[0].strip() if ident else ""
+    product_name = identify_product_with_retry(b64, mime, lang)
     if product_name and caption:
         request_query = f"{caption} — {product_name}"
         prompt_text = f"المنتج في الصورة: {product_name}\nطلب المستخدم عنه: {caption}\nصنّف الطلب وأجب. {LANG_INSTR[lang]}"
@@ -950,12 +1019,27 @@ def process_single_image(message,bot_id,lang="ar"):
         LAST_SEARCH[from_number] = {"product": product_name}
         query = product_name
     else:
-        req = caption if caption else "ما هذا المنتج؟ ابحث عن سعره الحالي في الكويت."
-        txt,urls=best_of_search([{"inline_data":{"mime_type":mime,"data":b64}},{"text":f"{req} {LANG_INSTR[lang]}"}], lang)
+        req = caption if caption else ("Identify this product and find its current price in Kuwait." if lang == "en" else "حدد هذا المنتج وابحث عن سعره الحالي في الكويت.")
+        txt, urls = "", {}
+        for attempt in range(1, MAX_SEARCH_ATTEMPTS + 1):
+            extra = (
+                "Look carefully at the logo, packaging, model number and product shape. Return at least one result with a numeric KWD price and a direct product-page link."
+                if lang == "en" else
+                "دقق في الشعار والعبوة ورقم الموديل وشكل المنتج. أعطني نتيجة واحدة على الأقل بسعر رقمي د.ك ورابط صفحة المنتج المباشرة."
+            )
+            txt, urls = call_gemini(
+                [{"inline_data": {"mime_type": mime, "data": b64}}, {"text": f"{req}\n{extra}\n{LANG_INSTR[lang]}"}],
+                use_search=True,
+            )
+            urls = direct_urls_only(urls)
+            if extract_store_offers(txt) and urls:
+                break
+            print(f"IMAGE GROUNDED SEARCH ATTEMPT {attempt} FAILED")
         name_m = re.search(r"📦\s*(.+)", txt or "")
-        product_name = name_m.group(1).strip() if name_m else "المنتج"
-        query = f"{caption} — {product_name}" if caption else product_name
-        LAST_SEARCH[from_number] = {"product": query}
+        product_name = name_m.group(1).strip() if name_m else ""
+        query = f"{caption} — {product_name}".strip(" —") if caption else product_name
+        if query:
+            LAST_SEARCH[from_number] = {"product": query}
     if not txt:
         send_whatsapp_text(from_number,T(lang,"cant_identify"),bot_id)
         return
@@ -967,8 +1051,7 @@ def process_single_image(message,bot_id,lang="ar"):
 def identify_image_product(msg):
     try:
         b64,mime=download_whatsapp_media(msg["image"]["id"])
-        ident,_=call_gemini([{"inline_data":{"mime_type":mime,"data":b64}},{"text":"ما اسم هذا المنتج؟"}], system=IDENTIFY_SYSTEM, use_search=False)
-        return ident.strip().splitlines()[0].strip() if ident else ""
+        return identify_product_with_retry(b64, mime, "ar")
     except: return ""
 
 def process_cart(products, from_number, bot_id, lang="ar"):
@@ -1047,4 +1130,4 @@ def process_location_message(message, bot_id):
     send_whatsapp_cta(from_number, body, maps_url, bot_id, T(lang,"maps_btn"))
 
 @app.get("/")
-async def health(): return {"status":"v34 economic - priced CTA results + automatic maps"}
+async def health(): return {"status":"v36 retries + classified maps"}
