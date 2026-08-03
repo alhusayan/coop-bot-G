@@ -6,10 +6,10 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v69-identity-guard-always-20260803"
+BUILD_ID = "v70-lens-harvest-global-20260803"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
-print("IDENTITY GUARD ON EVERY IMAGE SEARCH (LENS OR VISION) + GLOBAL ENGLISH")
+print("LENS MATCHES HARVESTED FOR GLOBAL + GUARDED CARDS + IDENTITY GUARD ALWAYS")
 print("=" * 70)
 
 
@@ -1947,6 +1947,10 @@ def lens_priced_offers(lens_context, lang="ar", local_only=True, exclude_local=F
         if in_stock is False:
             print(f"LENS PRODUCT OOS SKIP: {title} -> {url}")
             continue
+        # سياق pseudo = الهوية من Vision والبطاقات محصودة من Lens: لازم تمر ببوابة البراند
+        # وإلا رجعت بطاقات مختلفة (ألوان طعام، زوايا DREW) تتنكر كنفس المنتج.
+        if lens_context.get("pseudo") and not _lens_offer_compatible({"title": title}, url, lens_context):
+            continue
         if not price_text and price_value in (None, ""):
             continue
         # في الوضع المحلي: نبقي بطاقات عملة السوق فقط. في الوضع العالمي كل العملات مقبولة
@@ -2020,6 +2024,8 @@ def verify_lens_direct_matches(lens_context, local_only=True, exclude_local=Fals
             continue
         if exclude_local and is_local_lens_result(m):
             print(f"GLOBAL EXCLUDE LOCAL VERIFY: {title} -> {url}")
+            continue
+        if lens_context.get("pseudo") and not _lens_offer_compatible({"title": title}, url, lens_context):
             continue
         candidates[source] = url
     verified = verify_offers(candidates, (lens_context.get("chosen") or {}).get("title", ""))
@@ -3018,6 +3024,7 @@ def process_single_image(message,bot_id,lang="ar"):
     use_lens = force_fashion_lens or use_lens
 
     lens = {"aliases": [], "matches": [], "query": ""}
+    lens_harvest_future = None
     if use_lens:
         if lens_future is not None:
             try:
@@ -3027,8 +3034,10 @@ def process_single_image(message,bot_id,lang="ar"):
         else:
             lens = google_lens_lookup(b64, mime, lang, caption or vision_name)
     elif lens_future is not None:
-        # الراوتر قرر Vision-first (عبوة نصية)؛ نتيجة اللينز المتوازية تُهمل بهدوء.
-        lens_future.cancel()
+        # الراوتر اختار Vision للهوية (عبوة نصية)، لكن نتائج اللينز تبقى مصدراً ثميناً
+        # لروابط البائعين الحقيقيين عالمياً (DISCOUNTO.de، eBay...). لا نلغيها — نحصدها
+        # لاحقاً فقط إذا فشل البحث المحلي واحتجنا البحث العالمي.
+        lens_harvest_future = lens_future
 
     active_lens = None
     identity_source = "VISION"
@@ -3101,6 +3110,20 @@ def process_single_image(message,bot_id,lang="ar"):
             send_product_result(from_number, txt, urls, bot_id, lang, query)
             return
         if query:
+            # قبل عرض الخيارات: نحصد نتائج اللينز المتوازية (إن وُجدت) ونعلقها بسياق الحارس.
+            # بدونها كان البحث العالمي نصياً فقط ويرجع صفر نتائج رغم وجود بائعين حقيقيين في Lens.
+            if guard_ctx and guard_ctx.get("pseudo") and not guard_ctx.get("matches"):
+                harvest_src = None
+                if lens.get("matches"):
+                    harvest_src = lens
+                elif lens_harvest_future is not None:
+                    try:
+                        harvest_src = lens_harvest_future.result(timeout=45) or None
+                    except Exception as e:
+                        print(f"LENS HARVEST ERR: {e}")
+                if harvest_src and harvest_src.get("matches"):
+                    guard_ctx["matches"] = harvest_src["matches"]
+                    print(f"LENS HARVESTED FOR GLOBAL: {len(guard_ctx['matches'])} matches (identity stays VISION)")
             # حتى بدون نتائج Lens، البحث العالمي والبدائل يعملان نصياً بالاسم المحدد.
             _store_pending_global(from_number, bot_id, lang, query, guard_ctx, prompt_text if (combined_name and caption) else None)
             send_not_found_choice(from_number, bot_id, lang)
@@ -3362,4 +3385,4 @@ def process_location_message(message, bot_id):
     route_pending_after_location(from_number)
 
 @app.get("/")
-async def health(): return {"status":"v69 IDENTITY GUARD ALWAYS", "build":BUILD_ID, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
+async def health(): return {"status":"v70 LENS HARVEST GLOBAL", "build":BUILD_ID, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
