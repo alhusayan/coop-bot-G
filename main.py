@@ -6,10 +6,10 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v66-intent-understanding-20260803"
+BUILD_ID = "v71-lens-links-first-js-stores-gps-20260803"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
-print("INTENT UNDERSTANDING + NOT-FOUND OPTIONS + GLOBAL FX -> LOCAL CURRENCY")
+print("LENS LINKS FIRST + SHOPIFY-JSON + GEMINI URL PRICE PROBE + GPS")
 print("=" * 70)
 
 
@@ -71,6 +71,12 @@ ENABLE_SEARCH_RETRY = env_bool("ENABLE_SEARCH_RETRY", True)
 MAX_SEARCH_ATTEMPTS = max(2, int(os.environ.get("MAX_SEARCH_ATTEMPTS", "3")))
 MAX_IDENTIFY_ATTEMPTS = max(2, int(os.environ.get("MAX_IDENTIFY_ATTEMPTS", "3")))
 AUTO_SEND_PRODUCT_MAPS = env_bool("AUTO_SEND_PRODUCT_MAPS", True)
+# حارس جنون الأسعار: سعر أعلى من هذا الحد (بعملة السوق) يُرفض كخطأ استخراج.
+PRICE_SANITY_CAP = float(os.environ.get("PRICE_SANITY_CAP", "10000"))
+# إنقاذ متاجر JS: عدد روابط أقصى يفحصها Gemini بالبحث المؤرض لما يفشل HTML (لكل عملية تحقق).
+GEMINI_URL_PROBE_MAX = max(0, int(os.environ.get("GEMINI_URL_PROBE_MAX", "4")))
+# تمرير موقع المستخدم (مدينة/GPS) مع طلبات SerpApi Lens.
+LENS_USE_LOCATION = env_bool("LENS_USE_LOCATION", True)
 # Google Lens عبر SerpApi. لا توجد Google Lens API عامة رسمية للاستخدام الخادمي،
 # لذلك نستخدم SerpApi للوصول إلى نتائج Lens المنظمة.
 SERPAPI_API_KEY = os.environ.get("SERPAPI_API_KEY", "").strip()
@@ -284,7 +290,10 @@ def market_instruction():
     city = m.get("city") or ""
     place = f"{city}, {m['country_name']}" if city else m["country_name"]
     currency = m.get("currency") or "local currency"
-    return (f"\nIMPORTANT CURRENT USER MARKET: {place} (country code {m['country']}). "
+    gps = ""
+    if m.get("lat") is not None and m.get("lng") is not None:
+        gps = f"User GPS coordinates: {m['lat']:.5f},{m['lng']:.5f}. Prefer stores that serve this exact area. "
+    return (f"\nIMPORTANT CURRENT USER MARKET: {place} (country code {m['country']}). {gps}"
             f"Return stores that sell/deliver in {place}, and prices in {currency}. "
             "Reject India, China, or any other foreign-country result unless it explicitly delivers to the current market and no local result exists. "
             "Ignore any older Kuwait-specific instruction when the current market is not Kuwait.\n")
@@ -881,9 +890,104 @@ def _prune_verified_page_cache():
     for k, _ in items[: len(items) - VERIFIED_PAGE_CACHE_MAX // 2]:
         VERIFIED_PAGE_CACHE.pop(k, None)
 
+def fetch_shopify_product_json(url):
+    """متاجر Shopify (وكثير من متاجر الكويت عليها): صفحة المنتج + ‎.json ترجع السعر جاهزاً.
+
+    مجاني وفوري وبدون متصفح — ينقذ المتاجر التي يفشل معها HTML لأن السعر يُرسم بالجافاسكربت.
+    """
+    try:
+        parsed = urllib.parse.urlparse(url)
+        if "/products/" not in parsed.path:
+            return None
+        clean_path = parsed.path.split("?")[0].rstrip("/")
+        json_url = f"{parsed.scheme}://{parsed.netloc}{clean_path}.json"
+        r = requests.get(json_url, headers=HEADERS, timeout=8)
+        if r.status_code != 200:
+            return None
+        j = r.json()
+        product = j.get("product") or {}
+        variants = product.get("variants") or []
+        if not variants:
+            return None
+        # أرخص متغير متوفر؛ وإذا كلها غير متوفرة نعتبر المنتج OOS.
+        available_variants = [v for v in variants if v.get("available") is not False]
+        pool = available_variants or variants
+        prices = []
+        for v in pool:
+            try:
+                prices.append(float(str(v.get("price") or "").replace(",", "")))
+            except Exception:
+                continue
+        if not prices:
+            return None
+        image = product.get("image")
+        image_url = image.get("src", "") if isinstance(image, dict) else ""
+        return {
+            "price": min(prices),
+            "available": bool(available_variants),
+            "is_product": True,
+            "title": str(product.get("title") or "")[:80],
+            "image_url": image_url,
+            "currency": "",  # Shopify JSON لا يعلن العملة؛ بوابة السوق تتعامل مع الموقع نفسه.
+        }
+    except Exception as e:
+        print(f"SHOPIFY JSON ERR: {e} {url[:80]}")
+        return None
+
+
+PRICE_PROBE_SYSTEM = (
+    "You are a precise product-page price checker with Google Search access. "
+    "The user gives you ONE exact product page URL and the product name. "
+    "Use search/grounding to find the CURRENT price shown on that EXACT page (same domain and path). "
+    "Never take a price from a different store or a different product. "
+    "Reply in EXACTLY this format, one line, nothing else:\n"
+    "PRICE=<number> CURRENCY=<3-letter code> AVAILABLE=<YES|NO> TITLE=<short product title>\n"
+    "If you cannot confirm a price for that exact URL, reply exactly: UNKNOWN"
+)
+
+def gemini_price_probe(url, product_title=""):
+    """آخر خط دفاع لمتاجر الجافاسكربت: Gemini بالبحث المؤرض يزور الرابط ويستخرج السعر.
+
+    يُستدعى فقط بعد فشل HTML و Shopify JSON، وبميزانية محدودة لكل عملية تحقق.
+    """
+    prompt = (f"Product page URL: {url}\n"
+              f"Expected product: {product_title or 'unknown'}\n"
+              "Report the price currently shown on this exact page.")
+    raw, _ = call_gemini([{"text": prompt}], system=PRICE_PROBE_SYSTEM,
+                         use_search=True, neutral=True)
+    line = (raw or "").strip().splitlines()[0].strip() if raw else ""
+    if not line or line.upper().startswith("UNKNOWN"):
+        print(f"GEMINI PROBE UNKNOWN: {url[:90]}")
+        return None
+    m = re.search(
+        r"PRICE\s*=\s*([0-9]+(?:[.,][0-9]{1,3})?)\s+CURRENCY\s*=\s*([A-Z]{3})\s+AVAILABLE\s*=\s*(YES|NO)(?:\s+TITLE\s*=\s*(.*))?",
+        line, flags=re.I,
+    )
+    if not m:
+        print(f"GEMINI PROBE PARSE FAIL: {line[:150]}")
+        return None
+    try:
+        price = float(m.group(1).replace(",", ""))
+    except Exception:
+        return None
+    currency = m.group(2).upper()
+    info = {
+        "price": price,
+        "available": m.group(3).upper() == "YES",
+        "is_product": True,
+        "title": (m.group(4) or "").strip()[:80],
+        "image_url": "",
+        "currency": currency if currency in KNOWN_CURRENCY_CODES else "",
+    }
+    print(f"GEMINI PROBE OK: {url[:80]} -> {price} {currency}")
+    return info
+
+
 def verify_offers(urls_map, query):
     if not urls_map: return {}
     verified = {}
+    rescue = []  # روابط فشل معها HTML: متاجر JS غالباً — ننقذها بـ Shopify JSON ثم مسبار Gemini.
+
     def _check(item):
         name, url = item
         cached = VERIFIED_PAGE_CACHE.get(url)
@@ -894,23 +998,54 @@ def verify_offers(urls_map, query):
             info = parse_product_data(html, url)
             if info:
                 VERIFIED_PAGE_CACHE[url] = {"data": info, "ts": time.time()}
-        if not info: return None
-        if not info["is_product"]:
-            print(f"REJECT LISTING: {name} -> {url}")
-            return None
+        if not info:
+            return ("rescue", name, url, None)
         if not info["available"]:
             print(f"REJECT OOS: {name} -> {url}")
             return None
         if not info["price"] or info["price"] <= 0:
-            print(f"REJECT NO PRICE: {name} -> {url}")
+            # السعر غائب عن HTML ≠ المنتج غير موجود: متاجر Shopify/Salla/Zid ترسم السعر بالجافاسكربت.
+            return ("rescue", name, url, info)
+        if not info["is_product"]:
+            print(f"REJECT LISTING: {name} -> {url}")
             return None
-        return (name, url, info)
+        return ("ok", name, url, info)
+
     results = list(RESOLVER.map(_check, urls_map.items()))
     _prune_verified_page_cache()
     for r in results:
-        if r:
-            name, url, info = r
+        if not r:
+            continue
+        status, name, url, info = r
+        if status == "ok":
             verified[name] = {"url": url, "price": info["price"], "title": info["title"], "image_url": info.get("image_url", ""), "currency": info.get("currency", "")}
+        else:
+            rescue.append((name, url, info))
+
+    # مرحلة الإنقاذ (تسلسلية ومحدودة الميزانية):
+    probes_left = GEMINI_URL_PROBE_MAX
+    for name, url, html_info in rescue:
+        saved = fetch_shopify_product_json(url)
+        source = "SHOPIFY_JSON"
+        if not saved and probes_left > 0:
+            saved = gemini_price_probe(url, query)
+            source = "GEMINI_PROBE"
+            probes_left -= 1
+        if not saved:
+            print(f"REJECT NO PRICE: {name} -> {url}")
+            continue
+        if not saved.get("available", True):
+            print(f"REJECT OOS ({source}): {name} -> {url}")
+            continue
+        if not saved.get("price") or saved["price"] <= 0:
+            print(f"REJECT NO PRICE ({source}): {name} -> {url}")
+            continue
+        # نُكمل العنوان من HTML إن وُجد حتى تعمل بوابات الهوية على أفضل معلومات.
+        if html_info and html_info.get("title") and not saved.get("title"):
+            saved["title"] = html_info["title"]
+        VERIFIED_PAGE_CACHE[url] = {"data": saved, "ts": time.time()}
+        print(f"RESCUED ({source}): {name} -> {url} price={saved['price']} {saved.get('currency','')}")
+        verified[name] = {"url": url, "price": saved["price"], "title": saved.get("title", ""), "image_url": saved.get("image_url", ""), "currency": saved.get("currency", "")}
     return verified
 
 def _cleanup_lens_images():
@@ -987,6 +1122,13 @@ def _serpapi_lens_request(public_url, lens_type, country, auto_crop, query_hint)
         params["type"] = lens_type
     if country:
         params["country"] = country
+        # إحداثيات GPS بدل رمز الدولة وحده: نمرر الموقع الفعلي (مدينة + دولة) مع الطلب.
+        # google_lens يعتمد رسمياً على country؛ إذا كان location مدعوماً يزيد الدقة، وإلا يُتجاهل بلا ضرر.
+        if LENS_USE_LOCATION:
+            m = current_market()
+            loc_parts = [p for p in (m.get("city"), m.get("country_name")) if p]
+            if loc_parts:
+                params["location"] = ", ".join(loc_parts)
     if auto_crop:
         params["auto_crop"] = "true"
     # q مسموح فقط مع all و visual_matches و products حسب توثيق SerpApi.
@@ -1148,8 +1290,42 @@ def _meaningful_lens_tokens(text):
     return out
 
 
+def _token_in(token, hay):
+    """مطابقة كلمة كاملة وليس جزء كلمة: deco لا تطابق داخل DecoFiller.
+
+    هذا هو الباق الذي سمح بعرض Orac DecoFiller بدل Deco Craft — كلمة deco
+    كانت تُطابق كجزء من decofiller فيمر منتج مختلف تماماً كأنه نفس المنتج.
+    """
+    if not token or not hay:
+        return False
+    return bool(re.search(rf"(?<![\w\u0600-\u06FF]){re.escape(token)}(?![\w\u0600-\u06FF])", hay))
+
+
+BRAND_STOPWORDS = {
+    "the", "new", "original", "genuine", "white", "black", "mini", "pro", "max",
+    "for", "and", "with", "set", "pack",
+}
+
+def _extract_brand_tokens(chosen_title):
+    """أول كلمتين لاتينيتين من عنوان Lens تُعاملان كبراند (مثل deco + craft)."""
+    toks = re.findall(r"[a-z][a-z0-9]+", normalize_ar(chosen_title or ""))
+    brand = []
+    for t in toks:
+        if t in BRAND_STOPWORDS or len(t) < 3:
+            continue
+        brand.append(t)
+        if len(brand) == 2:
+            break
+    return brand
+
+
 def _lens_offer_compatible(info, url, lens_context):
-    """Strict guard for image searches. Candidate title/URL alone must match the Lens identity."""
+    """بوابة «نفس المنتج بالضبط أو لا شيء» لنتائج بحث الصور.
+
+    القاعدة: المرشح يمر فقط إذا طابق براند Lens (كلمات كاملة) مع كلمة مميزة واحدة
+    على الأقل، أو طابق كلمتين مميزتين من عنوان Lens. غير ذلك = رفض، ويُعرض للمستخدم
+    خيار (عالمي / بدائل مشابهة) بدل تقديم منتج شبيه على أنه نفس المنتج.
+    """
     if not lens_context:
         return True
     sig = lens_context.get("signature") or {}
@@ -1157,30 +1333,36 @@ def _lens_offer_compatible(info, url, lens_context):
     candidate_hay = normalize_ar(" ".join([str(info.get("title", "")), str(url)])).lower()
     chosen_title = normalize_ar(str(chosen.get("title", ""))).lower()
 
-    # Brand is mandatory when Lens returned a clear brand.
+    # Brand is mandatory when Lens returned a clear brand (hardcoded high-risk brands).
     brand_aliases = {
         "bottega veneta": ("bottega", "veneta", "بوتيغا", "بوتيقا"),
         "under armour": ("under", "armour", "اندر", "ارمور"),
     }
     for brand, aliases in brand_aliases.items():
-        if brand in chosen_title and not any(normalize_ar(a) in candidate_hay for a in aliases):
+        if brand in chosen_title and not any(_token_in(normalize_ar(a), candidate_hay) for a in aliases):
             return False
 
-    # Identity tokens are mandatory. For fashion, one generic overlap is not enough:
-    # require either the brand/model token, or two discriminative tokens from Lens.
-    desired_tokens = _meaningful_lens_tokens(chosen_title)
-    descriptor_tokens = [t for t in desired_tokens if t not in ("bottega", "veneta")]
-    matched_tokens = [t for t in descriptor_tokens if t in candidate_hay]
-    fashion_words = (
-        "shirt","blouse","dress","pajama","pyjama","nightwear","sleepwear","satin",
-        "printed","striped","قميص","فستان","بيجامه","بيجامة","ساتان","مخطط"
+    # البوابة العامة: براند + كلمات مميزة، كلها بمطابقة كلمات كاملة.
+    brand_tokens = _extract_brand_tokens(chosen_title)
+    brand_joined = "".join(brand_tokens)
+    brand_match = bool(brand_tokens) and (
+        all(_token_in(t, candidate_hay) for t in brand_tokens)
+        or (brand_joined and _token_in(brand_joined, candidate_hay))
+        or (brand_joined and brand_joined in re.sub(r"[^\w\u0600-\u06FF]", "", candidate_hay))
     )
-    is_fashion = any(normalize_ar(w) in chosen_title for w in fashion_words)
-    if descriptor_tokens:
-        needed = 2 if is_fashion and len(descriptor_tokens) >= 2 else 1
-        if len(matched_tokens) < needed:
-            print(f"LENS TOKEN REJECT: wanted={descriptor_tokens} matched={matched_tokens} candidate={candidate_hay[:180]}")
+
+    desired_tokens = _meaningful_lens_tokens(chosen_title)
+    descriptor_tokens = [t for t in desired_tokens if t not in brand_tokens and t not in ("bottega", "veneta")]
+    matched_tokens = [t for t in descriptor_tokens if _token_in(t, candidate_hay)]
+
+    if brand_tokens and not brand_match:
+        # براند Lens غائب عن المرشح: نقبله فقط إذا طابق كلمتين مميزتين على الأقل.
+        if len(matched_tokens) < 2:
+            print(f"LENS BRAND REJECT: brand={brand_tokens} matched={matched_tokens} candidate={candidate_hay[:180]}")
             return False
+    elif descriptor_tokens and len(matched_tokens) < 1:
+        print(f"LENS TOKEN REJECT: wanted={descriptor_tokens} matched={matched_tokens} candidate={candidate_hay[:180]}")
+        return False
 
     heel = (sig.get("heel") or "UNKNOWN").upper()
     high_words = ("high heel", "high heels", "stiletto", "kitten heel", "heeled", "pump", "كعب عالي", "كعب ذهبي")
@@ -1492,11 +1674,18 @@ def send_product_result(from_number, txt, urls, bot_id, lang, query, best_only=F
 GEMINI_STATS = {"search_calls": 0, "plain_calls": 0}
 GEMINI_STATS_LOCK = threading.Lock()
 
-def call_gemini(parts, system=SYSTEM_PROMPT, use_search=True):
+def global_instruction():
+    m = current_market()
+    return (f"\nGLOBAL MODE: The user is located in {m.get('country_name','')} but explicitly requested INTERNATIONAL stores. "
+            f"EXCLUDE every store in {m.get('country_name','')}. Search using ENGLISH product names and English search terms — "
+            "international products are indexed in English, not Arabic. Return prices in each store's original currency.\n")
+
+def call_gemini(parts, system=SYSTEM_PROMPT, use_search=True, global_mode=False, neutral=False):
     model = GEMINI_SEARCH_MODEL if use_search else GEMINI_FAST_MODEL
     gemini_url = f"{GEMINI_BASE_URL}/{model}:generateContent"
+    extra = "" if neutral else ((global_instruction() if global_mode else market_instruction()) if use_search else "")
     payload = {
-        "systemInstruction": {"parts": [{"text": system + (market_instruction() if use_search else "")}]},
+        "systemInstruction": {"parts": [{"text": system + extra}]},
         "contents": [{"role": "user", "parts": parts}],
         "generationConfig": {
             "temperature": 0,
@@ -1659,13 +1848,50 @@ def fuse_identity_aliases(lens_title, vision_name, extra_aliases=None):
     return aliases[:4]
 
 
-def _query_candidates(query):
-    """يبني صيغ بحث منفصلة؛ العربية أولاً لأنها غالباً أفضل في فهرسة المتاجر المحلية."""
+def to_english_query(query):
+    """البحث العالمي يحتاج اسماً لاتينياً — المنتجات العالمية مفهرسة بالإنجليزية وليس بالعربية.
+
+    باق الصور: البوت بحث عالمياً بـ«معجون ديكو» فرجّع Difiaba DECO Paste (صبغة شعر!)
+    و DREW (زوايا جبس!). القاعدة: نأخذ الأجزاء اللاتينية من الهوية أولاً، وإذا كان الاسم
+    عربياً بالكامل نترجمه باتصال fast رخيص واحد. الدالة idempotent: مدخل لاتيني يمر كما هو.
+    """
+    parts = [p.strip() for p in re.split(r"\s*[|｜]\s*", query or "") if p.strip()]
+    latin_parts = []
+    for part in parts:
+        # لو الجزء خليط (كابشن عربي — عنوان Lens لاتيني) نستخرج المقطع اللاتيني منه.
+        if re.search(r"[A-Za-z]", part):
+            latin_chunks = re.findall(r"[A-Za-z0-9][A-Za-z0-9 \-\+\./&']*[A-Za-z0-9]", part)
+            candidate = max(latin_chunks, key=len).strip() if latin_chunks else part
+            if candidate and candidate not in latin_parts:
+                latin_parts.append(candidate)
+    if latin_parts:
+        return " | ".join(latin_parts[:3])
+    # اسم عربي بالكامل: ترجمة سريعة لاسم تجاري إنجليزي قابل للبحث.
+    raw, _ = call_gemini(
+        [{"text": f"Product name: {query}"}],
+        system=("You translate product names into a concise, searchable ENGLISH commercial product name. "
+                "Keep brand names and model numbers. Output ONLY the English name, one line, no explanation."),
+        use_search=False,
+    )
+    english = (raw or "").strip().splitlines()[0].strip() if raw else ""
+    if english and len(english) >= 3 and re.search(r"[A-Za-z]", english):
+        print(f"GLOBAL QUERY TRANSLATED: {query!r} -> {english!r}")
+        return english
+    return query
+
+
+def _query_candidates(query, prefer_english=False):
+    """يبني صيغ بحث منفصلة؛ العربية أولاً محلياً، والإنجليزية أولاً عالمياً."""
     raw_parts = [p.strip() for p in re.split(r"\s*[|｜]\s*", query or "") if p.strip()]
     ar_parts = [p for p in raw_parts if re.search(r"[\u0600-\u06FF]", p)]
     en_parts = [p for p in raw_parts if re.search(r"[A-Za-z]", p)]
-    candidates = ar_parts + en_parts
-    if query and query.strip() not in candidates:
+    candidates = (en_parts + ar_parts) if prefer_english else (ar_parts + en_parts)
+    if prefer_english:
+        # عالمياً: الأجزاء العربية الصِرفة تضر أكثر مما تنفع؛ نستبعدها إذا وُجد بديل لاتيني.
+        pure_ar = [p for p in ar_parts if not re.search(r"[A-Za-z]", p)]
+        if en_parts and pure_ar:
+            candidates = en_parts + [p for p in ar_parts if p not in pure_ar]
+    if query and query.strip() not in candidates and not prefer_english:
         candidates.append(query.strip())
     unique = []
     for item in candidates:
@@ -1784,6 +2010,55 @@ def is_foreign_lens_result(item):
     return bool(host)
 
 
+def is_local_verified_offer(name, info):
+    """بوابة السوق المحلي على نتائج البحث النصي المتحقق منها.
+
+    مثال الباق: oracdecor.com (أوروبي، EUR) و 3d-wall.co.uk (بريطاني، GBP) كانا يُعرضان
+    كنتائج «محلية» بعملة د.ك. القاعدة: عملة الصفحة = عملة السوق، أو الموقع محلي فعلاً.
+    """
+    cur = (info.get("currency") or "").upper().strip()
+    market_cur = (current_market().get("currency") or "").upper().strip()
+    if cur and market_cur and cur == market_cur:
+        return True
+    looks_local = is_local_lens_result({
+        "link": info.get("url", ""), "source": name, "title": info.get("title", ""),
+    })
+    if looks_local:
+        # موقع يبدو محلياً لكن صفحته تعلن عملة أجنبية صراحة = نسخة دولية، نرفضها محلياً.
+        if cur and market_cur and cur != market_cur:
+            print(f"LOCAL GATE CURRENCY MISMATCH: {name} currency={cur} expected={market_cur}")
+            return False
+        return True
+    print(f"LOCAL GATE REJECT FOREIGN: {name} -> {info.get('url','')} currency={cur or '?'}")
+    return False
+
+
+def apply_local_gate(verified, allow_global):
+    if allow_global or not verified:
+        return verified
+    return {n: i for n, i in verified.items() if is_local_verified_offer(n, i)}
+
+
+def drop_absurd_prices(verified):
+    """يرفض أسعار الاستخراج المجنونة (مثل 4374.390 د.ك لأنبوب معجون سعره الطبيعي ~6 د.ك)."""
+    if not verified:
+        return verified
+    prices = sorted(float(v.get("price") or 0) for v in verified.values() if v.get("price"))
+    base = prices[0] if prices else 0
+    kept = {}
+    for name, info in verified.items():
+        p = float(info.get("price") or 0)
+        if p > PRICE_SANITY_CAP:
+            print(f"PRICE SANITY REJECT (cap): {name} price={p}")
+            continue
+        # إذا عندنا سعر مرجعي صغير، أي عرض أغلى منه 30 ضعفاً هو خطأ استخراج وليس عرضاً حقيقياً.
+        if base and base < 100 and p > base * 30:
+            print(f"PRICE SANITY REJECT (outlier): {name} price={p} vs min={base}")
+            continue
+        kept[name] = info
+    return kept
+
+
 def lens_priced_offers(lens_context, lang="ar", local_only=True, exclude_local=False):
     """Use Google Lens product cards directly.
 
@@ -1811,6 +2086,10 @@ def lens_priced_offers(lens_context, lang="ar", local_only=True, exclude_local=F
             continue
         if in_stock is False:
             print(f"LENS PRODUCT OOS SKIP: {title} -> {url}")
+            continue
+        # سياق pseudo = الهوية من Vision والبطاقات محصودة من Lens: لازم تمر ببوابة البراند
+        # وإلا رجعت بطاقات مختلفة (ألوان طعام، زوايا DREW) تتنكر كنفس المنتج.
+        if lens_context.get("pseudo") and not _lens_offer_compatible({"title": title}, url, lens_context):
             continue
         if not price_text and price_value in (None, ""):
             continue
@@ -1867,15 +2146,19 @@ def lens_priced_offers(lens_context, lang="ar", local_only=True, exclude_local=F
 
 
 def verify_lens_direct_matches(lens_context, local_only=True, exclude_local=False):
-    """Fallback verifier for Lens URLs that had no price card. Exact matches get priority."""
+    """روابط Lens تُفحص مباشرة — لا نترجمها لنص ونبحث من جديد.
+
+    exact_matches أولاً دائماً، ثم المحلي، ثم ترتيب Lens. مع سلسلة الإنقاذ في verify_offers
+    (HTML ثم Shopify JSON ثم مسبار Gemini) تنجح متاجر الجافاسكربت أيضاً.
+    """
     if not lens_context:
         return {}
     candidates = {}
     ordered = sorted(
-        (lens_context.get("matches") or [])[:16],
+        (lens_context.get("matches") or [])[:24],
         key=lambda m: (0 if m.get("exact") else 1, 0 if is_local_lens_result(m) else 1, int(m.get("position") or 99)),
     )
-    for i, m in enumerate(ordered[:8], 1):
+    for i, m in enumerate(ordered[:12], 1):
         url = (m.get("link") or "").strip()
         title = (m.get("title") or "").strip()
         source = (m.get("source") or f"Lens {i}").strip()
@@ -1885,6 +2168,8 @@ def verify_lens_direct_matches(lens_context, local_only=True, exclude_local=Fals
             continue
         if exclude_local and is_local_lens_result(m):
             print(f"GLOBAL EXCLUDE LOCAL VERIFY: {title} -> {url}")
+            continue
+        if lens_context.get("pseudo") and not _lens_offer_compatible({"title": title}, url, lens_context):
             continue
         candidates[source] = url
     verified = verify_offers(candidates, (lens_context.get("chosen") or {}).get("title", ""))
@@ -1915,6 +2200,8 @@ def _new_layer_search(query, lang, prompt_text=None, source_image_b64=None, sour
 
     # If Lens returned direct pages without price metadata, try our HTML verifier once.
     lens_verified = verify_lens_direct_matches(lens_context, local_only=not allow_global, exclude_local=allow_global)
+    lens_verified = apply_local_gate(lens_verified, allow_global)
+    lens_verified = drop_absurd_prices(lens_verified)
     if lens_verified:
         if allow_global:
             # أسعار أجنبية من HTML: نحولها للعملة المحلية أولاً ثم نرتب بالأرخص المحوَّل.
@@ -1936,12 +2223,12 @@ def _new_layer_search(query, lang, prompt_text=None, source_image_b64=None, sour
             new_urls[name] = info["url"]
         return "\n".join(lines), new_urls
 
-    candidates = _query_candidates(query)
+    candidates = _query_candidates(query, prefer_english=allow_global)
     best_txt, best_urls = "", {}
 
     for attempt in range(1, MAX_SEARCH_ATTEMPTS + 1):
         search_term = candidates[(attempt - 1) % len(candidates)]
-        if attempt == 1 and prompt_text:
+        if attempt == 1 and prompt_text and not allow_global:
             context = f"{prompt_text}\n"
         else:
             context = ""
@@ -1951,35 +2238,50 @@ def _new_layer_search(query, lang, prompt_text=None, source_image_b64=None, sour
         priority_stores = priority_stores_for(search_term)
         stores_hint = "، ".join(priority_stores)
         market_name = current_market().get("country_name", "Kuwait")
-        if attempt == 1 and current_market().get("country") == "kw":
-            search_scope = (
-                f"ابحث حصراً أولاً داخل هذه المتاجر وبنفس ترتيب الأولوية: {stores_hint}. "
-                "لا تعرض أي متجر خارج هذه القائمة في هذه المحاولة، وإذا لم تجد فلا تكتب اعتذاراً مطولاً؛ أرجع بلا نتائج لننتقل للبحث العام. "
-            )
-        elif attempt == 1:
-            search_scope = (
-                f"ابدأ بأشهر المتاجر المحلية في {market_name} أولاً. "
-                "إذا لم تجد فلا تكتب اعتذاراً مطولاً؛ أرجع بلا نتائج لننتقل للبحث العام. "
+        if allow_global:
+            # عالمي = برومبت إنجليزي بالكامل: المنتجات العالمية مفهرسة بالإنجليزية،
+            # والبرومبت العربي كان يرجّع منتجات مختلفة تشترك بكلمة واحدة فقط (باق Deco Paste).
+            current_prompt = (
+                f"{context}Search WORLDWIDE for exactly this product: {search_term}. "
+                + ((f"Google Lens identified it as: {(lens_context.get('chosen') or {}).get('title','')}. "
+                    "Do NOT broaden to different brands, models, colors or product categories — the exact same product only. ")
+                   if lens_context else "")
+                + f"Strictly EXCLUDE any store located in {market_name}; the local search already finished. "
+                "Use ENGLISH search terms only. Return up to 3 reputable international online stores, "
+                "each with a clear numeric price and the DIRECT product page URL inside the store. "
+                "No Google links, no search or category pages. State the original currency next to each price. "
+                f"{LANG_INSTR[lang]}"
             )
         else:
-            search_scope = (
-                f"لم توجد نتيجة صالحة في متاجر الأولوية. "
-                f"اعمل الآن بحثاً عاماً واسعاً في جميع متاجر {market_name} التي تبيع المنتج، بما فيها المتاجر المتخصصة، "
-                "مع تجنب الإعلانات المبوبة فقط مثل OpenSooq. لا تستبعد المتجر لمجرد أنه ليس ضمن القائمة الأولى. "
+            if attempt == 1 and current_market().get("country") == "kw":
+                search_scope = (
+                    f"ابحث حصراً أولاً داخل هذه المتاجر وبنفس ترتيب الأولوية: {stores_hint}. "
+                    "لا تعرض أي متجر خارج هذه القائمة في هذه المحاولة، وإذا لم تجد فلا تكتب اعتذاراً مطولاً؛ أرجع بلا نتائج لننتقل للبحث العام. "
+                )
+            elif attempt == 1:
+                search_scope = (
+                    f"ابدأ بأشهر المتاجر المحلية في {market_name} أولاً. "
+                    "إذا لم تجد فلا تكتب اعتذاراً مطولاً؛ أرجع بلا نتائج لننتقل للبحث العام. "
+                )
+            else:
+                search_scope = (
+                    f"لم توجد نتيجة صالحة في متاجر الأولوية. "
+                    f"اعمل الآن بحثاً عاماً واسعاً في جميع متاجر {market_name} التي تبيع المنتج، بما فيها المتاجر المتخصصة، "
+                    "مع تجنب الإعلانات المبوبة فقط مثل OpenSooq. لا تستبعد المتجر لمجرد أنه ليس ضمن القائمة الأولى. "
+                )
+            current_prompt = (
+                f"{context}ابحث في {market_name} عن هذا الاسم تحديداً: {search_term}. "
+                + ((f"الاسم المختار من Google Lens هو: {(lens_context.get('chosen') or {}).get('title','')}. "
+                    "لا توسع البحث إلى موديلات أخرى من نفس البراند، ولا تقبل اختلافاً واضحاً في اللون أو النقشة أو وجود الكعب. ") if lens_context else "")
+                + f"{search_scope}"
+                "استخدم الاسم كما هو، ويمكن تجربة تهجئات قريبة لنفس المنتج فقط. "
+                "أعطني حتى 3 متاجر فقط، وكل نتيجة يجب أن تحتوي سعراً رقمياً بعملة السوق الحالي "
+                "ورابط صفحة المنتج المباشرة داخل المتجر. ممنوع روابط Google وصفحات البحث والتصنيف. "
+                "لا تكتب متوفر أو InStock بدلاً من السعر. اكتب السعر بالفلوس كاملة مثل 1.950 وليس 1.95. "
+                f"{LANG_INSTR[lang]}"
             )
-        current_prompt = (
-            f"{context}ابحث في {market_name} عن هذا الاسم تحديداً: {search_term}. "
-            + ((f"الاسم المختار من Google Lens هو: {(lens_context.get('chosen') or {}).get('title','')}. "
-                "لا توسع البحث إلى موديلات أخرى من نفس البراند، ولا تقبل اختلافاً واضحاً في اللون أو النقشة أو وجود الكعب. ") if lens_context else "")
-            + f"{search_scope}"
-            "استخدم الاسم كما هو، ويمكن تجربة تهجئات قريبة لنفس المنتج فقط. "
-            "أعطني حتى 3 متاجر فقط، وكل نتيجة يجب أن تحتوي سعراً رقمياً بعملة السوق الحالي "
-            "ورابط صفحة المنتج المباشرة داخل المتجر. ممنوع روابط Google وصفحات البحث والتصنيف. "
-            "لا تكتب متوفر أو InStock بدلاً من السعر. اكتب السعر بالفلوس كاملة مثل 1.950 وليس 1.95. "
-            f"{LANG_INSTR[lang]}"
-        )
 
-        txt, urls = call_gemini([{"text": current_prompt}])
+        txt, urls = call_gemini([{"text": current_prompt}], global_mode=allow_global)
         urls = direct_urls_only(urls)
         offers = extract_store_offers(txt)
 
@@ -1997,6 +2299,8 @@ def _new_layer_search(query, lang, prompt_text=None, source_image_b64=None, sour
         if txt and offers and urls:
             verified = verify_offers(urls, search_term)
             verified = filter_verified_with_lens(verified, lens_context)
+            verified = apply_local_gate(verified, allow_global)
+            verified = drop_absurd_prices(verified)
             if verified:
                 # Google Lens استُخدم قبل البحث لتحديد المنتج. لا نحذف نتائج الأسعار بسبب تقييم بصري تخميني.
                 sorted_v = sorted(verified.items(), key=lambda x: x[1]["price"])
@@ -2105,7 +2409,10 @@ def _old_layer_search(query, lang, prompt_text=None, lens_context=None, allow_gl
         return "", {}
     if allow_global:
         base_prompt = (
-            f"ابحث عالميًا عن {query}. استبعد تمامًا أي متجر داخل {current_market().get('country_name', 'بلد المستخدم')}، لأن البحث المحلي انتهى بالفعل. اقبل المتاجر الأجنبية الموثوقة فقط، مع سعر رقمي واضح ورابط صفحة المنتج المباشر، واذكر العملة الأصلية. {LANG_INSTR[lang]}"
+            f"Search WORLDWIDE for exactly this product: {query}. "
+            f"Exclude every store located in {current_market().get('country_name', 'the user country')} — the local search already finished. "
+            "Reputable international online stores only, each with a clear numeric price and a DIRECT product page link. "
+            f"State the original currency. Use ENGLISH search terms only. {LANG_INSTR[lang]}"
         )
     else:
         base_prompt = prompt_text or (
@@ -2115,8 +2422,8 @@ def _old_layer_search(query, lang, prompt_text=None, lens_context=None, allow_gl
     if allow_global:
         variants = [
             base_prompt,
-            f"{query} buy online worldwide exact product direct page price {LANG_INSTR[lang]}",
-            f"{query} international stores exact visual match direct product link {LANG_INSTR[lang]}",
+            f"{query} buy online worldwide exact product direct page numeric price original currency. Use ENGLISH search terms. {LANG_INSTR[lang]}",
+            f"{query} international online stores exact same product direct product link with price. English search only. {LANG_INSTR[lang]}",
         ]
     elif current_market().get("country") == "kw":
         variants = [
@@ -2135,7 +2442,10 @@ def _old_layer_search(query, lang, prompt_text=None, lens_context=None, allow_gl
     futures = []
     for variant in variants:
         for _ in range(OLD_LAYER_DUPLICATES):
-            futures.append(OLD_SEARCH_POOL.submit(_run_with_market, market_snapshot, call_gemini, [{"text": variant}]))
+            futures.append(OLD_SEARCH_POOL.submit(
+                _run_with_market, market_snapshot, call_gemini,
+                [{"text": variant}], SYSTEM_PROMPT, True, allow_global,
+            ))
     results = []
     for future in futures:
         try:
@@ -2165,6 +2475,8 @@ def _old_layer_search(query, lang, prompt_text=None, lens_context=None, allow_gl
         print(f"GLOBAL OLD LAYER AFTER LOCAL EXCLUSION: {list(verified)}")
     if lens_context:
         verified = filter_verified_with_lens(verified, lens_context)
+    verified = apply_local_gate(verified, allow_global)
+    verified = drop_absurd_prices(verified)
     if not verified:
         print("OLD LAYER: no verified direct offers")
         return "", {}
@@ -2251,7 +2563,13 @@ def _merge_two_layers(query, lang, new_result, old_result, lens_context=None):
 
 def search_product(query, lang, prompt_text=None, source_image_b64=None, source_image_mime=None, lens_context=None, allow_global=False):
     """Two-layer search: new Lens/priority method first, old broad method second, then rank both."""
-    cached = None if source_image_b64 or lens_context else cache_get(query, lang)
+    if allow_global:
+        # عالمياً: الهوية لازم تكون إنجليزية قبل أي طبقة بحث (idempotent — لاتيني يمر كما هو).
+        english = to_english_query(query)
+        if english and english != query:
+            print(f"GLOBAL ENGLISH QUERY: {query!r} -> {english!r}")
+        query = english or query
+    cached = None if source_image_b64 or lens_context or allow_global else cache_get(query, lang)
     if cached:
         return cached
 
@@ -2469,6 +2787,8 @@ def run_similar_search(phone, item):
         if not txt or not offers or not urls:
             continue
         verified = verify_offers(urls, base)
+        verified = apply_local_gate(verified, False)
+        verified = drop_absurd_prices(verified)
         if verified:
             sorted_v = sorted(verified.items(), key=lambda x: x[1]["price"])
             title = product_title(txt, f"بدائل مشابهة: {base}" if lang == "ar" else f"Similar to: {base}")
@@ -2505,9 +2825,20 @@ def run_global_search(phone, item):
     activate_market(phone)
     bot_id = item["bot_id"]; lang = item["lang"]; query = item["query"]
     send_whatsapp_text(phone, T(lang, "global_searching"), bot_id)
+    # باق: كان lens_context يُخزَّن كـ {} الفارغة، وهي falsy فتعطّل كل حراس الهوية —
+    # لهذا مرّت نتائج DREW (زوايا جبس) و Grumbacher (ألوان زيتية) كأنها نفس المنتج.
+    lens_ctx = item.get("lens_context") or None
+    if lens_ctx and not (lens_ctx.get("chosen") or {}).get("title"):
+        lens_ctx = None
+    en_query = to_english_query(query)
+    if not lens_ctx:
+        # بدون Lens: نبني سياق هوية من الاسم الإنجليزي حتى تعمل بوابة البراند
+        # (كلمات كاملة) على نتائج البحث العالمي أيضاً — نفس المنتج بالضبط أو لا شيء.
+        lens_ctx = {"chosen": {"title": en_query.replace(" | ", " ")}, "signature": {}, "matches": []}
+        print(f"GLOBAL PSEUDO IDENTITY: {lens_ctx['chosen']['title']!r}")
     txt, urls = search_product(
-        query, lang, prompt_text=item.get("prompt_text"),
-        lens_context=item.get("lens_context"), allow_global=True,
+        en_query, lang, prompt_text=item.get("prompt_text"),
+        lens_context=lens_ctx, allow_global=True,
     )
     if txt and urls:
         filtered_urls = {}
@@ -2793,6 +3124,22 @@ def choose_image_identity(image_b64, mime_type, lens, vision_name):
         return final_name or f"{vision_name} | {lens_title}", lens, "MERGE"
     return final_name or vision_name, None, "VISION"
 
+def identity_guard_context(name):
+    """سياق هوية للحراسة حتى بدون Lens.
+
+    باق «سوق البناء الحديث»: لما الحَكَم يختار Vision ويرفض Lens، البحث كان يمشي
+    بـ lens_context=None فتتعطل بوابة البراند بالكامل، وتمر منتجات مختلفة من الطبقة
+    القديمة بلا فحص. الحل: نبني سياقاً من هوية Vision نفسها (الجزء اللاتيني أولاً)
+    فتعمل بوابة «نفس المنتج بالضبط أو لا شيء» على كل بحث صورة، فاز Lens أو Vision.
+    """
+    parts = [p.strip() for p in re.split(r"\s*[|｜]\s*", name or "") if p.strip()]
+    latin = [p for p in parts if re.search(r"[A-Za-z]", p)]
+    title = (latin[0] if latin else (parts[0] if parts else "")).strip()
+    if not title or len(title) < 3:
+        return None
+    return {"chosen": {"title": title}, "signature": {}, "matches": [], "pseudo": True}
+
+
 def process_single_image(message,bot_id,lang="ar"):
     from_number=message["from"]
     market = activate_market(from_number)
@@ -2821,6 +3168,7 @@ def process_single_image(message,bot_id,lang="ar"):
     use_lens = force_fashion_lens or use_lens
 
     lens = {"aliases": [], "matches": [], "query": ""}
+    lens_harvest_future = None
     if use_lens:
         if lens_future is not None:
             try:
@@ -2830,8 +3178,10 @@ def process_single_image(message,bot_id,lang="ar"):
         else:
             lens = google_lens_lookup(b64, mime, lang, caption or vision_name)
     elif lens_future is not None:
-        # الراوتر قرر Vision-first (عبوة نصية)؛ نتيجة اللينز المتوازية تُهمل بهدوء.
-        lens_future.cancel()
+        # الراوتر اختار Vision للهوية (عبوة نصية)، لكن نتائج اللينز تبقى مصدراً ثميناً
+        # لروابط البائعين الحقيقيين عالمياً (DISCOUNTO.de، eBay...). لا نلغيها — نحصدها
+        # لاحقاً فقط إذا فشل البحث المحلي واحتجنا البحث العالمي.
+        lens_harvest_future = lens_future
 
     active_lens = None
     identity_source = "VISION"
@@ -2873,6 +3223,13 @@ def process_single_image(message,bot_id,lang="ar"):
 
     print(f"FINAL IMAGE IDENTITY [{identity_source}]: {combined_name}")
 
+    # الحارس يعمل دائماً في بحث الصور: بسياق Lens إذا فاز، أو بسياق مبني من هوية Vision.
+    guard_ctx = active_lens
+    if guard_ctx is None and combined_name:
+        guard_ctx = identity_guard_context(combined_name)
+        if guard_ctx:
+            print(f"IDENTITY GUARD (vision): {guard_ctx['chosen']['title']!r}")
+
     if combined_name and caption:
         request_query = f"{caption} — {combined_name}"
         prompt_text = (
@@ -2881,10 +3238,10 @@ def process_single_image(message,bot_id,lang="ar"):
             "ابحث عن نفس المنتج فقط. لا توسع البحث إلى منتج يشاركه المكون أو اللون أو الفئة. "
             f"{LANG_INSTR[lang]}"
         )
-        txt,urls=search_product(request_query, lang, prompt_text=prompt_text, lens_context=active_lens)
+        txt,urls=search_product(request_query, lang, prompt_text=prompt_text, lens_context=guard_ctx)
         query = request_query
     elif combined_name:
-        txt,urls=search_product(combined_name, lang, lens_context=active_lens)
+        txt,urls=search_product(combined_name, lang, lens_context=guard_ctx)
         query = combined_name
     else:
         txt, urls = "", {}
@@ -2897,8 +3254,22 @@ def process_single_image(message,bot_id,lang="ar"):
             send_product_result(from_number, txt, urls, bot_id, lang, query)
             return
         if query:
+            # قبل عرض الخيارات: نحصد نتائج اللينز المتوازية (إن وُجدت) ونعلقها بسياق الحارس.
+            # بدونها كان البحث العالمي نصياً فقط ويرجع صفر نتائج رغم وجود بائعين حقيقيين في Lens.
+            if guard_ctx and guard_ctx.get("pseudo") and not guard_ctx.get("matches"):
+                harvest_src = None
+                if lens.get("matches"):
+                    harvest_src = lens
+                elif lens_harvest_future is not None:
+                    try:
+                        harvest_src = lens_harvest_future.result(timeout=45) or None
+                    except Exception as e:
+                        print(f"LENS HARVEST ERR: {e}")
+                if harvest_src and harvest_src.get("matches"):
+                    guard_ctx["matches"] = harvest_src["matches"]
+                    print(f"LENS HARVESTED FOR GLOBAL: {len(guard_ctx['matches'])} matches (identity stays VISION)")
             # حتى بدون نتائج Lens، البحث العالمي والبدائل يعملان نصياً بالاسم المحدد.
-            _store_pending_global(from_number, bot_id, lang, query, active_lens, prompt_text if (combined_name and caption) else None)
+            _store_pending_global(from_number, bot_id, lang, query, guard_ctx, prompt_text if (combined_name and caption) else None)
             send_not_found_choice(from_number, bot_id, lang)
         else:
             send_whatsapp_text(from_number,T(lang,"cant_identify"),bot_id)
@@ -2913,10 +3284,14 @@ def identify_image_product(msg):
         return identify_product_with_retry(b64, mime, "ar")
     except: return ""
 
-def process_cart(products, from_number, bot_id, lang="ar"):
+def process_cart(products, from_number, bot_id, lang="ar", guard=False):
     # MARKET_CTX يضيع داخل WORKERS؛ بدون الغلاف يبحث للسلة كلها في الدولة الافتراضية.
+    # guard=True لسلال الصور: كل منتج يبحث بسياق هوية حتى لا يُستبدل بمنتج مختلف.
     market = market_for_user(from_number)
-    results = list(WORKERS.map(lambda p: (p, *_run_with_market(market, search_product, p, lang)), products))
+    def _one(p):
+        ctx = identity_guard_context(p) if guard else None
+        return (p, *_run_with_market(market, search_product, p, lang, None, None, None, ctx))
+    results = list(WORKERS.map(_one, products))
     any_ok = False
     for p, txt, urls in results:
         if not txt: continue
@@ -2934,7 +3309,7 @@ def process_multi_images(messages,from_number,bot_id,lang="ar"):
     if not names:
         send_whatsapp_text(from_number,T(lang,"cant_identify"),bot_id)
         return
-    process_cart(names, from_number, bot_id, lang)
+    process_cart(names, from_number, bot_id, lang, guard=True)
 
 def is_map_command(text):
     compact = re.sub(r"[^\w\u0600-\u06FF]", "", normalize_ar(text))
@@ -3154,4 +3529,4 @@ def process_location_message(message, bot_id):
     route_pending_after_location(from_number)
 
 @app.get("/")
-async def health(): return {"status":"v66 INTENT UNDERSTANDING + FX", "build":BUILD_ID, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
+async def health(): return {"status":"v71 LINKS FIRST + JS STORES + GPS", "build":BUILD_ID, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
