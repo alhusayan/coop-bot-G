@@ -6,17 +6,16 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v49-exact-guard-20260802"
+BUILD_ID = "v53-lens-multipass-20260803"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
-print("LENS MODE: DIRECT — NO STRICT VISUAL SELECTION")
+print("LENS MODE: MULTI-PASS (products -> all -> wide) + EXACT FLAG FIX")
 print("=" * 70)
 
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 # تقدر تغيّر نموذج البحث ونموذج التعرف على الصور كل واحد بروحه من Environment Variables.
-# تركنا الافتراضي نفس نموذجك الحالي حتى لا يتعطل النشر بسبب اسم نموذج غير متاح في حسابك.
 GEMINI_SEARCH_MODEL = os.environ.get("GEMINI_SEARCH_MODEL", GEMINI_MODEL)
 GEMINI_FAST_MODEL = os.environ.get("GEMINI_FAST_MODEL", GEMINI_MODEL)
 WHATSAPP_TOKEN = os.environ.get("WHATSAPP_TOKEN", "")
@@ -62,7 +61,21 @@ AUTO_SEND_PRODUCT_MAPS = env_bool("AUTO_SEND_PRODUCT_MAPS", True)
 # لذلك نستخدم SerpApi للوصول إلى نتائج Lens المنظمة.
 SERPAPI_API_KEY = os.environ.get("SERPAPI_API_KEY", "").strip()
 PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "").strip().rstrip("/")
+if not PUBLIC_BASE_URL:
+    # على Railway الرابط العام موجود تلقائياً في هذه المتغيرات؛ نستخدمه بدون إعداد يدوي.
+    _railway_domain = (
+        os.environ.get("RAILWAY_PUBLIC_DOMAIN", "")
+        or os.environ.get("RAILWAY_STATIC_URL", "")
+    ).strip()
+    if _railway_domain:
+        _railway_domain = _railway_domain.replace("https://", "").replace("http://", "").rstrip("/")
+        PUBLIC_BASE_URL = f"https://{_railway_domain}"
+        print(f"PUBLIC_BASE_URL auto-derived from Railway: {PUBLIC_BASE_URL}")
 ENABLE_GOOGLE_LENS = env_bool("ENABLE_GOOGLE_LENS", True)
+# Fallback واسع: إذا نتائج الكويت قليلة، نعيد الطلب بدون قيد الدولة (مثل تطبيق Lens نفسه).
+ENABLE_LENS_WIDE_FALLBACK = env_bool("ENABLE_LENS_WIDE_FALLBACK", True)
+# أقل عدد نتائج نعتبره "كافياً" قبل التوقف عن تجربة تمريرات Lens إضافية.
+LENS_MIN_MATCHES = max(3, int(os.environ.get("LENS_MIN_MATCHES", "5")))
 LENS_RESULT_LIMIT = max(12, int(os.environ.get("LENS_RESULT_LIMIT", "40")))
 LENS_IMAGE_TTL = max(120, int(os.environ.get("LENS_IMAGE_TTL_SECONDS", "600")))
 LENS_IMAGE_STORE = {}
@@ -73,14 +86,15 @@ GROCERY_WORDS = [
     "برينجلز","كيتكات","نسكافيه","تونه","ماء","عصير","بسكوت","منظف","معجون","حفاض"
 ]
 
-print("STARTING COOP BOT BUILD: v52-kw-priority-fils-20260802")
 print(
     f"ECONOMIC CONFIG search_model={GEMINI_SEARCH_MODEL} fast_model={GEMINI_FAST_MODEL} "
     f"max_stores={MAX_STORES} search_attempts={MAX_SEARCH_ATTEMPTS} "
-    f"identify_attempts={MAX_IDENTIFY_ATTEMPTS} auto_maps={AUTO_SEND_PRODUCT_MAPS}"
+    f"identify_attempts={MAX_IDENTIFY_ATTEMPTS} auto_maps={AUTO_SEND_PRODUCT_MAPS} "
+    f"lens_wide_fallback={ENABLE_LENS_WIDE_FALLBACK} public_base_url={'SET' if PUBLIC_BASE_URL else 'MISSING'}"
 )
 
 VERIFIED_PAGE_CACHE = {}
+VERIFIED_PAGE_CACHE_MAX = int(os.environ.get("VERIFIED_PAGE_CACHE_MAX", "600"))
 OOS_PHRASES = ["out of stock","غير متوفر","نفدت الكمية","غير متاح","sold out","غير متوفر حاليا","نفذت","not available","temporarily unavailable"]
 LISTING_URL_PARTS = ["/search","/s?","/category","/categories","/collection","/collections","/shop/category","?q=","/search_results","/shop/","/listing","/c/"]
 
@@ -331,7 +345,9 @@ MSG = {
         "identifying": "ثواني بس.. أحدد المنتج وأدور لك الأفضل!",
         "searching": "🔍 أدور لك على {q}...",
         "not_found": "ما لقيت المنتج متوفر حالياً بسعر مؤكد 😅 جرب صياغة ثانية أو دز صورة أوضح.",
+        "identified_not_found": "حددت المنتج ({p}) بس ما لقيت له سعر مؤكد بمتاجر الكويت حالياً 😅 جرب تكتب اسمه بصيغة ثانية.",
         "cant_identify": "بحثت أكثر من مرة، لكن ما قدرت أحدد المنتج أو ألقى له نتيجة مؤكدة. دز صورة أوضح أو اكتب اسم المنتج.",
+        "image_error": "صار خلل بسيط وأنا أحمّل الصورة 😅 عيد إرسالها مرة ثانية.",
         "multi_text": "تمام لقيت {c} منتجات، أسوي سلة...",
         "multi_images": "تمام لقطت {c} منتجات، أسوي سلة...",
         "maps_body": "📍 تبي أقرب مكان؟\n\nاضغط الزر والخريطة بتفتح على أقرب الأماكن حولك 👇",
@@ -344,7 +360,9 @@ MSG = {
         "identifying": "One sec.. identifying the product and finding you the best deal!",
         "searching": "🔍 Looking up {q}...",
         "not_found": "Couldn't find it in-stock with a verified price 😅 try another phrasing or a clearer photo.",
+        "identified_not_found": "I identified the product ({p}) but couldn't find a verified Kuwait price right now 😅 try typing its name differently.",
         "cant_identify": "I searched several times but couldn’t identify the product or find a verified result. Send a clearer photo or type the product name.",
+        "image_error": "Something went wrong while loading the image 😅 please send it again.",
         "multi_text": "Got it, found {c} products. Building your cart...",
         "multi_images": "Nice, spotted {c} products. Building your cart...",
         "maps_body": "📍 Want the nearest place?\n\nTap the button and the map will open on the closest spots around you 👇",
@@ -491,6 +509,14 @@ def parse_product_data(html, url):
                 data["is_product"] = False
     return data
 
+def _prune_verified_page_cache():
+    if len(VERIFIED_PAGE_CACHE) <= VERIFIED_PAGE_CACHE_MAX:
+        return
+    # نحذف الأقدم حتى لا تتضخم الذاكرة على Railway مع مرور الأيام.
+    items = sorted(VERIFIED_PAGE_CACHE.items(), key=lambda kv: kv[1].get("ts", 0))
+    for k, _ in items[: len(items) - VERIFIED_PAGE_CACHE_MAX // 2]:
+        VERIFIED_PAGE_CACHE.pop(k, None)
+
 def verify_offers(urls_map, query):
     if not urls_map: return {}
     verified = {}
@@ -516,6 +542,7 @@ def verify_offers(urls_map, query):
             return None
         return (name, url, info)
     results = list(RESOLVER.map(_check, urls_map.items()))
+    _prune_verified_page_cache()
     for r in results:
         if r:
             name, url, info = r
@@ -549,10 +576,14 @@ def publish_image_for_lens(image_b64, mime_type):
         }
     return f"{PUBLIC_BASE_URL}/lens-image/{token}"
 
-def _lens_items(data):
-    items = []
-    seen = set()
-    for key in ("visual_matches", "exact_matches", "products"):
+def _collect_lens_items(data, items, seen):
+    """يجمع نتائج Lens من كل الأقسام مع تعليم exact حسب مصدر النتيجة فعلياً.
+
+    ملاحظة مهمة: في النسخة القديمة كان exact يُقرأ من الحقل x["exact_matches"]
+    وهو غير موجود داخل العنصر نفسه، فكانت كل النتائج exact=False دائماً.
+    الآن exact=True لأي عنصر جاء من قسم exact_matches.
+    """
+    for key in ("exact_matches", "visual_matches", "products"):
         values = data.get(key) or []
         if isinstance(values, dict):
             values = values.get("results") or []
@@ -571,7 +602,7 @@ def _lens_items(data):
                 "link": link,
                 "source": source,
                 "position": int(x.get("position") or len(items) + 1),
-                "exact": bool(x.get("exact_matches")),
+                "exact": key == "exact_matches",
                 "thumbnail": (x.get("thumbnail") or x.get("image") or "").strip(),
                 "image": (x.get("image") or x.get("thumbnail") or "").strip(),
                 "price": ((x.get("price") or {}).get("value") if isinstance(x.get("price"), dict) else str(x.get("price") or "")),
@@ -580,30 +611,52 @@ def _lens_items(data):
                 "in_stock": x.get("in_stock"),
                 "condition": (x.get("condition") or "").strip(),
             })
-    return items[:LENS_RESULT_LIMIT]
+    return items
 
-def _download_lens_candidate(url):
-    """ينزّل صورة مصغرة من نتائج Lens للمقارنة المؤقتة فقط."""
-    if not url or not url.startswith(("http://", "https://")):
-        return None
+def _serpapi_lens_request(public_url, lens_type, country, auto_crop, query_hint):
+    """طلب Lens واحد إلى SerpApi ويعيد قائمة النتائج (قد تكون فارغة)."""
+    params = {
+        "engine": "google_lens",
+        "url": public_url,
+        "api_key": SERPAPI_API_KEY,
+        "hl": "en",
+        "safe": "active",
+        "output": "json",
+    }
+    if lens_type:
+        params["type"] = lens_type
+    if country:
+        params["country"] = country
+    if auto_crop:
+        params["auto_crop"] = "true"
+    # q مسموح فقط مع all و visual_matches و products حسب توثيق SerpApi.
+    if query_hint and (lens_type in (None, "", "all", "visual_matches", "products")):
+        params["q"] = query_hint[:120]
     try:
-        r = requests.get(url, headers=HEADERS, timeout=12)
-        ctype = (r.headers.get("content-type") or "image/jpeg").split(";")[0]
-        if r.status_code != 200 or not r.content or len(r.content) > 5 * 1024 * 1024:
-            return None
-        if not ctype.startswith("image/"):
-            ctype = "image/jpeg"
-        return base64.b64encode(r.content).decode(), ctype
+        r = requests.get("https://serpapi.com/search.json", params=params, timeout=60)
+        if r.status_code >= 400:
+            print(f"GOOGLE LENS HTTP {r.status_code} type={lens_type or 'all'} country={country or '-'}: {r.text[:300]}")
+            return []
+        data = r.json()
+        if data.get("error"):
+            print(f"GOOGLE LENS ERROR type={lens_type or 'all'} country={country or '-'}: {data.get('error')}")
+            return []
+        items, seen = [], set()
+        _collect_lens_items(data, items, seen)
+        print(f"GOOGLE LENS PASS type={lens_type or 'all'} country={country or '-'} auto_crop={auto_crop} -> {len(items)} items")
+        return items
     except Exception as e:
-        print(f"LENS CANDIDATE IMAGE ERR: {e}")
-        return None
-
+        print(f"GOOGLE LENS PASS EXCEPTION type={lens_type or 'all'}: {e}")
+        return []
 
 def google_lens_lookup(image_b64, mime_type, lang="ar", query_hint=""):
-    """يستخدم أفضل نتيجة Google Lens مباشرة، ثم يستخرج وصفاً شكلياً من الصورة الأصلية فقط.
+    """تعرف بصري متعدد التمريرات ليقترب من قوة تطبيق Google Lens نفسه.
 
-    لا نطلب من Gemini اختيار صورة من صور Lens؛ لأن الصور المصغرة قد لا تُحمّل أو قد تجعل المقارنة
-    المتشددة ترجع NONE رغم أن Lens عرّف المنتج بصورة صحيحة.
+    التمريرات بالترتيب (نتوقف بمجرد الحصول على نتائج كافية):
+      1) type=products + country=kw + auto_crop  -> بطاقات منتجات فيها أسعار.
+      2) type=all + country=kw + auto_crop       -> visual_matches و exact_matches (أقوى تعرف بكثير).
+      3) type=all بدون قيد الدولة وبدون auto_crop -> أوسع بحث، مثل تطبيق Lens تماماً.
+    ثم ندمج النتائج (بدون تكرار) ونختار أفضل عنوان، ونستخرج التوقيع الشكلي من الصورة الأصلية.
     """
     if not ENABLE_GOOGLE_LENS or not SERPAPI_API_KEY or not PUBLIC_BASE_URL:
         print("GOOGLE LENS SKIPPED: missing SERPAPI_API_KEY or PUBLIC_BASE_URL")
@@ -614,40 +667,40 @@ def google_lens_lookup(image_b64, mime_type, lang="ar", query_hint=""):
         print("GOOGLE LENS SKIPPED: could not publish image")
         return {"aliases": [], "matches": [], "query": ""}
 
-    params = {
-        "engine": "google_lens",
-        "type": "products",
-        "url": public_url,
-        "api_key": SERPAPI_API_KEY,
-        "country": "kw",
-        "hl": "en",
-        "auto_crop": "true",
-        "safe": "active",
-        "output": "json",
-    }
-    if query_hint:
-        params["q"] = query_hint[:120]
-
     try:
-        r = requests.get("https://serpapi.com/search.json", params=params, timeout=60)
-        if r.status_code >= 400:
-            print(f"GOOGLE LENS HTTP {r.status_code}: {r.text[:300]}")
-            return {"aliases": [], "matches": [], "query": ""}
-        data = r.json()
-        if data.get("error"):
-            print(f"GOOGLE LENS ERROR: {data.get('error')}")
-            return {"aliases": [], "matches": [], "query": ""}
+        merged, seen = [], set()
 
-        matches = _lens_items(data)
+        def _merge(new_items):
+            for it in new_items:
+                sig = (it["title"].lower(), it["link"].lower())
+                if sig in seen:
+                    continue
+                seen.add(sig)
+                merged.append(it)
+
+        passes = [
+            ("products", "kw", True),
+            ("all", "kw", True),
+        ]
+        if ENABLE_LENS_WIDE_FALLBACK:
+            passes.append(("all", "", False))
+
+        for lens_type, country, auto_crop in passes:
+            _merge(_serpapi_lens_request(public_url, lens_type, country, auto_crop, query_hint))
+            has_exact = any(m.get("exact") for m in merged)
+            if len(merged) >= LENS_MIN_MATCHES and (has_exact or lens_type != "products"):
+                break
+
+        matches = merged[:LENS_RESULT_LIMIT]
         if not matches:
-            print("GOOGLE LENS: no visual matches")
+            print("GOOGLE LENS: no visual matches after all passes")
             return {"aliases": [], "matches": [], "query": ""}
 
         # اطبع أول النتائج حتى نعرف فعلياً ماذا أعاد Lens.
         for i, m in enumerate(matches[:5], 1):
             print(f"LENS MATCH {i}: {m.get('title','')} | {m.get('source','')} | exact={m.get('exact', False)}")
 
-        # نختار أول نتيجة Visual Match ذات عنوان واضح. exact_matches تحصل على أولوية،
+        # نختار أول نتيجة ذات عنوان واضح. exact_matches تحصل على أولوية،
         # ثم ترتيب Google Lens نفسه. نستبعد العناوين العامة جداً فقط.
         generic = re.compile(r"^(mules?|shoes?|slippers?|sandals?|footwear|بوتيغا فينيتا|bottega veneta)$", re.I)
         ranked = []
@@ -1343,11 +1396,15 @@ def lens_priced_offers(lens_context, lang="ar"):
 
 
 def verify_lens_direct_matches(lens_context):
-    """Fallback verifier for Lens URLs that had no price card."""
+    """Fallback verifier for Lens URLs that had no price card. Exact matches get priority."""
     if not lens_context:
         return {}
     candidates = {}
-    for i, m in enumerate((lens_context.get("matches") or [])[:8], 1):
+    ordered = sorted(
+        (lens_context.get("matches") or [])[:16],
+        key=lambda m: (0 if m.get("exact") else 1, int(m.get("position") or 99)),
+    )
+    for i, m in enumerate(ordered[:8], 1):
         url = (m.get("link") or "").strip()
         title = (m.get("title") or "").strip()
         source = (m.get("source") or f"Lens {i}").strip()
@@ -1636,7 +1693,13 @@ def process_single_image(message,bot_id,lang="ar"):
     from_number=message["from"]
     caption=(message.get("image",{}) or {}).get("caption","").strip()
     send_whatsapp_text(from_number,T(lang,"identifying"),bot_id)
-    b64,mime=download_whatsapp_media(message["image"]["id"])
+    try:
+        b64,mime=download_whatsapp_media(message["image"]["id"])
+    except Exception as e:
+        # روابط ميديا واتساب تنتهي صلاحيتها بسرعة؛ لا نترك المستخدم بدون رد.
+        print(f"MEDIA DOWNLOAD ERR: {e}")
+        send_whatsapp_text(from_number, T(lang, "image_error"), bot_id)
+        return
 
     # 1) Google Lens يحدد المنتج بصرياً.
     lens = google_lens_lookup(b64, mime, lang, caption)
@@ -1672,7 +1735,11 @@ def process_single_image(message,bot_id,lang="ar"):
     if query:
         LAST_SEARCH[from_number] = {"product": query}
     if not txt:
-        send_whatsapp_text(from_number,T(lang,"cant_identify"),bot_id)
+        # فرق مهم للمستخدم: هل فشل التعرف نفسه، أم عرفنا المنتج بس ما لقينا سعر مؤكد؟
+        if combined_name:
+            send_whatsapp_text(from_number, T(lang, "identified_not_found", p=short_query(combined_name)), bot_id)
+        else:
+            send_whatsapp_text(from_number, T(lang, "cant_identify"), bot_id)
         return
     result_type = send_product_result(from_number, txt, urls, bot_id, lang, query)
     if query and (result_type == "service" or (result_type == "product" and AUTO_SEND_PRODUCT_MAPS)):
@@ -1733,8 +1800,17 @@ def process_text_message(message,bot_id):
         return
     pend=PENDING_IMAGES.pop(from_number,None)
     if pend and pend["images"]:
-        if len(pend["images"])==1: process_single_image(pend["images"][0], pend["bot_id"], lang)
-        else: process_multi_images(pend["images"], from_number, pend["bot_id"], lang)
+        # الرسالة النصية بعد صورة معلقة تُعامل كوصف للصورة نفسها،
+        # ولا نكمل لمعالجتها كبحث نصي مستقل (كان يسبب بحثين وردّين مزدوجين).
+        if len(pend["images"])==1:
+            img_msg = pend["images"][0]
+            img = img_msg.setdefault("image", {})
+            if not (img.get("caption") or "").strip():
+                img["caption"] = user_text.strip()
+            process_single_image(img_msg, pend["bot_id"], lang)
+        else:
+            process_multi_images(pend["images"], from_number, pend["bot_id"], lang)
+        return
     products=extract_products(user_text)
     if len(products)==1:
         send_whatsapp_text(from_number,T(lang,"searching",q=products[0]),bot_id)
@@ -1760,4 +1836,4 @@ def process_location_message(message, bot_id):
     send_whatsapp_cta(from_number, body, maps_url, bot_id, T(lang,"maps_btn"))
 
 @app.get("/")
-async def health(): return {"status":"v52 KUWAIT PRIORITY + FILS", "build":"v52-kw-priority-fils-20260802"}
+async def health(): return {"status":"v53 LENS MULTI-PASS + EXACT FLAG FIX", "build": BUILD_ID}
