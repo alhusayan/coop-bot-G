@@ -6,10 +6,10 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v68-global-english-20260803"
+BUILD_ID = "v69-identity-guard-always-20260803"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
-print("GLOBAL=ENGLISH QUERIES + IDENTITY GUARD EVERYWHERE + PRICE SANITY")
+print("IDENTITY GUARD ON EVERY IMAGE SEARCH (LENS OR VISION) + GLOBAL ENGLISH")
 print("=" * 70)
 
 
@@ -2974,6 +2974,22 @@ def choose_image_identity(image_b64, mime_type, lens, vision_name):
         return final_name or f"{vision_name} | {lens_title}", lens, "MERGE"
     return final_name or vision_name, None, "VISION"
 
+def identity_guard_context(name):
+    """سياق هوية للحراسة حتى بدون Lens.
+
+    باق «سوق البناء الحديث»: لما الحَكَم يختار Vision ويرفض Lens، البحث كان يمشي
+    بـ lens_context=None فتتعطل بوابة البراند بالكامل، وتمر منتجات مختلفة من الطبقة
+    القديمة بلا فحص. الحل: نبني سياقاً من هوية Vision نفسها (الجزء اللاتيني أولاً)
+    فتعمل بوابة «نفس المنتج بالضبط أو لا شيء» على كل بحث صورة، فاز Lens أو Vision.
+    """
+    parts = [p.strip() for p in re.split(r"\s*[|｜]\s*", name or "") if p.strip()]
+    latin = [p for p in parts if re.search(r"[A-Za-z]", p)]
+    title = (latin[0] if latin else (parts[0] if parts else "")).strip()
+    if not title or len(title) < 3:
+        return None
+    return {"chosen": {"title": title}, "signature": {}, "matches": [], "pseudo": True}
+
+
 def process_single_image(message,bot_id,lang="ar"):
     from_number=message["from"]
     market = activate_market(from_number)
@@ -3054,6 +3070,13 @@ def process_single_image(message,bot_id,lang="ar"):
 
     print(f"FINAL IMAGE IDENTITY [{identity_source}]: {combined_name}")
 
+    # الحارس يعمل دائماً في بحث الصور: بسياق Lens إذا فاز، أو بسياق مبني من هوية Vision.
+    guard_ctx = active_lens
+    if guard_ctx is None and combined_name:
+        guard_ctx = identity_guard_context(combined_name)
+        if guard_ctx:
+            print(f"IDENTITY GUARD (vision): {guard_ctx['chosen']['title']!r}")
+
     if combined_name and caption:
         request_query = f"{caption} — {combined_name}"
         prompt_text = (
@@ -3062,10 +3085,10 @@ def process_single_image(message,bot_id,lang="ar"):
             "ابحث عن نفس المنتج فقط. لا توسع البحث إلى منتج يشاركه المكون أو اللون أو الفئة. "
             f"{LANG_INSTR[lang]}"
         )
-        txt,urls=search_product(request_query, lang, prompt_text=prompt_text, lens_context=active_lens)
+        txt,urls=search_product(request_query, lang, prompt_text=prompt_text, lens_context=guard_ctx)
         query = request_query
     elif combined_name:
-        txt,urls=search_product(combined_name, lang, lens_context=active_lens)
+        txt,urls=search_product(combined_name, lang, lens_context=guard_ctx)
         query = combined_name
     else:
         txt, urls = "", {}
@@ -3079,7 +3102,7 @@ def process_single_image(message,bot_id,lang="ar"):
             return
         if query:
             # حتى بدون نتائج Lens، البحث العالمي والبدائل يعملان نصياً بالاسم المحدد.
-            _store_pending_global(from_number, bot_id, lang, query, active_lens, prompt_text if (combined_name and caption) else None)
+            _store_pending_global(from_number, bot_id, lang, query, guard_ctx, prompt_text if (combined_name and caption) else None)
             send_not_found_choice(from_number, bot_id, lang)
         else:
             send_whatsapp_text(from_number,T(lang,"cant_identify"),bot_id)
@@ -3094,10 +3117,14 @@ def identify_image_product(msg):
         return identify_product_with_retry(b64, mime, "ar")
     except: return ""
 
-def process_cart(products, from_number, bot_id, lang="ar"):
+def process_cart(products, from_number, bot_id, lang="ar", guard=False):
     # MARKET_CTX يضيع داخل WORKERS؛ بدون الغلاف يبحث للسلة كلها في الدولة الافتراضية.
+    # guard=True لسلال الصور: كل منتج يبحث بسياق هوية حتى لا يُستبدل بمنتج مختلف.
     market = market_for_user(from_number)
-    results = list(WORKERS.map(lambda p: (p, *_run_with_market(market, search_product, p, lang)), products))
+    def _one(p):
+        ctx = identity_guard_context(p) if guard else None
+        return (p, *_run_with_market(market, search_product, p, lang, None, None, None, ctx))
+    results = list(WORKERS.map(_one, products))
     any_ok = False
     for p, txt, urls in results:
         if not txt: continue
@@ -3115,7 +3142,7 @@ def process_multi_images(messages,from_number,bot_id,lang="ar"):
     if not names:
         send_whatsapp_text(from_number,T(lang,"cant_identify"),bot_id)
         return
-    process_cart(names, from_number, bot_id, lang)
+    process_cart(names, from_number, bot_id, lang, guard=True)
 
 def is_map_command(text):
     compact = re.sub(r"[^\w\u0600-\u06FF]", "", normalize_ar(text))
@@ -3335,4 +3362,4 @@ def process_location_message(message, bot_id):
     route_pending_after_location(from_number)
 
 @app.get("/")
-async def health(): return {"status":"v68 GLOBAL ENGLISH + GUARDS", "build":BUILD_ID, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
+async def health(): return {"status":"v69 IDENTITY GUARD ALWAYS", "build":BUILD_ID, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
