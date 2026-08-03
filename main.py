@@ -6,10 +6,10 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v66-intent-understanding-20260803"
+BUILD_ID = "v67-exact-or-options-20260803"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
-print("INTENT UNDERSTANDING + NOT-FOUND OPTIONS + GLOBAL FX -> LOCAL CURRENCY")
+print("EXACT-OR-OPTIONS: NO SILENT SUBSTITUTES + PRICE SANITY + LOCAL GATE")
 print("=" * 70)
 
 
@@ -71,6 +71,8 @@ ENABLE_SEARCH_RETRY = env_bool("ENABLE_SEARCH_RETRY", True)
 MAX_SEARCH_ATTEMPTS = max(2, int(os.environ.get("MAX_SEARCH_ATTEMPTS", "3")))
 MAX_IDENTIFY_ATTEMPTS = max(2, int(os.environ.get("MAX_IDENTIFY_ATTEMPTS", "3")))
 AUTO_SEND_PRODUCT_MAPS = env_bool("AUTO_SEND_PRODUCT_MAPS", True)
+# حارس جنون الأسعار: سعر أعلى من هذا الحد (بعملة السوق) يُرفض كخطأ استخراج.
+PRICE_SANITY_CAP = float(os.environ.get("PRICE_SANITY_CAP", "10000"))
 # Google Lens عبر SerpApi. لا توجد Google Lens API عامة رسمية للاستخدام الخادمي،
 # لذلك نستخدم SerpApi للوصول إلى نتائج Lens المنظمة.
 SERPAPI_API_KEY = os.environ.get("SERPAPI_API_KEY", "").strip()
@@ -1148,8 +1150,42 @@ def _meaningful_lens_tokens(text):
     return out
 
 
+def _token_in(token, hay):
+    """مطابقة كلمة كاملة وليس جزء كلمة: deco لا تطابق داخل DecoFiller.
+
+    هذا هو الباق الذي سمح بعرض Orac DecoFiller بدل Deco Craft — كلمة deco
+    كانت تُطابق كجزء من decofiller فيمر منتج مختلف تماماً كأنه نفس المنتج.
+    """
+    if not token or not hay:
+        return False
+    return bool(re.search(rf"(?<![\w\u0600-\u06FF]){re.escape(token)}(?![\w\u0600-\u06FF])", hay))
+
+
+BRAND_STOPWORDS = {
+    "the", "new", "original", "genuine", "white", "black", "mini", "pro", "max",
+    "for", "and", "with", "set", "pack",
+}
+
+def _extract_brand_tokens(chosen_title):
+    """أول كلمتين لاتينيتين من عنوان Lens تُعاملان كبراند (مثل deco + craft)."""
+    toks = re.findall(r"[a-z][a-z0-9]+", normalize_ar(chosen_title or ""))
+    brand = []
+    for t in toks:
+        if t in BRAND_STOPWORDS or len(t) < 3:
+            continue
+        brand.append(t)
+        if len(brand) == 2:
+            break
+    return brand
+
+
 def _lens_offer_compatible(info, url, lens_context):
-    """Strict guard for image searches. Candidate title/URL alone must match the Lens identity."""
+    """بوابة «نفس المنتج بالضبط أو لا شيء» لنتائج بحث الصور.
+
+    القاعدة: المرشح يمر فقط إذا طابق براند Lens (كلمات كاملة) مع كلمة مميزة واحدة
+    على الأقل، أو طابق كلمتين مميزتين من عنوان Lens. غير ذلك = رفض، ويُعرض للمستخدم
+    خيار (عالمي / بدائل مشابهة) بدل تقديم منتج شبيه على أنه نفس المنتج.
+    """
     if not lens_context:
         return True
     sig = lens_context.get("signature") or {}
@@ -1157,30 +1193,36 @@ def _lens_offer_compatible(info, url, lens_context):
     candidate_hay = normalize_ar(" ".join([str(info.get("title", "")), str(url)])).lower()
     chosen_title = normalize_ar(str(chosen.get("title", ""))).lower()
 
-    # Brand is mandatory when Lens returned a clear brand.
+    # Brand is mandatory when Lens returned a clear brand (hardcoded high-risk brands).
     brand_aliases = {
         "bottega veneta": ("bottega", "veneta", "بوتيغا", "بوتيقا"),
         "under armour": ("under", "armour", "اندر", "ارمور"),
     }
     for brand, aliases in brand_aliases.items():
-        if brand in chosen_title and not any(normalize_ar(a) in candidate_hay for a in aliases):
+        if brand in chosen_title and not any(_token_in(normalize_ar(a), candidate_hay) for a in aliases):
             return False
 
-    # Identity tokens are mandatory. For fashion, one generic overlap is not enough:
-    # require either the brand/model token, or two discriminative tokens from Lens.
-    desired_tokens = _meaningful_lens_tokens(chosen_title)
-    descriptor_tokens = [t for t in desired_tokens if t not in ("bottega", "veneta")]
-    matched_tokens = [t for t in descriptor_tokens if t in candidate_hay]
-    fashion_words = (
-        "shirt","blouse","dress","pajama","pyjama","nightwear","sleepwear","satin",
-        "printed","striped","قميص","فستان","بيجامه","بيجامة","ساتان","مخطط"
+    # البوابة العامة: براند + كلمات مميزة، كلها بمطابقة كلمات كاملة.
+    brand_tokens = _extract_brand_tokens(chosen_title)
+    brand_joined = "".join(brand_tokens)
+    brand_match = bool(brand_tokens) and (
+        all(_token_in(t, candidate_hay) for t in brand_tokens)
+        or (brand_joined and _token_in(brand_joined, candidate_hay))
+        or (brand_joined and brand_joined in re.sub(r"[^\w\u0600-\u06FF]", "", candidate_hay))
     )
-    is_fashion = any(normalize_ar(w) in chosen_title for w in fashion_words)
-    if descriptor_tokens:
-        needed = 2 if is_fashion and len(descriptor_tokens) >= 2 else 1
-        if len(matched_tokens) < needed:
-            print(f"LENS TOKEN REJECT: wanted={descriptor_tokens} matched={matched_tokens} candidate={candidate_hay[:180]}")
+
+    desired_tokens = _meaningful_lens_tokens(chosen_title)
+    descriptor_tokens = [t for t in desired_tokens if t not in brand_tokens and t not in ("bottega", "veneta")]
+    matched_tokens = [t for t in descriptor_tokens if _token_in(t, candidate_hay)]
+
+    if brand_tokens and not brand_match:
+        # براند Lens غائب عن المرشح: نقبله فقط إذا طابق كلمتين مميزتين على الأقل.
+        if len(matched_tokens) < 2:
+            print(f"LENS BRAND REJECT: brand={brand_tokens} matched={matched_tokens} candidate={candidate_hay[:180]}")
             return False
+    elif descriptor_tokens and len(matched_tokens) < 1:
+        print(f"LENS TOKEN REJECT: wanted={descriptor_tokens} matched={matched_tokens} candidate={candidate_hay[:180]}")
+        return False
 
     heel = (sig.get("heel") or "UNKNOWN").upper()
     high_words = ("high heel", "high heels", "stiletto", "kitten heel", "heeled", "pump", "كعب عالي", "كعب ذهبي")
@@ -1784,6 +1826,55 @@ def is_foreign_lens_result(item):
     return bool(host)
 
 
+def is_local_verified_offer(name, info):
+    """بوابة السوق المحلي على نتائج البحث النصي المتحقق منها.
+
+    مثال الباق: oracdecor.com (أوروبي، EUR) و 3d-wall.co.uk (بريطاني، GBP) كانا يُعرضان
+    كنتائج «محلية» بعملة د.ك. القاعدة: عملة الصفحة = عملة السوق، أو الموقع محلي فعلاً.
+    """
+    cur = (info.get("currency") or "").upper().strip()
+    market_cur = (current_market().get("currency") or "").upper().strip()
+    if cur and market_cur and cur == market_cur:
+        return True
+    looks_local = is_local_lens_result({
+        "link": info.get("url", ""), "source": name, "title": info.get("title", ""),
+    })
+    if looks_local:
+        # موقع يبدو محلياً لكن صفحته تعلن عملة أجنبية صراحة = نسخة دولية، نرفضها محلياً.
+        if cur and market_cur and cur != market_cur:
+            print(f"LOCAL GATE CURRENCY MISMATCH: {name} currency={cur} expected={market_cur}")
+            return False
+        return True
+    print(f"LOCAL GATE REJECT FOREIGN: {name} -> {info.get('url','')} currency={cur or '?'}")
+    return False
+
+
+def apply_local_gate(verified, allow_global):
+    if allow_global or not verified:
+        return verified
+    return {n: i for n, i in verified.items() if is_local_verified_offer(n, i)}
+
+
+def drop_absurd_prices(verified):
+    """يرفض أسعار الاستخراج المجنونة (مثل 4374.390 د.ك لأنبوب معجون سعره الطبيعي ~6 د.ك)."""
+    if not verified:
+        return verified
+    prices = sorted(float(v.get("price") or 0) for v in verified.values() if v.get("price"))
+    base = prices[0] if prices else 0
+    kept = {}
+    for name, info in verified.items():
+        p = float(info.get("price") or 0)
+        if p > PRICE_SANITY_CAP:
+            print(f"PRICE SANITY REJECT (cap): {name} price={p}")
+            continue
+        # إذا عندنا سعر مرجعي صغير، أي عرض أغلى منه 30 ضعفاً هو خطأ استخراج وليس عرضاً حقيقياً.
+        if base and base < 100 and p > base * 30:
+            print(f"PRICE SANITY REJECT (outlier): {name} price={p} vs min={base}")
+            continue
+        kept[name] = info
+    return kept
+
+
 def lens_priced_offers(lens_context, lang="ar", local_only=True, exclude_local=False):
     """Use Google Lens product cards directly.
 
@@ -1915,6 +2006,8 @@ def _new_layer_search(query, lang, prompt_text=None, source_image_b64=None, sour
 
     # If Lens returned direct pages without price metadata, try our HTML verifier once.
     lens_verified = verify_lens_direct_matches(lens_context, local_only=not allow_global, exclude_local=allow_global)
+    lens_verified = apply_local_gate(lens_verified, allow_global)
+    lens_verified = drop_absurd_prices(lens_verified)
     if lens_verified:
         if allow_global:
             # أسعار أجنبية من HTML: نحولها للعملة المحلية أولاً ثم نرتب بالأرخص المحوَّل.
@@ -1997,6 +2090,8 @@ def _new_layer_search(query, lang, prompt_text=None, source_image_b64=None, sour
         if txt and offers and urls:
             verified = verify_offers(urls, search_term)
             verified = filter_verified_with_lens(verified, lens_context)
+            verified = apply_local_gate(verified, allow_global)
+            verified = drop_absurd_prices(verified)
             if verified:
                 # Google Lens استُخدم قبل البحث لتحديد المنتج. لا نحذف نتائج الأسعار بسبب تقييم بصري تخميني.
                 sorted_v = sorted(verified.items(), key=lambda x: x[1]["price"])
@@ -2165,6 +2260,8 @@ def _old_layer_search(query, lang, prompt_text=None, lens_context=None, allow_gl
         print(f"GLOBAL OLD LAYER AFTER LOCAL EXCLUSION: {list(verified)}")
     if lens_context:
         verified = filter_verified_with_lens(verified, lens_context)
+    verified = apply_local_gate(verified, allow_global)
+    verified = drop_absurd_prices(verified)
     if not verified:
         print("OLD LAYER: no verified direct offers")
         return "", {}
@@ -2469,6 +2566,8 @@ def run_similar_search(phone, item):
         if not txt or not offers or not urls:
             continue
         verified = verify_offers(urls, base)
+        verified = apply_local_gate(verified, False)
+        verified = drop_absurd_prices(verified)
         if verified:
             sorted_v = sorted(verified.items(), key=lambda x: x[1]["price"])
             title = product_title(txt, f"بدائل مشابهة: {base}" if lang == "ar" else f"Similar to: {base}")
@@ -3154,4 +3253,4 @@ def process_location_message(message, bot_id):
     route_pending_after_location(from_number)
 
 @app.get("/")
-async def health(): return {"status":"v66 INTENT UNDERSTANDING + FX", "build":BUILD_ID, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
+async def health(): return {"status":"v67 EXACT OR OPTIONS", "build":BUILD_ID, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
