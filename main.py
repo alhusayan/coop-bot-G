@@ -6,10 +6,10 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v66-intent-understanding-20260803"
+BUILD_ID = "v67-exact-visual-identity-20260803"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
-print("INTENT UNDERSTANDING + NOT-FOUND OPTIONS + GLOBAL FX -> LOCAL CURRENCY")
+print("EXACT VISUAL IDENTITY + STRICT LENS/OCR FUSION + GLOBAL FX")
 print("=" * 70)
 
 
@@ -657,12 +657,17 @@ def cache_put(query, lang, txt, urls):
     SEARCH_CACHE[key] = entry
     _cache_db_put(key, entry)
 
-IDENTIFY_SYSTEM = """أنت خبير تعرف على المنتجات من الصور.
-أرجع دائماً اسمين قابلين للبحث بهذا الشكل فقط:
-[الاسم التجاري بالعربية] | [commercial product name in English]
-ضع البراند ورقم الموديل إن ظهر. استنتج نوع المنتج من الشعار والشكل والنص الظاهر.
-لا ترفض التحديد لمجرد أن الصورة غير كاملة؛ أعطِ أقرب اسم تجاري مفيد للبحث.
-مثال: ريموت بي إن سبورت | beIN Sports remote control
+IDENTIFY_SYSTEM = """أنت خبير قراءة هوية المنتجات من الصور.
+الصورة هي المرجع الوحيد. اقرأ النص المطبوع حرفياً قبل أي استنتاج.
+أرجع سطراً واحداً فقط بهذا الشكل:
+[اسم عربي دقيق] | [exact searchable English product name]
+قواعد صارمة:
+- اذكر البراند كما هو مطبوع، واسم المنتج، ورقم الموديل/SKU، والوزن أو السعة إذا كانت ظاهرة.
+- ممنوع اختراع أو استبدال البراند أو الموديل بمنتج مشابه أو مكافئ.
+- لا تضف Orac أو DecoFiller أو FL300 أو أي اسم آخر إلا إذا كان مكتوباً فعلاً في الصورة.
+- إذا كان النص بلغة ثالثة، احتفظ بالبراند كما هو وترجم نوع المنتج فقط.
+- إذا لم يظهر موديل فلا تخترع موديل. وإذا لم يظهر براند فاكتب نوع المنتج المحافظ فقط.
+مثال: ديكو كرافت معجون فواصل 300 غ | Deco Craft joint compound 300g
 سطر واحد فقط، بدون شرح."""
 
 MSG = {
@@ -1009,15 +1014,291 @@ def _serpapi_lens_request(public_url, lens_type, country, auto_crop, query_hint)
         print(f"GOOGLE LENS PASS EXCEPTION type={lens_type or 'all'}: {e}")
         return []
 
-def google_lens_lookup(image_b64, mime_type, lang="ar", query_hint=""):
-    """تعرف بصري متعدد التمريرات ليقترب من قوة تطبيق Google Lens نفسه.
 
-    التمريرات بالترتيب (نتوقف بمجرد الحصول على نتائج كافية):
-      1) type=products + دولة المستخدم + auto_crop -> بطاقات منتجات فيها أسعار.
-      2) type=all + دولة المستخدم + auto_crop      -> visual_matches و exact_matches (التعرف الأقوى).
-      3) type=all بدون قيد الدولة وبدون auto_crop   -> أوسع بحث، مثل تطبيق Lens تماماً.
-    ثم ندمج النتائج (بدون تكرار) ونختار أفضل عنوان، ونستخرج التوقيع الشكلي من الصورة الأصلية.
-    """
+
+# ---- Exact visual identity ---------------------------------------------------
+# هوية المنتج تُحسم عالمياً أولاً، ثم نبحث عن السعر المحلي. لا يجوز أن يفوز منتج
+# محلي مختلف لمجرد أن عنده سعر أو لأنه من متجر كويتي.
+LENS_SECTION_BASE = {
+    "exact_matches": 30000,
+    "visual_matches": 18000,
+    "products": 6000,
+}
+
+IDENTITY_NOISE_TOKENS = {
+    "the","and","for","with","from","new","used","sale","offer","offers","price","buy","shop",
+    "online","official","authentic","original","available","stock","promo","promocja","aldi","ebay",
+    "amazon","women","woman","womens","men","man","mens","size","pack","piece","pcs","set",
+    "http","https","www","com","net","org","co","uk","html","product","products",
+    "de","la","el","para","con","y","en","da","do","na","z","w","i","of","to","in",
+    "الكويت","كويت","السعر","شراء","متوفر","اصلي","أصلي","جديد","عرض","خصم","للبيع",
+}
+
+IDENTITY_WEAK_TOKENS = {
+    "product","item","منتج","ماده","مادة","women","men","kids","adult",
+    "shoe","shoes","slipper","slippers","sandal","sandals","bag","bags","shirt","dress",
+    "cream","gel","spray","bottle","tube","box","علبه","علبة","عبوه","عبوة",
+}
+
+
+def _identity_words(text):
+    raw = normalize_ar(str(text or "")).lower()
+    raw = urllib.parse.unquote(raw)
+    tokens = re.findall(r"[a-z0-9\u0600-\u06ff]+", raw)
+    out = []
+    for token in tokens:
+        token = token.strip("_-")
+        if not token or token in IDENTITY_NOISE_TOKENS or token.isdigit() or len(token) < 2:
+            continue
+        if token not in out:
+            out.append(token)
+    return set(out)
+
+
+def _identity_models(text):
+    raw = normalize_ar(str(text or "")).lower()
+    models = set()
+    for token in re.findall(r"[a-z0-9][a-z0-9._-]{2,}", raw):
+        clean = token.strip("._-")
+        if not (re.search(r"[a-z]", clean) and re.search(r"\d", clean)):
+            continue
+        # 300g/500ml أوزان وليست موديلات.
+        if re.fullmatch(r"\d+(?:\.\d+)?(?:mg|g|gm|kg|ml|l|oz|lb|gb|tb)", clean):
+            continue
+        models.add(clean)
+    return models
+
+
+def _identity_sizes(text):
+    raw = normalize_ar(str(text or "")).lower().replace(",", ".")
+    unit_map = {
+        "mg": ("g", 0.001), "g": ("g", 1.0), "gm": ("g", 1.0), "gram": ("g", 1.0),
+        "grams": ("g", 1.0), "غ": ("g", 1.0), "جم": ("g", 1.0), "غرام": ("g", 1.0),
+        "kg": ("g", 1000.0), "كغ": ("g", 1000.0), "كيلو": ("g", 1000.0),
+        "ml": ("ml", 1.0), "مل": ("ml", 1.0), "l": ("ml", 1000.0),
+        "liter": ("ml", 1000.0), "litre": ("ml", 1000.0), "لتر": ("ml", 1000.0),
+        "oz": ("oz", 1.0), "lb": ("lb", 1.0), "gb": ("gb", 1.0), "tb": ("gb", 1024.0),
+    }
+    found = set()
+    pattern = r"(?<!\w)(\d+(?:\.\d+)?)\s*(mg|grams?|gram|gm|kg|ml|liter|litre|oz|lb|gb|tb|g|l|غرام|كيلو|لتر|جم|كغ|مل|غ)(?!\w)"
+    for number, unit in re.findall(pattern, raw, flags=re.I):
+        try:
+            base_unit, factor = unit_map[unit.lower()]
+            value = round(float(number) * factor, 3)
+            found.add(f"{value:g}{base_unit}")
+        except Exception:
+            continue
+    return found
+
+
+IDENTITY_VARIANTS = {
+    "max","plus","ultra","mini","lite","pro","se","fe","air","sport","sports",
+    "kids","kid","junior","jr","women","womens","men","mens",
+}
+IDENTITY_ACCESSORY_TOKENS = {
+    "case","cover","protector","screen","charger","charging","cable","adapter","strap",
+    "holder","mount","replacement","refill","compatible","accessory","accessories",
+    "كفر","غطاء","حمايه","حماية","شاحن","كيبل","كابل","سير","حامل","بديل",
+}
+
+
+def _identity_variants(text):
+    return _identity_words(text) & IDENTITY_VARIANTS
+
+
+def _identity_accessories(text):
+    return _identity_words(text) & IDENTITY_ACCESSORY_TOKENS
+
+
+def _identity_numbers(text):
+    raw = normalize_ar(str(text or "")).lower()
+    return set(re.findall(r"(?<![a-z0-9])\\d{2,5}(?![a-z0-9])", raw))
+
+
+def _identity_match_details(reference, candidate):
+    a = _identity_words(reference)
+    b = _identity_words(candidate)
+    inter = a & b
+    anchors_a = a - IDENTITY_WEAK_TOKENS
+    anchors_b = b - IDENTITY_WEAK_TOKENS
+    anchor_inter = anchors_a & anchors_b
+    models_a, models_b = _identity_models(reference), _identity_models(candidate)
+    sizes_a, sizes_b = _identity_sizes(reference), _identity_sizes(candidate)
+    variants_a, variants_b = _identity_variants(reference), _identity_variants(candidate)
+    accessories_a, accessories_b = _identity_accessories(reference), _identity_accessories(candidate)
+    numbers_a, numbers_b = _identity_numbers(reference), _identity_numbers(candidate)
+    model_match = bool(models_a & models_b)
+    size_match = bool(sizes_a & sizes_b)
+    model_conflict = bool(models_a and models_b and not model_match)
+    size_conflict = bool(sizes_a and sizes_b and not size_match)
+    variant_conflict = bool((variants_b - variants_a) & {"max","plus","ultra","mini","lite","se","fe","air"})
+    accessory_conflict = bool(accessories_b and not accessories_a)
+    number_conflict = bool(numbers_a and numbers_b and not (numbers_a & numbers_b))
+
+    short_coverage = len(inter) / max(1, min(len(a), len(b))) if a and b else 0.0
+    ref_coverage = len(inter) / max(1, len(a)) if a else 0.0
+    jaccard = len(inter) / max(1, len(a | b)) if (a or b) else 0.0
+    score = 0.45 * short_coverage + 0.30 * ref_coverage + 0.15 * jaccard
+    score += min(len(anchor_inter), 3) * 0.08
+    if model_match:
+        score += 0.45
+    if size_match:
+        score += 0.18
+    if model_conflict:
+        score -= 0.65
+    if size_conflict:
+        score -= 0.30
+    if variant_conflict:
+        score -= 0.45
+    if accessory_conflict:
+        score -= 0.65
+    if number_conflict:
+        score -= 0.35
+    score = max(0.0, min(score, 1.5))
+    return {
+        "score": score,
+        "words": a,
+        "candidate_words": b,
+        "matches": inter,
+        "anchors": anchors_a,
+        "anchor_matches": anchor_inter,
+        "models": models_a,
+        "candidate_models": models_b,
+        "model_match": model_match,
+        "sizes": sizes_a,
+        "candidate_sizes": sizes_b,
+        "size_match": size_match,
+        "variants": variants_a, "candidate_variants": variants_b,
+        "accessories": accessories_a, "candidate_accessories": accessories_b,
+        "numbers": numbers_a, "candidate_numbers": numbers_b,
+        "conflict": model_conflict or size_conflict or variant_conflict or accessory_conflict or number_conflict,
+    }
+
+
+def _lens_section_strength(item):
+    return LENS_SECTION_BASE.get(str(item.get("section") or ""), 0) + (8000 if item.get("exact") else 0)
+
+
+def _canonical_lens_url(url):
+    try:
+        parsed = urllib.parse.urlsplit(str(url or ""))
+        return urllib.parse.urlunsplit((parsed.scheme.lower(), parsed.netloc.lower(), parsed.path.rstrip("/"), "", ""))
+    except Exception:
+        return str(url or "").split("?")[0].rstrip("/").lower()
+
+
+def _best_hint_match(hint, candidate):
+    parts = [p.strip() for p in re.split(r"\s*[|｜]\s*", str(hint or "")) if p.strip()]
+    if not parts:
+        parts = [str(hint or "")]
+    details = [_identity_match_details(part, candidate) for part in parts if _identity_words(part)]
+    if not details:
+        return _identity_match_details("", candidate)
+    return max(details, key=lambda d: d["score"])
+
+
+def _lens_identity_rank(item, matches, hint=""):
+    title = str(item.get("title") or "").strip()
+    score = _lens_section_strength(item)
+    score += max(0, 1800 - min(int(item.get("position") or 99), 99) * 35)
+
+    hint_details = _best_hint_match(hint, title)
+    score += int(hint_details["score"] * 6500)
+    if hint_details["model_match"]:
+        score += 4500
+    if hint_details["size_match"]:
+        score += 1400
+    if len(hint_details["anchor_matches"]) >= 2:
+        score += 2200
+    if hint_details["conflict"]:
+        score -= 7500
+
+    # Consensus among exact/visual results: repeated identity beats one isolated shopping card.
+    consensus = 0
+    for other in (matches or [])[:30]:
+        if other is item or other.get("section") not in ("exact_matches", "visual_matches"):
+            continue
+        d = _identity_match_details(title, other.get("title") or "")
+        if not d["conflict"] and (len(d["anchor_matches"]) >= 2 or d["model_match"] or d["score"] >= 0.58):
+            consensus += 1
+    score += min(consensus, 5) * 900
+
+    # Locality and price are tiny tie-breakers only. They never decide product identity.
+    if is_local_lens_result(item):
+        score += 80
+    if item.get("price") or item.get("price_value") not in (None, ""):
+        score += 30
+    return score
+
+
+def _choose_best_lens_match(matches, hint=""):
+    usable = [m for m in (matches or []) if str(m.get("title") or "").strip()]
+    if not usable:
+        return None
+    ranked = sorted(usable, key=lambda m: _lens_identity_rank(m, usable, hint), reverse=True)
+    for i, m in enumerate(ranked[:5], 1):
+        print(
+            f"LENS ID RANK {i}: score={_lens_identity_rank(m, usable, hint)} "
+            f"section={m.get('section')} exact={m.get('exact')} title={m.get('title','')}"
+        )
+    return ranked[0]
+
+
+def rerank_lens_context_with_vision(lens, vision_name):
+    """Rerank the already-fetched Lens pool with literal OCR evidence, without allowing a local price card to win identity."""
+    if not lens or not lens.get("matches"):
+        return lens
+    signature = lens.get("signature") or {}
+    evidence = " | ".join(
+        x for x in (
+            vision_name,
+            lens.get("image_name_en", ""),
+            lens.get("image_name_ar", ""),
+            signature.get("brand", ""),
+            signature.get("model", ""),
+            signature.get("size", ""),
+        ) if x
+    )
+    chosen = _choose_best_lens_match(lens.get("matches") or [], evidence)
+    if not chosen:
+        return lens
+    old_title = ((lens.get("chosen") or {}).get("title") or "").strip()
+    new_title = (chosen.get("title") or "").strip()
+    lens["chosen"] = chosen
+    lens["vision_name"] = vision_name or ""
+    aliases = []
+    for value in [new_title, vision_name, lens.get("image_name_en", ""), lens.get("image_name_ar", "")] + list(lens.get("aliases") or []):
+        value = str(value or "").strip()
+        if value and value != old_title and value.upper() not in ("NONE", "UNKNOWN") and value not in aliases:
+            aliases.append(value)
+    lens["aliases"] = aliases[:5]
+    lens["query"] = " | ".join(lens["aliases"][:4])
+    if old_title != new_title:
+        print(f"LENS IDENTITY CORRECTED BY OCR: {old_title} -> {new_title}")
+    return lens
+
+
+def strict_identity_context(identity_name, lens=None):
+    """Build a fail-closed identity guard even when Vision wins or Lens returns nothing."""
+    ctx = dict(lens or {})
+    ctx["matches"] = list((lens or {}).get("matches") or [])
+    ctx["vision_name"] = str(identity_name or "").strip()
+    aliases = []
+    for value in split_product_aliases(identity_name) + list((lens or {}).get("aliases") or []):
+        value = str(value or "").strip()
+        if value and value.upper() not in ("NONE", "UNKNOWN") and value not in aliases:
+            aliases.append(value)
+    ctx["aliases"] = aliases[:5]
+    ctx["query"] = " | ".join(aliases[:4]) or str(identity_name or "").strip()
+    # The adopted OCR/judge identity becomes the reference. Existing Lens matches remain only
+    # as candidate URLs and must pass compatibility against this reference.
+    ctx["chosen"] = {"title": str(identity_name or "").strip(), "link": "", "section": "vision_guard", "exact": True}
+    ctx["strict_identity"] = True
+    return ctx
+
+
+def google_lens_lookup(image_b64, mime_type, lang="ar", query_hint=""):
+    """Google Lens identity pool: global visual identity first, local shopping cards second."""
     if not ENABLE_GOOGLE_LENS or not SERPAPI_API_KEY or not PUBLIC_BASE_URL:
         print("GOOGLE LENS SKIPPED: missing SERPAPI_API_KEY or PUBLIC_BASE_URL")
         return {"aliases": [], "matches": [], "query": ""}
@@ -1029,159 +1310,195 @@ def google_lens_lookup(image_b64, mime_type, lang="ar", query_hint=""):
 
     try:
         user_country = current_market().get("country", DEFAULT_COUNTRY)
-        merged, seen = [], set()
+        merged = []
+        seen = {}
 
         def _merge(new_items):
-            for it in new_items:
-                sig = (it["title"].lower(), it["link"].lower())
-                if sig in seen:
+            for item in new_items:
+                key = _canonical_lens_url(item.get("link")) or normalize_ar(item.get("title") or "")
+                if not key:
                     continue
-                seen.add(sig)
-                merged.append(it)
+                old_index = seen.get(key)
+                if old_index is None:
+                    seen[key] = len(merged)
+                    merged.append(item)
+                    continue
+                old = merged[old_index]
+                # Keep the stronger identity section, but preserve price/image metadata from either copy.
+                if _lens_section_strength(item) > _lens_section_strength(old):
+                    stronger, weaker = dict(item), old
+                else:
+                    stronger, weaker = dict(old), item
+                for field in ("price", "price_value", "currency", "thumbnail", "image", "source", "in_stock"):
+                    if stronger.get(field) in (None, "") and weaker.get(field) not in (None, ""):
+                        stronger[field] = weaker.get(field)
+                stronger["exact"] = bool(stronger.get("exact") or weaker.get("exact"))
+                merged[old_index] = stronger
 
+        # Product identity must not be restricted to Kuwait. This mirrors the useful part of Lens:
+        # find the exact object globally, then use local cards only for availability/price.
         passes = [
-            ("products", user_country, True),
+            ("all", "", True),
             ("all", user_country, True),
+            ("products", user_country, True),
         ]
         if ENABLE_LENS_WIDE_FALLBACK:
             passes.append(("all", "", False))
 
         for lens_type, country, auto_crop in passes:
             _merge(_serpapi_lens_request(public_url, lens_type, country, auto_crop, query_hint))
-            has_exact = any(m.get("exact") for m in merged)
-            has_local = any(is_local_lens_result(m) for m in merged)
-            if len(merged) >= LENS_MIN_MATCHES and lens_type != "products" and (has_exact or has_local):
-                break
 
         matches = merged[:LENS_RESULT_LIMIT]
         if not matches:
             print("GOOGLE LENS: no visual matches after all passes")
             return {"aliases": [], "matches": [], "query": ""}
 
-        # اطبع أول النتائج حتى نعرف فعلياً ماذا أعاد Lens.
-        for i, m in enumerate(matches[:5], 1):
-            print(f"LENS MATCH {i}: {m.get('title','')} | {m.get('source','')} | section={m.get('section','')} exact={m.get('exact', False)}")
+        for i, m in enumerate(matches[:8], 1):
+            print(
+                f"LENS MATCH {i}: {m.get('title','')} | {m.get('source','')} | "
+                f"section={m.get('section','')} exact={m.get('exact', False)}"
+            )
 
-        # نختار أفضل نتيجة ذات عنوان واضح. exact ثم المحلي ثم وجود سعر ثم ترتيب Lens.
-        generic = re.compile(r"^(mules?|shoes?|slippers?|sandals?|footwear|بوتيغا فينيتا|bottega veneta)$", re.I)
-        ranked = []
-        for m in matches:
-            title = (m.get("title") or "").strip()
-            if not title or generic.match(title):
-                continue
-            score = 2000 if m.get("exact") else 0
-            if is_local_lens_result(m):
-                score += 1500
-            if m.get("price") or m.get("price_value") not in (None, ""):
-                score += 700
-            if m.get("section") == "visual_matches":
-                score += 250
-            score += max(0, 300 - int(m.get("position") or 99) * 12)
-            score += min(len(title), 120) / 10
-            if m.get("thumbnail") or m.get("image"):
-                score += 10
-            ranked.append((score, m))
-        chosen = max(ranked, key=lambda x: x[0])[1] if ranked else matches[0]
-        chosen_title = (chosen.get("title") or "").strip()
+        chosen = _choose_best_lens_match(matches, query_hint) or matches[0]
 
-        # Gemini هنا لا يقرر أي نتيجة Lens صحيحة. فقط يصف الصورة الأصلية ويترجم الاسم.
-        # هذا يمنحنا اللون/النقشة/الكعب لحماية نتائج الأسعار من المنتجات المختلفة.
-        sig_system = (
-            "أنت خبير منتجات. الصورة هي المرجع الوحيد. استخرج اسماً عربياً وإنجليزياً ووصفاً شكلياً محافظاً. "
-            "لا تخترع رقم موديل. حدد اللون الأساسي، النقشة أو الخامة الظاهرة، وهل المنتج مسطح أو بكعب. "
-            "الرد سطر واحد فقط: Arabic name | English name | COLOR | PATTERN | HEEL | TYPE. "
-            "HEEL واحدة من FLAT, LOW, HIGH, NONE, UNKNOWN. TYPE مثل MULES, SLIPPERS, SHOES, BAG, ELECTRONICS."
+        # Read literal package evidence independently from the Lens title. This prevents a wrong
+        # shopping card from teaching the vision model a wrong brand/model.
+        evidence_system = (
+            "الصورة هي المرجع الوحيد. اقرأ هوية المنتج المطبوعة حرفياً ولا تستنتج براند أو موديل غير ظاهر. "
+            "أرجع سطراً واحداً فقط: Arabic name | English name | BRAND | MODEL | SIZE | COLOR | PATTERN | HEEL | TYPE. "
+            "MODEL وSIZE يكونان NONE إذا لم يظهرا. HEEL واحدة من FLAT, LOW, HIGH, NONE, UNKNOWN."
         )
-        sig_txt, _ = call_gemini([
+        evidence_txt, _ = call_gemini([
             {"inline_data": {"mime_type": mime_type, "data": image_b64}},
-            {"text": f"Google Lens title hint: {chosen_title}"},
-        ], system=sig_system, use_search=False)
-        fields = [x.strip() for x in ((sig_txt or "").strip().splitlines()[0] if sig_txt else "").split("|")]
-
-        ar_name = fields[0] if len(fields) > 0 else ""
-        en_name = fields[1] if len(fields) > 1 else ""
+            {"text": "اقرأ النص الظاهر والبراند واسم المنتج والوزن/السعة بدقة. لا تستخدم أي تخمين خارجي."},
+        ], system=evidence_system, use_search=False)
+        fields = [x.strip() for x in ((evidence_txt or "").strip().splitlines()[0] if evidence_txt else "").split("|")]
+        image_name_ar = fields[0] if len(fields) > 0 else ""
+        image_name_en = fields[1] if len(fields) > 1 else ""
         signature = {
-            "color": fields[2].lower() if len(fields) > 2 else "",
-            "pattern": fields[3].lower() if len(fields) > 3 else "",
-            "heel": fields[4].upper() if len(fields) > 4 else "UNKNOWN",
-            "type": fields[5].upper() if len(fields) > 5 else "",
+            "brand": fields[2] if len(fields) > 2 else "",
+            "model": fields[3] if len(fields) > 3 else "",
+            "size": fields[4] if len(fields) > 4 else "",
+            "color": fields[5].lower() if len(fields) > 5 else "",
+            "pattern": fields[6].lower() if len(fields) > 6 else "",
+            "heel": fields[7].upper() if len(fields) > 7 else "UNKNOWN",
+            "type": fields[8].upper() if len(fields) > 8 else "",
         }
 
+        evidence_hint = " | ".join(x for x in (query_hint, image_name_en, image_name_ar, signature["brand"], signature["model"], signature["size"]) if x)
+        chosen = _choose_best_lens_match(matches, evidence_hint) or chosen
+        chosen_title = (chosen.get("title") or "").strip()
+
         aliases = []
-        # عنوان Lens أولاً لأنه أساس التعرف، ثم الترجمتان من الصورة الأصلية.
-        for value in (chosen_title, en_name, ar_name):
+        for value in (chosen_title, image_name_en, image_name_ar):
             value = (value or "").strip()
             if value and value.upper() not in ("NONE", "UNKNOWN") and value not in aliases:
                 aliases.append(value)
 
         query = " | ".join(aliases[:3])
-        print(f"GOOGLE LENS DIRECT MATCH: {query}")
-        print(f"GOOGLE LENS SIGNATURE: {signature}")
+        print(f"GOOGLE LENS EXACT IDENTITY: {query}")
+        print(f"GOOGLE LENS IMAGE EVIDENCE: {signature}")
         return {
-            "aliases": aliases[:3],
+            "aliases": aliases[:4],
             "matches": matches,
             "query": query,
             "chosen": chosen,
             "signature": signature,
+            "image_name_ar": image_name_ar,
+            "image_name_en": image_name_en,
+            "public_url": public_url,
         }
     except Exception as e:
         print(f"GOOGLE LENS EXCEPTION: {e}")
         return {"aliases": [], "matches": [], "query": ""}
 
 def _meaningful_lens_tokens(text):
-    """Extract discriminative tokens from the chosen Lens title, excluding generic words and sizes."""
-    raw = normalize_ar(text or "").lower()
-    toks = re.findall(r"[a-z0-9؀-ۿ]+", raw)
-    stop = {
-        "women","woman","men","man","size","new","used","authentic","leather","جلد",
-        "mules","mule","shoes","shoe","slippers","slipper","sandals","sandal",
-        "shirt","blouse","top","dress","pajama","pajamas","pyjama","pyjamas",
-        "nightwear","sleepwear","set","women's","womens","ملابس","قميص","بيجامه","بيجامة",
-        "for","the","and","in","with","kw","kuwait","uae","كويت","نسائي","رجالي",
-    }
-    out=[]
-    for t in toks:
-        if t in stop or t.isdigit() or len(t) < 3:
-            continue
-        if t not in out:
-            out.append(t)
+    """Exact tokens only; never use substring matching (deco must not match decofiller)."""
+    return sorted(_identity_words(text) - IDENTITY_WEAK_TOKENS)
+
+
+def _lens_reference_texts(lens_context):
+    if not lens_context:
+        return []
+    chosen = lens_context.get("chosen") or {}
+    sig = lens_context.get("signature") or {}
+    refs = [
+        chosen.get("title", ""),
+        lens_context.get("vision_name", ""),
+        lens_context.get("image_name_en", ""),
+        lens_context.get("image_name_ar", ""),
+        sig.get("brand", ""),
+        sig.get("model", ""),
+        sig.get("size", ""),
+    ] + list(lens_context.get("aliases") or [])
+    out = []
+    for value in refs:
+        value = str(value or "").strip()
+        if value and value.upper() not in ("NONE", "UNKNOWN", "غير معروف") and _identity_words(value) and value not in out:
+            out.append(value)
     return out
 
 
+def _lens_compatibility_details(info, url, lens_context):
+    candidate = " ".join([str(info.get("title") or ""), str(url or "")]).strip()
+    refs = _lens_reference_texts(lens_context)
+    if not refs:
+        return _identity_match_details("", candidate)
+    scored = [_identity_match_details(ref, candidate) for ref in refs]
+    best = max(scored, key=lambda d: d["score"])
+    combined = _identity_match_details(" ".join(refs), candidate)
+    # Positive similarity may come from the best translated/full title, but every known
+    # model, capacity, variant and accessory constraint remains mandatory.
+    for key in (
+        "models","candidate_models","sizes","candidate_sizes","variants","candidate_variants",
+        "accessories","candidate_accessories","numbers","candidate_numbers"
+    ):
+        best[key] = combined.get(key, best.get(key))
+    best["model_match"] = combined.get("model_match", best.get("model_match"))
+    best["size_match"] = combined.get("size_match", best.get("size_match"))
+    best["conflict"] = combined.get("conflict", False)
+    return best
+
+
 def _lens_offer_compatible(info, url, lens_context):
-    """Strict guard for image searches. Candidate title/URL alone must match the Lens identity."""
+    """Reject a different SKU/brand even when it is local, cheap, or visually similar."""
     if not lens_context:
         return True
-    sig = lens_context.get("signature") or {}
     chosen = lens_context.get("chosen") or {}
-    candidate_hay = normalize_ar(" ".join([str(info.get("title", "")), str(url)])).lower()
-    chosen_title = normalize_ar(str(chosen.get("title", ""))).lower()
+    chosen_url = _canonical_lens_url(chosen.get("link") or "")
+    candidate_url = _canonical_lens_url(url)
+    if chosen_url and candidate_url and chosen_url == candidate_url:
+        return True
 
-    # Brand is mandatory when Lens returned a clear brand.
-    brand_aliases = {
-        "bottega veneta": ("bottega", "veneta", "بوتيغا", "بوتيقا"),
-        "under armour": ("under", "armour", "اندر", "ارمور"),
-    }
-    for brand, aliases in brand_aliases.items():
-        if brand in chosen_title and not any(normalize_ar(a) in candidate_hay for a in aliases):
-            return False
+    details = _lens_compatibility_details(info, url, lens_context)
+    if details["conflict"]:
+        print(
+            f"LENS ID CONFLICT REJECT: models={details['models']} vs {details['candidate_models']} "
+            f"sizes={details['sizes']} vs {details['candidate_sizes']} "
+            f"variants={details.get('variants')} vs {details.get('candidate_variants')} "
+            f"accessories={details.get('candidate_accessories')} title={info.get('title','')}"
+        )
+        return False
 
-    # Identity tokens are mandatory. For fashion, one generic overlap is not enough:
-    # require either the brand/model token, or two discriminative tokens from Lens.
-    desired_tokens = _meaningful_lens_tokens(chosen_title)
-    descriptor_tokens = [t for t in desired_tokens if t not in ("bottega", "veneta")]
-    matched_tokens = [t for t in descriptor_tokens if t in candidate_hay]
-    fashion_words = (
-        "shirt","blouse","dress","pajama","pyjama","nightwear","sleepwear","satin",
-        "printed","striped","قميص","فستان","بيجامه","بيجامة","ساتان","مخطط"
+    anchor_count = len(details["anchors"])
+    anchor_matches = len(details["anchor_matches"])
+    word_matches = len(details["matches"])
+    strong = (
+        details["model_match"]
+        or (anchor_count >= 2 and anchor_matches >= 2)
+        or (anchor_count == 1 and anchor_matches >= 1 and details["score"] >= 0.48)
+        or (word_matches >= 3 and details["score"] >= 0.48)
     )
-    is_fashion = any(normalize_ar(w) in chosen_title for w in fashion_words)
-    if descriptor_tokens:
-        needed = 2 if is_fashion and len(descriptor_tokens) >= 2 else 1
-        if len(matched_tokens) < needed:
-            print(f"LENS TOKEN REJECT: wanted={descriptor_tokens} matched={matched_tokens} candidate={candidate_hay[:180]}")
-            return False
+    if not strong:
+        print(
+            f"LENS IDENTITY REJECT: score={details['score']:.2f} anchors={sorted(details['anchor_matches'])} "
+            f"words={sorted(details['matches'])} candidate={info.get('title','')} -> {url}"
+        )
+        return False
 
+    # Existing visual guards remain useful after textual identity has passed.
+    sig = lens_context.get("signature") or {}
+    candidate_hay = normalize_ar(" ".join([str(info.get("title", "")), str(url)])).lower()
     heel = (sig.get("heel") or "UNKNOWN").upper()
     high_words = ("high heel", "high heels", "stiletto", "kitten heel", "heeled", "pump", "كعب عالي", "كعب ذهبي")
     if heel in ("FLAT", "NONE") and any(normalize_ar(w) in candidate_hay for w in high_words):
@@ -1195,7 +1512,6 @@ def _lens_offer_compatible(info, url, lens_context):
             "braided": ("braided", "woven", "intrecciato", "مضفر", "منسوج"),
         }
         keys = pattern_groups.get(pattern, (pattern,))
-        # For an explicitly woven item, require the candidate itself to say so.
         if pattern in pattern_groups and not any(normalize_ar(k) in candidate_hay for k in keys):
             return False
 
@@ -1203,8 +1519,7 @@ def _lens_offer_compatible(info, url, lens_context):
     if color and color not in ("unknown", "none", "غير معروف"):
         color_map = {
             "brown": ("brown", "tan", "cognac", "camel", "burgundy", "بني", "جملي"),
-            "black": ("black", "اسود"),
-            "green": ("green", "اخضر"),
+            "black": ("black", "اسود"), "green": ("green", "اخضر"),
             "white": ("white", "ivory", "cream", "ابيض"),
         }
         wanted = tuple(normalize_ar(x) for x in color_map.get(color, (color,)))
@@ -1214,7 +1529,6 @@ def _lens_offer_compatible(info, url, lens_context):
         ))
         if any(c in candidate_hay for c in explicit_colors) and not any(c in candidate_hay for c in wanted):
             return False
-
     return True
 
 def filter_verified_with_lens(verified, lens_context):
@@ -1785,12 +2099,7 @@ def is_foreign_lens_result(item):
 
 
 def lens_priced_offers(lens_context, lang="ar", local_only=True, exclude_local=False):
-    """Use Google Lens product cards directly.
-
-    Lens already supplies a visual match, direct product URL, displayed price and stock state.
-    We therefore do not force the page through our HTML parser first; that parser can wrongly
-    reject JS-heavy stores or replace a visually good alternative with a different SKU.
-    """
+    """Use only priced Lens cards that pass exact identity compatibility."""
     if not lens_context:
         return {}
     offers = {}
@@ -1798,7 +2107,7 @@ def lens_priced_offers(lens_context, lang="ar", local_only=True, exclude_local=F
     for i, item in enumerate(lens_context.get("matches") or [], 1):
         url = (item.get("link") or "").strip()
         title = (item.get("title") or "").strip()
-        price_text = (item.get("price") or "").strip()
+        price_text = str(item.get("price") or "").strip()
         price_value = item.get("price_value")
         currency = (item.get("currency") or "").strip()
         in_stock = item.get("in_stock")
@@ -1814,68 +2123,73 @@ def lens_priced_offers(lens_context, lang="ar", local_only=True, exclude_local=F
             continue
         if not price_text and price_value in (None, ""):
             continue
-        # في الوضع المحلي: نبقي بطاقات عملة السوق فقط. في الوضع العالمي كل العملات مقبولة
-        # لأنها ستُحوَّل إلى العملة المحلية قبل العرض.
+        if not _lens_offer_compatible(item, url, lens_context):
+            continue
+
         if not exclude_local:
             price_hay = f"{price_text} {currency}".lower()
             expected_currency = (current_market().get("currency") or "").lower()
             currency_aliases = {expected_currency}
-            if expected_currency == "kwd": currency_aliases.update({"د.ك", "kd"})
+            if expected_currency == "kwd":
+                currency_aliases.update({"د.ك", "kd"})
             if expected_currency and price_hay.strip() and not any(x and x in price_hay for x in currency_aliases):
                 if price_value in (None, ""):
                     continue
+
         name = _lens_source_name(item, i)
         base = name
         n = 2
         while name in offers:
             name = f"{base} {n}"; n += 1
-        numeric = None
         try:
             numeric = float(price_value) if price_value not in (None, "") else None
         except Exception:
             numeric = None
         if exclude_local:
-            # عالمي: السعر يُحوَّل دائماً إلى عملة المستخدم المحلية بالفلوس (1.950 د.ك) مع الأصل بين قوسين.
             shown, converted = display_global_price(price_value, price_text, currency, lang)
             if converted is not None:
                 numeric = converted
         else:
-            shown = format_lens_price(price_text, price_value, lang)
+            shown = format_lens_price(price_text, price_value, lang, currency)
+
+        details = _lens_compatibility_details(item, url, lens_context)
         offers[name] = {
-            "url": url,
-            "price": numeric,
-            "price_text": shown,
-            "is_local": is_local_lens_result(item),
-            "title": title,
-            "position": int(item.get("position") or i),
-            "exact": bool(item.get("exact")),
-            "section": item.get("section") or "",
-            "image_url": item.get("image") or item.get("thumbnail") or "",
+            "url": url, "price": numeric, "price_text": shown,
+            "is_local": is_local_lens_result(item), "title": title,
+            "position": int(item.get("position") or i), "exact": bool(item.get("exact")),
+            "section": item.get("section") or "", "image_url": item.get("image") or item.get("thumbnail") or "",
+            "identity_score": details.get("score", 0.0),
         }
         used_urls.add(url)
-    # المتاجر المحلية أولاً حتى لو رتبها Google متأخرة؛ ثم exact ثم visual ثم ترتيب Lens.
+
     ranked = sorted(
         offers.items(),
         key=lambda kv: (
             0 if kv[1].get("is_local") else 1,
             0 if kv[1].get("exact") else 1,
+            -float(kv[1].get("identity_score") or 0),
+            kv[1].get("price") if kv[1].get("price") is not None else 10**12,
             0 if kv[1].get("section") == "visual_matches" else 1,
             kv[1].get("position", 999),
         ),
     )
     return dict(ranked[:MAX_STORES])
 
-
 def verify_lens_direct_matches(lens_context, local_only=True, exclude_local=False):
-    """Fallback verifier for Lens URLs that had no price card. Exact matches get priority."""
+    """Verify only direct Lens pages that match the selected identity."""
     if not lens_context:
         return {}
     candidates = {}
     ordered = sorted(
-        (lens_context.get("matches") or [])[:16],
-        key=lambda m: (0 if m.get("exact") else 1, 0 if is_local_lens_result(m) else 1, int(m.get("position") or 99)),
+        (lens_context.get("matches") or [])[:24],
+        key=lambda m: (
+            0 if m.get("exact") else 1,
+            0 if m.get("section") == "visual_matches" else 1,
+            0 if is_local_lens_result(m) else 1,
+            int(m.get("position") or 99),
+        ),
     )
-    for i, m in enumerate(ordered[:8], 1):
+    for i, m in enumerate(ordered[:12], 1):
         url = (m.get("link") or "").strip()
         title = (m.get("title") or "").strip()
         source = (m.get("source") or f"Lens {i}").strip()
@@ -1886,10 +2200,13 @@ def verify_lens_direct_matches(lens_context, local_only=True, exclude_local=Fals
         if exclude_local and is_local_lens_result(m):
             print(f"GLOBAL EXCLUDE LOCAL VERIFY: {title} -> {url}")
             continue
+        if not _lens_offer_compatible(m, url, lens_context):
+            continue
         candidates[source] = url
     verified = verify_offers(candidates, (lens_context.get("chosen") or {}).get("title", ""))
+    verified = filter_verified_with_lens(verified, lens_context)
     if verified:
-        print(f"LENS HTML VERIFIED: {list(verified)}")
+        print(f"LENS HTML VERIFIED EXACT: {list(verified)}")
     return verified
 
 def _new_layer_search(query, lang, prompt_text=None, source_image_b64=None, source_image_mime=None, lens_context=None, allow_global=False):
@@ -2568,11 +2885,11 @@ async def process_image_buffer(from_number):
     else: await asyncio.to_thread(process_multi_images,data["images"],from_number,data["bot_id"],lang)
 
 def identify_product_with_retry(b64, mime, lang="ar"):
-    """يحدد الاسم بالعربي والإنجليزي دائماً، بغض النظر عن لغة واجهة المستخدم."""
+    """Literal OCR-first product identity. Never substitutes a similar commercial product."""
     prompts = [
-        "حدد المنتج من الشعار والشكل والنص. اكتب الاسم العربي ثم الإنجليزي مفصولين بـ |.",
-        "افحص الصورة بدقة أكبر، خصوصاً الشعار والأزرار ورقم الموديل. اكتب Arabic name | English name.",
-        "استنتج أقرب اسم تجاري قابل للبحث حتى لو الصورة جزئية. Arabic | English only.",
+        "اقرأ البراند واسم المنتج والموديل والوزن/السعة كما هي مطبوعة. لا تستنتج بديلاً. Arabic name | exact English name.",
+        "دقق في كل النص الظاهر والشعار والباركود/الموديل. اذكر فقط ما يظهر فعلاً. Arabic | English.",
+        "إذا تعذر اسم كامل، اكتب البراند الظاهر + نوع المنتج المحافظ فقط، بلا موديل مخترع. Arabic | English.",
     ]
     bad_phrases = (
         "ما قدرت", "لا استطيع", "لا أستطيع", "غير واضح", "لا يمكن تحديد",
@@ -2587,16 +2904,10 @@ def identify_product_with_retry(b64, mime, lang="ar"):
         )
         candidate = ident.strip().splitlines()[0].strip() if ident else ""
         if candidate and not any(p in candidate.lower() for p in bad_phrases):
-            if "|" not in candidate:
-                # لا نرفض الاسم الأحادي؛ البحث سيبدأ به ثم يحاول الصياغة الأخرى في المحاولات التالية.
-                candidate = candidate.strip()
-            print(f"IMAGE IDENTIFIED attempt={attempt + 1}: {candidate}")
+            print(f"IMAGE IDENTIFIED LITERAL attempt={attempt + 1}: {candidate}")
             return candidate
         print(f"IMAGE IDENTIFY ATTEMPT {attempt + 1} FAILED")
     return ""
-
-
-
 
 def _identity_tokens(text):
     t = normalize_ar(text or "")
@@ -2604,23 +2915,15 @@ def _identity_tokens(text):
 
 
 def identity_candidates_agree(vision_name, lens_title):
-    """True when Lens and direct vision clearly describe the same product.
-
-    Avoids a paid judge call when brand/model/type already overlap sufficiently.
-    """
-    a, b = _identity_tokens(vision_name), _identity_tokens(lens_title)
-    if not a or not b:
+    """Agreement requires exact discriminative tokens/model, not generic or substring overlap."""
+    d = _identity_match_details(vision_name, lens_title)
+    if d["conflict"]:
         return False
-    inter = a & b
-    # A model/SKU overlap is decisive.
-    model_a = {x for x in a if any(c.isdigit() for c in x)}
-    model_b = {x for x in b if any(c.isdigit() for c in x)}
-    if model_a & model_b:
-        return True
-    return len(inter) >= 2 and (len(inter) / max(1, min(len(a), len(b)))) >= 0.45
-
-
-
+    return bool(
+        d["model_match"]
+        or (len(d["anchor_matches"]) >= 2 and d["score"] >= 0.42)
+        or (len(d["anchor_matches"]) == 1 and len(d["anchors"]) == 1 and d["score"] >= 0.62)
+    )
 
 def is_fashion_identity(vision_name, caption=""):
     """Return True for any apparel/fashion item where exact visual design matters."""
@@ -2705,36 +3008,26 @@ def _is_text_heavy_packaged_product(vision_name, caption=""):
 
 
 def lens_routing_decision(vision_name, caption=""):
-    """Lens is the primary engine for most image searches (~70%).
-
-    Only clearly text-heavy packaged/medical/grocery products stay Vision-first.
-    This gives you a practical 70%+ Lens usage without breaking obvious label cases.
-    """
+    """Every product image gets Lens; packages use OCR+Lens arbitration rather than Lens suppression."""
     raw = f"{vision_name or ''} {caption or ''}".strip()
     q = normalize_ar(raw)
     if not ENABLE_GOOGLE_LENS:
         return False, "LENS_DISABLED"
     if not vision_name:
         return True, "NO_VISION_IDENTITY"
-
-    # Fashion remains a hard Lens-first case.
     if is_fashion_identity(vision_name, caption):
         return True, "FASHION_ALWAYS_LENS"
-
     uncertain = (
         "غير معروف", "منتج غير", "unknown", "unidentified", "possibly", "ربما",
         "قد يكون", "عام", "generic", "لا استطيع", "لا أستطيع"
     )
     if any(x in q for x in uncertain) or len(_identity_tokens(vision_name)) < 2:
         return True, "UNCERTAIN_IDENTITY"
-
+    if _is_text_heavy_packaged_product(vision_name, caption):
+        return True, "TEXT_HEAVY_PACKAGE_OCR_LENS_FUSION"
     if LENS_PRIMARY_MODE:
-        if LENS_PRIMARY_EXCEPT_TEXT_HEAVY and _is_text_heavy_packaged_product(vision_name, caption):
-            return False, "TEXT_HEAVY_PACKAGE_VISION_FIRST"
         return True, "LENS_PRIMARY_DEFAULT"
-
     return _legacy_should_use_google_lens(vision_name, caption), "LEGACY_ROUTER"
-
 
 def should_use_google_lens(vision_name, caption=""):
     use_lens, _reason = lens_routing_decision(vision_name, caption)
@@ -2765,10 +3058,16 @@ def choose_image_identity(image_b64, mime_type, lens, vision_name):
 أرجع JSON فقط بهذا الشكل:
 {"winner":"VISION"|"LENS"|"MERGE","confidence":0-100,"final_name":"اسم بحث دقيق بالعربي | English","reason":"سبب قصير"}
 """
+    top_lens_titles = "\n".join(
+        f"- {m.get('section','')}: {m.get('title','')}" for m in (lens.get("matches") or [])[:8]
+    )
+    signature = lens.get("signature") or {}
     prompt = (
-        f"Google Lens candidate: {lens_title}\n"
-        f"Direct vision/OCR candidate: {vision_name}\n"
-        "احكم بالاعتماد على الصورة نفسها، وليس على ترتيب Lens."
+        f"Google Lens selected candidate: {lens_title}\n"
+        f"Direct literal vision/OCR candidate: {vision_name}\n"
+        f"Literal image evidence: {json.dumps(signature, ensure_ascii=False)}\n"
+        f"Other Lens candidates:\n{top_lens_titles}\n"
+        "احكم من النص والشعار والموديل/الوزن الظاهر في الصورة. السعر أو كون المتجر محلياً ليس دليلاً على الهوية."
     )
     raw, _ = call_gemini([
         {"inline_data": {"mime_type": mime_type, "data": image_b64}},
@@ -2830,8 +3129,11 @@ def process_single_image(message,bot_id,lang="ar"):
         else:
             lens = google_lens_lookup(b64, mime, lang, caption or vision_name)
     elif lens_future is not None:
-        # الراوتر قرر Vision-first (عبوة نصية)؛ نتيجة اللينز المتوازية تُهمل بهدوء.
+        # هذا الفرع لا يعمل عادة في v67 إلا إذا عُطّل Lens من الإعدادات.
         lens_future.cancel()
+
+    if lens.get("matches"):
+        lens = rerank_lens_context_with_vision(lens, vision_name)
 
     active_lens = None
     identity_source = "VISION"
@@ -2870,6 +3172,12 @@ def process_single_image(message,bot_id,lang="ar"):
             combined_name, active_lens, identity_source = vision_name, None, "VISION_LENS_EMPTY"
     else:
         print("GOOGLE LENS SKIPPED BY SMART ROUTER")
+
+    # Fail closed: every image-derived search gets an identity guard. If Lens/OCR disagree
+    # or Lens is empty, a merely similar local page is rejected instead of being shown.
+    if combined_name and active_lens is None:
+        active_lens = strict_identity_context(combined_name, lens)
+        identity_source = f"{identity_source}_STRICT_GUARD"
 
     print(f"FINAL IMAGE IDENTITY [{identity_source}]: {combined_name}")
 
@@ -3154,4 +3462,4 @@ def process_location_message(message, bot_id):
     route_pending_after_location(from_number)
 
 @app.get("/")
-async def health(): return {"status":"v66 INTENT UNDERSTANDING + FX", "build":BUILD_ID, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
+async def health(): return {"status":"v67 EXACT VISUAL IDENTITY", "build":BUILD_ID, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
