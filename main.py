@@ -6,10 +6,10 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v65-notfound-options-fx-convert-20260803"
+BUILD_ID = "v66-intent-understanding-20260803"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
-print("LENS MULTI-PASS + FUSION + NOT-FOUND OPTIONS + GLOBAL FX -> LOCAL CURRENCY")
+print("INTENT UNDERSTANDING + NOT-FOUND OPTIONS + GLOBAL FX -> LOCAL CURRENCY")
 print("=" * 70)
 
 
@@ -692,6 +692,8 @@ MSG = {
         "similar_searching": "🔄 أدور لك على أفضل البدائل المشابهة المتوفرة عندك...",
         "similar_none": "ما لقيت بدائل مشابهة بسعر مؤكد حالياً 😅 جرب صياغة ثانية.",
         "declined_ok": "تمام 🙏 إذا احتجت شي ثاني أنا حاضر!",
+        "welcome_reply": "هلا والله! 🌟\nدز صورة المنتج أو اكتب اسمه، وأدور لك أفضل الأسعار والمتاجر القريبة منك 🛒",
+        "thanks_reply": "العفو! 🌹 في الخدمة دايماً.. أي منتج ثاني تبيه أنا حاضر!",
     },
     "en": {
         "identifying": "One sec.. identifying the product and finding you the best deal!",
@@ -719,6 +721,8 @@ MSG = {
         "similar_searching": "🔄 Looking for the best similar alternatives available near you...",
         "similar_none": "I couldn't find similar alternatives with a verified price right now 😅 try another phrasing.",
         "declined_ok": "No problem 🙏 I'm here whenever you need me!",
+        "welcome_reply": "Hello! 🌟\nSend a product photo or type its name, and I'll find you the best prices and nearby stores 🛒",
+        "thanks_reply": "You're welcome! 🌹 Anytime.. just send me the next product!",
     },
 }
 
@@ -2948,6 +2952,122 @@ def send_last_search_map(from_number, bot_id, lang):
         return
     send_maps_button(from_number, last_search["product"], bot_id, lang)
 
+
+# ---- فهم نية المستخدم من الجمل الكاملة --------------------------------------
+# المشكلة: "السلام عليكم\nمعجون ضد الصراصير عزكم الله وين أحصله\nمع الشكر"
+# كانت تُقص على الأسطر وتتحول إلى «3 منتجات» وهمية. الحل ثلاث طبقات:
+#   1) بدون تكلفة: اسم منتج قصير مباشر يمر كما هو (السلوك القديم محفوظ).
+#   2) بدون تكلفة: منظف تحيات/أدعية/شكر بالـ regex يستخرج المنتج من الجملة.
+#   3) نموذج Gemini السريع (بدون بحث، رخيص) للجمل المعقدة، يرجع JSON بالنية والمنتجات.
+
+GREETING_ONLY_FORMS = {
+    "السلامعليكم", "سلامعليكم", "السلامعليكمورحمهاللهوبركاته", "السلامعليكمورحمهالله",
+    "هلا", "هلاوالله", "اهلين", "اهلا", "اهلاوسهلا", "مرحبا", "مراحب", "حياكم", "حياكالله",
+    "صباحالخير", "صباحالنور", "مساءالخير", "مساءالنور", "شلونكم", "شخباركم", "شلونك", "شخبارك",
+    "hi", "hello", "hey", "goodmorning", "goodevening", "salam", "assalamualaikum", "hii", "helloo",
+}
+THANKS_ONLY_FORMS = {
+    "شكرا", "شكرًا", "شكرالك", "شكرالكم", "مشكور", "مشكورين", "تسلم", "تسلمون", "يعطيكالعافيه",
+    "يعطيكمالعافيه", "جزاكاللهخير", "جزاكماللهخير", "اللهيعطيكالعافيه", "ماقصرت", "ماقصرتوا",
+    "thanks", "thankyou", "thx", "thanku", "ty", "shukran",
+}
+CONVERSATIONAL_HINTS = (
+    "السلام", "عليكم", "صباح", "مساء", "هلا", "مرحبا", "حياك", "لو سمحت", "لوسمحت",
+    "شلون", "شخبار", "عساك", "عساكم", "كيفك", "كيف الحال", "اخبارك",
+    "عزكم الله", "اعزكم الله", "أعزكم الله", "اكرمكم", "أكرمكم", "حشاكم", "بلا مواخذه", "بلا مؤاخذة",
+    "شكرا", "مشكور", "تسلم", "يعطيك", "جزاك", "ما قصرت",
+    "وين", "أين", "اين", "احصل", "أحصل", "القى", "ألقى", "الاقي", "ألاقي",
+    "ابي", "أبي", "ابغى", "أبغى", "اريد", "أريد", "محتاج", "ودي", "تكفى", "تكفون",
+    "ممكن", "عندكم", "عندك", "بكم", "كم سعر", "وش سعر", "شكم", "دلوني", "دلني",
+    "ساعدني", "ساعدوني", "ابحث لي", "دور لي", "دورلي", "اشتري", "أشتري",
+    "please", "where", "can i", "could you", "i need", "i want", "looking for",
+    "how much", "help me", "find me", "thanks", "thank", "how are you", "good morning", "good evening",
+)
+
+PLEASANTRY_PATTERNS = [
+    r"السلام عليكم(?:\s*ورحمة الله(?:\s*وبركاته)?)?", r"و?عليكم السلام(?:\s*ورحمة الله(?:\s*وبركاته)?)?",
+    r"صباح الخير", r"صباح النور", r"مساء الخير", r"مساء النور",
+    r"هلا(?:\s*والله)?", r"ا?هلا(?:\s*وسهلا)?", r"مرحبا", r"حياكم?(?:\s*الله)?",
+    r"شلونك(?:م)?", r"شخبارك(?:م)?",
+    r"[أا]?عزكم الله", r"[أا]كرمكم الله", r"حشاكم", r"بلا م[ؤو]اخذة?ه?",
+    r"مع الشكر(?:\s*الجزيل)?", r"و?شكرا(?:\s*جزيلا)?(?:\s*لكم?)?", r"مشكورين?", r"تسلمون?",
+    r"يعطيكم?\s*العافيه?ة?", r"جزاكم?\s*الله\s*خيرا?", r"الله يخليكم?", r"ما قصرتو?ا?",
+    r"لو سمحتو?ا?", r"من فضلكم?", r"تكفون", r"تكفى", r"ممكن", r"ارجوكم?", r"أرجوكم?", r"رجاء",
+    r"وين\s*[أا]?حصله?ا?", r"وين\s*[أا]?لقاه?ا?", r"وين\s*[أا]لاقيه?ا?", r"وين\s*موجوده?",
+    r"[أا]ين\s*[أا]جده?ا?", r"[أا]بي\s*[أا]عرف\s*وين", r"دلوني\s*عليه?ا?", r"دلني\s*عليه?ا?",
+    r"[أا]بي\s*[أا]شتري", r"[أا]بغى\s*[أا]شتري", r"[أا]ريد\s*شراء", r"[أا]ريد", r"[أا]بغى", r"[أا]بي", r"محتاجه?",
+    r"دور\s*لي", r"ابحثو?ا?\s*لي", r"ساعدو?ني",
+    r"\bhi\b", r"\bhello\b", r"\bhey\b", r"\bplease\b", r"\bthanks?(?:\s*you)?\b", r"\bthank\s*you\b",
+    r"where\s*(?:can|do)\s*i\s*(?:find|get|buy)\s*(?:it|this)?", r"i\s*(?:need|want)", r"looking\s*for",
+    r"can\s*you\s*(?:find|get)\s*me", r"help\s*me\s*find",
+]
+_PLEASANTRY_RE = re.compile("|".join(PLEASANTRY_PATTERNS), flags=re.IGNORECASE)
+
+INTENT_PARSE_SYSTEM = """أنت محلل طلبات لبوت تسوق على واتساب. المستخدم يكتب أحياناً جملة كاملة فيها تحية ودعاء وشكر مع طلبه.
+مهمتك استخراج المطلوب الحقيقي فقط.
+أرجع JSON فقط بدون أي شرح وبدون Markdown:
+{"intent":"search|service|greeting|thanks|chat","products":["اسم المنتج نظيفاً"]}
+
+قواعد إلزامية:
+- "search": المستخدم يريد منتجاً. احذف التحية والدعاء (مثل: عزكم الله، أكرمكم الله، حشاكم) والشكر وعبارات مثل (وين أحصله، أبي أشتري، دلوني). أبقِ اسم المنتج وصفاته فقط.
+- المنتج الواحد = عنصر واحد في products حتى لو كانت الرسالة على عدة أسطر. لا تقسم الجملة الواحدة أبداً.
+- عدة منتجات مختلفة فعلاً (مفصولة بفواصل أو "و") = عدة عناصر.
+- "service": طلب فني/سباك/كهربائي/تصليح... ضع وصف الخدمة والمنطقة في products.
+- "greeting": تحية فقط بلا أي طلب. products فارغة.
+- "thanks": شكر فقط بلا طلب جديد. products فارغة.
+- "chat": كلام عام أو سؤال غير متعلق بمنتج. products فارغة.
+مثال: "السلام عليكم معجون ضد الصراصير عزكم الله وين أحصله مع الشكر"
+الجواب: {"intent":"search","products":["معجون ضد الصراصير"]}"""
+
+def strip_pleasantries(text):
+    """يشيل التحيات والأدعية والشكر وعبارات الطلب، ويرجع المتبقي كسطر واحد."""
+    cleaned = _PLEASANTRY_RE.sub(" ", text or "")
+    cleaned = re.sub(r"[،,.!؟?]+", " ", cleaned)
+    return " ".join(cleaned.split()).strip()
+
+def parse_user_intent(user_text, lang):
+    """يفهم الجملة الكاملة ويرجع {"intent": ..., "products": [...]}."""
+    text = (user_text or "").strip()
+    compact = re.sub(r"[^\w\u0600-\u06FF]", "", normalize_ar(text))
+
+    if compact in GREETING_ONLY_FORMS:
+        return {"intent": "greeting", "products": []}
+    if compact in THANKS_ONLY_FORMS:
+        return {"intent": "thanks", "products": []}
+
+    norm = normalize_ar(text)
+    conversational = ("؟" in text or "?" in text or
+                      any(normalize_ar(h) in norm for h in CONVERSATIONAL_HINTS))
+
+    # الطبقة 1 (بدون تكلفة): اسم منتج مباشر قصير — نفس سلوك البوت القديم بالضبط.
+    if not conversational and len(text.split()) <= 7:
+        return {"intent": "search", "products": extract_products(text)}
+
+    # الطبقة 3: جملة محادثة — نموذج سريع رخيص يستخرج النية والمنتجات.
+    raw, _ = call_gemini([{"text": text}], system=INTENT_PARSE_SYSTEM, use_search=False)
+    try:
+        data = json.loads(re.search(r"\{.*\}", raw or "", flags=re.S).group(0))
+        intent = str(data.get("intent") or "search").lower().strip()
+        products = [str(p).strip() for p in (data.get("products") or []) if str(p).strip()]
+        if intent in ("greeting", "thanks", "chat") and not products:
+            print(f"INTENT PARSED: {intent} (no products)")
+            return {"intent": intent, "products": []}
+        if intent in ("search", "service") and products:
+            print(f"INTENT PARSED: {intent} products={products}")
+            return {"intent": "search", "products": products[:6]}
+    except Exception:
+        print(f"INTENT PARSE FAIL: {raw!r}")
+
+    # الطبقة 2 (احتياط بدون تكلفة): تنظيف regex ثم اعتبار المتبقي منتجاً واحداً —
+    # لا نقسم على الأسطر أبداً لأن الجملة المحادثية جملة واحدة.
+    cleaned = strip_pleasantries(text)
+    if cleaned and len(cleaned) >= 3:
+        print(f"INTENT REGEX FALLBACK: {cleaned!r}")
+        return {"intent": "search", "products": [cleaned]}
+    # ما بقي شيء بعد التنظيف = كانت مجاملات فقط.
+    return {"intent": "greeting" if not compact.strip() or any(g in compact for g in ("سلام", "هلا", "مرحبا")) else "chat", "products": []}
+
+
 def process_text_message(message,bot_id,onboarding_checked=False):
     from_number=message["from"]
     load_user_preferences(from_number)
@@ -2981,7 +3101,19 @@ def process_text_message(message,bot_id,onboarding_checked=False):
         else:
             process_multi_images(pend["images"], from_number, pend["bot_id"], lang)
         return
-    products=extract_products(user_text)
+    parsed = parse_user_intent(user_text, lang)
+    intent = parsed.get("intent", "search")
+    if intent == "greeting":
+        send_whatsapp_text(from_number, T(lang, "welcome_reply"), bot_id)
+        return
+    if intent == "thanks":
+        send_whatsapp_text(from_number, T(lang, "thanks_reply"), bot_id)
+        return
+    if intent == "chat":
+        # كلام عام بلا منتج: نرحب ونوجه بدل ما نبحث عن جملة عشوائية.
+        send_whatsapp_text(from_number, T(lang, "welcome_reply"), bot_id)
+        return
+    products = [p for p in (parsed.get("products") or []) if p.strip()] or extract_products(user_text)
     if len(products)==1:
         send_whatsapp_text(from_number,T(lang,"searching",q=products[0]),bot_id)
         txt,urls=search_product(products[0], lang)
@@ -3022,4 +3154,4 @@ def process_location_message(message, bot_id):
     route_pending_after_location(from_number)
 
 @app.get("/")
-async def health(): return {"status":"v65 NOT-FOUND OPTIONS + FX TO LOCAL CURRENCY", "build":BUILD_ID, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
+async def health(): return {"status":"v66 INTENT UNDERSTANDING + FX", "build":BUILD_ID, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
