@@ -6,10 +6,10 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v64-lens-power-fusion-fils-20260803"
+BUILD_ID = "v65-notfound-options-fx-convert-20260803"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
-print("LENS MODE: MULTI-PASS (products -> all -> wide) + VISION FUSION + FILS PRICES")
+print("LENS MULTI-PASS + FUSION + NOT-FOUND OPTIONS + GLOBAL FX -> LOCAL CURRENCY")
 print("=" * 70)
 
 
@@ -130,6 +130,116 @@ COUNTRY_TLDS = {"kw":[".kw"],"sa":[".sa"],"ae":[".ae"],"bh":[".bh"],"qa":[".qa"]
 
 # العملات ذات الألف فلس: تُعرض دائماً بثلاث خانات عشرية (1.950 وليس 1.95).
 THREE_DECIMAL_CURRENCIES = {"KWD", "BHD", "OMR", "JOD", "TND", "LYD"}
+
+# ---- FX: تحويل الأسعار العالمية إلى عملة المستخدم المحلية -------------------
+# نستخدم open.er-api.com (مجاني بدون مفتاح، تحديث يومي، يشمل KWD وكل عملات الخليج).
+FX_CACHE = {}
+FX_CACHE_LOCK = threading.Lock()
+FX_CACHE_TTL = max(3600, int(os.environ.get("FX_CACHE_TTL_HOURS", "12")) * 3600)
+FX_API_URL = os.environ.get("FX_API_URL", "https://open.er-api.com/v6/latest/{base}")
+
+CURRENCY_SYMBOL_MAP = {
+    "$": "USD", "us$": "USD", "€": "EUR", "£": "GBP", "¥": "JPY", "₹": "INR",
+    "₩": "KRW", "₺": "TRY", "₽": "RUB", "r$": "BRL", "a$": "AUD", "c$": "CAD",
+    "د.إ": "AED", "ر.س": "SAR", "ر.ق": "QAR", "ر.ع": "OMR", "د.ب": "BHD",
+    "د.ك": "KWD", "ج.م": "EGP", "د.أ": "JOD",
+}
+KNOWN_CURRENCY_CODES = set(COUNTRY_CURRENCIES.values()) | {
+    "USD","EUR","GBP","JPY","CNY","INR","AED","SAR","QAR","OMR","BHD","KWD",
+    "TRY","EGP","JOD","AUD","CAD","CHF","SEK","NOK","DKK","PLN","RUB","BRL",
+    "MXN","ZAR","KRW","SGD","MYR","THB","IDR","PHP","VND","PKR","HKD","NZD","TWD"
+}
+
+def get_fx_rates(base):
+    """أسعار الصرف من عملة الأساس. كاش 12 ساعة حتى لا نستهلك الشبكة مع كل بحث."""
+    base = (base or "").upper().strip()
+    if not base:
+        return {}
+    now = time.time()
+    with FX_CACHE_LOCK:
+        hit = FX_CACHE.get(base)
+        if hit and now - hit["ts"] < FX_CACHE_TTL:
+            return hit["rates"]
+    try:
+        r = requests.get(FX_API_URL.format(base=base), timeout=10)
+        if r.ok:
+            j = r.json()
+            rates = j.get("rates") or j.get("conversion_rates") or {}
+            if rates:
+                with FX_CACHE_LOCK:
+                    FX_CACHE[base] = {"rates": rates, "ts": now}
+                print(f"FX RATES LOADED base={base} count={len(rates)}")
+                return rates
+        print(f"FX HTTP {r.status_code} base={base}")
+    except Exception as e:
+        print(f"FX FETCH ERR base={base}: {e}")
+    with FX_CACHE_LOCK:
+        hit = FX_CACHE.get(base)
+        return hit["rates"] if hit else {}
+
+def convert_to_local(value, from_currency):
+    """يحوّل قيمة بعملة أجنبية إلى عملة سوق المستخدم الحالي. يعيد None عند التعذر."""
+    try:
+        val = float(value)
+    except Exception:
+        return None
+    src = (from_currency or "").upper().strip()
+    dst = (current_market().get("currency") or "").upper().strip()
+    if not src or not dst:
+        return None
+    if src == dst:
+        return val
+    rates = get_fx_rates(src)
+    rate = rates.get(dst)
+    if not rate:
+        return None
+    return val * float(rate)
+
+def detect_currency_code(text, fallback=""):
+    """يستخرج رمز العملة من نص السعر: KWD أو $ أو ر.س ... إلخ."""
+    hay = str(text or "").strip()
+    if not hay:
+        return (fallback or "").upper()
+    m = re.search(r"\b([A-Z]{3})\b", hay.upper())
+    if m and m.group(1) in KNOWN_CURRENCY_CODES:
+        return m.group(1)
+    low = hay.lower()
+    # الرموز المركبة أولاً (us$ قبل $).
+    for sym in sorted(CURRENCY_SYMBOL_MAP, key=len, reverse=True):
+        if sym in low or sym in hay:
+            return CURRENCY_SYMBOL_MAP[sym]
+    return (fallback or "").upper()
+
+def display_global_price(price_value, price_text, currency_code, lang="ar"):
+    """السعر العالمي يُعرض دائماً بعملة المستخدم المحلية بالفلوس الكاملة: 1.950 د.ك (6.35 USD).
+
+    إذا تعذر التحويل (عملة مجهولة أو فشل مصدر الصرف) نعرض السعر الأصلي كما ورد بدل إخفاء العرض.
+    """
+    src = detect_currency_code(f"{currency_code or ''} {price_text or ''}", currency_code)
+    numeric = None
+    try:
+        if price_value not in (None, ""):
+            numeric = float(price_value)
+    except Exception:
+        numeric = None
+    if numeric is None:
+        m = re.search(r"(?<!\d)(\d+(?:[.,]\d{1,3})?)(?!\d)", str(price_text or "").replace(",", ""))
+        if m:
+            try:
+                numeric = float(m.group(1))
+            except Exception:
+                numeric = None
+    if numeric is None:
+        return str(price_text or "").strip(), None
+    converted = convert_to_local(numeric, src) if src else None
+    local_code = (current_market().get("currency") or "").upper()
+    if converted is not None:
+        label = currency_label(lang)
+        original = f" ({format_price(numeric, src)} {src})" if src and src != local_code else ""
+        return f"{format_price(converted, local_code)} {label}{original}", converted
+    # فشل التحويل: أظهر الأصلي بوضوح ولا تلصق عليه عملة محلية خاطئة.
+    shown = str(price_text or "").strip() or f"{format_price(numeric, src)} {src}".strip()
+    return shown, None
 
 def infer_country_from_phone(phone):
     digits = re.sub(r"\D", "", phone or "")
@@ -575,6 +685,13 @@ MSG = {
         "global_no": "لا، محلي فقط",
         "global_searching": "🌍 أدور لك عالميًا على أفضل النتائج المطابقة...",
         "global_none": "حتى بالبحث العالمي ما لقيت نتيجة مؤكدة ومباشرة لهذا المنتج.",
+        "ask_not_found": "ما لقيت نفس المنتج بالضبط متوفر عندك محلياً 😅\n\nشرايك، وش تبيني أسوي؟ 👇",
+        "opt_global": "🌍 دوّر عالمياً",
+        "opt_similar": "🔄 بدائل مشابهة",
+        "opt_no": "لا شكراً 🙏",
+        "similar_searching": "🔄 أدور لك على أفضل البدائل المشابهة المتوفرة عندك...",
+        "similar_none": "ما لقيت بدائل مشابهة بسعر مؤكد حالياً 😅 جرب صياغة ثانية.",
+        "declined_ok": "تمام 🙏 إذا احتجت شي ثاني أنا حاضر!",
     },
     "en": {
         "identifying": "One sec.. identifying the product and finding you the best deal!",
@@ -595,6 +712,13 @@ MSG = {
         "global_no": "No, local only",
         "global_searching": "🌍 Searching international stores for the closest matches...",
         "global_none": "I still couldn't find a verified direct result globally.",
+        "ask_not_found": "I couldn't find this exact product available locally 😅\n\nWhat would you like me to do? 👇",
+        "opt_global": "🌍 Search globally",
+        "opt_similar": "🔄 Similar items",
+        "opt_no": "No thanks 🙏",
+        "similar_searching": "🔄 Looking for the best similar alternatives available near you...",
+        "similar_none": "I couldn't find similar alternatives with a verified price right now 😅 try another phrasing.",
+        "declined_ok": "No problem 🙏 I'm here whenever you need me!",
     },
 }
 
@@ -672,7 +796,7 @@ def fetch_html(url):
 def parse_product_data(html, url):
     if not html: return None
     soup = BeautifulSoup(html, 'lxml')
-    data = {"price": None, "available": True, "is_product": True, "title": "", "image_url": ""}
+    data = {"price": None, "available": True, "is_product": True, "title": "", "image_url": "", "currency": ""}
     ld_products = 0
     for script in soup.find_all("script", type="application/ld+json"):
         try:
@@ -697,6 +821,10 @@ def parse_product_data(html, url):
                     if p:
                         try: data["price"] = float(str(p).replace(",",""))
                         except: pass
+                    if not data["currency"]:
+                        cur = str(offers.get("priceCurrency") or "").upper().strip()
+                        if cur in KNOWN_CURRENCY_CODES:
+                            data["currency"] = cur
                     av = str(offers.get("availability","")).lower()
                     if "outofstock" in av or "discontinued" in av or "soldout" in av:
                         data["available"] = False
@@ -722,6 +850,12 @@ def parse_product_data(html, url):
         if m and m.get("content"):
             try: data["price"] = float(m["content"])
             except: pass
+    if not data["currency"]:
+        m = soup.find("meta", property="product:price:currency")
+        if m and m.get("content"):
+            cur = str(m["content"]).upper().strip()
+            if cur in KNOWN_CURRENCY_CODES:
+                data["currency"] = cur
     if not data["image_url"]:
         for attrs in ({"property": "og:image"}, {"name": "twitter:image"}, {"property": "twitter:image"}):
             m = soup.find("meta", attrs=attrs)
@@ -772,7 +906,7 @@ def verify_offers(urls_map, query):
     for r in results:
         if r:
             name, url, info = r
-            verified[name] = {"url": url, "price": info["price"], "title": info["title"], "image_url": info.get("image_url", "")}
+            verified[name] = {"url": url, "price": info["price"], "title": info["title"], "image_url": info.get("image_url", ""), "currency": info.get("currency", "")}
     return verified
 
 def _cleanup_lens_images():
@@ -1676,15 +1810,16 @@ def lens_priced_offers(lens_context, lang="ar", local_only=True, exclude_local=F
             continue
         if not price_text and price_value in (None, ""):
             continue
-        # Keep cards in the user's current market currency. If SerpApi omitted the currency
-        # but supplied a numeric price, retain the card and let the local-result score decide.
-        price_hay = f"{price_text} {currency}".lower()
-        expected_currency = (current_market().get("currency") or "").lower()
-        currency_aliases = {expected_currency}
-        if expected_currency == "kwd": currency_aliases.update({"د.ك", "kd"})
-        if expected_currency and price_hay.strip() and not any(x and x in price_hay for x in currency_aliases):
-            if price_value in (None, ""):
-                continue
+        # في الوضع المحلي: نبقي بطاقات عملة السوق فقط. في الوضع العالمي كل العملات مقبولة
+        # لأنها ستُحوَّل إلى العملة المحلية قبل العرض.
+        if not exclude_local:
+            price_hay = f"{price_text} {currency}".lower()
+            expected_currency = (current_market().get("currency") or "").lower()
+            currency_aliases = {expected_currency}
+            if expected_currency == "kwd": currency_aliases.update({"د.ك", "kd"})
+            if expected_currency and price_hay.strip() and not any(x and x in price_hay for x in currency_aliases):
+                if price_value in (None, ""):
+                    continue
         name = _lens_source_name(item, i)
         base = name
         n = 2
@@ -1696,8 +1831,10 @@ def lens_priced_offers(lens_context, lang="ar", local_only=True, exclude_local=F
         except Exception:
             numeric = None
         if exclude_local:
-            # عالمي: نحافظ على العملة الأصلية كما وردت من Lens مع تنسيق الأرقام إن أمكن.
-            shown = str(price_text).strip() or (f"{format_price(price_value, currency)} {currency}".strip() if price_value not in (None, "") else "")
+            # عالمي: السعر يُحوَّل دائماً إلى عملة المستخدم المحلية بالفلوس (1.950 د.ك) مع الأصل بين قوسين.
+            shown, converted = display_global_price(price_value, price_text, currency, lang)
+            if converted is not None:
+                numeric = converted
         else:
             shown = format_lens_price(price_text, price_value, lang)
         offers[name] = {
@@ -1775,14 +1912,23 @@ def _new_layer_search(query, lang, prompt_text=None, source_image_b64=None, sour
     # If Lens returned direct pages without price metadata, try our HTML verifier once.
     lens_verified = verify_lens_direct_matches(lens_context, local_only=not allow_global, exclude_local=allow_global)
     if lens_verified:
-        sorted_v = sorted(lens_verified.items(), key=lambda x: x[1]["price"])
+        if allow_global:
+            # أسعار أجنبية من HTML: نحولها للعملة المحلية أولاً ثم نرتب بالأرخص المحوَّل.
+            for info in lens_verified.values():
+                shown, converted = display_global_price(info["price"], "", info.get("currency", ""), lang)
+                info["shown"] = shown
+                info["sort_price"] = converted if converted is not None else info["price"]
+            sorted_v = sorted(lens_verified.items(), key=lambda x: x[1]["sort_price"])
+        else:
+            for info in lens_verified.values():
+                info["shown"] = f"{format_price(info['price'])} {currency_label(lang)}"
+            sorted_v = sorted(lens_verified.items(), key=lambda x: x[1]["price"])
         display_name = (lens_context.get("chosen") or {}).get("title") or query
         lines = [f"📦 {display_name}", ""]
         new_urls = {}
         for i, (name, info) in enumerate(sorted_v[:MAX_STORES]):
             prefix = "✅" if i == 0 else "•"
-            currency = currency_label(lang)
-            lines.append(f"{prefix} {name} — {format_price(info['price'])} {currency}")
+            lines.append(f"{prefix} {name} — {info['shown']}")
             new_urls[name] = info["url"]
         return "\n".join(lines), new_urls
 
@@ -2019,14 +2165,23 @@ def _old_layer_search(query, lang, prompt_text=None, lens_context=None, allow_gl
         print("OLD LAYER: no verified direct offers")
         return "", {}
 
-    sorted_v = sorted(verified.items(), key=lambda x: x[1]["price"])
+    if allow_global:
+        # عالمي: كل سعر يُحوَّل إلى عملة المستخدم المحلية بالفلوس ثم نرتب بالأرخص المحوَّل.
+        for info in verified.values():
+            shown, converted = display_global_price(info["price"], "", info.get("currency", ""), lang)
+            info["shown"] = shown
+            info["sort_price"] = converted if converted is not None else info["price"]
+        sorted_v = sorted(verified.items(), key=lambda x: x[1]["sort_price"])
+    else:
+        for info in verified.values():
+            info["shown"] = f"{format_price(info['price'])} {currency_label(lang)}"
+        sorted_v = sorted(verified.items(), key=lambda x: x[1]["price"])
     title = product_title(best_txt, query)
-    currency = currency_label(lang)
     lines = [title, ""]
     new_urls = {}
     for i, (name, info) in enumerate(sorted_v[:max(MAX_STORES * 2, 6)]):
         prefix = "✅" if i == 0 else "•"
-        lines.append(f"{prefix} {name} — {format_price(info['price'])} {currency}")
+        lines.append(f"{prefix} {name} — {info['shown']}")
         new_urls[name] = info["url"]
     print(f"OLD LAYER VERIFIED: {list(new_urls)}")
     return "\n".join(lines), new_urls
@@ -2279,11 +2434,68 @@ def _pop_pending_global(phone):
         return None
     return item
 
-def send_global_choice(phone, bot_id, lang):
-    send_whatsapp_buttons(phone, T(lang, "ask_global"), [
-        {"id": "global_yes", "title": T(lang, "global_yes")[:20]},
-        {"id": "global_no", "title": T(lang, "global_no")[:20]},
+def send_not_found_choice(phone, bot_id, lang):
+    """المنتج بالضبط غير متوفر محلياً: 3 خيارات — عالمي، بدائل مشابهة، أو لا شكراً."""
+    send_whatsapp_buttons(phone, T(lang, "ask_not_found"), [
+        {"id": "nf_global", "title": T(lang, "opt_global")[:20]},
+        {"id": "nf_similar", "title": T(lang, "opt_similar")[:20]},
+        {"id": "nf_no", "title": T(lang, "opt_no")[:20]},
     ], bot_id)
+
+def run_similar_search(phone, item):
+    """بحث بدائل مشابهة: نفس الفئة والاستخدام، محلياً فقط، بدون قيود Lens الصارمة."""
+    activate_market(phone)
+    bot_id = item["bot_id"]; lang = item["lang"]; query = item["query"]
+    send_whatsapp_text(phone, T(lang, "similar_searching"), bot_id)
+    # نزيل جزء الكابشن إن وجد ونأخذ اسم المنتج الأساسي.
+    base = short_query(re.sub(r"^.*?—\s*", "", query).strip() or query) or short_query(query)
+    market_name = current_market().get("country_name", "Kuwait")
+    prompts = [
+        (f"المنتج التالي غير متوفر محلياً: {base}. اقترح حتى 3 بدائل مشابهة له فعلياً — نفس الفئة "
+         f"ونفس الاستخدام ومستوى جودة قريب — متوفرة الآن في متاجر {market_name} فقط. "
+         "لكل بديل: اسم البديل الفعلي (وليس اسم المنتج الأصلي)، سعر رقمي واضح بعملة السوق، "
+         f"ورابط صفحة المنتج المباشرة داخل المتجر. اكتب السعر بالفلوس كاملة مثل 1.950. {LANG_INSTR[lang]}"),
+        (f"3 best in-stock alternatives similar to {base} in {market_name} local online stores, "
+         f"each with the alternative's own name, a numeric price, and a direct product page link. {LANG_INSTR[lang]}"),
+    ]
+    for prompt in prompts:
+        txt, urls = call_gemini([{"text": prompt}])
+        urls = direct_urls_only(urls)
+        offers = extract_store_offers(txt)
+        if not txt or not offers or not urls:
+            continue
+        verified = verify_offers(urls, base)
+        if verified:
+            sorted_v = sorted(verified.items(), key=lambda x: x[1]["price"])
+            title = product_title(txt, f"بدائل مشابهة: {base}" if lang == "ar" else f"Similar to: {base}")
+            lines = [title, ""]
+            new_urls = {}
+            for i, (name, info) in enumerate(sorted_v[:MAX_STORES]):
+                prefix = "✅" if i == 0 else "•"
+                alt_title = (info.get("title") or "").strip()
+                label = f"{name}: {alt_title[:45]}" if alt_title else name
+                lines.append(f"{prefix} {label} — {format_price(info['price'])} {currency_label(lang)}")
+                new_urls[name] = info["url"]
+            send_product_result(phone, "\n".join(lines), new_urls, bot_id, lang, base)
+            return
+        # بعض المتاجر تمنع فحص HTML؛ نقبل سطور Gemini التي لها رابط منتج مباشر فقط.
+        kept = []
+        for offer in offers:
+            matched = match_url(offer["name"], urls)
+            if matched and is_direct_store_url(matched):
+                kept.append((offer, matched))
+        if kept:
+            title = product_title(txt, f"بدائل مشابهة: {base}" if lang == "ar" else f"Similar to: {base}")
+            lines = [title, ""]
+            new_urls = {}
+            for i, (offer, matched) in enumerate(kept[:MAX_STORES]):
+                prefix = "✅" if i == 0 else "•"
+                body = re.sub(r"^(?:✅|🏆|•)\s*", "", offer["line"]).strip()
+                lines.append(f"{prefix} {body}")
+                new_urls[offer["name"]] = matched
+            send_product_result(phone, "\n".join(lines), new_urls, bot_id, lang, base)
+            return
+    send_whatsapp_text(phone, T(lang, "similar_none"), bot_id)
 
 def run_global_search(phone, item):
     activate_market(phone)
@@ -2321,13 +2533,19 @@ def process_interactive_message(message, bot_id):
     from_number=message["from"]
     reply=(message.get("interactive") or {}).get("button_reply") or {}
     btn_id=reply.get("id","")
-    if btn_id == "global_yes":
+    if btn_id in ("global_yes", "nf_global"):
         item = _pop_pending_global(from_number)
         if item:
             run_global_search(from_number, item)
         return
-    if btn_id == "global_no":
+    if btn_id == "nf_similar":
+        item = _pop_pending_global(from_number)
+        if item:
+            run_similar_search(from_number, item)
+        return
+    if btn_id in ("global_no", "nf_no"):
         PENDING_GLOBAL_SEARCH.pop(from_number, None)
+        send_whatsapp_text(from_number, T(USER_LANG.get(from_number, "ar"), "declined_ok"), bot_id)
         return
     if btn_id not in ("lang_ar","lang_en"):
         return
@@ -2674,11 +2892,10 @@ def process_single_image(message,bot_id,lang="ar"):
         if txt and (is_service_answer(txt) or is_informational_answer(txt)):
             send_product_result(from_number, txt, urls, bot_id, lang, query)
             return
-        if active_lens and (active_lens.get("matches") or []):
+        if query:
+            # حتى بدون نتائج Lens، البحث العالمي والبدائل يعملان نصياً بالاسم المحدد.
             _store_pending_global(from_number, bot_id, lang, query, active_lens, prompt_text if (combined_name and caption) else None)
-            send_global_choice(from_number, bot_id, lang)
-        elif combined_name:
-            send_whatsapp_text(from_number, T(lang, "identified_not_found", p=short_query(combined_name)), bot_id)
+            send_not_found_choice(from_number, bot_id, lang)
         else:
             send_whatsapp_text(from_number,T(lang,"cant_identify"),bot_id)
         return
@@ -2769,8 +2986,17 @@ def process_text_message(message,bot_id,onboarding_checked=False):
         send_whatsapp_text(from_number,T(lang,"searching",q=products[0]),bot_id)
         txt,urls=search_product(products[0], lang)
         LAST_SEARCH[from_number] = {"product": products[0]}
+        if not txt or (not extract_store_offers(txt) and not is_service_answer(txt) and not is_informational_answer(txt)):
+            # ما لقينا المنتج بالضبط محلياً: نعرض الخيارات الثلاثة بدل رسالة الاعتذار وحدها.
+            _store_pending_global(from_number, bot_id, lang, products[0], None, None)
+            send_not_found_choice(from_number, bot_id, lang)
+            return
         result_type = send_product_result(from_number, txt, urls, bot_id, lang, products[0])
-        if result_type == "service" or (result_type == "product" and AUTO_SEND_PRODUCT_MAPS):
+        if result_type == "none":
+            # كانت هناك عروض لكن كل روابطها غير مباشرة؛ نفس الخيارات تنفع هنا أيضاً.
+            _store_pending_global(from_number, bot_id, lang, products[0], None, None)
+            send_not_found_choice(from_number, bot_id, lang)
+        elif result_type == "service" or (result_type == "product" and AUTO_SEND_PRODUCT_MAPS):
             send_maps_button(from_number, products[0], bot_id, lang)
     else:
         send_whatsapp_text(from_number,T(lang,"multi_text",c=len(products)),bot_id)
@@ -2796,4 +3022,4 @@ def process_location_message(message, bot_id):
     route_pending_after_location(from_number)
 
 @app.get("/")
-async def health(): return {"status":"v64 LENS MULTI-PASS + FUSION + FILS", "build":BUILD_ID, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
+async def health(): return {"status":"v65 NOT-FOUND OPTIONS + FX TO LOCAL CURRENCY", "build":BUILD_ID, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
