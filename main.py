@@ -6,10 +6,10 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v69-generic-product-fallback-20260804"
+BUILD_ID = "v70-category-safety-net-20260804"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
-print("GENERIC PRODUCT MODE + MARKETPLACE DEMOTION + REAL FILS + LOCAL GUARD")
+print("CATEGORY SAFETY NET + UNTRUSTED MARKETPLACE TITLES + GENERIC MODE + REAL FILS")
 print("=" * 70)
 
 
@@ -1142,7 +1142,7 @@ def google_lens_lookup(image_b64, mime_type, lang="ar", query_hint=""):
         )
         sig_txt, _ = call_gemini([
             {"inline_data": {"mime_type": mime_type, "data": image_b64}},
-            {"text": f"Google Lens title hint: {chosen_title}"},
+            {"text": f"Google Lens title hint (untrusted, for naming only — NEVER use it to decide BRAND): {chosen_title}"},
         ], system=sig_system, use_search=False)
         fields = [x.strip() for x in ((sig_txt or "").strip().splitlines()[0] if sig_txt else "").split("|")]
 
@@ -2791,8 +2791,12 @@ def is_generic_product_identity(lens_context, vision_name=""):
     brand = normalize_ar(sig.get("brand") or "").strip()
     if brand and brand not in ("none", "unknown", "لا يوجد", "غير معروف", "بدون", "-"):
         return False
-    chosen_title = str((lens_context.get("chosen") or {}).get("title") or "")
-    hay = normalize_ar(f"{chosen_title} {vision_name}")
+    chosen = lens_context.get("chosen") or {}
+    chosen_title = str(chosen.get("title") or "")
+    # v70: عنوان موقع وساطة (Ubuy...) غير موثوق كدليل براند — «Spalding TF Gold | Ubuy»
+    # لكرة برتقالية بلا أي شعار. البراند يُعتمد فقط من عنوان متجر حقيقي أو من الصورة نفسها.
+    title_trusted = not is_marketplace_lens_item(chosen)
+    hay = normalize_ar(f"{chosen_title if title_trusted else ''} {vision_name}")
     known_brands = (
         "nike","adidas","wilson","molten","spalding","jordan","puma","under armour",
         "reebok","asics","new balance","mizuno","yonex","babolat","head","wilson",
@@ -2878,6 +2882,17 @@ def identify_image_product(image_b64, mime_type, lang):
             return query, display, None
     if lens_context and is_fashion_identity(lens_context, vision_name):
         lens_context["force_lens_only"] = True
+    # v70: نحفظ أسماء الفئة (كرة سلة | basketball) داخل السياق لشبكة الأمان النهائية.
+    if lens_context:
+        chosen_title = str((lens_context.get("chosen") or {}).get("title") or "")
+        cats = []
+        for value in split_product_aliases(vision_name):
+            if value and value not in cats:
+                cats.append(value)
+        for value in (lens_context.get("aliases") or []):
+            if value and value != chosen_title and value not in cats and not is_marketplace_lens_item({"title": value}):
+                cats.append(value)
+        lens_context["category_aliases"] = cats[:2]
     query, display = choose_image_identity(lens_context, vision_name)
     return query, display, lens_context
 
@@ -2900,11 +2915,43 @@ def process_single_image(from_number, msg, bot_id, lang):
             source_image_b64=image_b64, source_image_mime=mime_type,
             lens_context=lens_context,
         )
-        if not txt or (not extract_store_offers(txt) and not is_service_answer(txt) and not is_informational_answer(txt)):
+
+        def _has_result(t):
+            return t and (extract_store_offers(t) or is_service_answer(t) or is_informational_answer(t))
+
+        # v70: شبكة الأمان — قبل أي رسالة «ما لقيت»، نجرب بحثاً محلياً باسم الفئة
+        # (كرة سلة | basketball) بدون قيود Lens. هذا يضمن أن البوت لا يكون أضعف
+        # من بحث Google العادي مهما كان عنوان Lens غريباً (Spalding TF Gold | Ubuy).
+        if not _has_result(txt):
+            cats = (lens_context or {}).get("category_aliases") or []
+            if cats:
+                cat_query = " | ".join(cats)
+                print(f"CATEGORY FALLBACK SEARCH: {cat_query}")
+                cat_txt, cat_urls = search_product(cat_query, lang)
+                if _has_result(cat_txt):
+                    txt, urls = cat_txt, cat_urls
+                    display = cats[0]
+                    query = cat_query
+                    lens_context = None
+
+        if not _has_result(txt):
             send_not_found_choice(from_number, bot_id, lang, query, lens_context=lens_context, identified_name=display)
             return
         kind = send_product_result(from_number, txt, urls, bot_id, lang, display or query)
         if kind == "none":
+            # v70: نفس شبكة الأمان إذا فشل إرسال الروابط المباشرة.
+            cats = (lens_context or {}).get("category_aliases") or []
+            if cats:
+                cat_query = " | ".join(cats)
+                print(f"CATEGORY FALLBACK (POST-SEND): {cat_query}")
+                cat_txt, cat_urls = search_product(cat_query, lang)
+                if _has_result(cat_txt):
+                    kind = send_product_result(from_number, cat_txt, cat_urls, bot_id, lang, cats[0])
+                    if kind == "product":
+                        LAST_SEARCH[from_number] = short_query(cats[0])
+                        if AUTO_SEND_PRODUCT_MAPS:
+                            send_maps_button(from_number, LAST_SEARCH[from_number], bot_id, lang)
+                    return
             send_not_found_choice(from_number, bot_id, lang, query, lens_context=lens_context, identified_name=display)
             return
         if kind == "product":
@@ -3124,7 +3171,7 @@ def process_location_message(msg, bot_id):
 async def health():
     return {
         "status": f"COOP BOT {BUILD_ID} RUNNING",
-        "features": "generic product mode + marketplace demotion + real fils prices + cheapest-first sort + local market guard + Taw9eel + 5 stores + two-layer search + Google Lens",
+        "features": "category safety net + generic product mode + marketplace demotion + real fils prices + cheapest-first sort + local market guard + Taw9eel + 5 stores + two-layer search + Google Lens",
         "gemini": GEMINI_STATS,
         "cache_entries": len(SEARCH_CACHE),
     }
