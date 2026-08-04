@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v71-1-lens-direct-passthrough-20260804"
+BUILD_ID = "v71-2-lens-country-hint-20260804"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE -> GOOGLE LENS DIRECT PASSTHROUGH (raw results to user)")
@@ -144,6 +144,23 @@ COUNTRY_CURRENCIES = {
     "au":"AUD","nz":"NZD","za":"ZAR","ng":"NGN","ke":"KES","ma":"MAD","dz":"DZD","tn":"TND","ru":"RUB","ua":"UAH","br":"BRL","mx":"MXN","ar":"ARS"
 }
 COUNTRY_TLDS = {"kw":[".kw"],"sa":[".sa"],"ae":[".ae"],"bh":[".bh"],"qa":[".qa"],"om":[".om"],"tr":[".tr"],"gb":[".uk"],"us":[".us"],"ca":[".ca"],"in":[".in"],"cn":[".cn"],"jp":[".jp"],"au":[".au"],"nz":[".nz"],"de":[".de"],"fr":[".fr"],"it":[".it"],"es":[".es"]}
+
+# v71.2: اسم البلد بالعربي — يُرسل كنص مع الصورة إلى Google Lens (نفس حركة كتابة
+# «الكويت» في مربع بحث Lens) فترجّح النتائج متاجرَ نفس البلد.
+COUNTRY_NAMES_AR = {
+    "kw": "الكويت", "sa": "السعودية", "ae": "الإمارات", "bh": "البحرين", "qa": "قطر",
+    "om": "عمان", "iq": "العراق", "jo": "الأردن", "lb": "لبنان", "eg": "مصر",
+    "sy": "سوريا", "ye": "اليمن", "ps": "فلسطين", "ma": "المغرب", "dz": "الجزائر",
+    "tn": "تونس", "ly": "ليبيا", "sd": "السودان", "tr": "تركيا",
+}
+
+def country_hint_word(lang="ar"):
+    """كلمة البلد التي تُلحق بطلب Lens: عربية للمستخدم العربي، وإلا الاسم الإنجليزي."""
+    m = current_market()
+    cc = (m.get("country") or DEFAULT_COUNTRY).lower()
+    if lang == "ar":
+        return COUNTRY_NAMES_AR.get(cc) or m.get("country_name") or ""
+    return m.get("country_name") or ""
 
 # العملات ذات الألف فلس: تُعرض دائماً بثلاث خانات عشرية (1.950 وليس 1.95).
 THREE_DECIMAL_CURRENCIES = {"KWD", "BHD", "OMR", "JOD", "TND", "LYD"}
@@ -3504,10 +3521,16 @@ def process_single_image(message,bot_id,lang="ar"):
         send_whatsapp_text(from_number, T(lang, "image_error"), bot_id)
         return
 
+    # v71.2: نفس حركة تطبيق Lens — نرفق اسم بلد المستخدم كنص مع الصورة
+    # («الكويت») فيرجّح Google نتائج متاجر نفس البلد.
+    country_word = country_hint_word(lang)
+    lens_hint = " ".join(x for x in (caption, country_word) if x).strip()
+
     # v71: وضع اللينز المباشر — الصورة تروح لـ Google Lens ونتائجه تُرسل كما هي.
     # بدون Vision ولا حكم هوية ولا طبقات بحث. إذا Google ما رجع شي، نكمل بالمسار الكامل.
     if LENS_DIRECT_MODE and ENABLE_GOOGLE_LENS and SERPAPI_API_KEY and PUBLIC_BASE_URL:
-        lens_direct = google_lens_lookup(b64, mime, lang, caption, light=True)
+        print(f"LENS DIRECT HINT: {lens_hint!r}")
+        lens_direct = google_lens_lookup(b64, mime, lang, lens_hint, light=True)
         if lens_direct.get("matches"):
             if send_lens_direct_results(from_number, lens_direct, bot_id, lang, caption):
                 if AUTO_SEND_PRODUCT_MAPS:
@@ -3523,7 +3546,7 @@ def process_single_image(message,bot_id,lang="ar"):
     #    فيبحث النص بكل المرادفات ويغطي الفهرسة العربية والإنجليزية معاً.
     lens_future = None
     if LENS_PARALLEL_WITH_VISION and ENABLE_GOOGLE_LENS and SERPAPI_API_KEY and PUBLIC_BASE_URL:
-        lens_future = LENS_POOL.submit(_run_with_market, market, google_lens_lookup, b64, mime, lang, caption)
+        lens_future = LENS_POOL.submit(_run_with_market, market, google_lens_lookup, b64, mime, lang, lens_hint)
 
     vision_name = identify_product_with_retry(b64, mime, lang)
     force_fashion_lens = is_fashion_identity(vision_name, caption)
@@ -3538,7 +3561,7 @@ def process_single_image(message,bot_id,lang="ar"):
             except Exception as e:
                 print(f"LENS PARALLEL ERR: {e}")
         else:
-            lens = google_lens_lookup(b64, mime, lang, caption or vision_name)
+            lens = google_lens_lookup(b64, mime, lang, " ".join(x for x in ((caption or vision_name), country_word) if x).strip())
     elif lens_future is not None:
         # الراوتر قرر Vision-first (عبوة نصية)؛ نتيجة اللينز المتوازية تُهمل بهدوء.
         lens_future.cancel()
