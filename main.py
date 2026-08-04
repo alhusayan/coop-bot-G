@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v67-1-image-notfound-options-20260804"
+BUILD_ID = "v67-4-same-size-comparison-20260804"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("GENERIC COMMODITY -> VISION FIRST + INTENT UNDERSTANDING + GLOBAL FX")
@@ -436,6 +436,86 @@ def normalize_ar(text):
     t = t.replace("ري بان", "ريبان").replace("راي بان", "ريبان").replace("ray ban", "rayban").replace("ray-ban", "rayban")
     return t
 
+# ---- مقارنة نفس الحجم فقط ----------------------------------------------------
+# عبوة 250 مل أرخص من لتر لأنها أصغر، مو لأنها عرض أفضل. نستخرج الحجم من عنوان
+# كل منتج (مع مضاعِف العبوات مثل 6×185مل) ونرفض أي عرض حجمه يختلف عن المرجع.
+SIZE_RE = re.compile(
+    r"(?:(\d+(?:[.,]\d+)?)\s*[x×*]\s*)?(\d+(?:[.,]\d+)?)\s*"
+    r"(مل|ملي لتر|ملل|ml|لتر|ليتر|l|ltr|liter|litre|كجم|كغم|كغ|كيلو جرام|كيلو غرام|كيلو|kg|جرام|غرام|جم|غم|gm|gr|g)\b",
+    re.I,
+)
+_VOL_UNITS = {"مل", "ملي لتر", "ملل", "ml"}
+_VOL_BIG_UNITS = {"لتر", "ليتر", "l", "ltr", "liter", "litre"}
+_WT_BIG_UNITS = {"كجم", "كغم", "كغ", "كيلو جرام", "كيلو غرام", "كيلو", "kg"}
+
+def extract_pack_size(text):
+    """يعيد (نوع, الكمية الكلية بالمل أو الجرام) أو None إذا ما فيه حجم مذكور."""
+    t = normalize_ar(str(text or ""))
+    for m in SIZE_RE.finditer(t):
+        try:
+            count = float((m.group(1) or "1").replace(",", "."))
+            qty = float(m.group(2).replace(",", "."))
+        except Exception:
+            continue
+        unit = m.group(3).lower()
+        if unit in _VOL_BIG_UNITS:
+            cls, base = "vol", qty * 1000.0
+        elif unit in _VOL_UNITS:
+            cls, base = "vol", qty
+        elif unit in _WT_BIG_UNITS:
+            cls, base = "wt", qty * 1000.0
+        else:
+            cls, base = "wt", qty
+        total = count * base
+        if total > 0:
+            return (cls, total)
+    return None
+
+def format_pack_size(sig):
+    if not sig:
+        return ""
+    cls, total = sig
+    if cls == "vol":
+        return f"{total/1000:g} لتر" if total >= 1000 else f"{int(total)} مل"
+    return f"{total/1000:g} كجم" if total >= 1000 else f"{int(total)} جم"
+
+def sizes_compatible(a, b):
+    """None = حجم غير معروف فنسمح به. اختلاف يتجاوز 15% = منتج مختلف."""
+    if not a or not b:
+        return True
+    if a[0] != b[0]:
+        return False
+    lo, hi = sorted((a[1], b[1]))
+    return hi <= lo * 1.15
+
+def filter_same_size(offers_dict, reference_text):
+    """يبقي فقط العروض المطابقة لحجم المرجع (اسم المنتج المحدد)، أو لحجم الأغلبية إذا المرجع بلا حجم.
+
+    العروض التي لا يظهر حجم في عنوانها تمر (لا نستطيع الحكم عليها)، لكن أي حجم
+    صريح مختلف يُرفض — عبوة أصغر ليست سعراً أرخص لنفس المنتج.
+    """
+    if not offers_dict:
+        return offers_dict
+    ref = extract_pack_size(reference_text)
+    sized = {n: extract_pack_size(str(i.get("title", ""))) for n, i in offers_dict.items()}
+    if not ref:
+        detected = [s for s in sized.values() if s]
+        if len(detected) >= 2:
+            counts = {}
+            for s in detected:
+                counts[s] = counts.get(s, 0) + 1
+            ref = max(counts, key=counts.get)
+    if not ref:
+        return offers_dict
+    kept = {}
+    for name, info in offers_dict.items():
+        if sizes_compatible(ref, sized.get(name)):
+            kept[name] = info
+        else:
+            print(f"SIZE MISMATCH REJECT: {name} -> {info.get('title','')} (want~{format_pack_size(ref)}, got {format_pack_size(sized.get(name))})")
+    return kept
+
+
 def norm_tokens(query):
     t = normalize_ar(query)
     toks = re.findall(r"[\w\u0600-\u06FF]+", t)
@@ -660,9 +740,10 @@ def cache_put(query, lang, txt, urls):
 IDENTIFY_SYSTEM = """أنت خبير تعرف على المنتجات من الصور.
 أرجع دائماً اسمين قابلين للبحث بهذا الشكل فقط:
 [الاسم التجاري بالعربية] | [commercial product name in English]
-ضع البراند ورقم الموديل إن ظهر. استنتج نوع المنتج من الشعار والشكل والنص الظاهر.
+ضع البراند ورقم الموديل إن ظهر. إذا ظهر حجم أو وزن على العبوة (مثل 1 لتر، 500 مل، 250 جم) أدخله في الاسمين، فهو جزء من هوية المنتج.
+استنتج نوع المنتج من الشعار والشكل والنص الظاهر.
 لا ترفض التحديد لمجرد أن الصورة غير كاملة؛ أعطِ أقرب اسم تجاري مفيد للبحث.
-مثال: ريموت بي إن سبورت | beIN Sports remote control
+مثال: حليب المراعي كامل الدسم 1 لتر | Almarai Full Fat Milk 1L
 سطر واحد فقط، بدون شرح."""
 
 MSG = {
@@ -1255,6 +1336,7 @@ STORE_DOMAINS = {
     "طلبات": "talabat.com", "ديليفرو": "deliveroo.com.kw", "بوتيكات": "boutiqaat.com",
     "جمعية دوت كوم": "jm3eia.com", "جمعيه دوت كوم": "jm3eia.com", "جميعة": "jm3eia.com", "jm3eia": "jm3eia.com",
     "كيتا": "mykeeta.com", "keeta": "mykeeta.com",
+    "توصيل": "taw9eel.com", "التوصيل": "taw9eel.com", "taw9eel": "taw9eel.com", "taw9el": "taw9eel.com",
     "انترسبورت": "intersport.com.kw", "إنترسبورت": "intersport.com.kw", "intersport": "intersport.com.kw",
     "ديكاثلون": "decathlon.com.kw", "decathlon": "decathlon.com.kw",
 }
@@ -1297,7 +1379,7 @@ def store_domain(name):
     for k, d in STORE_DOMAINS.items():
         if k in n or n in k: return d
     return ""
-JUNK_STORE = re.compile(r"^(التوصيل|توصيل|delivery|اونلاين|أونلاين|online|الموقعالرسمي|official)", re.I)
+JUNK_STORE = re.compile(r"^(اونلاين|أونلاين|online|الموقعالرسمي|official)$", re.I)
 def is_junk_store(name): return bool(JUNK_STORE.match(normalize_name(normalize_ar(name))))
 def short_query(q):
     q = re.sub(r"\([^)]*\)", " ", q or "")
@@ -1333,6 +1415,10 @@ def extract_store_offers(txt):
         if re.search(r"\(\s*(?:هاتف|Phone|phone|Tel|tel)\s*:", s):
             continue
         name = m.group(2).strip()
+        # "توصيل" و"أونلاين" وأمثالها ليست متاجر؛ غالباً سطر رسوم توصيل التقطه النموذج كعرض.
+        if is_junk_store(name):
+            print(f"SKIP JUNK STORE LINE: {s[:80]}")
+            continue
         best = m.group(1) in ("✅", "🏆")
         body = s if best else s.lstrip("•").strip()
         offers.append({"line": body, "name": name, "best": best})
@@ -1710,7 +1796,7 @@ def _lens_source_name(item, index):
 KUWAIT_STORE_HINTS = (
     ".com.kw", ".kw", "kuwait", "الكويت", "xcite", "eureka", "best al yousifi",
     "best alyousifi", "jarir", "level shoes", "future store", "blink", "noon kuwait",
-    "carrefour kuwait", "lulu kuwait", "jm3eia", "جمعية", "intersport kuwait",
+    "carrefour kuwait", "lulu kuwait", "jm3eia", "جمعية", "taw9eel", "توصيل", "intersport kuwait",
     "decathlon kuwait", "boutiqaat", "boots kuwait", "yiaco", "royal pharmacy",
     "talabat kuwait", "keeta kuwait"
 )
@@ -1852,6 +1938,8 @@ def lens_priced_offers(lens_context, lang="ar", local_only=True, exclude_local=F
             "image_url": item.get("image") or item.get("thumbnail") or "",
         }
         used_urls.add(url)
+    # نفس الحجم فقط: بطاقة عبوة أصغر ليست سعراً أرخص لنفس المنتج.
+    offers = filter_same_size(offers, ((lens_context.get("chosen") or {}).get("title") or ""))
     # المتاجر المحلية أولاً حتى لو رتبها Google متأخرة؛ ثم exact ثم visual ثم ترتيب Lens.
     ranked = sorted(
         offers.items(),
@@ -1862,7 +1950,10 @@ def lens_priced_offers(lens_context, lang="ar", local_only=True, exclude_local=F
             kv[1].get("position", 999),
         ),
     )
-    return dict(ranked[:MAX_STORES])
+    # الاختيار بالجودة، لكن العرض النهائي دائماً من الأرخص للأغلى و✅ للأرخص.
+    top = ranked[:MAX_STORES]
+    top.sort(key=lambda kv: kv[1].get("price") if kv[1].get("price") is not None else 10**9)
+    return dict(top)
 
 
 def verify_lens_direct_matches(lens_context, local_only=True, exclude_local=False):
@@ -1887,6 +1978,7 @@ def verify_lens_direct_matches(lens_context, local_only=True, exclude_local=Fals
             continue
         candidates[source] = url
     verified = verify_offers(candidates, (lens_context.get("chosen") or {}).get("title", ""))
+    verified = filter_same_size(verified, (lens_context.get("chosen") or {}).get("title", ""))
     if verified:
         print(f"LENS HTML VERIFIED: {list(verified)}")
     return verified
@@ -1972,6 +2064,8 @@ def _new_layer_search(query, lang, prompt_text=None, source_image_b64=None, sour
                 "لا توسع البحث إلى موديلات أخرى من نفس البراند، ولا تقبل اختلافاً واضحاً في اللون أو النقشة أو وجود الكعب. ") if lens_context else "")
             + f"{search_scope}"
             "استخدم الاسم كما هو، ويمكن تجربة تهجئات قريبة لنفس المنتج فقط. "
+            "قارن نفس المنتج بنفس الحجم/السعة/الوزن فقط: عبوة أصغر أو أكبر تعتبر منتجاً مختلفاً ولا تدخل المقارنة. "
+            "اذكر الحجم بجانب كل سعر إذا كان معروفاً (مثل: 1 لتر). "
             "أعطني حتى 3 متاجر فقط، وكل نتيجة يجب أن تحتوي سعراً رقمياً بعملة السوق الحالي "
             "ورابط صفحة المنتج المباشرة داخل المتجر. ممنوع روابط Google وصفحات البحث والتصنيف. "
             "لا تكتب متوفر أو InStock بدلاً من السعر. اكتب السعر بالفلوس كاملة مثل 1.950 وليس 1.95. "
@@ -1996,6 +2090,7 @@ def _new_layer_search(query, lang, prompt_text=None, source_image_b64=None, sour
         if txt and offers and urls:
             verified = verify_offers(urls, search_term)
             verified = filter_verified_with_lens(verified, lens_context)
+            verified = filter_same_size(verified, query)
             if verified:
                 # Google Lens استُخدم قبل البحث لتحديد المنتج. لا نحذف نتائج الأسعار بسبب تقييم بصري تخميني.
                 sorted_v = sorted(verified.items(), key=lambda x: x[1]["price"])
@@ -2005,7 +2100,9 @@ def _new_layer_search(query, lang, prompt_text=None, source_image_b64=None, sour
                 for i, (name, info) in enumerate(sorted_v[:MAX_STORES]):
                     prefix = "✅" if i == 0 else "•"
                     currency = currency_label(lang)
-                    lines.append(f"{prefix} {name} — {format_price(info['price'])} {currency}")
+                    size_note = format_pack_size(extract_pack_size(info.get("title", "")))
+                    size_suffix = f" ({size_note})" if size_note else ""
+                    lines.append(f"{prefix} {name} — {format_price(info['price'])} {currency}{size_suffix}")
                     new_urls[name] = info["url"]
                 final_txt = "\n".join(lines)
                 if not source_image_b64:
@@ -2164,6 +2261,7 @@ def _old_layer_search(query, lang, prompt_text=None, lens_context=None, allow_gl
         print(f"GLOBAL OLD LAYER AFTER LOCAL EXCLUSION: {list(verified)}")
     if lens_context:
         verified = filter_verified_with_lens(verified, lens_context)
+    verified = filter_same_size(verified, query)
     if not verified:
         print("OLD LAYER: no verified direct offers")
         return "", {}
@@ -2184,7 +2282,9 @@ def _old_layer_search(query, lang, prompt_text=None, lens_context=None, allow_gl
     new_urls = {}
     for i, (name, info) in enumerate(sorted_v[:max(MAX_STORES * 2, 6)]):
         prefix = "✅" if i == 0 else "•"
-        lines.append(f"{prefix} {name} — {info['shown']}")
+        size_note = format_pack_size(extract_pack_size(info.get("title", "")))
+        size_suffix = f" ({size_note})" if size_note else ""
+        lines.append(f"{prefix} {name} — {info['shown']}{size_suffix}")
         new_urls[name] = info["url"]
     print(f"OLD LAYER VERIFIED: {list(new_urls)}")
     return "\n".join(lines), new_urls
@@ -2194,7 +2294,7 @@ def _store_priority_value(name, url):
     text = f"{name} {url}".lower()
     priorities = (
         "jm3eia", "جمعية", "xcite", "eureka", "best", "yousifi", "blink",
-        "jarir", "lulu", "carrefour", "noon", "intersport", "decathlon",
+        "jarir", "lulu", "carrefour", "noon", "taw9eel", "توصيل", "intersport", "decathlon",
         "boutiqaat", "boots", "yiaco", "levelshoes", "future", "talabat", "keeta"
     )
     for i, token in enumerate(priorities):
@@ -2233,6 +2333,8 @@ def _merge_two_layers(query, lang, new_result, old_result, lens_context=None):
         return (-quality, o.get("price", 10**9))
     offers.sort(key=rank)
     chosen = offers[:MAX_STORES]
+    # الجودة تُستخدم لاختيار المرشحين فقط؛ العرض النهائي دائماً من الأرخص للأغلى و✅ للأرخص.
+    chosen.sort(key=lambda o: o.get("price") if o.get("price") is not None else 10**9)
 
     display_title = ((lens_context or {}).get("chosen") or {}).get("title") or \
                     product_title(new_txt, "").replace("📦", "").strip() or \
