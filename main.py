@@ -6,10 +6,10 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v67-cheapest-sort-local-guard-20260804"
+BUILD_ID = "v68-real-fils-20260804"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
-print("CHEAPEST-FIRST SORT + LOCAL MARKET GUARD + TAW9EEL + 5 STORES")
+print("REAL FILS PRICES (NO ROUNDED ZEROS) + CHEAPEST SORT + LOCAL GUARD + TAW9EEL")
 print("=" * 70)
 
 
@@ -778,6 +778,7 @@ SYSTEM_PROMPT = """
 - اذكر فقط المنتجات المتوفرة فعلاً. لا تكتب كلمة InStock أو متوفر مكان السعر.
 - أي متجر لا يظهر له سعر رقمي واضح بعملة السوق الحالي احذفه من النتيجة.
 - اكتب السعر بالفلوس كاملة دائماً: 1.950 وليس 1.95، و0.750 وليس 0.75.
+- انقل الفلوس الحقيقية كما تظهر في المتجر حرفياً: 5.310 تبقى 5.310. ممنوع منعاً باتاً تقريب الأسعار إلى أصفار (1.000، 2.000، 5.000) إلا إذا كان السعر المعروض في المتجر فعلاً بهذه الأصفار. متجر بلا سعر دقيق بالفلوس يُحذف من النتيجة.
 - ممنوع أن يكون الرد عبارة عن أسماء متاجر مع كلمة متوفر فقط؛ كل سطر عرض يجب أن يحتوي سعراً رقمياً.
 - رابط كل متجر يجب أن يكون رابط صفحة منتج مباشر (صفحة فيها منتج واحد وسعر واحد). ممنوع روابط الصفحة الرئيسية أو /search أو /category
 - لا تخترع سعراً، انسخ السعر كما يظهر في نتيجة البحث اليوم.
@@ -915,6 +916,33 @@ def verify_offers(urls_map, query):
             name, url, info = r
             verified[name] = {"url": url, "price": info["price"], "title": info["title"], "image_url": info.get("image_url", ""), "currency": info.get("currency", "")}
     return verified
+
+def soft_price_lookup(url):
+    """v68: يجلب السعر الحقيقي بالفلوس من صفحة المتجر لتصحيح أسعار Gemini المقربة.
+
+    أخف من verify_offers: يقبل السعر حتى لو تعذر تأكيد التوفر أو نوع الصفحة،
+    لأن الهدف هنا تصحيح الفلوس (5.000 -> 5.310) وليس القبول/الرفض.
+    يرفض السعر إذا كانت عملة الصفحة الموثقة مختلفة عن عملة سوق المستخدم.
+    """
+    if not is_direct_store_url(url):
+        return None
+    cached = VERIFIED_PAGE_CACHE.get(url)
+    if cached and (time.time() - cached["ts"] < 600):
+        info = cached["data"]
+    else:
+        html = fetch_html(url)
+        info = parse_product_data(html, url)
+        if info:
+            VERIFIED_PAGE_CACHE[url] = {"data": info, "ts": time.time()}
+    if not info or not info.get("price") or info["price"] <= 0:
+        return None
+    cur = str(info.get("currency") or "").upper().strip()
+    expected = (current_market().get("currency") or "").upper().strip()
+    if cur and expected and cur != expected:
+        print(f"SOFT PRICE CURRENCY REJECT {cur}!={expected}: {url[:80]}")
+        return None
+    return float(info["price"])
+
 
 def _cleanup_lens_images():
     now = time.time()
@@ -1637,11 +1665,19 @@ def call_gemini(parts, system=SYSTEM_PROMPT, use_search=True):
         return "", {}
 
 def source_label(title, url):
+    """v68: اسم متجر نظيف — www.alaysh.com تصير Alaysh بدل عرض الدومين كاملاً."""
     title = (title or "").strip()
-    if title: return title[:40]
+    if title:
+        t = re.sub(r"^https?://", "", title).strip().strip("/")
+        # إذا العنوان مجرد دومين، نعرض اسم المتجر منه بشكل مرتب.
+        if re.fullmatch(r"(?:www\.)?[\w-]+(?:\.[a-z]{2,})+", t, flags=re.I):
+            base = t.lower().replace("www.", "").split(".")[0]
+            return (base[:1].upper() + base[1:])[:40] or "المتجر"
+        return title[:40]
     try:
         host = urllib.parse.urlparse(url).netloc.replace("www.", "")
-        return host.split(".")[0] or "المتجر"
+        base = host.split(".")[0]
+        return (base[:1].upper() + base[1:])[:40] or "المتجر"
     except: return "المتجر"
 
 def best_of_search(parts, lang="ar"):
@@ -2018,6 +2054,7 @@ def _new_layer_search(query, lang, prompt_text=None, source_image_b64=None, sour
             "ورابط صفحة المنتج المباشرة داخل المتجر. ممنوع روابط Google وصفحات البحث والتصنيف. "
             "ممنوع أي متجر أجنبي أو سعر بعملة دولة أخرى في هذا البحث المحلي. "
             "لا تكتب متوفر أو InStock بدلاً من السعر. اكتب السعر بالفلوس كاملة مثل 1.950 وليس 1.95. "
+            "انقل السعر حرفياً كما يظهر في صفحة المتجر بفلوسه الحقيقية (5.310 تبقى 5.310)؛ ممنوع تقريب السعر إلى أصفار مثل 2.000 أو 5.000 إلا إذا كان مكتوباً كذلك فعلاً. "
             f"{LANG_INSTR[lang]}"
         )
 
@@ -2074,16 +2111,38 @@ def _new_layer_search(query, lang, prompt_text=None, source_image_b64=None, sour
                 if not allow_global and is_foreign_lens_result({"link": matched, "source": offer["name"]}):
                     print(f"LOCAL GUARD REJECT UNVERIFIED FOREIGN: {offer['name']} -> {matched}")
                     continue
-                kept.append(offer)
+                kept.append((offer, matched))
             if kept:
+                # v68: تصحيح الفلوس — أسعار Gemini غير المفحوصة كثيراً ما تُقرَّب إلى أصفار
+                # (5.310 تظهر 5.000). هنا نسحب السعر الحقيقي من صفحة المتجر ونستبدله.
+                records = []
+                real_prices = list(RESOLVER.map(soft_price_lookup, [m for _, m in kept]))
+                for (offer, matched), real in zip(kept, real_prices):
+                    gem_price = _extract_numeric_price(offer["line"])
+                    price = real if real is not None else gem_price
+                    if real is not None and gem_price is not None and abs(real - gem_price) >= 0.001:
+                        print(f"REAL FILS FIX: {offer['name']} {gem_price} -> {real}")
+                    host = urllib.parse.urlparse(matched).netloc.lower().replace("www.", "")
+                    records.append({"offer": offer, "url": matched, "price": price, "host": host})
+                # متجر واحد لكل نطاق: نُبقي الأرخص (نفس المتجر مرتين بعبوتين مختلفتين يشوش القائمة).
+                by_host = {}
+                for rec in records:
+                    prev = by_host.get(rec["host"])
+                    if prev is None or (rec["price"] is not None and (prev["price"] is None or rec["price"] < prev["price"])):
+                        by_host[rec["host"]] = rec
+                final_recs = sorted(by_host.values(), key=lambda r: r["price"] if r["price"] is not None else float("inf"))
                 title = product_title(txt, search_term)
                 lines = [title, ""]
                 clean_urls = {}
-                for i, offer in enumerate(kept[:MAX_STORES]):
+                for i, rec in enumerate(final_recs[:MAX_STORES]):
                     prefix = "✅" if i == 0 else "•"
-                    body = re.sub(r"^(?:✅|🏆|•)\s*", "", offer["line"]).strip()
-                    lines.append(f"{prefix} {body}")
-                    clean_urls[offer["name"]] = match_url(offer["name"], urls)
+                    name = rec["offer"]["name"]
+                    if rec["price"] is not None:
+                        lines.append(f"{prefix} {name} — {format_price(rec['price'])} {currency_label(lang)}")
+                    else:
+                        body = re.sub(r"^(?:✅|🏆|•)\s*", "", rec["offer"]["line"]).strip()
+                        lines.append(f"{prefix} {body}")
+                    clean_urls[name] = rec["url"]
                 final_txt = "\n".join(lines)
                 if not source_image_b64:
                     cache_put(query, lang, final_txt, clean_urls)
@@ -2567,11 +2626,22 @@ def run_similar_search(from_number, bot_id, pending):
         if not kept:
             send_whatsapp_text(from_number, T(lang, "similar_none"), bot_id)
             return
+        # v68: تصحيح الفلوس الحقيقية من صفحة المتجر + ترتيب من الأرخص.
+        recs = []
+        real_prices = list(RESOLVER.map(soft_price_lookup, [kept_urls[o["name"]] for o in kept]))
+        for offer, real in zip(kept, real_prices):
+            price = real if real is not None else _extract_numeric_price(offer["line"])
+            recs.append({"offer": offer, "price": price})
+        recs.sort(key=lambda r: r["price"] if r["price"] is not None else float("inf"))
         lines = [f"📦 {base_name}", ""]
-        for i, offer in enumerate(kept[:MAX_STORES]):
+        for i, rec in enumerate(recs[:MAX_STORES]):
             prefix = "✅" if i == 0 else "•"
-            body = re.sub(r"^(?:✅|🏆|•)\s*", "", offer["line"]).strip()
-            lines.append(f"{prefix} {body}")
+            name = rec["offer"]["name"]
+            if rec["price"] is not None:
+                lines.append(f"{prefix} {name} — {format_price(rec['price'])} {currency_label(lang)}")
+            else:
+                body = re.sub(r"^(?:✅|🏆|•)\s*", "", rec["offer"]["line"]).strip()
+                lines.append(f"{prefix} {body}")
         kind = send_product_result(from_number, "\n".join(lines), kept_urls, bot_id, lang, base_name)
     if kind == "product":
         LAST_SEARCH[from_number] = short_query(base_name)
@@ -2989,7 +3059,7 @@ def process_location_message(msg, bot_id):
 async def health():
     return {
         "status": f"COOP BOT {BUILD_ID} RUNNING",
-        "features": "cheapest-first sort + local market guard + Taw9eel + 5 stores + two-layer search + Google Lens",
+        "features": "real fils prices + cheapest-first sort + local market guard + Taw9eel + 5 stores + two-layer search + Google Lens",
         "gemini": GEMINI_STATS,
         "cache_entries": len(SEARCH_CACHE),
     }
