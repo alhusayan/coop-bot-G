@@ -6,10 +6,10 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v68-real-fils-20260804"
+BUILD_ID = "v69-generic-product-fallback-20260804"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
-print("REAL FILS PRICES (NO ROUNDED ZEROS) + CHEAPEST SORT + LOCAL GUARD + TAW9EEL")
+print("GENERIC PRODUCT MODE + MARKETPLACE DEMOTION + REAL FILS + LOCAL GUARD")
 print("=" * 70)
 
 
@@ -971,6 +971,18 @@ def publish_image_for_lens(image_b64, mime_type):
         }
     return f"{PUBLIC_BASE_URL}/lens-image/{token}"
 
+# v69: مواقع الوساطة/الاستيراد — عناوينها مضللة كهوية منتج (12 Pcs Mini... | Ubuy)
+# وغالباً أغلى من المتاجر المحلية. لا نستخدمها أبداً كهوية، ونؤخرها في العرض.
+MARKETPLACE_TOKENS = (
+    "ubuy", "aliexpress", "alibaba", "amazon", "ebay", "temu", "dhgate",
+    "desertcart", "banggood", "fruugo", "wish.com", "lightinthebox", "joom",
+)
+
+def is_marketplace_lens_item(item):
+    hay = " ".join(str(item.get(k) or "") for k in ("source", "link", "title", "domain")).lower()
+    return any(t in hay for t in MARKETPLACE_TOKENS)
+
+
 def _collect_lens_items(data, items, seen):
     """يجمع نتائج Lens من كل الأقسام (exact/visual/products) مع تعليم القسم الحقيقي."""
     for key in ("exact_matches", "visual_matches", "products"):
@@ -1111,6 +1123,10 @@ def google_lens_lookup(image_b64, mime_type, lang="ar", query_hint=""):
             score += min(len(title), 120) / 10
             if m.get("thumbnail") or m.get("image"):
                 score += 10
+            # v69: عناوين مواقع الوساطة (Ubuy/AliExpress/Temu...) لا تصلح هوية للمنتج —
+            # مثل «12 Pcs Mini Rubber Basketballs | Ubuy» لكرة سلة عادية.
+            if is_marketplace_lens_item(m):
+                score -= 1200
             ranked.append((score, m))
         chosen = max(ranked, key=lambda x: x[0])[1] if ranked else matches[0]
         chosen_title = (chosen.get("title") or "").strip()
@@ -1120,8 +1136,9 @@ def google_lens_lookup(image_b64, mime_type, lang="ar", query_hint=""):
         sig_system = (
             "أنت خبير منتجات. الصورة هي المرجع الوحيد. استخرج اسماً عربياً وإنجليزياً ووصفاً شكلياً محافظاً. "
             "لا تخترع رقم موديل. حدد اللون الأساسي، النقشة أو الخامة الظاهرة، وهل المنتج مسطح أو بكعب. "
-            "الرد سطر واحد فقط: Arabic name | English name | COLOR | PATTERN | HEEL | TYPE. "
-            "HEEL واحدة من FLAT, LOW, HIGH, NONE, UNKNOWN. TYPE مثل MULES, SLIPPERS, SHOES, BAG, ELECTRONICS."
+            "حدد أيضاً البراند إذا كان ظاهراً فعلاً في الصورة (شعار أو اسم مكتوب)؛ إذا غير ظاهر اكتب NONE ولا تخمن. "
+            "الرد سطر واحد فقط: Arabic name | English name | COLOR | PATTERN | HEEL | TYPE | BRAND. "
+            "HEEL واحدة من FLAT, LOW, HIGH, NONE, UNKNOWN. TYPE مثل MULES, SLIPPERS, SHOES, BAG, ELECTRONICS, BASKETBALL."
         )
         sig_txt, _ = call_gemini([
             {"inline_data": {"mime_type": mime_type, "data": image_b64}},
@@ -1136,6 +1153,7 @@ def google_lens_lookup(image_b64, mime_type, lang="ar", query_hint=""):
             "pattern": fields[3].lower() if len(fields) > 3 else "",
             "heel": fields[4].upper() if len(fields) > 4 else "UNKNOWN",
             "type": fields[5].upper() if len(fields) > 5 else "",
+            "brand": fields[6] if len(fields) > 6 else "",
         }
 
         aliases = []
@@ -1925,9 +1943,11 @@ def lens_priced_offers(lens_context, lang="ar", local_only=True, exclude_local=F
         }
         used_urls.add(url)
     # المتاجر المحلية أولاً حتى لو رتبها Google متأخرة؛ ثم exact ثم visual ثم ترتيب Lens.
+    # v69: مواقع الوساطة (Ubuy/Temu/AliExpress...) آخر شيء دائماً.
     ranked = sorted(
         offers.items(),
         key=lambda kv: (
+            1 if is_marketplace_lens_item({"source": kv[0], "link": kv[1].get("url", ""), "title": kv[1].get("title", "")}) else 0,
             0 if kv[1].get("is_local") else 1,
             0 if kv[1].get("exact") else 1,
             0 if kv[1].get("section") == "visual_matches" else 1,
@@ -2758,6 +2778,34 @@ def is_fashion_identity(lens_context, vision_name=""):
     hay = normalize_ar(f"{((lens_context or {}).get('chosen') or {}).get('title','')} {vision_name}")
     return any(normalize_ar(w) in hay for w in FASHION_WORDS_HAY)
 
+def is_generic_product_identity(lens_context, vision_name=""):
+    """v69: هل المنتج «عام» بلا براند ظاهر؟ (كرة سلة عادية، كوب، حبل قفز...)
+
+    في هذه الحالة عنوان Lens الحرفي (خصوصاً من مواقع الوساطة مثل Ubuy) يضر أكثر
+    مما ينفع: «12 Pcs Mini Rubber Basketballs Set 7 | Ubuy» يقتل البحث المحلي،
+    بينما البحث باسم الفئة «كرة سلة | basketball» يرجع نتائج المتاجر الكويتية فوراً.
+    """
+    if not lens_context:
+        return False
+    sig = lens_context.get("signature") or {}
+    brand = normalize_ar(sig.get("brand") or "").strip()
+    if brand and brand not in ("none", "unknown", "لا يوجد", "غير معروف", "بدون", "-"):
+        return False
+    chosen_title = str((lens_context.get("chosen") or {}).get("title") or "")
+    hay = normalize_ar(f"{chosen_title} {vision_name}")
+    known_brands = (
+        "nike","adidas","wilson","molten","spalding","jordan","puma","under armour",
+        "reebok","asics","new balance","mizuno","yonex","babolat","head","wilson",
+        "apple","samsung","sony","lg","xiaomi","huawei","dyson","philips","almarai",
+        "نايك","اديداس","ويلسون","مولتن","سبالدينج","جوردن","المراعي",
+    )
+    if any(normalize_ar(b) in hay for b in known_brands):
+        return False
+    # رقم موديل واضح (B7G5000, GX9000...) يعني منتجاً محدداً وليس عاماً.
+    if re.search(r"[a-z]\d{3,}|\d{3,}[a-z]", hay):
+        return False
+    return True
+
 def _legacy_should_use_google_lens(vision_name):
     """التوجيه القديم: Lens للأزياء والقطع البصرية، وVision للعبوات النصية."""
     hay = normalize_ar(vision_name or "")
@@ -2811,6 +2859,23 @@ def identify_image_product(image_b64, mime_type, lang):
             lens_context = google_lens_lookup(image_b64, mime_type, lang, query_hint=vision_name)
     if lens_context and not lens_context.get("matches"):
         lens_context = None
+    # v69: منتج عام بلا براند -> نترك هوية Lens الحرفية ونبحث باسم الفئة نصياً.
+    # هذا يعيد كل قوة البحث المحلي (متاجر الأولوية + الطبقة القديمة + الروابط غير المفحوصة).
+    if lens_context and is_generic_product_identity(lens_context, vision_name):
+        sig = lens_context.get("signature") or {}
+        generic_aliases = []
+        for value in split_product_aliases(vision_name):
+            if value and value not in generic_aliases:
+                generic_aliases.append(value)
+        chosen_title = str((lens_context.get("chosen") or {}).get("title") or "")
+        for value in (lens_context.get("aliases") or []):
+            if value and value != chosen_title and value not in generic_aliases and not is_marketplace_lens_item({"title": value}):
+                generic_aliases.append(value)
+        if generic_aliases:
+            query = " | ".join(generic_aliases[:2])
+            display = generic_aliases[0]
+            print(f"GENERIC PRODUCT MODE: '{chosen_title[:60]}' -> '{query}'")
+            return query, display, None
     if lens_context and is_fashion_identity(lens_context, vision_name):
         lens_context["force_lens_only"] = True
     query, display = choose_image_identity(lens_context, vision_name)
@@ -3059,7 +3124,7 @@ def process_location_message(msg, bot_id):
 async def health():
     return {
         "status": f"COOP BOT {BUILD_ID} RUNNING",
-        "features": "real fils prices + cheapest-first sort + local market guard + Taw9eel + 5 stores + two-layer search + Google Lens",
+        "features": "generic product mode + marketplace demotion + real fils prices + cheapest-first sort + local market guard + Taw9eel + 5 stores + two-layer search + Google Lens",
         "gemini": GEMINI_STATS,
         "cache_entries": len(SEARCH_CACHE),
     }
