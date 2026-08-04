@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v71-2-lens-country-hint-20260804"
+BUILD_ID = "v72-1-lens-local-first-foreign-consent-20260804"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE -> GOOGLE LENS DIRECT PASSTHROUGH (raw results to user)")
@@ -34,6 +34,8 @@ USER_MARKET = {}
 USER_LOCATION_TS = {}
 PENDING_ONBOARDING = {}
 PENDING_GLOBAL_SEARCH = {}
+# v72: نتائج Lens الأجنبية تُحفظ هنا ولا تُعرض إلا بعد موافقة المستخدم بزر.
+PENDING_LENS_FOREIGN = {}
 GLOBAL_PENDING_TTL = max(300, int(os.environ.get("GLOBAL_PENDING_TTL_SECONDS", "900")))
 LOCATION_TTL_SECONDS = max(3600, int(os.environ.get("LOCATION_TTL_HOURS", "72")) * 3600)
 MARKET_CTX = threading.local()
@@ -821,6 +823,12 @@ MSG = {
         "welcome_reply": "هلا والله! 🌟\nدز صورة المنتج أو اكتب اسمه، وأدور لك أفضل الأسعار والمتاجر القريبة منك 🛒",
         "thanks_reply": "العفو! 🌹 في الخدمة دايماً.. أي منتج ثاني تبيه أنا حاضر!",
         "lens_header": "🔍 هذا اللي طلع من Google عن صورتك:",
+        "lens_local_header": "🔍 نتائج {country} من Google لصورتك:",
+        "lens_foreign_ask": "🌍 عندي {c} نتائج إضافية من متاجر خارج {country}.\nتبي أعرضها لك؟ 👇",
+        "lens_no_local": "ما لقيت نتائج من متاجر داخل {country} لهالصورة 😅\nبس عندي {c} نتائج من متاجر عالمية 🌍 تبي أعرضها؟ 👇",
+        "lens_foreign_header": "🌍 النتائج العالمية (الأسعار محوّلة لعملتك عند الإمكان):",
+        "lf_show": "اعرضها 🌍",
+        "lf_skip": "لا شكراً 🙏",
         "lens_none": "Google ما رجّع نتائج للصورة 😅 أكمل البحث بطريقتي...",
     },
     "en": {
@@ -852,6 +860,12 @@ MSG = {
         "welcome_reply": "Hello! 🌟\nSend a product photo or type its name, and I'll find you the best prices and nearby stores 🛒",
         "thanks_reply": "You're welcome! 🌹 Anytime.. just send me the next product!",
         "lens_header": "🔍 Here's what Google returned for your photo:",
+        "lens_local_header": "🔍 {country} results from Google for your photo:",
+        "lens_foreign_ask": "🌍 I also have {c} results from stores outside {country}.\nWant me to show them? 👇",
+        "lens_no_local": "No results from stores inside {country} for this photo 😅\nBut I have {c} international results 🌍 want to see them? 👇",
+        "lens_foreign_header": "🌍 International results (prices converted to your currency when possible):",
+        "lf_show": "Show them 🌍",
+        "lf_skip": "No thanks 🙏",
         "lens_none": "Google returned no results for the photo 😅 continuing with my own search...",
     },
 }
@@ -3171,6 +3185,22 @@ def process_interactive_message(message, bot_id):
     from_number=message["from"]
     reply=(message.get("interactive") or {}).get("button_reply") or {}
     btn_id=reply.get("id","")
+    if btn_id == "lf_yes":
+        # v72: المستخدم وافق على عرض نتائج Lens الأجنبية.
+        item = _pop_pending_lens_foreign(from_number)
+        if item:
+            activate_market(from_number)
+            _send_lens_match_batch(
+                from_number, item["matches"], item.get("bot_id") or bot_id,
+                item.get("lang", "ar"),
+                T(item.get("lang", "ar"), "lens_foreign_header"),
+                convert_prices=True,
+            )
+        return
+    if btn_id == "lf_no":
+        PENDING_LENS_FOREIGN.pop(from_number, None)
+        send_whatsapp_text(from_number, T(USER_LANG.get(from_number, "ar"), "declined_ok"), bot_id)
+        return
     if btn_id in ("global_yes", "nf_global"):
         item = _pop_pending_global(from_number)
         if item:
@@ -3460,32 +3490,29 @@ def choose_image_identity(image_b64, mime_type, lens, vision_name):
         return final_name or f"{vision_name} | {lens_title}", lens, "MERGE"
     return final_name or vision_name, None, "VISION"
 
-def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
-    """v71: تمرير نتائج Google Lens للمستخدم كما هي — رسالة واحدة بالقائمة ثم أزرار للروابط.
-
-    بدون فلاتر هوية أو حجم أو محلية: هذا حرفياً «اللي طلع من Google».
-    """
-    matches = [m for m in (lens.get("matches") or []) if (m.get("title") or "").strip()]
-    if not matches:
-        return False
-    lines = [T(lang, "lens_header"), ""]
+def _send_lens_match_batch(from_number, matches, bot_id, lang, header, convert_prices=False):
+    """يرسل دفعة نتائج Lens: رسالة قائمة + أزرار روابط. convert_prices للأجنبي (تحويل للعملة المحلية)."""
+    lines = [header, ""]
     buttons, seen_urls, listed = [], set(), 0
     for m in matches:
-        title = m["title"].strip()[:80]
+        title = (m.get("title") or "").strip()[:80]
+        if not title:
+            continue
         source = (m.get("source") or "").strip()
-        local = is_local_lens_result(m)
-        price_txt = ""
         raw_price = str(m.get("price") or "").strip()
+        price_txt = ""
         if raw_price or m.get("price_value") not in (None, ""):
-            if local:
-                price_txt = format_lens_price(raw_price, m.get("price_value"), lang, m.get("currency") or None)
+            if convert_prices:
+                # أجنبي: تحويل للعملة المحلية بالفلوس مع الأصل بين قوسين، وإلا السعر كما ورد.
+                shown, _ = display_global_price(m.get("price_value"), raw_price, m.get("currency") or "", lang)
+                price_txt = shown
             else:
-                price_txt = raw_price
+                price_txt = format_lens_price(raw_price, m.get("price_value"), lang, m.get("currency") or None)
         seg = f"• {title}"
         if price_txt:
             seg += f" — {price_txt}"
         if source:
-            seg += f" ({source}{' 🇰🇼' if local else ''})"
+            seg += f" ({source})"
         if listed < LENS_DIRECT_MAX_LINES:
             lines.append(seg)
             listed += 1
@@ -3500,12 +3527,60 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
             seen_urls.add(url)
         if listed >= LENS_DIRECT_MAX_LINES and len(buttons) >= MAX_STORES:
             break
+    if listed == 0 and not buttons:
+        return False
     send_whatsapp_text(from_number, "\n".join(lines)[:3900], bot_id)
     for body, url, src in buttons:
         send_whatsapp_cta(from_number, body[:1000], url, bot_id, f"🛒 {src[:18]}")
+    return True
+
+
+def _store_pending_lens_foreign(phone, bot_id, lang, matches):
+    PENDING_LENS_FOREIGN[phone] = {
+        "bot_id": bot_id, "lang": lang,
+        "matches": matches[:LENS_RESULT_LIMIT], "ts": time.time(),
+    }
+
+
+def _pop_pending_lens_foreign(phone):
+    item = PENDING_LENS_FOREIGN.pop(phone, None)
+    if not item or time.time() - item.get("ts", 0) > GLOBAL_PENDING_TTL:
+        return None
+    return item
+
+
+def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
+    """v72: نتائج Lens موجهة لبلد المستخدم.
+
+    المحلي (داخل بلد المستخدم) يُرسل فوراً كما رجع من Google.
+    أي نتيجة خارج البلد تُحبس خلف سؤال موافقة بزر 🌍 — ولا تظهر بدونه.
+    """
+    matches = [m for m in (lens.get("matches") or []) if (m.get("title") or "").strip()]
+    if not matches:
+        return False
+    local = [m for m in matches if is_local_lens_result(m)]
+    foreign = [m for m in matches if not is_local_lens_result(m)]
+    country = country_hint_word(lang) or current_market().get("country_name", "")
+    sent = False
+    if local:
+        sent = _send_lens_match_batch(
+            from_number, local, bot_id, lang,
+            T(lang, "lens_local_header", country=country), convert_prices=False,
+        )
+    if foreign:
+        _store_pending_lens_foreign(from_number, bot_id, lang, foreign)
+        body = (T(lang, "lens_foreign_ask", c=len(foreign), country=country) if sent
+                else T(lang, "lens_no_local", c=len(foreign), country=country))
+        send_whatsapp_buttons(from_number, body, [
+            {"id": "lf_yes", "title": T(lang, "lf_show")[:20]},
+            {"id": "lf_no", "title": T(lang, "lf_skip")[:20]},
+        ], bot_id)
+        sent = True
+    if not sent:
+        return False
     chosen_title = ((lens.get("chosen") or {}).get("title") or matches[0]["title"]).strip()
     LAST_SEARCH[from_number] = {"product": (caption or chosen_title)}
-    print(f"LENS DIRECT SENT: {listed} lines, {len(buttons)} buttons")
+    print(f"LENS DIRECT SENT: local={len(local)} foreign_pending={len(foreign)}")
     return True
 
 def process_single_image(message,bot_id,lang="ar"):
@@ -3892,4 +3967,4 @@ def process_location_message(message, bot_id):
     route_pending_after_location(from_number)
 
 @app.get("/")
-async def health(): return {"status":"v71 LENS DIRECT PASSTHROUGH", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
+async def health(): return {"status":"v72 LENS LOCAL-FIRST + FOREIGN CONSENT", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
