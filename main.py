@@ -6,10 +6,10 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v67-generic-commodity-vision-first-20260804"
+BUILD_ID = "v67-common-product-intelligence-20260804"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
-print("GENERIC COMMODITY -> VISION FIRST + INTENT UNDERSTANDING + GLOBAL FX")
+print("COMMON PRODUCT INTELLIGENCE + SAFE GENERIC IMAGE SEARCH + GLOBAL FX")
 print("=" * 70)
 
 
@@ -657,12 +657,16 @@ def cache_put(query, lang, txt, urls):
     SEARCH_CACHE[key] = entry
     _cache_db_put(key, entry)
 
-IDENTIFY_SYSTEM = """أنت خبير تعرف على المنتجات من الصور.
-أرجع دائماً اسمين قابلين للبحث بهذا الشكل فقط:
-[الاسم التجاري بالعربية] | [commercial product name in English]
-ضع البراند ورقم الموديل إن ظهر. استنتج نوع المنتج من الشعار والشكل والنص الظاهر.
-لا ترفض التحديد لمجرد أن الصورة غير كاملة؛ أعطِ أقرب اسم تجاري مفيد للبحث.
-مثال: ريموت بي إن سبورت | beIN Sports remote control
+IDENTIFY_SYSTEM = """أنت خبير تعرف على المنتجات من الصور للتسوق.
+أرجع اسماً واقعياً قابلاً للبحث بهذا الشكل فقط:
+[الاسم بالعربية] | [searchable English name]
+
+قواعد إلزامية:
+1) إذا ظهر براند أو موديل أو رقم واضح، اكتبه كما هو.
+2) إذا لم يظهر براند أو موديل، سمِّ المنتج بالفئة الشائعة التي يعرفها الناس، ولا تخترع منتجاً متخصصاً.
+3) لا تضف كلمات مثل Mini أو Foam أو Nerf أو Professional أو Kids أو حجم/مادة محددة إلا إذا كانت ظاهرة بوضوح في الصورة.
+4) عند صورة عامة لكرة سلة بلا شعار، اكتب: كرة سلة عادية | standard basketball، وليس منتجاً نادراً أو لعبة إسفنجية.
+5) عند الشك فضّل الاسم الأشهر والأعم على اسم تجاري ضيق.
 سطر واحد فقط، بدون شرح."""
 
 MSG = {
@@ -1278,7 +1282,7 @@ def priority_stores_for(query):
          ["جمعية دوت كوم", "Lulu", "Carrefour", "Talabat", "Keeta"]),
         (("مطعم", "وجبه", "برجر", "بيتزا", "قهوه", "فلات وايت", "شاورما", "دجاج"),
          ["Keeta", "Talabat", "Deliveroo"]),
-        (("ملابس", "قميص", "بنطلون", "حذاء", "كاب", "قبعه", "شنطه", "رياضه", "كره", "مضرب"),
+        (("ملابس", "قميص", "بنطلون", "حذاء", "كاب", "قبعه", "شنطه", "رياضه"),
          ["Intersport Kuwait", "Decathlon Kuwait", "Sun & Sand Sports", "Foot Locker", "Noon", "Namshi"]),
         (("اثاث", "كرسي", "طاوله", "سرير", "كنب", "مرتبه"),
          ["IKEA Kuwait", "The One", "Home Centre", "Noon", "Lulu"]),
@@ -1407,7 +1411,7 @@ def maps_category_for(product):
         (("ملابس", "تيشيرت", "قميص", "بنطلون", "فستان", "جاكيت", "قبعه", "قبعة", "كاب", "shirt", "dress", "cap", "clothing"),
          "Intersport OR Decathlon OR Sun and Sand Sports OR متجر ملابس Fashion store"),
         (("حذاء", "جوتي", "سنيكر", "shoe", "sneaker"), "Intersport OR Decathlon OR Foot Locker OR متجر أحذية Shoe store"),
-        (("مضرب", "كره", "كرة", "تنس", "بادل", "جيم", "رياضه", "رياضة", "under armour", "nike", "adidas", "sports", "basketball"),
+        (("مضرب", "كره", "كرة", "تنس", "بادل", "جيم", "رياضه", "رياضة", "under armour", "nike", "adidas", "sports"),
          "Intersport OR Decathlon OR Sun and Sand Sports OR متجر رياضي Sports store"),
         (("ايفون", "آيفون", "سامسونج", "لابتوب", "بلايستيشن", "تلفزيون", "الكترون", "هاتف", "جوال", "كاميرا",
           "iphone", "samsung", "laptop", "playstation", "television", "electronics"),
@@ -1783,6 +1787,7 @@ def is_foreign_lens_result(item):
     # In explicit global mode, a valid non-local product URL is accepted as foreign.
     return bool(host)
 
+
 def lens_priced_offers(lens_context, lang="ar", local_only=True, exclude_local=False):
     """Use Google Lens product cards directly.
 
@@ -2104,7 +2109,7 @@ def _old_layer_search(query, lang, prompt_text=None, lens_context=None, allow_gl
         return "", {}
     if allow_global:
         base_prompt = (
-            f"ابحث عالميًا عن {query}. استبعد تمامًا أي متجر داخل {current_market().get('country_name', 'بلد المستخدم')}, لأن البحث المحلي انتهى بالفعل. اقبل المتاجر الأجنبية الموثوقة فقط، مع سعر رقمي واضح ورابط صفحة المنتج المباشر، واذكر العملة الأصلية. {LANG_INSTR[lang]}"
+            f"ابحث عالميًا عن {query}. استبعد تمامًا أي متجر داخل {current_market().get('country_name', 'بلد المستخدم')}، لأن البحث المحلي انتهى بالفعل. اقبل المتاجر الأجنبية الموثوقة فقط، مع سعر رقمي واضح ورابط صفحة المنتج المباشر، واذكر العملة الأصلية. {LANG_INSTR[lang]}"
         )
     else:
         base_prompt = prompt_text or (
@@ -2638,35 +2643,6 @@ def is_fashion_identity(vision_name, caption=""):
     )
     return any(term in q for term in fashion_terms)
 
-def is_generic_commodity(vision_name, caption=""):
-    """منتج عام بلا براند أو موديل (كرة سلة عادية، حبل قفز، دمبل...).
-
-    Lens مع هذا النوع يجيب إعلانات عشوائية مشابهة شكلاً (eBay، كرات إسفنجية، مغناطيسات)
-    لأن ما فيه هوية بصرية مميزة. البحث النصي بالاسم العام أدق وأرخص، و priority_stores_for
-    يوجهه تلقائياً لمتاجر الرياضة المحلية (Intersport / Decathlon / Sun & Sand).
-    """
-    raw = f"{vision_name or ''} {caption or ''}".strip()
-    if not raw:
-        return False
-    # رقم موديل أو SKU = منتج محدد، مو عام.
-    if re.search(r"\b(?=[a-z0-9-]{3,}\b)(?=[a-z0-9-]*[a-z])(?=[a-z0-9-]*\d)[a-z0-9-]+\b", raw, re.I):
-        return False
-    q = normalize_ar(raw)
-    known_brands = (
-        "نايك", "nike", "اديداس", "adidas", "سبولدينج", "spalding", "ويلسون", "wilson",
-        "مولتن", "molten", "ميكاسا", "mikasa", "بوما", "puma", "ريبوك", "reebok",
-        "اندر ارمور", "under armour", "اسيكس", "asics", "ابل", "apple", "سامسونج", "samsung", "سوني", "sony"
-    )
-    if any(normalize_ar(b) in q for b in known_brands):
-        return False
-    generic_terms = (
-        "كره سله", "basketball", "كره قدم", "football", "soccer ball",
-        "كره طايره", "volleyball", "كره تنس", "tennis ball", "كره يد", "handball",
-        "حبل قفز", "jump rope", "دمبل", "dumbbell", "سجاده يوغا", "yoga mat",
-        "مطاره ماء", "water bottle", "قاروره ماء", "شنطه رياضيه", "gym bag"
-    )
-    return any(normalize_ar(t) in q for t in generic_terms)
-
 def _legacy_should_use_google_lens(vision_name, caption=""):
     """Legacy router kept as a fallback when Lens-primary mode is disabled."""
     raw = f"{vision_name or ''} {caption or ''}".strip()
@@ -2735,8 +2711,8 @@ def _is_text_heavy_packaged_product(vision_name, caption=""):
 def lens_routing_decision(vision_name, caption=""):
     """Lens is the primary engine for most image searches (~70%).
 
-    Only clearly text-heavy packaged/medical/grocery products stay Vision-first,
-    plus generic unbranded commodities where Lens returns random lookalike ads.
+    Only clearly text-heavy packaged/medical/grocery products stay Vision-first.
+    This gives you a practical 70%+ Lens usage without breaking obvious label cases.
     """
     raw = f"{vision_name or ''} {caption or ''}".strip()
     q = normalize_ar(raw)
@@ -2748,10 +2724,6 @@ def lens_routing_decision(vision_name, caption=""):
     # Fashion remains a hard Lens-first case.
     if is_fashion_identity(vision_name, caption):
         return True, "FASHION_ALWAYS_LENS"
-
-    # منتج عام (كرة سلة عادية...): Vision-first دائماً — Lens يخربط ويجيب إسفنجيات وإعلانات.
-    if is_generic_commodity(vision_name, caption):
-        return False, "GENERIC_COMMODITY_VISION_FIRST"
 
     uncertain = (
         "غير معروف", "منتج غير", "unknown", "unidentified", "possibly", "ربما",
@@ -2825,6 +2797,92 @@ def choose_image_identity(image_b64, mime_type, lens, vision_name):
         return final_name or f"{vision_name} | {lens_title}", lens, "MERGE"
     return final_name or vision_name, None, "VISION"
 
+
+COMMON_PRODUCT_PROFILE_SYSTEM = """أنت محلل صور منتجات للتسوق، ومهمتك منع تحويل صورة عامة إلى منتج نادر بالخطأ.
+حلل الصورة الأصلية فقط، ثم أرجع JSON صالحاً فقط بالشكل التالي:
+{
+  "exact_identifiable": true,
+  "brand_visible": "",
+  "model_visible": "",
+  "common_ar": "",
+  "common_en": "",
+  "safe_subtype": "",
+  "confidence": 0,
+  "generic_reason": ""
+}
+
+القواعد:
+- exact_identifiable=true فقط إذا ظهر براند/موديل/اسم مطبوع واضح أو تصميم مميز جداً يمكن الجزم به.
+- إذا كانت الصورة لمنتج عام بلا شعار، exact_identifiable=false.
+- common_ar و common_en يجب أن يكونا الاسم الأكثر تداولاً بين الناس، لا اسم نتيجة Lens عشوائية.
+- safe_subtype لا يوضع إلا إذا كان واضحاً بصرياً. لا تستنتج Mini أو Foam أو Kids أو Nerf أو مقاساً أو خامة غير ظاهرة.
+- أمثلة:
+  صورة كرة سلة عامة بلا شعار => common_ar=كرة سلة عادية، common_en=standard basketball، exact_identifiable=false.
+  عبوة مكتوب عليها Difiaba Deco Paste => exact_identifiable=true مع البراند والاسم.
+- confidence من 0 إلى 100 لثقتك في الفئة الشائعة، وليس في موديل محدد.
+"""
+
+GENERIC_SPECIALTY_WORDS = {
+    "mini", "foam", "nerf", "toy", "kids", "junior", "soft", "training",
+    "professional", "official", "indoor", "outdoor", "size 3", "size 5", "size 6", "size 7",
+    "اسفنجي", "إسفنجي", "ميني", "صغير", "اطفال", "أطفال", "تدريب", "احترافي"
+}
+
+
+def analyze_common_product_profile(image_b64, mime_type):
+    """يفصل بين المنتج المحدد والمنتج العام، ويعيد الاسم الشعبي الآمن للبحث."""
+    raw, _ = call_gemini(
+        [
+            {"inline_data": {"mime_type": mime_type, "data": image_b64}},
+            {"text": "حلل مدى إمكانية تحديد هذا المنتج بدقة، ثم أعطني الاسم الأكثر تداولاً بين الناس."},
+        ],
+        system=COMMON_PRODUCT_PROFILE_SYSTEM,
+        use_search=False,
+    )
+    try:
+        m = re.search(r"\{.*\}", raw or "", flags=re.S)
+        data = json.loads(m.group(0)) if m else {}
+    except Exception as e:
+        print(f"COMMON PROFILE PARSE FAIL: {e} raw={str(raw)[:300]}")
+        return {}
+
+    profile = {
+        "exact_identifiable": bool(data.get("exact_identifiable")),
+        "brand_visible": str(data.get("brand_visible") or "").strip(),
+        "model_visible": str(data.get("model_visible") or "").strip(),
+        "common_ar": str(data.get("common_ar") or "").strip(),
+        "common_en": str(data.get("common_en") or "").strip(),
+        "safe_subtype": str(data.get("safe_subtype") or "").strip(),
+        "confidence": int(float(data.get("confidence") or 0)),
+        "generic_reason": str(data.get("generic_reason") or "").strip(),
+    }
+    print(f"COMMON PRODUCT PROFILE: {profile}")
+    return profile
+
+
+def common_profile_query(profile, fallback=""):
+    """يبني استعلاماً عاماً وآمناً، من دون صفات تخصصية غير مثبتة بالصورة."""
+    if not profile:
+        return fallback
+    ar = profile.get("common_ar", "")
+    en = profile.get("common_en", "")
+    subtype = profile.get("safe_subtype", "")
+    parts = [x for x in (ar, en) if x]
+    if subtype and not any(w in normalize_ar(subtype) for w in GENERIC_SPECIALTY_WORDS):
+        parts.append(subtype)
+    return " | ".join(dict.fromkeys(parts)) or fallback
+
+
+def should_force_common_identity(profile):
+    """المنتج العام ينتقل للبحث عن الفئة الشعبية بدل مطابقة Lens الضيقة."""
+    if not profile:
+        return False
+    if profile.get("exact_identifiable"):
+        return False
+    if profile.get("brand_visible") or profile.get("model_visible"):
+        return False
+    return profile.get("confidence", 0) >= 60 and bool(profile.get("common_ar") or profile.get("common_en"))
+
 def process_single_image(message,bot_id,lang="ar"):
     from_number=message["from"]
     market = activate_market(from_number)
@@ -2847,10 +2905,26 @@ def process_single_image(message,bot_id,lang="ar"):
     if LENS_PARALLEL_WITH_VISION and ENABLE_GOOGLE_LENS and SERPAPI_API_KEY and PUBLIC_BASE_URL:
         lens_future = LENS_POOL.submit(_run_with_market, market, google_lens_lookup, b64, mime, lang, caption)
 
+    # تحليل مستقل يقرر هل الصورة لمنتج محدد أم لفئة عامة شائعة.
+    # هذا يمنع Lens من تحويل كرة سلة عادية إلى Soft Foam Mini Basketball لمجرد تشابه الصورة.
+    profile_future = LENS_POOL.submit(_run_with_market, market, analyze_common_product_profile, b64, mime)
+
     vision_name = identify_product_with_retry(b64, mime, lang)
-    force_fashion_lens = is_fashion_identity(vision_name, caption)
+    try:
+        common_profile = profile_future.result(timeout=90) or {}
+    except Exception as e:
+        print(f"COMMON PROFILE ERR: {e}")
+        common_profile = {}
+
+    force_common = should_force_common_identity(common_profile)
+    if force_common:
+        vision_name = common_profile_query(common_profile, vision_name)
+        print(f"FORCE COMMON IDENTITY: {vision_name}")
+
+    force_fashion_lens = is_fashion_identity(vision_name, caption) and not force_common
     use_lens, route_reason = lens_routing_decision(vision_name, caption)
-    use_lens = force_fashion_lens or use_lens
+    # في الصور العامة نسمح بتشغيل Lens لجلب أفكار، لكن لا نسمح له بتسمية المنتج أو فرض مطابقة ضيقة.
+    use_lens = (force_fashion_lens or use_lens) and not force_common
 
     lens = {"aliases": [], "matches": [], "query": ""}
     if use_lens:
@@ -2870,8 +2944,13 @@ def process_single_image(message,bot_id,lang="ar"):
     combined_name = vision_name
     lens_title = ((lens.get("chosen") or {}).get("title") or lens.get("query") or "").strip()
 
-    print(f"SMART ROUTER: vision={vision_name!r} use_lens={use_lens} force_fashion={force_fashion_lens} reason={route_reason}")
-    if use_lens:
+    print(f"SMART ROUTER: vision={vision_name!r} use_lens={use_lens} force_common={force_common} force_fashion={force_fashion_lens} reason={route_reason}")
+    if force_common:
+        # لا نمرر lens_context للفلترة الصارمة؛ نبحث عن أشهر منتجات الفئة في السوق المحلي.
+        combined_name = common_profile_query(common_profile, vision_name)
+        active_lens = None
+        identity_source = "COMMON_CATEGORY"
+    elif use_lens:
         if force_fashion_lens and lens_title:
             # Exact design/pattern matters in fashion. Never downgrade to the generic Vision label.
             lens["force_lens_only"] = True
@@ -2916,7 +2995,18 @@ def process_single_image(message,bot_id,lang="ar"):
         txt,urls=search_product(request_query, lang, prompt_text=prompt_text, lens_context=active_lens)
         query = request_query
     elif combined_name:
-        txt,urls=search_product(combined_name, lang, lens_context=active_lens)
+        if identity_source == "COMMON_CATEGORY":
+            market_name = current_market().get("country_name", "Kuwait")
+            prompt_text = (
+                f"الصورة تمثل فئة عامة وليست موديلًا محددًا. الفئة الشعبية المعتمدة: {combined_name}.\n"
+                f"ابحث في {market_name} عن المنتجات الأكثر تداولاً وشهرة ضمن هذه الفئة، من المتاجر المعروفة، "
+                "ولا تختَر نسخة متخصصة مثل Mini أو Foam أو Kids أو Nerf أو مقاس محدد إلا إذا طلبها المستخدم. "
+                "رتّب النتائج حسب شيوع المنتج وموثوقية المتجر والتقييم، ثم السعر. "
+                f"{LANG_INSTR[lang]}"
+            )
+            txt,urls=search_product(combined_name, lang, prompt_text=prompt_text, lens_context=None)
+        else:
+            txt,urls=search_product(combined_name, lang, lens_context=active_lens)
         query = combined_name
     else:
         txt, urls = "", {}
@@ -3186,4 +3276,4 @@ def process_location_message(message, bot_id):
     route_pending_after_location(from_number)
 
 @app.get("/")
-async def health(): return {"status":"v67 GENERIC COMMODITY + INTENT + FX", "build":BUILD_ID, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
+async def health(): return {"status":"v66 INTENT UNDERSTANDING + FX", "build":BUILD_ID, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
