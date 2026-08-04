@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v72-1-lens-local-first-foreign-consent-20260804"
+BUILD_ID = "v72-2-lens-cta-only-price-store-diversity-20260804"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE -> GOOGLE LENS DIRECT PASSTHROUGH (raw results to user)")
@@ -93,6 +93,8 @@ ENABLE_GOOGLE_LENS = env_bool("ENABLE_GOOGLE_LENS", True)
 # لإرجاع المسار الذكي الكامل. عند عدم وجود نتائج، البوت يرجع تلقائياً للمسار الكامل.
 LENS_DIRECT_MODE = env_bool("LENS_DIRECT_MODE", True)
 LENS_DIRECT_MAX_LINES = max(3, int(os.environ.get("LENS_DIRECT_MAX_LINES", "8")))
+# v72.2: تنويع المتاجر في بطاقات CTA — حد أقصى من البطاقات لكل متجر واحد.
+LENS_PER_STORE_MAX = max(1, int(os.environ.get("LENS_PER_STORE_MAX", "2")))
 LENS_PRIMARY_MODE = env_bool("LENS_PRIMARY_MODE", True)
 LENS_PRIMARY_EXCEPT_TEXT_HEAVY = env_bool("LENS_PRIMARY_EXCEPT_TEXT_HEAVY", True)
 # قوة Lens الحقيقية تأتي من تعدد التمريرات: products ثم all (visual+exact) ثم بحث واسع بلا قيد دولة.
@@ -3490,49 +3492,94 @@ def choose_image_identity(image_b64, mime_type, lens, vision_name):
         return final_name or f"{vision_name} | {lens_title}", lens, "MERGE"
     return final_name or vision_name, None, "VISION"
 
-def _send_lens_match_batch(from_number, matches, bot_id, lang, header, convert_prices=False):
-    """يرسل دفعة نتائج Lens: رسالة قائمة + أزرار روابط. convert_prices للأجنبي (تحويل للعملة المحلية)."""
-    lines = [header, ""]
-    buttons, seen_urls, listed = [], set(), 0
+_LENS_TITLE_JUNK_RE = re.compile(
+    r"(?i)\b(online at best price|at best price|best price|shop online|buy online|order online|online)\b"
+)
+
+def _clean_lens_title(title):
+    """v72.2: تنظيف عنوان النتيجة من حشو SEO (Online at Best Price | Lu ...) ليصير مقروءاً."""
+    t = str(title or "").split("|")[0]
+    t = _LENS_TITLE_JUNK_RE.sub(" ", t)
+    t = re.sub(r"^\s*(buy|shop|order|اشتري|شراء)\s+", "", t, flags=re.I)
+    t = " ".join(t.split())
+    t = re.sub(r"[\-–—:،,.|]+\s*$", "", t).strip()
+    # عناوين Google المقصوصة تترك حرفاً يتيماً بالنهاية ("... Online a") — نشيله،
+    # لكن نحافظ على وحدات الحجم بعد الأرقام مثل "1.5 L".
+    t = re.sub(r"(?<=[A-Za-z])\s+[A-Za-z]{1,2}$", "", t).strip()
+    return t
+
+
+def _lens_store_label(m):
+    source = (m.get("source") or "").strip()
+    if source:
+        return source[:40]
+    try:
+        host = urllib.parse.urlparse(m.get("link") or "").netloc.replace("www.", "")
+        return (host.split(".")[0] or "Store").title()
+    except Exception:
+        return "Store"
+
+
+def _send_lens_match_batch(from_number, matches, bot_id, lang, header="", convert_prices=False):
+    """v72.2: بدون رسالة قائمة — بطاقات CTA مباشرة، كل بطاقة: اسم نظيف + سعر بارز + متجر.
+
+    التنويع: round-robin على المتاجر — متجر مختلف لكل بطاقة أولاً، ثم نكمل من نفس
+    المتاجر بحد أقصى LENS_PER_STORE_MAX لكل متجر (حتى لا تكون كل البطاقات من لولو).
+    """
+    # 1) تجميع المرشحين أصحاب الروابط الصالحة حسب المتجر (host) مع الحفاظ على ترتيب Google.
+    by_host, host_order = {}, []
     for m in matches:
-        title = (m.get("title") or "").strip()[:80]
-        if not title:
+        title = _clean_lens_title(m.get("title"))
+        url = (m.get("link") or "").strip()
+        try:
+            host = urllib.parse.urlparse(url).netloc.lower().replace("www.", "")
+        except Exception:
+            host = ""
+        if not title or not url.startswith("http") or not host or "google." in host:
             continue
-        source = (m.get("source") or "").strip()
+        if host not in by_host:
+            by_host[host] = []
+            host_order.append(host)
+        if len(by_host[host]) < LENS_PER_STORE_MAX:
+            by_host[host].append((m, title, url))
+    if not by_host:
+        return False
+
+    # 2) round-robin: الجولة الأولى بطاقة من كل متجر مختلف، ثم الجولة الثانية تكمل الفراغ.
+    picked, used_urls = [], set()
+    for round_i in range(LENS_PER_STORE_MAX):
+        for host in host_order:
+            if len(picked) >= MAX_STORES:
+                break
+            items = by_host[host]
+            if round_i < len(items):
+                m, title, url = items[round_i]
+                if url in used_urls:
+                    continue
+                picked.append((m, title, url))
+                used_urls.add(url)
+        if len(picked) >= MAX_STORES:
+            break
+
+    # 3) بطاقة CTA لكل عرض: الاسم، سطر سعر بارز، اسم المتجر — وزر يفتح صفحة المنتج.
+    sent = 0
+    for m, title, url in picked[:MAX_STORES]:
         raw_price = str(m.get("price") or "").strip()
         price_txt = ""
         if raw_price or m.get("price_value") not in (None, ""):
             if convert_prices:
-                # أجنبي: تحويل للعملة المحلية بالفلوس مع الأصل بين قوسين، وإلا السعر كما ورد.
-                shown, _ = display_global_price(m.get("price_value"), raw_price, m.get("currency") or "", lang)
-                price_txt = shown
+                price_txt, _ = display_global_price(m.get("price_value"), raw_price, m.get("currency") or "", lang)
             else:
                 price_txt = format_lens_price(raw_price, m.get("price_value"), lang, m.get("currency") or None)
-        seg = f"• {title}"
+        store = _lens_store_label(m)
+        body_lines = [f"🛍️ {title[:130]}", ""]
         if price_txt:
-            seg += f" — {price_txt}"
-        if source:
-            seg += f" ({source})"
-        if listed < LENS_DIRECT_MAX_LINES:
-            lines.append(seg)
-            listed += 1
-        url = (m.get("link") or "").strip()
-        try:
-            host = urllib.parse.urlparse(url).netloc.lower()
-        except Exception:
-            host = ""
-        if (url.startswith("http") and host and "google." not in host
-                and url not in seen_urls and len(buttons) < MAX_STORES):
-            buttons.append((seg.lstrip("• ").strip(), url, source or ("المتجر" if lang == "ar" else "Store")))
-            seen_urls.add(url)
-        if listed >= LENS_DIRECT_MAX_LINES and len(buttons) >= MAX_STORES:
-            break
-    if listed == 0 and not buttons:
-        return False
-    send_whatsapp_text(from_number, "\n".join(lines)[:3900], bot_id)
-    for body, url, src in buttons:
-        send_whatsapp_cta(from_number, body[:1000], url, bot_id, f"🛒 {src[:18]}")
-    return True
+            body_lines.append(f"💰 السعر: *{price_txt}*" if lang == "ar" else f"💰 Price: *{price_txt}*")
+        body_lines.append(f"🏪 {store}")
+        send_whatsapp_cta(from_number, "\n".join(body_lines)[:1024], url, bot_id, f"🛒 {store[:18]}")
+        sent += 1
+    print(f"LENS CTA BATCH: {sent} cards from {len({urllib.parse.urlparse(u).netloc for _,_,u in picked[:MAX_STORES]})} stores")
+    return sent > 0
 
 
 def _store_pending_lens_foreign(phone, bot_id, lang, matches):
