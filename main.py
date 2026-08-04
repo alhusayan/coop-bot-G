@@ -6,10 +6,10 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v70-category-safety-net-20260804"
+BUILD_ID = "v71-shopping-category-engine-20260804"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
-print("CATEGORY SAFETY NET + UNTRUSTED MARKETPLACE TITLES + GENERIC MODE + REAL FILS")
+print("GOOGLE SHOPPING + CATEGORY-FIRST STORES + GENERIC IMAGE MODE + REAL FILS")
 print("=" * 70)
 
 
@@ -45,6 +45,7 @@ RESOLVER = ThreadPoolExecutor(max_workers=8)
 WORKERS = ThreadPoolExecutor(max_workers=5)
 OLD_SEARCH_POOL = ThreadPoolExecutor(max_workers=8)
 LENS_POOL = ThreadPoolExecutor(max_workers=4)
+SHOPPING_POOL = ThreadPoolExecutor(max_workers=3)
 OLD_LAYER_DUPLICATES = max(1, int(os.environ.get("OLD_LAYER_DUPLICATES", "2")))
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
@@ -86,6 +87,13 @@ if not PUBLIC_BASE_URL:
         PUBLIC_BASE_URL = f"https://{_railway_domain}"
         print(f"PUBLIC_BASE_URL auto-derived from Railway: {PUBLIC_BASE_URL}")
 ENABLE_GOOGLE_LENS = env_bool("ENABLE_GOOGLE_LENS", True)
+# Google Shopping عبر نفس مفتاح SerpApi. يعيد بطاقات الأسعار التي تظهر في تبويب Shopping،
+# ونطلب direct_link حتى نحصل على صفحة المتجر نفسها بدلاً من صفحة Google.
+ENABLE_GOOGLE_SHOPPING = env_bool("ENABLE_GOOGLE_SHOPPING", True)
+SHOPPING_RESULT_LIMIT = max(12, int(os.environ.get("SHOPPING_RESULT_LIMIT", "40")))
+SHOPPING_QUERY_LIMIT = max(1, int(os.environ.get("SHOPPING_QUERY_LIMIT", "2")))
+SHOPPING_IMMERSIVE_LIMIT = max(0, int(os.environ.get("SHOPPING_IMMERSIVE_LIMIT", "4")))
+SHOPPING_TIMEOUT = max(15, int(os.environ.get("SHOPPING_TIMEOUT_SECONDS", "60")))
 LENS_PRIMARY_MODE = env_bool("LENS_PRIMARY_MODE", True)
 LENS_PRIMARY_EXCEPT_TEXT_HEAVY = env_bool("LENS_PRIMARY_EXCEPT_TEXT_HEAVY", True)
 # قوة Lens الحقيقية تأتي من تعدد التمريرات: products ثم all (visual+exact) ثم بحث واسع بلا قيد دولة.
@@ -311,7 +319,7 @@ print(
     f"ECONOMIC CONFIG search_model={GEMINI_SEARCH_MODEL} fast_model={GEMINI_FAST_MODEL} "
     f"max_stores={MAX_STORES} search_attempts={MAX_SEARCH_ATTEMPTS} "
     f"identify_attempts={MAX_IDENTIFY_ATTEMPTS} auto_maps={AUTO_SEND_PRODUCT_MAPS} "
-    f"lens_wide_fallback={ENABLE_LENS_WIDE_FALLBACK} lens_parallel={LENS_PARALLEL_WITH_VISION} "
+    f"lens_wide_fallback={ENABLE_LENS_WIDE_FALLBACK} lens_parallel={LENS_PARALLEL_WITH_VISION} shopping={ENABLE_GOOGLE_SHOPPING} "
     f"public_base_url={'SET' if PUBLIC_BASE_URL else 'MISSING'}"
 )
 
@@ -449,7 +457,7 @@ def has_model_token(a, b):
 def cache_key(query, lang):
     norm = re.sub(r"[^\w\u0600-\u06FF]+", "", normalize_ar(query))
     market = current_market().get("country", DEFAULT_COUNTRY)
-    return hashlib.sha256(f"v64|{market}|{norm}|{lang}".encode()).hexdigest()
+    return hashlib.sha256(f"{BUILD_ID}|{market}|{norm}|{lang}".encode()).hexdigest()
 
 def cache_ttl_for(query, txt=""):
     q_norm = normalize_ar(query)
@@ -754,9 +762,10 @@ SYSTEM_PROMPT = """
 • [المتجر الرابع] — [السعر] د.ك
 • [المتجر الخامس] — [السعر] د.ك
 
-الأولوية دائماً للمتاجر الكبيرة والمعروفة في الكويت، ثم المتاجر المتخصصة حسب نوع المنتج.
-ابدأ بالمتاجر الشاملة: جمعية دوت كوم، كيتا، طلبات، نون، لولو، كارفور، توصيل Taw9eel، ثم أضف المتاجر المتخصصة المناسبة للقسم.
-لا تعرض متجراً غير معروف إذا وُجد متجر كويتي معروف يبيع نفس المنتج بسعر موثق.
+الأولوية دائماً للمتاجر المتخصصة في فئة المنتج، ثم المتاجر الكويتية العامة كخيار احتياطي.
+مثال: المنتجات الرياضية تبدأ بإنترسبورت وديكاثلون وبرو سبورتس والمتاجر الرياضية، لا بنون أو السوبرماركت.
+لا تجعل Noon أو أي Marketplace عاماً يتقدم على متجر متخصص موثوق يبيع نفس الفئة.
+لا تعرض Ubuy أو Desertcart أو Temu أو AliExpress محلياً إذا وُجد أي عرض مباشر من متجر محلي.
 لا تعرض أي متجر أجنبي (سعودي أو إماراتي أو غيره) في نتائج السوق المحلي؛ عملة كل سعر يجب أن تكون عملة سوق المستخدم الحالي.
 
 【الحالة 2】طلب عام بدون براند محدد (مثل: قهوة فلات وايت حار، عطر رجالي، لابتوب للدراسة):
@@ -983,6 +992,383 @@ def is_marketplace_lens_item(item):
     return any(t in hay for t in MARKETPLACE_TOKENS)
 
 
+def _unwrap_google_redirect(url):
+    """يستخرج رابط المتجر من روابط Google redirect إن وُجد."""
+    url = str(url or "").strip()
+    if not url:
+        return ""
+    try:
+        parsed = urllib.parse.urlparse(url)
+        host = parsed.netloc.lower().replace("www.", "")
+        if host.endswith("google.com") or host.startswith("google.") or ".google." in host:
+            qs = urllib.parse.parse_qs(parsed.query)
+            for key in ("q", "url", "adurl", "target"):
+                candidate = (qs.get(key) or [""])[0]
+                candidate = urllib.parse.unquote(candidate)
+                if candidate.startswith(("http://", "https://")):
+                    return candidate
+    except Exception:
+        pass
+    return url
+
+
+def _shopping_direct_url(item):
+    """Google Shopping قد يعيد direct_link أو link عند direct_link=true؛ product_link صفحة Google وليست CTA."""
+    for key in ("direct_link", "merchant_link", "seller_link", "link"):
+        url = _unwrap_google_redirect(item.get(key))
+        if not url:
+            continue
+        try:
+            host = urllib.parse.urlparse(url).netloc.lower().replace("www.", "")
+        except Exception:
+            host = ""
+        if not host or "google." in host or host.endswith("google.com") or "serpapi.com" in host:
+            continue
+        return url
+    return ""
+
+
+def _collect_shopping_items(data):
+    """يجمع كل أشكال Shopping الحالية: العادية، inline، والمصنفة."""
+    out, seen = [], set()
+
+    def add(item):
+        if not isinstance(item, dict):
+            return
+        title = str(item.get("title") or "").strip()
+        source = str(item.get("source") or item.get("name") or "").strip()
+        has_price = item.get("extracted_price") not in (None, "") or bool(item.get("price"))
+        if not title or not source or not has_price:
+            return
+        sig = (title.lower(), source.lower(), str(item.get("price") or item.get("extracted_price") or ""))
+        if sig in seen:
+            return
+        seen.add(sig)
+        out.append(item)
+
+    for key in ("shopping_results", "inline_shopping_results", "featured_shopping_results", "related_shopping_results"):
+        for item in data.get(key) or []:
+            add(item)
+
+    def walk(value):
+        if isinstance(value, dict):
+            add(value)
+            for k, v in value.items():
+                if k in ("categorized_shopping_results", "shopping_results", "items", "results", "products"):
+                    walk(v)
+        elif isinstance(value, list):
+            for v in value:
+                walk(v)
+
+    walk(data.get("categorized_shopping_results") or [])
+    return out
+
+
+def _shopping_numeric_price(item):
+    value = item.get("extracted_price")
+    if value in (None, ""):
+        alt = item.get("alternative_price") or {}
+        if isinstance(alt, dict):
+            value = alt.get("extracted_price")
+    try:
+        if value not in (None, ""):
+            return float(value)
+    except Exception:
+        pass
+    raw = str(item.get("price") or "").replace(",", "")
+    m = re.search(r"(?<!\d)(\d+(?:\.\d{1,3})?)(?!\d)", raw)
+    try:
+        return float(m.group(1)) if m else None
+    except Exception:
+        return None
+
+
+def _shopping_currency(item):
+    alt = item.get("alternative_price") or {}
+    alt_cur = alt.get("currency") if isinstance(alt, dict) else ""
+    return detect_currency_code(f"{item.get('price','')} {item.get('currency','')} {alt_cur}")
+
+
+def _query_model_tokens(text):
+    return {
+        t.lower() for t in re.findall(r"[A-Za-z0-9-]+", str(text or ""))
+        if len(t) >= 4 and re.search(r"[A-Za-z]", t) and re.search(r"\d", t)
+    }
+
+
+def _shopping_title_compatible(query, title):
+    """يمنع خلط كرة السلة بالطوق أو الحذاء، ويحافظ على رقم الموديل عند وجوده."""
+    q = normalize_ar(query or "").lower()
+    t = normalize_ar(title or "").lower()
+    if not q or not t:
+        return False
+
+    models = _query_model_tokens(q)
+    if models and not any(m in t for m in models):
+        return False
+
+    subtype_rules = [
+        (("كره سله", "كرة سلة", "basketball"),
+         ("basketball", "كره سله", "كرة سلة"),
+         ("hoop", "backboard", "freestanding", "stand", "rim", "jersey", "shorts", "shoes", "shoe", "sneaker", "طوق", "سله مع عمود", "حذاء")),
+        (("كره قدم", "كرة قدم", "football", "soccer ball"),
+         ("football", "soccer ball", "كره قدم", "كرة قدم"),
+         ("goal", "boots", "shoes", "jersey", "shorts", "مرمى", "حذاء")),
+        (("كره طائره", "كرة طائرة", "volleyball"),
+         ("volleyball", "كره طائره", "كرة طائرة"),
+         ("net", "shoes", "jersey", "شبكه", "حذاء")),
+    ]
+    for query_words, required, blocked in subtype_rules:
+        if any(normalize_ar(x) in q for x in query_words):
+            if not any(normalize_ar(x) in t for x in required):
+                return False
+            # لا نحظر الإكسسوار إذا المستخدم طلبه صراحة.
+            for word in blocked:
+                nw = normalize_ar(word)
+                if nw in t and nw not in q:
+                    return False
+            return True
+
+    # للمنتج المحدد يكفي تطابق أحد الكلمات المميزة أو البراند، بالإضافة إلى الموديل إن وُجد.
+    stop = {
+        "buy", "online", "kuwait", "الكويت", "سعر", "افضل", "أفضل", "منتج", "with", "from",
+        "the", "and", "for", "متوفر", "شراء", "original", "new", "size", "حجم",
+    }
+    q_tokens = [x for x in re.findall(r"[a-z0-9\u0600-\u06ff]+", q) if len(x) >= 3 and x not in stop]
+    if not q_tokens:
+        return True
+    return any(token in t for token in q_tokens)
+
+
+def _shopping_location_params(lang):
+    m = current_market()
+    cc = (m.get("country") or DEFAULT_COUNTRY).lower()
+    location = ", ".join(x for x in (m.get("city"), m.get("country_name")) if x) or m.get("country_name") or "Kuwait"
+    return {
+        "gl": cc,
+        "hl": "ar" if lang == "ar" else "en",
+        "location": location,
+    }
+
+
+def _serpapi_shopping_request(search_term, lang):
+    params = {
+        "engine": "google_shopping",
+        "q": search_term,
+        "api_key": SERPAPI_API_KEY,
+        "device": "desktop",
+        "direct_link": "true",
+        "output": "json",
+        **_shopping_location_params(lang),
+    }
+    try:
+        r = requests.get("https://serpapi.com/search.json", params=params, timeout=SHOPPING_TIMEOUT)
+        if r.status_code >= 400:
+            print(f"GOOGLE SHOPPING HTTP {r.status_code}: {r.text[:300]}")
+            return []
+        data = r.json()
+        if data.get("error"):
+            print(f"GOOGLE SHOPPING ERROR: {data.get('error')}")
+            return []
+        items = _collect_shopping_items(data)
+        print(f"GOOGLE SHOPPING PASS '{search_term[:60]}' -> {len(items)} items")
+        return items[:SHOPPING_RESULT_LIMIT]
+    except Exception as e:
+        print(f"GOOGLE SHOPPING EXCEPTION: {e}")
+        return []
+
+
+def _serpapi_immersive_stores(page_token, query, lang):
+    if not page_token:
+        return []
+    params = {
+        "engine": "google_immersive_product",
+        "page_token": page_token,
+        "more_stores": "true",
+        "api_key": SERPAPI_API_KEY,
+        "output": "json",
+    }
+    try:
+        r = requests.get("https://serpapi.com/search.json", params=params, timeout=SHOPPING_TIMEOUT)
+        if r.status_code >= 400:
+            print(f"IMMERSIVE SHOPPING HTTP {r.status_code}: {r.text[:240]}")
+            return []
+        data = r.json()
+        stores = ((data.get("product_results") or {}).get("stores") or [])
+        out = []
+        for pos, store in enumerate(stores, 1):
+            if not isinstance(store, dict):
+                continue
+            title = str(store.get("title") or "").strip()
+            if title and not _shopping_title_compatible(query, title):
+                continue
+            url = _unwrap_google_redirect(store.get("direct_link") or store.get("link"))
+            if not url or not is_direct_store_url(url):
+                continue
+            price = _shopping_numeric_price(store)
+            if price is None or price <= 0:
+                continue
+            out.append({
+                "title": title,
+                "source": store.get("name") or source_label("", url),
+                "link": url,
+                "direct_link": url,
+                "price": store.get("price") or "",
+                "extracted_price": price,
+                "currency": _shopping_currency(store),
+                "position": pos,
+                "rating": store.get("rating"),
+                "reviews": store.get("reviews"),
+                "details_and_offers": store.get("details_and_offers") or [],
+            })
+        return out
+    except Exception as e:
+        print(f"IMMERSIVE SHOPPING EXCEPTION: {e}")
+        return []
+
+
+def _shopping_query_candidates(query):
+    candidates = _query_candidates(query)
+    category = detect_product_category(query)
+    # الاسم العربي والإنجليزي كل واحد في طلب مستقل؛ Google Shopping يتغير كثيراً حسب لغة الاستعلام.
+    out = []
+    for item in candidates:
+        item = short_query(item) or item
+        if item and item not in out:
+            out.append(item)
+    if category == "sports" and any(x in normalize_ar(query) for x in ("كره سله", "كرة سلة", "basketball")):
+        for item in ("كرة سلة", "basketball"):
+            if item not in out:
+                out.append(item)
+    return out[:SHOPPING_QUERY_LIMIT]
+
+
+def google_shopping_offers(query, lang="ar", allow_global=False):
+    """بطاقات Google Shopping المحلية مع روابط المتاجر المباشرة وأسعارها الفعلية."""
+    if allow_global or not ENABLE_GOOGLE_SHOPPING or not SERPAPI_API_KEY:
+        return {}
+
+    search_terms = _shopping_query_candidates(query)
+    market_snapshot = current_market()
+    futures = [
+        SHOPPING_POOL.submit(_run_with_market, market_snapshot, _serpapi_shopping_request, term, lang)
+        for term in search_terms
+    ]
+    raw_items = []
+    for future in futures:
+        try:
+            raw_items.extend(future.result(timeout=SHOPPING_TIMEOUT + 10) or [])
+        except Exception as e:
+            print(f"SHOPPING FUTURE ERR: {e}")
+
+    # إذا بطاقة Shopping هي تجميع منتج وليست رابط متجر، افتح أفضل عدد محدود منها لجلب البائعين.
+    immersive_candidates = []
+    for item in raw_items:
+        if _shopping_direct_url(item):
+            continue
+        token = item.get("immersive_product_page_token")
+        if token and _shopping_title_compatible(query, item.get("title", "")):
+            immersive_candidates.append(item)
+    immersive_candidates.sort(key=lambda x: int(x.get("position") or 999))
+    for item in immersive_candidates[:SHOPPING_IMMERSIVE_LIMIT]:
+        raw_items.extend(_serpapi_immersive_stores(item.get("immersive_product_page_token"), query, lang))
+
+    expected_currency = (current_market().get("currency") or "").upper()
+    records = []
+    for idx, item in enumerate(raw_items, 1):
+        title = str(item.get("title") or "").strip()
+        source = str(item.get("source") or item.get("name") or "").strip()
+        if not title or not source or not _shopping_title_compatible(query, title):
+            continue
+        url = _shopping_direct_url(item)
+        if not url or not is_direct_store_url(url):
+            continue
+        price = _shopping_numeric_price(item)
+        if price is None or price <= 0:
+            continue
+        currency = _shopping_currency(item)
+        local_item = {
+            "title": title, "source": source, "link": url,
+            "price": item.get("price") or "", "currency": currency,
+        }
+        is_local = is_local_lens_result(local_item)
+        if not is_local:
+            continue
+        if currency and expected_currency and currency != expected_currency:
+            continue
+        position = int(item.get("position") or idx)
+        quality = category_store_quality(source, url, query)
+        quality += 120
+        quality += max(0, 45 - min(position, 45))
+        if item.get("rating"):
+            try:
+                quality += min(15, float(item.get("rating")) * 3)
+            except Exception:
+                pass
+        hay = normalize_ar(f"{source} {url}").lower()
+        hard_marketplace = any(x in hay for x in HARD_DEMOTED_MARKETPLACES)
+        general_marketplace = any(x in hay for x in GENERAL_MARKETPLACE_ALIASES)
+        records.append({
+            "name": source[:40], "url": url, "price": price, "currency": currency or expected_currency,
+            "title": title, "position": position, "quality": quality, "is_local": True,
+            "hard_marketplace": hard_marketplace, "general_marketplace": general_marketplace,
+            "rating": item.get("rating"), "reviews": item.get("reviews"),
+        })
+
+    # متجر واحد فقط: نحتفظ بأفضل/أرخص منتج مطابق من كل نطاق.
+    by_host = {}
+    for rec in records:
+        host = urllib.parse.urlparse(rec["url"]).netloc.lower().replace("www.", "")
+        old = by_host.get(host)
+        if old is None or (rec["quality"], -rec["price"]) > (old["quality"], -old["price"]):
+            by_host[host] = rec
+    records = list(by_host.values())
+
+    non_hard = [r for r in records if not r["hard_marketplace"]]
+    if non_hard:
+        records = non_hard
+    specialists = [r for r in records if r["quality"] >= 220 and not r["general_marketplace"]]
+    # عند وجود ثلاثة متاجر قوية، لا نستهلك مكاناً في الخمسة على Noon أو Marketplace عام.
+    if len(specialists) >= 3:
+        records = [r for r in records if not r["general_marketplace"]]
+
+    records.sort(key=lambda r: (-r["quality"], r["price"]))
+    chosen = records[:MAX_STORES]
+    chosen.sort(key=lambda r: r["price"])
+
+    offers = {}
+    for rec in chosen:
+        name = rec["name"]
+        base = name
+        n = 2
+        while name in offers:
+            name = f"{base} {n}"; n += 1
+        offers[name] = rec
+    if offers:
+        print("GOOGLE SHOPPING FINAL:", [(n, x["price"], x["title"][:45]) for n, x in offers.items()])
+    return offers
+
+
+def safe_lens_display_name(lens_context, query):
+    chosen = ((lens_context or {}).get("chosen") or {})
+    title = str(chosen.get("title") or "").strip()
+    if title and not is_marketplace_lens_item(chosen):
+        return title
+    aliases = _query_candidates(query)
+    return short_query(aliases[0] if aliases else query) or short_query(query) or query
+
+
+def shopping_offers_text(query, offers, lang="ar"):
+    title = short_query(_query_candidates(query)[0]) or short_query(query) or query
+    lines = [f"📦 {title}", ""]
+    urls = {}
+    for i, (name, info) in enumerate(offers.items()):
+        prefix = "✅" if i == 0 else "•"
+        lines.append(f"{prefix} {name} — {format_price(info['price'])} {currency_label(lang)}")
+        urls[name] = info["url"]
+    return "\n".join(lines), urls
+
+
 def _collect_lens_items(data, items, seen):
     """يجمع نتائج Lens من كل الأقسام (exact/visual/products) مع تعليم القسم الحقيقي."""
     for key in ("exact_matches", "visual_matches", "products"):
@@ -1136,8 +1522,9 @@ def google_lens_lookup(image_b64, mime_type, lang="ar", query_hint=""):
         sig_system = (
             "أنت خبير منتجات. الصورة هي المرجع الوحيد. استخرج اسماً عربياً وإنجليزياً ووصفاً شكلياً محافظاً. "
             "لا تخترع رقم موديل. حدد اللون الأساسي، النقشة أو الخامة الظاهرة، وهل المنتج مسطح أو بكعب. "
-            "حدد أيضاً البراند إذا كان ظاهراً فعلاً في الصورة (شعار أو اسم مكتوب)؛ إذا غير ظاهر اكتب NONE ولا تخمن. "
-            "الرد سطر واحد فقط: Arabic name | English name | COLOR | PATTERN | HEEL | TYPE | BRAND. "
+            "حدد أيضاً البراند فقط إذا كان شعاره أو اسمه مقروءاً بوضوح داخل الصورة؛ إذا غير ظاهر اكتب NONE ولا تخمن. "
+            "الرد سطر واحد فقط: Arabic name | English name | COLOR | PATTERN | HEEL | TYPE | BRAND | BRAND_VISIBLE. "
+            "BRAND_VISIBLE يجب أن تكون YES فقط عند وجود شعار/اسم مقروء بالصورة، وإلا NO. "
             "HEEL واحدة من FLAT, LOW, HIGH, NONE, UNKNOWN. TYPE مثل MULES, SLIPPERS, SHOES, BAG, ELECTRONICS, BASKETBALL."
         )
         sig_txt, _ = call_gemini([
@@ -1154,6 +1541,7 @@ def google_lens_lookup(image_b64, mime_type, lang="ar", query_hint=""):
             "heel": fields[4].upper() if len(fields) > 4 else "UNKNOWN",
             "type": fields[5].upper() if len(fields) > 5 else "",
             "brand": fields[6] if len(fields) > 6 else "",
+            "brand_visible": (fields[7].upper() == "YES") if len(fields) > 7 else False,
         }
 
         aliases = []
@@ -1329,44 +1717,125 @@ STORE_DOMAINS = {
     "طلبات": "talabat.com", "ديليفرو": "deliveroo.com.kw", "بوتيكات": "boutiqaat.com",
     "جمعية دوت كوم": "jm3eia.com", "جمعيه دوت كوم": "jm3eia.com", "جميعة": "jm3eia.com", "jm3eia": "jm3eia.com",
     "كيتا": "mykeeta.com", "keeta": "mykeeta.com",
-    # v67: متجر Taw9eel الكويتي — اسمه العربي «توصيل» وكان فلتر الأسماء العامة يحذفه.
     "توصيل": "taw9eel.com", "التوصيل": "taw9eel.com", "taw9eel": "taw9eel.com", "taw9el": "taw9eel.com",
     "انترسبورت": "intersport.com.kw", "إنترسبورت": "intersport.com.kw", "intersport": "intersport.com.kw",
     "ديكاثلون": "decathlon.com.kw", "decathlon": "decathlon.com.kw",
+    "برو سبورتس": "prosportskw.com", "pro sports": "prosportskw.com", "prosports": "prosportskw.com",
+    "عروض كويت": "3roodq8.com", "3roodq8": "3roodq8.com", "3rood": "3roodq8.com",
+    "تيغرو": "tigro.app", "تيجرو": "tigro.app", "tigro": "tigro.app",
+    "سن اند ساند": "en-kw.sssports.com", "sun & sand": "en-kw.sssports.com", "sssports": "en-kw.sssports.com",
+    "نايك الكويت": "nike.com.kw", "nike kuwait": "nike.com.kw",
 }
+
+# لكل فئة ترتيب مستقل. المتجر المتخصص يدخل قبل المتجر العام حتى لو ظهر متأخراً في Google.
+CATEGORY_STORE_PRIORITY = {
+    "sports": [
+        "Intersport Kuwait", "Decathlon Kuwait", "Pro Sports Kuwait", "3roodq8", "Tigro",
+        "Sun & Sand Sports", "Nike Kuwait", "Go Sport", "Foot Locker", "Noon",
+    ],
+    "electronics": ["Xcite", "Eureka", "Best Al-Yousifi", "Blink", "Jarir", "Taw9eel", "Noon", "Lulu", "Carrefour"],
+    "appliances": ["Xcite", "Eureka", "Best Al-Yousifi", "Lulu", "Carrefour", "Taw9eel", "Noon"],
+    "beauty": ["Boutiqaat", "Faces", "Sephora", "Bloomingdale's Kuwait", "Boots Kuwait", "Noon"],
+    "pharmacy": ["Boots Kuwait", "YIACO", "Royal Pharmacy", "Pharmazone", "Talabat", "جمعية دوت كوم"],
+    "grocery": ["جمعية دوت كوم", "Lulu", "Carrefour", "Taw9eel", "Talabat", "Keeta"],
+    "restaurant": ["Keeta", "Talabat", "Deliveroo"],
+    "fashion": ["Centrepoint", "Namshi", "H&M Kuwait", "Max Fashion", "Sun & Sand Sports", "Noon"],
+    "furniture": ["IKEA Kuwait", "Home Centre", "The One", "Taw9eel", "Lulu", "Noon"],
+    "toys": ["Tigro", "Toys R Us Kuwait", "Fantasy World", "Centrepoint", "3roodq8", "Noon"],
+    "baby": ["Mothercare", "Centrepoint", "Toys R Us Kuwait", "جمعية دوت كوم", "Noon"],
+    "automotive": ["AlMailem", "Tires Plus", "ACE Kuwait", "Xcite", "Noon"],
+    "hardware": ["ACE Kuwait", "Bin Nisf", "Taw9eel", "Lulu", "Noon"],
+    "homeware": ["IKEA Kuwait", "Home Centre", "ACE Kuwait", "Taw9eel", "Lulu", "Noon"],
+    "pets": ["Petzone Kuwait", "The Pet Shop", "Talabat", "Noon"],
+    "books": ["Jarir", "That Al Salasil", "Jashanmal", "Taw9eel", "Noon"],
+    "general": ["جمعية دوت كوم", "Taw9eel", "Lulu", "Carrefour", "Talabat", "Keeta", "Noon"],
+}
+
+STORE_ALIASES = {
+    "Intersport Kuwait": ("intersport", "انترسبورت", "إنترسبورت"),
+    "Decathlon Kuwait": ("decathlon", "ديكاثلون"),
+    "Pro Sports Kuwait": ("prosportskw", "pro sports", "prosports", "برو سبورتس"),
+    "3roodq8": ("3roodq8", "3rood", "عروض كويت"),
+    "Tigro": ("tigro", "تيغرو", "تيجرو"),
+    "Sun & Sand Sports": ("sssports", "sun & sand", "sun and sand", "سن اند ساند"),
+    "Nike Kuwait": ("nike.com.kw", "nike kuwait", "نايك الكويت"),
+    "Xcite": ("xcite", "اكسايت", "الغانم"),
+    "Eureka": ("eureka", "يوريكا"),
+    "Best Al-Yousifi": ("best.com.kw", "best al", "اليوسفي"),
+    "Blink": ("blink", "بلينك"),
+    "Jarir": ("jarir", "جرير"),
+    "Noon": ("noon", "نون"),
+    "Lulu": ("lulu", "لولو"),
+    "Carrefour": ("carrefour", "كارفور"),
+    "Taw9eel": ("taw9eel", "taw9el", "توصيل"),
+    "جمعية دوت كوم": ("jm3eia", "جمعية دوت كوم", "جمعيه دوت كوم"),
+    "Talabat": ("talabat", "طلبات"),
+    "Keeta": ("mykeeta", "keeta", "كيتا"),
+    "Boutiqaat": ("boutiqaat", "بوتيكات"),
+    "Boots Kuwait": ("boots", "بوتس"),
+    "YIACO": ("yiaco", "ياكو"),
+}
+
+CATEGORY_RULES = [
+    ("sports", ("كره سله", "كرة سلة", "basketball", "كره قدم", "كرة قدم", "football", "soccer", "تنس", "tennis", "بادل", "padel", "مضرب", "racket", "racquet", "volleyball", "كره طائره", "كرة طائرة", "رياضه", "رياضة", "gym", "fitness", "dumbbell", "حبل قفز")),
+    ("electronics", ("ايفون", "iphone", "سامسونج", "samsung", "لابتوب", "laptop", "تابلت", "tablet", "بلايستيشن", "playstation", "اكس بوكس", "xbox", "تلفزيون", "tv", "الكترون", "هاتف", "phone", "ساعه ابل", "apple watch", "سماعه", "headphone", "earbuds", "كاميرا")),
+    ("appliances", ("ثلاجه", "غساله", "فرن", "مكيف", "جلايه", "مكنسه", "قلايه", "ميكرويف", "refrigerator", "washer", "oven", "air conditioner", "vacuum", "air fryer")),
+    ("beauty", ("عطر", "برفان", "perfume", "مكياج", "makeup", "كريم", "سيروم", "عنايه", "skincare", "شامبو")),
+    ("pharmacy", ("دواء", "صيدليه", "صيدلية", "فيتامين", "مكمل", "حبوب", "كبسول", "pharmacy", "medicine", "vitamin", "supplement")),
+    ("grocery", ("بيبسي", "شيبس", "حليب", "قهوه", "قهوة", "شاي", "سكر", "رز", "زيت", "ماء", "عصير", "بسكوت", "منظف", "صابون", "grocery", "food", "beverage")),
+    ("restaurant", ("مطعم", "وجبه", "وجبة", "برجر", "بيتزا", "فلات وايت", "شاورما", "restaurant", "meal")),
+    ("fashion", ("ملابس", "قميص", "بنطلون", "حذاء", "كاب", "قبعه", "شنطه", "فستان", "عبايه", "shirt", "pants", "shoes", "bag", "dress")),
+    ("furniture", ("اثاث", "أثاث", "كرسي", "طاوله", "طاولة", "سرير", "كنب", "مرتبه", "furniture", "chair", "table", "bed", "sofa")),
+    ("toys", ("لعبه", "لعبة", "العاب", "ألعاب", "toy", "doll", "lego")),
+    ("baby", ("عربانه", "عربة أطفال", "كرسي طفل", "رضاعه", "رضاعة", "حفاض", "حفاظ", "baby", "stroller")),
+    ("automotive", ("سياره", "سيارة", "بطاريه", "بطارية", "اطار", "إطار", "زيت محرك", "اكسسوار سياره", "auto parts", "car accessory", "tire")),
+    ("hardware", ("دريل", "مسمار", "صبغ", "دهان", "hardware", "tools", "power tool")),
+    ("homeware", ("ادوات منزليه", "أدوات منزلية", "صحون", "قدور", "مطبخ", "kitchenware", "homeware")),
+    ("pets", ("اكل قطط", "أكل قطط", "اكل كلاب", "أكل كلاب", "حيوانات", "pet food", "pet supplies")),
+    ("books", ("كتاب", "روايه", "رواية", "قرطاسيه", "قرطاسية", "book", "stationery")),
+]
+
+GENERAL_MARKETPLACE_ALIASES = ("noon", "نون", "amazon", "امازون", "marketplace")
+HARD_DEMOTED_MARKETPLACES = ("ubuy", "desertcart", "temu", "aliexpress", "alibaba", "ebay", "fruugo", "dhgate")
+
+
+def detect_product_category(query):
+    q = normalize_ar(query or "")
+    for category, words in CATEGORY_RULES:
+        if any(normalize_ar(w) in q for w in words):
+            return category
+    return "general"
 
 
 def priority_stores_for(query):
-    """يرتب أهم المتاجر الكويتية حسب فئة المنتج ويُستخدم داخل طلب البحث."""
-    q = normalize_ar(query)
-    general = ["جمعية دوت كوم", "طلبات", "كيتا", "نون", "لولو", "كارفور", "Taw9eel توصيل"]
+    """متاجر الفئة أولاً؛ Noon والمتاجر العامة في آخر القائمة لا أولها."""
+    category = detect_product_category(query)
+    return list(CATEGORY_STORE_PRIORITY.get(category) or CATEGORY_STORE_PRIORITY["general"])
 
-    rules = [
-        (("ايفون", "سامسونج", "لابتوب", "تابلت", "بلايستيشن", "اكس بوكس", "تلفزيون", "الكترون", "هاتف", "ساعه ابل", "سماعه"),
-         ["Xcite", "Eureka", "Best Al-Yousifi", "Blink", "Jarir", "Noon", "Taw9eel"]),
-        (("ثلاجه", "غساله", "فرن", "مكيف", "جلايه", "مكنسه", "قلايه", "ميكرويف"),
-         ["Xcite", "Eureka", "Best Al-Yousifi", "Lulu", "Carrefour", "Noon", "Taw9eel"]),
-        (("عطر", "برفان", "مكياج", "كريم", "سيروم", "عنايه", "شامبو"),
-         ["Boutiqaat", "Bloomingdale's Kuwait", "Faces", "Sephora", "Noon", "جمعية دوت كوم"]),
-        (("دواء", "صيدليه", "فيتامين", "مكمل", "حفاض", "حفاظ"),
-         ["Boots Kuwait", "YIACO", "Royal Pharmacy", "جمعية دوت كوم", "Talabat"]),
-        (("بيبسي", "شيبس", "حليب", "قهوه", "شاي", "سكر", "رز", "زيت", "ماء", "عصير", "بسكوت", "منظف", "صابون"),
-         ["جمعية دوت كوم", "Lulu", "Carrefour", "Talabat", "Keeta"]),
-        (("مطعم", "وجبه", "برجر", "بيتزا", "قهوه", "فلات وايت", "شاورما", "دجاج"),
-         ["Keeta", "Talabat", "Deliveroo"]),
-        (("ملابس", "قميص", "بنطلون", "حذاء", "كاب", "قبعه", "شنطه", "رياضه"),
-         ["Intersport Kuwait", "Decathlon Kuwait", "Sun & Sand Sports", "Foot Locker", "Noon", "Namshi"]),
-        (("اثاث", "كرسي", "طاوله", "سرير", "كنب", "مرتبه"),
-         ["IKEA Kuwait", "The One", "Home Centre", "Taw9eel", "Noon", "Lulu"]),
-        (("اطفال", "لعبه", "العاب", "عربانه", "رضاعه"),
-         ["Toys R Us Kuwait", "Mothercare", "Centrepoint", "Noon", "جمعية دوت كوم"]),
-        (("سياره", "بطاريه", "اطار", "زيت محرك", "اكسسوار"),
-         ["Tires Plus", "AlMailem", "Xcite", "Noon"]),
-    ]
-    for words, stores in rules:
-        if any(w in q for w in words):
-            return stores
-    return general
+
+def _store_matches_label(name, url, label):
+    hay = normalize_ar(f"{name or ''} {url or ''}").lower()
+    aliases = STORE_ALIASES.get(label, (label,))
+    return any(normalize_ar(a).lower() in hay for a in aliases)
+
+
+def category_store_quality(name, url, query=""):
+    """نقاط جودة المتجر بالنسبة لفئة الطلب؛ لا تستخدم لترتيب السعر النهائي."""
+    category = detect_product_category(query)
+    stores = CATEGORY_STORE_PRIORITY.get(category) or CATEGORY_STORE_PRIORITY["general"]
+    score = 0
+    for idx, label in enumerate(stores):
+        if _store_matches_label(name, url, label):
+            score = max(score, 240 - idx * 14)
+            break
+    hay = normalize_ar(f"{name or ''} {url or ''}").lower()
+    if any(x in hay for x in HARD_DEMOTED_MARKETPLACES):
+        score -= 400
+    elif category != "general" and any(x in hay for x in GENERAL_MARKETPLACE_ALIASES):
+        score -= 70
+    if is_local_lens_result({"source": name, "link": url}):
+        score += 35
+    return score
 
 def store_domain(name):
     n = normalize_name(normalize_ar(name))
@@ -1996,7 +2465,7 @@ def _new_layer_search(query, lang, prompt_text=None, source_image_b64=None, sour
     # This preserves the many visually close results Google shows instead of demanding one exact SKU.
     lens_cards = lens_priced_offers(lens_context, lang, local_only=not allow_global, exclude_local=allow_global)
     if lens_cards:
-        display_name = (lens_context.get("chosen") or {}).get("title") or query
+        display_name = safe_lens_display_name(lens_context, query)
         lines = [f"📦 {display_name}", ""]
         new_urls = {}
         for i, (name, info) in enumerate(lens_cards.items()):
@@ -2024,7 +2493,7 @@ def _new_layer_search(query, lang, prompt_text=None, source_image_b64=None, sour
             for info in lens_verified.values():
                 info["shown"] = f"{format_price(info['price'])} {currency_label(lang)}"
             sorted_v = sorted(lens_verified.items(), key=lambda x: x[1]["price"])
-        display_name = (lens_context.get("chosen") or {}).get("title") or query
+        display_name = safe_lens_display_name(lens_context, query)
         lines = [f"📦 {display_name}", ""]
         new_urls = {}
         for i, (name, info) in enumerate(sorted_v[:MAX_STORES]):
@@ -2032,6 +2501,11 @@ def _new_layer_search(query, lang, prompt_text=None, source_image_b64=None, sour
             lines.append(f"{prefix} {name} — {info['shown']}")
             new_urls[name] = info["url"]
         return "\n".join(lines), new_urls
+
+    # Google Shopping يعالج الطلبات العامة والمحددة ويعيد نفس المتاجر التي تظهر في تبويب Shopping.
+    shopping = google_shopping_offers(query, lang, allow_global=allow_global)
+    if shopping:
+        return shopping_offers_text(query, shopping, lang)
 
     candidates = _query_candidates(query)
     best_txt, best_urls = "", {}
@@ -2248,10 +2722,12 @@ def _old_layer_search(query, lang, prompt_text=None, lens_context=None, allow_gl
             f"{query} international stores exact visual match direct product link {LANG_INSTR[lang]}",
         ]
     elif current_market().get("country") == "kw":
+        category = detect_product_category(query)
+        stores_hint = " ".join(priority_stores_for(query))
         variants = [
             base_prompt,
-            f"{query} افضل سعر في الكويت Xcite Eureka Blink Noon Jarir Lulu Carrefour Best Al Yousifi جمعية دوت كوم Taw9eel - قارن الاسعار {LANG_INSTR[lang]}",
-            f"{query} شراء اونلاين الكويت سعر متوفر متجر كويتي صفحة المنتج مباشرة {LANG_INSTR[lang]}",
+            f"{query} افضل سعر في الكويت متاجر فئة {category}: {stores_hint} - قارن الاسعار {LANG_INSTR[lang]}",
+            f"{query} شراء اونلاين الكويت متجر متخصص {category} سعر متوفر صفحة المنتج مباشرة {LANG_INSTR[lang]}",
         ]
     else:
         variants = [
@@ -2323,17 +2799,8 @@ def _old_layer_search(query, lang, prompt_text=None, lens_context=None, allow_gl
     return "\n".join(lines), new_urls
 
 
-def _store_priority_value(name, url):
-    text = f"{name} {url}".lower()
-    priorities = (
-        "jm3eia", "جمعية", "xcite", "eureka", "best", "yousifi", "blink",
-        "jarir", "lulu", "carrefour", "noon", "intersport", "decathlon",
-        "boutiqaat", "boots", "yiaco", "levelshoes", "future", "talabat", "keeta", "taw9eel"
-    )
-    for i, token in enumerate(priorities):
-        if token in text:
-            return len(priorities) - i
-    return 0
+def _store_priority_value(name, url, query=""):
+    return category_store_quality(name, url, query)
 
 
 def _merge_two_layers(query, lang, new_result, old_result, lens_context=None):
@@ -2360,7 +2827,7 @@ def _merge_two_layers(query, lang, new_result, old_result, lens_context=None):
         quality = 0
         quality += 100 if o.get("exact") else 0
         quality += 40 if o.get("is_local") else 0
-        quality += _store_priority_value(o.get("name", ""), o.get("url", "")) * 2
+        quality += _store_priority_value(o.get("name", ""), o.get("url", ""), query)
         quality += 12 if o.get("layer") == "new" else 8
         quality += max(0, 20 - min(int(o.get("lens_position", 999)), 20))
         return (-quality, o.get("price", 10**9))
@@ -2369,9 +2836,11 @@ def _merge_two_layers(query, lang, new_result, old_result, lens_context=None):
     # v67: الجودة تحدد من يدخل القائمة النهائية فقط؛ العرض دائماً من الأرخص إلى الأغلى.
     chosen.sort(key=lambda o: o.get("price", 10**9))
 
-    display_title = ((lens_context or {}).get("chosen") or {}).get("title") or \
+    chosen_item = ((lens_context or {}).get("chosen") or {})
+    chosen_title = "" if is_marketplace_lens_item(chosen_item) else str(chosen_item.get("title") or "").strip()
+    display_title = chosen_title or \
                     product_title(new_txt, "").replace("📦", "").strip() or \
-                    product_title(old_txt, query).replace("📦", "").strip() or query
+                    product_title(old_txt, query).replace("📦", "").strip() or short_query(query) or query
     currency = currency_label(lang)
     lines = [f"📦 {display_title}", ""]
     urls = {}
@@ -2778,35 +3247,58 @@ def is_fashion_identity(lens_context, vision_name=""):
     hay = normalize_ar(f"{((lens_context or {}).get('chosen') or {}).get('title','')} {vision_name}")
     return any(normalize_ar(w) in hay for w in FASHION_WORDS_HAY)
 
-def is_generic_product_identity(lens_context, vision_name=""):
-    """v69: هل المنتج «عام» بلا براند ظاهر؟ (كرة سلة عادية، كوب، حبل قفز...)
+def canonical_generic_aliases(signature, vision_name=""):
+    """اسم فئة نظيف للصور العامة؛ يمنع عنوان إعلان Ubuy من التحول إلى هوية المنتج."""
+    ptype = str((signature or {}).get("type") or "").upper()
+    by_type = {
+        "BASKETBALL": ["كرة سلة", "basketball"],
+        "FOOTBALL": ["كرة قدم", "football"],
+        "SOCCER_BALL": ["كرة قدم", "soccer ball"],
+        "VOLLEYBALL": ["كرة طائرة", "volleyball"],
+        "TENNIS_RACKET": ["مضرب تنس", "tennis racket"],
+        "PADEL_RACKET": ["مضرب بادل", "padel racket"],
+        "JUMP_ROPE": ["حبل قفز", "jump rope"],
+        "MUG": ["كوب", "mug"],
+        "CUP": ["كوب", "cup"],
+    }
+    if ptype in by_type:
+        return by_type[ptype]
+    aliases = split_product_aliases(vision_name)
+    return aliases[:2]
 
-    في هذه الحالة عنوان Lens الحرفي (خصوصاً من مواقع الوساطة مثل Ubuy) يضر أكثر
-    مما ينفع: «12 Pcs Mini Rubber Basketballs Set 7 | Ubuy» يقتل البحث المحلي،
-    بينما البحث باسم الفئة «كرة سلة | basketball» يرجع نتائج المتاجر الكويتية فوراً.
-    """
+
+def is_generic_product_identity(lens_context, vision_name=""):
+    """هل الصورة لمنتج عام بلا شعار/موديل مرئي، مثل كرة سلة عادية؟"""
     if not lens_context:
         return False
     sig = lens_context.get("signature") or {}
-    brand = normalize_ar(sig.get("brand") or "").strip()
-    if brand and brand not in ("none", "unknown", "لا يوجد", "غير معروف", "بدون", "-"):
-        return False
+    ptype = str(sig.get("type") or "").upper()
+    brand_visible = bool(sig.get("brand_visible"))
+    brand = normalize_ar(sig.get("brand") or "").strip() if brand_visible else ""
     chosen = lens_context.get("chosen") or {}
     chosen_title = str(chosen.get("title") or "")
-    # v70: عنوان موقع وساطة (Ubuy...) غير موثوق كدليل براند — «Spalding TF Gold | Ubuy»
-    # لكرة برتقالية بلا أي شعار. البراند يُعتمد فقط من عنوان متجر حقيقي أو من الصورة نفسها.
+
+    # الأنواع البصرية العامة لا تأخذ برانداً من عنوان Lens أو من متجر وسيط.
+    generic_types = {"BASKETBALL", "FOOTBALL", "SOCCER_BALL", "VOLLEYBALL", "BALL", "JUMP_ROPE", "MUG", "CUP"}
+    if ptype in generic_types and not brand_visible:
+        return True
+
+    if brand:
+        return False
+
     title_trusted = not is_marketplace_lens_item(chosen)
     hay = normalize_ar(f"{chosen_title if title_trusted else ''} {vision_name}")
+    # رقم موديل واضح يعني منتجاً محدداً لا فئة عامة.
+    if re.search(r"[a-z]\d{3,}|\d{3,}[a-z]", hay):
+        return False
+
     known_brands = (
         "nike","adidas","wilson","molten","spalding","jordan","puma","under armour",
-        "reebok","asics","new balance","mizuno","yonex","babolat","head","wilson",
+        "reebok","asics","new balance","mizuno","yonex","babolat","head",
         "apple","samsung","sony","lg","xiaomi","huawei","dyson","philips","almarai",
         "نايك","اديداس","ويلسون","مولتن","سبالدينج","جوردن","المراعي",
     )
-    if any(normalize_ar(b) in hay for b in known_brands):
-        return False
-    # رقم موديل واضح (B7G5000, GX9000...) يعني منتجاً محدداً وليس عاماً.
-    if re.search(r"[a-z]\d{3,}|\d{3,}[a-z]", hay):
+    if title_trusted and any(normalize_ar(b) in hay for b in known_brands):
         return False
     return True
 
@@ -2868,7 +3360,7 @@ def identify_image_product(image_b64, mime_type, lang):
     if lens_context and is_generic_product_identity(lens_context, vision_name):
         sig = lens_context.get("signature") or {}
         generic_aliases = []
-        for value in split_product_aliases(vision_name):
+        for value in canonical_generic_aliases(sig, vision_name):
             if value and value not in generic_aliases:
                 generic_aliases.append(value)
         chosen_title = str((lens_context.get("chosen") or {}).get("title") or "")
@@ -3171,7 +3663,7 @@ def process_location_message(msg, bot_id):
 async def health():
     return {
         "status": f"COOP BOT {BUILD_ID} RUNNING",
-        "features": "category safety net + generic product mode + marketplace demotion + real fils prices + cheapest-first sort + local market guard + Taw9eel + 5 stores + two-layer search + Google Lens",
+        "features": "Google Shopping + category-first stores + generic image mode + marketplace demotion + real fils + local guard + two-layer search + Google Lens",
         "gemini": GEMINI_STATS,
         "cache_entries": len(SEARCH_CACHE),
     }
