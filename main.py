@@ -6,10 +6,10 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v67-4-same-size-comparison-20260804"
+BUILD_ID = "v68-1-open-stores-sorted-5-results-20260804"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
-print("GENERIC COMMODITY -> VISION FIRST + INTENT UNDERSTANDING + GLOBAL FX")
+print("OPEN LOCAL STORES + CHEAPEST-FIRST + SPEC MATCH + LOCAL-ONLY GUARD")
 print("=" * 70)
 
 
@@ -64,9 +64,9 @@ SERVICE_CACHE_TTL = int(os.environ.get("SERVICE_CACHE_TTL_HOURS", "168")) * 3600
 CACHE_MAX = int(os.environ.get("CACHE_MAX", "3000"))
 CACHE_DB_PATH = os.environ.get("CACHE_DB_PATH", "/tmp/coop_search_cache.sqlite3")
 CACHE_DB_LOCK = threading.Lock()
-# النسخة الاقتصادية: 3 نتائج فقط واتصال بحث واحد في الوضع الطبيعي.
-MAX_STORES = int(os.environ.get("MAX_STORES", "3"))
-MAX_URLS_MERGED = int(os.environ.get("MAX_URLS_MERGED", "5"))
+# v68: قائمة أطول — 5 نتائج افتراضياً (تُضبط من MAX_STORES في Environment Variables).
+MAX_STORES = int(os.environ.get("MAX_STORES", "5"))
+MAX_URLS_MERGED = int(os.environ.get("MAX_URLS_MERGED", "8"))
 ENABLE_SEARCH_RETRY = env_bool("ENABLE_SEARCH_RETRY", True)
 MAX_SEARCH_ATTEMPTS = max(2, int(os.environ.get("MAX_SEARCH_ATTEMPTS", "3")))
 MAX_IDENTIFY_ATTEMPTS = max(2, int(os.environ.get("MAX_IDENTIFY_ATTEMPTS", "3")))
@@ -436,20 +436,24 @@ def normalize_ar(text):
     t = t.replace("ري بان", "ريبان").replace("راي بان", "ريبان").replace("ray ban", "rayban").replace("ray-ban", "rayban")
     return t
 
-# ---- مقارنة نفس الحجم فقط ----------------------------------------------------
-# عبوة 250 مل أرخص من لتر لأنها أصغر، مو لأنها عرض أفضل. نستخرج الحجم من عنوان
-# كل منتج (مع مضاعِف العبوات مثل 6×185مل) ونرفض أي عرض حجمه يختلف عن المرجع.
+# ---- مقارنة نفس المواصفات فقط ------------------------------------------------
+# عبوة 250 مل أرخص من لتر لأنها أصغر، وآيفون 128GB أرخص من 256GB لأنه سعة أقل —
+# مو لأنه عرض أفضل. نستخرج الحجم/الوزن/السعة من عنوان كل منتج (مع مضاعِف العبوات
+# مثل 6×185مل) ونرفض أي عرض مواصفته تختلف عن المرجع.
 SIZE_RE = re.compile(
     r"(?:(\d+(?:[.,]\d+)?)\s*[x×*]\s*)?(\d+(?:[.,]\d+)?)\s*"
-    r"(مل|ملي لتر|ملل|ml|لتر|ليتر|l|ltr|liter|litre|كجم|كغم|كغ|كيلو جرام|كيلو غرام|كيلو|kg|جرام|غرام|جم|غم|gm|gr|g)\b",
+    r"(مل|ملي لتر|ملل|ml|لتر|ليتر|l|ltr|liter|litre|كجم|كغم|كغ|كيلو جرام|كيلو غرام|كيلو|kg|جرام|غرام|جم|غم|gm|gr|g"
+    r"|تيرا بايت|تيرابايت|تيرا|tb|جيجا بايت|جيجابايت|جيجا|غيغا|قيقا|gb)\b",
     re.I,
 )
 _VOL_UNITS = {"مل", "ملي لتر", "ملل", "ml"}
 _VOL_BIG_UNITS = {"لتر", "ليتر", "l", "ltr", "liter", "litre"}
 _WT_BIG_UNITS = {"كجم", "كغم", "كغ", "كيلو جرام", "كيلو غرام", "كيلو", "kg"}
+_CAP_UNITS = {"جيجا بايت", "جيجابايت", "جيجا", "غيغا", "قيقا", "gb"}
+_CAP_BIG_UNITS = {"تيرا بايت", "تيرابايت", "تيرا", "tb"}
 
 def extract_pack_size(text):
-    """يعيد (نوع, الكمية الكلية بالمل أو الجرام) أو None إذا ما فيه حجم مذكور."""
+    """يعيد (نوع, الكمية الكلية بالمل أو الجرام أو الجيجا) أو None إذا ما فيه حجم مذكور."""
     t = normalize_ar(str(text or ""))
     for m in SIZE_RE.finditer(t):
         try:
@@ -458,7 +462,11 @@ def extract_pack_size(text):
         except Exception:
             continue
         unit = m.group(3).lower()
-        if unit in _VOL_BIG_UNITS:
+        if unit in _CAP_BIG_UNITS:
+            cls, base = "cap", qty * 1000.0
+        elif unit in _CAP_UNITS:
+            cls, base = "cap", qty
+        elif unit in _VOL_BIG_UNITS:
             cls, base = "vol", qty * 1000.0
         elif unit in _VOL_UNITS:
             cls, base = "vol", qty
@@ -475,6 +483,8 @@ def format_pack_size(sig):
     if not sig:
         return ""
     cls, total = sig
+    if cls == "cap":
+        return f"{total/1000:g} تيرا" if total >= 1000 else f"{int(total)} جيجا"
     if cls == "vol":
         return f"{total/1000:g} لتر" if total >= 1000 else f"{int(total)} مل"
     return f"{total/1000:g} كجم" if total >= 1000 else f"{int(total)} جم"
@@ -492,7 +502,7 @@ def filter_same_size(offers_dict, reference_text):
     """يبقي فقط العروض المطابقة لحجم المرجع (اسم المنتج المحدد)، أو لحجم الأغلبية إذا المرجع بلا حجم.
 
     العروض التي لا يظهر حجم في عنوانها تمر (لا نستطيع الحكم عليها)، لكن أي حجم
-    صريح مختلف يُرفض — عبوة أصغر ليست سعراً أرخص لنفس المنتج.
+    صريح مختلف يُرفض — عبوة أصغر أو سعة أقل ليست سعراً أرخص لنفس المنتج.
     """
     if not offers_dict:
         return offers_dict
@@ -529,7 +539,7 @@ def has_model_token(a, b):
 def cache_key(query, lang):
     norm = re.sub(r"[^\w\u0600-\u06FF]+", "", normalize_ar(query))
     market = current_market().get("country", DEFAULT_COUNTRY)
-    return hashlib.sha256(f"v64|{market}|{norm}|{lang}".encode()).hexdigest()
+    return hashlib.sha256(f"v68|{market}|{norm}|{lang}".encode()).hexdigest()
 
 def cache_ttl_for(query, txt=""):
     q_norm = normalize_ar(query)
@@ -740,7 +750,7 @@ def cache_put(query, lang, txt, urls):
 IDENTIFY_SYSTEM = """أنت خبير تعرف على المنتجات من الصور.
 أرجع دائماً اسمين قابلين للبحث بهذا الشكل فقط:
 [الاسم التجاري بالعربية] | [commercial product name in English]
-ضع البراند ورقم الموديل إن ظهر. إذا ظهر حجم أو وزن على العبوة (مثل 1 لتر، 500 مل، 250 جم) أدخله في الاسمين، فهو جزء من هوية المنتج.
+ضع البراند ورقم الموديل إن ظهر. إذا ظهر حجم أو وزن أو سعة على العبوة (مثل 1 لتر، 500 مل، 250 جم، 256GB) أدخله في الاسمين، فهو جزء من هوية المنتج.
 استنتج نوع المنتج من الشعار والشكل والنص الظاهر.
 لا ترفض التحديد لمجرد أن الصورة غير كاملة؛ أعطِ أقرب اسم تجاري مفيد للبحث.
 مثال: حليب المراعي كامل الدسم 1 لتر | Almarai Full Fat Milk 1L
@@ -826,16 +836,16 @@ SYSTEM_PROMPT = """
 أولاً حدد نوع الطلب:
 
 【الحالة 1】منتج محدد بعلامة تجارية واضحة (مثل: آيفون 15 برو، بيبسي، ساعة أبل الترا، بلايستيشن 5):
-قارن الأسعار واختر الأرخص، ورد بهذا الشكل فقط:
+قارن الأسعار ورتب النتائج دائماً من الأرخص إلى الأغلى، ورد بهذا الشكل فقط:
 📦 [اسم المنتج]
 
 ✅ [المتجر الأرخص] — [السعر] د.ك
 • [المتجر الثاني] — [السعر] د.ك
 • [المتجر الثالث] — [السعر] د.ك
+• [المتجر الرابع] — [السعر] د.ك
+• [المتجر الخامس] — [السعر] د.ك
 
-الأولوية دائماً للمتاجر الكبيرة والمعروفة في الكويت، ثم المتاجر المتخصصة حسب نوع المنتج.
-ابدأ بالمتاجر الشاملة: جمعية دوت كوم، كيتا، طلبات، نون، لولو، كارفور، ثم أضف المتاجر المتخصصة المناسبة للقسم.
-لا تعرض متجراً غير معروف إذا وُجد متجر كويتي معروف يبيع نفس المنتج بسعر موثق.
+ابدأ بالمتاجر الشاملة المعروفة (جمعية دوت كوم، كيتا، طلبات، نون، لولو، كارفور) والمتاجر المتخصصة حسب نوع المنتج، لكن لا تحصر البحث فيها إطلاقاً: اقبل أي متجر محلي يبيع المنتج بسعر موثق ورابط صفحة منتج مباشر، حتى لو لم يكن متجراً مشهوراً.
 
 【الحالة 2】طلب عام بدون براند محدد (مثل: قهوة فلات وايت حار، عطر رجالي، لابتوب للدراسة):
 لا تبحث عن الأرخص! ابحث عن الأفضل تقييماً في الكويت بسعر مناسب.
@@ -856,10 +866,12 @@ SYSTEM_PROMPT = """
 - اذكر فقط المنتجات المتوفرة فعلاً. لا تكتب كلمة InStock أو متوفر مكان السعر.
 - أي متجر لا يظهر له سعر رقمي واضح بعملة السوق الحالي احذفه من النتيجة.
 - اكتب السعر بالفلوس كاملة دائماً: 1.950 وليس 1.95، و0.750 وليس 0.75.
+- قارن نفس المواصفات فقط: نفس الحجم/السعة/الوزن، ونفس اللون إذا كان اللون يغيّر السعر. اذكر المواصفة بجانب كل سعر (مثل: 256GB، 1 لتر، أحمر) ولا تدخل نسخة مختلفة المواصفات في نفس المقارنة.
+- اعرض المتاجر المحلية فقط التي تبيع أو توصل داخل بلد المستخدم الحالي؛ لا تعرض متجراً أجنبياً في هذا البحث.
 - ممنوع أن يكون الرد عبارة عن أسماء متاجر مع كلمة متوفر فقط؛ كل سطر عرض يجب أن يحتوي سعراً رقمياً.
 - رابط كل متجر يجب أن يكون رابط صفحة منتج مباشر (صفحة فيها منتج واحد وسعر واحد). ممنوع روابط الصفحة الرئيسية أو /search أو /category
 - لا تخترع سعراً، انسخ السعر كما يظهر في نتيجة البحث اليوم.
-- حاول تجيب 3 متاجر فقط، وإذا ما لقيت اذكر الموجود ولا تخترع.
+- حاول تجيب حتى 5 متاجر مختلفة، وإذا ما لقيت اذكر الموجود ولا تخترع.
 
 في الحالات 1 و2 و3، سطر أخير إلزامي:
 LINKS: اسم الأول=الدومين الحقيقي, اسم الثاني=الدومين الحقيقي
@@ -1343,7 +1355,7 @@ STORE_DOMAINS = {
 
 
 def priority_stores_for(query):
-    """يرتب أهم المتاجر الكويتية حسب فئة المنتج ويُستخدم داخل طلب البحث."""
+    """يرتب أشهر المتاجر المحلية حسب فئة المنتج كنقطة انطلاق للبحث — بدون حصر البحث فيها."""
     q = normalize_ar(query)
     general = ["جمعية دوت كوم", "طلبات", "كيتا", "نون", "لولو", "كارفور"]
 
@@ -1869,6 +1881,43 @@ def is_foreign_lens_result(item):
     # In explicit global mode, a valid non-local product URL is accepted as foreign.
     return bool(host)
 
+
+def filter_local_market_only(verified):
+    """v68: حارس الوضع المحلي — أي متجر أجنبي واضح (نطاق دولة ثانية أو عملة ثانية) يُرفض.
+
+    المواقع العالمية لا تظهر في البحث المحلي أبداً؛ تظهر فقط بعد موافقة المستخدم
+    على «دوّر عالمياً». النتيجة مجهولة الجنسية (لا محلية ولا أجنبية واضحة) تمر.
+    """
+    kept = {}
+    for name, info in (verified or {}).items():
+        item = {
+            "link": info.get("url", ""), "source": name,
+            "title": info.get("title", ""), "currency": info.get("currency", ""),
+            "price": info.get("price_text", "") or "",
+        }
+        # نرفض فقط الأجنبي الواضح: نطاق دولة ثانية أو عملة دولة ثانية صريحة.
+        if not is_local_lens_result(item):
+            host = ""
+            try:
+                host = urllib.parse.urlparse(item["link"]).netloc.lower()
+            except Exception:
+                pass
+            cc = (current_market().get("country") or DEFAULT_COUNTRY).lower()
+            foreign_tld = any(
+                other_cc != cc and any(tld in host for tld in tlds)
+                for other_cc, tlds in COUNTRY_TLDS.items()
+            )
+            hay = " ".join(str(item.get(k) or "") for k in ("title", "source", "currency", "price")).lower()
+            foreign_currency = any(
+                other_cc != cc and any(marker in hay for marker in markers)
+                for other_cc, markers in COUNTRY_CURRENCY_MARKERS.items()
+            )
+            if foreign_tld or foreign_currency:
+                print(f"LOCAL MODE REJECT FOREIGN: {name} -> {info.get('url','')}")
+                continue
+        kept[name] = info
+    return kept
+
 def lens_priced_offers(lens_context, lang="ar", local_only=True, exclude_local=False):
     """Use Google Lens product cards directly.
 
@@ -1938,7 +1987,7 @@ def lens_priced_offers(lens_context, lang="ar", local_only=True, exclude_local=F
             "image_url": item.get("image") or item.get("thumbnail") or "",
         }
         used_urls.add(url)
-    # نفس الحجم فقط: بطاقة عبوة أصغر ليست سعراً أرخص لنفس المنتج.
+    # نفس المواصفات فقط: بطاقة عبوة أصغر أو سعة أقل ليست سعراً أرخص لنفس المنتج.
     offers = filter_same_size(offers, ((lens_context.get("chosen") or {}).get("title") or ""))
     # المتاجر المحلية أولاً حتى لو رتبها Google متأخرة؛ ثم exact ثم visual ثم ترتيب Lens.
     ranked = sorted(
@@ -2015,17 +2064,19 @@ def _new_layer_search(query, lang, prompt_text=None, source_image_b64=None, sour
                 info["sort_price"] = converted if converted is not None else info["price"]
             sorted_v = sorted(lens_verified.items(), key=lambda x: x[1]["sort_price"])
         else:
+            lens_verified = filter_local_market_only(lens_verified)
             for info in lens_verified.values():
                 info["shown"] = f"{format_price(info['price'])} {currency_label(lang)}"
             sorted_v = sorted(lens_verified.items(), key=lambda x: x[1]["price"])
-        display_name = (lens_context.get("chosen") or {}).get("title") or query
-        lines = [f"📦 {display_name}", ""]
-        new_urls = {}
-        for i, (name, info) in enumerate(sorted_v[:MAX_STORES]):
-            prefix = "✅" if i == 0 else "•"
-            lines.append(f"{prefix} {name} — {info['shown']}")
-            new_urls[name] = info["url"]
-        return "\n".join(lines), new_urls
+        if sorted_v:
+            display_name = (lens_context.get("chosen") or {}).get("title") or query
+            lines = [f"📦 {display_name}", ""]
+            new_urls = {}
+            for i, (name, info) in enumerate(sorted_v[:MAX_STORES]):
+                prefix = "✅" if i == 0 else "•"
+                lines.append(f"{prefix} {name} — {info['shown']}")
+                new_urls[name] = info["url"]
+            return "\n".join(lines), new_urls
 
     candidates = _query_candidates(query)
     best_txt, best_urls = "", {}
@@ -2037,26 +2088,21 @@ def _new_layer_search(query, lang, prompt_text=None, source_image_b64=None, sour
         else:
             context = ""
 
-        # المحاولة الأولى تكون حصراً داخل المتاجر ذات الأولوية.
-        # إذا لم نجد نتيجة صالحة، تنتقل المحاولات التالية إلى بحث عام في المتاجر المحلية المعروفة.
+        # v68: المتاجر الشهيرة نقطة انطلاق فقط — البحث مفتوح لأي متجر محلي منذ المحاولة الأولى.
         priority_stores = priority_stores_for(search_term)
         stores_hint = "، ".join(priority_stores)
         market_name = current_market().get("country_name", "Kuwait")
-        if attempt == 1 and current_market().get("country") == "kw":
+        if attempt == 1:
             search_scope = (
-                f"ابحث حصراً أولاً داخل هذه المتاجر وبنفس ترتيب الأولوية: {stores_hint}. "
-                "لا تعرض أي متجر خارج هذه القائمة في هذه المحاولة، وإذا لم تجد فلا تكتب اعتذاراً مطولاً؛ أرجع بلا نتائج لننتقل للبحث العام. "
-            )
-        elif attempt == 1:
-            search_scope = (
-                f"ابدأ بأشهر المتاجر المحلية في {market_name} أولاً. "
-                "إذا لم تجد فلا تكتب اعتذاراً مطولاً؛ أرجع بلا نتائج لننتقل للبحث العام. "
+                f"ابدأ بأشهر المتاجر المحلية في {market_name} (مثل: {stores_hint}) لكن لا تحصر البحث فيها إطلاقاً: "
+                f"اقبل أي متجر محلي آخر في {market_name} يبيع المنتج بسعر موثق ورابط صفحة منتج مباشر حتى لو لم يكن مشهوراً. "
+                "إذا لم تجد فلا تكتب اعتذاراً مطولاً؛ أرجع بلا نتائج لننتقل لمحاولة أوسع. "
             )
         else:
             search_scope = (
-                f"لم توجد نتيجة صالحة في متاجر الأولوية. "
-                f"اعمل الآن بحثاً عاماً واسعاً في جميع متاجر {market_name} التي تبيع المنتج، بما فيها المتاجر المتخصصة، "
-                "مع تجنب الإعلانات المبوبة فقط مثل OpenSooq. لا تستبعد المتجر لمجرد أنه ليس ضمن القائمة الأولى. "
+                f"لم توجد نتيجة كافية في المحاولة السابقة. "
+                f"اعمل الآن بحثاً عاماً واسعاً في جميع متاجر {market_name} التي تبيع المنتج، بما فيها المتاجر المتخصصة والصغيرة، "
+                "مع تجنب الإعلانات المبوبة فقط مثل OpenSooq. لا تستبعد المتجر لمجرد أنه غير مشهور. "
             )
         current_prompt = (
             f"{context}ابحث في {market_name} عن هذا الاسم تحديداً: {search_term}. "
@@ -2064,10 +2110,11 @@ def _new_layer_search(query, lang, prompt_text=None, source_image_b64=None, sour
                 "لا توسع البحث إلى موديلات أخرى من نفس البراند، ولا تقبل اختلافاً واضحاً في اللون أو النقشة أو وجود الكعب. ") if lens_context else "")
             + f"{search_scope}"
             "استخدم الاسم كما هو، ويمكن تجربة تهجئات قريبة لنفس المنتج فقط. "
-            "قارن نفس المنتج بنفس الحجم/السعة/الوزن فقط: عبوة أصغر أو أكبر تعتبر منتجاً مختلفاً ولا تدخل المقارنة. "
-            "اذكر الحجم بجانب كل سعر إذا كان معروفاً (مثل: 1 لتر). "
-            "أعطني حتى 3 متاجر فقط، وكل نتيجة يجب أن تحتوي سعراً رقمياً بعملة السوق الحالي "
-            "ورابط صفحة المنتج المباشرة داخل المتجر. ممنوع روابط Google وصفحات البحث والتصنيف. "
+            "قارن نفس المنتج بنفس المواصفات فقط (الحجم/السعة/الوزن، واللون إذا كان يغيّر السعر): "
+            "عبوة أصغر أو أكبر أو سعة تخزين مختلفة تعتبر منتجاً مختلفاً ولا تدخل المقارنة. "
+            "اذكر المواصفة بجانب كل سعر إذا كانت معروفة (مثل: 1 لتر أو 256GB). "
+            f"أعطني حتى {MAX_STORES} متاجر مختلفة مرتبة من الأرخص إلى الأغلى، وكل نتيجة يجب أن تحتوي سعراً رقمياً بعملة السوق الحالي "
+            "ورابط صفحة المنتج المباشرة داخل المتجر. ممنوع روابط Google وصفحات البحث والتصنيف، وممنوع أي متجر أجنبي لا يبيع محلياً. "
             "لا تكتب متوفر أو InStock بدلاً من السعر. اكتب السعر بالفلوس كاملة مثل 1.950 وليس 1.95. "
             f"{LANG_INSTR[lang]}"
         )
@@ -2091,6 +2138,9 @@ def _new_layer_search(query, lang, prompt_text=None, source_image_b64=None, sour
             verified = verify_offers(urls, search_term)
             verified = filter_verified_with_lens(verified, lens_context)
             verified = filter_same_size(verified, query)
+            if not allow_global:
+                # v68: البحث المحلي لا يعرض مواقع عالمية أبداً — تظهر فقط بعد زر «دوّر عالمياً».
+                verified = filter_local_market_only(verified)
             if verified:
                 # Google Lens استُخدم قبل البحث لتحديد المنتج. لا نحذف نتائج الأسعار بسبب تقييم بصري تخميني.
                 sorted_v = sorted(verified.items(), key=lambda x: x[1]["price"])
@@ -2119,8 +2169,15 @@ def _new_layer_search(query, lang, prompt_text=None, source_image_b64=None, sour
             kept = []
             for offer in offers:
                 matched = match_url(offer["name"], urls)
-                if matched and is_direct_store_url(matched):
-                    kept.append(offer)
+                if not (matched and is_direct_store_url(matched)):
+                    continue
+                if not allow_global and is_foreign_lens_result({"link": matched, "source": offer["name"], "title": offer["line"]}):
+                    # v68: نفس الحارس المحلي حتى للعروض التي تعذّر فحص صفحتها.
+                    print(f"LOCAL MODE REJECT FOREIGN (unverified): {offer['name']} -> {matched}")
+                    continue
+                kept.append(offer)
+            # v68: الترتيب من الأرخص للأغلى حتى في المسار غير المفحوص.
+            kept.sort(key=lambda o: _extract_numeric_price(o.get("line", "")) or 10**9)
             if kept:
                 title = product_title(txt, search_term)
                 lines = [title, ""]
@@ -2205,7 +2262,7 @@ def _old_layer_search(query, lang, prompt_text=None, lens_context=None, allow_gl
         )
     else:
         base_prompt = prompt_text or (
-            f"ابحث عن {query} في {current_market().get('country_name', 'Kuwait')}. متوفر فقط وبسعر رقمي واضح ورابط صفحة منتج مباشر. {LANG_INSTR[lang]}"
+            f"ابحث عن {query} في {current_market().get('country_name', 'Kuwait')} في أي متجر محلي يبيعه — المشهور وغير المشهور. متوفر فقط وبسعر رقمي واضح ورابط صفحة منتج مباشر. {LANG_INSTR[lang]}"
         )
     market_name = current_market().get("country_name", "Kuwait")
     if allow_global:
@@ -2217,7 +2274,7 @@ def _old_layer_search(query, lang, prompt_text=None, lens_context=None, allow_gl
     elif current_market().get("country") == "kw":
         variants = [
             base_prompt,
-            f"{query} افضل سعر في الكويت Xcite Eureka Blink Noon Jarir Lulu Carrefour Best Al Yousifi جمعية دوت كوم - قارن الاسعار {LANG_INSTR[lang]}",
+            f"{query} افضل سعر في الكويت Xcite Eureka Blink Noon Jarir Lulu Carrefour Best Al Yousifi جمعية دوت كوم او اي متجر كويتي اخر - قارن الاسعار {LANG_INSTR[lang]}",
             f"{query} شراء اونلاين الكويت سعر متوفر متجر كويتي صفحة المنتج مباشرة {LANG_INSTR[lang]}",
         ]
     else:
@@ -2262,6 +2319,9 @@ def _old_layer_search(query, lang, prompt_text=None, lens_context=None, allow_gl
     if lens_context:
         verified = filter_verified_with_lens(verified, lens_context)
     verified = filter_same_size(verified, query)
+    if not allow_global:
+        # v68: البحث المحلي لا يعرض مواقع عالمية أبداً — تظهر فقط بعد موافقة المستخدم.
+        verified = filter_local_market_only(verified)
     if not verified:
         print("OLD LAYER: no verified direct offers")
         return "", {}
@@ -2556,12 +2616,12 @@ def run_similar_search(phone, item):
     base = short_query(re.sub(r"^.*?—\s*", "", query).strip() or query) or short_query(query)
     market_name = current_market().get("country_name", "Kuwait")
     prompts = [
-        (f"المنتج التالي غير متوفر محلياً: {base}. اقترح حتى 3 بدائل مشابهة له فعلياً — نفس الفئة "
-         f"ونفس الاستخدام ومستوى جودة قريب — متوفرة الآن في متاجر {market_name} فقط. "
+        (f"المنتج التالي غير متوفر محلياً: {base}. اقترح حتى {MAX_STORES} بدائل مشابهة له فعلياً — نفس الفئة "
+         f"ونفس الاستخدام ومستوى جودة قريب — متوفرة الآن في متاجر {market_name} فقط، من أي متجر محلي كان. "
          "لكل بديل: اسم البديل الفعلي (وليس اسم المنتج الأصلي)، سعر رقمي واضح بعملة السوق، "
-         f"ورابط صفحة المنتج المباشرة داخل المتجر. اكتب السعر بالفلوس كاملة مثل 1.950. {LANG_INSTR[lang]}"),
-        (f"3 best in-stock alternatives similar to {base} in {market_name} local online stores, "
-         f"each with the alternative's own name, a numeric price, and a direct product page link. {LANG_INSTR[lang]}"),
+         f"ورابط صفحة المنتج المباشرة داخل المتجر. رتب من الأرخص إلى الأغلى واكتب السعر بالفلوس كاملة مثل 1.950. {LANG_INSTR[lang]}"),
+        (f"{MAX_STORES} best in-stock alternatives similar to {base} in {market_name} local online stores, "
+         f"each with the alternative's own name, a numeric price, and a direct product page link, sorted cheapest first. {LANG_INSTR[lang]}"),
     ]
     for prompt in prompts:
         txt, urls = call_gemini([{"text": prompt}])
@@ -2570,6 +2630,8 @@ def run_similar_search(phone, item):
         if not txt or not offers or not urls:
             continue
         verified = verify_offers(urls, base)
+        # v68: البدائل المحلية لا تشمل مواقع أجنبية.
+        verified = filter_local_market_only(verified)
         if verified:
             sorted_v = sorted(verified.items(), key=lambda x: x[1]["price"])
             title = product_title(txt, f"بدائل مشابهة: {base}" if lang == "ar" else f"Similar to: {base}")
@@ -2587,8 +2649,14 @@ def run_similar_search(phone, item):
         kept = []
         for offer in offers:
             matched = match_url(offer["name"], urls)
-            if matched and is_direct_store_url(matched):
-                kept.append((offer, matched))
+            if not (matched and is_direct_store_url(matched)):
+                continue
+            if is_foreign_lens_result({"link": matched, "source": offer["name"], "title": offer["line"]}):
+                print(f"SIMILAR LOCAL REJECT FOREIGN: {offer['name']} -> {matched}")
+                continue
+            kept.append((offer, matched))
+        # v68: ترتيب البدائل من الأرخص للأغلى حتى بدون فحص الصفحة.
+        kept.sort(key=lambda om: _extract_numeric_price(om[0].get("line", "")) or 10**9)
         if kept:
             title = product_title(txt, f"بدائل مشابهة: {base}" if lang == "ar" else f"Similar to: {base}")
             lines = [title, ""]
@@ -3293,4 +3361,4 @@ def process_location_message(message, bot_id):
     route_pending_after_location(from_number)
 
 @app.get("/")
-async def health(): return {"status":"v67 GENERIC COMMODITY + INTENT + FX", "build":BUILD_ID, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
+async def health(): return {"status":"v68 OPEN LOCAL STORES + CHEAPEST FIRST + 5 RESULTS + SPEC MATCH", "build":BUILD_ID, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
