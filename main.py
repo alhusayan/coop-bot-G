@@ -6,10 +6,10 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v66-intent-understanding-20260803"
+BUILD_ID = "v67-generic-commodity-vision-first-20260804"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
-print("INTENT UNDERSTANDING + NOT-FOUND OPTIONS + GLOBAL FX -> LOCAL CURRENCY")
+print("GENERIC COMMODITY -> VISION FIRST + INTENT UNDERSTANDING + GLOBAL FX")
 print("=" * 70)
 
 
@@ -1278,7 +1278,7 @@ def priority_stores_for(query):
          ["جمعية دوت كوم", "Lulu", "Carrefour", "Talabat", "Keeta"]),
         (("مطعم", "وجبه", "برجر", "بيتزا", "قهوه", "فلات وايت", "شاورما", "دجاج"),
          ["Keeta", "Talabat", "Deliveroo"]),
-        (("ملابس", "قميص", "بنطلون", "حذاء", "كاب", "قبعه", "شنطه", "رياضه"),
+        (("ملابس", "قميص", "بنطلون", "حذاء", "كاب", "قبعه", "شنطه", "رياضه", "كره", "مضرب"),
          ["Intersport Kuwait", "Decathlon Kuwait", "Sun & Sand Sports", "Foot Locker", "Noon", "Namshi"]),
         (("اثاث", "كرسي", "طاوله", "سرير", "كنب", "مرتبه"),
          ["IKEA Kuwait", "The One", "Home Centre", "Noon", "Lulu"]),
@@ -1407,7 +1407,7 @@ def maps_category_for(product):
         (("ملابس", "تيشيرت", "قميص", "بنطلون", "فستان", "جاكيت", "قبعه", "قبعة", "كاب", "shirt", "dress", "cap", "clothing"),
          "Intersport OR Decathlon OR Sun and Sand Sports OR متجر ملابس Fashion store"),
         (("حذاء", "جوتي", "سنيكر", "shoe", "sneaker"), "Intersport OR Decathlon OR Foot Locker OR متجر أحذية Shoe store"),
-        (("مضرب", "كره", "كرة", "تنس", "بادل", "جيم", "رياضه", "رياضة", "under armour", "nike", "adidas", "sports"),
+        (("مضرب", "كره", "كرة", "تنس", "بادل", "جيم", "رياضه", "رياضة", "under armour", "nike", "adidas", "sports", "basketball"),
          "Intersport OR Decathlon OR Sun and Sand Sports OR متجر رياضي Sports store"),
         (("ايفون", "آيفون", "سامسونج", "لابتوب", "بلايستيشن", "تلفزيون", "الكترون", "هاتف", "جوال", "كاميرا",
           "iphone", "samsung", "laptop", "playstation", "television", "electronics"),
@@ -1783,7 +1783,6 @@ def is_foreign_lens_result(item):
     # In explicit global mode, a valid non-local product URL is accepted as foreign.
     return bool(host)
 
-
 def lens_priced_offers(lens_context, lang="ar", local_only=True, exclude_local=False):
     """Use Google Lens product cards directly.
 
@@ -2105,7 +2104,7 @@ def _old_layer_search(query, lang, prompt_text=None, lens_context=None, allow_gl
         return "", {}
     if allow_global:
         base_prompt = (
-            f"ابحث عالميًا عن {query}. استبعد تمامًا أي متجر داخل {current_market().get('country_name', 'بلد المستخدم')}، لأن البحث المحلي انتهى بالفعل. اقبل المتاجر الأجنبية الموثوقة فقط، مع سعر رقمي واضح ورابط صفحة المنتج المباشر، واذكر العملة الأصلية. {LANG_INSTR[lang]}"
+            f"ابحث عالميًا عن {query}. استبعد تمامًا أي متجر داخل {current_market().get('country_name', 'بلد المستخدم')}, لأن البحث المحلي انتهى بالفعل. اقبل المتاجر الأجنبية الموثوقة فقط، مع سعر رقمي واضح ورابط صفحة المنتج المباشر، واذكر العملة الأصلية. {LANG_INSTR[lang]}"
         )
     else:
         base_prompt = prompt_text or (
@@ -2639,6 +2638,35 @@ def is_fashion_identity(vision_name, caption=""):
     )
     return any(term in q for term in fashion_terms)
 
+def is_generic_commodity(vision_name, caption=""):
+    """منتج عام بلا براند أو موديل (كرة سلة عادية، حبل قفز، دمبل...).
+
+    Lens مع هذا النوع يجيب إعلانات عشوائية مشابهة شكلاً (eBay، كرات إسفنجية، مغناطيسات)
+    لأن ما فيه هوية بصرية مميزة. البحث النصي بالاسم العام أدق وأرخص، و priority_stores_for
+    يوجهه تلقائياً لمتاجر الرياضة المحلية (Intersport / Decathlon / Sun & Sand).
+    """
+    raw = f"{vision_name or ''} {caption or ''}".strip()
+    if not raw:
+        return False
+    # رقم موديل أو SKU = منتج محدد، مو عام.
+    if re.search(r"\b(?=[a-z0-9-]{3,}\b)(?=[a-z0-9-]*[a-z])(?=[a-z0-9-]*\d)[a-z0-9-]+\b", raw, re.I):
+        return False
+    q = normalize_ar(raw)
+    known_brands = (
+        "نايك", "nike", "اديداس", "adidas", "سبولدينج", "spalding", "ويلسون", "wilson",
+        "مولتن", "molten", "ميكاسا", "mikasa", "بوما", "puma", "ريبوك", "reebok",
+        "اندر ارمور", "under armour", "اسيكس", "asics", "ابل", "apple", "سامسونج", "samsung", "سوني", "sony"
+    )
+    if any(normalize_ar(b) in q for b in known_brands):
+        return False
+    generic_terms = (
+        "كره سله", "basketball", "كره قدم", "football", "soccer ball",
+        "كره طايره", "volleyball", "كره تنس", "tennis ball", "كره يد", "handball",
+        "حبل قفز", "jump rope", "دمبل", "dumbbell", "سجاده يوغا", "yoga mat",
+        "مطاره ماء", "water bottle", "قاروره ماء", "شنطه رياضيه", "gym bag"
+    )
+    return any(normalize_ar(t) in q for t in generic_terms)
+
 def _legacy_should_use_google_lens(vision_name, caption=""):
     """Legacy router kept as a fallback when Lens-primary mode is disabled."""
     raw = f"{vision_name or ''} {caption or ''}".strip()
@@ -2707,8 +2735,8 @@ def _is_text_heavy_packaged_product(vision_name, caption=""):
 def lens_routing_decision(vision_name, caption=""):
     """Lens is the primary engine for most image searches (~70%).
 
-    Only clearly text-heavy packaged/medical/grocery products stay Vision-first.
-    This gives you a practical 70%+ Lens usage without breaking obvious label cases.
+    Only clearly text-heavy packaged/medical/grocery products stay Vision-first,
+    plus generic unbranded commodities where Lens returns random lookalike ads.
     """
     raw = f"{vision_name or ''} {caption or ''}".strip()
     q = normalize_ar(raw)
@@ -2720,6 +2748,10 @@ def lens_routing_decision(vision_name, caption=""):
     # Fashion remains a hard Lens-first case.
     if is_fashion_identity(vision_name, caption):
         return True, "FASHION_ALWAYS_LENS"
+
+    # منتج عام (كرة سلة عادية...): Vision-first دائماً — Lens يخربط ويجيب إسفنجيات وإعلانات.
+    if is_generic_commodity(vision_name, caption):
+        return False, "GENERIC_COMMODITY_VISION_FIRST"
 
     uncertain = (
         "غير معروف", "منتج غير", "unknown", "unidentified", "possibly", "ربما",
@@ -3154,4 +3186,4 @@ def process_location_message(message, bot_id):
     route_pending_after_location(from_number)
 
 @app.get("/")
-async def health(): return {"status":"v66 INTENT UNDERSTANDING + FX", "build":BUILD_ID, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
+async def health(): return {"status":"v67 GENERIC COMMODITY + INTENT + FX", "build":BUILD_ID, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
