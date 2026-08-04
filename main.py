@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v67-generic-commodity-vision-first-20260804"
+BUILD_ID = "v67-1-image-notfound-options-20260804"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("GENERIC COMMODITY -> VISION FIRST + INTENT UNDERSTANDING + GLOBAL FX")
@@ -2936,6 +2936,11 @@ def process_single_image(message,bot_id,lang="ar"):
             send_whatsapp_text(from_number,T(lang,"cant_identify"),bot_id)
         return
     result_type = send_product_result(from_number, txt, urls, bot_id, lang, query)
+    if result_type == "none" and query:
+        # كانت هناك عروض لكن كل روابطها غير مباشرة؛ نعرض الخيارات الثلاثة مثل مسار النص تماماً.
+        _store_pending_global(from_number, bot_id, lang, query, active_lens, prompt_text if (combined_name and caption) else None)
+        send_not_found_choice(from_number, bot_id, lang)
+        return
     if query and (result_type == "service" or (result_type == "product" and AUTO_SEND_PRODUCT_MAPS)):
         send_maps_button(from_number, query, bot_id, lang)
 
