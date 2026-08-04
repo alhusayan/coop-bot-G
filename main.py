@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v72-2-lens-cta-only-price-store-diversity-20260804"
+BUILD_ID = "v72-3-lens-ar-titles-prices-strict-local-20260804"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE -> GOOGLE LENS DIRECT PASSTHROUGH (raw results to user)")
@@ -95,6 +95,8 @@ LENS_DIRECT_MODE = env_bool("LENS_DIRECT_MODE", True)
 LENS_DIRECT_MAX_LINES = max(3, int(os.environ.get("LENS_DIRECT_MAX_LINES", "8")))
 # v72.2: تنويع المتاجر في بطاقات CTA — حد أقصى من البطاقات لكل متجر واحد.
 LENS_PER_STORE_MAX = max(1, int(os.environ.get("LENS_PER_STORE_MAX", "2")))
+# v72.3: البطاقات التي بلا سعر من Google نجلب سعرها من صفحة المتجر مباشرة (مجاني).
+LENS_PRICE_FETCH_MAX = max(0, int(os.environ.get("LENS_PRICE_FETCH_MAX", "5")))
 LENS_PRIMARY_MODE = env_bool("LENS_PRIMARY_MODE", True)
 LENS_PRIMARY_EXCEPT_TEXT_HEAVY = env_bool("LENS_PRIMARY_EXCEPT_TEXT_HEAVY", True)
 # قوة Lens الحقيقية تأتي من تعدد التمريرات: products ثم all (visual+exact) ثم بحث واسع بلا قيد دولة.
@@ -1947,6 +1949,47 @@ def english_search_name(query):
     return name
 
 
+# v72.3: ترجمة عناوين نتائج Lens للعربية — دفعة واحدة باتصال سريع رخيص + كاش.
+TRANSLATE_TITLES_SYSTEM = """ترجم أسماء المنتجات التالية إلى العربية بأسلوب متجر واضح ومختصر.
+- أبقِ البراند والموديل والأرقام والأحجام لاتينية كما هي (Mountain Dew, iPhone 15 Pro, 250ml, 1.5L).
+- Pack of 30 تصير: عبوة 30. Carbonated Drink تصير: مشروب غازي.
+- سطر واحد لكل منتج وبنفس الترقيم تماماً. بدون أي شرح أو إضافات."""
+
+AR_TITLE_CACHE = {}
+AR_TITLE_LOCK = threading.Lock()
+
+def arabic_titles(titles):
+    """يعيد {العنوان الأصلي: الترجمة العربية}. العناوين العربية أصلاً تمر كما هي، وعند
+    فشل الترجمة يُعرض الأصل الإنجليزي بدل بطاقة فارغة."""
+    out, todo = {}, []
+    for t in titles:
+        t = (t or "").strip()
+        if not t:
+            continue
+        key = t.lower()
+        with AR_TITLE_LOCK:
+            cached = AR_TITLE_CACHE.get(key)
+        if cached:
+            out[t] = cached
+        elif re.search(r"[\u0600-\u06FF]", t):
+            out[t] = t
+        elif t not in todo:
+            todo.append(t)
+    if todo:
+        numbered = "\n".join(f"{i+1}. {t}" for i, t in enumerate(todo))
+        raw, _ = call_gemini([{"text": numbered}], system=TRANSLATE_TITLES_SYSTEM, use_search=False)
+        lines = [re.sub(r"^\s*\d+[\.\)\-]\s*", "", l).strip() for l in (raw or "").splitlines() if l.strip()]
+        with AR_TITLE_LOCK:
+            if len(AR_TITLE_CACHE) > 3000:
+                AR_TITLE_CACHE.clear()
+            for i, t in enumerate(todo):
+                tr = lines[i] if i < len(lines) and re.search(r"[\u0600-\u06FF]", lines[i]) else t
+                out[t] = tr
+                AR_TITLE_CACHE[t.lower()] = tr
+        print(f"AR TITLES TRANSLATED: {len(todo)}")
+    return out
+
+
 def _query_candidates(query, english_name=""):
     """v70: صيغ البحث بالإنجليزية أولاً (أدق فهرسة)، والعربية كاحتياط في المحاولات اللاحقة."""
     raw_parts = [p.strip() for p in re.split(r"\s*[|｜]\s*", query or "") if p.strip()]
@@ -2038,6 +2081,29 @@ def is_local_lens_result(item):
         host = urllib.parse.urlparse(link).netloc.lower().replace("www.", "")
     except Exception:
         host = ""
+
+    # v72.3: اسم دولة أخرى صريح في المتجر/العنوان (Carrefour Qatar، Amazon India...)
+    # = ليس محلياً مهما انطبقت تلميحات أخرى، إلا إذا ذُكر بلد المستخدم نفسه أيضاً.
+    current_names = {
+        str(m.get("country_name") or "").lower(),
+        COUNTRY_NAMES_AR.get(cc, "").strip(),
+    }
+    foreign_name_hit = False
+    for cc2, name2 in COUNTRY_NAMES.items():
+        if cc2 == cc or not name2:
+            continue
+        if re.search(rf"\b{re.escape(name2.lower())}\b", hay):
+            foreign_name_hit = True
+            break
+    if not foreign_name_hit:
+        for cc2, name2 in COUNTRY_NAMES_AR.items():
+            if cc2 == cc or not name2:
+                continue
+            if name2 in hay:
+                foreign_name_hit = True
+                break
+    if foreign_name_hit and not any(n and n.lower() in hay for n in current_names if n):
+        return False
 
     if any(tld in host for tld in COUNTRY_TLDS.get(cc, [])):
         return True
@@ -3561,9 +3627,39 @@ def _send_lens_match_batch(from_number, matches, bot_id, lang, header="", conver
         if len(picked) >= MAX_STORES:
             break
 
-    # 3) بطاقة CTA لكل عرض: الاسم، سطر سعر بارز، اسم المتجر — وزر يفتح صفحة المنتج.
+    # 3) v72.3: البطاقات التي بلا سعر من Google — نجلب السعر من صفحة المتجر نفسها (مجاني وسريع).
+    def _fetch_page_price(url):
+        cached = VERIFIED_PAGE_CACHE.get(url)
+        if cached and (time.time() - cached["ts"] < 600):
+            return cached["data"]
+        info = parse_product_data(fetch_html(url), url)
+        if info:
+            VERIFIED_PAGE_CACHE[url] = {"data": info, "ts": time.time()}
+        return info
+
+    final_picked = picked[:MAX_STORES]
+    missing = [
+        (i, url) for i, (m, _t, url) in enumerate(final_picked)
+        if not (str(m.get("price") or "").strip() or m.get("price_value") not in (None, ""))
+    ][:LENS_PRICE_FETCH_MAX]
+    if missing:
+        for i, info in RESOLVER.map(lambda x: (x[0], _fetch_page_price(x[1])), missing):
+            if info and info.get("price"):
+                m = final_picked[i][0]
+                m["price_value"] = info["price"]
+                if not (m.get("currency") or "").strip():
+                    m["currency"] = info.get("currency") or ""
+                print(f"LENS PRICE FETCHED: {final_picked[i][2][:70]} -> {info['price']} {info.get('currency','')}")
+
+    # 4) v72.3: للمستخدم العربي نترجم العناوين دفعة واحدة (كاش)؛ البراند يبقى لاتيني.
+    title_map = {}
+    if lang == "ar":
+        title_map = arabic_titles([t for _m, t, _u in final_picked])
+
+    # 5) بطاقة CTA لكل عرض: الاسم + سطر سعر بارز فقط — اسم المتجر يظهر على الزر بدون تكرار.
     sent = 0
-    for m, title, url in picked[:MAX_STORES]:
+    for m, title, url in final_picked:
+        shown_title = title_map.get(title, title) if lang == "ar" else title
         raw_price = str(m.get("price") or "").strip()
         price_txt = ""
         if raw_price or m.get("price_value") not in (None, ""):
@@ -3572,13 +3668,13 @@ def _send_lens_match_batch(from_number, matches, bot_id, lang, header="", conver
             else:
                 price_txt = format_lens_price(raw_price, m.get("price_value"), lang, m.get("currency") or None)
         store = _lens_store_label(m)
-        body_lines = [f"🛍️ {title[:130]}", ""]
+        body_lines = [f"🛍️ {shown_title[:130]}"]
         if price_txt:
+            body_lines.append("")
             body_lines.append(f"💰 السعر: *{price_txt}*" if lang == "ar" else f"💰 Price: *{price_txt}*")
-        body_lines.append(f"🏪 {store}")
         send_whatsapp_cta(from_number, "\n".join(body_lines)[:1024], url, bot_id, f"🛒 {store[:18]}")
         sent += 1
-    print(f"LENS CTA BATCH: {sent} cards from {len({urllib.parse.urlparse(u).netloc for _,_,u in picked[:MAX_STORES]})} stores")
+    print(f"LENS CTA BATCH: {sent} cards from {len({urllib.parse.urlparse(u).netloc for _, _, u in final_picked})} stores")
     return sent > 0
 
 
