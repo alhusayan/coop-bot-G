@@ -6,10 +6,10 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v68-1-open-stores-sorted-5-results-20260804"
+BUILD_ID = "v71-shopping-category-engine-20260804"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
-print("OPEN LOCAL STORES + CHEAPEST-FIRST + SPEC MATCH + LOCAL-ONLY GUARD")
+print("GOOGLE SHOPPING + CATEGORY-FIRST STORES + GENERIC IMAGE MODE + REAL FILS")
 print("=" * 70)
 
 
@@ -45,6 +45,7 @@ RESOLVER = ThreadPoolExecutor(max_workers=8)
 WORKERS = ThreadPoolExecutor(max_workers=5)
 OLD_SEARCH_POOL = ThreadPoolExecutor(max_workers=8)
 LENS_POOL = ThreadPoolExecutor(max_workers=4)
+SHOPPING_POOL = ThreadPoolExecutor(max_workers=3)
 OLD_LAYER_DUPLICATES = max(1, int(os.environ.get("OLD_LAYER_DUPLICATES", "2")))
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
@@ -64,9 +65,9 @@ SERVICE_CACHE_TTL = int(os.environ.get("SERVICE_CACHE_TTL_HOURS", "168")) * 3600
 CACHE_MAX = int(os.environ.get("CACHE_MAX", "3000"))
 CACHE_DB_PATH = os.environ.get("CACHE_DB_PATH", "/tmp/coop_search_cache.sqlite3")
 CACHE_DB_LOCK = threading.Lock()
-# v68: قائمة أطول — 5 نتائج افتراضياً (تُضبط من MAX_STORES في Environment Variables).
+# v67: القائمة صارت 5 متاجر افتراضياً بدل 3 (قابلة للتغيير من MAX_STORES).
 MAX_STORES = int(os.environ.get("MAX_STORES", "5"))
-MAX_URLS_MERGED = int(os.environ.get("MAX_URLS_MERGED", "8"))
+MAX_URLS_MERGED = int(os.environ.get("MAX_URLS_MERGED", "5"))
 ENABLE_SEARCH_RETRY = env_bool("ENABLE_SEARCH_RETRY", True)
 MAX_SEARCH_ATTEMPTS = max(2, int(os.environ.get("MAX_SEARCH_ATTEMPTS", "3")))
 MAX_IDENTIFY_ATTEMPTS = max(2, int(os.environ.get("MAX_IDENTIFY_ATTEMPTS", "3")))
@@ -86,6 +87,13 @@ if not PUBLIC_BASE_URL:
         PUBLIC_BASE_URL = f"https://{_railway_domain}"
         print(f"PUBLIC_BASE_URL auto-derived from Railway: {PUBLIC_BASE_URL}")
 ENABLE_GOOGLE_LENS = env_bool("ENABLE_GOOGLE_LENS", True)
+# Google Shopping عبر نفس مفتاح SerpApi. يعيد بطاقات الأسعار التي تظهر في تبويب Shopping،
+# ونطلب direct_link حتى نحصل على صفحة المتجر نفسها بدلاً من صفحة Google.
+ENABLE_GOOGLE_SHOPPING = env_bool("ENABLE_GOOGLE_SHOPPING", True)
+SHOPPING_RESULT_LIMIT = max(12, int(os.environ.get("SHOPPING_RESULT_LIMIT", "40")))
+SHOPPING_QUERY_LIMIT = max(1, int(os.environ.get("SHOPPING_QUERY_LIMIT", "2")))
+SHOPPING_IMMERSIVE_LIMIT = max(0, int(os.environ.get("SHOPPING_IMMERSIVE_LIMIT", "4")))
+SHOPPING_TIMEOUT = max(15, int(os.environ.get("SHOPPING_TIMEOUT_SECONDS", "60")))
 LENS_PRIMARY_MODE = env_bool("LENS_PRIMARY_MODE", True)
 LENS_PRIMARY_EXCEPT_TEXT_HEAVY = env_bool("LENS_PRIMARY_EXCEPT_TEXT_HEAVY", True)
 # قوة Lens الحقيقية تأتي من تعدد التمريرات: products ثم all (visual+exact) ثم بحث واسع بلا قيد دولة.
@@ -311,7 +319,7 @@ print(
     f"ECONOMIC CONFIG search_model={GEMINI_SEARCH_MODEL} fast_model={GEMINI_FAST_MODEL} "
     f"max_stores={MAX_STORES} search_attempts={MAX_SEARCH_ATTEMPTS} "
     f"identify_attempts={MAX_IDENTIFY_ATTEMPTS} auto_maps={AUTO_SEND_PRODUCT_MAPS} "
-    f"lens_wide_fallback={ENABLE_LENS_WIDE_FALLBACK} lens_parallel={LENS_PARALLEL_WITH_VISION} "
+    f"lens_wide_fallback={ENABLE_LENS_WIDE_FALLBACK} lens_parallel={LENS_PARALLEL_WITH_VISION} shopping={ENABLE_GOOGLE_SHOPPING} "
     f"public_base_url={'SET' if PUBLIC_BASE_URL else 'MISSING'}"
 )
 
@@ -436,96 +444,6 @@ def normalize_ar(text):
     t = t.replace("ري بان", "ريبان").replace("راي بان", "ريبان").replace("ray ban", "rayban").replace("ray-ban", "rayban")
     return t
 
-# ---- مقارنة نفس المواصفات فقط ------------------------------------------------
-# عبوة 250 مل أرخص من لتر لأنها أصغر، وآيفون 128GB أرخص من 256GB لأنه سعة أقل —
-# مو لأنه عرض أفضل. نستخرج الحجم/الوزن/السعة من عنوان كل منتج (مع مضاعِف العبوات
-# مثل 6×185مل) ونرفض أي عرض مواصفته تختلف عن المرجع.
-SIZE_RE = re.compile(
-    r"(?:(\d+(?:[.,]\d+)?)\s*[x×*]\s*)?(\d+(?:[.,]\d+)?)\s*"
-    r"(مل|ملي لتر|ملل|ml|لتر|ليتر|l|ltr|liter|litre|كجم|كغم|كغ|كيلو جرام|كيلو غرام|كيلو|kg|جرام|غرام|جم|غم|gm|gr|g"
-    r"|تيرا بايت|تيرابايت|تيرا|tb|جيجا بايت|جيجابايت|جيجا|غيغا|قيقا|gb)\b",
-    re.I,
-)
-_VOL_UNITS = {"مل", "ملي لتر", "ملل", "ml"}
-_VOL_BIG_UNITS = {"لتر", "ليتر", "l", "ltr", "liter", "litre"}
-_WT_BIG_UNITS = {"كجم", "كغم", "كغ", "كيلو جرام", "كيلو غرام", "كيلو", "kg"}
-_CAP_UNITS = {"جيجا بايت", "جيجابايت", "جيجا", "غيغا", "قيقا", "gb"}
-_CAP_BIG_UNITS = {"تيرا بايت", "تيرابايت", "تيرا", "tb"}
-
-def extract_pack_size(text):
-    """يعيد (نوع, الكمية الكلية بالمل أو الجرام أو الجيجا) أو None إذا ما فيه حجم مذكور."""
-    t = normalize_ar(str(text or ""))
-    for m in SIZE_RE.finditer(t):
-        try:
-            count = float((m.group(1) or "1").replace(",", "."))
-            qty = float(m.group(2).replace(",", "."))
-        except Exception:
-            continue
-        unit = m.group(3).lower()
-        if unit in _CAP_BIG_UNITS:
-            cls, base = "cap", qty * 1000.0
-        elif unit in _CAP_UNITS:
-            cls, base = "cap", qty
-        elif unit in _VOL_BIG_UNITS:
-            cls, base = "vol", qty * 1000.0
-        elif unit in _VOL_UNITS:
-            cls, base = "vol", qty
-        elif unit in _WT_BIG_UNITS:
-            cls, base = "wt", qty * 1000.0
-        else:
-            cls, base = "wt", qty
-        total = count * base
-        if total > 0:
-            return (cls, total)
-    return None
-
-def format_pack_size(sig):
-    if not sig:
-        return ""
-    cls, total = sig
-    if cls == "cap":
-        return f"{total/1000:g} تيرا" if total >= 1000 else f"{int(total)} جيجا"
-    if cls == "vol":
-        return f"{total/1000:g} لتر" if total >= 1000 else f"{int(total)} مل"
-    return f"{total/1000:g} كجم" if total >= 1000 else f"{int(total)} جم"
-
-def sizes_compatible(a, b):
-    """None = حجم غير معروف فنسمح به. اختلاف يتجاوز 15% = منتج مختلف."""
-    if not a or not b:
-        return True
-    if a[0] != b[0]:
-        return False
-    lo, hi = sorted((a[1], b[1]))
-    return hi <= lo * 1.15
-
-def filter_same_size(offers_dict, reference_text):
-    """يبقي فقط العروض المطابقة لحجم المرجع (اسم المنتج المحدد)، أو لحجم الأغلبية إذا المرجع بلا حجم.
-
-    العروض التي لا يظهر حجم في عنوانها تمر (لا نستطيع الحكم عليها)، لكن أي حجم
-    صريح مختلف يُرفض — عبوة أصغر أو سعة أقل ليست سعراً أرخص لنفس المنتج.
-    """
-    if not offers_dict:
-        return offers_dict
-    ref = extract_pack_size(reference_text)
-    sized = {n: extract_pack_size(str(i.get("title", ""))) for n, i in offers_dict.items()}
-    if not ref:
-        detected = [s for s in sized.values() if s]
-        if len(detected) >= 2:
-            counts = {}
-            for s in detected:
-                counts[s] = counts.get(s, 0) + 1
-            ref = max(counts, key=counts.get)
-    if not ref:
-        return offers_dict
-    kept = {}
-    for name, info in offers_dict.items():
-        if sizes_compatible(ref, sized.get(name)):
-            kept[name] = info
-        else:
-            print(f"SIZE MISMATCH REJECT: {name} -> {info.get('title','')} (want~{format_pack_size(ref)}, got {format_pack_size(sized.get(name))})")
-    return kept
-
-
 def norm_tokens(query):
     t = normalize_ar(query)
     toks = re.findall(r"[\w\u0600-\u06FF]+", t)
@@ -539,7 +457,7 @@ def has_model_token(a, b):
 def cache_key(query, lang):
     norm = re.sub(r"[^\w\u0600-\u06FF]+", "", normalize_ar(query))
     market = current_market().get("country", DEFAULT_COUNTRY)
-    return hashlib.sha256(f"v68|{market}|{norm}|{lang}".encode()).hexdigest()
+    return hashlib.sha256(f"{BUILD_ID}|{market}|{norm}|{lang}".encode()).hexdigest()
 
 def cache_ttl_for(query, txt=""):
     q_norm = normalize_ar(query)
@@ -750,10 +668,9 @@ def cache_put(query, lang, txt, urls):
 IDENTIFY_SYSTEM = """أنت خبير تعرف على المنتجات من الصور.
 أرجع دائماً اسمين قابلين للبحث بهذا الشكل فقط:
 [الاسم التجاري بالعربية] | [commercial product name in English]
-ضع البراند ورقم الموديل إن ظهر. إذا ظهر حجم أو وزن أو سعة على العبوة (مثل 1 لتر، 500 مل، 250 جم، 256GB) أدخله في الاسمين، فهو جزء من هوية المنتج.
-استنتج نوع المنتج من الشعار والشكل والنص الظاهر.
+ضع البراند ورقم الموديل إن ظهر. استنتج نوع المنتج من الشعار والشكل والنص الظاهر.
 لا ترفض التحديد لمجرد أن الصورة غير كاملة؛ أعطِ أقرب اسم تجاري مفيد للبحث.
-مثال: حليب المراعي كامل الدسم 1 لتر | Almarai Full Fat Milk 1L
+مثال: ريموت بي إن سبورت | beIN Sports remote control
 سطر واحد فقط، بدون شرح."""
 
 MSG = {
@@ -845,7 +762,11 @@ SYSTEM_PROMPT = """
 • [المتجر الرابع] — [السعر] د.ك
 • [المتجر الخامس] — [السعر] د.ك
 
-ابدأ بالمتاجر الشاملة المعروفة (جمعية دوت كوم، كيتا، طلبات، نون، لولو، كارفور) والمتاجر المتخصصة حسب نوع المنتج، لكن لا تحصر البحث فيها إطلاقاً: اقبل أي متجر محلي يبيع المنتج بسعر موثق ورابط صفحة منتج مباشر، حتى لو لم يكن متجراً مشهوراً.
+الأولوية دائماً للمتاجر المتخصصة في فئة المنتج، ثم المتاجر الكويتية العامة كخيار احتياطي.
+مثال: المنتجات الرياضية تبدأ بإنترسبورت وديكاثلون وبرو سبورتس والمتاجر الرياضية، لا بنون أو السوبرماركت.
+لا تجعل Noon أو أي Marketplace عاماً يتقدم على متجر متخصص موثوق يبيع نفس الفئة.
+لا تعرض Ubuy أو Desertcart أو Temu أو AliExpress محلياً إذا وُجد أي عرض مباشر من متجر محلي.
+لا تعرض أي متجر أجنبي (سعودي أو إماراتي أو غيره) في نتائج السوق المحلي؛ عملة كل سعر يجب أن تكون عملة سوق المستخدم الحالي.
 
 【الحالة 2】طلب عام بدون براند محدد (مثل: قهوة فلات وايت حار، عطر رجالي، لابتوب للدراسة):
 لا تبحث عن الأرخص! ابحث عن الأفضل تقييماً في الكويت بسعر مناسب.
@@ -866,12 +787,11 @@ SYSTEM_PROMPT = """
 - اذكر فقط المنتجات المتوفرة فعلاً. لا تكتب كلمة InStock أو متوفر مكان السعر.
 - أي متجر لا يظهر له سعر رقمي واضح بعملة السوق الحالي احذفه من النتيجة.
 - اكتب السعر بالفلوس كاملة دائماً: 1.950 وليس 1.95، و0.750 وليس 0.75.
-- قارن نفس المواصفات فقط: نفس الحجم/السعة/الوزن، ونفس اللون إذا كان اللون يغيّر السعر. اذكر المواصفة بجانب كل سعر (مثل: 256GB، 1 لتر، أحمر) ولا تدخل نسخة مختلفة المواصفات في نفس المقارنة.
-- اعرض المتاجر المحلية فقط التي تبيع أو توصل داخل بلد المستخدم الحالي؛ لا تعرض متجراً أجنبياً في هذا البحث.
+- انقل الفلوس الحقيقية كما تظهر في المتجر حرفياً: 5.310 تبقى 5.310. ممنوع منعاً باتاً تقريب الأسعار إلى أصفار (1.000، 2.000، 5.000) إلا إذا كان السعر المعروض في المتجر فعلاً بهذه الأصفار. متجر بلا سعر دقيق بالفلوس يُحذف من النتيجة.
 - ممنوع أن يكون الرد عبارة عن أسماء متاجر مع كلمة متوفر فقط؛ كل سطر عرض يجب أن يحتوي سعراً رقمياً.
 - رابط كل متجر يجب أن يكون رابط صفحة منتج مباشر (صفحة فيها منتج واحد وسعر واحد). ممنوع روابط الصفحة الرئيسية أو /search أو /category
 - لا تخترع سعراً، انسخ السعر كما يظهر في نتيجة البحث اليوم.
-- حاول تجيب حتى 5 متاجر مختلفة، وإذا ما لقيت اذكر الموجود ولا تخترع.
+- حاول تجيب 5 متاجر إن وجدت مرتبة من الأرخص إلى الأغلى، وإذا ما لقيت اذكر الموجود ولا تخترع.
 
 في الحالات 1 و2 و3، سطر أخير إلزامي:
 LINKS: اسم الأول=الدومين الحقيقي, اسم الثاني=الدومين الحقيقي
@@ -962,7 +882,7 @@ def parse_product_data(html, url):
     ul = url.lower()
     if any(p in ul for p in LISTING_URL_PARTS):
         if not re.search(r"/product/|/products/[^/]{3,}|/p/|/dp/|/item/|/prod/", ul):
-            if ld_products!= 1:
+            if ld_products != 1:
                 data["is_product"] = False
     return data
 
@@ -1006,6 +926,33 @@ def verify_offers(urls_map, query):
             verified[name] = {"url": url, "price": info["price"], "title": info["title"], "image_url": info.get("image_url", ""), "currency": info.get("currency", "")}
     return verified
 
+def soft_price_lookup(url):
+    """v68: يجلب السعر الحقيقي بالفلوس من صفحة المتجر لتصحيح أسعار Gemini المقربة.
+
+    أخف من verify_offers: يقبل السعر حتى لو تعذر تأكيد التوفر أو نوع الصفحة،
+    لأن الهدف هنا تصحيح الفلوس (5.000 -> 5.310) وليس القبول/الرفض.
+    يرفض السعر إذا كانت عملة الصفحة الموثقة مختلفة عن عملة سوق المستخدم.
+    """
+    if not is_direct_store_url(url):
+        return None
+    cached = VERIFIED_PAGE_CACHE.get(url)
+    if cached and (time.time() - cached["ts"] < 600):
+        info = cached["data"]
+    else:
+        html = fetch_html(url)
+        info = parse_product_data(html, url)
+        if info:
+            VERIFIED_PAGE_CACHE[url] = {"data": info, "ts": time.time()}
+    if not info or not info.get("price") or info["price"] <= 0:
+        return None
+    cur = str(info.get("currency") or "").upper().strip()
+    expected = (current_market().get("currency") or "").upper().strip()
+    if cur and expected and cur != expected:
+        print(f"SOFT PRICE CURRENCY REJECT {cur}!={expected}: {url[:80]}")
+        return None
+    return float(info["price"])
+
+
 def _cleanup_lens_images():
     now = time.time()
     with LENS_IMAGE_LOCK:
@@ -1032,6 +979,395 @@ def publish_image_for_lens(image_b64, mime_type):
             "expires_at": time.time() + LENS_IMAGE_TTL,
         }
     return f"{PUBLIC_BASE_URL}/lens-image/{token}"
+
+# v69: مواقع الوساطة/الاستيراد — عناوينها مضللة كهوية منتج (12 Pcs Mini... | Ubuy)
+# وغالباً أغلى من المتاجر المحلية. لا نستخدمها أبداً كهوية، ونؤخرها في العرض.
+MARKETPLACE_TOKENS = (
+    "ubuy", "aliexpress", "alibaba", "amazon", "ebay", "temu", "dhgate",
+    "desertcart", "banggood", "fruugo", "wish.com", "lightinthebox", "joom",
+)
+
+def is_marketplace_lens_item(item):
+    hay = " ".join(str(item.get(k) or "") for k in ("source", "link", "title", "domain")).lower()
+    return any(t in hay for t in MARKETPLACE_TOKENS)
+
+
+def _unwrap_google_redirect(url):
+    """يستخرج رابط المتجر من روابط Google redirect إن وُجد."""
+    url = str(url or "").strip()
+    if not url:
+        return ""
+    try:
+        parsed = urllib.parse.urlparse(url)
+        host = parsed.netloc.lower().replace("www.", "")
+        if host.endswith("google.com") or host.startswith("google.") or ".google." in host:
+            qs = urllib.parse.parse_qs(parsed.query)
+            for key in ("q", "url", "adurl", "target"):
+                candidate = (qs.get(key) or [""])[0]
+                candidate = urllib.parse.unquote(candidate)
+                if candidate.startswith(("http://", "https://")):
+                    return candidate
+    except Exception:
+        pass
+    return url
+
+
+def _shopping_direct_url(item):
+    """Google Shopping قد يعيد direct_link أو link عند direct_link=true؛ product_link صفحة Google وليست CTA."""
+    for key in ("direct_link", "merchant_link", "seller_link", "link"):
+        url = _unwrap_google_redirect(item.get(key))
+        if not url:
+            continue
+        try:
+            host = urllib.parse.urlparse(url).netloc.lower().replace("www.", "")
+        except Exception:
+            host = ""
+        if not host or "google." in host or host.endswith("google.com") or "serpapi.com" in host:
+            continue
+        return url
+    return ""
+
+
+def _collect_shopping_items(data):
+    """يجمع كل أشكال Shopping الحالية: العادية، inline، والمصنفة."""
+    out, seen = [], set()
+
+    def add(item):
+        if not isinstance(item, dict):
+            return
+        title = str(item.get("title") or "").strip()
+        source = str(item.get("source") or item.get("name") or "").strip()
+        has_price = item.get("extracted_price") not in (None, "") or bool(item.get("price"))
+        if not title or not source or not has_price:
+            return
+        sig = (title.lower(), source.lower(), str(item.get("price") or item.get("extracted_price") or ""))
+        if sig in seen:
+            return
+        seen.add(sig)
+        out.append(item)
+
+    for key in ("shopping_results", "inline_shopping_results", "featured_shopping_results", "related_shopping_results"):
+        for item in data.get(key) or []:
+            add(item)
+
+    def walk(value):
+        if isinstance(value, dict):
+            add(value)
+            for k, v in value.items():
+                if k in ("categorized_shopping_results", "shopping_results", "items", "results", "products"):
+                    walk(v)
+        elif isinstance(value, list):
+            for v in value:
+                walk(v)
+
+    walk(data.get("categorized_shopping_results") or [])
+    return out
+
+
+def _shopping_numeric_price(item):
+    value = item.get("extracted_price")
+    if value in (None, ""):
+        alt = item.get("alternative_price") or {}
+        if isinstance(alt, dict):
+            value = alt.get("extracted_price")
+    try:
+        if value not in (None, ""):
+            return float(value)
+    except Exception:
+        pass
+    raw = str(item.get("price") or "").replace(",", "")
+    m = re.search(r"(?<!\d)(\d+(?:\.\d{1,3})?)(?!\d)", raw)
+    try:
+        return float(m.group(1)) if m else None
+    except Exception:
+        return None
+
+
+def _shopping_currency(item):
+    alt = item.get("alternative_price") or {}
+    alt_cur = alt.get("currency") if isinstance(alt, dict) else ""
+    return detect_currency_code(f"{item.get('price','')} {item.get('currency','')} {alt_cur}")
+
+
+def _query_model_tokens(text):
+    return {
+        t.lower() for t in re.findall(r"[A-Za-z0-9-]+", str(text or ""))
+        if len(t) >= 4 and re.search(r"[A-Za-z]", t) and re.search(r"\d", t)
+    }
+
+
+def _shopping_title_compatible(query, title):
+    """يمنع خلط كرة السلة بالطوق أو الحذاء، ويحافظ على رقم الموديل عند وجوده."""
+    q = normalize_ar(query or "").lower()
+    t = normalize_ar(title or "").lower()
+    if not q or not t:
+        return False
+
+    models = _query_model_tokens(q)
+    if models and not any(m in t for m in models):
+        return False
+
+    subtype_rules = [
+        (("كره سله", "كرة سلة", "basketball"),
+         ("basketball", "كره سله", "كرة سلة"),
+         ("hoop", "backboard", "freestanding", "stand", "rim", "jersey", "shorts", "shoes", "shoe", "sneaker", "طوق", "سله مع عمود", "حذاء")),
+        (("كره قدم", "كرة قدم", "football", "soccer ball"),
+         ("football", "soccer ball", "كره قدم", "كرة قدم"),
+         ("goal", "boots", "shoes", "jersey", "shorts", "مرمى", "حذاء")),
+        (("كره طائره", "كرة طائرة", "volleyball"),
+         ("volleyball", "كره طائره", "كرة طائرة"),
+         ("net", "shoes", "jersey", "شبكه", "حذاء")),
+    ]
+    for query_words, required, blocked in subtype_rules:
+        if any(normalize_ar(x) in q for x in query_words):
+            if not any(normalize_ar(x) in t for x in required):
+                return False
+            # لا نحظر الإكسسوار إذا المستخدم طلبه صراحة.
+            for word in blocked:
+                nw = normalize_ar(word)
+                if nw in t and nw not in q:
+                    return False
+            return True
+
+    # للمنتج المحدد يكفي تطابق أحد الكلمات المميزة أو البراند، بالإضافة إلى الموديل إن وُجد.
+    stop = {
+        "buy", "online", "kuwait", "الكويت", "سعر", "افضل", "أفضل", "منتج", "with", "from",
+        "the", "and", "for", "متوفر", "شراء", "original", "new", "size", "حجم",
+    }
+    q_tokens = [x for x in re.findall(r"[a-z0-9\u0600-\u06ff]+", q) if len(x) >= 3 and x not in stop]
+    if not q_tokens:
+        return True
+    return any(token in t for token in q_tokens)
+
+
+def _shopping_location_params(lang):
+    m = current_market()
+    cc = (m.get("country") or DEFAULT_COUNTRY).lower()
+    location = ", ".join(x for x in (m.get("city"), m.get("country_name")) if x) or m.get("country_name") or "Kuwait"
+    return {
+        "gl": cc,
+        "hl": "ar" if lang == "ar" else "en",
+        "location": location,
+    }
+
+
+def _serpapi_shopping_request(search_term, lang):
+    params = {
+        "engine": "google_shopping",
+        "q": search_term,
+        "api_key": SERPAPI_API_KEY,
+        "device": "desktop",
+        "direct_link": "true",
+        "output": "json",
+        **_shopping_location_params(lang),
+    }
+    try:
+        r = requests.get("https://serpapi.com/search.json", params=params, timeout=SHOPPING_TIMEOUT)
+        if r.status_code >= 400:
+            print(f"GOOGLE SHOPPING HTTP {r.status_code}: {r.text[:300]}")
+            return []
+        data = r.json()
+        if data.get("error"):
+            print(f"GOOGLE SHOPPING ERROR: {data.get('error')}")
+            return []
+        items = _collect_shopping_items(data)
+        print(f"GOOGLE SHOPPING PASS '{search_term[:60]}' -> {len(items)} items")
+        return items[:SHOPPING_RESULT_LIMIT]
+    except Exception as e:
+        print(f"GOOGLE SHOPPING EXCEPTION: {e}")
+        return []
+
+
+def _serpapi_immersive_stores(page_token, query, lang):
+    if not page_token:
+        return []
+    params = {
+        "engine": "google_immersive_product",
+        "page_token": page_token,
+        "more_stores": "true",
+        "api_key": SERPAPI_API_KEY,
+        "output": "json",
+    }
+    try:
+        r = requests.get("https://serpapi.com/search.json", params=params, timeout=SHOPPING_TIMEOUT)
+        if r.status_code >= 400:
+            print(f"IMMERSIVE SHOPPING HTTP {r.status_code}: {r.text[:240]}")
+            return []
+        data = r.json()
+        stores = ((data.get("product_results") or {}).get("stores") or [])
+        out = []
+        for pos, store in enumerate(stores, 1):
+            if not isinstance(store, dict):
+                continue
+            title = str(store.get("title") or "").strip()
+            if title and not _shopping_title_compatible(query, title):
+                continue
+            url = _unwrap_google_redirect(store.get("direct_link") or store.get("link"))
+            if not url or not is_direct_store_url(url):
+                continue
+            price = _shopping_numeric_price(store)
+            if price is None or price <= 0:
+                continue
+            out.append({
+                "title": title,
+                "source": store.get("name") or source_label("", url),
+                "link": url,
+                "direct_link": url,
+                "price": store.get("price") or "",
+                "extracted_price": price,
+                "currency": _shopping_currency(store),
+                "position": pos,
+                "rating": store.get("rating"),
+                "reviews": store.get("reviews"),
+                "details_and_offers": store.get("details_and_offers") or [],
+            })
+        return out
+    except Exception as e:
+        print(f"IMMERSIVE SHOPPING EXCEPTION: {e}")
+        return []
+
+
+def _shopping_query_candidates(query):
+    candidates = _query_candidates(query)
+    category = detect_product_category(query)
+    # الاسم العربي والإنجليزي كل واحد في طلب مستقل؛ Google Shopping يتغير كثيراً حسب لغة الاستعلام.
+    out = []
+    for item in candidates:
+        item = short_query(item) or item
+        if item and item not in out:
+            out.append(item)
+    if category == "sports" and any(x in normalize_ar(query) for x in ("كره سله", "كرة سلة", "basketball")):
+        for item in ("كرة سلة", "basketball"):
+            if item not in out:
+                out.append(item)
+    return out[:SHOPPING_QUERY_LIMIT]
+
+
+def google_shopping_offers(query, lang="ar", allow_global=False):
+    """بطاقات Google Shopping المحلية مع روابط المتاجر المباشرة وأسعارها الفعلية."""
+    if allow_global or not ENABLE_GOOGLE_SHOPPING or not SERPAPI_API_KEY:
+        return {}
+
+    search_terms = _shopping_query_candidates(query)
+    market_snapshot = current_market()
+    futures = [
+        SHOPPING_POOL.submit(_run_with_market, market_snapshot, _serpapi_shopping_request, term, lang)
+        for term in search_terms
+    ]
+    raw_items = []
+    for future in futures:
+        try:
+            raw_items.extend(future.result(timeout=SHOPPING_TIMEOUT + 10) or [])
+        except Exception as e:
+            print(f"SHOPPING FUTURE ERR: {e}")
+
+    # إذا بطاقة Shopping هي تجميع منتج وليست رابط متجر، افتح أفضل عدد محدود منها لجلب البائعين.
+    immersive_candidates = []
+    for item in raw_items:
+        if _shopping_direct_url(item):
+            continue
+        token = item.get("immersive_product_page_token")
+        if token and _shopping_title_compatible(query, item.get("title", "")):
+            immersive_candidates.append(item)
+    immersive_candidates.sort(key=lambda x: int(x.get("position") or 999))
+    for item in immersive_candidates[:SHOPPING_IMMERSIVE_LIMIT]:
+        raw_items.extend(_serpapi_immersive_stores(item.get("immersive_product_page_token"), query, lang))
+
+    expected_currency = (current_market().get("currency") or "").upper()
+    records = []
+    for idx, item in enumerate(raw_items, 1):
+        title = str(item.get("title") or "").strip()
+        source = str(item.get("source") or item.get("name") or "").strip()
+        if not title or not source or not _shopping_title_compatible(query, title):
+            continue
+        url = _shopping_direct_url(item)
+        if not url or not is_direct_store_url(url):
+            continue
+        price = _shopping_numeric_price(item)
+        if price is None or price <= 0:
+            continue
+        currency = _shopping_currency(item)
+        local_item = {
+            "title": title, "source": source, "link": url,
+            "price": item.get("price") or "", "currency": currency,
+        }
+        is_local = is_local_lens_result(local_item)
+        if not is_local:
+            continue
+        if currency and expected_currency and currency != expected_currency:
+            continue
+        position = int(item.get("position") or idx)
+        quality = category_store_quality(source, url, query)
+        quality += 120
+        quality += max(0, 45 - min(position, 45))
+        if item.get("rating"):
+            try:
+                quality += min(15, float(item.get("rating")) * 3)
+            except Exception:
+                pass
+        hay = normalize_ar(f"{source} {url}").lower()
+        hard_marketplace = any(x in hay for x in HARD_DEMOTED_MARKETPLACES)
+        general_marketplace = any(x in hay for x in GENERAL_MARKETPLACE_ALIASES)
+        records.append({
+            "name": source[:40], "url": url, "price": price, "currency": currency or expected_currency,
+            "title": title, "position": position, "quality": quality, "is_local": True,
+            "hard_marketplace": hard_marketplace, "general_marketplace": general_marketplace,
+            "rating": item.get("rating"), "reviews": item.get("reviews"),
+        })
+
+    # متجر واحد فقط: نحتفظ بأفضل/أرخص منتج مطابق من كل نطاق.
+    by_host = {}
+    for rec in records:
+        host = urllib.parse.urlparse(rec["url"]).netloc.lower().replace("www.", "")
+        old = by_host.get(host)
+        if old is None or (rec["quality"], -rec["price"]) > (old["quality"], -old["price"]):
+            by_host[host] = rec
+    records = list(by_host.values())
+
+    non_hard = [r for r in records if not r["hard_marketplace"]]
+    if non_hard:
+        records = non_hard
+    specialists = [r for r in records if r["quality"] >= 220 and not r["general_marketplace"]]
+    # عند وجود ثلاثة متاجر قوية، لا نستهلك مكاناً في الخمسة على Noon أو Marketplace عام.
+    if len(specialists) >= 3:
+        records = [r for r in records if not r["general_marketplace"]]
+
+    records.sort(key=lambda r: (-r["quality"], r["price"]))
+    chosen = records[:MAX_STORES]
+    chosen.sort(key=lambda r: r["price"])
+
+    offers = {}
+    for rec in chosen:
+        name = rec["name"]
+        base = name
+        n = 2
+        while name in offers:
+            name = f"{base} {n}"; n += 1
+        offers[name] = rec
+    if offers:
+        print("GOOGLE SHOPPING FINAL:", [(n, x["price"], x["title"][:45]) for n, x in offers.items()])
+    return offers
+
+
+def safe_lens_display_name(lens_context, query):
+    chosen = ((lens_context or {}).get("chosen") or {})
+    title = str(chosen.get("title") or "").strip()
+    if title and not is_marketplace_lens_item(chosen):
+        return title
+    aliases = _query_candidates(query)
+    return short_query(aliases[0] if aliases else query) or short_query(query) or query
+
+
+def shopping_offers_text(query, offers, lang="ar"):
+    title = short_query(_query_candidates(query)[0]) or short_query(query) or query
+    lines = [f"📦 {title}", ""]
+    urls = {}
+    for i, (name, info) in enumerate(offers.items()):
+        prefix = "✅" if i == 0 else "•"
+        lines.append(f"{prefix} {name} — {format_price(info['price'])} {currency_label(lang)}")
+        urls[name] = info["url"]
+    return "\n".join(lines), urls
+
 
 def _collect_lens_items(data, items, seen):
     """يجمع نتائج Lens من كل الأقسام (exact/visual/products) مع تعليم القسم الحقيقي."""
@@ -1173,6 +1509,10 @@ def google_lens_lookup(image_b64, mime_type, lang="ar", query_hint=""):
             score += min(len(title), 120) / 10
             if m.get("thumbnail") or m.get("image"):
                 score += 10
+            # v69: عناوين مواقع الوساطة (Ubuy/AliExpress/Temu...) لا تصلح هوية للمنتج —
+            # مثل «12 Pcs Mini Rubber Basketballs | Ubuy» لكرة سلة عادية.
+            if is_marketplace_lens_item(m):
+                score -= 1200
             ranked.append((score, m))
         chosen = max(ranked, key=lambda x: x[0])[1] if ranked else matches[0]
         chosen_title = (chosen.get("title") or "").strip()
@@ -1182,12 +1522,14 @@ def google_lens_lookup(image_b64, mime_type, lang="ar", query_hint=""):
         sig_system = (
             "أنت خبير منتجات. الصورة هي المرجع الوحيد. استخرج اسماً عربياً وإنجليزياً ووصفاً شكلياً محافظاً. "
             "لا تخترع رقم موديل. حدد اللون الأساسي، النقشة أو الخامة الظاهرة، وهل المنتج مسطح أو بكعب. "
-            "الرد سطر واحد فقط: Arabic name | English name | COLOR | PATTERN | HEEL | TYPE. "
-            "HEEL واحدة من FLAT, LOW, HIGH, NONE, UNKNOWN. TYPE مثل MULES, SLIPPERS, SHOES, BAG, ELECTRONICS."
+            "حدد أيضاً البراند فقط إذا كان شعاره أو اسمه مقروءاً بوضوح داخل الصورة؛ إذا غير ظاهر اكتب NONE ولا تخمن. "
+            "الرد سطر واحد فقط: Arabic name | English name | COLOR | PATTERN | HEEL | TYPE | BRAND | BRAND_VISIBLE. "
+            "BRAND_VISIBLE يجب أن تكون YES فقط عند وجود شعار/اسم مقروء بالصورة، وإلا NO. "
+            "HEEL واحدة من FLAT, LOW, HIGH, NONE, UNKNOWN. TYPE مثل MULES, SLIPPERS, SHOES, BAG, ELECTRONICS, BASKETBALL."
         )
         sig_txt, _ = call_gemini([
             {"inline_data": {"mime_type": mime_type, "data": image_b64}},
-            {"text": f"Google Lens title hint: {chosen_title}"},
+            {"text": f"Google Lens title hint (untrusted, for naming only — NEVER use it to decide BRAND): {chosen_title}"},
         ], system=sig_system, use_search=False)
         fields = [x.strip() for x in ((sig_txt or "").strip().splitlines()[0] if sig_txt else "").split("|")]
 
@@ -1198,6 +1540,8 @@ def google_lens_lookup(image_b64, mime_type, lang="ar", query_hint=""):
             "pattern": fields[3].lower() if len(fields) > 3 else "",
             "heel": fields[4].upper() if len(fields) > 4 else "UNKNOWN",
             "type": fields[5].upper() if len(fields) > 5 else "",
+            "brand": fields[6] if len(fields) > 6 else "",
+            "brand_visible": (fields[7].upper() == "YES") if len(fields) > 7 else False,
         }
 
         aliases = []
@@ -1321,6 +1665,31 @@ def filter_verified_with_lens(verified, lens_context):
             print(f"LENS PRICE REJECT: {name} -> {info.get('title','')} -> {info.get('url','')}")
     return kept
 
+def filter_local_market(verified):
+    """v67: حارس السوق المحلي — يمنع تسريب المتاجر الأجنبية إلى النتائج المحلية.
+
+    مثال المشكلة: rahatystore.com متجر سعودي سعره 394.45 ريال، وكان يظهر في نتائج
+    الكويت مكتوباً «394.450 د.ك». هنا نرفض أي عرض:
+      1) عملته الموثقة من صفحة المتجر (JSON-LD / meta) تختلف عن عملة سوق المستخدم، أو
+      2) نطاقه/محتواه يدل بوضوح على دولة أخرى (tld أجنبي أو علامة عملة أجنبية).
+    البحث العالمي (زر «دوّر عالمياً») لا يمر من هنا إطلاقاً.
+    """
+    if not verified:
+        return verified
+    expected = (current_market().get("currency") or "").upper().strip()
+    kept = {}
+    for name, info in verified.items():
+        url = info.get("url", "")
+        cur = str(info.get("currency") or "").upper().strip()
+        if cur and expected and cur != expected:
+            print(f"LOCAL GUARD REJECT CURRENCY {cur}!={expected}: {name} -> {url}")
+            continue
+        if is_foreign_lens_result({"link": url, "source": name, "title": info.get("title", "")}):
+            print(f"LOCAL GUARD REJECT FOREIGN HOST: {name} -> {url}")
+            continue
+        kept[name] = info
+    return kept
+
 def rank_verified_by_image(source_b64, source_mime, verified):
     """تم تعطيل فلتر Gemini البصري؛ Lens يحدد الاسم أولاً، والأسعار تبقى من محرك البحث المجرب."""
     return verified
@@ -1351,48 +1720,135 @@ STORE_DOMAINS = {
     "توصيل": "taw9eel.com", "التوصيل": "taw9eel.com", "taw9eel": "taw9eel.com", "taw9el": "taw9eel.com",
     "انترسبورت": "intersport.com.kw", "إنترسبورت": "intersport.com.kw", "intersport": "intersport.com.kw",
     "ديكاثلون": "decathlon.com.kw", "decathlon": "decathlon.com.kw",
+    "برو سبورتس": "prosportskw.com", "pro sports": "prosportskw.com", "prosports": "prosportskw.com",
+    "عروض كويت": "3roodq8.com", "3roodq8": "3roodq8.com", "3rood": "3roodq8.com",
+    "تيغرو": "tigro.app", "تيجرو": "tigro.app", "tigro": "tigro.app",
+    "سن اند ساند": "en-kw.sssports.com", "sun & sand": "en-kw.sssports.com", "sssports": "en-kw.sssports.com",
+    "نايك الكويت": "nike.com.kw", "nike kuwait": "nike.com.kw",
 }
+
+# لكل فئة ترتيب مستقل. المتجر المتخصص يدخل قبل المتجر العام حتى لو ظهر متأخراً في Google.
+CATEGORY_STORE_PRIORITY = {
+    "sports": [
+        "Intersport Kuwait", "Decathlon Kuwait", "Pro Sports Kuwait", "3roodq8", "Tigro",
+        "Sun & Sand Sports", "Nike Kuwait", "Go Sport", "Foot Locker", "Noon",
+    ],
+    "electronics": ["Xcite", "Eureka", "Best Al-Yousifi", "Blink", "Jarir", "Taw9eel", "Noon", "Lulu", "Carrefour"],
+    "appliances": ["Xcite", "Eureka", "Best Al-Yousifi", "Lulu", "Carrefour", "Taw9eel", "Noon"],
+    "beauty": ["Boutiqaat", "Faces", "Sephora", "Bloomingdale's Kuwait", "Boots Kuwait", "Noon"],
+    "pharmacy": ["Boots Kuwait", "YIACO", "Royal Pharmacy", "Pharmazone", "Talabat", "جمعية دوت كوم"],
+    "grocery": ["جمعية دوت كوم", "Lulu", "Carrefour", "Taw9eel", "Talabat", "Keeta"],
+    "restaurant": ["Keeta", "Talabat", "Deliveroo"],
+    "fashion": ["Centrepoint", "Namshi", "H&M Kuwait", "Max Fashion", "Sun & Sand Sports", "Noon"],
+    "furniture": ["IKEA Kuwait", "Home Centre", "The One", "Taw9eel", "Lulu", "Noon"],
+    "toys": ["Tigro", "Toys R Us Kuwait", "Fantasy World", "Centrepoint", "3roodq8", "Noon"],
+    "baby": ["Mothercare", "Centrepoint", "Toys R Us Kuwait", "جمعية دوت كوم", "Noon"],
+    "automotive": ["AlMailem", "Tires Plus", "ACE Kuwait", "Xcite", "Noon"],
+    "hardware": ["ACE Kuwait", "Bin Nisf", "Taw9eel", "Lulu", "Noon"],
+    "homeware": ["IKEA Kuwait", "Home Centre", "ACE Kuwait", "Taw9eel", "Lulu", "Noon"],
+    "pets": ["Petzone Kuwait", "The Pet Shop", "Talabat", "Noon"],
+    "books": ["Jarir", "That Al Salasil", "Jashanmal", "Taw9eel", "Noon"],
+    "general": ["جمعية دوت كوم", "Taw9eel", "Lulu", "Carrefour", "Talabat", "Keeta", "Noon"],
+}
+
+STORE_ALIASES = {
+    "Intersport Kuwait": ("intersport", "انترسبورت", "إنترسبورت"),
+    "Decathlon Kuwait": ("decathlon", "ديكاثلون"),
+    "Pro Sports Kuwait": ("prosportskw", "pro sports", "prosports", "برو سبورتس"),
+    "3roodq8": ("3roodq8", "3rood", "عروض كويت"),
+    "Tigro": ("tigro", "تيغرو", "تيجرو"),
+    "Sun & Sand Sports": ("sssports", "sun & sand", "sun and sand", "سن اند ساند"),
+    "Nike Kuwait": ("nike.com.kw", "nike kuwait", "نايك الكويت"),
+    "Xcite": ("xcite", "اكسايت", "الغانم"),
+    "Eureka": ("eureka", "يوريكا"),
+    "Best Al-Yousifi": ("best.com.kw", "best al", "اليوسفي"),
+    "Blink": ("blink", "بلينك"),
+    "Jarir": ("jarir", "جرير"),
+    "Noon": ("noon", "نون"),
+    "Lulu": ("lulu", "لولو"),
+    "Carrefour": ("carrefour", "كارفور"),
+    "Taw9eel": ("taw9eel", "taw9el", "توصيل"),
+    "جمعية دوت كوم": ("jm3eia", "جمعية دوت كوم", "جمعيه دوت كوم"),
+    "Talabat": ("talabat", "طلبات"),
+    "Keeta": ("mykeeta", "keeta", "كيتا"),
+    "Boutiqaat": ("boutiqaat", "بوتيكات"),
+    "Boots Kuwait": ("boots", "بوتس"),
+    "YIACO": ("yiaco", "ياكو"),
+}
+
+CATEGORY_RULES = [
+    ("sports", ("كره سله", "كرة سلة", "basketball", "كره قدم", "كرة قدم", "football", "soccer", "تنس", "tennis", "بادل", "padel", "مضرب", "racket", "racquet", "volleyball", "كره طائره", "كرة طائرة", "رياضه", "رياضة", "gym", "fitness", "dumbbell", "حبل قفز")),
+    ("electronics", ("ايفون", "iphone", "سامسونج", "samsung", "لابتوب", "laptop", "تابلت", "tablet", "بلايستيشن", "playstation", "اكس بوكس", "xbox", "تلفزيون", "tv", "الكترون", "هاتف", "phone", "ساعه ابل", "apple watch", "سماعه", "headphone", "earbuds", "كاميرا")),
+    ("appliances", ("ثلاجه", "غساله", "فرن", "مكيف", "جلايه", "مكنسه", "قلايه", "ميكرويف", "refrigerator", "washer", "oven", "air conditioner", "vacuum", "air fryer")),
+    ("beauty", ("عطر", "برفان", "perfume", "مكياج", "makeup", "كريم", "سيروم", "عنايه", "skincare", "شامبو")),
+    ("pharmacy", ("دواء", "صيدليه", "صيدلية", "فيتامين", "مكمل", "حبوب", "كبسول", "pharmacy", "medicine", "vitamin", "supplement")),
+    ("grocery", ("بيبسي", "شيبس", "حليب", "قهوه", "قهوة", "شاي", "سكر", "رز", "زيت", "ماء", "عصير", "بسكوت", "منظف", "صابون", "grocery", "food", "beverage")),
+    ("restaurant", ("مطعم", "وجبه", "وجبة", "برجر", "بيتزا", "فلات وايت", "شاورما", "restaurant", "meal")),
+    ("fashion", ("ملابس", "قميص", "بنطلون", "حذاء", "كاب", "قبعه", "شنطه", "فستان", "عبايه", "shirt", "pants", "shoes", "bag", "dress")),
+    ("furniture", ("اثاث", "أثاث", "كرسي", "طاوله", "طاولة", "سرير", "كنب", "مرتبه", "furniture", "chair", "table", "bed", "sofa")),
+    ("toys", ("لعبه", "لعبة", "العاب", "ألعاب", "toy", "doll", "lego")),
+    ("baby", ("عربانه", "عربة أطفال", "كرسي طفل", "رضاعه", "رضاعة", "حفاض", "حفاظ", "baby", "stroller")),
+    ("automotive", ("سياره", "سيارة", "بطاريه", "بطارية", "اطار", "إطار", "زيت محرك", "اكسسوار سياره", "auto parts", "car accessory", "tire")),
+    ("hardware", ("دريل", "مسمار", "صبغ", "دهان", "hardware", "tools", "power tool")),
+    ("homeware", ("ادوات منزليه", "أدوات منزلية", "صحون", "قدور", "مطبخ", "kitchenware", "homeware")),
+    ("pets", ("اكل قطط", "أكل قطط", "اكل كلاب", "أكل كلاب", "حيوانات", "pet food", "pet supplies")),
+    ("books", ("كتاب", "روايه", "رواية", "قرطاسيه", "قرطاسية", "book", "stationery")),
+]
+
+GENERAL_MARKETPLACE_ALIASES = ("noon", "نون", "amazon", "امازون", "marketplace")
+HARD_DEMOTED_MARKETPLACES = ("ubuy", "desertcart", "temu", "aliexpress", "alibaba", "ebay", "fruugo", "dhgate")
+
+
+def detect_product_category(query):
+    q = normalize_ar(query or "")
+    for category, words in CATEGORY_RULES:
+        if any(normalize_ar(w) in q for w in words):
+            return category
+    return "general"
 
 
 def priority_stores_for(query):
-    """يرتب أشهر المتاجر المحلية حسب فئة المنتج كنقطة انطلاق للبحث — بدون حصر البحث فيها."""
-    q = normalize_ar(query)
-    general = ["جمعية دوت كوم", "طلبات", "كيتا", "نون", "لولو", "كارفور"]
+    """متاجر الفئة أولاً؛ Noon والمتاجر العامة في آخر القائمة لا أولها."""
+    category = detect_product_category(query)
+    return list(CATEGORY_STORE_PRIORITY.get(category) or CATEGORY_STORE_PRIORITY["general"])
 
-    rules = [
-        (("ايفون", "سامسونج", "لابتوب", "تابلت", "بلايستيشن", "اكس بوكس", "تلفزيون", "الكترون", "هاتف", "ساعه ابل", "سماعه"),
-         ["Xcite", "Eureka", "Best Al-Yousifi", "Blink", "Jarir", "Noon"]),
-        (("ثلاجه", "غساله", "فرن", "مكيف", "جلايه", "مكنسه", "قلايه", "ميكرويف"),
-         ["Xcite", "Eureka", "Best Al-Yousifi", "Lulu", "Carrefour", "Noon"]),
-        (("عطر", "برفان", "مكياج", "كريم", "سيروم", "عنايه", "شامبو"),
-         ["Boutiqaat", "Bloomingdale's Kuwait", "Faces", "Sephora", "Noon", "جمعية دوت كوم"]),
-        (("دواء", "صيدليه", "فيتامين", "مكمل", "حفاض", "حفاظ"),
-         ["Boots Kuwait", "YIACO", "Royal Pharmacy", "جمعية دوت كوم", "Talabat"]),
-        (("بيبسي", "شيبس", "حليب", "قهوه", "شاي", "سكر", "رز", "زيت", "ماء", "عصير", "بسكوت", "منظف", "صابون"),
-         ["جمعية دوت كوم", "Lulu", "Carrefour", "Talabat", "Keeta"]),
-        (("مطعم", "وجبه", "برجر", "بيتزا", "قهوه", "فلات وايت", "شاورما", "دجاج"),
-         ["Keeta", "Talabat", "Deliveroo"]),
-        (("ملابس", "قميص", "بنطلون", "حذاء", "كاب", "قبعه", "شنطه", "رياضه", "كره", "مضرب"),
-         ["Intersport Kuwait", "Decathlon Kuwait", "Sun & Sand Sports", "Foot Locker", "Noon", "Namshi"]),
-        (("اثاث", "كرسي", "طاوله", "سرير", "كنب", "مرتبه"),
-         ["IKEA Kuwait", "The One", "Home Centre", "Noon", "Lulu"]),
-        (("اطفال", "لعبه", "العاب", "عربانه", "رضاعه"),
-         ["Toys R Us Kuwait", "Mothercare", "Centrepoint", "Noon", "جمعية دوت كوم"]),
-        (("سياره", "بطاريه", "اطار", "زيت محرك", "اكسسوار"),
-         ["Tires Plus", "AlMailem", "Xcite", "Noon"]),
-    ]
-    for words, stores in rules:
-        if any(w in q for w in words):
-            return stores
-    return general
+
+def _store_matches_label(name, url, label):
+    hay = normalize_ar(f"{name or ''} {url or ''}").lower()
+    aliases = STORE_ALIASES.get(label, (label,))
+    return any(normalize_ar(a).lower() in hay for a in aliases)
+
+
+def category_store_quality(name, url, query=""):
+    """نقاط جودة المتجر بالنسبة لفئة الطلب؛ لا تستخدم لترتيب السعر النهائي."""
+    category = detect_product_category(query)
+    stores = CATEGORY_STORE_PRIORITY.get(category) or CATEGORY_STORE_PRIORITY["general"]
+    score = 0
+    for idx, label in enumerate(stores):
+        if _store_matches_label(name, url, label):
+            score = max(score, 240 - idx * 14)
+            break
+    hay = normalize_ar(f"{name or ''} {url or ''}").lower()
+    if any(x in hay for x in HARD_DEMOTED_MARKETPLACES):
+        score -= 400
+    elif category != "general" and any(x in hay for x in GENERAL_MARKETPLACE_ALIASES):
+        score -= 70
+    if is_local_lens_result({"source": name, "link": url}):
+        score += 35
+    return score
 
 def store_domain(name):
     n = normalize_name(normalize_ar(name))
     for k, d in STORE_DOMAINS.items():
         if k in n or n in k: return d
     return ""
-JUNK_STORE = re.compile(r"^(اونلاين|أونلاين|online|الموقعالرسمي|official)$", re.I)
-def is_junk_store(name): return bool(JUNK_STORE.match(normalize_name(normalize_ar(name))))
+JUNK_STORE = re.compile(r"^(التوصيل|توصيل|delivery|اونلاين|أونلاين|online|الموقعالرسمي|official)", re.I)
+def is_junk_store(name):
+    n = normalize_name(normalize_ar(name))
+    # v67: Taw9eel متجر كويتي حقيقي اسمه العربي «توصيل»؛ لا يُعامل كاسم عام مهمل.
+    if "taw9" in n or n in ("توصيل", "التوصيل") and store_domain(name):
+        return False
+    return bool(JUNK_STORE.match(n))
 def short_query(q):
     q = re.sub(r"\([^)]*\)", " ", q or "")
     q = re.split(r"\s+[-—–]\s+", q)[0]
@@ -1427,10 +1883,6 @@ def extract_store_offers(txt):
         if re.search(r"\(\s*(?:هاتف|Phone|phone|Tel|tel)\s*:", s):
             continue
         name = m.group(2).strip()
-        # "توصيل" و"أونلاين" وأمثالها ليست متاجر؛ غالباً سطر رسوم توصيل التقطه النموذج كعرض.
-        if is_junk_store(name):
-            print(f"SKIP JUNK STORE LINE: {s[:80]}")
-            continue
         best = m.group(1) in ("✅", "🏆")
         body = s if best else s.lstrip("•").strip()
         offers.append({"line": body, "name": name, "best": best})
@@ -1505,7 +1957,7 @@ def maps_category_for(product):
         (("ملابس", "تيشيرت", "قميص", "بنطلون", "فستان", "جاكيت", "قبعه", "قبعة", "كاب", "shirt", "dress", "cap", "clothing"),
          "Intersport OR Decathlon OR Sun and Sand Sports OR متجر ملابس Fashion store"),
         (("حذاء", "جوتي", "سنيكر", "shoe", "sneaker"), "Intersport OR Decathlon OR Foot Locker OR متجر أحذية Shoe store"),
-        (("مضرب", "كره", "كرة", "تنس", "بادل", "جيم", "رياضه", "رياضة", "under armour", "nike", "adidas", "sports", "basketball"),
+        (("مضرب", "كره", "كرة", "تنس", "بادل", "جيم", "رياضه", "رياضة", "under armour", "nike", "adidas", "sports"),
          "Intersport OR Decathlon OR Sun and Sand Sports OR متجر رياضي Sports store"),
         (("ايفون", "آيفون", "سامسونج", "لابتوب", "بلايستيشن", "تلفزيون", "الكترون", "هاتف", "جوال", "كاميرا",
           "iphone", "samsung", "laptop", "playstation", "television", "electronics"),
@@ -1700,11 +2152,19 @@ def call_gemini(parts, system=SYSTEM_PROMPT, use_search=True):
         return "", {}
 
 def source_label(title, url):
+    """v68: اسم متجر نظيف — www.alaysh.com تصير Alaysh بدل عرض الدومين كاملاً."""
     title = (title or "").strip()
-    if title: return title[:40]
+    if title:
+        t = re.sub(r"^https?://", "", title).strip().strip("/")
+        # إذا العنوان مجرد دومين، نعرض اسم المتجر منه بشكل مرتب.
+        if re.fullmatch(r"(?:www\.)?[\w-]+(?:\.[a-z]{2,})+", t, flags=re.I):
+            base = t.lower().replace("www.", "").split(".")[0]
+            return (base[:1].upper() + base[1:])[:40] or "المتجر"
+        return title[:40]
     try:
         host = urllib.parse.urlparse(url).netloc.replace("www.", "")
-        return host.split(".")[0] or "المتجر"
+        base = host.split(".")[0]
+        return (base[:1].upper() + base[1:])[:40] or "المتجر"
     except: return "المتجر"
 
 def best_of_search(parts, lang="ar"):
@@ -1808,9 +2268,9 @@ def _lens_source_name(item, index):
 KUWAIT_STORE_HINTS = (
     ".com.kw", ".kw", "kuwait", "الكويت", "xcite", "eureka", "best al yousifi",
     "best alyousifi", "jarir", "level shoes", "future store", "blink", "noon kuwait",
-    "carrefour kuwait", "lulu kuwait", "jm3eia", "جمعية", "taw9eel", "توصيل", "intersport kuwait",
+    "carrefour kuwait", "lulu kuwait", "jm3eia", "جمعية", "intersport kuwait",
     "decathlon kuwait", "boutiqaat", "boots kuwait", "yiaco", "royal pharmacy",
-    "talabat kuwait", "keeta kuwait"
+    "talabat kuwait", "keeta kuwait", "taw9eel", "taw9el"
 )
 
 
@@ -1882,42 +2342,6 @@ def is_foreign_lens_result(item):
     return bool(host)
 
 
-def filter_local_market_only(verified):
-    """v68: حارس الوضع المحلي — أي متجر أجنبي واضح (نطاق دولة ثانية أو عملة ثانية) يُرفض.
-
-    المواقع العالمية لا تظهر في البحث المحلي أبداً؛ تظهر فقط بعد موافقة المستخدم
-    على «دوّر عالمياً». النتيجة مجهولة الجنسية (لا محلية ولا أجنبية واضحة) تمر.
-    """
-    kept = {}
-    for name, info in (verified or {}).items():
-        item = {
-            "link": info.get("url", ""), "source": name,
-            "title": info.get("title", ""), "currency": info.get("currency", ""),
-            "price": info.get("price_text", "") or "",
-        }
-        # نرفض فقط الأجنبي الواضح: نطاق دولة ثانية أو عملة دولة ثانية صريحة.
-        if not is_local_lens_result(item):
-            host = ""
-            try:
-                host = urllib.parse.urlparse(item["link"]).netloc.lower()
-            except Exception:
-                pass
-            cc = (current_market().get("country") or DEFAULT_COUNTRY).lower()
-            foreign_tld = any(
-                other_cc != cc and any(tld in host for tld in tlds)
-                for other_cc, tlds in COUNTRY_TLDS.items()
-            )
-            hay = " ".join(str(item.get(k) or "") for k in ("title", "source", "currency", "price")).lower()
-            foreign_currency = any(
-                other_cc != cc and any(marker in hay for marker in markers)
-                for other_cc, markers in COUNTRY_CURRENCY_MARKERS.items()
-            )
-            if foreign_tld or foreign_currency:
-                print(f"LOCAL MODE REJECT FOREIGN: {name} -> {info.get('url','')}")
-                continue
-        kept[name] = info
-    return kept
-
 def lens_priced_offers(lens_context, lang="ar", local_only=True, exclude_local=False):
     """Use Google Lens product cards directly.
 
@@ -1987,21 +2411,21 @@ def lens_priced_offers(lens_context, lang="ar", local_only=True, exclude_local=F
             "image_url": item.get("image") or item.get("thumbnail") or "",
         }
         used_urls.add(url)
-    # نفس المواصفات فقط: بطاقة عبوة أصغر أو سعة أقل ليست سعراً أرخص لنفس المنتج.
-    offers = filter_same_size(offers, ((lens_context.get("chosen") or {}).get("title") or ""))
     # المتاجر المحلية أولاً حتى لو رتبها Google متأخرة؛ ثم exact ثم visual ثم ترتيب Lens.
+    # v69: مواقع الوساطة (Ubuy/Temu/AliExpress...) آخر شيء دائماً.
     ranked = sorted(
         offers.items(),
         key=lambda kv: (
+            1 if is_marketplace_lens_item({"source": kv[0], "link": kv[1].get("url", ""), "title": kv[1].get("title", "")}) else 0,
             0 if kv[1].get("is_local") else 1,
             0 if kv[1].get("exact") else 1,
             0 if kv[1].get("section") == "visual_matches" else 1,
             kv[1].get("position", 999),
         ),
     )
-    # الاختيار بالجودة، لكن العرض النهائي دائماً من الأرخص للأغلى و✅ للأرخص.
+    # v67: الجودة تحدد من يدخل القائمة، والعرض النهائي دائماً من الأرخص إلى الأغلى.
     top = ranked[:MAX_STORES]
-    top.sort(key=lambda kv: kv[1].get("price") if kv[1].get("price") is not None else 10**9)
+    top.sort(key=lambda kv: kv[1]["price"] if kv[1].get("price") is not None else float("inf"))
     return dict(top)
 
 
@@ -2027,7 +2451,6 @@ def verify_lens_direct_matches(lens_context, local_only=True, exclude_local=Fals
             continue
         candidates[source] = url
     verified = verify_offers(candidates, (lens_context.get("chosen") or {}).get("title", ""))
-    verified = filter_same_size(verified, (lens_context.get("chosen") or {}).get("title", ""))
     if verified:
         print(f"LENS HTML VERIFIED: {list(verified)}")
     return verified
@@ -2042,7 +2465,7 @@ def _new_layer_search(query, lang, prompt_text=None, source_image_b64=None, sour
     # This preserves the many visually close results Google shows instead of demanding one exact SKU.
     lens_cards = lens_priced_offers(lens_context, lang, local_only=not allow_global, exclude_local=allow_global)
     if lens_cards:
-        display_name = (lens_context.get("chosen") or {}).get("title") or query
+        display_name = safe_lens_display_name(lens_context, query)
         lines = [f"📦 {display_name}", ""]
         new_urls = {}
         for i, (name, info) in enumerate(lens_cards.items()):
@@ -2055,6 +2478,9 @@ def _new_layer_search(query, lang, prompt_text=None, source_image_b64=None, sour
 
     # If Lens returned direct pages without price metadata, try our HTML verifier once.
     lens_verified = verify_lens_direct_matches(lens_context, local_only=not allow_global, exclude_local=allow_global)
+    if lens_verified and not allow_global:
+        # v67: نفس حارس السوق المحلي يسري على روابط Lens المفحوصة.
+        lens_verified = filter_local_market(lens_verified)
     if lens_verified:
         if allow_global:
             # أسعار أجنبية من HTML: نحولها للعملة المحلية أولاً ثم نرتب بالأرخص المحوَّل.
@@ -2064,19 +2490,22 @@ def _new_layer_search(query, lang, prompt_text=None, source_image_b64=None, sour
                 info["sort_price"] = converted if converted is not None else info["price"]
             sorted_v = sorted(lens_verified.items(), key=lambda x: x[1]["sort_price"])
         else:
-            lens_verified = filter_local_market_only(lens_verified)
             for info in lens_verified.values():
                 info["shown"] = f"{format_price(info['price'])} {currency_label(lang)}"
             sorted_v = sorted(lens_verified.items(), key=lambda x: x[1]["price"])
-        if sorted_v:
-            display_name = (lens_context.get("chosen") or {}).get("title") or query
-            lines = [f"📦 {display_name}", ""]
-            new_urls = {}
-            for i, (name, info) in enumerate(sorted_v[:MAX_STORES]):
-                prefix = "✅" if i == 0 else "•"
-                lines.append(f"{prefix} {name} — {info['shown']}")
-                new_urls[name] = info["url"]
-            return "\n".join(lines), new_urls
+        display_name = safe_lens_display_name(lens_context, query)
+        lines = [f"📦 {display_name}", ""]
+        new_urls = {}
+        for i, (name, info) in enumerate(sorted_v[:MAX_STORES]):
+            prefix = "✅" if i == 0 else "•"
+            lines.append(f"{prefix} {name} — {info['shown']}")
+            new_urls[name] = info["url"]
+        return "\n".join(lines), new_urls
+
+    # Google Shopping يعالج الطلبات العامة والمحددة ويعيد نفس المتاجر التي تظهر في تبويب Shopping.
+    shopping = google_shopping_offers(query, lang, allow_global=allow_global)
+    if shopping:
+        return shopping_offers_text(query, shopping, lang)
 
     candidates = _query_candidates(query)
     best_txt, best_urls = "", {}
@@ -2088,21 +2517,26 @@ def _new_layer_search(query, lang, prompt_text=None, source_image_b64=None, sour
         else:
             context = ""
 
-        # v68: المتاجر الشهيرة نقطة انطلاق فقط — البحث مفتوح لأي متجر محلي منذ المحاولة الأولى.
+        # المحاولة الأولى تكون حصراً داخل المتاجر ذات الأولوية.
+        # إذا لم نجد نتيجة صالحة، تنتقل المحاولات التالية إلى بحث عام في المتاجر المحلية المعروفة.
         priority_stores = priority_stores_for(search_term)
         stores_hint = "، ".join(priority_stores)
         market_name = current_market().get("country_name", "Kuwait")
-        if attempt == 1:
+        if attempt == 1 and current_market().get("country") == "kw":
             search_scope = (
-                f"ابدأ بأشهر المتاجر المحلية في {market_name} (مثل: {stores_hint}) لكن لا تحصر البحث فيها إطلاقاً: "
-                f"اقبل أي متجر محلي آخر في {market_name} يبيع المنتج بسعر موثق ورابط صفحة منتج مباشر حتى لو لم يكن مشهوراً. "
-                "إذا لم تجد فلا تكتب اعتذاراً مطولاً؛ أرجع بلا نتائج لننتقل لمحاولة أوسع. "
+                f"ابحث حصراً أولاً داخل هذه المتاجر وبنفس ترتيب الأولوية: {stores_hint}. "
+                "لا تعرض أي متجر خارج هذه القائمة في هذه المحاولة، وإذا لم تجد فلا تكتب اعتذاراً مطولاً؛ أرجع بلا نتائج لننتقل للبحث العام. "
+            )
+        elif attempt == 1:
+            search_scope = (
+                f"ابدأ بأشهر المتاجر المحلية في {market_name} أولاً. "
+                "إذا لم تجد فلا تكتب اعتذاراً مطولاً؛ أرجع بلا نتائج لننتقل للبحث العام. "
             )
         else:
             search_scope = (
-                f"لم توجد نتيجة كافية في المحاولة السابقة. "
-                f"اعمل الآن بحثاً عاماً واسعاً في جميع متاجر {market_name} التي تبيع المنتج، بما فيها المتاجر المتخصصة والصغيرة، "
-                "مع تجنب الإعلانات المبوبة فقط مثل OpenSooq. لا تستبعد المتجر لمجرد أنه غير مشهور. "
+                f"لم توجد نتيجة صالحة في متاجر الأولوية. "
+                f"اعمل الآن بحثاً عاماً واسعاً في جميع متاجر {market_name} التي تبيع المنتج، بما فيها المتاجر المتخصصة، "
+                "مع تجنب الإعلانات المبوبة فقط مثل OpenSooq. لا تستبعد المتجر لمجرد أنه ليس ضمن القائمة الأولى. "
             )
         current_prompt = (
             f"{context}ابحث في {market_name} عن هذا الاسم تحديداً: {search_term}. "
@@ -2110,12 +2544,11 @@ def _new_layer_search(query, lang, prompt_text=None, source_image_b64=None, sour
                 "لا توسع البحث إلى موديلات أخرى من نفس البراند، ولا تقبل اختلافاً واضحاً في اللون أو النقشة أو وجود الكعب. ") if lens_context else "")
             + f"{search_scope}"
             "استخدم الاسم كما هو، ويمكن تجربة تهجئات قريبة لنفس المنتج فقط. "
-            "قارن نفس المنتج بنفس المواصفات فقط (الحجم/السعة/الوزن، واللون إذا كان يغيّر السعر): "
-            "عبوة أصغر أو أكبر أو سعة تخزين مختلفة تعتبر منتجاً مختلفاً ولا تدخل المقارنة. "
-            "اذكر المواصفة بجانب كل سعر إذا كانت معروفة (مثل: 1 لتر أو 256GB). "
-            f"أعطني حتى {MAX_STORES} متاجر مختلفة مرتبة من الأرخص إلى الأغلى، وكل نتيجة يجب أن تحتوي سعراً رقمياً بعملة السوق الحالي "
-            "ورابط صفحة المنتج المباشرة داخل المتجر. ممنوع روابط Google وصفحات البحث والتصنيف، وممنوع أي متجر أجنبي لا يبيع محلياً. "
+            "أعطني حتى 5 متاجر مرتبة من الأرخص إلى الأغلى، وكل نتيجة يجب أن تحتوي سعراً رقمياً بعملة السوق الحالي "
+            "ورابط صفحة المنتج المباشرة داخل المتجر. ممنوع روابط Google وصفحات البحث والتصنيف. "
+            "ممنوع أي متجر أجنبي أو سعر بعملة دولة أخرى في هذا البحث المحلي. "
             "لا تكتب متوفر أو InStock بدلاً من السعر. اكتب السعر بالفلوس كاملة مثل 1.950 وليس 1.95. "
+            "انقل السعر حرفياً كما يظهر في صفحة المتجر بفلوسه الحقيقية (5.310 تبقى 5.310)؛ ممنوع تقريب السعر إلى أصفار مثل 2.000 أو 5.000 إلا إذا كان مكتوباً كذلك فعلاً. "
             f"{LANG_INSTR[lang]}"
         )
 
@@ -2137,10 +2570,9 @@ def _new_layer_search(query, lang, prompt_text=None, source_image_b64=None, sour
         if txt and offers and urls:
             verified = verify_offers(urls, search_term)
             verified = filter_verified_with_lens(verified, lens_context)
-            verified = filter_same_size(verified, query)
             if not allow_global:
-                # v68: البحث المحلي لا يعرض مواقع عالمية أبداً — تظهر فقط بعد زر «دوّر عالمياً».
-                verified = filter_local_market_only(verified)
+                # v67: حارس السوق المحلي — يرفض متجراً أجنبياً بعملة أخرى (مثل rahatystore السعودي).
+                verified = filter_local_market(verified)
             if verified:
                 # Google Lens استُخدم قبل البحث لتحديد المنتج. لا نحذف نتائج الأسعار بسبب تقييم بصري تخميني.
                 sorted_v = sorted(verified.items(), key=lambda x: x[1]["price"])
@@ -2150,9 +2582,7 @@ def _new_layer_search(query, lang, prompt_text=None, source_image_b64=None, sour
                 for i, (name, info) in enumerate(sorted_v[:MAX_STORES]):
                     prefix = "✅" if i == 0 else "•"
                     currency = currency_label(lang)
-                    size_note = format_pack_size(extract_pack_size(info.get("title", "")))
-                    size_suffix = f" ({size_note})" if size_note else ""
-                    lines.append(f"{prefix} {name} — {format_price(info['price'])} {currency}{size_suffix}")
+                    lines.append(f"{prefix} {name} — {format_price(info['price'])} {currency}")
                     new_urls[name] = info["url"]
                 final_txt = "\n".join(lines)
                 if not source_image_b64:
@@ -2171,22 +2601,42 @@ def _new_layer_search(query, lang, prompt_text=None, source_image_b64=None, sour
                 matched = match_url(offer["name"], urls)
                 if not (matched and is_direct_store_url(matched)):
                     continue
-                if not allow_global and is_foreign_lens_result({"link": matched, "source": offer["name"], "title": offer["line"]}):
-                    # v68: نفس الحارس المحلي حتى للعروض التي تعذّر فحص صفحتها.
-                    print(f"LOCAL MODE REJECT FOREIGN (unverified): {offer['name']} -> {matched}")
+                # v67: حتى بدون فحص HTML، أي رابط يدل بوضوح على متجر أجنبي يُرفض محلياً.
+                if not allow_global and is_foreign_lens_result({"link": matched, "source": offer["name"]}):
+                    print(f"LOCAL GUARD REJECT UNVERIFIED FOREIGN: {offer['name']} -> {matched}")
                     continue
-                kept.append(offer)
-            # v68: الترتيب من الأرخص للأغلى حتى في المسار غير المفحوص.
-            kept.sort(key=lambda o: _extract_numeric_price(o.get("line", "")) or 10**9)
+                kept.append((offer, matched))
             if kept:
+                # v68: تصحيح الفلوس — أسعار Gemini غير المفحوصة كثيراً ما تُقرَّب إلى أصفار
+                # (5.310 تظهر 5.000). هنا نسحب السعر الحقيقي من صفحة المتجر ونستبدله.
+                records = []
+                real_prices = list(RESOLVER.map(soft_price_lookup, [m for _, m in kept]))
+                for (offer, matched), real in zip(kept, real_prices):
+                    gem_price = _extract_numeric_price(offer["line"])
+                    price = real if real is not None else gem_price
+                    if real is not None and gem_price is not None and abs(real - gem_price) >= 0.001:
+                        print(f"REAL FILS FIX: {offer['name']} {gem_price} -> {real}")
+                    host = urllib.parse.urlparse(matched).netloc.lower().replace("www.", "")
+                    records.append({"offer": offer, "url": matched, "price": price, "host": host})
+                # متجر واحد لكل نطاق: نُبقي الأرخص (نفس المتجر مرتين بعبوتين مختلفتين يشوش القائمة).
+                by_host = {}
+                for rec in records:
+                    prev = by_host.get(rec["host"])
+                    if prev is None or (rec["price"] is not None and (prev["price"] is None or rec["price"] < prev["price"])):
+                        by_host[rec["host"]] = rec
+                final_recs = sorted(by_host.values(), key=lambda r: r["price"] if r["price"] is not None else float("inf"))
                 title = product_title(txt, search_term)
                 lines = [title, ""]
                 clean_urls = {}
-                for i, offer in enumerate(kept[:MAX_STORES]):
+                for i, rec in enumerate(final_recs[:MAX_STORES]):
                     prefix = "✅" if i == 0 else "•"
-                    body = re.sub(r"^(?:✅|🏆|•)\s*", "", offer["line"]).strip()
-                    lines.append(f"{prefix} {body}")
-                    clean_urls[offer["name"]] = match_url(offer["name"], urls)
+                    name = rec["offer"]["name"]
+                    if rec["price"] is not None:
+                        lines.append(f"{prefix} {name} — {format_price(rec['price'])} {currency_label(lang)}")
+                    else:
+                        body = re.sub(r"^(?:✅|🏆|•)\s*", "", rec["offer"]["line"]).strip()
+                        lines.append(f"{prefix} {body}")
+                    clean_urls[name] = rec["url"]
                 final_txt = "\n".join(lines)
                 if not source_image_b64:
                     cache_put(query, lang, final_txt, clean_urls)
@@ -2258,11 +2708,11 @@ def _old_layer_search(query, lang, prompt_text=None, lens_context=None, allow_gl
         return "", {}
     if allow_global:
         base_prompt = (
-            f"ابحث عالميًا عن {query}. استبعد تمامًا أي متجر داخل {current_market().get('country_name', 'بلد المستخدم')}, لأن البحث المحلي انتهى بالفعل. اقبل المتاجر الأجنبية الموثوقة فقط، مع سعر رقمي واضح ورابط صفحة المنتج المباشر، واذكر العملة الأصلية. {LANG_INSTR[lang]}"
+            f"ابحث عالميًا عن {query}. استبعد تمامًا أي متجر داخل {current_market().get('country_name', 'بلد المستخدم')}، لأن البحث المحلي انتهى بالفعل. اقبل المتاجر الأجنبية الموثوقة فقط، مع سعر رقمي واضح ورابط صفحة المنتج المباشر، واذكر العملة الأصلية. {LANG_INSTR[lang]}"
         )
     else:
         base_prompt = prompt_text or (
-            f"ابحث عن {query} في {current_market().get('country_name', 'Kuwait')} في أي متجر محلي يبيعه — المشهور وغير المشهور. متوفر فقط وبسعر رقمي واضح ورابط صفحة منتج مباشر. {LANG_INSTR[lang]}"
+            f"ابحث عن {query} في {current_market().get('country_name', 'Kuwait')}. متوفر فقط وبسعر رقمي واضح ورابط صفحة منتج مباشر. {LANG_INSTR[lang]}"
         )
     market_name = current_market().get("country_name", "Kuwait")
     if allow_global:
@@ -2272,10 +2722,12 @@ def _old_layer_search(query, lang, prompt_text=None, lens_context=None, allow_gl
             f"{query} international stores exact visual match direct product link {LANG_INSTR[lang]}",
         ]
     elif current_market().get("country") == "kw":
+        category = detect_product_category(query)
+        stores_hint = " ".join(priority_stores_for(query))
         variants = [
             base_prompt,
-            f"{query} افضل سعر في الكويت Xcite Eureka Blink Noon Jarir Lulu Carrefour Best Al Yousifi جمعية دوت كوم او اي متجر كويتي اخر - قارن الاسعار {LANG_INSTR[lang]}",
-            f"{query} شراء اونلاين الكويت سعر متوفر متجر كويتي صفحة المنتج مباشرة {LANG_INSTR[lang]}",
+            f"{query} افضل سعر في الكويت متاجر فئة {category}: {stores_hint} - قارن الاسعار {LANG_INSTR[lang]}",
+            f"{query} شراء اونلاين الكويت متجر متخصص {category} سعر متوفر صفحة المنتج مباشرة {LANG_INSTR[lang]}",
         ]
     else:
         variants = [
@@ -2316,12 +2768,11 @@ def _old_layer_search(query, lang, prompt_text=None, lens_context=None, allow_gl
             if not is_local_lens_result({"link": info.get("url", ""), "source": name, "title": info.get("title", "")})
         }
         print(f"GLOBAL OLD LAYER AFTER LOCAL EXCLUSION: {list(verified)}")
+    if not allow_global:
+        # v67: حارس السوق المحلي على الطبقة القديمة أيضاً — هنا كان يتسرب rahatystore السعودي.
+        verified = filter_local_market(verified)
     if lens_context:
         verified = filter_verified_with_lens(verified, lens_context)
-    verified = filter_same_size(verified, query)
-    if not allow_global:
-        # v68: البحث المحلي لا يعرض مواقع عالمية أبداً — تظهر فقط بعد موافقة المستخدم.
-        verified = filter_local_market_only(verified)
     if not verified:
         print("OLD LAYER: no verified direct offers")
         return "", {}
@@ -2342,25 +2793,14 @@ def _old_layer_search(query, lang, prompt_text=None, lens_context=None, allow_gl
     new_urls = {}
     for i, (name, info) in enumerate(sorted_v[:max(MAX_STORES * 2, 6)]):
         prefix = "✅" if i == 0 else "•"
-        size_note = format_pack_size(extract_pack_size(info.get("title", "")))
-        size_suffix = f" ({size_note})" if size_note else ""
-        lines.append(f"{prefix} {name} — {info['shown']}{size_suffix}")
+        lines.append(f"{prefix} {name} — {info['shown']}")
         new_urls[name] = info["url"]
     print(f"OLD LAYER VERIFIED: {list(new_urls)}")
     return "\n".join(lines), new_urls
 
 
-def _store_priority_value(name, url):
-    text = f"{name} {url}".lower()
-    priorities = (
-        "jm3eia", "جمعية", "xcite", "eureka", "best", "yousifi", "blink",
-        "jarir", "lulu", "carrefour", "noon", "taw9eel", "توصيل", "intersport", "decathlon",
-        "boutiqaat", "boots", "yiaco", "levelshoes", "future", "talabat", "keeta"
-    )
-    for i, token in enumerate(priorities):
-        if token in text:
-            return len(priorities) - i
-    return 0
+def _store_priority_value(name, url, query=""):
+    return category_store_quality(name, url, query)
 
 
 def _merge_two_layers(query, lang, new_result, old_result, lens_context=None):
@@ -2387,18 +2827,20 @@ def _merge_two_layers(query, lang, new_result, old_result, lens_context=None):
         quality = 0
         quality += 100 if o.get("exact") else 0
         quality += 40 if o.get("is_local") else 0
-        quality += _store_priority_value(o.get("name", ""), o.get("url", "")) * 2
+        quality += _store_priority_value(o.get("name", ""), o.get("url", ""), query)
         quality += 12 if o.get("layer") == "new" else 8
         quality += max(0, 20 - min(int(o.get("lens_position", 999)), 20))
         return (-quality, o.get("price", 10**9))
     offers.sort(key=rank)
     chosen = offers[:MAX_STORES]
-    # الجودة تُستخدم لاختيار المرشحين فقط؛ العرض النهائي دائماً من الأرخص للأغلى و✅ للأرخص.
-    chosen.sort(key=lambda o: o.get("price") if o.get("price") is not None else 10**9)
+    # v67: الجودة تحدد من يدخل القائمة النهائية فقط؛ العرض دائماً من الأرخص إلى الأغلى.
+    chosen.sort(key=lambda o: o.get("price", 10**9))
 
-    display_title = ((lens_context or {}).get("chosen") or {}).get("title") or \
+    chosen_item = ((lens_context or {}).get("chosen") or {})
+    chosen_title = "" if is_marketplace_lens_item(chosen_item) else str(chosen_item.get("title") or "").strip()
+    display_title = chosen_title or \
                     product_title(new_txt, "").replace("📦", "").strip() or \
-                    product_title(old_txt, query).replace("📦", "").strip() or query
+                    product_title(old_txt, query).replace("📦", "").strip() or short_query(query) or query
     currency = currency_label(lang)
     lines = [f"📦 {display_title}", ""]
     urls = {}
@@ -2582,783 +3024,646 @@ async def receive(request: Request, background_tasks: BackgroundTasks):
     except Exception as e: print(f"webhook err {e}")
     return {"status":"ok"}
 
+# ---- «ما لقيت المنتج محلياً» : خيارات عالمي / بدائل / لا شكراً --------------
 
+def _store_pending_global(from_number, payload):
+    payload = dict(payload or {})
+    payload["ts"] = time.time()
+    PENDING_GLOBAL_SEARCH[from_number] = payload
 
-def _store_pending_global(phone, bot_id, lang, query, lens_context, prompt_text=None):
-    PENDING_GLOBAL_SEARCH[phone] = {
-        "bot_id": bot_id, "lang": lang, "query": query,
-        "lens_context": lens_context or {}, "prompt_text": prompt_text,
-        "ts": time.time(),
-    }
-
-def _pop_pending_global(phone):
-    item = PENDING_GLOBAL_SEARCH.pop(phone, None)
-    if not item:
+def _pop_pending_global(from_number):
+    pending = PENDING_GLOBAL_SEARCH.pop(from_number, None)
+    if not pending:
         return None
-    if time.time() - item.get("ts", 0) > GLOBAL_PENDING_TTL:
+    if time.time() - float(pending.get("ts", 0)) > GLOBAL_PENDING_TTL:
+        print("PENDING GLOBAL EXPIRED")
         return None
-    return item
+    return pending
 
-def send_not_found_choice(phone, bot_id, lang):
-    """المنتج بالضبط غير متوفر محلياً: 3 خيارات — عالمي، بدائل مشابهة، أو لا شكراً."""
-    send_whatsapp_buttons(phone, T(lang, "ask_not_found"), [
-        {"id": "nf_global", "title": T(lang, "opt_global")[:20]},
-        {"id": "nf_similar", "title": T(lang, "opt_similar")[:20]},
-        {"id": "nf_no", "title": T(lang, "opt_no")[:20]},
+def send_not_found_choice(from_number, bot_id, lang, query, lens_context=None, identified_name=""):
+    """عرض الخيارات الثلاثة بدل رسالة فشل جافة، مع حفظ سياق البحث للزر."""
+    _store_pending_global(from_number, {
+        "query": query,
+        "lang": lang,
+        "lens_context": lens_context,
+        "identified_name": identified_name,
+        "bot_id": bot_id,
+    })
+    body = T(lang, "ask_not_found")
+    if identified_name:
+        prefix = f"📦 {identified_name}\n\n" if lang == "ar" else f"📦 {identified_name}\n\n"
+        body = prefix + body
+    send_whatsapp_buttons(from_number, body, [
+        {"id": "go_global", "title": T(lang, "opt_global")},
+        {"id": "go_similar", "title": T(lang, "opt_similar")},
+        {"id": "no_thanks", "title": T(lang, "opt_no")},
     ], bot_id)
 
-def run_similar_search(phone, item):
-    """بحث بدائل مشابهة: نفس الفئة والاستخدام، محلياً فقط، بدون قيود Lens الصارمة."""
-    activate_market(phone)
-    bot_id = item["bot_id"]; lang = item["lang"]; query = item["query"]
-    send_whatsapp_text(phone, T(lang, "similar_searching"), bot_id)
-    # نزيل جزء الكابشن إن وجد ونأخذ اسم المنتج الأساسي.
-    base = short_query(re.sub(r"^.*?—\s*", "", query).strip() or query) or short_query(query)
+def run_similar_search(from_number, bot_id, pending):
+    """بدائل مشابهة محلياً: نفس الفئة والشكل العام بدون التقيد بالموديل الحرفي."""
+    lang = pending.get("lang", "ar")
+    query = pending.get("query", "")
+    lens_context = pending.get("lens_context")
+    activate_market(from_number)
+    send_whatsapp_text(from_number, T(lang, "similar_searching"), bot_id)
+
+    base_name = ""
+    if lens_context:
+        base_name = ((lens_context.get("chosen") or {}).get("title") or "").strip()
+    base_name = base_name or query
     market_name = current_market().get("country_name", "Kuwait")
-    prompts = [
-        (f"المنتج التالي غير متوفر محلياً: {base}. اقترح حتى {MAX_STORES} بدائل مشابهة له فعلياً — نفس الفئة "
-         f"ونفس الاستخدام ومستوى جودة قريب — متوفرة الآن في متاجر {market_name} فقط، من أي متجر محلي كان. "
-         "لكل بديل: اسم البديل الفعلي (وليس اسم المنتج الأصلي)، سعر رقمي واضح بعملة السوق، "
-         f"ورابط صفحة المنتج المباشرة داخل المتجر. رتب من الأرخص إلى الأغلى واكتب السعر بالفلوس كاملة مثل 1.950. {LANG_INSTR[lang]}"),
-        (f"{MAX_STORES} best in-stock alternatives similar to {base} in {market_name} local online stores, "
-         f"each with the alternative's own name, a numeric price, and a direct product page link, sorted cheapest first. {LANG_INSTR[lang]}"),
-    ]
-    for prompt in prompts:
-        txt, urls = call_gemini([{"text": prompt}])
-        urls = direct_urls_only(urls)
-        offers = extract_store_offers(txt)
-        if not txt or not offers or not urls:
-            continue
-        verified = verify_offers(urls, base)
-        # v68: البدائل المحلية لا تشمل مواقع أجنبية.
-        verified = filter_local_market_only(verified)
-        if verified:
-            sorted_v = sorted(verified.items(), key=lambda x: x[1]["price"])
-            title = product_title(txt, f"بدائل مشابهة: {base}" if lang == "ar" else f"Similar to: {base}")
-            lines = [title, ""]
-            new_urls = {}
-            for i, (name, info) in enumerate(sorted_v[:MAX_STORES]):
-                prefix = "✅" if i == 0 else "•"
-                alt_title = (info.get("title") or "").strip()
-                label = f"{name}: {alt_title[:45]}" if alt_title else name
-                lines.append(f"{prefix} {label} — {format_price(info['price'])} {currency_label(lang)}")
-                new_urls[name] = info["url"]
-            send_product_result(phone, "\n".join(lines), new_urls, bot_id, lang, base)
-            return
-        # بعض المتاجر تمنع فحص HTML؛ نقبل سطور Gemini التي لها رابط منتج مباشر فقط.
-        kept = []
+    prompt = (
+        f"المستخدم يبحث عن بدائل مشابهة متوفرة في {market_name} لهذا المنتج: {base_name}. "
+        "المطلوب منتجات من نفس الفئة والشكل العام (يمكن اختلاف البراند أو الموديل) وليس نفس القطعة حرفياً. "
+        "أعطني حتى 5 بدائل مرتبة من الأرخص إلى الأغلى، كل بديل بسعر رقمي بعملة السوق الحالي ورابط صفحة منتج مباشر. "
+        "ممنوع أي متجر أجنبي أو سعر بعملة دولة أخرى. "
+        f"{LANG_INSTR[lang]}"
+    )
+    txt, urls = call_gemini([{"text": prompt}])
+    urls = direct_urls_only(urls)
+    offers = extract_store_offers(txt)
+    if not txt or is_no_result_answer(txt) or not offers:
+        send_whatsapp_text(from_number, T(lang, "similar_none"), bot_id)
+        return
+
+    verified = verify_offers(urls, base_name)
+    # v67: حارس السوق المحلي على البدائل أيضاً — لا بدائل من متاجر أجنبية.
+    verified = filter_local_market(verified)
+    if verified:
+        sorted_v = sorted(verified.items(), key=lambda x: x[1]["price"])
+        lines = [f"📦 {base_name}", ""]
+        new_urls = {}
+        for i, (name, info) in enumerate(sorted_v[:MAX_STORES]):
+            prefix = "✅" if i == 0 else "•"
+            lines.append(f"{prefix} {name} — {format_price(info['price'])} {currency_label(lang)}")
+            new_urls[name] = info["url"]
+        final_txt = "\n".join(lines)
+        kind = send_product_result(from_number, final_txt, new_urls, bot_id, lang, base_name)
+    else:
+        # بدون فحص HTML: نقبل فقط روابط منتج مباشرة وغير أجنبية بوضوح.
+        kept, kept_urls = [], {}
         for offer in offers:
             matched = match_url(offer["name"], urls)
             if not (matched and is_direct_store_url(matched)):
                 continue
-            if is_foreign_lens_result({"link": matched, "source": offer["name"], "title": offer["line"]}):
-                print(f"SIMILAR LOCAL REJECT FOREIGN: {offer['name']} -> {matched}")
+            # v67: رفض أي رابط بديل يدل بوضوح على متجر أجنبي.
+            if is_foreign_lens_result({"link": matched, "source": offer["name"]}):
+                print(f"SIMILAR LOCAL GUARD REJECT: {offer['name']} -> {matched}")
                 continue
-            kept.append((offer, matched))
-        # v68: ترتيب البدائل من الأرخص للأغلى حتى بدون فحص الصفحة.
-        kept.sort(key=lambda om: _extract_numeric_price(om[0].get("line", "")) or 10**9)
-        if kept:
-            title = product_title(txt, f"بدائل مشابهة: {base}" if lang == "ar" else f"Similar to: {base}")
-            lines = [title, ""]
-            new_urls = {}
-            for i, (offer, matched) in enumerate(kept[:MAX_STORES]):
-                prefix = "✅" if i == 0 else "•"
-                body = re.sub(r"^(?:✅|🏆|•)\s*", "", offer["line"]).strip()
-                lines.append(f"{prefix} {body}")
-                new_urls[offer["name"]] = matched
-            send_product_result(phone, "\n".join(lines), new_urls, bot_id, lang, base)
+            kept.append(offer)
+            kept_urls[offer["name"]] = matched
+        if not kept:
+            send_whatsapp_text(from_number, T(lang, "similar_none"), bot_id)
             return
-    send_whatsapp_text(phone, T(lang, "similar_none"), bot_id)
-
-def run_global_search(phone, item):
-    activate_market(phone)
-    bot_id = item["bot_id"]; lang = item["lang"]; query = item["query"]
-    send_whatsapp_text(phone, T(lang, "global_searching"), bot_id)
-    txt, urls = search_product(
-        query, lang, prompt_text=item.get("prompt_text"),
-        lens_context=item.get("lens_context"), allow_global=True,
-    )
-    if txt and urls:
-        filtered_urls = {}
-        for name, url in urls.items():
-            local = is_local_lens_result({"link": url, "source": name, "title": name})
-            if local:
-                print(f"GLOBAL FINAL GUARD REJECT LOCAL: {name} -> {url}")
+        # v68: تصحيح الفلوس الحقيقية من صفحة المتجر + ترتيب من الأرخص.
+        recs = []
+        real_prices = list(RESOLVER.map(soft_price_lookup, [kept_urls[o["name"]] for o in kept]))
+        for offer, real in zip(kept, real_prices):
+            price = real if real is not None else _extract_numeric_price(offer["line"])
+            recs.append({"offer": offer, "price": price})
+        recs.sort(key=lambda r: r["price"] if r["price"] is not None else float("inf"))
+        lines = [f"📦 {base_name}", ""]
+        for i, rec in enumerate(recs[:MAX_STORES]):
+            prefix = "✅" if i == 0 else "•"
+            name = rec["offer"]["name"]
+            if rec["price"] is not None:
+                lines.append(f"{prefix} {name} — {format_price(rec['price'])} {currency_label(lang)}")
             else:
-                filtered_urls[name] = url
-        if len(filtered_urls) != len(urls):
-            # Remove offer lines whose CTA was rejected, so text and buttons stay consistent.
-            kept_names = {normalize_name(n) for n in filtered_urls}
-            kept_lines = []
-            for line in (txt or "").splitlines():
-                offer_match = re.match(r"^(?:✅|🏆|•)\s*(.+?)\s*(?:—|–|-)\s*", line.strip())
-                if offer_match and normalize_name(offer_match.group(1)) not in kept_names:
-                    continue
-                kept_lines.append(line)
-            txt = "\n".join(kept_lines).strip()
-            urls = filtered_urls
-    if not txt or not extract_store_offers(txt) or not urls:
-        send_whatsapp_text(phone, T(lang, "global_none"), bot_id)
-        return
-    send_product_result(phone, txt, urls, bot_id, lang, query)
+                body = re.sub(r"^(?:✅|🏆|•)\s*", "", rec["offer"]["line"]).strip()
+                lines.append(f"{prefix} {body}")
+        kind = send_product_result(from_number, "\n".join(lines), kept_urls, bot_id, lang, base_name)
+    if kind == "product":
+        LAST_SEARCH[from_number] = short_query(base_name)
+        if AUTO_SEND_PRODUCT_MAPS:
+            send_maps_button(from_number, LAST_SEARCH[from_number], bot_id, lang)
 
-def process_interactive_message(message, bot_id):
-    from_number=message["from"]
-    reply=(message.get("interactive") or {}).get("button_reply") or {}
-    btn_id=reply.get("id","")
-    if btn_id in ("global_yes", "nf_global"):
-        item = _pop_pending_global(from_number)
-        if item:
-            run_global_search(from_number, item)
+def run_global_search(from_number, bot_id, pending):
+    """بحث عالمي صريح بموافقة المستخدم؛ الأسعار تُعرض محوّلة لعملته المحلية."""
+    lang = pending.get("lang", "ar")
+    query = pending.get("query", "")
+    lens_context = pending.get("lens_context")
+    activate_market(from_number)
+    send_whatsapp_text(from_number, T(lang, "global_searching"), bot_id)
+    txt, urls = search_product(query, lang, lens_context=lens_context, allow_global=True)
+    if not txt or not extract_store_offers(txt):
+        send_whatsapp_text(from_number, T(lang, "global_none"), bot_id)
         return
-    if btn_id == "nf_similar":
-        item = _pop_pending_global(from_number)
-        if item:
-            run_similar_search(from_number, item)
+    kind = send_product_result(from_number, txt, urls, bot_id, lang, query)
+    if kind == "product":
+        LAST_SEARCH[from_number] = short_query(((lens_context or {}).get("chosen") or {}).get("title") or query)
+
+def process_interactive_message(msg, bot_id):
+    from_number = msg["from"]
+    load_user_preferences(from_number)
+    interactive = msg.get("interactive") or {}
+    reply = interactive.get("button_reply") or interactive.get("list_reply") or {}
+    btn_id = reply.get("id", "")
+    print(f"INTERACTIVE: {from_number} -> {btn_id}")
+
+    if btn_id in ("lang_ar", "lang_en"):
+        lang = "ar" if btn_id == "lang_ar" else "en"
+        USER_LANG[from_number] = lang
+        save_user_preferences(from_number)
+        send_whatsapp_text(from_number, T(lang, "lang_saved"), bot_id)
+        if not location_is_valid(from_number):
+            send_location_request(from_number, bot_id, lang, refresh=False)
+        else:
+            activate_market(from_number)
+            route_pending_after_location(from_number)
         return
-    if btn_id in ("global_no", "nf_no"):
-        PENDING_GLOBAL_SEARCH.pop(from_number, None)
-        send_whatsapp_text(from_number, T(USER_LANG.get(from_number, "ar"), "declined_ok"), bot_id)
+
+    lang = USER_LANG.get(from_number, "ar")
+    if btn_id == "go_global":
+        pending = _pop_pending_global(from_number)
+        if pending:
+            run_global_search(from_number, bot_id, pending)
+        else:
+            send_whatsapp_text(from_number, T(lang, "declined_ok"), bot_id)
         return
-    if btn_id not in ("lang_ar","lang_en"):
+    if btn_id == "go_similar":
+        pending = _pop_pending_global(from_number)
+        if pending:
+            run_similar_search(from_number, bot_id, pending)
+        else:
+            send_whatsapp_text(from_number, T(lang, "declined_ok"), bot_id)
         return
-    lang = "ar" if btn_id=="lang_ar" else "en"
-    USER_LANG[from_number]=lang
-    save_user_preferences(from_number)
-    # Do not run the stored search yet. Location is mandatory after language selection.
-    send_location_request(from_number, bot_id, lang, refresh=False)
+    if btn_id == "no_thanks":
+        _pop_pending_global(from_number)
+        send_whatsapp_text(from_number, T(lang, "declined_ok"), bot_id)
+        return
+
+# ---- الصور: تجميع، Lens + Vision، ثم البحث ----------------------------------
 
 async def process_image_buffer(from_number):
     await asyncio.sleep(BUFFER_SECONDS)
-    data=IMAGE_BUFFER.pop(from_number,None)
-    if not data: return
-    lang=USER_LANG.get(from_number,"ar")
-    if len(data["images"])==1: await asyncio.to_thread(process_single_image,data["images"][0],data["bot_id"],lang)
-    else: await asyncio.to_thread(process_multi_images,data["images"],from_number,data["bot_id"],lang)
+    buf = IMAGE_BUFFER.pop(from_number, None)
+    if not buf or not buf["images"]:
+        return
+    bot_id = buf["bot_id"] or PHONE_NUMBER_ID
+    images = buf["images"]
+    activate_market(from_number)
+    lang = USER_LANG.get(from_number, "ar")
+    if len(images) == 1:
+        await asyncio.to_thread(process_single_image, from_number, images[0], bot_id, lang)
+    else:
+        await asyncio.to_thread(process_multi_images, from_number, images, bot_id, lang)
 
-def identify_product_with_retry(b64, mime, lang="ar"):
-    """يحدد الاسم بالعربي والإنجليزي دائماً، بغض النظر عن لغة واجهة المستخدم."""
-    prompts = [
-        "حدد المنتج من الشعار والشكل والنص. اكتب الاسم العربي ثم الإنجليزي مفصولين بـ |.",
-        "افحص الصورة بدقة أكبر، خصوصاً الشعار والأزرار ورقم الموديل. اكتب Arabic name | English name.",
-        "استنتج أقرب اسم تجاري قابل للبحث حتى لو الصورة جزئية. Arabic | English only.",
-    ]
-    bad_phrases = (
-        "ما قدرت", "لا استطيع", "لا أستطيع", "غير واضح", "لا يمكن تحديد",
-        "couldn't identify", "cannot identify", "can't identify", "unable to identify",
-        "unknown product", "not sure"
-    )
-    for attempt in range(MAX_IDENTIFY_ATTEMPTS):
-        ident, _ = call_gemini(
-            [{"inline_data": {"mime_type": mime, "data": b64}}, {"text": prompts[min(attempt, len(prompts)-1)]}],
-            system=IDENTIFY_SYSTEM,
-            use_search=False,
+def identify_product_with_retry(image_b64, mime_type):
+    """محاولات متعددة لقراءة الصورة نصياً (Vision) بدون بحث."""
+    for attempt in range(1, MAX_IDENTIFY_ATTEMPTS + 1):
+        txt, _ = call_gemini(
+            [{"inline_data": {"mime_type": mime_type, "data": image_b64}},
+             {"text": "حدد اسم المنتج التجاري في الصورة."}],
+            system=IDENTIFY_SYSTEM, use_search=False,
         )
-        candidate = ident.strip().splitlines()[0].strip() if ident else ""
-        if candidate and not any(p in candidate.lower() for p in bad_phrases):
-            if "|" not in candidate:
-                # لا نرفض الاسم الأحادي؛ البحث سيبدأ به ثم يحاول الصياغة الأخرى في المحاولات التالية.
-                candidate = candidate.strip()
-            print(f"IMAGE IDENTIFIED attempt={attempt + 1}: {candidate}")
-            return candidate
-        print(f"IMAGE IDENTIFY ATTEMPT {attempt + 1} FAILED")
+        name = (txt or "").strip().splitlines()[0].strip() if txt else ""
+        if name and len(name) >= 4 and "|" in name:
+            return name
+        if name and len(name) >= 4 and attempt == MAX_IDENTIFY_ATTEMPTS:
+            return name
+        print(f"IDENTIFY ATTEMPT {attempt} WEAK: {name[:80]}")
     return ""
 
+def _identity_tokens(name):
+    return set(_meaningful_lens_tokens(name))
 
-
-
-def _identity_tokens(text):
-    t = normalize_ar(text or "")
-    return {x for x in re.findall(r"[a-z0-9\u0600-\u06ff]+", t) if len(x) > 2}
-
-
-def identity_candidates_agree(vision_name, lens_title):
-    """True when Lens and direct vision clearly describe the same product.
-
-    Avoids a paid judge call when brand/model/type already overlap sufficiently.
-    """
-    a, b = _identity_tokens(vision_name), _identity_tokens(lens_title)
+def identity_candidates_agree(lens_title, vision_name):
+    """هل هوية Lens وهوية Vision تتحدثان عن نفس المنتج تقريباً؟"""
+    a, b = _identity_tokens(lens_title), _identity_tokens(vision_name)
     if not a or not b:
         return False
-    inter = a & b
-    # A model/SKU overlap is decisive.
-    model_a = {x for x in a if any(c.isdigit() for c in x)}
-    model_b = {x for x in b if any(c.isdigit() for c in x)}
-    if model_a & model_b:
-        return True
-    return len(inter) >= 2 and (len(inter) / max(1, min(len(a), len(b)))) >= 0.45
+    return len(a & b) >= 1
 
-
-
-
-def is_fashion_identity(vision_name, caption=""):
-    """Return True for any apparel/fashion item where exact visual design matters."""
-    q = normalize_ar(f"{vision_name or ''} {caption or ''}")
-    fashion_terms = (
-        "ملابس", "قميص", "قميص نسائي", "بلوزه", "بلوزة", "توب", "فستان",
-        "بنطلون", "تنوره", "تنورة", "جاكيت", "معطف", "عبايه", "عباية",
-        "بيجامه", "بيجامة", "بجامه", "بجامة", "ملابس نوم", "روب", "طقم نسائي",
-        "ساتان", "مخطط", "مخططه", "مخططة", "مطبوع", "موضة", "ازياء", "أزياء",
-        "حذاء", "شبشب", "صندل", "نعال", "سنيكر", "شنطه", "شنطة", "حقيبه", "حقيبة",
-        "shirt", "women's shirt", "womens shirt", "blouse", "top", "dress", "skirt",
-        "pants", "trousers", "jacket", "coat", "abaya", "pajama", "pajamas",
-        "pyjama", "pyjamas", "nightwear", "sleepwear", "robe", "satin", "printed",
-        "striped", "fashion", "apparel", "clothing", "shoe", "mule", "slipper",
-        "sandal", "sneaker", "bag", "handbag", "co-ord", "coord"
-    )
-    return any(term in q for term in fashion_terms)
-
-def is_generic_commodity(vision_name, caption=""):
-    """منتج عام بلا براند أو موديل (كرة سلة عادية، حبل قفز، دمبل...).
-
-    Lens مع هذا النوع يجيب إعلانات عشوائية مشابهة شكلاً (eBay، كرات إسفنجية، مغناطيسات)
-    لأن ما فيه هوية بصرية مميزة. البحث النصي بالاسم العام أدق وأرخص، و priority_stores_for
-    يوجهه تلقائياً لمتاجر الرياضة المحلية (Intersport / Decathlon / Sun & Sand).
-    """
-    raw = f"{vision_name or ''} {caption or ''}".strip()
-    if not raw:
-        return False
-    # رقم موديل أو SKU = منتج محدد، مو عام.
-    if re.search(r"\b(?=[a-z0-9-]{3,}\b)(?=[a-z0-9-]*[a-z])(?=[a-z0-9-]*\d)[a-z0-9-]+\b", raw, re.I):
-        return False
-    q = normalize_ar(raw)
-    known_brands = (
-        "نايك", "nike", "اديداس", "adidas", "سبولدينج", "spalding", "ويلسون", "wilson",
-        "مولتن", "molten", "ميكاسا", "mikasa", "بوما", "puma", "ريبوك", "reebok",
-        "اندر ارمور", "under armour", "اسيكس", "asics", "ابل", "apple", "سامسونج", "samsung", "سوني", "sony"
-    )
-    if any(normalize_ar(b) in q for b in known_brands):
-        return False
-    generic_terms = (
-        "كره سله", "basketball", "كره قدم", "football", "soccer ball",
-        "كره طايره", "volleyball", "كره تنس", "tennis ball", "كره يد", "handball",
-        "حبل قفز", "jump rope", "دمبل", "dumbbell", "سجاده يوغا", "yoga mat",
-        "مطاره ماء", "water bottle", "قاروره ماء", "شنطه رياضيه", "gym bag"
-    )
-    return any(normalize_ar(t) in q for t in generic_terms)
-
-def _legacy_should_use_google_lens(vision_name, caption=""):
-    """Legacy router kept as a fallback when Lens-primary mode is disabled."""
-    raw = f"{vision_name or ''} {caption or ''}".strip()
-    q = normalize_ar(raw)
-    if not vision_name:
-        return True
-
-    if is_fashion_identity(vision_name, caption):
-        return True
-
-    uncertain = (
-        "غير معروف", "منتج غير", "unknown", "unidentified", "possibly", "ربما",
-        "قد يكون", "عام", "generic", "لا استطيع", "لا أستطيع"
-    )
-    if any(x in q for x in uncertain) or len(_identity_tokens(vision_name)) < 2:
-        return True
-
-    has_model = bool(re.search(r"\b(?=[a-z0-9-]{4,}\b)(?=[a-z0-9-]*[a-z])(?=[a-z0-9-]*\d)[a-z0-9-]+\b", raw, re.I))
-    packaged = (
-        "كرتون", "علبه", "عبوه", "جرام", "كيلو", "مل", "لتر", "حليب", "عصير",
-        "شيبس", "بسكوت", "كيك", "قهوه", "شاي", "دواء", "كريم", "شامبو",
-        "حبوب", "مكمل", "صلصه", "بهارات", "زعفران", "هيل", "منظف",
-        "bottle", "pack", "box", "gram", "kg", "ml", "liter", "medicine",
-        "shampoo", "cream", "snack", "cake", "coffee", "tea", "spice"
-    )
-    if has_model or any(x in q for x in packaged):
-        return False
-
-    visual_categories = (
-        "حذاء", "شبشب", "صندل", "نعال", "ملابس", "قميص", "بنطلون", "فستان",
-        "جاكيت", "قبعه", "شنطه", "حقيبه", "نظاره", "ساعه", "خاتم", "قلاده",
-        "اثاث", "كرسي", "طاوله", "ديكور", "لعبه", "سياره", "قطعه غيار",
-        "shoe", "mule", "slipper", "sandal", "sneaker", "dress", "shirt",
-        "jacket", "cap", "hat", "bag", "handbag", "glasses", "sunglasses",
-        "watch", "ring", "necklace", "furniture", "chair", "table", "decor",
-        "بيجامه", "بيجامة", "بجامه", "بجامة", "ملابس نوم", "روب", "بلوزه", "بلوزة",
-        "توب", "طقم نسائي", "قميص نسائي", "ساتان", "مخطط", "مخططه", "مخططة",
-        "pajama", "pajamas", "pyjama", "pyjamas", "nightwear", "sleepwear",
-        "blouse", "top", "co-ord", "coord", "satin", "printed", "striped"
-    )
-    return any(x in q for x in visual_categories)
-
-
-def _is_text_heavy_packaged_product(vision_name, caption=""):
-    """Return True for labels/packages where OCR identity is usually stronger than Lens."""
-    raw = f"{vision_name or ''} {caption or ''}".strip()
-    q = normalize_ar(raw)
-    if not q:
-        return False
-
-    package_terms = (
-        "كرتون", "علبه", "علبة", "عبوه", "عبوة", "جرام", "غرام", "كيلو", "جم", "mg",
-        "مل", "لتر", "حليب", "عصير", "شيبس", "بسكوت", "كيك", "قهوه", "قهوة", "شاي",
-        "دواء", "كريم", "شامبو", "حبوب", "مكمل", "صلصه", "صلصة", "بهارات", "زعفران",
-        "هيل", "منظف", "صابون", "bottle", "pack", "box", "gram", "kg", "g ",
-        " g", "ml", "liter", "medicine", "tablet", "capsule", "shampoo", "cream",
-        "snack", "cake", "coffee", "tea", "spice", "detergent", "soap"
-    )
-    text_strength = sum(1 for x in package_terms if x in q)
-    has_model = bool(re.search(r"\b(?=[a-z0-9-]{4,}\b)(?=[a-z0-9-]*[a-z])(?=[a-z0-9-]*\d)[a-z0-9-]+\b", raw, re.I))
-    has_numbers = bool(re.search(r"\d", raw))
-    token_count = len(_identity_tokens(vision_name))
-    return has_model or (text_strength >= 1 and (has_numbers or token_count >= 3))
-
-
-def lens_routing_decision(vision_name, caption=""):
-    """Lens is the primary engine for most image searches (~70%).
-
-    Only clearly text-heavy packaged/medical/grocery products stay Vision-first,
-    plus generic unbranded commodities where Lens returns random lookalike ads.
-    """
-    raw = f"{vision_name or ''} {caption or ''}".strip()
-    q = normalize_ar(raw)
-    if not ENABLE_GOOGLE_LENS:
-        return False, "LENS_DISABLED"
-    if not vision_name:
-        return True, "NO_VISION_IDENTITY"
-
-    # Fashion remains a hard Lens-first case.
-    if is_fashion_identity(vision_name, caption):
-        return True, "FASHION_ALWAYS_LENS"
-
-    # منتج عام (كرة سلة عادية...): Vision-first دائماً — Lens يخربط ويجيب إسفنجيات وإعلانات.
-    if is_generic_commodity(vision_name, caption):
-        return False, "GENERIC_COMMODITY_VISION_FIRST"
-
-    uncertain = (
-        "غير معروف", "منتج غير", "unknown", "unidentified", "possibly", "ربما",
-        "قد يكون", "عام", "generic", "لا استطيع", "لا أستطيع"
-    )
-    if any(x in q for x in uncertain) or len(_identity_tokens(vision_name)) < 2:
-        return True, "UNCERTAIN_IDENTITY"
-
-    if LENS_PRIMARY_MODE:
-        if LENS_PRIMARY_EXCEPT_TEXT_HEAVY and _is_text_heavy_packaged_product(vision_name, caption):
-            return False, "TEXT_HEAVY_PACKAGE_VISION_FIRST"
-        return True, "LENS_PRIMARY_DEFAULT"
-
-    return _legacy_should_use_google_lens(vision_name, caption), "LEGACY_ROUTER"
-
-
-def should_use_google_lens(vision_name, caption=""):
-    use_lens, _reason = lens_routing_decision(vision_name, caption)
-    return use_lens
-
-
-def choose_image_identity(image_b64, mime_type, lens, vision_name):
-    """Arbitrate between Google Lens and direct vision/OCR.
-
-    Rules: text printed on a package, barcode/model/brand and product type are stronger
-    evidence than visual similarity. Lens is stronger for unlabelled fashion/objects.
-    """
-    lens_title = ((lens.get("chosen") or {}).get("title") or lens.get("query") or "").strip()
-    vision_name = (vision_name or "").strip()
-    if not lens_title:
-        return vision_name, None, "VISION_ONLY"
-    if not vision_name:
-        return lens_title, lens, "LENS_ONLY"
-
-    judge_system = """أنت حكم دقيق لهوية المنتجات. الصورة هي المرجع النهائي.
-قارن بين اقتراح Google Lens واقتراح قارئ النص/الملصق.
-قواعد إلزامية:
-1) إذا كانت الصورة لعبوة أو منتج عليه ملصق واضح، فاسم البراند والنص المطبوع ونوع المنتج والوزن أقوى من التشابه الشكلي.
-2) لا تعتبر منتجين متطابقين لمجرد اشتراكهما في مكون مثل الزعفران أو اللون أو الفئة.
-3) إذا قال اقتراح إن المنتج كيك/حلويات والآخر زعفران خام أو بهارات فهما مختلفان قطعاً.
-4) للملابس والأحذية والحقائب غير المعلّمة بوضوح، أعط Lens وزناً أكبر.
-5) اختر MERGE فقط إذا كان الاقتراحان لنفس المنتج فعلاً ولا يوجد تعارض.
-أرجع JSON فقط بهذا الشكل:
-{"winner":"VISION"|"LENS"|"MERGE","confidence":0-100,"final_name":"اسم بحث دقيق بالعربي | English","reason":"سبب قصير"}
-"""
-    prompt = (
-        f"Google Lens candidate: {lens_title}\n"
-        f"Direct vision/OCR candidate: {vision_name}\n"
-        "احكم بالاعتماد على الصورة نفسها، وليس على ترتيب Lens."
-    )
-    raw, _ = call_gemini([
-        {"inline_data": {"mime_type": mime_type, "data": image_b64}},
-        {"text": prompt},
-    ], system=judge_system, use_search=False)
-    try:
-        data = json.loads(re.search(r"\{.*\}", raw or "", flags=re.S).group(0))
-    except Exception:
-        print(f"IDENTITY JUDGE PARSE FAIL: {raw}")
-        return vision_name, None, "VISION_SAFE_FALLBACK"
-
-    winner = str(data.get("winner", "VISION")).upper()
-    confidence = int(float(data.get("confidence", 0) or 0))
-    final_name = str(data.get("final_name") or "").strip()
-    reason = str(data.get("reason") or "").strip()
-    print(f"IDENTITY JUDGE: winner={winner} confidence={confidence} reason={reason}")
-
-    # Low confidence must never let Lens override readable package evidence.
-    if winner == "LENS" and confidence >= 78:
-        return final_name or lens_title, lens, "LENS"
-    if winner == "MERGE" and confidence >= 82:
-        return final_name or f"{vision_name} | {lens_title}", lens, "MERGE"
-    return final_name or vision_name, None, "VISION"
-
-def process_single_image(message,bot_id,lang="ar"):
-    from_number=message["from"]
-    market = activate_market(from_number)
-    caption=(message.get("image",{}) or {}).get("caption","").strip()
-    send_whatsapp_text(from_number,T(lang,"identifying"),bot_id)
-    try:
-        b64,mime=download_whatsapp_media(message["image"]["id"])
-    except Exception as e:
-        # روابط ميديا واتساب تنتهي صلاحيتها بسرعة؛ لا نترك المستخدم بدون رد.
-        print(f"MEDIA DOWNLOAD ERR: {e}")
-        send_whatsapp_text(from_number, T(lang, "image_error"), bot_id)
-        return
-
-    # FUSION ROUTER (قوة الخلط):
-    # 1) Lens و Vision يشتغلان بالتوازي — لا ننتظر أحدهما ليبدأ الآخر.
-    # 2) Lens متعدد التمريرات (products -> all -> wide) = نفس قوة تطبيق Lens.
-    # 3) الهوية النهائية = دمج عنوان Lens الدقيق + الاسم العربي/الإنجليزي من Vision،
-    #    فيبحث النص بكل المرادفات ويغطي الفهرسة العربية والإنجليزية معاً.
-    lens_future = None
-    if LENS_PARALLEL_WITH_VISION and ENABLE_GOOGLE_LENS and SERPAPI_API_KEY and PUBLIC_BASE_URL:
-        lens_future = LENS_POOL.submit(_run_with_market, market, google_lens_lookup, b64, mime, lang, caption)
-
-    vision_name = identify_product_with_retry(b64, mime, lang)
-    force_fashion_lens = is_fashion_identity(vision_name, caption)
-    use_lens, route_reason = lens_routing_decision(vision_name, caption)
-    use_lens = force_fashion_lens or use_lens
-
-    lens = {"aliases": [], "matches": [], "query": ""}
-    if use_lens:
-        if lens_future is not None:
-            try:
-                lens = lens_future.result(timeout=150) or lens
-            except Exception as e:
-                print(f"LENS PARALLEL ERR: {e}")
-        else:
-            lens = google_lens_lookup(b64, mime, lang, caption or vision_name)
-    elif lens_future is not None:
-        # الراوتر قرر Vision-first (عبوة نصية)؛ نتيجة اللينز المتوازية تُهمل بهدوء.
-        lens_future.cancel()
-
-    active_lens = None
-    identity_source = "VISION"
-    combined_name = vision_name
-    lens_title = ((lens.get("chosen") or {}).get("title") or lens.get("query") or "").strip()
-
-    print(f"SMART ROUTER: vision={vision_name!r} use_lens={use_lens} force_fashion={force_fashion_lens} reason={route_reason}")
-    if use_lens:
-        if force_fashion_lens and lens_title:
-            # Exact design/pattern matters in fashion. Never downgrade to the generic Vision label.
-            lens["force_lens_only"] = True
-            combined_name = " | ".join(fuse_identity_aliases(lens_title, "", lens.get("aliases")))
-            active_lens = lens
-            identity_source = "LENS_FASHION_FORCED"
-            print(f"FASHION LENS FORCED: {lens_title}")
-        elif lens_title and vision_name:
-            if identity_candidates_agree(vision_name, lens_title):
-                # الاتفاق = أقوى حالة: نبحث بعنوان Lens الدقيق + اسمي Vision العربي والإنجليزي معاً.
-                combined_name = " | ".join(fuse_identity_aliases(lens_title, vision_name))
-                active_lens = lens
-                identity_source = "VISION+LENS_AGREE_FUSED"
-                print("IDENTITY JUDGE SKIPPED: candidates already agree -> fused aliases")
-            else:
-                judged_name, active_lens, identity_source = choose_image_identity(
-                    b64, mime, lens, vision_name
-                )
-                if active_lens:
-                    # حتى بعد فوز Lens، مرادفات Vision تبقى في البحث النصي لتغطية الفهرسة العربية.
-                    combined_name = " | ".join(fuse_identity_aliases(judged_name, vision_name))
-                else:
-                    combined_name = judged_name
-        elif lens_title:
-            combined_name = " | ".join(fuse_identity_aliases(lens_title, "", lens.get("aliases")))
-            active_lens, identity_source = lens, "LENS_ONLY"
-        else:
-            combined_name, active_lens, identity_source = vision_name, None, "VISION_LENS_EMPTY"
-    else:
-        print("GOOGLE LENS SKIPPED BY SMART ROUTER")
-
-    print(f"FINAL IMAGE IDENTITY [{identity_source}]: {combined_name}")
-
-    if combined_name and caption:
-        request_query = f"{caption} — {combined_name}"
-        prompt_text = (
-            f"هوية المنتج المعتمدة: {combined_name}\n"
-            f"طلب المستخدم: {caption}\n"
-            "ابحث عن نفس المنتج فقط. لا توسع البحث إلى منتج يشاركه المكون أو اللون أو الفئة. "
-            f"{LANG_INSTR[lang]}"
-        )
-        txt,urls=search_product(request_query, lang, prompt_text=prompt_text, lens_context=active_lens)
-        query = request_query
-    elif combined_name:
-        txt,urls=search_product(combined_name, lang, lens_context=active_lens)
-        query = combined_name
-    else:
-        txt, urls = "", {}
-        query = caption
-
-    if query:
-        LAST_SEARCH[from_number] = {"product": query}
-    if not txt or not extract_store_offers(txt):
-        if txt and (is_service_answer(txt) or is_informational_answer(txt)):
-            send_product_result(from_number, txt, urls, bot_id, lang, query)
-            return
-        if query:
-            # حتى بدون نتائج Lens، البحث العالمي والبدائل يعملان نصياً بالاسم المحدد.
-            _store_pending_global(from_number, bot_id, lang, query, active_lens, prompt_text if (combined_name and caption) else None)
-            send_not_found_choice(from_number, bot_id, lang)
-        else:
-            send_whatsapp_text(from_number,T(lang,"cant_identify"),bot_id)
-        return
-    result_type = send_product_result(from_number, txt, urls, bot_id, lang, query)
-    if result_type == "none" and query:
-        # كانت هناك عروض لكن كل روابطها غير مباشرة؛ نعرض الخيارات الثلاثة مثل مسار النص تماماً.
-        _store_pending_global(from_number, bot_id, lang, query, active_lens, prompt_text if (combined_name and caption) else None)
-        send_not_found_choice(from_number, bot_id, lang)
-        return
-    if query and (result_type == "service" or (result_type == "product" and AUTO_SEND_PRODUCT_MAPS)):
-        send_maps_button(from_number, query, bot_id, lang)
-
-def identify_image_product(msg):
-    try:
-        b64,mime=download_whatsapp_media(msg["image"]["id"])
-        return identify_product_with_retry(b64, mime, "ar")
-    except: return ""
-
-def process_cart(products, from_number, bot_id, lang="ar"):
-    # MARKET_CTX يضيع داخل WORKERS؛ بدون الغلاف يبحث للسلة كلها في الدولة الافتراضية.
-    market = market_for_user(from_number)
-    results = list(WORKERS.map(lambda p: (p, *_run_with_market(market, search_product, p, lang)), products))
-    any_ok = False
-    for p, txt, urls in results:
-        if not txt: continue
-        any_ok = True
-        send_product_result(from_number, txt, urls, bot_id, lang, p, best_only=True)
-    if not any_ok:
-        send_whatsapp_text(from_number, T(lang, "not_found"), bot_id)
-        return
-    LAST_SEARCH[from_number] = {"product": products[0]}
-
-def process_multi_images(messages,from_number,bot_id,lang="ar"):
-    activate_market(from_number)
-    send_whatsapp_text(from_number,T(lang,"multi_images",c=len(messages)),bot_id)
-    names=[n for n in WORKERS.map(identify_image_product,messages) if n]
-    if not names:
-        send_whatsapp_text(from_number,T(lang,"cant_identify"),bot_id)
-        return
-    process_cart(names, from_number, bot_id, lang)
-
-def is_map_command(text):
-    compact = re.sub(r"[^\w\u0600-\u06FF]", "", normalize_ar(text))
-    exact = {
-        "الخريطه", "خريطه", "الموقع", "موقع", "اللوكيشن", "لوكيشن",
-        "الاقرب", "اقربمكان", "وينه", "ويناحصله", "وينالاقيه",
-        "map", "location", "nearest", "closest"
-    }
-    return compact in exact
-
-def send_last_search_map(from_number, bot_id, lang):
-    last_search = LAST_SEARCH.get(from_number)
-    if not last_search or not last_search.get("product"):
-        send_whatsapp_text(from_number, T(lang, "no_saved_product"), bot_id)
-        return
-    send_maps_button(from_number, last_search["product"], bot_id, lang)
-
-
-# ---- فهم نية المستخدم من الجمل الكاملة --------------------------------------
-# المشكلة: "السلام عليكم\nمعجون ضد الصراصير عزكم الله وين أحصله\nمع الشكر"
-# كانت تُقص على الأسطر وتتحول إلى «3 منتجات» وهمية. الحل ثلاث طبقات:
-#   1) بدون تكلفة: اسم منتج قصير مباشر يمر كما هو (السلوك القديم محفوظ).
-#   2) بدون تكلفة: منظف تحيات/أدعية/شكر بالـ regex يستخرج المنتج من الجملة.
-#   3) نموذج Gemini السريع (بدون بحث، رخيص) للجمل المعقدة، يرجع JSON بالنية والمنتجات.
-
-GREETING_ONLY_FORMS = {
-    "السلامعليكم", "سلامعليكم", "السلامعليكمورحمهاللهوبركاته", "السلامعليكمورحمهالله",
-    "هلا", "هلاوالله", "اهلين", "اهلا", "اهلاوسهلا", "مرحبا", "مراحب", "حياكم", "حياكالله",
-    "صباحالخير", "صباحالنور", "مساءالخير", "مساءالنور", "شلونكم", "شخباركم", "شلونك", "شخبارك",
-    "hi", "hello", "hey", "goodmorning", "goodevening", "salam", "assalamualaikum", "hii", "helloo",
-}
-THANKS_ONLY_FORMS = {
-    "شكرا", "شكرًا", "شكرالك", "شكرالكم", "مشكور", "مشكورين", "تسلم", "تسلمون", "يعطيكالعافيه",
-    "يعطيكمالعافيه", "جزاكاللهخير", "جزاكماللهخير", "اللهيعطيكالعافيه", "ماقصرت", "ماقصرتوا",
-    "thanks", "thankyou", "thx", "thanku", "ty", "shukran",
-}
-CONVERSATIONAL_HINTS = (
-    "السلام", "عليكم", "صباح", "مساء", "هلا", "مرحبا", "حياك", "لو سمحت", "لوسمحت",
-    "شلون", "شخبار", "عساك", "عساكم", "كيفك", "كيف الحال", "اخبارك",
-    "عزكم الله", "اعزكم الله", "أعزكم الله", "اكرمكم", "أكرمكم", "حشاكم", "بلا مواخذه", "بلا مؤاخذة",
-    "شكرا", "مشكور", "تسلم", "يعطيك", "جزاك", "ما قصرت",
-    "وين", "أين", "اين", "احصل", "أحصل", "القى", "ألقى", "الاقي", "ألاقي",
-    "ابي", "أبي", "ابغى", "أبغى", "اريد", "أريد", "محتاج", "ودي", "تكفى", "تكفون",
-    "ممكن", "عندكم", "عندك", "بكم", "كم سعر", "وش سعر", "شكم", "دلوني", "دلني",
-    "ساعدني", "ساعدوني", "ابحث لي", "دور لي", "دورلي", "اشتري", "أشتري",
-    "please", "where", "can i", "could you", "i need", "i want", "looking for",
-    "how much", "help me", "find me", "thanks", "thank", "how are you", "good morning", "good evening",
+FASHION_TYPES = ("MULES", "SLIPPERS", "SHOES", "BAG", "CLOTHING", "DRESS", "SHIRT")
+FASHION_WORDS_HAY = (
+    "mule", "slipper", "sandal", "shoe", "sneaker", "bag", "dress", "shirt",
+    "blouse", "pajama", "pyjama", "abaya", "فستان", "قميص", "حذاء", "شنطه", "بيجام", "عبايه"
 )
 
-PLEASANTRY_PATTERNS = [
-    r"السلام عليكم(?:\s*ورحمة الله(?:\s*وبركاته)?)?", r"و?عليكم السلام(?:\s*ورحمة الله(?:\s*وبركاته)?)?",
-    r"صباح الخير", r"صباح النور", r"مساء الخير", r"مساء النور",
-    r"هلا(?:\s*والله)?", r"ا?هلا(?:\s*وسهلا)?", r"مرحبا", r"حياكم?(?:\s*الله)?",
-    r"شلونك(?:م)?", r"شخبارك(?:م)?",
-    r"[أا]?عزكم الله", r"[أا]كرمكم الله", r"حشاكم", r"بلا م[ؤو]اخذة?ه?",
-    r"مع الشكر(?:\s*الجزيل)?", r"و?شكرا(?:\s*جزيلا)?(?:\s*لكم?)?", r"مشكورين?", r"تسلمون?",
-    r"يعطيكم?\s*العافيه?ة?", r"جزاكم?\s*الله\s*خيرا?", r"الله يخليكم?", r"ما قصرتو?ا?",
-    r"لو سمحتو?ا?", r"من فضلكم?", r"تكفون", r"تكفى", r"ممكن", r"ارجوكم?", r"أرجوكم?", r"رجاء",
-    r"وين\s*[أا]?حصله?ا?", r"وين\s*[أا]?لقاه?ا?", r"وين\s*[أا]لاقيه?ا?", r"وين\s*موجوده?",
-    r"[أا]ين\s*[أا]جده?ا?", r"[أا]بي\s*[أا]عرف\s*وين", r"دلوني\s*عليه?ا?", r"دلني\s*عليه?ا?",
-    r"[أا]بي\s*[أا]شتري", r"[أا]بغى\s*[أا]شتري", r"[أا]ريد\s*شراء", r"[أا]ريد", r"[أا]بغى", r"[أا]بي", r"محتاجه?",
-    r"دور\s*لي", r"ابحثو?ا?\s*لي", r"ساعدو?ني",
-    r"\bhi\b", r"\bhello\b", r"\bhey\b", r"\bplease\b", r"\bthanks?(?:\s*you)?\b", r"\bthank\s*you\b",
-    r"where\s*(?:can|do)\s*i\s*(?:find|get|buy)\s*(?:it|this)?", r"i\s*(?:need|want)", r"looking\s*for",
-    r"can\s*you\s*(?:find|get)\s*me", r"help\s*me\s*find",
-]
-_PLEASANTRY_RE = re.compile("|".join(PLEASANTRY_PATTERNS), flags=re.IGNORECASE)
+def is_fashion_identity(lens_context, vision_name=""):
+    sig = ((lens_context or {}).get("signature") or {})
+    if (sig.get("type") or "").upper() in FASHION_TYPES:
+        return True
+    hay = normalize_ar(f"{((lens_context or {}).get('chosen') or {}).get('title','')} {vision_name}")
+    return any(normalize_ar(w) in hay for w in FASHION_WORDS_HAY)
 
-INTENT_PARSE_SYSTEM = """أنت محلل طلبات لبوت تسوق على واتساب. المستخدم يكتب أحياناً جملة كاملة فيها تحية ودعاء وشكر مع طلبه.
-مهمتك استخراج المطلوب الحقيقي فقط.
-أرجع JSON فقط بدون أي شرح وبدون Markdown:
-{"intent":"search|service|greeting|thanks|chat","products":["اسم المنتج نظيفاً"]}
+def canonical_generic_aliases(signature, vision_name=""):
+    """اسم فئة نظيف للصور العامة؛ يمنع عنوان إعلان Ubuy من التحول إلى هوية المنتج."""
+    ptype = str((signature or {}).get("type") or "").upper()
+    by_type = {
+        "BASKETBALL": ["كرة سلة", "basketball"],
+        "FOOTBALL": ["كرة قدم", "football"],
+        "SOCCER_BALL": ["كرة قدم", "soccer ball"],
+        "VOLLEYBALL": ["كرة طائرة", "volleyball"],
+        "TENNIS_RACKET": ["مضرب تنس", "tennis racket"],
+        "PADEL_RACKET": ["مضرب بادل", "padel racket"],
+        "JUMP_ROPE": ["حبل قفز", "jump rope"],
+        "MUG": ["كوب", "mug"],
+        "CUP": ["كوب", "cup"],
+    }
+    if ptype in by_type:
+        return by_type[ptype]
+    aliases = split_product_aliases(vision_name)
+    return aliases[:2]
 
-قواعد إلزامية:
-- "search": المستخدم يريد منتجاً. احذف التحية والدعاء (مثل: عزكم الله، أكرمكم الله، حشاكم) والشكر وعبارات مثل (وين أحصله، أبي أشتري، دلوني). أبقِ اسم المنتج وصفاته فقط.
-- المنتج الواحد = عنصر واحد في products حتى لو كانت الرسالة على عدة أسطر. لا تقسم الجملة الواحدة أبداً.
-- عدة منتجات مختلفة فعلاً (مفصولة بفواصل أو "و") = عدة عناصر.
-- "service": طلب فني/سباك/كهربائي/تصليح... ضع وصف الخدمة والمنطقة في products.
-- "greeting": تحية فقط بلا أي طلب. products فارغة.
-- "thanks": شكر فقط بلا طلب جديد. products فارغة.
-- "chat": كلام عام أو سؤال غير متعلق بمنتج. products فارغة.
-مثال: "السلام عليكم معجون ضد الصراصير عزكم الله وين أحصله مع الشكر"
-الجواب: {"intent":"search","products":["معجون ضد الصراصير"]}"""
+
+def is_generic_product_identity(lens_context, vision_name=""):
+    """هل الصورة لمنتج عام بلا شعار/موديل مرئي، مثل كرة سلة عادية؟"""
+    if not lens_context:
+        return False
+    sig = lens_context.get("signature") or {}
+    ptype = str(sig.get("type") or "").upper()
+    brand_visible = bool(sig.get("brand_visible"))
+    brand = normalize_ar(sig.get("brand") or "").strip() if brand_visible else ""
+    chosen = lens_context.get("chosen") or {}
+    chosen_title = str(chosen.get("title") or "")
+
+    # الأنواع البصرية العامة لا تأخذ برانداً من عنوان Lens أو من متجر وسيط.
+    generic_types = {"BASKETBALL", "FOOTBALL", "SOCCER_BALL", "VOLLEYBALL", "BALL", "JUMP_ROPE", "MUG", "CUP"}
+    if ptype in generic_types and not brand_visible:
+        return True
+
+    if brand:
+        return False
+
+    title_trusted = not is_marketplace_lens_item(chosen)
+    hay = normalize_ar(f"{chosen_title if title_trusted else ''} {vision_name}")
+    # رقم موديل واضح يعني منتجاً محدداً لا فئة عامة.
+    if re.search(r"[a-z]\d{3,}|\d{3,}[a-z]", hay):
+        return False
+
+    known_brands = (
+        "nike","adidas","wilson","molten","spalding","jordan","puma","under armour",
+        "reebok","asics","new balance","mizuno","yonex","babolat","head",
+        "apple","samsung","sony","lg","xiaomi","huawei","dyson","philips","almarai",
+        "نايك","اديداس","ويلسون","مولتن","سبالدينج","جوردن","المراعي",
+    )
+    if title_trusted and any(normalize_ar(b) in hay for b in known_brands):
+        return False
+    return True
+
+def _legacy_should_use_google_lens(vision_name):
+    """التوجيه القديم: Lens للأزياء والقطع البصرية، وVision للعبوات النصية."""
+    hay = normalize_ar(vision_name or "")
+    text_heavy = ("شيبس","بسكوت","حليب","عصير","شامبو","معجون","منظف","قهوه","شاي","chips","biscuit","shampoo","juice","milk","detergent")
+    if any(w in hay for w in text_heavy):
+        return False
+    return True
+
+def _is_text_heavy_packaged_product(vision_name):
+    hay = normalize_ar(vision_name or "")
+    packaged = (
+        "شيبس","بسكوت","حليب","عصير","شامبو","معجون","منظف","قهوه","شاي","مشروب",
+        "علبه","عبوه","كيس","chips","biscuit","shampoo","juice","milk","detergent",
+        "toothpaste","coffee","tea","can","pack","bottle"
+    )
+    return any(w in hay for w in packaged)
+
+def lens_routing_decision(vision_name):
+    """هل نجعل Lens هو المصدر الأساسي لهذه الصورة؟"""
+    if not LENS_PRIMARY_MODE:
+        return _legacy_should_use_google_lens(vision_name)
+    if LENS_PRIMARY_EXCEPT_TEXT_HEAVY and _is_text_heavy_packaged_product(vision_name):
+        return False
+    return True
+
+def should_use_google_lens(vision_name):
+    return lens_routing_decision(vision_name)
+
+def choose_image_identity(lens_context, vision_name):
+    """دمج الهويتين: عنوان Lens أولاً إن وُجد، وإلا اسم Vision."""
+    lens_title = ((lens_context or {}).get("chosen") or {}).get("title", "").strip()
+    aliases = fuse_identity_aliases(lens_title, vision_name)
+    query = " | ".join(aliases) if aliases else (vision_name or lens_title)
+    display = lens_title or split_product_aliases(vision_name)[0] if (lens_title or vision_name) else query
+    return query, display
+
+def identify_image_product(image_b64, mime_type, lang):
+    """يشغل Lens و Vision (بالتوازي إن أمكن) ويعيد (query, display, lens_context)."""
+    lens_context, vision_name = None, ""
+    if LENS_PARALLEL_WITH_VISION and ENABLE_GOOGLE_LENS and SERPAPI_API_KEY and PUBLIC_BASE_URL:
+        lens_future = LENS_POOL.submit(_run_with_market, current_market(), google_lens_lookup, image_b64, mime_type, lang)
+        vision_name = identify_product_with_retry(image_b64, mime_type)
+        try:
+            lens_context = lens_future.result(timeout=120)
+        except Exception as e:
+            print(f"LENS FUTURE ERR: {e}")
+            lens_context = None
+    else:
+        vision_name = identify_product_with_retry(image_b64, mime_type)
+        if should_use_google_lens(vision_name):
+            lens_context = google_lens_lookup(image_b64, mime_type, lang, query_hint=vision_name)
+    if lens_context and not lens_context.get("matches"):
+        lens_context = None
+    # v69: منتج عام بلا براند -> نترك هوية Lens الحرفية ونبحث باسم الفئة نصياً.
+    # هذا يعيد كل قوة البحث المحلي (متاجر الأولوية + الطبقة القديمة + الروابط غير المفحوصة).
+    if lens_context and is_generic_product_identity(lens_context, vision_name):
+        sig = lens_context.get("signature") or {}
+        generic_aliases = []
+        for value in canonical_generic_aliases(sig, vision_name):
+            if value and value not in generic_aliases:
+                generic_aliases.append(value)
+        chosen_title = str((lens_context.get("chosen") or {}).get("title") or "")
+        for value in (lens_context.get("aliases") or []):
+            if value and value != chosen_title and value not in generic_aliases and not is_marketplace_lens_item({"title": value}):
+                generic_aliases.append(value)
+        if generic_aliases:
+            query = " | ".join(generic_aliases[:2])
+            display = generic_aliases[0]
+            print(f"GENERIC PRODUCT MODE: '{chosen_title[:60]}' -> '{query}'")
+            return query, display, None
+    if lens_context and is_fashion_identity(lens_context, vision_name):
+        lens_context["force_lens_only"] = True
+    # v70: نحفظ أسماء الفئة (كرة سلة | basketball) داخل السياق لشبكة الأمان النهائية.
+    if lens_context:
+        chosen_title = str((lens_context.get("chosen") or {}).get("title") or "")
+        cats = []
+        for value in split_product_aliases(vision_name):
+            if value and value not in cats:
+                cats.append(value)
+        for value in (lens_context.get("aliases") or []):
+            if value and value != chosen_title and value not in cats and not is_marketplace_lens_item({"title": value}):
+                cats.append(value)
+        lens_context["category_aliases"] = cats[:2]
+    query, display = choose_image_identity(lens_context, vision_name)
+    return query, display, lens_context
+
+def process_single_image(from_number, msg, bot_id, lang):
+    try:
+        activate_market(from_number)
+        send_whatsapp_text(from_number, T(lang, "identifying"), bot_id)
+        image_b64, mime_type = download_whatsapp_media(msg["image"]["id"])
+    except Exception as e:
+        print(f"IMAGE DOWNLOAD ERR: {e}")
+        send_whatsapp_text(from_number, T(lang, "image_error"), bot_id)
+        return
+    try:
+        query, display, lens_context = identify_image_product(image_b64, mime_type, lang)
+        if not query:
+            send_whatsapp_text(from_number, T(lang, "cant_identify"), bot_id)
+            return
+        txt, urls = search_product(
+            query, lang,
+            source_image_b64=image_b64, source_image_mime=mime_type,
+            lens_context=lens_context,
+        )
+
+        def _has_result(t):
+            return t and (extract_store_offers(t) or is_service_answer(t) or is_informational_answer(t))
+
+        # v70: شبكة الأمان — قبل أي رسالة «ما لقيت»، نجرب بحثاً محلياً باسم الفئة
+        # (كرة سلة | basketball) بدون قيود Lens. هذا يضمن أن البوت لا يكون أضعف
+        # من بحث Google العادي مهما كان عنوان Lens غريباً (Spalding TF Gold | Ubuy).
+        if not _has_result(txt):
+            cats = (lens_context or {}).get("category_aliases") or []
+            if cats:
+                cat_query = " | ".join(cats)
+                print(f"CATEGORY FALLBACK SEARCH: {cat_query}")
+                cat_txt, cat_urls = search_product(cat_query, lang)
+                if _has_result(cat_txt):
+                    txt, urls = cat_txt, cat_urls
+                    display = cats[0]
+                    query = cat_query
+                    lens_context = None
+
+        if not _has_result(txt):
+            send_not_found_choice(from_number, bot_id, lang, query, lens_context=lens_context, identified_name=display)
+            return
+        kind = send_product_result(from_number, txt, urls, bot_id, lang, display or query)
+        if kind == "none":
+            # v70: نفس شبكة الأمان إذا فشل إرسال الروابط المباشرة.
+            cats = (lens_context or {}).get("category_aliases") or []
+            if cats:
+                cat_query = " | ".join(cats)
+                print(f"CATEGORY FALLBACK (POST-SEND): {cat_query}")
+                cat_txt, cat_urls = search_product(cat_query, lang)
+                if _has_result(cat_txt):
+                    kind = send_product_result(from_number, cat_txt, cat_urls, bot_id, lang, cats[0])
+                    if kind == "product":
+                        LAST_SEARCH[from_number] = short_query(cats[0])
+                        if AUTO_SEND_PRODUCT_MAPS:
+                            send_maps_button(from_number, LAST_SEARCH[from_number], bot_id, lang)
+                    return
+            send_not_found_choice(from_number, bot_id, lang, query, lens_context=lens_context, identified_name=display)
+            return
+        if kind == "product":
+            LAST_SEARCH[from_number] = short_query(display or query)
+            if AUTO_SEND_PRODUCT_MAPS:
+                send_maps_button(from_number, LAST_SEARCH[from_number], bot_id, lang)
+    except Exception as e:
+        print(f"SINGLE IMAGE ERR: {e}")
+        send_whatsapp_text(from_number, T(lang, "image_error"), bot_id)
+
+def process_cart(from_number, product_names, bot_id, lang, per_item_context=None):
+    """سلة: يبحث عن كل منتج ويرسل أفضل عرض واحد لكل منتج."""
+    market = current_market()
+    def _one(item):
+        idx, name = item
+        ctx = (per_item_context or {}).get(idx) or {}
+        return idx, name, _run_with_market(
+            market, search_product, name, lang,
+            source_image_b64=ctx.get("image_b64"), source_image_mime=ctx.get("mime"),
+            lens_context=ctx.get("lens_context"),
+        )
+    results = list(WORKERS.map(_one, list(enumerate(product_names))))
+    results.sort(key=lambda r: r[0])
+    found_any = False
+    for _, name, (txt, urls) in results:
+        display = name
+        if txt and extract_store_offers(txt):
+            found_any = True
+            send_product_result(from_number, txt, urls, bot_id, lang, display, best_only=True)
+        else:
+            miss = T(lang, "identified_not_found", p=display)
+            send_whatsapp_text(from_number, miss, bot_id)
+    if found_any:
+        LAST_SEARCH[from_number] = short_query(product_names[0])
+
+def process_multi_images(from_number, msgs, bot_id, lang):
+    try:
+        activate_market(from_number)
+        send_whatsapp_text(from_number, T(lang, "multi_images", c=len(msgs)), bot_id)
+        names, contexts = [], {}
+        for i, m in enumerate(msgs[:6]):
+            try:
+                image_b64, mime_type = download_whatsapp_media(m["image"]["id"])
+            except Exception as e:
+                print(f"CART IMAGE DL ERR: {e}")
+                continue
+            query, display, lens_context = identify_image_product(image_b64, mime_type, lang)
+            if not query:
+                continue
+            names.append(query)
+            contexts[len(names) - 1] = {"image_b64": image_b64, "mime": mime_type, "lens_context": lens_context}
+        if not names:
+            send_whatsapp_text(from_number, T(lang, "cant_identify"), bot_id)
+            return
+        process_cart(from_number, names, bot_id, lang, per_item_context=contexts)
+    except Exception as e:
+        print(f"MULTI IMAGE ERR: {e}")
+        send_whatsapp_text(from_number, T(lang, "image_error"), bot_id)
+
+# ---- أوامر الخريطة وفهم النية -----------------------------------------------
+
+MAP_COMMAND_WORDS = (
+    "خريطه", "خريطة", "الخريطه", "الخريطة", "اقرب مكان", "أقرب مكان", "اقرب محل",
+    "وين اقرب", "وين أقرب", "map", "nearest", "near me", "الاقرب", "الأقرب"
+)
+
+def is_map_command(text):
+    t = normalize_ar(text)
+    return any(normalize_ar(w) in t for w in MAP_COMMAND_WORDS) and len(t) <= 40
+
+def send_last_search_map(from_number, bot_id, lang):
+    product = LAST_SEARCH.get(from_number, "")
+    if not product:
+        send_whatsapp_text(from_number, T(lang, "no_saved_product"), bot_id)
+        return
+    m = market_for_user(from_number)
+    url = maps_search_url(product, m.get("lat"), m.get("lng"))
+    send_whatsapp_cta(from_number, T(lang, "maps_body_loc", p=product), url, bot_id, T(lang, "maps_btn"))
+
+GREETING_ONLY_FORMS = (
+    "هلا","هلا والله","مرحبا","مرحبتين","السلام عليكم","سلام","صباح الخير","مساء الخير",
+    "hi","hello","hey","صباحو","مساءو","اهلين","أهلين","هاي"
+)
+THANKS_ONLY_FORMS = (
+    "شكرا","شكرًا","مشكور","مشكورين","تسلم","يعطيك العافيه","يعطيك العافية","thanks","thank you","thx","ثانكس"
+)
+CONVERSATIONAL_HINTS = ("كيف حالك","شخبارك","شلونك","how are you","من انت","من أنت","who are you","وش تسوي")
+PLEASANTRY_PATTERNS = (
+    r"^(هلا( والله)?|مرحبا|مرحبتين|السلام عليكم|سلام|صباح الخير|مساء الخير|اهلين|أهلين|هاي|hi|hello|hey)[\s,،!.-]*",
+    r"^(لو سمحت|من فضلك|الله يخليك|ممكن|please|plz)[\s,،!.-]*",
+    r"[\s,،!.-]*(شكرا|شكرًا|مشكور|تسلم|thanks|thank you|thx)[\s!.،-]*$",
+)
+_PLEASANTRY_RE = [re.compile(p, re.I) for p in PLEASANTRY_PATTERNS]
+
+INTENT_PARSE_SYSTEM = """أنت محلل نوايا لبوت تسوق واتساب. حلل رسالة المستخدم وأرجع JSON فقط بلا أي شرح:
+{"intent": "...", "query": "..."}
+intent واحدة من:
+- greeting  : تحية فقط بلا طلب.
+- thanks    : شكر فقط بلا طلب.
+- map       : يطلب أقرب مكان/الخريطة لآخر بحث.
+- search    : طلب منتج أو خدمة أو سؤال معلوماتي؛ ضع في query نص الطلب بعد إزالة عبارات المجاملة.
+- chat      : كلام عام لا يحتاج بحث.
+إذا كانت الرسالة تحية + طلب معاً فهي search. أرجع JSON فقط."""
 
 def strip_pleasantries(text):
-    """يشيل التحيات والأدعية والشكر وعبارات الطلب، ويرجع المتبقي كسطر واحد."""
-    cleaned = _PLEASANTRY_RE.sub(" ", text or "")
-    cleaned = re.sub(r"[،,.!؟?]+", " ", cleaned)
-    return " ".join(cleaned.split()).strip()
+    t = (text or "").strip()
+    for rx in _PLEASANTRY_RE:
+        t = rx.sub("", t).strip()
+    return t or (text or "").strip()
 
-def parse_user_intent(user_text, lang):
-    """يفهم الجملة الكاملة ويرجع {"intent": ..., "products": [...]}."""
-    text = (user_text or "").strip()
-    compact = re.sub(r"[^\w\u0600-\u06FF]", "", normalize_ar(text))
-
-    if compact in GREETING_ONLY_FORMS:
-        return {"intent": "greeting", "products": []}
-    if compact in THANKS_ONLY_FORMS:
-        return {"intent": "thanks", "products": []}
-
-    norm = normalize_ar(text)
-    conversational = ("؟" in text or "?" in text or
-                      any(normalize_ar(h) in norm for h in CONVERSATIONAL_HINTS))
-
-    # الطبقة 1 (بدون تكلفة): اسم منتج مباشر قصير — نفس سلوك البوت القديم بالضبط.
-    if not conversational and len(text.split()) <= 7:
-        return {"intent": "search", "products": extract_products(text)}
-
-    # الطبقة 3: جملة محادثة — نموذج سريع رخيص يستخرج النية والمنتجات.
-    raw, _ = call_gemini([{"text": text}], system=INTENT_PARSE_SYSTEM, use_search=False)
+def parse_user_intent(text, lang):
+    """طبقة فهم النية: قواعد سريعة أولاً، ثم Gemini بدون بحث للحالات الرمادية."""
+    raw = (text or "").strip()
+    t = normalize_ar(raw)
+    if not raw:
+        return "chat", ""
+    if t in tuple(normalize_ar(x) for x in GREETING_ONLY_FORMS):
+        return "greeting", ""
+    if t in tuple(normalize_ar(x) for x in THANKS_ONLY_FORMS):
+        return "thanks", ""
+    if is_map_command(raw):
+        return "map", ""
+    if any(normalize_ar(h) in t for h in CONVERSATIONAL_HINTS) and len(t) <= 30:
+        return "chat", ""
+    stripped = strip_pleasantries(raw)
+    # نص واضح وطويل نسبياً: ابحث مباشرة بدون اتصال إضافي.
+    if len(stripped) >= 3 and stripped != "":
+        if stripped == raw or len(stripped) >= 3:
+            direct = stripped
+            # حالات رمادية قصيرة جداً تُمرر إلى محلل النية.
+            if len(normalize_ar(direct)) >= 3 and (direct != raw or len(direct.split()) >= 1):
+                if direct.lower() not in ("ok", "اوك", "تمام", "طيب"):
+                    return "search", direct
     try:
-        data = json.loads(re.search(r"\{.*\}", raw or "", flags=re.S).group(0))
-        intent = str(data.get("intent") or "search").lower().strip()
-        products = [str(p).strip() for p in (data.get("products") or []) if str(p).strip()]
-        if intent in ("greeting", "thanks", "chat") and not products:
-            print(f"INTENT PARSED: {intent} (no products)")
-            return {"intent": intent, "products": []}
-        if intent in ("search", "service") and products:
-            print(f"INTENT PARSED: {intent} products={products}")
-            return {"intent": "search", "products": products[:6]}
-    except Exception:
-        print(f"INTENT PARSE FAIL: {raw!r}")
+        txt, _ = call_gemini([{"text": raw}], system=INTENT_PARSE_SYSTEM, use_search=False)
+        j = json.loads(re.sub(r"```(?:json)?|```", "", txt or "").strip())
+        intent = str(j.get("intent") or "chat").strip()
+        query = str(j.get("query") or "").strip()
+        if intent == "search" and not query:
+            query = strip_pleasantries(raw)
+        return intent, query
+    except Exception as e:
+        print(f"INTENT PARSE ERR: {e}")
+        return "search", strip_pleasantries(raw)
 
-    # الطبقة 2 (احتياط بدون تكلفة): تنظيف regex ثم اعتبار المتبقي منتجاً واحداً —
-    # لا نقسم على الأسطر أبداً لأن الجملة المحادثية جملة واحدة.
-    cleaned = strip_pleasantries(text)
-    if cleaned and len(cleaned) >= 3:
-        print(f"INTENT REGEX FALLBACK: {cleaned!r}")
-        return {"intent": "search", "products": [cleaned]}
-    # ما بقي شيء بعد التنظيف = كانت مجاملات فقط.
-    return {"intent": "greeting" if not compact.strip() or any(g in compact for g in ("سلام", "هلا", "مرحبا")) else "chat", "products": []}
-
-
-def process_text_message(message,bot_id,onboarding_checked=False):
-    from_number=message["from"]
+def process_text_message(msg, bot_id, onboarding_checked=False):
+    from_number = msg["from"]
     load_user_preferences(from_number)
-    if not onboarding_checked:
-        if from_number not in USER_LANG:
-            cache_pending_message(from_number, message, bot_id); send_language_choice(from_number, bot_id); return
-        if not location_is_valid(from_number):
-            cache_pending_message(from_number, message, bot_id); send_location_request(from_number, bot_id, USER_LANG.get(from_number,"ar"), bool(USER_LOCATION_TS.get(from_number,0))); return
-    activate_market(from_number); user_text=message["text"]["body"]
-    cmd=re.sub(r"[^\w\u0600-\u06FF]","",user_text.strip().lower())
-    if cmd in ("لغة","اللغة","غيراللغة","language","lang","changelanguage"):
-        send_language_choice(from_number, bot_id); return
-    detected=detect_lang(user_text)
-    if detected and USER_LANG.get(from_number) != detected:
-        USER_LANG[from_number]=detected
-        save_user_preferences(from_number)
-    lang=USER_LANG.get(from_number,"ar")
-    if is_map_command(user_text):
-        send_last_search_map(from_number, bot_id, lang)
+    activate_market(from_number)
+    body = (msg.get("text") or {}).get("body", "").strip()
+    lang = USER_LANG.get(from_number) or detect_lang(body) or "ar"
+    if not body:
         return
-    pend=PENDING_IMAGES.pop(from_number,None)
-    if pend and pend["images"]:
-        # الرسالة النصية بعد صورة معلقة تُعامل كوصف للصورة نفسها،
-        # ولا نكمل لمعالجتها كبحث نصي مستقل (كان يسبب بحثين وردّين مزدوجين).
-        if len(pend["images"])==1:
-            img_msg = pend["images"][0]
-            img = img_msg.setdefault("image", {})
-            if not (img.get("caption") or "").strip():
-                img["caption"] = user_text.strip()
-            process_single_image(img_msg, pend["bot_id"], lang)
-        else:
-            process_multi_images(pend["images"], from_number, pend["bot_id"], lang)
-        return
-    parsed = parse_user_intent(user_text, lang)
-    intent = parsed.get("intent", "search")
+    intent, query = parse_user_intent(body, lang)
+    print(f"TEXT INTENT: {from_number} -> {intent} | {query[:80]}")
+
     if intent == "greeting":
         send_whatsapp_text(from_number, T(lang, "welcome_reply"), bot_id)
         return
     if intent == "thanks":
         send_whatsapp_text(from_number, T(lang, "thanks_reply"), bot_id)
         return
+    if intent == "map":
+        send_last_search_map(from_number, bot_id, lang)
+        return
     if intent == "chat":
-        # كلام عام بلا منتج: نرحب ونوجه بدل ما نبحث عن جملة عشوائية.
         send_whatsapp_text(from_number, T(lang, "welcome_reply"), bot_id)
         return
-    products = [p for p in (parsed.get("products") or []) if p.strip()] or extract_products(user_text)
-    if len(products)==1:
-        send_whatsapp_text(from_number,T(lang,"searching",q=products[0]),bot_id)
-        txt,urls=search_product(products[0], lang)
-        LAST_SEARCH[from_number] = {"product": products[0]}
-        if not txt or (not extract_store_offers(txt) and not is_service_answer(txt) and not is_informational_answer(txt)):
-            # ما لقينا المنتج بالضبط محلياً: نعرض الخيارات الثلاثة بدل رسالة الاعتذار وحدها.
-            _store_pending_global(from_number, bot_id, lang, products[0], None, None)
-            send_not_found_choice(from_number, bot_id, lang)
-            return
-        result_type = send_product_result(from_number, txt, urls, bot_id, lang, products[0])
-        if result_type == "none":
-            # كانت هناك عروض لكن كل روابطها غير مباشرة؛ نفس الخيارات تنفع هنا أيضاً.
-            _store_pending_global(from_number, bot_id, lang, products[0], None, None)
-            send_not_found_choice(from_number, bot_id, lang)
-        elif result_type == "service" or (result_type == "product" and AUTO_SEND_PRODUCT_MAPS):
-            send_maps_button(from_number, products[0], bot_id, lang)
-    else:
-        send_whatsapp_text(from_number,T(lang,"multi_text",c=len(products)),bot_id)
-        process_cart(products, from_number, bot_id, lang)
 
-def process_location_message(message, bot_id):
-    from_number = message["from"]
+    query = query or strip_pleasantries(body)
+    products = extract_products(query)
+    if len(products) > 1:
+        send_whatsapp_text(from_number, T(lang, "multi_text", c=len(products)), bot_id)
+        process_cart(from_number, products, bot_id, lang)
+        return
+
+    send_whatsapp_text(from_number, T(lang, "searching", q=short_query(query)), bot_id)
+    txt, urls = search_product(query, lang)
+    if not txt or (not extract_store_offers(txt) and not is_service_answer(txt) and not is_informational_answer(txt)):
+        send_not_found_choice(from_number, bot_id, lang, query)
+        return
+    kind = send_product_result(from_number, txt, urls, bot_id, lang, query)
+    if kind == "none":
+        send_not_found_choice(from_number, bot_id, lang, query)
+        return
+    if kind in ("product", "service"):
+        LAST_SEARCH[from_number] = short_query(query)
+        if kind == "product" and AUTO_SEND_PRODUCT_MAPS:
+            send_maps_button(from_number, LAST_SEARCH[from_number], bot_id, lang)
+        elif kind == "service":
+            send_maps_button(from_number, LAST_SEARCH[from_number], bot_id, lang)
+
+def process_location_message(msg, bot_id):
+    from_number = msg["from"]
     load_user_preferences(from_number)
-    lat = message["location"]["latitude"]; lng = message["location"]["longitude"]
-    geo = reverse_geocode_market(lat, lng)
-    market = market_for_user(from_number)
-    market.update(geo)
-    market.update({"lat":lat,"lng":lng})
-    USER_MARKET[from_number]=market
-    USER_LOCATION_TS[from_number]=time.time()
-    MARKET_CTX.value=market
+    loc = msg.get("location") or {}
+    lat, lng = loc.get("latitude"), loc.get("longitude")
+    if lat is None or lng is None:
+        return
+    market = reverse_geocode_market(lat, lng)
+    if not market:
+        cc = infer_country_from_phone(from_number)
+        market = {"country": cc, "country_name": COUNTRY_NAMES.get(cc, cc.upper()), "city": "", "currency": COUNTRY_CURRENCIES.get(cc, "")}
+    market["lat"], market["lng"] = lat, lng
+    USER_MARKET[from_number] = market
+    USER_LOCATION_TS[from_number] = time.time()
     save_user_preferences(from_number)
-    print(f"USER MARKET UPDATED: {from_number} -> {market}; valid_for_hours={LOCATION_TTL_SECONDS/3600:.0f}")
+    activate_market(from_number)
     lang = USER_LANG.get(from_number, "ar")
-    city = market.get("city") or market.get("country_name") or market.get("country", "").upper()
-    msg = f"تم حفظ موقعك: {city} ✅\nراح أطلب تحديثه بعد 3 أيام." if lang == "ar" else f"Location saved: {city} ✅\nI’ll ask you to update it again after 3 days."
-    send_whatsapp_text(from_number, msg, bot_id)
-    route_pending_after_location(from_number)
+    print(f"LOCATION SAVED {from_number}: {market.get('city','')} {market.get('country','')}")
+    if from_number in PENDING_ONBOARDING:
+        route_pending_after_location(from_number)
+    else:
+        send_whatsapp_text(from_number, T(lang, "welcome_reply"), bot_id)
 
 @app.get("/")
-async def health(): return {"status":"v68 OPEN LOCAL STORES + CHEAPEST FIRST + 5 RESULTS + SPEC MATCH", "build":BUILD_ID, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
+async def health():
+    return {
+        "status": f"COOP BOT {BUILD_ID} RUNNING",
+        "features": "Google Shopping + category-first stores + generic image mode + marketplace demotion + real fils + local guard + two-layer search + Google Lens",
+        "gemini": GEMINI_STATS,
+        "cache_entries": len(SEARCH_CACHE),
+    }
