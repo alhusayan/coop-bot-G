@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v73-1-priced-first-social-ask-similar-fallback-20260804"
+BUILD_ID = "v73-2-local-only-no-foreign-nag-social-merged-20260804"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE -> GOOGLE LENS DIRECT PASSTHROUGH (raw results to user)")
@@ -3775,57 +3775,41 @@ def _pop_pending_lens_social(phone):
 
 
 def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
-    """v73: نتائج Lens موجهة لبلد المستخدم + فرز واضح.
+    """v73.2: منطق مبسّط حسب طلب المستخدم.
 
-    - نتائج برامج التواصل تُفصل وتُعرض فقط بعد سؤال منفصل 📱.
-    - المحلي يُرسل فوراً (المسعّر أولاً من الأرخص للأغلى، ثم بلا سعر).
-    - لا محلي؟ ثلاث خيارات: عالمي 🌍 (نتائج Lens العالمية)، بدائل مشابهة 🔄
-      (المسار الذكي الكامل القديم)، أو لا شكراً.
+    - فيه نتائج محلية؟ تُرسل بطاقاتها فوراً (المسعّر أولاً أرخص→أغلى) — وبدون أي
+      سؤال عن المتاجر الخارجية إطلاقاً.
+    - ما فيه محلي؟ سؤال واحد بثلاثة خيارات: عالمي 🌍 (نتائج Lens العالمية)،
+      بدائل مشابهة 🔄 (المسار الذكي الكامل القديم)، أو لا شكراً.
+    - نتائج برامج التواصل مدموجة مع الباقي مثل السابق — بدون سؤال منفصل.
     """
     matches = [m for m in (lens.get("matches") or []) if (m.get("title") or "").strip()]
     if not matches:
         return False
-    social = [m for m in matches if is_social_result(m)]
-    nonsocial = [m for m in matches if not is_social_result(m)]
-    local = [m for m in nonsocial if is_local_lens_result(m)]
-    foreign = [m for m in nonsocial if not is_local_lens_result(m)]
+    local = [m for m in matches if is_local_lens_result(m)]
+    foreign = [m for m in matches if not is_local_lens_result(m)]
     country = country_hint_word(lang) or current_market().get("country_name", "")
     chosen_title = ((lens.get("chosen") or {}).get("title") or matches[0]["title"]).strip()
     similar_query = (caption or chosen_title).strip()
     sent = False
     if local:
         sent = _send_lens_match_batch(from_number, local, bot_id, lang, convert_prices=False)
-    if foreign:
+    if not sent and foreign:
+        # فقط عند غياب المحلي: العالمي مدموج ضمن الخيارات الثلاثة.
         PENDING_LENS_FOREIGN[from_number] = {
             "bot_id": bot_id, "lang": lang, "matches": foreign[:LENS_RESULT_LIMIT],
             "query": similar_query, "ts": time.time(),
         }
-        if sent:
-            # فيه نتائج محلية: سؤال العالمي فقط.
-            send_whatsapp_buttons(from_number, T(lang, "lens_foreign_ask", c=len(foreign), country=country), [
-                {"id": "lf_yes", "title": T(lang, "lf_show")[:20]},
-                {"id": "lf_no", "title": T(lang, "lf_skip")[:20]},
-            ], bot_id)
-        else:
-            # v73: ما فيه محلي — ثلاث خيارات: عالمي / بدائل مشابهة (المسار الذكي القديم) / لا.
-            send_whatsapp_buttons(from_number, T(lang, "lens_no_local", c=len(foreign), country=country), [
-                {"id": "lf_yes", "title": T(lang, "opt_global")[:20]},
-                {"id": "lf_similar", "title": T(lang, "opt_similar")[:20]},
-                {"id": "lf_no", "title": T(lang, "lf_skip")[:20]},
-            ], bot_id)
-        sent = True
-    if social:
-        # v73: سؤال منفصل لنتائج برامج التواصل — تُعرض فقط عند الموافقة.
-        _store_pending_lens_social(from_number, bot_id, lang, social)
-        send_whatsapp_buttons(from_number, T(lang, "lens_social_ask"), [
-            {"id": "ls_yes", "title": T(lang, "ls_show")[:20]},
-            {"id": "ls_no", "title": T(lang, "ls_skip")[:20]},
+        send_whatsapp_buttons(from_number, T(lang, "lens_no_local", c=len(foreign), country=country), [
+            {"id": "lf_yes", "title": T(lang, "opt_global")[:20]},
+            {"id": "lf_similar", "title": T(lang, "opt_similar")[:20]},
+            {"id": "lf_no", "title": T(lang, "lf_skip")[:20]},
         ], bot_id)
         sent = True
     if not sent:
         return False
     LAST_SEARCH[from_number] = {"product": similar_query}
-    print(f"LENS DIRECT SENT: local={len(local)} foreign_pending={len(foreign)} social_pending={len(social)}")
+    print(f"LENS DIRECT SENT: local={len(local)} foreign={'asked' if (not local and foreign) else 'skipped'} ({len(foreign)})")
     return True
 
 def process_single_image(message,bot_id,lang="ar"):
@@ -4212,4 +4196,4 @@ def process_location_message(message, bot_id):
     route_pending_after_location(from_number)
 
 @app.get("/")
-async def health(): return {"status":"v73 PRICED-FIRST + SOCIAL ASK + SIMILAR FALLBACK", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
+async def health(): return {"status":"v73.2 LOCAL-ONLY DISPLAY + 3-OPTION FALLBACK + SOCIAL MERGED", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
