@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v73-1-priced-first-social-ask-similar-fallback-20260804"
+BUILD_ID = "v74-1-brand-compare-shopfilter-trio-exact-prices-20260805"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE -> GOOGLE LENS DIRECT PASSTHROUGH (raw results to user)")
@@ -43,6 +43,18 @@ SOCIAL_HOSTS = (
     "pinterest.", "facebook.com", "fb.com", "fb.watch", "x.com", "twitter.com",
     "threads.net", "reddit.com",
 )
+# v74: مواقع ليست متاجر أصلاً — تُرفض قبل حتى سؤال الذكاء الاصطناعي.
+NON_SHOP_HOSTS = (
+    "wikipedia.", "wikihow.", "fandom.com", "quora.com", "medium.com",
+    "blogspot.", "wordpress.", "tumblr.", "imdb.com", "tripadvisor.",
+    "yelp.", "github.", "stackoverflow.", "stackexchange.", "britannica.",
+    "cnn.", "bbc.", "nytimes.", "aljazeera.", "alarabiya.", "reuters.",
+    "alraimedia.", "alqabas.", "kooora.", "goal.com", "issuu.com", "scribd.com",
+    "slideshare.", "researchgate.", "academia.edu",
+)
+ENABLE_SHOP_AI_FILTER = env_bool("ENABLE_SHOP_AI_FILTER", True)
+# v74: مقارنة البراندات للطلب العام — خيارات المستخدم المعلقة للاختيار من القائمة.
+PENDING_BRAND_PICKS = {}
 GLOBAL_PENDING_TTL = max(300, int(os.environ.get("GLOBAL_PENDING_TTL_SECONDS", "900")))
 LOCATION_TTL_SECONDS = max(3600, int(os.environ.get("LOCATION_TTL_HOURS", "72")) * 3600)
 MARKET_CTX = threading.local()
@@ -840,6 +852,13 @@ MSG = {
         "lens_social_ask": "📱 لقيت للمنتج نتائج في برامج التواصل (انستجرام، تيك توك، سناب...).\nتبي أعرضها لك؟ 👇",
         "ls_show": "اعرضها 📱",
         "ls_skip": "لا شكراً 🙏",
+        "opt_social": "📱 عروض التواصل",
+        "more_options_ask": "تبي أكثر؟ 👇",
+        "social_none": "ما لقيت عروض للمنتج في برامج التواصل حالياً 😅",
+        "no_local_generic": "ما لقيت نتائج من متاجر محلية لهالصورة 😅 وش تبي أسوي؟ 👇",
+        "compare_searching": "⚖️ طلبك عام بدون ماركة محددة.. أسوي لك مقارنة بين أفضل البراندات المتوفرة!",
+        "pick_prompt": "اختر منتجاً من القائمة وأدور لك أفضل الأسعار المتوفرة 👇",
+        "list_button": "اختر منتج",
         "lens_foreign_header": "🌍 النتائج العالمية (الأسعار محوّلة لعملتك عند الإمكان):",
         "lf_show": "اعرضها 🌍",
         "lf_skip": "لا شكراً 🙏",
@@ -880,6 +899,13 @@ MSG = {
         "lens_social_ask": "📱 I also found results for this product on social media (Instagram, TikTok, Snapchat...).\nWant me to show them? 👇",
         "ls_show": "Show them 📱",
         "ls_skip": "No thanks 🙏",
+        "opt_social": "📱 Social offers",
+        "more_options_ask": "Want more? 👇",
+        "social_none": "No social media offers found for this product right now 😅",
+        "no_local_generic": "No local store results for this photo 😅 What would you like me to do? 👇",
+        "compare_searching": "⚖️ Your request is generic with no brand.. building a comparison of the best available brands!",
+        "pick_prompt": "Pick a product from the list and I'll find the best available prices 👇",
+        "list_button": "Choose",
         "lens_foreign_header": "🌍 International results (prices converted to your currency when possible):",
         "lf_show": "Show them 🌍",
         "lf_skip": "No thanks 🙏",
@@ -3031,6 +3057,25 @@ def send_whatsapp_buttons(to, body, buttons, bot_id):
     try: return requests.post(url,json=payload,headers=h,timeout=15).ok
     except: return False
 
+def send_whatsapp_list(to, body, rows, bot_id, button_title="اختر"):
+    """v74: رسالة قائمة تفاعلية (حتى 10 صفوف) — لاختيار منتج من مقارنة البراندات."""
+    url=f"{GRAPH_URL}/{bot_id}/messages"; h={"Authorization":f"Bearer {WHATSAPP_TOKEN}","Content-Type":"application/json"}
+    clean_rows=[]
+    for r in rows[:10]:
+        row={"id":r["id"],"title":str(r.get("title",""))[:24]}
+        desc=str(r.get("description","") or "")[:72]
+        if desc: row["description"]=desc
+        clean_rows.append(row)
+    payload={"messaging_product":"whatsapp","to":to,"type":"interactive","interactive":{
+        "type":"list","body":{"text":body[:1024]},
+        "action":{"button":button_title[:20],"sections":[{"title":button_title[:24],"rows":clean_rows}]}}}
+    try:
+        r=requests.post(url,json=payload,headers=h,timeout=15)
+        if not r.ok: print(f"LIST MSG ERR {r.status_code}: {r.text[:200]}")
+        return r.ok
+    except Exception as e:
+        print(f"LIST MSG ERR: {e}"); return False
+
 def send_language_choice(to, bot_id):
     body = "🌐 اختر لغتك المفضلة\nChoose your preferred language"
     send_whatsapp_buttons(to, body, [{"id": "lang_ar", "title": "العربية 🇰🇼"},{"id": "lang_en", "title": "English 🇬🇧"}], bot_id)
@@ -3262,41 +3307,70 @@ def run_global_search(phone, item):
         return
     send_product_result(phone, txt, urls, bot_id, lang, query)
 
+def _peek_pending(store, phone):
+    """v74: قراءة الطلب المعلق دون حذفه — حتى يقدر المستخدم يضغط أكثر من خيار (مشابه ثم عالمي...)."""
+    item = store.get(phone)
+    if not item or time.time() - item.get("ts", 0) > GLOBAL_PENDING_TTL:
+        store.pop(phone, None)
+        return None
+    return item
+
+
 def process_interactive_message(message, bot_id):
     from_number=message["from"]
-    reply=(message.get("interactive") or {}).get("button_reply") or {}
+    inter=(message.get("interactive") or {})
+    # v74: دعم القوائم (list_reply) إضافة إلى الأزرار.
+    reply=inter.get("button_reply") or inter.get("list_reply") or {}
     btn_id=reply.get("id","")
-    if btn_id == "lf_yes":
-        # v72: المستخدم وافق على عرض نتائج Lens الأجنبية.
-        item = _pop_pending_lens_foreign(from_number)
+    if btn_id.startswith("pick_"):
+        # v74: المستخدم اختار منتجاً من قائمة مقارنة البراندات — نشغل محرك البحث الجديد عليه.
+        item = _peek_pending(PENDING_BRAND_PICKS, from_number)
         if item:
-            activate_market(from_number)
+            idx = int(btn_id[5:]) if btn_id[5:].isdigit() else -1
+            opts = item.get("options") or []
+            if 0 <= idx < len(opts):
+                activate_market(from_number)
+                execute_product_search(from_number, opts[idx], item.get("bot_id") or bot_id, item.get("lang", "ar"))
+        return
+    if btn_id == "lf_yes":
+        # عرض نتائج Lens العالمية؛ وإذا ما فيه نتائج مخزنة نشغل البحث العالمي النصي الجديد.
+        item = _peek_pending(PENDING_LENS_FOREIGN, from_number)
+        activate_market(from_number)
+        if item and item.get("matches"):
             _send_lens_match_batch(
                 from_number, item["matches"], item.get("bot_id") or bot_id,
                 item.get("lang", "ar"), convert_prices=True,
             )
+        elif item and item.get("query"):
+            run_global_search(from_number, {
+                "bot_id": item.get("bot_id") or bot_id,
+                "lang": item.get("lang", "ar"), "query": item["query"],
+            })
         return
     if btn_id == "lf_similar":
-        # v73: بدائل مشابهة من صورة — يحوّل على المسار الذكي الكامل القديم.
-        item = _pop_pending_lens_foreign(from_number)
-        if item and item.get("query"):
+        # بدائل مشابهة — يحوّل على المسار الذكي الكامل القديم.
+        item = _peek_pending(PENDING_LENS_FOREIGN, from_number)
+        query = (item or {}).get("query") or (LAST_SEARCH.get(from_number) or {}).get("product")
+        if query:
             activate_market(from_number)
             run_similar_search(from_number, {
-                "bot_id": item.get("bot_id") or bot_id,
-                "lang": item.get("lang", "ar"),
-                "query": item["query"],
+                "bot_id": (item or {}).get("bot_id") or bot_id,
+                "lang": (item or {}).get("lang", USER_LANG.get(from_number, "ar")),
+                "query": query,
             })
         return
     if btn_id == "ls_yes":
-        # v73: عرض نتائج برامج التواصل بعد الموافقة.
-        item = _pop_pending_lens_social(from_number)
-        if item:
-            activate_market(from_number)
+        # عرض عروض برامج التواصل.
+        item = _peek_pending(PENDING_LENS_SOCIAL, from_number)
+        lang_ = (item or {}).get("lang", USER_LANG.get(from_number, "ar"))
+        activate_market(from_number)
+        if item and item.get("matches"):
             _send_lens_match_batch(
                 from_number, item["matches"], item.get("bot_id") or bot_id,
-                item.get("lang", "ar"), convert_prices=False,
-                per_store_max=MAX_STORES,
+                lang_, convert_prices=False, per_store_max=MAX_STORES,
             )
+        else:
+            send_whatsapp_text(from_number, T(lang_, "social_none"), bot_id)
         return
     if btn_id == "ls_no":
         PENDING_LENS_SOCIAL.pop(from_number, None)
@@ -3677,18 +3751,23 @@ def _send_lens_match_batch(from_number, matches, bot_id, lang, header="", conver
         return info
 
     final_picked = picked[:MAX_STORES]
-    missing = [
-        (i, url) for i, (m, _t, url) in enumerate(final_picked)
-        if not (str(m.get("price") or "").strip() or m.get("price_value") not in (None, ""))
-    ][:LENS_PRICE_FETCH_MAX]
-    if missing:
-        for i, info in RESOLVER.map(lambda x: (x[0], _fetch_page_price(x[1])), missing):
+    # v74: السعر الحقيقي بلا تقريب — Google أحياناً يقرّب (1.000 بدل 1.250)، لذلك نقرأ
+    # سعر صفحة المتجر نفسها لكل البطاقات (ضمن السقف) ونعتمده فوق سعر Google عند وجوده.
+    to_verify = [(i, url) for i, (_m, _t, url) in enumerate(final_picked)][:LENS_PRICE_FETCH_MAX]
+    if to_verify:
+        for i, info in RESOLVER.map(lambda x: (x[0], _fetch_page_price(x[1])), to_verify):
             if info and info.get("price"):
                 m = final_picked[i][0]
+                old_val = m.get("price_value")
                 m["price_value"] = info["price"]
-                if not (m.get("currency") or "").strip():
-                    m["currency"] = info.get("currency") or ""
-                print(f"LENS PRICE FETCHED: {final_picked[i][2][:70]} -> {info['price']} {info.get('currency','')}")
+                m["price"] = ""  # نص Google القديم قد يكون مقرّباً — نعتمد سعر الصفحة.
+                if info.get("currency"):
+                    m["currency"] = info["currency"]
+                try:
+                    if old_val not in (None, "") and abs(float(old_val) - float(info["price"])) >= 0.001:
+                        print(f"PRICE CORRECTED (Google {old_val} -> page {info['price']}): {final_picked[i][2][:70]}")
+                except Exception:
+                    pass
 
     # v73: الفرز النهائي — البطاقات المسعّرة أولاً من الأرخص إلى الأغلى، ثم غير المسعّرة
     # (بترتيب Google بينها). التحويل للعملة المحلية يدخل في المقارنة للنتائج العالمية.
@@ -3760,6 +3839,67 @@ def is_social_result(m):
     return bool(host) and any(h in host for h in SOCIAL_HOSTS)
 
 
+# ---- v74: فلتر مواقع البيع فقط -----------------------------------------------
+SHOP_FILTER_SYSTEM = """أنت مصنف صفحات ويب لبوت تسوق.
+سأعطيك قائمة مرقمة: عنوان الصفحة — الدومين.
+أعد فقط أرقام الصفحات التي هي صفحات منتج للبيع في متجر إلكتروني (فيها إمكانية شراء).
+استبعد: المقالات، الأخبار، المدونات، المراجعات، الشروحات، المنتديات، الموسوعات، صفحات الشركات التعريفية.
+أرجع JSON فقط بهذا الشكل بدون أي شرح: {"keep":[1,3,5]}"""
+
+def filter_shopping_results(matches):
+    """v74: يبقي فقط نتائج المتاجر التي تبيع المنتج فعلاً.
+
+    ثلاث طبقات: قبول تلقائي (سعر/متجر معروف)، رفض تلقائي (مواقع ليست متاجر)،
+    ثم حكم ذكاء اصطناعي سريع رخيص واحد للدفعة الغامضة المتبقية.
+    """
+    if not matches:
+        return matches
+    known_store_hosts = tuple(set(STORE_DOMAINS.values()))
+    auto_keep, ambiguous = [], []
+    for m in matches:
+        link = str(m.get("link") or "").lower()
+        try:
+            host = urllib.parse.urlparse(link).netloc.lower().replace("www.", "")
+        except Exception:
+            host = ""
+        if not host:
+            continue
+        if any(b in host for b in NON_SHOP_HOSTS):
+            print(f"SHOP FILTER AUTO-DROP: {host} | {str(m.get('title',''))[:60]}")
+            continue
+        has_price = bool(str(m.get("price") or "").strip()) or m.get("price_value") not in (None, "")
+        looks_store = any(d in host for d in known_store_hosts) or m.get("in_stock") is not None
+        if has_price or looks_store or m.get("section") == "products":
+            auto_keep.append(m)
+        else:
+            ambiguous.append(m)
+    if not ambiguous or not ENABLE_SHOP_AI_FILTER:
+        return auto_keep + ambiguous
+    # حكم ذكاء اصطناعي: اتصال سريع واحد (بدون بحث) للدفعة الغامضة كلها.
+    batch = ambiguous[:20]
+    numbered = []
+    for i, m in enumerate(batch, 1):
+        try:
+            host = urllib.parse.urlparse(str(m.get("link") or "")).netloc.replace("www.", "")
+        except Exception:
+            host = ""
+        numbered.append(f"{i}. {str(m.get('title',''))[:90]} — {host}")
+    raw, _ = call_gemini([{"text": "\n".join(numbered)}], system=SHOP_FILTER_SYSTEM, use_search=False)
+    kept_ambiguous = batch
+    try:
+        data = json.loads(re.search(r"\{.*\}", raw or "", flags=re.S).group(0))
+        keep_idx = {int(x) for x in (data.get("keep") or [])}
+        kept_ambiguous = [m for i, m in enumerate(batch, 1) if i in keep_idx]
+        dropped = [str(m.get('title',''))[:50] for i, m in enumerate(batch, 1) if i not in keep_idx]
+        if dropped:
+            print(f"SHOP FILTER AI-DROP ({len(dropped)}): {dropped[:5]}")
+    except Exception:
+        print(f"SHOP FILTER AI PARSE FAIL — keeping ambiguous as-is: {raw!r}")
+    result = auto_keep + kept_ambiguous + ambiguous[20:]
+    print(f"SHOP FILTER: {len(matches)} -> {len(result)} shopping results")
+    return result
+
+
 def _store_pending_lens_social(phone, bot_id, lang, matches):
     PENDING_LENS_SOCIAL[phone] = {
         "bot_id": bot_id, "lang": lang,
@@ -3775,57 +3915,55 @@ def _pop_pending_lens_social(phone):
 
 
 def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
-    """v73: نتائج Lens موجهة لبلد المستخدم + فرز واضح.
+    """v74: فلتر مواقع البيع + الخيارات الثلاثة كقائمة واحدة بعد النتائج.
 
-    - نتائج برامج التواصل تُفصل وتُعرض فقط بعد سؤال منفصل 📱.
-    - المحلي يُرسل فوراً (المسعّر أولاً من الأرخص للأغلى، ثم بلا سعر).
-    - لا محلي؟ ثلاث خيارات: عالمي 🌍 (نتائج Lens العالمية)، بدائل مشابهة 🔄
-      (المسار الذكي الكامل القديم)، أو لا شكراً.
+    - فلتر ذكاء اصطناعي يبقي فقط مواقع البيع الفعلية (لا مقالات ولا مدونات).
+    - نتائج التواصل تُفصل وتُعرض عند اختيار «عروض التواصل» من الخيارات.
+    - المحلي يُرسل فوراً (المسعّر أولاً أرخص→أغلى)، وبعده رسالة خيارات واحدة:
+      [🔄 بدائل مشابهة] [🌍 دوّر عالمياً] [📱 عروض التواصل]
+    - لا محلي؟ نفس الخيارات الثلاثة مع نص يوضح عدم توفر المنتج محلياً.
     """
     matches = [m for m in (lens.get("matches") or []) if (m.get("title") or "").strip()]
     if not matches:
         return False
     social = [m for m in matches if is_social_result(m)]
     nonsocial = [m for m in matches if not is_social_result(m)]
+    # v74: نتائج المتاجر فقط — المقالات والمدونات والمواقع العامة تُستبعد.
+    nonsocial = filter_shopping_results(nonsocial)
     local = [m for m in nonsocial if is_local_lens_result(m)]
     foreign = [m for m in nonsocial if not is_local_lens_result(m)]
     country = country_hint_word(lang) or current_market().get("country_name", "")
     chosen_title = ((lens.get("chosen") or {}).get("title") or matches[0]["title"]).strip()
     similar_query = (caption or chosen_title).strip()
+    # نخزن العالمي والتواصل دائماً — تُعرض فقط عند اختيار المستخدم من القائمة.
+    now = time.time()
+    PENDING_LENS_FOREIGN[from_number] = {
+        "bot_id": bot_id, "lang": lang, "matches": foreign[:LENS_RESULT_LIMIT],
+        "query": similar_query, "ts": now,
+    }
+    PENDING_LENS_SOCIAL[from_number] = {
+        "bot_id": bot_id, "lang": lang, "matches": social[:LENS_RESULT_LIMIT], "ts": now,
+    }
+    trio = [
+        {"id": "lf_similar", "title": T(lang, "opt_similar")[:20]},
+        {"id": "lf_yes", "title": T(lang, "opt_global")[:20]},
+        {"id": "ls_yes", "title": T(lang, "opt_social")[:20]},
+    ]
     sent = False
     if local:
         sent = _send_lens_match_batch(from_number, local, bot_id, lang, convert_prices=False)
-    if foreign:
-        PENDING_LENS_FOREIGN[from_number] = {
-            "bot_id": bot_id, "lang": lang, "matches": foreign[:LENS_RESULT_LIMIT],
-            "query": similar_query, "ts": time.time(),
-        }
-        if sent:
-            # فيه نتائج محلية: سؤال العالمي فقط.
-            send_whatsapp_buttons(from_number, T(lang, "lens_foreign_ask", c=len(foreign), country=country), [
-                {"id": "lf_yes", "title": T(lang, "lf_show")[:20]},
-                {"id": "lf_no", "title": T(lang, "lf_skip")[:20]},
-            ], bot_id)
-        else:
-            # v73: ما فيه محلي — ثلاث خيارات: عالمي / بدائل مشابهة (المسار الذكي القديم) / لا.
-            send_whatsapp_buttons(from_number, T(lang, "lens_no_local", c=len(foreign), country=country), [
-                {"id": "lf_yes", "title": T(lang, "opt_global")[:20]},
-                {"id": "lf_similar", "title": T(lang, "opt_similar")[:20]},
-                {"id": "lf_no", "title": T(lang, "lf_skip")[:20]},
-            ], bot_id)
-        sent = True
-    if social:
-        # v73: سؤال منفصل لنتائج برامج التواصل — تُعرض فقط عند الموافقة.
-        _store_pending_lens_social(from_number, bot_id, lang, social)
-        send_whatsapp_buttons(from_number, T(lang, "lens_social_ask"), [
-            {"id": "ls_yes", "title": T(lang, "ls_show")[:20]},
-            {"id": "ls_no", "title": T(lang, "ls_skip")[:20]},
-        ], bot_id)
+    if sent:
+        # v74: بعد النتائج المحلية — قائمة خيارات واحدة (بدون إلحاح، مجرد زيادة خيارات).
+        send_whatsapp_buttons(from_number, T(lang, "more_options_ask"), trio, bot_id)
+    elif foreign or social:
+        body = (T(lang, "lens_no_local", c=len(foreign), country=country) if foreign
+                else T(lang, "no_local_generic"))
+        send_whatsapp_buttons(from_number, body, trio, bot_id)
         sent = True
     if not sent:
         return False
     LAST_SEARCH[from_number] = {"product": similar_query}
-    print(f"LENS DIRECT SENT: local={len(local)} foreign_pending={len(foreign)} social_pending={len(social)}")
+    print(f"LENS DIRECT SENT: local={len(local)} foreign_stored={len(foreign)} social_stored={len(social)}")
     return True
 
 def process_single_image(message,bot_id,lang="ar"):
@@ -4126,6 +4264,104 @@ def parse_user_intent(user_text, lang):
     return {"intent": "greeting" if not compact.strip() or any(g in compact for g in ("سلام", "هلا", "مرحبا")) else "chat", "products": []}
 
 
+def execute_product_search(from_number, product, bot_id, lang):
+    """v74: مسار البحث النصي الكامل لمنتج واحد — يُستخدم من الرسائل ومن قوائم اختيار المقارنة."""
+    send_whatsapp_text(from_number, T(lang, "searching", q=product), bot_id)
+    txt, urls = search_product(product, lang)
+    LAST_SEARCH[from_number] = {"product": product}
+    if not txt or (not extract_store_offers(txt) and not is_service_answer(txt) and not is_informational_answer(txt)):
+        # ما لقينا المنتج بالضبط محلياً: نعرض الخيارات الثلاثة بدل رسالة الاعتذار وحدها.
+        _store_pending_global(from_number, bot_id, lang, product, None, None)
+        send_not_found_choice(from_number, bot_id, lang)
+        return
+    result_type = send_product_result(from_number, txt, urls, bot_id, lang, product)
+    if result_type == "none":
+        # كانت هناك عروض لكن كل روابطها غير مباشرة؛ نفس الخيارات تنفع هنا أيضاً.
+        _store_pending_global(from_number, bot_id, lang, product, None, None)
+        send_not_found_choice(from_number, bot_id, lang)
+    elif result_type == "service" or (result_type == "product" and AUTO_SEND_PRODUCT_MAPS):
+        send_maps_button(from_number, product, bot_id, lang)
+
+
+# ---- v74: مقارنة البراندات للطلب العام بدون ماركة ----------------------------
+BRAND_TOKENS = (
+    "نايك","nike","اديداس","adidas","سبولدينج","spalding","ويلسون","wilson","مولتن","molten",
+    "ميكاسا","mikasa","بوما","puma","ريبوك","reebok","اندر ارمور","under armour","اسيكس","asics",
+    "ابل","apple","ايفون","iphone","سامسونج","samsung","سوني","sony","توشيبا","toshiba",
+    "هواوي","huawei","شاومي","xiaomi","دايسون","dyson","فيليبس","philips","باناسونيك","panasonic",
+    "بوش","bosch","سيمنز","siemens","هيتاشي","hitachi","دايو","daewoo","اريستون","ariston",
+    "بيكو","beko","ميديا","midea","غري","gree","نيكون","nikon","كانون","canon","لينوفو","lenovo",
+    "ديل","dell","اسوس","asus","ايسر","acer","بلايستيشن","playstation","اكس بوكس","xbox",
+    "نينتندو","nintendo","تيفال","tefal","مولينكس","moulinex","كينوود","kenwood","ديلونجي","delonghi",
+    "نسبريسو","nespresso","كاسيو","casio","سيكو","seiko","روليكس","rolex","ايكيا","ikea",
+    "lg","ال جي","الجي","hp","اتش بي","tcl","jbl","بريفيل","breville","هايسنس","hisense",
+)
+
+def is_brandless_generic(query):
+    """طلب عام بدون ماركة ولا موديل، في فئة تستحق مقارنة براندات (أجهزة/رياضة/أثاث...)."""
+    raw = str(query or "")
+    q = normalize_ar(raw)
+    if len(q.split()) > 6:
+        return False
+    # رمز موديل (حروف+أرقام) = منتج محدد.
+    if re.search(r"\b(?=[a-z0-9-]{3,}\b)(?=[a-z0-9-]*[a-z])(?=[a-z0-9-]*\d)[a-z0-9-]+\b", raw, re.I):
+        return False
+    for b in BRAND_TOKENS:
+        nb = normalize_ar(b)
+        if re.search(r"[a-z]", nb):
+            # براند لاتيني (خصوصاً القصير مثل lg/hp): مطابقة بحدود كلمة حتى لا يمسك داخل كلمات أخرى.
+            if re.search(rf"\b{re.escape(nb)}\b", q):
+                return False
+        elif nb in q:
+            return False
+    cat = detect_category(raw)
+    return cat in ("electronics", "appliances", "sports", "gaming", "furniture", "auto", "kids_toys", "beauty")
+
+BRAND_COMPARE_SYSTEM = """أنت خبير مقارنات منتجات مثل مواقع «أفضل 10» ومواقع المراجعات.
+المستخدم طلب منتجاً عاماً بدون ماركة. ابحث في Google عن مقارنات ومراجعات حديثة لهذه الفئة
+واصنع مقارنة قصيرة بين 3-5 خيارات (براند + موديل) متوفرة فعلاً في بلد المستخدم الحالي.
+الشكل الإلزامي بالضبط:
+⚖️ مقارنة أفضل [الفئة]
+
+🏆 الأفضل عموماً: [براند + موديل] — [سبب في سطر واحد]
+💎 أفضل جودة: [براند + موديل] — [سبب]
+💰 أفضل قيمة مقابل السعر: [براند + موديل] — [سبب]
+✨ [معيار إضافي يهم هذه الفئة تحديداً مثل: الأهدأ، الأوفر بالكهرباء، الأمتن، الأخف]: [براند + موديل] — [سبب]
+
+OPTIONS: [براند موديل 1] | [براند موديل 2] | [براند موديل 3] | [براند موديل 4]
+قواعد: بدون روابط، بدون Markdown، لا تكرر نفس الموديل، سطر OPTIONS إلزامي وبأسماء قابلة للبحث.
+لغة الرد: حسب تعليمات رسالة المستخدم."""
+
+def run_brand_comparison(from_number, query, bot_id, lang):
+    """يرسل مقارنة براندات + قائمة اختيار. يعيد False عند الفشل ليكمل البحث العادي."""
+    send_whatsapp_text(from_number, T(lang, "compare_searching"), bot_id)
+    en = english_search_name(query)
+    prompt = (
+        f"الطلب العام: {query}" + (f" ({en})" if en and en != query else "") +
+        f". قارن أفضل الخيارات المتوفرة الآن في {current_market().get('country_name', 'Kuwait')}. "
+        f"{LANG_INSTR[lang]}"
+    )
+    txt, _ = call_gemini([{"text": prompt}], system=BRAND_COMPARE_SYSTEM)
+    if not txt:
+        return False
+    m = re.search(r"(?im)^\s*OPTIONS\s*:\s*(.+)$", txt)
+    options = []
+    if m:
+        options = [o.strip() for o in m.group(1).split("|") if o.strip()][:6]
+        txt = re.sub(r"(?im)^\s*OPTIONS\s*:.*$", "", txt).strip()
+    if not options:
+        print("BRAND COMPARE: no OPTIONS line -> normal search")
+        return False
+    send_whatsapp_text(from_number, txt, bot_id)
+    PENDING_BRAND_PICKS[from_number] = {"options": options, "bot_id": bot_id, "lang": lang, "ts": time.time()}
+    rows = []
+    for i, o in enumerate(options):
+        rows.append({"id": f"pick_{i}", "title": o[:24], "description": (o[24:96] if len(o) > 24 else "")})
+    send_whatsapp_list(from_number, T(lang, "pick_prompt"), rows, bot_id, T(lang, "list_button"))
+    print(f"BRAND COMPARE SENT: {options}")
+    return True
+
+
 def process_text_message(message,bot_id,onboarding_checked=False):
     from_number=message["from"]
     load_user_preferences(from_number)
@@ -4173,21 +4409,10 @@ def process_text_message(message,bot_id,onboarding_checked=False):
         return
     products = [p for p in (parsed.get("products") or []) if p.strip()] or extract_products(user_text)
     if len(products)==1:
-        send_whatsapp_text(from_number,T(lang,"searching",q=products[0]),bot_id)
-        txt,urls=search_product(products[0], lang)
-        LAST_SEARCH[from_number] = {"product": products[0]}
-        if not txt or (not extract_store_offers(txt) and not is_service_answer(txt) and not is_informational_answer(txt)):
-            # ما لقينا المنتج بالضبط محلياً: نعرض الخيارات الثلاثة بدل رسالة الاعتذار وحدها.
-            _store_pending_global(from_number, bot_id, lang, products[0], None, None)
-            send_not_found_choice(from_number, bot_id, lang)
+        # v74: طلب عام بدون ماركة؟ نبدأ بمقارنة البراندات وقائمة اختيار قبل البحث.
+        if is_brandless_generic(products[0]) and run_brand_comparison(from_number, products[0], bot_id, lang):
             return
-        result_type = send_product_result(from_number, txt, urls, bot_id, lang, products[0])
-        if result_type == "none":
-            # كانت هناك عروض لكن كل روابطها غير مباشرة؛ نفس الخيارات تنفع هنا أيضاً.
-            _store_pending_global(from_number, bot_id, lang, products[0], None, None)
-            send_not_found_choice(from_number, bot_id, lang)
-        elif result_type == "service" or (result_type == "product" and AUTO_SEND_PRODUCT_MAPS):
-            send_maps_button(from_number, products[0], bot_id, lang)
+        execute_product_search(from_number, products[0], bot_id, lang)
     else:
         send_whatsapp_text(from_number,T(lang,"multi_text",c=len(products)),bot_id)
         process_cart(products, from_number, bot_id, lang)
@@ -4212,4 +4437,4 @@ def process_location_message(message, bot_id):
     route_pending_after_location(from_number)
 
 @app.get("/")
-async def health(): return {"status":"v73 PRICED-FIRST + SOCIAL ASK + SIMILAR FALLBACK", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
+async def health(): return {"status":"v74 BRAND COMPARE + SHOP FILTER + TRIO OPTIONS + EXACT PRICES", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
