@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v74-11-none-class-no-fake-products-20260806"
+BUILD_ID = "v74-12-more-lens-cards-20260806"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE -> GOOGLE LENS DIRECT PASSTHROUGH (raw results to user)")
@@ -122,8 +122,10 @@ LENS_DIRECT_MODE = env_bool("LENS_DIRECT_MODE", True)
 LENS_DIRECT_MAX_LINES = max(3, int(os.environ.get("LENS_DIRECT_MAX_LINES", "8")))
 # v72.2: تنويع المتاجر في بطاقات CTA — حد أقصى من البطاقات لكل متجر واحد.
 LENS_PER_STORE_MAX = max(1, int(os.environ.get("LENS_PER_STORE_MAX", "2")))
+# v74.12: عدد بطاقات نتائج العدسة مستقل عن MAX_STORES — افتراضي 8 (يُضبط من Railway).
+LENS_MAX_CARDS = max(int(os.environ.get("MAX_STORES", "5")), int(os.environ.get("LENS_MAX_CARDS", "8")))
 # v72.3: البطاقات التي بلا سعر من Google نجلب سعرها من صفحة المتجر مباشرة (مجاني).
-LENS_PRICE_FETCH_MAX = max(0, int(os.environ.get("LENS_PRICE_FETCH_MAX", "5")))
+LENS_PRICE_FETCH_MAX = max(0, int(os.environ.get("LENS_PRICE_FETCH_MAX", "8")))
 LENS_PRIMARY_MODE = env_bool("LENS_PRIMARY_MODE", True)
 LENS_PRIMARY_EXCEPT_TEXT_HEAVY = env_bool("LENS_PRIMARY_EXCEPT_TEXT_HEAVY", True)
 # قوة Lens الحقيقية تأتي من تعدد التمريرات: products ثم all (visual+exact) ثم بحث واسع بلا قيد دولة.
@@ -3574,7 +3576,7 @@ def process_interactive_message(message, bot_id):
         if item and item.get("matches"):
             _send_lens_match_batch(
                 from_number, item["matches"], item.get("bot_id") or bot_id,
-                lang_, convert_prices=False, per_store_max=MAX_STORES,
+                lang_, convert_prices=False, per_store_max=LENS_MAX_CARDS,
             )
         else:
             send_whatsapp_text(from_number, T(lang_, "social_none"), bot_id)
@@ -3935,7 +3937,7 @@ def _send_lens_match_batch(from_number, matches, bot_id, lang, header="", conver
     picked, used_urls = [], set()
     for round_i in range(per_store):
         for host in host_order:
-            if len(picked) >= MAX_STORES:
+            if len(picked) >= LENS_MAX_CARDS:
                 break
             items = by_host[host]
             if round_i < len(items):
@@ -3944,7 +3946,7 @@ def _send_lens_match_batch(from_number, matches, bot_id, lang, header="", conver
                     continue
                 picked.append((m, title, url))
                 used_urls.add(url)
-        if len(picked) >= MAX_STORES:
+        if len(picked) >= LENS_MAX_CARDS:
             break
 
     # 3) v72.3: البطاقات التي بلا سعر من Google — نجلب السعر من صفحة المتجر نفسها (مجاني وسريع).
@@ -3957,7 +3959,7 @@ def _send_lens_match_batch(from_number, matches, bot_id, lang, header="", conver
             VERIFIED_PAGE_CACHE[url] = {"data": info, "ts": time.time()}
         return info
 
-    final_picked = picked[:MAX_STORES]
+    final_picked = picked[:LENS_MAX_CARDS]
     # v74: السعر الحقيقي بلا تقريب — Google أحياناً يقرّب (1.000 بدل 1.250)، لذلك نقرأ
     # سعر صفحة المتجر نفسها لكل البطاقات (ضمن السقف) ونعتمده فوق سعر Google عند وجوده.
     to_verify = [(i, url) for i, (_m, _t, url) in enumerate(final_picked)][:LENS_PRICE_FETCH_MAX]
@@ -4875,4 +4877,4 @@ def process_location_message(message, bot_id):
     route_pending_after_location(from_number)
 
 @app.get("/")
-async def health(): return {"status":"v74.11 NONE CLASS (no fake products from chatter) + CTA ALWAYS + ARABIC PICK LIST + RELEVANCE FILTER + NO SILENCE + BILINGUAL 2 ROUNDS + PURE AI CLASSIFIER + CLEAN STORE NAMES + SERVICE INTENT FIX (answer+5 providers) + TEXT+SIMILAR USE OLD v26 SMART PATH (tournament) + SERVICES 5+ PHONES + AI INTENT + BRAND COMPARE + SHOP FILTER + TRIO OPTIONS + EXACT PRICES", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "v26_runs":SEARCH_RUNS, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
+async def health(): return {"status":"v74.12 MORE LENS CARDS (LENS_MAX_CARDS=8 default) + NONE CLASS + CTA ALWAYS + ARABIC PICK LIST + RELEVANCE FILTER + NO SILENCE + BILINGUAL 2 ROUNDS + PURE AI CLASSIFIER + CLEAN STORE NAMES + SERVICE INTENT FIX (answer+5 providers) + TEXT+SIMILAR USE OLD v26 SMART PATH (tournament) + SERVICES 5+ PHONES + AI INTENT + BRAND COMPARE + SHOP FILTER + TRIO OPTIONS + EXACT PRICES", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "v26_runs":SEARCH_RUNS, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
