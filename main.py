@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v74-9-relevance-filter-pick-forever-compare-recovery-20260806"
+BUILD_ID = "v74-10-cta-always-store-homepage-arabic-pick-list-20260806"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE -> GOOGLE LENS DIRECT PASSTHROUGH (raw results to user)")
@@ -1830,6 +1830,43 @@ def filter_relevant_offers(query, offers, urls):
         print(f"RELEVANCE AI PARSE FAIL — keeping as-is: {raw!r}")
         return kept
 
+# ---- v74.10: حلّال الصفحة الرئيسية للمتجر — عشان كل عرض يحصل زر CTA ----------
+_STORE_HOME_CACHE = {}
+_STORE_HOME_LOCK = threading.Lock()
+STORE_DOMAIN_SYSTEM = """أنت خبير متاجر التجزئة في الخليج. سأعطيك اسم متجر وبلد المستخدم.
+أرجع دومين الموقع الرسمي للمتجر فقط (مثل: safathome.com أو abyat.com) بدون https وبدون أي شرح.
+إذا لم تكن متأكداً من الدومين الصحيح 100% أرجع كلمة NONE فقط. لا تخمن أبداً."""
+
+def resolve_store_homepage(name):
+    """رابط للمتجر عندما لا يوجد رابط منتج: القاموس أولاً، ثم ذكاء اصطناعي (كاش)."""
+    name = str(name or "").strip()
+    if not name:
+        return ""
+    dom = store_domain(name)
+    if dom:
+        return f"https://{dom}"
+    key = normalize_name(normalize_ar(name))[:80]
+    if not key:
+        return ""
+    with _STORE_HOME_LOCK:
+        if key in _STORE_HOME_CACHE:
+            return _STORE_HOME_CACHE[key]
+    raw, _ = call_gemini(
+        [{"text": f"المتجر: {name}\nالبلد: {current_market().get('country_name', 'Kuwait')}"}],
+        system=STORE_DOMAIN_SYSTEM, use_search=False,
+    )
+    ans = (raw or "").strip().splitlines()[0].strip().lower() if raw else ""
+    ans = ans.replace("https://", "").replace("http://", "").strip("/ ")
+    url = ""
+    if ans and ans != "none" and re.fullmatch(r"[a-z0-9][a-z0-9.-]{2,60}\.[a-z]{2,10}", ans):
+        url = f"https://{ans}"
+    with _STORE_HOME_LOCK:
+        if len(_STORE_HOME_CACHE) > 2000:
+            _STORE_HOME_CACHE.clear()
+        _STORE_HOME_CACHE[key] = url
+    print(f"STORE HOMEPAGE RESOLVED: {name!r} -> {url or 'NONE'}")
+    return url
+
 def send_product_result(from_number, txt, urls, bot_id, lang, query, best_only=False):
     if not txt:
         send_whatsapp_text(from_number, T(lang, "not_found"), bot_id)
@@ -1869,6 +1906,11 @@ def send_product_result(from_number, txt, urls, bot_id, lang, query, best_only=F
                 host = ""
             if url and url.startswith("http") and host and "google." not in host and "bing." not in host:
                 fallback_ctas.append((o, url))
+            else:
+                # v74.10: ولا رابط أصلاً؟ نحلّ الصفحة الرئيسية للمتجر (قاموس/ذكاء) — زر لكل عرض.
+                hp = resolve_store_homepage(o["name"])
+                if hp:
+                    fallback_ctas.append((o, hp))
             print(f"SKIP NON-DIRECT CTA: {o['name']} -> {url}")
             continue
         send_whatsapp_cta(from_number, o["line"], url, bot_id, f"🛒 {o['name'][:18]}")
@@ -3480,9 +3522,8 @@ def process_interactive_message(message, bot_id):
         opts = item.get("options") or []
         picked = opts[idx] if 0 <= idx < len(opts) else ""
         if not picked:
-            picked = (reply.get("title") or "").strip()
-            if picked and reply.get("description"):
-                picked = f"{picked}{reply.get('description','')}".strip()
+            # v74.10: الوصف يحمل الاسم الأصلي الكامل (العنوان قد يكون ترجمة مختصرة).
+            picked = (reply.get("description") or "").strip() or (reply.get("title") or "").strip()
         if picked:
             activate_market(from_number)
             lang_ = item.get("lang") or USER_LANG.get(from_number, "ar")
@@ -4726,9 +4767,14 @@ def run_brand_comparison(from_number, query, bot_id, lang):
         return False
     send_whatsapp_text(from_number, txt, bot_id)
     PENDING_BRAND_PICKS[from_number] = {"options": options, "bot_id": bot_id, "lang": lang, "ts": time.time()}
+    # v74.10: عناوين القائمة بالعربي للمستخدم العربي (ترجمة دفعة + كاش)،
+    # والاسم الأصلي يبقى في سطر الوصف — وهو المعتمد للبحث عند الاختيار.
+    title_map = arabic_titles(options) if lang == "ar" else {}
     rows = []
     for i, o in enumerate(options):
-        rows.append({"id": f"pick_{i}", "title": o[:24], "description": (o[24:96] if len(o) > 24 else "")})
+        shown = title_map.get(o, o) if lang == "ar" else o
+        desc = o if (shown != o) else (o[24:96] if len(o) > 24 else "")
+        rows.append({"id": f"pick_{i}", "title": shown[:24], "description": desc[:72]})
     send_whatsapp_list(from_number, T(lang, "pick_prompt"), rows, bot_id, T(lang, "list_button"))
     print(f"BRAND COMPARE SENT: {options}")
     return True
@@ -4819,4 +4865,4 @@ def process_location_message(message, bot_id):
     route_pending_after_location(from_number)
 
 @app.get("/")
-async def health(): return {"status":"v74.9 RELEVANCE FILTER + PICK FOREVER + COMPARE RECOVERY + NO SILENCE + BILINGUAL 2 ROUNDS + PURE AI CLASSIFIER + CLEAN STORE NAMES + SERVICE INTENT FIX (answer+5 providers) + TEXT+SIMILAR USE OLD v26 SMART PATH (tournament) + SERVICES 5+ PHONES + AI INTENT + BRAND COMPARE + SHOP FILTER + TRIO OPTIONS + EXACT PRICES", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "v26_runs":SEARCH_RUNS, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
+async def health(): return {"status":"v74.10 CTA ALWAYS (store homepage resolver) + ARABIC PICK LIST + RELEVANCE FILTER + NO SILENCE + BILINGUAL 2 ROUNDS + PURE AI CLASSIFIER + CLEAN STORE NAMES + SERVICE INTENT FIX (answer+5 providers) + TEXT+SIMILAR USE OLD v26 SMART PATH (tournament) + SERVICES 5+ PHONES + AI INTENT + BRAND COMPARE + SHOP FILTER + TRIO OPTIONS + EXACT PRICES", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "v26_runs":SEARCH_RUNS, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
