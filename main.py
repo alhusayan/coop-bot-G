@@ -1,8 +1,3 @@
-Library
-/
-main.py
-
-
 # -*- coding: utf-8 -*-
 import os, re, time, base64, requests, json, asyncio, urllib.parse, hashlib, sqlite3, threading
 from collections import deque, defaultdict
