@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v74-3-text-and-similar-use-v26-smart-path-services5-20260806"
+BUILD_ID = "v74-4-service-intent-fix-answer-plus-5-providers-20260806"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE -> GOOGLE LENS DIRECT PASSTHROUGH (raw results to user)")
@@ -4302,7 +4302,8 @@ def parse_user_intent(user_text, lang):
             return {"intent": intent, "products": []}
         if intent in ("search", "service") and products:
             print(f"INTENT PARSED: {intent} products={products}")
-            return {"intent": "search", "products": products[:6]}
+            # v74.4: نية الخدمة تبقى service — لا تتحول search حتى لا تدخل مقارنة البراندات.
+            return {"intent": intent, "products": products[:6]}
     except Exception:
         print(f"INTENT PARSE FAIL: {raw!r}")
 
@@ -4351,6 +4352,38 @@ def v26_text_search(product, lang):
     return txt, kept_urls
 
 
+def execute_service_search(from_number, service_desc, original_text, bot_id, lang):
+    """v74.4: مسار الخدمات — يفهم رسالة المستخدم كاملة: يجاوب على سؤاله الفني إن وجد,
+
+    ثم يجيب 5 مزودي خدمة على الأقل بأرقام هواتف مرتبة. يستخدم بطولة v26 نفسها.
+    """
+    send_whatsapp_text(from_number, T(lang, "searching", q=service_desc), bot_id)
+    LAST_SEARCH[from_number] = {"product": service_desc}
+    market_name = current_market().get("country_name", "Kuwait")
+    has_question = bool(re.search(r"[؟?]|هل |ليش |وش سبب|why |does |is it", original_text or ""))
+    question_part = (
+        ("رسالة المستخدم الكاملة:\n" + str(original_text or "").strip()[:600] + "\n\n"
+         "أولاً: إذا في رسالته سؤال فني (مثل: هل الطفح يخرب المكينة؟) أجب عنه بإيجاز في 2-3 أسطر قبل القائمة. ")
+        if has_question and original_text and original_text.strip() != service_desc.strip() else ""
+    )
+    prompt = (
+        f"{question_part}"
+        f"هذا طلب خدمة وليس منتجاً: {service_desc}. "
+        f"طبق الحالة 3 بالضبط: ابحث في Google وأعطني 5 مزودي خدمة على الأقل في {market_name} "
+        "مع أرقام هواتفهم الظاهرة فعلاً في نتائج البحث، مرتبين من الأعلى تقييماً. "
+        f"{LANG_INSTR[lang]}"
+    )
+    txt, urls = v26_best_of_search([{"text": prompt}])
+    if not txt or is_no_result_answer(txt):
+        # محاولة أخيرة باتصال مباشر قبل الاعتذار.
+        txt, urls = call_gemini([{"text": prompt}])
+    if not txt or is_no_result_answer(txt):
+        send_whatsapp_text(from_number, T(lang, "not_found"), bot_id)
+        return
+    send_whatsapp_text(from_number, txt, bot_id)
+    send_maps_button(from_number, service_desc, bot_id, lang)
+
+
 def execute_product_search(from_number, product, bot_id, lang):
     """v74.3: مسار البحث النصي — المسار الذكي الكامل القديم (v26) أولاً، نفس محرك
 
@@ -4391,10 +4424,25 @@ BRAND_TOKENS = (
     "lg","ال جي","الجي","hp","اتش بي","tcl","jbl","بريفيل","breville","هايسنس","hisense",
 )
 
+SERVICE_WORDS = (
+    "فني", "كهربائي", "سباك", "نجار", "حداد", "تصليح", "اصلاح", "إصلاح", "صيانه", "صيانة",
+    "تركيب", "تمديد", "معلم", "مقاول", "شركه تنظيف", "شركة تنظيف", "مكافحه", "مكافحة",
+    "خدمه", "خدمة", "بنشر", "ونش", "سطحه", "سطحة", "غسيل سياره", "غسيل سيارة",
+    "technician", "electrician", "plumber", "repair", "fix", "maintenance",
+    "installation", "service", "cleaning company", "pest control", "towing",
+)
+
+def is_service_request(text):
+    q = normalize_ar(str(text or ""))
+    return any(normalize_ar(w) in q for w in SERVICE_WORDS)
+
 def is_brandless_generic(query):
     """طلب عام بدون ماركة ولا موديل، في فئة تستحق مقارنة براندات (أجهزة/رياضة/أثاث...)."""
     raw = str(query or "")
     q = normalize_ar(raw)
+    # v74.4: طلب خدمة (فني/كهربائي/تصليح...) ليس منتجاً — لا مقارنة براندات أبداً.
+    if is_service_request(raw):
+        return False
     if len(q.split()) > 6:
         return False
     # رمز موديل (حروف+أرقام) = منتج محدد.
@@ -4502,6 +4550,12 @@ def process_text_message(message,bot_id,onboarding_checked=False):
         send_whatsapp_text(from_number, T(lang, "welcome_reply"), bot_id)
         return
     products = [p for p in (parsed.get("products") or []) if p.strip()] or extract_products(user_text)
+    # v74.4: طلب خدمة — سواء من المحلل أو من كلمات الخدمة الواضحة في النص —
+    # يروح لمسار الخدمات مباشرة: جواب على سؤال المستخدم + 5 مزودين بأرقام.
+    # لا مقارنة براندات ولا بحث منتجات إطلاقاً.
+    if intent == "service" or is_service_request(products[0] if products else user_text):
+        execute_service_search(from_number, products[0] if products else user_text, user_text, bot_id, lang)
+        return
     if len(products)==1:
         # v74: طلب عام بدون ماركة؟ نبدأ بمقارنة البراندات وقائمة اختيار قبل البحث.
         if is_brandless_generic(products[0]) and run_brand_comparison(from_number, products[0], bot_id, lang):
@@ -4531,4 +4585,4 @@ def process_location_message(message, bot_id):
     route_pending_after_location(from_number)
 
 @app.get("/")
-async def health(): return {"status":"v74.3 TEXT+SIMILAR USE OLD v26 SMART PATH (tournament) + SERVICES 5+ PHONES + AI INTENT + BRAND COMPARE + SHOP FILTER + TRIO OPTIONS + EXACT PRICES", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "v26_runs":SEARCH_RUNS, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
+async def health(): return {"status":"v74.4 SERVICE INTENT FIX (answer+5 providers) + TEXT+SIMILAR USE OLD v26 SMART PATH (tournament) + SERVICES 5+ PHONES + AI INTENT + BRAND COMPARE + SHOP FILTER + TRIO OPTIONS + EXACT PRICES", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "v26_runs":SEARCH_RUNS, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
