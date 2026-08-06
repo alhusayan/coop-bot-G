@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v74-5-ai-brandless-judge-clean-store-names-20260806"
+BUILD_ID = "v74-6-pure-ai-request-classifier-no-dictionary-20260806"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE -> GOOGLE LENS DIRECT PASSTHROUGH (raw results to user)")
@@ -4422,84 +4422,76 @@ def execute_product_search(from_number, product, bot_id, lang):
         send_maps_button(from_number, product, bot_id, lang)
 
 
-# ---- v74: مقارنة البراندات للطلب العام بدون ماركة ----------------------------
-BRAND_TOKENS = (
-    "نايك","nike","اديداس","adidas","سبولدينج","spalding","ويلسون","wilson","مولتن","molten",
-    "ميكاسا","mikasa","بوما","puma","ريبوك","reebok","اندر ارمور","under armour","اسيكس","asics",
-    "ابل","apple","ايفون","iphone","سامسونج","samsung","سوني","sony","توشيبا","toshiba",
-    "هواوي","huawei","شاومي","xiaomi","دايسون","dyson","فيليبس","philips","باناسونيك","panasonic",
-    "بوش","bosch","سيمنز","siemens","هيتاشي","hitachi","دايو","daewoo","اريستون","ariston",
-    "بيكو","beko","ميديا","midea","غري","gree","نيكون","nikon","كانون","canon","لينوفو","lenovo",
-    "ديل","dell","اسوس","asus","ايسر","acer","بلايستيشن","playstation","اكس بوكس","xbox",
-    "نينتندو","nintendo","تيفال","tefal","مولينكس","moulinex","كينوود","kenwood","ديلونجي","delonghi",
-    "نسبريسو","nespresso","كاسيو","casio","سيكو","seiko","روليكس","rolex","ايكيا","ikea",
-    "lg","ال جي","الجي","hp","اتش بي","tcl","jbl","بريفيل","breville","هايسنس","hisense",
-)
+# ---- v74.6: مصنّف الطلبات — ذكاء اصطناعي خالص، بدون أي قاموس -----------------
+# القاموس الثابت مستحيل يغطي ملايين المنتجات (يخت، موطور مخيمات، مكينة بر...).
+# القرار كله لنموذج سريع رخيص (بدون بحث + كاش + إعادة محاولة) بتعريفات وأمثلة قوية.
+REQUEST_CLASSIFIER_SYSTEM = """أنت مصنف طلبات خبير لبوت تسوق كويتي على واتساب. المستخدم كتب طلباً قصيراً بالعامية.
+صنّفه بدقة وأجب بكلمة واحدة فقط بدون أي شرح: GENERIC أو SPECIFIC أو SERVICE
 
+GENERIC = اسم فئة منتج بدون ماركة ولا موديل محدد، والمستخدم يستفيد من مقارنة أفضل البراندات قبل الأسعار.
+ينطبق على أي فئة مهما كانت غريبة أو نادرة: أجهزة، مكائن، مولدات، عدد، رياضة، أثاث، مركبات، قوارب، معدات بر ومخيمات، أدوات مطبخ، أجهزة تجميل...
+أمثلة GENERIC: شاشه كمبيوتر، مكينه بر، موطور مخيمات، مولد كهرباء، يخت، جت سكي، دراجه هوائيه، مضخة مسبح، غساله، مكواة بخار، سشوار، خيمه رحلات، ثلاجة سياره، قلاية هوائية، كاميرا مراقبه، سماعة بلوتوث، طباخ غاز، سيارة عائليه، لابتوب للدراسة
+
+SPECIFIC = المستخدم حدد ماركة أو موديل أو منتجاً بعينه، أو طلب سلعة استهلاكية يومية يبي سعرها مباشرة (أكل، مشروبات، تموينات، منظفات، أدوية، مستلزمات شخصية).
+أمثلة SPECIFIC: ايفون 15 برو، مكينة بر EcoFlow، بيبسي، حليب المراعي، حليب، رز بسمتي، بنادول، شامبو هيد اند شولدرز، مناديل، ماء قوارير
+
+SERVICE = طلب خدمة أو فني أو تصليح أو صيانة أو عامل، وليس شراء منتج.
+أمثلة SERVICE: كهربائي حمام سباحه، فني تكييف، سباك، بنشر متنقل، تصليح غسالات، شركة تنظيف، ونش، مكافحة حشرات
+
+قواعد الحسم:
+- ذكر ماركة (حتى مع فئة عامة) = SPECIFIC. مثال: مكينة بر هوندا = SPECIFIC.
+- كلمة فني/تصليح/صيانة/معلم مع أي شيء = SERVICE حتى لو ذكر جهازاً.
+- أكل وتموينات وأدوية دائماً SPECIFIC حتى بدون ماركة، لأن المستخدم يبي السعر مو مقارنة براندات.
+- ملابس وأزياء وعطور بدون ماركة = SPECIFIC (الاختيار فيها بصري/شخصي).
+- إذا شككت بين GENERIC و SPECIFIC لمنتج معمّر بدون ماركة، اختر GENERIC."""
+
+_REQUEST_CLASS_CACHE = {}
+_REQUEST_CLASS_LOCK = threading.Lock()
+
+def classify_request_type(query):
+    """v74.6: يصنف الطلب GENERIC / SPECIFIC / SERVICE بذكاء اصطناعي خالص (كاش + محاولتان).
+
+    عند فشل النموذج تماماً (انقطاع/429) نرجع SPECIFIC حتى يكمل البحث العادي بدل التوقف.
+    """
+    q = " ".join(str(query or "").split()).strip()
+    if not q:
+        return "SPECIFIC"
+    key = re.sub(r"\s+", " ", normalize_ar(q))[:150]
+    with _REQUEST_CLASS_LOCK:
+        if key in _REQUEST_CLASS_CACHE:
+            return _REQUEST_CLASS_CACHE[key]
+    verdict = ""
+    for attempt in (1, 2):
+        raw, _ = call_gemini([{"text": q}], system=REQUEST_CLASSIFIER_SYSTEM, use_search=False)
+        up = (raw or "").upper()
+        for label in ("SERVICE", "GENERIC", "SPECIFIC"):
+            if label in up:
+                verdict = label
+                break
+        if verdict:
+            break
+        print(f"REQUEST CLASSIFIER RETRY {attempt}: empty/unclear -> {raw!r}")
+    if not verdict:
+        verdict = "SPECIFIC"
+    with _REQUEST_CLASS_LOCK:
+        if len(_REQUEST_CLASS_CACHE) > 3000:
+            _REQUEST_CLASS_CACHE.clear()
+        _REQUEST_CLASS_CACHE[key] = verdict
+    print(f"REQUEST CLASSIFIER: {q!r} -> {verdict}")
+    return verdict
+
+# كلمات الخدمة تبقى فقط كشبكة أمان سريعة إذا تعطل المصنف (بدون أي دور في قرار GENERIC).
 SERVICE_WORDS = (
     "فني", "كهربائي", "سباك", "نجار", "حداد", "تصليح", "اصلاح", "إصلاح", "صيانه", "صيانة",
     "تركيب", "تمديد", "معلم", "مقاول", "شركه تنظيف", "شركة تنظيف", "مكافحه", "مكافحة",
-    "خدمه", "خدمة", "بنشر", "ونش", "سطحه", "سطحة", "غسيل سياره", "غسيل سيارة",
-    "technician", "electrician", "plumber", "repair", "fix", "maintenance",
-    "installation", "service", "cleaning company", "pest control", "towing",
+    "بنشر", "ونش", "سطحه", "سطحة", "غسيل سياره", "غسيل سيارة",
+    "technician", "electrician", "plumber", "repair", "maintenance",
+    "installation", "cleaning company", "pest control", "towing",
 )
 
 def is_service_request(text):
     q = normalize_ar(str(text or ""))
     return any(normalize_ar(w) in q for w in SERVICE_WORDS)
-
-def is_brandless_generic(query):
-    """طلب عام بدون ماركة ولا موديل، في فئة تستحق مقارنة براندات (أجهزة/رياضة/أثاث...)."""
-    raw = str(query or "")
-    q = normalize_ar(raw)
-    # v74.4: طلب خدمة (فني/كهربائي/تصليح...) ليس منتجاً — لا مقارنة براندات أبداً.
-    if is_service_request(raw):
-        return False
-    if len(q.split()) > 6:
-        return False
-    # رمز موديل (حروف+أرقام) = منتج محدد.
-    if re.search(r"\b(?=[a-z0-9-]{3,}\b)(?=[a-z0-9-]*[a-z])(?=[a-z0-9-]*\d)[a-z0-9-]+\b", raw, re.I):
-        return False
-    for b in BRAND_TOKENS:
-        nb = normalize_ar(b)
-        if re.search(r"[a-z]", nb):
-            # براند لاتيني (خصوصاً القصير مثل lg/hp): مطابقة بحدود كلمة حتى لا يمسك داخل كلمات أخرى.
-            if re.search(rf"\b{re.escape(nb)}\b", q):
-                return False
-        elif nb in q:
-            return False
-    cat = detect_category(raw)
-    if cat in ("electronics", "appliances", "sports", "gaming", "furniture", "auto", "kids_toys", "beauty"):
-        return True
-    # فئات ما نبي لها مقارنة براندات: تموينات وأكل وصيدلية وأزياء (بصرية/حساسة).
-    if cat in ("grocery", "food_delivery", "pharmacy", "fashion"):
-        return False
-    # v74.5: فئة غير معروفة في القاموس (مثل: شاشة كمبيوتر، مضخة مسبح، خيمة، دراي فون...)
-    # — حكم ذكاء اصطناعي سريع رخيص (بدون بحث + كاش) يقرر على الطاير بدل قاموس ثابت.
-    return _ai_brandless_judge(raw)
-
-_BRANDLESS_JUDGE_CACHE = {}
-_BRANDLESS_JUDGE_LOCK = threading.Lock()
-BRANDLESS_JUDGE_SYSTEM = """أنت مصنف طلبات لبوت تسوق. المستخدم كتب طلباً قصيراً.
-أجب بكلمة واحدة فقط: YES أو NO.
-YES = الطلب اسم فئة منتج معمّر عام بدون ماركة (مثل: شاشة كمبيوتر، مضخة مسبح، مكواة بخار، خيمة رحلات، سشوار)، والمستخدم يستفيد من مقارنة أفضل البراندات قبل عرض الأسعار.
-NO = أي شيء آخر: منتج بماركة أو موديل محدد، أكل أو تموينات، دواء، خدمة أو فني، ملابس وأزياء، أو كلام غير واضح."""
-
-def _ai_brandless_judge(query):
-    key = re.sub(r"\s+", " ", normalize_ar(str(query or "")))[:120]
-    if not key:
-        return False
-    with _BRANDLESS_JUDGE_LOCK:
-        if key in _BRANDLESS_JUDGE_CACHE:
-            return _BRANDLESS_JUDGE_CACHE[key]
-    raw, _ = call_gemini([{"text": str(query or "").strip()}], system=BRANDLESS_JUDGE_SYSTEM, use_search=False)
-    verdict = "YES" in (raw or "").upper()
-    with _BRANDLESS_JUDGE_LOCK:
-        if len(_BRANDLESS_JUDGE_CACHE) > 2000:
-            _BRANDLESS_JUDGE_CACHE.clear()
-        _BRANDLESS_JUDGE_CACHE[key] = verdict
-    print(f"BRANDLESS AI JUDGE: {query!r} -> {verdict}")
-    return verdict
 
 BRAND_COMPARE_SYSTEM = """أنت خبير مقارنات منتجات مثل مواقع «أفضل 10» ومواقع المراجعات.
 المستخدم طلب منتجاً عاماً بدون ماركة. ابحث في Google عن مقارنات ومراجعات حديثة لهذه الفئة
@@ -4599,8 +4591,12 @@ def process_text_message(message,bot_id,onboarding_checked=False):
         execute_service_search(from_number, products[0] if products else user_text, user_text, bot_id, lang)
         return
     if len(products)==1:
-        # v74: طلب عام بدون ماركة؟ نبدأ بمقارنة البراندات وقائمة اختيار قبل البحث.
-        if is_brandless_generic(products[0]) and run_brand_comparison(from_number, products[0], bot_id, lang):
+        # v74.6: المصنّف الذكي (بدون قاموس) يقرر: مقارنة براندات، خدمة، أو بحث مباشر.
+        rtype = classify_request_type(products[0])
+        if rtype == "SERVICE":
+            execute_service_search(from_number, products[0], user_text, bot_id, lang)
+            return
+        if rtype == "GENERIC" and run_brand_comparison(from_number, products[0], bot_id, lang):
             return
         execute_product_search(from_number, products[0], bot_id, lang)
     else:
@@ -4627,4 +4623,4 @@ def process_location_message(message, bot_id):
     route_pending_after_location(from_number)
 
 @app.get("/")
-async def health(): return {"status":"v74.5 AI BRANDLESS JUDGE + CLEAN STORE NAMES + SERVICE INTENT FIX (answer+5 providers) + TEXT+SIMILAR USE OLD v26 SMART PATH (tournament) + SERVICES 5+ PHONES + AI INTENT + BRAND COMPARE + SHOP FILTER + TRIO OPTIONS + EXACT PRICES", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "v26_runs":SEARCH_RUNS, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
+async def health(): return {"status":"v74.6 PURE AI REQUEST CLASSIFIER (no dictionary) + CLEAN STORE NAMES + SERVICE INTENT FIX (answer+5 providers) + TEXT+SIMILAR USE OLD v26 SMART PATH (tournament) + SERVICES 5+ PHONES + AI INTENT + BRAND COMPARE + SHOP FILTER + TRIO OPTIONS + EXACT PRICES", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "v26_runs":SEARCH_RUNS, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
