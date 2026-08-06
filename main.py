@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v74-12-more-lens-cards-20260806"
+BUILD_ID = "v74-13-global-region-order-gcc-us-cn-eu-20260806"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE -> GOOGLE LENS DIRECT PASSTHROUGH (raw results to user)")
@@ -2373,6 +2373,91 @@ def is_local_lens_result(item):
     return False
 
 
+# ---- v74.13: ترتيب النتائج العالمية جغرافياً --------------------------------
+# العرض للمستخدم الخليجي: دول الخليج أولاً (شحن أسرع وأرخص وضمانات أقرب)،
+# ثم أمريكا، ثم الصين، ثم أوروبا، ثم بقية العالم — وداخل كل منطقة الأرخص أولاً.
+_GCC_CCS = {"sa", "ae", "bh", "qa", "om", "kw"}
+_EU_CCS = {"gb", "de", "fr", "it", "es", "pt", "nl", "be", "ch", "at", "se", "dk", "no", "fi", "ie", "pl", "cz", "gr"}
+_GCC_HOST_HINTS = ("amazon.ae", "amazon.sa", "noon.", "namshi", "sharafdg", "luluhypermarket",
+                   "jarir", "extra.com", "xcite", "eureka", "boutiqaat", "sssports", "ounass", "dubaistore")
+_US_HOST_HINTS = ("amazon.com", "ebay.com", "walmart", "bestbuy", "target.com", "homedepot",
+                  "newegg", "bhphotovideo", "macys", "nordstrom", "gamestop")
+_CN_HOST_HINTS = ("aliexpress", "alibaba", "temu.", "shein", "dhgate", "banggood",
+                  "taobao", "tmall", "jd.com", "made-in-china", "1688.com", "lightinthebox")
+_EU_HOST_HINTS = ("amazon.co.uk", "amazon.de", "amazon.fr", "amazon.it", "amazon.es",
+                  "zalando", "argos", "currys", "mediamarkt", "fnac", "otto.de", "asos", "johnlewis")
+
+def global_region_rank(item):
+    """0=خليج، 1=أمريكا، 2=الصين، 3=أوروبا، 4=غير محدد/بقية العالم."""
+    hay = " ".join(str(item.get(k) or "") for k in ("title", "source", "link", "domain", "snippet", "price", "currency")).lower()
+    link = str(item.get("link") or "").lower()
+    try:
+        host = urllib.parse.urlparse(link).netloc.lower().replace("www.", "")
+    except Exception:
+        host = ""
+    if any(h in host for h in _CN_HOST_HINTS):
+        return 2
+    if any(h in host for h in _GCC_HOST_HINTS):
+        return 0
+    if any(h in host for h in _US_HOST_HINTS):
+        return 1
+    if any(h in host for h in _EU_HOST_HINTS):
+        return 3
+    # نطاقات الدول
+    for cc, tlds in COUNTRY_TLDS.items():
+        if any(tld in host for tld in tlds):
+            if cc in _GCC_CCS:
+                return 0
+            if cc == "us":
+                return 1
+            if cc == "cn":
+                return 2
+            if cc in _EU_CCS:
+                return 3
+            return 4
+    if host.endswith(".cn"):
+        return 2
+    # عملات صريحة
+    if any(c in hay for c in ("sar", "aed", "qar", "omr", "bhd", "ر.س", "د.إ", "ر.ق", "ر.ع", "د.ب")):
+        return 0
+    if any(c in hay for c in ("cny", "rmb", "yuan", "¥")):
+        return 2
+    if any(c in hay for c in ("eur", "gbp", "€", "£")):
+        return 3
+    if "usd" in hay or "us$" in hay or re.search(r"(?<![a-z])\$", hay):
+        return 1
+    return 4
+
+def reorder_global_offers_text(txt, urls):
+    """يعيد بناء نص النتائج العالمية بالترتيب الجغرافي (وداخل كل منطقة الأرخص أولاً)."""
+    offers = extract_store_offers(txt)
+    if len(offers) < 2:
+        return txt
+    lines = (txt or "").splitlines()
+    offer_line_set = set()
+    for line in lines:
+        m = re.match(r"^(✅|🏆|•)\s*(.+?)\s*(?:—|–|-)\s*(.+)$", line.strip())
+        if m and re.search(r"\d", m.group(3)):
+            offer_line_set.add(line)
+    header = [l for l in lines if l not in offer_line_set]
+    ranked = []
+    for o in offers:
+        u = match_url(o.get("name", ""), urls or {})
+        rank = global_region_rank({"link": u, "source": o.get("name", ""), "title": o.get("line", ""), "price": o.get("line", "")})
+        price = _extract_numeric_price(o.get("line", "")) or 10**9
+        ranked.append((rank, price, o))
+    ranked.sort(key=lambda x: (x[0], x[1]))
+    region_names = {0: "🇰🇼🇸🇦🇦🇪", 1: "🇺🇸", 2: "🇨🇳", 3: "🇪🇺", 4: "🌍"}
+    out = [l for l in header if l.strip()]
+    if out and not out[-1] == "":
+        out.append("")
+    for i, (rank, _price, o) in enumerate(ranked):
+        body = re.sub(r"^(?:✅|🏆|•)\s*", "", o.get("line", "")).strip()
+        flag = region_names.get(rank, "")
+        out.append(f"{'✅' if i == 0 else '•'} {flag} {body}".replace("  ", " "))
+    print(f"GLOBAL REGION ORDER: {[(region_names.get(r,''), o.get('name','')) for r,_p,o in ranked]}")
+    return "\n".join(out)
+
 def is_foreign_lens_result(item):
     """True only when the result is clearly not local. Unknown results remain false."""
     if is_local_lens_result(item):
@@ -3501,6 +3586,8 @@ def run_global_search(phone, item):
     if not txt or not extract_store_offers(txt) or not urls:
         send_whatsapp_text(phone, T(lang, "global_none"), bot_id)
         return
+    # v74.13: ترتيب جغرافي — الخليج ثم أمريكا ثم الصين ثم أوروبا، وداخل كل منطقة الأرخص أولاً.
+    txt = reorder_global_offers_text(txt, urls)
     send_product_result(phone, txt, urls, bot_id, lang, query)
 
 def _peek_pending(store, phone):
@@ -3996,7 +4083,15 @@ def _send_lens_match_batch(from_number, matches, bot_id, lang, header="", conver
             return conv if conv is not None else num
         return num
 
-    final_picked.sort(key=lambda x: ((0, p) if (p := _numeric_price_of(x[0])) is not None else (1, 0.0)))
+    if convert_prices:
+        # v74.13: عالمي — ترتيب جغرافي أولاً (خليج -> أمريكا -> الصين -> أوروبا -> الباقي)،
+        # ثم داخل كل منطقة: المسعّر أولاً من الأرخص إلى الأغلى.
+        final_picked.sort(key=lambda x: (
+            global_region_rank(x[0]),
+            (0, p) if (p := _numeric_price_of(x[0])) is not None else (1, 0.0),
+        ))
+    else:
+        final_picked.sort(key=lambda x: ((0, p) if (p := _numeric_price_of(x[0])) is not None else (1, 0.0)))
 
     # 4) v72.3: للمستخدم العربي نترجم العناوين دفعة واحدة (كاش)؛ البراند يبقى لاتيني.
     title_map = {}
@@ -4877,4 +4972,4 @@ def process_location_message(message, bot_id):
     route_pending_after_location(from_number)
 
 @app.get("/")
-async def health(): return {"status":"v74.12 MORE LENS CARDS (LENS_MAX_CARDS=8 default) + NONE CLASS + CTA ALWAYS + ARABIC PICK LIST + RELEVANCE FILTER + NO SILENCE + BILINGUAL 2 ROUNDS + PURE AI CLASSIFIER + CLEAN STORE NAMES + SERVICE INTENT FIX (answer+5 providers) + TEXT+SIMILAR USE OLD v26 SMART PATH (tournament) + SERVICES 5+ PHONES + AI INTENT + BRAND COMPARE + SHOP FILTER + TRIO OPTIONS + EXACT PRICES", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "v26_runs":SEARCH_RUNS, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
+async def health(): return {"status":"v74.13 GLOBAL REGION ORDER (GCC>US>CN>EU) + MORE LENS CARDS + NONE CLASS + CTA ALWAYS + ARABIC PICK LIST + RELEVANCE FILTER + NO SILENCE + BILINGUAL 2 ROUNDS + PURE AI CLASSIFIER + CLEAN STORE NAMES + SERVICE INTENT FIX (answer+5 providers) + TEXT+SIMILAR USE OLD v26 SMART PATH (tournament) + SERVICES 5+ PHONES + AI INTENT + BRAND COMPARE + SHOP FILTER + TRIO OPTIONS + EXACT PRICES", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "v26_runs":SEARCH_RUNS, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
