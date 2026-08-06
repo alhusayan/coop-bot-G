@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v74-8-graceful-link-degradation-soft-results-20260806"
+BUILD_ID = "v74-9-relevance-filter-pick-forever-compare-recovery-20260806"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE -> GOOGLE LENS DIRECT PASSTHROUGH (raw results to user)")
@@ -1776,6 +1776,60 @@ def send_maps_button(from_number, product, bot_id, lang):
     url = maps_search_url(product, m.get("lat"), m.get("lng")) if m.get("lat") is not None and m.get("lng") is not None else maps_search_url(product)
     send_whatsapp_cta(from_number, T(lang, "maps_body"), url, bot_id, T(lang, "maps_btn"))
 
+ENABLE_RELEVANCE_FILTER = env_bool("ENABLE_RELEVANCE_FILTER", True)
+# كلمات نتائج «حول المنتج» وليست المنتج نفسه — تُرفض فوراً إلا إذا طلبها المستخدم بنفسه.
+_NON_PRODUCT_WORDS = (
+    "owners manual", "owner's manual", "service manual", "workshop manual",
+    "repair manual", "manual pdf", "handbook", "wiring diagram", "parts catalog",
+    "parts catalogue", "spare part", "spare parts", "دليل المالك", "دليل الاستخدام",
+    "كتيب", "دليل الصيانه", "دليل الصيانة", "قطع غيار", "مخطط",
+)
+
+RELEVANCE_FILTER_SYSTEM = """أنت مدقق نتائج لبوت تسوق. المستخدم طلب منتجاً، وسأعطيك قائمة مرقمة بنتائج البحث (اسم المتجر — العنوان/الرابط).
+أعد فقط أرقام النتائج التي تبيع المنتج المطلوب نفسه (أو نسخة/موديل منه).
+ارفض بلا تردد: كتيبات ودلائل الاستخدام (Manuals/PDF)، قطع الغيار، الإكسسوارات والأغطية، المجسمات والألعاب المصغرة، الملصقات، الخدمات والتأجير — إلا إذا كان طلب المستخدم نفسه عنها.
+مثال: المستخدم طلب "Sea Ray Sundancer 320" (يخت) والنتيجة "Sea Ray 320 Owners Manual PDF" -> ارفضها.
+أرجع JSON فقط بدون شرح: {"keep":[1,3]}"""
+
+def filter_relevant_offers(query, offers, urls):
+    """v74.9: يرمي النتائج غير ذات الصلة (كتيب بدل اليخت...). طبقتان: كلمات قاطعة ثم حكم ذكي."""
+    if not offers:
+        return offers
+    q_norm = normalize_ar(str(query or ""))
+    wants_non_product = any(normalize_ar(w) in q_norm for w in _NON_PRODUCT_WORDS)
+    kept = []
+    for o in offers:
+        hay = normalize_ar(f"{o.get('line','')} {match_url(o.get('name',''), urls or {})}")
+        if not wants_non_product and any(normalize_ar(w) in hay for w in _NON_PRODUCT_WORDS):
+            print(f"RELEVANCE HARD-DROP: {o.get('line','')[:80]}")
+            continue
+        kept.append(o)
+    if not ENABLE_RELEVANCE_FILTER or not kept or len(kept) == 0:
+        return kept
+    # حكم ذكي واحد سريع للدفعة كلها — يمسك الحالات اللي ما تمسكها الكلمات.
+    numbered = []
+    for i, o in enumerate(kept, 1):
+        u = match_url(o.get("name", ""), urls or {})
+        try:
+            host = urllib.parse.urlparse(u or "").netloc.replace("www.", "")
+        except Exception:
+            host = ""
+        numbered.append(f"{i}. {o.get('line','')[:100]} — {host}")
+    prompt = f"طلب المستخدم: {query}\n\nالنتائج:\n" + "\n".join(numbered)
+    raw, _ = call_gemini([{"text": prompt}], system=RELEVANCE_FILTER_SYSTEM, use_search=False)
+    try:
+        data = json.loads(re.search(r"\{.*\}", raw or "", flags=re.S).group(0))
+        keep_idx = {int(x) for x in (data.get("keep") or [])}
+        ai_kept = [o for i, o in enumerate(kept, 1) if i in keep_idx]
+        dropped = [o.get("line", "")[:60] for i, o in enumerate(kept, 1) if i not in keep_idx]
+        if dropped:
+            print(f"RELEVANCE AI-DROP ({len(dropped)}): {dropped[:4]}")
+        # حماية: إذا الحكم رمى كل شي بدون سبب واضح نبقي القائمة (أفضل من إخفاء نتائج صحيحة).
+        return ai_kept if ai_kept else kept
+    except Exception:
+        print(f"RELEVANCE AI PARSE FAIL — keeping as-is: {raw!r}")
+        return kept
+
 def send_product_result(from_number, txt, urls, bot_id, lang, query, best_only=False):
     if not txt:
         send_whatsapp_text(from_number, T(lang, "not_found"), bot_id)
@@ -1788,6 +1842,12 @@ def send_product_result(from_number, txt, urls, bot_id, lang, query, best_only=F
     if not offers:
         send_whatsapp_text(from_number, txt, bot_id)
         return "info"
+    # v74.9: فلتر الصلة — كتيب اليخت ليس اليخت. إذا ما بقي شي، النتيجة تعتبر غير موجودة.
+    offers = filter_relevant_offers(query, offers, urls)
+    if not offers:
+        print("RELEVANCE: all offers dropped -> treat as not found")
+        send_whatsapp_text(from_number, T(lang, "not_found"), bot_id)
+        return "none"
     title = product_title(txt, query)
     if title:
         send_whatsapp_text(from_number, title, bot_id)
@@ -1822,7 +1882,13 @@ def send_product_result(from_number, txt, urls, bot_id, lang, query, best_only=F
     if sent == 0:
         # v74.8: عندنا أسعار حقيقية بدون أي روابط صالحة: نعرض الأسعار نصاً —
         # ممنوع نقول «ما لقيت» والنتيجة موجودة بأيدينا.
-        body = "\n".join(o["line"] for o in offers[:MAX_STORES]).strip()
+        # v74.9: مرتبة من الأرخص إلى الأغلى و✅ للأرخص دائماً.
+        ranked = sorted(offers[:MAX_STORES], key=lambda o: _extract_numeric_price(o.get("line", "")) or 10**9)
+        lines_out = []
+        for i, o in enumerate(ranked):
+            body_line = re.sub(r"^(?:✅|🏆|•)\s*", "", o.get("line", "")).strip()
+            lines_out.append(f"{'✅' if i == 0 else '•'} {body_line}")
+        body = "\n".join(lines_out).strip()
         if body:
             send_whatsapp_text(from_number, body, bot_id)
             return "product"
@@ -3407,14 +3473,28 @@ def process_interactive_message(message, bot_id):
     reply=inter.get("button_reply") or inter.get("list_reply") or {}
     btn_id=reply.get("id","")
     if btn_id.startswith("pick_"):
-        # v74: المستخدم اختار منتجاً من قائمة مقارنة البراندات — نشغل محرك البحث الجديد عليه.
-        item = _peek_pending(PENDING_BRAND_PICKS, from_number)
-        if item:
-            idx = int(btn_id[5:]) if btn_id[5:].isdigit() else -1
-            opts = item.get("options") or []
-            if 0 <= idx < len(opts):
-                activate_market(from_number)
-                execute_product_search(from_number, opts[idx], item.get("bot_id") or bot_id, item.get("lang", "ar"))
+        # v74.9: الاختيار من قائمة المقارنة يشتغل دائماً حتى بعد انتهاء صلاحية القائمة —
+        # عنوان الخيار موجود في الضغطة نفسها (list_reply.title) فلا نعتمد على المخزّن.
+        item = _peek_pending(PENDING_BRAND_PICKS, from_number) or {}
+        idx = int(btn_id[5:]) if btn_id[5:].isdigit() else -1
+        opts = item.get("options") or []
+        picked = opts[idx] if 0 <= idx < len(opts) else ""
+        if not picked:
+            picked = (reply.get("title") or "").strip()
+            if picked and reply.get("description"):
+                picked = f"{picked}{reply.get('description','')}".strip()
+        if picked:
+            activate_market(from_number)
+            lang_ = item.get("lang") or USER_LANG.get(from_number, "ar")
+            try:
+                execute_product_search(from_number, picked, item.get("bot_id") or bot_id, lang_)
+            except Exception as e:
+                print(f"PICK SEARCH ERR: {e}")
+                send_whatsapp_text(from_number, T(lang_, "not_found"), bot_id)
+        else:
+            # لا صمت أبداً: ما قدرنا نحدد الخيار — نطلب كتابته نصاً.
+            lang_ = USER_LANG.get(from_number, "ar")
+            send_whatsapp_text(from_number, ("اكتب اسم المنتج اللي تبيه وأدور لك عليه 👍" if lang_ == "ar" else "Type the product name and I'll search it for you 👍"), bot_id)
         return
     if btn_id == "lf_yes":
         # عرض نتائج Lens العالمية؛ وإذا ما فيه نتائج مخزنة نشغل البحث العالمي النصي الجديد.
@@ -4466,10 +4546,15 @@ def execute_service_search(from_number, service_desc, original_text, bot_id, lan
         "مع أرقام هواتفهم الظاهرة فعلاً في نتائج البحث، مرتبين من الأعلى تقييماً. "
         f"{LANG_INSTR[lang]}"
     )
-    txt, urls = v26_best_of_search([{"text": prompt}])
-    if not txt or is_no_result_answer(txt):
-        # محاولة أخيرة باتصال مباشر قبل الاعتذار.
-        txt, urls = call_gemini([{"text": prompt}])
+    txt, urls = "", {}
+    try:
+        txt, urls = v26_best_of_search([{"text": prompt}])
+        if not txt or is_no_result_answer(txt):
+            # محاولة أخيرة باتصال مباشر قبل الاعتذار.
+            txt, urls = call_gemini([{"text": prompt}])
+    except Exception as e:
+        print(f"SERVICE SEARCH CRASH: {e}")
+        txt = ""
     if not txt or is_no_result_answer(txt):
         send_whatsapp_text(from_number, T(lang, "not_found"), bot_id)
         return
@@ -4484,10 +4569,15 @@ def execute_product_search(from_number, product, bot_id, lang):
     يشتغل كشبكة أمان حتى لا نخسر أي منتج. العرض بالطريقة الحالية بدون تغيير.
     """
     send_whatsapp_text(from_number, T(lang, "searching", q=product), bot_id)
-    txt, urls = v26_text_search(product, lang)
-    if not txt:
-        print("TEXT v26 PATH EMPTY -> three-layer fallback")
-        txt, urls = search_product(product, lang)
+    try:
+        txt, urls = v26_text_search(product, lang)
+        if not txt:
+            print("TEXT v26 PATH EMPTY -> three-layer fallback")
+            txt, urls = search_product(product, lang)
+    except Exception as e:
+        # v74.9: ممنوع الصمت — أي خطأ داخلي يتحول لرد واضح مع خيارات المتابعة.
+        print(f"TEXT SEARCH CRASH: {e}")
+        txt, urls = "", {}
     LAST_SEARCH[from_number] = {"product": product}
     if not txt or (not extract_store_offers(txt) and not is_service_answer(txt) and not is_informational_answer(txt)):
         # ما لقينا المنتج بالضبط محلياً: نعرض الخيارات الثلاثة بدل رسالة الاعتذار وحدها.
@@ -4589,6 +4679,20 @@ OPTIONS: [براند موديل 1] | [براند موديل 2] | [براند م�
 قواعد: بدون روابط، بدون Markdown، لا تكرر نفس الموديل، سطر OPTIONS إلزامي وبأسماء قابلة للبحث.
 لغة الرد: حسب تعليمات رسالة المستخدم."""
 
+def _options_from_compare_lines(txt):
+    """v74.9: استرجاع ذكي — إذا Gemini نسي سطر OPTIONS نستخرج الخيارات من أسطر
+
+    🏆💎💰✨ نفسها: النص بين النقطتين والشرطة هو (البراند + الموديل)."""
+    options = []
+    for line in (txt or "").splitlines():
+        m = re.match(r"^\s*(?:🏆|💎|💰|✨)\s*[^:：]*[:：]\s*(.+?)\s*(?:—|–|-)\s", line.strip())
+        if m:
+            cand = " ".join(m.group(1).split()).strip()
+            if cand and len(cand) >= 3 and cand not in options:
+                options.append(cand)
+    return options[:6]
+
+
 def run_brand_comparison(from_number, query, bot_id, lang):
     """يرسل مقارنة براندات + قائمة اختيار. يعيد False عند الفشل ليكمل البحث العادي."""
     send_whatsapp_text(from_number, T(lang, "compare_searching"), bot_id)
@@ -4598,16 +4702,27 @@ def run_brand_comparison(from_number, query, bot_id, lang):
         f". قارن أفضل الخيارات المتوفرة الآن في {current_market().get('country_name', 'Kuwait')}. "
         f"{LANG_INSTR[lang]}"
     )
-    txt, _ = call_gemini([{"text": prompt}], system=BRAND_COMPARE_SYSTEM)
-    if not txt:
-        return False
-    m = re.search(r"(?im)^\s*OPTIONS\s*:\s*(.+)$", txt)
+    txt = ""
     options = []
-    if m:
-        options = [o.strip() for o in m.group(1).split("|") if o.strip()][:6]
-        txt = re.sub(r"(?im)^\s*OPTIONS\s*:.*$", "", txt).strip()
-    if not options:
-        print("BRAND COMPARE: no OPTIONS line -> normal search")
+    # v74.9: محاولتان — والخيارات تُستخرج من أسطر المقارنة إذا سطر OPTIONS ما جاء.
+    for attempt in (1, 2):
+        txt, _ = call_gemini([{"text": prompt}], system=BRAND_COMPARE_SYSTEM)
+        if not txt:
+            print(f"BRAND COMPARE ATTEMPT {attempt}: empty")
+            continue
+        m = re.search(r"(?im)^\s*OPTIONS\s*:\s*(.+)$", txt)
+        if m:
+            options = [o.strip() for o in m.group(1).split("|") if o.strip()][:6]
+            txt = re.sub(r"(?im)^\s*OPTIONS\s*:.*$", "", txt).strip()
+        if not options:
+            options = _options_from_compare_lines(txt)
+            if options:
+                print(f"BRAND COMPARE: OPTIONS recovered from lines -> {options}")
+        if options:
+            break
+        print(f"BRAND COMPARE ATTEMPT {attempt}: no options")
+    if not txt or not options:
+        print("BRAND COMPARE FAILED -> normal search")
         return False
     send_whatsapp_text(from_number, txt, bot_id)
     PENDING_BRAND_PICKS[from_number] = {"options": options, "bot_id": bot_id, "lang": lang, "ts": time.time()}
@@ -4704,4 +4819,4 @@ def process_location_message(message, bot_id):
     route_pending_after_location(from_number)
 
 @app.get("/")
-async def health(): return {"status":"v74.8 GRACEFUL LINK DEGRADATION (direct->store->text prices) + BILINGUAL 2 ROUNDS + PURE AI CLASSIFIER + CLEAN STORE NAMES + SERVICE INTENT FIX (answer+5 providers) + TEXT+SIMILAR USE OLD v26 SMART PATH (tournament) + SERVICES 5+ PHONES + AI INTENT + BRAND COMPARE + SHOP FILTER + TRIO OPTIONS + EXACT PRICES", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "v26_runs":SEARCH_RUNS, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
+async def health(): return {"status":"v74.9 RELEVANCE FILTER + PICK FOREVER + COMPARE RECOVERY + NO SILENCE + BILINGUAL 2 ROUNDS + PURE AI CLASSIFIER + CLEAN STORE NAMES + SERVICE INTENT FIX (answer+5 providers) + TEXT+SIMILAR USE OLD v26 SMART PATH (tournament) + SERVICES 5+ PHONES + AI INTENT + BRAND COMPARE + SHOP FILTER + TRIO OPTIONS + EXACT PRICES", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "v26_runs":SEARCH_RUNS, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
