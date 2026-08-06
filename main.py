@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v74-6-pure-ai-request-classifier-no-dictionary-20260806"
+BUILD_ID = "v74-7-bidirectional-bilingual-search-two-rounds-20260806"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE -> GOOGLE LENS DIRECT PASSTHROUGH (raw results to user)")
@@ -3304,7 +3304,11 @@ def run_similar_search(phone, item):
     send_whatsapp_text(phone, T(lang, "similar_searching"), bot_id)
     # نزيل جزء الكابشن إن وجد ونأخذ اسم المنتج الأساسي.
     base = short_query(re.sub(r"^.*?—\s*", "", query).strip() or query) or short_query(query)
-    base_en = english_search_name(base)
+    # v74.7: المرادف بالاتجاهين — عربي يجيب الإنجليزي، وإنجليزي يجيب العربي.
+    if re.search(r"[\u0600-\u06FF]", base):
+        base_en = english_search_name(base)
+    else:
+        base_en = arabic_search_name(base)
     market_name = current_market().get("country_name", "Kuwait")
     prompts = [
         (f"المنتج التالي غير متوفر محلياً: {base}" + (f" ({base_en})" if base_en and base_en != base else "") + f". اقترح حتى {MAX_STORES} بدائل مشابهة له فعلياً — نفس الفئة "
@@ -4329,39 +4333,75 @@ def parse_user_intent(user_text, lang):
     return {"intent": "greeting" if not compact.strip() or any(g in compact for g in ("سلام", "هلا", "مرحبا")) else "chat", "products": []}
 
 
-def v26_text_search(product, lang):
-    """v74.3: المسار الذكي الكامل القديم (v26) للبحث النصي — نفس محرك البدائل المشابهة.
+def arabic_search_name(query):
+    """v74.7: المقابل العربي لاسم إنجليزي (Toyota Land Cruiser -> تويوتا لاند كروزر).
 
-    بطولة SEARCH_RUNS بحوث Gemini متوازية بنفس SYSTEM_PROMPT (منتجات/خدمات/معلومات)
-    -> تقييم كل جواب بـ v26_answer_score -> الأقوى يفوز، واللنكات اتحاد كل الجولات.
-    يعيد (txt, urls) بعد كاش وتصفية الروابط المباشرة وحارس رفض الأجنبي الواضح.
+    نفس فكرة english_search_name بالاتجاه المعاكس — نموذج سريع رخيص + كاش،
+    حتى يبحث البوت بالاسمين مهما كانت لغة كتابة المستخدم.
+    """
+    q = " ".join(str(query or "").split()).strip()
+    if not q or re.search(r"[\u0600-\u06FF]", q):
+        return ""
+    translated = arabic_titles([q]).get(q, "")
+    return translated if translated and translated != q else ""
+
+
+def v26_text_search(product, lang):
+    """v74.7: المسار الذكي الكامل (v26) — ثنائي اللغة بالاتجاهين وبجولتين قبل الاستسلام.
+
+    - المستخدم كتب عربي؟ نجيب الاسم الإنجليزي التجاري ونبحث بالاثنين.
+    - كتب إنجليزي؟ نجيب المقابل العربي ونبحث بالاثنين (هذا اللي كان ناقص).
+    - الجولة الأولى بالاسم الأصلي + المرادف. فشلت؟ جولة ثانية المرادف هو الأساس.
+    كل جولة = بطولة SEARCH_RUNS بحوث متوازية، الأقوى يفوز واللنكات اتحاد الجولات.
     """
     cached = cache_get(product, lang)
     if cached:
         return cached
-    prompt = bilingual_search_instruction(product, lang)
-    txt, urls = v26_best_of_search([{"text": prompt}])
-    urls = direct_urls_only(urls)
-    if not txt:
-        return "", {}
-    # الخدمات والإجابات المعلوماتية تمر كما هي (رسالة نصية واحدة مرتبة).
-    if is_service_answer(txt) or is_informational_answer(txt):
-        if len(txt) >= 40:
-            cache_put(product, lang, txt, urls)
-        return txt, urls
-    if is_no_result_answer(txt) or not extract_store_offers(txt):
-        return "", {}
-    # حارس محلي خفيف مثل مسار البدائل: نرفض الأجنبي الواضح فقط، بدون فحص HTML (مثل v26).
-    kept_urls = {}
-    for n, u in urls.items():
-        if is_foreign_lens_result({"link": u, "source": n, "title": n}):
-            print(f"TEXT v26 REJECT FOREIGN: {n} -> {u}")
+    is_ar_query = bool(re.search(r"[\u0600-\u06FF]", str(product or "")))
+    alt = (english_search_name(product) if is_ar_query else arabic_search_name(product)) or ""
+    if alt.strip().lower() == str(product).strip().lower():
+        alt = ""
+    print(f"TEXT v26 BILINGUAL: {product!r} <-> {alt!r}")
+
+    def _round(primary, secondary):
+        extra = (
+            f" المرادف باللغة الأخرى لنفس المنتج بالضبط (ابحث به أيضاً في المتاجر التي تفهرس بتلك اللغة): {secondary}."
+            if secondary else ""
+        )
+        prompt = bilingual_search_instruction(primary, lang) + extra
+        txt, urls = v26_best_of_search([{"text": prompt}])
+        return txt, direct_urls_only(urls)
+
+    attempts = [(product, alt)]
+    if alt:
+        attempts.append((alt, product))
+
+    for i, (primary, secondary) in enumerate(attempts, 1):
+        txt, urls = _round(primary, secondary)
+        if not txt:
+            print(f"TEXT v26 ROUND {i}: empty answer")
             continue
-        kept_urls[n] = u
-    if not kept_urls:
-        return "", {}
-    cache_put(product, lang, txt, kept_urls)
-    return txt, kept_urls
+        # الخدمات والإجابات المعلوماتية تمر كما هي (رسالة نصية واحدة مرتبة).
+        if is_service_answer(txt) or is_informational_answer(txt):
+            if len(txt) >= 40:
+                cache_put(product, lang, txt, urls)
+            return txt, urls
+        if is_no_result_answer(txt) or not extract_store_offers(txt):
+            print(f"TEXT v26 ROUND {i}: no offers for {primary!r}")
+            continue
+        # حارس محلي خفيف مثل مسار البدائل: نرفض الأجنبي الواضح فقط، بدون فحص HTML (مثل v26).
+        kept_urls = {}
+        for n, u in urls.items():
+            if is_foreign_lens_result({"link": u, "source": n, "title": n}):
+                print(f"TEXT v26 REJECT FOREIGN: {n} -> {u}")
+                continue
+            kept_urls[n] = u
+        if not kept_urls:
+            print(f"TEXT v26 ROUND {i}: offers without direct local links -> next round")
+            continue
+        cache_put(product, lang, txt, kept_urls)
+        return txt, kept_urls
+    return "", {}
 
 
 def execute_service_search(from_number, service_desc, original_text, bot_id, lang):
@@ -4623,4 +4663,4 @@ def process_location_message(message, bot_id):
     route_pending_after_location(from_number)
 
 @app.get("/")
-async def health(): return {"status":"v74.6 PURE AI REQUEST CLASSIFIER (no dictionary) + CLEAN STORE NAMES + SERVICE INTENT FIX (answer+5 providers) + TEXT+SIMILAR USE OLD v26 SMART PATH (tournament) + SERVICES 5+ PHONES + AI INTENT + BRAND COMPARE + SHOP FILTER + TRIO OPTIONS + EXACT PRICES", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "v26_runs":SEARCH_RUNS, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
+async def health(): return {"status":"v74.7 BIDIRECTIONAL BILINGUAL SEARCH (ar<->en, 2 rounds) + PURE AI CLASSIFIER + CLEAN STORE NAMES + SERVICE INTENT FIX (answer+5 providers) + TEXT+SIMILAR USE OLD v26 SMART PATH (tournament) + SERVICES 5+ PHONES + AI INTENT + BRAND COMPARE + SHOP FILTER + TRIO OPTIONS + EXACT PRICES", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "v26_runs":SEARCH_RUNS, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
