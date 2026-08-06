@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v74-7-bidirectional-bilingual-search-two-rounds-20260806"
+BUILD_ID = "v74-8-graceful-link-degradation-soft-results-20260806"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE -> GOOGLE LENS DIRECT PASSTHROUGH (raw results to user)")
@@ -1797,15 +1797,35 @@ def send_product_result(from_number, txt, urls, bot_id, lang, query, best_only=F
         best = next((o for o in offers if o["best"]), offers[0])
         offers = [best]
     sent = 0
+    fallback_ctas = []
     for o in offers[:MAX_STORES]:
         url = match_url(o["name"], urls)
-        # ممنوع تماماً تحويل المستخدم إلى Google أو صفحة بحث أو تصنيف.
+        # الأفضل دائماً: رابط صفحة المنتج المباشرة. ممنوع Google وصفحات البحث فقط.
         if not is_direct_store_url(url):
+            # v74.8: رابط متجر عام (رئيسية/قسم) نحتفظ به كاحتياط — أفضل من لا شيء.
+            try:
+                host = urllib.parse.urlparse(url or "").netloc.lower()
+            except Exception:
+                host = ""
+            if url and url.startswith("http") and host and "google." not in host and "bing." not in host:
+                fallback_ctas.append((o, url))
             print(f"SKIP NON-DIRECT CTA: {o['name']} -> {url}")
             continue
         send_whatsapp_cta(from_number, o["line"], url, bot_id, f"🛒 {o['name'][:18]}")
         sent += 1
+    if sent == 0 and fallback_ctas:
+        # v74.8: ولا رابط مباشر؟ رابط المتجر نفسه (غير المباشر) أفضل بكثير من «ما لقيت».
+        for o, url in fallback_ctas[:MAX_STORES]:
+            print(f"FALLBACK STORE CTA: {o['name']} -> {url}")
+            send_whatsapp_cta(from_number, o["line"], url, bot_id, f"🛒 {o['name'][:18]}")
+            sent += 1
     if sent == 0:
+        # v74.8: عندنا أسعار حقيقية بدون أي روابط صالحة: نعرض الأسعار نصاً —
+        # ممنوع نقول «ما لقيت» والنتيجة موجودة بأيدينا.
+        body = "\n".join(o["line"] for o in offers[:MAX_STORES]).strip()
+        if body:
+            send_whatsapp_text(from_number, body, bot_id)
+            return "product"
         send_whatsapp_text(from_number, T(lang, "not_found"), bot_id)
         return "none"
     return "product"
@@ -4370,37 +4390,58 @@ def v26_text_search(product, lang):
         )
         prompt = bilingual_search_instruction(primary, lang) + extra
         txt, urls = v26_best_of_search([{"text": prompt}])
-        return txt, direct_urls_only(urls)
+        # v74.8: نرجع الروابط الخام — الصارم يُطبق في المسار الرئيسي، والخام يبقى
+        # احتياطاً للعرض المتدرج (رابط المتجر العام أفضل من رمي النتيجة).
+        return txt, dict(urls or {})
 
     attempts = [(product, alt)]
     if alt:
         attempts.append((alt, product))
 
+    soft_result = None
     for i, (primary, secondary) in enumerate(attempts, 1):
-        txt, urls = _round(primary, secondary)
+        txt, raw_urls = _round(primary, secondary)
         if not txt:
             print(f"TEXT v26 ROUND {i}: empty answer")
             continue
         # الخدمات والإجابات المعلوماتية تمر كما هي (رسالة نصية واحدة مرتبة).
         if is_service_answer(txt) or is_informational_answer(txt):
             if len(txt) >= 40:
-                cache_put(product, lang, txt, urls)
-            return txt, urls
+                cache_put(product, lang, txt, raw_urls)
+            return txt, raw_urls
         if is_no_result_answer(txt) or not extract_store_offers(txt):
             print(f"TEXT v26 ROUND {i}: no offers for {primary!r}")
             continue
-        # حارس محلي خفيف مثل مسار البدائل: نرفض الأجنبي الواضح فقط، بدون فحص HTML (مثل v26).
+        # المسار الرئيسي: روابط منتج مباشرة فقط + رفض الأجنبي الواضح.
+        strict = direct_urls_only(raw_urls)
         kept_urls = {}
-        for n, u in urls.items():
+        for n, u in strict.items():
             if is_foreign_lens_result({"link": u, "source": n, "title": n}):
                 print(f"TEXT v26 REJECT FOREIGN: {n} -> {u}")
                 continue
             kept_urls[n] = u
-        if not kept_urls:
-            print(f"TEXT v26 ROUND {i}: offers without direct local links -> next round")
-            continue
-        cache_put(product, lang, txt, kept_urls)
-        return txt, kept_urls
+        if kept_urls:
+            cache_put(product, lang, txt, kept_urls)
+            return txt, kept_urls
+        # v74.8: فيه عروض وأسعار لكن بلا روابط صارمة — نحتفظ بها (مع الروابط الخام
+        # غير الأجنبية) ونجرب الجولة الثانية؛ وإذا فشلت كلها نعرض هذي بدل «ما لقيت».
+        if soft_result is None:
+            soft_urls = {}
+            for n, u in (raw_urls or {}).items():
+                try:
+                    host = urllib.parse.urlparse(u or "").netloc.lower()
+                except Exception:
+                    host = ""
+                if not u or not u.startswith("http") or not host or "google." in host or "bing." in host:
+                    continue
+                if is_foreign_lens_result({"link": u, "source": n, "title": n}):
+                    continue
+                soft_urls[n] = u
+            soft_result = (txt, soft_urls)
+            print(f"TEXT v26 ROUND {i}: offers kept as SOFT result (links={list(soft_urls)})")
+    if soft_result:
+        # لا كاش للنتيجة اللينة — ضعيفة الروابط، نخليها تتحسن في بحث قادم.
+        return soft_result
     return "", {}
 
 
@@ -4663,4 +4704,4 @@ def process_location_message(message, bot_id):
     route_pending_after_location(from_number)
 
 @app.get("/")
-async def health(): return {"status":"v74.7 BIDIRECTIONAL BILINGUAL SEARCH (ar<->en, 2 rounds) + PURE AI CLASSIFIER + CLEAN STORE NAMES + SERVICE INTENT FIX (answer+5 providers) + TEXT+SIMILAR USE OLD v26 SMART PATH (tournament) + SERVICES 5+ PHONES + AI INTENT + BRAND COMPARE + SHOP FILTER + TRIO OPTIONS + EXACT PRICES", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "v26_runs":SEARCH_RUNS, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
+async def health(): return {"status":"v74.8 GRACEFUL LINK DEGRADATION (direct->store->text prices) + BILINGUAL 2 ROUNDS + PURE AI CLASSIFIER + CLEAN STORE NAMES + SERVICE INTENT FIX (answer+5 providers) + TEXT+SIMILAR USE OLD v26 SMART PATH (tournament) + SERVICES 5+ PHONES + AI INTENT + BRAND COMPARE + SHOP FILTER + TRIO OPTIONS + EXACT PRICES", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "v26_runs":SEARCH_RUNS, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
