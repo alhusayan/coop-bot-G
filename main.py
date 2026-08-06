@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v74-4-service-intent-fix-answer-plus-5-providers-20260806"
+BUILD_ID = "v74-5-ai-brandless-judge-clean-store-names-20260806"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE -> GOOGLE LENS DIRECT PASSTHROUGH (raw results to user)")
@@ -1517,8 +1517,12 @@ CATEGORY_KEYWORDS = {
     "electronics": (
         "ايفون", "سامسونج", "لابتوب", "تابلت", "ايباد", "تلفزيون", "الكترون", "هاتف",
         "جوال", "ساعه ابل", "ساعه ذكيه", "سماعه", "ايربودز", "كاميرا", "شاحن", "باور بانك",
+        "شاشه", "شاشة", "مونيتور", "طابعه", "طابعة", "راوتر", "مودم", "سبيكر", "مكبر صوت",
+        "بروجكتر", "داتا شو", "هارد", "فلاش", "ميموري",
         "iphone", "samsung", "laptop", "tablet", "ipad", "television", "tv", "phone",
         "smartwatch", "airpods", "earbuds", "camera", "charger", "power bank", "drone",
+        "monitor", "screen", "display", "printer", "router", "modem", "speaker",
+        "projector", "hard drive", "ssd", "flash drive",
     ),
     "appliances": (
         "ثلاجه", "غساله", "فرن", "مكيف", "جلايه", "مكنسه", "قلايه", "ميكرويف",
@@ -1627,6 +1631,12 @@ def extract_store_names(text):
     return stores[:MAX_STORES]
 
 def is_service_answer(txt): return bool(re.search(r"(?:🏆|•)\s*.+?\(\s*(?:هاتف|Phone|phone|Tel|tel)\s*:", txt or ""))
+def _clean_store_name(name):
+    """v74.5: تنظيف اسم المتجر من أقواس Gemini الزائدة: «[إكسايت] (» -> «إكسايت»."""
+    n = re.sub(r"[\[\]«»\"']+", "", str(name or ""))
+    n = re.sub(r"\(\s*[^)]*\)?\s*$", "", n)  # قوس مفتوح أو فاضي بنهاية الاسم
+    return " ".join(n.split()).strip(" -—–:،") or str(name or "").strip()
+
 def extract_store_offers(txt):
     offers = []
     for line in (txt or "").splitlines():
@@ -1637,7 +1647,9 @@ def extract_store_offers(txt):
             continue
         if re.search(r"\(\s*(?:هاتف|Phone|phone|Tel|tel)\s*:", s):
             continue
-        name = m.group(2).strip()
+        name = _clean_store_name(m.group(2))
+        # v74.5: السطر المعروض للمستخدم يُعاد بناؤه بالاسم النظيف نفسه.
+        s = f"{m.group(1)} {name} — {m.group(3).strip()}"
         # "توصيل" و"أونلاين" وأمثالها ليست متاجر؛ غالباً سطر رسوم توصيل التقطه النموذج كعرض.
         if is_junk_store(name):
             print(f"SKIP JUNK STORE LINE: {s[:80]}")
@@ -4457,7 +4469,37 @@ def is_brandless_generic(query):
         elif nb in q:
             return False
     cat = detect_category(raw)
-    return cat in ("electronics", "appliances", "sports", "gaming", "furniture", "auto", "kids_toys", "beauty")
+    if cat in ("electronics", "appliances", "sports", "gaming", "furniture", "auto", "kids_toys", "beauty"):
+        return True
+    # فئات ما نبي لها مقارنة براندات: تموينات وأكل وصيدلية وأزياء (بصرية/حساسة).
+    if cat in ("grocery", "food_delivery", "pharmacy", "fashion"):
+        return False
+    # v74.5: فئة غير معروفة في القاموس (مثل: شاشة كمبيوتر، مضخة مسبح، خيمة، دراي فون...)
+    # — حكم ذكاء اصطناعي سريع رخيص (بدون بحث + كاش) يقرر على الطاير بدل قاموس ثابت.
+    return _ai_brandless_judge(raw)
+
+_BRANDLESS_JUDGE_CACHE = {}
+_BRANDLESS_JUDGE_LOCK = threading.Lock()
+BRANDLESS_JUDGE_SYSTEM = """أنت مصنف طلبات لبوت تسوق. المستخدم كتب طلباً قصيراً.
+أجب بكلمة واحدة فقط: YES أو NO.
+YES = الطلب اسم فئة منتج معمّر عام بدون ماركة (مثل: شاشة كمبيوتر، مضخة مسبح، مكواة بخار، خيمة رحلات، سشوار)، والمستخدم يستفيد من مقارنة أفضل البراندات قبل عرض الأسعار.
+NO = أي شيء آخر: منتج بماركة أو موديل محدد، أكل أو تموينات، دواء، خدمة أو فني، ملابس وأزياء، أو كلام غير واضح."""
+
+def _ai_brandless_judge(query):
+    key = re.sub(r"\s+", " ", normalize_ar(str(query or "")))[:120]
+    if not key:
+        return False
+    with _BRANDLESS_JUDGE_LOCK:
+        if key in _BRANDLESS_JUDGE_CACHE:
+            return _BRANDLESS_JUDGE_CACHE[key]
+    raw, _ = call_gemini([{"text": str(query or "").strip()}], system=BRANDLESS_JUDGE_SYSTEM, use_search=False)
+    verdict = "YES" in (raw or "").upper()
+    with _BRANDLESS_JUDGE_LOCK:
+        if len(_BRANDLESS_JUDGE_CACHE) > 2000:
+            _BRANDLESS_JUDGE_CACHE.clear()
+        _BRANDLESS_JUDGE_CACHE[key] = verdict
+    print(f"BRANDLESS AI JUDGE: {query!r} -> {verdict}")
+    return verdict
 
 BRAND_COMPARE_SYSTEM = """أنت خبير مقارنات منتجات مثل مواقع «أفضل 10» ومواقع المراجعات.
 المستخدم طلب منتجاً عاماً بدون ماركة. ابحث في Google عن مقارنات ومراجعات حديثة لهذه الفئة
@@ -4585,4 +4627,4 @@ def process_location_message(message, bot_id):
     route_pending_after_location(from_number)
 
 @app.get("/")
-async def health(): return {"status":"v74.4 SERVICE INTENT FIX (answer+5 providers) + TEXT+SIMILAR USE OLD v26 SMART PATH (tournament) + SERVICES 5+ PHONES + AI INTENT + BRAND COMPARE + SHOP FILTER + TRIO OPTIONS + EXACT PRICES", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "v26_runs":SEARCH_RUNS, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
+async def health(): return {"status":"v74.5 AI BRANDLESS JUDGE + CLEAN STORE NAMES + SERVICE INTENT FIX (answer+5 providers) + TEXT+SIMILAR USE OLD v26 SMART PATH (tournament) + SERVICES 5+ PHONES + AI INTENT + BRAND COMPARE + SHOP FILTER + TRIO OPTIONS + EXACT PRICES", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "v26_runs":SEARCH_RUNS, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
