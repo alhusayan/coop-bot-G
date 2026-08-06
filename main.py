@@ -6,10 +6,12 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v74-1a-env-bool-startup-fix-20260805"
+BUILD_ID = "v74-3-text-and-similar-use-v26-smart-path-services5-20260806"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE -> GOOGLE LENS DIRECT PASSTHROUGH (raw results to user)")
+print("TEXT SEARCH + SIMILAR ALTERNATIVES -> OLD v26 FULL SMART PATH (tournament)")
+print("SERVICES -> AT LEAST 5 PROVIDERS WITH PHONE NUMBERS")
 print("=" * 70)
 
 
@@ -76,6 +78,12 @@ OLD_LAYER_DUPLICATES = max(1, int(os.environ.get("OLD_LAYER_DUPLICATES", "2")))
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
 OLD_LAYER_ENABLED = env_bool("OLD_LAYER_ENABLED", True)
+
+# ---- v74.2: محرك v26 القديم (المسار الذكي الكامل) لخيار «بدائل مشابهة» -------
+# بطولة داخلية: SEARCH_RUNS بحوث متوازية لنفس الطلب، نقيّمها كلها ونرسل الأقوى،
+# واللنكات اتحاد لنكات كل الجولات (أولوية لنكات الجواب الفائز) — طريقة v26 بالضبط.
+SEARCH_RUNS = int(os.environ.get("SEARCH_RUNS", "4"))
+V26_SEARCH_POOL = ThreadPoolExecutor(max_workers=8)
 
 SEARCH_CACHE = {}
 # كاش مختلف حسب نوع الطلب: المنتجات 12 ساعة، التموينات 4 ساعات، الخدمات 7 أيام.
@@ -372,6 +380,7 @@ print(
     f"identify_attempts={MAX_IDENTIFY_ATTEMPTS} auto_maps={AUTO_SEND_PRODUCT_MAPS} "
     f"lens_wide_fallback={ENABLE_LENS_WIDE_FALLBACK} lens_parallel={LENS_PARALLEL_WITH_VISION} "
     f"google_shopping={ENABLE_GOOGLE_SHOPPING} immersive_max={IMMERSIVE_LOOKUPS_MAX} "
+    f"similar_v26_runs={SEARCH_RUNS} "
     f"public_base_url={'SET' if PUBLIC_BASE_URL else 'MISSING'}"
 )
 
@@ -956,9 +965,18 @@ SYSTEM_PROMPT = """
 • [خيار ثالث] — [السعر] د.ك ⭐ [التقييم]
 
 【الحالة 3】طلب خدمة (فني، بنشر، تبديل بطارية، سباك...):
+ابحث بعمق وأعطني 5 مزودي خدمة على الأقل (وأكثر إذا وجدت)، مرتبين من الأعلى تقييماً إلى الأقل، بهذا الشكل المرتب بالضبط:
 📦 [وصف الخدمة + المنطقة]
-🏆 [اسم أفضل مزود فقط] (هاتف: [الرقم]) — [المنطقة] — [السعر إن وجد] د.ك ⭐ [التقييم]
-⛔ قاعدة صارمة جداً للأرقام: لا تكتب أي رقم هاتف إلا إذا ظهر حرفياً في نتائج البحث. إذا ما لقيت رقم اكتب (الرقم بالرابط).
+
+🏆 [اسم أفضل مزود] (هاتف: [الرقم]) — [المنطقة] — [السعر إن وجد] د.ك ⭐ [التقييم]
+• [مزود ثاني] (هاتف: [الرقم]) — [المنطقة] — [السعر إن وجد] ⭐ [التقييم]
+• [مزود ثالث] (هاتف: [الرقم]) — [المنطقة] ⭐ [التقييم]
+• [مزود رابع] (هاتف: [الرقم]) — [المنطقة] ⭐ [التقييم]
+• [مزود خامس] (هاتف: [الرقم]) — [المنطقة] ⭐ [التقييم]
+⛔ قاعدة صارمة جداً للأرقام: لا تكتب أي رقم هاتف إلا إذا ظهر حرفياً في نتائج البحث. لا تخترع أرقاماً أبداً.
+- أعط الأولوية للمزودين الذين وجدت أرقام هواتفهم فعلاً في نتائج البحث؛ ضعهم أولاً في القائمة.
+- إذا كان المزود قوياً لكن رقمه لم يظهر في النتائج، أضفه في آخر القائمة واكتب (الرقم بالرابط) مكان الرقم.
+- إذا لم تجد 5 مزودين فعلاً، اذكر كل الموجود ولا تخترع أسماء أو أرقاماً.
 
 【الحالة 4】سؤال معلوماتي عن منتج (المكونات، السعرات، المواصفات...):
 أجب على السؤال نفسه مباشرة — لا تعرض مقارنة أسعار.
@@ -1907,6 +1925,54 @@ def best_of_search(parts, lang="ar"):
         return txt, urls
     print("SEARCH RETRY: first call returned empty")
     return call_gemini(parts)
+
+
+# ---- v74.2: محرك v26 القديم بالضبط — البطولة الداخلية للبحوث المتوازية --------
+# هذا هو «المسار الذكي الكامل القديم» من v26: نفس دالة answer_score ونفس منطق
+# best_of_search (بطولة SEARCH_RUNS بحوث متوازية + اتحاد لنكات كل الجولات).
+# يُستخدم حالياً في خيار «🔄 بدائل مشابهة» فقط، مع إبقاء طريقة العرض الحالية.
+
+def v26_answer_score(txt, urls):
+    """v26: تقييم قوة الجواب — المتاجر أهم شي، ثم اللنكات، ثم سلامة التنسيق."""
+    stores = len(extract_store_names(txt or ""))
+    links = len(urls or {})
+    score = stores * 2 + links * 3
+    if txt and "📦" in txt:
+        score += 1
+    return score
+
+def v26_best_of_search(parts):
+    """v26 بالضبط: SEARCH_RUNS بحوث متوازية لنفس الطلب، نقيّمها كلها ونرسل الأقوى.
+    اللنكات: اتحاد لنكات كل الجولات (أولوية لنكات الجواب الفائز).
+    MARKET_CTX يُمرر لكل خيط حتى لا يرجع البحث للدولة الافتراضية."""
+    market_snapshot = current_market()
+    try:
+        futs = [V26_SEARCH_POOL.submit(_run_with_market, market_snapshot, call_gemini, parts)
+                for _ in range(SEARCH_RUNS)]
+        results = [f.result(timeout=120) for f in futs]
+    except Exception as e:
+        print(f"v26 best_of_search err {e}")
+        return call_gemini(parts)
+
+    results = [(t, u) for (t, u) in results if t]
+    if not results:
+        return "", {}
+
+    scored = sorted(results, key=lambda r: v26_answer_score(r[0], r[1]), reverse=True)
+    best_txt, best_urls = scored[0]
+
+    # اتحاد اللنكات: الفائز أولاً، ثم بقية الجولات تكمل النواقص.
+    merged_urls = dict(best_urls)
+    for _, u in scored[1:]:
+        for n, link in u.items():
+            if n not in merged_urls and link not in merged_urls.values():
+                merged_urls[n] = link
+    merged_urls = dict(list(merged_urls.items())[:max(MAX_STORES, 4)])
+
+    print({"v26_tournament": [v26_answer_score(t, u) for t, u in scored],
+           "winner_stores": len(extract_store_names(best_txt)),
+           "total_links": len(merged_urls)})
+    return best_txt, merged_urls
 
 def bilingual_search_instruction(query, lang):
     """يجبر البحث في الفهرسة العربية والإنجليزية مع إبقاء الرد بلغة المستخدم."""
@@ -3212,7 +3278,15 @@ def send_not_found_choice(phone, bot_id, lang):
     ], bot_id)
 
 def run_similar_search(phone, item):
-    """بحث بدائل مشابهة: نفس الفئة والاستخدام، محلياً فقط، بدون قيود Lens الصارمة."""
+    """v74.2: خيار «🔄 بدائل مشابهة» يستخدم المسار الذكي الكامل القديم (v26) بالضبط:
+
+    بطولة SEARCH_RUNS بحوث Gemini متوازية لنفس الطلب -> تقييم كل جواب بـ v26_answer_score
+    (المتاجر ×2 + اللنكات ×3 + سلامة 📦) -> إرسال الأقوى، واللنكات اتحاد لنكات كل الجولات.
+    بدون فحص HTML (verify_offers) مثل v26 تماماً — السرعة والتغطية أولاً.
+
+    طريقة العرض تبقى الحالية بدون تغيير: send_product_result
+    (رسالة 📦 العنوان، ثم بطاقة CTA لكل متجر برابط مباشر فقط).
+    """
     activate_market(phone)
     bot_id = item["bot_id"]; lang = item["lang"]; query = item["query"]
     send_whatsapp_text(phone, T(lang, "similar_searching"), bot_id)
@@ -3224,54 +3298,28 @@ def run_similar_search(phone, item):
         (f"المنتج التالي غير متوفر محلياً: {base}" + (f" ({base_en})" if base_en and base_en != base else "") + f". اقترح حتى {MAX_STORES} بدائل مشابهة له فعلياً — نفس الفئة "
          f"ونفس الاستخدام ومستوى جودة قريب — متوفرة الآن في متاجر {market_name} فقط، من أي متجر محلي كان. "
          "لكل بديل: اسم البديل الفعلي (وليس اسم المنتج الأصلي)، سعر رقمي واضح بعملة السوق، "
-         f"ورابط صفحة المنتج المباشرة داخل المتجر. رتب من الأرخص إلى الأغلى واكتب السعر بالفلوس كاملة مثل 1.950. {LANG_INSTR[lang]}"),
+         f"ورابط صفحة المنتج المباشرة داخل المتجر. اجعل سطر 📦 بهذا الشكل: بدائل مشابهة: {base}. "
+         f"رتب من الأرخص إلى الأغلى واكتب السعر بالفلوس كاملة مثل 1.950. {LANG_INSTR[lang]}"),
         (f"{MAX_STORES} best in-stock alternatives similar to {base_en or base} in {market_name} local online stores, "
-         f"each with the alternative's own name, a numeric price, and a direct product page link, sorted cheapest first. {LANG_INSTR[lang]}"),
+         f"each with the alternative's own name, a numeric price, and a direct product page link, sorted cheapest first. "
+         f"Write the 📦 line exactly as: بدائل مشابهة: {base}. {LANG_INSTR[lang]}"),
     ]
     for prompt in prompts:
-        txt, urls = call_gemini([{"text": prompt}])
+        # v26 بالضبط: بطولة بحوث متوازية + دمج لنكات كل الجولات.
+        txt, urls = v26_best_of_search([{"text": prompt}])
         urls = direct_urls_only(urls)
-        offers = extract_store_offers(txt)
-        if not txt or not offers or not urls:
+        if not txt or is_no_result_answer(txt) or not extract_store_offers(txt):
             continue
-        verified = verify_offers(urls, base)
-        # v68: البدائل المحلية لا تشمل مواقع أجنبية.
-        verified = filter_local_market_only(verified)
-        if verified:
-            sorted_v = sorted(verified.items(), key=lambda x: x[1]["price"])
-            title = product_title(txt, f"بدائل مشابهة: {base}" if lang == "ar" else f"Similar to: {base}")
-            lines = [title, ""]
-            new_urls = {}
-            for i, (name, info) in enumerate(sorted_v[:MAX_STORES]):
-                prefix = "✅" if i == 0 else "•"
-                alt_title = (info.get("title") or "").strip()
-                label = f"{name}: {alt_title[:45]}" if alt_title else name
-                lines.append(f"{prefix} {label} — {format_price(info['price'])} {currency_label(lang)}")
-                new_urls[name] = info["url"]
-            send_product_result(phone, "\n".join(lines), new_urls, bot_id, lang, base)
-            return
-        # بعض المتاجر تمنع فحص HTML؛ نقبل سطور Gemini التي لها رابط منتج مباشر فقط.
-        kept = []
-        for offer in offers:
-            matched = match_url(offer["name"], urls)
-            if not (matched and is_direct_store_url(matched)):
+        # حارس محلي خفيف فقط (مثل بقية مسارات v74): نرفض الأجنبي الواضح، بدون فحص HTML.
+        kept_urls = {}
+        for n, u in urls.items():
+            if is_foreign_lens_result({"link": u, "source": n, "title": n}):
+                print(f"SIMILAR v26 REJECT FOREIGN: {n} -> {u}")
                 continue
-            if is_foreign_lens_result({"link": matched, "source": offer["name"], "title": offer["line"]}):
-                print(f"SIMILAR LOCAL REJECT FOREIGN: {offer['name']} -> {matched}")
-                continue
-            kept.append((offer, matched))
-        # v68: ترتيب البدائل من الأرخص للأغلى حتى بدون فحص الصفحة.
-        kept.sort(key=lambda om: _extract_numeric_price(om[0].get("line", "")) or 10**9)
-        if kept:
-            title = product_title(txt, f"بدائل مشابهة: {base}" if lang == "ar" else f"Similar to: {base}")
-            lines = [title, ""]
-            new_urls = {}
-            for i, (offer, matched) in enumerate(kept[:MAX_STORES]):
-                prefix = "✅" if i == 0 else "•"
-                body = re.sub(r"^(?:✅|🏆|•)\s*", "", offer["line"]).strip()
-                lines.append(f"{prefix} {body}")
-                new_urls[offer["name"]] = matched
-            send_product_result(phone, "\n".join(lines), new_urls, bot_id, lang, base)
+            kept_urls[n] = u
+        # العرض بالطريقة الحالية بدون أي تغيير.
+        result_type = send_product_result(phone, txt, kept_urls, bot_id, lang, base)
+        if result_type != "none":
             return
     send_whatsapp_text(phone, T(lang, "similar_none"), bot_id)
 
@@ -3348,7 +3396,7 @@ def process_interactive_message(message, bot_id):
             })
         return
     if btn_id == "lf_similar":
-        # بدائل مشابهة — يحوّل على المسار الذكي الكامل القديم.
+        # بدائل مشابهة — يحوّل على المسار الذكي الكامل القديم (v26).
         item = _peek_pending(PENDING_LENS_FOREIGN, from_number)
         query = (item or {}).get("query") or (LAST_SEARCH.get(from_number) or {}).get("product")
         if query:
@@ -4206,12 +4254,16 @@ INTENT_PARSE_SYSTEM = """أنت محلل طلبات لبوت تسوق على و�
 
 قواعد إلزامية:
 - "search": المستخدم يريد منتجاً. احذف التحية والدعاء (مثل: عزكم الله، أكرمكم الله، حشاكم) والشكر وعبارات مثل (وين أحصله، أبي أشتري، دلوني). أبقِ اسم المنتج وصفاته فقط.
+- افهم التعبير الإنشائي: حتى لو كانت الرسالة قصة أو شرحاً طويلاً أو وصف مشكلة، استنتج المنتج أو الخدمة المطلوبة بذكائك. أمثلة:
+  "عندي صراصير بالمطبخ ومتضايق منهم وايد" -> {"intent":"search","products":["مبيد صراصير"]}
+  "ولدي بيدخل الجامعة ومحتار وش أشتري له يذاكر عليه" -> {"intent":"search","products":["لابتوب للدراسة"]}
+  "السياره ما تشتغل الصبح وأحس البطارية خلصت" -> {"intent":"search","products":["خدمة تبديل بطارية سيارة"]}
 - المنتج الواحد = عنصر واحد في products حتى لو كانت الرسالة على عدة أسطر. لا تقسم الجملة الواحدة أبداً.
 - عدة منتجات مختلفة فعلاً (مفصولة بفواصل أو "و") = عدة عناصر.
 - "service": طلب فني/سباك/كهربائي/تصليح... ضع وصف الخدمة والمنطقة في products.
 - "greeting": تحية فقط بلا أي طلب. products فارغة.
 - "thanks": شكر فقط بلا طلب جديد. products فارغة.
-- "chat": كلام عام أو سؤال غير متعلق بمنتج. products فارغة.
+- "chat": فقط إذا لم يكن في الرسالة أي منتج أو خدمة أو حاجة يمكن استنتاجها إطلاقاً. إذا كان في الرسالة أي مشكلة أو حاجة، استنتج المطلوب وأرجع search بدل chat.
 مثال: "السلام عليكم معجون ضد الصراصير عزكم الله وين أحصله مع الشكر"
 الجواب: {"intent":"search","products":["معجون ضد الصراصير"]}"""
 
@@ -4264,10 +4316,52 @@ def parse_user_intent(user_text, lang):
     return {"intent": "greeting" if not compact.strip() or any(g in compact for g in ("سلام", "هلا", "مرحبا")) else "chat", "products": []}
 
 
+def v26_text_search(product, lang):
+    """v74.3: المسار الذكي الكامل القديم (v26) للبحث النصي — نفس محرك البدائل المشابهة.
+
+    بطولة SEARCH_RUNS بحوث Gemini متوازية بنفس SYSTEM_PROMPT (منتجات/خدمات/معلومات)
+    -> تقييم كل جواب بـ v26_answer_score -> الأقوى يفوز، واللنكات اتحاد كل الجولات.
+    يعيد (txt, urls) بعد كاش وتصفية الروابط المباشرة وحارس رفض الأجنبي الواضح.
+    """
+    cached = cache_get(product, lang)
+    if cached:
+        return cached
+    prompt = bilingual_search_instruction(product, lang)
+    txt, urls = v26_best_of_search([{"text": prompt}])
+    urls = direct_urls_only(urls)
+    if not txt:
+        return "", {}
+    # الخدمات والإجابات المعلوماتية تمر كما هي (رسالة نصية واحدة مرتبة).
+    if is_service_answer(txt) or is_informational_answer(txt):
+        if len(txt) >= 40:
+            cache_put(product, lang, txt, urls)
+        return txt, urls
+    if is_no_result_answer(txt) or not extract_store_offers(txt):
+        return "", {}
+    # حارس محلي خفيف مثل مسار البدائل: نرفض الأجنبي الواضح فقط، بدون فحص HTML (مثل v26).
+    kept_urls = {}
+    for n, u in urls.items():
+        if is_foreign_lens_result({"link": u, "source": n, "title": n}):
+            print(f"TEXT v26 REJECT FOREIGN: {n} -> {u}")
+            continue
+        kept_urls[n] = u
+    if not kept_urls:
+        return "", {}
+    cache_put(product, lang, txt, kept_urls)
+    return txt, kept_urls
+
+
 def execute_product_search(from_number, product, bot_id, lang):
-    """v74: مسار البحث النصي الكامل لمنتج واحد — يُستخدم من الرسائل ومن قوائم اختيار المقارنة."""
+    """v74.3: مسار البحث النصي — المسار الذكي الكامل القديم (v26) أولاً، نفس محرك
+
+    البدائل المشابهة بالضبط. إذا ما رجّع نتيجة كافية، المحرك الثلاثي (Shopping+Lens+Broad)
+    يشتغل كشبكة أمان حتى لا نخسر أي منتج. العرض بالطريقة الحالية بدون تغيير.
+    """
     send_whatsapp_text(from_number, T(lang, "searching", q=product), bot_id)
-    txt, urls = search_product(product, lang)
+    txt, urls = v26_text_search(product, lang)
+    if not txt:
+        print("TEXT v26 PATH EMPTY -> three-layer fallback")
+        txt, urls = search_product(product, lang)
     LAST_SEARCH[from_number] = {"product": product}
     if not txt or (not extract_store_offers(txt) and not is_service_answer(txt) and not is_informational_answer(txt)):
         # ما لقينا المنتج بالضبط محلياً: نعرض الخيارات الثلاثة بدل رسالة الاعتذار وحدها.
@@ -4437,4 +4531,4 @@ def process_location_message(message, bot_id):
     route_pending_after_location(from_number)
 
 @app.get("/")
-async def health(): return {"status":"v74 BRAND COMPARE + SHOP FILTER + TRIO OPTIONS + EXACT PRICES", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
+async def health(): return {"status":"v74.3 TEXT+SIMILAR USE OLD v26 SMART PATH (tournament) + SERVICES 5+ PHONES + AI INTENT + BRAND COMPARE + SHOP FILTER + TRIO OPTIONS + EXACT PRICES", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "v26_runs":SEARCH_RUNS, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
