@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v74-13-global-region-order-gcc-us-cn-eu-20260806"
+BUILD_ID = "v74-14-map-in-options-list-trust-filter-20260806"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE -> GOOGLE LENS DIRECT PASSTHROUGH (raw results to user)")
@@ -864,6 +864,8 @@ MSG = {
         "ls_show": "اعرضها 📱",
         "ls_skip": "لا شكراً 🙏",
         "opt_social": "📱 عروض التواصل",
+        "opt_map": "📍 افتح الخريطة",
+        "options_button": "الخيارات",
         "more_options_ask": "تبي أكثر؟ 👇",
         "social_none": "ما لقيت عروض للمنتج في برامج التواصل حالياً 😅",
         "no_local_generic": "ما لقيت نتائج من متاجر محلية لهالصورة 😅 وش تبي أسوي؟ 👇",
@@ -912,6 +914,8 @@ MSG = {
         "ls_show": "Show them 📱",
         "ls_skip": "No thanks 🙏",
         "opt_social": "📱 Social offers",
+        "opt_map": "📍 Open map",
+        "options_button": "Options",
         "more_options_ask": "Want more? 👇",
         "social_none": "No social media offers found for this product right now 😅",
         "no_local_generic": "No local store results for this photo 😅 What would you like me to do? 👇",
@@ -2458,6 +2462,123 @@ def reorder_global_offers_text(txt, urls):
     print(f"GLOBAL REGION ORDER: {[(region_names.get(r,''), o.get('name','')) for r,_p,o in ranked]}")
     return "\n".join(out)
 
+# ---- v74.14: فلتر الثقة — حماية المستخدم من مواقع النصب والاحتيال ------------
+ENABLE_TRUST_FILTER = env_bool("ENABLE_TRUST_FILTER", True)
+_SUSPICIOUS_TLDS = (".tk", ".ml", ".ga", ".cf", ".gq", ".buzz", ".click", ".loan", ".rest", ".icu", ".cyou")
+
+def is_suspicious_url(url):
+    """علامات نصب قاطعة: بدون https، دومين رقمي (IP)، punycode، نطاقات مجانية مشبوهة،
+
+    دومينات طويلة محشوة بالشرطات والأرقام (best-cheap-sale-2024...)."""
+    u = str(url or "").strip()
+    if not u:
+        return False
+    if u.startswith("http://"):
+        return True
+    try:
+        host = urllib.parse.urlparse(u).netloc.lower().replace("www.", "")
+    except Exception:
+        return True
+    if not host:
+        return True
+    if re.fullmatch(r"[0-9.:]+", host):
+        return True
+    if "xn--" in host:
+        return True
+    if any(host.endswith(t) for t in _SUSPICIOUS_TLDS):
+        return True
+    main = host.split(".")[0]
+    if main.count("-") >= 3 or (len(main) > 30 and sum(c.isdigit() for c in main) >= 4):
+        return True
+    return False
+
+_ALL_KNOWN_HOST_HINTS = _GCC_HOST_HINTS + _US_HOST_HINTS + _CN_HOST_HINTS + _EU_HOST_HINTS
+_DOMAIN_TRUST_CACHE = {}
+_DOMAIN_TRUST_LOCK = threading.Lock()
+TRUST_FILTER_SYSTEM = """أنت خبير أمان تسوق إلكتروني تحمي المستخدمين من مواقع النصب.
+سأعطيك قائمة مرقمة بدومينات ظهرت في نتائج بحث تسوق عالمية.
+أعد فقط أرقام الدومينات لمتاجر أو منصات معروفة وموثوقة (عالمية أو خليجية أو إقليمية مشهورة).
+استبعد: الدومينات المجهولة، مواقع النسخ المقلدة، المتاجر الوهمية، أي دومين لا تعرفه بثقة.
+عند الشك استبعد — حماية المستخدم أهم من نتيجة إضافية.
+أرجع JSON فقط: {"trusted":[1,3]}"""
+
+def _host_of(url):
+    try:
+        return urllib.parse.urlparse(str(url or "")).netloc.lower().replace("www.", "")
+    except Exception:
+        return ""
+
+def is_known_trusted_host(host):
+    if not host:
+        return False
+    if host in set(STORE_DOMAINS.values()):
+        return True
+    if any(h in host for h in _ALL_KNOWN_HOST_HINTS):
+        return True
+    # نطاقات دول الخليج المحلية تمر (الحارس المحلي يضبطها أصلاً).
+    if any(host.endswith(t) for tlds in (COUNTRY_TLDS.get(c, []) for c in _GCC_CCS) for t in tlds):
+        return True
+    return False
+
+def trusted_hosts_verdict(hosts):
+    """حكم ثقة ذكي (كاش لكل دومين) على الدومينات المجهولة — دفعة واحدة."""
+    unknown = []
+    verdicts = {}
+    with _DOMAIN_TRUST_LOCK:
+        for h in hosts:
+            if h in _DOMAIN_TRUST_CACHE:
+                verdicts[h] = _DOMAIN_TRUST_CACHE[h]
+            elif h not in unknown:
+                unknown.append(h)
+    if unknown and ENABLE_TRUST_FILTER:
+        numbered = "\n".join(f"{i}. {h}" for i, h in enumerate(unknown, 1))
+        raw, _ = call_gemini([{"text": numbered}], system=TRUST_FILTER_SYSTEM, use_search=False)
+        trusted_idx = set()
+        try:
+            data = json.loads(re.search(r"\{.*\}", raw or "", flags=re.S).group(0))
+            trusted_idx = {int(x) for x in (data.get("trusted") or [])}
+        except Exception:
+            # فشل الحكم = نسمح (الفحوصات القاطعة فوقنا تحمي من الواضح).
+            trusted_idx = set(range(1, len(unknown) + 1))
+            print(f"TRUST AI PARSE FAIL — allowing batch: {raw!r}")
+        with _DOMAIN_TRUST_LOCK:
+            if len(_DOMAIN_TRUST_CACHE) > 3000:
+                _DOMAIN_TRUST_CACHE.clear()
+            for i, h in enumerate(unknown, 1):
+                _DOMAIN_TRUST_CACHE[h] = i in trusted_idx
+                verdicts[h] = i in trusted_idx
+        dropped = [h for h in unknown if not verdicts.get(h)]
+        if dropped:
+            print(f"TRUST AI-DROP domains: {dropped}")
+    else:
+        for h in unknown:
+            verdicts[h] = True
+    return verdicts
+
+def filter_trusted_global_matches(matches):
+    """v74.14: للنتائج العالمية — يشيل الروابط المشبوهة والدومينات غير الموثوقة."""
+    kept, unknown_hosts = [], []
+    for m in matches:
+        url = str(m.get("link") or "")
+        if is_suspicious_url(url):
+            print(f"TRUST HARD-DROP (suspicious url): {url[:90]}")
+            continue
+        host = _host_of(url)
+        if not is_known_trusted_host(host):
+            unknown_hosts.append(host)
+        kept.append(m)
+    if not unknown_hosts:
+        return kept
+    verdicts = trusted_hosts_verdict(unknown_hosts)
+    final = []
+    for m in kept:
+        host = _host_of(m.get("link"))
+        if is_known_trusted_host(host) or verdicts.get(host, True):
+            final.append(m)
+        else:
+            print(f"TRUST DROP: {host} | {str(m.get('title',''))[:60]}")
+    return final
+
 def is_foreign_lens_result(item):
     """True only when the result is clearly not local. Unknown results remain false."""
     if is_local_lens_result(item):
@@ -3570,8 +3691,23 @@ def run_global_search(phone, item):
             local = is_local_lens_result({"link": url, "source": name, "title": name})
             if local:
                 print(f"GLOBAL FINAL GUARD REJECT LOCAL: {name} -> {url}")
-            else:
-                filtered_urls[name] = url
+                continue
+            # v74.14: فلتر الثقة — روابط مشبوهة تُرفض فوراً.
+            if is_suspicious_url(url):
+                print(f"GLOBAL TRUST HARD-DROP: {name} -> {url}")
+                continue
+            filtered_urls[name] = url
+        # حكم الثقة الذكي على الدومينات المجهولة (دفعة + كاش).
+        if filtered_urls and ENABLE_TRUST_FILTER:
+            hosts = {n: _host_of(u) for n, u in filtered_urls.items()}
+            unknown = [h for h in hosts.values() if h and not is_known_trusted_host(h)]
+            if unknown:
+                verdicts = trusted_hosts_verdict(unknown)
+                for n in list(filtered_urls):
+                    h = hosts.get(n, "")
+                    if h and not is_known_trusted_host(h) and not verdicts.get(h, True):
+                        print(f"GLOBAL TRUST DROP: {n} -> {filtered_urls[n]}")
+                        filtered_urls.pop(n, None)
         if len(filtered_urls) != len(urls):
             # Remove offer lines whose CTA was rejected, so text and buttons stay consistent.
             kept_names = {normalize_name(n) for n in filtered_urls}
@@ -3627,6 +3763,11 @@ def process_interactive_message(message, bot_id):
             # لا صمت أبداً: ما قدرنا نحدد الخيار — نطلب كتابته نصاً.
             lang_ = USER_LANG.get(from_number, "ar")
             send_whatsapp_text(from_number, ("اكتب اسم المنتج اللي تبيه وأدور لك عليه 👍" if lang_ == "ar" else "Type the product name and I'll search it for you 👍"), bot_id)
+        return
+    if btn_id == "map_open":
+        # v74.14: خيار الخريطة من قائمة «تبي أكثر» — خريطة آخر بحث محفوظ.
+        activate_market(from_number)
+        send_last_search_map(from_number, bot_id, USER_LANG.get(from_number, "ar"))
         return
     if btn_id == "lf_yes":
         # عرض نتائج Lens العالمية؛ وإذا ما فيه نتائج مخزنة نشغل البحث العالمي النصي الجديد.
@@ -4001,6 +4142,9 @@ def _send_lens_match_batch(from_number, matches, bot_id, lang, header="", conver
     v73: الترتيب النهائي — المسعّر أولاً من الأرخص إلى الأغلى، ثم غير المسعّر.
     """
     per_store = per_store_max if per_store_max else LENS_PER_STORE_MAX
+    # v74.14: النتائج العالمية تمر أولاً على فلتر الثقة (حماية من مواقع النصب).
+    if convert_prices:
+        matches = filter_trusted_global_matches(matches)
     # 1) تجميع المرشحين أصحاب الروابط الصالحة حسب المتجر (host) مع الحفاظ على ترتيب Google.
     by_host, host_order = {}, []
     for m in matches:
@@ -4248,21 +4392,24 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
     PENDING_LENS_SOCIAL[from_number] = {
         "bot_id": bot_id, "lang": lang, "matches": social[:LENS_RESULT_LIMIT], "ts": now,
     }
+    # v74.14: قائمة واحدة بأربعة خيارات (القوائم تسمح حتى 10 بينما الأزرار 3 فقط) —
+    # «افتح الخريطة» انضمت كخيار رابع، ورسالة الخريطة المنفصلة انشالت.
     trio = [
-        {"id": "lf_similar", "title": T(lang, "opt_similar")[:20]},
-        {"id": "lf_yes", "title": T(lang, "opt_global")[:20]},
-        {"id": "ls_yes", "title": T(lang, "opt_social")[:20]},
+        {"id": "lf_similar", "title": T(lang, "opt_similar")[:24]},
+        {"id": "lf_yes", "title": T(lang, "opt_global")[:24]},
+        {"id": "ls_yes", "title": T(lang, "opt_social")[:24]},
+        {"id": "map_open", "title": T(lang, "opt_map")[:24]},
     ]
     sent = False
     if local:
         sent = _send_lens_match_batch(from_number, local, bot_id, lang, convert_prices=False)
     if sent:
-        # v74: بعد النتائج المحلية — قائمة خيارات واحدة (بدون إلحاح، مجرد زيادة خيارات).
-        send_whatsapp_buttons(from_number, T(lang, "more_options_ask"), trio, bot_id)
+        # v74.14: بعد النتائج المحلية — قائمة واحدة بأربعة خيارات (منها الخريطة).
+        send_whatsapp_list(from_number, T(lang, "more_options_ask"), trio, bot_id, T(lang, "options_button"))
     elif foreign or social:
         body = (T(lang, "lens_no_local", c=len(foreign), country=country) if foreign
                 else T(lang, "no_local_generic"))
-        send_whatsapp_buttons(from_number, body, trio, bot_id)
+        send_whatsapp_list(from_number, body, trio, bot_id, T(lang, "options_button"))
         sent = True
     if not sent:
         return False
@@ -4295,8 +4442,7 @@ def process_single_image(message,bot_id,lang="ar"):
         lens_direct = google_lens_lookup(b64, mime, lang, lens_hint, light=True)
         if lens_direct.get("matches"):
             if send_lens_direct_results(from_number, lens_direct, bot_id, lang, caption):
-                if AUTO_SEND_PRODUCT_MAPS:
-                    send_maps_button(from_number, LAST_SEARCH.get(from_number, {}).get("product") or caption or "product", bot_id, lang)
+                # v74.14: الخريطة صارت الخيار الرابع داخل قائمة «تبي أكثر» — لا رسالة منفصلة.
                 return
         print("LENS DIRECT MODE: no Google results -> full pipeline fallback")
         send_whatsapp_text(from_number, T(lang, "lens_none"), bot_id)
@@ -4972,4 +5118,4 @@ def process_location_message(message, bot_id):
     route_pending_after_location(from_number)
 
 @app.get("/")
-async def health(): return {"status":"v74.13 GLOBAL REGION ORDER (GCC>US>CN>EU) + MORE LENS CARDS + NONE CLASS + CTA ALWAYS + ARABIC PICK LIST + RELEVANCE FILTER + NO SILENCE + BILINGUAL 2 ROUNDS + PURE AI CLASSIFIER + CLEAN STORE NAMES + SERVICE INTENT FIX (answer+5 providers) + TEXT+SIMILAR USE OLD v26 SMART PATH (tournament) + SERVICES 5+ PHONES + AI INTENT + BRAND COMPARE + SHOP FILTER + TRIO OPTIONS + EXACT PRICES", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "v26_runs":SEARCH_RUNS, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
+async def health(): return {"status":"v74.14 MAP AS 4TH OPTION + ANTI-SCAM TRUST FILTER + GLOBAL REGION ORDER + MORE LENS CARDS + NONE CLASS + CTA ALWAYS + ARABIC PICK LIST + RELEVANCE FILTER + NO SILENCE + BILINGUAL 2 ROUNDS + PURE AI CLASSIFIER + CLEAN STORE NAMES + SERVICE INTENT FIX (answer+5 providers) + TEXT+SIMILAR USE OLD v26 SMART PATH (tournament) + SERVICES 5+ PHONES + AI INTENT + BRAND COMPARE + SHOP FILTER + TRIO OPTIONS + EXACT PRICES", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "v26_runs":SEARCH_RUNS, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
