@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v75-3-canonical-store-identity-clean-cart-layout-20260807"
+BUILD_ID = "v75-4-cart-uses-v26-smart-path-waves-20260807"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE -> GOOGLE LENS DIRECT PASSTHROUGH (raw results to user)")
@@ -4716,18 +4716,22 @@ def canonical_store_key(name, url=""):
     return key or normalize_name(n)
 
 
-CART_ITEM_DEADLINE = max(60, int(os.environ.get("CART_DEADLINE_SECONDS", "150")))
+CART_ITEM_DEADLINE = max(60, int(os.environ.get("CART_DEADLINE_SECONDS", "240")))
+# v75.4: كم صنفاً يدخل البطولة بالتزامن — كل صنف = SEARCH_RUNS بحوث متوازية،
+# فنحدد الموجة حتى لا تتزاحم عشرات الاتصالات وتعلّق (سبب تعليق v75.0).
+CART_CONCURRENCY = max(1, int(os.environ.get("CART_CONCURRENCY", "2")))
 
 def cart_item_search(product, lang):
-    """v75.2: بحث خفيف مخصص للسلة — اتصال واحد (ومحاولة ثانية موسعة عند الحاجة).
+    """v75.4: بحث صنف السلة بالمسار الذكي الكامل القديم (بطولة v26) — بطلب من خالد.
 
-    المحرك الثلاثي الكامل ×6 أصناف بالتوازي كان يزاحم المسابح ويعلّق لدقائق؛
-    أصناف التموينات بسيطة واتصال واحد يكفيها، والكاش يخدم التكرار.
+    بطولة SEARCH_RUNS بحوث Gemini متوازية لنفس الصنف، الأقوى يفوز واللنكات اتحاد
+    الجولات (نفس محرك البحث النصي والبدائل حرفياً). العرض يبقى بتنسيق v75.3.
+    عند فشل البطولة: محاولة موسعة باتصال واحد كشبكة أمان. الكاش يخدم التكرار.
     """
     cached = cache_get(product, lang)
     if cached:
         return cached
-    txt, urls = call_gemini([{"text": bilingual_search_instruction(product, lang)}])
+    txt, urls = v26_best_of_search([{"text": bilingual_search_instruction(product, lang)}])
     urls = direct_urls_only(urls)
     if txt and extract_store_offers(txt) and not is_no_result_answer(txt):
         cache_put(product, lang, txt, urls)
@@ -4757,16 +4761,25 @@ def run_cart_comparison(products, from_number, bot_id, lang="ar"):
     # والسلة تكمل بما توفر بدل ما تعلق للأبد. وأي خطأ داخلي = رد واضح مو صمت.
     results = []
     try:
-        futures = {WORKERS.submit(_run_with_market, market, cart_item_search, p, lang): p for p in products}
+        # v75.4: موجات بتزامن محدود — كل صنف بطولة كاملة، والموجة تمنع تزاحم المسابح.
         deadline = time.time() + CART_ITEM_DEADLINE
-        for future, p in futures.items():
-            remain = max(5.0, deadline - time.time())
-            try:
-                txt, urls = future.result(timeout=remain)
-            except Exception as e:
-                print(f"CART ITEM TIMEOUT/ERR ({p}): {e.__class__.__name__}")
-                txt, urls = "", {}
-            results.append((p, txt, urls))
+        for start in range(0, len(products), CART_CONCURRENCY):
+            wave = products[start:start + CART_CONCURRENCY]
+            futures = {WORKERS.submit(_run_with_market, market, cart_item_search, p, lang): p for p in wave}
+            for future, p in futures.items():
+                remain = max(5.0, deadline - time.time())
+                try:
+                    txt, urls = future.result(timeout=remain)
+                except Exception as e:
+                    print(f"CART ITEM TIMEOUT/ERR ({p}): {e.__class__.__name__}")
+                    txt, urls = "", {}
+                results.append((p, txt, urls))
+            if time.time() >= deadline:
+                # المهلة انتهت: الأصناف الباقية تنحسب غير موجودة والسلة تكمل بما توفر.
+                for p in products[start + CART_CONCURRENCY:]:
+                    print(f"CART DEADLINE SKIP: {p}")
+                    results.append((p, "", {}))
+                break
     except Exception as e:
         print(f"CART GATHER CRASH: {e}")
         send_whatsapp_text(from_number, T(lang, "not_found"), bot_id)
@@ -5486,4 +5499,4 @@ def process_location_message(message, bot_id):
     route_pending_after_location(from_number)
 
 @app.get("/")
-async def health(): return {"status":"v75.3 CANONICAL STORE IDENTITY + CLEAN CART LAYOUT (store header + per-item CTAs) + ONE-SESSION + GREEDY COMPLETION + LIVE LINKS + LOCAL SOCIAL + GLOBAL REGION ORDER + MORE LENS CARDS + NONE CLASS + CTA ALWAYS + ARABIC PICK LIST + RELEVANCE FILTER + NO SILENCE + BILINGUAL 2 ROUNDS + PURE AI CLASSIFIER + CLEAN STORE NAMES + SERVICE INTENT FIX (answer+5 providers) + TEXT+SIMILAR USE OLD v26 SMART PATH (tournament) + SERVICES 5+ PHONES + AI INTENT + BRAND COMPARE + SHOP FILTER + TRIO OPTIONS + EXACT PRICES", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "v26_runs":SEARCH_RUNS, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
+async def health(): return {"status":"v75.4 CART USES OLD v26 SMART PATH (tournament, waved) + CANONICAL STORES + CLEAN LAYOUT + ONE-SESSION + GREEDY COMPLETION + LIVE LINKS + LOCAL SOCIAL + GLOBAL REGION ORDER + MORE LENS CARDS + NONE CLASS + CTA ALWAYS + ARABIC PICK LIST + RELEVANCE FILTER + NO SILENCE + BILINGUAL 2 ROUNDS + PURE AI CLASSIFIER + CLEAN STORE NAMES + SERVICE INTENT FIX (answer+5 providers) + TEXT+SIMILAR USE OLD v26 SMART PATH (tournament) + SERVICES 5+ PHONES + AI INTENT + BRAND COMPARE + SHOP FILTER + TRIO OPTIONS + EXACT PRICES", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "v26_runs":SEARCH_RUNS, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
