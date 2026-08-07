@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v75-0-unified-cart-store-comparison-20260807"
+BUILD_ID = "v75-1-one-session-cart-greedy-completion-20260807"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE -> GOOGLE LENS DIRECT PASSTHROUGH (raw results to user)")
@@ -846,6 +846,11 @@ MSG = {
         "cart_total": "💰 مجموع السلة: {t}",
         "cart_missing": "⚠️ غير متوفر في هذا المتجر: {items}",
         "cart_expired": "قائمة السلة قدمت 😅 دز قائمة الأصناف من جديد وأجهزها لك على طول.",
+        "cart_session_tip": "💡 المهم: أضف الصنف الأول من الزر، وبعدها دوّر باقي الأصناف من بحث المتجر *بنفس الصفحة* — لا ترجع لواتساب بين كل صنف عشان تتراكم كلها في سلة وحدة.",
+        "cart_checklist": "📋 أصنافك في {s} — انسخ أو دوّر عليها داخل المتجر:",
+        "cart_complete_from": "🧩 تكملة الأصناف الناقصة من {s}:",
+        "cart_plan_total": "💰 مجموع الخطة كاملة: {t}",
+        "cart_not_anywhere": "⛔ ما لقيتها في أي متجر بالقائمة: {items}",
         "multi_images": "تمام لقطت {c} منتجات، أسوي سلة...",
         "maps_body": "📍 تبي أقرب مكان؟\n\nاضغط الزر والخريطة بتفتح على أقرب الأماكن حولك 👇",
         "maps_btn": "📍 افتح الخريطة",
@@ -904,6 +909,11 @@ MSG = {
         "cart_total": "💰 Basket total: {t}",
         "cart_missing": "⚠️ Not available at this store: {items}",
         "cart_expired": "That basket list expired 😅 send your items again and I'll rebuild it right away.",
+        "cart_session_tip": "💡 Important: add the first item from the button, then find the rest via the store's own search *in the same page* — don't switch back to WhatsApp between items so everything stacks in one cart.",
+        "cart_checklist": "📋 Your items at {s} — copy or search them inside the store:",
+        "cart_complete_from": "🧩 Completing the missing items from {s}:",
+        "cart_plan_total": "💰 Full plan total: {t}",
+        "cart_not_anywhere": "⛔ Not found in any listed store: {items}",
         "multi_images": "Nice, spotted {c} products. Building your cart...",
         "maps_body": "📍 Want the nearest place?\n\nTap the button and the map will open on the closest spots around you 👇",
         "maps_btn": "📍 Open Map",
@@ -3843,9 +3853,8 @@ def process_interactive_message(message, bot_id):
         idx = int(btn_id[5:]) if btn_id[5:].isdigit() else -1
         if item and 0 <= idx < len(item.get("stores") or []):
             activate_market(from_number)
-            store_name, items = item["stores"][idx]
             try:
-                send_cart_from_store(from_number, store_name, items, item.get("products") or [], item.get("bot_id") or bot_id, lang_)
+                send_cart_from_store(from_number, idx, item["stores"], item.get("products") or [], item.get("bot_id") or bot_id, lang_)
             except Exception as e:
                 print(f"CART PICK ERR: {e}")
                 send_whatsapp_text(from_number, T(lang_, "not_found"), bot_id)
@@ -4749,35 +4758,90 @@ def run_cart_comparison(products, from_number, bot_id, lang="ar"):
     print(f"CART COMPARISON SENT: {[(s['name'], len(s['items'])) for s in ranked]}")
 
 
-def send_cart_from_store(from_number, store_name, items, products, bot_id, lang):
-    """يرسل سلة المتجر المختار: بطاقة لكل صنف برابط صفحته داخل المتجر + المجموع والنواقص."""
-    send_whatsapp_text(from_number, T(lang, "cart_from_store", s=store_name), bot_id)
-    total, missing, sent = 0.0, [], 0
-    for p in products:
-        inf = items.get(p)
-        if not inf:
-            missing.append(p)
-            continue
-        total += inf["price"]
-        body = f"📦 {p} — {format_price(inf['price'])} {currency_label(lang)}"
-        url = inf.get("url") or ""
-        if url and is_direct_store_url(url):
-            send_whatsapp_cta(from_number, body, url, bot_id, f"🛒 {store_name[:18]}")
-            sent += 1
-        else:
-            hp = url if (url and url.startswith("http") and url_is_alive(url)) else resolve_store_homepage(store_name)
-            if hp:
-                note = "\n🔎 الزر يفتح المتجر — ادور الصنف داخله" if lang == "ar" else "\n🔎 Opens the store — search the item inside"
-                send_whatsapp_cta(from_number, (body + note)[:1024], hp, bot_id, f"🛒 {store_name[:18]}")
-                sent += 1
-            else:
-                send_whatsapp_text(from_number, body, bot_id)
-                sent += 1
-    tail = T(lang, "cart_total", t=f"{format_price(total)} {currency_label(lang)}")
-    if missing:
-        tail += "\n" + T(lang, "cart_missing", items="، ".join(missing) if lang == "ar" else ", ".join(missing))
-    send_whatsapp_text(from_number, tail, bot_id)
-    return sent > 0
+def _greedy_cart_completion(remaining, stores_list, used_idx):
+    """v75.1: تغطية النواقص من متاجر القائمة نفسها — كل مرة نختار المتجر الذي يغطي
+
+    أكبر عدد من الأصناف المتبقية (وعند التساوي الأرخص)، حتى تكتمل السلة أو تنفد المتاجر."""
+    plans, rem, used = [], set(remaining), set(used_idx)
+    while rem:
+        best = None
+        for i, (nm, items) in enumerate(stores_list):
+            if i in used:
+                continue
+            cover = [p for p in rem if p in items]
+            if not cover:
+                continue
+            total = sum(items[p]["price"] for p in cover)
+            score = (len(cover), -total)
+            if best is None or score > best[0]:
+                best = (score, i, nm, cover, total)
+        if best is None:
+            break
+        _score, i, nm, cover, _total = best
+        used.add(i)
+        rem -= set(cover)
+        plans.append((i, nm, {p: stores_list[i][1][p] for p in cover}))
+    return plans, sorted(rem)
+
+
+def _send_store_cart_block(from_number, store_name, items_map, products_order, bot_id, lang, header_key):
+    """كتلة متجر واحدة: زر دخول واحد + قائمة الأصناف نصاً — جلسة متصفح واحدة وسلة واحدة."""
+    ordered = [p for p in products_order if p in items_map]
+    if not ordered:
+        return 0.0
+    total = sum(items_map[p]["price"] for p in ordered)
+    unit = "أصناف" if lang == "ar" else "items"
+    # رابط الدخول: أول صفحة منتج مباشرة حية؛ وإلا رئيسية المتجر.
+    entry = ""
+    for p in ordered:
+        u = items_map[p].get("url") or ""
+        if u and is_direct_store_url(u):
+            entry = u
+            break
+    if not entry:
+        for p in ordered:
+            u = items_map[p].get("url") or ""
+            if u and u.startswith("http") and url_is_alive(u):
+                entry = u
+                break
+    if not entry:
+        entry = resolve_store_homepage(store_name)
+    body = f"{T(lang, header_key, s=store_name)}\n{len(ordered)} {unit} — {format_price(total)} {currency_label(lang)}"
+    if entry:
+        send_whatsapp_cta(from_number, body[:1024], entry, bot_id, f"🛒 {store_name[:18]}")
+    else:
+        send_whatsapp_text(from_number, body, bot_id)
+    # القائمة النصية: يضيف الأول من الزر ويدوّر الباقي داخل المتجر بنفس الصفحة.
+    lines = [T(lang, "cart_checklist", s=store_name)]
+    for i, p in enumerate(ordered, 1):
+        lines.append(f"{i}. {p} — {format_price(items_map[p]['price'])} {currency_label(lang)}")
+    send_whatsapp_text(from_number, "\n".join(lines), bot_id)
+    return total
+
+
+def send_cart_from_store(from_number, chosen_idx, stores_list, products, bot_id, lang):
+    """v75.1: سلة المتجر المختار بجلسة واحدة + تكملة النواقص تلقائياً من متاجر القائمة.
+
+    بدل بطاقة لكل صنف (كل ضغطة تفتح صفحة جديدة وتضيّع السلة): زر دخول واحد للمتجر
+    وقائمة الأصناف نصاً — يضيفها المستخدم داخل المتجر بنفس الصفحة فتتراكم بسلة وحدة.
+    والأصناف الناقصة تُغطى تلقائياً من بقية متاجر القائمة (الأشمل ثم الأرخص) حتى تكتمل.
+    """
+    store_name, items = stores_list[chosen_idx]
+    plan_total = _send_store_cart_block(from_number, store_name, items, products, bot_id, lang, "cart_from_store")
+    send_whatsapp_text(from_number, T(lang, "cart_session_tip"), bot_id)
+    remaining = [p for p in products if p not in items]
+    if remaining:
+        plans, still_missing = _greedy_cart_completion(remaining, stores_list, {chosen_idx})
+        for _i, nm, cover_items in plans:
+            plan_total += _send_store_cart_block(from_number, nm, cover_items, products, bot_id, lang, "cart_complete_from")
+        tail = T(lang, "cart_plan_total", t=f"{format_price(plan_total)} {currency_label(lang)}")
+        if still_missing:
+            joiner = "، " if lang == "ar" else ", "
+            tail += "\n" + T(lang, "cart_not_anywhere", items=joiner.join(still_missing))
+        send_whatsapp_text(from_number, tail, bot_id)
+    else:
+        send_whatsapp_text(from_number, T(lang, "cart_total", t=f"{format_price(plan_total)} {currency_label(lang)}"), bot_id)
+    return True
 
 
 def process_cart(products, from_number, bot_id, lang="ar"):
@@ -5340,4 +5404,4 @@ def process_location_message(message, bot_id):
     route_pending_after_location(from_number)
 
 @app.get("/")
-async def health(): return {"status":"v75.0 UNIFIED CART (basket-per-store comparison + one-store checkout) + LIVE LINKS + LOCAL SOCIAL + GLOBAL REGION ORDER + MORE LENS CARDS + NONE CLASS + CTA ALWAYS + ARABIC PICK LIST + RELEVANCE FILTER + NO SILENCE + BILINGUAL 2 ROUNDS + PURE AI CLASSIFIER + CLEAN STORE NAMES + SERVICE INTENT FIX (answer+5 providers) + TEXT+SIMILAR USE OLD v26 SMART PATH (tournament) + SERVICES 5+ PHONES + AI INTENT + BRAND COMPARE + SHOP FILTER + TRIO OPTIONS + EXACT PRICES", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "v26_runs":SEARCH_RUNS, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
+async def health(): return {"status":"v75.1 ONE-SESSION CART (single entry link + checklist) + GREEDY COMPLETION + LIVE LINKS + LOCAL SOCIAL + GLOBAL REGION ORDER + MORE LENS CARDS + NONE CLASS + CTA ALWAYS + ARABIC PICK LIST + RELEVANCE FILTER + NO SILENCE + BILINGUAL 2 ROUNDS + PURE AI CLASSIFIER + CLEAN STORE NAMES + SERVICE INTENT FIX (answer+5 providers) + TEXT+SIMILAR USE OLD v26 SMART PATH (tournament) + SERVICES 5+ PHONES + AI INTENT + BRAND COMPARE + SHOP FILTER + TRIO OPTIONS + EXACT PRICES", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "v26_runs":SEARCH_RUNS, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
