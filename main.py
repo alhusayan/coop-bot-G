@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v75-7-lens-identify-then-v26-search-20260807"
+BUILD_ID = "v75-6-no-social-option-clear-titles-20260807"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE -> GOOGLE LENS DIRECT PASSTHROUGH (raw results to user)")
@@ -121,8 +121,6 @@ ENABLE_GOOGLE_LENS = env_bool("ENABLE_GOOGLE_LENS", True)
 # بدون تحليل Vision ولا حكم هوية ولا طبقات بحث. أطفئه بـ LENS_DIRECT_MODE=false
 # لإرجاع المسار الذكي الكامل. عند عدم وجود نتائج، البوت يرجع تلقائياً للمسار الكامل.
 LENS_DIRECT_MODE = env_bool("LENS_DIRECT_MODE", True)
-# v75.7: العدسة للتعرف فقط والاسم المستخرج يروح لبطولة v26 (قائمة أكبر).
-LENS_NAME_TO_V26 = env_bool("LENS_NAME_TO_V26", True)
 LENS_DIRECT_MAX_LINES = max(3, int(os.environ.get("LENS_DIRECT_MAX_LINES", "8")))
 # v72.2: تنويع المتاجر في بطاقات CTA — حد أقصى من البطاقات لكل متجر واحد.
 LENS_PER_STORE_MAX = max(1, int(os.environ.get("LENS_PER_STORE_MAX", "2")))
@@ -4572,38 +4570,6 @@ def process_single_image(message,bot_id,lang="ar"):
         print(f"LENS DIRECT HINT: {lens_hint!r}")
         lens_direct = google_lens_lookup(b64, mime, lang, lens_hint, light=True)
         if lens_direct.get("matches"):
-            # v75.7: الطريقة الجديدة — العدسة للتعرف على المنتج فقط، والاسم المستخرج
-            # يدخل المسار الذكي الكامل القديم (بطولة v26) ليطلع قائمة متاجر أكبر.
-            # العرض بالتنسيق الحالي (📦 + بطاقات CTA)، وقائمة الخيارات بعدها.
-            lens_title = _clean_lens_title(((lens_direct.get("chosen") or {}).get("title") or ""))
-            if LENS_NAME_TO_V26 and lens_title:
-                query = f"{caption} — {lens_title}" if caption else lens_title
-                print(f"LENS->v26 SMART PATH: {query!r}")
-                send_whatsapp_text(from_number, T(lang, "searching", q=lens_title), bot_id)
-                try:
-                    txt, urls = v26_text_search(query, lang)
-                except Exception as e:
-                    print(f"LENS->v26 CRASH: {e}")
-                    txt, urls = "", {}
-                LAST_SEARCH[from_number] = {"product": query}
-                # نخزن نتائج العدسة الأجنبية — زر «دوّر عالمياً» يعرضها فوراً بلا بحث جديد.
-                foreign = [m for m in (lens_direct.get("matches") or []) if not is_local_lens_result(m)]
-                PENDING_LENS_FOREIGN[from_number] = {
-                    "bot_id": bot_id, "lang": lang, "matches": foreign[:LENS_RESULT_LIMIT],
-                    "query": query, "ts": time.time(),
-                }
-                if txt and (extract_store_offers(txt) or is_informational_answer(txt)):
-                    result_type = send_product_result(from_number, txt, urls, bot_id, lang, query)
-                    if result_type != "none":
-                        trio = [
-                            {"id": "lf_similar", "title": T(lang, "opt_similar")[:24]},
-                            {"id": "lf_yes", "title": T(lang, "opt_global")[:24]},
-                            {"id": "map_open", "title": T(lang, "opt_map")[:24]},
-                        ]
-                        send_whatsapp_list(from_number, T(lang, "more_options_ask"), trio, bot_id, T(lang, "options_button"))
-                        return
-                # البطولة ما رجّعت قائمة قوية: بطاقات العدسة المباشرة تنقذ الموقف.
-                print("LENS->v26: weak result -> lens direct cards fallback")
             if send_lens_direct_results(from_number, lens_direct, bot_id, lang, caption):
                 # v74.14: الخريطة صارت الخيار الرابع داخل قائمة «تبي أكثر» — لا رسالة منفصلة.
                 return
@@ -5651,4 +5617,4 @@ def process_location_message(message, bot_id):
     route_pending_after_location(from_number)
 
 @app.get("/")
-async def health(): return {"status":"v75.7 LENS IDENTIFY -> v26 SMART SEARCH (bigger lists) + CLEAR TITLES + AI STORE UNIFY + IN-STORE SEARCH LINKS + CANONICAL STORES + CLEAN LAYOUT + ONE-SESSION + GREEDY COMPLETION + LIVE LINKS + LOCAL SOCIAL + GLOBAL REGION ORDER + MORE LENS CARDS + NONE CLASS + CTA ALWAYS + ARABIC PICK LIST + RELEVANCE FILTER + NO SILENCE + BILINGUAL 2 ROUNDS + PURE AI CLASSIFIER + CLEAN STORE NAMES + SERVICE INTENT FIX (answer+5 providers) + TEXT+SIMILAR USE OLD v26 SMART PATH (tournament) + SERVICES 5+ PHONES + AI INTENT + BRAND COMPARE + SHOP FILTER + TRIO OPTIONS + EXACT PRICES", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "v26_runs":SEARCH_RUNS, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
+async def health(): return {"status":"v75.6 NO SOCIAL OPTION + CLEAR SIMPLE TITLES + AI STORE UNIFY + IN-STORE SEARCH LINKS + CANONICAL STORES + CLEAN LAYOUT + ONE-SESSION + GREEDY COMPLETION + LIVE LINKS + LOCAL SOCIAL + GLOBAL REGION ORDER + MORE LENS CARDS + NONE CLASS + CTA ALWAYS + ARABIC PICK LIST + RELEVANCE FILTER + NO SILENCE + BILINGUAL 2 ROUNDS + PURE AI CLASSIFIER + CLEAN STORE NAMES + SERVICE INTENT FIX (answer+5 providers) + TEXT+SIMILAR USE OLD v26 SMART PATH (tournament) + SERVICES 5+ PHONES + AI INTENT + BRAND COMPARE + SHOP FILTER + TRIO OPTIONS + EXACT PRICES", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "v26_runs":SEARCH_RUNS, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
