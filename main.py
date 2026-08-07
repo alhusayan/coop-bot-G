@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v74-15-live-links-local-social-parts-filter-open-maps-20260807"
+BUILD_ID = "v75-0-unified-cart-store-comparison-20260807"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE -> GOOGLE LENS DIRECT PASSTHROUGH (raw results to user)")
@@ -63,6 +63,8 @@ NON_SHOP_HOSTS = (
 ENABLE_SHOP_AI_FILTER = env_bool("ENABLE_SHOP_AI_FILTER", True)
 # v74: مقارنة البراندات للطلب العام — خيارات المستخدم المعلقة للاختيار من القائمة.
 PENDING_BRAND_PICKS = {}
+# v75: السلة الموحدة — مقارنة السلة كاملة عبر المتاجر واختيار متجر واحد.
+PENDING_CART_PICKS = {}
 GLOBAL_PENDING_TTL = max(300, int(os.environ.get("GLOBAL_PENDING_TTL_SECONDS", "900")))
 LOCATION_TTL_SECONDS = max(3600, int(os.environ.get("LOCATION_TTL_HOURS", "72")) * 3600)
 MARKET_CTX = threading.local()
@@ -836,6 +838,14 @@ MSG = {
         "cant_identify": "بحثت أكثر من مرة، لكن ما قدرت أحدد المنتج أو ألقى له نتيجة مؤكدة. دز صورة أوضح أو اكتب اسم المنتج.",
         "image_error": "صار خلل بسيط وأنا أحمّل الصورة 😅 عيد إرسالها مرة ثانية.",
         "multi_text": "تمام لقيت {c} منتجات، أسوي سلة...",
+        "cart_comparing": "🧺 لقيت {c} أصناف.. أقارن لك السلة كاملة في المتاجر وأشوف وين تطلع أوفر وأسهل!",
+        "cart_summary_header": "🧺 مقارنة سلتك ({c} أصناف) حسب المتجر — الأشمل ثم الأوفر:",
+        "cart_pick_prompt": "اختر متجراً وأرسل لك كل أصنافك بروابطها المباشرة داخله — طلبية وحدة وسلة وحدة 👇",
+        "cart_store_button": "اختر متجر",
+        "cart_from_store": "🧺 سلتك من {s}:",
+        "cart_total": "💰 مجموع السلة: {t}",
+        "cart_missing": "⚠️ غير متوفر في هذا المتجر: {items}",
+        "cart_expired": "قائمة السلة قدمت 😅 دز قائمة الأصناف من جديد وأجهزها لك على طول.",
         "multi_images": "تمام لقطت {c} منتجات، أسوي سلة...",
         "maps_body": "📍 تبي أقرب مكان؟\n\nاضغط الزر والخريطة بتفتح على أقرب الأماكن حولك 👇",
         "maps_btn": "📍 افتح الخريطة",
@@ -886,6 +896,14 @@ MSG = {
         "cant_identify": "I searched several times but couldn’t identify the product or find a verified result. Send a clearer photo or type the product name.",
         "image_error": "Something went wrong while loading the image 😅 please send it again.",
         "multi_text": "Got it, found {c} products. Building your cart...",
+        "cart_comparing": "🧺 Found {c} items.. comparing your full basket across stores to find the cheapest one-stop option!",
+        "cart_summary_header": "🧺 Your basket ({c} items) by store — best coverage then cheapest:",
+        "cart_pick_prompt": "Pick a store and I'll send all your items with direct links inside it — one order, one cart 👇",
+        "cart_store_button": "Pick store",
+        "cart_from_store": "🧺 Your cart from {s}:",
+        "cart_total": "💰 Basket total: {t}",
+        "cart_missing": "⚠️ Not available at this store: {items}",
+        "cart_expired": "That basket list expired 😅 send your items again and I'll rebuild it right away.",
         "multi_images": "Nice, spotted {c} products. Building your cart...",
         "maps_body": "📍 Want the nearest place?\n\nTap the button and the map will open on the closest spots around you 👇",
         "maps_btn": "📍 Open Map",
@@ -3818,6 +3836,23 @@ def process_interactive_message(message, bot_id):
             lang_ = USER_LANG.get(from_number, "ar")
             send_whatsapp_text(from_number, ("اكتب اسم المنتج اللي تبيه وأدور لك عليه 👍" if lang_ == "ar" else "Type the product name and I'll search it for you 👍"), bot_id)
         return
+    if btn_id.startswith("cart_"):
+        # v75: المستخدم اختار متجراً لسلته الموحدة — نرسل كل أصنافه بروابطها داخله.
+        item = _peek_pending(PENDING_CART_PICKS, from_number)
+        lang_ = (item or {}).get("lang", USER_LANG.get(from_number, "ar"))
+        idx = int(btn_id[5:]) if btn_id[5:].isdigit() else -1
+        if item and 0 <= idx < len(item.get("stores") or []):
+            activate_market(from_number)
+            store_name, items = item["stores"][idx]
+            try:
+                send_cart_from_store(from_number, store_name, items, item.get("products") or [], item.get("bot_id") or bot_id, lang_)
+            except Exception as e:
+                print(f"CART PICK ERR: {e}")
+                send_whatsapp_text(from_number, T(lang_, "not_found"), bot_id)
+        else:
+            # القائمة انتهت صلاحيتها — ما نقدر نسترجع أسعار الأصناف من الضغطة وحدها.
+            send_whatsapp_text(from_number, T(lang_, "cart_expired"), bot_id)
+        return
     if btn_id == "map_open":
         # v74.14: خيار الخريطة من قائمة «تبي أكثر» — خريطة آخر بحث محفوظ.
         activate_market(from_number)
@@ -4642,6 +4677,109 @@ def identify_image_product(msg):
         return identify_product_with_retry(b64, mime, "ar")
     except: return ""
 
+def run_cart_comparison(products, from_number, bot_id, lang="ar"):
+    """v75: السلة الموحدة — بدل أرخص متجر لكل صنف لحاله (وتشتت الطلب على 4 متاجر)،
+
+    نجمع نتائج كل الأصناف ونبني مصفوفة متجر × صنف: كم صنفاً يغطي كل متجر ومجموع
+    سلته، ونعرض قائمة متاجر مرتبة (الأشمل ثم الأوفر). يختار المستخدم متجراً واحداً
+    فنرسل كل أصنافه بروابط صفحاتها المباشرة داخل نفس المتجر — طلبية وحدة وسلة وحدة.
+    """
+    market = market_for_user(from_number)
+    send_whatsapp_text(from_number, T(lang, "cart_comparing", c=len(products)), bot_id)
+    results = list(WORKERS.map(lambda p: (p, *_run_with_market(market, search_product, p, lang)), products))
+
+    stores = {}
+    for p, txt, urls in results:
+        if not txt:
+            continue
+        offers = filter_relevant_offers(p, extract_store_offers(txt), urls)
+        for o in offers:
+            url = match_url(o.get("name", ""), urls or {})
+            price = _extract_numeric_price(o.get("line", ""))
+            if price is None or price <= 0:
+                continue
+            host = _host_of(url)
+            key = domain_key(host) if host else normalize_name(normalize_ar(o.get("name", "")))
+            if not key:
+                continue
+            s = stores.setdefault(key, {"name": _clean_store_name(o.get("name", "")) or key, "items": {}})
+            prev = s["items"].get(p)
+            if prev is None or price < prev["price"]:
+                s["items"][p] = {"price": price, "url": url}
+
+    if not stores:
+        # احتياط: السلوك القديم — أفضل عرض لكل صنف على حدة.
+        any_ok = False
+        for p, txt, urls in results:
+            if not txt:
+                continue
+            any_ok = True
+            send_product_result(from_number, txt, urls, bot_id, lang, p, best_only=True)
+        if not any_ok:
+            send_whatsapp_text(from_number, T(lang, "not_found"), bot_id)
+        return
+
+    n = len(products)
+    ranked = sorted(
+        stores.values(),
+        key=lambda s: (-len(s["items"]), sum(i["price"] for i in s["items"].values())),
+    )[:6]
+
+    unit = "أصناف" if lang == "ar" else "items"
+    lines = [T(lang, "cart_summary_header", c=n), ""]
+    rows = []
+    for i, s in enumerate(ranked):
+        cov = len(s["items"])
+        total = sum(x["price"] for x in s["items"].values())
+        prefix = "✅" if i == 0 else "•"
+        full_mark = " 🧺" if cov == n else ""
+        lines.append(f"{prefix} {s['name']} — {cov}/{n} {unit} — {format_price(total)} {currency_label(lang)}{full_mark}")
+        rows.append({
+            "id": f"cart_{i}",
+            "title": s["name"][:24],
+            "description": f"{cov}/{n} {unit} — {format_price(total)} {currency_label(lang)}"[:72],
+        })
+    send_whatsapp_text(from_number, "\n".join(lines), bot_id)
+    PENDING_CART_PICKS[from_number] = {
+        "stores": [(s["name"], s["items"]) for s in ranked],
+        "products": list(products), "bot_id": bot_id, "lang": lang, "ts": time.time(),
+    }
+    send_whatsapp_list(from_number, T(lang, "cart_pick_prompt"), rows, bot_id, T(lang, "cart_store_button"))
+    LAST_SEARCH[from_number] = {"product": products[0]}
+    print(f"CART COMPARISON SENT: {[(s['name'], len(s['items'])) for s in ranked]}")
+
+
+def send_cart_from_store(from_number, store_name, items, products, bot_id, lang):
+    """يرسل سلة المتجر المختار: بطاقة لكل صنف برابط صفحته داخل المتجر + المجموع والنواقص."""
+    send_whatsapp_text(from_number, T(lang, "cart_from_store", s=store_name), bot_id)
+    total, missing, sent = 0.0, [], 0
+    for p in products:
+        inf = items.get(p)
+        if not inf:
+            missing.append(p)
+            continue
+        total += inf["price"]
+        body = f"📦 {p} — {format_price(inf['price'])} {currency_label(lang)}"
+        url = inf.get("url") or ""
+        if url and is_direct_store_url(url):
+            send_whatsapp_cta(from_number, body, url, bot_id, f"🛒 {store_name[:18]}")
+            sent += 1
+        else:
+            hp = url if (url and url.startswith("http") and url_is_alive(url)) else resolve_store_homepage(store_name)
+            if hp:
+                note = "\n🔎 الزر يفتح المتجر — ادور الصنف داخله" if lang == "ar" else "\n🔎 Opens the store — search the item inside"
+                send_whatsapp_cta(from_number, (body + note)[:1024], hp, bot_id, f"🛒 {store_name[:18]}")
+                sent += 1
+            else:
+                send_whatsapp_text(from_number, body, bot_id)
+                sent += 1
+    tail = T(lang, "cart_total", t=f"{format_price(total)} {currency_label(lang)}")
+    if missing:
+        tail += "\n" + T(lang, "cart_missing", items="، ".join(missing) if lang == "ar" else ", ".join(missing))
+    send_whatsapp_text(from_number, tail, bot_id)
+    return sent > 0
+
+
 def process_cart(products, from_number, bot_id, lang="ar"):
     # MARKET_CTX يضيع داخل WORKERS؛ بدون الغلاف يبحث للسلة كلها في الدولة الافتراضية.
     market = market_for_user(from_number)
@@ -4663,7 +4801,8 @@ def process_multi_images(messages,from_number,bot_id,lang="ar"):
     if not names:
         send_whatsapp_text(from_number,T(lang,"cant_identify"),bot_id)
         return
-    process_cart(names, from_number, bot_id, lang)
+    # v75: صور متعددة = سلة موحدة أيضاً — نفس مقارنة المتاجر.
+    run_cart_comparison(names, from_number, bot_id, lang)
 
 def is_map_command(text):
     compact = re.sub(r"[^\w\u0600-\u06FF]", "", normalize_ar(text))
@@ -5178,8 +5317,8 @@ def process_text_message(message,bot_id,onboarding_checked=False):
             return
         execute_product_search(from_number, products[0], bot_id, lang)
     else:
-        send_whatsapp_text(from_number,T(lang,"multi_text",c=len(products)),bot_id)
-        process_cart(products, from_number, bot_id, lang)
+        # v75: السلة الموحدة — مقارنة السلة كاملة حسب المتجر واختيار متجر واحد.
+        run_cart_comparison(products, from_number, bot_id, lang)
 
 def process_location_message(message, bot_id):
     from_number = message["from"]
@@ -5201,4 +5340,4 @@ def process_location_message(message, bot_id):
     route_pending_after_location(from_number)
 
 @app.get("/")
-async def health(): return {"status":"v74.15 LIVE LINKS ONLY + LOCAL SOCIAL + PARTS FILTER + OPEN MAPS + TRUST FILTER + GLOBAL REGION ORDER + MORE LENS CARDS + NONE CLASS + CTA ALWAYS + ARABIC PICK LIST + RELEVANCE FILTER + NO SILENCE + BILINGUAL 2 ROUNDS + PURE AI CLASSIFIER + CLEAN STORE NAMES + SERVICE INTENT FIX (answer+5 providers) + TEXT+SIMILAR USE OLD v26 SMART PATH (tournament) + SERVICES 5+ PHONES + AI INTENT + BRAND COMPARE + SHOP FILTER + TRIO OPTIONS + EXACT PRICES", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "v26_runs":SEARCH_RUNS, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
+async def health(): return {"status":"v75.0 UNIFIED CART (basket-per-store comparison + one-store checkout) + LIVE LINKS + LOCAL SOCIAL + GLOBAL REGION ORDER + MORE LENS CARDS + NONE CLASS + CTA ALWAYS + ARABIC PICK LIST + RELEVANCE FILTER + NO SILENCE + BILINGUAL 2 ROUNDS + PURE AI CLASSIFIER + CLEAN STORE NAMES + SERVICE INTENT FIX (answer+5 providers) + TEXT+SIMILAR USE OLD v26 SMART PATH (tournament) + SERVICES 5+ PHONES + AI INTENT + BRAND COMPARE + SHOP FILTER + TRIO OPTIONS + EXACT PRICES", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "v26_runs":SEARCH_RUNS, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
