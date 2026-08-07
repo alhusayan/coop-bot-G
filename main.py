@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v74-15-live-links-local-social-parts-filter-open-maps-20260807"
+BUILD_ID = "v74-14-map-in-options-list-trust-filter-20260806"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE -> GOOGLE LENS DIRECT PASSTHROUGH (raw results to user)")
@@ -1780,9 +1780,8 @@ def maps_search_url(product, lat=None, lng=None):
     return f"https://www.google.com/maps/search/{safe_category}"
 
 def send_maps_button(from_number, product, bot_id, lang):
-    # v74.15: بدون إحداثيات محفوظة — خرائط Google تفتح على موقع الجهاز الحالي بنفسها
-    # (الموقع المحفوظ من التسجيل قد يكون قديماً بأيام).
-    url = maps_search_url(product)
+    m = market_for_user(from_number)
+    url = maps_search_url(product, m.get("lat"), m.get("lng")) if m.get("lat") is not None and m.get("lng") is not None else maps_search_url(product)
     send_whatsapp_cta(from_number, T(lang, "maps_body"), url, bot_id, T(lang, "maps_btn"))
 
 ENABLE_RELEVANCE_FILTER = env_bool("ENABLE_RELEVANCE_FILTER", True)
@@ -1792,20 +1791,12 @@ _NON_PRODUCT_WORDS = (
     "repair manual", "manual pdf", "handbook", "wiring diagram", "parts catalog",
     "parts catalogue", "spare part", "spare parts", "دليل المالك", "دليل الاستخدام",
     "كتيب", "دليل الصيانه", "دليل الصيانة", "قطع غيار", "مخطط",
-    # v74.15: قطع ومستلزمات — «مروحة المكينة» ليست «المكينة»، و«متوافق مع» = قطعة بديلة.
-    "متوافق مع", "compatible with", "replacement for", "يناسب موديل", "fits yamaha",
-    "fits suzuki", "fits mercury", "fits tohatsu", "fits honda",
-    "مروحه", "مروحة", "propeller", "impeller", "ستارتر", "starter motor", "self starter",
-    "كاربريتر", "carburetor", "carburettor", "بواجي", "spark plug", "gasket", "جوان",
-    "فلتر زيت", "oil filter", "فلتر هواء", "air filter", "طرمبه", "water pump kit",
-    "حساس", "sensor for", "غطاء المحرك", "engine cover", "sticker", "decal", "ملصق",
 )
 
 RELEVANCE_FILTER_SYSTEM = """أنت مدقق نتائج لبوت تسوق. المستخدم طلب منتجاً، وسأعطيك قائمة مرقمة بنتائج البحث (اسم المتجر — العنوان/الرابط).
-أعد فقط أرقام النتائج التي تبيع المنتج المطلوب نفسه كاملاً (أو نسخة/موديل منه).
-ارفض بلا تردد: كتيبات ودلائل الاستخدام (Manuals/PDF)، قطع الغيار ومكونات المنتج (مروحة، ستارتر، كاربريتر، فلتر، حساس...)، أي نتيجة فيها "متوافق مع" أو "Compatible with" أو "Replacement for" فهي قطعة وليست المنتج، الإكسسوارات والأغطية، المجسمات والألعاب المصغرة، الملصقات، الخدمات والتأجير — إلا إذا كان طلب المستخدم نفسه عنها.
-مثال 1: المستخدم طلب "Sea Ray Sundancer 320" (يخت) والنتيجة "Sea Ray 320 Owners Manual PDF" -> ارفضها.
-مثال 2: المستخدم طلب "محرك Suzuki DF25AES5" والنتيجة "Starter Motor Compatible with Suzuki 25HP" -> ارفضها، هذه قطعة وليست المحرك.
+أعد فقط أرقام النتائج التي تبيع المنتج المطلوب نفسه (أو نسخة/موديل منه).
+ارفض بلا تردد: كتيبات ودلائل الاستخدام (Manuals/PDF)، قطع الغيار، الإكسسوارات والأغطية، المجسمات والألعاب المصغرة، الملصقات، الخدمات والتأجير — إلا إذا كان طلب المستخدم نفسه عنها.
+مثال: المستخدم طلب "Sea Ray Sundancer 320" (يخت) والنتيجة "Sea Ray 320 Owners Manual PDF" -> ارفضها.
 أرجع JSON فقط بدون شرح: {"keep":[1,3]}"""
 
 def filter_relevant_offers(query, offers, urls):
@@ -1847,38 +1838,6 @@ def filter_relevant_offers(query, offers, urls):
         print(f"RELEVANCE AI PARSE FAIL — keeping as-is: {raw!r}")
         return kept
 
-# ---- v74.15: فاحص حياة الروابط — يمنع الروابط الميتة والدومينات المخترعة -----
-_URL_ALIVE_CACHE = {}
-_URL_ALIVE_LOCK = threading.Lock()
-
-def url_is_alive(url):
-    """فحص سريع (كاش) أن الرابط يفتح فعلاً — Safari can't open the page ممنوعة."""
-    u = str(url or "").strip()
-    if not u.startswith("http"):
-        return False
-    key = u.split("?")[0][:200]
-    with _URL_ALIVE_LOCK:
-        hit = _URL_ALIVE_CACHE.get(key)
-        if hit and time.time() - hit["ts"] < 21600:
-            return hit["ok"]
-    ok = False
-    try:
-        r = requests.head(u, headers=HEADERS, timeout=6, allow_redirects=True)
-        ok = r.status_code < 400
-        if not ok and r.status_code in (403, 405, 501):
-            # بعض المتاجر تمنع HEAD؛ نجرب GET خفيف.
-            r = requests.get(u, headers=HEADERS, timeout=8, stream=True)
-            ok = r.status_code < 400
-            r.close()
-    except Exception as e:
-        print(f"URL ALIVE FAIL: {u[:80]} -> {e.__class__.__name__}")
-        ok = False
-    with _URL_ALIVE_LOCK:
-        if len(_URL_ALIVE_CACHE) > 3000:
-            _URL_ALIVE_CACHE.clear()
-        _URL_ALIVE_CACHE[key] = {"ok": ok, "ts": time.time()}
-    return ok
-
 # ---- v74.10: حلّال الصفحة الرئيسية للمتجر — عشان كل عرض يحصل زر CTA ----------
 _STORE_HOME_CACHE = {}
 _STORE_HOME_LOCK = threading.Lock()
@@ -1908,13 +1867,7 @@ def resolve_store_homepage(name):
     ans = ans.replace("https://", "").replace("http://", "").strip("/ ")
     url = ""
     if ans and ans != "none" and re.fullmatch(r"[a-z0-9][a-z0-9.-]{2,60}\.[a-z]{2,10}", ans):
-        candidate = f"https://{ans}"
-        # v74.15: الذكاء أحياناً يخمّن دومينات غير موجودة (mustafakaram.com...) رغم
-        # التحذير — الفحص الحي إلزامي: رابط ميت = كأنه ما انحل.
-        if url_is_alive(candidate):
-            url = candidate
-        else:
-            print(f"STORE HOMEPAGE DEAD — REJECTED: {ans}")
+        url = f"https://{ans}"
     with _STORE_HOME_LOCK:
         if len(_STORE_HOME_CACHE) > 2000:
             _STORE_HOME_CACHE.clear()
@@ -1972,16 +1925,9 @@ def send_product_result(from_number, txt, urls, bot_id, lang, query, best_only=F
         sent += 1
     if sent == 0 and fallback_ctas:
         # v74.8: ولا رابط مباشر؟ رابط المتجر نفسه (غير المباشر) أفضل بكثير من «ما لقيت».
-        # v74.15: بس بشرط يكون حياً — فحص متوازٍ سريع، والميّت ينرمي.
-        checked = list(RESOLVER.map(lambda ou: (ou[0], ou[1], url_is_alive(ou[1])), fallback_ctas[:MAX_STORES]))
-        for o, url, alive in checked:
-            if not alive:
-                print(f"FALLBACK CTA DEAD — DROPPED: {o['name']} -> {url}")
-                continue
+        for o, url in fallback_ctas[:MAX_STORES]:
             print(f"FALLBACK STORE CTA: {o['name']} -> {url}")
-            # نوضح أن الزر يفتح المتجر (مو صفحة المنتج) حتى ما يتفاجأ المستخدم بصفحة عامة.
-            note = "\n🔎 الزر يفتح المتجر — ادور المنتج داخله" if lang == "ar" else "\n🔎 Button opens the store — search the product inside"
-            send_whatsapp_cta(from_number, (o["line"] + note)[:1024], url, bot_id, f"🛒 {o['name'][:18]}")
+            send_whatsapp_cta(from_number, o["line"], url, bot_id, f"🛒 {o['name'][:18]}")
             sent += 1
     if sent == 0:
         # v74.8: عندنا أسعار حقيقية بدون أي روابط صالحة: نعرض الأسعار نصاً —
@@ -4332,30 +4278,6 @@ def _pop_pending_lens_foreign(phone):
     return item
 
 
-def is_local_social_result(m):
-    """v74.15: بوست تواصل يخص بلد المستخدم فقط: اسم البلد، العملة المحلية، مفتاح
-
-    الاتصال (+965)، أو رموز البلد الدارجة في الحسابات (q8/kwt/kw للكويت)."""
-    market = current_market()
-    cc = (market.get("country") or DEFAULT_COUNTRY).lower()
-    hay = " ".join(str(m.get(k) or "") for k in ("title", "source", "link", "snippet", "price", "currency")).lower()
-    hay_norm = normalize_ar(hay)
-    names = [str(market.get("country_name") or "").lower(), (COUNTRY_NAMES_AR.get(cc) or "")]
-    if any(n and normalize_ar(n) in hay_norm for n in names):
-        return True
-    if any(mk in hay for mk in COUNTRY_CURRENCY_MARKERS.get(cc, ())):
-        return True
-    # مفتاح الاتصال الدولي (+965 للكويت...) — إعلانات التواصل عادة تحط رقم واتساب.
-    calling = next((code for code, c in CALLING_CODE_TO_COUNTRY.items() if c == cc and len(code) == 3), "")
-    if calling and (f"+{calling}" in hay or f"00{calling}" in hay):
-        return True
-    # رموز دارجة في أسماء الحسابات والهاشتاقات.
-    cc_tokens = {"kw": ("q8", "kwt", "_kw", "kw_", ".kw", "kuwaitcity", "kuwait")}.get(cc, ())
-    if any(t in hay for t in cc_tokens):
-        return True
-    return False
-
-
 def is_social_result(m):
     """v73: نتيجة من برامج التواصل (انستجرام/تيك توك/سناب/يوتيوب...)."""
     try:
@@ -4453,11 +4375,6 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
     if not matches:
         return False
     social = [m for m in matches if is_social_result(m)]
-    # v74.15: عروض التواصل المحلية فقط — بوست إسبانيا ما يهم مستخدم الكويت.
-    social_before = len(social)
-    social = [m for m in social if is_local_social_result(m)]
-    if social_before != len(social):
-        print(f"SOCIAL LOCAL FILTER: {social_before} -> {len(social)}")
     nonsocial = [m for m in matches if not is_social_result(m)]
     # v74: نتائج المتاجر فقط — المقالات والمدونات والمواقع العامة تُستبعد.
     nonsocial = filter_shopping_results(nonsocial)
@@ -5201,4 +5118,4 @@ def process_location_message(message, bot_id):
     route_pending_after_location(from_number)
 
 @app.get("/")
-async def health(): return {"status":"v74.15 LIVE LINKS ONLY + LOCAL SOCIAL + PARTS FILTER + OPEN MAPS + TRUST FILTER + GLOBAL REGION ORDER + MORE LENS CARDS + NONE CLASS + CTA ALWAYS + ARABIC PICK LIST + RELEVANCE FILTER + NO SILENCE + BILINGUAL 2 ROUNDS + PURE AI CLASSIFIER + CLEAN STORE NAMES + SERVICE INTENT FIX (answer+5 providers) + TEXT+SIMILAR USE OLD v26 SMART PATH (tournament) + SERVICES 5+ PHONES + AI INTENT + BRAND COMPARE + SHOP FILTER + TRIO OPTIONS + EXACT PRICES", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "v26_runs":SEARCH_RUNS, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
+async def health(): return {"status":"v74.14 MAP AS 4TH OPTION + ANTI-SCAM TRUST FILTER + GLOBAL REGION ORDER + MORE LENS CARDS + NONE CLASS + CTA ALWAYS + ARABIC PICK LIST + RELEVANCE FILTER + NO SILENCE + BILINGUAL 2 ROUNDS + PURE AI CLASSIFIER + CLEAN STORE NAMES + SERVICE INTENT FIX (answer+5 providers) + TEXT+SIMILAR USE OLD v26 SMART PATH (tournament) + SERVICES 5+ PHONES + AI INTENT + BRAND COMPARE + SHOP FILTER + TRIO OPTIONS + EXACT PRICES", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "v26_runs":SEARCH_RUNS, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
