@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v75-6-no-social-option-clear-titles-20260807"
+BUILD_ID = "v75-9-official-vision-web-detection-primary-20260807"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE -> GOOGLE LENS DIRECT PASSTHROUGH (raw results to user)")
@@ -76,6 +76,10 @@ RESOLVER = ThreadPoolExecutor(max_workers=8)
 WORKERS = ThreadPoolExecutor(max_workers=5)
 OLD_SEARCH_POOL = ThreadPoolExecutor(max_workers=8)
 LENS_POOL = ThreadPoolExecutor(max_workers=4)
+# v75.8: تمريرات العدسة تشتغل بالتوازي + مهلة SerpApi أطول (كان 60 ويعلق بالذروة).
+LENS_PASS_POOL = ThreadPoolExecutor(max_workers=3)
+LENS_HTTP_TIMEOUT = max(45, int(os.environ.get("LENS_HTTP_TIMEOUT", "75")))
+LENS_TOTAL_BUDGET = max(60, int(os.environ.get("LENS_TOTAL_BUDGET", "100")))
 OLD_LAYER_DUPLICATES = max(1, int(os.environ.get("OLD_LAYER_DUPLICATES", "2")))
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
@@ -121,6 +125,8 @@ ENABLE_GOOGLE_LENS = env_bool("ENABLE_GOOGLE_LENS", True)
 # بدون تحليل Vision ولا حكم هوية ولا طبقات بحث. أطفئه بـ LENS_DIRECT_MODE=false
 # لإرجاع المسار الذكي الكامل. عند عدم وجود نتائج، البوت يرجع تلقائياً للمسار الكامل.
 LENS_DIRECT_MODE = env_bool("LENS_DIRECT_MODE", True)
+# v75.7: العدسة للتعرف فقط والاسم المستخرج يروح لبطولة v26 (قائمة أكبر).
+LENS_NAME_TO_V26 = env_bool("LENS_NAME_TO_V26", True)
 LENS_DIRECT_MAX_LINES = max(3, int(os.environ.get("LENS_DIRECT_MAX_LINES", "8")))
 # v72.2: تنويع المتاجر في بطاقات CTA — حد أقصى من البطاقات لكل متجر واحد.
 LENS_PER_STORE_MAX = max(1, int(os.environ.get("LENS_PER_STORE_MAX", "2")))
@@ -1241,7 +1247,7 @@ def _serpapi_lens_request(public_url, lens_type, country, auto_crop, query_hint)
     if query_hint and (lens_type in (None, "", "all", "visual_matches", "products")):
         params["q"] = query_hint[:120]
     try:
-        r = requests.get("https://serpapi.com/search.json", params=params, timeout=60)
+        r = requests.get("https://serpapi.com/search.json", params=params, timeout=LENS_HTTP_TIMEOUT)
         if r.status_code >= 400:
             print(f"GOOGLE LENS HTTP {r.status_code} type={lens_type or 'all'} country={country or '-'}: {r.text[:300]}")
             return []
@@ -1256,6 +1262,77 @@ def _serpapi_lens_request(public_url, lens_type, country, auto_crop, query_hint)
     except Exception as e:
         print(f"GOOGLE LENS PASS EXCEPTION type={lens_type or 'all'}: {e}")
         return []
+
+# ---- v75.9: التعرف عبر Google Cloud Vision (رسمي) بدل سحب Lens ---------------
+# Google Lens ما له API رسمي؛ Web Detection هو المعادل الرسمي: يرجع أفضل تخمين
+# لاسم المنتج + صفحات الويب التي تحتوي نفس الصورة — يكفي تماماً لأن مسار v75.7
+# يحتاج الاسم فقط ثم بطولة v26 تبحث. أسرع (ثوانٍ) وأرخص ولا يحتاج نشر الصورة.
+# فعّل Cloud Vision API في نفس مشروع Google Cloud واستخدم نفس مفتاح Gemini،
+# أو حط مفتاحاً مستقلاً في GOOGLE_VISION_API_KEY.
+GOOGLE_VISION_API_KEY = os.environ.get("GOOGLE_VISION_API_KEY", "") or GEMINI_API_KEY
+# auto = فيجن أولاً ثم SerpApi احتياطاً | vision = فيجن فقط | serpapi = الطريقة القديمة.
+IMAGE_ID_ENGINE = os.environ.get("IMAGE_ID_ENGINE", "auto").strip().lower()
+
+def google_vision_web_detect(image_b64, mime_type, query_hint=""):
+    """تعرف رسمي: يعيد نفس شكل نتيجة Lens {matches, chosen, query} ليتركب على المسار الحالي."""
+    if not GOOGLE_VISION_API_KEY:
+        return {"aliases": [], "matches": [], "query": ""}
+    payload = {
+        "requests": [{
+            "image": {"content": image_b64},
+            "features": [{"type": "WEB_DETECTION", "maxResults": 25}],
+            "imageContext": {"webDetectionParams": {"includeGeoResults": True}},
+        }]
+    }
+    try:
+        r = requests.post(
+            "https://vision.googleapis.com/v1/images:annotate",
+            params={"key": GOOGLE_VISION_API_KEY}, json=payload, timeout=25,
+        )
+        if r.status_code >= 400:
+            print(f"VISION WEB HTTP {r.status_code}: {r.text[:300]}")
+            return {"aliases": [], "matches": [], "query": ""}
+        wd = ((r.json().get("responses") or [{}])[0]).get("webDetection") or {}
+    except Exception as e:
+        print(f"VISION WEB EXCEPTION: {e.__class__.__name__}: {e}")
+        return {"aliases": [], "matches": [], "query": ""}
+
+    best_guess = ""
+    for bg in wd.get("bestGuessLabels") or []:
+        if (bg.get("label") or "").strip():
+            best_guess = bg["label"].strip()
+            break
+    entities = [(e.get("description") or "").strip()
+                for e in sorted(wd.get("webEntities") or [], key=lambda x: -(x.get("score") or 0))
+                if (e.get("description") or "").strip()]
+    matches, seen = [], set()
+    for i, page in enumerate(wd.get("pagesWithMatchingImages") or [], 1):
+        url = (page.get("url") or "").strip()
+        title = re.sub(r"<[^>]+>", "", str(page.get("pageTitle") or "")).strip()
+        sig = (title.lower(), url.lower())
+        if not title or not url.startswith("http") or sig in seen:
+            continue
+        seen.add(sig)
+        matches.append({
+            "title": title, "link": url, "source": _host_of(url).split(".")[0].title(),
+            "position": i, "section": "vision_pages", "exact": True,
+            "thumbnail": "", "image": "", "price": "", "price_value": None,
+            "currency": "", "in_stock": None, "condition": "",
+        })
+    # الاسم النهائي: أفضل تخمين Google + أقوى كيان (براند/موديل) إذا أضاف معلومة.
+    name = best_guess
+    for ent in entities[:2]:
+        if ent and normalize_ar(ent) not in normalize_ar(name):
+            name = f"{name} {ent}".strip() if name else ent
+            break
+    name = " ".join(name.split()[:10])
+    chosen = {"title": name or (matches[0]["title"] if matches else "")}
+    print(f"VISION WEB DETECT: guess={best_guess!r} entities={entities[:3]} pages={len(matches)} -> name={name!r}")
+    return {
+        "aliases": [name] if name else [], "matches": matches[:LENS_RESULT_LIMIT],
+        "query": name, "chosen": chosen, "signature": {}, "engine": "vision",
+    }
+
 
 def google_lens_lookup(image_b64, mime_type, lang="ar", query_hint="", light=False):
     """تعرف بصري متعدد التمريرات ليقترب من قوة تطبيق Google Lens نفسه.
@@ -1290,19 +1367,31 @@ def google_lens_lookup(image_b64, mime_type, lang="ar", query_hint="", light=Fal
                 seen.add(sig)
                 merged.append(it)
 
-        passes = [
-            ("products", user_country, True),
-            ("all", user_country, True),
-        ]
-        if ENABLE_LENS_WIDE_FALLBACK:
-            passes.append(("all", "", False))
-
-        for lens_type, country, auto_crop in passes:
-            _merge(_serpapi_lens_request(public_url, lens_type, country, auto_crop, query_hint))
-            has_exact = any(m.get("exact") for m in merged)
-            has_local = any(is_local_lens_result(m) for m in merged)
-            if len(merged) >= LENS_MIN_MATCHES and lens_type != "products" and (has_exact or has_local):
-                break
+        # v75.8: التمريرتان الأساسيتان بالتوازي (كانتا بالتتابع — تعليق SerpApi في
+        # واحدة يجمّد الكل). الواسعة تنطلق فقط إذا النتائج ما كفت، وبمهلة إجمالية.
+        wave1 = [("products", user_country, True), ("all", user_country, True)]
+        deadline = time.time() + LENS_TOTAL_BUDGET
+        futs = {LENS_PASS_POOL.submit(_serpapi_lens_request, public_url, t, c, a, query_hint): i
+                for i, (t, c, a) in enumerate(wave1)}
+        wave1_results = {}
+        for fut, i in futs.items():
+            remain = max(5.0, deadline - time.time())
+            try:
+                wave1_results[i] = fut.result(timeout=remain) or []
+            except Exception as e:
+                print(f"LENS PASS {wave1[i][0]} TIMEOUT/ERR: {e.__class__.__name__}")
+                wave1_results[i] = []
+        for i in range(len(wave1)):
+            _merge(wave1_results.get(i) or [])
+        has_exact = any(m.get("exact") for m in merged)
+        has_local = any(is_local_lens_result(m) for m in merged)
+        if ENABLE_LENS_WIDE_FALLBACK and not (len(merged) >= LENS_MIN_MATCHES and (has_exact or has_local)):
+            remain = max(10.0, deadline - time.time())
+            try:
+                fut = LENS_PASS_POOL.submit(_serpapi_lens_request, public_url, "all", "", False, query_hint)
+                _merge(fut.result(timeout=remain) or [])
+            except Exception as e:
+                print(f"LENS WIDE PASS TIMEOUT/ERR: {e.__class__.__name__}")
 
         matches = merged[:LENS_RESULT_LIMIT]
         if not matches:
@@ -4546,7 +4635,21 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
     print(f"LENS DIRECT SENT: local={len(local)} foreign_stored={len(foreign)} social_stored={len(social)}")
     return True
 
-def process_single_image(message,bot_id,lang="ar"):
+def process_single_image(message, bot_id, lang="ar"):
+    """v75.8: غلاف ضد الصمت — أي انهيار داخل مسار الصورة (SerpApi ساقط، Gemini 429...)
+
+    يتحول لرسالة واضحة للمستخدم بدل السكوت الكامل."""
+    try:
+        _process_single_image_impl(message, bot_id, lang)
+    except Exception as e:
+        print(f"IMAGE PATH CRASH: {e.__class__.__name__}: {e}")
+        try:
+            send_whatsapp_text(message.get("from", ""), T(lang, "cant_identify"), bot_id)
+        except Exception:
+            pass
+
+
+def _process_single_image_impl(message,bot_id,lang="ar"):
     from_number=message["from"]
     market = activate_market(from_number)
     caption=(message.get("image",{}) or {}).get("caption","").strip()
@@ -4566,10 +4669,50 @@ def process_single_image(message,bot_id,lang="ar"):
 
     # v71: وضع اللينز المباشر — الصورة تروح لـ Google Lens ونتائجه تُرسل كما هي.
     # بدون Vision ولا حكم هوية ولا طبقات بحث. إذا Google ما رجع شي، نكمل بالمسار الكامل.
-    if LENS_DIRECT_MODE and ENABLE_GOOGLE_LENS and SERPAPI_API_KEY and PUBLIC_BASE_URL:
+    if LENS_DIRECT_MODE and ENABLE_GOOGLE_LENS and (GOOGLE_VISION_API_KEY or (SERPAPI_API_KEY and PUBLIC_BASE_URL)):
         print(f"LENS DIRECT HINT: {lens_hint!r}")
-        lens_direct = google_lens_lookup(b64, mime, lang, lens_hint, light=True)
-        if lens_direct.get("matches"):
+        # v75.9: المحرك الرسمي أولاً — Google Vision Web Detection (ثوانٍ، رسمي، أرخص).
+        # SerpApi Lens يبقى احتياطاً عند فشل فيجن أو حسب IMAGE_ID_ENGINE.
+        lens_direct = {"matches": [], "query": ""}
+        if IMAGE_ID_ENGINE in ("auto", "vision"):
+            lens_direct = google_vision_web_detect(b64, mime, lens_hint)
+        if (not lens_direct.get("matches") and not (lens_direct.get("chosen") or {}).get("title")
+                and IMAGE_ID_ENGINE != "vision" and SERPAPI_API_KEY and PUBLIC_BASE_URL):
+            print("VISION EMPTY -> SerpApi Lens fallback")
+            lens_direct = google_lens_lookup(b64, mime, lang, lens_hint, light=True)
+        if lens_direct.get("matches") or (lens_direct.get("chosen") or {}).get("title"):
+            # v75.7: الطريقة الجديدة — العدسة للتعرف على المنتج فقط، والاسم المستخرج
+            # يدخل المسار الذكي الكامل القديم (بطولة v26) ليطلع قائمة متاجر أكبر.
+            # العرض بالتنسيق الحالي (📦 + بطاقات CTA)، وقائمة الخيارات بعدها.
+            lens_title = _clean_lens_title(((lens_direct.get("chosen") or {}).get("title") or ""))
+            if LENS_NAME_TO_V26 and lens_title:
+                query = f"{caption} — {lens_title}" if caption else lens_title
+                print(f"LENS->v26 SMART PATH: {query!r}")
+                send_whatsapp_text(from_number, T(lang, "searching", q=lens_title), bot_id)
+                try:
+                    txt, urls = v26_text_search(query, lang)
+                except Exception as e:
+                    print(f"LENS->v26 CRASH: {e}")
+                    txt, urls = "", {}
+                LAST_SEARCH[from_number] = {"product": query}
+                # نخزن نتائج العدسة الأجنبية — زر «دوّر عالمياً» يعرضها فوراً بلا بحث جديد.
+                foreign = [m for m in (lens_direct.get("matches") or []) if not is_local_lens_result(m)]
+                PENDING_LENS_FOREIGN[from_number] = {
+                    "bot_id": bot_id, "lang": lang, "matches": foreign[:LENS_RESULT_LIMIT],
+                    "query": query, "ts": time.time(),
+                }
+                if txt and (extract_store_offers(txt) or is_informational_answer(txt)):
+                    result_type = send_product_result(from_number, txt, urls, bot_id, lang, query)
+                    if result_type != "none":
+                        trio = [
+                            {"id": "lf_similar", "title": T(lang, "opt_similar")[:24]},
+                            {"id": "lf_yes", "title": T(lang, "opt_global")[:24]},
+                            {"id": "map_open", "title": T(lang, "opt_map")[:24]},
+                        ]
+                        send_whatsapp_list(from_number, T(lang, "more_options_ask"), trio, bot_id, T(lang, "options_button"))
+                        return
+                # البطولة ما رجّعت قائمة قوية: بطاقات العدسة المباشرة تنقذ الموقف.
+                print("LENS->v26: weak result -> lens direct cards fallback")
             if send_lens_direct_results(from_number, lens_direct, bot_id, lang, caption):
                 # v74.14: الخريطة صارت الخيار الرابع داخل قائمة «تبي أكثر» — لا رسالة منفصلة.
                 return
@@ -5617,4 +5760,4 @@ def process_location_message(message, bot_id):
     route_pending_after_location(from_number)
 
 @app.get("/")
-async def health(): return {"status":"v75.6 NO SOCIAL OPTION + CLEAR SIMPLE TITLES + AI STORE UNIFY + IN-STORE SEARCH LINKS + CANONICAL STORES + CLEAN LAYOUT + ONE-SESSION + GREEDY COMPLETION + LIVE LINKS + LOCAL SOCIAL + GLOBAL REGION ORDER + MORE LENS CARDS + NONE CLASS + CTA ALWAYS + ARABIC PICK LIST + RELEVANCE FILTER + NO SILENCE + BILINGUAL 2 ROUNDS + PURE AI CLASSIFIER + CLEAN STORE NAMES + SERVICE INTENT FIX (answer+5 providers) + TEXT+SIMILAR USE OLD v26 SMART PATH (tournament) + SERVICES 5+ PHONES + AI INTENT + BRAND COMPARE + SHOP FILTER + TRIO OPTIONS + EXACT PRICES", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "v26_runs":SEARCH_RUNS, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
+async def health(): return {"status":"v75.9 OFFICIAL GOOGLE VISION WEB DETECTION (primary, seconds) + SERPAPI FALLBACK + IMAGE NO-SILENCE + LENS->v26 + CLEAR TITLES + AI STORE UNIFY + IN-STORE SEARCH LINKS + CANONICAL STORES + CLEAN LAYOUT + ONE-SESSION + GREEDY COMPLETION + LIVE LINKS + LOCAL SOCIAL + GLOBAL REGION ORDER + MORE LENS CARDS + NONE CLASS + CTA ALWAYS + ARABIC PICK LIST + RELEVANCE FILTER + NO SILENCE + BILINGUAL 2 ROUNDS + PURE AI CLASSIFIER + CLEAN STORE NAMES + SERVICE INTENT FIX (answer+5 providers) + TEXT+SIMILAR USE OLD v26 SMART PATH (tournament) + SERVICES 5+ PHONES + AI INTENT + BRAND COMPARE + SHOP FILTER + TRIO OPTIONS + EXACT PRICES", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "v26_runs":SEARCH_RUNS, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
