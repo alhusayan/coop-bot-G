@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v75-4-cart-uses-v26-smart-path-waves-20260807"
+BUILD_ID = "v75-5-ai-store-unify-search-links-no-summary-20260807"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE -> GOOGLE LENS DIRECT PASSTHROUGH (raw results to user)")
@@ -4689,7 +4689,8 @@ def identify_image_product(msg):
     except: return ""
 
 _STORE_GENERIC_TOKENS = {
-    "هايبر", "ماركت", "هايبرماركت", "سوبرماركت", "سوبر", "مول", "اسواق", "سوق",
+    "هايبر", "هاير", "ماركت", "هايبرماركت", "هايرماركت", "سوبرماركت", "سوبر", "مول", "اسواق", "سوق",
+    "مركز", "سنتر", "center", "centre",
     "اونلاين", "اون", "لاين", "الكويت", "كويت", "متجر", "محل", "شركه", "شركة",
     "hyper", "market", "hypermarket", "supermarket", "super", "store", "shop",
     "online", "kuwait", "kw", "mall", "co", "company", "the",
@@ -4714,6 +4715,117 @@ def canonical_store_key(name, url=""):
             return domain_key(dom)
     key = normalize_name("".join(toks))
     return key or normalize_name(n)
+
+
+# ---- v75.5: موحّد أسماء المتاجر الذكي + رابط بحث المتجر عن الصنف --------------
+STORE_UNIFY_SYSTEM = """أنت موحّد أسماء متاجر. سأعطيك قائمة مرقمة بأسماء متاجر كما وردت من نتائج بحث.
+جمّع الأرقام التي تعود لنفس المتجر الفعلي حتى لو اختلف الإملاء أو اللغة أو الصياغة
+(مثل: لولو هاير ماركت = لولو هايبرماركت = Lulu Hypermarket، مركز سلطان = Sultan Center = TSC).
+المتاجر المختلفة فعلاً تبقى في مجموعات منفصلة.
+أرجع JSON فقط بدون شرح: {"groups":[[1,3],[2],[4,5]]} بحيث يظهر كل رقم مرة واحدة بالضبط."""
+
+_STORE_UNIFY_CACHE = {}
+_STORE_UNIFY_LOCK = threading.Lock()
+
+def unify_store_groups(names):
+    """يرجع مجموعات فهارس الأسماء المتطابقة فعلياً — حكم ذكي واحد سريع (كاش)."""
+    if len(names) < 2:
+        return [[i] for i in range(len(names))]
+    key = "|".join(sorted(normalize_name(normalize_ar(n)) for n in names))[:400]
+    with _STORE_UNIFY_LOCK:
+        if key in _STORE_UNIFY_CACHE:
+            return _STORE_UNIFY_CACHE[key]
+    numbered = "\n".join(f"{i}. {n}" for i, n in enumerate(names, 1))
+    raw, _ = call_gemini([{"text": numbered}], system=STORE_UNIFY_SYSTEM, use_search=False)
+    groups = None
+    try:
+        data = json.loads(re.search(r"\{.*\}", raw or "", flags=re.S).group(0))
+        cand = [[int(x) - 1 for x in g] for g in (data.get("groups") or []) if g]
+        seen = sorted(i for g in cand for i in g)
+        if seen == list(range(len(names))):
+            groups = cand
+        else:
+            print(f"STORE UNIFY INVALID GROUPS (missing/dup idx): {raw!r}")
+    except Exception:
+        print(f"STORE UNIFY PARSE FAIL: {raw!r}")
+    if groups is None:
+        groups = [[i] for i in range(len(names))]
+    with _STORE_UNIFY_LOCK:
+        if len(_STORE_UNIFY_CACHE) > 500:
+            _STORE_UNIFY_CACHE.clear()
+        _STORE_UNIFY_CACHE[key] = groups
+    return groups
+
+
+def merge_store_matrix_ai(stores):
+    """v75.5: دمج نهائي بالذكاء — «لولو هاير ماركت» و«Lulu» يصيرون متجراً واحداً
+
+    مهما كان الإملاء. لكل صنف يبقى أرخص سعر، والاسم المعروض الأقصر."""
+    entries = list(stores.values())
+    if len(entries) < 2:
+        return stores
+    names = [e["name"] for e in entries]
+    groups = unify_store_groups(names)
+    if all(len(g) == 1 for g in groups):
+        return stores
+    merged = {}
+    for gi, group in enumerate(groups):
+        base = min((entries[i] for i in group), key=lambda e: len(e["name"]))
+        bucket = {"name": base["name"], "items": {}}
+        for i in group:
+            for p, inf in entries[i]["items"].items():
+                prev = bucket["items"].get(p)
+                if prev is None or inf["price"] < prev["price"]:
+                    bucket["items"][p] = inf
+        merged[f"g{gi}"] = bucket
+    if len(merged) != len(entries):
+        print(f"STORE UNIFY MERGED: {len(entries)} -> {len(merged)} stores: {[m['name'] for m in merged.values()]}")
+    return merged
+
+
+# روابط بحث المتاجر المعروفة — الزر يفتح نتائج الصنف داخل المتجر بدل الرئيسية.
+KNOWN_SEARCH_TEMPLATES = {
+    "luluhypermarket": "https://gcc.luluhypermarket.com/en-kw/search?text={q}",
+    "carrefourkuwait": "https://www.carrefourkuwait.com/mafkwt/en/v4/search?keyword={q}",
+    "taw9eel": "https://www.taw9eel.com/en/catalogsearch/result/?q={q}",
+    "sultan-center": "https://www.sultan-center.com/catalogsearch/result/?q={q}",
+    "jm3eia": "https://www.jm3eia.com/en/search?q={q}",
+    "safathome": "https://www.safathome.com/catalogsearch/result/?q={q}",
+    "xcite": "https://www.xcite.com/search?text={q}",
+    "abyat": "https://www.abyat.com/kw/en/search/{q}",
+}
+_GENERIC_SEARCH_PATTERNS = (
+    "https://{d}/catalogsearch/result/?q={q}",
+    "https://{d}/search?q={q}",
+    "https://{d}/en/search?q={q}",
+)
+_SEARCH_TMPL_CACHE = {}
+_SEARCH_TMPL_LOCK = threading.Lock()
+
+def store_search_url(store_name, query):
+    """رابط نتائج بحث المتجر عن الصنف — أفضل بكثير من الرئيسية. يُفحص حياً ويُكاش القالب."""
+    dom = store_domain(store_name)
+    host = clean_domain(dom) if dom else _host_of(resolve_store_homepage(store_name))
+    if not host:
+        return ""
+    q = urllib.parse.quote(" ".join(str(query or "").split())[:80])
+    with _SEARCH_TMPL_LOCK:
+        cached_tmpl = _SEARCH_TMPL_CACHE.get(host)
+    candidates = [cached_tmpl] if cached_tmpl else []
+    if not candidates:
+        dkey = host.split(".")[0]
+        if dkey in KNOWN_SEARCH_TEMPLATES:
+            candidates.append(KNOWN_SEARCH_TEMPLATES[dkey])
+        candidates += [p.replace("{d}", host) for p in _GENERIC_SEARCH_PATTERNS]
+    for tmpl in candidates:
+        url = tmpl.replace("{q}", q)
+        if url_is_alive(url):
+            with _SEARCH_TMPL_LOCK:
+                if len(_SEARCH_TMPL_CACHE) > 500:
+                    _SEARCH_TMPL_CACHE.clear()
+                _SEARCH_TMPL_CACHE[host] = tmpl
+            return url
+    return ""
 
 
 CART_ITEM_DEADLINE = max(60, int(os.environ.get("CART_DEADLINE_SECONDS", "240")))
@@ -4811,6 +4923,11 @@ def run_cart_comparison(products, from_number, bot_id, lang="ar"):
     except Exception as e:
         print(f"CART MATRIX CRASH: {e}")
         stores = {}
+    # v75.5: دمج نهائي بالذكاء — أي صيغ مختلفة لنفس المتجر تتوحد مهما كان الإملاء.
+    try:
+        stores = merge_store_matrix_ai(stores)
+    except Exception as e:
+        print(f"STORE UNIFY CRASH (keeping as-is): {e}")
 
     if not stores:
         # احتياط: السلوك القديم — أفضل عرض لكل صنف على حدة.
@@ -4831,20 +4948,16 @@ def run_cart_comparison(products, from_number, bot_id, lang="ar"):
     )[:6]
 
     unit = "أصناف" if lang == "ar" else "items"
-    lines = [T(lang, "cart_summary_header", c=n), ""]
+    # v75.5: بدون رسالة ملخص — قائمة الاختيار وحدها تكفي (وصف كل صف فيه التغطية والمجموع).
     rows = []
     for i, s in enumerate(ranked):
         cov = len(s["items"])
         total = sum(x["price"] for x in s["items"].values())
-        prefix = "✅" if i == 0 else "•"
-        full_mark = " 🧺" if cov == n else ""
-        lines.append(f"{prefix} {s['name']} — {cov}/{n} {unit} — {format_price(total)} {currency_label(lang)}{full_mark}")
         rows.append({
             "id": f"cart_{i}",
             "title": s["name"][:24],
             "description": f"{cov}/{n} {unit} — {format_price(total)} {currency_label(lang)}"[:72],
         })
-    send_whatsapp_text(from_number, "\n".join(lines), bot_id)
     PENDING_CART_PICKS[from_number] = {
         "stores": [(s["name"], s["items"]) for s in ranked],
         "products": list(products), "bot_id": bot_id, "lang": lang, "ts": time.time(),
@@ -4905,9 +5018,14 @@ def _send_store_cart_block(from_number, store_name, items_map, products_order, b
         body = f"{i}. {p} — {format_price(inf['price'])} {currency_label(lang)}"
         url = inf.get("url") or ""
         if not (url and is_direct_store_url(url)):
-            if store_home is None:
-                store_home = resolve_store_homepage(store_name) or ""
-            url = url if (url and url.startswith("http") and "google." not in _host_of(url)) else store_home
+            # v75.5: الأفضلية لرابط نتائج بحث المتجر عن الصنف نفسه — يوصلك للمنتج مو للرئيسية.
+            search_link = store_search_url(store_name, p)
+            if search_link:
+                url = search_link
+            else:
+                if store_home is None:
+                    store_home = resolve_store_homepage(store_name) or ""
+                url = url if (url and url.startswith("http") and "google." not in _host_of(url)) else store_home
         if url:
             send_whatsapp_cta(from_number, body, url, bot_id, f"🛒 {store_name[:18]}")
         else:
@@ -5499,4 +5617,4 @@ def process_location_message(message, bot_id):
     route_pending_after_location(from_number)
 
 @app.get("/")
-async def health(): return {"status":"v75.4 CART USES OLD v26 SMART PATH (tournament, waved) + CANONICAL STORES + CLEAN LAYOUT + ONE-SESSION + GREEDY COMPLETION + LIVE LINKS + LOCAL SOCIAL + GLOBAL REGION ORDER + MORE LENS CARDS + NONE CLASS + CTA ALWAYS + ARABIC PICK LIST + RELEVANCE FILTER + NO SILENCE + BILINGUAL 2 ROUNDS + PURE AI CLASSIFIER + CLEAN STORE NAMES + SERVICE INTENT FIX (answer+5 providers) + TEXT+SIMILAR USE OLD v26 SMART PATH (tournament) + SERVICES 5+ PHONES + AI INTENT + BRAND COMPARE + SHOP FILTER + TRIO OPTIONS + EXACT PRICES", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "v26_runs":SEARCH_RUNS, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
+async def health(): return {"status":"v75.5 AI STORE UNIFY + IN-STORE SEARCH LINKS + NO SUMMARY MSG + v26 CART + CANONICAL STORES + CLEAN LAYOUT + ONE-SESSION + GREEDY COMPLETION + LIVE LINKS + LOCAL SOCIAL + GLOBAL REGION ORDER + MORE LENS CARDS + NONE CLASS + CTA ALWAYS + ARABIC PICK LIST + RELEVANCE FILTER + NO SILENCE + BILINGUAL 2 ROUNDS + PURE AI CLASSIFIER + CLEAN STORE NAMES + SERVICE INTENT FIX (answer+5 providers) + TEXT+SIMILAR USE OLD v26 SMART PATH (tournament) + SERVICES 5+ PHONES + AI INTENT + BRAND COMPARE + SHOP FILTER + TRIO OPTIONS + EXACT PRICES", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "v26_runs":SEARCH_RUNS, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
