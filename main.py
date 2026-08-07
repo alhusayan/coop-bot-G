@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v75-2-fast-cart-light-search-deadline-no-silence-20260807"
+BUILD_ID = "v75-3-canonical-store-identity-clean-cart-layout-20260807"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE -> GOOGLE LENS DIRECT PASSTHROUGH (raw results to user)")
@@ -1512,7 +1512,9 @@ def normalize_name(value): return re.sub(r"[^\w\u0600-\u06FF]+", "", (value or "
 STORE_DOMAINS = {
     "اليوسفي": "best.com.kw", "بستاليوسفي": "best.com.kw", "اكسايت": "xcite.com", "الغانم": "xcite.com",
     "نون": "noon.com", "بلينك": "blink.com.kw", "يوريكا": "eureka.com.kw", "جرير": "jarir.com",
-    "كارفور": "carrefourkuwait.com", "لولو": "luluhypermarket.com", "امازون": "amazon.ae",
+    "كارفور": "carrefourkuwait.com", "carrefour": "carrefourkuwait.com", "لولو": "luluhypermarket.com", "lulu": "luluhypermarket.com", "امازون": "amazon.ae",
+    "صفاة هوم": "safathome.com", "صفاه هوم": "safathome.com", "safat home": "safathome.com", "safat": "safathome.com",
+    "ابيات": "abyat.com", "أبيات": "abyat.com", "abyat": "abyat.com",
     "طلبات": "talabat.com", "ديليفرو": "deliveroo.com.kw", "بوتيكات": "boutiqaat.com",
     "جمعية دوت كوم": "jm3eia.com", "جمعيه دوت كوم": "jm3eia.com", "جميعة": "jm3eia.com", "jm3eia": "jm3eia.com",
     "كيتا": "mykeeta.com", "keeta": "mykeeta.com",
@@ -4686,6 +4688,34 @@ def identify_image_product(msg):
         return identify_product_with_retry(b64, mime, "ar")
     except: return ""
 
+_STORE_GENERIC_TOKENS = {
+    "هايبر", "ماركت", "هايبرماركت", "سوبرماركت", "سوبر", "مول", "اسواق", "سوق",
+    "اونلاين", "اون", "لاين", "الكويت", "كويت", "متجر", "محل", "شركه", "شركة",
+    "hyper", "market", "hypermarket", "supermarket", "super", "store", "shop",
+    "online", "kuwait", "kw", "mall", "co", "company", "the",
+}
+
+def canonical_store_key(name, url=""):
+    """v75.3: هوية موحدة للمتجر — «لولو هايبر ماركت» و«لولو هايبرماركت» و«لولو الكويت»
+
+    كلها متجر واحد: الدومين أولاً، ثم قاموس المتاجر، ثم الاسم بعد إزالة الكلمات العامة."""
+    host = _host_of(url)
+    if host:
+        return domain_key(host)
+    dom = store_domain(name)
+    if dom:
+        return domain_key(dom)
+    n = normalize_ar(str(name or ""))
+    toks = [t for t in re.findall(r"[\w\u0600-\u06FF]+", n) if t not in _STORE_GENERIC_TOKENS]
+    core = " ".join(toks).strip()
+    if core:
+        dom = store_domain(core)
+        if dom:
+            return domain_key(dom)
+    key = normalize_name("".join(toks))
+    return key or normalize_name(n)
+
+
 CART_ITEM_DEADLINE = max(60, int(os.environ.get("CART_DEADLINE_SECONDS", "150")))
 
 def cart_item_search(product, lang):
@@ -4754,10 +4784,14 @@ def run_cart_comparison(products, from_number, bot_id, lang="ar"):
                 if price is None or price <= 0:
                     continue
                 host = _host_of(url)
-                key = domain_key(host) if host else normalize_name(normalize_ar(o.get("name", "")))
+                key = canonical_store_key(o.get("name", ""), url)
                 if not key:
                     continue
-                s = stores.setdefault(key, {"name": _clean_store_name(o.get("name", "")) or key, "items": {}})
+                display = _clean_store_name(o.get("name", "")) or key
+                s = stores.setdefault(key, {"name": display, "items": {}})
+                # v75.3: نعتمد أقصر اسم معروض لنفس المتجر (لولو أنظف من لولو هايبر ماركت الكويت).
+                if display and len(display) < len(s["name"]):
+                    s["name"] = display
                 prev = s["items"].get(p)
                 if prev is None or price < prev["price"]:
                     s["items"][p] = {"price": price, "url": url}
@@ -4833,63 +4867,62 @@ def _greedy_cart_completion(remaining, stores_list, used_idx):
     return plans, sorted(rem)
 
 
-def _send_store_cart_block(from_number, store_name, items_map, products_order, bot_id, lang, header_key):
-    """كتلة متجر واحدة: زر دخول واحد + قائمة الأصناف نصاً — جلسة متصفح واحدة وسلة واحدة."""
+def _send_store_cart_block(from_number, store_name, items_map, products_order, bot_id, lang, is_main):
+    """v75.3: كتلة متجر بالشكل المطلوب — رأس واضح مختصر، ثم كل منتج ببطاقة CTA خاصة.
+
+    رأس المتجر الرئيسي: «🧺 لولو — 4/6 أصناف — 3.435 د.ك»
+    رأس التكملة:        «🧩 جمعية — يكمل صنفين — 1.250 د.ك»
+    وتحت كل رأس: بطاقة لكل منتج (اسم + سعر) بزر يفتح صفحته المباشرة، وإلا رئيسية المتجر.
+    """
     ordered = [p for p in products_order if p in items_map]
     if not ordered:
         return 0.0
     total = sum(items_map[p]["price"] for p in ordered)
     unit = "أصناف" if lang == "ar" else "items"
-    # رابط الدخول: أول صفحة منتج مباشرة حية؛ وإلا رئيسية المتجر.
-    entry = ""
-    for p in ordered:
-        u = items_map[p].get("url") or ""
-        if u and is_direct_store_url(u):
-            entry = u
-            break
-    if not entry:
-        for p in ordered:
-            u = items_map[p].get("url") or ""
-            if u and u.startswith("http") and url_is_alive(u):
-                entry = u
-                break
-    if not entry:
-        entry = resolve_store_homepage(store_name)
-    body = f"{T(lang, header_key, s=store_name)}\n{len(ordered)} {unit} — {format_price(total)} {currency_label(lang)}"
-    if entry:
-        send_whatsapp_cta(from_number, body[:1024], entry, bot_id, f"🛒 {store_name[:18]}")
+    if is_main:
+        header = f"🧺 {store_name} — {len(ordered)} {unit} — {format_price(total)} {currency_label(lang)}"
     else:
-        send_whatsapp_text(from_number, body, bot_id)
-    # القائمة النصية: يضيف الأول من الزر ويدوّر الباقي داخل المتجر بنفس الصفحة.
-    lines = [T(lang, "cart_checklist", s=store_name)]
+        header = (f"🧩 {store_name} — يكمل {len(ordered)} {unit} — {format_price(total)} {currency_label(lang)}"
+                  if lang == "ar" else
+                  f"🧩 {store_name} — completes {len(ordered)} {unit} — {format_price(total)} {currency_label(lang)}")
+    send_whatsapp_text(from_number, header, bot_id)
+    store_home = None
     for i, p in enumerate(ordered, 1):
-        lines.append(f"{i}. {p} — {format_price(items_map[p]['price'])} {currency_label(lang)}")
-    send_whatsapp_text(from_number, "\n".join(lines), bot_id)
+        inf = items_map[p]
+        body = f"{i}. {p} — {format_price(inf['price'])} {currency_label(lang)}"
+        url = inf.get("url") or ""
+        if not (url and is_direct_store_url(url)):
+            if store_home is None:
+                store_home = resolve_store_homepage(store_name) or ""
+            url = url if (url and url.startswith("http") and "google." not in _host_of(url)) else store_home
+        if url:
+            send_whatsapp_cta(from_number, body, url, bot_id, f"🛒 {store_name[:18]}")
+        else:
+            send_whatsapp_text(from_number, body, bot_id)
     return total
 
 
 def send_cart_from_store(from_number, chosen_idx, stores_list, products, bot_id, lang):
-    """v75.1: سلة المتجر المختار بجلسة واحدة + تكملة النواقص تلقائياً من متاجر القائمة.
+    """v75.3: الترتيب المطلوب — المتجر الأكثر أصنافاً (المختار) أولاً وتحته منتجاته
 
-    بدل بطاقة لكل صنف (كل ضغطة تفتح صفحة جديدة وتضيّع السلة): زر دخول واحد للمتجر
-    وقائمة الأصناف نصاً — يضيفها المستخدم داخل المتجر بنفس الصفحة فتتراكم بسلة وحدة.
-    والأصناف الناقصة تُغطى تلقائياً من بقية متاجر القائمة (الأشمل ثم الأرخص) حتى تكتمل.
+    ببطاقات CTA، ثم متجر التكملة ومنتجاته، وهكذا حتى تكتمل السلة. المجموع بالنهاية
+    مع نصيحة الجلسة الواحدة مرة واحدة فقط.
     """
     store_name, items = stores_list[chosen_idx]
-    plan_total = _send_store_cart_block(from_number, store_name, items, products, bot_id, lang, "cart_from_store")
-    send_whatsapp_text(from_number, T(lang, "cart_session_tip"), bot_id)
+    plan_total = _send_store_cart_block(from_number, store_name, items, products, bot_id, lang, is_main=True)
     remaining = [p for p in products if p not in items]
     if remaining:
         plans, still_missing = _greedy_cart_completion(remaining, stores_list, {chosen_idx})
         for _i, nm, cover_items in plans:
-            plan_total += _send_store_cart_block(from_number, nm, cover_items, products, bot_id, lang, "cart_complete_from")
+            plan_total += _send_store_cart_block(from_number, nm, cover_items, products, bot_id, lang, is_main=False)
         tail = T(lang, "cart_plan_total", t=f"{format_price(plan_total)} {currency_label(lang)}")
         if still_missing:
             joiner = "، " if lang == "ar" else ", "
             tail += "\n" + T(lang, "cart_not_anywhere", items=joiner.join(still_missing))
-        send_whatsapp_text(from_number, tail, bot_id)
     else:
-        send_whatsapp_text(from_number, T(lang, "cart_total", t=f"{format_price(plan_total)} {currency_label(lang)}"), bot_id)
+        tail = T(lang, "cart_total", t=f"{format_price(plan_total)} {currency_label(lang)}")
+    tail += "\n\n" + T(lang, "cart_session_tip")
+    send_whatsapp_text(from_number, tail, bot_id)
     return True
 
 
@@ -5453,4 +5486,4 @@ def process_location_message(message, bot_id):
     route_pending_after_location(from_number)
 
 @app.get("/")
-async def health(): return {"status":"v75.2 FAST CART (light search + deadline + no-silence) + ONE-SESSION + GREEDY COMPLETION + LIVE LINKS + LOCAL SOCIAL + GLOBAL REGION ORDER + MORE LENS CARDS + NONE CLASS + CTA ALWAYS + ARABIC PICK LIST + RELEVANCE FILTER + NO SILENCE + BILINGUAL 2 ROUNDS + PURE AI CLASSIFIER + CLEAN STORE NAMES + SERVICE INTENT FIX (answer+5 providers) + TEXT+SIMILAR USE OLD v26 SMART PATH (tournament) + SERVICES 5+ PHONES + AI INTENT + BRAND COMPARE + SHOP FILTER + TRIO OPTIONS + EXACT PRICES", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "v26_runs":SEARCH_RUNS, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
+async def health(): return {"status":"v75.3 CANONICAL STORE IDENTITY + CLEAN CART LAYOUT (store header + per-item CTAs) + ONE-SESSION + GREEDY COMPLETION + LIVE LINKS + LOCAL SOCIAL + GLOBAL REGION ORDER + MORE LENS CARDS + NONE CLASS + CTA ALWAYS + ARABIC PICK LIST + RELEVANCE FILTER + NO SILENCE + BILINGUAL 2 ROUNDS + PURE AI CLASSIFIER + CLEAN STORE NAMES + SERVICE INTENT FIX (answer+5 providers) + TEXT+SIMILAR USE OLD v26 SMART PATH (tournament) + SERVICES 5+ PHONES + AI INTENT + BRAND COMPARE + SHOP FILTER + TRIO OPTIONS + EXACT PRICES", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "v26_runs":SEARCH_RUNS, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
