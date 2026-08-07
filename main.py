@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v75-1-one-session-cart-greedy-completion-20260807"
+BUILD_ID = "v75-2-fast-cart-light-search-deadline-no-silence-20260807"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE -> GOOGLE LENS DIRECT PASSTHROUGH (raw results to user)")
@@ -1836,7 +1836,7 @@ RELEVANCE_FILTER_SYSTEM = """أنت مدقق نتائج لبوت تسوق. ال�
 مثال 2: المستخدم طلب "محرك Suzuki DF25AES5" والنتيجة "Starter Motor Compatible with Suzuki 25HP" -> ارفضها، هذه قطعة وليست المحرك.
 أرجع JSON فقط بدون شرح: {"keep":[1,3]}"""
 
-def filter_relevant_offers(query, offers, urls):
+def filter_relevant_offers(query, offers, urls, use_ai=True):
     """v74.9: يرمي النتائج غير ذات الصلة (كتيب بدل اليخت...). طبقتان: كلمات قاطعة ثم حكم ذكي."""
     if not offers:
         return offers
@@ -1849,7 +1849,7 @@ def filter_relevant_offers(query, offers, urls):
             print(f"RELEVANCE HARD-DROP: {o.get('line','')[:80]}")
             continue
         kept.append(o)
-    if not ENABLE_RELEVANCE_FILTER or not kept or len(kept) == 0:
+    if not use_ai or not ENABLE_RELEVANCE_FILTER or not kept or len(kept) == 0:
         return kept
     # حكم ذكي واحد سريع للدفعة كلها — يمسك الحالات اللي ما تمسكها الكلمات.
     numbered = []
@@ -4686,6 +4686,34 @@ def identify_image_product(msg):
         return identify_product_with_retry(b64, mime, "ar")
     except: return ""
 
+CART_ITEM_DEADLINE = max(60, int(os.environ.get("CART_DEADLINE_SECONDS", "150")))
+
+def cart_item_search(product, lang):
+    """v75.2: بحث خفيف مخصص للسلة — اتصال واحد (ومحاولة ثانية موسعة عند الحاجة).
+
+    المحرك الثلاثي الكامل ×6 أصناف بالتوازي كان يزاحم المسابح ويعلّق لدقائق؛
+    أصناف التموينات بسيطة واتصال واحد يكفيها، والكاش يخدم التكرار.
+    """
+    cached = cache_get(product, lang)
+    if cached:
+        return cached
+    txt, urls = call_gemini([{"text": bilingual_search_instruction(product, lang)}])
+    urls = direct_urls_only(urls)
+    if txt and extract_store_offers(txt) and not is_no_result_answer(txt):
+        cache_put(product, lang, txt, urls)
+        return txt, urls
+    market_name = current_market().get("country_name", "Kuwait")
+    txt, urls = call_gemini([{"text": (
+        f"ابحث عن {product} في أي متجر محلي في {market_name} يبيعه بسعر رقمي واضح "
+        f"ورابط صفحة منتج مباشر. حتى {MAX_STORES} متاجر من الأرخص للأغلى. {LANG_INSTR[lang]}"
+    )}])
+    urls = direct_urls_only(urls)
+    if txt and extract_store_offers(txt) and not is_no_result_answer(txt):
+        cache_put(product, lang, txt, urls)
+        return txt, urls
+    return "", {}
+
+
 def run_cart_comparison(products, from_number, bot_id, lang="ar"):
     """v75: السلة الموحدة — بدل أرخص متجر لكل صنف لحاله (وتشتت الطلب على 4 متاجر)،
 
@@ -4695,26 +4723,47 @@ def run_cart_comparison(products, from_number, bot_id, lang="ar"):
     """
     market = market_for_user(from_number)
     send_whatsapp_text(from_number, T(lang, "cart_comparing", c=len(products)), bot_id)
-    results = list(WORKERS.map(lambda p: (p, *_run_with_market(market, search_product, p, lang)), products))
+    # v75.2: بحث خفيف بالتوازي + مهلة قصوى إجمالية — اللي يتأخر عن المهلة ينحسب غير موجود،
+    # والسلة تكمل بما توفر بدل ما تعلق للأبد. وأي خطأ داخلي = رد واضح مو صمت.
+    results = []
+    try:
+        futures = {WORKERS.submit(_run_with_market, market, cart_item_search, p, lang): p for p in products}
+        deadline = time.time() + CART_ITEM_DEADLINE
+        for future, p in futures.items():
+            remain = max(5.0, deadline - time.time())
+            try:
+                txt, urls = future.result(timeout=remain)
+            except Exception as e:
+                print(f"CART ITEM TIMEOUT/ERR ({p}): {e.__class__.__name__}")
+                txt, urls = "", {}
+            results.append((p, txt, urls))
+    except Exception as e:
+        print(f"CART GATHER CRASH: {e}")
+        send_whatsapp_text(from_number, T(lang, "not_found"), bot_id)
+        return
 
     stores = {}
-    for p, txt, urls in results:
-        if not txt:
-            continue
-        offers = filter_relevant_offers(p, extract_store_offers(txt), urls)
-        for o in offers:
-            url = match_url(o.get("name", ""), urls or {})
-            price = _extract_numeric_price(o.get("line", ""))
-            if price is None or price <= 0:
+    try:
+        for p, txt, urls in results:
+            if not txt:
                 continue
-            host = _host_of(url)
-            key = domain_key(host) if host else normalize_name(normalize_ar(o.get("name", "")))
-            if not key:
-                continue
-            s = stores.setdefault(key, {"name": _clean_store_name(o.get("name", "")) or key, "items": {}})
-            prev = s["items"].get(p)
-            if prev is None or price < prev["price"]:
-                s["items"][p] = {"price": price, "url": url}
+            offers = filter_relevant_offers(p, extract_store_offers(txt), urls, use_ai=False)
+            for o in offers:
+                url = match_url(o.get("name", ""), urls or {})
+                price = _extract_numeric_price(o.get("line", ""))
+                if price is None or price <= 0:
+                    continue
+                host = _host_of(url)
+                key = domain_key(host) if host else normalize_name(normalize_ar(o.get("name", "")))
+                if not key:
+                    continue
+                s = stores.setdefault(key, {"name": _clean_store_name(o.get("name", "")) or key, "items": {}})
+                prev = s["items"].get(p)
+                if prev is None or price < prev["price"]:
+                    s["items"][p] = {"price": price, "url": url}
+    except Exception as e:
+        print(f"CART MATRIX CRASH: {e}")
+        stores = {}
 
     if not stores:
         # احتياط: السلوك القديم — أفضل عرض لكل صنف على حدة.
@@ -4845,9 +4894,9 @@ def send_cart_from_store(from_number, chosen_idx, stores_list, products, bot_id,
 
 
 def process_cart(products, from_number, bot_id, lang="ar"):
-    # MARKET_CTX يضيع داخل WORKERS؛ بدون الغلاف يبحث للسلة كلها في الدولة الافتراضية.
+    # v75.2: احتياط قديم (غير مستخدم في المسارات) — على البحث الخفيف هو أيضاً.
     market = market_for_user(from_number)
-    results = list(WORKERS.map(lambda p: (p, *_run_with_market(market, search_product, p, lang)), products))
+    results = list(WORKERS.map(lambda p: (p, *_run_with_market(market, cart_item_search, p, lang)), products))
     any_ok = False
     for p, txt, urls in results:
         if not txt: continue
@@ -5404,4 +5453,4 @@ def process_location_message(message, bot_id):
     route_pending_after_location(from_number)
 
 @app.get("/")
-async def health(): return {"status":"v75.1 ONE-SESSION CART (single entry link + checklist) + GREEDY COMPLETION + LIVE LINKS + LOCAL SOCIAL + GLOBAL REGION ORDER + MORE LENS CARDS + NONE CLASS + CTA ALWAYS + ARABIC PICK LIST + RELEVANCE FILTER + NO SILENCE + BILINGUAL 2 ROUNDS + PURE AI CLASSIFIER + CLEAN STORE NAMES + SERVICE INTENT FIX (answer+5 providers) + TEXT+SIMILAR USE OLD v26 SMART PATH (tournament) + SERVICES 5+ PHONES + AI INTENT + BRAND COMPARE + SHOP FILTER + TRIO OPTIONS + EXACT PRICES", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "v26_runs":SEARCH_RUNS, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
+async def health(): return {"status":"v75.2 FAST CART (light search + deadline + no-silence) + ONE-SESSION + GREEDY COMPLETION + LIVE LINKS + LOCAL SOCIAL + GLOBAL REGION ORDER + MORE LENS CARDS + NONE CLASS + CTA ALWAYS + ARABIC PICK LIST + RELEVANCE FILTER + NO SILENCE + BILINGUAL 2 ROUNDS + PURE AI CLASSIFIER + CLEAN STORE NAMES + SERVICE INTENT FIX (answer+5 providers) + TEXT+SIMILAR USE OLD v26 SMART PATH (tournament) + SERVICES 5+ PHONES + AI INTENT + BRAND COMPARE + SHOP FILTER + TRIO OPTIONS + EXACT PRICES", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "v26_runs":SEARCH_RUNS, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
