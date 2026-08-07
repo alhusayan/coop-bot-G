@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v76-fast-verified-direct-pages-20260807"
+BUILD_ID = "v77-lens-budget-no-duplicate-20260808"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE -> GOOGLE LENS DIRECT PASSTHROUGH (raw results to user)")
@@ -81,7 +81,13 @@ HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/
 
 # v76 latency budget: short network deadlines + fast acceptance.
 GEMINI_HTTP_TIMEOUT = max(15, int(os.environ.get("GEMINI_HTTP_TIMEOUT_SECONDS", "45")))
-SERPAPI_HTTP_TIMEOUT = max(10, int(os.environ.get("SERPAPI_HTTP_TIMEOUT_SECONDS", "25")))
+# v77: SerpApi/Lens gets a TOTAL latency budget, not 25s for every pass.
+# A slow products pass must not cascade into all + wide + a second Lens run.
+SERPAPI_CONNECT_TIMEOUT = max(2, int(os.environ.get("SERPAPI_CONNECT_TIMEOUT_SECONDS", "4")))
+SERPAPI_READ_TIMEOUT = max(5, int(os.environ.get("SERPAPI_READ_TIMEOUT_SECONDS", "12")))
+LENS_TOTAL_BUDGET = max(8, int(os.environ.get("LENS_TOTAL_BUDGET_SECONDS", "18")))
+# Compatibility for Shopping/Immersive code that still uses the old aggregate value.
+SERPAPI_HTTP_TIMEOUT = SERPAPI_CONNECT_TIMEOUT + SERPAPI_READ_TIMEOUT
 PAGE_FETCH_TIMEOUT = max(3, int(os.environ.get("PAGE_FETCH_TIMEOUT_SECONDS", "6")))
 URL_RESOLVE_TIMEOUT = max(2, int(os.environ.get("URL_RESOLVE_TIMEOUT_SECONDS", "5")))
 FAST_ACCEPT_STORES = max(1, int(os.environ.get("FAST_ACCEPT_STORES", "3")))
@@ -1473,8 +1479,12 @@ def _collect_lens_items(data, items, seen):
             })
     return items
 
-def _serpapi_lens_request(public_url, lens_type, country, auto_crop, query_hint):
-    """طلب Lens واحد إلى SerpApi ويعيد قائمة النتائج (قد تكون فارغة)."""
+def _serpapi_lens_request(public_url, lens_type, country, auto_crop, query_hint, read_timeout=None):
+    """One Lens request. Returns (items, timed_out).
+
+    v77: connect/read deadlines are separate so a slow SerpApi response cannot hold the
+    WhatsApp request for 25-60 seconds per pass.
+    """
     params = {
         "engine": "google_lens",
         "url": public_url,
@@ -1489,25 +1499,33 @@ def _serpapi_lens_request(public_url, lens_type, country, auto_crop, query_hint)
         params["country"] = country
     if auto_crop:
         params["auto_crop"] = "true"
-    # q مسموح فقط مع all و visual_matches و products حسب توثيق SerpApi.
     if query_hint and (lens_type in (None, "", "all", "visual_matches", "products")):
         params["q"] = query_hint[:120]
+
+    rt = max(3.0, min(float(read_timeout or SERPAPI_READ_TIMEOUT), float(SERPAPI_READ_TIMEOUT)))
     try:
-        r = requests.get("https://serpapi.com/search.json", params=params, timeout=SERPAPI_HTTP_TIMEOUT)
+        r = requests.get(
+            "https://serpapi.com/search.json",
+            params=params,
+            timeout=(SERPAPI_CONNECT_TIMEOUT, rt),
+        )
         if r.status_code >= 400:
             print(f"GOOGLE LENS HTTP {r.status_code} type={lens_type or 'all'} country={country or '-'}: {r.text[:300]}")
-            return []
+            return [], False
         data = r.json()
         if data.get("error"):
             print(f"GOOGLE LENS ERROR type={lens_type or 'all'} country={country or '-'}: {data.get('error')}")
-            return []
+            return [], False
         items, seen = [], set()
         _collect_lens_items(data, items, seen)
         print(f"GOOGLE LENS PASS type={lens_type or 'all'} country={country or '-'} auto_crop={auto_crop} -> {len(items)} items")
-        return items
+        return items, False
+    except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectTimeout) as e:
+        print(f"GOOGLE LENS TIMEOUT type={lens_type or 'all'} read={rt:.1f}s: {e}")
+        return [], True
     except Exception as e:
         print(f"GOOGLE LENS PASS EXCEPTION type={lens_type or 'all'}: {e}")
-        return []
+        return [], False
 
 def google_lens_lookup(image_b64, mime_type, lang="ar", query_hint="", light=False):
     """تعرف بصري متعدد التمريرات ليقترب من قوة تطبيق Google Lens نفسه.
@@ -1523,12 +1541,12 @@ def google_lens_lookup(image_b64, mime_type, lang="ar", query_hint="", light=Fal
     """
     if not ENABLE_GOOGLE_LENS or not SERPAPI_API_KEY or not PUBLIC_BASE_URL:
         print("GOOGLE LENS SKIPPED: missing SERPAPI_API_KEY or PUBLIC_BASE_URL")
-        return {"aliases": [], "matches": [], "query": ""}
+        return {"aliases": [], "matches": [], "query": "", "timed_out": False}
 
     public_url = publish_image_for_lens(image_b64, mime_type)
     if not public_url:
         print("GOOGLE LENS SKIPPED: could not publish image")
-        return {"aliases": [], "matches": [], "query": ""}
+        return {"aliases": [], "matches": [], "query": "", "timed_out": False}
 
     try:
         user_country = current_market().get("country", DEFAULT_COUNTRY)
@@ -1549,8 +1567,27 @@ def google_lens_lookup(image_b64, mime_type, lang="ar", query_hint="", light=Fal
         if ENABLE_LENS_WIDE_FALLBACK:
             passes.append(("all", "", False))
 
+        lens_started = time.monotonic()
+        lens_timed_out = False
         for lens_type, country, auto_crop in passes:
-            _merge(_serpapi_lens_request(public_url, lens_type, country, auto_crop, query_hint))
+            elapsed = time.monotonic() - lens_started
+            remaining = LENS_TOTAL_BUDGET - elapsed
+            if remaining < 3.0:
+                print(f"LENS TOTAL BUDGET EXHAUSTED after {elapsed:.1f}s -> stop passes")
+                lens_timed_out = True
+                break
+
+            items, pass_timed_out = _serpapi_lens_request(
+                public_url, lens_type, country, auto_crop, query_hint,
+                read_timeout=min(SERPAPI_READ_TIMEOUT, remaining),
+            )
+            _merge(items)
+            if pass_timed_out:
+                # SerpApi is degraded/slow right now. Do not stack another 12s request.
+                lens_timed_out = True
+                print("LENS PASS TIMED OUT -> skip remaining Lens passes for this image")
+                break
+
             has_exact = any(m.get("exact") for m in merged)
             has_local = any(is_local_lens_result(m) for m in merged)
             if light and lens_type == "products":
@@ -1564,7 +1601,7 @@ def google_lens_lookup(image_b64, mime_type, lang="ar", query_hint="", light=Fal
         matches = merged[:LENS_RESULT_LIMIT]
         if not matches:
             print("GOOGLE LENS: no visual matches after all passes")
-            return {"aliases": [], "matches": [], "query": ""}
+            return {"aliases": [], "matches": [], "query": "", "timed_out": lens_timed_out}
 
         # اطبع أول النتائج حتى نعرف فعلياً ماذا أعاد Lens.
         for i, m in enumerate(matches[:5], 1):
@@ -1600,6 +1637,7 @@ def google_lens_lookup(image_b64, mime_type, lang="ar", query_hint="", light=Fal
                 "query": chosen_title,
                 "chosen": chosen,
                 "signature": {},
+                "timed_out": lens_timed_out,
             }
 
         # Gemini هنا لا يقرر أي نتيجة Lens صحيحة. فقط يصف الصورة الأصلية ويترجم الاسم.
@@ -1641,10 +1679,11 @@ def google_lens_lookup(image_b64, mime_type, lang="ar", query_hint="", light=Fal
             "query": query,
             "chosen": chosen,
             "signature": signature,
+            "timed_out": lens_timed_out,
         }
     except Exception as e:
         print(f"GOOGLE LENS EXCEPTION: {e}")
-        return {"aliases": [], "matches": [], "query": ""}
+        return {"aliases": [], "matches": [], "query": "", "timed_out": lens_timed_out}
 
 def _meaningful_lens_tokens(text):
     """Extract discriminative tokens from the chosen Lens title, excluding generic words and sizes."""
@@ -4831,15 +4870,20 @@ def process_single_image(message,bot_id,lang="ar"):
 
     # v71: وضع اللينز المباشر — الصورة تروح لـ Google Lens ونتائجه تُرسل كما هي.
     # بدون Vision ولا حكم هوية ولا طبقات بحث. إذا Google ما رجع شي، نكمل بالمسار الكامل.
+    # v77: if Direct Lens ran, NEVER run Lens again for the same image. Reuse its result
+    # in the fusion fallback. This removes the old duplicate products/all/wide cycle.
+    prefetched_lens = None
     if LENS_DIRECT_MODE and ENABLE_GOOGLE_LENS and SERPAPI_API_KEY and PUBLIC_BASE_URL:
         print(f"LENS DIRECT HINT: {lens_hint!r}")
         lens_direct = google_lens_lookup(b64, mime, lang, lens_hint, light=True)
+        prefetched_lens = lens_direct
         if lens_direct.get("matches"):
             if send_lens_direct_results(from_number, lens_direct, bot_id, lang, caption):
-                # v74.14: الخريطة صارت الخيار الرابع داخل قائمة «تبي أكثر» — لا رسالة منفصلة.
                 return
-        print("LENS DIRECT MODE: no Google results -> full pipeline fallback")
-        send_whatsapp_text(from_number, T(lang, "lens_none"), bot_id)
+        if lens_direct.get("timed_out"):
+            print("LENS DIRECT TIMEOUT -> Vision fallback; Lens will NOT be retried")
+        else:
+            print("LENS DIRECT MODE: no usable Google results -> Vision fallback (reuse Lens result)")
 
     # FUSION ROUTER (قوة الخلط):
     # 1) Lens و Vision يشتغلان بالتوازي — لا ننتظر أحدهما ليبدأ الآخر.
@@ -4847,7 +4891,7 @@ def process_single_image(message,bot_id,lang="ar"):
     # 3) الهوية النهائية = دمج عنوان Lens الدقيق + الاسم العربي/الإنجليزي من Vision،
     #    فيبحث النص بكل المرادفات ويغطي الفهرسة العربية والإنجليزية معاً.
     lens_future = None
-    if LENS_PARALLEL_WITH_VISION and ENABLE_GOOGLE_LENS and SERPAPI_API_KEY and PUBLIC_BASE_URL:
+    if prefetched_lens is None and LENS_PARALLEL_WITH_VISION and ENABLE_GOOGLE_LENS and SERPAPI_API_KEY and PUBLIC_BASE_URL:
         lens_future = LENS_POOL.submit(_run_with_market, market, google_lens_lookup, b64, mime, lang, lens_hint)
 
     vision_name = identify_product_with_retry(b64, mime, lang)
@@ -4855,9 +4899,11 @@ def process_single_image(message,bot_id,lang="ar"):
     use_lens, route_reason = lens_routing_decision(vision_name, caption)
     use_lens = force_fashion_lens or use_lens
 
-    lens = {"aliases": [], "matches": [], "query": ""}
+    lens = prefetched_lens or {"aliases": [], "matches": [], "query": "", "timed_out": False}
     if use_lens:
-        if lens_future is not None:
+        if prefetched_lens is not None:
+            print("LENS FUSION: reusing Direct Lens result; no second SerpApi call")
+        elif lens_future is not None:
             try:
                 lens = lens_future.result(timeout=SERPAPI_HTTP_TIMEOUT + 10) or lens
             except Exception as e:
