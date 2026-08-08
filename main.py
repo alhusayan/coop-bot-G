@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v75-6-no-social-option-clear-titles-20260807"
+BUILD_ID = "v74-13-global-region-order-gcc-us-cn-eu-20260806"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE -> GOOGLE LENS DIRECT PASSTHROUGH (raw results to user)")
@@ -63,8 +63,6 @@ NON_SHOP_HOSTS = (
 ENABLE_SHOP_AI_FILTER = env_bool("ENABLE_SHOP_AI_FILTER", True)
 # v74: مقارنة البراندات للطلب العام — خيارات المستخدم المعلقة للاختيار من القائمة.
 PENDING_BRAND_PICKS = {}
-# v75: السلة الموحدة — مقارنة السلة كاملة عبر المتاجر واختيار متجر واحد.
-PENDING_CART_PICKS = {}
 GLOBAL_PENDING_TTL = max(300, int(os.environ.get("GLOBAL_PENDING_TTL_SECONDS", "900")))
 LOCATION_TTL_SECONDS = max(3600, int(os.environ.get("LOCATION_TTL_HOURS", "72")) * 3600)
 MARKET_CTX = threading.local()
@@ -838,19 +836,6 @@ MSG = {
         "cant_identify": "بحثت أكثر من مرة، لكن ما قدرت أحدد المنتج أو ألقى له نتيجة مؤكدة. دز صورة أوضح أو اكتب اسم المنتج.",
         "image_error": "صار خلل بسيط وأنا أحمّل الصورة 😅 عيد إرسالها مرة ثانية.",
         "multi_text": "تمام لقيت {c} منتجات، أسوي سلة...",
-        "cart_comparing": "🧺 لقيت {c} أصناف.. أقارن لك السلة كاملة في المتاجر وأشوف وين تطلع أوفر وأسهل!",
-        "cart_summary_header": "🧺 مقارنة سلتك ({c} أصناف) حسب المتجر — الأشمل ثم الأوفر:",
-        "cart_pick_prompt": "اختر متجراً وأرسل لك كل أصنافك بروابطها المباشرة داخله — طلبية وحدة وسلة وحدة 👇",
-        "cart_store_button": "اختر متجر",
-        "cart_from_store": "🧺 سلتك من {s}:",
-        "cart_total": "💰 مجموع السلة: {t}",
-        "cart_missing": "⚠️ غير متوفر في هذا المتجر: {items}",
-        "cart_expired": "قائمة السلة قدمت 😅 دز قائمة الأصناف من جديد وأجهزها لك على طول.",
-        "cart_session_tip": "💡 المهم: أضف الصنف الأول من الزر، وبعدها دوّر باقي الأصناف من بحث المتجر *بنفس الصفحة* — لا ترجع لواتساب بين كل صنف عشان تتراكم كلها في سلة وحدة.",
-        "cart_checklist": "📋 أصنافك في {s} — انسخ أو دوّر عليها داخل المتجر:",
-        "cart_complete_from": "🧩 تكملة الأصناف الناقصة من {s}:",
-        "cart_plan_total": "💰 مجموع الخطة كاملة: {t}",
-        "cart_not_anywhere": "⛔ ما لقيتها في أي متجر بالقائمة: {items}",
         "multi_images": "تمام لقطت {c} منتجات، أسوي سلة...",
         "maps_body": "📍 تبي أقرب مكان؟\n\nاضغط الزر والخريطة بتفتح على أقرب الأماكن حولك 👇",
         "maps_btn": "📍 افتح الخريطة",
@@ -863,8 +848,8 @@ MSG = {
         "global_searching": "🌍 أدور لك عالميًا على أفضل النتائج المطابقة...",
         "global_none": "حتى بالبحث العالمي ما لقيت نتيجة مؤكدة ومباشرة لهذا المنتج.",
         "ask_not_found": "ما لقيت نفس المنتج بالضبط متوفر عندك محلياً 😅\n\nشرايك، وش تبيني أسوي؟ 👇",
-        "opt_global": "🌍 دوّر لي عالمياً",
-        "opt_similar": "🔄 أبي بدائل مشابهة",
+        "opt_global": "🌍 دوّر عالمياً",
+        "opt_similar": "🔄 بدائل مشابهة",
         "opt_no": "لا شكراً 🙏",
         "similar_searching": "🔄 أدور لك على أفضل البدائل المشابهة المتوفرة عندك...",
         "similar_none": "ما لقيت بدائل مشابهة بسعر مؤكد حالياً 😅 جرب صياغة ثانية.",
@@ -879,9 +864,7 @@ MSG = {
         "ls_show": "اعرضها 📱",
         "ls_skip": "لا شكراً 🙏",
         "opt_social": "📱 عروض التواصل",
-        "opt_map": "📍 وين أقرب محل؟",
-        "options_button": "خيارات إضافية",
-        "more_options_ask": "تبي شي ثاني؟ عندي لك خيارات إضافية 👇",
+        "more_options_ask": "تبي أكثر؟ 👇",
         "social_none": "ما لقيت عروض للمنتج في برامج التواصل حالياً 😅",
         "no_local_generic": "ما لقيت نتائج من متاجر محلية لهالصورة 😅 وش تبي أسوي؟ 👇",
         "compare_searching": "⚖️ طلبك عام بدون ماركة محددة.. أسوي لك مقارنة بين أفضل البراندات المتوفرة!",
@@ -901,19 +884,6 @@ MSG = {
         "cant_identify": "I searched several times but couldn’t identify the product or find a verified result. Send a clearer photo or type the product name.",
         "image_error": "Something went wrong while loading the image 😅 please send it again.",
         "multi_text": "Got it, found {c} products. Building your cart...",
-        "cart_comparing": "🧺 Found {c} items.. comparing your full basket across stores to find the cheapest one-stop option!",
-        "cart_summary_header": "🧺 Your basket ({c} items) by store — best coverage then cheapest:",
-        "cart_pick_prompt": "Pick a store and I'll send all your items with direct links inside it — one order, one cart 👇",
-        "cart_store_button": "Pick store",
-        "cart_from_store": "🧺 Your cart from {s}:",
-        "cart_total": "💰 Basket total: {t}",
-        "cart_missing": "⚠️ Not available at this store: {items}",
-        "cart_expired": "That basket list expired 😅 send your items again and I'll rebuild it right away.",
-        "cart_session_tip": "💡 Important: add the first item from the button, then find the rest via the store's own search *in the same page* — don't switch back to WhatsApp between items so everything stacks in one cart.",
-        "cart_checklist": "📋 Your items at {s} — copy or search them inside the store:",
-        "cart_complete_from": "🧩 Completing the missing items from {s}:",
-        "cart_plan_total": "💰 Full plan total: {t}",
-        "cart_not_anywhere": "⛔ Not found in any listed store: {items}",
         "multi_images": "Nice, spotted {c} products. Building your cart...",
         "maps_body": "📍 Want the nearest place?\n\nTap the button and the map will open on the closest spots around you 👇",
         "maps_btn": "📍 Open Map",
@@ -926,8 +896,8 @@ MSG = {
         "global_searching": "🌍 Searching international stores for the closest matches...",
         "global_none": "I still couldn't find a verified direct result globally.",
         "ask_not_found": "I couldn't find this exact product available locally 😅\n\nWhat would you like me to do? 👇",
-        "opt_global": "🌍 Search worldwide",
-        "opt_similar": "🔄 Show similar options",
+        "opt_global": "🌍 Search globally",
+        "opt_similar": "🔄 Similar items",
         "opt_no": "No thanks 🙏",
         "similar_searching": "🔄 Looking for the best similar alternatives available near you...",
         "similar_none": "I couldn't find similar alternatives with a verified price right now 😅 try another phrasing.",
@@ -942,9 +912,7 @@ MSG = {
         "ls_show": "Show them 📱",
         "ls_skip": "No thanks 🙏",
         "opt_social": "📱 Social offers",
-        "opt_map": "📍 Nearest store?",
-        "options_button": "More options",
-        "more_options_ask": "Anything else? I have more options 👇",
+        "more_options_ask": "Want more? 👇",
         "social_none": "No social media offers found for this product right now 😅",
         "no_local_generic": "No local store results for this photo 😅 What would you like me to do? 👇",
         "compare_searching": "⚖️ Your request is generic with no brand.. building a comparison of the best available brands!",
@@ -1512,9 +1480,7 @@ def normalize_name(value): return re.sub(r"[^\w\u0600-\u06FF]+", "", (value or "
 STORE_DOMAINS = {
     "اليوسفي": "best.com.kw", "بستاليوسفي": "best.com.kw", "اكسايت": "xcite.com", "الغانم": "xcite.com",
     "نون": "noon.com", "بلينك": "blink.com.kw", "يوريكا": "eureka.com.kw", "جرير": "jarir.com",
-    "كارفور": "carrefourkuwait.com", "carrefour": "carrefourkuwait.com", "لولو": "luluhypermarket.com", "lulu": "luluhypermarket.com", "امازون": "amazon.ae",
-    "صفاة هوم": "safathome.com", "صفاه هوم": "safathome.com", "safat home": "safathome.com", "safat": "safathome.com",
-    "ابيات": "abyat.com", "أبيات": "abyat.com", "abyat": "abyat.com",
+    "كارفور": "carrefourkuwait.com", "لولو": "luluhypermarket.com", "امازون": "amazon.ae",
     "طلبات": "talabat.com", "ديليفرو": "deliveroo.com.kw", "بوتيكات": "boutiqaat.com",
     "جمعية دوت كوم": "jm3eia.com", "جمعيه دوت كوم": "jm3eia.com", "جميعة": "jm3eia.com", "jm3eia": "jm3eia.com",
     "كيتا": "mykeeta.com", "keeta": "mykeeta.com",
@@ -1810,9 +1776,8 @@ def maps_search_url(product, lat=None, lng=None):
     return f"https://www.google.com/maps/search/{safe_category}"
 
 def send_maps_button(from_number, product, bot_id, lang):
-    # v74.15: بدون إحداثيات محفوظة — خرائط Google تفتح على موقع الجهاز الحالي بنفسها
-    # (الموقع المحفوظ من التسجيل قد يكون قديماً بأيام).
-    url = maps_search_url(product)
+    m = market_for_user(from_number)
+    url = maps_search_url(product, m.get("lat"), m.get("lng")) if m.get("lat") is not None and m.get("lng") is not None else maps_search_url(product)
     send_whatsapp_cta(from_number, T(lang, "maps_body"), url, bot_id, T(lang, "maps_btn"))
 
 ENABLE_RELEVANCE_FILTER = env_bool("ENABLE_RELEVANCE_FILTER", True)
@@ -1822,23 +1787,15 @@ _NON_PRODUCT_WORDS = (
     "repair manual", "manual pdf", "handbook", "wiring diagram", "parts catalog",
     "parts catalogue", "spare part", "spare parts", "دليل المالك", "دليل الاستخدام",
     "كتيب", "دليل الصيانه", "دليل الصيانة", "قطع غيار", "مخطط",
-    # v74.15: قطع ومستلزمات — «مروحة المكينة» ليست «المكينة»، و«متوافق مع» = قطعة بديلة.
-    "متوافق مع", "compatible with", "replacement for", "يناسب موديل", "fits yamaha",
-    "fits suzuki", "fits mercury", "fits tohatsu", "fits honda",
-    "مروحه", "مروحة", "propeller", "impeller", "ستارتر", "starter motor", "self starter",
-    "كاربريتر", "carburetor", "carburettor", "بواجي", "spark plug", "gasket", "جوان",
-    "فلتر زيت", "oil filter", "فلتر هواء", "air filter", "طرمبه", "water pump kit",
-    "حساس", "sensor for", "غطاء المحرك", "engine cover", "sticker", "decal", "ملصق",
 )
 
 RELEVANCE_FILTER_SYSTEM = """أنت مدقق نتائج لبوت تسوق. المستخدم طلب منتجاً، وسأعطيك قائمة مرقمة بنتائج البحث (اسم المتجر — العنوان/الرابط).
-أعد فقط أرقام النتائج التي تبيع المنتج المطلوب نفسه كاملاً (أو نسخة/موديل منه).
-ارفض بلا تردد: كتيبات ودلائل الاستخدام (Manuals/PDF)، قطع الغيار ومكونات المنتج (مروحة، ستارتر، كاربريتر، فلتر، حساس...)، أي نتيجة فيها "متوافق مع" أو "Compatible with" أو "Replacement for" فهي قطعة وليست المنتج، الإكسسوارات والأغطية، المجسمات والألعاب المصغرة، الملصقات، الخدمات والتأجير — إلا إذا كان طلب المستخدم نفسه عنها.
-مثال 1: المستخدم طلب "Sea Ray Sundancer 320" (يخت) والنتيجة "Sea Ray 320 Owners Manual PDF" -> ارفضها.
-مثال 2: المستخدم طلب "محرك Suzuki DF25AES5" والنتيجة "Starter Motor Compatible with Suzuki 25HP" -> ارفضها، هذه قطعة وليست المحرك.
+أعد فقط أرقام النتائج التي تبيع المنتج المطلوب نفسه (أو نسخة/موديل منه).
+ارفض بلا تردد: كتيبات ودلائل الاستخدام (Manuals/PDF)، قطع الغيار، الإكسسوارات والأغطية، المجسمات والألعاب المصغرة، الملصقات، الخدمات والتأجير — إلا إذا كان طلب المستخدم نفسه عنها.
+مثال: المستخدم طلب "Sea Ray Sundancer 320" (يخت) والنتيجة "Sea Ray 320 Owners Manual PDF" -> ارفضها.
 أرجع JSON فقط بدون شرح: {"keep":[1,3]}"""
 
-def filter_relevant_offers(query, offers, urls, use_ai=True):
+def filter_relevant_offers(query, offers, urls):
     """v74.9: يرمي النتائج غير ذات الصلة (كتيب بدل اليخت...). طبقتان: كلمات قاطعة ثم حكم ذكي."""
     if not offers:
         return offers
@@ -1851,7 +1808,7 @@ def filter_relevant_offers(query, offers, urls, use_ai=True):
             print(f"RELEVANCE HARD-DROP: {o.get('line','')[:80]}")
             continue
         kept.append(o)
-    if not use_ai or not ENABLE_RELEVANCE_FILTER or not kept or len(kept) == 0:
+    if not ENABLE_RELEVANCE_FILTER or not kept or len(kept) == 0:
         return kept
     # حكم ذكي واحد سريع للدفعة كلها — يمسك الحالات اللي ما تمسكها الكلمات.
     numbered = []
@@ -1876,38 +1833,6 @@ def filter_relevant_offers(query, offers, urls, use_ai=True):
     except Exception:
         print(f"RELEVANCE AI PARSE FAIL — keeping as-is: {raw!r}")
         return kept
-
-# ---- v74.15: فاحص حياة الروابط — يمنع الروابط الميتة والدومينات المخترعة -----
-_URL_ALIVE_CACHE = {}
-_URL_ALIVE_LOCK = threading.Lock()
-
-def url_is_alive(url):
-    """فحص سريع (كاش) أن الرابط يفتح فعلاً — Safari can't open the page ممنوعة."""
-    u = str(url or "").strip()
-    if not u.startswith("http"):
-        return False
-    key = u.split("?")[0][:200]
-    with _URL_ALIVE_LOCK:
-        hit = _URL_ALIVE_CACHE.get(key)
-        if hit and time.time() - hit["ts"] < 21600:
-            return hit["ok"]
-    ok = False
-    try:
-        r = requests.head(u, headers=HEADERS, timeout=6, allow_redirects=True)
-        ok = r.status_code < 400
-        if not ok and r.status_code in (403, 405, 501):
-            # بعض المتاجر تمنع HEAD؛ نجرب GET خفيف.
-            r = requests.get(u, headers=HEADERS, timeout=8, stream=True)
-            ok = r.status_code < 400
-            r.close()
-    except Exception as e:
-        print(f"URL ALIVE FAIL: {u[:80]} -> {e.__class__.__name__}")
-        ok = False
-    with _URL_ALIVE_LOCK:
-        if len(_URL_ALIVE_CACHE) > 3000:
-            _URL_ALIVE_CACHE.clear()
-        _URL_ALIVE_CACHE[key] = {"ok": ok, "ts": time.time()}
-    return ok
 
 # ---- v74.10: حلّال الصفحة الرئيسية للمتجر — عشان كل عرض يحصل زر CTA ----------
 _STORE_HOME_CACHE = {}
@@ -1938,13 +1863,7 @@ def resolve_store_homepage(name):
     ans = ans.replace("https://", "").replace("http://", "").strip("/ ")
     url = ""
     if ans and ans != "none" and re.fullmatch(r"[a-z0-9][a-z0-9.-]{2,60}\.[a-z]{2,10}", ans):
-        candidate = f"https://{ans}"
-        # v74.15: الذكاء أحياناً يخمّن دومينات غير موجودة (mustafakaram.com...) رغم
-        # التحذير — الفحص الحي إلزامي: رابط ميت = كأنه ما انحل.
-        if url_is_alive(candidate):
-            url = candidate
-        else:
-            print(f"STORE HOMEPAGE DEAD — REJECTED: {ans}")
+        url = f"https://{ans}"
     with _STORE_HOME_LOCK:
         if len(_STORE_HOME_CACHE) > 2000:
             _STORE_HOME_CACHE.clear()
@@ -2002,16 +1921,9 @@ def send_product_result(from_number, txt, urls, bot_id, lang, query, best_only=F
         sent += 1
     if sent == 0 and fallback_ctas:
         # v74.8: ولا رابط مباشر؟ رابط المتجر نفسه (غير المباشر) أفضل بكثير من «ما لقيت».
-        # v74.15: بس بشرط يكون حياً — فحص متوازٍ سريع، والميّت ينرمي.
-        checked = list(RESOLVER.map(lambda ou: (ou[0], ou[1], url_is_alive(ou[1])), fallback_ctas[:MAX_STORES]))
-        for o, url, alive in checked:
-            if not alive:
-                print(f"FALLBACK CTA DEAD — DROPPED: {o['name']} -> {url}")
-                continue
+        for o, url in fallback_ctas[:MAX_STORES]:
             print(f"FALLBACK STORE CTA: {o['name']} -> {url}")
-            # نوضح أن الزر يفتح المتجر (مو صفحة المنتج) حتى ما يتفاجأ المستخدم بصفحة عامة.
-            note = "\n🔎 الزر يفتح المتجر — ادور المنتج داخله" if lang == "ar" else "\n🔎 Button opens the store — search the product inside"
-            send_whatsapp_cta(from_number, (o["line"] + note)[:1024], url, bot_id, f"🛒 {o['name'][:18]}")
+            send_whatsapp_cta(from_number, o["line"], url, bot_id, f"🛒 {o['name'][:18]}")
             sent += 1
     if sent == 0:
         # v74.8: عندنا أسعار حقيقية بدون أي روابط صالحة: نعرض الأسعار نصاً —
@@ -2545,123 +2457,6 @@ def reorder_global_offers_text(txt, urls):
         out.append(f"{'✅' if i == 0 else '•'} {flag} {body}".replace("  ", " "))
     print(f"GLOBAL REGION ORDER: {[(region_names.get(r,''), o.get('name','')) for r,_p,o in ranked]}")
     return "\n".join(out)
-
-# ---- v74.14: فلتر الثقة — حماية المستخدم من مواقع النصب والاحتيال ------------
-ENABLE_TRUST_FILTER = env_bool("ENABLE_TRUST_FILTER", True)
-_SUSPICIOUS_TLDS = (".tk", ".ml", ".ga", ".cf", ".gq", ".buzz", ".click", ".loan", ".rest", ".icu", ".cyou")
-
-def is_suspicious_url(url):
-    """علامات نصب قاطعة: بدون https، دومين رقمي (IP)، punycode، نطاقات مجانية مشبوهة،
-
-    دومينات طويلة محشوة بالشرطات والأرقام (best-cheap-sale-2024...)."""
-    u = str(url or "").strip()
-    if not u:
-        return False
-    if u.startswith("http://"):
-        return True
-    try:
-        host = urllib.parse.urlparse(u).netloc.lower().replace("www.", "")
-    except Exception:
-        return True
-    if not host:
-        return True
-    if re.fullmatch(r"[0-9.:]+", host):
-        return True
-    if "xn--" in host:
-        return True
-    if any(host.endswith(t) for t in _SUSPICIOUS_TLDS):
-        return True
-    main = host.split(".")[0]
-    if main.count("-") >= 3 or (len(main) > 30 and sum(c.isdigit() for c in main) >= 4):
-        return True
-    return False
-
-_ALL_KNOWN_HOST_HINTS = _GCC_HOST_HINTS + _US_HOST_HINTS + _CN_HOST_HINTS + _EU_HOST_HINTS
-_DOMAIN_TRUST_CACHE = {}
-_DOMAIN_TRUST_LOCK = threading.Lock()
-TRUST_FILTER_SYSTEM = """أنت خبير أمان تسوق إلكتروني تحمي المستخدمين من مواقع النصب.
-سأعطيك قائمة مرقمة بدومينات ظهرت في نتائج بحث تسوق عالمية.
-أعد فقط أرقام الدومينات لمتاجر أو منصات معروفة وموثوقة (عالمية أو خليجية أو إقليمية مشهورة).
-استبعد: الدومينات المجهولة، مواقع النسخ المقلدة، المتاجر الوهمية، أي دومين لا تعرفه بثقة.
-عند الشك استبعد — حماية المستخدم أهم من نتيجة إضافية.
-أرجع JSON فقط: {"trusted":[1,3]}"""
-
-def _host_of(url):
-    try:
-        return urllib.parse.urlparse(str(url or "")).netloc.lower().replace("www.", "")
-    except Exception:
-        return ""
-
-def is_known_trusted_host(host):
-    if not host:
-        return False
-    if host in set(STORE_DOMAINS.values()):
-        return True
-    if any(h in host for h in _ALL_KNOWN_HOST_HINTS):
-        return True
-    # نطاقات دول الخليج المحلية تمر (الحارس المحلي يضبطها أصلاً).
-    if any(host.endswith(t) for tlds in (COUNTRY_TLDS.get(c, []) for c in _GCC_CCS) for t in tlds):
-        return True
-    return False
-
-def trusted_hosts_verdict(hosts):
-    """حكم ثقة ذكي (كاش لكل دومين) على الدومينات المجهولة — دفعة واحدة."""
-    unknown = []
-    verdicts = {}
-    with _DOMAIN_TRUST_LOCK:
-        for h in hosts:
-            if h in _DOMAIN_TRUST_CACHE:
-                verdicts[h] = _DOMAIN_TRUST_CACHE[h]
-            elif h not in unknown:
-                unknown.append(h)
-    if unknown and ENABLE_TRUST_FILTER:
-        numbered = "\n".join(f"{i}. {h}" for i, h in enumerate(unknown, 1))
-        raw, _ = call_gemini([{"text": numbered}], system=TRUST_FILTER_SYSTEM, use_search=False)
-        trusted_idx = set()
-        try:
-            data = json.loads(re.search(r"\{.*\}", raw or "", flags=re.S).group(0))
-            trusted_idx = {int(x) for x in (data.get("trusted") or [])}
-        except Exception:
-            # فشل الحكم = نسمح (الفحوصات القاطعة فوقنا تحمي من الواضح).
-            trusted_idx = set(range(1, len(unknown) + 1))
-            print(f"TRUST AI PARSE FAIL — allowing batch: {raw!r}")
-        with _DOMAIN_TRUST_LOCK:
-            if len(_DOMAIN_TRUST_CACHE) > 3000:
-                _DOMAIN_TRUST_CACHE.clear()
-            for i, h in enumerate(unknown, 1):
-                _DOMAIN_TRUST_CACHE[h] = i in trusted_idx
-                verdicts[h] = i in trusted_idx
-        dropped = [h for h in unknown if not verdicts.get(h)]
-        if dropped:
-            print(f"TRUST AI-DROP domains: {dropped}")
-    else:
-        for h in unknown:
-            verdicts[h] = True
-    return verdicts
-
-def filter_trusted_global_matches(matches):
-    """v74.14: للنتائج العالمية — يشيل الروابط المشبوهة والدومينات غير الموثوقة."""
-    kept, unknown_hosts = [], []
-    for m in matches:
-        url = str(m.get("link") or "")
-        if is_suspicious_url(url):
-            print(f"TRUST HARD-DROP (suspicious url): {url[:90]}")
-            continue
-        host = _host_of(url)
-        if not is_known_trusted_host(host):
-            unknown_hosts.append(host)
-        kept.append(m)
-    if not unknown_hosts:
-        return kept
-    verdicts = trusted_hosts_verdict(unknown_hosts)
-    final = []
-    for m in kept:
-        host = _host_of(m.get("link"))
-        if is_known_trusted_host(host) or verdicts.get(host, True):
-            final.append(m)
-        else:
-            print(f"TRUST DROP: {host} | {str(m.get('title',''))[:60]}")
-    return final
 
 def is_foreign_lens_result(item):
     """True only when the result is clearly not local. Unknown results remain false."""
@@ -3775,23 +3570,8 @@ def run_global_search(phone, item):
             local = is_local_lens_result({"link": url, "source": name, "title": name})
             if local:
                 print(f"GLOBAL FINAL GUARD REJECT LOCAL: {name} -> {url}")
-                continue
-            # v74.14: فلتر الثقة — روابط مشبوهة تُرفض فوراً.
-            if is_suspicious_url(url):
-                print(f"GLOBAL TRUST HARD-DROP: {name} -> {url}")
-                continue
-            filtered_urls[name] = url
-        # حكم الثقة الذكي على الدومينات المجهولة (دفعة + كاش).
-        if filtered_urls and ENABLE_TRUST_FILTER:
-            hosts = {n: _host_of(u) for n, u in filtered_urls.items()}
-            unknown = [h for h in hosts.values() if h and not is_known_trusted_host(h)]
-            if unknown:
-                verdicts = trusted_hosts_verdict(unknown)
-                for n in list(filtered_urls):
-                    h = hosts.get(n, "")
-                    if h and not is_known_trusted_host(h) and not verdicts.get(h, True):
-                        print(f"GLOBAL TRUST DROP: {n} -> {filtered_urls[n]}")
-                        filtered_urls.pop(n, None)
+            else:
+                filtered_urls[name] = url
         if len(filtered_urls) != len(urls):
             # Remove offer lines whose CTA was rejected, so text and buttons stay consistent.
             kept_names = {normalize_name(n) for n in filtered_urls}
@@ -3847,27 +3627,6 @@ def process_interactive_message(message, bot_id):
             # لا صمت أبداً: ما قدرنا نحدد الخيار — نطلب كتابته نصاً.
             lang_ = USER_LANG.get(from_number, "ar")
             send_whatsapp_text(from_number, ("اكتب اسم المنتج اللي تبيه وأدور لك عليه 👍" if lang_ == "ar" else "Type the product name and I'll search it for you 👍"), bot_id)
-        return
-    if btn_id.startswith("cart_"):
-        # v75: المستخدم اختار متجراً لسلته الموحدة — نرسل كل أصنافه بروابطها داخله.
-        item = _peek_pending(PENDING_CART_PICKS, from_number)
-        lang_ = (item or {}).get("lang", USER_LANG.get(from_number, "ar"))
-        idx = int(btn_id[5:]) if btn_id[5:].isdigit() else -1
-        if item and 0 <= idx < len(item.get("stores") or []):
-            activate_market(from_number)
-            try:
-                send_cart_from_store(from_number, idx, item["stores"], item.get("products") or [], item.get("bot_id") or bot_id, lang_)
-            except Exception as e:
-                print(f"CART PICK ERR: {e}")
-                send_whatsapp_text(from_number, T(lang_, "not_found"), bot_id)
-        else:
-            # القائمة انتهت صلاحيتها — ما نقدر نسترجع أسعار الأصناف من الضغطة وحدها.
-            send_whatsapp_text(from_number, T(lang_, "cart_expired"), bot_id)
-        return
-    if btn_id == "map_open":
-        # v74.14: خيار الخريطة من قائمة «تبي أكثر» — خريطة آخر بحث محفوظ.
-        activate_market(from_number)
-        send_last_search_map(from_number, bot_id, USER_LANG.get(from_number, "ar"))
         return
     if btn_id == "lf_yes":
         # عرض نتائج Lens العالمية؛ وإذا ما فيه نتائج مخزنة نشغل البحث العالمي النصي الجديد.
@@ -4242,9 +4001,6 @@ def _send_lens_match_batch(from_number, matches, bot_id, lang, header="", conver
     v73: الترتيب النهائي — المسعّر أولاً من الأرخص إلى الأغلى، ثم غير المسعّر.
     """
     per_store = per_store_max if per_store_max else LENS_PER_STORE_MAX
-    # v74.14: النتائج العالمية تمر أولاً على فلتر الثقة (حماية من مواقع النصب).
-    if convert_prices:
-        matches = filter_trusted_global_matches(matches)
     # 1) تجميع المرشحين أصحاب الروابط الصالحة حسب المتجر (host) مع الحفاظ على ترتيب Google.
     by_host, host_order = {}, []
     for m in matches:
@@ -4378,30 +4134,6 @@ def _pop_pending_lens_foreign(phone):
     return item
 
 
-def is_local_social_result(m):
-    """v74.15: بوست تواصل يخص بلد المستخدم فقط: اسم البلد، العملة المحلية، مفتاح
-
-    الاتصال (+965)، أو رموز البلد الدارجة في الحسابات (q8/kwt/kw للكويت)."""
-    market = current_market()
-    cc = (market.get("country") or DEFAULT_COUNTRY).lower()
-    hay = " ".join(str(m.get(k) or "") for k in ("title", "source", "link", "snippet", "price", "currency")).lower()
-    hay_norm = normalize_ar(hay)
-    names = [str(market.get("country_name") or "").lower(), (COUNTRY_NAMES_AR.get(cc) or "")]
-    if any(n and normalize_ar(n) in hay_norm for n in names):
-        return True
-    if any(mk in hay for mk in COUNTRY_CURRENCY_MARKERS.get(cc, ())):
-        return True
-    # مفتاح الاتصال الدولي (+965 للكويت...) — إعلانات التواصل عادة تحط رقم واتساب.
-    calling = next((code for code, c in CALLING_CODE_TO_COUNTRY.items() if c == cc and len(code) == 3), "")
-    if calling and (f"+{calling}" in hay or f"00{calling}" in hay):
-        return True
-    # رموز دارجة في أسماء الحسابات والهاشتاقات.
-    cc_tokens = {"kw": ("q8", "kwt", "_kw", "kw_", ".kw", "kuwaitcity", "kuwait")}.get(cc, ())
-    if any(t in hay for t in cc_tokens):
-        return True
-    return False
-
-
 def is_social_result(m):
     """v73: نتيجة من برامج التواصل (انستجرام/تيك توك/سناب/يوتيوب...)."""
     try:
@@ -4499,11 +4231,6 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
     if not matches:
         return False
     social = [m for m in matches if is_social_result(m)]
-    # v74.15: عروض التواصل المحلية فقط — بوست إسبانيا ما يهم مستخدم الكويت.
-    social_before = len(social)
-    social = [m for m in social if is_local_social_result(m)]
-    if social_before != len(social):
-        print(f"SOCIAL LOCAL FILTER: {social_before} -> {len(social)}")
     nonsocial = [m for m in matches if not is_social_result(m)]
     # v74: نتائج المتاجر فقط — المقالات والمدونات والمواقع العامة تُستبعد.
     nonsocial = filter_shopping_results(nonsocial)
@@ -4521,24 +4248,21 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
     PENDING_LENS_SOCIAL[from_number] = {
         "bot_id": bot_id, "lang": lang, "matches": social[:LENS_RESULT_LIMIT], "ts": now,
     }
-    # v74.14: قائمة واحدة بأربعة خيارات (القوائم تسمح حتى 10 بينما الأزرار 3 فقط) —
-    # «افتح الخريطة» انضمت كخيار رابع، ورسالة الخريطة المنفصلة انشالت.
-    # v75.6: بدون «عروض التواصل» — ثلاثة خيارات واضحة فقط.
     trio = [
-        {"id": "lf_similar", "title": T(lang, "opt_similar")[:24]},
-        {"id": "lf_yes", "title": T(lang, "opt_global")[:24]},
-        {"id": "map_open", "title": T(lang, "opt_map")[:24]},
+        {"id": "lf_similar", "title": T(lang, "opt_similar")[:20]},
+        {"id": "lf_yes", "title": T(lang, "opt_global")[:20]},
+        {"id": "ls_yes", "title": T(lang, "opt_social")[:20]},
     ]
     sent = False
     if local:
         sent = _send_lens_match_batch(from_number, local, bot_id, lang, convert_prices=False)
     if sent:
-        # v74.14: بعد النتائج المحلية — قائمة واحدة بأربعة خيارات (منها الخريطة).
-        send_whatsapp_list(from_number, T(lang, "more_options_ask"), trio, bot_id, T(lang, "options_button"))
+        # v74: بعد النتائج المحلية — قائمة خيارات واحدة (بدون إلحاح، مجرد زيادة خيارات).
+        send_whatsapp_buttons(from_number, T(lang, "more_options_ask"), trio, bot_id)
     elif foreign or social:
         body = (T(lang, "lens_no_local", c=len(foreign), country=country) if foreign
                 else T(lang, "no_local_generic"))
-        send_whatsapp_list(from_number, body, trio, bot_id, T(lang, "options_button"))
+        send_whatsapp_buttons(from_number, body, trio, bot_id)
         sent = True
     if not sent:
         return False
@@ -4571,7 +4295,8 @@ def process_single_image(message,bot_id,lang="ar"):
         lens_direct = google_lens_lookup(b64, mime, lang, lens_hint, light=True)
         if lens_direct.get("matches"):
             if send_lens_direct_results(from_number, lens_direct, bot_id, lang, caption):
-                # v74.14: الخريطة صارت الخيار الرابع داخل قائمة «تبي أكثر» — لا رسالة منفصلة.
+                if AUTO_SEND_PRODUCT_MAPS:
+                    send_maps_button(from_number, LAST_SEARCH.get(from_number, {}).get("product") or caption or "product", bot_id, lang)
                 return
         print("LENS DIRECT MODE: no Google results -> full pipeline fallback")
         send_whatsapp_text(from_number, T(lang, "lens_none"), bot_id)
@@ -4688,379 +4413,10 @@ def identify_image_product(msg):
         return identify_product_with_retry(b64, mime, "ar")
     except: return ""
 
-_STORE_GENERIC_TOKENS = {
-    "هايبر", "هاير", "ماركت", "هايبرماركت", "هايرماركت", "سوبرماركت", "سوبر", "مول", "اسواق", "سوق",
-    "مركز", "سنتر", "center", "centre",
-    "اونلاين", "اون", "لاين", "الكويت", "كويت", "متجر", "محل", "شركه", "شركة",
-    "hyper", "market", "hypermarket", "supermarket", "super", "store", "shop",
-    "online", "kuwait", "kw", "mall", "co", "company", "the",
-}
-
-def canonical_store_key(name, url=""):
-    """v75.3: هوية موحدة للمتجر — «لولو هايبر ماركت» و«لولو هايبرماركت» و«لولو الكويت»
-
-    كلها متجر واحد: الدومين أولاً، ثم قاموس المتاجر، ثم الاسم بعد إزالة الكلمات العامة."""
-    host = _host_of(url)
-    if host:
-        return domain_key(host)
-    dom = store_domain(name)
-    if dom:
-        return domain_key(dom)
-    n = normalize_ar(str(name or ""))
-    toks = [t for t in re.findall(r"[\w\u0600-\u06FF]+", n) if t not in _STORE_GENERIC_TOKENS]
-    core = " ".join(toks).strip()
-    if core:
-        dom = store_domain(core)
-        if dom:
-            return domain_key(dom)
-    key = normalize_name("".join(toks))
-    return key or normalize_name(n)
-
-
-# ---- v75.5: موحّد أسماء المتاجر الذكي + رابط بحث المتجر عن الصنف --------------
-STORE_UNIFY_SYSTEM = """أنت موحّد أسماء متاجر. سأعطيك قائمة مرقمة بأسماء متاجر كما وردت من نتائج بحث.
-جمّع الأرقام التي تعود لنفس المتجر الفعلي حتى لو اختلف الإملاء أو اللغة أو الصياغة
-(مثل: لولو هاير ماركت = لولو هايبرماركت = Lulu Hypermarket، مركز سلطان = Sultan Center = TSC).
-المتاجر المختلفة فعلاً تبقى في مجموعات منفصلة.
-أرجع JSON فقط بدون شرح: {"groups":[[1,3],[2],[4,5]]} بحيث يظهر كل رقم مرة واحدة بالضبط."""
-
-_STORE_UNIFY_CACHE = {}
-_STORE_UNIFY_LOCK = threading.Lock()
-
-def unify_store_groups(names):
-    """يرجع مجموعات فهارس الأسماء المتطابقة فعلياً — حكم ذكي واحد سريع (كاش)."""
-    if len(names) < 2:
-        return [[i] for i in range(len(names))]
-    key = "|".join(sorted(normalize_name(normalize_ar(n)) for n in names))[:400]
-    with _STORE_UNIFY_LOCK:
-        if key in _STORE_UNIFY_CACHE:
-            return _STORE_UNIFY_CACHE[key]
-    numbered = "\n".join(f"{i}. {n}" for i, n in enumerate(names, 1))
-    raw, _ = call_gemini([{"text": numbered}], system=STORE_UNIFY_SYSTEM, use_search=False)
-    groups = None
-    try:
-        data = json.loads(re.search(r"\{.*\}", raw or "", flags=re.S).group(0))
-        cand = [[int(x) - 1 for x in g] for g in (data.get("groups") or []) if g]
-        seen = sorted(i for g in cand for i in g)
-        if seen == list(range(len(names))):
-            groups = cand
-        else:
-            print(f"STORE UNIFY INVALID GROUPS (missing/dup idx): {raw!r}")
-    except Exception:
-        print(f"STORE UNIFY PARSE FAIL: {raw!r}")
-    if groups is None:
-        groups = [[i] for i in range(len(names))]
-    with _STORE_UNIFY_LOCK:
-        if len(_STORE_UNIFY_CACHE) > 500:
-            _STORE_UNIFY_CACHE.clear()
-        _STORE_UNIFY_CACHE[key] = groups
-    return groups
-
-
-def merge_store_matrix_ai(stores):
-    """v75.5: دمج نهائي بالذكاء — «لولو هاير ماركت» و«Lulu» يصيرون متجراً واحداً
-
-    مهما كان الإملاء. لكل صنف يبقى أرخص سعر، والاسم المعروض الأقصر."""
-    entries = list(stores.values())
-    if len(entries) < 2:
-        return stores
-    names = [e["name"] for e in entries]
-    groups = unify_store_groups(names)
-    if all(len(g) == 1 for g in groups):
-        return stores
-    merged = {}
-    for gi, group in enumerate(groups):
-        base = min((entries[i] for i in group), key=lambda e: len(e["name"]))
-        bucket = {"name": base["name"], "items": {}}
-        for i in group:
-            for p, inf in entries[i]["items"].items():
-                prev = bucket["items"].get(p)
-                if prev is None or inf["price"] < prev["price"]:
-                    bucket["items"][p] = inf
-        merged[f"g{gi}"] = bucket
-    if len(merged) != len(entries):
-        print(f"STORE UNIFY MERGED: {len(entries)} -> {len(merged)} stores: {[m['name'] for m in merged.values()]}")
-    return merged
-
-
-# روابط بحث المتاجر المعروفة — الزر يفتح نتائج الصنف داخل المتجر بدل الرئيسية.
-KNOWN_SEARCH_TEMPLATES = {
-    "luluhypermarket": "https://gcc.luluhypermarket.com/en-kw/search?text={q}",
-    "carrefourkuwait": "https://www.carrefourkuwait.com/mafkwt/en/v4/search?keyword={q}",
-    "taw9eel": "https://www.taw9eel.com/en/catalogsearch/result/?q={q}",
-    "sultan-center": "https://www.sultan-center.com/catalogsearch/result/?q={q}",
-    "jm3eia": "https://www.jm3eia.com/en/search?q={q}",
-    "safathome": "https://www.safathome.com/catalogsearch/result/?q={q}",
-    "xcite": "https://www.xcite.com/search?text={q}",
-    "abyat": "https://www.abyat.com/kw/en/search/{q}",
-}
-_GENERIC_SEARCH_PATTERNS = (
-    "https://{d}/catalogsearch/result/?q={q}",
-    "https://{d}/search?q={q}",
-    "https://{d}/en/search?q={q}",
-)
-_SEARCH_TMPL_CACHE = {}
-_SEARCH_TMPL_LOCK = threading.Lock()
-
-def store_search_url(store_name, query):
-    """رابط نتائج بحث المتجر عن الصنف — أفضل بكثير من الرئيسية. يُفحص حياً ويُكاش القالب."""
-    dom = store_domain(store_name)
-    host = clean_domain(dom) if dom else _host_of(resolve_store_homepage(store_name))
-    if not host:
-        return ""
-    q = urllib.parse.quote(" ".join(str(query or "").split())[:80])
-    with _SEARCH_TMPL_LOCK:
-        cached_tmpl = _SEARCH_TMPL_CACHE.get(host)
-    candidates = [cached_tmpl] if cached_tmpl else []
-    if not candidates:
-        dkey = host.split(".")[0]
-        if dkey in KNOWN_SEARCH_TEMPLATES:
-            candidates.append(KNOWN_SEARCH_TEMPLATES[dkey])
-        candidates += [p.replace("{d}", host) for p in _GENERIC_SEARCH_PATTERNS]
-    for tmpl in candidates:
-        url = tmpl.replace("{q}", q)
-        if url_is_alive(url):
-            with _SEARCH_TMPL_LOCK:
-                if len(_SEARCH_TMPL_CACHE) > 500:
-                    _SEARCH_TMPL_CACHE.clear()
-                _SEARCH_TMPL_CACHE[host] = tmpl
-            return url
-    return ""
-
-
-CART_ITEM_DEADLINE = max(60, int(os.environ.get("CART_DEADLINE_SECONDS", "240")))
-# v75.4: كم صنفاً يدخل البطولة بالتزامن — كل صنف = SEARCH_RUNS بحوث متوازية،
-# فنحدد الموجة حتى لا تتزاحم عشرات الاتصالات وتعلّق (سبب تعليق v75.0).
-CART_CONCURRENCY = max(1, int(os.environ.get("CART_CONCURRENCY", "2")))
-
-def cart_item_search(product, lang):
-    """v75.4: بحث صنف السلة بالمسار الذكي الكامل القديم (بطولة v26) — بطلب من خالد.
-
-    بطولة SEARCH_RUNS بحوث Gemini متوازية لنفس الصنف، الأقوى يفوز واللنكات اتحاد
-    الجولات (نفس محرك البحث النصي والبدائل حرفياً). العرض يبقى بتنسيق v75.3.
-    عند فشل البطولة: محاولة موسعة باتصال واحد كشبكة أمان. الكاش يخدم التكرار.
-    """
-    cached = cache_get(product, lang)
-    if cached:
-        return cached
-    txt, urls = v26_best_of_search([{"text": bilingual_search_instruction(product, lang)}])
-    urls = direct_urls_only(urls)
-    if txt and extract_store_offers(txt) and not is_no_result_answer(txt):
-        cache_put(product, lang, txt, urls)
-        return txt, urls
-    market_name = current_market().get("country_name", "Kuwait")
-    txt, urls = call_gemini([{"text": (
-        f"ابحث عن {product} في أي متجر محلي في {market_name} يبيعه بسعر رقمي واضح "
-        f"ورابط صفحة منتج مباشر. حتى {MAX_STORES} متاجر من الأرخص للأغلى. {LANG_INSTR[lang]}"
-    )}])
-    urls = direct_urls_only(urls)
-    if txt and extract_store_offers(txt) and not is_no_result_answer(txt):
-        cache_put(product, lang, txt, urls)
-        return txt, urls
-    return "", {}
-
-
-def run_cart_comparison(products, from_number, bot_id, lang="ar"):
-    """v75: السلة الموحدة — بدل أرخص متجر لكل صنف لحاله (وتشتت الطلب على 4 متاجر)،
-
-    نجمع نتائج كل الأصناف ونبني مصفوفة متجر × صنف: كم صنفاً يغطي كل متجر ومجموع
-    سلته، ونعرض قائمة متاجر مرتبة (الأشمل ثم الأوفر). يختار المستخدم متجراً واحداً
-    فنرسل كل أصنافه بروابط صفحاتها المباشرة داخل نفس المتجر — طلبية وحدة وسلة وحدة.
-    """
-    market = market_for_user(from_number)
-    send_whatsapp_text(from_number, T(lang, "cart_comparing", c=len(products)), bot_id)
-    # v75.2: بحث خفيف بالتوازي + مهلة قصوى إجمالية — اللي يتأخر عن المهلة ينحسب غير موجود،
-    # والسلة تكمل بما توفر بدل ما تعلق للأبد. وأي خطأ داخلي = رد واضح مو صمت.
-    results = []
-    try:
-        # v75.4: موجات بتزامن محدود — كل صنف بطولة كاملة، والموجة تمنع تزاحم المسابح.
-        deadline = time.time() + CART_ITEM_DEADLINE
-        for start in range(0, len(products), CART_CONCURRENCY):
-            wave = products[start:start + CART_CONCURRENCY]
-            futures = {WORKERS.submit(_run_with_market, market, cart_item_search, p, lang): p for p in wave}
-            for future, p in futures.items():
-                remain = max(5.0, deadline - time.time())
-                try:
-                    txt, urls = future.result(timeout=remain)
-                except Exception as e:
-                    print(f"CART ITEM TIMEOUT/ERR ({p}): {e.__class__.__name__}")
-                    txt, urls = "", {}
-                results.append((p, txt, urls))
-            if time.time() >= deadline:
-                # المهلة انتهت: الأصناف الباقية تنحسب غير موجودة والسلة تكمل بما توفر.
-                for p in products[start + CART_CONCURRENCY:]:
-                    print(f"CART DEADLINE SKIP: {p}")
-                    results.append((p, "", {}))
-                break
-    except Exception as e:
-        print(f"CART GATHER CRASH: {e}")
-        send_whatsapp_text(from_number, T(lang, "not_found"), bot_id)
-        return
-
-    stores = {}
-    try:
-        for p, txt, urls in results:
-            if not txt:
-                continue
-            offers = filter_relevant_offers(p, extract_store_offers(txt), urls, use_ai=False)
-            for o in offers:
-                url = match_url(o.get("name", ""), urls or {})
-                price = _extract_numeric_price(o.get("line", ""))
-                if price is None or price <= 0:
-                    continue
-                host = _host_of(url)
-                key = canonical_store_key(o.get("name", ""), url)
-                if not key:
-                    continue
-                display = _clean_store_name(o.get("name", "")) or key
-                s = stores.setdefault(key, {"name": display, "items": {}})
-                # v75.3: نعتمد أقصر اسم معروض لنفس المتجر (لولو أنظف من لولو هايبر ماركت الكويت).
-                if display and len(display) < len(s["name"]):
-                    s["name"] = display
-                prev = s["items"].get(p)
-                if prev is None or price < prev["price"]:
-                    s["items"][p] = {"price": price, "url": url}
-    except Exception as e:
-        print(f"CART MATRIX CRASH: {e}")
-        stores = {}
-    # v75.5: دمج نهائي بالذكاء — أي صيغ مختلفة لنفس المتجر تتوحد مهما كان الإملاء.
-    try:
-        stores = merge_store_matrix_ai(stores)
-    except Exception as e:
-        print(f"STORE UNIFY CRASH (keeping as-is): {e}")
-
-    if not stores:
-        # احتياط: السلوك القديم — أفضل عرض لكل صنف على حدة.
-        any_ok = False
-        for p, txt, urls in results:
-            if not txt:
-                continue
-            any_ok = True
-            send_product_result(from_number, txt, urls, bot_id, lang, p, best_only=True)
-        if not any_ok:
-            send_whatsapp_text(from_number, T(lang, "not_found"), bot_id)
-        return
-
-    n = len(products)
-    ranked = sorted(
-        stores.values(),
-        key=lambda s: (-len(s["items"]), sum(i["price"] for i in s["items"].values())),
-    )[:6]
-
-    unit = "أصناف" if lang == "ar" else "items"
-    # v75.5: بدون رسالة ملخص — قائمة الاختيار وحدها تكفي (وصف كل صف فيه التغطية والمجموع).
-    rows = []
-    for i, s in enumerate(ranked):
-        cov = len(s["items"])
-        total = sum(x["price"] for x in s["items"].values())
-        rows.append({
-            "id": f"cart_{i}",
-            "title": s["name"][:24],
-            "description": f"{cov}/{n} {unit} — {format_price(total)} {currency_label(lang)}"[:72],
-        })
-    PENDING_CART_PICKS[from_number] = {
-        "stores": [(s["name"], s["items"]) for s in ranked],
-        "products": list(products), "bot_id": bot_id, "lang": lang, "ts": time.time(),
-    }
-    send_whatsapp_list(from_number, T(lang, "cart_pick_prompt"), rows, bot_id, T(lang, "cart_store_button"))
-    LAST_SEARCH[from_number] = {"product": products[0]}
-    print(f"CART COMPARISON SENT: {[(s['name'], len(s['items'])) for s in ranked]}")
-
-
-def _greedy_cart_completion(remaining, stores_list, used_idx):
-    """v75.1: تغطية النواقص من متاجر القائمة نفسها — كل مرة نختار المتجر الذي يغطي
-
-    أكبر عدد من الأصناف المتبقية (وعند التساوي الأرخص)، حتى تكتمل السلة أو تنفد المتاجر."""
-    plans, rem, used = [], set(remaining), set(used_idx)
-    while rem:
-        best = None
-        for i, (nm, items) in enumerate(stores_list):
-            if i in used:
-                continue
-            cover = [p for p in rem if p in items]
-            if not cover:
-                continue
-            total = sum(items[p]["price"] for p in cover)
-            score = (len(cover), -total)
-            if best is None or score > best[0]:
-                best = (score, i, nm, cover, total)
-        if best is None:
-            break
-        _score, i, nm, cover, _total = best
-        used.add(i)
-        rem -= set(cover)
-        plans.append((i, nm, {p: stores_list[i][1][p] for p in cover}))
-    return plans, sorted(rem)
-
-
-def _send_store_cart_block(from_number, store_name, items_map, products_order, bot_id, lang, is_main):
-    """v75.3: كتلة متجر بالشكل المطلوب — رأس واضح مختصر، ثم كل منتج ببطاقة CTA خاصة.
-
-    رأس المتجر الرئيسي: «🧺 لولو — 4/6 أصناف — 3.435 د.ك»
-    رأس التكملة:        «🧩 جمعية — يكمل صنفين — 1.250 د.ك»
-    وتحت كل رأس: بطاقة لكل منتج (اسم + سعر) بزر يفتح صفحته المباشرة، وإلا رئيسية المتجر.
-    """
-    ordered = [p for p in products_order if p in items_map]
-    if not ordered:
-        return 0.0
-    total = sum(items_map[p]["price"] for p in ordered)
-    unit = "أصناف" if lang == "ar" else "items"
-    if is_main:
-        header = f"🧺 {store_name} — {len(ordered)} {unit} — {format_price(total)} {currency_label(lang)}"
-    else:
-        header = (f"🧩 {store_name} — يكمل {len(ordered)} {unit} — {format_price(total)} {currency_label(lang)}"
-                  if lang == "ar" else
-                  f"🧩 {store_name} — completes {len(ordered)} {unit} — {format_price(total)} {currency_label(lang)}")
-    send_whatsapp_text(from_number, header, bot_id)
-    store_home = None
-    for i, p in enumerate(ordered, 1):
-        inf = items_map[p]
-        body = f"{i}. {p} — {format_price(inf['price'])} {currency_label(lang)}"
-        url = inf.get("url") or ""
-        if not (url and is_direct_store_url(url)):
-            # v75.5: الأفضلية لرابط نتائج بحث المتجر عن الصنف نفسه — يوصلك للمنتج مو للرئيسية.
-            search_link = store_search_url(store_name, p)
-            if search_link:
-                url = search_link
-            else:
-                if store_home is None:
-                    store_home = resolve_store_homepage(store_name) or ""
-                url = url if (url and url.startswith("http") and "google." not in _host_of(url)) else store_home
-        if url:
-            send_whatsapp_cta(from_number, body, url, bot_id, f"🛒 {store_name[:18]}")
-        else:
-            send_whatsapp_text(from_number, body, bot_id)
-    return total
-
-
-def send_cart_from_store(from_number, chosen_idx, stores_list, products, bot_id, lang):
-    """v75.3: الترتيب المطلوب — المتجر الأكثر أصنافاً (المختار) أولاً وتحته منتجاته
-
-    ببطاقات CTA، ثم متجر التكملة ومنتجاته، وهكذا حتى تكتمل السلة. المجموع بالنهاية
-    مع نصيحة الجلسة الواحدة مرة واحدة فقط.
-    """
-    store_name, items = stores_list[chosen_idx]
-    plan_total = _send_store_cart_block(from_number, store_name, items, products, bot_id, lang, is_main=True)
-    remaining = [p for p in products if p not in items]
-    if remaining:
-        plans, still_missing = _greedy_cart_completion(remaining, stores_list, {chosen_idx})
-        for _i, nm, cover_items in plans:
-            plan_total += _send_store_cart_block(from_number, nm, cover_items, products, bot_id, lang, is_main=False)
-        tail = T(lang, "cart_plan_total", t=f"{format_price(plan_total)} {currency_label(lang)}")
-        if still_missing:
-            joiner = "، " if lang == "ar" else ", "
-            tail += "\n" + T(lang, "cart_not_anywhere", items=joiner.join(still_missing))
-    else:
-        tail = T(lang, "cart_total", t=f"{format_price(plan_total)} {currency_label(lang)}")
-    tail += "\n\n" + T(lang, "cart_session_tip")
-    send_whatsapp_text(from_number, tail, bot_id)
-    return True
-
-
 def process_cart(products, from_number, bot_id, lang="ar"):
-    # v75.2: احتياط قديم (غير مستخدم في المسارات) — على البحث الخفيف هو أيضاً.
+    # MARKET_CTX يضيع داخل WORKERS؛ بدون الغلاف يبحث للسلة كلها في الدولة الافتراضية.
     market = market_for_user(from_number)
-    results = list(WORKERS.map(lambda p: (p, *_run_with_market(market, cart_item_search, p, lang)), products))
+    results = list(WORKERS.map(lambda p: (p, *_run_with_market(market, search_product, p, lang)), products))
     any_ok = False
     for p, txt, urls in results:
         if not txt: continue
@@ -5078,8 +4434,7 @@ def process_multi_images(messages,from_number,bot_id,lang="ar"):
     if not names:
         send_whatsapp_text(from_number,T(lang,"cant_identify"),bot_id)
         return
-    # v75: صور متعددة = سلة موحدة أيضاً — نفس مقارنة المتاجر.
-    run_cart_comparison(names, from_number, bot_id, lang)
+    process_cart(names, from_number, bot_id, lang)
 
 def is_map_command(text):
     compact = re.sub(r"[^\w\u0600-\u06FF]", "", normalize_ar(text))
@@ -5594,8 +4949,8 @@ def process_text_message(message,bot_id,onboarding_checked=False):
             return
         execute_product_search(from_number, products[0], bot_id, lang)
     else:
-        # v75: السلة الموحدة — مقارنة السلة كاملة حسب المتجر واختيار متجر واحد.
-        run_cart_comparison(products, from_number, bot_id, lang)
+        send_whatsapp_text(from_number,T(lang,"multi_text",c=len(products)),bot_id)
+        process_cart(products, from_number, bot_id, lang)
 
 def process_location_message(message, bot_id):
     from_number = message["from"]
@@ -5617,4 +4972,4 @@ def process_location_message(message, bot_id):
     route_pending_after_location(from_number)
 
 @app.get("/")
-async def health(): return {"status":"v75.6 NO SOCIAL OPTION + CLEAR SIMPLE TITLES + AI STORE UNIFY + IN-STORE SEARCH LINKS + CANONICAL STORES + CLEAN LAYOUT + ONE-SESSION + GREEDY COMPLETION + LIVE LINKS + LOCAL SOCIAL + GLOBAL REGION ORDER + MORE LENS CARDS + NONE CLASS + CTA ALWAYS + ARABIC PICK LIST + RELEVANCE FILTER + NO SILENCE + BILINGUAL 2 ROUNDS + PURE AI CLASSIFIER + CLEAN STORE NAMES + SERVICE INTENT FIX (answer+5 providers) + TEXT+SIMILAR USE OLD v26 SMART PATH (tournament) + SERVICES 5+ PHONES + AI INTENT + BRAND COMPARE + SHOP FILTER + TRIO OPTIONS + EXACT PRICES", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "v26_runs":SEARCH_RUNS, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
+async def health(): return {"status":"v74.13 GLOBAL REGION ORDER (GCC>US>CN>EU) + MORE LENS CARDS + NONE CLASS + CTA ALWAYS + ARABIC PICK LIST + RELEVANCE FILTER + NO SILENCE + BILINGUAL 2 ROUNDS + PURE AI CLASSIFIER + CLEAN STORE NAMES + SERVICE INTENT FIX (answer+5 providers) + TEXT+SIMILAR USE OLD v26 SMART PATH (tournament) + SERVICES 5+ PHONES + AI INTENT + BRAND COMPARE + SHOP FILTER + TRIO OPTIONS + EXACT PRICES", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "v26_runs":SEARCH_RUNS, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
