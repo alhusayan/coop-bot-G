@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v76-lens-consensus-similar-20260808"
+BUILD_ID = "v76.1-lens-consensus-store-domain-guard-20260808"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE -> GOOGLE LENS DIRECT PASSTHROUGH (raw results to user)")
@@ -1807,9 +1807,16 @@ def priority_stores_for(query):
     return ordered[:9] if ordered else list(GENERAL_MARKETPLACES)
 
 def store_domain(name):
+    # v76.1: normalize BOTH the incoming store name and dictionary aliases.
+    # Previously only ``name`` was normalized, so Arabic spaces/ة->ه changes
+    # made aliases such as «صفاة هوم» fail to resolve, disabling the domain guard.
     n = normalize_name(normalize_ar(name))
+    if not n:
+        return ""
     for k, d in STORE_DOMAINS.items():
-        if k in n or n in k: return d
+        kn = normalize_name(normalize_ar(k))
+        if kn and (kn in n or n in kn):
+            return d
     return ""
 JUNK_STORE = re.compile(r"^(اونلاين|أونلاين|online|الموقعالرسمي|official)$", re.I)
 def is_junk_store(name): return bool(JUNK_STORE.match(normalize_name(normalize_ar(name))))
@@ -1875,18 +1882,54 @@ def product_title(txt, fallback=""):
     if m: return f"📦 {m.group(1).strip()}"
     return f"📦 {fallback}" if fallback else ""
 
+def _url_host(url):
+    try:
+        return clean_domain(urllib.parse.urlparse(str(url or "")).netloc)
+    except Exception:
+        return ""
+
+def store_url_matches_store(name, url):
+    """v76.1 hard guard: known store names may only open their own domain.
+
+    Prevents a merged Gemini/v26 URL such as a Safat Home CTA accidentally
+    pointing at jarir.com. Unknown stores are allowed through because there is
+    no canonical domain to compare against.
+    """
+    if not url or not str(url).startswith(("http://", "https://")):
+        return False
+    expected = clean_domain(store_domain(name))
+    if not expected:
+        return True
+    host = _url_host(url)
+    ok = bool(host and (host == expected or host.endswith("." + expected)))
+    if not ok:
+        print(f"STORE/URL MISMATCH DROP: store={name!r} expected={expected} got={host or url}")
+    return ok
+
 def match_url(name, urls):
-    if not urls: return ""
-    if name in urls: return urls[name]
+    """Match a CTA URL to a store without ever crossing known store domains."""
+    if not urls:
+        return ""
+
+    # 1) Exact key first, but only if the URL belongs to that store.
+    if name in urls and store_url_matches_store(name, urls[name]):
+        return urls[name]
+
     nn = normalize_name(name)
-    for k, v in urls.items():
-        kk = normalize_name(k)
-        if nn and kk and (nn in kk or kk in nn): return v
+
+    # 2) If this is a canonical/known store, host-domain evidence is stronger
+    # than Gemini's label. Search every collected URL for the correct domain.
     dom = store_domain(name)
     if dom:
-        key = domain_key(dom)
-        for k, v in urls.items():
-            if key and (key in (v or "").lower() or key in normalize_name(k)): return v
+        for _k, v in urls.items():
+            if store_url_matches_store(name, v):
+                return v
+
+    # 3) Fuzzy-name matching is allowed only after the same domain guard.
+    for k, v in urls.items():
+        kk = normalize_name(k)
+        if nn and kk and (nn in kk or kk in nn) and store_url_matches_store(name, v):
+            return v
     return ""
 
 def maps_category_for(product):
@@ -2165,6 +2208,11 @@ def send_product_result(from_number, txt, urls, bot_id, lang, query, best_only=F
     fallback_ctas = []
     for o in offers[:store_limit]:
         url = match_url(o["name"], urls)
+        # v76.1: دفاع أخير قبل CTA — حتى لو تغيّر match_url مستقبلاً،
+        # ممنوع اسم متجر يفتح دومين متجر آخر.
+        if url and not store_url_matches_store(o["name"], url):
+            print(f"CTA STORE DOMAIN GUARD DROP: {o['name']} -> {url}")
+            url = ""
         # الأفضل دائماً: رابط صفحة المنتج المباشرة. ممنوع Google وصفحات البحث فقط.
         if not is_direct_store_url(url):
             # v74.8: رابط متجر عام (رئيسية/قسم) نحتفظ به كاحتياط — أفضل من لا شيء.
