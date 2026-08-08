@@ -871,6 +871,7 @@ MSG = {
         "opt_similar": "🔄 أبي بدائل مشابهة",
         "opt_no": "لا شكراً 🙏",
         "similar_searching": "🔄 أدور لك على أفضل البدائل المشابهة المتوفرة عندك...",
+        "similar_section": "🔄 بحث البدائل المشابهة",
         "similar_none": "ما لقيت بدائل مشابهة بسعر مؤكد حالياً 😅 جرب صياغة ثانية.",
         "declined_ok": "تمام 🙏 إذا احتجت شي ثاني أنا حاضر!",
         "welcome_reply": "هلا والله! 🌟\nدز صورة المنتج أو اكتب اسمه، وأدور لك أفضل الأسعار والمتاجر القريبة منك 🛒",
@@ -934,6 +935,7 @@ MSG = {
         "opt_similar": "🔄 Show similar options",
         "opt_no": "No thanks 🙏",
         "similar_searching": "🔄 Looking for the best similar alternatives available near you...",
+        "similar_section": "🔄 Similar alternatives search",
         "similar_none": "I couldn't find similar alternatives with a verified price right now 😅 try another phrasing.",
         "declined_ok": "No problem 🙏 I'm here whenever you need me!",
         "welcome_reply": "Hello! 🌟\nSend a product photo or type its name, and I'll find you the best prices and nearby stores 🛒",
@@ -4190,7 +4192,8 @@ def run_similar_search(phone, item):
     """
     activate_market(phone)
     bot_id = item["bot_id"]; lang = item["lang"]; query = item["query"]
-    send_whatsapp_text(phone, T(lang, "similar_searching"), bot_id)
+    if not item.get("suppress_searching"):
+        send_whatsapp_text(phone, T(lang, "similar_searching"), bot_id)
 
     base = short_query(re.sub(r"^.*?—\s*", "", query).strip() or query) or short_query(query)
     if re.search(r"[\u0600-\u06FF]", base):
@@ -4995,9 +4998,9 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
 
     - فلتر ذكاء اصطناعي يبقي فقط مواقع البيع الفعلية (لا مقالات ولا مدونات).
     - نتائج التواصل تُفصل وتُعرض عند اختيار «عروض التواصل» من الخيارات.
-    - المحلي يُرسل فوراً (المسعّر أولاً أرخص→أغلى)، وبعده رسالة خيارات واحدة:
-      [🔄 بدائل مشابهة] [🌍 دوّر عالمياً] [📱 عروض التواصل]
-    - لا محلي؟ نفس الخيارات الثلاثة مع نص يوضح عدم توفر المنتج محلياً.
+    - المحلي يُرسل فوراً (المسعّر أولاً أرخص→أغلى).
+    - بعد انتهاء Lens، يبدأ بحث البدائل المشابهة تلقائياً بنفس طريقة العرض الحالية.
+    - قائمة الخيارات اللاحقة تحتوي البحث العالمي والخريطة فقط.
     """
     matches = [m for m in (lens.get("matches") or []) if (m.get("title") or "").strip()]
     if not matches:
@@ -5032,29 +5035,49 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
     PENDING_LENS_SOCIAL[from_number] = {
         "bot_id": bot_id, "lang": lang, "matches": social[:LENS_RESULT_LIMIT], "ts": now,
     }
-    # v74.14: قائمة واحدة بأربعة خيارات (القوائم تسمح حتى 10 بينما الأزرار 3 فقط) —
-    # «افتح الخريطة» انضمت كخيار رابع، ورسالة الخريطة المنفصلة انشالت.
-    # v75.6: بدون «عروض التواصل» — ثلاثة خيارات واضحة فقط.
-    trio = [
-        {"id": "lf_similar", "title": T(lang, "opt_similar")[:24]},
+    # v76.5: Lens results first, then automatically append similar alternatives.
+    # The extra-options menu no longer contains «similar alternatives» because that
+    # search is now automatic. Global search + map remain unchanged.
+    extra_options = [
         {"id": "lf_yes", "title": T(lang, "opt_global")[:24]},
         {"id": "map_open", "title": T(lang, "opt_map")[:24]},
     ]
+
     sent = False
     if local:
+        # 1) Keep the current Lens card presentation exactly as-is.
         sent = _send_lens_match_batch(from_number, local, bot_id, lang, convert_prices=False)
-    if sent:
-        # v74.14: بعد النتائج المحلية — قائمة واحدة بأربعة خيارات (منها الخريطة).
-        send_whatsapp_list(from_number, T(lang, "more_options_ask"), trio, bot_id, T(lang, "options_button"))
     elif foreign or social:
-        body = (T(lang, "lens_no_local", c=len(foreign), country=country) if foreign
-                else T(lang, "no_local_generic"))
-        send_whatsapp_list(from_number, body, trio, bot_id, T(lang, "options_button"))
+        # Lens found something, but nothing local to render. Tell the user briefly,
+        # then continue automatically to local alternatives instead of asking them.
+        send_whatsapp_text(from_number, T(lang, "no_local_generic"), bot_id)
         sent = True
+
     if not sent:
         return False
+
     LAST_SEARCH[from_number] = {"product": exact_query}
-    print(f"LENS DIRECT SENT: local={len(local)} foreign_stored={len(foreign)} social_stored={len(social)}")
+
+    # 2) Clear separator between the exact Lens block and the automatic alternatives.
+    send_whatsapp_text(from_number, T(lang, "similar_section"), bot_id)
+
+    # 3) Automatically run the same v76 alternative engine that used to live behind
+    #    the «similar alternatives» button. Suppress its old progress line so the
+    #    separator above is the only divider; CTA/result rendering stays unchanged.
+    run_similar_search(from_number, {
+        "bot_id": bot_id,
+        "lang": lang,
+        "query": similar_query,
+        "aliases": consensus.get("aliases") or [],
+        "max_results": SIMILAR_MAX_STORES,
+        "suppress_searching": True,
+    })
+
+    # 4) Only after Lens + automatic alternatives are finished, show the remaining
+    #    optional actions. «Similar alternatives» is intentionally removed.
+    send_whatsapp_list(from_number, T(lang, "more_options_ask"), extra_options, bot_id, T(lang, "options_button"))
+
+    print(f"LENS DIRECT SENT + AUTO SIMILAR: local={len(local)} foreign_stored={len(foreign)} social_stored={len(social)}")
     return True
 
 def process_single_image(message,bot_id,lang="ar"):
