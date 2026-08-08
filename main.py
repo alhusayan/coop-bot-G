@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v76.2-similar-cta-fixed-20260808"
+BUILD_ID = "v76.3-similar-cta-fixed-20260808"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE -> GOOGLE LENS DIRECT PASSTHROUGH (raw results to user)")
@@ -2263,6 +2263,97 @@ def resolve_store_homepage(name):
     print(f"STORE HOMEPAGE RESOLVED: {name!r} -> {url or 'NONE'}")
     return url
 
+
+
+def _similar_offer_product_name(offer):
+    """Extract the actual alternative product name from STORE — PRODUCT — PRICE."""
+    line = re.sub(r"^(?:✅|🏆|•)\s*", "", str((offer or {}).get("line", ""))).strip()
+    store = str((offer or {}).get("name", "")).strip()
+    # remove the store prefix if present, then remove the final price segment
+    if store and normalize_ar(line).startswith(normalize_ar(store)):
+        line = line[len(store):].lstrip(" —–-:،")
+    parts = [p.strip() for p in re.split(r"\s+(?:—|–)\s+|\s+-\s+", line) if p.strip()]
+    if not parts:
+        return line[:160]
+    # Last part normally contains the numeric price; everything before it is the product name.
+    if len(parts) >= 2 and re.search(r"\d", parts[-1]):
+        return " — ".join(parts[:-1]).strip()[:180]
+    return parts[0][:180]
+
+
+def resolve_direct_product_page(store_name, product_name, candidate_url=""):
+    """v76.3: Resolve a real product-page URL for similar alternatives only.
+
+    Homepages/category/search pages are never accepted.  The store/domain guard is
+    enforced both before and after the grounded Google lookup.
+    """
+    store_name = str(store_name or "").strip()
+    product_name = str(product_name or "").strip()
+    if not store_name or not product_name:
+        return ""
+
+    # If Gemini already grounded a true direct page from the right store, keep it.
+    if candidate_url and store_url_matches_store(store_name, candidate_url) and is_direct_store_url(candidate_url):
+        return candidate_url
+
+    expected = expected_store_domain(store_name)
+    if not expected:
+        # We still allow a known/verified homepage resolver only to discover the domain,
+        # never as the CTA itself.
+        hp = resolve_store_homepage(store_name) or ""
+        expected = _host_of(hp)
+    if not expected:
+        print(f"SIMILAR DIRECT RESOLVE: no known domain for {store_name!r}")
+        return ""
+
+    market_name = current_market().get("country_name", "Kuwait")
+    prompt = (
+        f"Find the exact direct product page for this product in this store.\n"
+        f"Store: {store_name}\nProduct: {product_name}\nMarket: {market_name}\n"
+        f"Required domain: {expected}\n"
+        "Use Google search deeply. Return only this store's actual product-detail page; "
+        "do NOT return the homepage, category, collection, search results, brand page, or another store. "
+        "If there is no direct product page, say NOT_FOUND."
+    )
+    try:
+        txt, urls = call_gemini([{"text": prompt}])
+    except Exception as e:
+        print(f"SIMILAR DIRECT RESOLVE ERR {store_name}: {e}")
+        return ""
+
+    candidates = []
+    if candidate_url:
+        candidates.append(candidate_url)
+    candidates.extend((urls or {}).values())
+    # Gemini sometimes prints a raw URL in text even when grounding map is sparse.
+    candidates.extend(re.findall(r"https?://[^\s)\]}>]+", txt or ""))
+
+    seen = set()
+    product_tokens = [t for t in _meaningful_lens_tokens(product_name) if len(t) >= 3][:8]
+    ranked = []
+    for u in candidates:
+        u = str(u or "").strip().rstrip(".,؛،")
+        if not u or u in seen:
+            continue
+        seen.add(u)
+        if not store_url_matches_store(store_name, u):
+            continue
+        if not is_direct_store_url(u):
+            print(f"SIMILAR DIRECT DROP NON-PRODUCT: {store_name} -> {u}")
+            continue
+        hay = normalize_ar(urllib.parse.unquote(u)).lower()
+        token_hits = sum(1 for t in product_tokens if normalize_ar(t) in hay)
+        # Direct-page structure is mandatory; token hits only rank several valid pages.
+        ranked.append((token_hits, len(u), u))
+    if not ranked:
+        print(f"SIMILAR DIRECT RESOLVE MISS: {store_name} | {product_name[:90]}")
+        return ""
+    ranked.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    chosen = ranked[0][2]
+    print(f"SIMILAR DIRECT RESOLVED: {store_name} | {product_name[:70]} -> {chosen}")
+    return chosen
+
+
 def send_product_result(from_number, txt, urls, bot_id, lang, query, best_only=False, max_stores=None, relevance_mode="exact"):
     if not txt:
         send_whatsapp_text(from_number, T(lang, "not_found"), bot_id)
@@ -2276,7 +2367,7 @@ def send_product_result(from_number, txt, urls, bot_id, lang, query, best_only=F
     if not offers:
         send_whatsapp_text(from_number, txt, bot_id)
         return "info"
-    # v76.2: بدائل Gemini قد تأتي PRODUCT — STORE — PRICE. أصلح اسم المتجر
+    # v76.3: بدائل Gemini قد تأتي PRODUCT — STORE — PRICE. أصلح اسم المتجر
     # قبل فلتر الصلة ومطابقة CTA حتى لا تتحول النتائج إلى نص بلا أزرار.
     if relevance_mode == "similar":
         offers = repair_similar_offer_store_names(offers, urls)
@@ -2303,9 +2394,21 @@ def send_product_result(from_number, txt, urls, bot_id, lang, query, best_only=F
         if url and not store_url_matches_store(o["name"], url):
             print(f"CTA STORE DOMAIN GUARD DROP: {o['name']} -> {url}")
             url = ""
-        # الأفضل دائماً: رابط صفحة المنتج المباشرة. ممنوع Google وصفحات البحث فقط.
+        # v76.3: For similar alternatives, NEVER use homepage/category/search fallbacks.
+        # Resolve the alternative's actual product page inside the same store instead.
+        if relevance_mode == "similar":
+            product_name = _similar_offer_product_name(o)
+            if not is_direct_store_url(url):
+                url = resolve_direct_product_page(o["name"], product_name, url)
+            if not url or not is_direct_store_url(url) or not store_url_matches_store(o["name"], url):
+                print(f"SIMILAR CTA DROP — NO DIRECT PRODUCT PAGE: {o['name']} | {product_name} -> {url}")
+                continue
+            send_whatsapp_cta(from_number, o["line"], url, bot_id, f"🛒 {o['name'][:18]}")
+            sent += 1
+            continue
+
+        # Normal exact-product searches keep the legacy safe fallback behavior.
         if not is_direct_store_url(url):
-            # v74.8: رابط متجر عام (رئيسية/قسم) نحتفظ به كاحتياط — أفضل من لا شيء.
             try:
                 host = urllib.parse.urlparse(url or "").netloc.lower()
             except Exception:
@@ -2313,7 +2416,6 @@ def send_product_result(from_number, txt, urls, bot_id, lang, query, best_only=F
             if url and url.startswith("http") and host and "google." not in host and "bing." not in host:
                 fallback_ctas.append((o, url))
             else:
-                # v74.10: ولا رابط أصلاً؟ نحلّ الصفحة الرئيسية للمتجر (قاموس/ذكاء) — زر لكل عرض.
                 hp = resolve_store_homepage(o["name"])
                 if hp:
                     fallback_ctas.append((o, hp))
@@ -2321,8 +2423,8 @@ def send_product_result(from_number, txt, urls, bot_id, lang, query, best_only=F
             continue
         send_whatsapp_cta(from_number, o["line"], url, bot_id, f"🛒 {o['name'][:18]}")
         sent += 1
-    if fallback_ctas and sent < store_limit:
-        # v76.2: لا نخفي CTAs الاحتياطية لمجرد أن نتيجة واحدة كان لها رابط مباشر.
+    if relevance_mode != "similar" and fallback_ctas and sent < store_limit:
+        # v76.3: لا نخفي CTAs الاحتياطية لمجرد أن نتيجة واحدة كان لها رابط مباشر.
         # نرسلها بعد المباشرة حتى يصل كل بديل ممكن إلى زر، مع توضيح إذا كان الزر يفتح المتجر.
         remaining = max(0, store_limit - sent)
         checked = list(RESOLVER.map(lambda ou: (ou[0], ou[1], url_is_alive(ou[1])), fallback_ctas[:remaining]))
@@ -2336,6 +2438,9 @@ def send_product_result(from_number, txt, urls, bot_id, lang, query, best_only=F
             send_whatsapp_cta(from_number, (o["line"] + note)[:1024], url, bot_id, f"🛒 {o['name'][:18]}")
             sent += 1
     if sent == 0:
+        if relevance_mode == "similar":
+            print("SIMILAR: zero verified direct product CTAs -> treat as none")
+            return "none"
         # v74.8: عندنا أسعار حقيقية بدون أي روابط صالحة: نعرض الأسعار نصاً —
         # ممنوع نقول «ما لقيت» والنتيجة موجودة بأيدينا.
         # v74.9: مرتبة من الأرخص إلى الأغلى و✅ للأرخص دائماً.
@@ -4135,7 +4240,7 @@ def run_similar_search(phone, item):
             merge_offers=True,
             merge_title=title_line,
         )
-        # v76.2: keep the full grounded URL map here. send_product_result will prefer
+        # v76.3: keep the full grounded URL map here. send_product_result will prefer
         # direct product pages, guard store/domain identity, then safely fall back.
         if not txt or is_no_result_answer(txt) or not extract_store_offers(txt, limit=limit):
             continue
