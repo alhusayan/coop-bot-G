@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
 import os, re, time, base64, requests, json, asyncio, urllib.parse, hashlib, sqlite3, threading
-from collections import deque, defaultdict
+from collections import deque, defaultdict, Counter
 from concurrent.futures import ThreadPoolExecutor
 from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v75-5-ai-store-unify-search-links-no-summary-20260807"
+BUILD_ID = "v76-lens-consensus-similar-20260808"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE -> GOOGLE LENS DIRECT PASSTHROUGH (raw results to user)")
@@ -97,6 +97,10 @@ CACHE_DB_PATH = os.environ.get("CACHE_DB_PATH", "/tmp/coop_search_cache.sqlite3"
 CACHE_DB_LOCK = threading.Lock()
 # v68: قائمة أطول — 5 نتائج افتراضياً (تُضبط من MAX_STORES في Environment Variables).
 MAX_STORES = int(os.environ.get("MAX_STORES", "5"))
+# v76: البدائل المشابهة لها سقف مستقل وأكبر من نتائج المنتج العادية.
+SIMILAR_MAX_STORES = max(MAX_STORES, int(os.environ.get("SIMILAR_MAX_STORES", "10")))
+SIMILAR_LENS_TITLE_LIMIT = max(8, int(os.environ.get("SIMILAR_LENS_TITLE_LIMIT", "24")))
+ENABLE_LENS_CONSENSUS_AI = env_bool("ENABLE_LENS_CONSENSUS_AI", True)
 MAX_URLS_MERGED = int(os.environ.get("MAX_URLS_MERGED", "8"))
 ENABLE_SEARCH_RETRY = env_bool("ENABLE_SEARCH_RETRY", True)
 MAX_SEARCH_ATTEMPTS = max(2, int(os.environ.get("MAX_SEARCH_ATTEMPTS", "3")))
@@ -384,7 +388,7 @@ print(
     f"identify_attempts={MAX_IDENTIFY_ATTEMPTS} auto_maps={AUTO_SEND_PRODUCT_MAPS} "
     f"lens_wide_fallback={ENABLE_LENS_WIDE_FALLBACK} lens_parallel={LENS_PARALLEL_WITH_VISION} "
     f"google_shopping={ENABLE_GOOGLE_SHOPPING} immersive_max={IMMERSIVE_LOOKUPS_MAX} "
-    f"similar_v26_runs={SEARCH_RUNS} "
+    f"similar_v26_runs={SEARCH_RUNS} similar_max={SIMILAR_MAX_STORES} "
     f"public_base_url={'SET' if PUBLIC_BASE_URL else 'MISSING'}"
 )
 
@@ -863,8 +867,8 @@ MSG = {
         "global_searching": "🌍 أدور لك عالميًا على أفضل النتائج المطابقة...",
         "global_none": "حتى بالبحث العالمي ما لقيت نتيجة مؤكدة ومباشرة لهذا المنتج.",
         "ask_not_found": "ما لقيت نفس المنتج بالضبط متوفر عندك محلياً 😅\n\nشرايك، وش تبيني أسوي؟ 👇",
-        "opt_global": "🌍 دوّر عالمياً",
-        "opt_similar": "🔄 بدائل مشابهة",
+        "opt_global": "🌍 دوّر لي عالمياً",
+        "opt_similar": "🔄 أبي بدائل مشابهة",
         "opt_no": "لا شكراً 🙏",
         "similar_searching": "🔄 أدور لك على أفضل البدائل المشابهة المتوفرة عندك...",
         "similar_none": "ما لقيت بدائل مشابهة بسعر مؤكد حالياً 😅 جرب صياغة ثانية.",
@@ -879,9 +883,9 @@ MSG = {
         "ls_show": "اعرضها 📱",
         "ls_skip": "لا شكراً 🙏",
         "opt_social": "📱 عروض التواصل",
-        "opt_map": "📍 افتح الخريطة",
-        "options_button": "الخيارات",
-        "more_options_ask": "تبي أكثر؟ 👇",
+        "opt_map": "📍 وين أقرب محل؟",
+        "options_button": "خيارات إضافية",
+        "more_options_ask": "تبي شي ثاني؟ عندي لك خيارات إضافية 👇",
         "social_none": "ما لقيت عروض للمنتج في برامج التواصل حالياً 😅",
         "no_local_generic": "ما لقيت نتائج من متاجر محلية لهالصورة 😅 وش تبي أسوي؟ 👇",
         "compare_searching": "⚖️ طلبك عام بدون ماركة محددة.. أسوي لك مقارنة بين أفضل البراندات المتوفرة!",
@@ -926,8 +930,8 @@ MSG = {
         "global_searching": "🌍 Searching international stores for the closest matches...",
         "global_none": "I still couldn't find a verified direct result globally.",
         "ask_not_found": "I couldn't find this exact product available locally 😅\n\nWhat would you like me to do? 👇",
-        "opt_global": "🌍 Search globally",
-        "opt_similar": "🔄 Similar items",
+        "opt_global": "🌍 Search worldwide",
+        "opt_similar": "🔄 Show similar options",
         "opt_no": "No thanks 🙏",
         "similar_searching": "🔄 Looking for the best similar alternatives available near you...",
         "similar_none": "I couldn't find similar alternatives with a verified price right now 😅 try another phrasing.",
@@ -942,9 +946,9 @@ MSG = {
         "ls_show": "Show them 📱",
         "ls_skip": "No thanks 🙏",
         "opt_social": "📱 Social offers",
-        "opt_map": "📍 Open map",
-        "options_button": "Options",
-        "more_options_ask": "Want more? 👇",
+        "opt_map": "📍 Nearest store?",
+        "options_button": "More options",
+        "more_options_ask": "Anything else? I have more options 👇",
         "social_none": "No social media offers found for this product right now 😅",
         "no_local_generic": "No local store results for this photo 😅 What would you like me to do? 👇",
         "compare_searching": "⚖️ Your request is generic with no brand.. building a comparison of the best available brands!",
@@ -1389,6 +1393,169 @@ def google_lens_lookup(image_b64, mime_type, lang="ar", query_hint="", light=Fal
         print(f"GOOGLE LENS EXCEPTION: {e}")
         return {"aliases": [], "matches": [], "query": ""}
 
+
+LENS_CONSENSUS_SYSTEM = """أنت مستخرج هوية منتج من نتائج Google Lens فقط.
+سأعطيك عناوين نتائج Lens لنفس الصورة من متاجر محلية وعالمية.
+استخرج الاسم التجاري/القابل للبحث الذي تتفق عليه أغلبية العناوين.
+القواعد:
+1) اعتمد فقط على الكلمات والبراند والموديل ونوع المنتج المتكررة في العناوين؛ لا تخترع أي معلومة.
+2) تجاهل أسماء المتاجر والأسعار وكلمات البيع مثل Buy/Sale/Online/Free shipping.
+3) إذا تكرر براند + موديل فاحتفظ بهما بالتهجئة الأصلية.
+4) إذا اختلفت تفاصيل ثانوية مثل اللون أو المقاس فلا تجعلها جزءاً من الاسم إلا إذا كانت متكررة بوضوح.
+5) أرجع عبارة بحث واحدة فقط، بدون شرح وبدون علامات اقتباس، بطول لا يتجاوز 120 حرفاً.
+"""
+
+_LENS_CONSENSUS_STOP = {
+    "buy","shop","online","sale","sales","price","prices","offer","offers","discount","new",
+    "authentic","original","free","shipping","delivery","available","stock","in","at","from","for",
+    "the","and","with","official","store","stores","kuwait","ksa","uae","qatar","bahrain","oman",
+    "شراء","اشتر","اونلاين","أونلاين","عرض","عروض","خصم","سعر","اسعار","أسعار","متجر","متاجر",
+    "الكويت","كويت","السعوديه","السعودية","الامارات","الإمارات","قطر","البحرين","عمان","توصيل",
+}
+
+
+def _clean_lens_identity_title(title):
+    t = str(title or "").strip()
+    if not t:
+        return ""
+    t = re.sub(r"https?://\\S+", " ", t, flags=re.I)
+    # prices/currencies are not product identity
+    t = re.sub(r"(?:KWD|KD|USD|EUR|GBP|AED|SAR|QAR|BHD|OMR)\\s*\\d+(?:[.,]\\d+)?", " ", t, flags=re.I)
+    t = re.sub(r"\\d+(?:[.,]\\d+)?\\s*(?:KWD|KD|USD|EUR|GBP|AED|SAR|QAR|BHD|OMR)\\b", " ", t, flags=re.I)
+    t = re.sub(r"[$€£]\\s*\\d+(?:[.,]\\d+)?", " ", t)
+    t = re.sub(r"\\s+", " ", t).strip(" -—–|•·:;,،")
+    return t[:180]
+
+
+def _lens_consensus_tokens(title):
+    t = normalize_ar(_clean_lens_identity_title(title)).lower()
+    toks = re.findall(r"[a-z0-9\\u0600-\\u06ff]+", t)
+    out = []
+    for tok in toks:
+        if len(tok) < 2 or tok in _LENS_CONSENSUS_STOP:
+            continue
+        if tok not in out:
+            out.append(tok)
+    return out
+
+
+def _lens_title_representatives(matches, limit=None):
+    """Pick diverse Lens titles from local + global results for identity consensus."""
+    cap = SIMILAR_LENS_TITLE_LIMIT if limit is None else max(3, int(limit))
+    rows, seen = [], set()
+    for m in (matches or []):
+        title = _clean_lens_identity_title(m.get("title"))
+        key = normalize_ar(title).lower()
+        if not title or not key or key in seen:
+            continue
+        seen.add(key)
+        weight = 1.0
+        if m.get("exact"):
+            weight += 1.0
+        if m.get("section") == "visual_matches":
+            weight += 0.25
+        pos = int(m.get("position") or 99)
+        weight += max(0.0, (20 - min(pos, 20)) / 40.0)
+        rows.append({"title": title, "tokens": set(_lens_consensus_tokens(title)), "weight": weight, "raw": m})
+        if len(rows) >= cap:
+            break
+    return rows
+
+
+def _lens_medoid_title(rows):
+    """Deterministic fallback: title with the greatest weighted token agreement."""
+    if not rows:
+        return ""
+    if len(rows) == 1:
+        return rows[0]["title"]
+    best_title, best_score = rows[0]["title"], -1.0
+    for i, row in enumerate(rows):
+        a = row["tokens"]
+        if not a:
+            continue
+        score = 0.0
+        for j, other in enumerate(rows):
+            if i == j or not other["tokens"]:
+                continue
+            b = other["tokens"]
+            union = a | b
+            overlap = len(a & b) / len(union) if union else 0.0
+            score += overlap * other["weight"]
+        # Exact Lens and early-ranked titles win ties, but never dominate the majority.
+        score += row["weight"] * 0.12
+        if score > best_score:
+            best_title, best_score = row["title"], score
+    return best_title
+
+
+def _consensus_name_supported(name, rows):
+    """Reject an AI canonical name if its meaningful tokens are not backed by Lens titles."""
+    tokens = _lens_consensus_tokens(name)
+    if not tokens:
+        return False
+    corpus = [set(r["tokens"]) for r in rows if r.get("tokens")]
+    if not corpus:
+        return False
+    support = Counter()
+    for tok in tokens:
+        support[tok] = sum(1 for c in corpus if tok in c)
+    # A model/number token must occur literally somewhere in Lens evidence.
+    for tok in tokens:
+        if any(ch.isdigit() for ch in tok) and support[tok] == 0:
+            return False
+    repeated = [tok for tok in tokens if support[tok] >= 2]
+    if len(corpus) == 1:
+        return any(support[tok] for tok in tokens)
+    return len(repeated) >= min(2, len(tokens)) or max(support.values(), default=0) >= max(2, len(corpus) // 2)
+
+
+def build_lens_consensus_identity(lens, matches=None):
+    """v76: identify the product from the majority of Lens local+global titles.
+
+    Returns a canonical query plus a few representative titles. This is used ONLY
+    for «similar alternatives»; exact Lens cards and the global-results button keep
+    their existing behavior.
+    """
+    evidence = list(matches if matches is not None else (lens.get("matches") or []))
+    rows = _lens_title_representatives(evidence)
+    chosen_title = _clean_lens_identity_title(((lens.get("chosen") or {}).get("title") or lens.get("query") or ""))
+    fallback = _lens_medoid_title(rows) or chosen_title
+    aliases = [r["title"] for r in rows[:5]]
+    if not rows:
+        return {"query": chosen_title, "aliases": [chosen_title] if chosen_title else [], "count": 0, "source": "chosen"}
+
+    canonical = ""
+    if ENABLE_LENS_CONSENSUS_AI and len(rows) >= 2:
+        title_lines = []
+        for i, r in enumerate(rows, 1):
+            flags = []
+            raw = r.get("raw") or {}
+            if raw.get("exact"):
+                flags.append("exact")
+            if is_local_lens_result(raw):
+                flags.append("local")
+            flag_text = f" [{' '.join(flags)}]" if flags else ""
+            title_lines.append(f"{i}. {r['title']}{flag_text}")
+        raw, _ = call_gemini(
+            [{"text": "Google Lens result titles:\\n" + "\\n".join(title_lines)}],
+            system=LENS_CONSENSUS_SYSTEM,
+            use_search=False,
+        )
+        candidate = _clean_lens_identity_title((raw or "").splitlines()[0] if raw else "")[:120]
+        if candidate and _consensus_name_supported(candidate, rows):
+            canonical = candidate
+        elif candidate:
+            print(f"LENS CONSENSUS AI REJECT unsupported={candidate!r}")
+
+    canonical = canonical or fallback
+    print(f"LENS CONSENSUS IDENTITY: {canonical!r} from={len(rows)} titles fallback={fallback!r}")
+    return {
+        "query": canonical,
+        "aliases": aliases,
+        "count": len(rows),
+        "source": "ai_consensus" if canonical and canonical != fallback else "medoid",
+    }
+
 def _meaningful_lens_tokens(text):
     """Extract discriminative tokens from the chosen Lens title, excluding generic words and sizes."""
     raw = normalize_ar(text or "").lower()
@@ -1675,7 +1842,12 @@ def _clean_store_name(name):
     n = re.sub(r"\(\s*[^)]*\)?\s*$", "", n)  # قوس مفتوح أو فاضي بنهاية الاسم
     return " ".join(n.split()).strip(" -—–:،") or str(name or "").strip()
 
-def extract_store_offers(txt):
+def extract_store_offers(txt, limit=None):
+    """Extract priced store lines.
+
+    v76: ``limit`` lets the similar-alternatives path return more cards without
+    changing the normal product-search cap. Existing callers keep MAX_STORES.
+    """
     offers = []
     for line in (txt or "").splitlines():
         s = line.strip()
@@ -1695,7 +1867,8 @@ def extract_store_offers(txt):
         best = m.group(1) in ("✅", "🏆")
         body = s if best else s.lstrip("•").strip()
         offers.append({"line": body, "name": name, "best": best})
-    return offers[:MAX_STORES]
+    cap = MAX_STORES if limit is None else max(1, int(limit))
+    return offers[:cap]
 
 def product_title(txt, fallback=""):
     m = re.search(r"^\s*📦\s*(.+)$", txt or "", flags=re.M)
@@ -1838,7 +2011,14 @@ RELEVANCE_FILTER_SYSTEM = """أنت مدقق نتائج لبوت تسوق. ال�
 مثال 2: المستخدم طلب "محرك Suzuki DF25AES5" والنتيجة "Starter Motor Compatible with Suzuki 25HP" -> ارفضها، هذه قطعة وليست المحرك.
 أرجع JSON فقط بدون شرح: {"keep":[1,3]}"""
 
-def filter_relevant_offers(query, offers, urls, use_ai=True):
+SIMILAR_RELEVANCE_FILTER_SYSTEM = """أنت مدقق نتائج لميزة «بدائل مشابهة» في بوت تسوق.
+المستخدم أعطانا منتجاً مرجعياً، والنتائج المطلوبة يجب أن تكون بدائل حقيقية له لا نفس الموديل بالضرورة.
+أبقِ المنتج إذا كان من نفس الفئة الرئيسية ونفس الاستخدام ونفس شكل/مستوى المواصفات تقريباً، حتى لو اختلف البراند أو الموديل.
+لا تشترط وجود اسم البراند الأصلي. ارفض المنتج الأصلي نفسه إذا كان واضحاً أنه نفس الموديل، وارفض الفئات البعيدة.
+ارفض دائماً الكتيبات وPDF وقطع الغيار والملحقات والأغطية والخدمات والتأجير وعبارات Compatible with / Replacement for، إلا إذا كان المرجع نفسه من هذه الفئة.
+أرجع JSON فقط بدون شرح: {"keep":[1,3]}"""
+
+def filter_relevant_offers(query, offers, urls, use_ai=True, mode="exact"):
     """v74.9: يرمي النتائج غير ذات الصلة (كتيب بدل اليخت...). طبقتان: كلمات قاطعة ثم حكم ذكي."""
     if not offers:
         return offers
@@ -1862,8 +2042,10 @@ def filter_relevant_offers(query, offers, urls, use_ai=True):
         except Exception:
             host = ""
         numbered.append(f"{i}. {o.get('line','')[:100]} — {host}")
-    prompt = f"طلب المستخدم: {query}\n\nالنتائج:\n" + "\n".join(numbered)
-    raw, _ = call_gemini([{"text": prompt}], system=RELEVANCE_FILTER_SYSTEM, use_search=False)
+    prompt_label = "المنتج المرجعي للبدائل" if mode == "similar" else "طلب المستخدم"
+    prompt = f"{prompt_label}: {query}\n\nالنتائج:\n" + "\n".join(numbered)
+    relevance_system = SIMILAR_RELEVANCE_FILTER_SYSTEM if mode == "similar" else RELEVANCE_FILTER_SYSTEM
+    raw, _ = call_gemini([{"text": prompt}], system=relevance_system, use_search=False)
     try:
         data = json.loads(re.search(r"\{.*\}", raw or "", flags=re.S).group(0))
         keep_idx = {int(x) for x in (data.get("keep") or [])}
@@ -1952,7 +2134,7 @@ def resolve_store_homepage(name):
     print(f"STORE HOMEPAGE RESOLVED: {name!r} -> {url or 'NONE'}")
     return url
 
-def send_product_result(from_number, txt, urls, bot_id, lang, query, best_only=False):
+def send_product_result(from_number, txt, urls, bot_id, lang, query, best_only=False, max_stores=None, relevance_mode="exact"):
     if not txt:
         send_whatsapp_text(from_number, T(lang, "not_found"), bot_id)
         return "none"
@@ -1960,12 +2142,13 @@ def send_product_result(from_number, txt, urls, bot_id, lang, query, best_only=F
         # الخدمات: رسالة واحدة فيها الاسم والرقم، وبعدها الخريطة بدون روابط متاجر.
         send_whatsapp_text(from_number, txt, bot_id)
         return "service"
-    offers = extract_store_offers(txt)
+    store_limit = MAX_STORES if max_stores is None else max(1, int(max_stores))
+    offers = extract_store_offers(txt, limit=store_limit)
     if not offers:
         send_whatsapp_text(from_number, txt, bot_id)
         return "info"
     # v74.9: فلتر الصلة — كتيب اليخت ليس اليخت. إذا ما بقي شي، النتيجة تعتبر غير موجودة.
-    offers = filter_relevant_offers(query, offers, urls)
+    offers = filter_relevant_offers(query, offers, urls, mode=relevance_mode)
     if not offers:
         print("RELEVANCE: all offers dropped -> treat as not found")
         send_whatsapp_text(from_number, T(lang, "not_found"), bot_id)
@@ -1980,7 +2163,7 @@ def send_product_result(from_number, txt, urls, bot_id, lang, query, best_only=F
         offers = [best]
     sent = 0
     fallback_ctas = []
-    for o in offers[:MAX_STORES]:
+    for o in offers[:store_limit]:
         url = match_url(o["name"], urls)
         # الأفضل دائماً: رابط صفحة المنتج المباشرة. ممنوع Google وصفحات البحث فقط.
         if not is_direct_store_url(url):
@@ -2003,7 +2186,7 @@ def send_product_result(from_number, txt, urls, bot_id, lang, query, best_only=F
     if sent == 0 and fallback_ctas:
         # v74.8: ولا رابط مباشر؟ رابط المتجر نفسه (غير المباشر) أفضل بكثير من «ما لقيت».
         # v74.15: بس بشرط يكون حياً — فحص متوازٍ سريع، والميّت ينرمي.
-        checked = list(RESOLVER.map(lambda ou: (ou[0], ou[1], url_is_alive(ou[1])), fallback_ctas[:MAX_STORES]))
+        checked = list(RESOLVER.map(lambda ou: (ou[0], ou[1], url_is_alive(ou[1])), fallback_ctas[:store_limit]))
         for o, url, alive in checked:
             if not alive:
                 print(f"FALLBACK CTA DEAD — DROPPED: {o['name']} -> {url}")
@@ -2017,7 +2200,7 @@ def send_product_result(from_number, txt, urls, bot_id, lang, query, best_only=F
         # v74.8: عندنا أسعار حقيقية بدون أي روابط صالحة: نعرض الأسعار نصاً —
         # ممنوع نقول «ما لقيت» والنتيجة موجودة بأيدينا.
         # v74.9: مرتبة من الأرخص إلى الأغلى و✅ للأرخص دائماً.
-        ranked = sorted(offers[:MAX_STORES], key=lambda o: _extract_numeric_price(o.get("line", "")) or 10**9)
+        ranked = sorted(offers[:store_limit], key=lambda o: _extract_numeric_price(o.get("line", "")) or 10**9)
         lines_out = []
         for i, o in enumerate(ranked):
             body_line = re.sub(r"^(?:✅|🏆|•)\s*", "", o.get("line", "")).strip()
@@ -2164,8 +2347,11 @@ def best_of_search(parts, lang="ar"):
 # best_of_search (بطولة SEARCH_RUNS بحوث متوازية + اتحاد لنكات كل الجولات).
 # يُستخدم حالياً في خيار «🔄 بدائل مشابهة» فقط، مع إبقاء طريقة العرض الحالية.
 
-def v26_answer_score(txt, urls):
-    """v26: تقييم قوة الجواب — المتاجر أهم شي، ثم اللنكات، ثم سلامة التنسيق."""
+def v26_answer_score(txt, urls, max_results=None):
+    """v26: تقييم قوة الجواب — المتاجر أهم شي، ثم اللنكات، ثم سلامة التنسيق.
+
+    ``max_results`` موجود للتوافق مع مسار v76، لكن طريقة تقييم v26 الأصلية لم تتغير.
+    """
     stores = len(extract_store_names(txt or ""))
     links = len(urls or {})
     score = stores * 2 + links * 3
@@ -2173,10 +2359,45 @@ def v26_answer_score(txt, urls):
         score += 1
     return score
 
-def v26_best_of_search(parts):
-    """v26 بالضبط: SEARCH_RUNS بحوث متوازية لنفس الطلب، نقيّمها كلها ونرسل الأقوى.
-    اللنكات: اتحاد لنكات كل الجولات (أولوية لنكات الجواب الفائز).
-    MARKET_CTX يُمرر لكل خيط حتى لا يرجع البحث للدولة الافتراضية."""
+
+def _merge_v26_offer_text(results, title_line, max_results):
+    """v76: اتحاد عروض جولات v26 نفسها، وليس اللنكات فقط.
+
+    هذا مهم للبدائل: كل جولة Google grounding قد تجد براند/متجر مختلف،
+    فنأخذ أفضل عروض الجميع حتى نكوّن قائمة أوسع ثم نرتبها بالسعر.
+    """
+    picked = {}
+    for txt, urls in results:
+        for offer in extract_store_offers(txt or "", limit=max_results):
+            key = normalize_name(offer.get("name", ""))
+            if not key:
+                continue
+            price = _extract_numeric_price(offer.get("line", ""))
+            prev = picked.get(key)
+            if prev is None or ((price is not None) and (prev[0] is None or price < prev[0])):
+                picked[key] = (price, offer)
+    if not picked:
+        return results[0][0] if results else ""
+    ordered = sorted(
+        (v for v in picked.values()),
+        key=lambda x: (x[0] is None, x[0] if x[0] is not None else 10**12),
+    )[:max_results]
+    lines = []
+    for i, (_, offer) in enumerate(ordered):
+        body = re.sub(r"^(?:✅|🏆|•)\s*", "", offer.get("line", "")).strip()
+        if body:
+            lines.append(f"{'✅' if i == 0 else '•'} {body}")
+    return (title_line.strip() + "\n" + "\n".join(lines)).strip()
+
+
+def v26_best_of_search(parts, max_results=None, merge_offers=False, merge_title=""):
+    """v26 tournament with an optional v76 union mode for similar alternatives.
+
+    Normal callers are unchanged. For alternatives, ``merge_offers=True`` unions
+    different stores/products discovered across SEARCH_RUNS instead of throwing
+    away everything except the winning text.
+    """
+    limit = MAX_STORES if max_results is None else max(1, int(max_results))
     market_snapshot = current_market()
     try:
         futs = [V26_SEARCH_POOL.submit(_run_with_market, market_snapshot, call_gemini, parts)
@@ -2190,7 +2411,7 @@ def v26_best_of_search(parts):
     if not results:
         return "", {}
 
-    scored = sorted(results, key=lambda r: v26_answer_score(r[0], r[1]), reverse=True)
+    scored = sorted(results, key=lambda r: v26_answer_score(r[0], r[1], limit), reverse=True)
     best_txt, best_urls = scored[0]
 
     # اتحاد اللنكات: الفائز أولاً، ثم بقية الجولات تكمل النواقص.
@@ -2199,12 +2420,17 @@ def v26_best_of_search(parts):
         for n, link in u.items():
             if n not in merged_urls and link not in merged_urls.values():
                 merged_urls[n] = link
-    merged_urls = dict(list(merged_urls.items())[:max(MAX_STORES, 4)])
+    merged_urls = dict(list(merged_urls.items())[:max(limit, 4)])
 
-    print({"v26_tournament": [v26_answer_score(t, u) for t, u in scored],
-           "winner_stores": len(extract_store_names(best_txt)),
-           "total_links": len(merged_urls)})
+    if merge_offers:
+        best_txt = _merge_v26_offer_text(scored, merge_title or product_title(best_txt, ""), limit)
+
+    print({"v26_tournament": [v26_answer_score(t, u, limit) for t, u in scored],
+           "winner_stores": len(extract_store_offers(best_txt, limit=limit)),
+           "total_links": len(merged_urls),
+           "merged_offers": bool(merge_offers)})
     return best_txt, merged_urls
+
 
 def bilingual_search_instruction(query, lang):
     """يجبر البحث في الفهرسة العربية والإنجليزية مع إبقاء الرد بلغة المستخدم."""
@@ -3712,54 +3938,82 @@ def send_not_found_choice(phone, bot_id, lang):
     ], bot_id)
 
 def run_similar_search(phone, item):
-    """v74.2: خيار «🔄 بدائل مشابهة» يستخدم المسار الذكي الكامل القديم (v26) بالضبط:
+    """v76: Lens-consensus -> broad local alternative search.
 
-    بطولة SEARCH_RUNS بحوث Gemini متوازية لنفس الطلب -> تقييم كل جواب بـ v26_answer_score
-    (المتاجر ×2 + اللنكات ×3 + سلامة 📦) -> إرسال الأقوى، واللنكات اتحاد لنكات كل الجولات.
-    بدون فحص HTML (verify_offers) مثل v26 تماماً — السرعة والتغطية أولاً.
-
-    طريقة العرض تبقى الحالية بدون تغيير: send_product_result
-    (رسالة 📦 العنوان، ثم بطاقة CTA لكل متجر برابط مباشر فقط).
+    For image-origin searches, ``item['query']`` is now the canonical identity agreed
+    by the majority of Lens local + global titles. The v26 tournament then searches
+    for alternatives and unions discoveries across its parallel runs.
     """
     activate_market(phone)
     bot_id = item["bot_id"]; lang = item["lang"]; query = item["query"]
     send_whatsapp_text(phone, T(lang, "similar_searching"), bot_id)
-    # نزيل جزء الكابشن إن وجد ونأخذ اسم المنتج الأساسي.
+
     base = short_query(re.sub(r"^.*?—\s*", "", query).strip() or query) or short_query(query)
-    # v74.7: المرادف بالاتجاهين — عربي يجيب الإنجليزي، وإنجليزي يجيب العربي.
     if re.search(r"[\u0600-\u06FF]", base):
-        base_en = english_search_name(base)
+        base_other = english_search_name(base)
     else:
-        base_en = arabic_search_name(base)
+        base_other = arabic_search_name(base)
+
+    evidence_aliases = []
+    for x in (item.get("aliases") or []):
+        x = _clean_lens_identity_title(x)
+        if x and normalize_ar(x) != normalize_ar(base) and x not in evidence_aliases:
+            evidence_aliases.append(x)
+    evidence_aliases = evidence_aliases[:4]
+    evidence_text = " | ".join(evidence_aliases)
+
     market_name = current_market().get("country_name", "Kuwait")
+    limit = max(MAX_STORES, int(item.get("max_results") or SIMILAR_MAX_STORES))
+    title_line = f"📦 بدائل مشابهة: {base}"
+
     prompts = [
-        (f"المنتج التالي غير متوفر محلياً: {base}" + (f" ({base_en})" if base_en and base_en != base else "") + f". اقترح حتى {MAX_STORES} بدائل مشابهة له فعلياً — نفس الفئة "
-         f"ونفس الاستخدام ومستوى جودة قريب — متوفرة الآن في متاجر {market_name} فقط، من أي متجر محلي كان. "
-         "لكل بديل: اسم البديل الفعلي (وليس اسم المنتج الأصلي)، سعر رقمي واضح بعملة السوق، "
-         f"ورابط صفحة المنتج المباشرة داخل المتجر. اجعل سطر 📦 بهذا الشكل: بدائل مشابهة: {base}. "
-         f"رتب من الأرخص إلى الأغلى واكتب السعر بالفلوس كاملة مثل 1.950. {LANG_INSTR[lang]}"),
-        (f"{MAX_STORES} best in-stock alternatives similar to {base_en or base} in {market_name} local online stores, "
-         f"each with the alternative's own name, a numeric price, and a direct product page link, sorted cheapest first. "
+        (f"Google Lens تعرّف على المنتج من أغلبية نتائجه المحلية والعالمية بهذا الاسم: {base}. "
+         + (f"الاسم/المرادف الآخر: {base_other}. " if base_other and base_other != base else "")
+         + (f"ومن عناوين Lens الممثلة للهوية: {evidence_text}. " if evidence_text else "")
+         + f"استخدم هذه المعلومات فقط لفهم هوية المنتج، ثم ابحث بعمق في Google عن حتى {limit} بدائل حقيقية مختلفة عن نفس الموديل الأصلي، "
+         f"من نفس الفئة والاستخدام وبمواصفات ومستوى جودة قريب، ومتوفرة الآن في متاجر {market_name} المحلية فقط. "
+         "لا تقيد البحث بالبراند الأصلي: جرّب البراندات المنافسة والمرادفات العربية والإنجليزية ونتائج Google المتأخرة. "
+         "لكل بديل اكتب اسم البديل الفعلي بوضوح، اسم المتجر، سعر رقمي بعملة السوق، ورابط صفحة المنتج المباشرة. "
+         f"رتب الأرخص أولاً. لا تعرض المنتج الأصلي نفسه ولا أي إكسسوار/قطعة غيار. اجعل سطر 📦 بالضبط: بدائل مشابهة: {base}. "
+         f"{LANG_INSTR[lang]}"),
+        (f"Google Lens majority identity for the reference product: {base}. "
+         + (f"Alternate-language identity: {base_other}. " if base_other and base_other != base else "")
+         + (f"Representative Lens titles: {evidence_text}. " if evidence_text else "")
+         + f"Find up to {limit} genuinely different but closely comparable alternatives in {market_name} local online stores. "
+         "Search competitor brands, synonyms, and deeper Google results. Match the same main category, purpose, form factor and nearby specification/quality tier. "
+         "Exclude the exact original model, accessories, spare parts, manuals and foreign stores. "
+         "For every alternative include its actual product name, store, numeric local price and direct product-page URL; sort cheapest first. "
          f"Write the 📦 line exactly as: بدائل مشابهة: {base}. {LANG_INSTR[lang]}"),
     ]
+
+    # Usually the first prompt is enough. If it fails, the English formulation is a second independent chance.
     for prompt in prompts:
-        # v26 بالضبط: بطولة بحوث متوازية + دمج لنكات كل الجولات.
-        txt, urls = v26_best_of_search([{"text": prompt}])
+        txt, urls = v26_best_of_search(
+            [{"text": prompt}],
+            max_results=limit,
+            merge_offers=True,
+            merge_title=title_line,
+        )
         urls = direct_urls_only(urls)
-        if not txt or is_no_result_answer(txt) or not extract_store_offers(txt):
+        if not txt or is_no_result_answer(txt) or not extract_store_offers(txt, limit=limit):
             continue
-        # حارس محلي خفيف فقط (مثل بقية مسارات v74): نرفض الأجنبي الواضح، بدون فحص HTML.
+
         kept_urls = {}
         for n, u in urls.items():
             if is_foreign_lens_result({"link": u, "source": n, "title": n}):
-                print(f"SIMILAR v26 REJECT FOREIGN: {n} -> {u}")
+                print(f"SIMILAR v76 REJECT FOREIGN: {n} -> {u}")
                 continue
             kept_urls[n] = u
-        # العرض بالطريقة الحالية بدون أي تغيير.
-        result_type = send_product_result(phone, txt, kept_urls, bot_id, lang, base)
+
+        result_type = send_product_result(
+            phone, txt, kept_urls, bot_id, lang, base,
+            max_stores=limit,
+            relevance_mode="similar",
+        )
         if result_type != "none":
             return
     send_whatsapp_text(phone, T(lang, "similar_none"), bot_id)
+
 
 def run_global_search(phone, item):
     activate_market(phone)
@@ -3885,15 +4139,18 @@ def process_interactive_message(message, bot_id):
             })
         return
     if btn_id == "lf_similar":
-        # بدائل مشابهة — يحوّل على المسار الذكي الكامل القديم (v26).
+        # v76: البدائل تبدأ من هوية Lens المتفق عليها عبر النتائج المحلية + العالمية.
         item = _peek_pending(PENDING_LENS_FOREIGN, from_number)
-        query = (item or {}).get("query") or (LAST_SEARCH.get(from_number) or {}).get("product")
+        query = ((item or {}).get("similar_query") or (item or {}).get("query")
+                 or (LAST_SEARCH.get(from_number) or {}).get("product"))
         if query:
             activate_market(from_number)
             run_similar_search(from_number, {
                 "bot_id": (item or {}).get("bot_id") or bot_id,
                 "lang": (item or {}).get("lang", USER_LANG.get(from_number, "ar")),
                 "query": query,
+                "aliases": (item or {}).get("similar_aliases") or [],
+                "max_results": SIMILAR_MAX_STORES,
             })
         return
     if btn_id == "ls_yes":
@@ -4511,22 +4768,29 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
     foreign = [m for m in nonsocial if not is_local_lens_result(m)]
     country = country_hint_word(lang) or current_market().get("country_name", "")
     chosen_title = ((lens.get("chosen") or {}).get("title") or matches[0]["title"]).strip()
-    similar_query = (caption or chosen_title).strip()
+    # البحث عن نفس المنتج/العالمي يبقى كما هو، لكن «البدائل» تستخدم هوية الأغلبية من Lens فقط.
+    exact_query = (caption or chosen_title).strip()
+    consensus = build_lens_consensus_identity(lens, local + foreign)
+    similar_query = (consensus.get("query") or chosen_title or exact_query).strip()
     # نخزن العالمي والتواصل دائماً — تُعرض فقط عند اختيار المستخدم من القائمة.
     now = time.time()
     PENDING_LENS_FOREIGN[from_number] = {
         "bot_id": bot_id, "lang": lang, "matches": foreign[:LENS_RESULT_LIMIT],
-        "query": similar_query, "ts": now,
+        "query": exact_query,
+        "similar_query": similar_query,
+        "similar_aliases": consensus.get("aliases") or [],
+        "similar_consensus_count": consensus.get("count", 0),
+        "ts": now,
     }
     PENDING_LENS_SOCIAL[from_number] = {
         "bot_id": bot_id, "lang": lang, "matches": social[:LENS_RESULT_LIMIT], "ts": now,
     }
     # v74.14: قائمة واحدة بأربعة خيارات (القوائم تسمح حتى 10 بينما الأزرار 3 فقط) —
     # «افتح الخريطة» انضمت كخيار رابع، ورسالة الخريطة المنفصلة انشالت.
+    # v75.6: بدون «عروض التواصل» — ثلاثة خيارات واضحة فقط.
     trio = [
         {"id": "lf_similar", "title": T(lang, "opt_similar")[:24]},
         {"id": "lf_yes", "title": T(lang, "opt_global")[:24]},
-        {"id": "ls_yes", "title": T(lang, "opt_social")[:24]},
         {"id": "map_open", "title": T(lang, "opt_map")[:24]},
     ]
     sent = False
@@ -4542,7 +4806,7 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
         sent = True
     if not sent:
         return False
-    LAST_SEARCH[from_number] = {"product": similar_query}
+    LAST_SEARCH[from_number] = {"product": exact_query}
     print(f"LENS DIRECT SENT: local={len(local)} foreign_stored={len(foreign)} social_stored={len(social)}")
     return True
 
@@ -5617,4 +5881,4 @@ def process_location_message(message, bot_id):
     route_pending_after_location(from_number)
 
 @app.get("/")
-async def health(): return {"status":"v75.5 AI STORE UNIFY + IN-STORE SEARCH LINKS + NO SUMMARY MSG + v26 CART + CANONICAL STORES + CLEAN LAYOUT + ONE-SESSION + GREEDY COMPLETION + LIVE LINKS + LOCAL SOCIAL + GLOBAL REGION ORDER + MORE LENS CARDS + NONE CLASS + CTA ALWAYS + ARABIC PICK LIST + RELEVANCE FILTER + NO SILENCE + BILINGUAL 2 ROUNDS + PURE AI CLASSIFIER + CLEAN STORE NAMES + SERVICE INTENT FIX (answer+5 providers) + TEXT+SIMILAR USE OLD v26 SMART PATH (tournament) + SERVICES 5+ PHONES + AI INTENT + BRAND COMPARE + SHOP FILTER + TRIO OPTIONS + EXACT PRICES", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "v26_runs":SEARCH_RUNS, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
+async def health(): return {"status":"v75.6 NO SOCIAL OPTION + CLEAR SIMPLE TITLES + AI STORE UNIFY + IN-STORE SEARCH LINKS + CANONICAL STORES + CLEAN LAYOUT + ONE-SESSION + GREEDY COMPLETION + LIVE LINKS + LOCAL SOCIAL + GLOBAL REGION ORDER + MORE LENS CARDS + NONE CLASS + CTA ALWAYS + ARABIC PICK LIST + RELEVANCE FILTER + NO SILENCE + BILINGUAL 2 ROUNDS + PURE AI CLASSIFIER + CLEAN STORE NAMES + SERVICE INTENT FIX (answer+5 providers) + TEXT+SIMILAR USE OLD v26 SMART PATH (tournament) + SERVICES 5+ PHONES + AI INTENT + BRAND COMPARE + SHOP FILTER + TRIO OPTIONS + EXACT PRICES", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "v26_runs":SEARCH_RUNS, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
