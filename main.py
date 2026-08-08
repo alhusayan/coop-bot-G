@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v76.1-lens-consensus-store-domain-guard-20260808"
+BUILD_ID = "v76.2-similar-cta-fixed-20260808"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE -> GOOGLE LENS DIRECT PASSTHROUGH (raw results to user)")
@@ -1682,6 +1682,10 @@ STORE_DOMAINS = {
     "كارفور": "carrefourkuwait.com", "carrefour": "carrefourkuwait.com", "لولو": "luluhypermarket.com", "lulu": "luluhypermarket.com", "امازون": "amazon.ae",
     "صفاة هوم": "safathome.com", "صفاه هوم": "safathome.com", "safat home": "safathome.com", "safat": "safathome.com",
     "ابيات": "abyat.com", "أبيات": "abyat.com", "abyat": "abyat.com",
+    "هوم بوكس": "homeboxstores.com", "home box": "homeboxstores.com", "homebox": "homeboxstores.com",
+    "هوم سنتر": "homecentre.com", "هوم سنتر الكويت": "homecentre.com", "home centre": "homecentre.com", "homecenter": "homecentre.com",
+    "ايكيا": "ikea.com", "إيكيا": "ikea.com", "ايكيا الكويت": "ikea.com", "ikea": "ikea.com",
+    "ميداس": "midasfurniture.com", "midas": "midasfurniture.com",
     "طلبات": "talabat.com", "ديليفرو": "deliveroo.com.kw", "بوتيكات": "boutiqaat.com",
     "جمعية دوت كوم": "jm3eia.com", "جمعيه دوت كوم": "jm3eia.com", "جميعة": "jm3eia.com", "jm3eia": "jm3eia.com",
     "كيتا": "mykeeta.com", "keeta": "mykeeta.com",
@@ -1931,6 +1935,88 @@ def match_url(name, urls):
         if nn and kk and (nn in kk or kk in nn) and store_url_matches_store(name, v):
             return v
     return ""
+
+def _similar_store_candidates_from_line(line, urls):
+    """Infer the real store name from a similar-alternative line.
+
+    Similar search models sometimes emit:
+        PRODUCT — STORE — PRICE
+    while the CTA pipeline expects STORE to be the first segment.  Recover the
+    store using canonical store aliases and the URL-map keys, without changing
+    the user-facing product description.
+    """
+    raw = re.sub(r"^(?:✅|🏆|•)\s*", "", str(line or "")).strip()
+    if not raw:
+        return []
+    parts = [x.strip() for x in re.split(r"\s*(?:—|–|\|)\s*", raw) if x.strip()]
+    # Price is normally the last part and is not useful for store detection.
+    searchable = parts[:-1] if len(parts) > 1 else parts
+    url_keys = [str(k).strip() for k in (urls or {}).keys() if str(k).strip()]
+    out = []
+
+    def add(name, score):
+        name = _clean_store_name(name)
+        if not name:
+            return
+        # A product title can accidentally contain a store word; prefer shorter,
+        # cleaner store labels over a full product title.
+        token_count = len(name.split())
+        score -= max(0, token_count - 4) * 2
+        cur = next((x for x in out if normalize_name(normalize_ar(x[0])) == normalize_name(normalize_ar(name))), None)
+        if cur:
+            if score > cur[1]:
+                cur[1] = score
+            return
+        out.append([name, score])
+
+    for seg_i, seg in enumerate(searchable):
+        seg_norm = normalize_name(normalize_ar(seg))
+        if not seg_norm:
+            continue
+        # Canonical known store found inside a segment.
+        dom = store_domain(seg)
+        if dom:
+            # Prefer a matching URL-map key on the same canonical domain so the
+            # CTA label stays natural (e.g. "صفاة هوم" instead of a product title).
+            matched_key = None
+            for k in url_keys:
+                if clean_domain(store_domain(k)) == clean_domain(dom):
+                    matched_key = k
+                    break
+            add(matched_key or seg, 120 - seg_i * 5)
+
+        # URL-map keys are strong evidence.  This also supports stores that are
+        # not yet in STORE_DOMAINS.
+        for k in url_keys:
+            kn = normalize_name(normalize_ar(k))
+            if not kn:
+                continue
+            if kn in seg_norm or seg_norm in kn:
+                add(k, 100 + min(len(kn), 30) - seg_i * 5)
+
+    return [x[0] for x in sorted(out, key=lambda z: z[1], reverse=True)]
+
+
+def repair_similar_offer_store_names(offers, urls):
+    """Relabel similar-search offers with the actual store before CTA matching."""
+    repaired = []
+    for o in (offers or []):
+        item = dict(o)
+        current = item.get("name", "")
+        cands = _similar_store_candidates_from_line(item.get("line", ""), urls or {})
+        if cands:
+            best = cands[0]
+            cur_norm = normalize_name(normalize_ar(current))
+            best_norm = normalize_name(normalize_ar(best))
+            # Even if a product-title prefix contains a store word (e.g.
+            # "Home Box Edmond 2"), relabel it to the clean URL/store key.
+            if best_norm and best_norm != cur_norm:
+                old = current
+                item["name"] = best
+                print(f"SIMILAR CTA STORE REPAIR: {old!r} -> {item['name']!r}")
+        repaired.append(item)
+    return repaired
+
 
 def maps_category_for(product):
     """اختيار نوع المتاجر في خرائط Google حسب تصنيف المنتج، بدون اتصال Gemini."""
@@ -2190,6 +2276,10 @@ def send_product_result(from_number, txt, urls, bot_id, lang, query, best_only=F
     if not offers:
         send_whatsapp_text(from_number, txt, bot_id)
         return "info"
+    # v76.2: بدائل Gemini قد تأتي PRODUCT — STORE — PRICE. أصلح اسم المتجر
+    # قبل فلتر الصلة ومطابقة CTA حتى لا تتحول النتائج إلى نص بلا أزرار.
+    if relevance_mode == "similar":
+        offers = repair_similar_offer_store_names(offers, urls)
     # v74.9: فلتر الصلة — كتيب اليخت ليس اليخت. إذا ما بقي شي، النتيجة تعتبر غير موجودة.
     offers = filter_relevant_offers(query, offers, urls, mode=relevance_mode)
     if not offers:
@@ -2231,10 +2321,11 @@ def send_product_result(from_number, txt, urls, bot_id, lang, query, best_only=F
             continue
         send_whatsapp_cta(from_number, o["line"], url, bot_id, f"🛒 {o['name'][:18]}")
         sent += 1
-    if sent == 0 and fallback_ctas:
-        # v74.8: ولا رابط مباشر؟ رابط المتجر نفسه (غير المباشر) أفضل بكثير من «ما لقيت».
-        # v74.15: بس بشرط يكون حياً — فحص متوازٍ سريع، والميّت ينرمي.
-        checked = list(RESOLVER.map(lambda ou: (ou[0], ou[1], url_is_alive(ou[1])), fallback_ctas[:store_limit]))
+    if fallback_ctas and sent < store_limit:
+        # v76.2: لا نخفي CTAs الاحتياطية لمجرد أن نتيجة واحدة كان لها رابط مباشر.
+        # نرسلها بعد المباشرة حتى يصل كل بديل ممكن إلى زر، مع توضيح إذا كان الزر يفتح المتجر.
+        remaining = max(0, store_limit - sent)
+        checked = list(RESOLVER.map(lambda ou: (ou[0], ou[1], url_is_alive(ou[1])), fallback_ctas[:remaining]))
         for o, url, alive in checked:
             if not alive:
                 print(f"FALLBACK CTA DEAD — DROPPED: {o['name']} -> {url}")
@@ -4021,7 +4112,8 @@ def run_similar_search(phone, item):
          + f"استخدم هذه المعلومات فقط لفهم هوية المنتج، ثم ابحث بعمق في Google عن حتى {limit} بدائل حقيقية مختلفة عن نفس الموديل الأصلي، "
          f"من نفس الفئة والاستخدام وبمواصفات ومستوى جودة قريب، ومتوفرة الآن في متاجر {market_name} المحلية فقط. "
          "لا تقيد البحث بالبراند الأصلي: جرّب البراندات المنافسة والمرادفات العربية والإنجليزية ونتائج Google المتأخرة. "
-         "لكل بديل اكتب اسم البديل الفعلي بوضوح، اسم المتجر، سعر رقمي بعملة السوق، ورابط صفحة المنتج المباشرة. "
+         "تنسيق كل نتيجة إلزامي ولا تغيّره: ✅ [اسم المتجر فقط] — [اسم البديل الفعلي] — [السعر الرقمي بعملة السوق]. "
+         "المقطع الأول بعد ✅ أو • يجب أن يكون اسم المتجر حصراً، وليس اسم المنتج. اربط كل متجر بصفحة المنتج المباشرة من نفس دومين المتجر. "
          f"رتب الأرخص أولاً. لا تعرض المنتج الأصلي نفسه ولا أي إكسسوار/قطعة غيار. اجعل سطر 📦 بالضبط: بدائل مشابهة: {base}. "
          f"{LANG_INSTR[lang]}"),
         (f"Google Lens majority identity for the reference product: {base}. "
@@ -4030,7 +4122,8 @@ def run_similar_search(phone, item):
          + f"Find up to {limit} genuinely different but closely comparable alternatives in {market_name} local online stores. "
          "Search competitor brands, synonyms, and deeper Google results. Match the same main category, purpose, form factor and nearby specification/quality tier. "
          "Exclude the exact original model, accessories, spare parts, manuals and foreign stores. "
-         "For every alternative include its actual product name, store, numeric local price and direct product-page URL; sort cheapest first. "
+         "MANDATORY line format: ✅ [STORE NAME ONLY] — [ACTUAL ALTERNATIVE PRODUCT NAME] — [NUMERIC LOCAL PRICE]. "
+         "The first field after ✅/• MUST be the store name, never the product name. Ground each store to that same store's direct product-page URL; sort cheapest first. "
          f"Write the 📦 line exactly as: بدائل مشابهة: {base}. {LANG_INSTR[lang]}"),
     ]
 
@@ -4042,7 +4135,8 @@ def run_similar_search(phone, item):
             merge_offers=True,
             merge_title=title_line,
         )
-        urls = direct_urls_only(urls)
+        # v76.2: keep the full grounded URL map here. send_product_result will prefer
+        # direct product pages, guard store/domain identity, then safely fall back.
         if not txt or is_no_result_answer(txt) or not extract_store_offers(txt, limit=limit):
             continue
 
