@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v73-2-local-only-no-foreign-nag-social-merged-20260804"
+BUILD_ID = "v72-1-lens-local-first-foreign-consent-20260804"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE -> GOOGLE LENS DIRECT PASSTHROUGH (raw results to user)")
@@ -36,13 +36,6 @@ PENDING_ONBOARDING = {}
 PENDING_GLOBAL_SEARCH = {}
 # v72: نتائج Lens الأجنبية تُحفظ هنا ولا تُعرض إلا بعد موافقة المستخدم بزر.
 PENDING_LENS_FOREIGN = {}
-# v73: نتائج برامج التواصل (انستجرام/تيك توك/سناب...) تُحفظ هنا وتُعرض بعد سؤال منفصل.
-PENDING_LENS_SOCIAL = {}
-SOCIAL_HOSTS = (
-    "instagram.com", "tiktok.com", "snapchat.com", "youtube.com", "youtu.be",
-    "pinterest.", "facebook.com", "fb.com", "fb.watch", "x.com", "twitter.com",
-    "threads.net", "reddit.com",
-)
 GLOBAL_PENDING_TTL = max(300, int(os.environ.get("GLOBAL_PENDING_TTL_SECONDS", "900")))
 LOCATION_TTL_SECONDS = max(3600, int(os.environ.get("LOCATION_TTL_HOURS", "72")) * 3600)
 MARKET_CTX = threading.local()
@@ -100,10 +93,6 @@ ENABLE_GOOGLE_LENS = env_bool("ENABLE_GOOGLE_LENS", True)
 # لإرجاع المسار الذكي الكامل. عند عدم وجود نتائج، البوت يرجع تلقائياً للمسار الكامل.
 LENS_DIRECT_MODE = env_bool("LENS_DIRECT_MODE", True)
 LENS_DIRECT_MAX_LINES = max(3, int(os.environ.get("LENS_DIRECT_MAX_LINES", "8")))
-# v72.2: تنويع المتاجر في بطاقات CTA — حد أقصى من البطاقات لكل متجر واحد.
-LENS_PER_STORE_MAX = max(1, int(os.environ.get("LENS_PER_STORE_MAX", "2")))
-# v72.3: البطاقات التي بلا سعر من Google نجلب سعرها من صفحة المتجر مباشرة (مجاني).
-LENS_PRICE_FETCH_MAX = max(0, int(os.environ.get("LENS_PRICE_FETCH_MAX", "5")))
 LENS_PRIMARY_MODE = env_bool("LENS_PRIMARY_MODE", True)
 LENS_PRIMARY_EXCEPT_TEXT_HEAVY = env_bool("LENS_PRIMARY_EXCEPT_TEXT_HEAVY", True)
 # قوة Lens الحقيقية تأتي من تعدد التمريرات: products ثم all (visual+exact) ثم بحث واسع بلا قيد دولة.
@@ -836,10 +825,7 @@ MSG = {
         "lens_header": "🔍 هذا اللي طلع من Google عن صورتك:",
         "lens_local_header": "🔍 نتائج {country} من Google لصورتك:",
         "lens_foreign_ask": "🌍 عندي {c} نتائج إضافية من متاجر خارج {country}.\nتبي أعرضها لك؟ 👇",
-        "lens_no_local": "ما لقيت نتائج من متاجر داخل {country} لهالصورة 😅\nعندي {c} نتائج من متاجر عالمية 🌍، أو أقدر أدور لك بدائل مشابهة محلياً 🔄\nوش تبي؟ 👇",
-        "lens_social_ask": "📱 لقيت للمنتج نتائج في برامج التواصل (انستجرام، تيك توك، سناب...).\nتبي أعرضها لك؟ 👇",
-        "ls_show": "اعرضها 📱",
-        "ls_skip": "لا شكراً 🙏",
+        "lens_no_local": "ما لقيت نتائج من متاجر داخل {country} لهالصورة 😅\nبس عندي {c} نتائج من متاجر عالمية 🌍 تبي أعرضها؟ 👇",
         "lens_foreign_header": "🌍 النتائج العالمية (الأسعار محوّلة لعملتك عند الإمكان):",
         "lf_show": "اعرضها 🌍",
         "lf_skip": "لا شكراً 🙏",
@@ -876,10 +862,7 @@ MSG = {
         "lens_header": "🔍 Here's what Google returned for your photo:",
         "lens_local_header": "🔍 {country} results from Google for your photo:",
         "lens_foreign_ask": "🌍 I also have {c} results from stores outside {country}.\nWant me to show them? 👇",
-        "lens_no_local": "No results from stores inside {country} for this photo 😅\nI have {c} international results 🌍, or I can find similar local alternatives 🔄\nWhat would you like? 👇",
-        "lens_social_ask": "📱 I also found results for this product on social media (Instagram, TikTok, Snapchat...).\nWant me to show them? 👇",
-        "ls_show": "Show them 📱",
-        "ls_skip": "No thanks 🙏",
+        "lens_no_local": "No results from stores inside {country} for this photo 😅\nBut I have {c} international results 🌍 want to see them? 👇",
         "lens_foreign_header": "🌍 International results (prices converted to your currency when possible):",
         "lf_show": "Show them 🌍",
         "lf_skip": "No thanks 🙏",
@@ -1962,47 +1945,6 @@ def english_search_name(query):
     return name
 
 
-# v72.3: ترجمة عناوين نتائج Lens للعربية — دفعة واحدة باتصال سريع رخيص + كاش.
-TRANSLATE_TITLES_SYSTEM = """ترجم أسماء المنتجات التالية إلى العربية بأسلوب متجر واضح ومختصر.
-- أبقِ البراند والموديل والأرقام والأحجام لاتينية كما هي (Mountain Dew, iPhone 15 Pro, 250ml, 1.5L).
-- Pack of 30 تصير: عبوة 30. Carbonated Drink تصير: مشروب غازي.
-- سطر واحد لكل منتج وبنفس الترقيم تماماً. بدون أي شرح أو إضافات."""
-
-AR_TITLE_CACHE = {}
-AR_TITLE_LOCK = threading.Lock()
-
-def arabic_titles(titles):
-    """يعيد {العنوان الأصلي: الترجمة العربية}. العناوين العربية أصلاً تمر كما هي، وعند
-    فشل الترجمة يُعرض الأصل الإنجليزي بدل بطاقة فارغة."""
-    out, todo = {}, []
-    for t in titles:
-        t = (t or "").strip()
-        if not t:
-            continue
-        key = t.lower()
-        with AR_TITLE_LOCK:
-            cached = AR_TITLE_CACHE.get(key)
-        if cached:
-            out[t] = cached
-        elif re.search(r"[\u0600-\u06FF]", t):
-            out[t] = t
-        elif t not in todo:
-            todo.append(t)
-    if todo:
-        numbered = "\n".join(f"{i+1}. {t}" for i, t in enumerate(todo))
-        raw, _ = call_gemini([{"text": numbered}], system=TRANSLATE_TITLES_SYSTEM, use_search=False)
-        lines = [re.sub(r"^\s*\d+[\.\)\-]\s*", "", l).strip() for l in (raw or "").splitlines() if l.strip()]
-        with AR_TITLE_LOCK:
-            if len(AR_TITLE_CACHE) > 3000:
-                AR_TITLE_CACHE.clear()
-            for i, t in enumerate(todo):
-                tr = lines[i] if i < len(lines) and re.search(r"[\u0600-\u06FF]", lines[i]) else t
-                out[t] = tr
-                AR_TITLE_CACHE[t.lower()] = tr
-        print(f"AR TITLES TRANSLATED: {len(todo)}")
-    return out
-
-
 def _query_candidates(query, english_name=""):
     """v70: صيغ البحث بالإنجليزية أولاً (أدق فهرسة)، والعربية كاحتياط في المحاولات اللاحقة."""
     raw_parts = [p.strip() for p in re.split(r"\s*[|｜]\s*", query or "") if p.strip()]
@@ -2094,29 +2036,6 @@ def is_local_lens_result(item):
         host = urllib.parse.urlparse(link).netloc.lower().replace("www.", "")
     except Exception:
         host = ""
-
-    # v72.3: اسم دولة أخرى صريح في المتجر/العنوان (Carrefour Qatar، Amazon India...)
-    # = ليس محلياً مهما انطبقت تلميحات أخرى، إلا إذا ذُكر بلد المستخدم نفسه أيضاً.
-    current_names = {
-        str(m.get("country_name") or "").lower(),
-        COUNTRY_NAMES_AR.get(cc, "").strip(),
-    }
-    foreign_name_hit = False
-    for cc2, name2 in COUNTRY_NAMES.items():
-        if cc2 == cc or not name2:
-            continue
-        if re.search(rf"\b{re.escape(name2.lower())}\b", hay):
-            foreign_name_hit = True
-            break
-    if not foreign_name_hit:
-        for cc2, name2 in COUNTRY_NAMES_AR.items():
-            if cc2 == cc or not name2:
-                continue
-            if name2 in hay:
-                foreign_name_hit = True
-                break
-    if foreign_name_hit and not any(n and n.lower() in hay for n in current_names if n):
-        return False
 
     if any(tld in host for tld in COUNTRY_TLDS.get(cc, [])):
         return True
@@ -3273,34 +3192,10 @@ def process_interactive_message(message, bot_id):
             activate_market(from_number)
             _send_lens_match_batch(
                 from_number, item["matches"], item.get("bot_id") or bot_id,
-                item.get("lang", "ar"), convert_prices=True,
+                item.get("lang", "ar"),
+                T(item.get("lang", "ar"), "lens_foreign_header"),
+                convert_prices=True,
             )
-        return
-    if btn_id == "lf_similar":
-        # v73: بدائل مشابهة من صورة — يحوّل على المسار الذكي الكامل القديم.
-        item = _pop_pending_lens_foreign(from_number)
-        if item and item.get("query"):
-            activate_market(from_number)
-            run_similar_search(from_number, {
-                "bot_id": item.get("bot_id") or bot_id,
-                "lang": item.get("lang", "ar"),
-                "query": item["query"],
-            })
-        return
-    if btn_id == "ls_yes":
-        # v73: عرض نتائج برامج التواصل بعد الموافقة.
-        item = _pop_pending_lens_social(from_number)
-        if item:
-            activate_market(from_number)
-            _send_lens_match_batch(
-                from_number, item["matches"], item.get("bot_id") or bot_id,
-                item.get("lang", "ar"), convert_prices=False,
-                per_store_max=MAX_STORES,
-            )
-        return
-    if btn_id == "ls_no":
-        PENDING_LENS_SOCIAL.pop(from_number, None)
-        send_whatsapp_text(from_number, T(USER_LANG.get(from_number, "ar"), "declined_ok"), bot_id)
         return
     if btn_id == "lf_no":
         PENDING_LENS_FOREIGN.pop(from_number, None)
@@ -3595,146 +3490,49 @@ def choose_image_identity(image_b64, mime_type, lens, vision_name):
         return final_name or f"{vision_name} | {lens_title}", lens, "MERGE"
     return final_name or vision_name, None, "VISION"
 
-_LENS_TITLE_JUNK_RE = re.compile(
-    r"(?i)\b(online at best price|at best price|best price|shop online|buy online|order online|online)\b"
-)
-
-def _clean_lens_title(title):
-    """v72.2: تنظيف عنوان النتيجة من حشو SEO (Online at Best Price | Lu ...) ليصير مقروءاً."""
-    t = str(title or "").split("|")[0]
-    t = _LENS_TITLE_JUNK_RE.sub(" ", t)
-    t = re.sub(r"^\s*(buy|shop|order|اشتري|شراء)\s+", "", t, flags=re.I)
-    t = " ".join(t.split())
-    t = re.sub(r"[\-–—:،,.|]+\s*$", "", t).strip()
-    # عناوين Google المقصوصة تترك حرفاً يتيماً بالنهاية ("... Online a") — نشيله،
-    # لكن نحافظ على وحدات الحجم بعد الأرقام مثل "1.5 L".
-    t = re.sub(r"(?<=[A-Za-z])\s+[A-Za-z]{1,2}$", "", t).strip()
-    return t
-
-
-def _lens_store_label(m):
-    source = (m.get("source") or "").strip()
-    if source:
-        return source[:40]
-    try:
-        host = urllib.parse.urlparse(m.get("link") or "").netloc.replace("www.", "")
-        return (host.split(".")[0] or "Store").title()
-    except Exception:
-        return "Store"
-
-
-def _send_lens_match_batch(from_number, matches, bot_id, lang, header="", convert_prices=False, per_store_max=None):
-    """v72.2: بدون رسالة قائمة — بطاقات CTA مباشرة، كل بطاقة: اسم نظيف + سعر بارز + متجر.
-
-    التنويع: round-robin على المتاجر — متجر مختلف لكل بطاقة أولاً، ثم نكمل من نفس
-    المتاجر بحد أقصى LENS_PER_STORE_MAX لكل متجر (حتى لا تكون كل البطاقات من لولو).
-    v73: الترتيب النهائي — المسعّر أولاً من الأرخص إلى الأغلى، ثم غير المسعّر.
-    """
-    per_store = per_store_max if per_store_max else LENS_PER_STORE_MAX
-    # 1) تجميع المرشحين أصحاب الروابط الصالحة حسب المتجر (host) مع الحفاظ على ترتيب Google.
-    by_host, host_order = {}, []
+def _send_lens_match_batch(from_number, matches, bot_id, lang, header, convert_prices=False):
+    """يرسل دفعة نتائج Lens: رسالة قائمة + أزرار روابط. convert_prices للأجنبي (تحويل للعملة المحلية)."""
+    lines = [header, ""]
+    buttons, seen_urls, listed = [], set(), 0
     for m in matches:
-        title = _clean_lens_title(m.get("title"))
-        url = (m.get("link") or "").strip()
-        try:
-            host = urllib.parse.urlparse(url).netloc.lower().replace("www.", "")
-        except Exception:
-            host = ""
-        if not title or not url.startswith("http") or not host or "google." in host:
+        title = (m.get("title") or "").strip()[:80]
+        if not title:
             continue
-        if host not in by_host:
-            by_host[host] = []
-            host_order.append(host)
-        if len(by_host[host]) < per_store:
-            by_host[host].append((m, title, url))
-    if not by_host:
-        return False
-
-    # 2) round-robin: الجولة الأولى بطاقة من كل متجر مختلف، ثم الجولة الثانية تكمل الفراغ.
-    picked, used_urls = [], set()
-    for round_i in range(per_store):
-        for host in host_order:
-            if len(picked) >= MAX_STORES:
-                break
-            items = by_host[host]
-            if round_i < len(items):
-                m, title, url = items[round_i]
-                if url in used_urls:
-                    continue
-                picked.append((m, title, url))
-                used_urls.add(url)
-        if len(picked) >= MAX_STORES:
-            break
-
-    # 3) v72.3: البطاقات التي بلا سعر من Google — نجلب السعر من صفحة المتجر نفسها (مجاني وسريع).
-    def _fetch_page_price(url):
-        cached = VERIFIED_PAGE_CACHE.get(url)
-        if cached and (time.time() - cached["ts"] < 600):
-            return cached["data"]
-        info = parse_product_data(fetch_html(url), url)
-        if info:
-            VERIFIED_PAGE_CACHE[url] = {"data": info, "ts": time.time()}
-        return info
-
-    final_picked = picked[:MAX_STORES]
-    missing = [
-        (i, url) for i, (m, _t, url) in enumerate(final_picked)
-        if not (str(m.get("price") or "").strip() or m.get("price_value") not in (None, ""))
-    ][:LENS_PRICE_FETCH_MAX]
-    if missing:
-        for i, info in RESOLVER.map(lambda x: (x[0], _fetch_page_price(x[1])), missing):
-            if info and info.get("price"):
-                m = final_picked[i][0]
-                m["price_value"] = info["price"]
-                if not (m.get("currency") or "").strip():
-                    m["currency"] = info.get("currency") or ""
-                print(f"LENS PRICE FETCHED: {final_picked[i][2][:70]} -> {info['price']} {info.get('currency','')}")
-
-    # v73: الفرز النهائي — البطاقات المسعّرة أولاً من الأرخص إلى الأغلى، ثم غير المسعّرة
-    # (بترتيب Google بينها). التحويل للعملة المحلية يدخل في المقارنة للنتائج العالمية.
-    def _numeric_price_of(m):
-        raw = str(m.get("price") or "").strip()
-        num = None
-        try:
-            num = float(m.get("price_value")) if m.get("price_value") not in (None, "") else None
-        except Exception:
-            num = None
-        if num is None:
-            num = _extract_numeric_price(raw)
-        if num is None:
-            return None
-        if convert_prices:
-            _shown, conv = display_global_price(num, raw, m.get("currency") or "", lang)
-            return conv if conv is not None else num
-        return num
-
-    final_picked.sort(key=lambda x: ((0, p) if (p := _numeric_price_of(x[0])) is not None else (1, 0.0)))
-
-    # 4) v72.3: للمستخدم العربي نترجم العناوين دفعة واحدة (كاش)؛ البراند يبقى لاتيني.
-    title_map = {}
-    if lang == "ar":
-        title_map = arabic_titles([t for _m, t, _u in final_picked])
-
-    # 5) بطاقة CTA لكل عرض: الاسم + سطر سعر بارز فقط — اسم المتجر يظهر على الزر بدون تكرار.
-    sent = 0
-    for m, title, url in final_picked:
-        shown_title = title_map.get(title, title) if lang == "ar" else title
+        source = (m.get("source") or "").strip()
         raw_price = str(m.get("price") or "").strip()
         price_txt = ""
         if raw_price or m.get("price_value") not in (None, ""):
             if convert_prices:
-                price_txt, _ = display_global_price(m.get("price_value"), raw_price, m.get("currency") or "", lang)
+                # أجنبي: تحويل للعملة المحلية بالفلوس مع الأصل بين قوسين، وإلا السعر كما ورد.
+                shown, _ = display_global_price(m.get("price_value"), raw_price, m.get("currency") or "", lang)
+                price_txt = shown
             else:
                 price_txt = format_lens_price(raw_price, m.get("price_value"), lang, m.get("currency") or None)
-        store = _lens_store_label(m)
-        body_lines = [f"🛍️ {shown_title[:130]}"]
+        seg = f"• {title}"
         if price_txt:
-            body_lines.append("")
-            body_lines.append(f"💰 السعر: *{price_txt}*" if lang == "ar" else f"💰 Price: *{price_txt}*")
-        send_whatsapp_cta(from_number, "\n".join(body_lines)[:1024], url, bot_id, f"🛒 {store[:18]}")
-        sent += 1
-    print(f"LENS CTA BATCH: {sent} cards from {len({urllib.parse.urlparse(u).netloc for _, _, u in final_picked})} stores")
-    return sent > 0
+            seg += f" — {price_txt}"
+        if source:
+            seg += f" ({source})"
+        if listed < LENS_DIRECT_MAX_LINES:
+            lines.append(seg)
+            listed += 1
+        url = (m.get("link") or "").strip()
+        try:
+            host = urllib.parse.urlparse(url).netloc.lower()
+        except Exception:
+            host = ""
+        if (url.startswith("http") and host and "google." not in host
+                and url not in seen_urls and len(buttons) < MAX_STORES):
+            buttons.append((seg.lstrip("• ").strip(), url, source or ("المتجر" if lang == "ar" else "Store")))
+            seen_urls.add(url)
+        if listed >= LENS_DIRECT_MAX_LINES and len(buttons) >= MAX_STORES:
+            break
+    if listed == 0 and not buttons:
+        return False
+    send_whatsapp_text(from_number, "\n".join(lines)[:3900], bot_id)
+    for body, url, src in buttons:
+        send_whatsapp_cta(from_number, body[:1000], url, bot_id, f"🛒 {src[:18]}")
+    return True
 
 
 def _store_pending_lens_foreign(phone, bot_id, lang, matches):
@@ -3751,37 +3549,11 @@ def _pop_pending_lens_foreign(phone):
     return item
 
 
-def is_social_result(m):
-    """v73: نتيجة من برامج التواصل (انستجرام/تيك توك/سناب/يوتيوب...)."""
-    try:
-        host = urllib.parse.urlparse(str(m.get("link") or "")).netloc.lower()
-    except Exception:
-        return False
-    return bool(host) and any(h in host for h in SOCIAL_HOSTS)
-
-
-def _store_pending_lens_social(phone, bot_id, lang, matches):
-    PENDING_LENS_SOCIAL[phone] = {
-        "bot_id": bot_id, "lang": lang,
-        "matches": matches[:LENS_RESULT_LIMIT], "ts": time.time(),
-    }
-
-
-def _pop_pending_lens_social(phone):
-    item = PENDING_LENS_SOCIAL.pop(phone, None)
-    if not item or time.time() - item.get("ts", 0) > GLOBAL_PENDING_TTL:
-        return None
-    return item
-
-
 def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
-    """v73.2: منطق مبسّط حسب طلب المستخدم.
+    """v72: نتائج Lens موجهة لبلد المستخدم.
 
-    - فيه نتائج محلية؟ تُرسل بطاقاتها فوراً (المسعّر أولاً أرخص→أغلى) — وبدون أي
-      سؤال عن المتاجر الخارجية إطلاقاً.
-    - ما فيه محلي؟ سؤال واحد بثلاثة خيارات: عالمي 🌍 (نتائج Lens العالمية)،
-      بدائل مشابهة 🔄 (المسار الذكي الكامل القديم)، أو لا شكراً.
-    - نتائج برامج التواصل مدموجة مع الباقي مثل السابق — بدون سؤال منفصل.
+    المحلي (داخل بلد المستخدم) يُرسل فوراً كما رجع من Google.
+    أي نتيجة خارج البلد تُحبس خلف سؤال موافقة بزر 🌍 — ولا تظهر بدونه.
     """
     matches = [m for m in (lens.get("matches") or []) if (m.get("title") or "").strip()]
     if not matches:
@@ -3789,27 +3561,26 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
     local = [m for m in matches if is_local_lens_result(m)]
     foreign = [m for m in matches if not is_local_lens_result(m)]
     country = country_hint_word(lang) or current_market().get("country_name", "")
-    chosen_title = ((lens.get("chosen") or {}).get("title") or matches[0]["title"]).strip()
-    similar_query = (caption or chosen_title).strip()
     sent = False
     if local:
-        sent = _send_lens_match_batch(from_number, local, bot_id, lang, convert_prices=False)
-    if not sent and foreign:
-        # فقط عند غياب المحلي: العالمي مدموج ضمن الخيارات الثلاثة.
-        PENDING_LENS_FOREIGN[from_number] = {
-            "bot_id": bot_id, "lang": lang, "matches": foreign[:LENS_RESULT_LIMIT],
-            "query": similar_query, "ts": time.time(),
-        }
-        send_whatsapp_buttons(from_number, T(lang, "lens_no_local", c=len(foreign), country=country), [
-            {"id": "lf_yes", "title": T(lang, "opt_global")[:20]},
-            {"id": "lf_similar", "title": T(lang, "opt_similar")[:20]},
+        sent = _send_lens_match_batch(
+            from_number, local, bot_id, lang,
+            T(lang, "lens_local_header", country=country), convert_prices=False,
+        )
+    if foreign:
+        _store_pending_lens_foreign(from_number, bot_id, lang, foreign)
+        body = (T(lang, "lens_foreign_ask", c=len(foreign), country=country) if sent
+                else T(lang, "lens_no_local", c=len(foreign), country=country))
+        send_whatsapp_buttons(from_number, body, [
+            {"id": "lf_yes", "title": T(lang, "lf_show")[:20]},
             {"id": "lf_no", "title": T(lang, "lf_skip")[:20]},
         ], bot_id)
         sent = True
     if not sent:
         return False
-    LAST_SEARCH[from_number] = {"product": similar_query}
-    print(f"LENS DIRECT SENT: local={len(local)} foreign={'asked' if (not local and foreign) else 'skipped'} ({len(foreign)})")
+    chosen_title = ((lens.get("chosen") or {}).get("title") or matches[0]["title"]).strip()
+    LAST_SEARCH[from_number] = {"product": (caption or chosen_title)}
+    print(f"LENS DIRECT SENT: local={len(local)} foreign_pending={len(foreign)}")
     return True
 
 def process_single_image(message,bot_id,lang="ar"):
@@ -4196,4 +3967,4 @@ def process_location_message(message, bot_id):
     route_pending_after_location(from_number)
 
 @app.get("/")
-async def health(): return {"status":"v73.2 LOCAL-ONLY DISPLAY + 3-OPTION FALLBACK + SOCIAL MERGED", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
+async def health(): return {"status":"v72 LENS LOCAL-FIRST + FOREIGN CONSENT", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
