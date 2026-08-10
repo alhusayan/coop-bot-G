@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v75-11-similar-alt-list-size-consistency-20260807"
+BUILD_ID = "v75-12-similar-additive-not-replace-20260807"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE -> GOOGLE LENS DIRECT PASSTHROUGH (raw results to user)")
@@ -872,6 +872,8 @@ MSG = {
         "opt_no": "لا شكراً 🙏",
         "similar_searching": "🔄 أدور لك على أفضل البدائل المشابهة المتوفرة عندك...",
         "similar_none": "ما لقيت بدائل مشابهة بسعر مؤكد حالياً 😅 جرب صياغة ثانية.",
+        "more_stores_searching": "🔎 أدور لك متاجر إضافية لنفس المنتج (فوق نتائج الصورة)...",
+        "more_stores_none": "ما لقيت متاجر إضافية غير اللي طلعت لك فوق 👆 — هذي أفضل الأسعار المتوفرة حالياً.",
         "declined_ok": "تمام 🙏 إذا احتجت شي ثاني أنا حاضر!",
         "welcome_reply": "هلا والله! 🌟\nدز صورة المنتج أو اكتب اسمه، وأدور لك أفضل الأسعار والمتاجر القريبة منك 🛒",
         "thanks_reply": "العفو! 🌹 في الخدمة دايماً.. أي منتج ثاني تبيه أنا حاضر!",
@@ -935,6 +937,8 @@ MSG = {
         "opt_no": "No thanks 🙏",
         "similar_searching": "🔄 Looking for the best similar alternatives available near you...",
         "similar_none": "I couldn't find similar alternatives with a verified price right now 😅 try another phrasing.",
+        "more_stores_searching": "🔎 Looking for additional stores for the same product (on top of the photo results)...",
+        "more_stores_none": "No additional stores found beyond what's shown above 👆 — those are the best prices available right now.",
         "declined_ok": "No problem 🙏 I'm here whenever you need me!",
         "welcome_reply": "Hello! 🌟\nSend a product photo or type its name, and I'll find you the best prices and nearby stores 🛒",
         "thanks_reply": "You're welcome! 🌹 Anytime.. just send me the next product!",
@@ -3852,18 +3856,20 @@ def send_not_found_choice(phone, bot_id, lang):
     ], bot_id)
 
 def run_similar_search(phone, item):
-    """v74.2: خيار «🔄 بدائل مشابهة» يستخدم المسار الذكي الكامل القديم (v26) بالضبط:
+    """v75.12: خيار «🔄 بدائل مشابهة» — وضعان:
 
-    بطولة SEARCH_RUNS بحوث Gemini متوازية لنفس الطلب -> تقييم كل جواب بـ v26_answer_score
-    (المتاجر ×2 + اللنكات ×3 + سلامة 📦) -> إرسال الأقوى، واللنكات اتحاد لنكات كل الجولات.
-    بدون فحص HTML (verify_offers) مثل v26 تماماً — السرعة والتغطية أولاً.
-
-    طريقة العرض تبقى الحالية بدون تغيير: send_product_result
-    (رسالة 📦 العنوان، ثم بطاقة CTA لكل متجر برابط مباشر فقط).
+    - وضع عادي (بحث نصي): بدائل حقيقية لمنتج غير متوفر، مثل v74.2 تماماً.
+    - وضع الصورة (image_mode): إضافة على قائمة اللينز — نفس المنتج المحدد بالإجماع،
+      نبحث عن متاجر إضافية فقط (نستثني ما ظهر أصلاً)، ولا نستبدل نتائج اللينز
+      المحلية/العالمية المعروضة، فقط نكمّل عليها.
+    كلا الوضعين يستخدمان بطولة v26 (المسار الذكي الكامل القديم) بلا تغيير في المحرك.
     """
     activate_market(phone)
     bot_id = item["bot_id"]; lang = item["lang"]; query = item["query"]
-    send_whatsapp_text(phone, T(lang, "similar_searching"), bot_id)
+    image_mode = bool(item.get("image_mode"))
+    exclude_hosts = set(item.get("exclude_hosts") or set())
+    shown_names = item.get("shown_names") or []
+    send_whatsapp_text(phone, T(lang, "more_stores_searching" if image_mode else "similar_searching"), bot_id)
     # نزيل جزء الكابشن إن وجد ونأخذ اسم المنتج الأساسي.
     base = short_query(re.sub(r"^.*?—\s*", "", query).strip() or query) or short_query(query)
     # v74.7: المرادف بالاتجاهين — عربي يجيب الإنجليزي، وإنجليزي يجيب العربي.
@@ -3872,34 +3878,64 @@ def run_similar_search(phone, item):
     else:
         base_en = arabic_search_name(base)
     market_name = current_market().get("country_name", "Kuwait")
-    prompts = [
-        (f"المنتج التالي غير متوفر محلياً: {base}" + (f" ({base_en})" if base_en and base_en != base else "") + f". اقترح حتى {SIMILAR_MAX_RESULTS} بدائل مشابهة له فعلياً — نفس الفئة "
-         f"ونفس الاستخدام ومستوى جودة قريب — متوفرة الآن في متاجر {market_name} فقط، من أي متجر محلي كان. "
-         "لكل بديل: اسم البديل الفعلي (وليس اسم المنتج الأصلي)، سعر رقمي واضح بعملة السوق، "
-         f"ورابط صفحة المنتج المباشرة داخل المتجر. اجعل سطر 📦 بهذا الشكل: بدائل مشابهة: {base}. "
-         f"رتب من الأرخص إلى الأغلى واكتب السعر بالفلوس كاملة مثل 1.950. {LANG_INSTR[lang]}"),
-        (f"{SIMILAR_MAX_RESULTS} best in-stock alternatives similar to {base_en or base} in {market_name} local online stores, "
-         f"each with the alternative's own name, a numeric price, and a direct product page link, sorted cheapest first. "
-         f"Write the 📦 line exactly as: بدائل مشابهة: {base}. {LANG_INSTR[lang]}"),
-    ]
+    if image_mode:
+        # v75.12: هذا نفس المنتج اللي حدده اللينز فعلاً (ظهر بمتاجر أخرى) — لسنا نقول
+        # «غير متوفر»، فقط نطلب متاجر إضافية له، ونمنع تكرار المتاجر المعروضة سلفاً.
+        exclude_note = (f" لا تكرر هذه المتاجر التي ظهرت لي أصلاً: {'، '.join(shown_names)}. " if shown_names else "")
+        prompts = [
+            (f"المنتج المحدد بالضبط: {base}" + (f" ({base_en})" if base_en and base_en != base else "") +
+             f". ابحث لي عن متاجر إضافية في {market_name} تبيع نفس المنتج بالضبط (نفس البراند والموديل) "
+             f"غير المتاجر المعروفة مسبقاً. {exclude_note}"
+             f"أعطني حتى {SIMILAR_MAX_RESULTS} متاجر إضافية، كل واحد بسعر رقمي واضح ورابط صفحة المنتج المباشرة. "
+             f"اجعل سطر 📦 بهذا الشكل بالضبط: متاجر إضافية: {base}. "
+             f"رتب من الأرخص إلى الأغلى واكتب السعر بالفلوس كاملة مثل 1.950. {LANG_INSTR[lang]}"),
+            (f"{SIMILAR_MAX_RESULTS} additional online stores in {market_name} selling the exact same product "
+             f"{base_en or base}, other than these already-known stores: {', '.join(shown_names) or 'none'}. "
+             f"Each with a numeric price and a direct product page link, sorted cheapest first. "
+             f"Write the 📦 line exactly as: متاجر إضافية: {base}. {LANG_INSTR[lang]}"),
+        ]
+    else:
+        prompts = [
+            (f"المنتج التالي غير متوفر محلياً: {base}" + (f" ({base_en})" if base_en and base_en != base else "") + f". اقترح حتى {SIMILAR_MAX_RESULTS} بدائل مشابهة له فعلياً — نفس الفئة "
+             f"ونفس الاستخدام ومستوى جودة قريب — متوفرة الآن في متاجر {market_name} فقط، من أي متجر محلي كان. "
+             "لكل بديل: اسم البديل الفعلي (وليس اسم المنتج الأصلي)، سعر رقمي واضح بعملة السوق، "
+             f"ورابط صفحة المنتج المباشرة داخل المتجر. اجعل سطر 📦 بهذا الشكل: بدائل مشابهة: {base}. "
+             f"رتب من الأرخص إلى الأغلى واكتب السعر بالفلوس كاملة مثل 1.950. {LANG_INSTR[lang]}"),
+            (f"{SIMILAR_MAX_RESULTS} best in-stock alternatives similar to {base_en or base} in {market_name} local online stores, "
+             f"each with the alternative's own name, a numeric price, and a direct product page link, sorted cheapest first. "
+             f"Write the 📦 line exactly as: بدائل مشابهة: {base}. {LANG_INSTR[lang]}"),
+        ]
+    found_new = False
     for prompt in prompts:
         # v26 بالضبط: بطولة بحوث متوازية + دمج لنكات كل الجولات.
         txt, urls = v26_best_of_search([{"text": prompt}])
         urls = direct_urls_only(urls)
         if not txt or is_no_result_answer(txt) or not extract_store_offers(txt):
             continue
-        # حارس محلي خفيف فقط (مثل بقية مسارات v74): نرفض الأجنبي الواضح، بدون فحص HTML.
-        kept_urls = {}
-        for n, u in urls.items():
-            if is_foreign_lens_result({"link": u, "source": n, "title": n}):
-                print(f"SIMILAR v26 REJECT FOREIGN: {n} -> {u}")
+        offers = extract_store_offers(txt, SIMILAR_MAX_RESULTS)
+        kept_urls, kept_lines = {}, []
+        for o in offers:
+            u = match_url(o["name"], urls)
+            if is_foreign_lens_result({"link": u, "source": o["name"], "title": o["name"]}):
+                print(f"SIMILAR v26 REJECT FOREIGN: {o['name']} -> {u}")
                 continue
-            kept_urls[n] = u
+            if image_mode and _host_of(u) in exclude_hosts:
+                # v75.12: نفس المتجر اللي طلع أصلاً من اللينز — إضافة لا تكرار.
+                print(f"SIMILAR v26 SKIP DUPLICATE HOST (already shown by Lens): {o['name']} -> {u}")
+                continue
+            kept_urls[o["name"]] = u
+            kept_lines.append(o["line"])
+        if not kept_lines:
+            continue
+        header_lines = [l for l in txt.splitlines() if l.strip().startswith("📦")]
+        rebuilt_txt = "\n".join(header_lines + [""] + kept_lines)
         # العرض بالطريقة الحالية بدون أي تغيير.
-        result_type = send_product_result(phone, txt, kept_urls, bot_id, lang, base, max_items=SIMILAR_MAX_RESULTS)
+        result_type = send_product_result(phone, rebuilt_txt, kept_urls, bot_id, lang, base, max_items=SIMILAR_MAX_RESULTS)
         if result_type != "none":
-            return
-    send_whatsapp_text(phone, T(lang, "similar_none"), bot_id)
+            found_new = True
+            break
+    if not found_new:
+        send_whatsapp_text(phone, T(lang, "more_stores_none" if image_mode else "similar_none"), bot_id)
 
 def run_global_search(phone, item):
     activate_market(phone)
@@ -4025,12 +4061,14 @@ def process_interactive_message(message, bot_id):
             })
         return
     if btn_id == "lf_similar":
-        # v75.7: بدائل الصور — نستخرج اسم الإجماع من أغلب نتائج اللينز (محلي+عالمي)
-        # بحكم ذكي، ثم نضخه في المسار الذكي الكامل القديم — قائمة أكبر وأدق.
+        # v75.12: بدائل الصور تُضاف على قائمة اللينز ولا تلغيها — نستخرج اسم الإجماع
+        # من أغلب نتائج اللينز (محلي+عالمي) ونبحث بطولة v26 عن متاجر إضافية فقط،
+        # مستثنين المتاجر اللي طلعت أصلاً حتى ما يتكرر شي على المستخدم.
         item = _peek_pending(PENDING_LENS_FOREIGN, from_number)
         query = (item or {}).get("query") or (LAST_SEARCH.get(from_number) or {}).get("product")
         lang_ = (item or {}).get("lang", USER_LANG.get(from_number, "ar"))
         all_matches = (item or {}).get("all_matches") or []
+        image_mode = bool(all_matches)
         if all_matches:
             ar_name, en_name = lens_consensus_name(all_matches, query or "")
             consensus = ar_name if (lang_ == "ar" and ar_name) else (en_name or ar_name)
@@ -4043,6 +4081,9 @@ def process_interactive_message(message, bot_id):
                 "bot_id": (item or {}).get("bot_id") or bot_id,
                 "lang": lang_,
                 "query": query,
+                "image_mode": image_mode,
+                "exclude_hosts": (item or {}).get("shown_hosts") or set(),
+                "shown_names": (item or {}).get("shown_names") or [],
             })
         return
     if btn_id == "ls_yes":
@@ -4661,13 +4702,18 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
     country = country_hint_word(lang) or current_market().get("country_name", "")
     chosen_title = ((lens.get("chosen") or {}).get("title") or matches[0]["title"]).strip()
     similar_query = (caption or chosen_title).strip()
-    # نخزن العالمي والتواصل دائماً — تُعرض فقط عند اختيار المستخدم من القائمة.
+    # v75.12: نحفظ متاجر اللينز المحلية المعروضة فعلاً (host+اسم) — البدائل بعدها
+    # تُضاف عليها ولا تكررها، ونعرف كم متجراً كان معروضاً أصلاً.
+    shown_hosts = {_host_of(m.get("link")) for m in local if _host_of(m.get("link"))}
+    shown_names = [_lens_store_label(m) for m in local][:MAX_STORES]
     now = time.time()
     PENDING_LENS_FOREIGN[from_number] = {
         "bot_id": bot_id, "lang": lang, "matches": foreign[:LENS_RESULT_LIMIT],
         "query": similar_query, "ts": now,
         # v75.7: كل نتائج المتاجر (محلي + عالمي) — لاستخراج اسم الإجماع للبدائل.
         "all_matches": nonsocial[:LENS_RESULT_LIMIT],
+        # v75.12: للإضافة على قائمة اللينز بدل استبدالها.
+        "shown_hosts": shown_hosts, "shown_names": shown_names,
     }
     PENDING_LENS_SOCIAL[from_number] = {
         "bot_id": bot_id, "lang": lang, "matches": social[:LENS_RESULT_LIMIT], "ts": now,
@@ -5793,4 +5839,4 @@ def process_location_message(message, bot_id):
     route_pending_after_location(from_number)
 
 @app.get("/")
-async def health(): return {"status":"v75.11 SIMILAR-ALT CONSENSUS LIST SIZE FIX + v75.6 IMAGE FLOW (direct lens cards) + OFFICIAL VISION PRIMARY + PARALLEL PASSES + NO-SILENCE + LENS->v26 + CLEAR TITLES + AI STORE UNIFY + IN-STORE SEARCH LINKS + CANONICAL STORES + CLEAN LAYOUT + ONE-SESSION + GREEDY COMPLETION + LIVE LINKS + LOCAL SOCIAL + GLOBAL REGION ORDER + MORE LENS CARDS + NONE CLASS + CTA ALWAYS + ARABIC PICK LIST + RELEVANCE FILTER + NO SILENCE + BILINGUAL 2 ROUNDS + PURE AI CLASSIFIER + CLEAN STORE NAMES + SERVICE INTENT FIX (answer+5 providers) + TEXT+SIMILAR USE OLD v26 SMART PATH (tournament) + SERVICES 5+ PHONES + AI INTENT + BRAND COMPARE + SHOP FILTER + TRIO OPTIONS + EXACT PRICES", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "v26_runs":SEARCH_RUNS, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
+async def health(): return {"status":"v75.12 SIMILAR = ADDITIVE TO LENS LIST (dedup shown stores, no replace) + LIST SIZE FIX + v75.6 IMAGE FLOW (direct lens cards) + OFFICIAL VISION PRIMARY + PARALLEL PASSES + NO-SILENCE + LENS->v26 + CLEAR TITLES + AI STORE UNIFY + IN-STORE SEARCH LINKS + CANONICAL STORES + CLEAN LAYOUT + ONE-SESSION + GREEDY COMPLETION + LIVE LINKS + LOCAL SOCIAL + GLOBAL REGION ORDER + MORE LENS CARDS + NONE CLASS + CTA ALWAYS + ARABIC PICK LIST + RELEVANCE FILTER + NO SILENCE + BILINGUAL 2 ROUNDS + PURE AI CLASSIFIER + CLEAN STORE NAMES + SERVICE INTENT FIX (answer+5 providers) + TEXT+SIMILAR USE OLD v26 SMART PATH (tournament) + SERVICES 5+ PHONES + AI INTENT + BRAND COMPARE + SHOP FILTER + TRIO OPTIONS + EXACT PRICES", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "v26_runs":SEARCH_RUNS, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
