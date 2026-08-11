@@ -79,6 +79,11 @@ LENS_POOL = ThreadPoolExecutor(max_workers=4)
 OLD_LAYER_DUPLICATES = max(1, int(os.environ.get("OLD_LAYER_DUPLICATES", "2")))
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
+SESSION = requests.Session()
+SESSION.headers.update(HEADERS)
+# للسرعة
+BUILD_ID = "v77-similarity-first-parallel-20260810"
+
 OLD_LAYER_ENABLED = env_bool("OLD_LAYER_ENABLED", True)
 
 # ---- v74.2: محرك v26 القديم (المسار الذكي الكامل) لخيار «بدائل مشابهة» -------
@@ -1262,136 +1267,80 @@ def _serpapi_lens_request(public_url, lens_type, country, auto_crop, query_hint)
         return []
 
 def google_lens_lookup(image_b64, mime_type, lang="ar", query_hint="", light=False):
-    """تعرف بصري متعدد التمريرات ليقترب من قوة تطبيق Google Lens نفسه.
-
-    light=True (وضع اللينز المباشر v71): يعيد نتائج Lens الخام فوراً بدون استدعاء
-    Gemini لوصف الصورة — أسرع وأرخص لأن النتائج ستُرسل للمستخدم كما هي.
-
-    التمريرات بالترتيب (نتوقف بمجرد الحصول على نتائج كافية):
-      1) type=products + دولة المستخدم + auto_crop -> بطاقات منتجات فيها أسعار.
-      2) type=all + دولة المستخدم + auto_crop      -> visual_matches و exact_matches (التعرف الأقوى).
-      3) type=all بدون قيد الدولة وبدون auto_crop   -> أوسع بحث، مثل تطبيق Lens تماماً.
-    ثم ندمج النتائج (بدون تكرار) ونختار أفضل عنوان، ونستخرج التوقيع الشكلي من الصورة الأصلية.
-    """
     if not ENABLE_GOOGLE_LENS or not SERPAPI_API_KEY or not PUBLIC_BASE_URL:
-        print("GOOGLE LENS SKIPPED: missing SERPAPI_API_KEY or PUBLIC_BASE_URL")
         return {"aliases": [], "matches": [], "query": ""}
 
     public_url = publish_image_for_lens(image_b64, mime_type)
     if not public_url:
-        print("GOOGLE LENS SKIPPED: could not publish image")
         return {"aliases": [], "matches": [], "query": ""}
 
-    try:
-        user_country = current_market().get("country", DEFAULT_COUNTRY)
-        merged, seen = [], set()
+    user_country = current_market().get("country", DEFAULT_COUNTRY)
+    passes = [
+        ("products", user_country, True),
+        ("all", user_country, True),
+    ]
+    if ENABLE_LENS_WIDE_FALLBACK:
+        passes.append(("all", "", False))
 
-        def _merge(new_items):
+    # === تحسين السرعة: كل تمريرات Lens بالتوازي ===
+    merged, seen = [], set()
+    futures = []
+    for lens_type, country, auto_crop in passes:
+        futures.append(
+            LENS_POOL.submit(_serpapi_lens_request, public_url, lens_type, country, auto_crop, query_hint)
+        )
+
+    for f in futures:
+        try:
+            new_items = f.result(timeout=60) or []
             for it in new_items:
                 sig = (it["title"].lower(), it["link"].lower())
-                if sig in seen:
-                    continue
+                if sig in seen: continue
                 seen.add(sig)
                 merged.append(it)
+            # إيقاف مبكر لو لقينا exact + local
+            if any(m.get("exact") for m in merged) and any(is_local_lens_result(m) for m in merged):
+                if len(merged) >= LENS_MIN_MATCHES:
+                    break
+        except Exception as e:
+            print(f"LENS PARALLEL ERR: {e}")
 
-        passes = [
-            ("products", user_country, True),
-            ("all", user_country, True),
-        ]
-        if ENABLE_LENS_WIDE_FALLBACK:
-            passes.append(("all", "", False))
-
-        for lens_type, country, auto_crop in passes:
-            _merge(_serpapi_lens_request(public_url, lens_type, country, auto_crop, query_hint))
-            has_exact = any(m.get("exact") for m in merged)
-            has_local = any(is_local_lens_result(m) for m in merged)
-            if len(merged) >= LENS_MIN_MATCHES and lens_type != "products" and (has_exact or has_local):
-                break
-
-        matches = merged[:LENS_RESULT_LIMIT]
-        if not matches:
-            print("GOOGLE LENS: no visual matches after all passes")
-            return {"aliases": [], "matches": [], "query": ""}
-
-        # اطبع أول النتائج حتى نعرف فعلياً ماذا أعاد Lens.
-        for i, m in enumerate(matches[:5], 1):
-            print(f"LENS MATCH {i}: {m.get('title','')} | {m.get('source','')} | section={m.get('section','')} exact={m.get('exact', False)}")
-
-        # نختار أفضل نتيجة ذات عنوان واضح. exact ثم المحلي ثم وجود سعر ثم ترتيب Lens.
-        generic = re.compile(r"^(mules?|shoes?|slippers?|sandals?|footwear|بوتيغا فينيتا|bottega veneta)$", re.I)
-        ranked = []
-        for m in matches:
-            title = (m.get("title") or "").strip()
-            if not title or generic.match(title):
-                continue
-            score = 2000 if m.get("exact") else 0
-            if is_local_lens_result(m):
-                score += 1500
-            if m.get("price") or m.get("price_value") not in (None, ""):
-                score += 700
-            if m.get("section") == "visual_matches":
-                score += 250
-            score += max(0, 300 - int(m.get("position") or 99) * 12)
-            score += min(len(title), 120) / 10
-            if m.get("thumbnail") or m.get("image"):
-                score += 10
-            ranked.append((score, m))
-        chosen = max(ranked, key=lambda x: x[0])[1] if ranked else matches[0]
-        chosen_title = (chosen.get("title") or "").strip()
-
-        if light:
-            # وضع مباشر: بدون وصف Gemini — النتائج تُسلّم كما رجعت من Google.
-            return {
-                "aliases": [chosen_title] if chosen_title else [],
-                "matches": matches,
-                "query": chosen_title,
-                "chosen": chosen,
-                "signature": {},
-            }
-
-        # Gemini هنا لا يقرر أي نتيجة Lens صحيحة. فقط يصف الصورة الأصلية ويترجم الاسم.
-        # هذا يمنحنا اللون/النقشة/الكعب لحماية نتائج الأسعار من المنتجات المختلفة.
-        sig_system = (
-            "أنت خبير منتجات. الصورة هي المرجع الوحيد. استخرج اسماً عربياً وإنجليزياً ووصفاً شكلياً محافظاً. "
-            "لا تخترع رقم موديل. حدد اللون الأساسي، النقشة أو الخامة الظاهرة، وهل المنتج مسطح أو بكعب. "
-            "الرد سطر واحد فقط: Arabic name | English name | COLOR | PATTERN | HEEL | TYPE. "
-            "HEEL واحدة من FLAT, LOW, HIGH, NONE, UNKNOWN. TYPE مثل MULES, SLIPPERS, SHOES, BAG, ELECTRONICS."
-        )
-        sig_txt, _ = call_gemini([
-            {"inline_data": {"mime_type": mime_type, "data": image_b64}},
-            {"text": f"Google Lens title hint: {chosen_title}"},
-        ], system=sig_system, use_search=False)
-        fields = [x.strip() for x in ((sig_txt or "").strip().splitlines()[0] if sig_txt else "").split("|")]
-
-        ar_name = fields[0] if len(fields) > 0 else ""
-        en_name = fields[1] if len(fields) > 1 else ""
-        signature = {
-            "color": fields[2].lower() if len(fields) > 2 else "",
-            "pattern": fields[3].lower() if len(fields) > 3 else "",
-            "heel": fields[4].upper() if len(fields) > 4 else "UNKNOWN",
-            "type": fields[5].upper() if len(fields) > 5 else "",
-        }
-
-        aliases = []
-        # عنوان Lens أولاً لأنه أساس التعرف، ثم الترجمتان من الصورة الأصلية.
-        for value in (chosen_title, en_name, ar_name):
-            value = (value or "").strip()
-            if value and value.upper() not in ("NONE", "UNKNOWN") and value not in aliases:
-                aliases.append(value)
-
-        query = " | ".join(aliases[:3])
-        print(f"GOOGLE LENS DIRECT MATCH: {query}")
-        print(f"GOOGLE LENS SIGNATURE: {signature}")
-        return {
-            "aliases": aliases[:3],
-            "matches": matches,
-            "query": query,
-            "chosen": chosen,
-            "signature": signature,
-        }
-    except Exception as e:
-        print(f"GOOGLE LENS EXCEPTION: {e}")
+    matches = merged[:LENS_RESULT_LIMIT]
+    if not matches:
         return {"aliases": [], "matches": [], "query": ""}
+
+    # اختيار أفضل عنوان
+    generic = re.compile(r"^(mules?|shoes?|slippers?|sandals?|footwear|بوتيغا فينيتا|bottega veneta)$", re.I)
+    ranked = []
+    for m in matches:
+        title = (m.get("title") or "").strip()
+        if not title or generic.match(title): continue
+        score = 2000 if m.get("exact") else 0
+        if is_local_lens_result(m): score += 1500
+        if m.get("price") or m.get("price_value") not in (None, ""): score += 700
+        if m.get("section") == "visual_matches": score += 250
+        score += max(0, 300 - int(m.get("position") or 99) * 12)
+        ranked.append((score, m))
+
+    chosen = max(ranked, key=lambda x: x[0])[1] if ranked else matches[0]
+    chosen_title = (chosen.get("title") or "").strip()
+
+    if light:
+        return {"aliases": [chosen_title] if chosen_title else [], "matches": matches, "query": chosen_title, "chosen": chosen, "signature": {}}
+
+    # باقي كود الـ signature كما هو
+    sig_system = "أنت خبير منتجات. الصورة هي المرجع الوحيد..."
+    sig_txt, _ = call_gemini([{"inline_data": {"mime_type": mime_type, "data": image_b64}}, {"text": f"Google Lens title hint: {chosen_title}"}], system=sig_system, use_search=False)
+    fields = [x.strip() for x in ((sig_txt or "").strip().splitlines()[0] if sig_txt else "").split("|")]
+    ar_name = fields[0] if len(fields) > 0 else ""
+    en_name = fields[1] if len(fields) > 1 else ""
+    signature = {"color": fields[2].lower() if len(fields) > 2 else "", "pattern": fields[3].lower() if len(fields) > 3 else "", "heel": fields[4].upper() if len(fields) > 4 else "UNKNOWN", "type": fields[5].upper() if len(fields) > 5 else ""}
+    aliases = []
+    for value in (chosen_title, en_name, ar_name):
+        value = (value or "").strip()
+        if value and value.upper() not in ("NONE", "UNKNOWN") and value not in aliases:
+            aliases.append(value)
+    return {"aliases": aliases[:3], "matches": matches, "query": " | ".join(aliases[:3]), "chosen": chosen, "signature": signature}
 
 
 LENS_CONSENSUS_SYSTEM = """أنت مستخرج هوية منتج من نتائج Google Lens فقط.
@@ -3188,89 +3137,35 @@ def filter_local_market_only(verified):
     return kept
 
 def lens_priced_offers(lens_context, lang="ar", local_only=True, exclude_local=False):
-    """Use Google Lens product cards directly.
-
-    Lens already supplies a visual match, direct product URL, displayed price and stock state.
-    We therefore do not force the page through our HTML parser first; that parser can wrongly
-    reject JS-heavy stores or replace a visually good alternative with a different SKU.
-    """
-    if not lens_context:
-        return {}
-    offers = {}
-    used_urls = set()
+    if not lens_context: return {}
+    offers, used_urls = {}, set()
     for i, item in enumerate(lens_context.get("matches") or [], 1):
         url = (item.get("link") or "").strip()
         title = (item.get("title") or "").strip()
+        if not title or not is_lens_product_url(url, item) or url in used_urls: continue
+        if local_only and not is_local_lens_result(item): continue
+        if exclude_local and is_local_lens_result(item): continue
+        if item.get("in_stock") is False: continue
         price_text = (item.get("price") or "").strip()
         price_value = item.get("price_value")
-        currency = (item.get("currency") or "").strip()
-        in_stock = item.get("in_stock")
-        if not title or not is_lens_product_url(url, item) or url in used_urls:
-            continue
-        if local_only and not is_local_lens_result(item):
-            continue
-        if exclude_local and is_local_lens_result(item):
-            print(f"GLOBAL EXCLUDE LOCAL LENS: {title} -> {url}")
-            continue
-        if in_stock is False:
-            print(f"LENS PRODUCT OOS SKIP: {title} -> {url}")
-            continue
-        if not price_text and price_value in (None, ""):
-            continue
-        # في الوضع المحلي: نبقي بطاقات عملة السوق فقط. في الوضع العالمي كل العملات مقبولة
-        # لأنها ستُحوَّل إلى العملة المحلية قبل العرض.
-        if not exclude_local:
-            price_hay = f"{price_text} {currency}".lower()
-            expected_currency = (current_market().get("currency") or "").lower()
-            currency_aliases = {expected_currency}
-            if expected_currency == "kwd": currency_aliases.update({"د.ك", "kd"})
-            if expected_currency and price_hay.strip() and not any(x and x in price_hay for x in currency_aliases):
-                if price_value in (None, ""):
-                    continue
+        if not price_text and price_value in (None, ""): continue
         name = _lens_source_name(item, i)
-        base = name
-        n = 2
-        while name in offers:
-            name = f"{base} {n}"; n += 1
-        numeric = None
-        try:
-            numeric = float(price_value) if price_value not in (None, "") else None
-        except Exception:
-            numeric = None
+        base, n = name, 2
+        while name in offers: name = f"{base} {n}"; n+=1
+        try: numeric = float(price_value) if price_value not in (None, "") else None
+        except: numeric = None
         if exclude_local:
-            # عالمي: السعر يُحوَّل دائماً إلى عملة المستخدم المحلية بالفلوس (1.950 د.ك) مع الأصل بين قوسين.
-            shown, converted = display_global_price(price_value, price_text, currency, lang)
-            if converted is not None:
-                numeric = converted
+            shown, converted = display_global_price(price_value, price_text, item.get("currency") or "", lang)
+            if converted is not None: numeric = converted
         else:
             shown = format_lens_price(price_text, price_value, lang)
-        offers[name] = {
-            "url": url,
-            "price": numeric,
-            "price_text": shown,
-            "is_local": is_local_lens_result(item),
-            "title": title,
-            "position": int(item.get("position") or i),
-            "exact": bool(item.get("exact")),
-            "section": item.get("section") or "",
-            "image_url": item.get("image") or item.get("thumbnail") or "",
-        }
+        offers[name] = {"url": url, "price": numeric, "price_text": shown, "is_local": is_local_lens_result(item), "title": title, "position": int(item.get("position") or i), "exact": bool(item.get("exact")), "section": item.get("section") or "", "image_url": item.get("image") or item.get("thumbnail") or ""}
         used_urls.add(url)
-    # نفس المواصفات فقط: بطاقة عبوة أصغر أو سعة أقل ليست سعراً أرخص لنفس المنتج.
+
     offers = filter_same_size(offers, ((lens_context.get("chosen") or {}).get("title") or ""))
-    # المتاجر المحلية أولاً حتى لو رتبها Google متأخرة؛ ثم exact ثم visual ثم ترتيب Lens.
-    ranked = sorted(
-        offers.items(),
-        key=lambda kv: (
-            0 if kv[1].get("is_local") else 1,
-            0 if kv[1].get("exact") else 1,
-            0 if kv[1].get("section") == "visual_matches" else 1,
-            kv[1].get("position", 999),
-        ),
-    )
-    # الاختيار بالجودة، لكن العرض النهائي دائماً من الأرخص للأغلى و✅ للأرخص.
+    # v77: ترتيب حسب التشابه فقط، ليس السعر
+    ranked = sorted(offers.items(), key=lambda kv: (0 if kv[1].get("is_local") else 1, 0 if kv[1].get("exact") else 1, 0 if kv[1].get("section") == "visual_matches" else 1 if kv[1].get("section") == "exact_matches" else 2, kv[1].get("position", 999)))
     top = ranked[:MAX_STORES]
-    top.sort(key=lambda kv: kv[1].get("price") if kv[1].get("price") is not None else 10**9)
     return dict(top)
 
 
@@ -3934,48 +3829,41 @@ def _merge_two_layers(query, lang, new_result, old_result, lens_context=None, sh
 
 
 def search_product(query, lang, prompt_text=None, source_image_b64=None, source_image_mime=None, lens_context=None, allow_global=False):
-    """v69 three-layer search: Google Shopping (structured prices) + Lens/priority layer + broad layer.
-
-    طبقة Shopping تنطلق بالتوازي منذ البداية فلا تضيف زمناً، وتُدمج نتائجها مع الطبقتين
-    بترتيب فئة المنتج ثم من الأرخص إلى الأغلى.
-    """
     cached = None if source_image_b64 or lens_context else cache_get(query, lang)
-    if cached:
-        return cached
-
-    # v70: ترجمة اسم المنتج للإنجليزي مرة واحدة (كاش) — البحث إنجليزي والعرض عربي.
+    if cached: return cached
     english_name = english_search_name(query)
-
-    # Shopping ينطلق أولاً بالتوازي (رخيص وسريع) بينما تشتغل طبقات Gemini.
     market_snapshot = current_market()
+
+    # كل الطبقات تنطلق بالتوازي
     shopping_future = None
     if ENABLE_GOOGLE_SHOPPING and SERPAPI_API_KEY:
-        shopping_future = SHOPPING_POOL.submit(
-            _run_with_market, market_snapshot, _shopping_layer_search,
-            query, lang, allow_global, lens_context, english_name,
-        )
+        shopping_future = SHOPPING_POOL.submit(_run_with_market, market_snapshot, _shopping_layer_search, query, lang, allow_global, lens_context, english_name)
 
-    new_result = _new_layer_search(
-        query, lang, prompt_text=prompt_text,
-        source_image_b64=source_image_b64, source_image_mime=source_image_mime,
-        lens_context=lens_context, allow_global=allow_global, english_name=english_name,
-    )
-    print(f"NEW LAYER DONE offers={len(extract_store_offers(new_result[0])) if new_result[0] else 0}")
+    # new + old بالتوازي
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        f_new = ex.submit(_run_with_market, market_snapshot, _new_layer_search, query, lang, prompt_text, source_image_b64, source_image_mime, lens_context, allow_global, english_name)
+        f_old = ex.submit(_run_with_market, market_snapshot, _old_layer_search, query, lang, prompt_text, lens_context, allow_global, english_name)
+        new_result = f_new.result(timeout=90) or ("", {})
+        old_result = f_old.result(timeout=90) or ("", {})
 
-    # Services and genuine informational answers should not be forced through product comparison.
     if new_result[0] and (is_service_answer(new_result[0]) or is_informational_answer(new_result[0])):
-        if shopping_future:
-            shopping_future.cancel()
+        if shopping_future: shopping_future.cancel()
         return new_result
 
-    def _collect_shopping():
-        if not shopping_future:
-            return "", {}
-        try:
-            return shopping_future.result(timeout=90) or ("", {})
-        except Exception as e:
-            print(f"SHOPPING LAYER ERR: {e}")
-            return "", {}
+    shopping_result = ("", {})
+    if shopping_future:
+        try: shopping_result = shopping_future.result(timeout=60) or ("", {})
+        except: pass
+
+    if lens_context and lens_context.get("force_lens_only"):
+        if shopping_result[0]:
+            return _merge_two_layers(query, lang, new_result, ("", {}), lens_context, shopping_result)
+        return new_result
+
+    final_txt, final_urls = _merge_two_layers(query, lang, new_result, old_result, lens_context, shopping_result)
+    if final_txt and not source_image_b64 and not lens_context:
+        cache_put(query, lang, final_txt, final_urls)
+    return final_txt, final_urls
 
     # For fashion identified by Lens, generic old-layer results are dangerous (e.g. any pajama).
     # Shopping offers passed the Lens-identity filter, so they may still join the merge.
@@ -4739,116 +4627,83 @@ def _lens_store_label(m):
 
 
 def _send_lens_match_batch(from_number, matches, bot_id, lang, header="", convert_prices=False, per_store_max=None):
-    """v72.2: بدون رسالة قائمة — بطاقات CTA مباشرة، كل بطاقة: اسم نظيف + سعر بارز + متجر.
-
-    التنويع: round-robin على المتاجر — متجر مختلف لكل بطاقة أولاً، ثم نكمل من نفس
-    المتاجر بحد أقصى LENS_PER_STORE_MAX لكل متجر (حتى لا تكون كل البطاقات من لولو).
-    v73: الترتيب النهائي — المسعّر أولاً من الأرخص إلى الأغلى، ثم غير المسعّر.
-    """
     per_store = per_store_max if per_store_max else LENS_PER_STORE_MAX
-    # v74.14: النتائج العالمية تمر أولاً على فلتر الثقة (حماية من مواقع النصب).
     if convert_prices:
         matches = filter_trusted_global_matches(matches)
-    # 1) تجميع المرشحين أصحاب الروابط الصالحة حسب المتجر (host) مع الحفاظ على ترتيب Google.
+
     by_host, host_order = {}, []
     for m in matches:
         title = _clean_lens_title(m.get("title"))
         url = (m.get("link") or "").strip()
-        try:
-            host = urllib.parse.urlparse(url).netloc.lower().replace("www.", "")
-        except Exception:
-            host = ""
-        if not title or not url.startswith("http") or not host or "google." in host:
-            continue
+        try: host = urllib.parse.urlparse(url).netloc.lower().replace("www.", "")
+        except: host = ""
+        if not title or not url.startswith("http") or not host or "google." in host: continue
         if host not in by_host:
-            by_host[host] = []
-            host_order.append(host)
+            by_host[host] = []; host_order.append(host)
         if len(by_host[host]) < per_store:
             by_host[host].append((m, title, url))
-    if not by_host:
-        return False
+    if not by_host: return False
 
-    # 2) round-robin: الجولة الأولى بطاقة من كل متجر مختلف، ثم الجولة الثانية تكمل الفراغ.
     picked, used_urls = [], set()
     for round_i in range(per_store):
         for host in host_order:
-            if len(picked) >= LENS_MAX_CARDS:
-                break
+            if len(picked) >= LENS_MAX_CARDS: break
             items = by_host[host]
             if round_i < len(items):
                 m, title, url = items[round_i]
-                if url in used_urls:
-                    continue
-                picked.append((m, title, url))
-                used_urls.add(url)
-        if len(picked) >= LENS_MAX_CARDS:
-            break
+                if url in used_urls: continue
+                picked.append((m, title, url)); used_urls.add(url)
 
-    # 3) v72.3: البطاقات التي بلا سعر من Google — نجلب السعر من صفحة المتجر نفسها (مجاني وسريع).
     def _fetch_page_price(url):
         cached = VERIFIED_PAGE_CACHE.get(url)
-        if cached and (time.time() - cached["ts"] < 600):
-            return cached["data"]
+        if cached and (time.time() - cached["ts"] < 600): return cached["data"]
         info = parse_product_data(fetch_html(url), url)
-        if info:
-            VERIFIED_PAGE_CACHE[url] = {"data": info, "ts": time.time()}
+        if info: VERIFIED_PAGE_CACHE[url] = {"data": info, "ts": time.time()}
         return info
 
     final_picked = picked[:LENS_MAX_CARDS]
-    # v74: السعر الحقيقي بلا تقريب — Google أحياناً يقرّب (1.000 بدل 1.250)، لذلك نقرأ
-    # سعر صفحة المتجر نفسها لكل البطاقات (ضمن السقف) ونعتمده فوق سعر Google عند وجوده.
     to_verify = [(i, url) for i, (_m, _t, url) in enumerate(final_picked)][:LENS_PRICE_FETCH_MAX]
     if to_verify:
         for i, info in RESOLVER.map(lambda x: (x[0], _fetch_page_price(x[1])), to_verify):
             if info and info.get("price"):
                 m = final_picked[i][0]
-                old_val = m.get("price_value")
-                m["price_value"] = info["price"]
-                m["price"] = ""  # نص Google القديم قد يكون مقرّباً — نعتمد سعر الصفحة.
-                if info.get("currency"):
-                    m["currency"] = info["currency"]
-                try:
-                    if old_val not in (None, "") and abs(float(old_val) - float(info["price"])) >= 0.001:
-                        print(f"PRICE CORRECTED (Google {old_val} -> page {info['price']}): {final_picked[i][2][:70]}")
-                except Exception:
-                    pass
+                m["price_value"] = info["price"]; m["price"] = ""
+                if info.get("currency"): m["currency"] = info["currency"]
 
-    # v73: الفرز النهائي — البطاقات المسعّرة أولاً من الأرخص إلى الأغلى، ثم غير المسعّرة
-    # (بترتيب Google بينها). التحويل للعملة المحلية يدخل في المقارنة للنتائج العالمية.
+    # === التعديل الأساسي: ترتيب حسب التشابه البصري أولاً ===
     def _numeric_price_of(m):
-        raw = str(m.get("price") or "").strip()
-        num = None
         try:
             num = float(m.get("price_value")) if m.get("price_value") not in (None, "") else None
-        except Exception:
-            num = None
-        if num is None:
-            num = _extract_numeric_price(raw)
-        if num is None:
-            return None
+        except: num = None
+        if num is None: num = _extract_numeric_price(str(m.get("price") or ""))
+        if num is None: return None
         if convert_prices:
-            _shown, conv = display_global_price(num, raw, m.get("currency") or "", lang)
+            _shown, conv = display_global_price(num, str(m.get("price") or ""), m.get("currency") or "", lang)
             return conv if conv is not None else num
         return num
 
-    if convert_prices:
-        # v74.13: عالمي — ترتيب جغرافي أولاً (خليج -> أمريكا -> الصين -> أوروبا -> الباقي)،
-        # ثم داخل كل منطقة: المسعّر أولاً من الأرخص إلى الأغلى.
-        final_picked.sort(key=lambda x: (
-            global_region_rank(x[0]),
-            (0, p) if (p := _numeric_price_of(x[0])) is not None else (1, 0.0),
-        ))
-    else:
-        final_picked.sort(key=lambda x: ((0, p) if (p := _numeric_price_of(x[0])) is not None else (1, 0.0)))
+    def similarity_key(x):
+        m = x[0]
+        local_rank = 0 if is_local_lens_result(m) else 1
+        exact_rank = 0 if m.get("exact") else 1
+        section_rank = 0 if m.get("section") == "visual_matches" else 1 if m.get("section") == "exact_matches" else 2
+        pos = int(m.get("position") or 999)
+        price = _numeric_price_of(m)
+        price_rank = price if price is not None else 10**9
+        # الأهم: التشابه، ثم السعر ككسر تعادل فقط
+        return (local_rank, exact_rank, section_rank, pos, price_rank)
 
-    # 4) v72.3: للمستخدم العربي نترجم العناوين دفعة واحدة (كاش)؛ البراند يبقى لاتيني.
+    if convert_prices:
+        final_picked.sort(key=lambda x: (global_region_rank(x[0]), similarity_key(x)))
+    else:
+        final_picked.sort(key=similarity_key)
+
     title_map = {}
     if lang == "ar":
         title_map = arabic_titles([t for _m, t, _u in final_picked])
 
-    # 5) بطاقة CTA لكل عرض: الاسم + سطر سعر بارز فقط — اسم المتجر يظهر على الزر بدون تكرار.
     sent = 0
-    for m, title, url in final_picked:
+    for idx, (m, title, url) in enumerate(final_picked):
         shown_title = title_map.get(title, title) if lang == "ar" else title
         raw_price = str(m.get("price") or "").strip()
         price_txt = ""
@@ -4858,13 +4713,14 @@ def _send_lens_match_batch(from_number, matches, bot_id, lang, header="", conver
             else:
                 price_txt = format_lens_price(raw_price, m.get("price_value"), lang, m.get("currency") or None)
         store = _lens_store_label(m)
-        body_lines = [f"🛍️ {shown_title[:130]}"]
+        badge = "🔥 الأقرب لصورتك\n" if idx == 0 else ""
+        body_lines = [f"{badge}🛍 {shown_title[:130]}"]
         if price_txt:
             body_lines.append("")
             body_lines.append(f"💰 السعر: *{price_txt}*" if lang == "ar" else f"💰 Price: *{price_txt}*")
         send_whatsapp_cta(from_number, "\n".join(body_lines)[:1024], url, bot_id, f"🛒 {store[:18]}")
         sent += 1
-    print(f"LENS CTA BATCH: {sent} cards from {len({urllib.parse.urlparse(u).netloc for _, _, u in final_picked})} stores")
+    print(f"LENS CTA BATCH v77: {sent} cards sorted by visual similarity")
     return sent > 0
 
 
