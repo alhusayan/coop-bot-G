@@ -6,10 +6,10 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v74-4-lens-only-global-optin-20260812"
+BUILD_ID = "v74-2-1-lens-raw-all-envbool-fix-20260812"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
-print("IMAGE -> LENS ONLY (old pipeline removed) -> LOCAL CTA NOW, GLOBAL ON REQUEST")
+print("IMAGE -> GOOGLE LENS type=all RAW PASSTHROUGH (ALL exact+visual results to user)")
 print("=" * 70)
 
 
@@ -118,8 +118,6 @@ LENS_DIRECT_MODE = env_bool("LENS_DIRECT_MODE", True)
 # أطفئه بـ LENS_RAW_ALL_MODE=false للرجوع لسلوك v74 المفلتر.
 LENS_RAW_ALL_MODE = env_bool("LENS_RAW_ALL_MODE", True)
 LENS_RAW_MAX_RESULTS = max(5, int(os.environ.get("LENS_RAW_MAX_RESULTS", "40")))
-# v74.3: سقف بطاقات CTA لكل قسم (محلي/عالمي) حتى لا نغرق المحادثة.
-LENS_RAW_SECTION_MAX = max(3, int(os.environ.get("LENS_RAW_SECTION_MAX", "12")))
 LENS_DIRECT_MAX_LINES = max(3, int(os.environ.get("LENS_DIRECT_MAX_LINES", "8")))
 # v72.2: تنويع المتاجر في بطاقات CTA — حد أقصى من البطاقات لكل متجر واحد.
 LENS_PER_STORE_MAX = max(1, int(os.environ.get("LENS_PER_STORE_MAX", "2")))
@@ -873,8 +871,6 @@ MSG = {
         "lf_skip": "لا شكراً 🙏",
         "lens_none": "Google ما رجّع نتائج للصورة 😅 أكمل البحث بطريقتي...",
         "lens_raw_header": "🔍 كل نتائج Google لصورتك ({c} نتيجة):",
-        "global_ask": "عندي بعد {c} نتائج من متاجر عالمية 🌍 تبيني أعرضها؟ أو أدور لك بدائل مشابهة 🔄👇",
-        "lens_none_final": "Google ما رجّع نتائج واضحة لهالصورة 😅\nجرّب صورة أوضح أو اكتب اسم المنتج وأنا أدور لك 🔍",
         "lens_raw_exact": "✅ *مطابقة تامة (Exact matches):*",
         "lens_raw_visual": "👀 *مشابهة بصرياً (Visual matches):*",
     },
@@ -925,8 +921,6 @@ MSG = {
         "lf_skip": "No thanks 🙏",
         "lens_none": "Google returned no results for the photo 😅 continuing with my own search...",
         "lens_raw_header": "🔍 All Google results for your photo ({c} results):",
-        "global_ask": "I also have {c} results from international stores 🌍 Want me to show them? Or I can find similar alternatives 🔄👇",
-        "lens_none_final": "Google returned no clear results for this photo 😅\nTry a clearer photo or type the product name and I'll search for you 🔍",
         "lens_raw_exact": "✅ *Exact matches:*",
         "lens_raw_visual": "👀 *Visual matches:*",
     },
@@ -3367,12 +3361,9 @@ def process_interactive_message(message, bot_id):
         item = _peek_pending(PENDING_LENS_FOREIGN, from_number)
         activate_market(from_number)
         if item and item.get("matches"):
-            lang_ = item.get("lang", "ar")
-            send_whatsapp_text(from_number, T(lang_, "lens_foreign_header"), item.get("bot_id") or bot_id)
             _send_lens_match_batch(
                 from_number, item["matches"], item.get("bot_id") or bot_id,
-                lang_, convert_prices=True,
-                per_store_max=LENS_RAW_SECTION_MAX, max_cards=LENS_RAW_SECTION_MAX,
+                item.get("lang", "ar"), convert_prices=True,
             )
         elif item and item.get("query"):
             run_global_search(from_number, {
@@ -3730,15 +3721,13 @@ def _lens_store_label(m):
         return "Store"
 
 
-def _send_lens_match_batch(from_number, matches, bot_id, lang, header="", convert_prices=False, per_store_max=None, max_cards=None):
+def _send_lens_match_batch(from_number, matches, bot_id, lang, header="", convert_prices=False, per_store_max=None):
     """v72.2: بدون رسالة قائمة — بطاقات CTA مباشرة، كل بطاقة: اسم نظيف + سعر بارز + متجر.
 
     التنويع: round-robin على المتاجر — متجر مختلف لكل بطاقة أولاً، ثم نكمل من نفس
     المتاجر بحد أقصى LENS_PER_STORE_MAX لكل متجر (حتى لا تكون كل البطاقات من لولو).
     v73: الترتيب النهائي — المسعّر أولاً من الأرخص إلى الأغلى، ثم غير المسعّر.
-    v74.3: max_cards يتجاوز سقف MAX_STORES (يستخدمه وضع الخام لعرض نتائج أكثر).
     """
-    card_limit = max_cards if max_cards else MAX_STORES
     per_store = per_store_max if per_store_max else LENS_PER_STORE_MAX
     # 1) تجميع المرشحين أصحاب الروابط الصالحة حسب المتجر (host) مع الحفاظ على ترتيب Google.
     by_host, host_order = {}, []
@@ -3763,7 +3752,7 @@ def _send_lens_match_batch(from_number, matches, bot_id, lang, header="", conver
     picked, used_urls = [], set()
     for round_i in range(per_store):
         for host in host_order:
-            if len(picked) >= card_limit:
+            if len(picked) >= MAX_STORES:
                 break
             items = by_host[host]
             if round_i < len(items):
@@ -3772,7 +3761,7 @@ def _send_lens_match_batch(from_number, matches, bot_id, lang, header="", conver
                     continue
                 picked.append((m, title, url))
                 used_urls.add(url)
-        if len(picked) >= card_limit:
+        if len(picked) >= MAX_STORES:
             break
 
     # 3) v72.3: البطاقات التي بلا سعر من Google — نجلب السعر من صفحة المتجر نفسها (مجاني وسريع).
@@ -3785,7 +3774,7 @@ def _send_lens_match_batch(from_number, matches, bot_id, lang, header="", conver
             VERIFIED_PAGE_CACHE[url] = {"data": info, "ts": time.time()}
         return info
 
-    final_picked = picked[:card_limit]
+    final_picked = picked[:MAX_STORES]
     # v74: السعر الحقيقي بلا تقريب — Google أحياناً يقرّب (1.000 بدل 1.250)، لذلك نقرأ
     # سعر صفحة المتجر نفسها لكل البطاقات (ضمن السقف) ونعتمده فوق سعر Google عند وجوده.
     to_verify = [(i, url) for i, (_m, _t, url) in enumerate(final_picked)][:LENS_PRICE_FETCH_MAX]
@@ -3842,9 +3831,6 @@ def _send_lens_match_batch(from_number, matches, bot_id, lang, header="", conver
                 price_txt = format_lens_price(raw_price, m.get("price_value"), lang, m.get("currency") or None)
         store = _lens_store_label(m)
         body_lines = [f"🛍️ {shown_title[:130]}"]
-        if m.get("exact"):
-            # v74.3: نتيجة Google المصنفة "مطابقة تامة" تُعلَّم على البطاقة.
-            body_lines.append("✅ مطابقة تامة" if lang == "ar" else "✅ Exact match")
         if price_txt:
             body_lines.append("")
             body_lines.append(f"💰 السعر: *{price_txt}*" if lang == "ar" else f"💰 Price: *{price_txt}*")
@@ -3953,73 +3939,84 @@ def _pop_pending_lens_social(phone):
 
 
 def send_lens_raw_all_results(from_number, lens, bot_id, lang, caption=""):
-    """v74.4: المحلي يُعرض فوراً كبطاقات CTA، والعالمي اختياري — نسأل المستخدم بزر 🌍.
+    """v74.2: كل نتائج Google Lens (تبويب All) تُرسل كما هي — Exact ثم Visual.
 
-    - فلتر الذكاء الاصطناعي (filter_shopping_results) يبقي مواقع البيع فقط.
-    - نتائج التواصل تُفصل وتُعرض عند اختيار «عروض التواصل».
-    - 🇰🇼 المحلي: بطاقات CTA فوراً (الاسم + ✅ مطابقة تامة + 💰 السعر + زر المتجر).
-    - 🌍 العالمي: لا يُرسل تلقائياً — يُخزن ويظهر زر «دوّر عالمياً» (نفس تصميم v72).
-    - إذا لا محلي: رسالة «ما لقيت نتائج محلية» مع عدد النتائج العالمية والأزرار.
+    بلا فلتر مواقع بيع، بلا فصل محلي/عالمي/تواصل، بلا سقف متاجر ولا فرز أسعار:
+    الترتيب هو ترتيب Google نفسه داخل كل قسم. النتائج مقسمة على رسائل واتساب
+    (سقف الرسالة 4096 حرفاً) وبعدها زر «بدائل مشابهة» لمن يريد بحثاً نصياً.
     """
     matches = [m for m in (lens.get("matches") or []) if (m.get("title") or "").strip()]
     if not matches:
         return False
     matches = matches[:LENS_RAW_MAX_RESULTS]
+    exact = [m for m in matches if m.get("exact")]
+    visual = [m for m in matches if not m.get("exact")]
 
-    social = [m for m in matches if is_social_result(m)]
-    nonsocial = [m for m in matches if not is_social_result(m)]
-    # فلتر مواقع البيع: NON_SHOP_HOSTS أولاً ثم حكم الذكاء الاصطناعي للغامض.
-    shopping = filter_shopping_results(nonsocial)
-    local = [m for m in shopping if is_local_lens_result(m)]
-    foreign = [m for m in shopping if not is_local_lens_result(m)]
-    country = country_hint_word(lang) or current_market().get("country_name", "")
+    def _fmt(i, m):
+        title = _clean_lens_title(m.get("title")) or (m.get("title") or "").strip()
+        store = _lens_store_label(m)
+        raw_price = str(m.get("price") or "").strip()
+        price_txt = ""
+        if raw_price or m.get("price_value") not in (None, ""):
+            price_txt = format_lens_price(raw_price, m.get("price_value"), lang, m.get("currency") or None)
+        line = f"{i}. *{title[:90]}*"
+        meta = " — ".join(x for x in (store, price_txt) if x)
+        if meta:
+            line += f"\n{meta}"
+        url = (m.get("link") or "").strip()
+        if url.startswith("http"):
+            line += f"\n{url}"
+        return line
 
+    lines = [T(lang, "lens_raw_header", c=len(matches))]
+    idx = 1
+    if exact:
+        lines.append("")
+        lines.append(T(lang, "lens_raw_exact"))
+        for m in exact:
+            lines.append(_fmt(idx, m))
+            idx += 1
+    if visual:
+        lines.append("")
+        lines.append(T(lang, "lens_raw_visual"))
+        for m in visual:
+            lines.append(_fmt(idx, m))
+            idx += 1
+
+    # تقسيم على رسائل ≤ 3800 حرفاً حتى لا نصطدم بسقف واتساب (4096).
+    chunks, cur = [], ""
+    for ln in lines:
+        candidate = (cur + "\n" + ln) if cur else ln
+        if len(candidate) > 3800 and cur:
+            chunks.append(cur)
+            cur = ln
+        else:
+            cur = candidate
+    if cur:
+        chunks.append(cur)
+    for ch in chunks:
+        send_whatsapp_text(from_number, ch, bot_id)
+
+    # نخزن العالمي والتواصل احتياطاً حتى تبقى أزرار lf_yes/ls_yes شغالة لو ظهرت لاحقاً.
     chosen_title = ((lens.get("chosen") or {}).get("title") or matches[0]["title"]).strip()
     similar_query = (caption or chosen_title).strip()
     now = time.time()
-    # العالمي والتواصل يُخزنان للأزرار (lf_yes / ls_yes) — يُعرضان فقط عند الطلب.
     PENDING_LENS_FOREIGN[from_number] = {
-        "bot_id": bot_id, "lang": lang, "matches": foreign[:LENS_RESULT_LIMIT],
+        "bot_id": bot_id, "lang": lang,
+        "matches": [m for m in matches if not is_local_lens_result(m)][:LENS_RESULT_LIMIT],
         "query": similar_query, "ts": now,
     }
     PENDING_LENS_SOCIAL[from_number] = {
-        "bot_id": bot_id, "lang": lang, "matches": social[:LENS_RESULT_LIMIT], "ts": now,
+        "bot_id": bot_id, "lang": lang,
+        "matches": [m for m in matches if is_social_result(m)][:LENS_RESULT_LIMIT], "ts": now,
     }
-
-    def _option_buttons():
-        # واتساب يسمح بـ 3 أزرار كحد أقصى — العالمي أولاً لأنه الأهم.
-        btns = []
-        if foreign:
-            btns.append({"id": "lf_yes", "title": T(lang, "opt_global")[:20]})
-        btns.append({"id": "lf_similar", "title": T(lang, "opt_similar")[:20]})
-        if social and len(btns) < 3:
-            btns.append({"id": "ls_yes", "title": T(lang, "opt_social")[:20]})
-        return btns
-
-    if local:
-        send_whatsapp_text(from_number, T(lang, "lens_local_header", country=country), bot_id)
-        sent = _send_lens_match_batch(
-            from_number, local, bot_id, lang, convert_prices=False,
-            per_store_max=LENS_RAW_SECTION_MAX, max_cards=LENS_RAW_SECTION_MAX,
-        )
-        if sent:
-            # العالمي ما ينرسل — نسأل: تبي أدور عالمياً؟ + بدائل + تواصل.
-            body = (T(lang, "global_ask", c=len(foreign)) if foreign
-                    else T(lang, "more_options_ask"))
-            send_whatsapp_buttons(from_number, body, _option_buttons(), bot_id)
-            LAST_SEARCH[from_number] = {"product": similar_query}
-            print(f"LENS RAW v74.4 SENT: local={len(local)} foreign_stored={len(foreign)} social_stored={len(social)}")
-            return True
-
-    # لا نتائج محلية: نفس تصميم v72 — رسالة + أزرار الخيارات، بدون عرض العالمي تلقائياً.
-    if foreign or social:
-        body = (T(lang, "lens_no_local", c=len(foreign), country=country) if foreign
-                else T(lang, "no_local_generic"))
-        send_whatsapp_buttons(from_number, body, _option_buttons(), bot_id)
-        LAST_SEARCH[from_number] = {"product": similar_query}
-        print(f"LENS RAW v74.4 NO LOCAL: foreign_stored={len(foreign)} social_stored={len(social)}")
-        return True
-    return False
+    send_whatsapp_buttons(
+        from_number, T(lang, "more_options_ask"),
+        [{"id": "lf_similar", "title": T(lang, "opt_similar")[:20]}], bot_id,
+    )
+    LAST_SEARCH[from_number] = {"product": similar_query}
+    print(f"LENS RAW ALL SENT: total={len(matches)} exact={len(exact)} visual={len(visual)} chunks={len(chunks)}")
+    return True
 
 
 def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
@@ -4075,13 +4072,8 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
     return True
 
 def process_single_image(message,bot_id,lang="ar"):
-    """v74.4: مسار الصور = Google Lens فقط — المسار القديم (Vision + طبقات البحث) أُلغي.
-
-    الصورة -> Lens (type=all) -> فلتر مواقع البيع -> بطاقات محلية،
-    والعالمي اختياري بزر 🌍. إذا Google ما رجّع شيئاً نطلب صورة أوضح أو اسم المنتج.
-    """
     from_number=message["from"]
-    activate_market(from_number)
+    market = activate_market(from_number)
     caption=(message.get("image",{}) or {}).get("caption","").strip()
     send_whatsapp_text(from_number,T(lang,"identifying"),bot_id)
     try:
@@ -4092,35 +4084,132 @@ def process_single_image(message,bot_id,lang="ar"):
         send_whatsapp_text(from_number, T(lang, "image_error"), bot_id)
         return
 
-    if not (ENABLE_GOOGLE_LENS and SERPAPI_API_KEY and PUBLIC_BASE_URL):
-        send_whatsapp_text(from_number, T(lang, "image_error"), bot_id)
-        return
-
     # v71.2: نفس حركة تطبيق Lens — نرفق اسم بلد المستخدم كنص مع الصورة
     # («الكويت») فيرجّح Google نتائج متاجر نفس البلد.
     country_word = country_hint_word(lang)
     lens_hint = " ".join(x for x in (caption, country_word) if x).strip()
-    print(f"LENS ONLY HINT: {lens_hint!r}")
 
-    lens = google_lens_lookup(b64, mime, lang, lens_hint, light=True)
-    if lens.get("matches") and send_lens_raw_all_results(from_number, lens, bot_id, lang, caption):
-        if AUTO_SEND_PRODUCT_MAPS:
-            send_maps_button(from_number, LAST_SEARCH.get(from_number, {}).get("product") or caption or "product", bot_id, lang)
-        return
+    # v71: وضع اللينز المباشر — الصورة تروح لـ Google Lens ونتائجه تُرسل كما هي.
+    # بدون Vision ولا حكم هوية ولا طبقات بحث. إذا Google ما رجع شي، نكمل بالمسار الكامل.
+    if LENS_DIRECT_MODE and ENABLE_GOOGLE_LENS and SERPAPI_API_KEY and PUBLIC_BASE_URL:
+        print(f"LENS DIRECT HINT: {lens_hint!r}")
+        lens_direct = google_lens_lookup(b64, mime, lang, lens_hint, light=True)
+        if lens_direct.get("matches"):
+            # v74.2: الوضع الخام يرسل كل نتائج All (exact+visual) كما هي؛
+            # وإلا نرجع لمسار v74 المفلتر (متاجر فقط + محلي/عالمي/تواصل).
+            _sender = send_lens_raw_all_results if LENS_RAW_ALL_MODE else send_lens_direct_results
+            if _sender(from_number, lens_direct, bot_id, lang, caption):
+                if AUTO_SEND_PRODUCT_MAPS:
+                    send_maps_button(from_number, LAST_SEARCH.get(from_number, {}).get("product") or caption or "product", bot_id, lang)
+                return
+        print("LENS DIRECT MODE: no Google results -> full pipeline fallback")
+        send_whatsapp_text(from_number, T(lang, "lens_none"), bot_id)
 
-    # لا نتائج من Google إطلاقاً (أو كلها انفلترت): لا مسار قديم — نطلب توضيحاً.
-    if caption:
-        # عنده وصف نصي: نخزنه ونعرض زر البدائل المشابهة (بحث نصي بالاسم).
-        PENDING_LENS_FOREIGN[from_number] = {
-            "bot_id": bot_id, "lang": lang, "matches": [], "query": caption, "ts": time.time(),
-        }
-        LAST_SEARCH[from_number] = {"product": caption}
-        send_whatsapp_buttons(
-            from_number, T(lang, "lens_none_final"),
-            [{"id": "lf_similar", "title": T(lang, "opt_similar")[:20]}], bot_id,
-        )
+    # FUSION ROUTER (قوة الخلط):
+    # 1) Lens و Vision يشتغلان بالتوازي — لا ننتظر أحدهما ليبدأ الآخر.
+    # 2) Lens متعدد التمريرات (products -> all -> wide) = نفس قوة تطبيق Lens.
+    # 3) الهوية النهائية = دمج عنوان Lens الدقيق + الاسم العربي/الإنجليزي من Vision،
+    #    فيبحث النص بكل المرادفات ويغطي الفهرسة العربية والإنجليزية معاً.
+    lens_future = None
+    if LENS_PARALLEL_WITH_VISION and ENABLE_GOOGLE_LENS and SERPAPI_API_KEY and PUBLIC_BASE_URL:
+        lens_future = LENS_POOL.submit(_run_with_market, market, google_lens_lookup, b64, mime, lang, lens_hint)
+
+    vision_name = identify_product_with_retry(b64, mime, lang)
+    force_fashion_lens = is_fashion_identity(vision_name, caption)
+    use_lens, route_reason = lens_routing_decision(vision_name, caption)
+    use_lens = force_fashion_lens or use_lens
+
+    lens = {"aliases": [], "matches": [], "query": ""}
+    if use_lens:
+        if lens_future is not None:
+            try:
+                lens = lens_future.result(timeout=150) or lens
+            except Exception as e:
+                print(f"LENS PARALLEL ERR: {e}")
+        else:
+            lens = google_lens_lookup(b64, mime, lang, " ".join(x for x in ((caption or vision_name), country_word) if x).strip())
+    elif lens_future is not None:
+        # الراوتر قرر Vision-first (عبوة نصية)؛ نتيجة اللينز المتوازية تُهمل بهدوء.
+        lens_future.cancel()
+
+    active_lens = None
+    identity_source = "VISION"
+    combined_name = vision_name
+    lens_title = ((lens.get("chosen") or {}).get("title") or lens.get("query") or "").strip()
+
+    print(f"SMART ROUTER: vision={vision_name!r} use_lens={use_lens} force_fashion={force_fashion_lens} reason={route_reason}")
+    if use_lens:
+        if force_fashion_lens and lens_title:
+            # Exact design/pattern matters in fashion. Never downgrade to the generic Vision label.
+            lens["force_lens_only"] = True
+            combined_name = " | ".join(fuse_identity_aliases(lens_title, "", lens.get("aliases")))
+            active_lens = lens
+            identity_source = "LENS_FASHION_FORCED"
+            print(f"FASHION LENS FORCED: {lens_title}")
+        elif lens_title and vision_name:
+            if identity_candidates_agree(vision_name, lens_title):
+                # الاتفاق = أقوى حالة: نبحث بعنوان Lens الدقيق + اسمي Vision العربي والإنجليزي معاً.
+                combined_name = " | ".join(fuse_identity_aliases(lens_title, vision_name))
+                active_lens = lens
+                identity_source = "VISION+LENS_AGREE_FUSED"
+                print("IDENTITY JUDGE SKIPPED: candidates already agree -> fused aliases")
+            else:
+                judged_name, active_lens, identity_source = choose_image_identity(
+                    b64, mime, lens, vision_name
+                )
+                if active_lens:
+                    # حتى بعد فوز Lens، مرادفات Vision تبقى في البحث النصي لتغطية الفهرسة العربية.
+                    combined_name = " | ".join(fuse_identity_aliases(judged_name, vision_name))
+                else:
+                    combined_name = judged_name
+        elif lens_title:
+            combined_name = " | ".join(fuse_identity_aliases(lens_title, "", lens.get("aliases")))
+            active_lens, identity_source = lens, "LENS_ONLY"
+        else:
+            combined_name, active_lens, identity_source = vision_name, None, "VISION_LENS_EMPTY"
     else:
-        send_whatsapp_text(from_number, T(lang, "lens_none_final"), bot_id)
+        print("GOOGLE LENS SKIPPED BY SMART ROUTER")
+
+    print(f"FINAL IMAGE IDENTITY [{identity_source}]: {combined_name}")
+
+    if combined_name and caption:
+        request_query = f"{caption} — {combined_name}"
+        prompt_text = (
+            f"هوية المنتج المعتمدة: {combined_name}\n"
+            f"طلب المستخدم: {caption}\n"
+            "ابحث عن نفس المنتج فقط. لا توسع البحث إلى منتج يشاركه المكون أو اللون أو الفئة. "
+            f"{LANG_INSTR[lang]}"
+        )
+        txt,urls=search_product(request_query, lang, prompt_text=prompt_text, lens_context=active_lens)
+        query = request_query
+    elif combined_name:
+        txt,urls=search_product(combined_name, lang, lens_context=active_lens)
+        query = combined_name
+    else:
+        txt, urls = "", {}
+        query = caption
+
+    if query:
+        LAST_SEARCH[from_number] = {"product": query}
+    if not txt or not extract_store_offers(txt):
+        if txt and (is_service_answer(txt) or is_informational_answer(txt)):
+            send_product_result(from_number, txt, urls, bot_id, lang, query)
+            return
+        if query:
+            # حتى بدون نتائج Lens، البحث العالمي والبدائل يعملان نصياً بالاسم المحدد.
+            _store_pending_global(from_number, bot_id, lang, query, active_lens, prompt_text if (combined_name and caption) else None)
+            send_not_found_choice(from_number, bot_id, lang)
+        else:
+            send_whatsapp_text(from_number,T(lang,"cant_identify"),bot_id)
+        return
+    result_type = send_product_result(from_number, txt, urls, bot_id, lang, query)
+    if result_type == "none" and query:
+        # كانت هناك عروض لكن كل روابطها غير مباشرة؛ نعرض الخيارات الثلاثة مثل مسار النص تماماً.
+        _store_pending_global(from_number, bot_id, lang, query, active_lens, prompt_text if (combined_name and caption) else None)
+        send_not_found_choice(from_number, bot_id, lang)
+        return
+    if query and (result_type == "service" or (result_type == "product" and AUTO_SEND_PRODUCT_MAPS)):
+        send_maps_button(from_number, query, bot_id, lang)
 
 def identify_image_product(msg):
     try:
@@ -4143,14 +4232,13 @@ def process_cart(products, from_number, bot_id, lang="ar"):
     LAST_SEARCH[from_number] = {"product": products[0]}
 
 def process_multi_images(messages,from_number,bot_id,lang="ar"):
-    """v74.4: كل صورة تمر بمسار Lens الجديد نفسه — مسار Vision القديم أُلغي."""
     activate_market(from_number)
     send_whatsapp_text(from_number,T(lang,"multi_images",c=len(messages)),bot_id)
-    for msg in messages:
-        try:
-            process_single_image(msg, bot_id, lang)
-        except Exception as e:
-            print(f"MULTI IMAGE ERR: {e}")
+    names=[n for n in WORKERS.map(identify_image_product,messages) if n]
+    if not names:
+        send_whatsapp_text(from_number,T(lang,"cant_identify"),bot_id)
+        return
+    process_cart(names, from_number, bot_id, lang)
 
 def is_map_command(text):
     compact = re.sub(r"[^\w\u0600-\u06FF]", "", normalize_ar(text))
@@ -4457,4 +4545,4 @@ def process_location_message(message, bot_id):
     route_pending_after_location(from_number)
 
 @app.get("/")
-async def health(): return {"status":"v74.4 LENS ONLY: LOCAL CTA + GLOBAL OPT-IN", "lens_direct_mode":LENS_DIRECT_MODE, "lens_raw_all_mode":LENS_RAW_ALL_MODE, "build":BUILD_ID, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
+async def health(): return {"status":"v74.2 LENS RAW ALL (exact+visual passthrough)", "lens_direct_mode":LENS_DIRECT_MODE, "lens_raw_all_mode":LENS_RAW_ALL_MODE, "build":BUILD_ID, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
