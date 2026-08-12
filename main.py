@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v76.4-no-similar-more-options-20260811"
+BUILD_ID = "v76.3-similar-cta-fixed-20260808"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE -> GOOGLE LENS DIRECT PASSTHROUGH (raw results to user)")
@@ -878,7 +878,7 @@ MSG = {
         "lens_header": "🔍 هذا اللي طلع من Google عن صورتك:",
         "lens_local_header": "🔍 نتائج {country} من Google لصورتك:",
         "lens_foreign_ask": "🌍 عندي {c} نتائج إضافية من متاجر خارج {country}.\nتبي أعرضها لك؟ 👇",
-        "lens_no_local": "ما لقيت نتائج من متاجر داخل {country} لهالصورة 😅\nعندي {c} نتائج من متاجر عالمية 🌍.\nوش تبي؟ 👇",
+        "lens_no_local": "ما لقيت نتائج من متاجر داخل {country} لهالصورة 😅\nعندي {c} نتائج من متاجر عالمية 🌍، أو أقدر أدور لك بدائل مشابهة محلياً 🔄\nوش تبي؟ 👇",
         "lens_social_ask": "📱 لقيت للمنتج نتائج في برامج التواصل (انستجرام، تيك توك، سناب...).\nتبي أعرضها لك؟ 👇",
         "ls_show": "اعرضها 📱",
         "ls_skip": "لا شكراً 🙏",
@@ -941,7 +941,7 @@ MSG = {
         "lens_header": "🔍 Here's what Google returned for your photo:",
         "lens_local_header": "🔍 {country} results from Google for your photo:",
         "lens_foreign_ask": "🌍 I also have {c} results from stores outside {country}.\nWant me to show them? 👇",
-        "lens_no_local": "No results from stores inside {country} for this photo 😅\nI have {c} international results 🌍.\nWhat would you like? 👇",
+        "lens_no_local": "No results from stores inside {country} for this photo 😅\nI have {c} international results 🌍, or I can find similar local alternatives 🔄\nWhat would you like? 👇",
         "lens_social_ask": "📱 I also found results for this product on social media (Instagram, TikTok, Snapchat...).\nWant me to show them? 👇",
         "ls_show": "Show them 📱",
         "ls_skip": "No thanks 🙏",
@@ -4991,14 +4991,13 @@ def _pop_pending_lens_social(phone):
 
 
 def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
-    """v76.4: فلتر مواقع البيع + قائمة الخيارات الإضافية بعد النتائج.
+    """v74: فلتر مواقع البيع + الخيارات الثلاثة كقائمة واحدة بعد النتائج.
 
     - فلتر ذكاء اصطناعي يبقي فقط مواقع البيع الفعلية (لا مقالات ولا مدونات).
     - نتائج التواصل تُفصل وتُعرض عند اختيار «عروض التواصل» من الخيارات.
-    - المحلي يُرسل فوراً (المسعّر أولاً أرخص→أغلى)، وبعده قائمة الخيارات الإضافية:
-      [🌍 دوّر عالمياً] [📍 وين أقرب محل؟]
-    - لا محلي؟ نفس الخيارين مع نص يوضح عدم توفر المنتج محلياً.
-    - ميزة «بدائل مشابهة» نفسها تبقى في الكود، لكنها لا تظهر في هذه القائمة.
+    - المحلي يُرسل فوراً (المسعّر أولاً أرخص→أغلى)، وبعده رسالة خيارات واحدة:
+      [🔄 بدائل مشابهة] [🌍 دوّر عالمياً] [📱 عروض التواصل]
+    - لا محلي؟ نفس الخيارات الثلاثة مع نص يوضح عدم توفر المنتج محلياً.
     """
     matches = [m for m in (lens.get("matches") or []) if (m.get("title") or "").strip()]
     if not matches:
@@ -5033,9 +5032,11 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
     PENDING_LENS_SOCIAL[from_number] = {
         "bot_id": bot_id, "lang": lang, "matches": social[:LENS_RESULT_LIMIT], "ts": now,
     }
-    # v76.4: «بدائل مشابهة» أزيلت من قائمة «خيارات إضافية» فقط.
-    # البحث العالمي والخريطة يبقيان كما هما.
+    # v74.14: قائمة واحدة بأربعة خيارات (القوائم تسمح حتى 10 بينما الأزرار 3 فقط) —
+    # «افتح الخريطة» انضمت كخيار رابع، ورسالة الخريطة المنفصلة انشالت.
+    # v75.6: بدون «عروض التواصل» — ثلاثة خيارات واضحة فقط.
     trio = [
+        {"id": "lf_similar", "title": T(lang, "opt_similar")[:24]},
         {"id": "lf_yes", "title": T(lang, "opt_global")[:24]},
         {"id": "map_open", "title": T(lang, "opt_map")[:24]},
     ]
@@ -5043,7 +5044,7 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
     if local:
         sent = _send_lens_match_batch(from_number, local, bot_id, lang, convert_prices=False)
     if sent:
-        # v76.4: بعد النتائج المحلية — البحث العالمي + الخريطة فقط.
+        # v74.14: بعد النتائج المحلية — قائمة واحدة بأربعة خيارات (منها الخريطة).
         send_whatsapp_list(from_number, T(lang, "more_options_ask"), trio, bot_id, T(lang, "options_button"))
     elif foreign or social:
         body = (T(lang, "lens_no_local", c=len(foreign), country=country) if foreign
