@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v74-2-lens-raw-all-20260812"
+BUILD_ID = "v74-2-1-lens-raw-all-envbool-fix-20260812"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE -> GOOGLE LENS type=all RAW PASSTHROUGH (ALL exact+visual results to user)")
@@ -24,6 +24,13 @@ VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN", "MY_SECRET_COOP_BOT_TOKEN")
 
 GRAPH_URL = "https://graph.facebook.com/v20.0"
 GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
+
+# v74.2.1: env_bool يجب أن تُعرَّف قبل أول استخدام لها في أعلى الملف.
+def env_bool(name, default=False):
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in ("1", "true", "yes", "on")
 
 processed_ids = deque(maxlen=1000)
 IMAGE_BUFFER = defaultdict(lambda: {"images": [], "time": 0, "bot_id": ""})
@@ -68,12 +75,6 @@ OLD_SEARCH_POOL = ThreadPoolExecutor(max_workers=8)
 LENS_POOL = ThreadPoolExecutor(max_workers=4)
 OLD_LAYER_DUPLICATES = max(1, int(os.environ.get("OLD_LAYER_DUPLICATES", "2")))
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-
-def env_bool(name, default=False):
-    value = os.environ.get(name)
-    if value is None:
-        return default
-    return value.strip().lower() in ("1", "true", "yes", "on")
 
 OLD_LAYER_ENABLED = env_bool("OLD_LAYER_ENABLED", True)
 
