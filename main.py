@@ -6,10 +6,10 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v74-2-1-lens-raw-all-envbool-fix-20260812"
+BUILD_ID = "v74-3-lens-raw-cta-local-global-20260812"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
-print("IMAGE -> GOOGLE LENS type=all RAW PASSTHROUGH (ALL exact+visual results to user)")
+print("IMAGE -> GOOGLE LENS type=all -> AI SHOP FILTER -> LOCAL + GLOBAL CTA CARDS")
 print("=" * 70)
 
 
@@ -118,6 +118,8 @@ LENS_DIRECT_MODE = env_bool("LENS_DIRECT_MODE", True)
 # أطفئه بـ LENS_RAW_ALL_MODE=false للرجوع لسلوك v74 المفلتر.
 LENS_RAW_ALL_MODE = env_bool("LENS_RAW_ALL_MODE", True)
 LENS_RAW_MAX_RESULTS = max(5, int(os.environ.get("LENS_RAW_MAX_RESULTS", "40")))
+# v74.3: سقف بطاقات CTA لكل قسم (محلي/عالمي) حتى لا نغرق المحادثة.
+LENS_RAW_SECTION_MAX = max(3, int(os.environ.get("LENS_RAW_SECTION_MAX", "12")))
 LENS_DIRECT_MAX_LINES = max(3, int(os.environ.get("LENS_DIRECT_MAX_LINES", "8")))
 # v72.2: تنويع المتاجر في بطاقات CTA — حد أقصى من البطاقات لكل متجر واحد.
 LENS_PER_STORE_MAX = max(1, int(os.environ.get("LENS_PER_STORE_MAX", "2")))
@@ -3721,13 +3723,15 @@ def _lens_store_label(m):
         return "Store"
 
 
-def _send_lens_match_batch(from_number, matches, bot_id, lang, header="", convert_prices=False, per_store_max=None):
+def _send_lens_match_batch(from_number, matches, bot_id, lang, header="", convert_prices=False, per_store_max=None, max_cards=None):
     """v72.2: بدون رسالة قائمة — بطاقات CTA مباشرة، كل بطاقة: اسم نظيف + سعر بارز + متجر.
 
     التنويع: round-robin على المتاجر — متجر مختلف لكل بطاقة أولاً، ثم نكمل من نفس
     المتاجر بحد أقصى LENS_PER_STORE_MAX لكل متجر (حتى لا تكون كل البطاقات من لولو).
     v73: الترتيب النهائي — المسعّر أولاً من الأرخص إلى الأغلى، ثم غير المسعّر.
+    v74.3: max_cards يتجاوز سقف MAX_STORES (يستخدمه وضع الخام لعرض نتائج أكثر).
     """
+    card_limit = max_cards if max_cards else MAX_STORES
     per_store = per_store_max if per_store_max else LENS_PER_STORE_MAX
     # 1) تجميع المرشحين أصحاب الروابط الصالحة حسب المتجر (host) مع الحفاظ على ترتيب Google.
     by_host, host_order = {}, []
@@ -3752,7 +3756,7 @@ def _send_lens_match_batch(from_number, matches, bot_id, lang, header="", conver
     picked, used_urls = [], set()
     for round_i in range(per_store):
         for host in host_order:
-            if len(picked) >= MAX_STORES:
+            if len(picked) >= card_limit:
                 break
             items = by_host[host]
             if round_i < len(items):
@@ -3761,7 +3765,7 @@ def _send_lens_match_batch(from_number, matches, bot_id, lang, header="", conver
                     continue
                 picked.append((m, title, url))
                 used_urls.add(url)
-        if len(picked) >= MAX_STORES:
+        if len(picked) >= card_limit:
             break
 
     # 3) v72.3: البطاقات التي بلا سعر من Google — نجلب السعر من صفحة المتجر نفسها (مجاني وسريع).
@@ -3774,7 +3778,7 @@ def _send_lens_match_batch(from_number, matches, bot_id, lang, header="", conver
             VERIFIED_PAGE_CACHE[url] = {"data": info, "ts": time.time()}
         return info
 
-    final_picked = picked[:MAX_STORES]
+    final_picked = picked[:card_limit]
     # v74: السعر الحقيقي بلا تقريب — Google أحياناً يقرّب (1.000 بدل 1.250)، لذلك نقرأ
     # سعر صفحة المتجر نفسها لكل البطاقات (ضمن السقف) ونعتمده فوق سعر Google عند وجوده.
     to_verify = [(i, url) for i, (_m, _t, url) in enumerate(final_picked)][:LENS_PRICE_FETCH_MAX]
@@ -3831,6 +3835,9 @@ def _send_lens_match_batch(from_number, matches, bot_id, lang, header="", conver
                 price_txt = format_lens_price(raw_price, m.get("price_value"), lang, m.get("currency") or None)
         store = _lens_store_label(m)
         body_lines = [f"🛍️ {shown_title[:130]}"]
+        if m.get("exact"):
+            # v74.3: نتيجة Google المصنفة "مطابقة تامة" تُعلَّم على البطاقة.
+            body_lines.append("✅ مطابقة تامة" if lang == "ar" else "✅ Exact match")
         if price_txt:
             body_lines.append("")
             body_lines.append(f"💰 السعر: *{price_txt}*" if lang == "ar" else f"💰 Price: *{price_txt}*")
@@ -3939,83 +3946,72 @@ def _pop_pending_lens_social(phone):
 
 
 def send_lens_raw_all_results(from_number, lens, bot_id, lang, caption=""):
-    """v74.2: كل نتائج Google Lens (تبويب All) تُرسل كما هي — Exact ثم Visual.
+    """v74.3: نتائج Lens (type=all) مقسمة قسمين — محلي ثم عالمي — كبطاقات CTA بأسعارها.
 
-    بلا فلتر مواقع بيع، بلا فصل محلي/عالمي/تواصل، بلا سقف متاجر ولا فرز أسعار:
-    الترتيب هو ترتيب Google نفسه داخل كل قسم. النتائج مقسمة على رسائل واتساب
-    (سقف الرسالة 4096 حرفاً) وبعدها زر «بدائل مشابهة» لمن يريد بحثاً نصياً.
+    - فلتر الذكاء الاصطناعي (filter_shopping_results) يبقي مواقع البيع فقط:
+      لا مقالات ولا مدونات ولا موسوعات ولا أخبار.
+    - نتائج التواصل (انستجرام/تيك توك...) تُفصل وتُعرض عند اختيار «عروض التواصل».
+    - 🇰🇼 القسم المحلي أولاً (المسعّر أرخص→أغلى)، ثم 🌍 القسم العالمي بأسعار محوّلة.
+    - كل نتيجة بطاقة CTA: الاسم + ✅ مطابقة تامة (إن وجدت) + 💰 السعر + زر المتجر.
+    - سقف كل قسم LENS_RAW_SECTION_MAX (افتراضياً 12) — عدّله من متغيرات البيئة.
     """
     matches = [m for m in (lens.get("matches") or []) if (m.get("title") or "").strip()]
     if not matches:
         return False
     matches = matches[:LENS_RAW_MAX_RESULTS]
-    exact = [m for m in matches if m.get("exact")]
-    visual = [m for m in matches if not m.get("exact")]
 
-    def _fmt(i, m):
-        title = _clean_lens_title(m.get("title")) or (m.get("title") or "").strip()
-        store = _lens_store_label(m)
-        raw_price = str(m.get("price") or "").strip()
-        price_txt = ""
-        if raw_price or m.get("price_value") not in (None, ""):
-            price_txt = format_lens_price(raw_price, m.get("price_value"), lang, m.get("currency") or None)
-        line = f"{i}. *{title[:90]}*"
-        meta = " — ".join(x for x in (store, price_txt) if x)
-        if meta:
-            line += f"\n{meta}"
-        url = (m.get("link") or "").strip()
-        if url.startswith("http"):
-            line += f"\n{url}"
-        return line
+    social = [m for m in matches if is_social_result(m)]
+    nonsocial = [m for m in matches if not is_social_result(m)]
+    # فلتر مواقع البيع: NON_SHOP_HOSTS أولاً ثم حكم الذكاء الاصطناعي للغامض.
+    shopping = filter_shopping_results(nonsocial)
+    local = [m for m in shopping if is_local_lens_result(m)]
+    foreign = [m for m in shopping if not is_local_lens_result(m)]
+    country = country_hint_word(lang) or current_market().get("country_name", "")
 
-    lines = [T(lang, "lens_raw_header", c=len(matches))]
-    idx = 1
-    if exact:
-        lines.append("")
-        lines.append(T(lang, "lens_raw_exact"))
-        for m in exact:
-            lines.append(_fmt(idx, m))
-            idx += 1
-    if visual:
-        lines.append("")
-        lines.append(T(lang, "lens_raw_visual"))
-        for m in visual:
-            lines.append(_fmt(idx, m))
-            idx += 1
-
-    # تقسيم على رسائل ≤ 3800 حرفاً حتى لا نصطدم بسقف واتساب (4096).
-    chunks, cur = [], ""
-    for ln in lines:
-        candidate = (cur + "\n" + ln) if cur else ln
-        if len(candidate) > 3800 and cur:
-            chunks.append(cur)
-            cur = ln
-        else:
-            cur = candidate
-    if cur:
-        chunks.append(cur)
-    for ch in chunks:
-        send_whatsapp_text(from_number, ch, bot_id)
-
-    # نخزن العالمي والتواصل احتياطاً حتى تبقى أزرار lf_yes/ls_yes شغالة لو ظهرت لاحقاً.
     chosen_title = ((lens.get("chosen") or {}).get("title") or matches[0]["title"]).strip()
     similar_query = (caption or chosen_title).strip()
     now = time.time()
+    # نخزن العالمي والتواصل للأزرار (lf_yes / ls_yes) حتى بعد عرضها — إعادة العرض ممكنة.
     PENDING_LENS_FOREIGN[from_number] = {
-        "bot_id": bot_id, "lang": lang,
-        "matches": [m for m in matches if not is_local_lens_result(m)][:LENS_RESULT_LIMIT],
+        "bot_id": bot_id, "lang": lang, "matches": foreign[:LENS_RESULT_LIMIT],
         "query": similar_query, "ts": now,
     }
     PENDING_LENS_SOCIAL[from_number] = {
-        "bot_id": bot_id, "lang": lang,
-        "matches": [m for m in matches if is_social_result(m)][:LENS_RESULT_LIMIT], "ts": now,
+        "bot_id": bot_id, "lang": lang, "matches": social[:LENS_RESULT_LIMIT], "ts": now,
     }
-    send_whatsapp_buttons(
-        from_number, T(lang, "more_options_ask"),
-        [{"id": "lf_similar", "title": T(lang, "opt_similar")[:20]}], bot_id,
-    )
+
+    sent_local = sent_foreign = False
+    if local:
+        send_whatsapp_text(from_number, T(lang, "lens_local_header", country=country), bot_id)
+        sent_local = _send_lens_match_batch(
+            from_number, local, bot_id, lang, convert_prices=False,
+            per_store_max=LENS_RAW_SECTION_MAX, max_cards=LENS_RAW_SECTION_MAX,
+        )
+    if foreign:
+        send_whatsapp_text(from_number, T(lang, "lens_foreign_header"), bot_id)
+        sent_foreign = _send_lens_match_batch(
+            from_number, foreign, bot_id, lang, convert_prices=True,
+            per_store_max=LENS_RAW_SECTION_MAX, max_cards=LENS_RAW_SECTION_MAX,
+        )
+
+    sent = sent_local or sent_foreign
+    if sent:
+        trio = [{"id": "lf_similar", "title": T(lang, "opt_similar")[:20]}]
+        if social:
+            trio.append({"id": "ls_yes", "title": T(lang, "opt_social")[:20]})
+        send_whatsapp_buttons(from_number, T(lang, "more_options_ask"), trio, bot_id)
+    elif social:
+        # لا متاجر أبداً — بس فيه نتائج تواصل: نعرض الخيار بدل الصمت.
+        trio = [
+            {"id": "lf_similar", "title": T(lang, "opt_similar")[:20]},
+            {"id": "ls_yes", "title": T(lang, "opt_social")[:20]},
+        ]
+        send_whatsapp_buttons(from_number, T(lang, "no_local_generic"), trio, bot_id)
+        sent = True
+    if not sent:
+        return False
     LAST_SEARCH[from_number] = {"product": similar_query}
-    print(f"LENS RAW ALL SENT: total={len(matches)} exact={len(exact)} visual={len(visual)} chunks={len(chunks)}")
+    print(f"LENS RAW v74.3 SENT: local={len(local)} foreign={len(foreign)} social_stored={len(social)} filtered_out={len(nonsocial)-len(shopping)}")
     return True
 
 
@@ -4545,4 +4541,4 @@ def process_location_message(message, bot_id):
     route_pending_after_location(from_number)
 
 @app.get("/")
-async def health(): return {"status":"v74.2 LENS RAW ALL (exact+visual passthrough)", "lens_direct_mode":LENS_DIRECT_MODE, "lens_raw_all_mode":LENS_RAW_ALL_MODE, "build":BUILD_ID, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
+async def health(): return {"status":"v74.3 LENS RAW: AI SHOP FILTER + LOCAL/GLOBAL CTA", "lens_direct_mode":LENS_DIRECT_MODE, "lens_raw_all_mode":LENS_RAW_ALL_MODE, "build":BUILD_ID, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
