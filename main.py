@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v76.5-amazon-priority-generic-fix-text-global-20260813"
+BUILD_ID = "v76.6-global-cache-fix-amazon-us-supplement-20260813"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE -> GOOGLE LENS DIRECT PASSTHROUGH (raw results to user)")
@@ -3511,7 +3511,8 @@ def _shopping_layer_search(query, lang, allow_global=False, lens_context=None, e
 
 def _new_layer_search(query, lang, prompt_text=None, source_image_b64=None, source_image_mime=None, lens_context=None, allow_global=False, english_name=""):
     # نتائج الصور تعتمد على الصورة نفسها، لذلك لا نستخدم كاش النص وحده.
-    cached = None if source_image_b64 else cache_get(query, lang)
+    # v76.6: والوضع العالمي لا يقرأ الكاش أبداً (الكاش محلي فقط).
+    cached = None if source_image_b64 or allow_global else cache_get(query, lang)
     if cached:
         return cached
 
@@ -3633,7 +3634,7 @@ def _new_layer_search(query, lang, prompt_text=None, source_image_b64=None, sour
         offers = extract_store_offers(txt)
 
         if is_service_answer(txt):
-            if len(txt) >= 40:
+            if len(txt) >= 40 and not allow_global:
                 cache_put(query, lang, txt, urls)
             return txt, urls
         # لا نرسل اعتذار Gemini مباشرة؛ نكمل باقي المحاولات والبحث العام.
@@ -3673,7 +3674,7 @@ def _new_layer_search(query, lang, prompt_text=None, source_image_b64=None, sour
                     lines.append(f"{prefix} {name} — {shown_price}{size_suffix}")
                     new_urls[name] = info["url"]
                 final_txt = "\n".join(lines)
-                if not source_image_b64:
+                if not source_image_b64 and not allow_global:
                     cache_put(query, lang, final_txt, new_urls)
                 return final_txt, new_urls
 
@@ -3706,7 +3707,7 @@ def _new_layer_search(query, lang, prompt_text=None, source_image_b64=None, sour
                     lines.append(f"{prefix} {body}")
                     clean_urls[offer["name"]] = match_url(offer["name"], urls)
                 final_txt = "\n".join(lines)
-                if not source_image_b64:
+                if not source_image_b64 and not allow_global:
                     cache_put(query, lang, final_txt, clean_urls)
                 return final_txt, clean_urls
 
@@ -3976,7 +3977,10 @@ def search_product(query, lang, prompt_text=None, source_image_b64=None, source_
     طبقة Shopping تنطلق بالتوازي منذ البداية فلا تضيف زمناً، وتُدمج نتائجها مع الطبقتين
     بترتيب فئة المنتج ثم من الأرخص إلى الأغلى.
     """
-    cached = None if source_image_b64 or lens_context else cache_get(query, lang)
+    # v76.6: الوضع العالمي لا يستخدم الكاش إطلاقاً — البحث المحلي يخزّن نتائجه بنفس
+    # المفتاح (وحتى المطابقة الضبابية تصيده)، فكان العالمي يرجع النتائج المحلية
+    # والحارس النهائي يحذفها كلها -> «ما لقيت نتيجة» دائماً.
+    cached = None if source_image_b64 or lens_context or allow_global else cache_get(query, lang)
     if cached:
         return cached
 
@@ -4029,7 +4033,7 @@ def search_product(query, lang, prompt_text=None, source_image_b64=None, source_
     shopping_result = _collect_shopping()
     print(f"SHOPPING LAYER DONE offers={len(extract_store_offers(shopping_result[0])) if shopping_result[0] else 0}")
     final_txt, final_urls = _merge_two_layers(query, lang, new_result, old_result, lens_context, shopping_result)
-    if final_txt and not source_image_b64 and not lens_context:
+    if final_txt and not source_image_b64 and not lens_context and not allow_global:
         cache_put(query, lang, final_txt, final_urls)
     return final_txt, final_urls
 
@@ -4299,6 +4303,49 @@ def run_similar_search(phone, item):
     send_whatsapp_text(phone, T(lang, "similar_none"), bot_id)
 
 
+def _is_amazon_us_host(url):
+    h = _host_of(url)
+    return h == "amazon.com" or h.endswith(".amazon.com")
+
+def _amazon_us_supplement(query, lang, limit=3):
+    """v76.6: أولوية قصوى لأمازون أمريكا بطلب المستخدم.
+
+    إذا لم يظهر amazon.com في النتائج العالمية، نسوي جولة Google Shopping أمريكية
+    (gl=us) مخصصة ونسحب منها عروض amazon.com فقط. استدعاء SerpApi واحد، وفقط عند
+    ضغط المستخدم زر البحث العالمي وغياب أمازون — بدون أي تكلفة إضافية دائمة.
+    الأسعار ترجع محوّلة للعملة المحلية جاهزة من google_shopping_offers.
+    """
+    q = str(query or "").strip()
+    if not q or not ENABLE_GOOGLE_SHOPPING or not SERPAPI_API_KEY:
+        return []
+    try:
+        offers = google_shopping_offers(q, lang, allow_global=True)
+    except Exception as e:
+        print(f"AMAZON US SUPPLEMENT ERR: {e}")
+        return []
+    local_code = (current_market().get("currency") or "").upper()
+    out = []
+    for name, info in (offers or {}).items():
+        if not _is_amazon_us_host(info.get("url", "")):
+            continue
+        out.append({
+            "title": (info.get("title") or name or "Amazon").strip(),
+            "link": info.get("url", ""),
+            "source": "Amazon",
+            # السعر محوَّل مسبقاً للعملة المحلية — نمرر عملة السوق حتى لا يُحوَّل مرتين.
+            "price": "", "price_value": info.get("price"),
+            "price_text": info.get("price_text") or "",
+            "currency": local_code,
+        })
+        if len(out) >= limit:
+            break
+    if out:
+        print(f"AMAZON US SUPPLEMENT: +{len(out)} amazon.com offers for {q!r}")
+    else:
+        print(f"AMAZON US SUPPLEMENT: no amazon.com offers for {q!r}")
+    return out
+
+
 def run_global_search(phone, item):
     activate_market(phone)
     bot_id = item["bot_id"]; lang = item["lang"]; query = item["query"]
@@ -4341,6 +4388,28 @@ def run_global_search(phone, item):
                 kept_lines.append(line)
             txt = "\n".join(kept_lines).strip()
             urls = filtered_urls
+    # v76.6: أولوية أمازون أمريكا — إذا ما ظهر amazon.com في النتائج نكمّلها
+    # بجولة Google Shopping أمريكية مخصصة. وتنقذ أيضاً حالة «صفر نتائج».
+    has_amazon = any(_is_amazon_us_host(u) for u in (urls or {}).values())
+    if not has_amazon:
+        supplement = _amazon_us_supplement(query, lang)
+        if supplement:
+            urls = dict(urls or {})
+            lines = (txt or "").splitlines() if (txt or "").strip() else [f"📦 {short_query(query) or query}", ""]
+            for s in supplement:
+                base_name, n = "Amazon", 2
+                name = base_name
+                while name in urls:
+                    name = f"{base_name} {n}"; n += 1
+                shown = s.get("price_text") or (
+                    f"{format_price(s.get('price_value'))} {currency_label(lang)}"
+                    if s.get("price_value") not in (None, "") else ""
+                )
+                if not shown or not s.get("link"):
+                    continue
+                lines.append(f"• {name} — {shown}")
+                urls[name] = s["link"]
+            txt = "\n".join(lines).strip()
     if not txt or not extract_store_offers(txt) or not urls:
         send_whatsapp_text(phone, T(lang, "global_none"), bot_id)
         return
@@ -4412,8 +4481,15 @@ def process_interactive_message(message, bot_id):
         item = _peek_pending(PENDING_LENS_FOREIGN, from_number)
         activate_market(from_number)
         if item and item.get("matches"):
+            matches = list(item["matches"])
+            # v76.6: أولوية أمازون أمريكا — Lens نادراً يرجّع amazon.com لمستخدم خليجي،
+            # فإذا غاب نكمّل بجولة Shopping أمريكية ونحط عروض أمازون بالمقدمة.
+            if not any(_is_amazon_us_host(m.get("link", "")) for m in matches):
+                supplement = _amazon_us_supplement(item.get("query") or "", item.get("lang", "ar"))
+                if supplement:
+                    matches = supplement + matches
             _send_lens_match_batch(
-                from_number, item["matches"], item.get("bot_id") or bot_id,
+                from_number, matches, item.get("bot_id") or bot_id,
                 item.get("lang", "ar"), convert_prices=True,
             )
         elif item and item.get("query"):
