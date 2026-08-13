@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v76.6-global-cache-fix-amazon-us-supplement-20260813"
+BUILD_ID = "v76.4-no-similar-more-options-20260811"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE -> GOOGLE LENS DIRECT PASSTHROUGH (raw results to user)")
@@ -2946,16 +2946,13 @@ _EU_HOST_HINTS = ("amazon.co.uk", "amazon.de", "amazon.fr", "amazon.it", "amazon
                   "zalando", "argos", "currys", "mediamarkt", "fnac", "otto.de", "asos", "johnlewis")
 
 def global_region_rank(item):
-    """-1=Amazon.com الأمريكي (أولوية قصوى)، 0=خليج، 1=أمريكا، 2=الصين، 3=أوروبا، 4=بقية العالم."""
+    """0=خليج، 1=أمريكا، 2=الصين، 3=أوروبا، 4=غير محدد/بقية العالم."""
     hay = " ".join(str(item.get(k) or "") for k in ("title", "source", "link", "domain", "snippet", "price", "currency")).lower()
     link = str(item.get("link") or "").lower()
     try:
         host = urllib.parse.urlparse(link).netloc.lower().replace("www.", "")
     except Exception:
         host = ""
-    # v76.5: Amazon.com الأمريكي دائماً أول نتيجة عالمية — يحتوي أغلب السلع.
-    if host == "amazon.com" or host.endswith(".amazon.com"):
-        return -1
     if any(h in host for h in _CN_HOST_HINTS):
         return 2
     if any(h in host for h in _GCC_HOST_HINTS):
@@ -3008,7 +3005,7 @@ def reorder_global_offers_text(txt, urls):
         price = _extract_numeric_price(o.get("line", "")) or 10**9
         ranked.append((rank, price, o))
     ranked.sort(key=lambda x: (x[0], x[1]))
-    region_names = {-1: "🇺🇸", 0: "🇰🇼🇸🇦🇦🇪", 1: "🇺🇸", 2: "🇨🇳", 3: "🇪🇺", 4: "🌍"}
+    region_names = {0: "🇰🇼🇸🇦🇦🇪", 1: "🇺🇸", 2: "🇨🇳", 3: "🇪🇺", 4: "🌍"}
     out = [l for l in header if l.strip()]
     if out and not out[-1] == "":
         out.append("")
@@ -3511,8 +3508,7 @@ def _shopping_layer_search(query, lang, allow_global=False, lens_context=None, e
 
 def _new_layer_search(query, lang, prompt_text=None, source_image_b64=None, source_image_mime=None, lens_context=None, allow_global=False, english_name=""):
     # نتائج الصور تعتمد على الصورة نفسها، لذلك لا نستخدم كاش النص وحده.
-    # v76.6: والوضع العالمي لا يقرأ الكاش أبداً (الكاش محلي فقط).
-    cached = None if source_image_b64 or allow_global else cache_get(query, lang)
+    cached = None if source_image_b64 else cache_get(query, lang)
     if cached:
         return cached
 
@@ -3577,20 +3573,7 @@ def _new_layer_search(query, lang, prompt_text=None, source_image_b64=None, sour
         priority_stores = priority_stores_for(search_term)
         stores_hint = "، ".join(priority_stores)
         market_name = current_market().get("country_name", "Kuwait")
-        # v76.5: في الوضع العالمي البرومبت عالمي فعلاً (كان محلياً بالخطأ فما يطلع أمازون أبداً).
-        if allow_global:
-            if attempt == 1:
-                search_scope = (
-                    "أولوية قصوى: افحص Amazon.com الأمريكي أولاً — يحتوي أغلب السلع تقريباً، وأحضر منه رابط صفحة المنتج المباشرة مع السعر بالدولار. "
-                    "ثم أكمل بباقي المتاجر العالمية الموثوقة (eBay, Walmart, BestBuy, AliExpress, Amazon.ae, Amazon.sa, Noon...). "
-                    "إذا لم تجد فلا تكتب اعتذاراً مطولاً؛ أرجع بلا نتائج لننتقل لمحاولة أوسع. "
-                )
-            else:
-                search_scope = (
-                    "لم توجد نتيجة كافية في المحاولة السابقة. "
-                    "وسّع البحث في جميع المتاجر العالمية الموثوقة، مع إبقاء Amazon.com الأمريكي في مقدمة المحاولات. "
-                )
-        elif attempt == 1:
+        if attempt == 1:
             search_scope = (
                 f"ابدأ بأشهر المتاجر المحلية في {market_name} (مثل: {stores_hint}) لكن لا تحصر البحث فيها إطلاقاً: "
                 f"اقبل أي متجر محلي آخر في {market_name} يبيع المنتج بسعر موثق ورابط صفحة منتج مباشر حتى لو لم يكن مشهوراً. "
@@ -3602,13 +3585,8 @@ def _new_layer_search(query, lang, prompt_text=None, source_image_b64=None, sour
                 f"اعمل الآن بحثاً عاماً واسعاً في جميع متاجر {market_name} التي تبيع المنتج، بما فيها المتاجر المتخصصة والصغيرة، "
                 "مع تجنب الإعلانات المبوبة فقط مثل OpenSooq. لا تستبعد المتجر لمجرد أنه غير مشهور. "
             )
-        search_opening = (
-            f"{context}ابحث عالمياً خارج {market_name} عن هذا الاسم تحديداً: {search_term}. "
-            if allow_global else
-            f"{context}ابحث في {market_name} عن هذا الاسم تحديداً: {search_term}. "
-        )
         current_prompt = (
-            search_opening
+            f"{context}ابحث في {market_name} عن هذا الاسم تحديداً: {search_term}. "
             + ((f"المقابل العربي لنفس المنتج (استخدمه أيضاً عند البحث في المتاجر ذات الفهرسة العربية): {ar_hint}. ")
                if ar_hint and not re.search(r"[\u0600-\u06FF]", search_term) else "")
             + ((f"الاسم المختار من Google Lens هو: {(lens_context.get('chosen') or {}).get('title','')}. "
@@ -3618,14 +3596,9 @@ def _new_layer_search(query, lang, prompt_text=None, source_image_b64=None, sour
             "قارن نفس المنتج بنفس المواصفات فقط (الحجم/السعة/الوزن، واللون إذا كان يغيّر السعر): "
             "عبوة أصغر أو أكبر أو سعة تخزين مختلفة تعتبر منتجاً مختلفاً ولا تدخل المقارنة. "
             "اذكر المواصفة بجانب كل سعر إذا كانت معروفة (مثل: 1 لتر أو 256GB). "
-            + (
-                f"أعطني حتى {MAX_STORES} متاجر مختلفة مرتبة من الأرخص إلى الأغلى، وكل نتيجة يجب أن تحتوي سعراً رقمياً بعملته الأصلية مع ذكر العملة "
-                f"ورابط صفحة المنتج المباشرة داخل المتجر. ممنوع روابط Google وصفحات البحث والتصنيف، وممنوع أي متجر محلي داخل {market_name} لأن البحث المحلي انتهى بالفعل. "
-                if allow_global else
-                f"أعطني حتى {MAX_STORES} متاجر مختلفة مرتبة من الأرخص إلى الأغلى، وكل نتيجة يجب أن تحتوي سعراً رقمياً بعملة السوق الحالي "
-                "ورابط صفحة المنتج المباشرة داخل المتجر. ممنوع روابط Google وصفحات البحث والتصنيف، وممنوع أي متجر أجنبي لا يبيع محلياً. "
-            )
-            + "لا تكتب متوفر أو InStock بدلاً من السعر. اكتب السعر بالفلوس كاملة مثل 1.950 وليس 1.95. "
+            f"أعطني حتى {MAX_STORES} متاجر مختلفة مرتبة من الأرخص إلى الأغلى، وكل نتيجة يجب أن تحتوي سعراً رقمياً بعملة السوق الحالي "
+            "ورابط صفحة المنتج المباشرة داخل المتجر. ممنوع روابط Google وصفحات البحث والتصنيف، وممنوع أي متجر أجنبي لا يبيع محلياً. "
+            "لا تكتب متوفر أو InStock بدلاً من السعر. اكتب السعر بالفلوس كاملة مثل 1.950 وليس 1.95. "
             f"{LANG_INSTR[lang]}"
         )
 
@@ -3634,7 +3607,7 @@ def _new_layer_search(query, lang, prompt_text=None, source_image_b64=None, sour
         offers = extract_store_offers(txt)
 
         if is_service_answer(txt):
-            if len(txt) >= 40 and not allow_global:
+            if len(txt) >= 40:
                 cache_put(query, lang, txt, urls)
             return txt, urls
         # لا نرسل اعتذار Gemini مباشرة؛ نكمل باقي المحاولات والبحث العام.
@@ -3653,28 +3626,20 @@ def _new_layer_search(query, lang, prompt_text=None, source_image_b64=None, sour
                 verified = filter_local_market_only(verified)
             if verified:
                 # Google Lens استُخدم قبل البحث لتحديد المنتج. لا نحذف نتائج الأسعار بسبب تقييم بصري تخميني.
-                if allow_global:
-                    # v76.5: أسعار أجنبية — تُحوَّل للعملة المحلية أولاً ثم نرتب بالأرخص المحوَّل.
-                    for info in verified.values():
-                        shown_g, converted_g = display_global_price(info["price"], "", info.get("currency", ""), lang)
-                        info["shown"] = shown_g
-                        info["sort_price"] = converted_g if converted_g is not None else info["price"]
-                    sorted_v = sorted(verified.items(), key=lambda x: x[1]["sort_price"])
-                else:
-                    sorted_v = sorted(verified.items(), key=lambda x: x[1]["price"])
+                sorted_v = sorted(verified.items(), key=lambda x: x[1]["price"])
                 # v70: العنوان المعروض عربي؛ الاسم الإنجليزي للبحث فقط.
                 title = product_title(txt, (ar_hint if lang == "ar" and ar_hint else search_term))
                 lines = [title, ""]
                 new_urls = {}
                 for i, (name, info) in enumerate(sorted_v[:MAX_STORES]):
                     prefix = "✅" if i == 0 else "•"
+                    currency = currency_label(lang)
                     size_note = format_pack_size(extract_pack_size(info.get("title", "")))
                     size_suffix = f" ({size_note})" if size_note else ""
-                    shown_price = info.get("shown") or f"{format_price(info['price'])} {currency_label(lang)}"
-                    lines.append(f"{prefix} {name} — {shown_price}{size_suffix}")
+                    lines.append(f"{prefix} {name} — {format_price(info['price'])} {currency}{size_suffix}")
                     new_urls[name] = info["url"]
                 final_txt = "\n".join(lines)
-                if not source_image_b64 and not allow_global:
+                if not source_image_b64:
                     cache_put(query, lang, final_txt, new_urls)
                 return final_txt, new_urls
 
@@ -3707,7 +3672,7 @@ def _new_layer_search(query, lang, prompt_text=None, source_image_b64=None, sour
                     lines.append(f"{prefix} {body}")
                     clean_urls[offer["name"]] = match_url(offer["name"], urls)
                 final_txt = "\n".join(lines)
-                if not source_image_b64 and not allow_global:
+                if not source_image_b64:
                     cache_put(query, lang, final_txt, clean_urls)
                 return final_txt, clean_urls
 
@@ -3781,8 +3746,7 @@ def _old_layer_search(query, lang, prompt_text=None, lens_context=None, allow_gl
     search_name = english_name or query
     if allow_global:
         base_prompt = (
-            f"ابحث عالميًا عن {search_name}. أولوية قصوى: افحص Amazon.com الأمريكي أولاً — فهو يحتوي أغلب السلع تقريباً، وأحضر منه رابط صفحة المنتج المباشرة مع السعر بالدولار. "
-            f"ثم أكمل بباقي المتاجر العالمية الموثوقة. استبعد تمامًا أي متجر داخل {current_market().get('country_name', 'بلد المستخدم')}, لأن البحث المحلي انتهى بالفعل. اقبل المتاجر الأجنبية الموثوقة فقط، مع سعر رقمي واضح ورابط صفحة المنتج المباشر، واذكر العملة الأصلية. {LANG_INSTR[lang]}"
+            f"ابحث عالميًا عن {search_name}. استبعد تمامًا أي متجر داخل {current_market().get('country_name', 'بلد المستخدم')}, لأن البحث المحلي انتهى بالفعل. اقبل المتاجر الأجنبية الموثوقة فقط، مع سعر رقمي واضح ورابط صفحة المنتج المباشر، واذكر العملة الأصلية. {LANG_INSTR[lang]}"
         )
     else:
         base_prompt = prompt_text or (
@@ -3792,8 +3756,6 @@ def _old_layer_search(query, lang, prompt_text=None, lens_context=None, allow_gl
     if allow_global:
         variants = [
             base_prompt,
-            # v76.5: جولة مخصصة لأمازون أمريكا — أولوية قصوى بطلب المستخدم.
-            f"{search_name} Amazon.com USA buy online price in USD direct amazon.com product page link {LANG_INSTR[lang]}",
             f"{search_name} buy online worldwide exact product direct page price {LANG_INSTR[lang]}",
             f"{search_name} international stores exact visual match direct product link {LANG_INSTR[lang]}",
         ]
@@ -3977,10 +3939,7 @@ def search_product(query, lang, prompt_text=None, source_image_b64=None, source_
     طبقة Shopping تنطلق بالتوازي منذ البداية فلا تضيف زمناً، وتُدمج نتائجها مع الطبقتين
     بترتيب فئة المنتج ثم من الأرخص إلى الأغلى.
     """
-    # v76.6: الوضع العالمي لا يستخدم الكاش إطلاقاً — البحث المحلي يخزّن نتائجه بنفس
-    # المفتاح (وحتى المطابقة الضبابية تصيده)، فكان العالمي يرجع النتائج المحلية
-    # والحارس النهائي يحذفها كلها -> «ما لقيت نتيجة» دائماً.
-    cached = None if source_image_b64 or lens_context or allow_global else cache_get(query, lang)
+    cached = None if source_image_b64 or lens_context else cache_get(query, lang)
     if cached:
         return cached
 
@@ -4033,7 +3992,7 @@ def search_product(query, lang, prompt_text=None, source_image_b64=None, source_
     shopping_result = _collect_shopping()
     print(f"SHOPPING LAYER DONE offers={len(extract_store_offers(shopping_result[0])) if shopping_result[0] else 0}")
     final_txt, final_urls = _merge_two_layers(query, lang, new_result, old_result, lens_context, shopping_result)
-    if final_txt and not source_image_b64 and not lens_context and not allow_global:
+    if final_txt and not source_image_b64 and not lens_context:
         cache_put(query, lang, final_txt, final_urls)
     return final_txt, final_urls
 
@@ -4303,49 +4262,6 @@ def run_similar_search(phone, item):
     send_whatsapp_text(phone, T(lang, "similar_none"), bot_id)
 
 
-def _is_amazon_us_host(url):
-    h = _host_of(url)
-    return h == "amazon.com" or h.endswith(".amazon.com")
-
-def _amazon_us_supplement(query, lang, limit=3):
-    """v76.6: أولوية قصوى لأمازون أمريكا بطلب المستخدم.
-
-    إذا لم يظهر amazon.com في النتائج العالمية، نسوي جولة Google Shopping أمريكية
-    (gl=us) مخصصة ونسحب منها عروض amazon.com فقط. استدعاء SerpApi واحد، وفقط عند
-    ضغط المستخدم زر البحث العالمي وغياب أمازون — بدون أي تكلفة إضافية دائمة.
-    الأسعار ترجع محوّلة للعملة المحلية جاهزة من google_shopping_offers.
-    """
-    q = str(query or "").strip()
-    if not q or not ENABLE_GOOGLE_SHOPPING or not SERPAPI_API_KEY:
-        return []
-    try:
-        offers = google_shopping_offers(q, lang, allow_global=True)
-    except Exception as e:
-        print(f"AMAZON US SUPPLEMENT ERR: {e}")
-        return []
-    local_code = (current_market().get("currency") or "").upper()
-    out = []
-    for name, info in (offers or {}).items():
-        if not _is_amazon_us_host(info.get("url", "")):
-            continue
-        out.append({
-            "title": (info.get("title") or name or "Amazon").strip(),
-            "link": info.get("url", ""),
-            "source": "Amazon",
-            # السعر محوَّل مسبقاً للعملة المحلية — نمرر عملة السوق حتى لا يُحوَّل مرتين.
-            "price": "", "price_value": info.get("price"),
-            "price_text": info.get("price_text") or "",
-            "currency": local_code,
-        })
-        if len(out) >= limit:
-            break
-    if out:
-        print(f"AMAZON US SUPPLEMENT: +{len(out)} amazon.com offers for {q!r}")
-    else:
-        print(f"AMAZON US SUPPLEMENT: no amazon.com offers for {q!r}")
-    return out
-
-
 def run_global_search(phone, item):
     activate_market(phone)
     bot_id = item["bot_id"]; lang = item["lang"]; query = item["query"]
@@ -4388,28 +4304,6 @@ def run_global_search(phone, item):
                 kept_lines.append(line)
             txt = "\n".join(kept_lines).strip()
             urls = filtered_urls
-    # v76.6: أولوية أمازون أمريكا — إذا ما ظهر amazon.com في النتائج نكمّلها
-    # بجولة Google Shopping أمريكية مخصصة. وتنقذ أيضاً حالة «صفر نتائج».
-    has_amazon = any(_is_amazon_us_host(u) for u in (urls or {}).values())
-    if not has_amazon:
-        supplement = _amazon_us_supplement(query, lang)
-        if supplement:
-            urls = dict(urls or {})
-            lines = (txt or "").splitlines() if (txt or "").strip() else [f"📦 {short_query(query) or query}", ""]
-            for s in supplement:
-                base_name, n = "Amazon", 2
-                name = base_name
-                while name in urls:
-                    name = f"{base_name} {n}"; n += 1
-                shown = s.get("price_text") or (
-                    f"{format_price(s.get('price_value'))} {currency_label(lang)}"
-                    if s.get("price_value") not in (None, "") else ""
-                )
-                if not shown or not s.get("link"):
-                    continue
-                lines.append(f"• {name} — {shown}")
-                urls[name] = s["link"]
-            txt = "\n".join(lines).strip()
     if not txt or not extract_store_offers(txt) or not urls:
         send_whatsapp_text(phone, T(lang, "global_none"), bot_id)
         return
@@ -4481,15 +4375,8 @@ def process_interactive_message(message, bot_id):
         item = _peek_pending(PENDING_LENS_FOREIGN, from_number)
         activate_market(from_number)
         if item and item.get("matches"):
-            matches = list(item["matches"])
-            # v76.6: أولوية أمازون أمريكا — Lens نادراً يرجّع amazon.com لمستخدم خليجي،
-            # فإذا غاب نكمّل بجولة Shopping أمريكية ونحط عروض أمازون بالمقدمة.
-            if not any(_is_amazon_us_host(m.get("link", "")) for m in matches):
-                supplement = _amazon_us_supplement(item.get("query") or "", item.get("lang", "ar"))
-                if supplement:
-                    matches = supplement + matches
             _send_lens_match_batch(
-                from_number, matches, item.get("bot_id") or bot_id,
+                from_number, item["matches"], item.get("bot_id") or bot_id,
                 item.get("lang", "ar"), convert_prices=True,
             )
         elif item and item.get("query"):
@@ -4536,13 +4423,7 @@ def process_interactive_message(message, bot_id):
         return
     if btn_id in ("global_yes", "nf_global"):
         item = _pop_pending_global(from_number)
-        if not item:
-            # v76.5: الزر بعد النتائج المحلية النصية — لو انتهت الصلاحية نكمل بآخر بحث محفوظ.
-            last_product = (LAST_SEARCH.get(from_number) or {}).get("product")
-            if last_product:
-                item = {"bot_id": bot_id, "lang": USER_LANG.get(from_number, "ar"), "query": last_product}
         if item:
-            activate_market(from_number)
             run_global_search(from_number, item)
         return
     if btn_id == "nf_similar":
@@ -6132,16 +6013,7 @@ def execute_product_search(from_number, product, bot_id, lang):
         # كانت هناك عروض لكن كل روابطها غير مباشرة؛ نفس الخيارات تنفع هنا أيضاً.
         _store_pending_global(from_number, bot_id, lang, product, None, None)
         send_not_found_choice(from_number, bot_id, lang)
-    elif result_type == "product":
-        # v76.5: مثل مسار الصور تماماً — بعد النتائج المحلية النصية نعرض قائمة
-        # «خيارات إضافية»: بحث عالمي 🌍 + خريطة 📍 (بدل زر الخريطة وحده).
-        _store_pending_global(from_number, bot_id, lang, product, None, None)
-        trio = [
-            {"id": "nf_global", "title": T(lang, "opt_global")[:24]},
-            {"id": "map_open", "title": T(lang, "opt_map")[:24]},
-        ]
-        send_whatsapp_list(from_number, T(lang, "more_options_ask"), trio, bot_id, T(lang, "options_button"))
-    elif result_type == "service":
+    elif result_type == "service" or (result_type == "product" and AUTO_SEND_PRODUCT_MAPS):
         send_maps_button(from_number, product, bot_id, lang)
 
 
@@ -6152,8 +6024,8 @@ REQUEST_CLASSIFIER_SYSTEM = """أنت مصنف طلبات خبير لبوت تس
 صنّفها بدقة وأجب بكلمة واحدة فقط بدون أي شرح: GENERIC أو SPECIFIC أو SERVICE أو NONE
 
 GENERIC = اسم فئة منتج بدون ماركة ولا موديل محدد، والمستخدم يستفيد من مقارنة أفضل البراندات قبل الأسعار.
-ينطبق على أي فئة مهما كانت غريبة أو نادرة: أجهزة، مكائن، مولدات، عدد، رياضة، أحذية وملابس رياضية، حقائب، أثاث، مركبات، قوارب، معدات بر ومخيمات، أدوات مطبخ، أجهزة تجميل...
-أمثلة GENERIC: شاشه كمبيوتر، مكينه بر، موطور مخيمات، مولد كهرباء، يخت، جت سكي، دراجه هوائيه، مضخة مسبح، غساله، مكواة بخار، سشوار، خيمه رحلات، ثلاجة سياره، قلاية هوائية، كاميرا مراقبه، سماعة بلوتوث، طباخ غاز، سيارة عائليه، لابتوب للدراسة، حذاء تنس للاطفال، حذاء رياضي، مضرب بادل، شنطة ظهر مدرسيه، ساعة ذكية
+ينطبق على أي فئة مهما كانت غريبة أو نادرة: أجهزة، مكائن، مولدات، عدد، رياضة، أثاث، مركبات، قوارب، معدات بر ومخيمات، أدوات مطبخ، أجهزة تجميل...
+أمثلة GENERIC: شاشه كمبيوتر، مكينه بر، موطور مخيمات، مولد كهرباء، يخت، جت سكي، دراجه هوائيه، مضخة مسبح، غساله، مكواة بخار، سشوار، خيمه رحلات، ثلاجة سياره، قلاية هوائية، كاميرا مراقبه، سماعة بلوتوث، طباخ غاز، سيارة عائليه، لابتوب للدراسة
 
 SPECIFIC = المستخدم حدد ماركة أو موديل أو منتجاً بعينه، أو طلب سلعة استهلاكية يومية يبي سعرها مباشرة (أكل، مشروبات، تموينات، منظفات، أدوية، مستلزمات شخصية).
 أمثلة SPECIFIC: ايفون 15 برو، مكينة بر EcoFlow، بيبسي، حليب المراعي، حليب، رز بسمتي، بنادول، شامبو هيد اند شولدرز، مناديل، ماء قوارير
@@ -6165,14 +6037,12 @@ NONE = الرسالة ليست طلب منتج ولا خدمة إطلاقاً: �
 أمثلة NONE: رد علي، ليش ما ترد، وينك، تأخرت، يا حمار، يا حماااار، هلا فيك، شفيك، تجربة، اختبار، ok، تمام، خلاص، ايه، لا
 
 قواعد الحسم:
-- القاعدة الذهبية: السؤال الأول دائماً — هل ذكر المستخدم ماركة أو موديل محدد؟ ذكر ماركة (حتى مع فئة عامة) = SPECIFIC. مثال: مكينة بر هوندا = SPECIFIC، حذاء تنس نايك = SPECIFIC.
-- لا ماركة ولا موديل في الرسالة + منتج معمّر أو قابل لمقارنة البراندات = GENERIC دائماً. مثال: حذاء تنس للاطفال = GENERIC (بدون ماركة)، شاشة ٢٧ انش = GENERIC.
+- ذكر ماركة (حتى مع فئة عامة) = SPECIFIC. مثال: مكينة بر هوندا = SPECIFIC.
 - كلمة فني/تصليح/صيانة/معلم مع أي شيء = SERVICE حتى لو ذكر جهازاً.
 - أكل وتموينات وأدوية دائماً SPECIFIC حتى بدون ماركة، لأن المستخدم يبي السعر مو مقارنة براندات.
-- الأحذية والملابس الرياضية والحقائب والإكسسوارات بدون ماركة = GENERIC (المقارنة بين البراندات مفيدة جداً هنا).
-- العطور ومستحضرات التجميل بدون ماركة = SPECIFIC (الاختيار فيها شخصي بحت).
+- ملابس وأزياء وعطور بدون ماركة = SPECIFIC (الاختيار فيها بصري/شخصي).
 - إذا الرسالة كلام موجه للبوت أو تعليق بلا أي سلعة أو خدمة = NONE دائماً. لا تخترع منتجاً من رسالة عتاب أبداً.
-- إذا شككت بين GENERIC و SPECIFIC لمنتج بدون ماركة، اختر GENERIC."""
+- إذا شككت بين GENERIC و SPECIFIC لمنتج معمّر بدون ماركة، اختر GENERIC."""
 
 _REQUEST_CLASS_CACHE = {}
 _REQUEST_CLASS_LOCK = threading.Lock()
