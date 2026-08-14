@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v77.0-brand-aware-global-text-20260814"
+BUILD_ID = "v77.1-pure-AI-brand-detection-20260814"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE -> GOOGLE LENS DIRECT PASSTHROUGH (raw results to user)")
@@ -6063,7 +6063,7 @@ _REQUEST_CLASS_CACHE = {}
 _REQUEST_CLASS_LOCK = threading.Lock()
 
 def classify_request_type(query):
-    """v77: يصنف الطلب GENERIC / SPECIFIC / SERVICE — مع كشف ماركة فوري لأي سلعة + ذكاء اصطناعي."""
+    """v77.1: مصنف ذكي خالص 100% — بدون قوائم ماركات ثابتة. الذكاء الاصطناعي نفسه يكتشف الماركة لأي سلعة."""
     q = " ".join(str(query or "").split()).strip()
     if not q:
         return "SPECIFIC"
@@ -6071,26 +6071,6 @@ def classify_request_type(query):
     with _REQUEST_CLASS_LOCK:
         if key in _REQUEST_CLASS_CACHE:
             return _REQUEST_CLASS_CACHE[key]
-
-    # v77: فحص سريع قبل نداء النموذج — يوفر تكلفة ويصلح مشكلة "حذاء تنس للاطفال"
-    # إذا فيه كلمة خدمة واضحة = SERVICE
-    if is_service_request(q):
-        verdict = "SERVICE"
-        with _REQUEST_CLASS_LOCK:
-            if len(_REQUEST_CLASS_CACHE) > 3000:
-                _REQUEST_CLASS_CACHE.clear()
-            _REQUEST_CLASS_CACHE[key] = verdict
-        print(f"REQUEST CLASSIFIER (fast SERVICE): {q!r} -> {verdict}")
-        return verdict
-    # إذا فيه ماركة مذكورة لأي سلعة = SPECIFIC فوراً
-    if contains_brand(q):
-        verdict = "SPECIFIC"
-        with _REQUEST_CLASS_LOCK:
-            if len(_REQUEST_CLASS_CACHE) > 3000:
-                _REQUEST_CLASS_CACHE.clear()
-            _REQUEST_CLASS_CACHE[key] = verdict
-        print(f"REQUEST CLASSIFIER (fast BRAND): {q!r} -> {verdict}")
-        return verdict
 
     verdict = ""
     for attempt in (1, 2):
@@ -6103,13 +6083,19 @@ def classify_request_type(query):
         if verdict:
             break
         print(f"REQUEST CLASSIFIER RETRY {attempt}: empty/unclear -> {raw!r}")
+
+    # شبكة أمان فقط إذا انقطع النموذج تماماً: نستخدم كشف الخدمة البسيط، وإلا SPECIFIC
     if not verdict:
-        verdict = "SPECIFIC"
+        if is_service_request(q):
+            verdict = "SERVICE"
+        else:
+            verdict = "SPECIFIC"
+
     with _REQUEST_CLASS_LOCK:
         if len(_REQUEST_CLASS_CACHE) > 3000:
             _REQUEST_CLASS_CACHE.clear()
         _REQUEST_CLASS_CACHE[key] = verdict
-    print(f"REQUEST CLASSIFIER: {q!r} -> {verdict}")
+    print(f"REQUEST CLASSIFIER (pure AI): {q!r} -> {verdict}")
     return verdict
 
 # كلمات الخدمة تبقى فقط كشبكة أمان سريعة إذا تعطل المصنف (بدون أي دور في قرار GENERIC).
@@ -6120,53 +6106,6 @@ SERVICE_WORDS = (
     "technician", "electrician", "plumber", "repair", "maintenance",
     "installation", "cleaning company", "pest control", "towing",
 )
-
-# v77: قائمة ماركات شاملة للكشف السريع عن الطلب المحدد بماركة (أي سلعة كانت)
-BRAND_KEYWORDS = (
-    # أحذية وملابس ورياضة
-    "nike", "نايك", "adidas", "أديداس", "اديداس", "puma", "بوما", "reebok", "ريبوك",
-    "new balance", "نيو بالانس", "asics", "اسيكس", "اسكس", "skechers", "سكيتشرز", "سكيتشر",
-    "vans", "فانس", "converse", "كونفرس", "crocs", "كروكس", "under armour", "اندر ارمور",
-    "fila", "فيلا", "lacoste", "لاكوست", "timberland", "تمبرلاند", "clarks", "كلاركس",
-    "birkenstock", "بيركنستوك", "drmartens", "dr. martens", "hoka", "هوكا", "salomon", "سالومون",
-    "zara", "زارا", "h&m", "اتش اند ام", "uniqlo", "يونيكلو", "gucci", "قوتشي", "prada", "برادا",
-    "louis vuitton", "لويس فيتون", "chanel", "شانيل", "dior", "ديور", "balenciaga", "بالنسياغا",
-    "levis", "ليفايز", "tommy", "تومي", "calvin klein", "كالفن كلاين", "ralph lauren", "رالف لورين",
-    "the north face", "نورث فيس", "columbia", "كولومبيا", "decathlon", "ديكاتلون", "intersport", "انترسبورت",
-    # إلكترونيات
-    "apple", "ابل", "ايفون", "iphone", "samsung", "سامسونج", "sony", "سوني", "lg", "ال جي",
-    "xiaomi", "شاومي", "huawei", "هواوي", "dell", "ديل", "hp", "اتش بي", "lenovo", "لينوفو",
-    "asus", "اسوس", "acer", "ايسر", "msi", "ام اس اي", "canon", "كانون", "nikon", "نيكون",
-    "gopro", "جوبرو", "bose", "بوز", "jbl", "جي بي ال", "playstation", "بلايستيشن", "xbox", "اكس بوكس",
-    "nintendo", "نينتندو", "anker", "انكر", "ecoflow", "ايكوفلو", "jackery", "جاكري",
-    "honda", "هوندا", "yamaha", "ياماها", "makita", "ماكيتا", "bosch", "بوش", "dewalt", "ديوالت",
-    "dyson", "دايسون", "philips", "فيليبس", "braun", "براون", "panasonic", "باناسونيك",
-    # عطور وتجميل
-    "dior sauvage", "bleu de chanel", "creed", "tom ford", "توم فورد",
-)
-
-def contains_brand(query: str) -> bool:
-    """v77: كشف سريع هل النص يحتوي ماركة معروفة — لأي سلعة كانت"""
-    try:
-        q = normalize_ar(str(query or "")).lower()
-        if not q:
-            return False
-        for b in BRAND_KEYWORDS:
-            nb = normalize_ar(b).lower()
-            if nb and nb in q:
-                # تجنب المطابقات القصيرة جداً الخاطئة (مثل lg داخل كلمة)
-                if len(nb) <= 2:
-                    if re.search(rf"\b{re.escape(nb)}\b", q):
-                        return True
-                else:
-                    if nb in q:
-                        return True
-        return False
-    except Exception:
-        return False
-
-
-
 def is_service_request(text):
     q = normalize_ar(str(text or ""))
     return any(normalize_ar(w) in q for w in SERVICE_WORDS)
