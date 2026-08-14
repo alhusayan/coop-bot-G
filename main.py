@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v77.3-pure-generic-for-all-20260814"
+BUILD_ID = "v77.4-brand-yes-no-detection-20260814"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE -> GOOGLE LENS DIRECT PASSTHROUGH (raw results to user)")
@@ -6063,7 +6063,7 @@ _REQUEST_CLASS_CACHE = {}
 _REQUEST_CLASS_LOCK = threading.Lock()
 
 def classify_request_type(query):
-    """v77.1: مصنف ذكي خالص 100% — بدون قوائم ماركات ثابتة. الذكاء الاصطناعي نفسه يكتشف الماركة لأي سلعة."""
+    """v77.4: تمييز عام vs محدد 100% بالذكاء - كلمة واحدة مثل "جبن" = GENERIC"""
     q = " ".join(str(query or "").split()).strip()
     if not q:
         return "SPECIFIC"
@@ -6071,6 +6071,44 @@ def classify_request_type(query):
     with _REQUEST_CLASS_LOCK:
         if key in _REQUEST_CLASS_CACHE:
             return _REQUEST_CLASS_CACHE[key]
+
+    if is_service_request(q):
+        verdict = "SERVICE"
+        with _REQUEST_CLASS_LOCK:
+            if len(_REQUEST_CLASS_CACHE) > 3000:
+                _REQUEST_CLASS_CACHE.clear()
+            _REQUEST_CLASS_CACHE[key] = verdict
+        print(f"REQUEST CLASSIFIER (fast SERVICE): {q!r} -> {verdict}")
+        return verdict
+
+    has_brand = None
+    for attempt in (1, 2):
+        raw, _ = call_gemini([{"text": f"النص: {q}"}], system=BRAND_DETECTION_SYSTEM, use_search=False)
+        up = (raw or "").strip().upper()
+        if "YES" in up:
+            has_brand = True
+            break
+        if "NO" in up:
+            has_brand = False
+            break
+        print(f"BRAND DETECTION RETRY {attempt}: {raw!r}")
+
+    if has_brand is True:
+        verdict = "SPECIFIC"
+        with _REQUEST_CLASS_LOCK:
+            if len(_REQUEST_CLASS_CACHE) > 3000:
+                _REQUEST_CLASS_CACHE.clear()
+            _REQUEST_CLASS_CACHE[key] = verdict
+        print(f"REQUEST CLASSIFIER (brand YES): {q!r} -> {verdict}")
+        return verdict
+    elif has_brand is False:
+        verdict = "GENERIC"
+        with _REQUEST_CLASS_LOCK:
+            if len(_REQUEST_CLASS_CACHE) > 3000:
+                _REQUEST_CLASS_CACHE.clear()
+            _REQUEST_CLASS_CACHE[key] = verdict
+        print(f"REQUEST CLASSIFIER (brand NO): {q!r} -> {verdict}")
+        return verdict
 
     verdict = ""
     for attempt in (1, 2):
@@ -6084,20 +6122,17 @@ def classify_request_type(query):
             break
         print(f"REQUEST CLASSIFIER RETRY {attempt}: empty/unclear -> {raw!r}")
 
-    # شبكة أمان فقط إذا انقطع النموذج تماماً: نستخدم كشف الخدمة البسيط، وإلا SPECIFIC
     if not verdict:
-        if is_service_request(q):
-            verdict = "SERVICE"
-        else:
-            verdict = "SPECIFIC"
+        verdict = "GENERIC"
 
     with _REQUEST_CLASS_LOCK:
         if len(_REQUEST_CLASS_CACHE) > 3000:
             _REQUEST_CLASS_CACHE.clear()
         _REQUEST_CLASS_CACHE[key] = verdict
-    print(f"REQUEST CLASSIFIER (pure AI): {q!r} -> {verdict}")
+    print(f"REQUEST CLASSIFIER (fallback): {q!r} -> {verdict}")
     return verdict
 
+# كلمات الخدمة تبقى فقط
 # كلمات الخدمة تبقى فقط كشبكة أمان سريعة إذا تعطل المصنف (بدون أي دور في قرار GENERIC).
 SERVICE_WORDS = (
     "فني", "كهربائي", "سباك", "نجار", "حداد", "تصليح", "اصلاح", "إصلاح", "صيانه", "صيانة",
