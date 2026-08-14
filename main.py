@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v76.5-text-generic-global-20260814"
+BUILD_ID = "v77.2-no-duplicate-spacing-fix-20260814"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE -> GOOGLE LENS DIRECT PASSTHROUGH (raw results to user)")
@@ -862,6 +862,8 @@ MSG = {
         "no_saved_product": "ما عندي منتج محفوظ حالياً 😅. ابحث عن منتج أول، وبعدها أدلك على أقرب مكان يبيعه!",
         "lang_saved": "تمام، بكلمك عربي من هني ورايح 🇰🇼\nدز صورة منتج أو اكتب اسمه وأنا حاضر!",
         "ask_global": "ما لقيت نتيجة محلية مؤكدة لهذا المنتج في موقعك الحالي. تبي أدور لك في المتاجر العالمية؟ 🌍",
+        "ask_global_after_local": "لقيت لك النتائج المحلية فوق 👆\nتبي أدور لك نفس المنتج في المتاجر العالمية أيضاً؟ 🌍",
+        "ask_global_after_local_en": "Found local results above 👆 Want me to also search international stores for the same product? 🌍",
         "global_yes": "نعم، ابحث عالميًا 🌍",
         "global_no": "لا، محلي فقط",
         "global_searching": "🌍 أدور لك عالميًا على أفضل النتائج المطابقة...",
@@ -925,6 +927,7 @@ MSG = {
         "no_saved_product": "I don't have a saved product yet 😅. Search for a product first, then I'll point you to the nearest store!",
         "lang_saved": "Great, I'll speak English with you from now on 🇬🇧\nSend a product photo or type its name and I'm on it!",
         "ask_global": "I couldn't find a verified local result in your current market. Search international stores instead? 🌍",
+        "ask_global_after_local": "Found local results above 👆 Want me to also search international stores for the same product? 🌍",
         "global_yes": "Yes, search globally 🌍",
         "global_no": "No, local only",
         "global_searching": "🌍 Searching international stores for the closest matches...",
@@ -2460,12 +2463,11 @@ def send_product_result(from_number, txt, urls, bot_id, lang, query, best_only=F
 GEMINI_STATS = {"search_calls": 0, "plain_calls": 0}
 GEMINI_STATS_LOCK = threading.Lock()
 
-def call_gemini(parts, system=SYSTEM_PROMPT, use_search=True, include_market_instruction=True):
+def call_gemini(parts, system=SYSTEM_PROMPT, use_search=True):
     model = GEMINI_SEARCH_MODEL if use_search else GEMINI_FAST_MODEL
     gemini_url = f"{GEMINI_BASE_URL}/{model}:generateContent"
-    market_ctx = market_instruction() if (use_search and include_market_instruction) else ""
     payload = {
-        "systemInstruction": {"parts": [{"text": system + market_ctx}]},
+        "systemInstruction": {"parts": [{"text": system + (market_instruction() if use_search else "")}]},
         "contents": [{"role": "user", "parts": parts}],
         "generationConfig": {
             "temperature": 0,
@@ -5676,8 +5678,6 @@ INTENT_PARSE_SYSTEM = """أنت محلل طلبات لبوت تسوق على و�
 - "greeting": تحية فقط بلا أي طلب. products فارغة.
 - "thanks": شكر فقط بلا طلب جديد. products فارغة.
 - "chat": فقط إذا لم يكن في الرسالة أي منتج أو خدمة أو حاجة يمكن استنتاجها إطلاقاً. إذا كان في الرسالة أي مشكلة أو حاجة، استنتج المطلوب وأرجع search بدل chat.
-- مهم جداً: لا تضف أبداً ماركة أو موديل أو اسم سلسلة لم يذكره المستخدم بنفسه. إذا قال "حذاء تنس للأطفال" أرجع "حذاء تنس للأطفال" فقط، ولا تخترع Nike أو Adidas أو Babolat.
-- الصفات مثل: للأطفال، رجالي، نسائي، خفيف، قوي، للمبتدئ، مقاس 35، للجامعة، للبر، للبيت — تبقى صفات للفئة وليست ماركة أو موديل.
 مثال: "السلام عليكم معجون ضد الصراصير عزكم الله وين أحصله مع الشكر"
 الجواب: {"intent":"search","products":["معجون ضد الصراصير"]}"""
 
@@ -5990,28 +5990,8 @@ def execute_service_search(from_number, service_desc, original_text, bot_id, lan
     send_maps_button(from_number, service_desc, bot_id, lang)
 
 
-def send_text_product_options(from_number, product, bot_id, lang):
-    """v76.5: بعد نجاح البحث النصي المحلي، أضف العالمي + الخريطة مثل مسار الصورة.
-
-    البحث العالمي لا يشتغل تلقائياً حتى لا نضاعف التكلفة والرسائل؛ المستخدم يختاره من القائمة.
-    الطلب المعلق مستقل عن Google Lens ويستخدم محرك allow_global=True الحالي.
-    """
-    _store_pending_global(from_number, bot_id, lang, product, None, None)
-    rows = [
-        {"id": "nf_global", "title": T(lang, "opt_global")[:24]},
-        {"id": "map_open", "title": T(lang, "opt_map")[:24]},
-    ]
-    send_whatsapp_list(
-        from_number, T(lang, "more_options_ask"), rows, bot_id, T(lang, "options_button")
-    )
-
-
 def execute_product_search(from_number, product, bot_id, lang):
-    """v74.3: مسار البحث النصي — المسار الذكي الكامل القديم (v26) أولاً، نفس محرك
-
-    البدائل المشابهة بالضبط. إذا ما رجّع نتيجة كافية، المحرك الثلاثي (Shopping+Lens+Broad)
-    يشتغل كشبكة أمان حتى لا نخسر أي منتج. العرض بالطريقة الحالية بدون تغيير.
-    """
+    """v77: مسار البحث النصي — v26 أولاً + عرض نتائج + زر بحث عالمي تلقائي للنص"""
     send_whatsapp_text(from_number, T(lang, "searching", q=product), bot_id)
     try:
         txt, urls = v26_text_search(product, lang)
@@ -6023,90 +6003,67 @@ def execute_product_search(from_number, product, bot_id, lang):
         txt, urls = "", {}
     LAST_SEARCH[from_number] = {"product": product}
     if not txt or (not extract_store_offers(txt) and not is_service_answer(txt) and not is_informational_answer(txt)):
-        # ما لقينا المنتج بالضبط محلياً: نعرض الخيارات الثلاثة بدل رسالة الاعتذار وحدها.
+        # ما لقينا المنتج بالضبط محلياً: نعرض الخيارات الثلاثة (عالمي + بدائل)
         _store_pending_global(from_number, bot_id, lang, product, None, None)
         send_not_found_choice(from_number, bot_id, lang)
         return
     result_type = send_product_result(from_number, txt, urls, bot_id, lang, product)
     if result_type == "none":
-        # كانت هناك عروض لكن كل روابطها غير مباشرة؛ نفس الخيارات تنفع هنا أيضاً.
         _store_pending_global(from_number, bot_id, lang, product, None, None)
         send_not_found_choice(from_number, bot_id, lang)
-    elif result_type == "service":
+        return
+    # v77: إضافة البحث العالمي التلقائي للبحث النصي — بعد النتائج المحلية
+    if result_type == "product":
+        # خزّن طلب البحث العالمي للزر
+        _store_pending_global(from_number, bot_id, lang, product, None, None)
+        # زر إضافي بعد النتائج المحلية: عالمي
+        try:
+            send_whatsapp_buttons(from_number, T(lang, "ask_global_after_local"), [
+                {"id": "nf_global", "title": T(lang, "opt_global")[:20]},
+                {"id": "nf_similar", "title": T(lang, "opt_similar")[:20]},
+                {"id": "nf_no", "title": T(lang, "opt_no")[:20]},
+            ], bot_id)
+        except Exception as e:
+            print(f"GLOBAL OFFER BTN ERR: {e}")
+            # fallback نصي
+            send_whatsapp_text(from_number, T(lang, "ask_global_after_local"), bot_id)
+
+    if result_type == "service" or (result_type == "product" and AUTO_SEND_PRODUCT_MAPS):
         send_maps_button(from_number, product, bot_id, lang)
-    elif result_type == "product":
-        # v76.5: أي بحث مكتوب نصياً ناجح يعطي خيار البحث العالمي أيضاً، مع الحفاظ على الخريطة.
-        send_text_product_options(from_number, product, bot_id, lang)
 
 
 # ---- v74.6: مصنّف الطلبات — ذكاء اصطناعي خالص، بدون أي قاموس -----------------
 # القاموس الثابت مستحيل يغطي ملايين المنتجات (يخت، موطور مخيمات، مكينة بر...).
 # القرار كله لنموذج سريع رخيص (بدون بحث + كاش + إعادة محاولة) بتعريفات وأمثلة قوية.
-REQUEST_CLASSIFIER_SYSTEM = """أنت مصنف طلبات خبير لبوت تسوق على واتساب.
-أجب بكلمة واحدة فقط: GENERIC أو SPECIFIC أو SERVICE أو NONE. لا تشرح ولا تعيد النص.
+REQUEST_CLASSIFIER_SYSTEM = """أنت مصنف طلبات خبير لبوت تسوق كويتي على واتساب. المستخدم كتب رسالة قصيرة بالعامية.
+صنّفها بدقة وأجب بكلمة واحدة فقط بدون أي شرح: GENERIC أو SPECIFIC أو SERVICE أو NONE
 
-اتبع هذا الترتيب حرفياً:
-1) SERVICE إذا المستخدم يطلب فني/تصليح/صيانة/تركيب/عامل/مزود خدمة.
-2) NONE إذا لا يوجد منتج ولا خدمة أصلاً.
-3) للمنتجات: لا تعتبر المنتج SPECIFIC إلا إذا تحقق أحد الأمرين:
-   أ) المستخدم كتب بنفسه ماركة أو مصنعاً أو موديلًا أو سلسلة/اسم منتج مميزاً يمكن البحث عنه كهوية بعينها.
-   ب) السلعة من المشتريات اليومية/الاستهلاكية التي المقصود الطبيعي منها مقارنة الأسعار مباشرة لا اختيار أفضل موديل، مثل الطعام والمشروبات والتموينات والمنظفات والأدوية ومستلزمات العناية اليومية.
-4) غير ذلك، إذا كتب المستخدم فئة منتج بدون ماركة/موديل وكان من المفيد اختيار أفضل براند/موديل قبل السعر = GENERIC.
+GENERIC = اسم فئة منتج بدون ذكر ماركة محددة، والمستخدم يستفيد من مقارنة أفضل البراندات والأسعار قبل الشراء.
+ينطبق على أي فئة بما فيها الملابس والأحذية والشنط والساعات والرياضة والإلكترونيات والأجهزة المنزلية والمكائن والمولدات والعدد والأثاث والمركبات والقوارب ومعدات البر والمخيمات وأدوات المطبخ وأجهزة التجميل...
+أمثلة GENERIC: شاشه كمبيوتر، مكينه بر، موطور مخيمات، مولد كهرباء، يخت، جت سكي، دراجه هوائيه، مضخة مسبح، غساله، مكواة بخار، سشوار، خيمه رحلات، ثلاجة سياره، قلاية هوائية، كاميرا مراقبه، سماعة بلوتوث، طباخ غاز، سيارة عائليه، لابتوب للدراسة، حذاء تنس للاطفال، حذاء رياضي للاطفال، تيشرت اطفال، فستان سهرة، شنطة ظهر مدرسية، ساعة ذكية
 
-قاعدة حاسمة جداً:
-- لا تستنتج ولا تخترع ماركة من نوع المنتج. وجود كلمة "تنس" لا يعني Babolat أو Nike. وجود "آيفون" نفسه اسم منتج/سلسلة من Apple ولذلك SPECIFIC.
-- الصفات ليست ماركة: أطفال، رجالي، نسائي، خفيف، احترافي، للمبتدئ، مقاس 35، لون أسود، 500 واط، 55 بوصة، للبر، للعائلة، للدراسة، رخيص، قوي.
-- الحذاء الرياضي/التخصصي بدون ماركة (تنس، جري، كرة قدم، بادل، مشي...) = GENERIC لأن اختيار البراند والموديل مهم للأداء.
-- الأزياء البحتة التي يطلبها المستخدم كقطعة شكل/ستايل بدون اهتمام أداء يمكن أن تذهب للبحث المباشر SPECIFIC، لكن لا تطبق هذه القاعدة على الأحذية أو المعدات الرياضية.
-- إذا شككت هل الاسم ماركة حقيقية أم مجرد وصف عام، لا تفترض أنه ماركة؛ اختر GENERIC.
+SPECIFIC = المستخدم حدد ماركة أو موديل أو منتجاً بعينه، أو طلب سلعة استهلاكية يومية يبي سعرها مباشرة (أكل، مشروبات، تموينات، منظفات يومية، أدوية، مستلزمات شخصية استهلاكية).
+أمثلة SPECIFIC: ايفون 15 برو، مكينة بر EcoFlow، حذاء تنس نايك للاطفال، حذاء اديداس اطفال، شنطة قوتشي، ساعة ابل، بيبسي، حليب المراعي، حليب، رز بسمتي، بنادول، شامبو هيد اند شولدرز، مناديل، ماء قوارير
 
-أمثلة GENERIC:
-حذاء تنس للأطفال
-حذاء جري رجالي خفيف
-مضرب بادل للمبتدئ
-شاشة كمبيوتر 27 بوصة
-مولد كهرباء للبيت
-مكينة بر
-قلاية هوائية
-سيارة عائلية SUV
-لابتوب للدراسة
-كاميرا مراقبة خارجية
+SERVICE = طلب خدمة أو فني أو تصليح أو صيانة أو عامل، وليس شراء منتج.
+أمثلة SERVICE: كهربائي حمام سباحه، فني تكييف، سباك، بنشر متنقل، تصليح غسالات، شركة تنظيف، ونش، مكافحة حشرات
 
-أمثلة SPECIFIC:
-Babolat Jet Mach 3 Junior
-حذاء تنس Babolat للأطفال
-Nike Vapor Pro 2 Junior
-iPhone 15 Pro
-Samsung QN90D 55
-EcoFlow Delta 2
-بيبسي
-حليب
-رز بسمتي
-بنادول
-شامبو هيد اند شولدرز
+NONE = الرسالة ليست طلب منتج ولا خدمة إطلاقاً: عتاب أو استعجال أو سب أو مزح أو تجربة أو كلام عام موجه للبوت نفسه.
+أمثلة NONE: رد علي، ليش ما ترد، وينك، تأخرت، يا حمار، يا حماااار، هلا فيك، شفيك، تجربة، اختبار، ok، تمام، خلاص، ايه، لا
 
-أمثلة SERVICE:
-فني تكييف
-تصليح غسالة
-سباك
-شركة تنظيف
-
-أمثلة NONE:
-هلا
-رد علي
-شكراً
-وينك
-تمام
-"""
+قواعد الحسم المحدثة (مهم جداً):
+- ذكر ماركة (Nike, Adidas, Puma, Zara, Gucci, Apple, Samsung, EcoFlow, Honda, نايك، اديداس، قوتشي...) حتى مع فئة عامة = SPECIFIC فوراً. مثال: مكينة بر هوندا = SPECIFIC، حذاء تنس نايك للاطفال = SPECIFIC، شنطة ظهر نايك = SPECIFIC.
+- كلمة فني/تصليح/صيانة/معلم/تركيب مع أي شيء = SERVICE حتى لو ذكر جهازاً.
+- أكل وتموينات ومشروبات ومنظفات استهلاكية وأدوية ومستلزمات استهلاكية يومية = SPECIFIC دائماً حتى بدون ماركة، لأن المستخدم يبي السعر مباشرة.
+- ملابس وأحذية وشنط وساعات ورياضة وإلكترونيات وأجهزة منزلية وأثاث ومعدات وعدد ومكائن ومركبات بدون ماركة = GENERIC دائماً، لأن المستخدم يستفيد من مقارنة أفضل الماركات. مثال: حذاء تنس للاطفال بدون ماركة = GENERIC، تيشرت اطفال = GENERIC، شنطة ظهر = GENERIC.
+- إذا الرسالة كلام موجه للبوت أو تعليق بلا أي سلعة أو خدمة = NONE دائماً. لا تخترع منتجاً من رسالة عتاب أبداً.
+- إذا شككت بين GENERIC و SPECIFIC لمنتج غير استهلاكي بدون ماركة، اختر GENERIC دائماً."""
 
 _REQUEST_CLASS_CACHE = {}
 _REQUEST_CLASS_LOCK = threading.Lock()
 
 def classify_request_type(query):
-    """v74.6: يصنف الطلب GENERIC / SPECIFIC / SERVICE بذكاء اصطناعي خالص (كاش + محاولتان).
-
-    عند فشل النموذج تماماً (انقطاع/429) نرجع SPECIFIC حتى يكمل البحث العادي بدل التوقف.
-    """
+    """v77.1: مصنف ذكي خالص 100% — بدون قوائم ماركات ثابتة. الذكاء الاصطناعي نفسه يكتشف الماركة لأي سلعة."""
     q = " ".join(str(query or "").split()).strip()
     if not q:
         return "SPECIFIC"
@@ -6114,23 +6071,31 @@ def classify_request_type(query):
     with _REQUEST_CLASS_LOCK:
         if key in _REQUEST_CLASS_CACHE:
             return _REQUEST_CLASS_CACHE[key]
+
     verdict = ""
     for attempt in (1, 2):
         raw, _ = call_gemini([{"text": q}], system=REQUEST_CLASSIFIER_SYSTEM, use_search=False)
-        up = (raw or "").upper().strip()
-        m = re.search(r"\b(GENERIC|SPECIFIC|SERVICE|NONE)\b", up)
-        if m:
-            verdict = m.group(1)
+        up = (raw or "").upper()
+        for label in ("SERVICE", "GENERIC", "SPECIFIC", "NONE"):
+            if label in up:
+                verdict = label
+                break
         if verdict:
             break
         print(f"REQUEST CLASSIFIER RETRY {attempt}: empty/unclear -> {raw!r}")
+
+    # شبكة أمان فقط إذا انقطع النموذج تماماً: نستخدم كشف الخدمة البسيط، وإلا SPECIFIC
     if not verdict:
-        verdict = "SPECIFIC"
+        if is_service_request(q):
+            verdict = "SERVICE"
+        else:
+            verdict = "SPECIFIC"
+
     with _REQUEST_CLASS_LOCK:
         if len(_REQUEST_CLASS_CACHE) > 3000:
             _REQUEST_CLASS_CACHE.clear()
         _REQUEST_CLASS_CACHE[key] = verdict
-    print(f"REQUEST CLASSIFIER: {q!r} -> {verdict}")
+    print(f"REQUEST CLASSIFIER (pure AI): {q!r} -> {verdict}")
     return verdict
 
 # كلمات الخدمة تبقى فقط كشبكة أمان سريعة إذا تعطل المصنف (بدون أي دور في قرار GENERIC).
@@ -6141,26 +6106,34 @@ SERVICE_WORDS = (
     "technician", "electrician", "plumber", "repair", "maintenance",
     "installation", "cleaning company", "pest control", "towing",
 )
-
 def is_service_request(text):
     q = normalize_ar(str(text or ""))
     return any(normalize_ar(w) in q for w in SERVICE_WORDS)
 
-BRAND_COMPARE_SYSTEM = """أنت خبير مقارنات منتجات مثل مواقع «أفضل 10» ومواقع المراجعات.
-المستخدم طلب فئة عامة بدون ماركة أو موديل محدد. استخدم بحث Google العالمي ومصادر ومراجعات حديثة من عدة دول لاختيار أفضل البراندات/الموديلات فعلاً لهذه الفئة، ولا تحصر التوصية في نتائج بلد المستخدم فقط.
-بعد اختيار الأفضل عالمياً، راعِ أن تكون الخيارات قابلة للشراء أو معروفة ومناسبة لسوق المستخدم الحالي قدر الإمكان.
-لا تخترع أن المستخدم ذكر ماركة لم يذكرها.
-واصنع مقارنة قصيرة بين 3-5 خيارات (براند + موديل).
-الشكل الإلزامي بالضبط:
+BRAND_COMPARE_SYSTEM = """أنت خبير مقارنات منتجات مثل مواقع «أفضل 10» ومواقع المراجعات، وخبير أحذية وملابس أطفال أيضاً.
+المستخدم طلب منتجاً عاماً بدون ماركة — لأي فئة كانت (إلكترونيات، أحذية، ملابس، رياضة، أثاث، معدات...). ابحث في Google عن مقارنات ومراجعات حديثة لهذه الفئة
+واصنع مقارنة قصيرة جداً بين 3-4 خيارات (براند + موديل) فقط.
+
+الشكل الإلزامي بالضبط — لا تخرج عنه أبداً:
 ⚖️ مقارنة أفضل [الفئة]
 
-🏆 الأفضل عموماً: [براند + موديل] — [سبب في سطر واحد]
-💎 أفضل جودة: [براند + موديل] — [سبب]
-💰 أفضل قيمة مقابل السعر: [براند + موديل] — [سبب]
-✨ [معيار إضافي يهم هذه الفئة تحديداً مثل: الأهدأ، الأوفر بالكهرباء، الأمتن، الأخف]: [براند + موديل] — [سبب]
+🏆 الأفضل عموماً: [براند + موديل] — [سبب في سطر واحد فقط]
+
+💎 أفضل جودة: [براند + موديل] — [سبب في سطر واحد فقط]
+
+💰 أفضل قيمة مقابل السعر: [براند + موديل] — [سبب في سطر واحد فقط]
+
+✨ [معيار رابع يهم هذه الفئة مثل: الأخف وزناً، الأكثر تهوية، الأمتن]: [براند + موديل] — [سبب في سطر واحد فقط]
 
 OPTIONS: [براند موديل 1] | [براند موديل 2] | [براند موديل 3] | [براند موديل 4]
-قواعد: بدون روابط، بدون Markdown، لا تكرر نفس الموديل، سطر OPTIONS إلزامي وبأسماء قابلة للبحث.
+
+قواعد صارمة جداً - ممنوع مخالفتها:
+1- اترك سطر فارغ بين كل توصية والتالية (سطر فارغ بعد كل سطر 🏆 و 💎 و 💰 و ✨).
+2- ممنوع تماماً كتابة أي سطر يبدأ بـ 📦 أو ✅ أو • أو كلمة "متوفر" أو ذكر متجر أو سعر. فقط المقارنة أعلاه.
+3- ممنوع كتابة تفاصيل المتاجر أو الأسعار أو أماكن التوفر في هذه الرسالة. هذه رسالة مقارنة فقط.
+4- لا تكرر نفس الموديل مرتين.
+5- سطر OPTIONS إلزامي وبأسماء قابلة للبحث (مثل: Nike Court Borough Low, Adidas Tensaur, Skechers Dyna Lite, Babolat Jet Mach 3).
+6- بدون روابط، بدون Markdown.
 لغة الرد: حسب تعليمات رسالة المستخدم."""
 
 def _options_from_compare_lines(txt):
@@ -6178,19 +6151,18 @@ def _options_from_compare_lines(txt):
 
 
 def run_brand_comparison(from_number, query, bot_id, lang):
-    """يرسل مقارنة براندات + قائمة اختيار. يعيد False عند الفشل ليكمل البحث العادي."""
+    """v77.2: مقارنة براندات بدون تكرار + مسافة سطر بين المنتجات"""
     send_whatsapp_text(from_number, T(lang, "compare_searching"), bot_id)
     en = english_search_name(query)
     prompt = (
-        f"الطلب العام كما كتبه المستخدم بدون افتراض ماركة: {query}" + (f" ({en})" if en and en != query else "") +
-        f". استخدم مراجعات ومقارنات عالمية حديثة لاختيار الأفضل عالمياً، ثم راعِ ملاءمة وتوفر الخيارات في {current_market().get('country_name', 'Kuwait')} قدر الإمكان. "
+        f"الطلب العام: {query}" + (f" ({en})" if en and en != query else "") +
+        f". قارن أفضل الخيارات المتوفرة الآن في {current_market().get('country_name', 'Kuwait')}. "
         f"{LANG_INSTR[lang]}"
     )
     txt = ""
     options = []
-    # v74.9: محاولتان — والخيارات تُستخرج من أسطر المقارنة إذا سطر OPTIONS ما جاء.
     for attempt in (1, 2):
-        txt, _ = call_gemini([{"text": prompt}], system=BRAND_COMPARE_SYSTEM, include_market_instruction=False)
+        txt, _ = call_gemini([{"text": prompt}], system=BRAND_COMPARE_SYSTEM)
         if not txt:
             print(f"BRAND COMPARE ATTEMPT {attempt}: empty")
             continue
@@ -6205,9 +6177,52 @@ def run_brand_comparison(from_number, query, bot_id, lang):
         if options:
             break
         print(f"BRAND COMPARE ATTEMPT {attempt}: no options")
+
     if not txt or not options:
         print("BRAND COMPARE FAILED -> normal search")
         return False
+
+    # v77.2: تنظيف التكرار - احذف أي سطر يبدأ بـ 📦 أو ✅ أو • فيه كلمة متوفر/متجر/سعر - هذه من بقايا بحث قديم
+    cleaned_lines = []
+    for line in (txt or "").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            cleaned_lines.append("")
+            continue
+        # احذف أسطر التوفر التي تسبب التكرار في الصورة
+        if stripped.startswith("📦") or (stripped.startswith("✅") and "متوفر" in stripped) or (stripped.startswith("•") and "متوفر" in stripped):
+            print(f"BRAND COMPARE CLEANUP DROP: {stripped[:80]}")
+            continue
+        if "متوفر عبر متجر" in stripped or "متوفر في" in stripped and "📦" in stripped:
+            continue
+        cleaned_lines.append(line)
+
+    txt = "\n".join(cleaned_lines).strip()
+
+    # v77.2: اجعل مسافة سطر بين منتج واللي بعده - تأكد من سطر فارغ بعد كل سطر توصية
+    # نحول أي سطر يبدأ بـ 🏆💎💰✨ إلى سطر + سطر فارغ بعده
+    formatted = []
+    for line in txt.splitlines():
+        formatted.append(line)
+        if re.match(r"^\s*(?:🏆|💎|💰|✨)", line):
+            # إذا السطر التالي ليس فارغاً أصلاً، أضف سطر فارغ
+            if not (formatted and len(formatted)>=2 and formatted[-2]==""):
+                # نضيف سطر فارغ لكن نتجنب التكرار
+                if len(formatted)==0 or formatted[-1].strip()!="":
+                    formatted.append("")
+
+    # إزالة الأسطر الفارغة المكررة أكثر من واحد
+    final_lines = []
+    prev_empty = False
+    for l in formatted:
+        is_empty = not l.strip()
+        if is_empty and prev_empty:
+            continue
+        final_lines.append(l)
+        prev_empty = is_empty
+
+    txt = "\n".join(final_lines).strip()
+
     send_whatsapp_text(from_number, txt, bot_id)
     PENDING_BRAND_PICKS[from_number] = {"options": options, "bot_id": bot_id, "lang": lang, "ts": time.time()}
     # v74.10: عناوين القائمة بالعربي للمستخدم العربي (ترجمة دفعة + كاش)،
@@ -6218,21 +6233,8 @@ def run_brand_comparison(from_number, query, bot_id, lang):
         shown = title_map.get(o, o) if lang == "ar" else o
         desc = o if (shown != o) else (o[24:96] if len(o) > 24 else "")
         rows.append({"id": f"pick_{i}", "title": shown[:24], "description": desc[:72]})
-
-    # v76.5: حتى الطلب العام المكتوب نصياً له بحث عالمي مباشر، وليس الصور فقط.
-    _store_pending_global(from_number, bot_id, lang, query, None, None)
-    rows.append({
-        "id": "nf_global",
-        "title": T(lang, "opt_global")[:24],
-        "description": ("عروض عالمية لكل الفئة" if lang == "ar" else "Worldwide offers for this category"),
-    })
-    pick_body = (
-        "اختر موديل من التوصيات لأبحث عن سعره، أو اختر البحث العالمي لكل الفئة 👇"
-        if lang == "ar"
-        else "Choose a recommended model for prices, or search the whole category worldwide 👇"
-    )
-    send_whatsapp_list(from_number, pick_body, rows, bot_id, T(lang, "list_button"))
-    print(f"BRAND COMPARE SENT: {options} + global category option")
+    send_whatsapp_list(from_number, T(lang, "pick_prompt"), rows, bot_id, T(lang, "list_button"))
+    print(f"BRAND COMPARE SENT: {options}")
     return True
 
 
@@ -6289,7 +6291,7 @@ def process_text_message(message,bot_id,onboarding_checked=False):
         execute_service_search(from_number, products[0] if products else user_text, user_text, bot_id, lang)
         return
     if len(products)==1:
-        # v76.5: المصنّف يفرق صراحة بين فئة بلا ماركة وبين منتج محدد كما كتبه المستخدم.
+        # v74.6: المصنّف الذكي (بدون قاموس) يقرر: مقارنة براندات، خدمة، أو بحث مباشر.
         rtype = classify_request_type(products[0])
         if rtype == "NONE":
             # v74.11: عتاب/استعجال/كلام موجه للبوت — نرد بلطف بدل اختراع منتج وهمي.
