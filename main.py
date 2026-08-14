@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v77.5-no-reply-fix-generic-single-20260814"
+BUILD_ID = "v77.6-global-text-fix-consistent-buttons-20260814"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE -> GOOGLE LENS DIRECT PASSTHROUGH (raw results to user)")
@@ -4269,35 +4269,60 @@ def run_global_search(phone, item):
     activate_market(phone)
     bot_id = item["bot_id"]; lang = item["lang"]; query = item["query"]
     send_whatsapp_text(phone, T(lang, "global_searching"), bot_id)
+
+    # v77.6: محاولة أولى بالمحرك الثلاثي (للمطابقة الدقيقة)
     txt, urls = search_product(
         query, lang, prompt_text=item.get("prompt_text"),
         lens_context=item.get("lens_context"), allow_global=True,
     )
+
+    # v77.6: إذا فشل المحرك الثلاثي (يحدث كثيراً للبحث النصي العام)، جرب محرك v26 العالمي المباشر
+    if not txt or not extract_store_offers(txt) or not urls:
+        print(f"GLOBAL SEARCH FALLBACK TO V26 FOR: {query}")
+        try:
+            market_name = current_market().get("country_name", "Kuwait")
+            # برومبت عالمي صريح للنص
+            global_prompt = (
+                f"ابحث عالمياً عن {query} في متاجر خارج {market_name} فقط. "
+                f"استبعد تماماً أي متجر داخل {market_name}. اقبل المتاجر الأجنبية الموثوقة فقط (Amazon.com, Amazon.ae, Noon, eBay, AliExpress, Temu, Shein, Walmart, BestBuy...). "
+                f"اعرض حتى 5 نتائج مختلفة بسعر رقمي واضح ورابط صفحة منتج مباشر. رتب الأرخص أولاً. {LANG_INSTR[lang]}"
+            )
+            txt2, urls2 = legacy_v26_best_of_search([{"text": global_prompt}], max_results=MAX_STORES)
+            if txt2 and urls2 and extract_store_offers(txt2):
+                txt, urls = txt2, urls2
+        except Exception as e:
+            print(f"GLOBAL V26 FALLBACK CRASH: {e}")
+
     if txt and urls:
         filtered_urls = {}
         for name, url in urls.items():
-            local = is_local_lens_result({"link": url, "source": name, "title": name})
-            if local:
-                print(f"GLOBAL FINAL GUARD REJECT LOCAL: {name} -> {url}")
-                continue
-            # v74.14: فلتر الثقة — روابط مشبوهة تُرفض فوراً.
+            # لا نرفض المحلي هنا إذا كان البحث نصي بدون lens_context - نريد أي نتيجة عالمية حتى لو فيها محلي بالخطأ
+            # لكن إذا كان هناك lens_context (صورة)، نرفض المحلي
+            if item.get("lens_context"):
+                local = is_local_lens_result({"link": url, "source": name, "title": name})
+                if local:
+                    print(f"GLOBAL FINAL GUARD REJECT LOCAL: {name} -> {url}")
+                    continue
             if is_suspicious_url(url):
                 print(f"GLOBAL TRUST HARD-DROP: {name} -> {url}")
                 continue
             filtered_urls[name] = url
-        # حكم الثقة الذكي على الدومينات المجهولة (دفعة + كاش).
+
         if filtered_urls and ENABLE_TRUST_FILTER:
             hosts = {n: _host_of(u) for n, u in filtered_urls.items()}
             unknown = [h for h in hosts.values() if h and not is_known_trusted_host(h)]
             if unknown:
-                verdicts = trusted_hosts_verdict(unknown)
-                for n in list(filtered_urls):
-                    h = hosts.get(n, "")
-                    if h and not is_known_trusted_host(h) and not verdicts.get(h, True):
-                        print(f"GLOBAL TRUST DROP: {n} -> {filtered_urls[n]}")
-                        filtered_urls.pop(n, None)
+                try:
+                    verdicts = trusted_hosts_verdict(unknown)
+                    for n in list(filtered_urls):
+                        h = hosts.get(n, "")
+                        if h and not is_known_trusted_host(h) and not verdicts.get(h, True):
+                            print(f"GLOBAL TRUST DROP: {n} -> {filtered_urls[n]}")
+                            filtered_urls.pop(n, None)
+                except Exception as e:
+                    print(f"TRUST VERDICT CRASH: {e}")
+
         if len(filtered_urls) != len(urls):
-            # Remove offer lines whose CTA was rejected, so text and buttons stay consistent.
             kept_names = {normalize_name(n) for n in filtered_urls}
             kept_lines = []
             for line in (txt or "").splitlines():
@@ -4307,10 +4332,11 @@ def run_global_search(phone, item):
                 kept_lines.append(line)
             txt = "\n".join(kept_lines).strip()
             urls = filtered_urls
+
     if not txt or not extract_store_offers(txt) or not urls:
         send_whatsapp_text(phone, T(lang, "global_none"), bot_id)
         return
-    # v74.13: ترتيب جغرافي — الخليج ثم أمريكا ثم الصين ثم أوروبا، وداخل كل منطقة الأرخص أولاً.
+
     txt = reorder_global_offers_text(txt, urls)
     send_product_result(phone, txt, urls, bot_id, lang, query)
 
@@ -6012,20 +6038,16 @@ def execute_product_search(from_number, product, bot_id, lang):
         _store_pending_global(from_number, bot_id, lang, product, None, None)
         send_not_found_choice(from_number, bot_id, lang)
         return
-    # v77: إضافة البحث العالمي التلقائي للبحث النصي — بعد النتائج المحلية
+    # v77.6: إضافة البحث العالمي التلقائي للبحث النصي — بعد النتائج المحلية (زرين فقط: عالمي ولا شكراً)
     if result_type == "product":
-        # خزّن طلب البحث العالمي للزر
         _store_pending_global(from_number, bot_id, lang, product, None, None)
-        # زر إضافي بعد النتائج المحلية: عالمي
         try:
             send_whatsapp_buttons(from_number, T(lang, "ask_global_after_local"), [
                 {"id": "nf_global", "title": T(lang, "opt_global")[:20]},
-                {"id": "nf_similar", "title": T(lang, "opt_similar")[:20]},
                 {"id": "nf_no", "title": T(lang, "opt_no")[:20]},
             ], bot_id)
         except Exception as e:
             print(f"GLOBAL OFFER BTN ERR: {e}")
-            # fallback نصي
             send_whatsapp_text(from_number, T(lang, "ask_global_after_local"), bot_id)
 
     if result_type == "service" or (result_type == "product" and AUTO_SEND_PRODUCT_MAPS):
