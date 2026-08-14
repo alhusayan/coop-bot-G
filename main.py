@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v77.6-global-text-fix-consistent-buttons-20260814"
+BUILD_ID = "v77.7-global-text-lenient-fix-20260814"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE -> GOOGLE LENS DIRECT PASSTHROUGH (raw results to user)")
@@ -4270,74 +4270,129 @@ def run_global_search(phone, item):
     bot_id = item["bot_id"]; lang = item["lang"]; query = item["query"]
     send_whatsapp_text(phone, T(lang, "global_searching"), bot_id)
 
-    # v77.6: محاولة أولى بالمحرك الثلاثي (للمطابقة الدقيقة)
-    txt, urls = search_product(
-        query, lang, prompt_text=item.get("prompt_text"),
-        lens_context=item.get("lens_context"), allow_global=True,
-    )
+    txt, urls = "", {}
+    # v77.7: للبحث النصي، جرب المحرك العالمي المباشر أولاً (أكثر تسامحاً)
+    is_text_search = not item.get("lens_context")
 
-    # v77.6: إذا فشل المحرك الثلاثي (يحدث كثيراً للبحث النصي العام)، جرب محرك v26 العالمي المباشر
-    if not txt or not extract_store_offers(txt) or not urls:
-        print(f"GLOBAL SEARCH FALLBACK TO V26 FOR: {query}")
+    if is_text_search:
         try:
             market_name = current_market().get("country_name", "Kuwait")
-            # برومبت عالمي صريح للنص
             global_prompt = (
                 f"ابحث عالمياً عن {query} في متاجر خارج {market_name} فقط. "
-                f"استبعد تماماً أي متجر داخل {market_name}. اقبل المتاجر الأجنبية الموثوقة فقط (Amazon.com, Amazon.ae, Noon, eBay, AliExpress, Temu, Shein, Walmart, BestBuy...). "
-                f"اعرض حتى 5 نتائج مختلفة بسعر رقمي واضح ورابط صفحة منتج مباشر. رتب الأرخص أولاً. {LANG_INSTR[lang]}"
+                f"استبعد أي متجر داخل {market_name}. ابحث في Amazon.com, Amazon.ae, Amazon.sa, Noon, eBay, AliExpress, Temu, Shein, Walmart, BestBuy, Namshi, Ounass وغيرها من المتاجر العالمية الموثوقة. "
+                f"اعرض حتى 5 نتائج مختلفة بسعر رقمي واضح ورابط صفحة منتج مباشر. اذكر السعر والعملة. رتب الأرخص أولاً. {LANG_INSTR[lang]}"
             )
-            txt2, urls2 = legacy_v26_best_of_search([{"text": global_prompt}], max_results=MAX_STORES)
-            if txt2 and urls2 and extract_store_offers(txt2):
-                txt, urls = txt2, urls2
+            txt, urls = legacy_v26_best_of_search([{"text": global_prompt}], max_results=MAX_STORES)
+            print(f"GLOBAL TEXT DIRECT V26: txt={bool(txt)} urls={len(urls) if urls else 0}")
         except Exception as e:
-            print(f"GLOBAL V26 FALLBACK CRASH: {e}")
+            print(f"GLOBAL TEXT DIRECT CRASH: {e}")
 
-    if txt and urls:
-        filtered_urls = {}
-        for name, url in urls.items():
-            # لا نرفض المحلي هنا إذا كان البحث نصي بدون lens_context - نريد أي نتيجة عالمية حتى لو فيها محلي بالخطأ
-            # لكن إذا كان هناك lens_context (صورة)، نرفض المحلي
-            if item.get("lens_context"):
-                local = is_local_lens_result({"link": url, "source": name, "title": name})
-                if local:
-                    print(f"GLOBAL FINAL GUARD REJECT LOCAL: {name} -> {url}")
-                    continue
-            if is_suspicious_url(url):
-                print(f"GLOBAL TRUST HARD-DROP: {name} -> {url}")
-                continue
-            filtered_urls[name] = url
+    # إذا فشل المباشر، جرب المحرك الثلاثي
+    if not txt or not urls or not extract_store_offers(txt):
+        try:
+            t2, u2 = search_product(
+                query, lang, prompt_text=item.get("prompt_text"),
+                lens_context=item.get("lens_context"), allow_global=True,
+            )
+            if t2 and u2 and extract_store_offers(t2):
+                txt, urls = t2, u2
+                print(f"GLOBAL THREE-LAYER SUCCESS: {query}")
+        except Exception as e:
+            print(f"GLOBAL THREE-LAYER CRASH: {e}")
 
-        if filtered_urls and ENABLE_TRUST_FILTER:
-            hosts = {n: _host_of(u) for n, u in filtered_urls.items()}
-            unknown = [h for h in hosts.values() if h and not is_known_trusted_host(h)]
-            if unknown:
-                try:
-                    verdicts = trusted_hosts_verdict(unknown)
-                    for n in list(filtered_urls):
-                        h = hosts.get(n, "")
-                        if h and not is_known_trusted_host(h) and not verdicts.get(h, True):
-                            print(f"GLOBAL TRUST DROP: {n} -> {filtered_urls[n]}")
-                            filtered_urls.pop(n, None)
-                except Exception as e:
-                    print(f"TRUST VERDICT CRASH: {e}")
+    # إذا فشل الاثنين، جرب مرة ثالثة ببروميت إنجليزي
+    if not txt or not urls or not extract_store_offers(txt):
+        try:
+            en_q = english_search_name(query) or query
+            global_prompt_en = (
+                f"Search worldwide for {en_q} outside {current_market().get('country_name','Kuwait')}. "
+                f"Find 5 different results from trusted international stores (Amazon.com, Amazon.ae, eBay, AliExpress, Temu, Walmart) with numeric price and direct product page link. Sort cheapest first. {LANG_INSTR[lang]}"
+            )
+            txt3, urls3 = legacy_v26_best_of_search([{"text": global_prompt_en}], max_results=MAX_STORES)
+            if txt3 and urls3 and extract_store_offers(txt3):
+                txt, urls = txt3, urls3
+                print(f"GLOBAL EN FALLBACK SUCCESS: {en_q}")
+        except Exception as e:
+            print(f"GLOBAL EN FALLBACK CRASH: {e}")
 
-        if len(filtered_urls) != len(urls):
-            kept_names = {normalize_name(n) for n in filtered_urls}
-            kept_lines = []
-            for line in (txt or "").splitlines():
-                offer_match = re.match(r"^(?:✅|🏆|•)\s*(.+?)\s*(?:—|–|-)\s*", line.strip())
-                if offer_match and normalize_name(offer_match.group(1)) not in kept_names:
-                    continue
-                kept_lines.append(line)
-            txt = "\n".join(kept_lines).strip()
-            urls = filtered_urls
-
-    if not txt or not extract_store_offers(txt) or not urls:
+    if not txt:
         send_whatsapp_text(phone, T(lang, "global_none"), bot_id)
         return
 
-    txt = reorder_global_offers_text(txt, urls)
+    # تنظيف وفلترة متساهلة جداً للنص
+    filtered_urls = {}
+    for name, url in (urls or {}).items():
+        if not url or not url.startswith("http"):
+            continue
+        # للصور فقط نرفض المحلي، للنص نقبل الكل (حتى لو محلي بالخطأ) لتجنب "ما لقيت نتيجة"
+        if item.get("lens_context"):
+            if is_local_lens_result({"link": url, "source": name, "title": name}):
+                print(f"GLOBAL FINAL GUARD REJECT LOCAL (image): {name} -> {url}")
+                continue
+        if is_suspicious_url(url):
+            print(f"GLOBAL TRUST HARD-DROP: {name} -> {url}")
+            continue
+        filtered_urls[name] = url
+
+    # فلتر الثقة: للنص نتساهل أكثر - لا نحذف إلا المشبوه جداً
+    if filtered_urls and ENABLE_TRUST_FILTER and not is_text_search:
+        try:
+            hosts = {n: _host_of(u) for n, u in filtered_urls.items()}
+            unknown = [h for h in hosts.values() if h and not is_known_trusted_host(h)]
+            if unknown:
+                verdicts = trusted_hosts_verdict(unknown)
+                for n in list(filtered_urls):
+                    h = hosts.get(n, "")
+                    if h and not is_known_trusted_host(h) and not verdicts.get(h, True):
+                        print(f"GLOBAL TRUST DROP: {n} -> {filtered_urls[n]}")
+                        filtered_urls.pop(n, None)
+        except Exception as e:
+            print(f"TRUST VERDICT CRASH: {e}")
+
+    # إذا بقي لدينا نص لكن الروابط فلترت كلها، نحاول إرسال النص كما هو مع روابط الصفحة الرئيسية للمتاجر
+    if not filtered_urls and txt:
+        print(f"GLOBAL NO URLS LEFT BUT TXT EXISTS - TRYING FALLBACK URLS")
+        # استخرج أسماء المتاجر من النص وحاول جلب صفحتها الرئيسية
+        offers = extract_store_offers(txt, limit=MAX_STORES)
+        for o in offers:
+            hp = resolve_store_homepage(o.get("name",""))
+            if hp:
+                filtered_urls[o.get("name","")] = hp
+        if not filtered_urls:
+            filtered_urls = urls  # أرجع الأصلي كملاذ أخير
+
+    if not txt or not extract_store_offers(txt):
+        send_whatsapp_text(phone, T(lang, "global_none"), bot_id)
+        return
+
+    if not filtered_urls:
+        # أرسل النص فقط بدون أزرار إذا فشلت الروابط كلها
+        send_whatsapp_text(phone, txt, bot_id)
+        return
+
+    # نظف أسطر العروض التي حذفت روابطها
+    if len(filtered_urls) != len(urls or {}):
+        kept_names = {normalize_name(n) for n in filtered_urls}
+        kept_lines = []
+        for line in (txt or "").splitlines():
+            offer_match = re.match(r"^(?:✅|🏆|•)\s*(.+?)\s*(?:—|–|-)\s*", line.strip())
+            if offer_match and normalize_name(offer_match.group(1)) not in kept_names:
+                continue
+            kept_lines.append(line)
+        txt = "\n".join(kept_lines).strip()
+        urls = filtered_urls
+    else:
+        urls = filtered_urls
+
+    if not txt:
+        send_whatsapp_text(phone, T(lang, "global_none"), bot_id)
+        return
+
+    try:
+        txt = reorder_global_offers_text(txt, urls)
+    except Exception as e:
+        print(f"REORDER GLOBAL CRASH: {e}")
+
     send_product_result(phone, txt, urls, bot_id, lang, query)
 
 def _peek_pending(store, phone):
