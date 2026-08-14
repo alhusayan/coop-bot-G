@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v77.4-brand-yes-no-detection-20260814"
+BUILD_ID = "v77.5-no-reply-fix-generic-single-20260814"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE -> GOOGLE LENS DIRECT PASSTHROUGH (raw results to user)")
@@ -6063,7 +6063,7 @@ _REQUEST_CLASS_CACHE = {}
 _REQUEST_CLASS_LOCK = threading.Lock()
 
 def classify_request_type(query):
-    """v77.4: تمييز عام vs محدد 100% بالذكاء - كلمة واحدة مثل "جبن" = GENERIC"""
+    """v77.5: تمييز عام vs محدد - آمن حتى لو انقطع النت - كلمة واحدة مثل جبن = GENERIC"""
     q = " ".join(str(query or "").split()).strip()
     if not q:
         return "SPECIFIC"
@@ -6071,6 +6071,17 @@ def classify_request_type(query):
     with _REQUEST_CLASS_LOCK:
         if key in _REQUEST_CLASS_CACHE:
             return _REQUEST_CLASS_CACHE[key]
+
+    q_norm = normalize_ar(q).lower()
+    single_word_generics = ("جبن", "حليب", "لبن", "رز", "عيش", "خبز", "ماء", "بيض", "لحم", "دجاج", "شاي", "قهوه", "قهوة", "سكر", "ملح", "زيت", "حذاء", "تيشرت", "بنطلون", "قميص", "فستان", "شنطه", "شنطة", "ساعه", "ساعة")
+    if len(q.split()) == 1 and q_norm in single_word_generics:
+        verdict = "GENERIC"
+        with _REQUEST_CLASS_LOCK:
+            if len(_REQUEST_CLASS_CACHE) > 3000:
+                _REQUEST_CLASS_CACHE.clear()
+            _REQUEST_CLASS_CACHE[key] = verdict
+        print(f"REQUEST CLASSIFIER (fast single generic): {q!r} -> {verdict}")
+        return verdict
 
     if is_service_request(q):
         verdict = "SERVICE"
@@ -6082,16 +6093,19 @@ def classify_request_type(query):
         return verdict
 
     has_brand = None
-    for attempt in (1, 2):
-        raw, _ = call_gemini([{"text": f"النص: {q}"}], system=BRAND_DETECTION_SYSTEM, use_search=False)
-        up = (raw or "").strip().upper()
-        if "YES" in up:
-            has_brand = True
-            break
-        if "NO" in up:
-            has_brand = False
-            break
-        print(f"BRAND DETECTION RETRY {attempt}: {raw!r}")
+    try:
+        for attempt in (1, 2):
+            raw, _ = call_gemini([{"text": f"النص: {q}"}], system=BRAND_DETECTION_SYSTEM, use_search=False)
+            up = (raw or "").strip().upper()
+            if "YES" in up:
+                has_brand = True
+                break
+            if "NO" in up:
+                has_brand = False
+                break
+            print(f"BRAND DETECTION RETRY {attempt}: {raw!r}")
+    except Exception as e:
+        print(f"BRAND DETECTION CRASH: {e}")
 
     if has_brand is True:
         verdict = "SPECIFIC"
@@ -6110,20 +6124,27 @@ def classify_request_type(query):
         print(f"REQUEST CLASSIFIER (brand NO): {q!r} -> {verdict}")
         return verdict
 
-    verdict = ""
-    for attempt in (1, 2):
-        raw, _ = call_gemini([{"text": q}], system=REQUEST_CLASSIFIER_SYSTEM, use_search=False)
-        up = (raw or "").upper()
-        for label in ("SERVICE", "GENERIC", "SPECIFIC", "NONE"):
-            if label in up:
-                verdict = label
+    try:
+        verdict = ""
+        for attempt in (1, 2):
+            raw, _ = call_gemini([{"text": q}], system=REQUEST_CLASSIFIER_SYSTEM, use_search=False)
+            up = (raw or "").upper()
+            for label in ("SERVICE", "GENERIC", "SPECIFIC", "NONE"):
+                if label in up:
+                    verdict = label
+                    break
+            if verdict:
                 break
-        if verdict:
-            break
-        print(f"REQUEST CLASSIFIER RETRY {attempt}: empty/unclear -> {raw!r}")
+            print(f"REQUEST CLASSIFIER RETRY {attempt}: empty/unclear -> {raw!r}")
+    except Exception as e:
+        print(f"CLASSIFIER FALLBACK CRASH: {e}")
+        verdict = ""
 
     if not verdict:
-        verdict = "GENERIC"
+        if len(q.split()) <= 2:
+            verdict = "GENERIC"
+        else:
+            verdict = "SPECIFIC"
 
     with _REQUEST_CLASS_LOCK:
         if len(_REQUEST_CLASS_CACHE) > 3000:
@@ -6275,73 +6296,87 @@ def run_brand_comparison(from_number, query, bot_id, lang):
 
 
 def process_text_message(message,bot_id,onboarding_checked=False):
-    from_number=message["from"]
-    load_user_preferences(from_number)
-    if not onboarding_checked:
-        if from_number not in USER_LANG:
-            cache_pending_message(from_number, message, bot_id); send_language_choice(from_number, bot_id); return
-        if not location_is_valid(from_number):
-            cache_pending_message(from_number, message, bot_id); send_location_request(from_number, bot_id, USER_LANG.get(from_number,"ar"), bool(USER_LOCATION_TS.get(from_number,0))); return
-    activate_market(from_number); user_text=message["text"]["body"]
-    cmd=re.sub(r"[^\w\u0600-\u06FF]","",user_text.strip().lower())
-    if cmd in ("لغة","اللغة","غيراللغة","language","lang","changelanguage"):
-        send_language_choice(from_number, bot_id); return
-    detected=detect_lang(user_text)
-    if detected and USER_LANG.get(from_number) != detected:
-        USER_LANG[from_number]=detected
-        save_user_preferences(from_number)
-    lang=USER_LANG.get(from_number,"ar")
-    if is_map_command(user_text):
-        send_last_search_map(from_number, bot_id, lang)
-        return
-    pend=PENDING_IMAGES.pop(from_number,None)
-    if pend and pend["images"]:
-        # الرسالة النصية بعد صورة معلقة تُعامل كوصف للصورة نفسها،
-        # ولا نكمل لمعالجتها كبحث نصي مستقل (كان يسبب بحثين وردّين مزدوجين).
-        if len(pend["images"])==1:
-            img_msg = pend["images"][0]
-            img = img_msg.setdefault("image", {})
-            if not (img.get("caption") or "").strip():
-                img["caption"] = user_text.strip()
-            process_single_image(img_msg, pend["bot_id"], lang)
+    from_number = "unknown"
+    try:
+        from_number=message["from"]
+        load_user_preferences(from_number)
+        if not onboarding_checked:
+            if from_number not in USER_LANG:
+                cache_pending_message(from_number, message, bot_id); send_language_choice(from_number, bot_id); return
+            if not location_is_valid(from_number):
+                cache_pending_message(from_number, message, bot_id); send_location_request(from_number, bot_id, USER_LANG.get(from_number,"ar"), bool(USER_LOCATION_TS.get(from_number,0))); return
+        activate_market(from_number)
+        user_text=message["text"]["body"]
+        cmd=re.sub(r"[^\w\u0600-\u06FF]","",user_text.strip().lower())
+        if cmd in ("لغة","اللغة","غيراللغة","language","lang","changelanguage"):
+            send_language_choice(from_number, bot_id); return
+        detected=detect_lang(user_text)
+        if detected and USER_LANG.get(from_number) != detected:
+            USER_LANG[from_number]=detected
+            save_user_preferences(from_number)
+        lang=USER_LANG.get(from_number,"ar")
+        if is_map_command(user_text):
+            send_last_search_map(from_number, bot_id, lang)
+            return
+        pend=PENDING_IMAGES.pop(from_number,None)
+        if pend and pend["images"]:
+            if len(pend["images"])==1:
+                img_msg = pend["images"][0]
+                img = img_msg.setdefault("image", {})
+                if not (img.get("caption") or "").strip():
+                    img["caption"] = user_text.strip()
+                process_single_image(img_msg, pend["bot_id"], lang)
+            else:
+                process_multi_images(pend["images"], from_number, pend["bot_id"], lang)
+            return
+        parsed = parse_user_intent(user_text, lang)
+        intent = parsed.get("intent", "search")
+        if intent == "greeting":
+            send_whatsapp_text(from_number, T(lang, "welcome_reply"), bot_id)
+            return
+        if intent == "thanks":
+            send_whatsapp_text(from_number, T(lang, "thanks_reply"), bot_id)
+            return
+        if intent == "chat":
+            send_whatsapp_text(from_number, T(lang, "welcome_reply"), bot_id)
+            return
+        products = [p for p in (parsed.get("products") or []) if p.strip()] or extract_products(user_text)
+        if intent == "service" or is_service_request(products[0] if products else user_text):
+            execute_service_search(from_number, products[0] if products else user_text, user_text, bot_id, lang)
+            return
+        if len(products)==1:
+            try:
+                rtype = classify_request_type(products[0])
+            except Exception as e:
+                print(f"CLASSIFY CRASH for {products[0]!r}: {e} -> fallback GENERIC")
+                rtype = "GENERIC"
+            if rtype == "NONE":
+                send_whatsapp_text(from_number, T(lang, "chat_redirect"), bot_id)
+                return
+            if rtype == "SERVICE":
+                execute_service_search(from_number, products[0], user_text, bot_id, lang)
+                return
+            if rtype == "GENERIC":
+                try:
+                    if run_brand_comparison(from_number, products[0], bot_id, lang):
+                        return
+                except Exception as e:
+                    print(f"BRAND COMPARE CRASH: {e}")
+            try:
+                execute_product_search(from_number, products[0], bot_id, lang)
+            except Exception as e:
+                print(f"PRODUCT SEARCH CRASH: {e}")
+                send_whatsapp_text(from_number, T(lang, "not_found"), bot_id)
         else:
-            process_multi_images(pend["images"], from_number, pend["bot_id"], lang)
-        return
-    parsed = parse_user_intent(user_text, lang)
-    intent = parsed.get("intent", "search")
-    if intent == "greeting":
-        send_whatsapp_text(from_number, T(lang, "welcome_reply"), bot_id)
-        return
-    if intent == "thanks":
-        send_whatsapp_text(from_number, T(lang, "thanks_reply"), bot_id)
-        return
-    if intent == "chat":
-        # كلام عام بلا منتج: نرحب ونوجه بدل ما نبحث عن جملة عشوائية.
-        send_whatsapp_text(from_number, T(lang, "welcome_reply"), bot_id)
-        return
-    products = [p for p in (parsed.get("products") or []) if p.strip()] or extract_products(user_text)
-    # v74.4: طلب خدمة — سواء من المحلل أو من كلمات الخدمة الواضحة في النص —
-    # يروح لمسار الخدمات مباشرة: جواب على سؤال المستخدم + 5 مزودين بأرقام.
-    # لا مقارنة براندات ولا بحث منتجات إطلاقاً.
-    if intent == "service" or is_service_request(products[0] if products else user_text):
-        execute_service_search(from_number, products[0] if products else user_text, user_text, bot_id, lang)
-        return
-    if len(products)==1:
-        # v74.6: المصنّف الذكي (بدون قاموس) يقرر: مقارنة براندات، خدمة، أو بحث مباشر.
-        rtype = classify_request_type(products[0])
-        if rtype == "NONE":
-            # v74.11: عتاب/استعجال/كلام موجه للبوت — نرد بلطف بدل اختراع منتج وهمي.
-            send_whatsapp_text(from_number, T(lang, "chat_redirect"), bot_id)
-            return
-        if rtype == "SERVICE":
-            execute_service_search(from_number, products[0], user_text, bot_id, lang)
-            return
-        if rtype == "GENERIC" and run_brand_comparison(from_number, products[0], bot_id, lang):
-            return
-        execute_product_search(from_number, products[0], bot_id, lang)
-    else:
-        # v75: السلة الموحدة — مقارنة السلة كاملة حسب المتجر واختيار متجر واحد.
-        run_cart_comparison(products, from_number, bot_id, lang)
+            run_cart_comparison(products, from_number, bot_id, lang)
+    except Exception as e:
+        print(f"PROCESS_TEXT_MESSAGE CRASH: {e} for {from_number}")
+        try:
+            lang = USER_LANG.get(from_number, "ar") if 'from_number' in locals() else "ar"
+            b_id = bot_id if 'bot_id' in locals() else PHONE_NUMBER_ID
+            send_whatsapp_text(from_number, T(lang, "not_found"), b_id)
+        except:
+            pass
 
 def process_location_message(message, bot_id):
     from_number = message["from"]
