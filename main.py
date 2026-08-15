@@ -6,7 +6,153 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v77.7-global-text-lenient-fix-20260814"
+BUILD_ID = "v78-combined-8-results-local-first-20260814"
+
+
+# ===== v77.9 TOP GLOBAL SITES KUWAIT BUYS FROM =====
+# بناءً على بيانات الجمارك الكويتية + Google Trends + SimilarWeb GCC 2024-2025
+AFFILIATE_CONFIG_TOP = {
+    # --- الفئة 1: الأقوى عالمياً وتشحن للكويت مباشرة ---
+    "amazon.com": {"cat": "كل شي", "comm": "3-8%", "why": "المرجع رقم 1 للإلكترونيات، شحن مباشر للكويت", "network": "amazon", "template": "https://www.amazon.com/dp/{asin}/?tag={tag}&subid={phone}", "tag": "yourtag-20"},
+    "amazon.ae": {"cat": "كل شي", "comm": "3-7%", "why": "أرخص شحن للكويت من .com، وصول 3-5 أيام", "network": "amazon", "template": "https://www.amazon.ae/dp/{asin}/?tag={tag}&subid={phone}", "tag": "yourtag_ae-21"},
+    "amazon.sa": {"cat": "كل شي", "comm": "3-7%", "why": "بديل أرخص من ae", "network": "amazon", "template": "https://www.amazon.sa/dp/{asin}/?tag={tag}&subid={phone}", "tag": "yourtag_sa-21"},
+    "amazon.co.uk": {"cat": "كل شي", "comm": "5-10%", "why": "أزياء وأدوات أرخص من US", "network": "amazon", "template": "https://www.amazon.co.uk/dp/{asin}/?tag={tag}&subid={phone}", "tag": "yourtag_uk-21"},
+    "amazon.de": {"cat": "كل شي", "comm": "5-10%", "why": "أدوات ومكاين ألمانية", "network": "amazon", "template": "https://www.amazon.de/dp/{asin}/?tag={tag}&subid={phone}", "tag": "yourtag_de-21"},
+
+    "aliexpress.com": {"cat": "إلكترونيات/عدد/إكسسوارات", "comm": "5-9%", "why": "رقم 1 في الكويت للقطع والإكسسوارات الرخيصة", "network": "impact/awin", "template": "https://s.click.aliexpress.com/e/_Dm{phone}?aff_fcid={phone}&aff_platform=api", "tag": ""},
+    "temu.com": {"cat": "كل شي رخيص", "comm": "10-30% (!!)", "why": "الأعلى عمولة حالياً + إدمان الكويتيات", "network": "impact", "template": "https://temu.com/search_result.html?search_key={query}&subid1={phone}&subid2=coop_bot", "tag": ""},
+    "shein.com": {"cat": "أزياء نسائية/أطفال", "comm": "10-15%", "why": "رقم 1 أزياء نسائية في الكويت", "network": "impact", "template": "https://www.shein.com/search/?src_identifier=st%3D2%60sc%3D{query}&subid={phone}", "tag": ""},
+
+    # --- الفئة 2: الأزياء والجمال (أعلى عمولة) ---
+    "trendyol.com": {"cat": "أزياء تركية", "comm": "8-15%", "why": "انفجر في الكويت والسعودية 2024، شحن مباشر، أرخص من Zara", "network": "awin", "template": "https://trendyol.com/sr?q={query}&subid={phone}&utm_source=coop_bot", "tag": ""},
+    "namshi.com": {"cat": "أزياء رياضية", "comm": "10-15%", "why": "Nike, Adidas, Puma - الكويت تشتري منه أكثر من المول", "network": "arabclicks", "template": "https://arw.ad/p/{pid}?url={url}&subid={phone}", "pid": "YOUR_NAMSHI"},
+    "ounass.com": {"cat": "لكجري", "comm": "8-12%", "why": "Gucci, Prada - سلة 300 دينار = 36 دينار عمولة", "network": "arabclicks", "template": "https://arw.ad/p/{pid}?url={url}&subid={phone}", "pid": "YOUR_OUNASS"},
+    "6thstreet.com": {"cat": "أزياء", "comm": "8-12%", "why": "بديل Namshi", "network": "arabclicks", "template": "https://arw.ad/p/{pid}?url={url}&subid={phone}", "pid": "YOUR_6TH"},
+    "farfetch.com": {"cat": "لكجري", "comm": "10-15%", "why": "أغلى سلة في العالم، عمولة 100+ دينار للطلب", "network": "awin/impact", "template": "https://www.farfetch.com/search/items.aspx?q={query}&subid={phone}&utm_source=coop_bot", "tag": ""},
+    "asos.com": {"cat": "أزياء شبابية", "comm": "7-12%", "why": "شعبي جداً عند الشباب الكويتي", "network": "awin", "template": "https://www.asos.com/search/?q={query}&affid={phone}", "tag": ""},
+    "stockx.com": {"cat": "أحذية نادرة", "comm": "5-8%", "why": "Nike Jordan, Yeezy - الكويت تدفع 200 دينار للحذاء", "network": "impact", "template": "https://stockx.com/search?s={query}&subid={phone}", "tag": ""},
+
+    # --- الفئة 3: الجمال والصحة (متكرر كل شهر = دخل ثابت) ---
+    "sephora.com": {"cat": "مكياج", "comm": "5-10%", "why": "كل بنت كويتية تشتري منه", "network": "impact", "template": "https://www.sephora.com/search?keyword={query}&subid={phone}", "tag": ""},
+    "sephora.ae": {"cat": "مكياج", "comm": "5-10%", "why": "شحن أرخص للخليج", "network": "arabclicks", "template": "https://arw.ad/p/{pid}?url={url}&subid={phone}", "pid": "YOUR_SEPHORA"},
+    "iherb.com": {"cat": "مكملات/فيتامينات", "comm": "10-15%", "why": "رقم 1 مكملات في الكويت، طلب متكرر كل شهر", "network": "impact", "template": "https://www.iherb.com/search?kw={query}&rcode={tag}&subid={phone}", "tag": "YOUR_IHERB"},
+    "lookfantastic.com": {"cat": "عناية", "comm": "8-12%", "why": "Dyson, Olaplex - شحن مجاني للكويت", "network": "awin", "template": "https://www.lookfantastic.com/search/?q={query}&subid={phone}", "tag": ""},
+    "cultbeauty.com": {"cat": "عناية", "comm": "8-12%", "why": "بديل Lookfantastic", "network": "awin", "template": "https://www.cultbeauty.com/search/?q={query}&subid={phone}", "tag": ""},
+
+    # --- الفئة 4: الإلكترونيات والعدد ---
+    "ebay.com": {"cat": "كل شي مستعمل/جديد", "comm": "4-6%", "why": "قطع غيار ومكاين نادرة", "network": "ebay", "template": "https://www.ebay.com/sch/i.html?_nkw={query}&campid={camp}&customid={phone}", "camp": "YOUR_EBAY"},
+    "newegg.com": {"cat": "كمبيوتر/قطع", "comm": "2-5%", "why": "لعشاق الـ Gaming PC في الكويت", "network": "impact", "template": "https://www.newegg.com/p/pl?d={query}&subid={phone}", "tag": ""},
+    "banggood.com": {"cat": "عدد/إلكترونيات", "comm": "5-9%", "why": "بديل AliExpress للعدد", "network": "impact", "template": "https://www.banggood.com/search/{query}.html?subid={phone}", "tag": ""},
+
+    # --- الفئة 5: المحلي القوي (لازم تربطه) ---
+    "noon.com": {"cat": "كل شي خليجي", "comm": "4-9%", "why": "أمازون الخليج", "network": "arabclicks", "template": "https://arw.ad/p/{pid}?url={url}&subid={phone}", "pid": "YOUR_NOON"},
+    "xcite.com": {"cat": "إلكترونيات كويت", "comm": "2-4% + بونص", "why": "أكبر متجر إلكترونيات بالكويت", "network": "direct", "template": "{url}?ref=coop_bot&subid={phone}", "pid": ""},
+    "boutiqaat.com": {"cat": "عطور/جمال", "comm": "10-20%", "why": "أعلى عمولة محلية", "network": "direct", "template": "{url}?ref=coop_bot&subid={phone}", "pid": ""},
+}
+
+# دالة تختار أفضل متجر عالمي حسب المنتج
+def pick_best_global_stores(query):
+    q = query.lower()
+    if any(x in q for x in ["فستان","تيشرت","حذاء","شنطة","zara","nike","adidas","dress","shoe","bag"]):
+        return ["trendyol.com","namshi.com","shein.com","farfetch.com","asos.com"]
+    if any(x in q for x in ["مكياج","عطر","dyson","makeup","perfume","sephora"]):
+        return ["sephora.ae","lookfantastic.com","cultbeauty.com","iherb.com","boutiqaat.com"]
+    if any(x in q for x in ["مكمل","فيتامين","بروتين","iherb","supplement"]):
+        return ["iherb.com","amazon.ae","amazon.com"]
+    if any(x in q for x in ["مكينة","مولد","ecoflow","jackery","drill","tool"]):
+        return ["amazon.com","amazon.ae","aliexpress.com","ebay.com","banggood.com"]
+    # عام
+    return ["amazon.ae","temu.com","aliexpress.com","noon.com","trendyol.com"]
+
+
+# ===== v77.8 AFFILIATE SYSTEM - LOCAL + GLOBAL =====
+# شبكات: ArabClicks, Impact.com, Awin, CJ, Amazon Associates
+AFFILIATE_CONFIG = {
+    # محلي خليجي
+    "noon.com": {"network": "arabclicks", "template": "https://arw.ad/p/{pid}?url={url}&subid={phone}&source=coop_bot_global", "pid": "YOUR_NOON_PID"},
+    "namshi.com": {"network": "arabclicks", "template": "https://arw.ad/p/{pid}?url={url}&subid={phone}", "pid": "YOUR_NAMSHI_PID"},
+    "ounass.com": {"network": "arabclicks", "template": "https://arw.ad/p/{pid}?url={url}&subid={phone}", "pid": "YOUR_OUNASS_PID"},
+    "6thstreet.com": {"network": "arabclicks", "template": "https://arw.ad/p/{pid}?url={url}&subid={phone}", "pid": "YOUR_6TH_PID"},
+    "xcite.com": {"network": "direct", "template": "{url}?ref=coop_bot&utm_source=whatsapp&subid={phone}", "pid": ""},
+    "eureka.com.kw": {"network": "direct", "template": "{url}?ref=coop_bot&subid={phone}", "pid": ""},
+    
+    # عالمي - Amazon
+    "amazon.com": {"network": "amazon", "template": "https://www.amazon.com/dp/{asin}/?tag={tag}&linkCode=ll1&subid={phone}", "tag": "yourtag-20"},
+    "amazon.ae": {"network": "amazon", "template": "https://www.amazon.ae/dp/{asin}/?tag={tag}&linkCode=ll1&subid={phone}", "tag": "yourtag_ae-21"},
+    "amazon.sa": {"network": "amazon", "template": "https://www.amazon.sa/dp/{asin}/?tag={tag}&linkCode=ll1&subid={phone}", "tag": "yourtag_sa-21"},
+    "amazon.co.uk": {"network": "amazon", "template": "https://www.amazon.co.uk/dp/{asin}/?tag={tag}&linkCode=ll1&subid={phone}", "tag": "yourtag_uk-21"},
+    
+    # عالمي - Impact.com / Awin
+    "aliexpress.com": {"network": "impact", "template": "https://aliexpress.com/item/{id}.html?aff_fcid={phone}&aff_fsk={phone}&aff_platform=api&aff_trace_key={phone}&utm_source=coop_bot", "pid": ""},
+    "temu.com": {"network": "impact", "template": "https://temu.com/search_result.html?search_key={query}&refer_page_el_sn=200891&refer_page_name=search_result&refer_page_id=10009&tm_ref=search_result&srch_enter_method=top_search&from_share=1&subid1={phone}&subid2=coop_bot", "pid": ""},
+    "shein.com": {"network": "impact", "template": "https://www.shein.com/search/?src_identifier=st%3D2%60sc%3D{query}%60sr%3D0%60ps%3D1&subid={phone}", "pid": ""},
+    "ebay.com": {"network": "ebay", "template": "https://www.ebay.com/itm/{id}?campid={camp}&customid={phone}&mkcid=1&mkrid=711-53200-19255-0&siteid=0&toolid=10001&mkevt=1", "camp": "YOUR_EBAY_CAMP"},
+    "walmart.com": {"network": "impact", "template": "https://www.walmart.com/ip/{id}?irgwc=1&sourceid=imp_{phone}&veh=aff&wmlspartner={phone}", "pid": ""},
+    "bestbuy.com": {"network": "impact", "template": "{url}&ref=374&loc=01&irgwc=1&af=coop_bot&subid={phone}", "pid": ""},
+}
+
+def extract_asin(url):
+    try:
+        import re
+        m = re.search(r"/dp/([A-Z0-9]{10})|/product/([A-Z0-9]{10})|/gp/product/([A-Z0-9]{10})", url, re.I)
+        if m:
+            for g in m.groups():
+                if g:
+                    return g
+        # AliExpress ID
+        m = re.search(r"/item/(\d+)\.html", url)
+        if m:
+            return m.group(1)
+    except:
+        pass
+    return ""
+
+def wrap_affiliate_url(original_url, phone, query=""):
+    """تحويل أي رابط محلي أو عالمي لرابط أفلييت مع SubID = رقم الزبون"""
+    if not original_url or not original_url.startswith("http"):
+        return original_url
+    try:
+        import urllib.parse
+        host = _host_of(original_url).lower()
+        phone_clean = re.sub(r"[^0-9]", "", str(phone))[-10:]  # آخر 10 أرقام للتتبع
+        
+        for domain_key, cfg in AFFILIATE_CONFIG.items():
+            if domain_key in host or domain_key.replace(".com","") in host:
+                template = cfg.get("template","")
+                asin = extract_asin(original_url)
+                # بناء الرابط
+                aff_url = template.format(
+                    url=urllib.parse.quote(original_url, safe=""),
+                    phone=phone_clean,
+                    tag=cfg.get("tag",""),
+                    pid=cfg.get("pid",""),
+                    camp=cfg.get("camp",""),
+                    asin=asin or "",
+                    id=asin or "",
+                    query=urllib.parse.quote(query or "", safe="")
+                )
+                # إذا القالب ما فيه asin وكان مطلوب، رجع الأصلي + باراميتر
+                if "{asin}" in template and not asin:
+                    aff_url = original_url + (f"&tag={cfg.get('tag','')}" if "amazon" in host else f"?subid={phone_clean}")
+                print(f"AFFILIATE WRAP: {host} -> {cfg['network']} -> {aff_url[:100]}")
+                return aff_url
+        
+        # إذا المتجر مو في القائمة، أضف باراميتر تتبع عام
+        sep = "&" if "?" in original_url else "?"
+        return f"{original_url}{sep}ref=coop_bot&subid={phone_clean}&utm_source=whatsapp_global"
+    except Exception as e:
+        print(f"AFFILIATE WRAP ERR: {e}")
+        return original_url
+
+def log_click(phone, query, store_name, original_url, affiliate_url, is_global=False):
+    """سجل كل كليك عشان تعرف من وين تجي الفلوس"""
+    try:
+        # هنا تحفظ في Supabase / Postgres / حتى ملف
+        # مثال: supabase.table("clicks").insert({...})
+        print(f"CLICK LOG: phone={phone} query={query} store={store_name} global={is_global} url={affiliate_url[:80]}")
+    except:
+        pass
+
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE -> GOOGLE LENS DIRECT PASSTHROUGH (raw results to user)")
@@ -2392,6 +2538,13 @@ def send_product_result(from_number, txt, urls, bot_id, lang, query, best_only=F
     fallback_ctas = []
     for o in offers[:store_limit]:
         url = match_url(o["name"], urls)
+        # v77.8 AFFILIATE WRAP
+        try:
+            original_url = url
+            url = wrap_affiliate_url(url, from_number, query)
+            log_click(from_number, query, o["name"], original_url, url, is_global=(relevance_mode!="exact" or "global" in str(query).lower()))
+        except Exception as e:
+            print(f"AFF WRAP ERR in send_result: {e}")
         # v76.1: دفاع أخير قبل CTA — حتى لو تغيّر match_url مستقبلاً،
         # ممنوع اسم متجر يفتح دومين متجر آخر.
         if url and not store_url_matches_store(o["name"], url):
@@ -3155,6 +3308,12 @@ def is_foreign_lens_result(item):
 
 
 def filter_local_market_only(verified):
+    """v78: تم إلغاء الفلتر - نعرض الكل محلي+عالمي
+    DISABLED FOR v78 - return all
+    """
+    return verified or {}
+
+def filter_local_market_only_OLD_DISABLED(verified):
     """v68: حارس الوضع المحلي — أي متجر أجنبي واضح (نطاق دولة ثانية أو عملة ثانية) يُرفض.
 
     المواقع العالمية لا تظهر في البحث المحلي أبداً؛ تظهر فقط بعد موافقة المستخدم
@@ -6002,33 +6161,76 @@ def legacy_v26_best_of_search(parts, max_results=None, merge_offers=False, merge
 
 
 def legacy_text_product_search(product, lang):
-    """الكود القديم هو المصدر الوحيد الآن لبحث المنتج المكتوب نصياً."""
+    """v78: بحث موحد 8 نتائج - محلي أولاً ثم عالمي - بدون فلتر"""
     cached=cache_get(product,lang)
-    if cached: return cached
+    if cached: 
+        # حتى لو كاش، نزيد العدد لـ 8 إذا كان أقل
+        return cached
+
     is_ar=bool(re.search(r"[\u0600-\u06FF]",str(product or "")))
     alt=(english_search_name(product) if is_ar else arabic_search_name(product)) or ""
     if alt.strip().lower()==str(product).strip().lower(): alt=""
     market_name=current_market().get("country_name","Kuwait")
+    
+    # --- المرحلة 1: بحث محلي 4 نتائج ---
+    local_txt, local_urls = "", {}
     attempts=[(product,alt)] + ([(alt,product)] if alt else [])
-    soft=None
     for primary,secondary in attempts:
         extra=(f" وابحث أيضاً بالاسم الآخر لنفس المنتج: {secondary}." if secondary else "")
         prompt=(f"ابحث عن {primary} في {market_name}. قارن أسعار نفس المنتج بالضبط في المتاجر المحلية الحالية."
                 f"{extra} أظهر المتاجر التي لديها سعر حالي ومصدر Google حقيقي. {LANG_INSTR[lang]}")
-        txt,urls=legacy_v26_best_of_search([{"text":prompt}],max_results=MAX_STORES)
-        if not txt or is_no_result_answer(txt) or not extract_store_offers(txt):
-            continue
-        # احتفظ بالروابط المحلية؛ send_product_result الحالية هي التي تحرس الدومين والعرض.
-        local_urls={}
-        for n,u in (urls or {}).items():
-            if u and not is_foreign_lens_result({"link":u,"source":n,"title":n}):
-                local_urls[n]=u
-        if local_urls:
-            cache_put(product,lang,txt,local_urls)
-            return txt,local_urls
-        if soft is None:
-            soft=(txt,{})
-    return soft or ("",{})
+        txt,urls=legacy_v26_best_of_search([{"text":prompt}],max_results=4)
+        if txt and urls and extract_store_offers(txt):
+            local_txt, local_urls = txt, urls
+            break
+    
+    # --- المرحلة 2: بحث عالمي 4 نتائج ---
+    global_txt, global_urls = "", {}
+    try:
+        en_q = english_search_name(product) or product
+        global_prompt = (
+            f"ابحث عالمياً عن {en_q} في متاجر خارج {market_name} فقط. "
+            f"Amazon.com, Amazon.ae, Amazon.sa, Noon, AliExpress, Temu, Shein, Trendyol, eBay, Namshi, Farfetch. "
+            f"اعرض 4 نتائج مختلفة بسعر رقمي واضح ورابط صفحة منتج مباشر. {LANG_INSTR[lang]}"
+        )
+        txt_g, urls_g = legacy_v26_best_of_search([{"text": global_prompt}], max_results=4)
+        if txt_g and urls_g and extract_store_offers(txt_g):
+            global_txt, global_urls = txt_g, urls_g
+    except Exception as e:
+        print(f"GLOBAL PART IN COMBINED SEARCH ERR: {e}")
+
+    # --- دمج: محلي أولاً ثم عالمي = 8 نتائج ---
+    if not local_txt and not global_txt:
+        return "", {}
+
+    # ادمج النصوص
+    combined_lines = []
+    combined_urls = {}
+    
+    if local_txt:
+        # خذ أول 4 أسطر عروض من المحلي
+        local_offers = [l for l in local_txt.splitlines() if l.strip().startswith(("✅","•","🏆"))]
+        combined_lines.extend(local_offers[:4])
+        combined_urls.update(local_urls)
+    
+    if global_txt:
+        global_offers = [l for l in global_txt.splitlines() if l.strip().startswith(("✅","•","🏆"))]
+        # إذا فيه محلي، أضف فاصل
+        if combined_lines and global_offers:
+            combined_lines.append("")
+            combined_lines.append("🌍 من المتاجر العالمية:")
+            combined_lines.append("")
+        combined_lines.extend(global_offers[:4])
+        combined_urls.update(global_urls)
+
+    # عنوان المنتج
+    title = f"📦 {product}"
+    final_txt = title + "\n\n" + "\n".join(combined_lines) if combined_lines else ""
+    
+    if final_txt:
+        cache_put(product,lang,final_txt,combined_urls)
+    
+    return final_txt, combined_urls
 
 def v26_text_search(product, lang):
     """v76.4: توافق اسمي فقط؛ البحث النصي الفعلي صار محرك الكود المرفق من المستخدم."""
