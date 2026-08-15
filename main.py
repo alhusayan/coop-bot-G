@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v78-combined-8-results-local-first-20260814"
+BUILD_ID = "v79-FINAL-8-results-no-global-button-20260814"
 
 
 # ===== v77.9 TOP GLOBAL SITES KUWAIT BUYS FROM =====
@@ -6273,42 +6273,24 @@ def execute_service_search(from_number, service_desc, original_text, bot_id, lan
     send_maps_button(from_number, service_desc, bot_id, lang)
 
 
+
 def execute_product_search(from_number, product, bot_id, lang):
-    """v77: مسار البحث النصي — v26 أولاً + عرض نتائج + زر بحث عالمي تلقائي للنص"""
+    """v79 FINAL: 8 نتائج موحدة محلي أولاً ثم عالمي - بدون زر دور عالميا"""
     send_whatsapp_text(from_number, T(lang, "searching", q=product), bot_id)
     try:
         txt, urls = v26_text_search(product, lang)
-        if not txt:
-            print("TEXT LEGACY V26 PATH EMPTY — no current-engine fallback by design")
     except Exception as e:
-        # v74.9: ممنوع الصمت — أي خطأ داخلي يتحول لرد واضح مع خيارات المتابعة.
         print(f"TEXT SEARCH CRASH: {e}")
         txt, urls = "", {}
     LAST_SEARCH[from_number] = {"product": product}
     if not txt or (not extract_store_offers(txt) and not is_service_answer(txt) and not is_informational_answer(txt)):
-        # ما لقينا المنتج بالضبط محلياً: نعرض الخيارات الثلاثة (عالمي + بدائل)
-        _store_pending_global(from_number, bot_id, lang, product, None, None)
-        send_not_found_choice(from_number, bot_id, lang)
+        send_whatsapp_text(from_number, T(lang, "not_found"), bot_id)
         return
-    result_type = send_product_result(from_number, txt, urls, bot_id, lang, product)
-    if result_type == "none":
-        _store_pending_global(from_number, bot_id, lang, product, None, None)
-        send_not_found_choice(from_number, bot_id, lang)
-        return
-    # v77.6: إضافة البحث العالمي التلقائي للبحث النصي — بعد النتائج المحلية (زرين فقط: عالمي ولا شكراً)
-    if result_type == "product":
-        _store_pending_global(from_number, bot_id, lang, product, None, None)
-        try:
-            send_whatsapp_buttons(from_number, T(lang, "ask_global_after_local"), [
-                {"id": "nf_global", "title": T(lang, "opt_global")[:20]},
-                {"id": "nf_no", "title": T(lang, "opt_no")[:20]},
-            ], bot_id)
-        except Exception as e:
-            print(f"GLOBAL OFFER BTN ERR: {e}")
-            send_whatsapp_text(from_number, T(lang, "ask_global_after_local"), bot_id)
-
-    if result_type == "service" or (result_type == "product" and AUTO_SEND_PRODUCT_MAPS):
+    # عرض 8 نتائج مباشرة
+    result_type = send_product_result(from_number, txt, urls, bot_id, lang, product, max_stores=8)
+    if result_type == "product" and AUTO_SEND_PRODUCT_MAPS:
         send_maps_button(from_number, product, bot_id, lang)
+
 
 
 # ---- v74.6: مصنّف الطلبات — ذكاء اصطناعي خالص، بدون أي قاموس -----------------
