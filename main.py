@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v79-FINAL-8-results-no-global-button-20260814"
+BUILD_ID = "v80-FINAL-image-8-combined-no-global-button-20260814"
 
 
 # ===== v77.9 TOP GLOBAL SITES KUWAIT BUYS FROM =====
@@ -5234,70 +5234,38 @@ def _pop_pending_lens_social(phone):
 
 
 def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
-    """v76.4: فلتر مواقع البيع + قائمة الخيارات الإضافية بعد النتائج.
-
-    - فلتر ذكاء اصطناعي يبقي فقط مواقع البيع الفعلية (لا مقالات ولا مدونات).
-    - نتائج التواصل تُفصل وتُعرض عند اختيار «عروض التواصل» من الخيارات.
-    - المحلي يُرسل فوراً (المسعّر أولاً أرخص→أغلى)، وبعده قائمة الخيارات الإضافية:
-      [🌍 دوّر عالمياً] [📍 وين أقرب محل؟]
-    - لا محلي؟ نفس الخيارين مع نص يوضح عدم توفر المنتج محلياً.
-    - ميزة «بدائل مشابهة» نفسها تبقى في الكود، لكنها لا تظهر في هذه القائمة.
-    """
+    """v80 FINAL: 8 نتائج موحدة للصورة - محلي أولاً ثم عالمي - بدون زر دور عالميا منفصل"""
     matches = [m for m in (lens.get("matches") or []) if (m.get("title") or "").strip()]
     if not matches:
         return False
-    social = [m for m in matches if is_social_result(m)]
-    # v74.15: عروض التواصل المحلية فقط — بوست إسبانيا ما يهم مستخدم الكويت.
-    social_before = len(social)
-    social = [m for m in social if is_local_social_result(m)]
-    if social_before != len(social):
-        print(f"SOCIAL LOCAL FILTER: {social_before} -> {len(social)}")
+    # فلتر مواقع البيع فقط
     nonsocial = [m for m in matches if not is_social_result(m)]
-    # v74: نتائج المتاجر فقط — المقالات والمدونات والمواقع العامة تُستبعد.
     nonsocial = filter_shopping_results(nonsocial)
     local = [m for m in nonsocial if is_local_lens_result(m)]
     foreign = [m for m in nonsocial if not is_local_lens_result(m)]
-    country = country_hint_word(lang) or current_market().get("country_name", "")
-    chosen_title = ((lens.get("chosen") or {}).get("title") or matches[0]["title"]).strip()
-    # البحث عن نفس المنتج/العالمي يبقى كما هو، لكن «البدائل» تستخدم هوية الأغلبية من Lens فقط.
-    exact_query = (caption or chosen_title).strip()
-    consensus = build_lens_consensus_identity(lens, local + foreign)
-    similar_query = (consensus.get("query") or chosen_title or exact_query).strip()
-    # نخزن العالمي والتواصل دائماً — تُعرض فقط عند اختيار المستخدم من القائمة.
-    now = time.time()
-    PENDING_LENS_FOREIGN[from_number] = {
-        "bot_id": bot_id, "lang": lang, "matches": foreign[:LENS_RESULT_LIMIT],
-        "query": exact_query,
-        "similar_query": similar_query,
-        "similar_aliases": consensus.get("aliases") or [],
-        "similar_consensus_count": consensus.get("count", 0),
-        "ts": now,
-    }
-    PENDING_LENS_SOCIAL[from_number] = {
-        "bot_id": bot_id, "lang": lang, "matches": social[:LENS_RESULT_LIMIT], "ts": now,
-    }
-    # v76.4: «بدائل مشابهة» أزيلت من قائمة «خيارات إضافية» فقط.
-    # البحث العالمي والخريطة يبقيان كما هما.
-    trio = [
-        {"id": "lf_yes", "title": T(lang, "opt_global")[:24]},
-        {"id": "map_open", "title": T(lang, "opt_map")[:24]},
-    ]
-    sent = False
-    if local:
-        sent = _send_lens_match_batch(from_number, local, bot_id, lang, convert_prices=False)
-    if sent:
-        # v76.4: بعد النتائج المحلية — البحث العالمي + الخريطة فقط.
-        send_whatsapp_list(from_number, T(lang, "more_options_ask"), trio, bot_id, T(lang, "options_button"))
-    elif foreign or social:
-        body = (T(lang, "lens_no_local", c=len(foreign), country=country) if foreign
-                else T(lang, "no_local_generic"))
-        send_whatsapp_list(from_number, body, trio, bot_id, T(lang, "options_button"))
-        sent = True
-    if not sent:
+    
+    # v80: دمج 8 نتائج - 4 محلي أولاً ثم 4 عالمي
+    combined = []
+    # محلي أولاً (4)
+    combined.extend(local[:4])
+    # عالمي بعد (4)
+    combined.extend(foreign[:4])
+    
+    if not combined:
         return False
+    
+    chosen_title = ((lens.get("chosen") or {}).get("title") or matches[0]["title"]).strip()
+    exact_query = (caption or chosen_title).strip()
+    
+    # أرسل 8 نتائج مباشرة بدون قائمة خيارات إضافية
+    sent = _send_lens_match_batch(from_number, combined, bot_id, lang, convert_prices=False)
+    
+    # إذا فيه نتائج عالمية بين المدمجة، فعّل تحويل العملة لها
+    # _send_lens_match_batch يتعامل معها تلقائياً
+    
     LAST_SEARCH[from_number] = {"product": exact_query}
-    print(f"LENS DIRECT SENT: local={len(local)} foreign_stored={len(foreign)} social_stored={len(social)}")
-    return True
+    print(f"LENS DIRECT v80 COMBINED: local={len(local[:4])} foreign={len(foreign[:4])} total={len(combined)}")
+    return sent
 
 def process_single_image(message,bot_id,lang="ar"):
     from_number=message["from"]
