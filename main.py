@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v82-FINAL-stock-filter-in-stock-only-8-results-20260814"
+BUILD_ID = "v83-FINAL-no-lens-none-msg-soft-stock-8-results-20260814"
 
 
 # ===== v77.9 TOP GLOBAL SITES KUWAIT BUYS FROM =====
@@ -1042,7 +1042,7 @@ MSG = {
         "lens_foreign_header": "🌍 النتائج العالمية (الأسعار محوّلة لعملتك عند الإمكان):",
         "lf_show": "اعرضها 🌍",
         "lf_skip": "لا شكراً 🙏",
-        "lens_none": "Google ما رجّع نتائج للصورة 😅 أكمل البحث بطريقتي...",
+        "lens_none": "",
         "chat_redirect": "أنا حاضر ومعك! 🙌\nدز اسم المنتج أو صورته وأدور لك أفضل الأسعار، أو اكتب طلب الخدمة اللي تحتاجها 🛒",
     },
     "en": {
@@ -5027,48 +5027,34 @@ def _send_lens_match_batch(from_number, matches, bot_id, lang, header="", conver
         if len(picked) >= LENS_MAX_CARDS:
             break
 
-    # 3) v72.3 + v82 STOCK: نجلب السعر وحالة التوفر - نحذف out of stock
+    # 3) v72.3: البطاقات التي بلا سعر من Google — نجلب السعر من صفحة المتجر نفسها (مجاني وسريع).
     def _fetch_page_price(url):
-        in_stock, info = fetch_stock_and_price(url)
-        if not in_stock:
-            return None  # سيتم حذفه
+        cached = VERIFIED_PAGE_CACHE.get(url)
+        if cached and (time.time() - cached["ts"] < 600):
+            return cached["data"]
+        info = parse_product_data(fetch_html(url), url)
+        if info:
+            VERIFIED_PAGE_CACHE[url] = {"data": info, "ts": time.time()}
         return info
 
-    # v82: فلتر out of stock قبل الفرز
-    # أولاً فلتر سريع من العنوان
-    # ثم فلتر عميق بجلب الصفحة
-    final_picked_raw = picked[:LENS_MAX_CARDS*2]  # نجيب ضعف عشان بعد الحذف يبقى 8
-    
-    # v74: السعر الحقيقي + فحص التوفر
-    to_verify = [(i, url) for i, (_m, _t, url) in enumerate(final_picked_raw)][:LENS_PRICE_FETCH_MAX*2]
-    verified_picked = []
+    final_picked = picked[:LENS_MAX_CARDS]
+    # v74: السعر الحقيقي بلا تقريب — Google أحياناً يقرّب (1.000 بدل 1.250)، لذلك نقرأ
+    # سعر صفحة المتجر نفسها لكل البطاقات (ضمن السقف) ونعتمده فوق سعر Google عند وجوده.
+    to_verify = [(i, url) for i, (_m, _t, url) in enumerate(final_picked)][:LENS_PRICE_FETCH_MAX]
     if to_verify:
         for i, info in RESOLVER.map(lambda x: (x[0], _fetch_page_price(x[1])), to_verify):
-            if info is None:
-                # out of stock -> تجاهل
-                print(f"STOCK FILTER DROP: {final_picked_raw[i][2][:70]}")
-                continue
-            if info.get("price"):
-                m = final_picked_raw[i][0]
+            if info and info.get("price"):
+                m = final_picked[i][0]
                 old_val = m.get("price_value")
                 m["price_value"] = info["price"]
-                m["price"] = ""
+                m["price"] = ""  # نص Google القديم قد يكون مقرّباً — نعتمد سعر الصفحة.
                 if info.get("currency"):
                     m["currency"] = info["currency"]
                 try:
                     if old_val not in (None, "") and abs(float(old_val) - float(info["price"])) >= 0.001:
-                        print(f"PRICE CORRECTED: {final_picked_raw[i][2][:70]}")
-                except:
+                        print(f"PRICE CORRECTED (Google {old_val} -> page {info['price']}): {final_picked[i][2][:70]}")
+                except Exception:
                     pass
-            verified_picked.append(final_picked_raw[i])
-
-    # إذا بعد الفلترة بقى أقل من المطلوب، كمل من الباقي
-    final_picked = verified_picked[:LENS_MAX_CARDS]
-    # إذا لسه قليل، حاول تجيب إضافي من الـ by_host
-    if len(final_picked) < 6:
-        print(f"STOCK FILTER LOW RESULTS: {len(final_picked)} only, trying to fill")
-        # لا نعمل شيء إضافي هنا، نعرض الموجود فقط
-        pass
 
     # v73: الفرز النهائي — البطاقات المسعّرة أولاً من الأرخص إلى الأغلى، ثم غير المسعّرة
     # (بترتيب Google بينها). التحويل للعملة المحلية يدخل في المقارنة للنتائج العالمية.
@@ -5249,79 +5235,14 @@ def _pop_pending_lens_social(phone):
 
 
 
-# ===== v82 STOCK CHECK - فلتر المنتجات الغير متوفرة =====
-OUT_OF_STOCK_PHRASES = [
-    "out of stock", "currently out of stock", "out-of-stock", "sold out",
-    "not available in store", "not available", "unavailable",
-    "temporarily out of stock", "currently unavailable",
-    "غير متوفر", "نفدت الكمية", "نفذت الكمية", "غير متاح", "عذرا غير متوفر",
-    "out of stock online", "email me when available",
-    "إضافة إلى قائمة الرغبات غير متوفر",
-]
-
-def is_out_of_stock_html(html):
-    """فحص سريع للـ HTML إذا كان المنتج غير متوفر"""
-    if not html:
-        return False
-    low = str(html).lower()
-    # تحقق من العبارات
-    for phrase in OUT_OF_STOCK_PHRASES:
-        if phrase.lower() in low:
-            return True
-    return False
-
-def is_in_stock_match(match):
-    """فحص نتيجة Lens إذا كانت in stock من snippet/title"""
+# v83 SOFT STOCK FILTER - يحذف فقط العناوين الواضحة جداً out of stock
+def is_out_of_stock_title(m):
     try:
-        hay = " ".join(str(match.get(k) or "") for k in ("title","snippet","price")).lower()
-        for phrase in OUT_OF_STOCK_PHRASES:
-            if phrase.lower() in hay:
-                return False
-        return True
+        hay = (str(m.get("title") or "") + " " + str(m.get("snippet") or "")).lower()
+        bad = ["out of stock", "currently out of stock", "sold out", "not available in store", "غير متوفر", "نفدت الكمية"]
+        return any(p in hay for p in bad)
     except:
-        return True
-
-def fetch_stock_and_price(url):
-    """يجلب السعر وحالة التوفر معاً - يرجع (in_stock: bool, price_info)"""
-    try:
-        cached = VERIFIED_PAGE_CACHE.get(url)
-        if cached and (time.time() - cached["ts"] < 600):
-            data = cached["data"]
-            # إذا الكاش فيه out_of_stock flag
-            if data and data.get("_out_of_stock"):
-                return False, data
-            return True, data
-        
-        html = fetch_html(url)
-        if not html:
-            return True, None  # لو ما قدرنا نجيب الصفحة، نفترض متوفر (لا نحذفه)
-        
-        # فحص out of stock أولاً
-        if is_out_of_stock_html(html):
-            info = parse_product_data(html, url) or {}
-            info["_out_of_stock"] = True
-            VERIFIED_PAGE_CACHE[url] = {"data": info, "ts": time.time()}
-            print(f"STOCK CHECK: OUT OF STOCK -> {url[:80]}")
-            return False, info
-        
-        info = parse_product_data(html, url)
-        if info:
-            VERIFIED_PAGE_CACHE[url] = {"data": info, "ts": time.time()}
-        return True, info
-    except Exception as e:
-        print(f"STOCK CHECK ERR {url[:60]}: {e}")
-        return True, None  # في حال خطأ، لا نحذف المنتج
-
-def filter_in_stock_matches(matches):
-    """فلتر سريع بدون fetch - يحذف اللي واضح أنه out of stock من العنوان"""
-    filtered = []
-    for m in matches:
-        if not is_in_stock_match(m):
-            print(f"STOCK FILTER TITLE: {m.get('title','')[:60]} -> OUT")
-            continue
-        filtered.append(m)
-    return filtered
-
+        return False
 
 # ===== v81 HIGH COMMISSION TARGETING =====
 HIGH_COMMISSION_STORES = {
@@ -5381,14 +5302,15 @@ def filter_and_prioritize_for_affiliate(matches, max_results=8):
 
 
 def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
-    """v80 FINAL: 8 نتائج موحدة للصورة - محلي أولاً ثم عالمي - بدون زر دور عالميا منفصل"""
+    """v83: 8 نتائج موحدة - محلي أولاً ثم عالمي - بدون رسالة lens_none - فلتر خفيف"""
     matches = [m for m in (lens.get("matches") or []) if (m.get("title") or "").strip()]
     if not matches:
         return False
-    # v82: فلتر مواقع البيع + فلتر out of stock السريع
+    # فلتر مواقع البيع فقط + فلتر خفيف جداً للـ out of stock الواضح
     nonsocial = [m for m in matches if not is_social_result(m)]
     nonsocial = filter_shopping_results(nonsocial)
-    nonsocial = filter_in_stock_matches(nonsocial)  # فلتر سريع للعناوين
+    # فلتر خفيف فقط
+    nonsocial = [m for m in nonsocial if not is_out_of_stock_title(m)]
     local = [m for m in nonsocial if is_local_lens_result(m)]
     foreign = [m for m in nonsocial if not is_local_lens_result(m)]
     
@@ -5442,8 +5364,8 @@ def process_single_image(message,bot_id,lang="ar"):
             if send_lens_direct_results(from_number, lens_direct, bot_id, lang, caption):
                 # v74.14: الخريطة صارت الخيار الرابع داخل قائمة «تبي أكثر» — لا رسالة منفصلة.
                 return
-        print("LENS DIRECT MODE: no Google results -> full pipeline fallback")
-        send_whatsapp_text(from_number, T(lang, "lens_none"), bot_id)
+        print("LENS DIRECT MODE: no Google results -> fallback silently")
+        # v83: إلغاء رسالة Google ما رجع نتائج - إكمال بصمت
 
     # FUSION ROUTER (قوة الخلط):
     # 1) Lens و Vision يشتغلان بالتوازي — لا ننتظر أحدهما ليبدأ الآخر.
