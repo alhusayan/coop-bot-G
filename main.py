@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v81-FINAL-currency-convert-high-commission-targeting-20260814"
+BUILD_ID = "v81.1-fast-parallel-phases-early-exit-sanity-20260815"
 
 
 # ===== v77.9 TOP GLOBAL SITES KUWAIT BUYS FROM =====
@@ -2503,6 +2503,65 @@ def resolve_direct_product_page(store_name, product_name, candidate_url=""):
     return chosen
 
 
+def _price_sanity_filter(offers, query="", lang="ar"):
+    """v81.1: سعر شاذ عن الوسيط بشكل صارخ = منتج مختلف غالباً (قطعة/إكسسوار/نسخة أخرى).
+
+    مدرك للعملات: النتائج المدموجة (محلي + عالمي) تُجمّع حسب عملة كل سطر، والقاعدة
+    (أكثر من 8× الوسيط أو أقل من وسيطه/8) تُطبق داخل كل مجموعة فيها 3 أسعار فأكثر.
+    """
+    local_code = (current_market().get("currency") or "KWD").upper()
+    groups = defaultdict(list)
+    for o in offers:
+        code = detect_currency_code(o.get("line", ""), local_code) or local_code
+        groups[code].append(o)
+    kept = []
+    for code, grp in groups.items():
+        priced = [(o, _extract_numeric_price(o.get("line", ""))) for o in grp]
+        nums = sorted(p for _o, p in priced if p is not None and p > 0)
+        if len(nums) < 3:
+            kept.extend(grp)
+            continue
+        median = nums[len(nums) // 2]
+        if median <= 0:
+            kept.extend(grp)
+            continue
+        for o, p in priced:
+            if p is not None and p > 0 and (p > median * 8 or p < median / 8):
+                print(f"PRICE SANITY DROP [{code}] ({str(query)[:40]!r}): {o.get('line','')[:80]} (median={median})")
+                continue
+            kept.append(o)
+    # الحفاظ على الترتيب الأصلي (محلي أولاً ثم عالمي).
+    order = {id(o): i for i, o in enumerate(offers)}
+    kept.sort(key=lambda o: order.get(id(o), 10**9))
+    return kept if kept else offers
+
+
+def _dedup_offers_by_store(offers, urls):
+    """v81.1: توحيد كانوني — «لولو» و«لولو هايبرماركت» بنفس النتيجة يظهران مرة (الأرخص)."""
+    best = {}
+    order = []
+    for o in offers:
+        try:
+            key = canonical_store_key(o.get("name", ""), match_url(o.get("name", ""), urls or {}))
+        except Exception:
+            key = ""
+        if not key:
+            key = normalize_name(normalize_ar(o.get("name", ""))) or o.get("name", "")
+        p = _extract_numeric_price(o.get("line", ""))
+        cur = best.get(key)
+        if cur is None:
+            best[key] = (o, p)
+            order.append(key)
+        else:
+            _co, cp = cur
+            if p is not None and (cp is None or p < cp):
+                best[key] = (o, p)
+    deduped = [best[k][0] for k in order]
+    if len(deduped) != len(offers):
+        print(f"STORE DEDUP: {len(offers)} -> {len(deduped)} offers")
+    return deduped
+
+
 def send_product_result(from_number, txt, urls, bot_id, lang, query, best_only=False, max_stores=None, relevance_mode="exact"):
     if not txt:
         send_whatsapp_text(from_number, T(lang, "not_found"), bot_id)
@@ -2526,6 +2585,11 @@ def send_product_result(from_number, txt, urls, bot_id, lang, query, best_only=F
         print("RELEVANCE: all offers dropped -> treat as not found")
         send_whatsapp_text(from_number, T(lang, "not_found"), bot_id)
         return "none"
+    # v81.1: فلترا الدقة — للبحث الدقيق فقط: البدائل المشابهة منتجات مختلفة بأسعار
+    # متباينة شرعاً، وقد يحمل المتجر الواحد بديلين، فما ينطبق عليها الفلتران.
+    if relevance_mode == "exact" and not best_only:
+        offers = _price_sanity_filter(offers, query, lang)
+        offers = _dedup_offers_by_store(offers, urls)
     title = product_title(txt, query)
     if title:
         send_whatsapp_text(from_number, title, bot_id)
@@ -2790,24 +2854,61 @@ def _merge_v26_offer_text(results, title_line, max_results):
     return (title_line.strip() + "\n" + "\n".join(lines)).strip()
 
 
+# v81.1: خروج مبكر من البطولات — نتيجة قوية مبكرة = ما ننتظر الجولة العالقة (توفير 30-60%).
+V26_EARLY_EXIT_SCORE = int(os.environ.get("V26_EARLY_EXIT_SCORE", "14"))
+V26_EARLY_EXIT_MIN_RUNS = max(1, int(os.environ.get("V26_EARLY_EXIT_MIN_RUNS", "2")))
+
+def _tournament_collect(futs, merge_offers, deadline_seconds=120):
+    """يجمع نتائج الجولات فور اكتمالها مع خروج مبكر ذكي.
+
+    وضع الدمج (merge_offers=True) يستفيد من كل الجولات للوفرة، فنقص فقط آخر جولة
+    عالقة (بعد اكتمال SEARCH_RUNS-1). الوضع العادي يخرج بعد جولتين ونتيجة قوية.
+    """
+    from concurrent.futures import as_completed as _as_completed
+    results = []
+    min_runs = max(V26_EARLY_EXIT_MIN_RUNS, len(futs) - 1) if merge_offers else V26_EARLY_EXIT_MIN_RUNS
+    deadline = time.time() + deadline_seconds
+    best_score = -1
+    try:
+        for f in _as_completed(futs, timeout=deadline_seconds + 5):
+            try:
+                t, u = f.result(timeout=max(1.0, deadline - time.time()))
+            except Exception as e:
+                print(f"tournament run err: {e.__class__.__name__}")
+                continue
+            if t:
+                results.append((t, u))
+                best_score = max(best_score, v26_answer_score(t, u))
+                if len(results) >= min_runs and best_score >= V26_EARLY_EXIT_SCORE:
+                    pending = sum(1 for x in futs if not x.done())
+                    if pending:
+                        print(f"TOURNAMENT EARLY EXIT: score={best_score} after {len(results)} runs, skipping {pending} pending")
+                    break
+            if time.time() >= deadline:
+                break
+    except Exception as e:
+        print(f"tournament collect err: {e.__class__.__name__}")
+    return results
+
+
 def v26_best_of_search(parts, max_results=None, merge_offers=False, merge_title=""):
     """v26 tournament with an optional v76 union mode for similar alternatives.
 
     Normal callers are unchanged. For alternatives, ``merge_offers=True`` unions
     different stores/products discovered across SEARCH_RUNS instead of throwing
     away everything except the winning text.
+    v81.1: as_completed + early exit — الجولة العالقة ما توقف الرد.
     """
     limit = MAX_STORES if max_results is None else max(1, int(max_results))
     market_snapshot = current_market()
     try:
         futs = [V26_SEARCH_POOL.submit(_run_with_market, market_snapshot, call_gemini, parts)
                 for _ in range(SEARCH_RUNS)]
-        results = [f.result(timeout=120) for f in futs]
+        results = _tournament_collect(futs, merge_offers)
     except Exception as e:
         print(f"v26 best_of_search err {e}")
         return call_gemini(parts)
 
-    results = [(t, u) for (t, u) in results if t]
     if not results:
         return "", {}
 
@@ -6156,7 +6257,9 @@ def legacy_v26_call_gemini(parts, system=LEGACY_TEXT_SEARCH_SYSTEM, max_results=
 
 
 def legacy_v26_best_of_search(parts, max_results=None, merge_offers=False, merge_title=""):
-    """بطولة الكود القديم: SEARCH_RUNS بالتوازي، الأفضل يفوز، والروابط اتحاد الجميع."""
+    """بطولة الكود القديم: SEARCH_RUNS بالتوازي، الأفضل يفوز، والروابط اتحاد الجميع.
+
+    v81.1: as_completed + خروج مبكر — نفس ترقية البطولة الرئيسية."""
     limit=MAX_STORES if max_results is None else max(1,int(max_results))
     market_snapshot=current_market()
     try:
@@ -6164,11 +6267,10 @@ def legacy_v26_best_of_search(parts, max_results=None, merge_offers=False, merge
                                      legacy_v26_call_gemini, parts,
                                      LEGACY_TEXT_SEARCH_SYSTEM, limit)
               for _ in range(SEARCH_RUNS)]
-        results=[f.result(timeout=120) for f in futs]
+        results=_tournament_collect(futs, merge_offers)
     except Exception as e:
         print(f"LEGACY V26 best_of_search err {e}")
         return legacy_v26_call_gemini(parts, max_results=limit)
-    results=[(tt,uu) for tt,uu in results if tt]
     if not results: return "",{}
     scored=sorted(results,key=lambda x:v26_answer_score(x[0],x[1],limit),reverse=True)
     best_txt,best_urls=scored[0]
@@ -6187,43 +6289,80 @@ def legacy_v26_best_of_search(parts, max_results=None, merge_offers=False, merge
 
 
 def legacy_text_product_search(product, lang):
-    """v78: بحث موحد 8 نتائج - محلي أولاً ثم عالمي - بدون فلتر"""
+    """v78: بحث موحد 8 نتائج - محلي أولاً ثم عالمي - بدون فلتر
+
+    v81.1: المرحلتان المحلية والعالمية تنطلقان **بالتوازي** بدل التتابع (كان ينتظر
+    المحلي كاملاً ثم يبدأ العالمي) + الترجمة كسولة بالخلفية + دمج عروض كل جولات
+    البطولة (merge_offers) لملء الخانات — أسرع بكثير ونتائج أوفر.
+    """
     cached=cache_get(product,lang)
     if cached: 
         # حتى لو كاش، نزيد العدد لـ 8 إذا كان أقل
         return cached
 
     is_ar=bool(re.search(r"[\u0600-\u06FF]",str(product or "")))
-    alt=(english_search_name(product) if is_ar else arabic_search_name(product)) or ""
-    if alt.strip().lower()==str(product).strip().lower(): alt=""
     market_name=current_market().get("country_name","Kuwait")
-    
-    # --- المرحلة 1: بحث محلي 4 نتائج ---
+    market_snapshot = current_market()
+
+    # الترجمة بالخلفية — البطولة المحلية الأولى ما تنتظرها (Gemini يترجم داخلياً).
+    _alt_future = RESOLVER.submit(
+        _run_with_market, market_snapshot,
+        (english_search_name if is_ar else arabic_search_name), product,
+    )
+    def _get_alt():
+        try:
+            a = (_alt_future.result(timeout=25) or "").strip()
+        except Exception as e:
+            print(f"ALT NAME ERR: {e.__class__.__name__}")
+            a = ""
+        return "" if a.lower() == str(product).strip().lower() else a
+
+    # --- المرحلة العالمية تنطلق فوراً كمستقبل موازٍ (كانت تنتظر المحلي كاملاً) ---
+    def _global_phase():
+        try:
+            en_q = (_get_alt() if is_ar else product) or english_search_name(product) or product
+            global_prompt = (
+                f"ابحث عالمياً عن {en_q} في متاجر خارج {market_name} فقط. "
+                f"Amazon.com, Amazon.ae, Amazon.sa, Noon, AliExpress, Temu, Shein, Trendyol, eBay, Namshi, Farfetch. "
+                f"اعرض 4 نتائج مختلفة بسعر رقمي واضح ورابط صفحة منتج مباشر. {LANG_INSTR[lang]}"
+            )
+            txt_g, urls_g = legacy_v26_best_of_search(
+                [{"text": global_prompt}], max_results=4,
+                merge_offers=True, merge_title=f"📦 {product}",
+            )
+            if txt_g and urls_g and extract_store_offers(txt_g):
+                return txt_g, urls_g
+        except Exception as e:
+            print(f"GLOBAL PART IN COMBINED SEARCH ERR: {e}")
+        return "", {}
+    _global_future = WORKERS.submit(_run_with_market, market_snapshot, _global_phase)
+
+    # --- المرحلة المحلية (بالخيط الحالي، بالتوازي مع العالمية) ---
     local_txt, local_urls = "", {}
-    attempts=[(product,alt)] + ([(alt,product)] if alt else [])
-    for primary,secondary in attempts:
+    def _local_attempts():
+        yield (product, "")
+        alt = _get_alt()
+        if alt:
+            print(f"LEGACY BILINGUAL (lazy): {product!r} <-> {alt!r}")
+            yield (alt, product)
+    for primary,secondary in _local_attempts():
         extra=(f" وابحث أيضاً بالاسم الآخر لنفس المنتج: {secondary}." if secondary else "")
         prompt=(f"ابحث عن {primary} في {market_name}. قارن أسعار نفس المنتج بالضبط في المتاجر المحلية الحالية."
                 f"{extra} أظهر المتاجر التي لديها سعر حالي ومصدر Google حقيقي. {LANG_INSTR[lang]}")
-        txt,urls=legacy_v26_best_of_search([{"text":prompt}],max_results=4)
+        txt,urls=legacy_v26_best_of_search(
+            [{"text":prompt}],max_results=4,
+            merge_offers=True, merge_title=f"📦 {product}",
+        )
         if txt and urls and extract_store_offers(txt):
             local_txt, local_urls = txt, urls
             break
-    
-    # --- المرحلة 2: بحث عالمي 4 نتائج ---
+
+    # --- جمع المرحلة العالمية (كانت تشتغل طوال هذا الوقت بالتوازي) ---
     global_txt, global_urls = "", {}
     try:
-        en_q = english_search_name(product) or product
-        global_prompt = (
-            f"ابحث عالمياً عن {en_q} في متاجر خارج {market_name} فقط. "
-            f"Amazon.com, Amazon.ae, Amazon.sa, Noon, AliExpress, Temu, Shein, Trendyol, eBay, Namshi, Farfetch. "
-            f"اعرض 4 نتائج مختلفة بسعر رقمي واضح ورابط صفحة منتج مباشر. {LANG_INSTR[lang]}"
-        )
-        txt_g, urls_g = legacy_v26_best_of_search([{"text": global_prompt}], max_results=4)
-        if txt_g and urls_g and extract_store_offers(txt_g):
-            global_txt, global_urls = txt_g, urls_g
+        global_txt, global_urls = _global_future.result(timeout=130)
     except Exception as e:
-        print(f"GLOBAL PART IN COMBINED SEARCH ERR: {e}")
+        print(f"GLOBAL PHASE JOIN ERR: {e.__class__.__name__}")
 
     # --- دمج: محلي أولاً ثم عالمي = 8 نتائج ---
     if not local_txt and not global_txt:
@@ -6685,4 +6824,4 @@ def process_location_message(message, bot_id):
     route_pending_after_location(from_number)
 
 @app.get("/")
-async def health(): return {"status":"v75.6 NO SOCIAL OPTION + CLEAR SIMPLE TITLES + AI STORE UNIFY + IN-STORE SEARCH LINKS + CANONICAL STORES + CLEAN LAYOUT + ONE-SESSION + GREEDY COMPLETION + LIVE LINKS + LOCAL SOCIAL + GLOBAL REGION ORDER + MORE LENS CARDS + NONE CLASS + CTA ALWAYS + ARABIC PICK LIST + RELEVANCE FILTER + NO SILENCE + BILINGUAL 2 ROUNDS + PURE AI CLASSIFIER + CLEAN STORE NAMES + SERVICE INTENT FIX (answer+5 providers) + TEXT+SIMILAR USE OLD v26 SMART PATH (tournament) + SERVICES 5+ PHONES + AI INTENT + BRAND COMPARE + SHOP FILTER + TRIO OPTIONS + EXACT PRICES", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "v26_runs":SEARCH_RUNS, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
+async def health(): return {"status":"v81.1 FAST: PARALLEL LOCAL+GLOBAL PHASES + EARLY-EXIT TOURNAMENTS + LAZY TRANSLATION | ACCURATE: CURRENCY-AWARE PRICE SANITY + CANONICAL STORE DEDUP | ABUNDANT: OFFER UNION IN TEXT PATH | + v81 CURRENCY CONVERT + HIGH COMMISSION + CLEAR SIMPLE TITLES + AI STORE UNIFY + IN-STORE SEARCH LINKS + CANONICAL STORES + CLEAN LAYOUT + ONE-SESSION + GREEDY COMPLETION + LIVE LINKS + LOCAL SOCIAL + GLOBAL REGION ORDER + MORE LENS CARDS + NONE CLASS + CTA ALWAYS + ARABIC PICK LIST + RELEVANCE FILTER + NO SILENCE + BILINGUAL 2 ROUNDS + PURE AI CLASSIFIER + CLEAN STORE NAMES + SERVICE INTENT FIX (answer+5 providers) + TEXT+SIMILAR USE OLD v26 SMART PATH (tournament) + SERVICES 5+ PHONES + AI INTENT + BRAND COMPARE + SHOP FILTER + TRIO OPTIONS + EXACT PRICES", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "v26_runs":SEARCH_RUNS, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
