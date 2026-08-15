@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v83-FINAL-no-lens-none-msg-soft-stock-8-results-20260814"
+BUILD_ID = "v81-FINAL-currency-convert-high-commission-targeting-20260814"
 
 
 # ===== v77.9 TOP GLOBAL SITES KUWAIT BUYS FROM =====
@@ -1042,7 +1042,7 @@ MSG = {
         "lens_foreign_header": "🌍 النتائج العالمية (الأسعار محوّلة لعملتك عند الإمكان):",
         "lf_show": "اعرضها 🌍",
         "lf_skip": "لا شكراً 🙏",
-        "lens_none": "",
+        "lens_none": "Google ما رجّع نتائج للصورة 😅 أكمل البحث بطريقتي...",
         "chat_redirect": "أنا حاضر ومعك! 🙌\nدز اسم المنتج أو صورته وأدور لك أفضل الأسعار، أو اكتب طلب الخدمة اللي تحتاجها 🛒",
     },
     "en": {
@@ -5234,16 +5234,6 @@ def _pop_pending_lens_social(phone):
 
 
 
-
-# v83 SOFT STOCK FILTER - يحذف فقط العناوين الواضحة جداً out of stock
-def is_out_of_stock_title(m):
-    try:
-        hay = (str(m.get("title") or "") + " " + str(m.get("snippet") or "")).lower()
-        bad = ["out of stock", "currently out of stock", "sold out", "not available in store", "غير متوفر", "نفدت الكمية"]
-        return any(p in hay for p in bad)
-    except:
-        return False
-
 # ===== v81 HIGH COMMISSION TARGETING =====
 HIGH_COMMISSION_STORES = {
     "temu.com": {"comm": "10-30%", "priority": 1},
@@ -5302,15 +5292,13 @@ def filter_and_prioritize_for_affiliate(matches, max_results=8):
 
 
 def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
-    """v83: 8 نتائج موحدة - محلي أولاً ثم عالمي - بدون رسالة lens_none - فلتر خفيف"""
+    """v80 FINAL: 8 نتائج موحدة للصورة - محلي أولاً ثم عالمي - بدون زر دور عالميا منفصل"""
     matches = [m for m in (lens.get("matches") or []) if (m.get("title") or "").strip()]
     if not matches:
         return False
-    # فلتر مواقع البيع فقط + فلتر خفيف جداً للـ out of stock الواضح
+    # فلتر مواقع البيع فقط
     nonsocial = [m for m in matches if not is_social_result(m)]
     nonsocial = filter_shopping_results(nonsocial)
-    # فلتر خفيف فقط
-    nonsocial = [m for m in nonsocial if not is_out_of_stock_title(m)]
     local = [m for m in nonsocial if is_local_lens_result(m)]
     foreign = [m for m in nonsocial if not is_local_lens_result(m)]
     
@@ -5364,8 +5352,8 @@ def process_single_image(message,bot_id,lang="ar"):
             if send_lens_direct_results(from_number, lens_direct, bot_id, lang, caption):
                 # v74.14: الخريطة صارت الخيار الرابع داخل قائمة «تبي أكثر» — لا رسالة منفصلة.
                 return
-        print("LENS DIRECT MODE: no Google results -> fallback silently")
-        # v83: إلغاء رسالة Google ما رجع نتائج - إكمال بصمت
+        print("LENS DIRECT MODE: no Google results -> full pipeline fallback")
+        send_whatsapp_text(from_number, T(lang, "lens_none"), bot_id)
 
     # FUSION ROUTER (قوة الخلط):
     # 1) Lens و Vision يشتغلان بالتوازي — لا ننتظر أحدهما ليبدأ الآخر.
