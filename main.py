@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v80-FINAL-image-8-combined-no-global-button-20260814"
+BUILD_ID = "v81-FINAL-currency-convert-high-commission-targeting-20260814"
 
 
 # ===== v77.9 TOP GLOBAL SITES KUWAIT BUYS FROM =====
@@ -5233,6 +5233,64 @@ def _pop_pending_lens_social(phone):
     return item
 
 
+
+# ===== v81 HIGH COMMISSION TARGETING =====
+HIGH_COMMISSION_STORES = {
+    "temu.com": {"comm": "10-30%", "priority": 1},
+    "shein.com": {"comm": "10-15%", "priority": 2},
+    "trendyol.com": {"comm": "8-15%", "priority": 3},
+    "namshi.com": {"comm": "10-15%", "priority": 4},
+    "ounass.com": {"comm": "8-12%", "priority": 5},
+    "6thstreet.com": {"comm": "8-12%", "priority": 6},
+    "farfetch.com": {"comm": "10-15%", "priority": 7},
+    "amazon.ae": {"comm": "3-7%", "priority": 8},
+    "amazon.sa": {"comm": "3-7%", "priority": 9},
+    "amazon.com": {"comm": "3-8%", "priority": 10},
+    "noon.com": {"comm": "4-9%", "priority": 11},
+    "aliexpress.com": {"comm": "5-9%", "priority": 12},
+    "sephora.ae": {"comm": "5-10%", "priority": 13},
+    "iherb.com": {"comm": "10-15%", "priority": 14},
+}
+
+def is_high_commission_store(url_or_host):
+    try:
+        import urllib.parse
+        host = url_or_host if "." in url_or_host and "/" not in url_or_host else urllib.parse.urlparse(str(url_or_host)).netloc.lower()
+        if not host:
+            host = str(url_or_host).lower()
+        for domain in HIGH_COMMISSION_STORES:
+            if domain in host:
+                return True
+        return False
+    except:
+        return False
+
+def prioritize_high_commission(matches):
+    """رتب النتائج: متاجر العمولة العالية أولاً"""
+    def score(m):
+        try:
+            url = (m.get("link") or "").lower()
+            for domain, info in HIGH_COMMISSION_STORES.items():
+                if domain in url:
+                    return info["priority"]
+            return 99
+        except:
+            return 99
+    return sorted(matches, key=score)
+
+def filter_and_prioritize_for_affiliate(matches, max_results=8):
+    """فلتر للمتاجر المستهدفة فقط + ترتيب حسب العمولة"""
+    # أولاً: المتاجر المستهدفة
+    targeted = [m for m in matches if is_high_commission_store(m.get("link",""))]
+    # ثانياً: الباقي
+    others = [m for m in matches if not is_high_commission_store(m.get("link",""))]
+    # رتب المستهدفة حسب العمولة
+    targeted = prioritize_high_commission(targeted)
+    # ادمج: المستهدفة أولاً ثم الباقي
+    combined = targeted + others
+    return combined[:max_results]
+
+
 def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
     """v80 FINAL: 8 نتائج موحدة للصورة - محلي أولاً ثم عالمي - بدون زر دور عالميا منفصل"""
     matches = [m for m in (lens.get("matches") or []) if (m.get("title") or "").strip()]
@@ -5257,8 +5315,8 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
     chosen_title = ((lens.get("chosen") or {}).get("title") or matches[0]["title"]).strip()
     exact_query = (caption or chosen_title).strip()
     
-    # أرسل 8 نتائج مباشرة بدون قائمة خيارات إضافية
-    sent = _send_lens_match_batch(from_number, combined, bot_id, lang, convert_prices=False)
+    # أرسل 8 نتائج مباشرة مع تحويل العملة للعالمي
+    sent = _send_lens_match_batch(from_number, combined, bot_id, lang, convert_prices=True)
     
     # إذا فيه نتائج عالمية بين المدمجة، فعّل تحويل العملة لها
     # _send_lens_match_batch يتعامل معها تلقائياً
