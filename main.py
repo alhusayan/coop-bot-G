@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v81.4-official-brand-card-cards-only-20260815"
+BUILD_ID = "v81.1-fast-parallel-phases-early-exit-sanity-20260815"
 
 
 # ===== v77.9 TOP GLOBAL SITES KUWAIT BUYS FROM =====
@@ -289,14 +289,6 @@ LENS_RESULT_LIMIT = max(12, int(os.environ.get("LENS_RESULT_LIMIT", "40")))
 LENS_IMAGE_TTL = max(120, int(os.environ.get("LENS_IMAGE_TTL_SECONDS", "600")))
 LENS_IMAGE_STORE = {}
 LENS_IMAGE_LOCK = threading.Lock()
-# v81.2: صمود اللينز — تطبيق Lens يلقى المنتج وبوتنا يقول «ما فيه»؟ هذا يمنعه:
-# تمريرات بالتوازي + إعادة محاولة عند الصفر + محرك Vision الرسمي احتياط مستقل.
-LENS_HTTP_TIMEOUT = max(30, int(os.environ.get("LENS_HTTP_TIMEOUT", "75")))
-LENS_PASS_POOL = ThreadPoolExecutor(max_workers=3)
-LENS_RETRY_ON_EMPTY = env_bool("LENS_RETRY_ON_EMPTY", True)
-# auto = SerpApi أولاً و Vision احتياط | vision = الرسمي فقط | serpapi = القديم فقط
-IMAGE_ID_ENGINE = os.environ.get("IMAGE_ID_ENGINE", "auto").strip().lower()
-GOOGLE_VISION_API_KEY = (os.environ.get("GOOGLE_VISION_API_KEY", "") or os.environ.get("GEMINI_API_KEY", "")).strip()
 
 # ---- Google Shopping عبر SerpApi (v69) ---------------------------------------
 # طبقة أسعار منظمة: google_shopping يجيب بطاقات المنتج مع immersive_product_page_token،
@@ -1402,7 +1394,7 @@ def _serpapi_lens_request(public_url, lens_type, country, auto_crop, query_hint)
     if query_hint and (lens_type in (None, "", "all", "visual_matches", "products")):
         params["q"] = query_hint[:120]
     try:
-        r = requests.get("https://serpapi.com/search.json", params=params, timeout=LENS_HTTP_TIMEOUT)
+        r = requests.get("https://serpapi.com/search.json", params=params, timeout=60)
         if r.status_code >= 400:
             print(f"GOOGLE LENS HTTP {r.status_code} type={lens_type or 'all'} country={country or '-'}: {r.text[:300]}")
             return []
@@ -1418,95 +1410,6 @@ def _serpapi_lens_request(public_url, lens_type, country, auto_crop, query_hint)
         print(f"GOOGLE LENS PASS EXCEPTION type={lens_type or 'all'}: {e}")
         return []
 
-
-def _self_url_reachable(public_url):
-    """v81.2: نتأكد أن رابط صورتنا العام يفتح فعلاً قبل حرق تمريرات SerpApi عليه.
-
-    فشل الوصول (سيرفر بارد/رابط خاطئ) كان يسبب «ما فيه نتائج» رغم أن Lens يعرف المنتج."""
-    try:
-        r = requests.get(public_url, headers=HEADERS, timeout=8, stream=True)
-        ok = r.status_code == 200
-        r.close()
-        if not ok:
-            print(f"LENS SELF-URL HTTP {r.status_code}: {public_url[:80]}")
-        return ok
-    except Exception as e:
-        print(f"LENS SELF-URL UNREACHABLE: {e.__class__.__name__}")
-        return False
-
-
-def google_vision_web_detect(image_b64, mime_type):
-    """v81.2: محرك التعرف الرسمي (Google Cloud Vision WEB_DETECTION) — احتياط مستقل.
-
-    يرسل الصورة base64 مباشرة (لا يحتاج رابطاً عاماً إطلاقاً) فيتجاوز كل أعطال
-    SerpApi والرابط العام. يعيد نتائج بشكل نتائج Lens نفسها حتى يمر كل ما بعدها
-    (العرض، الخيارات، ترتيب العمولة) بدون أي تعديل.
-    يتطلب تفعيل Cloud Vision API في نفس مشروع Google Cloud حق مفتاح Gemini.
-    """
-    if not GOOGLE_VISION_API_KEY or not image_b64:
-        return []
-    try:
-        body = {"requests": [{
-            "image": {"content": image_b64},
-            "features": [{"type": "WEB_DETECTION", "maxResults": 30}],
-        }]}
-        r = requests.post(
-            f"https://vision.googleapis.com/v1/images:annotate?key={GOOGLE_VISION_API_KEY}",
-            json=body, timeout=25,
-        )
-        if r.status_code >= 400:
-            print(f"VISION WEB HTTP {r.status_code}: {r.text[:200]}")
-            return []
-        web = (((r.json().get("responses") or [{}])[0]).get("webDetection") or {})
-        best_guess = ""
-        for g in (web.get("bestGuessLabels") or []):
-            if g.get("label"):
-                best_guess = g["label"].strip()
-                break
-        entities = [e.get("description", "").strip() for e in (web.get("webEntities") or [])
-                    if e.get("description") and float(e.get("score") or 0) >= 0.5]
-        items, seen = [], set()
-        pos = 0
-        for page in (web.get("pagesWithMatchingImages") or []):
-            title = re.sub(r"<[^>]+>", "", str(page.get("pageTitle") or "")).strip()
-            link = str(page.get("url") or "").strip()
-            if not title or not link:
-                continue
-            sig = (title.lower(), link.lower())
-            if sig in seen:
-                continue
-            seen.add(sig)
-            pos += 1
-            try:
-                host = urllib.parse.urlparse(link).netloc.replace("www.", "")
-            except Exception:
-                host = ""
-            items.append({
-                "title": title, "link": link, "source": host or "web",
-                "position": pos, "section": "vision_pages", "exact": True,
-                "thumbnail": "", "image": "", "price": "", "price_value": None,
-                "currency": "", "in_stock": None, "condition": "",
-            })
-        chosen_title = best_guess or (entities[0] if entities else "")
-        if chosen_title and items:
-            # نرفع النتيجة الأقرب لعنوان أفضل تخمين لتتصدر الاختيار.
-            for it in items:
-                if normalize_ar(chosen_title).lower() in normalize_ar(it["title"]).lower():
-                    it["position"] = 0
-                    break
-        print(f"VISION WEB DETECT: pages={len(items)} best_guess={chosen_title!r} entities={entities[:3]}")
-        if not items and chosen_title:
-            # حتى بدون صفحات: أفضل تخمين وحده يكفي ليكمل البوت بحثه النصي بالاسم الصحيح.
-            items = [{"title": chosen_title, "link": "", "source": "google-vision",
-                      "position": 1, "section": "vision_pages", "exact": True,
-                      "thumbnail": "", "image": "", "price": "", "price_value": None,
-                      "currency": "", "in_stock": None, "condition": ""}]
-        return items
-    except Exception as e:
-        print(f"VISION WEB EXCEPTION: {e}")
-        return []
-
-
 def google_lens_lookup(image_b64, mime_type, lang="ar", query_hint="", light=False):
     """تعرف بصري متعدد التمريرات ليقترب من قوة تطبيق Google Lens نفسه.
 
@@ -1519,15 +1422,14 @@ def google_lens_lookup(image_b64, mime_type, lang="ar", query_hint="", light=Fal
       3) type=all بدون قيد الدولة وبدون auto_crop   -> أوسع بحث، مثل تطبيق Lens تماماً.
     ثم ندمج النتائج (بدون تكرار) ونختار أفضل عنوان، ونستخرج التوقيع الشكلي من الصورة الأصلية.
     """
-    serpapi_possible = bool(ENABLE_GOOGLE_LENS and SERPAPI_API_KEY and PUBLIC_BASE_URL and IMAGE_ID_ENGINE in ("auto", "serpapi"))
-    vision_possible = bool(GOOGLE_VISION_API_KEY and IMAGE_ID_ENGINE in ("auto", "vision"))
-    if not serpapi_possible and not vision_possible:
-        print("GOOGLE LENS SKIPPED: no visual engine available (SerpApi keys/URL missing and Vision key missing)")
+    if not ENABLE_GOOGLE_LENS or not SERPAPI_API_KEY or not PUBLIC_BASE_URL:
+        print("GOOGLE LENS SKIPPED: missing SERPAPI_API_KEY or PUBLIC_BASE_URL")
         return {"aliases": [], "matches": [], "query": ""}
 
-    public_url = publish_image_for_lens(image_b64, mime_type) if serpapi_possible else ""
-    if serpapi_possible and not public_url:
-        print("GOOGLE LENS: could not publish image -> Vision-only path")
+    public_url = publish_image_for_lens(image_b64, mime_type)
+    if not public_url:
+        print("GOOGLE LENS SKIPPED: could not publish image")
+        return {"aliases": [], "matches": [], "query": ""}
 
     try:
         user_country = current_market().get("country", DEFAULT_COUNTRY)
@@ -1541,45 +1443,19 @@ def google_lens_lookup(image_b64, mime_type, lang="ar", query_hint="", light=Fal
                 seen.add(sig)
                 merged.append(it)
 
-        serpapi_ok = serpapi_possible and bool(public_url)
-        # v81.2: الرابط العام لازم يفتح قبل حرق تمريرات SerpApi عليه (سيرفر بارد = صفر نتائج).
-        if serpapi_ok and not _self_url_reachable(public_url):
-            print("LENS: public image URL unreachable -> skipping SerpApi passes")
-            serpapi_ok = False
+        passes = [
+            ("products", user_country, True),
+            ("all", user_country, True),
+        ]
+        if ENABLE_LENS_WIDE_FALLBACK:
+            passes.append(("all", "", False))
 
-        if serpapi_ok:
-            # v81.2: الموجة الأولى (products + all) بالتوازي بدل التتابع — أسرع وأصمد.
-            wave = [
-                LENS_PASS_POOL.submit(_serpapi_lens_request, public_url, "products", user_country, True, query_hint),
-                LENS_PASS_POOL.submit(_serpapi_lens_request, public_url, "all", user_country, True, query_hint),
-            ]
-            for f in wave:
-                try:
-                    _merge(f.result(timeout=LENS_HTTP_TIMEOUT + 10))
-                except Exception as e:
-                    print(f"LENS WAVE ERR: {e.__class__.__name__}")
+        for lens_type, country, auto_crop in passes:
+            _merge(_serpapi_lens_request(public_url, lens_type, country, auto_crop, query_hint))
             has_exact = any(m.get("exact") for m in merged)
             has_local = any(is_local_lens_result(m) for m in merged)
-            if ENABLE_LENS_WIDE_FALLBACK and (len(merged) < LENS_MIN_MATCHES or not (has_exact or has_local)):
-                _merge(_serpapi_lens_request(public_url, "all", "", False, query_hint))
-            # v81.2: صفر نتائج غالباً عثرة مؤقتة (ضغط SerpApi) — محاولة ثانية وحدة تنقذها.
-            if not merged and LENS_RETRY_ON_EMPTY:
-                print("LENS RETRY: all passes empty -> one retry after 2s")
-                time.sleep(2)
-                retry_wave = [
-                    LENS_PASS_POOL.submit(_serpapi_lens_request, public_url, "all", user_country, True, query_hint),
-                    LENS_PASS_POOL.submit(_serpapi_lens_request, public_url, "all", "", False, query_hint),
-                ]
-                for f in retry_wave:
-                    try:
-                        _merge(f.result(timeout=LENS_HTTP_TIMEOUT + 10))
-                    except Exception as e:
-                        print(f"LENS RETRY ERR: {e.__class__.__name__}")
-
-        # v81.2: محرك Vision الرسمي — احتياط مستقل تماماً (base64 مباشرة، بلا رابط عام).
-        if not merged and IMAGE_ID_ENGINE in ("auto", "vision"):
-            print("LENS FALLBACK: trying official Google Vision WEB_DETECTION")
-            _merge(google_vision_web_detect(image_b64, mime_type))
+            if len(merged) >= LENS_MIN_MATCHES and lens_type != "products" and (has_exact or has_local):
+                break
 
         matches = merged[:LENS_RESULT_LIMIT]
         if not matches:
@@ -5516,158 +5392,39 @@ def filter_and_prioritize_for_affiliate(matches, max_results=8):
     return combined[:max_results]
 
 
-# ---- v81.4: بطاقة المتجر الرسمي للبراند — Lens يعرف الاسم لكن نتائجه البصرية ---
-# غالباً مواقع إعادة بيع؛ نستخرج البراند من العنوان ونبني رابط متجره الرسمي بأنفسنا.
-BRAND_EXTRACT_SYSTEM = """أنت خبير علامات تجارية. سأعطيك عنوان منتج من نتائج بحث.
-أرجع اسم البراند/الماركة فقط كما يُكتب رسمياً (مثل: west elm أو IKEA أو Bottega Veneta أو Nike).
-تجاهل أسماء المتاجر البائعة (John Lewis, Etsy, Amazon...) وكلمات المنتج والألوان والمقاسات.
-إذا لا يوجد براند واضح في العنوان أرجع كلمة NONE فقط. سطر واحد بدون شرح."""
-_BRAND_EXTRACT_CACHE = {}
-_BRAND_EXTRACT_LOCK = threading.Lock()
-
-def extract_brand_from_title(title):
-    t = " ".join(str(title or "").split())[:150]
-    if not t:
-        return ""
-    key = normalize_ar(t).lower()[:120]
-    with _BRAND_EXTRACT_LOCK:
-        if key in _BRAND_EXTRACT_CACHE:
-            return _BRAND_EXTRACT_CACHE[key]
-    raw, _ = call_gemini([{"text": t}], system=BRAND_EXTRACT_SYSTEM, use_search=False)
-    brand = (raw or "").strip().splitlines()[0].strip(" .،-—\"'") if raw else ""
-    if brand.upper() == "NONE" or len(brand) < 2 or len(brand) > 40:
-        brand = ""
-    with _BRAND_EXTRACT_LOCK:
-        if len(_BRAND_EXTRACT_CACHE) > 2000:
-            _BRAND_EXTRACT_CACHE.clear()
-        _BRAND_EXTRACT_CACHE[key] = brand
-    print(f"BRAND EXTRACT: {t[:60]!r} -> {brand!r}")
-    return brand
-
-
-def official_brand_card(chosen_title):
-    """يعيد (البراند، رابط متجره الرسمي الحي) أو ("", "").
-
-    الرابط: نتائج بحث المتجر الرسمي عن المنتج نفسه (يوصلك للمنتج مباشرة)،
-    وإلا الصفحة الرئيسية — وكلها مفحوصة حياً قبل الإرسال.
-    """
-    brand = extract_brand_from_title(chosen_title)
-    if not brand:
-        return "", ""
-    url = ""
-    try:
-        url = store_search_url(brand, chosen_title) or ""
-    except Exception as e:
-        print(f"OFFICIAL SEARCH URL ERR: {e.__class__.__name__}")
-    if not url:
-        try:
-            url = resolve_store_homepage(brand) or ""
-        except Exception as e:
-            print(f"OFFICIAL HOMEPAGE ERR: {e.__class__.__name__}")
-    if url:
-        print(f"OFFICIAL BRAND CARD: {brand!r} -> {url}")
-    return brand, url
-
-
 def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
-    """v81.4: بطاقات فقط بترتيب Google الأصلي (دقة v71.1) — بدون رسالة القائمة الطويلة
-
-    وبدون قائمة خيارات بالنهاية. وقبل كل شي: بطاقة «المتجر الرسمي» للبراند المستخرج
-    من العنوان (Lens يعرف الاسم لكن نتائجه مواقع إعادة بيع — نحن نبني رابط البراند
-    الرسمي بأنفسنا، وينطبق تلقائياً على أي ماركة). العملة والأفلييت وحارس النصب باقون.
-    """
+    """v80 FINAL: 8 نتائج موحدة للصورة - محلي أولاً ثم عالمي - بدون زر دور عالميا منفصل"""
     matches = [m for m in (lens.get("matches") or []) if (m.get("title") or "").strip()]
     if not matches:
         return False
+    # فلتر مواقع البيع فقط
+    nonsocial = [m for m in matches if not is_social_result(m)]
+    nonsocial = filter_shopping_results(nonsocial)
+    local = [m for m in nonsocial if is_local_lens_result(m)]
+    foreign = [m for m in nonsocial if not is_local_lens_result(m)]
+    
+    # v80: دمج 8 نتائج - 4 محلي أولاً ثم 4 عالمي
+    combined = []
+    # محلي أولاً (4)
+    combined.extend(local[:4])
+    # عالمي بعد (4)
+    combined.extend(foreign[:4])
+    
+    if not combined:
+        return False
+    
     chosen_title = ((lens.get("chosen") or {}).get("title") or matches[0]["title"]).strip()
     exact_query = (caption or chosen_title).strip()
-
-    # v81.4: بطاقة البراند الرسمية تنحسب بالخلفية أثناء تجهيز بطاقات النتائج.
-    market_snapshot = current_market()
-    brand_future = RESOLVER.submit(_run_with_market, market_snapshot, official_brand_card, chosen_title)
-
-    cards, seen_urls = [], set()
-    card_cap = max(MAX_STORES, 8)
-    for m in matches:
-        if len(cards) >= card_cap:
-            break
-        title = m["title"].strip()[:80]
-        source = (m.get("source") or "").strip()
-        local = is_local_lens_result(m)
-        price_txt = ""
-        raw_price = str(m.get("price") or "").strip()
-        if raw_price or m.get("price_value") not in (None, ""):
-            if local:
-                price_txt = format_lens_price(raw_price, m.get("price_value"), lang, m.get("currency") or None)
-            else:
-                shown, _conv = display_global_price(m.get("price_value"), raw_price, m.get("currency") or "", lang)
-                price_txt = shown or raw_price
-        body = title
-        if price_txt:
-            body += f" — {price_txt}"
-        if source:
-            body += f" ({source}{' 🇰🇼' if local else ' 🌍'})"
-        url = (m.get("link") or "").strip()
-        try:
-            host = urllib.parse.urlparse(url).netloc.lower()
-        except Exception:
-            host = ""
-        if not (url.startswith("http") and host and "google." not in host and not is_suspicious_url(url)):
-            continue
-        if url in seen_urls:
-            continue
-        original_url = url
-        try:
-            url = wrap_affiliate_url(url, from_number, exact_query)
-            log_click(from_number, exact_query, source or title[:30], original_url, url, is_global=not local)
-        except Exception as e:
-            print(f"LENS AFF WRAP ERR: {e}")
-        seen_urls.add(original_url)
-        seen_urls.add(url)
-        cards.append((body, url, source or ("المتجر" if lang == "ar" else "Store")))
-
-    if not cards:
-        return False
-
-    # بطاقة المتجر الرسمي أولاً (إذا انحلت خلال مهلة قصيرة).
-    try:
-        brand, official_url = brand_future.result(timeout=15)
-    except Exception as e:
-        print(f"OFFICIAL CARD JOIN ERR: {e.__class__.__name__}")
-        brand, official_url = "", ""
-    if brand and official_url:
-        official_hosts = {_host_of(official_url)}
-        try:
-            official_url_wrapped = wrap_affiliate_url(official_url, from_number, exact_query)
-            log_click(from_number, exact_query, f"{brand} official", official_url, official_url_wrapped, is_global=True)
-        except Exception:
-            official_url_wrapped = official_url
-        official_body = (f"🏷️ {brand} — الموقع الرسمي\n{chosen_title[:90]}" if lang == "ar"
-                         else f"🏷️ {brand} — Official store\n{chosen_title[:90]}")
-        # نشيل أي بطاقة لنفس دومين الرسمي حتى ما يتكرر.
-        cards = [(b, u, s) for (b, u, s) in cards if _host_of(u) not in official_hosts]
-        cards.insert(0, (official_body, official_url_wrapped, brand))
-
-    for body, url, src_name in cards[:card_cap]:
-        send_whatsapp_cta(from_number, body[:1000], url, bot_id, f"🛒 {src_name[:18]}")
-
-    # النتائج كلها تبقى مخزنة وقوداً للبدائل (المعالج موجود) — بدون إرسال قائمة خيارات.
-    try:
-        identity = build_lens_consensus_identity(lens, matches)
-        PENDING_LENS_FOREIGN[from_number] = {
-            "bot_id": bot_id, "lang": lang,
-            "matches": matches[:LENS_RESULT_LIMIT], "ts": time.time(),
-            "query": exact_query,
-            "similar_query": (identity.get("query") or exact_query),
-            "similar_aliases": identity.get("aliases") or [],
-        }
-    except Exception as e:
-        print(f"LENS PENDING STORE ERR: {e}")
-
+    
+    # أرسل 8 نتائج مباشرة مع تحويل العملة للعالمي
+    sent = _send_lens_match_batch(from_number, combined, bot_id, lang, convert_prices=True)
+    
+    # إذا فيه نتائج عالمية بين المدمجة، فعّل تحويل العملة لها
+    # _send_lens_match_batch يتعامل معها تلقائياً
+    
     LAST_SEARCH[from_number] = {"product": exact_query}
-    print(f"LENS DIRECT v81.4: {len(cards[:card_cap])} cards (official_first={bool(brand and official_url)})")
-    return True
-
+    print(f"LENS DIRECT v80 COMBINED: local={len(local[:4])} foreign={len(foreign[:4])} total={len(combined)}")
+    return sent
 
 def process_single_image(message,bot_id,lang="ar"):
     from_number=message["from"]
@@ -5689,7 +5446,7 @@ def process_single_image(message,bot_id,lang="ar"):
 
     # v71: وضع اللينز المباشر — الصورة تروح لـ Google Lens ونتائجه تُرسل كما هي.
     # بدون Vision ولا حكم هوية ولا طبقات بحث. إذا Google ما رجع شي، نكمل بالمسار الكامل.
-    if LENS_DIRECT_MODE and ((ENABLE_GOOGLE_LENS and SERPAPI_API_KEY and PUBLIC_BASE_URL) or GOOGLE_VISION_API_KEY):
+    if LENS_DIRECT_MODE and ENABLE_GOOGLE_LENS and SERPAPI_API_KEY and PUBLIC_BASE_URL:
         print(f"LENS DIRECT HINT: {lens_hint!r}")
         lens_direct = google_lens_lookup(b64, mime, lang, lens_hint, light=True)
         if lens_direct.get("matches"):
@@ -5705,7 +5462,7 @@ def process_single_image(message,bot_id,lang="ar"):
     # 3) الهوية النهائية = دمج عنوان Lens الدقيق + الاسم العربي/الإنجليزي من Vision،
     #    فيبحث النص بكل المرادفات ويغطي الفهرسة العربية والإنجليزية معاً.
     lens_future = None
-    if LENS_PARALLEL_WITH_VISION and ((ENABLE_GOOGLE_LENS and SERPAPI_API_KEY and PUBLIC_BASE_URL) or GOOGLE_VISION_API_KEY):
+    if LENS_PARALLEL_WITH_VISION and ENABLE_GOOGLE_LENS and SERPAPI_API_KEY and PUBLIC_BASE_URL:
         lens_future = LENS_POOL.submit(_run_with_market, market, google_lens_lookup, b64, mime, lang, lens_hint)
 
     vision_name = identify_product_with_retry(b64, mime, lang)
@@ -7067,4 +6824,4 @@ def process_location_message(message, bot_id):
     route_pending_after_location(from_number)
 
 @app.get("/")
-async def health(): return {"status":"v81.4 OFFICIAL BRAND CARD FIRST + CARDS ONLY (no long msg, no options) | v81.3 LENS RAW GOOGLE ORDER (v71.1 accuracy, no reordering, extras feed SIMILAR) | v81.2 LENS RESILIENCE (parallel passes + retry + official Vision fallback + self-url check) | v81.1 FAST: PARALLEL LOCAL+GLOBAL PHASES + EARLY-EXIT TOURNAMENTS + LAZY TRANSLATION | ACCURATE: CURRENCY-AWARE PRICE SANITY + CANONICAL STORE DEDUP | ABUNDANT: OFFER UNION IN TEXT PATH | + v81 CURRENCY CONVERT + HIGH COMMISSION + CLEAR SIMPLE TITLES + AI STORE UNIFY + IN-STORE SEARCH LINKS + CANONICAL STORES + CLEAN LAYOUT + ONE-SESSION + GREEDY COMPLETION + LIVE LINKS + LOCAL SOCIAL + GLOBAL REGION ORDER + MORE LENS CARDS + NONE CLASS + CTA ALWAYS + ARABIC PICK LIST + RELEVANCE FILTER + NO SILENCE + BILINGUAL 2 ROUNDS + PURE AI CLASSIFIER + CLEAN STORE NAMES + SERVICE INTENT FIX (answer+5 providers) + TEXT+SIMILAR USE OLD v26 SMART PATH (tournament) + SERVICES 5+ PHONES + AI INTENT + BRAND COMPARE + SHOP FILTER + TRIO OPTIONS + EXACT PRICES", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "v26_runs":SEARCH_RUNS, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
+async def health(): return {"status":"v81.1 FAST: PARALLEL LOCAL+GLOBAL PHASES + EARLY-EXIT TOURNAMENTS + LAZY TRANSLATION | ACCURATE: CURRENCY-AWARE PRICE SANITY + CANONICAL STORE DEDUP | ABUNDANT: OFFER UNION IN TEXT PATH | + v81 CURRENCY CONVERT + HIGH COMMISSION + CLEAR SIMPLE TITLES + AI STORE UNIFY + IN-STORE SEARCH LINKS + CANONICAL STORES + CLEAN LAYOUT + ONE-SESSION + GREEDY COMPLETION + LIVE LINKS + LOCAL SOCIAL + GLOBAL REGION ORDER + MORE LENS CARDS + NONE CLASS + CTA ALWAYS + ARABIC PICK LIST + RELEVANCE FILTER + NO SILENCE + BILINGUAL 2 ROUNDS + PURE AI CLASSIFIER + CLEAN STORE NAMES + SERVICE INTENT FIX (answer+5 providers) + TEXT+SIMILAR USE OLD v26 SMART PATH (tournament) + SERVICES 5+ PHONES + AI INTENT + BRAND COMPARE + SHOP FILTER + TRIO OPTIONS + EXACT PRICES", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "v26_runs":SEARCH_RUNS, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
