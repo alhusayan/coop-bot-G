@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v81.2-lens-resilience-parallel-retry-vision-fallback-20260815"
+BUILD_ID = "v81.3-lens-raw-google-order-extras-to-similar-20260815"
 
 
 # ===== v77.9 TOP GLOBAL SITES KUWAIT BUYS FROM =====
@@ -5517,38 +5517,95 @@ def filter_and_prioritize_for_affiliate(matches, max_results=8):
 
 
 def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
-    """v80 FINAL: 8 نتائج موحدة للصورة - محلي أولاً ثم عالمي - بدون زر دور عالميا منفصل"""
+    """v81.3: رجوع لأسلوب v71.1 الأدق — تمرير نتائج Google Lens **بترتيب Google الأصلي
+
+    كما هي بدون فلترة ولا إعادة ترتيب** (الفلترة والتقسيم محلي/عالمي كانا يدفنان
+    المطابقات الصحيحة تحت مشابهات أضعف). رسالة واحدة بالقائمة ثم أزرار للروابط.
+    الإضافات الوحيدة (لا تمس الترتيب): تحويل عملة الأسعار الأجنبية، تغليف الأفلييت،
+    ورفض روابط النصب الواضحة من الأزرار فقط.
+    النتائج الزائدة/الأضعف تُخزن وقوداً لخيار «🔄 أبي بدائل مشابهة» بدل تلويث القائمة.
+    """
     matches = [m for m in (lens.get("matches") or []) if (m.get("title") or "").strip()]
     if not matches:
         return False
-    # فلتر مواقع البيع فقط
-    nonsocial = [m for m in matches if not is_social_result(m)]
-    nonsocial = filter_shopping_results(nonsocial)
-    local = [m for m in nonsocial if is_local_lens_result(m)]
-    foreign = [m for m in nonsocial if not is_local_lens_result(m)]
-    
-    # v80: دمج 8 نتائج - 4 محلي أولاً ثم 4 عالمي
-    combined = []
-    # محلي أولاً (4)
-    combined.extend(local[:4])
-    # عالمي بعد (4)
-    combined.extend(foreign[:4])
-    
-    if not combined:
-        return False
-    
     chosen_title = ((lens.get("chosen") or {}).get("title") or matches[0]["title"]).strip()
     exact_query = (caption or chosen_title).strip()
-    
-    # أرسل 8 نتائج مباشرة مع تحويل العملة للعالمي
-    sent = _send_lens_match_batch(from_number, combined, bot_id, lang, convert_prices=True)
-    
-    # إذا فيه نتائج عالمية بين المدمجة، فعّل تحويل العملة لها
-    # _send_lens_match_batch يتعامل معها تلقائياً
-    
+
+    lines = [T(lang, "lens_header"), ""]
+    buttons, seen_urls, listed = [], set(), 0
+    button_cap = max(MAX_STORES, 8)
+    for m in matches:
+        title = m["title"].strip()[:80]
+        source = (m.get("source") or "").strip()
+        local = is_local_lens_result(m)
+        price_txt = ""
+        raw_price = str(m.get("price") or "").strip()
+        if raw_price or m.get("price_value") not in (None, ""):
+            if local:
+                price_txt = format_lens_price(raw_price, m.get("price_value"), lang, m.get("currency") or None)
+            else:
+                # v81: السعر الأجنبي يظهر محولاً لعملة المستخدم (تنسيق فقط — الترتيب لا يتغير).
+                shown, _conv = display_global_price(m.get("price_value"), raw_price, m.get("currency") or "", lang)
+                price_txt = shown or raw_price
+        seg = f"• {title}"
+        if price_txt:
+            seg += f" — {price_txt}"
+        if source:
+            seg += f" ({source}{' 🇰🇼' if local else ' 🌍'})"
+        if listed < LENS_DIRECT_MAX_LINES:
+            lines.append(seg)
+            listed += 1
+        url = (m.get("link") or "").strip()
+        try:
+            host = urllib.parse.urlparse(url).netloc.lower()
+        except Exception:
+            host = ""
+        if (url.startswith("http") and host and "google." not in host
+                and not is_suspicious_url(url)
+                and url not in seen_urls and len(buttons) < button_cap):
+            # v81: تغليف الأفلييت على الزر — العمولة محفوظة بدون أي مساس بالترتيب.
+            original_url = url
+            try:
+                url = wrap_affiliate_url(url, from_number, exact_query)
+                log_click(from_number, exact_query, source or title[:30], original_url, url, is_global=not local)
+            except Exception as e:
+                print(f"LENS AFF WRAP ERR: {e}")
+            buttons.append((seg.lstrip("• ").strip(), url, source or ("المتجر" if lang == "ar" else "Store")))
+            seen_urls.add(original_url)
+            seen_urls.add(url)
+        if listed >= LENS_DIRECT_MAX_LINES and len(buttons) >= button_cap:
+            break
+    send_whatsapp_text(from_number, "\n".join(lines)[:3900], bot_id)
+    for body, url, src_name in buttons:
+        send_whatsapp_cta(from_number, body[:1000], url, bot_id, f"🛒 {src_name[:18]}")
+
+    # v81.3: كل النتائج (بما فيها الزائدة الأقل دقة اللي ما انعرضت) = وقود البدائل المشابهة.
+    try:
+        identity = build_lens_consensus_identity(lens, matches)
+        PENDING_LENS_FOREIGN[from_number] = {
+            "bot_id": bot_id, "lang": lang,
+            "matches": matches[:LENS_RESULT_LIMIT], "ts": time.time(),
+            "query": exact_query,
+            "similar_query": (identity.get("query") or exact_query),
+            "similar_aliases": identity.get("aliases") or [],
+        }
+    except Exception as e:
+        print(f"LENS PENDING STORE ERR: {e}")
+        PENDING_LENS_FOREIGN[from_number] = {
+            "bot_id": bot_id, "lang": lang, "matches": matches[:LENS_RESULT_LIMIT],
+            "ts": time.time(), "query": exact_query, "similar_query": exact_query,
+            "similar_aliases": [],
+        }
+    # خيارات المتابعة: بدائل مشابهة + أقرب محل.
+    rows = [
+        {"id": "lf_similar", "title": T(lang, "opt_similar")[:24]},
+        {"id": "map_open", "title": T(lang, "opt_map")[:24]},
+    ]
+    send_whatsapp_list(from_number, T(lang, "more_options_ask"), rows, bot_id, T(lang, "options_button"))
+
     LAST_SEARCH[from_number] = {"product": exact_query}
-    print(f"LENS DIRECT v80 COMBINED: local={len(local[:4])} foreign={len(foreign[:4])} total={len(combined)}")
-    return sent
+    print(f"LENS DIRECT v81.3 RAW ORDER: {listed} lines, {len(buttons)} buttons, extras_for_similar={max(0, len(matches) - listed)}")
+    return True
 
 def process_single_image(message,bot_id,lang="ar"):
     from_number=message["from"]
@@ -6948,4 +7005,4 @@ def process_location_message(message, bot_id):
     route_pending_after_location(from_number)
 
 @app.get("/")
-async def health(): return {"status":"v81.2 LENS RESILIENCE (parallel passes + retry + official Vision fallback + self-url check) | v81.1 FAST: PARALLEL LOCAL+GLOBAL PHASES + EARLY-EXIT TOURNAMENTS + LAZY TRANSLATION | ACCURATE: CURRENCY-AWARE PRICE SANITY + CANONICAL STORE DEDUP | ABUNDANT: OFFER UNION IN TEXT PATH | + v81 CURRENCY CONVERT + HIGH COMMISSION + CLEAR SIMPLE TITLES + AI STORE UNIFY + IN-STORE SEARCH LINKS + CANONICAL STORES + CLEAN LAYOUT + ONE-SESSION + GREEDY COMPLETION + LIVE LINKS + LOCAL SOCIAL + GLOBAL REGION ORDER + MORE LENS CARDS + NONE CLASS + CTA ALWAYS + ARABIC PICK LIST + RELEVANCE FILTER + NO SILENCE + BILINGUAL 2 ROUNDS + PURE AI CLASSIFIER + CLEAN STORE NAMES + SERVICE INTENT FIX (answer+5 providers) + TEXT+SIMILAR USE OLD v26 SMART PATH (tournament) + SERVICES 5+ PHONES + AI INTENT + BRAND COMPARE + SHOP FILTER + TRIO OPTIONS + EXACT PRICES", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "v26_runs":SEARCH_RUNS, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
+async def health(): return {"status":"v81.3 LENS RAW GOOGLE ORDER (v71.1 accuracy, no reordering, extras feed SIMILAR) | v81.2 LENS RESILIENCE (parallel passes + retry + official Vision fallback + self-url check) | v81.1 FAST: PARALLEL LOCAL+GLOBAL PHASES + EARLY-EXIT TOURNAMENTS + LAZY TRANSLATION | ACCURATE: CURRENCY-AWARE PRICE SANITY + CANONICAL STORE DEDUP | ABUNDANT: OFFER UNION IN TEXT PATH | + v81 CURRENCY CONVERT + HIGH COMMISSION + CLEAR SIMPLE TITLES + AI STORE UNIFY + IN-STORE SEARCH LINKS + CANONICAL STORES + CLEAN LAYOUT + ONE-SESSION + GREEDY COMPLETION + LIVE LINKS + LOCAL SOCIAL + GLOBAL REGION ORDER + MORE LENS CARDS + NONE CLASS + CTA ALWAYS + ARABIC PICK LIST + RELEVANCE FILTER + NO SILENCE + BILINGUAL 2 ROUNDS + PURE AI CLASSIFIER + CLEAN STORE NAMES + SERVICE INTENT FIX (answer+5 providers) + TEXT+SIMILAR USE OLD v26 SMART PATH (tournament) + SERVICES 5+ PHONES + AI INTENT + BRAND COMPARE + SHOP FILTER + TRIO OPTIONS + EXACT PRICES", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "v26_runs":SEARCH_RUNS, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
