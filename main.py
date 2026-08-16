@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v81.4-official-brand-card-cards-only-20260815"
+BUILD_ID = "v81.5-local-first-stable-more-button-20260815"
 
 
 # ===== v77.9 TOP GLOBAL SITES KUWAIT BUYS FROM =====
@@ -192,6 +192,10 @@ PENDING_GLOBAL_SEARCH = {}
 PENDING_LENS_FOREIGN = {}
 # v73: نتائج برامج التواصل (انستجرام/تيك توك/سناب...) تُحفظ هنا وتُعرض بعد سؤال منفصل.
 PENDING_LENS_SOCIAL = {}
+# v81.5: بقية بطاقات اللينز لصفحات «عرض المزيد».
+PENDING_LENS_MORE = {}
+# v81.5: بقية بطاقات اللينز غير المعروضة — زر «عرض المزيد» يسحب منها دفعة دفعة.
+PENDING_LENS_MORE = {}
 SOCIAL_HOSTS = (
     "instagram.com", "tiktok.com", "snapchat.com", "youtube.com", "youtu.be",
     "pinterest.", "facebook.com", "fb.com", "fb.watch", "x.com", "twitter.com",
@@ -1029,6 +1033,10 @@ MSG = {
         "similar_searching": "🔄 أدور لك على أفضل البدائل المشابهة المتوفرة عندك...",
         "similar_none": "ما لقيت بدائل مشابهة بسعر مؤكد حالياً 😅 جرب صياغة ثانية.",
         "declined_ok": "تمام 🙏 إذا احتجت شي ثاني أنا حاضر!",
+        "more_results_body": "عندي {n} نتائج إضافية لنفس الصورة 👇",
+        "more_results_btn": "➕ عرض المزيد ({n})",
+        "more_results_done": "هذي كل النتائج ✅",
+        "more_results_expired": "النتائج القديمة قدمت 😅 دز الصورة من جديد.",
         "welcome_reply": "هلا والله! 🌟\nدز صورة المنتج أو اكتب اسمه، وأدور لك أفضل الأسعار والمتاجر القريبة منك 🛒",
         "thanks_reply": "العفو! 🌹 في الخدمة دايماً.. أي منتج ثاني تبيه أنا حاضر!",
         "lens_header": "🔍 هذا اللي طلع من Google عن صورتك:",
@@ -1051,6 +1059,10 @@ MSG = {
         "lf_show": "اعرضها 🌍",
         "lf_skip": "لا شكراً 🙏",
         "lens_none": "Google ما رجّع نتائج للصورة 😅 أكمل البحث بطريقتي...",
+        "more_results_body": "عندي {n} نتائج إضافية لنفس الصورة 👇",
+        "more_results_btn": "➕ عرض المزيد ({n})",
+        "more_results_done": "هذي كل النتائج ✅",
+        "more_results_expired": "النتائج قدمت 😅 دز الصورة من جديد وأجيبها لك على طول.",
         "chat_redirect": "أنا حاضر ومعك! 🙌\nدز اسم المنتج أو صورته وأدور لك أفضل الأسعار، أو اكتب طلب الخدمة اللي تحتاجها 🛒",
     },
     "en": {
@@ -1093,6 +1105,10 @@ MSG = {
         "similar_searching": "🔄 Looking for the best similar alternatives available near you...",
         "similar_none": "I couldn't find similar alternatives with a verified price right now 😅 try another phrasing.",
         "declined_ok": "No problem 🙏 I'm here whenever you need me!",
+        "more_results_body": "I have {n} more results for this photo 👇",
+        "more_results_btn": "➕ Show more ({n})",
+        "more_results_done": "That's all the results ✅",
+        "more_results_expired": "Those results expired 😅 send the photo again.",
         "welcome_reply": "Hello! 🌟\nSend a product photo or type its name, and I'll find you the best prices and nearby stores 🛒",
         "thanks_reply": "You're welcome! 🌹 Anytime.. just send me the next product!",
         "lens_header": "🔍 Here's what Google returned for your photo:",
@@ -1115,6 +1131,10 @@ MSG = {
         "lf_show": "Show them 🌍",
         "lf_skip": "No thanks 🙏",
         "lens_none": "Google returned no results for the photo 😅 continuing with my own search...",
+        "more_results_body": "I have {n} more results for the same photo 👇",
+        "more_results_btn": "➕ Show more ({n})",
+        "more_results_done": "That's all the results ✅",
+        "more_results_expired": "Those results expired 😅 resend the photo and I'll fetch them right away.",
         "chat_redirect": "I'm here with you! 🙌\nSend a product name or photo and I'll find the best prices, or type the service you need 🛒",
     },
 }
@@ -4853,6 +4873,24 @@ def process_interactive_message(message, bot_id):
                 "lang": item.get("lang", "ar"), "query": item["query"],
             })
         return
+    if btn_id == "lens_more":
+        # v81.5: الدفعة التالية من بطاقات اللينز المؤجلة — وزر جديد إذا باقي أكثر.
+        item = _peek_pending(PENDING_LENS_MORE, from_number)
+        lang_ = (item or {}).get("lang", USER_LANG.get(from_number, "ar"))
+        activate_market(from_number)
+        cards = (item or {}).get("cards") or []
+        if not cards:
+            send_whatsapp_text(from_number, T(lang_, "more_results_expired"), bot_id)
+            return
+        card_cap = max(MAX_STORES, 8)
+        batch, remaining = cards[:card_cap], cards[card_cap:]
+        _send_lens_card_batch_v815(from_number, batch, item.get("bot_id") or bot_id, lang_, item.get("query") or "")
+        if remaining:
+            _offer_lens_more(from_number, item.get("bot_id") or bot_id, lang_, item.get("query") or "", remaining)
+        else:
+            PENDING_LENS_MORE.pop(from_number, None)
+            send_whatsapp_text(from_number, T(lang_, "more_results_done"), bot_id)
+        return
     if btn_id == "lf_similar":
         # v76: البدائل تبدأ من هوية Lens المتفق عليها عبر النتائج المحلية + العالمية.
         item = _peek_pending(PENDING_LENS_FOREIGN, from_number)
@@ -5569,12 +5607,43 @@ def official_brand_card(chosen_title):
     return brand, url
 
 
-def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
-    """v81.4: بطاقات فقط بترتيب Google الأصلي (دقة v71.1) — بدون رسالة القائمة الطويلة
+def _send_lens_card_batch_v815(from_number, batch, bot_id, lang, exact_query):
+    """يرسل دفعة بطاقات: التغليف بالأفلييت وتسجيل النقرة يتمان لحظة الإرسال فقط."""
+    sent = 0
+    for body, original_url, src_name, is_local in batch:
+        url = original_url
+        try:
+            url = wrap_affiliate_url(original_url, from_number, exact_query)
+            log_click(from_number, exact_query, src_name or body[:30], original_url, url, is_global=not is_local)
+        except Exception as e:
+            print(f"LENS AFF WRAP ERR: {e}")
+        send_whatsapp_cta(from_number, body[:1000], url, bot_id, f"🛒 {(src_name or 'Store')[:18]}")
+        sent += 1
+    return sent
 
-    وبدون قائمة خيارات بالنهاية. وقبل كل شي: بطاقة «المتجر الرسمي» للبراند المستخرج
-    من العنوان (Lens يعرف الاسم لكن نتائجه مواقع إعادة بيع — نحن نبني رابط البراند
-    الرسمي بأنفسنا، وينطبق تلقائياً على أي ماركة). العملة والأفلييت وحارس النصب باقون.
+
+def _offer_lens_more(from_number, bot_id, lang, exact_query, remaining):
+    """يخزن البقية ويرسل زر «عرض المزيد (N)» — الدقة ما تنرمي، تتأجل خلف زر."""
+    PENDING_LENS_MORE[from_number] = {
+        "bot_id": bot_id, "lang": lang, "query": exact_query,
+        "cards": remaining, "ts": time.time(),
+    }
+    n = len(remaining)
+    send_whatsapp_buttons(
+        from_number,
+        T(lang, "more_results_body", n=n),
+        [{"id": "lens_more", "title": T(lang, "more_results_btn", n=n)[:20]}],
+        bot_id,
+    )
+
+
+def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
+    """v81.5: بطاقات بترتيب Google الأصلي مع **تقسيم مستقر**: متاجر بلد المستخدم
+
+    (حسب اللوكيشن المحفوظ) تتقدم كمجموعة، وداخل كل مجموعة ترتيب Google محفوظ
+    حرفياً — هذا غير v80: لا فلترة ولا قص ولا خلط، وكل نتيجة زائدة عن الدفعة
+    الأولى تبقى خلف زر «➕ عرض المزيد (N)» بدل ما تنرمي.
+    بطاقة «🏷️ المتجر الرسمي» للبراند تتصدر الكل. العملة والأفلييت وحارس النصب باقون.
     """
     matches = [m for m in (lens.get("matches") or []) if (m.get("title") or "").strip()]
     if not matches:
@@ -5582,15 +5651,12 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
     chosen_title = ((lens.get("chosen") or {}).get("title") or matches[0]["title"]).strip()
     exact_query = (caption or chosen_title).strip()
 
-    # v81.4: بطاقة البراند الرسمية تنحسب بالخلفية أثناء تجهيز بطاقات النتائج.
     market_snapshot = current_market()
     brand_future = RESOLVER.submit(_run_with_market, market_snapshot, official_brand_card, chosen_title)
 
-    cards, seen_urls = [], set()
-    card_cap = max(MAX_STORES, 8)
+    # بناء كل البطاقات (بدون سقف): dedup + حارس النصب فقط — لا فلترة دقة.
+    local_cards, global_cards, seen_urls = [], [], set()
     for m in matches:
-        if len(cards) >= card_cap:
-            break
         title = m["title"].strip()[:80]
         source = (m.get("source") or "").strip()
         local = is_local_lens_result(m)
@@ -5616,42 +5682,35 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
             continue
         if url in seen_urls:
             continue
-        original_url = url
-        try:
-            url = wrap_affiliate_url(url, from_number, exact_query)
-            log_click(from_number, exact_query, source or title[:30], original_url, url, is_global=not local)
-        except Exception as e:
-            print(f"LENS AFF WRAP ERR: {e}")
-        seen_urls.add(original_url)
         seen_urls.add(url)
-        cards.append((body, url, source or ("المتجر" if lang == "ar" else "Store")))
+        card = (body, url, source or ("المتجر" if lang == "ar" else "Store"), local)
+        # v81.5: تقسيم مستقر — بلد المستخدم أولاً، والترتيب داخل كل مجموعة كما رتبه Google.
+        (local_cards if local else global_cards).append(card)
 
-    if not cards:
+    all_cards = local_cards + global_cards
+    if not all_cards:
         return False
 
-    # بطاقة المتجر الرسمي أولاً (إذا انحلت خلال مهلة قصيرة).
+    # بطاقة المتجر الرسمي للبراند تتصدر الكل.
     try:
         brand, official_url = brand_future.result(timeout=15)
     except Exception as e:
         print(f"OFFICIAL CARD JOIN ERR: {e.__class__.__name__}")
         brand, official_url = "", ""
     if brand and official_url:
-        official_hosts = {_host_of(official_url)}
-        try:
-            official_url_wrapped = wrap_affiliate_url(official_url, from_number, exact_query)
-            log_click(from_number, exact_query, f"{brand} official", official_url, official_url_wrapped, is_global=True)
-        except Exception:
-            official_url_wrapped = official_url
+        official_host = _host_of(official_url)
+        all_cards = [c for c in all_cards if _host_of(c[1]) != official_host]
         official_body = (f"🏷️ {brand} — الموقع الرسمي\n{chosen_title[:90]}" if lang == "ar"
                          else f"🏷️ {brand} — Official store\n{chosen_title[:90]}")
-        # نشيل أي بطاقة لنفس دومين الرسمي حتى ما يتكرر.
-        cards = [(b, u, s) for (b, u, s) in cards if _host_of(u) not in official_hosts]
-        cards.insert(0, (official_body, official_url_wrapped, brand))
+        all_cards.insert(0, (official_body, official_url, brand, False))
 
-    for body, url, src_name in cards[:card_cap]:
-        send_whatsapp_cta(from_number, body[:1000], url, bot_id, f"🛒 {src_name[:18]}")
+    card_cap = max(MAX_STORES, 8)
+    first_batch, remaining = all_cards[:card_cap], all_cards[card_cap:]
+    _send_lens_card_batch_v815(from_number, first_batch, bot_id, lang, exact_query)
+    if remaining:
+        _offer_lens_more(from_number, bot_id, lang, exact_query, remaining)
 
-    # النتائج كلها تبقى مخزنة وقوداً للبدائل (المعالج موجود) — بدون إرسال قائمة خيارات.
+    # النتائج كلها تبقى مخزنة وقوداً للبدائل (المعالج موجود) — بدون قائمة خيارات.
     try:
         identity = build_lens_consensus_identity(lens, matches)
         PENDING_LENS_FOREIGN[from_number] = {
@@ -5665,7 +5724,7 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
         print(f"LENS PENDING STORE ERR: {e}")
 
     LAST_SEARCH[from_number] = {"product": exact_query}
-    print(f"LENS DIRECT v81.4: {len(cards[:card_cap])} cards (official_first={bool(brand and official_url)})")
+    print(f"LENS DIRECT v81.5: sent={len(first_batch)} (local_first={len(local_cards)}) remaining={len(remaining)} official_first={bool(brand and official_url)}")
     return True
 
 
@@ -7067,4 +7126,4 @@ def process_location_message(message, bot_id):
     route_pending_after_location(from_number)
 
 @app.get("/")
-async def health(): return {"status":"v81.4 OFFICIAL BRAND CARD FIRST + CARDS ONLY (no long msg, no options) | v81.3 LENS RAW GOOGLE ORDER (v71.1 accuracy, no reordering, extras feed SIMILAR) | v81.2 LENS RESILIENCE (parallel passes + retry + official Vision fallback + self-url check) | v81.1 FAST: PARALLEL LOCAL+GLOBAL PHASES + EARLY-EXIT TOURNAMENTS + LAZY TRANSLATION | ACCURATE: CURRENCY-AWARE PRICE SANITY + CANONICAL STORE DEDUP | ABUNDANT: OFFER UNION IN TEXT PATH | + v81 CURRENCY CONVERT + HIGH COMMISSION + CLEAR SIMPLE TITLES + AI STORE UNIFY + IN-STORE SEARCH LINKS + CANONICAL STORES + CLEAN LAYOUT + ONE-SESSION + GREEDY COMPLETION + LIVE LINKS + LOCAL SOCIAL + GLOBAL REGION ORDER + MORE LENS CARDS + NONE CLASS + CTA ALWAYS + ARABIC PICK LIST + RELEVANCE FILTER + NO SILENCE + BILINGUAL 2 ROUNDS + PURE AI CLASSIFIER + CLEAN STORE NAMES + SERVICE INTENT FIX (answer+5 providers) + TEXT+SIMILAR USE OLD v26 SMART PATH (tournament) + SERVICES 5+ PHONES + AI INTENT + BRAND COMPARE + SHOP FILTER + TRIO OPTIONS + EXACT PRICES", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "v26_runs":SEARCH_RUNS, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
+async def health(): return {"status":"v81.5 LOCAL-FIRST STABLE PARTITION + MORE BUTTON (nothing dropped) | v81.4 OFFICIAL BRAND CARD FIRST + CARDS ONLY (no long msg, no options) | v81.3 LENS RAW GOOGLE ORDER (v71.1 accuracy, no reordering, extras feed SIMILAR) | v81.2 LENS RESILIENCE (parallel passes + retry + official Vision fallback + self-url check) | v81.1 FAST: PARALLEL LOCAL+GLOBAL PHASES + EARLY-EXIT TOURNAMENTS + LAZY TRANSLATION | ACCURATE: CURRENCY-AWARE PRICE SANITY + CANONICAL STORE DEDUP | ABUNDANT: OFFER UNION IN TEXT PATH | + v81 CURRENCY CONVERT + HIGH COMMISSION + CLEAR SIMPLE TITLES + AI STORE UNIFY + IN-STORE SEARCH LINKS + CANONICAL STORES + CLEAN LAYOUT + ONE-SESSION + GREEDY COMPLETION + LIVE LINKS + LOCAL SOCIAL + GLOBAL REGION ORDER + MORE LENS CARDS + NONE CLASS + CTA ALWAYS + ARABIC PICK LIST + RELEVANCE FILTER + NO SILENCE + BILINGUAL 2 ROUNDS + PURE AI CLASSIFIER + CLEAN STORE NAMES + SERVICE INTENT FIX (answer+5 providers) + TEXT+SIMILAR USE OLD v26 SMART PATH (tournament) + SERVICES 5+ PHONES + AI INTENT + BRAND COMPARE + SHOP FILTER + TRIO OPTIONS + EXACT PRICES", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "v26_runs":SEARCH_RUNS, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
