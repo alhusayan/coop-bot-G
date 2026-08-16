@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v81.5-local-first-stable-more-button-20260815"
+BUILD_ID = "v81.6-pure-lens-no-brand-card-no-social-20260815"
 
 
 # ===== v77.9 TOP GLOBAL SITES KUWAIT BUYS FROM =====
@@ -5638,12 +5638,11 @@ def _offer_lens_more(from_number, bot_id, lang, exact_query, remaining):
 
 
 def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
-    """v81.5: بطاقات بترتيب Google الأصلي مع **تقسيم مستقر**: متاجر بلد المستخدم
+    """v81.6: نتائج Google Lens **كما هي** — بدون أي إضافة أو اختراع من عندنا.
 
-    (حسب اللوكيشن المحفوظ) تتقدم كمجموعة، وداخل كل مجموعة ترتيب Google محفوظ
-    حرفياً — هذا غير v80: لا فلترة ولا قص ولا خلط، وكل نتيجة زائدة عن الدفعة
-    الأولى تبقى خلف زر «➕ عرض المزيد (N)» بدل ما تنرمي.
-    بطاقة «🏷️ المتجر الرسمي» للبراند تتصدر الكل. العملة والأفلييت وحارس النصب باقون.
+    الترتيب فقط: متاجر بلد المستخدم (حسب لوكيشنه) أولاً ثم العالمية، وداخل كل
+    مجموعة ترتيب Google الأصلي محفوظ حرفياً. المستبعد الوحيد: التواصل الاجتماعي
+    وروابط النصب. الزائد عن الدفعة الأولى خلف زر «➕ عرض المزيد (N)».
     """
     matches = [m for m in (lens.get("matches") or []) if (m.get("title") or "").strip()]
     if not matches:
@@ -5651,12 +5650,13 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
     chosen_title = ((lens.get("chosen") or {}).get("title") or matches[0]["title"]).strip()
     exact_query = (caption or chosen_title).strip()
 
-    market_snapshot = current_market()
-    brand_future = RESOLVER.submit(_run_with_market, market_snapshot, official_brand_card, chosen_title)
-
-    # بناء كل البطاقات (بدون سقف): dedup + حارس النصب فقط — لا فلترة دقة.
+    # v81.6: بدون بطاقة «المتجر الرسمي» — التجربة أثبتت أنها تهلوس مع نتائج الصور
+    # العامة (استخرجت براند غلط وربطت موقعاً لا علاقة له). نعرض ما يطلعه Lens فقط.
+    # بناء كل البطاقات: dedup + حارس النصب + استبعاد التواصل الاجتماعي فقط.
     local_cards, global_cards, seen_urls = [], [], set()
     for m in matches:
+        if is_social_result(m):
+            continue
         title = m["title"].strip()[:80]
         source = (m.get("source") or "").strip()
         local = is_local_lens_result(m)
@@ -5691,19 +5691,6 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
     if not all_cards:
         return False
 
-    # بطاقة المتجر الرسمي للبراند تتصدر الكل.
-    try:
-        brand, official_url = brand_future.result(timeout=15)
-    except Exception as e:
-        print(f"OFFICIAL CARD JOIN ERR: {e.__class__.__name__}")
-        brand, official_url = "", ""
-    if brand and official_url:
-        official_host = _host_of(official_url)
-        all_cards = [c for c in all_cards if _host_of(c[1]) != official_host]
-        official_body = (f"🏷️ {brand} — الموقع الرسمي\n{chosen_title[:90]}" if lang == "ar"
-                         else f"🏷️ {brand} — Official store\n{chosen_title[:90]}")
-        all_cards.insert(0, (official_body, official_url, brand, False))
-
     card_cap = max(MAX_STORES, 8)
     first_batch, remaining = all_cards[:card_cap], all_cards[card_cap:]
     _send_lens_card_batch_v815(from_number, first_batch, bot_id, lang, exact_query)
@@ -5724,7 +5711,7 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
         print(f"LENS PENDING STORE ERR: {e}")
 
     LAST_SEARCH[from_number] = {"product": exact_query}
-    print(f"LENS DIRECT v81.5: sent={len(first_batch)} (local_first={len(local_cards)}) remaining={len(remaining)} official_first={bool(brand and official_url)}")
+    print(f"LENS DIRECT v81.6 RAW: sent={len(first_batch)} (local_first={len(local_cards)}) remaining={len(remaining)} social_removed")
     return True
 
 
@@ -7126,4 +7113,4 @@ def process_location_message(message, bot_id):
     route_pending_after_location(from_number)
 
 @app.get("/")
-async def health(): return {"status":"v81.5 LOCAL-FIRST STABLE PARTITION + MORE BUTTON (nothing dropped) | v81.4 OFFICIAL BRAND CARD FIRST + CARDS ONLY (no long msg, no options) | v81.3 LENS RAW GOOGLE ORDER (v71.1 accuracy, no reordering, extras feed SIMILAR) | v81.2 LENS RESILIENCE (parallel passes + retry + official Vision fallback + self-url check) | v81.1 FAST: PARALLEL LOCAL+GLOBAL PHASES + EARLY-EXIT TOURNAMENTS + LAZY TRANSLATION | ACCURATE: CURRENCY-AWARE PRICE SANITY + CANONICAL STORE DEDUP | ABUNDANT: OFFER UNION IN TEXT PATH | + v81 CURRENCY CONVERT + HIGH COMMISSION + CLEAR SIMPLE TITLES + AI STORE UNIFY + IN-STORE SEARCH LINKS + CANONICAL STORES + CLEAN LAYOUT + ONE-SESSION + GREEDY COMPLETION + LIVE LINKS + LOCAL SOCIAL + GLOBAL REGION ORDER + MORE LENS CARDS + NONE CLASS + CTA ALWAYS + ARABIC PICK LIST + RELEVANCE FILTER + NO SILENCE + BILINGUAL 2 ROUNDS + PURE AI CLASSIFIER + CLEAN STORE NAMES + SERVICE INTENT FIX (answer+5 providers) + TEXT+SIMILAR USE OLD v26 SMART PATH (tournament) + SERVICES 5+ PHONES + AI INTENT + BRAND COMPARE + SHOP FILTER + TRIO OPTIONS + EXACT PRICES", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "v26_runs":SEARCH_RUNS, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
+async def health(): return {"status":"v81.6 PURE LENS OUTPUT (no invented brand card, social removed, local-first order only) + MORE BUTTON (nothing dropped) | v81.4 OFFICIAL BRAND CARD FIRST + CARDS ONLY (no long msg, no options) | v81.3 LENS RAW GOOGLE ORDER (v71.1 accuracy, no reordering, extras feed SIMILAR) | v81.2 LENS RESILIENCE (parallel passes + retry + official Vision fallback + self-url check) | v81.1 FAST: PARALLEL LOCAL+GLOBAL PHASES + EARLY-EXIT TOURNAMENTS + LAZY TRANSLATION | ACCURATE: CURRENCY-AWARE PRICE SANITY + CANONICAL STORE DEDUP | ABUNDANT: OFFER UNION IN TEXT PATH | + v81 CURRENCY CONVERT + HIGH COMMISSION + CLEAR SIMPLE TITLES + AI STORE UNIFY + IN-STORE SEARCH LINKS + CANONICAL STORES + CLEAN LAYOUT + ONE-SESSION + GREEDY COMPLETION + LIVE LINKS + LOCAL SOCIAL + GLOBAL REGION ORDER + MORE LENS CARDS + NONE CLASS + CTA ALWAYS + ARABIC PICK LIST + RELEVANCE FILTER + NO SILENCE + BILINGUAL 2 ROUNDS + PURE AI CLASSIFIER + CLEAN STORE NAMES + SERVICE INTENT FIX (answer+5 providers) + TEXT+SIMILAR USE OLD v26 SMART PATH (tournament) + SERVICES 5+ PHONES + AI INTENT + BRAND COMPARE + SHOP FILTER + TRIO OPTIONS + EXACT PRICES", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "v26_runs":SEARCH_RUNS, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
