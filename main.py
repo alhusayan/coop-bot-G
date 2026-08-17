@@ -3608,7 +3608,12 @@ def choose_image_identity(image_b64, mime_type, lens, vision_name):
     return final_name or vision_name, None, "VISION"
 
 def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
-    """v72: Lens مباشر لكن بفلتر وترتيب السوق: محلي -> أمريكا -> الصين فقط."""
+    """v74: نتائج Lens تُرسل CTA فقط، بترتيب محلي -> أمريكا -> الصين.
+
+    لا نرسل رسالة الملخص الطويلة أولاً حتى لا تتكرر النتائج. كل نتيجة ظاهرة للمستخدم
+    هي نفسها CTA قابلة للضغط، ونسمح حتى LENS_DIRECT_MAX_LINES بدلاً من MAX_STORES
+    حتى لا تستهلك النتائج المحلية كل أزرار CTA وتمنع أمريكا/الصين من الظهور.
+    """
     raw_matches = [m for m in (lens.get("matches") or []) if (m.get("title") or "").strip()]
     matches = [m for m in raw_matches if result_market_rank(m) != 99]
     matches.sort(key=lambda m: (
@@ -3620,17 +3625,40 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
     if not matches:
         return False
 
-    lines = [T(lang, "lens_header"), ""]
-    buttons, seen_urls, listed = [], set(), 0
     local_name = current_market().get("country_name") or "Local"
     labels_ar = {0: local_name, 1: "أمريكا", 2: "الصين"}
     labels_en = {0: local_name, 1: "USA", 2: "China"}
     labels = labels_ar if lang == "ar" else labels_en
-    last_rank = None
+
+    # CTA-only: نفس النتائج المرتبة التي كان الملخص يعرضها، حتى سقف Lens نفسه.
+    # لا نستخدم MAX_STORES هنا لأنه كان يجعل أول 5 نتائج محلية تستهلك كل الأزرار.
+    cta_limit = max(3, LENS_DIRECT_MAX_LINES)
+    selected = []
+    seen_urls = set()
 
     for m in matches:
+        url = (m.get("link") or "").strip()
+        try:
+            host = urllib.parse.urlparse(url).netloc.lower()
+        except Exception:
+            host = ""
+        if not (url.startswith("http") and host and "google." not in host):
+            continue
+        if url in seen_urls:
+            continue
+        selected.append(m)
+        seen_urls.add(url)
+        if len(selected) >= cta_limit:
+            break
+
+    if not selected:
+        return False
+
+    sent = 0
+    for m in selected:
         market_rank = result_market_rank(m)
-        title = m["title"].strip()[:80]
+        market_label = labels.get(market_rank, "")
+        title = (m.get("title") or "").strip()[:180]
         source = (m.get("source") or "").strip()
         raw_price = str(m.get("price") or "").strip()
         price_value = m.get("price_value")
@@ -3641,43 +3669,25 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
             if market_rank == 0:
                 price_txt = format_lens_price(raw_price, price_value, lang, currency or None)
             else:
-                src = currency.upper().strip() if currency else ("USD" if is_us_market_result(m) else "CNY")
-                price_txt, _ = display_global_price(price_value, raw_price, src, lang)
+                src_cur = currency.upper().strip() if currency else ("USD" if is_us_market_result(m) else "CNY")
+                price_txt, _ = display_global_price(price_value, raw_price, src_cur, lang)
 
-        if listed < LENS_DIRECT_MAX_LINES and market_rank != last_rank:
-            if listed > 0:
-                lines.append("")
-            lines.append(f"📍 {labels.get(market_rank, '')}")
-            last_rank = market_rank
-
-        seg = f"• {title}"
+        # السوق داخل كل CTA حتى يظل التقسيم واضحاً بدون رسالة الملخص.
+        body = f"📍 {market_label}\n{title}"
         if price_txt:
-            seg += f" — {price_txt}"
+            body += f" — {price_txt}"
         if source:
-            seg += f" ({source})"
-        if listed < LENS_DIRECT_MAX_LINES:
-            lines.append(seg)
-            listed += 1
+            body += f"\n({source})"
 
         url = (m.get("link") or "").strip()
-        try:
-            host = urllib.parse.urlparse(url).netloc.lower()
-        except Exception:
-            host = ""
-        if (url.startswith("http") and host and "google." not in host
-                and url not in seen_urls and len(buttons) < MAX_STORES):
-            buttons.append((seg.lstrip("• ").strip(), url, source or ("المتجر" if lang == "ar" else "Store")))
-            seen_urls.add(url)
-        if listed >= LENS_DIRECT_MAX_LINES and len(buttons) >= MAX_STORES:
-            break
+        button_source = source or ("المتجر" if lang == "ar" else "Store")
+        send_whatsapp_cta(from_number, body[:1000], url, bot_id, f"🛒 {button_source[:18]}")
+        sent += 1
 
-    send_whatsapp_text(from_number, "\n".join(lines)[:3900], bot_id)
-    for body, url, src in buttons:
-        send_whatsapp_cta(from_number, body[:1000], url, bot_id, f"🛒 {src[:18]}")
-    chosen_title = ((lens.get("chosen") or {}).get("title") or matches[0]["title"]).strip()
+    chosen_title = ((lens.get("chosen") or {}).get("title") or selected[0]["title"]).strip()
     LAST_SEARCH[from_number] = {"product": (caption or chosen_title)}
-    print(f"LENS DIRECT SENT v72: {listed} lines, {len(buttons)} buttons")
-    return True
+    print(f"LENS DIRECT SENT v74 CTA-ONLY: {sent} buttons; order=local->us->cn")
+    return sent > 0
 
 def process_single_image(message,bot_id,lang="ar"):
     from_number=message["from"]
