@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v82.2-HYBRID-merchant-only-local-shopping-20260817"
+BUILD_ID = "v82.3-HYBRID-prices-local-discovery-20260817"
 
 
 # ===== v77.9 TOP GLOBAL SITES KUWAIT BUYS FROM =====
@@ -5702,6 +5702,98 @@ def _shopping_offers_as_lens_matches(offers):
     return out
 
 
+
+# ---- v82.3: restore prices + broaden local merchant discovery -----------------
+def _verified_text_result_as_lens_matches(txt, urls, query, lang, source_layer="local_web"):
+    """Convert a verified priced text-search result into Lens-card schema.
+
+    Only direct, local, numeric-price offers survive.  This is intentionally
+    independent from Google Shopping because many Kuwait retailers are indexed
+    in normal Google results but do not expose a Shopping feed for every SKU.
+    """
+    out=[]
+    local_currency=(current_market().get("currency") or "KWD").upper()
+    title=product_title(txt or "", query).replace("📦", "").strip() or query
+    for pos, offer in enumerate(extract_store_offers(txt or ""), 1):
+        name=(offer.get("name") or "").strip()
+        url=match_url(name, urls or {})
+        price=_extract_numeric_price(offer.get("line", ""))
+        if not (name and is_direct_store_url(url) and price and price > 0):
+            continue
+        item={"link":url,"source":name,"title":title,"price":str(price),"currency":local_currency}
+        if not is_local_lens_result(item):
+            print(f"LOCAL WEB DISCOVERY REJECT NONLOCAL: {name} -> {url}")
+            continue
+        out.append({
+            "title": title, "link": url, "source": name, "position": pos,
+            "section": source_layer, "exact": True,
+            "price": f"{format_price(price)} {currency_label(lang)}",
+            "price_value": price, "currency": local_currency,
+            "in_stock": True, "condition": "",
+        })
+    return out
+
+
+def _enrich_direct_matches_with_page_prices(matches, query, lang, max_checks=16):
+    """Best-effort price recovery for Lens cards that arrive without a price.
+
+    Lens often identifies the correct merchant page but omits the price in the
+    visual_matches payload.  Verify those direct product URLs in parallel and
+    attach structured Product/OG prices before any WhatsApp card is rendered.
+    """
+    if not matches:
+        return []
+    candidates={}
+    url_to_keys={}
+    for idx,m in enumerate(matches):
+        if str(m.get("price") or "").strip() or m.get("price_value") not in (None, ""):
+            continue
+        url=(m.get("link") or "").strip()
+        if not is_direct_store_url(url):
+            continue
+        name=((m.get("source") or "").strip() or f"Lens {idx+1}")[:40]
+        key=name
+        n=2
+        while key in candidates:
+            key=f"{name} {n}"; n+=1
+        candidates[key]=url
+        url_to_keys.setdefault(url,[]).append(idx)
+        if len(candidates)>=max_checks:
+            break
+    if not candidates:
+        return matches
+    try:
+        verified=verify_offers(candidates, query)
+    except Exception as e:
+        print(f"LENS PRICE ENRICH VERIFY ERR: {e}")
+        verified={}
+    by_url={}
+    for _name,info in (verified or {}).items():
+        u=(info.get("url") or "").strip()
+        if u:
+            by_url[u]=info
+    recovered=0
+    for m in matches:
+        url=(m.get("link") or "").strip()
+        info=by_url.get(url)
+        if not info:
+            continue
+        p=info.get("price")
+        if p in (None, ""):
+            continue
+        cur=(info.get("currency") or "").upper().strip()
+        if not cur and is_local_lens_result(m):
+            cur=(current_market().get("currency") or "KWD").upper()
+        m["price_value"]=p
+        m["currency"]=cur
+        # Keep raw numeric/currency here; renderer below formats/local-converts it.
+        m["price"]=f"{p} {cur}".strip()
+        if info.get("title") and not m.get("title"):
+            m["title"]=info.get("title")
+        recovered+=1
+    print(f"LENS PRICE ENRICH: checked={len(candidates)} recovered={recovered}")
+    return matches
+
 def _store_pending_lens_social(phone, bot_id, lang, matches):
     PENDING_LENS_SOCIAL[phone] = {
         "bot_id": bot_id, "lang": lang,
@@ -5858,59 +5950,92 @@ def _offer_lens_more(from_number, bot_id, lang, exact_query, remaining):
 
 
 def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
-    """v82.2 Lens direct: merchant-only + structured local Shopping enrichment.
+    """v82.3 direct image shopping.
 
-    Identity still comes from raw Lens. What is shown to the customer is stricter:
-      1) local Google Shopping offers for the identified product (captures Xcite etc.)
-      2) Lens results proven to be actual retail/product pages
-      3) mandatory preferred stores are one priority tier and appear first
-      4) remaining local merchants, then remaining global merchants
-    News, reviews, magazines and informational pages never become shopping CTAs.
+    Identity comes from Lens, but merchant discovery is a UNION of:
+      1) structured Google Shopping in the user's market,
+      2) broad verified local web search (captures retailers such as Intersport),
+      3) strict merchant-only Lens results.
+
+    Every displayed card must have a numeric price. Lens cards missing a price
+    are verified against their product page first; unresolved unpriced cards are
+    withheld rather than shown as price-less shopping results.
     """
-    raw_matches=[m for m in (lens.get("matches") or []) if (m.get("title") or "").strip()]
+    raw_matches=[m.copy() for m in (lens.get("matches") or []) if (m.get("title") or "").strip()]
     if not raw_matches:
         return False
 
     chosen_title=((lens.get("chosen") or {}).get("title") or raw_matches[0]["title"]).strip()
     exact_query=(caption or chosen_title).strip()
+    english_name=english_search_name(exact_query) or chosen_title or exact_query
 
-    # v82.2 LOCAL SHOPPING ENRICHMENT:
-    # Lens is excellent at identity but not exhaustive for local merchants. Once
-    # identity is known, query structured Google Shopping in the user's market.
+    # Layer A: structured local Google Shopping (best price metadata when present).
     local_shop_matches=[]
     try:
         local_offers=google_shopping_offers(
             exact_query, lang, allow_global=False,
-            lens_context=lens,
-            english_name=english_search_name(exact_query) or exact_query,
+            lens_context=lens, english_name=english_name,
         )
         local_shop_matches=_shopping_offers_as_lens_matches(local_offers)
-        print(f"LENS v82.2 LOCAL SHOPPING INJECT: {len(local_shop_matches)} offers")
+        print(f"LENS v82.3 LOCAL SHOPPING INJECT: {len(local_shop_matches)} offers")
     except Exception as e:
         print(f"LENS LOCAL SHOPPING INJECT ERR: {e.__class__.__name__}: {e}")
 
-    # Strict retail-only filtering applies to raw visual Lens results. Structured
-    # Shopping results are already merchant offers and are injected separately.
-    retail_lens=filter_shopping_results_strict(raw_matches)
+    # Layer B: normal Google-grounded local web discovery. This catches local
+    # stores that have indexable product pages but no/weak Merchant Center feed.
+    local_web_matches=[]
+    try:
+        local_txt,local_urls=_old_layer_search(
+            exact_query, lang, lens_context=lens, allow_global=False,
+            english_name=english_name,
+        )
+        local_web_matches=_verified_text_result_as_lens_matches(
+            local_txt, local_urls, exact_query, lang, "local_web_verified"
+        )
+        print(f"LENS v82.3 LOCAL WEB INJECT: {len(local_web_matches)} offers")
+    except Exception as e:
+        print(f"LENS LOCAL WEB INJECT ERR: {e.__class__.__name__}: {e}")
 
-    # Deduplicate with Shopping first so a local merchant's priced Shopping card
-    # beats a weaker visual-match version of the same URL.
-    matches=[]; seen=set()
-    for m in local_shop_matches + retail_lens:
+    # Layer C: raw Lens remains valuable for merchant/page discovery, but only
+    # actual retail pages survive. Recover prices from product pages when Lens
+    # omitted them.
+    retail_lens=filter_shopping_results_strict(raw_matches)
+    retail_lens=_enrich_direct_matches_with_page_prices(retail_lens, exact_query, lang)
+
+    # Deduplicate. Prefer sources that already carry a verified/structured price:
+    # Shopping > verified local web > Lens.
+    matches=[]; by_sig={}
+    layer_rank={"google_shopping":3,"local_web_verified":2}
+    for m in local_shop_matches + local_web_matches + retail_lens:
         url=(m.get("link") or "").strip()
+        if not url:
+            continue
         try:
-            host=urllib.parse.urlparse(url).netloc.lower().replace("www.","")
-            path=urllib.parse.urlparse(url).path.rstrip("/")
-            sig=(host,path)
+            u=urllib.parse.urlparse(url)
+            sig=(u.netloc.lower().replace("www.",""),u.path.rstrip("/"))
         except Exception:
             sig=(url,"")
-        if not url or sig in seen:
-            continue
-        seen.add(sig); matches.append(m)
+        price_present=bool(str(m.get("price") or "").strip()) or m.get("price_value") not in (None, "")
+        score=(10 if price_present else 0)+layer_rank.get(str(m.get("section") or ""),1)
+        old=by_sig.get(sig)
+        if old is None or score>old[0]:
+            by_sig[sig]=(score,m)
+    matches=[v[1] for v in by_sig.values()]
     if not matches:
         return False
 
-    # Three fixed tiers. Mandatory stores are one tier; no special Amazon rank.
+    # User requirement: purchase comparisons must show prices. No price = no CTA.
+    priced=[]
+    for m in matches:
+        if str(m.get("price") or "").strip() or m.get("price_value") not in (None, ""):
+            priced.append(m)
+        else:
+            print(f"LENS v82.3 DROP UNPRICED: {m.get('source','')} | {str(m.get('title',''))[:70]}")
+    matches=priced
+    if not matches:
+        return False
+
+    # Mandatory list = one priority tier. Then all other local merchants, then global.
     priority_cards, local_cards, global_cards, seen_urls=[],[],[],set()
     for m in matches:
         if is_social_result(m):
@@ -5919,22 +6044,21 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
         if not title:
             continue
         source=(m.get("source") or "").strip()
-        local=is_local_lens_result(m) or str(m.get("section") or "") == "google_shopping"
-        price_txt=""
+        section=str(m.get("section") or "")
+        local=is_local_lens_result(m) or section in ("google_shopping","local_web_verified")
         raw_price=str(m.get("price") or "").strip()
-        if raw_price or m.get("price_value") not in (None, ""):
-            # Structured Shopping already carries a formatted local price_text in
-            # `price`; don't double-convert it.
-            if str(m.get("section") or "") == "google_shopping" and raw_price:
-                price_txt=raw_price
-            elif local:
-                price_txt=format_lens_price(raw_price, m.get("price_value"), lang, m.get("currency") or None)
-            else:
-                shown,_conv=display_global_price(m.get("price_value"), raw_price, m.get("currency") or "", lang)
-                price_txt=shown or raw_price
-        body=title
-        if price_txt:
-            body+=f" — {price_txt}"
+        price_txt=""
+        if section in ("google_shopping","local_web_verified") and raw_price:
+            price_txt=raw_price
+        elif local:
+            price_txt=format_lens_price(raw_price,m.get("price_value"),lang,m.get("currency") or None)
+        else:
+            shown,_conv=display_global_price(m.get("price_value"),raw_price,m.get("currency") or "",lang)
+            price_txt=shown or raw_price
+        if not re.search(r"\d", price_txt or ""):
+            print(f"LENS v82.3 DROP BAD PRICE: {source} -> {price_txt!r}")
+            continue
+        body=f"{title} — {price_txt}"
         if source:
             body+=f" ({source}{' 🇰🇼' if local else ' 🌍'})"
         url=(m.get("link") or "").strip()
@@ -5948,8 +6072,7 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
             continue
         seen_urls.add(url)
         card=(body,url,source or ("المتجر" if lang=="ar" else "Store"),local)
-        priority_domain=_mandatory_priority_domain(source,{source or "store":url})
-        if priority_domain:
+        if _mandatory_priority_domain(source,{source or "store":url}):
             priority_cards.append(card)
         elif local:
             local_cards.append(card)
@@ -5965,8 +6088,7 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
     if remaining:
         _offer_lens_more(from_number,bot_id,lang,exact_query,remaining)
 
-    # Keep RAW Lens evidence for Similar Alternatives identity consensus; do not
-    # cripple similar-search recall just because direct purchase display is strict.
+    # Similar Alternatives still uses raw Lens identity/evidence from the 81.7 path.
     try:
         identity=build_lens_consensus_identity(lens,raw_matches)
         PENDING_LENS_FOREIGN[from_number]={
@@ -5981,9 +6103,10 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
 
     LAST_SEARCH[from_number]={"product":exact_query}
     print(
-        f"LENS DIRECT v82.2: sent={len(first_batch)} shopping_local={len(local_shop_matches)} "
-        f"retail_lens={len(retail_lens)} priority={len(priority_cards)} "
-        f"local_other={len(local_cards)} global_other={len(global_cards)} remaining={len(remaining)}"
+        f"LENS DIRECT v82.3: sent={len(first_batch)} shopping={len(local_shop_matches)} "
+        f"local_web={len(local_web_matches)} retail_lens={len(retail_lens)} "
+        f"priority={len(priority_cards)} local_other={len(local_cards)} "
+        f"global_other={len(global_cards)} remaining={len(remaining)}"
     )
     return True
 
