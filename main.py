@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v82.0-HYBRID-priority-tier-stable-cta-order-20260817"
+BUILD_ID = "v82.1-HYBRID-priority-tier-lens-first-20260817"
 
 
 # ===== v77.9 TOP GLOBAL SITES KUWAIT BUYS FROM =====
@@ -5768,8 +5768,12 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
 
     # v81.6: بدون بطاقة «المتجر الرسمي» — التجربة أثبتت أنها تهلوس مع نتائج الصور
     # العامة (استخرجت براند غلط وربطت موقعاً لا علاقة له). نعرض ما يطلعه Lens فقط.
-    # بناء كل البطاقات: dedup + حارس النصب + استبعاد التواصل الاجتماعي فقط.
-    local_cards, global_cards, seen_urls = [], [], set()
+    # v82.1: بناء كل البطاقات بثلاث طبقات ثابتة:
+    # 1) أي متجر من MANDATORY_PRIORITY_STORES أولاً — بغض النظر محلي/عالمي.
+    # 2) بقية متاجر بلد المستخدم.
+    # 3) بقية المتاجر العالمية.
+    # داخل كل طبقة نحافظ على ترتيب Google Lens الأصلي.
+    priority_cards, local_cards, global_cards, seen_urls = [], [], [], set()
     for m in matches:
         if is_social_result(m):
             continue
@@ -5800,10 +5804,18 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
             continue
         seen_urls.add(url)
         card = (body, url, source or ("المتجر" if lang == "ar" else "Store"), local)
-        # v81.5: تقسيم مستقر — بلد المستخدم أولاً، والترتيب داخل كل مجموعة كما رتبه Google.
-        (local_cards if local else global_cards).append(card)
 
-    all_cards = local_cards + global_cards
+        # v82.1: الأولوية تُحسم من الدومين الفعلي للرابط أولاً، ثم اسم المصدر كاحتياط.
+        # كل المتاجر المحددة Tier واحد؛ Amazon لا يملك ترتيباً خاصاً داخلها.
+        priority_domain = _mandatory_priority_domain(source, {source or "store": url})
+        if priority_domain:
+            priority_cards.append(card)
+        elif local:
+            local_cards.append(card)
+        else:
+            global_cards.append(card)
+
+    all_cards = priority_cards + local_cards + global_cards
     if not all_cards:
         return False
 
@@ -5827,7 +5839,11 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
         print(f"LENS PENDING STORE ERR: {e}")
 
     LAST_SEARCH[from_number] = {"product": exact_query}
-    print(f"LENS DIRECT v81.6 RAW: sent={len(first_batch)} (local_first={len(local_cards)}) remaining={len(remaining)} social_removed")
+    print(
+        f"LENS DIRECT v82.1 PRIORITY: sent={len(first_batch)} "
+        f"priority={len(priority_cards)} local_other={len(local_cards)} "
+        f"global_other={len(global_cards)} remaining={len(remaining)}"
+    )
     return True
 
 
