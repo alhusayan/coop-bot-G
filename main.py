@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v81.7-more-text-results-pagination-20260816"
+BUILD_ID = "v81.8-HYBRID-v81FINAL-exact-v81.7-similar-20260817"
 
 
 # ===== v77.9 TOP GLOBAL SITES KUWAIT BUYS FROM =====
@@ -156,7 +156,7 @@ def log_click(phone, query, store_name, original_url, affiliate_url, is_global=F
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE -> GOOGLE LENS DIRECT PASSTHROUGH (raw results to user)")
-print("TEXT SEARCH + SIMILAR ALTERNATIVES -> USER-SUPPLIED LEGACY v26 ENGINE")
+print("TEXT EXACT MATCH -> v81-FINAL | SIMILAR ALTERNATIVES -> v81.7")
 print("SERVICES -> AT LEAST 5 PROVIDERS WITH PHONE NUMBERS")
 print("=" * 70)
 
@@ -779,7 +779,7 @@ def has_model_token(a, b):
 def cache_key(query, lang):
     norm = re.sub(r"[^\w\u0600-\u06FF]+", "", normalize_ar(query))
     market = current_market().get("country", DEFAULT_COUNTRY)
-    return hashlib.sha256(f"v70|{market}|{norm}|{lang}".encode()).hexdigest()
+    return hashlib.sha256(f"v81hybrid-final-exact|{market}|{norm}|{lang}".encode()).hexdigest()
 
 def cache_ttl_for(query, txt=""):
     q_norm = normalize_ar(query)
@@ -2734,11 +2734,6 @@ def send_product_result(from_number, txt, urls, bot_id, lang, query, best_only=F
         print("RELEVANCE: all offers dropped -> treat as not found")
         send_whatsapp_text(from_number, T(lang, "not_found"), bot_id)
         return "none"
-    # v81.1: فلترا الدقة — للبحث الدقيق فقط: البدائل المشابهة منتجات مختلفة بأسعار
-    # متباينة شرعاً، وقد يحمل المتجر الواحد بديلين، فما ينطبق عليها الفلتران.
-    if relevance_mode == "exact" and not best_only:
-        offers = _price_sanity_filter(offers, query, lang)
-        offers = _dedup_offers_by_store(offers, urls)
     title = product_title(txt, query)
     if title:
         send_whatsapp_text(from_number, title, bot_id)
@@ -2749,7 +2744,6 @@ def send_product_result(from_number, txt, urls, bot_id, lang, query, best_only=F
         offers = [best]
     sent = 0
     fallback_ctas = []
-    overflow_cards = []  # v81.7: ما بعد الصفحة الأولى -> زر «عرض المزيد»
     for o in offers[:store_limit]:
         url = match_url(o["name"], urls)
         # v77.8 AFFILIATE WRAP
@@ -2778,16 +2772,6 @@ def send_product_result(from_number, txt, urls, bot_id, lang, query, best_only=F
             continue
 
         # Normal exact-product searches keep the legacy safe fallback behavior.
-        # v81.7: بعد امتلاء الصفحة الأولى، البقية تُجمع لزر «عرض المزيد» بدل الإرسال.
-        if relevance_mode != "similar" and not best_only and sent >= TEXT_FIRST_PAGE:
-            if url and url.startswith("http"):
-                try:
-                    _h = urllib.parse.urlparse(url).netloc.lower()
-                except Exception:
-                    _h = ""
-                if _h and "google." not in _h and not is_suspicious_url(url):
-                    overflow_cards.append((o["line"], url, o["name"], True))
-            continue
         if not is_direct_store_url(url):
             try:
                 host = urllib.parse.urlparse(url or "").netloc.lower()
@@ -2803,11 +2787,10 @@ def send_product_result(from_number, txt, urls, bot_id, lang, query, best_only=F
             continue
         send_whatsapp_cta(from_number, o["line"], url, bot_id, f"🛒 {o['name'][:18]}")
         sent += 1
-    page_cap = TEXT_FIRST_PAGE if (relevance_mode != "similar" and not best_only) else store_limit
-    if relevance_mode != "similar" and fallback_ctas and sent < page_cap:
+    if relevance_mode != "similar" and fallback_ctas and sent < store_limit:
         # v76.3: لا نخفي CTAs الاحتياطية لمجرد أن نتيجة واحدة كان لها رابط مباشر.
-        # v81.7: الاحتياطي يكمل الصفحة الأولى فقط؛ الفائض يروح لزر «عرض المزيد».
-        remaining = max(0, page_cap - sent)
+        # نرسلها بعد المباشرة حتى يصل كل بديل ممكن إلى زر، مع توضيح إذا كان الزر يفتح المتجر.
+        remaining = max(0, store_limit - sent)
         checked = list(RESOLVER.map(lambda ou: (ou[0], ou[1], url_is_alive(ou[1])), fallback_ctas[:remaining]))
         for o, url, alive in checked:
             if not alive:
@@ -2818,13 +2801,6 @@ def send_product_result(from_number, txt, urls, bot_id, lang, query, best_only=F
             note = "\n🔎 الزر يفتح المتجر — ادور المنتج داخله" if lang == "ar" else "\n🔎 Button opens the store — search the product inside"
             send_whatsapp_cta(from_number, (o["line"] + note)[:1024], url, bot_id, f"🛒 {o['name'][:18]}")
             sent += 1
-        # v81.7: احتياطية زائدة عن الصفحة -> بطاقات مؤجلة خلف زر «عرض المزيد».
-        extra_fb = fallback_ctas[remaining:]
-        for o, url in extra_fb:
-            if url and url.startswith("http") and not is_suspicious_url(url):
-                overflow_cards.append((o["line"], url, o["name"], True))
-    if relevance_mode != "similar" and not best_only and overflow_cards and sent > 0:
-        _offer_lens_more(from_number, bot_id, lang, query, overflow_cards)
     if sent == 0:
         if relevance_mode == "similar":
             print("SIMILAR: zero verified direct product CTAs -> treat as none")
@@ -6570,9 +6546,14 @@ def legacy_v26_call_gemini(parts, system=LEGACY_TEXT_SEARCH_SYSTEM, max_results=
 
 
 def legacy_v26_best_of_search(parts, max_results=None, merge_offers=False, merge_title=""):
-    """بطولة الكود القديم: SEARCH_RUNS بالتوازي، الأفضل يفوز، والروابط اتحاد الجميع.
+    """HYBRID routing.
 
-    v81.1: as_completed + خروج مبكر — نفس ترقية البطولة الرئيسية."""
+    Exact product search (merge_offers=False): use v81-FINAL tournament behavior exactly:
+    wait for all SEARCH_RUNS, score them, choose the strongest answer, then union grounded URLs.
+
+    Similar alternatives (merge_offers=True): keep v81.7 behavior via _tournament_collect,
+    including its faster collection and union of alternative offers across runs.
+    """
     limit=MAX_STORES if max_results is None else max(1,int(max_results))
     market_snapshot=current_market()
     try:
@@ -6580,9 +6561,15 @@ def legacy_v26_best_of_search(parts, max_results=None, merge_offers=False, merge
                                      legacy_v26_call_gemini, parts,
                                      LEGACY_TEXT_SEARCH_SYSTEM, limit)
               for _ in range(SEARCH_RUNS)]
-        results=_tournament_collect(futs, merge_offers)
+        if merge_offers:
+            # v81.7 path — used by run_similar_search(..., merge_offers=True).
+            results=_tournament_collect(futs, True)
+        else:
+            # v81-FINAL exact path.
+            results=[f.result(timeout=120) for f in futs]
+            results=[(tt,uu) for tt,uu in results if tt]
     except Exception as e:
-        print(f"LEGACY V26 best_of_search err {e}")
+        print(f"LEGACY V26 HYBRID best_of_search err {e}")
         return legacy_v26_call_gemini(parts, max_results=limit)
     if not results: return "",{}
     scored=sorted(results,key=lambda x:v26_answer_score(x[0],x[1],limit),reverse=True)
@@ -6595,89 +6582,53 @@ def legacy_v26_best_of_search(parts, max_results=None, merge_offers=False, merge
     merged_urls=dict(list(merged_urls.items())[:max(limit,4)])
     if merge_offers:
         best_txt=_merge_v26_offer_text(scored, merge_title or product_title(best_txt,""), limit)
-    print({"legacy_v26_tournament":[v26_answer_score(tt,uu,limit) for tt,uu in scored],
+    print({"legacy_v26_hybrid_tournament":[v26_answer_score(tt,uu,limit) for tt,uu in scored],
+           "mode":"similar-v81.7" if merge_offers else "exact-v81-FINAL",
            "winner_stores":len(extract_store_offers(best_txt,limit=limit)),
            "total_links":len(merged_urls),"merged_offers":bool(merge_offers)})
     return best_txt,merged_urls
 
 
 def legacy_text_product_search(product, lang):
-    """v78: بحث موحد 8 نتائج - محلي أولاً ثم عالمي - بدون فلتر
-
-    v81.1: المرحلتان المحلية والعالمية تنطلقان **بالتوازي** بدل التتابع (كان ينتظر
-    المحلي كاملاً ثم يبدأ العالمي) + الترجمة كسولة بالخلفية + دمج عروض كل جولات
-    البطولة (merge_offers) لملء الخانات — أسرع بكثير ونتائج أوفر.
-    """
+    """v78: بحث موحد 8 نتائج - محلي أولاً ثم عالمي - بدون فلتر"""
     cached=cache_get(product,lang)
     if cached: 
         # حتى لو كاش، نزيد العدد لـ 8 إذا كان أقل
         return cached
 
     is_ar=bool(re.search(r"[\u0600-\u06FF]",str(product or "")))
+    alt=(english_search_name(product) if is_ar else arabic_search_name(product)) or ""
+    if alt.strip().lower()==str(product).strip().lower(): alt=""
     market_name=current_market().get("country_name","Kuwait")
-    market_snapshot = current_market()
-
-    # الترجمة بالخلفية — البطولة المحلية الأولى ما تنتظرها (Gemini يترجم داخلياً).
-    _alt_future = RESOLVER.submit(
-        _run_with_market, market_snapshot,
-        (english_search_name if is_ar else arabic_search_name), product,
-    )
-    def _get_alt():
-        try:
-            a = (_alt_future.result(timeout=25) or "").strip()
-        except Exception as e:
-            print(f"ALT NAME ERR: {e.__class__.__name__}")
-            a = ""
-        return "" if a.lower() == str(product).strip().lower() else a
-
-    # --- المرحلة العالمية تنطلق فوراً كمستقبل موازٍ (كانت تنتظر المحلي كاملاً) ---
-    def _global_phase():
-        try:
-            en_q = (_get_alt() if is_ar else product) or english_search_name(product) or product
-            global_prompt = (
-                f"ابحث عالمياً عن {en_q} في متاجر خارج {market_name} فقط. "
-                f"Amazon.com, Amazon.ae, Amazon.sa, Noon, AliExpress, Temu, Shein, Trendyol, eBay, Namshi, Farfetch. "
-                f"اعرض {TEXT_GLOBAL_RESULTS} نتائج مختلفة بسعر رقمي واضح ورابط صفحة منتج مباشر. {LANG_INSTR[lang]}"
-            )
-            txt_g, urls_g = legacy_v26_best_of_search(
-                [{"text": global_prompt}], max_results=TEXT_GLOBAL_RESULTS,
-                merge_offers=True, merge_title=f"📦 {product}",
-            )
-            if txt_g and urls_g and extract_store_offers(txt_g):
-                return txt_g, urls_g
-        except Exception as e:
-            print(f"GLOBAL PART IN COMBINED SEARCH ERR: {e}")
-        return "", {}
-    _global_future = WORKERS.submit(_run_with_market, market_snapshot, _global_phase)
-
-    # --- المرحلة المحلية (بالخيط الحالي، بالتوازي مع العالمية) ---
+    
+    # --- المرحلة 1: بحث محلي 4 نتائج ---
     local_txt, local_urls = "", {}
-    def _local_attempts():
-        yield (product, "")
-        alt = _get_alt()
-        if alt:
-            print(f"LEGACY BILINGUAL (lazy): {product!r} <-> {alt!r}")
-            yield (alt, product)
-    for primary,secondary in _local_attempts():
+    attempts=[(product,alt)] + ([(alt,product)] if alt else [])
+    for primary,secondary in attempts:
         extra=(f" وابحث أيضاً بالاسم الآخر لنفس المنتج: {secondary}." if secondary else "")
         prompt=(f"ابحث عن {primary} في {market_name}. قارن أسعار نفس المنتج بالضبط في المتاجر المحلية الحالية."
                 f"{extra} أظهر المتاجر التي لديها سعر حالي ومصدر Google حقيقي. {LANG_INSTR[lang]}")
-        txt,urls=legacy_v26_best_of_search(
-            [{"text":prompt}],max_results=TEXT_LOCAL_RESULTS,
-            merge_offers=True, merge_title=f"📦 {product}",
-        )
+        txt,urls=legacy_v26_best_of_search([{"text":prompt}],max_results=4)
         if txt and urls and extract_store_offers(txt):
             local_txt, local_urls = txt, urls
             break
-
-    # --- جمع المرحلة العالمية (كانت تشتغل طوال هذا الوقت بالتوازي) ---
+    
+    # --- المرحلة 2: بحث عالمي 4 نتائج ---
     global_txt, global_urls = "", {}
     try:
-        global_txt, global_urls = _global_future.result(timeout=130)
+        en_q = english_search_name(product) or product
+        global_prompt = (
+            f"ابحث عالمياً عن {en_q} في متاجر خارج {market_name} فقط. "
+            f"Amazon.com, Amazon.ae, Amazon.sa, Noon, AliExpress, Temu, Shein, Trendyol, eBay, Namshi, Farfetch. "
+            f"اعرض 4 نتائج مختلفة بسعر رقمي واضح ورابط صفحة منتج مباشر. {LANG_INSTR[lang]}"
+        )
+        txt_g, urls_g = legacy_v26_best_of_search([{"text": global_prompt}], max_results=4)
+        if txt_g and urls_g and extract_store_offers(txt_g):
+            global_txt, global_urls = txt_g, urls_g
     except Exception as e:
-        print(f"GLOBAL PHASE JOIN ERR: {e.__class__.__name__}")
+        print(f"GLOBAL PART IN COMBINED SEARCH ERR: {e}")
 
-    # --- دمج: محلي أولاً ثم عالمي (حتى 12 نتيجة) ---
+    # --- دمج: محلي أولاً ثم عالمي = 8 نتائج ---
     if not local_txt and not global_txt:
         return "", {}
 
@@ -6688,7 +6639,7 @@ def legacy_text_product_search(product, lang):
     if local_txt:
         # خذ أول 4 أسطر عروض من المحلي
         local_offers = [l for l in local_txt.splitlines() if l.strip().startswith(("✅","•","🏆"))]
-        combined_lines.extend(local_offers[:TEXT_LOCAL_RESULTS])
+        combined_lines.extend(local_offers[:4])
         combined_urls.update(local_urls)
     
     if global_txt:
@@ -6698,7 +6649,7 @@ def legacy_text_product_search(product, lang):
             combined_lines.append("")
             combined_lines.append("🌍 من المتاجر العالمية:")
             combined_lines.append("")
-        combined_lines.extend(global_offers[:TEXT_GLOBAL_RESULTS])
+        combined_lines.extend(global_offers[:4])
         combined_urls.update(global_urls)
 
     # عنوان المنتج
@@ -6765,7 +6716,7 @@ def execute_product_search(from_number, product, bot_id, lang):
         send_whatsapp_text(from_number, T(lang, "not_found"), bot_id)
         return
     # عرض 8 نتائج مباشرة
-    result_type = send_product_result(from_number, txt, urls, bot_id, lang, product, max_stores=TEXT_TOTAL_RESULTS)
+    result_type = send_product_result(from_number, txt, urls, bot_id, lang, product, max_stores=8)
     if result_type == "product" and AUTO_SEND_PRODUCT_MAPS:
         send_maps_button(from_number, product, bot_id, lang)
 
@@ -7137,4 +7088,4 @@ def process_location_message(message, bot_id):
     route_pending_after_location(from_number)
 
 @app.get("/")
-async def health(): return {"status":"v81.7 TEXT SEARCH 12 RESULTS (6 local + 6 global, first 8 + MORE button) | v81.6 PURE LENS OUTPUT (no invented brand card, social removed, local-first order only) + MORE BUTTON (nothing dropped) | v81.4 OFFICIAL BRAND CARD FIRST + CARDS ONLY (no long msg, no options) | v81.3 LENS RAW GOOGLE ORDER (v71.1 accuracy, no reordering, extras feed SIMILAR) | v81.2 LENS RESILIENCE (parallel passes + retry + official Vision fallback + self-url check) | v81.1 FAST: PARALLEL LOCAL+GLOBAL PHASES + EARLY-EXIT TOURNAMENTS + LAZY TRANSLATION | ACCURATE: CURRENCY-AWARE PRICE SANITY + CANONICAL STORE DEDUP | ABUNDANT: OFFER UNION IN TEXT PATH | + v81 CURRENCY CONVERT + HIGH COMMISSION + CLEAR SIMPLE TITLES + AI STORE UNIFY + IN-STORE SEARCH LINKS + CANONICAL STORES + CLEAN LAYOUT + ONE-SESSION + GREEDY COMPLETION + LIVE LINKS + LOCAL SOCIAL + GLOBAL REGION ORDER + MORE LENS CARDS + NONE CLASS + CTA ALWAYS + ARABIC PICK LIST + RELEVANCE FILTER + NO SILENCE + BILINGUAL 2 ROUNDS + PURE AI CLASSIFIER + CLEAN STORE NAMES + SERVICE INTENT FIX (answer+5 providers) + TEXT+SIMILAR USE OLD v26 SMART PATH (tournament) + SERVICES 5+ PHONES + AI INTENT + BRAND COMPARE + SHOP FILTER + TRIO OPTIONS + EXACT PRICES", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "v26_runs":SEARCH_RUNS, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
+async def health(): return {"status":"HYBRID: TEXT EXACT MATCH = v81-FINAL (4 local + 4 global, Final tournament/output) | SIMILAR ALTERNATIVES = v81.7 (offer union across tournament runs) | v81.7 Lens/resilience/pagination features retained", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "v26_runs":SEARCH_RUNS, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
