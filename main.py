@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v78-local5-cn-fallback-20260817"
+BUILD_ID = "v79-dedupe-store-no-auto-map-20260817"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE/TEXT -> FLAGS + CLEAR LOCAL PRICES + LOCAL/US/CHINA")
@@ -72,7 +72,7 @@ MAX_URLS_MERGED = int(os.environ.get("MAX_URLS_MERGED", "8"))
 ENABLE_SEARCH_RETRY = env_bool("ENABLE_SEARCH_RETRY", True)
 MAX_SEARCH_ATTEMPTS = max(2, int(os.environ.get("MAX_SEARCH_ATTEMPTS", "3")))
 MAX_IDENTIFY_ATTEMPTS = max(2, int(os.environ.get("MAX_IDENTIFY_ATTEMPTS", "3")))
-AUTO_SEND_PRODUCT_MAPS = env_bool("AUTO_SEND_PRODUCT_MAPS", True)
+AUTO_SEND_PRODUCT_MAPS = env_bool("AUTO_SEND_PRODUCT_MAPS", False)
 # Google Lens عبر SerpApi. لا توجد Google Lens API عامة رسمية للاستخدام الخادمي،
 # لذلك نستخدم SerpApi للوصول إلى نتائج Lens المنظمة.
 SERPAPI_API_KEY = os.environ.get("SERPAPI_API_KEY", "").strip()
@@ -3851,10 +3851,36 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
             int(m.get("position") or 999),
         ))
 
-    # حدود قصوى فقط وليست حصصاً: نعرض المتاح حتى سقف كل سوق.
+    # حدود قصوى فقط وليست حصصاً. v79: نتيجة واحدة فقط من كل متجر/merchant.
+    # Lens قد يرجّع SHEIN أو Ubuy عدة مرات لنفس المنتج بروابط/عناوين مختلفة؛
+    # بما أن الهدف مقارنة المتاجر، نحتفظ بأفضل بطاقة فقط لكل متجر.
+    def _merchant_key(m):
+        url = (m.get("link") or "").strip()
+        source = re.sub(r"\s+", " ", (m.get("source") or "").strip().lower())
+        try:
+            host = urllib.parse.urlparse(url).netloc.lower().split(":")[0]
+            host = host[4:] if host.startswith("www.") else host
+        except Exception:
+            host = ""
+
+        # توحيد أشهر المتاجر حتى لو جاء source مرة Shein ومرة shein.com.
+        known = (
+            "shein.com", "aliexpress.com", "temu.com", "alibaba.com", "1688.com",
+            "taobao.com", "tmall.com", "amazon.com", "ubuy.com", "westelm.com",
+            "hm.com", "wayfair.com",
+        )
+        for d in known:
+            if host == d or host.endswith("." + d) or d in source:
+                return d
+        if host:
+            # host هو المرجع الأقوى للمتاجر غير المعروفة.
+            return host
+        return re.sub(r"[^a-z0-9]+", "", source) or source
+
     market_caps = {0: LENS_DIRECT_LOCAL_MAX, 1: LENS_DIRECT_US_MAX, 2: LENS_DIRECT_CN_MAX}
     selected = []
     seen_urls = set()
+    seen_merchants = set()
     for rank in (0, 1, 2):
         taken = 0
         cap = market_caps.get(rank, 0)
@@ -3868,10 +3894,13 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
                 host = ""
             if not (url.startswith("http") and host and "google." not in host):
                 continue
-            if url in seen_urls:
+            merchant = _merchant_key(m)
+            if url in seen_urls or merchant in seen_merchants:
+                print(f"LENS DUP STORE SKIP: merchant={merchant} title={(m.get('title') or '')[:70]}")
                 continue
             selected.append(m)
             seen_urls.add(url)
+            seen_merchants.add(merchant)
             taken += 1
             if taken >= cap or len(selected) >= LENS_DIRECT_MAX_CTA:
                 break
@@ -3918,7 +3947,7 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
 
     chosen_title = ((lens.get("chosen") or {}).get("title") or selected[0]["title"]).strip()
     LAST_SEARCH[from_number] = {"product": (caption or chosen_title)}
-    print(f"LENS DIRECT SENT v77: {sent} CTA; buckets={market_counts}; caps=5/4/4; order=local->us->cn")
+    print(f"LENS DIRECT SENT v79: {sent} CTA; unique_merchants={len(seen_merchants)}; buckets={market_counts}; caps=5/4/4; order=local->us->cn")
     if market_counts[2] == 0:
         print("V77 WARNING: no Chinese-store Lens result survived filters")
     return sent > 0
@@ -3943,8 +3972,6 @@ def process_single_image(message,bot_id,lang="ar"):
         lens_direct = google_lens_lookup(b64, mime, lang, caption, light=True)
         if lens_direct.get("matches"):
             if send_lens_direct_results(from_number, lens_direct, bot_id, lang, caption):
-                if AUTO_SEND_PRODUCT_MAPS:
-                    send_maps_button(from_number, LAST_SEARCH.get(from_number, {}).get("product") or caption or "product", bot_id, lang)
                 return
         print("LENS DIRECT MODE: no Google results -> full pipeline fallback")
         send_whatsapp_text(from_number, T(lang, "lens_none"), bot_id)
@@ -4057,8 +4084,7 @@ def process_single_image(message,bot_id,lang="ar"):
         _store_pending_global(from_number, bot_id, lang, query, active_lens, prompt_text if (combined_name and caption) else None)
         send_not_found_choice(from_number, bot_id, lang)
         return
-    if query and (result_type == "service" or (result_type == "product" and AUTO_SEND_PRODUCT_MAPS)):
-        send_maps_button(from_number, query, bot_id, lang)
+    # v79: لا نرسل الخريطة تلقائياً بعد النتائج. تبقى متاحة فقط إذا طلبها المستخدم صراحة.
 
 def identify_image_product(msg):
     try:
@@ -4281,8 +4307,7 @@ def process_text_message(message,bot_id,onboarding_checked=False):
             # كانت هناك عروض لكن كل روابطها غير مباشرة؛ نفس الخيارات تنفع هنا أيضاً.
             _store_pending_global(from_number, bot_id, lang, products[0], None, None)
             send_not_found_choice(from_number, bot_id, lang)
-        elif result_type == "service" or (result_type == "product" and AUTO_SEND_PRODUCT_MAPS):
-            send_maps_button(from_number, products[0], bot_id, lang)
+        # v79: لا خريطة تلقائية؛ المستخدم يطلب الخريطة عند الحاجة.
     else:
         send_whatsapp_text(from_number,T(lang,"multi_text",c=len(products)),bot_id)
         process_cart(products, from_number, bot_id, lang)
@@ -4307,4 +4332,4 @@ def process_location_message(message, bot_id):
     route_pending_after_location(from_number)
 
 @app.get("/")
-async def health(): return {"status":"v78 LOCAL5-CN-SHEIN LOCAL-US-CHINA", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
+async def health(): return {"status":"v79 DEDUPE-STORE NO-AUTO-MAP LOCAL5-US4-CN4-SHEIN", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
