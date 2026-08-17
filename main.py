@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v82.4-HYBRID-safe-product-links-20260817"
+BUILD_ID = "v82.3-HYBRID-prices-local-discovery-20260817"
 
 
 # ===== v77.9 TOP GLOBAL SITES KUWAIT BUYS FROM =====
@@ -85,35 +85,6 @@ MANDATORY_PRIORITY_STORES = (
 MANDATORY_PRIORITY_INDEX = {domain: i for i, domain in enumerate(MANDATORY_PRIORITY_STORES)}
 MANDATORY_PRIORITY_PROMPT = ", ".join(MANDATORY_PRIORITY_STORES)
 
-# v82.5: well-known global retail domains.  These are not forced above Kuwait
-# merchants; they are used to stop obscure Lens sites filling the first page.
-KNOWN_GLOBAL_RETAIL_HOSTS = (
-    # user's preferred network
-    *MANDATORY_PRIORITY_STORES,
-    # major general / electronics
-    "walmart.com", "bestbuy.com", "target.com", "costco.com", "newegg.com",
-    "bhphotovideo.com", "adorama.com", "apple.com", "samsung.com",
-    # fashion / footwear / sport
-    "nike.com", "adidas.com", "puma.com", "underarmour.com", "newbalance.com",
-    "footlocker.com", "jdsports.com", "sportsdirect.com", "decathlon.com",
-    "intersport.com", "zappos.com", "nordstrom.com", "macys.com",
-    "ssense.com", "net-a-porter.com", "mrporter.com", "levelshoes.com",
-    "farfetch.com", "asos.com", "stockx.com", "goat.com",
-    # beauty / health
-    "ulta.com", "sephora.com", "lookfantastic.com", "cultbeauty.com", "iherb.com",
-    # specialist but established marketplaces / retailers
-    "etsy.com", "wayfair.com", "homedepot.com", "lowes.com", "ikea.com",
-    "tennis-warehouse.com", "tennis-point.com", "babolat.com",
-)
-
-def is_known_global_retailer(url_or_host):
-    raw=str(url_or_host or "").strip().lower()
-    try:
-        host=urllib.parse.urlparse(raw).netloc.lower().replace("www.", "") if "://" in raw else raw.replace("www.", "")
-    except Exception:
-        host=raw.replace("www.", "")
-    return any(host == d or host.endswith("." + d) for d in KNOWN_GLOBAL_RETAIL_HOSTS)
-
 # دالة تختار أفضل متجر عالمي حسب المنتج
 def pick_best_global_stores(query):
     q = query.lower()
@@ -172,68 +143,40 @@ def extract_asin(url):
     return ""
 
 def wrap_affiliate_url(original_url, phone, query=""):
-    """v82.4 SAFE DEEPLINKS.
-
-    Never replace a discovered product URL with a synthetic search/category URL.
-    Keep the exact merchant product path and only add tracking parameters that are
-    safe for that merchant. This prevents broken /itm/, Temu search pages, SHEIN
-    search pages, and similar affiliate-wrapper failures.
-    """
-    if not original_url or not original_url.startswith(("http://", "https://")):
+    """تحويل أي رابط محلي أو عالمي لرابط أفلييت مع SubID = رقم الزبون"""
+    if not original_url or not original_url.startswith("http"):
         return original_url
     try:
-        p = urllib.parse.urlparse(original_url)
-        host = p.netloc.lower().replace("www.", "")
-        phone_clean = re.sub(r"[^0-9]", "", str(phone))[-10:]
-
-        # Preserve existing query params and the exact product path.
-        pairs = urllib.parse.parse_qsl(p.query, keep_blank_values=True)
-        params = dict(pairs)
-
-        # Amazon: preserve /dp/<ASIN> (or any original product URL) and only add
-        # the Associate tag. Do NOT rebuild the URL from ASIN.
-        if any(x in host for x in ("amazon.com", "amazon.ae", "amazon.sa", "amazon.co.uk", "amazon.de")):
-            cfg = next((v for k, v in AFFILIATE_CONFIG.items() if k in host and v.get("network") == "amazon"), None)
-            tag = (cfg or {}).get("tag", "")
-            if tag:
-                params["tag"] = tag
-            params.setdefault("linkCode", "ll1")
-
-        # AliExpress: keep the real /item/<id>.html URL; tracking params are safe.
-        elif "aliexpress." in host:
-            params.setdefault("aff_fcid", phone_clean)
-            params.setdefault("aff_fsk", phone_clean)
-            params.setdefault("aff_platform", "api")
-            params.setdefault("aff_trace_key", phone_clean)
-
-        # eBay: only decorate the original item URL. Never construct /itm/{id}
-        # unless the ID actually came from that original URL.
-        elif "ebay." in host:
-            cfg = AFFILIATE_CONFIG.get("ebay.com", {})
-            camp = cfg.get("camp", "")
-            if camp and not camp.startswith("YOUR_"):
-                params.setdefault("campid", camp)
-                params.setdefault("customid", phone_clean)
-                params.setdefault("mkcid", "1")
-                params.setdefault("mkevt", "1")
-                params.setdefault("toolid", "10001")
-
-        # Temu / SHEIN and other stores: keep the exact original product URL.
-        # Their synthetic search templates were the cause of broken/wrong pages.
-        elif "temu." in host or "shein." in host:
-            return original_url
-
-        # Direct/local/unknown merchants: do NOT append arbitrary ref/subid params;
-        # some ecommerce routers treat unknown query parameters as invalid routes.
-        else:
-            return original_url
-
-        new_q = urllib.parse.urlencode(list(params.items()), doseq=True)
-        safe_url = urllib.parse.urlunparse((p.scheme, p.netloc, p.path, p.params, new_q, p.fragment))
-        print(f"SAFE AFFILIATE WRAP: {host} -> {safe_url[:120]}")
-        return safe_url
+        import urllib.parse
+        host = _host_of(original_url).lower()
+        phone_clean = re.sub(r"[^0-9]", "", str(phone))[-10:]  # آخر 10 أرقام للتتبع
+        
+        for domain_key, cfg in AFFILIATE_CONFIG.items():
+            if domain_key in host or domain_key.replace(".com","") in host:
+                template = cfg.get("template","")
+                asin = extract_asin(original_url)
+                # بناء الرابط
+                aff_url = template.format(
+                    url=urllib.parse.quote(original_url, safe=""),
+                    phone=phone_clean,
+                    tag=cfg.get("tag",""),
+                    pid=cfg.get("pid",""),
+                    camp=cfg.get("camp",""),
+                    asin=asin or "",
+                    id=asin or "",
+                    query=urllib.parse.quote(query or "", safe="")
+                )
+                # إذا القالب ما فيه asin وكان مطلوب، رجع الأصلي + باراميتر
+                if "{asin}" in template and not asin:
+                    aff_url = original_url + (f"&tag={cfg.get('tag','')}" if "amazon" in host else f"?subid={phone_clean}")
+                print(f"AFFILIATE WRAP: {host} -> {cfg['network']} -> {aff_url[:100]}")
+                return aff_url
+        
+        # إذا المتجر مو في القائمة، أضف باراميتر تتبع عام
+        sep = "&" if "?" in original_url else "?"
+        return f"{original_url}{sep}ref=coop_bot&subid={phone_clean}&utm_source=whatsapp_global"
     except Exception as e:
-        print(f"SAFE AFFILIATE WRAP ERR: {e}")
+        print(f"AFFILIATE WRAP ERR: {e}")
         return original_url
 
 def log_click(phone, query, store_name, original_url, affiliate_url, is_global=False):
@@ -6007,7 +5950,7 @@ def _offer_lens_more(from_number, bot_id, lang, exact_query, remaining):
 
 
 def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
-    """v82.5 direct image shopping.
+    """v82.3 direct image shopping.
 
     Identity comes from Lens, but merchant discovery is a UNION of:
       1) structured Google Shopping in the user's market,
@@ -6053,22 +5996,7 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
     except Exception as e:
         print(f"LENS LOCAL WEB INJECT ERR: {e.__class__.__name__}: {e}")
 
-    # Layer C: structured GLOBAL Google Shopping.  This increases result count
-    # using real merchant cards instead of filling the page with obscure Lens sites.
-    global_shop_matches=[]
-    try:
-        global_offers=google_shopping_offers(
-            exact_query, lang, allow_global=True,
-            lens_context=lens, english_name=english_name,
-        )
-        global_shop_matches=_shopping_offers_as_lens_matches(global_offers)
-        for _m in global_shop_matches:
-            _m["section"]="global_shopping"
-        print(f"LENS v82.5 GLOBAL SHOPPING INJECT: {len(global_shop_matches)} offers")
-    except Exception as e:
-        print(f"LENS GLOBAL SHOPPING INJECT ERR: {e.__class__.__name__}: {e}")
-
-    # Layer D: raw Lens remains valuable for merchant/page discovery, but only
+    # Layer C: raw Lens remains valuable for merchant/page discovery, but only
     # actual retail pages survive. Recover prices from product pages when Lens
     # omitted them.
     retail_lens=filter_shopping_results_strict(raw_matches)
@@ -6077,8 +6005,8 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
     # Deduplicate. Prefer sources that already carry a verified/structured price:
     # Shopping > verified local web > Lens.
     matches=[]; by_sig={}
-    layer_rank={"google_shopping":4,"local_web_verified":3,"global_shopping":2}
-    for m in local_shop_matches + local_web_matches + global_shop_matches + retail_lens:
+    layer_rank={"google_shopping":3,"local_web_verified":2}
+    for m in local_shop_matches + local_web_matches + retail_lens:
         url=(m.get("link") or "").strip()
         if not url:
             continue
@@ -6107,12 +6035,8 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
     if not matches:
         return False
 
-    # v82.5 ranking:
-    #   1) user's priority stores (one tier),
-    #   2) any real Kuwait/local merchant,
-    #   3) well-known global retailers,
-    #   4) obscure global merchants only as a tiny last-resort filler.
-    priority_cards, local_cards, known_global_cards, unknown_global_cards, seen_urls=[],[],[],[],set()
+    # Mandatory list = one priority tier. Then all other local merchants, then global.
+    priority_cards, local_cards, global_cards, seen_urls=[],[],[],set()
     for m in matches:
         if is_social_result(m):
             continue
@@ -6152,17 +6076,10 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
             priority_cards.append(card)
         elif local:
             local_cards.append(card)
-        elif is_known_global_retailer(url):
-            known_global_cards.append(card)
         else:
-            unknown_global_cards.append(card)
+            global_cards.append(card)
 
-    # Keep obscure overseas stores out of the first page.  If strong merchants are
-    # scarce, permit at most two unknown stores rather than filling the result set
-    # with unfamiliar domains.
-    strong_cards=priority_cards+local_cards+known_global_cards
-    unknown_allow=max(0, min(2, 8-len(strong_cards)))
-    all_cards=strong_cards+unknown_global_cards[:unknown_allow]
+    all_cards=priority_cards+local_cards+global_cards
     if not all_cards:
         return False
     card_cap=max(MAX_STORES,8)
@@ -6186,11 +6103,10 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
 
     LAST_SEARCH[from_number]={"product":exact_query}
     print(
-        f"LENS DIRECT v82.5: sent={len(first_batch)} local_shopping={len(local_shop_matches)} "
-        f"local_web={len(local_web_matches)} global_shopping={len(global_shop_matches)} "
-        f"retail_lens={len(retail_lens)} priority={len(priority_cards)} "
-        f"local_other={len(local_cards)} known_global={len(known_global_cards)} "
-        f"unknown_global_kept={unknown_allow} remaining={len(remaining)}"
+        f"LENS DIRECT v82.3: sent={len(first_batch)} shopping={len(local_shop_matches)} "
+        f"local_web={len(local_web_matches)} retail_lens={len(retail_lens)} "
+        f"priority={len(priority_cards)} local_other={len(local_cards)} "
+        f"global_other={len(global_cards)} remaining={len(remaining)}"
     )
     return True
 
@@ -7572,4 +7488,4 @@ def process_location_message(message, bot_id):
     route_pending_after_location(from_number)
 
 @app.get("/")
-async def health(): return {"status":"HYBRID v82.5: EXACT = v81-FINAL | SIMILAR = v81.7 | MANDATORY preferred-store ranking after relevance filter | v81.7 Lens/resilience/pagination retained", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "v26_runs":SEARCH_RUNS, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
+async def health(): return {"status":"HYBRID v82.0: EXACT = v81-FINAL | SIMILAR = v81.7 | MANDATORY preferred-store ranking after relevance filter | v81.7 Lens/resilience/pagination retained", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "v26_runs":SEARCH_RUNS, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
