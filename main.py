@@ -85,6 +85,35 @@ MANDATORY_PRIORITY_STORES = (
 MANDATORY_PRIORITY_INDEX = {domain: i for i, domain in enumerate(MANDATORY_PRIORITY_STORES)}
 MANDATORY_PRIORITY_PROMPT = ", ".join(MANDATORY_PRIORITY_STORES)
 
+# v82.5: well-known global retail domains.  These are not forced above Kuwait
+# merchants; they are used to stop obscure Lens sites filling the first page.
+KNOWN_GLOBAL_RETAIL_HOSTS = (
+    # user's preferred network
+    *MANDATORY_PRIORITY_STORES,
+    # major general / electronics
+    "walmart.com", "bestbuy.com", "target.com", "costco.com", "newegg.com",
+    "bhphotovideo.com", "adorama.com", "apple.com", "samsung.com",
+    # fashion / footwear / sport
+    "nike.com", "adidas.com", "puma.com", "underarmour.com", "newbalance.com",
+    "footlocker.com", "jdsports.com", "sportsdirect.com", "decathlon.com",
+    "intersport.com", "zappos.com", "nordstrom.com", "macys.com",
+    "ssense.com", "net-a-porter.com", "mrporter.com", "levelshoes.com",
+    "farfetch.com", "asos.com", "stockx.com", "goat.com",
+    # beauty / health
+    "ulta.com", "sephora.com", "lookfantastic.com", "cultbeauty.com", "iherb.com",
+    # specialist but established marketplaces / retailers
+    "etsy.com", "wayfair.com", "homedepot.com", "lowes.com", "ikea.com",
+    "tennis-warehouse.com", "tennis-point.com", "babolat.com",
+)
+
+def is_known_global_retailer(url_or_host):
+    raw=str(url_or_host or "").strip().lower()
+    try:
+        host=urllib.parse.urlparse(raw).netloc.lower().replace("www.", "") if "://" in raw else raw.replace("www.", "")
+    except Exception:
+        host=raw.replace("www.", "")
+    return any(host == d or host.endswith("." + d) for d in KNOWN_GLOBAL_RETAIL_HOSTS)
+
 # دالة تختار أفضل متجر عالمي حسب المنتج
 def pick_best_global_stores(query):
     q = query.lower()
@@ -5978,7 +6007,7 @@ def _offer_lens_more(from_number, bot_id, lang, exact_query, remaining):
 
 
 def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
-    """v82.3 direct image shopping.
+    """v82.5 direct image shopping.
 
     Identity comes from Lens, but merchant discovery is a UNION of:
       1) structured Google Shopping in the user's market,
@@ -6024,7 +6053,22 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
     except Exception as e:
         print(f"LENS LOCAL WEB INJECT ERR: {e.__class__.__name__}: {e}")
 
-    # Layer C: raw Lens remains valuable for merchant/page discovery, but only
+    # Layer C: structured GLOBAL Google Shopping.  This increases result count
+    # using real merchant cards instead of filling the page with obscure Lens sites.
+    global_shop_matches=[]
+    try:
+        global_offers=google_shopping_offers(
+            exact_query, lang, allow_global=True,
+            lens_context=lens, english_name=english_name,
+        )
+        global_shop_matches=_shopping_offers_as_lens_matches(global_offers)
+        for _m in global_shop_matches:
+            _m["section"]="global_shopping"
+        print(f"LENS v82.5 GLOBAL SHOPPING INJECT: {len(global_shop_matches)} offers")
+    except Exception as e:
+        print(f"LENS GLOBAL SHOPPING INJECT ERR: {e.__class__.__name__}: {e}")
+
+    # Layer D: raw Lens remains valuable for merchant/page discovery, but only
     # actual retail pages survive. Recover prices from product pages when Lens
     # omitted them.
     retail_lens=filter_shopping_results_strict(raw_matches)
@@ -6033,8 +6077,8 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
     # Deduplicate. Prefer sources that already carry a verified/structured price:
     # Shopping > verified local web > Lens.
     matches=[]; by_sig={}
-    layer_rank={"google_shopping":3,"local_web_verified":2}
-    for m in local_shop_matches + local_web_matches + retail_lens:
+    layer_rank={"google_shopping":4,"local_web_verified":3,"global_shopping":2}
+    for m in local_shop_matches + local_web_matches + global_shop_matches + retail_lens:
         url=(m.get("link") or "").strip()
         if not url:
             continue
@@ -6063,8 +6107,12 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
     if not matches:
         return False
 
-    # Mandatory list = one priority tier. Then all other local merchants, then global.
-    priority_cards, local_cards, global_cards, seen_urls=[],[],[],set()
+    # v82.5 ranking:
+    #   1) user's priority stores (one tier),
+    #   2) any real Kuwait/local merchant,
+    #   3) well-known global retailers,
+    #   4) obscure global merchants only as a tiny last-resort filler.
+    priority_cards, local_cards, known_global_cards, unknown_global_cards, seen_urls=[],[],[],[],set()
     for m in matches:
         if is_social_result(m):
             continue
@@ -6104,10 +6152,17 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
             priority_cards.append(card)
         elif local:
             local_cards.append(card)
+        elif is_known_global_retailer(url):
+            known_global_cards.append(card)
         else:
-            global_cards.append(card)
+            unknown_global_cards.append(card)
 
-    all_cards=priority_cards+local_cards+global_cards
+    # Keep obscure overseas stores out of the first page.  If strong merchants are
+    # scarce, permit at most two unknown stores rather than filling the result set
+    # with unfamiliar domains.
+    strong_cards=priority_cards+local_cards+known_global_cards
+    unknown_allow=max(0, min(2, 8-len(strong_cards)))
+    all_cards=strong_cards+unknown_global_cards[:unknown_allow]
     if not all_cards:
         return False
     card_cap=max(MAX_STORES,8)
@@ -6131,10 +6186,11 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
 
     LAST_SEARCH[from_number]={"product":exact_query}
     print(
-        f"LENS DIRECT v82.3: sent={len(first_batch)} shopping={len(local_shop_matches)} "
-        f"local_web={len(local_web_matches)} retail_lens={len(retail_lens)} "
-        f"priority={len(priority_cards)} local_other={len(local_cards)} "
-        f"global_other={len(global_cards)} remaining={len(remaining)}"
+        f"LENS DIRECT v82.5: sent={len(first_batch)} local_shopping={len(local_shop_matches)} "
+        f"local_web={len(local_web_matches)} global_shopping={len(global_shop_matches)} "
+        f"retail_lens={len(retail_lens)} priority={len(priority_cards)} "
+        f"local_other={len(local_cards)} known_global={len(known_global_cards)} "
+        f"unknown_global_kept={unknown_allow} remaining={len(remaining)}"
     )
     return True
 
@@ -7516,4 +7572,4 @@ def process_location_message(message, bot_id):
     route_pending_after_location(from_number)
 
 @app.get("/")
-async def health(): return {"status":"HYBRID v82.0: EXACT = v81-FINAL | SIMILAR = v81.7 | MANDATORY preferred-store ranking after relevance filter | v81.7 Lens/resilience/pagination retained", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "v26_runs":SEARCH_RUNS, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
+async def health(): return {"status":"HYBRID v82.5: EXACT = v81-FINAL | SIMILAR = v81.7 | MANDATORY preferred-store ranking after relevance filter | v81.7 Lens/resilience/pagination retained", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "v26_runs":SEARCH_RUNS, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
