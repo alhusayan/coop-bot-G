@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v81.8-HYBRID-v81FINAL-exact-v81.7-similar-20260817"
+BUILD_ID = "v81.9-HYBRID-v81FINAL-exact-v81.7-similar-MANDATORY-store-priority-20260817"
 
 
 # ===== v77.9 TOP GLOBAL SITES KUWAIT BUYS FROM =====
@@ -49,6 +49,41 @@ AFFILIATE_CONFIG_TOP = {
     "xcite.com": {"cat": "إلكترونيات كويت", "comm": "2-4% + بونص", "why": "أكبر متجر إلكترونيات بالكويت", "network": "direct", "template": "{url}?ref=coop_bot&subid={phone}", "pid": ""},
     "boutiqaat.com": {"cat": "عطور/جمال", "comm": "10-20%", "why": "أعلى عمولة محلية", "network": "direct", "template": "{url}?ref=coop_bot&subid={phone}", "pid": ""},
 }
+
+# ===== v81.9 MANDATORY STORE PRIORITY =========================================
+# طلب المالك: إذا وُجدت نتيجة مطابقة في أحد هذه المتاجر، تظهر قبل أي متجر غير موجود
+# في القائمة وبنفس ترتيب القائمة أدناه. فلتر مطابقة المنتج يظل يعمل أولاً دائماً،
+# لذلك الأولوية لا تسمح لموديل مختلف/إكسسوار أن يتجاوز نتيجة مطابقة من متجر آخر.
+MANDATORY_PRIORITY_STORES = (
+    "amazon.com",
+    "amazon.ae",
+    "amazon.sa",
+    "amazon.co.uk",
+    "amazon.de",
+    "aliexpress.com",
+    "temu.com",
+    "shein.com",
+    "trendyol.com",
+    "namshi.com",
+    "ounass.com",
+    "6thstreet.com",
+    "farfetch.com",
+    "asos.com",
+    "stockx.com",
+    "sephora.com",
+    "sephora.ae",
+    "iherb.com",
+    "lookfantastic.com",
+    "cultbeauty.com",
+    "ebay.com",
+    "newegg.com",
+    "banggood.com",
+    "noon.com",
+    "xcite.com",
+    "boutiqaat.com",
+)
+MANDATORY_PRIORITY_INDEX = {domain: i for i, domain in enumerate(MANDATORY_PRIORITY_STORES)}
+MANDATORY_PRIORITY_PROMPT = ", ".join(MANDATORY_PRIORITY_STORES)
 
 # دالة تختار أفضل متجر عالمي حسب المنتج
 def pick_best_global_stores(query):
@@ -779,7 +814,7 @@ def has_model_token(a, b):
 def cache_key(query, lang):
     norm = re.sub(r"[^\w\u0600-\u06FF]+", "", normalize_ar(query))
     market = current_market().get("country", DEFAULT_COUNTRY)
-    return hashlib.sha256(f"v81hybrid-final-exact|{market}|{norm}|{lang}".encode()).hexdigest()
+    return hashlib.sha256(f"v81.9-priority-stores|{market}|{norm}|{lang}".encode()).hexdigest()
 
 def cache_ttl_for(query, txt=""):
     q_norm = normalize_ar(query)
@@ -2711,6 +2746,85 @@ def _dedup_offers_by_store(offers, urls):
     return deduped
 
 
+def _mandatory_priority_domain(store_name, urls):
+    """Return the configured priority domain for an offer, preferring its grounded URL."""
+    name = str(store_name or "").strip()
+    url = ""
+    try:
+        url = match_url(name, urls or {}) or ""
+    except Exception:
+        url = ""
+    try:
+        host = _host_of(url).lower() if url else ""
+    except Exception:
+        try:
+            host = urllib.parse.urlparse(url).netloc.lower() if url else ""
+        except Exception:
+            host = ""
+
+    # URL is authoritative, especially for Amazon country domains.
+    if host:
+        for domain in MANDATORY_PRIORITY_STORES:
+            if host == domain or host.endswith("." + domain) or domain in host:
+                return domain
+
+    # Fallback when Gemini gave the store name but the URL map is missing/weak.
+    n = normalize_name(name)
+    aliases = {
+        "amazon.com": ("amazon", "amazoncom"),
+        "amazon.ae": ("amazonae",),
+        "amazon.sa": ("amazonsa",),
+        "amazon.co.uk": ("amazonuk", "amazoncouk"),
+        "amazon.de": ("amazonde",),
+        "aliexpress.com": ("aliexpress",),
+        "temu.com": ("temu",),
+        "shein.com": ("shein",),
+        "trendyol.com": ("trendyol",),
+        "namshi.com": ("namshi", "نمشي"),
+        "ounass.com": ("ounass", "اوناس", "أوناس"),
+        "6thstreet.com": ("6thstreet", "sixthstreet", "6th", "سيكثستريت"),
+        "farfetch.com": ("farfetch",),
+        "asos.com": ("asos",),
+        "stockx.com": ("stockx",),
+        "sephora.com": ("sephora", "سيفورا"),
+        "sephora.ae": ("sephoraae",),
+        "iherb.com": ("iherb", "ايهيرب", "آيهيرب"),
+        "lookfantastic.com": ("lookfantastic",),
+        "cultbeauty.com": ("cultbeauty",),
+        "ebay.com": ("ebay",),
+        "newegg.com": ("newegg",),
+        "banggood.com": ("banggood",),
+        "noon.com": ("noon", "نون"),
+        "xcite.com": ("xcite", "x-cite", "إكسايت", "اكسايت"),
+        "boutiqaat.com": ("boutiqaat", "بوتيكات"),
+    }
+    # Country-specific Amazon / Sephora names first so generic aliases don't steal them.
+    for domain in ("amazon.ae", "amazon.sa", "amazon.co.uk", "amazon.de", "sephora.ae"):
+        if any(normalize_name(a) and normalize_name(a) in n for a in aliases.get(domain, ())):
+            return domain
+    for domain in MANDATORY_PRIORITY_STORES:
+        if any(normalize_name(a) and normalize_name(a) in n for a in aliases.get(domain, ())):
+            return domain
+    return ""
+
+def prioritize_mandatory_store_offers(offers, urls):
+    """Stable mandatory ranking: listed stores first, in owner-defined order."""
+    if not offers:
+        return offers
+    decorated = []
+    hits = []
+    for original_index, offer in enumerate(offers):
+        domain = _mandatory_priority_domain(offer.get("name", ""), urls or {})
+        rank = MANDATORY_PRIORITY_INDEX.get(domain, len(MANDATORY_PRIORITY_STORES) + 1000)
+        decorated.append((rank, original_index, offer))
+        if domain:
+            hits.append((domain, offer.get("name", "")))
+    decorated.sort(key=lambda x: (x[0], x[1]))
+    if hits:
+        print("MANDATORY STORE PRIORITY:", hits)
+    return [x[2] for x in decorated]
+
+
 def send_product_result(from_number, txt, urls, bot_id, lang, query, best_only=False, max_stores=None, relevance_mode="exact"):
     if not txt:
         send_whatsapp_text(from_number, T(lang, "not_found"), bot_id)
@@ -2720,7 +2834,8 @@ def send_product_result(from_number, txt, urls, bot_id, lang, query, best_only=F
         send_whatsapp_text(from_number, txt, bot_id)
         return "service"
     store_limit = MAX_STORES if max_stores is None else max(1, int(max_stores))
-    offers = extract_store_offers(txt, limit=store_limit)
+    candidate_limit = max(store_limit, min(60, store_limit * 5))
+    offers = extract_store_offers(txt, limit=candidate_limit)
     if not offers:
         send_whatsapp_text(from_number, txt, bot_id)
         return "info"
@@ -2734,6 +2849,9 @@ def send_product_result(from_number, txt, urls, bot_id, lang, query, best_only=F
         print("RELEVANCE: all offers dropped -> treat as not found")
         send_whatsapp_text(from_number, T(lang, "not_found"), bot_id)
         return "none"
+    # v81.9: mandatory affiliate/store priority is applied ONLY after relevance filtering.
+    # This guarantees exact-match quality wins first; then preferred stores win presentation order.
+    offers = prioritize_mandatory_store_offers(offers, urls)
     title = product_title(txt, query)
     if title:
         send_whatsapp_text(from_number, title, bot_id)
@@ -2808,7 +2926,7 @@ def send_product_result(from_number, txt, urls, bot_id, lang, query, best_only=F
         # v74.8: عندنا أسعار حقيقية بدون أي روابط صالحة: نعرض الأسعار نصاً —
         # ممنوع نقول «ما لقيت» والنتيجة موجودة بأيدينا.
         # v74.9: مرتبة من الأرخص إلى الأغلى و✅ للأرخص دائماً.
-        ranked = sorted(offers[:store_limit], key=lambda o: _extract_numeric_price(o.get("line", "")) or 10**9)
+        ranked = offers[:store_limit]  # already filtered + mandatory-priority ranked above
         lines_out = []
         for i, o in enumerate(ranked):
             body_line = re.sub(r"^(?:✅|🏆|•)\s*", "", o.get("line", "")).strip()
@@ -4683,8 +4801,9 @@ def run_global_search(phone, item):
             market_name = current_market().get("country_name", "Kuwait")
             global_prompt = (
                 f"ابحث عالمياً عن {query} في متاجر خارج {market_name} فقط. "
-                f"استبعد أي متجر داخل {market_name}. ابحث في Amazon.com, Amazon.ae, Amazon.sa, Noon, eBay, AliExpress, Temu, Shein, Walmart, BestBuy, Namshi, Ounass وغيرها من المتاجر العالمية الموثوقة. "
-                f"اعرض حتى 5 نتائج مختلفة بسعر رقمي واضح ورابط صفحة منتج مباشر. اذكر السعر والعملة. رتب الأرخص أولاً. {LANG_INSTR[lang]}"
+                f"استبعد أي متجر داخل {market_name}. أولوية البحث والعرض إلزامياً بهذا الترتيب: {MANDATORY_PRIORITY_PROMPT}. "
+                "إذا كان نفس المنتج المطابق موجوداً في متجر مفضل، قدّمه على أي متجر غير مفضل. لا تستخدم موديل مختلف/إكسسوار لإجبار الأولوية. "
+                f"اعرض حتى 5 نتائج مختلفة بسعر رقمي واضح ورابط صفحة منتج مباشر. اذكر السعر والعملة. {LANG_INSTR[lang]}"
             )
             txt, urls = legacy_v26_best_of_search([{"text": global_prompt}], max_results=MAX_STORES)
             print(f"GLOBAL TEXT DIRECT V26: txt={bool(txt)} urls={len(urls) if urls else 0}")
@@ -6607,7 +6726,9 @@ def legacy_text_product_search(product, lang):
     for primary,secondary in attempts:
         extra=(f" وابحث أيضاً بالاسم الآخر لنفس المنتج: {secondary}." if secondary else "")
         prompt=(f"ابحث عن {primary} في {market_name}. قارن أسعار نفس المنتج بالضبط في المتاجر المحلية الحالية."
-                f"{extra} أظهر المتاجر التي لديها سعر حالي ومصدر Google حقيقي. {LANG_INSTR[lang]}")
+                f"{extra} أولوية إلزامية إذا كانت النتيجة المطابقة موجودة في أي متجر من هذه القائمة: {MANDATORY_PRIORITY_PROMPT}. "
+                "ابدأ بالبحث فيها أولاً، ثم أكمل بباقي المتاجر. لا تُدخل موديل مختلف أو إكسسوار فقط لفرض متجر مفضل. "
+                f"أظهر المتاجر التي لديها سعر حالي ومصدر Google حقيقي. {LANG_INSTR[lang]}")
         txt,urls=legacy_v26_best_of_search([{"text":prompt}],max_results=4)
         if txt and urls and extract_store_offers(txt):
             local_txt, local_urls = txt, urls
@@ -6619,7 +6740,9 @@ def legacy_text_product_search(product, lang):
         en_q = english_search_name(product) or product
         global_prompt = (
             f"ابحث عالمياً عن {en_q} في متاجر خارج {market_name} فقط. "
-            f"Amazon.com, Amazon.ae, Amazon.sa, Noon, AliExpress, Temu, Shein, Trendyol, eBay, Namshi, Farfetch. "
+            f"أولوية البحث والعرض إلزامياً بهذا الترتيب: {MANDATORY_PRIORITY_PROMPT}. "
+            "إذا وجدت نفس المنتج المطابق في متجر من القائمة، يجب أن يسبق أي متجر غير موجود فيها. "
+            "لا تعرض موديل مختلف أو إكسسوار فقط لإجبار متجر مفضل؛ المطابقة التامة شرط أول. "
             f"اعرض 4 نتائج مختلفة بسعر رقمي واضح ورابط صفحة منتج مباشر. {LANG_INSTR[lang]}"
         )
         txt_g, urls_g = legacy_v26_best_of_search([{"text": global_prompt}], max_results=4)
@@ -7088,4 +7211,4 @@ def process_location_message(message, bot_id):
     route_pending_after_location(from_number)
 
 @app.get("/")
-async def health(): return {"status":"HYBRID: TEXT EXACT MATCH = v81-FINAL (4 local + 4 global, Final tournament/output) | SIMILAR ALTERNATIVES = v81.7 (offer union across tournament runs) | v81.7 Lens/resilience/pagination features retained", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "v26_runs":SEARCH_RUNS, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
+async def health(): return {"status":"HYBRID v81.9: EXACT = v81-FINAL | SIMILAR = v81.7 | MANDATORY preferred-store ranking after relevance filter | v81.7 Lens/resilience/pagination retained", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "v26_runs":SEARCH_RUNS, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
