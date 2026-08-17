@@ -6,10 +6,10 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v73-fast-lens-local-us-cn-20260817"
+BUILD_ID = "v75-flags-prices-cn-20260817"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
-print("IMAGE/TEXT -> LOCAL MARKET, THEN US, THEN CHINA ONLY")
+print("IMAGE/TEXT -> FLAGS + CLEAR LOCAL PRICES + LOCAL/US/CHINA")
 print("=" * 70)
 
 
@@ -93,6 +93,9 @@ ENABLE_GOOGLE_LENS = env_bool("ENABLE_GOOGLE_LENS", True)
 # لإرجاع المسار الذكي الكامل. عند عدم وجود نتائج، البوت يرجع تلقائياً للمسار الكامل.
 LENS_DIRECT_MODE = env_bool("LENS_DIRECT_MODE", True)
 LENS_DIRECT_MAX_LINES = max(3, int(os.environ.get("LENS_DIRECT_MAX_LINES", "8")))
+# v75: رسائل CTA مختصرة: نتيجتان كحد أقصى من كل سوق، مع حد إجمالي 6.
+LENS_DIRECT_PER_MARKET = max(1, int(os.environ.get("LENS_DIRECT_PER_MARKET", "2")))
+LENS_DIRECT_MAX_CTA = max(3, int(os.environ.get("LENS_DIRECT_MAX_CTA", "6")))
 LENS_PRIMARY_MODE = env_bool("LENS_PRIMARY_MODE", True)
 LENS_PRIMARY_EXCEPT_TEXT_HEAVY = env_bool("LENS_PRIMARY_EXCEPT_TEXT_HEAVY", True)
 # قوة Lens الحقيقية تأتي من تعدد التمريرات: products ثم all (visual+exact) ثم بحث واسع بلا قيد دولة.
@@ -1133,6 +1136,9 @@ def _serpapi_lens_request(public_url, lens_type, country, auto_crop, query_hint)
             return []
         items, seen = [], set()
         _collect_lens_items(data, items, seen)
+        # v75: نحفظ البلد الذي جاءت منه تمريرة Lens للمراقبة/التشخيص.
+        for item in items:
+            item["_lens_country"] = (country or "").lower()
         print(f"GOOGLE LENS PASS type={lens_type or 'all'} country={country or '-'} auto_crop={auto_crop} -> {len(items)} items")
         return items
     except Exception as e:
@@ -1187,6 +1193,14 @@ def google_lens_lookup(image_b64, mime_type, lang="ar", query_hint="", light=Fal
                 (lens_type, country, auto_crop)
             for lens_type, country, auto_crop in passes
         }
+        # v75: تمريرة صينية موجهة للمتاجر الصينية المعروفة. country=cn وحده قد
+        # يعيد مواقع عالمية عامة؛ هذه التمريرة تزيد فرصة AliExpress/Alibaba/Temu/1688/Taobao.
+        cn_hint = (query_hint or "").strip()
+        cn_hint = (cn_hint + " site:aliexpress.com OR site:temu.com OR site:alibaba.com OR site:1688.com OR site:taobao.com").strip()
+        cn_future = LENS_HTTP_POOL.submit(
+            _serpapi_lens_request, public_url, "all", "cn", True, cn_hint
+        )
+        future_map[cn_future] = ("all-cn-stores", "cn", True)
         done, not_done = wait(list(future_map), timeout=LENS_TOTAL_TIMEOUT_SECONDS)
         for fut in done:
             lens_type, country, auto_crop = future_map[fut]
@@ -2046,18 +2060,26 @@ def _result_hay_host(item):
         host = ""
     return hay, host
 
+def _host_matches_any(host, domains):
+    host = (host or "").lower().strip(".")
+    for domain in domains:
+        d = str(domain or "").lower().strip(".")
+        if host == d or host.endswith("." + d):
+            return True
+    return False
+
 def is_us_market_result(item):
     hay, host = _result_hay_host(item)
-    if host.endswith(".us") or any(h in host for h in US_STORE_HINTS):
+    if host.endswith(".us") or _host_matches_any(host, US_STORE_HINTS):
         return True
     # China hints win before USD because Chinese marketplaces often display prices in USD.
-    if any(h in host for h in CHINA_STORE_HINTS):
+    if _host_matches_any(host, CHINA_STORE_HINTS):
         return False
     return any(marker in hay for marker in COUNTRY_CURRENCY_MARKERS.get("us", ()))
 
 def is_china_market_result(item):
     hay, host = _result_hay_host(item)
-    if host.endswith(".cn") or any(h in host for h in CHINA_STORE_HINTS):
+    if host.endswith(".cn") or _host_matches_any(host, CHINA_STORE_HINTS):
         return True
     return bool(re.search(r"(?:\bCNY\b|\bRMB\b|人民币|中国|china)", hay, flags=re.I))
 
@@ -3607,77 +3629,116 @@ def choose_image_identity(image_b64, mime_type, lens, vision_name):
         return final_name or f"{vision_name} | {lens_title}", lens, "MERGE"
     return final_name or vision_name, None, "VISION"
 
-def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
-    """v74: نتائج Lens تُرسل CTA فقط، بترتيب محلي -> أمريكا -> الصين.
+def country_flag_emoji(cc):
+    """ISO alpha-2 -> emoji flag. Falls back to globe for unknown codes."""
+    cc = str(cc or "").strip().upper()
+    if len(cc) == 2 and cc.isalpha():
+        try:
+            return "".join(chr(127397 + ord(ch)) for ch in cc)
+        except Exception:
+            pass
+    return "🌐"
 
-    لا نرسل رسالة الملخص الطويلة أولاً حتى لا تتكرر النتائج. كل نتيجة ظاهرة للمستخدم
-    هي نفسها CTA قابلة للضغط، ونسمح حتى LENS_DIRECT_MAX_LINES بدلاً من MAX_STORES
-    حتى لا تستهلك النتائج المحلية كل أزرار CTA وتمنع أمريكا/الصين من الظهور.
+def _lens_has_price(m):
+    return bool(str(m.get("price") or "").strip() or m.get("price_value") not in (None, ""))
+
+def _lens_price_text_local(m, market_rank, lang):
+    """Return a clear local-currency price, plus original foreign price when known."""
+    raw_price = str(m.get("price") or "").strip()
+    price_value = m.get("price_value")
+    currency = (m.get("currency") or "").upper().strip()
+    if not raw_price and price_value in (None, ""):
+        return ""
+    if market_rank == 0:
+        local_cur = (current_market().get("currency") or "").upper().strip()
+        src_local = currency or detect_currency_code(raw_price, local_cur)
+        if src_local and local_cur and src_local != local_cur:
+            shown, _ = display_global_price(price_value, raw_price, src_local, lang)
+            return shown
+        return format_lens_price(raw_price, price_value, lang, local_cur or currency or None)
+
+    # لا نفترض CNY لمجرد أن الموقع صيني: AliExpress/Temu كثيراً ما يعرضان USD.
+    src = currency or detect_currency_code(raw_price, "")
+    if not src:
+        src = "USD" if market_rank == 1 else "CNY"
+    shown, _ = display_global_price(price_value, raw_price, src, lang)
+    return shown
+
+def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
+    """v75: CTA-only، مختصر، بأعلام الدول، مع سعر محلي واضح.
+
+    التوزيع محجوز حسب السوق حتى لا تستهلك النتائج المحلية القائمة كلها:
+    محلي -> أمريكا -> الصين، بحد افتراضي نتيجتين لكل سوق و6 إجمالاً.
     """
     raw_matches = [m for m in (lens.get("matches") or []) if (m.get("title") or "").strip()]
     matches = [m for m in raw_matches if result_market_rank(m) != 99]
-    matches.sort(key=lambda m: (
-        result_market_rank(m),
-        0 if m.get("exact") else 1,
-        0 if m.get("section") == "visual_matches" else 1,
-        int(m.get("position") or 999),
-    ))
     if not matches:
         return False
 
-    local_name = current_market().get("country_name") or "Local"
-    labels_ar = {0: local_name, 1: "أمريكا", 2: "الصين"}
-    labels_en = {0: local_name, 1: "USA", 2: "China"}
-    labels = labels_ar if lang == "ar" else labels_en
+    # داخل كل سوق: النتائج ذات السعر أولاً، ثم exact/visual، ثم ترتيب Google Lens.
+    buckets = {0: [], 1: [], 2: []}
+    for m in matches:
+        rank = result_market_rank(m)
+        if rank in buckets:
+            buckets[rank].append(m)
+    for rank in buckets:
+        buckets[rank].sort(key=lambda m: (
+            0 if _lens_has_price(m) else 1,
+            0 if m.get("exact") else 1,
+            0 if m.get("section") == "visual_matches" else 1,
+            int(m.get("position") or 999),
+        ))
 
-    # CTA-only: نفس النتائج المرتبة التي كان الملخص يعرضها، حتى سقف Lens نفسه.
-    # لا نستخدم MAX_STORES هنا لأنه كان يجعل أول 5 نتائج محلية تستهلك كل الأزرار.
-    cta_limit = max(3, LENS_DIRECT_MAX_LINES)
+    # نأخذ حصة مستقلة لكل دولة: وجود 10 نتائج كويتية لا يلغي أمريكا أو الصين.
     selected = []
     seen_urls = set()
-
-    for m in matches:
-        url = (m.get("link") or "").strip()
-        try:
-            host = urllib.parse.urlparse(url).netloc.lower()
-        except Exception:
-            host = ""
-        if not (url.startswith("http") and host and "google." not in host):
-            continue
-        if url in seen_urls:
-            continue
-        selected.append(m)
-        seen_urls.add(url)
-        if len(selected) >= cta_limit:
+    for rank in (0, 1, 2):
+        taken = 0
+        for m in buckets[rank]:
+            url = (m.get("link") or "").strip()
+            try:
+                host = urllib.parse.urlparse(url).netloc.lower()
+            except Exception:
+                host = ""
+            if not (url.startswith("http") and host and "google." not in host):
+                continue
+            if url in seen_urls:
+                continue
+            selected.append(m)
+            seen_urls.add(url)
+            taken += 1
+            if taken >= LENS_DIRECT_PER_MARKET or len(selected) >= LENS_DIRECT_MAX_CTA:
+                break
+        if len(selected) >= LENS_DIRECT_MAX_CTA:
             break
 
     if not selected:
         return False
 
+    local_cc = (current_market().get("country") or DEFAULT_COUNTRY).lower()
+    market_cc = {0: local_cc, 1: "us", 2: "cn"}
+    no_price = "السعر غير ظاهر" if lang == "ar" else "Price not shown"
+
     sent = 0
+    market_counts = {0: 0, 1: 0, 2: 0}
     for m in selected:
         market_rank = result_market_rank(m)
-        market_label = labels.get(market_rank, "")
-        title = (m.get("title") or "").strip()[:180]
+        market_counts[market_rank] += 1
+        flag = country_flag_emoji(market_cc.get(market_rank, ""))
         source = (m.get("source") or "").strip()
-        raw_price = str(m.get("price") or "").strip()
-        price_value = m.get("price_value")
-        currency = (m.get("currency") or "").strip()
-        price_txt = ""
+        title = re.sub(r"\s+", " ", (m.get("title") or "").strip())
+        # أقصر عنوان ممكن داخل واتساب، مع بقاء اسم المنتج مفهوماً.
+        if len(title) > 105:
+            title = title[:102].rstrip(" ,-|—") + "…"
+        price_txt = _lens_price_text_local(m, market_rank, lang)
 
-        if raw_price or price_value not in (None, ""):
-            if market_rank == 0:
-                price_txt = format_lens_price(raw_price, price_value, lang, currency or None)
-            else:
-                src_cur = currency.upper().strip() if currency else ("USD" if is_us_market_result(m) else "CNY")
-                price_txt, _ = display_global_price(price_value, raw_price, src_cur, lang)
-
-        # السوق داخل كل CTA حتى يظل التقسيم واضحاً بدون رسالة الملخص.
-        body = f"📍 {market_label}\n{title}"
+        # شكل مختصر وواضح: العلم + المتجر، المنتج، السعر.
+        head = f"{flag} {source}" if source else flag
+        body = f"{head}\n{title}"
         if price_txt:
-            body += f" — {price_txt}"
-        if source:
-            body += f"\n({source})"
+            body += f"\n💰 {price_txt}"
+        else:
+            body += f"\n💰 {no_price}"
 
         url = (m.get("link") or "").strip()
         button_source = source or ("المتجر" if lang == "ar" else "Store")
@@ -3686,7 +3747,9 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
 
     chosen_title = ((lens.get("chosen") or {}).get("title") or selected[0]["title"]).strip()
     LAST_SEARCH[from_number] = {"product": (caption or chosen_title)}
-    print(f"LENS DIRECT SENT v74 CTA-ONLY: {sent} buttons; order=local->us->cn")
+    print(f"LENS DIRECT SENT v75: {sent} CTA; buckets={market_counts}; order=local->us->cn")
+    if market_counts[2] == 0:
+        print("V75 WARNING: no Chinese-store Lens result survived filters")
     return sent > 0
 
 def process_single_image(message,bot_id,lang="ar"):
@@ -4073,4 +4136,4 @@ def process_location_message(message, bot_id):
     route_pending_after_location(from_number)
 
 @app.get("/")
-async def health(): return {"status":"v73 FAST-LENS LOCAL-US-CHINA", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
+async def health(): return {"status":"v75 FLAGS-PRICES LOCAL-US-CHINA", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
