@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v81.9-HYBRID-v81FINAL-exact-v81.7-similar-MANDATORY-store-priority-20260817"
+BUILD_ID = "v82.0-HYBRID-priority-tier-stable-cta-order-20260817"
 
 
 # ===== v77.9 TOP GLOBAL SITES KUWAIT BUYS FROM =====
@@ -50,7 +50,7 @@ AFFILIATE_CONFIG_TOP = {
     "boutiqaat.com": {"cat": "عطور/جمال", "comm": "10-20%", "why": "أعلى عمولة محلية", "network": "direct", "template": "{url}?ref=coop_bot&subid={phone}", "pid": ""},
 }
 
-# ===== v81.9 MANDATORY STORE PRIORITY =========================================
+# ===== v82.0 MANDATORY STORE PRIORITY =========================================
 # طلب المالك: إذا وُجدت نتيجة مطابقة في أحد هذه المتاجر، تظهر قبل أي متجر غير موجود
 # في القائمة وبنفس ترتيب القائمة أدناه. فلتر مطابقة المنتج يظل يعمل أولاً دائماً،
 # لذلك الأولوية لا تسمح لموديل مختلف/إكسسوار أن يتجاوز نتيجة مطابقة من متجر آخر.
@@ -814,7 +814,7 @@ def has_model_token(a, b):
 def cache_key(query, lang):
     norm = re.sub(r"[^\w\u0600-\u06FF]+", "", normalize_ar(query))
     market = current_market().get("country", DEFAULT_COUNTRY)
-    return hashlib.sha256(f"v81.9-priority-stores|{market}|{norm}|{lang}".encode()).hexdigest()
+    return hashlib.sha256(f"v82.0-priority-stores|{market}|{norm}|{lang}".encode()).hexdigest()
 
 def cache_ttl_for(query, txt=""):
     q_norm = normalize_ar(query)
@@ -2808,21 +2808,25 @@ def _mandatory_priority_domain(store_name, urls):
     return ""
 
 def prioritize_mandatory_store_offers(offers, urls):
-    """Stable mandatory ranking: listed stores first, in owner-defined order."""
+    """v82: all configured stores are ONE priority tier.
+
+    Any preferred store must appear before any non-preferred store, but we preserve
+    the search engine's original order inside each tier. Amazon has no special rank.
+    """
     if not offers:
         return offers
-    decorated = []
+    preferred, other = [], []
     hits = []
-    for original_index, offer in enumerate(offers):
+    for offer in offers:
         domain = _mandatory_priority_domain(offer.get("name", ""), urls or {})
-        rank = MANDATORY_PRIORITY_INDEX.get(domain, len(MANDATORY_PRIORITY_STORES) + 1000)
-        decorated.append((rank, original_index, offer))
         if domain:
+            preferred.append(offer)
             hits.append((domain, offer.get("name", "")))
-    decorated.sort(key=lambda x: (x[0], x[1]))
+        else:
+            other.append(offer)
     if hits:
-        print("MANDATORY STORE PRIORITY:", hits)
-    return [x[2] for x in decorated]
+        print("PREFERRED STORE TIER:", hits)
+    return preferred + other
 
 
 def send_product_result(from_number, txt, urls, bot_id, lang, query, best_only=False, max_stores=None, relevance_mode="exact"):
@@ -2849,7 +2853,7 @@ def send_product_result(from_number, txt, urls, bot_id, lang, query, best_only=F
         print("RELEVANCE: all offers dropped -> treat as not found")
         send_whatsapp_text(from_number, T(lang, "not_found"), bot_id)
         return "none"
-    # v81.9: mandatory affiliate/store priority is applied ONLY after relevance filtering.
+    # v82.0: mandatory affiliate/store priority is applied ONLY after relevance filtering.
     # This guarantees exact-match quality wins first; then preferred stores win presentation order.
     offers = prioritize_mandatory_store_offers(offers, urls)
     title = product_title(txt, query)
@@ -2889,36 +2893,29 @@ def send_product_result(from_number, txt, urls, bot_id, lang, query, best_only=F
             sent += 1
             continue
 
-        # Normal exact-product searches keep the legacy safe fallback behavior.
+        # v82: exact results MUST preserve the already-ranked offer order.
+        # Previously, direct URLs were sent immediately while fallback URLs were deferred
+        # until the end; that allowed non-priority stores to jump ahead of preferred stores.
         if not is_direct_store_url(url):
             try:
                 host = urllib.parse.urlparse(url or "").netloc.lower()
             except Exception:
                 host = ""
+            fallback_url = ""
             if url and url.startswith("http") and host and "google." not in host and "bing." not in host:
-                fallback_ctas.append((o, url))
+                fallback_url = url
             else:
-                hp = resolve_store_homepage(o["name"])
-                if hp:
-                    fallback_ctas.append((o, hp))
-            print(f"SKIP NON-DIRECT CTA: {o['name']} -> {url}")
+                fallback_url = resolve_store_homepage(o["name"]) or ""
+            if not fallback_url or not url_is_alive(fallback_url):
+                print(f"FALLBACK CTA DEAD — DROPPED: {o['name']} -> {fallback_url or url}")
+                continue
+            print(f"FALLBACK STORE CTA IN ORDER: {o['name']} -> {fallback_url}")
+            note = "\n🔎 الزر يفتح المتجر — ادور المنتج داخله" if lang == "ar" else "\n🔎 Button opens the store — search the product inside"
+            send_whatsapp_cta(from_number, (o["line"] + note)[:1024], fallback_url, bot_id, f"🛒 {o['name'][:18]}")
+            sent += 1
             continue
         send_whatsapp_cta(from_number, o["line"], url, bot_id, f"🛒 {o['name'][:18]}")
         sent += 1
-    if relevance_mode != "similar" and fallback_ctas and sent < store_limit:
-        # v76.3: لا نخفي CTAs الاحتياطية لمجرد أن نتيجة واحدة كان لها رابط مباشر.
-        # نرسلها بعد المباشرة حتى يصل كل بديل ممكن إلى زر، مع توضيح إذا كان الزر يفتح المتجر.
-        remaining = max(0, store_limit - sent)
-        checked = list(RESOLVER.map(lambda ou: (ou[0], ou[1], url_is_alive(ou[1])), fallback_ctas[:remaining]))
-        for o, url, alive in checked:
-            if not alive:
-                print(f"FALLBACK CTA DEAD — DROPPED: {o['name']} -> {url}")
-                continue
-            print(f"FALLBACK STORE CTA: {o['name']} -> {url}")
-            # نوضح أن الزر يفتح المتجر (مو صفحة المنتج) حتى ما يتفاجأ المستخدم بصفحة عامة.
-            note = "\n🔎 الزر يفتح المتجر — ادور المنتج داخله" if lang == "ar" else "\n🔎 Button opens the store — search the product inside"
-            send_whatsapp_cta(from_number, (o["line"] + note)[:1024], url, bot_id, f"🛒 {o['name'][:18]}")
-            sent += 1
     if sent == 0:
         if relevance_mode == "similar":
             print("SIMILAR: zero verified direct product CTAs -> treat as none")
@@ -7211,4 +7208,4 @@ def process_location_message(message, bot_id):
     route_pending_after_location(from_number)
 
 @app.get("/")
-async def health(): return {"status":"HYBRID v81.9: EXACT = v81-FINAL | SIMILAR = v81.7 | MANDATORY preferred-store ranking after relevance filter | v81.7 Lens/resilience/pagination retained", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "v26_runs":SEARCH_RUNS, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
+async def health(): return {"status":"HYBRID v82.0: EXACT = v81-FINAL | SIMILAR = v81.7 | MANDATORY preferred-store ranking after relevance filter | v81.7 Lens/resilience/pagination retained", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "v26_runs":SEARCH_RUNS, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
