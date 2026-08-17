@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v81-FINAL-currency-convert-high-commission-targeting-20260814"
+BUILD_ID = "v81.7-more-text-results-pagination-20260816"
 
 
 # ===== v77.9 TOP GLOBAL SITES KUWAIT BUYS FROM =====
@@ -192,6 +192,10 @@ PENDING_GLOBAL_SEARCH = {}
 PENDING_LENS_FOREIGN = {}
 # v73: نتائج برامج التواصل (انستجرام/تيك توك/سناب...) تُحفظ هنا وتُعرض بعد سؤال منفصل.
 PENDING_LENS_SOCIAL = {}
+# v81.5: بقية بطاقات اللينز لصفحات «عرض المزيد».
+PENDING_LENS_MORE = {}
+# v81.5: بقية بطاقات اللينز غير المعروضة — زر «عرض المزيد» يسحب منها دفعة دفعة.
+PENDING_LENS_MORE = {}
 SOCIAL_HOSTS = (
     "instagram.com", "tiktok.com", "snapchat.com", "youtube.com", "youtu.be",
     "pinterest.", "facebook.com", "fb.com", "fb.watch", "x.com", "twitter.com",
@@ -243,6 +247,11 @@ CACHE_DB_PATH = os.environ.get("CACHE_DB_PATH", "/tmp/coop_search_cache.sqlite3"
 CACHE_DB_LOCK = threading.Lock()
 # v68: قائمة أطول — 5 نتائج افتراضياً (تُضبط من MAX_STORES في Environment Variables).
 MAX_STORES = int(os.environ.get("MAX_STORES", "5"))
+# v81.7: بحث نصي أوفر — 6 محلي + 6 عالمي = 12 مرشحاً؛ أول 8 تظهر والباقي خلف «عرض المزيد».
+TEXT_LOCAL_RESULTS = max(4, int(os.environ.get("TEXT_LOCAL_RESULTS", "6")))
+TEXT_GLOBAL_RESULTS = max(4, int(os.environ.get("TEXT_GLOBAL_RESULTS", "6")))
+TEXT_TOTAL_RESULTS = TEXT_LOCAL_RESULTS + TEXT_GLOBAL_RESULTS
+TEXT_FIRST_PAGE = max(6, int(os.environ.get("TEXT_FIRST_PAGE", "8")))
 # v76: البدائل المشابهة لها سقف مستقل وأكبر من نتائج المنتج العادية.
 SIMILAR_MAX_STORES = max(MAX_STORES, int(os.environ.get("SIMILAR_MAX_STORES", "10")))
 SIMILAR_LENS_TITLE_LIMIT = max(8, int(os.environ.get("SIMILAR_LENS_TITLE_LIMIT", "24")))
@@ -289,6 +298,14 @@ LENS_RESULT_LIMIT = max(12, int(os.environ.get("LENS_RESULT_LIMIT", "40")))
 LENS_IMAGE_TTL = max(120, int(os.environ.get("LENS_IMAGE_TTL_SECONDS", "600")))
 LENS_IMAGE_STORE = {}
 LENS_IMAGE_LOCK = threading.Lock()
+# v81.2: صمود اللينز — تطبيق Lens يلقى المنتج وبوتنا يقول «ما فيه»؟ هذا يمنعه:
+# تمريرات بالتوازي + إعادة محاولة عند الصفر + محرك Vision الرسمي احتياط مستقل.
+LENS_HTTP_TIMEOUT = max(30, int(os.environ.get("LENS_HTTP_TIMEOUT", "75")))
+LENS_PASS_POOL = ThreadPoolExecutor(max_workers=3)
+LENS_RETRY_ON_EMPTY = env_bool("LENS_RETRY_ON_EMPTY", True)
+# auto = SerpApi أولاً و Vision احتياط | vision = الرسمي فقط | serpapi = القديم فقط
+IMAGE_ID_ENGINE = os.environ.get("IMAGE_ID_ENGINE", "auto").strip().lower()
+GOOGLE_VISION_API_KEY = (os.environ.get("GOOGLE_VISION_API_KEY", "") or os.environ.get("GEMINI_API_KEY", "")).strip()
 
 # ---- Google Shopping عبر SerpApi (v69) ---------------------------------------
 # طبقة أسعار منظمة: google_shopping يجيب بطاقات المنتج مع immersive_product_page_token،
@@ -1021,6 +1038,10 @@ MSG = {
         "similar_searching": "🔄 أدور لك على أفضل البدائل المشابهة المتوفرة عندك...",
         "similar_none": "ما لقيت بدائل مشابهة بسعر مؤكد حالياً 😅 جرب صياغة ثانية.",
         "declined_ok": "تمام 🙏 إذا احتجت شي ثاني أنا حاضر!",
+        "more_results_body": "عندي {n} نتائج إضافية 👇",
+        "more_results_btn": "➕ عرض المزيد ({n})",
+        "more_results_done": "هذي كل النتائج ✅",
+        "more_results_expired": "النتائج القديمة قدمت 😅 أعد البحث من جديد.",
         "welcome_reply": "هلا والله! 🌟\nدز صورة المنتج أو اكتب اسمه، وأدور لك أفضل الأسعار والمتاجر القريبة منك 🛒",
         "thanks_reply": "العفو! 🌹 في الخدمة دايماً.. أي منتج ثاني تبيه أنا حاضر!",
         "lens_header": "🔍 هذا اللي طلع من Google عن صورتك:",
@@ -1043,6 +1064,10 @@ MSG = {
         "lf_show": "اعرضها 🌍",
         "lf_skip": "لا شكراً 🙏",
         "lens_none": "Google ما رجّع نتائج للصورة 😅 أكمل البحث بطريقتي...",
+        "more_results_body": "عندي {n} نتائج إضافية لنفس الصورة 👇",
+        "more_results_btn": "➕ عرض المزيد ({n})",
+        "more_results_done": "هذي كل النتائج ✅",
+        "more_results_expired": "النتائج قدمت 😅 دز الصورة من جديد وأجيبها لك على طول.",
         "chat_redirect": "أنا حاضر ومعك! 🙌\nدز اسم المنتج أو صورته وأدور لك أفضل الأسعار، أو اكتب طلب الخدمة اللي تحتاجها 🛒",
     },
     "en": {
@@ -1085,6 +1110,10 @@ MSG = {
         "similar_searching": "🔄 Looking for the best similar alternatives available near you...",
         "similar_none": "I couldn't find similar alternatives with a verified price right now 😅 try another phrasing.",
         "declined_ok": "No problem 🙏 I'm here whenever you need me!",
+        "more_results_body": "I have {n} more results 👇",
+        "more_results_btn": "➕ Show more ({n})",
+        "more_results_done": "That's all the results ✅",
+        "more_results_expired": "Those results expired 😅 search again.",
         "welcome_reply": "Hello! 🌟\nSend a product photo or type its name, and I'll find you the best prices and nearby stores 🛒",
         "thanks_reply": "You're welcome! 🌹 Anytime.. just send me the next product!",
         "lens_header": "🔍 Here's what Google returned for your photo:",
@@ -1107,6 +1136,10 @@ MSG = {
         "lf_show": "Show them 🌍",
         "lf_skip": "No thanks 🙏",
         "lens_none": "Google returned no results for the photo 😅 continuing with my own search...",
+        "more_results_body": "I have {n} more results for the same photo 👇",
+        "more_results_btn": "➕ Show more ({n})",
+        "more_results_done": "That's all the results ✅",
+        "more_results_expired": "Those results expired 😅 resend the photo and I'll fetch them right away.",
         "chat_redirect": "I'm here with you! 🙌\nSend a product name or photo and I'll find the best prices, or type the service you need 🛒",
     },
 }
@@ -1394,7 +1427,7 @@ def _serpapi_lens_request(public_url, lens_type, country, auto_crop, query_hint)
     if query_hint and (lens_type in (None, "", "all", "visual_matches", "products")):
         params["q"] = query_hint[:120]
     try:
-        r = requests.get("https://serpapi.com/search.json", params=params, timeout=60)
+        r = requests.get("https://serpapi.com/search.json", params=params, timeout=LENS_HTTP_TIMEOUT)
         if r.status_code >= 400:
             print(f"GOOGLE LENS HTTP {r.status_code} type={lens_type or 'all'} country={country or '-'}: {r.text[:300]}")
             return []
@@ -1410,6 +1443,95 @@ def _serpapi_lens_request(public_url, lens_type, country, auto_crop, query_hint)
         print(f"GOOGLE LENS PASS EXCEPTION type={lens_type or 'all'}: {e}")
         return []
 
+
+def _self_url_reachable(public_url):
+    """v81.2: نتأكد أن رابط صورتنا العام يفتح فعلاً قبل حرق تمريرات SerpApi عليه.
+
+    فشل الوصول (سيرفر بارد/رابط خاطئ) كان يسبب «ما فيه نتائج» رغم أن Lens يعرف المنتج."""
+    try:
+        r = requests.get(public_url, headers=HEADERS, timeout=8, stream=True)
+        ok = r.status_code == 200
+        r.close()
+        if not ok:
+            print(f"LENS SELF-URL HTTP {r.status_code}: {public_url[:80]}")
+        return ok
+    except Exception as e:
+        print(f"LENS SELF-URL UNREACHABLE: {e.__class__.__name__}")
+        return False
+
+
+def google_vision_web_detect(image_b64, mime_type):
+    """v81.2: محرك التعرف الرسمي (Google Cloud Vision WEB_DETECTION) — احتياط مستقل.
+
+    يرسل الصورة base64 مباشرة (لا يحتاج رابطاً عاماً إطلاقاً) فيتجاوز كل أعطال
+    SerpApi والرابط العام. يعيد نتائج بشكل نتائج Lens نفسها حتى يمر كل ما بعدها
+    (العرض، الخيارات، ترتيب العمولة) بدون أي تعديل.
+    يتطلب تفعيل Cloud Vision API في نفس مشروع Google Cloud حق مفتاح Gemini.
+    """
+    if not GOOGLE_VISION_API_KEY or not image_b64:
+        return []
+    try:
+        body = {"requests": [{
+            "image": {"content": image_b64},
+            "features": [{"type": "WEB_DETECTION", "maxResults": 30}],
+        }]}
+        r = requests.post(
+            f"https://vision.googleapis.com/v1/images:annotate?key={GOOGLE_VISION_API_KEY}",
+            json=body, timeout=25,
+        )
+        if r.status_code >= 400:
+            print(f"VISION WEB HTTP {r.status_code}: {r.text[:200]}")
+            return []
+        web = (((r.json().get("responses") or [{}])[0]).get("webDetection") or {})
+        best_guess = ""
+        for g in (web.get("bestGuessLabels") or []):
+            if g.get("label"):
+                best_guess = g["label"].strip()
+                break
+        entities = [e.get("description", "").strip() for e in (web.get("webEntities") or [])
+                    if e.get("description") and float(e.get("score") or 0) >= 0.5]
+        items, seen = [], set()
+        pos = 0
+        for page in (web.get("pagesWithMatchingImages") or []):
+            title = re.sub(r"<[^>]+>", "", str(page.get("pageTitle") or "")).strip()
+            link = str(page.get("url") or "").strip()
+            if not title or not link:
+                continue
+            sig = (title.lower(), link.lower())
+            if sig in seen:
+                continue
+            seen.add(sig)
+            pos += 1
+            try:
+                host = urllib.parse.urlparse(link).netloc.replace("www.", "")
+            except Exception:
+                host = ""
+            items.append({
+                "title": title, "link": link, "source": host or "web",
+                "position": pos, "section": "vision_pages", "exact": True,
+                "thumbnail": "", "image": "", "price": "", "price_value": None,
+                "currency": "", "in_stock": None, "condition": "",
+            })
+        chosen_title = best_guess or (entities[0] if entities else "")
+        if chosen_title and items:
+            # نرفع النتيجة الأقرب لعنوان أفضل تخمين لتتصدر الاختيار.
+            for it in items:
+                if normalize_ar(chosen_title).lower() in normalize_ar(it["title"]).lower():
+                    it["position"] = 0
+                    break
+        print(f"VISION WEB DETECT: pages={len(items)} best_guess={chosen_title!r} entities={entities[:3]}")
+        if not items and chosen_title:
+            # حتى بدون صفحات: أفضل تخمين وحده يكفي ليكمل البوت بحثه النصي بالاسم الصحيح.
+            items = [{"title": chosen_title, "link": "", "source": "google-vision",
+                      "position": 1, "section": "vision_pages", "exact": True,
+                      "thumbnail": "", "image": "", "price": "", "price_value": None,
+                      "currency": "", "in_stock": None, "condition": ""}]
+        return items
+    except Exception as e:
+        print(f"VISION WEB EXCEPTION: {e}")
+        return []
+
+
 def google_lens_lookup(image_b64, mime_type, lang="ar", query_hint="", light=False):
     """تعرف بصري متعدد التمريرات ليقترب من قوة تطبيق Google Lens نفسه.
 
@@ -1422,14 +1544,15 @@ def google_lens_lookup(image_b64, mime_type, lang="ar", query_hint="", light=Fal
       3) type=all بدون قيد الدولة وبدون auto_crop   -> أوسع بحث، مثل تطبيق Lens تماماً.
     ثم ندمج النتائج (بدون تكرار) ونختار أفضل عنوان، ونستخرج التوقيع الشكلي من الصورة الأصلية.
     """
-    if not ENABLE_GOOGLE_LENS or not SERPAPI_API_KEY or not PUBLIC_BASE_URL:
-        print("GOOGLE LENS SKIPPED: missing SERPAPI_API_KEY or PUBLIC_BASE_URL")
+    serpapi_possible = bool(ENABLE_GOOGLE_LENS and SERPAPI_API_KEY and PUBLIC_BASE_URL and IMAGE_ID_ENGINE in ("auto", "serpapi"))
+    vision_possible = bool(GOOGLE_VISION_API_KEY and IMAGE_ID_ENGINE in ("auto", "vision"))
+    if not serpapi_possible and not vision_possible:
+        print("GOOGLE LENS SKIPPED: no visual engine available (SerpApi keys/URL missing and Vision key missing)")
         return {"aliases": [], "matches": [], "query": ""}
 
-    public_url = publish_image_for_lens(image_b64, mime_type)
-    if not public_url:
-        print("GOOGLE LENS SKIPPED: could not publish image")
-        return {"aliases": [], "matches": [], "query": ""}
+    public_url = publish_image_for_lens(image_b64, mime_type) if serpapi_possible else ""
+    if serpapi_possible and not public_url:
+        print("GOOGLE LENS: could not publish image -> Vision-only path")
 
     try:
         user_country = current_market().get("country", DEFAULT_COUNTRY)
@@ -1443,19 +1566,45 @@ def google_lens_lookup(image_b64, mime_type, lang="ar", query_hint="", light=Fal
                 seen.add(sig)
                 merged.append(it)
 
-        passes = [
-            ("products", user_country, True),
-            ("all", user_country, True),
-        ]
-        if ENABLE_LENS_WIDE_FALLBACK:
-            passes.append(("all", "", False))
+        serpapi_ok = serpapi_possible and bool(public_url)
+        # v81.2: الرابط العام لازم يفتح قبل حرق تمريرات SerpApi عليه (سيرفر بارد = صفر نتائج).
+        if serpapi_ok and not _self_url_reachable(public_url):
+            print("LENS: public image URL unreachable -> skipping SerpApi passes")
+            serpapi_ok = False
 
-        for lens_type, country, auto_crop in passes:
-            _merge(_serpapi_lens_request(public_url, lens_type, country, auto_crop, query_hint))
+        if serpapi_ok:
+            # v81.2: الموجة الأولى (products + all) بالتوازي بدل التتابع — أسرع وأصمد.
+            wave = [
+                LENS_PASS_POOL.submit(_serpapi_lens_request, public_url, "products", user_country, True, query_hint),
+                LENS_PASS_POOL.submit(_serpapi_lens_request, public_url, "all", user_country, True, query_hint),
+            ]
+            for f in wave:
+                try:
+                    _merge(f.result(timeout=LENS_HTTP_TIMEOUT + 10))
+                except Exception as e:
+                    print(f"LENS WAVE ERR: {e.__class__.__name__}")
             has_exact = any(m.get("exact") for m in merged)
             has_local = any(is_local_lens_result(m) for m in merged)
-            if len(merged) >= LENS_MIN_MATCHES and lens_type != "products" and (has_exact or has_local):
-                break
+            if ENABLE_LENS_WIDE_FALLBACK and (len(merged) < LENS_MIN_MATCHES or not (has_exact or has_local)):
+                _merge(_serpapi_lens_request(public_url, "all", "", False, query_hint))
+            # v81.2: صفر نتائج غالباً عثرة مؤقتة (ضغط SerpApi) — محاولة ثانية وحدة تنقذها.
+            if not merged and LENS_RETRY_ON_EMPTY:
+                print("LENS RETRY: all passes empty -> one retry after 2s")
+                time.sleep(2)
+                retry_wave = [
+                    LENS_PASS_POOL.submit(_serpapi_lens_request, public_url, "all", user_country, True, query_hint),
+                    LENS_PASS_POOL.submit(_serpapi_lens_request, public_url, "all", "", False, query_hint),
+                ]
+                for f in retry_wave:
+                    try:
+                        _merge(f.result(timeout=LENS_HTTP_TIMEOUT + 10))
+                    except Exception as e:
+                        print(f"LENS RETRY ERR: {e.__class__.__name__}")
+
+        # v81.2: محرك Vision الرسمي — احتياط مستقل تماماً (base64 مباشرة، بلا رابط عام).
+        if not merged and IMAGE_ID_ENGINE in ("auto", "vision"):
+            print("LENS FALLBACK: trying official Google Vision WEB_DETECTION")
+            _merge(google_vision_web_detect(image_b64, mime_type))
 
         matches = merged[:LENS_RESULT_LIMIT]
         if not matches:
@@ -2503,6 +2652,65 @@ def resolve_direct_product_page(store_name, product_name, candidate_url=""):
     return chosen
 
 
+def _price_sanity_filter(offers, query="", lang="ar"):
+    """v81.1: سعر شاذ عن الوسيط بشكل صارخ = منتج مختلف غالباً (قطعة/إكسسوار/نسخة أخرى).
+
+    مدرك للعملات: النتائج المدموجة (محلي + عالمي) تُجمّع حسب عملة كل سطر، والقاعدة
+    (أكثر من 8× الوسيط أو أقل من وسيطه/8) تُطبق داخل كل مجموعة فيها 3 أسعار فأكثر.
+    """
+    local_code = (current_market().get("currency") or "KWD").upper()
+    groups = defaultdict(list)
+    for o in offers:
+        code = detect_currency_code(o.get("line", ""), local_code) or local_code
+        groups[code].append(o)
+    kept = []
+    for code, grp in groups.items():
+        priced = [(o, _extract_numeric_price(o.get("line", ""))) for o in grp]
+        nums = sorted(p for _o, p in priced if p is not None and p > 0)
+        if len(nums) < 3:
+            kept.extend(grp)
+            continue
+        median = nums[len(nums) // 2]
+        if median <= 0:
+            kept.extend(grp)
+            continue
+        for o, p in priced:
+            if p is not None and p > 0 and (p > median * 8 or p < median / 8):
+                print(f"PRICE SANITY DROP [{code}] ({str(query)[:40]!r}): {o.get('line','')[:80]} (median={median})")
+                continue
+            kept.append(o)
+    # الحفاظ على الترتيب الأصلي (محلي أولاً ثم عالمي).
+    order = {id(o): i for i, o in enumerate(offers)}
+    kept.sort(key=lambda o: order.get(id(o), 10**9))
+    return kept if kept else offers
+
+
+def _dedup_offers_by_store(offers, urls):
+    """v81.1: توحيد كانوني — «لولو» و«لولو هايبرماركت» بنفس النتيجة يظهران مرة (الأرخص)."""
+    best = {}
+    order = []
+    for o in offers:
+        try:
+            key = canonical_store_key(o.get("name", ""), match_url(o.get("name", ""), urls or {}))
+        except Exception:
+            key = ""
+        if not key:
+            key = normalize_name(normalize_ar(o.get("name", ""))) or o.get("name", "")
+        p = _extract_numeric_price(o.get("line", ""))
+        cur = best.get(key)
+        if cur is None:
+            best[key] = (o, p)
+            order.append(key)
+        else:
+            _co, cp = cur
+            if p is not None and (cp is None or p < cp):
+                best[key] = (o, p)
+    deduped = [best[k][0] for k in order]
+    if len(deduped) != len(offers):
+        print(f"STORE DEDUP: {len(offers)} -> {len(deduped)} offers")
+    return deduped
+
+
 def send_product_result(from_number, txt, urls, bot_id, lang, query, best_only=False, max_stores=None, relevance_mode="exact"):
     if not txt:
         send_whatsapp_text(from_number, T(lang, "not_found"), bot_id)
@@ -2526,6 +2734,11 @@ def send_product_result(from_number, txt, urls, bot_id, lang, query, best_only=F
         print("RELEVANCE: all offers dropped -> treat as not found")
         send_whatsapp_text(from_number, T(lang, "not_found"), bot_id)
         return "none"
+    # v81.1: فلترا الدقة — للبحث الدقيق فقط: البدائل المشابهة منتجات مختلفة بأسعار
+    # متباينة شرعاً، وقد يحمل المتجر الواحد بديلين، فما ينطبق عليها الفلتران.
+    if relevance_mode == "exact" and not best_only:
+        offers = _price_sanity_filter(offers, query, lang)
+        offers = _dedup_offers_by_store(offers, urls)
     title = product_title(txt, query)
     if title:
         send_whatsapp_text(from_number, title, bot_id)
@@ -2536,6 +2749,7 @@ def send_product_result(from_number, txt, urls, bot_id, lang, query, best_only=F
         offers = [best]
     sent = 0
     fallback_ctas = []
+    overflow_cards = []  # v81.7: ما بعد الصفحة الأولى -> زر «عرض المزيد»
     for o in offers[:store_limit]:
         url = match_url(o["name"], urls)
         # v77.8 AFFILIATE WRAP
@@ -2564,6 +2778,16 @@ def send_product_result(from_number, txt, urls, bot_id, lang, query, best_only=F
             continue
 
         # Normal exact-product searches keep the legacy safe fallback behavior.
+        # v81.7: بعد امتلاء الصفحة الأولى، البقية تُجمع لزر «عرض المزيد» بدل الإرسال.
+        if relevance_mode != "similar" and not best_only and sent >= TEXT_FIRST_PAGE:
+            if url and url.startswith("http"):
+                try:
+                    _h = urllib.parse.urlparse(url).netloc.lower()
+                except Exception:
+                    _h = ""
+                if _h and "google." not in _h and not is_suspicious_url(url):
+                    overflow_cards.append((o["line"], url, o["name"], True))
+            continue
         if not is_direct_store_url(url):
             try:
                 host = urllib.parse.urlparse(url or "").netloc.lower()
@@ -2579,10 +2803,11 @@ def send_product_result(from_number, txt, urls, bot_id, lang, query, best_only=F
             continue
         send_whatsapp_cta(from_number, o["line"], url, bot_id, f"🛒 {o['name'][:18]}")
         sent += 1
-    if relevance_mode != "similar" and fallback_ctas and sent < store_limit:
+    page_cap = TEXT_FIRST_PAGE if (relevance_mode != "similar" and not best_only) else store_limit
+    if relevance_mode != "similar" and fallback_ctas and sent < page_cap:
         # v76.3: لا نخفي CTAs الاحتياطية لمجرد أن نتيجة واحدة كان لها رابط مباشر.
-        # نرسلها بعد المباشرة حتى يصل كل بديل ممكن إلى زر، مع توضيح إذا كان الزر يفتح المتجر.
-        remaining = max(0, store_limit - sent)
+        # v81.7: الاحتياطي يكمل الصفحة الأولى فقط؛ الفائض يروح لزر «عرض المزيد».
+        remaining = max(0, page_cap - sent)
         checked = list(RESOLVER.map(lambda ou: (ou[0], ou[1], url_is_alive(ou[1])), fallback_ctas[:remaining]))
         for o, url, alive in checked:
             if not alive:
@@ -2593,6 +2818,13 @@ def send_product_result(from_number, txt, urls, bot_id, lang, query, best_only=F
             note = "\n🔎 الزر يفتح المتجر — ادور المنتج داخله" if lang == "ar" else "\n🔎 Button opens the store — search the product inside"
             send_whatsapp_cta(from_number, (o["line"] + note)[:1024], url, bot_id, f"🛒 {o['name'][:18]}")
             sent += 1
+        # v81.7: احتياطية زائدة عن الصفحة -> بطاقات مؤجلة خلف زر «عرض المزيد».
+        extra_fb = fallback_ctas[remaining:]
+        for o, url in extra_fb:
+            if url and url.startswith("http") and not is_suspicious_url(url):
+                overflow_cards.append((o["line"], url, o["name"], True))
+    if relevance_mode != "similar" and not best_only and overflow_cards and sent > 0:
+        _offer_lens_more(from_number, bot_id, lang, query, overflow_cards)
     if sent == 0:
         if relevance_mode == "similar":
             print("SIMILAR: zero verified direct product CTAs -> treat as none")
@@ -2790,24 +3022,61 @@ def _merge_v26_offer_text(results, title_line, max_results):
     return (title_line.strip() + "\n" + "\n".join(lines)).strip()
 
 
+# v81.1: خروج مبكر من البطولات — نتيجة قوية مبكرة = ما ننتظر الجولة العالقة (توفير 30-60%).
+V26_EARLY_EXIT_SCORE = int(os.environ.get("V26_EARLY_EXIT_SCORE", "14"))
+V26_EARLY_EXIT_MIN_RUNS = max(1, int(os.environ.get("V26_EARLY_EXIT_MIN_RUNS", "2")))
+
+def _tournament_collect(futs, merge_offers, deadline_seconds=120):
+    """يجمع نتائج الجولات فور اكتمالها مع خروج مبكر ذكي.
+
+    وضع الدمج (merge_offers=True) يستفيد من كل الجولات للوفرة، فنقص فقط آخر جولة
+    عالقة (بعد اكتمال SEARCH_RUNS-1). الوضع العادي يخرج بعد جولتين ونتيجة قوية.
+    """
+    from concurrent.futures import as_completed as _as_completed
+    results = []
+    min_runs = max(V26_EARLY_EXIT_MIN_RUNS, len(futs) - 1) if merge_offers else V26_EARLY_EXIT_MIN_RUNS
+    deadline = time.time() + deadline_seconds
+    best_score = -1
+    try:
+        for f in _as_completed(futs, timeout=deadline_seconds + 5):
+            try:
+                t, u = f.result(timeout=max(1.0, deadline - time.time()))
+            except Exception as e:
+                print(f"tournament run err: {e.__class__.__name__}")
+                continue
+            if t:
+                results.append((t, u))
+                best_score = max(best_score, v26_answer_score(t, u))
+                if len(results) >= min_runs and best_score >= V26_EARLY_EXIT_SCORE:
+                    pending = sum(1 for x in futs if not x.done())
+                    if pending:
+                        print(f"TOURNAMENT EARLY EXIT: score={best_score} after {len(results)} runs, skipping {pending} pending")
+                    break
+            if time.time() >= deadline:
+                break
+    except Exception as e:
+        print(f"tournament collect err: {e.__class__.__name__}")
+    return results
+
+
 def v26_best_of_search(parts, max_results=None, merge_offers=False, merge_title=""):
     """v26 tournament with an optional v76 union mode for similar alternatives.
 
     Normal callers are unchanged. For alternatives, ``merge_offers=True`` unions
     different stores/products discovered across SEARCH_RUNS instead of throwing
     away everything except the winning text.
+    v81.1: as_completed + early exit — الجولة العالقة ما توقف الرد.
     """
     limit = MAX_STORES if max_results is None else max(1, int(max_results))
     market_snapshot = current_market()
     try:
         futs = [V26_SEARCH_POOL.submit(_run_with_market, market_snapshot, call_gemini, parts)
                 for _ in range(SEARCH_RUNS)]
-        results = [f.result(timeout=120) for f in futs]
+        results = _tournament_collect(futs, merge_offers)
     except Exception as e:
         print(f"v26 best_of_search err {e}")
         return call_gemini(parts)
 
-    results = [(t, u) for (t, u) in results if t]
     if not results:
         return "", {}
 
@@ -4628,6 +4897,24 @@ def process_interactive_message(message, bot_id):
                 "lang": item.get("lang", "ar"), "query": item["query"],
             })
         return
+    if btn_id == "lens_more":
+        # v81.5: الدفعة التالية من بطاقات اللينز المؤجلة — وزر جديد إذا باقي أكثر.
+        item = _peek_pending(PENDING_LENS_MORE, from_number)
+        lang_ = (item or {}).get("lang", USER_LANG.get(from_number, "ar"))
+        activate_market(from_number)
+        cards = (item or {}).get("cards") or []
+        if not cards:
+            send_whatsapp_text(from_number, T(lang_, "more_results_expired"), bot_id)
+            return
+        card_cap = max(MAX_STORES, 8)
+        batch, remaining = cards[:card_cap], cards[card_cap:]
+        _send_lens_card_batch_v815(from_number, batch, item.get("bot_id") or bot_id, lang_, item.get("query") or "")
+        if remaining:
+            _offer_lens_more(from_number, item.get("bot_id") or bot_id, lang_, item.get("query") or "", remaining)
+        else:
+            PENDING_LENS_MORE.pop(from_number, None)
+            send_whatsapp_text(from_number, T(lang_, "more_results_done"), bot_id)
+        return
     if btn_id == "lf_similar":
         # v76: البدائل تبدأ من هوية Lens المتفق عليها عبر النتائج المحلية + العالمية.
         item = _peek_pending(PENDING_LENS_FOREIGN, from_number)
@@ -5291,39 +5578,166 @@ def filter_and_prioritize_for_affiliate(matches, max_results=8):
     return combined[:max_results]
 
 
+# ---- v81.4: بطاقة المتجر الرسمي للبراند — Lens يعرف الاسم لكن نتائجه البصرية ---
+# غالباً مواقع إعادة بيع؛ نستخرج البراند من العنوان ونبني رابط متجره الرسمي بأنفسنا.
+BRAND_EXTRACT_SYSTEM = """أنت خبير علامات تجارية. سأعطيك عنوان منتج من نتائج بحث.
+أرجع اسم البراند/الماركة فقط كما يُكتب رسمياً (مثل: west elm أو IKEA أو Bottega Veneta أو Nike).
+تجاهل أسماء المتاجر البائعة (John Lewis, Etsy, Amazon...) وكلمات المنتج والألوان والمقاسات.
+إذا لا يوجد براند واضح في العنوان أرجع كلمة NONE فقط. سطر واحد بدون شرح."""
+_BRAND_EXTRACT_CACHE = {}
+_BRAND_EXTRACT_LOCK = threading.Lock()
+
+def extract_brand_from_title(title):
+    t = " ".join(str(title or "").split())[:150]
+    if not t:
+        return ""
+    key = normalize_ar(t).lower()[:120]
+    with _BRAND_EXTRACT_LOCK:
+        if key in _BRAND_EXTRACT_CACHE:
+            return _BRAND_EXTRACT_CACHE[key]
+    raw, _ = call_gemini([{"text": t}], system=BRAND_EXTRACT_SYSTEM, use_search=False)
+    brand = (raw or "").strip().splitlines()[0].strip(" .،-—\"'") if raw else ""
+    if brand.upper() == "NONE" or len(brand) < 2 or len(brand) > 40:
+        brand = ""
+    with _BRAND_EXTRACT_LOCK:
+        if len(_BRAND_EXTRACT_CACHE) > 2000:
+            _BRAND_EXTRACT_CACHE.clear()
+        _BRAND_EXTRACT_CACHE[key] = brand
+    print(f"BRAND EXTRACT: {t[:60]!r} -> {brand!r}")
+    return brand
+
+
+def official_brand_card(chosen_title):
+    """يعيد (البراند، رابط متجره الرسمي الحي) أو ("", "").
+
+    الرابط: نتائج بحث المتجر الرسمي عن المنتج نفسه (يوصلك للمنتج مباشرة)،
+    وإلا الصفحة الرئيسية — وكلها مفحوصة حياً قبل الإرسال.
+    """
+    brand = extract_brand_from_title(chosen_title)
+    if not brand:
+        return "", ""
+    url = ""
+    try:
+        url = store_search_url(brand, chosen_title) or ""
+    except Exception as e:
+        print(f"OFFICIAL SEARCH URL ERR: {e.__class__.__name__}")
+    if not url:
+        try:
+            url = resolve_store_homepage(brand) or ""
+        except Exception as e:
+            print(f"OFFICIAL HOMEPAGE ERR: {e.__class__.__name__}")
+    if url:
+        print(f"OFFICIAL BRAND CARD: {brand!r} -> {url}")
+    return brand, url
+
+
+def _send_lens_card_batch_v815(from_number, batch, bot_id, lang, exact_query):
+    """يرسل دفعة بطاقات: التغليف بالأفلييت وتسجيل النقرة يتمان لحظة الإرسال فقط."""
+    sent = 0
+    for body, original_url, src_name, is_local in batch:
+        url = original_url
+        try:
+            url = wrap_affiliate_url(original_url, from_number, exact_query)
+            log_click(from_number, exact_query, src_name or body[:30], original_url, url, is_global=not is_local)
+        except Exception as e:
+            print(f"LENS AFF WRAP ERR: {e}")
+        send_whatsapp_cta(from_number, body[:1000], url, bot_id, f"🛒 {(src_name or 'Store')[:18]}")
+        sent += 1
+    return sent
+
+
+def _offer_lens_more(from_number, bot_id, lang, exact_query, remaining):
+    """يخزن البقية ويرسل زر «عرض المزيد (N)» — الدقة ما تنرمي، تتأجل خلف زر."""
+    PENDING_LENS_MORE[from_number] = {
+        "bot_id": bot_id, "lang": lang, "query": exact_query,
+        "cards": remaining, "ts": time.time(),
+    }
+    n = len(remaining)
+    send_whatsapp_buttons(
+        from_number,
+        T(lang, "more_results_body", n=n),
+        [{"id": "lens_more", "title": T(lang, "more_results_btn", n=n)[:20]}],
+        bot_id,
+    )
+
+
 def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
-    """v80 FINAL: 8 نتائج موحدة للصورة - محلي أولاً ثم عالمي - بدون زر دور عالميا منفصل"""
+    """v81.6: نتائج Google Lens **كما هي** — بدون أي إضافة أو اختراع من عندنا.
+
+    الترتيب فقط: متاجر بلد المستخدم (حسب لوكيشنه) أولاً ثم العالمية، وداخل كل
+    مجموعة ترتيب Google الأصلي محفوظ حرفياً. المستبعد الوحيد: التواصل الاجتماعي
+    وروابط النصب. الزائد عن الدفعة الأولى خلف زر «➕ عرض المزيد (N)».
+    """
     matches = [m for m in (lens.get("matches") or []) if (m.get("title") or "").strip()]
     if not matches:
         return False
-    # فلتر مواقع البيع فقط
-    nonsocial = [m for m in matches if not is_social_result(m)]
-    nonsocial = filter_shopping_results(nonsocial)
-    local = [m for m in nonsocial if is_local_lens_result(m)]
-    foreign = [m for m in nonsocial if not is_local_lens_result(m)]
-    
-    # v80: دمج 8 نتائج - 4 محلي أولاً ثم 4 عالمي
-    combined = []
-    # محلي أولاً (4)
-    combined.extend(local[:4])
-    # عالمي بعد (4)
-    combined.extend(foreign[:4])
-    
-    if not combined:
-        return False
-    
     chosen_title = ((lens.get("chosen") or {}).get("title") or matches[0]["title"]).strip()
     exact_query = (caption or chosen_title).strip()
-    
-    # أرسل 8 نتائج مباشرة مع تحويل العملة للعالمي
-    sent = _send_lens_match_batch(from_number, combined, bot_id, lang, convert_prices=True)
-    
-    # إذا فيه نتائج عالمية بين المدمجة، فعّل تحويل العملة لها
-    # _send_lens_match_batch يتعامل معها تلقائياً
-    
+
+    # v81.6: بدون بطاقة «المتجر الرسمي» — التجربة أثبتت أنها تهلوس مع نتائج الصور
+    # العامة (استخرجت براند غلط وربطت موقعاً لا علاقة له). نعرض ما يطلعه Lens فقط.
+    # بناء كل البطاقات: dedup + حارس النصب + استبعاد التواصل الاجتماعي فقط.
+    local_cards, global_cards, seen_urls = [], [], set()
+    for m in matches:
+        if is_social_result(m):
+            continue
+        title = m["title"].strip()[:80]
+        source = (m.get("source") or "").strip()
+        local = is_local_lens_result(m)
+        price_txt = ""
+        raw_price = str(m.get("price") or "").strip()
+        if raw_price or m.get("price_value") not in (None, ""):
+            if local:
+                price_txt = format_lens_price(raw_price, m.get("price_value"), lang, m.get("currency") or None)
+            else:
+                shown, _conv = display_global_price(m.get("price_value"), raw_price, m.get("currency") or "", lang)
+                price_txt = shown or raw_price
+        body = title
+        if price_txt:
+            body += f" — {price_txt}"
+        if source:
+            body += f" ({source}{' 🇰🇼' if local else ' 🌍'})"
+        url = (m.get("link") or "").strip()
+        try:
+            host = urllib.parse.urlparse(url).netloc.lower()
+        except Exception:
+            host = ""
+        if not (url.startswith("http") and host and "google." not in host and not is_suspicious_url(url)):
+            continue
+        if url in seen_urls:
+            continue
+        seen_urls.add(url)
+        card = (body, url, source or ("المتجر" if lang == "ar" else "Store"), local)
+        # v81.5: تقسيم مستقر — بلد المستخدم أولاً، والترتيب داخل كل مجموعة كما رتبه Google.
+        (local_cards if local else global_cards).append(card)
+
+    all_cards = local_cards + global_cards
+    if not all_cards:
+        return False
+
+    card_cap = max(MAX_STORES, 8)
+    first_batch, remaining = all_cards[:card_cap], all_cards[card_cap:]
+    _send_lens_card_batch_v815(from_number, first_batch, bot_id, lang, exact_query)
+    if remaining:
+        _offer_lens_more(from_number, bot_id, lang, exact_query, remaining)
+
+    # النتائج كلها تبقى مخزنة وقوداً للبدائل (المعالج موجود) — بدون قائمة خيارات.
+    try:
+        identity = build_lens_consensus_identity(lens, matches)
+        PENDING_LENS_FOREIGN[from_number] = {
+            "bot_id": bot_id, "lang": lang,
+            "matches": matches[:LENS_RESULT_LIMIT], "ts": time.time(),
+            "query": exact_query,
+            "similar_query": (identity.get("query") or exact_query),
+            "similar_aliases": identity.get("aliases") or [],
+        }
+    except Exception as e:
+        print(f"LENS PENDING STORE ERR: {e}")
+
     LAST_SEARCH[from_number] = {"product": exact_query}
-    print(f"LENS DIRECT v80 COMBINED: local={len(local[:4])} foreign={len(foreign[:4])} total={len(combined)}")
-    return sent
+    print(f"LENS DIRECT v81.6 RAW: sent={len(first_batch)} (local_first={len(local_cards)}) remaining={len(remaining)} social_removed")
+    return True
+
 
 def process_single_image(message,bot_id,lang="ar"):
     from_number=message["from"]
@@ -5345,7 +5759,7 @@ def process_single_image(message,bot_id,lang="ar"):
 
     # v71: وضع اللينز المباشر — الصورة تروح لـ Google Lens ونتائجه تُرسل كما هي.
     # بدون Vision ولا حكم هوية ولا طبقات بحث. إذا Google ما رجع شي، نكمل بالمسار الكامل.
-    if LENS_DIRECT_MODE and ENABLE_GOOGLE_LENS and SERPAPI_API_KEY and PUBLIC_BASE_URL:
+    if LENS_DIRECT_MODE and ((ENABLE_GOOGLE_LENS and SERPAPI_API_KEY and PUBLIC_BASE_URL) or GOOGLE_VISION_API_KEY):
         print(f"LENS DIRECT HINT: {lens_hint!r}")
         lens_direct = google_lens_lookup(b64, mime, lang, lens_hint, light=True)
         if lens_direct.get("matches"):
@@ -5361,7 +5775,7 @@ def process_single_image(message,bot_id,lang="ar"):
     # 3) الهوية النهائية = دمج عنوان Lens الدقيق + الاسم العربي/الإنجليزي من Vision،
     #    فيبحث النص بكل المرادفات ويغطي الفهرسة العربية والإنجليزية معاً.
     lens_future = None
-    if LENS_PARALLEL_WITH_VISION and ENABLE_GOOGLE_LENS and SERPAPI_API_KEY and PUBLIC_BASE_URL:
+    if LENS_PARALLEL_WITH_VISION and ((ENABLE_GOOGLE_LENS and SERPAPI_API_KEY and PUBLIC_BASE_URL) or GOOGLE_VISION_API_KEY):
         lens_future = LENS_POOL.submit(_run_with_market, market, google_lens_lookup, b64, mime, lang, lens_hint)
 
     vision_name = identify_product_with_retry(b64, mime, lang)
@@ -6156,7 +6570,9 @@ def legacy_v26_call_gemini(parts, system=LEGACY_TEXT_SEARCH_SYSTEM, max_results=
 
 
 def legacy_v26_best_of_search(parts, max_results=None, merge_offers=False, merge_title=""):
-    """بطولة الكود القديم: SEARCH_RUNS بالتوازي، الأفضل يفوز، والروابط اتحاد الجميع."""
+    """بطولة الكود القديم: SEARCH_RUNS بالتوازي، الأفضل يفوز، والروابط اتحاد الجميع.
+
+    v81.1: as_completed + خروج مبكر — نفس ترقية البطولة الرئيسية."""
     limit=MAX_STORES if max_results is None else max(1,int(max_results))
     market_snapshot=current_market()
     try:
@@ -6164,11 +6580,10 @@ def legacy_v26_best_of_search(parts, max_results=None, merge_offers=False, merge
                                      legacy_v26_call_gemini, parts,
                                      LEGACY_TEXT_SEARCH_SYSTEM, limit)
               for _ in range(SEARCH_RUNS)]
-        results=[f.result(timeout=120) for f in futs]
+        results=_tournament_collect(futs, merge_offers)
     except Exception as e:
         print(f"LEGACY V26 best_of_search err {e}")
         return legacy_v26_call_gemini(parts, max_results=limit)
-    results=[(tt,uu) for tt,uu in results if tt]
     if not results: return "",{}
     scored=sorted(results,key=lambda x:v26_answer_score(x[0],x[1],limit),reverse=True)
     best_txt,best_urls=scored[0]
@@ -6187,45 +6602,82 @@ def legacy_v26_best_of_search(parts, max_results=None, merge_offers=False, merge
 
 
 def legacy_text_product_search(product, lang):
-    """v78: بحث موحد 8 نتائج - محلي أولاً ثم عالمي - بدون فلتر"""
+    """v78: بحث موحد 8 نتائج - محلي أولاً ثم عالمي - بدون فلتر
+
+    v81.1: المرحلتان المحلية والعالمية تنطلقان **بالتوازي** بدل التتابع (كان ينتظر
+    المحلي كاملاً ثم يبدأ العالمي) + الترجمة كسولة بالخلفية + دمج عروض كل جولات
+    البطولة (merge_offers) لملء الخانات — أسرع بكثير ونتائج أوفر.
+    """
     cached=cache_get(product,lang)
     if cached: 
         # حتى لو كاش، نزيد العدد لـ 8 إذا كان أقل
         return cached
 
     is_ar=bool(re.search(r"[\u0600-\u06FF]",str(product or "")))
-    alt=(english_search_name(product) if is_ar else arabic_search_name(product)) or ""
-    if alt.strip().lower()==str(product).strip().lower(): alt=""
     market_name=current_market().get("country_name","Kuwait")
-    
-    # --- المرحلة 1: بحث محلي 4 نتائج ---
+    market_snapshot = current_market()
+
+    # الترجمة بالخلفية — البطولة المحلية الأولى ما تنتظرها (Gemini يترجم داخلياً).
+    _alt_future = RESOLVER.submit(
+        _run_with_market, market_snapshot,
+        (english_search_name if is_ar else arabic_search_name), product,
+    )
+    def _get_alt():
+        try:
+            a = (_alt_future.result(timeout=25) or "").strip()
+        except Exception as e:
+            print(f"ALT NAME ERR: {e.__class__.__name__}")
+            a = ""
+        return "" if a.lower() == str(product).strip().lower() else a
+
+    # --- المرحلة العالمية تنطلق فوراً كمستقبل موازٍ (كانت تنتظر المحلي كاملاً) ---
+    def _global_phase():
+        try:
+            en_q = (_get_alt() if is_ar else product) or english_search_name(product) or product
+            global_prompt = (
+                f"ابحث عالمياً عن {en_q} في متاجر خارج {market_name} فقط. "
+                f"Amazon.com, Amazon.ae, Amazon.sa, Noon, AliExpress, Temu, Shein, Trendyol, eBay, Namshi, Farfetch. "
+                f"اعرض {TEXT_GLOBAL_RESULTS} نتائج مختلفة بسعر رقمي واضح ورابط صفحة منتج مباشر. {LANG_INSTR[lang]}"
+            )
+            txt_g, urls_g = legacy_v26_best_of_search(
+                [{"text": global_prompt}], max_results=TEXT_GLOBAL_RESULTS,
+                merge_offers=True, merge_title=f"📦 {product}",
+            )
+            if txt_g and urls_g and extract_store_offers(txt_g):
+                return txt_g, urls_g
+        except Exception as e:
+            print(f"GLOBAL PART IN COMBINED SEARCH ERR: {e}")
+        return "", {}
+    _global_future = WORKERS.submit(_run_with_market, market_snapshot, _global_phase)
+
+    # --- المرحلة المحلية (بالخيط الحالي، بالتوازي مع العالمية) ---
     local_txt, local_urls = "", {}
-    attempts=[(product,alt)] + ([(alt,product)] if alt else [])
-    for primary,secondary in attempts:
+    def _local_attempts():
+        yield (product, "")
+        alt = _get_alt()
+        if alt:
+            print(f"LEGACY BILINGUAL (lazy): {product!r} <-> {alt!r}")
+            yield (alt, product)
+    for primary,secondary in _local_attempts():
         extra=(f" وابحث أيضاً بالاسم الآخر لنفس المنتج: {secondary}." if secondary else "")
         prompt=(f"ابحث عن {primary} في {market_name}. قارن أسعار نفس المنتج بالضبط في المتاجر المحلية الحالية."
                 f"{extra} أظهر المتاجر التي لديها سعر حالي ومصدر Google حقيقي. {LANG_INSTR[lang]}")
-        txt,urls=legacy_v26_best_of_search([{"text":prompt}],max_results=4)
+        txt,urls=legacy_v26_best_of_search(
+            [{"text":prompt}],max_results=TEXT_LOCAL_RESULTS,
+            merge_offers=True, merge_title=f"📦 {product}",
+        )
         if txt and urls and extract_store_offers(txt):
             local_txt, local_urls = txt, urls
             break
-    
-    # --- المرحلة 2: بحث عالمي 4 نتائج ---
+
+    # --- جمع المرحلة العالمية (كانت تشتغل طوال هذا الوقت بالتوازي) ---
     global_txt, global_urls = "", {}
     try:
-        en_q = english_search_name(product) or product
-        global_prompt = (
-            f"ابحث عالمياً عن {en_q} في متاجر خارج {market_name} فقط. "
-            f"Amazon.com, Amazon.ae, Amazon.sa, Noon, AliExpress, Temu, Shein, Trendyol, eBay, Namshi, Farfetch. "
-            f"اعرض 4 نتائج مختلفة بسعر رقمي واضح ورابط صفحة منتج مباشر. {LANG_INSTR[lang]}"
-        )
-        txt_g, urls_g = legacy_v26_best_of_search([{"text": global_prompt}], max_results=4)
-        if txt_g and urls_g and extract_store_offers(txt_g):
-            global_txt, global_urls = txt_g, urls_g
+        global_txt, global_urls = _global_future.result(timeout=130)
     except Exception as e:
-        print(f"GLOBAL PART IN COMBINED SEARCH ERR: {e}")
+        print(f"GLOBAL PHASE JOIN ERR: {e.__class__.__name__}")
 
-    # --- دمج: محلي أولاً ثم عالمي = 8 نتائج ---
+    # --- دمج: محلي أولاً ثم عالمي (حتى 12 نتيجة) ---
     if not local_txt and not global_txt:
         return "", {}
 
@@ -6236,7 +6688,7 @@ def legacy_text_product_search(product, lang):
     if local_txt:
         # خذ أول 4 أسطر عروض من المحلي
         local_offers = [l for l in local_txt.splitlines() if l.strip().startswith(("✅","•","🏆"))]
-        combined_lines.extend(local_offers[:4])
+        combined_lines.extend(local_offers[:TEXT_LOCAL_RESULTS])
         combined_urls.update(local_urls)
     
     if global_txt:
@@ -6246,7 +6698,7 @@ def legacy_text_product_search(product, lang):
             combined_lines.append("")
             combined_lines.append("🌍 من المتاجر العالمية:")
             combined_lines.append("")
-        combined_lines.extend(global_offers[:4])
+        combined_lines.extend(global_offers[:TEXT_GLOBAL_RESULTS])
         combined_urls.update(global_urls)
 
     # عنوان المنتج
@@ -6313,7 +6765,7 @@ def execute_product_search(from_number, product, bot_id, lang):
         send_whatsapp_text(from_number, T(lang, "not_found"), bot_id)
         return
     # عرض 8 نتائج مباشرة
-    result_type = send_product_result(from_number, txt, urls, bot_id, lang, product, max_stores=8)
+    result_type = send_product_result(from_number, txt, urls, bot_id, lang, product, max_stores=TEXT_TOTAL_RESULTS)
     if result_type == "product" and AUTO_SEND_PRODUCT_MAPS:
         send_maps_button(from_number, product, bot_id, lang)
 
@@ -6685,4 +7137,4 @@ def process_location_message(message, bot_id):
     route_pending_after_location(from_number)
 
 @app.get("/")
-async def health(): return {"status":"v75.6 NO SOCIAL OPTION + CLEAR SIMPLE TITLES + AI STORE UNIFY + IN-STORE SEARCH LINKS + CANONICAL STORES + CLEAN LAYOUT + ONE-SESSION + GREEDY COMPLETION + LIVE LINKS + LOCAL SOCIAL + GLOBAL REGION ORDER + MORE LENS CARDS + NONE CLASS + CTA ALWAYS + ARABIC PICK LIST + RELEVANCE FILTER + NO SILENCE + BILINGUAL 2 ROUNDS + PURE AI CLASSIFIER + CLEAN STORE NAMES + SERVICE INTENT FIX (answer+5 providers) + TEXT+SIMILAR USE OLD v26 SMART PATH (tournament) + SERVICES 5+ PHONES + AI INTENT + BRAND COMPARE + SHOP FILTER + TRIO OPTIONS + EXACT PRICES", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "v26_runs":SEARCH_RUNS, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
+async def health(): return {"status":"v81.7 TEXT SEARCH 12 RESULTS (6 local + 6 global, first 8 + MORE button) | v81.6 PURE LENS OUTPUT (no invented brand card, social removed, local-first order only) + MORE BUTTON (nothing dropped) | v81.4 OFFICIAL BRAND CARD FIRST + CARDS ONLY (no long msg, no options) | v81.3 LENS RAW GOOGLE ORDER (v71.1 accuracy, no reordering, extras feed SIMILAR) | v81.2 LENS RESILIENCE (parallel passes + retry + official Vision fallback + self-url check) | v81.1 FAST: PARALLEL LOCAL+GLOBAL PHASES + EARLY-EXIT TOURNAMENTS + LAZY TRANSLATION | ACCURATE: CURRENCY-AWARE PRICE SANITY + CANONICAL STORE DEDUP | ABUNDANT: OFFER UNION IN TEXT PATH | + v81 CURRENCY CONVERT + HIGH COMMISSION + CLEAR SIMPLE TITLES + AI STORE UNIFY + IN-STORE SEARCH LINKS + CANONICAL STORES + CLEAN LAYOUT + ONE-SESSION + GREEDY COMPLETION + LIVE LINKS + LOCAL SOCIAL + GLOBAL REGION ORDER + MORE LENS CARDS + NONE CLASS + CTA ALWAYS + ARABIC PICK LIST + RELEVANCE FILTER + NO SILENCE + BILINGUAL 2 ROUNDS + PURE AI CLASSIFIER + CLEAN STORE NAMES + SERVICE INTENT FIX (answer+5 providers) + TEXT+SIMILAR USE OLD v26 SMART PATH (tournament) + SERVICES 5+ PHONES + AI INTENT + BRAND COMPARE + SHOP FILTER + TRIO OPTIONS + EXACT PRICES", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "v26_runs":SEARCH_RUNS, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
