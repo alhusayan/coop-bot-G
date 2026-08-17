@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
 import os, re, time, base64, requests, json, asyncio, urllib.parse, hashlib, sqlite3, threading
 from collections import deque, defaultdict
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait
 from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v72-local-us-cn-ranking-20260817"
+BUILD_ID = "v73-fast-lens-local-us-cn-20260817"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE/TEXT -> LOCAL MARKET, THEN US, THEN CHINA ONLY")
@@ -45,6 +45,8 @@ RESOLVER = ThreadPoolExecutor(max_workers=8)
 WORKERS = ThreadPoolExecutor(max_workers=5)
 OLD_SEARCH_POOL = ThreadPoolExecutor(max_workers=8)
 LENS_POOL = ThreadPoolExecutor(max_workers=4)
+# v73: HTTP passes الخاصة بـ Lens لها pool مستقل حتى لا يحصل deadlock عندما google_lens_lookup يعمل داخل LENS_POOL.
+LENS_HTTP_POOL = ThreadPoolExecutor(max_workers=12)
 OLD_LAYER_DUPLICATES = max(1, int(os.environ.get("OLD_LAYER_DUPLICATES", "2")))
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
@@ -99,6 +101,9 @@ LENS_MIN_MATCHES = max(3, int(os.environ.get("LENS_MIN_MATCHES", "6")))
 # تشغيل Vision و Lens بالتوازي: أسرع وأدق دمج. عطّله إذا تبي توفر كريدت SerpApi للعبوات النصية.
 LENS_PARALLEL_WITH_VISION = env_bool("LENS_PARALLEL_WITH_VISION", True)
 LENS_RESULT_LIMIT = max(12, int(os.environ.get("LENS_RESULT_LIMIT", "40")))
+# v73: حد زمني واضح للينز. تمريرات البلدان تعمل بالتوازي، وليس واحدة وراء الثانية.
+LENS_HTTP_TIMEOUT_SECONDS = max(6, int(os.environ.get("LENS_HTTP_TIMEOUT_SECONDS", "15")))
+LENS_TOTAL_TIMEOUT_SECONDS = max(8, int(os.environ.get("LENS_TOTAL_TIMEOUT_SECONDS", "22")))
 LENS_IMAGE_TTL = max(120, int(os.environ.get("LENS_IMAGE_TTL_SECONDS", "600")))
 LENS_IMAGE_STORE = {}
 LENS_IMAGE_LOCK = threading.Lock()
@@ -1118,7 +1123,7 @@ def _serpapi_lens_request(public_url, lens_type, country, auto_crop, query_hint)
     if query_hint and (lens_type in (None, "", "all", "visual_matches", "products")):
         params["q"] = query_hint[:120]
     try:
-        r = requests.get("https://serpapi.com/search.json", params=params, timeout=60)
+        r = requests.get("https://serpapi.com/search.json", params=params, timeout=(5, LENS_HTTP_TIMEOUT_SECONDS))
         if r.status_code >= 400:
             print(f"GOOGLE LENS HTTP {r.status_code} type={lens_type or 'all'} country={country or '-'}: {r.text[:300]}")
             return []
@@ -1167,8 +1172,8 @@ def google_lens_lookup(image_b64, mime_type, lang="ar", query_hint="", light=Fal
                 seen.add(sig)
                 merged.append(it)
 
-        # v72: نجلب Lens حسب نفس أولوية العرض المطلوبة: بلد المستخدم، ثم أمريكا، ثم الصين فقط.
-        # لا نتوقف بعد النتائج المحلية لأن المطلوب أن تكون النتائج الأمريكية والصينية متاحة بعدها.
+        # v73: بلد المستخدم + أمريكا + الصين فقط، وكل تمريرات Lens تعمل بالتوازي.
+        # هذا يمنع 6 طلبات × timeout متتالية (سبب التعليق في v72).
         country_order = []
         for cc in (user_country, "us", "cn"):
             if cc and cc not in country_order:
@@ -1176,11 +1181,24 @@ def google_lens_lookup(image_b64, mime_type, lang="ar", query_hint="", light=Fal
         passes = []
         for cc in country_order:
             passes.extend([("products", cc, True), ("all", cc, True)])
-        if ENABLE_LENS_WIDE_FALLBACK:
-            passes.append(("all", "", False))
 
-        for lens_type, country, auto_crop in passes:
-            _merge(_serpapi_lens_request(public_url, lens_type, country, auto_crop, query_hint))
+        future_map = {
+            LENS_HTTP_POOL.submit(_serpapi_lens_request, public_url, lens_type, country, auto_crop, query_hint):
+                (lens_type, country, auto_crop)
+            for lens_type, country, auto_crop in passes
+        }
+        done, not_done = wait(list(future_map), timeout=LENS_TOTAL_TIMEOUT_SECONDS)
+        for fut in done:
+            lens_type, country, auto_crop = future_map[fut]
+            try:
+                _merge(fut.result())
+            except Exception as e:
+                print(f"GOOGLE LENS FUTURE ERR type={lens_type} country={country}: {e}")
+        for fut in not_done:
+            lens_type, country, _ = future_map[fut]
+            fut.cancel()
+            print(f"GOOGLE LENS PASS SKIPPED AFTER TOTAL TIMEOUT type={lens_type} country={country}")
+        print(f"GOOGLE LENS PARALLEL DONE completed={len(done)}/{len(future_map)} total_timeout={LENS_TOTAL_TIMEOUT_SECONDS}s")
 
         # أي دولة غير محلي/أمريكا/الصين تُحذف نهائياً، ثم نفرض ترتيب الأسواق قبل جودة Lens.
         allowed = [m for m in merged if result_market_rank(m) != 99]
@@ -3674,9 +3692,10 @@ def process_single_image(message,bot_id,lang="ar"):
         send_whatsapp_text(from_number, T(lang, "image_error"), bot_id)
         return
 
-    # v71: وضع اللينز المباشر — الصورة تروح لـ Google Lens ونتائجه تُرسل كما هي.
-    # بدون Vision ولا حكم هوية ولا طبقات بحث. إذا Google ما رجع شي، نكمل بالمسار الكامل.
+    # v73: Lens المباشر سريع ومحدود زمنياً. إذا لم يرجع نتيجة لا نعيد Lens مرة ثانية في fallback.
+    lens_direct_attempted = False
     if LENS_DIRECT_MODE and ENABLE_GOOGLE_LENS and SERPAPI_API_KEY and PUBLIC_BASE_URL:
+        lens_direct_attempted = True
         lens_direct = google_lens_lookup(b64, mime, lang, caption, light=True)
         if lens_direct.get("matches"):
             if send_lens_direct_results(from_number, lens_direct, bot_id, lang, caption):
@@ -3692,13 +3711,18 @@ def process_single_image(message,bot_id,lang="ar"):
     # 3) الهوية النهائية = دمج عنوان Lens الدقيق + الاسم العربي/الإنجليزي من Vision،
     #    فيبحث النص بكل المرادفات ويغطي الفهرسة العربية والإنجليزية معاً.
     lens_future = None
-    if LENS_PARALLEL_WITH_VISION and ENABLE_GOOGLE_LENS and SERPAPI_API_KEY and PUBLIC_BASE_URL:
+    if (not lens_direct_attempted and LENS_PARALLEL_WITH_VISION and ENABLE_GOOGLE_LENS
+            and SERPAPI_API_KEY and PUBLIC_BASE_URL):
         lens_future = LENS_POOL.submit(_run_with_market, market, google_lens_lookup, b64, mime, lang, caption)
 
     vision_name = identify_product_with_retry(b64, mime, lang)
     force_fashion_lens = is_fashion_identity(vision_name, caption)
     use_lens, route_reason = lens_routing_decision(vision_name, caption)
     use_lens = force_fashion_lens or use_lens
+    # إذا جرّبنا Lens المباشر بالفعل فلا نكرر نفس الشبكة مرة ثانية؛ نكمل Vision/Text فوراً.
+    if lens_direct_attempted:
+        use_lens = False
+        route_reason = "LENS_DIRECT_ALREADY_ATTEMPTED"
 
     lens = {"aliases": [], "matches": [], "query": ""}
     if use_lens:
@@ -4039,4 +4063,4 @@ def process_location_message(message, bot_id):
     route_pending_after_location(from_number)
 
 @app.get("/")
-async def health(): return {"status":"v72 LOCAL-US-CHINA", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
+async def health(): return {"status":"v73 FAST-LENS LOCAL-US-CHINA", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
