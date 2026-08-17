@@ -6,10 +6,10 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v71-1-lens-direct-passthrough-20260804"
+BUILD_ID = "v72-local-us-cn-ranking-20260817"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
-print("IMAGE -> GOOGLE LENS DIRECT PASSTHROUGH (raw results to user)")
+print("IMAGE/TEXT -> LOCAL MARKET, THEN US, THEN CHINA ONLY")
 print("=" * 70)
 
 
@@ -86,7 +86,7 @@ if not PUBLIC_BASE_URL:
         PUBLIC_BASE_URL = f"https://{_railway_domain}"
         print(f"PUBLIC_BASE_URL auto-derived from Railway: {PUBLIC_BASE_URL}")
 ENABLE_GOOGLE_LENS = env_bool("ENABLE_GOOGLE_LENS", True)
-# v71: وضع اللينز المباشر — الصورة تروح لـ Google Lens ونتائجه تُرسل للمستخدم كما هي،
+# v72: وضع اللينز المباشر — الصورة تروح لـ Google Lens ثم تُفلتر وتُرتب: محلي -> أمريكا -> الصين فقط.
 # بدون تحليل Vision ولا حكم هوية ولا طبقات بحث. أطفئه بـ LENS_DIRECT_MODE=false
 # لإرجاع المسار الذكي الكامل. عند عدم وجود نتائج، البوت يرجع تلقائياً للمسار الكامل.
 LENS_DIRECT_MODE = env_bool("LENS_DIRECT_MODE", True)
@@ -301,10 +301,15 @@ def market_instruction():
     city = m.get("city") or ""
     place = f"{city}, {m['country_name']}" if city else m["country_name"]
     currency = m.get("currency") or "local currency"
-    return (f"\nIMPORTANT CURRENT USER MARKET: {place} (country code {m['country']}). "
-            f"Return stores that sell/deliver in {place}, and prices in {currency}. "
-            "Reject India, China, or any other foreign-country result unless it explicitly delivers to the current market and no local result exists. "
-            "Ignore any older Kuwait-specific instruction when the current market is not Kuwait.\n")
+    return (
+        f"\nIMPORTANT CURRENT USER MARKET: {place} (country code {m['country']}). "
+        "For product/store searches use exactly this geographic priority: "
+        f"(1) stores in {place}, then (2) United States stores, then (3) China stores. "
+        "Reject stores from every other country. Do not require US/China stores to deliver locally. "
+        f"Local results should use {currency}; foreign prices may be returned in their original currency because the application converts them. "
+        "This LOCAL -> US -> CHINA ordering is more important than price: never place a cheaper US/China offer above a local one. "
+        "Ignore any older Kuwait-only or local-only instruction when it conflicts with this rule.\n"
+    )
 
 def reverse_geocode_market(lat, lng):
     # No API key required. Failure is harmless: coordinates still localise Google Maps.
@@ -557,7 +562,7 @@ def has_model_token(a, b):
 def cache_key(query, lang):
     norm = re.sub(r"[^\w\u0600-\u06FF]+", "", normalize_ar(query))
     market = current_market().get("country", DEFAULT_COUNTRY)
-    return hashlib.sha256(f"v70|{market}|{norm}|{lang}".encode()).hexdigest()
+    return hashlib.sha256(f"v72|{market}|{norm}|{lang}".encode()).hexdigest()
 
 def cache_ttl_for(query, txt=""):
     q_norm = normalize_ar(query)
@@ -853,12 +858,12 @@ def detect_lang(text):
     return None
 
 SYSTEM_PROMPT = """
-أنت مساعد تسوق كويتي. استخدم بحث Google فعلياً للأسعار والتقييمات الحالية في الكويت.
+أنت مساعد تسوق عالمي يعتمد موقع المستخدم الحالي. استخدم بحث Google فعلياً للأسعار الحالية، ورتب الأسواق دائماً: بلد المستخدم أولاً، ثم الولايات المتحدة، ثم الصين فقط.
 
 أولاً حدد نوع الطلب:
 
 【الحالة 1】منتج محدد بعلامة تجارية واضحة (مثل: آيفون 15 برو، بيبسي، ساعة أبل الترا، بلايستيشن 5):
-قارن الأسعار ورتب النتائج دائماً من الأرخص إلى الأغلى، ورد بهذا الشكل فقط:
+قارن الأسعار لكن رتب جغرافياً أولاً: بلد المستخدم، ثم الولايات المتحدة، ثم الصين فقط. داخل كل سوق رتب من الأرخص إلى الأغلى، ورد بهذا الشكل فقط:
 📦 [اسم المنتج]
 
 ✅ [المتجر الأرخص] — [السعر] د.ك
@@ -894,7 +899,7 @@ SYSTEM_PROMPT = """
 - أي متجر لا يظهر له سعر رقمي واضح بعملة السوق الحالي احذفه من النتيجة.
 - اكتب السعر بالفلوس كاملة دائماً: 1.950 وليس 1.95، و0.750 وليس 0.75.
 - قارن نفس المواصفات فقط: نفس الحجم/السعة/الوزن، ونفس اللون إذا كان اللون يغيّر السعر. اذكر المواصفة بجانب كل سعر (مثل: 256GB، 1 لتر، أحمر) ولا تدخل نسخة مختلفة المواصفات في نفس المقارنة.
-- اعرض المتاجر المحلية فقط التي تبيع أو توصل داخل بلد المستخدم الحالي؛ لا تعرض متجراً أجنبياً في هذا البحث.
+- اعرض المتاجر بهذا الترتيب الإجباري فقط: بلد المستخدم الحالي أولاً، ثم الولايات المتحدة، ثم الصين. احذف أي دولة أخرى. داخل كل سوق رتب من الأرخص إلى الأغلى.
 - ممنوع أن يكون الرد عبارة عن أسماء متاجر مع كلمة متوفر فقط؛ كل سطر عرض يجب أن يحتوي سعراً رقمياً.
 - رابط كل متجر يجب أن يكون رابط صفحة منتج مباشر (صفحة فيها منتج واحد وسعر واحد). ممنوع روابط الصفحة الرئيسية أو /search أو /category
 - لا تخترع سعراً، انسخ السعر كما يظهر في نتيجة البحث اليوم.
@@ -1132,8 +1137,8 @@ def _serpapi_lens_request(public_url, lens_type, country, auto_crop, query_hint)
 def google_lens_lookup(image_b64, mime_type, lang="ar", query_hint="", light=False):
     """تعرف بصري متعدد التمريرات ليقترب من قوة تطبيق Google Lens نفسه.
 
-    light=True (وضع اللينز المباشر v71): يعيد نتائج Lens الخام فوراً بدون استدعاء
-    Gemini لوصف الصورة — أسرع وأرخص لأن النتائج ستُرسل للمستخدم كما هي.
+    light=True (وضع اللينز المباشر v72): يعيد نتائج Lens بدون استدعاء Gemini لوصف الصورة،
+    ثم يطبق فلتر وترتيب السوق قبل إرسالها للمستخدم.
 
     التمريرات بالترتيب (نتوقف بمجرد الحصول على نتائج كافية):
       1) type=products + دولة المستخدم + auto_crop -> بطاقات منتجات فيها أسعار.
@@ -1162,21 +1167,30 @@ def google_lens_lookup(image_b64, mime_type, lang="ar", query_hint="", light=Fal
                 seen.add(sig)
                 merged.append(it)
 
-        passes = [
-            ("products", user_country, True),
-            ("all", user_country, True),
-        ]
+        # v72: نجلب Lens حسب نفس أولوية العرض المطلوبة: بلد المستخدم، ثم أمريكا، ثم الصين فقط.
+        # لا نتوقف بعد النتائج المحلية لأن المطلوب أن تكون النتائج الأمريكية والصينية متاحة بعدها.
+        country_order = []
+        for cc in (user_country, "us", "cn"):
+            if cc and cc not in country_order:
+                country_order.append(cc)
+        passes = []
+        for cc in country_order:
+            passes.extend([("products", cc, True), ("all", cc, True)])
         if ENABLE_LENS_WIDE_FALLBACK:
             passes.append(("all", "", False))
 
         for lens_type, country, auto_crop in passes:
             _merge(_serpapi_lens_request(public_url, lens_type, country, auto_crop, query_hint))
-            has_exact = any(m.get("exact") for m in merged)
-            has_local = any(is_local_lens_result(m) for m in merged)
-            if len(merged) >= LENS_MIN_MATCHES and lens_type != "products" and (has_exact or has_local):
-                break
 
-        matches = merged[:LENS_RESULT_LIMIT]
+        # أي دولة غير محلي/أمريكا/الصين تُحذف نهائياً، ثم نفرض ترتيب الأسواق قبل جودة Lens.
+        allowed = [m for m in merged if result_market_rank(m) != 99]
+        allowed.sort(key=lambda m: (
+            result_market_rank(m),
+            0 if m.get("exact") else 1,
+            0 if m.get("section") == "visual_matches" else 1,
+            int(m.get("position") or 999),
+        ))
+        matches = allowed[:LENS_RESULT_LIMIT]
         if not matches:
             print("GOOGLE LENS: no visual matches after all passes")
             return {"aliases": [], "matches": [], "query": ""}
@@ -1193,8 +1207,8 @@ def google_lens_lookup(image_b64, mime_type, lang="ar", query_hint="", light=Fal
             if not title or generic.match(title):
                 continue
             score = 2000 if m.get("exact") else 0
-            if is_local_lens_result(m):
-                score += 1500
+            market_rank = result_market_rank(m)
+            score += {0: 3000, 1: 1800, 2: 900}.get(market_rank, -5000)
             if m.get("price") or m.get("price_value") not in (None, ""):
                 score += 700
             if m.get("section") == "visual_matches":
@@ -1835,14 +1849,14 @@ def best_of_search(parts, lang="ar"):
     return call_gemini(parts)
 
 def bilingual_search_instruction(query, lang):
-    """يجبر البحث في الفهرسة العربية والإنجليزية مع إبقاء الرد بلغة المستخدم."""
+    """بحث ثنائي اللغة مع ترتيب السوق الثابت: محلي ثم أمريكا ثم الصين فقط."""
     response_rule = LANG_INSTR[lang]
+    market_name = current_market().get('country_name', 'Kuwait')
     return (
-        f"ابحث عن المنتج التالي في {current_market().get('country_name', 'Kuwait')} باستخدام العربية والإنجليزية معاً: {query}. "
-        "حوّل الاسم داخلياً إلى مرادف عربي ومرادف إنجليزي، وجرّب اسم البراند باللاتيني والعربي, "
-        "ولا تعتبر عدم ظهور نتيجة بلغة واحدة فشلاً قبل تجربة اللغة الأخرى. "
-        f"ابدأ بنتائج المتاجر المحلية في {current_market().get('country_name', 'Kuwait')} حتى لو كانت متأخرة في Google، وافحص نتائج أعمق قبل المتاجر الأجنبية. "
-        f"اعرض فقط نتائج لها سعر رقمي بعملة {current_market().get('currency', 'البلد')} ورابط صفحة منتج مباشر داخل المتجر. "
+        f"ابحث عن المنتج باستخدام العربية والإنجليزية معاً: {query}. "
+        "حوّل الاسم داخلياً إلى مرادف عربي ومرادف إنجليزي، وجرّب اسم البراند باللاتيني والعربي. "
+        f"رتب النتائج حصراً: متاجر {market_name} أولاً، ثم متاجر الولايات المتحدة، ثم متاجر الصين؛ واحذف أي دولة أخرى. "
+        "داخل كل سوق رتب من الأرخص إلى الأغلى، وكل نتيجة يجب أن تحتوي سعراً رقمياً ورابط صفحة منتج مباشر. "
         f"{response_rule}"
     )
 
@@ -1990,6 +2004,128 @@ COUNTRY_CURRENCY_MARKERS = {
     "us": ("usd", "$", "us dollar"),
 }
 
+# v72: النتائج المسموحة فقط بعد السوق المحلي هي الولايات المتحدة ثم الصين.
+# نستخدم الدومين/اسم المتجر/العملة لأن كثيراً من المتاجر الأمريكية والصينية تعمل على .com.
+US_STORE_HINTS = (
+    "amazon.com", "walmart.com", "target.com", "bestbuy.com", "costco.com",
+    "homedepot.com", "lowes.com", "macys.com", "nordstrom.com", "zappos.com",
+    "bhphotovideo.com", "newegg.com", "rei.com", "dickssportinggoods.com", "ebay.com",
+)
+
+CHINA_STORE_HINTS = (
+    "aliexpress.com", "alibaba.com", "1688.com", "taobao.com", "tmall.com",
+    "temu.com", "dhgate.com", "made-in-china.com", "banggood.com", "gearbest.com",
+    "jd.com", "pinduoduo.com",
+)
+
+def _result_hay_host(item):
+    hay = " ".join(str(item.get(k) or "") for k in (
+        "title", "source", "link", "domain", "snippet", "price", "price_text", "currency"
+    )).lower()
+    try:
+        host = urllib.parse.urlparse(str(item.get("link") or item.get("url") or "")).netloc.lower().replace("www.", "")
+    except Exception:
+        host = ""
+    return hay, host
+
+def is_us_market_result(item):
+    hay, host = _result_hay_host(item)
+    if host.endswith(".us") or any(h in host for h in US_STORE_HINTS):
+        return True
+    # China hints win before USD because Chinese marketplaces often display prices in USD.
+    if any(h in host for h in CHINA_STORE_HINTS):
+        return False
+    return any(marker in hay for marker in COUNTRY_CURRENCY_MARKERS.get("us", ()))
+
+def is_china_market_result(item):
+    hay, host = _result_hay_host(item)
+    if host.endswith(".cn") or any(h in host for h in CHINA_STORE_HINTS):
+        return True
+    return bool(re.search(r"(?:\bCNY\b|\bRMB\b|人民币|中国|china)", hay, flags=re.I))
+
+def result_market_rank(item):
+    """0=بلد المستخدم، 1=أمريكا، 2=الصين، 99=مرفوض.
+
+    نفحص السوق الأجنبي الصريح قبل علامة العملة المحلية لأن السعر بعد التحويل قد يحتوي
+    KWD/SAR/AED مع العملة الأصلية بين قوسين.
+    """
+    cc = (current_market().get("country") or DEFAULT_COUNTRY).lower()
+    hay, host = _result_hay_host(item)
+    is_us = is_us_market_result(item)
+    is_cn = is_china_market_result(item)
+
+    if cc == "us" and is_us:
+        return 0
+    if cc == "cn" and is_cn:
+        return 0
+
+    if cc != "us" and is_us:
+        return 1
+    if cc != "cn" and is_cn:
+        return 1 if cc == "us" else 2
+
+    # دولة رابعة صريحة بالدومين تُرفض حتى لو كان السطر يحتوي السعر المحوّل بعملة المستخدم.
+    for other_cc, tlds in COUNTRY_TLDS.items():
+        if other_cc not in {cc, "us", "cn"} and any(tld in host for tld in tlds):
+            return 99
+
+    # كذلك أي عملة أصلية صريحة غير عملة المستخدم/USD/CNY تعني سوقاً غير مسموح.
+    local_cur = (current_market().get("currency") or "").upper()
+    allowed_codes = {x for x in (local_cur, "USD", "CNY") if x}
+    codes = set(re.findall(r"\b[A-Z]{3}\b", hay.upper())) & KNOWN_CURRENCY_CODES
+    if any(code not in allowed_codes for code in codes):
+        return 99
+    if "£" in hay and "GBP" not in allowed_codes:
+        return 99
+    if "€" in hay and "EUR" not in allowed_codes:
+        return 99
+
+    if is_local_lens_result(item):
+        return 0
+    return 99
+
+def filter_allowed_market_results(verified, exclude_local=False):
+    kept = {}
+    for name, info in (verified or {}).items():
+        item = {
+            "link": info.get("url", ""), "source": name,
+            "title": info.get("title", ""), "currency": info.get("currency", ""),
+            "price": info.get("price_text", "") or info.get("price", ""),
+        }
+        rank = result_market_rank(item)
+        if rank == 99 or (exclude_local and rank == 0):
+            print(f"MARKET FILTER REJECT rank={rank}: {name} -> {info.get('url','')}")
+            continue
+        info["market_rank"] = rank
+        kept[name] = info
+    return kept
+
+def prepare_market_offer(info, name, lang="ar"):
+    """يحضر السعر والترتيب حسب السوق. المحلي يبقى بعملة المستخدم؛ أمريكا/الصين تُحوّل محلياً."""
+    item = {
+        "link": info.get("url", ""), "source": name, "title": info.get("title", ""),
+        "currency": info.get("currency", ""), "price": info.get("price_text", "") or info.get("price", ""),
+    }
+    rank = info.get("market_rank")
+    if rank is None:
+        rank = result_market_rank(item)
+    if rank == 99:
+        return None
+    try:
+        numeric = float(info.get("price"))
+    except Exception:
+        numeric = None
+    if numeric is None:
+        return None
+    if rank == 0:
+        shown = f"{format_price(numeric)} {currency_label(lang)}"
+        return rank, numeric, shown
+    src = (info.get("currency") or "").upper().strip()
+    if not src:
+        src = "USD" if is_us_market_result(item) else "CNY" if is_china_market_result(item) else ""
+    shown, converted = display_global_price(numeric, "", src, lang)
+    return rank, (converted if converted is not None else numeric), shown
+
 def is_local_lens_result(item):
     """Classify a Lens/search result as belonging to the user's current market.
 
@@ -2099,9 +2235,13 @@ def lens_priced_offers(lens_context, lang="ar", local_only=True, exclude_local=F
         in_stock = item.get("in_stock")
         if not title or not is_lens_product_url(url, item) or url in used_urls:
             continue
-        if local_only and not is_local_lens_result(item):
+        market_rank = result_market_rank(item)
+        if market_rank == 99:
+            print(f"LENS REJECT OTHER COUNTRY: {title} -> {url}")
             continue
-        if exclude_local and is_local_lens_result(item):
+        if local_only and market_rank != 0:
+            continue
+        if exclude_local and market_rank == 0:
             print(f"GLOBAL EXCLUDE LOCAL LENS: {title} -> {url}")
             continue
         if in_stock is False:
@@ -2109,16 +2249,8 @@ def lens_priced_offers(lens_context, lang="ar", local_only=True, exclude_local=F
             continue
         if not price_text and price_value in (None, ""):
             continue
-        # في الوضع المحلي: نبقي بطاقات عملة السوق فقط. في الوضع العالمي كل العملات مقبولة
-        # لأنها ستُحوَّل إلى العملة المحلية قبل العرض.
-        if not exclude_local:
-            price_hay = f"{price_text} {currency}".lower()
-            expected_currency = (current_market().get("currency") or "").lower()
-            currency_aliases = {expected_currency}
-            if expected_currency == "kwd": currency_aliases.update({"د.ك", "kd"})
-            if expected_currency and price_hay.strip() and not any(x and x in price_hay for x in currency_aliases):
-                if price_value in (None, ""):
-                    continue
+        # v72: العملة المحلية تُعرض كما هي، أما أمريكا/الصين فتحوّل إلى عملة المستخدم.
+        # لا نرفض العملة الأجنبية لأنها الآن جزء مقصود من النتائج.
         name = _lens_source_name(item, i)
         base = name
         n = 2
@@ -2129,18 +2261,21 @@ def lens_priced_offers(lens_context, lang="ar", local_only=True, exclude_local=F
             numeric = float(price_value) if price_value not in (None, "") else None
         except Exception:
             numeric = None
-        if exclude_local:
-            # عالمي: السعر يُحوَّل دائماً إلى عملة المستخدم المحلية بالفلوس (1.950 د.ك) مع الأصل بين قوسين.
-            shown, converted = display_global_price(price_value, price_text, currency, lang)
+        if market_rank == 0:
+            shown = format_lens_price(price_text, price_value, lang, currency or None)
+        else:
+            src_currency = (currency or "").upper().strip()
+            if not src_currency:
+                src_currency = "USD" if is_us_market_result(item) else "CNY" if is_china_market_result(item) else ""
+            shown, converted = display_global_price(price_value, price_text, src_currency, lang)
             if converted is not None:
                 numeric = converted
-        else:
-            shown = format_lens_price(price_text, price_value, lang)
         offers[name] = {
             "url": url,
             "price": numeric,
             "price_text": shown,
-            "is_local": is_local_lens_result(item),
+            "is_local": market_rank == 0,
+            "market_rank": market_rank,
             "title": title,
             "position": int(item.get("position") or i),
             "exact": bool(item.get("exact")),
@@ -2150,19 +2285,21 @@ def lens_priced_offers(lens_context, lang="ar", local_only=True, exclude_local=F
         used_urls.add(url)
     # نفس المواصفات فقط: بطاقة عبوة أصغر أو سعة أقل ليست سعراً أرخص لنفس المنتج.
     offers = filter_same_size(offers, ((lens_context.get("chosen") or {}).get("title") or ""))
-    # المتاجر المحلية أولاً حتى لو رتبها Google متأخرة؛ ثم exact ثم visual ثم ترتيب Lens.
+    # v72: بلد المستخدم أولاً، ثم أمريكا، ثم الصين فقط. داخل كل سوق: exact/visual ثم السعر.
     ranked = sorted(
         offers.items(),
         key=lambda kv: (
-            0 if kv[1].get("is_local") else 1,
+            kv[1].get("market_rank", 99),
             0 if kv[1].get("exact") else 1,
             0 if kv[1].get("section") == "visual_matches" else 1,
             kv[1].get("position", 999),
         ),
     )
-    # الاختيار بالجودة، لكن العرض النهائي دائماً من الأرخص للأغلى و✅ للأرخص.
     top = ranked[:MAX_STORES]
-    top.sort(key=lambda kv: kv[1].get("price") if kv[1].get("price") is not None else 10**9)
+    top.sort(key=lambda kv: (
+        kv[1].get("market_rank", 99),
+        kv[1].get("price") if kv[1].get("price") is not None else 10**9,
+    ))
     return dict(top)
 
 
@@ -2172,8 +2309,8 @@ def verify_lens_direct_matches(lens_context, local_only=True, exclude_local=Fals
         return {}
     candidates = {}
     ordered = sorted(
-        (lens_context.get("matches") or [])[:16],
-        key=lambda m: (0 if m.get("exact") else 1, 0 if is_local_lens_result(m) else 1, int(m.get("position") or 99)),
+        (lens_context.get("matches") or [])[:24],
+        key=lambda m: (result_market_rank(m), 0 if m.get("exact") else 1, int(m.get("position") or 99)),
     )
     for i, m in enumerate(ordered[:8], 1):
         url = (m.get("link") or "").strip()
@@ -2181,9 +2318,12 @@ def verify_lens_direct_matches(lens_context, local_only=True, exclude_local=Fals
         source = (m.get("source") or f"Lens {i}").strip()
         if not title or not is_lens_product_url(url, m):
             continue
-        if local_only and not is_local_lens_result(m):
+        market_rank = result_market_rank(m)
+        if market_rank == 99:
             continue
-        if exclude_local and is_local_lens_result(m):
+        if local_only and market_rank != 0:
+            continue
+        if exclude_local and market_rank == 0:
             print(f"GLOBAL EXCLUDE LOCAL VERIFY: {title} -> {url}")
             continue
         candidates[source] = url
@@ -2406,7 +2546,7 @@ def _new_layer_search(query, lang, prompt_text=None, source_image_b64=None, sour
 
     # For image requests, use the product cards returned by Google Lens itself first.
     # This preserves the many visually close results Google shows instead of demanding one exact SKU.
-    lens_cards = lens_priced_offers(lens_context, lang, local_only=not allow_global, exclude_local=allow_global)
+    lens_cards = lens_priced_offers(lens_context, lang, local_only=False, exclude_local=allow_global)
     if lens_cards:
         display_name = (lens_context.get("chosen") or {}).get("title") or query
         lines = [f"📦 {display_name}", ""]
@@ -2420,20 +2560,20 @@ def _new_layer_search(query, lang, prompt_text=None, source_image_b64=None, sour
         return "\n".join(lines), new_urls
 
     # If Lens returned direct pages without price metadata, try our HTML verifier once.
-    lens_verified = verify_lens_direct_matches(lens_context, local_only=not allow_global, exclude_local=allow_global)
+    lens_verified = verify_lens_direct_matches(lens_context, local_only=False, exclude_local=allow_global)
     if lens_verified:
-        if allow_global:
-            # أسعار أجنبية من HTML: نحولها للعملة المحلية أولاً ثم نرتب بالأرخص المحوَّل.
-            for info in lens_verified.values():
-                shown, converted = display_global_price(info["price"], "", info.get("currency", ""), lang)
-                info["shown"] = shown
-                info["sort_price"] = converted if converted is not None else info["price"]
-            sorted_v = sorted(lens_verified.items(), key=lambda x: x[1]["sort_price"])
-        else:
-            lens_verified = filter_local_market_only(lens_verified)
-            for info in lens_verified.values():
-                info["shown"] = f"{format_price(info['price'])} {currency_label(lang)}"
-            sorted_v = sorted(lens_verified.items(), key=lambda x: x[1]["price"])
+        lens_verified = filter_allowed_market_results(lens_verified, exclude_local=allow_global)
+        prepared = []
+        for name, info in lens_verified.items():
+            ready = prepare_market_offer(info, name, lang)
+            if not ready:
+                continue
+            market_rank, sort_price, shown = ready
+            info["shown"] = shown
+            info["sort_price"] = sort_price
+            info["market_rank"] = market_rank
+            prepared.append((name, info))
+        sorted_v = sorted(prepared, key=lambda x: (x[1].get("market_rank", 99), x[1].get("sort_price", 10**9)))
         if sorted_v:
             display_name = (lens_context.get("chosen") or {}).get("title") or query
             lines = [f"📦 {display_name}", ""]
@@ -2461,21 +2601,20 @@ def _new_layer_search(query, lang, prompt_text=None, source_image_b64=None, sour
         else:
             context = ""
 
-        # v68: المتاجر الشهيرة نقطة انطلاق فقط — البحث مفتوح لأي متجر محلي منذ المحاولة الأولى.
+        # v72: البحث النصي نفسه يتبع ترتيب السوق: محلي -> أمريكا -> الصين فقط.
         priority_stores = priority_stores_for(search_term)
         stores_hint = "، ".join(priority_stores)
         market_name = current_market().get("country_name", "Kuwait")
         if attempt == 1:
             search_scope = (
-                f"ابدأ بأشهر المتاجر المحلية في {market_name} (مثل: {stores_hint}) لكن لا تحصر البحث فيها إطلاقاً: "
-                f"اقبل أي متجر محلي آخر في {market_name} يبيع المنتج بسعر موثق ورابط صفحة منتج مباشر حتى لو لم يكن مشهوراً. "
-                "إذا لم تجد فلا تكتب اعتذاراً مطولاً؛ أرجع بلا نتائج لننتقل لمحاولة أوسع. "
+                f"ابدأ بأشهر المتاجر المحلية في {market_name} (مثل: {stores_hint}) ثم وسّع لأي متجر محلي موثوق. "
+                "بعد الانتهاء من المحلي ابحث في متاجر الولايات المتحدة، ثم متاجر الصين فقط. "
+                "ارفض أي نتيجة من أوروبا أو بريطانيا أو الهند أو اليابان أو أي دولة أخرى. "
             )
         else:
             search_scope = (
-                f"لم توجد نتيجة كافية في المحاولة السابقة. "
-                f"اعمل الآن بحثاً عاماً واسعاً في جميع متاجر {market_name} التي تبيع المنتج، بما فيها المتاجر المتخصصة والصغيرة، "
-                "مع تجنب الإعلانات المبوبة فقط مثل OpenSooq. لا تستبعد المتجر لمجرد أنه غير مشهور. "
+                f"اعمل بحثاً أوسع لنفس المنتج مع الحفاظ على هذا الترتيب الإجباري: {market_name} أولاً، ثم الولايات المتحدة، ثم الصين فقط. "
+                "لا تسمح لأي دولة رابعة، ولا ترفع نتيجة أمريكية أو صينية فوق نتيجة محلية بسبب السعر. "
             )
         current_prompt = (
             f"{context}ابحث في {market_name} عن هذا الاسم تحديداً: {search_term}. "
@@ -2488,8 +2627,9 @@ def _new_layer_search(query, lang, prompt_text=None, source_image_b64=None, sour
             "قارن نفس المنتج بنفس المواصفات فقط (الحجم/السعة/الوزن، واللون إذا كان يغيّر السعر): "
             "عبوة أصغر أو أكبر أو سعة تخزين مختلفة تعتبر منتجاً مختلفاً ولا تدخل المقارنة. "
             "اذكر المواصفة بجانب كل سعر إذا كانت معروفة (مثل: 1 لتر أو 256GB). "
-            f"أعطني حتى {MAX_STORES} متاجر مختلفة مرتبة من الأرخص إلى الأغلى، وكل نتيجة يجب أن تحتوي سعراً رقمياً بعملة السوق الحالي "
-            "ورابط صفحة المنتج المباشرة داخل المتجر. ممنوع روابط Google وصفحات البحث والتصنيف، وممنوع أي متجر أجنبي لا يبيع محلياً. "
+            f"أعطني حتى {MAX_STORES} متاجر مختلفة. الترتيب الإجباري حسب السوق أولاً: {market_name} ثم الولايات المتحدة ثم الصين فقط؛ "
+            "وداخل كل سوق فقط رتب من الأرخص إلى الأغلى. كل نتيجة يجب أن تحتوي سعراً رقمياً ورابط صفحة المنتج المباشرة داخل المتجر. "
+            "ممنوع روابط Google وصفحات البحث والتصنيف، وممنوع أي متجر من دولة غير هذه الأسواق الثلاثة. "
             "لا تكتب متوفر أو InStock بدلاً من السعر. اكتب السعر بالفلوس كاملة مثل 1.950 وليس 1.95. "
             f"{LANG_INSTR[lang]}"
         )
@@ -2513,22 +2653,29 @@ def _new_layer_search(query, lang, prompt_text=None, source_image_b64=None, sour
             verified = verify_offers(urls, search_term)
             verified = filter_verified_with_lens(verified, lens_context)
             verified = filter_same_size(verified, query)
-            if not allow_global:
-                # v68: البحث المحلي لا يعرض مواقع عالمية أبداً — تظهر فقط بعد زر «دوّر عالمياً».
-                verified = filter_local_market_only(verified)
+            verified = filter_allowed_market_results(verified, exclude_local=allow_global)
             if verified:
-                # Google Lens استُخدم قبل البحث لتحديد المنتج. لا نحذف نتائج الأسعار بسبب تقييم بصري تخميني.
-                sorted_v = sorted(verified.items(), key=lambda x: x[1]["price"])
+                # v72: السوق قبل السعر: محلي -> أمريكا -> الصين. داخل كل سوق الأرخص أولاً.
+                prepared = []
+                for name, info in verified.items():
+                    ready = prepare_market_offer(info, name, lang)
+                    if not ready:
+                        continue
+                    market_rank, sort_price, shown = ready
+                    info["market_rank"] = market_rank
+                    info["sort_price"] = sort_price
+                    info["shown"] = shown
+                    prepared.append((name, info))
+                sorted_v = sorted(prepared, key=lambda x: (x[1].get("market_rank", 99), x[1].get("sort_price", 10**9)))
                 # v70: العنوان المعروض عربي؛ الاسم الإنجليزي للبحث فقط.
                 title = product_title(txt, (ar_hint if lang == "ar" and ar_hint else search_term))
                 lines = [title, ""]
                 new_urls = {}
                 for i, (name, info) in enumerate(sorted_v[:MAX_STORES]):
                     prefix = "✅" if i == 0 else "•"
-                    currency = currency_label(lang)
                     size_note = format_pack_size(extract_pack_size(info.get("title", "")))
                     size_suffix = f" ({size_note})" if size_note else ""
-                    lines.append(f"{prefix} {name} — {format_price(info['price'])} {currency}{size_suffix}")
+                    lines.append(f"{prefix} {name} — {info['shown']}{size_suffix}")
                     new_urls[name] = info["url"]
                 final_txt = "\n".join(lines)
                 if not source_image_b64:
@@ -2547,22 +2694,32 @@ def _new_layer_search(query, lang, prompt_text=None, source_image_b64=None, sour
                 matched = match_url(offer["name"], urls)
                 if not (matched and is_direct_store_url(matched)):
                     continue
-                if not allow_global and is_foreign_lens_result({"link": matched, "source": offer["name"], "title": offer["line"]}):
-                    # v68: نفس الحارس المحلي حتى للعروض التي تعذّر فحص صفحتها.
-                    print(f"LOCAL MODE REJECT FOREIGN (unverified): {offer['name']} -> {matched}")
+                item = {"link": matched, "source": offer["name"], "title": offer["line"], "price": offer["line"]}
+                market_rank = result_market_rank(item)
+                if market_rank == 99 or (allow_global and market_rank == 0):
+                    print(f"UNVERIFIED MARKET REJECT rank={market_rank}: {offer['name']} -> {matched}")
                     continue
-                kept.append(offer)
-            # v68: الترتيب من الأرخص للأغلى حتى في المسار غير المفحوص.
-            kept.sort(key=lambda o: _extract_numeric_price(o.get("line", "")) or 10**9)
+                numeric = _extract_numeric_price(offer.get("line", ""))
+                if numeric is None:
+                    continue
+                if market_rank == 0:
+                    shown = f"{format_price(numeric)} {currency_label(lang)}"
+                    sort_price = numeric
+                else:
+                    src = detect_currency_code(offer.get("line", ""), "USD" if market_rank == 1 else "CNY")
+                    shown, converted = display_global_price(numeric, offer.get("line", ""), src, lang)
+                    sort_price = converted if converted is not None else numeric
+                kept.append({"offer": offer, "url": matched, "market_rank": market_rank, "sort_price": sort_price, "shown": shown})
+            kept.sort(key=lambda x: (x["market_rank"], x["sort_price"]))
             if kept:
                 title = product_title(txt, (ar_hint if lang == "ar" and ar_hint else search_term))
                 lines = [title, ""]
                 clean_urls = {}
-                for i, offer in enumerate(kept[:MAX_STORES]):
+                for i, rec in enumerate(kept[:MAX_STORES]):
                     prefix = "✅" if i == 0 else "•"
-                    body = re.sub(r"^(?:✅|🏆|•)\s*", "", offer["line"]).strip()
-                    lines.append(f"{prefix} {body}")
-                    clean_urls[offer["name"]] = match_url(offer["name"], urls)
+                    offer = rec["offer"]
+                    lines.append(f"{prefix} {offer['name']} — {rec['shown']}")
+                    clean_urls[offer["name"]] = rec["url"]
                 final_txt = "\n".join(lines)
                 if not source_image_b64:
                     cache_put(query, lang, final_txt, clean_urls)
@@ -2606,6 +2763,10 @@ def _result_offers(txt, urls, layer, lens_context=None):
         if price is None or price <= 0:
             continue
         host = urllib.parse.urlparse(url).netloc.lower().replace("www.", "")
+        market_item = {"link": url, "source": offer.get("name", ""), "title": title, "price": offer.get("line", "")}
+        market_rank = result_market_rank(market_item)
+        if market_rank == 99:
+            continue
         item = {
             "name": offer.get("name", "").strip(),
             "url": url,
@@ -2614,7 +2775,8 @@ def _result_offers(txt, urls, layer, lens_context=None):
             "line": offer.get("line", ""),
             "layer": layer,
             "host": host,
-            "is_local": is_local_lens_result({"link": url, "source": offer.get("name", ""), "title": title}),
+            "is_local": market_rank == 0,
+            "market_rank": market_rank,
             "exact": False,
             "lens_position": 999,
         }
@@ -2636,32 +2798,23 @@ def _old_layer_search(query, lang, prompt_text=None, lens_context=None, allow_gl
     if not OLD_LAYER_ENABLED:
         return "", {}
     search_name = english_name or query
-    if allow_global:
-        base_prompt = (
-            f"ابحث عالميًا عن {search_name}. استبعد تمامًا أي متجر داخل {current_market().get('country_name', 'بلد المستخدم')}, لأن البحث المحلي انتهى بالفعل. اقبل المتاجر الأجنبية الموثوقة فقط، مع سعر رقمي واضح ورابط صفحة المنتج المباشر، واذكر العملة الأصلية. {LANG_INSTR[lang]}"
-        )
-    else:
-        base_prompt = prompt_text or (
-            f"ابحث عن {search_name} في {current_market().get('country_name', 'Kuwait')} في أي متجر محلي يبيعه — المشهور وغير المشهور. متوفر فقط وبسعر رقمي واضح ورابط صفحة منتج مباشر. {LANG_INSTR[lang]}"
-        )
     market_name = current_market().get("country_name", "Kuwait")
     if allow_global:
+        base_prompt = (
+            f"ابحث عن {search_name} في الولايات المتحدة ثم الصين فقط. استبعد بلد المستخدم {market_name} واستبعد كل الدول الأخرى. "
+            f"سعر رقمي واضح ورابط صفحة المنتج المباشر مع العملة الأصلية. {LANG_INSTR[lang]}"
+        )
         variants = [
             base_prompt,
-            f"{search_name} buy online worldwide exact product direct page price {LANG_INSTR[lang]}",
-            f"{search_name} international stores exact visual match direct product link {LANG_INSTR[lang]}",
-        ]
-    elif current_market().get("country") == "kw":
-        variants = [
-            base_prompt,
-            f"{search_name} price Kuwait buy online Xcite Eureka Blink Noon Jarir Lulu Carrefour Best Al Yousifi Pro Sports Intersport Decathlon 3RoodQ8 Tigro or any Kuwaiti store - compare prices {LANG_INSTR[lang]}",
-            f"{query} شراء اونلاين الكويت سعر متوفر متجر كويتي صفحة المنتج مباشرة {LANG_INSTR[lang]}",
+            f"{search_name} United States buy online exact product direct page price USD {LANG_INSTR[lang]}",
+            f"{search_name} China buy online exact product direct page price CNY RMB AliExpress Alibaba 1688 Taobao JD {LANG_INSTR[lang]}",
         ]
     else:
+        # ثلاث عمليات بحث مستقلة تضمن وجود تغطية فعلية لكل سوق بدلاً من الاعتماد على ترتيب Google العام.
         variants = [
-            base_prompt,
-            f"{search_name} best price in {market_name} local stores direct product page {LANG_INSTR[lang]}",
-            f"{search_name} buy online {market_name} local delivery price in {current_market().get('currency','local currency')} {LANG_INSTR[lang]}",
+            prompt_text or f"ابحث عن {search_name} في {market_name} فقط، أي متجر محلي يبيعه، بسعر رقمي واضح ورابط صفحة منتج مباشر. {LANG_INSTR[lang]}",
+            f"{search_name} United States buy online exact product direct product page current price USD; US stores only. {LANG_INSTR[lang]}",
+            f"{search_name} China buy online exact product direct product page current price CNY RMB; Chinese stores only such as AliExpress Alibaba 1688 Taobao Tmall JD DHgate. {LANG_INSTR[lang]}",
         ]
     # MARKET_CTX يضيع داخل ThreadPool؛ نمرر سوق المستخدم مع كل استدعاء وإلا رجع البحث للكويت الافتراضية.
     market_snapshot = current_market()
@@ -2690,33 +2843,27 @@ def _old_layer_search(query, lang, prompt_text=None, lens_context=None, allow_gl
                 merged_urls[name] = url
 
     verified = verify_offers(merged_urls, query)
-    if allow_global and verified:
-        verified = {
-            name: info for name, info in verified.items()
-            if not is_local_lens_result({"link": info.get("url", ""), "source": name, "title": info.get("title", "")})
-        }
-        print(f"GLOBAL OLD LAYER AFTER LOCAL EXCLUSION: {list(verified)}")
     if lens_context:
         verified = filter_verified_with_lens(verified, lens_context)
     verified = filter_same_size(verified, query)
-    if not allow_global:
-        # v68: البحث المحلي لا يعرض مواقع عالمية أبداً — تظهر فقط بعد موافقة المستخدم.
-        verified = filter_local_market_only(verified)
+    verified = filter_allowed_market_results(verified, exclude_local=allow_global)
+    if allow_global:
+        print(f"GLOBAL OLD LAYER US/CN ONLY: {list(verified)}")
     if not verified:
         print("OLD LAYER: no verified direct offers")
         return "", {}
 
-    if allow_global:
-        # عالمي: كل سعر يُحوَّل إلى عملة المستخدم المحلية بالفلوس ثم نرتب بالأرخص المحوَّل.
-        for info in verified.values():
-            shown, converted = display_global_price(info["price"], "", info.get("currency", ""), lang)
-            info["shown"] = shown
-            info["sort_price"] = converted if converted is not None else info["price"]
-        sorted_v = sorted(verified.items(), key=lambda x: x[1]["sort_price"])
-    else:
-        for info in verified.values():
-            info["shown"] = f"{format_price(info['price'])} {currency_label(lang)}"
-        sorted_v = sorted(verified.items(), key=lambda x: x[1]["price"])
+    prepared = []
+    for name, info in verified.items():
+        ready = prepare_market_offer(info, name, lang)
+        if not ready:
+            continue
+        market_rank, sort_price, shown = ready
+        info["market_rank"] = market_rank
+        info["sort_price"] = sort_price
+        info["shown"] = shown
+        prepared.append((name, info))
+    sorted_v = sorted(prepared, key=lambda x: (x[1].get("market_rank", 99), x[1].get("sort_price", 10**9)))
     title = product_title(best_txt, query)
     lines = [title, ""]
     new_urls = {}
@@ -2782,20 +2929,19 @@ def _merge_two_layers(query, lang, new_result, old_result, lens_context=None, sh
         if previous is None or layer_pref.get(offer["layer"], 0) > layer_pref.get(previous["layer"], 0):
             dedup[key] = offer
 
-    offers = list(dedup.values())
+    offers = [o for o in dedup.values() if o.get("market_rank", 99) != 99]
     def rank(o):
         quality = 0
         quality += 100 if o.get("exact") else 0
-        quality += 40 if o.get("is_local") else 0
-        # v69: أولوية الفئة — متخصص الفئة يسبق المنصات العامة.
+        # v69: أولوية الفئة داخل السوق نفسه فقط.
         quality += _store_priority_value(o.get("name", ""), o.get("url", ""), query) * 2
         quality += {"shopping": 15, "new": 12, "old": 8}.get(o.get("layer"), 8)
         quality += max(0, 20 - min(int(o.get("lens_position", 999)), 20))
-        return (-quality, o.get("price", 10**9))
+        # v72: رتبة السوق هي المفتاح الأول ولا يمكن للسعر/الجودة تجاوزها.
+        return (o.get("market_rank", 99), -quality, o.get("price", 10**9))
     offers.sort(key=rank)
     chosen = offers[:MAX_STORES]
-    # الجودة تُستخدم لاختيار المرشحين فقط؛ العرض النهائي دائماً من الأرخص للأغلى و✅ للأرخص.
-    chosen.sort(key=lambda o: o.get("price") if o.get("price") is not None else 10**9)
+    chosen.sort(key=lambda o: (o.get("market_rank", 99), o.get("price") if o.get("price") is not None else 10**9))
 
     # v70: العرض للمستخدم العربي دائماً بعنوان عربي — نأخذ أول عنوان فيه حروف عربية
     # (من رد Gemini أو من استعلام المستخدم الأصلي)، وعنوان Lens الإنجليزي احتياط أخير.
@@ -2829,7 +2975,7 @@ def search_product(query, lang, prompt_text=None, source_image_b64=None, source_
     """v69 three-layer search: Google Shopping (structured prices) + Lens/priority layer + broad layer.
 
     طبقة Shopping تنطلق بالتوازي منذ البداية فلا تضيف زمناً، وتُدمج نتائجها مع الطبقتين
-    بترتيب فئة المنتج ثم من الأرخص إلى الأغلى.
+    بترتيب السوق أولاً (محلي -> أمريكا -> الصين) ثم السعر داخل كل سوق.
     """
     cached = None if source_image_b64 or lens_context else cache_get(query, lang)
     if cached:
@@ -3444,34 +3590,57 @@ def choose_image_identity(image_b64, mime_type, lens, vision_name):
     return final_name or vision_name, None, "VISION"
 
 def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
-    """v71: تمرير نتائج Google Lens للمستخدم كما هي — رسالة واحدة بالقائمة ثم أزرار للروابط.
-
-    بدون فلاتر هوية أو حجم أو محلية: هذا حرفياً «اللي طلع من Google».
-    """
-    matches = [m for m in (lens.get("matches") or []) if (m.get("title") or "").strip()]
+    """v72: Lens مباشر لكن بفلتر وترتيب السوق: محلي -> أمريكا -> الصين فقط."""
+    raw_matches = [m for m in (lens.get("matches") or []) if (m.get("title") or "").strip()]
+    matches = [m for m in raw_matches if result_market_rank(m) != 99]
+    matches.sort(key=lambda m: (
+        result_market_rank(m),
+        0 if m.get("exact") else 1,
+        0 if m.get("section") == "visual_matches" else 1,
+        int(m.get("position") or 999),
+    ))
     if not matches:
         return False
+
     lines = [T(lang, "lens_header"), ""]
     buttons, seen_urls, listed = [], set(), 0
+    local_name = current_market().get("country_name") or "Local"
+    labels_ar = {0: local_name, 1: "أمريكا", 2: "الصين"}
+    labels_en = {0: local_name, 1: "USA", 2: "China"}
+    labels = labels_ar if lang == "ar" else labels_en
+    last_rank = None
+
     for m in matches:
+        market_rank = result_market_rank(m)
         title = m["title"].strip()[:80]
         source = (m.get("source") or "").strip()
-        local = is_local_lens_result(m)
-        price_txt = ""
         raw_price = str(m.get("price") or "").strip()
-        if raw_price or m.get("price_value") not in (None, ""):
-            if local:
-                price_txt = format_lens_price(raw_price, m.get("price_value"), lang, m.get("currency") or None)
+        price_value = m.get("price_value")
+        currency = (m.get("currency") or "").strip()
+        price_txt = ""
+
+        if raw_price or price_value not in (None, ""):
+            if market_rank == 0:
+                price_txt = format_lens_price(raw_price, price_value, lang, currency or None)
             else:
-                price_txt = raw_price
+                src = currency.upper().strip() if currency else ("USD" if is_us_market_result(m) else "CNY")
+                price_txt, _ = display_global_price(price_value, raw_price, src, lang)
+
+        if listed < LENS_DIRECT_MAX_LINES and market_rank != last_rank:
+            if listed > 0:
+                lines.append("")
+            lines.append(f"📍 {labels.get(market_rank, '')}")
+            last_rank = market_rank
+
         seg = f"• {title}"
         if price_txt:
             seg += f" — {price_txt}"
         if source:
-            seg += f" ({source}{' 🇰🇼' if local else ''})"
+            seg += f" ({source})"
         if listed < LENS_DIRECT_MAX_LINES:
             lines.append(seg)
             listed += 1
+
         url = (m.get("link") or "").strip()
         try:
             host = urllib.parse.urlparse(url).netloc.lower()
@@ -3483,12 +3652,13 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
             seen_urls.add(url)
         if listed >= LENS_DIRECT_MAX_LINES and len(buttons) >= MAX_STORES:
             break
+
     send_whatsapp_text(from_number, "\n".join(lines)[:3900], bot_id)
     for body, url, src in buttons:
         send_whatsapp_cta(from_number, body[:1000], url, bot_id, f"🛒 {src[:18]}")
     chosen_title = ((lens.get("chosen") or {}).get("title") or matches[0]["title"]).strip()
     LAST_SEARCH[from_number] = {"product": (caption or chosen_title)}
-    print(f"LENS DIRECT SENT: {listed} lines, {len(buttons)} buttons")
+    print(f"LENS DIRECT SENT v72: {listed} lines, {len(buttons)} buttons")
     return True
 
 def process_single_image(message,bot_id,lang="ar"):
@@ -3869,4 +4039,4 @@ def process_location_message(message, bot_id):
     route_pending_after_location(from_number)
 
 @app.get("/")
-async def health(): return {"status":"v71 LENS DIRECT PASSTHROUGH", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
+async def health(): return {"status":"v72 LOCAL-US-CHINA", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
