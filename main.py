@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v79-text77-us-affiliate-focus-20260818"
+BUILD_ID = "v79-stock-filter-two-per-store-20260818"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE/TEXT -> FLAGS + CLEAR LOCAL PRICES + LOCAL/US/CHINA")
@@ -353,6 +353,9 @@ print(
 VERIFIED_PAGE_CACHE = {}
 VERIFIED_PAGE_CACHE_MAX = int(os.environ.get("VERIFIED_PAGE_CACHE_MAX", "600"))
 OOS_PHRASES = ["out of stock","غير متوفر","نفدت الكمية","غير متاح","sold out","غير متوفر حاليا","نفذت","not available","temporarily unavailable"]
+# v79.4: نسمح حتى نتيجتين من نفس المتجر/الدومين، ونحاول حذف صفحات المنتج المؤكد نفادها.
+RESULTS_PER_STORE_MAX = max(1, int(os.environ.get("RESULTS_PER_STORE_MAX", "2")))
+ENABLE_RESULT_STOCK_CHECK = env_bool("ENABLE_RESULT_STOCK_CHECK", True)
 LISTING_URL_PARTS = ["/search","/s?","/category","/categories","/collection","/collections","/shop/category","?q=","/search_results","/shop/","/listing","/c/"]
 
 def format_price(p, currency=None):
@@ -1017,6 +1020,59 @@ def _prune_verified_page_cache():
     items = sorted(VERIFIED_PAGE_CACHE.items(), key=lambda kv: kv[1].get("ts", 0))
     for k, _ in items[: len(items) - VERIFIED_PAGE_CACHE_MAX // 2]:
         VERIFIED_PAGE_CACHE.pop(k, None)
+
+def _result_confirmed_out_of_stock(item):
+    """Best-effort stock guard for displayed text/Lens results.
+
+    Returns True only when the source/page positively says the item is unavailable.
+    Network blocks, anti-bot pages, parsing failures, or missing stock metadata are treated
+    as UNKNOWN and therefore kept — we never hide an offer merely because we could not verify it.
+    """
+    if not ENABLE_RESULT_STOCK_CHECK:
+        return False
+    if isinstance(item, dict) and item.get("in_stock") is False:
+        return True
+    url = (item.get("link") or item.get("url") or "").strip() if isinstance(item, dict) else str(item or "").strip()
+    if not url.startswith(("http://", "https://")):
+        return False
+    try:
+        cached = VERIFIED_PAGE_CACHE.get(url)
+        if cached and (time.time() - cached.get("ts", 0) < 600):
+            info = cached.get("data")
+        else:
+            html = fetch_html(url)
+            if not html:
+                return False
+            info = parse_product_data(html, url)
+            if info:
+                VERIFIED_PAGE_CACHE[url] = {"data": info, "ts": time.time()}
+                _prune_verified_page_cache()
+        return bool(info and info.get("available") is False)
+    except Exception as e:
+        print(f"STOCK CHECK UNKNOWN: {url[:90]} -> {e}")
+        return False
+
+
+def _filter_confirmed_oos(items, label="RESULT"):
+    """Check candidates concurrently; preserve original order and keep unknown stock states."""
+    seq = list(items or [])
+    if not seq or not ENABLE_RESULT_STOCK_CHECK:
+        return seq
+    try:
+        flags = list(RESOLVER.map(_result_confirmed_out_of_stock, seq))
+    except Exception as e:
+        print(f"{label} STOCK FILTER ERR: {e}")
+        return seq
+    kept = []
+    for item, is_oos in zip(seq, flags):
+        if is_oos:
+            url = (item.get("link") or item.get("url") or "") if isinstance(item, dict) else ""
+            title = (item.get("title") or item.get("source") or "") if isinstance(item, dict) else ""
+            print(f"{label} OOS SKIP: {title[:70]} -> {url[:100]}")
+            continue
+        kept.append(item)
+    return kept
+
 
 def verify_offers(urls_map, query):
     if not urls_map: return {}
@@ -3891,10 +3947,15 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
             0 if m.get("section") == "visual_matches" else 1,
             int(m.get("position") or 999),
         ))
+        # فحص مخزون لأفضل المرشحين فقط حتى لا نبطئ Lens بعشرات طلبات HTTP.
+        # نأخذ cap+2 لإعطاء بديلين إذا كانت بعض البطاقات خالصة.
+        _cap = {0: LENS_DIRECT_LOCAL_MAX, 1: LENS_DIRECT_US_MAX, 2: LENS_DIRECT_CN_MAX}.get(rank, 0)
+        _probe_n = max(_cap + 2, _cap)
+        _head = _filter_confirmed_oos(buckets[rank][:_probe_n], f"LENS-{rank}")
+        buckets[rank] = _head + buckets[rank][_probe_n:]
 
-    # حدود قصوى فقط وليست حصصاً. v79: نتيجة واحدة فقط من كل متجر/merchant.
-    # Lens قد يرجّع SHEIN أو Ubuy عدة مرات لنفس المنتج بروابط/عناوين مختلفة؛
-    # بما أن الهدف مقارنة المتاجر، نحتفظ بأفضل بطاقة فقط لكل متجر.
+    # حدود قصوى فقط وليست حصصاً. نسمح حتى نتيجتين من نفس المتجر/merchant.
+    # نمنع تكرار نفس الرابط نفسه، لكن قد يظهر SKU/عرض ثانٍ من Amazon أو eBay أو غيرهما.
     def _merchant_key(m):
         url = (m.get("link") or "").strip()
         source = re.sub(r"\s+", " ", (m.get("source") or "").strip().lower())
@@ -3921,7 +3982,7 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
     market_caps = {0: LENS_DIRECT_LOCAL_MAX, 1: LENS_DIRECT_US_MAX, 2: LENS_DIRECT_CN_MAX}
     selected = []
     seen_urls = set()
-    seen_merchants = set()
+    merchant_counts = defaultdict(int)
     for rank in (0, 1, 2):
         taken = 0
         cap = market_caps.get(rank, 0)
@@ -3936,12 +3997,15 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
             if not (url.startswith("http") and host and "google." not in host):
                 continue
             merchant = _merchant_key(m)
-            if url in seen_urls or merchant in seen_merchants:
-                print(f"LENS DUP STORE SKIP: merchant={merchant} title={(m.get('title') or '')[:70]}")
+            if url in seen_urls:
+                print(f"LENS DUP URL SKIP: merchant={merchant} title={(m.get('title') or '')[:70]}")
+                continue
+            if merchant_counts[merchant] >= RESULTS_PER_STORE_MAX:
+                print(f"LENS STORE CAP SKIP: merchant={merchant} cap={RESULTS_PER_STORE_MAX}")
                 continue
             selected.append(m)
             seen_urls.add(url)
-            seen_merchants.add(merchant)
+            merchant_counts[merchant] += 1
             taken += 1
             if taken >= cap or len(selected) >= LENS_DIRECT_MAX_CTA:
                 break
@@ -3988,7 +4052,7 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
 
     chosen_title = ((lens.get("chosen") or {}).get("title") or selected[0]["title"]).strip()
     LAST_SEARCH[from_number] = {"product": (caption or chosen_title)}
-    print(f"LENS DIRECT SENT v79: {sent} CTA; unique_merchants={len(seen_merchants)}; buckets={market_counts}; caps=5/4/4; order=local->us->cn")
+    print(f"LENS DIRECT SENT v79: {sent} CTA; merchants={len(merchant_counts)}; per_store_cap={RESULTS_PER_STORE_MAX}; buckets={market_counts}; caps=5/4/4; order=local->us->cn")
     if market_counts[2] == 0:
         print("V77 WARNING: no Chinese-store Lens result survived filters")
     return sent > 0
@@ -5415,7 +5479,7 @@ def _text_price_local(raw_price, market_rank, lang):
 
 
 def send_text_lens_style_results(from_number, txt, urls, bot_id, lang, query):
-    """Typed search UI: flags + local->US->China + local-currency prices + one CTA per merchant."""
+    """Typed search UI: flags + local->US->China + local-currency prices + up to two CTAs per merchant."""
     total_cap = max(1, LENS_DIRECT_LOCAL_MAX + LENS_DIRECT_US_MAX + LENS_DIRECT_CN_MAX)
     offers = text77_extract_store_offers(txt or "", limit=max(total_cap * 2, total_cap))
     candidates = []
@@ -5430,8 +5494,11 @@ def send_text_lens_style_results(from_number, txt, urls, bot_id, lang, query):
         item["market_rank"] = rank
         candidates.append(item)
 
+    # نفس حارس المخزون المستخدم في Lens: نحذف المؤكد نفاده فقط، ونبقي الحالة المجهولة.
+    candidates = _filter_confirmed_oos(candidates, "TEXT")
+
     caps = {0: LENS_DIRECT_LOCAL_MAX, 1: LENS_DIRECT_US_MAX, 2: LENS_DIRECT_CN_MAX}
-    selected, seen_merchants = [], set()
+    selected, merchant_counts, seen_urls = [], defaultdict(int), set()
     for rank in (0, 1, 2):
         taken = 0
         bucket = [x for x in candidates if x["market_rank"] == rank]
@@ -5444,9 +5511,13 @@ def send_text_lens_style_results(from_number, txt, urls, bot_id, lang, query):
             except Exception:
                 host = ""
             merchant = host or normalize_name(item["source"])
-            if not merchant or merchant in seen_merchants:
+            url = (item.get("link") or "").strip()
+            if not merchant or url in seen_urls:
                 continue
-            seen_merchants.add(merchant)
+            if merchant_counts[merchant] >= RESULTS_PER_STORE_MAX:
+                continue
+            merchant_counts[merchant] += 1
+            seen_urls.add(url)
             selected.append(item)
             taken += 1
             if taken >= caps.get(rank, 0):
@@ -5476,7 +5547,7 @@ def send_text_lens_style_results(from_number, txt, urls, bot_id, lang, query):
         send_whatsapp_cta(from_number, body[:1000], item["link"], bot_id, f"🛒 {store[:18]}")
 
     LAST_SEARCH[from_number] = {"product": query}
-    print(f"TEXT LENS-STYLE SENT: {len(selected)} CTA; buckets={counts}; caps=5/4/4; order=local->us->cn")
+    print(f"TEXT LENS-STYLE SENT: {len(selected)} CTA; per_store_cap={RESULTS_PER_STORE_MAX}; buckets={counts}; caps=5/4/4; order=local->us->cn")
     return True
 
 
