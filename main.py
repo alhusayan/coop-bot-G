@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v79-text77-service-map-cart-picker-typo-ai-20260818"
+BUILD_ID = "v79-text77-us-affiliate-focus-20260818"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE/TEXT -> FLAGS + CLEAR LOCAL PRICES + LOCAL/US/CHINA")
@@ -3477,29 +3477,6 @@ def process_interactive_message(message, bot_id):
             send_whatsapp_text(from_number, ("اكتب اسم المنتج اللي تبيه وأدور لك عليه 👍" if lang_ == "ar" else "Type the product name and I'll search it for you 👍"), bot_id)
         return
 
-    # Typed basket product selection: tapping an item starts the normal text-search flow.
-    if btn_id.startswith("basketprod_"):
-        item = PENDING_CART_PRODUCT_PICKS.get(from_number) or {}
-        if item and time.time() - item.get("ts", 0) > GLOBAL_PENDING_TTL:
-            item = {}
-        idx = int(btn_id[11:]) if btn_id[11:].isdigit() else -1
-        products = item.get("products") or []
-        picked = products[idx] if 0 <= idx < len(products) else ""
-        lang_ = item.get("lang") or USER_LANG.get(from_number, "ar")
-        if picked:
-            activate_market(from_number)
-            run_single_typed_product_flow(
-                from_number, picked, item.get("bot_id") or bot_id, lang_
-            )
-        else:
-            send_whatsapp_text(
-                from_number,
-                ("قائمة المنتجات انتهت 😅 دز المنتجات مرة ثانية." if lang_ == "ar"
-                 else "That product list expired 😅 send the products again."),
-                bot_id,
-            )
-        return
-
     # v77.7 typed basket store selection.
     if btn_id.startswith("cart_"):
         item = PENDING_CART_PICKS.get(from_number)
@@ -4204,7 +4181,6 @@ def send_last_search_map(from_number, bot_id, lang):
 
 PENDING_BRAND_PICKS = {}
 PENDING_CART_PICKS = {}
-PENDING_CART_PRODUCT_PICKS = {}
 SEARCH_RUNS = int(os.environ.get("SEARCH_RUNS", "4"))
 V26_SEARCH_POOL = ThreadPoolExecutor(max_workers=8)
 SIMILAR_MAX_STORES = max(MAX_STORES, int(os.environ.get("SIMILAR_MAX_STORES", "10")))
@@ -4275,8 +4251,6 @@ def text77_market_instruction():
         f"For PRODUCT/STORE searches return ONLY: (1) stores in {place}, then (2) United States stores, then (3) China stores. "
         "Reject stores from every other country. Do not require US/China stores to deliver locally. "
         "Maximum results are 5 local, 4 United States, 4 China; these are caps, never quotas. "
-        "For the UNITED STATES pass, actively try Amazon.com, eBay.com, Newegg.com, Walmart.com and BestBuy.com first, while still allowing other US stores. "
-        "For the CHINA pass, actively try AliExpress, Temu, Alibaba and SHEIN first, while still allowing other China stores. "
         f"Local prices must use {currency}. US prices MUST stay in USD. China prices MUST stay in the exact source currency (USD or CNY/RMB). NEVER convert a foreign price to {currency}; the app converts it after retrieval. "
         "The LOCAL -> US -> CHINA order is mandatory and more important than price. "
         "For SERVICES, keep providers local to the user's market only.\n"
@@ -4909,65 +4883,6 @@ def cart_item_search(product, lang):
         return txt, urls
     return "", {}
 
-def send_cart_product_picker(products, from_number, bot_id, lang="ar"):
-    """Typed multi-product request: show products as a list; tapping one starts its normal search flow."""
-    clean = []
-    seen = set()
-    for p in products or []:
-        q = " ".join(str(p or "").split()).strip()
-        key = normalize_ar(q)
-        if not q or key in seen:
-            continue
-        seen.add(key)
-        clean.append(q)
-    if not clean:
-        send_whatsapp_text(from_number, T(lang, "not_found"), bot_id)
-        return False
-
-    PENDING_CART_PRODUCT_PICKS[from_number] = {
-        "products": clean[:10], "bot_id": bot_id, "lang": lang, "ts": time.time()
-    }
-    title_map = arabic_titles(clean[:10]) if lang == "ar" else {}
-    rows = []
-    for i, product in enumerate(clean[:10]):
-        shown = title_map.get(product, product) if lang == "ar" else product
-        desc = product if shown != product else ""
-        rows.append({
-            "id": f"basketprod_{i}",
-            "title": shown[:24],
-            "description": desc[:72],
-        })
-    body = (
-        f"🧺 لقيت {len(clean)} منتجات. اختر المنتج اللي تبي أبحث عنه 👇"
-        if lang == "ar"
-        else f"🧺 I found {len(clean)} products. Pick the one you want me to search 👇"
-    )
-    button = "اختر المنتج" if lang == "ar" else "Pick product"
-    return send_whatsapp_list(from_number, body, rows, bot_id, button)
-
-
-def run_single_typed_product_flow(from_number, product, bot_id, lang):
-    """Run the same classification/search behavior used for a normal one-product typed request."""
-    try:
-        rtype = classify_request_type(product)
-    except Exception as e:
-        print(f"TEXT77 CLASSIFY CRASH for {product!r}: {e} -> fallback GENERIC")
-        rtype = "GENERIC"
-    if rtype == "NONE":
-        send_whatsapp_text(from_number, T(lang, "chat_redirect"), bot_id)
-        return
-    if rtype == "SERVICE":
-        execute_service_search(from_number, product, product, bot_id, lang)
-        return
-    if rtype == "GENERIC":
-        try:
-            if run_brand_comparison(from_number, product, bot_id, lang):
-                return
-        except Exception as e:
-            print(f"TEXT77 BRAND COMPARE CRASH: {e}")
-    execute_product_search(from_number, product, bot_id, lang)
-
-
 def run_cart_comparison(products, from_number, bot_id, lang="ar"):
     """v75: السلة الموحدة — بدل أرخص متجر لكل صنف لحاله (وتشتت الطلب على 4 متاجر)،
 
@@ -5333,6 +5248,112 @@ def legacy_v26_best_of_search(parts, max_results=None, merge_offers=False, merge
     return best_txt,merged_urls
 
 
+
+US_AFFILIATE_FOCUS = (
+    ("amazon.com", "Amazon"),
+    ("ebay.com", "eBay"),
+    ("newegg.com", "Newegg"),
+    ("walmart.com", "Walmart"),
+    ("bestbuy.com", "Best Buy"),
+)
+
+
+def _us_affiliate_priority(name, url):
+    """Lower = stronger priority inside the US bucket only."""
+    hay = f"{name or ''} {url or ''}".lower()
+    for idx, (domain, label) in enumerate(US_AFFILIATE_FOCUS):
+        if domain in hay or normalize_name(label) in normalize_name(hay):
+            return idx
+    return 99
+
+
+def _targeted_us_affiliate_search(product, lang):
+    """Do real dedicated US passes so Amazon/eBay are not merely prompt preferences.
+
+    We use three focused searches: Amazon, eBay, then the other high-value US retailers.
+    Only grounded direct product links with numeric USD prices survive downstream.
+    """
+    groups = [
+        ("Amazon", "amazon.com"),
+        ("eBay", "ebay.com"),
+        ("Newegg, Walmart, Best Buy", "newegg.com walmart.com bestbuy.com"),
+    ]
+    market_snapshot = current_market()
+    futures = []
+    for label, domains in groups:
+        prompt = (
+            f"Search for this exact product: {product}. United States only. "
+            f"FOCUS ONLY on {label}. Search these domains directly: {domains}. "
+            "Return only an actually matching product that is currently listed with a clear numeric USD price "
+            "and a direct product-page URL. Do not return search/category/home pages. "
+            "If none of these stores has the exact product, return no store rather than substituting another merchant. "
+            "Format shopping offers as: • Store — exact product title — 49.99 USD. "
+            "End with LINKS using the real domain from Google grounding. "
+            f"{TEXT77_LANG_INSTR[lang]}"
+        )
+        futures.append(V26_SEARCH_POOL.submit(
+            _run_with_market, market_snapshot,
+            legacy_v26_call_gemini, [{"text": prompt}], LEGACY_TEXT_SEARCH_SYSTEM, 4
+        ))
+    out = []
+    for fut in futures:
+        try:
+            txt, urls = fut.result(timeout=120)
+            if txt and urls:
+                out.append((txt, urls))
+        except Exception as e:
+            print(f"US AFFILIATE TARGETED SEARCH ERR: {e}")
+    print(f"US AFFILIATE TARGETED PASSES: {[(len(text77_extract_store_offers(t, limit=10)), list(u)) for t,u in out]}")
+    return out
+
+
+def _merge_affiliate_results(base_txt, base_urls, targeted_results, product):
+    """Merge targeted affiliate offers into the normal LOCAL/US/CHINA result pool."""
+    records = []
+    seen_urls = set()
+    sources = [(base_txt, base_urls, False)] + [(t, u, True) for t, u in (targeted_results or [])]
+    for txt, urls, targeted in sources:
+        for offer in text77_extract_store_offers(txt or "", limit=40):
+            item = _text_offer_item(offer, urls or {})
+            url = item.get("link") or ""
+            if not url.startswith(("http://", "https://")) or url in seen_urls:
+                continue
+            rank = result_market_rank(item)
+            if rank == 99:
+                continue
+            # Targeted passes are US-only by design; reject accidental non-US leakage.
+            if targeted and rank != 1:
+                continue
+            seen_urls.add(url)
+            records.append((rank, _us_affiliate_priority(item.get("source"), url), targeted, offer, url))
+
+    # Preserve local first. In US, affiliate focus wins. China follows normally.
+    records.sort(key=lambda r: (r[0], r[1] if r[0] == 1 else 99, 0 if r[2] else 1))
+    lines = [f"📦 {product}", ""]
+    merged_urls = {}
+    used_hosts = set()
+    counts = {0: 0, 1: 0, 2: 0}
+    caps = {0: LENS_DIRECT_LOCAL_MAX, 1: LENS_DIRECT_US_MAX, 2: LENS_DIRECT_CN_MAX}
+    for rank, _prio, _targeted, offer, url in records:
+        if counts[rank] >= caps.get(rank, 0):
+            continue
+        try:
+            host = urllib.parse.urlparse(url).netloc.lower().replace("www.", "")
+        except Exception:
+            host = url
+        if host in used_hosts:
+            continue
+        used_hosts.add(host)
+        name = str(offer.get("name") or "").strip()
+        line = str(offer.get("line") or "").strip()
+        line = re.sub(r"^(?:✅|🏆|•)\s*", "", line).strip()
+        prefix = "✅" if not any(counts.values()) else "•"
+        lines.append(f"{prefix} {line}")
+        merged_urls[name] = url
+        counts[rank] += 1
+    return "\n".join(lines), merged_urls
+
+
 def legacy_text_product_search(product, lang):
     """v77.7 typed engine, automatic LOCAL -> US -> CHINA search."""
     cache_query = f"__TEXT79_LENS_STYLE__::{product}"
@@ -5360,10 +5381,21 @@ def legacy_text_product_search(product, lang):
             "لكل نتيجة اذكر اسم المتجر، اسم المنتج المطابق، السعر الرقمي والعملة، واربطه بصفحة المنتج المباشرة. "
             f"{TEXT77_LANG_INSTR[lang]}"
         )
-        txt, urls = legacy_v26_best_of_search(
-            [{"text": prompt}], max_results=total_cap,
-            merge_offers=True, merge_title=product
+        # Normal broad search + dedicated affiliate-focused US passes.
+        # The dedicated passes prevent Amazon/eBay from disappearing merely because
+        # four other US stores filled the normal result bucket first.
+        market_snapshot = current_market()
+        broad_future = V26_SEARCH_POOL.submit(
+            _run_with_market, market_snapshot, legacy_v26_best_of_search,
+            [{"text": prompt}], total_cap, True, product
         )
+        targeted_results = _targeted_us_affiliate_search(primary, lang)
+        try:
+            txt, urls = broad_future.result(timeout=150)
+        except Exception as e:
+            print(f"BROAD TEXT SEARCH ERR: {e}")
+            txt, urls = "", {}
+        txt, urls = _merge_affiliate_results(txt, urls, targeted_results, product)
         if not txt or is_no_result_answer(txt) or not text77_extract_store_offers(txt, limit=total_cap):
             continue
         if urls:
@@ -5411,8 +5443,7 @@ def execute_service_search(from_number, service_desc, original_text, bot_id, lan
         send_whatsapp_text(from_number, T(lang, "not_found"), bot_id)
         return
     send_whatsapp_text(from_number, txt, bot_id)
-    # Services: restore the automatic nearby-map button, while product searches stay map-free.
-    send_maps_button(from_number, service_desc, bot_id, lang)
+    # typed service search: no automatic map
 
 
 def _text_offer_item(offer, urls):
@@ -5499,7 +5530,10 @@ def send_text_lens_style_results(from_number, txt, urls, bot_id, lang, query):
     selected, seen_merchants = [], set()
     for rank in (0, 1, 2):
         taken = 0
-        for item in [x for x in candidates if x["market_rank"] == rank]:
+        bucket = [x for x in candidates if x["market_rank"] == rank]
+        if rank == 1:
+            bucket.sort(key=lambda x: _us_affiliate_priority(x.get("source"), x.get("link")))
+        for item in bucket:
             try:
                 host = urllib.parse.urlparse(item["link"]).netloc.lower().split(":")[0]
                 host = host[4:] if host.startswith("www.") else host
@@ -5973,49 +6007,6 @@ def parse_user_intent(user_text, lang):
         return {"intent": "search", "products": [cleaned]}
     return {"intent": "greeting" if not compact.strip() or any(g in compact for g in ("سلام", "هلا", "مرحبا")) else "chat", "products": []}
 
-TYPO_NORMALIZER_SYSTEM = """أنت مصحح ذكي لأسماء المنتجات والخدمات قبل البحث.
-المستخدم قد يخطئ بحرف أو حرفين، يكرر حرفاً، يحذف حرفاً، أو يكتب البراند بتهجئة قريبة.
-أعد JSON فقط بهذا الشكل: {"products":["..."]}
-
-قواعد صارمة:
-- صحح فقط عندما يكون المقصود واضحاً بدرجة عالية.
-- افهم أسماء البراندات والموديلات الشائعة بذكاء: samsng -> Samsung، ايفونن -> ايفون، crocks -> Crocs.
-- لا تغيّر البراند أو الموديل أو رقم الإصدار أو السعة أو الحجم أو الوزن أو اللون إذا كانت صحيحة.
-- لا تستبدل منتجاً بمنتج آخر لمجرد أنه أشهر.
-- إذا الاسم قد يكون براند/موديل صحيحاً وغير مألوف لك، اتركه كما كتبه المستخدم.
-- حافظ على لغة المستخدم قدر الإمكان.
-- حافظ على عدد العناصر وترتيبها.
-"""
-
-
-def smart_normalize_typed_products(products):
-    """AI typo tolerance for typed queries; one batched call, conservative on brands/models."""
-    original = [" ".join(str(x or "").split()).strip() for x in (products or []) if str(x or "").strip()]
-    if not original:
-        return []
-    try:
-        prompt = json.dumps({"products": original}, ensure_ascii=False)
-        raw, _ = text77_call_gemini(
-            [{"text": prompt}],
-            system=TYPO_NORMALIZER_SYSTEM,
-            use_search=False,
-        )
-        m = re.search(r"\{.*\}", raw or "", flags=re.S)
-        if not m:
-            return original
-        data = json.loads(m.group(0))
-        fixed = [str(x).strip() for x in (data.get("products") or [])]
-        if len(fixed) != len(original) or any(not x for x in fixed):
-            return original
-        for before, after in zip(original, fixed):
-            if normalize_ar(before) != normalize_ar(after):
-                print(f"TEXT TYPO NORMALIZED: {before!r} -> {after!r}")
-        return fixed
-    except Exception as e:
-        print(f"TEXT TYPO NORMALIZER FAIL: {e}")
-        return original
-
-
 def process_text_message(message,bot_id,onboarding_checked=False):
     from_number = "unknown"
     try:
@@ -6058,15 +6049,25 @@ def process_text_message(message,bot_id,onboarding_checked=False):
         if intent == "chat":
             send_whatsapp_text(from_number, T(lang, "welcome_reply"), bot_id); return
         products = [p for p in (parsed.get("products") or []) if p.strip()] or extract_products(user_text)
-        # Tolerate obvious 1-2 character typos / near spellings before classification and search.
-        products = smart_normalize_typed_products(products)
         if intent == "service" or is_service_request(products[0] if products else user_text):
             execute_service_search(from_number, products[0] if products else user_text, user_text, bot_id, lang); return
         if len(products)==1:
-            run_single_typed_product_flow(from_number, products[0], bot_id, lang)
+            try:
+                rtype = classify_request_type(products[0])
+            except Exception as e:
+                print(f"TEXT77 CLASSIFY CRASH for {products[0]!r}: {e} -> fallback GENERIC"); rtype = "GENERIC"
+            if rtype == "NONE":
+                send_whatsapp_text(from_number, T(lang, "chat_redirect"), bot_id); return
+            if rtype == "SERVICE":
+                execute_service_search(from_number, products[0], user_text, bot_id, lang); return
+            if rtype == "GENERIC":
+                try:
+                    if run_brand_comparison(from_number, products[0], bot_id, lang): return
+                except Exception as e:
+                    print(f"TEXT77 BRAND COMPARE CRASH: {e}")
+            execute_product_search(from_number, products[0], bot_id, lang)
         else:
-            # A typed "basket" is now a product picker; no automatic full-basket comparison.
-            send_cart_product_picker(products, from_number, bot_id, lang)
+            run_cart_comparison(products, from_number, bot_id, lang)
     except Exception as e:
         print(f"TEXT77 PROCESS_TEXT_MESSAGE CRASH: {e} for {from_number}")
         try:
