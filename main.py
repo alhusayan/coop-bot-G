@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v79-text77-lens-style-local-us-cn-20260818"
+BUILD_ID = "v79-text77-lens-style-local-currency-20260818"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE/TEXT -> FLAGS + CLEAR LOCAL PRICES + LOCAL/US/CHINA")
@@ -5339,8 +5339,29 @@ def _text_offer_price_and_title(detail):
     return text, ""
 
 
+def _text_price_local(raw_price, market_rank, lang):
+    """Convert typed-search prices to the user's local currency, matching Lens display behavior."""
+    raw = str(raw_price or "").strip()
+    if not raw:
+        return ""
+    local_cur = (current_market().get("currency") or "").upper().strip()
+    src = detect_currency_code(raw, "")
+    # If Gemini omitted the currency, infer it only from the already-classified market bucket.
+    if not src:
+        if market_rank == 0:
+            src = local_cur
+        elif market_rank == 1:
+            src = "USD"
+        elif market_rank == 2:
+            src = "CNY"
+    if market_rank == 0 and (not src or src == local_cur):
+        return format_lens_price(raw, None, lang, local_cur or src or None)
+    shown, _ = display_global_price(None, raw, src, lang)
+    return shown or raw
+
+
 def send_text_lens_style_results(from_number, txt, urls, bot_id, lang, query):
-    """Typed search UI: flags + local->US->China + one CTA per merchant."""
+    """Typed search UI: flags + local->US->China + local-currency prices + one CTA per merchant."""
     total_cap = max(1, LENS_DIRECT_LOCAL_MAX + LENS_DIRECT_US_MAX + LENS_DIRECT_CN_MAX)
     offers = text77_extract_store_offers(txt or "", limit=max(total_cap * 2, total_cap))
     candidates = []
@@ -5393,7 +5414,8 @@ def send_text_lens_style_results(from_number, txt, urls, bot_id, lang, query):
         title = re.sub(r"\s+", " ", shown_title or query).strip()
         if len(title) > 105:
             title = title[:102].rstrip(" ,-|—") + "…"
-        body = f"{flag} {store}\n{title}\n💰 {raw_price or no_price}"
+        shown_price = _text_price_local(raw_price, rank, lang) if raw_price else ""
+        body = f"{flag} {store}\n{title}\n💰 {shown_price or no_price}"
         send_whatsapp_cta(from_number, body[:1000], item["link"], bot_id, f"🛒 {store[:18]}")
 
     LAST_SEARCH[from_number] = {"product": query}
