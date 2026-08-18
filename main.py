@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v79-lens-unchanged-text-v77.7-20260818"
+BUILD_ID = "v79-text77-lens-style-local-us-cn-20260818"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE/TEXT -> FLAGS + CLEAR LOCAL PRICES + LOCAL/US/CHINA")
@@ -4225,15 +4225,20 @@ COUNTRY_NAMES_AR = {
 }
 
 def text77_market_instruction():
-    """The v77.7 local-market instruction used only by typed text search."""
+    """Typed-text market rule: same market order/caps as v79 Lens UI."""
     m = current_market()
     city = m.get("city") or ""
     place = f"{city}, {m['country_name']}" if city else m["country_name"]
     currency = m.get("currency") or "local currency"
-    return (f"\nIMPORTANT CURRENT USER MARKET: {place} (country code {m['country']}). "
-            f"Return stores that sell/deliver in {place}, and prices in {currency}. "
-            "Reject India, China, or any other foreign-country result unless it explicitly delivers to the current market and no local result exists. "
-            "Ignore any older Kuwait-specific instruction when the current market is not Kuwait.\n")
+    return (
+        f"\nIMPORTANT TYPED-TEXT MARKET RULE: user market is {place} (country code {m['country']}). "
+        f"For PRODUCT/STORE searches return ONLY: (1) stores in {place}, then (2) United States stores, then (3) China stores. "
+        "Reject stores from every other country. Do not require US/China stores to deliver locally. "
+        "Maximum results are 5 local, 4 United States, 4 China; these are caps, never quotas. "
+        f"Local prices should use {currency}; US/China prices may remain in source currency because the app converts them for display. "
+        "The LOCAL -> US -> CHINA order is mandatory and more important than price. "
+        "For SERVICES, keep providers local to the user's market only.\n"
+    )
 
 def text77_store_domain(name):
     """v77.7 store-domain normalization, isolated from v79 shared store_domain()."""
@@ -5228,33 +5233,44 @@ def legacy_v26_best_of_search(parts, max_results=None, merge_offers=False, merge
 
 
 def legacy_text_product_search(product, lang):
-    """الكود القديم هو المصدر الوحيد الآن لبحث المنتج المكتوب نصياً."""
-    cached=cache_get(product,lang)
-    if cached: return cached
-    is_ar=bool(re.search(r"[\u0600-\u06FF]",str(product or "")))
-    alt=(english_search_name(product) if is_ar else arabic_search_name(product)) or ""
-    if alt.strip().lower()==str(product).strip().lower(): alt=""
-    market_name=current_market().get("country_name","Kuwait")
-    attempts=[(product,alt)] + ([(alt,product)] if alt else [])
-    soft=None
-    for primary,secondary in attempts:
-        extra=(f" وابحث أيضاً بالاسم الآخر لنفس المنتج: {secondary}." if secondary else "")
-        prompt=(f"ابحث عن {primary} في {market_name}. قارن أسعار نفس المنتج بالضبط في المتاجر المحلية الحالية."
-                f"{extra} أظهر المتاجر التي لديها سعر حالي ومصدر Google حقيقي. {LANG_INSTR[lang]}")
-        txt,urls=legacy_v26_best_of_search([{"text":prompt}],max_results=MAX_STORES)
-        if not txt or is_no_result_answer(txt) or not text77_extract_store_offers(txt):
+    """v77.7 typed engine, automatic LOCAL -> US -> CHINA search."""
+    cache_query = f"__TEXT79_LENS_STYLE__::{product}"
+    cached = cache_get(cache_query, lang)
+    if cached:
+        return cached
+    is_ar = bool(re.search(r"[\u0600-\u06FF]", str(product or "")))
+    alt = (english_search_name(product) if is_ar else arabic_search_name(product)) or ""
+    if alt.strip().lower() == str(product).strip().lower():
+        alt = ""
+    market_name = current_market().get("country_name", "Kuwait")
+    total_cap = max(1, LENS_DIRECT_LOCAL_MAX + LENS_DIRECT_US_MAX + LENS_DIRECT_CN_MAX)
+    attempts = [(product, alt)] + ([(alt, product)] if alt else [])
+    soft = None
+    for primary, secondary in attempts:
+        extra = (f" وابحث أيضاً بالاسم الآخر لنفس المنتج: {secondary}." if secondary else "")
+        prompt = (
+            f"ابحث عن نفس المنتج بالضبط: {primary}.{extra} "
+            f"ابحث تلقائياً في ثلاث مجموعات فقط وبالترتيب الإلزامي: "
+            f"أولاً متاجر {market_name} المحلية حتى {LENS_DIRECT_LOCAL_MAX}، "
+            f"ثم متاجر الولايات المتحدة حتى {LENS_DIRECT_US_MAX}، "
+            f"ثم المتاجر الصينية حتى {LENS_DIRECT_CN_MAX}. "
+            "بالنسبة للصين ابحث مباشرة في AliExpress وTemu وAlibaba وSHEIN عندما توجد نتيجة مطابقة، ويمكن استخدام متاجر صينية أخرى. "
+            "لا تعرض أي دولة رابعة. لا تجعل الأعداد حصصاً إلزامية؛ اعرض الموجود المطابق فقط. "
+            "لكل نتيجة اذكر اسم المتجر، اسم المنتج المطابق، السعر الرقمي والعملة، واربطه بصفحة المنتج المباشرة. "
+            f"{LANG_INSTR[lang]}"
+        )
+        txt, urls = legacy_v26_best_of_search(
+            [{"text": prompt}], max_results=total_cap,
+            merge_offers=True, merge_title=product
+        )
+        if not txt or is_no_result_answer(txt) or not text77_extract_store_offers(txt, limit=total_cap):
             continue
-        # احتفظ بالروابط المحلية؛ send_product_result الحالية هي التي تحرس الدومين والعرض.
-        local_urls={}
-        for n,u in (urls or {}).items():
-            if u and not text77_is_foreign_result({"link":u,"source":n,"title":n}):
-                local_urls[n]=u
-        if local_urls:
-            cache_put(product,lang,txt,local_urls)
-            return txt,local_urls
+        if urls:
+            cache_put(cache_query, lang, txt, urls)
+            return txt, urls
         if soft is None:
-            soft=(txt,{})
-    return soft or ("",{})
+            soft = (txt, {})
+    return soft or ("", {})
 
 def v26_text_search(product, lang):
     """v76.4: توافق اسمي فقط؛ البحث النصي الفعلي صار محرك الكود المرفق من المستخدم."""
@@ -5294,46 +5310,118 @@ def execute_service_search(from_number, service_desc, original_text, bot_id, lan
         send_whatsapp_text(from_number, T(lang, "not_found"), bot_id)
         return
     send_whatsapp_text(from_number, txt, bot_id)
-    send_maps_button(from_number, service_desc, bot_id, lang)
+    # typed service search: no automatic map
+
+
+def _text_offer_item(offer, urls):
+    name = str(offer.get("name") or "").strip()
+    line = str(offer.get("line") or "").strip()
+    url = match_url(name, urls or {}) or ""
+    detail = re.sub(r"^(?:✅|🏆|•)\s*", "", line).strip()
+    if name:
+        detail = re.sub(rf"^{re.escape(name)}\s*(?:—|–|-)\s*", "", detail, flags=re.I).strip()
+    return {"source": name, "title": detail, "link": url, "price": detail}
+
+
+def _text_offer_price_and_title(detail):
+    """Split a legacy text offer into compact title + price for Lens-like UI."""
+    text = re.sub(r"\s+", " ", str(detail or "")).strip()
+    patterns = [
+        r"(?:—|–|-)\s*((?:USD|US\$|KWD|KD|د\.ك|دينار|SAR|AED|QAR|OMR|BHD|CNY|RMB|\$|¥|￥)?\s*\d[\d,.]*\s*(?:USD|KWD|KD|د\.ك|دينار|SAR|AED|QAR|OMR|BHD|CNY|RMB|ر\.س|د\.إ|¥|￥)?)\s*$",
+        r"((?:USD|US\$|KWD|KD|د\.ك|دينار|SAR|AED|QAR|OMR|BHD|CNY|RMB|\$|¥|￥)\s*\d[\d,.]*|\d[\d,.]*\s*(?:USD|KWD|KD|د\.ك|دينار|SAR|AED|QAR|OMR|BHD|CNY|RMB|ر\.س|د\.إ|¥|￥))\s*$",
+    ]
+    for pat in patterns:
+        m = re.search(pat, text, flags=re.I)
+        if m:
+            price = m.group(1).strip(" —–-")
+            title = text[:m.start()].strip(" —–-")
+            return title or text, price
+    return text, ""
+
+
+def send_text_lens_style_results(from_number, txt, urls, bot_id, lang, query):
+    """Typed search UI: flags + local->US->China + one CTA per merchant."""
+    total_cap = max(1, LENS_DIRECT_LOCAL_MAX + LENS_DIRECT_US_MAX + LENS_DIRECT_CN_MAX)
+    offers = text77_extract_store_offers(txt or "", limit=max(total_cap * 2, total_cap))
+    candidates = []
+    for offer in offers:
+        item = _text_offer_item(offer, urls)
+        if not item["link"] or not item["link"].startswith(("http://", "https://")):
+            continue
+        rank = result_market_rank(item)
+        if rank == 99:
+            print(f"TEXT UI MARKET REJECT: {item['source']} -> {item['link']}")
+            continue
+        item["market_rank"] = rank
+        candidates.append(item)
+
+    caps = {0: LENS_DIRECT_LOCAL_MAX, 1: LENS_DIRECT_US_MAX, 2: LENS_DIRECT_CN_MAX}
+    selected, seen_merchants = [], set()
+    for rank in (0, 1, 2):
+        taken = 0
+        for item in [x for x in candidates if x["market_rank"] == rank]:
+            try:
+                host = urllib.parse.urlparse(item["link"]).netloc.lower().split(":")[0]
+                host = host[4:] if host.startswith("www.") else host
+            except Exception:
+                host = ""
+            merchant = host or normalize_name(item["source"])
+            if not merchant or merchant in seen_merchants:
+                continue
+            seen_merchants.add(merchant)
+            selected.append(item)
+            taken += 1
+            if taken >= caps.get(rank, 0):
+                break
+
+    if not selected:
+        return False
+
+    split_cache = [_text_offer_price_and_title(item["title"]) for item in selected]
+    display_titles = [title or query for title, _ in split_cache]
+    translated = translate_ui_titles(display_titles, lang)
+    local_cc = (current_market().get("country") or DEFAULT_COUNTRY).lower()
+    rank_cc = {0: local_cc, 1: "us", 2: "cn"}
+    no_price = "السعر غير ظاهر" if lang == "ar" else "Price not shown"
+
+    counts = {0: 0, 1: 0, 2: 0}
+    for item, shown_title, (_raw_title, raw_price) in zip(selected, translated, split_cache):
+        rank = item["market_rank"]
+        counts[rank] += 1
+        flag = country_flag_emoji(rank_cc.get(rank, ""))
+        store = item["source"] or ("المتجر" if lang == "ar" else "Store")
+        title = re.sub(r"\s+", " ", shown_title or query).strip()
+        if len(title) > 105:
+            title = title[:102].rstrip(" ,-|—") + "…"
+        body = f"{flag} {store}\n{title}\n💰 {raw_price or no_price}"
+        send_whatsapp_cta(from_number, body[:1000], item["link"], bot_id, f"🛒 {store[:18]}")
+
+    LAST_SEARCH[from_number] = {"product": query}
+    print(f"TEXT LENS-STYLE SENT: {len(selected)} CTA; buckets={counts}; caps=5/4/4; order=local->us->cn")
+    return True
 
 
 def execute_product_search(from_number, product, bot_id, lang):
-    """v77: مسار البحث النصي — v26 أولاً + عرض نتائج + زر بحث عالمي تلقائي للنص"""
+    """Typed product search: v77.7 engine + v79 Lens-like presentation.
+
+    Searches local, US and China automatically. No global-search choice and no map.
+    """
     send_whatsapp_text(from_number, T(lang, "searching", q=product), bot_id)
     try:
         txt, urls = v26_text_search(product, lang)
         if not txt:
             print("TEXT LEGACY V26 PATH EMPTY — no current-engine fallback by design")
     except Exception as e:
-        # v74.9: ممنوع الصمت — أي خطأ داخلي يتحول لرد واضح مع خيارات المتابعة.
         print(f"TEXT SEARCH CRASH: {e}")
         txt, urls = "", {}
     LAST_SEARCH[from_number] = {"product": product}
-    if not txt or (not text77_extract_store_offers(txt) and not is_service_answer(txt) and not is_informational_answer(txt)):
-        # ما لقينا المنتج بالضبط محلياً: نعرض الخيارات الثلاثة (عالمي + بدائل)
-        text77_store_pending_global(from_number, bot_id, lang, product)
-        send_not_found_choice(from_number, bot_id, lang)
+    if not txt or not text77_extract_store_offers(txt, limit=30):
+        send_whatsapp_text(from_number, T(lang, "not_found"), bot_id)
         return
-    result_type = send_product_result(from_number, txt, urls, bot_id, lang, product)
-    if result_type == "none":
-        text77_store_pending_global(from_number, bot_id, lang, product)
-        send_not_found_choice(from_number, bot_id, lang)
+    if not send_text_lens_style_results(from_number, txt, urls, bot_id, lang, product):
+        send_whatsapp_text(from_number, T(lang, "not_found"), bot_id)
         return
-    # v77.6: إضافة البحث العالمي التلقائي للبحث النصي — بعد النتائج المحلية (زرين فقط: عالمي ولا شكراً)
-    if result_type == "product":
-        text77_store_pending_global(from_number, bot_id, lang, product)
-        try:
-            send_whatsapp_buttons(from_number, T(lang, "ask_global_after_local"), [
-                {"id": "nf_global", "title": T(lang, "opt_global")[:20]},
-                {"id": "nf_no", "title": T(lang, "opt_no")[:20]},
-            ], bot_id)
-        except Exception as e:
-            print(f"GLOBAL OFFER BTN ERR: {e}")
-            send_whatsapp_text(from_number, T(lang, "ask_global_after_local"), bot_id)
-
-    if result_type == "service" or (result_type == "product" and AUTO_SEND_PRODUCT_MAPS):
-        send_maps_button(from_number, product, bot_id, lang)
-
+    # No global-search buttons and no map for typed product searches.
 
 # ---- v74.6: مصنّف الطلبات — ذكاء اصطناعي خالص، بدون أي قاموس -----------------
 # القاموس الثابت مستحيل يغطي ملايين المنتجات (يخت، موطور مخيمات، مكينة بر...).
