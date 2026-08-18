@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v79-text77-local-plus-original-currency-20260818"
+BUILD_ID = "v79-text77-service-map-cart-picker-typo-ai-20260818"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE/TEXT -> FLAGS + CLEAR LOCAL PRICES + LOCAL/US/CHINA")
@@ -3477,6 +3477,29 @@ def process_interactive_message(message, bot_id):
             send_whatsapp_text(from_number, ("اكتب اسم المنتج اللي تبيه وأدور لك عليه 👍" if lang_ == "ar" else "Type the product name and I'll search it for you 👍"), bot_id)
         return
 
+    # Typed basket product selection: tapping an item starts the normal text-search flow.
+    if btn_id.startswith("basketprod_"):
+        item = PENDING_CART_PRODUCT_PICKS.get(from_number) or {}
+        if item and time.time() - item.get("ts", 0) > GLOBAL_PENDING_TTL:
+            item = {}
+        idx = int(btn_id[11:]) if btn_id[11:].isdigit() else -1
+        products = item.get("products") or []
+        picked = products[idx] if 0 <= idx < len(products) else ""
+        lang_ = item.get("lang") or USER_LANG.get(from_number, "ar")
+        if picked:
+            activate_market(from_number)
+            run_single_typed_product_flow(
+                from_number, picked, item.get("bot_id") or bot_id, lang_
+            )
+        else:
+            send_whatsapp_text(
+                from_number,
+                ("قائمة المنتجات انتهت 😅 دز المنتجات مرة ثانية." if lang_ == "ar"
+                 else "That product list expired 😅 send the products again."),
+                bot_id,
+            )
+        return
+
     # v77.7 typed basket store selection.
     if btn_id.startswith("cart_"):
         item = PENDING_CART_PICKS.get(from_number)
@@ -4181,6 +4204,7 @@ def send_last_search_map(from_number, bot_id, lang):
 
 PENDING_BRAND_PICKS = {}
 PENDING_CART_PICKS = {}
+PENDING_CART_PRODUCT_PICKS = {}
 SEARCH_RUNS = int(os.environ.get("SEARCH_RUNS", "4"))
 V26_SEARCH_POOL = ThreadPoolExecutor(max_workers=8)
 SIMILAR_MAX_STORES = max(MAX_STORES, int(os.environ.get("SIMILAR_MAX_STORES", "10")))
@@ -4251,6 +4275,8 @@ def text77_market_instruction():
         f"For PRODUCT/STORE searches return ONLY: (1) stores in {place}, then (2) United States stores, then (3) China stores. "
         "Reject stores from every other country. Do not require US/China stores to deliver locally. "
         "Maximum results are 5 local, 4 United States, 4 China; these are caps, never quotas. "
+        "For the UNITED STATES pass, actively try Amazon.com, eBay.com, Newegg.com, Walmart.com and BestBuy.com first, while still allowing other US stores. "
+        "For the CHINA pass, actively try AliExpress, Temu, Alibaba and SHEIN first, while still allowing other China stores. "
         f"Local prices must use {currency}. US prices MUST stay in USD. China prices MUST stay in the exact source currency (USD or CNY/RMB). NEVER convert a foreign price to {currency}; the app converts it after retrieval. "
         "The LOCAL -> US -> CHINA order is mandatory and more important than price. "
         "For SERVICES, keep providers local to the user's market only.\n"
@@ -4883,6 +4909,65 @@ def cart_item_search(product, lang):
         return txt, urls
     return "", {}
 
+def send_cart_product_picker(products, from_number, bot_id, lang="ar"):
+    """Typed multi-product request: show products as a list; tapping one starts its normal search flow."""
+    clean = []
+    seen = set()
+    for p in products or []:
+        q = " ".join(str(p or "").split()).strip()
+        key = normalize_ar(q)
+        if not q or key in seen:
+            continue
+        seen.add(key)
+        clean.append(q)
+    if not clean:
+        send_whatsapp_text(from_number, T(lang, "not_found"), bot_id)
+        return False
+
+    PENDING_CART_PRODUCT_PICKS[from_number] = {
+        "products": clean[:10], "bot_id": bot_id, "lang": lang, "ts": time.time()
+    }
+    title_map = arabic_titles(clean[:10]) if lang == "ar" else {}
+    rows = []
+    for i, product in enumerate(clean[:10]):
+        shown = title_map.get(product, product) if lang == "ar" else product
+        desc = product if shown != product else ""
+        rows.append({
+            "id": f"basketprod_{i}",
+            "title": shown[:24],
+            "description": desc[:72],
+        })
+    body = (
+        f"🧺 لقيت {len(clean)} منتجات. اختر المنتج اللي تبي أبحث عنه 👇"
+        if lang == "ar"
+        else f"🧺 I found {len(clean)} products. Pick the one you want me to search 👇"
+    )
+    button = "اختر المنتج" if lang == "ar" else "Pick product"
+    return send_whatsapp_list(from_number, body, rows, bot_id, button)
+
+
+def run_single_typed_product_flow(from_number, product, bot_id, lang):
+    """Run the same classification/search behavior used for a normal one-product typed request."""
+    try:
+        rtype = classify_request_type(product)
+    except Exception as e:
+        print(f"TEXT77 CLASSIFY CRASH for {product!r}: {e} -> fallback GENERIC")
+        rtype = "GENERIC"
+    if rtype == "NONE":
+        send_whatsapp_text(from_number, T(lang, "chat_redirect"), bot_id)
+        return
+    if rtype == "SERVICE":
+        execute_service_search(from_number, product, product, bot_id, lang)
+        return
+    if rtype == "GENERIC":
+        try:
+            if run_brand_comparison(from_number, product, bot_id, lang):
+                return
+        except Exception as e:
+            print(f"TEXT77 BRAND COMPARE CRASH: {e}")
+    execute_product_search(from_number, product, bot_id, lang)
+
+
 def run_cart_comparison(products, from_number, bot_id, lang="ar"):
     """v75: السلة الموحدة — بدل أرخص متجر لكل صنف لحاله (وتشتت الطلب على 4 متاجر)،
 
@@ -5270,7 +5355,6 @@ def legacy_text_product_search(product, lang):
             f"أولاً متاجر {market_name} المحلية حتى {LENS_DIRECT_LOCAL_MAX}، "
             f"ثم متاجر الولايات المتحدة حتى {LENS_DIRECT_US_MAX}، "
             f"ثم المتاجر الصينية حتى {LENS_DIRECT_CN_MAX}. "
-            "بالنسبة للولايات المتحدة: حاول مباشرة وبشكل صريح في Amazon.com وeBay.com وNewegg.com وWalmart.com وBestBuy.com أولاً عندما توجد نتيجة مطابقة، ثم اسمح بمتاجر أمريكية أخرى موثوقة ومطابقة. لا تعتبر هذه المواقع حصصاً إلزامية ولا تكرر نفس المتجر لنفس المنتج. "
             "بالنسبة للصين ابحث مباشرة في AliExpress وTemu وAlibaba وSHEIN عندما توجد نتيجة مطابقة، ويمكن استخدام متاجر صينية أخرى. "
             "لا تعرض أي دولة رابعة. لا تجعل الأعداد حصصاً إلزامية؛ اعرض الموجود المطابق فقط. "
             "لكل نتيجة اذكر اسم المتجر، اسم المنتج المطابق، السعر الرقمي والعملة، واربطه بصفحة المنتج المباشرة. "
@@ -5327,7 +5411,8 @@ def execute_service_search(from_number, service_desc, original_text, bot_id, lan
         send_whatsapp_text(from_number, T(lang, "not_found"), bot_id)
         return
     send_whatsapp_text(from_number, txt, bot_id)
-    # typed service search: no automatic map
+    # Services: restore the automatic nearby-map button, while product searches stay map-free.
+    send_maps_button(from_number, service_desc, bot_id, lang)
 
 
 def _text_offer_item(offer, urls):
@@ -5749,7 +5834,7 @@ def run_text_global_search(phone, item):
     market_name = current_market().get("country_name", "Kuwait")
     prompts = [
         f"ابحث عالمياً عن {query} في متاجر خارج {market_name} فقط. استبعد المتاجر داخل {market_name}. "
-        f"لأمريكا حاول مباشرة في Amazon.com وeBay.com وNewegg.com وWalmart.com وBestBuy.com ثم اسمح بمتاجر أمريكية أخرى؛ وللصين حاول AliExpress وTemu وAlibaba وSHEIN ثم متاجر صينية أخرى. اعرض حتى {MAX_STORES} نتائج مختلفة بسعر رقمي ورابط منتج مباشر والعملة. {TEXT77_LANG_INSTR[lang]}",
+        f"ابحث في Amazon.com وeBay وAliExpress وTemu وSHEIN وWalmart وغيرها. اعرض حتى {MAX_STORES} نتائج مختلفة بسعر رقمي ورابط منتج مباشر والعملة. {TEXT77_LANG_INSTR[lang]}",
         f"Search worldwide for {english_search_name(query) or query} outside {market_name}. Find up to {MAX_STORES} trusted international store results with numeric price, currency, and direct product page. {TEXT77_LANG_INSTR[lang]}",
     ]
     txt, urls = "", {}
@@ -5888,6 +5973,49 @@ def parse_user_intent(user_text, lang):
         return {"intent": "search", "products": [cleaned]}
     return {"intent": "greeting" if not compact.strip() or any(g in compact for g in ("سلام", "هلا", "مرحبا")) else "chat", "products": []}
 
+TYPO_NORMALIZER_SYSTEM = """أنت مصحح ذكي لأسماء المنتجات والخدمات قبل البحث.
+المستخدم قد يخطئ بحرف أو حرفين، يكرر حرفاً، يحذف حرفاً، أو يكتب البراند بتهجئة قريبة.
+أعد JSON فقط بهذا الشكل: {"products":["..."]}
+
+قواعد صارمة:
+- صحح فقط عندما يكون المقصود واضحاً بدرجة عالية.
+- افهم أسماء البراندات والموديلات الشائعة بذكاء: samsng -> Samsung، ايفونن -> ايفون، crocks -> Crocs.
+- لا تغيّر البراند أو الموديل أو رقم الإصدار أو السعة أو الحجم أو الوزن أو اللون إذا كانت صحيحة.
+- لا تستبدل منتجاً بمنتج آخر لمجرد أنه أشهر.
+- إذا الاسم قد يكون براند/موديل صحيحاً وغير مألوف لك، اتركه كما كتبه المستخدم.
+- حافظ على لغة المستخدم قدر الإمكان.
+- حافظ على عدد العناصر وترتيبها.
+"""
+
+
+def smart_normalize_typed_products(products):
+    """AI typo tolerance for typed queries; one batched call, conservative on brands/models."""
+    original = [" ".join(str(x or "").split()).strip() for x in (products or []) if str(x or "").strip()]
+    if not original:
+        return []
+    try:
+        prompt = json.dumps({"products": original}, ensure_ascii=False)
+        raw, _ = text77_call_gemini(
+            [{"text": prompt}],
+            system=TYPO_NORMALIZER_SYSTEM,
+            use_search=False,
+        )
+        m = re.search(r"\{.*\}", raw or "", flags=re.S)
+        if not m:
+            return original
+        data = json.loads(m.group(0))
+        fixed = [str(x).strip() for x in (data.get("products") or [])]
+        if len(fixed) != len(original) or any(not x for x in fixed):
+            return original
+        for before, after in zip(original, fixed):
+            if normalize_ar(before) != normalize_ar(after):
+                print(f"TEXT TYPO NORMALIZED: {before!r} -> {after!r}")
+        return fixed
+    except Exception as e:
+        print(f"TEXT TYPO NORMALIZER FAIL: {e}")
+        return original
+
+
 def process_text_message(message,bot_id,onboarding_checked=False):
     from_number = "unknown"
     try:
@@ -5930,25 +6058,15 @@ def process_text_message(message,bot_id,onboarding_checked=False):
         if intent == "chat":
             send_whatsapp_text(from_number, T(lang, "welcome_reply"), bot_id); return
         products = [p for p in (parsed.get("products") or []) if p.strip()] or extract_products(user_text)
+        # Tolerate obvious 1-2 character typos / near spellings before classification and search.
+        products = smart_normalize_typed_products(products)
         if intent == "service" or is_service_request(products[0] if products else user_text):
             execute_service_search(from_number, products[0] if products else user_text, user_text, bot_id, lang); return
         if len(products)==1:
-            try:
-                rtype = classify_request_type(products[0])
-            except Exception as e:
-                print(f"TEXT77 CLASSIFY CRASH for {products[0]!r}: {e} -> fallback GENERIC"); rtype = "GENERIC"
-            if rtype == "NONE":
-                send_whatsapp_text(from_number, T(lang, "chat_redirect"), bot_id); return
-            if rtype == "SERVICE":
-                execute_service_search(from_number, products[0], user_text, bot_id, lang); return
-            if rtype == "GENERIC":
-                try:
-                    if run_brand_comparison(from_number, products[0], bot_id, lang): return
-                except Exception as e:
-                    print(f"TEXT77 BRAND COMPARE CRASH: {e}")
-            execute_product_search(from_number, products[0], bot_id, lang)
+            run_single_typed_product_flow(from_number, products[0], bot_id, lang)
         else:
-            run_cart_comparison(products, from_number, bot_id, lang)
+            # A typed "basket" is now a product picker; no automatic full-basket comparison.
+            send_cart_product_picker(products, from_number, bot_id, lang)
     except Exception as e:
         print(f"TEXT77 PROCESS_TEXT_MESSAGE CRASH: {e} for {from_number}")
         try:
