@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v80-text-google-shopping-lens-format-20260818"
+BUILD_ID = "v81-text-google-shopping-3markets-fixed-20260818"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE/TEXT -> FLAGS + CLEAR LOCAL PRICES + LOCAL/US/CHINA")
@@ -575,7 +575,7 @@ def has_model_token(a, b):
 def cache_key(query, lang):
     norm = re.sub(r"[^\w\u0600-\u06FF]+", "", normalize_ar(query))
     market = current_market().get("country", DEFAULT_COUNTRY)
-    return hashlib.sha256(f"v72|{market}|{norm}|{lang}".encode()).hexdigest()
+    return hashlib.sha256(f"v81|{market}|{norm}|{lang}".encode()).hexdigest()
 
 def cache_ttl_for(query, txt=""):
     q_norm = normalize_ar(query)
@@ -4258,14 +4258,24 @@ def parse_user_intent(user_text, lang):
 def _text_shopping_market_matches(query, gl, forced_rank, domain=None, store_label=None, max_cards=18):
     """Google Shopping text pass -> Lens-like cards used by the same v79 CTA renderer.
 
-    Search text is kept exactly in the user's/search language. Translation is display-only later.
-    `domain` is used for the four explicit China marketplaces.
+    v81:
+    - Local pass accepts ONLY results that can actually be identified as local.
+    - US pass accepts ONLY actual US results.
+    - China merchant passes search each marketplace independently and accept ONLY that marketplace.
+    - Search text itself is never translated; translation remains display-only later.
     """
     q = _shopping_clean_query(query or "")
     if not q or not SERPAPI_API_KEY:
         return []
-    search_q = f"{q} site:{domain}" if domain else q
-    cards = _serpapi_shopping_request(search_q, gl, hl="en")
+
+    if domain:
+        search_queries = [
+            f"{q} {store_label or domain}",
+            f"{q} site:{domain}",
+        ]
+    else:
+        search_queries = [q]
+
     out, seen = [], set()
 
     def _append(source, title, url, price_text, price_value, position, currency=""):
@@ -4276,21 +4286,12 @@ def _text_shopping_market_matches(query, gl, forced_rank, domain=None, store_lab
             host = urllib.parse.urlparse(direct).netloc.lower().replace("www.", "")
         except Exception:
             host = ""
-        if domain and not _host_matches_any(host, (domain,)):
-            return
+
         src = (source or store_label or host or "Store").strip()
         raw_price = str(price_text or "").strip()
         cur = (currency or detect_currency_code(raw_price, "")).upper().strip()
-        # Google Shopping sometimes omits the ISO code while returning a numeric price.
-        if not cur:
-            if forced_rank == 0:
-                cur = (current_market().get("currency") or "").upper().strip()
-            elif forced_rank == 1:
-                cur = "USD"
-            # China marketplaces often expose USD internationally; do not assume CNY unless marked.
-            elif forced_rank == 2 and re.search(r"(?:CNY|RMB|¥|￥|人民币)", raw_price, flags=re.I):
-                cur = "CNY"
-        out.append({
+
+        candidate = {
             "title": (title or q).strip(),
             "link": direct,
             "source": store_label or src,
@@ -4302,13 +4303,69 @@ def _text_shopping_market_matches(query, gl, forced_rank, domain=None, store_lab
             "price_value": price_value,
             "currency": cur,
             "in_stock": None, "condition": "",
-            "_forced_market_rank": forced_rank,
             "_shopping_gl": gl,
-        })
+        }
+
+        local_cc = (current_market().get("country") or DEFAULT_COUNTRY).lower()
+
+        if forced_rank == 2:
+            if not domain or not _host_matches_any(host, (domain,)):
+                return
+            candidate["_forced_market_rank"] = 2
+
+        elif forced_rank == 1:
+            if is_china_market_result(candidate):
+                return
+            if not is_us_market_result(candidate):
+                return
+            candidate["_forced_market_rank"] = 1
+
+        elif forced_rank == 0:
+            if local_cc == "us":
+                if not is_us_market_result(candidate):
+                    return
+            elif local_cc == "cn":
+                if not is_china_market_result(candidate):
+                    return
+            else:
+                if not is_local_lens_result(candidate):
+                    return
+            candidate["_forced_market_rank"] = 0
+        else:
+            return
+
+        if not candidate["currency"]:
+            if forced_rank == 0:
+                candidate["currency"] = (current_market().get("currency") or "").upper().strip()
+            elif forced_rank == 1:
+                candidate["currency"] = "USD"
+            elif forced_rank == 2:
+                if re.search(r"(?:CNY|RMB|¥|￥|人民币)", raw_price, flags=re.I):
+                    candidate["currency"] = "CNY"
+                elif "$" in raw_price or "USD" in raw_price.upper():
+                    candidate["currency"] = "USD"
+
+        out.append(candidate)
         seen.add(direct)
 
+    all_cards = []
+    card_seen = set()
+    for search_q in search_queries:
+        cards = _serpapi_shopping_request(search_q, gl, hl="en")
+        for card in cards[:max_cards]:
+            sig = (
+                (card.get("title") or "").strip().lower(),
+                (card.get("source") or "").strip().lower(),
+                (card.get("link") or "").strip(),
+                (card.get("immersive_product_page_token") or "").strip(),
+            )
+            if sig in card_seen:
+                continue
+            card_seen.add(sig)
+            all_cards.append(card)
+
     immersive = []
-    for pos, card in enumerate(cards[:max_cards], 1):
+    for pos, card in enumerate(all_cards[:max_cards * len(search_queries)], 1):
         title = (card.get("title") or "").strip()
         source = (card.get("source") or store_label or "").strip()
         link = (card.get("link") or "").strip()
@@ -4316,12 +4373,11 @@ def _text_shopping_market_matches(query, gl, forced_rank, domain=None, store_lab
         if link:
             _append(source, title, link, card.get("price"), card.get("extracted_price"), pos)
         token = (card.get("immersive_product_page_token") or "").strip()
-        if token and len(out) == before and not domain:
+        if token and len(out) == before:
             immersive.append((pos, title, token))
 
-    # Local/US generic Shopping may hide merchant links behind Immersive Product.
-    # Keep this bounded; China site-specific passes deliberately stay direct.
-    for pos, title, token in immersive[:max(0, min(IMMERSIVE_LOOKUPS_MAX, 2))]:
+    immersive_cap = max(0, min(IMMERSIVE_LOOKUPS_MAX, 3))
+    for pos, title, token in immersive[:immersive_cap]:
         for store in (_immersive_product_stores(token) or []):
             _append(
                 store.get("name") or "", title, store.get("link") or "",
@@ -4329,27 +4385,30 @@ def _text_shopping_market_matches(query, gl, forced_rank, domain=None, store_lab
                 store.get("extracted_price") if store.get("extracted_price") not in (None, "") else store.get("extracted_total"),
                 pos,
             )
-    return out
 
+    return out[:max_cards]
 
 def google_shopping_text_lookup(query, lang="ar"):
-    """v80 text search: current market -> US -> China marketplaces, all through Google Shopping.
+    """v81 typed-product search with three truly independent Google Shopping markets.
 
-    China is searched explicitly and automatically on AliExpress, Temu, Alibaba and SHEIN.
-    Returns a Lens-shaped object so the exact same v79 sorting/dedupe/CTA code is reused.
+    1) Current user market
+    2) United States
+    3) China marketplaces: AliExpress, Temu, Alibaba, SHEIN
+
+    Each pass verifies the actual merchant market before results are merged.
+    The return shape is Lens-compatible so v79 CTA formatting/order/dedupe is reused unchanged.
     """
     q = _shopping_clean_query(query or "")
     if not q or not ENABLE_GOOGLE_SHOPPING or not SERPAPI_API_KEY:
         return {"matches": [], "chosen": {"title": q}, "query": q}
 
     local_cc = (current_market().get("country") or DEFAULT_COUNTRY).lower()
-    jobs = [
-        ("local", local_cc, 0, None, None),
-    ]
+
+    jobs = [("local", local_cc, 0, None, None)]
+
     if local_cc != "us":
         jobs.append(("us", "us", 1, None, None))
 
-    # China: explicit merchant searches, independent of generic Google results.
     china_targets = [
         ("AliExpress", "aliexpress.com"),
         ("Temu", "temu.com"),
@@ -4372,13 +4431,12 @@ def google_shopping_text_lookup(query, lang="ar"):
     matches = []
     for fut, tag in futures.items():
         try:
-            part = fut.result(timeout=55) or []
+            part = fut.result(timeout=65) or []
             print(f"TEXT SHOPPING PASS {tag}: {len(part)}")
             matches.extend(part)
         except Exception as e:
             print(f"TEXT SHOPPING PASS ERR {tag}: {e}")
 
-    # Same-size filter where Google titles expose a size/capacity. Unknown sizes are allowed.
     ref_size = extract_pack_size(q)
     if ref_size:
         kept = []
@@ -4390,9 +4448,22 @@ def google_shopping_text_lookup(query, lang="ar"):
                 print(f"TEXT SHOPPING SIZE SKIP: {(m.get('title') or '')[:80]}")
         matches = kept
 
-    print(f"TEXT SHOPPING TOTAL: {len(matches)} query={q!r}")
-    return {"matches": matches, "chosen": {"title": q}, "query": q, "source": "text_google_shopping"}
+    counts = {0: 0, 1: 0, 2: 0}
+    for m in matches:
+        rank = result_market_rank(m)
+        if rank in counts:
+            counts[rank] += 1
 
+    print(
+        f"TEXT SHOPPING TOTAL v81: {len(matches)} "
+        f"local={counts[0]} us={counts[1]} cn={counts[2]} query={q!r}"
+    )
+    return {
+        "matches": matches,
+        "chosen": {"title": q},
+        "query": q,
+        "source": "text_google_shopping_v81",
+    }
 
 def send_text_google_shopping_results(from_number, query, bot_id, lang):
     """Send typed-search results using the exact same UI/order/caps as Lens v79."""
@@ -4493,4 +4564,4 @@ def process_location_message(message, bot_id):
     route_pending_after_location(from_number)
 
 @app.get("/")
-async def health(): return {"status":"v80 TEXT-GSHOP LENS-CTA LOCAL5-US4-CN4 ALIEXPRESS-TEMU-ALIBABA-SHEIN", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
+async def health(): return {"status":"v81 TEXT-GSHOP 3-INDEPENDENT-MARKETS LOCAL5-US4-CN4 ALIEXPRESS-TEMU-ALIBABA-SHEIN", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
