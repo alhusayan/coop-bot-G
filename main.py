@@ -3885,6 +3885,7 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
             buckets[rank].append(m)
     for rank in buckets:
         buckets[rank].sort(key=lambda m: (
+            _us_store_priority(m.get("source"), m.get("link")) if rank == 1 else 99,
             0 if _lens_has_price(m) else 1,
             0 if m.get("exact") else 1,
             0 if m.get("section") == "visual_matches" else 1,
@@ -5249,109 +5250,21 @@ def legacy_v26_best_of_search(parts, max_results=None, merge_offers=False, merge
 
 
 
-US_AFFILIATE_FOCUS = (
+US_STORE_PRIORITY = (
     ("amazon.com", "Amazon"),
     ("ebay.com", "eBay"),
-    ("newegg.com", "Newegg"),
     ("walmart.com", "Walmart"),
-    ("bestbuy.com", "Best Buy"),
 )
 
 
-def _us_affiliate_priority(name, url):
+def _us_store_priority(name, url):
     """Lower = stronger priority inside the US bucket only."""
     hay = f"{name or ''} {url or ''}".lower()
-    for idx, (domain, label) in enumerate(US_AFFILIATE_FOCUS):
+    for idx, (domain, label) in enumerate(US_STORE_PRIORITY):
         if domain in hay or normalize_name(label) in normalize_name(hay):
             return idx
     return 99
 
-
-def _targeted_us_affiliate_search(product, lang):
-    """Do real dedicated US passes so Amazon/eBay are not merely prompt preferences.
-
-    We use three focused searches: Amazon, eBay, then the other high-value US retailers.
-    Only grounded direct product links with numeric USD prices survive downstream.
-    """
-    groups = [
-        ("Amazon", "amazon.com"),
-        ("eBay", "ebay.com"),
-        ("Newegg, Walmart, Best Buy", "newegg.com walmart.com bestbuy.com"),
-    ]
-    market_snapshot = current_market()
-    futures = []
-    for label, domains in groups:
-        prompt = (
-            f"Search for this exact product: {product}. United States only. "
-            f"FOCUS ONLY on {label}. Search these domains directly: {domains}. "
-            "Return only an actually matching product that is currently listed with a clear numeric USD price "
-            "and a direct product-page URL. Do not return search/category/home pages. "
-            "If none of these stores has the exact product, return no store rather than substituting another merchant. "
-            "Format shopping offers as: • Store — exact product title — 49.99 USD. "
-            "End with LINKS using the real domain from Google grounding. "
-            f"{TEXT77_LANG_INSTR[lang]}"
-        )
-        futures.append(V26_SEARCH_POOL.submit(
-            _run_with_market, market_snapshot,
-            legacy_v26_call_gemini, [{"text": prompt}], LEGACY_TEXT_SEARCH_SYSTEM, 4
-        ))
-    out = []
-    for fut in futures:
-        try:
-            txt, urls = fut.result(timeout=120)
-            if txt and urls:
-                out.append((txt, urls))
-        except Exception as e:
-            print(f"US AFFILIATE TARGETED SEARCH ERR: {e}")
-    print(f"US AFFILIATE TARGETED PASSES: {[(len(text77_extract_store_offers(t, limit=10)), list(u)) for t,u in out]}")
-    return out
-
-
-def _merge_affiliate_results(base_txt, base_urls, targeted_results, product):
-    """Merge targeted affiliate offers into the normal LOCAL/US/CHINA result pool."""
-    records = []
-    seen_urls = set()
-    sources = [(base_txt, base_urls, False)] + [(t, u, True) for t, u in (targeted_results or [])]
-    for txt, urls, targeted in sources:
-        for offer in text77_extract_store_offers(txt or "", limit=40):
-            item = _text_offer_item(offer, urls or {})
-            url = item.get("link") or ""
-            if not url.startswith(("http://", "https://")) or url in seen_urls:
-                continue
-            rank = result_market_rank(item)
-            if rank == 99:
-                continue
-            # Targeted passes are US-only by design; reject accidental non-US leakage.
-            if targeted and rank != 1:
-                continue
-            seen_urls.add(url)
-            records.append((rank, _us_affiliate_priority(item.get("source"), url), targeted, offer, url))
-
-    # Preserve local first. In US, affiliate focus wins. China follows normally.
-    records.sort(key=lambda r: (r[0], r[1] if r[0] == 1 else 99, 0 if r[2] else 1))
-    lines = [f"📦 {product}", ""]
-    merged_urls = {}
-    used_hosts = set()
-    counts = {0: 0, 1: 0, 2: 0}
-    caps = {0: LENS_DIRECT_LOCAL_MAX, 1: LENS_DIRECT_US_MAX, 2: LENS_DIRECT_CN_MAX}
-    for rank, _prio, _targeted, offer, url in records:
-        if counts[rank] >= caps.get(rank, 0):
-            continue
-        try:
-            host = urllib.parse.urlparse(url).netloc.lower().replace("www.", "")
-        except Exception:
-            host = url
-        if host in used_hosts:
-            continue
-        used_hosts.add(host)
-        name = str(offer.get("name") or "").strip()
-        line = str(offer.get("line") or "").strip()
-        line = re.sub(r"^(?:✅|🏆|•)\s*", "", line).strip()
-        prefix = "✅" if not any(counts.values()) else "•"
-        lines.append(f"{prefix} {line}")
-        merged_urls[name] = url
-        counts[rank] += 1
-    return "\n".join(lines), merged_urls
 
 
 def legacy_text_product_search(product, lang):
@@ -5376,26 +5289,17 @@ def legacy_text_product_search(product, lang):
             f"أولاً متاجر {market_name} المحلية حتى {LENS_DIRECT_LOCAL_MAX}، "
             f"ثم متاجر الولايات المتحدة حتى {LENS_DIRECT_US_MAX}، "
             f"ثم المتاجر الصينية حتى {LENS_DIRECT_CN_MAX}. "
+            "بالنسبة لأمريكا: ابحث بشكل طبيعي في المتاجر الأمريكية، وإذا ظهرت نتائج مطابقة فرتبها داخل القسم الأمريكي بهذه الأولوية فقط: Amazon ثم eBay ثم Walmart ثم باقي المتاجر الأمريكية. لا تفرض ظهور أي متجر إذا لم توجد نتيجة مطابقة. "
             "بالنسبة للصين ابحث مباشرة في AliExpress وTemu وAlibaba وSHEIN عندما توجد نتيجة مطابقة، ويمكن استخدام متاجر صينية أخرى. "
             "لا تعرض أي دولة رابعة. لا تجعل الأعداد حصصاً إلزامية؛ اعرض الموجود المطابق فقط. "
             "لكل نتيجة اذكر اسم المتجر، اسم المنتج المطابق، السعر الرقمي والعملة، واربطه بصفحة المنتج المباشرة. "
             f"{TEXT77_LANG_INSTR[lang]}"
         )
-        # Normal broad search + dedicated affiliate-focused US passes.
-        # The dedicated passes prevent Amazon/eBay from disappearing merely because
-        # four other US stores filled the normal result bucket first.
-        market_snapshot = current_market()
-        broad_future = V26_SEARCH_POOL.submit(
-            _run_with_market, market_snapshot, legacy_v26_best_of_search,
+        # بحث أمريكي واحد طبيعي؛ لا توجد تمريرات منفصلة لمتاجر بعينها.
+        # أولوية Amazon ثم eBay ثم Walmart تُطبّق فقط عند ترتيب النتائج التي ظهرت فعلاً.
+        txt, urls = legacy_v26_best_of_search(
             [{"text": prompt}], total_cap, True, product
         )
-        targeted_results = _targeted_us_affiliate_search(primary, lang)
-        try:
-            txt, urls = broad_future.result(timeout=150)
-        except Exception as e:
-            print(f"BROAD TEXT SEARCH ERR: {e}")
-            txt, urls = "", {}
-        txt, urls = _merge_affiliate_results(txt, urls, targeted_results, product)
         if not txt or is_no_result_answer(txt) or not text77_extract_store_offers(txt, limit=total_cap):
             continue
         if urls:
@@ -5532,7 +5436,7 @@ def send_text_lens_style_results(from_number, txt, urls, bot_id, lang, query):
         taken = 0
         bucket = [x for x in candidates if x["market_rank"] == rank]
         if rank == 1:
-            bucket.sort(key=lambda x: _us_affiliate_priority(x.get("source"), x.get("link")))
+            bucket.sort(key=lambda x: _us_store_priority(x.get("source"), x.get("link")))
         for item in bucket:
             try:
                 host = urllib.parse.urlparse(item["link"]).netloc.lower().split(":")[0]
