@@ -5270,6 +5270,7 @@ def legacy_text_product_search(product, lang):
             f"أولاً متاجر {market_name} المحلية حتى {LENS_DIRECT_LOCAL_MAX}، "
             f"ثم متاجر الولايات المتحدة حتى {LENS_DIRECT_US_MAX}، "
             f"ثم المتاجر الصينية حتى {LENS_DIRECT_CN_MAX}. "
+            "بالنسبة للولايات المتحدة: حاول مباشرة وبشكل صريح في Amazon.com وeBay.com وNewegg.com وWalmart.com وBestBuy.com أولاً عندما توجد نتيجة مطابقة، ثم اسمح بمتاجر أمريكية أخرى موثوقة ومطابقة. لا تعتبر هذه المواقع حصصاً إلزامية ولا تكرر نفس المتجر لنفس المنتج. "
             "بالنسبة للصين ابحث مباشرة في AliExpress وTemu وAlibaba وSHEIN عندما توجد نتيجة مطابقة، ويمكن استخدام متاجر صينية أخرى. "
             "لا تعرض أي دولة رابعة. لا تجعل الأعداد حصصاً إلزامية؛ اعرض الموجود المطابق فقط. "
             "لكل نتيجة اذكر اسم المتجر، اسم المنتج المطابق، السعر الرقمي والعملة، واربطه بصفحة المنتج المباشرة. "
@@ -5748,7 +5749,7 @@ def run_text_global_search(phone, item):
     market_name = current_market().get("country_name", "Kuwait")
     prompts = [
         f"ابحث عالمياً عن {query} في متاجر خارج {market_name} فقط. استبعد المتاجر داخل {market_name}. "
-        f"ابحث في Amazon.com وeBay وAliExpress وTemu وSHEIN وWalmart وغيرها. اعرض حتى {MAX_STORES} نتائج مختلفة بسعر رقمي ورابط منتج مباشر والعملة. {TEXT77_LANG_INSTR[lang]}",
+        f"لأمريكا حاول مباشرة في Amazon.com وeBay.com وNewegg.com وWalmart.com وBestBuy.com ثم اسمح بمتاجر أمريكية أخرى؛ وللصين حاول AliExpress وTemu وAlibaba وSHEIN ثم متاجر صينية أخرى. اعرض حتى {MAX_STORES} نتائج مختلفة بسعر رقمي ورابط منتج مباشر والعملة. {TEXT77_LANG_INSTR[lang]}",
         f"Search worldwide for {english_search_name(query) or query} outside {market_name}. Find up to {MAX_STORES} trusted international store results with numeric price, currency, and direct product page. {TEXT77_LANG_INSTR[lang]}",
     ]
     txt, urls = "", {}
