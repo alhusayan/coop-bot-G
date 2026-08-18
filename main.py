@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v79-text77-lens-style-local-currency-20260818"
+BUILD_ID = "v79-text77-local-plus-original-currency-20260818"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE/TEXT -> FLAGS + CLEAR LOCAL PRICES + LOCAL/US/CHINA")
@@ -4224,6 +4224,22 @@ COUNTRY_NAMES_AR = {
     "tn": "تونس", "ly": "ليبيا", "sd": "السودان", "tr": "تركيا",
 }
 
+TEXT77_LANG_INSTR = {
+    "ar": "رد باللغة العربية فقط في نصوص الواجهة، لكن لا تحوّل أسعار المتاجر الأجنبية. أبقِ السعر والعملة الأصلية كما ظهرا في المصدر: متاجر أمريكا USD، والمتاجر الصينية USD أو CNY/RMB حسب المصدر. الأسعار المحلية فقط بعملة بلد المستخدم. يجب أن يحتوي كل سطر متجر على السعر الرقمي والعملة الأصلية صراحةً.",
+    "en": "Respond in English for UI text, but NEVER convert foreign-store prices. Preserve the exact source currency: US stores in USD; China stores in USD or CNY/RMB as shown by the source. Only local-store prices use the user's local currency. Every store line must explicitly include numeric price plus original currency.",
+}
+
+TEXT77_SYSTEM_PROMPT = SYSTEM_PROMPT + """
+
+IMPORTANT OVERRIDE FOR TYPED-TEXT SEARCH ONLY:
+Ignore any earlier instruction that forces all prices into KWD or the user's local currency.
+For LOCAL stores, return the source price in the user's local currency.
+For UNITED STATES stores, return the source price in USD, never converted.
+For CHINA stores, return the source price exactly as listed by the store, normally USD or CNY/RMB, never converted.
+The application will perform FX conversion after retrieval. Therefore preserving the original numeric price and original currency is mandatory.
+Do not output a converted local-currency value for a foreign store.
+"""
+
 def text77_market_instruction():
     """Typed-text market rule: same market order/caps as v79 Lens UI."""
     m = current_market()
@@ -4235,7 +4251,7 @@ def text77_market_instruction():
         f"For PRODUCT/STORE searches return ONLY: (1) stores in {place}, then (2) United States stores, then (3) China stores. "
         "Reject stores from every other country. Do not require US/China stores to deliver locally. "
         "Maximum results are 5 local, 4 United States, 4 China; these are caps, never quotas. "
-        f"Local prices should use {currency}; US/China prices may remain in source currency because the app converts them for display. "
+        f"Local prices must use {currency}. US prices MUST stay in USD. China prices MUST stay in the exact source currency (USD or CNY/RMB). NEVER convert a foreign price to {currency}; the app converts it after retrieval. "
         "The LOCAL -> US -> CHINA order is mandatory and more important than price. "
         "For SERVICES, keep providers local to the user's market only.\n"
     )
@@ -4270,7 +4286,7 @@ def text77_extract_store_offers(txt, limit=None):
     cap = MAX_STORES if limit is None else max(1, int(limit))
     return offers[:cap]
 
-def text77_call_gemini(parts, system=SYSTEM_PROMPT, use_search=True):
+def text77_call_gemini(parts, system=TEXT77_SYSTEM_PROMPT, use_search=True):
     """v77.7 call_gemini semantics, but isolated to typed text flows."""
     model = GEMINI_SEARCH_MODEL if use_search else GEMINI_FAST_MODEL
     gemini_url = f"{GEMINI_BASE_URL}/{model}:generateContent"
@@ -4368,7 +4384,7 @@ def text77_call_gemini(parts, system=SYSTEM_PROMPT, use_search=True):
         return "", {}
 
 def text77_bilingual_search_instruction(query, lang):
-    response_rule = LANG_INSTR[lang]
+    response_rule = TEXT77_LANG_INSTR[lang]
     market_name = current_market().get('country_name', 'Kuwait')
     return (
         f"ابحث عن المنتج التالي في {market_name} باستخدام العربية والإنجليزية معاً: {query}. "
@@ -4859,7 +4875,7 @@ def cart_item_search(product, lang):
     market_name = current_market().get("country_name", "Kuwait")
     txt, urls = text77_call_gemini([{"text": (
         f"ابحث عن {product} في أي متجر محلي في {market_name} يبيعه بسعر رقمي واضح "
-        f"ورابط صفحة منتج مباشر. حتى {MAX_STORES} متاجر من الأرخص للأغلى. {LANG_INSTR[lang]}"
+        f"ورابط صفحة منتج مباشر. حتى {MAX_STORES} متاجر من الأرخص للأغلى. {TEXT77_LANG_INSTR[lang]}"
     )}])
     urls = direct_urls_only(urls)
     if txt and text77_extract_store_offers(txt) and not is_no_result_answer(txt):
@@ -5257,7 +5273,7 @@ def legacy_text_product_search(product, lang):
             "بالنسبة للصين ابحث مباشرة في AliExpress وTemu وAlibaba وSHEIN عندما توجد نتيجة مطابقة، ويمكن استخدام متاجر صينية أخرى. "
             "لا تعرض أي دولة رابعة. لا تجعل الأعداد حصصاً إلزامية؛ اعرض الموجود المطابق فقط. "
             "لكل نتيجة اذكر اسم المتجر، اسم المنتج المطابق، السعر الرقمي والعملة، واربطه بصفحة المنتج المباشرة. "
-            f"{LANG_INSTR[lang]}"
+            f"{TEXT77_LANG_INSTR[lang]}"
         )
         txt, urls = legacy_v26_best_of_search(
             [{"text": prompt}], max_results=total_cap,
@@ -5295,7 +5311,7 @@ def execute_service_search(from_number, service_desc, original_text, bot_id, lan
         f"هذا طلب خدمة وليس منتجاً: {service_desc}. "
         f"طبق الحالة 3 بالضبط: ابحث في Google وأعطني 5 مزودي خدمة على الأقل في {market_name} "
         "مع أرقام هواتفهم الظاهرة فعلاً في نتائج البحث، مرتبين من الأعلى تقييماً. "
-        f"{LANG_INSTR[lang]}"
+        f"{TEXT77_LANG_INSTR[lang]}"
     )
     txt, urls = "", {}
     try:
@@ -5340,13 +5356,12 @@ def _text_offer_price_and_title(detail):
 
 
 def _text_price_local(raw_price, market_rank, lang):
-    """Convert typed-search prices to the user's local currency, matching Lens display behavior."""
+    """Typed-search display: local converted price + original foreign price in parentheses."""
     raw = str(raw_price or "").strip()
     if not raw:
         return ""
     local_cur = (current_market().get("currency") or "").upper().strip()
     src = detect_currency_code(raw, "")
-    # If Gemini omitted the currency, infer it only from the already-classified market bucket.
     if not src:
         if market_rank == 0:
             src = local_cur
@@ -5354,10 +5369,28 @@ def _text_price_local(raw_price, market_rank, lang):
             src = "USD"
         elif market_rank == 2:
             src = "CNY"
+
+    # Local offer: no duplicate original-price parenthesis.
     if market_rank == 0 and (not src or src == local_cur):
         return format_lens_price(raw, None, lang, local_cur or src or None)
-    shown, _ = display_global_price(None, raw, src, lang)
-    return shown or raw
+
+    numeric = None
+    m = re.search(r"(?<!\d)(\d+(?:[.,]\d{1,3})?)(?!\d)", raw.replace(",", ""))
+    if m:
+        try:
+            numeric = float(m.group(1))
+        except Exception:
+            numeric = None
+    if numeric is None:
+        return raw
+
+    converted = convert_to_local(numeric, src) if src else None
+    if converted is None:
+        return raw
+
+    local_label = currency_label(lang)
+    original = f"{format_price(numeric, src)} {src}"
+    return f"{format_price(converted, local_cur)} {local_label} ({original})"
 
 
 def send_text_lens_style_results(from_number, txt, urls, bot_id, lang, query):
@@ -5627,7 +5660,7 @@ def run_brand_comparison(from_number, query, bot_id, lang):
     prompt = (
         f"الطلب العام: {query}" + (f" ({en})" if en and en != query else "") +
         f". قارن أفضل الخيارات المتوفرة الآن في {current_market().get('country_name', 'Kuwait')}. "
-        f"{LANG_INSTR[lang]}"
+        f"{TEXT77_LANG_INSTR[lang]}"
     )
     txt = ""
     options = []
@@ -5715,8 +5748,8 @@ def run_text_global_search(phone, item):
     market_name = current_market().get("country_name", "Kuwait")
     prompts = [
         f"ابحث عالمياً عن {query} في متاجر خارج {market_name} فقط. استبعد المتاجر داخل {market_name}. "
-        f"ابحث في Amazon.com وeBay وAliExpress وTemu وSHEIN وWalmart وغيرها. اعرض حتى {MAX_STORES} نتائج مختلفة بسعر رقمي ورابط منتج مباشر والعملة. {LANG_INSTR[lang]}",
-        f"Search worldwide for {english_search_name(query) or query} outside {market_name}. Find up to {MAX_STORES} trusted international store results with numeric price, currency, and direct product page. {LANG_INSTR[lang]}",
+        f"ابحث في Amazon.com وeBay وAliExpress وTemu وSHEIN وWalmart وغيرها. اعرض حتى {MAX_STORES} نتائج مختلفة بسعر رقمي ورابط منتج مباشر والعملة. {TEXT77_LANG_INSTR[lang]}",
+        f"Search worldwide for {english_search_name(query) or query} outside {market_name}. Find up to {MAX_STORES} trusted international store results with numeric price, currency, and direct product page. {TEXT77_LANG_INSTR[lang]}",
     ]
     txt, urls = "", {}
     for prompt in prompts:
@@ -5740,7 +5773,7 @@ def run_text_similar_search(phone, item):
         f"المنتج التالي غير متوفر محلياً: {base}. " + (f"الاسم الآخر: {base_other}. " if base_other else "") +
         f"ابحث بعمق في Google عن حتى {MAX_STORES} بدائل حقيقية مختلفة من نفس الفئة والاستخدام ومتوفرة الآن في متاجر {market_name} المحلية فقط. "
         "لكل نتيجة: اسم المتجر فقط — اسم البديل الفعلي — السعر الرقمي. اربط كل متجر بصفحة المنتج المباشرة. رتب الأرخص أولاً. "
-        f"{LANG_INSTR[lang]}"
+        f"{TEXT77_LANG_INSTR[lang]}"
     )
     txt, urls = legacy_v26_best_of_search([{"text": prompt}], max_results=MAX_STORES, merge_offers=True,
                                           merge_title=f"📦 بدائل مشابهة: {base}")
