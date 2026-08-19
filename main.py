@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v79-clean-ui-gcc4-no-source-links-20260819"
+BUILD_ID = "v79-compact-ui-no-autolinks-20260819"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE/TEXT -> FLAGS + CLEAR LOCAL PRICES + LOCAL/US/CHINA")
@@ -3383,6 +3383,43 @@ def _ui_plain_store_name(source="", link=""):
     return cleaned.strip(" .-/") or ("المتجر")
 
 
+def _compact_ui_title(value, max_len=68):
+    """Keep WhatsApp result cards short: product identity, not SEO/search-result prose."""
+    s = re.sub(r"\s+", " ", str(value or "")).strip()
+    # Remove common Arabic shopping/SEO lead-ins without touching model identity.
+    s = re.sub(r"^(?:اشتر(?:ي|ِ)?|اشتري|تسوق|تسوّق|اطلب|شراء)\s+", "", s, flags=re.I)
+    s = re.sub(r"\b(?:أونلاين|اونلاين)\s+(?:في|من)\s+[^|،,\-–—]{2,25}\b", "", s, flags=re.I)
+    s = re.sub(r"\b(?:في|من)\s+(?:الكويت|السعودية|الإمارات|الامارات|قطر|البحرين|عمان|بريطانيا|ألمانيا|المانيا|فرنسا|إسبانيا|اسبانيا)\b", "", s, flags=re.I)
+    # Remove obvious SEO separators and trailing store/location fragments.
+    parts = [p.strip() for p in re.split(r"\s*[|｜]\s*", s) if p.strip()]
+    if parts:
+        s = parts[0]
+    s = re.sub(r"\s*[-–—]\s*(?:تسوق|تسوّق|متوفر|اونلاين|أونلاين).*$", "", s, flags=re.I)
+    s = re.sub(r"\s{2,}", " ", s).strip(" ,-|–—")
+    if len(s) > max_len:
+        # Prefer a clean word boundary.
+        cut = s[:max_len + 1]
+        if " " in cut:
+            cut = cut.rsplit(" ", 1)[0]
+        s = cut.rstrip(" ,-|–—") + "…"
+    return s
+
+
+def _break_numeric_autolinks(value):
+    """Break WhatsApp auto-linking of long standalone numeric/SKU-like sequences invisibly."""
+    s = str(value or "")
+    # e.g. 001-1381645 or 123456789. Prices such as 8.000 and 79.00 are excluded.
+    pat = re.compile(r"(?<![\d.])((?:\d[\s-]?){7,}\d?)(?![\d.])")
+    def repl(m):
+        token = m.group(1)
+        digit_positions = [i for i, ch in enumerate(token) if ch.isdigit()]
+        if len(digit_positions) < 7:
+            return token
+        pos = digit_positions[min(2, len(digit_positions)-1)] + 1
+        return token[:pos] + "\u2060" + token[pos:]
+    return pat.sub(repl, s)
+
+
 def _remove_ui_autolinks(value):
     """Remove URLs/domain patterns from visible WhatsApp text; CTA action remains the only link."""
     s = str(value or "")
@@ -3416,6 +3453,7 @@ def _remove_ui_autolinks(value):
         s,
         flags=re.I,
     )
+    s = _break_numeric_autolinks(s)
     return re.sub(r"[ \t]{2,}", " ", s).strip()
 
 
@@ -4141,7 +4179,9 @@ def translate_ui_titles(titles, lang):
         system = f"""You translate shopping UI text into {target}.
 Translate ONLY the human-readable product description for display.
 Do not translate, alter, or localize brand names, model names, SKU codes, sizes, numbers, or store names.
-Keep the translation concise.
+Keep only the product identity and the few attributes needed to distinguish it (brand/model/type/color/size).
+Remove shopping/SEO filler such as buy, shop, online, available in, for men/women, city/country/store wording unless essential to identify the product.
+Aim for 3-8 words and at most 65 characters.
 Return ONLY a JSON array of strings in the same order, no markdown."""
         raw, _ = call_gemini([{"text": json.dumps(missing, ensure_ascii=False)}], system=system, use_search=False)
         translated = []
@@ -4506,15 +4546,12 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption="", image_
         market_counts[market_rank] += 1
         flag = country_flag_emoji(market_cc.get(market_rank, ""))
         source = _ui_plain_store_name((m.get("source") or "").strip(), (m.get("link") or "").strip())
-        title = re.sub(r"\s+", " ", (m.get("_display_title") or m.get("title") or "").strip())
-        # أقصر عنوان ممكن داخل واتساب، مع بقاء اسم المنتج مفهوماً.
-        if len(title) > 105:
-            title = title[:102].rstrip(" ,-|—") + "…"
+        title = _compact_ui_title(m.get("_display_title") or m.get("title") or "")
         price_txt = _lens_price_text_local(m, market_rank, lang)
 
         # شكل مختصر وواضح: العلم + المتجر، المنتج، السعر.
-        head = f"{flag}  🛍️ {source}" if source else flag
-        body = f"{head}\n✨ {title}"
+        head = f"{flag}  {source}" if source else flag
+        body = f"{head}\n{title}"
         # Price enrichment must never shrink Lens results. If every search-backed price attempt
         # fails, keep the visually relevant card as a last resort instead of dropping it.
         if price_txt:
@@ -5876,12 +5913,10 @@ def run_region_lens_search(phone, product, region_key, bot_id, lang,
         cc = (m.get("_lens_country") or "").lower()
         flag = country_flag_emoji(cc)
         store = _ui_plain_store_name((m.get("source") or "").strip(), (m.get("link") or "").strip()) or ("المتجر" if lang == "ar" else "Store")
-        title = re.sub(r"\s+", " ", shown_title or m.get("title") or product).strip()
-        if len(title) > 105:
-            title = title[:102].rstrip(" ,-|—") + "…"
+        title = _compact_ui_title(shown_title or m.get("title") or product)
 
         price = _lens_region_price_display(m, cc, lang)
-        body = f"{flag}  🛍️ {store}\\n✨ {title}"
+        body = f"{flag}  {store}\\n{title}"
         if price:
             body += f"\\n💰 {price}"
         else:
@@ -6033,11 +6068,9 @@ def run_region_search(phone, product, region_key, bot_id, lang="ar", origin="tex
         flag = country_flag_emoji(cc)
         store = _ui_plain_store_name(item["source"] or "", item.get("link") or "") or ("المتجر" if lang == "ar" else "Store")
         raw_title, raw_price = _text_offer_price_and_title(item["title"])
-        title = re.sub(r"\s+", " ", display_title or raw_title or product).strip()
-        if len(title) > 105:
-            title = title[:102].rstrip(" ,-|—") + "…"
+        title = _compact_ui_title(display_title or raw_title or product)
         price = _region_price_display(raw_price, cc, lang)
-        body = f"{flag}  🛍️ {store}\n✨ {title}"
+        body = f"{flag}  {store}\n{title}"
         if price:
             body += f"\n💰 {price}"
         send_whatsapp_cta(phone, body[:1000], item["link"], bot_id, ("🛒 عرض المنتج" if lang == "ar" else "🛒 View product"))
@@ -6783,11 +6816,9 @@ def send_text_lens_style_results(from_number, txt, urls, bot_id, lang, query):
         counts[rank] += 1
         flag = country_flag_emoji(rank_cc.get(rank, ""))
         store = _ui_plain_store_name(item["source"] or "", item.get("link") or "") or ("المتجر" if lang == "ar" else "Store")
-        title = re.sub(r"\s+", " ", shown_title or query).strip()
-        if len(title) > 105:
-            title = title[:102].rstrip(" ,-|—") + "…"
+        title = _compact_ui_title(shown_title or query)
         shown_price = _text_price_local(raw_price, rank, lang) if raw_price else ""
-        body = f"{flag}  🛍️ {store}\n✨ {title}\n💰 {shown_price or no_price}"
+        body = f"{flag}  {store}\n{title}\n💰 {shown_price or no_price}"
         send_whatsapp_cta(from_number, body[:1000], item["link"], bot_id, ("🛒 عرض المنتج" if lang == "ar" else "🛒 View product"))
 
     LAST_SEARCH[from_number] = {"product": query}
