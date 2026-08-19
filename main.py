@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v79-price-relevance-fix-20260819"
+BUILD_ID = "v79-lens-focused-text-price-enrichment-20260819"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE/TEXT -> FLAGS + CLEAR LOCAL PRICES + LOCAL/US/CHINA")
@@ -4075,6 +4075,153 @@ def _enrich_missing_prices(items):
         return seq
 
 
+
+def _lens_merchant_key(name, url=""):
+    """Canonical merchant key used to match Lens cards with typed-text search offers."""
+    try:
+        host = urllib.parse.urlparse(str(url or "")).netloc.lower().split(":")[0]
+        host = host[4:] if host.startswith("www.") else host
+    except Exception:
+        host = ""
+    aliases = (
+        "amazon.com", "ebay.com", "walmart.com", "aliexpress.com", "temu.com",
+        "alibaba.com", "shein.com", "1688.com", "taobao.com", "tmall.com",
+        "made-in-china.com", "newegg.com", "bestbuy.com",
+    )
+    hay = f"{name or ''} {host}".lower()
+    for dom in aliases:
+        label = dom.split(".")[0]
+        if dom in hay or normalize_name(label) in normalize_name(hay):
+            return dom
+    return host or normalize_name(str(name or ""))
+
+
+def _lens_price_from_text_search_one(item, target, lang):
+    """Recover ONE Lens card price using the same search-backed text engine.
+
+    Important: this does not replace the Lens result, URL, title, or merchant.  It only asks
+    Google-backed Gemini for the current numeric price of that exact Lens product at that exact
+    merchant/domain.  If price recovery fails, the original Lens card is preserved.
+    """
+    m = dict(item or {})
+    if _lens_has_price(m):
+        return m
+
+    source = str(m.get("source") or "").strip()
+    title = re.sub(r"\s+", " ", str(m.get("title") or target or "")).strip()
+    link = str(m.get("link") or "").strip()
+    try:
+        host = urllib.parse.urlparse(link).netloc.lower().split(":")[0]
+        host = host[4:] if host.startswith("www.") else host
+    except Exception:
+        host = ""
+    merchant = source or host
+    if not title or not merchant:
+        return m
+
+    rank = result_market_rank(m)
+    local_cur = (current_market().get("currency") or "KWD").upper()
+    if rank == 0:
+        currency_rule = f"Return the price in the store's displayed local currency, normally {local_cur}."
+    elif rank == 1:
+        currency_rule = "Return the original displayed price in USD. Do NOT convert it."
+    else:
+        currency_rule = "Return the original displayed price exactly as shown, normally USD or CNY/RMB. Do NOT convert it."
+
+    prompt = f"""PRICE LOOKUP FOR AN EXISTING GOOGLE LENS RESULT.
+Find the CURRENT selling price for this exact product at this exact merchant only.
+Product: {title}
+Merchant: {merchant}
+Merchant domain: {host or 'unknown'}
+Lens target/context: {target or title}
+
+Use Google Search grounding exactly like the normal typed-product search.
+{currency_rule}
+Do not return another merchant. Do not substitute a different product/model/size.
+If the exact price is visible in current Google/search results for this merchant, return exactly:
+PRICE: <numeric price> <currency code>
+If no reliable current numeric price is found, return exactly:
+PRICE: UNKNOWN
+"""
+    try:
+        txt, _urls = text77_call_gemini([{"text": prompt}], use_search=True)
+    except Exception as e:
+        print(f"LENS PRICE FOCUSED TEXT ERR: {merchant[:35]} -> {e}")
+        return m
+
+    raw = str(txt or "").strip()
+    # Prefer the explicit PRICE line, but accept the same currency/number patterns used by typed search.
+    mm = re.search(
+        r"PRICE\s*:\s*((?:USD|US\$|KWD|KD|SAR|AED|QAR|OMR|BHD|CNY|RMB|\$|¥|￥)?\s*\d[\d,.]*\s*(?:USD|KWD|KD|SAR|AED|QAR|OMR|BHD|CNY|RMB|\$|¥|￥)?)",
+        raw, flags=re.I,
+    )
+    price_raw = mm.group(1).strip() if mm else ""
+    if not price_raw:
+        _t, price_raw = _text_offer_price_and_title(raw)
+    if not price_raw or "UNKNOWN" in raw.upper():
+        print(f"LENS PRICE FOCUSED TEXT MISS: {merchant[:35]} | {title[:70]}")
+        return m
+
+    src = detect_currency_code(price_raw, "")
+    if not src:
+        src = local_cur if rank == 0 else ("USD" if rank == 1 else "CNY")
+    nm = re.search(r"(?<!\d)(\d+(?:[.,]\d{1,3})?)(?!\d)", price_raw.replace(",", ""))
+    if not nm:
+        return m
+    try:
+        num = float(nm.group(1))
+    except Exception:
+        return m
+    if num <= 0:
+        return m
+
+    m["price"] = f"{format_price(num, src)} {src}"
+    m["price_value"] = num
+    m["currency"] = src
+    m["price_source"] = "typed_search_focused"
+    print(f"LENS PRICE FOCUSED TEXT OK: {merchant[:35]} -> {m['price']}")
+    return m
+
+
+def _lens_fill_missing_prices_from_text_engine(selected, lens, caption, lang):
+    """Enrich Lens prices without shrinking the Lens result set.
+
+    Each price-less Lens card is preserved and gets its own focused, search-grounded price lookup
+    using the same text-search mechanism.  A lookup failure NEVER removes the Lens card.
+    """
+    items = [dict(x) for x in (selected or [])]
+    missing_idx = [i for i, x in enumerate(items) if not _lens_has_price(x)]
+    if not missing_idx:
+        return items
+
+    target = str(
+        (lens or {}).get("relevance_target")
+        or caption
+        or ((lens or {}).get("chosen") or {}).get("title")
+        or (items[0].get("title") if items else "")
+        or ""
+    ).strip()
+    print(f"LENS PRICE ENRICH VIA TEXT METHOD: target={target[:120]!r} missing={len(missing_idx)}")
+
+    market_snapshot = current_market()
+    futures = {}
+    for i in missing_idx:
+        fut = RESOLVER.submit(
+            _run_with_market, market_snapshot,
+            _lens_price_from_text_search_one, items[i], target, lang
+        )
+        futures[fut] = i
+
+    for fut, i in futures.items():
+        try:
+            items[i] = fut.result(timeout=90)
+        except Exception as e:
+            print(f"LENS PRICE ENRICH FUTURE ERR: idx={i} -> {e}")
+
+    recovered = sum(1 for i in missing_idx if _lens_has_price(items[i]))
+    print(f"LENS PRICE ENRICH VIA TEXT METHOD: recovered={recovered}/{len(missing_idx)}; cards_preserved={len(items)}")
+    return items
+
 def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
     """v76: CTA-only، مختصر، بأعلام الدول، وترجمة للواجهة فقط.
 
@@ -4174,8 +4321,11 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
     if not selected:
         return False
 
-    # Try to recover missing prices from direct product pages before rendering.
-    selected = _enrich_missing_prices(selected)
+    # Lens pricing rule: DO NOT scrape/display "price not shown".
+    # Missing prices are recovered through the same v77.7 typed-text search engine.
+    # If that engine still cannot confirm a numeric price, the Lens card is omitted.
+    # Preserve the Lens result set; use typed-search only as a price enrichment layer.
+    selected = _lens_fill_missing_prices_from_text_engine(selected, lens, caption, lang)
 
     # الترجمة للواجهة فقط بعد اكتمال البحث والاختيار؛ لا تؤثر على Lens أو Google أو الفلاتر.
     display_titles = translate_ui_titles([(m.get("title") or "").strip() for m in selected], lang)
@@ -4184,8 +4334,6 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
 
     local_cc = (current_market().get("country") or DEFAULT_COUNTRY).lower()
     market_cc = {0: local_cc, 1: "us", 2: "cn"}
-    no_price = "السعر غير ظاهر" if lang == "ar" else "Price not shown"
-
     sent = 0
     market_counts = {0: 0, 1: 0, 2: 0}
     for m in selected:
@@ -4202,10 +4350,12 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
         # شكل مختصر وواضح: العلم + المتجر، المنتج، السعر.
         head = f"{flag} {source}" if source else flag
         body = f"{head}\n{title}"
+        # Price enrichment must never shrink Lens results. If every search-backed price attempt
+        # fails, keep the visually relevant card as a last resort instead of dropping it.
         if price_txt:
             body += f"\n💰 {price_txt}"
         else:
-            body += f"\n💰 {no_price}"
+            body += f"\n💰 {'السعر غير ظاهر' if lang == 'ar' else 'Price not shown'}"
 
         url = (m.get("link") or "").strip()
         button_source = source or ("المتجر" if lang == "ar" else "Store")
