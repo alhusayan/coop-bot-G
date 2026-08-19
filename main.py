@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v79-other-country-caps-balanced-20260819"
+BUILD_ID = "v79-region-origin-aware-lens-text-20260819"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE/TEXT -> FLAGS + CLEAR LOCAL PRICES + LOCAL/US/CHINA")
@@ -3605,6 +3605,9 @@ def process_interactive_message(message, bot_id):
                 item.get("bot_id") or bot_id,
                 lang_,
                 origin=item.get("origin") or "text",
+                image_b64=item.get("image_b64") or "",
+                image_mime=item.get("image_mime") or "",
+                visual_identity=item.get("visual_identity") or "",
             )
         else:
             send_whatsapp_text(
@@ -4252,7 +4255,7 @@ def _lens_fill_missing_prices_from_text_engine(selected, lens, caption, lang):
     print(f"LENS PRICE ENRICH VIA TEXT METHOD: recovered={recovered}/{len(missing_idx)}; cards_preserved={len(items)}")
     return items
 
-def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
+def send_lens_direct_results(from_number, lens, bot_id, lang, caption="", image_b64="", image_mime=""):
     """v76: CTA-only، مختصر، بأعلام الدول، وترجمة للواجهة فقط.
 
     الحدود القصوى مستقلة: محلي 5، أمريكا 4، الصين 4.
@@ -4397,7 +4400,16 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
     if market_counts[2] == 0:
         print("V77 WARNING: no Chinese-store Lens result survived filters")
     if sent > 0 and expansion_query:
-        send_region_search_choice(from_number, expansion_query, bot_id, lang, origin="lens")
+        send_region_search_choice(
+            from_number,
+            expansion_query,
+            bot_id,
+            lang,
+            origin="lens",
+            image_b64=image_b64,
+            image_mime=image_mime,
+            visual_identity=(lens.get("visual_identity") or lens.get("relevance_target") or expansion_query),
+        )
     return sent > 0
 
 def process_single_image(message,bot_id,lang="ar"):
@@ -4419,7 +4431,10 @@ def process_single_image(message,bot_id,lang="ar"):
         lens_direct_attempted = True
         lens_direct = google_lens_lookup(b64, mime, lang, caption, light=True)
         if lens_direct.get("matches"):
-            if send_lens_direct_results(from_number, lens_direct, bot_id, lang, caption):
+            if send_lens_direct_results(
+                from_number, lens_direct, bot_id, lang, caption,
+                image_b64=b64, image_mime=mime
+            ):
                 return
         print("LENS DIRECT MODE: no Google results -> full pipeline fallback")
         send_whatsapp_text(from_number, T(lang, "lens_none"), bot_id)
@@ -5211,8 +5226,12 @@ def _region_country_fetch_limit(cc):
     return 3
 
 
-def send_region_search_choice(phone, query, bot_id, lang="ar", origin="text"):
-    """Show one compact list after product results for user-requested extra markets."""
+def send_region_search_choice(phone, query, bot_id, lang="ar", origin="text",
+                              image_b64="", image_mime="", visual_identity=""):
+    """Show one compact list after product results for user-requested extra markets.
+
+    If origin=Lens, preserve the ORIGINAL image so later country expansion also uses Lens.
+    """
     q = re.sub(r"\s+", " ", str(query or "")).strip()
     if not q:
         return False
@@ -5221,6 +5240,9 @@ def send_region_search_choice(phone, query, bot_id, lang="ar", origin="text"):
         "bot_id": bot_id,
         "lang": lang,
         "origin": origin,
+        "image_b64": image_b64 if origin == "lens" else "",
+        "image_mime": image_mime if origin == "lens" else "",
+        "visual_identity": visual_identity if origin == "lens" else "",
         "ts": time.time(),
     }
     if lang == "en":
@@ -5470,7 +5492,261 @@ def _search_one_region_country(product, cc, lang):
     return out
 
 
-def run_region_search(phone, product, region_key, bot_id, lang="ar", origin="text"):
+
+def _lens_region_lookup(image_b64, image_mime, countries, query_hint="", visual_identity=""):
+    """Run the SAME Google Lens mechanism used by the main image flow, but for explicit countries.
+
+    For every selected country:
+      - Lens products pass
+      - Lens all/visual pass
+    Results keep their pass-country in _lens_country.
+    """
+    if not (image_b64 and image_mime and ENABLE_GOOGLE_LENS and SERPAPI_API_KEY and PUBLIC_BASE_URL):
+        return {"matches": [], "visual_identity": visual_identity or query_hint, "query": visual_identity or query_hint}
+
+    public_url = publish_image_for_lens(image_b64, image_mime)
+    if not public_url:
+        return {"matches": [], "visual_identity": visual_identity or query_hint, "query": visual_identity or query_hint}
+
+    passes = []
+    for cc in countries:
+        passes.extend([
+            ("products", cc, True),
+            ("all", cc, True),
+        ])
+
+    future_map = {
+        LENS_HTTP_POOL.submit(
+            _serpapi_lens_request, public_url, lens_type, cc, auto_crop, query_hint
+        ): (lens_type, cc)
+        for lens_type, cc, auto_crop in passes
+    }
+
+    merged, seen = [], set()
+    done, not_done = wait(list(future_map), timeout=LENS_TOTAL_TIMEOUT_SECONDS)
+    for fut in done:
+        lens_type, cc = future_map[fut]
+        try:
+            for item in fut.result() or []:
+                # Keep pass country explicit; this is the selected market search.
+                item["_lens_country"] = cc
+                sig = (
+                    (item.get("title") or "").strip().lower(),
+                    (item.get("link") or "").strip().lower(),
+                    cc,
+                )
+                if sig in seen:
+                    continue
+                seen.add(sig)
+                merged.append(item)
+        except Exception as e:
+            print(f"REGION LENS FUTURE ERR type={lens_type} cc={cc}: {e}")
+    for fut in not_done:
+        lens_type, cc = future_map[fut]
+        fut.cancel()
+        print(f"REGION LENS TIMEOUT type={lens_type} cc={cc}")
+
+    # Never let obvious US/China results leak into manually selected other-country searches.
+    cleaned = []
+    for item in merged:
+        cc = (item.get("_lens_country") or "").lower()
+        if cc not in countries:
+            continue
+        if cc not in ("us", "cn"):
+            if is_us_market_result(item) or is_china_market_result(item):
+                print(f"REGION LENS REJECT US/CN LEAK cc={cc}: {(item.get('title') or '')[:80]}")
+                continue
+        cleaned.append(item)
+
+    lens_obj = {
+        "matches": cleaned,
+        "visual_identity": visual_identity or query_hint,
+        "query": visual_identity or query_hint,
+    }
+
+    # Same strict AI relevance layer used by the main Lens output.
+    filtered = _lens_ai_relevance_filter(lens_obj)
+    lens_obj["matches"] = filtered
+    return lens_obj
+
+
+def _lens_region_price_display(item, cc, lang):
+    """Display Lens price in user's local currency + original source price."""
+    raw_price = str(item.get("price") or "").strip()
+    price_value = item.get("price_value")
+    currency = (item.get("currency") or "").upper().strip()
+    if not currency:
+        currency = detect_currency_code(raw_price, COUNTRY_CURRENCIES.get(cc, ""))
+
+    numeric = None
+    try:
+        if price_value not in (None, ""):
+            numeric = float(price_value)
+    except Exception:
+        numeric = None
+    if numeric is None:
+        m = re.search(r"(?<!\d)(\d+(?:[.,]\d{1,3})?)(?!\d)", raw_price.replace(",", ""))
+        if m:
+            try:
+                numeric = float(m.group(1))
+            except Exception:
+                numeric = None
+    if numeric is None:
+        return raw_price
+
+    local_cur = (current_market().get("currency") or "").upper().strip()
+    if currency == local_cur:
+        return f"{format_price(numeric, local_cur)} {currency_label(lang)}"
+
+    converted = convert_to_local(numeric, currency) if currency else None
+    original = f"{format_price(numeric, currency)} {currency}".strip()
+    if converted is None:
+        return original
+    return f"{format_price(converted, local_cur)} {currency_label(lang)} ({original})"
+
+
+def run_region_lens_search(phone, product, region_key, bot_id, lang,
+                           image_b64, image_mime, visual_identity=""):
+    """Country expansion for IMAGE-origin searches: Lens only, not text search."""
+    group = REGION_SEARCH_GROUPS.get(region_key)
+    if not group:
+        return
+
+    current_cc = (current_market().get("country") or DEFAULT_COUNTRY).lower()
+    countries = [cc for cc in group["countries"] if cc != current_cc]
+    if not countries:
+        countries = list(group["countries"])
+
+    label = group.get(lang) or group.get("ar") or region_key
+    if lang == "en":
+        send_whatsapp_text(phone, f"🌍 Searching {label} with Google Lens...", bot_id)
+    else:
+        send_whatsapp_text(phone, f"🌍 أدور لك في {label} باستخدام Google Lens...", bot_id)
+
+    lens_obj = _lens_region_lookup(
+        image_b64, image_mime, countries,
+        query_hint=product,
+        visual_identity=visual_identity or product,
+    )
+    matches = list(lens_obj.get("matches") or [])
+
+    # Group by selected Lens country, then use the same quality order:
+    # priced -> exact -> visual -> Google position.
+    by_country = {cc: [] for cc in countries}
+    for m in matches:
+        cc = (m.get("_lens_country") or "").lower()
+        if cc in by_country:
+            by_country[cc].append(m)
+
+    for cc in countries:
+        by_country[cc].sort(key=lambda m: (
+            0 if _lens_has_price(m) else 1,
+            0 if m.get("exact") else 1,
+            0 if m.get("section") == "visual_matches" else 1,
+            int(m.get("position") or 999),
+        ))
+        # Confirmed OOS only; unknown stock remains, same conservative policy.
+        probe = max(_region_country_fetch_limit(cc) + 2, _region_country_fetch_limit(cc))
+        head = _filter_confirmed_oos(by_country[cc][:probe], f"REGION-LENS-{cc}")
+        by_country[cc] = head + by_country[cc][probe:]
+
+    total_limit = REGION_RESULT_LIMITS.get(region_key, 4)
+    per_country_limit = REGION_PER_COUNTRY_LIMITS.get(region_key, total_limit)
+
+    # Balanced round-robin by country, one result max per store/domain.
+    positions = {cc: 0 for cc in countries}
+    country_counts = {cc: 0 for cc in countries}
+    selected, seen_hosts = [], set()
+
+    while len(selected) < total_limit:
+        progressed = False
+        for cc in countries:
+            if len(selected) >= total_limit:
+                break
+            if country_counts[cc] >= per_country_limit:
+                continue
+            bucket = by_country.get(cc) or []
+            while positions[cc] < len(bucket):
+                item = bucket[positions[cc]]
+                positions[cc] += 1
+                url = (item.get("link") or "").strip()
+                host = _host_of(url)
+                if not url.startswith("http") or not host or "google." in host or host in seen_hosts:
+                    continue
+                seen_hosts.add(host)
+                selected.append(item)
+                country_counts[cc] += 1
+                progressed = True
+                break
+        if not progressed:
+            break
+
+    print(
+        f"REGION LENS BALANCED region={region_key} "
+        f"total={len(selected)}/{total_limit} per_country={country_counts}"
+    )
+
+    if not selected:
+        msg = (
+            "ما لقيت نتائج Lens مطابقة في الدول المختارة حالياً."
+            if lang == "ar"
+            else "I couldn't find matching Lens results in the selected countries right now."
+        )
+        send_whatsapp_text(phone, msg, bot_id)
+        send_region_search_choice(
+            phone, product, bot_id, lang, origin="lens",
+            image_b64=image_b64, image_mime=image_mime,
+            visual_identity=visual_identity or product,
+        )
+        return
+
+    display_titles = translate_ui_titles(
+        [(m.get("title") or product).strip() for m in selected], lang
+    )
+
+    sent = 0
+    for m, shown_title in zip(selected, display_titles):
+        cc = (m.get("_lens_country") or "").lower()
+        flag = country_flag_emoji(cc)
+        store = (m.get("source") or "").strip() or ("المتجر" if lang == "ar" else "Store")
+        title = re.sub(r"\s+", " ", shown_title or m.get("title") or product).strip()
+        if len(title) > 105:
+            title = title[:102].rstrip(" ,-|—") + "…"
+
+        price = _lens_region_price_display(m, cc, lang)
+        body = f"{flag} {store}\\n{title}"
+        if price:
+            body += f"\\n💰 {price}"
+        else:
+            # Preserve Lens cardinality just like the current main Lens flow.
+            body += f"\\n💰 {'السعر غير ظاهر' if lang == 'ar' else 'Price not shown'}"
+
+        send_whatsapp_cta(
+            phone, body[:1000], (m.get("link") or "").strip(),
+            bot_id, f"🛒 {store[:18]}"
+        )
+        sent += 1
+
+    print(f"REGION LENS RESULTS SENT region={region_key} count={sent}")
+    send_region_search_choice(
+        phone, product, bot_id, lang, origin="lens",
+        image_b64=image_b64, image_mime=image_mime,
+        visual_identity=visual_identity or product,
+    )
+
+
+def run_region_search(phone, product, region_key, bot_id, lang="ar", origin="text",
+                      image_b64="", image_mime="", visual_identity=""):
+    # Critical routing rule:
+    # image-origin -> Google Lens for the selected countries.
+    # typed-origin -> existing grounded text-search engine.
+    if origin == "lens" and image_b64 and image_mime:
+        return run_region_lens_search(
+            phone, product, region_key, bot_id, lang,
+            image_b64=image_b64,
+            image_mime=image_mime,
+            visual_identity=visual_identity or product,
+        )
     group = REGION_SEARCH_GROUPS.get(region_key)
     if not group:
         return
