@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v79-region-origin-aware-lens-text-20260819"
+BUILD_ID = "v79-gcc-submenu-no-turkey-20260819"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE/TEXT -> FLAGS + CLEAR LOCAL PRICES + LOCAL/US/CHINA")
@@ -3588,6 +3588,53 @@ def process_interactive_message(message, bot_id):
     btn_id=reply.get("id","")
 
     # Optional country/region expansion after either Lens or typed-text results.
+    if btn_id == "region_gcc":
+        item = PENDING_REGION_SEARCH.get(from_number) or {}
+        lang_ = item.get("lang") or USER_LANG.get(from_number, "ar")
+        if item and time.time() - item.get("ts", 0) <= GLOBAL_PENDING_TTL:
+            activate_market(from_number)
+            send_gcc_country_choice(from_number, item.get("bot_id") or bot_id, lang_)
+        else:
+            PENDING_REGION_SEARCH.pop(from_number, None)
+            send_whatsapp_text(
+                from_number,
+                ("انتهت صلاحية البحث 😅 ابحث عن المنتج مرة ثانية." if lang_ == "ar"
+                 else "That search expired 😅 search for the product again."),
+                bot_id,
+            )
+        return
+
+    if btn_id.startswith("gcc_"):
+        item = PENDING_REGION_SEARCH.get(from_number) or {}
+        if item and time.time() - item.get("ts", 0) > GLOBAL_PENDING_TTL:
+            item = {}
+            PENDING_REGION_SEARCH.pop(from_number, None)
+        cc = btn_id[4:].lower()
+        lang_ = item.get("lang") or USER_LANG.get(from_number, "ar")
+        query_ = (item.get("query") or "").strip()
+        valid_gcc = {x[0] for x in GCC_COUNTRY_CHOICES}
+        if item and query_ and cc in valid_gcc:
+            activate_market(from_number)
+            run_single_gcc_country_search(
+                from_number,
+                query_,
+                cc,
+                item.get("bot_id") or bot_id,
+                lang_,
+                origin=item.get("origin") or "text",
+                image_b64=item.get("image_b64") or "",
+                image_mime=item.get("image_mime") or "",
+                visual_identity=item.get("visual_identity") or "",
+            )
+        else:
+            send_whatsapp_text(
+                from_number,
+                ("انتهت صلاحية البحث 😅 ابحث عن المنتج مرة ثانية." if lang_ == "ar"
+                 else "That search expired 😅 search for the product again."),
+                bot_id,
+            )
+        return
+
     if btn_id.startswith("region_"):
         item = PENDING_REGION_SEARCH.get(from_number) or {}
         if item and time.time() - item.get("ts", 0) > GLOBAL_PENDING_TTL:
@@ -3596,7 +3643,7 @@ def process_interactive_message(message, bot_id):
         region_key = btn_id[7:]
         lang_ = item.get("lang") or USER_LANG.get(from_number, "ar")
         query_ = (item.get("query") or "").strip()
-        if item and query_ and region_key in REGION_SEARCH_GROUPS:
+        if item and query_ and region_key in REGION_SEARCH_GROUPS and region_key != "gcc":
             activate_market(from_number)
             run_region_search(
                 from_number,
@@ -4644,7 +4691,7 @@ COUNTRY_NAMES_AR = {
     "kw": "الكويت", "sa": "السعودية", "ae": "الإمارات", "bh": "البحرين", "qa": "قطر",
     "om": "عمان", "iq": "العراق", "jo": "الأردن", "lb": "لبنان", "eg": "مصر",
     "sy": "سوريا", "ye": "اليمن", "ps": "فلسطين", "ma": "المغرب", "dz": "الجزائر",
-    "tn": "تونس", "ly": "ليبيا", "sd": "السودان", "tr": "تركيا",
+    "tn": "تونس", "ly": "ليبيا", "sd": "السودان",
 }
 
 TEXT77_LANG_INSTR = {
@@ -5196,23 +5243,18 @@ REGION_SEARCH_GROUPS = {
         "en": "Europe: Spain / Germany / France",
         "countries": ["es", "de", "fr"],
     },
-    "tr": {
-        "ar": "تركيا",
-        "en": "Turkey",
-        "countries": ["tr"],
-    },
 }
 
 REGION_COUNTRY_NAMES_AR = {
     "kw": "الكويت", "sa": "السعودية", "ae": "الإمارات", "qa": "قطر",
     "bh": "البحرين", "om": "عمان", "gb": "بريطانيا", "es": "إسبانيا",
-    "de": "ألمانيا", "fr": "فرنسا", "tr": "تركيا",
+    "de": "ألمانيا", "fr": "فرنسا",
 }
 # حدود البحث الإضافي حسب المجموعة.
 # الخليج: 8 إجمالي، بحد أقصى 3 من الدولة الواحدة مع توزيع دائري متوازن.
 # بريطانيا: 4. أوروبا (ES/DE/FR): 6 مع توزيع متوازن. تركيا: 4.
-REGION_RESULT_LIMITS = {"gcc": 8, "uk": 4, "eu": 6, "tr": 4}
-REGION_PER_COUNTRY_LIMITS = {"gcc": 3, "uk": 4, "eu": 6, "tr": 4}
+REGION_RESULT_LIMITS = {"gcc": 8, "uk": 4, "eu": 6}
+REGION_PER_COUNTRY_LIMITS = {"gcc": 8, "uk": 4, "eu": 6}
 REGION_SEARCH_POOL = ThreadPoolExecutor(max_workers=6)
 
 def _region_country_fetch_limit(cc):
@@ -5221,9 +5263,45 @@ def _region_country_fetch_limit(cc):
     if cc in {"es", "de", "fr"}:
         # نطلب حتى 4 من كل دولة حتى نستطيع تعويض نقص دولة أخرى مع بقاء التوزيع عادلاً.
         return 4
-    if cc in {"gb", "tr"}:
+    if cc == "gb":
         return 4
     return 3
+
+
+
+GCC_COUNTRY_CHOICES = [
+    ("kw", "الكويت", "Kuwait"),
+    ("sa", "السعودية", "Saudi Arabia"),
+    ("ae", "الإمارات", "United Arab Emirates"),
+    ("qa", "قطر", "Qatar"),
+    ("bh", "البحرين", "Bahrain"),
+    ("om", "عمان", "Oman"),
+]
+
+
+def send_gcc_country_choice(phone, bot_id, lang="ar"):
+    """Second-level menu: choose ONE Gulf country; current local market is omitted."""
+    current_cc = (current_market().get("country") or DEFAULT_COUNTRY).lower()
+    rows = []
+    for cc, ar_name, en_name in GCC_COUNTRY_CHOICES:
+        if cc == current_cc:
+            continue
+        rows.append({
+            "id": f"gcc_{cc}",
+            "title": en_name if lang == "en" else ar_name,
+            "description": (
+                f"Search {en_name} stores"
+                if lang == "en"
+                else f"البحث في متاجر {ar_name}"
+            ),
+        })
+    body = (
+        "🌍 Choose one Gulf country to search:"
+        if lang == "en"
+        else "🌍 اختر الدولة الخليجية التي تبي تبحث فيها:"
+    )
+    button = "Choose country" if lang == "en" else "اختر الدولة"
+    return send_whatsapp_list(phone, body, rows, bot_id, button)
 
 
 def send_region_search_choice(phone, query, bot_id, lang="ar", origin="text",
@@ -5249,19 +5327,17 @@ def send_region_search_choice(phone, query, bot_id, lang="ar", origin="text",
         body = "🌍 Want to search the same product in other countries?"
         button = "Other countries"
         rows = [
-            {"id": "region_gcc", "title": "Gulf countries", "description": "Saudi, UAE, Qatar, Bahrain, Oman"},
+            {"id": "region_gcc", "title": "Gulf countries", "description": "Choose one Gulf country"},
             {"id": "region_uk", "title": "United Kingdom", "description": "UK stores"},
             {"id": "region_eu", "title": "Europe", "description": "Spain, Germany, France"},
-            {"id": "region_tr", "title": "Turkey", "description": "Turkish stores"},
         ]
     else:
         body = "🌍 تبي أدور لك على نفس المنتج في دول أخرى؟"
         button = "دول أخرى"
         rows = [
-            {"id": "region_gcc", "title": "دول الخليج", "description": "السعودية، الإمارات، قطر، البحرين، عمان"},
+            {"id": "region_gcc", "title": "دول الخليج", "description": "اختر دولة خليجية واحدة"},
             {"id": "region_uk", "title": "بريطانيا", "description": "المتاجر البريطانية"},
             {"id": "region_eu", "title": "دول أوروبية", "description": "إسبانيا، ألمانيا، فرنسا"},
-            {"id": "region_tr", "title": "تركيا", "description": "المتاجر التركية"},
         ]
     return send_whatsapp_list(phone, body, rows, bot_id, button)
 
@@ -5733,6 +5809,42 @@ def run_region_lens_search(phone, product, region_key, bot_id, lang,
         image_b64=image_b64, image_mime=image_mime,
         visual_identity=visual_identity or product,
     )
+
+
+
+def run_single_gcc_country_search(phone, product, cc, bot_id, lang="ar", origin="text",
+                                  image_b64="", image_mime="", visual_identity=""):
+    """Search one selected GCC country; image-origin uses Lens, text-origin uses text search."""
+    if cc not in {x[0] for x in GCC_COUNTRY_CHOICES}:
+        return
+
+    # Build a temporary one-country GCC group so existing Lens/text engines can be reused.
+    original_group = REGION_SEARCH_GROUPS.get("gcc")
+    original_total = REGION_RESULT_LIMITS.get("gcc")
+    original_per = REGION_PER_COUNTRY_LIMITS.get("gcc")
+    try:
+        REGION_SEARCH_GROUPS["gcc"] = {
+            "ar": REGION_COUNTRY_NAMES_AR.get(cc, cc.upper()),
+            "en": COUNTRY_NAMES.get(cc, cc.upper()),
+            "countries": [cc],
+        }
+        REGION_RESULT_LIMITS["gcc"] = 8
+        REGION_PER_COUNTRY_LIMITS["gcc"] = 8
+
+        return run_region_search(
+            phone, product, "gcc", bot_id, lang,
+            origin=origin,
+            image_b64=image_b64,
+            image_mime=image_mime,
+            visual_identity=visual_identity,
+        )
+    finally:
+        if original_group is not None:
+            REGION_SEARCH_GROUPS["gcc"] = original_group
+        if original_total is not None:
+            REGION_RESULT_LIMITS["gcc"] = original_total
+        if original_per is not None:
+            REGION_PER_COUNTRY_LIMITS["gcc"] = original_per
 
 
 def run_region_search(phone, product, region_key, bot_id, lang="ar", origin="text",
