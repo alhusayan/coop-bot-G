@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v79-compact-ui-better-english-20260819"
+BUILD_ID = "v79-single-direction-bold-cards-20260819"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE/TEXT -> FLAGS + CLEAR LOCAL PRICES + LOCAL/US/CHINA")
@@ -3466,6 +3466,79 @@ def _compact_ui_title(value, max_len=68):
     return s
 
 
+
+def _script_class(token):
+    t = str(token or "")
+    if re.search(r"[\u0600-\u06FF]", t):
+        return "ar"
+    if re.search(r"[A-Za-z]", t):
+        return "en"
+    if re.search(r"\d", t):
+        return "num"
+    return "neutral"
+
+
+def _single_direction_lines(text_value, lang="ar", max_groups=3):
+    s = re.sub(r"\s+", " ", str(text_value or "")).strip()
+    if not s:
+        return []
+    tokens = s.split()
+    groups, current = [], []
+    current_cls = None
+    default_cls = "ar" if lang == "ar" else "en"
+    for tok in tokens:
+        cls = _script_class(tok)
+        if cls in ("num", "neutral"):
+            cls = current_cls or default_cls
+        if current and cls != current_cls:
+            groups.append(" ".join(current).strip())
+            current = [tok]
+            current_cls = cls
+        else:
+            current.append(tok)
+            current_cls = cls if current_cls is None else current_cls
+    if current:
+        groups.append(" ".join(current).strip())
+    groups = [g for g in groups if g]
+    if len(groups) > max_groups:
+        groups = groups[:max_groups - 1] + [" ".join(groups[max_groups - 1:]).strip()]
+    return groups
+
+
+def _split_price_display(price_text):
+    s = re.sub(r"\s+", " ", str(price_text or "")).strip()
+    if not s:
+        return "", ""
+    m = re.match(r"^(.*?)\s*\(([^()]+)\)\s*$", s)
+    if m:
+        return m.group(1).strip(), m.group(2).strip()
+    return s, ""
+
+
+def _build_compact_card_body(flag, store, title, price_text, lang="ar"):
+    lines = []
+    header = f"{flag} *{store}*" if store else (flag or "")
+    if header.strip():
+        lines.append(header.strip())
+
+    title_lines = _single_direction_lines(_compact_ui_title(title or ""), lang, max_groups=3)
+    if title_lines:
+        lines.append(f"*{title_lines[0]}*")
+        for extra in title_lines[1:]:
+            lines.append(f"_{extra}_")
+
+    price_main, price_secondary = _split_price_display(price_text or "")
+    if price_main:
+        lines.append(f"*💰 {price_main}*")
+        if price_secondary:
+            lines.append(f"_({price_secondary})_")
+    else:
+        lines.append(f"*💰 {'السعر غير ظاهر' if lang == 'ar' else 'Price unavailable'}*")
+
+    return "\n".join([ln for ln in lines if str(ln).strip()]).strip()
+
+
+
 def _break_numeric_autolinks(value):
     """Break WhatsApp auto-linking of long standalone numeric/SKU-like sequences invisibly."""
     s = str(value or "")
@@ -4610,15 +4683,8 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption="", image_
         title = _compact_ui_title(m.get("_display_title") or m.get("title") or "")
         price_txt = _lens_price_text_local(m, market_rank, lang)
 
-        # شكل مختصر وواضح: العلم + المتجر، المنتج، السعر.
-        head = f"{flag}  {source}" if source else flag
-        body = f"{head}\n{title}"
-        # Price enrichment must never shrink Lens results. If every search-backed price attempt
-        # fails, keep the visually relevant card as a last resort instead of dropping it.
-        if price_txt:
-            body += f"\n💰 {price_txt}"
-        else:
-            body += f"\n💰 {'السعر غير ظاهر' if lang == 'ar' else 'Price unavailable'}"
+        # بطاقة مرتبة: متجر -> منتج -> سعر، بدون خلط عربي/إنجليزي في نفس السطر.
+        body = _build_compact_card_body(flag, source, title, price_txt, lang)
 
         url = (m.get("link") or "").strip()
         button_source = source or ("المتجر" if lang == "ar" else "Store")
@@ -5977,12 +6043,7 @@ def run_region_lens_search(phone, product, region_key, bot_id, lang,
         title = _compact_ui_title(shown_title or m.get("title") or product)
 
         price = _lens_region_price_display(m, cc, lang)
-        body = f"{flag}  {store}\\n{title}"
-        if price:
-            body += f"\\n💰 {price}"
-        else:
-            # Preserve Lens cardinality just like the current main Lens flow.
-            body += f"\\n💰 {'السعر غير ظاهر' if lang == 'ar' else 'Price unavailable'}"
+        body = _build_compact_card_body(flag, store, title, price, lang)
 
         send_whatsapp_cta(
             phone, body[:1000], (m.get("link") or "").strip(),
@@ -6131,9 +6192,7 @@ def run_region_search(phone, product, region_key, bot_id, lang="ar", origin="tex
         raw_title, raw_price = _text_offer_price_and_title(item["title"])
         title = _compact_ui_title(display_title or raw_title or product)
         price = _region_price_display(raw_price, cc, lang)
-        body = f"{flag}  {store}\n{title}"
-        if price:
-            body += f"\n💰 {price}"
+        body = _build_compact_card_body(flag, store, title, price, lang)
         send_whatsapp_cta(phone, body[:1000], item["link"], bot_id, ("🛒 عرض المنتج" if lang == "ar" else "View product"))
         sent += 1
 
@@ -6879,7 +6938,7 @@ def send_text_lens_style_results(from_number, txt, urls, bot_id, lang, query):
         store = _ui_plain_store_name(item["source"] or "", item.get("link") or "") or ("المتجر" if lang == "ar" else "Store")
         title = _compact_ui_title(shown_title or query)
         shown_price = _text_price_local(raw_price, rank, lang) if raw_price else ""
-        body = f"{flag}  {store}\n{title}\n💰 {shown_price or no_price}"
+        body = _build_compact_card_body(flag, store, title, shown_price or no_price, lang)
         send_whatsapp_cta(from_number, body[:1000], item["link"], bot_id, ("🛒 عرض المنتج" if lang == "ar" else "View product"))
 
     LAST_SEARCH[from_number] = {"product": query}
