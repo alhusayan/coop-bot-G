@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v79-lens-focused-text-price-enrichment-20260819"
+BUILD_ID = "v79-lens-old-price-method-keep-improvements-20260819"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE/TEXT -> FLAGS + CLEAR LOCAL PRICES + LOCAL/US/CHINA")
@@ -4320,12 +4320,6 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
 
     if not selected:
         return False
-
-    # Lens pricing rule: DO NOT scrape/display "price not shown".
-    # Missing prices are recovered through the same v77.7 typed-text search engine.
-    # If that engine still cannot confirm a numeric price, the Lens card is omitted.
-    # Preserve the Lens result set; use typed-search only as a price enrichment layer.
-    selected = _lens_fill_missing_prices_from_text_engine(selected, lens, caption, lang)
 
     # الترجمة للواجهة فقط بعد اكتمال البحث والاختيار؛ لا تؤثر على Lens أو Google أو الفلاتر.
     display_titles = translate_ui_titles([(m.get("title") or "").strip() for m in selected], lang)
