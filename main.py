@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v79-compact-ui-no-autolinks-20260819"
+BUILD_ID = "v79-compact-ui-better-english-20260819"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE/TEXT -> FLAGS + CLEAR LOCAL PRICES + LOCAL/US/CHINA")
@@ -3386,18 +3386,79 @@ def _ui_plain_store_name(source="", link=""):
 def _compact_ui_title(value, max_len=68):
     """Keep WhatsApp result cards short: product identity, not SEO/search-result prose."""
     s = re.sub(r"\s+", " ", str(value or "")).strip()
-    # Remove common Arabic shopping/SEO lead-ins without touching model identity.
+
+    # English cards need much stronger shortening because search-result titles are often SEO-heavy.
+    latin_chars = len(re.findall(r"[A-Za-z]", s))
+    arabic_chars = len(re.findall(r"[\u0600-\u06FF]", s))
+    mostly_english = latin_chars > arabic_chars
+
+    if mostly_english:
+        # Keep the useful first phrase and remove common shopping/SEO filler.
+        parts = [p.strip() for p in re.split(r"\s*[|｜]\s*", s) if p.strip()]
+        if parts:
+            s = parts[0]
+
+        s = re.sub(
+            r"^(?:buy|shop|order|get|find)\s+",
+            "",
+            s,
+            flags=re.I,
+        )
+        s = re.sub(
+            r"\b(?:online|for sale|free shipping|fast delivery|new arrival|best seller|hot sale|official store)\b",
+            " ",
+            s,
+            flags=re.I,
+        )
+        s = re.sub(
+            r"\b(?:for women|for men|for girls|for boys|women'?s|men'?s|girl'?s|boy'?s)\b",
+            " ",
+            s,
+            flags=re.I,
+        )
+        s = re.sub(
+            r"\b(?:large[- ]capacity|casual|lightweight|fashion|stylish|premium)\b",
+            " ",
+            s,
+            flags=re.I,
+        )
+        s = re.sub(
+            r"\b(?:in|from|at)\s+(?:Kuwait|Saudi Arabia|UAE|United Arab Emirates|USA|United States|UK|United Kingdom)\b",
+            " ",
+            s,
+            flags=re.I,
+        )
+        # Remove trailing merchant/location fragments after a dash.
+        s = re.sub(
+            r"\s*[-–—]\s*(?:Amazon|eBay|Walmart|SHEIN|AliExpress|Alibaba|Temu|Kuwait|Saudi Arabia|UAE).*$",
+            "",
+            s,
+            flags=re.I,
+        )
+        s = re.sub(r"\s*[,;:]\s*", " ", s)
+        s = re.sub(r"\s{2,}", " ", s).strip(" ,-|–—")
+
+        # Max 8 useful words in English cards.
+        words = s.split()
+        if len(words) > 8:
+            s = " ".join(words[:8]).rstrip(" ,-|–—") + "…"
+        elif len(s) > 58:
+            cut = s[:59]
+            if " " in cut:
+                cut = cut.rsplit(" ", 1)[0]
+            s = cut.rstrip(" ,-|–—") + "…"
+        return s
+
+    # Arabic cleanup.
     s = re.sub(r"^(?:اشتر(?:ي|ِ)?|اشتري|تسوق|تسوّق|اطلب|شراء)\s+", "", s, flags=re.I)
     s = re.sub(r"\b(?:أونلاين|اونلاين)\s+(?:في|من)\s+[^|،,\-–—]{2,25}\b", "", s, flags=re.I)
     s = re.sub(r"\b(?:في|من)\s+(?:الكويت|السعودية|الإمارات|الامارات|قطر|البحرين|عمان|بريطانيا|ألمانيا|المانيا|فرنسا|إسبانيا|اسبانيا)\b", "", s, flags=re.I)
-    # Remove obvious SEO separators and trailing store/location fragments.
     parts = [p.strip() for p in re.split(r"\s*[|｜]\s*", s) if p.strip()]
     if parts:
         s = parts[0]
     s = re.sub(r"\s*[-–—]\s*(?:تسوق|تسوّق|متوفر|اونلاين|أونلاين).*$", "", s, flags=re.I)
     s = re.sub(r"\s{2,}", " ", s).strip(" ,-|–—")
     if len(s) > max_len:
-        # Prefer a clean word boundary.
         cut = s[:max_len + 1]
         if " " in cut:
             cut = cut.rsplit(" ", 1)[0]
@@ -4557,11 +4618,11 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption="", image_
         if price_txt:
             body += f"\n💰 {price_txt}"
         else:
-            body += f"\n💰 {'السعر غير ظاهر' if lang == 'ar' else 'Price not shown'}"
+            body += f"\n💰 {'السعر غير ظاهر' if lang == 'ar' else 'Price unavailable'}"
 
         url = (m.get("link") or "").strip()
         button_source = source or ("المتجر" if lang == "ar" else "Store")
-        send_whatsapp_cta(from_number, body[:1000], url, bot_id, ("🛒 عرض المنتج" if lang == "ar" else "🛒 View product"))
+        send_whatsapp_cta(from_number, body[:1000], url, bot_id, ("🛒 عرض المنتج" if lang == "ar" else "View product"))
         sent += 1
 
     chosen_title = ((lens.get("chosen") or {}).get("title") or selected[0]["title"]).strip()
@@ -5921,11 +5982,11 @@ def run_region_lens_search(phone, product, region_key, bot_id, lang,
             body += f"\\n💰 {price}"
         else:
             # Preserve Lens cardinality just like the current main Lens flow.
-            body += f"\\n💰 {'السعر غير ظاهر' if lang == 'ar' else 'Price not shown'}"
+            body += f"\\n💰 {'السعر غير ظاهر' if lang == 'ar' else 'Price unavailable'}"
 
         send_whatsapp_cta(
             phone, body[:1000], (m.get("link") or "").strip(),
-            bot_id, ("🛒 عرض المنتج" if lang == "ar" else "🛒 View product")
+            bot_id, ("🛒 عرض المنتج" if lang == "ar" else "View product")
         )
         sent += 1
 
@@ -6073,7 +6134,7 @@ def run_region_search(phone, product, region_key, bot_id, lang="ar", origin="tex
         body = f"{flag}  {store}\n{title}"
         if price:
             body += f"\n💰 {price}"
-        send_whatsapp_cta(phone, body[:1000], item["link"], bot_id, ("🛒 عرض المنتج" if lang == "ar" else "🛒 View product"))
+        send_whatsapp_cta(phone, body[:1000], item["link"], bot_id, ("🛒 عرض المنتج" if lang == "ar" else "View product"))
         sent += 1
 
     print(f"REGION RESULTS SENT origin={origin} region={region_key} count={sent}")
@@ -6808,7 +6869,7 @@ def send_text_lens_style_results(from_number, txt, urls, bot_id, lang, query):
     translated = translate_ui_titles(display_titles, lang)
     local_cc = (current_market().get("country") or DEFAULT_COUNTRY).lower()
     rank_cc = {0: local_cc, 1: "us", 2: "cn"}
-    no_price = "السعر غير ظاهر" if lang == "ar" else "Price not shown"
+    no_price = "السعر غير ظاهر" if lang == "ar" else "Price unavailable"
 
     counts = {0: 0, 1: 0, 2: 0}
     for item, shown_title, (_raw_title, raw_price) in zip(selected, translated, split_cache):
@@ -6819,7 +6880,7 @@ def send_text_lens_style_results(from_number, txt, urls, bot_id, lang, query):
         title = _compact_ui_title(shown_title or query)
         shown_price = _text_price_local(raw_price, rank, lang) if raw_price else ""
         body = f"{flag}  {store}\n{title}\n💰 {shown_price or no_price}"
-        send_whatsapp_cta(from_number, body[:1000], item["link"], bot_id, ("🛒 عرض المنتج" if lang == "ar" else "🛒 View product"))
+        send_whatsapp_cta(from_number, body[:1000], item["link"], bot_id, ("🛒 عرض المنتج" if lang == "ar" else "View product"))
 
     LAST_SEARCH[from_number] = {"product": query}
     print(f"TEXT LENS-STYLE SENT: {len(selected)} CTA; per_store_cap={RESULTS_PER_STORE_MAX}; buckets={counts}; caps=5/4/4; order=local->us->cn")
