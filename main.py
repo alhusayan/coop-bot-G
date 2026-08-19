@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v79-other-country-options-text-lens-20260819"
+BUILD_ID = "v79-other-country-caps-balanced-20260819"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE/TEXT -> FLAGS + CLEAR LOCAL PRICES + LOCAL/US/CHINA")
@@ -5193,9 +5193,22 @@ REGION_COUNTRY_NAMES_AR = {
     "bh": "البحرين", "om": "عمان", "gb": "بريطانيا", "es": "إسبانيا",
     "de": "ألمانيا", "fr": "فرنسا", "tr": "تركيا",
 }
-REGION_COUNTRY_MAX = max(1, int(os.environ.get("REGION_COUNTRY_MAX", "2")))
-REGION_TOTAL_MAX = max(2, int(os.environ.get("REGION_TOTAL_MAX", "8")))
+# حدود البحث الإضافي حسب المجموعة.
+# الخليج: 8 إجمالي، بحد أقصى 3 من الدولة الواحدة مع توزيع دائري متوازن.
+# بريطانيا: 4. أوروبا (ES/DE/FR): 6 مع توزيع متوازن. تركيا: 4.
+REGION_RESULT_LIMITS = {"gcc": 8, "uk": 4, "eu": 6, "tr": 4}
+REGION_PER_COUNTRY_LIMITS = {"gcc": 3, "uk": 4, "eu": 6, "tr": 4}
 REGION_SEARCH_POOL = ThreadPoolExecutor(max_workers=6)
+
+def _region_country_fetch_limit(cc):
+    if cc in {"kw", "sa", "ae", "qa", "bh", "om"}:
+        return 3
+    if cc in {"es", "de", "fr"}:
+        # نطلب حتى 4 من كل دولة حتى نستطيع تعويض نقص دولة أخرى مع بقاء التوزيع عادلاً.
+        return 4
+    if cc in {"gb", "tr"}:
+        return 4
+    return 3
 
 
 def send_region_search_choice(phone, query, bot_id, lang="ar", origin="text"):
@@ -5262,7 +5275,7 @@ No markdown and no visible URLs.
 """
     prompt = (
         f"Search {country_en} ({country_ar}) only for this exact product: {product}. "
-        f"Return up to {REGION_COUNTRY_MAX + 2} strong matching offers with current numeric prices."
+        f"Return up to {_region_country_fetch_limit(cc) + 2} strong matching offers with current numeric prices."
     )
     model = GEMINI_SEARCH_MODEL
     gemini_url = f"{GEMINI_BASE_URL}/{model}:generateContent"
@@ -5452,7 +5465,7 @@ def _search_one_region_country(product, cc, lang):
             continue
         seen_hosts.add(host)
         out.append(item)
-        if len(out) >= REGION_COUNTRY_MAX:
+        if len(out) >= _region_country_fetch_limit(cc):
             break
     return out
 
@@ -5487,19 +5500,38 @@ def run_region_search(phone, product, region_key, bot_id, lang="ar", origin="tex
         except Exception as e:
             print(f"REGION FUTURE ERR cc={cc}: {e}")
 
-    # One result max per domain across the whole selected region.
+    # توزيع متوازن قدر الإمكان بين الدول المختارة مع نتيجة واحدة لكل دومين.
+    # Round-robin يمنع دولة واحدة من ابتلاع كل النتائج عندما تتوفر نتائج كثيرة فيها.
+    total_limit = REGION_RESULT_LIMITS.get(region_key, 4)
+    per_country_limit = REGION_PER_COUNTRY_LIMITS.get(region_key, total_limit)
+    by_country = {cc: [x for x in gathered if x.get("country_code") == cc] for cc in countries}
+    positions = {cc: 0 for cc in countries}
+    country_counts = {cc: 0 for cc in countries}
     selected, seen_hosts = [], set()
-    for cc in countries:
-        for item in [x for x in gathered if x.get("country_code") == cc]:
-            host = _host_of(item.get("link"))
-            if not host or host in seen_hosts:
-                continue
-            seen_hosts.add(host)
-            selected.append(item)
-            if len(selected) >= REGION_TOTAL_MAX:
+
+    while len(selected) < total_limit:
+        progressed = False
+        for cc in countries:
+            if len(selected) >= total_limit:
                 break
-        if len(selected) >= REGION_TOTAL_MAX:
+            if country_counts[cc] >= per_country_limit:
+                continue
+            bucket = by_country.get(cc) or []
+            while positions[cc] < len(bucket):
+                item = bucket[positions[cc]]
+                positions[cc] += 1
+                host = _host_of(item.get("link"))
+                if not host or host in seen_hosts:
+                    continue
+                seen_hosts.add(host)
+                selected.append(item)
+                country_counts[cc] += 1
+                progressed = True
+                break
+        if not progressed:
             break
+
+    print(f"REGION BALANCED SELECT region={region_key} total={len(selected)}/{total_limit} per_country={country_counts}")
 
     if not selected:
         msg = (
