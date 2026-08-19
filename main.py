@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v79-stock-filter-two-per-store-20260818"
+BUILD_ID = "v79-price-relevance-fix-20260819"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE/TEXT -> FLAGS + CLEAR LOCAL PRICES + LOCAL/US/CHINA")
@@ -1000,6 +1000,59 @@ def parse_product_data(html, url):
             cur = str(m["content"]).upper().strip()
             if cur in KNOWN_CURRENCY_CODES:
                 data["currency"] = cur
+
+    # v79.1: price fallbacks for stores whose JSON-LD is incomplete (Amazon/eBay/Temu/Alibaba, etc.).
+    if not data["price"]:
+        price_candidates = []
+        selectors = [
+            ('meta[itemprop="price"]', 'content'), ('meta[name="price"]', 'content'),
+            ('meta[property="og:price:amount"]', 'content'), ('meta[name="twitter:data1"]', 'content'),
+        ]
+        for sel, attr in selectors:
+            node = soup.select_one(sel)
+            if node and node.get(attr):
+                price_candidates.append(str(node.get(attr)))
+        for sel in ('.a-price .a-offscreen', '.a-price-whole', '[itemprop="price"]', '.x-price-primary span'):
+            node = soup.select_one(sel)
+            if node:
+                price_candidates.append(node.get_text(" ", strip=True))
+        # JSON/script fallbacks used by many JS-heavy commerce sites.
+        raw_html = html[:1200000]
+        for pat in (
+            r'"priceAmount"\s*:\s*"?(\d+(?:\.\d{1,3})?)',
+            r'"salePrice"\s*:\s*"?(\d+(?:\.\d{1,3})?)',
+            r'"currentPrice"\s*:\s*"?(\d+(?:\.\d{1,3})?)',
+            r'"price"\s*:\s*"(\d+(?:\.\d{1,3})?)"',
+        ):
+            mm = re.search(pat, raw_html, flags=re.I)
+            if mm:
+                price_candidates.append(mm.group(1))
+                break
+        for cand in price_candidates:
+            mm = re.search(r'(?<!\d)(\d+(?:[.,]\d{1,3})?)(?!\d)', str(cand).replace(',', ''))
+            if not mm:
+                continue
+            try:
+                val = float(mm.group(1))
+            except Exception:
+                continue
+            if val > 0:
+                data["price"] = val
+                if not data["currency"]:
+                    data["currency"] = detect_currency_code(str(cand), "")
+                break
+    if not data["currency"]:
+        # Currency hints from structured HTML/text; conservative domain fallback only when price exists.
+        raw_head = html[:250000]
+        mm = re.search(r'"priceCurrency"\s*:\s*"([A-Z]{3})"', raw_head, flags=re.I)
+        if mm and mm.group(1).upper() in KNOWN_CURRENCY_CODES:
+            data["currency"] = mm.group(1).upper()
+        elif data["price"]:
+            host = urllib.parse.urlparse(url).netloc.lower()
+            if any(d in host for d in ('amazon.com','ebay.com','walmart.com','bestbuy.com','newegg.com','aliexpress.com','temu.com')):
+                data["currency"] = 'USD'
+            elif any(d in host for d in ('1688.com','taobao.com','tmall.com')):
+                data["currency"] = 'CNY'
     if not data["image_url"]:
         for attrs in ({"property": "og:image"}, {"name": "twitter:image"}, {"property": "twitter:image"}):
             m = soup.find("meta", attrs=attrs)
@@ -1427,11 +1480,28 @@ def google_lens_lookup(image_b64, mime_type, lang="ar", query_hint="", light=Fal
         chosen_title = (chosen.get("title") or "").strip()
 
         if light:
-            # وضع مباشر: بدون وصف Gemini — النتائج تُسلّم كما رجعت من Google.
+            # v79.1 accuracy: one fast vision identity pass anchors relevance.
+            # It does NOT search or reorder stores; it only says what physical product is in the image.
+            visual_identity = ""
+            try:
+                id_system = (
+                    "Identify the physical product in the image for shopping search. "
+                    "Return one concise English commercial identity only: product type + brand/model if visibly supported. "
+                    "Do not guess a brand/model. Do not mention colors unless identity-critical. No explanation."
+                )
+                visual_identity, _ = call_gemini([
+                    {"inline_data": {"mime_type": mime_type, "data": image_b64}},
+                    {"text": f"Lens hint only (may be wrong): {chosen_title}"},
+                ], system=id_system, use_search=False)
+                visual_identity = re.sub(r"\s+", " ", (visual_identity or "").strip()).strip(' .-|')[:180]
+                print(f"LENS VISUAL IDENTITY: {visual_identity}")
+            except Exception as e:
+                print(f"LENS VISUAL IDENTITY FAIL: {e}")
             return {
-                "aliases": [chosen_title] if chosen_title else [],
+                "aliases": [x for x in (visual_identity, chosen_title) if x],
                 "matches": matches,
-                "query": chosen_title,
+                "query": visual_identity or chosen_title,
+                "visual_identity": visual_identity,
                 "chosen": chosen,
                 "signature": {},
             }
@@ -3922,6 +3992,89 @@ Return ONLY a JSON array of strings in the same order, no markdown."""
                 UI_TRANSLATE_CACHE[(lang, original)] = shown
     return [r or c for r, c in zip(result, clean)]
 
+def _lens_ai_relevance_filter(lens):
+    """Infer the product identity from the Lens result set and keep only direct matches.
+
+    This is intentionally independent from store/country/price priority: relevance wins first.
+    It catches cases like a coffee maker appearing among restaurant-pager results.
+    """
+    matches = list((lens or {}).get("matches") or [])
+    if not ENABLE_RELEVANCE_FILTER or len(matches) < 3:
+        return matches
+    sample = matches[:30]
+    rows = []
+    for i, m in enumerate(sample, 1):
+        rows.append(f"{i}. {(m.get('title') or '')[:180]} | store={(m.get('source') or '')[:50]} | exact={bool(m.get('exact'))}")
+    system = """You are a strict visual-shopping result validator.
+Infer the ONE physical product type/model that the Lens result set is actually about, using consensus across titles and exact/visual signals.
+Then keep only results that sell that same product or a clearly compatible variant of the same product type and use.
+Reject unrelated products even if they come from a preferred store/country or have a price.
+Example: for a restaurant coaster pager/calling system, reject coffee makers, vitamins, lights, unrelated electronics, manuals, accessories, and replacement parts unless the target itself is that accessory.
+Do not use price or merchant priority as relevance evidence.
+Return JSON only: {"target":"short identity","keep":[1,2,4]}"""
+    visual_identity = str((lens or {}).get("visual_identity") or "").strip()
+    prompt = (f"Visual AI identity from the original image: {visual_identity or 'UNKNOWN'}\n"
+              "Use this as the strongest anchor when it is specific and consistent with the Lens set.\n\n"
+              "Lens candidates:\n" + "\n".join(rows))
+    try:
+        raw, _ = call_gemini([{"text": prompt}], system=system, use_search=False)
+        data = json.loads(re.search(r"\{.*\}", raw or "", flags=re.S).group(0))
+        keep = {int(x) for x in (data.get("keep") or []) if str(x).isdigit()}
+        filtered = [m for i, m in enumerate(sample, 1) if i in keep]
+        # Safety: require at least one kept item; unlike old fallback, do NOT restore unrelated rows.
+        if filtered:
+            target = str(data.get("target") or "").strip()
+            if target:
+                lens["relevance_target"] = target
+            dropped = len(sample) - len(filtered)
+            if dropped:
+                print(f"LENS AI RELEVANCE: target={target!r} kept={len(filtered)}/{len(sample)} dropped={dropped}")
+            return filtered
+    except Exception as e:
+        print(f"LENS AI RELEVANCE FAIL: {e}")
+    return matches
+
+
+def _enrich_result_price(item):
+    """Best-effort price fill from the direct product page; never invent a price."""
+    if not isinstance(item, dict):
+        return item
+    if item.get("price") or item.get("price_value") not in (None, ""):
+        return item
+    url = (item.get("link") or item.get("url") or "").strip()
+    if not url.startswith(("http://", "https://")):
+        return item
+    try:
+        cached = VERIFIED_PAGE_CACHE.get(url)
+        info = cached.get("data") if cached and time.time() - cached.get("ts", 0) < 600 else None
+        if not info:
+            html = fetch_html(url)
+            info = parse_product_data(html, url) if html else None
+            if info:
+                VERIFIED_PAGE_CACHE[url] = {"data": info, "ts": time.time()}
+        if info and info.get("price") and info.get("price") > 0:
+            item = dict(item)
+            item["price_value"] = float(info["price"])
+            item["currency"] = (info.get("currency") or item.get("currency") or "").upper()
+            cur = item["currency"]
+            item["price"] = f"{format_price(item['price_value'], cur or None)} {cur}".strip()
+            print(f"PRICE ENRICH OK: {(item.get('source') or '')[:30]} -> {item['price']}")
+    except Exception as e:
+        print(f"PRICE ENRICH UNKNOWN: {url[:90]} -> {e}")
+    return item
+
+
+def _enrich_missing_prices(items):
+    seq = list(items or [])
+    if not seq:
+        return seq
+    try:
+        return list(RESOLVER.map(_enrich_result_price, seq))
+    except Exception as e:
+        print(f"PRICE ENRICH BATCH ERR: {e}")
+        return seq
+
+
 def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
     """v76: CTA-only، مختصر، بأعلام الدول، وترجمة للواجهة فقط.
 
@@ -3929,6 +4082,12 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
     لا يوجد حد أدنى أو عدد إلزامي لأي سوق.
     """
     raw_matches = [m for m in (lens.get("matches") or []) if (m.get("title") or "").strip()]
+    # Relevance BEFORE country/store priority: unrelated preferred-store results must never win.
+    lens_for_filter = dict(lens or {})
+    lens_for_filter["matches"] = raw_matches
+    raw_matches = _lens_ai_relevance_filter(lens_for_filter)
+    if lens_for_filter.get("relevance_target"):
+        lens["relevance_target"] = lens_for_filter["relevance_target"]
     matches = [m for m in raw_matches if result_market_rank(m) != 99]
     if not matches:
         return False
@@ -4014,6 +4173,9 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
 
     if not selected:
         return False
+
+    # Try to recover missing prices from direct product pages before rendering.
+    selected = _enrich_missing_prices(selected)
 
     # الترجمة للواجهة فقط بعد اكتمال البحث والاختيار؛ لا تؤثر على Lens أو Google أو الفلاتر.
     display_titles = translate_ui_titles([(m.get("title") or "").strip() for m in selected], lang)
@@ -5494,6 +5656,13 @@ def send_text_lens_style_results(from_number, txt, urls, bot_id, lang, query):
         item["market_rank"] = rank
         candidates.append(item)
 
+    # Relevance must win before merchant priority. Use the existing strict AI offer filter on typed results.
+    _offer_rows = [{"line": (o.get("title") or ""), "name": (o.get("source") or "")} for o in candidates]
+    _tmp_urls = {(o.get("source") or ""): (o.get("link") or "") for o in candidates}
+    _kept_rows = filter_relevant_offers(query, _offer_rows, _tmp_urls, use_ai=True, mode="exact")
+    _kept_keys = {(r.get("name") or "", r.get("line") or "") for r in _kept_rows}
+    candidates = [o for o in candidates if ((o.get("source") or "", o.get("title") or "") in _kept_keys)]
+
     # نفس حارس المخزون المستخدم في Lens: نحذف المؤكد نفاده فقط، ونبقي الحالة المجهولة.
     candidates = _filter_confirmed_oos(candidates, "TEXT")
 
@@ -5526,7 +5695,13 @@ def send_text_lens_style_results(from_number, txt, urls, bot_id, lang, query):
     if not selected:
         return False
 
+    selected = _enrich_missing_prices(selected)
     split_cache = [_text_offer_price_and_title(item["title"]) for item in selected]
+    # If page enrichment found a price, use it when the legacy text line had no numeric price.
+    split_cache = [
+        (title, raw_price or ((item.get("price") or "") if item.get("price_value") not in (None, "") else ""))
+        for item, (title, raw_price) in zip(selected, split_cache)
+    ]
     display_titles = [title or query for title, _ in split_cache]
     translated = translate_ui_titles(display_titles, lang)
     local_cc = (current_market().get("country") or DEFAULT_COUNTRY).lower()
