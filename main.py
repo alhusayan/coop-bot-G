@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v79-cta-store-name-flag-only-fixed-20260820"
+BUILD_ID = "v79-market-coverage-more-3-2-2-20260820"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE/TEXT -> FLAGS + CLEAR LOCAL PRICES + LOCAL/US/CHINA")
@@ -3668,26 +3668,19 @@ def _split_price_display(price_text):
 
 def _build_compact_card_body(flag, store, title, price_text, lang="ar"):
     lines = []
-
-    # Store name lives in the CTA button; only the country flag stays in the card header.
-    if str(flag or "").strip():
-        lines.append(str(flag).strip())
-
-    # Product/category + model remain normal text.
+    header = f"*{flag} {store}*" if store else f"*{flag}*"
+    if header.strip("* "):
+        lines.append(header.strip())
     title_lines = _single_direction_lines(_compact_ui_title(title or ""), lang, max_groups=3)
     for tline in title_lines:
         if tline.strip():
             lines.append(tline.strip())
-
-    # Local price bold; original foreign price italic.
     price_main, price_secondary = _split_price_display(price_text or "")
     if price_main:
         lines.append(f"*💰 {price_main}*")
         if price_secondary:
             lines.append(f"_({price_secondary})_")
-
     return "\n".join(lines).strip()
-
 
 
 def _break_numeric_autolinks(value):
@@ -4857,7 +4850,7 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption="", image_
 
         url = (m.get("link") or "").strip()
         button_source = source or ("المتجر" if lang == "ar" else "Store")
-        send_whatsapp_cta(from_number, body[:1000], url, bot_id, button_source)
+        send_whatsapp_cta(from_number, body[:1000], url, bot_id, ("🛒 عرض المنتج" if lang == "ar" else "View product"))
         sent += 1
 
     chosen_title = ((lens.get("chosen") or {}).get("title") or selected[0]["title"]).strip()
@@ -6208,7 +6201,7 @@ def run_region_lens_search(phone, product, region_key, bot_id, lang,
 
         send_whatsapp_cta(
             phone, body[:1000], (m.get("link") or "").strip(),
-            bot_id, store
+            bot_id, ("🛒 عرض المنتج" if lang == "ar" else "View product")
         )
         sent += 1
 
@@ -6354,7 +6347,7 @@ def run_region_search(phone, product, region_key, bot_id, lang="ar", origin="tex
         title = _compact_ui_title(display_title or raw_title or product)
         price = _region_price_display(raw_price, cc, lang)
         body = _build_compact_card_body(flag, store, title, price, lang)
-        send_whatsapp_cta(phone, body[:1000], item["link"], bot_id, store)
+        send_whatsapp_cta(phone, body[:1000], item["link"], bot_id, ("🛒 عرض المنتج" if lang == "ar" else "View product"))
         sent += 1
 
     print(f"REGION RESULTS SENT origin={origin} region={region_key} count={sent}")
@@ -7143,7 +7136,7 @@ def send_text_lens_style_results(from_number, txt, urls, bot_id, lang, query, ex
         title = _compact_ui_title(shown_title or query)
         shown_price = _text_price_local(raw_price, rank, lang) if raw_price else ""
         body = _build_compact_card_body(flag, store, title, shown_price or no_price, lang)
-        send_whatsapp_cta(from_number, body[:1000], item["link"], bot_id, store)
+        send_whatsapp_cta(from_number, body[:1000], item["link"], bot_id, ("🛒 عرض المنتج" if lang == "ar" else "View product"))
 
     LAST_SEARCH[from_number] = {"product": query}
     print(f"TEXT LENS-STYLE SENT: {len(selected)} CTA; per_store_cap={RESULTS_PER_STORE_MAX}; buckets={counts}; caps=5/4/4; order=local->us->cn")
