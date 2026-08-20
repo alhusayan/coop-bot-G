@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v79-context-more-no-regions-cards-20260820"
+BUILD_ID = "v79-market-coverage-more-3-2-2-20260820"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE/TEXT -> FLAGS + CLEAR LOCAL PRICES + LOCAL/US/CHINA")
@@ -103,6 +103,13 @@ LENS_DIRECT_LOCAL_MAX = max(0, int(os.environ.get("LENS_DIRECT_LOCAL_MAX", "5"))
 LENS_DIRECT_US_MAX = max(0, int(os.environ.get("LENS_DIRECT_US_MAX", "4")))
 LENS_DIRECT_CN_MAX = max(0, int(os.environ.get("LENS_DIRECT_CN_MAX", "4")))
 LENS_DIRECT_MAX_CTA = max(1, int(os.environ.get("LENS_DIRECT_MAX_CTA", str(LENS_DIRECT_LOCAL_MAX + LENS_DIRECT_US_MAX + LENS_DIRECT_CN_MAX))))
+
+# "ابحث أكثر" has its own smaller caps; primary v79 search above stays unchanged.
+MORE_LOCAL_MAX = max(0, int(os.environ.get("MORE_LOCAL_MAX", "3")))
+MORE_US_MAX = max(0, int(os.environ.get("MORE_US_MAX", "2")))
+MORE_CN_MAX = max(0, int(os.environ.get("MORE_CN_MAX", "2")))
+MORE_TOTAL_MAX = max(1, MORE_LOCAL_MAX + MORE_US_MAX + MORE_CN_MAX)
+
 LENS_PRIMARY_MODE = env_bool("LENS_PRIMARY_MODE", True)
 LENS_PRIMARY_EXCEPT_TEXT_HEAVY = env_bool("LENS_PRIMARY_EXCEPT_TEXT_HEAVY", True)
 # قوة Lens الحقيقية تأتي من تعدد التمريرات: products ثم all (visual+exact) ثم بحث واسع بلا قيد دولة.
@@ -1347,6 +1354,141 @@ def _china_store_search_fallback(base_query, limit=8):
     print(f"CHINA STORE FALLBACK: query={q[:70]!r} -> {len(merged)} results")
     return merged[:limit]
 
+
+def _shopping_card_to_market_item(card, fallback_source="", lens_country=""):
+    link = (card.get("link") or "").strip()
+    if not link:
+        return None
+    direct = _shopping_direct_url(link) or link
+    if not direct.startswith(("http://", "https://")):
+        return None
+    price_text = str(card.get("price") or "").strip()
+    return {
+        "title": (card.get("title") or "").strip(),
+        "link": direct,
+        "source": (card.get("source") or fallback_source or "").strip(),
+        "position": int(card.get("position") or 999),
+        "section": "market_presence_fallback",
+        "exact": False,
+        "thumbnail": (card.get("thumbnail") or "").strip(),
+        "image": (card.get("thumbnail") or "").strip(),
+        "price": price_text,
+        "price_value": card.get("extracted_price"),
+        "currency": detect_currency_code(price_text, ""),
+        "in_stock": None,
+        "condition": "",
+        "_lens_country": lens_country,
+        "_market_presence_fallback": True,
+    }
+
+
+def _market_presence_fallback(base_query, rank, limit=6):
+    """Search a market only when the normal first search found zero candidates there.
+
+    rank 0 = user's local market, 1 = US, 2 = China.
+    Strong marketplaces are queried first for US/China.
+    Returned candidates still pass the normal relevance/stock filters.
+    """
+    if not SERPAPI_API_KEY:
+        return []
+    q = _shopping_clean_query(base_query or "")
+    if not q:
+        return []
+
+    if rank == 2:
+        return _china_store_search_fallback(q, limit=limit)
+
+    local_cc = (current_market().get("country") or DEFAULT_COUNTRY).lower()
+    if rank == 0:
+        specs = [("Local", "", local_cc)]
+    else:
+        specs = [
+            ("Amazon", "amazon.com", "us"),
+            ("eBay", "ebay.com", "us"),
+            ("Walmart", "walmart.com", "us"),
+            ("US", "", "us"),
+        ]
+
+    def _one(label, domain, gl):
+        search_q = f"{q} site:{domain}" if domain else q
+        cards = _serpapi_shopping_request(search_q, gl, hl="en")
+        out = []
+        for card in cards or []:
+            item = _shopping_card_to_market_item(card, label, gl)
+            if not item:
+                continue
+            if domain:
+                try:
+                    host = urllib.parse.urlparse(item["link"]).netloc.lower().replace("www.", "")
+                except Exception:
+                    host = ""
+                if not _host_matches_any(host, (domain,)):
+                    continue
+            if result_market_rank(item) != rank:
+                continue
+            out.append(item)
+        return out
+
+    futures = {
+        LENS_HTTP_POOL.submit(_one, label, domain, gl): (label, domain)
+        for label, domain, gl in specs
+    }
+    merged, seen = [], set()
+    done, pending = wait(list(futures), timeout=min(LENS_TOTAL_TIMEOUT_SECONDS, 16))
+    # Deterministic ranking after parallel fetches.
+    gathered = []
+    for fut in done:
+        try:
+            gathered.extend(fut.result() or [])
+        except Exception as e:
+            print(f"MARKET PRESENCE FALLBACK ERR rank={rank}: {e}")
+    for fut in pending:
+        fut.cancel()
+
+    if rank == 1:
+        gathered.sort(key=lambda x: (
+            _us_store_priority(x.get("source"), x.get("link")),
+            int(x.get("position") or 999),
+        ))
+    else:
+        gathered.sort(key=lambda x: int(x.get("position") or 999))
+
+    for item in gathered:
+        sig = ((item.get("title") or "").lower(), (item.get("link") or "").lower())
+        if sig in seen:
+            continue
+        seen.add(sig)
+        merged.append(item)
+        if len(merged) >= limit:
+            break
+
+    print(f"MARKET PRESENCE FALLBACK rank={rank} query={q[:70]!r} -> {len(merged)}")
+    return merged
+
+
+def _supplement_missing_markets(candidates, query, label="FIRST"):
+    """If an exact product exists in a missing market, give that market a second chance."""
+    seq = list(candidates or [])
+    existing = {
+        ((x.get("title") or "").lower(), (x.get("link") or "").lower())
+        for x in seq
+    }
+    present = {r: any(result_market_rank(x) == r for x in seq) for r in (0, 1, 2)}
+    for rank in (0, 1, 2):
+        if present[rank]:
+            continue
+        extra = _market_presence_fallback(query, rank, limit=6)
+        for item in extra:
+            sig = ((item.get("title") or "").lower(), (item.get("link") or "").lower())
+            if sig in existing:
+                continue
+            seq.append(item)
+            existing.add(sig)
+        if extra:
+            print(f"{label}: supplemented missing market rank={rank} with {len(extra)} candidate(s)")
+    return seq
+
+
 def google_lens_lookup(image_b64, mime_type, lang="ar", query_hint="", light=False):
     """تعرف بصري متعدد التمريرات ليقترب من قوة تطبيق Google Lens نفسه.
 
@@ -1418,6 +1560,14 @@ def google_lens_lookup(image_b64, mime_type, lang="ar", query_hint="", light=Fal
 
         # أي دولة غير محلي/أمريكا/الصين تُحذف نهائياً.
         allowed = [m for m in merged if result_market_rank(m) != 99]
+
+        # First-search market presence: do not finish with a missing LOCAL/US/CHINA
+        # bucket until that missing market gets a dedicated fallback attempt.
+        # This does not force a result when the exact product is not found there.
+        fallback_query = (query_hint or "").strip()
+        if not fallback_query and merged:
+            fallback_query = (merged[0].get("title") or "").strip()
+        allowed = _supplement_missing_markets(allowed, fallback_query, "FIRST-LENS")
 
         # v77: إذا Lens لم يعطِ أي متجر صيني، نشغّل بحثاً نصياً احتياطياً مستقلاً
         # مقيّداً بمتاجر الصين. نشتق الاستعلام من أفضل عنوان بصري موجود ولا نترجمه.
@@ -3880,7 +4030,7 @@ def _more_exclusion_instruction(seen_domains):
 
 def legacy_text_product_search_more(product, lang, seen_domains):
     market_name = current_market().get("country_name", "Kuwait")
-    total_cap = max(1, LENS_DIRECT_LOCAL_MAX + LENS_DIRECT_US_MAX + LENS_DIRECT_CN_MAX)
+    total_cap = MORE_TOTAL_MAX
     exclusion = _more_exclusion_instruction(seen_domains)
     alt = english_search_name(product) if re.search(r"[\u0600-\u06FF]", str(product or "")) else arabic_search_name(product)
     alt = (alt or "").strip()
@@ -3888,8 +4038,8 @@ def legacy_text_product_search_more(product, lang, seen_domains):
     prompt = (
         f"ابحث مرة أخرى بعمق عن نفس المنتج بالضبط: {product}.{extra_name} "
         f"المستخدم شاهد نتائج سابقة ويريد متاجر إضافية جديدة فقط.{exclusion} "
-        f"نفس ترتيب البحث الأصلي: أولاً متاجر {market_name} المحلية حتى {LENS_DIRECT_LOCAL_MAX}، "
-        f"ثم الولايات المتحدة حتى {LENS_DIRECT_US_MAX}، ثم الصين حتى {LENS_DIRECT_CN_MAX}. "
+        f"نفس ترتيب البحث الأصلي لكن بحدود الدفعة الإضافية: أولاً متاجر {market_name} المحلية حتى {MORE_LOCAL_MAX}، "
+        f"ثم الولايات المتحدة حتى {MORE_US_MAX}، ثم الصين حتى {MORE_CN_MAX}. "
         "لا تعرض دولة رابعة. لا تكرر أي متجر أو دومين ظهر سابقاً. "
         "كل نتيجة يجب أن تكون نفس المنتج والموديل/الحجم، بسعر رقمي ورابط صفحة منتج مباشر. "
         f"{TEXT77_LANG_INSTR[lang]}"
@@ -4594,7 +4744,8 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption="", image_
             buckets[rank].append(m)
     for rank in buckets:
         buckets[rank].sort(key=lambda m: (
-            _us_store_priority(m.get("source"), m.get("link")) if rank == 1 else 99,
+            _us_store_priority(m.get("source"), m.get("link")) if rank == 1
+            else (_china_store_priority(m.get("source"), m.get("link")) if rank == 2 else 99),
             0 if _lens_has_price(m) else 1,
             0 if m.get("exact") else 1,
             0 if m.get("section") == "visual_matches" else 1,
@@ -4602,7 +4753,12 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption="", image_
         ))
         # فحص مخزون لأفضل المرشحين فقط حتى لا نبطئ Lens بعشرات طلبات HTTP.
         # نأخذ cap+2 لإعطاء بديلين إذا كانت بعض البطاقات خالصة.
-        _cap = {0: LENS_DIRECT_LOCAL_MAX, 1: LENS_DIRECT_US_MAX, 2: LENS_DIRECT_CN_MAX}.get(rank, 0)
+        _active_probe_caps = (
+            {0: MORE_LOCAL_MAX, 1: MORE_US_MAX, 2: MORE_CN_MAX}
+            if more_mode
+            else {0: LENS_DIRECT_LOCAL_MAX, 1: LENS_DIRECT_US_MAX, 2: LENS_DIRECT_CN_MAX}
+        )
+        _cap = _active_probe_caps.get(rank, 0)
         _probe_n = max(_cap + 2, _cap)
         _head = _filter_confirmed_oos(buckets[rank][:_probe_n], f"LENS-{rank}")
         buckets[rank] = _head + buckets[rank][_probe_n:]
@@ -4632,7 +4788,11 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption="", image_
             return host
         return re.sub(r"[^a-z0-9]+", "", source) or source
 
-    market_caps = {0: LENS_DIRECT_LOCAL_MAX, 1: LENS_DIRECT_US_MAX, 2: LENS_DIRECT_CN_MAX}
+    market_caps = (
+        {0: MORE_LOCAL_MAX, 1: MORE_US_MAX, 2: MORE_CN_MAX}
+        if more_mode
+        else {0: LENS_DIRECT_LOCAL_MAX, 1: LENS_DIRECT_US_MAX, 2: LENS_DIRECT_CN_MAX}
+    )
     selected = []
     seen_urls = set()
     merchant_counts = defaultdict(int)
@@ -6698,6 +6858,21 @@ US_STORE_PRIORITY = (
     ("walmart.com", "Walmart"),
 )
 
+# Same first-search principle for the strongest Chinese global marketplaces.
+CHINA_STORE_PRIORITY = (
+    ("aliexpress.com", "AliExpress"),
+    ("temu.com", "Temu"),
+    ("alibaba.com", "Alibaba"),
+    ("shein.com", "SHEIN"),
+    ("dhgate.com", "DHgate"),
+    ("made-in-china.com", "Made-in-China"),
+    ("banggood.com", "Banggood"),
+    ("1688.com", "1688"),
+    ("taobao.com", "Taobao"),
+    ("tmall.com", "Tmall"),
+    ("jd.com", "JD"),
+)
+
 
 def _us_store_priority(name, url):
     """Lower = stronger priority inside the US bucket only."""
@@ -6708,10 +6883,19 @@ def _us_store_priority(name, url):
     return 99
 
 
+def _china_store_priority(name, url):
+    """Lower = stronger priority inside the China bucket only."""
+    hay = f"{name or ''} {url or ''}".lower()
+    for idx, (domain, label) in enumerate(CHINA_STORE_PRIORITY):
+        if domain in hay or normalize_name(label) in normalize_name(hay):
+            return idx
+    return 99
+
+
 
 def legacy_text_product_search(product, lang):
     """v77.7 typed engine, automatic LOCAL -> US -> CHINA search."""
-    cache_query = f"__TEXT79_LENS_STYLE__::{product}"
+    cache_query = f"__TEXT79_MARKET_COVERAGE__::{product}"
     cached = cache_get(cache_query, lang)
     if cached:
         return cached
@@ -6734,6 +6918,7 @@ def legacy_text_product_search(product, lang):
             "بالنسبة لأمريكا: ابحث بشكل طبيعي في المتاجر الأمريكية، وإذا ظهرت نتائج مطابقة فرتبها داخل القسم الأمريكي بهذه الأولوية فقط: Amazon ثم eBay ثم Walmart ثم باقي المتاجر الأمريكية. لا تفرض ظهور أي متجر إذا لم توجد نتيجة مطابقة. "
             "بالنسبة للصين ابحث مباشرة في AliExpress وTemu وAlibaba وSHEIN عندما توجد نتيجة مطابقة، ويمكن استخدام متاجر صينية أخرى. "
             "لا تعرض أي دولة رابعة. لا تجعل الأعداد حصصاً إلزامية؛ اعرض الموجود المطابق فقط. "
+            "مهم جداً: لا تنه البحث قبل فحص الأسواق الثلاثة كلها. إذا كان نفس المنتج المطابق موجوداً في السوق المحلي أو أمريكا أو الصين فيجب أن يظهر على الأقل متجر واحد من ذلك السوق؛ لا تحذف سوقاً كاملاً بسبب أن سوقاً آخر أعاد نتائج أكثر أو أسرع. "
             "لكل نتيجة اذكر اسم المتجر، اسم المنتج المطابق، السعر الرقمي والعملة، واربطه بصفحة المنتج المباشرة. "
             f"{TEXT77_LANG_INSTR[lang]}"
         )
@@ -6860,7 +7045,7 @@ def send_text_lens_style_results(from_number, txt, urls, bot_id, lang, query, ex
     """Typed search UI: flags + local->US->China + local-currency prices + up to two CTAs per merchant."""
     exclude_domains = {str(x).lower() for x in (exclude_domains or []) if x}
     exclude_urls = {str(x).strip() for x in (exclude_urls or []) if x}
-    total_cap = max(1, LENS_DIRECT_LOCAL_MAX + LENS_DIRECT_US_MAX + LENS_DIRECT_CN_MAX)
+    total_cap = MORE_TOTAL_MAX if more_mode else max(1, LENS_DIRECT_LOCAL_MAX + LENS_DIRECT_US_MAX + LENS_DIRECT_CN_MAX)
     offers = text77_extract_store_offers(txt or "", limit=max(total_cap * 2, total_cap))
     candidates = []
     for offer in offers:
@@ -6878,6 +7063,12 @@ def send_text_lens_style_results(from_number, txt, urls, bot_id, lang, query, ex
         item["market_rank"] = rank
         candidates.append(item)
 
+    # Primary search remains v79. Only a missing market gets a second chance.
+    if not more_mode:
+        candidates = _supplement_missing_markets(candidates, query, "FIRST-TEXT")
+        for _c in candidates:
+            _c["market_rank"] = result_market_rank(_c)
+
     # Relevance must win before merchant priority. Use the existing strict AI offer filter on typed results.
     _offer_rows = [{"line": (o.get("title") or ""), "name": (o.get("source") or "")} for o in candidates]
     _tmp_urls = {(o.get("source") or ""): (o.get("link") or "") for o in candidates}
@@ -6888,13 +7079,19 @@ def send_text_lens_style_results(from_number, txt, urls, bot_id, lang, query, ex
     # نفس حارس المخزون المستخدم في Lens: نحذف المؤكد نفاده فقط، ونبقي الحالة المجهولة.
     candidates = _filter_confirmed_oos(candidates, "TEXT")
 
-    caps = {0: LENS_DIRECT_LOCAL_MAX, 1: LENS_DIRECT_US_MAX, 2: LENS_DIRECT_CN_MAX}
+    caps = (
+        {0: MORE_LOCAL_MAX, 1: MORE_US_MAX, 2: MORE_CN_MAX}
+        if more_mode
+        else {0: LENS_DIRECT_LOCAL_MAX, 1: LENS_DIRECT_US_MAX, 2: LENS_DIRECT_CN_MAX}
+    )
     selected, merchant_counts, seen_urls = [], defaultdict(int), set()
     for rank in (0, 1, 2):
         taken = 0
         bucket = [x for x in candidates if x["market_rank"] == rank]
         if rank == 1:
             bucket.sort(key=lambda x: _us_store_priority(x.get("source"), x.get("link")))
+        elif rank == 2:
+            bucket.sort(key=lambda x: _china_store_priority(x.get("source"), x.get("link")))
         for item in bucket:
             try:
                 host = urllib.parse.urlparse(item["link"]).netloc.lower().split(":")[0]
