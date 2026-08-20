@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v80.4-fast-quality-us-cn-20260820"
+BUILD_ID = "v80.5-context-aware-recommendation-pick-20260820"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE/TEXT -> FLAGS + CLEAR LOCAL PRICES + LOCAL/US/CHINA")
@@ -4254,7 +4254,18 @@ def process_interactive_message(message, bot_id):
         lang_ = item.get("lang") or USER_LANG.get(from_number, "ar")
         if picked:
             activate_market(from_number)
-            execute_product_search(from_number, picked, item.get("bot_id") or bot_id, lang_)
+            original_query = (item.get("original_query") or "").strip()
+            detailed_query = _recommendation_pick_search_query(original_query, picked)
+            print(
+                f"BRAND PICK SEARCH: picked={picked!r} original={original_query!r} "
+                f"-> detailed={detailed_query!r}"
+            )
+            execute_product_search(
+                from_number,
+                detailed_query,
+                item.get("bot_id") or bot_id,
+                lang_,
+            )
         else:
             send_whatsapp_text(from_number, ("اكتب اسم المنتج اللي تبيه وأدور لك عليه 👍" if lang_ == "ar" else "Type the product name and I'll search it for you 👍"), bot_id)
         return
@@ -7764,7 +7775,9 @@ OPTIONS: [براند موديل 1] | [براند موديل 2] | [براند م�
 3- ممنوع كتابة تفاصيل المتاجر أو الأسعار في هذه الرسالة.
 4- للمواد الغذائية (جبن، حليب، رز...): استخدم معايير الطعم، الجودة، القيمة، التقييمات، والتوفر المحلي.
 5- لا تكرر نفس الموديل مرتين.
-6- سطر OPTIONS إلزامي وبأسماء قابلة للبحث (مثل: Kraft Cheddar, Almarai Cheese, Puck Cheese | أو Nike Court Borough, Adidas Tensaur...).
+6- سطر OPTIONS إلزامي. كل اختيار يجب أن يحتوي البراند + الموديل/النوع الدقيق، ولا تضع اسم براند وحده.
+   مثال صحيح: Adidas Tiro League Ball وليس Adidas فقط. Nike Court Borough Low 2 وليس Nike فقط.
+   إذا كان اسم السلسلة يُستخدم في فئات مختلفة، اجعل اسم الاختيار أكثر تحديداً للمنتج قدر الإمكان.
 7- بدون روابط، بدون Markdown.
 لغة الرد: حسب تعليمات رسالة المستخدم."""
 
@@ -7780,6 +7793,38 @@ def _options_from_compare_lines(txt):
             if cand and len(cand) >= 3 and cand not in options:
                 options.append(cand)
     return options[:6]
+
+
+
+def _recommendation_pick_search_query(original_query, picked):
+    """Build a precise search query after choosing a recommended product."""
+    original = re.sub(r"\s+", " ", str(original_query or "")).strip()
+    choice = re.sub(r"\s+", " ", str(picked or "")).strip()
+    if not choice:
+        return original
+    if not original:
+        return choice
+
+    cleaned = original
+    cleanup_patterns = (
+        r"^\s*(?:ابي|أبي|اريد|أريد|ابغى|أبغى|احتاج|أحتاج)\s+",
+        r"^\s*(?:افضل|أفضل)\s+",
+        r"^\s*(?:دور لي|دوّر لي|ابحث لي|أبحث لي)\s+(?:عن\s+)?",
+        r"^\s*(?:recommend|find|show me|i want|i need|best)\s+",
+    )
+    for pat in cleanup_patterns:
+        cleaned = re.sub(pat, "", cleaned, flags=re.I).strip()
+
+    norm_orig = normalize_ar(original).lower()
+    norm_choice = normalize_ar(choice).lower()
+    if norm_choice and norm_choice in norm_orig:
+        return original
+
+    detailed = f"{cleaned} {choice}".strip()
+    words = detailed.split()
+    if len(words) > 22:
+        detailed = " ".join(words[:22])
+    return detailed
 
 
 def run_brand_comparison(from_number, query, bot_id, lang):
@@ -7856,7 +7901,13 @@ def run_brand_comparison(from_number, query, bot_id, lang):
     txt = "\n".join(final_lines).strip()
 
     send_whatsapp_text(from_number, txt, bot_id)
-    PENDING_BRAND_PICKS[from_number] = {"options": options, "bot_id": bot_id, "lang": lang, "ts": time.time()}
+    PENDING_BRAND_PICKS[from_number] = {
+        "options": options,
+        "original_query": query,
+        "bot_id": bot_id,
+        "lang": lang,
+        "ts": time.time(),
+    }
     # v74.10: عناوين القائمة بالعربي للمستخدم العربي (ترجمة دفعة + كاش)،
     # والاسم الأصلي يبقى في سطر الوصف — وهو المعتمد للبحث عند الاختيار.
     title_map = arabic_titles(options) if lang == "ar" else {}
