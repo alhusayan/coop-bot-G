@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v79-cta-store-name-flag-only-20260820"
+BUILD_ID = "v79-cta-store-name-flag-only-fixed-20260820"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE/TEXT -> FLAGS + CLEAR LOCAL PRICES + LOCAL/US/CHINA")
@@ -3669,17 +3669,17 @@ def _split_price_display(price_text):
 def _build_compact_card_body(flag, store, title, price_text, lang="ar"):
     lines = []
 
-    # Merchant name moves to CTA; card header keeps flag only.
+    # Store name lives in the CTA button; only the country flag stays in the card header.
     if str(flag or "").strip():
         lines.append(str(flag).strip())
 
-    # Product/category and brand/model remain normal text.
+    # Product/category + model remain normal text.
     title_lines = _single_direction_lines(_compact_ui_title(title or ""), lang, max_groups=3)
     for tline in title_lines:
         if tline.strip():
             lines.append(tline.strip())
 
-    # Local price bold, original foreign price italic.
+    # Local price bold; original foreign price italic.
     price_main, price_secondary = _split_price_display(price_text or "")
     if price_main:
         lines.append(f"*💰 {price_main}*")
@@ -3752,7 +3752,7 @@ def send_whatsapp_text(to,text,bot_id):
 def send_whatsapp_cta(to,body,link,bot_id,title):
     url=f"{GRAPH_URL}/{bot_id}/messages"; h={"Authorization":f"Bearer {WHATSAPP_TOKEN}","Content-Type":"application/json"}
     safe_body = _remove_ui_autolinks(body)
-    safe_title = _remove_ui_autolinks(title) or ("المتجر" if re.search(r"[\u0600-\u06FF]", safe_body) else "Store")
+    safe_title = _remove_ui_autolinks(title)
     payload={"messaging_product":"whatsapp","to":to,"type":"interactive","interactive":{"type":"cta_url","body":{"text":safe_body[:1024]},"action":{"name":"cta_url","parameters":{"display_text":safe_title[:20],"url":link}}}}
     try: return requests.post(url,json=payload,headers=h,timeout=15).ok
     except: return False
@@ -4857,7 +4857,7 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption="", image_
 
         url = (m.get("link") or "").strip()
         button_source = source or ("المتجر" if lang == "ar" else "Store")
-        send_whatsapp_cta(from_number, body[:1000], url, bot_id, store)
+        send_whatsapp_cta(from_number, body[:1000], url, bot_id, button_source)
         sent += 1
 
     chosen_title = ((lens.get("chosen") or {}).get("title") or selected[0]["title"]).strip()
