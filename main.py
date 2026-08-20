@@ -1561,6 +1561,67 @@ def _serpapi_lens_request(public_url, lens_type, country, auto_crop, query_hint)
         return []
 
 
+
+def _amazon_store_search_fallback(base_query, limit=4):
+    """Dedicated Amazon discovery used only when normal Lens/search did not surface Amazon.
+
+    It does not force Amazon into the final answer: downstream relevance/stock filters still apply.
+    """
+    if not SERPAPI_API_KEY:
+        return []
+    q = _shopping_clean_query(base_query or "")
+    if not q:
+        return []
+
+    try:
+        cards = _serpapi_shopping_request(f'{q} site:amazon.com', "us", hl="en")
+    except Exception as e:
+        print(f"AMAZON FALLBACK REQUEST ERR: {e}")
+        return []
+
+    out, seen = [], set()
+    for pos, card in enumerate(cards or [], 1):
+        link = (card.get("link") or "").strip()
+        if not link:
+            continue
+        direct = _shopping_direct_url(link) or link
+        try:
+            host = urllib.parse.urlparse(direct).netloc.lower().replace("www.", "")
+        except Exception:
+            host = ""
+        if not _host_matches_any(host, ("amazon.com",)):
+            continue
+        sig = ((card.get("title") or "").lower(), direct.lower())
+        if sig in seen:
+            continue
+        seen.add(sig)
+        price_text = str(card.get("price") or "").strip()
+        item = {
+            "title": (card.get("title") or q).strip(),
+            "link": direct,
+            "source": "Amazon",
+            "position": pos,
+            "section": "amazon_store_fallback",
+            "exact": False,
+            "thumbnail": (card.get("thumbnail") or "").strip(),
+            "image": (card.get("thumbnail") or "").strip(),
+            "price": price_text,
+            "price_value": card.get("extracted_price"),
+            "currency": detect_currency_code(price_text, "USD"),
+            "in_stock": None,
+            "condition": "",
+            "_lens_country": "us",
+            "_amazon_fallback": True,
+        }
+        if result_market_rank(item) != 1 and (current_market().get("country") or "").lower() != "us":
+            continue
+        out.append(item)
+        if len(out) >= limit:
+            break
+    print(f"AMAZON STORE FALLBACK: query={q[:70]!r} -> {len(out)} results")
+    return out
+
+
 def _china_store_search_fallback(base_query, limit=8):
     """بحث نصي احتياطي مخصص للصين عندما لا يعيد Lens أي متجر صيني.
 
@@ -1576,9 +1637,15 @@ def _china_store_search_fallback(base_query, limit=8):
         ("AliExpress", "aliexpress.com"),
         ("Temu", "temu.com"),
         ("Alibaba", "alibaba.com"),
+        ("SHEIN", "shein.com"),
+        ("DHgate", "dhgate.com"),
+        ("Made-in-China", "made-in-china.com"),
+        ("Banggood", "banggood.com"),
         ("1688", "1688.com"),
         ("Taobao", "taobao.com"),
-        ("SHEIN", "shein.com"),
+        ("Tmall", "tmall.com"),
+        ("JD", "jd.com"),
+        ("Pinduoduo", "pinduoduo.com"),
     ]
 
     def _one(label, domain):
@@ -1703,10 +1770,18 @@ def google_lens_lookup(image_b64, mime_type, lang="ar", query_hint="", light=Fal
         )
         future_map[us_future] = ("all-us-priority", "us", True)
 
+        # Dedicated Amazon pass: combined OR queries can let eBay/Walmart crowd Amazon out.
+        # This only DISCOVERS Amazon candidates; normal relevance filters still decide if they survive.
+        amazon_hint = ((query_hint or "").strip() + " site:amazon.com").strip()
+        amazon_future = LENS_HTTP_POOL.submit(
+            _serpapi_lens_request, public_url, "all", "us", True, amazon_hint
+        )
+        future_map[amazon_future] = ("all-us-amazon", "us", True)
+
         # v75: تمريرة صينية موجهة للمتاجر الصينية المعروفة. country=cn وحده قد
         # يعيد مواقع عالمية عامة؛ هذه التمريرة تزيد فرصة AliExpress/Alibaba/Temu/1688/Taobao/SHEIN.
         cn_hint = (query_hint or "").strip()
-        cn_hint = (cn_hint + " site:aliexpress.com OR site:temu.com OR site:alibaba.com OR site:1688.com OR site:taobao.com OR site:shein.com").strip()
+        cn_hint = (cn_hint + " site:aliexpress.com OR site:temu.com OR site:alibaba.com OR site:shein.com OR site:dhgate.com OR site:made-in-china.com OR site:banggood.com OR site:1688.com OR site:taobao.com OR site:tmall.com OR site:jd.com").strip()
         cn_future = LENS_HTTP_POOL.submit(
             _serpapi_lens_request, public_url, "all", "cn", True, cn_hint
         )
@@ -1727,19 +1802,44 @@ def google_lens_lookup(image_b64, mime_type, lang="ar", query_hint="", light=Fal
         # أي دولة غير محلي/أمريكا/الصين تُحذف نهائياً.
         allowed = [m for m in merged if result_market_rank(m) != 99]
 
-        # v77: إذا Lens لم يعطِ أي متجر صيني، نشغّل بحثاً نصياً احتياطياً مستقلاً
-        # مقيّداً بمتاجر الصين. نشتق الاستعلام من أفضل عنوان بصري موجود ولا نترجمه.
-        if not any(result_market_rank(m) == 2 for m in allowed):
-            fallback_query = (query_hint or "").strip()
-            if not fallback_query and merged:
-                fallback_query = (merged[0].get("title") or "").strip()
-            cn_extra = _china_store_search_fallback(fallback_query, limit=max(LENS_DIRECT_CN_MAX * 2, 8))
+        # v80.7 marketplace coverage boost:
+        # - Amazon gets a dedicated fallback if normal Lens did not surface it.
+        # - China gets supplementation whenever its bucket is weak, not only when it is completely empty.
+        fallback_query = (query_hint or "").strip()
+        if not fallback_query and merged:
+            fallback_query = (merged[0].get("title") or "").strip()
+
+        has_amazon = any(
+            _us_store_priority(m.get("source"), m.get("link")) == 0
+            for m in allowed
+            if result_market_rank(m) in (0, 1)
+        )
+        if not has_amazon:
+            amazon_extra = _amazon_store_search_fallback(
+                fallback_query,
+                limit=max(LENS_DIRECT_US_MAX, 3),
+            )
+            if amazon_extra:
+                existing = {((m.get("title") or "").lower(), (m.get("link") or "").lower()) for m in allowed}
+                for m in amazon_extra:
+                    sig = ((m.get("title") or "").lower(), (m.get("link") or "").lower())
+                    if sig not in existing:
+                        allowed.append(m)
+                        existing.add(sig)
+
+        china_count = sum(1 for m in allowed if result_market_rank(m) == 2)
+        if china_count < LENS_DIRECT_CN_MAX:
+            cn_extra = _china_store_search_fallback(
+                fallback_query,
+                limit=max(LENS_DIRECT_CN_MAX * 3, 10),
+            )
             if cn_extra:
                 existing = {((m.get("title") or "").lower(), (m.get("link") or "").lower()) for m in allowed}
                 for m in cn_extra:
                     sig = ((m.get("title") or "").lower(), (m.get("link") or "").lower())
                     if sig not in existing and result_market_rank(m) == 2:
-                        allowed.append(m); existing.add(sig)
+                        allowed.append(m)
+                        existing.add(sig)
 
         # نفرض ترتيب الأسواق قبل جودة Lens.
         allowed.sort(key=lambda m: (
@@ -3669,6 +3769,13 @@ _UI_STORE_ALIASES = {
     "next.sa": "Next",
     "next.com": "Next",
     "made-in-china.com": "Made-in-China",
+    "dhgate.com": "DHgate",
+    "banggood.com": "Banggood",
+    "1688.com": "1688",
+    "taobao.com": "Taobao",
+    "tmall.com": "Tmall",
+    "jd.com": "JD",
+    "pinduoduo.com": "Pinduoduo",
     "whizzcart.com": "Whizzcart",
     "q8supply.com": "Q8Supply",
 }
@@ -4243,8 +4350,8 @@ def legacy_text_product_search_more(product, lang, seen_domains):
         f"المستخدم شاهد دفعة نتائج سابقة ويريد متاجر إضافية جديدة فقط.{exclusion} "
         f"حافظ على نفس ترتيب الأسواق الإجباري: أولاً متاجر {market_name} المحلية حتى {LENS_DIRECT_LOCAL_MAX}، "
         f"ثم الولايات المتحدة حتى {LENS_DIRECT_US_MAX}، ثم الصين حتى {LENS_DIRECT_CN_MAX}. "
-        "في أمريكا أعط أولوية للنتائج المطابقة من Amazon ثم eBay ثم Walmart إذا لم تكن ظهرت سابقاً، ثم باقي المتاجر الأمريكية. "
-        "في الصين أعط أولوية للنتائج المطابقة من AliExpress ثم Temu ثم Alibaba ثم SHEIN إذا لم تكن ظهرت سابقاً، ثم باقي المتاجر الصينية. "
+        "في أمريكا افحص Amazon.com صراحةً أولاً إذا لم يظهر سابقاً، ثم eBay ثم Walmart، ثم باقي المتاجر الأمريكية؛ لا تفرض نتيجة غير مطابقة. "
+        "في الصين ابحث بعمق في AliExpress ثم Temu ثم Alibaba ثم SHEIN، وبعدها DHgate وMade-in-China وBanggood و1688 وTaobao وTmall وJD، ثم باقي المتاجر الصينية؛ لا تكتفِ بمتجر صيني واحد. "
         "لا تعرض أي دولة أخرى. ابحث عن متاجر مختلفة عن الدفعة السابقة، وكل نتيجة يجب أن تكون نفس المنتج، بسعر ورابط صفحة منتج مباشر. "
         f"{TEXT77_LANG_INSTR[lang]}"
     )
@@ -7513,6 +7620,14 @@ CHINA_STORE_PRIORITY = (
     ("temu.com", "Temu"),
     ("alibaba.com", "Alibaba"),
     ("shein.com", "SHEIN"),
+    ("dhgate.com", "DHgate"),
+    ("made-in-china.com", "Made-in-China"),
+    ("banggood.com", "Banggood"),
+    ("1688.com", "1688"),
+    ("taobao.com", "Taobao"),
+    ("tmall.com", "Tmall"),
+    ("jd.com", "JD"),
+    ("pinduoduo.com", "Pinduoduo"),
 )
 
 
@@ -7559,7 +7674,7 @@ def _preferred_market_coverage(txt, urls):
 
 def legacy_text_product_search(product, lang):
     """v77.7 typed engine, automatic LOCAL -> US -> CHINA search."""
-    cache_query = f"__TEXT80_4_USCN_QUALITY__::{product}"
+    cache_query = f"__TEXT80_7_AMAZON_CHINA_BOOST__::{product}"
     cached = cache_get(cache_query, lang)
     if cached:
         return cached
@@ -7579,8 +7694,8 @@ def legacy_text_product_search(product, lang):
             f"أولاً متاجر {market_name} المحلية حتى {LENS_DIRECT_LOCAL_MAX}، "
             f"ثم متاجر الولايات المتحدة حتى {LENS_DIRECT_US_MAX}، "
             f"ثم المتاجر الصينية حتى {LENS_DIRECT_CN_MAX}. "
-            "بالنسبة لأمريكا: ابحث بشكل طبيعي وواسع في المتاجر الأمريكية. افحص ظهور Amazon وeBay وWalmart ضمن البحث الطبيعي قبل الاكتفاء بالمتاجر الأخرى، وإذا وجدت نتائج مطابقة منها فرتبها بهذه الأولوية: Amazon ثم eBay ثم Walmart ثم باقي المتاجر الأمريكية. لا تعرض نتيجة غير مطابقة فقط لإكمال متجر. "
-            "بالنسبة للصين افحص أولاً ضمن البحث الطبيعي AliExpress وTemu وAlibaba وSHEIN، وإذا وجدت نتائج مطابقة فرتبها بهذا التسلسل قبل بقية المتاجر الصينية. لا تستبدلها بمتاجر أقل أهمية لمجرد أن نتيجتها ظهرت أسرع. "
+            "بالنسبة لأمريكا: افحص Amazon.com بشكل صريح أولاً للمنتج نفسه، ثم eBay ثم Walmart ثم باقي المتاجر الأمريكية. إذا كانت نتيجة Amazon مطابقة فعلاً أدرجها قبل بقية أمريكا؛ وإذا لم توجد نتيجة مطابقة فلا تفرضها. "
+            "بالنسبة للصين: ابحث بعمق في أقوى المنصات الصينية العالمية، وأعط الأولوية للنتيجة المطابقة بهذا التسلسل: AliExpress ثم Temu ثم Alibaba ثم SHEIN، وبعدها DHgate وMade-in-China وBanggood و1688 وTaobao وTmall وJD وبقية المتاجر الصينية. لا تكتفِ بأول متجر صيني يظهر، ولا تعرض نتيجة غير مطابقة فقط لإكمال العدد. "
             "لا تعرض أي دولة رابعة. لا تجعل الأعداد حصصاً إلزامية؛ اعرض الموجود المطابق فقط. "
             "لكل نتيجة اذكر اسم المتجر، اسم المنتج المطابق، السعر الرقمي والعملة، واربطه بصفحة المنتج المباشرة. "
             f"{TEXT77_LANG_INSTR[lang]}"
