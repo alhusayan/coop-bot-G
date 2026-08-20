@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v79-no-other-countries-prompt-20260820"
+BUILD_ID = "v79-commerce-only-no-social-news-20260820"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE/TEXT -> FLAGS + CLEAR LOCAL PRICES + LOCAL/US/CHINA")
@@ -417,9 +417,172 @@ def format_lens_price(price_text, price_value, lang="ar", currency_code=None):
     label = currency_label(lang)
     return f"{format_price(numeric, currency_code)} {label}"
 
-def is_direct_store_url(url):
-    """يمنع روابط Google والبحث والتصنيفات؛ يقبل روابط المتاجر المباشرة فقط."""
+
+SOCIAL_HOSTS = {
+    "instagram.com", "facebook.com", "fb.com", "tiktok.com", "x.com", "twitter.com",
+    "pinterest.com", "youtube.com", "youtu.be", "reddit.com", "threads.net",
+    "linkedin.com", "snapchat.com", "telegram.me", "t.me",
+}
+
+CONTENT_ONLY_HOST_HINTS = {
+    "medium.com", "substack.com", "wordpress.com", "blogspot.com",
+    "news.google.com", "msn.com", "yahoo.com", "bbc.com", "cnn.com",
+    "reuters.com", "apnews.com", "nytimes.com", "theguardian.com",
+}
+
+CONTENT_PATH_HINTS = (
+    "/news/", "/article/", "/articles/", "/blog/", "/blogs/", "/story/",
+    "/stories/", "/review/", "/reviews/", "/guide/", "/guides/",
+    "/how-to/", "/press/", "/magazine/", "/editorial/",
+)
+
+COMMERCE_PATH_HINTS = (
+    "/product/", "/products/", "/p/", "/dp/", "/item/", "/items/",
+    "/prod/", "/shop/", "/store/", "/buy/", "/cart/", "/collections/",
+)
+
+BUY_TEXT_HINTS = (
+    "add to cart", "buy now", "shop now", "in stock", "price",
+    "سلة", "أضف للسلة", "اشتر", "شراء", "السعر", "متوفر",
+)
+
+
+def _host_name(url):
+    try:
+        host = urllib.parse.urlparse(str(url or "")).netloc.lower().split(":")[0]
+        return host[4:] if host.startswith("www.") else host
+    except Exception:
+        return ""
+
+
+def is_social_result(url):
+    host = _host_name(url)
+    if not host:
+        return False
+    return any(host == h or host.endswith("." + h) for h in SOCIAL_HOSTS)
+
+
+def looks_like_content_only_url(url):
+    host = _host_name(url)
+    if not host:
+        return False
+    try:
+        parsed = urllib.parse.urlparse(str(url or ""))
+        path = (parsed.path or "").lower()
+    except Exception:
+        path = ""
+
+    if any(host == h or host.endswith("." + h) for h in CONTENT_ONLY_HOST_HINTS):
+        return True
+
+    if any(h in path for h in CONTENT_PATH_HINTS):
+        # If URL also looks strongly commerce/product-like, allow it to proceed.
+        if not any(h in path for h in COMMERCE_PATH_HINTS):
+            return True
+
+    return False
+
+
+def _page_has_commerce_signals(url):
+    """Conservative commerce verifier. Unknown/fetch-blocked pages are not rejected here."""
     if not url or not url.startswith(("http://", "https://")):
+        return False
+
+    if is_social_result(url) or looks_like_content_only_url(url):
+        return False
+
+    host = _host_name(url)
+    path = urllib.parse.urlparse(url).path.lower()
+    if any(h in path for h in COMMERCE_PATH_HINTS):
+        return True
+
+    try:
+        html = fetch_html(url)
+    except Exception:
+        html = ""
+
+    if not html:
+        # Do not kill valid store pages merely because scraping is blocked.
+        return None
+
+    low = html.lower()
+    # Structured commerce signals
+    if any(x in low for x in (
+        '"@type":"product"', '"@type": "product"', '"offers"', '"pricecurrency"',
+        'product:price:amount', 'itemprop="price"', "itemprop='price'",
+    )):
+        return True
+
+    text_only = BeautifulSoup(html, "lxml").get_text(" ", strip=True).lower()[:12000]
+    if any(h in text_only for h in BUY_TEXT_HINTS):
+        return True
+
+    return False
+
+
+def commerce_result_allowed(item, strict_ai=False):
+    """Reject social/news/content results; keep only plausible commerce/store results."""
+    if not item:
+        return False
+
+    url = str(item.get("link") or item.get("url") or "").strip()
+    title = str(item.get("title") or "").strip()
+    source = str(item.get("source") or item.get("name") or "").strip()
+
+    if not url or not url.startswith(("http://", "https://")):
+        return False
+    if is_social_result(url):
+        print(f"COMMERCE FILTER SOCIAL REJECT: {url[:120]}")
+        return False
+    if looks_like_content_only_url(url):
+        print(f"COMMERCE FILTER CONTENT REJECT: {url[:120]}")
+        return False
+
+    hay = f"{title} {source}".lower()
+
+    # Obvious editorial/news intent in title.
+    editorial_terms = (
+        "review", "reviews", "news", "article", "guide", "how to", "comparison",
+        "best ", "top 10", "press release", "announcement",
+        "مراجعة", "خبر", "أخبار", "مقال", "دليل", "مقارنة", "أفضل ",
+    )
+    if any(term in hay for term in editorial_terms):
+        # Product-store titles may contain "best" innocently; only hard reject when URL isn't commerce-like.
+        path = urllib.parse.urlparse(url).path.lower()
+        if not any(h in path for h in COMMERCE_PATH_HINTS):
+            print(f"COMMERCE FILTER EDITORIAL REJECT: {title[:100]} -> {url[:100]}")
+            return False
+
+    commerce = _page_has_commerce_signals(url)
+    if commerce is False:
+        print(f"COMMERCE FILTER NO BUY SIGNAL REJECT: {title[:100]} -> {url[:100]}")
+        return False
+
+    # Unknown due to blocked scraping: keep if source/title look merchant-like.
+    return True
+
+
+def filter_commerce_results(items, label=""):
+    kept = []
+    for item in items or []:
+        try:
+            if commerce_result_allowed(item):
+                kept.append(item)
+        except Exception as e:
+            print(f"COMMERCE FILTER ERR {label}: {e}")
+            # Conservative: on filter failure, keep only if not social/content.
+            url = str((item or {}).get("link") or (item or {}).get("url") or "")
+            if url and not is_social_result(url) and not looks_like_content_only_url(url):
+                kept.append(item)
+    print(f"COMMERCE FILTER {label}: {len(kept)}/{len(items or [])} kept")
+    return kept
+
+
+def is_direct_store_url(url):
+    """يمنع روابط البحث/المحتوى/التواصل؛ يقبل روابط المتاجر والمنتجات فقط."""
+    if not url or not url.startswith(("http://", "https://")):
+        return False
+    if is_social_result(url) or looks_like_content_only_url(url):
         return False
     try:
         parsed = urllib.parse.urlparse(url)
@@ -940,6 +1103,7 @@ SYSTEM_PROMPT = """
 - اعرض المتاجر بهذا الترتيب الإجباري فقط: بلد المستخدم الحالي أولاً، ثم الولايات المتحدة، ثم الصين. احذف أي دولة أخرى. داخل كل سوق رتب من الأرخص إلى الأغلى.
 - ممنوع أن يكون الرد عبارة عن أسماء متاجر مع كلمة متوفر فقط؛ كل سطر عرض يجب أن يحتوي سعراً رقمياً.
 - رابط كل متجر يجب أن يكون رابط صفحة منتج مباشر (صفحة فيها منتج واحد وسعر واحد). ممنوع روابط الصفحة الرئيسية أو /search أو /category
+- استبعد تماماً نتائج التواصل الاجتماعي والأخبار والمقالات والمدونات والمراجعات والأدلة؛ المطلوب متاجر وصفحات بيع فقط.
 - لا تخترع سعراً، انسخ السعر كما يظهر في نتيجة البحث اليوم.
 - حاول تجيب حتى 5 متاجر مختلفة، وإذا ما لقيت اذكر الموجود ولا تخترع.
 
@@ -4593,6 +4757,7 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption="", image_
     لا يوجد حد أدنى أو عدد إلزامي لأي سوق.
     """
     raw_matches = [m for m in (lens.get("matches") or []) if (m.get("title") or "").strip()]
+    raw_matches = filter_commerce_results(raw_matches, "MAIN-LENS")
     # Relevance BEFORE country/store priority: unrelated preferred-store results must never win.
     lens_for_filter = dict(lens or {})
     lens_for_filter["matches"] = raw_matches
@@ -5622,10 +5787,10 @@ Do not return stores from the United States, China, or any other country unless 
 store result is the {country_en} storefront/operation.
 Find the SAME requested product, not merely a related product.
 Reject wrong product categories, wrong models, and obvious accessories unless the query asks for them.
-Return only currently purchasable product pages when possible.
+Return only currently purchasable product pages. Never return social media, news, blogs, editorial articles, reviews, guides, forums, or informational pages.
 Every offer must contain a numeric price in the ORIGINAL source currency ({currency or 'the local currency'}).
 Never convert the price; the application converts it later.
-Use direct product-page links, never home/search/category pages.
+Use direct product-page links only, never home/search/category pages, social media, news, blogs, reviews, guides, or editorial pages.
 Respond in {response_lang}.
 Format:
 📦 [product]
@@ -5809,6 +5974,8 @@ def _search_one_region_country(product, cc, lang):
             continue
         items.append(item)
 
+    items = filter_commerce_results(items, f"REGION-TEXT-{cc}")
+
     # Product relevance first, exactly like the main improved flows.
     rows = [{"line": i["title"], "name": i["source"]} for i in items]
     u_map = {i["source"]: i["link"] for i in items}
@@ -5968,6 +6135,7 @@ def run_region_lens_search(phone, product, region_key, bot_id, lang,
         visual_identity=visual_identity or product,
     )
     matches = list(lens_obj.get("matches") or [])
+    matches = filter_commerce_results(matches, "REGION-LENS")
 
     # Group by selected Lens country, then use the same quality order:
     # priced -> exact -> visual -> Google position.
@@ -6873,6 +7041,8 @@ def send_text_lens_style_results(from_number, txt, urls, bot_id, lang, query):
             continue
         item["market_rank"] = rank
         candidates.append(item)
+
+    candidates = filter_commerce_results(candidates, "MAIN-TEXT")
 
     # Relevance must win before merchant priority. Use the existing strict AI offer filter on typed results.
     _offer_rows = [{"line": (o.get("title") or ""), "name": (o.get("source") or "")} for o in candidates]
