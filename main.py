@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
 import os, re, time, base64, requests, json, asyncio, urllib.parse, hashlib, sqlite3, threading
 from collections import deque, defaultdict
-from concurrent.futures import ThreadPoolExecutor, wait
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v80.2-plain-title-20260820"
+BUILD_ID = "v80.3-fast-lean-20260820"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE/TEXT -> FLAGS + CLEAR LOCAL PRICES + LOCAL/US/CHINA")
@@ -42,7 +42,7 @@ MARKET_CTX = threading.local()
 DEFAULT_COUNTRY = os.environ.get("DEFAULT_COUNTRY", "kw").strip().lower() or "kw"
 PENDING_IMAGES = defaultdict(lambda: {"images": [], "bot_id": ""})
 
-BUFFER_SECONDS = 4
+BUFFER_SECONDS = float(os.environ.get("BUFFER_SECONDS", "1.0"))
 RESOLVER = ThreadPoolExecutor(max_workers=8)
 WORKERS = ThreadPoolExecutor(max_workers=5)
 OLD_SEARCH_POOL = ThreadPoolExecutor(max_workers=8)
@@ -111,11 +111,37 @@ LENS_MIN_MATCHES = max(3, int(os.environ.get("LENS_MIN_MATCHES", "6")))
 LENS_PARALLEL_WITH_VISION = env_bool("LENS_PARALLEL_WITH_VISION", True)
 LENS_RESULT_LIMIT = max(12, int(os.environ.get("LENS_RESULT_LIMIT", "40")))
 # v73: حد زمني واضح للينز. تمريرات البلدان تعمل بالتوازي، وليس واحدة وراء الثانية.
-LENS_HTTP_TIMEOUT_SECONDS = max(6, int(os.environ.get("LENS_HTTP_TIMEOUT_SECONDS", "15")))
-LENS_TOTAL_TIMEOUT_SECONDS = max(8, int(os.environ.get("LENS_TOTAL_TIMEOUT_SECONDS", "22")))
+LENS_HTTP_TIMEOUT_SECONDS = max(5, int(os.environ.get("LENS_HTTP_TIMEOUT_SECONDS", "8")))
+LENS_TOTAL_TIMEOUT_SECONDS = max(7, int(os.environ.get("LENS_TOTAL_TIMEOUT_SECONDS", "12")))
 LENS_IMAGE_TTL = max(120, int(os.environ.get("LENS_IMAGE_TTL_SECONDS", "600")))
 LENS_IMAGE_STORE = {}
 LENS_IMAGE_LOCK = threading.Lock()
+
+# ---- v80.3 FAST/LEAN performance controls -------------------------------------
+FAST_MODE = env_bool("FAST_MODE", True)
+# Avoid opening every candidate page merely to decide if it is a shop page.
+FAST_COMMERCE_FILTER = env_bool("FAST_COMMERCE_FILTER", True)
+# Existing Lens/Gemini prices are trusted for first display; live-page refresh is only
+# used for missing prices unless explicitly enabled.
+LIVE_PRICE_REFRESH_EXISTING = env_bool("LIVE_PRICE_REFRESH_EXISTING", False)
+PAGE_CONNECT_TIMEOUT = float(os.environ.get("PAGE_CONNECT_TIMEOUT", "2.5"))
+PAGE_READ_TIMEOUT = float(os.environ.get("PAGE_READ_TIMEOUT", "4.0"))
+REDIRECT_CONNECT_TIMEOUT = float(os.environ.get("REDIRECT_CONNECT_TIMEOUT", "2.0"))
+REDIRECT_READ_TIMEOUT = float(os.environ.get("REDIRECT_READ_TIMEOUT", "4.0"))
+STOCK_TOTAL_TIMEOUT = float(os.environ.get("STOCK_TOTAL_TIMEOUT", "4.5"))
+PAGE_PRICE_TOTAL_TIMEOUT = float(os.environ.get("PAGE_PRICE_TOTAL_TIMEOUT", "4.5"))
+PRICE_TEXT_TOTAL_TIMEOUT = float(os.environ.get("PRICE_TEXT_TOTAL_TIMEOUT", "6.0"))
+LIVE_PRICE_TOTAL_TIMEOUT = float(os.environ.get("LIVE_PRICE_TOTAL_TIMEOUT", "4.5"))
+SEARCH_TOURNAMENT_TIMEOUT = float(os.environ.get("SEARCH_TOURNAMENT_TIMEOUT", "35"))
+UI_TRANSLATE_TIMEOUT = float(os.environ.get("UI_TRANSLATE_TIMEOUT", "6"))
+GROUNDING_RESOLVE_MAX = max(4, int(os.environ.get("GROUNDING_RESOLVE_MAX", "12")))
+CHINA_FALLBACK_TIMEOUT = float(os.environ.get("CHINA_FALLBACK_TIMEOUT", "6"))
+REGION_SEARCH_TOTAL_TIMEOUT = float(os.environ.get("REGION_SEARCH_TOTAL_TIMEOUT", "35"))
+
+# Dedicated pools prevent slow page probes from starving URL resolution/search tasks.
+PAGE_POOL = ThreadPoolExecutor(max_workers=max(8, int(os.environ.get("PAGE_POOL_WORKERS", "12"))))
+UI_POOL = ThreadPoolExecutor(max_workers=2)
+STOCK_BUCKET_POOL = ThreadPoolExecutor(max_workers=3)
 
 # ---- Google Shopping عبر SerpApi (v69) ---------------------------------------
 # طبقة أسعار منظمة: google_shopping يجيب بطاقات المنتج مع immersive_product_page_token،
@@ -168,7 +194,7 @@ HIDE_UNPRICED_MIN_PRICED = int(os.getenv("HIDE_UNPRICED_MIN_PRICED", "3"))
 # v80.1: تحديث كل الأسعار من صفحة المنتج الحية قبل الإرسال (سعر المتجر يغلب سعر Gemini/Lens المقرّب).
 LIVE_PRICE_REFRESH = env_bool("LIVE_PRICE_REFRESH", True)
 # v80: أقصى عدد بطاقات تُرسل لمحرك النص لاسترجاع سعرها (كل واحدة = نداء Gemini مستقل).
-PRICE_RECOVERY_TEXT_MAX = int(os.getenv("PRICE_RECOVERY_TEXT_MAX", "8"))
+PRICE_RECOVERY_TEXT_MAX = max(0, int(os.getenv("PRICE_RECOVERY_TEXT_MAX", "2")))
 # يُلحق بكل prompt يطلب أسعاراً: ممنوع التقريب.
 PRICE_NO_ROUND_RULE = (
     "PRICE PRECISION RULE (MANDATORY): never round, estimate, or truncate a price. "
@@ -251,7 +277,7 @@ def get_fx_rates(base):
         if hit and now - hit["ts"] < FX_CACHE_TTL:
             return hit["rates"]
     try:
-        r = requests.get(FX_API_URL.format(base=base), timeout=10)
+        r = requests.get(FX_API_URL.format(base=base), timeout=(2.0, 4.0))
         if r.ok:
             j = r.json()
             rates = j.get("rates") or j.get("conversion_rates") or {}
@@ -610,6 +636,12 @@ def commerce_result_allowed(item, strict_ai=False):
         if not any(h in path for h in COMMERCE_PATH_HINTS):
             print(f"COMMERCE FILTER EDITORIAL REJECT: {title[:100]} -> {url[:100]}")
             return False
+
+    # Fast path: social/editorial/category checks above are deterministic and cost no network.
+    # Do not open every candidate page before results can be shown. Stock/price probes later
+    # inspect only the small set of selected cards.
+    if FAST_COMMERCE_FILTER:
+        return True
 
     commerce = _page_has_commerce_signals(url)
     if commerce is False:
@@ -1176,7 +1208,7 @@ LINKS: اسم الأول=الدومين الحقيقي, اسم الثاني=ال
 def fetch_html(url):
     if not url or not url.startswith("http"): return ""
     try:
-        r = requests.get(url, headers=HEADERS, timeout=10)
+        r = requests.get(url, headers=HEADERS, timeout=(PAGE_CONNECT_TIMEOUT, PAGE_READ_TIMEOUT))
         if r.status_code == 200 and len(r.text) > 1500:
             return r.text
     except Exception as e:
@@ -1359,12 +1391,28 @@ def _result_confirmed_out_of_stock(item):
 
 
 def _filter_confirmed_oos(items, label="RESULT"):
-    """Check candidates concurrently; preserve original order and keep unknown stock states."""
+    """Bounded concurrent stock check; unknown/slow pages are kept."""
     seq = list(items or [])
     if not seq or not ENABLE_RESULT_STOCK_CHECK:
         return seq
+    market_snapshot = current_market()
+    futures = {
+        PAGE_POOL.submit(_run_with_market, market_snapshot, _result_confirmed_out_of_stock, item): i
+        for i, item in enumerate(seq)
+    }
+    flags = [False] * len(seq)
     try:
-        flags = list(RESOLVER.map(_result_confirmed_out_of_stock, seq))
+        done, pending = wait(list(futures), timeout=STOCK_TOTAL_TIMEOUT)
+        for fut in done:
+            i = futures[fut]
+            try:
+                flags[i] = bool(fut.result())
+            except Exception:
+                flags[i] = False
+        for fut in pending:
+            fut.cancel()
+        if pending:
+            print(f"{label} STOCK DEADLINE: kept {len(pending)} slow/unknown pages")
     except Exception as e:
         print(f"{label} STOCK FILTER ERR: {e}")
         return seq
@@ -1575,7 +1623,7 @@ def _china_store_search_fallback(base_query, limit=8):
         for label, domain in targets
     }
     merged, seen = [], set()
-    done, not_done = wait(list(futures), timeout=min(LENS_TOTAL_TIMEOUT_SECONDS, 18))
+    done, not_done = wait(list(futures), timeout=min(LENS_TOTAL_TIMEOUT_SECONDS, CHINA_FALLBACK_TIMEOUT))
     for fut in done:
         label, domain = futures[fut]
         try:
@@ -1909,7 +1957,7 @@ def rank_verified_by_image(source_b64, source_mime, verified):
 def get_final_url(url: str):
     if not url or not url.startswith(("http://", "https://")): return ""
     try:
-        r = requests.get(url, allow_redirects=True, timeout=12, stream=True, headers=HEADERS)
+        r = requests.get(url, allow_redirects=True, timeout=(REDIRECT_CONNECT_TIMEOUT, REDIRECT_READ_TIMEOUT), stream=True, headers=HEADERS)
         final = r.url or url
         r.close()
         return final if final.startswith(("http://", "https://")) else url
@@ -2269,7 +2317,7 @@ def call_gemini(parts, system=SYSTEM_PROMPT, use_search=True):
         GEMINI_STATS[key] += 1
         print(f"GEMINI CALL model={model} search={use_search} totals={GEMINI_STATS}")
     try:
-        r = requests.post(gemini_url, params={"key": GEMINI_API_KEY}, json=payload, timeout=90)
+        r = requests.post(gemini_url, params={"key": GEMINI_API_KEY}, json=payload, timeout=45)
         if r.status_code >= 400:
             print(f"Gemini HTTP {r.status_code}: {r.text[:500]}")
             return "", {}
@@ -3548,7 +3596,7 @@ def search_product(query, lang, prompt_text=None, source_image_b64=None, source_
         if not shopping_future:
             return "", {}
         try:
-            return shopping_future.result(timeout=90) or ("", {})
+            return shopping_future.result(timeout=12 if FAST_MODE else 45) or ("", {})
         except Exception as e:
             print(f"SHOPPING LAYER ERR: {e}")
             return "", {}
@@ -3563,8 +3611,15 @@ def search_product(query, lang, prompt_text=None, source_image_b64=None, source_
             return _merge_two_layers(query, lang, new_result, ("", {}), lens_context, shopping_result)
         return new_result
 
-    old_result = _old_layer_search(query, lang, prompt_text=prompt_text, lens_context=lens_context, allow_global=allow_global, english_name=english_name)
-    print(f"OLD LAYER DONE offers={len(extract_store_offers(old_result[0])) if old_result[0] else 0}")
+    _new_offer_count = len(extract_store_offers(new_result[0])) if new_result[0] else 0
+    # The broad old layer is expensive (multiple grounded searches + page verification).
+    # Use it only when the primary layer is thin; this keeps it as a quality fallback.
+    if FAST_MODE and _new_offer_count >= 4:
+        old_result = ("", {})
+        print(f"OLD LAYER FAST-SKIP: primary already has {_new_offer_count} offers")
+    else:
+        old_result = _old_layer_search(query, lang, prompt_text=prompt_text, lens_context=lens_context, allow_global=allow_global, english_name=english_name)
+        print(f"OLD LAYER DONE offers={len(extract_store_offers(old_result[0])) if old_result[0] else 0}")
     shopping_result = _collect_shopping()
     print(f"SHOPPING LAYER DONE offers={len(extract_store_offers(shopping_result[0])) if shopping_result[0] else 0}")
     final_txt, final_urls = _merge_two_layers(query, lang, new_result, old_result, lens_context, shopping_result)
@@ -4635,11 +4690,30 @@ def _refresh_live_prices(items):
     seq = [dict(x) for x in (items or []) if isinstance(x, dict)]
     if not seq or not LIVE_PRICE_REFRESH:
         return seq
+    # In fast mode, don't re-open pages for cards that already have a usable source price.
+    idxs = [i for i, x in enumerate(seq) if LIVE_PRICE_REFRESH_EXISTING or not _item_has_price(x)]
+    if not idxs:
+        return seq
+    market_snapshot = current_market()
+    futures = {
+        PAGE_POOL.submit(_run_with_market, market_snapshot, _refresh_one_live_price, seq[i]): i
+        for i in idxs
+    }
     try:
-        return list(RESOLVER.map(_refresh_one_live_price, seq))
+        done, pending = wait(list(futures), timeout=LIVE_PRICE_TOTAL_TIMEOUT)
+        for fut in done:
+            i = futures[fut]
+            try:
+                seq[i] = fut.result()
+            except Exception:
+                pass
+        for fut in pending:
+            fut.cancel()
+        if pending:
+            print(f"LIVE PRICE DEADLINE: {len(pending)} slow refreshes skipped")
     except Exception as e:
         print(f"LIVE PRICE BATCH ERR: {e}")
-        return seq
+    return seq
 
 
 def _drop_unpriced_if_enough(items):
@@ -4793,14 +4867,32 @@ def _enrich_result_price(item):
 
 
 def _enrich_missing_prices(items):
-    seq = list(items or [])
+    seq = [dict(x) if isinstance(x, dict) else x for x in (items or [])]
     if not seq:
         return seq
+    missing = [i for i, x in enumerate(seq) if isinstance(x, dict) and not _item_has_price(x)]
+    if not missing:
+        return seq
+    market_snapshot = current_market()
+    futures = {
+        PAGE_POOL.submit(_run_with_market, market_snapshot, _enrich_result_price, seq[i]): i
+        for i in missing
+    }
     try:
-        return list(RESOLVER.map(_enrich_result_price, seq))
+        done, pending = wait(list(futures), timeout=PAGE_PRICE_TOTAL_TIMEOUT)
+        for fut in done:
+            i = futures[fut]
+            try:
+                seq[i] = fut.result()
+            except Exception:
+                pass
+        for fut in pending:
+            fut.cancel()
+        if pending:
+            print(f"PRICE ENRICH DEADLINE: {len(pending)} slow pages skipped")
     except Exception as e:
         print(f"PRICE ENRICH BATCH ERR: {e}")
-        return seq
+    return seq
 
 
 
@@ -4939,11 +5031,17 @@ def _lens_fill_missing_prices_from_text_engine(selected, lens, caption, lang):
         )
         futures[fut] = i
 
-    for fut, i in futures.items():
+    done, pending = wait(list(futures), timeout=PRICE_TEXT_TOTAL_TIMEOUT)
+    for fut in done:
+        i = futures[fut]
         try:
-            items[i] = fut.result(timeout=90)
+            items[i] = fut.result()
         except Exception as e:
             print(f"LENS PRICE ENRICH FUTURE ERR: idx={i} -> {e}")
+    for fut in pending:
+        fut.cancel()
+    if pending:
+        print(f"LENS PRICE ENRICH DEADLINE: {len(pending)} focused lookups skipped")
 
     recovered = sum(1 for i in missing_idx if _lens_has_price(items[i]))
     print(f"LENS PRICE ENRICH VIA TEXT METHOD: recovered={recovered}/{len(missing_idx)}; cards_preserved={len(items)}")
@@ -4981,14 +5079,21 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption="", image_
             0 if m.get("section") == "visual_matches" else 1,
             int(m.get("position") or 999),
         ))
-        # فحص مخزون لأفضل المرشحين فقط حتى لا نبطئ Lens بعشرات طلبات HTTP.
-        # نأخذ cap+2 لإعطاء بديلين إذا كانت بعض البطاقات خالصة.
-        _cap = {0: LENS_DIRECT_LOCAL_MAX, 1: LENS_DIRECT_US_MAX, 2: LENS_DIRECT_CN_MAX}.get(rank, 0)
-        _probe_n = max(_cap + 2, _cap)
-        _head = _filter_confirmed_oos(buckets[rank][:_probe_n], f"LENS-{rank}")
-        buckets[rank] = _head + buckets[rank][_probe_n:]
 
-    # حدود قصوى فقط وليست حصصاً. نسمح حتى نتيجتين من نفس المتجر/merchant.
+    # Stock probes for LOCAL/US/CHINA run at the same time instead of three sequential waves.
+    _stock_jobs = {}
+    for _rank in (0, 1, 2):
+        _cap = {0: LENS_DIRECT_LOCAL_MAX, 1: LENS_DIRECT_US_MAX, 2: LENS_DIRECT_CN_MAX}.get(_rank, 0)
+        _probe_n = max(_cap + 2, _cap)
+        _stock_jobs[_rank] = (_probe_n, STOCK_BUCKET_POOL.submit(_filter_confirmed_oos, buckets[_rank][:_probe_n], f"LENS-{_rank}"))
+    for _rank, (_probe_n, _fut) in _stock_jobs.items():
+        try:
+            _head = _fut.result(timeout=STOCK_TOTAL_TIMEOUT + 0.5)
+            buckets[_rank] = _head + buckets[_rank][_probe_n:]
+        except Exception as e:
+            print(f"LENS-{_rank} STOCK BUCKET DEADLINE: {e}")
+
+    # حدود قصوى فقط وليست حصصاً. نتيجة واحدة من نفس المتجر حسب RESULTS_PER_STORE_MAX.
     # نمنع تكرار نفس الرابط نفسه، لكن قد يظهر SKU/عرض ثانٍ من Amazon أو eBay أو غيرهما.
     def _merchant_key(m):
         url = (m.get("link") or "").strip()
@@ -5049,7 +5154,11 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption="", image_
     if not selected:
         return False
 
-    # v80: استرجاع الأسعار الناقصة (صفحة المنتج ثم محرك النص) قبل الإرسال.
+    # Translation does not depend on price retrieval: run it in parallel to hide its latency.
+    _original_titles = [(m.get("title") or "").strip() for m in selected]
+    _translate_future = UI_POOL.submit(translate_ui_titles, _original_titles, lang) if lang != "en" else None
+
+    # v80.3: bounded price recovery; slow pages/searches no longer block the whole response.
     _target = str((lens.get("relevance_target") or caption or ((lens.get("chosen") or {}).get("title")) or "")).strip()
     selected = _recover_missing_prices(selected, _target, lang, lens)
     selected = _refresh_live_prices(selected)
@@ -5058,8 +5167,14 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption="", image_
     for _m in selected:
         merchant_counts[_merchant_key(_m)] += 1
 
-    # الترجمة للواجهة فقط بعد اكتمال البحث والاختيار؛ لا تؤثر على Lens أو Google أو الفلاتر.
-    display_titles = translate_ui_titles([(m.get("title") or "").strip() for m in selected], lang)
+    if _translate_future is not None:
+        try:
+            display_titles = _translate_future.result(timeout=UI_TRANSLATE_TIMEOUT)
+        except Exception as e:
+            print(f"UI TRANSLATE DEADLINE: {e}")
+            display_titles = _original_titles
+    else:
+        display_titles = _original_titles
     for m, display_title in zip(selected, display_titles):
         m["_display_title"] = display_title
 
@@ -5287,7 +5402,7 @@ def send_last_search_map(from_number, bot_id, lang):
 
 PENDING_BRAND_PICKS = {}
 PENDING_CART_PICKS = {}
-SEARCH_RUNS = int(os.environ.get("SEARCH_RUNS", "4"))
+SEARCH_RUNS = max(1, int(os.environ.get("SEARCH_RUNS", "2")))
 V26_SEARCH_POOL = ThreadPoolExecutor(max_workers=8)
 SIMILAR_MAX_STORES = max(MAX_STORES, int(os.environ.get("SIMILAR_MAX_STORES", "10")))
 
@@ -5408,7 +5523,7 @@ def text77_call_gemini(parts, system=TEXT77_SYSTEM_PROMPT, use_search=True):
         GEMINI_STATS[key] += 1
         print(f"TEXT77 GEMINI CALL model={model} search={use_search} totals={GEMINI_STATS}")
     try:
-        r = requests.post(gemini_url, params={"key": GEMINI_API_KEY}, json=payload, timeout=90)
+        r = requests.post(gemini_url, params={"key": GEMINI_API_KEY}, json=payload, timeout=45)
         if r.status_code >= 400:
             print(f"TEXT77 Gemini HTTP {r.status_code}: {r.text[:500]}")
             return "", {}
@@ -5767,7 +5882,32 @@ def v26_best_of_search(parts, max_results=None, merge_offers=False, merge_title=
     try:
         futs = [V26_SEARCH_POOL.submit(_run_with_market, market_snapshot, text77_call_gemini, parts)
                 for _ in range(SEARCH_RUNS)]
-        results = [f.result(timeout=120) for f in futs]
+        pending = set(futs)
+        results = []
+        _deadline = time.time() + SEARCH_TOURNAMENT_TIMEOUT
+        _early = False
+        while pending and time.time() < _deadline:
+            done, pending = wait(pending, timeout=max(0.1, _deadline - time.time()), return_when=FIRST_COMPLETED)
+            if not done:
+                break
+            for f in done:
+                try:
+                    r = f.result()
+                    results.append(r)
+                    if FAST_MODE and r and r[0]:
+                        _offers = text77_extract_store_offers(r[0], limit=limit)
+                        if len(_offers) >= min(limit, 4) and len(r[1] or {}) >= min(limit, 3):
+                            _early = True
+                except Exception as e:
+                    print(f"V26 RUN ERR: {e}")
+            if _early:
+                break
+        for f in pending:
+            f.cancel()
+        if _early:
+            print(f"V26 TOURNAMENT EARLY WIN: {len(results)}/{len(futs)} runs were enough")
+        elif pending:
+            print(f"V26 TOURNAMENT DEADLINE: using {len(results)}/{len(futs)} completed runs")
     except Exception as e:
         print(f"v26 best_of_search err {e}")
         return text77_call_gemini(parts)
@@ -6024,7 +6164,7 @@ No markdown and no visible URLs.
         with GEMINI_STATS_LOCK:
             GEMINI_STATS["search_calls"] += 1
             print(f"REGION GEMINI CALL cc={cc} model={model} totals={GEMINI_STATS}")
-        r = requests.post(gemini_url, params={"key": GEMINI_API_KEY}, json=payload, timeout=90)
+        r = requests.post(gemini_url, params={"key": GEMINI_API_KEY}, json=payload, timeout=45)
         if r.status_code >= 400:
             print(f"REGION Gemini HTTP {r.status_code} cc={cc}: {r.text[:400]}")
             return "", {}
@@ -6401,14 +6541,22 @@ def run_region_lens_search(phone, product, region_key, bot_id, lang,
         send_whatsapp_text(phone, msg, bot_id)
         return
 
-    # v80: استرجاع الأسعار الناقصة قبل الإرسال.
+    _region_lens_titles = [(m.get("title") or product).strip() for m in selected]
+    _translate_future = UI_POOL.submit(translate_ui_titles, _region_lens_titles, lang) if lang != "en" else None
+
+    # Bounded price recovery; translation runs in parallel.
     selected = _recover_missing_prices(selected, visual_identity or product, lang)
     selected = _refresh_live_prices(selected)
     selected = _drop_unpriced_if_enough(selected)
 
-    display_titles = translate_ui_titles(
-        [(m.get("title") or product).strip() for m in selected], lang
-    )
+    if _translate_future is not None:
+        try:
+            display_titles = _translate_future.result(timeout=UI_TRANSLATE_TIMEOUT)
+        except Exception as e:
+            print(f"REGION LENS UI TRANSLATE DEADLINE: {e}")
+            display_titles = _region_lens_titles
+    else:
+        display_titles = _region_lens_titles
 
     sent = 0
     for m, shown_title in zip(selected, display_titles):
@@ -6500,11 +6648,17 @@ def run_region_search(phone, product, region_key, bot_id, lang="ar", origin="tex
         for cc in countries
     }
     gathered = []
-    for future, cc in futures.items():
+    done, pending = wait(list(futures), timeout=REGION_SEARCH_TOTAL_TIMEOUT)
+    for future in done:
+        cc = futures[future]
         try:
-            gathered.extend(future.result(timeout=100) or [])
+            gathered.extend(future.result() or [])
         except Exception as e:
             print(f"REGION FUTURE ERR cc={cc}: {e}")
+    for future in pending:
+        future.cancel()
+    if pending:
+        print(f"REGION SEARCH DEADLINE: using {len(done)}/{len(futures)} completed countries")
 
     # توزيع متوازن قدر الإمكان بين الدول المختارة مع نتيجة واحدة لكل دومين.
     # Round-robin يمنع دولة واحدة من ابتلاع كل النتائج عندما تتوفر نتائج كثيرة فيها.
@@ -6549,15 +6703,22 @@ def run_region_search(phone, product, region_key, bot_id, lang="ar", origin="tex
         # Keep the choice available so the user can try another group.
         return
 
-    # v80: استرجاع الأسعار الناقصة قبل الإرسال.
+    _region_titles = [_text_offer_price_and_title(i["title"])[0] or product for i in selected]
+    _translate_future = UI_POOL.submit(translate_ui_titles, _region_titles, lang) if lang != "en" else None
+
+    # Bounded price recovery; translation runs in parallel.
     selected = _recover_missing_prices(selected, product, lang)
     selected = _refresh_live_prices(selected)
     selected = _drop_unpriced_if_enough(selected)
 
-    display_titles = translate_ui_titles(
-        [_text_offer_price_and_title(i["title"])[0] or product for i in selected],
-        lang,
-    )
+    if _translate_future is not None:
+        try:
+            display_titles = _translate_future.result(timeout=UI_TRANSLATE_TIMEOUT)
+        except Exception as e:
+            print(f"REGION UI TRANSLATE DEADLINE: {e}")
+            display_titles = _region_titles
+    else:
+        display_titles = _region_titles
     sent = 0
     for item, display_title in zip(selected, display_titles):
         cc = item["country_code"]
@@ -6951,14 +7112,14 @@ def legacy_v26_call_gemini(parts, system=LEGACY_TEXT_SEARCH_SYSTEM, max_results=
     payload = {
         "systemInstruction": {"parts": [{"text": system + text77_market_instruction()}]},
         "contents": [{"role": "user", "parts": parts}],
-        "generationConfig": {"temperature": 0, "maxOutputTokens": 2000},
+        "generationConfig": {"temperature": 0, "maxOutputTokens": 1300},
         "tools": [{"google_search": {}}],
     }
     try:
         with GEMINI_STATS_LOCK:
             GEMINI_STATS["search_calls"] += 1
             print(f"LEGACY V26 CALL model={model} totals={GEMINI_STATS}")
-        r = requests.post(gemini_url, params={"key": GEMINI_API_KEY}, json=payload, timeout=90)
+        r = requests.post(gemini_url, params={"key": GEMINI_API_KEY}, json=payload, timeout=45)
         if r.status_code >= 400:
             print(f"LEGACY V26 Gemini HTTP {r.status_code}: {r.text[:500]}")
             return "", {}
@@ -6987,9 +7148,9 @@ def legacy_v26_call_gemini(parts, system=LEGACY_TEXT_SEARCH_SYSTEM, max_results=
         metadata=cand.get("groundingMetadata",{}) or {}
         chunks=metadata.get("groundingChunks",[]) or []
         uris=[(c.get("web") or {}).get("uri","") for c in chunks]
-        finals=resolve_all(uris[:30]) if uris else []
+        finals=resolve_all(uris[:GROUNDING_RESOLVE_MAX]) if uris else []
         records=[]
-        for i,chunk in enumerate(chunks[:30]):
+        for i,chunk in enumerate(chunks[:GROUNDING_RESOLVE_MAX]):
             web=chunk.get("web") or {}
             raw_uri=web.get("uri","")
             final_uri=finals[i] if i < len(finals) else raw_uri
@@ -7050,7 +7211,32 @@ def legacy_v26_best_of_search(parts, max_results=None, merge_offers=False, merge
                                      legacy_v26_call_gemini, parts,
                                      LEGACY_TEXT_SEARCH_SYSTEM, limit)
               for _ in range(SEARCH_RUNS)]
-        results=[f.result(timeout=120) for f in futs]
+        pending = set(futs)
+        results=[]
+        _deadline = time.time() + SEARCH_TOURNAMENT_TIMEOUT
+        _early = False
+        while pending and time.time() < _deadline:
+            done, pending = wait(pending, timeout=max(0.1, _deadline - time.time()), return_when=FIRST_COMPLETED)
+            if not done:
+                break
+            for f in done:
+                try:
+                    r = f.result()
+                    results.append(r)
+                    if FAST_MODE and r and r[0]:
+                        _offers = text77_extract_store_offers(r[0], limit=limit)
+                        if len(_offers) >= min(limit, 4) and len(r[1] or {}) >= min(limit, 3):
+                            _early = True
+                except Exception as e:
+                    print(f"LEGACY V26 RUN ERR: {e}")
+            if _early:
+                break
+        for f in pending:
+            f.cancel()
+        if _early:
+            print(f"LEGACY V26 TOURNAMENT EARLY WIN: {len(results)}/{len(futs)} runs were enough")
+        elif pending:
+            print(f"LEGACY V26 TOURNAMENT DEADLINE: using {len(results)}/{len(futs)} completed runs")
     except Exception as e:
         print(f"LEGACY V26 best_of_search err {e}")
         return legacy_v26_call_gemini(parts, max_results=limit)
@@ -7259,9 +7445,8 @@ def send_text_lens_style_results(from_number, txt, urls, bot_id, lang, query):
     _kept_keys = {(r.get("name") or "", r.get("line") or "") for r in _kept_rows}
     candidates = [o for o in candidates if ((o.get("source") or "", o.get("title") or "") in _kept_keys)]
 
-    # نفس حارس المخزون المستخدم في Lens: نحذف المؤكد نفاده فقط، ونبقي الحالة المجهولة.
-    candidates = _filter_confirmed_oos(candidates, "TEXT")
-
+    # Stock checks are intentionally delayed until after the small final candidate set is chosen.
+    # Opening every candidate page here was one of the largest latency sources.
     caps = {0: LENS_DIRECT_LOCAL_MAX, 1: LENS_DIRECT_US_MAX, 2: LENS_DIRECT_CN_MAX}
     selected, merchant_counts, seen_urls = [], defaultdict(int), set()
     for rank in (0, 1, 2):
@@ -7291,6 +7476,14 @@ def send_text_lens_style_results(from_number, txt, urls, bot_id, lang, query):
     if not selected:
         return False
 
+    # Check only cards that can actually be displayed. Unknown/slow stock pages remain visible.
+    selected = _filter_confirmed_oos(selected, "TEXT")
+    if not selected:
+        return False
+
+    _pre_titles = [_text_offer_price_and_title(item["title"])[0] or query for item in selected]
+    _translate_future = UI_POOL.submit(translate_ui_titles, _pre_titles, lang) if lang != "en" else None
+
     selected = _recover_missing_prices(selected, query, lang)
     selected = _refresh_live_prices(selected)
     selected = _drop_unpriced_if_enough(selected)
@@ -7301,7 +7494,16 @@ def send_text_lens_style_results(from_number, txt, urls, bot_id, lang, query):
         for item, (title, raw_price) in zip(selected, split_cache)
     ]
     display_titles = [title or query for title, _ in split_cache]
-    translated = translate_ui_titles(display_titles, lang)
+    if _translate_future is not None:
+        try:
+            translated = _translate_future.result(timeout=UI_TRANSLATE_TIMEOUT)
+            if len(translated) != len(display_titles):
+                translated = display_titles
+        except Exception as e:
+            print(f"UI TRANSLATE DEADLINE: {e}")
+            translated = display_titles
+    else:
+        translated = display_titles
     local_cc = (current_market().get("country") or DEFAULT_COUNTRY).lower()
     rank_cc = {0: local_cc, 1: "us", 2: "cn"}
     no_price = "السعر غير ظاهر" if lang == "ar" else "Price unavailable"
