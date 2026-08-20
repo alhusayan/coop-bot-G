@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v80.7-more-results-20260820"
+BUILD_ID = "v81-global-market-engine-20260820"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE/TEXT -> FLAGS + CLEAR LOCAL PRICES + LOCAL/US/CHINA")
@@ -187,6 +187,71 @@ COUNTRY_CURRENCIES = {
 }
 COUNTRY_TLDS = {"kw":[".kw"],"sa":[".sa"],"ae":[".ae"],"bh":[".bh"],"qa":[".qa"],"om":[".om"],"tr":[".tr"],"gb":[".uk"],"us":[".us"],"ca":[".ca"],"in":[".in"],"cn":[".cn"],"jp":[".jp"],"au":[".au"],"nz":[".nz"],"de":[".de"],"fr":[".fr"],"it":[".it"],"es":[".es"]}
 
+# ---- v81 Global Market Engine -------------------------------------------------
+# Static ISO metadata: generated once into the source so Railway needs no extra packages.
+GLOBAL_COUNTRY_NAMES = {'ad': 'Andorra', 'ae': 'United Arab Emirates', 'af': 'Afghanistan', 'ag': 'Antigua and Barbuda', 'ai': 'Anguilla', 'al': 'Albania', 'am': 'Armenia', 'ao': 'Angola', 'aq': 'Antarctica', 'ar': 'Argentina', 'as': 'American Samoa', 'at': 'Austria', 'au': 'Australia', 'aw': 'Aruba', 'ax': 'Åland Islands', 'az': 'Azerbaijan', 'ba': 'Bosnia and Herzegovina', 'bb': 'Barbados', 'bd': 'Bangladesh', 'be': 'Belgium', 'bf': 'Burkina Faso', 'bg': 'Bulgaria', 'bh': 'Bahrain', 'bi': 'Burundi', 'bj': 'Benin', 'bl': 'Saint Barthélemy', 'bm': 'Bermuda', 'bn': 'Brunei', 'bo': 'Bolivia', 'bq': 'Bonaire, Sint Eustatius and Saba', 'br': 'Brazil', 'bs': 'Bahamas', 'bt': 'Bhutan', 'bv': 'Bouvet Island', 'bw': 'Botswana', 'by': 'Belarus', 'bz': 'Belize', 'ca': 'Canada', 'cc': 'Cocos (Keeling) Islands', 'cd': 'Congo, The Democratic Republic of the', 'cf': 'Central African Republic', 'cg': 'Congo', 'ch': 'Switzerland', 'ci': "Côte d'Ivoire", 'ck': 'Cook Islands', 'cl': 'Chile', 'cm': 'Cameroon', 'cn': 'China', 'co': 'Colombia', 'cr': 'Costa Rica', 'cu': 'Cuba', 'cv': 'Cabo Verde', 'cw': 'Curaçao', 'cx': 'Christmas Island', 'cy': 'Cyprus', 'cz': 'Czechia', 'de': 'Germany', 'dj': 'Djibouti', 'dk': 'Denmark', 'dm': 'Dominica', 'do': 'Dominican Republic', 'dz': 'Algeria', 'ec': 'Ecuador', 'ee': 'Estonia', 'eg': 'Egypt', 'eh': 'Western Sahara', 'er': 'Eritrea', 'es': 'Spain', 'et': 'Ethiopia', 'fi': 'Finland', 'fj': 'Fiji', 'fk': 'Falkland Islands (Malvinas)', 'fm': 'Micronesia, Federated States of', 'fo': 'Faroe Islands', 'fr': 'France', 'ga': 'Gabon', 'gb': 'United Kingdom', 'gd': 'Grenada', 'ge': 'Georgia', 'gf': 'French Guiana', 'gg': 'Guernsey', 'gh': 'Ghana', 'gi': 'Gibraltar', 'gl': 'Greenland', 'gm': 'Gambia', 'gn': 'Guinea', 'gp': 'Guadeloupe', 'gq': 'Equatorial Guinea', 'gr': 'Greece', 'gs': 'South Georgia and the South Sandwich Islands', 'gt': 'Guatemala', 'gu': 'Guam', 'gw': 'Guinea-Bissau', 'gy': 'Guyana', 'hk': 'Hong Kong', 'hm': 'Heard Island and McDonald Islands', 'hn': 'Honduras', 'hr': 'Croatia', 'ht': 'Haiti', 'hu': 'Hungary', 'id': 'Indonesia', 'ie': 'Ireland', 'il': 'Israel', 'im': 'Isle of Man', 'in': 'India', 'io': 'British Indian Ocean Territory', 'iq': 'Iraq', 'ir': 'Iran, Islamic Republic of', 'is': 'Iceland', 'it': 'Italy', 'je': 'Jersey', 'jm': 'Jamaica', 'jo': 'Jordan', 'jp': 'Japan', 'ke': 'Kenya', 'kg': 'Kyrgyzstan', 'kh': 'Cambodia', 'ki': 'Kiribati', 'km': 'Comoros', 'kn': 'Saint Kitts and Nevis', 'kp': 'North Korea', 'kr': 'South Korea', 'kw': 'Kuwait', 'ky': 'Cayman Islands', 'kz': 'Kazakhstan', 'la': 'Laos', 'lb': 'Lebanon', 'lc': 'Saint Lucia', 'li': 'Liechtenstein', 'lk': 'Sri Lanka', 'lr': 'Liberia', 'ls': 'Lesotho', 'lt': 'Lithuania', 'lu': 'Luxembourg', 'lv': 'Latvia', 'ly': 'Libya', 'ma': 'Morocco', 'mc': 'Monaco', 'md': 'Moldova', 'me': 'Montenegro', 'mf': 'Saint Martin (French part)', 'mg': 'Madagascar', 'mh': 'Marshall Islands', 'mk': 'North Macedonia', 'ml': 'Mali', 'mm': 'Myanmar', 'mn': 'Mongolia', 'mo': 'Macao', 'mp': 'Northern Mariana Islands', 'mq': 'Martinique', 'mr': 'Mauritania', 'ms': 'Montserrat', 'mt': 'Malta', 'mu': 'Mauritius', 'mv': 'Maldives', 'mw': 'Malawi', 'mx': 'Mexico', 'my': 'Malaysia', 'mz': 'Mozambique', 'na': 'Namibia', 'nc': 'New Caledonia', 'ne': 'Niger', 'nf': 'Norfolk Island', 'ng': 'Nigeria', 'ni': 'Nicaragua', 'nl': 'Netherlands', 'no': 'Norway', 'np': 'Nepal', 'nr': 'Nauru', 'nu': 'Niue', 'nz': 'New Zealand', 'om': 'Oman', 'pa': 'Panama', 'pe': 'Peru', 'pf': 'French Polynesia', 'pg': 'Papua New Guinea', 'ph': 'Philippines', 'pk': 'Pakistan', 'pl': 'Poland', 'pm': 'Saint Pierre and Miquelon', 'pn': 'Pitcairn', 'pr': 'Puerto Rico', 'ps': 'Palestine', 'pt': 'Portugal', 'pw': 'Palau', 'py': 'Paraguay', 'qa': 'Qatar', 're': 'Réunion', 'ro': 'Romania', 'rs': 'Serbia', 'ru': 'Russia', 'rw': 'Rwanda', 'sa': 'Saudi Arabia', 'sb': 'Solomon Islands', 'sc': 'Seychelles', 'sd': 'Sudan', 'se': 'Sweden', 'sg': 'Singapore', 'sh': 'Saint Helena, Ascension and Tristan da Cunha', 'si': 'Slovenia', 'sj': 'Svalbard and Jan Mayen', 'sk': 'Slovakia', 'sl': 'Sierra Leone', 'sm': 'San Marino', 'sn': 'Senegal', 'so': 'Somalia', 'sr': 'Suriname', 'ss': 'South Sudan', 'st': 'Sao Tome and Principe', 'sv': 'El Salvador', 'sx': 'Sint Maarten (Dutch part)', 'sy': 'Syrian Arab Republic', 'sz': 'Eswatini', 'tc': 'Turks and Caicos Islands', 'td': 'Chad', 'tf': 'French Southern Territories', 'tg': 'Togo', 'th': 'Thailand', 'tj': 'Tajikistan', 'tk': 'Tokelau', 'tl': 'Timor-Leste', 'tm': 'Turkmenistan', 'tn': 'Tunisia', 'to': 'Tonga', 'tr': 'Turkey', 'tt': 'Trinidad and Tobago', 'tv': 'Tuvalu', 'tw': 'Taiwan', 'tz': 'Tanzania', 'ua': 'Ukraine', 'ug': 'Uganda', 'um': 'United States Minor Outlying Islands', 'us': 'United States', 'uy': 'Uruguay', 'uz': 'Uzbekistan', 'va': 'Holy See (Vatican City State)', 'vc': 'Saint Vincent and the Grenadines', 've': 'Venezuela', 'vg': 'Virgin Islands, British', 'vi': 'Virgin Islands, U.S.', 'vn': 'Vietnam', 'vu': 'Vanuatu', 'wf': 'Wallis and Futuna', 'ws': 'Samoa', 'ye': 'Yemen', 'yt': 'Mayotte', 'za': 'South Africa', 'zm': 'Zambia', 'zw': 'Zimbabwe'}
+GLOBAL_COUNTRY_CURRENCIES = {'ad': 'EUR', 'ae': 'AED', 'af': 'AFN', 'ag': 'XCD', 'ai': 'XCD', 'al': 'ALL', 'am': 'AMD', 'ao': 'AOA', 'ar': 'ARS', 'as': 'USD', 'at': 'EUR', 'au': 'AUD', 'aw': 'AWG', 'ax': 'EUR', 'az': 'AZN', 'ba': 'BAM', 'bb': 'BBD', 'bd': 'BDT', 'be': 'EUR', 'bf': 'XOF', 'bg': 'BGN', 'bh': 'BHD', 'bi': 'BIF', 'bj': 'XOF', 'bl': 'EUR', 'bm': 'BMD', 'bn': 'BND', 'bo': 'BOB', 'bq': 'USD', 'br': 'BRL', 'bs': 'BSD', 'bt': 'INR', 'bv': 'NOK', 'bw': 'BWP', 'by': 'BYN', 'bz': 'BZD', 'ca': 'CAD', 'cc': 'AUD', 'cd': 'CDF', 'cf': 'XAF', 'cg': 'XAF', 'ch': 'CHF', 'ci': 'XOF', 'ck': 'NZD', 'cl': 'CLP', 'cm': 'XAF', 'cn': 'CNY', 'co': 'COP', 'cr': 'CRC', 'cu': 'CUP', 'cv': 'CVE', 'cw': 'XCG', 'cx': 'AUD', 'cy': 'EUR', 'cz': 'CZK', 'de': 'EUR', 'dj': 'DJF', 'dk': 'DKK', 'dm': 'XCD', 'do': 'DOP', 'dz': 'DZD', 'ec': 'USD', 'ee': 'EUR', 'eg': 'EGP', 'eh': 'MAD', 'er': 'ERN', 'es': 'EUR', 'et': 'ETB', 'fi': 'EUR', 'fj': 'FJD', 'fk': 'FKP', 'fm': 'USD', 'fo': 'DKK', 'fr': 'EUR', 'ga': 'XAF', 'gb': 'GBP', 'gd': 'XCD', 'ge': 'GEL', 'gf': 'EUR', 'gg': 'GBP', 'gh': 'GHS', 'gi': 'GIP', 'gl': 'DKK', 'gm': 'GMD', 'gn': 'GNF', 'gp': 'EUR', 'gq': 'XAF', 'gr': 'EUR', 'gs': 'GBP', 'gt': 'GTQ', 'gu': 'USD', 'gw': 'XOF', 'gy': 'GYD', 'hk': 'HKD', 'hm': 'AUD', 'hn': 'HNL', 'hr': 'EUR', 'ht': 'HTG', 'hu': 'HUF', 'id': 'IDR', 'ie': 'EUR', 'il': 'ILS', 'im': 'GBP', 'in': 'INR', 'io': 'USD', 'iq': 'IQD', 'ir': 'IRR', 'is': 'ISK', 'it': 'EUR', 'je': 'GBP', 'jm': 'JMD', 'jo': 'JOD', 'jp': 'JPY', 'ke': 'KES', 'kg': 'KGS', 'kh': 'KHR', 'ki': 'AUD', 'km': 'KMF', 'kn': 'XCD', 'kp': 'KPW', 'kr': 'KRW', 'kw': 'KWD', 'ky': 'KYD', 'kz': 'KZT', 'la': 'LAK', 'lb': 'LBP', 'lc': 'XCD', 'li': 'CHF', 'lk': 'LKR', 'lr': 'LRD', 'ls': 'ZAR', 'lt': 'EUR', 'lu': 'EUR', 'lv': 'EUR', 'ly': 'LYD', 'ma': 'MAD', 'mc': 'EUR', 'md': 'MDL', 'me': 'EUR', 'mf': 'EUR', 'mg': 'MGA', 'mh': 'USD', 'mk': 'MKD', 'ml': 'XOF', 'mm': 'MMK', 'mn': 'MNT', 'mo': 'MOP', 'mp': 'USD', 'mq': 'EUR', 'mr': 'MRU', 'ms': 'XCD', 'mt': 'EUR', 'mu': 'MUR', 'mv': 'MVR', 'mw': 'MWK', 'mx': 'MXN', 'my': 'MYR', 'mz': 'MZN', 'na': 'ZAR', 'nc': 'XPF', 'ne': 'XOF', 'nf': 'AUD', 'ng': 'NGN', 'ni': 'NIO', 'nl': 'EUR', 'no': 'NOK', 'np': 'NPR', 'nr': 'AUD', 'nu': 'NZD', 'nz': 'NZD', 'om': 'OMR', 'pa': 'PAB', 'pe': 'PEN', 'pf': 'XPF', 'pg': 'PGK', 'ph': 'PHP', 'pk': 'PKR', 'pl': 'PLN', 'pm': 'EUR', 'pn': 'NZD', 'pr': 'USD', 'ps': 'ILS', 'pt': 'EUR', 'pw': 'USD', 'py': 'PYG', 'qa': 'QAR', 're': 'EUR', 'ro': 'RON', 'rs': 'RSD', 'ru': 'RUB', 'rw': 'RWF', 'sa': 'SAR', 'sb': 'SBD', 'sc': 'SCR', 'sd': 'SDG', 'se': 'SEK', 'sg': 'SGD', 'sh': 'SHP', 'si': 'EUR', 'sj': 'NOK', 'sk': 'EUR', 'sl': 'SLE', 'sm': 'EUR', 'sn': 'XOF', 'so': 'SOS', 'sr': 'SRD', 'ss': 'SSP', 'st': 'STN', 'sv': 'USD', 'sx': 'XCG', 'sy': 'SYP', 'sz': 'SZL', 'tc': 'USD', 'td': 'XAF', 'tf': 'EUR', 'tg': 'XOF', 'th': 'THB', 'tj': 'TJS', 'tk': 'NZD', 'tl': 'USD', 'tm': 'TMT', 'tn': 'TND', 'to': 'TOP', 'tr': 'TRY', 'tt': 'TTD', 'tv': 'AUD', 'tw': 'TWD', 'tz': 'TZS', 'ua': 'UAH', 'ug': 'UGX', 'um': 'USD', 'us': 'USD', 'uy': 'UYU', 'uz': 'UZS', 'va': 'EUR', 'vc': 'XCD', 've': 'VES', 'vg': 'USD', 'vi': 'USD', 'vn': 'VND', 'vu': 'VUV', 'wf': 'XPF', 'ws': 'WST', 'ye': 'YER', 'yt': 'EUR', 'za': 'ZAR', 'zm': 'ZMW', 'zw': 'USD'}
+
+# Existing hand-tuned names/currencies win; global metadata fills every remaining ISO market.
+for _cc, _name in GLOBAL_COUNTRY_NAMES.items():
+    COUNTRY_NAMES.setdefault(_cc, _name)
+for _cc, _cur in GLOBAL_COUNTRY_CURRENCIES.items():
+    COUNTRY_CURRENCIES.setdefault(_cc, _cur)
+
+# Nearly every ISO market uses .<country-code>. Keep explicit exceptions already configured.
+for _cc in GLOBAL_COUNTRY_NAMES:
+    if _cc == "gb":
+        COUNTRY_TLDS.setdefault(_cc, [".uk"])
+    else:
+        COUNTRY_TLDS.setdefault(_cc, [f".{_cc}"])
+
+SUPPORTED_LANGUAGES = {
+    "ar": {"name": "العربية", "native": "العربية", "locale": "ar"},
+    "en": {"name": "English", "native": "English", "locale": "en"},
+    "de": {"name": "German", "native": "Deutsch", "locale": "de"},
+    "fr": {"name": "French", "native": "Français", "locale": "fr"},
+    "es": {"name": "Spanish", "native": "Español", "locale": "es"},
+    "it": {"name": "Italian", "native": "Italiano", "locale": "it"},
+    "tr": {"name": "Turkish", "native": "Türkçe", "locale": "tr"},
+    "pt": {"name": "Portuguese", "native": "Português", "locale": "pt"},
+    "ja": {"name": "Japanese", "native": "日本語", "locale": "ja"},
+    "ko": {"name": "Korean", "native": "한국어", "locale": "ko"},
+    "zh": {"name": "Chinese", "native": "中文", "locale": "zh"},
+}
+
+# Default language is only a first-use suggestion; the user's chosen UI language is independent.
+COUNTRY_DEFAULT_LANGUAGE = {
+    "kw":"ar","sa":"ar","ae":"ar","bh":"ar","qa":"ar","om":"ar","iq":"ar","jo":"ar","lb":"ar","eg":"ar",
+    "ma":"ar","dz":"ar","tn":"ar","ly":"ar","sd":"ar","sy":"ar","ye":"ar","ps":"ar",
+    "de":"de","at":"de","li":"de",
+    "fr":"fr","mc":"fr",
+    "es":"es","mx":"es","ar":"es","cl":"es","co":"es","pe":"es","uy":"es","py":"es","bo":"es","ec":"es","ve":"es",
+    "it":"it","sm":"it","va":"it",
+    "tr":"tr",
+    "pt":"pt","br":"pt",
+    "jp":"ja","kr":"ko","cn":"zh","tw":"zh","hk":"zh","mo":"zh",
+}
+
+LANGUAGE_LOCALES = {
+    "ar": "ar", "en": "en", "de": "de", "fr": "fr", "es": "es", "it": "it",
+    "tr": "tr", "pt": "pt", "ja": "ja", "ko": "ko", "zh": "zh",
+}
+
+# Affiliate/Tracking configuration is data-driven.
+# Example environment value:
+# AFFILIATE_ROUTES_JSON={
+#   "amazon.com": {"us": {"network":"amazon-us","template":"https://tracker.example/?u={url_encoded}"}},
+#   "*": {"*": {"network":"default","template":"https://tracker.example/?u={url_encoded}&cc={country}"}}
+# }
+try:
+    AFFILIATE_ROUTES = json.loads(os.environ.get("AFFILIATE_ROUTES_JSON", "{}") or "{}")
+    if not isinstance(AFFILIATE_ROUTES, dict):
+        AFFILIATE_ROUTES = {}
+except Exception as _e:
+    print(f"AFFILIATE_ROUTES_JSON parse error: {_e}")
+    AFFILIATE_ROUTES = {}
+
+
 # العملات ذات الألف فلس: تُعرض دائماً بثلاث خانات عشرية (1.950 وليس 1.95).
 THREE_DECIMAL_CURRENCIES = {"KWD", "BHD", "OMR", "JOD", "TND", "LYD", "IQD"}
 # عملات بلا كسور أصلاً (الين، الوون...). نعرض الكسر فقط إذا ورد في المصدر.
@@ -354,6 +419,7 @@ def display_global_price(price_value, price_text, currency_code, lang="ar"):
     shown = str(price_text or "").strip() or f"{format_price(numeric, src)} {src}".strip()
     return shown, None
 
+
 def infer_country_from_phone(phone):
     digits = re.sub(r"\D", "", phone or "")
     for prefix in sorted(CALLING_CODE_TO_COUNTRY, key=len, reverse=True):
@@ -361,34 +427,67 @@ def infer_country_from_phone(phone):
             return CALLING_CODE_TO_COUNTRY[prefix]
     return DEFAULT_COUNTRY
 
-def ensure_market_from_phone(phone):
-    """Initialize user's country/currency from the WhatsApp calling code.
 
-    This replaces mandatory location onboarding. Exact location remains optional
-    and can still override the phone-derived country when the user shares it.
-    """
-    load_user_preferences(phone)
-    market = dict(USER_MARKET.get(phone) or {})
-    # If user has already shared a real location, never overwrite it.
-    if market.get("lat") is not None and market.get("lng") is not None:
-        return market
+def _default_language_for_country(cc):
+    return COUNTRY_DEFAULT_LANGUAGE.get((cc or "").lower(), "en")
 
-    cc = infer_country_from_phone(phone)
+
+def build_market_profile(cc, source="phone_prefix", base=None):
+    cc = (cc or DEFAULT_COUNTRY).lower()
+    market = dict(base or {})
     market["country"] = cc
     market["country_name"] = COUNTRY_NAMES.get(cc, cc.upper())
-    market["currency"] = COUNTRY_CURRENCIES.get(cc, market.get("currency") or "")
-    market["country_source"] = "phone_prefix"
+    market["currency"] = COUNTRY_CURRENCIES.get(cc, market.get("currency") or "USD")
+    market["country_source"] = source
+    lang = market.get("language") or _default_language_for_country(cc)
+    market["default_language"] = _default_language_for_country(cc)
+    market["locale"] = market.get("locale") or f"{LANGUAGE_LOCALES.get(lang, lang)}-{cc.upper()}"
+    return market
+
+
+def ensure_market_from_phone(phone):
+    """Resolve market with stable precedence: GPS > manual selection > phone prefix > saved/default."""
+    load_user_preferences(phone)
+    market = dict(USER_MARKET.get(phone) or {})
+    source = str(market.get("country_source") or "")
+
+    # 1) Explicit GPS location always wins while present.
+    if market.get("lat") is not None and market.get("lng") is not None and source in ("gps", "location"):
+        return build_market_profile(market.get("country"), source="gps", base=market)
+
+    # 2) Explicit manual market selection is sticky until the user shares a new GPS location.
+    if market.get("country") and source == "manual":
+        return build_market_profile(market.get("country"), source="manual", base=market)
+
+    # 3) Phone prefix determines the normal automatic market.
+    cc = infer_country_from_phone(phone)
+    market = build_market_profile(cc, source="phone_prefix", base=market)
     USER_MARKET[phone] = market
     save_user_preferences(phone)
     return market
 
+
 def market_for_user(from_number):
     market = dict(USER_MARKET.get(from_number) or {})
+    if not market.get("country"):
+        market = ensure_market_from_phone(from_number)
     cc = (market.get("country") or DEFAULT_COUNTRY).lower()
-    market["country"] = cc
-    market.setdefault("country_name", COUNTRY_NAMES.get(cc, cc.upper()))
-    market.setdefault("currency", COUNTRY_CURRENCIES.get(cc, ""))
+    return build_market_profile(cc, source=market.get("country_source") or "saved", base=market)
+
+
+def set_manual_market(phone, cc):
+    """Persist a manual market. A later GPS location share overrides it."""
+    load_user_preferences(phone)
+    market = dict(USER_MARKET.get(phone) or {})
+    market.pop("lat", None)
+    market.pop("lng", None)
+    market = build_market_profile(cc, source="manual", base=market)
+    USER_MARKET[phone] = market
+    USER_LOCATION_TS[phone] = 0
+    MARKET_CTX.value = market
+    save_user_preferences(phone)
     return market
+
 
 def activate_market(from_number):
     market = market_for_user(from_number)
@@ -396,8 +495,10 @@ def activate_market(from_number):
     USER_MARKET[from_number] = market
     return market
 
+
 def current_market():
-    return getattr(MARKET_CTX, "value", None) or {"country":DEFAULT_COUNTRY,"country_name":COUNTRY_NAMES.get(DEFAULT_COUNTRY,"Kuwait"),"currency":COUNTRY_CURRENCIES.get(DEFAULT_COUNTRY,"KWD")}
+    return getattr(MARKET_CTX, "value", None) or build_market_profile(DEFAULT_COUNTRY, source="default")
+
 
 def _run_with_market(market, fn, *args, **kwargs):
     """MARKET_CTX هو threading.local؛ أي عمل داخل ThreadPool يفقد سوق المستخدم بدون هذا الغلاف.
@@ -1137,18 +1238,162 @@ MSG = {
     },
 }
 
+# Core localized UI. Less-common keys automatically fall back to English.
+MSG.update({
+    "de": {
+        "identifying":"✨ Einen Moment.. ich erkenne das Produkt und suche die besten Optionen.",
+        "searching":"🔎 Ich suche nach {q}...",
+        "not_found":"Ich konnte aktuell kein passendes verfügbares Angebot mit bestätigtem Preis finden.",
+        "welcome_reply":"Hallo! 🌟 Sende ein Produktfoto oder den Namen, und ich suche Preise und Shops.",
+        "thanks_reply":"Gern! 🌹 Schick mir einfach das nächste Produkt.",
+        "compare_searching":"⚖️ Deine Anfrage ist allgemein – ich vergleiche zuerst die besten Optionen.",
+        "pick_prompt":"Wähle ein Produkt und ich suche die besten verfügbaren Preise 👇",
+        "list_button":"Produkt wählen",
+    },
+    "fr": {
+        "identifying":"✨ Un instant.. j’identifie le produit et cherche les meilleures options.",
+        "searching":"🔎 Je cherche {q}...",
+        "not_found":"Je n’ai pas trouvé d’offre correspondante disponible avec un prix confirmé.",
+        "welcome_reply":"Bonjour ! 🌟 Envoyez une photo ou le nom du produit et je chercherai les prix et boutiques.",
+        "thanks_reply":"Avec plaisir ! 🌹 Envoyez-moi le prochain produit.",
+        "compare_searching":"⚖️ Votre demande est générale – je compare d’abord les meilleures options.",
+        "pick_prompt":"Choisissez un produit et je chercherai les meilleurs prix 👇",
+        "list_button":"Choisir",
+    },
+    "es": {
+        "identifying":"✨ Un momento.. identifico el producto y busco las mejores opciones.",
+        "searching":"🔎 Buscando {q}...",
+        "not_found":"No encontré una oferta coincidente disponible con precio confirmado.",
+        "welcome_reply":"¡Hola! 🌟 Envía una foto o el nombre del producto y buscaré precios y tiendas.",
+        "thanks_reply":"¡Con gusto! 🌹 Envíame el siguiente producto.",
+        "compare_searching":"⚖️ Tu solicitud es general; primero comparo las mejores opciones.",
+        "pick_prompt":"Elige un producto y buscaré los mejores precios 👇",
+        "list_button":"Elegir",
+    },
+    "it": {
+        "identifying":"✨ Un momento.. identifico il prodotto e cerco le opzioni migliori.",
+        "searching":"🔎 Cerco {q}...",
+        "not_found":"Non ho trovato un’offerta corrispondente disponibile con prezzo confermato.",
+        "welcome_reply":"Ciao! 🌟 Invia una foto o il nome del prodotto e cercherò prezzi e negozi.",
+        "thanks_reply":"Volentieri! 🌹 Mandami il prossimo prodotto.",
+        "compare_searching":"⚖️ La richiesta è generica: confronto prima le opzioni migliori.",
+        "pick_prompt":"Scegli un prodotto e cercherò i prezzi migliori 👇",
+        "list_button":"Scegli",
+    },
+    "tr": {
+        "identifying":"✨ Bir saniye.. ürünü belirleyip en iyi seçenekleri arıyorum.",
+        "searching":"🔎 {q} aranıyor...",
+        "not_found":"Şu anda doğrulanmış fiyatlı uygun bir sonuç bulamadım.",
+        "welcome_reply":"Merhaba! 🌟 Ürün fotoğrafını veya adını gönder, fiyat ve mağaza bulayım.",
+        "thanks_reply":"Rica ederim! 🌹 Sıradaki ürünü gönder.",
+        "compare_searching":"⚖️ İstek genel; önce en iyi seçenekleri karşılaştırıyorum.",
+        "pick_prompt":"Bir ürün seç, en iyi fiyatları arayayım 👇",
+        "list_button":"Ürün seç",
+    },
+    "pt": {
+        "identifying":"✨ Um momento.. identificando o produto e buscando as melhores opções.",
+        "searching":"🔎 Buscando {q}...",
+        "not_found":"Não encontrei uma oferta correspondente disponível com preço confirmado.",
+        "welcome_reply":"Olá! 🌟 Envie uma foto ou o nome do produto e eu busco preços e lojas.",
+        "thanks_reply":"De nada! 🌹 Envie o próximo produto.",
+        "compare_searching":"⚖️ Seu pedido é geral; primeiro comparo as melhores opções.",
+        "pick_prompt":"Escolha um produto e buscarei os melhores preços 👇",
+        "list_button":"Escolher",
+    },
+    "ja": {
+        "identifying":"✨ 少々お待ちください。商品を特定して最適な選択肢を探しています。",
+        "searching":"🔎 {q} を検索しています...",
+        "not_found":"現在、価格を確認できる一致商品が見つかりませんでした。",
+        "welcome_reply":"こんにちは！🌟 商品写真または商品名を送ってください。価格とショップを探します。",
+        "thanks_reply":"どういたしまして！🌹 次の商品を送ってください。",
+        "compare_searching":"⚖️ 一般的なご依頼なので、まず最適な候補を比較します。",
+        "pick_prompt":"商品を選ぶと、最適な価格を検索します 👇",
+        "list_button":"商品を選択",
+    },
+    "ko": {
+        "identifying":"✨ 잠시만요.. 상품을 확인하고 최적의 옵션을 찾고 있습니다.",
+        "searching":"🔎 {q} 검색 중...",
+        "not_found":"현재 확인된 가격이 있는 일치 상품을 찾지 못했습니다.",
+        "welcome_reply":"안녕하세요! 🌟 상품 사진이나 이름을 보내주시면 가격과 매장을 찾아드립니다.",
+        "thanks_reply":"천만에요! 🌹 다음 상품을 보내주세요.",
+        "compare_searching":"⚖️ 일반 요청이라 먼저 가장 좋은 옵션을 비교합니다.",
+        "pick_prompt":"상품을 선택하면 최적의 가격을 찾아드립니다 👇",
+        "list_button":"상품 선택",
+    },
+    "zh": {
+        "identifying":"✨ 稍等，我正在识别商品并寻找最佳选择。",
+        "searching":"🔎 正在搜索 {q}...",
+        "not_found":"目前没有找到带有已确认价格的匹配在售商品。",
+        "welcome_reply":"你好！🌟 发送商品照片或名称，我会帮你查找价格和商店。",
+        "thanks_reply":"不客气！🌹 发下一个商品给我即可。",
+        "compare_searching":"⚖️ 你的需求比较宽泛，我先比较最佳选项。",
+        "pick_prompt":"选择一个商品，我会查找最佳价格 👇",
+        "list_button":"选择商品",
+    },
+})
+
+
 LANG_INSTR = {
     "ar": "رد باللغة العربية فقط حتى لو كان اسم البحث بالإنجليزية: اكتب سطر 📦 ووصف المنتج بالعربية، مع إبقاء اسم البراند والموديل اللاتيني كما هو (مثل: كرة سلة Spalding NBA). أسماء المتاجر تُكتب بأشهر صيغة متداولة لها.",
     "en": "Respond ONLY in English. Keep the exact same response format and emojis, but translate all labels to English — including writing (Phone: NUMBER) instead of (هاتف: رقم). Keep prices in the user's local currency.",
 }
 
 def T(lang, key, **kw):
-    return MSG.get(lang, MSG["ar"])[key].format(**kw) if kw else MSG.get(lang, MSG["ar"])[key]
+    # Localized keys override English; missing keys safely fall back to English then Arabic.
+    table = MSG.get(lang) or {}
+    value = table.get(key)
+    if value is None:
+        value = MSG.get("en", {}).get(key, MSG.get("ar", {}).get(key, key))
+    return value.format(**kw) if kw else value
+
+
+def _language_name(lang):
+    return (SUPPORTED_LANGUAGES.get(lang) or SUPPORTED_LANGUAGES["en"])["name"]
+
+
+def _language_instruction(lang, typed=False):
+    lang = lang if lang in SUPPORTED_LANGUAGES else "en"
+    name = _language_name(lang)
+    if typed:
+        return (
+            f"Respond in {name} for all UI/product-description text. "
+            "Never translate brand names, model numbers, merchant names, SKU codes, prices, or currency codes. "
+            "Preserve foreign-store prices in the exact source currency; only local-store prices use the user's local market currency. "
+            "Every store result must include a numeric price plus its original currency when available."
+        )
+    return (
+        f"Respond ONLY in {name}. Keep brand names, model numbers, store names, SKU codes and currency codes unchanged. "
+        "Use the user's market currency for local-store results."
+    )
+
 
 def detect_lang(text):
-    if re.search(r"[\u0600-\u06FF]", text or ""): return "ar"
-    if re.search(r"[A-Za-z]", text or ""): return "en"
-    return None
+    """Fast local language detection. Conservative for ambiguous Latin text."""
+    s = str(text or "").strip()
+    low = f" {s.lower()} "
+    if not s:
+        return None
+    if re.search(r"[\u0600-\u06FF]", s): return "ar"
+    if re.search(r"[\u3040-\u30ff]", s): return "ja"
+    if re.search(r"[\uac00-\ud7af]", s): return "ko"
+    if re.search(r"[\u4e00-\u9fff]", s): return "zh"
+    if re.search(r"[ğüşöçıİ]", s, re.I): return "tr"
+    if re.search(r"[äöüß]", s, re.I): return "de"
+    if re.search(r"[ãõç]", s, re.I): return "pt"
+
+    # Stopword scoring for Latin-script languages.
+    signals = {
+        "fr": (" le "," la "," les "," des "," une "," pour "," avec "," meilleur "," prix "),
+        "es": (" el "," la "," los "," una "," para "," con "," mejor "," precio "," comprar "),
+        "it": (" il "," lo "," gli "," una "," per "," con "," migliore "," prezzo "," comprare "),
+        "pt": (" os "," as "," uma "," para "," com "," melhor "," preço "," comprar "),
+        "de": (" der "," die "," das "," ein "," eine "," für "," mit "," beste "," preis "," kaufen "),
+        "tr": (" bir "," için "," ile "," en iyi "," fiyat "," satın "),
+        "en": (" the "," a "," an "," for "," with "," best "," price "," buy "," find "),
+    }
+    scores = {k: sum(1 for w in words if w in low) for k, words in signals.items()}
+    best = max(scores, key=scores.get)
+    return best if scores[best] >= 1 else ("en" if re.search(r"[A-Za-z]", s) else None)
 
 SYSTEM_PROMPT = """
 أنت مساعد تسوق عالمي يعتمد موقع المستخدم الحالي. استخدم بحث Google فعلياً للأسعار الحالية، ورتب الأسواق دائماً: بلد المستخدم أولاً، ثم الولايات المتحدة، ثم الصين فقط.
@@ -2436,7 +2681,7 @@ def best_of_search(parts, lang="ar"):
 
 def bilingual_search_instruction(query, lang):
     """بحث ثنائي اللغة مع ترتيب السوق الثابت: محلي ثم أمريكا ثم الصين فقط."""
-    response_rule = LANG_INSTR[lang]
+    response_rule = _language_instruction(lang, typed=False)
     market_name = current_market().get('country_name', 'Kuwait')
     return (
         f"ابحث عن المنتج باستخدام العربية والإنجليزية معاً: {query}. "
@@ -3225,7 +3470,7 @@ def _new_layer_search(query, lang, prompt_text=None, source_image_b64=None, sour
             "وداخل كل سوق فقط رتب من الأرخص إلى الأغلى. كل نتيجة يجب أن تحتوي سعراً رقمياً ورابط صفحة المنتج المباشرة داخل المتجر. "
             "ممنوع روابط Google وصفحات البحث والتصنيف، وممنوع أي متجر من دولة غير هذه الأسواق الثلاثة. "
             "لا تكتب متوفر أو InStock بدلاً من السعر. اكتب السعر بالفلوس كاملة مثل 1.950 وليس 1.95. "
-            f"{LANG_INSTR[lang]}"
+            f"{_language_instruction(lang, typed=False)}"
         )
 
         txt, urls = call_gemini([{"text": current_prompt}])
@@ -3399,19 +3644,19 @@ def _old_layer_search(query, lang, prompt_text=None, lens_context=None, allow_gl
     if allow_global:
         base_prompt = (
             f"ابحث عن {search_name} في الولايات المتحدة ثم الصين فقط. استبعد بلد المستخدم {market_name} واستبعد كل الدول الأخرى. "
-            f"سعر رقمي واضح ورابط صفحة المنتج المباشر مع العملة الأصلية. {LANG_INSTR[lang]}"
+            f"سعر رقمي واضح ورابط صفحة المنتج المباشر مع العملة الأصلية. {_language_instruction(lang, typed=False)}"
         )
         variants = [
             base_prompt,
-            f"{search_name} United States buy online exact product direct page price USD {LANG_INSTR[lang]}",
-            f"{search_name} China buy online exact product direct page price CNY RMB AliExpress Alibaba 1688 Taobao SHEIN JD {LANG_INSTR[lang]}",
+            f"{search_name} United States buy online exact product direct page price USD {_language_instruction(lang, typed=False)}",
+            f"{search_name} China buy online exact product direct page price CNY RMB AliExpress Alibaba 1688 Taobao SHEIN JD {_language_instruction(lang, typed=False)}",
         ]
     else:
         # ثلاث عمليات بحث مستقلة تضمن وجود تغطية فعلية لكل سوق بدلاً من الاعتماد على ترتيب Google العام.
         variants = [
-            prompt_text or f"ابحث عن {search_name} في {market_name} فقط، أي متجر محلي يبيعه، بسعر رقمي واضح ورابط صفحة منتج مباشر. {LANG_INSTR[lang]}",
-            f"{search_name} United States buy online exact product direct product page current price USD; US stores only. {LANG_INSTR[lang]}",
-            f"{search_name} China buy online exact product direct product page current price CNY RMB; Chinese stores only such as AliExpress Alibaba 1688 Taobao SHEIN Tmall JD DHgate. {LANG_INSTR[lang]}",
+            prompt_text or f"ابحث عن {search_name} في {market_name} فقط، أي متجر محلي يبيعه، بسعر رقمي واضح ورابط صفحة منتج مباشر. {_language_instruction(lang, typed=False)}",
+            f"{search_name} United States buy online exact product direct product page current price USD; US stores only. {_language_instruction(lang, typed=False)}",
+            f"{search_name} China buy online exact product direct product page current price CNY RMB; Chinese stores only such as AliExpress Alibaba 1688 Taobao SHEIN Tmall JD DHgate. {_language_instruction(lang, typed=False)}",
         ]
     # MARKET_CTX يضيع داخل ThreadPool؛ نمرر سوق المستخدم مع كل استدعاء وإلا رجع البحث للكويت الافتراضية.
     market_snapshot = current_market()
@@ -3916,11 +4161,75 @@ def send_whatsapp_text(to,text,bot_id):
     try: return requests.post(url,json=payload,headers=h,timeout=15).ok
     except: return False
 
+
+def _affiliate_route_for(host, country):
+    """Resolve tracking config by merchant host + user's target market."""
+    host = (host or "").lower().replace("www.", "")
+    country = (country or "").lower()
+
+    candidates = []
+    if host:
+        parts = host.split(".")
+        for i in range(max(1, len(parts)-2)):
+            candidates.append(".".join(parts[i:]))
+        candidates.insert(0, host)
+    candidates.append("*")
+
+    for merchant_key in candidates:
+        spec = AFFILIATE_ROUTES.get(merchant_key)
+        if not isinstance(spec, dict):
+            continue
+        route = spec.get(country) or spec.get("*")
+        if route:
+            return route
+    return None
+
+
+def apply_affiliate_tracking(raw_url, phone):
+    """Geo-targeted tracking layer. No config = original direct URL, zero behavior change."""
+    url = str(raw_url or "").strip()
+    if not url.startswith(("http://", "https://")) or not AFFILIATE_ROUTES:
+        return url
+    try:
+        host = urllib.parse.urlparse(url).netloc.lower().split(":")[0].replace("www.", "")
+        market = market_for_user(phone)
+        cc = (market.get("country") or DEFAULT_COUNTRY).lower()
+        route = _affiliate_route_for(host, cc)
+        if not route:
+            return url
+
+        if isinstance(route, str):
+            template = route
+            network = ""
+        elif isinstance(route, dict):
+            template = str(route.get("template") or "")
+            network = str(route.get("network") or "")
+        else:
+            return url
+        if not template:
+            return url
+
+        tracked = template.format(
+            url=url,
+            url_encoded=urllib.parse.quote_plus(url),
+            country=cc,
+            merchant=host,
+        )
+        if tracked.startswith(("http://", "https://")):
+            if network:
+                print(f"AFFILIATE ROUTE network={network} market={cc} merchant={host}")
+            return tracked
+    except Exception as e:
+        print(f"AFFILIATE ROUTE ERR: {e}")
+    return url
+
+
 def send_whatsapp_cta(to,body,link,bot_id,title):
     url=f"{GRAPH_URL}/{bot_id}/messages"; h={"Authorization":f"Bearer {WHATSAPP_TOKEN}","Content-Type":"application/json"}
     safe_body = _remove_ui_autolinks(body)
     safe_title = _remove_ui_autolinks(title)
-    payload={"messaging_product":"whatsapp","to":to,"type":"interactive","interactive":{"type":"cta_url","body":{"text":safe_body[:1024]},"action":{"name":"cta_url","parameters":{"display_text":safe_title[:20],"url":link}}}}
+    tracked_link = apply_affiliate_tracking(link, to)
+    payload={"messaging_product":"whatsapp","to":to,"type":"interactive","interactive":{"type":"cta_url","body":{"text":safe_body[:1024]},"action":{"name":"cta_url","parameters":{"display_text":safe_title[:20],"url":tracked_link}}}}
     try: return requests.post(url,json=payload,headers=h,timeout=15).ok
     except: return False
 
@@ -3932,8 +4241,21 @@ def send_whatsapp_buttons(to, body, buttons, bot_id):
     except: return False
 
 def send_language_choice(to, bot_id):
-    body = "🌐 اختر لغتك المفضلة\nChoose your preferred language"
-    send_whatsapp_buttons(to, body, [{"id": "lang_ar", "title": "العربية 🇰🇼"},{"id": "lang_en", "title": "English 🇬🇧"}], bot_id)
+    body = "🌐 Choose your language / اختر اللغة"
+    rows = [
+        {"id":"lang_ar","title":"العربية","description":"Arabic"},
+        {"id":"lang_en","title":"English","description":"English"},
+        {"id":"lang_de","title":"Deutsch","description":"German"},
+        {"id":"lang_fr","title":"Français","description":"French"},
+        {"id":"lang_es","title":"Español","description":"Spanish"},
+        {"id":"lang_it","title":"Italiano","description":"Italian"},
+        {"id":"lang_tr","title":"Türkçe","description":"Turkish"},
+        {"id":"lang_pt","title":"Português","description":"Portuguese"},
+        {"id":"lang_ja","title":"日本語","description":"Japanese"},
+        {"id":"lang_ko","title":"한국어","description":"Korean"},
+        {"id":"lang_zh","title":"中文","description":"Chinese"},
+    ]
+    send_whatsapp_list(to, body, rows, bot_id, "Language")
 
 def send_location_request(to, bot_id, lang="ar", refresh=False):
     if lang == "en":
@@ -4076,9 +4398,9 @@ def run_similar_search(phone, item):
         (f"المنتج التالي غير متوفر محلياً: {base}" + (f" ({base_en})" if base_en and base_en != base else "") + f". اقترح حتى {MAX_STORES} بدائل مشابهة له فعلياً — نفس الفئة "
          f"ونفس الاستخدام ومستوى جودة قريب — متوفرة الآن في متاجر {market_name} فقط، من أي متجر محلي كان. "
          "لكل بديل: اسم البديل الفعلي (وليس اسم المنتج الأصلي)، سعر رقمي واضح بعملة السوق، "
-         f"ورابط صفحة المنتج المباشرة داخل المتجر. رتب من الأرخص إلى الأغلى واكتب السعر بالفلوس كاملة مثل 1.950. {LANG_INSTR[lang]}"),
+         f"ورابط صفحة المنتج المباشرة داخل المتجر. رتب من الأرخص إلى الأغلى واكتب السعر بالفلوس كاملة مثل 1.950. {_language_instruction(lang, typed=False)}"),
         (f"{MAX_STORES} best in-stock alternatives similar to {base_en or base} in {market_name} local online stores, "
-         f"each with the alternative's own name, a numeric price, and a direct product page link, sorted cheapest first. {LANG_INSTR[lang]}"),
+         f"each with the alternative's own name, a numeric price, and a direct product page link, sorted cheapest first. {_language_instruction(lang, typed=False)}"),
     ]
     for prompt in prompts:
         txt, urls = call_gemini([{"text": prompt}])
@@ -4246,7 +4568,7 @@ def legacy_text_product_search_more(product, lang, seen_domains):
         "في أمريكا أعط أولوية للنتائج المطابقة من Amazon ثم eBay ثم Walmart إذا لم تكن ظهرت سابقاً، ثم باقي المتاجر الأمريكية. "
         "في الصين أعط أولوية للنتائج المطابقة من AliExpress ثم Temu ثم Alibaba ثم SHEIN إذا لم تكن ظهرت سابقاً، ثم باقي المتاجر الصينية. "
         "لا تعرض أي دولة أخرى. ابحث عن متاجر مختلفة عن الدفعة السابقة، وكل نتيجة يجب أن تكون نفس المنتج، بسعر ورابط صفحة منتج مباشر. "
-        f"{TEXT77_LANG_INSTR[lang]}"
+        f"{TEXT77__language_instruction(lang, typed=False)}"
     )
     return legacy_v26_best_of_search([{"text": prompt}], total_cap, True, product)
 
@@ -4487,11 +4809,17 @@ def process_interactive_message(message, bot_id):
         PENDING_GLOBAL_SEARCH.pop(from_number, None)
         send_whatsapp_text(from_number, T(USER_LANG.get(from_number, "ar"), "declined_ok"), bot_id)
         return
-    if btn_id not in ("lang_ar","lang_en"):
+    if not btn_id.startswith("lang_"):
         return
-    lang = "ar" if btn_id=="lang_ar" else "en"
-    USER_LANG[from_number]=lang
+    lang = btn_id[5:].lower()
+    if lang not in SUPPORTED_LANGUAGES:
+        return
+    USER_LANG[from_number] = lang
     ensure_market_from_phone(from_number)
+    market = USER_MARKET.get(from_number) or {}
+    market["language"] = lang
+    market["locale"] = f"{LANGUAGE_LOCALES.get(lang, lang)}-{str(market.get('country') or DEFAULT_COUNTRY).upper()}"
+    USER_MARKET[from_number] = market
     save_user_preferences(from_number)
     route_pending_after_location(from_number)
 
@@ -5548,7 +5876,7 @@ def process_single_image(message,bot_id,lang="ar"):
             f"هوية المنتج المعتمدة: {combined_name}\n"
             f"طلب المستخدم: {caption}\n"
             "ابحث عن نفس المنتج فقط. لا توسع البحث إلى منتج يشاركه المكون أو اللون أو الفئة. "
-            f"{LANG_INSTR[lang]}"
+            f"{_language_instruction(lang, typed=False)}"
         )
         txt,urls=search_product(request_query, lang, prompt_text=prompt_text, lens_context=active_lens)
         query = request_query
@@ -5838,7 +6166,7 @@ def text77_call_gemini(parts, system=TEXT77_SYSTEM_PROMPT, use_search=True):
         return "", {}
 
 def text77_bilingual_search_instruction(query, lang):
-    response_rule = TEXT77_LANG_INSTR[lang]
+    response_rule = TEXT77__language_instruction(lang, typed=False)
     market_name = current_market().get('country_name', 'Kuwait')
     return (
         f"ابحث عن المنتج التالي في {market_name} باستخدام العربية والإنجليزية معاً: {query}. "
@@ -7098,7 +7426,7 @@ def cart_item_search(product, lang):
     market_name = current_market().get("country_name", "Kuwait")
     txt, urls = text77_call_gemini([{"text": (
         f"ابحث عن {product} في أي متجر محلي في {market_name} يبيعه بسعر رقمي واضح "
-        f"ورابط صفحة منتج مباشر. حتى {MAX_STORES} متاجر من الأرخص للأغلى. {TEXT77_LANG_INSTR[lang]}"
+        f"ورابط صفحة منتج مباشر. حتى {MAX_STORES} متاجر من الأرخص للأغلى. {TEXT77__language_instruction(lang, typed=False)}"
     )}])
     urls = direct_urls_only(urls)
     if txt and text77_extract_store_offers(txt) and not is_no_result_answer(txt):
@@ -7583,7 +7911,7 @@ def legacy_text_product_search(product, lang):
             "بالنسبة للصين افحص أولاً ضمن البحث الطبيعي AliExpress وTemu وAlibaba وSHEIN، وإذا وجدت نتائج مطابقة فرتبها بهذا التسلسل قبل بقية المتاجر الصينية. لا تستبدلها بمتاجر أقل أهمية لمجرد أن نتيجتها ظهرت أسرع. "
             "لا تعرض أي دولة رابعة. لا تجعل الأعداد حصصاً إلزامية؛ اعرض الموجود المطابق فقط. "
             "لكل نتيجة اذكر اسم المتجر، اسم المنتج المطابق، السعر الرقمي والعملة، واربطه بصفحة المنتج المباشرة. "
-            f"{TEXT77_LANG_INSTR[lang]}"
+            f"{TEXT77__language_instruction(lang, typed=False)}"
         )
         # بحث أمريكي واحد طبيعي؛ لا توجد تمريرات منفصلة لمتاجر بعينها.
         # أولوية Amazon ثم eBay ثم Walmart تُطبّق فقط عند ترتيب النتائج التي ظهرت فعلاً.
@@ -7622,7 +7950,7 @@ def execute_service_search(from_number, service_desc, original_text, bot_id, lan
         f"هذا طلب خدمة وليس منتجاً: {service_desc}. "
         f"طبق الحالة 3 بالضبط: ابحث في Google وأعطني 5 مزودي خدمة على الأقل في {market_name} "
         "مع أرقام هواتفهم الظاهرة فعلاً في نتائج البحث، مرتبين من الأعلى تقييماً. "
-        f"{TEXT77_LANG_INSTR[lang]}"
+        f"{TEXT77__language_instruction(lang, typed=False)}"
     )
     txt, urls = "", {}
     try:
@@ -8110,7 +8438,7 @@ def run_brand_comparison(from_number, query, bot_id, lang):
     prompt = (
         f"الطلب العام: {query}" + (f" ({en})" if en and en != query else "") +
         f". قارن أفضل الخيارات المتوفرة الآن في {current_market().get('country_name', 'Kuwait')}. "
-        f"{TEXT77_LANG_INSTR[lang]}"
+        f"{TEXT77__language_instruction(lang, typed=False)}"
     )
     txt = ""
     options = []
@@ -8206,8 +8534,8 @@ def run_text_global_search(phone, item):
     market_name = current_market().get("country_name", "Kuwait")
     prompts = [
         f"ابحث عالمياً عن {query} في متاجر خارج {market_name} فقط. استبعد المتاجر داخل {market_name}. "
-        f"ابحث في Amazon.com وeBay وAliExpress وTemu وSHEIN وWalmart وغيرها. اعرض حتى {MAX_STORES} نتائج مختلفة بسعر رقمي ورابط منتج مباشر والعملة. {TEXT77_LANG_INSTR[lang]}",
-        f"Search worldwide for {english_search_name(query) or query} outside {market_name}. Find up to {MAX_STORES} trusted international store results with numeric price, currency, and direct product page. {TEXT77_LANG_INSTR[lang]}",
+        f"ابحث في Amazon.com وeBay وAliExpress وTemu وSHEIN وWalmart وغيرها. اعرض حتى {MAX_STORES} نتائج مختلفة بسعر رقمي ورابط منتج مباشر والعملة. {TEXT77__language_instruction(lang, typed=False)}",
+        f"Search worldwide for {english_search_name(query) or query} outside {market_name}. Find up to {MAX_STORES} trusted international store results with numeric price, currency, and direct product page. {TEXT77__language_instruction(lang, typed=False)}",
     ]
     txt, urls = "", {}
     for prompt in prompts:
@@ -8231,7 +8559,7 @@ def run_text_similar_search(phone, item):
         f"المنتج التالي غير متوفر محلياً: {base}. " + (f"الاسم الآخر: {base_other}. " if base_other else "") +
         f"ابحث بعمق في Google عن حتى {MAX_STORES} بدائل حقيقية مختلفة من نفس الفئة والاستخدام ومتوفرة الآن في متاجر {market_name} المحلية فقط. "
         "لكل نتيجة: اسم المتجر فقط — اسم البديل الفعلي — السعر الرقمي. اربط كل متجر بصفحة المنتج المباشرة. رتب الأرخص أولاً. "
-        f"{TEXT77_LANG_INSTR[lang]}"
+        f"{TEXT77__language_instruction(lang, typed=False)}"
     )
     txt, urls = legacy_v26_best_of_search([{"text": prompt}], max_results=MAX_STORES, merge_offers=True,
                                           merge_title=f"📦 بدائل مشابهة: {base}")
@@ -8345,6 +8673,42 @@ def parse_user_intent(user_text, lang):
         return {"intent": "search", "products": [cleaned]}
     return {"intent": "greeting" if not compact.strip() or any(g in compact for g in ("سلام", "هلا", "مرحبا")) else "chat", "products": []}
 
+
+COUNTRY_INPUT_ALIASES = {
+    "uk":"gb","united kingdom":"gb","britain":"gb","great britain":"gb","بريطانيا":"gb",
+    "usa":"us","united states":"us","america":"us","أمريكا":"us","امريكا":"us",
+    "uae":"ae","emirates":"ae","الإمارات":"ae","الامارات":"ae",
+    "saudi":"sa","saudi arabia":"sa","السعودية":"sa",
+    "kuwait":"kw","الكويت":"kw","qatar":"qa","قطر":"qa","bahrain":"bh","البحرين":"bh",
+    "oman":"om","عمان":"om","germany":"de","deutschland":"de","ألمانيا":"de","المانيا":"de",
+    "france":"fr","فرنسا":"fr","spain":"es","españa":"es","إسبانيا":"es","اسبانيا":"es",
+    "italy":"it","italia":"it","إيطاليا":"it","ايطاليا":"it","turkey":"tr","türkiye":"tr","تركيا":"tr",
+    "japan":"jp","اليابان":"jp","china":"cn","الصين":"cn","korea":"kr","south korea":"kr","كوريا":"kr",
+    "brazil":"br","البرازيل":"br","canada":"ca","كندا":"ca","australia":"au","أستراليا":"au","استراليا":"au",
+}
+
+# Reverse index of all ISO English names.
+for _cc, _nm in COUNTRY_NAMES.items():
+    COUNTRY_INPUT_ALIASES.setdefault(str(_nm).lower(), _cc)
+
+
+def resolve_country_input(value):
+    raw = re.sub(r"\s+", " ", str(value or "")).strip()
+    low = raw.lower()
+    if re.fullmatch(r"[a-zA-Z]{2}", raw):
+        cc = low
+        return cc if cc in COUNTRY_NAMES else ""
+    return COUNTRY_INPUT_ALIASES.get(low, "")
+
+
+def _market_changed_message(lang, market):
+    place = market.get("country_name") or market.get("country", "").upper()
+    cur = market.get("currency") or ""
+    if lang == "ar":
+        return f"🌍 تم تغيير السوق المحلي إلى *{place}*\\n💰 العملة: *{cur}*"
+    return f"🌍 Local market changed to *{place}*\\n💰 Currency: *{cur}*"
+
+
 def process_text_message(message,bot_id,onboarding_checked=False):
     from_number = "unknown"
     try:
@@ -8358,12 +8722,45 @@ def process_text_message(message,bot_id,onboarding_checked=False):
             ensure_market_from_phone(from_number)
         activate_market(from_number)
         user_text=message["text"]["body"]
+
+        # Manual market override: "market Germany", "country DE", "السوق ألمانيا", "الدولة السعودية".
+        _market_cmd = re.match(r"^\s*(?:market|country|السوق|الدولة)\s*[:=\-]?\s*(.*?)\s*$", user_text, flags=re.I)
+        if _market_cmd:
+            _value = (_market_cmd.group(1) or "").strip()
+            _lang = USER_LANG.get(from_number, "ar")
+            if not _value:
+                send_whatsapp_text(
+                    from_number,
+                    ("🌍 اكتب اسم الدولة بعد كلمة السوق، مثال: السوق ألمانيا"
+                     if _lang == "ar"
+                     else "🌍 Type a country after 'market', for example: market Germany"),
+                    bot_id,
+                )
+                return
+            _cc = resolve_country_input(_value)
+            if not _cc:
+                send_whatsapp_text(
+                    from_number,
+                    ("ما قدرت أحدد الدولة. جرب اسمها بالإنجليزي أو رمز ISO مثل DE / US / GB."
+                     if _lang == "ar"
+                     else "I couldn't identify that country. Try its English name or ISO code such as DE / US / GB."),
+                    bot_id,
+                )
+                return
+            _market = set_manual_market(from_number, _cc)
+            send_whatsapp_text(from_number, _market_changed_message(_lang, _market), bot_id)
+            return
         cmd=re.sub(r"[^\w\u0600-\u06FF]","",user_text.strip().lower())
-        if cmd in ("لغة","اللغة","غيراللغة","language","lang","changelanguage"):
+        if cmd in ("لغة","اللغة","غيراللغة","language","lang","changelanguage","sprache","langue","idioma","lingua","dil"):
             send_language_choice(from_number, bot_id); return
         detected=detect_lang(user_text)
-        if detected and USER_LANG.get(from_number) != detected:
-            USER_LANG[from_number]=detected; save_user_preferences(from_number)
+        if detected and detected in SUPPORTED_LANGUAGES and USER_LANG.get(from_number) != detected:
+            USER_LANG[from_number] = detected
+            _m = USER_MARKET.get(from_number) or {}
+            _m["language"] = detected
+            _m["locale"] = f"{LANGUAGE_LOCALES.get(detected, detected)}-{str(_m.get('country') or DEFAULT_COUNTRY).upper()}"
+            USER_MARKET[from_number] = _m
+            save_user_preferences(from_number)
         lang=USER_LANG.get(from_number,"ar")
         if is_map_command(user_text):
             send_last_search_map(from_number, bot_id, lang); return
@@ -8422,7 +8819,7 @@ def process_location_message(message, bot_id):
     geo = reverse_geocode_market(lat, lng)
     market = market_for_user(from_number)
     market.update(geo)
-    market.update({"lat":lat,"lng":lng})
+    market.update({"lat":lat,"lng":lng,"country_source":"gps"})
     USER_MARKET[from_number]=market
     USER_LOCATION_TS[from_number]=time.time()
     MARKET_CTX.value=market
@@ -8435,4 +8832,4 @@ def process_location_message(message, bot_id):
     route_pending_after_location(from_number)
 
 @app.get("/")
-async def health(): return {"status":"v79 DEDUPE-STORE NO-AUTO-MAP LOCAL5-US4-CN4-SHEIN", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "location_ttl_hours":LOCATION_TTL_SECONDS//3600, "market_source_default":"phone_prefix"}
+async def health(): return {"status":"GLOBAL MARKET ENGINE LOCAL-US-CN", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "location_ttl_hours":LOCATION_TTL_SECONDS//3600, "market_source_default":"phone_prefix", "languages":list(SUPPORTED_LANGUAGES), "iso_markets":len(COUNTRY_NAMES), "affiliate_routing":bool(AFFILIATE_ROUTES)}
