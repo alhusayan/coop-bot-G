@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v80.1-live-page-price-refresh-20260820"
+BUILD_ID = "v80.2-plain-title-20260820"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE/TEXT -> FLAGS + CLEAR LOCAL PRICES + LOCAL/US/CHINA")
@@ -3775,10 +3775,9 @@ def _build_compact_card_body(flag, store, title, price_text, lang="ar"):
         lines.append(header.strip())
 
     title_lines = _single_direction_lines(_compact_ui_title(title or ""), lang, max_groups=3)
-    if title_lines:
-        lines.append(f"*{title_lines[0]}*")
-        for extra in title_lines[1:]:
-            lines.append(f"_{extra}_")
+    # v80.2: وصف المنتج (عربي/إنجليزي) بخط عادي؛ البولد للمتجر والسعر فقط.
+    for tl in title_lines:
+        lines.append(tl)
 
     price_main, price_secondary = _split_price_display(price_text or "")
     if price_main:
