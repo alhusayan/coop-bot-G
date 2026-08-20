@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v79-country-from-phone-no-location-onboarding-20260820"
+BUILD_ID = "v79-no-other-countries-prompt-20260820"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE/TEXT -> FLAGS + CLEAR LOCAL PRICES + LOCAL/US/CHINA")
@@ -4720,17 +4720,6 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption="", image_
     print(f"LENS DIRECT SENT v79: {sent} CTA; merchants={len(merchant_counts)}; per_store_cap={RESULTS_PER_STORE_MAX}; buckets={market_counts}; caps=5/4/4; order=local->us->cn")
     if market_counts[2] == 0:
         print("V77 WARNING: no Chinese-store Lens result survived filters")
-    if sent > 0 and expansion_query:
-        send_region_search_choice(
-            from_number,
-            expansion_query,
-            bot_id,
-            lang,
-            origin="lens",
-            image_b64=image_b64,
-            image_mime=image_mime,
-            visual_identity=(lens.get("visual_identity") or lens.get("relevance_target") or expansion_query),
-        )
     return sent > 0
 
 def process_single_image(message,bot_id,lang="ar"):
@@ -6043,11 +6032,6 @@ def run_region_lens_search(phone, product, region_key, bot_id, lang,
             else "✨ I couldn’t find matching results in the selected country right now."
         )
         send_whatsapp_text(phone, msg, bot_id)
-        send_region_search_choice(
-            phone, product, bot_id, lang, origin="lens",
-            image_b64=image_b64, image_mime=image_mime,
-            visual_identity=visual_identity or product,
-        )
         return
 
     display_titles = translate_ui_titles(
@@ -6071,11 +6055,6 @@ def run_region_lens_search(phone, product, region_key, bot_id, lang,
         sent += 1
 
     print(f"REGION LENS RESULTS SENT region={region_key} count={sent}")
-    send_region_search_choice(
-        phone, product, bot_id, lang, origin="lens",
-        image_b64=image_b64, image_mime=image_mime,
-        visual_identity=visual_identity or product,
-    )
 
 
 
@@ -6196,7 +6175,6 @@ def run_region_search(phone, product, region_key, bot_id, lang="ar", origin="tex
         )
         send_whatsapp_text(phone, msg, bot_id)
         # Keep the choice available so the user can try another group.
-        send_region_search_choice(phone, product, bot_id, lang, origin=origin)
         return
 
     display_titles = translate_ui_titles(
@@ -6217,7 +6195,6 @@ def run_region_search(phone, product, region_key, bot_id, lang="ar", origin="tex
 
     print(f"REGION RESULTS SENT origin={origin} region={region_key} count={sent}")
     # Allow another region choice after these results too.
-    send_region_search_choice(phone, product, bot_id, lang, origin=origin)
 
 
 def _host_of(url):
@@ -6962,7 +6939,6 @@ def send_text_lens_style_results(from_number, txt, urls, bot_id, lang, query):
 
     LAST_SEARCH[from_number] = {"product": query}
     print(f"TEXT LENS-STYLE SENT: {len(selected)} CTA; per_store_cap={RESULTS_PER_STORE_MAX}; buckets={counts}; caps=5/4/4; order=local->us->cn")
-    send_region_search_choice(from_number, query, bot_id, lang, origin="text")
     return True
 
 
