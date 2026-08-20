@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v80-prices-always-exact-fils-20260820"
+BUILD_ID = "v80.1-live-page-price-refresh-20260820"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE/TEXT -> FLAGS + CLEAR LOCAL PRICES + LOCAL/US/CHINA")
@@ -165,6 +165,8 @@ THREE_DECIMAL_CURRENCIES = {"KWD", "BHD", "OMR", "JOD", "TND", "LYD", "IQD"}
 ZERO_DECIMAL_CURRENCIES = {"JPY", "KRW", "VND", "IDR", "CLP", "ISK", "HUF"}
 # v80: إخفاء البطاقات التي بقيت بلا سعر بعد كل محاولات الاسترجاع، بشرط وجود نتائج مسعّرة كافية.
 HIDE_UNPRICED_MIN_PRICED = int(os.getenv("HIDE_UNPRICED_MIN_PRICED", "3"))
+# v80.1: تحديث كل الأسعار من صفحة المنتج الحية قبل الإرسال (سعر المتجر يغلب سعر Gemini/Lens المقرّب).
+LIVE_PRICE_REFRESH = env_bool("LIVE_PRICE_REFRESH", True)
 # v80: أقصى عدد بطاقات تُرسل لمحرك النص لاسترجاع سعرها (كل واحدة = نداء Gemini مستقل).
 PRICE_RECOVERY_TEXT_MAX = int(os.getenv("PRICE_RECOVERY_TEXT_MAX", "8"))
 # يُلحق بكل prompt يطلب أسعاراً: ممنوع التقريب.
@@ -4562,6 +4564,85 @@ def _recover_missing_prices(items, target, lang, lens=None):
     return seq
 
 
+def _page_price_for_url(url):
+    """يقرأ سعر صفحة المنتج الحية (كاش 10 دقائق). يعيد (price, currency) أو (None, "")."""
+    url = str(url or "").strip()
+    if not url.startswith(("http://", "https://")):
+        return None, ""
+    try:
+        cached = VERIFIED_PAGE_CACHE.get(url)
+        info = cached.get("data") if cached and time.time() - cached.get("ts", 0) < 600 else None
+        if not info:
+            html = fetch_html(url)
+            info = parse_product_data(html, url) if html else None
+            if info:
+                VERIFIED_PAGE_CACHE[url] = {"data": info, "ts": time.time()}
+        if info and info.get("price") and float(info["price"]) > 0:
+            return float(info["price"]), (info.get("currency") or "").upper().strip()
+    except Exception as e:
+        print(f"LIVE PRICE ERR: {url[:80]} -> {e}")
+    return None, ""
+
+
+def _refresh_one_live_price(item):
+    """v80.1: السعر المعروض في صفحة المتجر هو المرجع؛ نستبدل به سعر Gemini/Lens (غالباً مقرّب أو قديم).
+
+    قواعد الأمان: لا نستبدل إذا اختلفت العملة عن عملة البطاقة المعروفة، أو إذا كان السعر الجديد
+    أبعد من 4 أضعاف عن القديم بلا عملة مؤكدة (غالباً سعر قطعة/باقة مختلفة أو صفحة خاطئة).
+    """
+    if not isinstance(item, dict):
+        return item
+    m = dict(item)
+    url = (m.get("link") or m.get("url") or "").strip()
+    new_price, new_cur = _page_price_for_url(url)
+    if new_price is None:
+        return m
+    old_cur = (m.get("currency") or "").upper().strip()
+    if not old_cur:
+        old_cur = detect_currency_code(str(m.get("price") or ""), "") or detect_currency_code(
+            _text_offer_price_and_title(m.get("title") or "")[1], "")
+    cc = str(m.get("_lens_country") or m.get("country_code") or "").lower()
+    if not old_cur and cc:
+        old_cur = COUNTRY_CURRENCIES.get(cc, "")
+    if new_cur and old_cur and new_cur != old_cur:
+        print(f"LIVE PRICE SKIP currency {old_cur}!={new_cur}: {url[:70]}")
+        return m
+    old_val = None
+    if _lens_has_price(m):
+        old_val = float(m["price_value"]) if m.get("price_value") not in (None, "") else _parse_price_number(m.get("price"))
+    else:
+        old_val = _parse_price_number(_text_offer_price_and_title(m.get("title") or "")[1])
+    if old_val and not new_cur:
+        ratio = new_price / old_val if old_val else 0
+        if ratio > 4 or ratio < 0.25:
+            print(f"LIVE PRICE SKIP ratio {old_val}->{new_price}: {url[:70]}")
+            return m
+    cur = new_cur or old_cur
+    if old_val is not None and abs(old_val - new_price) < 1e-9:
+        return m
+    m["price_value"] = new_price
+    m["currency"] = cur
+    m["price"] = f"{format_price(new_price, cur or None)} {cur}".strip()
+    m["price_source"] = "live_page"
+    # للعناصر النصية: استبدل جزء السعر داخل title حتى يقرأه _text_offer_price_and_title.
+    t, p = _text_offer_price_and_title(m.get("title") or "")
+    if p and _parse_price_number(p) is not None:
+        m["title"] = f"{t} — {m['price']}"
+    print(f"LIVE PRICE OK: {(m.get('source') or '')[:25]} {old_val} -> {m['price']}")
+    return m
+
+
+def _refresh_live_prices(items):
+    seq = [dict(x) for x in (items or []) if isinstance(x, dict)]
+    if not seq or not LIVE_PRICE_REFRESH:
+        return seq
+    try:
+        return list(RESOLVER.map(_refresh_one_live_price, seq))
+    except Exception as e:
+        print(f"LIVE PRICE BATCH ERR: {e}")
+        return seq
+
+
 def _drop_unpriced_if_enough(items):
     """إذا توفر HIDE_UNPRICED_MIN_PRICED نتائج مسعّرة أو أكثر نخفي غير المسعّرة، وإلا نبقيها."""
     seq = list(items or [])
@@ -4972,6 +5053,7 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption="", image_
     # v80: استرجاع الأسعار الناقصة (صفحة المنتج ثم محرك النص) قبل الإرسال.
     _target = str((lens.get("relevance_target") or caption or ((lens.get("chosen") or {}).get("title")) or "")).strip()
     selected = _recover_missing_prices(selected, _target, lang, lens)
+    selected = _refresh_live_prices(selected)
     selected = _drop_unpriced_if_enough(selected)
     merchant_counts = defaultdict(int)
     for _m in selected:
@@ -6322,6 +6404,7 @@ def run_region_lens_search(phone, product, region_key, bot_id, lang,
 
     # v80: استرجاع الأسعار الناقصة قبل الإرسال.
     selected = _recover_missing_prices(selected, visual_identity or product, lang)
+    selected = _refresh_live_prices(selected)
     selected = _drop_unpriced_if_enough(selected)
 
     display_titles = translate_ui_titles(
@@ -6469,6 +6552,7 @@ def run_region_search(phone, product, region_key, bot_id, lang="ar", origin="tex
 
     # v80: استرجاع الأسعار الناقصة قبل الإرسال.
     selected = _recover_missing_prices(selected, product, lang)
+    selected = _refresh_live_prices(selected)
     selected = _drop_unpriced_if_enough(selected)
 
     display_titles = translate_ui_titles(
@@ -6481,7 +6565,7 @@ def run_region_search(phone, product, region_key, bot_id, lang="ar", origin="tex
         flag = country_flag_emoji(cc)
         store = _ui_plain_store_name(item["source"] or "", item.get("link") or "") or ("المتجر" if lang == "ar" else "Store")
         raw_title, raw_price = _text_offer_price_and_title(item["title"])
-        if _parse_price_number(raw_price) is None and _lens_has_price(item):
+        if _lens_has_price(item) and (item.get("price_source") == "live_page" or _parse_price_number(raw_price) is None):
             raw_price = str(item.get("price") or "")
         title = _compact_ui_title(display_title or raw_title or product)
         price = _region_price_display(raw_price, cc, lang)
@@ -7209,11 +7293,12 @@ def send_text_lens_style_results(from_number, txt, urls, bot_id, lang, query):
         return False
 
     selected = _recover_missing_prices(selected, query, lang)
+    selected = _refresh_live_prices(selected)
     selected = _drop_unpriced_if_enough(selected)
     split_cache = [_text_offer_price_and_title(item["title"]) for item in selected]
     # If page enrichment found a price, use it when the legacy text line had no numeric price.
     split_cache = [
-        (title, raw_price if _parse_price_number(raw_price) is not None else ((item.get("price") or "") if _lens_has_price(item) else ""))
+        (title, (item.get("price") or "") if (_lens_has_price(item) and (item.get("price_source") == "live_page" or _parse_price_number(raw_price) is None)) else raw_price)
         for item, (title, raw_price) in zip(selected, split_cache)
     ]
     display_titles = [title or query for title, _ in split_cache]
