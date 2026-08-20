@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v80.5-context-aware-recommendation-pick-20260820"
+BUILD_ID = "v80.6-clean-recommendation-menu-20260820"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE/TEXT -> FLAGS + CLEAR LOCAL PRICES + LOCAL/US/CHINA")
@@ -7827,6 +7827,53 @@ def _recommendation_pick_search_query(original_query, picked):
     return detailed
 
 
+
+def _clean_pick_label(value):
+    """Clean recommendation-menu labels for WhatsApp list rows."""
+    s = re.sub(r"\s+", " ", str(value or "")).strip()
+    s = s.strip("[](){}<>«»\"' ")
+    s = re.sub(r"^\[+|\]+$", "", s).strip()
+    return s
+
+
+def _short_pick_title(value, max_chars=24):
+    """Readable one-line title preserving brand/model."""
+    s = _clean_pick_label(value)
+    if len(s) <= max_chars:
+        return s
+    words = s.split()
+    out = []
+    for w in words:
+        candidate = " ".join(out + [w]).strip()
+        if len(candidate) > max_chars:
+            break
+        out.append(w)
+    if out:
+        return " ".join(out)
+    return s[:max_chars].rstrip(" -_/.,") 
+
+
+def _pick_description(option, original_query, lang="ar"):
+    """Useful category/use context instead of repeating the option name."""
+    q = re.sub(r"\s+", " ", str(original_query or "")).strip()
+    patterns = (
+        r"^\s*(?:ابي|أبي|اريد|أريد|ابغى|أبغى|احتاج|أحتاج)\s+",
+        r"^\s*(?:افضل|أفضل)\s+",
+        r"^\s*(?:دور لي|دوّر لي|ابحث لي|أبحث لي)\s+(?:عن\s+)?",
+        r"^\s*(?:recommend|find|show me|i want|i need|best)\s+",
+    )
+    for pat in patterns:
+        q = re.sub(pat, "", q, flags=re.I).strip()
+
+    if len(q) > 54:
+        cut = q[:55]
+        if " " in cut:
+            cut = cut.rsplit(" ", 1)[0]
+        q = cut.rstrip(" -–—،,") + "…"
+
+    return q or ("منتج مقترح" if lang == "ar" else "Recommended option")
+
+
 def run_brand_comparison(from_number, query, bot_id, lang):
     """v77.2: مقارنة براندات بدون تكرار + مسافة سطر بين المنتجات"""
     send_whatsapp_text(from_number, T(lang, "compare_searching"), bot_id)
@@ -7845,10 +7892,10 @@ def run_brand_comparison(from_number, query, bot_id, lang):
             continue
         m = re.search(r"(?im)^\s*OPTIONS\s*:\s*(.+)$", txt)
         if m:
-            options = [o.strip() for o in m.group(1).split("|") if o.strip()][:6]
+            options = [_clean_pick_label(o) for o in m.group(1).split("|") if _clean_pick_label(o)][:6]
             txt = re.sub(r"(?im)^\s*OPTIONS\s*:.*$", "", txt).strip()
         if not options:
-            options = _options_from_compare_lines(txt)
+            options = [_clean_pick_label(o) for o in _options_from_compare_lines(txt)]
             if options:
                 print(f"BRAND COMPARE: OPTIONS recovered from lines -> {options}")
         if options:
@@ -7910,12 +7957,14 @@ def run_brand_comparison(from_number, query, bot_id, lang):
     }
     # v74.10: عناوين القائمة بالعربي للمستخدم العربي (ترجمة دفعة + كاش)،
     # والاسم الأصلي يبقى في سطر الوصف — وهو المعتمد للبحث عند الاختيار.
-    title_map = arabic_titles(options) if lang == "ar" else {}
     rows = []
     for i, o in enumerate(options):
-        shown = title_map.get(o, o) if lang == "ar" else o
-        desc = o if (shown != o) else (o[24:96] if len(o) > 24 else "")
-        rows.append({"id": f"pick_{i}", "title": shown[:24], "description": desc[:72]})
+        clean_o = _clean_pick_label(o)
+        rows.append({
+            "id": f"pick_{i}",
+            "title": _short_pick_title(clean_o, 24),
+            "description": _pick_description(clean_o, query, lang)[:72],
+        })
     send_whatsapp_list(from_number, T(lang, "pick_prompt"), rows, bot_id, T(lang, "list_button"))
     print(f"BRAND COMPARE SENT: {options}")
     return True
