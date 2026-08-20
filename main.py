@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v81.1-golden-global-20260820"
+BUILD_ID = "v81.2-balanced-4-3-3-20260820"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE/TEXT -> FLAGS + CLEAR LOCAL PRICES + LOCAL/US/CHINA")
@@ -100,9 +100,9 @@ LENS_DIRECT_MAX_LINES = max(3, int(os.environ.get("LENS_DIRECT_MAX_LINES", "8"))
 # v76: الحدود القصوى مستقلة وليست حصصاً إلزامية.
 # المحلي حتى 5، الولايات المتحدة حتى 4، الصين حتى 4.
 # إذا كان سوق ما فيه نتائج أقل نعرض الموجود فقط ولا نملأ العدد إجبارياً.
-LENS_DIRECT_LOCAL_MAX = max(0, int(os.environ.get("LENS_DIRECT_LOCAL_MAX", "5")))
-LENS_DIRECT_US_MAX = max(0, int(os.environ.get("LENS_DIRECT_US_MAX", "4")))
-LENS_DIRECT_CN_MAX = max(0, int(os.environ.get("LENS_DIRECT_CN_MAX", "4")))
+LENS_DIRECT_LOCAL_MAX = max(0, int(os.environ.get("LENS_DIRECT_LOCAL_MAX", "4")))
+LENS_DIRECT_US_MAX = max(0, int(os.environ.get("LENS_DIRECT_US_MAX", "3")))
+LENS_DIRECT_CN_MAX = max(0, int(os.environ.get("LENS_DIRECT_CN_MAX", "3")))
 LENS_DIRECT_MAX_CTA = max(1, int(os.environ.get("LENS_DIRECT_MAX_CTA", str(LENS_DIRECT_LOCAL_MAX + LENS_DIRECT_US_MAX + LENS_DIRECT_CN_MAX))))
 LENS_PRIMARY_MODE = env_bool("LENS_PRIMARY_MODE", True)
 LENS_PRIMARY_EXCEPT_TEXT_HEAVY = env_bool("LENS_PRIMARY_EXCEPT_TEXT_HEAVY", True)
@@ -955,7 +955,7 @@ def has_model_token(a, b):
 def cache_key(query, lang):
     norm = re.sub(r"[^\w\u0600-\u06FF]+", "", normalize_ar(query))
     market = current_market().get("country", DEFAULT_COUNTRY)
-    return hashlib.sha256(f"v80.4|{market}|{norm}|{lang}".encode()).hexdigest()
+    return hashlib.sha256(f"v81.2|{market}|{norm}|{lang}".encode()).hexdigest()
 
 def cache_ttl_for(query, txt=""):
     q_norm = normalize_ar(query)
@@ -1792,6 +1792,61 @@ def _serpapi_lens_request(public_url, lens_type, country, auto_crop, query_hint)
         return []
 
 
+
+def _local_market_search_fallback(base_query, limit=8):
+    """Supplement Lens when the local-market pass returns no usable local stores.
+
+    Uses the same shopping source but targets the user's current market.
+    It never changes the US/China buckets and only keeps results classified LOCAL.
+    """
+    if not SERPAPI_API_KEY:
+        return []
+    q = _shopping_clean_query(base_query or "")
+    if not q:
+        return []
+    cc = (current_market().get("country") or DEFAULT_COUNTRY).lower()
+    try:
+        cards = _serpapi_shopping_request(q, cc, hl="en")
+    except Exception as e:
+        print(f"LOCAL FALLBACK REQUEST ERR cc={cc}: {e}")
+        return []
+
+    out, seen = [], set()
+    for pos, card in enumerate(cards or [], 1):
+        link = (card.get("link") or "").strip()
+        if not link:
+            continue
+        direct = _shopping_direct_url(link) or link
+        item = {
+            "title": (card.get("title") or q).strip(),
+            "link": direct,
+            "source": (card.get("source") or "").strip(),
+            "position": pos,
+            "section": "local_store_fallback",
+            "exact": False,
+            "thumbnail": (card.get("thumbnail") or "").strip(),
+            "image": (card.get("thumbnail") or "").strip(),
+            "price": str(card.get("price") or "").strip(),
+            "price_value": card.get("extracted_price"),
+            "currency": detect_currency_code(str(card.get("price") or ""), ""),
+            "in_stock": None,
+            "condition": "",
+            "_lens_country": cc,
+            "_local_fallback": True,
+        }
+        if result_market_rank(item) != 0:
+            continue
+        sig = ((item.get("title") or "").lower(), direct.lower())
+        if sig in seen:
+            continue
+        seen.add(sig)
+        out.append(item)
+        if len(out) >= limit:
+            break
+    print(f"LOCAL STORE FALLBACK: cc={cc} query={q[:70]!r} -> {len(out)} results")
+    return out
+
+
 def _china_store_search_fallback(base_query, limit=8):
     """بحث نصي احتياطي مخصص للصين عندما لا يعيد Lens أي متجر صيني.
 
@@ -1958,19 +2013,39 @@ def google_lens_lookup(image_b64, mime_type, lang="ar", query_hint="", light=Fal
         # أي دولة غير محلي/أمريكا/الصين تُحذف نهائياً.
         allowed = [m for m in merged if result_market_rank(m) != 99]
 
-        # v77: إذا Lens لم يعطِ أي متجر صيني، نشغّل بحثاً نصياً احتياطياً مستقلاً
-        # مقيّداً بمتاجر الصين. نشتق الاستعلام من أفضل عنوان بصري موجود ولا نترجمه.
-        if not any(result_market_rank(m) == 2 for m in allowed):
-            fallback_query = (query_hint or "").strip()
-            if not fallback_query and merged:
-                fallback_query = (merged[0].get("title") or "").strip()
-            cn_extra = _china_store_search_fallback(fallback_query, limit=max(LENS_DIRECT_CN_MAX * 2, 8))
+        # v81.2: protect LOCAL coverage. If Lens produced zero local stores,
+        # supplement the local bucket independently without changing US/China logic.
+        local_count = sum(1 for m in allowed if result_market_rank(m) == 0)
+        fallback_query = (query_hint or "").strip()
+        if not fallback_query and merged:
+            fallback_query = (merged[0].get("title") or "").strip()
+        if local_count == 0:
+            local_extra = _local_market_search_fallback(
+                fallback_query,
+                limit=max(LENS_DIRECT_LOCAL_MAX * 2, 6),
+            )
+            if local_extra:
+                existing = {((m.get("title") or "").lower(), (m.get("link") or "").lower()) for m in allowed}
+                for m in local_extra:
+                    sig = ((m.get("title") or "").lower(), (m.get("link") or "").lower())
+                    if sig not in existing and result_market_rank(m) == 0:
+                        allowed.append(m)
+                        existing.add(sig)
+
+        # China gets a second chance whenever its bucket is weak, not only when completely empty.
+        china_count = sum(1 for m in allowed if result_market_rank(m) == 2)
+        if china_count < min(2, LENS_DIRECT_CN_MAX):
+            cn_extra = _china_store_search_fallback(
+                fallback_query,
+                limit=max(LENS_DIRECT_CN_MAX * 3, 8),
+            )
             if cn_extra:
                 existing = {((m.get("title") or "").lower(), (m.get("link") or "").lower()) for m in allowed}
                 for m in cn_extra:
                     sig = ((m.get("title") or "").lower(), (m.get("link") or "").lower())
                     if sig not in existing and result_market_rank(m) == 2:
-                        allowed.append(m); existing.add(sig)
+                        allowed.append(m)
+                        existing.add(sig)
 
         # نفرض ترتيب الأسواق قبل جودة Lens.
         allowed.sort(key=lambda m: (
@@ -1980,7 +2055,7 @@ def google_lens_lookup(image_b64, mime_type, lang="ar", query_hint="", light=Fal
             int(m.get("position") or 999),
         ))
         # لا نسمح للنتائج المحلية/الأمريكية أن تملأ LENS_RESULT_LIMIT وتحذف الصين.
-        # نحتفظ بعدد كافٍ من كل سوق مستقلاً، ثم يطبق send_lens_direct_results سقف 5/4/4 النهائي.
+        # نحتفظ بعدد كافٍ من كل سوق مستقلاً، ثم يطبق send_lens_direct_results سقف 4/3/3 النهائي.
         keep_caps = {
             0: max(LENS_DIRECT_LOCAL_MAX * 3, LENS_DIRECT_LOCAL_MAX),
             1: max(LENS_DIRECT_US_MAX * 3, LENS_DIRECT_US_MAX),
@@ -5583,7 +5658,7 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption="", image_
                              exclude_domains=None, exclude_urls=None, more_mode=False):
     """v76: CTA-only، مختصر، بأعلام الدول، وترجمة للواجهة فقط.
 
-    الحدود القصوى مستقلة: محلي 5، أمريكا 4، الصين 4.
+    الحدود القصوى مستقلة: محلي 4، أمريكا 3، الصين 3.
     لا يوجد حد أدنى أو عدد إلزامي لأي سوق.
     """
     exclude_domains = {str(x).lower() for x in (exclude_domains or []) if x}
@@ -5752,7 +5827,7 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption="", image_
         or (caption or "").strip()
     )
     LAST_SEARCH[from_number] = {"product": (caption or expansion_query or chosen_title)}
-    print(f"LENS DIRECT SENT v79: {sent} CTA; merchants={len(merchant_counts)}; per_store_cap={RESULTS_PER_STORE_MAX}; buckets={market_counts}; caps=5/4/4; order=local->us->cn")
+    print(f"LENS DIRECT SENT v79: {sent} CTA; merchants={len(merchant_counts)}; per_store_cap={RESULTS_PER_STORE_MAX}; buckets={market_counts}; caps=4/3/3; order=local->us->cn")
     if market_counts[2] == 0:
         print("V77 WARNING: no Chinese-store Lens result survived filters")
 
@@ -6038,7 +6113,7 @@ def text77_market_instruction():
         f"\nIMPORTANT TYPED-TEXT MARKET RULE: user market is {place} (country code {m['country']}). "
         f"For PRODUCT/STORE searches return ONLY: (1) stores in {place}, then (2) United States stores, then (3) China stores. "
         "Reject stores from every other country. Do not require US/China stores to deliver locally. "
-        "Maximum results are 5 local, 4 United States, 4 China; these are caps, never quotas. "
+        "Maximum results are 4 local, 3 United States, 3 China; these are caps, never quotas. "
         f"Local prices must use {currency}. US prices MUST stay in USD. China prices MUST stay in the exact source currency (USD or CNY/RMB). NEVER convert a foreign price to {currency}; the app converts it after retrieval. "
         "The LOCAL -> US -> CHINA order is mandatory and more important than price. "
         "For SERVICES, keep providers local to the user's market only.\n"
@@ -7869,23 +7944,33 @@ def _china_store_priority(name, url):
 
 
 def _preferred_market_coverage(txt, urls):
-    """Fast quality gate used only for early-exit decisions.
+    """Quality gate for early exit.
 
-    Local coverage is intentionally ignored: this guard exists only to prevent
-    the speed optimizer from stopping before strong US/China marketplaces have
-    had a fair chance to appear.
+    A fast US-heavy answer is NOT enough. Before ending the tournament early,
+    require evidence from all three intended markets:
+      local market + preferred US marketplace + preferred China marketplace.
+    This is only an early-exit condition, not a forced quota in final results.
     """
-    offers = text77_extract_store_offers(txt or "", limit=30)
+    offers = text77_extract_store_offers(txt or "", limit=40)
+    local_hit = False
     us_hit = False
     cn_hit = False
     for offer in offers:
         name = str(offer.get("name") or "").strip()
         url = match_url(name, urls or {}) or ""
+        item = {
+            "source": name,
+            "title": str(offer.get("line") or ""),
+            "link": url,
+        }
+        rank = result_market_rank(item)
+        if rank == 0:
+            local_hit = True
         if _us_store_priority(name, url) < 99:
             us_hit = True
         if _china_store_priority(name, url) < 99:
             cn_hit = True
-        if us_hit and cn_hit:
+        if local_hit and us_hit and cn_hit:
             return True
     return False
 
@@ -7893,7 +7978,7 @@ def _preferred_market_coverage(txt, urls):
 
 def legacy_text_product_search(product, lang):
     """v77.7 typed engine, automatic LOCAL -> US -> CHINA search."""
-    cache_query = f"__TEXT80_4_USCN_QUALITY__::{product}"
+    cache_query = f"__TEXT81_2_BALANCED_433__::{product}"
     cached = cache_get(cache_query, lang)
     if cached:
         return cached
@@ -8144,7 +8229,7 @@ def send_text_lens_style_results(from_number, txt, urls, bot_id, lang, query,
         send_whatsapp_cta(from_number, body[:1000], item["link"], bot_id, _view_product_label(lang))
 
     LAST_SEARCH[from_number] = {"product": query}
-    print(f"TEXT LENS-STYLE SENT: {len(selected)} CTA; per_store_cap={RESULTS_PER_STORE_MAX}; buckets={counts}; caps=5/4/4; order=local->us->cn")
+    print(f"TEXT LENS-STYLE SENT: {len(selected)} CTA; per_store_cap={RESULTS_PER_STORE_MAX}; buckets={counts}; caps=4/3/3; order=local->us->cn")
 
     _save_more_results_state(
         from_number,
