@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v79-single-direction-bold-cards-20260819"
+BUILD_ID = "v79-context-more-no-regions-cards-20260820"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE/TEXT -> FLAGS + CLEAR LOCAL PRICES + LOCAL/US/CHINA")
@@ -36,6 +36,7 @@ PENDING_ONBOARDING = {}
 PENDING_GLOBAL_SEARCH = {}
 # نتائج البحث الحالي التي يمكن توسيعها يدوياً إلى دول أخرى بعد العرض.
 PENDING_REGION_SEARCH = {}
+PENDING_MORE_RESULTS = {}
 GLOBAL_PENDING_TTL = max(300, int(os.environ.get("GLOBAL_PENDING_TTL_SECONDS", "900")))
 LOCATION_TTL_SECONDS = max(3600, int(os.environ.get("LOCATION_TTL_HOURS", "72")) * 3600)
 MARKET_CTX = threading.local()
@@ -3517,26 +3518,19 @@ def _split_price_display(price_text):
 
 def _build_compact_card_body(flag, store, title, price_text, lang="ar"):
     lines = []
-    header = f"{flag} *{store}*" if store else (flag or "")
-    if header.strip():
+    header = f"*{flag} {store}*" if store else f"*{flag}*"
+    if header.strip("* "):
         lines.append(header.strip())
-
     title_lines = _single_direction_lines(_compact_ui_title(title or ""), lang, max_groups=3)
-    if title_lines:
-        lines.append(f"*{title_lines[0]}*")
-        for extra in title_lines[1:]:
-            lines.append(f"_{extra}_")
-
+    for tline in title_lines:
+        if tline.strip():
+            lines.append(tline.strip())
     price_main, price_secondary = _split_price_display(price_text or "")
     if price_main:
         lines.append(f"*💰 {price_main}*")
         if price_secondary:
             lines.append(f"_({price_secondary})_")
-    else:
-        lines.append(f"*💰 {'السعر غير ظاهر' if lang == 'ar' else 'Price unavailable'}*")
-
-    return "\n".join([ln for ln in lines if str(ln).strip()]).strip()
-
+    return "\n".join(lines).strip()
 
 
 def _break_numeric_autolinks(value):
@@ -3844,106 +3838,110 @@ def run_global_search(phone, item):
         return
     send_product_result(phone, txt, urls, bot_id, lang, query)
 
+def _more_result_domain(url):
+    try:
+        host = urllib.parse.urlparse(str(url or "")).netloc.lower().split(":")[0]
+        return host[4:] if host.startswith("www.") else host
+    except Exception:
+        return ""
+
+
+def _send_more_results_choice(phone, bot_id, lang="ar"):
+    body = "✨ تبي أشوف لك متاجر إضافية لنفس المنتج؟" if lang == "ar" else "✨ Want more stores for the same product?"
+    title = "🔎 ابحث أكثر" if lang == "ar" else "🔎 Search more"
+    return send_whatsapp_buttons(phone, body, [{"id":"more_results","title":title}], bot_id)
+
+
+def _save_more_results_state(phone, query, bot_id, lang, origin, shown_items, image_b64="", image_mime="", visual_identity="", reset=False):
+    prev = {} if reset else (PENDING_MORE_RESULTS.get(phone) or {})
+    seen_domains = set(prev.get("seen_domains") or [])
+    seen_urls = set(prev.get("seen_urls") or [])
+    for item in shown_items or []:
+        url = str((item or {}).get("link") or "").strip()
+        if url:
+            seen_urls.add(url)
+            dom = _more_result_domain(url)
+            if dom:
+                seen_domains.add(dom)
+    PENDING_MORE_RESULTS[phone] = {
+        "query": re.sub(r"\s+", " ", str(query or "")).strip(),
+        "bot_id": bot_id, "lang": lang, "origin": origin,
+        "image_b64": image_b64 if origin == "lens" else "",
+        "image_mime": image_mime if origin == "lens" else "",
+        "visual_identity": visual_identity if origin == "lens" else "",
+        "seen_domains": sorted(seen_domains), "seen_urls": sorted(seen_urls), "ts": time.time(),
+    }
+
+
+def _more_exclusion_instruction(seen_domains):
+    domains = [d for d in sorted(set(seen_domains or [])) if d][:18]
+    return (" استبعد هذه المواقع لأنها ظهرت سابقاً: " + ", ".join(domains) + ".") if domains else ""
+
+
+def legacy_text_product_search_more(product, lang, seen_domains):
+    market_name = current_market().get("country_name", "Kuwait")
+    total_cap = max(1, LENS_DIRECT_LOCAL_MAX + LENS_DIRECT_US_MAX + LENS_DIRECT_CN_MAX)
+    exclusion = _more_exclusion_instruction(seen_domains)
+    alt = english_search_name(product) if re.search(r"[\u0600-\u06FF]", str(product or "")) else arabic_search_name(product)
+    alt = (alt or "").strip()
+    extra_name = f" والاسم الآخر لنفس المنتج هو {alt}." if alt and alt.lower() != str(product).strip().lower() else ""
+    prompt = (
+        f"ابحث مرة أخرى بعمق عن نفس المنتج بالضبط: {product}.{extra_name} "
+        f"المستخدم شاهد نتائج سابقة ويريد متاجر إضافية جديدة فقط.{exclusion} "
+        f"نفس ترتيب البحث الأصلي: أولاً متاجر {market_name} المحلية حتى {LENS_DIRECT_LOCAL_MAX}، "
+        f"ثم الولايات المتحدة حتى {LENS_DIRECT_US_MAX}، ثم الصين حتى {LENS_DIRECT_CN_MAX}. "
+        "لا تعرض دولة رابعة. لا تكرر أي متجر أو دومين ظهر سابقاً. "
+        "كل نتيجة يجب أن تكون نفس المنتج والموديل/الحجم، بسعر رقمي ورابط صفحة منتج مباشر. "
+        f"{TEXT77_LANG_INSTR[lang]}"
+    )
+    return legacy_v26_best_of_search([{"text": prompt}], total_cap, True, product)
+
+
+def run_more_results_search(phone, item):
+    activate_market(phone)
+    bot_id = item.get("bot_id") or PHONE_NUMBER_ID
+    lang = item.get("lang") or USER_LANG.get(phone, "ar")
+    query = (item.get("query") or "").strip()
+    seen_domains = set(item.get("seen_domains") or [])
+    seen_urls = set(item.get("seen_urls") or [])
+    if not query:
+        return False
+    send_whatsapp_text(phone, "🔎 أدور لك على متاجر إضافية..." if lang == "ar" else "🔎 Looking for more stores...", bot_id)
+    if item.get("origin") == "lens" and item.get("image_b64") and item.get("image_mime"):
+        exclude_q = " ".join(f"-site:{d}" for d in list(seen_domains)[:5])
+        q_hint = re.sub(r"\s+", " ", f"{query} buy shop other retailers {exclude_q}").strip()[:120]
+        lens = google_lens_lookup(item["image_b64"], item["image_mime"], lang, q_hint, light=True)
+        if lens.get("matches") and send_lens_direct_results(phone, lens, bot_id, lang, caption=query, image_b64=item.get("image_b64") or "", image_mime=item.get("image_mime") or "", exclude_domains=seen_domains, exclude_urls=seen_urls, more_mode=True):
+            return True
+    else:
+        txt, urls = legacy_text_product_search_more(query, lang, seen_domains)
+        if txt and urls and send_text_lens_style_results(phone, txt, urls, bot_id, lang, query, exclude_domains=seen_domains, exclude_urls=seen_urls, more_mode=True):
+            return True
+    PENDING_MORE_RESULTS.pop(phone, None)
+    send_whatsapp_text(phone, "✅ هذي تقريباً كل النتائج المطابقة اللي قدرت ألقاها حالياً." if lang == "ar" else "✅ That's about all the matching store results I could find right now.", bot_id)
+    return False
+
+
 def process_interactive_message(message, bot_id):
     from_number=message["from"]
     inter=(message.get("interactive") or {})
     reply=inter.get("button_reply") or inter.get("list_reply") or {}
     btn_id=reply.get("id","")
 
-    # Optional country/region expansion after either Lens or typed-text results.
-    if btn_id == "region_gcc":
-        item = PENDING_REGION_SEARCH.get(from_number) or {}
+    if btn_id == "more_results":
+        item = PENDING_MORE_RESULTS.get(from_number) or {}
         lang_ = item.get("lang") or USER_LANG.get(from_number, "ar")
-        if item and time.time() - item.get("ts", 0) <= GLOBAL_PENDING_TTL:
-            activate_market(from_number)
-            send_gcc_country_choice(from_number, item.get("bot_id") or bot_id, lang_)
+        if item and time.time() - float(item.get("ts") or 0) <= GLOBAL_PENDING_TTL:
+            item["ts"] = time.time()
+            PENDING_MORE_RESULTS[from_number] = item
+            run_more_results_search(from_number, item)
         else:
-            PENDING_REGION_SEARCH.pop(from_number, None)
-            send_whatsapp_text(
-                from_number,
-                ("انتهت صلاحية البحث 😅 ابحث عن المنتج مرة ثانية." if lang_ == "ar"
-                 else "That search expired 😅 search for the product again."),
-                bot_id,
-            )
+            PENDING_MORE_RESULTS.pop(from_number, None)
+            send_whatsapp_text(from_number, "انتهت صلاحية البحث 😅 ابحث عن المنتج مرة ثانية." if lang_ == "ar" else "That search expired 😅 search for the product again.", bot_id)
         return
 
-    if btn_id.startswith("gcc_"):
-        item = PENDING_REGION_SEARCH.get(from_number) or {}
-        if item and time.time() - item.get("ts", 0) > GLOBAL_PENDING_TTL:
-            item = {}
-            PENDING_REGION_SEARCH.pop(from_number, None)
-        cc = btn_id[4:].lower()
-        lang_ = item.get("lang") or USER_LANG.get(from_number, "ar")
-        query_ = (item.get("query") or "").strip()
-        valid_gcc = {x[0] for x in GCC_COUNTRY_CHOICES}
-        if item and query_ and cc in valid_gcc:
-            activate_market(from_number)
-            run_single_gcc_country_search(
-                from_number,
-                query_,
-                cc,
-                item.get("bot_id") or bot_id,
-                lang_,
-                origin=item.get("origin") or "text",
-                image_b64=item.get("image_b64") or "",
-                image_mime=item.get("image_mime") or "",
-                visual_identity=item.get("visual_identity") or "",
-            )
-        else:
-            send_whatsapp_text(
-                from_number,
-                ("انتهت صلاحية البحث 😅 ابحث عن المنتج مرة ثانية." if lang_ == "ar"
-                 else "That search expired 😅 search for the product again."),
-                bot_id,
-            )
-        return
-
-    if btn_id.startswith("region_"):
-        item = PENDING_REGION_SEARCH.get(from_number) or {}
-        if item and time.time() - item.get("ts", 0) > GLOBAL_PENDING_TTL:
-            item = {}
-            PENDING_REGION_SEARCH.pop(from_number, None)
-        region_key = btn_id[7:]
-        lang_ = item.get("lang") or USER_LANG.get(from_number, "ar")
-        query_ = (item.get("query") or "").strip()
-        if item and query_ and region_key in REGION_SEARCH_GROUPS and region_key != "gcc":
-            activate_market(from_number)
-            run_region_search(
-                from_number,
-                query_,
-                region_key,
-                item.get("bot_id") or bot_id,
-                lang_,
-                origin=item.get("origin") or "text",
-                image_b64=item.get("image_b64") or "",
-                image_mime=item.get("image_mime") or "",
-                visual_identity=item.get("visual_identity") or "",
-            )
-        else:
-            send_whatsapp_text(
-                from_number,
-                ("انتهت صلاحية البحث 😅 ابحث عن المنتج مرة ثانية." if lang_ == "ar"
-                 else "That search expired 😅 search for the product again."),
-                bot_id,
-            )
-        return
-
-    # v77.7 typed generic-product selection.
-    if btn_id.startswith("pick_"):
-        item = PENDING_BRAND_PICKS.get(from_number) or {}
-        if item and time.time() - item.get("ts", 0) > GLOBAL_PENDING_TTL:
-            item = {}
-        idx = int(btn_id[5:]) if btn_id[5:].isdigit() else -1
-        opts = item.get("options") or []
-        picked = opts[idx] if 0 <= idx < len(opts) else ""
-        if not picked:
-            picked = (reply.get("description") or "").strip() or (reply.get("title") or "").strip()
-        lang_ = item.get("lang") or USER_LANG.get(from_number, "ar")
-        if picked:
-            activate_market(from_number)
-            execute_product_search(from_number, picked, item.get("bot_id") or bot_id, lang_)
-        else:
-            send_whatsapp_text(from_number, ("اكتب اسم المنتج اللي تبيه وأدور لك عليه 👍" if lang_ == "ar" else "Type the product name and I'll search it for you 👍"), bot_id)
+    # Region-expansion UI removed by request. Ignore stale old buttons.
+    if btn_id == "region_gcc" or btn_id.startswith("gcc_") or btn_id in ("region_uk", "region_eu"):
         return
 
     # v77.7 typed basket store selection.
@@ -4567,13 +4565,17 @@ def _lens_fill_missing_prices_from_text_engine(selected, lens, caption, lang):
     print(f"LENS PRICE ENRICH VIA TEXT METHOD: recovered={recovered}/{len(missing_idx)}; cards_preserved={len(items)}")
     return items
 
-def send_lens_direct_results(from_number, lens, bot_id, lang, caption="", image_b64="", image_mime=""):
+def send_lens_direct_results(from_number, lens, bot_id, lang, caption="", image_b64="", image_mime="", exclude_domains=None, exclude_urls=None, more_mode=False):
     """v76: CTA-only، مختصر، بأعلام الدول، وترجمة للواجهة فقط.
 
     الحدود القصوى مستقلة: محلي 5، أمريكا 4، الصين 4.
     لا يوجد حد أدنى أو عدد إلزامي لأي سوق.
     """
+    exclude_domains = {str(x).lower() for x in (exclude_domains or []) if x}
+    exclude_urls = {str(x).strip() for x in (exclude_urls or []) if x}
     raw_matches = [m for m in (lens.get("matches") or []) if (m.get("title") or "").strip()]
+    if exclude_domains or exclude_urls:
+        raw_matches = [m for m in raw_matches if str(m.get("link") or "").strip() not in exclude_urls and _more_result_domain(m.get("link")) not in exclude_domains]
     # Relevance BEFORE country/store priority: unrelated preferred-store results must never win.
     lens_for_filter = dict(lens or {})
     lens_for_filter["matches"] = raw_matches
@@ -4702,16 +4704,8 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption="", image_
     if market_counts[2] == 0:
         print("V77 WARNING: no Chinese-store Lens result survived filters")
     if sent > 0 and expansion_query:
-        send_region_search_choice(
-            from_number,
-            expansion_query,
-            bot_id,
-            lang,
-            origin="lens",
-            image_b64=image_b64,
-            image_mime=image_mime,
-            visual_identity=(lens.get("visual_identity") or lens.get("relevance_target") or expansion_query),
-        )
+        _save_more_results_state(from_number, expansion_query, bot_id, lang, "lens", selected, image_b64=image_b64, image_mime=image_mime, visual_identity=(lens.get("visual_identity") or lens.get("relevance_target") or expansion_query), reset=not more_mode)
+        _send_more_results_choice(from_number, bot_id, lang)
     return sent > 0
 
 def process_single_image(message,bot_id,lang="ar"):
@@ -6862,14 +6856,20 @@ def _text_price_local(raw_price, market_rank, lang):
     return f"{format_price(converted, local_cur)} {local_label} ({original})"
 
 
-def send_text_lens_style_results(from_number, txt, urls, bot_id, lang, query):
+def send_text_lens_style_results(from_number, txt, urls, bot_id, lang, query, exclude_domains=None, exclude_urls=None, more_mode=False):
     """Typed search UI: flags + local->US->China + local-currency prices + up to two CTAs per merchant."""
+    exclude_domains = {str(x).lower() for x in (exclude_domains or []) if x}
+    exclude_urls = {str(x).strip() for x in (exclude_urls or []) if x}
     total_cap = max(1, LENS_DIRECT_LOCAL_MAX + LENS_DIRECT_US_MAX + LENS_DIRECT_CN_MAX)
     offers = text77_extract_store_offers(txt or "", limit=max(total_cap * 2, total_cap))
     candidates = []
     for offer in offers:
         item = _text_offer_item(offer, urls)
         if not item["link"] or not item["link"].startswith(("http://", "https://")):
+            continue
+        _url = str(item.get("link") or "").strip()
+        _dom = _more_result_domain(_url)
+        if _url in exclude_urls or (_dom and _dom in exclude_domains):
             continue
         rank = result_market_rank(item)
         if rank == 99:
@@ -6943,7 +6943,8 @@ def send_text_lens_style_results(from_number, txt, urls, bot_id, lang, query):
 
     LAST_SEARCH[from_number] = {"product": query}
     print(f"TEXT LENS-STYLE SENT: {len(selected)} CTA; per_store_cap={RESULTS_PER_STORE_MAX}; buckets={counts}; caps=5/4/4; order=local->us->cn")
-    send_region_search_choice(from_number, query, bot_id, lang, origin="text")
+    _save_more_results_state(from_number, query, bot_id, lang, "text", selected, reset=not more_mode)
+    _send_more_results_choice(from_number, bot_id, lang)
     return True
 
 
@@ -7144,6 +7145,55 @@ def _options_from_compare_lines(txt):
     return options[:6]
 
 
+def _clean_pick_label(value):
+    s = re.sub(r"\s+", " ", str(value or "")).strip()
+    return s.strip("[](){}<>«»\"' ")
+
+
+def _short_pick_title(value, max_chars=24):
+    s = _clean_pick_label(value)
+    if len(s) <= max_chars:
+        return s
+    out = []
+    for word in s.split():
+        candidate = " ".join(out + [word])
+        if len(candidate) > max_chars:
+            break
+        out.append(word)
+    return " ".join(out) if out else s[:max_chars].rstrip(" -_/.,")
+
+
+def _recommendation_pick_search_query(original_query, picked):
+    original = re.sub(r"\s+", " ", str(original_query or "")).strip()
+    choice = _clean_pick_label(picked)
+    if not choice:
+        return original
+    if not original:
+        return choice
+    cleaned = original
+    for pat in (
+        r"^\s*(?:ابي|أبي|اريد|أريد|ابغى|أبغى|احتاج|أحتاج)\s+",
+        r"^\s*(?:افضل|أفضل)\s+",
+        r"^\s*(?:دور لي|دوّر لي|ابحث لي|أبحث لي)\s+(?:عن\s+)?",
+        r"^\s*(?:recommend|find|show me|i want|i need|best)\s+",
+    ):
+        cleaned = re.sub(pat, "", cleaned, flags=re.I).strip()
+    if normalize_ar(choice).lower() in normalize_ar(original).lower():
+        return original
+    return " ".join(f"{cleaned} {choice}".split()[:24])
+
+
+def _pick_description(original_query, lang="ar"):
+    q = re.sub(r"\s+", " ", str(original_query or "")).strip()
+    for pat in (
+        r"^\s*(?:ابي|أبي|اريد|أريد|ابغى|أبغى|احتاج|أحتاج)\s+",
+        r"^\s*(?:افضل|أفضل)\s+",
+        r"^\s*(?:recommend|find|show me|i want|i need|best)\s+",
+    ):
+        q = re.sub(pat, "", q, flags=re.I).strip()
+    return q[:68] or ("منتج مقترح" if lang == "ar" else "Recommended option")
+
+
 def run_brand_comparison(from_number, query, bot_id, lang):
     """v77.2: مقارنة براندات بدون تكرار + مسافة سطر بين المنتجات"""
     send_whatsapp_text(from_number, T(lang, "compare_searching"), bot_id)
@@ -7162,10 +7212,10 @@ def run_brand_comparison(from_number, query, bot_id, lang):
             continue
         m = re.search(r"(?im)^\s*OPTIONS\s*:\s*(.+)$", txt)
         if m:
-            options = [o.strip() for o in m.group(1).split("|") if o.strip()][:6]
+            options = [_clean_pick_label(o) for o in m.group(1).split("|") if _clean_pick_label(o)][:6]
             txt = re.sub(r"(?im)^\s*OPTIONS\s*:.*$", "", txt).strip()
         if not options:
-            options = _options_from_compare_lines(txt)
+            options = [_clean_pick_label(o) for o in _options_from_compare_lines(txt)]
             if options:
                 print(f"BRAND COMPARE: OPTIONS recovered from lines -> {options}")
         if options:
@@ -7218,15 +7268,13 @@ def run_brand_comparison(from_number, query, bot_id, lang):
     txt = "\n".join(final_lines).strip()
 
     send_whatsapp_text(from_number, txt, bot_id)
-    PENDING_BRAND_PICKS[from_number] = {"options": options, "bot_id": bot_id, "lang": lang, "ts": time.time()}
+    PENDING_BRAND_PICKS[from_number] = {"options": options, "original_query": query, "bot_id": bot_id, "lang": lang, "ts": time.time()}
     # v74.10: عناوين القائمة بالعربي للمستخدم العربي (ترجمة دفعة + كاش)،
     # والاسم الأصلي يبقى في سطر الوصف — وهو المعتمد للبحث عند الاختيار.
-    title_map = arabic_titles(options) if lang == "ar" else {}
     rows = []
     for i, o in enumerate(options):
-        shown = title_map.get(o, o) if lang == "ar" else o
-        desc = o if (shown != o) else (o[24:96] if len(o) > 24 else "")
-        rows.append({"id": f"pick_{i}", "title": shown[:24], "description": desc[:72]})
+        clean_o = _clean_pick_label(o)
+        rows.append({"id": f"pick_{i}", "title": _short_pick_title(clean_o, 24), "description": _pick_description(query, lang)})
     send_whatsapp_list(from_number, T(lang, "pick_prompt"), rows, bot_id, T(lang, "list_button"))
     print(f"BRAND COMPARE SENT: {options}")
     return True
