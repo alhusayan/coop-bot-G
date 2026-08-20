@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v79-single-direction-bold-cards-20260819"
+BUILD_ID = "v79-country-from-phone-no-location-onboarding-20260820"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE/TEXT -> FLAGS + CLEAR LOCAL PRICES + LOCAL/US/CHINA")
@@ -278,6 +278,27 @@ def infer_country_from_phone(phone):
         if digits.startswith(prefix):
             return CALLING_CODE_TO_COUNTRY[prefix]
     return DEFAULT_COUNTRY
+
+def ensure_market_from_phone(phone):
+    """Initialize user's country/currency from the WhatsApp calling code.
+
+    This replaces mandatory location onboarding. Exact location remains optional
+    and can still override the phone-derived country when the user shares it.
+    """
+    load_user_preferences(phone)
+    market = dict(USER_MARKET.get(phone) or {})
+    # If user has already shared a real location, never overwrite it.
+    if market.get("lat") is not None and market.get("lng") is not None:
+        return market
+
+    cc = infer_country_from_phone(phone)
+    market["country"] = cc
+    market["country_name"] = COUNTRY_NAMES.get(cc, cc.upper())
+    market["currency"] = COUNTRY_CURRENCIES.get(cc, market.get("currency") or "")
+    market["country_source"] = "phone_prefix"
+    USER_MARKET[phone] = market
+    save_user_preferences(phone)
+    return market
 
 def market_for_user(from_number):
     market = dict(USER_MARKET.get(from_number) or {})
@@ -3701,18 +3722,15 @@ async def receive(request: Request, background_tasks: BackgroundTasks):
             background_tasks.add_task(process_location_message,msg,bot_id)
             return {"status":"ok"}
 
-        # First use: keep the request, ask for language, then ask for location.
+        # First use: keep the request and ask for language; country comes from the phone prefix.
         if from_number not in USER_LANG:
             cache_pending_message(from_number, msg, bot_id)
             background_tasks.add_task(asyncio.to_thread, send_language_choice, from_number, bot_id)
             return {"status":"ok"}
 
-        # Every 3 days: pause the request and refresh location before searching.
-        if not location_is_valid(from_number):
-            cache_pending_message(from_number, msg, bot_id)
-            refresh = bool(USER_LOCATION_TS.get(from_number, 0))
-            background_tasks.add_task(asyncio.to_thread, send_location_request, from_number, bot_id, USER_LANG.get(from_number,"ar"), refresh)
-            return {"status":"ok"}
+        # Country is derived from the WhatsApp calling code.
+        # Exact device location is optional and requested only for "near me"/map use-cases.
+        ensure_market_from_phone(from_number)
 
         if typ=="image":
             IMAGE_BUFFER[from_number]["images"].append(msg); IMAGE_BUFFER[from_number]["time"]=time.time(); IMAGE_BUFFER[from_number]["bot_id"]=bot_id
@@ -3985,8 +4003,9 @@ def process_interactive_message(message, bot_id):
         return
     lang = "ar" if btn_id=="lang_ar" else "en"
     USER_LANG[from_number]=lang
+    ensure_market_from_phone(from_number)
     save_user_preferences(from_number)
-    send_location_request(from_number, bot_id, lang, refresh=False)
+    route_pending_after_location(from_number)
 
 async def process_image_buffer(from_number):
     await asyncio.sleep(BUFFER_SECONDS)
@@ -7386,8 +7405,9 @@ def process_text_message(message,bot_id,onboarding_checked=False):
         if not onboarding_checked:
             if from_number not in USER_LANG:
                 cache_pending_message(from_number, message, bot_id); send_language_choice(from_number, bot_id); return
-            if not location_is_valid(from_number):
-                cache_pending_message(from_number, message, bot_id); send_location_request(from_number, bot_id, USER_LANG.get(from_number,"ar"), bool(USER_LOCATION_TS.get(from_number,0))); return
+            ensure_market_from_phone(from_number)
+        else:
+            ensure_market_from_phone(from_number)
         activate_market(from_number)
         user_text=message["text"]["body"]
         cmd=re.sub(r"[^\w\u0600-\u06FF]","",user_text.strip().lower())
@@ -7462,9 +7482,9 @@ def process_location_message(message, bot_id):
     print(f"USER MARKET UPDATED: {from_number} -> {market}; valid_for_hours={LOCATION_TTL_SECONDS/3600:.0f}")
     lang = USER_LANG.get(from_number, "ar")
     city = market.get("city") or market.get("country_name") or market.get("country", "").upper()
-    msg = f"تم حفظ موقعك: {city} ✅\nراح أطلب تحديثه بعد 3 أيام." if lang == "ar" else f"Location saved: {city} ✅\nI’ll ask you to update it again after 3 days."
+    msg = f"📍 تم تحديث موقعك: {city} ✅" if lang == "ar" else f"📍 Location updated: {city} ✅"
     send_whatsapp_text(from_number, msg, bot_id)
     route_pending_after_location(from_number)
 
 @app.get("/")
-async def health(): return {"status":"v79 DEDUPE-STORE NO-AUTO-MAP LOCAL5-US4-CN4-SHEIN", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
+async def health(): return {"status":"v79 DEDUPE-STORE NO-AUTO-MAP LOCAL5-US4-CN4-SHEIN", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "location_ttl_hours":LOCATION_TTL_SECONDS//3600, "market_source_default":"phone_prefix"}
