@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v80.3-fast-lean-20260820"
+BUILD_ID = "v80.4-fast-quality-us-cn-20260820"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE/TEXT -> FLAGS + CLEAR LOCAL PRICES + LOCAL/US/CHINA")
@@ -853,7 +853,7 @@ def has_model_token(a, b):
 def cache_key(query, lang):
     norm = re.sub(r"[^\w\u0600-\u06FF]+", "", normalize_ar(query))
     market = current_market().get("country", DEFAULT_COUNTRY)
-    return hashlib.sha256(f"v72|{market}|{norm}|{lang}".encode()).hexdigest()
+    return hashlib.sha256(f"v80.4|{market}|{norm}|{lang}".encode()).hexdigest()
 
 def cache_ttl_for(query, txt=""):
     q_norm = normalize_ar(query)
@@ -1692,6 +1692,15 @@ def google_lens_lookup(image_b64, mime_type, lang="ar", query_hint="", light=Fal
                 (lens_type, country, auto_crop)
             for lens_type, country, auto_crop in passes
         }
+        # v80.4: تمريرة Lens أمريكية إضافية للمتاجر الأساسية، تعمل بالتوازي
+        # مع جميع التمريرات الحالية لذلك لا تضيف سلسلة انتظار مستقلة.
+        us_hint = (query_hint or "").strip()
+        us_hint = (us_hint + " site:amazon.com OR site:ebay.com OR site:walmart.com").strip()
+        us_future = LENS_HTTP_POOL.submit(
+            _serpapi_lens_request, public_url, "all", "us", True, us_hint
+        )
+        future_map[us_future] = ("all-us-priority", "us", True)
+
         # v75: تمريرة صينية موجهة للمتاجر الصينية المعروفة. country=cn وحده قد
         # يعيد مواقع عالمية عامة؛ هذه التمريرة تزيد فرصة AliExpress/Alibaba/Temu/1688/Taobao/SHEIN.
         cn_hint = (query_hint or "").strip()
@@ -5073,7 +5082,9 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption="", image_
             buckets[rank].append(m)
     for rank in buckets:
         buckets[rank].sort(key=lambda m: (
-            _us_store_priority(m.get("source"), m.get("link")) if rank == 1 else 99,
+            _us_store_priority(m.get("source"), m.get("link")) if rank == 1
+            else _china_store_priority(m.get("source"), m.get("link")) if rank == 2
+            else 99,
             0 if _lens_has_price(m) else 1,
             0 if m.get("exact") else 1,
             0 if m.get("section") == "visual_matches" else 1,
@@ -5896,7 +5907,12 @@ def v26_best_of_search(parts, max_results=None, merge_offers=False, merge_title=
                     results.append(r)
                     if FAST_MODE and r and r[0]:
                         _offers = text77_extract_store_offers(r[0], limit=limit)
-                        if len(_offers) >= min(limit, 4) and len(r[1] or {}) >= min(limit, 3):
+                        _count_ok = len(_offers) >= min(limit, 4) and len(r[1] or {}) >= min(limit, 3)
+                        # Product comparison searches mention both priority groups in their prompt.
+                        _prompt_blob = " ".join(str((p or {}).get("text") or "") for p in (parts or []) if isinstance(p, dict))
+                        _needs_market_quality = ("Amazon" in _prompt_blob and "AliExpress" in _prompt_blob)
+                        _coverage_ok = (not _needs_market_quality) or _preferred_market_coverage(r[0], r[1] or {})
+                        if _count_ok and _coverage_ok:
                             _early = True
                 except Exception as e:
                     print(f"V26 RUN ERR: {e}")
@@ -7225,7 +7241,12 @@ def legacy_v26_best_of_search(parts, max_results=None, merge_offers=False, merge
                     results.append(r)
                     if FAST_MODE and r and r[0]:
                         _offers = text77_extract_store_offers(r[0], limit=limit)
-                        if len(_offers) >= min(limit, 4) and len(r[1] or {}) >= min(limit, 3):
+                        _count_ok = len(_offers) >= min(limit, 4) and len(r[1] or {}) >= min(limit, 3)
+                        # Product comparison searches mention both priority groups in their prompt.
+                        _prompt_blob = " ".join(str((p or {}).get("text") or "") for p in (parts or []) if isinstance(p, dict))
+                        _needs_market_quality = ("Amazon" in _prompt_blob and "AliExpress" in _prompt_blob)
+                        _coverage_ok = (not _needs_market_quality) or _preferred_market_coverage(r[0], r[1] or {})
+                        if _count_ok and _coverage_ok:
                             _early = True
                 except Exception as e:
                     print(f"LEGACY V26 RUN ERR: {e}")
@@ -7265,6 +7286,13 @@ US_STORE_PRIORITY = (
     ("walmart.com", "Walmart"),
 )
 
+CHINA_STORE_PRIORITY = (
+    ("aliexpress.com", "AliExpress"),
+    ("temu.com", "Temu"),
+    ("alibaba.com", "Alibaba"),
+    ("shein.com", "SHEIN"),
+)
+
 
 def _us_store_priority(name, url):
     """Lower = stronger priority inside the US bucket only."""
@@ -7275,10 +7303,41 @@ def _us_store_priority(name, url):
     return 99
 
 
+def _china_store_priority(name, url):
+    """Lower = stronger priority inside the China bucket only."""
+    hay = f"{name or ''} {url or ''}".lower()
+    for idx, (domain, label) in enumerate(CHINA_STORE_PRIORITY):
+        if domain in hay or normalize_name(label) in normalize_name(hay):
+            return idx
+    return 99
+
+
+def _preferred_market_coverage(txt, urls):
+    """Fast quality gate used only for early-exit decisions.
+
+    Local coverage is intentionally ignored: this guard exists only to prevent
+    the speed optimizer from stopping before strong US/China marketplaces have
+    had a fair chance to appear.
+    """
+    offers = text77_extract_store_offers(txt or "", limit=30)
+    us_hit = False
+    cn_hit = False
+    for offer in offers:
+        name = str(offer.get("name") or "").strip()
+        url = match_url(name, urls or {}) or ""
+        if _us_store_priority(name, url) < 99:
+            us_hit = True
+        if _china_store_priority(name, url) < 99:
+            cn_hit = True
+        if us_hit and cn_hit:
+            return True
+    return False
+
+
 
 def legacy_text_product_search(product, lang):
     """v77.7 typed engine, automatic LOCAL -> US -> CHINA search."""
-    cache_query = f"__TEXT79_LENS_STYLE__::{product}"
+    cache_query = f"__TEXT80_4_USCN_QUALITY__::{product}"
     cached = cache_get(cache_query, lang)
     if cached:
         return cached
@@ -7298,8 +7357,8 @@ def legacy_text_product_search(product, lang):
             f"أولاً متاجر {market_name} المحلية حتى {LENS_DIRECT_LOCAL_MAX}، "
             f"ثم متاجر الولايات المتحدة حتى {LENS_DIRECT_US_MAX}، "
             f"ثم المتاجر الصينية حتى {LENS_DIRECT_CN_MAX}. "
-            "بالنسبة لأمريكا: ابحث بشكل طبيعي في المتاجر الأمريكية، وإذا ظهرت نتائج مطابقة فرتبها داخل القسم الأمريكي بهذه الأولوية فقط: Amazon ثم eBay ثم Walmart ثم باقي المتاجر الأمريكية. لا تفرض ظهور أي متجر إذا لم توجد نتيجة مطابقة. "
-            "بالنسبة للصين ابحث مباشرة في AliExpress وTemu وAlibaba وSHEIN عندما توجد نتيجة مطابقة، ويمكن استخدام متاجر صينية أخرى. "
+            "بالنسبة لأمريكا: ابحث بشكل طبيعي وواسع في المتاجر الأمريكية. افحص ظهور Amazon وeBay وWalmart ضمن البحث الطبيعي قبل الاكتفاء بالمتاجر الأخرى، وإذا وجدت نتائج مطابقة منها فرتبها بهذه الأولوية: Amazon ثم eBay ثم Walmart ثم باقي المتاجر الأمريكية. لا تعرض نتيجة غير مطابقة فقط لإكمال متجر. "
+            "بالنسبة للصين افحص أولاً ضمن البحث الطبيعي AliExpress وTemu وAlibaba وSHEIN، وإذا وجدت نتائج مطابقة فرتبها بهذا التسلسل قبل بقية المتاجر الصينية. لا تستبدلها بمتاجر أقل أهمية لمجرد أن نتيجتها ظهرت أسرع. "
             "لا تعرض أي دولة رابعة. لا تجعل الأعداد حصصاً إلزامية؛ اعرض الموجود المطابق فقط. "
             "لكل نتيجة اذكر اسم المتجر، اسم المنتج المطابق، السعر الرقمي والعملة، واربطه بصفحة المنتج المباشرة. "
             f"{TEXT77_LANG_INSTR[lang]}"
@@ -7454,6 +7513,8 @@ def send_text_lens_style_results(from_number, txt, urls, bot_id, lang, query):
         bucket = [x for x in candidates if x["market_rank"] == rank]
         if rank == 1:
             bucket.sort(key=lambda x: _us_store_priority(x.get("source"), x.get("link")))
+        elif rank == 2:
+            bucket.sort(key=lambda x: _china_store_priority(x.get("source"), x.get("link")))
         for item in bucket:
             try:
                 host = urllib.parse.urlparse(item["link"]).netloc.lower().split(":")[0]
