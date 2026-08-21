@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v85.3-fast-response-geo-20260821"
+BUILD_ID = "v85.4-fast-caps-4-3-3-20260821"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("GLOBAL GEO -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES")
@@ -116,13 +116,14 @@ ENABLE_GOOGLE_LENS = env_bool("ENABLE_GOOGLE_LENS", True)
 # بدون تحليل Vision ولا حكم هوية ولا طبقات بحث. أطفئه بـ LENS_DIRECT_MODE=false
 # لإرجاع المسار الذكي الكامل. عند عدم وجود نتائج، البوت يرجع تلقائياً للمسار الكامل.
 LENS_DIRECT_MODE = env_bool("LENS_DIRECT_MODE", True)
-LENS_DIRECT_MAX_LINES = max(3, int(os.environ.get("LENS_DIRECT_MAX_LINES", "8")))
+LENS_DIRECT_MAX_LINES = max(3, min(10, int(os.environ.get("LENS_DIRECT_MAX_LINES", "10"))))
 # v76: الحدود القصوى مستقلة وليست حصصاً إلزامية.
-# المحلي حتى 5، الولايات المتحدة حتى 4، الصين حتى 4.
-# إذا كان سوق ما فيه نتائج أقل نعرض الموجود فقط ولا نملأ العدد إجبارياً.
-LENS_DIRECT_LOCAL_MAX = max(0, int(os.environ.get("LENS_DIRECT_LOCAL_MAX", "5")))
-LENS_DIRECT_US_MAX = max(0, int(os.environ.get("LENS_DIRECT_US_MAX", "4")))
-LENS_DIRECT_CN_MAX = max(0, int(os.environ.get("LENS_DIRECT_CN_MAX", "4")))
+# v85.4 Fast caps: المحلي حتى 4، الولايات المتحدة حتى 3، الصين حتى 3.
+# هذه حدود قصوى حقيقية حتى لو بقيت Environment Variables القديمة أعلى في Railway.
+# يمكن للـ Environment خفض الحد، لكنه لا يستطيع رفعه فوق 4/3/3.
+LENS_DIRECT_LOCAL_MAX = max(0, min(4, int(os.environ.get("LENS_DIRECT_LOCAL_MAX", "4"))))
+LENS_DIRECT_US_MAX = max(0, min(3, int(os.environ.get("LENS_DIRECT_US_MAX", "3"))))
+LENS_DIRECT_CN_MAX = max(0, min(3, int(os.environ.get("LENS_DIRECT_CN_MAX", "3"))))
 LENS_DIRECT_MAX_CTA = max(1, int(os.environ.get("LENS_DIRECT_MAX_CTA", str(LENS_DIRECT_LOCAL_MAX + LENS_DIRECT_US_MAX + LENS_DIRECT_CN_MAX))))
 
 # "ابحث أكثر" has its own smaller caps; primary v79 search above stays unchanged.
@@ -135,7 +136,7 @@ LENS_PRIMARY_MODE = env_bool("LENS_PRIMARY_MODE", True)
 LENS_PRIMARY_EXCEPT_TEXT_HEAVY = env_bool("LENS_PRIMARY_EXCEPT_TEXT_HEAVY", True)
 # قوة Lens الحقيقية تأتي من تعدد التمريرات: products ثم all (visual+exact) ثم بحث واسع بلا قيد دولة.
 ENABLE_LENS_WIDE_FALLBACK = env_bool("ENABLE_LENS_WIDE_FALLBACK", True)
-LENS_MIN_MATCHES = max(3, int(os.environ.get("LENS_MIN_MATCHES", "6")))
+LENS_MIN_MATCHES = max(3, min(5, int(os.environ.get("LENS_MIN_MATCHES", "5"))))
 # تشغيل Vision و Lens بالتوازي: أسرع وأدق دمج. عطّله إذا تبي توفر كريدت SerpApi للعبوات النصية.
 LENS_PARALLEL_WITH_VISION = env_bool("LENS_PARALLEL_WITH_VISION", True)
 LENS_RESULT_LIMIT = max(12, int(os.environ.get("LENS_RESULT_LIMIT", "40")))
@@ -2731,7 +2732,7 @@ def google_lens_lookup(image_b64, mime_type, lang="ar", query_hint="", light=Fal
         # Exit early only when local is strong AND US/China already have coverage, so the
         # later missing-market supplement does not re-add the latency we just removed.
         enough_fast = (rank_counts[0] >= 2 and rank_counts[1] >= 1 and rank_counts[2] >= 1
-                       and len(merged) >= max(6, LENS_MIN_MATCHES))
+                       and len(merged) >= max(5, LENS_MIN_MATCHES))
         done = set(done_fast)
         if pending and not enough_fast:
             remaining = max(0.0, LENS_TOTAL_TIMEOUT_SECONDS - min(LENS_FAST_READY_SECONDS, LENS_TOTAL_TIMEOUT_SECONDS))
@@ -6706,7 +6707,7 @@ PENDING_BRAND_PICKS = {}
 PENDING_CART_PICKS = {}
 SEARCH_RUNS = max(1, min(3, int(os.environ.get("SEARCH_RUNS", "2"))))
 TOURNAMENT_GRACE_SECONDS = max(0.25, float(os.environ.get("TOURNAMENT_GRACE_SECONDS", "1.2")))
-LENS_FAST_READY_SECONDS = max(3.0, float(os.environ.get("LENS_FAST_READY_SECONDS", "6.5")))
+LENS_FAST_READY_SECONDS = max(3.0, min(5.0, float(os.environ.get("LENS_FAST_READY_SECONDS", "5.0"))))
 
 V26_SEARCH_POOL = ThreadPoolExecutor(max_workers=8)
 SIMILAR_MAX_STORES = max(MAX_STORES, int(os.environ.get("SIMILAR_MAX_STORES", "10")))
