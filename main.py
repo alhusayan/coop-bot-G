@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v79-text77-us-affiliate-focus-20260818"
+BUILD_ID = "v79-clean-ui-phone-market-20260821"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE/TEXT -> FLAGS + CLEAR LOCAL PRICES + LOCAL/US/CHINA")
@@ -278,18 +278,29 @@ def infer_country_from_phone(phone):
     return DEFAULT_COUNTRY
 
 def market_for_user(from_number):
+    """Local market is determined from the user's WhatsApp international dialing prefix."""
+    cc = infer_country_from_phone(from_number)
     market = dict(USER_MARKET.get(from_number) or {})
-    cc = (market.get("country") or DEFAULT_COUNTRY).lower()
+    # Phone prefix is authoritative. Remove stale GPS/city data saved by older builds.
+    market.pop("lat", None)
+    market.pop("lng", None)
+    market.pop("city", None)
     market["country"] = cc
-    market.setdefault("country_name", COUNTRY_NAMES.get(cc, cc.upper()))
-    market.setdefault("currency", COUNTRY_CURRENCIES.get(cc, ""))
+    market["country_name"] = COUNTRY_NAMES.get(cc, cc.upper())
+    market["currency"] = COUNTRY_CURRENCIES.get(cc, "")
+    market["market_source"] = "phone_prefix"
+    return market
+
+def ensure_market_from_phone(phone):
+    market = market_for_user(phone)
+    USER_MARKET[phone] = market
+    USER_LOCATION_TS[phone] = 0
+    MARKET_CTX.value = market
+    save_user_preferences(phone)
     return market
 
 def activate_market(from_number):
-    market = market_for_user(from_number)
-    MARKET_CTX.value = market
-    USER_MARKET[from_number] = market
-    return market
+    return ensure_market_from_phone(from_number)
 
 def current_market():
     return getattr(MARKET_CTX, "value", None) or {"country":DEFAULT_COUNTRY,"country_name":COUNTRY_NAMES.get(DEFAULT_COUNTRY,"Kuwait"),"currency":COUNTRY_CURRENCIES.get(DEFAULT_COUNTRY,"KWD")}
@@ -720,10 +731,10 @@ def save_user_preferences(phone):
         print(f"USER PREF PUT ERR: {e}")
 
 def location_is_valid(phone):
+    # Compatibility name only. A valid phone prefix is now enough; GPS is not required.
     load_user_preferences(phone)
-    market = USER_MARKET.get(phone) or {}
-    ts = float(USER_LOCATION_TS.get(phone, 0) or 0)
-    return bool(market.get("country") and market.get("lat") is not None and market.get("lng") is not None and (time.time() - ts) < LOCATION_TTL_SECONDS)
+    market = ensure_market_from_phone(phone)
+    return bool(market.get("country"))
 
 def cache_pending_message(phone, message, bot_id):
     PENDING_ONBOARDING[phone] = {"message": message, "bot_id": bot_id, "ts": time.time()}
@@ -793,66 +804,66 @@ IDENTIFY_SYSTEM = """أنت خبير تعرف على المنتجات من ال�
 
 MSG = {
     "ar": {
-        "identifying": "ثواني بس.. أحدد المنتج وأدور لك الأفضل!",
-        "searching": "🔍 أدور لك على {q}...",
-        "not_found": "ما لقيت المنتج متوفر حالياً بسعر مؤكد 😅 جرب صياغة ثانية أو دز صورة أوضح.",
-        "identified_not_found": "حددت المنتج ({p}) بس ما لقيت له سعر مؤكد حالياً 😅 جرب تكتب اسمه بصيغة ثانية.",
-        "cant_identify": "بحثت أكثر من مرة، لكن ما قدرت أحدد المنتج أو ألقى له نتيجة مؤكدة. دز صورة أوضح أو اكتب اسم المنتج.",
-        "image_error": "صار خلل بسيط وأنا أحمّل الصورة 😅 عيد إرسالها مرة ثانية.",
-        "multi_text": "تمام لقيت {c} منتجات، أسوي سلة...",
-        "multi_images": "تمام لقطت {c} منتجات، أسوي سلة...",
-        "maps_body": "📍 تبي أقرب مكان؟\n\nاضغط الزر والخريطة بتفتح على أقرب الأماكن حولك 👇",
+        "identifying": "✨ لحظة.. أحدد المنتج وأدور لك أفضل الخيارات.",
+        "searching": "🔎 أدور لك على {q}...",
+        "not_found": "🔍 ما لقيت نتيجة مطابقة بسعر مؤكد. جرّب اسم أو صورة أوضح.",
+        "identified_not_found": "🔍 حددت المنتج، بس ما لقيت له سعر مؤكد حالياً.",
+        "cant_identify": "📷 ما قدرت أحدد المنتج بدقة. دز صورة أوضح أو اكتب اسمه.",
+        "image_error": "⚠️ تعذر تحميل الصورة. دزها مرة ثانية.",
+        "multi_text": "🛒 لقيت {c} منتجات.. أجهز المقارنة.",
+        "multi_images": "🛒 لقيت {c} منتجات.. أجهز المقارنة.",
+        "maps_body": "📍 افتح المتاجر على الخريطة.",
         "maps_btn": "📍 افتح الخريطة",
-        "maps_body_loc": "📍 بحثك الأخير كان عن ({p})\n\nجهزت لك أقرب الأماكن حولك، اضغط الزر وافتح الخريطة 👇",
-        "no_saved_product": "ما عندي منتج محفوظ حالياً 😅. ابحث عن منتج أول، وبعدها أدلك على أقرب مكان يبيعه!",
-        "lang_saved": "تمام، بكلمك عربي من هني ورايح 🇰🇼\nدز صورة منتج أو اكتب اسمه وأنا حاضر!",
-        "ask_global": "ما لقيت نتيجة محلية مؤكدة لهذا المنتج في موقعك الحالي. تبي أدور لك في المتاجر العالمية؟ 🌍",
+        "maps_body_loc": "📍 افتح متاجر ({p}) على الخريطة.",
+        "no_saved_product": "🔎 ابحث عن منتج أول، وبعدها أفتح لك الخريطة.",
+        "lang_saved": "✅ تم اختيار العربية.\nدز صورة أو اكتب اسم المنتج.",
+        "ask_global": "🌍 ما لقيت نتيجة محلية مؤكدة. أبحث عالمياً؟",
         "global_yes": "نعم، ابحث عالميًا 🌍",
         "global_no": "لا، محلي فقط",
         "global_searching": "🌍 أدور لك عالميًا على أفضل النتائج المطابقة...",
-        "global_none": "حتى بالبحث العالمي ما لقيت نتيجة مؤكدة ومباشرة لهذا المنتج.",
-        "ask_not_found": "ما لقيت نفس المنتج بالضبط متوفر عندك محلياً 😅\n\nشرايك، وش تبيني أسوي؟ 👇",
+        "global_none": "🔍 ما لقيت نتيجة عالمية مؤكدة.",
+        "ask_not_found": "🔍 ما لقيت نفس المنتج محلياً.\nوش تفضل؟",
         "opt_global": "🌍 دوّر عالمياً",
         "opt_similar": "🔄 بدائل مشابهة",
         "opt_no": "لا شكراً 🙏",
-        "similar_searching": "🔄 أدور لك على أفضل البدائل المشابهة المتوفرة عندك...",
-        "similar_none": "ما لقيت بدائل مشابهة بسعر مؤكد حالياً 😅 جرب صياغة ثانية.",
-        "declined_ok": "تمام 🙏 إذا احتجت شي ثاني أنا حاضر!",
-        "welcome_reply": "هلا والله! 🌟\nدز صورة المنتج أو اكتب اسمه، وأدور لك أفضل الأسعار والمتاجر القريبة منك 🛒",
-        "thanks_reply": "العفو! 🌹 في الخدمة دايماً.. أي منتج ثاني تبيه أنا حاضر!",
-        "lens_header": "🔍 هذا اللي طلع من Google عن صورتك:",
-        "lens_none": "Google ما رجّع نتائج للصورة 😅 أكمل البحث بطريقتي...",
+        "similar_searching": "🔄 أدور لك على بدائل مشابهة...",
+        "similar_none": "🔍 ما لقيت بدائل بسعر مؤكد.",
+        "declined_ok": "👍 تمام، أنا حاضر.",
+        "welcome_reply": "👋 هلا!\nدز صورة المنتج أو اكتب اسمه.",
+        "thanks_reply": "🌷 العفو، دز المنتج اللي بعده.",
+        "lens_header": "✨ لقيت لك هالخيارات:",
+        "lens_none": "🔎 ما لقيت تطابق كافي. بجرب بحث أوسع...",
     },
     "en": {
-        "identifying": "One sec.. identifying the product and finding you the best deal!",
-        "searching": "🔍 Looking up {q}...",
-        "not_found": "Couldn't find it in-stock with a verified price 😅 try another phrasing or a clearer photo.",
-        "identified_not_found": "I identified the product ({p}) but couldn't find a verified price right now 😅 try typing its name differently.",
-        "cant_identify": "I searched several times but couldn’t identify the product or find a verified result. Send a clearer photo or type the product name.",
-        "image_error": "Something went wrong while loading the image 😅 please send it again.",
-        "multi_text": "Got it, found {c} products. Building your cart...",
-        "multi_images": "Nice, spotted {c} products. Building your cart...",
-        "maps_body": "📍 Want the nearest place?\n\nTap the button and the map will open on the closest spots around you 👇",
+        "identifying": "✨ One moment.. identifying the product.",
+        "searching": "🔎 Searching for {q}...",
+        "not_found": "🔍 No matching result with a verified price. Try another name or photo.",
+        "identified_not_found": "🔍 Product identified, but no verified price was found.",
+        "cant_identify": "📷 I couldn’t identify it accurately. Send a clearer photo or type the name.",
+        "image_error": "⚠️ Couldn’t load the image. Please send it again.",
+        "multi_text": "🛒 Found {c} products.. comparing them.",
+        "multi_images": "🛒 Found {c} products.. comparing them.",
+        "maps_body": "📍 Open stores on the map.",
         "maps_btn": "📍 Open Map",
-        "maps_body_loc": "📍 Your last search was ({p})\n\nI've lined up the closest places around you. Tap the button to open the map 👇",
-        "no_saved_product": "I don't have a saved product yet 😅. Search for a product first, then I'll point you to the nearest store!",
-        "lang_saved": "Great, I'll speak English with you from now on 🇬🇧\nSend a product photo or type its name and I'm on it!",
-        "ask_global": "I couldn't find a verified local result in your current market. Search international stores instead? 🌍",
+        "maps_body_loc": "📍 Open stores for ({p}) on the map.",
+        "no_saved_product": "🔎 Search for a product first, then I can open the map.",
+        "lang_saved": "✅ English selected.\nSend a photo or product name.",
+        "ask_global": "🌍 No verified local result. Search globally?",
         "global_yes": "Yes, search globally 🌍",
         "global_no": "No, local only",
-        "global_searching": "🌍 Searching international stores for the closest matches...",
-        "global_none": "I still couldn't find a verified direct result globally.",
-        "ask_not_found": "I couldn't find this exact product available locally 😅\n\nWhat would you like me to do? 👇",
+        "global_searching": "🌍 Searching global stores...",
+        "global_none": "🔍 No verified global result found.",
+        "ask_not_found": "🔍 Exact product not found locally.\nWhat would you like?",
         "opt_global": "🌍 Search globally",
         "opt_similar": "🔄 Similar items",
         "opt_no": "No thanks 🙏",
-        "similar_searching": "🔄 Looking for the best similar alternatives available near you...",
-        "similar_none": "I couldn't find similar alternatives with a verified price right now 😅 try another phrasing.",
-        "declined_ok": "No problem 🙏 I'm here whenever you need me!",
-        "welcome_reply": "Hello! 🌟\nSend a product photo or type its name, and I'll find you the best prices and nearby stores 🛒",
-        "thanks_reply": "You're welcome! 🌹 Anytime.. just send me the next product!",
-        "lens_header": "🔍 Here's what Google returned for your photo:",
-        "lens_none": "Google returned no results for the photo 😅 continuing with my own search...",
+        "similar_searching": "🔄 Looking for similar alternatives...",
+        "similar_none": "🔍 No similar alternative with a verified price.",
+        "declined_ok": "👍 No problem.",
+        "welcome_reply": "👋 Hello!\nSend a product photo or type its name.",
+        "thanks_reply": "🌷 You’re welcome. Send the next product.",
+        "lens_header": "✨ Here are the matching options:",
+        "lens_none": "🔎 Not enough matches. Trying a broader search...",
     },
 }
 
@@ -2124,9 +2135,9 @@ def _lens_source_name(item, index):
         return source[:40]
     try:
         host = urllib.parse.urlparse(item.get("link") or "").netloc.replace("www.", "")
-        return (host.split(".")[0] or f"Lens {index}")[:40]
+        return (host.split(".")[0] or f"Store {index}")[:40]
     except Exception:
-        return f"Lens {index}"
+        return f"Store {index}"
 
 
 KUWAIT_STORE_HINTS = (
@@ -3203,59 +3214,177 @@ def download_whatsapp_media(mid):
     img=requests.get(meta["url"],headers=h,timeout=30)
     return base64.b64encode(img.content).decode(), meta.get("mime_type","image/jpeg")
 
+
+_WORD_JOINER = "\u2060"
+
+def _strip_search_source_disclosure(value):
+    """Hide search-engine/provider wording without damaging product brands such as Google Pixel."""
+    s = str(value or "")
+    patterns = (
+        r"(?i)\b(?:according to|from|via|using|returned by|based on)\s+(?:google\s+lens|google|lens|serpapi|gemini)\b",
+        r"(?i)\bgoogle\s+(?:lens|search|shopping|results?|reviews?)\b",
+        r"(?i)\blens\s+(?:results?|search|match(?:es)?)\b",
+        r"(?:حسب|من|عبر|باستخدام|وفقاً لـ|وفقًا لـ|وفقا ل|استناداً إلى|استنادًا إلى)\s+(?:Google Lens|Google|جوجل|Lens|لينز|SerpApi|Gemini)",
+        r"(?:نتائج|بحث|مراجعات)\s+(?:Google Lens|Google|جوجل|Lens|لينز)",
+    )
+    for pat in patterns:
+        s = re.sub(pat, "", s)
+    return re.sub(r"[ \t]{2,}", " ", s).strip()
+
+
+def _token_script(token):
+    if re.search(r"[\u0600-\u06FF]", token or ""):
+        return "ar"
+    if re.search(r"[A-Za-z]", token or ""):
+        return "en"
+    return ""
+
+
+def _single_direction_lines(value):
+    """Split a mixed Arabic/Latin line into separate visual-direction lines."""
+    line = re.sub(r"[ \t]+", " ", str(value or "")).strip()
+    if not line:
+        return []
+    tokens = line.split(" ")
+    classes = [_token_script(t) for t in tokens]
+
+    # Neutral tokens (emoji, numbers, punctuation) follow the closest textual group.
+    for i, cls in enumerate(classes):
+        if cls:
+            continue
+        prev = next((classes[j] for j in range(i - 1, -1, -1) if classes[j]), "")
+        nxt = next((classes[j] for j in range(i + 1, len(classes)) if classes[j]), "")
+        classes[i] = prev or nxt or "neutral"
+
+    groups = []
+    current_cls = None
+    current = []
+    for token, cls in zip(tokens, classes):
+        if current and cls != current_cls and cls != "neutral" and current_cls != "neutral":
+            groups.append(" ".join(current).strip())
+            current = [token]
+            current_cls = cls
+        else:
+            current.append(token)
+            if current_cls in (None, "neutral") and cls != "neutral":
+                current_cls = cls
+            elif current_cls is None:
+                current_cls = cls
+    if current:
+        groups.append(" ".join(current).strip())
+    return [g for g in groups if g]
+
+
+def _single_direction_text(value):
+    out = []
+    for raw_line in str(value or "").splitlines():
+        if not raw_line.strip():
+            if out and out[-1] != "":
+                out.append("")
+            continue
+        out.extend(_single_direction_lines(raw_line))
+    while out and out[-1] == "":
+        out.pop()
+    return "\n".join(out).strip()
+
+
+def _break_phone_autolink(match):
+    s = match.group(0)
+    digit_seen = 0
+    chars = []
+    inserted = False
+    for ch in s:
+        chars.append(ch)
+        if ch.isdigit():
+            digit_seen += 1
+            if digit_seen == 3 and not inserted:
+                chars.append(_WORD_JOINER)
+                inserted = True
+    return "".join(chars)
+
+
+def _sanitize_card_body(value):
+    """CTA card body must contain no clickable URL/domain/phone; only the CTA button may link."""
+    s = _strip_search_source_disclosure(value)
+    # Markdown links -> visible label only.
+    s = re.sub(r"\[([^\]]+)\]\(\s*https?://[^)]+\)", r"\1", s, flags=re.I)
+    # Remove explicit URLs.
+    s = re.sub(r"(?i)\bhttps?://[^\s<>()]+", "", s)
+    s = re.sub(r"(?i)\bwww\.[^\s<>()]+", "", s)
+
+    # Break domain/email autolinking while preserving readable text.
+    s = re.sub(
+        r"(?i)\b(?:[A-Z0-9-]+\.)+(?:com|net|org|io|app|shop|store|co|kw|sa|ae|qa|bh|om|uk|cn|de|fr|it|es)(?:\.[A-Z]{2})?\b",
+        lambda m: m.group(0).replace(".", "." + _WORD_JOINER),
+        s,
+    )
+    s = re.sub(
+        r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b",
+        lambda m: m.group(0).replace("@", "@" + _WORD_JOINER).replace(".", "." + _WORD_JOINER),
+        s,
+        flags=re.I,
+    )
+    # Break phone-like sequences of 7+ digits without changing what the user reads.
+    s = re.sub(r"(?<!\w)\+?\d[\d\s().-]{5,}\d(?!\w)", _break_phone_autolink, s)
+
+    s = re.sub(r"[ \t]{2,}", " ", s)
+
+    # If a local price and original foreign price are on one line, separate them cleanly.
+    normalized_lines = []
+    for line in s.splitlines():
+        line = line.strip()
+        m = re.match(r"^(.*?)\s*(\([^()]*\b[A-Z]{3}\b[^()]*\))\s*$", line)
+        if m and m.group(1).strip():
+            normalized_lines.append(m.group(1).strip())
+            normalized_lines.append(m.group(2).strip())
+        else:
+            normalized_lines.append(line)
+    return _single_direction_text("\n".join(normalized_lines))
+
+
+def _prepare_user_message(value):
+    return _single_direction_text(_strip_search_source_disclosure(value))
+
+
 def send_whatsapp_text(to,text,bot_id):
     url=f"{GRAPH_URL}/{bot_id}/messages"; h={"Authorization":f"Bearer {WHATSAPP_TOKEN}","Content-Type":"application/json"}
-    payload={"messaging_product":"whatsapp","to":to,"type":"text","text":{"body":text[:3900]}}
+    safe_text = _prepare_user_message(text)
+    payload={"messaging_product":"whatsapp","to":to,"type":"text","text":{"body":safe_text[:3900]}}
     try: return requests.post(url,json=payload,headers=h,timeout=15).ok
     except: return False
 
 def send_whatsapp_cta(to,body,link,bot_id,title):
     url=f"{GRAPH_URL}/{bot_id}/messages"; h={"Authorization":f"Bearer {WHATSAPP_TOKEN}","Content-Type":"application/json"}
-    payload={"messaging_product":"whatsapp","to":to,"type":"interactive","interactive":{"type":"cta_url","body":{"text":body[:1024]},"action":{"name":"cta_url","parameters":{"display_text":title[:20],"url":link}}}}
+    safe_body = _sanitize_card_body(body)
+    safe_title = re.sub(r"(?i)^https?://|^www\.", "", str(title or "").strip())
+    payload={"messaging_product":"whatsapp","to":to,"type":"interactive","interactive":{"type":"cta_url","body":{"text":safe_body[:1024]},"action":{"name":"cta_url","parameters":{"display_text":safe_title[:20],"url":link}}}}
     try: return requests.post(url,json=payload,headers=h,timeout=15).ok
     except: return False
 
 def send_whatsapp_buttons(to, body, buttons, bot_id):
     url=f"{GRAPH_URL}/{bot_id}/messages"; h={"Authorization":f"Bearer {WHATSAPP_TOKEN}","Content-Type":"application/json"}
     btns=[{"type":"reply","reply":{"id":b["id"],"title":b["title"][:20]}} for b in buttons[:3]]
-    payload={"messaging_product":"whatsapp","to":to,"type":"interactive","interactive":{"type":"button","body":{"text":body[:1024]},"action":{"buttons":btns}}}
+    safe_body = _prepare_user_message(body)
+    payload={"messaging_product":"whatsapp","to":to,"type":"interactive","interactive":{"type":"button","body":{"text":safe_body[:1024]},"action":{"buttons":btns}}}
     try: return requests.post(url,json=payload,headers=h,timeout=15).ok
     except: return False
 
 def send_language_choice(to, bot_id):
-    body = "🌐 اختر لغتك المفضلة\nChoose your preferred language"
-    send_whatsapp_buttons(to, body, [{"id": "lang_ar", "title": "العربية 🇰🇼"},{"id": "lang_en", "title": "English 🇬🇧"}], bot_id)
+    cc = infer_country_from_phone(to)
+    arabic_markets = {"kw","sa","ae","bh","qa","om","iq","jo","lb","sy","ye","ps","eg","ma","dz","tn","ly","sd"}
+    body = "🌐 اختر اللغة" if cc in arabic_markets else "🌐 Choose language"
+    send_whatsapp_buttons(
+        to,
+        body,
+        [{"id": "lang_ar", "title": "العربية"},{"id": "lang_en", "title": "English"}],
+        bot_id,
+    )
 
 def send_location_request(to, bot_id, lang="ar", refresh=False):
-    if lang == "en":
-        body = "📍 Please share your current location so I can show stores and prices near you."
-        if refresh:
-            body = "📍 It has been 3 days. Please update your current location before the next search."
-    else:
-        body = "📍 دز موقعك الحالي عشان أطلع لك المتاجر والأسعار في البلد والمنطقة اللي أنت فيها."
-        if refresh:
-            body = "📍 مرّت 3 أيام. دز موقعك الحالي من جديد قبل البحث عشان أتأكد من البلد والمنطقة."
-    url=f"{GRAPH_URL}/{bot_id}/messages"
-    h={"Authorization":f"Bearer {WHATSAPP_TOKEN}","Content-Type":"application/json"}
-    payload={
-        "messaging_product":"whatsapp",
-        "to":to,
-        "type":"interactive",
-        "interactive":{
-            "type":"location_request_message",
-            "body":{"text":body[:1024]},
-            "action":{"name":"send_location"}
-        }
-    }
-    try:
-        r=requests.post(url,json=payload,headers=h,timeout=15)
-        if r.ok:
-            return True
-        print(f"LOCATION REQUEST ERR {r.status_code}: {r.text[:300]}")
-    except Exception as e:
-        print(f"LOCATION REQUEST ERR: {e}")
-    # fallback if the interactive location request is not available for the account/version
-    return send_whatsapp_text(to, body + ("\n\nمن واتساب: + ثم الموقع." if lang == "ar" else "\n\nIn WhatsApp: tap +, then Location."), bot_id)
+    """Deprecated UI hook: market now comes from the WhatsApp number prefix."""
+    ensure_market_from_phone(to)
+    return True
+
 
 def route_pending_after_location(phone):
     pending = PENDING_ONBOARDING.pop(phone, None)
@@ -3310,18 +3439,13 @@ async def receive(request: Request, background_tasks: BackgroundTasks):
             background_tasks.add_task(process_location_message,msg,bot_id)
             return {"status":"ok"}
 
-        # First use: keep the request, ask for language, then ask for location.
+        # First use: ask only for language. Market comes automatically from the phone prefix.
         if from_number not in USER_LANG:
             cache_pending_message(from_number, msg, bot_id)
             background_tasks.add_task(asyncio.to_thread, send_language_choice, from_number, bot_id)
             return {"status":"ok"}
 
-        # Every 3 days: pause the request and refresh location before searching.
-        if not location_is_valid(from_number):
-            cache_pending_message(from_number, msg, bot_id)
-            refresh = bool(USER_LOCATION_TS.get(from_number, 0))
-            background_tasks.add_task(asyncio.to_thread, send_location_request, from_number, bot_id, USER_LANG.get(from_number,"ar"), refresh)
-            return {"status":"ok"}
+        ensure_market_from_phone(from_number)
 
         if typ=="image":
             IMAGE_BUFFER[from_number]["images"].append(msg); IMAGE_BUFFER[from_number]["time"]=time.time(); IMAGE_BUFFER[from_number]["bot_id"]=bot_id
@@ -3516,8 +3640,9 @@ def process_interactive_message(message, bot_id):
         return
     lang = "ar" if btn_id=="lang_ar" else "en"
     USER_LANG[from_number]=lang
+    ensure_market_from_phone(from_number)
     save_user_preferences(from_number)
-    send_location_request(from_number, bot_id, lang, refresh=False)
+    route_pending_after_location(from_number)
 
 async def process_image_buffer(from_number):
     await asyncio.sleep(BUFFER_SECONDS)
@@ -3866,6 +3991,19 @@ Return ONLY a JSON array of strings in the same order, no markdown."""
                 UI_TRANSLATE_CACHE[(lang, original)] = shown
     return [r or c for r, c in zip(result, clean)]
 
+
+def _price_display_lines(price_text):
+    s = re.sub(r"\s+", " ", str(price_text or "")).strip()
+    if not s:
+        return []
+    m = re.match(r"^(.*?)\s*\(([^()]*)\)\s*$", s)
+    if m:
+        main = m.group(1).strip()
+        original = m.group(2).strip()
+        return [f"💰 {main}", f"({original})"] if original else [f"💰 {main}"]
+    return [f"💰 {s}"]
+
+
 def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
     """v76: CTA-only، مختصر، بأعلام الدول، وترجمة للواجهة فقط.
 
@@ -3973,13 +4111,11 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption=""):
             title = title[:102].rstrip(" ,-|—") + "…"
         price_txt = _lens_price_text_local(m, market_rank, lang)
 
-        # شكل مختصر وواضح: العلم + المتجر، المنتج، السعر.
+        # Short, one-direction card. Search source is never shown.
         head = f"{flag} {source}" if source else flag
-        body = f"{head}\n{title}"
-        if price_txt:
-            body += f"\n💰 {price_txt}"
-        else:
-            body += f"\n💰 {no_price}"
+        body_lines = _single_direction_lines(head) + _single_direction_lines(title)
+        body_lines += _price_display_lines(price_txt or no_price)
+        body = "\n".join(body_lines)
 
         url = (m.get("link") or "").strip()
         button_source = source or ("المتجر" if lang == "ar" else "Store")
@@ -4189,29 +4325,29 @@ SIMILAR_MAX_STORES = max(MAX_STORES, int(os.environ.get("SIMILAR_MAX_STORES", "1
 # Missing v77.7 text UI keys are added without replacing any existing v79/Lens messages.
 MSG["ar"].update({
     "ask_global_after_local": "لقيت لك النتائج المحلية فوق 👆\nتبي أدور لك نفس المنتج في المتاجر العالمية أيضاً؟ 🌍",
-    "compare_searching": "⚖️ طلبك عام بدون ماركة محددة.. أسوي لك مقارنة بين أفضل البراندات المتوفرة!",
-    "pick_prompt": "اختر منتجاً من القائمة وأدور لك أفضل الأسعار المتوفرة 👇",
+    "compare_searching": "⚖️ طلبك عام.. أقارن لك أفضل الخيارات.",
+    "pick_prompt": "👇 اختر المنتج اللي تبيه.",
     "list_button": "اختر منتج",
-    "cart_comparing": "🧺 لقيت {c} أصناف.. أقارن لك السلة كاملة في المتاجر وأشوف وين تطلع أوفر وأسهل!",
-    "cart_pick_prompt": "اختر متجراً وأرسل لك كل أصنافك بروابطها المباشرة داخله — طلبية وحدة وسلة وحدة 👇",
+    "cart_comparing": "🧺 أقارن {c} أصناف في المتاجر.",
+    "cart_pick_prompt": "👇 اختر متجر للسلة.",
     "cart_store_button": "اختر متجر",
     "cart_total": "💰 مجموع السلة: {t}",
-    "cart_expired": "قائمة السلة قدمت 😅 دز قائمة الأصناف من جديد وأجهزها لك على طول.",
+    "cart_expired": "⏳ انتهت السلة. دز الأصناف من جديد.",
     "cart_session_tip": "💡 المهم: أضف الصنف الأول من الزر، وبعدها دوّر باقي الأصناف من بحث المتجر بنفس الصفحة — لا ترجع لواتساب بين كل صنف عشان تتراكم كلها في سلة وحدة.",
     "cart_plan_total": "💰 مجموع الخطة كاملة: {t}",
     "cart_not_anywhere": "⛔ ما لقيتها في أي متجر بالقائمة: {items}",
-    "chat_redirect": "أنا حاضر ومعك! 🙌\nدز اسم المنتج أو صورته وأدور لك أفضل الأسعار، أو اكتب طلب الخدمة اللي تحتاجها 🛒",
+    "chat_redirect": "👋 دز اسم المنتج أو صورته، أو اكتب الخدمة المطلوبة.",
 })
 MSG["en"].update({
     "ask_global_after_local": "Found local results above 👆 Want me to also search international stores for the same product? 🌍",
-    "compare_searching": "⚖️ Your request is generic, so I’m comparing the best brands/options first!",
-    "pick_prompt": "Pick a product and I’ll search the best available prices 👇",
+    "compare_searching": "⚖️ Comparing the best options first.",
+    "pick_prompt": "👇 Pick the product you want.",
     "list_button": "Pick product",
-    "cart_comparing": "🧺 Found {c} items.. comparing your full basket across stores to find the easiest best-value option!",
-    "cart_pick_prompt": "Pick a store and I’ll send all your items with direct links inside it — one order, one cart 👇",
+    "cart_comparing": "🧺 Comparing {c} items across stores.",
+    "cart_pick_prompt": "👇 Pick a store for the basket.",
     "cart_store_button": "Pick store",
     "cart_total": "💰 Basket total: {t}",
-    "cart_expired": "That basket list expired 😅 send your items again and I’ll rebuild it.",
+    "cart_expired": "⏳ Basket expired. Send the items again.",
     "cart_session_tip": "💡 Add the first item from the button, then find the rest using the store search in the same page so they stay in one cart.",
     "cart_plan_total": "💰 Full plan total: {t}",
     "cart_not_anywhere": "⛔ Not found in any listed store: {items}",
@@ -5472,7 +5608,9 @@ def send_text_lens_style_results(from_number, txt, urls, bot_id, lang, query):
         if len(title) > 105:
             title = title[:102].rstrip(" ,-|—") + "…"
         shown_price = _text_price_local(raw_price, rank, lang) if raw_price else ""
-        body = f"{flag} {store}\n{title}\n💰 {shown_price or no_price}"
+        body_lines = _single_direction_lines(f"{flag} {store}") + _single_direction_lines(title)
+        body_lines += _price_display_lines(shown_price or no_price)
+        body = "\n".join(body_lines)
         send_whatsapp_cta(from_number, body[:1000], item["link"], bot_id, f"🛒 {store[:18]}")
 
     LAST_SEARCH[from_number] = {"product": query}
@@ -5919,8 +6057,7 @@ def process_text_message(message,bot_id,onboarding_checked=False):
         if not onboarding_checked:
             if from_number not in USER_LANG:
                 cache_pending_message(from_number, message, bot_id); send_language_choice(from_number, bot_id); return
-            if not location_is_valid(from_number):
-                cache_pending_message(from_number, message, bot_id); send_location_request(from_number, bot_id, USER_LANG.get(from_number,"ar"), bool(USER_LOCATION_TS.get(from_number,0))); return
+        ensure_market_from_phone(from_number)
         activate_market(from_number)
         user_text=message["text"]["body"]
         cmd=re.sub(r"[^\w\u0600-\u06FF]","",user_text.strip().lower())
@@ -5981,23 +6118,22 @@ def process_text_message(message,bot_id,onboarding_checked=False):
             pass
 
 def process_location_message(message, bot_id):
+    """GPS is intentionally ignored for market selection; phone prefix stays authoritative."""
     from_number = message["from"]
     load_user_preferences(from_number)
-    lat = message["location"]["latitude"]; lng = message["location"]["longitude"]
-    geo = reverse_geocode_market(lat, lng)
-    market = market_for_user(from_number)
-    market.update(geo)
-    market.update({"lat":lat,"lng":lng})
-    USER_MARKET[from_number]=market
-    USER_LOCATION_TS[from_number]=time.time()
-    MARKET_CTX.value=market
-    save_user_preferences(from_number)
-    print(f"USER MARKET UPDATED: {from_number} -> {market}; valid_for_hours={LOCATION_TTL_SECONDS/3600:.0f}")
+    market = ensure_market_from_phone(from_number)
     lang = USER_LANG.get(from_number, "ar")
-    city = market.get("city") or market.get("country_name") or market.get("country", "").upper()
-    msg = f"تم حفظ موقعك: {city} ✅\nراح أطلب تحديثه بعد 3 أيام." if lang == "ar" else f"Location saved: {city} ✅\nI’ll ask you to update it again after 3 days."
-    send_whatsapp_text(from_number, msg, bot_id)
+    cc = (market.get("country") or "").lower()
+    country = market.get("country_name") or cc.upper()
+    if lang == "ar":
+        country = (globals().get("COUNTRY_NAMES_AR") or {}).get(cc, country)
+    if from_number not in USER_LANG:
+        send_language_choice(from_number, bot_id)
+    else:
+        msg = f"📍 السوق المحلي: {country}" if lang == "ar" else f"📍 Local market: {country}"
+        send_whatsapp_text(from_number, msg, bot_id)
     route_pending_after_location(from_number)
 
+
 @app.get("/")
-async def health(): return {"status":"v79 DEDUPE-STORE NO-AUTO-MAP LOCAL5-US4-CN4-SHEIN", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "location_ttl_hours":LOCATION_TTL_SECONDS//3600}
+async def health(): return {"status":"v79 CLEAN UI PHONE MARKET", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "market_source":"phone_prefix"}
