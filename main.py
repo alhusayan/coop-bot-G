@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v85-global-geo-local-power-20260821"
+BUILD_ID = "v85.1-strict-local-geo-20260821"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("GLOBAL GEO -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES")
@@ -3755,7 +3755,8 @@ def is_us_market_result(item):
     local_codes = set(country_currency_codes())
     if "USD" in _explicit_currency_codes(item) and "USD" not in local_codes:
         return True
-    return _search_geo_country(item) == "us"
+    # Search geo (gl/Lens country) is only where Google was queried, not proof that the merchant is American.
+    return False
 
 
 def is_china_market_result(item):
@@ -3768,11 +3769,12 @@ def is_china_market_result(item):
     local_codes = set(country_currency_codes())
     if ("CNY" in _explicit_currency_codes(item) and "CNY" not in local_codes) or bool(re.search(r"\bRMB\b|人民币|中国|china", hay, flags=re.I)):
         return True
-    return _search_geo_country(item) == "cn"
+    # Search geo (gl/Lens country) is only where Google was queried, not proof that the merchant is Chinese.
+    return False
 
 
 def is_local_lens_result(item):
-    """Worldwide local-market classifier using explicit geo-target + ccTLD + country/path + local currencies."""
+    """Strict worldwide local-market classifier using merchant evidence, never search-geo alone."""
     m = current_market()
     cc = (m.get("country") or DEFAULT_COUNTRY).lower()
     explicit = _explicit_market_country(item)
@@ -3798,17 +3800,18 @@ def is_local_lens_result(item):
     if codes & local_codes:
         return True
     # For symbol-only prices ($/¥/£), resolve using local market context instead of assuming USD/JPY/GBP.
-    price_blob = " ".join(str((item or {}).get(k) or "") for k in ("price", "price_text", "currency"))
+    price_blob = " ".join(str((item or {}).get(k) or "") for k in ("price", "price_text", "currency")).strip()
     if price_blob:
-        local_primary = m.get("currency") or ""
-        detected = detect_currency_code(price_blob, local_primary, cc)
+        # Currency is LOCAL evidence only when it is actually present in the result.
+        # Never feed the local currency as a fallback here, otherwise a blank/unknown
+        # price returned by gl=KW gets silently interpreted as KWD and becomes falsely local.
+        detected = detect_currency_code(price_blob, "", cc)
         if detected and detected in local_codes:
             return True
-    # Last-resort soft signal: Google/Lens was explicitly searched in this country.
-    # Strong US/China hosts are classified before this in result_market_rank, so this does not
-    # turn amazon.com/AliExpress into local stores in USD-local markets.
-    if _search_geo_country(item) == cc:
-        return True
+    # IMPORTANT: Google/Lens search geo is NOT merchant nationality.
+    # A result returned by gl=KW can still be Italian, German, etc. Therefore an ambiguous
+    # generic-domain result is never labelled LOCAL unless one of the hard/merchant signals
+    # above confirms it (ccTLD/path/country text/known local merchant/local currency).
     return False
 
 
@@ -3827,9 +3830,7 @@ def is_foreign_lens_result(item):
     local_codes = set(country_currency_codes(cc))
     if codes and not (codes & local_codes):
         return True
-    search_geo = _search_geo_country(item)
-    if search_geo and search_geo != cc:
-        return True
+    # Search geo is not seller nationality, so never use it alone as foreign proof either.
     return bool(host and (_host_matches_any(host, US_STORE_HINTS) or _host_matches_any(host, CHINA_STORE_HINTS)))
 
 
