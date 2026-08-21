@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v82-10lang-phone-prefix-market-20260821"
+BUILD_ID = "v83-smart-pick-query-multilang-20260821"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE/TEXT -> FLAGS + CLEAR LOCAL PRICES + LOCAL/US/CHINA")
@@ -4513,6 +4513,31 @@ def process_interactive_message(message, bot_id):
             send_whatsapp_text(from_number, T(lang_, "cart_expired"), bot_id)
         return
 
+    # v83: recommendation list selection -> AI-normalized SPECIFIC product search.
+    # Do NOT feed the WhatsApp display text back through generic classification.
+    if btn_id.startswith("pick_"):
+        item = PENDING_BRAND_PICKS.get(from_number) or {}
+        lang_ = item.get("lang") or USER_LANG.get(from_number, "ar")
+        if not item or time.time() - float(item.get("ts") or 0) > GLOBAL_PENDING_TTL:
+            PENDING_BRAND_PICKS.pop(from_number, None)
+            send_whatsapp_text(from_number, U(lang_, "expired"), bot_id)
+            return
+        raw_idx = btn_id[5:]
+        pick_idx = int(raw_idx) if raw_idx.isdigit() else -1
+        options = item.get("options") or []
+        if not (0 <= pick_idx < len(options)):
+            send_whatsapp_text(from_number, U(lang_, "expired"), bot_id)
+            return
+        activate_market(from_number)
+        picked = _clean_pick_label(options[pick_idx])
+        original = item.get("original_query") or ""
+        search_query = ai_recommendation_pick_search_query(original, picked, lang_)
+        # Prevent the selection from being reclassified as another generic request.
+        LAST_SEARCH[from_number] = {"product": search_query}
+        PENDING_BRAND_PICKS.pop(from_number, None)
+        execute_product_search(from_number, search_query, item.get("bot_id") or bot_id, lang_)
+        return
+
     # Shared buttons: text77 uses text77 follow-ups; image/Lens keeps v79 handlers exactly.
     if btn_id in ("global_yes", "nf_global"):
         item = _pop_pending_global(from_number)
@@ -7890,32 +7915,54 @@ def is_service_request(text):
     q = normalize_ar(str(text or ""))
     return any(normalize_ar(w) in q for w in SERVICE_WORDS)
 
-BRAND_COMPARE_SYSTEM = """أنت خبير مقارنات منتجات مثل مواقع «أفضل 10» ومواقع المراجعات، وخبير أحذية وملابس أطفال وتغذية أيضاً.
-المستخدم طلب منتجاً عاماً بدون ماركة — لأي فئة كانت (إلكترونيات، أحذية، ملابس، رياضة، أثاث، أكل، جبن، حليب، رز، معدات...). ابحث في Google عن مقارنات ومراجعات حديثة لهذه الفئة
-واصنع مقارنة قصيرة جداً بين 3-4 خيارات (براند + موديل/نوع) فقط.
+COMPARE_UI = {
+    "ar": {"title":"مقارنة أفضل", "overall":"الأفضل عموماً", "quality":"أفضل جودة", "value":"أفضل قيمة مقابل السعر", "fourth":"ميزة إضافية مهمة"},
+    "en": {"title":"Best options comparison", "overall":"Best overall", "quality":"Best quality", "value":"Best value", "fourth":"Another important strength"},
+    "fr": {"title":"Comparatif des meilleurs choix", "overall":"Meilleur choix global", "quality":"Meilleure qualité", "value":"Meilleur rapport qualité-prix", "fourth":"Autre avantage important"},
+    "es": {"title":"Comparativa de las mejores opciones", "overall":"Mejor en general", "quality":"Mejor calidad", "value":"Mejor relación calidad-precio", "fourth":"Otra ventaja importante"},
+    "pt": {"title":"Comparação das melhores opções", "overall":"Melhor no geral", "quality":"Melhor qualidade", "value":"Melhor custo-benefício", "fourth":"Outra vantagem importante"},
+    "tr": {"title":"En iyi seçeneklerin karşılaştırması", "overall":"Genel olarak en iyi", "quality":"En iyi kalite", "value":"En iyi fiyat-performans", "fourth":"Diğer önemli avantaj"},
+    "ru": {"title":"Сравнение лучших вариантов", "overall":"Лучший в целом", "quality":"Лучшее качество", "value":"Лучшее соотношение цены и качества", "fourth":"Другое важное преимущество"},
+    "zh": {"title":"最佳选择对比", "overall":"综合最佳", "quality":"品质最佳", "value":"性价比最佳", "fourth":"其他重要优势"},
+    "hi": {"title":"सर्वश्रेष्ठ विकल्पों की तुलना", "overall":"कुल मिलाकर सर्वश्रेष्ठ", "quality":"सर्वश्रेष्ठ गुणवत्ता", "value":"पैसे के हिसाब से सर्वोत्तम", "fourth":"एक और महत्वपूर्ण खूबी"},
+    "ur": {"title":"بہترین آپشنز کا موازنہ", "overall":"مجموعی طور پر بہترین", "quality":"بہترین معیار", "value":"قیمت کے لحاظ سے بہترین", "fourth":"ایک اور اہم خوبی"},
+}
 
-الشكل الإلزامي بالضبط — لا تخرج عنه أبداً:
-⚖️ مقارنة أفضل [الفئة]
+def brand_compare_system(lang):
+    """Build comparison prompt in the user's UI language so Arabic labels never leak into other languages."""
+    ui = COMPARE_UI.get(lang) or COMPARE_UI["en"]
+    lang_name = LANGUAGE_NAMES_EN.get(lang, "English")
+    return f"""You are an expert product-comparison assistant similar to professional Best-Of review sites.
+The user made a GENERIC product request without a specific brand. Compare 3-4 concrete options (brand + model/type) only.
 
-🏆 الأفضل عموماً: [براند + موديل] — [سبب في سطر واحد فقط]
+CRITICAL LANGUAGE RULE:
+- ALL human-readable text MUST be written ONLY in {lang_name}.
+- Do not use Arabic words unless {lang_name} is Arabic.
+- Brand names, model names, sizes and SKUs may remain in their normal original/Latin form.
+- Never mix interface languages in the same answer.
 
-💎 أفضل جودة: [براند + موديل] — [سبب في سطر واحد فقط]
+Use EXACTLY this visible structure, with these localized labels:
+⚖️ {ui['title']} [category]
 
-💰 أفضل قيمة مقابل السعر: [براند + موديل] — [سبب في سطر واحد فقط]
+🏆 {ui['overall']}: [brand + model] — [one short reason]
 
-✨ [معيار رابع يهم هذه الفئة]: [براند + موديل] — [سبب في سطر واحد فقط]
+💎 {ui['quality']}: [brand + model] — [one short reason]
 
-OPTIONS: [براند موديل 1] | [براند موديل 2] | [براند موديل 3] | [براند موديل 4]
+💰 {ui['value']}: [brand + model] — [one short reason]
 
-قواعد صارمة جداً - ممنوع مخالفتها:
-1- اترك سطر فارغ بين كل توصية والتالية.
-2- ممنوع تماماً كتابة أي سطر يبدأ بـ 📦 أو ✅ أو • أو كلمة "متوفر" أو ذكر متجر أو سعر. فقط المقارنة.
-3- ممنوع كتابة تفاصيل المتاجر أو الأسعار في هذه الرسالة.
-4- للمواد الغذائية (جبن، حليب، رز...): استخدم معايير الطعم، الجودة، القيمة، التقييمات، والتوفر المحلي.
-5- لا تكرر نفس الموديل مرتين.
-6- سطر OPTIONS إلزامي وبأسماء قابلة للبحث (مثل: Kraft Cheddar, Almarai Cheese, Puck Cheese | أو Nike Court Borough, Adidas Tensaur...).
-7- بدون روابط، بدون Markdown.
-لغة الرد: حسب تعليمات رسالة المستخدم."""
+✨ [localized criterion relevant to this category]: [brand + model] — [one short reason]
+
+OPTIONS: [searchable brand model 1] | [searchable brand model 2] | [searchable brand model 3] | [searchable brand model 4]
+
+Strict rules:
+1) Leave one blank line between recommendations.
+2) Never output store names, availability, prices or shopping-result bullets here.
+3) For food, compare taste, quality, value and reviews.
+4) Never repeat the same model.
+5) OPTIONS is mandatory and MUST contain clean searchable product identities, preferably brand + exact model in their standard market spelling.
+6) No links and no Markdown.
+7) The OPTIONS line may stay in Latin script for brand/model names, but all descriptions and labels must be in {lang_name}.
+"""
 
 def _options_from_compare_lines(txt):
     """v74.9: استرجاع ذكي — إذا Gemini نسي سطر OPTIONS نستخرج الخيارات من أسطر
@@ -7969,6 +8016,47 @@ def _recommendation_pick_search_query(original_query, picked):
     return " ".join(f"{cleaned} {choice}".split()[:24])
 
 
+def ai_recommendation_pick_search_query(original_query, picked, lang="ar"):
+    """Turn a recommendation-list pick into one clean product-search identity using Gemini FAST.
+
+    Example: original='टेनिस रैकेट', picked='Yonex EZONE 100'
+    -> 'Yonex EZONE 100 tennis racket'
+
+    This is intentionally a plain/non-search AI call, so it is fast and does not perform an extra web search.
+    """
+    original = re.sub(r"\s+", " ", str(original_query or "")).strip()
+    choice = _clean_pick_label(picked)
+    if not choice:
+        return original
+    system = """You normalize a user's selected shopping recommendation into ONE high-precision product search query.
+Return ONLY the final search query on one line, no labels, no explanation, no quotes.
+Rules:
+- The selected option is authoritative. Keep its exact brand and model.
+- Add only the minimum product-category/context words from the original request that help shopping search accuracy.
+- Remove recommendation/question words such as best, recommend, compare, I want, show me.
+- Never turn it into a sentence or question.
+- Never add a different model, size, gender, generation or specification unless it was explicitly present in the selected option or original request.
+- Prefer the standard international/English product-category wording for search-engine accuracy while preserving brand/model exactly.
+Examples:
+Original: tennis racket | Pick: Yonex EZONE 100 -> Yonex EZONE 100 tennis racket
+Original: chaussures de tennis homme | Pick: ASICS Solution Speed FF 3 -> ASICS Solution Speed FF 3 men's tennis shoes
+Original: बच्चों का टेनिस रैकेट | Pick: Babolat Pure Aero Junior 25 -> Babolat Pure Aero Junior 25 junior tennis racket
+"""
+    user = f"Original generic request: {original}\nSelected recommendation: {choice}"
+    try:
+        txt, _ = text77_call_gemini([{"text": user}], system=system, use_search=False)
+        q = re.sub(r"^[\s\"'`]+|[\s\"'`]+$", "", (txt or "").splitlines()[0].strip()) if txt else ""
+        q = re.sub(r"^(?:SEARCH_QUERY|QUERY)\s*:\s*", "", q, flags=re.I).strip()
+        if q and len(q) <= 180 and normalize_ar(choice).lower() in normalize_ar(q).lower():
+            print(f"SMART PICK QUERY: original={original!r} picked={choice!r} -> {q!r}")
+            return q
+    except Exception as e:
+        print(f"SMART PICK QUERY ERR: {e}")
+    fallback = _recommendation_pick_search_query(original, choice)
+    print(f"SMART PICK QUERY FALLBACK: {fallback!r}")
+    return fallback
+
+
 def _pick_description(original_query, lang="ar"):
     q = re.sub(r"\s+", " ", str(original_query or "")).strip()
     for pat in (
@@ -7992,7 +8080,7 @@ def run_brand_comparison(from_number, query, bot_id, lang):
     txt = ""
     options = []
     for attempt in (1, 2):
-        txt, _ = text77_call_gemini([{"text": prompt}], system=BRAND_COMPARE_SYSTEM)
+        txt, _ = text77_call_gemini([{"text": prompt}], system=brand_compare_system(lang))
         if not txt:
             print(f"BRAND COMPARE ATTEMPT {attempt}: empty")
             continue
@@ -8293,4 +8381,4 @@ def process_location_message(message, bot_id):
     route_pending_after_location(from_number)
 
 @app.get("/")
-async def health(): return {"status":"v82 10-LANG PHONE-PREFIX-MARKET LOCAL5-US4-CN4-SHEIN", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "market_source":"phone_prefix", "languages":["ar","en","fr","es","pt","tr","ru","zh","hi","ur"]}
+async def health(): return {"status":"v83 SMART-PICK + 10-LANG PHONE-PREFIX-MARKET LOCAL5-US4-CN4-SHEIN", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "market_source":"phone_prefix", "languages":["ar","en","fr","es","pt","tr","ru","zh","hi","ur"]}
