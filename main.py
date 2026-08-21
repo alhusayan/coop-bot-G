@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
 import os, re, time, base64, requests, json, asyncio, urllib.parse, hashlib, sqlite3, threading
 from collections import deque, defaultdict
-from concurrent.futures import ThreadPoolExecutor, wait
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v79-multilang-more-results-ai-exact-20260821"
+BUILD_ID = "v79-fast-ai-exact-20260821"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE/TEXT -> FLAGS + CLEAR LOCAL PRICES + LOCAL/US/CHINA")
@@ -50,6 +50,27 @@ LENS_POOL = ThreadPoolExecutor(max_workers=4)
 LENS_HTTP_POOL = ThreadPoolExecutor(max_workers=12)
 OLD_LAYER_DUPLICATES = max(1, int(os.environ.get("OLD_LAYER_DUPLICATES", "2")))
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+
+_HTTP_LOCAL = threading.local()
+
+def _http_session():
+    """Per-thread pooled session; safe with the existing thread pools."""
+    sess = getattr(_HTTP_LOCAL, "session", None)
+    if sess is None:
+        sess = requests.Session()
+        try:
+            adapter = requests.adapters.HTTPAdapter(
+                pool_connections=24,
+                pool_maxsize=24,
+                max_retries=0,
+            )
+            sess.mount("https://", adapter)
+            sess.mount("http://", adapter)
+        except Exception:
+            pass
+        _HTTP_LOCAL.session = sess
+    return sess
+
 
 def env_bool(name, default=False):
     value = os.environ.get(name)
@@ -117,8 +138,8 @@ LENS_MIN_MATCHES = max(3, int(os.environ.get("LENS_MIN_MATCHES", "6")))
 LENS_PARALLEL_WITH_VISION = env_bool("LENS_PARALLEL_WITH_VISION", True)
 LENS_RESULT_LIMIT = max(12, int(os.environ.get("LENS_RESULT_LIMIT", "40")))
 # v73: حد زمني واضح للينز. تمريرات البلدان تعمل بالتوازي، وليس واحدة وراء الثانية.
-LENS_HTTP_TIMEOUT_SECONDS = max(6, int(os.environ.get("LENS_HTTP_TIMEOUT_SECONDS", "15")))
-LENS_TOTAL_TIMEOUT_SECONDS = max(8, int(os.environ.get("LENS_TOTAL_TIMEOUT_SECONDS", "22")))
+LENS_HTTP_TIMEOUT_SECONDS = max(6, int(os.environ.get("LENS_HTTP_TIMEOUT_SECONDS", "12")))
+LENS_TOTAL_TIMEOUT_SECONDS = max(8, int(os.environ.get("LENS_TOTAL_TIMEOUT_SECONDS", "18")))
 LENS_IMAGE_TTL = max(120, int(os.environ.get("LENS_IMAGE_TTL_SECONDS", "600")))
 LENS_IMAGE_STORE = {}
 LENS_IMAGE_LOCK = threading.Lock()
@@ -1386,7 +1407,7 @@ def _serpapi_lens_request(public_url, lens_type, country, auto_crop, query_hint)
     if query_hint and (lens_type in (None, "", "all", "visual_matches", "products")):
         params["q"] = query_hint[:120]
     try:
-        r = requests.get("https://serpapi.com/search.json", params=params, timeout=(5, LENS_HTTP_TIMEOUT_SECONDS))
+        r = _http_session().get("https://serpapi.com/search.json", params=params, timeout=(4, LENS_HTTP_TIMEOUT_SECONDS))
         if r.status_code >= 400:
             print(f"GOOGLE LENS HTTP {r.status_code} type={lens_type or 'all'} country={country or '-'}: {r.text[:300]}")
             return []
@@ -1784,16 +1805,43 @@ def rank_verified_by_image(source_b64, source_mime, verified):
     """تم تعطيل فلتر Gemini البصري؛ Lens يحدد الاسم أولاً، والأسعار تبقى من محرك البحث المجرب."""
     return verified
 
+_FINAL_URL_CACHE = {}
+_FINAL_URL_CACHE_LOCK = threading.Lock()
+_FINAL_URL_CACHE_TTL = 1800
+
 def get_final_url(url: str):
-    if not url or not url.startswith(("http://", "https://")): return ""
+    if not url or not url.startswith(("http://", "https://")):
+        return ""
+    now = time.time()
+    with _FINAL_URL_CACHE_LOCK:
+        hit = _FINAL_URL_CACHE.get(url)
+        if hit and now - hit[0] < _FINAL_URL_CACHE_TTL:
+            return hit[1]
     try:
-        r = requests.get(url, allow_redirects=True, timeout=12, stream=True, headers=HEADERS)
+        r = _http_session().get(
+            url,
+            allow_redirects=True,
+            timeout=(3, FINAL_URL_TIMEOUT),
+            stream=True,
+            headers=HEADERS,
+        )
         final = r.url or url
         r.close()
-        return final if final.startswith(("http://", "https://")) else url
-    except: return url
+        if not final.startswith(("http://", "https://")):
+            final = url
+    except Exception:
+        final = url
+    with _FINAL_URL_CACHE_LOCK:
+        if len(_FINAL_URL_CACHE) > 4000:
+            _FINAL_URL_CACHE.clear()
+        _FINAL_URL_CACHE[url] = (now, final)
+    return final
 
-def resolve_all(uris): return list(RESOLVER.map(get_final_url, uris))
+def resolve_all(uris):
+    bounded = list(uris or [])[:GROUNDING_RESOLVE_LIMIT]
+    if not bounded:
+        return []
+    return list(RESOLVER.map(get_final_url, bounded))
 def clean_domain(dom):
     dom = re.sub(r"^https?://", "", (dom or "").strip().lower())
     return dom.replace("www.", "").split("/")[0]
@@ -2155,7 +2203,7 @@ def call_gemini(parts, system=SYSTEM_PROMPT, use_search=True):
         GEMINI_STATS[key] += 1
         print(f"GEMINI CALL model={model} search={use_search} totals={GEMINI_STATS}")
     try:
-        r = requests.post(gemini_url, params={"key": GEMINI_API_KEY}, json=payload, timeout=90)
+        r = _http_session().post(gemini_url, params={"key": GEMINI_API_KEY}, json=payload, timeout=GEMINI_HTTP_TIMEOUT)
         if r.status_code >= 400:
             print(f"Gemini HTTP {r.status_code}: {r.text[:500]}")
             return "", {}
@@ -2180,10 +2228,11 @@ def call_gemini(parts, system=SYSTEM_PROMPT, use_search=True):
         text = re.sub(r"https?://\S+", "", text).replace("**", "").strip()
         metadata = cand.get("groundingMetadata", {}) or {}
         chunks = metadata.get("groundingChunks", []) or []
+        chunks = chunks[:GROUNDING_RESOLVE_LIMIT]
         uris = [(c.get("web") or {}).get("uri", "") for c in chunks]
-        finals = resolve_all(uris[:12]) if uris else []
+        finals = resolve_all(uris) if uris else []
         records = []
-        for i, chunk in enumerate(chunks[:12]):
+        for i, chunk in enumerate(chunks):
             web = chunk.get("web") or {}
             raw_uri = web.get("uri", "")
             final_uri = finals[i] if i < len(finals) else raw_uri
@@ -2772,7 +2821,7 @@ def _serpapi_shopping_request(query, gl, hl="en"):
     if gl:
         params["gl"] = gl
     try:
-        r = requests.get("https://serpapi.com/search.json", params=params, timeout=45)
+        r = _http_session().get("https://serpapi.com/search.json", params=params, timeout=30)
         if r.status_code >= 400:
             print(f"GOOGLE SHOPPING HTTP {r.status_code}: {r.text[:300]}")
             return []
@@ -2795,7 +2844,7 @@ def _immersive_product_stores(page_token):
         # يرفع النتيجة من 3-5 متاجر إلى 13 كحد أقصى حسب توثيق SerpApi.
         params["more_stores"] = "true"
     try:
-        r = requests.get("https://serpapi.com/search.json", params=params, timeout=45)
+        r = _http_session().get("https://serpapi.com/search.json", params=params, timeout=30)
         if r.status_code >= 400:
             print(f"IMMERSIVE HTTP {r.status_code}: {r.text[:200]}")
             return []
@@ -3463,8 +3512,9 @@ def extract_products(text):
 
 def download_whatsapp_media(mid):
     h={"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
-    meta=requests.get(f"{GRAPH_URL}/{mid}",headers=h,timeout=20).json()
-    img=requests.get(meta["url"],headers=h,timeout=30)
+    sess = _http_session()
+    meta = sess.get(f"{GRAPH_URL}/{mid}", headers=h, timeout=(4,12)).json()
+    img = sess.get(meta["url"], headers=h, timeout=(4,18))
     return base64.b64encode(img.content).decode(), meta.get("mime_type","image/jpeg")
 
 
@@ -4410,6 +4460,15 @@ def translate_ui_titles(titles, lang):
     clean = [re.sub(r"\s+", " ", str(t or "")).strip() for t in titles]
     if not clean or lang == "en":
         return clean
+
+    # Fast path: product/brand titles are often already readable and should not trigger
+    # another AI call just for display. Arabic only translates fully non-Arabic titles.
+    # Latin-script UI languages keep Latin product titles as-is; brands/models remain safest.
+    if lang == "ar" and all(re.search(r"[\u0600-\u06FF]", t) for t in clean if t):
+        return clean
+    if lang in {"de","fr","es","it","tr","pt"} and all(re.search(r"[A-Za-z]", t) for t in clean if t):
+        return clean
+
     target = SUPPORTED_LANGUAGES.get(lang, {"english":"English"})["english"]
     result = [None] * len(clean)
     missing_idx, missing = [], []
@@ -4460,6 +4519,23 @@ def _price_display_lines(price_text):
     return [f"💰 {s}"]
 
 
+
+AI_EXACT_CACHE = {}
+AI_EXACT_CACHE_LOCK = threading.Lock()
+
+def _ai_exact_cache_key(items, target, has_image=False):
+    compact = []
+    for x in items or []:
+        compact.append((
+            re.sub(r"\s+", " ", str((x or {}).get("title") or "")).strip().lower()[:180],
+            _more_domain((x or {}).get("link") or ""),
+        ))
+    raw = json.dumps(
+        {"target":str(target or "").strip().lower(), "image":bool(has_image), "items":compact},
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 AI_EXACT_MATCH_SYSTEM = """You are a strict product identity verifier for a shopping bot.
 
@@ -4521,6 +4597,43 @@ def _lexical_exact_fallback(items, target):
     return out
 
 
+def _pretrim_exact_candidates(items, per_market=8):
+    """Bound AI payload while preserving local/US/China coverage and strong-store candidates."""
+    buckets = {0:[], 1:[], 2:[], 99:[]}
+    for item in items or []:
+        rank = result_market_rank(item)
+        buckets.setdefault(rank, []).append(item)
+
+    out = []
+    seen = set()
+    for rank in (0,1,2,99):
+        rows = buckets.get(rank, [])
+        if rank == 1:
+            rows = sorted(rows, key=lambda x: (
+                _us_store_priority(x.get("source"), x.get("link")),
+                0 if _lens_has_price(x) else 1,
+                int(x.get("position") or 999),
+            ))
+        else:
+            rows = sorted(rows, key=lambda x: (
+                0 if _lens_has_price(x) else 1,
+                0 if x.get("exact") else 1,
+                int(x.get("position") or 999),
+            ))
+        for item in rows:
+            sig = (
+                re.sub(r"\\s+"," ",str(item.get("title") or "")).strip().lower(),
+                _more_domain(item.get("link") or ""),
+            )
+            if sig in seen:
+                continue
+            seen.add(sig)
+            out.append(item)
+            if sum(1 for x in out if result_market_rank(x) == rank) >= per_market:
+                break
+    return out
+
+
 def ai_exact_product_filter(items, target, image_b64="", image_mime="", label=""):
     """Strict batch verification before anything is shown to the user.
 
@@ -4531,8 +4644,18 @@ def ai_exact_product_filter(items, target, image_b64="", image_mime="", label=""
     seq = [dict(x) for x in (items or []) if str((x or {}).get("title") or "").strip()]
     if not seq:
         return []
+    seq = _pretrim_exact_candidates(seq, per_market=8)
 
     target = re.sub(r"\s+", " ", str(target or "")).strip()
+    _cache_key = _ai_exact_cache_key(seq, target, bool(image_b64 and image_mime))
+    _now = time.time()
+    with AI_EXACT_CACHE_LOCK:
+        _hit = AI_EXACT_CACHE.get(_cache_key)
+        if _hit and _now - _hit["ts"] < AI_EXACT_CACHE_TTL:
+            keep_idx = set(_hit["keep"])
+            print(f"AI EXACT CACHE HIT {label}: keep={len(keep_idx)}/{len(seq)}")
+            return [x for i, x in enumerate(seq, 1) if i in keep_idx]
+
     numbered = "\n".join(_ai_exact_candidate_line(x, i) for i, x in enumerate(seq, 1))
     prompt = (
         f"REFERENCE PRODUCT: {target or 'Use the attached image as the reference product.'}\n\n"
@@ -4560,6 +4683,10 @@ def ai_exact_product_filter(items, target, image_b64="", image_mime="", label=""
             if str(x).isdigit() and 1 <= int(x) <= len(seq)
         }
         kept = [x for i, x in enumerate(seq, 1) if i in keep_idx]
+        with AI_EXACT_CACHE_LOCK:
+            if len(AI_EXACT_CACHE) > 2500:
+                AI_EXACT_CACHE.clear()
+            AI_EXACT_CACHE[_cache_key] = {"ts":time.time(), "keep":sorted(keep_idx)}
         rejected = [
             str(x.get("title") or "")[:90]
             for i, x in enumerate(seq, 1) if i not in keep_idx
@@ -4770,7 +4897,9 @@ def process_single_image(message,bot_id,lang="ar"):
         if lens_direct.get("matches"):
             if send_lens_direct_results(from_number, lens_direct, bot_id, lang, caption, image_b64=b64, image_mime=mime):
                 return
-        print("LENS DIRECT MODE: no Google results -> full pipeline fallback")
+            print("LENS DIRECT MODE: candidates existed but exact filter rejected them")
+        else:
+            print("LENS DIRECT MODE: no Lens candidates")
         send_whatsapp_text(from_number, T(lang, "lens_none"), bot_id)
 
     # FUSION ROUTER (قوة الخلط):
@@ -4938,7 +5067,13 @@ def send_last_search_map(from_number, bot_id, lang):
 
 PENDING_BRAND_PICKS = {}
 PENDING_CART_PICKS = {}
-SEARCH_RUNS = int(os.environ.get("SEARCH_RUNS", "4"))
+SEARCH_RUNS = max(2, int(os.environ.get("SEARCH_RUNS", "3")))
+FAST_SEARCH_MIN_GOOD = max(1, int(os.environ.get("FAST_SEARCH_MIN_GOOD", "2")))
+FAST_SEARCH_TOTAL_TIMEOUT = max(18, int(os.environ.get("FAST_SEARCH_TOTAL_TIMEOUT", "38")))
+GEMINI_HTTP_TIMEOUT = max(20, int(os.environ.get("GEMINI_HTTP_TIMEOUT", "45")))
+GROUNDING_RESOLVE_LIMIT = max(5, int(os.environ.get("GROUNDING_RESOLVE_LIMIT", "8")))
+FINAL_URL_TIMEOUT = max(3, int(os.environ.get("FINAL_URL_TIMEOUT", "6")))
+AI_EXACT_CACHE_TTL = max(300, int(os.environ.get("AI_EXACT_CACHE_TTL", "1800")))
 V26_SEARCH_POOL = ThreadPoolExecutor(max_workers=8)
 SIMILAR_MAX_STORES = max(MAX_STORES, int(os.environ.get("SIMILAR_MAX_STORES", "10")))
 
@@ -5068,7 +5203,7 @@ def text77_call_gemini(parts, system=TEXT77_SYSTEM_PROMPT, use_search=True):
         GEMINI_STATS[key] += 1
         print(f"TEXT77 GEMINI CALL model={model} search={use_search} totals={GEMINI_STATS}")
     try:
-        r = requests.post(gemini_url, params={"key": GEMINI_API_KEY}, json=payload, timeout=90)
+        r = _http_session().post(gemini_url, params={"key": GEMINI_API_KEY}, json=payload, timeout=GEMINI_HTTP_TIMEOUT)
         if r.status_code >= 400:
             print(f"TEXT77 Gemini HTTP {r.status_code}: {r.text[:500]}")
             return "", {}
@@ -5092,10 +5227,11 @@ def text77_call_gemini(parts, system=TEXT77_SYSTEM_PROMPT, use_search=True):
         text = re.sub(r"https?://\S+", "", text).replace("**", "").strip()
         metadata = cand.get("groundingMetadata", {}) or {}
         chunks = metadata.get("groundingChunks", []) or []
+        chunks = chunks[:GROUNDING_RESOLVE_LIMIT]
         uris = [(c.get("web") or {}).get("uri", "") for c in chunks]
-        finals = resolve_all(uris[:12]) if uris else []
+        finals = resolve_all(uris) if uris else []
         records = []
-        for i, chunk in enumerate(chunks[:12]):
+        for i, chunk in enumerate(chunks):
             web = chunk.get("web") or {}
             raw_uri = web.get("uri", "")
             final_uri = finals[i] if i < len(finals) else raw_uri
@@ -5914,7 +6050,7 @@ def legacy_v26_call_gemini(parts, system=LEGACY_TEXT_SEARCH_SYSTEM, max_results=
         with GEMINI_STATS_LOCK:
             GEMINI_STATS["search_calls"] += 1
             print(f"LEGACY V26 CALL model={model} totals={GEMINI_STATS}")
-        r = requests.post(gemini_url, params={"key": GEMINI_API_KEY}, json=payload, timeout=90)
+        r = _http_session().post(gemini_url, params={"key": GEMINI_API_KEY}, json=payload, timeout=GEMINI_HTTP_TIMEOUT)
         if r.status_code >= 400:
             print(f"LEGACY V26 Gemini HTTP {r.status_code}: {r.text[:500]}")
             return "", {}
@@ -5998,34 +6134,83 @@ def legacy_v26_call_gemini(parts, system=LEGACY_TEXT_SEARCH_SYSTEM, max_results=
 
 
 def legacy_v26_best_of_search(parts, max_results=None, merge_offers=False, merge_title=""):
-    """بطولة الكود القديم: SEARCH_RUNS بالتوازي، الأفضل يفوز، والروابط اتحاد الجميع."""
-    limit=MAX_STORES if max_results is None else max(1,int(max_results))
-    market_snapshot=current_market()
-    try:
-        futs=[V26_SEARCH_POOL.submit(_run_with_market, market_snapshot,
-                                     legacy_v26_call_gemini, parts,
-                                     LEGACY_TEXT_SEARCH_SYSTEM, limit)
-              for _ in range(SEARCH_RUNS)]
-        results=[f.result(timeout=120) for f in futs]
-    except Exception as e:
-        print(f"LEGACY V26 best_of_search err {e}")
+    """Fast tournament.
+
+    Launches SEARCH_RUNS in parallel, but no longer waits for every slow request.
+    Two valid responses are normally enough because the strict AI exact filter runs later.
+    """
+    limit = MAX_STORES if max_results is None else max(1, int(max_results))
+    market_snapshot = current_market()
+
+    futs = [
+        V26_SEARCH_POOL.submit(
+            _run_with_market,
+            market_snapshot,
+            legacy_v26_call_gemini,
+            parts,
+            LEGACY_TEXT_SEARCH_SYSTEM,
+            limit,
+        )
+        for _ in range(SEARCH_RUNS)
+    ]
+
+    results = []
+    pending = set(futs)
+    deadline = time.monotonic() + FAST_SEARCH_TOTAL_TIMEOUT
+
+    while pending and time.monotonic() < deadline:
+        remaining = max(0.1, deadline - time.monotonic())
+        done, pending = wait(pending, timeout=remaining, return_when=FIRST_COMPLETED)
+        if not done:
+            break
+        for fut in done:
+            try:
+                tt, uu = fut.result()
+            except Exception as e:
+                print(f"LEGACY V26 search future err: {e}")
+                continue
+            if tt:
+                results.append((tt, uu or {}))
+
+        # Stop once we have enough GOOD independent answers.
+        if len(results) >= FAST_SEARCH_MIN_GOOD:
+            break
+
+    # Futures may still be doing network IO; don't block the user waiting for them.
+    for fut in pending:
+        fut.cancel()
+
+    if not results:
+        print("LEGACY V26 fast tournament: no good parallel result -> one direct fallback")
         return legacy_v26_call_gemini(parts, max_results=limit)
-    results=[(tt,uu) for tt,uu in results if tt]
-    if not results: return "",{}
-    scored=sorted(results,key=lambda x:v26_answer_score(x[0],x[1],limit),reverse=True)
-    best_txt,best_urls=scored[0]
-    merged_urls=dict(best_urls)
-    for _,u in scored[1:]:
-        for n,link in u.items():
+
+    scored = sorted(
+        results,
+        key=lambda x: v26_answer_score(x[0], x[1], limit),
+        reverse=True,
+    )
+    best_txt, best_urls = scored[0]
+    merged_urls = dict(best_urls)
+    for _, u in scored[1:]:
+        for n, link in u.items():
             if n not in merged_urls and link not in merged_urls.values():
-                merged_urls[n]=link
-    merged_urls=dict(list(merged_urls.items())[:max(limit,4)])
+                merged_urls[n] = link
+    merged_urls = dict(list(merged_urls.items())[:max(limit, 4)])
     if merge_offers:
-        best_txt=_merge_v26_offer_text(scored, merge_title or product_title(best_txt,""), limit)
-    print({"legacy_v26_tournament":[v26_answer_score(tt,uu,limit) for tt,uu in scored],
-           "winner_stores":len(text77_extract_store_offers(best_txt,limit=limit)),
-           "total_links":len(merged_urls),"merged_offers":bool(merge_offers)})
-    return best_txt,merged_urls
+        best_txt = _merge_v26_offer_text(
+            scored,
+            merge_title or product_title(best_txt, ""),
+            limit,
+        )
+    print({
+        "legacy_v26_fast_tournament":[v26_answer_score(tt, uu, limit) for tt, uu in scored],
+        "completed_good":len(results),
+        "cancelled_or_pending":len(pending),
+        "winner_stores":len(text77_extract_store_offers(best_txt, limit=limit)),
+        "total_links":len(merged_urls),
+        "merged_offers":bool(merge_offers),
+    })
+    return best_txt, merged_urls
 
 
 
