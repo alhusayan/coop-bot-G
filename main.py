@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v85.1-strict-local-geo-20260821"
+BUILD_ID = "v85.2-strict-local-geo-20260821"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("GLOBAL GEO -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES")
@@ -874,14 +874,72 @@ def infer_country_from_phone(phone):
     return DEFAULT_COUNTRY
 
 
-def market_for_user(from_number):
-    """Resolve a worldwide local market from the WhatsApp calling code.
+# ---- Admin/test market override ------------------------------------------------
+# Lets the same WhatsApp number test any market with commands such as:
+#   Market Germany
+#   Market Japan
+#   Market Auto
+# The override is stored in user_preferences via USER_MARKET, so Railway restarts/workers
+# do not immediately lose the selected test market. Normal users remain phone-prefix based.
+MARKET_NAME_ALIASES = {
+    "usa": "us", "unitedstates": "us", "america": "us",
+    "uk": "gb", "unitedkingdom": "gb", "britain": "gb", "greatbritain": "gb",
+    "uae": "ae", "emirates": "ae", "unitedarabemirates": "ae",
+    "saudi": "sa", "saudiarabia": "sa",
+    "korea": "kr", "southkorea": "kr",
+    "russia": "ru", "turkiye": "tr", "turkey": "tr",
+    "czechia": "cz", "czechrepublic": "cz",
+}
 
-    Phone prefix remains the source of truth requested by the product design; the resulting market
-    profile carries country, accepted currencies, ccTLDs and Google's local search language.
+def _norm_market_name(value):
+    import unicodedata
+    t = unicodedata.normalize("NFKD", str(value or "").strip().casefold())
+    t = "".join(ch for ch in t if not unicodedata.combining(ch))
+    return re.sub(r"[^a-z0-9]", "", t)
+
+def resolve_market_country(value):
+    """Resolve ISO-2 code or an English country name/alias to a supported market."""
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    cc = raw.lower()
+    if len(cc) == 2 and cc in COUNTRY_NAMES:
+        return cc
+    key = _norm_market_name(raw)
+    if key in MARKET_NAME_ALIASES:
+        return MARKET_NAME_ALIASES[key]
+    for code, name in COUNTRY_NAMES.items():
+        if _norm_market_name(name) == key:
+            return code
+    return None
+
+def set_market_override(phone, cc):
+    load_user_preferences(phone)
+    market = dict(USER_MARKET.get(phone) or {})
+    market["market_override"] = cc.lower()
+    market["market_source"] = "manual_test"
+    USER_MARKET[phone] = market
+    save_user_preferences(phone)
+    return market_for_user(phone)
+
+def clear_market_override(phone):
+    load_user_preferences(phone)
+    market = dict(USER_MARKET.get(phone) or {})
+    market.pop("market_override", None)
+    market["market_source"] = "phone_prefix"
+    USER_MARKET[phone] = market
+    save_user_preferences(phone)
+    return market_for_user(phone)
+
+def market_for_user(from_number):
+    """Resolve the active worldwide market.
+
+    Normally the WhatsApp calling code is the source of truth. During explicit Market <country>
+    testing, a persisted manual override takes precedence until Market Auto is sent.
     """
     market = dict(USER_MARKET.get(from_number) or {})
-    cc = (infer_country_from_phone(from_number) or DEFAULT_COUNTRY).lower()
+    override = str(market.get("market_override") or "").strip().lower()
+    cc = override if override in COUNTRY_NAMES else (infer_country_from_phone(from_number) or DEFAULT_COUNTRY).lower()
     currencies = COUNTRY_CURRENCY_CODES.get(cc) or tuple(filter(None, (COUNTRY_CURRENCIES.get(cc, ""),)))
     market["country"] = cc
     market["country_name"] = COUNTRY_NAMES.get(cc, cc.upper())
@@ -889,7 +947,7 @@ def market_for_user(from_number):
     market["currencies"] = list(currencies)
     market["search_hl"] = COUNTRY_SEARCH_HL.get(cc, "en")
     market["tlds"] = list(country_tlds(cc))
-    market["market_source"] = "phone_prefix"
+    market["market_source"] = "manual_test" if override else "phone_prefix"
     market.pop("lat", None)
     market.pop("lng", None)
     market.pop("city", None)
@@ -8580,9 +8638,37 @@ def process_text_message(message,bot_id,onboarding_checked=False):
         if not onboarding_checked:
             if from_number not in USER_LANG:
                 cache_pending_message(from_number, message, bot_id); send_language_choice(from_number, bot_id); return
+        user_text=message["text"]["body"]
+
+        # v85.2 test command: Market Germany / Market Japan / Market Auto.
+        # Handle it BEFORE phone-prefix activation, otherwise the requested override would be reset.
+        market_cmd = re.match(r"^\s*market\s+(.+?)\s*$", user_text, flags=re.I)
+        if market_cmd:
+            target = market_cmd.group(1).strip()
+            if _norm_market_name(target) in ("auto", "automatic", "phone", "default", "off"):
+                m = clear_market_override(from_number)
+                activate_market(from_number)
+                send_whatsapp_text(
+                    from_number,
+                    f"✅ Market Auto — {country_flag_emoji(m.get('country'))} {m.get('country_name')} · {m.get('currency')}",
+                    bot_id,
+                )
+                return
+            cc = resolve_market_country(target)
+            if not cc:
+                send_whatsapp_text(from_number, f"⚠️ Unknown market: {target}. Try: Market Germany, Market Japan, Market France, or Market Auto.", bot_id)
+                return
+            m = set_market_override(from_number, cc)
+            activate_market(from_number)
+            send_whatsapp_text(
+                from_number,
+                f"🧪 Market Test — {country_flag_emoji(cc)} {m.get('country_name')} · {m.get('currency')}\nLocal results will now be tested for this market. Send any product.",
+                bot_id,
+            )
+            return
+
         ensure_market_from_phone(from_number, persist=True)
         activate_market(from_number)
-        user_text=message["text"]["body"]
         cmd=re.sub(r"[^\w\u0600-\u06FF\u0900-\u097F]","",user_text.strip().lower())
         if cmd in ("لغة","اللغة","غيراللغة","language","lang","changelanguage","langue","idioma","mudaridioma","dil","dildeğiştir","dildegistir","язык","сменитьязык","语言","切换语言","भाषा","زبان","زبانبدلیں"):
             send_language_choice(from_number, bot_id); return
