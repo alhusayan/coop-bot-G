@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v79-multilang-more-results-flag-only-20260821"
+BUILD_ID = "v79-multilang-more-results-ai-exact-20260821"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE/TEXT -> FLAGS + CLEAR LOCAL PRICES + LOCAL/US/CHINA")
@@ -4460,6 +4460,125 @@ def _price_display_lines(price_text):
     return [f"💰 {s}"]
 
 
+
+AI_EXACT_MATCH_SYSTEM = """You are a strict product identity verifier for a shopping bot.
+
+Your task is NOT to find alternatives and NOT to judge whether products are in the same category.
+Keep a candidate only when it is the SAME PRODUCT the user requested.
+
+STRICT RULES:
+- Same category, same use, similar ingredients, same brand family, or a substitute is NOT enough.
+- Reject different product names/models, even if they solve the same problem.
+- Reject accessories, bundles with a different main product, comparison/category pages, search pages, and unrelated items.
+- If the reference is a branded/model product, the candidate must preserve the brand and distinctive model/product name.
+- Package quantity/size may differ only when it is clearly the same underlying product, unless the user's request explicitly requires an exact size/count.
+- For an image request, the attached reference image is authoritative. Use visible brand/model/package identity from the image.
+- Be conservative: if uncertain, reject.
+
+Return JSON only:
+{"keep":[1,3],"reject":[2,4]}
+"""
+
+
+def _ai_exact_candidate_line(item, index):
+    title = re.sub(r"\s+", " ", str((item or {}).get("title") or "")).strip()
+    source = re.sub(r"\s+", " ", str((item or {}).get("source") or "")).strip()
+    url = str((item or {}).get("link") or "").strip()
+    try:
+        host = urllib.parse.urlparse(url).netloc.lower().replace("www.", "")
+    except Exception:
+        host = ""
+    return f"{index}. TITLE: {title[:220]} | STORE: {source[:80]} | DOMAIN: {host[:100]}"
+
+
+def _lexical_exact_fallback(items, target):
+    """Conservative fallback only if AI parsing fails.
+
+    Requires meaningful target tokens to occur in candidate title. This is intentionally
+    stricter than the old relevance filter; it is better to hide a doubtful result than
+    send the user to the wrong product.
+    """
+    target_norm = normalize_ar(str(target or "")).lower()
+    toks = [
+        t for t in re.findall(r"[a-z0-9\u0600-\u06ff]+", target_norm)
+        if len(t) >= 3 and t not in {
+            "the","and","for","with","from","buy","best","price","الكويت","كويت",
+            "منتج","سعر","افضل","أفضل","ابي","أبي","اريد","أريد"
+        }
+    ]
+    # Distinctive tokens first.
+    toks = list(dict.fromkeys(toks))[:8]
+    if not toks:
+        return []
+    out = []
+    for item in items or []:
+        hay = normalize_ar(str((item or {}).get("title") or "")).lower()
+        matched = sum(1 for t in toks if t in hay)
+        # For branded/model queries, require at least 2 meaningful tokens when available.
+        need = 2 if len(toks) >= 2 else 1
+        if matched >= need:
+            out.append(item)
+    return out
+
+
+def ai_exact_product_filter(items, target, image_b64="", image_mime="", label=""):
+    """Strict batch verification before anything is shown to the user.
+
+    Image searches: original image + candidate titles are sent to Gemini.
+    Text searches: original user query + candidate titles are sent.
+    Empty AI keep-list is respected (fail-closed for wrong-product prevention).
+    """
+    seq = [dict(x) for x in (items or []) if str((x or {}).get("title") or "").strip()]
+    if not seq:
+        return []
+
+    target = re.sub(r"\s+", " ", str(target or "")).strip()
+    numbered = "\n".join(_ai_exact_candidate_line(x, i) for i, x in enumerate(seq, 1))
+    prompt = (
+        f"REFERENCE PRODUCT: {target or 'Use the attached image as the reference product.'}\n\n"
+        "CANDIDATES:\n" + numbered +
+        "\n\nKeep only candidates that are the exact same product. Similar products must be rejected."
+    )
+
+    parts = []
+    if image_b64 and image_mime:
+        parts.append({"inline_data": {"mime_type": image_mime, "data": image_b64}})
+    parts.append({"text": prompt})
+
+    raw, _ = text77_call_gemini(
+        parts,
+        system=AI_EXACT_MATCH_SYSTEM,
+        use_search=False,
+    )
+    try:
+        m = re.search(r"\{.*\}", raw or "", flags=re.S)
+        if not m:
+            raise ValueError("no json")
+        data = json.loads(m.group(0))
+        keep_idx = {
+            int(x) for x in (data.get("keep") or [])
+            if str(x).isdigit() and 1 <= int(x) <= len(seq)
+        }
+        kept = [x for i, x in enumerate(seq, 1) if i in keep_idx]
+        rejected = [
+            str(x.get("title") or "")[:90]
+            for i, x in enumerate(seq, 1) if i not in keep_idx
+        ]
+        print(
+            f"AI EXACT FILTER {label}: input={len(seq)} keep={len(kept)} "
+            f"reject={len(seq)-len(kept)} rejected={rejected[:6]}"
+        )
+        # IMPORTANT: exact verifier is fail-closed when AI deliberately returns no matches.
+        return kept
+    except Exception as e:
+        fallback = _lexical_exact_fallback(seq, target)
+        print(
+            f"AI EXACT FILTER PARSE FAIL {label}: {e}; "
+            f"lexical_fallback={len(fallback)}/{len(seq)} raw={str(raw)[:180]!r}"
+        )
+        return fallback
+
+
 def send_lens_direct_results(from_number, lens, bot_id, lang, caption="", image_b64="", image_mime="", exclude_urls=None, exclude_domains=None, exclude_store_keys=None, more_mode=False):
     """v76: CTA-only، مختصر، بأعلام الدول، وترجمة للواجهة فقط.
 
@@ -4479,6 +4598,24 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption="", image_
         ]
     matches = [m for m in raw_matches if result_market_rank(m) != 99]
     if not matches:
+        return False
+
+    # Strict AI identity verification.
+    # For image requests, the ORIGINAL user image is authoritative.
+    _reference_title = (
+        str(caption or "").strip()
+        or str((lens.get("query") or "")).strip()
+        or str(((lens.get("chosen") or {}).get("title") or "")).strip()
+    )
+    matches = ai_exact_product_filter(
+        matches,
+        _reference_title,
+        image_b64=image_b64,
+        image_mime=image_mime,
+        label="LENS-MORE" if more_mode else "LENS-FIRST",
+    )
+    if not matches:
+        print("AI EXACT FILTER: no exact Lens candidates survived")
         return False
 
     # داخل كل سوق: النتائج ذات السعر أولاً، ثم exact/visual، ثم ترتيب Google Lens.
@@ -5091,8 +5228,11 @@ _NON_PRODUCT_WORDS = (
     "مروحه", "مروحة", "propeller", "impeller", "ستارتر", "starter motor", "كاربريتر", "carburetor", "carburettor",
     "بواجي", "spark plug", "gasket", "فلتر زيت", "oil filter", "فلتر هواء", "air filter", "sensor for", "sticker", "decal",
 )
-RELEVANCE_FILTER_SYSTEM = """أنت مدقق نتائج لبوت تسوق. أعد فقط أرقام النتائج التي تبيع المنتج المطلوب نفسه كاملاً.
-ارفض الكتيبات وPDF وقطع الغيار والإكسسوارات والخدمات والتأجير إلا إذا كان طلب المستخدم نفسه عنها.
+RELEVANCE_FILTER_SYSTEM = """أنت مدقق صارم جداً لنتائج بوت تسوق.
+أبقِ فقط المنتج المطلوب نفسه بالاسم/البراند/الموديل، وليس منتجاً بديلاً أو مشابهاً أو من نفس الفئة.
+مثال: إذا المطلوب Mind Lab Pro فارفض Neuro Life وIdeal Brain وLeaky Gut حتى لو كانت مكملات أو nootropics.
+ارفض أيضاً الكتيبات وPDF وقطع الغيار والإكسسوارات والخدمات وصفحات التصنيف/البحث.
+إذا لم تكن متأكداً أن النتيجة هي نفس المنتج تماماً، ارفضها.
 أرجع JSON فقط: {\"keep\":[1,3]}"""
 SIMILAR_RELEVANCE_FILTER_SYSTEM = """أنت مدقق نتائج لبدائل مشابهة. أبقِ البدائل الحقيقية من نفس الفئة والاستخدام،
 وارفض المنتج الأصلي نفسه والكتيبات وقطع الغيار والملحقات والخدمات. أرجع JSON فقط: {\"keep\":[1,3]}"""
@@ -5167,10 +5307,20 @@ def filter_relevant_offers(query, offers, urls, use_ai=True, mode="exact"):
         dropped = [o.get("line", "")[:60] for i, o in enumerate(kept, 1) if i not in keep_idx]
         if dropped:
             print(f"RELEVANCE AI-DROP ({len(dropped)}): {dropped[:4]}")
-        # حماية: إذا الحكم رمى كل شي بدون سبب واضح نبقي القائمة (أفضل من إخفاء نتائج صحيحة).
+        # Exact-product mode is fail-closed: an explicit empty keep-list means no exact match.
+        if mode == "exact":
+            return ai_kept
         return ai_kept if ai_kept else kept
     except Exception:
-        print(f"RELEVANCE AI PARSE FAIL — keeping as-is: {raw!r}")
+        print(f"RELEVANCE AI PARSE FAIL: {raw!r}")
+        if mode == "exact":
+            wrapped = [
+                {"_offer":o, "title":o.get("line",""), "source":o.get("name",""),
+                 "link":match_url(o.get("name",""), urls or {})}
+                for o in kept
+            ]
+            exact_wrapped = _lexical_exact_fallback(wrapped, query)
+            return [x["_offer"] for x in exact_wrapped]
         return kept
 
 def url_is_alive(url):
@@ -6064,6 +6214,18 @@ def send_text_lens_style_results(from_number, txt, urls, bot_id, lang, query, ex
             continue
         item["market_rank"] = rank
         candidates.append(item)
+
+    # Strict AI identity verification before store priority and market caps.
+    candidates = ai_exact_product_filter(
+        candidates,
+        query,
+        label="TEXT-MORE" if more_mode else "TEXT-FIRST",
+    )
+    for _item in candidates:
+        _item["market_rank"] = result_market_rank(_item)
+    if not candidates:
+        print("AI EXACT FILTER: no exact typed-search candidates survived")
+        return False
 
     caps = (
         {0:MORE_LOCAL_MAX, 1:MORE_US_MAX, 2:MORE_CN_MAX}
