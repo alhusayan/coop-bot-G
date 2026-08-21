@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v84.1-clean-fast-restore-generic-20260821"
+BUILD_ID = "v84.2-ai-intent-generic-20260821"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE/TEXT -> FLAGS + CLEAR LOCAL PRICES + LOCAL/US/CHINA")
@@ -7109,38 +7109,45 @@ def execute_product_search(from_number, product, bot_id, lang):
 # ---- v74.6: مصنّف الطلبات — ذكاء اصطناعي خالص، بدون أي قاموس -----------------
 # القاموس الثابت مستحيل يغطي ملايين المنتجات (يخت، موطور مخيمات، مكينة بر...).
 # القرار كله لنموذج سريع رخيص (بدون بحث + كاش + إعادة محاولة) بتعريفات وأمثلة قوية.
-REQUEST_CLASSIFIER_SYSTEM = """أنت مصنف طلبات خبير لبوت تسوق كويتي على واتساب. المستخدم كتب رسالة قصيرة بالعامية.
-صنّفها بدقة وأجب بكلمة واحدة فقط بدون أي شرح: GENERIC أو SPECIFIC أو SERVICE أو NONE
+REQUEST_CLASSIFIER_SYSTEM = """أنت مصنف نية شراء ذكي لبوت تسوق عالمي على واتساب. المستخدم قد يكتب بالعربية أو بأي لغة مدعومة.
+صنّف الرسالة بدقة وأجب بكلمة واحدة فقط بدون أي شرح: GENERIC أو SPECIFIC أو SERVICE أو NONE
 
-GENERIC = اسم فئة منتج بدون ذكر ماركة محددة، والمستخدم يستفيد من مقارنة أفضل البراندات والأسعار قبل الشراء.
-ينطبق على أي فئة بما فيها الملابس والأحذية والشنط والساعات والرياضة والإلكترونيات والأجهزة المنزلية والمكائن والمولدات والعدد والأثاث والمركبات والقوارب ومعدات البر والمخيمات وأدوات المطبخ وأجهزة التجميل...
-أمثلة GENERIC: شاشه كمبيوتر، مكينه بر، موطور مخيمات، مولد كهرباء، يخت، جت سكي، دراجه هوائيه، مضخة مسبح، غساله، مكواة بخار، سشوار، خيمه رحلات، ثلاجة سياره، قلاية هوائية، كاميرا مراقبه، سماعة بلوتوث، طباخ غاز، سيارة عائليه، لابتوب للدراسة، حذاء تنس للاطفال، حذاء رياضي للاطفال، تيشرت اطفال، فستان سهرة، شنطة ظهر مدرسية، ساعة ذكية
+المبدأ الأساسي:
+- لا تحكم حسب نوع الفئة وحدها (طعام/إلكترونيات/ملابس...). افهم هل المستخدم حدّد منتجاً بعينه أم ما زال يطلب فئة عامة.
+- GENERIC يعني أن العبارة تصف فئة/نوعاً عاماً ويمكن أن توجد عدة براندات أو منتجات مناسبة، لذلك الأفضل أن نعرض توصيات ذكية أولاً.
+- SPECIFIC يعني أن المستخدم حدّد براند أو موديل أو SKU أو اسم منتج تجاري واضح أو وصفاً شديد التحديد يكفي للبحث عن نفس المنتج مباشرة.
 
-SPECIFIC = المستخدم حدد ماركة أو موديل أو منتجاً بعينه، أو طلب سلعة استهلاكية يومية يبي سعرها مباشرة (أكل، مشروبات، تموينات، منظفات يومية، أدوية، مستلزمات شخصية استهلاكية).
-أمثلة SPECIFIC: ايفون 15 برو، مكينة بر EcoFlow، حذاء تنس نايك للاطفال، حذاء اديداس اطفال، شنطة قوتشي، ساعة ابل، بيبسي، حليب المراعي، حليب، رز بسمتي، بنادول، شامبو هيد اند شولدرز، مناديل، ماء قوارير
+GENERIC أمثلة:
+شاورما دجاج، برجر دجاج، حليب، رز، ماء، قهوة، شوكولاتة، شامبو، حفاضات، مضرب تنس، حذاء تنس للأطفال، لابتوب للدراسة، سماعة بلوتوث، قلاية هوائية، عطر رجالي، سيارة عائلية، مولد كهرباء.
+Chicken shawarma, tennis racket, kids tennis shoes, laptop for university, protein bar, olive oil.
+إذا لم توجد ماركة/موديل واضحان وكانت هناك عدة خيارات ومنتجات محتملة، اختر GENERIC.
 
-SERVICE = طلب خدمة أو فني أو تصليح أو صيانة أو عامل، وليس شراء منتج.
-أمثلة SERVICE: كهربائي حمام سباحه، فني تكييف، سباك، بنشر متنقل، تصليح غسالات، شركة تنظيف، ونش، مكافحة حشرات
+SPECIFIC أمثلة:
+Nabil Chicken Shawarma 400g، حليب المراعي كامل الدسم 1 لتر، Pepsi 330ml، Yonex EZONE 100، Wilson Blade 98 V9، iPhone 16 Pro 256GB، Nike Vapor Pro 2 Junior، Head & Shoulders Classic Clean 400ml.
+ذكر ماركة مع نوع المنتج غالباً SPECIFIC حتى لو لم يذكر المقاس، مثل: حليب المراعي، شامبو Pantene، حذاء Adidas.
 
-NONE = الرسالة ليست طلب منتج ولا خدمة إطلاقاً: عتاب أو استعجال أو سب أو مزح أو تجربة أو كلام عام موجه للبوت نفسه.
-أمثلة NONE: رد علي، ليش ما ترد، وينك، تأخرت، يا حمار، يا حماااار، هلا فيك، شفيك، تجربة، اختبار، ok، تمام، خلاص، ايه، لا
+SERVICE = طلب خدمة أو فني أو تصليح أو صيانة أو عامل وليس شراء منتج.
+أمثلة: كهربائي، فني تكييف، سباك، بنشر متنقل، تصليح غسالة، مكافحة حشرات.
 
-قواعد الحسم المحدثة (مهم جداً):
-- ذكر ماركة (Nike, Adidas, Puma, Zara, Gucci, Apple, Samsung, EcoFlow, Honda, نايك، اديداس، قوتشي...) حتى مع فئة عامة = SPECIFIC فوراً. مثال: مكينة بر هوندا = SPECIFIC، حذاء تنس نايك للاطفال = SPECIFIC، شنطة ظهر نايك = SPECIFIC.
-- كلمة فني/تصليح/صيانة/معلم/تركيب مع أي شيء = SERVICE حتى لو ذكر جهازاً.
-- أكل وتموينات ومشروبات ومنظفات استهلاكية وأدوية ومستلزمات استهلاكية يومية = SPECIFIC دائماً حتى بدون ماركة، لأن المستخدم يبي السعر مباشرة.
-- ملابس وأحذية وشنط وساعات ورياضة وإلكترونيات وأجهزة منزلية وأثاث ومعدات وعدد ومكائن ومركبات بدون ماركة = GENERIC دائماً، لأن المستخدم يستفيد من مقارنة أفضل الماركات. مثال: حذاء تنس للاطفال بدون ماركة = GENERIC، تيشرت اطفال = GENERIC، شنطة ظهر = GENERIC.
-- إذا الرسالة كلام موجه للبوت أو تعليق بلا أي سلعة أو خدمة = NONE دائماً. لا تخترع منتجاً من رسالة عتاب أبداً.
-- إذا شككت بين GENERIC و SPECIFIC لمنتج غير استهلاكي بدون ماركة، اختر GENERIC دائماً."""
+NONE = الرسالة ليست طلب شراء ولا خدمة: تحية، شكر، عتاب، مزح، اختبار، أو كلام موجه للبوت.
+أمثلة: هلا، شكراً، وينك، ليش ما ترد، تمام، ok، تجربة.
+
+قواعد الحسم:
+1) لا تعتبر الطعام أو التموينات SPECIFIC تلقائياً. «شاورما دجاج» GENERIC، بينما «Nabil Chicken Shawarma 400g» SPECIFIC.
+2) لا تعتبر كلمة واحدة SPECIFIC تلقائياً. «حليب» GENERIC، بينما «حليب المراعي 1 لتر» SPECIFIC.
+3) إذا توجد ماركة/موديل/SKU واضح = SPECIFIC.
+4) إذا الطلب فئة عامة بلا ماركة واضحة = GENERIC.
+5) إذا شككت بين GENERIC وSPECIFIC ولم توجد هوية تجارية واضحة، اختر GENERIC.
+6) أجب بكلمة التصنيف فقط."""
 
 _REQUEST_CLASS_CACHE = {}
 _REQUEST_CLASS_LOCK = threading.Lock()
 
 def classify_request_type(query):
-    """Fast cached request classification: local rules first, then ONE plain Gemini call.
+    """AI-first semantic request classification with cache and one Gemini call.
 
-    v83 could call Gemini 2-4 times (brand detector + classifier retries) before search began.
-    The main classifier already knows how to detect brands, so the separate brand round-trip was redundant.
+    Product intent is decided semantically by Gemini instead of hard-coded category rules.
+    Only obvious service detection remains as a fast shortcut.
     """
     q = " ".join(str(query or "").split()).strip()
     if not q:
@@ -7163,17 +7170,6 @@ def classify_request_type(query):
 
     if is_service_request(q):
         return _remember("SERVICE", "fast-service")
-
-    # v84.1: restore v83 behavior for short generic product requests.
-    # A single broad word such as حليب / رز / ماء should open recommendations first,
-    # rather than being forced directly into a specific price search.
-    single_word_generics = {
-        "جبن", "حليب", "لبن", "رز", "عيش", "خبز", "ماء", "بيض", "لحم", "دجاج",
-        "شاي", "قهوه", "قهوة", "سكر", "ملح", "زيت",
-        "حذاء", "تيشرت", "بنطلون", "قميص", "فستان", "شنطه", "شنطة", "ساعه", "ساعة",
-    }
-    if len(q.split()) == 1 and q_norm in single_word_generics:
-        return _remember("GENERIC", "fast-single-generic")
 
     verdict = ""
     try:
