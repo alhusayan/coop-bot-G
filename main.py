@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
 import os, re, time, base64, requests, json, asyncio, urllib.parse, hashlib, sqlite3, threading
 from collections import deque, defaultdict
-from concurrent.futures import ThreadPoolExecutor, wait
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v85.2-strict-local-geo-20260821"
+BUILD_ID = "v85.3-fast-response-geo-20260821"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("GLOBAL GEO -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES")
@@ -47,14 +47,14 @@ PENDING_IMAGES = defaultdict(lambda: {"images": [], "bot_id": ""})
 
 # v84 latency tuning: single images no longer wait a fixed 4 seconds.
 # We debounce briefly so several images sent together still form one batch.
-IMAGE_BUFFER_IDLE_SECONDS = max(0.4, float(os.environ.get("IMAGE_BUFFER_IDLE_SECONDS", "1.0")))
-IMAGE_BUFFER_MAX_WAIT_SECONDS = max(IMAGE_BUFFER_IDLE_SECONDS, float(os.environ.get("IMAGE_BUFFER_MAX_WAIT_SECONDS", "2.5")))
+IMAGE_BUFFER_IDLE_SECONDS = max(0.35, float(os.environ.get("IMAGE_BUFFER_IDLE_SECONDS", "0.6")))
+IMAGE_BUFFER_MAX_WAIT_SECONDS = max(IMAGE_BUFFER_IDLE_SECONDS, float(os.environ.get("IMAGE_BUFFER_MAX_WAIT_SECONDS", "1.5")))
 
 # Network deadlines are deliberately bounded: a slow upstream should not freeze WhatsApp.
-GEMINI_SEARCH_TIMEOUT_SECONDS = max(15, int(os.environ.get("GEMINI_SEARCH_TIMEOUT_SECONDS", "38")))
+GEMINI_SEARCH_TIMEOUT_SECONDS = max(15, int(os.environ.get("GEMINI_SEARCH_TIMEOUT_SECONDS", "28")))
 GEMINI_PLAIN_TIMEOUT_SECONDS = max(8, int(os.environ.get("GEMINI_PLAIN_TIMEOUT_SECONDS", "22")))
-SERPAPI_TIMEOUT_SECONDS = max(8, int(os.environ.get("SERPAPI_TIMEOUT_SECONDS", "18")))
-MARKET_FALLBACK_TIMEOUT_SECONDS = max(4, int(os.environ.get("MARKET_FALLBACK_TIMEOUT_SECONDS", "8")))
+SERPAPI_TIMEOUT_SECONDS = max(8, int(os.environ.get("SERPAPI_TIMEOUT_SECONDS", "13")))
+MARKET_FALLBACK_TIMEOUT_SECONDS = max(4, int(os.environ.get("MARKET_FALLBACK_TIMEOUT_SECONDS", "6")))
 WHATSAPP_TIMEOUT_SECONDS = max(5, int(os.environ.get("WHATSAPP_TIMEOUT_SECONDS", "10")))
 RESOLVE_TIMEOUT_SECONDS = max(3, int(os.environ.get("RESOLVE_TIMEOUT_SECONDS", "7")))
 FINAL_URL_CACHE_TTL = max(300, int(os.environ.get("FINAL_URL_CACHE_TTL_SECONDS", "3600")))
@@ -141,7 +141,7 @@ LENS_PARALLEL_WITH_VISION = env_bool("LENS_PARALLEL_WITH_VISION", True)
 LENS_RESULT_LIMIT = max(12, int(os.environ.get("LENS_RESULT_LIMIT", "40")))
 # v73: حد زمني واضح للينز. تمريرات البلدان تعمل بالتوازي، وليس واحدة وراء الثانية.
 LENS_HTTP_TIMEOUT_SECONDS = max(6, int(os.environ.get("LENS_HTTP_TIMEOUT_SECONDS", "13")))
-LENS_TOTAL_TIMEOUT_SECONDS = max(8, int(os.environ.get("LENS_TOTAL_TIMEOUT_SECONDS", "18")))
+LENS_TOTAL_TIMEOUT_SECONDS = max(8, int(os.environ.get("LENS_TOTAL_TIMEOUT_SECONDS", "12")))
 LENS_IMAGE_TTL = max(120, int(os.environ.get("LENS_IMAGE_TTL_SECONDS", "600")))
 LENS_IMAGE_STORE = {}
 LENS_IMAGE_LOCK = threading.Lock()
@@ -2716,18 +2716,38 @@ def google_lens_lookup(image_b64, mime_type, lang="ar", query_hint="", light=Fal
             _serpapi_lens_request, public_url, "all", "cn", True, cn_hint
         )
         future_map[cn_future] = ("all-cn-stores", "cn", True)
-        done, not_done = wait(list(future_map), timeout=LENS_TOTAL_TIMEOUT_SECONDS)
-        for fut in done:
+        # Fast staged wait: all Lens passes start together. If enough strong local-first evidence
+        # arrives quickly, do not wait for a single slow duplicate pass. If not, preserve the
+        # original quality behavior and continue up to the full total timeout.
+        all_futures = set(future_map)
+        done_fast, pending = wait(all_futures, timeout=min(LENS_FAST_READY_SECONDS, LENS_TOTAL_TIMEOUT_SECONDS))
+        for fut in done_fast:
             lens_type, country, auto_crop = future_map[fut]
             try:
                 _merge(fut.result())
             except Exception as e:
                 print(f"GOOGLE LENS FUTURE ERR type={lens_type} country={country}: {e}")
-        for fut in not_done:
+        rank_counts = {r: sum(1 for x in merged if result_market_rank(x) == r) for r in (0, 1, 2)}
+        # Exit early only when local is strong AND US/China already have coverage, so the
+        # later missing-market supplement does not re-add the latency we just removed.
+        enough_fast = (rank_counts[0] >= 2 and rank_counts[1] >= 1 and rank_counts[2] >= 1
+                       and len(merged) >= max(6, LENS_MIN_MATCHES))
+        done = set(done_fast)
+        if pending and not enough_fast:
+            remaining = max(0.0, LENS_TOTAL_TIMEOUT_SECONDS - min(LENS_FAST_READY_SECONDS, LENS_TOTAL_TIMEOUT_SECONDS))
+            done_more, pending = wait(pending, timeout=remaining)
+            done |= done_more
+            for fut in done_more:
+                lens_type, country, auto_crop = future_map[fut]
+                try:
+                    _merge(fut.result())
+                except Exception as e:
+                    print(f"GOOGLE LENS FUTURE ERR type={lens_type} country={country}: {e}")
+        for fut in pending:
             lens_type, country, _ = future_map[fut]
             fut.cancel()
-            print(f"GOOGLE LENS PASS SKIPPED AFTER TOTAL TIMEOUT type={lens_type} country={country}")
-        print(f"GOOGLE LENS PARALLEL DONE completed={len(done)}/{len(future_map)} total_timeout={LENS_TOTAL_TIMEOUT_SECONDS}s")
+            print(f"GOOGLE LENS PASS SKIPPED AFTER FAST/TOTAL TIMEOUT type={lens_type} country={country}")
+        print(f"GOOGLE LENS PARALLEL DONE completed={len(done)}/{len(future_map)} fast_ready={enough_fast} total_timeout={LENS_TOTAL_TIMEOUT_SECONDS}s")
 
         # أي دولة غير محلي/أمريكا/الصين تُحذف نهائياً.
         allowed = [m for m in merged if result_market_rank(m) != 99]
@@ -6495,7 +6515,8 @@ def process_single_image(message,bot_id,lang="ar"):
     from_number=message["from"]
     market = activate_market(from_number)
     caption=(message.get("image",{}) or {}).get("caption","").strip()
-    send_whatsapp_text(from_number,T(lang,"identifying"),bot_id)
+    # Start media download immediately; status message is sent in parallel.
+    WORKERS.submit(send_whatsapp_text, from_number, T(lang,"identifying"), bot_id)
     try:
         b64,mime=download_whatsapp_media(message["image"]["id"])
     except Exception as e:
@@ -6684,6 +6705,9 @@ def send_last_search_map(from_number, bot_id, lang):
 PENDING_BRAND_PICKS = {}
 PENDING_CART_PICKS = {}
 SEARCH_RUNS = max(1, min(3, int(os.environ.get("SEARCH_RUNS", "2"))))
+TOURNAMENT_GRACE_SECONDS = max(0.25, float(os.environ.get("TOURNAMENT_GRACE_SECONDS", "1.2")))
+LENS_FAST_READY_SECONDS = max(3.0, float(os.environ.get("LENS_FAST_READY_SECONDS", "6.5")))
+
 V26_SEARCH_POOL = ThreadPoolExecutor(max_workers=8)
 SIMILAR_MAX_STORES = max(MAX_STORES, int(os.environ.get("SIMILAR_MAX_STORES", "10")))
 
@@ -7192,6 +7216,44 @@ def _merge_v26_offer_text(results, title_line, max_results):
             lines.append(f"{'✅' if i == 0 else '•'} {body}")
     return (title_line.strip() + "\n" + "\n".join(lines)).strip()
 
+def _fast_tournament_results(futs, limit, timeout_seconds):
+    """Return tournament results without waiting for a slow duplicate when a strong answer is already ready.
+
+    All runs still start in parallel. After the first completion, a strong result gets only a short
+    grace window for peers to join; weak/empty first results keep the full timeout for quality.
+    """
+    pending = set(futs)
+    results = []
+    if not pending:
+        return results
+    done, pending = wait(pending, timeout=timeout_seconds, return_when=FIRST_COMPLETED)
+    for f in done:
+        try:
+            r = f.result()
+            if r and r[0]:
+                results.append(r)
+        except Exception as e:
+            print(f"TOURNAMENT FIRST ERR: {e}")
+    def strong():
+        for txt, urls in results:
+            offers = text77_extract_store_offers(txt, limit=limit)
+            if len(offers) >= min(3, limit) and len(urls or {}) >= min(2, limit):
+                return True
+        return False
+    if pending:
+        extra_wait = TOURNAMENT_GRACE_SECONDS if strong() else timeout_seconds
+        done2, pending2 = wait(pending, timeout=extra_wait)
+        for f in done2:
+            try:
+                r = f.result()
+                if r and r[0]:
+                    results.append(r)
+            except Exception as e:
+                print(f"TOURNAMENT PEER ERR: {e}")
+        for f in pending2:
+            f.cancel()
+    return results
+
 def v26_best_of_search(parts, max_results=None, merge_offers=False, merge_title=""):
     """v26 tournament with an optional v76 union mode for similar alternatives.
 
@@ -7204,7 +7266,7 @@ def v26_best_of_search(parts, max_results=None, merge_offers=False, merge_title=
     try:
         futs = [V26_SEARCH_POOL.submit(_run_with_market, market_snapshot, text77_call_gemini, parts)
                 for _ in range(SEARCH_RUNS)]
-        results = [f.result(timeout=GEMINI_SEARCH_TIMEOUT_SECONDS + 5) for f in futs]
+        results = _fast_tournament_results(futs, limit, GEMINI_SEARCH_TIMEOUT_SECONDS + 5)
     except Exception as e:
         print(f"v26 best_of_search err {e}")
         return text77_call_gemini(parts)
@@ -7772,7 +7834,7 @@ def legacy_v26_best_of_search(parts, max_results=None, merge_offers=False, merge
                                      legacy_v26_call_gemini, parts,
                                      LEGACY_TEXT_SEARCH_SYSTEM, limit)
               for _ in range(SEARCH_RUNS)]
-        results=[f.result(timeout=GEMINI_SEARCH_TIMEOUT_SECONDS + 5) for f in futs]
+        results=_fast_tournament_results(futs, limit, GEMINI_SEARCH_TIMEOUT_SECONDS + 5)
     except Exception as e:
         print(f"LEGACY V26 best_of_search err {e}")
         return legacy_v26_call_gemini(parts, max_results=limit)
@@ -8118,7 +8180,8 @@ def execute_product_search(from_number, product, bot_id, lang):
 
     Searches local, US and China automatically. No global-search choice and no map.
     """
-    send_whatsapp_text(from_number, T(lang, "searching", q=product), bot_id)
+    # Do not block backend search on WhatsApp network latency.
+    WORKERS.submit(send_whatsapp_text, from_number, T(lang, "searching", q=product), bot_id)
     try:
         txt, urls = v26_text_search(product, lang)
         if not txt:
