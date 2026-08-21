@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v85.5-turbo-safe-4-3-3-20260821"
+BUILD_ID = "v85.4-fast-caps-4-3-3-20260821"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("GLOBAL GEO -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES")
@@ -76,16 +76,6 @@ def env_bool(name, default=False):
     if value is None:
         return default
     return value.strip().lower() in ("1", "true", "yes", "on")
-
-# v85.5 Turbo Safe: direct market-shopping race against grounded Gemini.
-# The fast path may win only with strong STRICT-local coverage; otherwise the original engine remains the fallback.
-TURBO_SAFE_ENABLED = env_bool("TURBO_SAFE_ENABLED", True)
-TURBO_FAST_MARKET_TIMEOUT = max(3.5, min(7.0, float(os.environ.get("TURBO_FAST_MARKET_TIMEOUT", "5.5"))))
-TURBO_TOTAL_BUDGET = max(7.0, min(15.0, float(os.environ.get("TURBO_TOTAL_BUDGET", "11.5"))))
-TURBO_PEER_GRACE = max(0.25, min(1.5, float(os.environ.get("TURBO_PEER_GRACE", "0.7"))))
-TURBO_MIN_LOCAL = max(2, min(4, int(os.environ.get("TURBO_MIN_LOCAL", "3"))))
-TURBO_MIN_TOTAL = max(4, min(10, int(os.environ.get("TURBO_MIN_TOTAL", "6"))))
-TURBO_TEXT_POOL = ThreadPoolExecutor(max_workers=6)
 
 OLD_LAYER_ENABLED = env_bool("OLD_LAYER_ENABLED", True)
 
@@ -6716,7 +6706,7 @@ def send_last_search_map(from_number, bot_id, lang):
 PENDING_BRAND_PICKS = {}
 PENDING_CART_PICKS = {}
 SEARCH_RUNS = max(1, min(3, int(os.environ.get("SEARCH_RUNS", "2"))))
-TOURNAMENT_GRACE_SECONDS = max(0.25, float(os.environ.get("TOURNAMENT_GRACE_SECONDS", "0.7")))
+TOURNAMENT_GRACE_SECONDS = max(0.25, float(os.environ.get("TOURNAMENT_GRACE_SECONDS", "1.2")))
 LENS_FAST_READY_SECONDS = max(3.0, min(5.0, float(os.environ.get("LENS_FAST_READY_SECONDS", "5.0"))))
 
 V26_SEARCH_POOL = ThreadPoolExecutor(max_workers=8)
@@ -7909,143 +7899,6 @@ def _china_store_priority(name, url):
 
 
 
-
-def _turbo_market_item_price(item, rank, lang):
-    """Format a SerpApi shopping card for typed Turbo without visiting the merchant page."""
-    raw = str(item.get("price") or "").strip()
-    val = item.get("price_value")
-    try:
-        numeric = float(val) if val not in (None, "") else None
-    except Exception:
-        numeric = None
-    src = detect_currency_code(raw, item.get("currency") or (current_market().get("currency") if rank == 0 else ("USD" if rank == 1 else "CNY")),
-                               current_market().get("country") if rank == 0 else ("us" if rank == 1 else "cn"))
-    if rank == 0:
-        if numeric is not None:
-            return f"{format_price(numeric, src or current_market().get('currency'))} {currency_label(lang)}"
-        return raw
-    shown, _ = display_global_price(numeric, raw, src or ("USD" if rank == 1 else "CNY"), lang)
-    return shown or raw
-
-
-def _turbo_fast_market_text(product, lang):
-    """Fast STRICT-geo path: local/US/China Shopping all start together.
-
-    This never weakens the original engine: it is accepted only when STRICT local proof gives
-    enough local offers and overall coverage. Otherwise caller keeps waiting for grounded Gemini.
-    """
-    if not TURBO_SAFE_ENABLED or not SERPAPI_API_KEY:
-        return "", {}, {0:0,1:0,2:0}
-    market_snapshot = current_market()
-    futures = {
-        TURBO_TEXT_POOL.submit(_run_with_market, market_snapshot, _market_presence_fallback,
-                               product, rank, max(6, (LENS_DIRECT_LOCAL_MAX if rank == 0 else 4))): rank
-        for rank in (0, 1, 2)
-    }
-    done, pending = wait(list(futures), timeout=TURBO_FAST_MARKET_TIMEOUT)
-    buckets = {0: [], 1: [], 2: []}
-    for fut in done:
-        rank = futures[fut]
-        try:
-            for item in fut.result() or []:
-                actual = result_market_rank(item)
-                if actual in buckets:
-                    buckets[actual].append(item)
-        except Exception as e:
-            print(f"TURBO MARKET ERR rank={rank}: {e}")
-    for fut in pending:
-        fut.cancel()
-
-    caps = {0:LENS_DIRECT_LOCAL_MAX, 1:LENS_DIRECT_US_MAX, 2:LENS_DIRECT_CN_MAX}
-    used_urls=set(); used_domains=set(); chosen=[]
-    for rank in (0,1,2):
-        # Preserve returned priority, but prefer cards with a numeric/display price.
-        for item in buckets[rank]:
-            url=str(item.get("link") or "").strip()
-            if not url or url in used_urls: continue
-            host=_host_of(url)
-            # one result per exact domain in turbo path => more merchant diversity.
-            if host and host in used_domains: continue
-            price=_turbo_market_item_price(item, rank, lang)
-            if not price: continue
-            chosen.append((rank,item,price)); used_urls.add(url)
-            if host: used_domains.add(host)
-            if sum(1 for r,_,__ in chosen if r==rank) >= caps[rank]: break
-
-    counts={r:sum(1 for rr,_,__ in chosen if rr==r) for r in (0,1,2)}
-    if counts[0] < min(TURBO_MIN_LOCAL, LENS_DIRECT_LOCAL_MAX) or sum(counts.values()) < TURBO_MIN_TOTAL:
-        print(f"TURBO FAST WEAK counts={counts}; keep original engine")
-        return "", {}, counts
-
-    title = str(product or "").strip()
-    lines=[f"📦 {title}", ""]
-    urls={}
-    first=True
-    for rank,item,price in chosen:
-        store=(item.get("source") or _host_of(item.get("link")) or "Store").strip()
-        base=store; n=2
-        while store in urls:
-            store=f"{base} {n}"; n+=1
-        prod_title=re.sub(r"\s+", " ", str(item.get("title") or title)).strip()
-        lines.append(f"{'✅' if first else '•'} {store} — {prod_title} — {price}")
-        urls[store]=item.get("link")
-        first=False
-    print(f"TURBO FAST WIN counts={counts} stores={list(urls)[:10]}")
-    return "\n".join(lines), urls, counts
-
-
-def _turbo_raced_text_attempt(product, lang, prompt_runner):
-    """Race strict direct Shopping against the unchanged grounded-Gemini attempt."""
-    if not TURBO_SAFE_ENABLED:
-        return prompt_runner()
-    market_snapshot=current_market()
-    fast_f=TURBO_TEXT_POOL.submit(_run_with_market, market_snapshot, _turbo_fast_market_text, product, lang)
-    gem_f=TURBO_TEXT_POOL.submit(_run_with_market, market_snapshot, prompt_runner)
-    started=time.time(); pending={fast_f,gem_f}
-    best_fast=("",{})
-    while pending:
-        remaining=max(0.0, TURBO_TOTAL_BUDGET-(time.time()-started))
-        if remaining <= 0: break
-        done,pending=wait(pending, timeout=remaining, return_when=FIRST_COMPLETED)
-        if not done: break
-        for fut in done:
-            try:
-                res=fut.result()
-            except Exception as e:
-                print(f"TURBO RACE ERR: {e}"); continue
-            if fut is fast_f:
-                txt,urls,counts=res if isinstance(res,tuple) and len(res)==3 else ("",{}, {})
-                if txt and urls:
-                    gem_f.cancel()
-                    return txt,urls
-                best_fast=(txt or "", urls or {})
-            else:
-                txt,urls=res or ("",{})
-                if txt and text77_extract_store_offers(txt, limit=LENS_DIRECT_LOCAL_MAX+LENS_DIRECT_US_MAX+LENS_DIRECT_CN_MAX):
-                    # Small grace only if fast Shopping is about to finish; otherwise return Gemini now.
-                    if fast_f in pending:
-                        d2,p2=wait({fast_f}, timeout=TURBO_PEER_GRACE)
-                        if d2:
-                            try:
-                                ftxt,furls,_=fast_f.result()
-                                if ftxt and furls: return ftxt,furls
-                            except Exception: pass
-                    return txt,urls
-    # Budget exhausted: use any completed valid result, never block to the old 20+ sec ceiling.
-    if gem_f.done():
-        try:
-            txt,urls=gem_f.result() or ("",{})
-            if txt: return txt,urls
-        except Exception: pass
-    if fast_f.done():
-        try:
-            txt,urls,_=fast_f.result()
-            if txt: return txt,urls
-        except Exception: pass
-    for f in pending: f.cancel()
-    return best_fast
-
-
 def legacy_text_product_search(product, lang):
     """v84 typed engine: search immediately in the user's wording; translate only on failure."""
     cache_query = f"__TEXT79_MARKET_COVERAGE__::{product}"
@@ -8084,9 +7937,8 @@ def legacy_text_product_search(product, lang):
         )
         return legacy_v26_best_of_search([{"text": prompt}], total_cap, True, product)
 
-    # v85.5 Turbo Safe: direct STRICT-geo Shopping races the unchanged grounded-Gemini search.
-    # If local coverage is strong enough, the direct path wins in ~5-6s; otherwise Gemini remains the fallback.
-    txt, urls = _turbo_raced_text_attempt(product, lang, lambda: _attempt(product))
+    # Fast path: no translation call before the search.
+    txt, urls = _attempt(product)
     if txt and not is_no_result_answer(txt) and text77_extract_store_offers(txt, limit=total_cap):
         if urls:
             cache_put(cache_query, lang, txt, urls)
@@ -8948,4 +8800,4 @@ def process_location_message(message, bot_id):
     route_pending_after_location(from_number)
 
 @app.get("/")
-async def health(): return {"status":"v85.5 TURBO-SAFE + GLOBAL-GEO + STRICT-LOCAL + MULTI-CURRENCY + 10-LANG + LOCAL4-US3-CN3", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "market_source":"phone_prefix", "languages":["ar","en","fr","es","pt","tr","ru","zh","hi","ur"]}
+async def health(): return {"status":"v85 GLOBAL-GEO + STRONG-LOCAL + MULTI-CURRENCY + 10-LANG + SMART-PICK LOCAL5-US4-CN4-SHEIN", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "market_source":"phone_prefix", "languages":["ar","en","fr","es","pt","tr","ru","zh","hi","ur"]}
