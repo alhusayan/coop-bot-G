@@ -6,10 +6,10 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v84.2-ai-intent-generic-20260821"
+BUILD_ID = "v85-global-geo-local-power-20260821"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
-print("IMAGE/TEXT -> FLAGS + CLEAR LOCAL PRICES + LOCAL/US/CHINA")
+print("GLOBAL GEO -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES")
 print("=" * 70)
 
 
@@ -38,6 +38,8 @@ PENDING_GLOBAL_SEARCH = {}
 # نتائج البحث الحالي التي يمكن توسيعها يدوياً إلى دول أخرى بعد العرض.
 PENDING_MORE_RESULTS = {}
 GLOBAL_PENDING_TTL = max(300, int(os.environ.get("GLOBAL_PENDING_TTL_SECONDS", "900")))
+# Recommendation picks should survive normal user delays and transient process restarts.
+BRAND_PICK_TTL = max(3600, int(os.environ.get("BRAND_PICK_TTL_HOURS", "6")) * 3600)
 LOCATION_TTL_SECONDS = max(3600, int(os.environ.get("LOCATION_TTL_HOURS", "72")) * 3600)
 MARKET_CTX = threading.local()
 DEFAULT_COUNTRY = os.environ.get("DEFAULT_COUNTRY", "kw").strip().lower() or "kw"
@@ -155,41 +157,540 @@ SHOPPING_RESULT_LIMIT = max(5, int(os.environ.get("SHOPPING_RESULT_LIMIT", "20")
 IMMERSIVE_LOOKUPS_MAX = max(0, int(os.environ.get("IMMERSIVE_LOOKUPS_MAX", "3")))
 IMMERSIVE_MORE_STORES = env_bool("IMMERSIVE_MORE_STORES", True)
 SHOPPING_POOL = ThreadPoolExecutor(max_workers=4)
+LOCAL_SHOPPING_POOL = ThreadPoolExecutor(max_workers=max(4, int(os.environ.get("LOCAL_SHOPPING_WORKERS", "6"))))
+LOCAL_SHOPPING_PRIMARY_PASSES = max(1, min(3, int(os.environ.get("LOCAL_SHOPPING_PRIMARY_PASSES", "2"))))
+LOCAL_RESULTS_TARGET = max(2, int(os.environ.get("LOCAL_RESULTS_TARGET", "4")))
+LOCAL_STORE_RESCUE_MAX = max(0, min(4, int(os.environ.get("LOCAL_STORE_RESCUE_MAX", "3"))))
+LOCAL_COUNTRY_RESCUE_ENABLED = env_bool("LOCAL_COUNTRY_RESCUE_ENABLED", True)
+LOCAL_COUNTRY_RESCUE_PASSES = max(1, min(2, int(os.environ.get("LOCAL_COUNTRY_RESCUE_PASSES", "1"))))
+LOCAL_AI_QUERY_RESCUE_ENABLED = env_bool("LOCAL_AI_QUERY_RESCUE_ENABLED", True)
+LOCAL_QUERY_CACHE = {}
+LOCAL_QUERY_CACHE_LOCK = threading.Lock()
 
 
-# ---- Global market detection -------------------------------------------------
-# Longest-prefix matching. This covers all international calling-code zones; ambiguous
-# +1 and +7 default to the most common market unless the user shares location.
+# ---- Global market detection v85 ----------------------------------------------
+# Worldwide market profile: country name + all tender currencies + commerce search language.
+# This is intentionally static so Railway does not depend on pycountry/Babel at runtime.
+COUNTRY_META = {
+    'ae': ('United Arab Emirates', ('AED',), 'en'),
+    'af': ('Afghanistan', ('AFN',), 'ps'),
+    'ag': ('Antigua and Barbuda', ('XCD',), 'en'),
+    'ai': ('Anguilla', ('XCD',), 'en'),
+    'al': ('Albania', ('ALL',), 'sq'),
+    'am': ('Armenia', ('AMD',), 'hy'),
+    'ao': ('Angola', ('AOA',), 'pt'),
+    'ar': ('Argentina', ('ARS',), 'es'),
+    'as': ('American Samoa', ('USD',), 'en'),
+    'at': ('Austria', ('EUR',), 'de'),
+    'au': ('Australia', ('AUD',), 'en'),
+    'aw': ('Aruba', ('AWG',), 'nl'),
+    'az': ('Azerbaijan', ('AZN',), 'az'),
+    'ba': ('Bosnia and Herzegovina', ('BAM',), 'bs'),
+    'bb': ('Barbados', ('BBD',), 'en'),
+    'bd': ('Bangladesh', ('BDT',), 'en'),
+    'be': ('Belgium', ('EUR',), 'nl'),
+    'bf': ('Burkina Faso', ('XOF',), 'fr'),
+    'bg': ('Bulgaria', ('BGN',), 'bg'),
+    'bh': ('Bahrain', ('BHD',), 'ar'),
+    'bi': ('Burundi', ('BIF',), 'fr'),
+    'bj': ('Benin', ('XOF',), 'fr'),
+    'bm': ('Bermuda', ('BMD',), 'en'),
+    'bn': ('Brunei Darussalam', ('BND',), 'ms'),
+    'bo': ('Bolivia, Plurinational State of', ('BOB',), 'es'),
+    'br': ('Brazil', ('BRL',), 'pt'),
+    'bs': ('Bahamas', ('BSD',), 'en'),
+    'bt': ('Bhutan', ('INR', 'BTN'), 'dz'),
+    'bw': ('Botswana', ('BWP',), 'en'),
+    'by': ('Belarus', ('BYN',), 'ru'),
+    'bz': ('Belize', ('BZD',), 'en'),
+    'ca': ('Canada', ('CAD',), 'en'),
+    'cc': ('Cocos (Keeling) Islands', ('AUD',), 'en'),
+    'cd': ('Congo, The Democratic Republic of the', ('CDF',), 'fr'),
+    'cf': ('Central African Republic', ('XAF',), 'fr'),
+    'cg': ('Congo', ('XAF',), 'fr'),
+    'ch': ('Switzerland', ('CHF',), 'de'),
+    'ci': ("Côte d'Ivoire", ('XOF',), 'fr'),
+    'ck': ('Cook Islands', ('NZD',), 'en'),
+    'cl': ('Chile', ('CLP',), 'es'),
+    'cm': ('Cameroon', ('XAF',), 'en'),
+    'cn': ('China', ('CNY',), 'zh'),
+    'co': ('Colombia', ('COP',), 'es'),
+    'cr': ('Costa Rica', ('CRC',), 'es'),
+    'cu': ('Cuba', ('CUP',), 'es'),
+    'cv': ('Cabo Verde', ('CVE',), 'pt'),
+    'cx': ('Christmas Island', ('AUD',), 'en'),
+    'cy': ('Cyprus', ('EUR',), 'el'),
+    'cz': ('Czechia', ('CZK',), 'cs'),
+    'de': ('Germany', ('EUR',), 'de'),
+    'dj': ('Djibouti', ('DJF',), 'fr'),
+    'dk': ('Denmark', ('DKK',), 'da'),
+    'dm': ('Dominica', ('XCD',), 'en'),
+    'do': ('Dominican Republic', ('DOP',), 'es'),
+    'dz': ('Algeria', ('DZD',), 'fr'),
+    'ec': ('Ecuador', ('USD',), 'es'),
+    'ee': ('Estonia', ('EUR',), 'et'),
+    'eg': ('Egypt', ('EGP',), 'ar'),
+    'eh': ('Western Sahara', ('MAD',), 'es'),
+    'er': ('Eritrea', ('ERN',), 'ti'),
+    'es': ('Spain', ('EUR',), 'es'),
+    'et': ('Ethiopia', ('ETB',), 'am'),
+    'fi': ('Finland', ('EUR',), 'fi'),
+    'fj': ('Fiji', ('FJD',), 'en'),
+    'fk': ('Falkland Islands (Malvinas)', ('FKP',), 'en'),
+    'fm': ('Micronesia, Federated States of', ('USD',), 'en'),
+    'fo': ('Faroe Islands', ('DKK',), 'fo'),
+    'fr': ('France', ('EUR',), 'fr'),
+    'ga': ('Gabon', ('XAF',), 'fr'),
+    'gb': ('United Kingdom', ('GBP',), 'en'),
+    'gd': ('Grenada', ('XCD',), 'en'),
+    'ge': ('Georgia', ('GEL',), 'ka'),
+    'gf': ('French Guiana', ('EUR',), 'fr'),
+    'gg': ('Guernsey', ('GBP',), 'en'),
+    'gh': ('Ghana', ('GHS',), 'en'),
+    'gi': ('Gibraltar', ('GIP',), 'en'),
+    'gl': ('Greenland', ('DKK',), 'kl'),
+    'gm': ('Gambia', ('GMD',), 'en'),
+    'gn': ('Guinea', ('GNF',), 'fr'),
+    'gp': ('Guadeloupe', ('EUR',), 'fr'),
+    'gq': ('Equatorial Guinea', ('XAF',), 'es'),
+    'gr': ('Greece', ('EUR',), 'el'),
+    'gs': ('South Georgia and the South Sandwich Islands', ('GBP',), 'en'),
+    'gt': ('Guatemala', ('GTQ',), 'es'),
+    'gu': ('Guam', ('USD',), 'en'),
+    'gw': ('Guinea-Bissau', ('XOF',), 'pt'),
+    'gy': ('Guyana', ('GYD',), 'en'),
+    'hk': ('Hong Kong', ('HKD',), 'en'),
+    'hm': ('Heard Island and McDonald Islands', ('AUD',), 'en'),
+    'hn': ('Honduras', ('HNL',), 'es'),
+    'hr': ('Croatia', ('EUR',), 'hr'),
+    'ht': ('Haiti', ('HTG', 'USD'), 'fr'),
+    'hu': ('Hungary', ('HUF',), 'hu'),
+    'id': ('Indonesia', ('IDR',), 'id'),
+    'ie': ('Ireland', ('EUR',), 'en'),
+    'il': ('Israel', ('ILS',), 'he'),
+    'im': ('Isle of Man', ('GBP',), 'en'),
+    'in': ('India', ('INR',), 'en'),
+    'io': ('British Indian Ocean Territory', ('USD',), 'en'),
+    'iq': ('Iraq', ('IQD',), 'ar'),
+    'ir': ('Iran, Islamic Republic of', ('IRR',), 'fa'),
+    'is': ('Iceland', ('ISK',), 'is'),
+    'it': ('Italy', ('EUR',), 'it'),
+    'je': ('Jersey', ('GBP',), 'en'),
+    'jm': ('Jamaica', ('JMD',), 'en'),
+    'jo': ('Jordan', ('JOD',), 'ar'),
+    'jp': ('Japan', ('JPY',), 'ja'),
+    'ke': ('Kenya', ('KES',), 'en'),
+    'kg': ('Kyrgyzstan', ('KGS',), 'ky'),
+    'kh': ('Cambodia', ('KHR',), 'km'),
+    'ki': ('Kiribati', ('AUD',), 'en'),
+    'km': ('Comoros', ('KMF',), 'ar'),
+    'kn': ('Saint Kitts and Nevis', ('XCD',), 'en'),
+    'kp': ("Korea, Democratic People's Republic of", ('KPW',), 'ko'),
+    'kr': ('Korea, Republic of', ('KRW',), 'ko'),
+    'kw': ('Kuwait', ('KWD',), 'ar'),
+    'ky': ('Cayman Islands', ('KYD',), 'en'),
+    'kz': ('Kazakhstan', ('KZT',), 'ru'),
+    'la': ("Lao People's Democratic Republic", ('LAK',), 'lo'),
+    'lb': ('Lebanon', ('LBP',), 'ar'),
+    'lc': ('Saint Lucia', ('XCD',), 'en'),
+    'li': ('Liechtenstein', ('CHF',), 'de'),
+    'lk': ('Sri Lanka', ('LKR',), 'si'),
+    'lr': ('Liberia', ('LRD',), 'en'),
+    'ls': ('Lesotho', ('ZAR', 'LSL'), 'en'),
+    'lt': ('Lithuania', ('EUR',), 'lt'),
+    'lu': ('Luxembourg', ('EUR',), 'fr'),
+    'lv': ('Latvia', ('EUR',), 'lv'),
+    'ly': ('Libya', ('LYD',), 'ar'),
+    'ma': ('Morocco', ('MAD',), 'fr'),
+    'mc': ('Monaco', ('EUR',), 'fr'),
+    'md': ('Moldova, Republic of', ('MDL',), 'ro'),
+    'mg': ('Madagascar', ('MGA',), 'fr'),
+    'mh': ('Marshall Islands', ('USD',), 'en'),
+    'mk': ('North Macedonia', ('MKD',), 'mk'),
+    'ml': ('Mali', ('XOF',), 'fr'),
+    'mn': ('Mongolia', ('MNT',), 'mn'),
+    'mo': ('Macao', ('MOP',), 'zh'),
+    'mp': ('Northern Mariana Islands', ('USD',), 'en'),
+    'mq': ('Martinique', ('EUR',), 'fr'),
+    'mr': ('Mauritania', ('MRU',), 'ar'),
+    'ms': ('Montserrat', ('XCD',), 'en'),
+    'mt': ('Malta', ('EUR',), 'mt'),
+    'mu': ('Mauritius', ('MUR',), 'en'),
+    'mv': ('Maldives', ('MVR',), 'dv'),
+    'mw': ('Malawi', ('MWK',), 'en'),
+    'mx': ('Mexico', ('MXN',), 'es'),
+    'my': ('Malaysia', ('MYR',), 'en'),
+    'mz': ('Mozambique', ('MZN',), 'pt'),
+    'na': ('Namibia', ('ZAR', 'NAD'), 'en'),
+    'nc': ('New Caledonia', ('XPF',), 'fr'),
+    'ne': ('Niger', ('XOF',), 'fr'),
+    'nf': ('Norfolk Island', ('AUD',), 'en'),
+    'ng': ('Nigeria', ('NGN',), 'en'),
+    'ni': ('Nicaragua', ('NIO',), 'es'),
+    'nl': ('Netherlands', ('EUR',), 'nl'),
+    'no': ('Norway', ('NOK',), 'no'),
+    'np': ('Nepal', ('NPR',), 'ne'),
+    'nr': ('Nauru', ('AUD',), 'en'),
+    'nu': ('Niue', ('NZD',), 'en'),
+    'nz': ('New Zealand', ('NZD',), 'en'),
+    'om': ('Oman', ('OMR',), 'ar'),
+    'pa': ('Panama', ('PAB', 'USD'), 'es'),
+    'pe': ('Peru', ('PEN',), 'es'),
+    'pf': ('French Polynesia', ('XPF',), 'fr'),
+    'pg': ('Papua New Guinea', ('PGK',), 'en'),
+    'ph': ('Philippines', ('PHP',), 'en'),
+    'pk': ('Pakistan', ('PKR',), 'en'),
+    'pl': ('Poland', ('PLN',), 'pl'),
+    'pm': ('Saint Pierre and Miquelon', ('EUR',), 'fr'),
+    'pn': ('Pitcairn', ('NZD',), 'en'),
+    'pr': ('Puerto Rico', ('USD',), 'es'),
+    'pt': ('Portugal', ('EUR',), 'pt'),
+    'pw': ('Palau', ('USD',), 'en'),
+    'py': ('Paraguay', ('PYG',), 'es'),
+    'qa': ('Qatar', ('QAR',), 'ar'),
+    're': ('Réunion', ('EUR',), 'fr'),
+    'ro': ('Romania', ('RON',), 'ro'),
+    'rs': ('Serbia', ('RSD',), 'rs'),
+    'ru': ('Russian Federation', ('RUB',), 'ru'),
+    'rw': ('Rwanda', ('RWF',), 'rw'),
+    'sa': ('Saudi Arabia', ('SAR',), 'ar'),
+    'sb': ('Solomon Islands', ('SBD',), 'en'),
+    'sc': ('Seychelles', ('SCR',), 'fr'),
+    'sd': ('Sudan', ('SDG',), 'ar'),
+    'se': ('Sweden', ('SEK',), 'sv'),
+    'sg': ('Singapore', ('SGD',), 'en'),
+    'sh': ('Saint Helena, Ascension and Tristan da Cunha', ('SHP',), 'en'),
+    'si': ('Slovenia', ('EUR',), 'sl'),
+    'sj': ('Svalbard and Jan Mayen', ('NOK',), 'no'),
+    'sk': ('Slovakia', ('EUR',), 'sk'),
+    'sl': ('Sierra Leone', ('SLE',), 'en'),
+    'sm': ('San Marino', ('EUR',), 'it'),
+    'sn': ('Senegal', ('XOF',), 'fr'),
+    'so': ('Somalia', ('SOS',), 'so'),
+    'sr': ('Suriname', ('SRD',), 'nl'),
+    'ss': ('South Sudan', ('SSP',), 'en'),
+    'st': ('Sao Tome and Principe', ('STN',), 'pt'),
+    'sv': ('El Salvador', ('USD',), 'es'),
+    'sy': ('Syrian Arab Republic', ('SYP',), 'ar'),
+    'sz': ('Eswatini', ('SZL',), 'en'),
+    'td': ('Chad', ('XAF',), 'fr'),
+    'tf': ('French Southern Territories', ('EUR',), 'fr'),
+    'tg': ('Togo', ('XOF',), 'fr'),
+    'th': ('Thailand', ('THB',), 'th'),
+    'tj': ('Tajikistan', ('TJS',), 'tg'),
+    'tk': ('Tokelau', ('NZD',), 'en'),
+    'tl': ('Timor-Leste', ('USD',), 'pt'),
+    'tm': ('Turkmenistan', ('TMT',), 'tk'),
+    'tn': ('Tunisia', ('TND',), 'fr'),
+    'to': ('Tonga', ('TOP',), 'en'),
+    'tr': ('Türkiye', ('TRY',), 'tr'),
+    'tt': ('Trinidad and Tobago', ('TTD',), 'en'),
+    'tv': ('Tuvalu', ('AUD',), 'en'),
+    'tw': ('Taiwan, Province of China', ('TWD',), 'zh'),
+    'tz': ('Tanzania, United Republic of', ('TZS',), 'en'),
+    'ua': ('Ukraine', ('UAH',), 'uk'),
+    'ug': ('Uganda', ('UGX',), 'en'),
+    'us': ('United States', ('USD',), 'en'),
+    'uy': ('Uruguay', ('UYU',), 'es'),
+    'uz': ('Uzbekistan', ('UZS',), 'uz'),
+    'vc': ('Saint Vincent and the Grenadines', ('XCD',), 'en'),
+    've': ('Venezuela, Bolivarian Republic of', ('VES',), 'es'),
+    'vn': ('Viet Nam', ('VND',), 'vi'),
+    'vu': ('Vanuatu', ('VUV',), 'bi'),
+    'wf': ('Wallis and Futuna', ('XPF',), 'fr'),
+    'ws': ('Samoa', ('WST',), 'sm'),
+    'xk': ('Kosovo', ('EUR',), 'sq'),
+    'ye': ('Yemen', ('YER',), 'ar'),
+    'yt': ('Mayotte', ('EUR',), 'fr'),
+    'za': ('South Africa', ('ZAR',), 'en'),
+    'zm': ('Zambia', ('ZMW',), 'en'),
+    'zw': ('Zimbabwe', ('USD', 'ZWG'), 'en'),
+}
+
 CALLING_CODE_TO_COUNTRY = {
-    "965":"kw","966":"sa","971":"ae","973":"bh","974":"qa","968":"om","964":"iq","962":"jo","961":"lb","963":"sy","967":"ye","970":"ps",
-    "20":"eg","212":"ma","213":"dz","216":"tn","218":"ly","249":"sd","252":"so","253":"dj","269":"km","222":"mr",
-    "90":"tr","98":"ir","92":"pk","91":"in","880":"bd","94":"lk","977":"np","93":"af","960":"mv","975":"bt",
-    "86":"cn","852":"hk","853":"mo","886":"tw","81":"jp","82":"kr","850":"kp","65":"sg","60":"my","62":"id","63":"ph","66":"th","84":"vn","855":"kh","856":"la","95":"mm","673":"bn","670":"tl","976":"mn",
-    "44":"gb","353":"ie","33":"fr","49":"de","39":"it","34":"es","351":"pt","31":"nl","32":"be","352":"lu","41":"ch","43":"at","45":"dk","46":"se","47":"no","358":"fi","354":"is","30":"gr","357":"cy","356":"mt",
-    "48":"pl","420":"cz","421":"sk","36":"hu","40":"ro","359":"bg","385":"hr","386":"si","381":"rs","382":"me","387":"ba","389":"mk","355":"al","383":"xk","373":"md","380":"ua","375":"by","370":"lt","371":"lv","372":"ee","7":"ru",
-    "1":"us","52":"mx","55":"br","54":"ar","56":"cl","57":"co","58":"ve","51":"pe","593":"ec","591":"bo","595":"py","598":"uy","592":"gy","597":"sr","500":"fk",
-    "61":"au","64":"nz","675":"pg","679":"fj","677":"sb","678":"vu","685":"ws","676":"to","686":"ki","688":"tv","691":"fm","692":"mh","680":"pw","674":"nr",
-    "27":"za","234":"ng","233":"gh","254":"ke","255":"tz","256":"ug","250":"rw","257":"bi","251":"et","291":"er","260":"zm","263":"zw","267":"bw","264":"na","258":"mz","261":"mg","230":"mu","248":"sc","266":"ls","268":"sz","265":"mw","244":"ao","243":"cd","242":"cg","241":"ga","237":"cm","225":"ci","221":"sn","223":"ml","226":"bf","227":"ne","228":"tg","229":"bj","231":"lr","232":"sl","224":"gn","245":"gw","240":"gq","235":"td","236":"cf","239":"st","238":"cv",
-    "972":"il","994":"az","995":"ge","374":"am","992":"tj","993":"tm","996":"kg","998":"uz"
+    '1': 'us',
+    '7': 'ru',
+    '20': 'eg',
+    '27': 'za',
+    '30': 'gr',
+    '31': 'nl',
+    '32': 'be',
+    '33': 'fr',
+    '34': 'es',
+    '36': 'hu',
+    '39': 'it',
+    '40': 'ro',
+    '41': 'ch',
+    '43': 'at',
+    '44': 'gb',
+    '45': 'dk',
+    '46': 'se',
+    '47': 'no',
+    '48': 'pl',
+    '49': 'de',
+    '51': 'pe',
+    '52': 'mx',
+    '53': 'cu',
+    '54': 'ar',
+    '55': 'br',
+    '56': 'cl',
+    '57': 'co',
+    '58': 've',
+    '60': 'my',
+    '61': 'au',
+    '62': 'id',
+    '63': 'ph',
+    '64': 'nz',
+    '65': 'sg',
+    '66': 'th',
+    '76': 'kz',
+    '77': 'kz',
+    '81': 'jp',
+    '82': 'kr',
+    '84': 'vn',
+    '86': 'cn',
+    '90': 'tr',
+    '91': 'in',
+    '92': 'pk',
+    '93': 'af',
+    '94': 'lk',
+    '98': 'ir',
+    '211': 'ss',
+    '212': 'ma',
+    '213': 'dz',
+    '216': 'tn',
+    '218': 'ly',
+    '220': 'gm',
+    '221': 'sn',
+    '222': 'mr',
+    '223': 'ml',
+    '224': 'gn',
+    '225': 'ci',
+    '226': 'bf',
+    '227': 'ne',
+    '228': 'tg',
+    '229': 'bj',
+    '230': 'mu',
+    '231': 'lr',
+    '232': 'sl',
+    '233': 'gh',
+    '234': 'ng',
+    '235': 'td',
+    '236': 'cf',
+    '237': 'cm',
+    '238': 'cv',
+    '239': 'st',
+    '240': 'gq',
+    '241': 'ga',
+    '242': 'cg',
+    '243': 'cd',
+    '244': 'ao',
+    '245': 'gw',
+    '246': 'io',
+    '248': 'sc',
+    '249': 'sd',
+    '250': 'rw',
+    '251': 'et',
+    '252': 'so',
+    '253': 'dj',
+    '254': 'ke',
+    '255': 'tz',
+    '256': 'ug',
+    '257': 'bi',
+    '258': 'mz',
+    '260': 'zm',
+    '261': 'mg',
+    '262': 're',
+    '263': 'zw',
+    '264': 'na',
+    '265': 'mw',
+    '266': 'ls',
+    '267': 'bw',
+    '268': 'sz',
+    '269': 'km',
+    '290': 'sh',
+    '291': 'er',
+    '297': 'aw',
+    '298': 'fo',
+    '299': 'gl',
+    '350': 'gi',
+    '351': 'pt',
+    '352': 'lu',
+    '353': 'ie',
+    '354': 'is',
+    '355': 'al',
+    '356': 'mt',
+    '357': 'cy',
+    '358': 'fi',
+    '359': 'bg',
+    '370': 'lt',
+    '371': 'lv',
+    '372': 'ee',
+    '373': 'md',
+    '374': 'am',
+    '375': 'by',
+    '377': 'mc',
+    '378': 'sm',
+    '380': 'ua',
+    '381': 'rs',
+    '385': 'hr',
+    '386': 'si',
+    '387': 'ba',
+    '389': 'mk',
+    '420': 'cz',
+    '421': 'sk',
+    '423': 'li',
+    '500': 'fk',
+    '501': 'bz',
+    '502': 'gt',
+    '503': 'sv',
+    '504': 'hn',
+    '505': 'ni',
+    '506': 'cr',
+    '507': 'pa',
+    '508': 'pm',
+    '509': 'ht',
+    '590': 'gp',
+    '591': 'bo',
+    '592': 'gy',
+    '593': 'ec',
+    '594': 'gf',
+    '595': 'py',
+    '596': 'mq',
+    '597': 'sr',
+    '598': 'uy',
+    '670': 'tl',
+    '672': 'nf',
+    '673': 'bn',
+    '674': 'nr',
+    '675': 'pg',
+    '676': 'to',
+    '677': 'sb',
+    '678': 'vu',
+    '679': 'fj',
+    '680': 'pw',
+    '681': 'wf',
+    '682': 'ck',
+    '683': 'nu',
+    '685': 'ws',
+    '686': 'ki',
+    '687': 'nc',
+    '688': 'tv',
+    '689': 'pf',
+    '690': 'tk',
+    '691': 'fm',
+    '692': 'mh',
+    '850': 'kp',
+    '852': 'hk',
+    '853': 'mo',
+    '855': 'kh',
+    '856': 'la',
+    '880': 'bd',
+    '886': 'tw',
+    '960': 'mv',
+    '961': 'lb',
+    '962': 'jo',
+    '963': 'sy',
+    '964': 'iq',
+    '965': 'kw',
+    '966': 'sa',
+    '967': 'ye',
+    '968': 'om',
+    '971': 'ae',
+    '972': 'il',
+    '973': 'bh',
+    '974': 'qa',
+    '975': 'bt',
+    '976': 'mn',
+    '977': 'np',
+    '992': 'tj',
+    '993': 'tm',
+    '994': 'az',
+    '995': 'ge',
+    '996': 'kg',
+    '998': 'uz',
+    '1242': 'bs',
+    '1246': 'bb',
+    '1264': 'ai',
+    '1268': 'ag',
+    '1345': 'ky',
+    '1441': 'bm',
+    '1473': 'gd',
+    '1664': 'ms',
+    '1670': 'mp',
+    '1671': 'gu',
+    '1684': 'as',
+    '1758': 'lc',
+    '1767': 'dm',
+    '1784': 'vc',
+    '1787': 'pr',
+    '1809': 'do',
+    '1829': 'do',
+    '1849': 'do',
+    '1868': 'tt',
+    '1869': 'kn',
+    '1876': 'jm',
+    '1939': 'pr',
+    '4779': 'sj',
 }
-COUNTRY_NAMES = {
-    "kw":"Kuwait","sa":"Saudi Arabia","ae":"United Arab Emirates","bh":"Bahrain","qa":"Qatar","om":"Oman","iq":"Iraq","jo":"Jordan","lb":"Lebanon","eg":"Egypt","tr":"Turkey",
-    "us":"United States","ca":"Canada","gb":"United Kingdom","fr":"France","de":"Germany","it":"Italy","es":"Spain","pt":"Portugal","nl":"Netherlands","be":"Belgium","ch":"Switzerland","at":"Austria",
-    "in":"India","cn":"China","jp":"Japan","kr":"South Korea","sg":"Singapore","my":"Malaysia","id":"Indonesia","ph":"Philippines","th":"Thailand","vn":"Vietnam","pk":"Pakistan","bd":"Bangladesh",
-    "au":"Australia","nz":"New Zealand","za":"South Africa","ng":"Nigeria","ke":"Kenya","ma":"Morocco","dz":"Algeria","tn":"Tunisia","ru":"Russia","ua":"Ukraine","br":"Brazil","mx":"Mexico","ar":"Argentina",
-    "lk":"Sri Lanka","np":"Nepal","af":"Afghanistan","hk":"Hong Kong","tw":"Taiwan","kw":"Kuwait"
-}
-COUNTRY_CURRENCIES = {
-    "kw":"KWD","sa":"SAR","ae":"AED","bh":"BHD","qa":"QAR","om":"OMR","iq":"IQD","jo":"JOD","lb":"LBP","eg":"EGP","tr":"TRY",
-    "us":"USD","ca":"CAD","gb":"GBP","fr":"EUR","de":"EUR","it":"EUR","es":"EUR","pt":"EUR","nl":"EUR","be":"EUR","ch":"CHF","at":"EUR",
-    "in":"INR","cn":"CNY","jp":"JPY","kr":"KRW","sg":"SGD","my":"MYR","id":"IDR","ph":"PHP","th":"THB","vn":"VND","pk":"PKR","bd":"BDT",
-    "au":"AUD","nz":"NZD","za":"ZAR","ng":"NGN","ke":"KES","ma":"MAD","dz":"DZD","tn":"TND","ru":"RUB","ua":"UAH","br":"BRL","mx":"MXN","ar":"ARS",
-    "lk":"LKR","np":"NPR","af":"AFN","hk":"HKD","tw":"TWD"
-}
-COUNTRY_TLDS = {"kw":[".kw"],"sa":[".sa"],"ae":[".ae"],"bh":[".bh"],"qa":[".qa"],"om":[".om"],"tr":[".tr"],"gb":[".uk"],"us":[".us"],"ca":[".ca"],"in":[".in"],"cn":[".cn"],"jp":[".jp"],"au":[".au"],"nz":[".nz"],"de":[".de"],"fr":[".fr"],"it":[".it"],"es":[".es"]}
 
-# العملات ذات الألف فلس: تُعرض دائماً بثلاث خانات عشرية (1.950 وليس 1.95).
-THREE_DECIMAL_CURRENCIES = {"KWD", "BHD", "OMR", "JOD", "TND", "LYD"}
+
+# +1 is shared by US/Canada/Caribbean. Caribbean full prefixes are already in the table;
+# Canada needs area-code refinement because its country calling code is only +1.
+NANP_CANADA_AREA_CODES = {
+    "204","226","236","249","250","257","263","289","306","343","354","365","367","368",
+    "382","403","416","418","428","431","437","438","450","468","474","506","514","519","548",
+    "579","581","584","587","604","613","639","647","672","683","705","709","742","753","778",
+    "780","782","807","819","825","867","873","879","902","905"
+}
+
+# Manual additions missing from the bundled country dataset but relevant to real users.
+COUNTRY_META.update({
+    "ad": ("Andorra", ("EUR",), "ca"),
+    "ax": ("Åland Islands", ("EUR",), "sv"),
+    "bq": ("Bonaire, Sint Eustatius and Saba", ("USD",), "nl"),
+    "bl": ("Saint Barthélemy", ("EUR",), "fr"),
+    "cw": ("Curaçao", ("XCG",), "nl"),
+    "mf": ("Saint Martin", ("EUR",), "fr"),
+    "mm": ("Myanmar", ("MMK",), "my"),
+    "me": ("Montenegro", ("EUR",), "sr"),
+    "ps": ("Palestine", ("ILS", "JOD"), "ar"),
+    "sx": ("Sint Maarten", ("XCG",), "nl"),
+    "tc": ("Turks and Caicos Islands", ("USD",), "en"),
+    "va": ("Vatican City", ("EUR",), "it"),
+    "vg": ("British Virgin Islands", ("USD",), "en"),
+    "vi": ("U.S. Virgin Islands", ("USD",), "en"),
+})
+CALLING_CODE_TO_COUNTRY.update({
+    "376":"ad", "95":"mm", "382":"me", "970":"ps", "383":"xk",
+    "5999":"cw", "5997":"bq", "5994":"bq", "5993":"bq", "599":"bq",
+    "1721":"sx", "1649":"tc", "1284":"vg", "1340":"vi", "3906698":"va",
+    # Shared calling-code refinements where the subscriber prefix is distinctive.
+    "441481":"gg", "441534":"je", "441624":"im",
+    "35818":"ax", "262269":"yt", "262639":"yt",
+    "59059027":"bl", "59059029":"mf",
+})
+
+COUNTRY_NAMES = {cc: meta[0] for cc, meta in COUNTRY_META.items()}
+COUNTRY_CURRENCY_CODES = {cc: tuple(meta[1]) for cc, meta in COUNTRY_META.items()}
+COUNTRY_CURRENCIES = {cc: (meta[1][0] if meta[1] else "") for cc, meta in COUNTRY_META.items()}
+COUNTRY_SEARCH_HL = {cc: (meta[2] or "en") for cc, meta in COUNTRY_META.items()}
+# ISO alpha-2 matches ccTLD for practically every shopping market; UK is the important exception.
+COUNTRY_TLDS = {cc: ((".uk",) if cc == "gb" else (f".{cc}",)) for cc in COUNTRY_META}
+# Keep legacy aliases that appear in retail URLs.
+COUNTRY_TLDS["gb"] = (".uk", ".co.uk")
+COUNTRY_TLDS["us"] = (".us",)
+
+# Currency decimal precision used for retail display. Default is 2 decimals.
+CURRENCY_DECIMALS = {
+    "AFN":0,"ALL":0,"BHD":3,"BIF":0,"CLP":0,"DJF":0,"GNF":0,"IQD":0,"IRR":0,"ISK":0,
+    "JOD":3,"JPY":0,"KMF":0,"KPW":0,"KRW":0,"KWD":3,"LAK":0,"LBP":0,"LYD":3,"MGA":0,
+    "OMR":3,"PYG":0,"RSD":0,"RWF":0,"SOS":0,"SYP":0,"TND":3,"UGX":0,"VND":0,"VUV":0,
+    "XAF":0,"XOF":0,"XPF":0,"YER":0,
+}
+THREE_DECIMAL_CURRENCIES = {code for code, digits in CURRENCY_DECIMALS.items() if digits == 3}
+ZERO_DECIMAL_CURRENCIES = {code for code, digits in CURRENCY_DECIMALS.items() if digits == 0}
+
 
 # ---- FX: تحويل الأسعار العالمية إلى عملة المستخدم المحلية -------------------
 # نستخدم open.er-api.com (مجاني بدون مفتاح، تحديث يومي، يشمل KWD وكل عملات الخليج).
@@ -199,16 +700,23 @@ FX_CACHE_TTL = max(3600, int(os.environ.get("FX_CACHE_TTL_HOURS", "12")) * 3600)
 FX_API_URL = os.environ.get("FX_API_URL", "https://open.er-api.com/v6/latest/{base}")
 
 CURRENCY_SYMBOL_MAP = {
-    "$": "USD", "us$": "USD", "€": "EUR", "£": "GBP", "¥": "JPY", "₹": "INR",
-    "₩": "KRW", "₺": "TRY", "₽": "RUB", "r$": "BRL", "a$": "AUD", "c$": "CAD",
-    "د.إ": "AED", "ر.س": "SAR", "ر.ق": "QAR", "ر.ع": "OMR", "د.ب": "BHD",
-    "د.ك": "KWD", "ج.م": "EGP", "د.أ": "JOD",
+    "us$":"USD", "€":"EUR", "₹":"INR", "₩":"KRW", "₺":"TRY", "₽":"RUB", "r$":"BRL",
+    "a$":"AUD", "c$":"CAD", "hk$":"HKD", "s$":"SGD", "nz$":"NZD", "nt$":"TWD",
+    "د.إ":"AED", "ر.س":"SAR", "ر.ق":"QAR", "ر.ع":"OMR", "د.ب":"BHD", "د.ك":"KWD",
+    "ج.م":"EGP", "د.أ":"JOD", "₪":"ILS", "₴":"UAH", "₸":"KZT", "₾":"GEL", "₼":"AZN",
+    "฿":"THB", "₫":"VND", "₱":"PHP", "₦":"NGN", "₵":"GHS", "৳":"BDT", "₲":"PYG",
+    "₭":"LAK", "₮":"MNT", "zł":"PLN", "kč":"CZK", "ft":"HUF",
 }
-KNOWN_CURRENCY_CODES = set(COUNTRY_CURRENCIES.values()) | {
-    "USD","EUR","GBP","JPY","CNY","INR","AED","SAR","QAR","OMR","BHD","KWD",
-    "TRY","EGP","JOD","AUD","CAD","CHF","SEK","NOK","DKK","PLN","RUB","BRL",
-    "MXN","ZAR","KRW","SGD","MYR","THB","IDR","PHP","VND","PKR","HKD","NZD","TWD"
+KNOWN_CURRENCY_CODES = set(code for codes in COUNTRY_CURRENCY_CODES.values() for code in codes) | {
+    "USD","EUR","GBP","JPY","CNY","INR","AED","SAR","QAR","OMR","BHD","KWD","TRY","EGP",
+    "JOD","AUD","CAD","CHF","SEK","NOK","DKK","PLN","RUB","BRL","MXN","ZAR","KRW","SGD",
+    "MYR","THB","IDR","PHP","VND","PKR","HKD","NZD","TWD"
 }
+
+# Symbols shared by many countries must be interpreted in market context, not hardwired to USD/JPY/GBP.
+DOLLAR_LIKE_CODES = {"USD","CAD","AUD","NZD","SGD","HKD","TWD","MXN","ARS","CLP","COP","UYU","BMD","BBD","BSD","BZD","BND","FJD","GYD","JMD","KYD","LRD","NAD","SBD","SRD","TTD","XCD"}
+YEN_LIKE_CODES = {"JPY","CNY"}
+POUND_LIKE_CODES = {"GBP","EGP","FKP","GIP","SHP","SSP","SYP"}
 
 def get_fx_rates(base):
     """أسعار الصرف من عملة الأساس. كاش 12 ساعة حتى لا نستهلك الشبكة مع كل بحث."""
@@ -255,27 +763,55 @@ def convert_to_local(value, from_currency):
         return None
     return val * float(rate)
 
-def detect_currency_code(text, fallback=""):
-    """يستخرج رمز العملة من نص السعر: KWD أو $ أو ر.س ... إلخ."""
+def detect_currency_code(text, fallback="", country_code=None):
+    """Detect currency with market-aware handling for ambiguous $, ¥ and £ symbols."""
     hay = str(text or "").strip()
+    fallback = (fallback or "").upper().strip()
     if not hay:
-        return (fallback or "").upper()
+        return fallback
     m = re.search(r"\b([A-Z]{3})\b", hay.upper())
     if m and m.group(1) in KNOWN_CURRENCY_CODES:
         return m.group(1)
     low = hay.lower()
-    # الرموز المركبة أولاً (us$ قبل $).
+    # Explicit multi-character/non-ambiguous symbols first.
     for sym in sorted(CURRENCY_SYMBOL_MAP, key=len, reverse=True):
         if sym in low or sym in hay:
             return CURRENCY_SYMBOL_MAP[sym]
-    return (fallback or "").upper()
+    # Resolve shared symbols from the supplied/local market before applying global defaults.
+    cc = (country_code or (current_market().get("country") if "current_market" in globals() else "") or "").lower()
+    local_codes = set(COUNTRY_CURRENCY_CODES.get(cc, ()))
+    preferred = fallback or (next(iter(local_codes)) if len(local_codes) == 1 else "")
+    if "$" in hay:
+        if preferred in DOLLAR_LIKE_CODES:
+            return preferred
+        for code in COUNTRY_CURRENCY_CODES.get(cc, ()):
+            if code in DOLLAR_LIKE_CODES:
+                return code
+        return "USD"
+    if "¥" in hay or "￥" in hay:
+        if preferred in YEN_LIKE_CODES:
+            return preferred
+        if "CNY" in local_codes:
+            return "CNY"
+        if "JPY" in local_codes:
+            return "JPY"
+        return "JPY"
+    if "£" in hay:
+        if preferred in POUND_LIKE_CODES:
+            return preferred
+        for code in COUNTRY_CURRENCY_CODES.get(cc, ()):
+            if code in POUND_LIKE_CODES:
+                return code
+        return "GBP"
+    return fallback
+
 
 def display_global_price(price_value, price_text, currency_code, lang="ar"):
     """السعر العالمي يُعرض دائماً بعملة المستخدم المحلية بالفلوس الكاملة: 1.950 د.ك (6.35 USD).
 
     إذا تعذر التحويل (عملة مجهولة أو فشل مصدر الصرف) نعرض السعر الأصلي كما ورد بدل إخفاء العرض.
     """
-    src = detect_currency_code(f"{currency_code or ''} {price_text or ''}", currency_code)
+    src = detect_currency_code(f"{currency_code or ''} {price_text or ''}", currency_code, current_market().get("country"))
     numeric = None
     try:
         if price_value not in (None, ""):
@@ -283,12 +819,10 @@ def display_global_price(price_value, price_text, currency_code, lang="ar"):
     except Exception:
         numeric = None
     if numeric is None:
-        m = re.search(r"(?<!\d)(\d+(?:[.,]\d{1,3})?)(?!\d)", str(price_text or "").replace(",", ""))
-        if m:
-            try:
-                numeric = float(m.group(1))
-            except Exception:
-                numeric = None
+        try:
+            numeric = _extract_numeric_price(str(price_text or ""))
+        except Exception:
+            numeric = None
     if numeric is None:
         return str(price_text or "").strip(), None
     converted = convert_to_local(numeric, src) if src else None
@@ -301,40 +835,76 @@ def display_global_price(price_value, price_text, currency_code, lang="ar"):
     shown = str(price_text or "").strip() or f"{format_price(numeric, src)} {src}".strip()
     return shown, None
 
+def country_currency_codes(cc=None):
+    cc = (cc or current_market().get("country") or DEFAULT_COUNTRY).lower()
+    return COUNTRY_CURRENCY_CODES.get(cc, tuple(filter(None, (COUNTRY_CURRENCIES.get(cc, ""),))))
+
+
+def country_search_hl(cc=None):
+    cc = (cc or current_market().get("country") or DEFAULT_COUNTRY).lower()
+    return COUNTRY_SEARCH_HL.get(cc, "en") or "en"
+
+
+def country_tlds(cc=None):
+    cc = (cc or current_market().get("country") or DEFAULT_COUNTRY).lower()
+    return COUNTRY_TLDS.get(cc, (f".{cc}",) if len(cc) == 2 else ())
+
+
 def infer_country_from_phone(phone):
+    """Infer market from WhatsApp international number, including shared calling-code zones."""
     digits = re.sub(r"\D", "", phone or "")
+    # International 00 prefix can appear in manually supplied/test values.
+    if digits.startswith("00"):
+        digits = digits[2:]
+    # North American Numbering Plan: Caribbean prefixes are represented as 1xxx in the main table.
+    # Canada has only +1, so refine it from the next three digits; otherwise default +1 to US.
+    if digits.startswith("1") and len(digits) >= 4:
+        full4 = digits[:4]
+        if full4 in CALLING_CODE_TO_COUNTRY and full4 != "1":
+            return CALLING_CODE_TO_COUNTRY[full4]
+        if digits[1:4] in NANP_CANADA_AREA_CODES:
+            return "ca"
+        return "us"
+    # Kazakhstan uses +76/+77 while Russia uses the rest of +7.
+    if digits.startswith(("76", "77")):
+        return "kz"
     for prefix in sorted(CALLING_CODE_TO_COUNTRY, key=len, reverse=True):
         if digits.startswith(prefix):
             return CALLING_CODE_TO_COUNTRY[prefix]
     return DEFAULT_COUNTRY
 
-def market_for_user(from_number):
-    """Resolve the user's market from the WhatsApp phone calling code.
 
-    v81: phone prefix is the single source of truth for the country. We intentionally
-    discard old GPS/city fields so a previously shared location can never override
-    the market inferred from the user's WhatsApp number.
+def market_for_user(from_number):
+    """Resolve a worldwide local market from the WhatsApp calling code.
+
+    Phone prefix remains the source of truth requested by the product design; the resulting market
+    profile carries country, accepted currencies, ccTLDs and Google's local search language.
     """
     market = dict(USER_MARKET.get(from_number) or {})
     cc = (infer_country_from_phone(from_number) or DEFAULT_COUNTRY).lower()
+    currencies = COUNTRY_CURRENCY_CODES.get(cc) or tuple(filter(None, (COUNTRY_CURRENCIES.get(cc, ""),)))
     market["country"] = cc
     market["country_name"] = COUNTRY_NAMES.get(cc, cc.upper())
-    market["currency"] = COUNTRY_CURRENCIES.get(cc, "")
+    market["currency"] = currencies[0] if currencies else ""
+    market["currencies"] = list(currencies)
+    market["search_hl"] = COUNTRY_SEARCH_HL.get(cc, "en")
+    market["tlds"] = list(country_tlds(cc))
     market["market_source"] = "phone_prefix"
     market.pop("lat", None)
     market.pop("lng", None)
     market.pop("city", None)
     return market
 
+
 def activate_market(from_number):
     market = market_for_user(from_number)
     MARKET_CTX.value = market
     USER_MARKET[from_number] = market
-    USER_LOCATION_TS[from_number] = time.time()  # compatibility: market is always valid from phone prefix
+    USER_LOCATION_TS[from_number] = time.time()
     return market
 
+
 def ensure_market_from_phone(from_number, persist=False):
-    """Initialize/refresh market from the WhatsApp number without any GPS prompt."""
     before = dict(USER_MARKET.get(from_number) or {})
     market = activate_market(from_number)
     changed = any(before.get(k) != market.get(k) for k in ("country", "country_name", "currency", "market_source"))
@@ -342,36 +912,62 @@ def ensure_market_from_phone(from_number, persist=False):
         save_user_preferences(from_number)
     return market
 
+
 def current_market():
-    return getattr(MARKET_CTX, "value", None) or {"country":DEFAULT_COUNTRY,"country_name":COUNTRY_NAMES.get(DEFAULT_COUNTRY,"Kuwait"),"currency":COUNTRY_CURRENCIES.get(DEFAULT_COUNTRY,"KWD")}
+    base_cc = DEFAULT_COUNTRY
+    base_codes = COUNTRY_CURRENCY_CODES.get(base_cc) or (COUNTRY_CURRENCIES.get(base_cc, "KWD"),)
+    return getattr(MARKET_CTX, "value", None) or {
+        "country": base_cc,
+        "country_name": COUNTRY_NAMES.get(base_cc, "Kuwait"),
+        "currency": base_codes[0] if base_codes else "KWD",
+        "currencies": list(base_codes),
+        "search_hl": COUNTRY_SEARCH_HL.get(base_cc, "ar"),
+        "tlds": list(country_tlds(base_cc)),
+    }
+
 
 def _run_with_market(market, fn, *args, **kwargs):
-    """MARKET_CTX هو threading.local؛ أي عمل داخل ThreadPool يفقد سوق المستخدم بدون هذا الغلاف.
-
-    بدونه: مستخدم سعودي يرسل سلة منتجات أو يمر على الطبقة القديمة -> البحث يرجع للكويت الافتراضية.
-    """
     MARKET_CTX.value = market
     return fn(*args, **kwargs)
 
+
 def currency_label(lang="ar"):
     code = current_market().get("currency") or ""
-    if lang != "ar" or code != "KWD":
-        return code or ""
-    return "د.ك"
+    # Keep the familiar Kuwait label for Arabic; ISO codes are clearer and universal elsewhere.
+    if lang == "ar" and code == "KWD":
+        return "د.ك"
+    return code or ""
+
 
 def market_instruction():
     m = current_market()
-    city = m.get("city") or ""
-    place = f"{city}, {m['country_name']}" if city else m["country_name"]
+    cc = (m.get("country") or DEFAULT_COUNTRY).lower()
+    country = m.get("country_name") or COUNTRY_NAMES.get(cc, cc.upper())
     currency = m.get("currency") or "local currency"
+    currencies = ", ".join(m.get("currencies") or country_currency_codes(cc)) or currency
+    hl = m.get("search_hl") or country_search_hl(cc)
+    tlds = ", ".join(country_tlds(cc))
+    priority = priority_stores_for("") if "priority_stores_for" in globals() else []
+    stores = ", ".join(priority[:6]) if priority else "the strongest local specialist retailers and marketplaces"
+    kuwait_extra = ""
+    if cc == "kw":
+        # Preserve the exact Kuwait strength from the original bot instead of replacing it with a generic global rule.
+        kuwait_extra = (
+            " Kuwait premium local discovery: actively check Pro Sports, Intersport, Decathlon, Sun & Sand Sports for sports; "
+            "Xcite, Eureka Kuwait, Best Al-Yousifi, Blink, Jarir and 3RoodQ8 for electronics/gaming; Tigro and Toys R Us for toys; "
+            "Jm3eia, Lulu, Carrefour and Taw9eel for grocery, plus any smaller Kuwait merchant indexed by Google Shopping."
+        )
     return (
-        f"\nIMPORTANT CURRENT USER MARKET: {place} (country code {m['country']}). "
-        "For product/store searches use exactly this geographic priority: "
-        f"(1) stores in {place}, then (2) United States stores, then (3) China stores. "
-        "Reject stores from every other country. Explicitly reject Heureka/heureka.cz/heureka.sk; it is not a local Kuwait store. Do not require US/China stores to deliver locally. "
-        f"Local results should use {currency}; foreign prices may be returned in their original currency because the application converts them. "
-        "This LOCAL -> US -> CHINA ordering is more important than price: never place a cheaper US/China offer above a local one. "
-        "Ignore any older Kuwait-only or local-only instruction when it conflicts with this rule.\n"
+        f"\nIMPORTANT CURRENT USER MARKET: {country} (ISO country {cc.upper()}, Google gl={cc}, preferred hl={hl}). "
+        f"Accepted local currencies: {currencies}; primary display currency: {currency}; local ccTLD evidence: {tlds}. "
+        "LOCAL RESULTS ARE THE CORE PRODUCT: exhaust the local market before relying on foreign results. "
+        f"Search the product using the user's wording, its commercial English name, and when useful the main local commerce language ({hl}). "
+        f"Prioritize {stores}, but never limit discovery to a fixed list: include small genuine local merchants indexed in Google Shopping/Search. "
+        "Use geography in this exact order: (1) the user's local country, (2) United States, (3) China only. Reject every fourth country. "
+        "Do not move a cheaper US/China offer above a genuine local offer. Foreign stores do not need to ship locally. "
+        "Treat Heureka/heureka.cz/heureka.sk as blocked comparison sites in every market; do NOT confuse them with Eureka Kuwait. "
+        "A local .com merchant is valid when Google local targeting, local currency, country text/path, or merchant evidence clearly ties it to the user's market. "
+        + kuwait_extra + "\n"
     )
 
 def reverse_geocode_market(lat, lng):
@@ -441,9 +1037,8 @@ def format_price(p, currency=None):
     except Exception:
         return str(p)
     code = (currency or current_market().get("currency") or "KWD").upper().strip()
-    if code in THREE_DECIMAL_CURRENCIES:
-        return f"{pf:.3f}"
-    return f"{pf:.2f}"
+    digits = int(CURRENCY_DECIMALS.get(code, 2))
+    return f"{pf:.{digits}f}"
 
 
 def format_lens_price(price_text, price_value, lang="ar", currency_code=None):
@@ -455,12 +1050,10 @@ def format_lens_price(price_text, price_value, lang="ar", currency_code=None):
     except Exception:
         numeric = None
     if numeric is None:
-        m = re.search(r"(?<!\d)(\d+(?:[.,]\d{1,3})?)(?!\d)", str(price_text or "").replace(",", ""))
-        if m:
-            try:
-                numeric = float(m.group(1))
-            except Exception:
-                numeric = None
+        try:
+            numeric = _extract_numeric_price(str(price_text or ""))
+        except Exception:
+            numeric = None
     if numeric is None:
         return str(price_text or "").strip()
     label = currency_label(lang)
@@ -655,7 +1248,7 @@ def has_model_token(a, b):
 def cache_key(query, lang):
     norm = re.sub(r"[^\w\u0600-\u06FF]+", "", normalize_ar(query))
     market = current_market().get("country", DEFAULT_COUNTRY)
-    return hashlib.sha256(f"v84|{market}|{norm}|{lang}".encode()).hexdigest()
+    return hashlib.sha256(f"v85-global-geo|{market}|{norm}|{lang}".encode()).hexdigest()
 
 def cache_ttl_for(query, txt=""):
     q_norm = normalize_ar(query)
@@ -1358,59 +1951,40 @@ def detect_lang(text):
     return None
 
 SYSTEM_PROMPT = """
-أنت مساعد تسوق عالمي يعتمد موقع المستخدم الحالي. استخدم بحث Google فعلياً للأسعار الحالية، ورتب الأسواق دائماً: بلد المستخدم أولاً، ثم الولايات المتحدة، ثم الصين فقط.
+أنت مساعد تسوق عالمي يعتمد سوق المستخدم المحلي الحالي. السوق المحلي هو أهم جزء في الخدمة ويجب البحث فيه بقوة قبل النتائج الأجنبية.
 
 أولاً حدد نوع الطلب:
 
-【الحالة 1】منتج محدد بعلامة تجارية واضحة (مثل: آيفون 15 برو، بيبسي، ساعة أبل الترا، بلايستيشن 5):
-قارن الأسعار لكن رتب جغرافياً أولاً: بلد المستخدم، ثم الولايات المتحدة، ثم الصين فقط. داخل كل سوق رتب من الأرخص إلى الأغلى، ورد بهذا الشكل فقط:
+【الحالة 1】منتج محدد بعلامة/موديل واضح:
+قارن نفس المنتج ونفس المواصفات. رتب جغرافياً دائماً: بلد المستخدم المحلي أولاً، ثم الولايات المتحدة، ثم الصين فقط. داخل كل سوق رتب من الأرخص إلى الأغلى.
 📦 [اسم المنتج]
+✅ [المتجر] — [السعر الرقمي + العملة]
+• [المتجر] — [السعر الرقمي + العملة]
 
-✅ [المتجر الأرخص] — [السعر] د.ك
-• [المتجر الثاني] — [السعر] د.ك
-• [المتجر الثالث] — [السعر] د.ك
-• [المتجر الرابع] — [السعر] د.ك
-• [المتجر الخامس] — [السعر] د.ك
+قاعدة المحلي: ابحث في المتاجر المتخصصة القوية في بلد المستخدم ثم المنصات العامة، ووسّع لأي متجر محلي حقيقي مفهرس في Google Shopping/Search. لا تحصر البحث في قائمة ثابتة، ولا تفترض أن .com يعني متجر أمريكي؛ قد يكون متجراً محلياً.
 
-قاعدة المتاجر: كل فئة لها متاجرها المتخصصة القوية وهي تتقدم على المنصات العامة (نون، طلبات، لولو، كارفور):
-- الرياضة واللياقة: Pro Sports (prosportskw.com)، Intersport، Decathlon، Sun & Sand Sports
-- الإلكترونيات وألعاب الفيديو: Xcite، Eureka، Best Al-Yousifi، Blink، Jarir، 3RoodQ8 (3roodq8.com)
-- ألعاب الأطفال: Tigro (tigro.app)، Toys R Us، 3RoodQ8
-- التموينات: جمعية دوت كوم، لولو، كارفور
-ابحث في متاجر الفئة المتخصصة أولاً ثم المنصات العامة، ولا تحصر البحث في أي قائمة: اقبل أي متجر محلي يبيع المنتج بسعر موثق ورابط صفحة منتج مباشر، حتى لو لم يكن متجراً مشهوراً.
+【الحالة 2】طلب عام بدون براند/موديل محدد:
+لا تبحث عن الأرخص فقط. اقترح أفضل الخيارات المناسبة والمتاحة في سوق المستخدم المحلي، وباللغة التي طلبها المستخدم، ثم اسمح له باختيار منتج للبحث عن أسعاره.
 
-【الحالة 2】طلب عام بدون براند محدد (مثل: قهوة فلات وايت حار، عطر رجالي، لابتوب للدراسة):
-لا تبحث عن الأرخص! ابحث عن الأفضل تقييماً في الكويت بسعر مناسب.
-📦 [وصف الطلب]
-🏆 [اسم الخيار الأفضل + مكانه/متجره] — [السعر] د.ك ⭐ [التقييم من 5]
-• [خيار ثاني] — [السعر] د.ك ⭐ [التقييم]
-• [خيار ثالث] — [السعر] د.ك ⭐ [التقييم]
+【الحالة 3】طلب خدمة:
+ابحث محلياً في بلد المستخدم. لا تكتب رقم هاتف إلا إذا ظهر حرفياً في نتائج البحث.
 
-【الحالة 3】طلب خدمة (فني، بنشر، تبديل بطارية، سباك...):
-📦 [وصف الخدمة + المنطقة]
-🏆 [اسم أفضل مزود فقط] (هاتف: [الرقم]) — [المنطقة] — [السعر إن وجد] د.ك ⭐ [التقييم]
-⛔ قاعدة صارمة جداً للأرقام: لا تكتب أي رقم هاتف إلا إذا ظهر حرفياً في نتائج البحث. إذا ما لقيت رقم اكتب (الرقم بالرابط).
+【الحالة 4】سؤال معلوماتي عن منتج:
+أجب عن السؤال مباشرة ولا تعرض مقارنة أسعار إلا إذا طلب المستخدم ذلك.
 
-【الحالة 4】سؤال معلوماتي عن منتج (المكونات، السعرات، المواصفات...):
-أجب على السؤال نفسه مباشرة — لا تعرض مقارنة أسعار.
+قواعد جودة صارمة:
+- السوق المحلي أولاً دائماً، وبعده الولايات المتحدة ثم الصين فقط؛ ارفض أي دولة رابعة.
+- لا تجعل السعر الأرخص في أمريكا/الصين يتقدم على عرض محلي صحيح.
+- قارن نفس المواصفات فقط: الحجم/السعة/الوزن/الموديل واللون إذا كان يؤثر في السعر.
+- كل رابط شراء يجب أن يكون صفحة منتج مباشرة، وليس Google ولا صفحة بحث/تصنيف.
+- لا تخترع سعراً أو متجراً. استخدم السعر الموجود في نتيجة البحث الحالية.
+- اكتب السعر بالعملة الصحيحة للسوق كما تظهر، والتطبيق يتولى التنسيق والتحويل عند الحاجة.
+- استبعد Heureka / heureka.cz / heureka.sk دائماً لأنه موقع مقارنة وليس متجراً مباشراً. لا تستبعد Eureka الكويتية.
+- لا تفترض أن رمز $ يعني USD دائماً؛ احترم سياق بلد المستخدم والعملة التي يحددها التطبيق.
+- في البحث المحلي استخدم اسم المنتج بصياغة المستخدم + الاسم التجاري الإنجليزي + لغة التجارة المحلية عندما تفيد الفهرسة.
 
-قواعد جودة صارمة جداً:
-- اذكر فقط المنتجات المتوفرة فعلاً. لا تكتب كلمة InStock أو متوفر مكان السعر.
-- أي متجر لا يظهر له سعر رقمي واضح بعملة السوق الحالي احذفه من النتيجة.
-- اكتب السعر بالفلوس كاملة دائماً: 1.950 وليس 1.95، و0.750 وليس 0.75.
-- قارن نفس المواصفات فقط: نفس الحجم/السعة/الوزن، ونفس اللون إذا كان اللون يغيّر السعر. اذكر المواصفة بجانب كل سعر (مثل: 256GB، 1 لتر، أحمر) ولا تدخل نسخة مختلفة المواصفات في نفس المقارنة.
-- اعرض المتاجر بهذا الترتيب الإجباري فقط: بلد المستخدم الحالي أولاً، ثم الولايات المتحدة، ثم الصين. احذف أي دولة أخرى. داخل كل سوق رتب من الأرخص إلى الأغلى.
-- ممنوع أن يكون الرد عبارة عن أسماء متاجر مع كلمة متوفر فقط؛ كل سطر عرض يجب أن يحتوي سعراً رقمياً.
-- رابط كل متجر يجب أن يكون رابط صفحة منتج مباشر (صفحة فيها منتج واحد وسعر واحد). ممنوع روابط الصفحة الرئيسية أو /search أو /category
-- لا تخترع سعراً، انسخ السعر كما يظهر في نتيجة البحث اليوم.
-- استبعد Heureka / heureka.cz / heureka.sk نهائياً؛ هذا ليس متجراً كويتياً. لا تستبعد Eureka الكويتية.
-- حاول تجيب حتى 5 متاجر مختلفة، وإذا ما لقيت اذكر الموجود ولا تخترع.
-
-في الحالات 1 و2 و3، سطر أخير إلزامي:
-LINKS: اسم الأول=الدومين الحقيقي, اسم الثاني=الدومين الحقيقي
-في الحالة 4: سطر LINKS اختياري.
-ممنوع روابط ظاهرة. ممنوع Markdown.
-لغة الرد: التزم بلغة الرد المطلوبة في رسالة المستخدم.
+في نتائج المتاجر أضف سطر LINKS داخلياً لربط أسماء المتاجر بالمصادر، ولا تعرض روابط خام للمستخدم.
+لغة الرد: التزم حصراً بلغة المستخدم المحددة في الواجهة.
 """
 
 def fetch_html(url):
@@ -1801,7 +2375,7 @@ def _china_store_search_fallback(base_query, limit=8):
             source = (card.get("source") or label).strip() or label
             price_text = str(card.get("price") or "").strip()
             price_value = card.get("extracted_price")
-            currency = detect_currency_code(price_text, "")
+            currency = detect_currency_code(price_text, "CNY", "cn")
             out.append({
                 "title": title or q,
                 "link": direct,
@@ -1871,7 +2445,7 @@ def _shopping_card_to_market_item(card, fallback_source="", lens_country=""):
         "image": (card.get("thumbnail") or "").strip(),
         "price": price_text,
         "price_value": card.get("extracted_price"),
-        "currency": detect_currency_code(price_text, ""),
+        "currency": detect_currency_code(price_text, COUNTRY_CURRENCIES.get(lens_country, ""), lens_country),
         "in_stock": None,
         "condition": "",
         "_lens_country": lens_country,
@@ -1898,6 +2472,7 @@ def _market_presence_fallback(base_query, rank, limit=6):
     local_cc = (current_market().get("country") or DEFAULT_COUNTRY).lower()
     if rank == 0:
         specs = [("Local", "", local_cc)]
+        specs.extend((label, domain, local_cc) for label, domain in local_rescue_store_specs(q, LOCAL_STORE_RESCUE_MAX))
     else:
         specs = [
             ("Amazon", "amazon.com", "us"),
@@ -1908,7 +2483,7 @@ def _market_presence_fallback(base_query, rank, limit=6):
 
     def _one(label, domain, gl):
         search_q = f"{q} site:{domain}" if domain else q
-        cards = _serpapi_shopping_request(search_q, gl, hl="en", timeout_seconds=MARKET_FALLBACK_TIMEOUT_SECONDS)
+        cards = _serpapi_shopping_request(search_q, gl, hl=(country_search_hl(gl) if rank == 0 else "en"), timeout_seconds=MARKET_FALLBACK_TIMEOUT_SECONDS)
         out = []
         for card in cards or []:
             item = _shopping_card_to_market_item(card, label, gl)
@@ -1970,7 +2545,15 @@ def _supplement_missing_markets(candidates, query, label="FIRST"):
         ((x.get("title") or "").lower(), (x.get("link") or "").lower())
         for x in seq
     }
-    missing = [r for r in (0, 1, 2) if not any(result_market_rank(x) == r for x in seq)]
+    counts = {r: sum(1 for x in seq if result_market_rank(x) == r) for r in (0, 1, 2)}
+    local_target = min(LENS_DIRECT_LOCAL_MAX, LOCAL_RESULTS_TARGET)
+    missing = []
+    if counts[0] < local_target:
+        missing.append(0)
+    if counts[1] == 0:
+        missing.append(1)
+    if counts[2] == 0:
+        missing.append(2)
     if not missing or not SERPAPI_API_KEY:
         return seq
 
@@ -1999,7 +2582,7 @@ def _supplement_missing_markets(candidates, query, label="FIRST"):
             seq.append(item)
             existing.add(sig)
         if extra:
-            print(f"{label}: supplemented missing market rank={rank} with {len(extra)} candidate(s)")
+            print(f"{label}: supplemented weak/missing market rank={rank} with {len(extra)} candidate(s)")
     return seq
 
 
@@ -2479,6 +3062,65 @@ CATEGORY_SPECIALISTS = {
     "auto": ["AlMailem Tires", "Tires Plus", "Xcite"],
 }
 
+
+# v85: country-level merchant hints are a BOOST, never a whitelist. Google local discovery remains open.
+COUNTRY_MAJOR_STORE_DOMAINS = {
+    "us": [("Amazon","amazon.com"),("Walmart","walmart.com"),("Target","target.com"),("Best Buy","bestbuy.com"),("eBay","ebay.com")],
+    "ca": [("Amazon Canada","amazon.ca"),("Walmart Canada","walmart.ca"),("Best Buy Canada","bestbuy.ca"),("Canadian Tire","canadiantire.ca")],
+    "gb": [("Amazon UK","amazon.co.uk"),("Argos","argos.co.uk"),("Currys","currys.co.uk"),("John Lewis","johnlewis.com")],
+    "fr": [("Amazon France","amazon.fr"),("Fnac","fnac.com"),("Darty","darty.com"),("Cdiscount","cdiscount.com"),("Carrefour","carrefour.fr")],
+    "de": [("Amazon Germany","amazon.de"),("MediaMarkt","mediamarkt.de"),("Saturn","saturn.de"),("Otto","otto.de")],
+    "es": [("Amazon Spain","amazon.es"),("El Corte Inglés","elcorteingles.es"),("MediaMarkt","mediamarkt.es"),("Carrefour","carrefour.es")],
+    "it": [("Amazon Italy","amazon.it"),("MediaWorld","mediaworld.it"),("Unieuro","unieuro.it")],
+    "nl": [("bol","bol.com"),("Coolblue","coolblue.nl"),("MediaMarkt","mediamarkt.nl"),("Amazon Netherlands","amazon.nl")],
+    "be": [("bol","bol.com"),("Coolblue","coolblue.be"),("MediaMarkt","mediamarkt.be"),("Amazon Belgium","amazon.com.be")],
+    "ch": [("Galaxus","galaxus.ch"),("Digitec","digitec.ch"),("Brack","brack.ch"),("Manor","manor.ch")],
+    "at": [("MediaMarkt","mediamarkt.at"),("Amazon Germany","amazon.de"),("Otto Austria","ottoversand.at")],
+    "ie": [("Currys Ireland","currys.ie"),("Harvey Norman","harveynorman.ie"),("Amazon UK","amazon.co.uk")],
+    "pt": [("Worten","worten.pt"),("Fnac Portugal","fnac.pt"),("Continente","continente.pt")],
+    "pl": [("Allegro","allegro.pl"),("Media Expert","mediaexpert.pl"),("RTV Euro AGD","euro.com.pl")],
+    "cz": [("Alza","alza.cz"),("Datart","datart.cz"),("Mall","mall.cz")],
+    "se": [("Amazon Sweden","amazon.se"),("Elgiganten","elgiganten.se"),("CDON","cdon.se")],
+    "no": [("Elkjøp","elkjop.no"),("Komplett","komplett.no"),("Power","power.no")],
+    "dk": [("Elgiganten","elgiganten.dk"),("Proshop","proshop.dk"),("Power","power.dk")],
+    "fi": [("Verkkokauppa","verkkokauppa.com"),("Gigantti","gigantti.fi"),("Power","power.fi")],
+    "tr": [("Trendyol","trendyol.com"),("Hepsiburada","hepsiburada.com"),("Amazon Turkey","amazon.com.tr"),("n11","n11.com")],
+    "ru": [("Ozon","ozon.ru"),("Wildberries","wildberries.ru"),("Yandex Market","market.yandex.ru")],
+    "ua": [("Rozetka","rozetka.com.ua"),("Prom","prom.ua"),("Epicentr","epicentrk.ua")],
+    "sa": [("Amazon Saudi","amazon.sa"),("Noon","noon.com"),("Jarir","jarir.com"),("eXtra","extra.com"),("Carrefour","carrefourksa.com")],
+    "ae": [("Amazon UAE","amazon.ae"),("Noon","noon.com"),("Carrefour UAE","carrefouruae.com"),("Sharaf DG","sharafdg.com"),("Jumbo","jumbo.ae")],
+    "eg": [("Amazon Egypt","amazon.eg"),("Noon","noon.com"),("B.TECH","btech.com"),("Carrefour Egypt","carrefouregypt.com")],
+    "in": [("Amazon India","amazon.in"),("Flipkart","flipkart.com"),("Croma","croma.com"),("Reliance Digital","reliancedigital.in"),("Myntra","myntra.com")],
+    "pk": [("Daraz","daraz.pk"),("PriceOye","priceoye.pk")],
+    "bd": [("Daraz Bangladesh","daraz.com.bd"),("Pickaboo","pickaboo.com")],
+    "cn": [("JD","jd.com"),("Tmall","tmall.com"),("Taobao","taobao.com"),("Suning","suning.com")],
+    "jp": [("Amazon Japan","amazon.co.jp"),("Rakuten","rakuten.co.jp"),("Yodobashi","yodobashi.com"),("Bic Camera","biccamera.com")],
+    "kr": [("Coupang","coupang.com"),("Gmarket","gmarket.co.kr"),("11st","11st.co.kr")],
+    "sg": [("Shopee Singapore","shopee.sg"),("Lazada Singapore","lazada.sg"),("Amazon Singapore","amazon.sg"),("Courts","courts.com.sg")],
+    "my": [("Shopee Malaysia","shopee.com.my"),("Lazada Malaysia","lazada.com.my"),("Harvey Norman","harveynorman.com.my")],
+    "id": [("Tokopedia","tokopedia.com"),("Shopee Indonesia","shopee.co.id"),("Blibli","blibli.com"),("Lazada Indonesia","lazada.co.id")],
+    "ph": [("Shopee Philippines","shopee.ph"),("Lazada Philippines","lazada.com.ph")],
+    "th": [("Shopee Thailand","shopee.co.th"),("Lazada Thailand","lazada.co.th"),("Central","central.co.th"),("Power Buy","powerbuy.co.th")],
+    "vn": [("Shopee Vietnam","shopee.vn"),("Lazada Vietnam","lazada.vn"),("Tiki","tiki.vn")],
+    "au": [("Amazon Australia","amazon.com.au"),("JB Hi-Fi","jbhifi.com.au"),("Harvey Norman","harveynorman.com.au"),("Kmart","kmart.com.au")],
+    "nz": [("The Warehouse","thewarehouse.co.nz"),("Noel Leeming","noelleeming.co.nz"),("Mighty Ape","mightyape.co.nz"),("Harvey Norman","harveynorman.co.nz")],
+    "br": [("Mercado Livre","mercadolivre.com.br"),("Amazon Brazil","amazon.com.br"),("Magazine Luiza","magazineluiza.com.br")],
+    "mx": [("Mercado Libre","mercadolibre.com.mx"),("Amazon Mexico","amazon.com.mx"),("Walmart Mexico","walmart.com.mx"),("Liverpool","liverpool.com.mx")],
+    "ar": [("Mercado Libre","mercadolibre.com.ar"),("Frávega","fravega.com")],
+    "cl": [("Mercado Libre","mercadolibre.cl"),("Falabella","falabella.com"),("Paris","paris.cl")],
+    "co": [("Mercado Libre","mercadolibre.com.co"),("Falabella","falabella.com.co"),("Éxito","exito.com")],
+    "pe": [("Mercado Libre","mercadolibre.com.pe"),("Falabella","falabella.com.pe"),("Ripley","ripley.com.pe")],
+    "za": [("Takealot","takealot.com"),("Makro","makro.co.za"),("Woolworths","woolworths.co.za")],
+    "ng": [("Jumia Nigeria","jumia.com.ng"),("Konga","konga.com")],
+    "ke": [("Jumia Kenya","jumia.co.ke"),("Carrefour Kenya","carrefour.ke")],
+    "ma": [("Jumia Morocco","jumia.ma"),("Marjane","marjane.ma")],
+    "il": [("KSP","ksp.co.il"),("Ivory","ivory.co.il")],
+}
+
+def country_major_store_specs(cc=None):
+    cc = (cc or current_market().get("country") or DEFAULT_COUNTRY).lower()
+    return list(COUNTRY_MAJOR_STORE_DOMAINS.get(cc, ()))
+
 def detect_category(query):
     """يحدد فئة المنتج من الكلمات؛ الفئات الأدق (رياضة/قيمنق/ألعاب) تُفحص قبل العامة."""
     q = normalize_ar(query)
@@ -2489,18 +3131,64 @@ def detect_category(query):
     return ""
 
 def priority_stores_for(query):
-    """v69: متاجر الفئة المتخصصة أولاً، والمنصات العامة (نون/طلبات...) في ذيل القائمة دائماً."""
-    cat = detect_category(query)
-    specialists = list(CATEGORY_SPECIALISTS.get(cat, []))
-    tail = [m for m in GENERAL_MARKETPLACES if m not in specialists]
-    ordered = specialists + tail
-    return ordered[:9] if ordered else list(GENERAL_MARKETPLACES)
+    """Strong local merchant hints. Kuwait keeps the original category engine; other markets use country retailers."""
+    cc = (current_market().get("country") or DEFAULT_COUNTRY).lower()
+    if cc == "kw":
+        cat = detect_category(query)
+        specialists = list(CATEGORY_SPECIALISTS.get(cat, []))
+        tail = [m for m in GENERAL_MARKETPLACES if m not in specialists]
+        ordered = specialists + tail
+        return ordered[:9] if ordered else list(GENERAL_MARKETPLACES)
+    return [label for label, _ in country_major_store_specs(cc)][:9]
+
 
 def store_domain(name):
+    # Explicit "Store (domain.tld)" always wins.
+    mm = re.search(r"\(([a-z0-9.-]+\.[a-z]{2,})\)", str(name or ""), flags=re.I)
+    if mm:
+        return mm.group(1).lower()
+    cc = (current_market().get("country") or DEFAULT_COUNTRY).lower()
     n = normalize_name(normalize_ar(name))
+    if cc != "kw":
+        for label, domain in country_major_store_specs(cc):
+            key = normalize_name(normalize_ar(label))
+            if key and (key in n or n in key):
+                return domain
+        return ""
     for k, d in STORE_DOMAINS.items():
-        if k in n or n in k: return d
+        if k in n or n in k:
+            return d
     return ""
+
+
+def local_rescue_store_specs(query, max_count=None):
+    """Direct-store rescue list used only if broad local discovery is weak."""
+    max_count = LOCAL_STORE_RESCUE_MAX if max_count is None else max_count
+    if max_count <= 0:
+        return []
+    seen, out = set(), []
+    for label in priority_stores_for(query):
+        domain = store_domain(label)
+        if not domain:
+            continue
+        key = domain.lower().replace("www.", "")
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append((label, key))
+        if len(out) >= max_count:
+            break
+    # For non-Kuwait markets, country list may contain extra merchants not returned by priority list.
+    if len(out) < max_count:
+        for label, domain in country_major_store_specs():
+            key = domain.lower().replace("www.", "")
+            if key in seen:
+                continue
+            seen.add(key); out.append((label, key))
+            if len(out) >= max_count:
+                break
+    return out
+
 JUNK_STORE = re.compile(r"^(اونلاين|أونلاين|online|الموقعالرسمي|official)$", re.I)
 def is_junk_store(name): return bool(JUNK_STORE.match(normalize_name(normalize_ar(name))))
 def short_query(q):
@@ -2832,14 +3520,16 @@ def best_of_search(parts, lang="ar"):
     return call_gemini(parts)
 
 def bilingual_search_instruction(query, lang):
-    """بحث ثنائي اللغة مع ترتيب السوق الثابت: محلي ثم أمريكا ثم الصين فقط."""
+    """Worldwide search aliases: user's wording + English commercial name + local commerce language."""
     response_rule = LANG_INSTR[lang]
-    market_name = current_market().get('country_name', 'Kuwait')
+    m = current_market()
+    market_name = m.get("country_name", "Kuwait")
+    hl = m.get("search_hl") or country_search_hl()
     return (
-        f"ابحث عن المنتج باستخدام العربية والإنجليزية معاً: {query}. "
-        "حوّل الاسم داخلياً إلى مرادف عربي ومرادف إنجليزي، وجرّب اسم البراند باللاتيني والعربي. "
-        f"رتب النتائج حصراً: متاجر {market_name} أولاً، ثم متاجر الولايات المتحدة، ثم متاجر الصين؛ واحذف أي دولة أخرى. "
-        "داخل كل سوق رتب من الأرخص إلى الأغلى، وكل نتيجة يجب أن تحتوي سعراً رقمياً ورابط صفحة منتج مباشر. "
+        f"Search this exact product in {market_name}: {query}. "
+        f"Use the user's wording, the commercial English name, and a {hl} local-market wording when that improves discovery. "
+        f"Exhaust genuine {market_name} stores first; then United States; then China only. Reject every other country. "
+        "Within each market sort by price, but geography always outranks price. Every offer needs a numeric current price and direct product page. "
         f"{response_rule}"
     )
 
@@ -2892,13 +3582,14 @@ def english_search_name(query):
     q = " ".join(str(query or "").split()).strip()
     if not q:
         return ""
-    if not re.search(r"[\u0600-\u06FF]", q):
+    # Latin-script product names are searchable as-is. Translate Arabic/Urdu, Devanagari, CJK and Cyrillic once (cached).
+    if not re.search(r"[\u0600-\u06FF\u0900-\u097F\u3040-\u30FF\u3400-\u9FFF\u0400-\u04FF]", q):
         return q
     # Image/AI identities often already contain "Arabic | English". Reuse the Latin alias
     # instead of paying for another translation round-trip.
     if re.search(r"[A-Za-z]", q):
         parts = [x.strip() for x in re.split(r"\s*[|｜]\s*", q) if x.strip()]
-        latin = next((x for x in parts if re.search(r"[A-Za-z]", x) and not re.search(r"[\u0600-\u06FF]", x)), "")
+        latin = next((x for x in parts if re.search(r"[A-Za-z]", x) and not re.search(r"[\u0600-\u06FF\u0900-\u097F\u3040-\u30FF\u3400-\u9FFF\u0400-\u04FF]", x)), "")
         if latin and len(latin) <= 100:
             return latin
     key = re.sub(r"\s+", " ", normalize_ar(q))[:150]
@@ -2908,7 +3599,7 @@ def english_search_name(query):
     raw, _ = call_gemini([{"text": q}], system=TRANSLATE_NAME_SYSTEM, use_search=False)
     name = (raw or "").strip().splitlines()[0].strip().strip('"').strip("'")
     # حماية: لازم يكون إنجليزياً فعلاً وبطول منطقي، وإلا نتجاهله ونكمل بالعربي.
-    if not re.search(r"[A-Za-z]", name) or re.search(r"[\u0600-\u06FF]", name) or len(name) > 90:
+    if not re.search(r"[A-Za-z]", name) or re.search(r"[\u0600-\u06FF\u0900-\u097F\u3040-\u30FF\u3400-\u9FFF\u0400-\u04FF]", name) or len(name) > 90:
         name = ""
     with EN_NAME_LOCK:
         if len(EN_NAME_CACHE) > 3000:
@@ -2971,52 +3662,33 @@ def _lens_source_name(item, index):
 
 
 KUWAIT_STORE_HINTS = (
-    ".com.kw", ".kw", "kuwait", "الكويت", "xcite", "eureka", "best al yousifi",
-    "best alyousifi", "jarir", "level shoes", "future store", "blink", "noon kuwait",
-    "carrefour kuwait", "lulu kuwait", "jm3eia", "جمعية", "taw9eel", "توصيل", "intersport kuwait",
-    "decathlon kuwait", "boutiqaat", "boots kuwait", "yiaco", "royal pharmacy",
-    "talabat kuwait", "keeta kuwait"
+    ".com.kw", ".kw", "kuwait", "الكويت", "xcite", "eureka", "best al yousifi", "best alyousifi",
+    "jarir", "level shoes", "future store", "blink", "noon kuwait", "carrefour kuwait", "lulu kuwait",
+    "jm3eia", "جمعية", "taw9eel", "توصيل", "intersport kuwait", "decathlon kuwait", "boutiqaat",
+    "boots kuwait", "yiaco", "royal pharmacy", "talabat kuwait", "keeta kuwait"
 )
 
-
-COUNTRY_URL_HINTS = {
-    "kw": ("-kw.", "-kw/", "/kw/", "kuwait-", "kuwait/", "kw-en", "kw-ar", "_kw", "bcute-kw"),
-    "sa": ("-sa.", "-sa/", "/sa/", "saudi-", "saudi/", "ksa", "sa-en", "sa-ar"),
-    "ae": ("-ae.", "-ae/", "/ae/", "uae-", "uae/", "ae-en", "ae-ar"),
-    "gb": ("-uk.", "-uk/", "/uk/", "united-kingdom", "gb-en"),
-}
-
-COUNTRY_CURRENCY_MARKERS = {
-    "kw": ("kwd", "د.ك", " kd", "kuwait dinar"),
-    "sa": ("sar", "ر.س", "saudi riyal"),
-    "ae": ("aed", "د.إ", "uae dirham"),
-    "gb": ("gbp", "£", "pound"),
-    "us": ("usd", "$", "us dollar"),
-}
-
-# v72: النتائج المسموحة فقط بعد السوق المحلي هي الولايات المتحدة ثم الصين.
-# نستخدم الدومين/اسم المتجر/العملة لأن كثيراً من المتاجر الأمريكية والصينية تعمل على .com.
 US_STORE_HINTS = (
-    "amazon.com", "walmart.com", "target.com", "bestbuy.com", "costco.com",
-    "homedepot.com", "lowes.com", "macys.com", "nordstrom.com", "zappos.com",
-    "bhphotovideo.com", "newegg.com", "rei.com", "dickssportinggoods.com", "ebay.com",
+    "amazon.com", "walmart.com", "target.com", "bestbuy.com", "costco.com", "homedepot.com", "lowes.com",
+    "macys.com", "nordstrom.com", "zappos.com", "bhphotovideo.com", "newegg.com", "rei.com",
+    "dickssportinggoods.com", "ebay.com",
+)
+CHINA_STORE_HINTS = (
+    "aliexpress.com", "alibaba.com", "1688.com", "taobao.com", "tmall.com", "shein.com", "temu.com",
+    "dhgate.com", "made-in-china.com", "banggood.com", "gearbest.com", "jd.com", "pinduoduo.com",
 )
 
-CHINA_STORE_HINTS = (
-    "aliexpress.com", "alibaba.com", "1688.com", "taobao.com", "tmall.com", "shein.com",
-    "temu.com", "dhgate.com", "made-in-china.com", "banggood.com", "gearbest.com",
-    "jd.com", "pinduoduo.com",
-)
 
 def _result_hay_host(item):
     hay = " ".join(str(item.get(k) or "") for k in (
-        "title", "source", "link", "domain", "snippet", "price", "price_text", "currency"
+        "title", "source", "link", "domain", "snippet", "price", "price_text", "currency", "country", "market_country", "_lens_country", "_shopping_gl"
     )).lower()
     try:
         host = urllib.parse.urlparse(str(item.get("link") or item.get("url") or "")).netloc.lower().replace("www.", "")
     except Exception:
         host = ""
     return hay, host
+
 
 def _host_matches_any(host, domains):
     host = (host or "").lower().strip(".")
@@ -3026,74 +3698,196 @@ def _host_matches_any(host, domains):
             return True
     return False
 
+
+def _explicit_market_country(item):
+    """Country asserted by the merchant/result itself. Search geo (gl/Lens country) is NOT merchant country."""
+    for key in ("market_country", "country"):
+        value = str((item or {}).get(key) or "").lower().strip()
+        if len(value) == 2 and value in COUNTRY_META:
+            return value
+    return ""
+
+
+def _search_geo_country(item):
+    """Soft geo signal: country used to run Google Shopping/Lens, not proof of seller location."""
+    for key in ("_shopping_gl", "_lens_country"):
+        value = str((item or {}).get(key) or "").lower().strip()
+        if len(value) == 2 and value in COUNTRY_META:
+            return value
+    return ""
+
+
+def _host_country_code(host):
+    host = (host or "").lower().split(":",1)[0]
+    if not host:
+        return ""
+    for cc in COUNTRY_META:
+        for tld in country_tlds(cc):
+            if host == tld.lstrip(".") or host.endswith(tld):
+                return cc
+    return ""
+
+
+def _dynamic_country_url_hit(cc, link, host):
+    cc = (cc or "").lower()
+    if not cc or len(cc) != 2:
+        return False
+    text = f"{host} {link}".lower()
+    tokens = (f"/{cc}/", f"-{cc}/", f"-{cc}.", f"_{cc}", f"{cc}-en", f"{cc}-ar", f"{cc}-fr", f"{cc}-es")
+    return any(t in text for t in tokens)
+
+
+def _explicit_currency_codes(item):
+    hay, _ = _result_hay_host(item)
+    return set(re.findall(r"\b[A-Z]{3}\b", hay.upper())) & KNOWN_CURRENCY_CODES
+
+
 def is_us_market_result(item):
+    explicit = _explicit_market_country(item)
+    if explicit:
+        return explicit == "us"
     hay, host = _result_hay_host(item)
     if host.endswith(".us") or _host_matches_any(host, US_STORE_HINTS):
         return True
-    # China hints win before USD because Chinese marketplaces often display prices in USD.
     if _host_matches_any(host, CHINA_STORE_HINTS):
         return False
-    return any(marker in hay for marker in COUNTRY_CURRENCY_MARKERS.get("us", ()))
+    # USD is useful evidence only when it is not also a legal/local currency in the user's market.
+    local_codes = set(country_currency_codes())
+    if "USD" in _explicit_currency_codes(item) and "USD" not in local_codes:
+        return True
+    return _search_geo_country(item) == "us"
+
 
 def is_china_market_result(item):
+    explicit = _explicit_market_country(item)
+    if explicit:
+        return explicit == "cn"
     hay, host = _result_hay_host(item)
     if host.endswith(".cn") or _host_matches_any(host, CHINA_STORE_HINTS):
         return True
-    return bool(re.search(r"(?:\bCNY\b|\bRMB\b|人民币|中国|china)", hay, flags=re.I))
+    local_codes = set(country_currency_codes())
+    if ("CNY" in _explicit_currency_codes(item) and "CNY" not in local_codes) or bool(re.search(r"\bRMB\b|人民币|中国|china", hay, flags=re.I)):
+        return True
+    return _search_geo_country(item) == "cn"
+
+
+def is_local_lens_result(item):
+    """Worldwide local-market classifier using explicit geo-target + ccTLD + country/path + local currencies."""
+    m = current_market()
+    cc = (m.get("country") or DEFAULT_COUNTRY).lower()
+    explicit = _explicit_market_country(item)
+    if explicit:
+        return explicit == cc
+    hay, host = _result_hay_host(item)
+    link = str((item or {}).get("link") or (item or {}).get("url") or "").lower()
+    host_cc = _host_country_code(host)
+    if host_cc:
+        return host_cc == cc
+    if _dynamic_country_url_hit(cc, link, host):
+        return True
+    country_name = str(m.get("country_name") or "").lower()
+    if country_name and country_name in hay:
+        return True
+    if cc == "kw" and any(h in hay for h in KUWAIT_STORE_HINTS):
+        return True
+    for label, domain in country_major_store_specs(cc):
+        if _host_matches_any(host, (domain,)) or normalize_name(label) in normalize_name(hay):
+            return True
+    codes = _explicit_currency_codes(item)
+    local_codes = set(country_currency_codes(cc))
+    if codes & local_codes:
+        return True
+    # For symbol-only prices ($/¥/£), resolve using local market context instead of assuming USD/JPY/GBP.
+    price_blob = " ".join(str((item or {}).get(k) or "") for k in ("price", "price_text", "currency"))
+    if price_blob:
+        local_primary = m.get("currency") or ""
+        detected = detect_currency_code(price_blob, local_primary, cc)
+        if detected and detected in local_codes:
+            return True
+    # Last-resort soft signal: Google/Lens was explicitly searched in this country.
+    # Strong US/China hosts are classified before this in result_market_rank, so this does not
+    # turn amazon.com/AliExpress into local stores in USD-local markets.
+    if _search_geo_country(item) == cc:
+        return True
+    return False
+
+
+def is_foreign_lens_result(item):
+    if is_local_lens_result(item):
+        return False
+    cc = (current_market().get("country") or DEFAULT_COUNTRY).lower()
+    explicit = _explicit_market_country(item)
+    if explicit and explicit != cc:
+        return True
+    _, host = _result_hay_host(item)
+    host_cc = _host_country_code(host)
+    if host_cc and host_cc != cc:
+        return True
+    codes = _explicit_currency_codes(item)
+    local_codes = set(country_currency_codes(cc))
+    if codes and not (codes & local_codes):
+        return True
+    search_geo = _search_geo_country(item)
+    if search_geo and search_geo != cc:
+        return True
+    return bool(host and (_host_matches_any(host, US_STORE_HINTS) or _host_matches_any(host, CHINA_STORE_HINTS)))
+
 
 def result_market_rank(item):
-    """0=بلد المستخدم، 1=أمريكا، 2=الصين، 99=مرفوض.
-
-    نفحص السوق الأجنبي الصريح قبل علامة العملة المحلية لأن السعر بعد التحويل قد يحتوي
-    KWD/SAR/AED مع العملة الأصلية بين قوسين.
-    """
+    """0=local market, 1=US, 2=China, 99=reject/other country."""
     cc = (current_market().get("country") or DEFAULT_COUNTRY).lower()
-    _url = str(item.get("link") or item.get("url") or "") if isinstance(item, dict) else ""
-    _source = str(item.get("source") or item.get("name") or "") if isinstance(item, dict) else ""
-    if is_blocked_store(_source, _url):
-        print(f"MARKET BLOCKED STORE REJECT: {_source} -> {_url}")
+    url = str((item or {}).get("link") or (item or {}).get("url") or "")
+    source = str((item or {}).get("source") or (item or {}).get("name") or "")
+    if is_blocked_store(source, url):
         return 99
-    hay, host = _result_hay_host(item)
-    is_us = is_us_market_result(item)
-    is_cn = is_china_market_result(item)
-
-    if cc == "us" and is_us:
+    explicit = _explicit_market_country(item)
+    if explicit == cc:
         return 0
-    if cc == "cn" and is_cn:
-        return 0
-
-    if cc != "us" and is_us:
+    if explicit == "us":
+        return 0 if cc == "us" else 1
+    if explicit == "cn":
+        return 0 if cc == "cn" else (1 if cc == "us" else 2)
+    # Explicit third-country geo targeting is not allowed.
+    if explicit and explicit not in {cc, "us", "cn"}:
+        return 99
+    # Check strong US/China merchant evidence before generic local-currency evidence.
+    # This matters in USD-local markets (e.g. Ecuador/Panama): amazon.com must stay US,
+    # not become "local" merely because both markets use USD.
+    if cc != "us" and is_us_market_result(item):
         return 1
-    if cc != "cn" and is_cn:
+    if cc != "cn" and is_china_market_result(item):
         return 1 if cc == "us" else 2
-
-    # دولة رابعة صريحة بالدومين تُرفض حتى لو كان السطر يحتوي السعر المحوّل بعملة المستخدم.
-    for other_cc, tlds in COUNTRY_TLDS.items():
-        if other_cc not in {cc, "us", "cn"} and any(tld in host for tld in tlds):
-            return 99
-
-    # كذلك أي عملة أصلية صريحة غير عملة المستخدم/USD/CNY تعني سوقاً غير مسموح.
-    local_cur = (current_market().get("currency") or "").upper()
-    allowed_codes = {x for x in (local_cur, "USD", "CNY") if x}
-    codes = set(re.findall(r"\b[A-Z]{3}\b", hay.upper())) & KNOWN_CURRENCY_CODES
-    if any(code not in allowed_codes for code in codes):
-        return 99
-    if "£" in hay and "GBP" not in allowed_codes:
-        return 99
-    if "€" in hay and "EUR" not in allowed_codes:
-        return 99
-
     if is_local_lens_result(item):
         return 0
+    if is_us_market_result(item):
+        return 0 if cc == "us" else 1
+    if is_china_market_result(item):
+        return 0 if cc == "cn" else (1 if cc == "us" else 2)
+    _, host = _result_hay_host(item)
+    host_cc = _host_country_code(host)
+    if host_cc and host_cc not in {cc, "us", "cn"}:
+        return 99
+    # A clearly different currency is foreign; only USD/CNY are permitted foreign markets.
+    codes = _explicit_currency_codes(item)
+    local_codes = set(country_currency_codes(cc))
+    if codes:
+        if codes & local_codes:
+            return 0
+        if "USD" in codes and "USD" not in local_codes:
+            return 1
+        if "CNY" in codes and "CNY" not in local_codes:
+            return 2 if cc != "us" else 1
+        return 99
     return 99
+
 
 def filter_allowed_market_results(verified, exclude_local=False):
     kept = {}
     for name, info in (verified or {}).items():
         item = {
-            "link": info.get("url", ""), "source": name,
-            "title": info.get("title", ""), "currency": info.get("currency", ""),
-            "price": info.get("price_text", "") or info.get("price", ""),
+            "link": info.get("url", ""), "source": name, "title": info.get("title", ""),
+            "currency": info.get("currency", ""), "price": info.get("price_text", "") or info.get("price", ""),
+            "market_country": info.get("market_country", "") or info.get("country", ""),
         }
         rank = result_market_rank(item)
         if rank == 99 or (exclude_local and rank == 0):
@@ -3103,11 +3897,12 @@ def filter_allowed_market_results(verified, exclude_local=False):
         kept[name] = info
     return kept
 
+
 def prepare_market_offer(info, name, lang="ar"):
-    """يحضر السعر والترتيب حسب السوق. المحلي يبقى بعملة المستخدم؛ أمريكا/الصين تُحوّل محلياً."""
     item = {
         "link": info.get("url", ""), "source": name, "title": info.get("title", ""),
         "currency": info.get("currency", ""), "price": info.get("price_text", "") or info.get("price", ""),
+        "market_country": info.get("market_country", "") or info.get("country", ""),
     }
     rank = info.get("market_rank")
     if rank is None:
@@ -3121,102 +3916,27 @@ def prepare_market_offer(info, name, lang="ar"):
     if numeric is None:
         return None
     if rank == 0:
-        shown = f"{format_price(numeric)} {currency_label(lang)}"
-        return rank, numeric, shown
+        return rank, numeric, f"{format_price(numeric)} {currency_label(lang)}"
     src = (info.get("currency") or "").upper().strip()
     if not src:
-        src = "USD" if is_us_market_result(item) else "CNY" if is_china_market_result(item) else ""
+        src = "USD" if rank == 1 else "CNY"
     shown, converted = display_global_price(numeric, "", src, lang)
     return rank, (converted if converted is not None else numeric), shown
 
-def is_local_lens_result(item):
-    """Classify a Lens/search result as belonging to the user's current market.
-
-    Covers non-standard Kuwaiti domains such as bcute-kw.com, local URL paths,
-    KWD price markers, and store/source text—not only .kw domains.
-    """
-    m = current_market()
-    cc = (m.get("country") or DEFAULT_COUNTRY).lower()
-    fields = ("title", "source", "link", "domain", "snippet", "price", "currency")
-    hay = " ".join(str(item.get(k) or "") for k in fields).lower()
-    link = str(item.get("link") or "").lower()
-    try:
-        host = urllib.parse.urlparse(link).netloc.lower().replace("www.", "")
-    except Exception:
-        host = ""
-
-    if any(tld in host for tld in COUNTRY_TLDS.get(cc, [])):
-        return True
-    if any(hint in f"{host}{link}" for hint in COUNTRY_URL_HINTS.get(cc, ())):
-        return True
-
-    country_name = str(m.get("country_name") or "").lower()
-    city = str(m.get("city") or "").lower()
-    if (country_name and country_name in hay) or (city and city in hay):
-        return True
-
-    if cc == "kw" and any(h in hay for h in KUWAIT_STORE_HINTS):
-        return True
-
-    # A local-currency marker is useful when Lens omitted the country but gave a product card.
-    if any(marker in hay for marker in COUNTRY_CURRENCY_MARKERS.get(cc, ())):
-        return True
-    return False
-
-
-def is_foreign_lens_result(item):
-    """True only when the result is clearly not local. Unknown results remain false."""
-    if is_local_lens_result(item):
-        return False
-    m = current_market()
-    cc = (m.get("country") or DEFAULT_COUNTRY).lower()
-    hay = " ".join(str(item.get(k) or "") for k in ("title","source","link","domain","snippet","price","currency")).lower()
-    host = urllib.parse.urlparse(str(item.get("link") or "")).netloc.lower()
-    for other_cc, tlds in COUNTRY_TLDS.items():
-        if other_cc != cc and any(tld in host for tld in tlds):
-            return True
-    for other_cc, markers in COUNTRY_CURRENCY_MARKERS.items():
-        if other_cc != cc and any(marker in hay for marker in markers):
-            return True
-    # In explicit global mode, a valid non-local product URL is accepted as foreign.
-    return bool(host)
-
-
 def filter_local_market_only(verified):
-    """v68: حارس الوضع المحلي — أي متجر أجنبي واضح (نطاق دولة ثانية أو عملة ثانية) يُرفض.
-
-    المواقع العالمية لا تظهر في البحث المحلي أبداً؛ تظهر فقط بعد موافقة المستخدم
-    على «دوّر عالمياً». النتيجة مجهولة الجنسية (لا محلية ولا أجنبية واضحة) تمر.
-    """
     kept = {}
     for name, info in (verified or {}).items():
         item = {
-            "link": info.get("url", ""), "source": name,
-            "title": info.get("title", ""), "currency": info.get("currency", ""),
-            "price": info.get("price_text", "") or "",
+            "link": info.get("url", ""), "source": name, "title": info.get("title", ""),
+            "currency": info.get("currency", ""), "price": info.get("price_text", "") or info.get("price", ""),
+            "market_country": info.get("market_country", "") or info.get("country", ""),
         }
-        # نرفض فقط الأجنبي الواضح: نطاق دولة ثانية أو عملة دولة ثانية صريحة.
-        if not is_local_lens_result(item):
-            host = ""
-            try:
-                host = urllib.parse.urlparse(item["link"]).netloc.lower()
-            except Exception:
-                pass
-            cc = (current_market().get("country") or DEFAULT_COUNTRY).lower()
-            foreign_tld = any(
-                other_cc != cc and any(tld in host for tld in tlds)
-                for other_cc, tlds in COUNTRY_TLDS.items()
-            )
-            hay = " ".join(str(item.get(k) or "") for k in ("title", "source", "currency", "price")).lower()
-            foreign_currency = any(
-                other_cc != cc and any(marker in hay for marker in markers)
-                for other_cc, markers in COUNTRY_CURRENCY_MARKERS.items()
-            )
-            if foreign_tld or foreign_currency:
-                print(f"LOCAL MODE REJECT FOREIGN: {name} -> {info.get('url','')}")
-                continue
+        if result_market_rank(item) != 0:
+            print(f"LOCAL MODE REJECT FOREIGN/UNKNOWN: {name} -> {info.get('url','')}")
+            continue
         kept[name] = info
     return kept
+
 
 def lens_priced_offers(lens_context, lang="ar", local_only=True, exclude_local=False):
     """Use Google Lens product cards directly.
@@ -3407,42 +4127,147 @@ def _shopping_direct_url(url):
     return url if is_direct_store_url(url) else ""
 
 
-def google_shopping_offers(query, lang="ar", allow_global=False, lens_context=None, english_name=""):
-    """يجمع عروض Google Shopping: روابط البطاقات المباشرة أولاً، ثم Immersive Product
+def _ai_local_market_search_query(query, english_name=""):
+    """Conditional FAST translation/normalization for weak local markets only. No web search here."""
+    if not LOCAL_AI_QUERY_RESCUE_ENABLED:
+        return ""
+    m = current_market()
+    cc = (m.get("country") or DEFAULT_COUNTRY).lower()
+    country_name = m.get("country_name") or cc.upper()
+    local_hl = m.get("search_hl") or country_search_hl(cc)
+    base = _shopping_clean_query(english_name or query) or _shopping_clean_query(query)
+    if not base or not local_hl or local_hl == "en":
+        return ""
+    key = (cc, normalize_ar(base).lower())
+    now = time.time()
+    with LOCAL_QUERY_CACHE_LOCK:
+        hit = LOCAL_QUERY_CACHE.get(key)
+        if hit and now - hit[0] < 86400:
+            return hit[1]
+    system = f"""You create ONE high-precision shopping search query for the local retail market in {country_name}.
+Return ONLY the query, one line, no explanation.
+Use the dominant language/wording that shoppers and local stores in {country_name} commonly use.
+Preserve every brand, model, SKU, capacity, size and number exactly. Never invent specifications.
+Translate only generic product/category words when that improves local merchant discovery.
+If the original international/English wording is already what local stores use, return it unchanged."""
+    try:
+        raw, _ = text77_call_gemini([{"text": base}], system=system, use_search=False)
+        candidate = re.sub(r"^[\s\"'`]+|[\s\"'`]+$", "", (raw or "").splitlines()[0].strip()) if raw else ""
+        candidate = re.sub(r"^(?:QUERY|SEARCH_QUERY)\s*:\s*", "", candidate, flags=re.I).strip()
+        # Protect model/SKU tokens containing digits from accidental translation/hallucination.
+        must_keep = {t.lower() for t in re.findall(r"[A-Za-z0-9][A-Za-z0-9._/-]*", base) if re.search(r"\d", t)}
+        cand_low = candidate.lower()
+        if not candidate or len(candidate) > 180 or any(tok not in cand_low for tok in must_keep):
+            candidate = ""
+    except Exception as e:
+        print(f"LOCAL AI QUERY ERR {cc}: {e}")
+        candidate = ""
+    with LOCAL_QUERY_CACHE_LOCK:
+        if len(LOCAL_QUERY_CACHE) > 2000:
+            LOCAL_QUERY_CACHE.clear()
+        LOCAL_QUERY_CACHE[key] = (now, candidate)
+    if candidate and candidate.lower() != base.lower():
+        print(f"LOCAL AI QUERY market={cc}: {base!r} -> {candidate!r}")
+    return candidate
 
-    للبطاقات التي بلا رابط مباشر (ضمن سقف IMMERSIVE_LOOKUPS_MAX للكريدت).
-    v70: البحث دائماً بالاسم الإنجليزي (hl=en) لأن فهرسة Google Shopping به أدق.
-    الإخراج بنفس مخطط verify_offers: {اسم المتجر: {url, price, title, currency, price_text}}.
+
+def google_shopping_offers(query, lang="ar", allow_global=False, lens_context=None, english_name=""):
+    """Worldwide Google Shopping layer with local-first multi-locale discovery.
+
+    LOCAL mode preserves the original English/gl pass and adds a parallel local-language pass.
+    A direct-store rescue is triggered only when local coverage is still below LOCAL_RESULTS_TARGET.
     """
     if not ENABLE_GOOGLE_SHOPPING or not SERPAPI_API_KEY:
         return {}
-    clean_q = _shopping_clean_query(english_name or query)
-    if not clean_q:
+    raw_q = _shopping_clean_query(query)
+    en_q = _shopping_clean_query(english_name or query)
+    if not (raw_q or en_q):
         return {}
-    gl = "" if allow_global else current_market().get("country", DEFAULT_COUNTRY)
-    cards = _serpapi_shopping_request(clean_q, gl or "us", hl="en")
+
+    m = current_market()
+    local_cc = (m.get("country") or DEFAULT_COUNTRY).lower()
+    local_hl = (m.get("search_hl") or country_search_hl(local_cc) or "en").lower()
+
+    if allow_global:
+        specs = [(en_q or raw_q, "us", "en")]
+    else:
+        # Pass 1 is exactly the successful original behavior: commercial English name + local gl + hl=en.
+        specs = [(en_q or raw_q, local_cc, "en")]
+        # Pass 2 gives local-language indexing a real chance (Arabic in Kuwait, Japanese in Japan, etc.).
+        local_query = raw_q or en_q
+        if (local_query, local_cc, local_hl) not in specs:
+            specs.append((local_query, local_cc, local_hl))
+        # Optional third pass is useful when query was translated and the local language differs from English.
+        if LOCAL_SHOPPING_PRIMARY_PASSES >= 3 and en_q and local_hl != "en" and (en_q, local_cc, local_hl) not in specs:
+            specs.append((en_q, local_cc, local_hl))
+        specs = specs[:LOCAL_SHOPPING_PRIMARY_PASSES]
+
+    def _fetch_spec(spec):
+        q, gl, hl = spec
+        cards = _serpapi_shopping_request(q, gl, hl=hl)
+        out = []
+        for card in cards or []:
+            c = dict(card)
+            c["_shopping_gl"] = gl
+            c["_shopping_hl"] = hl
+            c["_shopping_query"] = q
+            out.append(c)
+        return out
+
+    cards = []
+    if len(specs) == 1:
+        cards = _fetch_spec(specs[0])
+    else:
+        futures = {LOCAL_SHOPPING_POOL.submit(_fetch_spec, spec): spec for spec in specs}
+        for fut, spec in futures.items():
+            try:
+                cards.extend(fut.result(timeout=SERPAPI_TIMEOUT_SECONDS + 5) or [])
+            except Exception as e:
+                print(f"LOCAL SHOPPING PASS ERR spec={spec}: {e}")
+
+    # Deduplicate cards returned by multiple locales while preserving the earliest/best pass.
+    dedup_cards, seen_cards = [], set()
+    for card in cards:
+        sig = (
+            str(card.get("link") or "").split("?")[0].lower(),
+            str(card.get("title") or "").lower(),
+            str(card.get("source") or "").lower(),
+            str(card.get("price") or "").lower(),
+        )
+        if sig in seen_cards:
+            continue
+        seen_cards.add(sig); dedup_cards.append(card)
+    cards = dedup_cards
     if not cards:
-        return {}
+        print(f"SHOPPING PRIMARY EMPTY market={local_cc} allow_global={allow_global}; continuing to rescue layers")
 
     offers, used_urls, immersive_tokens = {}, set(), []
 
-    def _add(store_name, url, price_text, price_value, title, position):
+    def _add(store_name, url, price_text, price_value, title, position, market_country=""):
         url = _shopping_direct_url(url)
         if not url or url in used_urls:
             return
         if is_blocked_store(store_name, url):
             print(f"SHOPPING BLOCKED STORE REJECT: {store_name} -> {url}")
             return
-        item = {"link": url, "source": store_name, "title": title, "price": str(price_text or ""), "currency": ""}
+        search_gl = (market_country or ("us" if allow_global else local_cc)).lower()
+        item = {
+            "link": url, "source": store_name, "title": title, "price": str(price_text or ""),
+            "currency": "", "market_country": "", "_shopping_gl": search_gl,
+        }
+        market_rank = result_market_rank(item)
         if allow_global:
-            if is_local_lens_result(item):
-                print(f"SHOPPING GLOBAL EXCLUDE LOCAL: {store_name} -> {url}")
+            expected_rank = 1 if search_gl == "us" else (2 if search_gl == "cn" else None)
+            if market_rank == 0 or market_rank == 99 or (expected_rank is not None and market_rank != expected_rank):
+                print(f"SHOPPING GLOBAL MARKET REJECT rank={market_rank} gl={search_gl}: {store_name} -> {url}")
                 return
         else:
-            if is_foreign_lens_result(item):
-                print(f"SHOPPING LOCAL REJECT FOREIGN: {store_name} -> {url}")
+            # Google gl is a strong search signal, but not proof of merchant nationality.
+            # Strong US/China hosts and third-country ccTLDs are rejected before the soft gl-local fallback.
+            if market_rank != 0:
+                print(f"SHOPPING LOCAL REJECT rank={market_rank} gl={search_gl}: {store_name} -> {url}")
                 return
-        numeric = None
+        resolved_market_country = local_cc if market_rank == 0 else ("us" if market_rank == 1 else "cn" if market_rank == 2 else "")
         try:
             numeric = float(price_value) if price_value not in (None, "") else None
         except Exception:
@@ -3451,26 +4276,36 @@ def google_shopping_offers(query, lang="ar", allow_global=False, lens_context=No
             numeric = _extract_numeric_price(str(price_text or ""))
         if numeric is None or numeric <= 0:
             return
-        src_currency = detect_currency_code(str(price_text or ""), "")
+
         if allow_global:
+            fallback_cur = "USD" if search_gl == "us" else "CNY" if search_gl == "cn" else ""
+            src_currency = detect_currency_code(str(price_text or ""), fallback_cur, search_gl)
             shown, converted = display_global_price(numeric, str(price_text or ""), src_currency, lang)
             sort_price = converted if converted is not None else numeric
         else:
-            local_code = (current_market().get("currency") or "").upper()
-            if src_currency and src_currency != local_code:
-                # gl محلي لكن Google أحياناً يدس بطاقة بعملة أجنبية؛ نرفضها في الوضع المحلي.
-                print(f"SHOPPING LOCAL CURRENCY REJECT: {store_name} {price_text}")
+            accepted = set(country_currency_codes(local_cc))
+            local_primary = (m.get("currency") or "").upper()
+            src_currency = detect_currency_code(str(price_text or ""), local_primary, local_cc)
+            if src_currency and accepted and src_currency not in accepted:
+                print(f"SHOPPING LOCAL CURRENCY REJECT: {store_name} {price_text} detected={src_currency}")
                 return
-            shown = f"{format_price(numeric)} {currency_label(lang)}"
-            sort_price = numeric
+            src_currency = src_currency or local_primary
+            if src_currency and src_currency != local_primary:
+                converted = convert_to_local(numeric, src_currency)
+                sort_price = converted if converted is not None else numeric
+                shown = f"{format_price(numeric, src_currency)} {src_currency}"
+            else:
+                sort_price = numeric
+                shown = f"{format_price(numeric, local_primary)} {currency_label(lang)}"
+
         name = (store_name or "").strip()[:40] or f"Store {len(offers)+1}"
         base, n = name, 2
         while name in offers:
             name = f"{base} {n}"; n += 1
         offers[name] = {
-            "url": url, "price": sort_price, "price_text": shown,
-            "title": (title or "").strip(), "currency": src_currency,
-            "position": position, "source_layer": "shopping",
+            "url": url, "price": sort_price, "price_text": shown, "title": (title or "").strip(),
+            "currency": src_currency, "position": position, "source_layer": "shopping",
+            "market_country": resolved_market_country, "search_gl": search_gl,
         }
         used_urls.add(url)
 
@@ -3478,24 +4313,22 @@ def google_shopping_offers(query, lang="ar", allow_global=False, lens_context=No
         title = (card.get("title") or "").strip()
         source = (card.get("source") or "").strip()
         direct = (card.get("link") or "").strip()
-        # product_link هو صفحة Google نفسها — ما ينفع كرابط للمستخدم.
+        gl = (card.get("_shopping_gl") or ("us" if allow_global else local_cc)).lower()
         added_before = len(offers)
         if direct:
-            _add(source or title, direct, card.get("price"), card.get("extracted_price"), title, i)
+            _add(source or title, direct, card.get("price"), card.get("extracted_price"), title, i, gl)
         token = (card.get("immersive_product_page_token") or "").strip()
         if token and len(offers) == added_before:
-            # ما حصلنا رابط مباشر من البطاقة: نرشحها لفتح Immersive.
-            immersive_tokens.append((i, title, token))
+            immersive_tokens.append((i, title, token, gl))
 
-    # نفتح Immersive لأفضل البطاقات فقط، بالتوازي، ضمن سقف الكريدت.
     if immersive_tokens and IMMERSIVE_LOOKUPS_MAX > 0 and len(offers) < MAX_STORES:
         picked = immersive_tokens[:IMMERSIVE_LOOKUPS_MAX]
         market_snapshot = current_market()
         futures = {
-            SHOPPING_POOL.submit(_run_with_market, market_snapshot, _immersive_product_stores, token): (pos, title)
-            for pos, title, token in picked
+            SHOPPING_POOL.submit(_run_with_market, market_snapshot, _immersive_product_stores, token): (pos, title, gl)
+            for pos, title, token, gl in picked
         }
-        for future, (pos, title) in futures.items():
+        for future, (pos, title, gl) in futures.items():
             try:
                 stores = future.result(timeout=SERPAPI_TIMEOUT_SECONDS + 5) or []
             except Exception as e:
@@ -3503,19 +4336,88 @@ def google_shopping_offers(query, lang="ar", allow_global=False, lens_context=No
                 continue
             for store in stores:
                 _add(
-                    store.get("name") or "",
-                    store.get("link") or "",
+                    store.get("name") or "", store.get("link") or "",
                     store.get("price") or store.get("total") or "",
                     store.get("extracted_price") if store.get("extracted_price") not in (None, "") else store.get("extracted_total"),
-                    title, pos,
+                    title, pos, gl,
                 )
 
-    # نفس المواصفات فقط + توافق هوية Lens إن وجدت (لبحث الصور).
-    offers = filter_same_size(offers, clean_q)
+    # Rescue local merchant domains only when broad local Shopping is weak. No penalty for strong markets.
+    if not allow_global and len(offers) < LOCAL_RESULTS_TARGET and LOCAL_STORE_RESCUE_MAX > 0:
+        rescue_specs = local_rescue_store_specs(query, LOCAL_STORE_RESCUE_MAX)
+        def _rescue(label, domain):
+            q = en_q or raw_q
+            rs = _serpapi_shopping_request(f"{q} site:{domain}", local_cc, hl=local_hl, timeout_seconds=MARKET_FALLBACK_TIMEOUT_SECONDS)
+            return label, domain, rs
+        futures = {LOCAL_SHOPPING_POOL.submit(_rescue, label, domain):(label,domain) for label,domain in rescue_specs}
+        for fut, (label, domain) in futures.items():
+            try:
+                _, _, rs = fut.result(timeout=MARKET_FALLBACK_TIMEOUT_SECONDS + 4)
+            except Exception as e:
+                print(f"LOCAL STORE RESCUE ERR {label}: {e}")
+                continue
+            for card in rs or []:
+                link = (card.get("link") or "").strip()
+                direct = _shopping_direct_url(link) or link
+                try:
+                    host = urllib.parse.urlparse(direct).netloc.lower().replace("www.", "")
+                except Exception:
+                    host = ""
+                if not _host_matches_any(host, (domain,)):
+                    continue
+                _add(card.get("source") or label, direct, card.get("price"), card.get("extracted_price"), card.get("title") or "", int(card.get("position") or 999), local_cc)
+
+    # Generic country rescue for markets without a curated merchant profile or where the first passes were sparse.
+    # Runs only on weak LOCAL coverage, so Kuwait/other strong markets do not pay extra latency when already healthy.
+    if not allow_global and LOCAL_COUNTRY_RESCUE_ENABLED and len(offers) < LOCAL_RESULTS_TARGET:
+        country_name = str(m.get("country_name") or "").strip()
+        rescue_queries = []
+        base = en_q or raw_q
+        if country_name and base:
+            rescue_queries.append(f"{base} {country_name}")
+        if LOCAL_COUNTRY_RESCUE_PASSES >= 2 and raw_q and raw_q.lower() != base.lower() and country_name:
+            rescue_queries.append(f"{raw_q} {country_name}")
+        for rq in rescue_queries[:LOCAL_COUNTRY_RESCUE_PASSES]:
+            try:
+                rs = _serpapi_shopping_request(rq, local_cc, hl=local_hl, timeout_seconds=MARKET_FALLBACK_TIMEOUT_SECONDS)
+            except Exception as e:
+                print(f"LOCAL COUNTRY RESCUE ERR {local_cc}/{rq[:70]}: {e}")
+                rs = []
+            for card in rs or []:
+                _add(
+                    card.get("source") or country_name or "Local", card.get("link") or "",
+                    card.get("price") or "", card.get("extracted_price"),
+                    card.get("title") or "", int(card.get("position") or 999), local_cc,
+                )
+                if len(offers) >= LOCAL_RESULTS_TARGET:
+                    break
+            if len(offers) >= LOCAL_RESULTS_TARGET:
+                break
+
+    # Final LOCAL-only rescue: translate/normalize product identity into the market's own retail wording.
+    # It runs only when all no-AI local passes are still below target, protecting normal response time.
+    if not allow_global and LOCAL_AI_QUERY_RESCUE_ENABLED and len(offers) < LOCAL_RESULTS_TARGET:
+        localized_q = _ai_local_market_search_query(raw_q or query, en_q or english_name)
+        if localized_q and localized_q.lower() not in {str(en_q or "").lower(), str(raw_q or "").lower()}:
+            try:
+                rs = _serpapi_shopping_request(localized_q, local_cc, hl=local_hl, timeout_seconds=MARKET_FALLBACK_TIMEOUT_SECONDS)
+            except Exception as e:
+                print(f"LOCAL AI SHOPPING RESCUE ERR {local_cc}: {e}")
+                rs = []
+            for card in rs or []:
+                _add(
+                    card.get("source") or (m.get("country_name") or "Local"), card.get("link") or "",
+                    card.get("price") or "", card.get("extracted_price"),
+                    card.get("title") or "", int(card.get("position") or 999), local_cc,
+                )
+                if len(offers) >= LOCAL_RESULTS_TARGET:
+                    break
+
+    offers = filter_same_size(offers, en_q or raw_q)
     if lens_context:
         offers = filter_verified_with_lens(offers, lens_context)
     if offers:
-        print(f"SHOPPING OFFERS FINAL: {[(n, o['price']) for n, o in offers.items()]}")
+        print(f"SHOPPING OFFERS FINAL market={local_cc} passes={specs}: {[(n, o['price']) for n, o in offers.items()]}")
     return offers
 
 
@@ -3612,10 +4514,12 @@ def _new_layer_search(query, lang, prompt_text=None, source_image_b64=None, sour
         stores_hint = "، ".join(priority_stores)
         market_name = current_market().get("country_name", "Kuwait")
         if attempt == 1:
+            _stores_phrase = (f"ابدأ بالمتاجر المحلية القوية مثل: {stores_hint}، ثم وسّع لأي متجر محلي موثوق. " if stores_hint else "ابدأ بأقوى المتاجر المتخصصة والمنصات المحلية، ثم وسّع لأي متجر محلي موثوق. ")
             search_scope = (
-                f"ابدأ بأشهر المتاجر المحلية في {market_name} (مثل: {stores_hint}) ثم وسّع لأي متجر محلي موثوق. "
-                "بعد الانتهاء من المحلي ابحث في متاجر الولايات المتحدة، ثم متاجر الصين فقط. "
-                "ارفض أي نتيجة من أوروبا أو بريطانيا أو الهند أو اليابان أو أي دولة أخرى. "
+                _stores_phrase
+                + f"ابحث محلياً أيضاً بصياغة لغة السوق {country_search_hl()} وبالعملة/العملات المحلية {', '.join(country_currency_codes())}. "
+                + "بعد استنفاد المحلي ابحث في الولايات المتحدة، ثم الصين فقط. "
+                + f"ارفض أي دولة أخرى غير {market_name} والولايات المتحدة والصين. "
             )
         else:
             search_scope = (
@@ -3636,7 +4540,7 @@ def _new_layer_search(query, lang, prompt_text=None, source_image_b64=None, sour
             f"أعطني حتى {MAX_STORES} متاجر مختلفة. الترتيب الإجباري حسب السوق أولاً: {market_name} ثم الولايات المتحدة ثم الصين فقط؛ "
             "وداخل كل سوق فقط رتب من الأرخص إلى الأغلى. كل نتيجة يجب أن تحتوي سعراً رقمياً ورابط صفحة المنتج المباشرة داخل المتجر. "
             "ممنوع روابط Google وصفحات البحث والتصنيف، وممنوع أي متجر من دولة غير هذه الأسواق الثلاثة. "
-            "لا تكتب متوفر أو InStock بدلاً من السعر. اكتب السعر بالفلوس كاملة مثل 1.950 وليس 1.95. "
+            "لا تكتب متوفر أو InStock بدلاً من السعر. حافظ على السعر الرقمي والعملة كما في المصدر؛ التطبيق ينسق عدد الخانات حسب العملة. "
             f"{LANG_INSTR[lang]}"
         )
 
@@ -3737,21 +4641,85 @@ def _new_layer_search(query, lang, prompt_text=None, source_image_b64=None, sour
     return "", {}
 
 
+_PRICE_CHAR_TRANSLATION = str.maketrans({
+    **{ord(a): b for a, b in zip("٠١٢٣٤٥٦٧٨٩", "0123456789")},
+    **{ord(a): b for a, b in zip("۰۱۲۳۴۵۶۷۸۹", "0123456789")},
+    ord("٫"): ".", ord("٬"): ",",
+})
+
+def _normalize_price_chars(value):
+    return str(value or "").translate(_PRICE_CHAR_TRANSLATION)
+
+
+def _normalize_price_token(token, currency_code=""):
+    t = _normalize_price_chars(token).replace("\u00a0", " ").replace("\u202f", " ").strip()
+    t = re.sub(r"\s+", "", t)
+    if not t:
+        return None
+    # Keep only numeric separators/sign.
+    t = re.sub(r"[^0-9,.-]", "", t)
+    if not re.search(r"\d", t):
+        return None
+    neg = t.startswith("-")
+    t = t.lstrip("-")
+    dots, commas = t.count("."), t.count(",")
+    decimals = CURRENCY_DECIMALS.get((currency_code or "").upper(), 2)
+    if dots and commas:
+        # Last separator is decimal when it has a plausible minor-unit tail; the other is thousands.
+        last_dot, last_comma = t.rfind("."), t.rfind(",")
+        dec_sep = "." if last_dot > last_comma else ","
+        tail = len(t) - max(last_dot, last_comma) - 1
+        if tail in ({decimals} if decimals in (0,3) else {1,2}):
+            thou = "," if dec_sep == "." else "."
+            t = t.replace(thou, "").replace(dec_sep, ".")
+        else:
+            t = t.replace(".", "").replace(",", "")
+    elif commas:
+        pos = t.rfind(","); tail = len(t) - pos - 1
+        if (decimals == 3 and tail == 3) or (decimals == 2 and tail in (1,2)):
+            t = t[:pos].replace(",", "") + "." + t[pos+1:]
+        else:
+            t = t.replace(",", "")
+    elif dots:
+        pos = t.rfind("."); tail = len(t) - pos - 1
+        if t.count(".") > 1:
+            if (decimals == 3 and tail == 3) or (decimals == 2 and tail in (1,2)):
+                t = t[:pos].replace(".", "") + "." + t[pos+1:]
+            else:
+                t = t.replace(".", "")
+        elif decimals == 0 and tail == 3:
+            t = t.replace(".", "")
+    try:
+        val = float(t)
+        return -val if neg else val
+    except Exception:
+        return None
+
+
 def _extract_numeric_price(line):
-    """Extract a price whether currency appears before or after the number."""
-    text = str(line or "").replace(",", "")
-    patterns = (
-        r"(?:KWD|SAR|AED|BHD|QAR|OMR|USD|EUR|GBP|د\.ك|ر\.س|د\.إ|KD)\s*([0-9]+(?:\.[0-9]{1,3})?)",
-        r"([0-9]+(?:\.[0-9]{1,3})?)\s*(?:KWD|SAR|AED|BHD|QAR|OMR|USD|EUR|GBP|د\.ك|ر\.س|د\.إ|KD)",
-        r"—\s*([0-9]+(?:\.[0-9]{1,3})?)",
-    )
-    for pattern in patterns:
-        m = re.search(pattern, text, flags=re.I)
-        if m:
-            try:
-                return float(m.group(1))
-            except Exception:
-                pass
+    """Worldwide price parser: supports ISO currencies and comma/dot/space locale formatting."""
+    text = _normalize_price_chars(line).replace("\u00a0", " ").replace("\u202f", " ")
+    cur = detect_currency_code(text, "")
+    # Price normally sits after the final dash in generated offer lines; this avoids model numbers in titles.
+    parts = re.split(r"\s+(?:—|–|-)\s+", text)
+    zones = [parts[-1]] if len(parts) > 1 else []
+    zones.append(text)
+    number_re = re.compile(r"(?<!\w)(\d{1,3}(?:,\d{2})+,\d{3}(?:\.\d{1,3})?|\d{1,3}(?:[ .,'’]\d{3})+(?:[.,]\d{1,3})?|\d+(?:[.,]\d{1,3})?)(?!\w)")
+    for zone in zones:
+        matches = list(number_re.finditer(zone))
+        if not matches:
+            continue
+        # Prefer a number adjacent to currency; otherwise the last number in the price zone.
+        ranked = []
+        for mm in matches:
+            context = zone[max(0, mm.start()-12): min(len(zone), mm.end()+12)]
+            has_cur = bool(re.search(r"\b[A-Z]{3}\b|US\$|A\$|C\$|S\$|HK\$|NZ\$|NT\$|[$€£¥￥₹₩₺₽₪₴₸₾₼฿₫₱₦₵৳₲₭₮]|د\.ك|ر\.س|د\.إ|ر\.ق|ر\.ع|د\.ب|KD\b|RMB\b", context, re.I))
+            ranked.append((1 if has_cur else 0, mm.start(), mm.group(1)))
+        ranked.sort(reverse=True)
+        for _, _, token in ranked:
+            val = _normalize_price_token(token, cur)
+            if val is not None and val > 0:
+                return val
     return None
 
 
@@ -3818,7 +4786,7 @@ def _old_layer_search(query, lang, prompt_text=None, lens_context=None, allow_gl
     else:
         # ثلاث عمليات بحث مستقلة تضمن وجود تغطية فعلية لكل سوق بدلاً من الاعتماد على ترتيب Google العام.
         variants = [
-            prompt_text or f"ابحث عن {search_name} في {market_name} فقط، أي متجر محلي يبيعه، بسعر رقمي واضح ورابط صفحة منتج مباشر. {LANG_INSTR[lang]}",
+            prompt_text or f"ابحث عن {search_name} في {market_name} فقط. استخدم الاسم التجاري الإنجليزي ولغة السوق {country_search_hl()}، وافحص المتاجر المتخصصة والمحلية الصغيرة. السعر يجب أن يكون رقمياً بعملة محلية مقبولة ({', '.join(country_currency_codes())}) ورابط صفحة منتج مباشر. {LANG_INSTR[lang]}",
             f"{search_name} United States buy online exact product direct product page current price USD; US stores only. {LANG_INSTR[lang]}",
             f"{search_name} China buy online exact product direct product page current price CNY RMB; Chinese stores only such as AliExpress Alibaba 1688 Taobao SHEIN Tmall JD DHgate. {LANG_INSTR[lang]}",
         ]
@@ -3899,15 +4867,16 @@ def _store_priority_value(name, url, query=""):
             # مطابقة بالاسم أو بدومين المتجر داخل الرابط.
             if (key and key in text) or (dom and dom.replace("www.", "") in raw_text) or (dom_key and dom_key in raw_text):
                 return 120 - i * 8
-    priorities = (
-        "prosportskw", "tigro", "3roodq8", "intersport", "decathlon", "sssports",
-        "jm3eia", "جمعية", "xcite", "eureka", "best", "yousifi", "blink",
-        "jarir", "lulu", "carrefour", "noon", "taw9eel", "توصيل",
-        "boutiqaat", "boots", "yiaco", "levelshoes", "future", "talabat", "keeta"
-    )
-    for i, token in enumerate(priorities):
-        if token in raw_text:
-            return len(priorities) - i
+    if (current_market().get("country") or DEFAULT_COUNTRY).lower() == "kw":
+        priorities = (
+            "prosportskw", "tigro", "3roodq8", "intersport", "decathlon", "sssports",
+            "jm3eia", "جمعية", "xcite", "eureka", "best", "yousifi", "blink", "jarir",
+            "lulu", "carrefour", "noon", "taw9eel", "توصيل", "boutiqaat", "boots", "yiaco",
+            "levelshoes", "future", "talabat", "keeta"
+        )
+        for i, token in enumerate(priorities):
+            if token in raw_text:
+                return len(priorities) - i
     return 0
 
 
@@ -4676,29 +5645,52 @@ def process_interactive_message(message, bot_id):
             send_whatsapp_text(from_number, T(lang_, "cart_expired"), bot_id)
         return
 
-    # v83: recommendation list selection -> AI-normalized SPECIFIC product search.
-    # Do NOT feed the WhatsApp display text back through generic classification.
-    if btn_id.startswith("pick_"):
+    # v84.3: recommendation selection is self-contained and resilient.
+    # New list rows carry the product identity inside the row id (pickq_...).
+    # This means a restart/worker switch cannot make a fresh choice "expire".
+    # Old pick_N rows are also supported and fall back to WhatsApp's reply title.
+    if btn_id.startswith("pickq_") or btn_id.startswith("pick_"):
         item = PENDING_BRAND_PICKS.get(from_number) or {}
         lang_ = item.get("lang") or USER_LANG.get(from_number, "ar")
-        if not item or time.time() - float(item.get("ts") or 0) > GLOBAL_PENDING_TTL:
-            PENDING_BRAND_PICKS.pop(from_number, None)
+        picked = ""
+
+        if btn_id.startswith("pickq_"):
+            token = btn_id[6:]
+            try:
+                pad = "=" * ((4 - len(token) % 4) % 4)
+                picked = base64.urlsafe_b64decode((token + pad).encode("ascii")).decode("utf-8", "ignore")
+            except Exception as e:
+                print(f"PICK TOKEN DECODE ERR: {e}")
+                picked = ""
+        else:
+            raw_idx = btn_id[5:]
+            pick_idx = int(raw_idx) if raw_idx.isdigit() else -1
+            options = item.get("options") or []
+            if 0 <= pick_idx < len(options):
+                picked = options[pick_idx]
+
+        # Critical fallback: list replies contain the visible title. Use it rather than
+        # rejecting a user's selection if in-memory state disappeared.
+        if not picked:
+            picked = reply.get("title") or reply.get("description") or ""
+        picked = _clean_pick_label(picked)
+        if not picked:
             send_whatsapp_text(from_number, U(lang_, "expired"), bot_id)
             return
-        raw_idx = btn_id[5:]
-        pick_idx = int(raw_idx) if raw_idx.isdigit() else -1
-        options = item.get("options") or []
-        if not (0 <= pick_idx < len(options)):
-            send_whatsapp_text(from_number, U(lang_, "expired"), bot_id)
-            return
+
+        # State improves normalization while present, but is no longer required.
+        if item and time.time() - float(item.get("ts") or 0) <= BRAND_PICK_TTL:
+            original = item.get("original_query") or ""
+            target_bot_id = item.get("bot_id") or bot_id
+        else:
+            original = ""
+            target_bot_id = bot_id
+
         activate_market(from_number)
-        picked = _clean_pick_label(options[pick_idx])
-        original = item.get("original_query") or ""
         search_query = ai_recommendation_pick_search_query(original, picked, lang_)
-        # Prevent the selection from being reclassified as another generic request.
         LAST_SEARCH[from_number] = {"product": search_query}
         PENDING_BRAND_PICKS.pop(from_number, None)
-        execute_product_search(from_number, search_query, item.get("bot_id") or bot_id, lang_)
+        execute_product_search(from_number, search_query, target_bot_id, lang_)
         return
 
     # Shared buttons: text77 uses text77 follow-ups; image/Lens keeps v79 handlers exactly.
@@ -5668,6 +6660,14 @@ MSG["en"].update({
     "chat_redirect": "I’m here 🙌 Send a product name/photo for prices, or type the service you need 🛒",
 })
 
+# Complete localization for the post-local-results international-search prompt.
+MSG["fr"]["ask_global_after_local"] = "J’ai trouvé les résultats locaux ci-dessus 👆 Voulez-vous que je cherche aussi le même produit dans les boutiques internationales ? 🌍"
+MSG["es"]["ask_global_after_local"] = "Encontré los resultados locales arriba 👆 ¿Quieres que busque también el mismo producto en tiendas internacionales? 🌍"
+MSG["pt"]["ask_global_after_local"] = "Encontrei os resultados locais acima 👆 Quer que eu procure o mesmo produto também em lojas internacionais? 🌍"
+MSG["tr"]["ask_global_after_local"] = "Yerel sonuçları yukarıda buldum 👆 Aynı ürünü uluslararası mağazalarda da aramamı ister misiniz? 🌍"
+MSG["ru"]["ask_global_after_local"] = "Локальные результаты уже выше 👆 Искать этот же товар также в международных магазинах? 🌍"
+MSG["zh"]["ask_global_after_local"] = "上面已经找到本地结果 👆 要不要继续在国际商店中搜索同一商品？🌍"
+
 MSG["hi"].update({
     "ask_global_after_local": "स्थानीय नतीजे ऊपर हैं 👆 क्या इसी प्रोडक्ट के लिए अंतरराष्ट्रीय स्टोर भी खोजूँ? 🌍",
     "compare_searching": "⚖️ आपका अनुरोध सामान्य है, इसलिए पहले सबसे अच्छे ब्रांड/विकल्पों की तुलना कर रहा हूँ!",
@@ -5731,31 +6731,32 @@ Do not output a converted local-currency value for a foreign store.
 """
 
 def text77_market_instruction():
-    """Typed-text market rule: same market order/caps as v79 Lens UI."""
+    """Typed-text global market rule with premium local discovery."""
     m = current_market()
-    city = m.get("city") or ""
-    place = f"{city}, {m['country_name']}" if city else m["country_name"]
+    cc = (m.get("country") or DEFAULT_COUNTRY).lower()
+    place = m.get("country_name") or COUNTRY_NAMES.get(cc, cc.upper())
     currency = m.get("currency") or "local currency"
+    currencies = ", ".join(country_currency_codes(cc)) or currency
+    hl = m.get("search_hl") or country_search_hl(cc)
+    tlds = ", ".join(country_tlds(cc))
+    local_stores = priority_stores_for("")
+    stores_hint = ", ".join(local_stores[:6]) if local_stores else "strong local specialist stores and marketplaces"
     return (
-        f"\nIMPORTANT TYPED-TEXT MARKET RULE: user market is {place} (country code {m['country']}). "
-        f"For PRODUCT/STORE searches return ONLY: (1) stores in {place}, then (2) United States stores, then (3) China stores. "
-        "Reject stores from every other country. Explicitly reject Heureka/heureka.cz/heureka.sk; never classify it as local. Do not require US/China stores to deliver locally. "
-        "Maximum results are 5 local, 4 United States, 4 China; these are caps, never quotas. "
-        f"Local prices must use {currency}. US prices MUST stay in USD. China prices MUST stay in the exact source currency (USD or CNY/RMB). NEVER convert a foreign price to {currency}; the app converts it after retrieval. "
-        "The LOCAL -> US -> CHINA order is mandatory and more important than price. "
-        "For SERVICES, keep providers local to the user's market only.\n"
+        f"\nIMPORTANT TYPED-TEXT GEO RULE: local market is {place} (gl={cc}, hl={hl}, ccTLD={tlds}). "
+        f"Accepted local currencies: {currencies}; primary display currency: {currency}. "
+        "LOCAL IS THE MAIN PRODUCT: search it deeply before foreign markets. Use the user's wording, commercial English name, and local-commerce wording when useful. "
+        f"Check {stores_hint}, then broaden to smaller genuine local merchants indexed by Google; this is not a whitelist. "
+        f"Return in strict order: up to {LENS_DIRECT_LOCAL_MAX} LOCAL {place} results, then up to {LENS_DIRECT_US_MAX} US, then up to {LENS_DIRECT_CN_MAX} China. Reject every fourth country. "
+        "Heureka/heureka.cz/heureka.sk is blocked globally as a comparison site; Eureka Kuwait is allowed. "
+        f"Local prices use a valid local source currency ({currencies}); US stays USD; China stays source USD or CNY/RMB. Never convert foreign prices in the AI response. "
+        "A .com domain can still be local when Google local targeting, local currency, country path/text, or merchant identity ties it to the local market. "
+        "For SERVICES keep providers local only.\n"
     )
 
+
 def text77_store_domain(name):
-    """v77.7 store-domain normalization, isolated from v79 shared store_domain()."""
-    n = normalize_name(normalize_ar(name))
-    if not n:
-        return ""
-    for k, d in STORE_DOMAINS.items():
-        kn = normalize_name(normalize_ar(k))
-        if kn and (kn in n or n in kn):
-            return d
-    return ""
+    """Use the same market-aware domain resolver as the global engine."""
+    return store_domain(name)
 
 def text77_extract_store_offers(txt, limit=None):
     offers = []
@@ -5877,65 +6878,24 @@ def text77_call_gemini(parts, system=TEXT77_SYSTEM_PROMPT, use_search=True):
         return "", {}
 
 def text77_bilingual_search_instruction(query, lang):
-    response_rule = TEXT77_LANG_INSTR[lang]
-    market_name = current_market().get('country_name', 'Kuwait')
+    m = current_market()
+    market_name = m.get("country_name", "Kuwait")
+    hl = m.get("search_hl") or country_search_hl()
     return (
-        f"ابحث عن المنتج التالي في {market_name} باستخدام العربية والإنجليزية معاً: {query}. "
-        "حوّل الاسم داخلياً إلى مرادف عربي ومرادف إنجليزي، وجرّب اسم البراند باللاتيني والعربي، "
-        "ولا تعتبر عدم ظهور نتيجة بلغة واحدة فشلاً قبل تجربة اللغة الأخرى. "
-        f"ابدأ بنتائج المتاجر المحلية في {market_name} حتى لو كانت متأخرة في Google، وافحص نتائج أعمق قبل المتاجر الأجنبية. "
-        f"اعرض فقط نتائج لها سعر رقمي بعملة {current_market().get('currency', 'البلد')} ورابط صفحة منتج مباشر داخل المتجر. "
-        f"{response_rule}"
+        f"Search this exact product deeply in the LOCAL market {market_name}: {query}. "
+        f"Use the original wording, English commercial name, and local commerce language {hl}. "
+        f"Do not stop at famous stores; inspect smaller genuine {market_name} merchants indexed by Google. "
+        f"Local prices must be numeric and use an accepted local currency ({', '.join(country_currency_codes())}). "
+        f"Then US and China only if needed. {TEXT77_LANG_INSTR[lang]}"
     )
 
+
 def text77_is_local_result(item):
-    m = current_market()
-    cc = (m.get("country") or DEFAULT_COUNTRY).lower()
-    fields = ("title", "source", "link", "domain", "snippet", "price", "currency")
-    hay = " ".join(str(item.get(k) or "") for k in fields).lower()
-    link = str(item.get("link") or "").lower()
-    try:
-        host = urllib.parse.urlparse(link).netloc.lower().replace("www.", "")
-    except Exception:
-        host = ""
-    current_names = {str(m.get("country_name") or "").lower(), COUNTRY_NAMES_AR.get(cc, "").strip()}
-    foreign_name_hit = False
-    for cc2, name2 in COUNTRY_NAMES.items():
-        if cc2 != cc and name2 and re.search(rf"\b{re.escape(name2.lower())}\b", hay):
-            foreign_name_hit = True; break
-    if not foreign_name_hit:
-        for cc2, name2 in COUNTRY_NAMES_AR.items():
-            if cc2 != cc and name2 and name2 in hay:
-                foreign_name_hit = True; break
-    if foreign_name_hit and not any(n and n.lower() in hay for n in current_names if n):
-        return False
-    if any(tld in host for tld in COUNTRY_TLDS.get(cc, [])):
-        return True
-    if any(hint in f"{host}{link}" for hint in COUNTRY_URL_HINTS.get(cc, ())):
-        return True
-    country_name = str(m.get("country_name") or "").lower()
-    city = str(m.get("city") or "").lower()
-    if (country_name and country_name in hay) or (city and city in hay):
-        return True
-    if cc == "kw" and any(h in hay for h in KUWAIT_STORE_HINTS):
-        return True
-    if any(marker in hay for marker in COUNTRY_CURRENCY_MARKERS.get(cc, ())):
-        return True
-    return False
+    return is_local_lens_result(item)
+
 
 def text77_is_foreign_result(item):
-    if text77_is_local_result(item):
-        return False
-    m = current_market(); cc = (m.get("country") or DEFAULT_COUNTRY).lower()
-    hay = " ".join(str(item.get(k) or "") for k in ("title","source","link","domain","snippet","price","currency")).lower()
-    host = urllib.parse.urlparse(str(item.get("link") or "")).netloc.lower()
-    for other_cc, tlds in COUNTRY_TLDS.items():
-        if other_cc != cc and any(tld in host for tld in tlds):
-            return True
-    for other_cc, markers in COUNTRY_CURRENCY_MARKERS.items():
-        if other_cc != cc and any(marker in hay for marker in markers):
-            return True
-    return bool(host)
+    return is_foreign_lens_result(item)
 
 def text77_store_pending_global(phone, bot_id, lang, query):
     _store_pending_global(phone, bot_id, lang, query, None, None)
@@ -6824,7 +7784,14 @@ def legacy_text_product_search(product, lang):
     if cached:
         return cached
 
-    market_name = current_market().get("country_name", "Kuwait")
+    m = current_market()
+    market_name = m.get("country_name", "Kuwait")
+    local_cc = (m.get("country") or DEFAULT_COUNTRY).lower()
+    local_hl = m.get("search_hl") or country_search_hl(local_cc)
+    local_currencies = ", ".join(country_currency_codes(local_cc))
+    local_tlds = ", ".join(country_tlds(local_cc))
+    local_stores = priority_stores_for(product)
+    local_store_hint = ", ".join(local_stores[:7]) if local_stores else "the strongest specialist and marketplace stores in the country"
     total_cap = max(1, LENS_DIRECT_LOCAL_MAX + LENS_DIRECT_US_MAX + LENS_DIRECT_CN_MAX)
     soft = None
 
@@ -6833,6 +7800,8 @@ def legacy_text_product_search(product, lang):
         prompt = (
             f"ابحث عن نفس المنتج بالضبط: {primary}.{extra} "
             "إذا كان اسم المنتج مكتوباً بلغة غير لغة المتجر، افهم الاسم التجاري المكافئ تلقائياً أثناء بحث Google. "
+            f"LOCAL SEARCH BOOST: في {market_name} ابحث بصياغة المستخدم + الاسم التجاري الإنجليزي + صياغة لغة السوق {local_hl}. "
+            f"استخدم إشارات السوق gl={local_cc} و ccTLD={local_tlds} والعملات المحلية {local_currencies}. ابدأ بالمتاجر القوية مثل {local_store_hint} ثم وسّع للمتاجر المحلية الصغيرة المفهرسة؛ القائمة ليست whitelist. "
             f"ابحث تلقائياً في ثلاث مجموعات فقط وبالترتيب الإلزامي: "
             f"أولاً متاجر {market_name} المحلية حتى {LENS_DIRECT_LOCAL_MAX}، "
             f"ثم متاجر الولايات المتحدة حتى {LENS_DIRECT_US_MAX}، "
@@ -6855,8 +7824,13 @@ def legacy_text_product_search(product, lang):
         soft = (txt, {})
 
     # Only if the first grounded search failed, generate an alternate-language identity and retry.
-    is_ar = bool(re.search(r"[\u0600-\u06FF]", str(product or "")))
-    alt = (english_search_name(product) if is_ar else arabic_search_name(product)) or ""
+    _nonlatin = bool(re.search(r"[\u0600-\u06FF\u0900-\u097F\u3040-\u30FF\u3400-\u9FFF\u0400-\u04FF]", str(product or "")))
+    if _nonlatin:
+        alt = english_search_name(product) or ""
+    elif local_hl == "ar":
+        alt = arabic_search_name(product) or ""
+    else:
+        alt = ""
     if alt and alt.strip().lower() != str(product).strip().lower():
         txt2, urls2 = _attempt(alt, product)
         if txt2 and not is_no_result_answer(txt2) and text77_extract_store_offers(txt2, limit=total_cap):
@@ -6919,18 +7893,14 @@ def _text_offer_item(offer, urls):
 
 
 def _text_offer_price_and_title(detail):
-    """Split a legacy text offer into compact title + price for Lens-like UI."""
+    """Split a typed offer using the final dash/price segment; supports every ISO currency code."""
     text = re.sub(r"\s+", " ", str(detail or "")).strip()
-    patterns = [
-        r"(?:—|–|-)\s*((?:USD|US\$|KWD|KD|د\.ك|دينار|SAR|AED|QAR|OMR|BHD|CNY|RMB|\$|¥|￥)?\s*\d[\d,.]*\s*(?:USD|KWD|KD|د\.ك|دينار|SAR|AED|QAR|OMR|BHD|CNY|RMB|ر\.س|د\.إ|¥|￥)?)\s*$",
-        r"((?:USD|US\$|KWD|KD|د\.ك|دينار|SAR|AED|QAR|OMR|BHD|CNY|RMB|\$|¥|￥)\s*\d[\d,.]*|\d[\d,.]*\s*(?:USD|KWD|KD|د\.ك|دينار|SAR|AED|QAR|OMR|BHD|CNY|RMB|ر\.س|د\.إ|¥|￥))\s*$",
-    ]
-    for pat in patterns:
-        m = re.search(pat, text, flags=re.I)
-        if m:
-            price = m.group(1).strip(" —–-")
-            title = text[:m.start()].strip(" —–-")
-            return title or text, price
+    parts = re.split(r"\s+(?:—|–|-)\s+", text)
+    if len(parts) >= 2 and _extract_numeric_price(parts[-1]) is not None:
+        return " — ".join(parts[:-1]).strip(), parts[-1].strip()
+    has_currency = bool(re.search(r"\b[A-Z]{3}\b|US\$|A\$|C\$|S\$|HK\$|NZ\$|[$€£¥￥₹₩₺₽₪₴₸₾₼฿₫₱₦₵৳₲₭₮]|د\.ك|ر\.س|د\.إ|ر\.ق|ر\.ع|د\.ب|KD\b|RMB\b", text, re.I))
+    if has_currency and _extract_numeric_price(text) is not None:
+        return "", text
     return text, ""
 
 
@@ -6940,7 +7910,7 @@ def _text_price_local(raw_price, market_rank, lang):
     if not raw:
         return ""
     local_cur = (current_market().get("currency") or "").upper().strip()
-    src = detect_currency_code(raw, "")
+    src = detect_currency_code(raw, local_cur if market_rank == 0 else ("USD" if market_rank == 1 else "CNY" if market_rank == 2 else ""), current_market().get("country") if market_rank == 0 else ("us" if market_rank == 1 else "cn" if market_rank == 2 else ""))
     if not src:
         if market_rank == 0:
             src = local_cur
@@ -7437,7 +8407,16 @@ def run_brand_comparison(from_number, query, bot_id, lang):
     rows = []
     for i, o in enumerate(options):
         clean_o = _clean_pick_label(o)
-        rows.append({"id": f"pick_{i}", "title": _short_pick_title(clean_o, 24), "description": _pick_description(query, lang)})
+        # Put the product identity inside the row id so the click remains usable
+        # even after a process restart or worker switch. WhatsApp row ids allow
+        # substantially more space than the 24-char visible title.
+        raw_token = base64.urlsafe_b64encode(clean_o.encode("utf-8")).decode("ascii").rstrip("=")
+        row_id = f"pickq_{raw_token}"
+        # Defensive bound: if an unusually long generated name exceeds the practical
+        # row-id budget, keep the legacy index id; the reply-title fallback still works.
+        if len(row_id) > 190:
+            row_id = f"pick_{i}"
+        rows.append({"id": row_id, "title": _short_pick_title(clean_o, 24), "description": _pick_description(query, lang)})
     send_whatsapp_list(from_number, T(lang, "pick_prompt"), rows, bot_id, T(lang, "list_button"))
     print(f"BRAND COMPARE SENT: {options}")
     return True
@@ -7670,4 +8649,4 @@ def process_location_message(message, bot_id):
     route_pending_after_location(from_number)
 
 @app.get("/")
-async def health(): return {"status":"v84.1 CLEAN-FAST + RESTORED GENERIC + SMART-PICK + 10-LANG PHONE-PREFIX-MARKET LOCAL5-US4-CN4-SHEIN", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "market_source":"phone_prefix", "languages":["ar","en","fr","es","pt","tr","ru","zh","hi","ur"]}
+async def health(): return {"status":"v85 GLOBAL-GEO + STRONG-LOCAL + MULTI-CURRENCY + 10-LANG + SMART-PICK LOCAL5-US4-CN4-SHEIN", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "market_source":"phone_prefix", "languages":["ar","en","fr","es","pt","tr","ru","zh","hi","ur"]}
