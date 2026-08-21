@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v80-price-strict-no-heureka-20260821"
+BUILD_ID = "v80.1-price-smart-preserve-no-heureka-20260821"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE/TEXT -> FLAGS + CLEAR LOCAL PRICES + LOCAL/US/CHINA")
@@ -1550,13 +1550,29 @@ def google_lens_lookup(image_b64, mime_type, lang="ar", query_hint="", light=Fal
         user_country = current_market().get("country", DEFAULT_COUNTRY)
         merged, seen = [], set()
 
+        merged_by_sig = {}
         def _merge(new_items):
+            # نفس بطاقة Lens قد تصل من أكثر من تمريرة. سابقاً كنا نحتفظ بأول نسخة
+            # ونرمي الثانية حتى لو كانت الثانية تحمل السعر. الآن ندمج metadata مجاناً
+            # من كل تمريرات Lens بدون أي HTTP إضافي.
             for it in new_items:
                 sig = (it["title"].lower(), it["link"].lower())
                 if sig in seen:
+                    prev = merged_by_sig.get(sig)
+                    if prev is not None:
+                        if (not _lens_has_price(prev)) and _lens_has_price(it):
+                            for k in ("price", "price_value", "currency", "in_stock", "condition"):
+                                if it.get(k) not in (None, ""):
+                                    prev[k] = it.get(k)
+                            prev["price_source"] = "lens_duplicate_pass"
+                            print(f"LENS DUP PRICE MERGE: {(prev.get('source') or '')[:35]} -> {prev.get('price') or prev.get('price_value')}")
+                        # معلومات المخزون الصريحة أفضل من None حتى لو لم يتغير السعر.
+                        if prev.get("in_stock") is None and it.get("in_stock") is not None:
+                            prev["in_stock"] = it.get("in_stock")
                     continue
                 seen.add(sig)
                 merged.append(it)
+                merged_by_sig[sig] = it
 
         # v73: بلد المستخدم + أمريكا + الصين فقط، وكل تمريرات Lens تعمل بالتوازي.
         # هذا يمنع 6 طلبات × timeout متتالية (سبب التعليق في v72).
@@ -3729,13 +3745,15 @@ def _build_compact_card_body(flag, store, title, price_text, lang="ar"):
         if tline.strip():
             lines.append(tline.strip())
 
-    # v80 strict: لا توجد بطاقة نتيجة من دون سعر رقمي ظاهر.
+    # v80.1: لا نحذف أي بطاقة بسبب غياب السعر. نعرض السعر إذا استُخرج بأمان،
+    # وإلا نبقي البطاقة مع تنبيه قصير بدل اختراع رقم أو إخفاء النتيجة بالكامل.
     price_main, price_secondary = _split_price_display(price_text or "")
-    if not price_main or not re.search(r"\d", price_main):
-        return ""
-    lines.append(f"*💰 {price_main}*")
-    if price_secondary:
-        lines.append(f"_({price_secondary})_")
+    if price_main and re.search(r"\d", price_main):
+        lines.append(f"*💰 {price_main}*")
+        if price_secondary:
+            lines.append(f"_({price_secondary})_")
+    else:
+        lines.append("💰 السعر عند المتجر" if lang == "ar" else "💰 Price at store")
 
     return "\n".join(lines).strip()
 
@@ -4494,6 +4512,109 @@ def _lens_has_price(m):
             return False
     return False
 
+def _safe_embedded_price(item):
+    """Extract only a currency-tagged price already present in Lens text; no network call.
+
+    We intentionally refuse bare numbers so model names such as iPhone 16 / WH-1000XM5
+    are never mistaken for a price.
+    """
+    if not isinstance(item, dict) or _lens_has_price(item):
+        return item
+    text = " ".join(str(item.get(k) or "") for k in ("price", "title", "snippet", "extensions"))
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text:
+        return item
+    currency_pat = r"(?:KWD|KD|د\.ك|دينار|USD|US\$|\$|SAR|ر\.س|AED|د\.إ|QAR|OMR|BHD|CNY|RMB|¥|￥|EUR|€|GBP|£)"
+    pats = (
+        rf"({currency_pat})\s*([0-9]+(?:[.,][0-9]{{1,3}})?)",
+        rf"([0-9]+(?:[.,][0-9]{{1,3}})?)\s*({currency_pat})",
+    )
+    cur = ""
+    num = None
+    raw = ""
+    for idx, pat in enumerate(pats):
+        m = re.search(pat, text, flags=re.I)
+        if not m:
+            continue
+        if idx == 0:
+            cur_token, num_token = m.group(1), m.group(2)
+        else:
+            num_token, cur_token = m.group(1), m.group(2)
+        try:
+            num = float(num_token.replace(",", ""))
+        except Exception:
+            num = None
+        if num and num > 0:
+            raw = m.group(0)
+            cur = detect_currency_code(cur_token, "")
+            break
+    if not num:
+        return item
+    out = dict(item)
+    rank = result_market_rank(out)
+    if not cur:
+        cur = (current_market().get("currency") or "KWD").upper() if rank == 0 else ("USD" if rank == 1 else "CNY")
+    out["price_value"] = num
+    out["currency"] = cur
+    out["price"] = raw or f"{format_price(num, cur)} {cur}"
+    out["price_source"] = "embedded_lens_text"
+    return out
+
+
+def _price_identity_score(a, b):
+    """Conservative score for borrowing a price from another already-returned Lens card."""
+    ta, tb = _identity_tokens(a or ""), _identity_tokens(b or "")
+    if not ta or not tb:
+        return 0.0
+    model_a = {x for x in ta if any(c.isdigit() for c in x)}
+    model_b = {x for x in tb if any(c.isdigit() for c in x)}
+    if model_a and model_b and not (model_a & model_b):
+        return 0.0
+    inter = len(ta & tb)
+    score = inter / max(1, min(len(ta), len(tb)))
+    if model_a & model_b:
+        score += 0.50
+    return score
+
+
+def _fill_prices_from_existing_lens_pool(selected, pool):
+    """Fill missing prices from cards already fetched in this Lens request.
+
+    No merchant-page fetch and no extra SerpApi/Gemini lookup. Price is copied only when
+    merchant, model/title identity and pack size are compatible. Every selected card is preserved.
+    """
+    out = [dict(x) for x in (selected or [])]
+    pool = [_safe_embedded_price(dict(x)) for x in (pool or [])]
+    for i, item in enumerate(out):
+        item = _safe_embedded_price(item)
+        if _lens_has_price(item):
+            out[i] = item
+            continue
+        merchant = _lens_merchant_key(item.get("source"), item.get("link"))
+        title = str(item.get("title") or "")
+        sig = extract_pack_size(title)
+        best = None
+        best_score = 0.0
+        for cand in pool:
+            if not _lens_has_price(cand):
+                continue
+            if _lens_merchant_key(cand.get("source"), cand.get("link")) != merchant:
+                continue
+            if not sizes_compatible(sig, extract_pack_size(cand.get("title") or "")):
+                continue
+            score = _price_identity_score(title, cand.get("title") or "")
+            if score >= 0.72 and score > best_score:
+                best, best_score = cand, score
+        if best:
+            for k in ("price", "price_value", "currency"):
+                if best.get(k) not in (None, ""):
+                    item[k] = best.get(k)
+            item["price_source"] = "existing_lens_pool"
+            print(f"LENS PRICE REUSE: {(item.get('source') or '')[:35]} score={best_score:.2f} -> {item.get('price') or item.get('price_value')}")
+        out[i] = item
+    return out
+
+
 def _lens_price_text_local(m, market_rank, lang):
     """Return a clear local-currency price, plus original foreign price when known."""
     raw_price = str(m.get("price") or "").strip()
@@ -4609,8 +4730,8 @@ Return JSON only: {"target":"short identity","keep":[1,2,4]}"""
 def _enrich_result_price(item):
     """Best-effort price fill from the direct product page; never invent a price.
 
-    Existing reliable Lens/Google/Search prices are preserved for speed. Only cards with no
-    usable numeric price hit the merchant page.
+    Legacy/explicit verifier only. The normal fast card path does NOT call this function;
+    it preserves cards and reuses Lens/Search metadata instead of hitting merchant pages.
     """
     if not isinstance(item, dict):
         return item
@@ -4915,15 +5036,13 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption="", image_
     if not selected:
         return False
 
-    # v80 PRICE-STRICT: حاول ملء السعر الناقص من صفحة المنتج المباشرة ثم احذف أي بطاقة
-    # بقيت بلا سعر رقمي. لا نرسل أبداً "السعر غير ظاهر" ولا بطاقة بلا 💰.
-    selected = _enrich_missing_prices(selected)
-    before_price_filter = len(selected)
-    selected = [m for m in selected if _lens_has_price(m)]
-    if len(selected) != before_price_filter:
-        print(f"LENS PRICE-STRICT DROP: {before_price_filter - len(selected)} card(s) without numeric price")
-    if not selected:
-        return False
+    # v80.1 PRICE-SMART: لا نزور صفحات المتاجر ولا نحذف أي بطاقة.
+    # نستعيد السعر مجاناً من بيانات Lens الموجودة: النص المضمّن أو نسخة أخرى من نفس
+    # المتجر/الموديل في تمريرات Lens المتعددة. إذا بقي السعر مجهولاً تبقى البطاقة.
+    selected = _fill_prices_from_existing_lens_pool(selected, raw_matches)
+    missing_prices = sum(1 for m in selected if not _lens_has_price(m))
+    if missing_prices:
+        print(f"LENS PRICE-SMART: preserved {missing_prices} card(s) with no safely extracted numeric price")
 
     # الترجمة للواجهة فقط بعد اكتمال البحث والاختيار؛ لا تؤثر على Lens أو Google أو الفلاتر.
     display_titles = translate_ui_titles([(m.get("title") or "").strip() for m in selected], lang)
@@ -4944,7 +5063,6 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption="", image_
         # بطاقة مرتبة: متجر -> منتج -> سعر، بدون خلط عربي/إنجليزي في نفس السطر.
         body = _build_compact_card_body(flag, source, title, price_txt, lang)
         if not body:
-            print(f"LENS PRICE-STRICT SEND SKIP: {source} -> no displayable price")
             continue
 
         url = (m.get("link") or "").strip()
@@ -6276,6 +6394,9 @@ def run_region_lens_search(phone, product, region_key, bot_id, lang,
         f"total={len(selected)}/{total_limit} per_country={country_counts}"
     )
 
+    # Zero-extra-request price recovery from the Lens rows already fetched for this region.
+    selected = _fill_prices_from_existing_lens_pool(selected, matches)
+
     if not selected:
         msg = (
             "✨ ما لقيت نتائج مطابقة في الدولة المختارة حالياً."
@@ -6304,7 +6425,6 @@ def run_region_lens_search(phone, product, region_key, bot_id, lang,
         price = _lens_region_price_display(m, cc, lang)
         body = _build_compact_card_body(flag, store, title, price, lang)
         if not body:
-            print(f"REGION LENS PRICE-STRICT SKIP: {store} -> no numeric price")
             continue
 
         send_whatsapp_cta(
@@ -6456,7 +6576,6 @@ def run_region_search(phone, product, region_key, bot_id, lang="ar", origin="tex
         price = _region_price_display(raw_price, cc, lang)
         body = _build_compact_card_body(flag, store, title, price, lang)
         if not body:
-            print(f"REGION TEXT PRICE-STRICT SKIP: {store} -> no numeric price")
             continue
         send_whatsapp_cta(phone, body[:1000], item["link"], bot_id, store)
         sent += 1
@@ -7226,20 +7345,13 @@ def send_text_lens_style_results(from_number, txt, urls, bot_id, lang, query, ex
     if not selected:
         return False
 
-    selected = _enrich_missing_prices(selected)
+    # Typed search already asks Google-grounded search for prices. Do not add merchant-page
+    # HTTP lookups and do not shrink the result set if one line lacks a parsable price.
     priced_rows = []
     for item in selected:
         raw_title, raw_price = _text_offer_price_and_title(item["title"])
-        page_price = (item.get("price") or "") if item.get("price_source") == "direct_product_page" and _lens_has_price(item) else ""
-        final_price = page_price or raw_price
-        shown_price = _text_price_local(final_price, item["market_rank"], lang) if final_price else ""
-        if not shown_price or not re.search(r"\d", shown_price):
-            print(f"TEXT PRICE-STRICT DROP: {item.get('source','')} -> {item.get('link','')}")
-            continue
+        shown_price = _text_price_local(raw_price, item["market_rank"], lang) if raw_price else ""
         priced_rows.append((item, raw_title, shown_price))
-
-    if not priced_rows:
-        return False
 
     display_titles = [raw_title or query for _, raw_title, _ in priced_rows]
     translated = translate_ui_titles(display_titles, lang)
