@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v84-clean-fast-multilang-20260821"
+BUILD_ID = "v84.1-clean-fast-restore-generic-20260821"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("IMAGE/TEXT -> FLAGS + CLEAR LOCAL PRICES + LOCAL/US/CHINA")
@@ -7164,20 +7164,16 @@ def classify_request_type(query):
     if is_service_request(q):
         return _remember("SERVICE", "fast-service")
 
-    # Daily consumables should go straight to price search, not a brand-comparison screen.
-    consumable_specific = {
+    # v84.1: restore v83 behavior for short generic product requests.
+    # A single broad word such as حليب / رز / ماء should open recommendations first,
+    # rather than being forced directly into a specific price search.
+    single_word_generics = {
         "جبن", "حليب", "لبن", "رز", "عيش", "خبز", "ماء", "بيض", "لحم", "دجاج",
-        "شاي", "قهوه", "قهوة", "سكر", "ملح", "زيت", "مناديل", "شامبو", "دواء",
-    }
-    generic_categories = {
+        "شاي", "قهوه", "قهوة", "سكر", "ملح", "زيت",
         "حذاء", "تيشرت", "بنطلون", "قميص", "فستان", "شنطه", "شنطة", "ساعه", "ساعة",
-        "مضرب", "لابتوب", "مولد", "كاميرا", "سماعة", "شاشه", "شاشة", "غساله", "غسالة",
     }
-    if len(q.split()) == 1:
-        if q_norm in consumable_specific:
-            return _remember("SPECIFIC", "fast-consumable")
-        if q_norm in generic_categories:
-            return _remember("GENERIC", "fast-category")
+    if len(q.split()) == 1 and q_norm in single_word_generics:
+        return _remember("GENERIC", "fast-single-generic")
 
     verdict = ""
     try:
@@ -7678,4 +7674,4 @@ def process_location_message(message, bot_id):
     route_pending_after_location(from_number)
 
 @app.get("/")
-async def health(): return {"status":"v84 CLEAN-FAST + SMART-PICK + 10-LANG PHONE-PREFIX-MARKET LOCAL5-US4-CN4-SHEIN", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "market_source":"phone_prefix", "languages":["ar","en","fr","es","pt","tr","ru","zh","hi","ur"]}
+async def health(): return {"status":"v84.1 CLEAN-FAST + RESTORED GENERIC + SMART-PICK + 10-LANG PHONE-PREFIX-MARKET LOCAL5-US4-CN4-SHEIN", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "market_source":"phone_prefix", "languages":["ar","en","fr","es","pt","tr","ru","zh","hi","ur"]}
