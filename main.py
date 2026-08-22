@@ -26,7 +26,7 @@ app.add_middleware(
     allow_headers=["Content-Type", "Accept"],
     max_age=86400,
 )
-BUILD_ID = "v94.0-local-priority-nonblocking-20260823"
+BUILD_ID = "v95.0-lean-streaming-one-shot-20260823"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("GLOBAL GEO -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES")
@@ -8868,6 +8868,11 @@ GOOGLE_SHOPPING_GL_SUPPORTED = {
     "ai","ar","aw","au","at","be","bm","br","io","ca","ky","cl","cx","cc","co","cz","dk","fk","fi","fr","gf","pf","tf","de","gr","gp","hm","hk","hu","in","id","ie","il","it","jp","kr","my","mq","yt","mx","ms","nl","nc","nz","nf","no","ph","pl","pt","re","ro","ru","pm","sa","sg","sk","za","gs","es","se","ch","tw","th","tk","tr","tc","ua","ae","uk","gb","us","vn","vg","wf"
 }
 WEB_SUPPLEMENT_REQUEST_TIMEOUT = max(2.5, min(5.0, float(os.environ.get("WEB_SUPPLEMENT_REQUEST_TIMEOUT", "3.5"))))
+# v95 lean streaming: exactly one enrichment request per market.
+# The HTTP request timeout is the real deadline; we do NOT wrap these calls in asyncio.wait_for,
+# avoiding orphaned to_thread requests that continue after the UI has already timed out.
+WEB_LEAN_LOCAL_TIMEOUT = max(2.8, min(4.2, float(os.environ.get("WEB_LEAN_LOCAL_TIMEOUT", "3.4"))))
+WEB_LEAN_FOREIGN_TIMEOUT = max(2.0, min(3.5, float(os.environ.get("WEB_LEAN_FOREIGN_TIMEOUT", "2.8"))))
 WEB_LOCAL_SITE_RESCUE_MAX = max(0, min(3, int(os.environ.get("WEB_LOCAL_SITE_RESCUE_MAX", "2"))))
 WEB_CHINA_SITE_RESCUE_MAX = max(1, min(3, int(os.environ.get("WEB_CHINA_SITE_RESCUE_MAX", "2"))))
 WEB_IMAGE_TARGET_LOCAL = max(1, min(LENS_DIRECT_LOCAL_MAX, int(os.environ.get("WEB_IMAGE_TARGET_LOCAL", "3"))))
@@ -9253,6 +9258,105 @@ def _web_market_candidates_to_items(candidates, rank, lang, query):
         if len(out) >= cap:
             break
     return out
+
+
+
+def _web_lean_market_wave_sync(query, country, lang, rank):
+    """v95: one-shot market enrichment for image streaming.
+
+    Exactly ONE SerpApi Shopping request is allowed per market:
+      rank 0 local: broad Shopping if supported, otherwise one OR-combined local-domain rescue
+      rank 1 US: one broad US Shopping request
+      rank 2 China: one OR-combined AliExpress/SHEIN/Temu rescue through US Shopping
+
+    This deliberately avoids nested retries and sequential site loops. The request itself owns the
+    timeout, so the async layer does not abandon a still-running thread after asyncio.wait_for.
+    """
+    market = _web_market(country)
+    MARKET_CTX.value = market
+    q = _shopping_clean_query(query or "")
+    if not q or not SERPAPI_API_KEY:
+        return []
+
+    cap = {0: WEB_IMAGE_TARGET_LOCAL, 1: WEB_IMAGE_TARGET_US, 2: WEB_IMAGE_TARGET_CN}.get(rank, 2)
+    candidates = []
+
+    def _append_cards(cards, fallback_source, market_cc, force_market_country="", allowed_domains=()):
+        for card in cards or []:
+            item = _shopping_card_to_market_item(card, fallback_source, market_cc)
+            if not item:
+                continue
+            if force_market_country:
+                item["market_country"] = force_market_country
+            if allowed_domains:
+                try:
+                    host = urllib.parse.urlparse(item.get("link") or "").netloc.lower().replace("www.", "")
+                except Exception:
+                    host = ""
+                if not _host_matches_any(host, tuple(allowed_domains)):
+                    continue
+            candidates.append(item)
+            if len(candidates) >= max(cap + 2, cap):
+                break
+
+    if rank == 0:
+        local_cc = (market.get("country") or DEFAULT_COUNTRY).lower()
+        if local_cc in GOOGLE_SHOPPING_GL_SUPPORTED:
+            cards = _serpapi_shopping_request(
+                q,
+                local_cc,
+                hl=country_search_hl(local_cc),
+                timeout_seconds=WEB_LEAN_LOCAL_TIMEOUT,
+            )
+            _append_cards(cards, market.get("country_name") or "Local", local_cc)
+        else:
+            specs = local_rescue_store_specs(q, max(1, WEB_LOCAL_SITE_RESCUE_MAX))
+            domains = [d for _label, d in specs if d][:max(1, WEB_LOCAL_SITE_RESCUE_MAX)]
+            labels = [label for label, d in specs if d][:max(1, WEB_LOCAL_SITE_RESCUE_MAX)]
+            if domains:
+                if len(domains) == 1:
+                    rescue_q = f"{q} site:{domains[0]}"
+                else:
+                    rescue_q = q + " (" + " OR ".join(f"site:{d}" for d in domains) + ")"
+                cards = _serpapi_shopping_request(
+                    rescue_q,
+                    "us",
+                    hl="en",
+                    timeout_seconds=WEB_LEAN_LOCAL_TIMEOUT,
+                )
+                _append_cards(
+                    cards,
+                    labels[0] if labels else (market.get("country_name") or "Local"),
+                    local_cc,
+                    force_market_country=local_cc,
+                    allowed_domains=domains,
+                )
+    elif rank == 1:
+        cards = _serpapi_shopping_request(
+            q,
+            "us",
+            hl="en",
+            timeout_seconds=WEB_LEAN_FOREIGN_TIMEOUT,
+        )
+        _append_cards(cards, "US", "us")
+    else:
+        targets = [("AliExpress", "aliexpress.com"), ("SHEIN", "shein.com"), ("Temu", "temu.com")]
+        targets = targets[:max(1, WEB_CHINA_SITE_RESCUE_MAX)]
+        domains = [d for _label, d in targets]
+        if domains:
+            if len(domains) == 1:
+                rescue_q = f"{q} site:{domains[0]}"
+            else:
+                rescue_q = q + " (" + " OR ".join(f"site:{d}" for d in domains) + ")"
+            cards = _serpapi_shopping_request(
+                rescue_q,
+                "us",
+                hl="en",
+                timeout_seconds=WEB_LEAN_FOREIGN_TIMEOUT,
+            )
+            _append_cards(cards, "China", "cn", allowed_domains=domains)
+
+    return _web_market_candidates_to_items(candidates, rank, lang, query)[:cap]
 
 
 def _web_fast_market_wave_sync(query, country, lang, rank):
@@ -9834,10 +9938,10 @@ async def web_api_image_search_stream(request: Request):
                         timeout=min(WEB_LENS_TOTAL_BUDGET_SECONDS, WEB_LENS_PASS_TIMEOUT_SECONDS + 0.35),
                     )
                 except asyncio.TimeoutError:
-                    print(f"WEB IMAGE V94 primary lens timeout country={primary_cc}")
+                    print(f"WEB IMAGE V95 primary lens timeout country={primary_cc}")
                     lens_packet = None
                 except Exception as exc:
-                    print(f"WEB IMAGE V94 primary lens error country={primary_cc}: {exc}")
+                    print(f"WEB IMAGE V95 primary lens error country={primary_cc}: {exc}")
                     lens_packet = None
 
             rows = (lens_packet or {}).get("items") or []
@@ -9862,35 +9966,30 @@ async def web_api_image_search_stream(request: Request):
                         timeout=WEB_IMAGE_VISION_FALLBACK_TIMEOUT,
                     )
                 except asyncio.TimeoutError:
-                    print("WEB IMAGE V94 VISION FALLBACK TIMEOUT")
+                    print("WEB IMAGE V95 VISION FALLBACK TIMEOUT")
                     identity = ""
                 if identity and not query_sent:
                     yield _web_stream_event({"event": "query", "query": identity, "market": market, "elapsed_ms": int((time.time()-started)*1000)})
                     query_sent = True
 
-            # Enrich weak/missing buckets in parallel. Local is IMPORTANT but non-blocking:
-            # US/China may stream first, while local gets a slightly longer bounded window.
-            # This preserves speed without allowing local discovery to lag far behind.
+            # v95 LEAN enrichment: one request per weak market, all launched together.
+            # First Lens cards have already been streamed above. Local gets a slightly longer HTTP
+            # deadline internally, but it NEVER blocks US/China from appearing first.
+            # Crucially: no asyncio.wait_for around to_thread here; the underlying request owns the
+            # deadline, so there are no abandoned Shopping threads continuing after a timeout.
             if WEB_IMAGE_STREAM_SUPPLEMENT and identity:
                 target = {0: WEB_IMAGE_TARGET_LOCAL, 1: WEB_IMAGE_TARGET_US, 2: WEB_IMAGE_TARGET_CN}
                 weak = [rank for rank in (0, 1, 2) if counts[rank] < target[rank]]
 
-                async def _one_market(rank):
+                async def _one_market_lean(rank):
                     try:
-                        market_timeout = WEB_LOCAL_SUPPLEMENT_TIMEOUT if rank == 0 else WEB_FOREIGN_SUPPLEMENT_TIMEOUT
-                        rows = await asyncio.wait_for(
-                            asyncio.to_thread(_web_fast_market_wave_sync, identity, country, lang, rank),
-                            timeout=market_timeout,
-                        )
+                        rows = await asyncio.to_thread(_web_lean_market_wave_sync, identity, country, lang, rank)
                         return rank, rows or []
-                    except asyncio.TimeoutError:
-                        print(f"WEB IMAGE V94 supplement timeout rank={rank}")
-                        return rank, []
                     except Exception as exc:
-                        print(f"WEB IMAGE V94 supplement error rank={rank}: {exc}")
+                        print(f"WEB IMAGE V95 lean supplement error rank={rank}: {exc}")
                         return rank, []
 
-                tasks = [asyncio.create_task(_one_market(rank)) for rank in weak]
+                tasks = [asyncio.create_task(_one_market_lean(rank)) for rank in weak]
                 for finished in asyncio.as_completed(tasks):
                     rank, rows = await finished
                     need = max(0, target[rank] - counts[rank])
@@ -9923,7 +10022,7 @@ async def web_api_image_search_stream(request: Request):
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            print(f"WEB IMAGE V93 STREAM ERROR: {exc}")
+            print(f"WEB IMAGE V95 STREAM ERROR: {exc}")
             yield _web_stream_event({"event": "error", "error": "image_search_failed", "elapsed_ms": int((time.time()-started)*1000)})
 
     return StreamingResponse(
