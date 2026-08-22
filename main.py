@@ -26,7 +26,7 @@ app.add_middleware(
     allow_headers=["Content-Type", "Accept"],
     max_age=86400,
 )
-BUILD_ID = "v88.0-web-stream-20260822"
+BUILD_ID = "v89.0-web-image-parity-20260822"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("GLOBAL GEO -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES")
@@ -8829,6 +8829,10 @@ WEB_API_MAX_QUERY_CHARS = max(40, min(500, int(os.environ.get("WEB_API_MAX_QUERY
 WEB_API_MAX_IMAGE_BYTES = max(512000, min(12 * 1024 * 1024, int(os.environ.get("WEB_API_MAX_IMAGE_BYTES", str(6 * 1024 * 1024)))))
 WEB_API_RATE_PER_MINUTE = max(5, min(120, int(os.environ.get("WEB_API_RATE_PER_MINUTE", "30"))))
 WEB_STREAM_ENABLED = env_bool("WEB_STREAM_ENABLED", True)
+WEB_IMAGE_SUPPLEMENT_WEAK_MARKETS = env_bool("WEB_IMAGE_SUPPLEMENT_WEAK_MARKETS", True)
+WEB_IMAGE_TARGET_LOCAL = max(1, min(LENS_DIRECT_LOCAL_MAX, int(os.environ.get("WEB_IMAGE_TARGET_LOCAL", "3"))))
+WEB_IMAGE_TARGET_US = max(1, min(LENS_DIRECT_US_MAX, int(os.environ.get("WEB_IMAGE_TARGET_US", "2"))))
+WEB_IMAGE_TARGET_CN = max(1, min(LENS_DIRECT_CN_MAX, int(os.environ.get("WEB_IMAGE_TARGET_CN", "2"))))
 WEB_STREAM_FAST_WAVE = env_bool("WEB_STREAM_FAST_WAVE", True)
 WEB_STREAM_MARKET_TIMEOUT = max(4, min(20, int(os.environ.get("WEB_STREAM_MARKET_TIMEOUT_SECONDS", "8"))))
 WEB_RATE_BUCKETS = defaultdict(deque)
@@ -9304,8 +9308,66 @@ def _web_search_image_sync(image_b64, mime, caption, country, lang):
         if lens_direct.get("matches"):
             items = _web_build_lens_items(lens_direct, lang, caption)
             if items:
-                identity = (lens_direct.get("visual_identity") or lens_direct.get("query") or caption or "").strip()
-                return {"ok": True, "type": "results", "query": identity, "market": market, "results": items, "source": "lens_direct"}
+                identity = (lens_direct.get("visual_identity") or lens_direct.get("relevance_target") or lens_direct.get("query") or caption or "").strip()
+
+                # v89: Direct Lens can be excellent but uneven by market.  Do not stop the
+                # web search merely because *some* Lens cards exist.  WhatsApp often has a
+                # richer pool after its market/rescue layers, so the website now fills weak
+                # LOCAL / US / CHINA buckets before returning while preserving Lens first.
+                if WEB_IMAGE_SUPPLEMENT_WEAK_MARKETS and identity:
+                    target = {0: WEB_IMAGE_TARGET_LOCAL, 1: WEB_IMAGE_TARGET_US, 2: WEB_IMAGE_TARGET_CN}
+                    counts = {0: 0, 1: 0, 2: 0}
+                    for row in items:
+                        r = row.get("market_rank")
+                        if r in counts:
+                            counts[r] += 1
+
+                    weak = [r for r in (0, 1, 2) if counts[r] < target[r]]
+                    if weak:
+                        print(f"WEB IMAGE v89 weak markets before supplement counts={counts} target={target} identity={identity[:90]!r}")
+                        market_snapshot = dict(market)
+                        extra_by_rank = {}
+
+                        def _supp(rank):
+                            MARKET_CTX.value = market_snapshot
+                            try:
+                                return rank, _web_fast_market_wave_sync(identity, country, lang, rank)
+                            except Exception as e:
+                                print(f"WEB IMAGE SUPPLEMENT ERR rank={rank}: {e}")
+                                return rank, []
+
+                        with ThreadPoolExecutor(max_workers=max(1, len(weak))) as ex:
+                            futs = [ex.submit(_supp, r) for r in weak]
+                            for fut in futs:
+                                try:
+                                    rank, rows = fut.result(timeout=SERPAPI_TIMEOUT_SECONDS + 5)
+                                    extra_by_rank[rank] = rows or []
+                                except Exception as e:
+                                    print(f"WEB IMAGE SUPPLEMENT FUTURE ERR: {e}")
+
+                        seen_urls = {str(x.get("url") or "").strip() for x in items if str(x.get("url") or "").strip()}
+                        seen_sig = {(str(x.get("store") or "").strip().lower(), normalize_name(x.get("title") or "")) for x in items}
+                        for rank in (0, 1, 2):
+                            need = max(0, target[rank] - counts[rank])
+                            if need <= 0:
+                                continue
+                            for row in extra_by_rank.get(rank, []):
+                                url = str(row.get("url") or "").strip()
+                                sig = (str(row.get("store") or "").strip().lower(), normalize_name(row.get("title") or ""))
+                                if (url and url in seen_urls) or sig in seen_sig:
+                                    continue
+                                items.append(row)
+                                if url:
+                                    seen_urls.add(url)
+                                seen_sig.add(sig)
+                                counts[rank] += 1
+                                need -= 1
+                                if need <= 0:
+                                    break
+                        items.sort(key=lambda x: (int(x.get("market_rank", 99)), 0 if x.get("price") else 1))
+                        print(f"WEB IMAGE v89 after supplement counts={counts} total={len(items)}")
+
+                return {"ok": True, "type": "results", "query": identity, "market": market, "results": items, "source": "lens_direct_plus_market_supplement"}
 
     # Full Vision/Lens fusion fallback mirrors process_single_image, but returns JSON.
     lens_future = None
