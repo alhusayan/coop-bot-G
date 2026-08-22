@@ -26,7 +26,7 @@ app.add_middleware(
     allow_headers=["Content-Type", "Accept"],
     max_age=86400,
 )
-BUILD_ID = "v91.0-lens-first-response-20260823"
+BUILD_ID = "v92.0-serpapi-geo-safe-20260823"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("GLOBAL GEO -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES")
@@ -4166,7 +4166,16 @@ def _shopping_clean_query(query):
 
 
 def _serpapi_shopping_request(query, gl, hl="en", timeout_seconds=None):
-    """طلب google_shopping واحد. يعيد shopping_results (قد تكون فارغة)."""
+    """One bounded google_shopping request.
+
+    v92: SerpApi/Google Shopping no longer accepts every Google country as `gl`.
+    Unsupported markets (including KW/CN) are skipped instead of wasting requests on HTTP 400.
+    Local discovery for those markets comes from Lens + direct-store/background rescue.
+    """
+    gl = str(gl or "").lower().strip()
+    if gl and gl not in GOOGLE_SHOPPING_GL_SUPPORTED:
+        print(f"GOOGLE SHOPPING SKIP unsupported-gl={gl} q={str(query)[:60]!r}")
+        return []
     params = {
         "engine": "google_shopping", "q": query, "api_key": SERPAPI_API_KEY,
         "hl": hl, "output": "json",
@@ -4174,7 +4183,8 @@ def _serpapi_shopping_request(query, gl, hl="en", timeout_seconds=None):
     if gl:
         params["gl"] = gl
     try:
-        r = requests.get("https://serpapi.com/search.json", params=params, timeout=(4, timeout_seconds or SERPAPI_TIMEOUT_SECONDS))
+        read_timeout = timeout_seconds or SERPAPI_TIMEOUT_SECONDS
+        r = requests.get("https://serpapi.com/search.json", params=params, timeout=(3, read_timeout))
         if r.status_code >= 400:
             print(f"GOOGLE SHOPPING HTTP {r.status_code}: {r.text[:300]}")
             return []
@@ -4185,6 +4195,9 @@ def _serpapi_shopping_request(query, gl, hl="en", timeout_seconds=None):
         results = data.get("shopping_results") or []
         print(f"GOOGLE SHOPPING: q={query[:60]!r} gl={gl or '-'} -> {len(results)} cards")
         return results[:SHOPPING_RESULT_LIMIT]
+    except requests.exceptions.Timeout:
+        print(f"GOOGLE SHOPPING TIMEOUT gl={gl or '-'} q={str(query)[:60]!r}")
+        return []
     except Exception as e:
         print(f"GOOGLE SHOPPING EXCEPTION: {e}")
         return []
@@ -8843,8 +8856,17 @@ WEB_LENS_INITIAL_PER_MARKET = max(1, min(4, int(os.environ.get("WEB_LENS_INITIAL
 WEB_LENS_CIRCUIT_FAILS = max(1, min(4, int(os.environ.get("WEB_LENS_CIRCUIT_FAILS", "2"))))
 WEB_LENS_CIRCUIT_SECONDS = max(10.0, min(180.0, float(os.environ.get("WEB_LENS_CIRCUIT_SECONDS", "45"))))
 WEB_IMAGE_VISION_FALLBACK_TIMEOUT = max(5.0, min(14.0, float(os.environ.get("WEB_IMAGE_VISION_FALLBACK_TIMEOUT", "8"))))
-WEB_LENS_CIRCUIT = {"failures": 0, "open_until": 0.0}
+# v92: circuit breaker is per Lens country. A slow Kuwait/China pass must not disable a healthy US pass.
+WEB_LENS_CIRCUIT = defaultdict(lambda: {"failures": 0, "open_until": 0.0})
 WEB_LENS_CIRCUIT_LOCK = threading.Lock()
+# Google Shopping supports only a subset of countries; Kuwait and mainland China are not supported as gl values.
+# Keep this list in sync with SerpApi's published Google Shopping countries.
+GOOGLE_SHOPPING_GL_SUPPORTED = {
+    "ai","ar","aw","au","at","be","bm","br","io","ca","ky","cl","cx","cc","co","cz","dk","fk","fi","fr","gf","pf","tf","de","gr","gp","hm","hk","hu","in","id","ie","il","it","jp","kr","my","mq","yt","mx","ms","nl","nc","nz","nf","no","ph","pl","pt","re","ro","ru","pm","sa","sg","sk","za","gs","es","se","ch","tw","th","tk","tr","tc","ua","ae","uk","gb","us","vn","vg","wf"
+}
+WEB_SUPPLEMENT_REQUEST_TIMEOUT = max(2.5, min(5.0, float(os.environ.get("WEB_SUPPLEMENT_REQUEST_TIMEOUT", "3.5"))))
+WEB_LOCAL_SITE_RESCUE_MAX = max(0, min(3, int(os.environ.get("WEB_LOCAL_SITE_RESCUE_MAX", "2"))))
+WEB_CHINA_SITE_RESCUE_MAX = max(1, min(3, int(os.environ.get("WEB_CHINA_SITE_RESCUE_MAX", "2"))))
 WEB_IMAGE_TARGET_LOCAL = max(1, min(LENS_DIRECT_LOCAL_MAX, int(os.environ.get("WEB_IMAGE_TARGET_LOCAL", "3"))))
 WEB_IMAGE_TARGET_US = max(1, min(LENS_DIRECT_US_MAX, int(os.environ.get("WEB_IMAGE_TARGET_US", "2"))))
 WEB_IMAGE_TARGET_CN = max(1, min(LENS_DIRECT_CN_MAX, int(os.environ.get("WEB_IMAGE_TARGET_CN", "2"))))
@@ -9231,10 +9253,67 @@ def _web_market_candidates_to_items(candidates, rank, lang, query):
 
 
 def _web_fast_market_wave_sync(query, country, lang, rank):
+    """Lean background fill used only by web streaming.
+
+    v92 deliberately avoids the old nested pool / 6-parallel Shopping rescue because an
+    asyncio timeout cannot cancel the underlying requests thread. That was causing request
+    pile-ups after the UI had already timed out.
+    """
     market = _web_market(country)
     MARKET_CTX.value = market
     cap = {0: LENS_DIRECT_LOCAL_MAX, 1: LENS_DIRECT_US_MAX, 2: LENS_DIRECT_CN_MAX}.get(rank, 4)
-    candidates = _market_presence_fallback(query, rank, limit=max(cap + 2, cap))
+    q = _shopping_clean_query(query or "")
+    if not q:
+        return []
+    candidates = []
+
+    def _append_cards(cards, fallback_source, market_cc, force_market_country=""):
+        for card in cards or []:
+            item = _shopping_card_to_market_item(card, fallback_source, market_cc)
+            if not item:
+                continue
+            if force_market_country:
+                item["market_country"] = force_market_country
+            candidates.append(item)
+            if len(candidates) >= max(cap + 2, cap):
+                break
+
+    if rank == 0:
+        local_cc = (market.get("country") or DEFAULT_COUNTRY).lower()
+        # Supported Shopping market: one broad request only.
+        if local_cc in GOOGLE_SHOPPING_GL_SUPPORTED:
+            cards = _serpapi_shopping_request(q, local_cc, hl=country_search_hl(local_cc), timeout_seconds=WEB_SUPPLEMENT_REQUEST_TIMEOUT)
+            _append_cards(cards, market.get("country_name") or "Local", local_cc)
+        else:
+            # Unsupported Shopping market (e.g. Kuwait): query only a couple of known local domains
+            # through a supported Google Shopping locale. The site restriction + merchant list is
+            # stronger evidence than pretending `gl=kw`, which SerpApi rejects.
+            specs = local_rescue_store_specs(q, WEB_LOCAL_SITE_RESCUE_MAX)
+            for label, domain in specs:
+                cards = _serpapi_shopping_request(f"{q} site:{domain}", "us", hl="en", timeout_seconds=WEB_SUPPLEMENT_REQUEST_TIMEOUT)
+                before = len(candidates)
+                _append_cards(cards, label, local_cc, force_market_country=local_cc)
+                # Keep only the requested local domain for this rescue pass.
+                if len(candidates) > before:
+                    candidates[before:] = [x for x in candidates[before:] if _host_matches_any(urllib.parse.urlparse(x.get("link") or "").netloc.lower().replace("www.", ""), (domain,))]
+                if len(candidates) >= cap:
+                    break
+    elif rank == 1:
+        cards = _serpapi_shopping_request(q, "us", hl="en", timeout_seconds=WEB_SUPPLEMENT_REQUEST_TIMEOUT)
+        _append_cards(cards, "US", "us")
+    else:
+        # China is also unsupported as Google Shopping gl. Use at most a couple of strong Chinese
+        # retail domains through US Shopping, sequentially, so we never launch six orphaned threads.
+        targets = [("AliExpress", "aliexpress.com"), ("SHEIN", "shein.com"), ("Temu", "temu.com")][:WEB_CHINA_SITE_RESCUE_MAX]
+        for label, domain in targets:
+            cards = _serpapi_shopping_request(f"{q} site:{domain}", "us", hl="en", timeout_seconds=WEB_SUPPLEMENT_REQUEST_TIMEOUT)
+            before = len(candidates)
+            _append_cards(cards, label, "cn")
+            if len(candidates) > before:
+                candidates[before:] = [x for x in candidates[before:] if _host_matches_any(urllib.parse.urlparse(x.get("link") or "").netloc.lower().replace("www.", ""), (domain,))]
+            if len(candidates) >= cap:
+                break
+
     return _web_market_candidates_to_items(candidates, rank, lang, query)
 
 
@@ -9517,29 +9596,34 @@ async def web_api_search_stream(request: Request):
 
 
 
-def _web_lens_circuit_is_open():
+def _web_lens_circuit_is_open(country=""):
+    key = str(country or "*").lower()
     now = time.time()
     with WEB_LENS_CIRCUIT_LOCK:
-        return float(WEB_LENS_CIRCUIT.get("open_until") or 0.0) > now
+        state = WEB_LENS_CIRCUIT[key]
+        return float(state.get("open_until") or 0.0) > now
 
 
-def _web_lens_circuit_note(success):
+def _web_lens_circuit_note(country, success):
+    key = str(country or "*").lower()
     now = time.time()
     with WEB_LENS_CIRCUIT_LOCK:
+        state = WEB_LENS_CIRCUIT[key]
         if success:
-            WEB_LENS_CIRCUIT["failures"] = 0
-            WEB_LENS_CIRCUIT["open_until"] = 0.0
+            state["failures"] = 0
+            state["open_until"] = 0.0
             return
-        failures = int(WEB_LENS_CIRCUIT.get("failures") or 0) + 1
-        WEB_LENS_CIRCUIT["failures"] = failures
+        failures = int(state.get("failures") or 0) + 1
+        state["failures"] = failures
         if failures >= WEB_LENS_CIRCUIT_FAILS:
-            WEB_LENS_CIRCUIT["open_until"] = now + WEB_LENS_CIRCUIT_SECONDS
-            print(f"WEB LENS CIRCUIT OPEN failures={failures} for={WEB_LENS_CIRCUIT_SECONDS:.0f}s")
+            state["open_until"] = now + WEB_LENS_CIRCUIT_SECONDS
+            print(f"WEB LENS CIRCUIT OPEN country={key} failures={failures} for={WEB_LENS_CIRCUIT_SECONDS:.0f}s")
 
 
 def _web_serpapi_lens_once(public_url, country, query_hint=""):
     """One bounded Google Lens pass for web streaming. No products/all duplication."""
-    if _web_lens_circuit_is_open():
+    country = str(country or "").lower()
+    if _web_lens_circuit_is_open(country):
         print(f"WEB LENS FAST SKIP circuit-open country={country}")
         return {"country": country, "items": [], "ok": False, "circuit": True, "elapsed_ms": 0}
     params = {
@@ -9565,11 +9649,10 @@ def _web_serpapi_lens_once(public_url, country, query_hint=""):
         )
         elapsed_ms = int((time.time() - started) * 1000)
         if r.status_code >= 500:
-            _web_lens_circuit_note(False)
+            _web_lens_circuit_note(country, False)
             print(f"WEB LENS FAST HTTP {r.status_code} country={country} elapsed={elapsed_ms}ms")
             return {"country": country, "items": [], "ok": False, "elapsed_ms": elapsed_ms}
         if r.status_code >= 400:
-            # Client/request errors should not poison the circuit.
             print(f"WEB LENS FAST HTTP {r.status_code} country={country}: {r.text[:180]}")
             return {"country": country, "items": [], "ok": True, "elapsed_ms": elapsed_ms}
         data = r.json()
@@ -9579,18 +9662,18 @@ def _web_serpapi_lens_once(public_url, country, query_hint=""):
         items, seen = [], set()
         _collect_lens_items(data, items, seen)
         for item in items:
-            item["_lens_country"] = (country or "").lower()
-        _web_lens_circuit_note(True)
+            item["_lens_country"] = country
+        _web_lens_circuit_note(country, True)
         print(f"WEB LENS FAST PASS country={country} -> {len(items)} items elapsed={elapsed_ms}ms")
         return {"country": country, "items": items, "ok": True, "elapsed_ms": elapsed_ms}
     except requests.exceptions.Timeout:
         elapsed_ms = int((time.time() - started) * 1000)
-        _web_lens_circuit_note(False)
+        _web_lens_circuit_note(country, False)
         print(f"WEB LENS FAST TIMEOUT country={country} elapsed={elapsed_ms}ms")
         return {"country": country, "items": [], "ok": False, "timeout": True, "elapsed_ms": elapsed_ms}
     except Exception as exc:
         elapsed_ms = int((time.time() - started) * 1000)
-        _web_lens_circuit_note(False)
+        _web_lens_circuit_note(country, False)
         print(f"WEB LENS FAST EXCEPTION country={country} elapsed={elapsed_ms}ms: {exc}")
         return {"country": country, "items": [], "ok": False, "elapsed_ms": elapsed_ms}
 
@@ -9742,8 +9825,11 @@ async def web_api_image_search_stream(request: Request):
                     country_order.append(cc)
 
             lens_tasks = []
-            if public_url and not _web_lens_circuit_is_open():
+            if public_url:
                 for cc in country_order:
+                    if _web_lens_circuit_is_open(cc):
+                        print(f"WEB IMAGE V92 lens skip open-circuit country={cc}")
+                        continue
                     lens_tasks.append(asyncio.create_task(asyncio.to_thread(_web_serpapi_lens_once, public_url, cc, caption)))
 
             # Stream each market the moment its ONE Lens pass returns. Never wait for a slow duplicate pass.
@@ -9800,7 +9886,7 @@ async def web_api_image_search_stream(request: Request):
                     try:
                         rows = await asyncio.wait_for(
                             asyncio.to_thread(_web_fast_market_wave_sync, identity, country, lang, rank),
-                            timeout=max(3.0, WEB_IMAGE_STREAM_SUPPLEMENT_TIMEOUT),
+                            timeout=max(2.5, WEB_IMAGE_STREAM_SUPPLEMENT_TIMEOUT),
                         )
                         return rank, rows or []
                     except asyncio.TimeoutError:
