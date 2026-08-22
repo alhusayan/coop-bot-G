@@ -26,7 +26,7 @@ app.add_middleware(
     allow_headers=["Content-Type", "Accept"],
     max_age=86400,
 )
-BUILD_ID = "v92.0-serpapi-geo-safe-20260823"
+BUILD_ID = "v93.0-single-lens-fast-20260823"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("GLOBAL GEO -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES")
@@ -8852,6 +8852,7 @@ WEB_IMAGE_STREAM_SUPPLEMENT_TIMEOUT = float(os.environ.get("WEB_IMAGE_STREAM_SUP
 WEB_LENS_FAST_MODE = env_bool("WEB_LENS_FAST_MODE", True)
 WEB_LENS_PASS_TIMEOUT_SECONDS = max(3.0, min(8.0, float(os.environ.get("WEB_LENS_PASS_TIMEOUT_SECONDS", "5.0"))))
 WEB_LENS_TOTAL_BUDGET_SECONDS = max(WEB_LENS_PASS_TIMEOUT_SECONDS, min(10.0, float(os.environ.get("WEB_LENS_TOTAL_BUDGET_SECONDS", "6.5"))))
+WEB_LENS_PRIMARY_COUNTRY = str(os.environ.get("WEB_LENS_PRIMARY_COUNTRY", "us") or "us").strip().lower()
 WEB_LENS_INITIAL_PER_MARKET = max(1, min(4, int(os.environ.get("WEB_LENS_INITIAL_PER_MARKET", "2"))))
 WEB_LENS_CIRCUIT_FAILS = max(1, min(4, int(os.environ.get("WEB_LENS_CIRCUIT_FAILS", "2"))))
 WEB_LENS_CIRCUIT_SECONDS = max(10.0, min(180.0, float(os.environ.get("WEB_LENS_CIRCUIT_SECONDS", "45"))))
@@ -9818,50 +9819,38 @@ async def web_api_image_search_stream(request: Request):
         try:
             # v91: publish once; then one Lens request per market. No products+all duplicate passes.
             public_url = publish_image_for_lens(image_b64, mime) if (WEB_LENS_FAST_MODE and ENABLE_GOOGLE_LENS and SERPAPI_API_KEY and PUBLIC_BASE_URL) else ""
-            country_order = []
-            for cc in (country, "us", "cn"):
-                cc = str(cc or "").lower()
-                if cc and cc not in country_order:
-                    country_order.append(cc)
+            # v93: one visual Lens pass only. The US Lens index is the fastest/most complete in our logs.
+            # Once it returns, immediately start market-specific enrichment instead of waiting for KW/CN Lens timeouts.
+            primary_cc = WEB_LENS_PRIMARY_COUNTRY or "us"
+            if primary_cc not in ("us", "kw", "cn"):
+                primary_cc = "us"
+            lens_packet = None
+            if public_url and not _web_lens_circuit_is_open(primary_cc):
+                try:
+                    lens_packet = await asyncio.wait_for(
+                        asyncio.to_thread(_web_serpapi_lens_once, public_url, primary_cc, caption),
+                        timeout=min(WEB_LENS_TOTAL_BUDGET_SECONDS, WEB_LENS_PASS_TIMEOUT_SECONDS + 0.35),
+                    )
+                except asyncio.TimeoutError:
+                    print(f"WEB IMAGE V93 primary lens timeout country={primary_cc}")
+                    lens_packet = None
+                except Exception as exc:
+                    print(f"WEB IMAGE V93 primary lens error country={primary_cc}: {exc}")
+                    lens_packet = None
 
-            lens_tasks = []
-            if public_url:
-                for cc in country_order:
-                    if _web_lens_circuit_is_open(cc):
-                        print(f"WEB IMAGE V92 lens skip open-circuit country={cc}")
-                        continue
-                    lens_tasks.append(asyncio.create_task(asyncio.to_thread(_web_serpapi_lens_once, public_url, cc, caption)))
-
-            # Stream each market the moment its ONE Lens pass returns. Never wait for a slow duplicate pass.
-            pending = set(lens_tasks)
-            deadline = time.time() + WEB_LENS_TOTAL_BUDGET_SECONDS
-            while pending and time.time() < deadline:
-                remaining = max(0.05, deadline - time.time())
-                done, pending = await asyncio.wait(pending, timeout=min(0.20, remaining), return_when=asyncio.FIRST_COMPLETED)
-                if not done:
-                    continue
-                for task in done:
-                    try:
-                        packet = await task
-                    except Exception as exc:
-                        print(f"WEB IMAGE FAST task error: {exc}")
-                        continue
-                    rows = packet.get("items") or []
-                    if rows:
-                        raw_rows.extend(rows)
-                        if not identity:
-                            identity = _web_lens_identity_from_rows(rows, caption)
-                        if identity and not query_sent:
-                            yield _web_stream_event({"event": "query", "query": identity, "market": market, "elapsed_ms": int((time.time()-started)*1000)})
-                            query_sent = True
-                        quick_items = _web_build_lens_items_quick(rows, lang, country)
-                        emitted = await _emit_items(quick_items, "lens_fast")
-                        for item in emitted:
-                            yield _web_stream_event({"event": "result", "phase": "lens_fast", "market": item.get("market") or "other", "item": item, "elapsed_ms": int((time.time()-started)*1000)})
-                            await asyncio.sleep(0.01)
-
-            for task in pending:
-                task.cancel()
+            rows = (lens_packet or {}).get("items") or []
+            if rows:
+                raw_rows.extend(rows)
+                if not identity:
+                    identity = _web_lens_identity_from_rows(rows, caption)
+                if identity and not query_sent:
+                    yield _web_stream_event({"event": "query", "query": identity, "market": market, "elapsed_ms": int((time.time()-started)*1000)})
+                    query_sent = True
+                quick_items = _web_build_lens_items_quick(rows, lang, country)
+                emitted = await _emit_items(quick_items, "lens_fast")
+                for item in emitted:
+                    yield _web_stream_event({"event": "result", "phase": "lens_fast", "market": item.get("market") or "other", "item": item, "elapsed_ms": int((time.time()-started)*1000)})
+                    await asyncio.sleep(0.01)
 
             # If Lens gave no usable identity/results, use Vision only as a bounded fallback.
             if not identity:
@@ -9871,7 +9860,7 @@ async def web_api_image_search_stream(request: Request):
                         timeout=WEB_IMAGE_VISION_FALLBACK_TIMEOUT,
                     )
                 except asyncio.TimeoutError:
-                    print("WEB IMAGE V91 VISION FALLBACK TIMEOUT")
+                    print("WEB IMAGE V93 VISION FALLBACK TIMEOUT")
                     identity = ""
                 if identity and not query_sent:
                     yield _web_stream_event({"event": "query", "query": identity, "market": market, "elapsed_ms": int((time.time()-started)*1000)})
@@ -9890,10 +9879,10 @@ async def web_api_image_search_stream(request: Request):
                         )
                         return rank, rows or []
                     except asyncio.TimeoutError:
-                        print(f"WEB IMAGE V91 supplement timeout rank={rank}")
+                        print(f"WEB IMAGE V93 supplement timeout rank={rank}")
                         return rank, []
                     except Exception as exc:
-                        print(f"WEB IMAGE V91 supplement error rank={rank}: {exc}")
+                        print(f"WEB IMAGE V93 supplement error rank={rank}: {exc}")
                         return rank, []
 
                 tasks = [asyncio.create_task(_one_market(rank)) for rank in weak]
@@ -9929,7 +9918,7 @@ async def web_api_image_search_stream(request: Request):
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            print(f"WEB IMAGE V91 STREAM ERROR: {exc}")
+            print(f"WEB IMAGE V93 STREAM ERROR: {exc}")
             yield _web_stream_event({"event": "error", "error": "image_search_failed", "elapsed_ms": int((time.time()-started)*1000)})
 
     return StreamingResponse(
