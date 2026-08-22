@@ -26,7 +26,7 @@ app.add_middleware(
     allow_headers=["Content-Type", "Accept"],
     max_age=86400,
 )
-BUILD_ID = "v88.0-web-stream-20260822"
+BUILD_ID = "v91.0-lens-first-response-20260823"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("GLOBAL GEO -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES")
@@ -8835,6 +8835,16 @@ WEB_STREAM_FAST_WAVE = env_bool("WEB_STREAM_FAST_WAVE", True)
 WEB_IMAGE_STREAM_SUPPLEMENT = env_bool("WEB_IMAGE_STREAM_SUPPLEMENT", True)
 WEB_IMAGE_STREAM_INITIAL_TIMEOUT = float(os.environ.get("WEB_IMAGE_STREAM_INITIAL_TIMEOUT", "20"))
 WEB_IMAGE_STREAM_SUPPLEMENT_TIMEOUT = float(os.environ.get("WEB_IMAGE_STREAM_SUPPLEMENT_TIMEOUT", "7"))
+# v91 web-image latency: one Lens pass per market, strict per-request deadlines, no duplicate products/all passes.
+WEB_LENS_FAST_MODE = env_bool("WEB_LENS_FAST_MODE", True)
+WEB_LENS_PASS_TIMEOUT_SECONDS = max(3.0, min(8.0, float(os.environ.get("WEB_LENS_PASS_TIMEOUT_SECONDS", "5.0"))))
+WEB_LENS_TOTAL_BUDGET_SECONDS = max(WEB_LENS_PASS_TIMEOUT_SECONDS, min(10.0, float(os.environ.get("WEB_LENS_TOTAL_BUDGET_SECONDS", "6.5"))))
+WEB_LENS_INITIAL_PER_MARKET = max(1, min(4, int(os.environ.get("WEB_LENS_INITIAL_PER_MARKET", "2"))))
+WEB_LENS_CIRCUIT_FAILS = max(1, min(4, int(os.environ.get("WEB_LENS_CIRCUIT_FAILS", "2"))))
+WEB_LENS_CIRCUIT_SECONDS = max(10.0, min(180.0, float(os.environ.get("WEB_LENS_CIRCUIT_SECONDS", "45"))))
+WEB_IMAGE_VISION_FALLBACK_TIMEOUT = max(5.0, min(14.0, float(os.environ.get("WEB_IMAGE_VISION_FALLBACK_TIMEOUT", "8"))))
+WEB_LENS_CIRCUIT = {"failures": 0, "open_until": 0.0}
+WEB_LENS_CIRCUIT_LOCK = threading.Lock()
 WEB_IMAGE_TARGET_LOCAL = max(1, min(LENS_DIRECT_LOCAL_MAX, int(os.environ.get("WEB_IMAGE_TARGET_LOCAL", "3"))))
 WEB_IMAGE_TARGET_US = max(1, min(LENS_DIRECT_US_MAX, int(os.environ.get("WEB_IMAGE_TARGET_US", "2"))))
 WEB_IMAGE_TARGET_CN = max(1, min(LENS_DIRECT_CN_MAX, int(os.environ.get("WEB_IMAGE_TARGET_CN", "2"))))
@@ -9506,6 +9516,158 @@ async def web_api_search_stream(request: Request):
     )
 
 
+
+def _web_lens_circuit_is_open():
+    now = time.time()
+    with WEB_LENS_CIRCUIT_LOCK:
+        return float(WEB_LENS_CIRCUIT.get("open_until") or 0.0) > now
+
+
+def _web_lens_circuit_note(success):
+    now = time.time()
+    with WEB_LENS_CIRCUIT_LOCK:
+        if success:
+            WEB_LENS_CIRCUIT["failures"] = 0
+            WEB_LENS_CIRCUIT["open_until"] = 0.0
+            return
+        failures = int(WEB_LENS_CIRCUIT.get("failures") or 0) + 1
+        WEB_LENS_CIRCUIT["failures"] = failures
+        if failures >= WEB_LENS_CIRCUIT_FAILS:
+            WEB_LENS_CIRCUIT["open_until"] = now + WEB_LENS_CIRCUIT_SECONDS
+            print(f"WEB LENS CIRCUIT OPEN failures={failures} for={WEB_LENS_CIRCUIT_SECONDS:.0f}s")
+
+
+def _web_serpapi_lens_once(public_url, country, query_hint=""):
+    """One bounded Google Lens pass for web streaming. No products/all duplication."""
+    if _web_lens_circuit_is_open():
+        print(f"WEB LENS FAST SKIP circuit-open country={country}")
+        return {"country": country, "items": [], "ok": False, "circuit": True, "elapsed_ms": 0}
+    params = {
+        "engine": "google_lens",
+        "url": public_url,
+        "api_key": SERPAPI_API_KEY,
+        "hl": "en",
+        "safe": "active",
+        "output": "json",
+        "type": "all",
+        "auto_crop": "true",
+    }
+    if country:
+        params["country"] = country
+    if query_hint:
+        params["q"] = str(query_hint)[:120]
+    started = time.time()
+    try:
+        r = requests.get(
+            "https://serpapi.com/search.json",
+            params=params,
+            timeout=(3, WEB_LENS_PASS_TIMEOUT_SECONDS),
+        )
+        elapsed_ms = int((time.time() - started) * 1000)
+        if r.status_code >= 500:
+            _web_lens_circuit_note(False)
+            print(f"WEB LENS FAST HTTP {r.status_code} country={country} elapsed={elapsed_ms}ms")
+            return {"country": country, "items": [], "ok": False, "elapsed_ms": elapsed_ms}
+        if r.status_code >= 400:
+            # Client/request errors should not poison the circuit.
+            print(f"WEB LENS FAST HTTP {r.status_code} country={country}: {r.text[:180]}")
+            return {"country": country, "items": [], "ok": True, "elapsed_ms": elapsed_ms}
+        data = r.json()
+        if data.get("error"):
+            print(f"WEB LENS FAST ERROR country={country}: {data.get('error')}")
+            return {"country": country, "items": [], "ok": True, "elapsed_ms": elapsed_ms}
+        items, seen = [], set()
+        _collect_lens_items(data, items, seen)
+        for item in items:
+            item["_lens_country"] = (country or "").lower()
+        _web_lens_circuit_note(True)
+        print(f"WEB LENS FAST PASS country={country} -> {len(items)} items elapsed={elapsed_ms}ms")
+        return {"country": country, "items": items, "ok": True, "elapsed_ms": elapsed_ms}
+    except requests.exceptions.Timeout:
+        elapsed_ms = int((time.time() - started) * 1000)
+        _web_lens_circuit_note(False)
+        print(f"WEB LENS FAST TIMEOUT country={country} elapsed={elapsed_ms}ms")
+        return {"country": country, "items": [], "ok": False, "timeout": True, "elapsed_ms": elapsed_ms}
+    except Exception as exc:
+        elapsed_ms = int((time.time() - started) * 1000)
+        _web_lens_circuit_note(False)
+        print(f"WEB LENS FAST EXCEPTION country={country} elapsed={elapsed_ms}ms: {exc}")
+        return {"country": country, "items": [], "ok": False, "elapsed_ms": elapsed_ms}
+
+
+def _web_lens_identity_from_rows(rows, caption=""):
+    caption = re.sub(r"\s+", " ", str(caption or "")).strip()
+    if caption:
+        return caption
+    rows = [r for r in (rows or []) if str(r.get("title") or "").strip()]
+    if not rows:
+        return ""
+    rows.sort(key=lambda r: (
+        0 if r.get("exact") else 1,
+        0 if r.get("section") == "visual_matches" else 1,
+        int(r.get("position") or 999),
+    ))
+    return re.sub(r"\s+", " ", str(rows[0].get("title") or "")).strip()[:180]
+
+
+def _web_build_lens_items_quick(rows, lang, country):
+    """Zero-extra-network conversion of raw Lens rows to web cards for first paint."""
+    market = _web_market(country)
+    MARKET_CTX.value = market
+    buckets = {0: [], 1: [], 2: []}
+    seen_urls = set()
+    for m in rows or []:
+        title = re.sub(r"\s+", " ", str(m.get("title") or "")).strip()
+        url = str(m.get("link") or "").strip()
+        if not title or not url.startswith("http"):
+            continue
+        try:
+            host = urllib.parse.urlparse(url).netloc.lower()
+        except Exception:
+            host = ""
+        if not host or "google." in host:
+            continue
+        rank = result_market_rank(m)
+        if rank not in buckets or url in seen_urls:
+            continue
+        seen_urls.add(url)
+        buckets[rank].append(m)
+    for rank in buckets:
+        buckets[rank].sort(key=lambda m: (
+            0 if _lens_has_price(m) else 1,
+            0 if m.get("exact") else 1,
+            0 if m.get("section") == "visual_matches" else 1,
+            int(m.get("position") or 999),
+        ))
+    local_cc = (market.get("country") or DEFAULT_COUNTRY).lower()
+    rank_cc = {0: local_cc, 1: "us", 2: "cn"}
+    out = []
+    for rank in (0, 1, 2):
+        for m in buckets[rank][:WEB_LENS_INITIAL_PER_MARKET]:
+            cc = rank_cc[rank]
+            out.append({
+                "market": _web_market_label(rank),
+                "market_rank": rank,
+                "country": cc,
+                "flag": country_flag_emoji(cc),
+                "store": _ui_plain_store_name(m.get("source") or "", m.get("link") or "") or U(lang, "store"),
+                "title": _compact_ui_title(m.get("title") or ""),
+                "price": _lens_price_text_local(m, rank, lang),
+                "url": (m.get("link") or "").strip(),
+                "image": m.get("thumbnail") or m.get("image") or "",
+            })
+    return out
+
+
+def _web_identify_image_fast_sync(image_b64, mime, lang, market):
+    MARKET_CTX.value = market
+    try:
+        return identify_product_with_retry(image_b64, mime, lang) or ""
+    except Exception as exc:
+        print(f"WEB IMAGE VISION FALLBACK ERR: {exc}")
+        return ""
+
+
 @app.post("/api/search/image/stream")
 async def web_api_image_search_stream(request: Request):
     if not WEB_API_ENABLED or not WEB_STREAM_ENABLED:
@@ -9531,54 +9693,105 @@ async def web_api_image_search_stream(request: Request):
         return Response(content=json.dumps({"ok": False, "error": "invalid_image"}), media_type="application/json", status_code=400)
     if not image_bytes or len(image_bytes) > WEB_API_MAX_IMAGE_BYTES:
         return Response(content=json.dumps({"ok": False, "error": "image_too_large"}), media_type="application/json", status_code=413)
+
     image_b64 = base64.b64encode(image_bytes).decode("ascii")
     lang = _web_language(payload.get("lang"))
-    country = str(payload.get("country") or DEFAULT_COUNTRY).strip()
-    caption = str(payload.get("caption") or "").strip()
+    country = str(payload.get("country") or DEFAULT_COUNTRY).strip().lower() or DEFAULT_COUNTRY
+    caption = re.sub(r"\s+", " ", str(payload.get("caption") or "")).strip()[:WEB_API_MAX_QUERY_CHARS]
 
     async def _generator():
         started = time.time()
-        yield _web_stream_event({"event": "start", "ok": True, "kind": "image"})
+        market = _web_market(country)
+        MARKET_CTX.value = market
+        yield _web_stream_event({"event": "start", "ok": True, "kind": "image", "build": BUILD_ID})
         yield _web_stream_event({"event": "status", "stage": "identify", "elapsed_ms": 0})
-        try:
-            # Phase 1: never wait forever. Return the normal fast direct-Lens pool first.
-            try:
-                result = await asyncio.wait_for(
-                    asyncio.to_thread(_web_search_image_sync, image_b64, mime, caption, country, lang),
-                    timeout=max(8.0, WEB_IMAGE_STREAM_INITIAL_TIMEOUT),
-                )
-            except asyncio.TimeoutError:
-                print("WEB IMAGE STREAM INITIAL TIMEOUT")
-                yield _web_stream_event({"event": "error", "error": "image_search_timeout", "elapsed_ms": int((time.time()-started)*1000)})
-                return
 
-            identity = str(result.get("query") or caption or "").strip()
-            market_info = result.get("market") or _web_market(country)
-            yield _web_stream_event({"event": "query", "query": identity, "market": market_info})
+        sent = set()
+        counts = {0: 0, 1: 0, 2: 0}
+        raw_rows = []
+        identity = caption
+        query_sent = False
 
-            sent = set()
-            counts = {0: 0, 1: 0, 2: 0}
+        def _sig(item):
+            url = str((item or {}).get("url") or "").strip().lower()
+            if url:
+                return "u:" + url
+            return "s:" + str((item or {}).get("store") or "").strip().lower() + "|" + normalize_name((item or {}).get("title") or "")
 
-            def _sig(item):
-                url = str((item or {}).get("url") or "").strip().lower()
-                if url:
-                    return "u:" + url
-                return "s:" + str((item or {}).get("store") or "").strip().lower() + "|" + normalize_name((item or {}).get("title") or "")
-
-            # Stream the initial result pool immediately, one by one.
-            for item in result.get("results") or []:
+        async def _emit_items(items, phase):
+            nonlocal query_sent, identity
+            emitted = []
+            for item in items or []:
                 sig = _sig(item)
-                if sig in sent:
+                if not sig or sig in sent:
                     continue
                 sent.add(sig)
                 rank = item.get("market_rank")
                 if rank in counts:
                     counts[rank] += 1
-                yield _web_stream_event({"event": "result", "phase": "image_primary", "market": item.get("market") or "other", "item": item, "elapsed_ms": int((time.time()-started)*1000)})
-                await asyncio.sleep(0.04)
+                emitted.append(item)
+            return emitted
 
-            # Phase 2: fill weak markets in the background. Slow markets no longer block
-            # the first visible cards. Each market is emitted as soon as it finishes.
+        try:
+            # v91: publish once; then one Lens request per market. No products+all duplicate passes.
+            public_url = publish_image_for_lens(image_b64, mime) if (WEB_LENS_FAST_MODE and ENABLE_GOOGLE_LENS and SERPAPI_API_KEY and PUBLIC_BASE_URL) else ""
+            country_order = []
+            for cc in (country, "us", "cn"):
+                cc = str(cc or "").lower()
+                if cc and cc not in country_order:
+                    country_order.append(cc)
+
+            lens_tasks = []
+            if public_url and not _web_lens_circuit_is_open():
+                for cc in country_order:
+                    lens_tasks.append(asyncio.create_task(asyncio.to_thread(_web_serpapi_lens_once, public_url, cc, caption)))
+
+            # Stream each market the moment its ONE Lens pass returns. Never wait for a slow duplicate pass.
+            pending = set(lens_tasks)
+            deadline = time.time() + WEB_LENS_TOTAL_BUDGET_SECONDS
+            while pending and time.time() < deadline:
+                remaining = max(0.05, deadline - time.time())
+                done, pending = await asyncio.wait(pending, timeout=min(0.20, remaining), return_when=asyncio.FIRST_COMPLETED)
+                if not done:
+                    continue
+                for task in done:
+                    try:
+                        packet = await task
+                    except Exception as exc:
+                        print(f"WEB IMAGE FAST task error: {exc}")
+                        continue
+                    rows = packet.get("items") or []
+                    if rows:
+                        raw_rows.extend(rows)
+                        if not identity:
+                            identity = _web_lens_identity_from_rows(rows, caption)
+                        if identity and not query_sent:
+                            yield _web_stream_event({"event": "query", "query": identity, "market": market, "elapsed_ms": int((time.time()-started)*1000)})
+                            query_sent = True
+                        quick_items = _web_build_lens_items_quick(rows, lang, country)
+                        emitted = await _emit_items(quick_items, "lens_fast")
+                        for item in emitted:
+                            yield _web_stream_event({"event": "result", "phase": "lens_fast", "market": item.get("market") or "other", "item": item, "elapsed_ms": int((time.time()-started)*1000)})
+                            await asyncio.sleep(0.01)
+
+            for task in pending:
+                task.cancel()
+
+            # If Lens gave no usable identity/results, use Vision only as a bounded fallback.
+            if not identity:
+                try:
+                    identity = await asyncio.wait_for(
+                        asyncio.to_thread(_web_identify_image_fast_sync, image_b64, mime, lang, market),
+                        timeout=WEB_IMAGE_VISION_FALLBACK_TIMEOUT,
+                    )
+                except asyncio.TimeoutError:
+                    print("WEB IMAGE V91 VISION FALLBACK TIMEOUT")
+                    identity = ""
+                if identity and not query_sent:
+                    yield _web_stream_event({"event": "query", "query": identity, "market": market, "elapsed_ms": int((time.time()-started)*1000)})
+                    query_sent = True
+
+            # Enrich only weak/missing buckets, in parallel, with strict independent timeouts.
             if WEB_IMAGE_STREAM_SUPPLEMENT and identity:
                 target = {0: WEB_IMAGE_TARGET_LOCAL, 1: WEB_IMAGE_TARGET_US, 2: WEB_IMAGE_TARGET_CN}
                 weak = [rank for rank in (0, 1, 2) if counts[rank] < target[rank]]
@@ -9591,35 +9804,46 @@ async def web_api_image_search_stream(request: Request):
                         )
                         return rank, rows or []
                     except asyncio.TimeoutError:
-                        print(f"WEB IMAGE STREAM supplement timeout rank={rank}")
+                        print(f"WEB IMAGE V91 supplement timeout rank={rank}")
                         return rank, []
                     except Exception as exc:
-                        print(f"WEB IMAGE STREAM supplement error rank={rank}: {exc}")
+                        print(f"WEB IMAGE V91 supplement error rank={rank}: {exc}")
                         return rank, []
 
                 tasks = [asyncio.create_task(_one_market(rank)) for rank in weak]
                 for finished in asyncio.as_completed(tasks):
                     rank, rows = await finished
                     need = max(0, target[rank] - counts[rank])
+                    emitted = []
                     for item in rows:
                         if need <= 0:
                             break
                         sig = _sig(item)
-                        if sig in sent:
+                        if not sig or sig in sent:
                             continue
                         sent.add(sig)
                         counts[rank] += 1
                         need -= 1
-                        yield _web_stream_event({"event": "result", "phase": "image_supplement", "market": item.get("market") or "other", "item": item, "elapsed_ms": int((time.time()-started)*1000)})
-                        await asyncio.sleep(0.04)
+                        emitted.append(item)
+                    for item in emitted:
+                        yield _web_stream_event({"event": "result", "phase": "market_fill", "market": item.get("market") or "other", "item": item, "elapsed_ms": int((time.time()-started)*1000)})
+                        await asyncio.sleep(0.01)
                     market_name = {0: "local", 1: "us", 2: "china"}.get(rank, "other")
                     yield _web_stream_event({"event": "market_fast_done", "market": market_name, "count": counts.get(rank, 0), "elapsed_ms": int((time.time()-started)*1000)})
+
+            # Markets that did not need supplement still need a done signal for the UI.
+            for rank, market_name in ((0, "local"), (1, "us"), (2, "china")):
+                yield _web_stream_event({"event": "market_fast_done", "market": market_name, "count": counts.get(rank, 0), "elapsed_ms": int((time.time()-started)*1000)})
+
+            if not sent and not identity:
+                yield _web_stream_event({"event": "error", "error": "image_search_unavailable", "elapsed_ms": int((time.time()-started)*1000)})
+                return
 
             yield _web_stream_event({"event": "done", "count": len(sent), "elapsed_ms": int((time.time()-started)*1000)})
         except asyncio.CancelledError:
             raise
-        except Exception as e:
-            print(f"WEB IMAGE STREAM ERROR: {e}")
+        except Exception as exc:
+            print(f"WEB IMAGE V91 STREAM ERROR: {exc}")
             yield _web_stream_event({"event": "error", "error": "image_search_failed", "elapsed_ms": int((time.time()-started)*1000)})
 
     return StreamingResponse(
