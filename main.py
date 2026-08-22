@@ -3,6 +3,7 @@ import os, re, time, base64, requests, json, asyncio, urllib.parse, hashlib, sql
 from collections import deque, defaultdict
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from fastapi import FastAPI, Request, Response, BackgroundTasks
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from bs4 import BeautifulSoup
 
@@ -25,7 +26,7 @@ app.add_middleware(
     allow_headers=["Content-Type", "Accept"],
     max_age=86400,
 )
-BUILD_ID = "v86.0-web-api-20260822"
+BUILD_ID = "v88.0-web-stream-20260822"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("GLOBAL GEO -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES")
@@ -8827,6 +8828,9 @@ WEB_API_ENABLED = env_bool("WEB_API_ENABLED", True)
 WEB_API_MAX_QUERY_CHARS = max(40, min(500, int(os.environ.get("WEB_API_MAX_QUERY_CHARS", "220"))))
 WEB_API_MAX_IMAGE_BYTES = max(512000, min(12 * 1024 * 1024, int(os.environ.get("WEB_API_MAX_IMAGE_BYTES", str(6 * 1024 * 1024)))))
 WEB_API_RATE_PER_MINUTE = max(5, min(120, int(os.environ.get("WEB_API_RATE_PER_MINUTE", "30"))))
+WEB_STREAM_ENABLED = env_bool("WEB_STREAM_ENABLED", True)
+WEB_STREAM_FAST_WAVE = env_bool("WEB_STREAM_FAST_WAVE", True)
+WEB_STREAM_MARKET_TIMEOUT = max(4, min(20, int(os.environ.get("WEB_STREAM_MARKET_TIMEOUT_SECONDS", "8"))))
 WEB_RATE_BUCKETS = defaultdict(deque)
 WEB_RATE_LOCK = threading.Lock()
 
@@ -9136,6 +9140,110 @@ def _web_fallback_product_items(txt, urls, lang, query):
     return out
 
 
+
+def _web_stream_event(payload):
+    return (json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
+
+
+def _web_market_candidates_to_items(candidates, rank, lang, query):
+    """Convert one market's SerpApi shopping wave to the same JSON card contract as /api/search."""
+    seq = []
+    for item in list(candidates or []):
+        if result_market_rank(item) != rank:
+            continue
+        url = str(item.get("link") or "").strip()
+        if not url.startswith(("http://", "https://")):
+            continue
+        seq.append(item)
+
+    # Keep the same cheap relevance and stock gates; do not add another AI call here.
+    if seq:
+        offer_rows = [{"line": (x.get("title") or ""), "name": (x.get("source") or "")} for x in seq]
+        tmp_urls = {(x.get("source") or ""): (x.get("link") or "") for x in seq}
+        try:
+            kept_rows = filter_relevant_offers(query, offer_rows, tmp_urls, use_ai=False, mode="exact")
+            kept = {(r.get("name") or "", r.get("line") or "") for r in kept_rows}
+            seq = [x for x in seq if ((x.get("source") or "", x.get("title") or "") in kept)]
+        except Exception:
+            pass
+    try:
+        seq = _filter_confirmed_oos(seq, f"WEB-STREAM-{rank}")
+    except Exception:
+        pass
+
+    if rank == 1:
+        seq.sort(key=lambda x: (_us_store_priority(x.get("source"), x.get("link")), int(x.get("position") or 999)))
+    elif rank == 2:
+        seq.sort(key=lambda x: (_china_store_priority(x.get("source"), x.get("link")), int(x.get("position") or 999)))
+    else:
+        seq.sort(key=lambda x: int(x.get("position") or 999))
+
+    cap = {0: LENS_DIRECT_LOCAL_MAX, 1: LENS_DIRECT_US_MAX, 2: LENS_DIRECT_CN_MAX}.get(rank, 4)
+    local_cc = (current_market().get("country") or DEFAULT_COUNTRY).lower()
+    cc = local_cc if rank == 0 else ("us" if rank == 1 else "cn")
+    out, seen_urls, merchant_counts = [], set(), defaultdict(int)
+    for item in seq:
+        url = str(item.get("link") or "").strip()
+        try:
+            host = urllib.parse.urlparse(url).netloc.lower().split(":")[0]
+            host = host[4:] if host.startswith("www.") else host
+        except Exception:
+            host = ""
+        merchant = host or normalize_name(item.get("source") or "")
+        if not merchant or not url or url in seen_urls or merchant_counts[merchant] >= RESULTS_PER_STORE_MAX:
+            continue
+        seen_urls.add(url)
+        merchant_counts[merchant] += 1
+        raw_price = str(item.get("price") or "").strip()
+        shown_price = _text_price_local(raw_price, rank, lang) if raw_price else ""
+        out.append({
+            "market": _web_market_label(rank),
+            "market_rank": rank,
+            "country": cc,
+            "flag": country_flag_emoji(cc),
+            "store": _ui_plain_store_name(item.get("source") or "", url) or U(lang, "store"),
+            "title": _compact_ui_title(item.get("title") or query),
+            "price": shown_price,
+            "url": url,
+            "image": item.get("thumbnail") or item.get("image") or "",
+        })
+        if len(out) >= cap:
+            break
+    return out
+
+
+def _web_fast_market_wave_sync(query, country, lang, rank):
+    market = _web_market(country)
+    MARKET_CTX.value = market
+    cap = {0: LENS_DIRECT_LOCAL_MAX, 1: LENS_DIRECT_US_MAX, 2: LENS_DIRECT_CN_MAX}.get(rank, 4)
+    candidates = _market_presence_fallback(query, rank, limit=max(cap + 2, cap))
+    return _web_market_candidates_to_items(candidates, rank, lang, query)
+
+
+def _web_prepare_stream_query_sync(query, country, lang, selected_option="", original_query="", force_specific=False):
+    market = _web_market(country)
+    MARKET_CTX.value = market
+    q = re.sub(r"\s+", " ", str(query or "")).strip()[:WEB_API_MAX_QUERY_CHARS]
+    if selected_option:
+        q = ai_recommendation_pick_search_query(original_query or q, selected_option, lang)
+        force_specific = True
+    if not q:
+        return {"ok": False, "error": "empty_query", "market": market, "query": q}
+    try:
+        parsed = parse_user_intent(q, lang)
+        products = [p for p in (parsed.get("products") or []) if str(p).strip()]
+        if len(products) == 1:
+            q = products[0]
+    except Exception:
+        pass
+    rtype = "SPECIFIC"
+    if not force_specific:
+        try:
+            rtype = classify_request_type(q)
+        except Exception:
+            rtype = "SPECIFIC"
+    return {"ok": True, "query": q, "market": market, "rtype": rtype, "force_specific": force_specific}
+
 def _web_search_text_sync(query, country, lang, selected_option="", original_query="", force_specific=False):
     market = _web_market(country)
     MARKET_CTX.value = market
@@ -9267,6 +9375,181 @@ def _web_search_image_sync(image_b64, mime, caption, country, lang):
 @app.get("/api/health")
 async def web_api_health():
     return {"ok": True, "web_api": WEB_API_ENABLED, "build": BUILD_ID, "lens": bool(ENABLE_GOOGLE_LENS and SERPAPI_API_KEY)}
+
+
+
+@app.post("/api/search/stream")
+async def web_api_search_stream(request: Request):
+    if not WEB_API_ENABLED or not WEB_STREAM_ENABLED:
+        return Response(content=json.dumps({"ok": False, "error": "web_stream_disabled"}), media_type="application/json", status_code=503)
+    if not _web_rate_allowed(request):
+        return Response(content=json.dumps({"ok": False, "error": "rate_limit"}), media_type="application/json", status_code=429)
+    try:
+        payload = await request.json()
+    except Exception:
+        return Response(content=json.dumps({"ok": False, "error": "invalid_json"}), media_type="application/json", status_code=400)
+
+    query = str(payload.get("query") or "").strip()
+    if not query and not payload.get("selected_option"):
+        return Response(content=json.dumps({"ok": False, "error": "empty_query"}), media_type="application/json", status_code=400)
+    lang = _web_language(payload.get("lang"))
+    country = str(payload.get("country") or DEFAULT_COUNTRY).strip()
+    selected_option = str(payload.get("selected_option") or "").strip()
+    original_query = str(payload.get("original_query") or "").strip()
+    force_specific = bool(payload.get("force_specific"))
+
+    async def _generator():
+        started = time.time()
+        yield _web_stream_event({"event": "start", "ok": True, "elapsed_ms": 0})
+        try:
+            prep = await asyncio.to_thread(
+                _web_prepare_stream_query_sync, query, country, lang, selected_option, original_query, force_specific
+            )
+            if not prep.get("ok"):
+                yield _web_stream_event({"event": "error", "error": prep.get("error") or "bad_query"})
+                return
+            q = prep["query"]
+            market = prep["market"]
+            rtype = prep.get("rtype") or "SPECIFIC"
+            yield _web_stream_event({"event": "query", "query": q, "market": market})
+
+            if rtype == "GENERIC" and not force_specific:
+                result = await asyncio.to_thread(_web_search_text_sync, q, country, lang, "", "", False)
+                yield _web_stream_event({"event": "recommendations", "data": result, "elapsed_ms": int((time.time()-started)*1000)})
+                yield _web_stream_event({"event": "done", "elapsed_ms": int((time.time()-started)*1000)})
+                return
+            if rtype == "SERVICE":
+                yield _web_stream_event({"event": "error", "error": "service_search_not_enabled_on_web_yet"})
+                return
+            if rtype == "NONE":
+                yield _web_stream_event({"event": "error", "error": "not_a_product_query"})
+                return
+
+            sent = set()
+            fast_tasks = []
+            if WEB_STREAM_FAST_WAVE and SERPAPI_API_KEY:
+                for rank in (0, 1, 2):
+                    async def _run_market(r=rank):
+                        try:
+                            items = await asyncio.wait_for(
+                                asyncio.to_thread(_web_fast_market_wave_sync, q, country, lang, r),
+                                timeout=WEB_STREAM_MARKET_TIMEOUT,
+                            )
+                            return r, items
+                        except Exception as e:
+                            print(f"WEB STREAM FAST MARKET ERR rank={r}: {e}")
+                            return r, []
+                    fast_tasks.append(asyncio.create_task(_run_market()))
+
+            final_task = asyncio.create_task(asyncio.to_thread(
+                _web_search_text_sync, q, country, lang, "", "", True
+            ))
+
+            # Emit fast market waves as each market finishes.
+            pending_fast = set(fast_tasks)
+            while pending_fast:
+                done, pending_fast = await asyncio.wait(pending_fast, timeout=0.15, return_when=asyncio.FIRST_COMPLETED)
+                for task in done:
+                    rank, items = await task
+                    market_name = _web_market_label(rank)
+                    for item in items or []:
+                        key = str(item.get("url") or "").strip() or (market_name + "|" + str(item.get("store") or "") + "|" + str(item.get("title") or ""))
+                        if key in sent:
+                            continue
+                        sent.add(key)
+                        yield _web_stream_event({"event": "result", "phase": "fast", "market": market_name, "item": item, "elapsed_ms": int((time.time()-started)*1000)})
+                        await asyncio.sleep(0.01)
+                    yield _web_stream_event({"event": "market_fast_done", "market": market_name, "count": len(items or []), "elapsed_ms": int((time.time()-started)*1000)})
+                if final_task.done():
+                    break
+
+            # Preserve the existing full engine as the authoritative enrichment/final pass.
+            final = await final_task
+            if final.get("type") == "recommendations":
+                yield _web_stream_event({"event": "recommendations", "data": final, "elapsed_ms": int((time.time()-started)*1000)})
+            else:
+                final_results = final.get("results") or []
+                for item in final_results:
+                    market_name = str(item.get("market") or "other")
+                    key = str(item.get("url") or "").strip() or (market_name + "|" + str(item.get("store") or "") + "|" + str(item.get("title") or ""))
+                    if key in sent:
+                        yield _web_stream_event({"event": "upsert", "phase": "final", "market": market_name, "item": item, "elapsed_ms": int((time.time()-started)*1000)})
+                    else:
+                        sent.add(key)
+                        yield _web_stream_event({"event": "result", "phase": "final", "market": market_name, "item": item, "elapsed_ms": int((time.time()-started)*1000)})
+                    await asyncio.sleep(0.01)
+            for task in pending_fast:
+                task.cancel()
+            yield _web_stream_event({"event": "done", "count": len(sent), "elapsed_ms": int((time.time()-started)*1000)})
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            print(f"WEB STREAM ERROR: {e}")
+            yield _web_stream_event({"event": "error", "error": "search_failed", "elapsed_ms": int((time.time()-started)*1000)})
+
+    return StreamingResponse(
+        _generator(),
+        media_type="application/x-ndjson",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
+
+
+@app.post("/api/search/image/stream")
+async def web_api_image_search_stream(request: Request):
+    if not WEB_API_ENABLED or not WEB_STREAM_ENABLED:
+        return Response(content=json.dumps({"ok": False, "error": "web_stream_disabled"}), media_type="application/json", status_code=503)
+    if not _web_rate_allowed(request):
+        return Response(content=json.dumps({"ok": False, "error": "rate_limit"}), media_type="application/json", status_code=429)
+    try:
+        payload = await request.json()
+    except Exception:
+        return Response(content=json.dumps({"ok": False, "error": "invalid_json"}), media_type="application/json", status_code=400)
+
+    raw = str(payload.get("image_base64") or "").strip()
+    if not raw:
+        return Response(content=json.dumps({"ok": False, "error": "missing_image"}), media_type="application/json", status_code=400)
+    mime = str(payload.get("mime_type") or "image/jpeg").strip().lower()
+    if mime not in ("image/jpeg", "image/png", "image/webp"):
+        return Response(content=json.dumps({"ok": False, "error": "unsupported_image_type"}), media_type="application/json", status_code=400)
+    if "," in raw and raw.lower().startswith("data:image/"):
+        raw = raw.split(",", 1)[1]
+    try:
+        image_bytes = base64.b64decode(raw, validate=True)
+    except Exception:
+        return Response(content=json.dumps({"ok": False, "error": "invalid_image"}), media_type="application/json", status_code=400)
+    if not image_bytes or len(image_bytes) > WEB_API_MAX_IMAGE_BYTES:
+        return Response(content=json.dumps({"ok": False, "error": "image_too_large"}), media_type="application/json", status_code=413)
+    image_b64 = base64.b64encode(image_bytes).decode("ascii")
+    lang = _web_language(payload.get("lang"))
+    country = str(payload.get("country") or DEFAULT_COUNTRY).strip()
+    caption = str(payload.get("caption") or "").strip()
+
+    async def _generator():
+        started = time.time()
+        yield _web_stream_event({"event": "start", "ok": True, "kind": "image"})
+        yield _web_stream_event({"event": "status", "stage": "identify", "elapsed_ms": 0})
+        try:
+            result = await asyncio.to_thread(_web_search_image_sync, image_b64, mime, caption, country, lang)
+            yield _web_stream_event({"event": "query", "query": result.get("query") or caption, "market": result.get("market")})
+            for item in result.get("results") or []:
+                yield _web_stream_event({"event": "result", "phase": "image", "market": item.get("market") or "other", "item": item, "elapsed_ms": int((time.time()-started)*1000)})
+                await asyncio.sleep(0.01)
+            yield _web_stream_event({"event": "done", "count": len(result.get("results") or []), "elapsed_ms": int((time.time()-started)*1000)})
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            print(f"WEB IMAGE STREAM ERROR: {e}")
+            yield _web_stream_event({"event": "error", "error": "image_search_failed", "elapsed_ms": int((time.time()-started)*1000)})
+
+    return StreamingResponse(
+        _generator(),
+        media_type="application/x-ndjson",
+        headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no", "Connection": "keep-alive"},
+    )
 
 
 @app.post("/api/search")
