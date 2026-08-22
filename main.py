@@ -26,7 +26,7 @@ app.add_middleware(
     allow_headers=["Content-Type", "Accept"],
     max_age=86400,
 )
-BUILD_ID = "v93.0-single-lens-fast-20260823"
+BUILD_ID = "v94.0-local-priority-nonblocking-20260823"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("GLOBAL GEO -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES")
@@ -8848,6 +8848,8 @@ WEB_STREAM_FAST_WAVE = env_bool("WEB_STREAM_FAST_WAVE", True)
 WEB_IMAGE_STREAM_SUPPLEMENT = env_bool("WEB_IMAGE_STREAM_SUPPLEMENT", True)
 WEB_IMAGE_STREAM_INITIAL_TIMEOUT = float(os.environ.get("WEB_IMAGE_STREAM_INITIAL_TIMEOUT", "20"))
 WEB_IMAGE_STREAM_SUPPLEMENT_TIMEOUT = float(os.environ.get("WEB_IMAGE_STREAM_SUPPLEMENT_TIMEOUT", "7"))
+WEB_LOCAL_SUPPLEMENT_TIMEOUT = max(2.8, min(5.0, float(os.environ.get("WEB_LOCAL_SUPPLEMENT_TIMEOUT", "3.8"))))
+WEB_FOREIGN_SUPPLEMENT_TIMEOUT = max(2.2, min(4.0, float(os.environ.get("WEB_FOREIGN_SUPPLEMENT_TIMEOUT", "3.0"))))
 # v91 web-image latency: one Lens pass per market, strict per-request deadlines, no duplicate products/all passes.
 WEB_LENS_FAST_MODE = env_bool("WEB_LENS_FAST_MODE", True)
 WEB_LENS_PASS_TIMEOUT_SECONDS = max(3.0, min(8.0, float(os.environ.get("WEB_LENS_PASS_TIMEOUT_SECONDS", "5.0"))))
@@ -9832,10 +9834,10 @@ async def web_api_image_search_stream(request: Request):
                         timeout=min(WEB_LENS_TOTAL_BUDGET_SECONDS, WEB_LENS_PASS_TIMEOUT_SECONDS + 0.35),
                     )
                 except asyncio.TimeoutError:
-                    print(f"WEB IMAGE V93 primary lens timeout country={primary_cc}")
+                    print(f"WEB IMAGE V94 primary lens timeout country={primary_cc}")
                     lens_packet = None
                 except Exception as exc:
-                    print(f"WEB IMAGE V93 primary lens error country={primary_cc}: {exc}")
+                    print(f"WEB IMAGE V94 primary lens error country={primary_cc}: {exc}")
                     lens_packet = None
 
             rows = (lens_packet or {}).get("items") or []
@@ -9860,29 +9862,32 @@ async def web_api_image_search_stream(request: Request):
                         timeout=WEB_IMAGE_VISION_FALLBACK_TIMEOUT,
                     )
                 except asyncio.TimeoutError:
-                    print("WEB IMAGE V93 VISION FALLBACK TIMEOUT")
+                    print("WEB IMAGE V94 VISION FALLBACK TIMEOUT")
                     identity = ""
                 if identity and not query_sent:
                     yield _web_stream_event({"event": "query", "query": identity, "market": market, "elapsed_ms": int((time.time()-started)*1000)})
                     query_sent = True
 
-            # Enrich only weak/missing buckets, in parallel, with strict independent timeouts.
+            # Enrich weak/missing buckets in parallel. Local is IMPORTANT but non-blocking:
+            # US/China may stream first, while local gets a slightly longer bounded window.
+            # This preserves speed without allowing local discovery to lag far behind.
             if WEB_IMAGE_STREAM_SUPPLEMENT and identity:
                 target = {0: WEB_IMAGE_TARGET_LOCAL, 1: WEB_IMAGE_TARGET_US, 2: WEB_IMAGE_TARGET_CN}
                 weak = [rank for rank in (0, 1, 2) if counts[rank] < target[rank]]
 
                 async def _one_market(rank):
                     try:
+                        market_timeout = WEB_LOCAL_SUPPLEMENT_TIMEOUT if rank == 0 else WEB_FOREIGN_SUPPLEMENT_TIMEOUT
                         rows = await asyncio.wait_for(
                             asyncio.to_thread(_web_fast_market_wave_sync, identity, country, lang, rank),
-                            timeout=max(2.5, WEB_IMAGE_STREAM_SUPPLEMENT_TIMEOUT),
+                            timeout=market_timeout,
                         )
                         return rank, rows or []
                     except asyncio.TimeoutError:
-                        print(f"WEB IMAGE V93 supplement timeout rank={rank}")
+                        print(f"WEB IMAGE V94 supplement timeout rank={rank}")
                         return rank, []
                     except Exception as exc:
-                        print(f"WEB IMAGE V93 supplement error rank={rank}: {exc}")
+                        print(f"WEB IMAGE V94 supplement error rank={rank}: {exc}")
                         return rank, []
 
                 tasks = [asyncio.create_task(_one_market(rank)) for rank in weak]
