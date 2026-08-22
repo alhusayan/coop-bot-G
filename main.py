@@ -26,7 +26,7 @@ app.add_middleware(
     allow_headers=["Content-Type", "Accept"],
     max_age=86400,
 )
-BUILD_ID = "v89.0-web-image-parity-20260822"
+BUILD_ID = "v88.0-web-stream-20260822"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("GLOBAL GEO -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES")
@@ -8829,11 +8829,15 @@ WEB_API_MAX_QUERY_CHARS = max(40, min(500, int(os.environ.get("WEB_API_MAX_QUERY
 WEB_API_MAX_IMAGE_BYTES = max(512000, min(12 * 1024 * 1024, int(os.environ.get("WEB_API_MAX_IMAGE_BYTES", str(6 * 1024 * 1024)))))
 WEB_API_RATE_PER_MINUTE = max(5, min(120, int(os.environ.get("WEB_API_RATE_PER_MINUTE", "30"))))
 WEB_STREAM_ENABLED = env_bool("WEB_STREAM_ENABLED", True)
-WEB_IMAGE_SUPPLEMENT_WEAK_MARKETS = env_bool("WEB_IMAGE_SUPPLEMENT_WEAK_MARKETS", True)
+WEB_STREAM_FAST_WAVE = env_bool("WEB_STREAM_FAST_WAVE", True)
+# v90: image enrichment happens AFTER initial Lens results are streamed.
+# This keeps the UI responsive even if a weak market search is slow.
+WEB_IMAGE_STREAM_SUPPLEMENT = env_bool("WEB_IMAGE_STREAM_SUPPLEMENT", True)
+WEB_IMAGE_STREAM_INITIAL_TIMEOUT = float(os.environ.get("WEB_IMAGE_STREAM_INITIAL_TIMEOUT", "20"))
+WEB_IMAGE_STREAM_SUPPLEMENT_TIMEOUT = float(os.environ.get("WEB_IMAGE_STREAM_SUPPLEMENT_TIMEOUT", "7"))
 WEB_IMAGE_TARGET_LOCAL = max(1, min(LENS_DIRECT_LOCAL_MAX, int(os.environ.get("WEB_IMAGE_TARGET_LOCAL", "3"))))
 WEB_IMAGE_TARGET_US = max(1, min(LENS_DIRECT_US_MAX, int(os.environ.get("WEB_IMAGE_TARGET_US", "2"))))
 WEB_IMAGE_TARGET_CN = max(1, min(LENS_DIRECT_CN_MAX, int(os.environ.get("WEB_IMAGE_TARGET_CN", "2"))))
-WEB_STREAM_FAST_WAVE = env_bool("WEB_STREAM_FAST_WAVE", True)
 WEB_STREAM_MARKET_TIMEOUT = max(4, min(20, int(os.environ.get("WEB_STREAM_MARKET_TIMEOUT_SECONDS", "8"))))
 WEB_RATE_BUCKETS = defaultdict(deque)
 WEB_RATE_LOCK = threading.Lock()
@@ -9308,66 +9312,8 @@ def _web_search_image_sync(image_b64, mime, caption, country, lang):
         if lens_direct.get("matches"):
             items = _web_build_lens_items(lens_direct, lang, caption)
             if items:
-                identity = (lens_direct.get("visual_identity") or lens_direct.get("relevance_target") or lens_direct.get("query") or caption or "").strip()
-
-                # v89: Direct Lens can be excellent but uneven by market.  Do not stop the
-                # web search merely because *some* Lens cards exist.  WhatsApp often has a
-                # richer pool after its market/rescue layers, so the website now fills weak
-                # LOCAL / US / CHINA buckets before returning while preserving Lens first.
-                if WEB_IMAGE_SUPPLEMENT_WEAK_MARKETS and identity:
-                    target = {0: WEB_IMAGE_TARGET_LOCAL, 1: WEB_IMAGE_TARGET_US, 2: WEB_IMAGE_TARGET_CN}
-                    counts = {0: 0, 1: 0, 2: 0}
-                    for row in items:
-                        r = row.get("market_rank")
-                        if r in counts:
-                            counts[r] += 1
-
-                    weak = [r for r in (0, 1, 2) if counts[r] < target[r]]
-                    if weak:
-                        print(f"WEB IMAGE v89 weak markets before supplement counts={counts} target={target} identity={identity[:90]!r}")
-                        market_snapshot = dict(market)
-                        extra_by_rank = {}
-
-                        def _supp(rank):
-                            MARKET_CTX.value = market_snapshot
-                            try:
-                                return rank, _web_fast_market_wave_sync(identity, country, lang, rank)
-                            except Exception as e:
-                                print(f"WEB IMAGE SUPPLEMENT ERR rank={rank}: {e}")
-                                return rank, []
-
-                        with ThreadPoolExecutor(max_workers=max(1, len(weak))) as ex:
-                            futs = [ex.submit(_supp, r) for r in weak]
-                            for fut in futs:
-                                try:
-                                    rank, rows = fut.result(timeout=SERPAPI_TIMEOUT_SECONDS + 5)
-                                    extra_by_rank[rank] = rows or []
-                                except Exception as e:
-                                    print(f"WEB IMAGE SUPPLEMENT FUTURE ERR: {e}")
-
-                        seen_urls = {str(x.get("url") or "").strip() for x in items if str(x.get("url") or "").strip()}
-                        seen_sig = {(str(x.get("store") or "").strip().lower(), normalize_name(x.get("title") or "")) for x in items}
-                        for rank in (0, 1, 2):
-                            need = max(0, target[rank] - counts[rank])
-                            if need <= 0:
-                                continue
-                            for row in extra_by_rank.get(rank, []):
-                                url = str(row.get("url") or "").strip()
-                                sig = (str(row.get("store") or "").strip().lower(), normalize_name(row.get("title") or ""))
-                                if (url and url in seen_urls) or sig in seen_sig:
-                                    continue
-                                items.append(row)
-                                if url:
-                                    seen_urls.add(url)
-                                seen_sig.add(sig)
-                                counts[rank] += 1
-                                need -= 1
-                                if need <= 0:
-                                    break
-                        items.sort(key=lambda x: (int(x.get("market_rank", 99)), 0 if x.get("price") else 1))
-                        print(f"WEB IMAGE v89 after supplement counts={counts} total={len(items)}")
-
-                return {"ok": True, "type": "results", "query": identity, "market": market, "results": items, "source": "lens_direct_plus_market_supplement"}
+                identity = (lens_direct.get("visual_identity") or lens_direct.get("query") or caption or "").strip()
+                return {"ok": True, "type": "results", "query": identity, "market": market, "results": items, "source": "lens_direct"}
 
     # Full Vision/Lens fusion fallback mirrors process_single_image, but returns JSON.
     lens_future = None
@@ -9595,12 +9541,81 @@ async def web_api_image_search_stream(request: Request):
         yield _web_stream_event({"event": "start", "ok": True, "kind": "image"})
         yield _web_stream_event({"event": "status", "stage": "identify", "elapsed_ms": 0})
         try:
-            result = await asyncio.to_thread(_web_search_image_sync, image_b64, mime, caption, country, lang)
-            yield _web_stream_event({"event": "query", "query": result.get("query") or caption, "market": result.get("market")})
+            # Phase 1: never wait forever. Return the normal fast direct-Lens pool first.
+            try:
+                result = await asyncio.wait_for(
+                    asyncio.to_thread(_web_search_image_sync, image_b64, mime, caption, country, lang),
+                    timeout=max(8.0, WEB_IMAGE_STREAM_INITIAL_TIMEOUT),
+                )
+            except asyncio.TimeoutError:
+                print("WEB IMAGE STREAM INITIAL TIMEOUT")
+                yield _web_stream_event({"event": "error", "error": "image_search_timeout", "elapsed_ms": int((time.time()-started)*1000)})
+                return
+
+            identity = str(result.get("query") or caption or "").strip()
+            market_info = result.get("market") or _web_market(country)
+            yield _web_stream_event({"event": "query", "query": identity, "market": market_info})
+
+            sent = set()
+            counts = {0: 0, 1: 0, 2: 0}
+
+            def _sig(item):
+                url = str((item or {}).get("url") or "").strip().lower()
+                if url:
+                    return "u:" + url
+                return "s:" + str((item or {}).get("store") or "").strip().lower() + "|" + normalize_name((item or {}).get("title") or "")
+
+            # Stream the initial result pool immediately, one by one.
             for item in result.get("results") or []:
-                yield _web_stream_event({"event": "result", "phase": "image", "market": item.get("market") or "other", "item": item, "elapsed_ms": int((time.time()-started)*1000)})
-                await asyncio.sleep(0.01)
-            yield _web_stream_event({"event": "done", "count": len(result.get("results") or []), "elapsed_ms": int((time.time()-started)*1000)})
+                sig = _sig(item)
+                if sig in sent:
+                    continue
+                sent.add(sig)
+                rank = item.get("market_rank")
+                if rank in counts:
+                    counts[rank] += 1
+                yield _web_stream_event({"event": "result", "phase": "image_primary", "market": item.get("market") or "other", "item": item, "elapsed_ms": int((time.time()-started)*1000)})
+                await asyncio.sleep(0.04)
+
+            # Phase 2: fill weak markets in the background. Slow markets no longer block
+            # the first visible cards. Each market is emitted as soon as it finishes.
+            if WEB_IMAGE_STREAM_SUPPLEMENT and identity:
+                target = {0: WEB_IMAGE_TARGET_LOCAL, 1: WEB_IMAGE_TARGET_US, 2: WEB_IMAGE_TARGET_CN}
+                weak = [rank for rank in (0, 1, 2) if counts[rank] < target[rank]]
+
+                async def _one_market(rank):
+                    try:
+                        rows = await asyncio.wait_for(
+                            asyncio.to_thread(_web_fast_market_wave_sync, identity, country, lang, rank),
+                            timeout=max(3.0, WEB_IMAGE_STREAM_SUPPLEMENT_TIMEOUT),
+                        )
+                        return rank, rows or []
+                    except asyncio.TimeoutError:
+                        print(f"WEB IMAGE STREAM supplement timeout rank={rank}")
+                        return rank, []
+                    except Exception as exc:
+                        print(f"WEB IMAGE STREAM supplement error rank={rank}: {exc}")
+                        return rank, []
+
+                tasks = [asyncio.create_task(_one_market(rank)) for rank in weak]
+                for finished in asyncio.as_completed(tasks):
+                    rank, rows = await finished
+                    need = max(0, target[rank] - counts[rank])
+                    for item in rows:
+                        if need <= 0:
+                            break
+                        sig = _sig(item)
+                        if sig in sent:
+                            continue
+                        sent.add(sig)
+                        counts[rank] += 1
+                        need -= 1
+                        yield _web_stream_event({"event": "result", "phase": "image_supplement", "market": item.get("market") or "other", "item": item, "elapsed_ms": int((time.time()-started)*1000)})
+                        await asyncio.sleep(0.04)
+                    market_name = {0: "local", 1: "us", 2: "china"}.get(rank, "other")
+                    yield _web_stream_event({"event": "market_fast_done", "market": market_name, "count": counts.get(rank, 0), "elapsed_ms": int((time.time()-started)*1000)})
+
+            yield _web_stream_event({"event": "done", "count": len(sent), "elapsed_ms": int((time.time()-started)*1000)})
         except asyncio.CancelledError:
             raise
         except Exception as e:
