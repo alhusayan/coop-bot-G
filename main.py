@@ -3,10 +3,29 @@ import os, re, time, base64, requests, json, asyncio, urllib.parse, hashlib, sql
 from collections import deque, defaultdict
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from fastapi import FastAPI, Request, Response, BackgroundTasks
+from fastapi.middleware.cors import CORSMiddleware
 from bs4 import BeautifulSoup
 
 app = FastAPI()
-BUILD_ID = "v85.4-fast-caps-4-3-3-20260821"
+
+# Browser frontend (Shopify/findzia.com) may call the same Railway search engine.
+_WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get(
+    "WEB_ALLOWED_ORIGINS",
+    "https://findzia.com,https://www.findzia.com"
+).split(",") if x.strip()]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_WEB_CORS_ORIGINS,
+    allow_origin_regex=os.environ.get(
+        "WEB_ALLOWED_ORIGIN_REGEX",
+        r"^https://[a-z0-9-]+\.myshopify\.com$"
+    ),
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "Accept"],
+    max_age=86400,
+)
+BUILD_ID = "v86.0-web-api-20260822"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("GLOBAL GEO -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES")
@@ -8798,6 +8817,518 @@ def process_location_message(message, bot_id):
     country = market.get("country_name") or market.get("country", "").upper()
     send_whatsapp_text(from_number, T(lang, "market_from_phone", country=country), bot_id)
     route_pending_after_location(from_number)
+
+
+# =============================================================================
+# FINDZIA WEB API — Shopify is frontend only; this Railway service remains engine
+# Added without changing the existing WhatsApp routes/search behavior.
+# =============================================================================
+WEB_API_ENABLED = env_bool("WEB_API_ENABLED", True)
+WEB_API_MAX_QUERY_CHARS = max(40, min(500, int(os.environ.get("WEB_API_MAX_QUERY_CHARS", "220"))))
+WEB_API_MAX_IMAGE_BYTES = max(512000, min(12 * 1024 * 1024, int(os.environ.get("WEB_API_MAX_IMAGE_BYTES", str(6 * 1024 * 1024)))))
+WEB_API_RATE_PER_MINUTE = max(5, min(120, int(os.environ.get("WEB_API_RATE_PER_MINUTE", "30"))))
+WEB_RATE_BUCKETS = defaultdict(deque)
+WEB_RATE_LOCK = threading.Lock()
+
+
+def _web_request_ip(request):
+    forwarded = str(request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+    if forwarded:
+        return forwarded
+    try:
+        return request.client.host or "unknown"
+    except Exception:
+        return "unknown"
+
+
+def _web_rate_allowed(request):
+    key = _web_request_ip(request)
+    now = time.time()
+    with WEB_RATE_LOCK:
+        q = WEB_RATE_BUCKETS[key]
+        while q and now - q[0] > 60:
+            q.popleft()
+        if len(q) >= WEB_API_RATE_PER_MINUTE:
+            return False
+        q.append(now)
+        if len(WEB_RATE_BUCKETS) > 5000:
+            stale = [k for k, v in WEB_RATE_BUCKETS.items() if not v or now - v[-1] > 300]
+            for k in stale[:1000]:
+                WEB_RATE_BUCKETS.pop(k, None)
+    return True
+
+
+def _web_language(value):
+    lang = str(value or "en").strip().lower().split("-")[0]
+    return lang if lang in ("ar", "en", "fr", "es", "pt", "tr", "ru", "zh", "hi", "ur") else "en"
+
+
+def _web_market(country):
+    raw = str(country or "").strip()
+    cc = resolve_market_country(raw) if raw else None
+    cc = (cc or DEFAULT_COUNTRY).lower()
+    currencies = COUNTRY_CURRENCY_CODES.get(cc) or tuple(filter(None, (COUNTRY_CURRENCIES.get(cc, ""),)))
+    return {
+        "country": cc,
+        "country_name": COUNTRY_NAMES.get(cc, cc.upper()),
+        "currency": currencies[0] if currencies else "",
+        "currencies": list(currencies),
+        "search_hl": COUNTRY_SEARCH_HL.get(cc, "en"),
+        "tlds": list(country_tlds(cc)),
+        "market_source": "web_country",
+    }
+
+
+def _web_market_label(rank):
+    return {0: "local", 1: "us", 2: "china"}.get(rank, "other")
+
+
+def _web_build_text_items(txt, urls, lang, query):
+    """Same typed-search selection logic as WhatsApp, but returns JSON cards instead of sending CTAs."""
+    total_cap = max(1, LENS_DIRECT_LOCAL_MAX + LENS_DIRECT_US_MAX + LENS_DIRECT_CN_MAX)
+    offers = text77_extract_store_offers(txt or "", limit=max(total_cap * 2, total_cap))
+    candidates = []
+    for offer in offers:
+        item = _text_offer_item(offer, urls)
+        if not item["link"] or not item["link"].startswith(("http://", "https://")):
+            continue
+        rank = result_market_rank(item)
+        if rank == 99:
+            continue
+        item["market_rank"] = rank
+        candidates.append(item)
+
+    # Preserve v79 behavior: only supplement a market that is missing.
+    candidates = _supplement_missing_markets(candidates, query, "WEB-TEXT")
+    for item in candidates:
+        item["market_rank"] = result_market_rank(item)
+    candidates = [x for x in candidates if x.get("market_rank") in (0, 1, 2)]
+
+    # Preserve the same relevance gate used by the WhatsApp typed flow.
+    offer_rows = [{"line": (o.get("title") or ""), "name": (o.get("source") or "")} for o in candidates]
+    tmp_urls = {(o.get("source") or ""): (o.get("link") or "") for o in candidates}
+    skip_ai = _fast_relevance_confident(query, candidates)
+    kept_rows = filter_relevant_offers(query, offer_rows, tmp_urls, use_ai=not skip_ai, mode="exact")
+    kept_keys = {(r.get("name") or "", r.get("line") or "") for r in kept_rows}
+    candidates = [o for o in candidates if ((o.get("source") or "", o.get("title") or "") in kept_keys)]
+    candidates = _filter_confirmed_oos(candidates, "WEB-TEXT")
+
+    caps = {0: LENS_DIRECT_LOCAL_MAX, 1: LENS_DIRECT_US_MAX, 2: LENS_DIRECT_CN_MAX}
+    selected, merchant_counts, seen_urls = [], defaultdict(int), set()
+    for rank in (0, 1, 2):
+        bucket = [x for x in candidates if x.get("market_rank") == rank]
+        if rank == 1:
+            bucket.sort(key=lambda x: _us_store_priority(x.get("source"), x.get("link")))
+        elif rank == 2:
+            bucket.sort(key=lambda x: _china_store_priority(x.get("source"), x.get("link")))
+        taken = 0
+        for item in bucket:
+            url = str(item.get("link") or "").strip()
+            try:
+                host = urllib.parse.urlparse(url).netloc.lower().split(":")[0]
+                host = host[4:] if host.startswith("www.") else host
+            except Exception:
+                host = ""
+            merchant = host or normalize_name(item.get("source") or "")
+            if not merchant or not url or url in seen_urls:
+                continue
+            if merchant_counts[merchant] >= RESULTS_PER_STORE_MAX:
+                continue
+            merchant_counts[merchant] += 1
+            seen_urls.add(url)
+            selected.append(item)
+            taken += 1
+            if taken >= caps.get(rank, 0):
+                break
+
+    local_cc = (current_market().get("country") or DEFAULT_COUNTRY).lower()
+    rank_cc = {0: local_cc, 1: "us", 2: "cn"}
+    results = []
+    for item in selected:
+        rank = item["market_rank"]
+        raw_title, raw_price = _text_offer_price_and_title(item.get("title") or "")
+        shown_price = _text_price_local(raw_price, rank, lang) if raw_price else ""
+        title = _compact_ui_title(raw_title or query)
+        store = _ui_plain_store_name(item.get("source") or "", item.get("link") or "") or U(lang, "store")
+        results.append({
+            "market": _web_market_label(rank),
+            "market_rank": rank,
+            "country": rank_cc.get(rank, ""),
+            "flag": country_flag_emoji(rank_cc.get(rank, "")),
+            "store": store,
+            "title": title,
+            "price": shown_price,
+            "url": item.get("link") or "",
+            "image": item.get("thumbnail") or item.get("image") or "",
+        })
+    return results
+
+
+def _web_brand_comparison(query, lang):
+    """WhatsApp generic-request comparison, returned as JSON instead of a list message."""
+    lang_name = LANGUAGE_NAMES_EN.get(lang, "English")
+    prompt = (
+        f"Generic shopping request: {query}\n"
+        f"Current market: {current_market().get('country_name', 'Kuwait')}\n"
+        f"Compare 3-4 strong concrete options for this request. Output only in {lang_name}. "
+        f"{TEXT77_LANG_INSTR[lang]}"
+    )
+    txt, options = "", []
+    for _ in (1, 2):
+        txt, _urls = text77_call_gemini([{"text": prompt}], system=brand_compare_system(lang))
+        if not txt:
+            continue
+        m = re.search(r"(?im)^\s*OPTIONS\s*:\s*(.+)$", txt)
+        if m:
+            options = [_clean_pick_label(o) for o in m.group(1).split("|") if _clean_pick_label(o)][:6]
+            txt = re.sub(r"(?im)^\s*OPTIONS\s*:.*$", "", txt).strip()
+        if not options:
+            options = [_clean_pick_label(o) for o in _options_from_compare_lines(txt)]
+        if options:
+            break
+    if not txt or not options:
+        return None
+
+    cleaned = []
+    for line in txt.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("📦") or (stripped.startswith(("✅", "•")) and "متوفر" in stripped):
+            continue
+        if "متوفر عبر متجر" in stripped or ("متوفر في" in stripped and "📦" in stripped):
+            continue
+        cleaned.append(line)
+    txt = re.sub(r"\n{3,}", "\n\n", "\n".join(cleaned)).strip()
+    return {"summary": txt, "options": options}
+
+
+def _web_build_lens_items(lens, lang, caption=""):
+    """Same direct-Lens ranking/caps as WhatsApp, returned as structured JSON."""
+    raw_matches = [m for m in (lens.get("matches") or []) if (m.get("title") or "").strip()]
+    lens_for_filter = dict(lens or {})
+    lens_for_filter["matches"] = raw_matches
+    raw_matches = _lens_ai_relevance_filter(lens_for_filter)
+    if lens_for_filter.get("relevance_target"):
+        lens["relevance_target"] = lens_for_filter["relevance_target"]
+    matches = [m for m in raw_matches if result_market_rank(m) != 99]
+    if not matches:
+        return []
+
+    buckets = {0: [], 1: [], 2: []}
+    for m in matches:
+        rank = result_market_rank(m)
+        if rank in buckets:
+            buckets[rank].append(m)
+    for rank in buckets:
+        buckets[rank].sort(key=lambda m: (
+            _us_store_priority(m.get("source"), m.get("link")) if rank == 1
+            else (_china_store_priority(m.get("source"), m.get("link")) if rank == 2 else 99),
+            0 if _lens_has_price(m) else 1,
+            0 if m.get("exact") else 1,
+            0 if m.get("section") == "visual_matches" else 1,
+            int(m.get("position") or 999),
+        ))
+        cap = {0: LENS_DIRECT_LOCAL_MAX, 1: LENS_DIRECT_US_MAX, 2: LENS_DIRECT_CN_MAX}.get(rank, 0)
+        probe_n = max(cap + 2, cap)
+        head = _filter_confirmed_oos(buckets[rank][:probe_n], f"WEB-LENS-{rank}")
+        buckets[rank] = head + buckets[rank][probe_n:]
+
+    def merchant_key(m):
+        url = (m.get("link") or "").strip()
+        source = re.sub(r"\s+", " ", (m.get("source") or "").strip().lower())
+        try:
+            host = urllib.parse.urlparse(url).netloc.lower().split(":")[0]
+            host = host[4:] if host.startswith("www.") else host
+        except Exception:
+            host = ""
+        known = (
+            "shein.com", "aliexpress.com", "temu.com", "alibaba.com", "1688.com",
+            "taobao.com", "tmall.com", "amazon.com", "ubuy.com", "westelm.com",
+            "hm.com", "wayfair.com",
+        )
+        for d in known:
+            if host == d or host.endswith("." + d) or d in source:
+                return d
+        return host or re.sub(r"[^a-z0-9]+", "", source) or source
+
+    caps = {0: LENS_DIRECT_LOCAL_MAX, 1: LENS_DIRECT_US_MAX, 2: LENS_DIRECT_CN_MAX}
+    selected, seen_urls, merchant_counts = [], set(), defaultdict(int)
+    for rank in (0, 1, 2):
+        taken = 0
+        for m in buckets[rank]:
+            url = (m.get("link") or "").strip()
+            try:
+                host = urllib.parse.urlparse(url).netloc.lower()
+            except Exception:
+                host = ""
+            if not (url.startswith("http") and host and "google." not in host):
+                continue
+            merchant = merchant_key(m)
+            if url in seen_urls or merchant_counts[merchant] >= RESULTS_PER_STORE_MAX:
+                continue
+            selected.append(m)
+            seen_urls.add(url)
+            merchant_counts[merchant] += 1
+            taken += 1
+            if taken >= caps.get(rank, 0) or len(selected) >= LENS_DIRECT_MAX_CTA:
+                break
+        if len(selected) >= LENS_DIRECT_MAX_CTA:
+            break
+
+    selected = _fill_prices_from_existing_lens_pool(selected, raw_matches)
+    display_titles = translate_ui_titles([(m.get("title") or "").strip() for m in selected], lang)
+    local_cc = (current_market().get("country") or DEFAULT_COUNTRY).lower()
+    rank_cc = {0: local_cc, 1: "us", 2: "cn"}
+    results = []
+    for m, display_title in zip(selected, display_titles):
+        rank = result_market_rank(m)
+        cc = rank_cc.get(rank, "")
+        results.append({
+            "market": _web_market_label(rank),
+            "market_rank": rank,
+            "country": cc,
+            "flag": country_flag_emoji(cc),
+            "store": _ui_plain_store_name(m.get("source") or "", m.get("link") or "") or U(lang, "store"),
+            "title": _compact_ui_title(display_title or m.get("title") or ""),
+            "price": _lens_price_text_local(m, rank, lang),
+            "url": (m.get("link") or "").strip(),
+            "image": m.get("thumbnail") or m.get("image") or "",
+        })
+    return results
+
+
+def _web_fallback_product_items(txt, urls, lang, query):
+    """Fallback for image searches that went through the full Vision/text pipeline."""
+    offers = extract_store_offers(txt or "")
+    rows = []
+    for offer in offers:
+        url = match_url(offer.get("name") or "", urls or {})
+        if not is_direct_store_url(url):
+            continue
+        detail = re.sub(r"^(?:✅|🏆|•)\s*", "", offer.get("line") or "").strip()
+        name = offer.get("name") or ""
+        if name:
+            detail = re.sub(rf"^{re.escape(name)}\s*(?:—|–|-)\s*", "", detail, flags=re.I).strip()
+        title, raw_price = _text_offer_price_and_title(detail)
+        probe = {"source": name, "title": title or detail, "link": url}
+        rank = result_market_rank(probe)
+        if rank not in (0, 1, 2):
+            continue
+        cc = (current_market().get("country") or DEFAULT_COUNTRY).lower() if rank == 0 else ("us" if rank == 1 else "cn")
+        rows.append({
+            "market": _web_market_label(rank),
+            "market_rank": rank,
+            "country": cc,
+            "flag": country_flag_emoji(cc),
+            "store": _ui_plain_store_name(name, url) or U(lang, "store"),
+            "title": _compact_ui_title(title or query),
+            "price": _text_price_local(raw_price, rank, lang) if raw_price else "",
+            "url": url,
+            "image": "",
+        })
+    rows.sort(key=lambda x: x["market_rank"])
+    caps = {0: LENS_DIRECT_LOCAL_MAX, 1: LENS_DIRECT_US_MAX, 2: LENS_DIRECT_CN_MAX}
+    out, counts = [], defaultdict(int)
+    for row in rows:
+        if counts[row["market_rank"]] >= caps[row["market_rank"]]:
+            continue
+        out.append(row)
+        counts[row["market_rank"]] += 1
+    return out
+
+
+def _web_search_text_sync(query, country, lang, selected_option="", original_query="", force_specific=False):
+    market = _web_market(country)
+    MARKET_CTX.value = market
+    q = re.sub(r"\s+", " ", str(query or "")).strip()[:WEB_API_MAX_QUERY_CHARS]
+    if selected_option:
+        q = ai_recommendation_pick_search_query(original_query or q, selected_option, lang)
+        force_specific = True
+    if not q:
+        return {"ok": False, "error": "empty_query"}
+
+    # Keep the conversational parser so web and WhatsApp understand natural requests similarly.
+    try:
+        parsed = parse_user_intent(q, lang)
+        products = [p for p in (parsed.get("products") or []) if str(p).strip()]
+        if len(products) == 1:
+            q = products[0]
+    except Exception:
+        pass
+
+    if not force_specific:
+        try:
+            rtype = classify_request_type(q)
+        except Exception:
+            rtype = "SPECIFIC"
+        if rtype == "GENERIC":
+            comparison = _web_brand_comparison(q, lang)
+            if comparison:
+                return {
+                    "ok": True,
+                    "type": "recommendations",
+                    "query": q,
+                    "market": market,
+                    "comparison": comparison["summary"],
+                    "options": comparison["options"],
+                }
+        elif rtype == "SERVICE":
+            return {"ok": False, "type": "service", "error": "service_search_not_enabled_on_web_yet", "query": q, "market": market}
+        elif rtype == "NONE":
+            return {"ok": False, "type": "chat", "error": "not_a_product_query", "query": q, "market": market}
+
+    txt, urls = v26_text_search(q, lang)
+    if not txt or not text77_extract_store_offers(txt, limit=30):
+        return {"ok": True, "type": "results", "query": q, "market": market, "results": []}
+    results = _web_build_text_items(txt, urls, lang, q)
+    return {"ok": True, "type": "results", "query": q, "market": market, "results": results}
+
+
+def _web_search_image_sync(image_b64, mime, caption, country, lang):
+    market = _web_market(country)
+    MARKET_CTX.value = market
+    caption = re.sub(r"\s+", " ", str(caption or "")).strip()[:WEB_API_MAX_QUERY_CHARS]
+
+    # First preserve the exact v79 fast direct-Lens path.
+    direct_attempted = False
+    if LENS_DIRECT_MODE and ENABLE_GOOGLE_LENS and SERPAPI_API_KEY and PUBLIC_BASE_URL:
+        direct_attempted = True
+        lens_direct = google_lens_lookup(image_b64, mime, lang, caption, light=True)
+        if lens_direct.get("matches"):
+            items = _web_build_lens_items(lens_direct, lang, caption)
+            if items:
+                identity = (lens_direct.get("visual_identity") or lens_direct.get("query") or caption or "").strip()
+                return {"ok": True, "type": "results", "query": identity, "market": market, "results": items, "source": "lens_direct"}
+
+    # Full Vision/Lens fusion fallback mirrors process_single_image, but returns JSON.
+    lens_future = None
+    if (not direct_attempted and LENS_PARALLEL_WITH_VISION and ENABLE_GOOGLE_LENS and SERPAPI_API_KEY and PUBLIC_BASE_URL):
+        lens_future = LENS_POOL.submit(_run_with_market, market, google_lens_lookup, image_b64, mime, lang, caption)
+
+    vision_name = identify_product_with_retry(image_b64, mime, lang)
+    force_fashion_lens = is_fashion_identity(vision_name, caption)
+    use_lens, _route_reason = lens_routing_decision(vision_name, caption)
+    use_lens = force_fashion_lens or use_lens
+    if direct_attempted:
+        use_lens = False
+
+    lens = {"aliases": [], "matches": [], "query": ""}
+    if use_lens:
+        if lens_future is not None:
+            try:
+                lens = lens_future.result(timeout=LENS_TOTAL_TIMEOUT_SECONDS + 5) or lens
+            except Exception:
+                pass
+        else:
+            lens = google_lens_lookup(image_b64, mime, lang, caption or vision_name)
+    elif lens_future is not None:
+        lens_future.cancel()
+
+    active_lens = None
+    combined_name = vision_name
+    lens_title = ((lens.get("chosen") or {}).get("title") or lens.get("query") or "").strip()
+    if use_lens:
+        if force_fashion_lens and lens_title:
+            lens["force_lens_only"] = True
+            combined_name = " | ".join(fuse_identity_aliases(lens_title, "", lens.get("aliases")))
+            active_lens = lens
+        elif lens_title and vision_name:
+            if identity_candidates_agree(vision_name, lens_title):
+                combined_name = " | ".join(fuse_identity_aliases(lens_title, vision_name))
+                active_lens = lens
+            else:
+                judged_name, active_lens, _identity_source = choose_image_identity(image_b64, mime, lens, vision_name)
+                combined_name = " | ".join(fuse_identity_aliases(judged_name, vision_name)) if active_lens else judged_name
+        elif lens_title:
+            combined_name = " | ".join(fuse_identity_aliases(lens_title, "", lens.get("aliases")))
+            active_lens = lens
+
+    if combined_name and caption:
+        request_query = f"{caption} — {combined_name}"
+        prompt_text = (
+            f"هوية المنتج المعتمدة: {combined_name}\n"
+            f"طلب المستخدم: {caption}\n"
+            "ابحث عن نفس المنتج فقط. لا توسع البحث إلى منتج يشاركه المكون أو اللون أو الفئة. "
+            f"{LANG_INSTR[lang]}"
+        )
+        txt, urls = search_product(request_query, lang, prompt_text=prompt_text, lens_context=active_lens)
+        query = request_query
+    elif combined_name:
+        txt, urls = search_product(combined_name, lang, lens_context=active_lens)
+        query = combined_name
+    else:
+        txt, urls, query = "", {}, caption
+
+    if not txt:
+        return {"ok": True, "type": "results", "query": query, "market": market, "results": [], "source": "image_fallback"}
+    items = _web_fallback_product_items(txt, urls, lang, query)
+    return {"ok": True, "type": "results", "query": query, "market": market, "results": items, "source": "image_fallback"}
+
+
+@app.get("/api/health")
+async def web_api_health():
+    return {"ok": True, "web_api": WEB_API_ENABLED, "build": BUILD_ID, "lens": bool(ENABLE_GOOGLE_LENS and SERPAPI_API_KEY)}
+
+
+@app.post("/api/search")
+async def web_api_search(request: Request):
+    if not WEB_API_ENABLED:
+        return Response(content=json.dumps({"ok": False, "error": "web_api_disabled"}), media_type="application/json", status_code=503)
+    if not _web_rate_allowed(request):
+        return Response(content=json.dumps({"ok": False, "error": "rate_limit"}), media_type="application/json", status_code=429)
+    try:
+        payload = await request.json()
+    except Exception:
+        return Response(content=json.dumps({"ok": False, "error": "invalid_json"}), media_type="application/json", status_code=400)
+    query = str(payload.get("query") or "").strip()
+    if not query and not payload.get("selected_option"):
+        return Response(content=json.dumps({"ok": False, "error": "empty_query"}), media_type="application/json", status_code=400)
+    lang = _web_language(payload.get("lang"))
+    country = str(payload.get("country") or DEFAULT_COUNTRY).strip()
+    selected_option = str(payload.get("selected_option") or "").strip()
+    original_query = str(payload.get("original_query") or "").strip()
+    force_specific = bool(payload.get("force_specific"))
+    started = time.time()
+    result = await asyncio.to_thread(
+        _web_search_text_sync, query, country, lang, selected_option, original_query, force_specific
+    )
+    result["elapsed_ms"] = int((time.time() - started) * 1000)
+    return result
+
+
+@app.post("/api/search/image")
+async def web_api_image_search(request: Request):
+    if not WEB_API_ENABLED:
+        return Response(content=json.dumps({"ok": False, "error": "web_api_disabled"}), media_type="application/json", status_code=503)
+    if not _web_rate_allowed(request):
+        return Response(content=json.dumps({"ok": False, "error": "rate_limit"}), media_type="application/json", status_code=429)
+    try:
+        payload = await request.json()
+    except Exception:
+        return Response(content=json.dumps({"ok": False, "error": "invalid_json"}), media_type="application/json", status_code=400)
+
+    raw = str(payload.get("image_base64") or "").strip()
+    if not raw:
+        return Response(content=json.dumps({"ok": False, "error": "missing_image"}), media_type="application/json", status_code=400)
+    mime = str(payload.get("mime_type") or "image/jpeg").strip().lower()
+    if mime not in ("image/jpeg", "image/png", "image/webp"):
+        return Response(content=json.dumps({"ok": False, "error": "unsupported_image_type"}), media_type="application/json", status_code=400)
+    if "," in raw and raw.lower().startswith("data:image/"):
+        raw = raw.split(",", 1)[1]
+    try:
+        image_bytes = base64.b64decode(raw, validate=True)
+    except Exception:
+        return Response(content=json.dumps({"ok": False, "error": "invalid_image"}), media_type="application/json", status_code=400)
+    if not image_bytes or len(image_bytes) > WEB_API_MAX_IMAGE_BYTES:
+        return Response(content=json.dumps({"ok": False, "error": "image_too_large"}), media_type="application/json", status_code=413)
+    image_b64 = base64.b64encode(image_bytes).decode("ascii")
+    lang = _web_language(payload.get("lang"))
+    country = str(payload.get("country") or DEFAULT_COUNTRY).strip()
+    caption = str(payload.get("caption") or "").strip()
+    started = time.time()
+    result = await asyncio.to_thread(_web_search_image_sync, image_b64, mime, caption, country, lang)
+    result["elapsed_ms"] = int((time.time() - started) * 1000)
+    return result
+
 
 @app.get("/")
 async def health(): return {"status":"v85 GLOBAL-GEO + STRONG-LOCAL + MULTI-CURRENCY + 10-LANG + SMART-PICK LOCAL5-US4-CN4-SHEIN", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "market_source":"phone_prefix", "languages":["ar","en","fr","es","pt","tr","ru","zh","hi","ur"]}
