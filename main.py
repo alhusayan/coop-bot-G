@@ -26,7 +26,7 @@ app.add_middleware(
     allow_headers=["Content-Type", "Accept"],
     max_age=86400,
 )
-BUILD_ID = "v89.0-web-image-parity-20260822"
+BUILD_ID = "v96.0-store-fifo-20260823"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("GLOBAL GEO -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES")
@@ -8835,6 +8835,13 @@ WEB_IMAGE_TARGET_US = max(1, min(LENS_DIRECT_US_MAX, int(os.environ.get("WEB_IMA
 WEB_IMAGE_TARGET_CN = max(1, min(LENS_DIRECT_CN_MAX, int(os.environ.get("WEB_IMAGE_TARGET_CN", "2"))))
 WEB_STREAM_FAST_WAVE = env_bool("WEB_STREAM_FAST_WAVE", True)
 WEB_STREAM_MARKET_TIMEOUT = max(4, min(20, int(os.environ.get("WEB_STREAM_MARKET_TIMEOUT_SECONDS", "8"))))
+# v96: stream store probes in true FIFO order across all markets. A fast US/China/local
+# merchant can appear immediately; no market has to finish before another market is shown.
+WEB_STREAM_STORE_FIFO = env_bool("WEB_STREAM_STORE_FIFO", True)
+WEB_STREAM_STORE_TIMEOUT = max(4.0, min(12.0, float(os.environ.get("WEB_STREAM_STORE_TIMEOUT_SECONDS", "8"))))
+WEB_STREAM_STORE_HTTP_TIMEOUT = max(3.0, min(WEB_STREAM_STORE_TIMEOUT, float(os.environ.get("WEB_STREAM_STORE_HTTP_TIMEOUT_SECONDS", "7.5"))))
+WEB_STREAM_RESULTS_PER_STORE = max(1, min(2, int(os.environ.get("WEB_STREAM_RESULTS_PER_STORE", "1"))))
+WEB_STREAM_IMAGE_FINAL_MIN_RESULTS = max(2, min(10, int(os.environ.get("WEB_STREAM_IMAGE_FINAL_MIN_RESULTS", "5"))))
 WEB_RATE_BUCKETS = defaultdict(deque)
 WEB_RATE_LOCK = threading.Lock()
 
@@ -9224,6 +9231,111 @@ def _web_fast_market_wave_sync(query, country, lang, rank):
     return _web_market_candidates_to_items(candidates, rank, lang, query)
 
 
+def _web_stream_store_specs(query, country, rank):
+    """Return independent store probes for true FIFO streaming.
+
+    Each tuple is (label, domain, search_gl).  The probes are fired together and
+    /api/search/stream emits whichever merchant returns first, irrespective of market.
+    """
+    market = _web_market(country)
+    MARKET_CTX.value = market
+    local_cc = (market.get("country") or DEFAULT_COUNTRY).lower()
+    q = _shopping_clean_query(query or "")
+    if rank == 0:
+        specs = [("Local", "", local_cc)]
+        try:
+            specs.extend((label, domain, local_cc) for label, domain in local_rescue_store_specs(q, LOCAL_STORE_RESCUE_MAX))
+        except Exception:
+            pass
+    elif rank == 1:
+        specs = [
+            ("Amazon", "amazon.com", "us"),
+            ("eBay", "ebay.com", "us"),
+            ("Walmart", "walmart.com", "us"),
+            ("US", "", "us"),
+        ]
+    else:
+        # Google Shopping for these domains is queried through the US surface,
+        # while candidate classification remains China via _lens_country='cn'.
+        specs = [
+            ("AliExpress", "aliexpress.com", "us"),
+            ("Temu", "temu.com", "us"),
+            ("Alibaba", "alibaba.com", "us"),
+            ("1688", "1688.com", "us"),
+            ("Taobao", "taobao.com", "us"),
+            ("SHEIN", "shein.com", "us"),
+        ]
+    out, seen = [], set()
+    for label, domain, gl in specs:
+        key = (str(domain or "").lower(), str(gl or "").lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append((label, domain, gl))
+    return out
+
+
+def _web_store_probe_sync(query, country, lang, rank, label, domain, gl):
+    """Probe one merchant and return at most WEB_STREAM_RESULTS_PER_STORE UI cards."""
+    market = _web_market(country)
+    MARKET_CTX.value = market
+    q = _shopping_clean_query(query or "")
+    if not q or not SERPAPI_API_KEY:
+        return []
+    search_q = f"{q} site:{domain}" if domain else q
+    hl = country_search_hl(gl) if rank == 0 else "en"
+    cards = _serpapi_shopping_request(
+        search_q,
+        gl,
+        hl=hl,
+        timeout_seconds=WEB_STREAM_STORE_HTTP_TIMEOUT,
+    )
+    candidate_cc = (market.get("country") or DEFAULT_COUNTRY).lower() if rank == 0 else ("us" if rank == 1 else "cn")
+    candidates = []
+    for card in cards or []:
+        item = _shopping_card_to_market_item(card, label, candidate_cc)
+        if not item:
+            continue
+        if domain:
+            try:
+                host = urllib.parse.urlparse(item.get("link") or "").netloc.lower().replace("www.", "")
+            except Exception:
+                host = ""
+            if not _host_matches_any(host, (domain,)):
+                continue
+        if result_market_rank(item) != rank:
+            continue
+        candidates.append(item)
+    rows = _web_market_candidates_to_items(candidates, rank, lang, q)
+    return rows[:WEB_STREAM_RESULTS_PER_STORE]
+
+
+def _web_image_seed_sync(image_b64, mime, caption, country, lang):
+    """One fast image-identification pass used before merchant FIFO probes.
+
+    It deliberately does not run the heavy weak-market supplement.  The stream endpoint
+    performs merchant probes independently, so the first available store is not held up.
+    """
+    market = _web_market(country)
+    MARKET_CTX.value = market
+    caption = re.sub(r"\s+", " ", str(caption or "")).strip()[:WEB_API_MAX_QUERY_CHARS]
+    if LENS_DIRECT_MODE and ENABLE_GOOGLE_LENS and SERPAPI_API_KEY and PUBLIC_BASE_URL:
+        try:
+            lens = google_lens_lookup(image_b64, mime, lang, caption, light=True)
+        except Exception as e:
+            print(f"WEB IMAGE FIFO LENS SEED ERR: {e}")
+            lens = {"matches": [], "query": ""}
+        items = _web_build_lens_items(lens, lang, caption) if lens.get("matches") else []
+        identity = (lens.get("visual_identity") or lens.get("relevance_target") or lens.get("query") or caption or "").strip()
+        if identity or items:
+            return {"query": identity or caption, "items": items, "market": market, "source": "lens_seed"}
+    try:
+        identity = identify_product_with_retry(image_b64, mime, lang) or caption
+    except Exception:
+        identity = caption
+    return {"query": str(identity or caption or "").strip(), "items": [], "market": market, "source": "vision_seed"}
+
+
 def _web_prepare_stream_query_sync(query, country, lang, selected_option="", original_query="", force_specific=False):
     market = _web_market(country)
     MARKET_CTX.value = market
@@ -9488,50 +9600,112 @@ async def web_api_search_stream(request: Request):
                 return
 
             sent = set()
-            fast_tasks = []
-            if WEB_STREAM_FAST_WAVE and SERPAPI_API_KEY:
-                for rank in (0, 1, 2):
-                    async def _run_market(r=rank):
-                        try:
-                            items = await asyncio.wait_for(
-                                asyncio.to_thread(_web_fast_market_wave_sync, q, country, lang, r),
-                                timeout=WEB_STREAM_MARKET_TIMEOUT,
-                            )
-                            return r, items
-                        except Exception as e:
-                            print(f"WEB STREAM FAST MARKET ERR rank={r}: {e}")
-                            return r, []
-                    fast_tasks.append(asyncio.create_task(_run_market()))
-
             final_task = asyncio.create_task(asyncio.to_thread(
                 _web_search_text_sync, q, country, lang, "", "", True
             ))
 
-            # Emit fast market waves as each market finishes.
-            pending_fast = set(fast_tasks)
-            while pending_fast:
-                done, pending_fast = await asyncio.wait(pending_fast, timeout=0.15, return_when=asyncio.FIRST_COMPLETED)
-                for task in done:
-                    rank, items = await task
-                    market_name = _web_market_label(rank)
-                    for item in items or []:
-                        key = str(item.get("url") or "").strip() or (market_name + "|" + str(item.get("store") or "") + "|" + str(item.get("title") or ""))
-                        if key in sent:
-                            continue
-                        sent.add(key)
-                        yield _web_stream_event({"event": "result", "phase": "fast", "market": market_name, "item": item, "elapsed_ms": int((time.time()-started)*1000)})
-                        await asyncio.sleep(0.01)
-                    yield _web_stream_event({"event": "market_fast_done", "market": market_name, "count": len(items or []), "elapsed_ms": int((time.time()-started)*1000)})
-                if final_task.done():
-                    break
+            if WEB_STREAM_STORE_FIFO and WEB_STREAM_FAST_WAVE and SERPAPI_API_KEY:
+                store_tasks = []
+                task_meta = {}
+                rank_remaining = {0: 0, 1: 0, 2: 0}
+                for rank in (0, 1, 2):
+                    for label, domain, gl in _web_stream_store_specs(q, country, rank):
+                        async def _run_store(r=rank, lab=label, dom=domain, search_gl=gl):
+                            try:
+                                rows = await asyncio.wait_for(
+                                    asyncio.to_thread(_web_store_probe_sync, q, country, lang, r, lab, dom, search_gl),
+                                    timeout=WEB_STREAM_STORE_TIMEOUT,
+                                )
+                                return r, lab, rows
+                            except Exception as e:
+                                print(f"WEB STORE FIFO ERR rank={r} store={lab}: {e}")
+                                return r, lab, []
+                        task = asyncio.create_task(_run_store())
+                        store_tasks.append(task)
+                        task_meta[task] = (rank, label)
+                        rank_remaining[rank] += 1
 
-            # Preserve the existing full engine as the authoritative enrichment/final pass.
+                pending = set(store_tasks)
+                loop = asyncio.get_running_loop()
+                deadline = loop.time() + WEB_STREAM_STORE_TIMEOUT
+                while pending:
+                    remaining = deadline - loop.time()
+                    if remaining <= 0:
+                        break
+                    done, pending = await asyncio.wait(
+                        pending,
+                        timeout=min(0.12, remaining),
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    for task in done:
+                        rank, label = task_meta.get(task, (99, "Store"))
+                        try:
+                            r, label, items = await task
+                        except Exception:
+                            r, items = rank, []
+                        market_name = _web_market_label(r)
+                        for item in items or []:
+                            key = str(item.get("url") or "").strip() or (market_name + "|" + str(item.get("store") or "") + "|" + str(item.get("title") or ""))
+                            if key in sent:
+                                continue
+                            sent.add(key)
+                            yield _web_stream_event({
+                                "event": "result", "phase": "store_fifo", "market": market_name,
+                                "store_probe": label, "item": item,
+                                "elapsed_ms": int((time.time()-started)*1000),
+                            })
+                            await asyncio.sleep(0.015)
+                        rank_remaining[r] = max(0, rank_remaining.get(r, 1) - 1)
+                        if rank_remaining[r] == 0:
+                            yield _web_stream_event({"event": "market_fast_done", "market": market_name, "elapsed_ms": int((time.time()-started)*1000)})
+
+                for task in pending:
+                    task.cancel()
+                for r in (0, 1, 2):
+                    if rank_remaining.get(r, 0) > 0:
+                        yield _web_stream_event({"event": "market_fast_done", "market": _web_market_label(r), "elapsed_ms": int((time.time()-started)*1000)})
+            else:
+                # Compatibility mode: retain the previous market-level fast wave.
+                fast_tasks = []
+                if WEB_STREAM_FAST_WAVE and SERPAPI_API_KEY:
+                    for rank in (0, 1, 2):
+                        async def _run_market(r=rank):
+                            try:
+                                items = await asyncio.wait_for(
+                                    asyncio.to_thread(_web_fast_market_wave_sync, q, country, lang, r),
+                                    timeout=WEB_STREAM_MARKET_TIMEOUT,
+                                )
+                                return r, items
+                            except Exception as e:
+                                print(f"WEB STREAM FAST MARKET ERR rank={r}: {e}")
+                                return r, []
+                        fast_tasks.append(asyncio.create_task(_run_market()))
+                pending_fast = set(fast_tasks)
+                while pending_fast:
+                    done, pending_fast = await asyncio.wait(pending_fast, timeout=0.15, return_when=asyncio.FIRST_COMPLETED)
+                    for task in done:
+                        rank, items = await task
+                        market_name = _web_market_label(rank)
+                        for item in items or []:
+                            key = str(item.get("url") or "").strip() or (market_name + "|" + str(item.get("store") or "") + "|" + str(item.get("title") or ""))
+                            if key in sent:
+                                continue
+                            sent.add(key)
+                            yield _web_stream_event({"event": "result", "phase": "fast", "market": market_name, "item": item, "elapsed_ms": int((time.time()-started)*1000)})
+                            await asyncio.sleep(0.01)
+                        yield _web_stream_event({"event": "market_fast_done", "market": market_name, "count": len(items or []), "elapsed_ms": int((time.time()-started)*1000)})
+                    if final_task.done():
+                        break
+                for task in pending_fast:
+                    task.cancel()
+
+            # Existing engine remains the authoritative enrichment pass.  Its extra rows
+            # are appended after the live FIFO store probes, without changing WhatsApp logic.
             final = await final_task
             if final.get("type") == "recommendations":
                 yield _web_stream_event({"event": "recommendations", "data": final, "elapsed_ms": int((time.time()-started)*1000)})
             else:
-                final_results = final.get("results") or []
-                for item in final_results:
+                for item in final.get("results") or []:
                     market_name = str(item.get("market") or "other")
                     key = str(item.get("url") or "").strip() or (market_name + "|" + str(item.get("store") or "") + "|" + str(item.get("title") or ""))
                     if key in sent:
@@ -9540,23 +9714,17 @@ async def web_api_search_stream(request: Request):
                         sent.add(key)
                         yield _web_stream_event({"event": "result", "phase": "final", "market": market_name, "item": item, "elapsed_ms": int((time.time()-started)*1000)})
                     await asyncio.sleep(0.01)
-            for task in pending_fast:
-                task.cancel()
             yield _web_stream_event({"event": "done", "count": len(sent), "elapsed_ms": int((time.time()-started)*1000)})
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            print(f"WEB STREAM ERROR: {e}")
+            print(f"WEB STORE FIFO STREAM ERROR: {e}")
             yield _web_stream_event({"event": "error", "error": "search_failed", "elapsed_ms": int((time.time()-started)*1000)})
 
     return StreamingResponse(
         _generator(),
         media_type="application/x-ndjson",
-        headers={
-            "Cache-Control": "no-cache, no-transform",
-            "X-Accel-Buffering": "no",
-            "Connection": "keep-alive",
-        },
+        headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no", "Connection": "keep-alive"},
     )
 
 
@@ -9592,19 +9760,104 @@ async def web_api_image_search_stream(request: Request):
 
     async def _generator():
         started = time.time()
+        sent = set()
+        market_counts = {"local": 0, "us": 0, "china": 0}
         yield _web_stream_event({"event": "start", "ok": True, "kind": "image"})
         yield _web_stream_event({"event": "status", "stage": "identify", "elapsed_ms": 0})
         try:
-            result = await asyncio.to_thread(_web_search_image_sync, image_b64, mime, caption, country, lang)
-            yield _web_stream_event({"event": "query", "query": result.get("query") or caption, "market": result.get("market")})
-            for item in result.get("results") or []:
-                yield _web_stream_event({"event": "result", "phase": "image", "market": item.get("market") or "other", "item": item, "elapsed_ms": int((time.time()-started)*1000)})
-                await asyncio.sleep(0.01)
-            yield _web_stream_event({"event": "done", "count": len(result.get("results") or []), "elapsed_ms": int((time.time()-started)*1000)})
+            seed = await asyncio.to_thread(_web_image_seed_sync, image_b64, mime, caption, country, lang)
+            identity = str(seed.get("query") or caption or "").strip()
+            yield _web_stream_event({"event": "query", "query": identity, "market": seed.get("market")})
+
+            # Lens seed results are useful immediately. Emit them without waiting for any market.
+            for item in seed.get("items") or []:
+                market_name = str(item.get("market") or "other")
+                key = str(item.get("url") or "").strip() or (market_name + "|" + str(item.get("store") or "") + "|" + str(item.get("title") or ""))
+                if key in sent:
+                    continue
+                sent.add(key)
+                if market_name in market_counts:
+                    market_counts[market_name] += 1
+                yield _web_stream_event({"event": "result", "phase": "lens_seed", "market": market_name, "item": item, "elapsed_ms": int((time.time()-started)*1000)})
+                await asyncio.sleep(0.015)
+
+            if identity and WEB_STREAM_STORE_FIFO and WEB_STREAM_FAST_WAVE and SERPAPI_API_KEY:
+                store_tasks = []
+                task_meta = {}
+                rank_remaining = {0: 0, 1: 0, 2: 0}
+                for rank in (0, 1, 2):
+                    for label, domain, gl in _web_stream_store_specs(identity, country, rank):
+                        async def _run_store(r=rank, lab=label, dom=domain, search_gl=gl):
+                            try:
+                                rows = await asyncio.wait_for(
+                                    asyncio.to_thread(_web_store_probe_sync, identity, country, lang, r, lab, dom, search_gl),
+                                    timeout=WEB_STREAM_STORE_TIMEOUT,
+                                )
+                                return r, lab, rows
+                            except Exception as e:
+                                print(f"WEB IMAGE STORE FIFO ERR rank={r} store={lab}: {e}")
+                                return r, lab, []
+                        task = asyncio.create_task(_run_store())
+                        store_tasks.append(task)
+                        task_meta[task] = (rank, label)
+                        rank_remaining[rank] += 1
+
+                pending = set(store_tasks)
+                loop = asyncio.get_running_loop()
+                deadline = loop.time() + WEB_STREAM_STORE_TIMEOUT
+                while pending:
+                    remaining = deadline - loop.time()
+                    if remaining <= 0:
+                        break
+                    done, pending = await asyncio.wait(pending, timeout=min(0.12, remaining), return_when=asyncio.FIRST_COMPLETED)
+                    for task in done:
+                        rank, label = task_meta.get(task, (99, "Store"))
+                        try:
+                            r, label, rows = await task
+                        except Exception:
+                            r, rows = rank, []
+                        market_name = _web_market_label(r)
+                        for item in rows or []:
+                            key = str(item.get("url") or "").strip() or (market_name + "|" + str(item.get("store") or "") + "|" + str(item.get("title") or ""))
+                            if key in sent:
+                                continue
+                            sent.add(key)
+                            if market_name in market_counts:
+                                market_counts[market_name] += 1
+                            yield _web_stream_event({
+                                "event": "result", "phase": "store_fifo", "market": market_name,
+                                "store_probe": label, "item": item,
+                                "elapsed_ms": int((time.time()-started)*1000),
+                            })
+                            await asyncio.sleep(0.015)
+                        rank_remaining[r] = max(0, rank_remaining.get(r, 1) - 1)
+                        if rank_remaining[r] == 0:
+                            yield _web_stream_event({"event": "market_fast_done", "market": market_name, "elapsed_ms": int((time.time()-started)*1000)})
+                for task in pending:
+                    task.cancel()
+                for r in (0, 1, 2):
+                    if rank_remaining.get(r, 0) > 0:
+                        yield _web_stream_event({"event": "market_fast_done", "market": _web_market_label(r), "elapsed_ms": int((time.time()-started)*1000)})
+
+            # Only invoke the heavy original image engine when the live wave is still sparse
+            # or local coverage is missing.  The user has already seen FIFO cards by then.
+            if len(sent) < WEB_STREAM_IMAGE_FINAL_MIN_RESULTS or market_counts.get("local", 0) == 0:
+                final = await asyncio.to_thread(_web_search_image_sync, image_b64, mime, caption, country, lang)
+                for item in final.get("results") or []:
+                    market_name = str(item.get("market") or "other")
+                    key = str(item.get("url") or "").strip() or (market_name + "|" + str(item.get("store") or "") + "|" + str(item.get("title") or ""))
+                    if key in sent:
+                        yield _web_stream_event({"event": "upsert", "phase": "final", "market": market_name, "item": item, "elapsed_ms": int((time.time()-started)*1000)})
+                        continue
+                    sent.add(key)
+                    yield _web_stream_event({"event": "result", "phase": "final", "market": market_name, "item": item, "elapsed_ms": int((time.time()-started)*1000)})
+                    await asyncio.sleep(0.01)
+
+            yield _web_stream_event({"event": "done", "count": len(sent), "elapsed_ms": int((time.time()-started)*1000)})
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            print(f"WEB IMAGE STREAM ERROR: {e}")
+            print(f"WEB IMAGE STORE FIFO STREAM ERROR: {e}")
             yield _web_stream_event({"event": "error", "error": "image_search_failed", "elapsed_ms": int((time.time()-started)*1000)})
 
     return StreamingResponse(
