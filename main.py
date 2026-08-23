@@ -26,7 +26,7 @@ app.add_middleware(
     allow_headers=["Content-Type", "Accept"],
     max_age=86400,
 )
-BUILD_ID = "v107.0-stream-10-results-20260823"
+BUILD_ID = "v108.0-unit-safe-price-parser-20260823"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES")
@@ -2140,7 +2140,15 @@ def parse_product_data(html, url):
             if cur in KNOWN_CURRENCY_CODES:
                 data["currency"] = cur
 
-    # v79.1: price fallbacks for stores whose JSON-LD is incomplete (Amazon/eBay/Temu/Alibaba, etc.).
+    # v108: prefer a visible currency-tagged selling price before generic numeric fallbacks.
+    if not data["price"]:
+        visible_price, visible_cur = _visible_currency_price(html, data.get("currency") or "")
+        if visible_price:
+            data["price"] = visible_price
+            if visible_cur in KNOWN_CURRENCY_CODES:
+                data["currency"] = visible_cur
+
+    # Price fallbacks for stores whose JSON-LD is incomplete.
     if not data["price"]:
         price_candidates = []
         selectors = [
@@ -2168,7 +2176,10 @@ def parse_product_data(html, url):
                 price_candidates.append(mm.group(1))
                 break
         for cand in price_candidates:
-            mm = re.search(r'(?<!\d)(\d+(?:[.,]\d{1,3})?)(?!\d)', str(cand).replace(',', ''))
+            cand_text = str(cand).strip()
+            if _looks_like_measurement_number(cand_text):
+                continue
+            mm = re.search(r'(?<!\d)(\d+(?:[.,]\d{1,3})?)(?!\d)', cand_text.replace(',', ''))
             if not mm:
                 continue
             try:
@@ -2177,8 +2188,9 @@ def parse_product_data(html, url):
                 continue
             if val > 0:
                 data["price"] = val
-                if not data["currency"]:
-                    data["currency"] = detect_currency_code(str(cand), "")
+                detected_cur = detect_currency_code(cand_text, "")
+                if detected_cur:
+                    data["currency"] = detected_cur
                 break
     if not data["currency"]:
         # Currency hints from structured HTML/text; conservative domain fallback only when price exists.
@@ -6111,16 +6123,68 @@ def country_flag_emoji(cc):
             pass
     return "🌐"
 
+_PRICE_UNIT_RE = re.compile(r"(?i)\b(?:ml|milliliters?|millilitres?|liters?|litres?|g|grams?|kg|kilograms?|oz|fl\.?\s*oz|lb|lbs|cm|mm|inches?|pcs?|pieces?|pack|count|ct|spf)\b")
+
+def _looks_like_measurement_number(text, value=None):
+    raw = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not raw:
+        return False
+    if value not in (None, ""):
+        try:
+            num = float(value)
+            pat = rf"(?i)(?<!\d){re.escape(f'{num:g}')}(?:\.0+)?\s*(?:ml|l|g|kg|oz|fl\.?\s*oz|lb|lbs|cm|mm|inches?|pcs?|pieces?|pack|count|ct|spf)\b"
+            if re.search(pat, raw):
+                return True
+        except Exception:
+            pass
+    return bool(_PRICE_UNIT_RE.search(raw))
+
+def _has_explicit_currency(text):
+    return bool(re.search(r"(?i)(?:KWD|KD|د\.ك|USD|US\$|EUR|GBP|SAR|AED|QAR|BHD|OMR|CNY|RMB|JPY|CAD|AUD|CHF|INR|KRW|TRY|RUB|[$€£¥￥₹₩₺₽])", str(text or "")))
+
+def _visible_currency_price(html, currency_hint=""):
+    if not html:
+        return None, ""
+    try:
+        soup = BeautifulSoup(html, "html.parser")
+        text = re.sub(r"\s+", " ", soup.get_text(" ", strip=True))[:500000]
+    except Exception:
+        text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", str(html or "")))[:500000]
+    currency_pat = r"(?:KWD|KD|د\.ك|USD|US\$|EUR|GBP|SAR|AED|QAR|BHD|OMR|CNY|RMB|JPY|CAD|AUD|CHF|INR|KRW|TRY|RUB|[$€£¥￥₹₩₺₽])"
+    pats=(rf"({currency_pat})\s*([0-9]+(?:[.,][0-9]{{1,3}})?)", rf"([0-9]+(?:[.,][0-9]{{1,3}})?)\s*({currency_pat})")
+    wanted=str(currency_hint or "").upper().strip()
+    cands=[]
+    for idx,pat in enumerate(pats):
+        for m in re.finditer(pat,text,flags=re.I):
+            if idx==0: cur_token,num_token=m.group(1),m.group(2)
+            else: num_token,cur_token=m.group(1),m.group(2)
+            snippet=text[max(0,m.start()-30):min(len(text),m.end()+30)]
+            if _looks_like_measurement_number(snippet):
+                continue
+            try: val=float(num_token.replace(",",""))
+            except Exception: continue
+            if val<=0: continue
+            cur=detect_currency_code(cur_token,"") or wanted
+            score=(4 if wanted and cur==wanted else 0) + (2 if any(k in snippet.lower() for k in ("price","now","sale","add to cart","buy","kwd","kd")) else 0)
+            cands.append((score,m.start(),val,cur))
+    if not cands:
+        return None,""
+    cands.sort(key=lambda x:(-x[0],x[1]))
+    return cands[0][2],cands[0][3]
+
 def _lens_has_price(m):
-    """True only for a usable numeric selling price, not merely any non-empty text/model number."""
+    """True only for a usable numeric selling price, never a size/spec number."""
     if not isinstance(m, dict):
         return False
+    raw = str(m.get("price") or "").strip()
+    title_ctx = " ".join(str(m.get(k) or "") for k in ("title", "snippet", "extensions"))
     try:
-        if m.get("price_value") not in (None, "") and float(m.get("price_value")) > 0:
-            return True
+        if m.get("price_value") not in (None, ""):
+            pv=float(m.get("price_value"))
+            if pv>0 and not (_looks_like_measurement_number(title_ctx,pv) and not _has_explicit_currency(raw)):
+                return True
     except Exception:
         pass
-    raw = str(m.get("price") or "").strip()
     if not raw:
         return False
     numeric = _extract_numeric_price(raw)
@@ -8881,6 +8945,19 @@ WEB_TURBO_FINAL_HEADSTART_SECONDS = max(0.0, min(3.0, float(os.environ.get("WEB_
 WEB_TURBO_STORE_CACHE_TTL_SECONDS = max(30, min(1800, int(os.environ.get("WEB_TURBO_STORE_CACHE_TTL_SECONDS", "300"))))
 WEB_TURBO_PREP_CACHE_TTL_SECONDS = max(30, min(1800, int(os.environ.get("WEB_TURBO_PREP_CACHE_TTL_SECONDS", "600"))))
 WEB_TURBO_STRICT_WORKERS = max(6, min(20, int(os.environ.get("WEB_TURBO_STRICT_WORKERS", "12"))))
+
+# v109: SerpApi quota saver for WEB only.
+# WhatsApp keeps the existing behavior.
+WEB_QUOTA_SAVER_MODE = env_bool("WEB_QUOTA_SAVER_MODE", True)
+WEB_QUOTA_POOL_TTL_SECONDS = max(60, int(os.environ.get("WEB_QUOTA_POOL_TTL_SECONDS", "600")))
+WEB_QUOTA_POOL_TIMEOUT_SECONDS = max(3.0, min(10.0, float(os.environ.get("WEB_QUOTA_POOL_TIMEOUT_SECONDS", "6"))))
+WEB_QUOTA_LENS_TIMEOUT_SECONDS = max(3.0, min(10.0, float(os.environ.get("WEB_QUOTA_LENS_TIMEOUT_SECONDS", "6"))))
+WEB_QUOTA_HEAVY_RESCUE = env_bool("WEB_QUOTA_HEAVY_RESCUE", False)
+WEB_QUOTA_HEAVY_RESCUE_MIN_RESULTS = max(1, min(10, int(os.environ.get("WEB_QUOTA_HEAVY_RESCUE_MIN_RESULTS", "5"))))
+WEB_QUOTA_POOL_CACHE = {}
+WEB_QUOTA_POOL_CACHE_LOCK = threading.Lock()
+WEB_QUOTA_POOL_INFLIGHT = {}
+WEB_QUOTA_POOL_INFLIGHT_LOCK = threading.Lock()
 WEB_TURBO_STORE_CACHE = {}
 WEB_TURBO_STORE_CACHE_LOCK = threading.Lock()
 WEB_TURBO_PREP_CACHE = {}
@@ -9775,8 +9852,8 @@ def _web_price_number_and_currency(text, fallback_currency=""):
                     return val, cur
             except Exception:
                 pass
-    # Last resort only when the string itself is short and price-like.
-    if len(raw) <= 50:
+    # Last resort only when the string itself is short and price-like, never a size/spec.
+    if len(raw) <= 50 and not _looks_like_measurement_number(raw):
         m = re.search(r"(?<!\\d)([0-9]+(?:[.,][0-9]{1,3})?)(?!\\d)", raw.replace(",", ""))
         if m:
             try:
@@ -10074,6 +10151,14 @@ def _web_verify_card_strict(row, rank, lang, market_snapshot=None):
     existing = str(row.get("price") or "").strip()
     val, cur = _web_price_number_and_currency(existing)
     if val and val > 0:
+        title_ctx = " ".join(str(row.get(k) or "") for k in ("title", "name", "snippet"))
+        source_kind = str(row.get("price_source") or "").lower()
+        if _looks_like_measurement_number(title_ctx, val) and source_kind not in ("product_page", "jsonld", "merchant_page"):
+            print(f"WEB PRICE UNIT REJECT store={row.get('store') or row.get('source')} val={val} title={title_ctx[:100]}")
+            if WEB_REQUIRE_NUMERIC_PRICE:
+                return None
+            row["price"] = ""
+            return row
         row["price"] = _web_normalize_existing_price_to_market(existing, rank, lang, market_snapshot)
         row["price_verified"] = True
         row["price_source"] = row.get("price_source") or "search_structured_rebased"
@@ -10262,6 +10347,245 @@ def _web_store_probe_sync(query, country, lang, rank, label, domain, gl):
     if WEB_TURBO_MODE:
         _web_turbo_cache_set(WEB_TURBO_STORE_CACHE, WEB_TURBO_STORE_CACHE_LOCK, cache_key, [dict(x) for x in rows])
     return rows
+
+
+def _web_quota_cache_key(kind, query, country, lang, rank=None):
+    return "|".join([
+        str(kind), normalize_name(query or ""), str(country or "").lower(),
+        str(lang or "").lower(), "" if rank is None else str(rank)
+    ])
+
+
+def _web_quota_cached_call(key, fn):
+    cached = _web_turbo_cache_get(
+        WEB_QUOTA_POOL_CACHE, WEB_QUOTA_POOL_CACHE_LOCK, key, WEB_QUOTA_POOL_TTL_SECONDS
+    )
+    if cached is not None:
+        print(f"WEB QUOTA CACHE HIT key={key[:90]}")
+        return cached
+
+    leader = False
+    with WEB_QUOTA_POOL_INFLIGHT_LOCK:
+        state = WEB_QUOTA_POOL_INFLIGHT.get(key)
+        if state is None:
+            state = {"event": threading.Event(), "value": None}
+            WEB_QUOTA_POOL_INFLIGHT[key] = state
+            leader = True
+
+    if not leader:
+        state["event"].wait(timeout=WEB_QUOTA_POOL_TIMEOUT_SECONDS + 2)
+        cached = _web_turbo_cache_get(
+            WEB_QUOTA_POOL_CACHE, WEB_QUOTA_POOL_CACHE_LOCK, key, WEB_QUOTA_POOL_TTL_SECONDS
+        )
+        if cached is not None:
+            print(f"WEB QUOTA SINGLEFLIGHT HIT key={key[:90]}")
+            return cached
+        return state.get("value")
+
+    try:
+        value = fn()
+        state["value"] = value
+        _web_turbo_cache_set(
+            WEB_QUOTA_POOL_CACHE, WEB_QUOTA_POOL_CACHE_LOCK, key, value, max_items=1500
+        )
+        return value
+    finally:
+        state["event"].set()
+        with WEB_QUOTA_POOL_INFLIGHT_LOCK:
+            WEB_QUOTA_POOL_INFLIGHT.pop(key, None)
+
+
+def _web_quota_lens_seed_sync(image_b64, mime, caption, country, lang):
+    """Web-only Lens seed: at most one `all` pass per unique market country.
+    Typical request count = 3 (local + US + CN), instead of 6-7 Lens passes.
+    """
+    market = _web_market(country)
+    MARKET_CTX.value = market
+    caption = re.sub(r"\s+", " ", str(caption or "")).strip()[:WEB_API_MAX_QUERY_CHARS]
+    if not (ENABLE_GOOGLE_LENS and SERPAPI_API_KEY and PUBLIC_BASE_URL):
+        return _web_image_seed_sync(image_b64, mime, caption, country, lang)
+
+    public_url = publish_image_for_lens(image_b64, mime)
+    if not public_url:
+        return _web_image_seed_sync(image_b64, mime, caption, country, lang)
+
+    user_cc = str(market.get("country") or DEFAULT_COUNTRY).lower()
+    countries = []
+    for cc in (user_cc, "us", "cn"):
+        if cc and cc not in countries:
+            countries.append(cc)
+
+    merged = []
+    seen = set()
+
+    def _one(cc):
+        try:
+            return cc, _serpapi_lens_request(
+                public_url, "all", cc, True, caption
+            )
+        except Exception as e:
+            print(f"WEB QUOTA LENS ERR country={cc}: {e}")
+            return cc, []
+
+    with ThreadPoolExecutor(max_workers=len(countries)) as pool:
+        futures = [pool.submit(_one, cc) for cc in countries]
+        done, pending = wait(futures, timeout=WEB_QUOTA_LENS_TIMEOUT_SECONDS)
+        for fut in done:
+            try:
+                cc, rows = fut.result()
+            except Exception:
+                continue
+            for it in rows or []:
+                sig = (str(it.get("title") or "").lower(), str(it.get("link") or "").lower())
+                if sig in seen:
+                    continue
+                seen.add(sig)
+                merged.append(it)
+        for fut in pending:
+            fut.cancel()
+
+    items = _web_build_lens_items({"matches": merged}, lang, caption) if merged else []
+    identity = caption
+    if merged:
+        identity = str(merged[0].get("title") or caption or "").strip()
+    print(f"WEB QUOTA LENS seed passes={len(countries)} merged={len(merged)} items={len(items)}")
+    return {"query": identity or caption, "items": items, "market": market, "source": "quota_lens"}
+
+
+def _web_quota_china_pool(query, lang):
+    """One organic Google/SerpApi call covering all major global China marketplaces."""
+    q = _shopping_clean_query(query or "")
+    if not q or not SERPAPI_API_KEY:
+        return []
+    stores = [
+        ("AliExpress", "aliexpress.com"),
+        ("Temu", "temu.com"),
+        ("SHEIN", "shein.com"),
+        ("DHgate", "dhgate.com"),
+        ("Banggood", "banggood.com"),
+        ("Alibaba", "alibaba.com"),
+        ("Made-in-China", "made-in-china.com"),
+    ][:WEB_CHINA_GLOBAL_MAX_STORES]
+    site_expr = " OR ".join(f"site:{domain}" for _, domain in stores)
+    params = {
+        "engine": "google",
+        "q": f"{q} ({site_expr})",
+        "api_key": SERPAPI_API_KEY,
+        "google_domain": "google.com",
+        "gl": "us",
+        "hl": "en",
+        "num": max(10, min(30, WEB_CHINA_ORGANIC_NUM * 3)),
+        "output": "json",
+    }
+    try:
+        r = requests.get(
+            "https://serpapi.com/search.json",
+            params=params,
+            timeout=(3.0, WEB_QUOTA_POOL_TIMEOUT_SECONDS),
+        )
+        if r.status_code >= 400:
+            print(f"WEB QUOTA CHINA HTTP {r.status_code}: {r.text[:180]}")
+            return []
+        data = r.json()
+        if data.get("error"):
+            print(f"WEB QUOTA CHINA ERROR: {data.get('error')}")
+            return []
+        candidates = []
+        per_store = {}
+        for pos, row in enumerate(data.get("organic_results") or [], 1):
+            link = str(row.get("link") or "").strip()
+            if not link:
+                continue
+            host = urllib.parse.urlparse(link).netloc.lower().replace("www.", "")
+            label = ""
+            domain = ""
+            for lab, dom in stores:
+                if _host_matches_any(host, (dom,)):
+                    label, domain = lab, dom
+                    break
+            if not domain or not _china_global_product_url(domain, link):
+                continue
+            if per_store.get(domain, 0) >= _web_marketplace_repeat_cap(domain):
+                continue
+            per_store[domain] = per_store.get(domain, 0) + 1
+            price_text = _google_organic_price_text(row)
+            candidates.append({
+                "title": str(row.get("title") or q).strip(),
+                "link": link,
+                "source": label,
+                "position": int(row.get("position") or pos),
+                "section": "web_quota_china_pool",
+                "thumbnail": str(row.get("thumbnail") or "").strip(),
+                "image": str(row.get("thumbnail") or "").strip(),
+                "price": price_text,
+                "currency": detect_currency_code(price_text, "", "cn") if price_text else "",
+                "_web_global_china": True,
+            })
+        rows = _web_market_candidates_to_items(candidates, 2, lang, q)
+        rows = _web_verify_rows_strict(rows, lang)
+        print(f"WEB QUOTA CHINA POOL -> {len(rows)} rows")
+        return rows
+    except Exception as e:
+        print(f"WEB QUOTA CHINA EXCEPTION: {e}")
+        return []
+
+
+def _web_quota_market_pool_sync(query, country, lang, rank):
+    """One SerpApi request per market rank. Results are then verified locally.
+    This replaces many per-store SerpApi probes in the web streaming path.
+    """
+    market = _web_market(country)
+    MARKET_CTX.value = market
+    q = _shopping_clean_query(query or "")
+    if not q or not SERPAPI_API_KEY:
+        return []
+
+    key = _web_quota_cache_key("market_pool", q, country, lang, rank)
+
+    def _fetch():
+        if rank == 2:
+            return _web_quota_china_pool(q, lang)
+
+        gl = str(market.get("country") or DEFAULT_COUNTRY).lower() if rank == 0 else "us"
+        hl = country_search_hl(gl) if rank == 0 else "en"
+        cards = _serpapi_shopping_request(
+            q, gl, hl=hl, timeout_seconds=WEB_QUOTA_POOL_TIMEOUT_SECONDS
+        )
+        candidates = []
+        for card in cards or []:
+            item = _shopping_card_to_market_item(card, "", gl)
+            if not item:
+                continue
+            if result_market_rank(item) != rank:
+                continue
+            candidates.append(item)
+
+        rows = _web_market_candidates_to_items(candidates, rank, lang, q)
+        rows = [r for r in rows if _web_is_direct_product_page_url(r.get("url") or "", r.get("store") or "")]
+        rows = _web_verify_rows_strict(rows, lang)
+
+        # Preserve useful diversity while allowing multi-listing marketplaces.
+        out = []
+        store_counts = {}
+        for row in rows:
+            store = normalize_name(row.get("store") or "")
+            host = ""
+            try:
+                host = urllib.parse.urlparse(row.get("url") or "").netloc.lower().replace("www.", "")
+            except Exception:
+                pass
+            cap = _web_marketplace_repeat_cap(host) if host else WEB_STREAM_RESULTS_PER_STORE
+            if store_counts.get(store, 0) >= cap:
+                continue
+            store_counts[store] = store_counts.get(store, 0) + 1
+            out.append(row)
+            if len(out) >= WEB_STREAM_IMAGE_TARGET_RESULTS:
+                break
+        print(f"WEB QUOTA MARKET POOL rank={rank} gl={gl} -> {len(out)} rows")
+        return out
+
+    return _web_quota_cached_call(key, _fetch) or []
+
 
 def _web_image_seed_sync(image_b64, mime, caption, country, lang):
     """One fast image-identification pass used before merchant FIFO probes.
@@ -10743,9 +11067,53 @@ async def web_api_search_stream(request: Request):
             sent = set()
             # v105 gives lightweight store probes a short head start before the heavy
             # authoritative engine starts. Final results are unchanged; first paint is faster.
-            final_task = asyncio.create_task(_web_turbo_delayed_text_final(q, country, lang))
+            final_task = None if WEB_QUOTA_SAVER_MODE else asyncio.create_task(_web_turbo_delayed_text_final(q, country, lang))
 
-            if WEB_STREAM_STORE_FIFO and WEB_STREAM_FAST_WAVE and SERPAPI_API_KEY:
+            if WEB_QUOTA_SAVER_MODE and WEB_STREAM_FAST_WAVE and SERPAPI_API_KEY:
+                pool_tasks = []
+                for rank in (2, 0, 1):
+                    async def _run_pool(r=rank):
+                        try:
+                            rows = await asyncio.wait_for(
+                                asyncio.to_thread(_web_quota_market_pool_sync, q, country, lang, r),
+                                timeout=WEB_STREAM_STORE_TIMEOUT,
+                            )
+                            return r, rows
+                        except Exception as e:
+                            print(f"WEB QUOTA TEXT POOL ERR rank={r}: {e}")
+                            return r, []
+                    pool_tasks.append(asyncio.create_task(_run_pool()))
+
+                pending_pool = set(pool_tasks)
+                while pending_pool and len(sent) < WEB_STREAM_IMAGE_TARGET_RESULTS:
+                    done_pool, pending_pool = await asyncio.wait(
+                        pending_pool, timeout=0.15, return_when=asyncio.FIRST_COMPLETED
+                    )
+                    for task in done_pool:
+                        rank, rows = await task
+                        market_name = _web_market_label(rank)
+                        for item in rows or []:
+                            if len(sent) >= WEB_STREAM_IMAGE_TARGET_RESULTS:
+                                break
+                            key = str(item.get("url") or "").strip() or (
+                                market_name + "|" + str(item.get("store") or "") + "|" + str(item.get("title") or "")
+                            )
+                            if key in sent:
+                                continue
+                            sent.add(key)
+                            yield _web_stream_event({
+                                "event": "result", "phase": "quota_pool", "market": market_name,
+                                "item": item, "elapsed_ms": int((time.time()-started)*1000),
+                            })
+                            await asyncio.sleep(0)
+                        yield _web_stream_event({
+                            "event": "market_fast_done", "market": market_name,
+                            "elapsed_ms": int((time.time()-started)*1000)
+                        })
+                for task in pending_pool:
+                    task.cancel()
+
+            elif WEB_STREAM_STORE_FIFO and WEB_STREAM_FAST_WAVE and SERPAPI_API_KEY:
                 store_tasks = []
                 task_meta = {}
                 rank_remaining = {0: 0, 1: 0, 2: 0}
@@ -10837,14 +11205,20 @@ async def web_api_search_stream(request: Request):
                             yield _web_stream_event({"event": "result", "phase": "fast", "market": market_name, "item": item, "elapsed_ms": int((time.time()-started)*1000)})
                             await asyncio.sleep(0)
                         yield _web_stream_event({"event": "market_fast_done", "market": market_name, "count": len(items or []), "elapsed_ms": int((time.time()-started)*1000)})
-                    if final_task.done():
+                    if final_task is not None and final_task.done():
                         break
                 for task in pending_fast:
                     task.cancel()
 
-            # Existing engine remains the authoritative enrichment pass.  Its extra rows
-            # are appended after the live FIFO store probes, without changing WhatsApp logic.
-            final = await final_task
+            # In quota-saver mode, the pooled market results are normally enough.
+            # Only invoke the expensive original engine when explicitly enabled and the pool is very sparse.
+            if final_task is None:
+                if WEB_QUOTA_HEAVY_RESCUE and len(sent) < WEB_QUOTA_HEAVY_RESCUE_MIN_RESULTS:
+                    final = await _web_turbo_delayed_text_final(q, country, lang)
+                else:
+                    final = {"results": []}
+            else:
+                final = await final_task
             if final.get("type") == "recommendations":
                 yield _web_stream_event({"event": "recommendations", "data": final, "elapsed_ms": int((time.time()-started)*1000)})
             else:
@@ -10908,7 +11282,7 @@ async def web_api_image_search_stream(request: Request):
         yield _web_stream_event({"event": "start", "ok": True, "kind": "image"})
         yield _web_stream_event({"event": "status", "stage": "identify", "elapsed_ms": 0})
         try:
-            seed = await asyncio.to_thread(_web_image_seed_sync, image_b64, mime, caption, country, lang)
+            seed = await asyncio.to_thread(_web_quota_lens_seed_sync if WEB_QUOTA_SAVER_MODE else _web_image_seed_sync, image_b64, mime, caption, country, lang)
             identity = str(seed.get("query") or caption or "").strip()
             yield _web_stream_event({"event": "query", "query": identity, "market": seed.get("market")})
 
@@ -10926,7 +11300,52 @@ async def web_api_image_search_stream(request: Request):
                 yield _web_stream_event({"event": "result", "phase": "lens_seed", "market": market_name, "item": item, "elapsed_ms": int((time.time()-started)*1000)})
                 await asyncio.sleep(0)
 
-            if len(sent) < WEB_STREAM_IMAGE_TARGET_RESULTS and identity and WEB_STREAM_STORE_FIFO and WEB_STREAM_FAST_WAVE and SERPAPI_API_KEY:
+            if len(sent) < WEB_STREAM_IMAGE_TARGET_RESULTS and identity and WEB_QUOTA_SAVER_MODE and SERPAPI_API_KEY:
+                pool_tasks = []
+                for rank in (2, 0, 1):
+                    async def _run_pool(r=rank):
+                        try:
+                            rows = await asyncio.wait_for(
+                                asyncio.to_thread(_web_quota_market_pool_sync, identity, country, lang, r),
+                                timeout=WEB_STREAM_STORE_TIMEOUT,
+                            )
+                            return r, rows
+                        except Exception as e:
+                            print(f"WEB QUOTA IMAGE POOL ERR rank={r}: {e}")
+                            return r, []
+                    pool_tasks.append(asyncio.create_task(_run_pool()))
+
+                pending_pool = set(pool_tasks)
+                while pending_pool and len(sent) < WEB_STREAM_IMAGE_TARGET_RESULTS:
+                    done_pool, pending_pool = await asyncio.wait(
+                        pending_pool, timeout=0.15, return_when=asyncio.FIRST_COMPLETED
+                    )
+                    for task in done_pool:
+                        rank, rows = await task
+                        market_name = _web_market_label(rank)
+                        for item in rows or []:
+                            if len(sent) >= WEB_STREAM_IMAGE_TARGET_RESULTS:
+                                break
+                            key = str(item.get("url") or "").strip() or (
+                                market_name + "|" + str(item.get("store") or "") + "|" + str(item.get("title") or "")
+                            )
+                            if key in sent:
+                                continue
+                            sent.add(key)
+                            market_counts[market_name] = market_counts.get(market_name, 0) + 1
+                            yield _web_stream_event({
+                                "event": "result", "phase": "quota_pool", "market": market_name,
+                                "item": item, "elapsed_ms": int((time.time()-started)*1000),
+                            })
+                            await asyncio.sleep(0)
+                        yield _web_stream_event({
+                            "event": "market_fast_done", "market": market_name,
+                            "elapsed_ms": int((time.time()-started)*1000)
+                        })
+                for task in pending_pool:
+                    task.cancel()
+
+            elif len(sent) < WEB_STREAM_IMAGE_TARGET_RESULTS and identity and WEB_STREAM_STORE_FIFO and WEB_STREAM_FAST_WAVE and SERPAPI_API_KEY:
                 store_tasks = []
                 task_meta = {}
                 rank_remaining = {0: 0, 1: 0, 2: 0}
@@ -10990,7 +11409,8 @@ async def web_api_image_search_stream(request: Request):
 
             # Only invoke the heavy original image engine when the live wave is still sparse
             # or local coverage is missing.  The user has already seen FIFO cards by then.
-            if len(sent) < WEB_STREAM_IMAGE_TARGET_RESULTS or market_counts.get("local", 0) == 0:
+            if ((not WEB_QUOTA_SAVER_MODE and (len(sent) < WEB_STREAM_IMAGE_TARGET_RESULTS or market_counts.get("local", 0) == 0))
+                or (WEB_QUOTA_SAVER_MODE and WEB_QUOTA_HEAVY_RESCUE and len(sent) < WEB_QUOTA_HEAVY_RESCUE_MIN_RESULTS)):
                 final = await asyncio.to_thread(_web_search_image_sync, image_b64, mime, caption, country, lang)
                 for item in final.get("results") or []:
                     market_name = str(item.get("market") or "other")
@@ -11013,9 +11433,12 @@ async def web_api_image_search_stream(request: Request):
                     if len(sent) >= WEB_STREAM_IMAGE_TARGET_RESULTS:
                         break
                     try:
-                        extra_rows = await asyncio.to_thread(_web_fast_market_wave_sync, identity, country, lang, rank)
+                        if WEB_QUOTA_SAVER_MODE:
+                            extra_rows = await asyncio.to_thread(_web_quota_market_pool_sync, identity, country, lang, rank)
+                        else:
+                            extra_rows = await asyncio.to_thread(_web_fast_market_wave_sync, identity, country, lang, rank)
                     except Exception as e:
-                        print(f"WEB IMAGE V107 TOPUP ERR rank={rank}: {e}")
+                        print(f"WEB IMAGE TOPUP ERR rank={rank}: {e}")
                         extra_rows = []
                     for item in extra_rows or []:
                         if len(sent) >= WEB_STREAM_IMAGE_TARGET_RESULTS:
