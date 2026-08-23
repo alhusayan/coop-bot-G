@@ -26,7 +26,7 @@ app.add_middleware(
     allow_headers=["Content-Type", "Accept"],
     max_age=86400,
 )
-BUILD_ID = "v106.0-amazon-direct-price-safety-20260823"
+BUILD_ID = "v107.0-stream-10-results-20260823"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES")
@@ -8892,7 +8892,8 @@ WEB_MULTI_LISTING_MARKETPLACES = (
     "etsy.com", "ebay.com", "aliexpress.com", "temu.com", "shein.com",
     "dhgate.com", "amazon.com", "alibaba.com", "made-in-china.com", "banggood.com",
 )
-WEB_STREAM_IMAGE_FINAL_MIN_RESULTS = max(2, min(10, int(os.environ.get("WEB_STREAM_IMAGE_FINAL_MIN_RESULTS", "5"))))
+WEB_STREAM_IMAGE_FINAL_MIN_RESULTS = max(2, min(20, int(os.environ.get("WEB_STREAM_IMAGE_FINAL_MIN_RESULTS", "10"))))
+WEB_STREAM_IMAGE_TARGET_RESULTS = max(5, min(20, int(os.environ.get("WEB_STREAM_IMAGE_TARGET_RESULTS", "10"))))
 # v97: Chinese global marketplaces are more important than the US wave on web.
 # Their fast probes use normal Google organic site search first because Google Shopping
 # often returns few/no cards for AliExpress/Temu/SHEIN/Alibaba-style domains.
@@ -10799,6 +10800,8 @@ async def web_api_search_stream(request: Request):
                         if rank_remaining[r] == 0:
                             yield _web_stream_event({"event": "market_fast_done", "market": market_name, "elapsed_ms": int((time.time()-started)*1000)})
 
+                if len(sent) >= WEB_STREAM_IMAGE_TARGET_RESULTS:
+                    print(f"WEB IMAGE TARGET REACHED live={len(sent)} target={WEB_STREAM_IMAGE_TARGET_RESULTS}")
                 for task in pending:
                     task.cancel()
                 for r in (0, 1, 2):
@@ -10911,6 +10914,8 @@ async def web_api_image_search_stream(request: Request):
 
             # Lens seed results are useful immediately. Emit them without waiting for any market.
             for item in seed.get("items") or []:
+                if len(sent) >= WEB_STREAM_IMAGE_TARGET_RESULTS:
+                    break
                 market_name = str(item.get("market") or "other")
                 key = str(item.get("url") or "").strip() or (market_name + "|" + str(item.get("store") or "") + "|" + str(item.get("title") or ""))
                 if key in sent:
@@ -10919,9 +10924,9 @@ async def web_api_image_search_stream(request: Request):
                 if market_name in market_counts:
                     market_counts[market_name] += 1
                 yield _web_stream_event({"event": "result", "phase": "lens_seed", "market": market_name, "item": item, "elapsed_ms": int((time.time()-started)*1000)})
-                await asyncio.sleep(0.015)
+                await asyncio.sleep(0)
 
-            if identity and WEB_STREAM_STORE_FIFO and WEB_STREAM_FAST_WAVE and SERPAPI_API_KEY:
+            if len(sent) < WEB_STREAM_IMAGE_TARGET_RESULTS and identity and WEB_STREAM_STORE_FIFO and WEB_STREAM_FAST_WAVE and SERPAPI_API_KEY:
                 store_tasks = []
                 task_meta = {}
                 rank_remaining = {0: 0, 1: 0, 2: 0}
@@ -10958,6 +10963,8 @@ async def web_api_image_search_stream(request: Request):
                             r, rows = rank, []
                         market_name = _web_market_label(r)
                         for item in rows or []:
+                            if len(sent) >= WEB_STREAM_IMAGE_TARGET_RESULTS:
+                                break
                             key = str(item.get("url") or "").strip() or (market_name + "|" + str(item.get("store") or "") + "|" + str(item.get("title") or ""))
                             if key in sent:
                                 continue
@@ -10971,6 +10978,8 @@ async def web_api_image_search_stream(request: Request):
                             })
                             await asyncio.sleep(0)
                         rank_remaining[r] = max(0, rank_remaining.get(r, 1) - 1)
+                        if len(sent) >= WEB_STREAM_IMAGE_TARGET_RESULTS:
+                            break
                         if rank_remaining[r] == 0:
                             yield _web_stream_event({"event": "market_fast_done", "market": market_name, "elapsed_ms": int((time.time()-started)*1000)})
                 for task in pending:
@@ -10981,7 +10990,7 @@ async def web_api_image_search_stream(request: Request):
 
             # Only invoke the heavy original image engine when the live wave is still sparse
             # or local coverage is missing.  The user has already seen FIFO cards by then.
-            if len(sent) < WEB_STREAM_IMAGE_FINAL_MIN_RESULTS or market_counts.get("local", 0) == 0:
+            if len(sent) < WEB_STREAM_IMAGE_TARGET_RESULTS or market_counts.get("local", 0) == 0:
                 final = await asyncio.to_thread(_web_search_image_sync, image_b64, mime, caption, country, lang)
                 for item in final.get("results") or []:
                     market_name = str(item.get("market") or "other")
@@ -10989,9 +10998,35 @@ async def web_api_image_search_stream(request: Request):
                     if key in sent:
                         yield _web_stream_event({"event": "upsert", "phase": "final", "market": market_name, "item": item, "elapsed_ms": int((time.time()-started)*1000)})
                         continue
+                    if len(sent) >= WEB_STREAM_IMAGE_TARGET_RESULTS:
+                        break
                     sent.add(key)
                     yield _web_stream_event({"event": "result", "phase": "final", "market": market_name, "item": item, "elapsed_ms": int((time.time()-started)*1000)})
                     await asyncio.sleep(0)
+
+            # v107 top-up: if strict verification removed too many cards, reuse the same
+            # proven store-wave logic and continue streaming until we reach 10 unique products.
+            if identity and len(sent) < WEB_STREAM_IMAGE_TARGET_RESULTS:
+                market_snapshot = _web_market(country)
+                MARKET_CTX.value = market_snapshot
+                for rank in (0, 2, 1):
+                    if len(sent) >= WEB_STREAM_IMAGE_TARGET_RESULTS:
+                        break
+                    try:
+                        extra_rows = await asyncio.to_thread(_web_fast_market_wave_sync, identity, country, lang, rank)
+                    except Exception as e:
+                        print(f"WEB IMAGE V107 TOPUP ERR rank={rank}: {e}")
+                        extra_rows = []
+                    for item in extra_rows or []:
+                        if len(sent) >= WEB_STREAM_IMAGE_TARGET_RESULTS:
+                            break
+                        market_name = str(item.get("market") or _web_market_label(rank))
+                        key = str(item.get("url") or "").strip() or (market_name + "|" + str(item.get("store") or "") + "|" + str(item.get("title") or ""))
+                        if key in sent:
+                            continue
+                        sent.add(key)
+                        yield _web_stream_event({"event": "result", "phase": "topup10", "market": market_name, "item": item, "elapsed_ms": int((time.time()-started)*1000)})
+                        await asyncio.sleep(0)
 
             yield _web_stream_event({"event": "done", "count": len(sent), "elapsed_ms": int((time.time()-started)*1000)})
         except asyncio.CancelledError:
