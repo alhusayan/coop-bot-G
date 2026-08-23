@@ -26,7 +26,7 @@ app.add_middleware(
     allow_headers=["Content-Type", "Accept"],
     max_age=86400,
 )
-BUILD_ID = "v113.0-fast-precision-60-100-20260823"
+BUILD_ID = "v110.2-real-shopping-gl-fix-20260823"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES")
@@ -9057,24 +9057,6 @@ WEB_MULTI_LISTING_MARKETPLACES = (
 )
 WEB_STREAM_IMAGE_FINAL_MIN_RESULTS = max(2, min(20, int(os.environ.get("WEB_STREAM_IMAGE_FINAL_MIN_RESULTS", "10"))))
 WEB_STREAM_IMAGE_TARGET_RESULTS = max(5, min(20, int(os.environ.get("WEB_STREAM_IMAGE_TARGET_RESULTS", "10"))))
-
-# v111: AI gatekeeper for image-search results. The original user image is the source of truth.
-# Exact branded/model products are filtered strictly before any card is streamed.
-WEB_AI_RESULT_GATE = env_bool("WEB_AI_RESULT_GATE", True)
-WEB_AI_GATE_FAIL_CLOSED_STRICT = env_bool("WEB_AI_GATE_FAIL_CLOSED_STRICT", True)
-WEB_AI_GATE_PROFILE_TIMEOUT_SECONDS = max(3.0, min(10.0, float(os.environ.get("WEB_AI_GATE_PROFILE_TIMEOUT_SECONDS", "6.0"))))
-WEB_AI_GATE_JUDGE_TIMEOUT_SECONDS = max(2.5, min(8.0, float(os.environ.get("WEB_AI_GATE_JUDGE_TIMEOUT_SECONDS", "5.0"))))
-WEB_AI_GATE_IMAGE_TIMEOUT_SECONDS = max(1.5, min(5.0, float(os.environ.get("WEB_AI_GATE_IMAGE_TIMEOUT_SECONDS", "2.5"))))
-WEB_AI_GATE_MAX_IMAGE_BYTES = max(250000, min(2 * 1024 * 1024, int(os.environ.get("WEB_AI_GATE_MAX_IMAGE_BYTES", "1200000"))))
-WEB_AI_GATE_CONCURRENCY = max(1, min(6, int(os.environ.get("WEB_AI_GATE_CONCURRENCY", "3"))))
-WEB_AI_GATE_STREAM_EXTRA_SECONDS = max(1.0, min(8.0, float(os.environ.get("WEB_AI_GATE_STREAM_EXTRA_SECONDS", "4.0"))))
-WEB_AI_GATE_CACHE_TTL_SECONDS = max(300, min(86400, int(os.environ.get("WEB_AI_GATE_CACHE_TTL_SECONDS", "3600"))))
-WEB_SEARCH_PRECISION_DEFAULT = max(60, min(100, int(os.environ.get("WEB_SEARCH_PRECISION_DEFAULT", "70"))))
-WEB_AI_GATE_FULL_START = max(90, min(100, int(os.environ.get("WEB_AI_GATE_FULL_START", "90"))))
-WEB_AI_GATE_LIGHT_START = max(61, min(89, int(os.environ.get("WEB_AI_GATE_LIGHT_START", "61"))))
-WEB_AI_GATE_CACHE = {}
-WEB_AI_GATE_CACHE_LOCK = threading.Lock()
-WEB_AI_GATE_SEMAPHORE = threading.Semaphore(WEB_AI_GATE_CONCURRENCY)
 # v97: Chinese global marketplaces are more important than the US wave on web.
 # Their fast probes use normal Google organic site search first because Google Shopping
 # often returns few/no cards for AliExpress/Temu/SHEIN/Alibaba-style domains.
@@ -10296,387 +10278,6 @@ def _web_verify_rows_strict(rows, lang):
     return [x for x in out if x]
 
 
-
-def _web_ai_gate_json(raw):
-    text = str(raw or "").strip()
-    if not text:
-        return {}
-    text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.I)
-    text = re.sub(r"\s*```$", "", text)
-    m = re.search(r"\{.*\}", text, flags=re.S)
-    if m:
-        text = m.group(0)
-    try:
-        data = json.loads(text)
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
-
-
-def _web_ai_gate_terms(value):
-    txt = normalize_ar(str(value or "")).lower()
-    return [x for x in re.findall(r"[a-z0-9\u0600-\u06ff]+", txt) if len(x) >= 2]
-
-
-def _web_ai_plain_call(parts, system, timeout_seconds):
-    """Bounded Gemini plain call used only by the web AI gatekeeper."""
-    if not GEMINI_API_KEY:
-        return ""
-    model = GEMINI_FAST_MODEL
-    url = f"{GEMINI_BASE_URL}/{model}:generateContent"
-    payload = {
-        "systemInstruction": {"parts": [{"text": system}]},
-        "contents": [{"role": "user", "parts": parts}],
-        "generationConfig": {"temperature": 0, "maxOutputTokens": 280},
-    }
-    try:
-        with GEMINI_STATS_LOCK:
-            GEMINI_STATS["plain_calls"] += 1
-            print(f"GEMINI GATE CALL model={model} totals={GEMINI_STATS}")
-        r = requests.post(url, params={"key": GEMINI_API_KEY}, json=payload, timeout=(3.0, timeout_seconds))
-        if r.status_code >= 400:
-            print(f"GEMINI GATE HTTP {r.status_code}: {r.text[:240]}")
-            return ""
-        data = r.json()
-        candidates = data.get("candidates") or []
-        if not candidates:
-            return ""
-        return "".join(
-            str(part.get("text") or "")
-            for part in (candidates[0].get("content", {}).get("parts", []) or [])
-        ).strip()
-    except Exception as e:
-        print(f"GEMINI GATE EXCEPTION: {e}")
-        return ""
-
-
-def _web_search_precision(value):
-    try:
-        return max(60, min(100, int(round(float(value)))))
-    except Exception:
-        return WEB_SEARCH_PRECISION_DEFAULT
-
-
-def _web_ai_precision_policy(precision, mode):
-    p = _web_search_precision(precision)
-    mode = str(mode or "balanced").lower()
-    ai_off = p <= 60
-    light_gate = 60 < p < WEB_AI_GATE_FULL_START
-    full_gate = p >= WEB_AI_GATE_FULL_START
-    if mode == "strict_exact":
-        threshold = 70 + int(round((p - 60) * 0.575))  # 70 @60 -> 93 @100
-        exact_only = p >= 80
-    else:
-        threshold = 58 + int(round((p - 60) * 0.50))   # 58 @60 -> 78 @100
-        exact_only = False
-    return {
-        "precision": p,
-        "threshold": threshold,
-        "exact_only": exact_only,
-        "use_candidate_image": full_gate,
-        "fail_closed": p >= 90,
-        "ai_off": ai_off,
-        "light_gate": light_gate,
-        "full_gate": full_gate,
-        "broad_fast": ai_off,
-    }
-
-
-def _web_ai_identity_profile(image_b64, mime, identity_hint="", precision=70):
-    """Build one conservative product identity profile from the ORIGINAL image.
-
-    This is one plain Gemini call and does not search the web.  It decides whether the
-    photo supports a strict exact-product identity (brand/model/variant visibly readable)
-    or whether similar products should remain allowed for generic items.
-    """
-    precision = _web_search_precision(precision)
-    if precision <= 60:
-        return {
-            "mode": "balanced", "brand": "", "product": str(identity_hint or "").strip()[:160],
-            "variant": "", "category": "", "search_identity": str(identity_hint or "").strip()[:160],
-            "must_terms": [], "exclude_terms": [], "confidence": 0.0, "precision": precision,
-            "ai_filter_off": True,
-        }
-    fallback = {
-        "mode": "balanced",
-        "brand": "",
-        "product": str(identity_hint or "").strip()[:160],
-        "variant": "",
-        "category": "",
-        "search_identity": str(identity_hint or "").strip()[:160],
-        "must_terms": [],
-        "exclude_terms": [],
-        "confidence": 0.45,
-    }
-    if not WEB_AI_RESULT_GATE or not GEMINI_API_KEY:
-        return fallback
-    system = (
-        "You are the product-identity gatekeeper for a shopping image-search engine. "
-        "The ORIGINAL user image is the only source of truth. Read visible branding, model, variant, size/edition text when clear. "
-        "Never invent a brand or model. If the image clearly identifies a specific branded/model/variant product, mode must be strict_exact. "
-        "If it is only a generic style/object, mode must be balanced. Return compact JSON only with keys: "
-        "mode, brand, product, variant, category, search_identity, must_terms, exclude_terms, confidence. "
-        "must_terms should be 1-5 short English terms that an exact listing normally contains. "
-        "exclude_terms should list obvious conflicting variants only when certain."
-    )
-    prompt = (
-        f"Existing Lens/Vision hint (may be wrong): {identity_hint}\n"
-        f"User-selected search precision: {precision}%. This controls filtering strictness later; identity recognition itself must remain factual and conservative.\n"
-        "Create the conservative identity profile. For perfume/fragrance, distinguish the exact line/flanker such as Intense, Sport, Parfum, EDT, EDP when visible."
-    )
-    try:
-        with WEB_AI_GATE_SEMAPHORE:
-            raw = _web_ai_plain_call([
-                {"inline_data": {"mime_type": mime, "data": image_b64}},
-                {"text": prompt},
-            ], system, WEB_AI_GATE_PROFILE_TIMEOUT_SECONDS)
-        data = _web_ai_gate_json(raw)
-    except Exception as e:
-        print(f"WEB AI PROFILE ERR: {e}")
-        data = {}
-    if not data:
-        return fallback
-    mode = str(data.get("mode") or "balanced").strip().lower()
-    if mode not in ("strict_exact", "balanced"):
-        mode = "balanced"
-    out = {
-        "mode": mode,
-        "brand": str(data.get("brand") or "").strip()[:80],
-        "product": str(data.get("product") or identity_hint or "").strip()[:160],
-        "variant": str(data.get("variant") or "").strip()[:100],
-        "category": str(data.get("category") or "").strip()[:80],
-        "search_identity": str(data.get("search_identity") or data.get("product") or identity_hint or "").strip()[:180],
-        "must_terms": [str(x).strip()[:50] for x in (data.get("must_terms") or []) if str(x).strip()][:5],
-        "exclude_terms": [str(x).strip()[:50] for x in (data.get("exclude_terms") or []) if str(x).strip()][:5],
-        "confidence": float(data.get("confidence") or 0.5) if str(data.get("confidence") or "").replace('.','',1).isdigit() else 0.5,
-        "precision": precision,
-    }
-    print(
-        "WEB AI PROFILE "
-        f"mode={out['mode']} brand={out['brand']!r} product={out['product']!r} "
-        f"variant={out['variant']!r} must={out['must_terms']} precision={precision}%"
-    )
-    return out
-
-
-def _web_ai_gate_cache_key(profile, row):
-    identity = "|".join([
-        str(profile.get("brand") or ""), str(profile.get("product") or ""),
-        str(profile.get("variant") or ""), str(profile.get("mode") or ""),
-        str(_web_search_precision(profile.get("precision", WEB_SEARCH_PRECISION_DEFAULT)))
-    ])
-    target = str(row.get("url") or row.get("link") or row.get("title") or "")
-    return hashlib.sha1((normalize_name(identity) + "|" + target.lower()).encode("utf-8", "ignore")).hexdigest()
-
-
-def _web_ai_gate_cache_get(key):
-    now = time.time()
-    with WEB_AI_GATE_CACHE_LOCK:
-        item = WEB_AI_GATE_CACHE.get(key)
-        if item and now - float(item.get("ts") or 0) <= WEB_AI_GATE_CACHE_TTL_SECONDS:
-            return dict(item.get("data") or {})
-        if item:
-            WEB_AI_GATE_CACHE.pop(key, None)
-    return None
-
-
-def _web_ai_gate_cache_set(key, data):
-    with WEB_AI_GATE_CACHE_LOCK:
-        WEB_AI_GATE_CACHE[key] = {"ts": time.time(), "data": dict(data or {})}
-        if len(WEB_AI_GATE_CACHE) > 5000:
-            oldest = sorted(WEB_AI_GATE_CACHE.items(), key=lambda kv: kv[1].get("ts", 0))[:800]
-            for k, _ in oldest:
-                WEB_AI_GATE_CACHE.pop(k, None)
-
-
-def _web_ai_gate_candidate_image(row):
-    image_url = _web_unproxy_image_url(row.get("image") or row.get("thumbnail") or "")
-    if not image_url:
-        return None
-    try:
-        parsed = urllib.parse.urlparse(image_url)
-        headers = dict(HEADERS)
-        headers["Accept"] = "image/avif,image/webp,image/apng,image/*,*/*;q=0.8"
-        if parsed.scheme and parsed.netloc:
-            headers["Referer"] = f"{parsed.scheme}://{parsed.netloc}/"
-        resp = requests.get(
-            image_url, headers=headers,
-            timeout=(1.5, WEB_AI_GATE_IMAGE_TIMEOUT_SECONDS),
-            stream=True, allow_redirects=True,
-        )
-        if resp.status_code >= 400:
-            return None
-        ctype = str(resp.headers.get("content-type") or "").split(";",1)[0].strip().lower()
-        if not ctype.startswith("image/"):
-            return None
-        chunks, total = [], 0
-        for chunk in resp.iter_content(65536):
-            if not chunk:
-                continue
-            total += len(chunk)
-            if total > WEB_AI_GATE_MAX_IMAGE_BYTES:
-                return None
-            chunks.append(chunk)
-        body = b"".join(chunks)
-        if not body:
-            return None
-        return ctype, base64.b64encode(body).decode("ascii")
-    except Exception:
-        return None
-
-
-def _web_ai_gate_fast_decision(profile, row):
-    """Return accept/reject/None. None means ask the multimodal judge."""
-    mode = str(profile.get("mode") or "balanced")
-    precision = _web_search_precision(profile.get("precision", WEB_SEARCH_PRECISION_DEFAULT))
-    policy = _web_ai_precision_policy(precision, mode)
-    if policy["ai_off"]:
-        return True
-    if mode != "strict_exact":
-        if policy["light_gate"]:
-            return True
-        # At the broadest setting the AI identity profile still supervises the search,
-        # while the existing relevance/product-page gates can stream generic matches immediately.
-        if policy["broad_fast"]:
-            return True
-        return None
-    text = " ".join(str(row.get(k) or "") for k in ("store", "title", "name", "snippet")).lower()
-    tokens = set(_web_ai_gate_terms(text))
-    brand_tokens = set(_web_ai_gate_terms(profile.get("brand")))
-    must = [set(_web_ai_gate_terms(x)) for x in (profile.get("must_terms") or [])]
-    must = [x for x in must if x]
-    exclude = [set(_web_ai_gate_terms(x)) for x in (profile.get("exclude_terms") or [])]
-    # Explicit conflicting flanker/model is a safe rejection.
-    if any(x and x.issubset(tokens) for x in exclude):
-        return False if precision >= 35 else None
-    brand_ok = (not brand_tokens) or brand_tokens.issubset(tokens)
-    must_hits = sum(1 for x in must if x.issubset(tokens))
-    # Strong textual exactness: the AI profile's brand + most exact terms are present.
-    required_hits = max(1, len(must) - 1) if precision >= 65 else max(1, (len(must) + 1) // 2)
-    if brand_ok and (not must or must_hits >= required_hits):
-        return True
-    return None
-
-
-def _web_ai_gate_candidate(profile, row, original_b64, original_mime, lang="en"):
-    if not WEB_AI_RESULT_GATE:
-        return True, 100, "disabled"
-    key = _web_ai_gate_cache_key(profile, row)
-    cached = _web_ai_gate_cache_get(key)
-    if cached is not None:
-        return bool(cached.get("accept")), int(cached.get("score") or 0), str(cached.get("level") or "cached")
-
-    fast = _web_ai_gate_fast_decision(profile, row)
-    if fast is True:
-        result = {"accept": True, "score": 98, "level": "exact_text"}
-        _web_ai_gate_cache_set(key, result)
-        return True, 98, "exact_text"
-
-    mode = str(profile.get("mode") or "balanced")
-    precision = _web_search_precision(profile.get("precision", WEB_SEARCH_PRECISION_DEFAULT))
-    policy = _web_ai_precision_policy(precision, mode)
-    if policy["ai_off"]:
-        return True, 100, "ai_off_60"
-    if policy["light_gate"] and fast is None:
-        # Fast path for 61-89: keep existing product/relevance filters and avoid a per-result Gemini call.
-        return True, 75, "light_fast"
-    candidate_img = _web_ai_gate_candidate_image(row) if policy["use_candidate_image"] else None
-    if fast is False:
-        result = {"accept": False, "score": 5, "level": "conflict"}
-        _web_ai_gate_cache_set(key, result)
-        return False, 5, "conflict"
-
-    system = (
-        "You are the final AI gatekeeper before a shopping result is shown. "
-        "The FIRST image is the user's ORIGINAL product and is the source of truth. "
-        "If a SECOND image is provided it is the candidate listing image. "
-        "Use the identity profile plus candidate title/store and visual comparison. "
-        "For strict_exact: accept ONLY the same brand + same product line/model + same variant/flanker. "
-        "Reject lookalikes, inspired products, different fragrances/variants, generic wholesale items, accessories, empty bottles, samples unless the original itself is that. "
-        "For balanced: accept the same product type/style when an exact brand/model is not visible, but reject clearly different objects. "
-        f"The user selected search precision {precision}%. Higher precision means stricter identity matching; lower precision may accept genuinely similar products but never a clearly different object/category. "
-        "Return JSON only: {\"accept\":true|false,\"level\":\"exact\"|\"similar\"|\"reject\",\"score\":0-100}."
-    )
-    info = {
-        "mode": mode,
-        "brand": profile.get("brand") or "",
-        "product": profile.get("product") or "",
-        "variant": profile.get("variant") or "",
-        "category": profile.get("category") or "",
-        "must_terms": profile.get("must_terms") or [],
-        "store": row.get("store") or row.get("source") or "",
-        "title": row.get("title") or row.get("name") or "",
-    }
-    parts = [
-        {"text": "ORIGINAL USER IMAGE:"},
-        {"inline_data": {"mime_type": original_mime, "data": original_b64}},
-        {"text": "IDENTITY AND CANDIDATE METADATA:\n" + json.dumps(info, ensure_ascii=False)},
-    ]
-    if candidate_img:
-        ctype, cb64 = candidate_img
-        parts.extend([
-            {"text": "CANDIDATE LISTING IMAGE:"},
-            {"inline_data": {"mime_type": ctype, "data": cb64}},
-        ])
-    try:
-        with WEB_AI_GATE_SEMAPHORE:
-            raw = _web_ai_plain_call(parts, system, WEB_AI_GATE_JUDGE_TIMEOUT_SECONDS)
-        data = _web_ai_gate_json(raw)
-    except Exception as e:
-        print(f"WEB AI GATE JUDGE ERR store={row.get('store')}: {e}")
-        data = {}
-    score = int(float(data.get("score") or 0)) if str(data.get("score") or "").replace('.','',1).isdigit() else 0
-    level = str(data.get("level") or "reject").lower()
-    ai_accept = bool(data.get("accept"))
-    threshold = int(policy["threshold"])
-    if mode == "strict_exact":
-        allowed_levels = ("exact",) if policy["exact_only"] else ("exact", "similar")
-        accept = ai_accept and level in allowed_levels and score >= threshold
-        if not data:
-            accept = not (WEB_AI_GATE_FAIL_CLOSED_STRICT and policy["fail_closed"])
-    else:
-        accept = ai_accept and level in ("exact", "similar") and score >= threshold
-        if not data:
-            # Lower/balanced precision fails open to the existing relevance filters; high precision fails closed.
-            accept = not policy["fail_closed"]
-    result = {"accept": bool(accept), "score": score, "level": level}
-    _web_ai_gate_cache_set(key, result)
-    print(
-        f"WEB AI GATE {'ACCEPT' if accept else 'REJECT'} mode={mode} precision={precision}% threshold={threshold} score={score} level={level} "
-        f"store={row.get('store') or row.get('source')} title={str(row.get('title') or '')[:90]!r}"
-    )
-    return bool(accept), score, level
-
-
-def _web_ai_gate_rows(profile, rows, original_b64, original_mime, lang="en"):
-    rows = list(rows or [])
-    if not rows or not WEB_AI_RESULT_GATE:
-        return rows
-    precision = _web_search_precision(profile.get("precision", WEB_SEARCH_PRECISION_DEFAULT))
-    if precision <= 60:
-        # User explicitly chose speed: no AI result filtering, no candidate-image downloads, no Gemini judging.
-        return rows
-    out = [None] * len(rows)
-    workers = min(WEB_AI_GATE_CONCURRENCY, len(rows))
-    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
-        jobs = []
-        for i, row in enumerate(rows):
-            jobs.append((i, pool.submit(_web_ai_gate_candidate, profile, row, original_b64, original_mime, lang)))
-        for i, fut in jobs:
-            try:
-                accept, score, level = fut.result(timeout=WEB_AI_GATE_JUDGE_TIMEOUT_SECONDS + WEB_AI_GATE_IMAGE_TIMEOUT_SECONDS + 2)
-            except Exception as e:
-                print(f"WEB AI GATE FUTURE ERR: {e}")
-                policy = _web_ai_precision_policy(profile.get("precision", WEB_SEARCH_PRECISION_DEFAULT), profile.get("mode"))
-                accept, score, level = (False, 0, "timeout") if policy["fail_closed"] else (True, 0, "timeout")
-            if accept:
-                row = dict(rows[i])
-                row["ai_match_score"] = score
-                row["ai_match_level"] = level
-                out[i] = row
-    return [x for x in out if x]
-
-
 def _serpapi_china_global_site_request(query, label, domain, timeout_seconds=None):
     """One regular Google site-search for a Chinese global marketplace.
 
@@ -11338,7 +10939,7 @@ async def web_api_search_stream(request: Request):
 
                 pending = set(store_tasks)
                 loop = asyncio.get_running_loop()
-                deadline = loop.time() + WEB_STREAM_STORE_TIMEOUT + WEB_AI_GATE_STREAM_EXTRA_SECONDS
+                deadline = loop.time() + WEB_STREAM_STORE_TIMEOUT
                 while pending:
                     remaining = deadline - loop.time()
                     if remaining <= 0:
@@ -11470,26 +11071,20 @@ async def web_api_image_search_stream(request: Request):
     lang = _web_language(payload.get("lang"))
     country, country_source = await asyncio.to_thread(_web_resolve_request_country, request, payload.get("country"))
     caption = str(payload.get("caption") or "").strip()
-    precision = _web_search_precision(payload.get("search_precision", WEB_SEARCH_PRECISION_DEFAULT))
 
     async def _generator():
         started = time.time()
         sent = set()
         market_counts = {"local": 0, "us": 0, "china": 0}
-        yield _web_stream_event({"event": "start", "ok": True, "kind": "image", "search_precision": precision})
+        yield _web_stream_event({"event": "start", "ok": True, "kind": "image"})
         yield _web_stream_event({"event": "status", "stage": "identify", "elapsed_ms": 0})
         try:
             seed = await asyncio.to_thread(_web_image_seed_sync, image_b64, mime, caption, country, lang)
             identity = str(seed.get("query") or caption or "").strip()
-            profile = await asyncio.to_thread(_web_ai_identity_profile, image_b64, mime, identity, precision)
-            if profile.get("search_identity"):
-                identity = str(profile.get("search_identity") or identity).strip()
             yield _web_stream_event({"event": "query", "query": identity, "market": seed.get("market")})
-            yield _web_stream_event({"event": "status", "stage": "ai_verify", "elapsed_ms": int((time.time()-started)*1000)})
 
-            # Nothing is shown until the AI gatekeeper has approved it against the original image.
-            seed_items = await asyncio.to_thread(_web_ai_gate_rows, profile, seed.get("items") or [], image_b64, mime, lang)
-            for item in seed_items:
+            # Lens seed results are useful immediately. Emit them without waiting for any market.
+            for item in seed.get("items") or []:
                 if len(sent) >= WEB_STREAM_IMAGE_TARGET_RESULTS:
                     break
                 market_name = str(item.get("market") or "other")
@@ -11514,8 +11109,6 @@ async def web_api_image_search_stream(request: Request):
                                     asyncio.to_thread(_web_store_probe_sync, identity, country, lang, r, lab, dom, search_gl),
                                     timeout=WEB_STREAM_STORE_TIMEOUT,
                                 )
-                                if rows:
-                                    rows = await asyncio.to_thread(_web_ai_gate_rows, profile, rows, image_b64, mime, lang)
                                 return r, lab, rows
                             except Exception as e:
                                 print(f"WEB IMAGE STORE FIFO ERR rank={r} store={lab}: {e}")
@@ -11570,8 +11163,7 @@ async def web_api_image_search_stream(request: Request):
             # or local coverage is missing.  The user has already seen FIFO cards by then.
             if len(sent) < WEB_STREAM_IMAGE_TARGET_RESULTS or market_counts.get("local", 0) == 0:
                 final = await asyncio.to_thread(_web_search_image_sync, image_b64, mime, caption, country, lang)
-                final_rows = await asyncio.to_thread(_web_ai_gate_rows, profile, final.get("results") or [], image_b64, mime, lang)
-                for item in final_rows:
+                for item in final.get("results") or []:
                     market_name = str(item.get("market") or "other")
                     key = str(item.get("url") or "").strip() or (market_name + "|" + str(item.get("store") or "") + "|" + str(item.get("title") or ""))
                     if key in sent:
@@ -11596,8 +11188,6 @@ async def web_api_image_search_stream(request: Request):
                     except Exception as e:
                         print(f"WEB IMAGE V107 TOPUP ERR rank={rank}: {e}")
                         extra_rows = []
-                    if extra_rows:
-                        extra_rows = await asyncio.to_thread(_web_ai_gate_rows, profile, extra_rows, image_b64, mime, lang)
                     for item in extra_rows or []:
                         if len(sent) >= WEB_STREAM_IMAGE_TARGET_RESULTS:
                             break
@@ -11678,16 +11268,8 @@ async def web_api_image_search(request: Request):
     lang = _web_language(payload.get("lang"))
     country, country_source = await asyncio.to_thread(_web_resolve_request_country, request, payload.get("country"))
     caption = str(payload.get("caption") or "").strip()
-    precision = _web_search_precision(payload.get("search_precision", WEB_SEARCH_PRECISION_DEFAULT))
     started = time.time()
     result = await asyncio.to_thread(_web_search_image_sync, image_b64, mime, caption, country, lang)
-    if result.get("type") == "results" and WEB_AI_RESULT_GATE:
-        identity = str(result.get("query") or caption or "").strip()
-        profile = await asyncio.to_thread(_web_ai_identity_profile, image_b64, mime, identity, precision)
-        result["results"] = await asyncio.to_thread(_web_ai_gate_rows, profile, result.get("results") or [], image_b64, mime, lang)
-        result["query"] = str(profile.get("search_identity") or identity).strip()
-        result["ai_gate_mode"] = profile.get("mode")
-        result["search_precision"] = precision
     result["elapsed_ms"] = int((time.time() - started) * 1000)
     return result
 
