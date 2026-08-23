@@ -26,9 +26,10 @@ app.add_middleware(
     allow_headers=["Content-Type", "Accept"],
     max_age=86400,
 )
-BUILD_ID = "v107.0-stream-10-results-20260823"
+BUILD_ID = "v108.0-unit-safe-price-parser-20260823"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
+print(f"WEB CLEAN TRANSPORT -> shopping_cache={WEB_CLEAN_SHOPPING_CACHE_TTL_SECONDS}s singleflight={WEB_CLEAN_SHOPPING_SINGLEFLIGHT} unsupported_gl={sorted(WEB_GOOGLE_SHOPPING_UNSUPPORTED_GL)} fallback={WEB_GOOGLE_SHOPPING_GL_FALLBACK}")
 print("GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES")
 print("=" * 70)
 
@@ -74,6 +75,20 @@ IMAGE_BUFFER_MAX_WAIT_SECONDS = max(IMAGE_BUFFER_IDLE_SECONDS, float(os.environ.
 GEMINI_SEARCH_TIMEOUT_SECONDS = max(15, int(os.environ.get("GEMINI_SEARCH_TIMEOUT_SECONDS", "28")))
 GEMINI_PLAIN_TIMEOUT_SECONDS = max(8, int(os.environ.get("GEMINI_PLAIN_TIMEOUT_SECONDS", "22")))
 SERPAPI_TIMEOUT_SECONDS = max(8, int(os.environ.get("SERPAPI_TIMEOUT_SECONDS", "13")))
+
+# v110 clean web shopping transport: preserves search logic/results while avoiding
+# duplicate identical SerpApi calls and unsupported Google Shopping gl values.
+WEB_CLEAN_SHOPPING_CACHE_TTL_SECONDS = max(5, int(os.environ.get("WEB_CLEAN_SHOPPING_CACHE_TTL_SECONDS", "45")))
+WEB_CLEAN_SHOPPING_SINGLEFLIGHT = env_bool("WEB_CLEAN_SHOPPING_SINGLEFLIGHT", True)
+WEB_CLEAN_SHOPPING_CACHE = {}
+WEB_CLEAN_SHOPPING_CACHE_LOCK = threading.Lock()
+WEB_CLEAN_SHOPPING_INFLIGHT = {}
+WEB_CLEAN_SHOPPING_INFLIGHT_LOCK = threading.Lock()
+# Google Shopping/SerpApi currently rejects Kuwait as a gl value. Keep Kuwait
+# discovery via site:merchant/local query terms, but execute Shopping on a supported gl.
+WEB_GOOGLE_SHOPPING_GL_FALLBACK = os.environ.get("WEB_GOOGLE_SHOPPING_GL_FALLBACK", "us").strip().lower() or "us"
+WEB_GOOGLE_SHOPPING_UNSUPPORTED_GL = {x.strip().lower() for x in os.environ.get("WEB_GOOGLE_SHOPPING_UNSUPPORTED_GL", "kw").split(",") if x.strip()}
+
 MARKET_FALLBACK_TIMEOUT_SECONDS = max(4, int(os.environ.get("MARKET_FALLBACK_TIMEOUT_SECONDS", "6")))
 WHATSAPP_TIMEOUT_SECONDS = max(5, int(os.environ.get("WHATSAPP_TIMEOUT_SECONDS", "10")))
 RESOLVE_TIMEOUT_SECONDS = max(3, int(os.environ.get("RESOLVE_TIMEOUT_SECONDS", "7")))
@@ -2140,7 +2155,15 @@ def parse_product_data(html, url):
             if cur in KNOWN_CURRENCY_CODES:
                 data["currency"] = cur
 
-    # v79.1: price fallbacks for stores whose JSON-LD is incomplete (Amazon/eBay/Temu/Alibaba, etc.).
+    # v108: prefer a visible currency-tagged selling price before generic numeric fallbacks.
+    if not data["price"]:
+        visible_price, visible_cur = _visible_currency_price(html, data.get("currency") or "")
+        if visible_price:
+            data["price"] = visible_price
+            if visible_cur in KNOWN_CURRENCY_CODES:
+                data["currency"] = visible_cur
+
+    # Price fallbacks for stores whose JSON-LD is incomplete.
     if not data["price"]:
         price_candidates = []
         selectors = [
@@ -2168,7 +2191,10 @@ def parse_product_data(html, url):
                 price_candidates.append(mm.group(1))
                 break
         for cand in price_candidates:
-            mm = re.search(r'(?<!\d)(\d+(?:[.,]\d{1,3})?)(?!\d)', str(cand).replace(',', ''))
+            cand_text = str(cand).strip()
+            if _looks_like_measurement_number(cand_text):
+                continue
+            mm = re.search(r'(?<!\d)(\d+(?:[.,]\d{1,3})?)(?!\d)', cand_text.replace(',', ''))
             if not mm:
                 continue
             try:
@@ -2177,8 +2203,9 @@ def parse_product_data(html, url):
                 continue
             if val > 0:
                 data["price"] = val
-                if not data["currency"]:
-                    data["currency"] = detect_currency_code(str(cand), "")
+                detected_cur = detect_currency_code(cand_text, "")
+                if detected_cur:
+                    data["currency"] = detected_cur
                 break
     if not data["currency"]:
         # Currency hints from structured HTML/text; conservative domain fallback only when price exists.
@@ -4165,29 +4192,102 @@ def _shopping_clean_query(query):
     return " ".join(q.split()[:10])
 
 
+def _clean_google_shopping_gl(gl):
+    raw = str(gl or "").strip().lower()
+    if raw in WEB_GOOGLE_SHOPPING_UNSUPPORTED_GL:
+        return WEB_GOOGLE_SHOPPING_GL_FALLBACK
+    return raw
+
+
+def _clean_shopping_cache_get(key):
+    now = time.time()
+    with WEB_CLEAN_SHOPPING_CACHE_LOCK:
+        row = WEB_CLEAN_SHOPPING_CACHE.get(key)
+        if row and now - float(row.get("ts") or 0) <= WEB_CLEAN_SHOPPING_CACHE_TTL_SECONDS:
+            return [dict(x) for x in (row.get("value") or [])]
+    return None
+
+
+def _clean_shopping_cache_set(key, value):
+    with WEB_CLEAN_SHOPPING_CACHE_LOCK:
+        WEB_CLEAN_SHOPPING_CACHE[key] = {"ts": time.time(), "value": [dict(x) for x in (value or [])]}
+        if len(WEB_CLEAN_SHOPPING_CACHE) > 1200:
+            old = sorted(WEB_CLEAN_SHOPPING_CACHE.items(), key=lambda kv: kv[1].get("ts", 0))[:250]
+            for k, _ in old:
+                WEB_CLEAN_SHOPPING_CACHE.pop(k, None)
+
+
 def _serpapi_shopping_request(query, gl, hl="en", timeout_seconds=None):
-    """طلب google_shopping واحد. يعيد shopping_results (قد تكون فارغة)."""
-    params = {
-        "engine": "google_shopping", "q": query, "api_key": SERPAPI_API_KEY,
-        "hl": hl, "output": "json",
-    }
-    if gl:
-        params["gl"] = gl
+    """Google Shopping request with v110 transport cleanup.
+
+    Search semantics stay the same. Only transport is optimized:
+    - normalize unsupported gl values (notably kw -> supported fallback)
+    - cache identical short-lived requests
+    - collapse simultaneous identical requests into one in-flight SerpApi call
+    """
+    original_gl = str(gl or "").strip().lower()
+    safe_gl = _clean_google_shopping_gl(original_gl)
+    if original_gl and safe_gl != original_gl:
+        print(f"WEB CLEAN SHOPPING GL {original_gl}->{safe_gl} q={str(query)[:55]!r}")
+
+    key = "|".join([str(query or "").strip(), safe_gl, str(hl or "en").lower()])
+    cached = _clean_shopping_cache_get(key)
+    if cached is not None:
+        print(f"WEB CLEAN SHOPPING CACHE HIT gl={safe_gl or '-'} q={str(query)[:55]!r} cards={len(cached)}")
+        return cached
+
+    leader = True
+    state = None
+    if WEB_CLEAN_SHOPPING_SINGLEFLIGHT:
+        with WEB_CLEAN_SHOPPING_INFLIGHT_LOCK:
+            state = WEB_CLEAN_SHOPPING_INFLIGHT.get(key)
+            if state is None:
+                state = {"event": threading.Event(), "value": None}
+                WEB_CLEAN_SHOPPING_INFLIGHT[key] = state
+            else:
+                leader = False
+        if not leader:
+            wait_for = float(timeout_seconds or SERPAPI_TIMEOUT_SECONDS) + 2.0
+            state["event"].wait(timeout=wait_for)
+            cached = _clean_shopping_cache_get(key)
+            if cached is not None:
+                print(f"WEB CLEAN SHOPPING SINGLEFLIGHT HIT gl={safe_gl or '-'} q={str(query)[:55]!r}")
+                return cached
+            return [dict(x) for x in (state.get("value") or [])]
+
+    results = []
     try:
+        params = {
+            "engine": "google_shopping", "q": query, "api_key": SERPAPI_API_KEY,
+            "hl": hl, "output": "json",
+        }
+        if safe_gl:
+            params["gl"] = safe_gl
         r = requests.get("https://serpapi.com/search.json", params=params, timeout=(4, timeout_seconds or SERPAPI_TIMEOUT_SECONDS))
         if r.status_code >= 400:
             print(f"GOOGLE SHOPPING HTTP {r.status_code}: {r.text[:300]}")
-            return []
-        data = r.json()
-        if data.get("error"):
-            print(f"GOOGLE SHOPPING ERROR: {data.get('error')}")
-            return []
-        results = data.get("shopping_results") or []
-        print(f"GOOGLE SHOPPING: q={query[:60]!r} gl={gl or '-'} -> {len(results)} cards")
-        return results[:SHOPPING_RESULT_LIMIT]
+            results = []
+        else:
+            data = r.json()
+            if data.get("error"):
+                print(f"GOOGLE SHOPPING ERROR: {data.get('error')}")
+                results = []
+            else:
+                results = (data.get("shopping_results") or [])[:SHOPPING_RESULT_LIMIT]
+                print(f"GOOGLE SHOPPING: q={query[:60]!r} gl={safe_gl or '-'} -> {len(results)} cards")
+        _clean_shopping_cache_set(key, results)
+        if state is not None:
+            state["value"] = [dict(x) for x in results]
+        return results
     except Exception as e:
         print(f"GOOGLE SHOPPING EXCEPTION: {e}")
+        _clean_shopping_cache_set(key, [])
         return []
+    finally:
+        if state is not None and leader:
+            state["event"].set()
+            with WEB_CLEAN_SHOPPING_INFLIGHT_LOCK:
+                WEB_CLEAN_SHOPPING_INFLIGHT.pop(key, None)
 
 
 def _immersive_product_stores(page_token):
@@ -6111,16 +6211,68 @@ def country_flag_emoji(cc):
             pass
     return "🌐"
 
+_PRICE_UNIT_RE = re.compile(r"(?i)\b(?:ml|milliliters?|millilitres?|liters?|litres?|g|grams?|kg|kilograms?|oz|fl\.?\s*oz|lb|lbs|cm|mm|inches?|pcs?|pieces?|pack|count|ct|spf)\b")
+
+def _looks_like_measurement_number(text, value=None):
+    raw = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not raw:
+        return False
+    if value not in (None, ""):
+        try:
+            num = float(value)
+            pat = rf"(?i)(?<!\d){re.escape(f'{num:g}')}(?:\.0+)?\s*(?:ml|l|g|kg|oz|fl\.?\s*oz|lb|lbs|cm|mm|inches?|pcs?|pieces?|pack|count|ct|spf)\b"
+            if re.search(pat, raw):
+                return True
+        except Exception:
+            pass
+    return bool(_PRICE_UNIT_RE.search(raw))
+
+def _has_explicit_currency(text):
+    return bool(re.search(r"(?i)(?:KWD|KD|د\.ك|USD|US\$|EUR|GBP|SAR|AED|QAR|BHD|OMR|CNY|RMB|JPY|CAD|AUD|CHF|INR|KRW|TRY|RUB|[$€£¥￥₹₩₺₽])", str(text or "")))
+
+def _visible_currency_price(html, currency_hint=""):
+    if not html:
+        return None, ""
+    try:
+        soup = BeautifulSoup(html, "html.parser")
+        text = re.sub(r"\s+", " ", soup.get_text(" ", strip=True))[:500000]
+    except Exception:
+        text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", str(html or "")))[:500000]
+    currency_pat = r"(?:KWD|KD|د\.ك|USD|US\$|EUR|GBP|SAR|AED|QAR|BHD|OMR|CNY|RMB|JPY|CAD|AUD|CHF|INR|KRW|TRY|RUB|[$€£¥￥₹₩₺₽])"
+    pats=(rf"({currency_pat})\s*([0-9]+(?:[.,][0-9]{{1,3}})?)", rf"([0-9]+(?:[.,][0-9]{{1,3}})?)\s*({currency_pat})")
+    wanted=str(currency_hint or "").upper().strip()
+    cands=[]
+    for idx,pat in enumerate(pats):
+        for m in re.finditer(pat,text,flags=re.I):
+            if idx==0: cur_token,num_token=m.group(1),m.group(2)
+            else: num_token,cur_token=m.group(1),m.group(2)
+            snippet=text[max(0,m.start()-30):min(len(text),m.end()+30)]
+            if _looks_like_measurement_number(snippet):
+                continue
+            try: val=float(num_token.replace(",",""))
+            except Exception: continue
+            if val<=0: continue
+            cur=detect_currency_code(cur_token,"") or wanted
+            score=(4 if wanted and cur==wanted else 0) + (2 if any(k in snippet.lower() for k in ("price","now","sale","add to cart","buy","kwd","kd")) else 0)
+            cands.append((score,m.start(),val,cur))
+    if not cands:
+        return None,""
+    cands.sort(key=lambda x:(-x[0],x[1]))
+    return cands[0][2],cands[0][3]
+
 def _lens_has_price(m):
-    """True only for a usable numeric selling price, not merely any non-empty text/model number."""
+    """True only for a usable numeric selling price, never a size/spec number."""
     if not isinstance(m, dict):
         return False
+    raw = str(m.get("price") or "").strip()
+    title_ctx = " ".join(str(m.get(k) or "") for k in ("title", "snippet", "extensions"))
     try:
-        if m.get("price_value") not in (None, "") and float(m.get("price_value")) > 0:
-            return True
+        if m.get("price_value") not in (None, ""):
+            pv=float(m.get("price_value"))
+            if pv>0 and not (_looks_like_measurement_number(title_ctx,pv) and not _has_explicit_currency(raw)):
+                return True
     except Exception:
         pass
-    raw = str(m.get("price") or "").strip()
     if not raw:
         return False
     numeric = _extract_numeric_price(raw)
@@ -9775,8 +9927,8 @@ def _web_price_number_and_currency(text, fallback_currency=""):
                     return val, cur
             except Exception:
                 pass
-    # Last resort only when the string itself is short and price-like.
-    if len(raw) <= 50:
+    # Last resort only when the string itself is short and price-like, never a size/spec.
+    if len(raw) <= 50 and not _looks_like_measurement_number(raw):
         m = re.search(r"(?<!\\d)([0-9]+(?:[.,][0-9]{1,3})?)(?!\\d)", raw.replace(",", ""))
         if m:
             try:
@@ -10074,6 +10226,14 @@ def _web_verify_card_strict(row, rank, lang, market_snapshot=None):
     existing = str(row.get("price") or "").strip()
     val, cur = _web_price_number_and_currency(existing)
     if val and val > 0:
+        title_ctx = " ".join(str(row.get(k) or "") for k in ("title", "name", "snippet"))
+        source_kind = str(row.get("price_source") or "").lower()
+        if _looks_like_measurement_number(title_ctx, val) and source_kind not in ("product_page", "jsonld", "merchant_page"):
+            print(f"WEB PRICE UNIT REJECT store={row.get('store') or row.get('source')} val={val} title={title_ctx[:100]}")
+            if WEB_REQUIRE_NUMERIC_PRICE:
+                return None
+            row["price"] = ""
+            return row
         row["price"] = _web_normalize_existing_price_to_market(existing, rank, lang, market_snapshot)
         row["price_verified"] = True
         row["price_source"] = row.get("price_source") or "search_structured_rebased"
@@ -10385,7 +10545,7 @@ def _web_search_image_sync(image_b64, mime, caption, country, lang):
             if items:
                 identity = (lens_direct.get("visual_identity") or lens_direct.get("relevance_target") or lens_direct.get("query") or caption or "").strip()
 
-                # v89: Direct Lens can be excellent but uneven by market.  Do not stop the
+                # v110 clean final enrichment: Direct Lens can be excellent but uneven by market.  Do not stop the
                 # web search merely because *some* Lens cards exist.  WhatsApp often has a
                 # richer pool after its market/rescue layers, so the website now fills weak
                 # LOCAL / US / CHINA buckets before returning while preserving Lens first.
@@ -10399,7 +10559,7 @@ def _web_search_image_sync(image_b64, mime, caption, country, lang):
 
                     weak = [r for r in (0, 1, 2) if counts[r] < target[r]]
                     if weak:
-                        print(f"WEB IMAGE v89 weak markets before supplement counts={counts} target={target} identity={identity[:90]!r}")
+                        print(f"WEB CLEAN IMAGE weak markets before supplement counts={counts} target={target} identity={identity[:90]!r}")
                         market_snapshot = dict(market)
                         extra_by_rank = {}
 
@@ -10440,9 +10600,9 @@ def _web_search_image_sync(image_b64, mime, caption, country, lang):
                                 if need <= 0:
                                     break
                         items.sort(key=lambda x: (int(x.get("market_rank", 99)), 0 if x.get("price") else 1))
-                        print(f"WEB IMAGE v89 after supplement counts={counts} total={len(items)}")
+                        print(f"WEB CLEAN IMAGE after supplement counts={counts} total={len(items)}")
 
-                return {"ok": True, "type": "results", "query": identity, "market": market, "results": items, "source": "lens_direct_plus_market_supplement"}
+                return {"ok": True, "type": "results", "query": identity, "market": market, "results": items, "source": "lens_direct_plus_clean_market_supplement"}
 
     # Full Vision/Lens fusion fallback mirrors process_single_image, but returns JSON.
     lens_future = None
