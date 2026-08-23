@@ -29,7 +29,6 @@ app.add_middleware(
 BUILD_ID = "v108.0-unit-safe-price-parser-20260823"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
-print(f"WEB CLEAN TRANSPORT -> shopping_cache={WEB_CLEAN_SHOPPING_CACHE_TTL_SECONDS}s singleflight={WEB_CLEAN_SHOPPING_SINGLEFLIGHT} unsupported_gl={sorted(WEB_GOOGLE_SHOPPING_UNSUPPORTED_GL)} fallback={WEB_GOOGLE_SHOPPING_GL_FALLBACK}")
 print("GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES")
 print("=" * 70)
 
@@ -88,6 +87,7 @@ WEB_CLEAN_SHOPPING_INFLIGHT_LOCK = threading.Lock()
 # discovery via site:merchant/local query terms, but execute Shopping on a supported gl.
 WEB_GOOGLE_SHOPPING_GL_FALLBACK = os.environ.get("WEB_GOOGLE_SHOPPING_GL_FALLBACK", "us").strip().lower() or "us"
 WEB_GOOGLE_SHOPPING_UNSUPPORTED_GL = {x.strip().lower() for x in os.environ.get("WEB_GOOGLE_SHOPPING_UNSUPPORTED_GL", "kw").split(",") if x.strip()}
+print(f"WEB CLEAN TRANSPORT -> shopping_cache={WEB_CLEAN_SHOPPING_CACHE_TTL_SECONDS}s singleflight={WEB_CLEAN_SHOPPING_SINGLEFLIGHT} unsupported_gl={sorted(WEB_GOOGLE_SHOPPING_UNSUPPORTED_GL)} fallback={WEB_GOOGLE_SHOPPING_GL_FALLBACK}")
 
 MARKET_FALLBACK_TIMEOUT_SECONDS = max(4, int(os.environ.get("MARKET_FALLBACK_TIMEOUT_SECONDS", "6")))
 WHATSAPP_TIMEOUT_SECONDS = max(5, int(os.environ.get("WHATSAPP_TIMEOUT_SECONDS", "10")))
