@@ -26,10 +26,10 @@ app.add_middleware(
     allow_headers=["Content-Type", "Accept"],
     max_age=86400,
 )
-BUILD_ID = "v98.0-auto-country-geo-20260823"
+BUILD_ID = "v99.0-image-proxy-rescue-20260823"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
-print("GLOBAL GEO -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES")
+print("GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES")
 print("=" * 70)
 
 
@@ -8837,6 +8837,17 @@ WEB_GEO_PROVIDER_URL = os.environ.get("WEB_GEO_PROVIDER_URL", "https://ipwho.is/
 WEB_GEO_CACHE = {}
 WEB_GEO_CACHE_LOCK = threading.Lock()
 
+# v99: product-card images on the web are now normalized through an image proxy.
+# This fixes merchants that block hotlinking and also rescues missing thumbnails
+# by reading the product page's og:image/twitter:image when needed.
+WEB_IMAGE_PROXY_ENABLED = env_bool("WEB_IMAGE_PROXY_ENABLED", True)
+WEB_IMAGE_PROXY_TIMEOUT_SECONDS = max(3.0, min(12.0, float(os.environ.get("WEB_IMAGE_PROXY_TIMEOUT_SECONDS", "8"))))
+WEB_IMAGE_PAGE_TIMEOUT_SECONDS = max(2.0, min(8.0, float(os.environ.get("WEB_IMAGE_PAGE_TIMEOUT_SECONDS", "4.5"))))
+WEB_IMAGE_CACHE_TTL_SECONDS = max(3600, int(os.environ.get("WEB_IMAGE_CACHE_TTL_SECONDS", "86400")))
+WEB_IMAGE_PROXY_MAX_BYTES = max(512000, min(8 * 1024 * 1024, int(os.environ.get("WEB_IMAGE_PROXY_MAX_BYTES", str(4 * 1024 * 1024)))))
+WEB_IMAGE_CACHE = {}
+WEB_IMAGE_CACHE_LOCK = threading.Lock()
+
 WEB_API_MAX_QUERY_CHARS = max(40, min(500, int(os.environ.get("WEB_API_MAX_QUERY_CHARS", "220"))))
 WEB_API_MAX_IMAGE_BYTES = max(512000, min(12 * 1024 * 1024, int(os.environ.get("WEB_API_MAX_IMAGE_BYTES", str(6 * 1024 * 1024)))))
 WEB_API_RATE_PER_MINUTE = max(5, min(120, int(os.environ.get("WEB_API_RATE_PER_MINUTE", "30"))))
@@ -8917,6 +8928,190 @@ def _web_market_label(rank):
     return {0: "local", 1: "us", 2: "china"}.get(rank, "other")
 
 
+def _web_is_http_url(value):
+    try:
+        u = urllib.parse.urlparse(str(value or "").strip())
+        return u.scheme in ("http", "https") and bool(u.netloc)
+    except Exception:
+        return False
+
+
+def _web_image_cache_get(key):
+    now = time.time()
+    with WEB_IMAGE_CACHE_LOCK:
+        item = WEB_IMAGE_CACHE.get(key)
+        if item and now - float(item.get("ts") or 0) < WEB_IMAGE_CACHE_TTL_SECONDS:
+            return item.get("value") or ""
+    return ""
+
+
+def _web_image_cache_set(key, value):
+    now = time.time()
+    with WEB_IMAGE_CACHE_LOCK:
+        WEB_IMAGE_CACHE[key] = {"value": str(value or ""), "ts": now}
+        if len(WEB_IMAGE_CACHE) > 5000:
+            stale = sorted(WEB_IMAGE_CACHE.items(), key=lambda kv: kv[1].get("ts", 0))[:1000]
+            for old_key, _ in stale:
+                WEB_IMAGE_CACHE.pop(old_key, None)
+
+
+def _web_absolute_url(base_url, value):
+    raw = str(value or "").strip()
+    if not raw or raw.startswith(("data:", "blob:", "javascript:")):
+        return ""
+    try:
+        return urllib.parse.urljoin(base_url or "", raw)
+    except Exception:
+        return raw if _web_is_http_url(raw) else ""
+
+
+def _web_extract_product_image_from_html(html, base_url):
+    try:
+        soup = BeautifulSoup(html or "", "html.parser")
+    except Exception:
+        return ""
+
+    candidates = []
+    for attrs in (
+        {"property": "og:image"},
+        {"property": "og:image:url"},
+        {"name": "twitter:image"},
+        {"property": "twitter:image"},
+        {"itemprop": "image"},
+    ):
+        for tag in soup.find_all("meta", attrs=attrs):
+            candidates.append(tag.get("content") or "")
+    for link in soup.find_all("link", attrs={"rel": True}):
+        rel = " ".join(link.get("rel") or []).lower()
+        if rel in ("image_src", "preload"):
+            href = link.get("href") or ""
+            as_attr = str(link.get("as") or "").lower()
+            if rel == "image_src" or as_attr == "image":
+                candidates.append(href)
+
+    for script in soup.find_all("script", attrs={"type": "application/ld+json"})[:10]:
+        text = (script.string or script.get_text() or "").strip()
+        if not text or 'image' not in text.lower():
+            continue
+        try:
+            data = json.loads(text)
+        except Exception:
+            continue
+        stack = [data]
+        while stack:
+            obj = stack.pop()
+            if isinstance(obj, dict):
+                img = obj.get("image")
+                if isinstance(img, str):
+                    candidates.append(img)
+                elif isinstance(img, list):
+                    for x in img:
+                        if isinstance(x, str):
+                            candidates.append(x)
+                        elif isinstance(x, dict):
+                            candidates.append(x.get("url") or x.get("contentUrl") or "")
+                elif isinstance(img, dict):
+                    candidates.append(img.get("url") or img.get("contentUrl") or "")
+                stack.extend(obj.values())
+            elif isinstance(obj, list):
+                stack.extend(obj[:12])
+
+    if not candidates:
+        # Conservative fallback: first non-logo real image on the page.
+        for img in soup.find_all("img")[:30]:
+            src = img.get("src") or img.get("data-src") or img.get("data-lazy-src") or img.get("data-original") or ""
+            alt = str(img.get("alt") or "").lower()
+            classes = " ".join(img.get("class") or []).lower()
+            if any(bad in (src or '').lower() for bad in ("sprite", "icon", "logo", ".svg")):
+                continue
+            if "logo" in alt or "logo" in classes:
+                continue
+            candidates.append(src)
+
+    seen = set()
+    for raw in candidates:
+        url = _web_absolute_url(base_url, raw)
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        low = url.lower()
+        if any(x in low for x in ("logo", "icon", "sprite")):
+            continue
+        return url
+    return ""
+
+
+def _web_rescue_product_image(page_url):
+    page_url = str(page_url or "").strip()
+    if not _web_is_http_url(page_url):
+        return ""
+    cache_key = 'page:' + page_url
+    cached = _web_image_cache_get(cache_key)
+    if cached:
+        return cached
+
+    try:
+        parsed = urllib.parse.urlparse(page_url)
+        headers = dict(HEADERS)
+        headers.setdefault('Accept', 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8')
+        headers.setdefault('Referer', f'{parsed.scheme}://{parsed.netloc}/')
+        resp = requests.get(page_url, headers=headers, timeout=(2.5, WEB_IMAGE_PAGE_TIMEOUT_SECONDS), allow_redirects=True)
+        if resp.status_code >= 400:
+            _web_image_cache_set(cache_key, '')
+            return ''
+        content_type = (resp.headers.get('content-type') or '').split(';', 1)[0].strip().lower()
+        if content_type.startswith('image/'):
+            _web_image_cache_set(cache_key, resp.url or page_url)
+            return resp.url or page_url
+        html = resp.text[:400000]
+        found = _web_extract_product_image_from_html(html, resp.url or page_url)
+        _web_image_cache_set(cache_key, found)
+        return found
+    except Exception as e:
+        print(f'WEB IMAGE RESCUE ERR: {page_url[:120]} -> {e.__class__.__name__}')
+        _web_image_cache_set(cache_key, '')
+        return ''
+
+
+def _web_public_image_url(raw_url):
+    raw_url = str(raw_url or '').strip()
+    if not _web_is_http_url(raw_url):
+        return ''
+    if WEB_IMAGE_PROXY_ENABLED and PUBLIC_BASE_URL:
+        return f"{PUBLIC_BASE_URL}/api/img-proxy?u={urllib.parse.quote(raw_url, safe='')}"
+    return raw_url
+
+
+def _web_best_card_image(primary_url='', page_url='', rescue_page=False):
+    primary_url = str(primary_url or '').strip()
+    page_url = str(page_url or '').strip()
+    if _web_is_http_url(primary_url):
+        return _web_public_image_url(primary_url)
+    if rescue_page and _web_is_http_url(page_url):
+        rescued = _web_rescue_product_image(page_url)
+        if rescued:
+            return _web_public_image_url(rescued)
+    return ''
+
+
+def _web_attach_best_images(rows, rescue_page=False):
+    rows = list(rows or [])
+    if not rows:
+        return rows
+    jobs = []
+    with ThreadPoolExecutor(max_workers=min(6, len(rows))) as pool:
+        for idx, row in enumerate(rows):
+            primary = row.get('image') or row.get('thumbnail') or ''
+            page_url = row.get('url') or row.get('link') or ''
+            jobs.append((idx, pool.submit(_web_best_card_image, primary, page_url, rescue_page)))
+        for idx, fut in jobs:
+            try:
+                rows[idx]['image'] = fut.result() or ''
+            except Exception:
+                rows[idx]['image'] = rows[idx].get('image') or ''
+    return rows
+
+
 def _web_build_text_items(txt, urls, lang, query):
     """Same typed-search selection logic as WhatsApp, but returns JSON cards instead of sending CTAs."""
     total_cap = max(1, LENS_DIRECT_LOCAL_MAX + LENS_DIRECT_US_MAX + LENS_DIRECT_CN_MAX)
@@ -8995,7 +9190,7 @@ def _web_build_text_items(txt, urls, lang, query):
             "url": item.get("link") or "",
             "image": item.get("thumbnail") or item.get("image") or "",
         })
-    return results
+    return _web_attach_best_images(results, rescue_page=True)
 
 
 def _web_brand_comparison(query, lang):
@@ -9127,7 +9322,7 @@ def _web_build_lens_items(lens, lang, caption=""):
             "url": (m.get("link") or "").strip(),
             "image": m.get("thumbnail") or m.get("image") or "",
         })
-    return results
+    return _web_attach_best_images(results, rescue_page=True)
 
 
 def _web_fallback_product_items(txt, urls, lang, query):
@@ -9159,6 +9354,7 @@ def _web_fallback_product_items(txt, urls, lang, query):
             "url": url,
             "image": "",
         })
+    rows = _web_attach_best_images(rows, rescue_page=True)
     rows.sort(key=lambda x: x["market_rank"])
     caps = {0: LENS_DIRECT_LOCAL_MAX, 1: LENS_DIRECT_US_MAX, 2: LENS_DIRECT_CN_MAX}
     out, counts = [], defaultdict(int)
@@ -9235,7 +9431,7 @@ def _web_market_candidates_to_items(candidates, rank, lang, query):
             "title": _compact_ui_title(item.get("title") or query),
             "price": shown_price,
             "url": url,
-            "image": item.get("thumbnail") or item.get("image") or "",
+            "image": _web_best_card_image(item.get("thumbnail") or item.get("image") or "", "", False),
         })
         if len(out) >= cap:
             break
@@ -9821,6 +10017,59 @@ async def web_api_geo(request: Request):
         "currency": currencies[0] if currencies else COUNTRY_CURRENCIES.get(cc, ""),
         "source": source,
     }
+
+
+@app.get("/api/img-proxy")
+async def web_api_img_proxy(request: Request):
+    if not WEB_API_ENABLED or not WEB_IMAGE_PROXY_ENABLED:
+        return Response(content=b"", status_code=404)
+    raw_url = str(request.query_params.get('u') or '').strip()
+    if not _web_is_http_url(raw_url):
+        return Response(content=b"", status_code=400)
+
+    def _fetch_image(target_url):
+        parsed = urllib.parse.urlparse(target_url)
+        headers = dict(HEADERS)
+        headers['Accept'] = 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8'
+        headers['Referer'] = f'{parsed.scheme}://{parsed.netloc}/'
+        resp = requests.get(target_url, headers=headers, timeout=(2.5, WEB_IMAGE_PROXY_TIMEOUT_SECONDS), stream=True, allow_redirects=True)
+        if resp.status_code >= 400:
+            return resp.status_code, '', b'', ''
+        content_type = (resp.headers.get('content-type') or '').split(';', 1)[0].strip().lower()
+        body = b''
+        if content_type.startswith('image/'):
+            chunks = []
+            total = 0
+            for chunk in resp.iter_content(65536):
+                if not chunk:
+                    continue
+                total += len(chunk)
+                if total > WEB_IMAGE_PROXY_MAX_BYTES:
+                    break
+                chunks.append(chunk)
+            body = b''.join(chunks)
+            return 200, content_type or 'image/jpeg', body, ''
+        try:
+            html = resp.text[:400000]
+        except Exception:
+            html = ''
+        return 200, content_type or 'text/html', b'', html
+
+    try:
+        status, content_type, body, html = await asyncio.to_thread(_fetch_image, raw_url)
+        if status >= 400:
+            return Response(content=b"", status_code=status)
+        if content_type.startswith('image/') and body:
+            return Response(content=body, media_type=content_type, headers={'Cache-Control': 'public, max-age=86400'})
+
+        rescued = _web_extract_product_image_from_html(html, raw_url) if html else ''
+        if rescued and rescued != raw_url:
+            status2, content_type2, body2, _ = await asyncio.to_thread(_fetch_image, rescued)
+            if status2 < 400 and content_type2.startswith('image/') and body2:
+                return Response(content=body2, media_type=content_type2, headers={'Cache-Control': 'public, max-age=86400'})
+    except Exception as e:
+        print(f'WEB IMG PROXY ERR: {raw_url[:120]} -> {e.__class__.__name__}')
+    return Response(content=b"", status_code=404)
 
 
 @app.get("/api/health")
