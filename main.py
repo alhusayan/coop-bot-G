@@ -26,7 +26,7 @@ app.add_middleware(
     allow_headers=["Content-Type", "Accept"],
     max_age=86400,
 )
-BUILD_ID = "v118.0-local-priority-nonblocking-20260823"
+BUILD_ID = "v104.0-marketplace-multi-listings-20260823"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES")
@@ -187,21 +187,6 @@ LOCAL_COUNTRY_RESCUE_PASSES = max(1, min(2, int(os.environ.get("LOCAL_COUNTRY_RE
 LOCAL_AI_QUERY_RESCUE_ENABLED = env_bool("LOCAL_AI_QUERY_RESCUE_ENABLED", True)
 LOCAL_QUERY_CACHE = {}
 LOCAL_QUERY_CACHE_LOCK = threading.Lock()
-
-# v110.2 WEB/Google Shopping transport safety.
-# Some SerpApi google_shopping markets reject ISO gl=kw.  Keep Findzia's logical
-# market as Kuwait/KWD, but use a supported transport gl and add Kuwait to the
-# query so local merchant discovery remains strong.
-WEB_GOOGLE_SHOPPING_GL_FALLBACK = os.environ.get("WEB_GOOGLE_SHOPPING_GL_FALLBACK", "us").strip().lower() or "us"
-WEB_GOOGLE_SHOPPING_UNSUPPORTED_GL = {
-    x.strip().lower() for x in os.environ.get("WEB_GOOGLE_SHOPPING_UNSUPPORTED_GL", "kw").split(",") if x.strip()
-}
-WEB_CLEAN_SHOPPING_CACHE_TTL_SECONDS = max(0, int(os.environ.get("WEB_CLEAN_SHOPPING_CACHE_TTL_SECONDS", "45")))
-WEB_CLEAN_SHOPPING_SINGLEFLIGHT = env_bool("WEB_CLEAN_SHOPPING_SINGLEFLIGHT", True)
-WEB_CLEAN_SHOPPING_CACHE = {}
-WEB_CLEAN_SHOPPING_CACHE_LOCK = threading.Lock()
-WEB_CLEAN_SHOPPING_INFLIGHT = {}
-WEB_CLEAN_SHOPPING_INFLIGHT_LOCK = threading.Lock()
 
 
 # ---- Global market detection v85 ----------------------------------------------
@@ -1089,13 +1074,6 @@ print(
     f"lens_wide_fallback={ENABLE_LENS_WIDE_FALLBACK} lens_parallel={LENS_PARALLEL_WITH_VISION} "
     f"google_shopping={ENABLE_GOOGLE_SHOPPING} immersive_max={IMMERSIVE_LOOKUPS_MAX} "
     f"public_base_url={'SET' if PUBLIC_BASE_URL else 'MISSING'}"
-)
-
-print(
-    f"WEB CLEAN SHOPPING CONFIG cache_ttl={WEB_CLEAN_SHOPPING_CACHE_TTL_SECONDS}s "
-    f"singleflight={WEB_CLEAN_SHOPPING_SINGLEFLIGHT} "
-    f"unsupported_gl={sorted(WEB_GOOGLE_SHOPPING_UNSUPPORTED_GL)} "
-    f"fallback_gl={WEB_GOOGLE_SHOPPING_GL_FALLBACK}"
 )
 
 VERIFIED_PAGE_CACHE = {}
@@ -2162,15 +2140,7 @@ def parse_product_data(html, url):
             if cur in KNOWN_CURRENCY_CODES:
                 data["currency"] = cur
 
-    # v108: prefer a visible currency-tagged selling price before generic numeric fallbacks.
-    if not data["price"]:
-        visible_price, visible_cur = _visible_currency_price(html, data.get("currency") or "")
-        if visible_price:
-            data["price"] = visible_price
-            if visible_cur in KNOWN_CURRENCY_CODES:
-                data["currency"] = visible_cur
-
-    # Price fallbacks for stores whose JSON-LD is incomplete.
+    # v79.1: price fallbacks for stores whose JSON-LD is incomplete (Amazon/eBay/Temu/Alibaba, etc.).
     if not data["price"]:
         price_candidates = []
         selectors = [
@@ -2198,10 +2168,7 @@ def parse_product_data(html, url):
                 price_candidates.append(mm.group(1))
                 break
         for cand in price_candidates:
-            cand_text = str(cand).strip()
-            if _looks_like_measurement_number(cand_text):
-                continue
-            mm = re.search(r'(?<!\d)(\d+(?:[.,]\d{1,3})?)(?!\d)', cand_text.replace(',', ''))
+            mm = re.search(r'(?<!\d)(\d+(?:[.,]\d{1,3})?)(?!\d)', str(cand).replace(',', ''))
             if not mm:
                 continue
             try:
@@ -2210,9 +2177,8 @@ def parse_product_data(html, url):
                 continue
             if val > 0:
                 data["price"] = val
-                detected_cur = detect_currency_code(cand_text, "")
-                if detected_cur:
-                    data["currency"] = detected_cur
+                if not data["currency"]:
+                    data["currency"] = detect_currency_code(str(cand), "")
                 break
     if not data["currency"]:
         # Currency hints from structured HTML/text; conservative domain fallback only when price exists.
@@ -4199,106 +4165,29 @@ def _shopping_clean_query(query):
     return " ".join(q.split()[:10])
 
 
-def _shopping_transport_gl(gl):
-    logical = str(gl or "").strip().lower()
-    if logical in WEB_GOOGLE_SHOPPING_UNSUPPORTED_GL:
-        return WEB_GOOGLE_SHOPPING_GL_FALLBACK
-    return logical
-
-
-def _shopping_transport_query(query, logical_gl):
-    q = str(query or "").strip()
-    # Keep Kuwait search local even though the HTTP transport uses a supported gl.
-    # Preserve site: filters and avoid appending Kuwait twice.
-    if str(logical_gl or "").lower() == "kw" and "kuwait" not in q.lower() and "الكويت" not in q:
-        q = f"{q} Kuwait".strip()
-    return q
-
-
 def _serpapi_shopping_request(query, gl, hl="en", timeout_seconds=None):
-    """One google_shopping request with safe transport GL + short cache/single-flight.
-
-    IMPORTANT: logical gl remains unchanged for Findzia ranking/currency.  Only the
-    HTTP parameter sent to SerpApi is mapped when the engine rejects that country.
-    """
-    logical_gl = str(gl or "").strip().lower()
-    transport_gl = _shopping_transport_gl(logical_gl)
-    transport_query = _shopping_transport_query(query, logical_gl)
-    timeout_value = timeout_seconds or SERPAPI_TIMEOUT_SECONDS
-    cache_key = "|".join([transport_query, logical_gl, transport_gl, str(hl or "en").lower()])
-    now = time.time()
-
-    if WEB_CLEAN_SHOPPING_CACHE_TTL_SECONDS > 0:
-        with WEB_CLEAN_SHOPPING_CACHE_LOCK:
-            hit = WEB_CLEAN_SHOPPING_CACHE.get(cache_key)
-            if hit and now - hit[0] < WEB_CLEAN_SHOPPING_CACHE_TTL_SECONDS:
-                print(f"WEB CLEAN SHOPPING CACHE HIT logical_gl={logical_gl or '-'} transport_gl={transport_gl or '-'} cards={len(hit[1])}")
-                return [dict(x) for x in hit[1]]
-
-    leader = True
-    state = None
-    if WEB_CLEAN_SHOPPING_SINGLEFLIGHT:
-        with WEB_CLEAN_SHOPPING_INFLIGHT_LOCK:
-            state = WEB_CLEAN_SHOPPING_INFLIGHT.get(cache_key)
-            if state is None:
-                state = {"event": threading.Event(), "rows": None}
-                WEB_CLEAN_SHOPPING_INFLIGHT[cache_key] = state
-            else:
-                leader = False
-        if not leader:
-            state["event"].wait(timeout=float(timeout_value) + 2.0)
-            rows = state.get("rows")
-            if rows is not None:
-                print(f"WEB CLEAN SHOPPING SINGLEFLIGHT HIT logical_gl={logical_gl or '-'} cards={len(rows)}")
-                return [dict(x) for x in rows]
-
-    rows = []
+    """طلب google_shopping واحد. يعيد shopping_results (قد تكون فارغة)."""
+    params = {
+        "engine": "google_shopping", "q": query, "api_key": SERPAPI_API_KEY,
+        "hl": hl, "output": "json",
+    }
+    if gl:
+        params["gl"] = gl
     try:
-        params = {
-            "engine": "google_shopping", "q": transport_query, "api_key": SERPAPI_API_KEY,
-            "hl": hl, "output": "json",
-        }
-        if transport_gl:
-            params["gl"] = transport_gl
-        if logical_gl != transport_gl:
-            print(f"WEB CLEAN SHOPPING GL {logical_gl or '-'}->{transport_gl or '-'} q={transport_query[:80]!r}")
-        r = requests.get(
-            "https://serpapi.com/search.json",
-            params=params,
-            timeout=(4, timeout_value),
-        )
+        r = requests.get("https://serpapi.com/search.json", params=params, timeout=(4, timeout_seconds or SERPAPI_TIMEOUT_SECONDS))
         if r.status_code >= 400:
             print(f"GOOGLE SHOPPING HTTP {r.status_code}: {r.text[:300]}")
-            rows = []
-        else:
-            data = r.json()
-            if data.get("error"):
-                print(f"GOOGLE SHOPPING ERROR: {data.get('error')}")
-                rows = []
-            else:
-                rows = (data.get("shopping_results") or [])[:SHOPPING_RESULT_LIMIT]
-                print(
-                    f"GOOGLE SHOPPING: q={transport_query[:60]!r} "
-                    f"logical_gl={logical_gl or '-'} transport_gl={transport_gl or '-'} -> {len(rows)} cards"
-                )
+            return []
+        data = r.json()
+        if data.get("error"):
+            print(f"GOOGLE SHOPPING ERROR: {data.get('error')}")
+            return []
+        results = data.get("shopping_results") or []
+        print(f"GOOGLE SHOPPING: q={query[:60]!r} gl={gl or '-'} -> {len(results)} cards")
+        return results[:SHOPPING_RESULT_LIMIT]
     except Exception as e:
         print(f"GOOGLE SHOPPING EXCEPTION: {e}")
-        rows = []
-    finally:
-        if WEB_CLEAN_SHOPPING_CACHE_TTL_SECONDS > 0:
-            with WEB_CLEAN_SHOPPING_CACHE_LOCK:
-                WEB_CLEAN_SHOPPING_CACHE[cache_key] = (time.time(), [dict(x) for x in rows])
-                if len(WEB_CLEAN_SHOPPING_CACHE) > 1200:
-                    oldest = sorted(WEB_CLEAN_SHOPPING_CACHE.items(), key=lambda kv: kv[1][0])[:200]
-                    for k, _ in oldest:
-                        WEB_CLEAN_SHOPPING_CACHE.pop(k, None)
-        if WEB_CLEAN_SHOPPING_SINGLEFLIGHT and state is not None:
-            state["rows"] = [dict(x) for x in rows]
-            state["event"].set()
-            if leader:
-                with WEB_CLEAN_SHOPPING_INFLIGHT_LOCK:
-                    WEB_CLEAN_SHOPPING_INFLIGHT.pop(cache_key, None)
-    return [dict(x) for x in rows]
+        return []
 
 
 def _immersive_product_stores(page_token):
@@ -6222,68 +6111,16 @@ def country_flag_emoji(cc):
             pass
     return "🌐"
 
-_PRICE_UNIT_RE = re.compile(r"(?i)\b(?:ml|milliliters?|millilitres?|liters?|litres?|g|grams?|kg|kilograms?|oz|fl\.?\s*oz|lb|lbs|cm|mm|inches?|pcs?|pieces?|pack|count|ct|spf)\b")
-
-def _looks_like_measurement_number(text, value=None):
-    raw = re.sub(r"\s+", " ", str(text or "")).strip()
-    if not raw:
-        return False
-    if value not in (None, ""):
-        try:
-            num = float(value)
-            pat = rf"(?i)(?<!\d){re.escape(f'{num:g}')}(?:\.0+)?\s*(?:ml|l|g|kg|oz|fl\.?\s*oz|lb|lbs|cm|mm|inches?|pcs?|pieces?|pack|count|ct|spf)\b"
-            if re.search(pat, raw):
-                return True
-        except Exception:
-            pass
-    return bool(_PRICE_UNIT_RE.search(raw))
-
-def _has_explicit_currency(text):
-    return bool(re.search(r"(?i)(?:KWD|KD|د\.ك|USD|US\$|EUR|GBP|SAR|AED|QAR|BHD|OMR|CNY|RMB|JPY|CAD|AUD|CHF|INR|KRW|TRY|RUB|[$€£¥￥₹₩₺₽])", str(text or "")))
-
-def _visible_currency_price(html, currency_hint=""):
-    if not html:
-        return None, ""
-    try:
-        soup = BeautifulSoup(html, "html.parser")
-        text = re.sub(r"\s+", " ", soup.get_text(" ", strip=True))[:500000]
-    except Exception:
-        text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", str(html or "")))[:500000]
-    currency_pat = r"(?:KWD|KD|د\.ك|USD|US\$|EUR|GBP|SAR|AED|QAR|BHD|OMR|CNY|RMB|JPY|CAD|AUD|CHF|INR|KRW|TRY|RUB|[$€£¥￥₹₩₺₽])"
-    pats=(rf"({currency_pat})\s*([0-9]+(?:[.,][0-9]{{1,3}})?)", rf"([0-9]+(?:[.,][0-9]{{1,3}})?)\s*({currency_pat})")
-    wanted=str(currency_hint or "").upper().strip()
-    cands=[]
-    for idx,pat in enumerate(pats):
-        for m in re.finditer(pat,text,flags=re.I):
-            if idx==0: cur_token,num_token=m.group(1),m.group(2)
-            else: num_token,cur_token=m.group(1),m.group(2)
-            snippet=text[max(0,m.start()-30):min(len(text),m.end()+30)]
-            if _looks_like_measurement_number(snippet):
-                continue
-            try: val=float(num_token.replace(",",""))
-            except Exception: continue
-            if val<=0: continue
-            cur=detect_currency_code(cur_token,"") or wanted
-            score=(4 if wanted and cur==wanted else 0) + (2 if any(k in snippet.lower() for k in ("price","now","sale","add to cart","buy","kwd","kd")) else 0)
-            cands.append((score,m.start(),val,cur))
-    if not cands:
-        return None,""
-    cands.sort(key=lambda x:(-x[0],x[1]))
-    return cands[0][2],cands[0][3]
-
 def _lens_has_price(m):
-    """True only for a usable numeric selling price, never a size/spec number."""
+    """True only for a usable numeric selling price, not merely any non-empty text/model number."""
     if not isinstance(m, dict):
         return False
-    raw = str(m.get("price") or "").strip()
-    title_ctx = " ".join(str(m.get(k) or "") for k in ("title", "snippet", "extensions"))
     try:
-        if m.get("price_value") not in (None, ""):
-            pv=float(m.get("price_value"))
-            if pv>0 and not (_looks_like_measurement_number(title_ctx,pv) and not _has_explicit_currency(raw)):
-                return True
+        if m.get("price_value") not in (None, "") and float(m.get("price_value")) > 0:
+            return True
     except Exception:
         pass
+    raw = str(m.get("price") or "").strip()
     if not raw:
         return False
     numeric = _extract_numeric_price(raw)
@@ -9037,17 +8874,6 @@ WEB_STREAM_MARKET_TIMEOUT = max(4, min(20, int(os.environ.get("WEB_STREAM_MARKET
 WEB_STREAM_STORE_FIFO = env_bool("WEB_STREAM_STORE_FIFO", True)
 WEB_STREAM_STORE_TIMEOUT = max(4.0, min(12.0, float(os.environ.get("WEB_STREAM_STORE_TIMEOUT_SECONDS", "8"))))
 WEB_STREAM_STORE_HTTP_TIMEOUT = max(3.0, min(WEB_STREAM_STORE_TIMEOUT, float(os.environ.get("WEB_STREAM_STORE_HTTP_TIMEOUT_SECONDS", "7.5"))))
-
-# v105: latency optimization only. Result-selection rules remain unchanged.
-WEB_TURBO_MODE = env_bool("WEB_TURBO_MODE", True)
-WEB_TURBO_FINAL_HEADSTART_SECONDS = max(0.0, min(3.0, float(os.environ.get("WEB_TURBO_FINAL_HEADSTART_SECONDS", "1.25"))))
-WEB_TURBO_STORE_CACHE_TTL_SECONDS = max(30, min(1800, int(os.environ.get("WEB_TURBO_STORE_CACHE_TTL_SECONDS", "300"))))
-WEB_TURBO_PREP_CACHE_TTL_SECONDS = max(30, min(1800, int(os.environ.get("WEB_TURBO_PREP_CACHE_TTL_SECONDS", "600"))))
-WEB_TURBO_STRICT_WORKERS = max(6, min(20, int(os.environ.get("WEB_TURBO_STRICT_WORKERS", "12"))))
-WEB_TURBO_STORE_CACHE = {}
-WEB_TURBO_STORE_CACHE_LOCK = threading.Lock()
-WEB_TURBO_PREP_CACHE = {}
-WEB_TURBO_PREP_CACHE_LOCK = threading.Lock()
 WEB_STREAM_RESULTS_PER_STORE = max(1, min(2, int(os.environ.get("WEB_STREAM_RESULTS_PER_STORE", "1"))))
 # v104: marketplaces can legitimately return several distinct listings for the same/similar product.
 WEB_STREAM_MARKETPLACE_RESULTS_PER_STORE = max(2, min(6, int(os.environ.get("WEB_STREAM_MARKETPLACE_RESULTS_PER_STORE", "4"))))
@@ -9055,69 +8881,7 @@ WEB_MULTI_LISTING_MARKETPLACES = (
     "etsy.com", "ebay.com", "aliexpress.com", "temu.com", "shein.com",
     "dhgate.com", "amazon.com", "alibaba.com", "made-in-china.com", "banggood.com",
 )
-WEB_STREAM_IMAGE_FINAL_MIN_RESULTS = max(2, min(20, int(os.environ.get("WEB_STREAM_IMAGE_FINAL_MIN_RESULTS", "10"))))
-WEB_STREAM_IMAGE_TARGET_RESULTS = max(5, min(20, int(os.environ.get("WEB_STREAM_IMAGE_TARGET_RESULTS", "10"))))
-
-# v111: AI gatekeeper for image-search results. The original user image is the source of truth.
-# Exact branded/model products are filtered strictly before any card is streamed.
-WEB_AI_RESULT_GATE = env_bool("WEB_AI_RESULT_GATE", True)
-WEB_AI_GATE_FAIL_CLOSED_STRICT = env_bool("WEB_AI_GATE_FAIL_CLOSED_STRICT", True)
-WEB_AI_GATE_PROFILE_TIMEOUT_SECONDS = max(3.0, min(10.0, float(os.environ.get("WEB_AI_GATE_PROFILE_TIMEOUT_SECONDS", "6.0"))))
-WEB_AI_GATE_JUDGE_TIMEOUT_SECONDS = max(2.5, min(8.0, float(os.environ.get("WEB_AI_GATE_JUDGE_TIMEOUT_SECONDS", "5.0"))))
-WEB_AI_GATE_IMAGE_TIMEOUT_SECONDS = max(1.5, min(5.0, float(os.environ.get("WEB_AI_GATE_IMAGE_TIMEOUT_SECONDS", "2.5"))))
-WEB_AI_GATE_MAX_IMAGE_BYTES = max(250000, min(2 * 1024 * 1024, int(os.environ.get("WEB_AI_GATE_MAX_IMAGE_BYTES", "1200000"))))
-WEB_AI_GATE_CONCURRENCY = max(1, min(6, int(os.environ.get("WEB_AI_GATE_CONCURRENCY", "3"))))
-WEB_AI_GATE_STREAM_EXTRA_SECONDS = max(1.0, min(8.0, float(os.environ.get("WEB_AI_GATE_STREAM_EXTRA_SECONDS", "4.0"))))
-WEB_AI_GATE_CACHE_TTL_SECONDS = max(300, min(86400, int(os.environ.get("WEB_AI_GATE_CACHE_TTL_SECONDS", "3600"))))
-WEB_SEARCH_PRECISION_DEFAULT = max(60, min(100, int(os.environ.get("WEB_SEARCH_PRECISION_DEFAULT", "70"))))
-WEB_AI_GATE_FULL_START = max(90, min(100, int(os.environ.get("WEB_AI_GATE_FULL_START", "90"))))
-
-# v114: make the slider control SEARCH DEPTH as well as AI strictness.
-# 60-89 gets a genuinely fast Lens seed and shorter store deadlines.
-WEB_PRECISION_TURBO = env_bool("WEB_PRECISION_TURBO", True)
-WEB_FAST_LENS_TIMEOUT_SECONDS = max(2.5, min(6.0, float(os.environ.get("WEB_FAST_LENS_TIMEOUT_SECONDS", "4.0"))))
-WEB_FAST_IDENTITY_TIMEOUT_SECONDS = max(1.5, min(5.0, float(os.environ.get("WEB_FAST_IDENTITY_TIMEOUT_SECONDS", "3.0"))))
-WEB_FAST_STORE_TIMEOUT_SECONDS = max(3.0, min(7.0, float(os.environ.get("WEB_FAST_STORE_TIMEOUT_SECONDS", "5.0"))))
-WEB_FAST_STORE_HTTP_TIMEOUT_SECONDS = max(2.5, min(WEB_FAST_STORE_TIMEOUT_SECONDS, float(os.environ.get("WEB_FAST_STORE_HTTP_TIMEOUT_SECONDS", "4.5"))))
-WEB_FAST_NO_HEAVY_AT_60 = env_bool("WEB_FAST_NO_HEAVY_AT_60", True)
-WEB_BALANCED_HEAVY_MIN_RESULTS = max(1, min(8, int(os.environ.get("WEB_BALANCED_HEAVY_MIN_RESULTS", "4"))))
-
-WEB_FAST_EMPTY_RESCUE = env_bool("WEB_FAST_EMPTY_RESCUE", True)
-WEB_FAST_EMPTY_RESCUE_TIMEOUT_SECONDS = max(3.0, min(8.0, float(os.environ.get("WEB_FAST_EMPTY_RESCUE_TIMEOUT_SECONDS", "5.0"))))
-WEB_FAST_EMPTY_HEAVY_FALLBACK = env_bool("WEB_FAST_EMPTY_HEAVY_FALLBACK", True)
-WEB_FAST_EMPTY_HEAVY_TIMEOUT_SECONDS = max(6.0, min(18.0, float(os.environ.get("WEB_FAST_EMPTY_HEAVY_TIMEOUT_SECONDS", "10.0"))))
-
-# v116: two-wave store race for low/balanced precision.
-# The first wave is intentionally tiny; first successful merchants stream immediately.
-WEB_TURBO_STORE_RACE = env_bool("WEB_TURBO_STORE_RACE", True)
-WEB_TURBO_PRIMARY_TIMEOUT_SECONDS = max(1.8, min(5.0, float(os.environ.get("WEB_TURBO_PRIMARY_TIMEOUT_SECONDS", "3.0"))))
-WEB_TURBO_SECONDARY_TIMEOUT_SECONDS = max(1.8, min(5.0, float(os.environ.get("WEB_TURBO_SECONDARY_TIMEOUT_SECONDS", "3.0"))))
-WEB_TURBO_SECONDARY_START_BELOW = max(2, min(10, int(os.environ.get("WEB_TURBO_SECONDARY_START_BELOW", "6"))))
-WEB_TURBO_CHINA_COMBINED = env_bool("WEB_TURBO_CHINA_COMBINED", True)
-WEB_TURBO_CHINA_COMBINED_NUM = max(8, min(30, int(os.environ.get("WEB_TURBO_CHINA_COMBINED_NUM", "18"))))
-WEB_TURBO_CHINA_COMBINED_TIMEOUT_SECONDS = max(2.0, min(5.0, float(os.environ.get("WEB_TURBO_CHINA_COMBINED_TIMEOUT_SECONDS", "3.0"))))
-
-# v117 balanced/sweet-spot mode.
-# 61-84 = broad + fast, 85-89 = broad + stricter deterministic relevance,
-# 90-100 = full AI exact path.
-WEB_WIDE_BALANCED_SEARCH = env_bool("WEB_WIDE_BALANCED_SEARCH", True)
-WEB_SWEET_SPOT_MAX = max(75, min(89, int(os.environ.get("WEB_SWEET_SPOT_MAX", "84"))))
-WEB_NEAR_EXACT_START = max(WEB_SWEET_SPOT_MAX + 1, min(89, int(os.environ.get("WEB_NEAR_EXACT_START", "85"))))
-WEB_WIDE_SEARCH_TIMEOUT_SECONDS = max(2.2, min(5.0, float(os.environ.get("WEB_WIDE_SEARCH_TIMEOUT_SECONDS", "3.5"))))
-WEB_WIDE_LOCAL_CAP = max(1, min(5, int(os.environ.get("WEB_WIDE_LOCAL_CAP", "4"))))
-WEB_WIDE_US_CAP = max(1, min(4, int(os.environ.get("WEB_WIDE_US_CAP", "3"))))
-WEB_WIDE_CN_CAP = max(1, min(4, int(os.environ.get("WEB_WIDE_CN_CAP", "3"))))
-
-# v118: local is the core Findzia promise. Keep it strong without blocking global results.
-WEB_LOCAL_PRIORITY_BALANCED = env_bool("WEB_LOCAL_PRIORITY_BALANCED", True)
-WEB_LOCAL_PRIORITY_RESCUE_STORES = max(1, min(5, int(os.environ.get("WEB_LOCAL_PRIORITY_RESCUE_STORES", "3"))))
-WEB_LOCAL_PRIORITY_TIMEOUT_SECONDS = max(2.5, min(5.5, float(os.environ.get("WEB_LOCAL_PRIORITY_TIMEOUT_SECONDS", "4.0"))))
-WEB_LOCAL_PRIORITY_HEADSTART_SECONDS = max(0.0, min(0.6, float(os.environ.get("WEB_LOCAL_PRIORITY_HEADSTART_SECONDS", "0.18"))))
-WEB_LOCAL_RESULT_RESERVE = max(1, min(5, int(os.environ.get("WEB_LOCAL_RESULT_RESERVE", "4"))))
-WEB_AI_GATE_LIGHT_START = max(61, min(89, int(os.environ.get("WEB_AI_GATE_LIGHT_START", "61"))))
-WEB_AI_GATE_CACHE = {}
-WEB_AI_GATE_CACHE_LOCK = threading.Lock()
-WEB_AI_GATE_SEMAPHORE = threading.Semaphore(WEB_AI_GATE_CONCURRENCY)
+WEB_STREAM_IMAGE_FINAL_MIN_RESULTS = max(2, min(10, int(os.environ.get("WEB_STREAM_IMAGE_FINAL_MIN_RESULTS", "5"))))
 # v97: Chinese global marketplaces are more important than the US wave on web.
 # Their fast probes use normal Google organic site search first because Google Shopping
 # often returns few/no cards for AliExpress/Temu/SHEIN/Alibaba-style domains.
@@ -9352,7 +9116,7 @@ def _web_attach_best_images(rows, rescue_page=False):
     if not rows:
         return rows
     jobs = []
-    with ThreadPoolExecutor(max_workers=min(WEB_TURBO_STRICT_WORKERS if WEB_TURBO_MODE else 6, len(rows))) as pool:
+    with ThreadPoolExecutor(max_workers=min(6, len(rows))) as pool:
         for idx, row in enumerate(rows):
             primary = row.get('image') or row.get('thumbnail') or ''
             page_url = row.get('url') or row.get('link') or ''
@@ -9848,30 +9612,6 @@ def _web_marketplace_repeat_cap(domain_or_url):
     return WEB_STREAM_RESULTS_PER_STORE
 
 
-def _web_is_amazon_host(host):
-    host = str(host or "").lower().split(":")[0]
-    if host.startswith("www."):
-        host = host[4:]
-    # Supports amazon.fr, amazon.de, amazon.co.uk, amazon.co.jp, amazon.com.au, etc.
-    return bool(re.match(r"^(?:[a-z0-9-]+\.)*amazon\.(?:com|ca|de|fr|it|es|nl|se|pl|eg|sa|ae|sg|in|co\.uk|co\.jp|com\.au|com\.br|com\.mx|com\.tr|com\.be)$", host))
-
-
-def _web_is_amazon_product_url(url):
-    raw = str(url or "").strip()
-    if not _web_is_http_url(raw):
-        return False
-    try:
-        u = urllib.parse.urlparse(raw)
-        host = u.netloc.lower().split(":")[0]
-        path = (u.path or "").lower()
-    except Exception:
-        return False
-    if not _web_is_amazon_host(host):
-        return False
-    # Direct ASIN product pages only. Reject home, search, promo, storefront and deal pages.
-    return bool(re.search(r"/(?:dp|gp/product|gp/aw/d)/[a-z0-9]{8,}(?:[/?]|$)", path))
-
-
 def _web_is_direct_product_page_url(url, store_name=""):
     """General web-card gate: reject obvious search/category/listing URLs."""
     raw = str(url or "").strip()
@@ -9910,8 +9650,8 @@ def _web_is_direct_product_page_url(url, store_name=""):
     if path in ("", "/"):
         return False
 
-    if _web_is_amazon_host(host):
-        return _web_is_amazon_product_url(raw)
+    if host.endswith("amazon.com"):
+        return bool(re.search(r"/(?:dp|gp/product)/[a-z0-9]{8,}", path))
     if host.endswith("ebay.com"):
         return bool(re.search(r"/itm/(?:[^/]+/)?\d{8,}", path))
     if host.endswith("walmart.com"):
@@ -9999,8 +9739,8 @@ def _web_price_number_and_currency(text, fallback_currency=""):
                     return val, cur
             except Exception:
                 pass
-    # Last resort only when the string itself is short and price-like, never a size/spec.
-    if len(raw) <= 50 and not _looks_like_measurement_number(raw):
+    # Last resort only when the string itself is short and price-like.
+    if len(raw) <= 50:
         m = re.search(r"(?<!\\d)([0-9]+(?:[.,][0-9]{1,3})?)(?!\\d)", raw.replace(",", ""))
         if m:
             try:
@@ -10047,16 +9787,6 @@ def _web_verified_page_snapshot(url):
             low = re.sub(r"\\s+", " ", BeautifulSoup(html[:450000], "html.parser").get_text(" ", strip=True).lower())
             host = urllib.parse.urlparse(final_url).netloc.lower().split(":")[0]
             host = host[4:] if host.startswith("www.") else host
-            # Amazon: country marketplaces must resolve to a real ASIN product page.
-            # Homepage/promo/search pages can contain many numbers and images; never parse those as product price/image.
-            if _web_is_amazon_host(host):
-                if not _web_is_amazon_product_url(final_url):
-                    data["is_product"] = False
-                    data["price"] = None
-                    data["currency"] = ""
-                    data["image"] = ""
-                    print(f"WEB AMAZON REJECT NON-PRODUCT final={final_url[:160]}")
-
             # Alibaba vertical/supplier result pages can look like product URLs but are supplier listings.
             if host.endswith("alibaba.com"):
                 if host not in ("alibaba.com", "www.alibaba.com"):
@@ -10261,12 +9991,6 @@ def _web_verify_card_strict(row, rank, lang, market_snapshot=None):
             print(f"WEB STRICT REJECT NO IMAGE store={row.get('store') or row.get('source')} url={url[:140]}")
             return None
 
-    # If a merchant URL redirected to a non-product page, reject it completely.
-    # Do not fall back to a structured price from the search result, because that can pair a promo/banner URL with a bogus number.
-    if snap and snap.get("ok") and not snap.get("is_product"):
-        print(f"WEB STRICT REJECT REDIRECT NON-PRODUCT store={row.get('store') or row.get('source')} url={(snap.get('url') or url)[:160]}")
-        return None
-
     # Page price is authoritative when exposed. Otherwise use a structured search/Lens price.
     page_price = snap.get("price") if snap and snap.get("ok") else None
     page_cur = str((snap or {}).get("currency") or "").upper().strip()
@@ -10276,36 +10000,18 @@ def _web_verify_card_strict(row, rank, lang, market_snapshot=None):
         except Exception:
             page_price = None
     if page_price and page_price > 0:
-        # Cross-check page parser against an existing structured price when both exist.
-        # This protects against grabbing banner/order-id numbers from complex merchant HTML.
-        existing_text = str(row.get("price") or "").strip()
-        existing_val, existing_cur = _web_price_number_and_currency(existing_text)
-        if existing_val and existing_val > 0 and existing_cur and page_cur and existing_cur == page_cur:
-            ratio = max(page_price, existing_val) / max(0.000001, min(page_price, existing_val))
-            if ratio >= 8.0:
-                print(f"WEB PRICE MISMATCH REJECT store={row.get('store') or row.get('source')} page={page_price} structured={existing_val} cur={page_cur}")
-                page_price = None
-        if page_price and not page_cur:
+        if not page_cur:
             page_cur = _web_market_currency(market_snapshot) if rank == 0 else ("USD" if rank == 1 else "CNY")
-        if page_price and page_price > 0:
-            raw_price = f"{page_price:g} {page_cur}".strip()
-            row["price"] = _web_price_local_explicit(raw_price, rank, lang, market_snapshot)
-            row["price"] = _web_normalize_existing_price_to_market(row["price"], rank, lang, market_snapshot)
-            row["price_verified"] = True
-            row["price_source"] = "product_page"
-            return row
+        raw_price = f"{page_price:g} {page_cur}".strip()
+        row["price"] = _web_price_local_explicit(raw_price, rank, lang, market_snapshot)
+        row["price"] = _web_normalize_existing_price_to_market(row["price"], rank, lang, market_snapshot)
+        row["price_verified"] = True
+        row["price_source"] = "product_page"
+        return row
 
     existing = str(row.get("price") or "").strip()
     val, cur = _web_price_number_and_currency(existing)
     if val and val > 0:
-        title_ctx = " ".join(str(row.get(k) or "") for k in ("title", "name", "snippet"))
-        source_kind = str(row.get("price_source") or "").lower()
-        if _looks_like_measurement_number(title_ctx, val) and source_kind not in ("product_page", "jsonld", "merchant_page"):
-            print(f"WEB PRICE UNIT REJECT store={row.get('store') or row.get('source')} val={val} title={title_ctx[:100]}")
-            if WEB_REQUIRE_NUMERIC_PRICE:
-                return None
-            row["price"] = ""
-            return row
         row["price"] = _web_normalize_existing_price_to_market(existing, rank, lang, market_snapshot)
         row["price_verified"] = True
         row["price_source"] = row.get("price_source") or "search_structured_rebased"
@@ -10336,387 +10042,6 @@ def _web_verify_rows_strict(rows, lang):
                 out[i] = fut.result()
             except Exception:
                 out[i] = None
-    return [x for x in out if x]
-
-
-
-def _web_ai_gate_json(raw):
-    text = str(raw or "").strip()
-    if not text:
-        return {}
-    text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.I)
-    text = re.sub(r"\s*```$", "", text)
-    m = re.search(r"\{.*\}", text, flags=re.S)
-    if m:
-        text = m.group(0)
-    try:
-        data = json.loads(text)
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
-
-
-def _web_ai_gate_terms(value):
-    txt = normalize_ar(str(value or "")).lower()
-    return [x for x in re.findall(r"[a-z0-9\u0600-\u06ff]+", txt) if len(x) >= 2]
-
-
-def _web_ai_plain_call(parts, system, timeout_seconds):
-    """Bounded Gemini plain call used only by the web AI gatekeeper."""
-    if not GEMINI_API_KEY:
-        return ""
-    model = GEMINI_FAST_MODEL
-    url = f"{GEMINI_BASE_URL}/{model}:generateContent"
-    payload = {
-        "systemInstruction": {"parts": [{"text": system}]},
-        "contents": [{"role": "user", "parts": parts}],
-        "generationConfig": {"temperature": 0, "maxOutputTokens": 280},
-    }
-    try:
-        with GEMINI_STATS_LOCK:
-            GEMINI_STATS["plain_calls"] += 1
-            print(f"GEMINI GATE CALL model={model} totals={GEMINI_STATS}")
-        r = requests.post(url, params={"key": GEMINI_API_KEY}, json=payload, timeout=(3.0, timeout_seconds))
-        if r.status_code >= 400:
-            print(f"GEMINI GATE HTTP {r.status_code}: {r.text[:240]}")
-            return ""
-        data = r.json()
-        candidates = data.get("candidates") or []
-        if not candidates:
-            return ""
-        return "".join(
-            str(part.get("text") or "")
-            for part in (candidates[0].get("content", {}).get("parts", []) or [])
-        ).strip()
-    except Exception as e:
-        print(f"GEMINI GATE EXCEPTION: {e}")
-        return ""
-
-
-def _web_search_precision(value):
-    try:
-        return max(60, min(100, int(round(float(value)))))
-    except Exception:
-        return WEB_SEARCH_PRECISION_DEFAULT
-
-
-def _web_ai_precision_policy(precision, mode):
-    p = _web_search_precision(precision)
-    mode = str(mode or "balanced").lower()
-    ai_off = p <= 60
-    light_gate = 60 < p < WEB_AI_GATE_FULL_START
-    full_gate = p >= WEB_AI_GATE_FULL_START
-    if mode == "strict_exact":
-        threshold = 70 + int(round((p - 60) * 0.575))  # 70 @60 -> 93 @100
-        exact_only = p >= 80
-    else:
-        threshold = 58 + int(round((p - 60) * 0.50))   # 58 @60 -> 78 @100
-        exact_only = False
-    return {
-        "precision": p,
-        "threshold": threshold,
-        "exact_only": exact_only,
-        "use_candidate_image": full_gate,
-        "fail_closed": p >= 90,
-        "ai_off": ai_off,
-        "light_gate": light_gate,
-        "full_gate": full_gate,
-        "broad_fast": ai_off,
-    }
-
-
-def _web_ai_identity_profile(image_b64, mime, identity_hint="", precision=70):
-    """Build one conservative product identity profile from the ORIGINAL image.
-
-    This is one plain Gemini call and does not search the web.  It decides whether the
-    photo supports a strict exact-product identity (brand/model/variant visibly readable)
-    or whether similar products should remain allowed for generic items.
-    """
-    precision = _web_search_precision(precision)
-    if precision <= 60:
-        return {
-            "mode": "balanced", "brand": "", "product": str(identity_hint or "").strip()[:160],
-            "variant": "", "category": "", "search_identity": str(identity_hint or "").strip()[:160],
-            "must_terms": [], "exclude_terms": [], "confidence": 0.0, "precision": precision,
-            "ai_filter_off": True,
-        }
-    fallback = {
-        "mode": "balanced",
-        "brand": "",
-        "product": str(identity_hint or "").strip()[:160],
-        "variant": "",
-        "category": "",
-        "search_identity": str(identity_hint or "").strip()[:160],
-        "must_terms": [],
-        "exclude_terms": [],
-        "confidence": 0.45,
-    }
-    if not WEB_AI_RESULT_GATE or not GEMINI_API_KEY:
-        return fallback
-    system = (
-        "You are the product-identity gatekeeper for a shopping image-search engine. "
-        "The ORIGINAL user image is the only source of truth. Read visible branding, model, variant, size/edition text when clear. "
-        "Never invent a brand or model. If the image clearly identifies a specific branded/model/variant product, mode must be strict_exact. "
-        "If it is only a generic style/object, mode must be balanced. Return compact JSON only with keys: "
-        "mode, brand, product, variant, category, search_identity, must_terms, exclude_terms, confidence. "
-        "must_terms should be 1-5 short English terms that an exact listing normally contains. "
-        "exclude_terms should list obvious conflicting variants only when certain."
-    )
-    prompt = (
-        f"Existing Lens/Vision hint (may be wrong): {identity_hint}\n"
-        f"User-selected search precision: {precision}%. This controls filtering strictness later; identity recognition itself must remain factual and conservative.\n"
-        "Create the conservative identity profile. For perfume/fragrance, distinguish the exact line/flanker such as Intense, Sport, Parfum, EDT, EDP when visible."
-    )
-    try:
-        with WEB_AI_GATE_SEMAPHORE:
-            raw = _web_ai_plain_call([
-                {"inline_data": {"mime_type": mime, "data": image_b64}},
-                {"text": prompt},
-            ], system, WEB_AI_GATE_PROFILE_TIMEOUT_SECONDS)
-        data = _web_ai_gate_json(raw)
-    except Exception as e:
-        print(f"WEB AI PROFILE ERR: {e}")
-        data = {}
-    if not data:
-        return fallback
-    mode = str(data.get("mode") or "balanced").strip().lower()
-    if mode not in ("strict_exact", "balanced"):
-        mode = "balanced"
-    out = {
-        "mode": mode,
-        "brand": str(data.get("brand") or "").strip()[:80],
-        "product": str(data.get("product") or identity_hint or "").strip()[:160],
-        "variant": str(data.get("variant") or "").strip()[:100],
-        "category": str(data.get("category") or "").strip()[:80],
-        "search_identity": str(data.get("search_identity") or data.get("product") or identity_hint or "").strip()[:180],
-        "must_terms": [str(x).strip()[:50] for x in (data.get("must_terms") or []) if str(x).strip()][:5],
-        "exclude_terms": [str(x).strip()[:50] for x in (data.get("exclude_terms") or []) if str(x).strip()][:5],
-        "confidence": float(data.get("confidence") or 0.5) if str(data.get("confidence") or "").replace('.','',1).isdigit() else 0.5,
-        "precision": precision,
-    }
-    print(
-        "WEB AI PROFILE "
-        f"mode={out['mode']} brand={out['brand']!r} product={out['product']!r} "
-        f"variant={out['variant']!r} must={out['must_terms']} precision={precision}%"
-    )
-    return out
-
-
-def _web_ai_gate_cache_key(profile, row):
-    identity = "|".join([
-        str(profile.get("brand") or ""), str(profile.get("product") or ""),
-        str(profile.get("variant") or ""), str(profile.get("mode") or ""),
-        str(_web_search_precision(profile.get("precision", WEB_SEARCH_PRECISION_DEFAULT)))
-    ])
-    target = str(row.get("url") or row.get("link") or row.get("title") or "")
-    return hashlib.sha1((normalize_name(identity) + "|" + target.lower()).encode("utf-8", "ignore")).hexdigest()
-
-
-def _web_ai_gate_cache_get(key):
-    now = time.time()
-    with WEB_AI_GATE_CACHE_LOCK:
-        item = WEB_AI_GATE_CACHE.get(key)
-        if item and now - float(item.get("ts") or 0) <= WEB_AI_GATE_CACHE_TTL_SECONDS:
-            return dict(item.get("data") or {})
-        if item:
-            WEB_AI_GATE_CACHE.pop(key, None)
-    return None
-
-
-def _web_ai_gate_cache_set(key, data):
-    with WEB_AI_GATE_CACHE_LOCK:
-        WEB_AI_GATE_CACHE[key] = {"ts": time.time(), "data": dict(data or {})}
-        if len(WEB_AI_GATE_CACHE) > 5000:
-            oldest = sorted(WEB_AI_GATE_CACHE.items(), key=lambda kv: kv[1].get("ts", 0))[:800]
-            for k, _ in oldest:
-                WEB_AI_GATE_CACHE.pop(k, None)
-
-
-def _web_ai_gate_candidate_image(row):
-    image_url = _web_unproxy_image_url(row.get("image") or row.get("thumbnail") or "")
-    if not image_url:
-        return None
-    try:
-        parsed = urllib.parse.urlparse(image_url)
-        headers = dict(HEADERS)
-        headers["Accept"] = "image/avif,image/webp,image/apng,image/*,*/*;q=0.8"
-        if parsed.scheme and parsed.netloc:
-            headers["Referer"] = f"{parsed.scheme}://{parsed.netloc}/"
-        resp = requests.get(
-            image_url, headers=headers,
-            timeout=(1.5, WEB_AI_GATE_IMAGE_TIMEOUT_SECONDS),
-            stream=True, allow_redirects=True,
-        )
-        if resp.status_code >= 400:
-            return None
-        ctype = str(resp.headers.get("content-type") or "").split(";",1)[0].strip().lower()
-        if not ctype.startswith("image/"):
-            return None
-        chunks, total = [], 0
-        for chunk in resp.iter_content(65536):
-            if not chunk:
-                continue
-            total += len(chunk)
-            if total > WEB_AI_GATE_MAX_IMAGE_BYTES:
-                return None
-            chunks.append(chunk)
-        body = b"".join(chunks)
-        if not body:
-            return None
-        return ctype, base64.b64encode(body).decode("ascii")
-    except Exception:
-        return None
-
-
-def _web_ai_gate_fast_decision(profile, row):
-    """Return accept/reject/None. None means ask the multimodal judge."""
-    mode = str(profile.get("mode") or "balanced")
-    precision = _web_search_precision(profile.get("precision", WEB_SEARCH_PRECISION_DEFAULT))
-    policy = _web_ai_precision_policy(precision, mode)
-    if policy["ai_off"]:
-        return True
-    if mode != "strict_exact":
-        if policy["light_gate"]:
-            return True
-        # At the broadest setting the AI identity profile still supervises the search,
-        # while the existing relevance/product-page gates can stream generic matches immediately.
-        if policy["broad_fast"]:
-            return True
-        return None
-    text = " ".join(str(row.get(k) or "") for k in ("store", "title", "name", "snippet")).lower()
-    tokens = set(_web_ai_gate_terms(text))
-    brand_tokens = set(_web_ai_gate_terms(profile.get("brand")))
-    must = [set(_web_ai_gate_terms(x)) for x in (profile.get("must_terms") or [])]
-    must = [x for x in must if x]
-    exclude = [set(_web_ai_gate_terms(x)) for x in (profile.get("exclude_terms") or [])]
-    # Explicit conflicting flanker/model is a safe rejection.
-    if any(x and x.issubset(tokens) for x in exclude):
-        return False if precision >= 35 else None
-    brand_ok = (not brand_tokens) or brand_tokens.issubset(tokens)
-    must_hits = sum(1 for x in must if x.issubset(tokens))
-    # Strong textual exactness: the AI profile's brand + most exact terms are present.
-    required_hits = max(1, len(must) - 1) if precision >= 65 else max(1, (len(must) + 1) // 2)
-    if brand_ok and (not must or must_hits >= required_hits):
-        return True
-    return None
-
-
-def _web_ai_gate_candidate(profile, row, original_b64, original_mime, lang="en"):
-    if not WEB_AI_RESULT_GATE:
-        return True, 100, "disabled"
-    key = _web_ai_gate_cache_key(profile, row)
-    cached = _web_ai_gate_cache_get(key)
-    if cached is not None:
-        return bool(cached.get("accept")), int(cached.get("score") or 0), str(cached.get("level") or "cached")
-
-    fast = _web_ai_gate_fast_decision(profile, row)
-    if fast is True:
-        result = {"accept": True, "score": 98, "level": "exact_text"}
-        _web_ai_gate_cache_set(key, result)
-        return True, 98, "exact_text"
-
-    mode = str(profile.get("mode") or "balanced")
-    precision = _web_search_precision(profile.get("precision", WEB_SEARCH_PRECISION_DEFAULT))
-    policy = _web_ai_precision_policy(precision, mode)
-    if policy["ai_off"]:
-        return True, 100, "ai_off_60"
-    if policy["light_gate"] and fast is None:
-        # Fast path for 61-89: keep existing product/relevance filters and avoid a per-result Gemini call.
-        return True, 75, "light_fast"
-    candidate_img = _web_ai_gate_candidate_image(row) if policy["use_candidate_image"] else None
-    if fast is False:
-        result = {"accept": False, "score": 5, "level": "conflict"}
-        _web_ai_gate_cache_set(key, result)
-        return False, 5, "conflict"
-
-    system = (
-        "You are the final AI gatekeeper before a shopping result is shown. "
-        "The FIRST image is the user's ORIGINAL product and is the source of truth. "
-        "If a SECOND image is provided it is the candidate listing image. "
-        "Use the identity profile plus candidate title/store and visual comparison. "
-        "For strict_exact: accept ONLY the same brand + same product line/model + same variant/flanker. "
-        "Reject lookalikes, inspired products, different fragrances/variants, generic wholesale items, accessories, empty bottles, samples unless the original itself is that. "
-        "For balanced: accept the same product type/style when an exact brand/model is not visible, but reject clearly different objects. "
-        f"The user selected search precision {precision}%. Higher precision means stricter identity matching; lower precision may accept genuinely similar products but never a clearly different object/category. "
-        "Return JSON only: {\"accept\":true|false,\"level\":\"exact\"|\"similar\"|\"reject\",\"score\":0-100}."
-    )
-    info = {
-        "mode": mode,
-        "brand": profile.get("brand") or "",
-        "product": profile.get("product") or "",
-        "variant": profile.get("variant") or "",
-        "category": profile.get("category") or "",
-        "must_terms": profile.get("must_terms") or [],
-        "store": row.get("store") or row.get("source") or "",
-        "title": row.get("title") or row.get("name") or "",
-    }
-    parts = [
-        {"text": "ORIGINAL USER IMAGE:"},
-        {"inline_data": {"mime_type": original_mime, "data": original_b64}},
-        {"text": "IDENTITY AND CANDIDATE METADATA:\n" + json.dumps(info, ensure_ascii=False)},
-    ]
-    if candidate_img:
-        ctype, cb64 = candidate_img
-        parts.extend([
-            {"text": "CANDIDATE LISTING IMAGE:"},
-            {"inline_data": {"mime_type": ctype, "data": cb64}},
-        ])
-    try:
-        with WEB_AI_GATE_SEMAPHORE:
-            raw = _web_ai_plain_call(parts, system, WEB_AI_GATE_JUDGE_TIMEOUT_SECONDS)
-        data = _web_ai_gate_json(raw)
-    except Exception as e:
-        print(f"WEB AI GATE JUDGE ERR store={row.get('store')}: {e}")
-        data = {}
-    score = int(float(data.get("score") or 0)) if str(data.get("score") or "").replace('.','',1).isdigit() else 0
-    level = str(data.get("level") or "reject").lower()
-    ai_accept = bool(data.get("accept"))
-    threshold = int(policy["threshold"])
-    if mode == "strict_exact":
-        allowed_levels = ("exact",) if policy["exact_only"] else ("exact", "similar")
-        accept = ai_accept and level in allowed_levels and score >= threshold
-        if not data:
-            accept = not (WEB_AI_GATE_FAIL_CLOSED_STRICT and policy["fail_closed"])
-    else:
-        accept = ai_accept and level in ("exact", "similar") and score >= threshold
-        if not data:
-            # Lower/balanced precision fails open to the existing relevance filters; high precision fails closed.
-            accept = not policy["fail_closed"]
-    result = {"accept": bool(accept), "score": score, "level": level}
-    _web_ai_gate_cache_set(key, result)
-    print(
-        f"WEB AI GATE {'ACCEPT' if accept else 'REJECT'} mode={mode} precision={precision}% threshold={threshold} score={score} level={level} "
-        f"store={row.get('store') or row.get('source')} title={str(row.get('title') or '')[:90]!r}"
-    )
-    return bool(accept), score, level
-
-
-def _web_ai_gate_rows(profile, rows, original_b64, original_mime, lang="en"):
-    rows = list(rows or [])
-    if not rows or not WEB_AI_RESULT_GATE:
-        return rows
-    precision = _web_search_precision(profile.get("precision", WEB_SEARCH_PRECISION_DEFAULT))
-    if precision <= 60:
-        # User explicitly chose speed: no AI result filtering, no candidate-image downloads, no Gemini judging.
-        return rows
-    out = [None] * len(rows)
-    workers = min(WEB_AI_GATE_CONCURRENCY, len(rows))
-    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
-        jobs = []
-        for i, row in enumerate(rows):
-            jobs.append((i, pool.submit(_web_ai_gate_candidate, profile, row, original_b64, original_mime, lang)))
-        for i, fut in jobs:
-            try:
-                accept, score, level = fut.result(timeout=WEB_AI_GATE_JUDGE_TIMEOUT_SECONDS + WEB_AI_GATE_IMAGE_TIMEOUT_SECONDS + 2)
-            except Exception as e:
-                print(f"WEB AI GATE FUTURE ERR: {e}")
-                policy = _web_ai_precision_policy(profile.get("precision", WEB_SEARCH_PRECISION_DEFAULT), profile.get("mode"))
-                accept, score, level = (False, 0, "timeout") if policy["fail_closed"] else (True, 0, "timeout")
-            if accept:
-                row = dict(rows[i])
-                row["ai_match_score"] = score
-                row["ai_match_level"] = level
-                out[i] = row
     return [x for x in out if x]
 
 
@@ -10784,45 +10109,13 @@ def _serpapi_china_global_site_request(query, label, domain, timeout_seconds=Non
         print(f"WEB CHINA GLOBAL GOOGLE EXCEPTION store={label}: {e}")
         return []
 
-def _web_turbo_cache_get(cache, lock, key, ttl):
-    now = time.time()
-    with lock:
-        hit = cache.get(key)
-        if hit and now - float(hit.get("ts") or 0) < ttl:
-            return hit.get("value")
-    return None
-
-
-def _web_turbo_cache_set(cache, lock, key, value, max_items=1200):
-    now = time.time()
-    with lock:
-        cache[key] = {"ts": now, "value": value}
-        if len(cache) > max_items:
-            oldest = sorted(cache.items(), key=lambda kv: kv[1].get("ts", 0))[:max(100, max_items // 5)]
-            for k, _ in oldest:
-                cache.pop(k, None)
-
-
-def _web_store_probe_cache_key(query, country, lang, rank, label, domain, gl):
-    return "|".join([
-        normalize_name(query or ""), str(country or "").lower(), str(lang or "").lower(),
-        str(rank), normalize_name(label or ""), str(domain or "").lower(), str(gl or "").lower()
-    ])
-
-
 def _web_store_probe_sync(query, country, lang, rank, label, domain, gl):
-    """Probe one merchant and return UI cards; v105 caches the exact verified rows briefly."""
+    """Probe one merchant and return UI cards; Chinese globals use organic-first in v97."""
     market = _web_market(country)
     MARKET_CTX.value = market
     q = _shopping_clean_query(query or "")
     if not q or not SERPAPI_API_KEY:
         return []
-    cache_key = _web_store_probe_cache_key(q, country, lang, rank, label, domain, gl)
-    if WEB_TURBO_MODE:
-        cached = _web_turbo_cache_get(WEB_TURBO_STORE_CACHE, WEB_TURBO_STORE_CACHE_LOCK, cache_key, WEB_TURBO_STORE_CACHE_TTL_SECONDS)
-        if cached is not None:
-            print(f"WEB TURBO STORE CACHE HIT store={label} rows={len(cached)}")
-            return [dict(x) for x in cached]
 
     candidate_cc = (market.get("country") or DEFAULT_COUNTRY).lower() if rank == 0 else ("us" if rank == 1 else "cn")
     candidates = []
@@ -10836,10 +10129,8 @@ def _web_store_probe_sync(query, country, lang, rank, label, domain, gl):
         # Do not chain a second SerpApi request inside the fast FIFO task.  Other China
         # merchants are already running in parallel, and the full engine can enrich later.
         # This prevents timed-out to_thread work from continuing in the background.
-        rows = _web_market_candidates_to_items(candidates, rank, lang, q)[:_web_marketplace_repeat_cap(domain)]
-        if WEB_TURBO_MODE:
-            _web_turbo_cache_set(WEB_TURBO_STORE_CACHE, WEB_TURBO_STORE_CACHE_LOCK, cache_key, [dict(x) for x in rows])
-        return rows
+        rows = _web_market_candidates_to_items(candidates, rank, lang, q)
+        return rows[:_web_marketplace_repeat_cap(domain)]
 
     # Existing Shopping path remains unchanged for local/US.
     if not candidates:
@@ -10871,763 +10162,7 @@ def _web_store_probe_sync(query, country, lang, rank, label, domain, gl):
     cap = _web_marketplace_repeat_cap(domain)
     if cap > WEB_STREAM_RESULTS_PER_STORE and rows:
         print(f"WEB MARKETPLACE MULTI store={label} cap={cap} rows={len(rows)}")
-    rows = rows[:cap]
-    if WEB_TURBO_MODE:
-        _web_turbo_cache_set(WEB_TURBO_STORE_CACHE, WEB_TURBO_STORE_CACHE_LOCK, cache_key, [dict(x) for x in rows])
-    return rows
-
-
-def _web_fast_lens_request(public_url, country, query_hint="", timeout_seconds=None):
-    """Single bounded Lens `all` request for low/balanced precision web search only."""
-    timeout_seconds = float(timeout_seconds or WEB_FAST_LENS_TIMEOUT_SECONDS)
-    params = {
-        "engine": "google_lens",
-        "url": public_url,
-        "api_key": SERPAPI_API_KEY,
-        "hl": "en",
-        "safe": "active",
-        "output": "json",
-        "type": "all",
-        "auto_crop": "true",
-    }
-    if country:
-        params["country"] = str(country).lower()
-    if query_hint:
-        params["q"] = str(query_hint)[:120]
-    try:
-        r = requests.get(
-            "https://serpapi.com/search.json",
-            params=params,
-            timeout=(2.5, timeout_seconds),
-        )
-        if r.status_code >= 400:
-            print(f"WEB FAST LENS HTTP {r.status_code} country={country}: {r.text[:180]}")
-            return []
-        data = r.json()
-        if data.get("error"):
-            print(f"WEB FAST LENS ERROR country={country}: {data.get('error')}")
-            return []
-        items, seen = [], set()
-        _collect_lens_items(data, items, seen)
-        for item in items:
-            item["_lens_country"] = str(country or "").lower()
-        print(f"WEB FAST LENS PASS country={country} -> {len(items)} items")
-        return items
-    except Exception as e:
-        print(f"WEB FAST LENS TIMEOUT/ERR country={country}: {e}")
-        return []
-
-
-def _web_fast_lens_cards(raw_matches, lang, caption=""):
-    """Build first-paint cards with NO AI, NO page probes and NO translation network calls."""
-    market = current_market()
-    local_cc = (market.get("country") or DEFAULT_COUNTRY).lower()
-    rank_cc = {0: local_cc, 1: "us", 2: "cn"}
-    out, seen = [], set()
-    # Exact/visual and priced cards first.
-    ordered = sorted(
-        list(raw_matches or []),
-        key=lambda m: (
-            0 if m.get("exact") else 1,
-            0 if str(m.get("section") or "") in ("exact_matches", "visual_matches") else 1,
-            0 if str(m.get("price") or "").strip() else 1,
-            int(m.get("position") or 999),
-        ),
-    )
-    merchant_counts = defaultdict(int)
-    caps = {0: LENS_DIRECT_LOCAL_MAX, 1: LENS_DIRECT_US_MAX, 2: LENS_DIRECT_CN_MAX}
-    rank_counts = defaultdict(int)
-
-    for m in ordered:
-        rank = result_market_rank(m)
-        if rank not in (0, 1, 2):
-            continue
-        if rank_counts[rank] >= caps.get(rank, 0):
-            continue
-        url = str(m.get("link") or "").strip()
-        if not _web_is_direct_product_page_url(url, m.get("source") or ""):
-            continue
-        image = _web_best_card_image(m.get("thumbnail") or m.get("image") or "", "", False)
-        raw_price = str(m.get("price") or "").strip()
-        if not image or not raw_price:
-            continue
-        shown_price = _text_price_local(raw_price, rank, lang)
-        if not shown_price:
-            continue
-        try:
-            host = urllib.parse.urlparse(url).netloc.lower().replace("www.", "")
-        except Exception:
-            host = ""
-        merchant = host or normalize_name(m.get("source") or "")
-        cap = _web_marketplace_repeat_cap(host) if host else WEB_STREAM_RESULTS_PER_STORE
-        if merchant_counts[merchant] >= cap:
-            continue
-        sig = url.split("#", 1)[0]
-        if sig in seen:
-            continue
-        seen.add(sig)
-        merchant_counts[merchant] += 1
-        rank_counts[rank] += 1
-        cc = rank_cc[rank]
-        out.append({
-            "market": _web_market_label(rank),
-            "market_rank": rank,
-            "country": cc,
-            "flag": country_flag_emoji(cc),
-            "store": _ui_plain_store_name(m.get("source") or "", url) or U(lang, "store"),
-            "title": _compact_ui_title(m.get("title") or caption or ""),
-            "price": shown_price,
-            "url": url,
-            "image": image,
-        })
-        if len(out) >= min(WEB_STREAM_IMAGE_TARGET_RESULTS, 6):
-            break
-    return out
-
-
-
-def _web_fast_identity_from_image(image_b64, mime, lens_hint=""):
-    """One concise Gemini identity call for 60-89.
-    This is NOT a result filter. It only cleans the search query and runs in parallel with Lens.
-    """
-    if not GEMINI_API_KEY:
-        return ""
-    system = (
-        "Identify the physical product in the ORIGINAL image for shopping search. "
-        "Return one concise English commercial search phrase only. "
-        "Use brand/model only when visibly supported. For generic items use product type + material/style. "
-        "Never return a store name, webpage title, marketing sentence, or explanation."
-    )
-    prompt = f"Possible Lens hint (may be noisy or wrong): {lens_hint}"
-    try:
-        raw = _web_ai_plain_call([
-            {"inline_data": {"mime_type": mime, "data": image_b64}},
-            {"text": prompt},
-        ], system, WEB_FAST_IDENTITY_TIMEOUT_SECONDS)
-        value = re.sub(r"\s+", " ", str(raw or "")).strip().strip(' .-|')[:140]
-        if value:
-            print(f"WEB FAST IDENTITY -> {value!r}")
-        return value
-    except Exception as e:
-        print(f"WEB FAST IDENTITY ERR: {e}")
-        return ""
-
-
-def _web_clean_fast_identity(value):
-    value = re.sub(r"\s+", " ", str(value or "")).strip()
-    if not value:
-        return ""
-    # Strip common store/page boilerplate from Lens titles.
-    value = re.split(r"\s*[|•]\s*", value)[0].strip()
-    value = re.sub(r"^(shop|buy|discover|view|find)\s+", "", value, flags=re.I)
-    value = re.sub(r"\s+(online|for sale|official site|shop now)\b.*$", "", value, flags=re.I)
-    value = _shopping_clean_query(value)
-    return value[:140].strip()
-
-
-def _web_image_seed_precision_sync(image_b64, mime, caption, country, lang, precision):
-    """Precision-aware seed.
-    60-89: two bounded Lens passes + one concise image-identity call IN PARALLEL.
-    90-100: preserve the full exact-search seed.
-    """
-    p = _web_search_precision(precision)
-    if (not WEB_PRECISION_TURBO) or p >= WEB_AI_GATE_FULL_START:
-        return _web_image_seed_sync(image_b64, mime, caption, country, lang)
-
-    market = _web_market(country)
-    MARKET_CTX.value = market
-    caption = re.sub(r"\s+", " ", str(caption or "")).strip()[:WEB_API_MAX_QUERY_CHARS]
-
-    if not (LENS_DIRECT_MODE and ENABLE_GOOGLE_LENS and SERPAPI_API_KEY and PUBLIC_BASE_URL):
-        return _web_image_seed_sync(image_b64, mime, caption, country, lang)
-
-    public_url = publish_image_for_lens(image_b64, mime)
-    if not public_url:
-        return {"query": caption, "items": [], "market": market, "source": "fast_no_public_url"}
-
-    local_cc = str(market.get("country") or DEFAULT_COUNTRY).lower()
-    countries = []
-    for cc in (local_cc, "us"):
-        if cc and cc not in countries:
-            countries.append(cc)
-
-    raw = []
-    seen = set()
-    lens_hint = ""
-    identity = ""
-
-    # Run both Lens passes and Gemini identity concurrently: no serial AI delay.
-    with ThreadPoolExecutor(max_workers=len(countries) + 1) as pool:
-        lens_jobs = {
-            pool.submit(_web_fast_lens_request, public_url, cc, caption, WEB_FAST_LENS_TIMEOUT_SECONDS): cc
-            for cc in countries
-        }
-        identity_job = pool.submit(_web_fast_identity_from_image, image_b64, mime, caption)
-
-        done, pending = wait(
-            list(lens_jobs.keys()) + [identity_job],
-            timeout=WEB_FAST_LENS_TIMEOUT_SECONDS + 0.35
-        )
-
-        for fut in done:
-            if fut is identity_job:
-                try:
-                    identity = _web_clean_fast_identity(fut.result() or "")
-                except Exception:
-                    identity = ""
-                continue
-
-            try:
-                rows = fut.result() or []
-            except Exception:
-                rows = []
-            for m in rows:
-                sig = (str(m.get("title") or "").lower(), str(m.get("link") or "").lower())
-                if sig in seen:
-                    continue
-                seen.add(sig)
-                raw.append(m)
-
-        for fut in pending:
-            fut.cancel()
-
-    # Best Lens title is a fallback only.
-    for m in raw:
-        title = _web_clean_fast_identity(m.get("title") or "")
-        if title:
-            lens_hint = title
-            break
-
-    identity = identity or lens_hint or _web_clean_fast_identity(caption)
-    items = _web_fast_lens_cards(raw, lang, caption)
-
-    print(
-        f"WEB PRECISION FAST SEED precision={p}% passes={len(countries)} "
-        f"raw={len(raw)} cards={len(items)} identity={identity[:80]!r}"
-    )
-    return {
-        "query": identity or caption,
-        "items": items,
-        "market": market,
-        "source": "precision_fast_lens",
-    }
-
-
-def _web_fast_profile(identity, precision):
-    """No extra Gemini profile call for 60-89. Existing relevance gates remain active."""
-    p = _web_search_precision(precision)
-    return {
-        "mode": "balanced",
-        "brand": "",
-        "product": str(identity or "").strip()[:160],
-        "variant": "",
-        "category": "",
-        "search_identity": str(identity or "").strip()[:180],
-        "must_terms": [],
-        "exclude_terms": [],
-        "confidence": 0.0,
-        "precision": p,
-        "ai_filter_off": p <= 60,
-        "fast_profile": True,
-    }
-
-
-
-def _web_relaxed_store_identity(identity, precision):
-    """Broaden only the merchant-search query at 60-89%.
-    The visible identity and 90-100% exact path remain unchanged.
-    """
-    p = _web_search_precision(precision)
-    q = _shopping_clean_query(identity or "")
-    if p >= WEB_AI_GATE_FULL_START:
-        return q
-
-    # Common Lens over-specification: a product is identified together with its case.
-    # For shopping discovery at 60-89, search the core product family first.
-    if re.search(r"\b(earbuds?|earphones?|headphones?)\b", q, flags=re.I):
-        q2 = re.sub(
-            r"\b(charging|charger|carrying|protective|replacement)\s+case\b",
-            "",
-            q,
-            flags=re.I,
-        )
-        q2 = re.sub(r"\bcase\b\s*$", "", q2, flags=re.I)
-        q2 = re.sub(r"\s+", " ", q2).strip(" -")
-        if len(q2.split()) >= 2:
-            q = q2
-
-    # Remove very low-value visual colour words from balanced discovery.
-    if p <= 75:
-        q2 = re.sub(
-            r"\b(black|white|brown|beige|grey|gray|red|blue|green|pink|purple|yellow)\b",
-            "",
-            q,
-            flags=re.I,
-        )
-        q2 = re.sub(r"\s+", " ", q2).strip(" -")
-        if len(q2.split()) >= 2:
-            q = q2
-
-    return q[:150]
-
-
-def _web_china_combined_probe_sync(query, country, lang):
-    """One fast Google organic request covering the major global China marketplaces.
-    This replaces 7 simultaneous SerpApi merchant calls in the first wave.
-    """
-    if not (SERPAPI_API_KEY and query):
-        return []
-
-    stores = [
-        ("AliExpress", "aliexpress.com"),
-        ("Temu", "temu.com"),
-        ("SHEIN", "shein.com"),
-        ("DHgate", "dhgate.com"),
-        ("Banggood", "banggood.com"),
-        ("Alibaba", "alibaba.com"),
-        ("Made-in-China", "made-in-china.com"),
-    ]
-    site_expr = " OR ".join(f"site:{domain}" for _, domain in stores)
-    params = {
-        "engine": "google",
-        "q": f"{_shopping_clean_query(query)} ({site_expr})",
-        "api_key": SERPAPI_API_KEY,
-        "google_domain": "google.com",
-        "gl": "us",
-        "hl": "en",
-        "num": WEB_TURBO_CHINA_COMBINED_NUM,
-        "output": "json",
-    }
-
-    try:
-        r = requests.get(
-            "https://serpapi.com/search.json",
-            params=params,
-            timeout=(2.2, WEB_TURBO_CHINA_COMBINED_TIMEOUT_SECONDS),
-        )
-        if r.status_code >= 400:
-            print(f"WEB TURBO CHINA COMBINED HTTP {r.status_code}: {r.text[:180]}")
-            return []
-        data = r.json()
-        if data.get("error"):
-            print(f"WEB TURBO CHINA COMBINED ERROR: {data.get('error')}")
-            return []
-
-        candidates = []
-        per_store = defaultdict(int)
-        for pos, row in enumerate(data.get("organic_results") or [], 1):
-            link = str(row.get("link") or "").strip()
-            if not link:
-                continue
-            try:
-                host = urllib.parse.urlparse(link).netloc.lower().replace("www.", "")
-            except Exception:
-                host = ""
-
-            label = ""
-            domain = ""
-            for lab, dom in stores:
-                if _host_matches_any(host, (dom,)):
-                    label, domain = lab, dom
-                    break
-            if not domain:
-                continue
-            if not _china_global_product_url(domain, link):
-                continue
-            cap = _web_marketplace_repeat_cap(domain)
-            if per_store[domain] >= cap:
-                continue
-            per_store[domain] += 1
-
-            price_text = _google_organic_price_text(row)
-            candidates.append({
-                "title": str(row.get("title") or query).strip(),
-                "link": link,
-                "source": label,
-                "position": int(row.get("position") or pos),
-                "section": "web_turbo_china_combined",
-                "thumbnail": str(row.get("thumbnail") or "").strip(),
-                "image": str(row.get("thumbnail") or "").strip(),
-                "price": price_text,
-                "currency": detect_currency_code(price_text, "", "cn") if price_text else "",
-                "_web_global_china": True,
-            })
-
-        rows = _web_market_candidates_to_items(candidates, 2, lang, query)
-        print(f"WEB TURBO CHINA COMBINED -> {len(rows)} row(s)")
-        return rows
-    except Exception as e:
-        print(f"WEB TURBO CHINA COMBINED EXCEPTION: {e}")
-        return []
-
-
-
-_WEB_BALANCED_STOPWORDS = {
-    "the","a","an","for","with","and","or","of","in","on","to","from",
-    "buy","shop","online","new","men","women","womens","mens","product",
-    "official","best","sale","size","sizes"
-}
-
-def _web_balanced_tokens(text):
-    vals = re.findall(r"[a-z0-9]+", str(text or "").lower())
-    return [v for v in vals if len(v) > 2 and v not in _WEB_BALANCED_STOPWORDS]
-
-
-def _web_fast_precision_filter_rows(rows, identity, precision):
-    """No Gemini calls. Used only below 90%.
-
-    61-84: permissive relevance + mandatory price/image/direct product URL.
-    85-89: stronger title-token overlap, still no per-result AI judge.
-    """
-    p = _web_search_precision(precision)
-    seq = list(rows or [])
-    if p <= 60:
-        return seq
-
-    q_tokens = _web_balanced_tokens(identity)
-    out = []
-    seen = set()
-
-    for row in seq:
-        row = dict(row)
-        url = str(row.get("url") or "").strip()
-        image = str(row.get("image") or "").strip()
-        price = str(row.get("price") or "").strip()
-        title = str(row.get("title") or "").strip()
-
-        if not url or not image or not price:
-            continue
-        if not _web_is_direct_product_page_url(url, row.get("store") or ""):
-            continue
-
-        key = url.split("#", 1)[0]
-        if key in seen:
-            continue
-
-        if q_tokens:
-            t_tokens = set(_web_balanced_tokens(title + " " + str(row.get("store") or "")))
-            overlap = sum(1 for tok in q_tokens if tok in t_tokens)
-
-            if p <= WEB_SWEET_SPOT_MAX:
-                # Broad but not random: one meaningful overlap is enough for a
-                # multi-token branded query. Lens seed itself remains trusted.
-                need = 1 if len(q_tokens) >= 2 else 0
-            else:
-                # 85-89: still fast, but require a stronger lexical match.
-                need = 2 if len(q_tokens) >= 3 else 1
-
-            if overlap < need:
-                continue
-
-        seen.add(key)
-        out.append(row)
-
-    return out
-
-
-def _web_wide_candidates_to_rows(candidates, rank, lang, query, precision):
-    """Cheap card conversion: no page fetch, no Gemini, no stock probe.
-    Google Shopping/Lens data must already contain image + numeric price + direct URL.
-    """
-    market = current_market()
-    local_cc = (market.get("country") or DEFAULT_COUNTRY).lower()
-    cc = local_cc if rank == 0 else ("us" if rank == 1 else "cn")
-    cap = {0: WEB_WIDE_LOCAL_CAP, 1: WEB_WIDE_US_CAP, 2: WEB_WIDE_CN_CAP}.get(rank, 3)
-
-    seq = []
-    for item in list(candidates or []):
-        if result_market_rank(item) != rank:
-            continue
-        url = str(item.get("link") or "").strip()
-        if not url.startswith(("http://", "https://")):
-            continue
-        if not _web_is_direct_product_page_url(url, item.get("source") or ""):
-            continue
-        raw_price = str(item.get("price") or "").strip()
-        image = _web_best_card_image(item.get("thumbnail") or item.get("image") or "", "", False)
-        if not raw_price or not image:
-            continue
-        shown_price = _text_price_local(raw_price, rank, lang)
-        if not shown_price:
-            continue
-
-        seq.append({
-            "market": _web_market_label(rank),
-            "market_rank": rank,
-            "country": cc,
-            "flag": country_flag_emoji(cc),
-            "store": _ui_plain_store_name(item.get("source") or "", url) or U(lang, "store"),
-            "title": _compact_ui_title(item.get("title") or query),
-            "price": shown_price,
-            "url": url,
-            "image": image,
-            "_position": int(item.get("position") or 999),
-        })
-
-    # Keep familiar strong stores first without waiting for store-specific calls.
-    if rank == 1:
-        seq.sort(key=lambda x: (_us_store_priority(x.get("store"), x.get("url")), x.get("_position", 999)))
-    elif rank == 2:
-        seq.sort(key=lambda x: (_china_store_priority(x.get("store"), x.get("url")), x.get("_position", 999)))
-    else:
-        seq.sort(key=lambda x: x.get("_position", 999))
-
-    seq = _web_fast_precision_filter_rows(seq, query, precision)
-
-    out = []
-    store_counts = defaultdict(int)
-    for row in seq:
-        try:
-            host = urllib.parse.urlparse(row.get("url") or "").netloc.lower().replace("www.", "")
-        except Exception:
-            host = ""
-        merchant = host or normalize_name(row.get("store") or "")
-        repeat_cap = _web_marketplace_repeat_cap(host) if host else WEB_STREAM_RESULTS_PER_STORE
-        if store_counts[merchant] >= repeat_cap:
-            continue
-        store_counts[merchant] += 1
-        row.pop("_position", None)
-        out.append(row)
-        if len(out) >= cap:
-            break
-    return out
-
-
-
-def _web_wide_local_priority_sync(query, country, lang, precision):
-    """Strong, bounded local discovery for 61-89%.
-
-    Runs the broad local Shopping query plus a few category-aware direct local
-    merchant probes in parallel. This is deliberately stronger than US/China,
-    but still bounded so it cannot hold the whole page hostage.
-    """
-    market = _web_market(country)
-    MARKET_CTX.value = market
-    q = _web_relaxed_store_identity(query, precision)
-    local_cc = (market.get("country") or DEFAULT_COUNTRY).lower()
-
-    specs = local_rescue_store_specs(q, WEB_LOCAL_PRIORITY_RESCUE_STORES)
-    rows = []
-
-    def broad():
-        return _web_wide_market_search_sync(q, country, lang, 0, precision)
-
-    def store(label, domain):
-        try:
-            return _web_store_probe_precision_sync(
-                q, country, lang, 0, label, domain, local_cc, True
-            )
-        except Exception as e:
-            print(f"WEB LOCAL PRIORITY STORE ERR {label}: {e}")
-            return []
-
-    jobs = []
-    with ThreadPoolExecutor(max_workers=1 + len(specs)) as pool:
-        jobs.append(pool.submit(broad))
-        jobs.extend(pool.submit(store, label, domain) for label, domain in specs)
-        done, pending = wait(jobs, timeout=WEB_LOCAL_PRIORITY_TIMEOUT_SECONDS)
-        for fut in done:
-            try:
-                rows.extend(fut.result() or [])
-            except Exception:
-                pass
-        for fut in pending:
-            fut.cancel()
-
-    # Deterministic safeguards only below 90: direct page + image + numeric price.
-    rows = _web_fast_precision_filter_rows(rows, q, precision)
-
-    out, seen = [], set()
-    store_counts = defaultdict(int)
-    for row in rows:
-        url = str(row.get("url") or "").strip()
-        if not url:
-            continue
-        key = url.split("#", 1)[0]
-        if key in seen:
-            continue
-        try:
-            host = urllib.parse.urlparse(url).netloc.lower().replace("www.", "")
-        except Exception:
-            host = ""
-        merchant = host or normalize_name(row.get("store") or "")
-        cap = _web_marketplace_repeat_cap(host) if host else WEB_STREAM_RESULTS_PER_STORE
-        if store_counts[merchant] >= cap:
-            continue
-        seen.add(key)
-        store_counts[merchant] += 1
-        row = dict(row)
-        row["market"] = "local"
-        row["market_rank"] = 0
-        row["country"] = local_cc
-        row["flag"] = country_flag_emoji(local_cc)
-        out.append(row)
-        if len(out) >= WEB_WIDE_LOCAL_CAP:
-            break
-
-    print(
-        f"WEB LOCAL PRIORITY precision={precision}% query={q[:75]!r} "
-        f"stores={len(specs)} -> {len(out)} row(s)"
-    )
-    return out
-
-
-def _web_wide_market_search_sync(query, country, lang, rank, precision):
-    """Exactly one external search operation per market rank for 61-89."""
-    market = _web_market(country)
-    MARKET_CTX.value = market
-    q = _web_relaxed_store_identity(query, precision)
-    if not q or not SERPAPI_API_KEY:
-        return []
-
-    if rank == 2:
-        # One combined China operation. Convert its already-priced/image rows
-        # with the same deterministic precision filter.
-        rows = _web_china_combined_probe_sync(q, country, lang)
-        rows = _web_fast_precision_filter_rows(rows, q, precision)
-        return rows[:WEB_WIDE_CN_CAP]
-
-    gl = (market.get("country") or DEFAULT_COUNTRY).lower() if rank == 0 else "us"
-    hl = country_search_hl(gl) if rank == 0 else "en"
-    cards = _serpapi_shopping_request(
-        q,
-        gl,
-        hl=hl,
-        timeout_seconds=WEB_WIDE_SEARCH_TIMEOUT_SECONDS,
-    )
-
-    candidates = []
-    for card in cards or []:
-        item = _shopping_card_to_market_item(card, "", gl)
-        if item:
-            candidates.append(item)
-
-    rows = _web_wide_candidates_to_rows(candidates, rank, lang, q, precision)
-    print(
-        f"WEB WIDE MARKET rank={rank} precision={precision}% "
-        f"query={q[:75]!r} -> {len(rows)} row(s)"
-    )
-    return rows
-
-
-def _web_turbo_store_race_specs(query, country):
-    """Return primary and secondary merchant waves for precision < 90."""
-    market = _web_market(country)
-    MARKET_CTX.value = market
-    local_cc = (market.get("country") or DEFAULT_COUNTRY).lower()
-    q = _shopping_clean_query(query or "")
-
-    local_specs = [("Local", "", local_cc)]
-    try:
-        local_specs.extend(
-            (label, domain, local_cc)
-            for label, domain in local_rescue_store_specs(q, LOCAL_STORE_RESCUE_MAX)
-        )
-    except Exception:
-        pass
-
-    # First wave: a general local query + two local rescues + strongest US marketplaces
-    # + ONE combined China query. Everything launches together.
-    primary = []
-    primary.extend((0, lab, dom, gl) for lab, dom, gl in local_specs[:3])
-    primary.extend([
-        (1, "Amazon", "amazon.com", "us"),
-        (1, "eBay", "ebay.com", "us"),
-    ])
-    if WEB_TURBO_CHINA_COMBINED:
-        primary.append((2, "China Global", "__china_combined__", "us"))
-
-    # Second wave only runs when first wave is sparse.
-    secondary = []
-    secondary.extend((0, lab, dom, gl) for lab, dom, gl in local_specs[3:5])
-    secondary.extend([
-        (1, "Etsy", "etsy.com", "us"),
-        (1, "Walmart", "walmart.com", "us"),
-        (2, "AliExpress", "aliexpress.com", "us"),
-        (2, "Temu", "temu.com", "us"),
-        (2, "SHEIN", "shein.com", "us"),
-    ])
-
-    # Remove duplicate merchant/domain combos.
-    def dedupe(rows):
-        out, seen = [], set()
-        for row in rows:
-            key = (row[0], row[2], row[3])
-            if key in seen:
-                continue
-            seen.add(key)
-            out.append(row)
-        return out
-
-    return dedupe(primary), dedupe(secondary)
-
-
-def _web_store_probe_precision_sync(query, country, lang, rank, label, domain, gl, fast=False):
-    """Same store probe logic, but low/balanced precision uses shorter HTTP deadlines."""
-    if not fast:
-        return _web_store_probe_sync(query, country, lang, rank, label, domain, gl)
-
-    market = _web_market(country)
-    MARKET_CTX.value = market
-    q = _shopping_clean_query(query or "")
-    if not q or not SERPAPI_API_KEY:
-        return []
-
-    cache_key = _web_store_probe_cache_key(q, country, lang, rank, label, domain, gl)
-    if WEB_TURBO_MODE:
-        cached = _web_turbo_cache_get(
-            WEB_TURBO_STORE_CACHE, WEB_TURBO_STORE_CACHE_LOCK,
-            cache_key, WEB_TURBO_STORE_CACHE_TTL_SECONDS
-        )
-        if cached is not None:
-            print(f"WEB TURBO STORE CACHE HIT store={label} rows={len(cached)}")
-            return [dict(x) for x in cached]
-
-    candidate_cc = (market.get("country") or DEFAULT_COUNTRY).lower() if rank == 0 else ("us" if rank == 1 else "cn")
-    candidates = []
-
-    if rank == 2 and domain and WEB_CHINA_ORGANIC_FIRST:
-        candidates = _serpapi_china_global_site_request(
-            q, label, domain, timeout_seconds=WEB_FAST_STORE_HTTP_TIMEOUT_SECONDS
-        )
-        rows = _web_market_candidates_to_items(candidates, rank, lang, q)[:_web_marketplace_repeat_cap(domain)]
-        if WEB_TURBO_MODE:
-            _web_turbo_cache_set(
-                WEB_TURBO_STORE_CACHE, WEB_TURBO_STORE_CACHE_LOCK,
-                cache_key, [dict(x) for x in rows]
-            )
-        return rows
-
-    search_q = f"{q} site:{domain}" if domain else q
-    hl = country_search_hl(gl) if rank == 0 else "en"
-    cards = _serpapi_shopping_request(
-        search_q, gl, hl=hl, timeout_seconds=WEB_FAST_STORE_HTTP_TIMEOUT_SECONDS
-    )
-    for card in cards or []:
-        item = _shopping_card_to_market_item(card, label, candidate_cc)
-        if not item:
-            continue
-        if domain:
-            try:
-                host = urllib.parse.urlparse(item.get("link") or "").netloc.lower().replace("www.", "")
-            except Exception:
-                host = ""
-            if not _host_matches_any(host, (domain,)):
-                continue
-        if result_market_rank(item) != rank:
-            continue
-        candidates.append(item)
-
-    rows = _web_market_candidates_to_items(candidates, rank, lang, q)
-    rows = [row for row in rows if _web_is_direct_product_page_url(row.get("url") or "", row.get("store") or label)]
-    rows = rows[:_web_marketplace_repeat_cap(domain)]
-    if WEB_TURBO_MODE:
-        _web_turbo_cache_set(
-            WEB_TURBO_STORE_CACHE, WEB_TURBO_STORE_CACHE_LOCK,
-            cache_key, [dict(x) for x in rows]
-        )
-    return rows
-
+    return rows[:cap]
 
 def _web_image_seed_sync(image_b64, mime, caption, country, lang):
     """One fast image-identification pass used before merchant FIFO probes.
@@ -11658,14 +10193,7 @@ def _web_image_seed_sync(image_b64, mime, caption, country, lang):
 def _web_prepare_stream_query_sync(query, country, lang, selected_option="", original_query="", force_specific=False):
     market = _web_market(country)
     MARKET_CTX.value = market
-    raw_q = re.sub(r"\s+", " ", str(query or "")).strip()[:WEB_API_MAX_QUERY_CHARS]
-    prep_key = "|".join([normalize_name(raw_q), str(country or "").lower(), str(lang or "").lower(), normalize_name(selected_option or ""), normalize_name(original_query or ""), "1" if force_specific else "0"])
-    if WEB_TURBO_MODE:
-        cached = _web_turbo_cache_get(WEB_TURBO_PREP_CACHE, WEB_TURBO_PREP_CACHE_LOCK, prep_key, WEB_TURBO_PREP_CACHE_TTL_SECONDS)
-        if cached is not None:
-            print(f"WEB TURBO PREP CACHE HIT q={raw_q[:70]!r}")
-            return dict(cached)
-    q = raw_q
+    q = re.sub(r"\s+", " ", str(query or "")).strip()[:WEB_API_MAX_QUERY_CHARS]
     if selected_option:
         q = ai_recommendation_pick_search_query(original_query or q, selected_option, lang)
         force_specific = True
@@ -11684,10 +10212,7 @@ def _web_prepare_stream_query_sync(query, country, lang, selected_option="", ori
             rtype = classify_request_type(q)
         except Exception:
             rtype = "SPECIFIC"
-    result = {"ok": True, "query": q, "market": market, "rtype": rtype, "force_specific": force_specific}
-    if WEB_TURBO_MODE:
-        _web_turbo_cache_set(WEB_TURBO_PREP_CACHE, WEB_TURBO_PREP_CACHE_LOCK, prep_key, dict(result))
-    return result
+    return {"ok": True, "query": q, "market": market, "rtype": rtype, "force_specific": force_specific}
 
 def _web_search_text_sync(query, country, lang, selected_option="", original_query="", force_specific=False):
     market = _web_market(country)
@@ -11765,7 +10290,7 @@ def _web_search_image_sync(image_b64, mime, caption, country, lang):
 
                     weak = [r for r in (0, 1, 2) if counts[r] < target[r]]
                     if weak:
-                        print(f"WEB IMAGE CLEAN weak markets before supplement counts={counts} target={target} identity={identity[:90]!r}")
+                        print(f"WEB IMAGE v89 weak markets before supplement counts={counts} target={target} identity={identity[:90]!r}")
                         market_snapshot = dict(market)
                         extra_by_rank = {}
 
@@ -11806,7 +10331,7 @@ def _web_search_image_sync(image_b64, mime, caption, country, lang):
                                 if need <= 0:
                                     break
                         items.sort(key=lambda x: (int(x.get("market_rank", 99)), 0 if x.get("price") else 1))
-                        print(f"WEB IMAGE CLEAN after supplement counts={counts} total={len(items)}")
+                        print(f"WEB IMAGE v89 after supplement counts={counts} total={len(items)}")
 
                 return {"ok": True, "type": "results", "query": identity, "market": market, "results": items, "source": "lens_direct_plus_market_supplement"}
 
@@ -12053,12 +10578,6 @@ async def web_api_health():
 
 
 
-async def _web_turbo_delayed_text_final(q, country, lang):
-    if WEB_TURBO_MODE and WEB_TURBO_FINAL_HEADSTART_SECONDS > 0:
-        await asyncio.sleep(WEB_TURBO_FINAL_HEADSTART_SECONDS)
-    return await asyncio.to_thread(_web_search_text_sync, q, country, lang, "", "", True)
-
-
 @app.post("/api/search/stream")
 async def web_api_search_stream(request: Request):
     if not WEB_API_ENABLED or not WEB_STREAM_ENABLED:
@@ -12107,9 +10626,9 @@ async def web_api_search_stream(request: Request):
                 return
 
             sent = set()
-            # v105 gives lightweight store probes a short head start before the heavy
-            # authoritative engine starts. Final results are unchanged; first paint is faster.
-            final_task = asyncio.create_task(_web_turbo_delayed_text_final(q, country, lang))
+            final_task = asyncio.create_task(asyncio.to_thread(
+                _web_search_text_sync, q, country, lang, "", "", True
+            ))
 
             if WEB_STREAM_STORE_FIFO and WEB_STREAM_FAST_WAVE and SERPAPI_API_KEY:
                 store_tasks = []
@@ -12134,7 +10653,7 @@ async def web_api_search_stream(request: Request):
 
                 pending = set(store_tasks)
                 loop = asyncio.get_running_loop()
-                deadline = loop.time() + WEB_STREAM_STORE_TIMEOUT + WEB_AI_GATE_STREAM_EXTRA_SECONDS
+                deadline = loop.time() + WEB_STREAM_STORE_TIMEOUT
                 while pending:
                     remaining = deadline - loop.time()
                     if remaining <= 0:
@@ -12161,13 +10680,11 @@ async def web_api_search_stream(request: Request):
                                 "store_probe": label, "item": item,
                                 "elapsed_ms": int((time.time()-started)*1000),
                             })
-                            await asyncio.sleep(0)
+                            await asyncio.sleep(0.015)
                         rank_remaining[r] = max(0, rank_remaining.get(r, 1) - 1)
                         if rank_remaining[r] == 0:
                             yield _web_stream_event({"event": "market_fast_done", "market": market_name, "elapsed_ms": int((time.time()-started)*1000)})
 
-                if len(sent) >= WEB_STREAM_IMAGE_TARGET_RESULTS:
-                    print(f"WEB IMAGE TARGET REACHED live={len(sent)} target={WEB_STREAM_IMAGE_TARGET_RESULTS}")
                 for task in pending:
                     task.cancel()
                 for r in (0, 1, 2):
@@ -12201,7 +10718,7 @@ async def web_api_search_stream(request: Request):
                                 continue
                             sent.add(key)
                             yield _web_stream_event({"event": "result", "phase": "fast", "market": market_name, "item": item, "elapsed_ms": int((time.time()-started)*1000)})
-                            await asyncio.sleep(0)
+                            await asyncio.sleep(0.01)
                         yield _web_stream_event({"event": "market_fast_done", "market": market_name, "count": len(items or []), "elapsed_ms": int((time.time()-started)*1000)})
                     if final_task.done():
                         break
@@ -12222,7 +10739,7 @@ async def web_api_search_stream(request: Request):
                     else:
                         sent.add(key)
                         yield _web_stream_event({"event": "result", "phase": "final", "market": market_name, "item": item, "elapsed_ms": int((time.time()-started)*1000)})
-                    await asyncio.sleep(0)
+                    await asyncio.sleep(0.01)
             yield _web_stream_event({"event": "done", "count": len(sent), "elapsed_ms": int((time.time()-started)*1000)})
         except asyncio.CancelledError:
             raise
@@ -12235,43 +10752,6 @@ async def web_api_search_stream(request: Request):
         media_type="application/x-ndjson",
         headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no", "Connection": "keep-alive"},
     )
-
-
-
-async def _web_fast_empty_rescue(identity, country, lang, precision):
-    """Bounded rescue used only when the 60-89 fast path produced no cards."""
-    if not identity or not WEB_FAST_EMPTY_RESCUE:
-        return []
-
-    async def one(rank):
-        try:
-            rows = await asyncio.wait_for(
-                asyncio.to_thread(_web_fast_market_wave_sync, identity, country, lang, rank),
-                timeout=WEB_FAST_EMPTY_RESCUE_TIMEOUT_SECONDS,
-            )
-            return rank, rows or []
-        except Exception as e:
-            print(f"WEB FAST EMPTY RESCUE ERR rank={rank}: {e}")
-            return rank, []
-
-    tasks = [asyncio.create_task(one(r)) for r in (0, 2, 1)]
-    out = []
-    pending = set(tasks)
-    deadline = asyncio.get_running_loop().time() + WEB_FAST_EMPTY_RESCUE_TIMEOUT_SECONDS
-    while pending:
-        left = deadline - asyncio.get_running_loop().time()
-        if left <= 0:
-            break
-        done, pending = await asyncio.wait(
-            pending, timeout=min(.15, left), return_when=asyncio.FIRST_COMPLETED
-        )
-        for task in done:
-            _, rows = await task
-            out.extend(rows or [])
-    for task in pending:
-        task.cancel()
-    print(f"WEB FAST EMPTY RESCUE -> {len(out)} rows")
-    return out
 
 
 @app.post("/api/search/image/stream")
@@ -12303,37 +10783,20 @@ async def web_api_image_search_stream(request: Request):
     lang = _web_language(payload.get("lang"))
     country, country_source = await asyncio.to_thread(_web_resolve_request_country, request, payload.get("country"))
     caption = str(payload.get("caption") or "").strip()
-    precision = _web_search_precision(payload.get("search_precision", WEB_SEARCH_PRECISION_DEFAULT))
 
     async def _generator():
         started = time.time()
         sent = set()
         market_counts = {"local": 0, "us": 0, "china": 0}
-        yield _web_stream_event({"event": "start", "ok": True, "kind": "image", "search_precision": precision})
+        yield _web_stream_event({"event": "start", "ok": True, "kind": "image"})
         yield _web_stream_event({"event": "status", "stage": "identify", "elapsed_ms": 0})
         try:
-            seed = await asyncio.to_thread(_web_image_seed_precision_sync, image_b64, mime, caption, country, lang, precision)
+            seed = await asyncio.to_thread(_web_image_seed_sync, image_b64, mime, caption, country, lang)
             identity = str(seed.get("query") or caption or "").strip()
-            if WEB_PRECISION_TURBO and precision < WEB_AI_GATE_FULL_START:
-                profile = _web_fast_profile(identity, precision)
-            else:
-                profile = await asyncio.to_thread(_web_ai_identity_profile, image_b64, mime, identity, precision)
-            if profile.get("search_identity"):
-                identity = str(profile.get("search_identity") or identity).strip()
             yield _web_stream_event({"event": "query", "query": identity, "market": seed.get("market")})
-            yield _web_stream_event({"event": "status", "stage": "ai_verify", "elapsed_ms": int((time.time()-started)*1000)})
 
-            # v117: below 90%, never block first paint on a per-result Gemini judge.
-            # 61-84 is intentionally broad; 85-89 uses deterministic lexical tightening.
-            if precision < WEB_AI_GATE_FULL_START:
-                seed_items = _web_fast_precision_filter_rows(seed.get("items") or [], identity, precision)
-            else:
-                seed_items = await asyncio.to_thread(
-                    _web_ai_gate_rows, profile, seed.get("items") or [], image_b64, mime, lang
-                )
-            for item in seed_items:
-                if len(sent) >= WEB_STREAM_IMAGE_TARGET_RESULTS:
-                    break
+            # Lens seed results are useful immediately. Emit them without waiting for any market.
+            for item in seed.get("items") or []:
                 market_name = str(item.get("market") or "other")
                 key = str(item.get("url") or "").strip() or (market_name + "|" + str(item.get("store") or "") + "|" + str(item.get("title") or ""))
                 if key in sent:
@@ -12342,416 +10805,79 @@ async def web_api_image_search_stream(request: Request):
                 if market_name in market_counts:
                     market_counts[market_name] += 1
                 yield _web_stream_event({"event": "result", "phase": "lens_seed", "market": market_name, "item": item, "elapsed_ms": int((time.time()-started)*1000)})
-                await asyncio.sleep(0)
+                await asyncio.sleep(0.015)
 
-            if len(sent) < WEB_STREAM_IMAGE_TARGET_RESULTS and identity and WEB_STREAM_STORE_FIFO and WEB_STREAM_FAST_WAVE and SERPAPI_API_KEY:
-                balanced_wide = bool(
-                    WEB_WIDE_BALANCED_SEARCH
-                    and 60 < precision < WEB_AI_GATE_FULL_START
-                )
+            if identity and WEB_STREAM_STORE_FIFO and WEB_STREAM_FAST_WAVE and SERPAPI_API_KEY:
+                store_tasks = []
+                task_meta = {}
+                rank_remaining = {0: 0, 1: 0, 2: 0}
+                for rank in (2, 0, 1):
+                    for label, domain, gl in _web_stream_store_specs(identity, country, rank):
+                        async def _run_store(r=rank, lab=label, dom=domain, search_gl=gl):
+                            try:
+                                rows = await asyncio.wait_for(
+                                    asyncio.to_thread(_web_store_probe_sync, identity, country, lang, r, lab, dom, search_gl),
+                                    timeout=WEB_STREAM_STORE_TIMEOUT,
+                                )
+                                return r, lab, rows
+                            except Exception as e:
+                                print(f"WEB IMAGE STORE FIFO ERR rank={r} store={lab}: {e}")
+                                return r, lab, []
+                        task = asyncio.create_task(_run_store())
+                        store_tasks.append(task)
+                        task_meta[task] = (rank, label)
+                        rank_remaining[rank] += 1
 
-                if balanced_wide:
-                    async def _run_wide_market(r):
+                pending = set(store_tasks)
+                loop = asyncio.get_running_loop()
+                deadline = loop.time() + WEB_STREAM_STORE_TIMEOUT
+                while pending:
+                    remaining = deadline - loop.time()
+                    if remaining <= 0:
+                        break
+                    done, pending = await asyncio.wait(pending, timeout=min(0.12, remaining), return_when=asyncio.FIRST_COMPLETED)
+                    for task in done:
+                        rank, label = task_meta.get(task, (99, "Store"))
                         try:
-                            if r == 0 and WEB_LOCAL_PRIORITY_BALANCED:
-                                rows = await asyncio.wait_for(
-                                    asyncio.to_thread(
-                                        _web_wide_local_priority_sync,
-                                        identity, country, lang, precision
-                                    ),
-                                    timeout=WEB_LOCAL_PRIORITY_TIMEOUT_SECONDS + 0.4,
-                                )
-                            else:
-                                rows = await asyncio.wait_for(
-                                    asyncio.to_thread(
-                                        _web_wide_market_search_sync,
-                                        identity, country, lang, r, precision
-                                    ),
-                                    timeout=WEB_WIDE_SEARCH_TIMEOUT_SECONDS + 0.5,
-                                )
-                            return r, rows or []
-                        except Exception as e:
-                            print(f"WEB WIDE MARKET ERR rank={r}: {e}")
-                            return r, []
-
-                    # Local starts first, but only gets a tiny head start. US/China
-                    # are still allowed to appear first if they respond faster.
-                    local_task = asyncio.create_task(_run_wide_market(0))
-                    if WEB_LOCAL_PRIORITY_HEADSTART_SECONDS > 0:
-                        await asyncio.sleep(WEB_LOCAL_PRIORITY_HEADSTART_SECONDS)
-                    global_tasks = [
-                        asyncio.create_task(_run_wide_market(1)),
-                        asyncio.create_task(_run_wide_market(2)),
-                    ]
-
-                    all_tasks = {local_task: 0, global_tasks[0]: 1, global_tasks[1]: 2}
-                    pending_wide = set(all_tasks)
-                    loop = asyncio.get_running_loop()
-                    wide_deadline = loop.time() + max(
-                        WEB_LOCAL_PRIORITY_TIMEOUT_SECONDS,
-                        WEB_WIDE_SEARCH_TIMEOUT_SECONDS
-                    ) + 0.7
-
-                    # Reserve room for local while it is still running. This prevents
-                    # fast US/China results from consuming all 10 slots.
-                    foreign_buffer = []
-                    local_finished = False
-
-                    async def _emit_rows(rank, rows):
-                        nonlocal local_finished
-                        market_name = _web_market_label(rank)
-                        emitted_now = 0
+                            r, label, rows = await task
+                        except Exception:
+                            r, rows = rank, []
+                        market_name = _web_market_label(r)
                         for item in rows or []:
-                            if len(sent) >= WEB_STREAM_IMAGE_TARGET_RESULTS:
-                                break
-                            key = str(item.get("url") or "").strip() or (
-                                market_name + "|" + str(item.get("store") or "") + "|" + str(item.get("title") or "")
-                            )
+                            key = str(item.get("url") or "").strip() or (market_name + "|" + str(item.get("store") or "") + "|" + str(item.get("title") or ""))
                             if key in sent:
                                 continue
-
-                            if rank != 0 and not local_finished:
-                                foreign_limit = max(
-                                    1,
-                                    WEB_STREAM_IMAGE_TARGET_RESULTS - WEB_LOCAL_RESULT_RESERVE
-                                )
-                                if len(sent) >= foreign_limit:
-                                    foreign_buffer.append((rank, item))
-                                    continue
-
                             sent.add(key)
                             if market_name in market_counts:
                                 market_counts[market_name] += 1
-                            emitted_now += 1
                             yield _web_stream_event({
-                                "event": "result",
-                                "phase": "wide_market_local_priority",
-                                "market": market_name,
-                                "item": item,
+                                "event": "result", "phase": "store_fifo", "market": market_name,
+                                "store_probe": label, "item": item,
                                 "elapsed_ms": int((time.time()-started)*1000),
                             })
-                            await asyncio.sleep(0)
-                        return
-
-                    while pending_wide and len(sent) < WEB_STREAM_IMAGE_TARGET_RESULTS:
-                        remaining = wide_deadline - loop.time()
-                        if remaining <= 0:
-                            break
-                        done_wide, pending_wide = await asyncio.wait(
-                            pending_wide,
-                            timeout=min(0.10, remaining),
-                            return_when=asyncio.FIRST_COMPLETED,
-                        )
-                        for task in done_wide:
-                            rank = all_tasks.get(task, 99)
-                            try:
-                                rank, rows = await task
-                            except Exception:
-                                rows = []
-
-                            if rank == 0:
-                                local_finished = True
-
-                            async for event in _emit_rows(rank, rows):
-                                yield event
-
-                            # Once local is done, release buffered foreign results.
-                            if local_finished and foreign_buffer and len(sent) < WEB_STREAM_IMAGE_TARGET_RESULTS:
-                                buffered = foreign_buffer
-                                foreign_buffer = []
-                                for brank, bitem in buffered:
-                                    if len(sent) >= WEB_STREAM_IMAGE_TARGET_RESULTS:
-                                        break
-                                    async for event in _emit_rows(brank, [bitem]):
-                                        yield event
-
-                    # If local timed out entirely, do not waste the reserved slots.
-                    if not local_finished:
-                        local_finished = True
-                    if foreign_buffer and len(sent) < WEB_STREAM_IMAGE_TARGET_RESULTS:
-                        buffered = foreign_buffer
-                        foreign_buffer = []
-                        for brank, bitem in buffered:
-                            if len(sent) >= WEB_STREAM_IMAGE_TARGET_RESULTS:
-                                break
-                            async for event in _emit_rows(brank, [bitem]):
-                                yield event
-
-                    for task in pending_wide:
-                        task.cancel()
-
-                    print(
-                        f"WEB WIDE 3-MARKET DONE precision={precision}% "
-                        f"total={len(sent)} counts={market_counts} "
-                        f"local_reserve={WEB_LOCAL_RESULT_RESERVE}"
-                    )
-                    for r in (0, 1, 2):
-                        yield _web_stream_event({
-                            "event": "market_fast_done",
-                            "market": _web_market_label(r),
-                            "elapsed_ms": int((time.time()-started)*1000),
-                        })
-
-                else:
-                    fast_race = bool(WEB_TURBO_STORE_RACE and precision < WEB_AI_GATE_FULL_START)
-                    store_identity = _web_relaxed_store_identity(identity, precision) if fast_race else identity
-
-                    async def _run_store_race_task(r, lab, dom, search_gl):
-                        try:
-                            if fast_race and dom == "__china_combined__":
-                                rows = await asyncio.wait_for(
-                                    asyncio.to_thread(_web_china_combined_probe_sync, store_identity, country, lang),
-                                    timeout=WEB_TURBO_CHINA_COMBINED_TIMEOUT_SECONDS + 0.4,
-                                )
-                            else:
-                                fast_store = bool(WEB_PRECISION_TURBO and precision < WEB_AI_GATE_FULL_START)
-                                store_timeout = WEB_FAST_STORE_TIMEOUT_SECONDS if fast_store else WEB_STREAM_STORE_TIMEOUT
-                                rows = await asyncio.wait_for(
-                                    asyncio.to_thread(
-                                        _web_store_probe_precision_sync,
-                                        store_identity, country, lang, r, lab, dom, search_gl, fast_store
-                                    ),
-                                    timeout=store_timeout,
-                                )
-
-                            # At 60% the user's request is explicit: no AI result gate.
-                            # 61-89 retains the existing V115 gate; 90-100 remains unchanged.
-                            if rows:
-                                rows = await asyncio.to_thread(
-                                    _web_ai_gate_rows, profile, rows, image_b64, mime, lang
-                                )
-                            return r, lab, rows
-                        except Exception as e:
-                            print(f"WEB IMAGE STORE RACE ERR rank={r} store={lab}: {e}")
-                            return r, lab, []
-
-                    async def _stream_race_wave(specs, phase, wave_timeout):
-                        tasks = []
-                        meta = {}
-                        for r, lab, dom, search_gl in specs:
-                            task = asyncio.create_task(_run_store_race_task(r, lab, dom, search_gl))
-                            tasks.append(task)
-                            meta[task] = (r, lab)
-
-                        pending = set(tasks)
-                        loop = asyncio.get_running_loop()
-                        deadline = loop.time() + wave_timeout
-                        emitted = 0
-
-                        while pending and len(sent) < WEB_STREAM_IMAGE_TARGET_RESULTS:
-                            remaining = deadline - loop.time()
-                            if remaining <= 0:
-                                break
-                            done, pending = await asyncio.wait(
-                                pending,
-                                timeout=min(0.10, remaining),
-                                return_when=asyncio.FIRST_COMPLETED,
-                            )
-                            for task in done:
-                                r, lab = meta.get(task, (99, "Store"))
-                                try:
-                                    r, lab, rows = await task
-                                except Exception:
-                                    rows = []
-
-                                market_name = _web_market_label(r)
-                                for item in rows or []:
-                                    if len(sent) >= WEB_STREAM_IMAGE_TARGET_RESULTS:
-                                        break
-                                    key = str(item.get("url") or "").strip() or (
-                                        market_name + "|" + str(item.get("store") or "") + "|" + str(item.get("title") or "")
-                                    )
-                                    if key in sent:
-                                        continue
-                                    sent.add(key)
-                                    emitted += 1
-                                    if market_name in market_counts:
-                                        market_counts[market_name] += 1
-                                    yield _web_stream_event({
-                                        "event": "result",
-                                        "phase": phase,
-                                        "market": market_name,
-                                        "store_probe": lab,
-                                        "item": item,
-                                        "elapsed_ms": int((time.time()-started)*1000),
-                                    })
-                                    await asyncio.sleep(0)
-
-                        for task in pending:
-                            task.cancel()
-
-                        print(
-                            f"WEB TURBO STORE WAVE phase={phase} precision={precision}% "
-                            f"query={store_identity[:80]!r} emitted={emitted} total={len(sent)}"
-                        )
-
-                    if fast_race:
-                        primary_specs, secondary_specs = _web_turbo_store_race_specs(store_identity, country)
-
-                        async for event in _stream_race_wave(
-                            primary_specs, "store_race_primary", WEB_TURBO_PRIMARY_TIMEOUT_SECONDS
-                        ):
-                            yield event
-
-                        # Do not pay for the second wave if the first wave already produced a healthy grid.
-                        if (
-                            len(sent) < WEB_STREAM_IMAGE_TARGET_RESULTS
-                            and len(sent) < WEB_TURBO_SECONDARY_START_BELOW
-                        ):
-                            async for event in _stream_race_wave(
-                                secondary_specs, "store_race_secondary", WEB_TURBO_SECONDARY_TIMEOUT_SECONDS
-                            ):
-                                yield event
-
-                        for r in (0, 1, 2):
-                            yield _web_stream_event({
-                                "event": "market_fast_done",
-                                "market": _web_market_label(r),
-                                "elapsed_ms": int((time.time()-started)*1000),
-                            })
-                    else:
-                        # 90-100% keeps the full V115 store fan-out unchanged.
-                        store_tasks = []
-                        task_meta = {}
-                        rank_remaining = {0: 0, 1: 0, 2: 0}
-                        for rank in (2, 0, 1):
-                            for label, domain, gl in _web_stream_store_specs(identity, country, rank):
-                                task = asyncio.create_task(_run_store_race_task(rank, label, domain, gl))
-                                store_tasks.append(task)
-                                task_meta[task] = (rank, label)
-                                rank_remaining[rank] += 1
-
-                        pending = set(store_tasks)
-                        loop = asyncio.get_running_loop()
-                        deadline = loop.time() + WEB_STREAM_STORE_TIMEOUT
-                        while pending:
-                            remaining = deadline - loop.time()
-                            if remaining <= 0:
-                                break
-                            done, pending = await asyncio.wait(
-                                pending, timeout=min(0.12, remaining), return_when=asyncio.FIRST_COMPLETED
-                            )
-                            for task in done:
-                                rank, label = task_meta.get(task, (99, "Store"))
-                                try:
-                                    r, label, rows = await task
-                                except Exception:
-                                    r, rows = rank, []
-                                market_name = _web_market_label(r)
-                                for item in rows or []:
-                                    if len(sent) >= WEB_STREAM_IMAGE_TARGET_RESULTS:
-                                        break
-                                    key = str(item.get("url") or "").strip() or (
-                                        market_name + "|" + str(item.get("store") or "") + "|" + str(item.get("title") or "")
-                                    )
-                                    if key in sent:
-                                        continue
-                                    sent.add(key)
-                                    if market_name in market_counts:
-                                        market_counts[market_name] += 1
-                                    yield _web_stream_event({
-                                        "event": "result", "phase": "store_fifo", "market": market_name,
-                                        "store_probe": label, "item": item,
-                                        "elapsed_ms": int((time.time()-started)*1000),
-                                    })
-                                    await asyncio.sleep(0)
-                                rank_remaining[r] = max(0, rank_remaining.get(r, 1) - 1)
-                                if len(sent) >= WEB_STREAM_IMAGE_TARGET_RESULTS:
-                                    break
-                        for task in pending:
-                            task.cancel()
-                        for r in (0, 1, 2):
-                            yield _web_stream_event({
-                                "event": "market_fast_done",
-                                "market": _web_market_label(r),
-                                "elapsed_ms": int((time.time()-started)*1000),
-                            })
+                            await asyncio.sleep(0.015)
+                        rank_remaining[r] = max(0, rank_remaining.get(r, 1) - 1)
+                        if rank_remaining[r] == 0:
+                            yield _web_stream_event({"event": "market_fast_done", "market": market_name, "elapsed_ms": int((time.time()-started)*1000)})
+                for task in pending:
+                    task.cancel()
+                for r in (0, 1, 2):
+                    if rank_remaining.get(r, 0) > 0:
+                        yield _web_stream_event({"event": "market_fast_done", "market": _web_market_label(r), "elapsed_ms": int((time.time()-started)*1000)})
 
             # Only invoke the heavy original image engine when the live wave is still sparse
             # or local coverage is missing.  The user has already seen FIFO cards by then.
-            # v115: low/balanced precision must never silently end with zero cards.
-            if len(sent) == 0 and precision < WEB_AI_GATE_FULL_START:
-                rescue_rows = await _web_fast_empty_rescue(identity, country, lang, precision)
-                # Below 90% rescue remains deterministic and bounded; no per-result Gemini.
-                if precision > 60 and rescue_rows:
-                    rescue_rows = _web_fast_precision_filter_rows(rescue_rows, identity, precision)
-                for item in rescue_rows or []:
-                    if len(sent) >= WEB_STREAM_IMAGE_TARGET_RESULTS:
-                        break
-                    market_name = str(item.get("market") or "other")
-                    key = str(item.get("url") or "").strip() or (
-                        market_name + "|" + str(item.get("store") or "") + "|" + str(item.get("title") or "")
-                    )
-                    if key in sent:
-                        continue
-                    sent.add(key)
-                    if market_name in market_counts:
-                        market_counts[market_name] += 1
-                    yield _web_stream_event({
-                        "event": "result", "phase": "fast_empty_rescue",
-                        "market": market_name, "item": item,
-                        "elapsed_ms": int((time.time()-started)*1000),
-                    })
-                    await asyncio.sleep(0)
-
-            run_heavy_final = False
-            if precision >= WEB_AI_GATE_FULL_START:
-                run_heavy_final = (
-                    len(sent) < WEB_STREAM_IMAGE_TARGET_RESULTS
-                    or market_counts.get("local", 0) == 0
-                )
-            elif precision <= 60:
-                # 60% remains the explicit speed mode, with only a zero-result safety net.
-                run_heavy_final = (
-                    len(sent) == 0 and WEB_FAST_EMPTY_HEAVY_FALLBACK
-                ) or (
-                    (not WEB_FAST_NO_HEAVY_AT_60)
-                    and len(sent) < WEB_BALANCED_HEAVY_MIN_RESULTS
-                )
-            else:
-                # 61-89: NEVER chain into the old heavy engine.
-                run_heavy_final = False
-
-            if run_heavy_final:
+            if len(sent) < WEB_STREAM_IMAGE_FINAL_MIN_RESULTS or market_counts.get("local", 0) == 0:
                 final = await asyncio.to_thread(_web_search_image_sync, image_b64, mime, caption, country, lang)
-                final_rows = await asyncio.to_thread(_web_ai_gate_rows, profile, final.get("results") or [], image_b64, mime, lang)
-                for item in final_rows:
+                for item in final.get("results") or []:
                     market_name = str(item.get("market") or "other")
                     key = str(item.get("url") or "").strip() or (market_name + "|" + str(item.get("store") or "") + "|" + str(item.get("title") or ""))
                     if key in sent:
                         yield _web_stream_event({"event": "upsert", "phase": "final", "market": market_name, "item": item, "elapsed_ms": int((time.time()-started)*1000)})
                         continue
-                    if len(sent) >= WEB_STREAM_IMAGE_TARGET_RESULTS:
-                        break
                     sent.add(key)
                     yield _web_stream_event({"event": "result", "phase": "final", "market": market_name, "item": item, "elapsed_ms": int((time.time()-started)*1000)})
-                    await asyncio.sleep(0)
-
-            # v107 top-up: if strict verification removed too many cards, reuse the same
-            # proven store-wave logic and continue streaming until we reach 10 unique products.
-            if identity and len(sent) < WEB_STREAM_IMAGE_TARGET_RESULTS and precision >= WEB_AI_GATE_FULL_START:
-                market_snapshot = _web_market(country)
-                MARKET_CTX.value = market_snapshot
-                for rank in (0, 2, 1):
-                    if len(sent) >= WEB_STREAM_IMAGE_TARGET_RESULTS:
-                        break
-                    try:
-                        extra_rows = await asyncio.to_thread(_web_fast_market_wave_sync, identity, country, lang, rank)
-                    except Exception as e:
-                        print(f"WEB IMAGE V107 TOPUP ERR rank={rank}: {e}")
-                        extra_rows = []
-                    if extra_rows:
-                        extra_rows = await asyncio.to_thread(_web_ai_gate_rows, profile, extra_rows, image_b64, mime, lang)
-                    for item in extra_rows or []:
-                        if len(sent) >= WEB_STREAM_IMAGE_TARGET_RESULTS:
-                            break
-                        market_name = str(item.get("market") or _web_market_label(rank))
-                        key = str(item.get("url") or "").strip() or (market_name + "|" + str(item.get("store") or "") + "|" + str(item.get("title") or ""))
-                        if key in sent:
-                            continue
-                        sent.add(key)
-                        yield _web_stream_event({"event": "result", "phase": "topup10", "market": market_name, "item": item, "elapsed_ms": int((time.time()-started)*1000)})
-                        await asyncio.sleep(0)
+                    await asyncio.sleep(0.01)
 
             yield _web_stream_event({"event": "done", "count": len(sent), "elapsed_ms": int((time.time()-started)*1000)})
         except asyncio.CancelledError:
@@ -12822,16 +10948,8 @@ async def web_api_image_search(request: Request):
     lang = _web_language(payload.get("lang"))
     country, country_source = await asyncio.to_thread(_web_resolve_request_country, request, payload.get("country"))
     caption = str(payload.get("caption") or "").strip()
-    precision = _web_search_precision(payload.get("search_precision", WEB_SEARCH_PRECISION_DEFAULT))
     started = time.time()
     result = await asyncio.to_thread(_web_search_image_sync, image_b64, mime, caption, country, lang)
-    if result.get("type") == "results" and WEB_AI_RESULT_GATE:
-        identity = str(result.get("query") or caption or "").strip()
-        profile = await asyncio.to_thread(_web_ai_identity_profile, image_b64, mime, identity, precision)
-        result["results"] = await asyncio.to_thread(_web_ai_gate_rows, profile, result.get("results") or [], image_b64, mime, lang)
-        result["query"] = str(profile.get("search_identity") or identity).strip()
-        result["ai_gate_mode"] = profile.get("mode")
-        result["search_precision"] = precision
     result["elapsed_ms"] = int((time.time() - started) * 1000)
     return result
 
