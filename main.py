@@ -26,7 +26,7 @@ app.add_middleware(
     allow_headers=["Content-Type", "Accept"],
     max_age=86400,
 )
-BUILD_ID = "v110.2-real-shopping-gl-fix-20260823"
+BUILD_ID = "v103.0-force-local-currency-require-image-20260823"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES")
@@ -187,21 +187,6 @@ LOCAL_COUNTRY_RESCUE_PASSES = max(1, min(2, int(os.environ.get("LOCAL_COUNTRY_RE
 LOCAL_AI_QUERY_RESCUE_ENABLED = env_bool("LOCAL_AI_QUERY_RESCUE_ENABLED", True)
 LOCAL_QUERY_CACHE = {}
 LOCAL_QUERY_CACHE_LOCK = threading.Lock()
-
-# v110.2 WEB/Google Shopping transport safety.
-# Some SerpApi google_shopping markets reject ISO gl=kw.  Keep Findzia's logical
-# market as Kuwait/KWD, but use a supported transport gl and add Kuwait to the
-# query so local merchant discovery remains strong.
-WEB_GOOGLE_SHOPPING_GL_FALLBACK = os.environ.get("WEB_GOOGLE_SHOPPING_GL_FALLBACK", "us").strip().lower() or "us"
-WEB_GOOGLE_SHOPPING_UNSUPPORTED_GL = {
-    x.strip().lower() for x in os.environ.get("WEB_GOOGLE_SHOPPING_UNSUPPORTED_GL", "kw").split(",") if x.strip()
-}
-WEB_CLEAN_SHOPPING_CACHE_TTL_SECONDS = max(0, int(os.environ.get("WEB_CLEAN_SHOPPING_CACHE_TTL_SECONDS", "45")))
-WEB_CLEAN_SHOPPING_SINGLEFLIGHT = env_bool("WEB_CLEAN_SHOPPING_SINGLEFLIGHT", True)
-WEB_CLEAN_SHOPPING_CACHE = {}
-WEB_CLEAN_SHOPPING_CACHE_LOCK = threading.Lock()
-WEB_CLEAN_SHOPPING_INFLIGHT = {}
-WEB_CLEAN_SHOPPING_INFLIGHT_LOCK = threading.Lock()
 
 
 # ---- Global market detection v85 ----------------------------------------------
@@ -1089,13 +1074,6 @@ print(
     f"lens_wide_fallback={ENABLE_LENS_WIDE_FALLBACK} lens_parallel={LENS_PARALLEL_WITH_VISION} "
     f"google_shopping={ENABLE_GOOGLE_SHOPPING} immersive_max={IMMERSIVE_LOOKUPS_MAX} "
     f"public_base_url={'SET' if PUBLIC_BASE_URL else 'MISSING'}"
-)
-
-print(
-    f"WEB CLEAN SHOPPING CONFIG cache_ttl={WEB_CLEAN_SHOPPING_CACHE_TTL_SECONDS}s "
-    f"singleflight={WEB_CLEAN_SHOPPING_SINGLEFLIGHT} "
-    f"unsupported_gl={sorted(WEB_GOOGLE_SHOPPING_UNSUPPORTED_GL)} "
-    f"fallback_gl={WEB_GOOGLE_SHOPPING_GL_FALLBACK}"
 )
 
 VERIFIED_PAGE_CACHE = {}
@@ -2162,15 +2140,7 @@ def parse_product_data(html, url):
             if cur in KNOWN_CURRENCY_CODES:
                 data["currency"] = cur
 
-    # v108: prefer a visible currency-tagged selling price before generic numeric fallbacks.
-    if not data["price"]:
-        visible_price, visible_cur = _visible_currency_price(html, data.get("currency") or "")
-        if visible_price:
-            data["price"] = visible_price
-            if visible_cur in KNOWN_CURRENCY_CODES:
-                data["currency"] = visible_cur
-
-    # Price fallbacks for stores whose JSON-LD is incomplete.
+    # v79.1: price fallbacks for stores whose JSON-LD is incomplete (Amazon/eBay/Temu/Alibaba, etc.).
     if not data["price"]:
         price_candidates = []
         selectors = [
@@ -2198,10 +2168,7 @@ def parse_product_data(html, url):
                 price_candidates.append(mm.group(1))
                 break
         for cand in price_candidates:
-            cand_text = str(cand).strip()
-            if _looks_like_measurement_number(cand_text):
-                continue
-            mm = re.search(r'(?<!\d)(\d+(?:[.,]\d{1,3})?)(?!\d)', cand_text.replace(',', ''))
+            mm = re.search(r'(?<!\d)(\d+(?:[.,]\d{1,3})?)(?!\d)', str(cand).replace(',', ''))
             if not mm:
                 continue
             try:
@@ -2210,9 +2177,8 @@ def parse_product_data(html, url):
                 continue
             if val > 0:
                 data["price"] = val
-                detected_cur = detect_currency_code(cand_text, "")
-                if detected_cur:
-                    data["currency"] = detected_cur
+                if not data["currency"]:
+                    data["currency"] = detect_currency_code(str(cand), "")
                 break
     if not data["currency"]:
         # Currency hints from structured HTML/text; conservative domain fallback only when price exists.
@@ -4199,106 +4165,29 @@ def _shopping_clean_query(query):
     return " ".join(q.split()[:10])
 
 
-def _shopping_transport_gl(gl):
-    logical = str(gl or "").strip().lower()
-    if logical in WEB_GOOGLE_SHOPPING_UNSUPPORTED_GL:
-        return WEB_GOOGLE_SHOPPING_GL_FALLBACK
-    return logical
-
-
-def _shopping_transport_query(query, logical_gl):
-    q = str(query or "").strip()
-    # Keep Kuwait search local even though the HTTP transport uses a supported gl.
-    # Preserve site: filters and avoid appending Kuwait twice.
-    if str(logical_gl or "").lower() == "kw" and "kuwait" not in q.lower() and "الكويت" not in q:
-        q = f"{q} Kuwait".strip()
-    return q
-
-
 def _serpapi_shopping_request(query, gl, hl="en", timeout_seconds=None):
-    """One google_shopping request with safe transport GL + short cache/single-flight.
-
-    IMPORTANT: logical gl remains unchanged for Findzia ranking/currency.  Only the
-    HTTP parameter sent to SerpApi is mapped when the engine rejects that country.
-    """
-    logical_gl = str(gl or "").strip().lower()
-    transport_gl = _shopping_transport_gl(logical_gl)
-    transport_query = _shopping_transport_query(query, logical_gl)
-    timeout_value = timeout_seconds or SERPAPI_TIMEOUT_SECONDS
-    cache_key = "|".join([transport_query, logical_gl, transport_gl, str(hl or "en").lower()])
-    now = time.time()
-
-    if WEB_CLEAN_SHOPPING_CACHE_TTL_SECONDS > 0:
-        with WEB_CLEAN_SHOPPING_CACHE_LOCK:
-            hit = WEB_CLEAN_SHOPPING_CACHE.get(cache_key)
-            if hit and now - hit[0] < WEB_CLEAN_SHOPPING_CACHE_TTL_SECONDS:
-                print(f"WEB CLEAN SHOPPING CACHE HIT logical_gl={logical_gl or '-'} transport_gl={transport_gl or '-'} cards={len(hit[1])}")
-                return [dict(x) for x in hit[1]]
-
-    leader = True
-    state = None
-    if WEB_CLEAN_SHOPPING_SINGLEFLIGHT:
-        with WEB_CLEAN_SHOPPING_INFLIGHT_LOCK:
-            state = WEB_CLEAN_SHOPPING_INFLIGHT.get(cache_key)
-            if state is None:
-                state = {"event": threading.Event(), "rows": None}
-                WEB_CLEAN_SHOPPING_INFLIGHT[cache_key] = state
-            else:
-                leader = False
-        if not leader:
-            state["event"].wait(timeout=float(timeout_value) + 2.0)
-            rows = state.get("rows")
-            if rows is not None:
-                print(f"WEB CLEAN SHOPPING SINGLEFLIGHT HIT logical_gl={logical_gl or '-'} cards={len(rows)}")
-                return [dict(x) for x in rows]
-
-    rows = []
+    """طلب google_shopping واحد. يعيد shopping_results (قد تكون فارغة)."""
+    params = {
+        "engine": "google_shopping", "q": query, "api_key": SERPAPI_API_KEY,
+        "hl": hl, "output": "json",
+    }
+    if gl:
+        params["gl"] = gl
     try:
-        params = {
-            "engine": "google_shopping", "q": transport_query, "api_key": SERPAPI_API_KEY,
-            "hl": hl, "output": "json",
-        }
-        if transport_gl:
-            params["gl"] = transport_gl
-        if logical_gl != transport_gl:
-            print(f"WEB CLEAN SHOPPING GL {logical_gl or '-'}->{transport_gl or '-'} q={transport_query[:80]!r}")
-        r = requests.get(
-            "https://serpapi.com/search.json",
-            params=params,
-            timeout=(4, timeout_value),
-        )
+        r = requests.get("https://serpapi.com/search.json", params=params, timeout=(4, timeout_seconds or SERPAPI_TIMEOUT_SECONDS))
         if r.status_code >= 400:
             print(f"GOOGLE SHOPPING HTTP {r.status_code}: {r.text[:300]}")
-            rows = []
-        else:
-            data = r.json()
-            if data.get("error"):
-                print(f"GOOGLE SHOPPING ERROR: {data.get('error')}")
-                rows = []
-            else:
-                rows = (data.get("shopping_results") or [])[:SHOPPING_RESULT_LIMIT]
-                print(
-                    f"GOOGLE SHOPPING: q={transport_query[:60]!r} "
-                    f"logical_gl={logical_gl or '-'} transport_gl={transport_gl or '-'} -> {len(rows)} cards"
-                )
+            return []
+        data = r.json()
+        if data.get("error"):
+            print(f"GOOGLE SHOPPING ERROR: {data.get('error')}")
+            return []
+        results = data.get("shopping_results") or []
+        print(f"GOOGLE SHOPPING: q={query[:60]!r} gl={gl or '-'} -> {len(results)} cards")
+        return results[:SHOPPING_RESULT_LIMIT]
     except Exception as e:
         print(f"GOOGLE SHOPPING EXCEPTION: {e}")
-        rows = []
-    finally:
-        if WEB_CLEAN_SHOPPING_CACHE_TTL_SECONDS > 0:
-            with WEB_CLEAN_SHOPPING_CACHE_LOCK:
-                WEB_CLEAN_SHOPPING_CACHE[cache_key] = (time.time(), [dict(x) for x in rows])
-                if len(WEB_CLEAN_SHOPPING_CACHE) > 1200:
-                    oldest = sorted(WEB_CLEAN_SHOPPING_CACHE.items(), key=lambda kv: kv[1][0])[:200]
-                    for k, _ in oldest:
-                        WEB_CLEAN_SHOPPING_CACHE.pop(k, None)
-        if WEB_CLEAN_SHOPPING_SINGLEFLIGHT and state is not None:
-            state["rows"] = [dict(x) for x in rows]
-            state["event"].set()
-            if leader:
-                with WEB_CLEAN_SHOPPING_INFLIGHT_LOCK:
-                    WEB_CLEAN_SHOPPING_INFLIGHT.pop(cache_key, None)
-    return [dict(x) for x in rows]
+        return []
 
 
 def _immersive_product_stores(page_token):
@@ -6222,68 +6111,16 @@ def country_flag_emoji(cc):
             pass
     return "🌐"
 
-_PRICE_UNIT_RE = re.compile(r"(?i)\b(?:ml|milliliters?|millilitres?|liters?|litres?|g|grams?|kg|kilograms?|oz|fl\.?\s*oz|lb|lbs|cm|mm|inches?|pcs?|pieces?|pack|count|ct|spf)\b")
-
-def _looks_like_measurement_number(text, value=None):
-    raw = re.sub(r"\s+", " ", str(text or "")).strip()
-    if not raw:
-        return False
-    if value not in (None, ""):
-        try:
-            num = float(value)
-            pat = rf"(?i)(?<!\d){re.escape(f'{num:g}')}(?:\.0+)?\s*(?:ml|l|g|kg|oz|fl\.?\s*oz|lb|lbs|cm|mm|inches?|pcs?|pieces?|pack|count|ct|spf)\b"
-            if re.search(pat, raw):
-                return True
-        except Exception:
-            pass
-    return bool(_PRICE_UNIT_RE.search(raw))
-
-def _has_explicit_currency(text):
-    return bool(re.search(r"(?i)(?:KWD|KD|د\.ك|USD|US\$|EUR|GBP|SAR|AED|QAR|BHD|OMR|CNY|RMB|JPY|CAD|AUD|CHF|INR|KRW|TRY|RUB|[$€£¥￥₹₩₺₽])", str(text or "")))
-
-def _visible_currency_price(html, currency_hint=""):
-    if not html:
-        return None, ""
-    try:
-        soup = BeautifulSoup(html, "html.parser")
-        text = re.sub(r"\s+", " ", soup.get_text(" ", strip=True))[:500000]
-    except Exception:
-        text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", str(html or "")))[:500000]
-    currency_pat = r"(?:KWD|KD|د\.ك|USD|US\$|EUR|GBP|SAR|AED|QAR|BHD|OMR|CNY|RMB|JPY|CAD|AUD|CHF|INR|KRW|TRY|RUB|[$€£¥￥₹₩₺₽])"
-    pats=(rf"({currency_pat})\s*([0-9]+(?:[.,][0-9]{{1,3}})?)", rf"([0-9]+(?:[.,][0-9]{{1,3}})?)\s*({currency_pat})")
-    wanted=str(currency_hint or "").upper().strip()
-    cands=[]
-    for idx,pat in enumerate(pats):
-        for m in re.finditer(pat,text,flags=re.I):
-            if idx==0: cur_token,num_token=m.group(1),m.group(2)
-            else: num_token,cur_token=m.group(1),m.group(2)
-            snippet=text[max(0,m.start()-30):min(len(text),m.end()+30)]
-            if _looks_like_measurement_number(snippet):
-                continue
-            try: val=float(num_token.replace(",",""))
-            except Exception: continue
-            if val<=0: continue
-            cur=detect_currency_code(cur_token,"") or wanted
-            score=(4 if wanted and cur==wanted else 0) + (2 if any(k in snippet.lower() for k in ("price","now","sale","add to cart","buy","kwd","kd")) else 0)
-            cands.append((score,m.start(),val,cur))
-    if not cands:
-        return None,""
-    cands.sort(key=lambda x:(-x[0],x[1]))
-    return cands[0][2],cands[0][3]
-
 def _lens_has_price(m):
-    """True only for a usable numeric selling price, never a size/spec number."""
+    """True only for a usable numeric selling price, not merely any non-empty text/model number."""
     if not isinstance(m, dict):
         return False
-    raw = str(m.get("price") or "").strip()
-    title_ctx = " ".join(str(m.get(k) or "") for k in ("title", "snippet", "extensions"))
     try:
-        if m.get("price_value") not in (None, ""):
-            pv=float(m.get("price_value"))
-            if pv>0 and not (_looks_like_measurement_number(title_ctx,pv) and not _has_explicit_currency(raw)):
-                return True
+        if m.get("price_value") not in (None, "") and float(m.get("price_value")) > 0:
+            return True
     except Exception:
         pass
+    raw = str(m.get("price") or "").strip()
     if not raw:
         return False
     numeric = _extract_numeric_price(raw)
@@ -9037,26 +8874,8 @@ WEB_STREAM_MARKET_TIMEOUT = max(4, min(20, int(os.environ.get("WEB_STREAM_MARKET
 WEB_STREAM_STORE_FIFO = env_bool("WEB_STREAM_STORE_FIFO", True)
 WEB_STREAM_STORE_TIMEOUT = max(4.0, min(12.0, float(os.environ.get("WEB_STREAM_STORE_TIMEOUT_SECONDS", "8"))))
 WEB_STREAM_STORE_HTTP_TIMEOUT = max(3.0, min(WEB_STREAM_STORE_TIMEOUT, float(os.environ.get("WEB_STREAM_STORE_HTTP_TIMEOUT_SECONDS", "7.5"))))
-
-# v105: latency optimization only. Result-selection rules remain unchanged.
-WEB_TURBO_MODE = env_bool("WEB_TURBO_MODE", True)
-WEB_TURBO_FINAL_HEADSTART_SECONDS = max(0.0, min(3.0, float(os.environ.get("WEB_TURBO_FINAL_HEADSTART_SECONDS", "1.25"))))
-WEB_TURBO_STORE_CACHE_TTL_SECONDS = max(30, min(1800, int(os.environ.get("WEB_TURBO_STORE_CACHE_TTL_SECONDS", "300"))))
-WEB_TURBO_PREP_CACHE_TTL_SECONDS = max(30, min(1800, int(os.environ.get("WEB_TURBO_PREP_CACHE_TTL_SECONDS", "600"))))
-WEB_TURBO_STRICT_WORKERS = max(6, min(20, int(os.environ.get("WEB_TURBO_STRICT_WORKERS", "12"))))
-WEB_TURBO_STORE_CACHE = {}
-WEB_TURBO_STORE_CACHE_LOCK = threading.Lock()
-WEB_TURBO_PREP_CACHE = {}
-WEB_TURBO_PREP_CACHE_LOCK = threading.Lock()
 WEB_STREAM_RESULTS_PER_STORE = max(1, min(2, int(os.environ.get("WEB_STREAM_RESULTS_PER_STORE", "1"))))
-# v104: marketplaces can legitimately return several distinct listings for the same/similar product.
-WEB_STREAM_MARKETPLACE_RESULTS_PER_STORE = max(2, min(6, int(os.environ.get("WEB_STREAM_MARKETPLACE_RESULTS_PER_STORE", "4"))))
-WEB_MULTI_LISTING_MARKETPLACES = (
-    "etsy.com", "ebay.com", "aliexpress.com", "temu.com", "shein.com",
-    "dhgate.com", "amazon.com", "alibaba.com", "made-in-china.com", "banggood.com",
-)
-WEB_STREAM_IMAGE_FINAL_MIN_RESULTS = max(2, min(20, int(os.environ.get("WEB_STREAM_IMAGE_FINAL_MIN_RESULTS", "10"))))
-WEB_STREAM_IMAGE_TARGET_RESULTS = max(5, min(20, int(os.environ.get("WEB_STREAM_IMAGE_TARGET_RESULTS", "10"))))
+WEB_STREAM_IMAGE_FINAL_MIN_RESULTS = max(2, min(10, int(os.environ.get("WEB_STREAM_IMAGE_FINAL_MIN_RESULTS", "5"))))
 # v97: Chinese global marketplaces are more important than the US wave on web.
 # Their fast probes use normal Google organic site search first because Google Shopping
 # often returns few/no cards for AliExpress/Temu/SHEIN/Alibaba-style domains.
@@ -9291,7 +9110,7 @@ def _web_attach_best_images(rows, rescue_page=False):
     if not rows:
         return rows
     jobs = []
-    with ThreadPoolExecutor(max_workers=min(WEB_TURBO_STRICT_WORKERS if WEB_TURBO_MODE else 6, len(rows))) as pool:
+    with ThreadPoolExecutor(max_workers=min(6, len(rows))) as pool:
         for idx, row in enumerate(rows):
             primary = row.get('image') or row.get('thumbnail') or ''
             page_url = row.get('url') or row.get('link') or ''
@@ -9665,7 +9484,6 @@ def _web_stream_store_specs(query, country, rank):
         specs = [
             ("Amazon", "amazon.com", "us"),
             ("eBay", "ebay.com", "us"),
-            ("Etsy", "etsy.com", "us"),
             ("Walmart", "walmart.com", "us"),
         ]
     else:
@@ -9775,42 +9593,6 @@ def _china_global_product_url(domain, url):
     return bool(checker and checker())
 
 
-def _web_marketplace_repeat_cap(domain_or_url):
-    raw = str(domain_or_url or "").strip().lower()
-    try:
-        host = urllib.parse.urlparse(raw if "://" in raw else "https://" + raw).netloc.lower().replace("www.", "")
-    except Exception:
-        host = raw.replace("www.", "").split("/")[0]
-    for dom in WEB_MULTI_LISTING_MARKETPLACES:
-        if host == dom or host.endswith("." + dom):
-            return WEB_STREAM_MARKETPLACE_RESULTS_PER_STORE
-    return WEB_STREAM_RESULTS_PER_STORE
-
-
-def _web_is_amazon_host(host):
-    host = str(host or "").lower().split(":")[0]
-    if host.startswith("www."):
-        host = host[4:]
-    # Supports amazon.fr, amazon.de, amazon.co.uk, amazon.co.jp, amazon.com.au, etc.
-    return bool(re.match(r"^(?:[a-z0-9-]+\.)*amazon\.(?:com|ca|de|fr|it|es|nl|se|pl|eg|sa|ae|sg|in|co\.uk|co\.jp|com\.au|com\.br|com\.mx|com\.tr|com\.be)$", host))
-
-
-def _web_is_amazon_product_url(url):
-    raw = str(url or "").strip()
-    if not _web_is_http_url(raw):
-        return False
-    try:
-        u = urllib.parse.urlparse(raw)
-        host = u.netloc.lower().split(":")[0]
-        path = (u.path or "").lower()
-    except Exception:
-        return False
-    if not _web_is_amazon_host(host):
-        return False
-    # Direct ASIN product pages only. Reject home, search, promo, storefront and deal pages.
-    return bool(re.search(r"/(?:dp|gp/product|gp/aw/d)/[a-z0-9]{8,}(?:[/?]|$)", path))
-
-
 def _web_is_direct_product_page_url(url, store_name=""):
     """General web-card gate: reject obvious search/category/listing URLs."""
     raw = str(url or "").strip()
@@ -9834,11 +9616,6 @@ def _web_is_direct_product_page_url(url, store_name=""):
         if host == dom or host.endswith("." + dom):
             return _china_global_product_url(dom, raw)
 
-    # Etsy's real product pages use /listing/<numeric-id>/... . Allow those explicitly
-    # before the generic listing/category rejection below.
-    if host == "etsy.com" or host.endswith(".etsy.com"):
-        return bool(re.search(r"/listing/\d{6,}(?:/|$)", path))
-
     bad = (
         "/search", "/search/", "/category", "/categories", "/collections/",
         "/catalog", "/results", "/browse", "/listing", "/list/",
@@ -9849,8 +9626,8 @@ def _web_is_direct_product_page_url(url, store_name=""):
     if path in ("", "/"):
         return False
 
-    if _web_is_amazon_host(host):
-        return _web_is_amazon_product_url(raw)
+    if host.endswith("amazon.com"):
+        return bool(re.search(r"/(?:dp|gp/product)/[a-z0-9]{8,}", path))
     if host.endswith("ebay.com"):
         return bool(re.search(r"/itm/(?:[^/]+/)?\d{8,}", path))
     if host.endswith("walmart.com"):
@@ -9938,8 +9715,8 @@ def _web_price_number_and_currency(text, fallback_currency=""):
                     return val, cur
             except Exception:
                 pass
-    # Last resort only when the string itself is short and price-like, never a size/spec.
-    if len(raw) <= 50 and not _looks_like_measurement_number(raw):
+    # Last resort only when the string itself is short and price-like.
+    if len(raw) <= 50:
         m = re.search(r"(?<!\\d)([0-9]+(?:[.,][0-9]{1,3})?)(?!\\d)", raw.replace(",", ""))
         if m:
             try:
@@ -9986,16 +9763,6 @@ def _web_verified_page_snapshot(url):
             low = re.sub(r"\\s+", " ", BeautifulSoup(html[:450000], "html.parser").get_text(" ", strip=True).lower())
             host = urllib.parse.urlparse(final_url).netloc.lower().split(":")[0]
             host = host[4:] if host.startswith("www.") else host
-            # Amazon: country marketplaces must resolve to a real ASIN product page.
-            # Homepage/promo/search pages can contain many numbers and images; never parse those as product price/image.
-            if _web_is_amazon_host(host):
-                if not _web_is_amazon_product_url(final_url):
-                    data["is_product"] = False
-                    data["price"] = None
-                    data["currency"] = ""
-                    data["image"] = ""
-                    print(f"WEB AMAZON REJECT NON-PRODUCT final={final_url[:160]}")
-
             # Alibaba vertical/supplier result pages can look like product URLs but are supplier listings.
             if host.endswith("alibaba.com"):
                 if host not in ("alibaba.com", "www.alibaba.com"):
@@ -10200,12 +9967,6 @@ def _web_verify_card_strict(row, rank, lang, market_snapshot=None):
             print(f"WEB STRICT REJECT NO IMAGE store={row.get('store') or row.get('source')} url={url[:140]}")
             return None
 
-    # If a merchant URL redirected to a non-product page, reject it completely.
-    # Do not fall back to a structured price from the search result, because that can pair a promo/banner URL with a bogus number.
-    if snap and snap.get("ok") and not snap.get("is_product"):
-        print(f"WEB STRICT REJECT REDIRECT NON-PRODUCT store={row.get('store') or row.get('source')} url={(snap.get('url') or url)[:160]}")
-        return None
-
     # Page price is authoritative when exposed. Otherwise use a structured search/Lens price.
     page_price = snap.get("price") if snap and snap.get("ok") else None
     page_cur = str((snap or {}).get("currency") or "").upper().strip()
@@ -10215,36 +9976,18 @@ def _web_verify_card_strict(row, rank, lang, market_snapshot=None):
         except Exception:
             page_price = None
     if page_price and page_price > 0:
-        # Cross-check page parser against an existing structured price when both exist.
-        # This protects against grabbing banner/order-id numbers from complex merchant HTML.
-        existing_text = str(row.get("price") or "").strip()
-        existing_val, existing_cur = _web_price_number_and_currency(existing_text)
-        if existing_val and existing_val > 0 and existing_cur and page_cur and existing_cur == page_cur:
-            ratio = max(page_price, existing_val) / max(0.000001, min(page_price, existing_val))
-            if ratio >= 8.0:
-                print(f"WEB PRICE MISMATCH REJECT store={row.get('store') or row.get('source')} page={page_price} structured={existing_val} cur={page_cur}")
-                page_price = None
-        if page_price and not page_cur:
+        if not page_cur:
             page_cur = _web_market_currency(market_snapshot) if rank == 0 else ("USD" if rank == 1 else "CNY")
-        if page_price and page_price > 0:
-            raw_price = f"{page_price:g} {page_cur}".strip()
-            row["price"] = _web_price_local_explicit(raw_price, rank, lang, market_snapshot)
-            row["price"] = _web_normalize_existing_price_to_market(row["price"], rank, lang, market_snapshot)
-            row["price_verified"] = True
-            row["price_source"] = "product_page"
-            return row
+        raw_price = f"{page_price:g} {page_cur}".strip()
+        row["price"] = _web_price_local_explicit(raw_price, rank, lang, market_snapshot)
+        row["price"] = _web_normalize_existing_price_to_market(row["price"], rank, lang, market_snapshot)
+        row["price_verified"] = True
+        row["price_source"] = "product_page"
+        return row
 
     existing = str(row.get("price") or "").strip()
     val, cur = _web_price_number_and_currency(existing)
     if val and val > 0:
-        title_ctx = " ".join(str(row.get(k) or "") for k in ("title", "name", "snippet"))
-        source_kind = str(row.get("price_source") or "").lower()
-        if _looks_like_measurement_number(title_ctx, val) and source_kind not in ("product_page", "jsonld", "merchant_page"):
-            print(f"WEB PRICE UNIT REJECT store={row.get('store') or row.get('source')} val={val} title={title_ctx[:100]}")
-            if WEB_REQUIRE_NUMERIC_PRICE:
-                return None
-            row["price"] = ""
-            return row
         row["price"] = _web_normalize_existing_price_to_market(existing, rank, lang, market_snapshot)
         row["price_verified"] = True
         row["price_source"] = row.get("price_source") or "search_structured_rebased"
@@ -10334,7 +10077,7 @@ def _serpapi_china_global_site_request(query, label, domain, timeout_seconds=Non
                 "_china_fallback": True,
                 "_web_global_china": True,
             })
-            if len(out) >= _web_marketplace_repeat_cap(domain):
+            if len(out) >= max(WEB_STREAM_RESULTS_PER_STORE, 2):
                 break
         print(f"WEB CHINA GLOBAL GOOGLE store={label} -> {len(out)} result(s)")
         return out
@@ -10342,45 +10085,13 @@ def _serpapi_china_global_site_request(query, label, domain, timeout_seconds=Non
         print(f"WEB CHINA GLOBAL GOOGLE EXCEPTION store={label}: {e}")
         return []
 
-def _web_turbo_cache_get(cache, lock, key, ttl):
-    now = time.time()
-    with lock:
-        hit = cache.get(key)
-        if hit and now - float(hit.get("ts") or 0) < ttl:
-            return hit.get("value")
-    return None
-
-
-def _web_turbo_cache_set(cache, lock, key, value, max_items=1200):
-    now = time.time()
-    with lock:
-        cache[key] = {"ts": now, "value": value}
-        if len(cache) > max_items:
-            oldest = sorted(cache.items(), key=lambda kv: kv[1].get("ts", 0))[:max(100, max_items // 5)]
-            for k, _ in oldest:
-                cache.pop(k, None)
-
-
-def _web_store_probe_cache_key(query, country, lang, rank, label, domain, gl):
-    return "|".join([
-        normalize_name(query or ""), str(country or "").lower(), str(lang or "").lower(),
-        str(rank), normalize_name(label or ""), str(domain or "").lower(), str(gl or "").lower()
-    ])
-
-
 def _web_store_probe_sync(query, country, lang, rank, label, domain, gl):
-    """Probe one merchant and return UI cards; v105 caches the exact verified rows briefly."""
+    """Probe one merchant and return UI cards; Chinese globals use organic-first in v97."""
     market = _web_market(country)
     MARKET_CTX.value = market
     q = _shopping_clean_query(query or "")
     if not q or not SERPAPI_API_KEY:
         return []
-    cache_key = _web_store_probe_cache_key(q, country, lang, rank, label, domain, gl)
-    if WEB_TURBO_MODE:
-        cached = _web_turbo_cache_get(WEB_TURBO_STORE_CACHE, WEB_TURBO_STORE_CACHE_LOCK, cache_key, WEB_TURBO_STORE_CACHE_TTL_SECONDS)
-        if cached is not None:
-            print(f"WEB TURBO STORE CACHE HIT store={label} rows={len(cached)}")
-            return [dict(x) for x in cached]
 
     candidate_cc = (market.get("country") or DEFAULT_COUNTRY).lower() if rank == 0 else ("us" if rank == 1 else "cn")
     candidates = []
@@ -10394,10 +10105,8 @@ def _web_store_probe_sync(query, country, lang, rank, label, domain, gl):
         # Do not chain a second SerpApi request inside the fast FIFO task.  Other China
         # merchants are already running in parallel, and the full engine can enrich later.
         # This prevents timed-out to_thread work from continuing in the background.
-        rows = _web_market_candidates_to_items(candidates, rank, lang, q)[:_web_marketplace_repeat_cap(domain)]
-        if WEB_TURBO_MODE:
-            _web_turbo_cache_set(WEB_TURBO_STORE_CACHE, WEB_TURBO_STORE_CACHE_LOCK, cache_key, [dict(x) for x in rows])
-        return rows
+        rows = _web_market_candidates_to_items(candidates, rank, lang, q)
+        return rows[:WEB_STREAM_RESULTS_PER_STORE]
 
     # Existing Shopping path remains unchanged for local/US.
     if not candidates:
@@ -10426,13 +10135,7 @@ def _web_store_probe_sync(query, country, lang, rank, label, domain, gl):
 
     rows = _web_market_candidates_to_items(candidates, rank, lang, q)
     rows = [row for row in rows if _web_is_direct_product_page_url(row.get("url") or "", row.get("store") or label)]
-    cap = _web_marketplace_repeat_cap(domain)
-    if cap > WEB_STREAM_RESULTS_PER_STORE and rows:
-        print(f"WEB MARKETPLACE MULTI store={label} cap={cap} rows={len(rows)}")
-    rows = rows[:cap]
-    if WEB_TURBO_MODE:
-        _web_turbo_cache_set(WEB_TURBO_STORE_CACHE, WEB_TURBO_STORE_CACHE_LOCK, cache_key, [dict(x) for x in rows])
-    return rows
+    return rows[:WEB_STREAM_RESULTS_PER_STORE]
 
 def _web_image_seed_sync(image_b64, mime, caption, country, lang):
     """One fast image-identification pass used before merchant FIFO probes.
@@ -10463,14 +10166,7 @@ def _web_image_seed_sync(image_b64, mime, caption, country, lang):
 def _web_prepare_stream_query_sync(query, country, lang, selected_option="", original_query="", force_specific=False):
     market = _web_market(country)
     MARKET_CTX.value = market
-    raw_q = re.sub(r"\s+", " ", str(query or "")).strip()[:WEB_API_MAX_QUERY_CHARS]
-    prep_key = "|".join([normalize_name(raw_q), str(country or "").lower(), str(lang or "").lower(), normalize_name(selected_option or ""), normalize_name(original_query or ""), "1" if force_specific else "0"])
-    if WEB_TURBO_MODE:
-        cached = _web_turbo_cache_get(WEB_TURBO_PREP_CACHE, WEB_TURBO_PREP_CACHE_LOCK, prep_key, WEB_TURBO_PREP_CACHE_TTL_SECONDS)
-        if cached is not None:
-            print(f"WEB TURBO PREP CACHE HIT q={raw_q[:70]!r}")
-            return dict(cached)
-    q = raw_q
+    q = re.sub(r"\s+", " ", str(query or "")).strip()[:WEB_API_MAX_QUERY_CHARS]
     if selected_option:
         q = ai_recommendation_pick_search_query(original_query or q, selected_option, lang)
         force_specific = True
@@ -10489,10 +10185,7 @@ def _web_prepare_stream_query_sync(query, country, lang, selected_option="", ori
             rtype = classify_request_type(q)
         except Exception:
             rtype = "SPECIFIC"
-    result = {"ok": True, "query": q, "market": market, "rtype": rtype, "force_specific": force_specific}
-    if WEB_TURBO_MODE:
-        _web_turbo_cache_set(WEB_TURBO_PREP_CACHE, WEB_TURBO_PREP_CACHE_LOCK, prep_key, dict(result))
-    return result
+    return {"ok": True, "query": q, "market": market, "rtype": rtype, "force_specific": force_specific}
 
 def _web_search_text_sync(query, country, lang, selected_option="", original_query="", force_specific=False):
     market = _web_market(country)
@@ -10570,7 +10263,7 @@ def _web_search_image_sync(image_b64, mime, caption, country, lang):
 
                     weak = [r for r in (0, 1, 2) if counts[r] < target[r]]
                     if weak:
-                        print(f"WEB IMAGE CLEAN weak markets before supplement counts={counts} target={target} identity={identity[:90]!r}")
+                        print(f"WEB IMAGE v89 weak markets before supplement counts={counts} target={target} identity={identity[:90]!r}")
                         market_snapshot = dict(market)
                         extra_by_rank = {}
 
@@ -10611,7 +10304,7 @@ def _web_search_image_sync(image_b64, mime, caption, country, lang):
                                 if need <= 0:
                                     break
                         items.sort(key=lambda x: (int(x.get("market_rank", 99)), 0 if x.get("price") else 1))
-                        print(f"WEB IMAGE CLEAN after supplement counts={counts} total={len(items)}")
+                        print(f"WEB IMAGE v89 after supplement counts={counts} total={len(items)}")
 
                 return {"ok": True, "type": "results", "query": identity, "market": market, "results": items, "source": "lens_direct_plus_market_supplement"}
 
@@ -10858,12 +10551,6 @@ async def web_api_health():
 
 
 
-async def _web_turbo_delayed_text_final(q, country, lang):
-    if WEB_TURBO_MODE and WEB_TURBO_FINAL_HEADSTART_SECONDS > 0:
-        await asyncio.sleep(WEB_TURBO_FINAL_HEADSTART_SECONDS)
-    return await asyncio.to_thread(_web_search_text_sync, q, country, lang, "", "", True)
-
-
 @app.post("/api/search/stream")
 async def web_api_search_stream(request: Request):
     if not WEB_API_ENABLED or not WEB_STREAM_ENABLED:
@@ -10912,9 +10599,9 @@ async def web_api_search_stream(request: Request):
                 return
 
             sent = set()
-            # v105 gives lightweight store probes a short head start before the heavy
-            # authoritative engine starts. Final results are unchanged; first paint is faster.
-            final_task = asyncio.create_task(_web_turbo_delayed_text_final(q, country, lang))
+            final_task = asyncio.create_task(asyncio.to_thread(
+                _web_search_text_sync, q, country, lang, "", "", True
+            ))
 
             if WEB_STREAM_STORE_FIFO and WEB_STREAM_FAST_WAVE and SERPAPI_API_KEY:
                 store_tasks = []
@@ -10966,13 +10653,11 @@ async def web_api_search_stream(request: Request):
                                 "store_probe": label, "item": item,
                                 "elapsed_ms": int((time.time()-started)*1000),
                             })
-                            await asyncio.sleep(0)
+                            await asyncio.sleep(0.015)
                         rank_remaining[r] = max(0, rank_remaining.get(r, 1) - 1)
                         if rank_remaining[r] == 0:
                             yield _web_stream_event({"event": "market_fast_done", "market": market_name, "elapsed_ms": int((time.time()-started)*1000)})
 
-                if len(sent) >= WEB_STREAM_IMAGE_TARGET_RESULTS:
-                    print(f"WEB IMAGE TARGET REACHED live={len(sent)} target={WEB_STREAM_IMAGE_TARGET_RESULTS}")
                 for task in pending:
                     task.cancel()
                 for r in (0, 1, 2):
@@ -11006,7 +10691,7 @@ async def web_api_search_stream(request: Request):
                                 continue
                             sent.add(key)
                             yield _web_stream_event({"event": "result", "phase": "fast", "market": market_name, "item": item, "elapsed_ms": int((time.time()-started)*1000)})
-                            await asyncio.sleep(0)
+                            await asyncio.sleep(0.01)
                         yield _web_stream_event({"event": "market_fast_done", "market": market_name, "count": len(items or []), "elapsed_ms": int((time.time()-started)*1000)})
                     if final_task.done():
                         break
@@ -11027,7 +10712,7 @@ async def web_api_search_stream(request: Request):
                     else:
                         sent.add(key)
                         yield _web_stream_event({"event": "result", "phase": "final", "market": market_name, "item": item, "elapsed_ms": int((time.time()-started)*1000)})
-                    await asyncio.sleep(0)
+                    await asyncio.sleep(0.01)
             yield _web_stream_event({"event": "done", "count": len(sent), "elapsed_ms": int((time.time()-started)*1000)})
         except asyncio.CancelledError:
             raise
@@ -11085,8 +10770,6 @@ async def web_api_image_search_stream(request: Request):
 
             # Lens seed results are useful immediately. Emit them without waiting for any market.
             for item in seed.get("items") or []:
-                if len(sent) >= WEB_STREAM_IMAGE_TARGET_RESULTS:
-                    break
                 market_name = str(item.get("market") or "other")
                 key = str(item.get("url") or "").strip() or (market_name + "|" + str(item.get("store") or "") + "|" + str(item.get("title") or ""))
                 if key in sent:
@@ -11095,9 +10778,9 @@ async def web_api_image_search_stream(request: Request):
                 if market_name in market_counts:
                     market_counts[market_name] += 1
                 yield _web_stream_event({"event": "result", "phase": "lens_seed", "market": market_name, "item": item, "elapsed_ms": int((time.time()-started)*1000)})
-                await asyncio.sleep(0)
+                await asyncio.sleep(0.015)
 
-            if len(sent) < WEB_STREAM_IMAGE_TARGET_RESULTS and identity and WEB_STREAM_STORE_FIFO and WEB_STREAM_FAST_WAVE and SERPAPI_API_KEY:
+            if identity and WEB_STREAM_STORE_FIFO and WEB_STREAM_FAST_WAVE and SERPAPI_API_KEY:
                 store_tasks = []
                 task_meta = {}
                 rank_remaining = {0: 0, 1: 0, 2: 0}
@@ -11134,8 +10817,6 @@ async def web_api_image_search_stream(request: Request):
                             r, rows = rank, []
                         market_name = _web_market_label(r)
                         for item in rows or []:
-                            if len(sent) >= WEB_STREAM_IMAGE_TARGET_RESULTS:
-                                break
                             key = str(item.get("url") or "").strip() or (market_name + "|" + str(item.get("store") or "") + "|" + str(item.get("title") or ""))
                             if key in sent:
                                 continue
@@ -11147,10 +10828,8 @@ async def web_api_image_search_stream(request: Request):
                                 "store_probe": label, "item": item,
                                 "elapsed_ms": int((time.time()-started)*1000),
                             })
-                            await asyncio.sleep(0)
+                            await asyncio.sleep(0.015)
                         rank_remaining[r] = max(0, rank_remaining.get(r, 1) - 1)
-                        if len(sent) >= WEB_STREAM_IMAGE_TARGET_RESULTS:
-                            break
                         if rank_remaining[r] == 0:
                             yield _web_stream_event({"event": "market_fast_done", "market": market_name, "elapsed_ms": int((time.time()-started)*1000)})
                 for task in pending:
@@ -11161,7 +10840,7 @@ async def web_api_image_search_stream(request: Request):
 
             # Only invoke the heavy original image engine when the live wave is still sparse
             # or local coverage is missing.  The user has already seen FIFO cards by then.
-            if len(sent) < WEB_STREAM_IMAGE_TARGET_RESULTS or market_counts.get("local", 0) == 0:
+            if len(sent) < WEB_STREAM_IMAGE_FINAL_MIN_RESULTS or market_counts.get("local", 0) == 0:
                 final = await asyncio.to_thread(_web_search_image_sync, image_b64, mime, caption, country, lang)
                 for item in final.get("results") or []:
                     market_name = str(item.get("market") or "other")
@@ -11169,35 +10848,9 @@ async def web_api_image_search_stream(request: Request):
                     if key in sent:
                         yield _web_stream_event({"event": "upsert", "phase": "final", "market": market_name, "item": item, "elapsed_ms": int((time.time()-started)*1000)})
                         continue
-                    if len(sent) >= WEB_STREAM_IMAGE_TARGET_RESULTS:
-                        break
                     sent.add(key)
                     yield _web_stream_event({"event": "result", "phase": "final", "market": market_name, "item": item, "elapsed_ms": int((time.time()-started)*1000)})
-                    await asyncio.sleep(0)
-
-            # v107 top-up: if strict verification removed too many cards, reuse the same
-            # proven store-wave logic and continue streaming until we reach 10 unique products.
-            if identity and len(sent) < WEB_STREAM_IMAGE_TARGET_RESULTS:
-                market_snapshot = _web_market(country)
-                MARKET_CTX.value = market_snapshot
-                for rank in (0, 2, 1):
-                    if len(sent) >= WEB_STREAM_IMAGE_TARGET_RESULTS:
-                        break
-                    try:
-                        extra_rows = await asyncio.to_thread(_web_fast_market_wave_sync, identity, country, lang, rank)
-                    except Exception as e:
-                        print(f"WEB IMAGE V107 TOPUP ERR rank={rank}: {e}")
-                        extra_rows = []
-                    for item in extra_rows or []:
-                        if len(sent) >= WEB_STREAM_IMAGE_TARGET_RESULTS:
-                            break
-                        market_name = str(item.get("market") or _web_market_label(rank))
-                        key = str(item.get("url") or "").strip() or (market_name + "|" + str(item.get("store") or "") + "|" + str(item.get("title") or ""))
-                        if key in sent:
-                            continue
-                        sent.add(key)
-                        yield _web_stream_event({"event": "result", "phase": "topup10", "market": market_name, "item": item, "elapsed_ms": int((time.time()-started)*1000)})
-                        await asyncio.sleep(0)
+                    await asyncio.sleep(0.01)
 
             yield _web_stream_event({"event": "done", "count": len(sent), "elapsed_ms": int((time.time()-started)*1000)})
         except asyncio.CancelledError:
