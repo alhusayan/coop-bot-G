@@ -26,7 +26,7 @@ app.add_middleware(
     allow_headers=["Content-Type", "Accept"],
     max_age=86400,
 )
-BUILD_ID = "v117.0-sweet-spot-wide-search-20260823"
+BUILD_ID = "v118.0-local-priority-nonblocking-20260823"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES")
@@ -9107,6 +9107,13 @@ WEB_WIDE_SEARCH_TIMEOUT_SECONDS = max(2.2, min(5.0, float(os.environ.get("WEB_WI
 WEB_WIDE_LOCAL_CAP = max(1, min(5, int(os.environ.get("WEB_WIDE_LOCAL_CAP", "4"))))
 WEB_WIDE_US_CAP = max(1, min(4, int(os.environ.get("WEB_WIDE_US_CAP", "3"))))
 WEB_WIDE_CN_CAP = max(1, min(4, int(os.environ.get("WEB_WIDE_CN_CAP", "3"))))
+
+# v118: local is the core Findzia promise. Keep it strong without blocking global results.
+WEB_LOCAL_PRIORITY_BALANCED = env_bool("WEB_LOCAL_PRIORITY_BALANCED", True)
+WEB_LOCAL_PRIORITY_RESCUE_STORES = max(1, min(5, int(os.environ.get("WEB_LOCAL_PRIORITY_RESCUE_STORES", "3"))))
+WEB_LOCAL_PRIORITY_TIMEOUT_SECONDS = max(2.5, min(5.5, float(os.environ.get("WEB_LOCAL_PRIORITY_TIMEOUT_SECONDS", "4.0"))))
+WEB_LOCAL_PRIORITY_HEADSTART_SECONDS = max(0.0, min(0.6, float(os.environ.get("WEB_LOCAL_PRIORITY_HEADSTART_SECONDS", "0.18"))))
+WEB_LOCAL_RESULT_RESERVE = max(1, min(5, int(os.environ.get("WEB_LOCAL_RESULT_RESERVE", "4"))))
 WEB_AI_GATE_LIGHT_START = max(61, min(89, int(os.environ.get("WEB_AI_GATE_LIGHT_START", "61"))))
 WEB_AI_GATE_CACHE = {}
 WEB_AI_GATE_CACHE_LOCK = threading.Lock()
@@ -11386,6 +11393,85 @@ def _web_wide_candidates_to_rows(candidates, rank, lang, query, precision):
     return out
 
 
+
+def _web_wide_local_priority_sync(query, country, lang, precision):
+    """Strong, bounded local discovery for 61-89%.
+
+    Runs the broad local Shopping query plus a few category-aware direct local
+    merchant probes in parallel. This is deliberately stronger than US/China,
+    but still bounded so it cannot hold the whole page hostage.
+    """
+    market = _web_market(country)
+    MARKET_CTX.value = market
+    q = _web_relaxed_store_identity(query, precision)
+    local_cc = (market.get("country") or DEFAULT_COUNTRY).lower()
+
+    specs = local_rescue_store_specs(q, WEB_LOCAL_PRIORITY_RESCUE_STORES)
+    rows = []
+
+    def broad():
+        return _web_wide_market_search_sync(q, country, lang, 0, precision)
+
+    def store(label, domain):
+        try:
+            return _web_store_probe_precision_sync(
+                q, country, lang, 0, label, domain, local_cc, True
+            )
+        except Exception as e:
+            print(f"WEB LOCAL PRIORITY STORE ERR {label}: {e}")
+            return []
+
+    jobs = []
+    with ThreadPoolExecutor(max_workers=1 + len(specs)) as pool:
+        jobs.append(pool.submit(broad))
+        jobs.extend(pool.submit(store, label, domain) for label, domain in specs)
+        done, pending = wait(jobs, timeout=WEB_LOCAL_PRIORITY_TIMEOUT_SECONDS)
+        for fut in done:
+            try:
+                rows.extend(fut.result() or [])
+            except Exception:
+                pass
+        for fut in pending:
+            fut.cancel()
+
+    # Deterministic safeguards only below 90: direct page + image + numeric price.
+    rows = _web_fast_precision_filter_rows(rows, q, precision)
+
+    out, seen = [], set()
+    store_counts = defaultdict(int)
+    for row in rows:
+        url = str(row.get("url") or "").strip()
+        if not url:
+            continue
+        key = url.split("#", 1)[0]
+        if key in seen:
+            continue
+        try:
+            host = urllib.parse.urlparse(url).netloc.lower().replace("www.", "")
+        except Exception:
+            host = ""
+        merchant = host or normalize_name(row.get("store") or "")
+        cap = _web_marketplace_repeat_cap(host) if host else WEB_STREAM_RESULTS_PER_STORE
+        if store_counts[merchant] >= cap:
+            continue
+        seen.add(key)
+        store_counts[merchant] += 1
+        row = dict(row)
+        row["market"] = "local"
+        row["market_rank"] = 0
+        row["country"] = local_cc
+        row["flag"] = country_flag_emoji(local_cc)
+        out.append(row)
+        if len(out) >= WEB_WIDE_LOCAL_CAP:
+            break
+
+    print(
+        f"WEB LOCAL PRIORITY precision={precision}% query={q[:75]!r} "
+        f"stores={len(specs)} -> {len(out)} row(s)"
+    )
+    return out
+
+
 def _web_wide_market_search_sync(query, country, lang, rank, precision):
     """Exactly one external search operation per market rank for 61-89."""
     market = _web_market(country)
@@ -12267,25 +12353,85 @@ async def web_api_image_search_stream(request: Request):
                 if balanced_wide:
                     async def _run_wide_market(r):
                         try:
-                            rows = await asyncio.wait_for(
-                                asyncio.to_thread(
-                                    _web_wide_market_search_sync,
-                                    identity, country, lang, r, precision
-                                ),
-                                timeout=WEB_WIDE_SEARCH_TIMEOUT_SECONDS + 0.5,
-                            )
+                            if r == 0 and WEB_LOCAL_PRIORITY_BALANCED:
+                                rows = await asyncio.wait_for(
+                                    asyncio.to_thread(
+                                        _web_wide_local_priority_sync,
+                                        identity, country, lang, precision
+                                    ),
+                                    timeout=WEB_LOCAL_PRIORITY_TIMEOUT_SECONDS + 0.4,
+                                )
+                            else:
+                                rows = await asyncio.wait_for(
+                                    asyncio.to_thread(
+                                        _web_wide_market_search_sync,
+                                        identity, country, lang, r, precision
+                                    ),
+                                    timeout=WEB_WIDE_SEARCH_TIMEOUT_SECONDS + 0.5,
+                                )
                             return r, rows or []
                         except Exception as e:
                             print(f"WEB WIDE MARKET ERR rank={r}: {e}")
                             return r, []
 
-                    wide_tasks = {
-                        asyncio.create_task(_run_wide_market(r)): r
-                        for r in (0, 1, 2)
-                    }
-                    pending_wide = set(wide_tasks)
+                    # Local starts first, but only gets a tiny head start. US/China
+                    # are still allowed to appear first if they respond faster.
+                    local_task = asyncio.create_task(_run_wide_market(0))
+                    if WEB_LOCAL_PRIORITY_HEADSTART_SECONDS > 0:
+                        await asyncio.sleep(WEB_LOCAL_PRIORITY_HEADSTART_SECONDS)
+                    global_tasks = [
+                        asyncio.create_task(_run_wide_market(1)),
+                        asyncio.create_task(_run_wide_market(2)),
+                    ]
+
+                    all_tasks = {local_task: 0, global_tasks[0]: 1, global_tasks[1]: 2}
+                    pending_wide = set(all_tasks)
                     loop = asyncio.get_running_loop()
-                    wide_deadline = loop.time() + WEB_WIDE_SEARCH_TIMEOUT_SECONDS + 0.6
+                    wide_deadline = loop.time() + max(
+                        WEB_LOCAL_PRIORITY_TIMEOUT_SECONDS,
+                        WEB_WIDE_SEARCH_TIMEOUT_SECONDS
+                    ) + 0.7
+
+                    # Reserve room for local while it is still running. This prevents
+                    # fast US/China results from consuming all 10 slots.
+                    foreign_buffer = []
+                    local_finished = False
+
+                    async def _emit_rows(rank, rows):
+                        nonlocal local_finished
+                        market_name = _web_market_label(rank)
+                        emitted_now = 0
+                        for item in rows or []:
+                            if len(sent) >= WEB_STREAM_IMAGE_TARGET_RESULTS:
+                                break
+                            key = str(item.get("url") or "").strip() or (
+                                market_name + "|" + str(item.get("store") or "") + "|" + str(item.get("title") or "")
+                            )
+                            if key in sent:
+                                continue
+
+                            if rank != 0 and not local_finished:
+                                foreign_limit = max(
+                                    1,
+                                    WEB_STREAM_IMAGE_TARGET_RESULTS - WEB_LOCAL_RESULT_RESERVE
+                                )
+                                if len(sent) >= foreign_limit:
+                                    foreign_buffer.append((rank, item))
+                                    continue
+
+                            sent.add(key)
+                            if market_name in market_counts:
+                                market_counts[market_name] += 1
+                            emitted_now += 1
+                            yield _web_stream_event({
+                                "event": "result",
+                                "phase": "wide_market_local_priority",
+                                "market": market_name,
+                                "item": item,
+                                "elapsed_ms": int((time.time()-started)*1000),
+                            })
+                            await asyncio.sleep(0)
+                        return
 
                     while pending_wide and len(sent) < WEB_STREAM_IMAGE_TARGET_RESULTS:
                         remaining = wide_deadline - loop.time()
@@ -12297,37 +12443,47 @@ async def web_api_image_search_stream(request: Request):
                             return_when=asyncio.FIRST_COMPLETED,
                         )
                         for task in done_wide:
+                            rank = all_tasks.get(task, 99)
                             try:
                                 rank, rows = await task
                             except Exception:
-                                rank, rows = wide_tasks.get(task, 99), []
-                            market_name = _web_market_label(rank)
-                            for item in rows or []:
-                                if len(sent) >= WEB_STREAM_IMAGE_TARGET_RESULTS:
-                                    break
-                                key = str(item.get("url") or "").strip() or (
-                                    market_name + "|" + str(item.get("store") or "") + "|" + str(item.get("title") or "")
-                                )
-                                if key in sent:
-                                    continue
-                                sent.add(key)
-                                if market_name in market_counts:
-                                    market_counts[market_name] += 1
-                                yield _web_stream_event({
-                                    "event": "result",
-                                    "phase": "wide_market",
-                                    "market": market_name,
-                                    "item": item,
-                                    "elapsed_ms": int((time.time()-started)*1000),
-                                })
-                                await asyncio.sleep(0)
+                                rows = []
+
+                            if rank == 0:
+                                local_finished = True
+
+                            async for event in _emit_rows(rank, rows):
+                                yield event
+
+                            # Once local is done, release buffered foreign results.
+                            if local_finished and foreign_buffer and len(sent) < WEB_STREAM_IMAGE_TARGET_RESULTS:
+                                buffered = foreign_buffer
+                                foreign_buffer = []
+                                for brank, bitem in buffered:
+                                    if len(sent) >= WEB_STREAM_IMAGE_TARGET_RESULTS:
+                                        break
+                                    async for event in _emit_rows(brank, [bitem]):
+                                        yield event
+
+                    # If local timed out entirely, do not waste the reserved slots.
+                    if not local_finished:
+                        local_finished = True
+                    if foreign_buffer and len(sent) < WEB_STREAM_IMAGE_TARGET_RESULTS:
+                        buffered = foreign_buffer
+                        foreign_buffer = []
+                        for brank, bitem in buffered:
+                            if len(sent) >= WEB_STREAM_IMAGE_TARGET_RESULTS:
+                                break
+                            async for event in _emit_rows(brank, [bitem]):
+                                yield event
 
                     for task in pending_wide:
                         task.cancel()
 
                     print(
                         f"WEB WIDE 3-MARKET DONE precision={precision}% "
-                        f"total={len(sent)} counts={market_counts}"
+                        f"total={len(sent)} counts={market_counts} "
+                        f"local_reserve={WEB_LOCAL_RESULT_RESERVE}"
                     )
                     for r in (0, 1, 2):
                         yield _web_stream_event({
