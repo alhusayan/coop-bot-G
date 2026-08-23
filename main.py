@@ -26,7 +26,7 @@ app.add_middleware(
     allow_headers=["Content-Type", "Accept"],
     max_age=86400,
 )
-BUILD_ID = "v116.0-turbo-store-race-20260823"
+BUILD_ID = "v117.0-sweet-spot-wide-search-20260823"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES")
@@ -9096,6 +9096,17 @@ WEB_TURBO_SECONDARY_START_BELOW = max(2, min(10, int(os.environ.get("WEB_TURBO_S
 WEB_TURBO_CHINA_COMBINED = env_bool("WEB_TURBO_CHINA_COMBINED", True)
 WEB_TURBO_CHINA_COMBINED_NUM = max(8, min(30, int(os.environ.get("WEB_TURBO_CHINA_COMBINED_NUM", "18"))))
 WEB_TURBO_CHINA_COMBINED_TIMEOUT_SECONDS = max(2.0, min(5.0, float(os.environ.get("WEB_TURBO_CHINA_COMBINED_TIMEOUT_SECONDS", "3.0"))))
+
+# v117 balanced/sweet-spot mode.
+# 61-84 = broad + fast, 85-89 = broad + stricter deterministic relevance,
+# 90-100 = full AI exact path.
+WEB_WIDE_BALANCED_SEARCH = env_bool("WEB_WIDE_BALANCED_SEARCH", True)
+WEB_SWEET_SPOT_MAX = max(75, min(89, int(os.environ.get("WEB_SWEET_SPOT_MAX", "84"))))
+WEB_NEAR_EXACT_START = max(WEB_SWEET_SPOT_MAX + 1, min(89, int(os.environ.get("WEB_NEAR_EXACT_START", "85"))))
+WEB_WIDE_SEARCH_TIMEOUT_SECONDS = max(2.2, min(5.0, float(os.environ.get("WEB_WIDE_SEARCH_TIMEOUT_SECONDS", "3.5"))))
+WEB_WIDE_LOCAL_CAP = max(1, min(5, int(os.environ.get("WEB_WIDE_LOCAL_CAP", "4"))))
+WEB_WIDE_US_CAP = max(1, min(4, int(os.environ.get("WEB_WIDE_US_CAP", "3"))))
+WEB_WIDE_CN_CAP = max(1, min(4, int(os.environ.get("WEB_WIDE_CN_CAP", "3"))))
 WEB_AI_GATE_LIGHT_START = max(61, min(89, int(os.environ.get("WEB_AI_GATE_LIGHT_START", "61"))))
 WEB_AI_GATE_CACHE = {}
 WEB_AI_GATE_CACHE_LOCK = threading.Lock()
@@ -11243,6 +11254,176 @@ def _web_china_combined_probe_sync(query, country, lang):
         return []
 
 
+
+_WEB_BALANCED_STOPWORDS = {
+    "the","a","an","for","with","and","or","of","in","on","to","from",
+    "buy","shop","online","new","men","women","womens","mens","product",
+    "official","best","sale","size","sizes"
+}
+
+def _web_balanced_tokens(text):
+    vals = re.findall(r"[a-z0-9]+", str(text or "").lower())
+    return [v for v in vals if len(v) > 2 and v not in _WEB_BALANCED_STOPWORDS]
+
+
+def _web_fast_precision_filter_rows(rows, identity, precision):
+    """No Gemini calls. Used only below 90%.
+
+    61-84: permissive relevance + mandatory price/image/direct product URL.
+    85-89: stronger title-token overlap, still no per-result AI judge.
+    """
+    p = _web_search_precision(precision)
+    seq = list(rows or [])
+    if p <= 60:
+        return seq
+
+    q_tokens = _web_balanced_tokens(identity)
+    out = []
+    seen = set()
+
+    for row in seq:
+        row = dict(row)
+        url = str(row.get("url") or "").strip()
+        image = str(row.get("image") or "").strip()
+        price = str(row.get("price") or "").strip()
+        title = str(row.get("title") or "").strip()
+
+        if not url or not image or not price:
+            continue
+        if not _web_is_direct_product_page_url(url, row.get("store") or ""):
+            continue
+
+        key = url.split("#", 1)[0]
+        if key in seen:
+            continue
+
+        if q_tokens:
+            t_tokens = set(_web_balanced_tokens(title + " " + str(row.get("store") or "")))
+            overlap = sum(1 for tok in q_tokens if tok in t_tokens)
+
+            if p <= WEB_SWEET_SPOT_MAX:
+                # Broad but not random: one meaningful overlap is enough for a
+                # multi-token branded query. Lens seed itself remains trusted.
+                need = 1 if len(q_tokens) >= 2 else 0
+            else:
+                # 85-89: still fast, but require a stronger lexical match.
+                need = 2 if len(q_tokens) >= 3 else 1
+
+            if overlap < need:
+                continue
+
+        seen.add(key)
+        out.append(row)
+
+    return out
+
+
+def _web_wide_candidates_to_rows(candidates, rank, lang, query, precision):
+    """Cheap card conversion: no page fetch, no Gemini, no stock probe.
+    Google Shopping/Lens data must already contain image + numeric price + direct URL.
+    """
+    market = current_market()
+    local_cc = (market.get("country") or DEFAULT_COUNTRY).lower()
+    cc = local_cc if rank == 0 else ("us" if rank == 1 else "cn")
+    cap = {0: WEB_WIDE_LOCAL_CAP, 1: WEB_WIDE_US_CAP, 2: WEB_WIDE_CN_CAP}.get(rank, 3)
+
+    seq = []
+    for item in list(candidates or []):
+        if result_market_rank(item) != rank:
+            continue
+        url = str(item.get("link") or "").strip()
+        if not url.startswith(("http://", "https://")):
+            continue
+        if not _web_is_direct_product_page_url(url, item.get("source") or ""):
+            continue
+        raw_price = str(item.get("price") or "").strip()
+        image = _web_best_card_image(item.get("thumbnail") or item.get("image") or "", "", False)
+        if not raw_price or not image:
+            continue
+        shown_price = _text_price_local(raw_price, rank, lang)
+        if not shown_price:
+            continue
+
+        seq.append({
+            "market": _web_market_label(rank),
+            "market_rank": rank,
+            "country": cc,
+            "flag": country_flag_emoji(cc),
+            "store": _ui_plain_store_name(item.get("source") or "", url) or U(lang, "store"),
+            "title": _compact_ui_title(item.get("title") or query),
+            "price": shown_price,
+            "url": url,
+            "image": image,
+            "_position": int(item.get("position") or 999),
+        })
+
+    # Keep familiar strong stores first without waiting for store-specific calls.
+    if rank == 1:
+        seq.sort(key=lambda x: (_us_store_priority(x.get("store"), x.get("url")), x.get("_position", 999)))
+    elif rank == 2:
+        seq.sort(key=lambda x: (_china_store_priority(x.get("store"), x.get("url")), x.get("_position", 999)))
+    else:
+        seq.sort(key=lambda x: x.get("_position", 999))
+
+    seq = _web_fast_precision_filter_rows(seq, query, precision)
+
+    out = []
+    store_counts = defaultdict(int)
+    for row in seq:
+        try:
+            host = urllib.parse.urlparse(row.get("url") or "").netloc.lower().replace("www.", "")
+        except Exception:
+            host = ""
+        merchant = host or normalize_name(row.get("store") or "")
+        repeat_cap = _web_marketplace_repeat_cap(host) if host else WEB_STREAM_RESULTS_PER_STORE
+        if store_counts[merchant] >= repeat_cap:
+            continue
+        store_counts[merchant] += 1
+        row.pop("_position", None)
+        out.append(row)
+        if len(out) >= cap:
+            break
+    return out
+
+
+def _web_wide_market_search_sync(query, country, lang, rank, precision):
+    """Exactly one external search operation per market rank for 61-89."""
+    market = _web_market(country)
+    MARKET_CTX.value = market
+    q = _web_relaxed_store_identity(query, precision)
+    if not q or not SERPAPI_API_KEY:
+        return []
+
+    if rank == 2:
+        # One combined China operation. Convert its already-priced/image rows
+        # with the same deterministic precision filter.
+        rows = _web_china_combined_probe_sync(q, country, lang)
+        rows = _web_fast_precision_filter_rows(rows, q, precision)
+        return rows[:WEB_WIDE_CN_CAP]
+
+    gl = (market.get("country") or DEFAULT_COUNTRY).lower() if rank == 0 else "us"
+    hl = country_search_hl(gl) if rank == 0 else "en"
+    cards = _serpapi_shopping_request(
+        q,
+        gl,
+        hl=hl,
+        timeout_seconds=WEB_WIDE_SEARCH_TIMEOUT_SECONDS,
+    )
+
+    candidates = []
+    for card in cards or []:
+        item = _shopping_card_to_market_item(card, "", gl)
+        if item:
+            candidates.append(item)
+
+    rows = _web_wide_candidates_to_rows(candidates, rank, lang, q, precision)
+    print(
+        f"WEB WIDE MARKET rank={rank} precision={precision}% "
+        f"query={q[:75]!r} -> {len(rows)} row(s)"
+    )
+    return rows
+
+
 def _web_turbo_store_race_specs(query, country):
     """Return primary and secondary merchant waves for precision < 90."""
     market = _web_market(country)
@@ -12056,8 +12237,14 @@ async def web_api_image_search_stream(request: Request):
             yield _web_stream_event({"event": "query", "query": identity, "market": seed.get("market")})
             yield _web_stream_event({"event": "status", "stage": "ai_verify", "elapsed_ms": int((time.time()-started)*1000)})
 
-            # Nothing is shown until the AI gatekeeper has approved it against the original image.
-            seed_items = await asyncio.to_thread(_web_ai_gate_rows, profile, seed.get("items") or [], image_b64, mime, lang)
+            # v117: below 90%, never block first paint on a per-result Gemini judge.
+            # 61-84 is intentionally broad; 85-89 uses deterministic lexical tightening.
+            if precision < WEB_AI_GATE_FULL_START:
+                seed_items = _web_fast_precision_filter_rows(seed.get("items") or [], identity, precision)
+            else:
+                seed_items = await asyncio.to_thread(
+                    _web_ai_gate_rows, profile, seed.get("items") or [], image_b64, mime, lang
+                )
             for item in seed_items:
                 if len(sent) >= WEB_STREAM_IMAGE_TARGET_RESULTS:
                     break
@@ -12072,68 +12259,49 @@ async def web_api_image_search_stream(request: Request):
                 await asyncio.sleep(0)
 
             if len(sent) < WEB_STREAM_IMAGE_TARGET_RESULTS and identity and WEB_STREAM_STORE_FIFO and WEB_STREAM_FAST_WAVE and SERPAPI_API_KEY:
-                fast_race = bool(WEB_TURBO_STORE_RACE and precision < WEB_AI_GATE_FULL_START)
-                store_identity = _web_relaxed_store_identity(identity, precision) if fast_race else identity
+                balanced_wide = bool(
+                    WEB_WIDE_BALANCED_SEARCH
+                    and 60 < precision < WEB_AI_GATE_FULL_START
+                )
 
-                async def _run_store_race_task(r, lab, dom, search_gl):
-                    try:
-                        if fast_race and dom == "__china_combined__":
-                            rows = await asyncio.wait_for(
-                                asyncio.to_thread(_web_china_combined_probe_sync, store_identity, country, lang),
-                                timeout=WEB_TURBO_CHINA_COMBINED_TIMEOUT_SECONDS + 0.4,
-                            )
-                        else:
-                            fast_store = bool(WEB_PRECISION_TURBO and precision < WEB_AI_GATE_FULL_START)
-                            store_timeout = WEB_FAST_STORE_TIMEOUT_SECONDS if fast_store else WEB_STREAM_STORE_TIMEOUT
+                if balanced_wide:
+                    async def _run_wide_market(r):
+                        try:
                             rows = await asyncio.wait_for(
                                 asyncio.to_thread(
-                                    _web_store_probe_precision_sync,
-                                    store_identity, country, lang, r, lab, dom, search_gl, fast_store
+                                    _web_wide_market_search_sync,
+                                    identity, country, lang, r, precision
                                 ),
-                                timeout=store_timeout,
+                                timeout=WEB_WIDE_SEARCH_TIMEOUT_SECONDS + 0.5,
                             )
+                            return r, rows or []
+                        except Exception as e:
+                            print(f"WEB WIDE MARKET ERR rank={r}: {e}")
+                            return r, []
 
-                        # At 60% the user's request is explicit: no AI result gate.
-                        # 61-89 retains the existing V115 gate; 90-100 remains unchanged.
-                        if rows:
-                            rows = await asyncio.to_thread(
-                                _web_ai_gate_rows, profile, rows, image_b64, mime, lang
-                            )
-                        return r, lab, rows
-                    except Exception as e:
-                        print(f"WEB IMAGE STORE RACE ERR rank={r} store={lab}: {e}")
-                        return r, lab, []
-
-                async def _stream_race_wave(specs, phase, wave_timeout):
-                    tasks = []
-                    meta = {}
-                    for r, lab, dom, search_gl in specs:
-                        task = asyncio.create_task(_run_store_race_task(r, lab, dom, search_gl))
-                        tasks.append(task)
-                        meta[task] = (r, lab)
-
-                    pending = set(tasks)
+                    wide_tasks = {
+                        asyncio.create_task(_run_wide_market(r)): r
+                        for r in (0, 1, 2)
+                    }
+                    pending_wide = set(wide_tasks)
                     loop = asyncio.get_running_loop()
-                    deadline = loop.time() + wave_timeout
-                    emitted = 0
+                    wide_deadline = loop.time() + WEB_WIDE_SEARCH_TIMEOUT_SECONDS + 0.6
 
-                    while pending and len(sent) < WEB_STREAM_IMAGE_TARGET_RESULTS:
-                        remaining = deadline - loop.time()
+                    while pending_wide and len(sent) < WEB_STREAM_IMAGE_TARGET_RESULTS:
+                        remaining = wide_deadline - loop.time()
                         if remaining <= 0:
                             break
-                        done, pending = await asyncio.wait(
-                            pending,
+                        done_wide, pending_wide = await asyncio.wait(
+                            pending_wide,
                             timeout=min(0.10, remaining),
                             return_when=asyncio.FIRST_COMPLETED,
                         )
-                        for task in done:
-                            r, lab = meta.get(task, (99, "Store"))
+                        for task in done_wide:
                             try:
-                                r, lab, rows = await task
+                                rank, rows = await task
                             except Exception:
-                                rows = []
-
-                            market_name = _web_market_label(r)
+                                rank, rows = wide_tasks.get(task, 99), []
+                            market_name = _web_market_label(rank)
                             for item in rows or []:
                                 if len(sent) >= WEB_STREAM_IMAGE_TARGET_RESULTS:
                                     break
@@ -12143,119 +12311,214 @@ async def web_api_image_search_stream(request: Request):
                                 if key in sent:
                                     continue
                                 sent.add(key)
-                                emitted += 1
                                 if market_name in market_counts:
                                     market_counts[market_name] += 1
                                 yield _web_stream_event({
                                     "event": "result",
-                                    "phase": phase,
+                                    "phase": "wide_market",
                                     "market": market_name,
-                                    "store_probe": lab,
                                     "item": item,
                                     "elapsed_ms": int((time.time()-started)*1000),
                                 })
                                 await asyncio.sleep(0)
 
-                    for task in pending:
+                    for task in pending_wide:
                         task.cancel()
 
                     print(
-                        f"WEB TURBO STORE WAVE phase={phase} precision={precision}% "
-                        f"query={store_identity[:80]!r} emitted={emitted} total={len(sent)}"
+                        f"WEB WIDE 3-MARKET DONE precision={precision}% "
+                        f"total={len(sent)} counts={market_counts}"
                     )
+                    for r in (0, 1, 2):
+                        yield _web_stream_event({
+                            "event": "market_fast_done",
+                            "market": _web_market_label(r),
+                            "elapsed_ms": int((time.time()-started)*1000),
+                        })
 
-                if fast_race:
-                    primary_specs, secondary_specs = _web_turbo_store_race_specs(store_identity, country)
+                else:
+                    fast_race = bool(WEB_TURBO_STORE_RACE and precision < WEB_AI_GATE_FULL_START)
+                    store_identity = _web_relaxed_store_identity(identity, precision) if fast_race else identity
 
-                    async for event in _stream_race_wave(
-                        primary_specs, "store_race_primary", WEB_TURBO_PRIMARY_TIMEOUT_SECONDS
-                    ):
-                        yield event
+                    async def _run_store_race_task(r, lab, dom, search_gl):
+                        try:
+                            if fast_race and dom == "__china_combined__":
+                                rows = await asyncio.wait_for(
+                                    asyncio.to_thread(_web_china_combined_probe_sync, store_identity, country, lang),
+                                    timeout=WEB_TURBO_CHINA_COMBINED_TIMEOUT_SECONDS + 0.4,
+                                )
+                            else:
+                                fast_store = bool(WEB_PRECISION_TURBO and precision < WEB_AI_GATE_FULL_START)
+                                store_timeout = WEB_FAST_STORE_TIMEOUT_SECONDS if fast_store else WEB_STREAM_STORE_TIMEOUT
+                                rows = await asyncio.wait_for(
+                                    asyncio.to_thread(
+                                        _web_store_probe_precision_sync,
+                                        store_identity, country, lang, r, lab, dom, search_gl, fast_store
+                                    ),
+                                    timeout=store_timeout,
+                                )
 
-                    # Do not pay for the second wave if the first wave already produced a healthy grid.
-                    if (
-                        len(sent) < WEB_STREAM_IMAGE_TARGET_RESULTS
-                        and len(sent) < WEB_TURBO_SECONDARY_START_BELOW
-                    ):
+                            # At 60% the user's request is explicit: no AI result gate.
+                            # 61-89 retains the existing V115 gate; 90-100 remains unchanged.
+                            if rows:
+                                rows = await asyncio.to_thread(
+                                    _web_ai_gate_rows, profile, rows, image_b64, mime, lang
+                                )
+                            return r, lab, rows
+                        except Exception as e:
+                            print(f"WEB IMAGE STORE RACE ERR rank={r} store={lab}: {e}")
+                            return r, lab, []
+
+                    async def _stream_race_wave(specs, phase, wave_timeout):
+                        tasks = []
+                        meta = {}
+                        for r, lab, dom, search_gl in specs:
+                            task = asyncio.create_task(_run_store_race_task(r, lab, dom, search_gl))
+                            tasks.append(task)
+                            meta[task] = (r, lab)
+
+                        pending = set(tasks)
+                        loop = asyncio.get_running_loop()
+                        deadline = loop.time() + wave_timeout
+                        emitted = 0
+
+                        while pending and len(sent) < WEB_STREAM_IMAGE_TARGET_RESULTS:
+                            remaining = deadline - loop.time()
+                            if remaining <= 0:
+                                break
+                            done, pending = await asyncio.wait(
+                                pending,
+                                timeout=min(0.10, remaining),
+                                return_when=asyncio.FIRST_COMPLETED,
+                            )
+                            for task in done:
+                                r, lab = meta.get(task, (99, "Store"))
+                                try:
+                                    r, lab, rows = await task
+                                except Exception:
+                                    rows = []
+
+                                market_name = _web_market_label(r)
+                                for item in rows or []:
+                                    if len(sent) >= WEB_STREAM_IMAGE_TARGET_RESULTS:
+                                        break
+                                    key = str(item.get("url") or "").strip() or (
+                                        market_name + "|" + str(item.get("store") or "") + "|" + str(item.get("title") or "")
+                                    )
+                                    if key in sent:
+                                        continue
+                                    sent.add(key)
+                                    emitted += 1
+                                    if market_name in market_counts:
+                                        market_counts[market_name] += 1
+                                    yield _web_stream_event({
+                                        "event": "result",
+                                        "phase": phase,
+                                        "market": market_name,
+                                        "store_probe": lab,
+                                        "item": item,
+                                        "elapsed_ms": int((time.time()-started)*1000),
+                                    })
+                                    await asyncio.sleep(0)
+
+                        for task in pending:
+                            task.cancel()
+
+                        print(
+                            f"WEB TURBO STORE WAVE phase={phase} precision={precision}% "
+                            f"query={store_identity[:80]!r} emitted={emitted} total={len(sent)}"
+                        )
+
+                    if fast_race:
+                        primary_specs, secondary_specs = _web_turbo_store_race_specs(store_identity, country)
+
                         async for event in _stream_race_wave(
-                            secondary_specs, "store_race_secondary", WEB_TURBO_SECONDARY_TIMEOUT_SECONDS
+                            primary_specs, "store_race_primary", WEB_TURBO_PRIMARY_TIMEOUT_SECONDS
                         ):
                             yield event
 
-                    for r in (0, 1, 2):
-                        yield _web_stream_event({
-                            "event": "market_fast_done",
-                            "market": _web_market_label(r),
-                            "elapsed_ms": int((time.time()-started)*1000),
-                        })
-                else:
-                    # 90-100% keeps the full V115 store fan-out unchanged.
-                    store_tasks = []
-                    task_meta = {}
-                    rank_remaining = {0: 0, 1: 0, 2: 0}
-                    for rank in (2, 0, 1):
-                        for label, domain, gl in _web_stream_store_specs(identity, country, rank):
-                            task = asyncio.create_task(_run_store_race_task(rank, label, domain, gl))
-                            store_tasks.append(task)
-                            task_meta[task] = (rank, label)
-                            rank_remaining[rank] += 1
+                        # Do not pay for the second wave if the first wave already produced a healthy grid.
+                        if (
+                            len(sent) < WEB_STREAM_IMAGE_TARGET_RESULTS
+                            and len(sent) < WEB_TURBO_SECONDARY_START_BELOW
+                        ):
+                            async for event in _stream_race_wave(
+                                secondary_specs, "store_race_secondary", WEB_TURBO_SECONDARY_TIMEOUT_SECONDS
+                            ):
+                                yield event
 
-                    pending = set(store_tasks)
-                    loop = asyncio.get_running_loop()
-                    deadline = loop.time() + WEB_STREAM_STORE_TIMEOUT
-                    while pending:
-                        remaining = deadline - loop.time()
-                        if remaining <= 0:
-                            break
-                        done, pending = await asyncio.wait(
-                            pending, timeout=min(0.12, remaining), return_when=asyncio.FIRST_COMPLETED
-                        )
-                        for task in done:
-                            rank, label = task_meta.get(task, (99, "Store"))
-                            try:
-                                r, label, rows = await task
-                            except Exception:
-                                r, rows = rank, []
-                            market_name = _web_market_label(r)
-                            for item in rows or []:
+                        for r in (0, 1, 2):
+                            yield _web_stream_event({
+                                "event": "market_fast_done",
+                                "market": _web_market_label(r),
+                                "elapsed_ms": int((time.time()-started)*1000),
+                            })
+                    else:
+                        # 90-100% keeps the full V115 store fan-out unchanged.
+                        store_tasks = []
+                        task_meta = {}
+                        rank_remaining = {0: 0, 1: 0, 2: 0}
+                        for rank in (2, 0, 1):
+                            for label, domain, gl in _web_stream_store_specs(identity, country, rank):
+                                task = asyncio.create_task(_run_store_race_task(rank, label, domain, gl))
+                                store_tasks.append(task)
+                                task_meta[task] = (rank, label)
+                                rank_remaining[rank] += 1
+
+                        pending = set(store_tasks)
+                        loop = asyncio.get_running_loop()
+                        deadline = loop.time() + WEB_STREAM_STORE_TIMEOUT
+                        while pending:
+                            remaining = deadline - loop.time()
+                            if remaining <= 0:
+                                break
+                            done, pending = await asyncio.wait(
+                                pending, timeout=min(0.12, remaining), return_when=asyncio.FIRST_COMPLETED
+                            )
+                            for task in done:
+                                rank, label = task_meta.get(task, (99, "Store"))
+                                try:
+                                    r, label, rows = await task
+                                except Exception:
+                                    r, rows = rank, []
+                                market_name = _web_market_label(r)
+                                for item in rows or []:
+                                    if len(sent) >= WEB_STREAM_IMAGE_TARGET_RESULTS:
+                                        break
+                                    key = str(item.get("url") or "").strip() or (
+                                        market_name + "|" + str(item.get("store") or "") + "|" + str(item.get("title") or "")
+                                    )
+                                    if key in sent:
+                                        continue
+                                    sent.add(key)
+                                    if market_name in market_counts:
+                                        market_counts[market_name] += 1
+                                    yield _web_stream_event({
+                                        "event": "result", "phase": "store_fifo", "market": market_name,
+                                        "store_probe": label, "item": item,
+                                        "elapsed_ms": int((time.time()-started)*1000),
+                                    })
+                                    await asyncio.sleep(0)
+                                rank_remaining[r] = max(0, rank_remaining.get(r, 1) - 1)
                                 if len(sent) >= WEB_STREAM_IMAGE_TARGET_RESULTS:
                                     break
-                                key = str(item.get("url") or "").strip() or (
-                                    market_name + "|" + str(item.get("store") or "") + "|" + str(item.get("title") or "")
-                                )
-                                if key in sent:
-                                    continue
-                                sent.add(key)
-                                if market_name in market_counts:
-                                    market_counts[market_name] += 1
-                                yield _web_stream_event({
-                                    "event": "result", "phase": "store_fifo", "market": market_name,
-                                    "store_probe": label, "item": item,
-                                    "elapsed_ms": int((time.time()-started)*1000),
-                                })
-                                await asyncio.sleep(0)
-                            rank_remaining[r] = max(0, rank_remaining.get(r, 1) - 1)
-                            if len(sent) >= WEB_STREAM_IMAGE_TARGET_RESULTS:
-                                break
-                    for task in pending:
-                        task.cancel()
-                    for r in (0, 1, 2):
-                        yield _web_stream_event({
-                            "event": "market_fast_done",
-                            "market": _web_market_label(r),
-                            "elapsed_ms": int((time.time()-started)*1000),
-                        })
+                        for task in pending:
+                            task.cancel()
+                        for r in (0, 1, 2):
+                            yield _web_stream_event({
+                                "event": "market_fast_done",
+                                "market": _web_market_label(r),
+                                "elapsed_ms": int((time.time()-started)*1000),
+                            })
 
             # Only invoke the heavy original image engine when the live wave is still sparse
             # or local coverage is missing.  The user has already seen FIFO cards by then.
             # v115: low/balanced precision must never silently end with zero cards.
             if len(sent) == 0 and precision < WEB_AI_GATE_FULL_START:
                 rescue_rows = await _web_fast_empty_rescue(identity, country, lang, precision)
-                # At 60% there is explicitly NO AI filtering.
+                # Below 90% rescue remains deterministic and bounded; no per-result Gemini.
                 if precision > 60 and rescue_rows:
-                    rescue_rows = await asyncio.to_thread(
-                        _web_ai_gate_rows, profile, rescue_rows, image_b64, mime, lang
-                    )
+                    rescue_rows = _web_fast_precision_filter_rows(rescue_rows, identity, precision)
                 for item in rescue_rows or []:
                     if len(sent) >= WEB_STREAM_IMAGE_TARGET_RESULTS:
                         break
@@ -12277,16 +12540,21 @@ async def web_api_image_search_stream(request: Request):
 
             run_heavy_final = False
             if precision >= WEB_AI_GATE_FULL_START:
-                run_heavy_final = (len(sent) < WEB_STREAM_IMAGE_TARGET_RESULTS or market_counts.get("local", 0) == 0)
+                run_heavy_final = (
+                    len(sent) < WEB_STREAM_IMAGE_TARGET_RESULTS
+                    or market_counts.get("local", 0) == 0
+                )
             elif precision <= 60:
+                # 60% remains the explicit speed mode, with only a zero-result safety net.
                 run_heavy_final = (
                     len(sent) == 0 and WEB_FAST_EMPTY_HEAVY_FALLBACK
                 ) or (
-                    (not WEB_FAST_NO_HEAVY_AT_60) and len(sent) < WEB_BALANCED_HEAVY_MIN_RESULTS
+                    (not WEB_FAST_NO_HEAVY_AT_60)
+                    and len(sent) < WEB_BALANCED_HEAVY_MIN_RESULTS
                 )
             else:
-                # Balanced range: only pay for the old heavy engine when the fast wave is genuinely sparse.
-                run_heavy_final = len(sent) < WEB_BALANCED_HEAVY_MIN_RESULTS
+                # 61-89: NEVER chain into the old heavy engine.
+                run_heavy_final = False
 
             if run_heavy_final:
                 final = await asyncio.to_thread(_web_search_image_sync, image_b64, mime, caption, country, lang)
@@ -12305,7 +12573,7 @@ async def web_api_image_search_stream(request: Request):
 
             # v107 top-up: if strict verification removed too many cards, reuse the same
             # proven store-wave logic and continue streaming until we reach 10 unique products.
-            if identity and len(sent) < WEB_STREAM_IMAGE_TARGET_RESULTS and not (WEB_PRECISION_TURBO and precision <= 60):
+            if identity and len(sent) < WEB_STREAM_IMAGE_TARGET_RESULTS and precision >= WEB_AI_GATE_FULL_START:
                 market_snapshot = _web_market(country)
                 MARKET_CTX.value = market_snapshot
                 for rank in (0, 2, 1):
