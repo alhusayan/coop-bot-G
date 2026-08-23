@@ -26,7 +26,7 @@ app.add_middleware(
     allow_headers=["Content-Type", "Accept"],
     max_age=86400,
 )
-BUILD_ID = "v108.0-unit-safe-price-parser-20260823"
+BUILD_ID = "v110.2-real-shopping-gl-fix-20260823"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES")
@@ -187,6 +187,21 @@ LOCAL_COUNTRY_RESCUE_PASSES = max(1, min(2, int(os.environ.get("LOCAL_COUNTRY_RE
 LOCAL_AI_QUERY_RESCUE_ENABLED = env_bool("LOCAL_AI_QUERY_RESCUE_ENABLED", True)
 LOCAL_QUERY_CACHE = {}
 LOCAL_QUERY_CACHE_LOCK = threading.Lock()
+
+# v110.2 WEB/Google Shopping transport safety.
+# Some SerpApi google_shopping markets reject ISO gl=kw.  Keep Findzia's logical
+# market as Kuwait/KWD, but use a supported transport gl and add Kuwait to the
+# query so local merchant discovery remains strong.
+WEB_GOOGLE_SHOPPING_GL_FALLBACK = os.environ.get("WEB_GOOGLE_SHOPPING_GL_FALLBACK", "us").strip().lower() or "us"
+WEB_GOOGLE_SHOPPING_UNSUPPORTED_GL = {
+    x.strip().lower() for x in os.environ.get("WEB_GOOGLE_SHOPPING_UNSUPPORTED_GL", "kw").split(",") if x.strip()
+}
+WEB_CLEAN_SHOPPING_CACHE_TTL_SECONDS = max(0, int(os.environ.get("WEB_CLEAN_SHOPPING_CACHE_TTL_SECONDS", "45")))
+WEB_CLEAN_SHOPPING_SINGLEFLIGHT = env_bool("WEB_CLEAN_SHOPPING_SINGLEFLIGHT", True)
+WEB_CLEAN_SHOPPING_CACHE = {}
+WEB_CLEAN_SHOPPING_CACHE_LOCK = threading.Lock()
+WEB_CLEAN_SHOPPING_INFLIGHT = {}
+WEB_CLEAN_SHOPPING_INFLIGHT_LOCK = threading.Lock()
 
 
 # ---- Global market detection v85 ----------------------------------------------
@@ -1074,6 +1089,13 @@ print(
     f"lens_wide_fallback={ENABLE_LENS_WIDE_FALLBACK} lens_parallel={LENS_PARALLEL_WITH_VISION} "
     f"google_shopping={ENABLE_GOOGLE_SHOPPING} immersive_max={IMMERSIVE_LOOKUPS_MAX} "
     f"public_base_url={'SET' if PUBLIC_BASE_URL else 'MISSING'}"
+)
+
+print(
+    f"WEB CLEAN SHOPPING CONFIG cache_ttl={WEB_CLEAN_SHOPPING_CACHE_TTL_SECONDS}s "
+    f"singleflight={WEB_CLEAN_SHOPPING_SINGLEFLIGHT} "
+    f"unsupported_gl={sorted(WEB_GOOGLE_SHOPPING_UNSUPPORTED_GL)} "
+    f"fallback_gl={WEB_GOOGLE_SHOPPING_GL_FALLBACK}"
 )
 
 VERIFIED_PAGE_CACHE = {}
@@ -4177,29 +4199,106 @@ def _shopping_clean_query(query):
     return " ".join(q.split()[:10])
 
 
+def _shopping_transport_gl(gl):
+    logical = str(gl or "").strip().lower()
+    if logical in WEB_GOOGLE_SHOPPING_UNSUPPORTED_GL:
+        return WEB_GOOGLE_SHOPPING_GL_FALLBACK
+    return logical
+
+
+def _shopping_transport_query(query, logical_gl):
+    q = str(query or "").strip()
+    # Keep Kuwait search local even though the HTTP transport uses a supported gl.
+    # Preserve site: filters and avoid appending Kuwait twice.
+    if str(logical_gl or "").lower() == "kw" and "kuwait" not in q.lower() and "الكويت" not in q:
+        q = f"{q} Kuwait".strip()
+    return q
+
+
 def _serpapi_shopping_request(query, gl, hl="en", timeout_seconds=None):
-    """طلب google_shopping واحد. يعيد shopping_results (قد تكون فارغة)."""
-    params = {
-        "engine": "google_shopping", "q": query, "api_key": SERPAPI_API_KEY,
-        "hl": hl, "output": "json",
-    }
-    if gl:
-        params["gl"] = gl
+    """One google_shopping request with safe transport GL + short cache/single-flight.
+
+    IMPORTANT: logical gl remains unchanged for Findzia ranking/currency.  Only the
+    HTTP parameter sent to SerpApi is mapped when the engine rejects that country.
+    """
+    logical_gl = str(gl or "").strip().lower()
+    transport_gl = _shopping_transport_gl(logical_gl)
+    transport_query = _shopping_transport_query(query, logical_gl)
+    timeout_value = timeout_seconds or SERPAPI_TIMEOUT_SECONDS
+    cache_key = "|".join([transport_query, logical_gl, transport_gl, str(hl or "en").lower()])
+    now = time.time()
+
+    if WEB_CLEAN_SHOPPING_CACHE_TTL_SECONDS > 0:
+        with WEB_CLEAN_SHOPPING_CACHE_LOCK:
+            hit = WEB_CLEAN_SHOPPING_CACHE.get(cache_key)
+            if hit and now - hit[0] < WEB_CLEAN_SHOPPING_CACHE_TTL_SECONDS:
+                print(f"WEB CLEAN SHOPPING CACHE HIT logical_gl={logical_gl or '-'} transport_gl={transport_gl or '-'} cards={len(hit[1])}")
+                return [dict(x) for x in hit[1]]
+
+    leader = True
+    state = None
+    if WEB_CLEAN_SHOPPING_SINGLEFLIGHT:
+        with WEB_CLEAN_SHOPPING_INFLIGHT_LOCK:
+            state = WEB_CLEAN_SHOPPING_INFLIGHT.get(cache_key)
+            if state is None:
+                state = {"event": threading.Event(), "rows": None}
+                WEB_CLEAN_SHOPPING_INFLIGHT[cache_key] = state
+            else:
+                leader = False
+        if not leader:
+            state["event"].wait(timeout=float(timeout_value) + 2.0)
+            rows = state.get("rows")
+            if rows is not None:
+                print(f"WEB CLEAN SHOPPING SINGLEFLIGHT HIT logical_gl={logical_gl or '-'} cards={len(rows)}")
+                return [dict(x) for x in rows]
+
+    rows = []
     try:
-        r = requests.get("https://serpapi.com/search.json", params=params, timeout=(4, timeout_seconds or SERPAPI_TIMEOUT_SECONDS))
+        params = {
+            "engine": "google_shopping", "q": transport_query, "api_key": SERPAPI_API_KEY,
+            "hl": hl, "output": "json",
+        }
+        if transport_gl:
+            params["gl"] = transport_gl
+        if logical_gl != transport_gl:
+            print(f"WEB CLEAN SHOPPING GL {logical_gl or '-'}->{transport_gl or '-'} q={transport_query[:80]!r}")
+        r = requests.get(
+            "https://serpapi.com/search.json",
+            params=params,
+            timeout=(4, timeout_value),
+        )
         if r.status_code >= 400:
             print(f"GOOGLE SHOPPING HTTP {r.status_code}: {r.text[:300]}")
-            return []
-        data = r.json()
-        if data.get("error"):
-            print(f"GOOGLE SHOPPING ERROR: {data.get('error')}")
-            return []
-        results = data.get("shopping_results") or []
-        print(f"GOOGLE SHOPPING: q={query[:60]!r} gl={gl or '-'} -> {len(results)} cards")
-        return results[:SHOPPING_RESULT_LIMIT]
+            rows = []
+        else:
+            data = r.json()
+            if data.get("error"):
+                print(f"GOOGLE SHOPPING ERROR: {data.get('error')}")
+                rows = []
+            else:
+                rows = (data.get("shopping_results") or [])[:SHOPPING_RESULT_LIMIT]
+                print(
+                    f"GOOGLE SHOPPING: q={transport_query[:60]!r} "
+                    f"logical_gl={logical_gl or '-'} transport_gl={transport_gl or '-'} -> {len(rows)} cards"
+                )
     except Exception as e:
         print(f"GOOGLE SHOPPING EXCEPTION: {e}")
-        return []
+        rows = []
+    finally:
+        if WEB_CLEAN_SHOPPING_CACHE_TTL_SECONDS > 0:
+            with WEB_CLEAN_SHOPPING_CACHE_LOCK:
+                WEB_CLEAN_SHOPPING_CACHE[cache_key] = (time.time(), [dict(x) for x in rows])
+                if len(WEB_CLEAN_SHOPPING_CACHE) > 1200:
+                    oldest = sorted(WEB_CLEAN_SHOPPING_CACHE.items(), key=lambda kv: kv[1][0])[:200]
+                    for k, _ in oldest:
+                        WEB_CLEAN_SHOPPING_CACHE.pop(k, None)
+        if WEB_CLEAN_SHOPPING_SINGLEFLIGHT and state is not None:
+            state["rows"] = [dict(x) for x in rows]
+            state["event"].set()
+            if leader:
+                with WEB_CLEAN_SHOPPING_INFLIGHT_LOCK:
+                    WEB_CLEAN_SHOPPING_INFLIGHT.pop(cache_key, None)
+    return [dict(x) for x in rows]
 
 
 def _immersive_product_stores(page_token):
@@ -10471,7 +10570,7 @@ def _web_search_image_sync(image_b64, mime, caption, country, lang):
 
                     weak = [r for r in (0, 1, 2) if counts[r] < target[r]]
                     if weak:
-                        print(f"WEB IMAGE v89 weak markets before supplement counts={counts} target={target} identity={identity[:90]!r}")
+                        print(f"WEB IMAGE CLEAN weak markets before supplement counts={counts} target={target} identity={identity[:90]!r}")
                         market_snapshot = dict(market)
                         extra_by_rank = {}
 
@@ -10512,7 +10611,7 @@ def _web_search_image_sync(image_b64, mime, caption, country, lang):
                                 if need <= 0:
                                     break
                         items.sort(key=lambda x: (int(x.get("market_rank", 99)), 0 if x.get("price") else 1))
-                        print(f"WEB IMAGE v89 after supplement counts={counts} total={len(items)}")
+                        print(f"WEB IMAGE CLEAN after supplement counts={counts} total={len(items)}")
 
                 return {"ok": True, "type": "results", "query": identity, "market": market, "results": items, "source": "lens_direct_plus_market_supplement"}
 
