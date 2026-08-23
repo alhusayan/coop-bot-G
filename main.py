@@ -26,7 +26,7 @@ app.add_middleware(
     allow_headers=["Content-Type", "Accept"],
     max_age=86400,
 )
-BUILD_ID = "v105.0-turbo-same-results-20260823"
+BUILD_ID = "v106.0-amazon-direct-price-safety-20260823"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES")
@@ -9623,6 +9623,30 @@ def _web_marketplace_repeat_cap(domain_or_url):
     return WEB_STREAM_RESULTS_PER_STORE
 
 
+def _web_is_amazon_host(host):
+    host = str(host or "").lower().split(":")[0]
+    if host.startswith("www."):
+        host = host[4:]
+    # Supports amazon.fr, amazon.de, amazon.co.uk, amazon.co.jp, amazon.com.au, etc.
+    return bool(re.match(r"^(?:[a-z0-9-]+\.)*amazon\.(?:com|ca|de|fr|it|es|nl|se|pl|eg|sa|ae|sg|in|co\.uk|co\.jp|com\.au|com\.br|com\.mx|com\.tr|com\.be)$", host))
+
+
+def _web_is_amazon_product_url(url):
+    raw = str(url or "").strip()
+    if not _web_is_http_url(raw):
+        return False
+    try:
+        u = urllib.parse.urlparse(raw)
+        host = u.netloc.lower().split(":")[0]
+        path = (u.path or "").lower()
+    except Exception:
+        return False
+    if not _web_is_amazon_host(host):
+        return False
+    # Direct ASIN product pages only. Reject home, search, promo, storefront and deal pages.
+    return bool(re.search(r"/(?:dp|gp/product|gp/aw/d)/[a-z0-9]{8,}(?:[/?]|$)", path))
+
+
 def _web_is_direct_product_page_url(url, store_name=""):
     """General web-card gate: reject obvious search/category/listing URLs."""
     raw = str(url or "").strip()
@@ -9661,8 +9685,8 @@ def _web_is_direct_product_page_url(url, store_name=""):
     if path in ("", "/"):
         return False
 
-    if host.endswith("amazon.com"):
-        return bool(re.search(r"/(?:dp|gp/product)/[a-z0-9]{8,}", path))
+    if _web_is_amazon_host(host):
+        return _web_is_amazon_product_url(raw)
     if host.endswith("ebay.com"):
         return bool(re.search(r"/itm/(?:[^/]+/)?\d{8,}", path))
     if host.endswith("walmart.com"):
@@ -9798,6 +9822,16 @@ def _web_verified_page_snapshot(url):
             low = re.sub(r"\\s+", " ", BeautifulSoup(html[:450000], "html.parser").get_text(" ", strip=True).lower())
             host = urllib.parse.urlparse(final_url).netloc.lower().split(":")[0]
             host = host[4:] if host.startswith("www.") else host
+            # Amazon: country marketplaces must resolve to a real ASIN product page.
+            # Homepage/promo/search pages can contain many numbers and images; never parse those as product price/image.
+            if _web_is_amazon_host(host):
+                if not _web_is_amazon_product_url(final_url):
+                    data["is_product"] = False
+                    data["price"] = None
+                    data["currency"] = ""
+                    data["image"] = ""
+                    print(f"WEB AMAZON REJECT NON-PRODUCT final={final_url[:160]}")
+
             # Alibaba vertical/supplier result pages can look like product URLs but are supplier listings.
             if host.endswith("alibaba.com"):
                 if host not in ("alibaba.com", "www.alibaba.com"):
@@ -10002,6 +10036,12 @@ def _web_verify_card_strict(row, rank, lang, market_snapshot=None):
             print(f"WEB STRICT REJECT NO IMAGE store={row.get('store') or row.get('source')} url={url[:140]}")
             return None
 
+    # If a merchant URL redirected to a non-product page, reject it completely.
+    # Do not fall back to a structured price from the search result, because that can pair a promo/banner URL with a bogus number.
+    if snap and snap.get("ok") and not snap.get("is_product"):
+        print(f"WEB STRICT REJECT REDIRECT NON-PRODUCT store={row.get('store') or row.get('source')} url={(snap.get('url') or url)[:160]}")
+        return None
+
     # Page price is authoritative when exposed. Otherwise use a structured search/Lens price.
     page_price = snap.get("price") if snap and snap.get("ok") else None
     page_cur = str((snap or {}).get("currency") or "").upper().strip()
@@ -10011,14 +10051,24 @@ def _web_verify_card_strict(row, rank, lang, market_snapshot=None):
         except Exception:
             page_price = None
     if page_price and page_price > 0:
-        if not page_cur:
+        # Cross-check page parser against an existing structured price when both exist.
+        # This protects against grabbing banner/order-id numbers from complex merchant HTML.
+        existing_text = str(row.get("price") or "").strip()
+        existing_val, existing_cur = _web_price_number_and_currency(existing_text)
+        if existing_val and existing_val > 0 and existing_cur and page_cur and existing_cur == page_cur:
+            ratio = max(page_price, existing_val) / max(0.000001, min(page_price, existing_val))
+            if ratio >= 8.0:
+                print(f"WEB PRICE MISMATCH REJECT store={row.get('store') or row.get('source')} page={page_price} structured={existing_val} cur={page_cur}")
+                page_price = None
+        if page_price and not page_cur:
             page_cur = _web_market_currency(market_snapshot) if rank == 0 else ("USD" if rank == 1 else "CNY")
-        raw_price = f"{page_price:g} {page_cur}".strip()
-        row["price"] = _web_price_local_explicit(raw_price, rank, lang, market_snapshot)
-        row["price"] = _web_normalize_existing_price_to_market(row["price"], rank, lang, market_snapshot)
-        row["price_verified"] = True
-        row["price_source"] = "product_page"
-        return row
+        if page_price and page_price > 0:
+            raw_price = f"{page_price:g} {page_cur}".strip()
+            row["price"] = _web_price_local_explicit(raw_price, rank, lang, market_snapshot)
+            row["price"] = _web_normalize_existing_price_to_market(row["price"], rank, lang, market_snapshot)
+            row["price_verified"] = True
+            row["price_source"] = "product_page"
+            return row
 
     existing = str(row.get("price") or "").strip()
     val, cur = _web_price_number_and_currency(existing)
