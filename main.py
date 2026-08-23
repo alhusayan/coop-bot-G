@@ -26,7 +26,7 @@ app.add_middleware(
     allow_headers=["Content-Type", "Accept"],
     max_age=86400,
 )
-BUILD_ID = "v112.0-user-search-precision-20260823"
+BUILD_ID = "v113.0-fast-precision-60-100-20260823"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES")
@@ -9069,7 +9069,9 @@ WEB_AI_GATE_MAX_IMAGE_BYTES = max(250000, min(2 * 1024 * 1024, int(os.environ.ge
 WEB_AI_GATE_CONCURRENCY = max(1, min(6, int(os.environ.get("WEB_AI_GATE_CONCURRENCY", "3"))))
 WEB_AI_GATE_STREAM_EXTRA_SECONDS = max(1.0, min(8.0, float(os.environ.get("WEB_AI_GATE_STREAM_EXTRA_SECONDS", "4.0"))))
 WEB_AI_GATE_CACHE_TTL_SECONDS = max(300, min(86400, int(os.environ.get("WEB_AI_GATE_CACHE_TTL_SECONDS", "3600"))))
-WEB_SEARCH_PRECISION_DEFAULT = max(0, min(100, int(os.environ.get("WEB_SEARCH_PRECISION_DEFAULT", "70"))))
+WEB_SEARCH_PRECISION_DEFAULT = max(60, min(100, int(os.environ.get("WEB_SEARCH_PRECISION_DEFAULT", "70"))))
+WEB_AI_GATE_FULL_START = max(90, min(100, int(os.environ.get("WEB_AI_GATE_FULL_START", "90"))))
+WEB_AI_GATE_LIGHT_START = max(61, min(89, int(os.environ.get("WEB_AI_GATE_LIGHT_START", "61"))))
 WEB_AI_GATE_CACHE = {}
 WEB_AI_GATE_CACHE_LOCK = threading.Lock()
 WEB_AI_GATE_SEMAPHORE = threading.Semaphore(WEB_AI_GATE_CONCURRENCY)
@@ -10350,7 +10352,7 @@ def _web_ai_plain_call(parts, system, timeout_seconds):
 
 def _web_search_precision(value):
     try:
-        return max(0, min(100, int(round(float(value)))))
+        return max(60, min(100, int(round(float(value)))))
     except Exception:
         return WEB_SEARCH_PRECISION_DEFAULT
 
@@ -10358,19 +10360,25 @@ def _web_search_precision(value):
 def _web_ai_precision_policy(precision, mode):
     p = _web_search_precision(precision)
     mode = str(mode or "balanced").lower()
+    ai_off = p <= 60
+    light_gate = 60 < p < WEB_AI_GATE_FULL_START
+    full_gate = p >= WEB_AI_GATE_FULL_START
     if mode == "strict_exact":
-        threshold = 55 + int(round(p * 0.38))  # 55 -> 93; p=70 ~= 82 (v111 behavior)
-        exact_only = p >= 65
+        threshold = 70 + int(round((p - 60) * 0.575))  # 70 @60 -> 93 @100
+        exact_only = p >= 80
     else:
-        threshold = 45 + int(round(p * 0.33))  # 45 -> 78; p=70 ~= 68 (v111 behavior)
+        threshold = 58 + int(round((p - 60) * 0.50))   # 58 @60 -> 78 @100
         exact_only = False
     return {
         "precision": p,
         "threshold": threshold,
         "exact_only": exact_only,
-        "use_candidate_image": p >= 35,
-        "fail_closed": p >= 70,
-        "broad_fast": p <= 20,
+        "use_candidate_image": full_gate,
+        "fail_closed": p >= 90,
+        "ai_off": ai_off,
+        "light_gate": light_gate,
+        "full_gate": full_gate,
+        "broad_fast": ai_off,
     }
 
 
@@ -10382,6 +10390,13 @@ def _web_ai_identity_profile(image_b64, mime, identity_hint="", precision=70):
     or whether similar products should remain allowed for generic items.
     """
     precision = _web_search_precision(precision)
+    if precision <= 60:
+        return {
+            "mode": "balanced", "brand": "", "product": str(identity_hint or "").strip()[:160],
+            "variant": "", "category": "", "search_identity": str(identity_hint or "").strip()[:160],
+            "must_terms": [], "exclude_terms": [], "confidence": 0.0, "precision": precision,
+            "ai_filter_off": True,
+        }
     fallback = {
         "mode": "balanced",
         "brand": "",
@@ -10515,7 +10530,11 @@ def _web_ai_gate_fast_decision(profile, row):
     mode = str(profile.get("mode") or "balanced")
     precision = _web_search_precision(profile.get("precision", WEB_SEARCH_PRECISION_DEFAULT))
     policy = _web_ai_precision_policy(precision, mode)
+    if policy["ai_off"]:
+        return True
     if mode != "strict_exact":
+        if policy["light_gate"]:
+            return True
         # At the broadest setting the AI identity profile still supervises the search,
         # while the existing relevance/product-page gates can stream generic matches immediately.
         if policy["broad_fast"]:
@@ -10556,6 +10575,11 @@ def _web_ai_gate_candidate(profile, row, original_b64, original_mime, lang="en")
     mode = str(profile.get("mode") or "balanced")
     precision = _web_search_precision(profile.get("precision", WEB_SEARCH_PRECISION_DEFAULT))
     policy = _web_ai_precision_policy(precision, mode)
+    if policy["ai_off"]:
+        return True, 100, "ai_off_60"
+    if policy["light_gate"] and fast is None:
+        # Fast path for 61-89: keep existing product/relevance filters and avoid a per-result Gemini call.
+        return True, 75, "light_fast"
     candidate_img = _web_ai_gate_candidate_image(row) if policy["use_candidate_image"] else None
     if fast is False:
         result = {"accept": False, "score": 5, "level": "conflict"}
@@ -10627,6 +10651,10 @@ def _web_ai_gate_candidate(profile, row, original_b64, original_mime, lang="en")
 def _web_ai_gate_rows(profile, rows, original_b64, original_mime, lang="en"):
     rows = list(rows or [])
     if not rows or not WEB_AI_RESULT_GATE:
+        return rows
+    precision = _web_search_precision(profile.get("precision", WEB_SEARCH_PRECISION_DEFAULT))
+    if precision <= 60:
+        # User explicitly chose speed: no AI result filtering, no candidate-image downloads, no Gemini judging.
         return rows
     out = [None] * len(rows)
     workers = min(WEB_AI_GATE_CONCURRENCY, len(rows))
