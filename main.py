@@ -26,7 +26,7 @@ app.add_middleware(
     allow_headers=["Content-Type", "Accept"],
     max_age=86400,
 )
-BUILD_ID = "v103.0-force-local-currency-require-image-20260823"
+BUILD_ID = "v104.0-marketplace-multi-listings-20260823"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES")
@@ -8875,6 +8875,12 @@ WEB_STREAM_STORE_FIFO = env_bool("WEB_STREAM_STORE_FIFO", True)
 WEB_STREAM_STORE_TIMEOUT = max(4.0, min(12.0, float(os.environ.get("WEB_STREAM_STORE_TIMEOUT_SECONDS", "8"))))
 WEB_STREAM_STORE_HTTP_TIMEOUT = max(3.0, min(WEB_STREAM_STORE_TIMEOUT, float(os.environ.get("WEB_STREAM_STORE_HTTP_TIMEOUT_SECONDS", "7.5"))))
 WEB_STREAM_RESULTS_PER_STORE = max(1, min(2, int(os.environ.get("WEB_STREAM_RESULTS_PER_STORE", "1"))))
+# v104: marketplaces can legitimately return several distinct listings for the same/similar product.
+WEB_STREAM_MARKETPLACE_RESULTS_PER_STORE = max(2, min(6, int(os.environ.get("WEB_STREAM_MARKETPLACE_RESULTS_PER_STORE", "4"))))
+WEB_MULTI_LISTING_MARKETPLACES = (
+    "etsy.com", "ebay.com", "aliexpress.com", "temu.com", "shein.com",
+    "dhgate.com", "amazon.com", "alibaba.com", "made-in-china.com", "banggood.com",
+)
 WEB_STREAM_IMAGE_FINAL_MIN_RESULTS = max(2, min(10, int(os.environ.get("WEB_STREAM_IMAGE_FINAL_MIN_RESULTS", "5"))))
 # v97: Chinese global marketplaces are more important than the US wave on web.
 # Their fast probes use normal Google organic site search first because Google Shopping
@@ -9484,6 +9490,7 @@ def _web_stream_store_specs(query, country, rank):
         specs = [
             ("Amazon", "amazon.com", "us"),
             ("eBay", "ebay.com", "us"),
+            ("Etsy", "etsy.com", "us"),
             ("Walmart", "walmart.com", "us"),
         ]
     else:
@@ -9593,6 +9600,18 @@ def _china_global_product_url(domain, url):
     return bool(checker and checker())
 
 
+def _web_marketplace_repeat_cap(domain_or_url):
+    raw = str(domain_or_url or "").strip().lower()
+    try:
+        host = urllib.parse.urlparse(raw if "://" in raw else "https://" + raw).netloc.lower().replace("www.", "")
+    except Exception:
+        host = raw.replace("www.", "").split("/")[0]
+    for dom in WEB_MULTI_LISTING_MARKETPLACES:
+        if host == dom or host.endswith("." + dom):
+            return WEB_STREAM_MARKETPLACE_RESULTS_PER_STORE
+    return WEB_STREAM_RESULTS_PER_STORE
+
+
 def _web_is_direct_product_page_url(url, store_name=""):
     """General web-card gate: reject obvious search/category/listing URLs."""
     raw = str(url or "").strip()
@@ -9615,6 +9634,11 @@ def _web_is_direct_product_page_url(url, store_name=""):
     for dom in china_domains:
         if host == dom or host.endswith("." + dom):
             return _china_global_product_url(dom, raw)
+
+    # Etsy's real product pages use /listing/<numeric-id>/... . Allow those explicitly
+    # before the generic listing/category rejection below.
+    if host == "etsy.com" or host.endswith(".etsy.com"):
+        return bool(re.search(r"/listing/\d{6,}(?:/|$)", path))
 
     bad = (
         "/search", "/search/", "/category", "/categories", "/collections/",
@@ -10077,7 +10101,7 @@ def _serpapi_china_global_site_request(query, label, domain, timeout_seconds=Non
                 "_china_fallback": True,
                 "_web_global_china": True,
             })
-            if len(out) >= max(WEB_STREAM_RESULTS_PER_STORE, 2):
+            if len(out) >= _web_marketplace_repeat_cap(domain):
                 break
         print(f"WEB CHINA GLOBAL GOOGLE store={label} -> {len(out)} result(s)")
         return out
@@ -10106,7 +10130,7 @@ def _web_store_probe_sync(query, country, lang, rank, label, domain, gl):
         # merchants are already running in parallel, and the full engine can enrich later.
         # This prevents timed-out to_thread work from continuing in the background.
         rows = _web_market_candidates_to_items(candidates, rank, lang, q)
-        return rows[:WEB_STREAM_RESULTS_PER_STORE]
+        return rows[:_web_marketplace_repeat_cap(domain)]
 
     # Existing Shopping path remains unchanged for local/US.
     if not candidates:
@@ -10135,7 +10159,10 @@ def _web_store_probe_sync(query, country, lang, rank, label, domain, gl):
 
     rows = _web_market_candidates_to_items(candidates, rank, lang, q)
     rows = [row for row in rows if _web_is_direct_product_page_url(row.get("url") or "", row.get("store") or label)]
-    return rows[:WEB_STREAM_RESULTS_PER_STORE]
+    cap = _web_marketplace_repeat_cap(domain)
+    if cap > WEB_STREAM_RESULTS_PER_STORE and rows:
+        print(f"WEB MARKETPLACE MULTI store={label} cap={cap} rows={len(rows)}")
+    return rows[:cap]
 
 def _web_image_seed_sync(image_b64, mime, caption, country, lang):
     """One fast image-identification pass used before merchant FIFO probes.
