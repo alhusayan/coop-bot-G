@@ -26,7 +26,7 @@ app.add_middleware(
     allow_headers=["Content-Type", "Accept"],
     max_age=86400,
 )
-BUILD_ID = "v114.0-precision-turbo-lens-20260823"
+BUILD_ID = "v115.0-fast-safe-rescue-20260823"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES")
@@ -9081,6 +9081,11 @@ WEB_FAST_STORE_TIMEOUT_SECONDS = max(3.0, min(7.0, float(os.environ.get("WEB_FAS
 WEB_FAST_STORE_HTTP_TIMEOUT_SECONDS = max(2.5, min(WEB_FAST_STORE_TIMEOUT_SECONDS, float(os.environ.get("WEB_FAST_STORE_HTTP_TIMEOUT_SECONDS", "4.5"))))
 WEB_FAST_NO_HEAVY_AT_60 = env_bool("WEB_FAST_NO_HEAVY_AT_60", True)
 WEB_BALANCED_HEAVY_MIN_RESULTS = max(1, min(8, int(os.environ.get("WEB_BALANCED_HEAVY_MIN_RESULTS", "4"))))
+
+WEB_FAST_EMPTY_RESCUE = env_bool("WEB_FAST_EMPTY_RESCUE", True)
+WEB_FAST_EMPTY_RESCUE_TIMEOUT_SECONDS = max(3.0, min(8.0, float(os.environ.get("WEB_FAST_EMPTY_RESCUE_TIMEOUT_SECONDS", "5.0"))))
+WEB_FAST_EMPTY_HEAVY_FALLBACK = env_bool("WEB_FAST_EMPTY_HEAVY_FALLBACK", True)
+WEB_FAST_EMPTY_HEAVY_TIMEOUT_SECONDS = max(6.0, min(18.0, float(os.environ.get("WEB_FAST_EMPTY_HEAVY_TIMEOUT_SECONDS", "10.0"))))
 WEB_AI_GATE_LIGHT_START = max(61, min(89, int(os.environ.get("WEB_AI_GATE_LIGHT_START", "61"))))
 WEB_AI_GATE_CACHE = {}
 WEB_AI_GATE_CACHE_LOCK = threading.Lock()
@@ -10952,10 +10957,50 @@ def _web_fast_lens_cards(raw_matches, lang, caption=""):
     return out
 
 
+
+def _web_fast_identity_from_image(image_b64, mime, lens_hint=""):
+    """One concise Gemini identity call for 60-89.
+    This is NOT a result filter. It only cleans the search query and runs in parallel with Lens.
+    """
+    if not GEMINI_API_KEY:
+        return ""
+    system = (
+        "Identify the physical product in the ORIGINAL image for shopping search. "
+        "Return one concise English commercial search phrase only. "
+        "Use brand/model only when visibly supported. For generic items use product type + material/style. "
+        "Never return a store name, webpage title, marketing sentence, or explanation."
+    )
+    prompt = f"Possible Lens hint (may be noisy or wrong): {lens_hint}"
+    try:
+        raw = _web_ai_plain_call([
+            {"inline_data": {"mime_type": mime, "data": image_b64}},
+            {"text": prompt},
+        ], system, WEB_FAST_IDENTITY_TIMEOUT_SECONDS)
+        value = re.sub(r"\s+", " ", str(raw or "")).strip().strip(' .-|')[:140]
+        if value:
+            print(f"WEB FAST IDENTITY -> {value!r}")
+        return value
+    except Exception as e:
+        print(f"WEB FAST IDENTITY ERR: {e}")
+        return ""
+
+
+def _web_clean_fast_identity(value):
+    value = re.sub(r"\s+", " ", str(value or "")).strip()
+    if not value:
+        return ""
+    # Strip common store/page boilerplate from Lens titles.
+    value = re.split(r"\s*[|•]\s*", value)[0].strip()
+    value = re.sub(r"^(shop|buy|discover|view|find)\s+", "", value, flags=re.I)
+    value = re.sub(r"\s+(online|for sale|official site|shop now)\b.*$", "", value, flags=re.I)
+    value = _shopping_clean_query(value)
+    return value[:140].strip()
+
+
 def _web_image_seed_precision_sync(image_b64, mime, caption, country, lang, precision):
     """Precision-aware seed.
-    60-89: at most two bounded Lens `all` calls in parallel, no 12-second multi-pass.
-    90-100: preserve the full v113 exact-search seed.
+    60-89: two bounded Lens passes + one concise image-identity call IN PARALLEL.
+    90-100: preserve the full exact-search seed.
     """
     p = _web_search_precision(precision)
     if (not WEB_PRECISION_TURBO) or p >= WEB_AI_GATE_FULL_START:
@@ -10974,20 +11019,36 @@ def _web_image_seed_precision_sync(image_b64, mime, caption, country, lang, prec
 
     local_cc = str(market.get("country") or DEFAULT_COUNTRY).lower()
     countries = []
-    # local + US in parallel gives local discovery without waiting for the old product/all/cn matrix.
     for cc in (local_cc, "us"):
         if cc and cc not in countries:
             countries.append(cc)
 
     raw = []
     seen = set()
-    with ThreadPoolExecutor(max_workers=len(countries)) as pool:
-        futs = [
-            pool.submit(_web_fast_lens_request, public_url, cc, caption, WEB_FAST_LENS_TIMEOUT_SECONDS)
+    lens_hint = ""
+    identity = ""
+
+    # Run both Lens passes and Gemini identity concurrently: no serial AI delay.
+    with ThreadPoolExecutor(max_workers=len(countries) + 1) as pool:
+        lens_jobs = {
+            pool.submit(_web_fast_lens_request, public_url, cc, caption, WEB_FAST_LENS_TIMEOUT_SECONDS): cc
             for cc in countries
-        ]
-        done, pending = wait(futs, timeout=WEB_FAST_LENS_TIMEOUT_SECONDS + 0.35)
+        }
+        identity_job = pool.submit(_web_fast_identity_from_image, image_b64, mime, caption)
+
+        done, pending = wait(
+            list(lens_jobs.keys()) + [identity_job],
+            timeout=WEB_FAST_LENS_TIMEOUT_SECONDS + 0.35
+        )
+
         for fut in done:
+            if fut is identity_job:
+                try:
+                    identity = _web_clean_fast_identity(fut.result() or "")
+                except Exception:
+                    identity = ""
+                continue
+
             try:
                 rows = fut.result() or []
             except Exception:
@@ -10998,28 +11059,20 @@ def _web_image_seed_precision_sync(image_b64, mime, caption, country, lang, prec
                     continue
                 seen.add(sig)
                 raw.append(m)
+
         for fut in pending:
             fut.cancel()
 
-    # Use a Lens title immediately. Only call Vision/Gemini when Lens gives no usable identity.
-    identity = ""
+    # Best Lens title is a fallback only.
     for m in raw:
-        title = re.sub(r"\s+", " ", str(m.get("title") or "")).strip()
+        title = _web_clean_fast_identity(m.get("title") or "")
         if title:
-            identity = title[:180]
+            lens_hint = title
             break
-    if not identity:
-        identity = caption
-    if not identity:
-        pool = ThreadPoolExecutor(max_workers=1)
-        fut = pool.submit(identify_product_with_retry, image_b64, mime, lang)
-        try:
-            identity = str(fut.result(timeout=WEB_FAST_IDENTITY_TIMEOUT_SECONDS) or "").strip()
-        except Exception:
-            identity = ""
-        pool.shutdown(wait=False, cancel_futures=True)
 
+    identity = identity or lens_hint or _web_clean_fast_identity(caption)
     items = _web_fast_lens_cards(raw, lang, caption)
+
     print(
         f"WEB PRECISION FAST SEED precision={p}% passes={len(countries)} "
         f"raw={len(raw)} cards={len(items)} identity={identity[:80]!r}"
@@ -11726,6 +11779,43 @@ async def web_api_search_stream(request: Request):
     )
 
 
+
+async def _web_fast_empty_rescue(identity, country, lang, precision):
+    """Bounded rescue used only when the 60-89 fast path produced no cards."""
+    if not identity or not WEB_FAST_EMPTY_RESCUE:
+        return []
+
+    async def one(rank):
+        try:
+            rows = await asyncio.wait_for(
+                asyncio.to_thread(_web_fast_market_wave_sync, identity, country, lang, rank),
+                timeout=WEB_FAST_EMPTY_RESCUE_TIMEOUT_SECONDS,
+            )
+            return rank, rows or []
+        except Exception as e:
+            print(f"WEB FAST EMPTY RESCUE ERR rank={rank}: {e}")
+            return rank, []
+
+    tasks = [asyncio.create_task(one(r)) for r in (0, 2, 1)]
+    out = []
+    pending = set(tasks)
+    deadline = asyncio.get_running_loop().time() + WEB_FAST_EMPTY_RESCUE_TIMEOUT_SECONDS
+    while pending:
+        left = deadline - asyncio.get_running_loop().time()
+        if left <= 0:
+            break
+        done, pending = await asyncio.wait(
+            pending, timeout=min(.15, left), return_when=asyncio.FIRST_COMPLETED
+        )
+        for task in done:
+            _, rows = await task
+            out.extend(rows or [])
+    for task in pending:
+        task.cancel()
+    print(f"WEB FAST EMPTY RESCUE -> {len(out)} rows")
+    return out
+
+
 @app.post("/api/search/image/stream")
 async def web_api_image_search_stream(request: Request):
     if not WEB_API_ENABLED or not WEB_STREAM_ENABLED:
@@ -11859,11 +11949,42 @@ async def web_api_image_search_stream(request: Request):
 
             # Only invoke the heavy original image engine when the live wave is still sparse
             # or local coverage is missing.  The user has already seen FIFO cards by then.
+            # v115: low/balanced precision must never silently end with zero cards.
+            if len(sent) == 0 and precision < WEB_AI_GATE_FULL_START:
+                rescue_rows = await _web_fast_empty_rescue(identity, country, lang, precision)
+                # At 60% there is explicitly NO AI filtering.
+                if precision > 60 and rescue_rows:
+                    rescue_rows = await asyncio.to_thread(
+                        _web_ai_gate_rows, profile, rescue_rows, image_b64, mime, lang
+                    )
+                for item in rescue_rows or []:
+                    if len(sent) >= WEB_STREAM_IMAGE_TARGET_RESULTS:
+                        break
+                    market_name = str(item.get("market") or "other")
+                    key = str(item.get("url") or "").strip() or (
+                        market_name + "|" + str(item.get("store") or "") + "|" + str(item.get("title") or "")
+                    )
+                    if key in sent:
+                        continue
+                    sent.add(key)
+                    if market_name in market_counts:
+                        market_counts[market_name] += 1
+                    yield _web_stream_event({
+                        "event": "result", "phase": "fast_empty_rescue",
+                        "market": market_name, "item": item,
+                        "elapsed_ms": int((time.time()-started)*1000),
+                    })
+                    await asyncio.sleep(0)
+
             run_heavy_final = False
             if precision >= WEB_AI_GATE_FULL_START:
                 run_heavy_final = (len(sent) < WEB_STREAM_IMAGE_TARGET_RESULTS or market_counts.get("local", 0) == 0)
             elif precision <= 60:
-                run_heavy_final = (not WEB_FAST_NO_HEAVY_AT_60) and len(sent) < WEB_BALANCED_HEAVY_MIN_RESULTS
+                run_heavy_final = (
+                    len(sent) == 0 and WEB_FAST_EMPTY_HEAVY_FALLBACK
+                ) or (
+                    (not WEB_FAST_NO_HEAVY_AT_60) and len(sent) < WEB_BALANCED_HEAVY_MIN_RESULTS
+                )
             else:
                 # Balanced range: only pay for the old heavy engine when the fast wave is genuinely sparse.
                 run_heavy_final = len(sent) < WEB_BALANCED_HEAVY_MIN_RESULTS
