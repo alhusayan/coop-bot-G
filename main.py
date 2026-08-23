@@ -26,7 +26,7 @@ app.add_middleware(
     allow_headers=["Content-Type", "Accept"],
     max_age=86400,
 )
-BUILD_ID = "v104.0-marketplace-multi-listings-20260823"
+BUILD_ID = "v105.0-turbo-same-results-20260823"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES")
@@ -8874,6 +8874,17 @@ WEB_STREAM_MARKET_TIMEOUT = max(4, min(20, int(os.environ.get("WEB_STREAM_MARKET
 WEB_STREAM_STORE_FIFO = env_bool("WEB_STREAM_STORE_FIFO", True)
 WEB_STREAM_STORE_TIMEOUT = max(4.0, min(12.0, float(os.environ.get("WEB_STREAM_STORE_TIMEOUT_SECONDS", "8"))))
 WEB_STREAM_STORE_HTTP_TIMEOUT = max(3.0, min(WEB_STREAM_STORE_TIMEOUT, float(os.environ.get("WEB_STREAM_STORE_HTTP_TIMEOUT_SECONDS", "7.5"))))
+
+# v105: latency optimization only. Result-selection rules remain unchanged.
+WEB_TURBO_MODE = env_bool("WEB_TURBO_MODE", True)
+WEB_TURBO_FINAL_HEADSTART_SECONDS = max(0.0, min(3.0, float(os.environ.get("WEB_TURBO_FINAL_HEADSTART_SECONDS", "1.25"))))
+WEB_TURBO_STORE_CACHE_TTL_SECONDS = max(30, min(1800, int(os.environ.get("WEB_TURBO_STORE_CACHE_TTL_SECONDS", "300"))))
+WEB_TURBO_PREP_CACHE_TTL_SECONDS = max(30, min(1800, int(os.environ.get("WEB_TURBO_PREP_CACHE_TTL_SECONDS", "600"))))
+WEB_TURBO_STRICT_WORKERS = max(6, min(20, int(os.environ.get("WEB_TURBO_STRICT_WORKERS", "12"))))
+WEB_TURBO_STORE_CACHE = {}
+WEB_TURBO_STORE_CACHE_LOCK = threading.Lock()
+WEB_TURBO_PREP_CACHE = {}
+WEB_TURBO_PREP_CACHE_LOCK = threading.Lock()
 WEB_STREAM_RESULTS_PER_STORE = max(1, min(2, int(os.environ.get("WEB_STREAM_RESULTS_PER_STORE", "1"))))
 # v104: marketplaces can legitimately return several distinct listings for the same/similar product.
 WEB_STREAM_MARKETPLACE_RESULTS_PER_STORE = max(2, min(6, int(os.environ.get("WEB_STREAM_MARKETPLACE_RESULTS_PER_STORE", "4"))))
@@ -9116,7 +9127,7 @@ def _web_attach_best_images(rows, rescue_page=False):
     if not rows:
         return rows
     jobs = []
-    with ThreadPoolExecutor(max_workers=min(6, len(rows))) as pool:
+    with ThreadPoolExecutor(max_workers=min(WEB_TURBO_STRICT_WORKERS if WEB_TURBO_MODE else 6, len(rows))) as pool:
         for idx, row in enumerate(rows):
             primary = row.get('image') or row.get('thumbnail') or ''
             page_url = row.get('url') or row.get('link') or ''
@@ -10109,13 +10120,45 @@ def _serpapi_china_global_site_request(query, label, domain, timeout_seconds=Non
         print(f"WEB CHINA GLOBAL GOOGLE EXCEPTION store={label}: {e}")
         return []
 
+def _web_turbo_cache_get(cache, lock, key, ttl):
+    now = time.time()
+    with lock:
+        hit = cache.get(key)
+        if hit and now - float(hit.get("ts") or 0) < ttl:
+            return hit.get("value")
+    return None
+
+
+def _web_turbo_cache_set(cache, lock, key, value, max_items=1200):
+    now = time.time()
+    with lock:
+        cache[key] = {"ts": now, "value": value}
+        if len(cache) > max_items:
+            oldest = sorted(cache.items(), key=lambda kv: kv[1].get("ts", 0))[:max(100, max_items // 5)]
+            for k, _ in oldest:
+                cache.pop(k, None)
+
+
+def _web_store_probe_cache_key(query, country, lang, rank, label, domain, gl):
+    return "|".join([
+        normalize_name(query or ""), str(country or "").lower(), str(lang or "").lower(),
+        str(rank), normalize_name(label or ""), str(domain or "").lower(), str(gl or "").lower()
+    ])
+
+
 def _web_store_probe_sync(query, country, lang, rank, label, domain, gl):
-    """Probe one merchant and return UI cards; Chinese globals use organic-first in v97."""
+    """Probe one merchant and return UI cards; v105 caches the exact verified rows briefly."""
     market = _web_market(country)
     MARKET_CTX.value = market
     q = _shopping_clean_query(query or "")
     if not q or not SERPAPI_API_KEY:
         return []
+    cache_key = _web_store_probe_cache_key(q, country, lang, rank, label, domain, gl)
+    if WEB_TURBO_MODE:
+        cached = _web_turbo_cache_get(WEB_TURBO_STORE_CACHE, WEB_TURBO_STORE_CACHE_LOCK, cache_key, WEB_TURBO_STORE_CACHE_TTL_SECONDS)
+        if cached is not None:
+            print(f"WEB TURBO STORE CACHE HIT store={label} rows={len(cached)}")
+            return [dict(x) for x in cached]
 
     candidate_cc = (market.get("country") or DEFAULT_COUNTRY).lower() if rank == 0 else ("us" if rank == 1 else "cn")
     candidates = []
@@ -10129,8 +10172,10 @@ def _web_store_probe_sync(query, country, lang, rank, label, domain, gl):
         # Do not chain a second SerpApi request inside the fast FIFO task.  Other China
         # merchants are already running in parallel, and the full engine can enrich later.
         # This prevents timed-out to_thread work from continuing in the background.
-        rows = _web_market_candidates_to_items(candidates, rank, lang, q)
-        return rows[:_web_marketplace_repeat_cap(domain)]
+        rows = _web_market_candidates_to_items(candidates, rank, lang, q)[:_web_marketplace_repeat_cap(domain)]
+        if WEB_TURBO_MODE:
+            _web_turbo_cache_set(WEB_TURBO_STORE_CACHE, WEB_TURBO_STORE_CACHE_LOCK, cache_key, [dict(x) for x in rows])
+        return rows
 
     # Existing Shopping path remains unchanged for local/US.
     if not candidates:
@@ -10162,7 +10207,10 @@ def _web_store_probe_sync(query, country, lang, rank, label, domain, gl):
     cap = _web_marketplace_repeat_cap(domain)
     if cap > WEB_STREAM_RESULTS_PER_STORE and rows:
         print(f"WEB MARKETPLACE MULTI store={label} cap={cap} rows={len(rows)}")
-    return rows[:cap]
+    rows = rows[:cap]
+    if WEB_TURBO_MODE:
+        _web_turbo_cache_set(WEB_TURBO_STORE_CACHE, WEB_TURBO_STORE_CACHE_LOCK, cache_key, [dict(x) for x in rows])
+    return rows
 
 def _web_image_seed_sync(image_b64, mime, caption, country, lang):
     """One fast image-identification pass used before merchant FIFO probes.
@@ -10193,7 +10241,14 @@ def _web_image_seed_sync(image_b64, mime, caption, country, lang):
 def _web_prepare_stream_query_sync(query, country, lang, selected_option="", original_query="", force_specific=False):
     market = _web_market(country)
     MARKET_CTX.value = market
-    q = re.sub(r"\s+", " ", str(query or "")).strip()[:WEB_API_MAX_QUERY_CHARS]
+    raw_q = re.sub(r"\s+", " ", str(query or "")).strip()[:WEB_API_MAX_QUERY_CHARS]
+    prep_key = "|".join([normalize_name(raw_q), str(country or "").lower(), str(lang or "").lower(), normalize_name(selected_option or ""), normalize_name(original_query or ""), "1" if force_specific else "0"])
+    if WEB_TURBO_MODE:
+        cached = _web_turbo_cache_get(WEB_TURBO_PREP_CACHE, WEB_TURBO_PREP_CACHE_LOCK, prep_key, WEB_TURBO_PREP_CACHE_TTL_SECONDS)
+        if cached is not None:
+            print(f"WEB TURBO PREP CACHE HIT q={raw_q[:70]!r}")
+            return dict(cached)
+    q = raw_q
     if selected_option:
         q = ai_recommendation_pick_search_query(original_query or q, selected_option, lang)
         force_specific = True
@@ -10212,7 +10267,10 @@ def _web_prepare_stream_query_sync(query, country, lang, selected_option="", ori
             rtype = classify_request_type(q)
         except Exception:
             rtype = "SPECIFIC"
-    return {"ok": True, "query": q, "market": market, "rtype": rtype, "force_specific": force_specific}
+    result = {"ok": True, "query": q, "market": market, "rtype": rtype, "force_specific": force_specific}
+    if WEB_TURBO_MODE:
+        _web_turbo_cache_set(WEB_TURBO_PREP_CACHE, WEB_TURBO_PREP_CACHE_LOCK, prep_key, dict(result))
+    return result
 
 def _web_search_text_sync(query, country, lang, selected_option="", original_query="", force_specific=False):
     market = _web_market(country)
@@ -10578,6 +10636,12 @@ async def web_api_health():
 
 
 
+async def _web_turbo_delayed_text_final(q, country, lang):
+    if WEB_TURBO_MODE and WEB_TURBO_FINAL_HEADSTART_SECONDS > 0:
+        await asyncio.sleep(WEB_TURBO_FINAL_HEADSTART_SECONDS)
+    return await asyncio.to_thread(_web_search_text_sync, q, country, lang, "", "", True)
+
+
 @app.post("/api/search/stream")
 async def web_api_search_stream(request: Request):
     if not WEB_API_ENABLED or not WEB_STREAM_ENABLED:
@@ -10626,9 +10690,9 @@ async def web_api_search_stream(request: Request):
                 return
 
             sent = set()
-            final_task = asyncio.create_task(asyncio.to_thread(
-                _web_search_text_sync, q, country, lang, "", "", True
-            ))
+            # v105 gives lightweight store probes a short head start before the heavy
+            # authoritative engine starts. Final results are unchanged; first paint is faster.
+            final_task = asyncio.create_task(_web_turbo_delayed_text_final(q, country, lang))
 
             if WEB_STREAM_STORE_FIFO and WEB_STREAM_FAST_WAVE and SERPAPI_API_KEY:
                 store_tasks = []
@@ -10680,7 +10744,7 @@ async def web_api_search_stream(request: Request):
                                 "store_probe": label, "item": item,
                                 "elapsed_ms": int((time.time()-started)*1000),
                             })
-                            await asyncio.sleep(0.015)
+                            await asyncio.sleep(0)
                         rank_remaining[r] = max(0, rank_remaining.get(r, 1) - 1)
                         if rank_remaining[r] == 0:
                             yield _web_stream_event({"event": "market_fast_done", "market": market_name, "elapsed_ms": int((time.time()-started)*1000)})
@@ -10718,7 +10782,7 @@ async def web_api_search_stream(request: Request):
                                 continue
                             sent.add(key)
                             yield _web_stream_event({"event": "result", "phase": "fast", "market": market_name, "item": item, "elapsed_ms": int((time.time()-started)*1000)})
-                            await asyncio.sleep(0.01)
+                            await asyncio.sleep(0)
                         yield _web_stream_event({"event": "market_fast_done", "market": market_name, "count": len(items or []), "elapsed_ms": int((time.time()-started)*1000)})
                     if final_task.done():
                         break
@@ -10739,7 +10803,7 @@ async def web_api_search_stream(request: Request):
                     else:
                         sent.add(key)
                         yield _web_stream_event({"event": "result", "phase": "final", "market": market_name, "item": item, "elapsed_ms": int((time.time()-started)*1000)})
-                    await asyncio.sleep(0.01)
+                    await asyncio.sleep(0)
             yield _web_stream_event({"event": "done", "count": len(sent), "elapsed_ms": int((time.time()-started)*1000)})
         except asyncio.CancelledError:
             raise
@@ -10855,7 +10919,7 @@ async def web_api_image_search_stream(request: Request):
                                 "store_probe": label, "item": item,
                                 "elapsed_ms": int((time.time()-started)*1000),
                             })
-                            await asyncio.sleep(0.015)
+                            await asyncio.sleep(0)
                         rank_remaining[r] = max(0, rank_remaining.get(r, 1) - 1)
                         if rank_remaining[r] == 0:
                             yield _web_stream_event({"event": "market_fast_done", "market": market_name, "elapsed_ms": int((time.time()-started)*1000)})
@@ -10877,7 +10941,7 @@ async def web_api_image_search_stream(request: Request):
                         continue
                     sent.add(key)
                     yield _web_stream_event({"event": "result", "phase": "final", "market": market_name, "item": item, "elapsed_ms": int((time.time()-started)*1000)})
-                    await asyncio.sleep(0.01)
+                    await asyncio.sleep(0)
 
             yield _web_stream_event({"event": "done", "count": len(sent), "elapsed_ms": int((time.time()-started)*1000)})
         except asyncio.CancelledError:
