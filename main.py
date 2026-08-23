@@ -26,7 +26,7 @@ app.add_middleware(
     allow_headers=["Content-Type", "Accept"],
     max_age=86400,
 )
-BUILD_ID = "v99.0-image-proxy-rescue-20260823"
+BUILD_ID = "v101.0-strict-product-price-20260823"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES")
@@ -8848,6 +8848,14 @@ WEB_IMAGE_PROXY_MAX_BYTES = max(512000, min(8 * 1024 * 1024, int(os.environ.get(
 WEB_IMAGE_CACHE = {}
 WEB_IMAGE_CACHE_LOCK = threading.Lock()
 
+# v101: every web shopping card must resolve to a direct product page and carry a numeric price.
+WEB_STRICT_PRODUCT_PAGE = env_bool("WEB_STRICT_PRODUCT_PAGE", True)
+WEB_REQUIRE_NUMERIC_PRICE = env_bool("WEB_REQUIRE_NUMERIC_PRICE", True)
+WEB_PRODUCT_VERIFY_TIMEOUT_SECONDS = max(2.5, min(8.0, float(os.environ.get("WEB_PRODUCT_VERIFY_TIMEOUT_SECONDS", "5.5"))))
+WEB_PRODUCT_VERIFY_CACHE_TTL_SECONDS = max(300, int(os.environ.get("WEB_PRODUCT_VERIFY_CACHE_TTL_SECONDS", "1800")))
+WEB_PRODUCT_VERIFY_CACHE = {}
+WEB_PRODUCT_VERIFY_LOCK = threading.Lock()
+
 WEB_API_MAX_QUERY_CHARS = max(40, min(500, int(os.environ.get("WEB_API_MAX_QUERY_CHARS", "220"))))
 WEB_API_MAX_IMAGE_BYTES = max(512000, min(12 * 1024 * 1024, int(os.environ.get("WEB_API_MAX_IMAGE_BYTES", str(6 * 1024 * 1024)))))
 WEB_API_RATE_PER_MINUTE = max(5, min(120, int(os.environ.get("WEB_API_RATE_PER_MINUTE", "30"))))
@@ -9190,7 +9198,9 @@ def _web_build_text_items(txt, urls, lang, query):
             "url": item.get("link") or "",
             "image": item.get("thumbnail") or item.get("image") or "",
         })
-    return _web_attach_best_images(results, rescue_page=True)
+    results = [row for row in results if _web_is_direct_product_page_url(row.get("url") or "", row.get("store") or "")]
+    results = _web_attach_best_images(results, rescue_page=True)
+    return _web_verify_rows_strict(results, lang)
 
 
 def _web_brand_comparison(query, lang):
@@ -9322,7 +9332,9 @@ def _web_build_lens_items(lens, lang, caption=""):
             "url": (m.get("link") or "").strip(),
             "image": m.get("thumbnail") or m.get("image") or "",
         })
-    return _web_attach_best_images(results, rescue_page=True)
+    results = [row for row in results if _web_is_direct_product_page_url(row.get("url") or "", row.get("store") or "")]
+    results = _web_attach_best_images(results, rescue_page=True)
+    return _web_verify_rows_strict(results, lang)
 
 
 def _web_fallback_product_items(txt, urls, lang, query):
@@ -9354,6 +9366,7 @@ def _web_fallback_product_items(txt, urls, lang, query):
             "url": url,
             "image": "",
         })
+    rows = [row for row in rows if _web_is_direct_product_page_url(row.get("url") or "", row.get("store") or "")]
     rows = _web_attach_best_images(rows, rescue_page=True)
     rows.sort(key=lambda x: x["market_rank"])
     caps = {0: LENS_DIRECT_LOCAL_MAX, 1: LENS_DIRECT_US_MAX, 2: LENS_DIRECT_CN_MAX}
@@ -9363,7 +9376,7 @@ def _web_fallback_product_items(txt, urls, lang, query):
             continue
         out.append(row)
         counts[row["market_rank"]] += 1
-    return out
+    return _web_verify_rows_strict(out, lang)
 
 
 
@@ -9435,7 +9448,7 @@ def _web_market_candidates_to_items(candidates, rank, lang, query):
         })
         if len(out) >= cap:
             break
-    return out
+    return _web_verify_rows_strict(out, lang)
 
 
 def _web_fast_market_wave_sync(query, country, lang, rank):
@@ -9520,35 +9533,278 @@ def _google_organic_price_text(row):
 
 
 def _china_global_product_url(domain, url):
-    """Reject obvious home/search/category links while keeping real product pages."""
+    """Strict direct-product-page gate for Chinese global marketplaces.
+
+    v100: category/search/store/listing pages are never emitted as shopping cards.
+    A merchant-specific positive product-page signature is required.
+    """
     try:
-        u = urllib.parse.urlparse(str(url or ""))
-        host = u.netloc.lower().replace("www.", "")
-        pathq = (u.path + ("?" + u.query if u.query else "")).lower()
+        u = urllib.parse.urlparse(str(url or "").strip())
+        host = u.netloc.lower().split(":")[0]
+        host = host[4:] if host.startswith("www.") else host
+        path = (u.path or "").lower()
+        query = (u.query or "").lower()
+        pathq = path + ("?" + query if query else "")
     except Exception:
         return False
+
     if not _host_matches_any(host, (domain,)):
         return False
-    if not pathq or pathq in ("/", ""):
+    if not path or path == "/":
         return False
-    bad = ("/search", "/category", "/categories", "/store/", "/stores/", "/blog", "/help")
+
+    bad_markers = (
+        "/search", "/category", "/categories", "/catalog", "/collections",
+        "/store/", "/stores/", "/shop/", "/shops/", "/wholesale/",
+        "/products?", "/product-list", "/list/", "/listing/", "/all-products",
+        "searchtext=", "searchkey=", "keyword=", "q=", "query=", "search="
+    )
+    if any(marker in pathq for marker in bad_markers):
+        return False
+
+    checks = {
+        "aliexpress.com": lambda: bool(re.search(r"/item/(?:\d+)(?:\.html)?", path)),
+        "temu.com": lambda: (
+            ("/goods.html" in path and ("goods_id=" in query or "goodsid=" in query))
+            or bool(re.search(r"-g-\d+", path))
+            or bool(re.search(r"/goods/[^/]+", path))
+        ),
+        "shein.com": lambda: bool(re.search(r"(?:-p-|/product-p-)\d+", path)),
+        "dhgate.com": lambda: (
+            "/product/" in path
+            and bool(re.search(r"(?:/|-)\d{6,}(?:\.html)?$", path))
+        ),
+        "banggood.com": lambda: bool(re.search(r"(?:-p-|/p-)\d+(?:\.html)?", path)),
+        "alibaba.com": lambda: (
+            host in ("alibaba.com", "www.alibaba.com")
+            and "/product-detail/" in path
+            and bool(re.search(r"(?:_|/)\d{6,}(?:\.html)?$", path))
+        ),
+        "made-in-china.com": lambda: (
+            "/product/" in path
+            and path.endswith(".html")
+            and len(path.strip("/")) >= 18
+        ),
+    }
+    checker = checks.get(domain)
+    return bool(checker and checker())
+
+
+def _web_is_direct_product_page_url(url, store_name=""):
+    """General web-card gate: reject obvious search/category/listing URLs."""
+    raw = str(url or "").strip()
+    if not _web_is_http_url(raw):
+        return False
+    try:
+        u = urllib.parse.urlparse(raw)
+        host = u.netloc.lower().split(":")[0]
+        host = host[4:] if host.startswith("www.") else host
+        path = (u.path or "").lower()
+        query = (u.query or "").lower()
+        pathq = path + ("?" + query if query else "")
+    except Exception:
+        return False
+
+    china_domains = (
+        "aliexpress.com", "temu.com", "shein.com", "dhgate.com",
+        "banggood.com", "alibaba.com", "made-in-china.com"
+    )
+    for dom in china_domains:
+        if host == dom or host.endswith("." + dom):
+            return _china_global_product_url(dom, raw)
+
+    bad = (
+        "/search", "/search/", "/category", "/categories", "/collections/",
+        "/catalog", "/results", "/browse", "/listing", "/list/",
+        "?q=", "&q=", "search=", "query=", "keyword=", "searchterm="
+    )
     if any(x in pathq for x in bad):
         return False
-    positive = {
-        "aliexpress.com": ("/item/",),
-        "temu.com": ("-g-", "/goods.html", "/goods"),
-        "shein.com": ("-p-", "/product-p-"),
-        "dhgate.com": ("/product/",),
-        "banggood.com": ("-p-", "/p-"),
-        "alibaba.com": ("/product-detail/",),
-        "made-in-china.com": ("/product/",),
-    }
-    markers = positive.get(domain, ())
-    if markers and any(x in pathq for x in markers):
-        return True
-    # Google occasionally canonicalizes product URLs differently.  Keep a non-trivial
-    # same-domain page unless it is clearly a listing/navigation page.
-    return len(u.path.strip("/")) >= 12
+    if path in ("", "/"):
+        return False
+
+    if host.endswith("amazon.com"):
+        return bool(re.search(r"/(?:dp|gp/product)/[a-z0-9]{8,}", path))
+    if host.endswith("ebay.com"):
+        return bool(re.search(r"/itm/(?:[^/]+/)?\d{8,}", path))
+    if host.endswith("walmart.com"):
+        return "/ip/" in path
+
+    if len(path.strip("/")) < 6:
+        return False
+    nav_words = ("category", "collection", "search", "brand", "brands", "shop-all", "all-products")
+    if any(word in path for word in nav_words):
+        return False
+    return True
+
+
+def _web_price_number_and_currency(text, fallback_currency=""):
+    raw = str(text or "").strip()
+    if not raw:
+        return None, ""
+    cur = detect_currency_code(raw, fallback_currency or "") or fallback_currency or ""
+    # Prefer a number adjacent to a currency token when possible.
+    pats = (
+        r"(?:USD|US\\$|EUR|GBP|KWD|KD|SAR|AED|QAR|BHD|OMR|CNY|RMB|JPY|CAD|AUD|CHF|INR|KRW|TRY|RUB|[$€£¥￥₹₩₺₽])\\s*([0-9]+(?:[.,][0-9]{1,3})?)",
+        r"([0-9]+(?:[.,][0-9]{1,3})?)\\s*(?:USD|EUR|GBP|KWD|KD|SAR|AED|QAR|BHD|OMR|CNY|RMB|JPY|CAD|AUD|CHF|INR|KRW|TRY|RUB)",
+    )
+    for pat in pats:
+        m = re.search(pat, raw, flags=re.I)
+        if m:
+            try:
+                val = float(m.group(1).replace(",", ""))
+                if val > 0:
+                    return val, cur
+            except Exception:
+                pass
+    # Last resort only when the string itself is short and price-like.
+    if len(raw) <= 50:
+        m = re.search(r"(?<!\\d)([0-9]+(?:[.,][0-9]{1,3})?)(?!\\d)", raw.replace(",", ""))
+        if m:
+            try:
+                val = float(m.group(1))
+                if val > 0:
+                    return val, cur
+            except Exception:
+                pass
+    return None, cur
+
+
+def _web_verified_page_snapshot(url):
+    url = str(url or "").strip()
+    if not _web_is_http_url(url):
+        return None
+    now = time.time()
+    with WEB_PRODUCT_VERIFY_LOCK:
+        cached = WEB_PRODUCT_VERIFY_CACHE.get(url)
+        if cached and now - float(cached.get("ts") or 0) < WEB_PRODUCT_VERIFY_CACHE_TTL_SECONDS:
+            return dict(cached.get("data") or {})
+
+    data = {"ok": False, "url": url, "price": None, "currency": "", "image": "", "title": "", "is_product": False}
+    try:
+        parsed = urllib.parse.urlparse(url)
+        headers = dict(HEADERS)
+        headers.update({
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.8",
+            "Referer": f"{parsed.scheme}://{parsed.netloc}/",
+        })
+        r = requests.get(url, headers=headers, timeout=(2.5, WEB_PRODUCT_VERIFY_TIMEOUT_SECONDS), allow_redirects=True)
+        final_url = str(r.url or url)
+        data["url"] = final_url
+        if r.status_code < 400 and r.text:
+            html = r.text[:1500000]
+            parsed_data = parse_product_data(html, final_url) or {}
+            data["price"] = parsed_data.get("price")
+            data["currency"] = str(parsed_data.get("currency") or "").upper().strip()
+            data["image"] = parsed_data.get("image_url") or _web_extract_product_image_from_html(html, final_url) or ""
+            data["title"] = parsed_data.get("title") or ""
+            data["is_product"] = bool(parsed_data.get("is_product", True))
+            data["ok"] = True
+
+            low = re.sub(r"\\s+", " ", BeautifulSoup(html[:450000], "html.parser").get_text(" ", strip=True).lower())
+            host = urllib.parse.urlparse(final_url).netloc.lower().split(":")[0]
+            host = host[4:] if host.startswith("www.") else host
+            # Alibaba vertical/supplier result pages can look like product URLs but are supplier listings.
+            if host.endswith("alibaba.com"):
+                if host not in ("alibaba.com", "www.alibaba.com"):
+                    data["is_product"] = False
+                supplier_listing_markers = (
+                    "verified suppliers ·", "verified suppliers", "supplier lists", "results for ",
+                    "latest products", "distributor  verified suppliers", "contact supplier"
+                )
+                marker_hits = sum(1 for x in supplier_listing_markers if x in low)
+                if marker_hits >= 2:
+                    data["is_product"] = False
+
+            if WEB_STRICT_PRODUCT_PAGE and not _web_is_direct_product_page_url(final_url, ""):
+                data["is_product"] = False
+    except Exception as e:
+        print(f"WEB PRODUCT VERIFY ERR url={url[:120]}: {e.__class__.__name__}")
+
+    with WEB_PRODUCT_VERIFY_LOCK:
+        WEB_PRODUCT_VERIFY_CACHE[url] = {"ts": now, "data": dict(data)}
+        if len(WEB_PRODUCT_VERIFY_CACHE) > 4000:
+            oldest = sorted(WEB_PRODUCT_VERIFY_CACHE.items(), key=lambda kv: kv[1].get("ts", 0))[:800]
+            for k, _ in oldest:
+                WEB_PRODUCT_VERIFY_CACHE.pop(k, None)
+    return data
+
+
+def _web_verify_card_strict(row, rank, lang):
+    row = dict(row or {})
+    url = str(row.get("url") or row.get("link") or "").strip()
+    if not url:
+        return None
+
+    # Reject known listing/search URLs before spending network time.
+    if WEB_STRICT_PRODUCT_PAGE and not _web_is_direct_product_page_url(url, row.get("store") or row.get("source") or ""):
+        print(f"WEB STRICT REJECT URL store={row.get('store') or row.get('source')} url={url[:150]}")
+        return None
+
+    snap = _web_verified_page_snapshot(url)
+    if snap and snap.get("ok"):
+        final_url = snap.get("url") or url
+        if WEB_STRICT_PRODUCT_PAGE and not snap.get("is_product"):
+            print(f"WEB STRICT REJECT PAGE store={row.get('store') or row.get('source')} url={final_url[:150]}")
+            return None
+        row["url"] = final_url
+        if not row.get("image") and snap.get("image"):
+            row["image"] = _web_public_image_url(snap.get("image"))
+        elif row.get("image") and not str(row.get("image")).startswith(str(PUBLIC_BASE_URL or "") + "/api/img-proxy"):
+            row["image"] = _web_public_image_url(row.get("image"))
+        if snap.get("title") and not row.get("title"):
+            row["title"] = _compact_ui_title(snap.get("title"))
+
+    # Page price is authoritative when exposed. Otherwise use a structured search/Lens price.
+    page_price = snap.get("price") if snap and snap.get("ok") else None
+    page_cur = str((snap or {}).get("currency") or "").upper().strip()
+    if page_price not in (None, ""):
+        try:
+            page_price = float(page_price)
+        except Exception:
+            page_price = None
+    if page_price and page_price > 0:
+        if not page_cur:
+            page_cur = (current_market().get("currency") or "") if rank == 0 else ("USD" if rank == 1 else "CNY")
+        raw_price = f"{page_price:g} {page_cur}".strip()
+        row["price"] = _text_price_local(raw_price, rank, lang)
+        row["price_verified"] = True
+        row["price_source"] = "product_page"
+        return row
+
+    existing = str(row.get("price") or "").strip()
+    val, cur = _web_price_number_and_currency(existing)
+    if val and val > 0:
+        # Keep already converted display text; mark that the number came from structured search/Lens data.
+        row["price_verified"] = True
+        row["price_source"] = row.get("price_source") or "search_structured"
+        return row
+
+    if WEB_REQUIRE_NUMERIC_PRICE:
+        print(f"WEB STRICT REJECT NO PRICE store={row.get('store') or row.get('source')} url={url[:140]}")
+        return None
+    return row
+
+
+def _web_verify_rows_strict(rows, lang):
+    rows = list(rows or [])
+    if not rows:
+        return []
+    out = [None] * len(rows)
+    with ThreadPoolExecutor(max_workers=min(6, len(rows))) as pool:
+        jobs = []
+        for i, row in enumerate(rows):
+            rank = row.get("market_rank")
+            if rank not in (0, 1, 2):
+                rank = result_market_rank({"link": row.get("url") or row.get("link"), "source": row.get("store") or row.get("source"), "title": row.get("title")})
+            jobs.append((i, pool.submit(_web_verify_card_strict, row, rank, lang)))
+        for i, fut in jobs:
+            try:
+                out[i] = fut.result()
+            except Exception:
+                out[i] = None
+    return [x for x in out if x]
 
 
 def _serpapi_china_global_site_request(query, label, domain, timeout_seconds=None):
@@ -9585,6 +9841,8 @@ def _serpapi_china_global_site_request(query, label, domain, timeout_seconds=Non
         for pos, row in enumerate(rows, 1):
             link = str(row.get("link") or "").strip()
             if not link or not _china_global_product_url(domain, link):
+                if link:
+                    print(f"WEB CHINA REJECT NON-PRODUCT store={label} url={link[:160]}")
                 continue
             price_text = _google_organic_price_text(row)
             out.append({
@@ -9662,6 +9920,7 @@ def _web_store_probe_sync(query, country, lang, rank, label, domain, gl):
             candidates.append(item)
 
     rows = _web_market_candidates_to_items(candidates, rank, lang, q)
+    rows = [row for row in rows if _web_is_direct_product_page_url(row.get("url") or "", row.get("store") or label)]
     return rows[:WEB_STREAM_RESULTS_PER_STORE]
 
 def _web_image_seed_sync(image_b64, mime, caption, country, lang):
