@@ -26,7 +26,7 @@ app.add_middleware(
     allow_headers=["Content-Type", "Accept"],
     max_age=86400,
 )
-BUILD_ID = "v101.0-strict-product-price-20260823"
+BUILD_ID = "v103.0-force-local-currency-require-image-20260823"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES")
@@ -8851,6 +8851,9 @@ WEB_IMAGE_CACHE_LOCK = threading.Lock()
 # v101: every web shopping card must resolve to a direct product page and carry a numeric price.
 WEB_STRICT_PRODUCT_PAGE = env_bool("WEB_STRICT_PRODUCT_PAGE", True)
 WEB_REQUIRE_NUMERIC_PRICE = env_bool("WEB_REQUIRE_NUMERIC_PRICE", True)
+WEB_REQUIRE_PRODUCT_IMAGE = env_bool("WEB_REQUIRE_PRODUCT_IMAGE", True)
+WEB_VERIFY_PRODUCT_IMAGE = env_bool("WEB_VERIFY_PRODUCT_IMAGE", True)
+WEB_PRODUCT_IMAGE_VERIFY_TIMEOUT_SECONDS = max(2.0, min(8.0, float(os.environ.get("WEB_PRODUCT_IMAGE_VERIFY_TIMEOUT_SECONDS", "4.0"))))
 WEB_PRODUCT_VERIFY_TIMEOUT_SECONDS = max(2.5, min(8.0, float(os.environ.get("WEB_PRODUCT_VERIFY_TIMEOUT_SECONDS", "5.5"))))
 WEB_PRODUCT_VERIFY_CACHE_TTL_SECONDS = max(300, int(os.environ.get("WEB_PRODUCT_VERIFY_CACHE_TTL_SECONDS", "1800")))
 WEB_PRODUCT_VERIFY_CACHE = {}
@@ -9638,6 +9641,61 @@ def _web_is_direct_product_page_url(url, store_name=""):
     return True
 
 
+def _web_market_currency(market_snapshot=None):
+    m = market_snapshot or current_market()
+    cc = str((m or {}).get("country") or DEFAULT_COUNTRY).lower()
+    codes = COUNTRY_CURRENCY_CODES.get(cc) or tuple()
+    return str((m or {}).get("currency") or (codes[0] if codes else COUNTRY_CURRENCIES.get(cc, ""))).upper().strip()
+
+
+def _web_convert_to_market(value, from_currency, market_snapshot=None):
+    try:
+        val = float(value)
+    except Exception:
+        return None
+    src_cur = str(from_currency or "").upper().strip()
+    dst_cur = _web_market_currency(market_snapshot)
+    if not src_cur or not dst_cur:
+        return None
+    if src_cur == dst_cur:
+        return val
+    rates = get_fx_rates(src_cur)
+    rate = rates.get(dst_cur)
+    if not rate:
+        return None
+    return val * float(rate)
+
+
+def _web_price_local_explicit(raw_price, market_rank, lang, market_snapshot=None):
+    raw = str(raw_price or "").strip()
+    if not raw:
+        return ""
+    m = market_snapshot or current_market()
+    local_cc = str((m or {}).get("country") or DEFAULT_COUNTRY).lower()
+    local_cur = _web_market_currency(m)
+    src = detect_currency_code(
+        raw,
+        local_cur if market_rank == 0 else ("USD" if market_rank == 1 else "CNY" if market_rank == 2 else ""),
+        local_cc if market_rank == 0 else ("us" if market_rank == 1 else "cn" if market_rank == 2 else "")
+    )
+    if not src:
+        src = local_cur if market_rank == 0 else ("USD" if market_rank == 1 else "CNY" if market_rank == 2 else "")
+
+    numeric = _extract_numeric_price(raw)
+    if numeric is None:
+        return raw
+
+    if market_rank == 0 and src == local_cur:
+        return f"{format_price(numeric, local_cur)} {local_cur}".strip()
+
+    converted = _web_convert_to_market(numeric, src, m)
+    if converted is None:
+        return raw
+
+    original = f" ({format_price(numeric, src)} {src})" if src and src != local_cur else ""
+    return f"{format_price(converted, local_cur)} {local_cur}{original}"
+
+
 def _web_price_number_and_currency(text, fallback_currency=""):
     raw = str(text or "").strip()
     if not raw:
@@ -9731,7 +9789,153 @@ def _web_verified_page_snapshot(url):
     return data
 
 
-def _web_verify_card_strict(row, rank, lang):
+
+def _web_unproxy_image_url(value):
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    try:
+        u = urllib.parse.urlparse(raw)
+        if u.path.endswith("/api/img-proxy"):
+            q = urllib.parse.parse_qs(u.query)
+            inner = (q.get("u") or [""])[0]
+            if _web_is_http_url(inner):
+                return inner
+    except Exception:
+        pass
+    return raw if _web_is_http_url(raw) else ""
+
+
+def _web_image_fetchable(value):
+    """Verify that a candidate URL actually returns image bytes, not HTML/error."""
+    raw = _web_unproxy_image_url(value)
+    if not _web_is_http_url(raw):
+        return False
+    cache_key = "imgok:" + raw
+    cached = _web_image_cache_get(cache_key)
+    if cached in ("1", "0"):
+        return cached == "1"
+    ok = False
+    try:
+        p = urllib.parse.urlparse(raw)
+        headers = dict(HEADERS)
+        headers["Accept"] = "image/avif,image/webp,image/apng,image/*,*/*;q=0.8"
+        headers["Referer"] = f"{p.scheme}://{p.netloc}/"
+        r = requests.get(
+            raw,
+            headers=headers,
+            timeout=(2.0, WEB_PRODUCT_IMAGE_VERIFY_TIMEOUT_SECONDS),
+            stream=True,
+            allow_redirects=True,
+        )
+        ctype = (r.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
+        if r.status_code < 400 and ctype.startswith("image/"):
+            first = next(r.iter_content(4096), b"")
+            ok = bool(first)
+    except Exception:
+        ok = False
+    _web_image_cache_set(cache_key, "1" if ok else "0")
+    return ok
+
+
+def _web_choose_verified_product_image(row, snap):
+    """Prefer the actual product page image; fall back to search image only if it loads."""
+    candidates = []
+    if snap and snap.get("image"):
+        candidates.append(str(snap.get("image") or "").strip())
+    current = _web_unproxy_image_url(row.get("image") or row.get("thumbnail") or "")
+    if current:
+        candidates.append(current)
+
+    seen = set()
+    for candidate in candidates:
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        if not WEB_VERIFY_PRODUCT_IMAGE or _web_image_fetchable(candidate):
+            return _web_public_image_url(candidate)
+    return ""
+
+
+def _web_price_pairs(text):
+    """Extract ordered (value,currency) pairs from a display string."""
+    raw = str(text or "")
+    pairs = []
+    pats = (
+        r"(?i)(KWD|KD|USD|EUR|GBP|JPY|CNY|RMB|SAR|AED|QAR|BHD|OMR|CAD|AUD|CHF|INR|KRW|TRY|RUB)\s*([0-9]+(?:[.,][0-9]{1,3})?)",
+        r"(?i)([0-9]+(?:[.,][0-9]{1,3})?)\s*(KWD|KD|USD|EUR|GBP|JPY|CNY|RMB|SAR|AED|QAR|BHD|OMR|CAD|AUD|CHF|INR|KRW|TRY|RUB)",
+    )
+    for pat_idx, pat in enumerate(pats):
+        for m in re.finditer(pat, raw):
+            if pat_idx == 0:
+                cur, num = m.group(1), m.group(2)
+            else:
+                num, cur = m.group(1), m.group(2)
+            cur = cur.upper()
+            if cur == "KD":
+                cur = "KWD"
+            if cur == "RMB":
+                cur = "CNY"
+            try:
+                val = float(num.replace(",", ""))
+            except Exception:
+                continue
+            if val > 0:
+                pairs.append((m.start(), val, cur))
+    # de-duplicate overlapping regex captures and preserve display order
+    unique = []
+    seen = set()
+    for pos, val, cur in sorted(pairs, key=lambda x: x[0]):
+        key = (round(val, 6), cur)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append((val, cur))
+    return unique
+
+
+def _web_normalize_existing_price_to_market(display_price, rank, lang, market_snapshot=None):
+    """
+    Rebuild every final web price against the CURRENT detected market.
+    If a stale converted price exists, e.g. '9.176 KWD (29.99 USD)' while user is in Spain,
+    prefer the parenthetical/original foreign price and recalculate EUR.
+    """
+    raw = str(display_price or "").strip()
+    if not raw:
+        return ""
+    market = market_snapshot or current_market()
+    local_cur = _web_market_currency(market)
+    pairs = _web_price_pairs(raw)
+    if not pairs:
+        return raw
+
+    # If the current local currency already exists as the leading/display price, keep
+    # normalizing its format and preserve one original source amount if present.
+    if pairs[0][1] == local_cur:
+        local_value = pairs[0][0]
+        original = next(((v, c) for v, c in pairs[1:] if c != local_cur), None)
+        suffix = f" ({format_price(original[0], original[1])} {original[1]})" if original else ""
+        return f"{format_price(local_value, local_cur)} {local_cur}{suffix}"
+
+    # No local currency in the stale display. Prefer the LAST distinct currency pair;
+    # this is normally the original source in parentheses from older Findzia formatting.
+    source_value, source_cur = pairs[-1]
+    converted = _web_convert_to_market(source_value, source_cur, market)
+    if converted is None:
+        # fallback to first parseable currency
+        source_value, source_cur = pairs[0]
+        converted = _web_convert_to_market(source_value, source_cur, market)
+    if converted is None:
+        return raw
+
+    suffix = "" if source_cur == local_cur else f" ({format_price(source_value, source_cur)} {source_cur})"
+    return f"{format_price(converted, local_cur)} {local_cur}{suffix}"
+
+
+def _web_verify_card_strict(row, rank, lang, market_snapshot=None):
+    # v102: restore the originating web market inside this worker thread.
+    if market_snapshot:
+        MARKET_CTX.value = dict(market_snapshot)
     row = dict(row or {})
     url = str(row.get("url") or row.get("link") or "").strip()
     if not url:
@@ -9749,12 +9953,19 @@ def _web_verify_card_strict(row, rank, lang):
             print(f"WEB STRICT REJECT PAGE store={row.get('store') or row.get('source')} url={final_url[:150]}")
             return None
         row["url"] = final_url
-        if not row.get("image") and snap.get("image"):
-            row["image"] = _web_public_image_url(snap.get("image"))
-        elif row.get("image") and not str(row.get("image")).startswith(str(PUBLIC_BASE_URL or "") + "/api/img-proxy"):
-            row["image"] = _web_public_image_url(row.get("image"))
+        row["image"] = _web_choose_verified_product_image(row, snap)
+        if WEB_REQUIRE_PRODUCT_IMAGE and not row.get("image"):
+            print(f"WEB STRICT REJECT NO IMAGE store={row.get('store') or row.get('source')} url={final_url[:140]}")
+            return None
         if snap.get("title") and not row.get("title"):
             row["title"] = _compact_ui_title(snap.get("title"))
+
+    # Even when the merchant page could not be parsed, never expose a broken/empty card.
+    if not (snap and snap.get("ok")):
+        row["image"] = _web_choose_verified_product_image(row, snap)
+        if WEB_REQUIRE_PRODUCT_IMAGE and not row.get("image"):
+            print(f"WEB STRICT REJECT NO IMAGE store={row.get('store') or row.get('source')} url={url[:140]}")
+            return None
 
     # Page price is authoritative when exposed. Otherwise use a structured search/Lens price.
     page_price = snap.get("price") if snap and snap.get("ok") else None
@@ -9766,9 +9977,10 @@ def _web_verify_card_strict(row, rank, lang):
             page_price = None
     if page_price and page_price > 0:
         if not page_cur:
-            page_cur = (current_market().get("currency") or "") if rank == 0 else ("USD" if rank == 1 else "CNY")
+            page_cur = _web_market_currency(market_snapshot) if rank == 0 else ("USD" if rank == 1 else "CNY")
         raw_price = f"{page_price:g} {page_cur}".strip()
-        row["price"] = _text_price_local(raw_price, rank, lang)
+        row["price"] = _web_price_local_explicit(raw_price, rank, lang, market_snapshot)
+        row["price"] = _web_normalize_existing_price_to_market(row["price"], rank, lang, market_snapshot)
         row["price_verified"] = True
         row["price_source"] = "product_page"
         return row
@@ -9776,9 +9988,9 @@ def _web_verify_card_strict(row, rank, lang):
     existing = str(row.get("price") or "").strip()
     val, cur = _web_price_number_and_currency(existing)
     if val and val > 0:
-        # Keep already converted display text; mark that the number came from structured search/Lens data.
+        row["price"] = _web_normalize_existing_price_to_market(existing, rank, lang, market_snapshot)
         row["price_verified"] = True
-        row["price_source"] = row.get("price_source") or "search_structured"
+        row["price_source"] = row.get("price_source") or "search_structured_rebased"
         return row
 
     if WEB_REQUIRE_NUMERIC_PRICE:
@@ -9791,6 +10003,8 @@ def _web_verify_rows_strict(rows, lang):
     rows = list(rows or [])
     if not rows:
         return []
+    market_snapshot = dict(current_market())
+    print(f"WEB STRICT MARKET CONTEXT country={market_snapshot.get('country')} currency={market_snapshot.get('currency')} rows={len(rows)}")
     out = [None] * len(rows)
     with ThreadPoolExecutor(max_workers=min(6, len(rows))) as pool:
         jobs = []
@@ -9798,7 +10012,7 @@ def _web_verify_rows_strict(rows, lang):
             rank = row.get("market_rank")
             if rank not in (0, 1, 2):
                 rank = result_market_rank({"link": row.get("url") or row.get("link"), "source": row.get("store") or row.get("source"), "title": row.get("title")})
-            jobs.append((i, pool.submit(_web_verify_card_strict, row, rank, lang)))
+            jobs.append((i, pool.submit(_web_verify_card_strict, row, rank, lang, market_snapshot)))
         for i, fut in jobs:
             try:
                 out[i] = fut.result()
