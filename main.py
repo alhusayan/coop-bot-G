@@ -26,7 +26,7 @@ app.add_middleware(
     allow_headers=["Content-Type", "Accept"],
     max_age=86400,
 )
-BUILD_ID = "v96.0-store-fifo-20260823"
+BUILD_ID = "v97.0-china-global-fifo-20260823"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("GLOBAL GEO -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES")
@@ -8842,6 +8842,13 @@ WEB_STREAM_STORE_TIMEOUT = max(4.0, min(12.0, float(os.environ.get("WEB_STREAM_S
 WEB_STREAM_STORE_HTTP_TIMEOUT = max(3.0, min(WEB_STREAM_STORE_TIMEOUT, float(os.environ.get("WEB_STREAM_STORE_HTTP_TIMEOUT_SECONDS", "7.5"))))
 WEB_STREAM_RESULTS_PER_STORE = max(1, min(2, int(os.environ.get("WEB_STREAM_RESULTS_PER_STORE", "1"))))
 WEB_STREAM_IMAGE_FINAL_MIN_RESULTS = max(2, min(10, int(os.environ.get("WEB_STREAM_IMAGE_FINAL_MIN_RESULTS", "5"))))
+# v97: Chinese global marketplaces are more important than the US wave on web.
+# Their fast probes use normal Google organic site search first because Google Shopping
+# often returns few/no cards for AliExpress/Temu/SHEIN/Alibaba-style domains.
+WEB_CHINA_ORGANIC_FIRST = env_bool("WEB_CHINA_ORGANIC_FIRST", True)
+WEB_CHINA_ORGANIC_TIMEOUT = max(3.0, min(WEB_STREAM_STORE_TIMEOUT, float(os.environ.get("WEB_CHINA_ORGANIC_TIMEOUT_SECONDS", "6.5"))))
+WEB_CHINA_GLOBAL_MAX_STORES = max(4, min(9, int(os.environ.get("WEB_CHINA_GLOBAL_MAX_STORES", "7"))))
+WEB_CHINA_ORGANIC_NUM = max(3, min(10, int(os.environ.get("WEB_CHINA_ORGANIC_NUM", "8"))))
 WEB_RATE_BUCKETS = defaultdict(deque)
 WEB_RATE_LOCK = threading.Lock()
 
@@ -9234,8 +9241,9 @@ def _web_fast_market_wave_sync(query, country, lang, rank):
 def _web_stream_store_specs(query, country, rank):
     """Return independent store probes for true FIFO streaming.
 
-    Each tuple is (label, domain, search_gl).  The probes are fired together and
-    /api/search/stream emits whichever merchant returns first, irrespective of market.
+    v97 launches Chinese GLOBAL marketplaces first.  Every merchant is still an
+    independent task, so the UI receives whichever store actually answers first;
+    no country waits for another country to finish.
     """
     market = _web_market(country)
     MARKET_CTX.value = market
@@ -9248,23 +9256,24 @@ def _web_stream_store_specs(query, country, rank):
         except Exception:
             pass
     elif rank == 1:
+        # Keep the US wave intentionally small; the full engine can enrich it later.
         specs = [
             ("Amazon", "amazon.com", "us"),
             ("eBay", "ebay.com", "us"),
             ("Walmart", "walmart.com", "us"),
-            ("US", "", "us"),
         ]
     else:
-        # Google Shopping for these domains is queried through the US surface,
-        # while candidate classification remains China via _lens_country='cn'.
+        # Global Chinese marketplaces first.  Domestic-China-only stores stay in the
+        # slower/full engine so they do not consume the fast first-paint budget.
         specs = [
             ("AliExpress", "aliexpress.com", "us"),
             ("Temu", "temu.com", "us"),
-            ("Alibaba", "alibaba.com", "us"),
-            ("1688", "1688.com", "us"),
-            ("Taobao", "taobao.com", "us"),
             ("SHEIN", "shein.com", "us"),
-        ]
+            ("DHgate", "dhgate.com", "us"),
+            ("Banggood", "banggood.com", "us"),
+            ("Alibaba", "alibaba.com", "us"),
+            ("Made-in-China", "made-in-china.com", "us"),
+        ][:WEB_CHINA_GLOBAL_MAX_STORES]
     out, seen = [], set()
     for label, domain, gl in specs:
         key = (str(domain or "").lower(), str(gl or "").lower())
@@ -9275,40 +9284,177 @@ def _web_stream_store_specs(query, country, rank):
     return out
 
 
+def _google_organic_price_text(row):
+    """Best-effort visible price from Google organic rich snippets; no extra HTTP."""
+    if not isinstance(row, dict):
+        return ""
+    direct = str(row.get("price") or "").strip()
+    if direct:
+        return direct
+    rich = row.get("rich_snippet") or {}
+    for side in ("top", "bottom"):
+        block = rich.get(side) or {}
+        detected = block.get("detected_extensions") or {}
+        p = detected.get("price")
+        if p not in (None, ""):
+            cur = str(detected.get("currency") or "").strip()
+            return (f"{cur} {p}" if cur else str(p)).strip()
+        ext = block.get("extensions") or []
+        if isinstance(ext, list):
+            joined = " | ".join(str(x) for x in ext)
+            if joined:
+                m = re.search(r"(?i)(?:US\$|HK\$|S\$|A\$|C\$|\$|€|£|¥|￥|AED|SAR|KWD|CNY|RMB)\s*\d[\d,.]*(?:\.\d{1,3})?|\d[\d,.]*(?:\.\d{1,3})?\s*(?:USD|CNY|RMB|EUR|GBP|KWD|AED|SAR)", joined)
+                if m:
+                    return m.group(0).strip()
+    hay = " ".join(str(row.get(k) or "") for k in ("title", "snippet"))
+    m = re.search(r"(?i)(?:US\$|HK\$|S\$|A\$|C\$|\$|€|£|¥|￥|AED|SAR|KWD|CNY|RMB)\s*\d[\d,.]*(?:\.\d{1,3})?|\d[\d,.]*(?:\.\d{1,3})?\s*(?:USD|CNY|RMB|EUR|GBP|KWD|AED|SAR)", hay)
+    return m.group(0).strip() if m else ""
+
+
+def _china_global_product_url(domain, url):
+    """Reject obvious home/search/category links while keeping real product pages."""
+    try:
+        u = urllib.parse.urlparse(str(url or ""))
+        host = u.netloc.lower().replace("www.", "")
+        pathq = (u.path + ("?" + u.query if u.query else "")).lower()
+    except Exception:
+        return False
+    if not _host_matches_any(host, (domain,)):
+        return False
+    if not pathq or pathq in ("/", ""):
+        return False
+    bad = ("/search", "/category", "/categories", "/store/", "/stores/", "/blog", "/help")
+    if any(x in pathq for x in bad):
+        return False
+    positive = {
+        "aliexpress.com": ("/item/",),
+        "temu.com": ("-g-", "/goods.html", "/goods"),
+        "shein.com": ("-p-", "/product-p-"),
+        "dhgate.com": ("/product/",),
+        "banggood.com": ("-p-", "/p-"),
+        "alibaba.com": ("/product-detail/",),
+        "made-in-china.com": ("/product/",),
+    }
+    markers = positive.get(domain, ())
+    if markers and any(x in pathq for x in markers):
+        return True
+    # Google occasionally canonicalizes product URLs differently.  Keep a non-trivial
+    # same-domain page unless it is clearly a listing/navigation page.
+    return len(u.path.strip("/")) >= 12
+
+
+def _serpapi_china_global_site_request(query, label, domain, timeout_seconds=None):
+    """One regular Google site-search for a Chinese global marketplace.
+
+    This is deliberately separate per merchant so it preserves true store-level FIFO.
+    It is much more tolerant than google_shopping for Chinese global marketplaces.
+    """
+    params = {
+        "engine": "google",
+        "q": f"{query} site:{domain}",
+        "api_key": SERPAPI_API_KEY,
+        "google_domain": "google.com",
+        "gl": "us",
+        "hl": "en",
+        "num": WEB_CHINA_ORGANIC_NUM,
+        "output": "json",
+    }
+    try:
+        r = requests.get(
+            "https://serpapi.com/search.json",
+            params=params,
+            timeout=(3.5, timeout_seconds or WEB_CHINA_ORGANIC_TIMEOUT),
+        )
+        if r.status_code >= 400:
+            print(f"WEB CHINA GOOGLE HTTP {r.status_code} store={label}: {r.text[:220]}")
+            return []
+        data = r.json()
+        if data.get("error"):
+            print(f"WEB CHINA GOOGLE ERROR store={label}: {data.get('error')}")
+            return []
+        rows = data.get("organic_results") or []
+        out = []
+        for pos, row in enumerate(rows, 1):
+            link = str(row.get("link") or "").strip()
+            if not link or not _china_global_product_url(domain, link):
+                continue
+            price_text = _google_organic_price_text(row)
+            out.append({
+                "title": str(row.get("title") or query).strip(),
+                "link": link,
+                "source": label,
+                "position": int(row.get("position") or pos),
+                "section": "web_china_global_google",
+                "exact": False,
+                "thumbnail": str(row.get("thumbnail") or "").strip(),
+                "image": str(row.get("thumbnail") or "").strip(),
+                "price": price_text,
+                "price_value": None,
+                "currency": detect_currency_code(price_text, "", "cn") if price_text else "",
+                "in_stock": None,
+                "condition": "",
+                "_lens_country": "cn",
+                "_china_fallback": True,
+                "_web_global_china": True,
+            })
+            if len(out) >= max(WEB_STREAM_RESULTS_PER_STORE, 2):
+                break
+        print(f"WEB CHINA GLOBAL GOOGLE store={label} -> {len(out)} result(s)")
+        return out
+    except Exception as e:
+        print(f"WEB CHINA GLOBAL GOOGLE EXCEPTION store={label}: {e}")
+        return []
+
 def _web_store_probe_sync(query, country, lang, rank, label, domain, gl):
-    """Probe one merchant and return at most WEB_STREAM_RESULTS_PER_STORE UI cards."""
+    """Probe one merchant and return UI cards; Chinese globals use organic-first in v97."""
     market = _web_market(country)
     MARKET_CTX.value = market
     q = _shopping_clean_query(query or "")
     if not q or not SERPAPI_API_KEY:
         return []
-    search_q = f"{q} site:{domain}" if domain else q
-    hl = country_search_hl(gl) if rank == 0 else "en"
-    cards = _serpapi_shopping_request(
-        search_q,
-        gl,
-        hl=hl,
-        timeout_seconds=WEB_STREAM_STORE_HTTP_TIMEOUT,
-    )
+
     candidate_cc = (market.get("country") or DEFAULT_COUNTRY).lower() if rank == 0 else ("us" if rank == 1 else "cn")
     candidates = []
-    for card in cards or []:
-        item = _shopping_card_to_market_item(card, label, candidate_cc)
-        if not item:
-            continue
-        if domain:
-            try:
-                host = urllib.parse.urlparse(item.get("link") or "").netloc.lower().replace("www.", "")
-            except Exception:
-                host = ""
-            if not _host_matches_any(host, (domain,)):
+
+    # v97: for Chinese global marketplaces, ordinary Google site search is the fast
+    # first path.  Google Shopping site: queries are too sparse for these domains.
+    if rank == 2 and domain and WEB_CHINA_ORGANIC_FIRST:
+        candidates = _serpapi_china_global_site_request(
+            q, label, domain, timeout_seconds=WEB_CHINA_ORGANIC_TIMEOUT
+        )
+        # Do not chain a second SerpApi request inside the fast FIFO task.  Other China
+        # merchants are already running in parallel, and the full engine can enrich later.
+        # This prevents timed-out to_thread work from continuing in the background.
+        rows = _web_market_candidates_to_items(candidates, rank, lang, q)
+        return rows[:WEB_STREAM_RESULTS_PER_STORE]
+
+    # Existing Shopping path remains unchanged for local/US.
+    if not candidates:
+        search_q = f"{q} site:{domain}" if domain else q
+        hl = country_search_hl(gl) if rank == 0 else "en"
+        cards = _serpapi_shopping_request(
+            search_q,
+            gl,
+            hl=hl,
+            timeout_seconds=WEB_STREAM_STORE_HTTP_TIMEOUT,
+        )
+        for card in cards or []:
+            item = _shopping_card_to_market_item(card, label, candidate_cc)
+            if not item:
                 continue
-        if result_market_rank(item) != rank:
-            continue
-        candidates.append(item)
+            if domain:
+                try:
+                    host = urllib.parse.urlparse(item.get("link") or "").netloc.lower().replace("www.", "")
+                except Exception:
+                    host = ""
+                if not _host_matches_any(host, (domain,)):
+                    continue
+            if result_market_rank(item) != rank:
+                continue
+            candidates.append(item)
+
     rows = _web_market_candidates_to_items(candidates, rank, lang, q)
     return rows[:WEB_STREAM_RESULTS_PER_STORE]
-
 
 def _web_image_seed_sync(image_b64, mime, caption, country, lang):
     """One fast image-identification pass used before merchant FIFO probes.
@@ -9608,7 +9754,7 @@ async def web_api_search_stream(request: Request):
                 store_tasks = []
                 task_meta = {}
                 rank_remaining = {0: 0, 1: 0, 2: 0}
-                for rank in (0, 1, 2):
+                for rank in (2, 0, 1):
                     for label, domain, gl in _web_stream_store_specs(q, country, rank):
                         async def _run_store(r=rank, lab=label, dom=domain, search_gl=gl):
                             try:
@@ -9785,7 +9931,7 @@ async def web_api_image_search_stream(request: Request):
                 store_tasks = []
                 task_meta = {}
                 rank_remaining = {0: 0, 1: 0, 2: 0}
-                for rank in (0, 1, 2):
+                for rank in (2, 0, 1):
                     for label, domain, gl in _web_stream_store_specs(identity, country, rank):
                         async def _run_store(r=rank, lab=label, dom=domain, search_gl=gl):
                             try:
