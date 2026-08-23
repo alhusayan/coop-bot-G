@@ -26,7 +26,7 @@ app.add_middleware(
     allow_headers=["Content-Type", "Accept"],
     max_age=86400,
 )
-BUILD_ID = "v96.0-store-fifo-20260823"
+BUILD_ID = "v98.0-auto-country-geo-20260823"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("GLOBAL GEO -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES")
@@ -8824,7 +8824,19 @@ def process_location_message(message, bot_id):
 # FINDZIA WEB API — Shopify is frontend only; this Railway service remains engine
 # Added without changing the existing WhatsApp routes/search behavior.
 # =============================================================================
+
 WEB_API_ENABLED = env_bool("WEB_API_ENABLED", True)
+
+# v98 web auto-country detection.
+# Prefer trusted country headers when available; otherwise resolve the browser IP once
+# through a lightweight GeoIP service and cache it. Search never waits on GPS permission.
+WEB_GEO_ENABLED = env_bool("WEB_GEO_ENABLED", True)
+WEB_GEO_TIMEOUT_SECONDS = max(0.8, min(4.0, float(os.environ.get("WEB_GEO_TIMEOUT_SECONDS", "2.0"))))
+WEB_GEO_CACHE_TTL_SECONDS = max(3600, int(os.environ.get("WEB_GEO_CACHE_TTL_SECONDS", "86400")))
+WEB_GEO_PROVIDER_URL = os.environ.get("WEB_GEO_PROVIDER_URL", "https://ipwho.is/{ip}?fields=success,country_code").strip()
+WEB_GEO_CACHE = {}
+WEB_GEO_CACHE_LOCK = threading.Lock()
+
 WEB_API_MAX_QUERY_CHARS = max(40, min(500, int(os.environ.get("WEB_API_MAX_QUERY_CHARS", "220"))))
 WEB_API_MAX_IMAGE_BYTES = max(512000, min(12 * 1024 * 1024, int(os.environ.get("WEB_API_MAX_IMAGE_BYTES", str(6 * 1024 * 1024)))))
 WEB_API_RATE_PER_MINUTE = max(5, min(120, int(os.environ.get("WEB_API_RATE_PER_MINUTE", "30"))))
@@ -8842,6 +8854,13 @@ WEB_STREAM_STORE_TIMEOUT = max(4.0, min(12.0, float(os.environ.get("WEB_STREAM_S
 WEB_STREAM_STORE_HTTP_TIMEOUT = max(3.0, min(WEB_STREAM_STORE_TIMEOUT, float(os.environ.get("WEB_STREAM_STORE_HTTP_TIMEOUT_SECONDS", "7.5"))))
 WEB_STREAM_RESULTS_PER_STORE = max(1, min(2, int(os.environ.get("WEB_STREAM_RESULTS_PER_STORE", "1"))))
 WEB_STREAM_IMAGE_FINAL_MIN_RESULTS = max(2, min(10, int(os.environ.get("WEB_STREAM_IMAGE_FINAL_MIN_RESULTS", "5"))))
+# v97: Chinese global marketplaces are more important than the US wave on web.
+# Their fast probes use normal Google organic site search first because Google Shopping
+# often returns few/no cards for AliExpress/Temu/SHEIN/Alibaba-style domains.
+WEB_CHINA_ORGANIC_FIRST = env_bool("WEB_CHINA_ORGANIC_FIRST", True)
+WEB_CHINA_ORGANIC_TIMEOUT = max(3.0, min(WEB_STREAM_STORE_TIMEOUT, float(os.environ.get("WEB_CHINA_ORGANIC_TIMEOUT_SECONDS", "6.5"))))
+WEB_CHINA_GLOBAL_MAX_STORES = max(4, min(9, int(os.environ.get("WEB_CHINA_GLOBAL_MAX_STORES", "7"))))
+WEB_CHINA_ORGANIC_NUM = max(3, min(10, int(os.environ.get("WEB_CHINA_ORGANIC_NUM", "8"))))
 WEB_RATE_BUCKETS = defaultdict(deque)
 WEB_RATE_LOCK = threading.Lock()
 
@@ -9234,8 +9253,9 @@ def _web_fast_market_wave_sync(query, country, lang, rank):
 def _web_stream_store_specs(query, country, rank):
     """Return independent store probes for true FIFO streaming.
 
-    Each tuple is (label, domain, search_gl).  The probes are fired together and
-    /api/search/stream emits whichever merchant returns first, irrespective of market.
+    v97 launches Chinese GLOBAL marketplaces first.  Every merchant is still an
+    independent task, so the UI receives whichever store actually answers first;
+    no country waits for another country to finish.
     """
     market = _web_market(country)
     MARKET_CTX.value = market
@@ -9248,23 +9268,24 @@ def _web_stream_store_specs(query, country, rank):
         except Exception:
             pass
     elif rank == 1:
+        # Keep the US wave intentionally small; the full engine can enrich it later.
         specs = [
             ("Amazon", "amazon.com", "us"),
             ("eBay", "ebay.com", "us"),
             ("Walmart", "walmart.com", "us"),
-            ("US", "", "us"),
         ]
     else:
-        # Google Shopping for these domains is queried through the US surface,
-        # while candidate classification remains China via _lens_country='cn'.
+        # Global Chinese marketplaces first.  Domestic-China-only stores stay in the
+        # slower/full engine so they do not consume the fast first-paint budget.
         specs = [
             ("AliExpress", "aliexpress.com", "us"),
             ("Temu", "temu.com", "us"),
-            ("Alibaba", "alibaba.com", "us"),
-            ("1688", "1688.com", "us"),
-            ("Taobao", "taobao.com", "us"),
             ("SHEIN", "shein.com", "us"),
-        ]
+            ("DHgate", "dhgate.com", "us"),
+            ("Banggood", "banggood.com", "us"),
+            ("Alibaba", "alibaba.com", "us"),
+            ("Made-in-China", "made-in-china.com", "us"),
+        ][:WEB_CHINA_GLOBAL_MAX_STORES]
     out, seen = [], set()
     for label, domain, gl in specs:
         key = (str(domain or "").lower(), str(gl or "").lower())
@@ -9275,40 +9296,177 @@ def _web_stream_store_specs(query, country, rank):
     return out
 
 
+def _google_organic_price_text(row):
+    """Best-effort visible price from Google organic rich snippets; no extra HTTP."""
+    if not isinstance(row, dict):
+        return ""
+    direct = str(row.get("price") or "").strip()
+    if direct:
+        return direct
+    rich = row.get("rich_snippet") or {}
+    for side in ("top", "bottom"):
+        block = rich.get(side) or {}
+        detected = block.get("detected_extensions") or {}
+        p = detected.get("price")
+        if p not in (None, ""):
+            cur = str(detected.get("currency") or "").strip()
+            return (f"{cur} {p}" if cur else str(p)).strip()
+        ext = block.get("extensions") or []
+        if isinstance(ext, list):
+            joined = " | ".join(str(x) for x in ext)
+            if joined:
+                m = re.search(r"(?i)(?:US\$|HK\$|S\$|A\$|C\$|\$|€|£|¥|￥|AED|SAR|KWD|CNY|RMB)\s*\d[\d,.]*(?:\.\d{1,3})?|\d[\d,.]*(?:\.\d{1,3})?\s*(?:USD|CNY|RMB|EUR|GBP|KWD|AED|SAR)", joined)
+                if m:
+                    return m.group(0).strip()
+    hay = " ".join(str(row.get(k) or "") for k in ("title", "snippet"))
+    m = re.search(r"(?i)(?:US\$|HK\$|S\$|A\$|C\$|\$|€|£|¥|￥|AED|SAR|KWD|CNY|RMB)\s*\d[\d,.]*(?:\.\d{1,3})?|\d[\d,.]*(?:\.\d{1,3})?\s*(?:USD|CNY|RMB|EUR|GBP|KWD|AED|SAR)", hay)
+    return m.group(0).strip() if m else ""
+
+
+def _china_global_product_url(domain, url):
+    """Reject obvious home/search/category links while keeping real product pages."""
+    try:
+        u = urllib.parse.urlparse(str(url or ""))
+        host = u.netloc.lower().replace("www.", "")
+        pathq = (u.path + ("?" + u.query if u.query else "")).lower()
+    except Exception:
+        return False
+    if not _host_matches_any(host, (domain,)):
+        return False
+    if not pathq or pathq in ("/", ""):
+        return False
+    bad = ("/search", "/category", "/categories", "/store/", "/stores/", "/blog", "/help")
+    if any(x in pathq for x in bad):
+        return False
+    positive = {
+        "aliexpress.com": ("/item/",),
+        "temu.com": ("-g-", "/goods.html", "/goods"),
+        "shein.com": ("-p-", "/product-p-"),
+        "dhgate.com": ("/product/",),
+        "banggood.com": ("-p-", "/p-"),
+        "alibaba.com": ("/product-detail/",),
+        "made-in-china.com": ("/product/",),
+    }
+    markers = positive.get(domain, ())
+    if markers and any(x in pathq for x in markers):
+        return True
+    # Google occasionally canonicalizes product URLs differently.  Keep a non-trivial
+    # same-domain page unless it is clearly a listing/navigation page.
+    return len(u.path.strip("/")) >= 12
+
+
+def _serpapi_china_global_site_request(query, label, domain, timeout_seconds=None):
+    """One regular Google site-search for a Chinese global marketplace.
+
+    This is deliberately separate per merchant so it preserves true store-level FIFO.
+    It is much more tolerant than google_shopping for Chinese global marketplaces.
+    """
+    params = {
+        "engine": "google",
+        "q": f"{query} site:{domain}",
+        "api_key": SERPAPI_API_KEY,
+        "google_domain": "google.com",
+        "gl": "us",
+        "hl": "en",
+        "num": WEB_CHINA_ORGANIC_NUM,
+        "output": "json",
+    }
+    try:
+        r = requests.get(
+            "https://serpapi.com/search.json",
+            params=params,
+            timeout=(3.5, timeout_seconds or WEB_CHINA_ORGANIC_TIMEOUT),
+        )
+        if r.status_code >= 400:
+            print(f"WEB CHINA GOOGLE HTTP {r.status_code} store={label}: {r.text[:220]}")
+            return []
+        data = r.json()
+        if data.get("error"):
+            print(f"WEB CHINA GOOGLE ERROR store={label}: {data.get('error')}")
+            return []
+        rows = data.get("organic_results") or []
+        out = []
+        for pos, row in enumerate(rows, 1):
+            link = str(row.get("link") or "").strip()
+            if not link or not _china_global_product_url(domain, link):
+                continue
+            price_text = _google_organic_price_text(row)
+            out.append({
+                "title": str(row.get("title") or query).strip(),
+                "link": link,
+                "source": label,
+                "position": int(row.get("position") or pos),
+                "section": "web_china_global_google",
+                "exact": False,
+                "thumbnail": str(row.get("thumbnail") or "").strip(),
+                "image": str(row.get("thumbnail") or "").strip(),
+                "price": price_text,
+                "price_value": None,
+                "currency": detect_currency_code(price_text, "", "cn") if price_text else "",
+                "in_stock": None,
+                "condition": "",
+                "_lens_country": "cn",
+                "_china_fallback": True,
+                "_web_global_china": True,
+            })
+            if len(out) >= max(WEB_STREAM_RESULTS_PER_STORE, 2):
+                break
+        print(f"WEB CHINA GLOBAL GOOGLE store={label} -> {len(out)} result(s)")
+        return out
+    except Exception as e:
+        print(f"WEB CHINA GLOBAL GOOGLE EXCEPTION store={label}: {e}")
+        return []
+
 def _web_store_probe_sync(query, country, lang, rank, label, domain, gl):
-    """Probe one merchant and return at most WEB_STREAM_RESULTS_PER_STORE UI cards."""
+    """Probe one merchant and return UI cards; Chinese globals use organic-first in v97."""
     market = _web_market(country)
     MARKET_CTX.value = market
     q = _shopping_clean_query(query or "")
     if not q or not SERPAPI_API_KEY:
         return []
-    search_q = f"{q} site:{domain}" if domain else q
-    hl = country_search_hl(gl) if rank == 0 else "en"
-    cards = _serpapi_shopping_request(
-        search_q,
-        gl,
-        hl=hl,
-        timeout_seconds=WEB_STREAM_STORE_HTTP_TIMEOUT,
-    )
+
     candidate_cc = (market.get("country") or DEFAULT_COUNTRY).lower() if rank == 0 else ("us" if rank == 1 else "cn")
     candidates = []
-    for card in cards or []:
-        item = _shopping_card_to_market_item(card, label, candidate_cc)
-        if not item:
-            continue
-        if domain:
-            try:
-                host = urllib.parse.urlparse(item.get("link") or "").netloc.lower().replace("www.", "")
-            except Exception:
-                host = ""
-            if not _host_matches_any(host, (domain,)):
+
+    # v97: for Chinese global marketplaces, ordinary Google site search is the fast
+    # first path.  Google Shopping site: queries are too sparse for these domains.
+    if rank == 2 and domain and WEB_CHINA_ORGANIC_FIRST:
+        candidates = _serpapi_china_global_site_request(
+            q, label, domain, timeout_seconds=WEB_CHINA_ORGANIC_TIMEOUT
+        )
+        # Do not chain a second SerpApi request inside the fast FIFO task.  Other China
+        # merchants are already running in parallel, and the full engine can enrich later.
+        # This prevents timed-out to_thread work from continuing in the background.
+        rows = _web_market_candidates_to_items(candidates, rank, lang, q)
+        return rows[:WEB_STREAM_RESULTS_PER_STORE]
+
+    # Existing Shopping path remains unchanged for local/US.
+    if not candidates:
+        search_q = f"{q} site:{domain}" if domain else q
+        hl = country_search_hl(gl) if rank == 0 else "en"
+        cards = _serpapi_shopping_request(
+            search_q,
+            gl,
+            hl=hl,
+            timeout_seconds=WEB_STREAM_STORE_HTTP_TIMEOUT,
+        )
+        for card in cards or []:
+            item = _shopping_card_to_market_item(card, label, candidate_cc)
+            if not item:
                 continue
-        if result_market_rank(item) != rank:
-            continue
-        candidates.append(item)
+            if domain:
+                try:
+                    host = urllib.parse.urlparse(item.get("link") or "").netloc.lower().replace("www.", "")
+                except Exception:
+                    host = ""
+                if not _host_matches_any(host, (domain,)):
+                    continue
+            if result_market_rank(item) != rank:
+                continue
+            candidates.append(item)
+
     rows = _web_market_candidates_to_items(candidates, rank, lang, q)
     return rows[:WEB_STREAM_RESULTS_PER_STORE]
-
 
 def _web_image_seed_sync(image_b64, mime, caption, country, lang):
     """One fast image-identification pass used before merchant FIFO probes.
@@ -9546,6 +9704,125 @@ def _web_search_image_sync(image_b64, mime, caption, country, lang):
     return {"ok": True, "type": "results", "query": query, "market": market, "results": items, "source": "image_fallback"}
 
 
+
+def _web_normalize_country_code(value):
+    cc = str(value or "").strip().lower()
+    if len(cc) == 2 and cc in COUNTRY_META:
+        return cc
+    return ""
+
+
+def _web_client_ip(request: Request):
+    """Best-effort original browser IP behind Railway/proxies."""
+    for header in ("cf-connecting-ip", "true-client-ip", "x-real-ip"):
+        value = str(request.headers.get(header) or "").strip()
+        if value:
+            return value.split(",")[0].strip()
+    forwarded = str(request.headers.get("x-forwarded-for") or "").strip()
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    try:
+        return str(request.client.host or "").strip()
+    except Exception:
+        return ""
+
+
+def _web_country_from_headers(request: Request):
+    """Use a proxy/CDN country header when one exists; this costs zero network time."""
+    for header in (
+        "cf-ipcountry",
+        "x-vercel-ip-country",
+        "cloudfront-viewer-country",
+        "x-country-code",
+        "x-geo-country",
+    ):
+        cc = _web_normalize_country_code(request.headers.get(header))
+        if cc:
+            return cc, "header:" + header
+    return "", ""
+
+
+def _web_geo_country_from_ip(ip):
+    ip = str(ip or "").strip()
+    if not WEB_GEO_ENABLED or not ip:
+        return "", "disabled"
+    # Ignore obvious local/private addresses.
+    if ip in ("127.0.0.1", "::1") or ip.startswith(("10.", "192.168.", "172.16.", "172.17.", "172.18.", "172.19.", "172.2", "172.30.", "172.31.")):
+        return "", "private_ip"
+
+    now = time.time()
+    with WEB_GEO_CACHE_LOCK:
+        cached = WEB_GEO_CACHE.get(ip)
+        if cached and now - cached.get("ts", 0) < WEB_GEO_CACHE_TTL_SECONDS:
+            return cached.get("country", ""), "cache"
+
+    cc = ""
+    try:
+        url = WEB_GEO_PROVIDER_URL.format(ip=urllib.parse.quote(ip, safe=":."))
+        r = requests.get(url, timeout=(1.0, WEB_GEO_TIMEOUT_SECONDS), headers=HEADERS)
+        if r.ok:
+            data = r.json() if r.content else {}
+            if data.get("success", True) is not False:
+                cc = _web_normalize_country_code(data.get("country_code") or data.get("countryCode"))
+    except Exception as e:
+        print(f"WEB GEO LOOKUP ERR ip={ip[:32]!r}: {e.__class__.__name__}")
+
+    with WEB_GEO_CACHE_LOCK:
+        WEB_GEO_CACHE[ip] = {"country": cc, "ts": now}
+        if len(WEB_GEO_CACHE) > 5000:
+            # Cheap bounded cache cleanup.
+            oldest = sorted(WEB_GEO_CACHE.items(), key=lambda kv: kv[1].get("ts", 0))[:1000]
+            for key, _ in oldest:
+                WEB_GEO_CACHE.pop(key, None)
+    return cc, "ipwhois" if cc else "fallback"
+
+
+def _web_resolve_request_country(request: Request, supplied_country=""):
+    """
+    Explicit frontend country wins when valid.
+    Otherwise: proxy country header -> IP GeoIP -> DEFAULT_COUNTRY.
+    """
+    supplied = str(supplied_country or "").strip().lower()
+    if supplied and supplied not in ("auto", "detect", "xx"):
+        cc = _web_normalize_country_code(supplied)
+        if cc:
+            return cc, "supplied"
+
+    cc, source = _web_country_from_headers(request)
+    if cc:
+        return cc, source
+
+    cc, source = _web_geo_country_from_ip(_web_client_ip(request))
+    if cc:
+        return cc, source
+
+    return _web_normalize_country_code(DEFAULT_COUNTRY) or "kw", "default"
+
+
+@app.get("/api/geo")
+async def web_api_geo(request: Request):
+    if not WEB_API_ENABLED:
+        return Response(content=json.dumps({"ok": False, "error": "web_api_disabled"}), media_type="application/json", status_code=503)
+
+    header_cc, header_source = _web_country_from_headers(request)
+    if header_cc:
+        cc, source = header_cc, header_source
+    else:
+        cc, source = await asyncio.to_thread(_web_geo_country_from_ip, _web_client_ip(request))
+        if not cc:
+            cc, source = _web_normalize_country_code(DEFAULT_COUNTRY) or "kw", "default"
+
+    currencies = COUNTRY_CURRENCY_CODES.get(cc) or tuple()
+    return {
+        "ok": True,
+        "country": cc.upper(),
+        "country_code": cc,
+        "country_name": COUNTRY_NAMES.get(cc, cc.upper()),
+        "currency": currencies[0] if currencies else COUNTRY_CURRENCIES.get(cc, ""),
+        "source": source,
+    }
+
+
 @app.get("/api/health")
 async def web_api_health():
     return {"ok": True, "web_api": WEB_API_ENABLED, "build": BUILD_ID, "lens": bool(ENABLE_GOOGLE_LENS and SERPAPI_API_KEY)}
@@ -9567,7 +9844,7 @@ async def web_api_search_stream(request: Request):
     if not query and not payload.get("selected_option"):
         return Response(content=json.dumps({"ok": False, "error": "empty_query"}), media_type="application/json", status_code=400)
     lang = _web_language(payload.get("lang"))
-    country = str(payload.get("country") or DEFAULT_COUNTRY).strip()
+    country, country_source = await asyncio.to_thread(_web_resolve_request_country, request, payload.get("country"))
     selected_option = str(payload.get("selected_option") or "").strip()
     original_query = str(payload.get("original_query") or "").strip()
     force_specific = bool(payload.get("force_specific"))
@@ -9608,7 +9885,7 @@ async def web_api_search_stream(request: Request):
                 store_tasks = []
                 task_meta = {}
                 rank_remaining = {0: 0, 1: 0, 2: 0}
-                for rank in (0, 1, 2):
+                for rank in (2, 0, 1):
                     for label, domain, gl in _web_stream_store_specs(q, country, rank):
                         async def _run_store(r=rank, lab=label, dom=domain, search_gl=gl):
                             try:
@@ -9755,7 +10032,7 @@ async def web_api_image_search_stream(request: Request):
         return Response(content=json.dumps({"ok": False, "error": "image_too_large"}), media_type="application/json", status_code=413)
     image_b64 = base64.b64encode(image_bytes).decode("ascii")
     lang = _web_language(payload.get("lang"))
-    country = str(payload.get("country") or DEFAULT_COUNTRY).strip()
+    country, country_source = await asyncio.to_thread(_web_resolve_request_country, request, payload.get("country"))
     caption = str(payload.get("caption") or "").strip()
 
     async def _generator():
@@ -9785,7 +10062,7 @@ async def web_api_image_search_stream(request: Request):
                 store_tasks = []
                 task_meta = {}
                 rank_remaining = {0: 0, 1: 0, 2: 0}
-                for rank in (0, 1, 2):
+                for rank in (2, 0, 1):
                     for label, domain, gl in _web_stream_store_specs(identity, country, rank):
                         async def _run_store(r=rank, lab=label, dom=domain, search_gl=gl):
                             try:
@@ -9881,7 +10158,7 @@ async def web_api_search(request: Request):
     if not query and not payload.get("selected_option"):
         return Response(content=json.dumps({"ok": False, "error": "empty_query"}), media_type="application/json", status_code=400)
     lang = _web_language(payload.get("lang"))
-    country = str(payload.get("country") or DEFAULT_COUNTRY).strip()
+    country, country_source = await asyncio.to_thread(_web_resolve_request_country, request, payload.get("country"))
     selected_option = str(payload.get("selected_option") or "").strip()
     original_query = str(payload.get("original_query") or "").strip()
     force_specific = bool(payload.get("force_specific"))
@@ -9920,7 +10197,7 @@ async def web_api_image_search(request: Request):
         return Response(content=json.dumps({"ok": False, "error": "image_too_large"}), media_type="application/json", status_code=413)
     image_b64 = base64.b64encode(image_bytes).decode("ascii")
     lang = _web_language(payload.get("lang"))
-    country = str(payload.get("country") or DEFAULT_COUNTRY).strip()
+    country, country_source = await asyncio.to_thread(_web_resolve_request_country, request, payload.get("country"))
     caption = str(payload.get("caption") or "").strip()
     started = time.time()
     result = await asyncio.to_thread(_web_search_image_sync, image_b64, mime, caption, country, lang)
