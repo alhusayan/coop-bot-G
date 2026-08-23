@@ -26,7 +26,7 @@ app.add_middleware(
     allow_headers=["Content-Type", "Accept"],
     max_age=86400,
 )
-BUILD_ID = "v100.0-direct-product-pages-20260823"
+BUILD_ID = "v99.0-image-proxy-rescue-20260823"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES")
@@ -9190,7 +9190,6 @@ def _web_build_text_items(txt, urls, lang, query):
             "url": item.get("link") or "",
             "image": item.get("thumbnail") or item.get("image") or "",
         })
-    results = [row for row in results if _web_is_direct_product_page_url(row.get("url") or "", row.get("store") or "")]
     return _web_attach_best_images(results, rescue_page=True)
 
 
@@ -9323,7 +9322,6 @@ def _web_build_lens_items(lens, lang, caption=""):
             "url": (m.get("link") or "").strip(),
             "image": m.get("thumbnail") or m.get("image") or "",
         })
-    results = [row for row in results if _web_is_direct_product_page_url(row.get("url") or "", row.get("store") or "")]
     return _web_attach_best_images(results, rescue_page=True)
 
 
@@ -9356,7 +9354,6 @@ def _web_fallback_product_items(txt, urls, lang, query):
             "url": url,
             "image": "",
         })
-    rows = [row for row in rows if _web_is_direct_product_page_url(row.get("url") or "", row.get("store") or "")]
     rows = _web_attach_best_images(rows, rescue_page=True)
     rows.sort(key=lambda x: x["market_rank"])
     caps = {0: LENS_DIRECT_LOCAL_MAX, 1: LENS_DIRECT_US_MAX, 2: LENS_DIRECT_CN_MAX}
@@ -9523,108 +9520,35 @@ def _google_organic_price_text(row):
 
 
 def _china_global_product_url(domain, url):
-    """Strict direct-product-page gate for Chinese global marketplaces.
-
-    v100: category/search/store/listing pages are never emitted as shopping cards.
-    A merchant-specific positive product-page signature is required.
-    """
+    """Reject obvious home/search/category links while keeping real product pages."""
     try:
-        u = urllib.parse.urlparse(str(url or "").strip())
-        host = u.netloc.lower().split(":")[0]
-        host = host[4:] if host.startswith("www.") else host
-        path = (u.path or "").lower()
-        query = (u.query or "").lower()
-        pathq = path + ("?" + query if query else "")
+        u = urllib.parse.urlparse(str(url or ""))
+        host = u.netloc.lower().replace("www.", "")
+        pathq = (u.path + ("?" + u.query if u.query else "")).lower()
     except Exception:
         return False
-
     if not _host_matches_any(host, (domain,)):
         return False
-    if not path or path == "/":
+    if not pathq or pathq in ("/", ""):
         return False
-
-    bad_markers = (
-        "/search", "/category", "/categories", "/catalog", "/collections",
-        "/store/", "/stores/", "/shop/", "/shops/", "/wholesale/",
-        "/products?", "/product-list", "/list/", "/listing/", "/all-products",
-        "searchtext=", "searchkey=", "keyword=", "q=", "query=", "search="
-    )
-    if any(marker in pathq for marker in bad_markers):
-        return False
-
-    checks = {
-        "aliexpress.com": lambda: bool(re.search(r"/item/(?:\d+)(?:\.html)?", path)),
-        "temu.com": lambda: (
-            ("/goods.html" in path and ("goods_id=" in query or "goodsid=" in query))
-            or bool(re.search(r"-g-\d+", path))
-            or bool(re.search(r"/goods/[^/]+", path))
-        ),
-        "shein.com": lambda: bool(re.search(r"(?:-p-|/product-p-)\d+", path)),
-        "dhgate.com": lambda: (
-            "/product/" in path
-            and bool(re.search(r"(?:/|-)\d{6,}(?:\.html)?$", path))
-        ),
-        "banggood.com": lambda: bool(re.search(r"(?:-p-|/p-)\d+(?:\.html)?", path)),
-        "alibaba.com": lambda: (
-            "/product-detail/" in path
-            and bool(re.search(r"(?:_|/)\d{6,}(?:\.html)?$", path))
-        ),
-        "made-in-china.com": lambda: (
-            "/product/" in path
-            and path.endswith(".html")
-            and len(path.strip("/")) >= 18
-        ),
-    }
-    checker = checks.get(domain)
-    return bool(checker and checker())
-
-
-def _web_is_direct_product_page_url(url, store_name=""):
-    """General web-card gate: reject obvious search/category/listing URLs."""
-    raw = str(url or "").strip()
-    if not _web_is_http_url(raw):
-        return False
-    try:
-        u = urllib.parse.urlparse(raw)
-        host = u.netloc.lower().split(":")[0]
-        host = host[4:] if host.startswith("www.") else host
-        path = (u.path or "").lower()
-        query = (u.query or "").lower()
-        pathq = path + ("?" + query if query else "")
-    except Exception:
-        return False
-
-    china_domains = (
-        "aliexpress.com", "temu.com", "shein.com", "dhgate.com",
-        "banggood.com", "alibaba.com", "made-in-china.com"
-    )
-    for dom in china_domains:
-        if host == dom or host.endswith("." + dom):
-            return _china_global_product_url(dom, raw)
-
-    bad = (
-        "/search", "/search/", "/category", "/categories", "/collections/",
-        "/catalog", "/results", "/browse", "/listing", "/list/",
-        "?q=", "&q=", "search=", "query=", "keyword=", "searchterm="
-    )
+    bad = ("/search", "/category", "/categories", "/store/", "/stores/", "/blog", "/help")
     if any(x in pathq for x in bad):
         return False
-    if path in ("", "/"):
-        return False
-
-    if host.endswith("amazon.com"):
-        return bool(re.search(r"/(?:dp|gp/product)/[a-z0-9]{8,}", path))
-    if host.endswith("ebay.com"):
-        return bool(re.search(r"/itm/(?:[^/]+/)?\d{8,}", path))
-    if host.endswith("walmart.com"):
-        return "/ip/" in path
-
-    if len(path.strip("/")) < 6:
-        return False
-    nav_words = ("category", "collection", "search", "brand", "brands", "shop-all", "all-products")
-    if any(word in path for word in nav_words):
-        return False
-    return True
+    positive = {
+        "aliexpress.com": ("/item/",),
+        "temu.com": ("-g-", "/goods.html", "/goods"),
+        "shein.com": ("-p-", "/product-p-"),
+        "dhgate.com": ("/product/",),
+        "banggood.com": ("-p-", "/p-"),
+        "alibaba.com": ("/product-detail/",),
+        "made-in-china.com": ("/product/",),
+    }
+    markers = positive.get(domain, ())
+    if markers and any(x in pathq for x in markers):
+        return True
+    # Google occasionally canonicalizes product URLs differently.  Keep a non-trivial
+    # same-domain page unless it is clearly a listing/navigation page.
+    return len(u.path.strip("/")) >= 12
 
 
 def _serpapi_china_global_site_request(query, label, domain, timeout_seconds=None):
@@ -9661,8 +9585,6 @@ def _serpapi_china_global_site_request(query, label, domain, timeout_seconds=Non
         for pos, row in enumerate(rows, 1):
             link = str(row.get("link") or "").strip()
             if not link or not _china_global_product_url(domain, link):
-                if link:
-                    print(f"WEB CHINA REJECT NON-PRODUCT store={label} url={link[:160]}")
                 continue
             price_text = _google_organic_price_text(row)
             out.append({
@@ -9740,7 +9662,6 @@ def _web_store_probe_sync(query, country, lang, rank, label, domain, gl):
             candidates.append(item)
 
     rows = _web_market_candidates_to_items(candidates, rank, lang, q)
-    rows = [row for row in rows if _web_is_direct_product_page_url(row.get("url") or "", row.get("store") or label)]
     return rows[:WEB_STREAM_RESULTS_PER_STORE]
 
 def _web_image_seed_sync(image_b64, mime, caption, country, lang):
