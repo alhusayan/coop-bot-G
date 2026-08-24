@@ -26,7 +26,7 @@ app.add_middleware(
     allow_headers=["Content-Type", "Accept"],
     max_age=86400,
 )
-BUILD_ID = "v104.1-whatsapp-lens-text-price-rescue-20260824"
+BUILD_ID = "v104.2-whatsapp-lens-exact-title-price-rescue-20260824"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES")
@@ -6397,36 +6397,55 @@ def _lens_targeted_store_price_search(item, rank):
 
 
 def _fill_lens_prices_from_text_search(selected, lens, caption="", lang="ar"):
-    """WhatsApp Lens-only enrichment using the text-search Google Shopping price path.
+    """WhatsApp Lens price enrichment by mirroring the successful typed-text search.
 
-    Rules:
-    - only cards missing a Lens price are considered;
+    v104.2:
+    - for every selected Lens card missing a price, search Google Shopping using THAT
+      card's exact Lens title (the same behavior the user gets by typing the title);
+    - all exact-title searches run in parallel, so the fast Lens response is preserved;
+    - generic Lens identity search remains only a fallback;
     - same merchant + compatible product identity/size are mandatory;
-    - only price/currency are copied; Lens URL, title, store and ranking remain unchanged;
-    - broad market passes and a few exact-store passes run together under one latency budget.
+    - only price/currency are copied. Lens URL/title/store/order never change.
     """
     out = [dict(x) for x in (selected or [])]
     missing_idx = [i for i, x in enumerate(out) if not _lens_has_price(x)]
     if not missing_idx or not LENS_TEXT_PRICE_RESCUE:
         return out
-    query = _lens_price_rescue_query(lens, out, caption)
-    if not query:
-        return out
 
-    ranks = sorted({result_market_rank(out[i]) for i in missing_idx if result_market_rank(out[i]) in (0, 1, 2)})
+    fallback_query = _lens_price_rescue_query(lens, out, caption)
     market_snapshot = current_market()
-    candidates = []
-
-    # Run one broad Google Shopping text pass per needed market plus a few exact-store
-    # searches at the SAME TIME. This is much faster than broad-then-targeted serial lookup.
+    candidates_by_item = defaultdict(list)
+    shared_candidates = []
     futures = {}
-    for rank in ranks:
-        fut = LENS_HTTP_POOL.submit(
-            _run_with_market, market_snapshot, _lens_text_price_search_cards,
-            query, rank, lang,
-        )
-        futures[fut] = ("broad", rank)
 
+    # IMPORTANT: exact title per missing Lens card. This is what reproduces the
+    # successful manual text search shown by the user (e.g. exact Chloé title -> Ounass price).
+    for i in missing_idx:
+        rank = result_market_rank(out[i])
+        if rank not in (0, 1, 2):
+            continue
+        exact_q = _shopping_clean_query(out[i].get("title") or "")
+        if exact_q:
+            fut = LENS_HTTP_POOL.submit(
+                _run_with_market, market_snapshot, _lens_text_price_search_cards,
+                exact_q, rank, lang,
+            )
+            futures[fut] = ("exact", i, exact_q)
+
+    # Keep a single generic/consensus query only as fallback for cards whose title
+    # is shortened by Lens. It runs concurrently and therefore adds almost no latency.
+    ranks = sorted({result_market_rank(out[i]) for i in missing_idx if result_market_rank(out[i]) in (0, 1, 2)})
+    if fallback_query:
+        for rank in ranks:
+            fut = LENS_HTTP_POOL.submit(
+                _run_with_market, market_snapshot, _lens_text_price_search_cards,
+                fallback_query, rank, lang,
+            )
+            futures[fut] = ("fallback", rank, fallback_query)
+
+    # Store-targeted query is now a tertiary fallback only. Exact-title Shopping is
+    # normally stronger than `site:` inside Google Shopping, but keeping a few helps
+    # stores with weak titles without slowing the normal case.
     for i in missing_idx[:LENS_TEXT_PRICE_RESCUE_MAX_TARGETED]:
         rank = result_market_rank(out[i])
         if rank not in (0, 1, 2):
@@ -6435,37 +6454,39 @@ def _fill_lens_prices_from_text_search(selected, lens, caption="", lang="ar"):
             _run_with_market, market_snapshot, _lens_targeted_store_price_search,
             out[i], rank,
         )
-        futures[fut] = ("targeted", i)
+        futures[fut] = ("targeted", i, "")
 
     done, not_done = wait(list(futures), timeout=LENS_TEXT_PRICE_RESCUE_WAIT_SECONDS)
     for fut in done:
-        kind, ref = futures[fut]
+        kind, ref, q = futures[fut]
         try:
             got = fut.result() or []
-            candidates.extend(got)
-            if kind == "broad":
-                print(f"LENS TEXT PRICE PASS rank={ref} query={query[:55]!r} -> {len(got)} priced cards")
-            elif got:
-                print(f"LENS TARGETED PRICE PASS idx={ref} -> {len(got)} priced cards")
+            if kind in ("exact", "targeted"):
+                candidates_by_item[int(ref)].extend(got)
+            else:
+                shared_candidates.extend(got)
+            if got:
+                print(f"LENS PRICE {kind.upper()} ref={ref} q={q[:60]!r} -> {len(got)} priced cards")
         except Exception as e:
             print(f"LENS TEXT PRICE PASS ERR kind={kind} ref={ref}: {e}")
     for fut in not_done:
         fut.cancel()
 
-    def apply_best(i, pool):
+    def apply_best(i):
         item = out[i]
+        # Exact-title candidates are deliberately considered before the generic pool.
+        pool = list(candidates_by_item.get(i) or []) + list(shared_candidates)
         best, best_score = None, -1.0
         for cand in pool:
             score = _lens_price_rescue_match_score(item, cand)
             if score > best_score:
                 best, best_score = cand, score
-        # 0.62 is intentionally conservative; exact URL/model bonuses make true matches much stronger.
         if best is None or best_score < 0.62:
             return False
         item["price"] = best.get("price") or ""
         item["price_value"] = best.get("price_value")
         item["currency"] = best.get("currency") or ""
-        item["price_source"] = "text_search_google_shopping"
+        item["price_source"] = "text_search_exact_lens_title"
         print(
             f"LENS TEXT PRICE HIT: merchant={_lens_merchant_key(item.get('source'), item.get('link'))} "
             f"score={best_score:.2f} -> {item.get('price') or item.get('price_value')}"
@@ -6473,11 +6494,11 @@ def _fill_lens_prices_from_text_search(selected, lens, caption="", lang="ar"):
         return True
 
     for i in missing_idx:
-        apply_best(i, candidates)
+        apply_best(i)
 
     rescued = sum(1 for i in missing_idx if _lens_has_price(out[i]))
     unresolved = sum(1 for i in missing_idx if not _lens_has_price(out[i]))
-    print(f"LENS TEXT PRICE RESCUE: rescued={rescued}/{len(missing_idx)} unresolved={unresolved}")
+    print(f"LENS TEXT PRICE RESCUE v104.2: rescued={rescued}/{len(missing_idx)} unresolved={unresolved}")
     return out
 
 
@@ -6606,10 +6627,36 @@ def _lens_merchant_key(name, url=""):
         "made-in-china.com", "newegg.com", "bestbuy.com",
     )
     hay = f"{name or ''} {host}".lower()
+    nhay = normalize_name(hay)
     for dom in aliases:
         label = dom.split(".")[0]
-        if dom in hay or normalize_name(label) in normalize_name(hay):
+        if dom in hay or normalize_name(label) in nhay:
             return dom
+
+    # v104.2: Lens and Google Shopping may describe the same local merchant with
+    # different country domains/subdomains (e.g. OUNASS Kuwait vs another Ounass host).
+    # Canonicalise well-known merchant brands by brand name before falling back to host.
+    brand_aliases = {
+        "ounass": ("ounass",),
+        "bloomingdales": ("bloomingdales", "bloomingdale"),
+        "harrods": ("harrods",),
+        "vvip": ("vvip", "thevvipshop"),
+        "farfetch": ("farfetch",),
+        "netaporter": ("netaporter",),
+        "ssense": ("ssense",),
+    }
+    for canonical, keys in brand_aliases.items():
+        if any(normalize_name(k) in nhay for k in keys):
+            return canonical
+
+    # Normalise ordinary subdomains (kuwait.shop.com -> shop.com) while preserving
+    # common compound public suffixes such as co.uk.
+    if host:
+        parts = [p for p in host.split('.') if p]
+        if len(parts) >= 3 and '.'.join(parts[-2:]) in {"co.uk", "com.au", "com.cn", "com.hk", "co.jp", "co.in", "com.sa", "com.kw", "com.ae"}:
+            return '.'.join(parts[-3:])
+        if len(parts) >= 2:
+            return '.'.join(parts[-2:])
     return host or normalize_name(str(name or ""))
 
 
