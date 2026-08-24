@@ -26,7 +26,7 @@ app.add_middleware(
     allow_headers=["Content-Type", "Accept"],
     max_age=86400,
 )
-BUILD_ID = "v104.4-lens-direct-page-price-first-20260824"
+BUILD_ID = "v104.5-lens-exact-card-price-lookup-20260824"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES")
@@ -6484,11 +6484,16 @@ def _fill_lens_prices_from_merchant_pages(selected):
     return out
 
 
-def _lens_targeted_store_price_search(item, rank):
-    """Second chance for the exact Lens merchant, capped to protect WhatsApp latency."""
-    domain = _lens_price_rescue_domain(item.get("link"))
+def _lens_exact_card_price_search(item, rank):
+    """One paid Google Shopping lookup for ONE already-selected Lens card.
+
+    Query = exact Lens title + merchant name.  We do not replace the card: only a price from
+    the same merchant and a compatible product identity may be copied back.
+    """
     title = _shopping_clean_query(item.get("title") or "")
-    if not domain or not title:
+    store = re.sub(r"\s+", " ", str(item.get("source") or "")).strip()
+    domain = _lens_price_rescue_domain(item.get("link"))
+    if not title:
         return []
     m = current_market()
     if rank == 0:
@@ -6497,79 +6502,97 @@ def _lens_targeted_store_price_search(item, rank):
     elif rank == 1:
         gl, hl = "us", "en"
     else:
-        # Chinese marketplaces are often indexed more richly in global/US Shopping than gl=cn.
+        # Chinese marketplaces are generally indexed more richly from global/US Shopping.
         gl, hl = "us", "en"
-    q = f"{title} site:{domain}"
+
+    # Merchant NAME is intentionally included rather than relying only on site:domain.
+    # Google Shopping often understands retail names better than a site: operator.
+    merchant_hint = store or domain
+    q = f"{title} {merchant_hint}".strip()
     cards = _serpapi_shopping_request(q, gl, hl=hl, timeout_seconds=MARKET_FALLBACK_TIMEOUT_SECONDS)
+
+    item_key = _lens_merchant_key(item.get("source"), item.get("link"))
+    item_store_norm = normalize_name(store)
     out = []
     for card in cards or []:
         cand = _lens_price_card_from_shopping(card, rank, gl)
         if not cand:
             continue
-        if _lens_merchant_key(item.get("source"), item.get("link")) != _lens_merchant_key(cand.get("source"), cand.get("link")):
+        cand_key = _lens_merchant_key(cand.get("source"), cand.get("link"))
+        cand_store_norm = normalize_name(cand.get("source") or "")
+        same_merchant = bool(item_key and cand_key and item_key == cand_key)
+        # Fallback for feeds whose direct URL is a tracking URL and therefore hides the final host.
+        if not same_merchant and item_store_norm and cand_store_norm:
+            same_merchant = (item_store_norm in cand_store_norm or cand_store_norm in item_store_norm)
+        if not same_merchant:
             continue
+        if not sizes_compatible(extract_pack_size(item.get("title") or ""), extract_pack_size(cand.get("title") or "")):
+            continue
+        score = _price_identity_score(item.get("title") or "", cand.get("title") or "")
+        # Model/SKU conflicts are a hard rejection.
+        a = _lens_price_rescue_model_tokens(item.get("title") or "")
+        b = _lens_price_rescue_model_tokens(cand.get("title") or "")
+        if a and b and not (a & b):
+            continue
+        if score < 0.52:
+            continue
+        cand["_exact_card_score"] = score
         out.append(cand)
+    out.sort(key=lambda x: float(x.get("_exact_card_score") or 0), reverse=True)
+    print(f"LENS EXACT CARD PRICE SEARCH: store={store[:35]!r} q={q[:80]!r} -> {len(out)} match(es)")
     return out
 
 
 def _fill_lens_prices_from_text_search(selected, lens, caption="", lang="ar"):
-    """FINAL paid fallback: targeted Google Shopping only for still-unpriced Lens cards.
+    """v104.5 exact-card price enrichment.
 
-    Merchant-page extraction runs before this function.  To protect cost, there is no broad
-    per-market Shopping pass here anymore.  We spend at most LENS_TEXT_PRICE_RESCUE_MAX_TARGETED
-    SerpApi searches, each constrained to the exact Lens merchant domain/title.
+    Only final Lens cards that are missing prices are queried. One Google Shopping request per
+    card, all in parallel. Lens title/store/link/order are preserved; only price/currency are copied.
     """
     out = [dict(x) for x in (selected or [])]
     missing_idx = [i for i, x in enumerate(out) if not _lens_has_price(x)]
-    if not missing_idx or not LENS_TEXT_PRICE_RESCUE or LENS_TEXT_PRICE_RESCUE_MAX_TARGETED <= 0:
+    if not missing_idx or not LENS_TEXT_PRICE_RESCUE or not SERPAPI_API_KEY:
         return out
 
     market_snapshot = current_market()
+    chosen = missing_idx[:LENS_EXACT_CARD_PRICE_MAX]
     futures = {}
-    for i in missing_idx[:LENS_TEXT_PRICE_RESCUE_MAX_TARGETED]:
+    for i in chosen:
         rank = result_market_rank(out[i])
         if rank not in (0, 1, 2):
             continue
         fut = LENS_HTTP_POOL.submit(
-            _run_with_market, market_snapshot, _lens_targeted_store_price_search,
-            out[i], rank,
+            _run_with_market, market_snapshot, _lens_exact_card_price_search, out[i], rank
         )
         futures[fut] = i
 
     if not futures:
         return out
-
-    done, not_done = wait(list(futures), timeout=LENS_TEXT_PRICE_RESCUE_WAIT_SECONDS)
-    paid_calls = len(futures)
+    done, pending = wait(list(futures), timeout=LENS_EXACT_CARD_PRICE_WAIT_SECONDS)
     for fut in done:
         i = futures[fut]
         try:
-            pool = fut.result() or []
+            matches = fut.result() or []
         except Exception as e:
-            print(f"LENS TARGETED SHOPPING PRICE ERR idx={i}: {e}")
+            print(f"LENS EXACT CARD PRICE ERR idx={i}: {e}")
             continue
+        if not matches:
+            continue
+        best = matches[0]
         item = out[i]
-        best, best_score = None, -1.0
-        for cand in pool:
-            score = _lens_price_rescue_match_score(item, cand)
-            if score > best_score:
-                best, best_score = cand, score
-        if best is None or best_score < 0.62:
-            continue
         item["price"] = best.get("price") or ""
         item["price_value"] = best.get("price_value")
         item["currency"] = best.get("currency") or ""
-        item["price_source"] = "targeted_google_shopping"
+        item["price_source"] = "exact_card_google_shopping"
         print(
-            f"LENS TARGETED SHOPPING PRICE HIT: merchant={_lens_merchant_key(item.get('source'), item.get('link'))} "
-            f"score={best_score:.2f} -> {item.get('price') or item.get('price_value')}"
+            f"LENS EXACT CARD PRICE HIT: {(item.get('source') or '')[:35]} "
+            f"score={float(best.get('_exact_card_score') or 0):.2f} -> {item.get('price') or item.get('price_value')}"
         )
-    for fut in not_done:
+    for fut in pending:
         fut.cancel()
 
     rescued = sum(1 for i in missing_idx if _lens_has_price(out[i]))
-    unresolved = sum(1 for i in missing_idx if not _lens_has_price(out[i]))
-    print(f"LENS PAID PRICE FALLBACK: rescued={rescued}/{len(missing_idx)} unresolved={unresolved} serpapi_calls<={paid_calls}")
+    print(f"LENS EXACT CARD PRICE: rescued={rescued}/{len(missing_idx)} paid_searches={len(futures)}")
     return out
 
 
@@ -6818,39 +6841,31 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption="", image_
     if not selected:
         return False
 
-    # v104.4 PRICE PIPELINE (WhatsApp Lens results stay untouched):
-    # A) free reuse from duplicate Lens passes;
-    # B) exact merchant product-page extraction (zero SerpApi credits), in parallel with UI translation;
-    # C) only for survivors, a small paid targeted Shopping fallback for the SAME merchant.
+    # v104.5 PRICE PIPELINE (WhatsApp Lens results stay untouched):
+    # A) reuse any price already returned by another Lens pass for the same card;
+    # B) for the FINAL selected cards still missing price, run one exact-card Google Shopping
+    #    query per card (title + merchant), all in parallel. No merchant replacement.
     selected = _fill_prices_from_existing_lens_pool(selected, raw_matches)
     missing_prices = sum(1 for m in selected if not _lens_has_price(m))
-    page_future = None
-    if missing_prices and LENS_DIRECT_PAGE_PRICE_ENABLED:
+    price_future = None
+    if missing_prices and LENS_TEXT_PRICE_RESCUE and ENABLE_GOOGLE_SHOPPING and SERPAPI_API_KEY:
         market_snapshot = current_market()
-        page_future = MARKET_SUPPLEMENT_POOL.submit(
-            _run_with_market, market_snapshot, _fill_lens_prices_from_merchant_pages, selected
+        price_future = MARKET_SUPPLEMENT_POOL.submit(
+            _run_with_market, market_snapshot, _fill_lens_prices_from_text_search,
+            selected, dict(lens or {}), caption, lang,
         )
-        print(f"LENS DIRECT PAGE PRICE START: missing={missing_prices}")
+        print(f"LENS EXACT CARD PRICE START: missing={missing_prices}")
 
-    # Hide most merchant-page latency behind the existing UI translation round-trip.
+    # Keep perceived speed: translation and exact-card price lookups run at the same time.
     display_titles = translate_ui_titles([(m.get("title") or "").strip() for m in selected], lang)
 
-    if page_future is not None:
+    if price_future is not None:
         try:
-            page_selected = page_future.result(timeout=LENS_DIRECT_PAGE_PRICE_WAIT_SECONDS + 1.0)
-            if page_selected and len(page_selected) == len(selected):
-                selected = page_selected
+            enriched = price_future.result(timeout=LENS_EXACT_CARD_PRICE_WAIT_SECONDS + 1.0)
+            if enriched and len(enriched) == len(selected):
+                selected = enriched
         except Exception as e:
-            print(f"LENS DIRECT PAGE PRICE FUTURE ERR: {e}")
-
-    # Paid fallback is deliberately AFTER the free page attempt, so we do not spend a Shopping
-    # credit when the merchant page already exposes JSON-LD/meta/embedded price data.
-    missing_prices = sum(1 for m in selected if not _lens_has_price(m))
-    if missing_prices and LENS_TEXT_PRICE_RESCUE and ENABLE_GOOGLE_SHOPPING and SERPAPI_API_KEY:
-        try:
-            selected = _fill_lens_prices_from_text_search(selected, dict(lens or {}), caption, lang)
-        except Exception as e:
-            print(f"LENS PAID PRICE FALLBACK ERR: {e}")
+            print(f"LENS EXACT CARD PRICE FUTURE ERR: {e}")
 
     missing_prices = sum(1 for m in selected if not _lens_has_price(m))
     if missing_prices:
