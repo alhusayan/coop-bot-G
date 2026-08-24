@@ -26,7 +26,7 @@ app.add_middleware(
     allow_headers=["Content-Type", "Accept"],
     max_age=86400,
 )
-BUILD_ID = "v104.2-whatsapp-lens-exact-title-price-rescue-20260824"
+BUILD_ID = "v104.3-whatsapp-lens-priced-text-replacement-20260824"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES")
@@ -6472,24 +6472,85 @@ def _fill_lens_prices_from_text_search(selected, lens, caption="", lang="ar"):
     for fut in not_done:
         fut.cancel()
 
+    # v104.3: Lens identifies the product; text Shopping is allowed to replace an
+    # unpriced Lens merchant with a priced merchant for the SAME product/market.
+    # This mirrors what the user sees when typing the Lens title manually.
+    used_urls = {str(x.get("link") or "").split("#", 1)[0] for x in out if _lens_has_price(x)}
+    used_merchants = {_lens_merchant_key(x.get("source"), x.get("link")) for x in out if _lens_has_price(x)}
+
+    def _cross_merchant_identity_score(item, cand):
+        if not item or not cand:
+            return -1.0
+        if result_market_rank(item) != int(cand.get("rank", 99)):
+            return -1.0
+        it = str(item.get("title") or "")
+        ct = str(cand.get("title") or "")
+        if not sizes_compatible(extract_pack_size(it), extract_pack_size(ct)):
+            return -1.0
+        im = _lens_price_rescue_model_tokens(it)
+        cm = _lens_price_rescue_model_tokens(ct)
+        if im and cm and not (im & cm):
+            return -1.0
+        score = _price_identity_score(it, ct)
+        if im and (im & cm):
+            score += 0.30
+        # Exact-title pass gets a small preference over the generic fallback.
+        return score
+
     def apply_best(i):
         item = out[i]
-        # Exact-title candidates are deliberately considered before the generic pool.
         pool = list(candidates_by_item.get(i) or []) + list(shared_candidates)
+
+        # 1) First try same merchant: safest case, copy price only.
         best, best_score = None, -1.0
         for cand in pool:
             score = _lens_price_rescue_match_score(item, cand)
             if score > best_score:
                 best, best_score = cand, score
-        if best is None or best_score < 0.62:
+        if best is not None and best_score >= 0.62:
+            item["price"] = best.get("price") or ""
+            item["price_value"] = best.get("price_value")
+            item["currency"] = best.get("currency") or ""
+            item["price_source"] = "text_search_same_merchant"
+            used_urls.add(str(item.get("link") or "").split("#", 1)[0])
+            used_merchants.add(_lens_merchant_key(item.get("source"), item.get("link")))
+            print(f"LENS TEXT PRICE SAME-MERCHANT HIT score={best_score:.2f} -> {item.get('price') or item.get('price_value')}")
+            return True
+
+        # 2) Correct behavior for WhatsApp Lens: if Lens merchant has no usable price,
+        # replace that CARD with a priced text-search result for the same product/market.
+        # Do not show 'Price at store' when the text engine already has a priced offer.
+        ranked = []
+        for cand in pool:
+            url = str(cand.get("link") or "").split("#", 1)[0]
+            merchant = _lens_merchant_key(cand.get("source"), cand.get("link"))
+            if not url or url in used_urls:
+                continue
+            score = _cross_merchant_identity_score(item, cand)
+            if score < 0:
+                continue
+            # Prefer a fresh merchant so one store does not occupy several Lens slots.
+            novelty = 0.08 if merchant and merchant not in used_merchants else 0.0
+            ranked.append((score + novelty, cand))
+        ranked.sort(key=lambda x: x[0], reverse=True)
+        if not ranked or ranked[0][0] < 0.66:
             return False
+
+        best_score, best = ranked[0]
+        old_store = item.get("source") or ""
+        item["title"] = best.get("title") or item.get("title") or ""
+        item["source"] = best.get("source") or item.get("source") or ""
+        item["link"] = best.get("link") or item.get("link") or ""
         item["price"] = best.get("price") or ""
         item["price_value"] = best.get("price_value")
         item["currency"] = best.get("currency") or ""
-        item["price_source"] = "text_search_exact_lens_title"
+        item["price_source"] = "text_search_priced_replacement"
+        item["_replaced_unpriced_lens_store"] = old_store
+        used_urls.add(str(item.get("link") or "").split("#", 1)[0])
+        used_merchants.add(_lens_merchant_key(item.get("source"), item.get("link")))
         print(
-            f"LENS TEXT PRICE HIT: merchant={_lens_merchant_key(item.get('source'), item.get('link'))} "
-            f"score={best_score:.2f} -> {item.get('price') or item.get('price_value')}"
+            f"LENS TEXT PRICED REPLACEMENT: {old_store!r} -> {item.get('source')!r} "
+            f"score={best_score:.2f} price={item.get('price') or item.get('price_value')}"
         )
         return True
 
@@ -6498,7 +6559,7 @@ def _fill_lens_prices_from_text_search(selected, lens, caption="", lang="ar"):
 
     rescued = sum(1 for i in missing_idx if _lens_has_price(out[i]))
     unresolved = sum(1 for i in missing_idx if not _lens_has_price(out[i]))
-    print(f"LENS TEXT PRICE RESCUE v104.2: rescued={rescued}/{len(missing_idx)} unresolved={unresolved}")
+    print(f"LENS TEXT PRICE RESCUE v104.3: rescued={rescued}/{len(missing_idx)} unresolved={unresolved}")
     return out
 
 
