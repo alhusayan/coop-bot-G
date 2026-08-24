@@ -26,7 +26,7 @@ app.add_middleware(
     allow_headers=["Content-Type", "Accept"],
     max_age=86400,
 )
-BUILD_ID = "v104.1-whatsapp-lens-text-price-rescue-20260824"
+BUILD_ID = "v104.4-lens-direct-page-price-first-20260824"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES")
@@ -177,12 +177,19 @@ SHOPPING_RESULT_LIMIT = max(5, int(os.environ.get("SHOPPING_RESULT_LIMIT", "20")
 # كل استدعاء Immersive يستهلك كريدت SerpApi؛ نحدد سقفاً لكل بحث.
 IMMERSIVE_LOOKUPS_MAX = max(0, int(os.environ.get("IMMERSIVE_LOOKUPS_MAX", "3")))
 IMMERSIVE_MORE_STORES = env_bool("IMMERSIVE_MORE_STORES", True)
-# v104.1 WhatsApp Lens price rescue: when Lens finds the correct merchant/product but
-# omits the price, reuse the same Google Shopping text-search engine only to enrich price.
-# The Lens URL/title/store stay untouched. This path is used only by WhatsApp direct Lens.
+# v104.4 WhatsApp Lens price pipeline:
+# 1) keep Lens result/store/url/order exactly as returned;
+# 2) if Lens has no price, read the SAME merchant product page first (no SerpApi credit);
+# 3) only if that fails, use a small targeted Google Shopping fallback for the same merchant.
+# This avoids turning image search into typed search and preserves the strong Lens result set.
+LENS_DIRECT_PAGE_PRICE_ENABLED = env_bool("LENS_DIRECT_PAGE_PRICE_ENABLED", True)
+LENS_DIRECT_PAGE_PRICE_MAX = max(1, min(10, int(os.environ.get("LENS_DIRECT_PAGE_PRICE_MAX", "10"))))
+LENS_DIRECT_PAGE_PRICE_TIMEOUT_SECONDS = max(2.0, min(6.0, float(os.environ.get("LENS_DIRECT_PAGE_PRICE_TIMEOUT_SECONDS", "3.5"))))
+LENS_DIRECT_PAGE_PRICE_WAIT_SECONDS = max(2.0, min(7.0, float(os.environ.get("LENS_DIRECT_PAGE_PRICE_WAIT_SECONDS", "4.0"))))
+# Backward-compatible switch name: now controls only the FINAL paid Shopping fallback.
 LENS_TEXT_PRICE_RESCUE = env_bool("LENS_TEXT_PRICE_RESCUE", True)
 LENS_TEXT_PRICE_RESCUE_MAX_TARGETED = max(0, min(4, int(os.environ.get("LENS_TEXT_PRICE_RESCUE_MAX_TARGETED", "3"))))
-LENS_TEXT_PRICE_RESCUE_WAIT_SECONDS = max(4, min(12, int(os.environ.get("LENS_TEXT_PRICE_RESCUE_WAIT_SECONDS", "8"))))
+LENS_TEXT_PRICE_RESCUE_WAIT_SECONDS = max(3, min(8, int(os.environ.get("LENS_TEXT_PRICE_RESCUE_WAIT_SECONDS", "5"))))
 SHOPPING_POOL = ThreadPoolExecutor(max_workers=4)
 LOCAL_SHOPPING_POOL = ThreadPoolExecutor(max_workers=max(4, int(os.environ.get("LOCAL_SHOPPING_WORKERS", "6"))))
 LOCAL_SHOPPING_PRIMARY_PASSES = max(1, min(3, int(os.environ.get("LOCAL_SHOPPING_PRIMARY_PASSES", "2"))))
@@ -6368,6 +6375,115 @@ def _lens_text_price_search_cards(query, rank, lang="ar"):
     return out
 
 
+def _lens_direct_page_price_one(item):
+    """Read price from the exact Lens product URL without spending a SerpApi search credit.
+
+    This is deliberately conservative: the Lens URL/title/store are never replaced.  We only
+    accept a positive price from a page that still parses as a product and is not explicitly OOS.
+    """
+    if not isinstance(item, dict):
+        return None
+    url = str(item.get("link") or "").strip()
+    if not url.startswith(("http://", "https://")):
+        return None
+    if is_blocked_store(item.get("source") or "", url):
+        return None
+
+    # Reuse the existing verified-page cache when available.
+    now = time.time()
+    cached = VERIFIED_PAGE_CACHE.get(url)
+    if cached and now - float(cached.get("ts") or 0) < 600:
+        info = cached.get("data") or {}
+        if info.get("is_product", True) and info.get("available", True) is not False:
+            try:
+                price = float(info.get("price")) if info.get("price") not in (None, "") else None
+            except Exception:
+                price = None
+            if price and price > 0:
+                rank = result_market_rank(item)
+                fallback_cur = ((current_market().get("currency") or "").upper() if rank == 0 else ("USD" if rank == 1 else "CNY" if rank == 2 else ""))
+                currency = (info.get("currency") or fallback_cur or "").upper().strip()
+                return {"price": str(price), "price_value": price, "currency": currency, "price_source": "merchant_page_cache"}
+
+    headers = dict(HEADERS)
+    headers.update({
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.8,ar;q=0.6",
+        "Cache-Control": "no-cache",
+    })
+    try:
+        r = requests.get(
+            url, headers=headers, allow_redirects=True,
+            timeout=(2.0, LENS_DIRECT_PAGE_PRICE_TIMEOUT_SECONDS),
+        )
+        if r.status_code >= 400:
+            print(f"LENS DIRECT PAGE PRICE HTTP {r.status_code}: {url[:100]}")
+            return None
+        ctype = (r.headers.get("content-type") or "").lower()
+        if ctype and "html" not in ctype and "text" not in ctype:
+            return None
+        final_url = r.url or url
+        html = r.text[:1500000]
+        if len(html) < 600:
+            return None
+        info = parse_product_data(html, final_url) or {}
+        # Cache under the original Lens URL because that is what future result cards use.
+        if info:
+            VERIFIED_PAGE_CACHE[url] = {"data": info, "ts": time.time()}
+            _prune_verified_page_cache()
+        if not info or info.get("is_product", True) is False or info.get("available", True) is False:
+            return None
+        try:
+            price = float(info.get("price")) if info.get("price") not in (None, "") else None
+        except Exception:
+            price = None
+        if price is None or price <= 0:
+            return None
+        rank = result_market_rank(item)
+        fallback_cur = ((current_market().get("currency") or "").upper() if rank == 0 else ("USD" if rank == 1 else "CNY" if rank == 2 else ""))
+        currency = (info.get("currency") or fallback_cur or "").upper().strip()
+        print(f"LENS DIRECT PAGE PRICE HIT: {(item.get('source') or '')[:35]} -> {price} {currency}")
+        return {"price": str(price), "price_value": price, "currency": currency, "price_source": "merchant_page"}
+    except Exception as e:
+        print(f"LENS DIRECT PAGE PRICE ERR: {(item.get('source') or '')[:35]} {e.__class__.__name__}")
+        return None
+
+
+def _fill_lens_prices_from_merchant_pages(selected):
+    """Enrich missing Lens prices from their exact merchant pages in parallel, at zero SerpApi cost."""
+    out = [dict(x) for x in (selected or [])]
+    missing_idx = [i for i, x in enumerate(out) if not _lens_has_price(x)]
+    if not missing_idx or not LENS_DIRECT_PAGE_PRICE_ENABLED:
+        return out
+
+    market_snapshot = current_market()
+    chosen_idx = missing_idx[:LENS_DIRECT_PAGE_PRICE_MAX]
+    futures = {
+        LENS_HTTP_POOL.submit(_run_with_market, market_snapshot, _lens_direct_page_price_one, out[i]): i
+        for i in chosen_idx
+    }
+    done, pending = wait(list(futures), timeout=LENS_DIRECT_PAGE_PRICE_WAIT_SECONDS)
+    for fut in done:
+        i = futures[fut]
+        try:
+            got = fut.result() or None
+        except Exception as e:
+            print(f"LENS DIRECT PAGE FUTURE ERR idx={i}: {e}")
+            got = None
+        if not got:
+            continue
+        item = out[i]
+        for k in ("price", "price_value", "currency", "price_source"):
+            if got.get(k) not in (None, ""):
+                item[k] = got.get(k)
+    for fut in pending:
+        fut.cancel()
+
+    rescued = sum(1 for i in missing_idx if _lens_has_price(out[i]))
+    print(f"LENS DIRECT PAGE PRICE: rescued={rescued}/{len(missing_idx)} paid_searches=0")
+    return out
+
+
 def _lens_targeted_store_price_search(item, rank):
     """Second chance for the exact Lens merchant, capped to protect WhatsApp latency."""
     domain = _lens_price_rescue_domain(item.get("link"))
@@ -6397,36 +6513,19 @@ def _lens_targeted_store_price_search(item, rank):
 
 
 def _fill_lens_prices_from_text_search(selected, lens, caption="", lang="ar"):
-    """WhatsApp Lens-only enrichment using the text-search Google Shopping price path.
+    """FINAL paid fallback: targeted Google Shopping only for still-unpriced Lens cards.
 
-    Rules:
-    - only cards missing a Lens price are considered;
-    - same merchant + compatible product identity/size are mandatory;
-    - only price/currency are copied; Lens URL, title, store and ranking remain unchanged;
-    - broad market passes and a few exact-store passes run together under one latency budget.
+    Merchant-page extraction runs before this function.  To protect cost, there is no broad
+    per-market Shopping pass here anymore.  We spend at most LENS_TEXT_PRICE_RESCUE_MAX_TARGETED
+    SerpApi searches, each constrained to the exact Lens merchant domain/title.
     """
     out = [dict(x) for x in (selected or [])]
     missing_idx = [i for i, x in enumerate(out) if not _lens_has_price(x)]
-    if not missing_idx or not LENS_TEXT_PRICE_RESCUE:
-        return out
-    query = _lens_price_rescue_query(lens, out, caption)
-    if not query:
+    if not missing_idx or not LENS_TEXT_PRICE_RESCUE or LENS_TEXT_PRICE_RESCUE_MAX_TARGETED <= 0:
         return out
 
-    ranks = sorted({result_market_rank(out[i]) for i in missing_idx if result_market_rank(out[i]) in (0, 1, 2)})
     market_snapshot = current_market()
-    candidates = []
-
-    # Run one broad Google Shopping text pass per needed market plus a few exact-store
-    # searches at the SAME TIME. This is much faster than broad-then-targeted serial lookup.
     futures = {}
-    for rank in ranks:
-        fut = LENS_HTTP_POOL.submit(
-            _run_with_market, market_snapshot, _lens_text_price_search_cards,
-            query, rank, lang,
-        )
-        futures[fut] = ("broad", rank)
-
     for i in missing_idx[:LENS_TEXT_PRICE_RESCUE_MAX_TARGETED]:
         rank = result_market_rank(out[i])
         if rank not in (0, 1, 2):
@@ -6435,49 +6534,42 @@ def _fill_lens_prices_from_text_search(selected, lens, caption="", lang="ar"):
             _run_with_market, market_snapshot, _lens_targeted_store_price_search,
             out[i], rank,
         )
-        futures[fut] = ("targeted", i)
+        futures[fut] = i
+
+    if not futures:
+        return out
 
     done, not_done = wait(list(futures), timeout=LENS_TEXT_PRICE_RESCUE_WAIT_SECONDS)
+    paid_calls = len(futures)
     for fut in done:
-        kind, ref = futures[fut]
+        i = futures[fut]
         try:
-            got = fut.result() or []
-            candidates.extend(got)
-            if kind == "broad":
-                print(f"LENS TEXT PRICE PASS rank={ref} query={query[:55]!r} -> {len(got)} priced cards")
-            elif got:
-                print(f"LENS TARGETED PRICE PASS idx={ref} -> {len(got)} priced cards")
+            pool = fut.result() or []
         except Exception as e:
-            print(f"LENS TEXT PRICE PASS ERR kind={kind} ref={ref}: {e}")
-    for fut in not_done:
-        fut.cancel()
-
-    def apply_best(i, pool):
+            print(f"LENS TARGETED SHOPPING PRICE ERR idx={i}: {e}")
+            continue
         item = out[i]
         best, best_score = None, -1.0
         for cand in pool:
             score = _lens_price_rescue_match_score(item, cand)
             if score > best_score:
                 best, best_score = cand, score
-        # 0.62 is intentionally conservative; exact URL/model bonuses make true matches much stronger.
         if best is None or best_score < 0.62:
-            return False
+            continue
         item["price"] = best.get("price") or ""
         item["price_value"] = best.get("price_value")
         item["currency"] = best.get("currency") or ""
-        item["price_source"] = "text_search_google_shopping"
+        item["price_source"] = "targeted_google_shopping"
         print(
-            f"LENS TEXT PRICE HIT: merchant={_lens_merchant_key(item.get('source'), item.get('link'))} "
+            f"LENS TARGETED SHOPPING PRICE HIT: merchant={_lens_merchant_key(item.get('source'), item.get('link'))} "
             f"score={best_score:.2f} -> {item.get('price') or item.get('price_value')}"
         )
-        return True
-
-    for i in missing_idx:
-        apply_best(i, candidates)
+    for fut in not_done:
+        fut.cancel()
 
     rescued = sum(1 for i in missing_idx if _lens_has_price(out[i]))
     unresolved = sum(1 for i in missing_idx if not _lens_has_price(out[i]))
-    print(f"LENS TEXT PRICE RESCUE: rescued={rescued}/{len(missing_idx)} unresolved={unresolved}")
+    print(f"LENS PAID PRICE FALLBACK: rescued={rescued}/{len(missing_idx)} unresolved={unresolved} serpapi_calls<={paid_calls}")
     return out
 
 
@@ -6726,31 +6818,39 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption="", image_
     if not selected:
         return False
 
-    # v104.1 PRICE-SMART + TEXT-PRICE RESCUE (WhatsApp only).
-    # First reuse free price data already returned by Lens. If some selected cards are still missing
-    # price, start a Google Shopping text-price lookup in parallel with UI-title translation.
-    # IMPORTANT: enrichment copies price/currency only; Lens URL/title/store/order are never replaced.
+    # v104.4 PRICE PIPELINE (WhatsApp Lens results stay untouched):
+    # A) free reuse from duplicate Lens passes;
+    # B) exact merchant product-page extraction (zero SerpApi credits), in parallel with UI translation;
+    # C) only for survivors, a small paid targeted Shopping fallback for the SAME merchant.
     selected = _fill_prices_from_existing_lens_pool(selected, raw_matches)
     missing_prices = sum(1 for m in selected if not _lens_has_price(m))
-    price_future = None
-    if missing_prices and LENS_TEXT_PRICE_RESCUE and ENABLE_GOOGLE_SHOPPING and SERPAPI_API_KEY:
+    page_future = None
+    if missing_prices and LENS_DIRECT_PAGE_PRICE_ENABLED:
         market_snapshot = current_market()
-        price_future = MARKET_SUPPLEMENT_POOL.submit(
-            _run_with_market, market_snapshot, _fill_lens_prices_from_text_search,
-            selected, dict(lens or {}), caption, lang,
+        page_future = MARKET_SUPPLEMENT_POOL.submit(
+            _run_with_market, market_snapshot, _fill_lens_prices_from_merchant_pages, selected
         )
-        print(f"LENS TEXT PRICE RESCUE START: missing={missing_prices}")
+        print(f"LENS DIRECT PAGE PRICE START: missing={missing_prices}")
 
-    # UI translation runs while price rescue is on the network, hiding most of the extra latency.
+    # Hide most merchant-page latency behind the existing UI translation round-trip.
     display_titles = translate_ui_titles([(m.get("title") or "").strip() for m in selected], lang)
 
-    if price_future is not None:
+    if page_future is not None:
         try:
-            rescued_selected = price_future.result(timeout=LENS_TEXT_PRICE_RESCUE_WAIT_SECONDS + 2)
-            if rescued_selected and len(rescued_selected) == len(selected):
-                selected = rescued_selected
+            page_selected = page_future.result(timeout=LENS_DIRECT_PAGE_PRICE_WAIT_SECONDS + 1.0)
+            if page_selected and len(page_selected) == len(selected):
+                selected = page_selected
         except Exception as e:
-            print(f"LENS TEXT PRICE RESCUE FUTURE ERR: {e}")
+            print(f"LENS DIRECT PAGE PRICE FUTURE ERR: {e}")
+
+    # Paid fallback is deliberately AFTER the free page attempt, so we do not spend a Shopping
+    # credit when the merchant page already exposes JSON-LD/meta/embedded price data.
+    missing_prices = sum(1 for m in selected if not _lens_has_price(m))
+    if missing_prices and LENS_TEXT_PRICE_RESCUE and ENABLE_GOOGLE_SHOPPING and SERPAPI_API_KEY:
+        try:
+            selected = _fill_lens_prices_from_text_search(selected, dict(lens or {}), caption, lang)
+        except Exception as e:
+            print(f"LENS PAID PRICE FALLBACK ERR: {e}")
 
     missing_prices = sum(1 for m in selected if not _lens_has_price(m))
     if missing_prices:
