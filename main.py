@@ -26,7 +26,7 @@ app.add_middleware(
     allow_headers=["Content-Type", "Accept"],
     max_age=86400,
 )
-BUILD_ID = "v104.3-whatsapp-lens-priced-text-replacement-20260824"
+BUILD_ID = "v105.0-whatsapp-image-text-engine-20260824"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES")
@@ -177,12 +177,6 @@ SHOPPING_RESULT_LIMIT = max(5, int(os.environ.get("SHOPPING_RESULT_LIMIT", "20")
 # كل استدعاء Immersive يستهلك كريدت SerpApi؛ نحدد سقفاً لكل بحث.
 IMMERSIVE_LOOKUPS_MAX = max(0, int(os.environ.get("IMMERSIVE_LOOKUPS_MAX", "3")))
 IMMERSIVE_MORE_STORES = env_bool("IMMERSIVE_MORE_STORES", True)
-# v104.1 WhatsApp Lens price rescue: when Lens finds the correct merchant/product but
-# omits the price, reuse the same Google Shopping text-search engine only to enrich price.
-# The Lens URL/title/store stay untouched. This path is used only by WhatsApp direct Lens.
-LENS_TEXT_PRICE_RESCUE = env_bool("LENS_TEXT_PRICE_RESCUE", True)
-LENS_TEXT_PRICE_RESCUE_MAX_TARGETED = max(0, min(4, int(os.environ.get("LENS_TEXT_PRICE_RESCUE_MAX_TARGETED", "3"))))
-LENS_TEXT_PRICE_RESCUE_WAIT_SECONDS = max(4, min(12, int(os.environ.get("LENS_TEXT_PRICE_RESCUE_WAIT_SECONDS", "8"))))
 SHOPPING_POOL = ThreadPoolExecutor(max_workers=4)
 LOCAL_SHOPPING_POOL = ThreadPoolExecutor(max_workers=max(4, int(os.environ.get("LOCAL_SHOPPING_WORKERS", "6"))))
 LOCAL_SHOPPING_PRIMARY_PASSES = max(1, min(3, int(os.environ.get("LOCAL_SHOPPING_PRIMARY_PASSES", "2"))))
@@ -6243,326 +6237,6 @@ def _fill_prices_from_existing_lens_pool(selected, pool):
     return out
 
 
-def _lens_price_rescue_domain(url):
-    try:
-        host = urllib.parse.urlparse(str(url or "")).netloc.lower().split(":")[0]
-        return host[4:] if host.startswith("www.") else host
-    except Exception:
-        return ""
-
-
-def _lens_price_rescue_model_tokens(title):
-    """Model/SKU-like tokens used to prevent borrowing a price from a nearby variant."""
-    return {
-        t.lower() for t in re.findall(r"[A-Za-z0-9][A-Za-z0-9._/+\-]*", str(title or ""))
-        if re.search(r"\d", t) and len(t) >= 3
-    }
-
-
-def _lens_price_rescue_query(lens, selected, caption=""):
-    """Prefer Lens consensus identity, then chosen/result title, then user caption."""
-    candidates = [
-        str((lens or {}).get("relevance_target") or "").strip(),
-        str(((lens or {}).get("chosen") or {}).get("title") or "").strip(),
-        str((lens or {}).get("query") or "").strip(),
-        str((selected or [{}])[0].get("title") or "").strip() if selected else "",
-        str(caption or "").strip(),
-    ]
-    for q in candidates:
-        q = _shopping_clean_query(q)
-        if q:
-            return q
-    return ""
-
-
-def _lens_price_card_from_shopping(card, rank, fallback_gl=""):
-    """Normalize a raw Google Shopping card into source-price fields safe for Lens display."""
-    if not isinstance(card, dict):
-        return None
-    link = (card.get("link") or "").strip()
-    direct = _shopping_direct_url(link) or link
-    if not direct.startswith(("http://", "https://")):
-        return None
-    source = (card.get("source") or "").strip()
-    if is_blocked_store(source, direct):
-        return None
-    price_text = str(card.get("price") or "").strip()
-    price_value = card.get("extracted_price")
-    try:
-        numeric = float(price_value) if price_value not in (None, "") else None
-    except Exception:
-        numeric = None
-    if numeric is None:
-        numeric = _extract_numeric_price(price_text)
-    if numeric is None or numeric <= 0:
-        return None
-
-    local_cc = (current_market().get("country") or DEFAULT_COUNTRY).lower()
-    fallback_cc = local_cc if rank == 0 else ("us" if rank == 1 else "cn")
-    fallback_cur = (current_market().get("currency") or "").upper() if rank == 0 else ("USD" if rank == 1 else "CNY")
-    currency = detect_currency_code(price_text, fallback_cur, fallback_gl or fallback_cc)
-    return {
-        "title": (card.get("title") or "").strip(),
-        "source": source,
-        "link": direct,
-        "price": price_text,
-        "price_value": numeric,
-        "currency": currency,
-        "rank": rank,
-    }
-
-
-def _lens_price_rescue_match_score(item, cand):
-    """Conservative same-merchant product match. Price never changes Lens identity or URL."""
-    if not item or not cand:
-        return -1.0
-    item_key = _lens_merchant_key(item.get("source"), item.get("link"))
-    cand_key = _lens_merchant_key(cand.get("source"), cand.get("link"))
-    if not item_key or item_key != cand_key:
-        return -1.0
-    if result_market_rank(item) != int(cand.get("rank", 99)):
-        return -1.0
-
-    item_title = str(item.get("title") or "")
-    cand_title = str(cand.get("title") or "")
-    if not sizes_compatible(extract_pack_size(item_title), extract_pack_size(cand_title)):
-        return -1.0
-
-    item_models = _lens_price_rescue_model_tokens(item_title)
-    cand_models = _lens_price_rescue_model_tokens(cand_title)
-    if item_models and cand_models and not (item_models & cand_models):
-        return -1.0
-
-    score = _price_identity_score(item_title, cand_title)
-    item_url = str(item.get("link") or "").split("#", 1)[0]
-    cand_url = str(cand.get("link") or "").split("#", 1)[0]
-    if item_url and cand_url and item_url.split("?", 1)[0].rstrip("/") == cand_url.split("?", 1)[0].rstrip("/"):
-        score += 0.35
-    # If Lens title carries a model/SKU, require that model to survive the text result.
-    if item_models:
-        if item_models & cand_models:
-            score += 0.35
-        elif cand_models:
-            return -1.0
-    return score
-
-
-def _lens_text_price_search_cards(query, rank, lang="ar"):
-    """One fast Google Shopping text-search pass for price enrichment only."""
-    if not query or not SERPAPI_API_KEY or not ENABLE_GOOGLE_SHOPPING:
-        return []
-    m = current_market()
-    if rank == 0:
-        gl = (m.get("country") or DEFAULT_COUNTRY).lower()
-        hl = (m.get("search_hl") or country_search_hl(gl) or "en").lower()
-    elif rank == 1:
-        gl, hl = "us", "en"
-    else:
-        gl, hl = "cn", (country_search_hl("cn") or "zh")
-    cards = _serpapi_shopping_request(query, gl, hl=hl, timeout_seconds=MARKET_FALLBACK_TIMEOUT_SECONDS)
-    out = []
-    for card in cards or []:
-        cand = _lens_price_card_from_shopping(card, rank, gl)
-        if cand:
-            out.append(cand)
-    return out
-
-
-def _lens_targeted_store_price_search(item, rank):
-    """Second chance for the exact Lens merchant, capped to protect WhatsApp latency."""
-    domain = _lens_price_rescue_domain(item.get("link"))
-    title = _shopping_clean_query(item.get("title") or "")
-    if not domain or not title:
-        return []
-    m = current_market()
-    if rank == 0:
-        gl = (m.get("country") or DEFAULT_COUNTRY).lower()
-        hl = (m.get("search_hl") or country_search_hl(gl) or "en").lower()
-    elif rank == 1:
-        gl, hl = "us", "en"
-    else:
-        # Chinese marketplaces are often indexed more richly in global/US Shopping than gl=cn.
-        gl, hl = "us", "en"
-    q = f"{title} site:{domain}"
-    cards = _serpapi_shopping_request(q, gl, hl=hl, timeout_seconds=MARKET_FALLBACK_TIMEOUT_SECONDS)
-    out = []
-    for card in cards or []:
-        cand = _lens_price_card_from_shopping(card, rank, gl)
-        if not cand:
-            continue
-        if _lens_merchant_key(item.get("source"), item.get("link")) != _lens_merchant_key(cand.get("source"), cand.get("link")):
-            continue
-        out.append(cand)
-    return out
-
-
-def _fill_lens_prices_from_text_search(selected, lens, caption="", lang="ar"):
-    """WhatsApp Lens price enrichment by mirroring the successful typed-text search.
-
-    v104.2:
-    - for every selected Lens card missing a price, search Google Shopping using THAT
-      card's exact Lens title (the same behavior the user gets by typing the title);
-    - all exact-title searches run in parallel, so the fast Lens response is preserved;
-    - generic Lens identity search remains only a fallback;
-    - same merchant + compatible product identity/size are mandatory;
-    - only price/currency are copied. Lens URL/title/store/order never change.
-    """
-    out = [dict(x) for x in (selected or [])]
-    missing_idx = [i for i, x in enumerate(out) if not _lens_has_price(x)]
-    if not missing_idx or not LENS_TEXT_PRICE_RESCUE:
-        return out
-
-    fallback_query = _lens_price_rescue_query(lens, out, caption)
-    market_snapshot = current_market()
-    candidates_by_item = defaultdict(list)
-    shared_candidates = []
-    futures = {}
-
-    # IMPORTANT: exact title per missing Lens card. This is what reproduces the
-    # successful manual text search shown by the user (e.g. exact Chloé title -> Ounass price).
-    for i in missing_idx:
-        rank = result_market_rank(out[i])
-        if rank not in (0, 1, 2):
-            continue
-        exact_q = _shopping_clean_query(out[i].get("title") or "")
-        if exact_q:
-            fut = LENS_HTTP_POOL.submit(
-                _run_with_market, market_snapshot, _lens_text_price_search_cards,
-                exact_q, rank, lang,
-            )
-            futures[fut] = ("exact", i, exact_q)
-
-    # Keep a single generic/consensus query only as fallback for cards whose title
-    # is shortened by Lens. It runs concurrently and therefore adds almost no latency.
-    ranks = sorted({result_market_rank(out[i]) for i in missing_idx if result_market_rank(out[i]) in (0, 1, 2)})
-    if fallback_query:
-        for rank in ranks:
-            fut = LENS_HTTP_POOL.submit(
-                _run_with_market, market_snapshot, _lens_text_price_search_cards,
-                fallback_query, rank, lang,
-            )
-            futures[fut] = ("fallback", rank, fallback_query)
-
-    # Store-targeted query is now a tertiary fallback only. Exact-title Shopping is
-    # normally stronger than `site:` inside Google Shopping, but keeping a few helps
-    # stores with weak titles without slowing the normal case.
-    for i in missing_idx[:LENS_TEXT_PRICE_RESCUE_MAX_TARGETED]:
-        rank = result_market_rank(out[i])
-        if rank not in (0, 1, 2):
-            continue
-        fut = LENS_HTTP_POOL.submit(
-            _run_with_market, market_snapshot, _lens_targeted_store_price_search,
-            out[i], rank,
-        )
-        futures[fut] = ("targeted", i, "")
-
-    done, not_done = wait(list(futures), timeout=LENS_TEXT_PRICE_RESCUE_WAIT_SECONDS)
-    for fut in done:
-        kind, ref, q = futures[fut]
-        try:
-            got = fut.result() or []
-            if kind in ("exact", "targeted"):
-                candidates_by_item[int(ref)].extend(got)
-            else:
-                shared_candidates.extend(got)
-            if got:
-                print(f"LENS PRICE {kind.upper()} ref={ref} q={q[:60]!r} -> {len(got)} priced cards")
-        except Exception as e:
-            print(f"LENS TEXT PRICE PASS ERR kind={kind} ref={ref}: {e}")
-    for fut in not_done:
-        fut.cancel()
-
-    # v104.3: Lens identifies the product; text Shopping is allowed to replace an
-    # unpriced Lens merchant with a priced merchant for the SAME product/market.
-    # This mirrors what the user sees when typing the Lens title manually.
-    used_urls = {str(x.get("link") or "").split("#", 1)[0] for x in out if _lens_has_price(x)}
-    used_merchants = {_lens_merchant_key(x.get("source"), x.get("link")) for x in out if _lens_has_price(x)}
-
-    def _cross_merchant_identity_score(item, cand):
-        if not item or not cand:
-            return -1.0
-        if result_market_rank(item) != int(cand.get("rank", 99)):
-            return -1.0
-        it = str(item.get("title") or "")
-        ct = str(cand.get("title") or "")
-        if not sizes_compatible(extract_pack_size(it), extract_pack_size(ct)):
-            return -1.0
-        im = _lens_price_rescue_model_tokens(it)
-        cm = _lens_price_rescue_model_tokens(ct)
-        if im and cm and not (im & cm):
-            return -1.0
-        score = _price_identity_score(it, ct)
-        if im and (im & cm):
-            score += 0.30
-        # Exact-title pass gets a small preference over the generic fallback.
-        return score
-
-    def apply_best(i):
-        item = out[i]
-        pool = list(candidates_by_item.get(i) or []) + list(shared_candidates)
-
-        # 1) First try same merchant: safest case, copy price only.
-        best, best_score = None, -1.0
-        for cand in pool:
-            score = _lens_price_rescue_match_score(item, cand)
-            if score > best_score:
-                best, best_score = cand, score
-        if best is not None and best_score >= 0.62:
-            item["price"] = best.get("price") or ""
-            item["price_value"] = best.get("price_value")
-            item["currency"] = best.get("currency") or ""
-            item["price_source"] = "text_search_same_merchant"
-            used_urls.add(str(item.get("link") or "").split("#", 1)[0])
-            used_merchants.add(_lens_merchant_key(item.get("source"), item.get("link")))
-            print(f"LENS TEXT PRICE SAME-MERCHANT HIT score={best_score:.2f} -> {item.get('price') or item.get('price_value')}")
-            return True
-
-        # 2) Correct behavior for WhatsApp Lens: if Lens merchant has no usable price,
-        # replace that CARD with a priced text-search result for the same product/market.
-        # Do not show 'Price at store' when the text engine already has a priced offer.
-        ranked = []
-        for cand in pool:
-            url = str(cand.get("link") or "").split("#", 1)[0]
-            merchant = _lens_merchant_key(cand.get("source"), cand.get("link"))
-            if not url or url in used_urls:
-                continue
-            score = _cross_merchant_identity_score(item, cand)
-            if score < 0:
-                continue
-            # Prefer a fresh merchant so one store does not occupy several Lens slots.
-            novelty = 0.08 if merchant and merchant not in used_merchants else 0.0
-            ranked.append((score + novelty, cand))
-        ranked.sort(key=lambda x: x[0], reverse=True)
-        if not ranked or ranked[0][0] < 0.66:
-            return False
-
-        best_score, best = ranked[0]
-        old_store = item.get("source") or ""
-        item["title"] = best.get("title") or item.get("title") or ""
-        item["source"] = best.get("source") or item.get("source") or ""
-        item["link"] = best.get("link") or item.get("link") or ""
-        item["price"] = best.get("price") or ""
-        item["price_value"] = best.get("price_value")
-        item["currency"] = best.get("currency") or ""
-        item["price_source"] = "text_search_priced_replacement"
-        item["_replaced_unpriced_lens_store"] = old_store
-        used_urls.add(str(item.get("link") or "").split("#", 1)[0])
-        used_merchants.add(_lens_merchant_key(item.get("source"), item.get("link")))
-        print(
-            f"LENS TEXT PRICED REPLACEMENT: {old_store!r} -> {item.get('source')!r} "
-            f"score={best_score:.2f} price={item.get('price') or item.get('price_value')}"
-        )
-        return True
-
-    for i in missing_idx:
-        apply_best(i)
-
-    rescued = sum(1 for i in missing_idx if _lens_has_price(out[i]))
-    unresolved = sum(1 for i in missing_idx if not _lens_has_price(out[i]))
-    print(f"LENS TEXT PRICE RESCUE v104.3: rescued={rescued}/{len(missing_idx)} unresolved={unresolved}")
-    return out
-
-
 def _lens_price_text_local(m, market_rank, lang):
     """Return a clear local-currency price, plus original foreign price when known."""
     raw_price = str(m.get("price") or "").strip()
@@ -6688,36 +6362,10 @@ def _lens_merchant_key(name, url=""):
         "made-in-china.com", "newegg.com", "bestbuy.com",
     )
     hay = f"{name or ''} {host}".lower()
-    nhay = normalize_name(hay)
     for dom in aliases:
         label = dom.split(".")[0]
-        if dom in hay or normalize_name(label) in nhay:
+        if dom in hay or normalize_name(label) in normalize_name(hay):
             return dom
-
-    # v104.2: Lens and Google Shopping may describe the same local merchant with
-    # different country domains/subdomains (e.g. OUNASS Kuwait vs another Ounass host).
-    # Canonicalise well-known merchant brands by brand name before falling back to host.
-    brand_aliases = {
-        "ounass": ("ounass",),
-        "bloomingdales": ("bloomingdales", "bloomingdale"),
-        "harrods": ("harrods",),
-        "vvip": ("vvip", "thevvipshop"),
-        "farfetch": ("farfetch",),
-        "netaporter": ("netaporter",),
-        "ssense": ("ssense",),
-    }
-    for canonical, keys in brand_aliases.items():
-        if any(normalize_name(k) in nhay for k in keys):
-            return canonical
-
-    # Normalise ordinary subdomains (kuwait.shop.com -> shop.com) while preserving
-    # common compound public suffixes such as co.uk.
-    if host:
-        parts = [p for p in host.split('.') if p]
-        if len(parts) >= 3 and '.'.join(parts[-2:]) in {"co.uk", "com.au", "com.cn", "com.hk", "co.jp", "co.in", "com.sa", "com.kw", "com.ae"}:
-            return '.'.join(parts[-3:])
-        if len(parts) >= 2:
-            return '.'.join(parts[-2:])
     return host or normalize_name(str(name or ""))
 
 
@@ -6834,35 +6482,16 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption="", image_
     if not selected:
         return False
 
-    # v104.1 PRICE-SMART + TEXT-PRICE RESCUE (WhatsApp only).
-    # First reuse free price data already returned by Lens. If some selected cards are still missing
-    # price, start a Google Shopping text-price lookup in parallel with UI-title translation.
-    # IMPORTANT: enrichment copies price/currency only; Lens URL/title/store/order are never replaced.
+    # v80.1 PRICE-SMART: لا نزور صفحات المتاجر ولا نحذف أي بطاقة.
+    # نستعيد السعر مجاناً من بيانات Lens الموجودة: النص المضمّن أو نسخة أخرى من نفس
+    # المتجر/الموديل في تمريرات Lens المتعددة. إذا بقي السعر مجهولاً تبقى البطاقة.
     selected = _fill_prices_from_existing_lens_pool(selected, raw_matches)
     missing_prices = sum(1 for m in selected if not _lens_has_price(m))
-    price_future = None
-    if missing_prices and LENS_TEXT_PRICE_RESCUE and ENABLE_GOOGLE_SHOPPING and SERPAPI_API_KEY:
-        market_snapshot = current_market()
-        price_future = MARKET_SUPPLEMENT_POOL.submit(
-            _run_with_market, market_snapshot, _fill_lens_prices_from_text_search,
-            selected, dict(lens or {}), caption, lang,
-        )
-        print(f"LENS TEXT PRICE RESCUE START: missing={missing_prices}")
-
-    # UI translation runs while price rescue is on the network, hiding most of the extra latency.
-    display_titles = translate_ui_titles([(m.get("title") or "").strip() for m in selected], lang)
-
-    if price_future is not None:
-        try:
-            rescued_selected = price_future.result(timeout=LENS_TEXT_PRICE_RESCUE_WAIT_SECONDS + 2)
-            if rescued_selected and len(rescued_selected) == len(selected):
-                selected = rescued_selected
-        except Exception as e:
-            print(f"LENS TEXT PRICE RESCUE FUTURE ERR: {e}")
-
-    missing_prices = sum(1 for m in selected if not _lens_has_price(m))
     if missing_prices:
-        print(f"LENS PRICE-SMART: preserved {missing_prices} card(s) with no safely verified numeric price")
+        print(f"LENS PRICE-SMART: preserved {missing_prices} card(s) with no safely extracted numeric price")
+
+    # الترجمة للواجهة فقط بعد اكتمال البحث والاختيار؛ لا تؤثر على Lens أو Google أو الفلاتر.
+    display_titles = translate_ui_titles([(m.get("title") or "").strip() for m in selected], lang)
     for m, display_title in zip(selected, display_titles):
         m["_display_title"] = display_title
 
@@ -6903,143 +6532,154 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption="", image_
         _send_more_results_choice(from_number, bot_id, lang)
     return sent > 0
 
+def _image_text_engine_queries(lens, caption=""):
+    """v105: turn Lens into identification only; shopping is delegated to typed search.
+
+    Returns a primary and optional fallback query. We never use Lens merchants/prices here.
+    The primary favors a concrete Lens product title; visual identity is only a fallback/anchor.
+    """
+    caption = re.sub(r"\s+", " ", str(caption or "")).strip()
+    chosen = re.sub(r"\s+", " ", str(((lens or {}).get("chosen") or {}).get("title") or "")).strip()
+    visual = re.sub(r"\s+", " ", str((lens or {}).get("visual_identity") or "")).strip()
+    query_field = re.sub(r"\s+", " ", str((lens or {}).get("query") or "")).strip()
+    aliases = [re.sub(r"\s+", " ", str(x or "")).strip() for x in ((lens or {}).get("aliases") or [])]
+
+    def _usable(s):
+        if not s:
+            return False
+        # Avoid generic identities that are too weak to drive a price search.
+        toks = [t for t in re.findall(r"[A-Za-z0-9\u0600-\u06FF]+", s) if len(t) > 1]
+        return len(toks) >= 2
+
+    candidates = []
+    # Prefer the clean commercial identity already extracted from the original image.
+    # The chosen Lens title is the fallback if the visual identity is too generic or unavailable.
+    for value in (visual, chosen, query_field, *aliases):
+        if _usable(value) and value.lower() not in {x.lower() for x in candidates}:
+            candidates.append(value)
+
+    if not candidates:
+        return caption, ""
+
+    primary = candidates[0]
+    fallback = next((x for x in candidates[1:] if normalize_name(x) != normalize_name(primary)), "")
+
+    # Caption usually contains a useful constraint such as size/color/model. Keep it without
+    # replacing the product identity. For an empty/noisy caption we search the identity alone.
+    if caption and normalize_name(caption) not in normalize_name(primary):
+        primary = f"{primary} {caption}".strip()
+        if fallback:
+            fallback = f"{fallback} {caption}".strip()
+
+    return primary[:220], fallback[:220]
+
+
+def _run_whatsapp_image_through_text_engine(from_number, bot_id, lang, lens, caption=""):
+    """v105 radical image flow: Lens identifies; v77.7 typed engine does ALL shopping.
+
+    This intentionally does not merge Lens offers, borrow Lens prices, visit Lens merchants,
+    or preserve Lens store cards. Image and typed requests now share the exact same search and
+    presentation code, so price behavior is identical by construction.
+    """
+    primary, fallback = _image_text_engine_queries(lens, caption)
+    if not primary:
+        return False, ""
+
+    queries = [primary]
+    if fallback and normalize_name(fallback) != normalize_name(primary):
+        queries.append(fallback)
+
+    for idx, query in enumerate(queries):
+        try:
+            print(f"IMAGE->TEXT ENGINE attempt={idx+1} query={query!r}")
+            txt, urls = v26_text_search(query, lang)
+        except Exception as e:
+            print(f"IMAGE->TEXT ENGINE SEARCH ERR attempt={idx+1}: {e}")
+            txt, urls = "", {}
+
+        if txt and text77_extract_store_offers(txt, limit=30):
+            LAST_SEARCH[from_number] = {"product": query}
+            if send_text_lens_style_results(from_number, txt, urls, bot_id, lang, query):
+                print(f"IMAGE->TEXT ENGINE SUCCESS query={query!r}")
+                return True, query
+
+        # Fallback query is tried only if the first typed search produced no usable result,
+        # so the normal successful path keeps the same excellent latency.
+        print(f"IMAGE->TEXT ENGINE EMPTY attempt={idx+1}")
+
+    return False, primary
+
+
 def process_single_image(message,bot_id,lang="ar"):
-    from_number=message["from"]
-    market = activate_market(from_number)
-    caption=(message.get("image",{}) or {}).get("caption","").strip()
-    # Start media download immediately; status message is sent in parallel.
-    WORKERS.submit(send_whatsapp_text, from_number, T(lang,"identifying"), bot_id)
+    """v105 WhatsApp image search.
+
+    Architecture:
+        IMAGE -> Lens/Vision identity -> EXACT SAME typed-search engine -> typed-result UI
+
+    Lens results are NEVER sent as shopping results on WhatsApp in this flow.
+    This removes the entire Lens-price problem instead of trying to repair it afterwards.
+    """
+    from_number = message["from"]
+    activate_market(from_number)
+    caption = (message.get("image", {}) or {}).get("caption", "").strip()
+
+    # Keep the quick acknowledgement asynchronous so media download starts immediately.
+    WORKERS.submit(send_whatsapp_text, from_number, T(lang, "identifying"), bot_id)
     try:
-        b64,mime=download_whatsapp_media(message["image"]["id"])
+        b64, mime = download_whatsapp_media(message["image"]["id"])
     except Exception as e:
-        # روابط ميديا واتساب تنتهي صلاحيتها بسرعة؛ لا نترك المستخدم بدون رد.
         print(f"MEDIA DOWNLOAD ERR: {e}")
         send_whatsapp_text(from_number, T(lang, "image_error"), bot_id)
         return
 
-    # v73: Lens المباشر سريع ومحدود زمنياً. إذا لم يرجع نتيجة لا نعيد Lens مرة ثانية في fallback.
-    lens_direct_attempted = False
-    if LENS_DIRECT_MODE and ENABLE_GOOGLE_LENS and SERPAPI_API_KEY and PUBLIC_BASE_URL:
-        lens_direct_attempted = True
-        lens_direct = google_lens_lookup(b64, mime, lang, caption, light=True)
-        if lens_direct.get("matches"):
-            if send_lens_direct_results(
-                from_number, lens_direct, bot_id, lang, caption,
-                image_b64=b64, image_mime=mime
-            ):
-                return
-        print("LENS DIRECT MODE: no Google results -> full pipeline fallback")
-        send_whatsapp_text(from_number, T(lang, "lens_none"), bot_id)
-
-    # FUSION ROUTER (قوة الخلط):
-    # 1) Lens و Vision يشتغلان بالتوازي — لا ننتظر أحدهما ليبدأ الآخر.
-    # 2) Lens متعدد التمريرات (products -> all -> wide) = نفس قوة تطبيق Lens.
-    # 3) الهوية النهائية = دمج عنوان Lens الدقيق + الاسم العربي/الإنجليزي من Vision،
-    #    فيبحث النص بكل المرادفات ويغطي الفهرسة العربية والإنجليزية معاً.
-    lens_future = None
-    if (not lens_direct_attempted and LENS_PARALLEL_WITH_VISION and ENABLE_GOOGLE_LENS
-            and SERPAPI_API_KEY and PUBLIC_BASE_URL):
-        lens_future = LENS_POOL.submit(_run_with_market, market, google_lens_lookup, b64, mime, lang, caption)
-
-    vision_name = identify_product_with_retry(b64, mime, lang)
-    force_fashion_lens = is_fashion_identity(vision_name, caption)
-    use_lens, route_reason = lens_routing_decision(vision_name, caption)
-    use_lens = force_fashion_lens or use_lens
-    # إذا جرّبنا Lens المباشر بالفعل فلا نكرر نفس الشبكة مرة ثانية؛ نكمل Vision/Text فوراً.
-    if lens_direct_attempted:
-        use_lens = False
-        route_reason = "LENS_DIRECT_ALREADY_ATTEMPTED"
-
+    # 1) Fast Lens is identification only. Its stores/prices are deliberately ignored.
     lens = {"aliases": [], "matches": [], "query": ""}
-    if use_lens:
-        if lens_future is not None:
-            try:
-                lens = lens_future.result(timeout=LENS_TOTAL_TIMEOUT_SECONDS + 5) or lens
-            except Exception as e:
-                print(f"LENS PARALLEL ERR: {e}")
-        else:
-            lens = google_lens_lookup(b64, mime, lang, caption or vision_name)
-    elif lens_future is not None:
-        # الراوتر قرر Vision-first (عبوة نصية)؛ نتيجة اللينز المتوازية تُهمل بهدوء.
-        lens_future.cancel()
+    if ENABLE_GOOGLE_LENS and SERPAPI_API_KEY and PUBLIC_BASE_URL:
+        try:
+            lens = google_lens_lookup(b64, mime, lang, caption, light=True) or lens
+        except Exception as e:
+            print(f"IMAGE ID LENS ERR: {e}")
 
-    active_lens = None
-    identity_source = "VISION"
-    combined_name = vision_name
-    lens_title = ((lens.get("chosen") or {}).get("title") or lens.get("query") or "").strip()
-
-    print(f"SMART ROUTER: vision={vision_name!r} use_lens={use_lens} force_fashion={force_fashion_lens} reason={route_reason}")
-    if use_lens:
-        if force_fashion_lens and lens_title:
-            # Exact design/pattern matters in fashion. Never downgrade to the generic Vision label.
-            lens["force_lens_only"] = True
-            combined_name = " | ".join(fuse_identity_aliases(lens_title, "", lens.get("aliases")))
-            active_lens = lens
-            identity_source = "LENS_FASHION_FORCED"
-            print(f"FASHION LENS FORCED: {lens_title}")
-        elif lens_title and vision_name:
-            if identity_candidates_agree(vision_name, lens_title):
-                # الاتفاق = أقوى حالة: نبحث بعنوان Lens الدقيق + اسمي Vision العربي والإنجليزي معاً.
-                combined_name = " | ".join(fuse_identity_aliases(lens_title, vision_name))
-                active_lens = lens
-                identity_source = "VISION+LENS_AGREE_FUSED"
-                print("IDENTITY JUDGE SKIPPED: candidates already agree -> fused aliases")
-            else:
-                judged_name, active_lens, identity_source = choose_image_identity(
-                    b64, mime, lens, vision_name
-                )
-                if active_lens:
-                    # حتى بعد فوز Lens، مرادفات Vision تبقى في البحث النصي لتغطية الفهرسة العربية.
-                    combined_name = " | ".join(fuse_identity_aliases(judged_name, vision_name))
-                else:
-                    combined_name = judged_name
-        elif lens_title:
-            combined_name = " | ".join(fuse_identity_aliases(lens_title, "", lens.get("aliases")))
-            active_lens, identity_source = lens, "LENS_ONLY"
-        else:
-            combined_name, active_lens, identity_source = vision_name, None, "VISION_LENS_EMPTY"
-    else:
-        print("GOOGLE LENS SKIPPED BY SMART ROUTER")
-
-    print(f"FINAL IMAGE IDENTITY [{identity_source}]: {combined_name}")
-
-    if combined_name and caption:
-        request_query = f"{caption} — {combined_name}"
-        prompt_text = (
-            f"هوية المنتج المعتمدة: {combined_name}\n"
-            f"طلب المستخدم: {caption}\n"
-            "ابحث عن نفس المنتج فقط. لا توسع البحث إلى منتج يشاركه المكون أو اللون أو الفئة. "
-            f"{LANG_INSTR[lang]}"
+    # 2) If Lens gave a commercial identity, immediately use the typed engine.
+    primary, _ = _image_text_engine_queries(lens, caption)
+    if primary:
+        ok, used_query = _run_whatsapp_image_through_text_engine(
+            from_number, bot_id, lang, lens, caption
         )
-        txt,urls=search_product(request_query, lang, prompt_text=prompt_text, lens_context=active_lens)
-        query = request_query
-    elif combined_name:
-        txt,urls=search_product(combined_name, lang, lens_context=active_lens)
-        query = combined_name
-    else:
-        txt, urls = "", {}
-        query = caption
-
-    if query:
-        LAST_SEARCH[from_number] = {"product": query}
-    if not txt or not extract_store_offers(txt):
-        if txt and (is_service_answer(txt) or is_informational_answer(txt)):
-            send_product_result(from_number, txt, urls, bot_id, lang, query)
+        if ok:
             return
-        if query:
-            # حتى بدون نتائج Lens، البحث العالمي والبدائل يعملان نصياً بالاسم المحدد.
-            _store_pending_global(from_number, bot_id, lang, query, active_lens, prompt_text if (combined_name and caption) else None)
-            send_not_found_choice(from_number, bot_id, lang)
-        else:
-            send_whatsapp_text(from_number,T(lang,"cant_identify"),bot_id)
-        return
-    result_type = send_product_result(from_number, txt, urls, bot_id, lang, query)
-    if result_type == "none" and query:
-        # كانت هناك عروض لكن كل روابطها غير مباشرة؛ نعرض الخيارات الثلاثة مثل مسار النص تماماً.
-        _store_pending_global(from_number, bot_id, lang, query, active_lens, prompt_text if (combined_name and caption) else None)
-        send_not_found_choice(from_number, bot_id, lang)
-        return
-    # v79: لا نرسل الخريطة تلقائياً بعد النتائج. تبقى متاحة فقط إذا طلبها المستخدم صراحة.
+
+    # 3) Identification fallback only. Still no Lens shopping results: Vision name goes into
+    # the exact same typed engine. This runs only when Lens identity/search was unusable.
+    try:
+        vision_name = identify_product_with_retry(b64, mime, lang)
+    except Exception as e:
+        print(f"IMAGE VISION FALLBACK ERR: {e}")
+        vision_name = ""
+
+    vision_name = re.sub(r"\s+", " ", str(vision_name or "")).strip()
+    if vision_name:
+        fallback_lens = {
+            "chosen": {"title": vision_name},
+            "visual_identity": vision_name,
+            "query": vision_name,
+            "aliases": [vision_name],
+            "matches": [],
+        }
+        ok, used_query = _run_whatsapp_image_through_text_engine(
+            from_number, bot_id, lang, fallback_lens, caption
+        )
+        if ok:
+            return
+        final_query = used_query or vision_name
+    else:
+        final_query = primary or caption
+
+    if final_query:
+        LAST_SEARCH[from_number] = {"product": final_query}
+        send_whatsapp_text(from_number, T(lang, "not_found"), bot_id)
+    else:
+        send_whatsapp_text(from_number, T(lang, "cant_identify"), bot_id)
 
 def identify_image_product(msg):
     try:
