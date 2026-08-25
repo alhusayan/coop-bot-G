@@ -3456,13 +3456,106 @@ def send_maps_button(from_number, product, bot_id, lang):
     url = maps_search_url(product, m.get("lat"), m.get("lng")) if m.get("lat") is not None and m.get("lng") is not None else maps_search_url(product)
     send_whatsapp_cta(from_number, T(lang, "maps_body"), url, bot_id, T(lang, "maps_btn"))
 
+# ---- v105: نتائج الخدمات = بطاقة لكل مزود + زر يفتح واتساب برسالة طلب الخدمة جاهزة ----
+_SERVICE_LINE_RE = re.compile(
+    r"^\s*(🏆|✅|•)\s*(.+?)\s*\(\s*(?:هاتف|Phone|phone|Tel|tel)\s*[:：]\s*([^)]+?)\s*\)\s*(?:(?:—|–|-|:|،|,)\s*)?(.*)$"
+)
+
+SERVICE_REQUEST_MSG = {
+    "ar": "السلام عليكم 👋\nأحتاج {service}\nمتى ممكن؟",
+    "en": "Hello 👋\nI need {service}\nWhen are you available?",
+    "fr": "Bonjour 👋\nJ’ai besoin de : {service}\nQuand êtes-vous disponible ?",
+    "es": "Hola 👋\nNecesito: {service}\n¿Cuándo está disponible?",
+    "pt": "Olá 👋\nPreciso de: {service}\nQuando está disponível?",
+    "tr": "Merhaba 👋\n{service} lazım\nNe zaman müsaitsiniz?",
+    "ru": "Здравствуйте 👋\nНужно: {service}\nКогда вы доступны?",
+    "zh": "您好 👋\n我需要：{service}\n什么时候方便？",
+    "hi": "नमस्ते 👋\nमुझे चाहिए: {service}\nआप कब उपलब्ध हैं?",
+    "ur": "السلام علیکم 👋\nمجھے چاہیے: {service}\nآپ کب دستیاب ہیں؟",
+}
+SERVICE_REQUEST_BUTTON = {
+    "ar": "📲 اطلب الخدمة", "en": "📲 Request service", "fr": "📲 Demander", "es": "📲 Solicitar",
+    "pt": "📲 Solicitar", "tr": "📲 Talep gönder", "ru": "📲 Запросить", "zh": "📲 预约服务",
+    "hi": "📲 सेवा मांगें", "ur": "📲 سروس مانگیں",
+}
+
+def _market_dial_code(cc=None):
+    """رمز الاتصال الدولي لسوق المستخدم الحالي (الكويت = 965) من جدول CALLING_CODE_TO_COUNTRY."""
+    cc = (cc or current_market().get("country") or DEFAULT_COUNTRY or "kw").lower()
+    codes = [code for code, c in CALLING_CODE_TO_COUNTRY.items() if c == cc]
+    if not codes:
+        return "965" if cc == "kw" else ""
+    return sorted(codes, key=len)[0]
+
+def _service_phone_intl(raw_phone, dial=None):
+    """يحوّل رقم المزود كما ظهر في النتائج إلى صيغة دولية بدون + مناسبة لرابط wa.me."""
+    digits = re.sub(r"\D", "", str(raw_phone or ""))
+    if digits.startswith("00"):
+        digits = digits[2:]
+    if len(digits) < 6:
+        return ""
+    dial = dial if dial is not None else _market_dial_code()
+    if dial and digits.startswith(dial) and len(digits) >= len(dial) + 6:
+        return digits
+    return f"{dial}{digits.lstrip('0')}" if dial else digits
+
+def _service_request_link(intl_phone, service_desc, lang="ar"):
+    template = SERVICE_REQUEST_MSG.get(lang) or SERVICE_REQUEST_MSG["en"]
+    service = re.sub(r"\s+", " ", str(service_desc or "")).strip()[:120]
+    msg = template.format(service=service) if service else template.split("\n")[0]
+    return f"https://wa.me/{intl_phone}?text={urllib.parse.quote(msg)}"
+
+def parse_service_providers(txt):
+    """يقسم رد الخدمات إلى: مقدمة نصية (إجابة سؤال فني إن وجدت) + قائمة مزودين {emoji, name, phone, detail}."""
+    intro, providers = [], []
+    for line in (txt or "").splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        if re.match(r"(?im)^\s*LINKS\s*:", s):
+            continue
+        m = _SERVICE_LINE_RE.match(s)
+        if m:
+            providers.append({"emoji": m.group(1), "name": m.group(2).strip(" -—–:"), "phone": m.group(3).strip(), "detail": (m.group(4) or "").strip(" -—–")})
+        elif not providers:
+            intro.append(s)
+    return "\n".join(intro).strip(), providers
+
+def send_service_result(from_number, txt, bot_id, lang, service_desc):
+    """v105: الأرقام تظهر كنص عادي، والرابط الوحيد هو زر واتساب برسالة طلب الخدمة الجاهزة.
+
+    يعيد عدد البطاقات المرسلة؛ عند فشل التحليل يرسل النص كما هو (السلوك القديم)."""
+    intro, providers = parse_service_providers(txt)
+    if not providers:
+        send_whatsapp_text(from_number, txt, bot_id)
+        return 0
+    if intro:
+        send_whatsapp_text(from_number, intro, bot_id)
+    dial = _market_dial_code()
+    sent = 0
+    button = (SERVICE_REQUEST_BUTTON.get(lang) or SERVICE_REQUEST_BUTTON["en"])[:20]
+    for p in providers[:MAX_STORES]:
+        body = f"{p['emoji']} {p['name']}\n📞 {p['phone']}"
+        if p.get("detail"):
+            body += f"\n{p['detail']}"
+        intl = _service_phone_intl(p["phone"], dial)
+        if not intl:
+            send_whatsapp_text(from_number, body, bot_id)
+            continue
+        ok = send_whatsapp_cta(from_number, body, _service_request_link(intl, service_desc, lang), bot_id, button)
+        if not ok:
+            send_whatsapp_text(from_number, body, bot_id)
+        sent += 1
+    return sent
+
+
 def send_product_result(from_number, txt, urls, bot_id, lang, query, best_only=False):
     if not txt:
         send_whatsapp_text(from_number, T(lang, "not_found"), bot_id)
         return "none"
     if is_service_answer(txt):
-        # الخدمات: رسالة واحدة فيها الاسم والرقم، وبعدها الخريطة بدون روابط متاجر.
-        send_whatsapp_text(from_number, txt, bot_id)
+        # v105: الخدمات: بطاقة لكل مزود (اسم + رقم كنص) وزر واتساب برسالة طلب الخدمة.
+        send_service_result(from_number, txt, bot_id, lang, query)
         return "service"
     offers = extract_store_offers(txt)
     if not offers:
@@ -5771,8 +5864,13 @@ def process_interactive_message(message, bot_id):
 
         # Critical fallback: list replies contain the visible title. Use it rather than
         # rejecting a user's selection if in-memory state disappeared.
+        # v105: عنوان الصف صار نوع التوصية (🏆 الأفضل...) والمنتج في الوصف قبل الشرطة.
         if not picked:
-            picked = reply.get("title") or reply.get("description") or ""
+            desc = str(reply.get("description") or "")
+            desc_product = re.split(r"\s+(?:—|–|-)\s+", desc, maxsplit=1)[0].strip()
+            title = str(reply.get("title") or "")
+            title_is_label = bool(re.match(r"^\s*(?:🏆|💎|💰|✨|⭐)", title))
+            picked = (desc_product if (title_is_label or not title) else title) or desc_product or title
         picked = _clean_pick_label(picked)
         if not picked:
             send_whatsapp_text(from_number, U(lang_, "expired"), bot_id)
@@ -8006,6 +8104,10 @@ def execute_service_search(from_number, service_desc, original_text, bot_id, lan
         f"هذا طلب خدمة وليس منتجاً: {service_desc}. "
         f"طبق الحالة 3 بالضبط: ابحث في Google وأعطني 5 مزودي خدمة على الأقل في {market_name} "
         "مع أرقام هواتفهم الظاهرة فعلاً في نتائج البحث، مرتبين من الأعلى تقييماً. "
+        "اكتب كل مزود في سطر واحد فقط بهذا الشكل الحرفي بدون أي إضافات:\n"
+        "🏆 [اسم المزود] (هاتف: [الرقم]) — [المنطقة أو التقييم باختصار]\n"
+        "• [اسم المزود] (هاتف: [الرقم]) — [المنطقة أو التقييم باختصار]\n"
+        "بدون روابط، بدون Markdown، بدون فقرات شرح بعد القائمة. "
         f"{TEXT77_LANG_INSTR[lang]}"
     )
     txt, urls = "", {}
@@ -8020,7 +8122,8 @@ def execute_service_search(from_number, service_desc, original_text, bot_id, lan
     if not txt or is_no_result_answer(txt):
         send_whatsapp_text(from_number, T(lang, "not_found"), bot_id)
         return
-    send_whatsapp_text(from_number, txt, bot_id)
+    # v105: بطاقة لكل مزود + زر واتساب برسالة طلب الخدمة (الرقم يظهر كنص فقط).
+    send_service_result(from_number, txt, bot_id, lang, service_desc)
     # typed service search: no automatic map
 
 
@@ -8317,8 +8420,8 @@ def is_service_request(text):
     return any(normalize_ar(w) in q for w in SERVICE_WORDS)
 
 COMPARE_UI = {
-    "ar": {"title":"مقارنة أفضل", "overall":"الأفضل عموماً", "quality":"أفضل جودة", "value":"أفضل قيمة مقابل السعر", "fourth":"ميزة إضافية مهمة"},
-    "en": {"title":"Best options comparison", "overall":"Best overall", "quality":"Best quality", "value":"Best value", "fourth":"Another important strength"},
+    "ar": {"title":"أفضل الخيارات", "overall":"الأفضل عموماً", "quality":"أفضل جودة", "value":"الأرخص", "fourth":"ميزة إضافية"},
+    "en": {"title":"Best options", "overall":"Best overall", "quality":"Best quality", "value":"Cheapest", "fourth":"Notable strength"},
     "fr": {"title":"Comparatif des meilleurs choix", "overall":"Meilleur choix global", "quality":"Meilleure qualité", "value":"Meilleur rapport qualité-prix", "fourth":"Autre avantage important"},
     "es": {"title":"Comparativa de las mejores opciones", "overall":"Mejor en general", "quality":"Mejor calidad", "value":"Mejor relación calidad-precio", "fourth":"Otra ventaja importante"},
     "pt": {"title":"Comparação das melhores opções", "overall":"Melhor no geral", "quality":"Melhor qualidade", "value":"Melhor custo-benefício", "fourth":"Outra vantagem importante"},
@@ -8365,18 +8468,51 @@ Strict rules:
 7) The OPTIONS line may stay in Latin script for brand/model names, but all descriptions and labels must be in {lang_name}.
 """
 
+_COMPARE_LINE_RE = re.compile(r"^\s*(🏆|💎|💰|✨)\s*([^:：]*?)\s*[:：]\s*(.+?)(?:\s*(?:—|–|-)\s+(.*))?\s*$")
+
+def _compare_entries_from_text(txt):
+    """v105: يحوّل أسطر 🏆💎💰✨ إلى عناصر منظمة: {emoji, label, product, reason}.
+
+    هذه العناصر تُعرض كصفوف قائمة اختيار (نوع التوصية + المنتج) بدل نص المقارنة الطويل."""
+    entries = []
+    for line in (txt or "").splitlines():
+        m = _COMPARE_LINE_RE.match(line.strip())
+        if not m:
+            continue
+        product = " ".join((m.group(3) or "").split()).strip()
+        if not product or len(product) < 3:
+            continue
+        entries.append({
+            "emoji": m.group(1),
+            "label": " ".join((m.group(2) or "").split()).strip(),
+            "product": product,
+            "reason": " ".join((m.group(4) or "").split()).strip(),
+        })
+    return entries[:6]
+
+
 def _options_from_compare_lines(txt):
     """v74.9: استرجاع ذكي — إذا Gemini نسي سطر OPTIONS نستخرج الخيارات من أسطر
 
     🏆💎💰✨ نفسها: النص بين النقطتين والشرطة هو (البراند + الموديل)."""
     options = []
-    for line in (txt or "").splitlines():
-        m = re.match(r"^\s*(?:🏆|💎|💰|✨)\s*[^:：]*[:：]\s*(.+?)\s*(?:—|–|-)\s", line.strip())
-        if m:
-            cand = " ".join(m.group(1).split()).strip()
-            if cand and len(cand) >= 3 and cand not in options:
-                options.append(cand)
+    for e in _compare_entries_from_text(txt):
+        cand = e["product"]
+        if cand not in options:
+            options.append(cand)
     return options[:6]
+
+
+def _compare_entry_for_option(option, entries, index):
+    """يطابق خيار OPTIONS مع سطر التوصية المناسب (بالاسم أولاً ثم بالترتيب)."""
+    no = normalize_ar(option).lower()
+    for e in entries:
+        ne = normalize_ar(e["product"]).lower()
+        if no and ne and (no in ne or ne in no):
+            return e
+    if 0 <= index < len(entries):
+        return entries[index]
+    return None
 
 
 def _clean_pick_label(value):
@@ -8502,65 +8638,46 @@ def run_brand_comparison(from_number, query, bot_id, lang):
         print("BRAND COMPARE FAILED -> normal search")
         return False
 
-    # v77.2: تنظيف التكرار - احذف أي سطر يبدأ بـ 📦 أو ✅ أو • فيه كلمة متوفر/متجر/سعر - هذه من بقايا بحث قديم
-    cleaned_lines = []
-    for line in (txt or "").splitlines():
-        stripped = line.strip()
-        if not stripped:
-            cleaned_lines.append("")
-            continue
-        # احذف أسطر التوفر التي تسبب التكرار في الصورة
-        if stripped.startswith("📦") or (stripped.startswith("✅") and "متوفر" in stripped) or (stripped.startswith("•") and "متوفر" in stripped):
-            print(f"BRAND COMPARE CLEANUP DROP: {stripped[:80]}")
-            continue
-        if "متوفر عبر متجر" in stripped or "متوفر في" in stripped and "📦" in stripped:
-            continue
-        cleaned_lines.append(line)
+    # v105: لا نرسل نص المقارنة. نرسل قائمة اختيار واحدة فقط:
+    #   عنوان الصف   = نوع التوصية (🏆 الأفضل عموماً / 💰 الأرخص / 💎 أفضل جودة / ✨ ...)
+    #   وصف الصف     = البراند + الموديل — سبب قصير
+    # هوية المنتج تبقى داخل id الصف (pickq_...) حتى يعمل الاختيار بعد إعادة التشغيل.
+    entries = _compare_entries_from_text(txt)
+    ui = COMPARE_UI.get(lang) or COMPARE_UI["en"]
+    default_labels = [("🏆", ui["overall"]), ("💰", ui["value"]), ("💎", ui["quality"]), ("✨", ui["fourth"])]
 
-    txt = "\n".join(cleaned_lines).strip()
-
-    # v77.2: اجعل مسافة سطر بين منتج واللي بعده - تأكد من سطر فارغ بعد كل سطر توصية
-    # نحول أي سطر يبدأ بـ 🏆💎💰✨ إلى سطر + سطر فارغ بعده
-    formatted = []
-    for line in txt.splitlines():
-        formatted.append(line)
-        if re.match(r"^\s*(?:🏆|💎|💰|✨)", line):
-            # إذا السطر التالي ليس فارغاً أصلاً، أضف سطر فارغ
-            if not (formatted and len(formatted)>=2 and formatted[-2]==""):
-                # نضيف سطر فارغ لكن نتجنب التكرار
-                if len(formatted)==0 or formatted[-1].strip()!="":
-                    formatted.append("")
-
-    # إزالة الأسطر الفارغة المكررة أكثر من واحد
-    final_lines = []
-    prev_empty = False
-    for l in formatted:
-        is_empty = not l.strip()
-        if is_empty and prev_empty:
-            continue
-        final_lines.append(l)
-        prev_empty = is_empty
-
-    txt = "\n".join(final_lines).strip()
-
-    send_whatsapp_text(from_number, txt, bot_id)
     PENDING_BRAND_PICKS[from_number] = {"options": options, "original_query": query, "bot_id": bot_id, "lang": lang, "ts": time.time()}
-    # v74.10: عناوين القائمة بالعربي للمستخدم العربي (ترجمة دفعة + كاش)،
-    # والاسم الأصلي يبقى في سطر الوصف — وهو المعتمد للبحث عند الاختيار.
     rows = []
+    used_titles = set()
     for i, o in enumerate(options):
         clean_o = _clean_pick_label(o)
-        # Put the product identity inside the row id so the click remains usable
-        # even after a process restart or worker switch. WhatsApp row ids allow
-        # substantially more space than the 24-char visible title.
         raw_token = base64.urlsafe_b64encode(clean_o.encode("utf-8")).decode("ascii").rstrip("=")
         row_id = f"pickq_{raw_token}"
-        # Defensive bound: if an unusually long generated name exceeds the practical
-        # row-id budget, keep the legacy index id; the reply-title fallback still works.
         if len(row_id) > 190:
             row_id = f"pick_{i}"
-        rows.append({"id": row_id, "title": _short_pick_title(clean_o, 24), "description": _pick_description(query, lang)})
-    send_whatsapp_list(from_number, T(lang, "pick_prompt"), rows, bot_id, T(lang, "list_button"))
+        entry = _compare_entry_for_option(clean_o, entries, i)
+        if entry and entry.get("label"):
+            emoji, label = entry["emoji"], entry["label"]
+        else:
+            emoji, label = default_labels[i] if i < len(default_labels) else ("⭐", U(lang, "recommended"))
+        title = _short_pick_title(f"{emoji} {label}", 24)
+        # WhatsApp لا يقبل عنوانين متطابقين في نفس القائمة.
+        if title in used_titles:
+            title = _short_pick_title(f"{emoji} {label} {i+1}", 24)
+        used_titles.add(title)
+        reason = (entry or {}).get("reason") or ""
+        description = f"{clean_o} — {reason}" if reason else clean_o
+        rows.append({"id": row_id, "title": title, "description": description[:72]})
+
+    header = ""
+    for line in (txt or "").splitlines():
+        if line.strip().startswith("⚖️"):
+            header = line.strip()
+            break
+    if not header:
+        header = f"⚖️ {ui['title']}: {_pick_description(query, lang)}"
+    body = f"{header}\n{T(lang, 'pick_prompt')}"
+    send_whatsapp_list(from_number, body, rows, bot_id, T(lang, "list_button"))
     print(f"BRAND COMPARE SENT: {options}")
     return True
 
