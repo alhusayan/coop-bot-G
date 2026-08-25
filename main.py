@@ -6335,6 +6335,147 @@ def _fill_prices_from_existing_lens_pool(selected, pool):
     return out
 
 
+# ---- v105: أسعار حقيقية لبطاقات Lens مثل البحث النصي --------------------------
+# المرحلة 1: صفحة المنتج نفسها (JSON-LD / meta / سكربتات المتجر) بالتوازي مع مهلة قصيرة.
+# المرحلة 2: لما تبقى بطاقات بلا سعر، استعلام Google Shopping واحد لكل بطاقة مقيّد بدومين المتجر.
+ENABLE_LENS_LIVE_PRICES = env_bool("ENABLE_LENS_LIVE_PRICES", True)
+LENS_PAGE_PRICE_TIMEOUT_SECONDS = max(3, int(os.environ.get("LENS_PAGE_PRICE_TIMEOUT_SECONDS", "8")))
+LENS_SHOPPING_PRICE_TIMEOUT_SECONDS = max(3, int(os.environ.get("LENS_SHOPPING_PRICE_TIMEOUT_SECONDS", "6")))
+LENS_SHOPPING_PRICE_MAX = max(0, int(os.environ.get("LENS_SHOPPING_PRICE_MAX", "5")))
+
+def _lens_page_info(url):
+    """يقرأ صفحة المتجر (مع الكاش المشترك مع فحص المخزون) ويعيد dict فيه price/currency/available."""
+    url = (url or "").strip()
+    if not url.startswith(("http://", "https://")):
+        return None
+    cached = VERIFIED_PAGE_CACHE.get(url)
+    if cached and (time.time() - cached.get("ts", 0) < 600):
+        return cached.get("data")
+    html = fetch_html(url)
+    if not html:
+        return None
+    info = parse_product_data(html, url)
+    if info:
+        VERIFIED_PAGE_CACHE[url] = {"data": info, "ts": time.time()}
+        _prune_verified_page_cache()
+    return info
+
+def _lens_expected_currencies(item):
+    rank = result_market_rank(item)
+    if rank == 0:
+        return {c.upper() for c in (current_market().get("currencies") or country_currency_codes())}
+    if rank == 1:
+        return {"USD"}
+    if rank == 2:
+        return {"USD", "CNY"}
+    return set()
+
+def _apply_live_price(item, price_value, currency, source_label):
+    try:
+        val = float(price_value)
+    except Exception:
+        return False
+    if val <= 0:
+        return False
+    cur = (currency or "").upper().strip()
+    expected = _lens_expected_currencies(item)
+    # عملة واضحة لا تنتمي لسوق البطاقة = البطاقة ليست من هذا السوق أصلاً (مثل Carrefour Qatar تحت علم الكويت).
+    if cur and expected and cur not in expected:
+        item["_currency_mismatch"] = cur
+        print(f"LENS LIVE PRICE MARKET MISMATCH: {(item.get('source') or '')[:35]} {cur} not in {sorted(expected)}")
+        return False
+    item["price_value"] = val
+    item["currency"] = cur or (sorted(expected)[0] if len(expected) == 1 else "")
+    item["price"] = f"{val:g} {item['currency']}".strip()
+    item["price_source"] = source_label
+    print(f"LENS LIVE PRICE ({source_label}): {(item.get('source') or '')[:35]} -> {item['price']}")
+    return True
+
+def _lens_shopping_price_lookup(item):
+    """سعر من Google Shopping لنفس المتجر: q = العنوان + site:الدومين، بسوق البطاقة."""
+    if not SERPAPI_API_KEY:
+        return None
+    rank = result_market_rank(item)
+    gl = (current_market().get("country") or DEFAULT_COUNTRY).lower() if rank == 0 else ("us" if rank == 1 else "cn")
+    host = _host_of(item.get("link"))
+    title = _shopping_clean_query(item.get("title") or "")
+    if not host or not title:
+        return None
+    q = f"{title} site:{host}"
+    cards = _serpapi_shopping_request(q, gl, hl=(country_search_hl(gl) if rank == 0 else "en"), timeout_seconds=LENS_SHOPPING_PRICE_TIMEOUT_SECONDS)
+    sig = extract_pack_size(item.get("title") or "")
+    for card in cards or []:
+        cand = _shopping_card_to_market_item(card, item.get("source") or "", gl)
+        if not cand or not _lens_has_price(cand):
+            continue
+        if not _host_matches_any(_host_of(cand.get("link")), (host,)):
+            continue
+        if not sizes_compatible(sig, extract_pack_size(cand.get("title") or "")):
+            continue
+        if _price_identity_score(item.get("title") or "", cand.get("title") or "") < 0.6:
+            continue
+        return {"price": cand.get("price_value") or _extract_numeric_price(cand.get("price") or ""), "currency": cand.get("currency") or ""}
+    return None
+
+def _fill_prices_live(selected):
+    """يملأ الأسعار الناقصة من صفحة المتجر ثم Google Shopping، ويحذف البطاقات التي تبيّن أنها من سوق آخر أو نافدة."""
+    if not ENABLE_LENS_LIVE_PRICES:
+        return selected
+    out = [dict(x) for x in (selected or [])]
+    missing = [i for i, m in enumerate(out) if not _lens_has_price(m)]
+    if not missing:
+        return out
+
+    # المرحلة 1: صفحات المتاجر بالتوازي.
+    futures = {LENS_HTTP_POOL.submit(_lens_page_info, out[i].get("link")): i for i in missing}
+    done, pending = wait(list(futures), timeout=LENS_PAGE_PRICE_TIMEOUT_SECONDS)
+    for f in pending:
+        f.cancel()
+    for f in done:
+        i = futures[f]
+        try:
+            info = f.result()
+        except Exception as e:
+            print(f"LENS PAGE PRICE ERR: {e}")
+            continue
+        if not info:
+            continue
+        if info.get("available") is False:
+            out[i]["in_stock"] = False
+        if info.get("price"):
+            _apply_live_price(out[i], info.get("price"), info.get("currency"), "store_page")
+
+    # المرحلة 2: Google Shopping لما بقي بلا سعر (بحد أقصى LENS_SHOPPING_PRICE_MAX بطاقة).
+    still = [i for i in missing if not _lens_has_price(out[i]) and not out[i].get("_currency_mismatch") and out[i].get("in_stock") is not False][:LENS_SHOPPING_PRICE_MAX]
+    if still and SERPAPI_API_KEY:
+        futures = {LENS_HTTP_POOL.submit(_lens_shopping_price_lookup, out[i]): i for i in still}
+        done, pending = wait(list(futures), timeout=LENS_SHOPPING_PRICE_TIMEOUT_SECONDS + 1)
+        for f in pending:
+            f.cancel()
+        for f in done:
+            i = futures[f]
+            try:
+                res = f.result()
+            except Exception as e:
+                print(f"LENS SHOPPING PRICE ERR: {e}")
+                continue
+            if res and res.get("price"):
+                _apply_live_price(out[i], res.get("price"), res.get("currency"), "google_shopping")
+
+    kept = []
+    for m in out:
+        if m.get("_currency_mismatch"):
+            print(f"LENS DROP MARKET MISMATCH: {(m.get('source') or '')[:35]} ({m['_currency_mismatch']})")
+            continue
+        if m.get("in_stock") is False:
+            print(f"LENS DROP OOS (page): {(m.get('source') or '')[:35]}")
+            continue
+        kept.append(m)
+    filled = sum(1 for m in kept if m.get("price_source") in ("store_page", "google_shopping"))
+    print(f"LENS LIVE PRICES: filled={filled} still_missing={sum(1 for m in kept if not _lens_has_price(m))} dropped={len(out)-len(kept)}")
+    return kept
+
+
 def _lens_price_text_local(m, market_rank, lang):
     """Return a clear local-currency price, plus original foreign price when known."""
     raw_price = str(m.get("price") or "").strip()
@@ -6584,6 +6725,11 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption="", image_
     # نستعيد السعر مجاناً من بيانات Lens الموجودة: النص المضمّن أو نسخة أخرى من نفس
     # المتجر/الموديل في تمريرات Lens المتعددة. إذا بقي السعر مجهولاً تبقى البطاقة.
     selected = _fill_prices_from_existing_lens_pool(selected, raw_matches)
+    # v105: بعد الاستعادة المجانية، نجيب السعر الحقيقي من صفحة المتجر / Google Shopping
+    # حتى تظهر بطاقات Lens بأسعار رقمية مثل البحث النصي بدل «السعر عند المتجر».
+    selected = _fill_prices_live(selected)
+    if not selected:
+        return False
     missing_prices = sum(1 for m in selected if not _lens_has_price(m))
     if missing_prices:
         print(f"LENS PRICE-SMART: preserved {missing_prices} card(s) with no safely extracted numeric price")
