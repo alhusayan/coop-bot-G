@@ -8187,13 +8187,8 @@ def _text_price_local(raw_price, market_rank, lang):
     return f"{format_price(converted, local_cur)} {local_label} ({original})"
 
 
-def select_text_result_rows(txt, urls, lang, query, exclude_domains=None, exclude_urls=None, more_mode=False, label="TEXT"):
-    """v106: المحرك المشترك لاختيار نتائج البحث النصي (واتساب + ويب).
-
-    نفس الترتيب والفلاتر بالضبط: أعلام + محلي -> أمريكا -> الصين + سعر بالعملة المحلية
-    + حد أقصى لكل متجر. يعيد صفوفاً جاهزة للعرض: {item, market_rank, flag, store, title, price, url}.
-    أي تعديل هنا ينعكس تلقائياً على الواتساب والويب معاً.
-    """
+def send_text_lens_style_results(from_number, txt, urls, bot_id, lang, query, exclude_domains=None, exclude_urls=None, more_mode=False):
+    """Typed search UI: flags + local->US->China + local-currency prices + up to two CTAs per merchant."""
     exclude_domains = {str(x).lower() for x in (exclude_domains or []) if x}
     exclude_urls = {str(x).strip() for x in (exclude_urls or []) if x}
     total_cap = MORE_TOTAL_MAX if more_mode else max(1, LENS_DIRECT_LOCAL_MAX + LENS_DIRECT_US_MAX + LENS_DIRECT_CN_MAX)
@@ -8209,17 +8204,16 @@ def select_text_result_rows(txt, urls, lang, query, exclude_domains=None, exclud
             continue
         rank = result_market_rank(item)
         if rank == 99:
-            print(f"{label} UI MARKET REJECT: {item['source']} -> {item['link']}")
+            print(f"TEXT UI MARKET REJECT: {item['source']} -> {item['link']}")
             continue
         item["market_rank"] = rank
         candidates.append(item)
 
     # Primary search remains v79. Only a missing market gets a second chance.
     if not more_mode:
-        candidates = _supplement_missing_markets(candidates, query, f"FIRST-{label}")
+        candidates = _supplement_missing_markets(candidates, query, "FIRST-TEXT")
         for _c in candidates:
             _c["market_rank"] = result_market_rank(_c)
-        candidates = [x for x in candidates if x.get("market_rank") in (0, 1, 2)]
 
     # Relevance must win before merchant priority. Use the existing strict AI offer filter on typed results.
     _offer_rows = [{"line": (o.get("title") or ""), "name": (o.get("source") or "")} for o in candidates]
@@ -8227,12 +8221,12 @@ def select_text_result_rows(txt, urls, lang, query, exclude_domains=None, exclud
     _skip_ai_relevance = _fast_relevance_confident(query, candidates)
     _kept_rows = filter_relevant_offers(query, _offer_rows, _tmp_urls, use_ai=not _skip_ai_relevance, mode="exact")
     if _skip_ai_relevance:
-        print(f"{label} RELEVANCE: strong exact-token evidence -> AI filter skipped")
+        print("TEXT RELEVANCE: strong exact-token evidence -> AI filter skipped")
     _kept_keys = {(r.get("name") or "", r.get("line") or "") for r in _kept_rows}
     candidates = [o for o in candidates if ((o.get("source") or "", o.get("title") or "") in _kept_keys)]
 
     # نفس حارس المخزون المستخدم في Lens: نحذف المؤكد نفاده فقط، ونبقي الحالة المجهولة.
-    candidates = _filter_confirmed_oos(candidates, label)
+    candidates = _filter_confirmed_oos(candidates, "TEXT")
 
     caps = (
         {0: MORE_LOCAL_MAX, 1: MORE_US_MAX, 2: MORE_CN_MAX}
@@ -8267,46 +8261,34 @@ def select_text_result_rows(txt, urls, lang, query, exclude_domains=None, exclud
                 break
 
     if not selected:
-        return []
+        return False
 
     # Typed search already asks Google-grounded search for prices. Do not add merchant-page
     # HTTP lookups and do not shrink the result set if one line lacks a parsable price.
+    priced_rows = []
+    for item in selected:
+        raw_title, raw_price = _text_offer_price_and_title(item["title"])
+        shown_price = _text_price_local(raw_price, item["market_rank"], lang) if raw_price else ""
+        priced_rows.append((item, raw_title, shown_price))
+
+    display_titles = [raw_title or query for _, raw_title, _ in priced_rows]
+    translated = display_titles  # v84: typed Gemini output is already localized; avoid a second AI round-trip
     local_cc = (current_market().get("country") or DEFAULT_COUNTRY).lower()
     rank_cc = {0: local_cc, 1: "us", 2: "cn"}
-    rows = []
-    for item in selected:
-        rank = item["market_rank"]
-        raw_title, raw_price = _text_offer_price_and_title(item["title"])
-        shown_price = _text_price_local(raw_price, rank, lang) if raw_price else ""
-        # v84: typed Gemini output is already localized; avoid a second AI round-trip
-        rows.append({
-            "item": item,
-            "market_rank": rank,
-            "country": rank_cc.get(rank, ""),
-            "flag": country_flag_emoji(rank_cc.get(rank, "")),
-            "store": _ui_plain_store_name(item["source"] or "", item.get("link") or "") or (U(lang, "store")),
-            "title": _compact_ui_title(raw_title or query),
-            "price": shown_price,
-            "url": item["link"],
-        })
-    return rows
-
-
-def send_text_lens_style_results(from_number, txt, urls, bot_id, lang, query, exclude_domains=None, exclude_urls=None, more_mode=False):
-    """Typed search UI: flags + local->US->China + local-currency prices + up to two CTAs per merchant."""
-    rows = select_text_result_rows(txt, urls, lang, query, exclude_domains, exclude_urls, more_mode, label="TEXT")
-    if not rows:
-        return False
 
     counts = {0: 0, 1: 0, 2: 0}
     sent_items = []
-    for row in rows:
-        body = _build_compact_card_body(row["flag"], row["store"], row["title"], row["price"], lang)
+    for (item, _raw_title, shown_price), shown_title in zip(priced_rows, translated):
+        rank = item["market_rank"]
+        flag = country_flag_emoji(rank_cc.get(rank, ""))
+        store = _ui_plain_store_name(item["source"] or "", item.get("link") or "") or (U(lang, "store"))
+        title = _compact_ui_title(shown_title or query)
+        body = _build_compact_card_body(flag, store, title, shown_price, lang)
         if not body:
             continue
-        send_whatsapp_cta(from_number, body[:1000], row["url"], bot_id, row["store"])
-        counts[row["market_rank"]] += 1
-        sent_items.append(row["item"])
+        send_whatsapp_cta(from_number, body[:1000], item["link"], bot_id, store)
+        counts[rank] += 1
+        sent_items.append(item)
 
     if not sent_items:
         return False
@@ -9264,31 +9246,84 @@ def _web_attach_best_images(rows, rescue_page=False):
     return rows
 
 
-WEB_TEXT_MIRROR_WHATSAPP = env_bool("WEB_TEXT_MIRROR_WHATSAPP", True)
-
 def _web_build_text_items(txt, urls, lang, query):
-    """v106: نفس محرك واتساب حرفياً (select_text_result_rows) ثم تحويل الصفوف إلى JSON.
+    """Same typed-search selection logic as WhatsApp, but returns JSON cards instead of sending CTAs."""
+    total_cap = max(1, LENS_DIRECT_LOCAL_MAX + LENS_DIRECT_US_MAX + LENS_DIRECT_CN_MAX)
+    offers = text77_extract_store_offers(txt or "", limit=max(total_cap * 2, total_cap))
+    candidates = []
+    for offer in offers:
+        item = _text_offer_item(offer, urls)
+        if not item["link"] or not item["link"].startswith(("http://", "https://")):
+            continue
+        rank = result_market_rank(item)
+        if rank == 99:
+            continue
+        item["market_rank"] = rank
+        candidates.append(item)
 
-    عند WEB_TEXT_MIRROR_WHATSAPP=true لا يوجد فحص صارم إضافي للويب (صفحة منتج/صورة/سعر)،
-    فالنتائج مطابقة لبطاقات الواتساب واحدة بواحدة؛ الصور تُضاف فقط ولا تحذف أي نتيجة.
-    """
-    rows = select_text_result_rows(txt, urls, lang, query, label="WEB-TEXT")
+    # Preserve v79 behavior: only supplement a market that is missing.
+    candidates = _supplement_missing_markets(candidates, query, "WEB-TEXT")
+    for item in candidates:
+        item["market_rank"] = result_market_rank(item)
+    candidates = [x for x in candidates if x.get("market_rank") in (0, 1, 2)]
+
+    # Preserve the same relevance gate used by the WhatsApp typed flow.
+    offer_rows = [{"line": (o.get("title") or ""), "name": (o.get("source") or "")} for o in candidates]
+    tmp_urls = {(o.get("source") or ""): (o.get("link") or "") for o in candidates}
+    skip_ai = _fast_relevance_confident(query, candidates)
+    kept_rows = filter_relevant_offers(query, offer_rows, tmp_urls, use_ai=not skip_ai, mode="exact")
+    kept_keys = {(r.get("name") or "", r.get("line") or "") for r in kept_rows}
+    candidates = [o for o in candidates if ((o.get("source") or "", o.get("title") or "") in kept_keys)]
+    candidates = _filter_confirmed_oos(candidates, "WEB-TEXT")
+
+    caps = {0: LENS_DIRECT_LOCAL_MAX, 1: LENS_DIRECT_US_MAX, 2: LENS_DIRECT_CN_MAX}
+    selected, merchant_counts, seen_urls = [], defaultdict(int), set()
+    for rank in (0, 1, 2):
+        bucket = [x for x in candidates if x.get("market_rank") == rank]
+        if rank == 1:
+            bucket.sort(key=lambda x: _us_store_priority(x.get("source"), x.get("link")))
+        elif rank == 2:
+            bucket.sort(key=lambda x: _china_store_priority(x.get("source"), x.get("link")))
+        taken = 0
+        for item in bucket:
+            url = str(item.get("link") or "").strip()
+            try:
+                host = urllib.parse.urlparse(url).netloc.lower().split(":")[0]
+                host = host[4:] if host.startswith("www.") else host
+            except Exception:
+                host = ""
+            merchant = host or normalize_name(item.get("source") or "")
+            if not merchant or not url or url in seen_urls:
+                continue
+            if merchant_counts[merchant] >= RESULTS_PER_STORE_MAX:
+                continue
+            merchant_counts[merchant] += 1
+            seen_urls.add(url)
+            selected.append(item)
+            taken += 1
+            if taken >= caps.get(rank, 0):
+                break
+
+    local_cc = (current_market().get("country") or DEFAULT_COUNTRY).lower()
+    rank_cc = {0: local_cc, 1: "us", 2: "cn"}
     results = []
-    for row in rows:
-        item = row["item"]
+    for item in selected:
+        rank = item["market_rank"]
+        raw_title, raw_price = _text_offer_price_and_title(item.get("title") or "")
+        shown_price = _text_price_local(raw_price, rank, lang) if raw_price else ""
+        title = _compact_ui_title(raw_title or query)
+        store = _ui_plain_store_name(item.get("source") or "", item.get("link") or "") or U(lang, "store")
         results.append({
-            "market": _web_market_label(row["market_rank"]),
-            "market_rank": row["market_rank"],
-            "country": row["country"],
-            "flag": row["flag"],
-            "store": row["store"],
-            "title": row["title"],
-            "price": row["price"],
-            "url": row["url"],
+            "market": _web_market_label(rank),
+            "market_rank": rank,
+            "country": rank_cc.get(rank, ""),
+            "flag": country_flag_emoji(rank_cc.get(rank, "")),
+            "store": store,
+            "title": title,
+            "price": shown_price,
+            "url": item.get("link") or "",
             "image": item.get("thumbnail") or item.get("image") or "",
         })
-    if WEB_TEXT_MIRROR_WHATSAPP:
-        return _web_attach_best_images(results, rescue_page=True)
     results = [row for row in results if _web_is_direct_product_page_url(row.get("url") or "", row.get("store") or "")]
     results = _web_attach_best_images(results, rescue_page=True)
     return _web_verify_rows_strict(results, lang)
@@ -10712,11 +10747,7 @@ async def web_api_search_stream(request: Request):
                 _web_search_text_sync, q, country, lang, "", "", True
             ))
 
-            if WEB_TEXT_MIRROR_WHATSAPP:
-                # v106: البحث النصي في الويب = محرك واتساب فقط. لا موجات متاجر سريعة ولا نتائج إضافية،
-                # حتى تكون النتائج والترتيب مطابقة لما يظهر في الواتساب.
-                pass
-            elif WEB_STREAM_STORE_FIFO and WEB_STREAM_FAST_WAVE and SERPAPI_API_KEY:
+            if WEB_STREAM_STORE_FIFO and WEB_STREAM_FAST_WAVE and SERPAPI_API_KEY:
                 store_tasks = []
                 task_meta = {}
                 rank_remaining = {0: 0, 1: 0, 2: 0}
