@@ -26,7 +26,7 @@ app.add_middleware(
     allow_headers=["Content-Type", "Accept"],
     max_age=86400,
 )
-BUILD_ID = "v104.1-auto-language-any-language-20260827"
+BUILD_ID = "v104.2-auto-language-text-rescue-20260827"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES")
@@ -5973,7 +5973,7 @@ def legacy_text_product_search_more(product, lang, seen_domains):
         f"ثم الولايات المتحدة حتى {MORE_US_MAX}، ثم الصين حتى {MORE_CN_MAX}. "
         "لا تعرض دولة رابعة. لا تكرر أي متجر أو دومين ظهر سابقاً. "
         "كل نتيجة يجب أن تكون نفس المنتج والموديل/الحجم، بسعر رقمي ورابط صفحة منتج مباشر. "
-        f"{TEXT77_lang_instr(lang)}"
+        f"{text77_lang_instr(lang)}"
     )
     return legacy_v26_best_of_search([{"text": prompt}], total_cap, True, product)
 
@@ -7303,7 +7303,7 @@ def text77_bilingual_search_instruction(query, lang):
         f"Use the original wording, English commercial name, and local commerce language {hl}. "
         f"Do not stop at famous stores; inspect smaller genuine {market_name} merchants indexed by Google. "
         f"Local prices must be numeric and use an accepted local currency ({', '.join(country_currency_codes())}). "
-        f"Then US and China only if needed. {TEXT77_lang_instr(lang)}"
+        f"Then US and China only if needed. {text77_lang_instr(lang)}"
     )
 
 
@@ -7817,7 +7817,7 @@ def cart_item_search(product, lang):
     market_name = current_market().get("country_name", "Kuwait")
     txt, urls = text77_call_gemini([{"text": (
         f"ابحث عن {product} في أي متجر محلي في {market_name} يبيعه بسعر رقمي واضح "
-        f"ورابط صفحة منتج مباشر. حتى {MAX_STORES} متاجر من الأرخص للأغلى. {TEXT77_lang_instr(lang)}"
+        f"ورابط صفحة منتج مباشر. حتى {MAX_STORES} متاجر من الأرخص للأغلى. {text77_lang_instr(lang)}"
     )}])
     urls = direct_urls_only(urls)
     if txt and text77_extract_store_offers(txt) and not is_no_result_answer(txt):
@@ -8266,7 +8266,7 @@ def legacy_text_product_search(product, lang):
             "لا تعرض أي دولة رابعة. استبعد Heureka/heureka.cz/heureka.sk نهائياً ولا تعتبره متجراً محلياً. لا تجعل الأعداد حصصاً إلزامية؛ اعرض الموجود المطابق فقط. "
             "مهم جداً: لا تنه البحث قبل فحص الأسواق الثلاثة كلها. إذا كان نفس المنتج المطابق موجوداً في السوق المحلي أو أمريكا أو الصين فيجب أن يظهر على الأقل متجر واحد من ذلك السوق؛ لا تحذف سوقاً كاملاً بسبب أن سوقاً آخر أعاد نتائج أكثر أو أسرع. "
             "لكل نتيجة اذكر اسم المتجر، اسم المنتج المطابق، السعر الرقمي والعملة، واربطه بصفحة المنتج المباشرة. "
-            f"{TEXT77_lang_instr(lang)}"
+            f"{text77_lang_instr(lang)}"
         )
         return legacy_v26_best_of_search([{"text": prompt}], total_cap, True, product)
 
@@ -8300,6 +8300,102 @@ def v26_text_search(product, lang):
     """v76.4: توافق اسمي فقط؛ البحث النصي الفعلي صار محرك الكود المرفق من المستخدم."""
     return legacy_text_product_search(product, lang)
 
+
+def text_search_rescue(product, lang):
+    """v104.2: last-resort typed-product search.
+
+    Runs ONLY when the normal v26 typed engine returned no usable priced offers.
+    It tries:
+      1) the user's exact wording,
+      2) an English commercial name when useful,
+      3) a local-commerce phrasing,
+    while preserving the user's current UI language and market/currency.
+    """
+    product = re.sub(r"\s+", " ", str(product or "")).strip()
+    if not product:
+        return "", {}
+
+    m = current_market()
+    market_name = m.get("country_name", "Kuwait")
+    local_cc = (m.get("country") or DEFAULT_COUNTRY).lower()
+    local_hl = m.get("search_hl") or country_search_hl(local_cc)
+    local_cur = ", ".join(country_currency_codes(local_cc))
+    local_stores = priority_stores_for(product)
+    store_hint = ", ".join(local_stores[:8]) if local_stores else "all genuine local stores indexed by Google"
+
+    variants = [product]
+    try:
+        en = (english_search_name(product) or "").strip()
+        if en and en.casefold() != product.casefold():
+            variants.append(en)
+    except Exception as e:
+        print(f"TEXT RESCUE ENGLISH NAME ERR: {e}")
+
+    # If the local commerce language is Arabic and the query is Latin, add Arabic commerce wording.
+    try:
+        if local_hl == "ar" and re.search(r"[A-Za-z]", product):
+            ar = (arabic_search_name(product) or "").strip()
+            if ar and ar.casefold() not in {v.casefold() for v in variants}:
+                variants.append(ar)
+    except Exception as e:
+        print(f"TEXT RESCUE LOCAL NAME ERR: {e}")
+
+    # Keep rescue bounded: at most 3 grounded attempts.
+    variants = variants[:3]
+    best_soft = None
+
+    for idx, q in enumerate(variants, start=1):
+        prompt = (
+            f"Search deeply for purchasable products matching: {q}. "
+            f"The user's local market is {market_name} (country={local_cc}, commerce language={local_hl}). "
+            f"FIRST exhaust LOCAL stores in {market_name}; check {store_hint}, then smaller genuine local merchants indexed by Google. "
+            f"Accepted local currencies: {local_cur}. "
+            "If the request is generic (for example toothpaste, shampoo, milk, headphones), return concrete popular purchasable products/brands that satisfy the request instead of saying the query is too broad. "
+            "Every result MUST have: store name, concrete product title, numeric price, currency, and a DIRECT product-page URL. "
+            "Do not return category pages, Google links, blog/review pages, manuals, services, or out-of-stock items without a current numeric price. "
+            f"After local coverage, US and China may be used only if needed. Return up to {MAX_STORES} strong distinct store results. "
+            f"{text77_lang_instr(lang)}"
+        )
+        try:
+            print(f"TEXT RESCUE PASS {idx}/{len(variants)}: {q}")
+            txt, urls = legacy_v26_best_of_search(
+                [{"text": prompt}],
+                max(1, LENS_DIRECT_LOCAL_MAX + LENS_DIRECT_US_MAX + LENS_DIRECT_CN_MAX),
+                True,
+                product,
+            )
+        except Exception as e:
+            print(f"TEXT RESCUE PASS ERR {idx}: {e}")
+            txt, urls = "", {}
+
+        offers = text77_extract_store_offers(txt or "", limit=30)
+        direct = direct_urls_only(urls or {})
+        if txt and offers and direct and not is_no_result_answer(txt):
+            print(f"TEXT RESCUE SUCCESS pass={idx} offers={len(offers)} direct_urls={len(direct)}")
+            return txt, direct
+        if txt and offers and best_soft is None:
+            best_soft = (txt, direct)
+
+    # Final single grounded Gemini request, without the tournament, for resilience.
+    final_q = variants[0]
+    final_prompt = (
+        f"Find real stores selling {final_q} now in {market_name}. "
+        "For a generic category, choose actual common products that match it. "
+        "Return only concrete purchasable product offers with numeric price, currency and direct product-page URLs. "
+        f"Search broadly in the local market first. {text77_lang_instr(lang)}"
+    )
+    try:
+        print("TEXT RESCUE FINAL DIRECT PASS")
+        txt, urls = text77_call_gemini([{"text": final_prompt}])
+        urls = direct_urls_only(urls or {})
+        if txt and text77_extract_store_offers(txt, limit=30) and urls and not is_no_result_answer(txt):
+            print(f"TEXT RESCUE FINAL SUCCESS direct_urls={len(urls)}")
+            return txt, urls
+    except Exception as e:
+        print(f"TEXT RESCUE FINAL ERR: {e}")
+
+    return best_soft or ("", {})
+
 def execute_service_search(from_number, service_desc, original_text, bot_id, lang):
     """v74.4: مسار الخدمات — يفهم رسالة المستخدم كاملة: يجاوب على سؤاله الفني إن وجد,
 
@@ -8323,7 +8419,7 @@ def execute_service_search(from_number, service_desc, original_text, bot_id, lan
         "🏆 [اسم المزود] (هاتف: [الرقم]) — [المنطقة أو التقييم باختصار]\n"
         "• [اسم المزود] (هاتف: [الرقم]) — [المنطقة أو التقييم باختصار]\n"
         "بدون روابط، بدون Markdown، بدون فقرات شرح بعد القائمة. "
-        f"{TEXT77_lang_instr(lang)}"
+        f"{text77_lang_instr(lang)}"
     )
     txt, urls = "", {}
     try:
@@ -8515,27 +8611,45 @@ def send_text_lens_style_results(from_number, txt, urls, bot_id, lang, query, ex
 
 
 def execute_product_search(from_number, product, bot_id, lang):
-    """Typed product search: v77.7 engine + v79 Lens-like presentation.
-
-    Searches local, US and China automatically. No global-search choice and no map.
-    """
+    """v104.2 typed product search: normal fast path first, then a bounded rescue before Not Found."""
     # Do not block backend search on WhatsApp network latency.
     WORKERS.submit(send_whatsapp_text, from_number, T(lang, "searching", q=product), bot_id)
+
+    txt, urls = "", {}
     try:
         txt, urls = v26_text_search(product, lang)
         if not txt:
-            print("TEXT LEGACY V26 PATH EMPTY — no current-engine fallback by design")
+            print("TEXT PRIMARY EMPTY -> RESCUE")
     except Exception as e:
-        print(f"TEXT SEARCH CRASH: {e}")
+        print(f"TEXT PRIMARY CRASH: {e}")
         txt, urls = "", {}
+
     LAST_SEARCH[from_number] = {"product": product}
-    if not txt or not text77_extract_store_offers(txt, limit=30):
-        send_whatsapp_text(from_number, T(lang, "not_found"), bot_id)
-        return
-    if not send_text_lens_style_results(from_number, txt, urls, bot_id, lang, product):
-        send_whatsapp_text(from_number, T(lang, "not_found"), bot_id)
-        return
-    # No global-search buttons and no map for typed product searches.
+
+    primary_usable = bool(
+        txt
+        and text77_extract_store_offers(txt, limit=30)
+        and direct_urls_only(urls or {})
+    )
+
+    if primary_usable:
+        if send_text_lens_style_results(from_number, txt, urls, bot_id, lang, product):
+            return
+        print("TEXT PRIMARY HAD OFFERS BUT UI FILTER SENT 0 -> RESCUE")
+
+    # v104.2: do not tell the user "not found" until a second, broader search path also fails.
+    try:
+        rescue_txt, rescue_urls = text_search_rescue(product, lang)
+    except Exception as e:
+        print(f"TEXT RESCUE CRASH: {e}")
+        rescue_txt, rescue_urls = "", {}
+
+    if rescue_txt and text77_extract_store_offers(rescue_txt, limit=30):
+        if send_text_lens_style_results(from_number, rescue_txt, rescue_urls, bot_id, lang, product):
+            return
+
+    print(f"TEXT FINAL NOT FOUND after primary+rescue: {product!r}")
+    send_whatsapp_text(from_number, T(lang, "not_found"), bot_id)
 
 # ---- v74.6: مصنّف الطلبات — ذكاء اصطناعي خالص، بدون أي قاموس -----------------
 # القاموس الثابت مستحيل يغطي ملايين المنتجات (يخت، موطور مخيمات، مكينة بر...).
@@ -8863,7 +8977,7 @@ def run_brand_comparison(from_number, query, bot_id, lang):
         f"Generic shopping request: {query}\n"
         f"Current market: {current_market().get('country_name', 'Kuwait')}\n"
         f"Compare 3-4 strong concrete options for this request. Output only in {lang_name}. "
-        f"{TEXT77_lang_instr(lang)}"
+        f"{text77_lang_instr(lang)}"
     )
     txt = ""
     options = []
@@ -8939,8 +9053,8 @@ def run_text_global_search(phone, item):
     market_name = current_market().get("country_name", "Kuwait")
     prompts = [
         f"ابحث عالمياً عن {query} في متاجر خارج {market_name} فقط. استبعد المتاجر داخل {market_name}. "
-        f"ابحث في Amazon.com وeBay وAliExpress وTemu وSHEIN وWalmart وغيرها. اعرض حتى {MAX_STORES} نتائج مختلفة بسعر رقمي ورابط منتج مباشر والعملة. {TEXT77_lang_instr(lang)}",
-        f"Search worldwide for {english_search_name(query) or query} outside {market_name}. Find up to {MAX_STORES} trusted international store results with numeric price, currency, and direct product page. {TEXT77_lang_instr(lang)}",
+        f"ابحث في Amazon.com وeBay وAliExpress وTemu وSHEIN وWalmart وغيرها. اعرض حتى {MAX_STORES} نتائج مختلفة بسعر رقمي ورابط منتج مباشر والعملة. {text77_lang_instr(lang)}",
+        f"Search worldwide for {english_search_name(query) or query} outside {market_name}. Find up to {MAX_STORES} trusted international store results with numeric price, currency, and direct product page. {text77_lang_instr(lang)}",
     ]
     txt, urls = "", {}
     for prompt in prompts:
@@ -8964,7 +9078,7 @@ def run_text_similar_search(phone, item):
         f"المنتج التالي غير متوفر محلياً: {base}. " + (f"الاسم الآخر: {base_other}. " if base_other else "") +
         f"ابحث بعمق في Google عن حتى {MAX_STORES} بدائل حقيقية مختلفة من نفس الفئة والاستخدام ومتوفرة الآن في متاجر {market_name} المحلية فقط. "
         "لكل نتيجة: اسم المتجر فقط — اسم البديل الفعلي — السعر الرقمي. اربط كل متجر بصفحة المنتج المباشرة. رتب الأرخص أولاً. "
-        f"{TEXT77_lang_instr(lang)}"
+        f"{text77_lang_instr(lang)}"
     )
     txt, urls = legacy_v26_best_of_search([{"text": prompt}], max_results=MAX_STORES, merge_offers=True,
                                           merge_title=f"📦 بدائل مشابهة: {base}")
@@ -9601,7 +9715,7 @@ def _web_brand_comparison(query, lang):
         f"Generic shopping request: {query}\n"
         f"Current market: {current_market().get('country_name', 'Kuwait')}\n"
         f"Compare 3-4 strong concrete options for this request. Output only in {lang_name}. "
-        f"{TEXT77_lang_instr(lang)}"
+        f"{text77_lang_instr(lang)}"
     )
     txt, options = "", []
     for _ in (1, 2):
