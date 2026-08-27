@@ -26,7 +26,7 @@ app.add_middleware(
     allow_headers=["Content-Type", "Accept"],
     max_age=86400,
 )
-BUILD_ID = "v106.0-local-first-global-when-useful-20260827"
+BUILD_ID = "v106.1-local-first-global-when-useful-fix-20260827"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("LOCAL FIRST -> GLOBAL ONLY WHEN USEFUL | GLOBAL ENGINE HIDDEN FROM UI | 10 LANGS | WORLD CURRENCIES")
@@ -71,7 +71,7 @@ LOCAL_FIRST_SAVINGS_PCT = max(5.0, min(60.0, float(os.environ.get("LOCAL_FIRST_S
 LOCAL_FIRST_GLOBAL_INTEREST_CLICKS = max(2, int(os.environ.get("LOCAL_FIRST_GLOBAL_INTEREST_CLICKS", "3")))
 
 # "Everyday/local" requests should never auto-jump abroad. Services are already routed locally.
-LOCAL_ONLY_EVERYDAY_WORDS = tuple(GROCERY_WORDS) + (
+LOCAL_ONLY_EVERYDAY_WORDS = (
     "grocery","groceries","food","beverage","milk","water","juice","bread","rice","sugar","tea","coffee",
     "restaurant","restaurants","meal","meals","takeaway","delivery food",
     "مطعم","مطاعم","وجبه","وجبة","وجبات","اكل","أكل","مشروب","مشروبات","مخبز","خبز","تموين","جمعية","سوبرماركت",
@@ -1645,7 +1645,8 @@ def _local_first_country():
 
 def _is_everyday_local_only(query):
     q = normalize_ar(str(query or "")).lower()
-    return any(normalize_ar(w).lower() in q for w in LOCAL_ONLY_EVERYDAY_WORDS if str(w).strip())
+    words = tuple(globals().get("GROCERY_WORDS", ())) + tuple(LOCAL_ONLY_EVERYDAY_WORDS)
+    return any(normalize_ar(w).lower() in q for w in words if str(w).strip())
 
 def _global_interest_clicks(phone):
     load_user_preferences(phone)
