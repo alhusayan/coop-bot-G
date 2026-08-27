@@ -26,10 +26,10 @@ app.add_middleware(
     allow_headers=["Content-Type", "Accept"],
     max_age=86400,
 )
-BUILD_ID = "v106.1-local-first-global-when-useful-fix-20260827"
+BUILD_ID = "v104.1-auto-language-any-language-20260827"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
-print("LOCAL FIRST -> GLOBAL ONLY WHEN USEFUL | GLOBAL ENGINE HIDDEN FROM UI | 10 LANGS | WORLD CURRENCIES")
+print("GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES")
 print("=" * 70)
 
 
@@ -50,7 +50,7 @@ PROCESSED_IDS_LOCK = threading.Lock()
 IMAGE_BUFFER = defaultdict(lambda: {"images": [], "time": 0, "bot_id": ""})
 LAST_SEARCH = {}
 USER_LANG = {}
-# اللغة تُطلب في أول استخدام فقط؛ السوق والعملة يُحددان تلقائياً من فتح خط WhatsApp.
+# لغة رسائل WhatsApp النصية تُكتشف تلقائياً من كل رسالة؛ السوق والعملة يبقيان من رقم الهاتف.
 USER_MARKET = {}
 USER_LOCATION_TS = {}
 PENDING_ONBOARDING = {}
@@ -58,24 +58,6 @@ PENDING_GLOBAL_SEARCH = {}
 # نتائج البحث الحالي التي يمكن توسيعها يدوياً إلى دول أخرى بعد العرض.
 PENDING_MORE_RESULTS = {}
 GLOBAL_PENDING_TTL = max(300, int(os.environ.get("GLOBAL_PENDING_TTL_SECONDS", "900")))
-
-# ---- v106 Local-first product philosophy ------------------------------------
-# Primary WhatsApp product results are LOCAL only.
-# International search stays behind one button unless local coverage is weak.
-LOCAL_FIRST_STRONG_MIN = max(1, min(4, int(os.environ.get("LOCAL_FIRST_STRONG_MIN", "2"))))
-LOCAL_FIRST_GLOBAL_DISPLAY_MAX = max(1, min(5, int(os.environ.get("LOCAL_FIRST_GLOBAL_DISPLAY_MAX", "3"))))
-# A foreign price must be meaningfully lower before we call it a saving.
-# Shipping/import fees are NOT known reliably, so the UI always says "before shipping/import fees".
-LOCAL_FIRST_SAVINGS_PCT = max(5.0, min(60.0, float(os.environ.get("LOCAL_FIRST_SAVINGS_PCT", "20"))))
-# After repeated international-comparison clicks, Global Deals is placed first in the follow-up buttons.
-LOCAL_FIRST_GLOBAL_INTEREST_CLICKS = max(2, int(os.environ.get("LOCAL_FIRST_GLOBAL_INTEREST_CLICKS", "3")))
-
-# "Everyday/local" requests should never auto-jump abroad. Services are already routed locally.
-LOCAL_ONLY_EVERYDAY_WORDS = (
-    "grocery","groceries","food","beverage","milk","water","juice","bread","rice","sugar","tea","coffee",
-    "restaurant","restaurants","meal","meals","takeaway","delivery food",
-    "مطعم","مطاعم","وجبه","وجبة","وجبات","اكل","أكل","مشروب","مشروبات","مخبز","خبز","تموين","جمعية","سوبرماركت",
-)
 # Recommendation picks should survive normal user delays and transient process restarts.
 BRAND_PICK_TTL = max(3600, int(os.environ.get("BRAND_PICK_TTL_HOURS", "6")) * 3600)
 LOCATION_TTL_SECONDS = max(3600, int(os.environ.get("LOCATION_TTL_HOURS", "72")) * 3600)
@@ -150,13 +132,13 @@ if not PUBLIC_BASE_URL:
         PUBLIC_BASE_URL = f"https://{_railway_domain}"
         print(f"PUBLIC_BASE_URL auto-derived from Railway: {PUBLIC_BASE_URL}")
 ENABLE_GOOGLE_LENS = env_bool("ENABLE_GOOGLE_LENS", True)
-# v106: Lens may search international sources internally, but WhatsApp presents LOCAL first and hides global unless useful.
+# v72: وضع اللينز المباشر — الصورة تروح لـ Google Lens ثم تُفلتر وتُرتب: محلي -> أمريكا -> الصين فقط.
 # بدون تحليل Vision ولا حكم هوية ولا طبقات بحث. أطفئه بـ LENS_DIRECT_MODE=false
 # لإرجاع المسار الذكي الكامل. عند عدم وجود نتائج، البوت يرجع تلقائياً للمسار الكامل.
 LENS_DIRECT_MODE = env_bool("LENS_DIRECT_MODE", True)
 LENS_DIRECT_MAX_LINES = max(3, min(10, int(os.environ.get("LENS_DIRECT_MAX_LINES", "10"))))
 # v76: الحدود القصوى مستقلة وليست حصصاً إلزامية.
-# Internal Lens caps remain available for hidden international comparison; primary WhatsApp cards are local-first.
+# v85.4 Fast caps: المحلي حتى 4، الولايات المتحدة حتى 3، الصين حتى 3.
 # هذه حدود قصوى حقيقية حتى لو بقيت Environment Variables القديمة أعلى في Railway.
 # يمكن للـ Environment خفض الحد، لكنه لا يستطيع رفعه فوق 4/3/3.
 LENS_DIRECT_LOCAL_MAX = max(0, min(4, int(os.environ.get("LENS_DIRECT_LOCAL_MAX", "4"))))
@@ -1490,278 +1472,6 @@ def save_user_preferences(phone):
     except Exception as e:
         print(f"USER PREF PUT ERR: {e}")
 
-
-LOCAL_FIRST_UI = {
-    "ar": {
-        "local_summary": "{flag} متوفر عندك في {country} — لقيت {count} خيار محلي.",
-        "local_actions": "تبي متاجر محلية أكثر، أو أقارن لك خارج {country}؟",
-        "local_actions_repeat": "أنت غالباً تقارن عالمياً 🌍 خليت العروض العالمية أقرب لك، والمحلي يظل أولاً.",
-        "more_local": "🔎 محلي أكثر",
-        "global_deals": "🌍 عروض عالمية",
-        "weak_local": "لقيت {count} نتيجة محلية فقط، لذلك بشوف لك إذا في خيار عالمي يستاهل 🌍",
-        "no_local": "ما لقيت نتيجة محلية قوية، لذلك بوسع البحث عالمياً 🌍",
-        "global_header": "🌍 أفضل الخيارات العالمية المتاحة",
-        "saving": "🌍 السعر العالمي أقل بحوالي {saving} {currency} ({pct}%) قبل الشحن ورسوم الاستيراد.",
-        "local_wins": "✅ المحلي عندك منافس جداً. ما لقيت سعراً عالمياً أقل بشكل يستاهل بعد التحويل وقبل الشحن ورسوم الاستيراد.",
-        "global_none": "ما لقيت خياراً عالمياً مباشراً أفضل أو أوضح حالياً.",
-        "everyday_local": "📍 لهذا النوع من الطلبات بخلي البحث محلي فقط.",
-    },
-    "en": {
-        "local_summary": "{flag} Available in {country} — {count} local option(s).",
-        "local_actions": "Want more local stores, or compare outside {country}?",
-        "local_actions_repeat": "You often compare internationally 🌍 so Global Deals is one tap away. Local still comes first.",
-        "more_local": "🔎 More local",
-        "global_deals": "🌍 Global deals",
-        "weak_local": "I found only {count} local option(s), so I’m checking whether an international deal is actually useful 🌍",
-        "no_local": "I couldn’t find a strong local match, so I’m checking international options 🌍",
-        "global_header": "🌍 Best international options",
-        "saving": "🌍 The international price is about {saving} {currency} lower ({pct}%) before shipping/import fees.",
-        "local_wins": "✅ Your local price is already competitive. I didn’t find an international price meaningfully lower after conversion and before shipping/import fees.",
-        "global_none": "I couldn’t find a clearer or more useful direct international option right now.",
-        "everyday_local": "📍 I’m keeping this type of request local-only.",
-    },
-    "fr": {
-        "local_summary": "{flag} Disponible en {country} — {count} option(s) locale(s).",
-        "local_actions": "Plus de boutiques locales ou comparer à l’international ?",
-        "local_actions_repeat": "Vous comparez souvent à l’international 🌍 Les offres mondiales sont à un clic; le local reste prioritaire.",
-        "more_local": "🔎 Plus local",
-        "global_deals": "🌍 Offres monde",
-        "weak_local": "Je n’ai trouvé que {count} option(s) locale(s), je vérifie donc si l’international vaut vraiment le coup 🌍",
-        "no_local": "Pas de correspondance locale solide; je vérifie les options internationales 🌍",
-        "global_header": "🌍 Meilleures options internationales",
-        "saving": "🌍 Le prix international est inférieur d’environ {saving} {currency} ({pct}%) avant livraison/importation.",
-        "local_wins": "✅ Le prix local est déjà compétitif. Je n’ai pas trouvé d’économie internationale significative avant livraison/importation.",
-        "global_none": "Je n’ai pas trouvé d’option internationale directe plus utile pour le moment.",
-        "everyday_local": "📍 Je garde ce type de demande uniquement en local.",
-    },
-    "es": {
-        "local_summary": "{flag} Disponible en {country} — {count} opción(es) local(es).",
-        "local_actions": "¿Más tiendas locales o comparar internacionalmente?",
-        "local_actions_repeat": "Sueles comparar internacionalmente 🌍 Dejé Ofertas globales a un toque; lo local sigue primero.",
-        "more_local": "🔎 Más local",
-        "global_deals": "🌍 Ofertas globales",
-        "weak_local": "Solo encontré {count} opción(es) local(es), así que comprobaré si hay una oferta internacional que valga la pena 🌍",
-        "no_local": "No encontré una coincidencia local sólida; comprobaré opciones internacionales 🌍",
-        "global_header": "🌍 Mejores opciones internacionales",
-        "saving": "🌍 El precio internacional es unos {saving} {currency} menor ({pct}%) antes de envío/importación.",
-        "local_wins": "✅ El precio local ya es competitivo. No encontré un ahorro internacional significativo antes de envío/importación.",
-        "global_none": "No encontré ahora una opción internacional directa más útil.",
-        "everyday_local": "📍 Mantendré este tipo de búsqueda solo local.",
-    },
-    "pt": {
-        "local_summary": "{flag} Disponível em {country} — {count} opção(ões) local(is).",
-        "local_actions": "Mais lojas locais ou comparar internacionalmente?",
-        "local_actions_repeat": "Você costuma comparar internacionalmente 🌍 Ofertas globais ficam a um toque; o local continua primeiro.",
-        "more_local": "🔎 Mais local",
-        "global_deals": "🌍 Ofertas globais",
-        "weak_local": "Encontrei só {count} opção(ões) local(is), então vou verificar se há uma oferta internacional que realmente compense 🌍",
-        "no_local": "Não encontrei uma correspondência local forte; vou verificar opções internacionais 🌍",
-        "global_header": "🌍 Melhores opções internacionais",
-        "saving": "🌍 O preço internacional é cerca de {saving} {currency} menor ({pct}%) antes de frete/importação.",
-        "local_wins": "✅ O preço local já está competitivo. Não encontrei economia internacional relevante antes de frete/importação.",
-        "global_none": "Não encontrei uma opção internacional direta mais útil agora.",
-        "everyday_local": "📍 Vou manter este tipo de busca apenas local.",
-    },
-    "tr": {
-        "local_summary": "{flag} {country} içinde mevcut — {count} yerel seçenek.",
-        "local_actions": "Daha fazla yerel mağaza mı, yoksa yurtdışı karşılaştırması mı?",
-        "local_actions_repeat": "Sık sık yurtdışı karşılaştırıyorsunuz 🌍 Global fırsatlar tek dokunuşta; yerel yine önce.",
-        "more_local": "🔎 Daha yerel",
-        "global_deals": "🌍 Global fırsatlar",
-        "weak_local": "Yalnızca {count} yerel seçenek buldum; gerçekten avantajlı bir yurtdışı fırsatı var mı bakıyorum 🌍",
-        "no_local": "Güçlü yerel eşleşme bulamadım; yurtdışı seçeneklere bakıyorum 🌍",
-        "global_header": "🌍 En iyi uluslararası seçenekler",
-        "saving": "🌍 Uluslararası fiyat kargo/ithalat öncesi yaklaşık {saving} {currency} daha düşük (%{pct}).",
-        "local_wins": "✅ Yerel fiyat zaten rekabetçi. Kargo/ithalat öncesi anlamlı derecede daha ucuz bir yurtdışı fiyat bulamadım.",
-        "global_none": "Şu anda daha faydalı doğrudan uluslararası seçenek bulamadım.",
-        "everyday_local": "📍 Bu tür aramayı yalnızca yerelde tutuyorum.",
-    },
-    "ru": {
-        "local_summary": "{flag} Доступно в {country} — локальных вариантов: {count}.",
-        "local_actions": "Ещё местные магазины или сравнить за рубежом?",
-        "local_actions_repeat": "Вы часто сравниваете международные цены 🌍 Глобальные предложения в один клик; местные всё равно первые.",
-        "more_local": "🔎 Ещё местные",
-        "global_deals": "🌍 Глобальные цены",
-        "weak_local": "Нашёл только {count} местных вариант(а), поэтому проверяю, есть ли действительно выгодное международное предложение 🌍",
-        "no_local": "Сильного местного совпадения нет; проверяю международные варианты 🌍",
-        "global_header": "🌍 Лучшие международные варианты",
-        "saving": "🌍 Международная цена примерно на {saving} {currency} ниже ({pct}%) до доставки/импортных сборов.",
-        "local_wins": "✅ Местная цена уже конкурентная. Существенно более дешёвой международной цены до доставки/сборов не найдено.",
-        "global_none": "Сейчас не нашёл более полезного прямого международного варианта.",
-        "everyday_local": "📍 Такой запрос оставляю только локальным.",
-    },
-    "zh": {
-        "local_summary": "{flag} {country} 本地可买 — 找到 {count} 个本地选项。",
-        "local_actions": "查看更多本地商店，还是比较海外价格？",
-        "local_actions_repeat": "您经常比较海外价格 🌍 全球优惠已放到一键位置；本地结果仍优先。",
-        "more_local": "🔎 更多本地",
-        "global_deals": "🌍 全球优惠",
-        "weak_local": "本地只找到 {count} 个选项，我再看看海外是否真的更划算 🌍",
-        "no_local": "没有找到足够可靠的本地结果，我正在查看海外选项 🌍",
-        "global_header": "🌍 最佳海外选项",
-        "saving": "🌍 海外价格约低 {saving} {currency}（{pct}%），未计运费/进口费用。",
-        "local_wins": "✅ 本地价格已经很有竞争力。换算后、未计运费/进口费用，并没有明显更便宜的海外价格。",
-        "global_none": "目前没有找到更有价值的海外直购选项。",
-        "everyday_local": "📍 这类需求只保留本地搜索。",
-    },
-    "hi": {
-        "local_summary": "{flag} {country} में उपलब्ध — {count} स्थानीय विकल्प।",
-        "local_actions": "और स्थानीय स्टोर देखें या अंतरराष्ट्रीय तुलना करें?",
-        "local_actions_repeat": "आप अक्सर अंतरराष्ट्रीय तुलना करते हैं 🌍 Global Deals एक टैप दूर है; स्थानीय परिणाम फिर भी पहले हैं।",
-        "more_local": "🔎 और स्थानीय",
-        "global_deals": "🌍 ग्लोबल डील्स",
-        "weak_local": "मुझे केवल {count} स्थानीय विकल्प मिला, इसलिए देख रहा हूँ कि कोई अंतरराष्ट्रीय डील सच में फायदेमंद है या नहीं 🌍",
-        "no_local": "मजबूत स्थानीय मैच नहीं मिला; अंतरराष्ट्रीय विकल्प देख रहा हूँ 🌍",
-        "global_header": "🌍 सर्वोत्तम अंतरराष्ट्रीय विकल्प",
-        "saving": "🌍 अंतरराष्ट्रीय कीमत शिपिंग/इम्पोर्ट फीस से पहले लगभग {saving} {currency} कम ({pct}%) है।",
-        "local_wins": "✅ स्थानीय कीमत पहले से प्रतिस्पर्धी है। शिपिंग/इम्पोर्ट फीस से पहले कोई अर्थपूर्ण अंतरराष्ट्रीय बचत नहीं मिली।",
-        "global_none": "अभी कोई अधिक उपयोगी सीधा अंतरराष्ट्रीय विकल्प नहीं मिला।",
-        "everyday_local": "📍 इस तरह की खोज को केवल स्थानीय रख रहा हूँ।",
-    },
-    "ur": {
-        "local_summary": "{flag} {country} میں دستیاب — {count} مقامی آپشن۔",
-        "local_actions": "مزید مقامی اسٹورز یا بیرونِ ملک قیمتوں کا موازنہ؟",
-        "local_actions_repeat": "آپ اکثر عالمی قیمتیں دیکھتے ہیں 🌍 Global Deals ایک ٹیپ پر ہے؛ مقامی نتائج پھر بھی پہلے ہیں۔",
-        "more_local": "🔎 مزید مقامی",
-        "global_deals": "🌍 عالمی ڈیلز",
-        "weak_local": "صرف {count} مقامی آپشن ملا، اس لیے دیکھ رہا ہوں کہ کوئی عالمی ڈیل واقعی فائدہ مند ہے یا نہیں 🌍",
-        "no_local": "مضبوط مقامی نتیجہ نہیں ملا؛ عالمی آپشنز دیکھ رہا ہوں 🌍",
-        "global_header": "🌍 بہترین عالمی آپشنز",
-        "saving": "🌍 عالمی قیمت شپنگ/درآمد فیس سے پہلے تقریباً {saving} {currency} کم ({pct}%) ہے۔",
-        "local_wins": "✅ مقامی قیمت پہلے ہی اچھی ہے۔ شپنگ/درآمد فیس سے پہلے کوئی نمایاں عالمی بچت نہیں ملی۔",
-        "global_none": "ابھی کوئی زیادہ مفید براہِ راست عالمی آپشن نہیں ملا۔",
-        "everyday_local": "📍 اس قسم کی تلاش صرف مقامی رکھ رہا ہوں۔",
-    },
-}
-
-def LF(lang, key, **kw):
-    table = LOCAL_FIRST_UI.get(lang) or LOCAL_FIRST_UI["en"]
-    value = table.get(key) or LOCAL_FIRST_UI["en"].get(key) or key
-    return value.format(**kw) if kw else value
-
-def _local_first_country():
-    m = current_market()
-    return (m.get("country_name") or COUNTRY_NAMES.get((m.get("country") or DEFAULT_COUNTRY).lower()) or "your country")
-
-def _is_everyday_local_only(query):
-    q = normalize_ar(str(query or "")).lower()
-    words = tuple(globals().get("GROCERY_WORDS", ())) + tuple(LOCAL_ONLY_EVERYDAY_WORDS)
-    return any(normalize_ar(w).lower() in q for w in words if str(w).strip())
-
-def _global_interest_clicks(phone):
-    load_user_preferences(phone)
-    try:
-        return int((USER_MARKET.get(phone) or {}).get("_global_interest_clicks") or 0)
-    except Exception:
-        return 0
-
-def _record_global_interest(phone):
-    load_user_preferences(phone)
-    market = dict(USER_MARKET.get(phone) or {})
-    try:
-        clicks = int(market.get("_global_interest_clicks") or 0) + 1
-    except Exception:
-        clicks = 1
-    market["_global_interest_clicks"] = min(clicks, 100)
-    market["_global_interest_last_ts"] = time.time()
-    USER_MARKET[phone] = market
-    save_user_preferences(phone)
-    print(f"LOCAL-FIRST GLOBAL INTEREST: {phone} -> {clicks}")
-    return clicks
-
-def _auto_global_allowed(query):
-    # Services are already separated before product search. Everyday groceries/food remain local.
-    return not _is_everyday_local_only(query)
-
-def _send_local_first_choices(phone, bot_id, lang, query):
-    """One compact follow-up: more local results + international comparison only when relevant."""
-    allow_global = _auto_global_allowed(query)
-    clicks = _global_interest_clicks(phone)
-    repeated = clicks >= LOCAL_FIRST_GLOBAL_INTEREST_CLICKS
-    body = LF(lang, "local_actions_repeat" if (allow_global and repeated) else "local_actions",
-              country=_local_first_country())
-    buttons = []
-    if allow_global and repeated:
-        buttons.append({"id":"global_yes", "title":LF(lang, "global_deals")[:20]})
-        buttons.append({"id":"more_results", "title":LF(lang, "more_local")[:20]})
-    else:
-        buttons.append({"id":"more_results", "title":LF(lang, "more_local")[:20]})
-        if allow_global:
-            buttons.append({"id":"global_yes", "title":LF(lang, "global_deals")[:20]})
-    return send_whatsapp_buttons(phone, body, buttons, bot_id)
-
-def _local_first_notice(phone, bot_id, lang, local_count):
-    if local_count > 0:
-        send_whatsapp_text(phone, LF(lang, "weak_local", count=local_count), bot_id)
-    else:
-        send_whatsapp_text(phone, LF(lang, "no_local"), bot_id)
-
-def _price_to_local_value(raw_price, market_rank=None, country_hint=""):
-    raw = str(raw_price or "").strip()
-    numeric = _extract_numeric_price(raw)
-    if numeric is None:
-        return None
-    local_cur = (current_market().get("currency") or "").upper().strip()
-    if market_rank == 0:
-        src = detect_currency_code(raw, local_cur, current_market().get("country"))
-    else:
-        fallback = "USD" if market_rank == 1 else ("CNY" if market_rank == 2 else "")
-        src = detect_currency_code(raw, fallback, country_hint or ("us" if market_rank == 1 else "cn" if market_rank == 2 else ""))
-    if not src or src == local_cur:
-        return float(numeric)
-    converted = convert_to_local(numeric, src)
-    return float(converted) if converted is not None else None
-
-def _lens_item_local_value(item, rank):
-    try:
-        numeric = float(item.get("price_value")) if item.get("price_value") not in (None, "") else None
-    except Exception:
-        numeric = None
-    raw = str(item.get("price") or "").strip()
-    if numeric is None:
-        numeric = _extract_numeric_price(raw)
-    if numeric is None:
-        return None
-    local_cur = (current_market().get("currency") or "").upper().strip()
-    currency = (item.get("currency") or "").upper().strip()
-    if rank == 0:
-        src = currency or detect_currency_code(raw, local_cur, current_market().get("country"))
-    else:
-        src = currency or detect_currency_code(raw, "USD" if rank == 1 else "CNY", "us" if rank == 1 else "cn")
-    if not src or src == local_cur:
-        return float(numeric)
-    converted = convert_to_local(numeric, src)
-    return float(converted) if converted is not None else None
-
-def _meaningful_global_saving(local_best, global_best):
-    try:
-        local_best = float(local_best); global_best = float(global_best)
-    except Exception:
-        return False, 0.0, 0.0
-    if local_best <= 0 or global_best <= 0 or global_best >= local_best:
-        return False, 0.0, 0.0
-    saving = local_best - global_best
-    pct = saving / local_best * 100.0
-    return pct >= LOCAL_FIRST_SAVINGS_PCT, saving, pct
-
-def _global_savings_intro(phone, bot_id, lang, local_best, global_best, auto_global=False):
-    """Return True when full international cards should be shown."""
-    if auto_global or local_best in (None, "") or global_best in (None, ""):
-        send_whatsapp_text(phone, LF(lang, "global_header"), bot_id)
-        return True
-    good, saving, pct = _meaningful_global_saving(local_best, global_best)
-    if good:
-        cur = currency_label(lang) or (current_market().get("currency") or "")
-        send_whatsapp_text(
-            phone,
-            LF(lang, "saving", saving=format_price(saving, current_market().get("currency")), currency=cur, pct=int(round(pct))),
-            bot_id,
-        )
-        return True
-    send_whatsapp_text(phone, LF(lang, "local_wins"), bot_id)
-    return False
-
-
 def location_is_valid(phone):
     """v81 compatibility shim: market is valid as soon as phone prefix can be resolved."""
     load_user_preferences(phone)
@@ -2257,6 +1967,68 @@ MSG["zh"].update({
 
 
 LANGUAGE_NAMES_EN = {"ar":"Arabic", "en":"English", "fr":"French", "es":"Spanish", "pt":"Portuguese", "tr":"Turkish", "ru":"Russian", "zh":"Simplified Chinese", "hi":"Hindi", "ur":"Urdu"}
+
+# v104.1: Languages outside the original 10 are supported dynamically.
+LANGUAGE_NAMES_EN.update({
+    "de":"German", "it":"Italian", "nl":"Dutch", "pl":"Polish", "ja":"Japanese", "ko":"Korean",
+    "fa":"Persian", "he":"Hebrew", "uk":"Ukrainian", "el":"Greek", "ro":"Romanian", "cs":"Czech",
+    "sk":"Slovak", "sv":"Swedish", "no":"Norwegian", "da":"Danish", "fi":"Finnish", "hu":"Hungarian",
+    "bg":"Bulgarian", "sr":"Serbian", "hr":"Croatian", "sl":"Slovenian", "lt":"Lithuanian",
+    "lv":"Latvian", "et":"Estonian", "id":"Indonesian", "ms":"Malay", "vi":"Vietnamese",
+    "th":"Thai", "bn":"Bengali", "pa":"Punjabi", "gu":"Gujarati", "ta":"Tamil", "te":"Telugu",
+    "kn":"Kannada", "ml":"Malayalam", "mr":"Marathi", "ne":"Nepali", "si":"Sinhala",
+    "km":"Khmer", "lo":"Lao", "my":"Burmese", "ka":"Georgian", "hy":"Armenian",
+    "az":"Azerbaijani", "kk":"Kazakh", "uz":"Uzbek", "sq":"Albanian", "bs":"Bosnian",
+    "mk":"Macedonian", "is":"Icelandic", "ca":"Catalan", "eu":"Basque", "gl":"Galician",
+    "af":"Afrikaans", "sw":"Swahili", "so":"Somali", "am":"Amharic", "fil":"Filipino",
+})
+
+def language_name_en(lang):
+    code = str(lang or "en").strip().lower()
+    return LANGUAGE_NAMES_EN.get(code) or code.upper() or "English"
+
+_DYNAMIC_UI_CACHE = {}
+_DYNAMIC_UI_LOCK = threading.Lock()
+
+def _dynamic_translate_template(lang, source, cache_tag="ui"):
+    """Translate a fixed UI template for a dynamically detected language, preserving {placeholders}."""
+    code = str(lang or "en").strip().lower()
+    source = str(source or "")
+    if not source or code in ("", "en"):
+        return source
+
+    cache_key = (code, cache_tag, source)
+    with _DYNAMIC_UI_LOCK:
+        hit = _DYNAMIC_UI_CACHE.get(cache_key)
+    if hit:
+        return hit
+
+    target = language_name_en(code)
+    placeholders = set(re.findall(r"\{[A-Za-z0-9_]+\}", source))
+    system = (
+        f"You are a UI translator. Translate the user's WhatsApp bot interface text into {target}. "
+        "Return ONLY the translated text, no quotes and no explanation. "
+        "Preserve emojis, brand/model names, currency codes, numbers, URLs, and every {...} placeholder EXACTLY. "
+        "Keep the wording short and natural for a shopping/search assistant."
+    )
+    translated = ""
+    try:
+        fn = globals().get("text77_call_gemini")
+        if callable(fn):
+            translated, _ = fn([{"text": source}], system=system, use_search=False)
+            translated = str(translated or "").strip()
+    except Exception as e:
+        print(f"DYNAMIC UI TRANSLATE ERR lang={code}: {e}")
+        translated = ""
+
+    if translated and placeholders.issubset(set(re.findall(r"\{[A-Za-z0-9_]+\}", translated))):
+        result = translated
+    else:
+        result = source
+
+    with _DYNAMIC_UI_LOCK:
+        _DYNAMIC_UI_CACHE[cache_key] = result
+    return result
 LANGUAGE_SELECTION = {
     "lang_ar": ("ar", "العربية 🇰🇼"),
     "lang_en": ("en", "English 🇬🇧"),
@@ -2283,9 +2055,27 @@ LANG_INSTR = {
     "ur": "Respond ONLY in Urdu for all UI and descriptive text. Keep brand/model names in their normal Latin form when appropriate. Keep the exact response format and emojis. Keep local prices in the user's local currency.",
 }
 
+def lang_instr(lang):
+    """Search/generation instruction for both fixed and dynamically detected languages."""
+    code = str(lang or "en").lower()
+    if code in LANG_INSTR:
+        return LANG_INSTR[code]
+    name = language_name_en(code)
+    return (
+        f"Respond ONLY in {name} for all human-readable UI and descriptive text. "
+        "Keep brand names, model names, SKUs, sizes, numbers and store names in their normal/original form when appropriate. "
+        "Keep the exact requested response format and emojis. Keep local prices in the user's local currency."
+    )
+
 def T(lang, key, **kw):
-    table = MSG.get(lang) or MSG["en"]
-    value = table.get(key, MSG["en"].get(key, MSG["ar"].get(key, key)))
+    code = str(lang or "en").lower()
+    table = MSG.get(code)
+    if table and key in table:
+        value = table[key]
+    else:
+        value = MSG["en"].get(key, MSG["ar"].get(key, key))
+        if code not in MSG and code != "en":
+            value = _dynamic_translate_template(code, value, f"msg:{key}")
     return value.format(**kw) if kw else value
 
 
@@ -2304,20 +2094,140 @@ UI_TEXT = {
 }
 
 def U(lang, key, **kw):
-    value = (UI_TEXT.get(key) or {}).get(lang) or (UI_TEXT.get(key) or {}).get("en") or key
+    code = str(lang or "en").lower()
+    table = UI_TEXT.get(key) or {}
+    value = table.get(code)
+    if value is None:
+        value = table.get("en") or key
+        if code not in table and code != "en":
+            value = _dynamic_translate_template(code, value, f"ui:{key}")
     return value.format(**kw) if kw else value
 
-def detect_lang(text):
-    """Script-aware detection. Stored UI preference remains authoritative."""
-    t = text or ""
+
+_LANGUAGE_DETECT_CACHE = {}
+_LANGUAGE_DETECT_LOCK = threading.Lock()
+
+_LATIN_LANGUAGE_HINTS = {
+    "en": ("the","please","find","looking","want","need","where","price","how much","can you","show me","best"),
+    "fr": ("je","cherche","veux","besoin","prix","combien","trouve","bonjour","meilleur","où"),
+    "es": ("quiero","busco","precio","cuánto","dónde","hola","mejor","necesito","encuentra"),
+    "pt": ("quero","procuro","preço","quanto","onde","olá","melhor","preciso","encontre"),
+    "tr": ("istiyorum","arıyorum","fiyat","nerede","merhaba","en iyi","bul","lütfen"),
+    "de": ("ich","suche","möchte","preis","wie viel","wo","hallo","beste","finden","bitte"),
+    "it": ("cerco","voglio","prezzo","quanto","dove","ciao","migliore","trova","vorrei"),
+    "nl": ("ik","zoek","wil","prijs","hoeveel","waar","hallo","beste","vinden"),
+    "pl": ("szukam","chcę","cena","ile","gdzie","cześć","najlepszy","znajdź"),
+    "id": ("saya","cari","mau","harga","berapa","dimana","halo","terbaik","tolong"),
+    "ms": ("saya","cari","mahu","harga","berapa","di mana","hai","terbaik","tolong"),
+    "vi": ("tôi","tìm","muốn","giá","bao nhiêu","ở đâu","xin chào","tốt nhất"),
+}
+
+def _script_language_hint(t):
+    if re.search(r"[\u3040-\u30FF]", t): return "ja"
+    if re.search(r"[\uAC00-\uD7AF]", t): return "ko"
     if re.search(r"[\u4E00-\u9FFF]", t): return "zh"
-    if re.search(r"[\u0400-\u04FF]", t): return "ru"
+    if re.search(r"[\u0E00-\u0E7F]", t): return "th"
+    if re.search(r"[\u0590-\u05FF]", t): return "he"
+    if re.search(r"[\u0980-\u09FF]", t): return "bn"
+    if re.search(r"[\u0A00-\u0A7F]", t): return "pa"
+    if re.search(r"[\u0A80-\u0AFF]", t): return "gu"
+    if re.search(r"[\u0B80-\u0BFF]", t): return "ta"
+    if re.search(r"[\u0C00-\u0C7F]", t): return "te"
+    if re.search(r"[\u0C80-\u0CFF]", t): return "kn"
+    if re.search(r"[\u0D00-\u0D7F]", t): return "ml"
     if re.search(r"[\u0900-\u097F]", t): return "hi"
-    # Urdu-specific letters; generic Arabic-script words are intentionally left Arabic.
-    if re.search(r"[ٹڈڑںھہءےگکپچژ]", t): return "ur"
-    if re.search(r"[\u0600-\u06FF]", t): return "ar"
-    if re.search(r"[A-Za-z]", t): return "en"
+    if re.search(r"[\u0D80-\u0DFF]", t): return "si"
+    if re.search(r"[\u1780-\u17FF]", t): return "km"
+    if re.search(r"[\u1000-\u109F]", t): return "my"
+    if re.search(r"[\u10A0-\u10FF]", t): return "ka"
+    if re.search(r"[\u0530-\u058F]", t): return "hy"
+    if re.search(r"[ٹڈڑںھہءے]", t): return "ur"
+    if re.search(r"[іїєґІЇЄҐ]", t): return "uk"
     return None
+
+def _latin_hint(t):
+    low = " " + re.sub(r"\s+", " ", t.lower()) + " "
+    scores = {}
+    for code, words in _LATIN_LANGUAGE_HINTS.items():
+        score = 0
+        for w in words:
+            if f" {w} " in low or (len(w) >= 5 and w in low):
+                score += 1
+        if score:
+            scores[code] = score
+    if not scores:
+        return None
+    best = sorted(scores.items(), key=lambda x: (-x[1], x[0]))
+    if len(best) == 1 or best[0][1] > best[1][1]:
+        return best[0][0]
+    return None
+
+def detect_message_language(text, previous=None):
+    """Detect the language actually used in THIS text message.
+
+    A language-neutral brand/model/SKU returns None, so "iPhone 16 Pro" does not
+    accidentally switch an Arabic user's interface to English.
+    """
+    raw = str(text or "").strip()
+    if not raw:
+        return None
+
+    cache_key = re.sub(r"\s+", " ", raw.casefold())[:300]
+    with _LANGUAGE_DETECT_LOCK:
+        if cache_key in _LANGUAGE_DETECT_CACHE:
+            return _LANGUAGE_DETECT_CACHE[cache_key]
+
+    hint = _script_language_hint(raw)
+    if hint:
+        with _LANGUAGE_DETECT_LOCK:
+            _LANGUAGE_DETECT_CACHE[cache_key] = hint
+        return hint
+
+    # Fast Arabic speech hints. Ambiguous Persian/Arabic script falls through to Gemini.
+    norm_ar = " " + normalize_ar(raw).lower() + " "
+    arabic_hints = ("ابي","اريد","احتاج","وين","شنو","شلون","سعر","ابحث","دور","ممكن","هذا","هذه","هذي","عندكم","شكرا","مرحبا","هلا")
+    if re.search(r"[\u0600-\u06FF]", raw) and any(f" {normalize_ar(w)} " in norm_ar for w in arabic_hints):
+        with _LANGUAGE_DETECT_LOCK:
+            _LANGUAGE_DETECT_CACHE[cache_key] = "ar"
+        return "ar"
+
+    if re.search(r"[A-Za-zÀ-ÖØ-öø-ÿ]", raw):
+        latin = _latin_hint(raw)
+        if latin:
+            with _LANGUAGE_DETECT_LOCK:
+                _LANGUAGE_DETECT_CACHE[cache_key] = latin
+            return latin
+
+    system = """Identify the natural language the user is SPEAKING in the message.
+Return ONLY one lowercase ISO 639-1 language code such as ar, en, de, it, fr, es, ja, ko, fa, ur, uk, etc.
+If the message is only a brand, model, SKU, product code, person's name, URL, number, or other language-neutral proper noun
+(for example: "iPhone 16 Pro", "PS5", "Nike Air Max 90"), return exactly: und.
+Do not infer language merely because a brand/model uses Latin letters.
+No explanation."""
+    detected = ""
+    try:
+        fn = globals().get("text77_call_gemini")
+        if callable(fn):
+            detected, _ = fn([{"text": raw[:500]}], system=system, use_search=False)
+            detected = str(detected or "").strip().lower()
+    except Exception as e:
+        print(f"AUTO LANGUAGE DETECT ERR: {e}")
+        detected = ""
+
+    m = re.search(r"\b([a-z]{2,3})\b", detected)
+    code = m.group(1) if m else ""
+    if code == "und" or not code:
+        code = None
+
+    if code is None and re.search(r"[\u0600-\u06FF]", raw):
+        code = previous if previous in ("ar","ur","fa") else "ar"
+
+    with _LANGUAGE_DETECT_LOCK:
+        _LANGUAGE_DETECT_CACHE[cache_key] = code
+    return code
+
+def detect_lang(text):
+    return detect_message_language(text)
 
 SYSTEM_PROMPT = """
 أنت مساعد تسوق عالمي يعتمد سوق المستخدم المحلي الحالي. السوق المحلي هو أهم جزء في الخدمة ويجب البحث فيه بقوة قبل النتائج الأجنبية.
@@ -4003,7 +3913,7 @@ def best_of_search(parts, lang="ar"):
 
 def bilingual_search_instruction(query, lang):
     """Worldwide search aliases: user's wording + English commercial name + local commerce language."""
-    response_rule = LANG_INSTR[lang]
+    response_rule = lang_instr(lang)
     m = current_market()
     market_name = m.get("country_name", "Kuwait")
     hl = m.get("search_hl") or country_search_hl()
@@ -5024,7 +4934,7 @@ def _new_layer_search(query, lang, prompt_text=None, source_image_b64=None, sour
             "وداخل كل سوق فقط رتب من الأرخص إلى الأغلى. كل نتيجة يجب أن تحتوي سعراً رقمياً ورابط صفحة المنتج المباشرة داخل المتجر. "
             "ممنوع روابط Google وصفحات البحث والتصنيف، وممنوع أي متجر من دولة غير هذه الأسواق الثلاثة. "
             "لا تكتب متوفر أو InStock بدلاً من السعر. حافظ على السعر الرقمي والعملة كما في المصدر؛ التطبيق ينسق عدد الخانات حسب العملة. "
-            f"{LANG_INSTR[lang]}"
+            f"{lang_instr(lang)}"
         )
 
         txt, urls = call_gemini([{"text": current_prompt}])
@@ -5259,19 +5169,19 @@ def _old_layer_search(query, lang, prompt_text=None, lens_context=None, allow_gl
     if allow_global:
         base_prompt = (
             f"ابحث عن {search_name} في الولايات المتحدة ثم الصين فقط. استبعد بلد المستخدم {market_name} واستبعد كل الدول الأخرى. "
-            f"سعر رقمي واضح ورابط صفحة المنتج المباشر مع العملة الأصلية. {LANG_INSTR[lang]}"
+            f"سعر رقمي واضح ورابط صفحة المنتج المباشر مع العملة الأصلية. {lang_instr(lang)}"
         )
         variants = [
             base_prompt,
-            f"{search_name} United States buy online exact product direct page price USD {LANG_INSTR[lang]}",
-            f"{search_name} China buy online exact product direct page price CNY RMB AliExpress Alibaba 1688 Taobao SHEIN JD {LANG_INSTR[lang]}",
+            f"{search_name} United States buy online exact product direct page price USD {lang_instr(lang)}",
+            f"{search_name} China buy online exact product direct page price CNY RMB AliExpress Alibaba 1688 Taobao SHEIN JD {lang_instr(lang)}",
         ]
     else:
         # ثلاث عمليات بحث مستقلة تضمن وجود تغطية فعلية لكل سوق بدلاً من الاعتماد على ترتيب Google العام.
         variants = [
-            prompt_text or f"ابحث عن {search_name} في {market_name} فقط. استخدم الاسم التجاري الإنجليزي ولغة السوق {country_search_hl()}، وافحص المتاجر المتخصصة والمحلية الصغيرة. السعر يجب أن يكون رقمياً بعملة محلية مقبولة ({', '.join(country_currency_codes())}) ورابط صفحة منتج مباشر. {LANG_INSTR[lang]}",
-            f"{search_name} United States buy online exact product direct product page current price USD; US stores only. {LANG_INSTR[lang]}",
-            f"{search_name} China buy online exact product direct product page current price CNY RMB; Chinese stores only such as AliExpress Alibaba 1688 Taobao SHEIN Tmall JD DHgate. {LANG_INSTR[lang]}",
+            prompt_text or f"ابحث عن {search_name} في {market_name} فقط. استخدم الاسم التجاري الإنجليزي ولغة السوق {country_search_hl()}، وافحص المتاجر المتخصصة والمحلية الصغيرة. السعر يجب أن يكون رقمياً بعملة محلية مقبولة ({', '.join(country_currency_codes())}) ورابط صفحة منتج مباشر. {lang_instr(lang)}",
+            f"{search_name} United States buy online exact product direct product page current price USD; US stores only. {lang_instr(lang)}",
+            f"{search_name} China buy online exact product direct product page current price CNY RMB; Chinese stores only such as AliExpress Alibaba 1688 Taobao SHEIN Tmall JD DHgate. {lang_instr(lang)}",
         ]
     # MARKET_CTX يضيع داخل ThreadPool؛ نمرر سوق المستخدم مع كل استدعاء وإلا رجع البحث للكويت الافتراضية.
     market_snapshot = current_market()
@@ -5872,8 +5782,9 @@ async def receive(request: Request, background_tasks: BackgroundTasks):
             background_tasks.add_task(process_location_message,msg,bot_id)
             return {"status":"ok"}
 
-        # First use: ask only for UI language. Country is already known from phone prefix.
-        if from_number not in USER_LANG:
+        # v104.1: first TEXT message detects its own language automatically.
+        # If the user's very first interaction is an image, keep the existing manual picker.
+        if from_number not in USER_LANG and typ != "text":
             cache_pending_message(from_number, msg, bot_id)
             background_tasks.add_task(asyncio.to_thread, send_language_choice, from_number, bot_id)
             return {"status":"ok"}
@@ -5889,15 +5800,10 @@ async def receive(request: Request, background_tasks: BackgroundTasks):
 
 
 
-def _store_pending_global(phone, bot_id, lang, query, lens_context, prompt_text=None,
-                          origin="", local_best_price=None, local_count=0, cached_foreign=None):
+def _store_pending_global(phone, bot_id, lang, query, lens_context, prompt_text=None):
     PENDING_GLOBAL_SEARCH[phone] = {
         "bot_id": bot_id, "lang": lang, "query": query,
         "lens_context": lens_context or {}, "prompt_text": prompt_text,
-        "origin": origin or "",
-        "local_best_price": local_best_price,
-        "local_count": int(local_count or 0),
-        "cached_foreign": list(cached_foreign or []),
         "ts": time.time(),
     }
 
@@ -5930,9 +5836,9 @@ def run_similar_search(phone, item):
         (f"المنتج التالي غير متوفر محلياً: {base}" + (f" ({base_en})" if base_en and base_en != base else "") + f". اقترح حتى {MAX_STORES} بدائل مشابهة له فعلياً — نفس الفئة "
          f"ونفس الاستخدام ومستوى جودة قريب — متوفرة الآن في متاجر {market_name} فقط، من أي متجر محلي كان. "
          "لكل بديل: اسم البديل الفعلي (وليس اسم المنتج الأصلي)، سعر رقمي واضح بعملة السوق، "
-         f"ورابط صفحة المنتج المباشرة داخل المتجر. رتب من الأرخص إلى الأغلى واكتب السعر بالفلوس كاملة مثل 1.950. {LANG_INSTR[lang]}"),
+         f"ورابط صفحة المنتج المباشرة داخل المتجر. رتب من الأرخص إلى الأغلى واكتب السعر بالفلوس كاملة مثل 1.950. {lang_instr(lang)}"),
         (f"{MAX_STORES} best in-stock alternatives similar to {base_en or base} in {market_name} local online stores, "
-         f"each with the alternative's own name, a numeric price, and a direct product page link, sorted cheapest first. {LANG_INSTR[lang]}"),
+         f"each with the alternative's own name, a numeric price, and a direct product page link, sorted cheapest first. {lang_instr(lang)}"),
     ]
     for prompt in prompts:
         txt, urls = call_gemini([{"text": prompt}])
@@ -6009,9 +5915,9 @@ def run_global_search(phone, item):
             txt = "\n".join(kept_lines).strip()
             urls = filtered_urls
     if not txt or not extract_store_offers(txt) or not urls:
-        send_whatsapp_text(phone, LF(lang, "global_none"), bot_id)
-        return False
-    return _send_text_global_records(phone, txt, urls, bot_id, lang, query, item)
+        send_whatsapp_text(phone, T(lang, "global_none"), bot_id)
+        return
+    send_product_result(phone, txt, urls, bot_id, lang, query)
 
 def _more_result_domain(url):
     try:
@@ -6022,8 +5928,8 @@ def _more_result_domain(url):
 
 
 def _send_more_results_choice(phone, bot_id, lang="ar"):
-    body = LF(lang, "local_actions", country=_local_first_country())
-    title = LF(lang, "more_local")[:20]
+    body = U(lang, "more_store_q")
+    title = U(lang, "search_more")
     return send_whatsapp_buttons(phone, body, [{"id":"more_results","title":title}], bot_id)
 
 
@@ -6054,21 +5960,22 @@ def _more_exclusion_instruction(seen_domains):
 
 
 def legacy_text_product_search_more(product, lang, seen_domains):
-    """More results = more LOCAL merchants. International comparison has its own button."""
     market_name = current_market().get("country_name", "Kuwait")
+    total_cap = MORE_TOTAL_MAX
     exclusion = _more_exclusion_instruction(seen_domains)
     alt = english_search_name(product) if re.search(r"[\u0600-\u06FF]", str(product or "")) else arabic_search_name(product)
     alt = (alt or "").strip()
     extra_name = f" والاسم الآخر لنفس المنتج هو {alt}." if alt and alt.lower() != str(product).strip().lower() else ""
     prompt = (
         f"ابحث مرة أخرى بعمق عن نفس المنتج بالضبط: {product}.{extra_name} "
-        f"المستخدم شاهد نتائج محلية سابقة ويريد متاجر محلية إضافية جديدة فقط.{exclusion} "
-        f"ابحث داخل {market_name} فقط واعرض حتى {MORE_LOCAL_MAX} متاجر محلية جديدة. "
-        "لا تعرض أي متجر دولي أو أمريكي أو صيني في هذا الطلب. لا تكرر أي متجر أو دومين ظهر سابقاً. "
+        f"المستخدم شاهد نتائج سابقة ويريد متاجر إضافية جديدة فقط.{exclusion} "
+        f"نفس ترتيب البحث الأصلي لكن بحدود الدفعة الإضافية: أولاً متاجر {market_name} المحلية حتى {MORE_LOCAL_MAX}، "
+        f"ثم الولايات المتحدة حتى {MORE_US_MAX}، ثم الصين حتى {MORE_CN_MAX}. "
+        "لا تعرض دولة رابعة. لا تكرر أي متجر أو دومين ظهر سابقاً. "
         "كل نتيجة يجب أن تكون نفس المنتج والموديل/الحجم، بسعر رقمي ورابط صفحة منتج مباشر. "
-        f"{TEXT77_LANG_INSTR[lang]}"
+        f"{TEXT77_lang_instr(lang)}"
     )
-    return legacy_v26_best_of_search([{"text": prompt}], max(1, MORE_LOCAL_MAX), True, product)
+    return legacy_v26_best_of_search([{"text": prompt}], total_cap, True, product)
 
 
 def run_more_results_search(phone, item):
@@ -6185,16 +6092,12 @@ def process_interactive_message(message, bot_id):
         execute_product_search(from_number, search_query, target_bot_id, lang_)
         return
 
-    # v106: international comparison is opt-in after good local coverage.
-    # Repeated clicks are persisted so Global Deals can be surfaced more prominently later.
+    # Shared buttons: text77 uses text77 follow-ups; image/Lens keeps v79 handlers exactly.
     if btn_id in ("global_yes", "nf_global"):
-        _record_global_interest(from_number)
         item = _pop_pending_global(from_number)
         if item:
             if item.get("origin") == "text77":
                 run_text_global_search(from_number, item)
-            elif item.get("origin") == "lens_cached" and item.get("cached_foreign"):
-                run_cached_lens_global_search(from_number, item)
             else:
                 run_global_search(from_number, item)
         return
@@ -6663,7 +6566,7 @@ def translate_ui_titles(titles, lang):
     clean = [re.sub(r"\s+", " ", str(t or "")).strip() for t in titles]
     if not clean or lang == "en":
         return clean
-    target = LANGUAGE_NAMES_EN.get(lang, "English")
+    target = language_name_en(lang)
     result = [None] * len(clean)
     missing_idx, missing = [], []
     with UI_TRANSLATE_LOCK:
@@ -6766,165 +6669,167 @@ def _lens_merchant_key(name, url=""):
 
 
 def send_lens_direct_results(from_number, lens, bot_id, lang, caption="", image_b64="", image_mime="", exclude_domains=None, exclude_urls=None, more_mode=False):
-    """v106 Lens UI: show local cards first; keep foreign Lens cards cached and hidden until useful."""
+    """v76: CTA-only، مختصر، بأعلام الدول، وترجمة للواجهة فقط.
+
+    الحدود القصوى مستقلة: محلي 5، أمريكا 4، الصين 4.
+    لا يوجد حد أدنى أو عدد إلزامي لأي سوق.
+    """
     exclude_domains = {str(x).lower() for x in (exclude_domains or []) if x}
     exclude_urls = {str(x).strip() for x in (exclude_urls or []) if x}
     raw_matches = [m for m in (lens.get("matches") or []) if (m.get("title") or "").strip()]
     if exclude_domains or exclude_urls:
-        raw_matches = [
-            m for m in raw_matches
-            if str(m.get("link") or "").strip() not in exclude_urls
-            and _more_result_domain(m.get("link")) not in exclude_domains
-        ]
-
+        raw_matches = [m for m in raw_matches if str(m.get("link") or "").strip() not in exclude_urls and _more_result_domain(m.get("link")) not in exclude_domains]
+    # Relevance BEFORE country/store priority: unrelated preferred-store results must never win.
     lens_for_filter = dict(lens or {})
     lens_for_filter["matches"] = raw_matches
     raw_matches = _lens_ai_relevance_filter(lens_for_filter)
     if lens_for_filter.get("relevance_target"):
         lens["relevance_target"] = lens_for_filter["relevance_target"]
-
     matches = [m for m in raw_matches if result_market_rank(m) != 99]
     if not matches:
         return False
 
+    # داخل كل سوق: النتائج ذات السعر أولاً، ثم exact/visual، ثم ترتيب Google Lens.
     buckets = {0: [], 1: [], 2: []}
     for m in matches:
         rank = result_market_rank(m)
         if rank in buckets:
             buckets[rank].append(m)
-
     for rank in buckets:
         buckets[rank].sort(key=lambda m: (
+            _us_store_priority(m.get("source"), m.get("link")) if rank == 1
+            else (_china_store_priority(m.get("source"), m.get("link")) if rank == 2 else 99),
             0 if _lens_has_price(m) else 1,
             0 if m.get("exact") else 1,
             0 if m.get("section") == "visual_matches" else 1,
-            _us_store_priority(m.get("source"), m.get("link")) if rank == 1
-            else (_china_store_priority(m.get("source"), m.get("link")) if rank == 2 else 99),
             int(m.get("position") or 999),
         ))
-        cap = (MORE_LOCAL_MAX if more_mode and rank == 0 else LENS_DIRECT_LOCAL_MAX if rank == 0
-               else LENS_DIRECT_US_MAX if rank == 1 else LENS_DIRECT_CN_MAX)
-        probe_n = max(cap + 2, cap)
-        if probe_n > 0:
-            head = _filter_confirmed_oos(buckets[rank][:probe_n], f"LENS-{rank}")
-            buckets[rank] = head + buckets[rank][probe_n:]
+        # فحص مخزون لأفضل المرشحين فقط حتى لا نبطئ Lens بعشرات طلبات HTTP.
+        # نأخذ cap+2 لإعطاء بديلين إذا كانت بعض البطاقات خالصة.
+        _active_probe_caps = (
+            {0: MORE_LOCAL_MAX, 1: MORE_US_MAX, 2: MORE_CN_MAX}
+            if more_mode
+            else {0: LENS_DIRECT_LOCAL_MAX, 1: LENS_DIRECT_US_MAX, 2: LENS_DIRECT_CN_MAX}
+        )
+        _cap = _active_probe_caps.get(rank, 0)
+        _probe_n = max(_cap + 2, _cap)
+        _head = _filter_confirmed_oos(buckets[rank][:_probe_n], f"LENS-{rank}")
+        buckets[rank] = _head + buckets[rank][_probe_n:]
 
-    def _select_bucket(rank, cap):
-        selected, seen, merchant_counts = [], set(), defaultdict(int)
-        for m in buckets.get(rank, []):
-            url = str(m.get("link") or "").strip()
+    # حدود قصوى فقط وليست حصصاً. نسمح حتى نتيجتين من نفس المتجر/merchant.
+    # نمنع تكرار نفس الرابط نفسه، لكن قد يظهر SKU/عرض ثانٍ من Amazon أو eBay أو غيرهما.
+    def _merchant_key(m):
+        url = (m.get("link") or "").strip()
+        source = re.sub(r"\s+", " ", (m.get("source") or "").strip().lower())
+        try:
+            host = urllib.parse.urlparse(url).netloc.lower().split(":")[0]
+            host = host[4:] if host.startswith("www.") else host
+        except Exception:
+            host = ""
+
+        # توحيد أشهر المتاجر حتى لو جاء source مرة Shein ومرة shein.com.
+        known = (
+            "shein.com", "aliexpress.com", "temu.com", "alibaba.com", "1688.com",
+            "taobao.com", "tmall.com", "amazon.com", "ubuy.com", "westelm.com",
+            "hm.com", "wayfair.com",
+        )
+        for d in known:
+            if host == d or host.endswith("." + d) or d in source:
+                return d
+        if host:
+            # host هو المرجع الأقوى للمتاجر غير المعروفة.
+            return host
+        return re.sub(r"[^a-z0-9]+", "", source) or source
+
+    market_caps = (
+        {0: MORE_LOCAL_MAX, 1: MORE_US_MAX, 2: MORE_CN_MAX}
+        if more_mode
+        else {0: LENS_DIRECT_LOCAL_MAX, 1: LENS_DIRECT_US_MAX, 2: LENS_DIRECT_CN_MAX}
+    )
+    selected = []
+    seen_urls = set()
+    merchant_counts = defaultdict(int)
+    for rank in (0, 1, 2):
+        taken = 0
+        cap = market_caps.get(rank, 0)
+        if cap <= 0:
+            continue
+        for m in buckets[rank]:
+            url = (m.get("link") or "").strip()
             try:
                 host = urllib.parse.urlparse(url).netloc.lower()
             except Exception:
                 host = ""
             if not (url.startswith("http") and host and "google." not in host):
                 continue
-            merchant = _lens_merchant_key(m.get("source"), url)
-            if url in seen or merchant_counts[merchant] >= RESULTS_PER_STORE_MAX:
+            merchant = _merchant_key(m)
+            if url in seen_urls:
+                print(f"LENS DUP URL SKIP: merchant={merchant} title={(m.get('title') or '')[:70]}")
                 continue
-            seen.add(url); merchant_counts[merchant] += 1
+            if merchant_counts[merchant] >= RESULTS_PER_STORE_MAX:
+                print(f"LENS STORE CAP SKIP: merchant={merchant} cap={RESULTS_PER_STORE_MAX}")
+                continue
             selected.append(m)
-            if len(selected) >= cap:
+            seen_urls.add(url)
+            merchant_counts[merchant] += 1
+            taken += 1
+            if taken >= cap or len(selected) >= LENS_DIRECT_MAX_CTA:
                 break
-        return selected
+        if len(selected) >= LENS_DIRECT_MAX_CTA:
+            break
 
-    local_cap = MORE_LOCAL_MAX if more_mode else LENS_DIRECT_LOCAL_MAX
-    selected = _select_bucket(0, local_cap)
-    foreign_cached = _prepare_cached_lens_foreign(
-        _select_bucket(1, LENS_DIRECT_US_MAX) + _select_bucket(2, LENS_DIRECT_CN_MAX)
-    )
-
-    expansion_query = (
-        (lens.get("relevance_target") or "").strip()
-        or ((lens.get("chosen") or {}).get("title") or "").strip()
-        or (caption or "").strip()
-    )
-
-    # If no local match exists, use the already-fetched international Lens cards immediately.
     if not selected:
-        if not more_mode and foreign_cached and expansion_query and _auto_global_allowed(expansion_query):
-            item = {
-                "bot_id":bot_id, "lang":lang, "query":expansion_query,
-                "origin":"lens_cached", "local_best_price":None, "local_count":0,
-                "cached_foreign":foreign_cached, "lens_context":lens, "auto_global":True,
-            }
-            _local_first_notice(from_number, bot_id, lang, 0)
-            run_cached_lens_global_search(from_number, item)
-            return True
         return False
 
+    # v80.1 PRICE-SMART: لا نزور صفحات المتاجر ولا نحذف أي بطاقة.
+    # نستعيد السعر مجاناً من بيانات Lens الموجودة: النص المضمّن أو نسخة أخرى من نفس
+    # المتجر/الموديل في تمريرات Lens المتعددة. إذا بقي السعر مجهولاً تبقى البطاقة.
     selected = _fill_prices_from_existing_lens_pool(selected, raw_matches)
+    missing_prices = sum(1 for m in selected if not _lens_has_price(m))
+    if missing_prices:
+        print(f"LENS PRICE-SMART: preserved {missing_prices} card(s) with no safely extracted numeric price")
+
+    # الترجمة للواجهة فقط بعد اكتمال البحث والاختيار؛ لا تؤثر على Lens أو Google أو الفلاتر.
     display_titles = translate_ui_titles([(m.get("title") or "").strip() for m in selected], lang)
     for m, display_title in zip(selected, display_titles):
         m["_display_title"] = display_title
 
     local_cc = (current_market().get("country") or DEFAULT_COUNTRY).lower()
-    if not more_mode:
-        send_whatsapp_text(
-            from_number,
-            LF(lang, "local_summary", flag=country_flag_emoji(local_cc), country=_local_first_country(), count=len(selected)),
-            bot_id,
-        )
-
+    market_cc = {0: local_cc, 1: "us", 2: "cn"}
     sent = 0
-    sent_items = []
-    local_values = []
+    market_counts = {0: 0, 1: 0, 2: 0}
     for m in selected:
+        market_rank = result_market_rank(m)
+        flag = country_flag_emoji(market_cc.get(market_rank, ""))
         source = _ui_plain_store_name((m.get("source") or "").strip(), (m.get("link") or "").strip())
         title = _compact_ui_title(m.get("_display_title") or m.get("title") or "")
-        price_txt = _lens_price_text_local(m, 0, lang)
-        local_val = _lens_item_local_value(m, 0)
-        if local_val is not None:
-            local_values.append(local_val)
-        body = _build_compact_card_body(country_flag_emoji(local_cc), source, title, price_txt, lang)
+        price_txt = _lens_price_text_local(m, market_rank, lang)
+
+        # بطاقة مرتبة: متجر -> منتج -> سعر، بدون خلط عربي/إنجليزي في نفس السطر.
+        body = _build_compact_card_body(flag, source, title, price_txt, lang)
         if not body:
             continue
+
         url = (m.get("link") or "").strip()
-        button_source = source or U(lang, "store")
+        button_source = source or (U(lang, "store"))
         send_whatsapp_cta(from_number, body[:1000], url, bot_id, button_source)
+        market_counts[market_rank] += 1
         sent += 1
-        sent_items.append(m)
 
-    if not sent:
-        return False
-
-    local_best = min(local_values) if local_values else None
     chosen_title = ((lens.get("chosen") or {}).get("title") or selected[0]["title"]).strip()
-    expansion_query = expansion_query or chosen_title
-    LAST_SEARCH[from_number] = {"product": (caption or expansion_query or chosen_title)}
-    print(f"LOCAL-FIRST LENS SENT: local={sent} cached_global={len(foreign_cached)} best={local_best} more_mode={more_mode}")
-
-    if expansion_query:
-        _save_more_results_state(
-            from_number, expansion_query, bot_id, lang, "lens", sent_items,
-            image_b64=image_b64, image_mime=image_mime,
-            visual_identity=(lens.get("visual_identity") or lens.get("relevance_target") or expansion_query),
-            reset=not more_mode
-        )
-
-    if more_mode:
-        _send_more_results_choice(from_number, bot_id, lang)
-        return True
-
-    _store_pending_global(
-        from_number, bot_id, lang, expansion_query, lens,
-        origin="lens_cached", local_best_price=local_best, local_count=sent,
-        cached_foreign=foreign_cached
+    expansion_query = (
+        (lens.get("relevance_target") or "").strip()
+        or chosen_title
+        or (caption or "").strip()
     )
-
-    if sent < LOCAL_FIRST_STRONG_MIN and _auto_global_allowed(expansion_query):
-        item = _pop_pending_global(from_number) or {}
-        item.update({
-            "bot_id":bot_id, "lang":lang, "query":expansion_query,
-            "origin":"lens_cached", "local_best_price":local_best, "local_count":sent,
-            "cached_foreign":foreign_cached, "lens_context":lens, "auto_global":True,
-        })
-        _local_first_notice(from_number, bot_id, lang, sent)
-        run_cached_lens_global_search(from_number, item)
-    else:
-        _send_local_first_choices(from_number, bot_id, lang, expansion_query)
-    return True
-
+    LAST_SEARCH[from_number] = {"product": (caption or expansion_query or chosen_title)}
+    print(f"LENS DIRECT SENT v79: {sent} CTA; merchants={len(merchant_counts)}; per_store_cap={RESULTS_PER_STORE_MAX}; buckets={market_counts}; caps=5/4/4; order=local->us->cn")
+    if market_counts[2] == 0:
+        print("V77 WARNING: no Chinese-store Lens result survived filters")
+    if sent > 0 and expansion_query:
+        _save_more_results_state(from_number, expansion_query, bot_id, lang, "lens", selected, image_b64=image_b64, image_mime=image_mime, visual_identity=(lens.get("visual_identity") or lens.get("relevance_target") or expansion_query), reset=not more_mode)
+        _send_more_results_choice(from_number, bot_id, lang)
+    return sent > 0
 
 def process_single_image(message,bot_id,lang="ar"):
     from_number=message["from"]
@@ -7032,7 +6937,7 @@ def process_single_image(message,bot_id,lang="ar"):
             f"هوية المنتج المعتمدة: {combined_name}\n"
             f"طلب المستخدم: {caption}\n"
             "ابحث عن نفس المنتج فقط. لا توسع البحث إلى منتج يشاركه المكون أو اللون أو الفئة. "
-            f"{LANG_INSTR[lang]}"
+            f"{lang_instr(lang)}"
         )
         txt,urls=search_product(request_query, lang, prompt_text=prompt_text, lens_context=active_lens)
         query = request_query
@@ -7217,6 +7122,20 @@ TEXT77_LANG_INSTR = {
     "ur": "UI متن اردو میں دیں، مگر غیر ملکی اسٹور کی قیمت کبھی تبدیل نہ کریں۔ اصل ماخذ کی کرنسی برقرار رکھیں: امریکی اسٹور USD میں؛ چینی اسٹور ماخذ کے مطابق USD یا CNY/RMB میں۔ صرف مقامی اسٹور کی قیمت صارف کی مقامی کرنسی میں ہو۔",
 }
 
+def text77_lang_instr(lang):
+    code = str(lang or "en").lower()
+    if code in TEXT77_LANG_INSTR:
+        return TEXT77_LANG_INSTR[code]
+    name = language_name_en(code)
+    return (
+        f"Write ALL human-readable interface and descriptive text ONLY in {name}. "
+        "Do NOT translate or alter store prices. Preserve the exact source currency for foreign stores. "
+        "Only local-store prices use the user's local currency. "
+        "Every store line must explicitly include a numeric price and its original/source currency. "
+        "Keep brand names, model names, SKUs, sizes and store names unchanged when appropriate."
+    )
+
+
 TEXT77_SYSTEM_PROMPT = SYSTEM_PROMPT + """
 
 IMPORTANT OVERRIDE FOR TYPED-TEXT SEARCH ONLY:
@@ -7229,7 +7148,7 @@ Do not output a converted local-currency value for a foreign store.
 """
 
 def text77_market_instruction():
-    """Typed-text geo rule for v106: local by default; international only when the prompt explicitly asks."""
+    """Typed-text global market rule with premium local discovery."""
     m = current_market()
     cc = (m.get("country") or DEFAULT_COUNTRY).lower()
     place = m.get("country_name") or COUNTRY_NAMES.get(cc, cc.upper())
@@ -7240,14 +7159,14 @@ def text77_market_instruction():
     local_stores = priority_stores_for("")
     stores_hint = ", ".join(local_stores[:6]) if local_stores else "strong local specialist stores and marketplaces"
     return (
-        f"\nIMPORTANT GEO RULE: the user's local market is {place} (gl={cc}, hl={hl}, ccTLD={tlds}). "
+        f"\nIMPORTANT TYPED-TEXT GEO RULE: local market is {place} (gl={cc}, hl={hl}, ccTLD={tlds}). "
         f"Accepted local currencies: {currencies}; primary display currency: {currency}. "
-        "DEFAULT PRODUCT SEARCH = LOCAL ONLY. Exhaust the user's local market deeply and do not add foreign stores unless the user/task explicitly asks for worldwide, international, outside-country, or global results. "
-        f"For local searches check {stores_hint}, then broaden to smaller genuine local merchants indexed by Google; this is not a whitelist. "
-        "When the prompt EXPLICITLY asks for international/outside-country results: exclude the user's local country, prioritize practical nearby/regional markets first, then trusted worldwide stores/marketplaces. "
-        "Do not expose internal market buckets such as 'USA section' or 'China section' in the user-facing answer. "
-        f"Local prices use valid local source currency ({currencies}); international results keep their real source currency so the application can convert it. "
+        "LOCAL IS THE MAIN PRODUCT: search it deeply before foreign markets. Use the user's wording, commercial English name, and local-commerce wording when useful. "
+        f"Check {stores_hint}, then broaden to smaller genuine local merchants indexed by Google; this is not a whitelist. "
+        f"Return in strict order: up to {LENS_DIRECT_LOCAL_MAX} LOCAL {place} results, then up to {LENS_DIRECT_US_MAX} US, then up to {LENS_DIRECT_CN_MAX} China. Reject every fourth country. "
         "Heureka/heureka.cz/heureka.sk is blocked globally as a comparison site; Eureka Kuwait is allowed. "
+        f"Local prices use a valid local source currency ({currencies}); US stays USD; China stays source USD or CNY/RMB. Never convert foreign prices in the AI response. "
+        "A .com domain can still be local when Google local targeting, local currency, country path/text, or merchant identity ties it to the local market. "
         "For SERVICES keep providers local only.\n"
     )
 
@@ -7384,7 +7303,7 @@ def text77_bilingual_search_instruction(query, lang):
         f"Use the original wording, English commercial name, and local commerce language {hl}. "
         f"Do not stop at famous stores; inspect smaller genuine {market_name} merchants indexed by Google. "
         f"Local prices must be numeric and use an accepted local currency ({', '.join(country_currency_codes())}). "
-        f"Then US and China only if needed. {TEXT77_LANG_INSTR[lang]}"
+        f"Then US and China only if needed. {TEXT77_lang_instr(lang)}"
     )
 
 
@@ -7395,11 +7314,10 @@ def text77_is_local_result(item):
 def text77_is_foreign_result(item):
     return is_foreign_lens_result(item)
 
-def text77_store_pending_global(phone, bot_id, lang, query, local_best_price=None, local_count=0):
-    _store_pending_global(
-        phone, bot_id, lang, query, None, None,
-        origin="text77", local_best_price=local_best_price, local_count=local_count
-    )
+def text77_store_pending_global(phone, bot_id, lang, query):
+    _store_pending_global(phone, bot_id, lang, query, None, None)
+    if phone in PENDING_GLOBAL_SEARCH:
+        PENDING_GLOBAL_SEARCH[phone]["origin"] = "text77"
 
 # v77.7 classifier references this intent; the original file omitted the constant.
 # Defining it here realizes the behavior documented by the v77.7 classifier comments.
@@ -7899,7 +7817,7 @@ def cart_item_search(product, lang):
     market_name = current_market().get("country_name", "Kuwait")
     txt, urls = text77_call_gemini([{"text": (
         f"ابحث عن {product} في أي متجر محلي في {market_name} يبيعه بسعر رقمي واضح "
-        f"ورابط صفحة منتج مباشر. حتى {MAX_STORES} متاجر من الأرخص للأغلى. {TEXT77_LANG_INSTR[lang]}"
+        f"ورابط صفحة منتج مباشر. حتى {MAX_STORES} متاجر من الأرخص للأغلى. {TEXT77_lang_instr(lang)}"
     )}])
     urls = direct_urls_only(urls)
     if txt and text77_extract_store_offers(txt) and not is_no_result_answer(txt):
@@ -8315,8 +8233,8 @@ def _china_store_priority(name, url):
 
 
 def legacy_text_product_search(product, lang):
-    """v106 primary typed search: LOCAL ONLY. International search is a separate useful-on-demand step."""
-    cache_query = f"__TEXT_LOCAL_FIRST_V106__::{product}"
+    """v84 typed engine: search immediately in the user's wording; translate only on failure."""
+    cache_query = f"__TEXT79_MARKET_COVERAGE__::{product}"
     cached = cache_get(cache_query, lang)
     if cached:
         return cached
@@ -8329,7 +8247,7 @@ def legacy_text_product_search(product, lang):
     local_tlds = ", ".join(country_tlds(local_cc))
     local_stores = priority_stores_for(product)
     local_store_hint = ", ".join(local_stores[:7]) if local_stores else "the strongest specialist and marketplace stores in the country"
-    total_cap = max(1, LENS_DIRECT_LOCAL_MAX)
+    total_cap = max(1, LENS_DIRECT_LOCAL_MAX + LENS_DIRECT_US_MAX + LENS_DIRECT_CN_MAX)
     soft = None
 
     def _attempt(primary, secondary=""):
@@ -8337,18 +8255,22 @@ def legacy_text_product_search(product, lang):
         prompt = (
             f"ابحث عن نفس المنتج بالضبط: {primary}.{extra} "
             "إذا كان اسم المنتج مكتوباً بلغة غير لغة المتجر، افهم الاسم التجاري المكافئ تلقائياً أثناء بحث Google. "
-            f"LOCAL-FIRST ONLY: ابحث داخل {market_name} فقط. استخدم صياغة المستخدم + الاسم التجاري الإنجليزي + صياغة لغة السوق {local_hl}. "
-            f"استخدم إشارات السوق gl={local_cc} و ccTLD={local_tlds} والعملات المحلية {local_currencies}. "
-            f"ابدأ بالمتاجر القوية مثل {local_store_hint} ثم وسّع للمتاجر المحلية الصغيرة المفهرسة؛ القائمة ليست whitelist. "
-            f"اعرض حتى {LENS_DIRECT_LOCAL_MAX} نتائج محلية مطابقة فقط، من الأرخص إلى الأغلى. "
-            "ارفض أي متجر أجنبي في هذه المرحلة. لا تعرض أقسام أمريكا أو الصين أو أي دولة أخرى. "
-            "استبعد Heureka/heureka.cz/heureka.sk نهائياً ولا تعتبره متجراً محلياً. "
-            "لكل نتيجة اذكر اسم المتجر، اسم المنتج المطابق، السعر الرقمي والعملة المحلية/المعتمدة، واربطه بصفحة المنتج المباشرة. "
-            f"{TEXT77_LANG_INSTR[lang]}"
+            f"LOCAL SEARCH BOOST: في {market_name} ابحث بصياغة المستخدم + الاسم التجاري الإنجليزي + صياغة لغة السوق {local_hl}. "
+            f"استخدم إشارات السوق gl={local_cc} و ccTLD={local_tlds} والعملات المحلية {local_currencies}. ابدأ بالمتاجر القوية مثل {local_store_hint} ثم وسّع للمتاجر المحلية الصغيرة المفهرسة؛ القائمة ليست whitelist. "
+            f"ابحث تلقائياً في ثلاث مجموعات فقط وبالترتيب الإلزامي: "
+            f"أولاً متاجر {market_name} المحلية حتى {LENS_DIRECT_LOCAL_MAX}، "
+            f"ثم متاجر الولايات المتحدة حتى {LENS_DIRECT_US_MAX}، "
+            f"ثم المتاجر الصينية حتى {LENS_DIRECT_CN_MAX}. "
+            "بالنسبة لأمريكا: ابحث بشكل طبيعي في المتاجر الأمريكية، وإذا ظهرت نتائج مطابقة فرتبها داخل القسم الأمريكي بهذه الأولوية فقط: Amazon ثم eBay ثم Walmart ثم باقي المتاجر الأمريكية. لا تفرض ظهور أي متجر إذا لم توجد نتيجة مطابقة. "
+            "بالنسبة للصين ابحث مباشرة في AliExpress وTemu وAlibaba وSHEIN عندما توجد نتيجة مطابقة، ويمكن استخدام متاجر صينية أخرى. "
+            "لا تعرض أي دولة رابعة. استبعد Heureka/heureka.cz/heureka.sk نهائياً ولا تعتبره متجراً محلياً. لا تجعل الأعداد حصصاً إلزامية؛ اعرض الموجود المطابق فقط. "
+            "مهم جداً: لا تنه البحث قبل فحص الأسواق الثلاثة كلها. إذا كان نفس المنتج المطابق موجوداً في السوق المحلي أو أمريكا أو الصين فيجب أن يظهر على الأقل متجر واحد من ذلك السوق؛ لا تحذف سوقاً كاملاً بسبب أن سوقاً آخر أعاد نتائج أكثر أو أسرع. "
+            "لكل نتيجة اذكر اسم المتجر، اسم المنتج المطابق، السعر الرقمي والعملة، واربطه بصفحة المنتج المباشرة. "
+            f"{TEXT77_lang_instr(lang)}"
         )
         return legacy_v26_best_of_search([{"text": prompt}], total_cap, True, product)
 
-    # Fast path: user's wording first.
+    # Fast path: no translation call before the search.
     txt, urls = _attempt(product)
     if txt and not is_no_result_answer(txt) and text77_extract_store_offers(txt, limit=total_cap):
         if urls:
@@ -8356,7 +8278,7 @@ def legacy_text_product_search(product, lang):
             return txt, urls
         soft = (txt, {})
 
-    # Translate only if the local first attempt failed.
+    # Only if the first grounded search failed, generate an alternate-language identity and retry.
     _nonlatin = bool(re.search(r"[\u0600-\u06FF\u0900-\u097F\u3040-\u30FF\u3400-\u9FFF\u0400-\u04FF]", str(product or "")))
     if _nonlatin:
         alt = english_search_name(product) or ""
@@ -8373,7 +8295,6 @@ def legacy_text_product_search(product, lang):
             if soft is None:
                 soft = (txt2, {})
     return soft or ("", {})
-
 
 def v26_text_search(product, lang):
     """v76.4: توافق اسمي فقط؛ البحث النصي الفعلي صار محرك الكود المرفق من المستخدم."""
@@ -8402,7 +8323,7 @@ def execute_service_search(from_number, service_desc, original_text, bot_id, lan
         "🏆 [اسم المزود] (هاتف: [الرقم]) — [المنطقة أو التقييم باختصار]\n"
         "• [اسم المزود] (هاتف: [الرقم]) — [المنطقة أو التقييم باختصار]\n"
         "بدون روابط، بدون Markdown، بدون فقرات شرح بعد القائمة. "
-        f"{TEXT77_LANG_INSTR[lang]}"
+        f"{TEXT77_lang_instr(lang)}"
     )
     txt, urls = "", {}
     try:
@@ -8482,11 +8403,11 @@ def _text_price_local(raw_price, market_rank, lang):
 
 
 def send_text_lens_style_results(from_number, txt, urls, bot_id, lang, query, exclude_domains=None, exclude_urls=None, more_mode=False):
-    """v106 typed UI: LOCAL cards first. International results are hidden unless useful/requested."""
+    """Typed search UI: flags + local->US->China + local-currency prices + up to two CTAs per merchant."""
     exclude_domains = {str(x).lower() for x in (exclude_domains or []) if x}
     exclude_urls = {str(x).strip() for x in (exclude_urls or []) if x}
-    total_cap = MORE_LOCAL_MAX if more_mode else max(1, LENS_DIRECT_LOCAL_MAX)
-    offers = text77_extract_store_offers(txt or "", limit=max(total_cap * 3, total_cap))
+    total_cap = MORE_TOTAL_MAX if more_mode else max(1, LENS_DIRECT_LOCAL_MAX + LENS_DIRECT_US_MAX + LENS_DIRECT_CN_MAX)
+    offers = text77_extract_store_offers(txt or "", limit=max(total_cap * 2, total_cap))
     candidates = []
     for offer in offers:
         item = _text_offer_item(offer, urls)
@@ -8497,146 +8418,124 @@ def send_text_lens_style_results(from_number, txt, urls, bot_id, lang, query, ex
         if _url in exclude_urls or (_dom and _dom in exclude_domains):
             continue
         rank = result_market_rank(item)
-        if rank != 0:
-            # Primary/More-local flows never expose foreign stores.
-            print(f"LOCAL-FIRST TEXT HIDE FOREIGN rank={rank}: {item['source']} -> {item['link']}")
+        if rank == 99:
+            print(f"TEXT UI MARKET REJECT: {item['source']} -> {item['link']}")
             continue
-        item["market_rank"] = 0
+        item["market_rank"] = rank
         candidates.append(item)
 
-    # Local-only structured rescue if grounded text did not give enough local coverage.
-    if not more_mode and len(candidates) < LOCAL_FIRST_STRONG_MIN:
-        try:
-            rescue = _market_presence_fallback(query, 0, limit=max(LENS_DIRECT_LOCAL_MAX, LOCAL_FIRST_STRONG_MIN))
-        except Exception as e:
-            print(f"LOCAL-FIRST TEXT RESCUE ERR: {e}")
-            rescue = []
-        existing = {str(x.get("link") or "").strip() for x in candidates}
-        for r in rescue or []:
-            if str(r.get("link") or "").strip() in existing:
-                continue
-            r = dict(r); r["market_rank"] = 0
-            candidates.append(r)
+    # Primary search remains v79. Only a missing market gets a second chance.
+    if not more_mode:
+        candidates = _supplement_missing_markets(candidates, query, "FIRST-TEXT")
+        for _c in candidates:
+            _c["market_rank"] = result_market_rank(_c)
 
-    # Relevance + stock guards stay intact.
+    # Relevance must win before merchant priority. Use the existing strict AI offer filter on typed results.
     _offer_rows = [{"line": (o.get("title") or ""), "name": (o.get("source") or "")} for o in candidates]
     _tmp_urls = {(o.get("source") or ""): (o.get("link") or "") for o in candidates}
     _skip_ai_relevance = _fast_relevance_confident(query, candidates)
     _kept_rows = filter_relevant_offers(query, _offer_rows, _tmp_urls, use_ai=not _skip_ai_relevance, mode="exact")
+    if _skip_ai_relevance:
+        print("TEXT RELEVANCE: strong exact-token evidence -> AI filter skipped")
     _kept_keys = {(r.get("name") or "", r.get("line") or "") for r in _kept_rows}
     candidates = [o for o in candidates if ((o.get("source") or "", o.get("title") or "") in _kept_keys)]
-    candidates = _filter_confirmed_oos(candidates, "TEXT-LOCAL")
 
-    cap = MORE_LOCAL_MAX if more_mode else LENS_DIRECT_LOCAL_MAX
+    # نفس حارس المخزون المستخدم في Lens: نحذف المؤكد نفاده فقط، ونبقي الحالة المجهولة.
+    candidates = _filter_confirmed_oos(candidates, "TEXT")
+
+    caps = (
+        {0: MORE_LOCAL_MAX, 1: MORE_US_MAX, 2: MORE_CN_MAX}
+        if more_mode
+        else {0: LENS_DIRECT_LOCAL_MAX, 1: LENS_DIRECT_US_MAX, 2: LENS_DIRECT_CN_MAX}
+    )
     selected, merchant_counts, seen_urls = [], defaultdict(int), set()
-    for item in candidates:
-        try:
-            host = urllib.parse.urlparse(item["link"]).netloc.lower().split(":")[0]
-            host = host[4:] if host.startswith("www.") else host
-        except Exception:
-            host = ""
-        merchant = host or normalize_name(item["source"])
-        url = (item.get("link") or "").strip()
-        if not merchant or url in seen_urls:
-            continue
-        if merchant_counts[merchant] >= RESULTS_PER_STORE_MAX:
-            continue
-        merchant_counts[merchant] += 1
-        seen_urls.add(url)
-        selected.append(item)
-        if len(selected) >= cap:
-            break
+    for rank in (0, 1, 2):
+        taken = 0
+        bucket = [x for x in candidates if x["market_rank"] == rank]
+        if rank == 1:
+            bucket.sort(key=lambda x: _us_store_priority(x.get("source"), x.get("link")))
+        elif rank == 2:
+            bucket.sort(key=lambda x: _china_store_priority(x.get("source"), x.get("link")))
+        for item in bucket:
+            try:
+                host = urllib.parse.urlparse(item["link"]).netloc.lower().split(":")[0]
+                host = host[4:] if host.startswith("www.") else host
+            except Exception:
+                host = ""
+            merchant = host or normalize_name(item["source"])
+            url = (item.get("link") or "").strip()
+            if not merchant or url in seen_urls:
+                continue
+            if merchant_counts[merchant] >= RESULTS_PER_STORE_MAX:
+                continue
+            merchant_counts[merchant] += 1
+            seen_urls.add(url)
+            selected.append(item)
+            taken += 1
+            if taken >= caps.get(rank, 0):
+                break
 
     if not selected:
         return False
 
+    # Typed search already asks Google-grounded search for prices. Do not add merchant-page
+    # HTTP lookups and do not shrink the result set if one line lacks a parsable price.
     priced_rows = []
-    local_values = []
     for item in selected:
         raw_title, raw_price = _text_offer_price_and_title(item["title"])
-        shown_price = _text_price_local(raw_price, 0, lang) if raw_price else ""
-        local_val = _price_to_local_value(raw_price, 0) if raw_price else None
-        if local_val is not None:
-            local_values.append(local_val)
+        shown_price = _text_price_local(raw_price, item["market_rank"], lang) if raw_price else ""
         priced_rows.append((item, raw_title, shown_price))
 
+    display_titles = [raw_title or query for _, raw_title, _ in priced_rows]
+    translated = display_titles  # v84: typed Gemini output is already localized; avoid a second AI round-trip
     local_cc = (current_market().get("country") or DEFAULT_COUNTRY).lower()
-    if not more_mode:
-        send_whatsapp_text(
-            from_number,
-            LF(lang, "local_summary", flag=country_flag_emoji(local_cc), country=_local_first_country(), count=len(selected)),
-            bot_id,
-        )
+    rank_cc = {0: local_cc, 1: "us", 2: "cn"}
 
+    counts = {0: 0, 1: 0, 2: 0}
     sent_items = []
-    for item, raw_title, shown_price in priced_rows:
-        flag = country_flag_emoji(local_cc)
-        store = _ui_plain_store_name(item["source"] or "", item.get("link") or "") or U(lang, "store")
-        title = _compact_ui_title(raw_title or query)
+    for (item, _raw_title, shown_price), shown_title in zip(priced_rows, translated):
+        rank = item["market_rank"]
+        flag = country_flag_emoji(rank_cc.get(rank, ""))
+        store = _ui_plain_store_name(item["source"] or "", item.get("link") or "") or (U(lang, "store"))
+        title = _compact_ui_title(shown_title or query)
         body = _build_compact_card_body(flag, store, title, shown_price, lang)
         if not body:
             continue
         send_whatsapp_cta(from_number, body[:1000], item["link"], bot_id, store)
+        counts[rank] += 1
         sent_items.append(item)
 
     if not sent_items:
         return False
-
     LAST_SEARCH[from_number] = {"product": query}
-    local_best = min(local_values) if local_values else None
-    print(f"LOCAL-FIRST TEXT SENT: local={len(sent_items)} best={local_best} more_mode={more_mode}")
-
+    print(f"TEXT LENS-STYLE SENT: {len(sent_items)} CTA; per_store_cap={RESULTS_PER_STORE_MAX}; buckets={counts}; caps=5/4/4; order=local->us->cn")
     _save_more_results_state(from_number, query, bot_id, lang, "text", sent_items, reset=not more_mode)
-
-    if more_mode:
-        _send_more_results_choice(from_number, bot_id, lang)
-        return True
-
-    # Keep an international comparison ready, but do not show it by default.
-    text77_store_pending_global(from_number, bot_id, lang, query, local_best_price=local_best, local_count=len(sent_items))
-
-    # Weak local coverage -> international is useful enough to check automatically,
-    # except everyday/grocery requests which remain local-only.
-    if len(sent_items) < LOCAL_FIRST_STRONG_MIN and _auto_global_allowed(query):
-        item = _pop_pending_global(from_number) or {
-            "bot_id":bot_id, "lang":lang, "query":query, "origin":"text77",
-            "local_best_price":local_best, "local_count":len(sent_items)
-        }
-        item["auto_global"] = True
-        _local_first_notice(from_number, bot_id, lang, len(sent_items))
-        run_text_global_search(from_number, item)
-    else:
-        _send_local_first_choices(from_number, bot_id, lang, query)
+    _send_more_results_choice(from_number, bot_id, lang)
     return True
 
 
 def execute_product_search(from_number, product, bot_id, lang):
-    """v106 typed product search: local first; global is automatic only when local coverage is weak."""
+    """Typed product search: v77.7 engine + v79 Lens-like presentation.
+
+    Searches local, US and China automatically. No global-search choice and no map.
+    """
+    # Do not block backend search on WhatsApp network latency.
     WORKERS.submit(send_whatsapp_text, from_number, T(lang, "searching", q=product), bot_id)
     try:
         txt, urls = v26_text_search(product, lang)
+        if not txt:
+            print("TEXT LEGACY V26 PATH EMPTY — no current-engine fallback by design")
     except Exception as e:
         print(f"TEXT SEARCH CRASH: {e}")
         txt, urls = "", {}
     LAST_SEARCH[from_number] = {"product": product}
-
-    if txt and text77_extract_store_offers(txt, limit=30):
-        if send_text_lens_style_results(from_number, txt, urls, bot_id, lang, product):
-            return
-
-    # No usable local result. Everyday/grocery stays local; other products expand automatically.
-    if not _auto_global_allowed(product):
-        send_whatsapp_text(from_number, LF(lang, "everyday_local"), bot_id)
+    if not txt or not text77_extract_store_offers(txt, limit=30):
         send_whatsapp_text(from_number, T(lang, "not_found"), bot_id)
         return
-
-    item = {
-        "bot_id": bot_id, "lang": lang, "query": product, "origin": "text77",
-        "local_best_price": None, "local_count": 0, "auto_global": True,
-    }
-    _local_first_notice(from_number, bot_id, lang, 0)
-    run_text_global_search(from_number, item)
-
+    if not send_text_lens_style_results(from_number, txt, urls, bot_id, lang, product):
+        send_whatsapp_text(from_number, T(lang, "not_found"), bot_id)
+        return
+    # No global-search buttons and no map for typed product searches.
 
 # ---- v74.6: مصنّف الطلبات — ذكاء اصطناعي خالص، بدون أي قاموس -----------------
 # القاموس الثابت مستحيل يغطي ملايين المنتجات (يخت، موطور مخيمات، مكينة بر...).
@@ -8748,10 +8647,45 @@ COMPARE_UI = {
     "ur": {"title":"بہترین آپشنز کا موازنہ", "overall":"مجموعی طور پر بہترین", "quality":"بہترین معیار", "value":"قیمت کے لحاظ سے بہترین", "fourth":"ایک اور اہم خوبی"},
 }
 
+_COMPARE_UI_DYNAMIC_CACHE = {}
+_COMPARE_UI_DYNAMIC_LOCK = threading.Lock()
+
+def compare_ui_for(lang):
+    code = str(lang or "en").lower()
+    if code in COMPARE_UI:
+        return COMPARE_UI[code]
+    with _COMPARE_UI_DYNAMIC_LOCK:
+        hit = _COMPARE_UI_DYNAMIC_CACHE.get(code)
+    if hit:
+        return hit
+
+    source = COMPARE_UI["en"]
+    target = language_name_en(code)
+    system = (
+        f"Translate this JSON object's VALUES into {target}. Keep the JSON keys exactly unchanged. "
+        "Return ONLY valid JSON, no markdown. Keep each label concise for a WhatsApp product comparison."
+    )
+    translated = None
+    try:
+        fn = globals().get("text77_call_gemini")
+        if callable(fn):
+            raw, _ = fn([{"text": json.dumps(source, ensure_ascii=False)}], system=system, use_search=False)
+            match = re.search(r"\{.*\}", raw or "", flags=re.S)
+            obj = json.loads(match.group(0)) if match else {}
+            if all(k in obj and str(obj[k]).strip() for k in source):
+                translated = {k:str(obj[k]).strip() for k in source}
+    except Exception as e:
+        print(f"COMPARE UI TRANSLATE ERR lang={code}: {e}")
+    if not translated:
+        translated = source
+    with _COMPARE_UI_DYNAMIC_LOCK:
+        _COMPARE_UI_DYNAMIC_CACHE[code] = translated
+    return translated
+
 def brand_compare_system(lang):
-    """Build comparison prompt in the user's UI language so Arabic labels never leak into other languages."""
-    ui = COMPARE_UI.get(lang) or COMPARE_UI["en"]
-    lang_name = LANGUAGE_NAMES_EN.get(lang, "English")
+    """Build comparison prompt in the language of the user's current text message."""
+    ui = compare_ui_for(lang)
+    lang_name = language_name_en(lang)
     return f"""You are an expert product-comparison assistant similar to professional Best-Of review sites.
 The user made a GENERIC product request without a specific brand. Compare 3-4 concrete options (brand + model/type) only.
 
@@ -8924,12 +8858,12 @@ def _pick_description(original_query, lang="ar"):
 def run_brand_comparison(from_number, query, bot_id, lang):
     """v77.2: مقارنة براندات بدون تكرار + مسافة سطر بين المنتجات"""
     send_whatsapp_text(from_number, T(lang, "compare_searching"), bot_id)
-    lang_name = LANGUAGE_NAMES_EN.get(lang, "English")
+    lang_name = language_name_en(lang)
     prompt = (
         f"Generic shopping request: {query}\n"
         f"Current market: {current_market().get('country_name', 'Kuwait')}\n"
         f"Compare 3-4 strong concrete options for this request. Output only in {lang_name}. "
-        f"{TEXT77_LANG_INSTR[lang]}"
+        f"{TEXT77_lang_instr(lang)}"
     )
     txt = ""
     options = []
@@ -8998,161 +8932,26 @@ def run_brand_comparison(from_number, query, bot_id, lang):
     return True
 
 
-def _regional_search_hint():
-    cc = (current_market().get("country") or DEFAULT_COUNTRY).lower()
-    if cc in {"kw","sa","ae","bh","qa","om"}:
-        return "Prioritize practical GCC stores in Saudi Arabia, UAE, Qatar, Bahrain and Oman when relevant, then broaden worldwide."
-    if cc in {"de","fr","it","es","pt","nl","be","at","pl","cz","dk","se","fi","ie","lu","ch","gb"}:
-        return "Prioritize nearby European stores that realistically sell/ship across borders, then broaden worldwide."
-    if cc in {"sg","my","id","th","ph","vn","bn"}:
-        return "Prioritize practical nearby Southeast Asian markets first, then broaden worldwide."
-    if cc in {"au","nz"}:
-        return "Prioritize Australia/New Zealand cross-border options first, then broaden worldwide."
-    if cc in {"us","ca","mx"}:
-        return "Prioritize practical North American cross-border options first, then broaden worldwide."
-    return "Prioritize practical nearby/regional markets first when useful, then broaden worldwide."
-
-def _prepare_text_global_records(txt, urls, query, lang):
-    records = []
-    seen_urls = set()
-    for offer in text77_extract_store_offers(txt or "", limit=max(MAX_STORES * 2, 8)):
-        item = _text_offer_item(offer, urls)
-        url = str(item.get("link") or "").strip()
-        if not (url.startswith(("http://","https://")) and is_direct_store_url(url)) or url in seen_urls:
-            continue
-        raw_title, raw_price = _text_offer_price_and_title(item.get("title") or "")
-        numeric = _extract_numeric_price(raw_price)
-        src = detect_currency_code(raw_price, "")
-        local_value = None
-        if numeric is not None and src:
-            local_value = convert_to_local(numeric, src)
-            if local_value is None and src == (current_market().get("currency") or "").upper():
-                local_value = numeric
-        shown_price = raw_price
-        if numeric is not None and src:
-            shown, converted = display_global_price(numeric, raw_price, src, lang)
-            shown_price = shown or raw_price
-            if converted is not None:
-                local_value = converted
-        records.append({
-            "source": item.get("source") or "",
-            "title": raw_title or query,
-            "price_text": shown_price,
-            "local_value": float(local_value) if local_value is not None else None,
-            "link": url,
-        })
-        seen_urls.add(url)
-    records.sort(key=lambda r: (r["local_value"] is None, r["local_value"] if r["local_value"] is not None else 10**18))
-    return records
-
-def _send_text_global_records(phone, txt, urls, bot_id, lang, query, item):
-    records = _prepare_text_global_records(txt, urls, query, lang)
-    if not records:
-        send_whatsapp_text(phone, LF(lang, "global_none"), bot_id)
-        return False
-    best_global = next((r["local_value"] for r in records if r.get("local_value") is not None), None)
-    show_cards = _global_savings_intro(
-        phone, bot_id, lang,
-        item.get("local_best_price"), best_global,
-        auto_global=bool(item.get("auto_global"))
-    )
-    if not show_cards:
-        return True
-    for rec in records[:LOCAL_FIRST_GLOBAL_DISPLAY_MAX]:
-        store = _ui_plain_store_name(rec["source"], rec["link"]) or U(lang, "store")
-        title = _compact_ui_title(rec["title"] or query)
-        body = _build_compact_card_body("🌍", store, title, rec["price_text"], lang)
-        if body:
-            send_whatsapp_cta(phone, body[:1000], rec["link"], bot_id, store)
-    return True
-
-def _prepare_cached_lens_foreign(candidates):
-    rows = []
-    seen = set()
-    merchant_counts = defaultdict(int)
-    for m in candidates or []:
-        rank = result_market_rank(m)
-        if rank not in (1,2):
-            continue
-        url = str(m.get("link") or "").strip()
-        if not url.startswith(("http://","https://")) or url in seen:
-            continue
-        merchant = _lens_merchant_key(m.get("source"), url)
-        if merchant_counts[merchant] >= RESULTS_PER_STORE_MAX:
-            continue
-        merchant_counts[merchant] += 1
-        seen.add(url)
-        copy_m = dict(m)
-        copy_m["_global_local_value"] = _lens_item_local_value(copy_m, rank)
-        rows.append(copy_m)
-    rows.sort(key=lambda x: (
-        x.get("_global_local_value") is None,
-        x.get("_global_local_value") if x.get("_global_local_value") is not None else 10**18,
-        int(x.get("position") or 999),
-    ))
-    return rows[:max(LOCAL_FIRST_GLOBAL_DISPLAY_MAX * 2, 6)]
-
-def run_cached_lens_global_search(phone, item):
-    activate_market(phone)
-    bot_id = item.get("bot_id") or PHONE_NUMBER_ID
-    lang = item.get("lang") or USER_LANG.get(phone, "ar")
-    query = item.get("query") or ""
-    rows = _prepare_cached_lens_foreign(item.get("cached_foreign") or [])
-    if not rows:
-        # No cached foreign Lens cards: fall back to the normal image/text global engine.
-        return run_global_search(phone, item)
-    best_global = next((x.get("_global_local_value") for x in rows if x.get("_global_local_value") is not None), None)
-    show_cards = _global_savings_intro(
-        phone, bot_id, lang,
-        item.get("local_best_price"), best_global,
-        auto_global=bool(item.get("auto_global"))
-    )
-    if not show_cards:
-        return True
-    display_titles = translate_ui_titles([(m.get("title") or query).strip() for m in rows[:LOCAL_FIRST_GLOBAL_DISPLAY_MAX]], lang)
-    for m, display_title in zip(rows[:LOCAL_FIRST_GLOBAL_DISPLAY_MAX], display_titles):
-        rank = result_market_rank(m)
-        source = _ui_plain_store_name(m.get("source") or "", m.get("link") or "") or U(lang, "store")
-        title = _compact_ui_title(display_title or query)
-        price_txt = _lens_price_text_local(m, rank, lang)
-        body = _build_compact_card_body("🌍", source, title, price_txt, lang)
-        if body:
-            send_whatsapp_cta(phone, body[:1000], m.get("link") or "", bot_id, source)
-    return True
-
-
 def run_text_global_search(phone, item):
     activate_market(phone)
     bot_id = item["bot_id"]; lang = item["lang"]; query = item["query"]
-    if not item.get("auto_global"):
-        send_whatsapp_text(phone, T(lang, "global_searching"), bot_id)
+    send_whatsapp_text(phone, T(lang, "global_searching"), bot_id)
     market_name = current_market().get("country_name", "Kuwait")
-    regional_hint = _regional_search_hint()
     prompts = [
-        (
-            f"Search outside {market_name} for the exact product: {query}. Exclude all stores located in {market_name}. "
-            f"{regional_hint} Then use trusted worldwide stores/marketplaces when useful. "
-            "Do NOT organize the answer into USA/China sections. Rank concrete direct-buy options by practical value/price. "
-            "Each result needs a numeric source price, explicit ISO currency, and a direct product page. "
-            f"Return up to {max(MAX_STORES, LOCAL_FIRST_GLOBAL_DISPLAY_MAX)} distinct stores. {TEXT77_LANG_INSTR[lang]}"
-        ),
-        (
-            f"ابحث خارج {market_name} فقط عن نفس المنتج: {english_search_name(query) or query}. "
-            f"{regional_hint} لا تعرض تقسيمات أمريكا/الصين للمستخدم. "
-            "اعرض أفضل المتاجر العالمية المباشرة فقط مع سعر رقمي وعملة ISO ورابط صفحة المنتج. "
-            f"{TEXT77_LANG_INSTR[lang]}"
-        ),
+        f"ابحث عالمياً عن {query} في متاجر خارج {market_name} فقط. استبعد المتاجر داخل {market_name}. "
+        f"ابحث في Amazon.com وeBay وAliExpress وTemu وSHEIN وWalmart وغيرها. اعرض حتى {MAX_STORES} نتائج مختلفة بسعر رقمي ورابط منتج مباشر والعملة. {TEXT77_lang_instr(lang)}",
+        f"Search worldwide for {english_search_name(query) or query} outside {market_name}. Find up to {MAX_STORES} trusted international store results with numeric price, currency, and direct product page. {TEXT77_lang_instr(lang)}",
     ]
     txt, urls = "", {}
     for prompt in prompts:
-        txt, urls = legacy_v26_best_of_search([{"text": prompt}], max_results=max(MAX_STORES, LOCAL_FIRST_GLOBAL_DISPLAY_MAX))
+        txt, urls = legacy_v26_best_of_search([{"text": prompt}], max_results=MAX_STORES)
         if txt and urls and text77_extract_store_offers(txt):
             break
-    if not txt or not urls or not text77_extract_store_offers(txt):
-        send_whatsapp_text(phone, LF(lang, "global_none"), bot_id)
-        return False
-    return _send_text_global_records(phone, txt, urls, bot_id, lang, query, item)
-
+    if not txt or not text77_extract_store_offers(txt):
+        send_whatsapp_text(phone, T(lang, "global_none"), bot_id); return
+    if not urls:
+        send_whatsapp_text(phone, txt, bot_id); return
+    send_product_result(phone, txt, urls, bot_id, lang, query)
 
 def run_text_similar_search(phone, item):
     activate_market(phone)
@@ -9165,7 +8964,7 @@ def run_text_similar_search(phone, item):
         f"المنتج التالي غير متوفر محلياً: {base}. " + (f"الاسم الآخر: {base_other}. " if base_other else "") +
         f"ابحث بعمق في Google عن حتى {MAX_STORES} بدائل حقيقية مختلفة من نفس الفئة والاستخدام ومتوفرة الآن في متاجر {market_name} المحلية فقط. "
         "لكل نتيجة: اسم المتجر فقط — اسم البديل الفعلي — السعر الرقمي. اربط كل متجر بصفحة المنتج المباشرة. رتب الأرخص أولاً. "
-        f"{TEXT77_LANG_INSTR[lang]}"
+        f"{TEXT77_lang_instr(lang)}"
     )
     txt, urls = legacy_v26_best_of_search([{"text": prompt}], max_results=MAX_STORES, merge_offers=True,
                                           merge_title=f"📦 بدائل مشابهة: {base}")
@@ -9287,9 +9086,6 @@ def process_text_message(message,bot_id,onboarding_checked=False):
     try:
         from_number=message["from"]
         load_user_preferences(from_number)
-        if not onboarding_checked:
-            if from_number not in USER_LANG:
-                cache_pending_message(from_number, message, bot_id); send_language_choice(from_number, bot_id); return
         user_text=message["text"]["body"]
 
         # v85.2 test command: Market Germany / Market Japan / Market Auto.
@@ -9324,9 +9120,27 @@ def process_text_message(message,bot_id,onboarding_checked=False):
         cmd=re.sub(r"[^\w\u0600-\u06FF\u0900-\u097F]","",user_text.strip().lower())
         if cmd in ("لغة","اللغة","غيراللغة","language","lang","changelanguage","langue","idioma","mudaridioma","dil","dildeğiştir","dildegistir","язык","сменитьязык","语言","切换语言","भाषा","زبان","زبانبدلیں"):
             send_language_choice(from_number, bot_id); return
-        # v82: do NOT auto-switch UI language because a product name is typed in another script.
-        # The saved language stays fixed until the user explicitly opens the language selector.
-        lang=USER_LANG.get(from_number,"ar")
+
+        # v104.1 AUTO LANGUAGE:
+        # Every normal text message may switch the bot to the language used in THAT message.
+        # A neutral model/SKU such as "iPhone 16 Pro" keeps the previous language.
+        previous_lang = USER_LANG.get(from_number)
+        detected_lang = detect_message_language(user_text, previous=previous_lang)
+        if detected_lang:
+            lang = detected_lang
+            if previous_lang != lang:
+                USER_LANG[from_number] = lang
+                save_user_preferences(from_number)
+                print(f"AUTO LANGUAGE SWITCH: {from_number} {previous_lang or '-'} -> {lang} ({language_name_en(lang)})")
+        else:
+            if previous_lang:
+                lang = previous_lang
+            else:
+                market_lang = str(current_market().get("search_hl") or "en").lower()
+                lang = market_lang if re.fullmatch(r"[a-z]{2,3}", market_lang) else "en"
+                USER_LANG[from_number] = lang
+                save_user_preferences(from_number)
+                print(f"AUTO LANGUAGE FALLBACK: {from_number} -> {lang} ({language_name_en(lang)})")
         if is_map_command(user_text):
             send_last_search_map(from_number, bot_id, lang); return
         pend=PENDING_IMAGES.pop(from_number,None)
@@ -9782,12 +9596,12 @@ def _web_build_text_items(txt, urls, lang, query):
 
 def _web_brand_comparison(query, lang):
     """WhatsApp generic-request comparison, returned as JSON instead of a list message."""
-    lang_name = LANGUAGE_NAMES_EN.get(lang, "English")
+    lang_name = language_name_en(lang)
     prompt = (
         f"Generic shopping request: {query}\n"
         f"Current market: {current_market().get('country_name', 'Kuwait')}\n"
         f"Compare 3-4 strong concrete options for this request. Output only in {lang_name}. "
-        f"{TEXT77_LANG_INSTR[lang]}"
+        f"{TEXT77_lang_instr(lang)}"
     )
     txt, options = "", []
     for _ in (1, 2):
@@ -10952,7 +10766,7 @@ def _web_search_image_sync(image_b64, mime, caption, country, lang):
             f"هوية المنتج المعتمدة: {combined_name}\n"
             f"طلب المستخدم: {caption}\n"
             "ابحث عن نفس المنتج فقط. لا توسع البحث إلى منتج يشاركه المكون أو اللون أو الفئة. "
-            f"{LANG_INSTR[lang]}"
+            f"{lang_instr(lang)}"
         )
         txt, urls = search_product(request_query, lang, prompt_text=prompt_text, lens_context=active_lens)
         query = request_query
