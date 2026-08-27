@@ -26,7 +26,7 @@ app.add_middleware(
     allow_headers=["Content-Type", "Accept"],
     max_age=86400,
 )
-BUILD_ID = "v104.9-language-exact-size-20260827"
+BUILD_ID = "v105.0-image-local-deep-rescue-20260827"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("LOCAL FIRST | OLD GLOBAL ENGINE PRESERVED | FLAGS + SMART SAVINGS | AUTO LANGUAGE | WORLD CURRENCIES")
@@ -3821,7 +3821,7 @@ def normalize_name(value): return re.sub(r"[^\w\u0600-\u06FF]+", "", (value or "
 STORE_DOMAINS = {
     "اليوسفي": "best.com.kw", "بستاليوسفي": "best.com.kw", "اكسايت": "xcite.com", "الغانم": "xcite.com",
     "نون": "noon.com", "بلينك": "blink.com.kw", "يوريكا": "eureka.com.kw", "جرير": "jarir.com",
-    "كارفور": "carrefourkuwait.com", "لولو": "luluhypermarket.com", "امازون": "amazon.ae",
+    "كارفور": "carrefourkuwait.com", "carrefour": "carrefourkuwait.com", "لولو": "luluhypermarket.com", "lulu": "luluhypermarket.com", "نون": "noon.com", "noon": "noon.com", "امازون": "amazon.ae",
     "طلبات": "talabat.com", "ديليفرو": "deliveroo.com.kw", "بوتيكات": "boutiqaat.com",
     "جمعية دوت كوم": "jm3eia.com", "جمعيه دوت كوم": "jm3eia.com", "جميعة": "jm3eia.com", "jm3eia": "jm3eia.com",
     "كيتا": "mykeeta.com", "keeta": "mykeeta.com",
@@ -3840,7 +3840,7 @@ STORE_DOMAINS = {
 
 # ---- v69: محرك الفئات — كل فئة لها متاجرها المتخصصة القوية أولاً --------------
 # المنصات العامة (نون/طلبات/لولو...) دائماً في ذيل القائمة، فلا تكتسح المتخصصين.
-GENERAL_MARKETPLACES = ["جمعية دوت كوم", "طلبات", "كيتا", "نون", "لولو", "كارفور"]
+GENERAL_MARKETPLACES = ["لولو", "كارفور", "نون", "جمعية دوت كوم", "طلبات", "كيتا"]
 
 CATEGORY_KEYWORDS = {
     "sports": (
@@ -7257,6 +7257,281 @@ def _lens_merchant_key(name, url=""):
     return host or normalize_name(str(name or ""))
 
 
+
+_LENS_LOCAL_RESCUE_QUERY_CACHE = {}
+_LENS_LOCAL_RESCUE_QUERY_LOCK = threading.Lock()
+
+def _lens_broad_local_query(lens, caption=""):
+    """Create a LOCAL discovery query without over-trusting a possibly wrong Lens model.
+
+    Example:
+      Lens: "DELSEY Concorde 2 23 inch Hard Side Spinner"
+      Rescue: "Delsey blue hard-shell cabin suitcase 55 cm"
+    This deliberately keeps brand + product type + visible attributes, while dropping
+    uncertain model names unless they are strongly repeated.
+    """
+    titles = [
+        str((m or {}).get("title") or "").strip()
+        for m in (lens or {}).get("matches", [])[:8]
+        if str((m or {}).get("title") or "").strip()
+    ]
+    seed = (
+        str(caption or "").strip()
+        or str((lens or {}).get("visual_identity") or "").strip()
+        or str((lens or {}).get("relevance_target") or "").strip()
+        or str(((lens or {}).get("chosen") or {}).get("title") or "").strip()
+        or str((lens or {}).get("query") or "").strip()
+        or (titles[0] if titles else "")
+    )
+    if not seed:
+        return ""
+
+    cache_key = re.sub(r"\s+", " ", seed.casefold())[:220]
+    with _LENS_LOCAL_RESCUE_QUERY_LOCK:
+        hit = _LENS_LOCAL_RESCUE_QUERY_CACHE.get(cache_key)
+    if hit:
+        return hit
+
+    sample = "\n".join(f"- {t}" for t in titles[:6])
+    system = """You create a broad but useful LOCAL shopping-search query from Google Lens evidence.
+The Lens model name may be wrong. Keep only:
+- brand when reasonably clear,
+- physical product category/type,
+- visible color/material/form factor,
+- explicit size only when it is clearly reliable.
+DROP uncertain model/series names that appear only once or could be a visual-neighbor guess.
+Return ONE short English shopping query only, no explanation, no quotes.
+Examples:
+"DELSEY Concorde 2 23 inch Hard Side Spinner" -> "Delsey hard-shell cabin suitcase 55 cm"
+"Kate Spade Jakalyn sunglasses" -> "Kate Spade burgundy oversized sunglasses"
+"""
+    prompt = f"Primary seed: {seed}\nLens titles:\n{sample}"
+    broad = ""
+    try:
+        raw, _ = text77_call_gemini([{"text": prompt}], system=system, use_search=False)
+        broad = re.sub(r"\s+", " ", str(raw or "").strip().strip('"“”'))
+        if len(broad) > 140:
+            broad = broad[:140].rsplit(" ", 1)[0]
+    except Exception as e:
+        print(f"LENS LOCAL BROAD QUERY ERR: {e}")
+
+    if not broad:
+        # Safe fallback: remove obvious marketing/model clutter but preserve brand/category words.
+        broad = re.sub(r"\b(?:series|model|good condition|new|used|for sale|online)\b", " ", seed, flags=re.I)
+        broad = re.sub(r"\s+", " ", broad).strip()[:120]
+
+    with _LENS_LOCAL_RESCUE_QUERY_LOCK:
+        if len(_LENS_LOCAL_RESCUE_QUERY_CACHE) > 1500:
+            _LENS_LOCAL_RESCUE_QUERY_CACHE.clear()
+        _LENS_LOCAL_RESCUE_QUERY_CACHE[cache_key] = broad
+    print(f"LENS LOCAL BROAD QUERY: {seed[:80]!r} -> {broad!r}")
+    return broad
+
+
+def _serpapi_local_organic_site_request(query, label, domain, local_cc):
+    """Regular Google site-search for a LOCAL merchant.
+
+    Google Shopping can miss products that normal Google indexes perfectly.
+    This path is used only after Lens found ZERO local results.
+    """
+    if not SERPAPI_API_KEY or not query or not domain:
+        return []
+    params = {
+        "engine": "google",
+        "q": f'{query} site:{domain}',
+        "api_key": SERPAPI_API_KEY,
+        "google_domain": "google.com",
+        "gl": local_cc,
+        "hl": country_search_hl(local_cc),
+        "num": 6,
+        "output": "json",
+    }
+    try:
+        r = requests.get(
+            "https://serpapi.com/search.json",
+            params=params,
+            timeout=(3.5, MARKET_FALLBACK_TIMEOUT_SECONDS),
+        )
+        if r.status_code >= 400:
+            print(f"LOCAL ORGANIC HTTP {r.status_code} store={label}: {r.text[:180]}")
+            return []
+        data = r.json()
+        if data.get("error"):
+            print(f"LOCAL ORGANIC ERROR store={label}: {data.get('error')}")
+            return []
+
+        out = []
+        for pos, row in enumerate(data.get("organic_results") or [], 1):
+            url = str(row.get("link") or "").strip()
+            if not url.startswith(("http://", "https://")):
+                continue
+            try:
+                host = urllib.parse.urlparse(url).netloc.lower().replace("www.", "")
+            except Exception:
+                host = ""
+            if not _host_matches_any(host, (domain,)):
+                continue
+
+            title = str(row.get("title") or query).strip()
+            # Skip obvious search/category/home pages where possible.
+            low_url = url.lower()
+            if any(x in low_url for x in ("/search?", "/search/", "/category/", "/categories/")):
+                continue
+
+            price_text = _google_organic_price_text(row)
+            item = {
+                "title": title,
+                "link": url,
+                "source": label,
+                "position": int(row.get("position") or pos),
+                "section": "local_organic_rescue",
+                "exact": False,
+                "thumbnail": str(row.get("thumbnail") or "").strip(),
+                "image": str(row.get("thumbnail") or "").strip(),
+                "price": price_text,
+                "price_value": None,
+                "currency": detect_currency_code(price_text, "", local_cc) if price_text else "",
+                "in_stock": None,
+                "condition": "",
+                "_lens_country": local_cc,
+                "_local_deep_rescue": True,
+            }
+
+            # If Google snippet has no reliable price, inspect the actual merchant page.
+            if not _lens_has_price(item):
+                try:
+                    snap = _web_verified_page_snapshot(url)
+                except Exception:
+                    snap = None
+                if snap and snap.get("ok"):
+                    if snap.get("available") is False:
+                        print(f"LOCAL ORGANIC OOS REJECT store={label}: {url[:110]}")
+                        continue
+                    if snap.get("title"):
+                        item["title"] = str(snap.get("title")).strip()
+                    if snap.get("price") is not None:
+                        item["price_value"] = snap.get("price")
+                        item["currency"] = str(snap.get("currency") or "").upper()
+                        if item["price_value"] is not None:
+                            cur = item["currency"] or (current_market().get("currency") or "KWD")
+                            item["price"] = f"{format_price(item['price_value'], cur)} {cur}"
+                    if snap.get("image"):
+                        item["image"] = snap.get("image")
+                        item["thumbnail"] = snap.get("image")
+
+            if result_market_rank(item) != 0:
+                continue
+            if not _lens_has_price(item):
+                # The bot's local cards should remain priced and actionable.
+                continue
+
+            out.append(item)
+            if len(out) >= 2:
+                break
+
+        print(f"LOCAL ORGANIC store={label} domain={domain} -> {len(out)}")
+        return out
+    except Exception as e:
+        print(f"LOCAL ORGANIC EXCEPTION store={label}: {e}")
+        return []
+
+
+def _lens_local_deep_rescue(lens, caption=""):
+    """Deep LOCAL discovery before the bot gives up and goes international.
+
+    Uses both Google Shopping and regular Google site-search. For Kuwait, major
+    marketplaces such as Lulu/Carrefour/Noon are always included even when the
+    category-specialist list is full.
+    """
+    if not SERPAPI_API_KEY:
+        return []
+
+    local_cc = (current_market().get("country") or DEFAULT_COUNTRY).lower()
+    broad = _lens_broad_local_query(lens, caption)
+    if not broad:
+        return []
+
+    # Start with the normal rescue list, then ALWAYS add core local marketplaces.
+    specs = []
+    seen_domains = set()
+
+    def _add(label, domain):
+        d = str(domain or "").lower().replace("www.", "").strip()
+        if not d or d in seen_domains:
+            return
+        seen_domains.add(d)
+        specs.append((label, d))
+
+    for label, domain in local_rescue_store_specs(broad, max_count=6):
+        _add(label, domain)
+
+    if local_cc == "kw":
+        # These are broad retailers with inventory outside their grocery stereotype.
+        for label in ("Lulu", "Carrefour", "Noon", "Centrepoint", "Xcite", "جمعية دوت كوم"):
+            _add(label, store_domain(label))
+
+    # Normal Google Shopping broad local probe + direct-store organic probes in parallel.
+    jobs = {}
+    jobs[LENS_HTTP_POOL.submit(
+        _market_presence_fallback, broad, 0, max(LENS_DIRECT_LOCAL_MAX * 2, 6)
+    )] = ("shopping", "Local")
+
+    for label, domain in specs[:8]:
+        jobs[LENS_HTTP_POOL.submit(
+            _serpapi_local_organic_site_request, broad, label, domain, local_cc
+        )] = ("organic", label)
+
+    gathered = []
+    done, pending = wait(list(jobs), timeout=MARKET_FALLBACK_TIMEOUT_SECONDS + 2)
+    for fut in done:
+        try:
+            gathered.extend(fut.result() or [])
+        except Exception as e:
+            print(f"LENS LOCAL DEEP RESCUE JOB ERR: {e}")
+    for fut in pending:
+        fut.cancel()
+
+    # Relevance guard: same brand/category is required, but do not force the
+    # possibly-wrong Lens model/series name.
+    broad_tokens = {
+        t for t in norm_tokens(broad)
+        if len(t) >= 3 and t not in {"inch","inches","with","hard","side","blue","black","new"}
+    }
+    brandish = [t for t in broad_tokens if t.isalpha()][:2]
+
+    unique = []
+    seen = set()
+    for item in gathered:
+        url = str(item.get("link") or "").strip()
+        title = str(item.get("title") or "").strip()
+        if not url or not title or url in seen:
+            continue
+        if result_market_rank(item) != 0:
+            continue
+        title_tokens = norm_tokens(title)
+        # Require at least one strong query token; when a brand token exists, prefer it.
+        overlap = broad_tokens & title_tokens
+        if not overlap:
+            continue
+        if brandish and not any(b in title_tokens for b in brandish):
+            # Do not hard-reject if generic broad query did not really start with a brand.
+            first = next(iter(brandish), "")
+            if first and first in {"suitcase","luggage","trolley","bag","monitor","shoe"}:
+                pass
+            else:
+                continue
+        seen.add(url)
+        unique.append(item)
+
+    unique = _filter_confirmed_oos(unique, "LENS-LOCAL-DEEP")
+    unique.sort(key=lambda m: (
+        0 if _lens_has_price(m) else 1,
+        int(m.get("position") or 999),
+    ))
+    print(f"LENS LOCAL DEEP RESCUE query={broad!r} -> {len(unique)} usable")
+    return unique[:max(LENS_DIRECT_LOCAL_MAX * 2, 6)]
+
+
 def send_lens_direct_results(from_number, lens, bot_id, lang, caption="", image_b64="", image_mime="", exclude_domains=None, exclude_urls=None, more_mode=False):
     """v104.3 Lens: show LOCAL only; keep US/China Lens matches cached in the background."""
     exclude_domains = {str(x).lower() for x in (exclude_domains or []) if x}
@@ -7271,9 +7546,12 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption="", image_
 
     lens_for_filter = dict(lens or {})
     lens_for_filter["matches"] = raw_matches
-    raw_matches = _lens_ai_relevance_filter(lens_for_filter)
-    if lens_for_filter.get("relevance_target"):
-        lens["relevance_target"] = lens_for_filter["relevance_target"]
+    if lens.get("_skip_lens_ai_relevance_once"):
+        print("LENS AI RELEVANCE SKIPPED ONCE: deep-local rescue rows already guarded")
+    else:
+        raw_matches = _lens_ai_relevance_filter(lens_for_filter)
+        if lens_for_filter.get("relevance_target"):
+            lens["relevance_target"] = lens_for_filter["relevance_target"]
     matches = [m for m in raw_matches if result_market_rank(m) != 99]
     if not matches:
         return False
@@ -7353,7 +7631,26 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption="", image_
         or (caption or "").strip()
     )
 
-    # No local Lens result: use cached international matches automatically when appropriate.
+    # v105.0: Lens can miss locally indexed products (Google organic sees them).
+    # Before going international, run ONE deep local rescue using a broader brand/category query.
+    if not selected and not lens.get("_local_deep_rescue_done"):
+        rescued_local = _lens_local_deep_rescue(lens, caption)
+        if rescued_local:
+            retry_lens = dict(lens or {})
+            retry_lens["_local_deep_rescue_done"] = True
+            # Put rescued LOCAL rows first and keep the original global Lens cache behind them.
+            retry_lens["matches"] = rescued_local + list(lens.get("matches") or [])
+            # Avoid the consensus AI filter from forcing the possibly-wrong foreign Lens model.
+            retry_lens["_skip_lens_ai_relevance_once"] = True
+            print(f"LENS LOCAL DEEP RESCUE RETRY: {len(rescued_local)} local row(s)")
+            return send_lens_direct_results(
+                from_number, retry_lens, bot_id, lang, caption,
+                image_b64=image_b64, image_mime=image_mime,
+                exclude_domains=exclude_domains, exclude_urls=exclude_urls,
+                more_mode=more_mode,
+            )
+
+    # No local result even after deep rescue: only now use cached international matches automatically.
     if not selected:
         if cached_global and expansion_query and not _is_everyday_local_only(expansion_query):
             send_whatsapp_text(from_number, LF(lang, "no_local"), bot_id)
