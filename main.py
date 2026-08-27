@@ -26,7 +26,7 @@ app.add_middleware(
     allow_headers=["Content-Type", "Accept"],
     max_age=86400,
 )
-BUILD_ID = "v105.2-exact-local-prices-fast-more-20260827"
+BUILD_ID = "v105.4-fast-image-budget-20260827"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("LOCAL FIRST | OLD GLOBAL ENGINE PRESERVED | FLAGS + SMART SAVINGS | AUTO LANGUAGE | WORLD CURRENCIES")
@@ -89,6 +89,21 @@ FINAL_URL_CACHE_LOCK = threading.Lock()
 
 RESOLVER = ThreadPoolExecutor(max_workers=8)
 WORKERS = ThreadPoolExecutor(max_workers=5)
+
+IMAGE_WATCHDOG_POOL = ThreadPoolExecutor(max_workers=6)
+IMAGE_CALL_TIMEOUT_SECONDS = max(6.0, min(18.0, float(os.environ.get("IMAGE_CALL_TIMEOUT_SECONDS", "7"))))
+IMAGE_TOTAL_BUDGET_SECONDS = max(12.0, min(25.0, float(os.environ.get("IMAGE_TOTAL_BUDGET_SECONDS", "15"))))
+
+def image_call_bounded(fn, *args, timeout=None, label="image_call", default=None, **kwargs):
+    """Release the WhatsApp flow if an external image/search provider stalls."""
+    fut = IMAGE_WATCHDOG_POOL.submit(fn, *args, **kwargs)
+    try:
+        return fut.result(timeout=float(timeout or IMAGE_CALL_TIMEOUT_SECONDS))
+    except Exception as e:
+        print(f"IMAGE WATCHDOG {label}: {e.__class__.__name__} {str(e)[:160]}")
+        fut.cancel()
+        return default
+
 OLD_SEARCH_POOL = ThreadPoolExecutor(max_workers=8)
 LENS_POOL = ThreadPoolExecutor(max_workers=4)
 # v73: HTTP passes الخاصة بـ Lens لها pool مستقل حتى لا يحصل deadlock عندما google_lens_lookup يعمل داخل LENS_POOL.
@@ -1641,6 +1656,7 @@ def CLEAN(lang, key, **kw):
         "global_checked_none": "🌍 شيكت لك عالمياً بعد — ما لقيت خيار أفضل ومؤكد.",
         "no_local_checking": "🔎 ما لقيت نتيجة محلية قوية، بشوف لك عالمياً...",
         "no_confirmed": "ما لقيت خيارات مؤكدة حالياً. جرّب صورة ثانية أو اسم أدق للمنتج.",
+        "image_slow": "الصورة أخذت وقت أطول من اللازم. جرّب صورة أوضح أو اكتب اسم المنتج.",
         "global_better": "🌍 لقيت خيارات عالمية أوفر ومطابقة.",
     }
     en = {
@@ -1648,6 +1664,7 @@ def CLEAN(lang, key, **kw):
         "global_checked_none": "🌍 I checked international options too — no better confirmed match found.",
         "no_local_checking": "🔎 No strong local match. I’m checking international options…",
         "no_confirmed": "No confirmed options found yet. Try another photo or a more specific product name.",
+        "image_slow": "This image search is taking too long. Try a clearer photo or type the product name.",
         "global_better": "🌍 I found better matching international options.",
     }
     code = str(lang or "en").lower()
@@ -6339,7 +6356,8 @@ def _remove_ui_autolinks(value):
 _WHATSAPP_HTTP_CTX = threading.local()
 
 _TYPING_GRAPH_URL = os.environ.get("WHATSAPP_TYPING_GRAPH_URL", "https://graph.facebook.com/v26.0")
-_TYPING_REFRESH_SECONDS = max(12.0, min(22.0, float(os.environ.get("WHATSAPP_TYPING_REFRESH_SECONDS", "18"))))
+_TYPING_REFRESH_SECONDS = max(10.0, min(18.0, float(os.environ.get("WHATSAPP_TYPING_REFRESH_SECONDS", "14"))))
+_TYPING_MAX_SECONDS = max(15.0, min(35.0, float(os.environ.get("WHATSAPP_TYPING_MAX_SECONDS", "15"))))
 _TYPING_STATE = {}
 _TYPING_LOCK = threading.Lock()
 
@@ -6392,11 +6410,21 @@ def start_typing_indicator(phone, bot_id, message_id):
         _TYPING_STATE[phone] = state
 
     def _loop():
-        # Immediate indicator, then refresh before Meta's indicator expires.
+        # Immediate indicator, then refresh only for a HARD bounded period.
+        started = time.monotonic()
         while not stop_event.is_set():
-            _send_typing_once(bot_id, message_id)
-            if stop_event.wait(_TYPING_REFRESH_SECONDS):
+            if time.monotonic() - started >= _TYPING_MAX_SECONDS:
+                print(f"TYPING HARD STOP phone={phone[-6:]} after {_TYPING_MAX_SECONDS:.0f}s")
                 break
+            _send_typing_once(bot_id, message_id)
+            remaining = _TYPING_MAX_SECONDS - (time.monotonic() - started)
+            if remaining <= 0 or stop_event.wait(min(_TYPING_REFRESH_SECONDS, remaining)):
+                break
+        stop_event.set()
+        with _TYPING_LOCK:
+            current = _TYPING_STATE.get(phone)
+            if current is state:
+                _TYPING_STATE.pop(phone, None)
 
     threading.Thread(target=_loop, daemon=True, name=f"wa-typing-{phone[-6:]}").start()
     return True
@@ -6844,9 +6872,11 @@ def run_more_results_search(phone, item):
         try:
             exclude_q = " ".join(f"-site:{d}" for d in list(seen_domains)[:5])
             q_hint = re.sub(r"\s+", " ", f"{query} buy shop other retailers {exclude_q}").strip()[:120]
-            lens = google_lens_lookup(
-                item["image_b64"], item["image_mime"], lang, q_hint, light=True
-            )
+            lens = image_call_bounded(
+                google_lens_lookup,
+                item["image_b64"], item["image_mime"], lang, q_hint,
+                light=True, timeout=5.0, label="more_local_lens", default={}
+            ) or {}
             if lens.get("matches") and send_lens_direct_results(
                 phone, lens, bot_id, lang, caption=query,
                 image_b64=item.get("image_b64") or "",
@@ -8135,6 +8165,7 @@ def _send_image_fallback_local_first(from_number, txt, urls, bot_id, lang, query
 
 def process_single_image(message,bot_id,lang="ar"):
     from_number=message["from"]
+    image_started = time.monotonic()
     market = activate_market(from_number)
     caption=(message.get("image",{}) or {}).get("caption","").strip()
     # Start media download immediately; status message is sent in parallel.
@@ -8151,7 +8182,10 @@ def process_single_image(message,bot_id,lang="ar"):
     lens_direct_attempted = False
     if LENS_DIRECT_MODE and ENABLE_GOOGLE_LENS and SERPAPI_API_KEY and PUBLIC_BASE_URL:
         lens_direct_attempted = True
-        lens_direct = google_lens_lookup(b64, mime, lang, caption, light=True)
+        lens_direct = image_call_bounded(
+            google_lens_lookup, b64, mime, lang, caption,
+            light=True, timeout=6.0, label="direct_lens", default={}
+        ) or {}
         if lens_direct.get("matches"):
             if send_lens_direct_results(
                 from_number, lens_direct, bot_id, lang, caption,
@@ -8171,7 +8205,10 @@ def process_single_image(message,bot_id,lang="ar"):
             and SERPAPI_API_KEY and PUBLIC_BASE_URL):
         lens_future = LENS_POOL.submit(_run_with_market, market, google_lens_lookup, b64, mime, lang, caption)
 
-    vision_name = identify_product_with_retry(b64, mime, lang)
+    vision_name = image_call_bounded(
+        identify_product_with_retry, b64, mime, lang,
+        timeout=7.0, label="vision_identify", default=""
+    ) or ""
     force_fashion_lens = is_fashion_identity(vision_name, caption)
     use_lens, route_reason = lens_routing_decision(vision_name, caption)
     use_lens = force_fashion_lens or use_lens
@@ -8188,7 +8225,10 @@ def process_single_image(message,bot_id,lang="ar"):
             except Exception as e:
                 print(f"LENS PARALLEL ERR: {e}")
         else:
-            lens = google_lens_lookup(b64, mime, lang, caption or vision_name)
+            lens = image_call_bounded(
+                google_lens_lookup, b64, mime, lang, caption or vision_name,
+                timeout=6.0, label="full_lens", default={}
+            ) or lens
     elif lens_future is not None:
         # الراوتر قرر Vision-first (عبوة نصية)؛ نتيجة اللينز المتوازية تُهمل بهدوء.
         lens_future.cancel()
@@ -8241,10 +8281,18 @@ def process_single_image(message,bot_id,lang="ar"):
             "ابحث عن نفس المنتج فقط. لا توسع البحث إلى منتج يشاركه المكون أو اللون أو الفئة. "
             f"{lang_instr(lang)}"
         )
-        txt,urls=search_product(request_query, lang, prompt_text=prompt_text, lens_context=active_lens)
+        txt, urls = image_call_bounded(
+            search_product, request_query, lang,
+            prompt_text=prompt_text, lens_context=active_lens,
+            timeout=7.0, label="image_text_search", default=("", {})
+        ) or ("", {})
         query = request_query
     elif combined_name:
-        txt,urls=search_product(combined_name, lang, lens_context=active_lens)
+        txt, urls = image_call_bounded(
+            search_product, combined_name, lang,
+            lens_context=active_lens,
+            timeout=7.0, label="image_text_search", default=("", {})
+        ) or ("", {})
         query = combined_name
     else:
         txt, urls = "", {}
@@ -8260,6 +8308,10 @@ def process_single_image(message,bot_id,lang="ar"):
             if _is_everyday_local_only(query):
                 send_whatsapp_text(from_number, CLEAN(lang, "no_confirmed"), bot_id)
             else:
+                if time.monotonic() - image_started >= IMAGE_TOTAL_BUDGET_SECONDS:
+                    stop_typing_indicator(from_number)
+                    send_whatsapp_text(from_number, CLEAN(lang, "image_slow"), bot_id)
+                    return
                 send_whatsapp_text(from_number, LF(lang, "no_local"), bot_id)
                 item = {
                     "bot_id":bot_id, "lang":lang, "query":query, "origin":"image_global",
@@ -8274,6 +8326,10 @@ def process_single_image(message,bot_id,lang="ar"):
     if result_type == "none" and query:
         if _is_everyday_local_only(query):
             send_whatsapp_text(from_number, CLEAN(lang, "no_confirmed"), bot_id)
+            return
+        if time.monotonic() - image_started >= IMAGE_TOTAL_BUDGET_SECONDS:
+            stop_typing_indicator(from_number)
+            send_whatsapp_text(from_number, CLEAN(lang, "image_slow"), bot_id)
             return
         send_whatsapp_text(from_number, LF(lang, "no_local"), bot_id)
         item = {
