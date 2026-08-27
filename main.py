@@ -26,7 +26,7 @@ app.add_middleware(
     allow_headers=["Content-Type", "Accept"],
     max_age=86400,
 )
-BUILD_ID = "v104.8-clean-messages-20260827"
+BUILD_ID = "v104.9-language-exact-size-20260827"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("LOCAL FIRST | OLD GLOBAL ENGINE PRESERVED | FLAGS + SMART SAVINGS | AUTO LANGUAGE | WORLD CURRENCIES")
@@ -1245,6 +1245,76 @@ _VOL_BIG_UNITS = {"لتر", "ليتر", "l", "ltr", "liter", "litre"}
 _WT_BIG_UNITS = {"كجم", "كغم", "كغ", "كيلو جرام", "كيلو غرام", "كيلو", "kg"}
 _CAP_UNITS = {"جيجا بايت", "جيجابايت", "جيجا", "غيغا", "قيقا", "gb"}
 _CAP_BIG_UNITS = {"تيرا بايت", "تيرابايت", "تيرا", "tb"}
+
+
+_DISPLAY_INCH_RE = re.compile(
+    r'(?<!\d)(\d{1,3}(?:[.,]\d+)?)\s*(?:"|”|“|″|inch(?:es)?\b|in\b|بوص(?:ة|ه|ات)\b)',
+    re.I,
+)
+
+def extract_display_inches(text):
+    """Extract an explicit screen/display diagonal in inches. None if not explicitly stated."""
+    s = str(text or "")
+    vals = []
+    for m in _DISPLAY_INCH_RE.finditer(s):
+        try:
+            v = float(m.group(1).replace(",", "."))
+        except Exception:
+            continue
+        # Practical display diagonal guard; avoids accidental year/model numbers.
+        if 5 <= v <= 120:
+            vals.append(v)
+    return vals[0] if vals else None
+
+def exact_display_size_compatible(reference_text, candidate_text):
+    """If BOTH sides explicitly state a display diagonal, they must be effectively identical."""
+    want = extract_display_inches(reference_text)
+    got = extract_display_inches(candidate_text)
+    if want is None or got is None:
+        return True
+    return abs(want - got) <= 0.25
+
+def _verify_exact_display_variant(query, item):
+    """Best-effort strict verification for explicit screen-size queries.
+
+    Reject:
+      - generated/result title explicitly says a different inch size;
+      - fetched merchant page title explicitly says a different inch size;
+      - fetched page is confirmed out of stock.
+    Unknown/unfetchable pages are kept rather than falsely rejected.
+    """
+    want = extract_display_inches(query)
+    if want is None:
+        return True
+
+    title = str((item or {}).get("title") or "")
+    if not exact_display_size_compatible(query, title):
+        print(f"DISPLAY SIZE REJECT TITLE: want={want:g}\\\" got={extract_display_inches(title)} title={title[:90]}")
+        return False
+
+    url = str((item or {}).get("link") or (item or {}).get("url") or "").strip()
+    if not url.startswith(("http://", "https://")):
+        return True
+
+    try:
+        snap_fn = globals().get("_web_verified_page_snapshot")
+        snap = snap_fn(url) if callable(snap_fn) else None
+        if not snap or not snap.get("ok"):
+            return True
+        page_title = str(snap.get("title") or "")
+        page_size = extract_display_inches(page_title)
+        if page_size is not None and abs(page_size - want) > 0.25:
+            print(
+                f"DISPLAY SIZE REJECT PAGE: want={want:g}\\\" got={page_size:g}\\\" "
+                f"page={page_title[:100]} url={url[:100]}"
+            )
+            return False
+        if snap.get("available") is False:
+            print(f"DISPLAY SIZE PAGE OOS REJECT: {page_title[:90]} -> {url[:100]}")
+            return False
+    except Exception as e:
+        print(f"DISPLAY SIZE VERIFY UNKNOWN: {e.__class__.__name__}: {url[:90]}")
+    return True
 
 def extract_pack_size(text):
     """يعيد (نوع, الكمية الكلية بالمل أو الجرام أو الجيجا) أو None إذا ما فيه حجم مذكور."""
@@ -2601,6 +2671,38 @@ def _script_language_hint(t):
     if re.search(r"[іїєґІЇЄҐ]", t): return "uk"
     return None
 
+
+_ENGLISH_PRODUCT_NOUNS = {
+    "monitor","screen","tv","television","laptop","notebook","computer","desktop","keyboard","mouse",
+    "headphone","headphones","earbud","earbuds","speaker","charger","cable","adapter","powerbank",
+    "phone","smartphone","tablet","watch","smartwatch","camera","lens","printer","router","console",
+    "controller","ssd","harddrive","drive","memory","ram","gpu","graphics","motherboard","processor",
+    "shoe","shoes","sneaker","sneakers","slipper","slippers","sandal","sandals","boot","boots",
+    "shirt","tshirt","t-shirt","jacket","dress","bag","handbag","wallet","sunglasses","glasses",
+    "toothpaste","shampoo","soap","cream","perfume","coffee","milk","water","juice","food",
+    "chair","desk","table","sofa","bed","mattress","fridge","refrigerator","freezer","oven",
+    "microwave","washer","washing","dryer","vacuum","fan","airconditioner","conditioner",
+    "gaming","gamingmonitor",
+}
+
+def _looks_like_english_product_phrase(raw):
+    """English commerce/category wording is enough to switch UI to English.
+
+    Pure brand/model strings remain neutral. Examples:
+    - "iPhone 16 Pro" -> False
+    - "Asus TUF gaming monitor 24" -> True
+    """
+    low = re.sub(r"[^a-z0-9-]+", " ", str(raw or "").lower()).strip()
+    toks = [t for t in low.split() if t]
+    if not toks:
+        return False
+    joined = "".join(toks)
+    if any(t in _ENGLISH_PRODUCT_NOUNS for t in toks) or any(n in joined for n in ("gamingmonitor",)):
+        return True
+    # Common English size/spec wording also makes the query linguistic rather than a pure model code.
+    spec_words = {"inch","inches","size","wireless","wired","portable","original","replacement","gaming"}
+    return any(t in spec_words for t in toks)
+
 def _latin_hint(t):
     low = " " + re.sub(r"\s+", " ", t.lower()) + " "
     scores = {}
@@ -2648,6 +2750,10 @@ def detect_message_language(text, previous=None):
         return "ar"
 
     if re.search(r"[A-Za-zÀ-ÖØ-öø-ÿ]", raw):
+        if _looks_like_english_product_phrase(raw):
+            with _LANGUAGE_DETECT_LOCK:
+                _LANGUAGE_DETECT_CACHE[cache_key] = "en"
+            return "en"
         latin = _latin_hint(raw)
         if latin:
             with _LANGUAGE_DETECT_LOCK:
@@ -2656,9 +2762,11 @@ def detect_message_language(text, previous=None):
 
     system = """Identify the natural language the user is SPEAKING in the message.
 Return ONLY one lowercase ISO 639-1 language code such as ar, en, de, it, fr, es, ja, ko, fa, ur, uk, etc.
-If the message is only a brand, model, SKU, product code, person's name, URL, number, or other language-neutral proper noun
-(for example: "iPhone 16 Pro", "PS5", "Nike Air Max 90"), return exactly: und.
-Do not infer language merely because a brand/model uses Latin letters.
+If the message contains ordinary product-category/type words in a language (for example "gaming monitor", "toothpaste",
+"wireless headphones", "Fernseher", "chaussures"), return THAT language even when a brand/model is also present.
+Return exactly und ONLY when the message is almost entirely a brand/model/SKU/proper noun with no ordinary category/type wording
+(for example: "iPhone 16 Pro", "PS5", "Nike Air Max 90").
+Do not infer language merely because a pure brand/model uses Latin letters.
 No explanation."""
     detected = ""
     try:
@@ -8904,6 +9012,7 @@ def text_search_rescue(product, lang):
             f"Accepted local currencies: {local_cur}. "
             "If the request is generic (for example toothpaste, shampoo, milk, headphones), return concrete popular purchasable products/brands that satisfy the request instead of saying the query is too broad. "
             "Every result MUST have: store name, concrete product title, numeric price, currency, and a DIRECT product-page URL. "
+            "Any explicit model/spec/size in the user's query is mandatory. For example, a 24-inch monitor must NEVER link to a 27-inch product page. "
             "Do not return category pages, Google links, blog/review pages, manuals, services, or out-of-stock items without a current numeric price. "
             f"This rescue pass is LOCAL ONLY. Do not add any foreign store. Return strong distinct local store results only. "
             f"{text77_lang_instr(lang)}"
@@ -9081,6 +9190,12 @@ def send_text_lens_style_results(from_number, txt, urls, bot_id, lang, query, ex
     _kept_rows = filter_relevant_offers(query, _offer_rows, _tmp_urls, use_ai=not _skip_ai_relevance, mode="exact")
     _kept_keys = {(r.get("name") or "", r.get("line") or "") for r in _kept_rows}
     candidates = [o for o in candidates if ((o.get("source") or "", o.get("title") or "") in _kept_keys)]
+
+    # v104.9: explicit display size (24", 27 inch, etc.) is a hard product variant.
+    # Do not let a cheaper 27" page satisfy a 24" request.
+    if extract_display_inches(query) is not None:
+        candidates = [o for o in candidates if _verify_exact_display_variant(query, o)]
+
     candidates = _filter_confirmed_oos(candidates, "TEXT-LOCAL")
 
     selected, merchant_counts, seen_urls = [], defaultdict(int), set()
@@ -10808,7 +10923,7 @@ def _web_verified_page_snapshot(url):
         if cached and now - float(cached.get("ts") or 0) < WEB_PRODUCT_VERIFY_CACHE_TTL_SECONDS:
             return dict(cached.get("data") or {})
 
-    data = {"ok": False, "url": url, "price": None, "currency": "", "image": "", "title": "", "is_product": False}
+    data = {"ok": False, "url": url, "price": None, "currency": "", "image": "", "title": "", "is_product": False, "available": None}
     try:
         parsed = urllib.parse.urlparse(url)
         headers = dict(HEADERS)
@@ -10828,6 +10943,7 @@ def _web_verified_page_snapshot(url):
             data["image"] = parsed_data.get("image_url") or _web_extract_product_image_from_html(html, final_url) or ""
             data["title"] = parsed_data.get("title") or ""
             data["is_product"] = bool(parsed_data.get("is_product", True))
+            data["available"] = parsed_data.get("available")
             data["ok"] = True
 
             low = re.sub(r"\\s+", " ", BeautifulSoup(html[:450000], "html.parser").get_text(" ", strip=True).lower())
