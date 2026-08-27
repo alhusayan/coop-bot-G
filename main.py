@@ -26,7 +26,7 @@ app.add_middleware(
     allow_headers=["Content-Type", "Accept"],
     max_age=86400,
 )
-BUILD_ID = "v104.5-list-ui-local-global-20260827"
+BUILD_ID = "v104.6-list-ui-with-cta-fallback-20260827"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("LOCAL FIRST | LIST RESULTS UI | OLD GLOBAL ENGINE PRESERVED | FLAGS + SMART SAVINGS | AUTO LANGUAGE")
@@ -1671,6 +1671,32 @@ def send_result_list(phone, bot_id, lang, results, kind="local"):
     return send_whatsapp_list(phone, body, rows, bot_id, button)
 
 
+
+def send_result_list_with_fallback(phone, bot_id, lang, results, kind="local"):
+    """Primary UI = WhatsApp list. If Meta rejects/doesn't send the list, fall back to the proven CTA cards."""
+    if send_result_list(phone, bot_id, lang, results, kind):
+        print(f"RESULT LIST SENT kind={kind} count={len(results or [])}")
+        return True
+
+    print(f"RESULT LIST FAILED -> CTA FALLBACK kind={kind} count={len(results or [])}")
+    sent = 0
+    for r in (results or []):
+        url = str(r.get("url") or "").strip()
+        if not url.startswith(("http://", "https://")):
+            continue
+        store = str(r.get("store") or U(lang, "store")).strip()
+        flag = str(r.get("flag") or "").strip()
+        title = _compact_ui_title(r.get("title") or "")
+        price = str(r.get("price") or "").strip()
+        body = _build_compact_card_body(flag, store, title, price, lang)
+        if not body:
+            body = f"{flag}\n{title}\n{price}".strip()
+        if send_whatsapp_cta(phone, body[:1000], url, bot_id, store or U(lang, "store")):
+            sent += 1
+    print(f"CTA FALLBACK SENT kind={kind} sent={sent}")
+    return sent > 0
+
+
 def _open_selected_result(phone, reply, bot_id):
     btn_id = str((reply or {}).get("id") or "")
     m = re.fullmatch(r"res_([0-9a-f]{8})_(\d+)", btn_id)
@@ -1978,7 +2004,7 @@ def _send_global_text_results_with_flags(phone, txt, urls, bot_id, lang, query, 
             "title": _compact_ui_title(rec["title"] or query),
             "price": rec["shown_price"],
         })
-    return send_result_list(phone, bot_id, lang, list_results, "global")
+    return send_result_list_with_fallback(phone, bot_id, lang, list_results, "global")
 
 def _prepare_cached_lens_global(items):
     rows = []
@@ -2062,7 +2088,7 @@ def _send_cached_lens_global(phone, item):
             "title": _compact_ui_title(title or query),
             "price": price_txt,
         })
-    return send_result_list(phone, bot_id, lang, list_results, "global")
+    return send_result_list_with_fallback(phone, bot_id, lang, list_results, "global")
 
 
 def location_is_valid(phone):
@@ -7424,7 +7450,7 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption="", image_
             "title": title, "price": price_txt,
         })
 
-    if not sent_items or not send_result_list(from_number, bot_id, lang, list_results, "local"):
+    if not sent_items or not send_result_list_with_fallback(from_number, bot_id, lang, list_results, "local"):
         return False
 
     chosen_title = ((lens.get("chosen") or {}).get("title") or selected[0]["title"]).strip()
@@ -8387,7 +8413,11 @@ def send_whatsapp_list(to, body, rows, bot_id, button_title="اختر"):
         "action":{"button":_remove_ui_autolinks(button_title)[:20],"sections":[{"title":_remove_ui_autolinks(button_title)[:24],"rows":clean_rows}]}}}
     try:
         r=_whatsapp_http_session().post(url,json=payload,headers=h,timeout=(3, WHATSAPP_TIMEOUT_SECONDS))
-        if not r.ok: print(f"LIST MSG ERR {r.status_code}: {r.text[:200]}")
+        if not r.ok:
+            print(f"LIST MSG ERR {r.status_code}: {r.text[:500]}")
+            print(f"LIST MSG META kind_rows={len(clean_rows)} button={button_title!r} body={body[:120]!r}")
+        else:
+            print(f"LIST MSG OK rows={len(clean_rows)} button={button_title!r}")
         return r.ok
     except Exception as e:
         print(f"LIST MSG ERR: {e}"); return False
@@ -9273,7 +9303,7 @@ def send_text_lens_style_results(from_number, txt, urls, bot_id, lang, query, ex
             "title": title, "price": shown_price,
         })
 
-    if not sent_items or not send_result_list(from_number, bot_id, lang, list_results, "local"):
+    if not sent_items or not send_result_list_with_fallback(from_number, bot_id, lang, list_results, "local"):
         return False
 
     LAST_SEARCH[from_number] = {"product": query}
