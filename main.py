@@ -26,7 +26,7 @@ app.add_middleware(
     allow_headers=["Content-Type", "Accept"],
     max_age=86400,
 )
-BUILD_ID = "v105.1-whatsapp-auto-language-20260827"
+BUILD_ID = "v105.2-whatsapp-auto-language-hotfix-20260827"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES")
@@ -4464,25 +4464,99 @@ def _shopping_clean_query(query):
     return " ".join(q.split()[:10])
 
 
+# Some countries are valid for normal Google `gl` but are not accepted by
+# SerpApi's google_shopping `gl`. Kuwait currently falls in this group.
+# For those markets we preserve local intent with `location=<country>` instead
+# of incorrectly substituting another country's `gl`.
+SHOPPING_UNSUPPORTED_GL = {"kw"}
+SHOPPING_UNSUPPORTED_GL_LOCK = threading.Lock()
+
 def _serpapi_shopping_request(query, gl, hl="en", timeout_seconds=None):
-    """طلب google_shopping واحد. يعيد shopping_results (قد تكون فارغة)."""
-    params = {
-        "engine": "google_shopping", "q": query, "api_key": SERPAPI_API_KEY,
-        "hl": hl, "output": "json",
-    }
-    if gl:
-        params["gl"] = gl
+    """One Google Shopping request with safe fallback for unsupported Shopping `gl` countries."""
+    gl_code = str(gl or "").strip().lower()
+    timeout_value = (4, timeout_seconds or SERPAPI_TIMEOUT_SECONDS)
+
+    def _params(use_gl=True):
+        p = {
+            "engine": "google_shopping",
+            "q": query,
+            "api_key": SERPAPI_API_KEY,
+            "hl": hl,
+            "output": "json",
+        }
+        with SHOPPING_UNSUPPORTED_GL_LOCK:
+            unsupported = gl_code in SHOPPING_UNSUPPORTED_GL
+
+        if gl_code and use_gl and not unsupported:
+            p["gl"] = gl_code
+        elif gl_code:
+            # Keep the actual local market instead of falling back to US/UAE/etc.
+            p["location"] = COUNTRY_NAMES.get(gl_code, gl_code.upper())
+        return p
+
+    def _do_request(params):
+        return requests.get(
+            "https://serpapi.com/search.json",
+            params=params,
+            timeout=timeout_value,
+        )
+
     try:
-        r = requests.get("https://serpapi.com/search.json", params=params, timeout=(4, timeout_seconds or SERPAPI_TIMEOUT_SECONDS))
+        params = _params(use_gl=True)
+        r = _do_request(params)
+
+        # Learn unsupported Google-Shopping country codes at runtime and retry once
+        # using a real location target. This prevents repeated 400s in future calls.
+        if r.status_code >= 400:
+            body = r.text or ""
+            unsupported_gl = (
+                gl_code
+                and "unsupported" in body.lower()
+                and "country" in body.lower()
+                and "gl" in body.lower()
+            )
+            if unsupported_gl:
+                with SHOPPING_UNSUPPORTED_GL_LOCK:
+                    SHOPPING_UNSUPPORTED_GL.add(gl_code)
+                print(f"GOOGLE SHOPPING GL FALLBACK: {gl_code} unsupported -> location={COUNTRY_NAMES.get(gl_code, gl_code.upper())}")
+                r = _do_request(_params(use_gl=False))
+
         if r.status_code >= 400:
             print(f"GOOGLE SHOPPING HTTP {r.status_code}: {r.text[:300]}")
             return []
+
         data = r.json()
         if data.get("error"):
-            print(f"GOOGLE SHOPPING ERROR: {data.get('error')}")
-            return []
+            err = str(data.get("error") or "")
+            unsupported_gl = (
+                gl_code
+                and "unsupported" in err.lower()
+                and "country" in err.lower()
+                and "gl" in err.lower()
+            )
+            if unsupported_gl:
+                with SHOPPING_UNSUPPORTED_GL_LOCK:
+                    SHOPPING_UNSUPPORTED_GL.add(gl_code)
+                print(f"GOOGLE SHOPPING GL FALLBACK(JSON): {gl_code} unsupported -> location={COUNTRY_NAMES.get(gl_code, gl_code.upper())}")
+                r = _do_request(_params(use_gl=False))
+                if r.status_code >= 400:
+                    print(f"GOOGLE SHOPPING HTTP {r.status_code}: {r.text[:300]}")
+                    return []
+                data = r.json()
+                if data.get("error"):
+                    print(f"GOOGLE SHOPPING ERROR: {data.get('error')}")
+                    return []
+            else:
+                print(f"GOOGLE SHOPPING ERROR: {err}")
+                return []
+
         results = data.get("shopping_results") or []
-        print(f"GOOGLE SHOPPING: q={query[:60]!r} gl={gl or '-'} -> {len(results)} cards")
+        target_note = (
+            f"location={COUNTRY_NAMES.get(gl_code, gl_code.upper())}"
+            if gl_code in SHOPPING_UNSUPPORTED_GL
+            else f"gl={gl_code or '-'}"
+        )
+        print(f"GOOGLE SHOPPING: q={query[:60]!r} {target_note} -> {len(results)} cards")
         return results[:SHOPPING_RESULT_LIMIT]
     except Exception as e:
         print(f"GOOGLE SHOPPING EXCEPTION: {e}")
@@ -5982,7 +6056,7 @@ def legacy_text_product_search_more(product, lang, seen_domains):
         f"ثم الولايات المتحدة حتى {MORE_US_MAX}، ثم الصين حتى {MORE_CN_MAX}. "
         "لا تعرض دولة رابعة. لا تكرر أي متجر أو دومين ظهر سابقاً. "
         "كل نتيجة يجب أن تكون نفس المنتج والموديل/الحجم، بسعر رقمي ورابط صفحة منتج مباشر. "
-        f"{TEXT77_lang_instr(lang)}"
+        f"{text77_lang_instr(lang)}"
     )
     return legacy_v26_best_of_search([{"text": prompt}], total_cap, True, product)
 
@@ -7311,7 +7385,7 @@ def text77_bilingual_search_instruction(query, lang):
         f"Use the original wording, English commercial name, and local commerce language {hl}. "
         f"Do not stop at famous stores; inspect smaller genuine {market_name} merchants indexed by Google. "
         f"Local prices must be numeric and use an accepted local currency ({', '.join(country_currency_codes())}). "
-        f"Then US and China only if needed. {TEXT77_lang_instr(lang)}"
+        f"Then US and China only if needed. {text77_lang_instr(lang)}"
     )
 
 
@@ -7825,7 +7899,7 @@ def cart_item_search(product, lang):
     market_name = current_market().get("country_name", "Kuwait")
     txt, urls = text77_call_gemini([{"text": (
         f"ابحث عن {product} في أي متجر محلي في {market_name} يبيعه بسعر رقمي واضح "
-        f"ورابط صفحة منتج مباشر. حتى {MAX_STORES} متاجر من الأرخص للأغلى. {TEXT77_lang_instr(lang)}"
+        f"ورابط صفحة منتج مباشر. حتى {MAX_STORES} متاجر من الأرخص للأغلى. {text77_lang_instr(lang)}"
     )}])
     urls = direct_urls_only(urls)
     if txt and text77_extract_store_offers(txt) and not is_no_result_answer(txt):
@@ -8274,7 +8348,7 @@ def legacy_text_product_search(product, lang):
             "لا تعرض أي دولة رابعة. استبعد Heureka/heureka.cz/heureka.sk نهائياً ولا تعتبره متجراً محلياً. لا تجعل الأعداد حصصاً إلزامية؛ اعرض الموجود المطابق فقط. "
             "مهم جداً: لا تنه البحث قبل فحص الأسواق الثلاثة كلها. إذا كان نفس المنتج المطابق موجوداً في السوق المحلي أو أمريكا أو الصين فيجب أن يظهر على الأقل متجر واحد من ذلك السوق؛ لا تحذف سوقاً كاملاً بسبب أن سوقاً آخر أعاد نتائج أكثر أو أسرع. "
             "لكل نتيجة اذكر اسم المتجر، اسم المنتج المطابق، السعر الرقمي والعملة، واربطه بصفحة المنتج المباشرة. "
-            f"{TEXT77_lang_instr(lang)}"
+            f"{text77_lang_instr(lang)}"
         )
         return legacy_v26_best_of_search([{"text": prompt}], total_cap, True, product)
 
@@ -8331,7 +8405,7 @@ def execute_service_search(from_number, service_desc, original_text, bot_id, lan
         "🏆 [اسم المزود] (هاتف: [الرقم]) — [المنطقة أو التقييم باختصار]\n"
         "• [اسم المزود] (هاتف: [الرقم]) — [المنطقة أو التقييم باختصار]\n"
         "بدون روابط، بدون Markdown، بدون فقرات شرح بعد القائمة. "
-        f"{TEXT77_lang_instr(lang)}"
+        f"{text77_lang_instr(lang)}"
     )
     txt, urls = "", {}
     try:
@@ -8844,7 +8918,7 @@ def run_brand_comparison(from_number, query, bot_id, lang):
         f"Generic shopping request: {query}\n"
         f"Current market: {current_market().get('country_name', 'Kuwait')}\n"
         f"Compare 3-4 strong concrete options for this request. Output only in {lang_name}. "
-        f"{TEXT77_lang_instr(lang)}"
+        f"{text77_lang_instr(lang)}"
     )
     txt = ""
     options = []
@@ -8920,8 +8994,8 @@ def run_text_global_search(phone, item):
     market_name = current_market().get("country_name", "Kuwait")
     prompts = [
         f"ابحث عالمياً عن {query} في متاجر خارج {market_name} فقط. استبعد المتاجر داخل {market_name}. "
-        f"ابحث في Amazon.com وeBay وAliExpress وTemu وSHEIN وWalmart وغيرها. اعرض حتى {MAX_STORES} نتائج مختلفة بسعر رقمي ورابط منتج مباشر والعملة. {TEXT77_lang_instr(lang)}",
-        f"Search worldwide for {english_search_name(query) or query} outside {market_name}. Find up to {MAX_STORES} trusted international store results with numeric price, currency, and direct product page. {TEXT77_lang_instr(lang)}",
+        f"ابحث في Amazon.com وeBay وAliExpress وTemu وSHEIN وWalmart وغيرها. اعرض حتى {MAX_STORES} نتائج مختلفة بسعر رقمي ورابط منتج مباشر والعملة. {text77_lang_instr(lang)}",
+        f"Search worldwide for {english_search_name(query) or query} outside {market_name}. Find up to {MAX_STORES} trusted international store results with numeric price, currency, and direct product page. {text77_lang_instr(lang)}",
     ]
     txt, urls = "", {}
     for prompt in prompts:
@@ -8945,7 +9019,7 @@ def run_text_similar_search(phone, item):
         f"المنتج التالي غير متوفر محلياً: {base}. " + (f"الاسم الآخر: {base_other}. " if base_other else "") +
         f"ابحث بعمق في Google عن حتى {MAX_STORES} بدائل حقيقية مختلفة من نفس الفئة والاستخدام ومتوفرة الآن في متاجر {market_name} المحلية فقط. "
         "لكل نتيجة: اسم المتجر فقط — اسم البديل الفعلي — السعر الرقمي. اربط كل متجر بصفحة المنتج المباشرة. رتب الأرخص أولاً. "
-        f"{TEXT77_lang_instr(lang)}"
+        f"{text77_lang_instr(lang)}"
     )
     txt, urls = legacy_v26_best_of_search([{"text": prompt}], max_results=MAX_STORES, merge_offers=True,
                                           merge_title=f"📦 بدائل مشابهة: {base}")
@@ -9569,7 +9643,7 @@ def _web_brand_comparison(query, lang):
         f"Generic shopping request: {query}\n"
         f"Current market: {current_market().get('country_name', 'Kuwait')}\n"
         f"Compare 3-4 strong concrete options for this request. Output only in {lang_name}. "
-        f"{TEXT77_lang_instr(lang)}"
+        f"{text77_lang_instr(lang)}"
     )
     txt, options = "", []
     for _ in (1, 2):
