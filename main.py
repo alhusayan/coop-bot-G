@@ -26,10 +26,10 @@ app.add_middleware(
     allow_headers=["Content-Type", "Accept"],
     max_age=86400,
 )
-BUILD_ID = "v104.6-list-ui-with-cta-fallback-20260827"
+BUILD_ID = "v104.4-local-first-smart-global-fx-fix-20260827"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
-print("LOCAL FIRST | LIST RESULTS UI | OLD GLOBAL ENGINE PRESERVED | FLAGS + SMART SAVINGS | AUTO LANGUAGE")
+print("LOCAL FIRST | OLD GLOBAL ENGINE PRESERVED | FLAGS + SMART SAVINGS | AUTO LANGUAGE | WORLD CURRENCIES")
 print("=" * 70)
 
 
@@ -57,7 +57,6 @@ PENDING_ONBOARDING = {}
 PENDING_GLOBAL_SEARCH = {}
 # نتائج البحث الحالي التي يمكن توسيعها يدوياً إلى دول أخرى بعد العرض.
 PENDING_MORE_RESULTS = {}
-PENDING_RESULT_LISTS = {}  # v104.5: compact local/global result lists -> selected row -> one CTA
 GLOBAL_PENDING_TTL = max(300, int(os.environ.get("GLOBAL_PENDING_TTL_SECONDS", "900")))
 # v104.3 Local-first presentation policy.
 LOCAL_FIRST_STRONG_MIN = max(2, int(os.environ.get("LOCAL_FIRST_STRONG_MIN", "2")))
@@ -1562,194 +1561,12 @@ def _record_global_interest(phone):
     print(f"GLOBAL DEALS INTEREST: phone={phone} clicks={n}")
     return n
 
-
-def _result_list_copy(lang, key, **kw):
-    en = {
-        "local_body": "{flag} {count} local options found.\nTap a result to see the store.",
-        "global_body": "🌍 {count} international options.\nTap a result to see the store.",
-        "local_button": "Local results",
-        "global_button": "Global deals",
-        "section_local": "Available near you",
-        "section_global": "International options",
-        "open_store": "Open store",
-        "expired": "These results expired. Search again and I’ll refresh them.",
-    }
-    ar = {
-        "local_body": "{flag} لقيت لك {count} خيارات محلية.\nاضغط على النتيجة لفتح المتجر.",
-        "global_body": "🌍 لقيت لك {count} خيارات عالمية.\nاضغط على النتيجة لفتح المتجر.",
-        "local_button": "النتائج المحلية",
-        "global_button": "العروض العالمية",
-        "section_local": "متوفر عندك",
-        "section_global": "خيارات عالمية",
-        "open_store": "فتح المتجر",
-        "expired": "انتهت صلاحية هذي النتائج. ابحث مرة ثانية وأحدثها لك.",
-    }
-    code = str(lang or "en").lower()
-    base = (ar if code == "ar" else en).get(key, en.get(key, key))
-    if code not in ("ar", "en"):
-        base = _dynamic_translate_template(code, en.get(key, base), f"resultlist:{key}")
-    return base.format(**kw) if kw else base
-
-
-def _short_result_row_title(flag, store):
-    """WhatsApp list row title is limited to 24 chars."""
-    raw = f"{flag} {store}".strip()
-    return re.sub(r"\s+", " ", raw)[:24]
-
-
-def _short_result_description(title, price):
-    """Keep the visually useful bit first: price, then compact product title."""
-    title = re.sub(r"\s+", " ", str(title or "")).strip()
-    price = re.sub(r"\s+", " ", str(price or "")).strip()
-    if price and title:
-        s = f"{price} · {title}"
-    else:
-        s = price or title
-    return s[:72]
-
-
-def send_result_list(phone, bot_id, lang, results, kind="local"):
-    """Send one compact WhatsApp list instead of many CTA cards.
-
-    A WhatsApp list row cannot itself open an external URL. Therefore selecting
-    a row sends exactly ONE CTA for that chosen store. This keeps the chat clean.
-    """
-    clean = []
-    for r in (results or [])[:10]:
-        url = str(r.get("url") or "").strip()
-        if not url.startswith(("http://", "https://")):
-            continue
-        store = str(r.get("store") or U(lang, "store")).strip()
-        flag = str(r.get("flag") or "").strip()
-        title = str(r.get("title") or "").strip()
-        price = str(r.get("price") or "").strip()
-        clean.append({
-            "url": url,
-            "store": store,
-            "flag": flag,
-            "title": title,
-            "price": price,
-        })
-
-    if not clean:
-        return False
-
-    token = uuid.uuid4().hex[:8]
-    PENDING_RESULT_LISTS[phone] = {
-        "token": token,
-        "items": clean,
-        "bot_id": bot_id,
-        "lang": lang,
-        "kind": kind,
-        "ts": time.time(),
-    }
-
-    rows = []
-    for i, r in enumerate(clean):
-        rows.append({
-            "id": f"res_{token}_{i}",
-            "title": _short_result_row_title(r["flag"], r["store"]),
-            "description": _short_result_description(r["title"], r["price"]),
-        })
-
-    if kind == "global":
-        body = _result_list_copy(lang, "global_body", count=len(clean))
-        button = _result_list_copy(lang, "global_button")
-        section_title = _result_list_copy(lang, "section_global")
-    else:
-        cc = _local_first_country_code()
-        body = _result_list_copy(
-            lang, "local_body",
-            flag=country_flag_emoji(cc),
-            count=len(clean)
-        )
-        button = _result_list_copy(lang, "local_button")
-        section_title = _result_list_copy(lang, "section_local")
-
-    # send_whatsapp_list uses the button title as the section title too; this
-    # keeps the implementation compatible with the existing, proven sender.
-    return send_whatsapp_list(phone, body, rows, bot_id, button)
-
-
-
-def send_result_list_with_fallback(phone, bot_id, lang, results, kind="local"):
-    """Primary UI = WhatsApp list. If Meta rejects/doesn't send the list, fall back to the proven CTA cards."""
-    if send_result_list(phone, bot_id, lang, results, kind):
-        print(f"RESULT LIST SENT kind={kind} count={len(results or [])}")
-        return True
-
-    print(f"RESULT LIST FAILED -> CTA FALLBACK kind={kind} count={len(results or [])}")
-    sent = 0
-    for r in (results or []):
-        url = str(r.get("url") or "").strip()
-        if not url.startswith(("http://", "https://")):
-            continue
-        store = str(r.get("store") or U(lang, "store")).strip()
-        flag = str(r.get("flag") or "").strip()
-        title = _compact_ui_title(r.get("title") or "")
-        price = str(r.get("price") or "").strip()
-        body = _build_compact_card_body(flag, store, title, price, lang)
-        if not body:
-            body = f"{flag}\n{title}\n{price}".strip()
-        if send_whatsapp_cta(phone, body[:1000], url, bot_id, store or U(lang, "store")):
-            sent += 1
-    print(f"CTA FALLBACK SENT kind={kind} sent={sent}")
-    return sent > 0
-
-
-def _open_selected_result(phone, reply, bot_id):
-    btn_id = str((reply or {}).get("id") or "")
-    m = re.fullmatch(r"res_([0-9a-f]{8})_(\d+)", btn_id)
-    if not m:
-        return False
-
-    item = PENDING_RESULT_LISTS.get(phone) or {}
-    lang = item.get("lang") or USER_LANG.get(phone, "ar")
-    if (
-        not item
-        or item.get("token") != m.group(1)
-        or time.time() - float(item.get("ts") or 0) > GLOBAL_PENDING_TTL
-    ):
-        PENDING_RESULT_LISTS.pop(phone, None)
-        send_whatsapp_text(phone, _result_list_copy(lang, "expired"), bot_id)
-        return True
-
-    idx = int(m.group(2))
-    rows = item.get("items") or []
-    if not (0 <= idx < len(rows)):
-        return True
-
-    r = rows[idx]
-    body = _build_compact_card_body(
-        r.get("flag") or "",
-        r.get("store") or U(lang, "store"),
-        _compact_ui_title(r.get("title") or ""),
-        r.get("price") or "",
-        lang,
-    )
-    send_whatsapp_cta(
-        phone,
-        (body or r.get("store") or U(lang, "store"))[:1000],
-        r.get("url") or "",
-        item.get("bot_id") or bot_id,
-        _result_list_copy(lang, "open_store"),
-    )
-    return True
-
-
 def _send_local_first_choices(phone, bot_id, lang, query, allow_global=True):
     """Two compact actions. After repeated global clicks, Global Deals is promoted to the first button."""
     promoted = allow_global and _global_interest_count(phone) >= GLOBAL_INTEREST_PROMOTE_AFTER
     body = LF(lang, "local_prompt_repeat" if promoted else "local_prompt")
-    more_title = LF(lang, "more_local")
-    glob_title = LF(lang, "global_deals")
-    # Keep the actions visually distinct and immediately understandable.
-    if not str(more_title).lstrip().startswith(("🔎","📍")):
-        more_title = "📍 " + str(more_title)
-    if not str(glob_title).lstrip().startswith("🌍"):
-        glob_title = "🌍 " + str(glob_title)
-    more = {"id":"more_results", "title":more_title[:20]}
-    glob = {"id":"global_yes", "title":glob_title[:20]}
+    more = {"id":"more_results", "title":LF(lang, "more_local")[:20]}
+    glob = {"id":"global_yes", "title":LF(lang, "global_deals")[:20]}
     buttons = ([glob, more] if promoted else [more, glob]) if allow_global else [more]
     return send_whatsapp_buttons(phone, body, buttons, bot_id)
 
@@ -1993,18 +1810,18 @@ def _send_global_text_results_with_flags(phone, txt, urls, bot_id, lang, query, 
         auto_global=bool(item.get("auto_global"))
     ):
         return True
-    list_results = []
+    sent = 0
     for rec in records[:GLOBAL_DISPLAY_MAX]:
         flag = country_flag_emoji(rec.get("country") or "")
         store = _ui_plain_store_name(rec["source"], rec["url"]) or U(lang, "store")
-        list_results.append({
-            "url": rec["url"],
-            "store": store,
-            "flag": flag,
-            "title": _compact_ui_title(rec["title"] or query),
-            "price": rec["shown_price"],
-        })
-    return send_result_list_with_fallback(phone, bot_id, lang, list_results, "global")
+        body = _build_compact_card_body(
+            flag, store, _compact_ui_title(rec["title"] or query), rec["shown_price"], lang
+        )
+        if not body:
+            continue
+        send_whatsapp_cta(phone, body[:1000], rec["url"], bot_id, store)
+        sent += 1
+    return sent > 0
 
 def _prepare_cached_lens_global(items):
     rows = []
@@ -2072,7 +1889,7 @@ def _send_cached_lens_global(phone, item):
     ):
         return True
     titles = translate_ui_titles([(r.get("title") or query).strip() for r in rows[:GLOBAL_DISPLAY_MAX]], lang)
-    list_results = []
+    sent = 0
     for m, title in zip(rows[:GLOBAL_DISPLAY_MAX], titles):
         rank = int(m.get("_cached_market_rank") or result_market_rank(m))
         cc = m.get("_cached_country") or ("us" if rank == 1 else "cn")
@@ -2081,14 +1898,12 @@ def _send_cached_lens_global(phone, item):
         price_txt = _lens_price_text_local(m, rank, lang)
         if not price_txt or m.get("_cached_local_value") is None:
             continue
-        list_results.append({
-            "url": m.get("link") or "",
-            "store": source,
-            "flag": flag,
-            "title": _compact_ui_title(title or query),
-            "price": price_txt,
-        })
-    return send_result_list_with_fallback(phone, bot_id, lang, list_results, "global")
+        body = _build_compact_card_body(flag, source, _compact_ui_title(title or query), price_txt, lang)
+        if not body:
+            continue
+        send_whatsapp_cta(phone, body[:1000], m.get("link") or "", bot_id, source)
+        sent += 1
+    return sent > 0
 
 
 def location_is_valid(phone):
@@ -6646,11 +6461,6 @@ def process_interactive_message(message, bot_id):
     reply=inter.get("button_reply") or inter.get("list_reply") or {}
     btn_id=reply.get("id","")
 
-    # v104.5 compact results list: selecting a row opens one clean CTA.
-    if btn_id.startswith("res_"):
-        if _open_selected_result(from_number, reply, bot_id):
-            return
-
     if btn_id == "more_results":
         item = PENDING_MORE_RESULTS.get(from_number) or {}
         lang_ = item.get("lang") or USER_LANG.get(from_number, "ar")
@@ -7432,25 +7242,29 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption="", image_
         m["_display_title"] = display_title
 
     local_cc = _local_first_country_code()
-    sent_items, local_values, list_results = [], [], []
+    send_whatsapp_text(
+        from_number,
+        LF(lang, "local_summary", flag=country_flag_emoji(local_cc), count=len(selected)),
+        bot_id,
+    ) if not more_mode else None
+
+    sent_items, local_values = [], []
     for m in selected:
         flag = country_flag_emoji(local_cc)
-        source = _ui_plain_store_name((m.get("source") or "").strip(), (m.get("link") or "").strip()) or U(lang, "store")
+        source = _ui_plain_store_name((m.get("source") or "").strip(), (m.get("link") or "").strip())
         title = _compact_ui_title(m.get("_display_title") or m.get("title") or "")
         price_txt = _lens_price_text_local(m, 0, lang)
         local_val = _lens_local_value(m, 0)
         if local_val is not None:
             local_values.append(local_val)
-        url = (m.get("link") or "").strip()
-        if not url:
+        body = _build_compact_card_body(flag, source, title, price_txt, lang)
+        if not body:
             continue
+        url = (m.get("link") or "").strip()
+        send_whatsapp_cta(from_number, body[:1000], url, bot_id, source or U(lang, "store"))
         sent_items.append(m)
-        list_results.append({
-            "url": url, "store": source, "flag": flag,
-            "title": title, "price": price_txt,
-        })
 
-    if not sent_items or not send_result_list_with_fallback(from_number, bot_id, lang, list_results, "local"):
+    if not sent_items:
         return False
 
     chosen_title = ((lens.get("chosen") or {}).get("title") or selected[0]["title"]).strip()
@@ -8413,11 +8227,7 @@ def send_whatsapp_list(to, body, rows, bot_id, button_title="اختر"):
         "action":{"button":_remove_ui_autolinks(button_title)[:20],"sections":[{"title":_remove_ui_autolinks(button_title)[:24],"rows":clean_rows}]}}}
     try:
         r=_whatsapp_http_session().post(url,json=payload,headers=h,timeout=(3, WHATSAPP_TIMEOUT_SECONDS))
-        if not r.ok:
-            print(f"LIST MSG ERR {r.status_code}: {r.text[:500]}")
-            print(f"LIST MSG META kind_rows={len(clean_rows)} button={button_title!r} body={body[:120]!r}")
-        else:
-            print(f"LIST MSG OK rows={len(clean_rows)} button={button_title!r}")
+        if not r.ok: print(f"LIST MSG ERR {r.status_code}: {r.text[:200]}")
         return r.ok
     except Exception as e:
         print(f"LIST MSG ERR: {e}"); return False
@@ -9288,22 +9098,24 @@ def send_text_lens_style_results(from_number, txt, urls, bot_id, lang, query, ex
             local_values.append(local_value)
         priced_rows.append((item, raw_title, shown_price))
 
+    if not more_mode:
+        send_whatsapp_text(
+            from_number,
+            LF(lang, "local_summary", flag=country_flag_emoji(local_cc), count=len(selected)),
+            bot_id,
+        )
+
     sent_items = []
-    list_results = []
     for item, raw_title, shown_price in priced_rows:
         flag = country_flag_emoji(local_cc)
         store = _ui_plain_store_name(item["source"] or "", item.get("link") or "") or U(lang, "store")
-        title = _compact_ui_title(raw_title or query)
-        url = str(item.get("link") or "").strip()
-        if not url:
+        body = _build_compact_card_body(flag, store, _compact_ui_title(raw_title or query), shown_price, lang)
+        if not body:
             continue
+        send_whatsapp_cta(from_number, body[:1000], item["link"], bot_id, store)
         sent_items.append(item)
-        list_results.append({
-            "url": url, "store": store, "flag": flag,
-            "title": title, "price": shown_price,
-        })
 
-    if not sent_items or not send_result_list_with_fallback(from_number, bot_id, lang, list_results, "local"):
+    if not sent_items:
         return False
 
     LAST_SEARCH[from_number] = {"product": query}
