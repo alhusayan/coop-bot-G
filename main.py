@@ -26,7 +26,7 @@ app.add_middleware(
     allow_headers=["Content-Type", "Accept"],
     max_age=86400,
 )
-BUILD_ID = "v104.4-local-first-smart-global-fx-fix-20260827"
+BUILD_ID = "v104.8-clean-messages-20260827"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("LOCAL FIRST | OLD GLOBAL ENGINE PRESERVED | FLAGS + SMART SAVINGS | AUTO LANGUAGE | WORLD CURRENCIES")
@@ -1561,6 +1561,28 @@ def _record_global_interest(phone):
     print(f"GLOBAL DEALS INTEREST: phone={phone} clicks={n}")
     return n
 
+
+def CLEAN(lang, key, **kw):
+    ar = {
+        "local_found": "{flag} لقيت لك {count} خيار محلي.",
+        "global_checked_none": "🌍 شيكت لك عالمياً بعد — ما لقيت خيار أفضل ومؤكد.",
+        "no_local_checking": "🔎 ما لقيت نتيجة محلية قوية، بشوف لك عالمياً...",
+        "no_confirmed": "ما لقيت خيارات مؤكدة حالياً. جرّب صورة ثانية أو اسم أدق للمنتج.",
+        "global_better": "🌍 لقيت خيارات عالمية أوفر ومطابقة.",
+    }
+    en = {
+        "local_found": "{flag} Found {count} local option(s).",
+        "global_checked_none": "🌍 I checked international options too — no better confirmed match found.",
+        "no_local_checking": "🔎 No strong local match. I’m checking international options…",
+        "no_confirmed": "No confirmed options found yet. Try another photo or a more specific product name.",
+        "global_better": "🌍 I found better matching international options.",
+    }
+    code = str(lang or "en").lower()
+    base = (ar if code == "ar" else en).get(key, en.get(key, key))
+    if code not in ("ar", "en"):
+        base = _dynamic_translate_template(code, en.get(key, base), f"clean:{key}")
+    return base.format(**kw) if kw else base
+
 def _send_local_first_choices(phone, bot_id, lang, query, allow_global=True):
     """Two compact actions. After repeated global clicks, Global Deals is promoted to the first button."""
     promoted = allow_global and _global_interest_count(phone) >= GLOBAL_INTEREST_PROMOTE_AFTER
@@ -1801,7 +1823,7 @@ def _send_global_text_results_with_flags(phone, txt, urls, bot_id, lang, query, 
     """Presentation layer for the OLD global text search: flags + price comparison, no USA/China headings."""
     records = _global_text_records(txt, urls, lang)
     if not records:
-        send_whatsapp_text(phone, LF(lang, "global_none"), bot_id)
+        send_whatsapp_text(phone, CLEAN(lang, "global_checked_none"), bot_id)
         return False
     best_global = min((r["local_value"] for r in records if r["local_value"] is not None), default=None)
     if not _global_price_decision(
@@ -4185,7 +4207,7 @@ def send_service_result(from_number, txt, bot_id, lang, service_desc):
 
 def send_product_result(from_number, txt, urls, bot_id, lang, query, best_only=False):
     if not txt:
-        send_whatsapp_text(from_number, T(lang, "not_found"), bot_id)
+        send_whatsapp_text(from_number, CLEAN(lang, "no_confirmed"), bot_id)
         return "none"
     if is_service_answer(txt):
         # v105: الخدمات: بطاقة لكل مزود (اسم + رقم كنص) وزر واتساب برسالة طلب الخدمة.
@@ -4213,7 +4235,7 @@ def send_product_result(from_number, txt, urls, bot_id, lang, query, best_only=F
         send_whatsapp_cta(from_number, o["line"], url, bot_id, f"🛒 {o['name'][:18]}")
         sent += 1
     if sent == 0:
-        send_whatsapp_text(from_number, T(lang, "not_found"), bot_id)
+        send_whatsapp_text(from_number, CLEAN(lang, "no_confirmed"), bot_id)
         return "none"
     return "product"
 
@@ -6344,7 +6366,7 @@ def run_similar_search(phone, item):
 def run_global_search(phone, item):
     activate_market(phone)
     bot_id = item["bot_id"]; lang = item["lang"]; query = item["query"]
-    send_whatsapp_text(phone, T(lang, "global_searching"), bot_id)
+    None  # v104.8: suppress duplicate global-searching status
     txt, urls = search_product(
         query, lang, prompt_text=item.get("prompt_text"),
         lens_context=item.get("lens_context"), allow_global=True,
@@ -6369,7 +6391,7 @@ def run_global_search(phone, item):
             txt = "\n".join(kept_lines).strip()
             urls = filtered_urls
     if not txt or not extract_store_offers(txt) or not urls:
-        send_whatsapp_text(phone, T(lang, "global_none"), bot_id)
+        send_whatsapp_text(phone, CLEAN(lang, "global_checked_none"), bot_id)
         return
     # Search path above remains the old proven global engine. Presentation adds flags/comparison only.
     _send_global_text_results_with_flags(phone, txt, urls, bot_id, lang, query, item)
@@ -7242,11 +7264,7 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption="", image_
         m["_display_title"] = display_title
 
     local_cc = _local_first_country_code()
-    send_whatsapp_text(
-        from_number,
-        LF(lang, "local_summary", flag=country_flag_emoji(local_cc), count=len(selected)),
-        bot_id,
-    ) if not more_mode else None
+    send_whatsapp_text(from_number, CLEAN(lang, "local_found", flag=country_flag_emoji(local_cc), count=len(selected)), bot_id) if not more_mode else None
 
     sent_items, local_values = [], []
     for m in selected:
@@ -7479,7 +7497,7 @@ def process_single_image(message,bot_id,lang="ar"):
             return
         if query:
             if _is_everyday_local_only(query):
-                send_whatsapp_text(from_number, T(lang, "not_found"), bot_id)
+                send_whatsapp_text(from_number, CLEAN(lang, "no_confirmed"), bot_id)
             else:
                 send_whatsapp_text(from_number, LF(lang, "no_local"), bot_id)
                 item = {
@@ -7494,7 +7512,7 @@ def process_single_image(message,bot_id,lang="ar"):
     result_type = _send_image_fallback_local_first(from_number, txt, urls, bot_id, lang, query, active_lens, prompt_text if (combined_name and caption) else None)
     if result_type == "none" and query:
         if _is_everyday_local_only(query):
-            send_whatsapp_text(from_number, T(lang, "not_found"), bot_id)
+            send_whatsapp_text(from_number, CLEAN(lang, "no_confirmed"), bot_id)
             return
         send_whatsapp_text(from_number, LF(lang, "no_local"), bot_id)
         item = {
@@ -7522,7 +7540,7 @@ def process_cart(products, from_number, bot_id, lang="ar"):
         any_ok = True
         send_product_result(from_number, txt, urls, bot_id, lang, p, best_only=True)
     if not any_ok:
-        send_whatsapp_text(from_number, T(lang, "not_found"), bot_id)
+        send_whatsapp_text(from_number, CLEAN(lang, "no_confirmed"), bot_id)
         return
     LAST_SEARCH[from_number] = {"product": products[0]}
 
@@ -8400,7 +8418,7 @@ def run_cart_comparison(products, from_number, bot_id, lang="ar"):
                 break
     except Exception as e:
         print(f"CART GATHER CRASH: {e}")
-        send_whatsapp_text(from_number, T(lang, "not_found"), bot_id)
+        send_whatsapp_text(from_number, CLEAN(lang, "no_confirmed"), bot_id)
         return
 
     stores = {}
@@ -8444,7 +8462,7 @@ def run_cart_comparison(products, from_number, bot_id, lang="ar"):
             any_ok = True
             send_product_result(from_number, txt, urls, bot_id, lang, p, best_only=True)
         if not any_ok:
-            send_whatsapp_text(from_number, T(lang, "not_found"), bot_id)
+            send_whatsapp_text(from_number, CLEAN(lang, "no_confirmed"), bot_id)
         return
 
     n = len(products)
@@ -8965,7 +8983,7 @@ def execute_service_search(from_number, service_desc, original_text, bot_id, lan
         print(f"SERVICE SEARCH CRASH: {e}")
         txt = ""
     if not txt or is_no_result_answer(txt):
-        send_whatsapp_text(from_number, T(lang, "not_found"), bot_id)
+        send_whatsapp_text(from_number, CLEAN(lang, "no_confirmed"), bot_id)
         return
     # v105: بطاقة لكل مزود + زر واتساب برسالة طلب الخدمة (الرقم يظهر كنص فقط).
     send_service_result(from_number, txt, bot_id, lang, service_desc)
@@ -9099,11 +9117,7 @@ def send_text_lens_style_results(from_number, txt, urls, bot_id, lang, query, ex
         priced_rows.append((item, raw_title, shown_price))
 
     if not more_mode:
-        send_whatsapp_text(
-            from_number,
-            LF(lang, "local_summary", flag=country_flag_emoji(local_cc), count=len(selected)),
-            bot_id,
-        )
+        send_whatsapp_text(from_number, CLEAN(lang, "local_found", flag=country_flag_emoji(local_cc), count=len(selected)), bot_id)
 
     sent_items = []
     for item, raw_title, shown_price in priced_rows:
@@ -9176,7 +9190,7 @@ def execute_product_search(from_number, product, bot_id, lang):
     # No local result. Daily/grocery/restaurant requests stay local-only; other products expand automatically.
     if _is_everyday_local_only(product):
         print(f"TEXT LOCAL-ONLY FINAL NOT FOUND: {product!r}")
-        send_whatsapp_text(from_number, T(lang, "not_found"), bot_id)
+        send_whatsapp_text(from_number, CLEAN(lang, "no_confirmed"), bot_id)
         return
 
     send_whatsapp_text(from_number, LF(lang, "no_local"), bot_id)
@@ -9584,7 +9598,7 @@ def run_brand_comparison(from_number, query, bot_id, lang):
 def run_text_global_search(phone, item):
     activate_market(phone)
     bot_id = item["bot_id"]; lang = item["lang"]; query = item["query"]
-    send_whatsapp_text(phone, T(lang, "global_searching"), bot_id)
+    None  # v104.8: suppress duplicate global-searching status
     market_name = current_market().get("country_name", "Kuwait")
     prompts = [
         f"ابحث عالمياً عن {query} في متاجر خارج {market_name} فقط. استبعد المتاجر داخل {market_name}. "
@@ -9597,7 +9611,7 @@ def run_text_global_search(phone, item):
         if txt and urls and text77_extract_store_offers(txt):
             break
     if not txt or not text77_extract_store_offers(txt):
-        send_whatsapp_text(phone, T(lang, "global_none"), bot_id); return
+        send_whatsapp_text(phone, CLEAN(lang, "global_checked_none"), bot_id); return
     if not urls:
         send_whatsapp_text(phone, txt, bot_id); return
     # v104.3: OLD global search above is unchanged; only presentation is smarter.
@@ -9837,7 +9851,7 @@ def process_text_message(message,bot_id,onboarding_checked=False):
         print(f"TEXT77 PROCESS_TEXT_MESSAGE CRASH: {e} for {from_number}")
         try:
             lang = USER_LANG.get(from_number, "ar")
-            send_whatsapp_text(from_number, T(lang, "not_found"), bot_id)
+            send_whatsapp_text(from_number, CLEAN(lang, "no_confirmed"), bot_id)
         except Exception:
             pass
 
