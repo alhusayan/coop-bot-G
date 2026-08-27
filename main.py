@@ -26,7 +26,7 @@ app.add_middleware(
     allow_headers=["Content-Type", "Accept"],
     max_age=86400,
 )
-BUILD_ID = "v105.1-whatsapp-auto-language-live-typing-20260827"
+BUILD_ID = "v105.1-whatsapp-auto-language-live-typing-fix1-20260827"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES")
@@ -7293,6 +7293,13 @@ def text77_lang_instr(lang):
         "Only local-store prices use the user's local currency. Every store line must explicitly include a numeric price and currency. "
         "Keep brand names, model names, SKUs, sizes, URLs and currency codes unchanged."
     )
+
+
+# Compatibility alias:
+# Several v105.1 typed-search paths call TEXT77_lang_instr(...) with capital TEXT77,
+# while the actual helper is defined as text77_lang_instr(...). Python is case-sensitive.
+# Keep both names valid without changing any search/result behavior.
+TEXT77_lang_instr = text77_lang_instr
 
 
 TEXT77_SYSTEM_PROMPT = SYSTEM_PROMPT + """
