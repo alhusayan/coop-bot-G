@@ -26,7 +26,7 @@ app.add_middleware(
     allow_headers=["Content-Type", "Accept"],
     max_age=86400,
 )
-BUILD_ID = "v104.3-local-first-smart-global-20260827"
+BUILD_ID = "v104.4-local-first-smart-global-fx-fix-20260827"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("LOCAL FIRST | OLD GLOBAL ENGINE PRESERVED | FLAGS + SMART SAVINGS | AUTO LANGUAGE | WORLD CURRENCIES")
@@ -1630,6 +1630,54 @@ def _local_value_from_price(raw_price, market_rank=0, country_code=""):
     converted = convert_to_local(numeric, src)
     return float(converted) if converted is not None else None
 
+def _foreign_source_currency(item, market_rank):
+    """Return (source_currency, trustworthy_source_price).
+
+    Google Lens may localize a foreign merchant price into the viewer's currency
+    (e.g. eBay $20.98 becomes ~21 KWD in a Lens card). That value is useful for
+    Google UI, but it is NOT the merchant's original source price and must not be
+    converted again or used for savings math.
+    """
+    raw = str((item or {}).get("price") or "").strip()
+    declared = str((item or {}).get("currency") or "").upper().strip()
+    local_cur = (current_market().get("currency") or "").upper().strip()
+    cc = _global_country_code(
+        (item or {}).get("source"),
+        (item or {}).get("link"),
+        (item or {}).get("title"),
+    )
+
+    # Strong source-country fallback. This is only a fallback when Lens did not
+    # provide an explicit trustworthy source currency.
+    country_codes = tuple(COUNTRY_CURRENCY_CODES.get((cc or "").lower(), ()))
+    country_default = country_codes[0] if country_codes else ""
+    if not country_default:
+        country_default = "USD" if market_rank == 1 else ("CNY" if market_rank == 2 else "")
+
+    detected = detect_currency_code(raw, "", cc or None)
+
+    # Explicit foreign currency in raw text wins.
+    if detected and detected != local_cur:
+        return detected, True
+
+    # Lens explicitly saying the user's LOCAL currency for a FOREIGN merchant
+    # means Google localized the card. Reject it as a source price.
+    if declared and declared == local_cur:
+        return country_default or "", False
+    if detected and detected == local_cur:
+        return country_default or "", False
+
+    # A non-local declared currency is trustworthy.
+    if declared and declared != local_cur:
+        return declared, True
+
+    # Bare foreign price with no currency: infer from the merchant's country.
+    # This is acceptable only when a country/source market is identifiable.
+    if country_default:
+        return country_default, True
+    return "", False
+
+
 def _lens_local_value(item, market_rank):
     try:
         value = item.get("price_value")
@@ -1641,17 +1689,26 @@ def _lens_local_value(item, market_rank):
         numeric = _extract_numeric_price(raw)
     if numeric is None:
         return None
+
     local_cur = (current_market().get("currency") or "").upper().strip()
     currency = str(item.get("currency") or "").upper().strip()
+
     if market_rank == 0:
         src = currency or detect_currency_code(raw, local_cur, _local_first_country_code()) or local_cur
-    else:
-        cc = _global_country_code(item.get("source"), item.get("link"), item.get("title"))
-        fallback = "USD" if cc == "us" or market_rank == 1 else ("CNY" if cc == "cn" or market_rank == 2 else "")
-        src = currency or detect_currency_code(raw, fallback, cc or None) or fallback
-    if not src or src == local_cur:
-        return float(numeric)
-    converted = convert_to_local(numeric, src)
+        if not src or src == local_cur:
+            return float(numeric)
+        converted = convert_to_local(numeric, src)
+        return float(converted) if converted is not None else None
+
+    src, trustworthy = _foreign_source_currency(item, market_rank)
+    if not trustworthy:
+        print(
+            f"LENS GLOBAL PRICE REJECT LOCALIZED: source={(item.get('source') or '')[:40]} "
+            f"raw={raw!r} declared={currency!r} local={local_cur}"
+        )
+        return None
+
+    converted = convert_to_local(numeric, src) if src else None
     return float(converted) if converted is not None else None
 
 def _meaningful_global_saving(local_best, global_best):
@@ -1700,12 +1757,28 @@ def _global_text_records(txt, urls, lang):
         cc = _global_country_code(item.get("source"), url, item.get("title"))
         rank = 1 if cc == "us" else (2 if cc == "cn" else 3)
         numeric = _extract_numeric_price(raw_price) if raw_price else None
-        src = detect_currency_code(raw_price, "USD" if rank == 1 else ("CNY" if rank == 2 else ""), cc or None) if raw_price else ""
+        fallback_src = ""
+        if cc:
+            cc_codes = tuple(COUNTRY_CURRENCY_CODES.get(cc.lower(), ()))
+            fallback_src = cc_codes[0] if cc_codes else ""
+        if not fallback_src:
+            fallback_src = "USD" if rank == 1 else ("CNY" if rank == 2 else "")
+        src = detect_currency_code(raw_price, fallback_src, cc or None) if raw_price else ""
+
+        # A FOREIGN merchant must not arrive already labelled in the user's local
+        # currency. That means the search/model localized it instead of preserving
+        # the source price, so it is unsafe for conversion/savings math.
+        if src and local_cur and src == local_cur:
+            print(f"GLOBAL TEXT PRICE REJECT LOCALIZED: {item.get('source')} -> {raw_price!r}")
+            continue
+
         shown = raw_price
         converted = None
         if numeric is not None:
             shown2, converted = display_global_price(numeric, raw_price, src, lang)
             shown = shown2 or raw_price
+        if numeric is None or converted is None:
+            continue
         records.append({
             "source": item.get("source") or "",
             "url": url,
@@ -1753,6 +1826,7 @@ def _send_global_text_results_with_flags(phone, txt, urls, bot_id, lang, query, 
 def _prepare_cached_lens_global(items):
     rows = []
     seen = set()
+    rejected_localized = 0
     for m in items or []:
         rank = result_market_rank(m)
         if rank not in (1,2):
@@ -1760,12 +1834,36 @@ def _prepare_cached_lens_global(items):
         url = str(m.get("link") or "").strip()
         if not url.startswith(("http://","https://")) or url in seen:
             continue
+
         row = dict(m)
+        src, trustworthy = _foreign_source_currency(row, rank)
+        if not trustworthy:
+            rejected_localized += 1
+            print(
+                f"CACHED LENS GLOBAL SKIP LOCALIZED PRICE: {(row.get('source') or '')[:45]} "
+                f"{row.get('price')!r} {row.get('currency')!r}"
+            )
+            continue
+
+        local_value = _lens_local_value(row, rank)
+        if local_value is None:
+            continue
+
         row["_cached_market_rank"] = rank
-        row["_cached_local_value"] = _lens_local_value(row, rank)
-        row["_cached_country"] = _global_country_code(row.get("source"), url, row.get("title")) or ("us" if rank == 1 else "cn")
+        row["_cached_source_currency"] = src
+        row["_cached_local_value"] = local_value
+        row["_cached_country"] = _global_country_code(
+            row.get("source"), url, row.get("title")
+        ) or ("us" if rank == 1 else "cn")
         rows.append(row)
         seen.add(url)
+
+    if rejected_localized:
+        print(
+            f"CACHED LENS GLOBAL: rejected {rejected_localized} Google-localized foreign price(s); "
+            "old global search will be used if no trustworthy cached cards remain."
+        )
+
     rows.sort(key=lambda r: (
         _regional_priority(r.get("_cached_country")),
         r.get("_cached_local_value") is None,
@@ -1798,6 +1896,8 @@ def _send_cached_lens_global(phone, item):
         flag = country_flag_emoji(cc)
         source = _ui_plain_store_name(m.get("source") or "", m.get("link") or "") or U(lang, "store")
         price_txt = _lens_price_text_local(m, rank, lang)
+        if not price_txt or m.get("_cached_local_value") is None:
+            continue
         body = _build_compact_card_body(flag, source, _compact_ui_title(title or query), price_txt, lang)
         if not body:
             continue
@@ -6893,12 +6993,13 @@ def _fill_prices_from_existing_lens_pool(selected, pool):
 
 
 def _lens_price_text_local(m, market_rank, lang):
-    """Return a clear local-currency price, plus original foreign price when known."""
+    """Return local-currency display from a REAL source-currency price."""
     raw_price = str(m.get("price") or "").strip()
     price_value = m.get("price_value")
     currency = (m.get("currency") or "").upper().strip()
     if not raw_price and price_value in (None, ""):
         return ""
+
     if market_rank == 0:
         local_cur = (current_market().get("currency") or "").upper().strip()
         src_local = currency or detect_currency_code(raw_price, local_cur)
@@ -6907,10 +7008,12 @@ def _lens_price_text_local(m, market_rank, lang):
             return shown
         return format_lens_price(raw_price, price_value, lang, local_cur or currency or None)
 
-    # لا نفترض CNY لمجرد أن الموقع صيني: AliExpress/Temu كثيراً ما يعرضان USD.
-    src = currency or detect_currency_code(raw_price, "")
-    if not src:
-        src = "USD" if market_rank == 1 else "CNY"
+    src, trustworthy = _foreign_source_currency(m, market_rank)
+    if not trustworthy:
+        # Caller should fall back to the proven old global search rather than
+        # display a Google-localized foreign price as if it were source currency.
+        return ""
+
     shown, _ = display_global_price(price_value, raw_price, src, lang)
     return shown
 
