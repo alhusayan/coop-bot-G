@@ -26,7 +26,7 @@ app.add_middleware(
     allow_headers=["Content-Type", "Accept"],
     max_age=86400,
 )
-BUILD_ID = "v105.1-faster-smart-languages-typing-20260827"
+BUILD_ID = "v105.2-exact-local-prices-fast-more-20260827"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("LOCAL FIRST | OLD GLOBAL ENGINE PRESERVED | FLAGS + SMART SAVINGS | AUTO LANGUAGE | WORLD CURRENCIES")
@@ -6710,6 +6710,103 @@ def _more_exclusion_instruction(seen_domains):
     return (" استبعد هذه المواقع لأنها ظهرت سابقاً: " + ", ".join(domains) + ".") if domains else ""
 
 
+
+MORE_LOCAL_FAST_TIMEOUT_SECONDS = max(2.5, min(6.0, float(os.environ.get("MORE_LOCAL_FAST_TIMEOUT_SECONDS", "4.5"))))
+_MORE_LOCAL_POOL = ThreadPoolExecutor(max_workers=8)
+
+def _fast_more_local_items(query, seen_domains=None, seen_urls=None):
+    """Bounded More-local discovery. Local merchants only, no AI tournament."""
+    seen_domains = {str(x).lower() for x in (seen_domains or []) if x}
+    seen_urls = {str(x).strip() for x in (seen_urls or []) if x}
+    cc = (current_market().get("country") or DEFAULT_COUNTRY).lower()
+
+    specs = []
+    used = set()
+    def add(label, domain):
+        d = str(domain or "").lower().replace("www.", "").strip()
+        if not d or d in used or d in seen_domains:
+            return
+        used.add(d)
+        specs.append((label, d))
+
+    # Category-aware merchants, then the country's major stores.
+    for label, domain in local_rescue_store_specs(query, max_count=8):
+        add(label, domain)
+    for domain in country_major_store_domains(cc)[:8]:
+        label = _ui_plain_store_name(domain, f"https://{domain}") or domain.split(".")[0].title()
+        add(label, domain)
+
+    # Broad local Google Shopping pass as well.
+    jobs = {
+        _MORE_LOCAL_POOL.submit(_market_presence_fallback, query, 0, max(MORE_LOCAL_MAX * 2, 6)): ("shopping", "")
+    }
+    for label, domain in specs[:7]:
+        jobs[_MORE_LOCAL_POOL.submit(
+            _serpapi_local_organic_site_request, query, label, domain, cc
+        )] = ("organic", domain)
+
+    gathered = []
+    pending = set(jobs)
+    deadline = time.monotonic() + MORE_LOCAL_FAST_TIMEOUT_SECONDS
+    while pending and time.monotonic() < deadline and len(gathered) < max(MORE_LOCAL_MAX * 2, 6):
+        done_now, pending = wait(
+            pending,
+            timeout=min(0.4, max(0.05, deadline - time.monotonic())),
+            return_when=FIRST_COMPLETED,
+        )
+        for fut in done_now:
+            try:
+                gathered.extend(fut.result() or [])
+            except Exception as e:
+                print(f"MORE LOCAL FAST JOB ERR: {e}")
+    for fut in pending:
+        fut.cancel()
+
+    out, seen = [], set()
+    for item in gathered:
+        url = str((item or {}).get("link") or "").strip()
+        if not url or url in seen_urls or url in seen:
+            continue
+        dom = _more_result_domain(url)
+        if not dom or dom in seen_domains:
+            continue
+        if result_market_rank(item) != 0:
+            continue
+        if is_blocked_store(item.get("source"), url):
+            continue
+        seen.add(url)
+        out.append(item)
+        if len(out) >= MORE_LOCAL_MAX:
+            break
+
+    print(f"MORE LOCAL FAST: query={query!r} -> {len(out)} new local result(s)")
+    return out
+
+def _send_fast_more_local(phone, bot_id, lang, query, items, seen_domains=None, seen_urls=None):
+    """Render fast-more items through the proven CTA presentation."""
+    if not items:
+        return False
+
+    # Build a minimal text/URL package compatible with the stable text card renderer.
+    lines, urls = [], {}
+    for i, item in enumerate(items, 1):
+        source = str(item.get("source") or f"Store {i}").strip()
+        title = str(item.get("title") or query).strip()
+        raw_price = str(item.get("price") or "").strip()
+        if not raw_price and item.get("price_value") is not None:
+            cur = str(item.get("currency") or current_market().get("currency") or "KWD").upper()
+            raw_price = f"{format_price(item.get('price_value'), cur)} {cur}"
+        if not raw_price:
+            continue
+        lines.append(f"✅ {source} — {title} — {raw_price}")
+        urls[source] = str(item.get("link") or "")
+    if not lines:
+        return False
+    return send_text_lens_style_results(
+        phone, "\n".join(lines), urls, bot_id, lang, query,
+        exclude_domains=seen_domains, exclude_urls=seen_urls, more_mode=True
+    )
+
 def legacy_text_product_search_more(product, lang, seen_domains):
     """v104.3 More local = new LOCAL merchants only."""
     market_name = current_market().get("country_name", "Kuwait")
@@ -6736,21 +6833,45 @@ def run_more_results_search(phone, item):
     seen_urls = set(item.get("seen_urls") or [])
     if not query:
         return False
-    send_whatsapp_text(phone, U(lang, "looking_more"), bot_id)
+
+    # IMPORTANT: do not send "Looking for more stores..." because that message
+    # stops WhatsApp's native typing indicator. The webhook already started "...",
+    # so keep it visible until the actual results/final answer arrives.
+    print(f"MORE LOCAL: native typing indicator active query={query!r}")
+
+    # Image origin: one light Lens retry first, then the same bounded local fallback.
     if item.get("origin") == "lens" and item.get("image_b64") and item.get("image_mime"):
-        exclude_q = " ".join(f"-site:{d}" for d in list(seen_domains)[:5])
-        q_hint = re.sub(r"\s+", " ", f"{query} buy shop other retailers {exclude_q}").strip()[:120]
-        lens = google_lens_lookup(item["image_b64"], item["image_mime"], lang, q_hint, light=True)
-        if lens.get("matches") and send_lens_direct_results(phone, lens, bot_id, lang, caption=query, image_b64=item.get("image_b64") or "", image_mime=item.get("image_mime") or "", exclude_domains=seen_domains, exclude_urls=seen_urls, more_mode=True):
+        try:
+            exclude_q = " ".join(f"-site:{d}" for d in list(seen_domains)[:5])
+            q_hint = re.sub(r"\s+", " ", f"{query} buy shop other retailers {exclude_q}").strip()[:120]
+            lens = google_lens_lookup(
+                item["image_b64"], item["image_mime"], lang, q_hint, light=True
+            )
+            if lens.get("matches") and send_lens_direct_results(
+                phone, lens, bot_id, lang, caption=query,
+                image_b64=item.get("image_b64") or "",
+                image_mime=item.get("image_mime") or "",
+                exclude_domains=seen_domains, exclude_urls=seen_urls,
+                more_mode=True
+            ):
+                return True
+        except Exception as e:
+            print(f"MORE LOCAL LIGHT LENS ERR: {e}")
+
+    # Fast bounded local search for both typed and image-origin requests.
+    try:
+        items = _fast_more_local_items(query, seen_domains, seen_urls)
+        if _send_fast_more_local(
+            phone, bot_id, lang, query, items,
+            seen_domains=seen_domains, seen_urls=seen_urls
+        ):
             return True
-    else:
-        txt, urls = legacy_text_product_search_more(query, lang, seen_domains)
-        if txt and urls and send_text_lens_style_results(phone, txt, urls, bot_id, lang, query, exclude_domains=seen_domains, exclude_urls=seen_urls, more_mode=True):
-            return True
+    except Exception as e:
+        print(f"MORE LOCAL FAST ERR: {e}")
+
     PENDING_MORE_RESULTS.pop(phone, None)
     send_whatsapp_text(phone, U(lang, "all_results"), bot_id)
     return False
-
 
 def process_interactive_message(message, bot_id):
     from_number=message["from"]
@@ -9692,6 +9813,114 @@ def _text_price_local(raw_price, market_rank, lang):
     return f"{format_price(converted, local_cur)} {local_label} ({original})"
 
 
+
+_LOCAL_PRICE_VERIFY_POOL = ThreadPoolExecutor(max_workers=5)
+_THREE_DECIMAL_CURRENCIES = {"KWD","BHD","OMR","JOD","TND"}
+
+def _raw_price_decimal_places(price_text):
+    s = str(price_text or "").strip()
+    # Find the numeric token, preserving the source's visible decimal precision.
+    m = re.search(r"(?<!\d)(\d+(?:[.,]\d{1,3})?)(?!\d)", s.replace(",", "."))
+    if not m:
+        return None
+    token = m.group(1)
+    return len(token.split(".", 1)[1]) if "." in token else 0
+
+def _local_price_needs_page_verify(raw_price, local_cur):
+    """Verify prices that may have lost fils/decimal precision upstream."""
+    cur = str(local_cur or "").upper()
+    if cur not in _THREE_DECIMAL_CURRENCIES:
+        return False
+    places = _raw_price_decimal_places(raw_price)
+    if places is None:
+        return True
+    # In KWD-like currencies, integer/1-2 decimal source text can be a rounded
+    # representation. Fetch the merchant page before showing it as exact.
+    return places < 3
+
+def _verified_local_offer_price(item, raw_price, lang):
+    """Return (display_text, numeric_local_value).
+
+    Grounded/Lens prices remain the fast default. We only inspect the merchant
+    page when a 3-decimal local currency price looks rounded/imprecise.
+    """
+    local_cur = (current_market().get("currency") or "KWD").upper().strip()
+    fallback_text = _text_price_local(raw_price, 0, lang) if raw_price else ""
+    fallback_value = _local_value_from_price(raw_price, 0) if raw_price else None
+
+    if not _local_price_needs_page_verify(raw_price, local_cur):
+        return fallback_text, fallback_value
+
+    url = str((item or {}).get("link") or "").strip()
+    if not url.startswith(("http://", "https://")):
+        return fallback_text, fallback_value
+
+    try:
+        snap = _web_verified_page_snapshot(url)
+    except Exception as e:
+        print(f"LOCAL PRICE VERIFY ERR {url[:90]}: {e}")
+        snap = None
+
+    if not snap or not snap.get("ok") or snap.get("price") is None:
+        return fallback_text, fallback_value
+
+    try:
+        exact = float(snap.get("price"))
+    except Exception:
+        return fallback_text, fallback_value
+    if exact <= 0:
+        return fallback_text, fallback_value
+
+    src_cur = str(snap.get("currency") or local_cur).upper().strip() or local_cur
+    if src_cur != local_cur:
+        converted = convert_to_local(exact, src_cur)
+        if converted is None:
+            return fallback_text, fallback_value
+        exact_local = float(converted)
+    else:
+        exact_local = exact
+
+    print(
+        f"LOCAL PRICE VERIFIED: {(item.get('source') or '')[:35]} "
+        f"{raw_price!r} -> {format_price(exact_local, local_cur)} {local_cur}"
+    )
+    return f"{format_price(exact_local, local_cur)} {currency_label(lang)}", exact_local
+
+
+def _verify_local_price_rows(selected, lang, query):
+    """Verify only the suspicious rounded rows, concurrently and with a short bound."""
+    rows = []
+    jobs = {}
+    local_cur = (current_market().get("currency") or "KWD").upper().strip()
+
+    for pos, item in enumerate(selected or []):
+        raw_title, raw_price = _text_offer_price_and_title(item.get("title") or "")
+        base = (
+            _text_price_local(raw_price, 0, lang) if raw_price else "",
+            _local_value_from_price(raw_price, 0) if raw_price else None,
+        )
+        rows.append([item, raw_title, raw_price, base[0], base[1]])
+        if _local_price_needs_page_verify(raw_price, local_cur):
+            jobs[_LOCAL_PRICE_VERIFY_POOL.submit(_verified_local_offer_price, item, raw_price, lang)] = pos
+
+    if jobs:
+        done, pending = wait(set(jobs), timeout=3.2)
+        for fut in done:
+            pos = jobs[fut]
+            try:
+                shown, value = fut.result()
+                if shown:
+                    rows[pos][3] = shown
+                if value is not None:
+                    rows[pos][4] = value
+            except Exception as e:
+                print(f"LOCAL PRICE VERIFY JOB ERR: {e}")
+        # Do not block the user beyond the bound. Late work can finish into the page cache.
+        for fut in pending:
+            fut.cancel()
+
+    return [(r[0], r[1], r[3], r[4]) for r in rows]
+
 def send_text_lens_style_results(from_number, txt, urls, bot_id, lang, query, exclude_domains=None, exclude_urls=None, more_mode=False):
     """v104.3 typed UI: LOCAL cards only; global stays hidden until useful/requested."""
     exclude_domains = {str(x).lower() for x in (exclude_domains or []) if x}
@@ -9756,10 +9985,7 @@ def send_text_lens_style_results(from_number, txt, urls, bot_id, lang, query, ex
 
     local_cc = _local_first_country_code()
     priced_rows, local_values = [], []
-    for item in selected:
-        raw_title, raw_price = _text_offer_price_and_title(item["title"])
-        shown_price = _text_price_local(raw_price, 0, lang) if raw_price else ""
-        local_value = _local_value_from_price(raw_price, 0) if raw_price else None
+    for item, raw_title, shown_price, local_value in _verify_local_price_rows(selected, lang, query):
         if local_value is not None:
             local_values.append(local_value)
         priced_rows.append((item, raw_title, shown_price))
@@ -11228,11 +11454,11 @@ def _google_organic_price_text(row):
         if isinstance(ext, list):
             joined = " | ".join(str(x) for x in ext)
             if joined:
-                m = re.search(r"(?i)(?:US\$|HK\$|S\$|A\$|C\$|\$|€|£|¥|￥|AED|SAR|KWD|CNY|RMB)\s*\d[\d,.]*(?:\.\d{1,3})?|\d[\d,.]*(?:\.\d{1,3})?\s*(?:USD|CNY|RMB|EUR|GBP|KWD|AED|SAR)", joined)
+                m = re.search(r"(?i)(?:US\$|HK\$|S\$|A\$|C\$|\$|€|£|¥|￥|AED|SAR|KWD|KD|د\.?ك|CNY|RMB)\s*\d[\d,.]*(?:\.\d{1,3})?|\d[\d,.]*(?:\.\d{1,3})?\s*(?:USD|CNY|RMB|EUR|GBP|KWD|AED|SAR)", joined)
                 if m:
                     return m.group(0).strip()
     hay = " ".join(str(row.get(k) or "") for k in ("title", "snippet"))
-    m = re.search(r"(?i)(?:US\$|HK\$|S\$|A\$|C\$|\$|€|£|¥|￥|AED|SAR|KWD|CNY|RMB)\s*\d[\d,.]*(?:\.\d{1,3})?|\d[\d,.]*(?:\.\d{1,3})?\s*(?:USD|CNY|RMB|EUR|GBP|KWD|AED|SAR)", hay)
+    m = re.search(r"(?i)(?:US\$|HK\$|S\$|A\$|C\$|\$|€|£|¥|￥|AED|SAR|KWD|KD|د\.?ك|CNY|RMB)\s*\d[\d,.]*(?:\.\d{1,3})?|\d[\d,.]*(?:\.\d{1,3})?\s*(?:USD|CNY|RMB|EUR|GBP|KWD|AED|SAR)", hay)
     return m.group(0).strip() if m else ""
 
 
