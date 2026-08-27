@@ -26,7 +26,7 @@ app.add_middleware(
     allow_headers=["Content-Type", "Accept"],
     max_age=86400,
 )
-BUILD_ID = "v105.0-image-local-deep-rescue-20260827"
+BUILD_ID = "v105.1-faster-smart-languages-typing-20260827"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("LOCAL FIRST | OLD GLOBAL ENGINE PRESERVED | FLAGS + SMART SAVINGS | AUTO LANGUAGE | WORLD CURRENCIES")
@@ -193,6 +193,9 @@ LOCAL_COUNTRY_RESCUE_PASSES = max(1, min(2, int(os.environ.get("LOCAL_COUNTRY_RE
 LOCAL_AI_QUERY_RESCUE_ENABLED = env_bool("LOCAL_AI_QUERY_RESCUE_ENABLED", True)
 LOCAL_QUERY_CACHE = {}
 LOCAL_QUERY_CACHE_LOCK = threading.Lock()
+
+LOCAL_DEEP_RESCUE_MAX_STORES = max(3, min(6, int(os.environ.get("LOCAL_DEEP_RESCUE_MAX_STORES", "5"))))
+LOCAL_DEEP_RESCUE_TIMEOUT_SECONDS = max(2.5, min(6.0, float(os.environ.get("LOCAL_DEEP_RESCUE_TIMEOUT_SECONDS", "4.0"))))
 
 
 # ---- Global market detection v85 ----------------------------------------------
@@ -2556,7 +2559,8 @@ def _dynamic_translate_template(lang, source, cache_tag="ui"):
         _DYNAMIC_UI_CACHE[cache_key] = result
     return result
 LANGUAGE_SELECTION = {
-    "lang_ar": ("ar", "العربية 🇰🇼"),
+    # Kept for backward compatibility with old interactive replies.
+    "lang_ar": ("ar", "العربية 🇸🇦"),
     "lang_en": ("en", "English 🇬🇧"),
     "lang_fr": ("fr", "Français 🇫🇷"),
     "lang_es": ("es", "Español 🇪🇸"),
@@ -2567,6 +2571,94 @@ LANGUAGE_SELECTION = {
     "lang_hi": ("hi", "हिन्दी 🇮🇳"),
     "lang_ur": ("ur", "اردو 🇵🇰"),
 }
+
+_LANGUAGE_NATIVE_LABELS = {
+    "en":"English 🇬🇧", "ar":"العربية 🇸🇦", "fr":"Français 🇫🇷", "es":"Español 🇪🇸",
+    "pt":"Português 🇵🇹", "tr":"Türkçe 🇹🇷", "ru":"Русский 🇷🇺", "zh":"中文 🇨🇳",
+    "hi":"हिन्दी 🇮🇳", "ur":"اردو 🇵🇰", "de":"Deutsch 🇩🇪", "it":"Italiano 🇮🇹",
+    "nl":"Nederlands 🇳🇱", "pl":"Polski 🇵🇱", "ja":"日本語 🇯🇵", "ko":"한국어 🇰🇷",
+    "fa":"فارسی 🇮🇷", "he":"עברית 🇮🇱", "uk":"Українська 🇺🇦", "el":"Ελληνικά 🇬🇷",
+    "ro":"Română 🇷🇴", "cs":"Čeština 🇨🇿", "sk":"Slovenčina 🇸🇰", "sv":"Svenska 🇸🇪",
+    "no":"Norsk 🇳🇴", "da":"Dansk 🇩🇰", "fi":"Suomi 🇫🇮", "hu":"Magyar 🇭🇺",
+    "bg":"Български 🇧🇬", "sr":"Srpski 🇷🇸", "hr":"Hrvatski 🇭🇷", "sl":"Slovenščina 🇸🇮",
+    "id":"Bahasa Indonesia 🇮🇩", "ms":"Bahasa Melayu 🇲🇾", "vi":"Tiếng Việt 🇻🇳",
+    "th":"ไทย 🇹🇭", "bn":"বাংলা 🇧🇩", "ta":"தமிழ் 🇮🇳", "te":"తెలుగు 🇮🇳",
+    "fil":"Filipino 🇵🇭", "sw":"Kiswahili 🇰🇪", "am":"አማርኛ 🇪🇹",
+}
+
+# Regional preference pools. The country's own language is always inserted before these.
+_LANGUAGE_REGION_POOLS = {
+    "gcc": ["ar","ur","hi","fa","tr","fr","zh","ru","de"],
+    "mena": ["ar","fr","tr","fa","ur","es","de","ru","hi"],
+    "west_europe": ["de","fr","es","it","nl","pt","pl","tr","ru"],
+    "east_europe": ["ru","pl","uk","de","tr","ro","cs","bg","fr"],
+    "south_asia": ["hi","ur","bn","ta","te","ms","ar","zh","fr"],
+    "east_asia": ["zh","ja","ko","vi","th","id","ms","hi","ru"],
+    "se_asia": ["id","ms","vi","th","fil","zh","ja","ko","hi"],
+    "americas": ["es","pt","fr","de","it","zh","hi","ar","ru"],
+    "africa": ["fr","ar","sw","pt","am","es","hi","ur","de"],
+    "default": ["ar","fr","es","de","zh","hi","ur","pt","tr"],
+}
+
+_GCC_COUNTRIES = {"kw","sa","ae","qa","bh","om"}
+_MENA_COUNTRIES = {"eg","jo","lb","iq","sy","ye","ps","ma","dz","tn","ly","ir","il"}
+_WEST_EUROPE = {"gb","ie","fr","de","at","ch","be","nl","lu","es","pt","it","dk","no","se","fi","is"}
+_EAST_EUROPE = {"pl","cz","sk","hu","ro","bg","rs","hr","si","ba","me","mk","al","ua","by","md","ru"}
+_SOUTH_ASIA = {"in","pk","bd","lk","np","bt","mv","af"}
+_EAST_ASIA = {"cn","jp","kr","tw","hk","mo","mn"}
+_SE_ASIA = {"sg","my","id","th","vn","ph","bn","kh","la","mm"}
+_AMERICAS = {"us","ca","mx","br","ar","cl","co","pe","ve","ec","uy","py","bo","cr","pa","do","gt","hn","sv","ni","cu"}
+_AFRICA = {"za","ng","ke","gh","et","tz","ug","rw","cm","sn","ci","ao","mz","zw","zm","bw","na","sd"}
+
+def _language_region_for_country(cc):
+    cc = str(cc or "").lower()
+    if cc in _GCC_COUNTRIES: return "gcc"
+    if cc in _MENA_COUNTRIES: return "mena"
+    if cc in _WEST_EUROPE: return "west_europe"
+    if cc in _EAST_EUROPE: return "east_europe"
+    if cc in _SOUTH_ASIA: return "south_asia"
+    if cc in _EAST_ASIA: return "east_asia"
+    if cc in _SE_ASIA: return "se_asia"
+    if cc in _AMERICAS: return "americas"
+    if cc in _AFRICA: return "africa"
+    return "default"
+
+def _country_primary_language(cc):
+    meta = COUNTRY_META.get(str(cc or "").lower())
+    if not meta:
+        return "en"
+    lang = str(meta[2] or "en").lower()
+    # COUNTRY_META occasionally uses a search language that isn't in our dynamic UI map.
+    return lang if re.fullmatch(r"[a-z]{2,3}", lang) else "en"
+
+def _language_label(code):
+    code = str(code or "en").lower()
+    return _LANGUAGE_NATIVE_LABELS.get(code) or language_name_en(code)[:20]
+
+def language_choices_for_country(cc, limit=10):
+    """English first, then country's language, then regionally useful languages."""
+    cc = str(cc or "").lower()
+    local_lang = _country_primary_language(cc)
+    region = _language_region_for_country(cc)
+
+    order = ["en"]
+    if local_lang != "en":
+        order.append(local_lang)
+    order.extend(_LANGUAGE_REGION_POOLS.get(region, _LANGUAGE_REGION_POOLS["default"]))
+
+    # Add the original stable languages as a final safety net.
+    order.extend(["ar","fr","es","pt","tr","ru","zh","hi","ur"])
+
+    seen, rows = set(), []
+    for code in order:
+        code = str(code or "").lower()
+        if not code or code in seen:
+            continue
+        seen.add(code)
+        rows.append((f"lang_{code}", code, _language_label(code)))
+        if len(rows) >= max(2, min(10, int(limit or 10))):
+            break
+    return rows
 
 LANG_INSTR = {
     "ar": "رد باللغة العربية فقط حتى لو كان اسم البحث بالإنجليزية: اكتب سطر 📦 ووصف المنتج بالعربية، مع إبقاء اسم البراند والموديل اللاتيني كما هو. أسماء المتاجر تُكتب بأشهر صيغة متداولة لها.",
@@ -6246,6 +6338,70 @@ def _remove_ui_autolinks(value):
 
 _WHATSAPP_HTTP_CTX = threading.local()
 
+_TYPING_GRAPH_URL = os.environ.get("WHATSAPP_TYPING_GRAPH_URL", "https://graph.facebook.com/v26.0")
+_TYPING_REFRESH_SECONDS = max(12.0, min(22.0, float(os.environ.get("WHATSAPP_TYPING_REFRESH_SECONDS", "18"))))
+_TYPING_STATE = {}
+_TYPING_LOCK = threading.Lock()
+
+def _send_typing_once(bot_id, message_id):
+    """Show WhatsApp's native typing indicator for an incoming message."""
+    if not bot_id or not message_id or not WHATSAPP_TOKEN:
+        return False
+    url = f"{_TYPING_GRAPH_URL}/{bot_id}/messages"
+    headers = {
+        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "messaging_product": "whatsapp",
+        "status": "read",
+        "message_id": message_id,
+        "typing_indicator": {"type": "text"},
+    }
+    try:
+        r = _whatsapp_http_session().post(
+            url, json=payload, headers=headers,
+            timeout=(2.5, min(6, WHATSAPP_TIMEOUT_SECONDS))
+        )
+        if not r.ok:
+            print(f"TYPING INDICATOR ERR {r.status_code}: {r.text[:180]}")
+        return r.ok
+    except Exception as e:
+        print(f"TYPING INDICATOR EXCEPTION: {e}")
+        return False
+
+def stop_typing_indicator(phone):
+    with _TYPING_LOCK:
+        item = _TYPING_STATE.pop(str(phone or ""), None)
+    if item:
+        try:
+            item["stop"].set()
+        except Exception:
+            pass
+
+def start_typing_indicator(phone, bot_id, message_id):
+    """Keep the native ... indicator alive until the next outgoing bot message."""
+    phone = str(phone or "")
+    if not phone or not message_id:
+        return False
+
+    stop_typing_indicator(phone)
+    stop_event = threading.Event()
+    state = {"stop": stop_event, "message_id": message_id, "bot_id": bot_id}
+    with _TYPING_LOCK:
+        _TYPING_STATE[phone] = state
+
+    def _loop():
+        # Immediate indicator, then refresh before Meta's indicator expires.
+        while not stop_event.is_set():
+            _send_typing_once(bot_id, message_id)
+            if stop_event.wait(_TYPING_REFRESH_SECONDS):
+                break
+
+    threading.Thread(target=_loop, daemon=True, name=f"wa-typing-{phone[-6:]}").start()
+    return True
+
+
 def _whatsapp_http_session():
     """Per-worker keep-alive session: speeds consecutive WhatsApp card sends safely across threads."""
     session = getattr(_WHATSAPP_HTTP_CTX, "session", None)
@@ -6255,6 +6411,7 @@ def _whatsapp_http_session():
     return session
 
 def send_whatsapp_text(to,text,bot_id):
+    stop_typing_indicator(to)
     url=f"{GRAPH_URL}/{bot_id}/messages"; h={"Authorization":f"Bearer {WHATSAPP_TOKEN}","Content-Type":"application/json"}
     safe_text = _remove_ui_autolinks(text)
     payload={"messaging_product":"whatsapp","to":to,"type":"text","text":{"body":safe_text[:3900]}}
@@ -6262,6 +6419,7 @@ def send_whatsapp_text(to,text,bot_id):
     except Exception: return False
 
 def send_whatsapp_cta(to,body,link,bot_id,title):
+    stop_typing_indicator(to)
     url=f"{GRAPH_URL}/{bot_id}/messages"; h={"Authorization":f"Bearer {WHATSAPP_TOKEN}","Content-Type":"application/json"}
     safe_body = _remove_ui_autolinks(body)
     safe_title = _remove_ui_autolinks(title)
@@ -6270,6 +6428,7 @@ def send_whatsapp_cta(to,body,link,bot_id,title):
     except Exception: return False
 
 def send_whatsapp_buttons(to, body, buttons, bot_id):
+    stop_typing_indicator(to)
     url=f"{GRAPH_URL}/{bot_id}/messages"; h={"Authorization":f"Bearer {WHATSAPP_TOKEN}","Content-Type":"application/json"}
     btns=[{"type":"reply","reply":{"id":b["id"],"title":_remove_ui_autolinks(b["title"])[:20]}} for b in buttons[:3]]
     payload={"messaging_product":"whatsapp","to":to,"type":"interactive","interactive":{"type":"button","body":{"text":_remove_ui_autolinks(body)[:1024]},"action":{"buttons":btns}}}
@@ -6277,9 +6436,12 @@ def send_whatsapp_buttons(to, body, buttons, bot_id):
     except Exception: return False
 
 def send_language_choice(to, bot_id):
-    body = "🌐 Choose your language"
-    rows = [{"id": btn_id, "title": title} for btn_id, (_code, title) in LANGUAGE_SELECTION.items()]
-    return send_whatsapp_list(to, body, rows, bot_id, "Languages")
+    market = ensure_market_from_phone(to, persist=False)
+    cc = (market.get("country") or DEFAULT_COUNTRY).lower()
+    choices = language_choices_for_country(cc, limit=10)
+    rows = [{"id": btn_id, "title": title} for btn_id, _code, title in choices]
+    print(f"LANGUAGE MENU country={cc} order={[code for _, code, _ in choices]}")
+    return send_whatsapp_list(to, "🌐 Choose your language", rows, bot_id, "Languages")
 
 def send_location_request(to, bot_id, lang="ar", refresh=False):
     """Compatibility wrapper: v81 never asks for GPS; market comes from phone prefix."""
@@ -6335,6 +6497,11 @@ async def receive(request: Request, background_tasks: BackgroundTasks):
         load_user_preferences(from_number)
         ensure_market_from_phone(from_number, persist=True)
         typ=msg.get("type")
+
+        # Native WhatsApp "..." indicator while Findzia is working.
+        # The first outgoing message/result automatically stops it.
+        if typ in ("text", "image", "interactive"):
+            start_typing_indicator(from_number, bot_id, msg.get("id"))
 
         # Interactive language/search choices always pass through.
         if typ == "interactive":
@@ -6699,9 +6866,12 @@ def process_interactive_message(message, bot_id):
         PENDING_GLOBAL_SEARCH.pop(from_number, None)
         send_whatsapp_text(from_number, T(USER_LANG.get(from_number, "ar"), "declined_ok"), bot_id)
         return
-    if btn_id not in LANGUAGE_SELECTION:
+    if btn_id in LANGUAGE_SELECTION:
+        lang = LANGUAGE_SELECTION[btn_id][0]
+    elif btn_id.startswith("lang_") and re.fullmatch(r"[a-z]{2,3}", btn_id[5:]):
+        lang = btn_id[5:]
+    else:
         return
-    lang = LANGUAGE_SELECTION[btn_id][0]
     USER_LANG[from_number] = lang
     market = ensure_market_from_phone(from_number, persist=False)
     save_user_preferences(from_number)
@@ -7261,6 +7431,49 @@ def _lens_merchant_key(name, url=""):
 _LENS_LOCAL_RESCUE_QUERY_CACHE = {}
 _LENS_LOCAL_RESCUE_QUERY_LOCK = threading.Lock()
 
+
+_FAST_LOCAL_CATEGORY_RULES = (
+    (("suitcase","luggage","spinner","trolley","carry on","carry-on"), "suitcase"),
+    (("monitor","gaming monitor","display"), "monitor"),
+    (("shoe","shoes","sneaker","sneakers","slipper","slippers","sandal","sandals"), "shoes"),
+    (("sunglass","sunglasses","eyewear"), "sunglasses"),
+    (("headphone","headphones","earbud","earbuds"), "headphones"),
+    (("phone","smartphone"), "smartphone"),
+    (("laptop","notebook"), "laptop"),
+    (("watch","smartwatch"), "watch"),
+    (("perfume","fragrance","eau de parfum"), "perfume"),
+    (("bag","handbag","backpack"), "bag"),
+)
+
+_FAST_COLORS = ("black","white","blue","navy","red","green","pink","brown","beige","grey","gray","silver","gold")
+
+def _fast_broad_local_query(seed, titles=None):
+    """Zero-network broadening for common visual-product categories."""
+    sample = " | ".join([str(seed or "")] + [str(x or "") for x in (titles or [])[:4]])
+    low = sample.lower()
+    category = ""
+    for keys, normalized in _FAST_LOCAL_CATEGORY_RULES:
+        if any(k in low for k in keys):
+            category = normalized
+            break
+    if not category:
+        return ""
+
+    # First plausible brand token from the strongest title/seed.
+    first = str(seed or "").strip()
+    brand = ""
+    for token in re.findall(r"[A-Za-z][A-Za-z0-9&+-]{2,24}", first):
+        tl = token.lower()
+        if tl in {"hard","side","wheeled","spinner","series","gaming","monitor","women","mens","men","women","blue","black","green","good","condition"}:
+            continue
+        brand = token
+        break
+
+    color = next((c for c in _FAST_COLORS if re.search(rf"\b{re.escape(c)}\b", low)), "")
+    parts = [x for x in (brand, color, category) if x]
+    q = " ".join(parts).strip()
+    return q if len(q.split()) >= 2 else ""
+
 def _lens_broad_local_query(lens, caption=""):
     """Create a LOCAL discovery query without over-trusting a possibly wrong Lens model.
 
@@ -7291,6 +7504,13 @@ def _lens_broad_local_query(lens, caption=""):
         hit = _LENS_LOCAL_RESCUE_QUERY_CACHE.get(cache_key)
     if hit:
         return hit
+
+    fast_broad = _fast_broad_local_query(seed, titles)
+    if fast_broad:
+        with _LENS_LOCAL_RESCUE_QUERY_LOCK:
+            _LENS_LOCAL_RESCUE_QUERY_CACHE[cache_key] = fast_broad
+        print(f"LENS LOCAL FAST QUERY: {seed[:80]!r} -> {fast_broad!r}")
+        return fast_broad
 
     sample = "\n".join(f"- {t}" for t in titles[:6])
     system = """You create a broad but useful LOCAL shopping-search query from Google Lens evidence.
@@ -7350,7 +7570,7 @@ def _serpapi_local_organic_site_request(query, label, domain, local_cc):
         r = requests.get(
             "https://serpapi.com/search.json",
             params=params,
-            timeout=(3.5, MARKET_FALLBACK_TIMEOUT_SECONDS),
+            timeout=(2.5, LOCAL_DEEP_RESCUE_TIMEOUT_SECONDS),
         )
         if r.status_code >= 400:
             print(f"LOCAL ORGANIC HTTP {r.status_code} store={label}: {r.text[:180]}")
@@ -7451,7 +7671,8 @@ def _lens_local_deep_rescue(lens, caption=""):
     if not broad:
         return []
 
-    # Start with the normal rescue list, then ALWAYS add core local marketplaces.
+    # Start with category-aware rescue stores, then ALWAYS add the country's
+    # major merchants. This makes the Kuwait/Lulu fix work worldwide.
     specs = []
     seen_domains = set()
 
@@ -7462,13 +7683,19 @@ def _lens_local_deep_rescue(lens, caption=""):
         seen_domains.add(d)
         specs.append((label, d))
 
-    for label, domain in local_rescue_store_specs(broad, max_count=6):
+    for label, domain in local_rescue_store_specs(broad, max_count=LOCAL_DEEP_RESCUE_MAX_STORES):
         _add(label, domain)
 
+    for domain in country_major_store_domains(local_cc)[:LOCAL_DEEP_RESCUE_MAX_STORES]:
+        label = _ui_plain_store_name(domain, f"https://{domain}") or domain.split(".")[0].title()
+        _add(label, domain)
+
+    # Kuwait broad retailers remain useful beyond their stereotypical categories.
     if local_cc == "kw":
-        # These are broad retailers with inventory outside their grocery stereotype.
-        for label in ("Lulu", "Carrefour", "Noon", "Centrepoint", "Xcite", "جمعية دوت كوم"):
+        for label in ("Lulu", "Carrefour", "Noon", "Centrepoint", "Xcite"):
             _add(label, store_domain(label))
+
+    specs = specs[:LOCAL_DEEP_RESCUE_MAX_STORES]
 
     # Normal Google Shopping broad local probe + direct-store organic probes in parallel.
     jobs = {}
@@ -7476,18 +7703,26 @@ def _lens_local_deep_rescue(lens, caption=""):
         _market_presence_fallback, broad, 0, max(LENS_DIRECT_LOCAL_MAX * 2, 6)
     )] = ("shopping", "Local")
 
-    for label, domain in specs[:8]:
+    for label, domain in specs:
         jobs[LENS_HTTP_POOL.submit(
             _serpapi_local_organic_site_request, broad, label, domain, local_cc
         )] = ("organic", label)
 
     gathered = []
-    done, pending = wait(list(jobs), timeout=MARKET_FALLBACK_TIMEOUT_SECONDS + 2)
-    for fut in done:
-        try:
-            gathered.extend(fut.result() or [])
-        except Exception as e:
-            print(f"LENS LOCAL DEEP RESCUE JOB ERR: {e}")
+    pending = set(jobs)
+    deadline = time.monotonic() + LOCAL_DEEP_RESCUE_TIMEOUT_SECONDS
+    # Poll in short slices and leave early once we already have enough usable candidates.
+    while pending and time.monotonic() < deadline and len(gathered) < max(3, LENS_DIRECT_LOCAL_MAX):
+        done_now, pending = wait(
+            pending,
+            timeout=min(0.45, max(0.05, deadline - time.monotonic())),
+            return_when=FIRST_COMPLETED,
+        )
+        for fut in done_now:
+            try:
+                gathered.extend(fut.result() or [])
+            except Exception as e:
+                print(f"LENS LOCAL DEEP RESCUE JOB ERR: {e}")
     for fut in pending:
         fut.cancel()
 
@@ -7782,7 +8017,7 @@ def process_single_image(message,bot_id,lang="ar"):
     market = activate_market(from_number)
     caption=(message.get("image",{}) or {}).get("caption","").strip()
     # Start media download immediately; status message is sent in parallel.
-    WORKERS.submit(send_whatsapp_text, from_number, T(lang,"identifying"), bot_id)
+    print("IMAGE SEARCH: native typing indicator active")
     try:
         b64,mime=download_whatsapp_media(message["image"]["id"])
     except Exception as e:
@@ -8637,6 +8872,7 @@ def arabic_search_name(query):
     return translated if translated and translated != q else ""
 
 def send_whatsapp_list(to, body, rows, bot_id, button_title="اختر"):
+    stop_typing_indicator(to)
     """v74: رسالة قائمة تفاعلية (حتى 10 صفوف) — لاختيار منتج من مقارنة البراندات."""
     url=f"{GRAPH_URL}/{bot_id}/messages"; h={"Authorization":f"Bearer {WHATSAPP_TOKEN}","Content-Type":"application/json"}
     clean_rows=[]
@@ -9359,7 +9595,7 @@ def execute_service_search(from_number, service_desc, original_text, bot_id, lan
 
     ثم يجيب 5 مزودي خدمة على الأقل بأرقام هواتف مرتبة. يستخدم بطولة v26 نفسها.
     """
-    send_whatsapp_text(from_number, T(lang, "searching", q=service_desc), bot_id)
+    print(f"SERVICE SEARCH: native typing indicator active query={service_desc!r}")
     LAST_SEARCH[from_number] = {"product": service_desc}
     market_name = current_market().get("country_name", "Kuwait")
     has_question = bool(re.search(r"[؟?]|هل |ليش |وش سبب|why |does |is it", original_text or ""))
@@ -9570,7 +9806,7 @@ def send_text_lens_style_results(from_number, txt, urls, bot_id, lang, query, ex
 
 def execute_product_search(from_number, product, bot_id, lang):
     """v104.3 typed search: local first; global auto-expands only when local coverage is weak."""
-    WORKERS.submit(send_whatsapp_text, from_number, T(lang, "searching", q=product), bot_id)
+    print(f"TEXT SEARCH: native typing indicator active query={product!r}")
 
     txt, urls = "", {}
     try:
@@ -9932,7 +10168,7 @@ def _pick_description(original_query, lang="ar"):
 
 def run_brand_comparison(from_number, query, bot_id, lang):
     """v77.2: مقارنة براندات بدون تكرار + مسافة سطر بين المنتجات"""
-    send_whatsapp_text(from_number, T(lang, "compare_searching"), bot_id)
+    print("GENERIC COMPARE: native typing indicator active")
     lang_name = language_name_en(lang)
     prompt = (
         f"Generic shopping request: {query}\n"
