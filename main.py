@@ -26,7 +26,7 @@ app.add_middleware(
     allow_headers=["Content-Type", "Accept"],
     max_age=86400,
 )
-BUILD_ID = "v106.3-lens-overlap-speed-20260829"
+BUILD_ID = "v106.4-progressive-parity-20260829"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES")
@@ -103,6 +103,14 @@ OLD_LAYER_ENABLED = env_bool("OLD_LAYER_ENABLED", True)
 # remaining Google Lens passes are still in flight.  Final inclusion rules,
 # ranking and caps stay unchanged; this only overlaps network waits.
 LENS_OVERLAP_MARKET_FALLBACK = env_bool("LENS_OVERLAP_MARKET_FALLBACK", True)
+
+# v106.4 PROGRESSIVE: Android may show an early Lens preview while the shared
+# WhatsApp-authoritative engine continues to completion.  The stream later sends
+# an authoritative snapshot that replaces the preview exactly, so final membership
+# and order remain identical to the WhatsApp-equivalent selection.
+ANDROID_IMAGE_PROGRESSIVE = env_bool("ANDROID_IMAGE_PROGRESSIVE", True)
+ANDROID_IMAGE_PROGRESSIVE_MIN_RESULTS = max(1, min(6, int(os.environ.get("ANDROID_IMAGE_PROGRESSIVE_MIN_RESULTS", "2"))))
+ANDROID_IMAGE_PROGRESSIVE_MIN_LOCAL = max(0, min(4, int(os.environ.get("ANDROID_IMAGE_PROGRESSIVE_MIN_LOCAL", "1"))))
 
 SEARCH_CACHE = {}
 # كاش مختلف حسب نوع الطلب. لأن السعر عنصر أساسي، نضع سقفاً قصيراً للكاش حتى لا
@@ -2978,7 +2986,7 @@ def _supplement_missing_markets(candidates, query, label="FIRST", prefetch=None)
     return seq
 
 
-def google_lens_lookup(image_b64, mime_type, lang="ar", query_hint="", light=False):
+def google_lens_lookup(image_b64, mime_type, lang="ar", query_hint="", light=False, progress_callback=None):
     """تعرف بصري متعدد التمريرات ليقترب من قوة تطبيق Google Lens نفسه.
 
     light=True (وضع اللينز المباشر v72): يعيد نتائج Lens بدون استدعاء Gemini لوصف الصورة،
@@ -3050,22 +3058,67 @@ def google_lens_lookup(image_b64, mime_type, lang="ar", query_hint="", light=Fal
             _serpapi_lens_request, public_url, "all", "cn", True, cn_hint
         )
         future_map[cn_future] = ("all-cn-stores", "cn", True)
-        # Fast staged wait: all Lens passes start together. If enough strong local-first evidence
-        # arrives quickly, do not wait for a single slow duplicate pass. If not, preserve the
-        # original quality behavior and continue up to the full total timeout.
+        # v106.4 PROGRESSIVE fast staged wait.  All Lens passes still start together,
+        # but we merge futures as soon as they finish instead of sleeping until the end
+        # of the whole fast window.  This preserves the same final shared Lens pool while
+        # allowing Android to receive a safe provisional snapshot several seconds earlier.
         all_futures = set(future_map)
-        done_fast, pending = wait(all_futures, timeout=min(LENS_FAST_READY_SECONDS, LENS_TOTAL_TIMEOUT_SECONDS))
-        for fut in done_fast:
-            lens_type, country, auto_crop = future_map[fut]
-            try:
-                _merge(fut.result())
-            except Exception as e:
-                print(f"GOOGLE LENS FUTURE ERR type={lens_type} country={country}: {e}")
+        pending = set(all_futures)
+        done_fast = set()
+        fast_started = time.monotonic()
+        fast_deadline = fast_started + min(LENS_FAST_READY_SECONDS, LENS_TOTAL_TIMEOUT_SECONDS)
+        enough_fast = False
+        last_progress_size = 0
+
+        while pending and time.monotonic() < fast_deadline:
+            remaining_fast = max(0.0, fast_deadline - time.monotonic())
+            just_done, pending = wait(
+                pending, timeout=min(0.35, remaining_fast), return_when=FIRST_COMPLETED
+            )
+            if not just_done:
+                continue
+            done_fast |= set(just_done)
+            for fut in just_done:
+                lens_type, country, auto_crop = future_map[fut]
+                try:
+                    _merge(fut.result())
+                except Exception as e:
+                    print(f"GOOGLE LENS FUTURE ERR type={lens_type} country={country}: {e}")
+
+            rank_counts = {r: sum(1 for x in merged if result_market_rank(x) == r) for r in (0, 1, 2)}
+            enough_fast = (rank_counts[0] >= 2 and rank_counts[1] >= 1 and rank_counts[2] >= 1
+                           and len(merged) >= max(5, LENS_MIN_MATCHES))
+
+            # Web/Android only: publish raw Lens evidence early.  We do NOT change or
+            # stop the authoritative pipeline here.  The caller applies the exact same
+            # relevance/ranking code to this snapshot, and later replaces it with final.
+            if light and progress_callback and last_progress_size == 0 and len(merged) > last_progress_size:
+                preview_allowed = [dict(x) for x in merged if result_market_rank(x) != 99]
+                preview_counts = {r: sum(1 for x in preview_allowed if result_market_rank(x) == r) for r in (0, 1, 2)}
+                if (len(preview_allowed) >= ANDROID_IMAGE_PROGRESSIVE_MIN_RESULTS and
+                        preview_counts[0] >= ANDROID_IMAGE_PROGRESSIVE_MIN_LOCAL):
+                    try:
+                        preview_allowed.sort(key=lambda m: (
+                            result_market_rank(m),
+                            0 if m.get("exact") else 1,
+                            0 if m.get("section") == "visual_matches" else 1,
+                            int(m.get("position") or 999),
+                        ))
+                        progress_callback({
+                            "aliases": [],
+                            "matches": preview_allowed,
+                            "query": (query_hint or (preview_allowed[0].get("title") if preview_allowed else "") or "").strip(),
+                            "visual_identity": "",
+                            "chosen": preview_allowed[0] if preview_allowed else {},
+                            "signature": {},
+                            "progressive": True,
+                        })
+                        last_progress_size = len(merged)
+                        print(f"LENS PROGRESSIVE SNAPSHOT raw={len(preview_allowed)} counts={preview_counts} elapsed={time.monotonic()-fast_started:.1f}s")
+                    except Exception as e:
+                        print(f"LENS PROGRESSIVE CALLBACK ERR: {e}")
+
         rank_counts = {r: sum(1 for x in merged if result_market_rank(x) == r) for r in (0, 1, 2)}
-        # Exit early only when local is strong AND US/China already have coverage, so the
-        # later missing-market supplement does not re-add the latency we just removed.
-        enough_fast = (rank_counts[0] >= 2 and rank_counts[1] >= 1 and rank_counts[2] >= 1
-                       and len(merged) >= max(5, LENS_MIN_MATCHES))
 
         # v106.3 SPEED: if the fast Lens window already gave us an identity but
         # some market buckets are weak/missing, start the *same* fallback work now
@@ -3079,7 +3132,8 @@ def google_lens_lookup(image_b64, mime_type, lang="ar", query_hint="", light=Fal
 
         done = set(done_fast)
         if pending and not enough_fast:
-            remaining = max(0.0, LENS_TOTAL_TIMEOUT_SECONDS - min(LENS_FAST_READY_SECONDS, LENS_TOTAL_TIMEOUT_SECONDS))
+            fast_elapsed = max(0.0, time.monotonic() - fast_started)
+            remaining = max(0.0, LENS_TOTAL_TIMEOUT_SECONDS - fast_elapsed)
             done_more, pending = wait(pending, timeout=remaining)
             done |= done_more
             for fut in done_more:
@@ -9667,7 +9721,8 @@ WEB_RATE_LOCK = threading.Lock()
 print(
     f"ANDROID/WEB PARITY exact={WEB_MATCH_WHATSAPP_EXACT} "
     f"caps local/us/cn={WEB_LOCAL_MAX}/{WEB_US_MAX}/{WEB_CN_MAX} "
-    f"legacy_turbo_available={WEB_STREAM_FAST_WAVE} store_timeout={WEB_STREAM_STORE_TIMEOUT}s"
+    f"legacy_turbo_available={WEB_STREAM_FAST_WAVE} store_timeout={WEB_STREAM_STORE_TIMEOUT}s "
+    f"progressive={ANDROID_IMAGE_PROGRESSIVE}"
 )
 
 
@@ -11116,7 +11171,7 @@ def _web_search_text_sync(query, country, lang, selected_option="", original_que
     return {"ok": True, "type": "results", "query": q, "market": market, "results": results}
 
 
-def _web_search_image_sync(image_b64, mime, caption, country, lang):
+def _web_search_image_sync(image_b64, mime, caption, country, lang, progress_callback=None):
     market = _web_market(country)
     MARKET_CTX.value = market
     caption = re.sub(r"\s+", " ", str(caption or "")).strip()[:WEB_API_MAX_QUERY_CHARS]
@@ -11125,7 +11180,7 @@ def _web_search_image_sync(image_b64, mime, caption, country, lang):
     direct_attempted = False
     if LENS_DIRECT_MODE and ENABLE_GOOGLE_LENS and SERPAPI_API_KEY and PUBLIC_BASE_URL:
         direct_attempted = True
-        lens_direct = google_lens_lookup(image_b64, mime, lang, caption, light=True)
+        lens_direct = google_lens_lookup(image_b64, mime, lang, caption, light=True, progress_callback=progress_callback)
         if lens_direct.get("matches"):
             items = _web_build_lens_items(lens_direct, lang, caption)
             if items:
@@ -11701,32 +11756,89 @@ async def web_api_image_search_stream(request: Request):
             # v106.1: run the same direct-Lens -> Vision/Text fallback path as
             # WhatsApp. No app-only merchant FIFO wave may precede or replace it.
             if WEB_MATCH_WHATSAPP_EXACT:
+                progress_queue = asyncio.Queue()
+                loop = asyncio.get_running_loop()
+                market_snapshot = _web_market(country)
+
+                def _lens_progress_callback(partial_lens):
+                    if not ANDROID_IMAGE_PROGRESSIVE:
+                        return
+                    try:
+                        loop.call_soon_threadsafe(progress_queue.put_nowait, partial_lens)
+                    except Exception as e:
+                        print(f"ANDROID PROGRESSIVE QUEUE ERR: {e}")
+
                 final_task = asyncio.create_task(asyncio.to_thread(
-                    _web_search_image_sync, image_b64, mime, caption, country, lang
+                    _web_search_image_sync, image_b64, mime, caption, country, lang,
+                    _lens_progress_callback if ANDROID_IMAGE_PROGRESSIVE else None
                 ))
+                preview_keys = set()
+                query_sent = False
+
                 while not final_task.done():
                     try:
-                        await asyncio.wait_for(asyncio.shield(final_task), timeout=2.0)
+                        partial_lens = await asyncio.wait_for(progress_queue.get(), timeout=1.0)
                     except asyncio.TimeoutError:
                         yield _web_stream_event({
                             "event": "status", "stage": "whatsapp_image_engine",
                             "elapsed_ms": int((time.time()-started)*1000),
                         })
+                        continue
+
+                    try:
+                        preview_items = await asyncio.to_thread(
+                            _run_with_market, market_snapshot, _web_build_lens_items,
+                            partial_lens, lang, caption
+                        )
+                    except Exception as e:
+                        print(f"ANDROID PROGRESSIVE BUILD ERR: {e}")
+                        preview_items = []
+
+                    if preview_items:
+                        preview_query = str(
+                            partial_lens.get("relevance_target") or
+                            partial_lens.get("query") or caption or ""
+                        ).strip()
+                        if preview_query and not query_sent:
+                            yield _web_stream_event({"event": "query", "query": preview_query, "market": market_snapshot})
+                            query_sent = True
+                        emitted_now = 0
+                        for item in preview_items:
+                            market_name = str(item.get("market") or "other")
+                            key = str(item.get("url") or "").strip() or (market_name + "|" + str(item.get("store") or "") + "|" + str(item.get("title") or ""))
+                            if key in preview_keys:
+                                continue
+                            preview_keys.add(key)
+                            sent.add(key)
+                            emitted_now += 1
+                            yield _web_stream_event({
+                                "event": "result", "phase": "progressive_preview",
+                                "provisional": True, "market": market_name, "item": item,
+                                "elapsed_ms": int((time.time()-started)*1000),
+                            })
+                            await asyncio.sleep(0.003)
+                        if emitted_now:
+                            print(f"ANDROID PROGRESSIVE PREVIEW sent={emitted_now} total_preview={len(preview_keys)} elapsed={time.time()-started:.1f}s")
+
                 final = await final_task
                 identity = str(final.get("query") or caption or "").strip()
-                yield _web_stream_event({"event": "query", "query": identity, "market": final.get("market")})
-                for item in final.get("results") or []:
-                    market_name = str(item.get("market") or "other")
-                    key = str(item.get("url") or "").strip() or (market_name + "|" + str(item.get("store") or "") + "|" + str(item.get("title") or ""))
-                    if key in sent:
-                        continue
-                    sent.add(key)
-                    yield _web_stream_event({
-                        "event": "result", "phase": "whatsapp_exact",
-                        "market": market_name, "item": item,
-                        "elapsed_ms": int((time.time()-started)*1000),
-                    })
-                    await asyncio.sleep(0.005)
+                if identity and not query_sent:
+                    yield _web_stream_event({"event": "query", "query": identity, "market": final.get("market")})
+
+                # Authoritative replacement: Flutter v106.4 clears provisional rows and
+                # rebuilds the list from this exact WhatsApp-equivalent final snapshot.
+                final_results = list(final.get("results") or [])
+                yield _web_stream_event({
+                    "event": "snapshot", "phase": "whatsapp_exact_final",
+                    "authoritative": True, "query": identity,
+                    "market": final.get("market"), "results": final_results,
+                    "elapsed_ms": int((time.time()-started)*1000),
+                })
+                print(f"ANDROID PROGRESSIVE FINAL SNAPSHOT results={len(final_results)} preview={len(preview_keys)} elapsed={time.time()-started:.1f}s")
+                sent = {
+                    (str(item.get("url") or "").strip() or (str(item.get("market") or "other") + "|" + str(item.get("store") or "") + "|" + str(item.get("title") or "")))
+                    for item in final_results
+                }
                 yield _web_stream_event({"event": "done", "count": len(sent), "elapsed_ms": int((time.time()-started)*1000)})
                 return
 
