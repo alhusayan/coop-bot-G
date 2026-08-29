@@ -26,7 +26,7 @@ app.add_middleware(
     allow_headers=["Content-Type", "Accept"],
     max_age=86400,
 )
-BUILD_ID = "v106.1-android-whatsapp-parity-20260829"
+BUILD_ID = "v106.3-lens-overlap-speed-20260829"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES")
@@ -98,6 +98,11 @@ def env_bool(name, default=False):
     return value.strip().lower() in ("1", "true", "yes", "on")
 
 OLD_LAYER_ENABLED = env_bool("OLD_LAYER_ENABLED", True)
+
+# v106.3 SPEED: start slow missing-market Google Shopping fallbacks while the
+# remaining Google Lens passes are still in flight.  Final inclusion rules,
+# ranking and caps stay unchanged; this only overlaps network waits.
+LENS_OVERLAP_MARKET_FALLBACK = env_bool("LENS_OVERLAP_MARKET_FALLBACK", True)
 
 SEARCH_CACHE = {}
 # كاش مختلف حسب نوع الطلب. لأن السعر عنصر أساسي، نضع سقفاً قصيراً للكاش حتى لا
@@ -2831,13 +2836,9 @@ def _market_presence_fallback(base_query, rank, limit=6):
     return merged
 
 
-def _supplement_missing_markets(candidates, query, label="FIRST"):
-    """Second-chance coverage for missing markets, with all missing markets checked in parallel."""
+def _lens_missing_market_ranks(candidates):
+    """Return the exact market ranks that the normal first-Lens supplement would probe."""
     seq = list(candidates or [])
-    existing = {
-        ((x.get("title") or "").lower(), (x.get("link") or "").lower())
-        for x in seq
-    }
     counts = {r: sum(1 for x in seq if result_market_rank(x) == r) for r in (0, 1, 2)}
     local_target = min(LENS_DIRECT_LOCAL_MAX, LOCAL_RESULTS_TARGET)
     missing = []
@@ -2847,24 +2848,122 @@ def _supplement_missing_markets(candidates, query, label="FIRST"):
         missing.append(1)
     if counts[2] == 0:
         missing.append(2)
+    return counts, missing
+
+
+def _delayed_china_store_fallback(query, limit, delay_seconds=0.9):
+    """Second China attempt, started early but slightly staggered to avoid a same-ms burst."""
+    if delay_seconds > 0:
+        time.sleep(delay_seconds)
+    return _china_store_search_fallback(query, limit=limit)
+
+
+def _start_lens_market_prefetch(candidates, query):
+    """v106.3: overlap slow market fallbacks with the remaining Lens HTTP passes.
+
+    Nothing from these futures is applied early.  The normal post-Lens conditions
+    decide later whether each prefetched result is actually eligible, so result
+    membership/ranking/caps remain governed by the existing pipeline.
+    """
+    if not LENS_OVERLAP_MARKET_FALLBACK or not SERPAPI_API_KEY:
+        return None
+    q = (query or "").strip()
+    if not q:
+        return None
+    counts, missing = _lens_missing_market_ranks(candidates)
+    if not missing:
+        return None
+    market_snapshot = dict(current_market())
+    futures = {}
+    for rank in missing:
+        futures[rank] = MARKET_SUPPLEMENT_POOL.submit(
+            _run_with_market, market_snapshot, _market_presence_fallback, q, rank, 6
+        )
+
+    # The old pipeline can make an immediate second China fallback after the first
+    # missing-market pass.  Queue that retry now as well, so even that retry is
+    # hidden under the Lens wait instead of adding another ~6 seconds afterwards.
+    china_retry = None
+    if 2 in missing:
+        china_retry = MARKET_SUPPLEMENT_POOL.submit(
+            _run_with_market, market_snapshot, _delayed_china_store_fallback,
+            q, max(LENS_DIRECT_CN_MAX * 2, 8), 0.9
+        )
+    print(f"LENS SPEED PREFETCH START missing={missing} counts={counts} query={q[:80]!r}")
+    return {
+        "query": q,
+        "started": time.monotonic(),
+        "futures": futures,
+        "china_retry": china_retry,
+    }
+
+
+def _prefetch_query_matches(prefetch, query):
+    if not prefetch:
+        return False
+    return _shopping_clean_query(prefetch.get("query") or "").lower() == _shopping_clean_query(query or "").lower()
+
+
+def _supplement_missing_markets(candidates, query, label="FIRST", prefetch=None):
+    """Second-chance coverage for missing markets, with all missing markets checked in parallel.
+
+    v106.3 may hand in already-running futures.  We still apply the exact same
+    final missing-market test here; prefetch only changes *when* network I/O began.
+    """
+    seq = list(candidates or [])
+    existing = {
+        ((x.get("title") or "").lower(), (x.get("link") or "").lower())
+        for x in seq
+    }
+    counts, missing = _lens_missing_market_ranks(seq)
     if not missing or not SERPAPI_API_KEY:
         return seq
 
-    market_snapshot = current_market()
-    futures = {
-        MARKET_SUPPLEMENT_POOL.submit(_run_with_market, market_snapshot, _market_presence_fallback, query, rank, 6): rank
-        for rank in missing
-    }
-    done, pending = wait(list(futures), timeout=MARKET_FALLBACK_TIMEOUT_SECONDS + 1)
     gathered = {}
-    for fut in done:
-        rank = futures[fut]
-        try:
-            gathered[rank] = fut.result() or []
-        except Exception as e:
-            print(f"{label}: market supplement error rank={rank}: {e}")
-    for fut in pending:
-        fut.cancel()
+    market_snapshot = dict(current_market())
+
+    # v106.3: consume matching futures that started during the fast Lens window.
+    # They receive the same total timeout budget as before, only shifted earlier.
+    prefetched_by_future = {}
+    if _prefetch_query_matches(prefetch, query):
+        for rank in missing:
+            fut = (prefetch.get("futures") or {}).get(rank)
+            if fut is not None:
+                prefetched_by_future[fut] = rank
+
+    if prefetched_by_future:
+        elapsed = max(0.0, time.monotonic() - float(prefetch.get("started") or time.monotonic()))
+        remaining = max(0.0, (MARKET_FALLBACK_TIMEOUT_SECONDS + 1.0) - elapsed)
+        done, pending = wait(list(prefetched_by_future), timeout=remaining)
+        for fut in done:
+            rank = prefetched_by_future[fut]
+            try:
+                gathered[rank] = fut.result() or []
+                print(f"LENS SPEED PREFETCH HIT rank={rank} saved_wait~{elapsed:.1f}s")
+            except Exception as e:
+                print(f"{label}: prefetched market supplement error rank={rank}: {e}")
+        for fut in pending:
+            rank = prefetched_by_future[fut]
+            fut.cancel()
+            print(f"LENS SPEED PREFETCH TIMEOUT rank={rank} elapsed={elapsed:.1f}s")
+
+    # If a rank could not be prefetched (for example there were no early Lens
+    # matches), keep the exact old behavior for that rank.
+    fresh_ranks = [r for r in missing if r not in gathered and r not in set(prefetched_by_future.values())]
+    if fresh_ranks:
+        fresh = {
+            MARKET_SUPPLEMENT_POOL.submit(_run_with_market, market_snapshot, _market_presence_fallback, query, rank, 6): rank
+            for rank in fresh_ranks
+        }
+        done, pending = wait(list(fresh), timeout=MARKET_FALLBACK_TIMEOUT_SECONDS + 1)
+        for fut in done:
+            rank = fresh[fut]
+            try:
+                gathered[rank] = fut.result() or []
+            except Exception as e:
+                print(f"{label}: market supplement error rank={rank}: {e}")
+        for fut in pending:
+            fut.cancel()
 
     for rank in (0, 1, 2):
         extra = gathered.get(rank) or []
@@ -2967,6 +3066,17 @@ def google_lens_lookup(image_b64, mime_type, lang="ar", query_hint="", light=Fal
         # later missing-market supplement does not re-add the latency we just removed.
         enough_fast = (rank_counts[0] >= 2 and rank_counts[1] >= 1 and rank_counts[2] >= 1
                        and len(merged) >= max(5, LENS_MIN_MATCHES))
+
+        # v106.3 SPEED: if the fast Lens window already gave us an identity but
+        # some market buckets are weak/missing, start the *same* fallback work now
+        # while the remaining Lens passes continue.  Results are not applied yet.
+        market_prefetch = None
+        prefetch_query = (query_hint or "").strip()
+        if not prefetch_query and merged:
+            prefetch_query = (merged[0].get("title") or "").strip()
+        if light and pending and not enough_fast and prefetch_query:
+            market_prefetch = _start_lens_market_prefetch(merged, prefetch_query)
+
         done = set(done_fast)
         if pending and not enough_fast:
             remaining = max(0.0, LENS_TOTAL_TIMEOUT_SECONDS - min(LENS_FAST_READY_SECONDS, LENS_TOTAL_TIMEOUT_SECONDS))
@@ -2993,7 +3103,7 @@ def google_lens_lookup(image_b64, mime_type, lang="ar", query_hint="", light=Fal
         fallback_query = (query_hint or "").strip()
         if not fallback_query and merged:
             fallback_query = (merged[0].get("title") or "").strip()
-        allowed = _supplement_missing_markets(allowed, fallback_query, "FIRST-LENS")
+        allowed = _supplement_missing_markets(allowed, fallback_query, "FIRST-LENS", prefetch=market_prefetch)
 
         # v77: إذا Lens لم يعطِ أي متجر صيني، نشغّل بحثاً نصياً احتياطياً مستقلاً
         # مقيّداً بمتاجر الصين. نشتق الاستعلام من أفضل عنوان بصري موجود ولا نترجمه.
@@ -3001,7 +3111,22 @@ def google_lens_lookup(image_b64, mime_type, lang="ar", query_hint="", light=Fal
             fallback_query = (query_hint or "").strip()
             if not fallback_query and merged:
                 fallback_query = (merged[0].get("title") or "").strip()
-            cn_extra = _china_store_search_fallback(fallback_query, limit=max(LENS_DIRECT_CN_MAX * 2, 8))
+            cn_extra = None
+            if _prefetch_query_matches(market_prefetch, fallback_query):
+                retry_fut = market_prefetch.get("china_retry")
+                if retry_fut is not None:
+                    elapsed = max(0.0, time.monotonic() - float(market_prefetch.get("started") or time.monotonic()))
+                    retry_budget = (2.0 * MARKET_FALLBACK_TIMEOUT_SECONDS) + 2.0
+                    remaining = max(0.0, retry_budget - elapsed)
+                    try:
+                        cn_extra = retry_fut.result(timeout=remaining) or []
+                        print(f"LENS SPEED CHINA RETRY HIT saved_wait~{elapsed:.1f}s results={len(cn_extra)}")
+                    except Exception as e:
+                        retry_fut.cancel()
+                        cn_extra = []
+                        print(f"LENS SPEED CHINA RETRY TIMEOUT/ERR elapsed={elapsed:.1f}s err={e}")
+            if cn_extra is None:
+                cn_extra = _china_store_search_fallback(fallback_query, limit=max(LENS_DIRECT_CN_MAX * 2, 8))
             if cn_extra:
                 existing = {((m.get("title") or "").lower(), (m.get("link") or "").lower()) for m in allowed}
                 for m in cn_extra:
