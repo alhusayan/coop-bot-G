@@ -26,7 +26,7 @@ app.add_middleware(
     allow_headers=["Content-Type", "Accept"],
     max_age=86400,
 )
-BUILD_ID = "v105.1-whatsapp-auto-language-live-typing-fix1-20260827"
+BUILD_ID = "v105.1-ANDROID-FASTFIX-20260829"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES")
@@ -9381,8 +9381,8 @@ WEB_STREAM_MARKET_TIMEOUT = max(4, min(20, int(os.environ.get("WEB_STREAM_MARKET
 # v96: stream store probes in true FIFO order across all markets. A fast US/China/local
 # merchant can appear immediately; no market has to finish before another market is shown.
 WEB_STREAM_STORE_FIFO = env_bool("WEB_STREAM_STORE_FIFO", True)
-WEB_STREAM_STORE_TIMEOUT = max(4.0, min(12.0, float(os.environ.get("WEB_STREAM_STORE_TIMEOUT_SECONDS", "8"))))
-WEB_STREAM_STORE_HTTP_TIMEOUT = max(3.0, min(WEB_STREAM_STORE_TIMEOUT, float(os.environ.get("WEB_STREAM_STORE_HTTP_TIMEOUT_SECONDS", "7.5"))))
+WEB_STREAM_STORE_TIMEOUT = max(3.5, min(8.0, float(os.environ.get("WEB_STREAM_STORE_TIMEOUT_SECONDS", "5"))))
+WEB_STREAM_STORE_HTTP_TIMEOUT = max(3.0, min(WEB_STREAM_STORE_TIMEOUT, float(os.environ.get("WEB_STREAM_STORE_HTTP_TIMEOUT_SECONDS", "4.5"))))
 WEB_STREAM_RESULTS_PER_STORE = max(1, min(2, int(os.environ.get("WEB_STREAM_RESULTS_PER_STORE", "1"))))
 # v104: marketplaces can legitimately return several distinct listings for the same/similar product.
 WEB_STREAM_MARKETPLACE_RESULTS_PER_STORE = max(2, min(6, int(os.environ.get("WEB_STREAM_MARKETPLACE_RESULTS_PER_STORE", "4"))))
@@ -9390,12 +9390,12 @@ WEB_MULTI_LISTING_MARKETPLACES = (
     "etsy.com", "ebay.com", "aliexpress.com", "temu.com", "shein.com",
     "dhgate.com", "amazon.com", "alibaba.com", "made-in-china.com", "banggood.com",
 )
-WEB_STREAM_IMAGE_FINAL_MIN_RESULTS = max(2, min(10, int(os.environ.get("WEB_STREAM_IMAGE_FINAL_MIN_RESULTS", "5"))))
+WEB_STREAM_IMAGE_FINAL_MIN_RESULTS = max(2, min(8, int(os.environ.get("WEB_STREAM_IMAGE_FINAL_MIN_RESULTS", "3"))))
 # v97: Chinese global marketplaces are more important than the US wave on web.
 # Their fast probes use normal Google organic site search first because Google Shopping
 # often returns few/no cards for AliExpress/Temu/SHEIN/Alibaba-style domains.
 WEB_CHINA_ORGANIC_FIRST = env_bool("WEB_CHINA_ORGANIC_FIRST", True)
-WEB_CHINA_ORGANIC_TIMEOUT = max(3.0, min(WEB_STREAM_STORE_TIMEOUT, float(os.environ.get("WEB_CHINA_ORGANIC_TIMEOUT_SECONDS", "6.5"))))
+WEB_CHINA_ORGANIC_TIMEOUT = max(3.0, min(WEB_STREAM_STORE_TIMEOUT, float(os.environ.get("WEB_CHINA_ORGANIC_TIMEOUT_SECONDS", "4.5"))))
 WEB_CHINA_GLOBAL_MAX_STORES = max(4, min(9, int(os.environ.get("WEB_CHINA_GLOBAL_MAX_STORES", "7"))))
 WEB_CHINA_ORGANIC_NUM = max(3, min(10, int(os.environ.get("WEB_CHINA_ORGANIC_NUM", "8"))))
 WEB_RATE_BUCKETS = defaultdict(deque)
@@ -9902,7 +9902,7 @@ def _web_stream_event(payload):
     return (json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
 
 
-def _web_market_candidates_to_items(candidates, rank, lang, query):
+def _web_market_candidates_to_items(candidates, rank, lang, query, verify=True):
     """Convert one market's SerpApi shopping wave to the same JSON card contract as /api/search."""
     seq = []
     for item in list(candidates or []):
@@ -9966,6 +9966,8 @@ def _web_market_candidates_to_items(candidates, rank, lang, query):
         })
         if len(out) >= cap:
             break
+    if not verify:
+        return out
     return _web_verify_rows_strict(out, lang)
 
 
@@ -10554,6 +10556,108 @@ def _web_verify_rows_strict(rows, lang):
     return [x for x in out if x]
 
 
+
+def _serpapi_local_google_request(query, label="", domain="", country="kw", timeout_seconds=4.5):
+    """Fast local organic Google fallback for countries unsupported by google_shopping gl.
+
+    This is intentionally a first-paint path:
+    - one ordinary Google request
+    - no merchant page fetch
+    - no Gemini
+    - keeps only URLs that the existing market classifier recognizes as LOCAL
+    """
+    if not SERPAPI_API_KEY:
+        return []
+
+    q = _shopping_clean_query(query or "")
+    if not q:
+        return []
+
+    market = current_market()
+    cc = str(country or market.get("country") or DEFAULT_COUNTRY).lower()
+    country_name = str(market.get("country_name") or cc.upper()).strip()
+
+    if domain:
+        search_q = f'{q} site:{domain}'
+    else:
+        search_q = f'{q} {country_name} price buy'
+
+    params = {
+        "engine": "google",
+        "q": search_q,
+        "api_key": SERPAPI_API_KEY,
+        "hl": country_search_hl(cc) or "en",
+        "num": 12,
+        "output": "json",
+    }
+
+    try:
+        r = requests.get(
+            "https://serpapi.com/search.json",
+            params=params,
+            timeout=(2.5, max(3.0, float(timeout_seconds or 4.5))),
+        )
+        if r.status_code >= 400:
+            print(f"WEB LOCAL GOOGLE HTTP {r.status_code} store={label or 'Local'}: {r.text[:180]}")
+            return []
+
+        data = r.json()
+        if data.get("error"):
+            print(f"WEB LOCAL GOOGLE ERROR store={label or 'Local'}: {data.get('error')}")
+            return []
+
+        rows = data.get("organic_results") or []
+        out = []
+
+        for pos, row in enumerate(rows, 1):
+            link = str(row.get("link") or "").strip()
+            if not link.startswith(("http://", "https://")):
+                continue
+
+            if domain:
+                try:
+                    host = urllib.parse.urlparse(link).netloc.lower().replace("www.", "")
+                except Exception:
+                    host = ""
+                if not _host_matches_any(host, (domain,)):
+                    continue
+
+            price_text = _google_organic_price_text(row)
+
+            item = {
+                "title": str(row.get("title") or q).strip(),
+                "link": link,
+                "source": label or str(row.get("source") or "").strip() or "Local",
+                "position": int(row.get("position") or pos),
+                "section": "web_local_google",
+                "exact": False,
+                "thumbnail": str(row.get("thumbnail") or "").strip(),
+                "image": str(row.get("thumbnail") or "").strip(),
+                "price": price_text,
+                "price_value": None,
+                "currency": detect_currency_code(price_text, "", cc) if price_text else "",
+                "in_stock": None,
+                "condition": "",
+                "_lens_country": cc,
+                "_local_google_fallback": True,
+            }
+
+            if result_market_rank(item) != 0:
+                continue
+
+            out.append(item)
+
+            if len(out) >= 8:
+                break
+
+        print(f"WEB LOCAL GOOGLE store={label or 'Local'} -> {len(out)} result(s)")
+        return out
+
+    except Exception as e:
+        print(f"WEB LOCAL GOOGLE EXCEPTION store={label or 'Local'}: {e}")
+        return []
+
+
 def _serpapi_china_global_site_request(query, label, domain, timeout_seconds=None):
     """One regular Google site-search for a Chinese global marketplace.
 
@@ -10619,84 +10723,168 @@ def _serpapi_china_global_site_request(query, label, domain, timeout_seconds=Non
         return []
 
 def _web_store_probe_sync(query, country, lang, rank, label, domain, gl):
-    """Probe one merchant and return UI cards; Chinese globals use organic-first in v97."""
-    market = _web_market(country)
-    MARKET_CTX.value = market
-    q = _shopping_clean_query(query or "")
-    if not q or not SERPAPI_API_KEY:
-        return []
+    """Fast one-store probe used for live FIFO first paint.
 
-    candidate_cc = (market.get("country") or DEFAULT_COUNTRY).lower() if rank == 0 else ("us" if rank == 1 else "cn")
-    candidates = []
-
-    # v97: for Chinese global marketplaces, ordinary Google site search is the fast
-    # first path.  Google Shopping site: queries are too sparse for these domains.
-    if rank == 2 and domain and WEB_CHINA_ORGANIC_FIRST:
-        candidates = _serpapi_china_global_site_request(
-            q, label, domain, timeout_seconds=WEB_CHINA_ORGANIC_TIMEOUT
-        )
-        # Do not chain a second SerpApi request inside the fast FIFO task.  Other China
-        # merchants are already running in parallel, and the full engine can enrich later.
-        # This prevents timed-out to_thread work from continuing in the background.
-        rows = _web_market_candidates_to_items(candidates, rank, lang, q)
-        return rows[:_web_marketplace_repeat_cap(domain)]
-
-    # Existing Shopping path remains unchanged for local/US.
-    if not candidates:
-        search_q = f"{q} site:{domain}" if domain else q
-        hl = country_search_hl(gl) if rank == 0 else "en"
-        cards = _serpapi_shopping_request(
-            search_q,
-            gl,
-            hl=hl,
-            timeout_seconds=WEB_STREAM_STORE_HTTP_TIMEOUT,
-        )
-        for card in cards or []:
-            item = _shopping_card_to_market_item(card, label, candidate_cc)
-            if not item:
-                continue
-            if domain:
-                try:
-                    host = urllib.parse.urlparse(item.get("link") or "").netloc.lower().replace("www.", "")
-                except Exception:
-                    host = ""
-                if not _host_matches_any(host, (domain,)):
-                    continue
-            if result_market_rank(item) != rank:
-                continue
-            candidates.append(item)
-
-    rows = _web_market_candidates_to_items(candidates, rank, lang, q)
-    rows = [row for row in rows if _web_is_direct_product_page_url(row.get("url") or "", row.get("store") or label)]
-    cap = _web_marketplace_repeat_cap(domain)
-    if cap > WEB_STREAM_RESULTS_PER_STORE and rows:
-        print(f"WEB MARKETPLACE MULTI store={label} cap={cap} rows={len(rows)}")
-    return rows[:cap]
-
-def _web_image_seed_sync(image_b64, mime, caption, country, lang):
-    """One fast image-identification pass used before merchant FIFO probes.
-
-    It deliberately does not run the heavy weak-market supplement.  The stream endpoint
-    performs merchant probes independently, so the first available store is not held up.
+    v105-fastfix:
+    - LOCAL: ordinary Google organic search because google_shopping gl=kw is unsupported.
+    - US: Google Shopping as before.
+    - CHINA: organic marketplace path as before.
+    - No strict merchant page fetch before the card is emitted.
     """
     market = _web_market(country)
     MARKET_CTX.value = market
-    caption = re.sub(r"\s+", " ", str(caption or "")).strip()[:WEB_API_MAX_QUERY_CHARS]
-    if LENS_DIRECT_MODE and ENABLE_GOOGLE_LENS and SERPAPI_API_KEY and PUBLIC_BASE_URL:
-        try:
-            lens = google_lens_lookup(image_b64, mime, lang, caption, light=True)
-        except Exception as e:
-            print(f"WEB IMAGE FIFO LENS SEED ERR: {e}")
-            lens = {"matches": [], "query": ""}
-        items = _web_build_lens_items(lens, lang, caption) if lens.get("matches") else []
-        identity = (lens.get("visual_identity") or lens.get("relevance_target") or lens.get("query") or caption or "").strip()
-        if identity or items:
-            return {"query": identity or caption, "items": items, "market": market, "source": "lens_seed"}
+    q = _shopping_clean_query(query or "")
+
+    if not q or not SERPAPI_API_KEY:
+        return []
+
+    candidate_cc = (
+        (market.get("country") or DEFAULT_COUNTRY).lower()
+        if rank == 0
+        else ("us" if rank == 1 else "cn")
+    )
+
+    # LOCAL first paint: skip unsupported google_shopping gl=kw entirely.
+    if rank == 0:
+        candidates = _serpapi_local_google_request(
+            q,
+            label=label,
+            domain=domain,
+            country=candidate_cc,
+            timeout_seconds=min(WEB_STREAM_STORE_HTTP_TIMEOUT, 4.5),
+        )
+        rows = _web_market_candidates_to_items(
+            candidates,
+            rank,
+            lang,
+            q,
+            verify=False,
+        )
+        rows = [
+            row
+            for row in rows
+            if _web_is_direct_product_page_url(
+                row.get("url") or "",
+                row.get("store") or label,
+            )
+        ]
+        return rows[:max(WEB_STREAM_RESULTS_PER_STORE, _web_marketplace_repeat_cap(domain))]
+
+    # China global marketplaces: keep existing organic-first path.
+    if rank == 2 and domain and WEB_CHINA_ORGANIC_FIRST:
+        candidates = _serpapi_china_global_site_request(
+            q,
+            label,
+            domain,
+            timeout_seconds=min(WEB_CHINA_ORGANIC_TIMEOUT, 4.8),
+        )
+        rows = _web_market_candidates_to_items(
+            candidates,
+            rank,
+            lang,
+            q,
+            verify=False,
+        )
+        return rows[:_web_marketplace_repeat_cap(domain)]
+
+    # US first paint: Shopping is supported; keep it, but don't open merchant pages.
+    search_q = f"{q} site:{domain}" if domain else q
+    cards = _serpapi_shopping_request(
+        search_q,
+        gl or "us",
+        hl="en",
+        timeout_seconds=min(WEB_STREAM_STORE_HTTP_TIMEOUT, 4.8),
+    )
+
+    candidates = []
+    for card in cards or []:
+        item = _shopping_card_to_market_item(card, label, candidate_cc)
+        if not item:
+            continue
+
+        if domain:
+            try:
+                host = urllib.parse.urlparse(
+                    item.get("link") or ""
+                ).netloc.lower().replace("www.", "")
+            except Exception:
+                host = ""
+
+            if not _host_matches_any(host, (domain,)):
+                continue
+
+        if result_market_rank(item) != rank:
+            continue
+
+        candidates.append(item)
+
+    rows = _web_market_candidates_to_items(
+        candidates,
+        rank,
+        lang,
+        q,
+        verify=False,
+    )
+    rows = [
+        row
+        for row in rows
+        if _web_is_direct_product_page_url(
+            row.get("url") or "",
+            row.get("store") or label,
+        )
+    ]
+
+    return rows[:_web_marketplace_repeat_cap(domain)]
+
+
+
+def _web_image_seed_sync(image_b64, mime, caption, country, lang):
+    """Fast image identity for first paint.
+
+    Important: this deliberately does NOT wait for the multi-pass SerpApi Lens call.
+    The live store FIFO can start from a fast Gemini visual identity.  If the fast
+    merchant wave is sparse, the existing heavy image/Lens engine still runs later.
+    """
+    market = _web_market(country)
+    MARKET_CTX.value = market
+    caption = re.sub(
+        r"\s+",
+        " ",
+        str(caption or ""),
+    ).strip()[:WEB_API_MAX_QUERY_CHARS]
+
+    # If the user typed a caption, it is already the fastest usable shopping identity.
+    if caption:
+        return {
+            "query": caption,
+            "items": [],
+            "market": market,
+            "source": "caption_seed",
+        }
+
     try:
-        identity = identify_product_with_retry(image_b64, mime, lang) or caption
-    except Exception:
-        identity = caption
-    return {"query": str(identity or caption or "").strip(), "items": [], "market": market, "source": "vision_seed"}
+        identity = identify_product_with_retry(
+            image_b64,
+            mime,
+            lang,
+        )
+    except Exception as e:
+        print(f"WEB IMAGE FAST VISION SEED ERR: {e}")
+        identity = ""
+
+    identity = re.sub(
+        r"\s+",
+        " ",
+        str(identity or ""),
+    ).strip()[:180]
+
+    return {
+        "query": identity,
+        "items": [],
+        "market": market,
+        "source": "vision_seed",
+    }
+
 
 
 def _web_prepare_stream_query_sync(query, country, lang, selected_option="", original_query="", force_specific=False):
