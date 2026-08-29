@@ -10014,7 +10014,7 @@ def _web_stream_event(payload):
     return (json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
 
 
-def _web_market_candidates_to_items(candidates, rank, lang, query):
+def _web_market_candidates_to_items(candidates, rank, lang, query, fast=False):
     """Convert one market's SerpApi shopping wave to the same JSON card contract as /api/search."""
     seq = []
     for item in list(candidates or []):
@@ -10040,10 +10040,12 @@ def _web_market_candidates_to_items(candidates, rank, lang, query):
             seq = [x for x in seq if ((x.get("source") or "", x.get("title") or "") in kept)]
         except Exception:
             pass
-    try:
-        seq = _filter_confirmed_oos(seq, f"WEB-STREAM-{rank}")
-    except Exception:
-        pass
+    # v108: first-paint scoped search must never wait for merchant-page stock probes.
+    if not fast:
+        try:
+            seq = _filter_confirmed_oos(seq, f"WEB-STREAM-{rank}")
+        except Exception:
+            pass
 
     if rank == 1:
         seq.sort(key=lambda x: (_us_store_priority(x.get("source"), x.get("link")), int(x.get("position") or 999)))
@@ -10084,15 +10086,17 @@ def _web_market_candidates_to_items(candidates, rank, lang, query):
         })
         if len(out) >= cap:
             break
+    if fast:
+        return out
     return _web_verify_rows_strict(out, lang)
 
 
-def _web_fast_market_wave_sync(query, country, lang, rank):
+def _web_fast_market_wave_sync(query, country, lang, rank, fast=False):
     market = _web_market(country)
     MARKET_CTX.value = market
     cap = {0: LENS_DIRECT_LOCAL_MAX, 1: LENS_DIRECT_US_MAX, 2: LENS_DIRECT_CN_MAX}.get(rank, 4)
     candidates = _market_presence_fallback(query, rank, limit=max(cap + 2, cap))
-    return _web_market_candidates_to_items(candidates, rank, lang, query)
+    return _web_market_candidates_to_items(candidates, rank, lang, query, fast=fast)
 
 
 def _web_stream_store_specs(query, country, rank):
@@ -10736,7 +10740,7 @@ def _serpapi_china_global_site_request(query, label, domain, timeout_seconds=Non
         print(f"WEB CHINA GLOBAL GOOGLE EXCEPTION store={label}: {e}")
         return []
 
-def _web_store_probe_sync(query, country, lang, rank, label, domain, gl):
+def _web_store_probe_sync(query, country, lang, rank, label, domain, gl, fast=False):
     """Probe one merchant and return UI cards; Chinese globals use organic-first in v97."""
     market = _web_market(country)
     MARKET_CTX.value = market
@@ -10756,7 +10760,7 @@ def _web_store_probe_sync(query, country, lang, rank, label, domain, gl):
         # Do not chain a second SerpApi request inside the fast FIFO task.  Other China
         # merchants are already running in parallel, and the full engine can enrich later.
         # This prevents timed-out to_thread work from continuing in the background.
-        rows = _web_market_candidates_to_items(candidates, rank, lang, q)
+        rows = _web_market_candidates_to_items(candidates, rank, lang, q, fast=fast)
         return rows[:_web_marketplace_repeat_cap(domain)]
 
     # Existing Shopping path remains unchanged for local/US.
@@ -10767,7 +10771,13 @@ def _web_store_probe_sync(query, country, lang, rank, label, domain, gl):
             search_q,
             gl,
             hl=hl,
-            timeout_seconds=WEB_STREAM_STORE_HTTP_TIMEOUT,
+            timeout_seconds=(
+                min(WEB_STREAM_STORE_HTTP_TIMEOUT, 4.2)
+                if fast and rank == 0
+                else min(WEB_STREAM_STORE_HTTP_TIMEOUT, 5.2)
+                if fast
+                else WEB_STREAM_STORE_HTTP_TIMEOUT
+            ),
         )
         for card in cards or []:
             item = _shopping_card_to_market_item(card, label, candidate_cc)
@@ -10784,7 +10794,7 @@ def _web_store_probe_sync(query, country, lang, rank, label, domain, gl):
                 continue
             candidates.append(item)
 
-    rows = _web_market_candidates_to_items(candidates, rank, lang, q)
+    rows = _web_market_candidates_to_items(candidates, rank, lang, q, fast=fast)
     rows = [row for row in rows if _web_is_direct_product_page_url(row.get("url") or "", row.get("store") or label)]
     cap = _web_marketplace_repeat_cap(domain)
     if cap > WEB_STREAM_RESULTS_PER_STORE and rows:
@@ -10817,15 +10827,78 @@ def _web_image_seed_sync(image_b64, mime, caption, country, lang):
     return {"query": str(identity or caption or "").strip(), "items": [], "market": market, "source": "vision_seed"}
 
 
+
+def _web_fast_request_type_hint(query):
+    """Avoid AI preparation on obvious exact product/model searches."""
+    raw = re.sub(r"\s+", " ", str(query or "")).strip()
+    if not raw:
+        return None
+
+    low = normalize_ar(raw).lower()
+    toks = [t for t in re.split(r"\s+", low) if t]
+
+    # Phone families commonly need storage before fair price comparison.
+    phone_family = any(x in low for x in (
+        "iphone", "galaxy s", "galaxy z", "google pixel", "pixel ",
+        "ايفون", "آيفون"
+    ))
+    has_storage = bool(re.search(r"\b\d+\s*(?:gb|tb)\b", low, re.I))
+    if phone_family and not has_storage:
+        return "GENERIC"
+
+    # M90 / WH-1000XM5 / A55 / SM-S928B etc.
+    if re.search(
+        r"\b(?=[a-z0-9-]{2,}\b)(?=[a-z0-9-]*[a-z])(?=[a-z0-9-]*\d)[a-z0-9-]+\b",
+        raw,
+        re.I,
+    ):
+        return "SPECIFIC"
+
+    # Long commercial product names are normally already specific.
+    if len(toks) >= 5:
+        return "SPECIFIC"
+
+    # Explicit storage/pack/size on a sufficiently detailed query.
+    if (
+        has_storage
+        or re.search(r"\b\d+(?:\.\d+)?\s*(?:ml|l|kg|g|oz|cm|mm)\b", low, re.I)
+    ) and len(toks) >= 3:
+        return "SPECIFIC"
+
+    return None
+
+
 def _web_prepare_stream_query_sync(query, country, lang, selected_option="", original_query="", force_specific=False):
     market = _web_market(country)
     MARKET_CTX.value = market
     q = re.sub(r"\s+", " ", str(query or "")).strip()[:WEB_API_MAX_QUERY_CHARS]
+
     if selected_option:
         q = ai_recommendation_pick_search_query(original_query or q, selected_option, lang)
         force_specific = True
+
     if not q:
-        return {"ok": False, "error": "empty_query", "market": market, "query": q}
+        return {
+            "ok": False,
+            "error": "empty_query",
+            "market": market,
+            "query": q,
+        }
+
+    # v108: exact model/SKU/product-title searches skip AI preparation entirely.
+    hint = "SPECIFIC" if force_specific else _web_fast_request_type_hint(q)
+
+    if hint == "SPECIFIC":
+        return {
+            "ok": True,
+            "query": q,
+            "market": market,
+            "rtype": "SPECIFIC",
+            "force_specific": force_specific,
+            "prep": "fast_specific",
+        }
+
+    # Ambiguous/general queries keep the AI recommendation flow.
     try:
         parsed = parse_user_intent(q, lang)
         products = [p for p in (parsed.get("products") or []) if str(p).strip()]
@@ -10833,13 +10906,25 @@ def _web_prepare_stream_query_sync(query, country, lang, selected_option="", ori
             q = products[0]
     except Exception:
         pass
-    rtype = "SPECIFIC"
-    if not force_specific:
-        try:
-            rtype = classify_request_type(q)
-        except Exception:
-            rtype = "SPECIFIC"
-    return {"ok": True, "query": q, "market": market, "rtype": rtype, "force_specific": force_specific}
+
+    if hint == "GENERIC":
+        rtype = "GENERIC"
+    else:
+        rtype = "SPECIFIC"
+        if not force_specific:
+            try:
+                rtype = classify_request_type(q)
+            except Exception:
+                rtype = "SPECIFIC"
+
+    return {
+        "ok": True,
+        "query": q,
+        "market": market,
+        "rtype": rtype,
+        "force_specific": force_specific,
+        "prep": "smart",
+    }
 
 def _web_search_text_sync(query, country, lang, selected_option="", original_query="", force_specific=False):
     market = _web_market(country)
@@ -11277,7 +11362,7 @@ async def web_api_search_stream(request: Request):
                             async def _run_store_scoped(r=rank, lab=label, dom=domain, search_gl=gl):
                                 try:
                                     rows = await asyncio.wait_for(
-                                        asyncio.to_thread(_web_store_probe_sync, q, country, lang, r, lab, dom, search_gl),
+                                        asyncio.to_thread(_web_store_probe_sync, q, country, lang, r, lab, dom, search_gl, True),
                                         timeout=WEB_STREAM_STORE_TIMEOUT,
                                     )
                                     return r, lab, rows
@@ -11294,7 +11379,7 @@ async def web_api_search_stream(request: Request):
                         async def _run_broad_scoped(r=rank):
                             try:
                                 rows = await asyncio.wait_for(
-                                    asyncio.to_thread(_web_fast_market_wave_sync, q, country, lang, r),
+                                    asyncio.to_thread(_web_fast_market_wave_sync, q, country, lang, r, True),
                                     timeout=WEB_STREAM_MARKET_TIMEOUT,
                                 )
                                 return r, "Broad", rows
@@ -11309,7 +11394,7 @@ async def web_api_search_stream(request: Request):
                 loop = asyncio.get_running_loop()
                 # Local must feel instant. Global can have a slightly wider window because
                 # it is explicitly requested by the user.
-                scoped_budget = 6.2 if scope == "local" else 8.0
+                scoped_budget = 5.2 if scope == "local" else 7.0
                 deadline = loop.time() + scoped_budget
 
                 while pending:
@@ -11380,7 +11465,7 @@ async def web_api_search_stream(request: Request):
                         async def _run_store(r=rank, lab=label, dom=domain, search_gl=gl):
                             try:
                                 rows = await asyncio.wait_for(
-                                    asyncio.to_thread(_web_store_probe_sync, q, country, lang, r, lab, dom, search_gl),
+                                    asyncio.to_thread(_web_store_probe_sync, q, country, lang, r, lab, dom, search_gl, True),
                                     timeout=WEB_STREAM_STORE_TIMEOUT,
                                 )
                                 return r, lab, rows
@@ -11439,7 +11524,7 @@ async def web_api_search_stream(request: Request):
                         async def _run_market(r=rank):
                             try:
                                 items = await asyncio.wait_for(
-                                    asyncio.to_thread(_web_fast_market_wave_sync, q, country, lang, r),
+                                    asyncio.to_thread(_web_fast_market_wave_sync, q, country, lang, r, True),
                                     timeout=WEB_STREAM_MARKET_TIMEOUT,
                                 )
                                 return r, items
