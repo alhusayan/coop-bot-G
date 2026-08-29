@@ -26,7 +26,7 @@ app.add_middleware(
     allow_headers=["Content-Type", "Accept"],
     max_age=86400,
 )
-BUILD_ID = "v106.4-progressive-parity-20260829"
+BUILD_ID = "v106.5-shopping-geo-guard-20260829"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES")
@@ -186,6 +186,24 @@ LENS_IMAGE_LOCK = threading.Lock()
 # هذا يدخل المتاجر الصغيرة المفهرسة في Google Merchant (مثل Pro Sports وTigro و3RoodQ8)
 # حتى لو ما ذكرها Gemini أبداً.
 ENABLE_GOOGLE_SHOPPING = env_bool("ENABLE_GOOGLE_SHOPPING", True)
+# v106.5: SerpApi Google Shopping supports a smaller GL country set than
+# ordinary Google Search. Never send an unsupported local country (e.g. KW)
+# to engine=google_shopping; those calls return HTTP 400 and waste the fast
+# progressive window. Unsupported local markets fall back to ordinary Google
+# Search/Lens while supported US/China/global work stays unchanged.
+GOOGLE_SHOPPING_SUPPORTED_GL = frozenset({
+    "ai", "ar", "aw", "au", "at", "be", "bm", "br", "io", "ca", "ky",
+    "cl", "cx", "cc", "co", "cz", "dk", "fk", "fi", "fr", "gf", "pf",
+    "tf", "de", "gr", "gp", "hm", "hk", "hu", "in", "id", "ie", "il",
+    "it", "jp", "kr", "my", "mq", "yt", "mx", "ms", "nl", "nc", "nz",
+    "nf", "no", "ph", "pl", "pt", "re", "ro", "ru", "pm", "sa", "sg",
+    "sk", "za", "gs", "es", "se", "ch", "tw", "th", "tk", "tr", "tc",
+    "ua", "ae", "uk", "gb", "us", "vn", "vg", "wf",
+})
+SHOPPING_GEO_GUARD = env_bool("SHOPPING_GEO_GUARD", True)
+SHOPPING_UNSUPPORTED_ORGANIC_FALLBACK = env_bool("SHOPPING_UNSUPPORTED_ORGANIC_FALLBACK", True)
+_SHOPPING_UNSUPPORTED_LOGGED = set()
+_SHOPPING_UNSUPPORTED_LOG_LOCK = threading.Lock()
 SHOPPING_RESULT_LIMIT = max(5, int(os.environ.get("SHOPPING_RESULT_LIMIT", "20")))
 # كل استدعاء Immersive يستهلك كريدت SerpApi؛ نحدد سقفاً لكل بحث.
 IMMERSIVE_LOOKUPS_MAX = max(0, int(os.environ.get("IMMERSIVE_LOOKUPS_MAX", "3")))
@@ -2788,8 +2806,25 @@ def _market_presence_fallback(base_query, rank, limit=6):
         ]
 
     def _one(label, domain, gl):
+        hl = country_search_hl(gl) if rank == 0 else "en"
+        # v106.5: do not spend the progressive window on a guaranteed Shopping 400.
+        # For unsupported LOCAL Shopping countries (notably Kuwait), ordinary
+        # Google Search uses the same local GL and feeds candidates through the
+        # same market/relevance gates. US remains on Shopping; China has its own path.
+        if rank == 0 and SHOPPING_GEO_GUARD and not _shopping_gl_supported(gl):
+            if not SHOPPING_UNSUPPORTED_ORGANIC_FALLBACK:
+                _log_unsupported_shopping_gl(gl)
+                return []
+            return [
+                item for item in _serpapi_google_organic_market_request(
+                    q, gl, hl=hl, domain=domain,
+                    timeout_seconds=MARKET_FALLBACK_TIMEOUT_SECONDS, limit=6,
+                )
+                if result_market_rank(item) == rank
+            ]
+
         search_q = f"{q} site:{domain}" if domain else q
-        cards = _serpapi_shopping_request(search_q, gl, hl=(country_search_hl(gl) if rank == 0 else "en"), timeout_seconds=MARKET_FALLBACK_TIMEOUT_SECONDS)
+        cards = _serpapi_shopping_request(search_q, gl, hl=hl, timeout_seconds=MARKET_FALLBACK_TIMEOUT_SECONDS)
         out = []
         for card in cards or []:
             item = _shopping_card_to_market_item(card, label, gl)
@@ -4651,8 +4686,29 @@ def _shopping_clean_query(query):
     return " ".join(q.split()[:10])
 
 
+def _shopping_gl_supported(gl):
+    cc = str(gl or "").strip().lower()
+    return (not cc) or (cc in GOOGLE_SHOPPING_SUPPORTED_GL)
+
+
+def _log_unsupported_shopping_gl(gl):
+    cc = str(gl or "").strip().lower() or "-"
+    with _SHOPPING_UNSUPPORTED_LOG_LOCK:
+        if cc in _SHOPPING_UNSUPPORTED_LOGGED:
+            return
+        _SHOPPING_UNSUPPORTED_LOGGED.add(cc)
+    print(f"GOOGLE SHOPPING SKIP unsupported_gl={cc}; fallback=google_search+lens")
+
+
 def _serpapi_shopping_request(query, gl, hl="en", timeout_seconds=None):
-    """طلب google_shopping واحد. يعيد shopping_results (قد تكون فارغة)."""
+    """طلب google_shopping واحد. يعيد shopping_results (قد تكون فارغة).
+
+    v106.5 guards SerpApi's Shopping-specific GL allowlist before network I/O.
+    Ordinary Google Search supports more countries than Google Shopping.
+    """
+    if SHOPPING_GEO_GUARD and gl and not _shopping_gl_supported(gl):
+        _log_unsupported_shopping_gl(gl)
+        return []
     params = {
         "engine": "google_shopping", "q": query, "api_key": SERPAPI_API_KEY,
         "hl": hl, "output": "json",
@@ -4673,6 +4729,85 @@ def _serpapi_shopping_request(query, gl, hl="en", timeout_seconds=None):
         return results[:SHOPPING_RESULT_LIMIT]
     except Exception as e:
         print(f"GOOGLE SHOPPING EXCEPTION: {e}")
+        return []
+
+
+def _serpapi_google_organic_market_request(query, gl, hl="en", domain="", timeout_seconds=None, limit=8):
+    """Fast ordinary Google fallback for markets unsupported by Google Shopping GL.
+
+    This uses engine=google (whose country list includes markets such as Kuwait),
+    optionally constrained to a merchant domain.  It returns Lens-compatible
+    market candidates and does not launch page verification.
+    """
+    if not SERPAPI_API_KEY:
+        return []
+    q = _shopping_clean_query(query or "")
+    if not q:
+        return []
+    search_q = f"{q} site:{domain}" if domain else q
+    params = {
+        "engine": "google",
+        "q": search_q,
+        "api_key": SERPAPI_API_KEY,
+        "google_domain": "google.com",
+        "gl": (gl or "us").lower(),
+        "hl": hl or "en",
+        "num": max(3, min(10, int(limit or 8))),
+        "output": "json",
+    }
+    try:
+        r = requests.get(
+            "https://serpapi.com/search.json",
+            params=params,
+            timeout=(3.5, timeout_seconds or MARKET_FALLBACK_TIMEOUT_SECONDS),
+        )
+        if r.status_code >= 400:
+            print(f"LOCAL GOOGLE SEARCH HTTP {r.status_code} gl={gl or '-'} domain={domain or '-'}: {r.text[:220]}")
+            return []
+        data = r.json()
+        if data.get("error"):
+            print(f"LOCAL GOOGLE SEARCH ERROR gl={gl or '-'} domain={domain or '-'}: {data.get('error')}")
+            return []
+        rows = data.get("organic_results") or []
+        out = []
+        for pos, row in enumerate(rows, 1):
+            link = str(row.get("link") or "").strip()
+            if not link.startswith(("http://", "https://")):
+                continue
+            try:
+                host = urllib.parse.urlparse(link).netloc.lower().replace("www.", "")
+            except Exception:
+                host = ""
+            if domain and not _host_matches_any(host, (domain,)):
+                continue
+            source = str(row.get("source") or row.get("displayed_link") or "").strip()
+            if not source:
+                source = host.split(".")[0].replace("-", " ").title() if host else "Google"
+            price_text = _google_organic_price_text(row)
+            out.append({
+                "title": str(row.get("title") or q).strip(),
+                "link": link,
+                "source": source,
+                "position": int(row.get("position") or pos),
+                "section": "local_google_organic_fallback",
+                "exact": False,
+                "thumbnail": str(row.get("thumbnail") or "").strip(),
+                "image": str(row.get("thumbnail") or "").strip(),
+                "price": price_text,
+                "price_value": _extract_numeric_price(price_text) if price_text else None,
+                "currency": detect_currency_code(price_text, COUNTRY_CURRENCIES.get((gl or "").lower(), ""), (gl or "").lower()) if price_text else "",
+                "in_stock": None,
+                "condition": "",
+                "_lens_country": (gl or "").lower(),
+                "_market_presence_fallback": True,
+                "_google_organic_fallback": True,
+            })
+            if len(out) >= limit:
+                break
+        print(f"LOCAL GOOGLE SEARCH gl={gl or '-'} domain={domain or '-'} -> {len(out)} result(s)")
+        return out
+    except Exception as e:
+        print(f"LOCAL GOOGLE SEARCH EXCEPTION gl={gl or '-'} domain={domain or '-'}: {e}")
         return []
 
 
@@ -4928,8 +5063,50 @@ def google_shopping_offers(query, lang="ar", allow_global=False, lens_context=No
                     title, pos, gl,
                 )
 
+    # v106.5: Shopping GL is unavailable in some otherwise-valid Google markets
+    # (Kuwait is one). Use ordinary Google Search instead of repeatedly issuing
+    # guaranteed HTTP 400 Shopping calls. Only price-bearing organic rich snippets
+    # are added here; Lens/direct results continue to cover unpriced local pages.
+    if (
+        not allow_global
+        and SHOPPING_GEO_GUARD
+        and not _shopping_gl_supported(local_cc)
+        and SHOPPING_UNSUPPORTED_ORGANIC_FALLBACK
+        and len(offers) < LOCAL_RESULTS_TARGET
+    ):
+        organic_specs = [("Local", "")]
+        organic_specs.extend(local_rescue_store_specs(en_q or raw_q, LOCAL_STORE_RESCUE_MAX))
+        futures = {
+            LOCAL_SHOPPING_POOL.submit(
+                _serpapi_google_organic_market_request, en_q or raw_q, local_cc, local_hl, domain,
+                MARKET_FALLBACK_TIMEOUT_SECONDS, 6
+            ): (label, domain)
+            for label, domain in organic_specs
+        }
+        for fut, (label, domain) in futures.items():
+            try:
+                rows = fut.result(timeout=MARKET_FALLBACK_TIMEOUT_SECONDS + 2) or []
+            except Exception as e:
+                print(f"LOCAL ORGANIC PRICE RESCUE ERR {label}: {e}")
+                continue
+            for row in rows:
+                if result_market_rank(row) != 0:
+                    continue
+                _add(
+                    row.get("source") or label, row.get("link") or "",
+                    row.get("price") or "", row.get("price_value"),
+                    row.get("title") or "", int(row.get("position") or 999), local_cc,
+                )
+                if len(offers) >= LOCAL_RESULTS_TARGET:
+                    break
+            if len(offers) >= LOCAL_RESULTS_TARGET:
+                break
+
     # Rescue local merchant domains only when broad local Shopping is weak. No penalty for strong markets.
-    if not allow_global and len(offers) < LOCAL_RESULTS_TARGET and LOCAL_STORE_RESCUE_MAX > 0:
+    if (
+        not allow_global and len(offers) < LOCAL_RESULTS_TARGET and LOCAL_STORE_RESCUE_MAX > 0
+        and (not SHOPPING_GEO_GUARD or _shopping_gl_supported(local_cc))
+    ):
         rescue_specs = local_rescue_store_specs(query, LOCAL_STORE_RESCUE_MAX)
         def _rescue(label, domain):
             q = en_q or raw_q
@@ -4955,7 +5132,10 @@ def google_shopping_offers(query, lang="ar", allow_global=False, lens_context=No
 
     # Generic country rescue for markets without a curated merchant profile or where the first passes were sparse.
     # Runs only on weak LOCAL coverage, so Kuwait/other strong markets do not pay extra latency when already healthy.
-    if not allow_global and LOCAL_COUNTRY_RESCUE_ENABLED and len(offers) < LOCAL_RESULTS_TARGET:
+    if (
+        not allow_global and LOCAL_COUNTRY_RESCUE_ENABLED and len(offers) < LOCAL_RESULTS_TARGET
+        and (not SHOPPING_GEO_GUARD or _shopping_gl_supported(local_cc))
+    ):
         country_name = str(m.get("country_name") or "").strip()
         rescue_queries = []
         base = en_q or raw_q
@@ -4982,7 +5162,10 @@ def google_shopping_offers(query, lang="ar", allow_global=False, lens_context=No
 
     # Final LOCAL-only rescue: translate/normalize product identity into the market's own retail wording.
     # It runs only when all no-AI local passes are still below target, protecting normal response time.
-    if not allow_global and LOCAL_AI_QUERY_RESCUE_ENABLED and len(offers) < LOCAL_RESULTS_TARGET:
+    if (
+        not allow_global and LOCAL_AI_QUERY_RESCUE_ENABLED and len(offers) < LOCAL_RESULTS_TARGET
+        and (not SHOPPING_GEO_GUARD or _shopping_gl_supported(local_cc))
+    ):
         localized_q = _ai_local_market_search_query(raw_q or query, en_q or english_name)
         if localized_q and localized_q.lower() not in {str(en_q or "").lower(), str(raw_q or "").lower()}:
             try:
@@ -9722,7 +9905,7 @@ print(
     f"ANDROID/WEB PARITY exact={WEB_MATCH_WHATSAPP_EXACT} "
     f"caps local/us/cn={WEB_LOCAL_MAX}/{WEB_US_MAX}/{WEB_CN_MAX} "
     f"legacy_turbo_available={WEB_STREAM_FAST_WAVE} store_timeout={WEB_STREAM_STORE_TIMEOUT}s "
-    f"progressive={ANDROID_IMAGE_PROGRESSIVE}"
+    f"progressive={ANDROID_IMAGE_PROGRESSIVE} shopping_geo_guard={SHOPPING_GEO_GUARD}"
 )
 
 
@@ -11042,30 +11225,44 @@ def _web_store_probe_sync(query, country, lang, rank, label, domain, gl):
         rows = _web_market_candidates_to_items(candidates, rank, lang, q)
         return rows[:_web_marketplace_repeat_cap(domain)]
 
-    # Existing Shopping path remains unchanged for local/US.
+    # Existing Shopping path remains unchanged for supported local/US markets.
+    # v106.5 uses ordinary Google Search for unsupported LOCAL Shopping GL values.
     if not candidates:
-        search_q = f"{q} site:{domain}" if domain else q
         hl = country_search_hl(gl) if rank == 0 else "en"
-        cards = _serpapi_shopping_request(
-            search_q,
-            gl,
-            hl=hl,
-            timeout_seconds=WEB_STREAM_STORE_HTTP_TIMEOUT,
-        )
-        for card in cards or []:
-            item = _shopping_card_to_market_item(card, label, candidate_cc)
-            if not item:
-                continue
-            if domain:
-                try:
-                    host = urllib.parse.urlparse(item.get("link") or "").netloc.lower().replace("www.", "")
-                except Exception:
-                    host = ""
-                if not _host_matches_any(host, (domain,)):
+        if rank == 0 and SHOPPING_GEO_GUARD and not _shopping_gl_supported(gl):
+            if SHOPPING_UNSUPPORTED_ORGANIC_FALLBACK:
+                candidates = [
+                    item for item in _serpapi_google_organic_market_request(
+                        q, gl, hl=hl, domain=domain,
+                        timeout_seconds=WEB_STREAM_STORE_HTTP_TIMEOUT,
+                        limit=max(WEB_STREAM_RESULTS_PER_STORE, 4),
+                    )
+                    if result_market_rank(item) == rank
+                ]
+            else:
+                _log_unsupported_shopping_gl(gl)
+        else:
+            search_q = f"{q} site:{domain}" if domain else q
+            cards = _serpapi_shopping_request(
+                search_q,
+                gl,
+                hl=hl,
+                timeout_seconds=WEB_STREAM_STORE_HTTP_TIMEOUT,
+            )
+            for card in cards or []:
+                item = _shopping_card_to_market_item(card, label, candidate_cc)
+                if not item:
                     continue
-            if result_market_rank(item) != rank:
-                continue
-            candidates.append(item)
+                if domain:
+                    try:
+                        host = urllib.parse.urlparse(item.get("link") or "").netloc.lower().replace("www.", "")
+                    except Exception:
+                        host = ""
+                    if not _host_matches_any(host, (domain,)):
+                        continue
+                if result_market_rank(item) != rank:
+                    continue
+                candidates.append(item)
 
     rows = _web_market_candidates_to_items(candidates, rank, lang, q)
     rows = [row for row in rows if _web_is_direct_product_page_url(row.get("url") or "", row.get("store") or label)]
