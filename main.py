@@ -26,7 +26,7 @@ app.add_middleware(
     allow_headers=["Content-Type", "Accept"],
     max_age=86400,
 )
-BUILD_ID = "v106.0-app-turbo-local-stream-20260829"
+BUILD_ID = "v105.2-findzia-result-guard-20260829"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES")
@@ -181,7 +181,7 @@ SHOPPING_POOL = ThreadPoolExecutor(max_workers=4)
 LOCAL_SHOPPING_POOL = ThreadPoolExecutor(max_workers=max(4, int(os.environ.get("LOCAL_SHOPPING_WORKERS", "6"))))
 LOCAL_SHOPPING_PRIMARY_PASSES = max(1, min(3, int(os.environ.get("LOCAL_SHOPPING_PRIMARY_PASSES", "2"))))
 LOCAL_RESULTS_TARGET = max(2, int(os.environ.get("LOCAL_RESULTS_TARGET", "4")))
-LOCAL_STORE_RESCUE_MAX = max(0, min(4, int(os.environ.get("LOCAL_STORE_RESCUE_MAX", "3"))))
+LOCAL_STORE_RESCUE_MAX = max(0, min(8, int(os.environ.get("LOCAL_STORE_RESCUE_MAX", "6"))))
 LOCAL_COUNTRY_RESCUE_ENABLED = env_bool("LOCAL_COUNTRY_RESCUE_ENABLED", True)
 LOCAL_COUNTRY_RESCUE_PASSES = max(1, min(2, int(os.environ.get("LOCAL_COUNTRY_RESCUE_PASSES", "1"))))
 LOCAL_AI_QUERY_RESCUE_ENABLED = env_bool("LOCAL_AI_QUERY_RESCUE_ENABLED", True)
@@ -2731,13 +2731,6 @@ def _shopping_card_to_market_item(card, fallback_source="", lens_country=""):
         "price": price_text,
         "price_value": card.get("extracted_price"),
         "currency": detect_currency_code(price_text, COUNTRY_CURRENCIES.get(lens_country, ""), lens_country),
-        # Keep lightweight Shopping metadata so the fast stream can reject
-        # installments / monthly payments / wholesale-MOQ rows without fetching
-        # every merchant page first.
-        "_offer_meta": " ".join(str(card.get(k) or "") for k in (
-            "installment", "monthly_payment", "payment", "price_description",
-            "snippet", "extensions", "badge", "tag", "delivery"
-        )),
         "in_stock": None,
         "condition": "",
         "_lens_country": lens_country,
@@ -9486,42 +9479,24 @@ WEB_PRODUCT_VERIFY_CACHE_TTL_SECONDS = max(300, int(os.environ.get("WEB_PRODUCT_
 WEB_PRODUCT_VERIFY_CACHE = {}
 WEB_PRODUCT_VERIFY_LOCK = threading.Lock()
 
-# v106 APP/WEB TURBO --------------------------------------------------------------
-# Keep WhatsApp/Lens legacy caps untouched. The mobile/web API gets its own
-# larger limits so Android can show a deep local list and keep global results
-# collapsed behind its live counter.
-WEB_LOCAL_MAX = max(4, min(30, int(os.environ.get("WEB_LOCAL_MAX", "14"))))
-WEB_US_MAX = max(3, min(20, int(os.environ.get("WEB_US_MAX", "8"))))
-WEB_CN_MAX = max(3, min(24, int(os.environ.get("WEB_CN_MAX", "10"))))
-WEB_RESULT_CAPS = {0: WEB_LOCAL_MAX, 1: WEB_US_MAX, 2: WEB_CN_MAX}
-
-# Broad Google Shopping already discovers many merchants in one request. A few
-# direct local merchant probes run in parallel as rescue/coverage, not serially.
-WEB_LOCAL_STORE_PROBES = max(0, min(9, int(os.environ.get("WEB_LOCAL_STORE_PROBES", "6"))))
-
-# Critical latency fix: FIFO rows that already carry a structured numeric price
-# can stream immediately after cheap relevance/URL/price guards. The final pass
-# still performs the heavier merchant-page verification and can upsert later.
-WEB_FAST_SKIP_PRODUCT_PAGE_VERIFY = env_bool("WEB_FAST_SKIP_PRODUCT_PAGE_VERIFY", True)
-
 WEB_API_MAX_QUERY_CHARS = max(40, min(500, int(os.environ.get("WEB_API_MAX_QUERY_CHARS", "220"))))
 WEB_API_MAX_IMAGE_BYTES = max(512000, min(12 * 1024 * 1024, int(os.environ.get("WEB_API_MAX_IMAGE_BYTES", str(6 * 1024 * 1024)))))
 WEB_API_RATE_PER_MINUTE = max(5, min(120, int(os.environ.get("WEB_API_RATE_PER_MINUTE", "30"))))
 WEB_STREAM_ENABLED = env_bool("WEB_STREAM_ENABLED", True)
 WEB_IMAGE_SUPPLEMENT_WEAK_MARKETS = env_bool("WEB_IMAGE_SUPPLEMENT_WEAK_MARKETS", True)
-WEB_IMAGE_TARGET_LOCAL = max(1, min(WEB_LOCAL_MAX, int(os.environ.get("WEB_IMAGE_TARGET_LOCAL", "3"))))
-WEB_IMAGE_TARGET_US = max(1, min(WEB_US_MAX, int(os.environ.get("WEB_IMAGE_TARGET_US", "2"))))
-WEB_IMAGE_TARGET_CN = max(1, min(WEB_CN_MAX, int(os.environ.get("WEB_IMAGE_TARGET_CN", "2"))))
+WEB_IMAGE_TARGET_LOCAL = max(1, min(LENS_DIRECT_LOCAL_MAX, int(os.environ.get("WEB_IMAGE_TARGET_LOCAL", "3"))))
+WEB_IMAGE_TARGET_US = max(1, min(LENS_DIRECT_US_MAX, int(os.environ.get("WEB_IMAGE_TARGET_US", "2"))))
+WEB_IMAGE_TARGET_CN = max(1, min(LENS_DIRECT_CN_MAX, int(os.environ.get("WEB_IMAGE_TARGET_CN", "2"))))
 WEB_STREAM_FAST_WAVE = env_bool("WEB_STREAM_FAST_WAVE", True)
-WEB_STREAM_MARKET_TIMEOUT = max(3, min(12, int(os.environ.get("WEB_STREAM_MARKET_TIMEOUT_SECONDS", "6"))))
+WEB_STREAM_MARKET_TIMEOUT = max(3.5, min(12, float(os.environ.get("WEB_STREAM_MARKET_TIMEOUT_SECONDS", "5.8"))))
 # v96: stream store probes in true FIFO order across all markets. A fast US/China/local
 # merchant can appear immediately; no market has to finish before another market is shown.
 WEB_STREAM_STORE_FIFO = env_bool("WEB_STREAM_STORE_FIFO", True)
 WEB_STREAM_STORE_TIMEOUT = max(3.5, min(9.0, float(os.environ.get("WEB_STREAM_STORE_TIMEOUT_SECONDS", "5.8"))))
-WEB_STREAM_STORE_HTTP_TIMEOUT = max(3.0, min(WEB_STREAM_STORE_TIMEOUT, float(os.environ.get("WEB_STREAM_STORE_HTTP_TIMEOUT_SECONDS", "5.0"))))
+WEB_STREAM_STORE_HTTP_TIMEOUT = max(3.0, min(WEB_STREAM_STORE_TIMEOUT, float(os.environ.get("WEB_STREAM_STORE_HTTP_TIMEOUT_SECONDS", "5.2"))))
 WEB_STREAM_RESULTS_PER_STORE = max(1, min(2, int(os.environ.get("WEB_STREAM_RESULTS_PER_STORE", "1"))))
 # v104: marketplaces can legitimately return several distinct listings for the same/similar product.
-WEB_STREAM_MARKETPLACE_RESULTS_PER_STORE = max(1, min(4, int(os.environ.get("WEB_STREAM_MARKETPLACE_RESULTS_PER_STORE", "3"))))
+WEB_STREAM_MARKETPLACE_RESULTS_PER_STORE = max(1, min(2, int(os.environ.get("WEB_STREAM_MARKETPLACE_RESULTS_PER_STORE", "1"))))
 WEB_MULTI_LISTING_MARKETPLACES = (
     "etsy.com", "ebay.com", "aliexpress.com", "temu.com", "shein.com",
     "dhgate.com", "amazon.com", "alibaba.com", "made-in-china.com", "banggood.com",
@@ -9531,16 +9506,11 @@ WEB_STREAM_IMAGE_FINAL_MIN_RESULTS = max(2, min(10, int(os.environ.get("WEB_STRE
 # Their fast probes use normal Google organic site search first because Google Shopping
 # often returns few/no cards for AliExpress/Temu/SHEIN/Alibaba-style domains.
 WEB_CHINA_ORGANIC_FIRST = env_bool("WEB_CHINA_ORGANIC_FIRST", True)
-WEB_CHINA_ORGANIC_TIMEOUT = max(3.0, min(WEB_STREAM_STORE_TIMEOUT, float(os.environ.get("WEB_CHINA_ORGANIC_TIMEOUT_SECONDS", "4.8"))))
+WEB_CHINA_ORGANIC_TIMEOUT = max(3.0, min(WEB_STREAM_STORE_TIMEOUT, float(os.environ.get("WEB_CHINA_ORGANIC_TIMEOUT_SECONDS", "6.5"))))
 WEB_CHINA_GLOBAL_MAX_STORES = max(4, min(9, int(os.environ.get("WEB_CHINA_GLOBAL_MAX_STORES", "7"))))
 WEB_CHINA_ORGANIC_NUM = max(3, min(10, int(os.environ.get("WEB_CHINA_ORGANIC_NUM", "8"))))
 WEB_RATE_BUCKETS = defaultdict(deque)
 WEB_RATE_LOCK = threading.Lock()
-print(
-    f"WEB TURBO caps local/us/cn={WEB_LOCAL_MAX}/{WEB_US_MAX}/{WEB_CN_MAX} "
-    f"local_probes={WEB_LOCAL_STORE_PROBES} fast_skip_page_verify={WEB_FAST_SKIP_PRODUCT_PAGE_VERIFY} "
-    f"store_timeout={WEB_STREAM_STORE_TIMEOUT}s marketplace_rows={WEB_STREAM_MARKETPLACE_RESULTS_PER_STORE}"
-)
 
 
 def _web_request_ip(request):
@@ -9781,7 +9751,7 @@ def _web_attach_best_images(rows, rescue_page=False):
 
 def _web_build_text_items(txt, urls, lang, query):
     """Same typed-search selection logic as WhatsApp, but returns JSON cards instead of sending CTAs."""
-    total_cap = max(1, WEB_LOCAL_MAX + WEB_US_MAX + WEB_CN_MAX)
+    total_cap = max(1, LENS_DIRECT_LOCAL_MAX + LENS_DIRECT_US_MAX + LENS_DIRECT_CN_MAX)
     offers = text77_extract_store_offers(txt or "", limit=max(total_cap * 2, total_cap))
     candidates = []
     for offer in offers:
@@ -9809,7 +9779,7 @@ def _web_build_text_items(txt, urls, lang, query):
     candidates = [o for o in candidates if ((o.get("source") or "", o.get("title") or "") in kept_keys)]
     candidates = _filter_confirmed_oos(candidates, "WEB-TEXT")
 
-    caps = {0: WEB_LOCAL_MAX, 1: WEB_US_MAX, 2: WEB_CN_MAX}
+    caps = {0: LENS_DIRECT_LOCAL_MAX, 1: LENS_DIRECT_US_MAX, 2: LENS_DIRECT_CN_MAX}
     selected, merchant_counts, seen_urls = [], defaultdict(int), set()
     for rank in (0, 1, 2):
         bucket = [x for x in candidates if x.get("market_rank") == rank]
@@ -9859,7 +9829,7 @@ def _web_build_text_items(txt, urls, lang, query):
             "match_score": round(_findzia_match_score(query, raw_title or title or query), 3),
         })
     results = [row for row in results if _web_is_direct_product_page_url(row.get("url") or "", row.get("store") or "")]
-    results = _web_attach_best_images(results, rescue_page=False)
+    results = _web_attach_best_images(results, rescue_page=True)
     return _web_verify_rows_strict(results, lang)
 
 
@@ -9926,7 +9896,7 @@ def _web_build_lens_items(lens, lang, caption=""):
             0 if m.get("section") == "visual_matches" else 1,
             int(m.get("position") or 999),
         ))
-        cap = {0: WEB_LOCAL_MAX, 1: WEB_US_MAX, 2: WEB_CN_MAX}.get(rank, 0)
+        cap = {0: LENS_DIRECT_LOCAL_MAX, 1: LENS_DIRECT_US_MAX, 2: LENS_DIRECT_CN_MAX}.get(rank, 0)
         probe_n = max(cap + 2, cap)
         head = _filter_confirmed_oos(buckets[rank][:probe_n], f"WEB-LENS-{rank}")
         buckets[rank] = head + buckets[rank][probe_n:]
@@ -9949,7 +9919,7 @@ def _web_build_lens_items(lens, lang, caption=""):
                 return d
         return host or re.sub(r"[^a-z0-9]+", "", source) or source
 
-    caps = {0: WEB_LOCAL_MAX, 1: WEB_US_MAX, 2: WEB_CN_MAX}
+    caps = {0: LENS_DIRECT_LOCAL_MAX, 1: LENS_DIRECT_US_MAX, 2: LENS_DIRECT_CN_MAX}
     selected, seen_urls, merchant_counts = [], set(), defaultdict(int)
     for rank in (0, 1, 2):
         taken = 0
@@ -10029,7 +9999,7 @@ def _web_fallback_product_items(txt, urls, lang, query):
     rows = [row for row in rows if _web_is_direct_product_page_url(row.get("url") or "", row.get("store") or "")]
     rows = _web_attach_best_images(rows, rescue_page=True)
     rows.sort(key=lambda x: x["market_rank"])
-    caps = {0: WEB_LOCAL_MAX, 1: WEB_US_MAX, 2: WEB_CN_MAX}
+    caps = {0: LENS_DIRECT_LOCAL_MAX, 1: LENS_DIRECT_US_MAX, 2: LENS_DIRECT_CN_MAX}
     out, counts = [], defaultdict(int)
     for row in rows:
         if counts[row["market_rank"]] >= caps[row["market_rank"]]:
@@ -10042,73 +10012,6 @@ def _web_fallback_product_items(txt, urls, lang, query):
 
 def _web_stream_event(payload):
     return (json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
-
-
-_WEB_BAD_PRICE_TERMS = (
-    "per month", "monthly", "month plan", "installment", "instalment", "pay monthly",
-    "monthly payment", "emi", "finance payment", "قسطي", "قسط", "اقساط", "أقساط", "شهري",
-)
-_WEB_WHOLESALE_TERMS = (
-    "minimum order", "min order", "moq", "wholesale", "bulk order", "fob",
-    "per piece", "/piece", "piece price", "sample price", "supplier",
-    "حد ادنى للطلب", "الحد الأدنى للطلب", "جملة", "بالجملة",
-)
-
-
-def _web_fast_price_guard(row):
-    """Cheap guard for streamed cards; avoids a merchant-page HTTP round-trip."""
-    row = dict(row or {})
-    blob = " ".join(
-        str(row.get(k) or "")
-        for k in ("title", "price", "_offer_meta", "store", "source")
-    ).lower()
-    if any(term in blob for term in _WEB_BAD_PRICE_TERMS):
-        return False
-    if any(term in blob for term in _WEB_WHOLESALE_TERMS):
-        return False
-    return True
-
-
-def _web_fast_finalize_rows(rows, lang):
-    """Stream safe structured-price rows without fetching each merchant page.
-
-    Used only by the live FIFO wave. The final engine remains authoritative and
-    can later upsert verified/enriched cards.
-    """
-    market_snapshot = dict(current_market())
-    out = []
-    for row in list(rows or []):
-        row = dict(row or {})
-        url = str(row.get("url") or row.get("link") or "").strip()
-        if not url or not _web_is_direct_product_page_url(
-            url, row.get("store") or row.get("source") or ""
-        ):
-            continue
-        if not _web_fast_price_guard(row):
-            print(
-                f"WEB FAST PRICE-GUARD DROP store={row.get('store') or row.get('source')} "
-                f"title={(row.get('title') or '')[:90]}"
-            )
-            continue
-        rank = row.get("market_rank")
-        if rank not in (0, 1, 2):
-            rank = result_market_rank({
-                "link": url,
-                "source": row.get("store") or row.get("source"),
-                "title": row.get("title"),
-            })
-        existing = str(row.get("price") or "").strip()
-        val, _cur = _web_price_number_and_currency(existing)
-        if not val or val <= 0:
-            continue
-        row["price"] = _web_normalize_existing_price_to_market(
-            existing, rank, lang, market_snapshot
-        )
-        row["price_verified"] = False
-        row["price_source"] = row.get("price_source") or "search_structured_fast"
-        row.pop("_offer_meta", None)
-        out.append(row)
-    return out
 
 
 def _web_market_candidates_to_items(candidates, rank, lang, query):
@@ -10149,7 +10052,7 @@ def _web_market_candidates_to_items(candidates, rank, lang, query):
     else:
         seq.sort(key=lambda x: int(x.get("position") or 999))
 
-    cap = {0: WEB_LOCAL_MAX, 1: WEB_US_MAX, 2: WEB_CN_MAX}.get(rank, 4)
+    cap = {0: LENS_DIRECT_LOCAL_MAX, 1: LENS_DIRECT_US_MAX, 2: LENS_DIRECT_CN_MAX}.get(rank, 4)
     local_cc = (current_market().get("country") or DEFAULT_COUNTRY).lower()
     cc = local_cc if rank == 0 else ("us" if rank == 1 else "cn")
     out, seen_urls, merchant_counts = [], set(), defaultdict(int)
@@ -10178,19 +10081,16 @@ def _web_market_candidates_to_items(candidates, rank, lang, query):
             "url": url,
             "image": _web_best_card_image(item.get("thumbnail") or item.get("image") or "", "", False),
             "match_score": round(_findzia_match_score(query, item.get("title") or query), 3),
-            "_offer_meta": item.get("_offer_meta") or "",
         })
         if len(out) >= cap:
             break
-    if WEB_FAST_SKIP_PRODUCT_PAGE_VERIFY:
-        return _web_fast_finalize_rows(out, lang)
     return _web_verify_rows_strict(out, lang)
 
 
 def _web_fast_market_wave_sync(query, country, lang, rank):
     market = _web_market(country)
     MARKET_CTX.value = market
-    cap = {0: WEB_LOCAL_MAX, 1: WEB_US_MAX, 2: WEB_CN_MAX}.get(rank, 4)
+    cap = {0: LENS_DIRECT_LOCAL_MAX, 1: LENS_DIRECT_US_MAX, 2: LENS_DIRECT_CN_MAX}.get(rank, 4)
     candidates = _market_presence_fallback(query, rank, limit=max(cap + 2, cap))
     return _web_market_candidates_to_items(candidates, rank, lang, query)
 
@@ -10209,7 +10109,7 @@ def _web_stream_store_specs(query, country, rank):
     if rank == 0:
         specs = [("Local", "", local_cc)]
         try:
-            specs.extend((label, domain, local_cc) for label, domain in local_rescue_store_specs(q, WEB_LOCAL_STORE_PROBES))
+            specs.extend((label, domain, local_cc) for label, domain in local_rescue_store_specs(q, LOCAL_STORE_RESCUE_MAX))
         except Exception:
             pass
     elif rank == 1:
@@ -11324,6 +11224,11 @@ async def web_api_search_stream(request: Request):
     selected_option = str(payload.get("selected_option") or "").strip()
     original_query = str(payload.get("original_query") or "").strip()
     force_specific = bool(payload.get("force_specific"))
+    # v107 APP TURBO: Android can request LOCAL only for first paint, then GLOBAL on demand.
+    # Default remains "all" so the existing website/other clients keep their old behaviour.
+    scope = str(payload.get("scope") or "all").strip().lower()
+    if scope not in {"all", "local", "global"}:
+        scope = "all"
 
     async def _generator():
         started = time.time()
@@ -11353,6 +11258,115 @@ async def web_api_search_stream(request: Request):
                 return
 
             sent = set()
+
+            # ------------------------------------------------------------------
+            # v107 APP TURBO SCOPED SEARCH
+            # LOCAL first paint: no US/China and no heavy final enrichment wait.
+            # GLOBAL on demand: only US + China, launched when the user expands it.
+            # This removes the 30s perceived wait while preserving the legacy "all" path.
+            # ------------------------------------------------------------------
+            if scope in {"local", "global"}:
+                allowed_ranks = (0,) if scope == "local" else (1, 2)
+                task_meta = {}
+                tasks = []
+
+                # Independent store probes. Every store runs concurrently.
+                if WEB_STREAM_FAST_WAVE and SERPAPI_API_KEY:
+                    for rank in allowed_ranks:
+                        for label, domain, gl in _web_stream_store_specs(q, country, rank):
+                            async def _run_store_scoped(r=rank, lab=label, dom=domain, search_gl=gl):
+                                try:
+                                    rows = await asyncio.wait_for(
+                                        asyncio.to_thread(_web_store_probe_sync, q, country, lang, r, lab, dom, search_gl),
+                                        timeout=WEB_STREAM_STORE_TIMEOUT,
+                                    )
+                                    return r, lab, rows
+                                except Exception as e:
+                                    print(f"WEB APP TURBO STORE ERR scope={scope} rank={r} store={lab}: {e}")
+                                    return r, lab, []
+                            t = asyncio.create_task(_run_store_scoped())
+                            tasks.append(t)
+                            task_meta[t] = (rank, label, "store")
+
+                    # One broad market wave per requested market catches merchants that are
+                    # not in the priority store list. It runs in parallel, never before first paint.
+                    for rank in allowed_ranks:
+                        async def _run_broad_scoped(r=rank):
+                            try:
+                                rows = await asyncio.wait_for(
+                                    asyncio.to_thread(_web_fast_market_wave_sync, q, country, lang, r),
+                                    timeout=WEB_STREAM_MARKET_TIMEOUT,
+                                )
+                                return r, "Broad", rows
+                            except Exception as e:
+                                print(f"WEB APP TURBO BROAD ERR scope={scope} rank={r}: {e}")
+                                return r, "Broad", []
+                        t = asyncio.create_task(_run_broad_scoped())
+                        tasks.append(t)
+                        task_meta[t] = (rank, "Broad", "broad")
+
+                pending = set(tasks)
+                loop = asyncio.get_running_loop()
+                # Local must feel instant. Global can have a slightly wider window because
+                # it is explicitly requested by the user.
+                scoped_budget = 6.2 if scope == "local" else 8.0
+                deadline = loop.time() + scoped_budget
+
+                while pending:
+                    remaining = deadline - loop.time()
+                    if remaining <= 0:
+                        break
+                    done, pending = await asyncio.wait(
+                        pending,
+                        timeout=min(0.10, remaining),
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    for task in done:
+                        rank, label, phase_kind = task_meta.get(task, (99, "Store", "store"))
+                        try:
+                            r, label, items = await task
+                        except Exception:
+                            r, items = rank, []
+                        market_name = _web_market_label(r)
+                        for item in items or []:
+                            # Safety: a scoped call may never leak a different market.
+                            item_rank = item.get("market_rank")
+                            if item_rank is None:
+                                try:
+                                    item_rank = result_market_rank(item)
+                                except Exception:
+                                    item_rank = r
+                            if int(item_rank) not in allowed_ranks:
+                                continue
+                            key = str(item.get("url") or "").strip() or (
+                                market_name + "|" + str(item.get("store") or "") + "|" + str(item.get("title") or "")
+                            )
+                            if key in sent:
+                                continue
+                            sent.add(key)
+                            yield _web_stream_event({
+                                "event": "result",
+                                "phase": f"app_turbo_{phase_kind}",
+                                "scope": scope,
+                                "market": market_name,
+                                "store_probe": label,
+                                "item": item,
+                                "elapsed_ms": int((time.time()-started)*1000),
+                            })
+                            await asyncio.sleep(0.006)
+
+                for task in pending:
+                    task.cancel()
+
+                yield _web_stream_event({
+                    "event": "done",
+                    "scope": scope,
+                    "count": len(sent),
+                    "partial": bool(pending),
+                    "elapsed_ms": int((time.time()-started)*1000),
+                })
+                return
+
             final_task = asyncio.create_task(asyncio.to_thread(
                 _web_search_text_sync, q, country, lang, "", "", True
             ))
@@ -11361,7 +11375,7 @@ async def web_api_search_stream(request: Request):
                 store_tasks = []
                 task_meta = {}
                 rank_remaining = {0: 0, 1: 0, 2: 0}
-                for rank in (0, 2, 1):
+                for rank in (0, 1, 2):
                     for label, domain, gl in _web_stream_store_specs(q, country, rank):
                         async def _run_store(r=rank, lab=label, dom=domain, search_gl=gl):
                             try:
@@ -11546,7 +11560,7 @@ async def web_api_image_search_stream(request: Request):
                 store_tasks = []
                 task_meta = {}
                 rank_remaining = {0: 0, 1: 0, 2: 0}
-                for rank in (0, 2, 1):
+                for rank in (2, 0, 1):
                     for label, domain, gl in _web_stream_store_specs(identity, country, rank):
                         async def _run_store(r=rank, lab=label, dom=domain, search_gl=gl):
                             try:
