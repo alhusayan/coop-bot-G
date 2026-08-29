@@ -26,7 +26,7 @@ app.add_middleware(
     allow_headers=["Content-Type", "Accept"],
     max_age=86400,
 )
-BUILD_ID = "v105.2-findzia-result-guard-20260829"
+BUILD_ID = "findzia-generic-choice-v106"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES")
@@ -8818,22 +8818,29 @@ def execute_product_search(from_number, product, bot_id, lang):
 # ---- v74.6: مصنّف الطلبات — ذكاء اصطناعي خالص، بدون أي قاموس -----------------
 # القاموس الثابت مستحيل يغطي ملايين المنتجات (يخت، موطور مخيمات، مكينة بر...).
 # القرار كله لنموذج سريع رخيص (بدون بحث + كاش + إعادة محاولة) بتعريفات وأمثلة قوية.
-REQUEST_CLASSIFIER_SYSTEM = """أنت مصنف نية شراء ذكي لبوت تسوق عالمي على واتساب. المستخدم قد يكتب بالعربية أو بأي لغة مدعومة.
+REQUEST_CLASSIFIER_SYSTEM = """أنت مصنف نية شراء ذكي لـ Findzia. المستخدم قد يكتب بالعربية أو بأي لغة مدعومة.
 صنّف الرسالة بدقة وأجب بكلمة واحدة فقط بدون أي شرح: GENERIC أو SPECIFIC أو SERVICE أو NONE
 
 المبدأ الأساسي:
-- لا تحكم حسب نوع الفئة وحدها (طعام/إلكترونيات/ملابس...). افهم هل المستخدم حدّد منتجاً بعينه أم ما زال يطلب فئة عامة.
-- GENERIC يعني أن العبارة تصف فئة/نوعاً عاماً ويمكن أن توجد عدة براندات أو منتجات مناسبة، لذلك الأفضل أن نعرض توصيات ذكية أولاً.
-- SPECIFIC يعني أن المستخدم حدّد براند أو موديل أو SKU أو اسم منتج تجاري واضح أو وصفاً شديد التحديد يكفي للبحث عن نفس المنتج مباشرة.
+- هدف SPECIFIC هو أن تكون هوية المنتج ضيقة بما يكفي لكي نقارن سعر *نفس المنتج* بين المتاجر.
+- وجود اسم ماركة وحده لا يجعل الطلب SPECIFIC.
+- إذا كان داخل الماركة نفسها عدة موديلات أو استخدامات أو مستويات محتملة، فالطلب GENERIC ونحتاج توصيات/اختيارات أولاً.
+- SPECIFIC يحتاج موديل/سلسلة/اسم منتج تجاري واضح/SKU أو تركيبة مواصفات تجعل المنتج المقصود واحداً تقريباً.
 
 GENERIC أمثلة:
-شاورما دجاج، برجر دجاج، حليب، رز، ماء، قهوة، شوكولاتة، شامبو، حفاضات، مضرب تنس، حذاء تنس للأطفال، لابتوب للدراسة، سماعة بلوتوث، قلاية هوائية، عطر رجالي، سيارة عائلية، مولد كهرباء.
-Chicken shawarma, tennis racket, kids tennis shoes, laptop for university, protein bar, olive oil.
-إذا لم توجد ماركة/موديل واضحان وكانت هناك عدة خيارات ومنتجات محتملة، اختر GENERIC.
+شاورما دجاج، حليب، شامبو Pantene، حذاء Adidas، حذاء تنس Nike، Nike tennis shoes، Nike running shoes، مضرب تنس Wilson، سماعات Sony، لابتوب Lenovo للدراسة، قلاية Philips، عطر Dior رجالي.
+هذه الطلبات تحتوي أحياناً على ماركة، لكنها ما زالت تضم موديلات كثيرة مختلفة؛ لذلك يجب عرض 3-4 خيارات ذكية قبل مقارنة الأسعار.
 
 SPECIFIC أمثلة:
-Nabil Chicken Shawarma 400g، حليب المراعي كامل الدسم 1 لتر، Pepsi 330ml، Yonex EZONE 100، Wilson Blade 98 V9، iPhone 16 Pro 256GB، Nike Vapor Pro 2 Junior، Head & Shoulders Classic Clean 400ml.
-ذكر ماركة مع نوع المنتج غالباً SPECIFIC حتى لو لم يذكر المقاس، مثل: حليب المراعي، شامبو Pantene، حذاء Adidas.
+Nabil Chicken Shawarma 400g، حليب المراعي كامل الدسم 1 لتر، Pepsi 330ml، Yonex EZONE 100، Wilson Blade 98 V9، iPhone 16 Pro 256GB، Nike Vapor Pro 2 Junior، Nike GP Challenge Pro، Sony WH-1000XM6، Head & Shoulders Classic Clean 400ml.
+
+تمييز مهم جداً:
+- "Nike tennis shoes" = GENERIC لأن Nike لديها عدة موديلات تنس.
+- "Nike Vapor Pro 3" = SPECIFIC.
+- "Nike shoes" = GENERIC.
+- "iPhone 16 Pro 256GB" = SPECIFIC.
+- "Samsung TV" = GENERIC، بينما "Samsung QN90D 65 inch" = SPECIFIC.
+- فئة رياضية محددة (tennis/running/basketball/football) يجب الحفاظ عليها؛ لا تعتبر موديل رياضة أخرى بديلاً لنفس المنتج.
 
 SERVICE = طلب خدمة أو فني أو تصليح أو صيانة أو عامل وليس شراء منتج.
 أمثلة: كهربائي، فني تكييف، سباك، بنشر متنقل، تصليح غسالة، مكافحة حشرات.
@@ -8842,11 +8849,11 @@ NONE = الرسالة ليست طلب شراء ولا خدمة: تحية، شك�
 أمثلة: هلا، شكراً، وينك، ليش ما ترد، تمام، ok، تجربة.
 
 قواعد الحسم:
-1) لا تعتبر الطعام أو التموينات SPECIFIC تلقائياً. «شاورما دجاج» GENERIC، بينما «Nabil Chicken Shawarma 400g» SPECIFIC.
-2) لا تعتبر كلمة واحدة SPECIFIC تلقائياً. «حليب» GENERIC، بينما «حليب المراعي 1 لتر» SPECIFIC.
-3) إذا توجد ماركة/موديل/SKU واضح = SPECIFIC.
-4) إذا الطلب فئة عامة بلا ماركة واضحة = GENERIC.
-5) إذا شككت بين GENERIC وSPECIFIC ولم توجد هوية تجارية واضحة، اختر GENERIC.
+1) BRAND + BROAD CATEGORY = GENERIC في العادة.
+2) BRAND + MODEL/PRODUCT LINE/SKU أو هوية تجارية محددة = SPECIFIC.
+3) الحجم/السعة/اللون وحدهم لا يحولون فئة واسعة إلى SPECIFIC، لكنهم قد يكملون اسم منتج تجاري معروف.
+4) إذا كانت مقارنة الأسعار قد تخلط موديلات مختلفة، اختر GENERIC.
+5) إذا شككت بين GENERIC وSPECIFIC، اختر GENERIC.
 6) أجب بكلمة التصنيف فقط."""
 
 _REQUEST_CLASS_CACHE = {}
@@ -8892,11 +8899,11 @@ def classify_request_type(query):
         print(f"REQUEST CLASSIFIER AI ERR: {e}")
 
     if not verdict:
-        # Safe no-network fallback: model/SKU-like numbers usually mean a specific product.
-        if re.search(r"\d", q) or len(q.split()) >= 4:
-            verdict = "SPECIFIC"
-        else:
-            verdict = "GENERIC"
+        # Safe no-network fallback: only obvious model/SKU-like identity should bypass recommendations.
+        # Word count is NOT enough: "Nike tennis shoes men" is still a broad family.
+        has_digit = bool(re.search(r"\d", q))
+        has_modelish = bool(re.search(r"(?i)\b[a-z]{1,8}[-_/]?[a-z]*\d{2,}[a-z0-9-]*\b", q))
+        verdict = "SPECIFIC" if (has_digit or has_modelish) else "GENERIC"
     return _remember(verdict, "one-pass-ai" if verdict else "fallback")
 
 # كلمات الخدمة تبقى فقط
@@ -8934,39 +8941,49 @@ def compare_ui(lang):
 
 
 def brand_compare_system(lang):
-    """Build comparison prompt in the user's UI language so Arabic labels never leak into other languages."""
+    """Build a constrained AI comparison for broad requests, including brand-constrained families."""
     ui = compare_ui(lang)
     lang_name = language_name_en(lang)
-    return f"""You are an expert product-comparison assistant similar to professional Best-Of review sites.
-The user made a GENERIC product request without a specific brand. Compare 3-4 concrete options (brand + model/type) only.
+    return f"""You are Findzia's expert product-selection assistant.
+The user made a GENERIC shopping request: the request may include a brand, category, sport, intended use, age group, gender, budget or other constraints, but it does NOT identify one exact model strongly enough for direct price comparison.
+
+YOUR JOB:
+Choose 3-4 concrete, currently recognizable product models/types that satisfy the user's stated constraints, so the user can pick ONE before Findzia compares prices.
+
+CONSTRAINT PRESERVATION — ABSOLUTE:
+- If the user names a brand (for example Nike), EVERY option must stay inside that brand unless the user explicitly asks for alternatives.
+- Preserve the exact product category and sport/use. Tennis shoes must be tennis shoes; never substitute running, basketball, football/soccer or casual shoes.
+- Preserve junior/kids/women/men/unisex, size class, platform/device compatibility and other explicit constraints when stated.
+- Do not invent a model. Prefer real, recognizable model families whose identity is searchable in retail stores.
+- If the request is too vague to choose responsibly, still give useful representative choices within the stated category, differentiated by use (overall, speed/lightweight, stability/durability, value).
 
 CRITICAL LANGUAGE RULE:
 - ALL human-readable text MUST be written ONLY in {lang_name}.
 - Do not use Arabic words unless {lang_name} is Arabic.
-- Brand names, model names, sizes and SKUs may remain in their normal original/Latin form.
-- Never mix interface languages in the same answer.
+- Brand/model/SKU names stay in their standard market spelling.
+- Never mix interface languages.
 
-Use EXACTLY this visible structure, with these localized labels:
+Use EXACTLY this visible structure:
 ⚖️ {ui['title']} [category]
 
-🏆 {ui['overall']}: [brand + model] — [one short reason]
+🏆 {ui['overall']}: [brand + exact model] — [one short reason]
 
-💎 {ui['quality']}: [brand + model] — [one short reason]
+💎 {ui['quality']}: [brand + exact model] — [one short reason]
 
-💰 {ui['value']}: [brand + model] — [one short reason]
+💰 {ui['value']}: [brand + exact model] — [one short reason]
 
-✨ [localized criterion relevant to this category]: [brand + model] — [one short reason]
+✨ [localized criterion most useful for this category]: [brand + exact model] — [one short reason]
 
 OPTIONS: [searchable brand model 1] | [searchable brand model 2] | [searchable brand model 3] | [searchable brand model 4]
 
 Strict rules:
-1) Leave one blank line between recommendations.
-2) Never output store names, availability, prices or shopping-result bullets here.
-3) For food, compare taste, quality, value and reviews.
-4) Never repeat the same model.
-5) OPTIONS is mandatory and MUST contain clean searchable product identities, preferably brand + exact model in their standard market spelling.
-6) No links and no Markdown.
-7) The OPTIONS line may stay in Latin script for brand/model names, but all descriptions and labels must be in {lang_name}.
+1) Never output store names, availability or prices here.
+2) Never repeat the same model.
+3) OPTIONS is mandatory and must contain only clean searchable product identities.
+4) Do not put descriptive reasons inside OPTIONS.
+5) No links and no Markdown.
+6) For sports products, the fourth criterion should usually reflect the category (speed/lightweight, stability, control, durability, etc.).
+7) For food, compare taste, quality, value and reviews.
 """
 
 _COMPARE_LINE_RE = re.compile(r"^\s*(🏆|💎|💰|✨)\s*([^:：]*?)\s*[:：]\s*(.+?)(?:\s*(?:—|–|-)\s+(.*))?\s*$")
@@ -9111,10 +9128,12 @@ def run_brand_comparison(from_number, query, bot_id, lang):
     send_whatsapp_text(from_number, T(lang, "compare_searching"), bot_id)
     lang_name = language_name_en(lang)
     prompt = (
-        f"Generic shopping request: {query}\n"
+        f"USER REQUEST: {query}\n"
         f"Current market: {current_market().get('country_name', 'Kuwait')}\n"
-        f"Compare 3-4 strong concrete options for this request. Output only in {lang_name}. "
-        f"{TEXT77_lang_instr(lang)}"
+        "This request is broad enough that price comparison must wait until the user chooses one concrete model. "
+        "Preserve every explicit brand/category/sport/use constraint from USER REQUEST. "
+        "Return 3-4 strong concrete choices only; for a brand-constrained request, stay within that brand. "
+        f"Output only in {lang_name}. {TEXT77_lang_instr(lang)}"
     )
     txt = ""
     options = []
@@ -9837,10 +9856,12 @@ def _web_brand_comparison(query, lang):
     """WhatsApp generic-request comparison, returned as JSON instead of a list message."""
     lang_name = language_name_en(lang)
     prompt = (
-        f"Generic shopping request: {query}\n"
+        f"USER REQUEST: {query}\n"
         f"Current market: {current_market().get('country_name', 'Kuwait')}\n"
-        f"Compare 3-4 strong concrete options for this request. Output only in {lang_name}. "
-        f"{TEXT77_lang_instr(lang)}"
+        "This request is broad enough that price comparison must wait until the user chooses one concrete model. "
+        "Preserve every explicit brand/category/sport/use constraint from USER REQUEST. "
+        "Return 3-4 strong concrete choices only; for a brand-constrained request, stay within that brand. "
+        f"Output only in {lang_name}. {TEXT77_lang_instr(lang)}"
     )
     txt, options = "", []
     for _ in (1, 2):
@@ -11261,7 +11282,7 @@ async def web_api_search_stream(request: Request):
                 store_tasks = []
                 task_meta = {}
                 rank_remaining = {0: 0, 1: 0, 2: 0}
-                for rank in (2, 0, 1):
+                for rank in (0, 1, 2):
                     for label, domain, gl in _web_stream_store_specs(q, country, rank):
                         async def _run_store(r=rank, lab=label, dom=domain, search_gl=gl):
                             try:
@@ -11446,7 +11467,7 @@ async def web_api_image_search_stream(request: Request):
                 store_tasks = []
                 task_meta = {}
                 rank_remaining = {0: 0, 1: 0, 2: 0}
-                for rank in (2, 0, 1):
+                for rank in (0, 1, 2):
                     for label, domain, gl in _web_stream_store_specs(identity, country, rank):
                         async def _run_store(r=rank, lab=label, dom=domain, search_gl=gl):
                             try:
