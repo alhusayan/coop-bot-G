@@ -26,7 +26,7 @@ app.add_middleware(
     allow_headers=["Content-Type", "Accept"],
     max_age=86400,
 )
-BUILD_ID = "v105.1-ANDROID-FASTFIX-20260829"
+BUILD_ID = "v106.1-android-whatsapp-parity-20260829"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES")
@@ -2731,6 +2731,13 @@ def _shopping_card_to_market_item(card, fallback_source="", lens_country=""):
         "price": price_text,
         "price_value": card.get("extracted_price"),
         "currency": detect_currency_code(price_text, COUNTRY_CURRENCIES.get(lens_country, ""), lens_country),
+        # Keep lightweight Shopping metadata so the fast stream can reject
+        # installments / monthly payments / wholesale-MOQ rows without fetching
+        # every merchant page first.
+        "_offer_meta": " ".join(str(card.get(k) or "") for k in (
+            "installment", "monthly_payment", "payment", "price_description",
+            "snippet", "extensions", "badge", "tag", "delivery"
+        )),
         "in_stock": None,
         "condition": "",
         "_lens_country": lens_country,
@@ -6831,7 +6838,7 @@ def _lens_merchant_key(name, url=""):
 def send_lens_direct_results(from_number, lens, bot_id, lang, caption="", image_b64="", image_mime="", exclude_domains=None, exclude_urls=None, more_mode=False):
     """v76: CTA-only، مختصر، بأعلام الدول، وترجمة للواجهة فقط.
 
-    الحدود القصوى مستقلة: محلي 5، أمريكا 4، الصين 4.
+    الحدود القصوى مستقلة وتؤخذ مباشرة من LENS_DIRECT_* الحالية.
     لا يوجد حد أدنى أو عدد إلزامي لأي سوق.
     """
     exclude_domains = {str(x).lower() for x in (exclude_domains or []) if x}
@@ -6983,7 +6990,7 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption="", image_
         or (caption or "").strip()
     )
     LAST_SEARCH[from_number] = {"product": (caption or expansion_query or chosen_title)}
-    print(f"LENS DIRECT SENT v79: {sent} CTA; merchants={len(merchant_counts)}; per_store_cap={RESULTS_PER_STORE_MAX}; buckets={market_counts}; caps=5/4/4; order=local->us->cn")
+    print(f"LENS DIRECT SENT v79: {sent} CTA; merchants={len(merchant_counts)}; per_store_cap={RESULTS_PER_STORE_MAX}; buckets={market_counts}; caps={LENS_DIRECT_LOCAL_MAX}/{LENS_DIRECT_US_MAX}/{LENS_DIRECT_CN_MAX}; order=local->us->cn")
     if market_counts[2] == 0:
         print("V77 WARNING: no Chinese-store Lens result survived filters")
     if sent > 0 and expansion_query:
@@ -7539,6 +7546,110 @@ def _clean_store_name(name):
     n = re.sub(r"\(\s*[^)]*\)?\s*$", "", n)  # قوس مفتوح أو فاضي بنهاية الاسم
     return " ".join(n.split()).strip(" -—–:،") or str(name or "").strip()
 
+# v105.2 Findzia Result Guard -----------------------------------------------------
+# Cheap deterministic gate used by both the fast stream and the authoritative
+# relevance pass. It removes obvious accessories/parts and category conflicts
+# before price or merchant priority can influence the result.
+_FINDZIA_ACCESSORY_TOKENS = {
+    "case", "cover", "protector", "guard", "skin", "sticker", "decal",
+    "cable", "cord", "charger", "adapter", "adaptor", "dock", "stand",
+    "mount", "holder", "strap", "band", "sleeve", "pouch", "bag",
+    "lace", "laces", "shoelace", "shoelaces", "insole", "insoles", "sock", "socks",
+    "replacement", "spare", "part", "parts", "accessory", "accessories",
+    "manual", "handbook", "pdf",
+    "كفر", "غطاء", "حمايه", "حماية", "شاحن", "كيبل", "كابل", "وصله", "وصلة",
+    "حامل", "سوار", "رباط", "اربطة", "أربطة", "جوارب", "نعل", "قطع", "غيار", "اكسسوار", "اكسسوارات",
+}
+
+# Mutually exclusive intent words. If the user explicitly asks for one type and
+# a result explicitly advertises another, it is not the same product for price comparison.
+_FINDZIA_CONFLICT_GROUPS = (
+    ({"tennis", "تنس"}, {"running", "runner", "jogging", "basketball", "soccer", "football", "golf", "hiking", "trail", "padel", "تنس", "جري", "ركض", "سله", "سلة", "قدم", "جولف", "بادل"}),
+    ({"running", "runner", "jogging", "جري", "ركض"}, {"tennis", "basketball", "soccer", "football", "golf", "hiking", "padel", "تنس", "سله", "سلة", "قدم", "جولف", "بادل"}),
+    ({"padel", "بادل"}, {"tennis", "running", "basketball", "soccer", "football", "golf", "hiking", "تنس", "جري", "سله", "سلة", "قدم", "جولف"}),
+)
+
+_FINDZIA_QUERY_FILLER = {
+    "buy", "best", "price", "cheap", "cheapest", "online", "shop", "shopping",
+    "for", "the", "a", "an", "of", "in", "with", "new", "original",
+    "ابي", "أبي", "اريد", "أريد", "افضل", "أفضل", "ارخص", "أرخص", "سعر", "شراء", "اونلاين", "أونلاين",
+}
+
+
+def _findzia_hard_product_mismatch(query, title):
+    q_raw = normalize_ar(str(query or ""))
+    t_raw = normalize_ar(str(title or ""))
+    q = norm_tokens(q_raw)
+    t = norm_tokens(t_raw)
+    if not q or not t:
+        return False
+
+    # An accessory/part word that the user did not ask for is a strong mismatch.
+    # Use token equality (not substring) so words such as "suitcase" are not treated as "case".
+    q_acc = q & _FINDZIA_ACCESSORY_TOKENS
+    t_acc = t & _FINDZIA_ACCESSORY_TOKENS
+    if t_acc - q_acc:
+        return True
+
+    # Explicit sport/use conflicts, e.g. tennis shoes vs running shoes.
+    for wanted, alternatives in _FINDZIA_CONFLICT_GROUPS:
+        q_wanted = q & wanted
+        if not q_wanted:
+            continue
+        # Remove the requested intent from the alternative set before checking the title.
+        other = set(alternatives) - set(wanted)
+        if (t & other) and not (t & wanted):
+            return True
+
+    # Exact alphanumeric model tokens are strong identity anchors. If both sides expose
+    # model-like tokens but none agree, do not treat the listing as the same product.
+    q_models = {x for x in q if any(c.isdigit() for c in x) and len(x) >= 2}
+    t_models = {x for x in t if any(c.isdigit() for c in x) and len(x) >= 2}
+    if q_models and t_models and not (q_models & t_models):
+        return True
+    return False
+
+
+def _findzia_match_score(query, title):
+    """0..1 cheap confidence score for streaming; authoritative final pass can still use AI."""
+    if _findzia_hard_product_mismatch(query, title):
+        return 0.0
+    q = norm_tokens(query) - _FINDZIA_QUERY_FILLER
+    t = norm_tokens(title)
+    if not q or not t:
+        return 0.0
+    q_models = {x for x in q if any(c.isdigit() for c in x) and len(x) >= 2}
+    if q_models:
+        if not (q_models & t):
+            return 0.10
+        model_score = 0.45
+    else:
+        model_score = 0.0
+    overlap = len(q & t) / max(1, len(q))
+    # Query containment is strong, but cap below 1 because titles can contain SEO noise.
+    return min(0.99, model_score + (0.55 * overlap if q_models else overlap))
+
+
+def _findzia_stream_candidate_ok(query, item):
+    title = str((item or {}).get("title") or (item or {}).get("line") or "")
+    if not title:
+        return False
+    if _findzia_hard_product_mismatch(query, title):
+        print(f"FINDZIA GUARD HARD-DROP: {title[:100]}")
+        return False
+    score = _findzia_match_score(query, title)
+    q = norm_tokens(query) - _FINDZIA_QUERY_FILLER
+    q_models = {x for x in q if any(c.isdigit() for c in x) and len(x) >= 2}
+    # Model queries can stream at a lower lexical threshold once the model matches.
+    # Broad/category queries are held to a stricter threshold; uncertain cards wait for
+    # the authoritative final AI-filtered pass rather than flashing a wrong cheap item.
+    threshold = 0.52 if q_models else 0.50
+    if score < threshold:
+        print(f"FINDZIA GUARD HOLD score={score:.2f}: {title[:100]}")
+        return False
+    return True
+
+
 def _fast_relevance_confident(query, candidates):
     """True when returned titles already contain strong query/model evidence.
 
@@ -7552,6 +7663,10 @@ def _fast_relevance_confident(query, candidates):
     if not q_tokens:
         return False
     q_models = {t for t in q_tokens if any(ch.isdigit() for ch in t) and len(t) >= 2}
+    # v105.2: broad/category requests are exactly where accessories and neighboring
+    # product types sneak in. Let the final AI relevance pass judge them.
+    if not q_models:
+        return False
     confident = 0
     considered = 0
     for item in seq:
@@ -7581,6 +7696,9 @@ def filter_relevant_offers(query, offers, urls, use_ai=True, mode="exact"):
         hay = normalize_ar(f"{o.get('line','')} {match_url(o.get('name',''), urls or {})}")
         if not wants_non_product and any(normalize_ar(w) in hay for w in _NON_PRODUCT_WORDS):
             print(f"RELEVANCE HARD-DROP: {o.get('line','')[:80]}")
+            continue
+        if _findzia_hard_product_mismatch(query, o.get('line','')):
+            print(f"FINDZIA RELEVANCE HARD-DROP: {o.get('line','')[:90]}")
             continue
         kept.append(o)
     if not use_ai or not ENABLE_RELEVANCE_FILTER or not kept or len(kept) == 0:
@@ -8675,7 +8793,7 @@ def send_text_lens_style_results(from_number, txt, urls, bot_id, lang, query, ex
     if not sent_items:
         return False
     LAST_SEARCH[from_number] = {"product": query}
-    print(f"TEXT LENS-STYLE SENT: {len(sent_items)} CTA; per_store_cap={RESULTS_PER_STORE_MAX}; buckets={counts}; caps=5/4/4; order=local->us->cn")
+    print(f"TEXT LENS-STYLE SENT: {len(sent_items)} CTA; per_store_cap={RESULTS_PER_STORE_MAX}; buckets={counts}; caps={LENS_DIRECT_LOCAL_MAX}/{LENS_DIRECT_US_MAX}/{LENS_DIRECT_CN_MAX}; order=local->us->cn")
     _save_more_results_state(from_number, query, bot_id, lang, "text", sent_items, reset=not more_mode)
     _send_more_results_choice(from_number, bot_id, lang)
     return True
@@ -9368,38 +9486,63 @@ WEB_PRODUCT_VERIFY_CACHE_TTL_SECONDS = max(300, int(os.environ.get("WEB_PRODUCT_
 WEB_PRODUCT_VERIFY_CACHE = {}
 WEB_PRODUCT_VERIFY_LOCK = threading.Lock()
 
+# v106.1 ANDROID = WHATSAPP PARITY ----------------------------------------------
+# WhatsApp is the reference engine. Android/Web must use the exact same primary
+# result caps so the same candidate pool, market ordering and merchant limits win.
+# Do not give the app a deeper independent result pool: that was the main source
+# of slower and less consistent results versus WhatsApp.
+WEB_MATCH_WHATSAPP_EXACT = env_bool("WEB_MATCH_WHATSAPP_EXACT", True)
+WEB_LOCAL_MAX = LENS_DIRECT_LOCAL_MAX
+WEB_US_MAX = LENS_DIRECT_US_MAX
+WEB_CN_MAX = LENS_DIRECT_CN_MAX
+WEB_RESULT_CAPS = {0: WEB_LOCAL_MAX, 1: WEB_US_MAX, 2: WEB_CN_MAX}
+
+# Broad Google Shopping already discovers many merchants in one request. A few
+# direct local merchant probes run in parallel as rescue/coverage, not serially.
+WEB_LOCAL_STORE_PROBES = max(0, min(9, int(os.environ.get("WEB_LOCAL_STORE_PROBES", "6"))))
+
+# Critical latency fix: FIFO rows that already carry a structured numeric price
+# can stream immediately after cheap relevance/URL/price guards. The final pass
+# still performs the heavier merchant-page verification and can upsert later.
+WEB_FAST_SKIP_PRODUCT_PAGE_VERIFY = env_bool("WEB_FAST_SKIP_PRODUCT_PAGE_VERIFY", True)
+
 WEB_API_MAX_QUERY_CHARS = max(40, min(500, int(os.environ.get("WEB_API_MAX_QUERY_CHARS", "220"))))
 WEB_API_MAX_IMAGE_BYTES = max(512000, min(12 * 1024 * 1024, int(os.environ.get("WEB_API_MAX_IMAGE_BYTES", str(6 * 1024 * 1024)))))
 WEB_API_RATE_PER_MINUTE = max(5, min(120, int(os.environ.get("WEB_API_RATE_PER_MINUTE", "30"))))
 WEB_STREAM_ENABLED = env_bool("WEB_STREAM_ENABLED", True)
 WEB_IMAGE_SUPPLEMENT_WEAK_MARKETS = env_bool("WEB_IMAGE_SUPPLEMENT_WEAK_MARKETS", True)
-WEB_IMAGE_TARGET_LOCAL = max(1, min(LENS_DIRECT_LOCAL_MAX, int(os.environ.get("WEB_IMAGE_TARGET_LOCAL", "3"))))
-WEB_IMAGE_TARGET_US = max(1, min(LENS_DIRECT_US_MAX, int(os.environ.get("WEB_IMAGE_TARGET_US", "2"))))
-WEB_IMAGE_TARGET_CN = max(1, min(LENS_DIRECT_CN_MAX, int(os.environ.get("WEB_IMAGE_TARGET_CN", "2"))))
+WEB_IMAGE_TARGET_LOCAL = max(1, min(WEB_LOCAL_MAX, int(os.environ.get("WEB_IMAGE_TARGET_LOCAL", "3"))))
+WEB_IMAGE_TARGET_US = max(1, min(WEB_US_MAX, int(os.environ.get("WEB_IMAGE_TARGET_US", "2"))))
+WEB_IMAGE_TARGET_CN = max(1, min(WEB_CN_MAX, int(os.environ.get("WEB_IMAGE_TARGET_CN", "2"))))
 WEB_STREAM_FAST_WAVE = env_bool("WEB_STREAM_FAST_WAVE", True)
-WEB_STREAM_MARKET_TIMEOUT = max(4, min(20, int(os.environ.get("WEB_STREAM_MARKET_TIMEOUT_SECONDS", "8"))))
+WEB_STREAM_MARKET_TIMEOUT = max(3, min(12, int(os.environ.get("WEB_STREAM_MARKET_TIMEOUT_SECONDS", "6"))))
 # v96: stream store probes in true FIFO order across all markets. A fast US/China/local
 # merchant can appear immediately; no market has to finish before another market is shown.
 WEB_STREAM_STORE_FIFO = env_bool("WEB_STREAM_STORE_FIFO", True)
-WEB_STREAM_STORE_TIMEOUT = max(3.5, min(8.0, float(os.environ.get("WEB_STREAM_STORE_TIMEOUT_SECONDS", "5"))))
-WEB_STREAM_STORE_HTTP_TIMEOUT = max(3.0, min(WEB_STREAM_STORE_TIMEOUT, float(os.environ.get("WEB_STREAM_STORE_HTTP_TIMEOUT_SECONDS", "4.5"))))
+WEB_STREAM_STORE_TIMEOUT = max(3.5, min(9.0, float(os.environ.get("WEB_STREAM_STORE_TIMEOUT_SECONDS", "5.8"))))
+WEB_STREAM_STORE_HTTP_TIMEOUT = max(3.0, min(WEB_STREAM_STORE_TIMEOUT, float(os.environ.get("WEB_STREAM_STORE_HTTP_TIMEOUT_SECONDS", "5.0"))))
 WEB_STREAM_RESULTS_PER_STORE = max(1, min(2, int(os.environ.get("WEB_STREAM_RESULTS_PER_STORE", "1"))))
 # v104: marketplaces can legitimately return several distinct listings for the same/similar product.
-WEB_STREAM_MARKETPLACE_RESULTS_PER_STORE = max(2, min(6, int(os.environ.get("WEB_STREAM_MARKETPLACE_RESULTS_PER_STORE", "4"))))
+WEB_STREAM_MARKETPLACE_RESULTS_PER_STORE = max(1, min(4, int(os.environ.get("WEB_STREAM_MARKETPLACE_RESULTS_PER_STORE", "3"))))
 WEB_MULTI_LISTING_MARKETPLACES = (
     "etsy.com", "ebay.com", "aliexpress.com", "temu.com", "shein.com",
     "dhgate.com", "amazon.com", "alibaba.com", "made-in-china.com", "banggood.com",
 )
-WEB_STREAM_IMAGE_FINAL_MIN_RESULTS = max(2, min(8, int(os.environ.get("WEB_STREAM_IMAGE_FINAL_MIN_RESULTS", "3"))))
+WEB_STREAM_IMAGE_FINAL_MIN_RESULTS = max(2, min(10, int(os.environ.get("WEB_STREAM_IMAGE_FINAL_MIN_RESULTS", "5"))))
 # v97: Chinese global marketplaces are more important than the US wave on web.
 # Their fast probes use normal Google organic site search first because Google Shopping
 # often returns few/no cards for AliExpress/Temu/SHEIN/Alibaba-style domains.
 WEB_CHINA_ORGANIC_FIRST = env_bool("WEB_CHINA_ORGANIC_FIRST", True)
-WEB_CHINA_ORGANIC_TIMEOUT = max(3.0, min(WEB_STREAM_STORE_TIMEOUT, float(os.environ.get("WEB_CHINA_ORGANIC_TIMEOUT_SECONDS", "4.5"))))
+WEB_CHINA_ORGANIC_TIMEOUT = max(3.0, min(WEB_STREAM_STORE_TIMEOUT, float(os.environ.get("WEB_CHINA_ORGANIC_TIMEOUT_SECONDS", "4.8"))))
 WEB_CHINA_GLOBAL_MAX_STORES = max(4, min(9, int(os.environ.get("WEB_CHINA_GLOBAL_MAX_STORES", "7"))))
 WEB_CHINA_ORGANIC_NUM = max(3, min(10, int(os.environ.get("WEB_CHINA_ORGANIC_NUM", "8"))))
 WEB_RATE_BUCKETS = defaultdict(deque)
 WEB_RATE_LOCK = threading.Lock()
+print(
+    f"ANDROID/WEB PARITY exact={WEB_MATCH_WHATSAPP_EXACT} "
+    f"caps local/us/cn={WEB_LOCAL_MAX}/{WEB_US_MAX}/{WEB_CN_MAX} "
+    f"legacy_turbo_available={WEB_STREAM_FAST_WAVE} store_timeout={WEB_STREAM_STORE_TIMEOUT}s"
+)
 
 
 def _web_request_ip(request):
@@ -9640,7 +9783,7 @@ def _web_attach_best_images(rows, rescue_page=False):
 
 def _web_build_text_items(txt, urls, lang, query):
     """Same typed-search selection logic as WhatsApp, but returns JSON cards instead of sending CTAs."""
-    total_cap = max(1, LENS_DIRECT_LOCAL_MAX + LENS_DIRECT_US_MAX + LENS_DIRECT_CN_MAX)
+    total_cap = max(1, WEB_LOCAL_MAX + WEB_US_MAX + WEB_CN_MAX)
     offers = text77_extract_store_offers(txt or "", limit=max(total_cap * 2, total_cap))
     candidates = []
     for offer in offers:
@@ -9668,7 +9811,7 @@ def _web_build_text_items(txt, urls, lang, query):
     candidates = [o for o in candidates if ((o.get("source") or "", o.get("title") or "") in kept_keys)]
     candidates = _filter_confirmed_oos(candidates, "WEB-TEXT")
 
-    caps = {0: LENS_DIRECT_LOCAL_MAX, 1: LENS_DIRECT_US_MAX, 2: LENS_DIRECT_CN_MAX}
+    caps = {0: WEB_LOCAL_MAX, 1: WEB_US_MAX, 2: WEB_CN_MAX}
     selected, merchant_counts, seen_urls = [], defaultdict(int), set()
     for rank in (0, 1, 2):
         bucket = [x for x in candidates if x.get("market_rank") == rank]
@@ -9715,10 +9858,12 @@ def _web_build_text_items(txt, urls, lang, query):
             "price": shown_price,
             "url": item.get("link") or "",
             "image": item.get("thumbnail") or item.get("image") or "",
+            "match_score": round(_findzia_match_score(query, raw_title or title or query), 3),
         })
-    results = [row for row in results if _web_is_direct_product_page_url(row.get("url") or "", row.get("store") or "")]
-    results = _web_attach_best_images(results, rescue_page=True)
-    return _web_verify_rows_strict(results, lang)
+    # v106.1 parity: stop here, exactly where WhatsApp stops.
+    # The previous app-only direct-page/image/merchant verification pass could
+    # remove valid WhatsApp winners and added several seconds of network latency.
+    return results
 
 
 def _web_brand_comparison(query, lang):
@@ -9784,7 +9929,7 @@ def _web_build_lens_items(lens, lang, caption=""):
             0 if m.get("section") == "visual_matches" else 1,
             int(m.get("position") or 999),
         ))
-        cap = {0: LENS_DIRECT_LOCAL_MAX, 1: LENS_DIRECT_US_MAX, 2: LENS_DIRECT_CN_MAX}.get(rank, 0)
+        cap = {0: WEB_LOCAL_MAX, 1: WEB_US_MAX, 2: WEB_CN_MAX}.get(rank, 0)
         probe_n = max(cap + 2, cap)
         head = _filter_confirmed_oos(buckets[rank][:probe_n], f"WEB-LENS-{rank}")
         buckets[rank] = head + buckets[rank][probe_n:]
@@ -9807,7 +9952,7 @@ def _web_build_lens_items(lens, lang, caption=""):
                 return d
         return host or re.sub(r"[^a-z0-9]+", "", source) or source
 
-    caps = {0: LENS_DIRECT_LOCAL_MAX, 1: LENS_DIRECT_US_MAX, 2: LENS_DIRECT_CN_MAX}
+    caps = {0: WEB_LOCAL_MAX, 1: WEB_US_MAX, 2: WEB_CN_MAX}
     selected, seen_urls, merchant_counts = [], set(), defaultdict(int)
     for rank in (0, 1, 2):
         taken = 0
@@ -9850,59 +9995,125 @@ def _web_build_lens_items(lens, lang, caption=""):
             "url": (m.get("link") or "").strip(),
             "image": m.get("thumbnail") or m.get("image") or "",
         })
-    results = [row for row in results if _web_is_direct_product_page_url(row.get("url") or "", row.get("store") or "")]
-    results = _web_attach_best_images(results, rescue_page=True)
-    return _web_verify_rows_strict(results, lang)
+    # v106.1 parity: WhatsApp sends the selected Lens cards immediately and does
+    # not re-open merchant pages. Keep the Lens thumbnail already returned by
+    # SerpApi, but do not alter membership/order with app-only verification.
+    return results
 
 
 def _web_fallback_product_items(txt, urls, lang, query):
-    """Fallback for image searches that went through the full Vision/text pipeline."""
+    """Structured equivalent of WhatsApp send_product_result for image fallback.
+
+    Membership and order intentionally follow WhatsApp: first MAX_STORES offers,
+    only direct store URLs, no app-only market quota/page verification.
+    """
     offers = extract_store_offers(txt or "")
     rows = []
-    for offer in offers:
-        url = match_url(offer.get("name") or "", urls or {})
+    for offer in offers[:MAX_STORES]:
+        name = offer.get("name") or ""
+        url = match_url(name, urls or {})
         if not is_direct_store_url(url):
             continue
         detail = re.sub(r"^(?:✅|🏆|•)\s*", "", offer.get("line") or "").strip()
-        name = offer.get("name") or ""
         if name:
             detail = re.sub(rf"^{re.escape(name)}\s*(?:—|–|-)\s*", "", detail, flags=re.I).strip()
         title, raw_price = _text_offer_price_and_title(detail)
         probe = {"source": name, "title": title or detail, "link": url}
         rank = result_market_rank(probe)
-        if rank not in (0, 1, 2):
-            continue
-        cc = (current_market().get("country") or DEFAULT_COUNTRY).lower() if rank == 0 else ("us" if rank == 1 else "cn")
+        if rank == 0:
+            cc = (current_market().get("country") or DEFAULT_COUNTRY).lower()
+        elif rank == 1:
+            cc = "us"
+        elif rank == 2:
+            cc = "cn"
+        else:
+            cc = ""
         rows.append({
             "market": _web_market_label(rank),
             "market_rank": rank,
             "country": cc,
-            "flag": country_flag_emoji(cc),
+            "flag": country_flag_emoji(cc) if cc else "",
             "store": _ui_plain_store_name(name, url) or U(lang, "store"),
             "title": _compact_ui_title(title or query),
-            "price": _text_price_local(raw_price, rank, lang) if raw_price else "",
+            "price": _text_price_local(raw_price, rank, lang) if raw_price and rank in (0, 1, 2) else raw_price,
             "url": url,
             "image": "",
         })
-    rows = [row for row in rows if _web_is_direct_product_page_url(row.get("url") or "", row.get("store") or "")]
-    rows = _web_attach_best_images(rows, rescue_page=True)
-    rows.sort(key=lambda x: x["market_rank"])
-    caps = {0: LENS_DIRECT_LOCAL_MAX, 1: LENS_DIRECT_US_MAX, 2: LENS_DIRECT_CN_MAX}
-    out, counts = [], defaultdict(int)
-    for row in rows:
-        if counts[row["market_rank"]] >= caps[row["market_rank"]]:
-            continue
-        out.append(row)
-        counts[row["market_rank"]] += 1
-    return _web_verify_rows_strict(out, lang)
-
+    return rows
 
 
 def _web_stream_event(payload):
     return (json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
 
 
-def _web_market_candidates_to_items(candidates, rank, lang, query, verify=True):
+_WEB_BAD_PRICE_TERMS = (
+    "per month", "monthly", "month plan", "installment", "instalment", "pay monthly",
+    "monthly payment", "emi", "finance payment", "قسطي", "قسط", "اقساط", "أقساط", "شهري",
+)
+_WEB_WHOLESALE_TERMS = (
+    "minimum order", "min order", "moq", "wholesale", "bulk order", "fob",
+    "per piece", "/piece", "piece price", "sample price", "supplier",
+    "حد ادنى للطلب", "الحد الأدنى للطلب", "جملة", "بالجملة",
+)
+
+
+def _web_fast_price_guard(row):
+    """Cheap guard for streamed cards; avoids a merchant-page HTTP round-trip."""
+    row = dict(row or {})
+    blob = " ".join(
+        str(row.get(k) or "")
+        for k in ("title", "price", "_offer_meta", "store", "source")
+    ).lower()
+    if any(term in blob for term in _WEB_BAD_PRICE_TERMS):
+        return False
+    if any(term in blob for term in _WEB_WHOLESALE_TERMS):
+        return False
+    return True
+
+
+def _web_fast_finalize_rows(rows, lang):
+    """Stream safe structured-price rows without fetching each merchant page.
+
+    Used only by the live FIFO wave. The final engine remains authoritative and
+    can later upsert verified/enriched cards.
+    """
+    market_snapshot = dict(current_market())
+    out = []
+    for row in list(rows or []):
+        row = dict(row or {})
+        url = str(row.get("url") or row.get("link") or "").strip()
+        if not url or not _web_is_direct_product_page_url(
+            url, row.get("store") or row.get("source") or ""
+        ):
+            continue
+        if not _web_fast_price_guard(row):
+            print(
+                f"WEB FAST PRICE-GUARD DROP store={row.get('store') or row.get('source')} "
+                f"title={(row.get('title') or '')[:90]}"
+            )
+            continue
+        rank = row.get("market_rank")
+        if rank not in (0, 1, 2):
+            rank = result_market_rank({
+                "link": url,
+                "source": row.get("store") or row.get("source"),
+                "title": row.get("title"),
+            })
+        existing = str(row.get("price") or "").strip()
+        val, _cur = _web_price_number_and_currency(existing)
+        if not val or val <= 0:
+            continue
+        row["price"] = _web_normalize_existing_price_to_market(
+            existing, rank, lang, market_snapshot
+        )
+        row["price_verified"] = False
+        row["price_source"] = row.get("price_source") or "search_structured_fast"
+        row.pop("_offer_meta", None)
+        out.append(row)
+    return out
+
+
+def _web_market_candidates_to_items(candidates, rank, lang, query):
     """Convert one market's SerpApi shopping wave to the same JSON card contract as /api/search."""
     seq = []
     for item in list(candidates or []):
@@ -9912,6 +10123,11 @@ def _web_market_candidates_to_items(candidates, rank, lang, query, verify=True):
         if not url.startswith(("http://", "https://")):
             continue
         seq.append(item)
+
+    # v105.2: never flash obvious wrong cheap items in FIFO. Ambiguous rows are held
+    # for the authoritative final pass, which already has the AI relevance gate.
+    if seq:
+        seq = [x for x in seq if _findzia_stream_candidate_ok(query, x)]
 
     # Keep the same cheap relevance and stock gates; do not add another AI call here.
     if seq:
@@ -9935,7 +10151,7 @@ def _web_market_candidates_to_items(candidates, rank, lang, query, verify=True):
     else:
         seq.sort(key=lambda x: int(x.get("position") or 999))
 
-    cap = {0: LENS_DIRECT_LOCAL_MAX, 1: LENS_DIRECT_US_MAX, 2: LENS_DIRECT_CN_MAX}.get(rank, 4)
+    cap = {0: WEB_LOCAL_MAX, 1: WEB_US_MAX, 2: WEB_CN_MAX}.get(rank, 4)
     local_cc = (current_market().get("country") or DEFAULT_COUNTRY).lower()
     cc = local_cc if rank == 0 else ("us" if rank == 1 else "cn")
     out, seen_urls, merchant_counts = [], set(), defaultdict(int)
@@ -9963,18 +10179,20 @@ def _web_market_candidates_to_items(candidates, rank, lang, query, verify=True):
             "price": shown_price,
             "url": url,
             "image": _web_best_card_image(item.get("thumbnail") or item.get("image") or "", "", False),
+            "match_score": round(_findzia_match_score(query, item.get("title") or query), 3),
+            "_offer_meta": item.get("_offer_meta") or "",
         })
         if len(out) >= cap:
             break
-    if not verify:
-        return out
+    if WEB_FAST_SKIP_PRODUCT_PAGE_VERIFY:
+        return _web_fast_finalize_rows(out, lang)
     return _web_verify_rows_strict(out, lang)
 
 
 def _web_fast_market_wave_sync(query, country, lang, rank):
     market = _web_market(country)
     MARKET_CTX.value = market
-    cap = {0: LENS_DIRECT_LOCAL_MAX, 1: LENS_DIRECT_US_MAX, 2: LENS_DIRECT_CN_MAX}.get(rank, 4)
+    cap = {0: WEB_LOCAL_MAX, 1: WEB_US_MAX, 2: WEB_CN_MAX}.get(rank, 4)
     candidates = _market_presence_fallback(query, rank, limit=max(cap + 2, cap))
     return _web_market_candidates_to_items(candidates, rank, lang, query)
 
@@ -9993,7 +10211,7 @@ def _web_stream_store_specs(query, country, rank):
     if rank == 0:
         specs = [("Local", "", local_cc)]
         try:
-            specs.extend((label, domain, local_cc) for label, domain in local_rescue_store_specs(q, LOCAL_STORE_RESCUE_MAX))
+            specs.extend((label, domain, local_cc) for label, domain in local_rescue_store_specs(q, WEB_LOCAL_STORE_PROBES))
         except Exception:
             pass
     elif rank == 1:
@@ -10556,108 +10774,6 @@ def _web_verify_rows_strict(rows, lang):
     return [x for x in out if x]
 
 
-
-def _serpapi_local_google_request(query, label="", domain="", country="kw", timeout_seconds=4.5):
-    """Fast local organic Google fallback for countries unsupported by google_shopping gl.
-
-    This is intentionally a first-paint path:
-    - one ordinary Google request
-    - no merchant page fetch
-    - no Gemini
-    - keeps only URLs that the existing market classifier recognizes as LOCAL
-    """
-    if not SERPAPI_API_KEY:
-        return []
-
-    q = _shopping_clean_query(query or "")
-    if not q:
-        return []
-
-    market = current_market()
-    cc = str(country or market.get("country") or DEFAULT_COUNTRY).lower()
-    country_name = str(market.get("country_name") or cc.upper()).strip()
-
-    if domain:
-        search_q = f'{q} site:{domain}'
-    else:
-        search_q = f'{q} {country_name} price buy'
-
-    params = {
-        "engine": "google",
-        "q": search_q,
-        "api_key": SERPAPI_API_KEY,
-        "hl": country_search_hl(cc) or "en",
-        "num": 12,
-        "output": "json",
-    }
-
-    try:
-        r = requests.get(
-            "https://serpapi.com/search.json",
-            params=params,
-            timeout=(2.5, max(3.0, float(timeout_seconds or 4.5))),
-        )
-        if r.status_code >= 400:
-            print(f"WEB LOCAL GOOGLE HTTP {r.status_code} store={label or 'Local'}: {r.text[:180]}")
-            return []
-
-        data = r.json()
-        if data.get("error"):
-            print(f"WEB LOCAL GOOGLE ERROR store={label or 'Local'}: {data.get('error')}")
-            return []
-
-        rows = data.get("organic_results") or []
-        out = []
-
-        for pos, row in enumerate(rows, 1):
-            link = str(row.get("link") or "").strip()
-            if not link.startswith(("http://", "https://")):
-                continue
-
-            if domain:
-                try:
-                    host = urllib.parse.urlparse(link).netloc.lower().replace("www.", "")
-                except Exception:
-                    host = ""
-                if not _host_matches_any(host, (domain,)):
-                    continue
-
-            price_text = _google_organic_price_text(row)
-
-            item = {
-                "title": str(row.get("title") or q).strip(),
-                "link": link,
-                "source": label or str(row.get("source") or "").strip() or "Local",
-                "position": int(row.get("position") or pos),
-                "section": "web_local_google",
-                "exact": False,
-                "thumbnail": str(row.get("thumbnail") or "").strip(),
-                "image": str(row.get("thumbnail") or "").strip(),
-                "price": price_text,
-                "price_value": None,
-                "currency": detect_currency_code(price_text, "", cc) if price_text else "",
-                "in_stock": None,
-                "condition": "",
-                "_lens_country": cc,
-                "_local_google_fallback": True,
-            }
-
-            if result_market_rank(item) != 0:
-                continue
-
-            out.append(item)
-
-            if len(out) >= 8:
-                break
-
-        print(f"WEB LOCAL GOOGLE store={label or 'Local'} -> {len(out)} result(s)")
-        return out
-
-    except Exception as e:
-        print(f"WEB LOCAL GOOGLE EXCEPTION store={label or 'Local'}: {e}")
-        return []
-
-
 def _serpapi_china_global_site_request(query, label, domain, timeout_seconds=None):
     """One regular Google site-search for a Chinese global marketplace.
 
@@ -10723,168 +10839,84 @@ def _serpapi_china_global_site_request(query, label, domain, timeout_seconds=Non
         return []
 
 def _web_store_probe_sync(query, country, lang, rank, label, domain, gl):
-    """Fast one-store probe used for live FIFO first paint.
-
-    v105-fastfix:
-    - LOCAL: ordinary Google organic search because google_shopping gl=kw is unsupported.
-    - US: Google Shopping as before.
-    - CHINA: organic marketplace path as before.
-    - No strict merchant page fetch before the card is emitted.
-    """
+    """Probe one merchant and return UI cards; Chinese globals use organic-first in v97."""
     market = _web_market(country)
     MARKET_CTX.value = market
     q = _shopping_clean_query(query or "")
-
     if not q or not SERPAPI_API_KEY:
         return []
 
-    candidate_cc = (
-        (market.get("country") or DEFAULT_COUNTRY).lower()
-        if rank == 0
-        else ("us" if rank == 1 else "cn")
-    )
+    candidate_cc = (market.get("country") or DEFAULT_COUNTRY).lower() if rank == 0 else ("us" if rank == 1 else "cn")
+    candidates = []
 
-    # LOCAL first paint: skip unsupported google_shopping gl=kw entirely.
-    if rank == 0:
-        candidates = _serpapi_local_google_request(
-            q,
-            label=label,
-            domain=domain,
-            country=candidate_cc,
-            timeout_seconds=min(WEB_STREAM_STORE_HTTP_TIMEOUT, 4.5),
-        )
-        rows = _web_market_candidates_to_items(
-            candidates,
-            rank,
-            lang,
-            q,
-            verify=False,
-        )
-        rows = [
-            row
-            for row in rows
-            if _web_is_direct_product_page_url(
-                row.get("url") or "",
-                row.get("store") or label,
-            )
-        ]
-        return rows[:max(WEB_STREAM_RESULTS_PER_STORE, _web_marketplace_repeat_cap(domain))]
-
-    # China global marketplaces: keep existing organic-first path.
+    # v97: for Chinese global marketplaces, ordinary Google site search is the fast
+    # first path.  Google Shopping site: queries are too sparse for these domains.
     if rank == 2 and domain and WEB_CHINA_ORGANIC_FIRST:
         candidates = _serpapi_china_global_site_request(
-            q,
-            label,
-            domain,
-            timeout_seconds=min(WEB_CHINA_ORGANIC_TIMEOUT, 4.8),
+            q, label, domain, timeout_seconds=WEB_CHINA_ORGANIC_TIMEOUT
         )
-        rows = _web_market_candidates_to_items(
-            candidates,
-            rank,
-            lang,
-            q,
-            verify=False,
-        )
+        # Do not chain a second SerpApi request inside the fast FIFO task.  Other China
+        # merchants are already running in parallel, and the full engine can enrich later.
+        # This prevents timed-out to_thread work from continuing in the background.
+        rows = _web_market_candidates_to_items(candidates, rank, lang, q)
         return rows[:_web_marketplace_repeat_cap(domain)]
 
-    # US first paint: Shopping is supported; keep it, but don't open merchant pages.
-    search_q = f"{q} site:{domain}" if domain else q
-    cards = _serpapi_shopping_request(
-        search_q,
-        gl or "us",
-        hl="en",
-        timeout_seconds=min(WEB_STREAM_STORE_HTTP_TIMEOUT, 4.8),
-    )
-
-    candidates = []
-    for card in cards or []:
-        item = _shopping_card_to_market_item(card, label, candidate_cc)
-        if not item:
-            continue
-
-        if domain:
-            try:
-                host = urllib.parse.urlparse(
-                    item.get("link") or ""
-                ).netloc.lower().replace("www.", "")
-            except Exception:
-                host = ""
-
-            if not _host_matches_any(host, (domain,)):
-                continue
-
-        if result_market_rank(item) != rank:
-            continue
-
-        candidates.append(item)
-
-    rows = _web_market_candidates_to_items(
-        candidates,
-        rank,
-        lang,
-        q,
-        verify=False,
-    )
-    rows = [
-        row
-        for row in rows
-        if _web_is_direct_product_page_url(
-            row.get("url") or "",
-            row.get("store") or label,
+    # Existing Shopping path remains unchanged for local/US.
+    if not candidates:
+        search_q = f"{q} site:{domain}" if domain else q
+        hl = country_search_hl(gl) if rank == 0 else "en"
+        cards = _serpapi_shopping_request(
+            search_q,
+            gl,
+            hl=hl,
+            timeout_seconds=WEB_STREAM_STORE_HTTP_TIMEOUT,
         )
-    ]
+        for card in cards or []:
+            item = _shopping_card_to_market_item(card, label, candidate_cc)
+            if not item:
+                continue
+            if domain:
+                try:
+                    host = urllib.parse.urlparse(item.get("link") or "").netloc.lower().replace("www.", "")
+                except Exception:
+                    host = ""
+                if not _host_matches_any(host, (domain,)):
+                    continue
+            if result_market_rank(item) != rank:
+                continue
+            candidates.append(item)
 
-    return rows[:_web_marketplace_repeat_cap(domain)]
-
-
+    rows = _web_market_candidates_to_items(candidates, rank, lang, q)
+    rows = [row for row in rows if _web_is_direct_product_page_url(row.get("url") or "", row.get("store") or label)]
+    cap = _web_marketplace_repeat_cap(domain)
+    if cap > WEB_STREAM_RESULTS_PER_STORE and rows:
+        print(f"WEB MARKETPLACE MULTI store={label} cap={cap} rows={len(rows)}")
+    return rows[:cap]
 
 def _web_image_seed_sync(image_b64, mime, caption, country, lang):
-    """Fast image identity for first paint.
+    """One fast image-identification pass used before merchant FIFO probes.
 
-    Important: this deliberately does NOT wait for the multi-pass SerpApi Lens call.
-    The live store FIFO can start from a fast Gemini visual identity.  If the fast
-    merchant wave is sparse, the existing heavy image/Lens engine still runs later.
+    It deliberately does not run the heavy weak-market supplement.  The stream endpoint
+    performs merchant probes independently, so the first available store is not held up.
     """
     market = _web_market(country)
     MARKET_CTX.value = market
-    caption = re.sub(
-        r"\s+",
-        " ",
-        str(caption or ""),
-    ).strip()[:WEB_API_MAX_QUERY_CHARS]
-
-    # If the user typed a caption, it is already the fastest usable shopping identity.
-    if caption:
-        return {
-            "query": caption,
-            "items": [],
-            "market": market,
-            "source": "caption_seed",
-        }
-
+    caption = re.sub(r"\s+", " ", str(caption or "")).strip()[:WEB_API_MAX_QUERY_CHARS]
+    if LENS_DIRECT_MODE and ENABLE_GOOGLE_LENS and SERPAPI_API_KEY and PUBLIC_BASE_URL:
+        try:
+            lens = google_lens_lookup(image_b64, mime, lang, caption, light=True)
+        except Exception as e:
+            print(f"WEB IMAGE FIFO LENS SEED ERR: {e}")
+            lens = {"matches": [], "query": ""}
+        items = _web_build_lens_items(lens, lang, caption) if lens.get("matches") else []
+        identity = (lens.get("visual_identity") or lens.get("relevance_target") or lens.get("query") or caption or "").strip()
+        if identity or items:
+            return {"query": identity or caption, "items": items, "market": market, "source": "lens_seed"}
     try:
-        identity = identify_product_with_retry(
-            image_b64,
-            mime,
-            lang,
-        )
-    except Exception as e:
-        print(f"WEB IMAGE FAST VISION SEED ERR: {e}")
-        identity = ""
-
-    identity = re.sub(
-        r"\s+",
-        " ",
-        str(identity or ""),
-    ).strip()[:180]
-
-    return {
-        "query": identity,
-        "items": [],
-        "market": market,
-        "source": "vision_seed",
-    }
-
+        identity = identify_product_with_retry(image_b64, mime, lang) or caption
+    except Exception:
+        identity = caption
+    return {"query": str(identity or caption or "").strip(), "items": [], "market": market, "source": "vision_seed"}
 
 
 def _web_prepare_stream_query_sync(query, country, lang, selected_option="", original_query="", force_specific=False):
@@ -11322,6 +11354,37 @@ async def web_api_search_stream(request: Request):
                 yield _web_stream_event({"event": "error", "error": "not_a_product_query"})
                 return
 
+            # v106.1: WhatsApp is authoritative. Do not emit speculative FIFO/store
+            # probes before the WhatsApp-equivalent relevance/ranking pipeline finishes.
+            # A lightweight status heartbeat keeps the Android stream alive without
+            # restarting the same search through the JSON fallback.
+            if WEB_MATCH_WHATSAPP_EXACT:
+                final_task = asyncio.create_task(asyncio.to_thread(
+                    _web_search_text_sync, q, country, lang, "", "", True
+                ))
+                while not final_task.done():
+                    try:
+                        await asyncio.wait_for(asyncio.shield(final_task), timeout=2.0)
+                    except asyncio.TimeoutError:
+                        yield _web_stream_event({
+                            "event": "status", "stage": "whatsapp_engine",
+                            "elapsed_ms": int((time.time()-started)*1000),
+                        })
+                final = await final_task
+                if final.get("type") == "recommendations":
+                    yield _web_stream_event({"event": "recommendations", "data": final, "elapsed_ms": int((time.time()-started)*1000)})
+                else:
+                    exact_rows = final.get("results") or []
+                    for item in exact_rows:
+                        yield _web_stream_event({
+                            "event": "result", "phase": "whatsapp_exact",
+                            "market": str(item.get("market") or "other"),
+                            "item": item, "elapsed_ms": int((time.time()-started)*1000),
+                        })
+                        await asyncio.sleep(0.005)
+                yield _web_stream_event({"event": "done", "count": len(final.get("results") or []), "elapsed_ms": int((time.time()-started)*1000)})
+                return
+
             sent = set()
             final_task = asyncio.create_task(asyncio.to_thread(
                 _web_search_text_sync, q, country, lang, "", "", True
@@ -11331,7 +11394,7 @@ async def web_api_search_stream(request: Request):
                 store_tasks = []
                 task_meta = {}
                 rank_remaining = {0: 0, 1: 0, 2: 0}
-                for rank in (2, 0, 1):
+                for rank in (0, 2, 1):
                     for label, domain, gl in _web_stream_store_specs(q, country, rank):
                         async def _run_store(r=rank, lab=label, dom=domain, search_gl=gl):
                             try:
@@ -11442,7 +11505,15 @@ async def web_api_search_stream(request: Request):
             raise
         except Exception as e:
             print(f"WEB STORE FIFO STREAM ERROR: {e}")
-            yield _web_stream_event({"event": "error", "error": "search_failed", "elapsed_ms": int((time.time()-started)*1000)})
+            # v105.2: a late upstream failure must not turn already-visible valid offers
+            # into a red "Search failed" state. Keep partial results and close normally.
+            if 'sent' in locals() and sent:
+                yield _web_stream_event({
+                    "event": "done", "count": len(sent), "partial": True,
+                    "elapsed_ms": int((time.time()-started)*1000),
+                })
+            else:
+                yield _web_stream_event({"event": "error", "error": "search_failed", "elapsed_ms": int((time.time()-started)*1000)})
 
     return StreamingResponse(
         _generator(),
@@ -11488,6 +11559,38 @@ async def web_api_image_search_stream(request: Request):
         yield _web_stream_event({"event": "start", "ok": True, "kind": "image"})
         yield _web_stream_event({"event": "status", "stage": "identify", "elapsed_ms": 0})
         try:
+            # v106.1: run the same direct-Lens -> Vision/Text fallback path as
+            # WhatsApp. No app-only merchant FIFO wave may precede or replace it.
+            if WEB_MATCH_WHATSAPP_EXACT:
+                final_task = asyncio.create_task(asyncio.to_thread(
+                    _web_search_image_sync, image_b64, mime, caption, country, lang
+                ))
+                while not final_task.done():
+                    try:
+                        await asyncio.wait_for(asyncio.shield(final_task), timeout=2.0)
+                    except asyncio.TimeoutError:
+                        yield _web_stream_event({
+                            "event": "status", "stage": "whatsapp_image_engine",
+                            "elapsed_ms": int((time.time()-started)*1000),
+                        })
+                final = await final_task
+                identity = str(final.get("query") or caption or "").strip()
+                yield _web_stream_event({"event": "query", "query": identity, "market": final.get("market")})
+                for item in final.get("results") or []:
+                    market_name = str(item.get("market") or "other")
+                    key = str(item.get("url") or "").strip() or (market_name + "|" + str(item.get("store") or "") + "|" + str(item.get("title") or ""))
+                    if key in sent:
+                        continue
+                    sent.add(key)
+                    yield _web_stream_event({
+                        "event": "result", "phase": "whatsapp_exact",
+                        "market": market_name, "item": item,
+                        "elapsed_ms": int((time.time()-started)*1000),
+                    })
+                    await asyncio.sleep(0.005)
+                yield _web_stream_event({"event": "done", "count": len(sent), "elapsed_ms": int((time.time()-started)*1000)})
+                return
+
             seed = await asyncio.to_thread(_web_image_seed_sync, image_b64, mime, caption, country, lang)
             identity = str(seed.get("query") or caption or "").strip()
             yield _web_stream_event({"event": "query", "query": identity, "market": seed.get("market")})
@@ -11508,7 +11611,7 @@ async def web_api_image_search_stream(request: Request):
                 store_tasks = []
                 task_meta = {}
                 rank_remaining = {0: 0, 1: 0, 2: 0}
-                for rank in (2, 0, 1):
+                for rank in (0, 2, 1):
                     for label, domain, gl in _web_stream_store_specs(identity, country, rank):
                         async def _run_store(r=rank, lab=label, dom=domain, search_gl=gl):
                             try:
@@ -11581,7 +11684,13 @@ async def web_api_image_search_stream(request: Request):
             raise
         except Exception as e:
             print(f"WEB IMAGE STORE FIFO STREAM ERROR: {e}")
-            yield _web_stream_event({"event": "error", "error": "image_search_failed", "elapsed_ms": int((time.time()-started)*1000)})
+            if 'sent' in locals() and sent:
+                yield _web_stream_event({
+                    "event": "done", "count": len(sent), "partial": True,
+                    "elapsed_ms": int((time.time()-started)*1000),
+                })
+            else:
+                yield _web_stream_event({"event": "error", "error": "image_search_failed", "elapsed_ms": int((time.time()-started)*1000)})
 
     return StreamingResponse(
         _generator(),
