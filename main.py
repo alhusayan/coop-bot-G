@@ -2601,7 +2601,8 @@ def _serpapi_lens_request(public_url, lens_type, country, auto_crop, query_hint)
     if query_hint and (lens_type in (None, "", "all", "visual_matches", "products")):
         params["q"] = query_hint[:120]
     try:
-        r = requests.get("https://serpapi.com/search.json", params=params, timeout=(5, LENS_HTTP_TIMEOUT_SECONDS))
+        lens_read_timeout = min(float(LENS_HTTP_TIMEOUT_SECONDS), max(6.0, float(LENS_TOTAL_TIMEOUT_SECONDS) - 0.5))
+        r = requests.get("https://serpapi.com/search.json", params=params, timeout=(5, lens_read_timeout))
         if r.status_code >= 400:
             print(f"GOOGLE LENS HTTP {r.status_code} type={lens_type or 'all'} country={country or '-'}: {r.text[:300]}")
             return []
@@ -9486,7 +9487,7 @@ WEB_PRODUCT_VERIFY_CACHE_TTL_SECONDS = max(300, int(os.environ.get("WEB_PRODUCT_
 WEB_PRODUCT_VERIFY_CACHE = {}
 WEB_PRODUCT_VERIFY_LOCK = threading.Lock()
 
-# v106.1 ANDROID = WHATSAPP PARITY ----------------------------------------------
+# v106.2 ANDROID = TRUE WHATSAPP PARITY -----------------------------------------
 # WhatsApp is the reference engine. Android/Web must use the exact same primary
 # result caps so the same candidate pool, market ordering and merchant limits win.
 # Do not give the app a deeper independent result pool: that was the main source
@@ -11005,7 +11006,20 @@ def _web_search_image_sync(image_b64, mime, caption, country, lang):
             if items:
                 identity = (lens_direct.get("visual_identity") or lens_direct.get("relevance_target") or lens_direct.get("query") or caption or "").strip()
 
-                # v89: Direct Lens can be excellent but uneven by market.  Do not stop the
+                # v106.2 TRUE WHATSAPP PARITY:
+                # WhatsApp sends the selected direct-Lens cards at this point.  In exact
+                # parity mode Android must NOT run the old web-only weak-market supplement,
+                # because that changes membership/order and adds another Google Shopping
+                # wave (the source of the Railway Read timed out bursts).
+                if WEB_MATCH_WHATSAPP_EXACT:
+                    print(f"ANDROID IMAGE TRUE PARITY: direct WhatsApp Lens set -> {len(items)} result(s); no WEB v89 supplement")
+                    return {
+                        "ok": True, "type": "results", "query": identity,
+                        "market": market, "results": items,
+                        "source": "whatsapp_direct_lens_exact",
+                    }
+
+                # Legacy web mode only: Direct Lens can be excellent but uneven by market.
                 # web search merely because *some* Lens cards exist.  WhatsApp often has a
                 # richer pool after its market/rescue layers, so the website now fills weak
                 # LOCAL / US / CHINA buckets before returning while preserving Lens first.
