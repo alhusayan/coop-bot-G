@@ -26,7 +26,7 @@ app.add_middleware(
     allow_headers=["Content-Type", "Accept"],
     max_age=86400,
 )
-BUILD_ID = "v105.1-whatsapp-auto-language-live-typing-fix1-20260827"
+BUILD_ID = "v105.2-findzia-result-guard-20260829"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES")
@@ -7539,6 +7539,110 @@ def _clean_store_name(name):
     n = re.sub(r"\(\s*[^)]*\)?\s*$", "", n)  # قوس مفتوح أو فاضي بنهاية الاسم
     return " ".join(n.split()).strip(" -—–:،") or str(name or "").strip()
 
+# v105.2 Findzia Result Guard -----------------------------------------------------
+# Cheap deterministic gate used by both the fast stream and the authoritative
+# relevance pass. It removes obvious accessories/parts and category conflicts
+# before price or merchant priority can influence the result.
+_FINDZIA_ACCESSORY_TOKENS = {
+    "case", "cover", "protector", "guard", "skin", "sticker", "decal",
+    "cable", "cord", "charger", "adapter", "adaptor", "dock", "stand",
+    "mount", "holder", "strap", "band", "sleeve", "pouch", "bag",
+    "lace", "laces", "shoelace", "shoelaces", "insole", "insoles", "sock", "socks",
+    "replacement", "spare", "part", "parts", "accessory", "accessories",
+    "manual", "handbook", "pdf",
+    "كفر", "غطاء", "حمايه", "حماية", "شاحن", "كيبل", "كابل", "وصله", "وصلة",
+    "حامل", "سوار", "رباط", "اربطة", "أربطة", "جوارب", "نعل", "قطع", "غيار", "اكسسوار", "اكسسوارات",
+}
+
+# Mutually exclusive intent words. If the user explicitly asks for one type and
+# a result explicitly advertises another, it is not the same product for price comparison.
+_FINDZIA_CONFLICT_GROUPS = (
+    ({"tennis", "تنس"}, {"running", "runner", "jogging", "basketball", "soccer", "football", "golf", "hiking", "trail", "padel", "تنس", "جري", "ركض", "سله", "سلة", "قدم", "جولف", "بادل"}),
+    ({"running", "runner", "jogging", "جري", "ركض"}, {"tennis", "basketball", "soccer", "football", "golf", "hiking", "padel", "تنس", "سله", "سلة", "قدم", "جولف", "بادل"}),
+    ({"padel", "بادل"}, {"tennis", "running", "basketball", "soccer", "football", "golf", "hiking", "تنس", "جري", "سله", "سلة", "قدم", "جولف"}),
+)
+
+_FINDZIA_QUERY_FILLER = {
+    "buy", "best", "price", "cheap", "cheapest", "online", "shop", "shopping",
+    "for", "the", "a", "an", "of", "in", "with", "new", "original",
+    "ابي", "أبي", "اريد", "أريد", "افضل", "أفضل", "ارخص", "أرخص", "سعر", "شراء", "اونلاين", "أونلاين",
+}
+
+
+def _findzia_hard_product_mismatch(query, title):
+    q_raw = normalize_ar(str(query or ""))
+    t_raw = normalize_ar(str(title or ""))
+    q = norm_tokens(q_raw)
+    t = norm_tokens(t_raw)
+    if not q or not t:
+        return False
+
+    # An accessory/part word that the user did not ask for is a strong mismatch.
+    # Use token equality (not substring) so words such as "suitcase" are not treated as "case".
+    q_acc = q & _FINDZIA_ACCESSORY_TOKENS
+    t_acc = t & _FINDZIA_ACCESSORY_TOKENS
+    if t_acc - q_acc:
+        return True
+
+    # Explicit sport/use conflicts, e.g. tennis shoes vs running shoes.
+    for wanted, alternatives in _FINDZIA_CONFLICT_GROUPS:
+        q_wanted = q & wanted
+        if not q_wanted:
+            continue
+        # Remove the requested intent from the alternative set before checking the title.
+        other = set(alternatives) - set(wanted)
+        if (t & other) and not (t & wanted):
+            return True
+
+    # Exact alphanumeric model tokens are strong identity anchors. If both sides expose
+    # model-like tokens but none agree, do not treat the listing as the same product.
+    q_models = {x for x in q if any(c.isdigit() for c in x) and len(x) >= 2}
+    t_models = {x for x in t if any(c.isdigit() for c in x) and len(x) >= 2}
+    if q_models and t_models and not (q_models & t_models):
+        return True
+    return False
+
+
+def _findzia_match_score(query, title):
+    """0..1 cheap confidence score for streaming; authoritative final pass can still use AI."""
+    if _findzia_hard_product_mismatch(query, title):
+        return 0.0
+    q = norm_tokens(query) - _FINDZIA_QUERY_FILLER
+    t = norm_tokens(title)
+    if not q or not t:
+        return 0.0
+    q_models = {x for x in q if any(c.isdigit() for c in x) and len(x) >= 2}
+    if q_models:
+        if not (q_models & t):
+            return 0.10
+        model_score = 0.45
+    else:
+        model_score = 0.0
+    overlap = len(q & t) / max(1, len(q))
+    # Query containment is strong, but cap below 1 because titles can contain SEO noise.
+    return min(0.99, model_score + (0.55 * overlap if q_models else overlap))
+
+
+def _findzia_stream_candidate_ok(query, item):
+    title = str((item or {}).get("title") or (item or {}).get("line") or "")
+    if not title:
+        return False
+    if _findzia_hard_product_mismatch(query, title):
+        print(f"FINDZIA GUARD HARD-DROP: {title[:100]}")
+        return False
+    score = _findzia_match_score(query, title)
+    q = norm_tokens(query) - _FINDZIA_QUERY_FILLER
+    q_models = {x for x in q if any(c.isdigit() for c in x) and len(x) >= 2}
+    # Model queries can stream at a lower lexical threshold once the model matches.
+    # Broad/category queries are held to a stricter threshold; uncertain cards wait for
+    # the authoritative final AI-filtered pass rather than flashing a wrong cheap item.
+    threshold = 0.52 if q_models else 0.50
+    if score < threshold:
+        print(f"FINDZIA GUARD HOLD score={score:.2f}: {title[:100]}")
+        return False
+    return True
+
+
 def _fast_relevance_confident(query, candidates):
     """True when returned titles already contain strong query/model evidence.
 
@@ -7552,6 +7656,10 @@ def _fast_relevance_confident(query, candidates):
     if not q_tokens:
         return False
     q_models = {t for t in q_tokens if any(ch.isdigit() for ch in t) and len(t) >= 2}
+    # v105.2: broad/category requests are exactly where accessories and neighboring
+    # product types sneak in. Let the final AI relevance pass judge them.
+    if not q_models:
+        return False
     confident = 0
     considered = 0
     for item in seq:
@@ -7581,6 +7689,9 @@ def filter_relevant_offers(query, offers, urls, use_ai=True, mode="exact"):
         hay = normalize_ar(f"{o.get('line','')} {match_url(o.get('name',''), urls or {})}")
         if not wants_non_product and any(normalize_ar(w) in hay for w in _NON_PRODUCT_WORDS):
             print(f"RELEVANCE HARD-DROP: {o.get('line','')[:80]}")
+            continue
+        if _findzia_hard_product_mismatch(query, o.get('line','')):
+            print(f"FINDZIA RELEVANCE HARD-DROP: {o.get('line','')[:90]}")
             continue
         kept.append(o)
     if not use_ai or not ENABLE_RELEVANCE_FILTER or not kept or len(kept) == 0:
@@ -9385,7 +9496,7 @@ WEB_STREAM_STORE_TIMEOUT = max(4.0, min(12.0, float(os.environ.get("WEB_STREAM_S
 WEB_STREAM_STORE_HTTP_TIMEOUT = max(3.0, min(WEB_STREAM_STORE_TIMEOUT, float(os.environ.get("WEB_STREAM_STORE_HTTP_TIMEOUT_SECONDS", "7.5"))))
 WEB_STREAM_RESULTS_PER_STORE = max(1, min(2, int(os.environ.get("WEB_STREAM_RESULTS_PER_STORE", "1"))))
 # v104: marketplaces can legitimately return several distinct listings for the same/similar product.
-WEB_STREAM_MARKETPLACE_RESULTS_PER_STORE = max(2, min(6, int(os.environ.get("WEB_STREAM_MARKETPLACE_RESULTS_PER_STORE", "4"))))
+WEB_STREAM_MARKETPLACE_RESULTS_PER_STORE = max(1, min(2, int(os.environ.get("WEB_STREAM_MARKETPLACE_RESULTS_PER_STORE", "1"))))
 WEB_MULTI_LISTING_MARKETPLACES = (
     "etsy.com", "ebay.com", "aliexpress.com", "temu.com", "shein.com",
     "dhgate.com", "amazon.com", "alibaba.com", "made-in-china.com", "banggood.com",
@@ -9715,6 +9826,7 @@ def _web_build_text_items(txt, urls, lang, query):
             "price": shown_price,
             "url": item.get("link") or "",
             "image": item.get("thumbnail") or item.get("image") or "",
+            "match_score": round(_findzia_match_score(query, raw_title or title or query), 3),
         })
     results = [row for row in results if _web_is_direct_product_page_url(row.get("url") or "", row.get("store") or "")]
     results = _web_attach_best_images(results, rescue_page=True)
@@ -9913,6 +10025,11 @@ def _web_market_candidates_to_items(candidates, rank, lang, query):
             continue
         seq.append(item)
 
+    # v105.2: never flash obvious wrong cheap items in FIFO. Ambiguous rows are held
+    # for the authoritative final pass, which already has the AI relevance gate.
+    if seq:
+        seq = [x for x in seq if _findzia_stream_candidate_ok(query, x)]
+
     # Keep the same cheap relevance and stock gates; do not add another AI call here.
     if seq:
         offer_rows = [{"line": (x.get("title") or ""), "name": (x.get("source") or "")} for x in seq]
@@ -9963,6 +10080,7 @@ def _web_market_candidates_to_items(candidates, rank, lang, query):
             "price": shown_price,
             "url": url,
             "image": _web_best_card_image(item.get("thumbnail") or item.get("image") or "", "", False),
+            "match_score": round(_findzia_match_score(query, item.get("title") or query), 3),
         })
         if len(out) >= cap:
             break
@@ -11254,7 +11372,15 @@ async def web_api_search_stream(request: Request):
             raise
         except Exception as e:
             print(f"WEB STORE FIFO STREAM ERROR: {e}")
-            yield _web_stream_event({"event": "error", "error": "search_failed", "elapsed_ms": int((time.time()-started)*1000)})
+            # v105.2: a late upstream failure must not turn already-visible valid offers
+            # into a red "Search failed" state. Keep partial results and close normally.
+            if 'sent' in locals() and sent:
+                yield _web_stream_event({
+                    "event": "done", "count": len(sent), "partial": True,
+                    "elapsed_ms": int((time.time()-started)*1000),
+                })
+            else:
+                yield _web_stream_event({"event": "error", "error": "search_failed", "elapsed_ms": int((time.time()-started)*1000)})
 
     return StreamingResponse(
         _generator(),
@@ -11393,7 +11519,13 @@ async def web_api_image_search_stream(request: Request):
             raise
         except Exception as e:
             print(f"WEB IMAGE STORE FIFO STREAM ERROR: {e}")
-            yield _web_stream_event({"event": "error", "error": "image_search_failed", "elapsed_ms": int((time.time()-started)*1000)})
+            if 'sent' in locals() and sent:
+                yield _web_stream_event({
+                    "event": "done", "count": len(sent), "partial": True,
+                    "elapsed_ms": int((time.time()-started)*1000),
+                })
+            else:
+                yield _web_stream_event({"event": "error", "error": "image_search_failed", "elapsed_ms": int((time.time()-started)*1000)})
 
     return StreamingResponse(
         _generator(),
