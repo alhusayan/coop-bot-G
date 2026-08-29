@@ -26,7 +26,7 @@ app.add_middleware(
     allow_headers=["Content-Type", "Accept"],
     max_age=86400,
 )
-BUILD_ID = "v106.5-shopping-geo-guard-20260829"
+BUILD_ID = "v106.6-fast-first-whatsapp-parity-20260830"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES")
@@ -111,6 +111,15 @@ LENS_OVERLAP_MARKET_FALLBACK = env_bool("LENS_OVERLAP_MARKET_FALLBACK", True)
 ANDROID_IMAGE_PROGRESSIVE = env_bool("ANDROID_IMAGE_PROGRESSIVE", True)
 ANDROID_IMAGE_PROGRESSIVE_MIN_RESULTS = max(1, min(6, int(os.environ.get("ANDROID_IMAGE_PROGRESSIVE_MIN_RESULTS", "2"))))
 ANDROID_IMAGE_PROGRESSIVE_MIN_LOCAL = max(0, min(4, int(os.environ.get("ANDROID_IMAGE_PROGRESSIVE_MIN_LOCAL", "1"))))
+
+# v106.6 FAST-FIRST: the authoritative WhatsApp pipeline is NOT shortened.
+# Android simply gets one provisional, AI-filtered snapshot as soon as enough
+# Lens evidence exists, with a raw-Lens deadline chosen to leave ~0.7-0.8 s for
+# the normal relevance/currency formatting before the ~4 s user-visible target.
+ANDROID_FAST_FIRST = env_bool("ANDROID_FAST_FIRST", True)
+ANDROID_FAST_FIRST_TARGET_SECONDS = max(3.0, min(6.0, float(os.environ.get("ANDROID_FAST_FIRST_TARGET_SECONDS", "4.0"))))
+ANDROID_FAST_FIRST_RAW_SECONDS = max(2.0, min(ANDROID_FAST_FIRST_TARGET_SECONDS, float(os.environ.get("ANDROID_FAST_FIRST_RAW_SECONDS", "3.2"))))
+ANDROID_FAST_FIRST_MAX_CANDIDATES = max(4, min(20, int(os.environ.get("ANDROID_FAST_FIRST_MAX_CANDIDATES", "12"))))
 
 SEARCH_CACHE = {}
 # كاش مختلف حسب نوع الطلب. لأن السعر عنصر أساسي، نضع سقفاً قصيراً للكاش حتى لا
@@ -3104,13 +3113,69 @@ def google_lens_lookup(image_b64, mime_type, lang="ar", query_hint="", light=Fal
         fast_deadline = fast_started + min(LENS_FAST_READY_SECONDS, LENS_TOTAL_TIMEOUT_SECONDS)
         enough_fast = False
         last_progress_size = 0
+        preview_raw_deadline = fast_started + min(
+            ANDROID_FAST_FIRST_RAW_SECONDS if ANDROID_FAST_FIRST else LENS_FAST_READY_SECONDS,
+            LENS_TOTAL_TIMEOUT_SECONDS,
+        )
+
+        def _emit_progressive_snapshot(force=False):
+            """Emit at most one provisional Lens snapshot; never alters final selection."""
+            nonlocal last_progress_size
+            if not (light and progress_callback) or last_progress_size != 0 or not merged:
+                return False
+            preview_allowed = [dict(x) for x in merged if result_market_rank(x) != 99]
+            if not preview_allowed:
+                return False
+            preview_counts = {r: sum(1 for x in preview_allowed if result_market_rank(x) == r) for r in (0, 1, 2)}
+            qualifies = (
+                len(preview_allowed) >= ANDROID_IMAGE_PROGRESSIVE_MIN_RESULTS and
+                preview_counts[0] >= ANDROID_IMAGE_PROGRESSIVE_MIN_LOCAL
+            )
+            # At the fast-first raw deadline, do not let a missing slow market hold the UI.
+            # The preview still goes through the exact same AI relevance filter in the
+            # caller and is later replaced by the authoritative WhatsApp snapshot.
+            if not qualifies and not force:
+                return False
+            try:
+                preview_allowed.sort(key=lambda m: (
+                    result_market_rank(m),
+                    0 if m.get("exact") else 1,
+                    0 if m.get("section") == "visual_matches" else 1,
+                    int(m.get("position") or 999),
+                ))
+                # Bound preview work only; final keeps the complete merged pool.  This
+                # prevents a 40-60 card early Lens pass from making Gemini/FX formatting
+                # consume the entire four-second display budget.
+                preview_allowed = preview_allowed[:ANDROID_FAST_FIRST_MAX_CANDIDATES]
+                progress_callback({
+                    "aliases": [],
+                    "matches": preview_allowed,
+                    "query": (query_hint or (preview_allowed[0].get("title") if preview_allowed else "") or "").strip(),
+                    "visual_identity": "",
+                    "chosen": preview_allowed[0] if preview_allowed else {},
+                    "signature": {},
+                    "progressive": True,
+                    "fast_first_forced": bool(force and not qualifies),
+                })
+                last_progress_size = len(merged)
+                mode = "FORCED" if force and not qualifies else "READY"
+                print(
+                    f"LENS FAST-FIRST SNAPSHOT mode={mode} raw={len(preview_allowed)} "
+                    f"counts={preview_counts} elapsed={time.monotonic()-fast_started:.1f}s"
+                )
+                return True
+            except Exception as e:
+                print(f"LENS PROGRESSIVE CALLBACK ERR: {e}")
+                return False
 
         while pending and time.monotonic() < fast_deadline:
             remaining_fast = max(0.0, fast_deadline - time.monotonic())
             just_done, pending = wait(
-                pending, timeout=min(0.35, remaining_fast), return_when=FIRST_COMPLETED
+                pending, timeout=min(0.10, remaining_fast), return_when=FIRST_COMPLETED
             )
             if not just_done:
+                if ANDROID_FAST_FIRST and time.monotonic() >= preview_raw_deadline:
+                    _emit_progressive_snapshot(force=True)
                 continue
             done_fast |= set(just_done)
             for fut in just_done:
@@ -3124,34 +3189,17 @@ def google_lens_lookup(image_b64, mime_type, lang="ar", query_hint="", light=Fal
             enough_fast = (rank_counts[0] >= 2 and rank_counts[1] >= 1 and rank_counts[2] >= 1
                            and len(merged) >= max(5, LENS_MIN_MATCHES))
 
-            # Web/Android only: publish raw Lens evidence early.  We do NOT change or
-            # stop the authoritative pipeline here.  The caller applies the exact same
-            # relevance/ranking code to this snapshot, and later replaces it with final.
-            if light and progress_callback and last_progress_size == 0 and len(merged) > last_progress_size:
-                preview_allowed = [dict(x) for x in merged if result_market_rank(x) != 99]
-                preview_counts = {r: sum(1 for x in preview_allowed if result_market_rank(x) == r) for r in (0, 1, 2)}
-                if (len(preview_allowed) >= ANDROID_IMAGE_PROGRESSIVE_MIN_RESULTS and
-                        preview_counts[0] >= ANDROID_IMAGE_PROGRESSIVE_MIN_LOCAL):
-                    try:
-                        preview_allowed.sort(key=lambda m: (
-                            result_market_rank(m),
-                            0 if m.get("exact") else 1,
-                            0 if m.get("section") == "visual_matches" else 1,
-                            int(m.get("position") or 999),
-                        ))
-                        progress_callback({
-                            "aliases": [],
-                            "matches": preview_allowed,
-                            "query": (query_hint or (preview_allowed[0].get("title") if preview_allowed else "") or "").strip(),
-                            "visual_identity": "",
-                            "chosen": preview_allowed[0] if preview_allowed else {},
-                            "signature": {},
-                            "progressive": True,
-                        })
-                        last_progress_size = len(merged)
-                        print(f"LENS PROGRESSIVE SNAPSHOT raw={len(preview_allowed)} counts={preview_counts} elapsed={time.monotonic()-fast_started:.1f}s")
-                    except Exception as e:
-                        print(f"LENS PROGRESSIVE CALLBACK ERR: {e}")
+            # Web/Android only: publish AI-filtered evidence early.  Slow Lens/store
+            # futures continue in the authoritative background task and can only affect
+            # the later final snapshot, never block already-visible preview cards.
+            force_preview = bool(ANDROID_FAST_FIRST and time.monotonic() >= preview_raw_deadline)
+            _emit_progressive_snapshot(force=force_preview)
+
+        # If some useful Lens evidence exists but the normal progressive thresholds were
+        # not met, give Android one last fast-first chance before the shared pipeline waits
+        # on slow upstreams. This does not cancel or shorten any WhatsApp work.
+        if ANDROID_FAST_FIRST and last_progress_size == 0 and merged:
+            _emit_progressive_snapshot(force=True)
 
         rank_counts = {r: sum(1 for x in merged if result_market_rank(x) == r) for r in (0, 1, 2)}
 
@@ -9905,7 +9953,9 @@ print(
     f"ANDROID/WEB PARITY exact={WEB_MATCH_WHATSAPP_EXACT} "
     f"caps local/us/cn={WEB_LOCAL_MAX}/{WEB_US_MAX}/{WEB_CN_MAX} "
     f"legacy_turbo_available={WEB_STREAM_FAST_WAVE} store_timeout={WEB_STREAM_STORE_TIMEOUT}s "
-    f"progressive={ANDROID_IMAGE_PROGRESSIVE} shopping_geo_guard={SHOPPING_GEO_GUARD}"
+    f"progressive={ANDROID_IMAGE_PROGRESSIVE} fast_first={ANDROID_FAST_FIRST} "
+    f"fast_first_target={ANDROID_FAST_FIRST_TARGET_SECONDS}s raw_deadline={ANDROID_FAST_FIRST_RAW_SECONDS}s "
+    f"shopping_geo_guard={SHOPPING_GEO_GUARD}"
 )
 
 
@@ -12015,7 +12065,11 @@ async def web_api_image_search_stream(request: Request):
                             })
                             await asyncio.sleep(0.003)
                         if emitted_now:
-                            print(f"ANDROID PROGRESSIVE PREVIEW sent={emitted_now} total_preview={len(preview_keys)} elapsed={time.time()-started:.1f}s")
+                            elapsed_preview = time.time() - started
+                            print(f"ANDROID PROGRESSIVE PREVIEW sent={emitted_now} total_preview={len(preview_keys)} elapsed={elapsed_preview:.1f}s")
+                            if ANDROID_FAST_FIRST:
+                                verdict = "HIT" if elapsed_preview <= (ANDROID_FAST_FIRST_TARGET_SECONDS + 0.35) else "LATE"
+                                print(f"ANDROID FAST-FIRST {verdict} target={ANDROID_FAST_FIRST_TARGET_SECONDS:.1f}s actual={elapsed_preview:.1f}s")
 
                 final = await final_task
                 identity = str(final.get("query") or caption or "").strip()
