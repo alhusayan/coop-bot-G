@@ -26,7 +26,7 @@ app.add_middleware(
     allow_headers=["Content-Type", "Accept"],
     max_age=86400,
 )
-BUILD_ID = "v106.8-stream-recovery-20260830"
+BUILD_ID = "v106.5-shopping-geo-guard-20260829"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES")
@@ -102,7 +102,7 @@ OLD_LAYER_ENABLED = env_bool("OLD_LAYER_ENABLED", True)
 # v106.3 SPEED: start slow missing-market Google Shopping fallbacks while the
 # remaining Google Lens passes are still in flight.  Final inclusion rules,
 # ranking and caps stay unchanged; this only overlaps network waits.
-LENS_OVERLAP_MARKET_FALLBACK = False  # v106.7 stability: no orphan prefetch jobs
+LENS_OVERLAP_MARKET_FALLBACK = env_bool("LENS_OVERLAP_MARKET_FALLBACK", True)
 
 # v106.4 PROGRESSIVE: Android may show an early Lens preview while the shared
 # WhatsApp-authoritative engine continues to completion.  The stream later sends
@@ -110,7 +110,7 @@ LENS_OVERLAP_MARKET_FALLBACK = False  # v106.7 stability: no orphan prefetch job
 # and order remain identical to the WhatsApp-equivalent selection.
 ANDROID_IMAGE_PROGRESSIVE = env_bool("ANDROID_IMAGE_PROGRESSIVE", True)
 ANDROID_IMAGE_PROGRESSIVE_MIN_RESULTS = max(1, min(6, int(os.environ.get("ANDROID_IMAGE_PROGRESSIVE_MIN_RESULTS", "2"))))
-ANDROID_IMAGE_PROGRESSIVE_MIN_LOCAL = max(0, min(4, int(os.environ.get("ANDROID_IMAGE_PROGRESSIVE_MIN_LOCAL", "0"))))
+ANDROID_IMAGE_PROGRESSIVE_MIN_LOCAL = max(0, min(4, int(os.environ.get("ANDROID_IMAGE_PROGRESSIVE_MIN_LOCAL", "1"))))
 
 SEARCH_CACHE = {}
 # كاش مختلف حسب نوع الطلب. لأن السعر عنصر أساسي، نضع سقفاً قصيراً للكاش حتى لا
@@ -10410,36 +10410,6 @@ def _web_stream_event(payload):
     return (json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
 
 
-# v106.8: image-search recovery cache.  This does not launch another Lens search.
-# It lets Android recover the result of the *same* server-side job if the NDJSON
-# connection is interrupted by the mobile network / proxy after HTTP 200.
-_WEB_IMAGE_RECOVERY = {}
-_WEB_IMAGE_RECOVERY_TTL = 180.0
-_WEB_BG_TASKS = set()
-
-def _web_recovery_prune():
-    now = time.time()
-    stale = [k for k, v in _WEB_IMAGE_RECOVERY.items() if now - float(v.get("updated_at") or now) > _WEB_IMAGE_RECOVERY_TTL]
-    for k in stale:
-        _WEB_IMAGE_RECOVERY.pop(k, None)
-
-def _web_recovery_init(request_id):
-    if not request_id:
-        return
-    _web_recovery_prune()
-    _WEB_IMAGE_RECOVERY[request_id] = {
-        "request_id": request_id, "started_at": time.time(), "updated_at": time.time(),
-        "done": False, "results": [], "query": "", "market": None, "error": None,
-    }
-
-def _web_recovery_update(request_id, **values):
-    if not request_id:
-        return
-    row = _WEB_IMAGE_RECOVERY.setdefault(request_id, {"request_id": request_id, "started_at": time.time()})
-    row.update(values)
-    row["updated_at"] = time.time()
-
-
 _WEB_BAD_PRICE_TERMS = (
     "per month", "monthly", "month plan", "installment", "instalment", "pay monthly",
     "monthly payment", "emi", "finance payment", "قسطي", "قسط", "اقساط", "أقساط", "شهري",
@@ -11972,9 +11942,6 @@ async def web_api_image_search_stream(request: Request):
     lang = _web_language(payload.get("lang"))
     country, country_source = await asyncio.to_thread(_web_resolve_request_country, request, payload.get("country"))
     caption = str(payload.get("caption") or "").strip()
-    request_id = str(payload.get("request_id") or "").strip()[:128]
-    if request_id:
-        _web_recovery_init(request_id)
 
     async def _generator():
         started = time.time()
@@ -12002,32 +11969,6 @@ async def web_api_image_search_stream(request: Request):
                     _web_search_image_sync, image_b64, mime, caption, country, lang,
                     _lens_progress_callback if ANDROID_IMAGE_PROGRESSIVE else None
                 ))
-
-                # Keep one independent waiter alive so the authoritative result is
-                # cached even if the client-side stream disconnects.  It awaits the
-                # very same final_task; no duplicate Lens/Shopping work is started.
-                async def _cache_authoritative_result():
-                    try:
-                        cached_final = await asyncio.shield(final_task)
-                        cached_results = list(cached_final.get("results") or [])
-                        _web_recovery_update(
-                            request_id,
-                            done=True,
-                            results=cached_results,
-                            query=str(cached_final.get("query") or caption or "").strip(),
-                            market=cached_final.get("market"),
-                            error=None,
-                        )
-                        print(f"ANDROID RECOVERY CACHE READY request={request_id[:18]} results={len(cached_results)}")
-                    except Exception as e:
-                        _web_recovery_update(request_id, done=True, error=str(e), results=[])
-                        print(f"ANDROID RECOVERY CACHE ERR request={request_id[:18]} err={e}")
-
-                if request_id:
-                    recovery_task = asyncio.create_task(_cache_authoritative_result())
-                    _WEB_BG_TASKS.add(recovery_task)
-                    recovery_task.add_done_callback(_WEB_BG_TASKS.discard)
-
                 preview_keys = set()
                 query_sent = False
 
@@ -12075,14 +12016,8 @@ async def web_api_image_search_stream(request: Request):
                             await asyncio.sleep(0.003)
                         if emitted_now:
                             print(f"ANDROID PROGRESSIVE PREVIEW sent={emitted_now} total_preview={len(preview_keys)} elapsed={time.time()-started:.1f}s")
-                            # Cache the current preview as a safety net.  The final
-                            # watcher above will replace it with the exact final set.
-                            try:
-                                _web_recovery_update(request_id, done=False, results=list(preview_items), query=preview_query, market=market_snapshot)
-                            except Exception:
-                                pass
 
-                final = await asyncio.shield(final_task)
+                final = await final_task
                 identity = str(final.get("query") or caption or "").strip()
                 if identity and not query_sent:
                     yield _web_stream_event({"event": "query", "query": identity, "market": final.get("market")})
@@ -12090,10 +12025,6 @@ async def web_api_image_search_stream(request: Request):
                 # Authoritative replacement: Flutter v106.4 clears provisional rows and
                 # rebuilds the list from this exact WhatsApp-equivalent final snapshot.
                 final_results = list(final.get("results") or [])
-                _web_recovery_update(
-                    request_id, done=True, results=final_results, query=identity,
-                    market=final.get("market"), error=None
-                )
                 yield _web_stream_event({
                     "event": "snapshot", "phase": "whatsapp_exact_final",
                     "authoritative": True, "query": identity,
@@ -12214,40 +12145,6 @@ async def web_api_image_search_stream(request: Request):
         media_type="application/x-ndjson",
         headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no", "Connection": "keep-alive"},
     )
-
-
-@app.post("/api/search/image/recover")
-async def web_api_image_search_recover(request: Request):
-    """Recover the same image-search job after an interrupted NDJSON stream.
-
-    This endpoint never starts Google Lens or Shopping. It only waits for / reads
-    the short-lived in-memory result produced by the original request_id.
-    """
-    try:
-        payload = await request.json()
-    except Exception:
-        return Response(content=json.dumps({"ok": False, "error": "invalid_json"}), media_type="application/json", status_code=400)
-    request_id = str(payload.get("request_id") or "").strip()[:128]
-    if not request_id:
-        return Response(content=json.dumps({"ok": False, "error": "missing_request_id"}), media_type="application/json", status_code=400)
-    _web_recovery_prune()
-    wait_s = max(0.0, min(float(payload.get("wait_seconds") or 18.0), 22.0))
-    deadline = time.time() + wait_s
-    row = _WEB_IMAGE_RECOVERY.get(request_id)
-    while time.time() < deadline and row is not None and not row.get("done"):
-        await asyncio.sleep(0.20)
-        row = _WEB_IMAGE_RECOVERY.get(request_id)
-    if row is None:
-        return {"ok": False, "error": "recovery_not_found", "request_id": request_id}
-    return {
-        "ok": True,
-        "request_id": request_id,
-        "done": bool(row.get("done")),
-        "results": list(row.get("results") or []),
-        "query": str(row.get("query") or ""),
-        "market": row.get("market"),
-        "error": row.get("error"),
-    }
 
 
 @app.post("/api/search")
