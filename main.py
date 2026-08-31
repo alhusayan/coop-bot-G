@@ -26,7 +26,7 @@ app.add_middleware(
     allow_headers=["Content-Type", "Accept"],
     max_age=86400,
 )
-BUILD_ID = "v107.2-size-aware-price-more-results-20260901"
+BUILD_ID = "v107.0-result-quality-20260831"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES")
@@ -124,8 +124,8 @@ CACHE_MAX = int(os.environ.get("CACHE_MAX", "3000"))
 CACHE_DB_PATH = os.environ.get("CACHE_DB_PATH", "/tmp/coop_search_cache.sqlite3")
 CACHE_DB_LOCK = threading.Lock()
 # Internal/default text result cap; final market selectors still enforce 4 local + 3 US + 3 China.
-MAX_STORES = int(os.environ.get("MAX_STORES", "14"))
-MAX_URLS_MERGED = int(os.environ.get("MAX_URLS_MERGED", "24"))
+MAX_STORES = int(os.environ.get("MAX_STORES", "10"))
+MAX_URLS_MERGED = int(os.environ.get("MAX_URLS_MERGED", "8"))
 ENABLE_SEARCH_RETRY = env_bool("ENABLE_SEARCH_RETRY", True)
 MAX_SEARCH_ATTEMPTS = max(2, int(os.environ.get("MAX_SEARCH_ATTEMPTS", "3")))
 MAX_IDENTIFY_ATTEMPTS = max(2, int(os.environ.get("MAX_IDENTIFY_ATTEMPTS", "3")))
@@ -149,14 +149,14 @@ ENABLE_GOOGLE_LENS = env_bool("ENABLE_GOOGLE_LENS", True)
 # بدون تحليل Vision ولا حكم هوية ولا طبقات بحث. أطفئه بـ LENS_DIRECT_MODE=false
 # لإرجاع المسار الذكي الكامل. عند عدم وجود نتائج، البوت يرجع تلقائياً للمسار الكامل.
 LENS_DIRECT_MODE = env_bool("LENS_DIRECT_MODE", True)
-LENS_DIRECT_MAX_LINES = max(3, min(20, int(os.environ.get("LENS_DIRECT_MAX_LINES", "14"))))
+LENS_DIRECT_MAX_LINES = max(3, min(10, int(os.environ.get("LENS_DIRECT_MAX_LINES", "10"))))
 # v76: الحدود القصوى مستقلة وليست حصصاً إلزامية.
 # v85.4 Fast caps: المحلي حتى 4، الولايات المتحدة حتى 3، الصين حتى 3.
 # هذه حدود قصوى حقيقية حتى لو بقيت Environment Variables القديمة أعلى في Railway.
 # يمكن للـ Environment خفض الحد، لكنه لا يستطيع رفعه فوق 4/3/3.
-LENS_DIRECT_LOCAL_MAX = max(0, min(6, int(os.environ.get("LENS_DIRECT_LOCAL_MAX", "6"))))
-LENS_DIRECT_US_MAX = max(0, min(4, int(os.environ.get("LENS_DIRECT_US_MAX", "4"))))
-LENS_DIRECT_CN_MAX = max(0, min(4, int(os.environ.get("LENS_DIRECT_CN_MAX", "4"))))
+LENS_DIRECT_LOCAL_MAX = max(0, min(4, int(os.environ.get("LENS_DIRECT_LOCAL_MAX", "4"))))
+LENS_DIRECT_US_MAX = max(0, min(3, int(os.environ.get("LENS_DIRECT_US_MAX", "3"))))
+LENS_DIRECT_CN_MAX = max(0, min(3, int(os.environ.get("LENS_DIRECT_CN_MAX", "3"))))
 LENS_DIRECT_MAX_CTA = max(1, int(os.environ.get("LENS_DIRECT_MAX_CTA", str(LENS_DIRECT_LOCAL_MAX + LENS_DIRECT_US_MAX + LENS_DIRECT_CN_MAX))))
 RESULT_CANDIDATE_SCAN_MAX = max(10, int(os.environ.get("RESULT_CANDIDATE_SCAN_MAX", "20")))
 
@@ -212,7 +212,7 @@ IMMERSIVE_MORE_STORES = env_bool("IMMERSIVE_MORE_STORES", True)
 SHOPPING_POOL = ThreadPoolExecutor(max_workers=4)
 LOCAL_SHOPPING_POOL = ThreadPoolExecutor(max_workers=max(4, int(os.environ.get("LOCAL_SHOPPING_WORKERS", "6"))))
 LOCAL_SHOPPING_PRIMARY_PASSES = max(1, min(3, int(os.environ.get("LOCAL_SHOPPING_PRIMARY_PASSES", "2"))))
-LOCAL_RESULTS_TARGET = max(2, int(os.environ.get("LOCAL_RESULTS_TARGET", "6")))
+LOCAL_RESULTS_TARGET = max(2, int(os.environ.get("LOCAL_RESULTS_TARGET", "4")))
 LOCAL_STORE_RESCUE_MAX = max(0, min(4, int(os.environ.get("LOCAL_STORE_RESCUE_MAX", "3"))))
 LOCAL_COUNTRY_RESCUE_ENABLED = env_bool("LOCAL_COUNTRY_RESCUE_ENABLED", True)
 LOCAL_COUNTRY_RESCUE_PASSES = max(1, min(2, int(os.environ.get("LOCAL_COUNTRY_RESCUE_PASSES", "1"))))
@@ -1344,61 +1344,6 @@ def filter_same_size(offers_dict, reference_text):
         else:
             print(f"SIZE MISMATCH REJECT: {name} -> {info.get('title','')} (want~{format_pack_size(ref)}, got {format_pack_size(sized.get(name))})")
     return kept
-
-
-def _measurement_numeric_values(text):
-    """Numbers that belong to pack/volume/weight/capacity, not selling price.
-
-    Example: ``Pantene 275 ml`` => {275, 275}; ``6 x 185 ml`` also exposes
-    the unit quantity and the total pack quantity.  Used only as a negative
-    price signal; it never changes product identity.
-    """
-    out = []
-    t = normalize_ar(str(text or ""))
-    for m in SIZE_RE.finditer(t):
-        try:
-            count = float((m.group(1) or "1").replace(",", "."))
-            qty = float(m.group(2).replace(",", "."))
-        except Exception:
-            continue
-        if qty > 0:
-            out.append(qty)
-            if count > 1:
-                out.append(count * qty)
-    return out
-
-
-def _price_collides_with_measurement(value, *texts):
-    """True when a weak/unverified price is actually the product's size number.
-
-    We intentionally use this guard only for inferred/search prices.  A verified
-    merchant-page structured price is allowed to equal a size by coincidence.
-    """
-    try:
-        val = float(value)
-    except Exception:
-        return False
-    if val <= 0:
-        return False
-    for text in texts:
-        for qty in _measurement_numeric_values(text):
-            # Avoid aggressive false positives for tiny measures such as 1 L.
-            # The bug class we want to stop is 50ml/275ml/500g/128GB becoming price.
-            if qty < 8:
-                continue
-            tol = max(0.001, abs(qty) * 0.001)
-            if abs(val - qty) <= tol:
-                return True
-    return False
-
-
-def _number_overlaps_measurement_span(text, start, end):
-    """Detect whether a parsed number is physically part of `275 ml`, `500g`, etc."""
-    t = normalize_ar(str(text or ""))
-    for m in SIZE_RE.finditer(t):
-        if start < m.end() and end > m.start():
-            return True
-    return False
 
 
 def norm_tokens(query):
@@ -5503,9 +5448,6 @@ def _extract_numeric_price(line):
         # Prefer a number adjacent to currency; otherwise the last number in the price zone.
         ranked = []
         for mm in matches:
-            # A product measure is not a price: 275 ml, 500 g, 128 GB, 6x185 ml, etc.
-            if _number_overlaps_measurement_span(zone, mm.start(), mm.end()):
-                continue
             context = zone[max(0, mm.start()-12): min(len(zone), mm.end()+12)]
             has_cur = bool(re.search(r"\b[A-Z]{3}\b|US\$|A\$|C\$|S\$|HK\$|NZ\$|NT\$|[$€£¥￥₹₩₺₽₪₴₸₾₼฿₫₱₦₵৳₲₭₮]|د\.ك|ر\.س|د\.إ|ر\.ق|ر\.ع|د\.ب|KD\b|RMB\b", context, re.I))
             ranked.append((1 if has_cur else 0, mm.start(), mm.group(1)))
@@ -6968,10 +6910,8 @@ def _lens_has_price(m):
     if not isinstance(m, dict):
         return False
     try:
-        if m.get("price_value") not in (None, ""):
-            _pv = float(m.get("price_value"))
-            if _pv > 0 and not _price_collides_with_measurement(_pv, m.get("title"), m.get("snippet")):
-                return True
+        if m.get("price_value") not in (None, "") and float(m.get("price_value")) > 0:
+            return True
     except Exception:
         pass
     raw = str(m.get("price") or "").strip()
@@ -7014,9 +6954,6 @@ def _safe_embedded_price(item):
         except Exception:
             continue
         if val <= 0:
-            continue
-        if _price_collides_with_measurement(val, item.get("title"), item.get("snippet")):
-            print(f"LENS SIZE-AS-PRICE BLOCK value={val} title={(item.get('title') or '')[:90]}")
             continue
         candidates.append((m.start(), val, cur_token, m.group(0)))
     if not candidates:
@@ -9958,7 +9895,7 @@ WEB_FAST_SKIP_PRODUCT_PAGE_VERIFY = env_bool("WEB_FAST_SKIP_PRODUCT_PAGE_VERIFY"
 #    instead of inventing a number.
 WEB_KEEP_PRICELESS_RESULTS = env_bool("WEB_KEEP_PRICELESS_RESULTS", True)
 WEB_PRICE_ENRICH_ENABLED = env_bool("WEB_PRICE_ENRICH_ENABLED", True)
-WEB_PRICE_ENRICH_MAX_ROWS = max(2, min(24, int(os.environ.get("WEB_PRICE_ENRICH_MAX_ROWS", "14"))))
+WEB_PRICE_ENRICH_MAX_ROWS = max(2, min(20, int(os.environ.get("WEB_PRICE_ENRICH_MAX_ROWS", "12"))))
 WEB_PRICE_ENRICH_MAX_WAIT_SECONDS = max(2.0, min(12.0, float(os.environ.get("WEB_PRICE_ENRICH_MAX_WAIT_SECONDS", "6.5"))))
 # v106.6.1: many merchants (Namshi, 6thstreet, SHEIN, Amazon...) block server-side
 # page fetches, so the page can answer HTTP 200/403 yet expose no machine-readable
@@ -10570,12 +10507,6 @@ def _web_fast_finalize_rows(rows, lang):
         row["market_rank"] = rank
         existing = str(row.get("price") or "").strip()
         val, _cur = _web_price_number_and_currency(existing)
-        # Search snippets occasionally expose the pack size as the only number; e.g.
-        # Pantene 275 ml was displayed as KWD 275.000. Hold that price for page enrichment.
-        if val and _price_collides_with_measurement(val, row.get("title"), row.get("_offer_meta")):
-            print(f"WEB SIZE-AS-PRICE BLOCK store={row.get('store') or row.get('source')} value={val} title={(row.get('title') or '')[:90]}")
-            val = None
-            row["price"] = ""
         if val and val > 0:
             row["price"] = _web_normalize_existing_price_to_market(
                 existing, rank, lang, market_snapshot
@@ -10977,9 +10908,6 @@ def _web_price_number_and_currency(text, fallback_currency=""):
             if val and val > 0:
                 return val, cur
     # Last resort only when the string itself is short and price-like.
-    # Never turn a naked product measure (275 ml / 500 g / 128 GB) into a price.
-    if extract_pack_size(raw) and not re.search(r"\b(?:USD|EUR|GBP|KWD|KD|SAR|AED|QAR|BHD|OMR|CNY|RMB|JPY|CAD|AUD|CHF|INR|KRW|TRY|RUB)\b|[$€£¥￥₹₩₺₽]|د\.ك|ر\.س|د\.إ|ر\.ق|د\.ب|ر\.ع", raw, re.I):
-        return None, cur
     if len(raw) <= 50:
         m = re.search(r"(?<![0-9])([0-9]+(?:[.,][0-9]{1,3})?)(?![0-9])", raw.replace(",", ""))
         if m:
