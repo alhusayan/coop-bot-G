@@ -26,7 +26,7 @@ app.add_middleware(
     allow_headers=["Content-Type", "Accept"],
     max_age=86400,
 )
-BUILD_ID = "v106.6.4-keep-results-20260831"
+BUILD_ID = "v106.6.3-deep-price-scan-20260831"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES")
@@ -7135,13 +7135,6 @@ Return ONLY a JSON array of strings in the same order, no markdown."""
                 UI_TRANSLATE_CACHE[(lang, original)] = shown
     return [r or c for r, c in zip(result, clean)]
 
-# v106.6.4: the relevance verdict is non-deterministic; on bad runs (weak Lens pool
-# after SerpApi timeouts) it can throw away 20+ valid candidates. When the AI keeps
-# fewer than this floor, top-ranked candidates are restored in Google's own Lens
-# order — a verdict that discards nearly everything is treated as broken, not strict.
-LENS_RELEVANCE_MIN_KEEP = max(2, min(12, int(os.environ.get("LENS_RELEVANCE_MIN_KEEP", "6"))))
-
-
 def _lens_ai_relevance_filter(lens):
     """Infer the product identity from the Lens result set and keep only direct matches.
 
@@ -7176,22 +7169,6 @@ Return JSON only: {"target":"short identity","keep":[1,2,4]}"""
             target = str(data.get("target") or "").strip()
             if target:
                 lens["relevance_target"] = target
-            # v106.6.4 floor: an AI verdict that keeps almost nothing from a large
-            # pool is far more often a bad run than a real relevance judgement.
-            floor = min(LENS_RELEVANCE_MIN_KEEP, len(sample))
-            if len(filtered) < floor:
-                kept_ids = set(id(m) for m in filtered)
-                restored = 0
-                for m in sample:
-                    if len(filtered) >= floor:
-                        break
-                    if id(m) in kept_ids:
-                        continue
-                    filtered.append(m)
-                    kept_ids.add(id(m))
-                    restored += 1
-                if restored:
-                    print(f"LENS RELEVANCE FLOOR: ai_kept={len(filtered)-restored} restored={restored} floor={floor}")
             dropped = len(sample) - len(filtered)
             if dropped:
                 print(f"LENS AI RELEVANCE: target={target!r} kept={len(filtered)}/{len(sample)} dropped={dropped}")
@@ -12382,7 +12359,6 @@ async def web_api_image_search_stream(request: Request):
                     _lens_progress_callback if ANDROID_IMAGE_PROGRESSIVE else None
                 ))
                 preview_keys = set()
-                preview_items = {}
                 query_sent = False
 
                 while not final_task.done():
@@ -12419,7 +12395,6 @@ async def web_api_image_search_stream(request: Request):
                             if key in preview_keys:
                                 continue
                             preview_keys.add(key)
-                            preview_items[key] = dict(item)
                             sent.add(key)
                             emitted_now += 1
                             yield _web_stream_event({
@@ -12445,26 +12420,6 @@ async def web_api_image_search_stream(request: Request):
                 # Authoritative replacement: Flutter v106.4 clears provisional rows and
                 # rebuilds the list from this exact WhatsApp-equivalent final snapshot.
                 final_results = list(final.get("results") or [])
-                # v106.6.4: never erase good cards the user has already seen. Preview
-                # cards passed the same build/quality gates on an earlier Lens pass;
-                # when the final engine comes back smaller (flaky relevance verdict,
-                # SerpApi timeouts), append the missing preview cards after the
-                # authoritative rows instead of deleting them from the screen.
-                if preview_items:
-                    _final_keys = {
-                        (str(it.get("url") or "").strip() or (str(it.get("market") or "other") + "|" + str(it.get("store") or "") + "|" + str(it.get("title") or "")))
-                        for it in final_results
-                    }
-                    _restored = 0
-                    for _k, _it in preview_items.items():
-                        if _k in _final_keys:
-                            continue
-                        _row = dict(_it)
-                        _row["restored_from_preview"] = True
-                        final_results.append(_row)
-                        _restored += 1
-                    if _restored:
-                        print(f"WEB SNAPSHOT PRESERVE PREVIEW restored={_restored} final_total={len(final_results)}")
                 yield _web_stream_event({
                     "event": "snapshot", "phase": "whatsapp_exact_final",
                     "authoritative": True, "query": identity,
