@@ -26,7 +26,7 @@ app.add_middleware(
     allow_headers=["Content-Type", "Accept"],
     max_age=86400,
 )
-BUILD_ID = "v106.5-shopping-geo-guard-20260829"
+BUILD_ID = "v107.0-result-quality-20260831"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES")
@@ -123,8 +123,8 @@ SERVICE_CACHE_TTL = int(os.environ.get("SERVICE_CACHE_TTL_HOURS", "168")) * 3600
 CACHE_MAX = int(os.environ.get("CACHE_MAX", "3000"))
 CACHE_DB_PATH = os.environ.get("CACHE_DB_PATH", "/tmp/coop_search_cache.sqlite3")
 CACHE_DB_LOCK = threading.Lock()
-# v68: قائمة أطول — 5 نتائج افتراضياً (تُضبط من MAX_STORES في Environment Variables).
-MAX_STORES = int(os.environ.get("MAX_STORES", "5"))
+# Internal/default text result cap; final market selectors still enforce 4 local + 3 US + 3 China.
+MAX_STORES = int(os.environ.get("MAX_STORES", "10"))
 MAX_URLS_MERGED = int(os.environ.get("MAX_URLS_MERGED", "8"))
 ENABLE_SEARCH_RETRY = env_bool("ENABLE_SEARCH_RETRY", True)
 MAX_SEARCH_ATTEMPTS = max(2, int(os.environ.get("MAX_SEARCH_ATTEMPTS", "3")))
@@ -158,6 +158,7 @@ LENS_DIRECT_LOCAL_MAX = max(0, min(4, int(os.environ.get("LENS_DIRECT_LOCAL_MAX"
 LENS_DIRECT_US_MAX = max(0, min(3, int(os.environ.get("LENS_DIRECT_US_MAX", "3"))))
 LENS_DIRECT_CN_MAX = max(0, min(3, int(os.environ.get("LENS_DIRECT_CN_MAX", "3"))))
 LENS_DIRECT_MAX_CTA = max(1, int(os.environ.get("LENS_DIRECT_MAX_CTA", str(LENS_DIRECT_LOCAL_MAX + LENS_DIRECT_US_MAX + LENS_DIRECT_CN_MAX))))
+RESULT_CANDIDATE_SCAN_MAX = max(10, int(os.environ.get("RESULT_CANDIDATE_SCAN_MAX", "20")))
 
 # "ابحث أكثر" has its own smaller caps; primary v79 search above stays unchanged.
 MORE_LOCAL_MAX = max(0, int(os.environ.get("MORE_LOCAL_MAX", "3")))
@@ -2762,7 +2763,7 @@ def _shopping_card_to_market_item(card, fallback_source="", lens_country=""):
         "image": (card.get("thumbnail") or "").strip(),
         "price": price_text,
         "price_value": card.get("extracted_price"),
-        "currency": detect_currency_code(price_text, COUNTRY_CURRENCIES.get(lens_country, ""), lens_country),
+        "currency": detect_currency_code(price_text, "", lens_country),
         # Keep lightweight Shopping metadata so the fast stream can reject
         # installments / monthly payments / wholesale-MOQ rows without fetching
         # every merchant page first.
@@ -3250,24 +3251,20 @@ def google_lens_lookup(image_b64, mime_type, lang="ar", query_hint="", light=Fal
         for i, m in enumerate(matches[:5], 1):
             print(f"LENS MATCH {i}: {m.get('title','')} | {m.get('source','')} | section={m.get('section','')} exact={m.get('exact', False)}")
 
-        # نختار أفضل نتيجة ذات عنوان واضح. exact ثم المحلي ثم وجود سعر ثم ترتيب Lens.
+        # نختار هوية الصورة من exact/visual/Lens position فقط؛ السوق والسعر لا يقرران هوية المنتج.
         generic = re.compile(r"^(mules?|shoes?|slippers?|sandals?|footwear|بوتيغا فينيتا|bottega veneta)$", re.I)
         ranked = []
         for m in matches:
             title = (m.get("title") or "").strip()
             if not title or generic.match(title):
                 continue
-            score = 2000 if m.get("exact") else 0
-            market_rank = result_market_rank(m)
-            score += {0: 3000, 1: 1800, 2: 900}.get(market_rank, -5000)
-            if m.get("price") or m.get("price_value") not in (None, ""):
-                score += 700
+            score = 4000 if m.get("exact") else 0
             if m.get("section") == "visual_matches":
-                score += 250
-            score += max(0, 300 - int(m.get("position") or 99) * 12)
-            score += min(len(title), 120) / 10
+                score += 900
+            score += max(0, 700 - int(m.get("position") or 99) * 20)
+            score += min(len(title), 120) / 12
             if m.get("thumbnail") or m.get("image"):
-                score += 10
+                score += 20
             ranked.append((score, m))
         chosen = max(ranked, key=lambda x: x[0])[1] if ranked else matches[0]
         chosen_title = (chosen.get("title") or "").strip()
@@ -3363,73 +3360,57 @@ def _meaningful_lens_tokens(text):
     return out
 
 
+
 def _lens_offer_compatible(info, url, lens_context):
-    """Strict guard for image searches. Candidate title/URL alone must match the Lens identity."""
+    """Image-search identity guard using token boundaries and generic model/spec checks."""
     if not lens_context:
         return True
     sig = lens_context.get("signature") or {}
     chosen = lens_context.get("chosen") or {}
-    candidate_hay = normalize_ar(" ".join([str(info.get("title", "")), str(url)])).lower()
-    chosen_title = normalize_ar(str(chosen.get("title", ""))).lower()
+    candidate = " ".join([str(info.get("title", "")), str(url or "")])
+    chosen_title = str(chosen.get("title", "") or lens_context.get("visual_identity", ""))
+    if chosen_title and _findzia_hard_product_mismatch(chosen_title, candidate):
+        return False
 
-    # Brand is mandatory when Lens returned a clear brand.
-    brand_aliases = {
-        "bottega veneta": ("bottega", "veneta", "بوتيغا", "بوتيقا"),
-        "under armour": ("under", "armour", "اندر", "ارمور"),
-    }
-    for brand, aliases in brand_aliases.items():
-        if brand in chosen_title and not any(normalize_ar(a) in candidate_hay for a in aliases):
-            return False
-
-    # Identity tokens are mandatory. For fashion, one generic overlap is not enough:
-    # require either the brand/model token, or two discriminative tokens from Lens.
-    desired_tokens = _meaningful_lens_tokens(chosen_title)
-    descriptor_tokens = [t for t in desired_tokens if t not in ("bottega", "veneta")]
-    matched_tokens = [t for t in descriptor_tokens if t in candidate_hay]
-    fashion_words = (
-        "shirt","blouse","dress","pajama","pyjama","nightwear","sleepwear","satin",
-        "printed","striped","قميص","فستان","بيجامه","بيجامة","ساتان","مخطط"
-    )
-    is_fashion = any(normalize_ar(w) in chosen_title for w in fashion_words)
-    if descriptor_tokens:
-        needed = 2 if is_fashion and len(descriptor_tokens) >= 2 else 1
-        if len(matched_tokens) < needed:
-            print(f"LENS TOKEN REJECT: wanted={descriptor_tokens} matched={matched_tokens} candidate={candidate_hay[:180]}")
+    desired = _meaningful_lens_tokens(chosen_title)
+    cand_tokens = norm_tokens(candidate)
+    matched = [t for t in desired if t in cand_tokens]
+    fashion_words = {"shirt","blouse","dress","pajama","pyjama","nightwear","sleepwear","satin","printed","striped","قميص","فستان","بيجامه","بيجامة","ساتان","مخطط"}
+    is_fashion = bool(norm_tokens(chosen_title) & fashion_words)
+    if desired:
+        needed = 2 if is_fashion and len(desired) >= 2 else 1
+        if len(matched) < needed:
+            print(f"LENS TOKEN REJECT: wanted={desired} matched={matched} candidate={candidate[:180]}")
             return False
 
     heel = (sig.get("heel") or "UNKNOWN").upper()
-    high_words = ("high heel", "high heels", "stiletto", "kitten heel", "heeled", "pump", "كعب عالي", "كعب ذهبي")
-    if heel in ("FLAT", "NONE") and any(normalize_ar(w) in candidate_hay for w in high_words):
+    cand_norm = normalize_ar(candidate).lower()
+    if heel in ("FLAT", "NONE") and any(normalize_ar(w) in cand_norm for w in ("high heel","high heels","stiletto","kitten heel","heeled","pump","كعب عالي","كعب ذهبي")):
         return False
 
-    pattern = normalize_ar(sig.get("pattern") or "")
-    if pattern and pattern not in ("unknown", "none", "غير معروف"):
-        pattern_groups = {
-            "woven": ("woven", "intrecciato", "weave", "handwoven", "منسوج", "ضفيره"),
-            "intrecciato": ("woven", "intrecciato", "weave", "handwoven", "منسوج", "ضفيره"),
-            "braided": ("braided", "woven", "intrecciato", "مضفر", "منسوج"),
+    pattern = normalize_ar(sig.get("pattern") or "").lower()
+    if pattern and pattern not in ("unknown","none","غير معروف"):
+        groups = {
+            "woven": ("woven","intrecciato","weave","handwoven","منسوج","ضفيره"),
+            "intrecciato": ("woven","intrecciato","weave","handwoven","منسوج","ضفيره"),
+            "braided": ("braided","woven","intrecciato","مضفر","منسوج"),
         }
-        keys = pattern_groups.get(pattern, (pattern,))
-        # For an explicitly woven item, require the candidate itself to say so.
-        if pattern in pattern_groups and not any(normalize_ar(k) in candidate_hay for k in keys):
+        keys = groups.get(pattern)
+        if keys and not any(normalize_ar(k) in cand_norm for k in keys):
             return False
 
-    color = normalize_ar(sig.get("color") or "")
-    if color and color not in ("unknown", "none", "غير معروف"):
-        color_map = {
-            "brown": ("brown", "tan", "cognac", "camel", "burgundy", "بني", "جملي"),
-            "black": ("black", "اسود"),
-            "green": ("green", "اخضر"),
-            "white": ("white", "ivory", "cream", "ابيض"),
+    color = normalize_ar(sig.get("color") or "").lower()
+    if color and color not in ("unknown","none","غير معروف"):
+        cmap = {
+            "brown": ("brown","tan","cognac","camel","burgundy","بني","جملي"),
+            "black": ("black","اسود"), "green": ("green","اخضر"),
+            "white": ("white","ivory","cream","ابيض"),
         }
-        wanted = tuple(normalize_ar(x) for x in color_map.get(color, (color,)))
-        explicit_colors = tuple(normalize_ar(x) for x in (
-            "black","green","white","red","blue","silver","gold","pink","purple",
-            "اسود","اخضر","ابيض","احمر","ازرق","ذهبي","وردي","بنفسجي"
-        ))
-        if any(c in candidate_hay for c in explicit_colors) and not any(c in candidate_hay for c in wanted):
+        wanted = {normalize_ar(x) for x in cmap.get(color, (color,))}
+        all_colors = {normalize_ar(x) for x in ("black","green","white","red","blue","silver","gold","pink","purple","اسود","اخضر","ابيض","احمر","ازرق","ذهبي","وردي","بنفسجي")}
+        explicit = cand_tokens & all_colors
+        if explicit and not (explicit & wanted):
             return False
-
     return True
 
 def filter_verified_with_lens(verified, lens_context):
@@ -3762,7 +3743,7 @@ def extract_store_offers(txt):
         best = m.group(1) in ("✅", "🏆")
         body = s if best else s.lstrip("•").strip()
         offers.append({"line": body, "name": name, "best": best})
-    return offers[:MAX_STORES]
+    return offers[:RESULT_CANDIDATE_SCAN_MAX]
 
 def product_title(txt, fallback=""):
     m = re.search(r"^\s*📦\s*(.+)$", txt or "", flags=re.M)
@@ -4107,7 +4088,7 @@ def call_gemini(parts, system=SYSTEM_PROMPT, use_search=True):
                     urls_map[store] = rec["url"]
                     used_urls.add(rec["url"])
                     break
-        if len(urls_map) < MAX_STORES:
+        if len(urls_map) < RESULT_CANDIDATE_SCAN_MAX:
             for rec in records:
                 url = rec["url"]
                 if not url or url in used_urls:
@@ -4116,9 +4097,9 @@ def call_gemini(parts, system=SYSTEM_PROMPT, use_search=True):
                 if label not in urls_map:
                     urls_map[label] = url
                     used_urls.add(url)
-                if len(urls_map) >= MAX_STORES:
+                if len(urls_map) >= RESULT_CANDIDATE_SCAN_MAX:
                     break
-        return text, dict(list(urls_map.items())[:MAX_STORES])
+        return text, dict(list(urls_map.items())[:RESULT_CANDIDATE_SCAN_MAX])
     except Exception as e:
         print(f"Gemini err {e}")
         return "", {}
@@ -4393,8 +4374,9 @@ def is_china_market_result(item):
     return False
 
 
+
 def is_local_lens_result(item):
-    """Strict worldwide local-market classifier using merchant evidence, never search-geo alone."""
+    """Local means merchant-market evidence, not merely a localized currency or Google search geo."""
     m = current_market()
     cc = (m.get("country") or DEFAULT_COUNTRY).lower()
     explicit = _explicit_market_country(item)
@@ -4415,23 +4397,8 @@ def is_local_lens_result(item):
     for label, domain in country_major_store_specs(cc):
         if _host_matches_any(host, (domain,)) or normalize_name(label) in normalize_name(hay):
             return True
-    codes = _explicit_currency_codes(item)
-    local_codes = set(country_currency_codes(cc))
-    if codes & local_codes:
-        return True
-    # For symbol-only prices ($/¥/£), resolve using local market context instead of assuming USD/JPY/GBP.
-    price_blob = " ".join(str((item or {}).get(k) or "") for k in ("price", "price_text", "currency")).strip()
-    if price_blob:
-        # Currency is LOCAL evidence only when it is actually present in the result.
-        # Never feed the local currency as a fallback here, otherwise a blank/unknown
-        # price returned by gl=KW gets silently interpreted as KWD and becomes falsely local.
-        detected = detect_currency_code(price_blob, "", cc)
-        if detected and detected in local_codes:
-            return True
-    # IMPORTANT: Google/Lens search geo is NOT merchant nationality.
-    # A result returned by gl=KW can still be Italian, German, etc. Therefore an ambiguous
-    # generic-domain result is never labelled LOCAL unless one of the hard/merchant signals
-    # above confirms it (ccTLD/path/country text/known local merchant/local currency).
+    # Critical quality rule: KWD/AED/EUR alone is not merchant-country proof.
+    # Global .com stores often localize the displayed currency.
     return False
 
 
@@ -4454,8 +4421,9 @@ def is_foreign_lens_result(item):
     return bool(host and (_host_matches_any(host, US_STORE_HINTS) or _host_matches_any(host, CHINA_STORE_HINTS)))
 
 
+
 def result_market_rank(item):
-    """0=local market, 1=US, 2=China, 99=reject/other country."""
+    """0=local merchant market, 1=US, 2=China, 99=reject/ambiguous third-country."""
     cc = (current_market().get("country") or DEFAULT_COUNTRY).lower()
     url = str((item or {}).get("link") or (item or {}).get("url") or "")
     source = str((item or {}).get("source") or (item or {}).get("name") or "")
@@ -4468,12 +4436,8 @@ def result_market_rank(item):
         return 0 if cc == "us" else 1
     if explicit == "cn":
         return 0 if cc == "cn" else (1 if cc == "us" else 2)
-    # Explicit third-country geo targeting is not allowed.
     if explicit and explicit not in {cc, "us", "cn"}:
         return 99
-    # Check strong US/China merchant evidence before generic local-currency evidence.
-    # This matters in USD-local markets (e.g. Ecuador/Panama): amazon.com must stay US,
-    # not become "local" merely because both markets use USD.
     if cc != "us" and is_us_market_result(item):
         return 1
     if cc != "cn" and is_china_market_result(item):
@@ -4488,16 +4452,19 @@ def result_market_rank(item):
     host_cc = _host_country_code(host)
     if host_cc and host_cc not in {cc, "us", "cn"}:
         return 99
-    # A clearly different currency is foreign; only USD/CNY are permitted foreign markets.
     codes = _explicit_currency_codes(item)
     local_codes = set(country_currency_codes(cc))
     if codes:
-        if codes & local_codes:
-            return 0
-        if "USD" in codes and "USD" not in local_codes:
+        if "USD" in codes and cc != "us":
             return 1
-        if "CNY" in codes and "CNY" not in local_codes:
-            return 2 if cc != "us" else 1
+        if "CNY" in codes and cc != "cn":
+            return 1 if cc == "us" else 2
+        # Local currency by itself is ambiguous for generic/global domains.
+        if codes & local_codes:
+            search_cc = _search_geo_country(item)
+            if cc in {"us", "cn"} and search_cc == cc:
+                return 0
+            return 99
         return 99
     return 99
 
@@ -4795,7 +4762,7 @@ def _serpapi_google_organic_market_request(query, gl, hl="en", domain="", timeou
                 "image": str(row.get("thumbnail") or "").strip(),
                 "price": price_text,
                 "price_value": _extract_numeric_price(price_text) if price_text else None,
-                "currency": detect_currency_code(price_text, COUNTRY_CURRENCIES.get((gl or "").lower(), ""), (gl or "").lower()) if price_text else "",
+                "currency": detect_currency_code(price_text, "", (gl or "").lower()) if price_text else "",
                 "in_stock": None,
                 "condition": "",
                 "_lens_country": (gl or "").lower(),
@@ -6470,7 +6437,7 @@ def _save_more_results_state(phone, query, bot_id, lang, origin, shown_items, im
     for item in shown_items or []:
         url = str((item or {}).get("link") or "").strip()
         if url:
-            seen_urls.add(url)
+            seen_urls.add(_canonical_result_url(url))
             dom = _more_result_domain(url)
             if dom:
                 seen_domains.add(dom)
@@ -6707,20 +6674,18 @@ def _identity_tokens(text):
     return {x for x in re.findall(r"[a-z0-9\u0600-\u06ff]+", t) if len(x) > 2}
 
 
-def identity_candidates_agree(vision_name, lens_title):
-    """True when Lens and direct vision clearly describe the same product.
 
-    Avoids a paid judge call when brand/model/type already overlap sufficiently.
-    """
+def identity_candidates_agree(vision_name, lens_title):
+    """Agree only when image-Vision and Lens share identity without a model/spec conflict."""
+    if _findzia_hard_product_mismatch(vision_name, lens_title):
+        return False
     a, b = _identity_tokens(vision_name), _identity_tokens(lens_title)
     if not a or not b:
         return False
-    inter = a & b
-    # A model/SKU overlap is decisive.
-    model_a = {x for x in a if any(c.isdigit() for c in x)}
-    model_b = {x for x in b if any(c.isdigit() for c in x)}
-    if model_a & model_b:
-        return True
+    ma, mb = _findzia_model_tokens(vision_name), _findzia_model_tokens(lens_title)
+    if ma or mb:
+        return bool(ma & mb)
+    inter = {x for x in (a & b) if not x.isdigit()}
     return len(inter) >= 2 and (len(inter) / max(1, min(len(a), len(b)))) >= 0.45
 
 
@@ -6963,44 +6928,39 @@ def _lens_has_price(m):
             return False
     return False
 
-def _safe_embedded_price(item):
-    """Extract only a currency-tagged price already present in Lens text; no network call.
 
-    We intentionally refuse bare numbers so model names such as iPhone 16 / WH-1000XM5
-    are never mistaken for a price.
-    """
+def _safe_embedded_price(item):
+    """Extract a currency-tagged selling price from Lens text while rejecting discounts/installments."""
     if not isinstance(item, dict) or _lens_has_price(item):
         return item
-    text = " ".join(str(item.get(k) or "") for k in ("price", "title", "snippet", "extensions"))
-    text = re.sub(r"\s+", " ", text).strip()
-    if not text:
+    text_blob = " ".join(str(item.get(k) or "") for k in ("price", "title", "snippet", "extensions"))
+    text_blob = re.sub(r"\s+", " ", text_blob).strip()
+    if not text_blob:
         return item
     currency_pat = r"(?:KWD|KD|د\.ك|دينار|USD|US\$|\$|SAR|ر\.س|AED|د\.إ|QAR|OMR|BHD|CNY|RMB|¥|￥|EUR|€|GBP|£)"
-    pats = (
-        rf"({currency_pat})\s*([0-9]+(?:[.,][0-9]{{1,3}})?)",
-        rf"([0-9]+(?:[.,][0-9]{{1,3}})?)\s*({currency_pat})",
-    )
-    cur = ""
-    num = None
-    raw = ""
-    for idx, pat in enumerate(pats):
-        m = re.search(pat, text, flags=re.I)
-        if not m:
+    pat = re.compile(rf"(?:(?P<c1>{currency_pat})\s*(?P<n1>[0-9]+(?:[.,][0-9]{{1,3}})?)|(?P<n2>[0-9]+(?:[.,][0-9]{{1,3}})?)\s*(?P<c2>{currency_pat}))", re.I)
+    bad_before = re.compile(r"(?:save|saving|discount|coupon|off|خصم|وفر|توفير)\s*$", re.I)
+    bad_after = re.compile(r"^\s*(?:/\s*(?:mo|month|yr|year)|per\s+(?:month|year)|monthly|installment|قسط|شهري|بالشهر)", re.I)
+    candidates = []
+    for m in pat.finditer(text_blob):
+        before = text_blob[max(0, m.start()-28):m.start()]
+        after = text_blob[m.end():m.end()+28]
+        if bad_before.search(before) or bad_after.search(after):
             continue
-        if idx == 0:
-            cur_token, num_token = m.group(1), m.group(2)
-        else:
-            num_token, cur_token = m.group(1), m.group(2)
+        num_token = m.group('n1') or m.group('n2')
+        cur_token = m.group('c1') or m.group('c2')
         try:
-            num = float(num_token.replace(",", ""))
+            val = float(num_token.replace(',', ''))
         except Exception:
-            num = None
-        if num and num > 0:
-            raw = m.group(0)
-            cur = detect_currency_code(cur_token, "")
-            break
-    if not num:
+            continue
+        if val <= 0:
+            continue
+        candidates.append((m.start(), val, cur_token, m.group(0)))
+    if not candidates:
         return item
+    # Prefer a price explicitly stored in the price field; otherwise the first non-promotional selling-price candidate.
+    _, num, cur_token, raw = candidates[0]
+    cur = detect_currency_code(cur_token, "")
     out = dict(item)
     rank = result_market_rank(out)
     if not cur:
@@ -7012,19 +6972,24 @@ def _safe_embedded_price(item):
     return out
 
 
+
 def _price_identity_score(a, b):
     """Conservative score for borrowing a price from another already-returned Lens card."""
+    if _findzia_hard_product_mismatch(a, b):
+        return 0.0
     ta, tb = _identity_tokens(a or ""), _identity_tokens(b or "")
     if not ta or not tb:
         return 0.0
-    model_a = {x for x in ta if any(c.isdigit() for c in x)}
-    model_b = {x for x in tb if any(c.isdigit() for c in x)}
-    if model_a and model_b and not (model_a & model_b):
+    ma, mb = _findzia_model_tokens(a), _findzia_model_tokens(b)
+    if (ma or mb) and not (ma & mb):
         return 0.0
     inter = len(ta & tb)
     score = inter / max(1, min(len(ta), len(tb)))
-    if model_a & model_b:
+    if ma & mb:
         score += 0.50
+    na, nb = _findzia_pure_numbers(a), _findzia_pure_numbers(b)
+    if na and nb and na & nb:
+        score += 0.10
     return score
 
 
@@ -7135,47 +7100,41 @@ Return ONLY a JSON array of strings in the same order, no markdown."""
                 UI_TRANSLATE_CACHE[(lang, original)] = shown
     return [r or c for r, c in zip(result, clean)]
 
-def _lens_ai_relevance_filter(lens):
-    """Infer the product identity from the Lens result set and keep only direct matches.
 
-    This is intentionally independent from store/country/price priority: relevance wins first.
-    It catches cases like a coffee maker appearing among restaurant-pager results.
-    """
+def _lens_ai_relevance_filter(lens):
+    """Relevance first; AI failure falls back to deterministic high-confidence rows, never the whole noisy pool."""
     matches = list((lens or {}).get("matches") or [])
     if not ENABLE_RELEVANCE_FILTER or len(matches) < 3:
         return matches
     sample = matches[:30]
-    rows = []
-    for i, m in enumerate(sample, 1):
-        rows.append(f"{i}. {(m.get('title') or '')[:180]} | store={(m.get('source') or '')[:50]} | exact={bool(m.get('exact'))}")
+    anchor = str((lens or {}).get("visual_identity") or (lens or {}).get("relevance_target") or ((lens or {}).get("chosen") or {}).get("title") or "").strip()
+    deterministic = sample
+    if anchor:
+        deterministic = [m for m in sample if not _findzia_hard_product_mismatch(anchor, m.get("title") or "") and _findzia_match_score(anchor, m.get("title") or "") >= 0.28]
+        if not deterministic:
+            deterministic = [m for m in sample if not _findzia_hard_product_mismatch(anchor, m.get("title") or "")]
+    rows = [f"{i}. {(m.get('title') or '')[:180]} | store={(m.get('source') or '')[:50]} | exact={bool(m.get('exact'))}" for i, m in enumerate(sample, 1)]
     system = """You are a strict visual-shopping result validator.
-Infer the ONE physical product type/model that the Lens result set is actually about, using consensus across titles and exact/visual signals.
-Then keep only results that sell that same product or a clearly compatible variant of the same product type and use.
-Reject unrelated products even if they come from a preferred store/country or have a price.
-Example: for a restaurant coaster pager/calling system, reject coffee makers, vitamins, lights, unrelated electronics, manuals, accessories, and replacement parts unless the target itself is that accessory.
-Do not use price or merchant priority as relevance evidence.
-Return JSON only: {"target":"short identity","keep":[1,2,4]}"""
-    visual_identity = str((lens or {}).get("visual_identity") or "").strip()
-    prompt = (f"Visual AI identity from the original image: {visual_identity or 'UNKNOWN'}\n"
-              "Use this as the strongest anchor when it is specific and consistent with the Lens set.\n\n"
-              "Lens candidates:\n" + "\n".join(rows))
+Infer the ONE physical product type/model from the original-image identity and Lens consensus.
+Keep only direct sales of that same product or clearly compatible variant. Reject accessories, manuals, neighboring models/types and unrelated products.
+Never use price, merchant fame or country as relevance evidence.
+Return JSON only: {\"target\":\"short identity\",\"keep\":[1,2,4]}"""
+    prompt = f"Visual/original-image identity: {anchor or 'UNKNOWN'}\n\nLens candidates:\n" + "\n".join(rows)
     try:
         raw, _ = call_gemini([{"text": prompt}], system=system, use_search=False)
-        data = json.loads(re.search(r"\{.*\}", raw or "", flags=re.S).group(0))
+        mobj = re.search(r"\{.*\}", raw or "", flags=re.S)
+        data = json.loads(mobj.group(0)) if mobj else {}
         keep = {int(x) for x in (data.get("keep") or []) if str(x).isdigit()}
         filtered = [m for i, m in enumerate(sample, 1) if i in keep]
-        # Safety: require at least one kept item; unlike old fallback, do NOT restore unrelated rows.
         if filtered:
             target = str(data.get("target") or "").strip()
             if target:
                 lens["relevance_target"] = target
-            dropped = len(sample) - len(filtered)
-            if dropped:
-                print(f"LENS AI RELEVANCE: target={target!r} kept={len(filtered)}/{len(sample)} dropped={dropped}")
             return filtered
+        print("LENS AI RELEVANCE: empty keep -> deterministic fallback")
     except Exception as e:
         print(f"LENS AI RELEVANCE FAIL: {e}")
-    return matches
+    return deterministic
 
 
 def _lens_merchant_key(name, url=""):
@@ -7219,20 +7178,22 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption="", image_
     if not matches:
         return False
 
-    # داخل كل سوق: النتائج ذات السعر أولاً، ثم exact/visual، ثم ترتيب Google Lens.
+    # داخل كل سوق: exact/visual/relevance أولاً؛ السعر وشهرة المتجر عوامل لاحقة.
     buckets = {0: [], 1: [], 2: []}
     for m in matches:
         rank = result_market_rank(m)
         if rank in buckets:
             buckets[rank].append(m)
     for rank in buckets:
+        _anchor = str(lens.get("visual_identity") or lens.get("relevance_target") or (lens.get("chosen") or {}).get("title") or "")
         buckets[rank].sort(key=lambda m: (
-            _us_store_priority(m.get("source"), m.get("link")) if rank == 1
-            else (_china_store_priority(m.get("source"), m.get("link")) if rank == 2 else 99),
-            0 if _lens_has_price(m) else 1,
             0 if m.get("exact") else 1,
             0 if m.get("section") == "visual_matches" else 1,
+            -_findzia_match_score(_anchor, m.get("title") or "") if _anchor else 0,
+            0 if _lens_has_price(m) else 1,
             int(m.get("position") or 999),
+            _us_store_priority(m.get("source"), m.get("link")) if rank == 1
+            else (_china_store_priority(m.get("source"), m.get("link")) if rank == 2 else 99),
         ))
         # فحص مخزون لأفضل المرشحين فقط حتى لا نبطئ Lens بعشرات طلبات HTTP.
         # نأخذ cap+2 لإعطاء بديلين إذا كانت بعض البطاقات خالصة.
@@ -7293,14 +7254,14 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption="", image_
             if not (url.startswith("http") and host and "google." not in host):
                 continue
             merchant = _merchant_key(m)
-            if url in seen_urls:
+            if _canonical_result_url(url) in seen_urls:
                 print(f"LENS DUP URL SKIP: merchant={merchant} title={(m.get('title') or '')[:70]}")
                 continue
             if merchant_counts[merchant] >= RESULTS_PER_STORE_MAX:
                 print(f"LENS STORE CAP SKIP: merchant={merchant} cap={RESULTS_PER_STORE_MAX}")
                 continue
             selected.append(m)
-            seen_urls.add(url)
+            seen_urls.add(_canonical_result_url(url))
             merchant_counts[merchant] += 1
             taken += 1
             if taken >= cap or len(selected) >= LENS_DIRECT_MAX_CTA:
@@ -7939,6 +7900,67 @@ _FINDZIA_QUERY_FILLER = {
 }
 
 
+_FINDZIA_SPEC_UNITS = {
+    "gb","tb","mb","kb","kg","g","mg","lb","lbs","oz","ml","l","cl",
+    "cm","mm","m","inch","inches","in","ft","w","kw","mah","hz","khz","mhz","ghz",
+    "mp","mm","pcs","pc","pack","packs","set","sets"
+}
+_FINDZIA_PRICE_WORDS = {
+    "kwd","kd","usd","sar","aed","qar","omr","bhd","cny","rmb","eur","gbp",
+    "دينار","ريال","درهم"
+}
+
+
+def _findzia_model_tokens(value):
+    """Strong model/SKU tokens only: must contain both letters and digits and not be a simple unit spec."""
+    toks = norm_tokens(value)
+    out = set()
+    for tok in toks:
+        if len(tok) < 3 or not any(c.isdigit() for c in tok) or not any(c.isalpha() for c in tok):
+            continue
+        low = tok.lower()
+        # 256gb / 55inch / 500ml are specs, not model IDs.
+        if any(re.fullmatch(rf"\d+(?:\.\d+)?{re.escape(unit)}", low) for unit in _FINDZIA_SPEC_UNITS):
+            continue
+        if low in _FINDZIA_PRICE_WORDS:
+            continue
+        out.add(low)
+    return out
+
+
+def _findzia_pure_numbers(value):
+    """Numeric identity/spec tokens after removing obvious prices/discounts/ratings."""
+    raw = normalize_ar(str(value or "")).lower()
+    currency = r"(?:kwd|kd|usd|sar|aed|qar|omr|bhd|cny|rmb|eur|gbp|د\.ك|دك|ر\.س|ر\.س|د\.إ|دإ|ر\.ق|ر\.ع|د\.ب|دينار|ريال|درهم|\$|€|£|¥|￥)"
+    raw = re.sub(rf"{currency}\s*\d+(?:[.,]\d+)?|\d+(?:[.,]\d+)?\s*{currency}", " ", raw, flags=re.I)
+    raw = re.sub(r"\b\d+(?:[.,]\d+)?\s*%", " ", raw)
+    raw = re.sub(r"\b\d(?:[.,]\d)?\s*(?:/\s*5|stars?|نجوم?)\b", " ", raw, flags=re.I)
+    return set(re.findall(r"(?<![a-z\u0600-\u06ff])\d{2,5}(?![a-z\u0600-\u06ff])", raw))
+
+
+def _findzia_lexical_tokens(value):
+    return {x for x in (norm_tokens(value) - _FINDZIA_QUERY_FILLER) if not x.isdigit() and x.lower() not in _FINDZIA_PRICE_WORDS}
+
+
+def _canonical_result_url(url):
+    """Strip tracking-only parameters while preserving product/variant identifiers."""
+    u = str(url or "").strip()
+    if not u.startswith(("http://", "https://")):
+        return u
+    try:
+        p = urllib.parse.urlsplit(u)
+        drop = {
+            "utm_source","utm_medium","utm_campaign","utm_term","utm_content","utm_id",
+            "gclid","fbclid","msclkid","mc_cid","mc_eid","ref","ref_","tag","affid",
+            "affiliate","aff","source","campaign"
+        }
+        q = [(k, v) for k, v in urllib.parse.parse_qsl(p.query, keep_blank_values=True) if k.lower() not in drop]
+        path = re.sub(r"/{2,}", "/", p.path or "/")
+        return urllib.parse.urlunsplit((p.scheme.lower(), p.netloc.lower(), path.rstrip("/") or "/", urllib.parse.urlencode(q, doseq=True), ""))
+    except Exception:
+        return u.split("#", 1)[0]
+
+
 def _findzia_hard_product_mismatch(query, title):
     q_raw = normalize_ar(str(query or ""))
     t_raw = normalize_ar(str(title or ""))
@@ -7947,105 +7969,93 @@ def _findzia_hard_product_mismatch(query, title):
     if not q or not t:
         return False
 
-    # An accessory/part word that the user did not ask for is a strong mismatch.
-    # Use token equality (not substring) so words such as "suitcase" are not treated as "case".
     q_acc = q & _FINDZIA_ACCESSORY_TOKENS
     t_acc = t & _FINDZIA_ACCESSORY_TOKENS
     if t_acc - q_acc:
         return True
 
-    # Explicit sport/use conflicts, e.g. tennis shoes vs running shoes.
     for wanted, alternatives in _FINDZIA_CONFLICT_GROUPS:
-        q_wanted = q & wanted
-        if not q_wanted:
+        if not (q & wanted):
             continue
-        # Remove the requested intent from the alternative set before checking the title.
         other = set(alternatives) - set(wanted)
         if (t & other) and not (t & wanted):
             return True
 
-    # Exact alphanumeric model tokens are strong identity anchors. If both sides expose
-    # model-like tokens but none agree, do not treat the listing as the same product.
-    q_models = {x for x in q if any(c.isdigit() for c in x) and len(x) >= 2}
-    t_models = {x for x in t if any(c.isdigit() for c in x) and len(x) >= 2}
+    # Strong alphanumeric models: WH1000XM5 / A55 / QTJ500 etc.
+    q_models = _findzia_model_tokens(q_raw)
+    t_models = _findzia_model_tokens(t_raw)
     if q_models and t_models and not (q_models & t_models):
         return True
+
+    # Pure numbers can be model generations/specs (iPhone 16, 256 GB, 55 inch),
+    # but never use them alone. Require substantial shared lexical identity first.
+    q_nums = _findzia_pure_numbers(q_raw)
+    t_nums = _findzia_pure_numbers(t_raw)
+    shared_lex = _findzia_lexical_tokens(q_raw) & _findzia_lexical_tokens(t_raw)
+    if q_nums and t_nums and len(shared_lex) >= 2:
+        shared_nums = q_nums & t_nums
+        if not shared_nums:
+            return True
+        # Same family but conflicting generation/capacity: e.g. iPhone 16 256 vs iPhone 15 256.
+        if (q_nums - t_nums) and (t_nums - q_nums):
+            return True
     return False
 
 
+
 def _findzia_match_score(query, title):
-    """0..1 cheap confidence score for streaming; authoritative final pass can still use AI."""
+    """0..1 deterministic identity score. Store/price priority must never inflate this score."""
     if _findzia_hard_product_mismatch(query, title):
         return 0.0
-    q = norm_tokens(query) - _FINDZIA_QUERY_FILLER
-    t = norm_tokens(title)
+    q = _findzia_lexical_tokens(query)
+    t = _findzia_lexical_tokens(title)
     if not q or not t:
         return 0.0
-    q_models = {x for x in q if any(c.isdigit() for c in x) and len(x) >= 2}
-    if q_models:
-        if not (q_models & t):
-            return 0.10
-        model_score = 0.45
-    else:
-        model_score = 0.0
     overlap = len(q & t) / max(1, len(q))
-    # Query containment is strong, but cap below 1 because titles can contain SEO noise.
-    return min(0.99, model_score + (0.55 * overlap if q_models else overlap))
+    q_models = _findzia_model_tokens(query)
+    t_models = _findzia_model_tokens(title)
+    model_bonus = 0.38 if (q_models and (q_models & t_models)) else 0.0
+    q_nums = _findzia_pure_numbers(query)
+    t_nums = _findzia_pure_numbers(title)
+    numeric_bonus = 0.12 if (q_nums and (q_nums & t_nums)) else 0.0
+    return min(0.99, overlap * (0.50 if model_bonus else 0.78) + model_bonus + numeric_bonus)
+
 
 
 def _findzia_stream_candidate_ok(query, item):
     title = str((item or {}).get("title") or (item or {}).get("line") or "")
-    if not title:
-        return False
-    if _findzia_hard_product_mismatch(query, title):
-        print(f"FINDZIA GUARD HARD-DROP: {title[:100]}")
+    if not title or _findzia_hard_product_mismatch(query, title):
+        if title:
+            print(f"FINDZIA GUARD HARD-DROP: {title[:100]}")
         return False
     score = _findzia_match_score(query, title)
-    q = norm_tokens(query) - _FINDZIA_QUERY_FILLER
-    q_models = {x for x in q if any(c.isdigit() for c in x) and len(x) >= 2}
-    # Model queries can stream at a lower lexical threshold once the model matches.
-    # Broad/category queries are held to a stricter threshold; uncertain cards wait for
-    # the authoritative final AI-filtered pass rather than flashing a wrong cheap item.
-    threshold = 0.52 if q_models else 0.50
+    # Only true alphanumeric model/SKU anchors get the lower streaming threshold.
+    strong_model = bool(_findzia_model_tokens(query) & _findzia_model_tokens(title))
+    threshold = 0.46 if strong_model else 0.56
     if score < threshold:
         print(f"FINDZIA GUARD HOLD score={score:.2f}: {title[:100]}")
         return False
     return True
 
 
-def _fast_relevance_confident(query, candidates):
-    """True when returned titles already contain strong query/model evidence.
 
-    This avoids an extra plain-Gemini relevance round-trip for obvious exact-model searches.
-    Ambiguous results still use the AI filter.
-    """
+def _fast_relevance_confident(query, candidates):
+    """Skip the AI relevance round-trip only for genuinely exact alphanumeric model/SKU queries."""
     seq = list(candidates or [])
-    if not seq:
+    q_models = _findzia_model_tokens(query)
+    if not seq or not q_models:
         return False
-    q_tokens = norm_tokens(query)
-    if not q_tokens:
-        return False
-    q_models = {t for t in q_tokens if any(ch.isdigit() for ch in t) and len(t) >= 2}
-    # v105.2: broad/category requests are exactly where accessories and neighboring
-    # product types sneak in. Let the final AI relevance pass judge them.
-    if not q_models:
-        return False
-    confident = 0
-    considered = 0
+    considered = confident = 0
     for item in seq:
         title = str(item.get("title") or item.get("line") or "")
-        t_tokens = norm_tokens(title)
-        if not t_tokens:
+        if not title:
             continue
         considered += 1
-        if q_models:
-            if q_models & t_tokens:
-                confident += 1
-        else:
-            overlap = len(q_tokens & t_tokens) / max(1, min(len(q_tokens), len(t_tokens)))
-            if overlap >= 0.60:
-                confident += 1
-    return considered > 0 and confident / considered >= 0.80
+        if _findzia_hard_product_mismatch(query, title):
+            continue
+        if q_models & _findzia_model_tokens(title):
+            confident += 1
+    return considered >= 2 and confident / considered >= 0.80
 
 
 def filter_relevant_offers(query, offers, urls, use_ai=True, mode="exact"):
@@ -8087,10 +8097,15 @@ def filter_relevant_offers(query, offers, urls, use_ai=True, mode="exact"):
         if dropped:
             print(f"RELEVANCE AI-DROP ({len(dropped)}): {dropped[:4]}")
         # حماية: إذا الحكم رمى كل شي بدون سبب واضح نبقي القائمة (أفضل من إخفاء نتائج صحيحة).
-        return ai_kept if ai_kept else kept
+        if ai_kept:
+            return ai_kept
+        deterministic = [o for o in kept if _findzia_match_score(query, o.get("line", "")) >= 0.42]
+        print(f"RELEVANCE AI EMPTY -> deterministic fallback {len(deterministic)}/{len(kept)}")
+        return deterministic
     except Exception:
-        print(f"RELEVANCE AI PARSE FAIL — keeping as-is: {raw!r}")
-        return kept
+        deterministic = [o for o in kept if _findzia_match_score(query, o.get("line", "")) >= 0.42]
+        print(f"RELEVANCE AI PARSE FAIL -> deterministic fallback {len(deterministic)}/{len(kept)}: {raw!r}")
+        return deterministic
 
 def url_is_alive(url):
     """فحص سريع (كاش) أن الرابط يفتح فعلاً — Safari can't open the page ممنوعة."""
@@ -9101,9 +9116,11 @@ def send_text_lens_style_results(from_number, txt, urls, bot_id, lang, query, ex
         taken = 0
         bucket = [x for x in candidates if x["market_rank"] == rank]
         if rank == 1:
-            bucket.sort(key=lambda x: _us_store_priority(x.get("source"), x.get("link")))
+            bucket.sort(key=lambda x: (-_findzia_match_score(query, x.get("title") or ""), _us_store_priority(x.get("source"), x.get("link")), int(x.get("position") or 999)))
         elif rank == 2:
-            bucket.sort(key=lambda x: _china_store_priority(x.get("source"), x.get("link")))
+            bucket.sort(key=lambda x: (-_findzia_match_score(query, x.get("title") or ""), _china_store_priority(x.get("source"), x.get("link")), int(x.get("position") or 999)))
+        else:
+            bucket.sort(key=lambda x: (-_findzia_match_score(query, x.get("title") or ""), int(x.get("position") or 999)))
         for item in bucket:
             try:
                 host = urllib.parse.urlparse(item["link"]).netloc.lower().split(":")[0]
@@ -9112,12 +9129,12 @@ def send_text_lens_style_results(from_number, txt, urls, bot_id, lang, query, ex
                 host = ""
             merchant = host or normalize_name(item["source"])
             url = (item.get("link") or "").strip()
-            if not merchant or url in seen_urls:
+            if not merchant or _canonical_result_url(url) in seen_urls:
                 continue
             if merchant_counts[merchant] >= RESULTS_PER_STORE_MAX:
                 continue
             merchant_counts[merchant] += 1
-            seen_urls.add(url)
+            seen_urls.add(_canonical_result_url(url))
             selected.append(item)
             taken += 1
             if taken >= caps.get(rank, 0):
@@ -9869,6 +9886,24 @@ WEB_LOCAL_STORE_PROBES = max(0, min(9, int(os.environ.get("WEB_LOCAL_STORE_PROBE
 # still performs the heavier merchant-page verification and can upsert later.
 WEB_FAST_SKIP_PRODUCT_PAGE_VERIFY = env_bool("WEB_FAST_SKIP_PRODUCT_PAGE_VERIFY", True)
 
+# v106.6 ALL-PRICES GUARANTEE ---------------------------------------------------
+# 1) Never delete an already-relevant card just because its price failed to parse.
+# 2) Cards that stream without a numeric price are enriched in the background from
+#    the merchant page (cached, parallel) and the verified price is upserted live.
+# 3) If a merchant page publishes no machine-readable price at all, the card is
+#    kept with an empty price and the client shows the "Price at store" label
+#    instead of inventing a number.
+WEB_KEEP_PRICELESS_RESULTS = env_bool("WEB_KEEP_PRICELESS_RESULTS", True)
+WEB_PRICE_ENRICH_ENABLED = env_bool("WEB_PRICE_ENRICH_ENABLED", True)
+WEB_PRICE_ENRICH_MAX_ROWS = max(2, min(20, int(os.environ.get("WEB_PRICE_ENRICH_MAX_ROWS", "12"))))
+WEB_PRICE_ENRICH_MAX_WAIT_SECONDS = max(2.0, min(12.0, float(os.environ.get("WEB_PRICE_ENRICH_MAX_WAIT_SECONDS", "6.5"))))
+# v106.6.1: many merchants (Namshi, 6thstreet, SHEIN, Amazon...) block server-side
+# page fetches, so the page can answer HTTP 200/403 yet expose no machine-readable
+# price. For those cards a capped Google Shopping site-query recovers the
+# structured price that Google itself already has.
+WEB_PRICE_ENRICH_SHOPPING_FALLBACK = env_bool("WEB_PRICE_ENRICH_SHOPPING_FALLBACK", True)
+WEB_PRICE_ENRICH_SHOPPING_MAX = max(0, min(10, int(os.environ.get("WEB_PRICE_ENRICH_SHOPPING_MAX", "6"))))
+
 WEB_API_MAX_QUERY_CHARS = max(40, min(500, int(os.environ.get("WEB_API_MAX_QUERY_CHARS", "220"))))
 WEB_API_MAX_IMAGE_BYTES = max(512000, min(12 * 1024 * 1024, int(os.environ.get("WEB_API_MAX_IMAGE_BYTES", str(6 * 1024 * 1024)))))
 WEB_API_RATE_PER_MINUTE = max(5, min(120, int(os.environ.get("WEB_API_RATE_PER_MINUTE", "30"))))
@@ -10180,9 +10215,11 @@ def _web_build_text_items(txt, urls, lang, query):
     for rank in (0, 1, 2):
         bucket = [x for x in candidates if x.get("market_rank") == rank]
         if rank == 1:
-            bucket.sort(key=lambda x: _us_store_priority(x.get("source"), x.get("link")))
+            bucket.sort(key=lambda x: (-_findzia_match_score(query, x.get("title") or ""), _us_store_priority(x.get("source"), x.get("link")), int(x.get("position") or 999)))
         elif rank == 2:
-            bucket.sort(key=lambda x: _china_store_priority(x.get("source"), x.get("link")))
+            bucket.sort(key=lambda x: (-_findzia_match_score(query, x.get("title") or ""), _china_store_priority(x.get("source"), x.get("link")), int(x.get("position") or 999)))
+        else:
+            bucket.sort(key=lambda x: (-_findzia_match_score(query, x.get("title") or ""), int(x.get("position") or 999)))
         taken = 0
         for item in bucket:
             url = str(item.get("link") or "").strip()
@@ -10192,12 +10229,12 @@ def _web_build_text_items(txt, urls, lang, query):
             except Exception:
                 host = ""
             merchant = host or normalize_name(item.get("source") or "")
-            if not merchant or not url or url in seen_urls:
+            if not merchant or not url or _canonical_result_url(url) in seen_urls:
                 continue
             if merchant_counts[merchant] >= RESULTS_PER_STORE_MAX:
                 continue
             merchant_counts[merchant] += 1
-            seen_urls.add(url)
+            seen_urls.add(_canonical_result_url(url))
             selected.append(item)
             taken += 1
             if taken >= caps.get(rank, 0):
@@ -10285,13 +10322,15 @@ def _web_build_lens_items(lens, lang, caption=""):
         if rank in buckets:
             buckets[rank].append(m)
     for rank in buckets:
+        _anchor = str(lens.get("visual_identity") or lens.get("relevance_target") or (lens.get("chosen") or {}).get("title") or "")
         buckets[rank].sort(key=lambda m: (
-            _us_store_priority(m.get("source"), m.get("link")) if rank == 1
-            else (_china_store_priority(m.get("source"), m.get("link")) if rank == 2 else 99),
-            0 if _lens_has_price(m) else 1,
             0 if m.get("exact") else 1,
             0 if m.get("section") == "visual_matches" else 1,
+            -_findzia_match_score(_anchor, m.get("title") or "") if _anchor else 0,
+            0 if _lens_has_price(m) else 1,
             int(m.get("position") or 999),
+            _us_store_priority(m.get("source"), m.get("link")) if rank == 1
+            else (_china_store_priority(m.get("source"), m.get("link")) if rank == 2 else 99),
         ))
         cap = {0: WEB_LOCAL_MAX, 1: WEB_US_MAX, 2: WEB_CN_MAX}.get(rank, 0)
         probe_n = max(cap + 2, cap)
@@ -10329,10 +10368,10 @@ def _web_build_lens_items(lens, lang, caption=""):
             if not (url.startswith("http") and host and "google." not in host):
                 continue
             merchant = merchant_key(m)
-            if url in seen_urls or merchant_counts[merchant] >= RESULTS_PER_STORE_MAX:
+            if _canonical_result_url(url) in seen_urls or merchant_counts[merchant] >= RESULTS_PER_STORE_MAX:
                 continue
             selected.append(m)
-            seen_urls.add(url)
+            seen_urls.add(_canonical_result_url(url))
             merchant_counts[merchant] += 1
             taken += 1
             if taken >= caps.get(rank, 0) or len(selected) >= LENS_DIRECT_MAX_CTA:
@@ -10451,11 +10490,13 @@ def _web_fast_finalize_rows(rows, lang):
         ):
             continue
         if not _web_fast_price_guard(row):
+            # v106.6: installment/wholesale text used to delete the whole card. Now only the
+            # misleading price string is cleared; the real page price is upserted later.
             print(
-                f"WEB FAST PRICE-GUARD DROP store={row.get('store') or row.get('source')} "
+                f"WEB FAST PRICE-GUARD BLANK store={row.get('store') or row.get('source')} "
                 f"title={(row.get('title') or '')[:90]}"
             )
-            continue
+            row["price"] = ""
         rank = row.get("market_rank")
         if rank not in (0, 1, 2):
             rank = result_market_rank({
@@ -10463,15 +10504,22 @@ def _web_fast_finalize_rows(rows, lang):
                 "source": row.get("store") or row.get("source"),
                 "title": row.get("title"),
             })
+        row["market_rank"] = rank
         existing = str(row.get("price") or "").strip()
         val, _cur = _web_price_number_and_currency(existing)
-        if not val or val <= 0:
-            continue
-        row["price"] = _web_normalize_existing_price_to_market(
-            existing, rank, lang, market_snapshot
-        )
-        row["price_verified"] = False
-        row["price_source"] = row.get("price_source") or "search_structured_fast"
+        if val and val > 0:
+            row["price"] = _web_normalize_existing_price_to_market(
+                existing, rank, lang, market_snapshot
+            )
+            row["price_verified"] = False
+            row["price_source"] = row.get("price_source") or "search_structured_fast"
+        else:
+            # v106.6: never drop the card for a missing structured price. Stream it now;
+            # the background enrichment fetches the merchant page and upserts the price.
+            row["price"] = ""
+            row["price_verified"] = False
+            row["price_pending"] = True
+            row["price_source"] = "pending_page_price"
         row.pop("_offer_meta", None)
         out.append(row)
     return out
@@ -10509,11 +10557,11 @@ def _web_market_candidates_to_items(candidates, rank, lang, query):
         pass
 
     if rank == 1:
-        seq.sort(key=lambda x: (_us_store_priority(x.get("source"), x.get("link")), int(x.get("position") or 999)))
+        seq.sort(key=lambda x: (-_findzia_match_score(query, x.get("title") or ""), _us_store_priority(x.get("source"), x.get("link")), int(x.get("position") or 999)))
     elif rank == 2:
-        seq.sort(key=lambda x: (_china_store_priority(x.get("source"), x.get("link")), int(x.get("position") or 999)))
+        seq.sort(key=lambda x: (-_findzia_match_score(query, x.get("title") or ""), _china_store_priority(x.get("source"), x.get("link")), int(x.get("position") or 999)))
     else:
-        seq.sort(key=lambda x: int(x.get("position") or 999))
+        seq.sort(key=lambda x: (-_findzia_match_score(query, x.get("title") or ""), int(x.get("position") or 999)))
 
     cap = {0: WEB_LOCAL_MAX, 1: WEB_US_MAX, 2: WEB_CN_MAX}.get(rank, 4)
     local_cc = (current_market().get("country") or DEFAULT_COUNTRY).lower()
@@ -10529,7 +10577,7 @@ def _web_market_candidates_to_items(candidates, rank, lang, query):
         merchant = host or normalize_name(item.get("source") or "")
         if not merchant or not url or url in seen_urls or merchant_counts[merchant] >= RESULTS_PER_STORE_MAX:
             continue
-        seen_urls.add(url)
+        seen_urls.add(_canonical_result_url(url))
         merchant_counts[merchant] += 1
         raw_price = str(item.get("price") or "").strip()
         shown_price = _text_price_local(raw_price, rank, lang) if raw_price else ""
@@ -10813,28 +10861,55 @@ def _web_price_local_explicit(raw_price, market_rank, lang, market_snapshot=None
     return f"{format_price(converted, local_cur)} {local_cur}{original}"
 
 
+def _web_price_token_to_float(token):
+    """'1,299.00' -> 1299.0 ; '24,90' (decimal comma) -> 24.9 ; '12.500' -> 12.5."""
+    s = str(token or "").strip()
+    if not s:
+        return None
+    try:
+        if "," in s and "." not in s:
+            head, _, tail = s.rpartition(",")
+            # a single comma with 1-2 trailing digits is a European decimal comma
+            if head and len(tail) in (1, 2) and head.count(",") == 0:
+                return float(head.replace(",", "") + "." + tail)
+        return float(s.replace(",", ""))
+    except Exception:
+        return None
+
+
+_WEB_PRICE_CUR_WORDS = (
+    r"USD|US\$|EUR|GBP|KWD|KD|SAR|AED|QAR|BHD|OMR|CNY|RMB|JPY|CAD|AUD|CHF|INR|KRW|TRY|RUB"
+)
+_WEB_PRICE_CUR_SYMS = (
+    r"[$€£¥￥₹₩₺₽]"
+    r"|د\.ك|ر\.س|د\.إ|ر\.ق|د\.ب|ر\.ع"
+)
+# Accepts "1,299.99" thousands style and the previous "12.500"/"12,500" style.
+_WEB_PRICE_NUM = r"([0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]{1,3})?|[0-9]+(?:[.,][0-9]{1,3})?)"
+_WEB_PRICE_PATS = (
+    re.compile(r"(?:%s|%s)\s*%s" % (_WEB_PRICE_CUR_WORDS, _WEB_PRICE_CUR_SYMS, _WEB_PRICE_NUM), re.I),
+    re.compile(r"%s\s*(?:%s|%s)" % (_WEB_PRICE_NUM, _WEB_PRICE_CUR_WORDS, _WEB_PRICE_CUR_SYMS), re.I),
+)
+
+
 def _web_price_number_and_currency(text, fallback_currency=""):
     raw = str(text or "").strip()
     if not raw:
         return None, ""
     cur = detect_currency_code(raw, fallback_currency or "") or fallback_currency or ""
+    # v106.6: the currency-adjacent patterns were corrupted by an escaping round-trip
+    # (a doubled backslash before s* never matched a space), so most structured prices like
+    # "US $4.99" or "12.500 KWD" silently failed and valid cards were dropped.
     # Prefer a number adjacent to a currency token when possible.
-    pats = (
-        r"(?:USD|US\\$|EUR|GBP|KWD|KD|SAR|AED|QAR|BHD|OMR|CNY|RMB|JPY|CAD|AUD|CHF|INR|KRW|TRY|RUB|[$€£¥￥₹₩₺₽])\\s*([0-9]+(?:[.,][0-9]{1,3})?)",
-        r"([0-9]+(?:[.,][0-9]{1,3})?)\\s*(?:USD|EUR|GBP|KWD|KD|SAR|AED|QAR|BHD|OMR|CNY|RMB|JPY|CAD|AUD|CHF|INR|KRW|TRY|RUB)",
-    )
-    for pat in pats:
-        m = re.search(pat, raw, flags=re.I)
+    for pat in _WEB_PRICE_PATS:
+        m = pat.search(raw)
         if m:
-            try:
-                val = float(m.group(1).replace(",", ""))
-                if val > 0:
-                    return val, cur
-            except Exception:
-                pass
+            val = _web_price_token_to_float(m.group(1))
+            if val and val > 0:
+                return val, cur
     # Last resort only when the string itself is short and price-like.
     if len(raw) <= 50:
-        m = re.search(r"(?<!\\d)([0-9]+(?:[.,][0-9]{1,3})?)(?!\\d)", raw.replace(",", ""))
+        m = re.search(r"(?<![0-9])([0-9]+(?:[.,][0-9]{1,3})?)(?![0-9])", raw.replace(",", ""))
         if m:
             try:
                 val = float(m.group(1))
@@ -10843,6 +10918,97 @@ def _web_price_number_and_currency(text, fallback_currency=""):
             except Exception:
                 pass
     return None, cur
+
+
+_WEB_DEEP_PRICE_SPECIFIC_PATS = (
+    # nested price objects: "salePrice": {"amount": "12.49", ...} (SHEIN-style)
+    re.compile(
+        r'"(?:salePrice|sale_price|specialPrice|special_price|sellingPrice|selling_price|'
+        r'offerPrice|offer_price|finalPrice|final_price|currentPrice|current_price|'
+        r'discountedPrice|discounted_price)"\s*:\s*\{[^{}]{0,140}?'
+        r'"(?:amount|value|raw)"\s*:\s*"?([0-9]+(?:\.[0-9]{1,4})?)', re.I),
+    # flat specific keys, quoted or unquoted numbers (Next.js-style embeds)
+    re.compile(
+        r'"(?:salePrice|specialPrice|sellingPrice|offerPrice|finalPrice|currentPrice|'
+        r'discountedPrice|price_amount|priceAmount|priceValue|price_value)"'
+        r'\s*:\s*"?([0-9]+(?:\.[0-9]{1,4})?)"?', re.I),
+    # "price": {"amount": ...}
+    re.compile(
+        r'"price"\s*:\s*\{[^{}]{0,140}?"(?:amount|value|raw)"\s*:\s*"?([0-9]+(?:\.[0-9]{1,4})?)', re.I),
+)
+_WEB_DEEP_PRICE_GENERIC_PAT = re.compile(r'"price"\s*:\s*"?([0-9]+(?:\.[0-9]{1,4})?)"?', re.I)
+_WEB_DEEP_CURRENCY_PAT = re.compile(
+    r'"(?:currency|currencyCode|currency_code|priceCurrency|currencyIsoCode)"\s*:\s*"([A-Za-z]{3})"', re.I)
+
+_WEB_URL_CURRENCY_HINTS = (
+    (("kuwait", "/kw/", "/kw-", "-kw/", ".kw/"), "KWD"),
+    (("saudi", "/sa/", "/sa-", "-sa/", ".sa/"), "SAR"),
+    (("/uae", "uae/", "/ae/", "/ae-", ".ae/"), "AED"),
+    (("qatar", "/qa/", ".qa/"), "QAR"),
+    (("bahrain", "/bh/", ".bh/"), "BHD"),
+    (("oman", "/om/", ".om/"), "OMR"),
+    (("egypt", "/eg/", ".eg/"), "EGP"),
+)
+
+
+def _web_currency_from_url(url):
+    low = str(url or "").lower()
+    for needles, code in _WEB_URL_CURRENCY_HINTS:
+        if any(n in low for n in needles):
+            return code
+    return ""
+
+
+def _web_deep_json_price_scan(html, url=""):
+    """v106.6.3: last-tier price recovery for JS-heavy stores (Namshi, SHEIN...)
+    whose prices live in embedded JSON that JSON-LD/meta parsing misses.
+    Returns (price_float_or_None, currency_code_or_empty)."""
+    if not html:
+        return None, ""
+    blob = html[:1200000]
+    price = None
+    # specific keys first: take the first sane match
+    for pat in _WEB_DEEP_PRICE_SPECIFIC_PATS:
+        m = pat.search(blob)
+        if m:
+            try:
+                v = float(m.group(1))
+            except Exception:
+                continue
+            if 0.05 <= v <= 1000000:
+                price = v
+                break
+    # generic "price": N as a vote — the real product price usually repeats across
+    # embedded components, so take the most frequent sane value, never the first.
+    if price is None:
+        votes = {}
+        for m in _WEB_DEEP_PRICE_GENERIC_PAT.finditer(blob):
+            try:
+                v = float(m.group(1))
+            except Exception:
+                continue
+            if 0.05 <= v <= 1000000:
+                votes[v] = votes.get(v, 0) + 1
+        if votes:
+            best = max(votes.items(), key=lambda kv: (kv[1], -kv[0]))
+            # require agreement: a value seen once could belong to a recommended item
+            if best[1] >= 2:
+                price = best[0]
+    cur = ""
+    m = _WEB_DEEP_CURRENCY_PAT.search(blob)
+    if m and m.group(1).upper() in KNOWN_CURRENCY_CODES:
+        cur = m.group(1).upper()
+    if not cur:
+        cur = _web_currency_from_url(url)
+    return price, cur
+
+
+_WEB_MOBILE_HEADERS = {
+    "User-Agent": ("Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) "
+                   "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1"),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9,ar;q=0.8",
+}
 
 
 def _web_verified_page_snapshot(url):
@@ -10865,6 +11031,18 @@ def _web_verified_page_snapshot(url):
             "Referer": f"{parsed.scheme}://{parsed.netloc}/",
         })
         r = requests.get(url, headers=headers, timeout=(2.5, WEB_PRODUCT_VERIFY_TIMEOUT_SECONDS), allow_redirects=True)
+        # v106.6.3: some merchants (e.g. Next Direct) block the desktop UA outright.
+        # One retry as mobile Safari rescues most of those without extra config.
+        if (r.status_code >= 400 or not r.text) and r.status_code != 404:
+            try:
+                alt = dict(_WEB_MOBILE_HEADERS)
+                alt["Referer"] = f"{parsed.scheme}://{parsed.netloc}/"
+                r2 = requests.get(url, headers=alt, timeout=(2.5, WEB_PRODUCT_VERIFY_TIMEOUT_SECONDS), allow_redirects=True)
+                if r2.status_code < 400 and r2.text:
+                    print(f"WEB PAGE MOBILE-UA RESCUE host={parsed.netloc} status={r.status_code}->{r2.status_code}")
+                    r = r2
+            except Exception as e2:
+                print(f"WEB PAGE MOBILE-UA RETRY ERR host={parsed.netloc}: {e2.__class__.__name__}")
         final_url = str(r.url or url)
         data["url"] = final_url
         if r.status_code < 400 and r.text:
@@ -10872,12 +11050,22 @@ def _web_verified_page_snapshot(url):
             parsed_data = parse_product_data(html, final_url) or {}
             data["price"] = parsed_data.get("price")
             data["currency"] = str(parsed_data.get("currency") or "").upper().strip()
+            if not data["price"]:
+                deep_price, deep_cur = _web_deep_json_price_scan(html, final_url)
+                if deep_price and deep_price > 0:
+                    data["price"] = deep_price
+                    if not data["currency"] and deep_cur:
+                        data["currency"] = deep_cur
+                    host_l = urllib.parse.urlparse(final_url).netloc
+                    print(f"WEB DEEP PRICE SCAN HIT host={host_l} -> {deep_price} {data['currency'] or '?'}")
+            if data["price"] and not data["currency"]:
+                data["currency"] = _web_currency_from_url(final_url)
             data["image"] = parsed_data.get("image_url") or _web_extract_product_image_from_html(html, final_url) or ""
             data["title"] = parsed_data.get("title") or ""
             data["is_product"] = bool(parsed_data.get("is_product", True))
             data["ok"] = True
 
-            low = re.sub(r"\\s+", " ", BeautifulSoup(html[:450000], "html.parser").get_text(" ", strip=True).lower())
+            low = re.sub(r"\s+", " ", BeautifulSoup(html[:450000], "html.parser").get_text(" ", strip=True).lower())
             host = urllib.parse.urlparse(final_url).netloc.lower().split(":")[0]
             host = host[4:] if host.startswith("www.") else host
             # Alibaba vertical/supplier result pages can look like product URLs but are supplier listings.
@@ -11110,10 +11298,200 @@ def _web_verify_card_strict(row, rank, lang, market_snapshot=None):
         row["price_source"] = row.get("price_source") or "search_structured_rebased"
         return row
 
-    if WEB_REQUIRE_NUMERIC_PRICE:
+    if WEB_REQUIRE_NUMERIC_PRICE and not WEB_KEEP_PRICELESS_RESULTS:
         print(f"WEB STRICT REJECT NO PRICE store={row.get('store') or row.get('source')} url={url[:140]}")
         return None
+    # v106.6: the merchant page exposed no machine-readable price. Keep the relevant
+    # card (never cancel a result); the client renders its "Price at store" label
+    # rather than showing an invented number.
+    print(f"WEB STRICT KEEP PRICELESS store={row.get('store') or row.get('source')} url={url[:140]}")
+    row["price"] = ""
+    row["price_verified"] = False
+    row["price_pending"] = True
+    row["price_source"] = "pending_page_price"
     return row
+
+
+def _web_row_has_numeric_price(row):
+    val, _cur = _web_price_number_and_currency(str((row or {}).get("price") or ""))
+    return bool(val and val > 0)
+
+
+def _web_enrich_price_via_shopping(row, rank, market_snapshot):
+    """v106.6.1 fallback: structured Google Shopping price for merchants that block
+    direct page fetches. Returns (value, raw_price_text) or (None, "")."""
+    if not (WEB_PRICE_ENRICH_SHOPPING_FALLBACK and SERPAPI_API_KEY):
+        return None, ""
+    url = str(row.get("url") or "").strip()
+    title = str(row.get("title") or "").strip()
+    if not url or not title:
+        return None, ""
+    try:
+        host = urllib.parse.urlparse(url).netloc.lower().split(":")[0]
+        host = host[4:] if host.startswith("www.") else host
+    except Exception:
+        return None, ""
+    if not host:
+        return None, ""
+    if rank == 0:
+        gl = ((market_snapshot or {}).get("country") or DEFAULT_COUNTRY).lower()
+        if SHOPPING_GEO_GUARD and not _shopping_gl_supported(gl):
+            return None, ""
+        cc = gl
+    else:
+        gl, cc = "us", "us"
+    cards = None
+    for attempt in (1, 2):
+        try:
+            cards = _serpapi_shopping_request(
+                f"{title} site:{host}", gl, hl="en",
+                timeout_seconds=WEB_STREAM_STORE_HTTP_TIMEOUT,
+            )
+            break
+        except Exception as e:
+            print(f"WEB PRICE FALLBACK SHOPPING ERR host={host} attempt={attempt}: {e}")
+            if attempt == 2:
+                return None, ""
+    for card in cards or []:
+        item = _shopping_card_to_market_item(card, row.get("store") or "", cc)
+        if not item:
+            continue
+        try:
+            item_host = urllib.parse.urlparse(item.get("link") or "").netloc.lower().split(":")[0]
+            item_host = item_host[4:] if item_host.startswith("www.") else item_host
+        except Exception:
+            item_host = ""
+        if not (item_host == host or item_host.endswith("." + host) or host.endswith("." + item_host)):
+            continue
+        pv = item.get("price_value")
+        try:
+            pv = float(pv) if pv not in (None, "") else None
+        except Exception:
+            pv = None
+        raw = str(item.get("price") or "").strip()
+        if not pv or pv <= 0:
+            pv, _c = _web_price_number_and_currency(raw)
+        if pv and pv > 0:
+            cur = str(item.get("currency") or "").upper().strip()
+            if not cur:
+                cur = _web_market_currency(market_snapshot) if rank == 0 else "USD"
+            return pv, (raw or f"{pv:g} {cur}")
+    return None, ""
+
+
+def _web_enrich_row_price_sync(row, lang, market_snapshot, allow_shopping=True):
+    """v106.6: resolve a missing card price from the merchant page (cached snapshot),
+    with a v106.6.1 Google Shopping fallback for merchants that block server fetches.
+
+    Runs in parallel with the authoritative final engine, so it adds no wall time to
+    the first paint. Returns the updated row with a verified localized price, or None
+    when no price could be recovered (the card then keeps the client-side
+    "Price at store" label). Every outcome is logged for diagnosability."""
+    try:
+        if market_snapshot:
+            MARKET_CTX.value = dict(market_snapshot)
+        row = dict(row or {})
+        url = str(row.get("url") or "").strip()
+        store = row.get("store") or row.get("source") or "?"
+        if not url:
+            print(f"WEB PRICE ENRICH MISS store={store} reason=no_url")
+            return None
+        rank = row.get("market_rank")
+        if rank not in (0, 1, 2):
+            rank = result_market_rank({
+                "link": url,
+                "source": row.get("store") or row.get("source"),
+                "title": row.get("title"),
+            })
+        snap = _web_verified_page_snapshot(url)
+        page_ok = bool((snap or {}).get("ok"))
+        page_price = (snap or {}).get("price")
+        page_cur = str((snap or {}).get("currency") or "").upper().strip()
+        try:
+            page_price = float(page_price) if page_price not in (None, "") else None
+        except Exception:
+            page_price = None
+
+        raw_price = ""
+        source_tag = ""
+        if page_price and page_price > 0:
+            if not page_cur:
+                page_cur = _web_market_currency(market_snapshot) if rank == 0 else ("USD" if rank == 1 else "CNY")
+            raw_price = f"{page_price:g} {page_cur}".strip()
+            source_tag = "product_page"
+        elif allow_shopping:
+            fb_val, fb_raw = _web_enrich_price_via_shopping(row, rank, market_snapshot)
+            if fb_val and fb_val > 0:
+                raw_price = fb_raw
+                source_tag = "google_shopping_fallback"
+
+        if not raw_price:
+            print(
+                f"WEB PRICE ENRICH MISS store={store} page_ok={page_ok} "
+                f"shopping_fallback={'tried' if allow_shopping else 'off'} url={url[:120]}"
+            )
+            return None
+
+        row["price"] = _web_price_local_explicit(raw_price, rank, lang, market_snapshot)
+        row["price"] = _web_normalize_existing_price_to_market(row["price"], rank, lang, market_snapshot)
+        row["price_verified"] = True
+        row["price_source"] = source_tag
+        row.pop("price_pending", None)
+        if (snap or {}).get("title") and not row.get("title"):
+            row["title"] = _compact_ui_title(snap.get("title"))
+        print(f"WEB PRICE ENRICH OK store={store} via={source_tag} -> {row.get('price')}")
+        return row
+    except Exception as e:
+        print(f"WEB PRICE ENRICH ERR: {e}")
+        return None
+
+
+def _web_spawn_price_enrich_task(price_tasks, key, item, lang, market_snapshot):
+    """Register one background page-price fetch for a card streamed without a price."""
+    if not (WEB_PRICE_ENRICH_ENABLED and WEB_KEEP_PRICELESS_RESULTS):
+        return
+    if key in price_tasks or len(price_tasks) >= WEB_PRICE_ENRICH_MAX_ROWS:
+        return
+    if _web_row_has_numeric_price(item):
+        return
+    if not str((item or {}).get("url") or "").strip():
+        return
+    allow_shopping = len(price_tasks) < WEB_PRICE_ENRICH_SHOPPING_MAX
+    try:
+        price_tasks[key] = asyncio.create_task(
+            asyncio.to_thread(_web_enrich_row_price_sync, dict(item), lang, market_snapshot, allow_shopping)
+        )
+        print(
+            f"WEB PRICE ENRICH SPAWN store={item.get('store') or item.get('source')} "
+            f"fallback={'on' if allow_shopping else 'quota_off'} url={str(item.get('url'))[:110]}"
+        )
+    except Exception as e:
+        print(f"WEB PRICE ENRICH SPAWN ERR: {e}")
+
+
+async def _web_drain_price_enrich_events(price_tasks, priced_keys, started):
+    """Yield 'upsert' events for resolved prices; bounded so 'done' is never delayed long."""
+    if not price_tasks:
+        return
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + WEB_PRICE_ENRICH_MAX_WAIT_SECONDS
+    for key, task in list(price_tasks.items()):
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            task.cancel()
+            continue
+        try:
+            enriched = await asyncio.wait_for(task, timeout=remaining)
+        except Exception:
+            enriched = None
+        if not enriched or key in priced_keys:
+            continue
+        priced_keys.add(key)
+        yield _web_stream_event({
+            "event": "upsert", "phase": "price_enrich",
+            "market": str(enriched.get("market") or "other"), "item": enriched,
+            "elapsed_ms": int((time.time() - started) * 1000),
+        })
 
 
 def _web_verify_rows_strict(rows, lang):
@@ -11444,7 +11822,7 @@ def _web_search_image_sync(image_b64, mime, caption, country, lang, progress_cal
                                     continue
                                 items.append(row)
                                 if url:
-                                    seen_urls.add(url)
+                                    seen_urls.add(_canonical_result_url(url))
                                 seen_sig.add(sig)
                                 counts[rank] += 1
                                 need -= 1
@@ -11765,6 +12143,10 @@ async def web_api_search_stream(request: Request):
                 if final.get("type") == "recommendations":
                     yield _web_stream_event({"event": "recommendations", "data": final, "elapsed_ms": int((time.time()-started)*1000)})
                 else:
+                    # v106.6.2: this parity branch used to bypass price enrichment
+                    # entirely. Spawn a page-price fetch for every card that lacks a
+                    # numeric price and upsert what resolves before closing.
+                    price_tasks, priced_keys = {}, set()
                     exact_rows = final.get("results") or []
                     for item in exact_rows:
                         yield _web_stream_event({
@@ -11772,11 +12154,19 @@ async def web_api_search_stream(request: Request):
                             "market": str(item.get("market") or "other"),
                             "item": item, "elapsed_ms": int((time.time()-started)*1000),
                         })
+                        key = str(item.get("url") or "").strip() or (str(item.get("market") or "other") + "|" + str(item.get("store") or "") + "|" + str(item.get("title") or ""))
+                        if _web_row_has_numeric_price(item):
+                            priced_keys.add(key)
+                        else:
+                            _web_spawn_price_enrich_task(price_tasks, key, item, lang, market)
                         await asyncio.sleep(0.005)
+                    async for _ev in _web_drain_price_enrich_events(price_tasks, priced_keys, started):
+                        yield _ev
                 yield _web_stream_event({"event": "done", "count": len(final.get("results") or []), "elapsed_ms": int((time.time()-started)*1000)})
                 return
 
             sent = set()
+            price_tasks, priced_keys = {}, set()
             final_task = asyncio.create_task(asyncio.to_thread(
                 _web_search_text_sync, q, country, lang, "", "", True
             ))
@@ -11831,6 +12221,10 @@ async def web_api_search_stream(request: Request):
                                 "store_probe": label, "item": item,
                                 "elapsed_ms": int((time.time()-started)*1000),
                             })
+                            if _web_row_has_numeric_price(item):
+                                priced_keys.add(key)
+                            else:
+                                _web_spawn_price_enrich_task(price_tasks, key, item, lang, market)
                             await asyncio.sleep(0.015)
                         rank_remaining[r] = max(0, rank_remaining.get(r, 1) - 1)
                         if rank_remaining[r] == 0:
@@ -11869,6 +12263,10 @@ async def web_api_search_stream(request: Request):
                                 continue
                             sent.add(key)
                             yield _web_stream_event({"event": "result", "phase": "fast", "market": market_name, "item": item, "elapsed_ms": int((time.time()-started)*1000)})
+                            if _web_row_has_numeric_price(item):
+                                priced_keys.add(key)
+                            else:
+                                _web_spawn_price_enrich_task(price_tasks, key, item, lang, market)
                             await asyncio.sleep(0.01)
                         yield _web_stream_event({"event": "market_fast_done", "market": market_name, "count": len(items or []), "elapsed_ms": int((time.time()-started)*1000)})
                     if final_task.done():
@@ -11885,12 +12283,22 @@ async def web_api_search_stream(request: Request):
                 for item in final.get("results") or []:
                     market_name = str(item.get("market") or "other")
                     key = str(item.get("url") or "").strip() or (market_name + "|" + str(item.get("store") or "") + "|" + str(item.get("title") or ""))
+                    if _web_row_has_numeric_price(item):
+                        priced_keys.add(key)
+                        t = price_tasks.pop(key, None)
+                        if t:
+                            t.cancel()
+                    else:
+                        _web_spawn_price_enrich_task(price_tasks, key, item, lang, market)
                     if key in sent:
                         yield _web_stream_event({"event": "upsert", "phase": "final", "market": market_name, "item": item, "elapsed_ms": int((time.time()-started)*1000)})
                     else:
                         sent.add(key)
                         yield _web_stream_event({"event": "result", "phase": "final", "market": market_name, "item": item, "elapsed_ms": int((time.time()-started)*1000)})
                     await asyncio.sleep(0.01)
+            # v106.6: upsert page-verified prices for cards that streamed without one.
+            async for _ev in _web_drain_price_enrich_events(price_tasks, priced_keys, started):
+                yield _ev
             yield _web_stream_event({"event": "done", "count": len(sent), "elapsed_ms": int((time.time()-started)*1000)})
         except asyncio.CancelledError:
             raise
@@ -11946,6 +12354,8 @@ async def web_api_image_search_stream(request: Request):
     async def _generator():
         started = time.time()
         sent = set()
+        price_tasks, priced_keys = {}, set()
+        enrich_market = _web_market(country)
         market_counts = {"local": 0, "us": 0, "china": 0}
         yield _web_stream_event({"event": "start", "ok": True, "kind": "image"})
         yield _web_stream_event({"event": "status", "stage": "identify", "elapsed_ms": 0})
@@ -12013,6 +12423,12 @@ async def web_api_image_search_stream(request: Request):
                                 "provisional": True, "market": market_name, "item": item,
                                 "elapsed_ms": int((time.time()-started)*1000),
                             })
+                            # v106.6.2: start the page-price fetch while the final
+                            # engine is still running, so the upsert lands fast.
+                            if _web_row_has_numeric_price(item):
+                                priced_keys.add(key)
+                            else:
+                                _web_spawn_price_enrich_task(price_tasks, key, item, lang, market_snapshot)
                             await asyncio.sleep(0.003)
                         if emitted_now:
                             print(f"ANDROID PROGRESSIVE PREVIEW sent={emitted_now} total_preview={len(preview_keys)} elapsed={time.time()-started:.1f}s")
@@ -12036,6 +12452,21 @@ async def web_api_image_search_stream(request: Request):
                     (str(item.get("url") or "").strip() or (str(item.get("market") or "other") + "|" + str(item.get("store") or "") + "|" + str(item.get("title") or "")))
                     for item in final_results
                 }
+                # v106.6.2: the WhatsApp-parity branch used to return here, so image
+                # searches never reached the price-enrichment code at all. Spawn for
+                # every final card that lacks a numeric price, then upsert what
+                # resolves within the bounded window before closing the stream.
+                for item in final_results:
+                    key = str(item.get("url") or "").strip() or (str(item.get("market") or "other") + "|" + str(item.get("store") or "") + "|" + str(item.get("title") or ""))
+                    if _web_row_has_numeric_price(item):
+                        priced_keys.add(key)
+                        t = price_tasks.pop(key, None)
+                        if t:
+                            t.cancel()
+                    else:
+                        _web_spawn_price_enrich_task(price_tasks, key, item, lang, market_snapshot)
+                async for _ev in _web_drain_price_enrich_events(price_tasks, priced_keys, started):
+                    yield _ev
                 yield _web_stream_event({"event": "done", "count": len(sent), "elapsed_ms": int((time.time()-started)*1000)})
                 return
 
@@ -12053,6 +12484,10 @@ async def web_api_image_search_stream(request: Request):
                 if market_name in market_counts:
                     market_counts[market_name] += 1
                 yield _web_stream_event({"event": "result", "phase": "lens_seed", "market": market_name, "item": item, "elapsed_ms": int((time.time()-started)*1000)})
+                if _web_row_has_numeric_price(item):
+                    priced_keys.add(key)
+                else:
+                    _web_spawn_price_enrich_task(price_tasks, key, item, lang, enrich_market)
                 await asyncio.sleep(0.015)
 
             if identity and WEB_STREAM_STORE_FIFO and WEB_STREAM_FAST_WAVE and SERPAPI_API_KEY:
@@ -12103,6 +12538,10 @@ async def web_api_image_search_stream(request: Request):
                                 "store_probe": label, "item": item,
                                 "elapsed_ms": int((time.time()-started)*1000),
                             })
+                            if _web_row_has_numeric_price(item):
+                                priced_keys.add(key)
+                            else:
+                                _web_spawn_price_enrich_task(price_tasks, key, item, lang, enrich_market)
                             await asyncio.sleep(0.015)
                         rank_remaining[r] = max(0, rank_remaining.get(r, 1) - 1)
                         if rank_remaining[r] == 0:
@@ -12120,6 +12559,13 @@ async def web_api_image_search_stream(request: Request):
                 for item in final.get("results") or []:
                     market_name = str(item.get("market") or "other")
                     key = str(item.get("url") or "").strip() or (market_name + "|" + str(item.get("store") or "") + "|" + str(item.get("title") or ""))
+                    if _web_row_has_numeric_price(item):
+                        priced_keys.add(key)
+                        t = price_tasks.pop(key, None)
+                        if t:
+                            t.cancel()
+                    else:
+                        _web_spawn_price_enrich_task(price_tasks, key, item, lang, enrich_market)
                     if key in sent:
                         yield _web_stream_event({"event": "upsert", "phase": "final", "market": market_name, "item": item, "elapsed_ms": int((time.time()-started)*1000)})
                         continue
@@ -12127,6 +12573,9 @@ async def web_api_image_search_stream(request: Request):
                     yield _web_stream_event({"event": "result", "phase": "final", "market": market_name, "item": item, "elapsed_ms": int((time.time()-started)*1000)})
                     await asyncio.sleep(0.01)
 
+            # v106.6: upsert page-verified prices for cards that streamed without one.
+            async for _ev in _web_drain_price_enrich_events(price_tasks, priced_keys, started):
+                yield _ev
             yield _web_stream_event({"event": "done", "count": len(sent), "elapsed_ms": int((time.time()-started)*1000)})
         except asyncio.CancelledError:
             raise
@@ -12209,4 +12658,4 @@ async def web_api_image_search(request: Request):
 
 
 @app.get("/")
-async def health(): return {"status":"v85 GLOBAL-GEO + STRONG-LOCAL + MULTI-CURRENCY + 10-LANG + SMART-PICK LOCAL5-US4-CN4-SHEIN", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "market_source":"phone_prefix", "languages":["ar","en","fr","es","pt","tr","ru","zh","hi","ur"]}
+async def health(): return {"status":"v107 RESULT-QUALITY + GLOBAL-GEO + STRONG-LOCAL + MULTI-CURRENCY + 10-LANG + CAPS-4-3-3", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "market_source":"phone_prefix", "languages":["ar","en","fr","es","pt","tr","ru","zh","hi","ur"]}
