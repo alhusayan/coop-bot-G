@@ -26,7 +26,7 @@ app.add_middleware(
     allow_headers=["Content-Type", "Accept"],
     max_age=86400,
 )
-BUILD_ID = "v107.0-result-quality-20260831"
+BUILD_ID = "v108.0-turbo-more-results-20260831"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES")
@@ -82,12 +82,12 @@ FINAL_URL_CACHE = {}
 FINAL_URL_CACHE_LOCK = threading.Lock()
 
 RESOLVER = ThreadPoolExecutor(max_workers=8)
-WORKERS = ThreadPoolExecutor(max_workers=5)
+WORKERS = ThreadPoolExecutor(max_workers=8)
 OLD_SEARCH_POOL = ThreadPoolExecutor(max_workers=8)
 LENS_POOL = ThreadPoolExecutor(max_workers=4)
 # v73: HTTP passes الخاصة بـ Lens لها pool مستقل حتى لا يحصل deadlock عندما google_lens_lookup يعمل داخل LENS_POOL.
-LENS_HTTP_POOL = ThreadPoolExecutor(max_workers=12)
-MARKET_SUPPLEMENT_POOL = ThreadPoolExecutor(max_workers=3)
+LENS_HTTP_POOL = ThreadPoolExecutor(max_workers=16)
+MARKET_SUPPLEMENT_POOL = ThreadPoolExecutor(max_workers=6)
 OLD_LAYER_DUPLICATES = max(1, min(2, int(os.environ.get("OLD_LAYER_DUPLICATES", "1"))))
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
@@ -123,9 +123,11 @@ SERVICE_CACHE_TTL = int(os.environ.get("SERVICE_CACHE_TTL_HOURS", "168")) * 3600
 CACHE_MAX = int(os.environ.get("CACHE_MAX", "3000"))
 CACHE_DB_PATH = os.environ.get("CACHE_DB_PATH", "/tmp/coop_search_cache.sqlite3")
 CACHE_DB_LOCK = threading.Lock()
-# Internal/default text result cap; final market selectors still enforce 4 local + 3 US + 3 China.
-MAX_STORES = int(os.environ.get("MAX_STORES", "10"))
-MAX_URLS_MERGED = int(os.environ.get("MAX_URLS_MERGED", "8"))
+# v108 TURBO: 14 primary results by default. PRIMARY_RESULTS_TARGET intentionally
+# overrides an old MAX_STORES=10 Railway value so upgrading this file actually widens results.
+PRIMARY_RESULTS_TARGET = max(10, min(18, int(os.environ.get("PRIMARY_RESULTS_TARGET", "14"))))
+MAX_STORES = max(PRIMARY_RESULTS_TARGET, int(os.environ.get("MAX_STORES", str(PRIMARY_RESULTS_TARGET))))
+MAX_URLS_MERGED = max(MAX_STORES, int(os.environ.get("MAX_URLS_MERGED", str(MAX_STORES))))
 ENABLE_SEARCH_RETRY = env_bool("ENABLE_SEARCH_RETRY", True)
 MAX_SEARCH_ATTEMPTS = max(2, int(os.environ.get("MAX_SEARCH_ATTEMPTS", "3")))
 MAX_IDENTIFY_ATTEMPTS = max(2, int(os.environ.get("MAX_IDENTIFY_ATTEMPTS", "3")))
@@ -150,15 +152,15 @@ ENABLE_GOOGLE_LENS = env_bool("ENABLE_GOOGLE_LENS", True)
 # لإرجاع المسار الذكي الكامل. عند عدم وجود نتائج، البوت يرجع تلقائياً للمسار الكامل.
 LENS_DIRECT_MODE = env_bool("LENS_DIRECT_MODE", True)
 LENS_DIRECT_MAX_LINES = max(3, min(10, int(os.environ.get("LENS_DIRECT_MAX_LINES", "10"))))
-# v76: الحدود القصوى مستقلة وليست حصصاً إلزامية.
-# v85.4 Fast caps: المحلي حتى 4، الولايات المتحدة حتى 3، الصين حتى 3.
-# هذه حدود قصوى حقيقية حتى لو بقيت Environment Variables القديمة أعلى في Railway.
-# يمكن للـ Environment خفض الحد، لكنه لا يستطيع رفعه فوق 4/3/3.
-LENS_DIRECT_LOCAL_MAX = max(0, min(4, int(os.environ.get("LENS_DIRECT_LOCAL_MAX", "4"))))
-LENS_DIRECT_US_MAX = max(0, min(3, int(os.environ.get("LENS_DIRECT_US_MAX", "3"))))
-LENS_DIRECT_CN_MAX = max(0, min(3, int(os.environ.get("LENS_DIRECT_CN_MAX", "3"))))
-LENS_DIRECT_MAX_CTA = max(1, int(os.environ.get("LENS_DIRECT_MAX_CTA", str(LENS_DIRECT_LOCAL_MAX + LENS_DIRECT_US_MAX + LENS_DIRECT_CN_MAX))))
-RESULT_CANDIDATE_SCAN_MAX = max(10, int(os.environ.get("RESULT_CANDIDATE_SCAN_MAX", "20")))
+# v108 TURBO caps: LOCAL stays strongest while the first answer widens to 14 cards.
+# Old Railway caps (4/3/3 or CTA=10) no longer silently shrink the upgraded build.
+LENS_DIRECT_LOCAL_MAX = max(6, min(8, int(os.environ.get("LENS_DIRECT_LOCAL_MAX", "6"))))
+LENS_DIRECT_US_MAX = max(4, min(6, int(os.environ.get("LENS_DIRECT_US_MAX", "4"))))
+LENS_DIRECT_CN_MAX = max(4, min(6, int(os.environ.get("LENS_DIRECT_CN_MAX", "4"))))
+_PRIMARY_CAP_SUM = LENS_DIRECT_LOCAL_MAX + LENS_DIRECT_US_MAX + LENS_DIRECT_CN_MAX
+LENS_DIRECT_MAX_CTA = max(_PRIMARY_CAP_SUM, min(20, int(os.environ.get("LENS_DIRECT_MAX_CTA", str(_PRIMARY_CAP_SUM)))))
+# Scan much wider than what is displayed so relevance/dedupe/OOS filtering does not starve the final list.
+RESULT_CANDIDATE_SCAN_MAX = max(_PRIMARY_CAP_SUM * 2 + 8, int(os.environ.get("RESULT_CANDIDATE_SCAN_MAX", "36")))
 
 # "ابحث أكثر" has its own smaller caps; primary v79 search above stays unchanged.
 MORE_LOCAL_MAX = max(0, int(os.environ.get("MORE_LOCAL_MAX", "3")))
@@ -173,7 +175,7 @@ ENABLE_LENS_WIDE_FALLBACK = env_bool("ENABLE_LENS_WIDE_FALLBACK", True)
 LENS_MIN_MATCHES = max(3, min(5, int(os.environ.get("LENS_MIN_MATCHES", "5"))))
 # تشغيل Vision و Lens بالتوازي: أسرع وأدق دمج. عطّله إذا تبي توفر كريدت SerpApi للعبوات النصية.
 LENS_PARALLEL_WITH_VISION = env_bool("LENS_PARALLEL_WITH_VISION", True)
-LENS_RESULT_LIMIT = max(12, int(os.environ.get("LENS_RESULT_LIMIT", "40")))
+LENS_RESULT_LIMIT = max(48, int(os.environ.get("LENS_RESULT_LIMIT", "60")))
 # v73: حد زمني واضح للينز. تمريرات البلدان تعمل بالتوازي، وليس واحدة وراء الثانية.
 LENS_HTTP_TIMEOUT_SECONDS = max(6, int(os.environ.get("LENS_HTTP_TIMEOUT_SECONDS", "13")))
 LENS_TOTAL_TIMEOUT_SECONDS = max(8, int(os.environ.get("LENS_TOTAL_TIMEOUT_SECONDS", "12")))
@@ -205,15 +207,15 @@ SHOPPING_GEO_GUARD = env_bool("SHOPPING_GEO_GUARD", True)
 SHOPPING_UNSUPPORTED_ORGANIC_FALLBACK = env_bool("SHOPPING_UNSUPPORTED_ORGANIC_FALLBACK", True)
 _SHOPPING_UNSUPPORTED_LOGGED = set()
 _SHOPPING_UNSUPPORTED_LOG_LOCK = threading.Lock()
-SHOPPING_RESULT_LIMIT = max(5, int(os.environ.get("SHOPPING_RESULT_LIMIT", "20")))
+SHOPPING_RESULT_LIMIT = max(30, int(os.environ.get("SHOPPING_RESULT_LIMIT", "30")))
 # كل استدعاء Immersive يستهلك كريدت SerpApi؛ نحدد سقفاً لكل بحث.
-IMMERSIVE_LOOKUPS_MAX = max(0, int(os.environ.get("IMMERSIVE_LOOKUPS_MAX", "3")))
+IMMERSIVE_LOOKUPS_MAX = max(0, min(5, int(os.environ.get("IMMERSIVE_LOOKUPS_MAX", "4"))))
 IMMERSIVE_MORE_STORES = env_bool("IMMERSIVE_MORE_STORES", True)
-SHOPPING_POOL = ThreadPoolExecutor(max_workers=4)
-LOCAL_SHOPPING_POOL = ThreadPoolExecutor(max_workers=max(4, int(os.environ.get("LOCAL_SHOPPING_WORKERS", "6"))))
+SHOPPING_POOL = ThreadPoolExecutor(max_workers=6)
+LOCAL_SHOPPING_POOL = ThreadPoolExecutor(max_workers=max(6, int(os.environ.get("LOCAL_SHOPPING_WORKERS", "8"))))
 LOCAL_SHOPPING_PRIMARY_PASSES = max(1, min(3, int(os.environ.get("LOCAL_SHOPPING_PRIMARY_PASSES", "2"))))
-LOCAL_RESULTS_TARGET = max(2, int(os.environ.get("LOCAL_RESULTS_TARGET", "4")))
-LOCAL_STORE_RESCUE_MAX = max(0, min(4, int(os.environ.get("LOCAL_STORE_RESCUE_MAX", "3"))))
+LOCAL_RESULTS_TARGET = max(LENS_DIRECT_LOCAL_MAX, int(os.environ.get("LOCAL_RESULTS_TARGET", str(LENS_DIRECT_LOCAL_MAX))))
+LOCAL_STORE_RESCUE_MAX = max(0, min(6, int(os.environ.get("LOCAL_STORE_RESCUE_MAX", "4"))))
 LOCAL_COUNTRY_RESCUE_ENABLED = env_bool("LOCAL_COUNTRY_RESCUE_ENABLED", True)
 LOCAL_COUNTRY_RESCUE_PASSES = max(1, min(2, int(os.environ.get("LOCAL_COUNTRY_RESCUE_PASSES", "1"))))
 LOCAL_AI_QUERY_RESCUE_ENABLED = env_bool("LOCAL_AI_QUERY_RESCUE_ENABLED", True)
@@ -1113,6 +1115,9 @@ VERIFIED_PAGE_CACHE_MAX = int(os.environ.get("VERIFIED_PAGE_CACHE_MAX", "600"))
 OOS_PHRASES = ["out of stock","غير متوفر","نفدت الكمية","غير متاح","sold out","غير متوفر حاليا","نفذت","not available","temporarily unavailable"]
 # v79.4: نسمح حتى نتيجتين من نفس المتجر/الدومين، ونحاول حذف صفحات المنتج المؤكد نفادها.
 RESULTS_PER_STORE_MAX = max(1, int(os.environ.get("RESULTS_PER_STORE_MAX", "1")))
+# Diversity first: one result per merchant. Only if a market bucket cannot fill its
+# target do we allow a second distinct listing from the same merchant/marketplace.
+RESULTS_PER_STORE_FILL_MAX = max(RESULTS_PER_STORE_MAX, min(3, int(os.environ.get("RESULTS_PER_STORE_FILL_MAX", "2"))))
 ENABLE_RESULT_STOCK_CHECK = env_bool("ENABLE_RESULT_STOCK_CHECK", True)
 # Normal result cards use stock metadata/cache only. Live merchant-page GETs are opt-in because
 # they can add several seconds and some stores intentionally block bots.
@@ -2881,17 +2886,19 @@ def _market_presence_fallback(base_query, rank, limit=6):
 
 
 def _lens_missing_market_ranks(candidates):
-    """Return the exact market ranks that the normal first-Lens supplement would probe."""
+    """Return weak/missing market ranks worth supplementing.
+
+    v108 does not wait until US/China are completely empty. A thin bucket gets a
+    parallel rescue too, which raises final count while Lens passes are still running.
+    """
     seq = list(candidates or [])
     counts = {r: sum(1 for x in seq if result_market_rank(x) == r) for r in (0, 1, 2)}
-    local_target = min(LENS_DIRECT_LOCAL_MAX, LOCAL_RESULTS_TARGET)
-    missing = []
-    if counts[0] < local_target:
-        missing.append(0)
-    if counts[1] == 0:
-        missing.append(1)
-    if counts[2] == 0:
-        missing.append(2)
+    targets = {
+        0: min(LENS_DIRECT_LOCAL_MAX, LOCAL_RESULTS_TARGET),
+        1: min(LENS_DIRECT_US_MAX, 2),
+        2: min(LENS_DIRECT_CN_MAX, 2),
+    }
+    missing = [r for r in (0, 1, 2) if counts[r] < targets[r]]
     return counts, missing
 
 
@@ -3163,8 +3170,12 @@ def google_lens_lookup(image_b64, mime_type, lang="ar", query_hint="", light=Fal
         prefetch_query = (query_hint or "").strip()
         if not prefetch_query and merged:
             prefetch_query = (merged[0].get("title") or "").strip()
-        if light and pending and not enough_fast and prefetch_query:
-            market_prefetch = _start_lens_market_prefetch(merged, prefetch_query)
+        if light and pending and prefetch_query:
+            # v108: weak-market rescue starts under the remaining Lens wait even when
+            # the first wave is already good enough to finish quickly.
+            _prefetch_counts, _prefetch_missing = _lens_missing_market_ranks(merged)
+            if _prefetch_missing:
+                market_prefetch = _start_lens_market_prefetch(merged, prefetch_query)
 
         done = set(done_fast)
         if pending and not enough_fast:
@@ -3232,7 +3243,7 @@ def google_lens_lookup(image_b64, mime_type, lang="ar", query_hint="", light=Fal
             int(m.get("position") or 999),
         ))
         # لا نسمح للنتائج المحلية/الأمريكية أن تملأ LENS_RESULT_LIMIT وتحذف الصين.
-        # نحتفظ بعدد كافٍ من كل سوق مستقلاً، ثم يطبق send_lens_direct_results سقف 5/4/4 النهائي.
+        # نحتفظ بعدد كافٍ من كل سوق مستقلاً، ثم يطبق send_lens_direct_results سقف v108 النهائي (افتراضياً 6/4/4).
         keep_caps = {
             0: max(LENS_DIRECT_LOCAL_MAX * 3, LENS_DIRECT_LOCAL_MAX),
             1: max(LENS_DIRECT_US_MAX * 3, LENS_DIRECT_US_MAX),
@@ -4907,11 +4918,16 @@ def google_shopping_offers(query, lang="ar", allow_global=False, lens_context=No
         cards = _fetch_spec(specs[0])
     else:
         futures = {LOCAL_SHOPPING_POOL.submit(_fetch_spec, spec): spec for spec in specs}
-        for fut, spec in futures.items():
+        done, pending = wait(list(futures), timeout=SERPAPI_TIMEOUT_SECONDS + 1)
+        for fut in done:
+            spec = futures[fut]
             try:
-                cards.extend(fut.result(timeout=SERPAPI_TIMEOUT_SECONDS + 5) or [])
+                cards.extend(fut.result() or [])
             except Exception as e:
                 print(f"LOCAL SHOPPING PASS ERR spec={spec}: {e}")
+        for fut in pending:
+            fut.cancel()
+            print(f"LOCAL SHOPPING PASS GLOBAL TIMEOUT spec={futures[fut]}")
 
     # Deduplicate cards returned by multiple locales while preserving the earliest/best pass.
     dedup_cards, seen_cards = [], set()
@@ -5016,9 +5032,11 @@ def google_shopping_offers(query, lang="ar", allow_global=False, lens_context=No
             SHOPPING_POOL.submit(_run_with_market, market_snapshot, _immersive_product_stores, token): (pos, title, gl)
             for pos, title, token, gl in picked
         }
-        for future, (pos, title, gl) in futures.items():
+        done, pending = wait(list(futures), timeout=min(SERPAPI_TIMEOUT_SECONDS + 1, 10))
+        for future in done:
+            pos, title, gl = futures[future]
             try:
-                stores = future.result(timeout=SERPAPI_TIMEOUT_SECONDS + 5) or []
+                stores = future.result() or []
             except Exception as e:
                 print(f"IMMERSIVE FUTURE ERR: {e}")
                 continue
@@ -5029,6 +5047,8 @@ def google_shopping_offers(query, lang="ar", allow_global=False, lens_context=No
                     store.get("extracted_price") if store.get("extracted_price") not in (None, "") else store.get("extracted_total"),
                     title, pos, gl,
                 )
+        for future in pending:
+            future.cancel()
 
     # v106.5: Shopping GL is unavailable in some otherwise-valid Google markets
     # (Kuwait is one). Use ordinary Google Search instead of repeatedly issuing
@@ -5050,9 +5070,12 @@ def google_shopping_offers(query, lang="ar", allow_global=False, lens_context=No
             ): (label, domain)
             for label, domain in organic_specs
         }
-        for fut, (label, domain) in futures.items():
+        done, pending = wait(list(futures), timeout=MARKET_FALLBACK_TIMEOUT_SECONDS + 0.5)
+        # Consume only work that completed inside one shared deadline.
+        for fut in done:
+            label, domain = futures[fut]
             try:
-                rows = fut.result(timeout=MARKET_FALLBACK_TIMEOUT_SECONDS + 2) or []
+                rows = fut.result() or []
             except Exception as e:
                 print(f"LOCAL ORGANIC PRICE RESCUE ERR {label}: {e}")
                 continue
@@ -5068,6 +5091,8 @@ def google_shopping_offers(query, lang="ar", allow_global=False, lens_context=No
                     break
             if len(offers) >= LOCAL_RESULTS_TARGET:
                 break
+        for fut in pending:
+            fut.cancel()
 
     # Rescue local merchant domains only when broad local Shopping is weak. No penalty for strong markets.
     if (
@@ -5080,9 +5105,11 @@ def google_shopping_offers(query, lang="ar", allow_global=False, lens_context=No
             rs = _serpapi_shopping_request(f"{q} site:{domain}", local_cc, hl=local_hl, timeout_seconds=MARKET_FALLBACK_TIMEOUT_SECONDS)
             return label, domain, rs
         futures = {LOCAL_SHOPPING_POOL.submit(_rescue, label, domain):(label,domain) for label,domain in rescue_specs}
-        for fut, (label, domain) in futures.items():
+        done, pending = wait(list(futures), timeout=MARKET_FALLBACK_TIMEOUT_SECONDS + 0.5)
+        for fut in done:
+            label, domain = futures[fut]
             try:
-                _, _, rs = fut.result(timeout=MARKET_FALLBACK_TIMEOUT_SECONDS + 4)
+                _, _, rs = fut.result()
             except Exception as e:
                 print(f"LOCAL STORE RESCUE ERR {label}: {e}")
                 continue
@@ -5096,6 +5123,8 @@ def google_shopping_offers(query, lang="ar", allow_global=False, lens_context=No
                 if not _host_matches_any(host, (domain,)):
                     continue
                 _add(card.get("source") or label, direct, card.get("price"), card.get("extracted_price"), card.get("title") or "", int(card.get("position") or 999), local_cc)
+        for fut in pending:
+            fut.cancel()
 
     # Generic country rescue for markets without a curated merchant profile or where the first passes were sparse.
     # Runs only on weak LOCAL coverage, so Kuwait/other strong markets do not pay extra latency when already healthy.
@@ -6187,8 +6216,11 @@ def send_whatsapp_text(to,text,bot_id):
     try: return _whatsapp_http_session().post(url,json=payload,headers=h,timeout=(3, WHATSAPP_TIMEOUT_SECONDS)).ok
     except Exception: return False
 
-def send_whatsapp_cta(to,body,link,bot_id,title):
-    _typing_before_outgoing(to, bot_id)
+def send_whatsapp_cta(to,body,link,bot_id,title,typing=True):
+    # The first card handles typing. Bulk result cards skip another Meta typing API
+    # call + artificial delay before every CTA, while preserving send order.
+    if typing:
+        _typing_before_outgoing(to, bot_id)
     url=f"{GRAPH_URL}/{bot_id}/messages"; h={"Authorization":f"Bearer {WHATSAPP_TOKEN}","Content-Type":"application/json"}
     safe_body = _remove_ui_autolinks(body)
     safe_title = _remove_ui_autolinks(title)
@@ -7240,6 +7272,7 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption="", image_
     selected = []
     seen_urls = set()
     merchant_counts = defaultdict(int)
+    selected_market_counts = {0: 0, 1: 0, 2: 0}
     for rank in (0, 1, 2):
         taken = 0
         cap = market_caps.get(rank, 0)
@@ -7254,20 +7287,47 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption="", image_
             if not (url.startswith("http") and host and "google." not in host):
                 continue
             merchant = _merchant_key(m)
-            if _canonical_result_url(url) in seen_urls:
+            canon = _canonical_result_url(url)
+            if canon in seen_urls:
                 print(f"LENS DUP URL SKIP: merchant={merchant} title={(m.get('title') or '')[:70]}")
                 continue
             if merchant_counts[merchant] >= RESULTS_PER_STORE_MAX:
-                print(f"LENS STORE CAP SKIP: merchant={merchant} cap={RESULTS_PER_STORE_MAX}")
                 continue
             selected.append(m)
-            seen_urls.add(_canonical_result_url(url))
+            seen_urls.add(canon)
             merchant_counts[merchant] += 1
+            selected_market_counts[rank] += 1
             taken += 1
             if taken >= cap or len(selected) >= LENS_DIRECT_MAX_CTA:
                 break
         if len(selected) >= LENS_DIRECT_MAX_CTA:
             break
+
+    # v108 MORE RESULTS: preserve merchant diversity first, then use a second
+    # distinct listing only to fill otherwise-empty slots in that same market.
+    if RESULTS_PER_STORE_FILL_MAX > RESULTS_PER_STORE_MAX and len(selected) < LENS_DIRECT_MAX_CTA:
+        for rank in (0, 1, 2):
+            cap = market_caps.get(rank, 0)
+            need = max(0, cap - selected_market_counts.get(rank, 0))
+            if not need:
+                continue
+            for m in buckets[rank]:
+                url = (m.get("link") or "").strip()
+                canon = _canonical_result_url(url)
+                if not url.startswith("http") or canon in seen_urls:
+                    continue
+                merchant = _merchant_key(m)
+                if merchant_counts[merchant] >= RESULTS_PER_STORE_FILL_MAX:
+                    continue
+                selected.append(m)
+                seen_urls.add(canon)
+                merchant_counts[merchant] += 1
+                selected_market_counts[rank] += 1
+                need -= 1
+                if need <= 0 or len(selected) >= LENS_DIRECT_MAX_CTA:
+                    break
+            if len(selected) >= LENS_DIRECT_MAX_CTA:
+                break
 
     if not selected:
         return False
@@ -7303,7 +7363,7 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption="", image_
 
         url = (m.get("link") or "").strip()
         button_source = source or (U(lang, "store"))
-        send_whatsapp_cta(from_number, body[:1000], url, bot_id, button_source)
+        send_whatsapp_cta(from_number, body[:1000], url, bot_id, button_source, typing=(sent == 0))
         market_counts[market_rank] += 1
         sent += 1
 
@@ -7515,9 +7575,11 @@ def send_last_search_map(from_number, bot_id, lang):
 
 PENDING_BRAND_PICKS = {}
 PENDING_CART_PICKS = {}
-SEARCH_RUNS = max(1, min(3, int(os.environ.get("SEARCH_RUNS", "2"))))
-TOURNAMENT_GRACE_SECONDS = max(0.25, float(os.environ.get("TOURNAMENT_GRACE_SECONDS", "1.2")))
-LENS_FAST_READY_SECONDS = max(3.0, min(5.0, float(os.environ.get("LENS_FAST_READY_SECONDS", "5.0"))))
+SEARCH_RUNS = max(1, min(3, int(os.environ.get("SEARCH_RUNS", "3"))))
+# Strong first answer: tiny grace. Thin-but-usable answer: short bounded grace, never a full Gemini timeout.
+TOURNAMENT_GRACE_SECONDS = max(0.25, min(1.5, float(os.environ.get("TOURNAMENT_GRACE_SECONDS", "0.65"))))
+TOURNAMENT_WEAK_GRACE_SECONDS = max(0.75, min(4.0, float(os.environ.get("TOURNAMENT_WEAK_GRACE_SECONDS", "2.0"))))
+LENS_FAST_READY_SECONDS = max(3.0, min(5.0, float(os.environ.get("LENS_FAST_READY_SECONDS", "3.8"))))
 
 V26_SEARCH_POOL = ThreadPoolExecutor(max_workers=8)
 SIMILAR_MAX_STORES = max(MAX_STORES, int(os.environ.get("SIMILAR_MAX_STORES", "10")))
@@ -8230,14 +8292,24 @@ def _fast_tournament_results(futs, limit, timeout_seconds):
                 results.append(r)
         except Exception as e:
             print(f"TOURNAMENT FIRST ERR: {e}")
-    def strong():
+    def _best_coverage():
+        best_offers = best_urls = 0
         for txt, urls in results:
-            offers = text77_extract_store_offers(txt, limit=limit)
-            if len(offers) >= min(3, limit) and len(urls or {}) >= min(2, limit):
-                return True
-        return False
+            best_offers = max(best_offers, len(text77_extract_store_offers(txt, limit=limit)))
+            best_urls = max(best_urls, len(urls or {}))
+        return best_offers, best_urls
     if pending:
-        extra_wait = TOURNAMENT_GRACE_SECONDS if strong() else timeout_seconds
+        best_offers, best_urls = _best_coverage()
+        # About half the requested list is a strong first wave. Thin-but-usable
+        # answers get only a short grace instead of the old full 28-33 second wait.
+        strong_target = min(limit, max(4, (limit + 1) // 2))
+        if not results:
+            extra_wait = timeout_seconds
+        elif best_offers >= strong_target and best_urls >= min(5, strong_target):
+            extra_wait = TOURNAMENT_GRACE_SECONDS
+        else:
+            extra_wait = min(TOURNAMENT_WEAK_GRACE_SECONDS, timeout_seconds)
+        print(f"TOURNAMENT ADAPTIVE first_offers={best_offers} first_urls={best_urls} target={strong_target} grace={extra_wait:.2f}s")
         done2, pending2 = wait(pending, timeout=extra_wait)
         for f in done2:
             try:
@@ -9112,6 +9184,8 @@ def send_text_lens_style_results(from_number, txt, urls, bot_id, lang, query, ex
         else {0: LENS_DIRECT_LOCAL_MAX, 1: LENS_DIRECT_US_MAX, 2: LENS_DIRECT_CN_MAX}
     )
     selected, merchant_counts, seen_urls = [], defaultdict(int), set()
+    selected_market_counts = {0: 0, 1: 0, 2: 0}
+    sorted_buckets = {}
     for rank in (0, 1, 2):
         taken = 0
         bucket = [x for x in candidates if x["market_rank"] == rank]
@@ -9121,6 +9195,7 @@ def send_text_lens_style_results(from_number, txt, urls, bot_id, lang, query, ex
             bucket.sort(key=lambda x: (-_findzia_match_score(query, x.get("title") or ""), _china_store_priority(x.get("source"), x.get("link")), int(x.get("position") or 999)))
         else:
             bucket.sort(key=lambda x: (-_findzia_match_score(query, x.get("title") or ""), int(x.get("position") or 999)))
+        sorted_buckets[rank] = bucket
         for item in bucket:
             try:
                 host = urllib.parse.urlparse(item["link"]).netloc.lower().split(":")[0]
@@ -9129,16 +9204,44 @@ def send_text_lens_style_results(from_number, txt, urls, bot_id, lang, query, ex
                 host = ""
             merchant = host or normalize_name(item["source"])
             url = (item.get("link") or "").strip()
-            if not merchant or _canonical_result_url(url) in seen_urls:
+            canon = _canonical_result_url(url)
+            if not merchant or canon in seen_urls:
                 continue
             if merchant_counts[merchant] >= RESULTS_PER_STORE_MAX:
                 continue
             merchant_counts[merchant] += 1
-            seen_urls.add(_canonical_result_url(url))
+            seen_urls.add(canon)
             selected.append(item)
+            selected_market_counts[rank] += 1
             taken += 1
             if taken >= caps.get(rank, 0):
                 break
+
+    # Same diversity-first fill as Lens: second listing only when unique merchants
+    # cannot fill the market cap. This raises count without letting Amazon/Temu dominate.
+    if RESULTS_PER_STORE_FILL_MAX > RESULTS_PER_STORE_MAX:
+        for rank in (0, 1, 2):
+            need = max(0, caps.get(rank, 0) - selected_market_counts.get(rank, 0))
+            if not need:
+                continue
+            for item in sorted_buckets.get(rank, []):
+                try:
+                    host = urllib.parse.urlparse(item["link"]).netloc.lower().split(":")[0]
+                    host = host[4:] if host.startswith("www.") else host
+                except Exception:
+                    host = ""
+                merchant = host or normalize_name(item["source"])
+                url = (item.get("link") or "").strip()
+                canon = _canonical_result_url(url)
+                if not merchant or canon in seen_urls or merchant_counts[merchant] >= RESULTS_PER_STORE_FILL_MAX:
+                    continue
+                merchant_counts[merchant] += 1
+                seen_urls.add(canon)
+                selected.append(item)
+                selected_market_counts[rank] += 1
+                need -= 1
+                if need <= 0:
+                    break
 
     if not selected:
         return False
@@ -9166,7 +9269,7 @@ def send_text_lens_style_results(from_number, txt, urls, bot_id, lang, query, ex
         body = _build_compact_card_body(flag, store, title, shown_price, lang)
         if not body:
             continue
-        send_whatsapp_cta(from_number, body[:1000], item["link"], bot_id, store)
+        send_whatsapp_cta(from_number, body[:1000], item["link"], bot_id, store, typing=(len(sent_items) == 0))
         counts[rank] += 1
         sent_items.append(item)
 
@@ -12658,4 +12761,4 @@ async def web_api_image_search(request: Request):
 
 
 @app.get("/")
-async def health(): return {"status":"v107 RESULT-QUALITY + GLOBAL-GEO + STRONG-LOCAL + MULTI-CURRENCY + 10-LANG + CAPS-4-3-3", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "market_source":"phone_prefix", "languages":["ar","en","fr","es","pt","tr","ru","zh","hi","ur"]}
+async def health(): return {"status":"v108 TURBO-MORE-RESULTS + RESULT-QUALITY + GLOBAL-GEO + STRONG-LOCAL + MULTI-CURRENCY + 10-LANG + CAPS-6-4-4", "lens_direct_mode":LENS_DIRECT_MODE, "build":BUILD_ID, "market_source":"phone_prefix", "languages":["ar","en","fr","es","pt","tr","ru","zh","hi","ur"]}
