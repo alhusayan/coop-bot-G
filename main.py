@@ -1,9 +1,5 @@
 # -*- coding: utf-8 -*-
-import os, re, time, base64, requests, json, asyncio, urllib.parse, hashlib, sqlite3, threading, logging
-try:
-    import httpx
-except ImportError:
-    httpx = None
+import os, re, time, base64, requests, json, asyncio, urllib.parse, hashlib, sqlite3, threading
 from collections import deque, defaultdict
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from fastapi import FastAPI, Request, Response, BackgroundTasks
@@ -30,7 +26,7 @@ app.add_middleware(
     allow_headers=["Content-Type", "Accept"],
     max_age=86400,
 )
-BUILD_ID = "v107.1-quality-httpx-json-20260901"
+BUILD_ID = "v107.0-result-quality-20260831"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES")
@@ -94,121 +90,6 @@ LENS_HTTP_POOL = ThreadPoolExecutor(max_workers=12)
 MARKET_SUPPLEMENT_POOL = ThreadPoolExecutor(max_workers=3)
 OLD_LAYER_DUPLICATES = max(1, min(2, int(os.environ.get("OLD_LAYER_DUPLICATES", "1"))))
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-
-
-# ---- v107.1 pooled HTTP transport --------------------------------------------
-# Keep the proven synchronous search/ranking pipeline, but stop opening a fresh
-# TCP/TLS connection for every SerpApi/Gemini/FX request. HTTPX Client is safe to
-# share across worker threads and reuses keep-alive connections. A requests
-# fallback keeps Railway deploys alive until httpx is added to requirements.
-logger = logging.getLogger("findzia")
-if not logger.handlers:
-    _handler = logging.StreamHandler()
-    _handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
-    logger.addHandler(_handler)
-logger.setLevel(getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO))
-
-HTTP_MAX_CONNECTIONS = max(20, int(os.environ.get("HTTP_MAX_CONNECTIONS", "80")))
-HTTP_MAX_KEEPALIVE = max(10, int(os.environ.get("HTTP_MAX_KEEPALIVE", "30")))
-HTTP_KEEPALIVE_EXPIRY = max(5.0, float(os.environ.get("HTTP_KEEPALIVE_EXPIRY", "20")))
-_http2_raw = os.environ.get("HTTP2_ENABLED", "true").strip().lower()
-HTTP2_ENABLED = _http2_raw in ("1", "true", "yes", "on")
-_HTTPX_CLIENT = None
-_HTTPX_LOCK = threading.Lock()
-
-
-def _shared_httpx_client():
-    global _HTTPX_CLIENT
-    if httpx is None:
-        return None
-    if _HTTPX_CLIENT is not None:
-        return _HTTPX_CLIENT
-    with _HTTPX_LOCK:
-        if _HTTPX_CLIENT is None:
-            limits = httpx.Limits(
-                max_connections=HTTP_MAX_CONNECTIONS,
-                max_keepalive_connections=HTTP_MAX_KEEPALIVE,
-                keepalive_expiry=HTTP_KEEPALIVE_EXPIRY,
-            )
-            try:
-                _HTTPX_CLIENT = httpx.Client(
-                    http2=HTTP2_ENABLED,
-                    limits=limits,
-                    follow_redirects=True,
-                    headers={"User-Agent": HEADERS["User-Agent"]},
-                )
-            except Exception as e:
-                logger.warning("HTTPX HTTP/2 unavailable; falling back to HTTP/1.1: %s", e)
-                _HTTPX_CLIENT = httpx.Client(
-                    http2=False,
-                    limits=limits,
-                    follow_redirects=True,
-                    headers={"User-Agent": HEADERS["User-Agent"]},
-                )
-    return _HTTPX_CLIENT
-
-
-def _httpx_timeout(value):
-    if httpx is None:
-        return value
-    if isinstance(value, (tuple, list)) and len(value) >= 2:
-        connect, read = float(value[0]), float(value[1])
-        return httpx.Timeout(connect=connect, read=read, write=max(read, 5.0), pool=connect)
-    if value is None:
-        return None
-    return httpx.Timeout(float(value))
-
-
-def _http_request(method, url, **kwargs):
-    """Pooled request for API-style calls; preserves requests-style timeout tuples."""
-    client = _shared_httpx_client()
-    if client is None:
-        return requests.request(method, url, **kwargs)
-    timeout = kwargs.pop("timeout", None)
-    allow_redirects = kwargs.pop("allow_redirects", None)
-    # Streaming merchant/image fetches intentionally remain on requests because
-    # callers use iter_content(); hot JSON APIs use this pooled path.
-    kwargs.pop("stream", None)
-    if allow_redirects is not None:
-        kwargs["follow_redirects"] = bool(allow_redirects)
-    if timeout is not None:
-        kwargs["timeout"] = _httpx_timeout(timeout)
-    return client.request(method, url, **kwargs)
-
-
-def _http_get(url, **kwargs):
-    return _http_request("GET", url, **kwargs)
-
-
-def _http_post(url, **kwargs):
-    return _http_request("POST", url, **kwargs)
-
-
-def _http_head(url, **kwargs):
-    return _http_request("HEAD", url, **kwargs)
-
-
-def _parse_structured_json(raw, default=None, label="Gemini JSON"):
-    """Structured-output parser. Regex is fallback-only for old/provider-degraded responses."""
-    default = {} if default is None else default
-    txt = str(raw or "").strip()
-    if not txt:
-        return default
-    try:
-        return json.loads(txt)
-    except Exception as direct_err:
-        # Backward-compatible safety net only; normal structured output should never need this.
-        try:
-            first_obj = min([x for x in (txt.find("{"), txt.find("[")) if x >= 0], default=-1)
-            if first_obj >= 0:
-                decoder = json.JSONDecoder()
-                value, _ = decoder.raw_decode(txt[first_obj:])
-                logger.warning("%s required fallback JSON extraction", label)
-                return value
-        except Exception:
-            pass
-        logger.warning("%s parse failed: %s; raw=%r", label, direct_err, txt[:280])
-        return default
 
 def env_bool(name, default=False):
     value = os.environ.get(name)
@@ -901,7 +782,7 @@ def get_fx_rates(base):
         if hit and now - hit["ts"] < FX_CACHE_TTL:
             return hit["rates"]
     try:
-        r = _http_get(FX_API_URL.format(base=base), timeout=10)
+        r = requests.get(FX_API_URL.format(base=base), timeout=10)
         if r.ok:
             j = r.json()
             rates = j.get("rates") or j.get("conversion_rates") or {}
@@ -1203,7 +1084,7 @@ def market_instruction():
 def reverse_geocode_market(lat, lng):
     # No API key required. Failure is harmless: coordinates still localise Google Maps.
     try:
-        r = _http_get("https://api.bigdatacloud.net/data/reverse-geocode-client", params={"latitude":lat,"longitude":lng,"localityLanguage":"en"}, timeout=8)
+        r = requests.get("https://api.bigdatacloud.net/data/reverse-geocode-client", params={"latitude":lat,"longitude":lng,"localityLanguage":"en"}, timeout=8)
         if r.ok:
             j = r.json()
             cc = str(j.get("countryCode") or "").lower()
@@ -2426,7 +2307,7 @@ SYSTEM_PROMPT = """
 def fetch_html(url):
     if not url or not url.startswith("http"): return ""
     try:
-        r = _http_get(url, headers=HEADERS, timeout=10)
+        r = requests.get(url, headers=HEADERS, timeout=10)
         if r.status_code == 200 and len(r.text) > 1500:
             return r.text
     except Exception as e:
@@ -2753,7 +2634,7 @@ def _serpapi_lens_request(public_url, lens_type, country, auto_crop, query_hint)
         params["q"] = query_hint[:120]
     try:
         lens_read_timeout = min(float(LENS_HTTP_TIMEOUT_SECONDS), max(6.0, float(LENS_TOTAL_TIMEOUT_SECONDS) - 0.5))
-        r = _http_get("https://serpapi.com/search.json", params=params, timeout=(5, lens_read_timeout))
+        r = requests.get("https://serpapi.com/search.json", params=params, timeout=(5, lens_read_timeout))
         if r.status_code >= 400:
             print(f"GOOGLE LENS HTTP {r.status_code} type={lens_type or 'all'} country={country or '-'}: {r.text[:300]}")
             return []
@@ -4114,57 +3995,7 @@ def send_product_result(from_number, txt, urls, bot_id, lang, query, best_only=F
 GEMINI_STATS = {"search_calls": 0, "plain_calls": 0}
 GEMINI_STATS_LOCK = threading.Lock()
 
-
-# Structured schemas for deterministic non-search Gemini calls.
-_SCHEMA_IDENTITY_JUDGE = {
-    "type": "object",
-    "properties": {
-        "winner": {"type": "string", "enum": ["VISION", "LENS", "MERGE"]},
-        "confidence": {"type": "integer", "minimum": 0, "maximum": 100},
-        "final_name": {"type": "string"},
-        "reason": {"type": "string"},
-    },
-    "required": ["winner", "confidence", "final_name", "reason"],
-    "additionalProperties": False,
-}
-_SCHEMA_LENS_RELEVANCE = {
-    "type": "object",
-    "properties": {
-        "target": {"type": "string"},
-        "keep": {"type": "array", "items": {"type": "integer", "minimum": 1}, "maxItems": 30},
-    },
-    "required": ["target", "keep"],
-    "additionalProperties": False,
-}
-_SCHEMA_KEEP_INDICES = {
-    "type": "object",
-    "properties": {"keep": {"type": "array", "items": {"type": "integer", "minimum": 1}, "maxItems": 60}},
-    "required": ["keep"],
-    "additionalProperties": False,
-}
-_SCHEMA_STORE_GROUPS = {
-    "type": "object",
-    "properties": {
-        "groups": {
-            "type": "array",
-            "items": {"type": "array", "items": {"type": "integer", "minimum": 1}, "minItems": 1},
-            "minItems": 1,
-        }
-    },
-    "required": ["groups"],
-    "additionalProperties": False,
-}
-_SCHEMA_INTENT = {
-    "type": "object",
-    "properties": {
-        "intent": {"type": "string", "enum": ["search", "service", "greeting", "thanks", "chat"]},
-        "products": {"type": "array", "items": {"type": "string"}, "maxItems": 6},
-    },
-    "required": ["intent", "products"],
-    "additionalProperties": False,
-}
-
-def call_gemini(parts, system=SYSTEM_PROMPT, use_search=True, response_schema=None):
+def call_gemini(parts, system=SYSTEM_PROMPT, use_search=True):
     model = GEMINI_SEARCH_MODEL if use_search else GEMINI_FAST_MODEL
     gemini_url = f"{GEMINI_BASE_URL}/{model}:generateContent"
     payload = {
@@ -4176,9 +4007,6 @@ def call_gemini(parts, system=SYSTEM_PROMPT, use_search=True, response_schema=No
             "maxOutputTokens": 1000 if use_search else 300,
         },
     }
-    if response_schema is not None and not use_search:
-        payload["generationConfig"]["responseMimeType"] = "application/json"
-        payload["generationConfig"]["responseJsonSchema"] = response_schema
     if use_search:
         payload["tools"] = [{"google_search": {}}]
     with GEMINI_STATS_LOCK:
@@ -4186,7 +4014,7 @@ def call_gemini(parts, system=SYSTEM_PROMPT, use_search=True, response_schema=No
         GEMINI_STATS[key] += 1
         print(f"GEMINI CALL model={model} search={use_search} totals={GEMINI_STATS}")
     try:
-        r = _http_post(gemini_url, params={"key": GEMINI_API_KEY}, json=payload, timeout=(5, GEMINI_SEARCH_TIMEOUT_SECONDS if use_search else GEMINI_PLAIN_TIMEOUT_SECONDS))
+        r = requests.post(gemini_url, params={"key": GEMINI_API_KEY}, json=payload, timeout=(5, GEMINI_SEARCH_TIMEOUT_SECONDS if use_search else GEMINI_PLAIN_TIMEOUT_SECONDS))
         if r.status_code >= 400:
             print(f"Gemini HTTP {r.status_code}: {r.text[:500]}")
             return "", {}
@@ -4855,7 +4683,7 @@ def _serpapi_shopping_request(query, gl, hl="en", timeout_seconds=None):
     if gl:
         params["gl"] = gl
     try:
-        r = _http_get("https://serpapi.com/search.json", params=params, timeout=(4, timeout_seconds or SERPAPI_TIMEOUT_SECONDS))
+        r = requests.get("https://serpapi.com/search.json", params=params, timeout=(4, timeout_seconds or SERPAPI_TIMEOUT_SECONDS))
         if r.status_code >= 400:
             print(f"GOOGLE SHOPPING HTTP {r.status_code}: {r.text[:300]}")
             return []
@@ -4895,7 +4723,7 @@ def _serpapi_google_organic_market_request(query, gl, hl="en", domain="", timeou
         "output": "json",
     }
     try:
-        r = _http_get(
+        r = requests.get(
             "https://serpapi.com/search.json",
             params=params,
             timeout=(3.5, timeout_seconds or MARKET_FALLBACK_TIMEOUT_SECONDS),
@@ -4957,7 +4785,7 @@ def _immersive_product_stores(page_token):
         # يرفع النتيجة من 3-5 متاجر إلى 13 كحد أقصى حسب توثيق SerpApi.
         params["more_stores"] = "true"
     try:
-        r = _http_get("https://serpapi.com/search.json", params=params, timeout=(4, SERPAPI_TIMEOUT_SECONDS))
+        r = requests.get("https://serpapi.com/search.json", params=params, timeout=(4, SERPAPI_TIMEOUT_SECONDS))
         if r.status_code >= 400:
             print(f"IMMERSIVE HTTP {r.status_code}: {r.text[:200]}")
             return []
@@ -7047,10 +6875,11 @@ def choose_image_identity(image_b64, mime_type, lens, vision_name):
     raw, _ = call_gemini([
         {"inline_data": {"mime_type": mime_type, "data": image_b64}},
         {"text": prompt},
-    ], system=judge_system, use_search=False, response_schema=_SCHEMA_IDENTITY_JUDGE)
-    data = _parse_structured_json(raw, {}, "IDENTITY JUDGE")
-    if not data:
-        logger.warning("IDENTITY JUDGE structured parse failed")
+    ], system=judge_system, use_search=False)
+    try:
+        data = json.loads(re.search(r"\{.*\}", raw or "", flags=re.S).group(0))
+    except Exception:
+        print(f"IDENTITY JUDGE PARSE FAIL: {raw}")
         return vision_name, None, "VISION_SAFE_FALLBACK"
 
     winner = str(data.get("winner", "VISION")).upper()
@@ -7251,16 +7080,15 @@ Keep only the product identity and the few attributes needed to distinguish it (
 Remove shopping/SEO filler such as buy, shop, online, available in, for men/women, city/country/store wording unless essential to identify the product.
 Aim for 3-8 words and at most 65 characters.
 Return ONLY a JSON array of strings in the same order, no markdown."""
-        title_schema = {
-            "type": "array", "items": {"type": "string"},
-            "minItems": len(missing), "maxItems": len(missing),
-        }
-        raw, _ = call_gemini(
-            [{"text": json.dumps(missing, ensure_ascii=False)}],
-            system=system, use_search=False, response_schema=title_schema,
-        )
-        parsed = _parse_structured_json(raw, [], "UI TITLE TRANSLATE")
-        translated = [str(x or "").strip() for x in parsed] if isinstance(parsed, list) else []
+        raw, _ = call_gemini([{"text": json.dumps(missing, ensure_ascii=False)}], system=system, use_search=False)
+        translated = []
+        try:
+            m = re.search(r"\[.*\]", raw or "", flags=re.S)
+            parsed = json.loads(m.group(0)) if m else []
+            if isinstance(parsed, list):
+                translated = [str(x or "").strip() for x in parsed]
+        except Exception as e:
+            print(f"UI TITLE TRANSLATE PARSE ERR: {e}")
         if len(translated) != len(missing):
             translated = missing
         with UI_TRANSLATE_LOCK:
@@ -7293,10 +7121,9 @@ Never use price, merchant fame or country as relevance evidence.
 Return JSON only: {\"target\":\"short identity\",\"keep\":[1,2,4]}"""
     prompt = f"Visual/original-image identity: {anchor or 'UNKNOWN'}\n\nLens candidates:\n" + "\n".join(rows)
     try:
-        raw, _ = call_gemini(
-            [{"text": prompt}], system=system, use_search=False, response_schema=_SCHEMA_LENS_RELEVANCE
-        )
-        data = _parse_structured_json(raw, {}, "LENS AI RELEVANCE")
+        raw, _ = call_gemini([{"text": prompt}], system=system, use_search=False)
+        mobj = re.search(r"\{.*\}", raw or "", flags=re.S)
+        data = json.loads(mobj.group(0)) if mobj else {}
         keep = {int(x) for x in (data.get("keep") or []) if str(x).isdigit()}
         filtered = [m for i, m in enumerate(sample, 1) if i in keep]
         if filtered:
@@ -7867,7 +7694,7 @@ def text77_extract_store_offers(txt, limit=None):
     cap = MAX_STORES if limit is None else max(1, int(limit))
     return offers[:cap]
 
-def text77_call_gemini(parts, system=TEXT77_SYSTEM_PROMPT, use_search=True, response_schema=None):
+def text77_call_gemini(parts, system=TEXT77_SYSTEM_PROMPT, use_search=True):
     """v77.7 call_gemini semantics, but isolated to typed text flows."""
     model = GEMINI_SEARCH_MODEL if use_search else GEMINI_FAST_MODEL
     gemini_url = f"{GEMINI_BASE_URL}/{model}:generateContent"
@@ -7876,9 +7703,6 @@ def text77_call_gemini(parts, system=TEXT77_SYSTEM_PROMPT, use_search=True, resp
         "contents": [{"role": "user", "parts": parts}],
         "generationConfig": {"temperature": 0, "maxOutputTokens": 1000 if use_search else 300},
     }
-    if response_schema is not None and not use_search:
-        payload["generationConfig"]["responseMimeType"] = "application/json"
-        payload["generationConfig"]["responseJsonSchema"] = response_schema
     if use_search:
         payload["tools"] = [{"google_search": {}}]
     with GEMINI_STATS_LOCK:
@@ -7886,7 +7710,7 @@ def text77_call_gemini(parts, system=TEXT77_SYSTEM_PROMPT, use_search=True, resp
         GEMINI_STATS[key] += 1
         print(f"TEXT77 GEMINI CALL model={model} search={use_search} totals={GEMINI_STATS}")
     try:
-        r = _http_post(gemini_url, params={"key": GEMINI_API_KEY}, json=payload, timeout=(5, GEMINI_SEARCH_TIMEOUT_SECONDS if use_search else GEMINI_PLAIN_TIMEOUT_SECONDS))
+        r = requests.post(gemini_url, params={"key": GEMINI_API_KEY}, json=payload, timeout=(5, GEMINI_SEARCH_TIMEOUT_SECONDS if use_search else GEMINI_PLAIN_TIMEOUT_SECONDS))
         if r.status_code >= 400:
             print(f"TEXT77 Gemini HTTP {r.status_code}: {r.text[:500]}")
             return "", {}
@@ -8264,11 +8088,9 @@ def filter_relevant_offers(query, offers, urls, use_ai=True, mode="exact"):
     prompt_label = "المنتج المرجعي للبدائل" if mode == "similar" else "طلب المستخدم"
     prompt = f"{prompt_label}: {query}\n\nالنتائج:\n" + "\n".join(numbered)
     relevance_system = SIMILAR_RELEVANCE_FILTER_SYSTEM if mode == "similar" else RELEVANCE_FILTER_SYSTEM
-    raw, _ = text77_call_gemini(
-        [{"text": prompt}], system=relevance_system, use_search=False, response_schema=_SCHEMA_KEEP_INDICES
-    )
+    raw, _ = text77_call_gemini([{"text": prompt}], system=relevance_system, use_search=False)
     try:
-        data = _parse_structured_json(raw, {}, "TEXT RELEVANCE")
+        data = json.loads(re.search(r"\{.*\}", raw or "", flags=re.S).group(0))
         keep_idx = {int(x) for x in (data.get("keep") or [])}
         ai_kept = [o for i, o in enumerate(kept, 1) if i in keep_idx]
         dropped = [o.get("line", "")[:60] for i, o in enumerate(kept, 1) if i not in keep_idx]
@@ -8570,12 +8392,10 @@ def unify_store_groups(names):
         if key in _STORE_UNIFY_CACHE:
             return _STORE_UNIFY_CACHE[key]
     numbered = "\n".join(f"{i}. {n}" for i, n in enumerate(names, 1))
-    raw, _ = text77_call_gemini(
-        [{"text": numbered}], system=STORE_UNIFY_SYSTEM, use_search=False, response_schema=_SCHEMA_STORE_GROUPS
-    )
+    raw, _ = text77_call_gemini([{"text": numbered}], system=STORE_UNIFY_SYSTEM, use_search=False)
     groups = None
     try:
-        data = _parse_structured_json(raw, {}, "STORE UNIFY")
+        data = json.loads(re.search(r"\{.*\}", raw or "", flags=re.S).group(0))
         cand = [[int(x) - 1 for x in g] for g in (data.get("groups") or []) if g]
         seen = sorted(i for g in cand for i in g)
         if seen == list(range(len(names))):
@@ -8919,7 +8739,7 @@ def legacy_v26_call_gemini(parts, system=LEGACY_TEXT_SEARCH_SYSTEM, max_results=
         with GEMINI_STATS_LOCK:
             GEMINI_STATS["search_calls"] += 1
             print(f"LEGACY V26 CALL model={model} totals={GEMINI_STATS}")
-        r = _http_post(gemini_url, params={"key": GEMINI_API_KEY}, json=payload, timeout=(5, GEMINI_SEARCH_TIMEOUT_SECONDS))
+        r = requests.post(gemini_url, params={"key": GEMINI_API_KEY}, json=payload, timeout=(5, GEMINI_SEARCH_TIMEOUT_SECONDS))
         if r.status_code >= 400:
             print(f"LEGACY V26 Gemini HTTP {r.status_code}: {r.text[:500]}")
             return "", {}
@@ -9883,11 +9703,9 @@ def parse_user_intent(user_text, lang):
     conversational = ("؟" in text or "?" in text or any(normalize_ar(h) in norm for h in CONVERSATIONAL_HINTS))
     if not conversational and len(text.split()) <= 7:
         return {"intent": "search", "products": extract_products(text)}
-    raw, _ = text77_call_gemini(
-        [{"text": text}], system=INTENT_PARSE_SYSTEM, use_search=False, response_schema=_SCHEMA_INTENT
-    )
+    raw, _ = text77_call_gemini([{"text": text}], system=INTENT_PARSE_SYSTEM, use_search=False)
     try:
-        data = _parse_structured_json(raw, {}, "TEXT77 INTENT")
+        data = json.loads(re.search(r"\{.*\}", raw or "", flags=re.S).group(0))
         intent = str(data.get("intent") or "search").lower().strip()
         products = [str(p).strip() for p in (data.get("products") or []) if str(p).strip()]
         if intent in ("greeting", "thanks", "chat") and not products:
@@ -11715,7 +11533,7 @@ def _serpapi_china_global_site_request(query, label, domain, timeout_seconds=Non
         "output": "json",
     }
     try:
-        r = _http_get(
+        r = requests.get(
             "https://serpapi.com/search.json",
             params=params,
             timeout=(3.5, timeout_seconds or WEB_CHINA_ORGANIC_TIMEOUT),
@@ -11897,8 +11715,8 @@ def _web_search_text_sync(query, country, lang, selected_option="", original_que
         products = [p for p in (parsed.get("products") or []) if str(p).strip()]
         if len(products) == 1:
             q = products[0]
-    except Exception as e:
-        logger.debug("WEB intent parse fallback: %s", e)
+    except Exception:
+        pass
 
     if not force_specific:
         try:
@@ -12135,7 +11953,7 @@ def _web_geo_country_from_ip(ip):
     cc = ""
     try:
         url = WEB_GEO_PROVIDER_URL.format(ip=urllib.parse.quote(ip, safe=":."))
-        r = _http_get(url, timeout=(1.0, WEB_GEO_TIMEOUT_SECONDS), headers=HEADERS)
+        r = requests.get(url, timeout=(1.0, WEB_GEO_TIMEOUT_SECONDS), headers=HEADERS)
         if r.ok:
             data = r.json() if r.content else {}
             if data.get("success", True) is not False:
