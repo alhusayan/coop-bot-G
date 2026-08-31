@@ -26,7 +26,7 @@ app.add_middleware(
     allow_headers=["Content-Type", "Accept"],
     max_age=86400,
 )
-BUILD_ID = "v106.6.1-price-fallback-20260831"
+BUILD_ID = "v106.6.2-image-price-enrich-20260831"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES")
@@ -12274,6 +12274,12 @@ async def web_api_image_search_stream(request: Request):
                                 "provisional": True, "market": market_name, "item": item,
                                 "elapsed_ms": int((time.time()-started)*1000),
                             })
+                            # v106.6.2: start the page-price fetch while the final
+                            # engine is still running, so the upsert lands fast.
+                            if _web_row_has_numeric_price(item):
+                                priced_keys.add(key)
+                            else:
+                                _web_spawn_price_enrich_task(price_tasks, key, item, lang, market_snapshot)
                             await asyncio.sleep(0.003)
                         if emitted_now:
                             print(f"ANDROID PROGRESSIVE PREVIEW sent={emitted_now} total_preview={len(preview_keys)} elapsed={time.time()-started:.1f}s")
@@ -12297,6 +12303,21 @@ async def web_api_image_search_stream(request: Request):
                     (str(item.get("url") or "").strip() or (str(item.get("market") or "other") + "|" + str(item.get("store") or "") + "|" + str(item.get("title") or "")))
                     for item in final_results
                 }
+                # v106.6.2: the WhatsApp-parity branch used to return here, so image
+                # searches never reached the price-enrichment code at all. Spawn for
+                # every final card that lacks a numeric price, then upsert what
+                # resolves within the bounded window before closing the stream.
+                for item in final_results:
+                    key = str(item.get("url") or "").strip() or (str(item.get("market") or "other") + "|" + str(item.get("store") or "") + "|" + str(item.get("title") or ""))
+                    if _web_row_has_numeric_price(item):
+                        priced_keys.add(key)
+                        t = price_tasks.pop(key, None)
+                        if t:
+                            t.cancel()
+                    else:
+                        _web_spawn_price_enrich_task(price_tasks, key, item, lang, market_snapshot)
+                async for _ev in _web_drain_price_enrich_events(price_tasks, priced_keys, started):
+                    yield _ev
                 yield _web_stream_event({"event": "done", "count": len(sent), "elapsed_ms": int((time.time()-started)*1000)})
                 return
 
