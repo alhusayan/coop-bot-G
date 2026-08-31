@@ -26,7 +26,7 @@ app.add_middleware(
     allow_headers=["Content-Type", "Accept"],
     max_age=86400,
 )
-BUILD_ID = "v106.6-all-prices-no-drop-20260831"
+BUILD_ID = "v106.6.1-price-fallback-20260831"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES")
@@ -9880,6 +9880,12 @@ WEB_KEEP_PRICELESS_RESULTS = env_bool("WEB_KEEP_PRICELESS_RESULTS", True)
 WEB_PRICE_ENRICH_ENABLED = env_bool("WEB_PRICE_ENRICH_ENABLED", True)
 WEB_PRICE_ENRICH_MAX_ROWS = max(2, min(20, int(os.environ.get("WEB_PRICE_ENRICH_MAX_ROWS", "12"))))
 WEB_PRICE_ENRICH_MAX_WAIT_SECONDS = max(2.0, min(12.0, float(os.environ.get("WEB_PRICE_ENRICH_MAX_WAIT_SECONDS", "6.5"))))
+# v106.6.1: many merchants (Namshi, 6thstreet, SHEIN, Amazon...) block server-side
+# page fetches, so the page can answer HTTP 200/403 yet expose no machine-readable
+# price. For those cards a capped Google Shopping site-query recovers the
+# structured price that Google itself already has.
+WEB_PRICE_ENRICH_SHOPPING_FALLBACK = env_bool("WEB_PRICE_ENRICH_SHOPPING_FALLBACK", True)
+WEB_PRICE_ENRICH_SHOPPING_MAX = max(0, min(10, int(os.environ.get("WEB_PRICE_ENRICH_SHOPPING_MAX", "6"))))
 
 WEB_API_MAX_QUERY_CHARS = max(40, min(500, int(os.environ.get("WEB_API_MAX_QUERY_CHARS", "220"))))
 WEB_API_MAX_IMAGE_BYTES = max(512000, min(12 * 1024 * 1024, int(os.environ.get("WEB_API_MAX_IMAGE_BYTES", str(6 * 1024 * 1024)))))
@@ -11177,19 +11183,80 @@ def _web_row_has_numeric_price(row):
     return bool(val and val > 0)
 
 
-def _web_enrich_row_price_sync(row, lang, market_snapshot):
-    """v106.6: resolve a missing card price from the merchant page (cached snapshot).
+def _web_enrich_price_via_shopping(row, rank, market_snapshot):
+    """v106.6.1 fallback: structured Google Shopping price for merchants that block
+    direct page fetches. Returns (value, raw_price_text) or (None, "")."""
+    if not (WEB_PRICE_ENRICH_SHOPPING_FALLBACK and SERPAPI_API_KEY):
+        return None, ""
+    url = str(row.get("url") or "").strip()
+    title = str(row.get("title") or "").strip()
+    if not url or not title:
+        return None, ""
+    try:
+        host = urllib.parse.urlparse(url).netloc.lower().split(":")[0]
+        host = host[4:] if host.startswith("www.") else host
+    except Exception:
+        return None, ""
+    if not host:
+        return None, ""
+    if rank == 0:
+        gl = ((market_snapshot or {}).get("country") or DEFAULT_COUNTRY).lower()
+        if SHOPPING_GEO_GUARD and not _shopping_gl_supported(gl):
+            return None, ""
+        cc = gl
+    else:
+        gl, cc = "us", "us"
+    try:
+        cards = _serpapi_shopping_request(
+            f"{title} site:{host}", gl, hl="en",
+            timeout_seconds=WEB_STREAM_STORE_HTTP_TIMEOUT,
+        )
+    except Exception as e:
+        print(f"WEB PRICE FALLBACK SHOPPING ERR host={host}: {e}")
+        return None, ""
+    for card in cards or []:
+        item = _shopping_card_to_market_item(card, row.get("store") or "", cc)
+        if not item:
+            continue
+        try:
+            item_host = urllib.parse.urlparse(item.get("link") or "").netloc.lower().split(":")[0]
+            item_host = item_host[4:] if item_host.startswith("www.") else item_host
+        except Exception:
+            item_host = ""
+        if not (item_host == host or item_host.endswith("." + host) or host.endswith("." + item_host)):
+            continue
+        pv = item.get("price_value")
+        try:
+            pv = float(pv) if pv not in (None, "") else None
+        except Exception:
+            pv = None
+        raw = str(item.get("price") or "").strip()
+        if not pv or pv <= 0:
+            pv, _c = _web_price_number_and_currency(raw)
+        if pv and pv > 0:
+            cur = str(item.get("currency") or "").upper().strip()
+            if not cur:
+                cur = _web_market_currency(market_snapshot) if rank == 0 else "USD"
+            return pv, (raw or f"{pv:g} {cur}")
+    return None, ""
+
+
+def _web_enrich_row_price_sync(row, lang, market_snapshot, allow_shopping=True):
+    """v106.6: resolve a missing card price from the merchant page (cached snapshot),
+    with a v106.6.1 Google Shopping fallback for merchants that block server fetches.
 
     Runs in parallel with the authoritative final engine, so it adds no wall time to
     the first paint. Returns the updated row with a verified localized price, or None
-    when the page publishes no machine-readable price (the card then keeps the
-    client-side "Price at store" label)."""
+    when no price could be recovered (the card then keeps the client-side
+    "Price at store" label). Every outcome is logged for diagnosability."""
     try:
         if market_snapshot:
             MARKET_CTX.value = dict(market_snapshot)
         row = dict(row or {})
         url = str(row.get("url") or "").strip()
+        store = row.get("store") or row.get("source") or "?"
         if not url:
+            print(f"WEB PRICE ENRICH MISS store={store} reason=no_url")
             return None
         rank = row.get("market_rank")
         if rank not in (0, 1, 2):
@@ -11199,25 +11266,42 @@ def _web_enrich_row_price_sync(row, lang, market_snapshot):
                 "title": row.get("title"),
             })
         snap = _web_verified_page_snapshot(url)
+        page_ok = bool((snap or {}).get("ok"))
         page_price = (snap or {}).get("price")
         page_cur = str((snap or {}).get("currency") or "").upper().strip()
         try:
             page_price = float(page_price) if page_price not in (None, "") else None
         except Exception:
             page_price = None
-        if not page_price or page_price <= 0:
+
+        raw_price = ""
+        source_tag = ""
+        if page_price and page_price > 0:
+            if not page_cur:
+                page_cur = _web_market_currency(market_snapshot) if rank == 0 else ("USD" if rank == 1 else "CNY")
+            raw_price = f"{page_price:g} {page_cur}".strip()
+            source_tag = "product_page"
+        elif allow_shopping:
+            fb_val, fb_raw = _web_enrich_price_via_shopping(row, rank, market_snapshot)
+            if fb_val and fb_val > 0:
+                raw_price = fb_raw
+                source_tag = "google_shopping_fallback"
+
+        if not raw_price:
+            print(
+                f"WEB PRICE ENRICH MISS store={store} page_ok={page_ok} "
+                f"shopping_fallback={'tried' if allow_shopping else 'off'} url={url[:120]}"
+            )
             return None
-        if not page_cur:
-            page_cur = _web_market_currency(market_snapshot) if rank == 0 else ("USD" if rank == 1 else "CNY")
-        raw_price = f"{page_price:g} {page_cur}".strip()
+
         row["price"] = _web_price_local_explicit(raw_price, rank, lang, market_snapshot)
         row["price"] = _web_normalize_existing_price_to_market(row["price"], rank, lang, market_snapshot)
         row["price_verified"] = True
-        row["price_source"] = "product_page"
+        row["price_source"] = source_tag
         row.pop("price_pending", None)
         if (snap or {}).get("title") and not row.get("title"):
             row["title"] = _compact_ui_title(snap.get("title"))
-        print(f"WEB PRICE ENRICH OK store={row.get('store')} -> {row.get('price')}")
+        print(f"WEB PRICE ENRICH OK store={store} via={source_tag} -> {row.get('price')}")
         return row
     except Exception as e:
         print(f"WEB PRICE ENRICH ERR: {e}")
@@ -11234,9 +11318,14 @@ def _web_spawn_price_enrich_task(price_tasks, key, item, lang, market_snapshot):
         return
     if not str((item or {}).get("url") or "").strip():
         return
+    allow_shopping = len(price_tasks) < WEB_PRICE_ENRICH_SHOPPING_MAX
     try:
         price_tasks[key] = asyncio.create_task(
-            asyncio.to_thread(_web_enrich_row_price_sync, dict(item), lang, market_snapshot)
+            asyncio.to_thread(_web_enrich_row_price_sync, dict(item), lang, market_snapshot, allow_shopping)
+        )
+        print(
+            f"WEB PRICE ENRICH SPAWN store={item.get('store') or item.get('source')} "
+            f"fallback={'on' if allow_shopping else 'quota_off'} url={str(item.get('url'))[:110]}"
         )
     except Exception as e:
         print(f"WEB PRICE ENRICH SPAWN ERR: {e}")
