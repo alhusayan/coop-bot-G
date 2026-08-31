@@ -26,7 +26,7 @@ app.add_middleware(
     allow_headers=["Content-Type", "Accept"],
     max_age=86400,
 )
-BUILD_ID = "v106.5-shopping-geo-guard-20260829"
+BUILD_ID = "v106.6-all-prices-no-drop-20260831"
 print("=" * 70)
 print(f"STARTING COOP BOT BUILD: {BUILD_ID}")
 print("GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES")
@@ -9869,6 +9869,18 @@ WEB_LOCAL_STORE_PROBES = max(0, min(9, int(os.environ.get("WEB_LOCAL_STORE_PROBE
 # still performs the heavier merchant-page verification and can upsert later.
 WEB_FAST_SKIP_PRODUCT_PAGE_VERIFY = env_bool("WEB_FAST_SKIP_PRODUCT_PAGE_VERIFY", True)
 
+# v106.6 ALL-PRICES GUARANTEE ---------------------------------------------------
+# 1) Never delete an already-relevant card just because its price failed to parse.
+# 2) Cards that stream without a numeric price are enriched in the background from
+#    the merchant page (cached, parallel) and the verified price is upserted live.
+# 3) If a merchant page publishes no machine-readable price at all, the card is
+#    kept with an empty price and the client shows the "Price at store" label
+#    instead of inventing a number.
+WEB_KEEP_PRICELESS_RESULTS = env_bool("WEB_KEEP_PRICELESS_RESULTS", True)
+WEB_PRICE_ENRICH_ENABLED = env_bool("WEB_PRICE_ENRICH_ENABLED", True)
+WEB_PRICE_ENRICH_MAX_ROWS = max(2, min(20, int(os.environ.get("WEB_PRICE_ENRICH_MAX_ROWS", "12"))))
+WEB_PRICE_ENRICH_MAX_WAIT_SECONDS = max(2.0, min(12.0, float(os.environ.get("WEB_PRICE_ENRICH_MAX_WAIT_SECONDS", "6.5"))))
+
 WEB_API_MAX_QUERY_CHARS = max(40, min(500, int(os.environ.get("WEB_API_MAX_QUERY_CHARS", "220"))))
 WEB_API_MAX_IMAGE_BYTES = max(512000, min(12 * 1024 * 1024, int(os.environ.get("WEB_API_MAX_IMAGE_BYTES", str(6 * 1024 * 1024)))))
 WEB_API_RATE_PER_MINUTE = max(5, min(120, int(os.environ.get("WEB_API_RATE_PER_MINUTE", "30"))))
@@ -10451,11 +10463,13 @@ def _web_fast_finalize_rows(rows, lang):
         ):
             continue
         if not _web_fast_price_guard(row):
+            # v106.6: installment/wholesale text used to delete the whole card. Now only the
+            # misleading price string is cleared; the real page price is upserted later.
             print(
-                f"WEB FAST PRICE-GUARD DROP store={row.get('store') or row.get('source')} "
+                f"WEB FAST PRICE-GUARD BLANK store={row.get('store') or row.get('source')} "
                 f"title={(row.get('title') or '')[:90]}"
             )
-            continue
+            row["price"] = ""
         rank = row.get("market_rank")
         if rank not in (0, 1, 2):
             rank = result_market_rank({
@@ -10463,15 +10477,22 @@ def _web_fast_finalize_rows(rows, lang):
                 "source": row.get("store") or row.get("source"),
                 "title": row.get("title"),
             })
+        row["market_rank"] = rank
         existing = str(row.get("price") or "").strip()
         val, _cur = _web_price_number_and_currency(existing)
-        if not val or val <= 0:
-            continue
-        row["price"] = _web_normalize_existing_price_to_market(
-            existing, rank, lang, market_snapshot
-        )
-        row["price_verified"] = False
-        row["price_source"] = row.get("price_source") or "search_structured_fast"
+        if val and val > 0:
+            row["price"] = _web_normalize_existing_price_to_market(
+                existing, rank, lang, market_snapshot
+            )
+            row["price_verified"] = False
+            row["price_source"] = row.get("price_source") or "search_structured_fast"
+        else:
+            # v106.6: never drop the card for a missing structured price. Stream it now;
+            # the background enrichment fetches the merchant page and upserts the price.
+            row["price"] = ""
+            row["price_verified"] = False
+            row["price_pending"] = True
+            row["price_source"] = "pending_page_price"
         row.pop("_offer_meta", None)
         out.append(row)
     return out
@@ -10813,28 +10834,55 @@ def _web_price_local_explicit(raw_price, market_rank, lang, market_snapshot=None
     return f"{format_price(converted, local_cur)} {local_cur}{original}"
 
 
+def _web_price_token_to_float(token):
+    """'1,299.00' -> 1299.0 ; '24,90' (decimal comma) -> 24.9 ; '12.500' -> 12.5."""
+    s = str(token or "").strip()
+    if not s:
+        return None
+    try:
+        if "," in s and "." not in s:
+            head, _, tail = s.rpartition(",")
+            # a single comma with 1-2 trailing digits is a European decimal comma
+            if head and len(tail) in (1, 2) and head.count(",") == 0:
+                return float(head.replace(",", "") + "." + tail)
+        return float(s.replace(",", ""))
+    except Exception:
+        return None
+
+
+_WEB_PRICE_CUR_WORDS = (
+    r"USD|US\$|EUR|GBP|KWD|KD|SAR|AED|QAR|BHD|OMR|CNY|RMB|JPY|CAD|AUD|CHF|INR|KRW|TRY|RUB"
+)
+_WEB_PRICE_CUR_SYMS = (
+    r"[$€£¥￥₹₩₺₽]"
+    r"|د\.ك|ر\.س|د\.إ|ر\.ق|د\.ب|ر\.ع"
+)
+# Accepts "1,299.99" thousands style and the previous "12.500"/"12,500" style.
+_WEB_PRICE_NUM = r"([0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]{1,3})?|[0-9]+(?:[.,][0-9]{1,3})?)"
+_WEB_PRICE_PATS = (
+    re.compile(r"(?:%s|%s)\s*%s" % (_WEB_PRICE_CUR_WORDS, _WEB_PRICE_CUR_SYMS, _WEB_PRICE_NUM), re.I),
+    re.compile(r"%s\s*(?:%s|%s)" % (_WEB_PRICE_NUM, _WEB_PRICE_CUR_WORDS, _WEB_PRICE_CUR_SYMS), re.I),
+)
+
+
 def _web_price_number_and_currency(text, fallback_currency=""):
     raw = str(text or "").strip()
     if not raw:
         return None, ""
     cur = detect_currency_code(raw, fallback_currency or "") or fallback_currency or ""
+    # v106.6: the currency-adjacent patterns were corrupted by an escaping round-trip
+    # (a doubled backslash before s* never matched a space), so most structured prices like
+    # "US $4.99" or "12.500 KWD" silently failed and valid cards were dropped.
     # Prefer a number adjacent to a currency token when possible.
-    pats = (
-        r"(?:USD|US\\$|EUR|GBP|KWD|KD|SAR|AED|QAR|BHD|OMR|CNY|RMB|JPY|CAD|AUD|CHF|INR|KRW|TRY|RUB|[$€£¥￥₹₩₺₽])\\s*([0-9]+(?:[.,][0-9]{1,3})?)",
-        r"([0-9]+(?:[.,][0-9]{1,3})?)\\s*(?:USD|EUR|GBP|KWD|KD|SAR|AED|QAR|BHD|OMR|CNY|RMB|JPY|CAD|AUD|CHF|INR|KRW|TRY|RUB)",
-    )
-    for pat in pats:
-        m = re.search(pat, raw, flags=re.I)
+    for pat in _WEB_PRICE_PATS:
+        m = pat.search(raw)
         if m:
-            try:
-                val = float(m.group(1).replace(",", ""))
-                if val > 0:
-                    return val, cur
-            except Exception:
-                pass
+            val = _web_price_token_to_float(m.group(1))
+            if val and val > 0:
+                return val, cur
     # Last resort only when the string itself is short and price-like.
     if len(raw) <= 50:
-        m = re.search(r"(?<!\\d)([0-9]+(?:[.,][0-9]{1,3})?)(?!\\d)", raw.replace(",", ""))
+        m = re.search(r"(?<![0-9])([0-9]+(?:[.,][0-9]{1,3})?)(?![0-9])", raw.replace(",", ""))
         if m:
             try:
                 val = float(m.group(1))
@@ -10877,7 +10925,7 @@ def _web_verified_page_snapshot(url):
             data["is_product"] = bool(parsed_data.get("is_product", True))
             data["ok"] = True
 
-            low = re.sub(r"\\s+", " ", BeautifulSoup(html[:450000], "html.parser").get_text(" ", strip=True).lower())
+            low = re.sub(r"\s+", " ", BeautifulSoup(html[:450000], "html.parser").get_text(" ", strip=True).lower())
             host = urllib.parse.urlparse(final_url).netloc.lower().split(":")[0]
             host = host[4:] if host.startswith("www.") else host
             # Alibaba vertical/supplier result pages can look like product URLs but are supplier listings.
@@ -11110,10 +11158,113 @@ def _web_verify_card_strict(row, rank, lang, market_snapshot=None):
         row["price_source"] = row.get("price_source") or "search_structured_rebased"
         return row
 
-    if WEB_REQUIRE_NUMERIC_PRICE:
+    if WEB_REQUIRE_NUMERIC_PRICE and not WEB_KEEP_PRICELESS_RESULTS:
         print(f"WEB STRICT REJECT NO PRICE store={row.get('store') or row.get('source')} url={url[:140]}")
         return None
+    # v106.6: the merchant page exposed no machine-readable price. Keep the relevant
+    # card (never cancel a result); the client renders its "Price at store" label
+    # rather than showing an invented number.
+    print(f"WEB STRICT KEEP PRICELESS store={row.get('store') or row.get('source')} url={url[:140]}")
+    row["price"] = ""
+    row["price_verified"] = False
+    row["price_pending"] = True
+    row["price_source"] = "pending_page_price"
     return row
+
+
+def _web_row_has_numeric_price(row):
+    val, _cur = _web_price_number_and_currency(str((row or {}).get("price") or ""))
+    return bool(val and val > 0)
+
+
+def _web_enrich_row_price_sync(row, lang, market_snapshot):
+    """v106.6: resolve a missing card price from the merchant page (cached snapshot).
+
+    Runs in parallel with the authoritative final engine, so it adds no wall time to
+    the first paint. Returns the updated row with a verified localized price, or None
+    when the page publishes no machine-readable price (the card then keeps the
+    client-side "Price at store" label)."""
+    try:
+        if market_snapshot:
+            MARKET_CTX.value = dict(market_snapshot)
+        row = dict(row or {})
+        url = str(row.get("url") or "").strip()
+        if not url:
+            return None
+        rank = row.get("market_rank")
+        if rank not in (0, 1, 2):
+            rank = result_market_rank({
+                "link": url,
+                "source": row.get("store") or row.get("source"),
+                "title": row.get("title"),
+            })
+        snap = _web_verified_page_snapshot(url)
+        page_price = (snap or {}).get("price")
+        page_cur = str((snap or {}).get("currency") or "").upper().strip()
+        try:
+            page_price = float(page_price) if page_price not in (None, "") else None
+        except Exception:
+            page_price = None
+        if not page_price or page_price <= 0:
+            return None
+        if not page_cur:
+            page_cur = _web_market_currency(market_snapshot) if rank == 0 else ("USD" if rank == 1 else "CNY")
+        raw_price = f"{page_price:g} {page_cur}".strip()
+        row["price"] = _web_price_local_explicit(raw_price, rank, lang, market_snapshot)
+        row["price"] = _web_normalize_existing_price_to_market(row["price"], rank, lang, market_snapshot)
+        row["price_verified"] = True
+        row["price_source"] = "product_page"
+        row.pop("price_pending", None)
+        if (snap or {}).get("title") and not row.get("title"):
+            row["title"] = _compact_ui_title(snap.get("title"))
+        print(f"WEB PRICE ENRICH OK store={row.get('store')} -> {row.get('price')}")
+        return row
+    except Exception as e:
+        print(f"WEB PRICE ENRICH ERR: {e}")
+        return None
+
+
+def _web_spawn_price_enrich_task(price_tasks, key, item, lang, market_snapshot):
+    """Register one background page-price fetch for a card streamed without a price."""
+    if not (WEB_PRICE_ENRICH_ENABLED and WEB_KEEP_PRICELESS_RESULTS):
+        return
+    if key in price_tasks or len(price_tasks) >= WEB_PRICE_ENRICH_MAX_ROWS:
+        return
+    if _web_row_has_numeric_price(item):
+        return
+    if not str((item or {}).get("url") or "").strip():
+        return
+    try:
+        price_tasks[key] = asyncio.create_task(
+            asyncio.to_thread(_web_enrich_row_price_sync, dict(item), lang, market_snapshot)
+        )
+    except Exception as e:
+        print(f"WEB PRICE ENRICH SPAWN ERR: {e}")
+
+
+async def _web_drain_price_enrich_events(price_tasks, priced_keys, started):
+    """Yield 'upsert' events for resolved prices; bounded so 'done' is never delayed long."""
+    if not price_tasks:
+        return
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + WEB_PRICE_ENRICH_MAX_WAIT_SECONDS
+    for key, task in list(price_tasks.items()):
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            task.cancel()
+            continue
+        try:
+            enriched = await asyncio.wait_for(task, timeout=remaining)
+        except Exception:
+            enriched = None
+        if not enriched or key in priced_keys:
+            continue
+        priced_keys.add(key)
+        yield _web_stream_event({
+            "event": "upsert", "phase": "price_enrich",
+            "market": str(enriched.get("market") or "other"), "item": enriched,
+            "elapsed_ms": int((time.time() - started) * 1000),
+        })
 
 
 def _web_verify_rows_strict(rows, lang):
@@ -11777,6 +11928,7 @@ async def web_api_search_stream(request: Request):
                 return
 
             sent = set()
+            price_tasks, priced_keys = {}, set()
             final_task = asyncio.create_task(asyncio.to_thread(
                 _web_search_text_sync, q, country, lang, "", "", True
             ))
@@ -11831,6 +11983,10 @@ async def web_api_search_stream(request: Request):
                                 "store_probe": label, "item": item,
                                 "elapsed_ms": int((time.time()-started)*1000),
                             })
+                            if _web_row_has_numeric_price(item):
+                                priced_keys.add(key)
+                            else:
+                                _web_spawn_price_enrich_task(price_tasks, key, item, lang, market)
                             await asyncio.sleep(0.015)
                         rank_remaining[r] = max(0, rank_remaining.get(r, 1) - 1)
                         if rank_remaining[r] == 0:
@@ -11869,6 +12025,10 @@ async def web_api_search_stream(request: Request):
                                 continue
                             sent.add(key)
                             yield _web_stream_event({"event": "result", "phase": "fast", "market": market_name, "item": item, "elapsed_ms": int((time.time()-started)*1000)})
+                            if _web_row_has_numeric_price(item):
+                                priced_keys.add(key)
+                            else:
+                                _web_spawn_price_enrich_task(price_tasks, key, item, lang, market)
                             await asyncio.sleep(0.01)
                         yield _web_stream_event({"event": "market_fast_done", "market": market_name, "count": len(items or []), "elapsed_ms": int((time.time()-started)*1000)})
                     if final_task.done():
@@ -11885,12 +12045,22 @@ async def web_api_search_stream(request: Request):
                 for item in final.get("results") or []:
                     market_name = str(item.get("market") or "other")
                     key = str(item.get("url") or "").strip() or (market_name + "|" + str(item.get("store") or "") + "|" + str(item.get("title") or ""))
+                    if _web_row_has_numeric_price(item):
+                        priced_keys.add(key)
+                        t = price_tasks.pop(key, None)
+                        if t:
+                            t.cancel()
+                    else:
+                        _web_spawn_price_enrich_task(price_tasks, key, item, lang, market)
                     if key in sent:
                         yield _web_stream_event({"event": "upsert", "phase": "final", "market": market_name, "item": item, "elapsed_ms": int((time.time()-started)*1000)})
                     else:
                         sent.add(key)
                         yield _web_stream_event({"event": "result", "phase": "final", "market": market_name, "item": item, "elapsed_ms": int((time.time()-started)*1000)})
                     await asyncio.sleep(0.01)
+            # v106.6: upsert page-verified prices for cards that streamed without one.
+            async for _ev in _web_drain_price_enrich_events(price_tasks, priced_keys, started):
+                yield _ev
             yield _web_stream_event({"event": "done", "count": len(sent), "elapsed_ms": int((time.time()-started)*1000)})
         except asyncio.CancelledError:
             raise
@@ -11946,6 +12116,8 @@ async def web_api_image_search_stream(request: Request):
     async def _generator():
         started = time.time()
         sent = set()
+        price_tasks, priced_keys = {}, set()
+        enrich_market = _web_market(country)
         market_counts = {"local": 0, "us": 0, "china": 0}
         yield _web_stream_event({"event": "start", "ok": True, "kind": "image"})
         yield _web_stream_event({"event": "status", "stage": "identify", "elapsed_ms": 0})
@@ -12053,6 +12225,10 @@ async def web_api_image_search_stream(request: Request):
                 if market_name in market_counts:
                     market_counts[market_name] += 1
                 yield _web_stream_event({"event": "result", "phase": "lens_seed", "market": market_name, "item": item, "elapsed_ms": int((time.time()-started)*1000)})
+                if _web_row_has_numeric_price(item):
+                    priced_keys.add(key)
+                else:
+                    _web_spawn_price_enrich_task(price_tasks, key, item, lang, enrich_market)
                 await asyncio.sleep(0.015)
 
             if identity and WEB_STREAM_STORE_FIFO and WEB_STREAM_FAST_WAVE and SERPAPI_API_KEY:
@@ -12103,6 +12279,10 @@ async def web_api_image_search_stream(request: Request):
                                 "store_probe": label, "item": item,
                                 "elapsed_ms": int((time.time()-started)*1000),
                             })
+                            if _web_row_has_numeric_price(item):
+                                priced_keys.add(key)
+                            else:
+                                _web_spawn_price_enrich_task(price_tasks, key, item, lang, enrich_market)
                             await asyncio.sleep(0.015)
                         rank_remaining[r] = max(0, rank_remaining.get(r, 1) - 1)
                         if rank_remaining[r] == 0:
@@ -12120,6 +12300,13 @@ async def web_api_image_search_stream(request: Request):
                 for item in final.get("results") or []:
                     market_name = str(item.get("market") or "other")
                     key = str(item.get("url") or "").strip() or (market_name + "|" + str(item.get("store") or "") + "|" + str(item.get("title") or ""))
+                    if _web_row_has_numeric_price(item):
+                        priced_keys.add(key)
+                        t = price_tasks.pop(key, None)
+                        if t:
+                            t.cancel()
+                    else:
+                        _web_spawn_price_enrich_task(price_tasks, key, item, lang, enrich_market)
                     if key in sent:
                         yield _web_stream_event({"event": "upsert", "phase": "final", "market": market_name, "item": item, "elapsed_ms": int((time.time()-started)*1000)})
                         continue
@@ -12127,6 +12314,9 @@ async def web_api_image_search_stream(request: Request):
                     yield _web_stream_event({"event": "result", "phase": "final", "market": market_name, "item": item, "elapsed_ms": int((time.time()-started)*1000)})
                     await asyncio.sleep(0.01)
 
+            # v106.6: upsert page-verified prices for cards that streamed without one.
+            async for _ev in _web_drain_price_enrich_events(price_tasks, priced_keys, started):
+                yield _ev
             yield _web_stream_event({"event": "done", "count": len(sent), "elapsed_ms": int((time.time()-started)*1000)})
         except asyncio.CancelledError:
             raise
