@@ -243,17 +243,7 @@ def detect_currency_code(text, fallback='', country_code=None):
 
 def display_global_price(price_value, price_text, currency_code, lang='ar'):
     src = detect_currency_code(f"{currency_code or ''} {price_text or ''}", currency_code, current_market().get('country'))
-    numeric = None
-    try:
-        if price_value not in (None, ''):
-            numeric = float(price_value)
-    except Exception:
-        numeric = None
-    if numeric is None:
-        try:
-            numeric = _extract_numeric_price(str(price_text or ''))
-        except Exception:
-            numeric = None
+    numeric = _authoritative_price_value(price_value, price_text, currency_code)
     if numeric is None:
         return (str(price_text or '').strip(), None)
     converted = convert_to_local(numeric, src) if src else None
@@ -430,17 +420,7 @@ def format_price(p, currency=None):
     return f'{pf:.{digits}f}'
 
 def format_lens_price(price_text, price_value, lang='ar', currency_code=None):
-    numeric = None
-    try:
-        if price_value not in (None, ''):
-            numeric = float(price_value)
-    except Exception:
-        numeric = None
-    if numeric is None:
-        try:
-            numeric = _extract_numeric_price(str(price_text or ''))
-        except Exception:
-            numeric = None
+    numeric = _authoritative_price_value(price_value, price_text, currency_code)
     if numeric is None:
         return str(price_text or '').strip()
     label = currency_label(lang)
@@ -2508,7 +2488,7 @@ def lens_priced_offers(lens_context, lang='ar', local_only=True, exclude_local=F
             n += 1
         numeric = None
         try:
-            numeric = float(price_value) if price_value not in (None, '') else None
+            numeric = _authoritative_price_value(price_value, price_text, currency)
         except Exception:
             numeric = None
         if market_rank == 0:
@@ -2778,7 +2758,7 @@ def google_shopping_offers(query, lang='ar', allow_global=False, lens_context=No
             return
         resolved_market_country = local_cc if market_rank == 0 else 'us' if market_rank == 1 else 'cn' if market_rank == 2 else ''
         try:
-            numeric = float(price_value) if price_value not in (None, '') else None
+            numeric = _authoritative_price_value(price_value, price_text, currency)
         except Exception:
             numeric = None
         if numeric is None:
@@ -3153,6 +3133,39 @@ def _extract_numeric_price(line):
             if val is not None and val > 0:
                 return val
     return None
+
+
+
+def _authoritative_price_value(price_value, price_text='', currency_code=''):
+    """Prefer an explicit displayed retail price over upstream extracted_price.
+
+    Some providers parse European decimal commas incorrectly (80,00€ -> 8000).
+    When the visible price text contains an explicit currency, our locale-aware parser
+    is authoritative. Otherwise retain the structured numeric value as fallback.
+    """
+    raw = _normalize_price_chars(price_text).replace('\xa0', ' ').replace('\u202f', ' ').strip()
+    explicit_currency = bool(re.search(
+        r'\b(?:USD|EUR|GBP|KWD|KD|SAR|AED|QAR|BHD|OMR|CNY|RMB|JPY|CAD|AUD|CHF|INR|KRW|TRY|RUB)\b|US\$|A\$|C\$|S\$|HK\$|NZ\$|NT\$|[$€£¥￥₹₩₺₽₪]|د\.ك|ر\.س|د\.إ|ر\.ق|ر\.ع|د\.ب',
+        raw, re.I
+    ))
+    if raw and explicit_currency:
+        parsed = _extract_numeric_price(raw)
+        if parsed is not None and parsed > 0:
+            try:
+                upstream = float(price_value) if price_value not in (None, '') else None
+            except Exception:
+                upstream = None
+            if upstream is not None and upstream > 0 and abs(upstream - parsed) > max(0.01, parsed * 0.02):
+                print(f'PRICE TEXT OVERRIDE upstream={upstream} visible={parsed} raw={raw[:80]!r}')
+            return parsed
+    try:
+        upstream = float(price_value) if price_value not in (None, '') else None
+    except Exception:
+        upstream = None
+    if upstream is not None and upstream > 0:
+        return upstream
+    parsed = _extract_numeric_price(raw) if raw else None
+    return parsed if parsed is not None and parsed > 0 else None
 
 def _result_offers(txt, urls, layer, lens_context=None):
     out = []
@@ -4158,14 +4171,13 @@ def country_flag_emoji(cc):
 def _lens_has_price(m):
     if not isinstance(m, dict):
         return False
+    raw = str(m.get('price') or '').strip()
     try:
-        if m.get('price_value') not in (None, ''):
-            _pv = float(m.get('price_value'))
-            if _pv > 0 and (not _price_collides_with_measurement(_pv, m.get('title'), m.get('snippet'))):
-                return True
+        _pv = _authoritative_price_value(m.get('price_value'), raw, str(m.get('currency') or ''))
+        if _pv is not None and _pv > 0 and (not _price_collides_with_measurement(_pv, m.get('title'), m.get('snippet'))):
+            return True
     except Exception:
         pass
-    raw = str(m.get('price') or '').strip()
     if not raw:
         return False
     numeric = _extract_numeric_price(raw)
