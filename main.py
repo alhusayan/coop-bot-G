@@ -9,7 +9,7 @@ from bs4 import BeautifulSoup
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept'], max_age=86400)
-BUILD_ID = 'v107.3-lean-size-aware-price-more-results-20260901'
+BUILD_ID = 'v107.4-lean-size-aware-price-more-results-20260901'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -1004,7 +1004,7 @@ def parse_product_data(html, url):
                     p = offers.get('price') or offers.get('lowPrice') or offers.get('highPrice')
                     if p:
                         try:
-                            data['price'] = float(str(p).replace(',', ''))
+                            data['price'] = _normalize_price_token(str(p), str(offers.get('priceCurrency') or data.get('currency') or ''))
                         except Exception:
                             pass
                     if not data['currency']:
@@ -1063,12 +1063,13 @@ def parse_product_data(html, url):
                 price_candidates.append(mm.group(1))
                 break
         for cand in price_candidates:
-            mm = re.search('(?<!\\d)(\\d+(?:[.,]\\d{1,3})?)(?!\\d)', str(cand).replace(',', ''))
+            cand_text = _normalize_price_chars(str(cand))
+            mm = re.search(r'(?<!\d)(\d+(?:[.,]\d{1,3})?)(?!\d)', cand_text)
             if not mm:
                 continue
-            try:
-                val = float(mm.group(1))
-            except Exception:
+            cand_cur = detect_currency_code(cand_text, data.get('currency') or '')
+            val = _normalize_price_token(mm.group(1), cand_cur)
+            if val is None:
                 continue
             if val > 0:
                 data['price'] = val
@@ -4172,7 +4173,10 @@ def _lens_has_price(m):
         return True
     if len(raw) <= 24 and re.fullmatch('\\s*[$€£¥￥]?\\s*\\d+(?:[.,]\\d{1,3})?\\s*(?:[A-Z]{3}|د\\.ك|KD|RMB)?\\s*', raw, flags=re.I):
         try:
-            return float(re.search('\\d+(?:[.,]\\d{1,3})?', raw.replace(',', '')).group(0)) > 0
+            mm = re.search(r'\d+(?:[.,]\d{1,3})?', _normalize_price_chars(raw))
+            cur = detect_currency_code(raw, str(m.get('currency') or ''))
+            val = _normalize_price_token(mm.group(0), cur) if mm else None
+            return bool(val is not None and val > 0)
         except Exception:
             return False
     return False
@@ -4197,10 +4201,10 @@ def _safe_embedded_price(item):
         num_token = m.group('n1') or m.group('n2')
         cur_token = m.group('c1') or m.group('c2')
         try:
-            val = float(num_token.replace(',', ''))
+            val = _normalize_price_token(num_token, detect_currency_code(cur_token, ''))
         except Exception:
             continue
-        if val <= 0:
+        if val is None or val <= 0:
             continue
         if _price_collides_with_measurement(val, item.get('title'), item.get('snippet')):
             print(f"LENS SIZE-AS-PRICE BLOCK value={val} title={(item.get('title') or '')[:90]}")
@@ -5700,12 +5704,9 @@ def _text_price_local(raw_price, market_rank, lang):
     if market_rank == 0 and (not src or src == local_cur):
         return format_lens_price(raw, None, lang, local_cur or src or None)
     numeric = None
-    m = re.search('(?<!\\d)(\\d+(?:[.,]\\d{1,3})?)(?!\\d)', raw.replace(',', ''))
+    m = re.search(r'(?<!\d)(\d+(?:[.,]\d{1,3})?)(?!\d)', _normalize_price_chars(raw))
     if m:
-        try:
-            numeric = float(m.group(1))
-        except Exception:
-            numeric = None
+        numeric = _normalize_price_token(m.group(1), src)
     if numeric is None:
         return raw
     converted = convert_to_local(numeric, src) if src else None
@@ -6913,18 +6914,8 @@ def _web_price_local_explicit(raw_price, market_rank, lang, market_snapshot=None
     original = f' ({format_price(numeric, src)} {src})' if src and src != local_cur else ''
     return f'{format_price(converted, local_cur)} {local_cur}{original}'
 
-def _web_price_token_to_float(token):
-    s = str(token or '').strip()
-    if not s:
-        return None
-    try:
-        if ',' in s and '.' not in s:
-            head, _, tail = s.rpartition(',')
-            if head and len(tail) in (1, 2) and (head.count(',') == 0):
-                return float(head.replace(',', '') + '.' + tail)
-        return float(s.replace(',', ''))
-    except Exception:
-        return None
+def _web_price_token_to_float(token, currency_code=''):
+    return _normalize_price_token(token, currency_code)
 _WEB_PRICE_CUR_WORDS = 'USD|US\\$|EUR|GBP|KWD|KD|SAR|AED|QAR|BHD|OMR|CNY|RMB|JPY|CAD|AUD|CHF|INR|KRW|TRY|RUB'
 _WEB_PRICE_CUR_SYMS = '[$€£¥￥₹₩₺₽]|د\\.ك|ر\\.س|د\\.إ|ر\\.ق|د\\.ب|ر\\.ع'
 _WEB_PRICE_NUM = '([0-9]{1,3}(?:,[0-9]{3})+(?:\\.[0-9]{1,3})?|[0-9]+(?:[.,][0-9]{1,3})?)'
@@ -6938,20 +6929,17 @@ def _web_price_number_and_currency(text, fallback_currency=''):
     for pat in _WEB_PRICE_PATS:
         m = pat.search(raw)
         if m:
-            val = _web_price_token_to_float(m.group(1))
+            val = _web_price_token_to_float(m.group(1), cur)
             if val and val > 0:
                 return (val, cur)
     if extract_pack_size(raw) and (not re.search('\\b(?:USD|EUR|GBP|KWD|KD|SAR|AED|QAR|BHD|OMR|CNY|RMB|JPY|CAD|AUD|CHF|INR|KRW|TRY|RUB)\\b|[$€£¥￥₹₩₺₽]|د\\.ك|ر\\.س|د\\.إ|ر\\.ق|د\\.ب|ر\\.ع', raw, re.I)):
         return (None, cur)
     if len(raw) <= 50:
-        m = re.search('(?<![0-9])([0-9]+(?:[.,][0-9]{1,3})?)(?![0-9])', raw.replace(',', ''))
+        m = re.search(r'(?<![0-9])([0-9]+(?:[.,][0-9]{1,3})?)(?![0-9])', _normalize_price_chars(raw))
         if m:
-            try:
-                val = float(m.group(1))
-                if val > 0:
-                    return (val, cur)
-            except Exception:
-                pass
+            val = _normalize_price_token(m.group(1), cur)
+            if val is not None and val > 0:
+                return (val, cur)
     return (None, cur)
 _WEB_DEEP_PRICE_SPECIFIC_PATS = (re.compile('"(?:salePrice|sale_price|specialPrice|special_price|sellingPrice|selling_price|offerPrice|offer_price|finalPrice|final_price|currentPrice|current_price|discountedPrice|discounted_price)"\\s*:\\s*\\{[^{}]{0,140}?"(?:amount|value|raw)"\\s*:\\s*"?([0-9]+(?:\\.[0-9]{1,4})?)', re.I), re.compile('"(?:salePrice|specialPrice|sellingPrice|offerPrice|finalPrice|currentPrice|discountedPrice|price_amount|priceAmount|priceValue|price_value)"\\s*:\\s*"?([0-9]+(?:\\.[0-9]{1,4})?)"?', re.I), re.compile('"price"\\s*:\\s*\\{[^{}]{0,140}?"(?:amount|value|raw)"\\s*:\\s*"?([0-9]+(?:\\.[0-9]{1,4})?)', re.I))
 _WEB_DEEP_PRICE_GENERIC_PAT = re.compile('"price"\\s*:\\s*"?([0-9]+(?:\\.[0-9]{1,4})?)"?', re.I)
@@ -7141,10 +7129,10 @@ def _web_price_pairs(text):
             if cur == 'RMB':
                 cur = 'CNY'
             try:
-                val = float(num.replace(',', ''))
+                val = _normalize_price_token(num, cur)
             except Exception:
                 continue
-            if val > 0:
+            if val is not None and val > 0:
                 pairs.append((m.start(), val, cur))
     unique = []
     seen = set()
