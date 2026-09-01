@@ -9,7 +9,7 @@ from bs4 import BeautifulSoup
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept'], max_age=86400)
-BUILD_ID = 'v107.10-ai-shopping-copilot-web-20260901'
+BUILD_ID = 'v107.4-lean-size-aware-price-more-results-20260901'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -7818,8 +7818,8 @@ AI_SHOPPING_MAX_OFFERS = max(3, min(12, int(os.environ.get('AI_SHOPPING_MAX_OFFE
 AI_SHOPPING_MAX_HISTORY_DAYS = max(30, min(730, int(os.environ.get('AI_SHOPPING_MAX_HISTORY_DAYS', '365'))))
 
 _AI_LANG_NAMES = {
-    'en': 'English', 'ar': 'Arabic', 'fr': 'French', 'es': 'Spanish', 'pt': 'Portuguese',
-    'tr': 'Turkish', 'ru': 'Russian', 'zh': 'Chinese', 'hi': 'Hindi', 'ur': 'Urdu'
+    'en': 'English', 'ar': 'Arabic', 'de': 'German', 'fr': 'French', 'it': 'Italian', 'es': 'Spanish', 'pt': 'Portuguese',
+    'tr': 'Turkish', 'ru': 'Russian', 'ja': 'Japanese', 'zh': 'Chinese', 'hi': 'Hindi', 'ur': 'Urdu'
 }
 
 def _ai_product_identity_text(product):
@@ -7939,7 +7939,7 @@ def _ai_record_observations(product, offers, country=''):
         print(f'AI OBSERVE ERR: {e}')
         return {'ok': False, 'recorded': 0, 'product_key': key}
 
-def _ai_history(product, window_days, country='', lang='en'):
+def _ai_history(product, window_days, country=''):
     key = _ai_product_key(product)
     market = _web_market(country)
     fallback_cur = str(product.get('currency') or market.get('currency') or '').upper()
@@ -7976,13 +7976,13 @@ def _ai_history(product, window_days, country='', lang='en'):
         if first > 0:
             pct = ((last - first) / first) * 100
             if abs(pct) < 0.8:
-                summary = (f'السعر مستقر تقريباً خلال آخر {days} يوماً.' if lang == 'ar' else f'Price has been steady over the last {days} days.')
+                summary = f'Price has been steady over the last {days} days.'
             elif pct < 0:
-                summary = (f'السعر أقل بنسبة {abs(pct):.1f}% خلال آخر {days} يوماً.' if lang == 'ar' else f'Price is down {abs(pct):.1f}% over the last {days} days.')
+                summary = f'Price is down {abs(pct):.1f}% over the last {days} days.'
             else:
-                summary = (f'السعر أعلى بنسبة {pct:.1f}% خلال آخر {days} يوماً.' if lang == 'ar' else f'Price is up {pct:.1f}% over the last {days} days.')
+                summary = f'Price is up {pct:.1f}% over the last {days} days.'
     elif points:
-        summary = ('بدأ Findzia بتتبع سعر هذا المنتج.' if lang == 'ar' else 'Findzia has started tracking this product.')
+        summary = 'Findzia has started tracking this product.'
     return {'ok': True, 'product_key': key, 'currency': cur, 'current_price': current_price,
             'points': points, 'summary': summary, 'window_days': days}
 
@@ -8011,11 +8011,11 @@ def _ai_shopping_prompt(product, offers, question, lang, action):
     offer_text = json.dumps(list(offers or [])[:AI_SHOPPING_MAX_OFFERS], ensure_ascii=False)
     action = action or 'qa'
     system = f'''You are Findzia AI for shopping, a product-aware shopping copilot.
-Answer in {target}. Be concise, practical, and specific to the exact product context supplied.
-Never invent compatibility, warranty, customer sentiment, price history, or specifications. If current web evidence is uncertain, say so briefly.
+Answer in {target}. Be concise, practical, and specific to the exact product context supplied. Think like a senior shopping expert: first identify the user's decision, then answer only what helps that decision.
+Never invent compatibility, warranty, customer sentiment, price history, availability, or specifications. Distinguish facts from inference. If current web evidence is uncertain, say so briefly. Use CURRENT FINDZIA OFFERS as the authoritative live price context and never replace a Findzia-observed price with an unrelated web price.
 Brand/model/SKU names must not be translated. Do not output markdown tables.
 Return ONLY valid JSON with this exact shape:
-{{"answer":"short answer in 1-4 compact paragraphs","bullets":["0-5 concise bullets"],"comparison":[{{"name":"product","why":"key difference / best use","best_for":"short","price_note":"optional"}}],"suggested_questions":["3-6 short follow-up shopping questions"]}}
+{{"answer":"direct answer in 1-3 compact paragraphs, usually under 120 words","bullets":["0-5 concise bullets"],"comparison":[{{"name":"product","why":"key difference / best use","best_for":"short","price_note":"optional"}}],"suggested_questions":["3-6 short follow-up shopping questions"]}}
 For action=suggestions, answer and bullets may be empty and suggested_questions must contain 5-7 useful questions tailored to this product.
 For action=compare, compare the current product with 2-4 genuinely similar products or variants, prioritizing the same brand/ecosystem when relevant.
 For reviews/customer questions, summarize reliable themes; do not fabricate ratings or quote unverifiable reviews.'''
@@ -8082,8 +8082,7 @@ async def web_ai_price_history(request: Request):
         days = int(payload.get('window') or 30)
     except Exception:
         days = 30
-    lang = _web_language(payload.get('lang'))
-    return await asyncio.to_thread(_ai_history, product, days, country, lang)
+    return await asyncio.to_thread(_ai_history, product, days, country)
 
 @app.post('/api/ai/price-alert')
 async def web_ai_price_alert(request: Request):
@@ -8146,6 +8145,8 @@ async def web_ai_shopping(request: Request):
     result = await asyncio.to_thread(_ai_shopping_call_sync, product, offers, question, lang, country, action)
     result['product_key'] = _ai_product_key(product)
     return result
+
+
 
 @app.get('/api/health')
 async def web_api_health():
