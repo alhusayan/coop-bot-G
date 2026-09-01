@@ -9,7 +9,7 @@ from bs4 import BeautifulSoup
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept'], max_age=86400)
-BUILD_ID = 'v107.4-lean-size-aware-price-more-results-20260901'
+BUILD_ID = 'v107.10-ai-shopping-copilot-web-20260901'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -7807,6 +7807,345 @@ async def web_api_img_proxy(request: Request):
     except Exception as e:
         print(f'WEB IMG PROXY ERR: {raw_url[:120]} -> {e.__class__.__name__}')
     return Response(content=b'', status_code=404)
+
+
+# =============================================================================
+# FINDZIA AI FOR SHOPPING · WEB COPILOT v107.10
+# Product-aware Q&A, similar-item comparison, observed price history, price alerts.
+# =============================================================================
+AI_SHOPPING_ENABLED = env_bool('AI_SHOPPING_ENABLED', True)
+AI_SHOPPING_MAX_OFFERS = max(3, min(12, int(os.environ.get('AI_SHOPPING_MAX_OFFERS', '8'))))
+AI_SHOPPING_MAX_HISTORY_DAYS = max(30, min(730, int(os.environ.get('AI_SHOPPING_MAX_HISTORY_DAYS', '365'))))
+
+_AI_LANG_NAMES = {
+    'en': 'English', 'ar': 'Arabic', 'fr': 'French', 'es': 'Spanish', 'pt': 'Portuguese',
+    'tr': 'Turkish', 'ru': 'Russian', 'zh': 'Chinese', 'hi': 'Hindi', 'ur': 'Urdu'
+}
+
+def _ai_product_identity_text(product):
+    product = product or {}
+    title = str(product.get('title') or product.get('raw_title') or product.get('query') or '').strip()
+    title = re.sub(r'\s+', ' ', title)
+    return title[:260]
+
+def _ai_product_key(product):
+    title = _ai_product_identity_text(product)
+    norm = normalize_ar(title).lower()
+    norm = re.sub(r'https?://\S+', ' ', norm)
+    norm = re.sub(r'\b(?:buy|shop|online|price|offer|best|sale|discount|amazon|noon|ebay)\b', ' ', norm, flags=re.I)
+    norm = re.sub(r'[^\w\u0600-\u06FF]+', ' ', norm)
+    norm = re.sub(r'\s+', ' ', norm).strip()
+    if not norm:
+        norm = str(product.get('url') or product.get('store') or 'product').strip().lower()
+    return hashlib.sha256(norm.encode('utf-8')).hexdigest()[:32]
+
+def _ai_db_init():
+    try:
+        with CACHE_DB_LOCK, _cache_db_connect() as conn:
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS ai_price_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    product_key TEXT NOT NULL,
+                    product_title TEXT NOT NULL,
+                    store TEXT NOT NULL DEFAULT '',
+                    price REAL NOT NULL,
+                    currency TEXT NOT NULL,
+                    country TEXT NOT NULL DEFAULT '',
+                    url TEXT NOT NULL DEFAULT '',
+                    ts REAL NOT NULL,
+                    day TEXT NOT NULL,
+                    UNIQUE(product_key, store, currency, price, day)
+                )
+            ''')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_ai_price_history_lookup ON ai_price_history(product_key, currency, ts)')
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS ai_price_alerts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    client_id TEXT NOT NULL,
+                    product_key TEXT NOT NULL,
+                    product_title TEXT NOT NULL,
+                    target_price REAL NOT NULL,
+                    currency TEXT NOT NULL,
+                    country TEXT NOT NULL DEFAULT '',
+                    created_at REAL NOT NULL,
+                    active INTEGER NOT NULL DEFAULT 1,
+                    last_seen_price REAL,
+                    triggered_at REAL,
+                    UNIQUE(client_id, product_key, target_price, currency)
+                )
+            ''')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_ai_price_alerts_lookup ON ai_price_alerts(client_id, active, product_key)')
+    except Exception as e:
+        print(f'AI DB INIT ERR: {e}')
+
+_ai_db_init()
+
+def _ai_price_value_currency(row, fallback_currency=''):
+    row = row or {}
+    raw = str(row.get('price') or '').strip()
+    cur = str(row.get('currency') or '').strip().upper() or fallback_currency
+    n, detected = _web_price_number_and_currency(raw, cur)
+    cur = (detected or cur or '').upper()
+    if n is None:
+        try:
+            n = float(row.get('price_value')) if row.get('price_value') not in (None, '') else None
+        except Exception:
+            n = None
+    return (float(n) if n is not None and n > 0 else None, cur)
+
+def _ai_record_observations(product, offers, country=''):
+    product = product or {}
+    offers = list(offers or [])[:AI_SHOPPING_MAX_OFFERS]
+    key = _ai_product_key(product)
+    title = _ai_product_identity_text(product)
+    market = _web_market(country)
+    fallback_cur = str(product.get('currency') or market.get('currency') or '').upper()
+    rows = []
+    now = time.time()
+    day = time.strftime('%Y-%m-%d', time.gmtime(now))
+    for offer in offers:
+        price, cur = _ai_price_value_currency(offer, fallback_cur)
+        if price is None or not cur:
+            continue
+        rows.append((key, title, str(offer.get('store') or '').strip()[:120], float(price), cur,
+                     market.get('country') or '', str(offer.get('url') or '').strip()[:800], now, day))
+    if not rows:
+        price, cur = _ai_price_value_currency(product, fallback_cur)
+        if price is not None and cur:
+            rows.append((key, title, str(product.get('store') or '').strip()[:120], float(price), cur,
+                         market.get('country') or '', str(product.get('url') or '').strip()[:800], now, day))
+    if not rows:
+        return {'ok': True, 'recorded': 0, 'product_key': key}
+    try:
+        with CACHE_DB_LOCK, _cache_db_connect() as conn:
+            conn.executemany('''
+                INSERT OR IGNORE INTO ai_price_history
+                (product_key, product_title, store, price, currency, country, url, ts, day)
+                VALUES(?,?,?,?,?,?,?,?,?)
+            ''', rows)
+            by_cur = {}
+            for row in rows:
+                by_cur[row[4]] = min(by_cur.get(row[4], row[3]), row[3])
+            for cur, current_price in by_cur.items():
+                conn.execute('''
+                    UPDATE ai_price_alerts
+                    SET last_seen_price=?,
+                        triggered_at=CASE WHEN active=1 AND ?<=target_price THEN ? ELSE triggered_at END,
+                        active=CASE WHEN active=1 AND ?<=target_price THEN 0 ELSE active END
+                    WHERE product_key=? AND currency=?
+                ''', (current_price, current_price, now, current_price, key, cur))
+        return {'ok': True, 'recorded': len(rows), 'product_key': key}
+    except Exception as e:
+        print(f'AI OBSERVE ERR: {e}')
+        return {'ok': False, 'recorded': 0, 'product_key': key}
+
+def _ai_history(product, window_days, country='', lang='en'):
+    key = _ai_product_key(product)
+    market = _web_market(country)
+    fallback_cur = str(product.get('currency') or market.get('currency') or '').upper()
+    current_price, detected_cur = _ai_price_value_currency(product, fallback_cur)
+    cur = detected_cur or fallback_cur
+    days = max(1, min(AI_SHOPPING_MAX_HISTORY_DAYS, int(window_days or 30)))
+    cutoff = time.time() - days * 86400
+    points = []
+    try:
+        with CACHE_DB_LOCK, _cache_db_connect() as conn:
+            if cur:
+                rows = conn.execute('''
+                    SELECT day, MIN(price) FROM ai_price_history
+                    WHERE product_key=? AND currency=? AND ts>=?
+                    GROUP BY day ORDER BY day ASC
+                ''', (key, cur, cutoff)).fetchall()
+            else:
+                rows = conn.execute('''
+                    SELECT day, MIN(price), currency FROM ai_price_history
+                    WHERE product_key=? AND ts>=?
+                    GROUP BY day, currency ORDER BY day ASC
+                ''', (key, cutoff)).fetchall()
+                if rows and not cur:
+                    cur = str(rows[-1][2] or '')
+                    rows = [r[:2] for r in rows if str(r[2] or '') == cur]
+        points = [{'date': r[0], 'price': round(float(r[1]), 4)} for r in rows]
+    except Exception as e:
+        print(f'AI HISTORY ERR: {e}')
+    if current_price is None and points:
+        current_price = points[-1]['price']
+    summary = ''
+    if len(points) >= 2:
+        first, last = points[0]['price'], points[-1]['price']
+        if first > 0:
+            pct = ((last - first) / first) * 100
+            if abs(pct) < 0.8:
+                summary = (f'السعر مستقر تقريباً خلال آخر {days} يوماً.' if lang == 'ar' else f'Price has been steady over the last {days} days.')
+            elif pct < 0:
+                summary = (f'السعر أقل بنسبة {abs(pct):.1f}% خلال آخر {days} يوماً.' if lang == 'ar' else f'Price is down {abs(pct):.1f}% over the last {days} days.')
+            else:
+                summary = (f'السعر أعلى بنسبة {pct:.1f}% خلال آخر {days} يوماً.' if lang == 'ar' else f'Price is up {pct:.1f}% over the last {days} days.')
+    elif points:
+        summary = ('بدأ Findzia بتتبع سعر هذا المنتج.' if lang == 'ar' else 'Findzia has started tracking this product.')
+    return {'ok': True, 'product_key': key, 'currency': cur, 'current_price': current_price,
+            'points': points, 'summary': summary, 'window_days': days}
+
+def _ai_json_object(raw):
+    text = str(raw or '').strip()
+    if not text:
+        return {}
+    text = re.sub(r'^```(?:json)?\s*|\s*```$', '', text, flags=re.I | re.S).strip()
+    try:
+        obj = json.loads(text)
+        return obj if isinstance(obj, dict) else {}
+    except Exception:
+        pass
+    m = re.search(r'\{.*\}', text, re.S)
+    if m:
+        try:
+            obj = json.loads(m.group(0))
+            return obj if isinstance(obj, dict) else {}
+        except Exception:
+            pass
+    return {}
+
+def _ai_shopping_prompt(product, offers, question, lang, action):
+    target = _AI_LANG_NAMES.get(lang, 'English')
+    product_text = json.dumps(product or {}, ensure_ascii=False)
+    offer_text = json.dumps(list(offers or [])[:AI_SHOPPING_MAX_OFFERS], ensure_ascii=False)
+    action = action or 'qa'
+    system = f'''You are Findzia AI for shopping, a product-aware shopping copilot.
+Answer in {target}. Be concise, practical, and specific to the exact product context supplied.
+Never invent compatibility, warranty, customer sentiment, price history, or specifications. If current web evidence is uncertain, say so briefly.
+Brand/model/SKU names must not be translated. Do not output markdown tables.
+Return ONLY valid JSON with this exact shape:
+{{"answer":"short answer in 1-4 compact paragraphs","bullets":["0-5 concise bullets"],"comparison":[{{"name":"product","why":"key difference / best use","best_for":"short","price_note":"optional"}}],"suggested_questions":["3-6 short follow-up shopping questions"]}}
+For action=suggestions, answer and bullets may be empty and suggested_questions must contain 5-7 useful questions tailored to this product.
+For action=compare, compare the current product with 2-4 genuinely similar products or variants, prioritizing the same brand/ecosystem when relevant.
+For reviews/customer questions, summarize reliable themes; do not fabricate ratings or quote unverifiable reviews.'''
+    user = f'''ACTION: {action}
+CURRENT PRODUCT: {product_text}
+CURRENT FINDZIA OFFERS: {offer_text}
+USER QUESTION: {question or 'Generate the most useful shopping questions for this exact product.'}'''
+    return system, user
+
+def _ai_shopping_call_sync(product, offers, question, lang, country, action):
+    system, prompt = _ai_shopping_prompt(product, offers, question, lang, action)
+    market = _web_market(country)
+    use_search = action not in ('suggestions',)
+    try:
+        raw, urls = _run_with_market(market, call_gemini, [{'text': prompt}], system=system, use_search=use_search)
+    except Exception as e:
+        print(f'AI SHOPPING GEMINI ERR: {e}')
+        raw, urls = ('', {})
+    data = _ai_json_object(raw)
+    if not data:
+        data = {'answer': str(raw or '').strip()[:1800], 'bullets': [], 'comparison': [], 'suggested_questions': []}
+    data['answer'] = str(data.get('answer') or '').strip()[:2200]
+    data['bullets'] = [str(x).strip()[:360] for x in (data.get('bullets') or []) if str(x).strip()][:6]
+    comp = []
+    for x in (data.get('comparison') or [])[:5]:
+        if not isinstance(x, dict):
+            continue
+        comp.append({
+            'name': str(x.get('name') or '').strip()[:140],
+            'why': str(x.get('why') or '').strip()[:500],
+            'best_for': str(x.get('best_for') or '').strip()[:180],
+            'price_note': str(x.get('price_note') or '').strip()[:120],
+        })
+    data['comparison'] = comp
+    data['suggested_questions'] = [str(x).strip()[:160] for x in (data.get('suggested_questions') or []) if str(x).strip()][:7]
+    data['sources'] = list(dict.fromkeys([u for u in (urls or {}).values() if _web_is_http_url(u)]))[:5]
+    data['ok'] = True
+    return data
+
+@app.post('/api/ai/observe-prices')
+async def web_ai_observe_prices(request: Request):
+    if not AI_SHOPPING_ENABLED:
+        return Response(content=json.dumps({'ok': False, 'error': 'ai_shopping_disabled'}), media_type='application/json', status_code=503)
+    try:
+        payload = await request.json()
+    except Exception:
+        return Response(content=json.dumps({'ok': False, 'error': 'invalid_json'}), media_type='application/json', status_code=400)
+    product = payload.get('product') if isinstance(payload.get('product'), dict) else {}
+    offers = payload.get('offers') if isinstance(payload.get('offers'), list) else []
+    country = str(payload.get('country') or DEFAULT_COUNTRY)
+    return await asyncio.to_thread(_ai_record_observations, product, offers, country)
+
+@app.post('/api/ai/price-history')
+async def web_ai_price_history(request: Request):
+    if not AI_SHOPPING_ENABLED:
+        return Response(content=json.dumps({'ok': False, 'error': 'ai_shopping_disabled'}), media_type='application/json', status_code=503)
+    try:
+        payload = await request.json()
+    except Exception:
+        return Response(content=json.dumps({'ok': False, 'error': 'invalid_json'}), media_type='application/json', status_code=400)
+    product = payload.get('product') if isinstance(payload.get('product'), dict) else {}
+    country = str(payload.get('country') or DEFAULT_COUNTRY)
+    try:
+        days = int(payload.get('window') or 30)
+    except Exception:
+        days = 30
+    lang = _web_language(payload.get('lang'))
+    return await asyncio.to_thread(_ai_history, product, days, country, lang)
+
+@app.post('/api/ai/price-alert')
+async def web_ai_price_alert(request: Request):
+    if not AI_SHOPPING_ENABLED:
+        return Response(content=json.dumps({'ok': False, 'error': 'ai_shopping_disabled'}), media_type='application/json', status_code=503)
+    try:
+        payload = await request.json()
+    except Exception:
+        return Response(content=json.dumps({'ok': False, 'error': 'invalid_json'}), media_type='application/json', status_code=400)
+    client_id = re.sub(r'[^A-Za-z0-9_.:-]+', '', str(payload.get('client_id') or ''))[:100]
+    product = payload.get('product') if isinstance(payload.get('product'), dict) else {}
+    country = str(payload.get('country') or DEFAULT_COUNTRY)
+    try:
+        target = float(payload.get('target_price'))
+    except Exception:
+        target = 0.0
+    if not client_id or target <= 0:
+        return Response(content=json.dumps({'ok': False, 'error': 'invalid_alert'}), media_type='application/json', status_code=400)
+    market = _web_market(country)
+    current, cur = _ai_price_value_currency(product, str(product.get('currency') or market.get('currency') or '').upper())
+    cur = (cur or market.get('currency') or '').upper()
+    key = _ai_product_key(product)
+    title = _ai_product_identity_text(product)
+    try:
+        with CACHE_DB_LOCK, _cache_db_connect() as conn:
+            conn.execute('''
+                INSERT INTO ai_price_alerts(client_id, product_key, product_title, target_price, currency, country, created_at, active, last_seen_price)
+                VALUES(?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(client_id, product_key, target_price, currency) DO UPDATE SET
+                    active=1, created_at=excluded.created_at, last_seen_price=excluded.last_seen_price, triggered_at=NULL
+            ''', (client_id, key, title, target, cur, market.get('country') or '', time.time(), 1, current))
+        lang = _web_language(payload.get('lang'))
+        msg = 'تم حفظ تنبيه السعر. سيقارن Findzia السعر المستهدف بالأسعار التي يرصدها لاحقاً.' if lang == 'ar' else 'Price alert saved. Findzia will compare your target with future observed prices.'
+        return {'ok': True, 'message': msg, 'target_price': target, 'currency': cur, 'current_price': current}
+    except Exception as e:
+        print(f'AI ALERT ERR: {e}')
+        return Response(content=json.dumps({'ok': False, 'error': 'alert_save_failed'}), media_type='application/json', status_code=500)
+
+@app.post('/api/ai/shopping')
+async def web_ai_shopping(request: Request):
+    if not AI_SHOPPING_ENABLED:
+        return Response(content=json.dumps({'ok': False, 'error': 'ai_shopping_disabled'}), media_type='application/json', status_code=503)
+    if not _web_rate_allowed(request):
+        return Response(content=json.dumps({'ok': False, 'error': 'rate_limit'}), media_type='application/json', status_code=429)
+    try:
+        payload = await request.json()
+    except Exception:
+        return Response(content=json.dumps({'ok': False, 'error': 'invalid_json'}), media_type='application/json', status_code=400)
+    product = payload.get('product') if isinstance(payload.get('product'), dict) else {}
+    if not _ai_product_identity_text(product):
+        return Response(content=json.dumps({'ok': False, 'error': 'missing_product'}), media_type='application/json', status_code=400)
+    offers = payload.get('offers') if isinstance(payload.get('offers'), list) else []
+    question = str(payload.get('question') or '').strip()[:1200]
+    action = str(payload.get('action') or 'qa').strip().lower()
+    if action not in ('suggestions', 'qa', 'compare'):
+        action = 'qa'
+    lang = _web_language(payload.get('lang'))
+    country = str(payload.get('country') or DEFAULT_COUNTRY)
+    await asyncio.to_thread(_ai_record_observations, product, offers, country)
+    result = await asyncio.to_thread(_ai_shopping_call_sync, product, offers, question, lang, country, action)
+    result['product_key'] = _ai_product_key(product)
+    return result
 
 @app.get('/api/health')
 async def web_api_health():
