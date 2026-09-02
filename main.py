@@ -17,7 +17,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept'], max_age=86400)
-BUILD_ID = 'v107.19-v106.5-extraction-engine'
+BUILD_ID = 'v107.20-lens-first-result-turbo'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -77,6 +77,9 @@ OLD_LAYER_ENABLED = env_bool('OLD_LAYER_ENABLED', True)
 # Keep the newer UI, AI and "more stores" endpoints, but do not let their
 # enrichment work enter the critical path of the first search.
 USE_V106_5_RESULT_PIPELINE = env_bool('USE_V106_5_RESULT_PIPELINE', True)
+# The old Lens flow still launched seven requests and two Gemini validators.
+# This switch makes first useful Lens evidence authoritative immediately.
+USE_FAST_LENS_PIPELINE = env_bool('USE_FAST_LENS_PIPELINE', True)
 LENS_OVERLAP_MARKET_FALLBACK = env_bool('LENS_OVERLAP_MARKET_FALLBACK', True)
 ANDROID_IMAGE_PROGRESSIVE = env_bool('ANDROID_IMAGE_PROGRESSIVE', True)
 ANDROID_IMAGE_PROGRESSIVE_MIN_RESULTS = max(1, min(6, int(os.environ.get('ANDROID_IMAGE_PROGRESSIVE_MIN_RESULTS', '2'))))
@@ -137,6 +140,7 @@ LENS_PARALLEL_WITH_VISION = env_bool('LENS_PARALLEL_WITH_VISION', True)
 LENS_RESULT_LIMIT = max(12, int(os.environ.get('LENS_RESULT_LIMIT', '40')))
 LENS_HTTP_TIMEOUT_SECONDS = max(6, int(os.environ.get('LENS_HTTP_TIMEOUT_SECONDS', '13')))
 LENS_TOTAL_TIMEOUT_SECONDS = max(8, int(os.environ.get('LENS_TOTAL_TIMEOUT_SECONDS', '12')))
+LENS_TURBO_MAX_WAIT_SECONDS = max(2.5, min(6.0, float(os.environ.get('LENS_TURBO_MAX_WAIT_SECONDS', '4.5'))))
 LENS_IMAGE_TTL = max(120, int(os.environ.get('LENS_IMAGE_TTL_SECONDS', '600')))
 LENS_IMAGE_STORE = {}
 LENS_IMAGE_LOCK = threading.Lock()
@@ -1564,23 +1568,32 @@ def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=Fal
                 seen.add(sig)
                 merged.append(it)
                 merged_by_sig[sig] = it
-        country_order = []
-        for cc in (user_country, 'us', 'cn'):
-            if cc and cc not in country_order:
-                country_order.append(cc)
-        passes = []
-        for cc in country_order:
-            passes.extend([('products', cc, True), ('all', cc, True)])
+        if USE_FAST_LENS_PIPELINE:
+            # Four broad passes are enough for the first screen. The previous
+            # seven-pass fan-out mostly duplicated the same 60 Lens cards.
+            passes = [('products', user_country, True), ('all', user_country, True)]
+            for cc in ('us', 'cn'):
+                if cc != user_country:
+                    passes.append(('all', cc, True))
+        else:
+            country_order = []
+            for cc in (user_country, 'us', 'cn'):
+                if cc and cc not in country_order:
+                    country_order.append(cc)
+            passes = []
+            for cc in country_order:
+                passes.extend([('products', cc, True), ('all', cc, True)])
         future_map = {LENS_HTTP_POOL.submit(_serpapi_lens_request, public_url, lens_type, country, auto_crop, query_hint): (lens_type, country, auto_crop) for lens_type, country, auto_crop in passes}
-        cn_hint = (query_hint or '').strip()
-        cn_hint = (cn_hint + ' site:aliexpress.com OR site:temu.com OR site:alibaba.com OR site:1688.com OR site:taobao.com OR site:shein.com').strip()
-        cn_future = LENS_HTTP_POOL.submit(_serpapi_lens_request, public_url, 'all', 'cn', True, cn_hint)
-        future_map[cn_future] = ('all-cn-stores', 'cn', True)
+        if not USE_FAST_LENS_PIPELINE:
+            cn_hint = (query_hint or '').strip()
+            cn_hint = (cn_hint + ' site:aliexpress.com OR site:temu.com OR site:alibaba.com OR site:1688.com OR site:taobao.com OR site:shein.com').strip()
+            cn_future = LENS_HTTP_POOL.submit(_serpapi_lens_request, public_url, 'all', 'cn', True, cn_hint)
+            future_map[cn_future] = ('all-cn-stores', 'cn', True)
         all_futures = set(future_map)
         pending = set(all_futures)
         done_fast = set()
         fast_started = time.monotonic()
-        fast_deadline = fast_started + min(LENS_FAST_READY_SECONDS, LENS_TOTAL_TIMEOUT_SECONDS)
+        fast_deadline = fast_started + (LENS_TURBO_MAX_WAIT_SECONDS if USE_FAST_LENS_PIPELINE else min(LENS_FAST_READY_SECONDS, LENS_TOTAL_TIMEOUT_SECONDS))
         enough_fast = False
         last_progress_size = 0
         while pending and time.monotonic() < fast_deadline:
@@ -1596,7 +1609,13 @@ def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=Fal
                 except Exception as e:
                     print(f'GOOGLE LENS FUTURE ERR type={lens_type} country={country}: {e}')
             rank_counts = {r: sum((1 for x in merged if result_market_rank(x) == r)) for r in (0, 1, 2)}
-            enough_fast = rank_counts[0] >= 2 and rank_counts[1] >= 1 and (rank_counts[2] >= 1) and (len(merged) >= max(5, LENS_MIN_MATCHES))
+            if USE_FAST_LENS_PIPELINE:
+                # Do not hold 60 useful cards hostage because one market bucket
+                # is missing. The separate "more stores" action can deepen it.
+                useful = sum(rank_counts.values())
+                enough_fast = useful >= max(6, LENS_MIN_MATCHES)
+            else:
+                enough_fast = rank_counts[0] >= 2 and rank_counts[1] >= 1 and (rank_counts[2] >= 1) and (len(merged) >= max(5, LENS_MIN_MATCHES))
             if light and progress_callback and (last_progress_size == 0) and (len(merged) > last_progress_size):
                 preview_allowed = [dict(x) for x in merged if result_market_rank(x) != 99]
                 preview_counts = {r: sum((1 for x in preview_allowed if result_market_rank(x) == r)) for r in (0, 1, 2)}
@@ -1608,15 +1627,18 @@ def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=Fal
                         print(f'LENS PROGRESSIVE SNAPSHOT raw={len(preview_allowed)} counts={preview_counts} elapsed={time.monotonic() - fast_started:.1f}s')
                     except Exception as e:
                         print(f'LENS PROGRESSIVE CALLBACK ERR: {e}')
+            if USE_FAST_LENS_PIPELINE and enough_fast:
+                print(f'LENS TURBO EARLY RETURN READY useful={sum(rank_counts.values())} elapsed={time.monotonic() - fast_started:.2f}s')
+                break
         rank_counts = {r: sum((1 for x in merged if result_market_rank(x) == r)) for r in (0, 1, 2)}
         market_prefetch = None
         prefetch_query = (query_hint or '').strip()
         if not prefetch_query and merged:
             prefetch_query = (merged[0].get('title') or '').strip()
-        if light and pending and (not enough_fast) and prefetch_query:
+        if (not USE_FAST_LENS_PIPELINE) and light and pending and (not enough_fast) and prefetch_query:
             market_prefetch = _start_lens_market_prefetch(merged, prefetch_query)
         done = set(done_fast)
-        if pending and (not enough_fast):
+        if (not USE_FAST_LENS_PIPELINE) and pending and (not enough_fast):
             fast_elapsed = max(0.0, time.monotonic() - fast_started)
             remaining = max(0.0, LENS_TOTAL_TIMEOUT_SECONDS - fast_elapsed)
             done_more, pending = wait(pending, timeout=remaining)
@@ -1631,13 +1653,14 @@ def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=Fal
             lens_type, country, _ = future_map[fut]
             fut.cancel()
             print(f'GOOGLE LENS PASS SKIPPED AFTER FAST/TOTAL TIMEOUT type={lens_type} country={country}')
-        print(f'GOOGLE LENS PARALLEL DONE completed={len(done)}/{len(future_map)} fast_ready={enough_fast} total_timeout={LENS_TOTAL_TIMEOUT_SECONDS}s')
+        print(f'GOOGLE LENS PARALLEL DONE completed={len(done)}/{len(future_map)} fast_ready={enough_fast} max_wait={(LENS_TURBO_MAX_WAIT_SECONDS if USE_FAST_LENS_PIPELINE else LENS_TOTAL_TIMEOUT_SECONDS)}s')
         allowed = [m for m in merged if result_market_rank(m) != 99]
         fallback_query = (query_hint or '').strip()
         if not fallback_query and merged:
             fallback_query = (merged[0].get('title') or '').strip()
-        allowed = _supplement_missing_markets(allowed, fallback_query, 'FIRST-LENS', prefetch=market_prefetch)
-        if not any((result_market_rank(m) == 2 for m in allowed)):
+        if not USE_FAST_LENS_PIPELINE:
+            allowed = _supplement_missing_markets(allowed, fallback_query, 'FIRST-LENS', prefetch=market_prefetch)
+        if (not USE_FAST_LENS_PIPELINE) and not any((result_market_rank(m) == 2 for m in allowed)):
             fallback_query = (query_hint or '').strip()
             if not fallback_query and merged:
                 fallback_query = (merged[0].get('title') or '').strip()
@@ -1693,6 +1716,10 @@ def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=Fal
         chosen = max(ranked, key=lambda x: x[0])[1] if ranked else matches[0]
         chosen_title = (chosen.get('title') or '').strip()
         if light:
+            if USE_FAST_LENS_PIPELINE:
+                # Lens already identified and ranked the product. Returning its
+                # commercial title avoids the extra image-Gemini round trip.
+                return {'aliases': [chosen_title] if chosen_title else [], 'matches': matches, 'query': chosen_title, 'visual_identity': '', 'chosen': chosen, 'signature': {}, 'source': 'lens_turbo'}
             visual_identity = ''
             try:
                 id_system = 'Identify the physical product in the image for shopping search. Return one concise English commercial identity only: product type + brand/model if visibly supported. Do not guess a brand/model. Do not mention colors unless identity-critical. No explanation.'
@@ -4451,11 +4478,12 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption='', image_
     raw_matches = [m for m in lens.get('matches') or [] if (m.get('title') or '').strip()]
     if exclude_domains or exclude_urls:
         raw_matches = [m for m in raw_matches if str(m.get('link') or '').strip() not in exclude_urls and _more_result_domain(m.get('link')) not in exclude_domains]
-    lens_for_filter = dict(lens or {})
-    lens_for_filter['matches'] = raw_matches
-    raw_matches = _lens_ai_relevance_filter(lens_for_filter)
-    if lens_for_filter.get('relevance_target'):
-        lens['relevance_target'] = lens_for_filter['relevance_target']
+    if not USE_FAST_LENS_PIPELINE:
+        lens_for_filter = dict(lens or {})
+        lens_for_filter['matches'] = raw_matches
+        raw_matches = _lens_ai_relevance_filter(lens_for_filter)
+        if lens_for_filter.get('relevance_target'):
+            lens['relevance_target'] = lens_for_filter['relevance_target']
     matches = [m for m in raw_matches if result_market_rank(m) != 99]
     if not matches:
         return False
@@ -4526,7 +4554,7 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption='', image_
     missing_prices = sum((1 for m in selected if not _lens_has_price(m)))
     if missing_prices:
         print(f'LENS PRICE-SMART: preserved {missing_prices} card(s) with no safely extracted numeric price')
-    display_titles = translate_ui_titles([(m.get('title') or '').strip() for m in selected], lang)
+    display_titles = ([(m.get('title') or '').strip() for m in selected] if USE_FAST_LENS_PIPELINE else translate_ui_titles([(m.get('title') or '').strip() for m in selected], lang))
     for m, display_title in zip(selected, display_titles):
         m['_display_title'] = display_title
     local_cc = (current_market().get('country') or DEFAULT_COUNTRY).lower()
@@ -6349,7 +6377,7 @@ WEB_CHINA_GLOBAL_MAX_STORES = max(4, min(9, int(os.environ.get('WEB_CHINA_GLOBAL
 WEB_CHINA_ORGANIC_NUM = max(3, min(10, int(os.environ.get('WEB_CHINA_ORGANIC_NUM', '8'))))
 WEB_RATE_BUCKETS = defaultdict(deque)
 WEB_RATE_LOCK = threading.Lock()
-print(f'ANDROID/WEB PARITY exact={WEB_MATCH_WHATSAPP_EXACT} v106_pipeline={USE_V106_5_RESULT_PIPELINE} caps local/us/cn={WEB_LOCAL_MAX}/{WEB_US_MAX}/{WEB_CN_MAX} legacy_turbo_available={WEB_STREAM_FAST_WAVE} store_timeout={WEB_STREAM_STORE_TIMEOUT}s progressive={ANDROID_IMAGE_PROGRESSIVE} shopping_geo_guard={SHOPPING_GEO_GUARD}')
+print(f'ANDROID/WEB PARITY exact={WEB_MATCH_WHATSAPP_EXACT} v106_pipeline={USE_V106_5_RESULT_PIPELINE} fast_lens={USE_FAST_LENS_PIPELINE} lens_wait={LENS_TURBO_MAX_WAIT_SECONDS}s caps local/us/cn={WEB_LOCAL_MAX}/{WEB_US_MAX}/{WEB_CN_MAX} legacy_turbo_available={WEB_STREAM_FAST_WAVE} store_timeout={WEB_STREAM_STORE_TIMEOUT}s progressive={ANDROID_IMAGE_PROGRESSIVE} shopping_geo_guard={SHOPPING_GEO_GUARD}')
 
 def _web_request_ip(request):
     forwarded = str(request.headers.get('x-forwarded-for') or '').split(',')[0].strip()
@@ -6687,11 +6715,12 @@ def _web_brand_comparison(query, lang):
 
 def _web_build_lens_items(lens, lang, caption=''):
     raw_matches = [m for m in lens.get('matches') or [] if (m.get('title') or '').strip()]
-    lens_for_filter = dict(lens or {})
-    lens_for_filter['matches'] = raw_matches
-    raw_matches = _lens_ai_relevance_filter(lens_for_filter)
-    if lens_for_filter.get('relevance_target'):
-        lens['relevance_target'] = lens_for_filter['relevance_target']
+    if not USE_FAST_LENS_PIPELINE:
+        lens_for_filter = dict(lens or {})
+        lens_for_filter['matches'] = raw_matches
+        raw_matches = _lens_ai_relevance_filter(lens_for_filter)
+        if lens_for_filter.get('relevance_target'):
+            lens['relevance_target'] = lens_for_filter['relevance_target']
     matches = [m for m in raw_matches if result_market_rank(m) != 99]
     if not matches:
         return []
@@ -6745,7 +6774,7 @@ def _web_build_lens_items(lens, lang, caption=''):
         if len(selected) >= LENS_DIRECT_MAX_CTA:
             break
     selected = _fill_prices_from_existing_lens_pool(selected, raw_matches)
-    display_titles = translate_ui_titles([(m.get('title') or '').strip() for m in selected], lang)
+    display_titles = ([(m.get('title') or '').strip() for m in selected] if USE_FAST_LENS_PIPELINE else translate_ui_titles([(m.get('title') or '').strip() for m in selected], lang))
     local_cc = (current_market().get('country') or DEFAULT_COUNTRY).lower()
     rank_cc = {0: local_cc, 1: 'us', 2: 'cn'}
     results = []
@@ -9432,4 +9461,4 @@ async def web_api_image_search(request: Request):
 
 @app.get('/')
 async def health():
-    return {'status': 'v107.19 V106.5 EXTRACTION + BLUE-Z + GLOBAL-TEXT + SAME-PRODUCT-MORE-STORES', 'lens_direct_mode': LENS_DIRECT_MODE, 'v106_pipeline': USE_V106_5_RESULT_PIPELINE, 'build': BUILD_ID, 'market_source': 'phone_prefix', 'languages': ['ar','en','de','fr','it','es','pt','tr','ru','ja','zh','ko','hi','ur','id','ms']}
+    return {'status': 'v107.20 LENS FIRST-RESULT TURBO + V106.5 TEXT EXTRACTION', 'lens_direct_mode': LENS_DIRECT_MODE, 'fast_lens': USE_FAST_LENS_PIPELINE, 'v106_pipeline': USE_V106_5_RESULT_PIPELINE, 'build': BUILD_ID, 'market_source': 'phone_prefix', 'languages': ['ar','en','de','fr','it','es','pt','tr','ru','ja','zh','ko','hi','ur','id','ms']}
