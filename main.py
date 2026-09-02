@@ -17,7 +17,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept'], max_age=86400)
-BUILD_ID = 'v107.13-web-density-images-ai-fix'
+BUILD_ID = 'v107.15-market-price-ai-intelligence'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -593,6 +593,36 @@ def _price_collides_with_measurement(value, *texts):
                 continue
             tol = max(0.001, abs(qty) * 0.001)
             if abs(val - qty) <= tol:
+                return True
+    return False
+
+# Product specifications such as 1440p, 180Hz, 27-inch, 65W, 5000mAh
+# are common false positives when a retailer page exposes loose numeric metadata.
+_SPEC_NUMBER_RE = re.compile(r'(?<![A-Za-z0-9])([0-9]{2,5}(?:[.,][0-9]+)?)\s*(?:p\b|hz\b|khz\b|mhz\b|ghz\b|inch(?:es)?\b|in\b|["”″]|w\b|watt(?:s)?\b|mah\b|dpi\b|ppi\b|nits?\b|rpm\b)', re.I)
+
+def _product_spec_numeric_values(text):
+    out = []
+    t = normalize_ar(str(text or ''))
+    for m in _SPEC_NUMBER_RE.finditer(t):
+        try:
+            out.append(float(str(m.group(1)).replace(',', '.')))
+        except Exception:
+            pass
+    return out
+
+def _price_collides_with_product_spec(value, *texts):
+    try:
+        val = float(value)
+    except Exception:
+        return False
+    if val <= 0:
+        return False
+    if _price_collides_with_measurement(val, *texts):
+        return True
+    for text in texts:
+        for spec in _product_spec_numeric_values(text):
+            tol = max(0.01, abs(spec) * 0.001)
+            if abs(val - spec) <= tol:
                 return True
     return False
 
@@ -6321,7 +6351,7 @@ def _web_rate_allowed(request):
 
 def _web_language(value):
     lang = str(value or 'en').strip().lower().split('-')[0]
-    return lang if lang in ('ar', 'en', 'fr', 'es', 'pt', 'tr', 'ru', 'zh', 'hi', 'ur') else 'en'
+    return lang if lang in ('ar', 'en', 'de', 'fr', 'it', 'es', 'pt', 'tr', 'ru', 'ja', 'zh', 'ko', 'hi', 'ur', 'id', 'ms') else 'en'
 
 def _web_market(country):
     raw = str(country or '').strip()
@@ -6737,7 +6767,7 @@ def _web_fast_finalize_rows(rows, lang):
         row['market_rank'] = rank
         existing = str(row.get('price') or '').strip()
         val, _cur = _web_price_number_and_currency(existing)
-        if val and _price_collides_with_measurement(val, row.get('title'), row.get('_offer_meta')):
+        if val and _price_collides_with_product_spec(val, row.get('title'), row.get('_offer_meta')):
             print(f"WEB SIZE-AS-PRICE BLOCK store={row.get('store') or row.get('source')} value={val} title={(row.get('title') or '')[:90]}")
             val = None
             row['price'] = ''
@@ -7295,7 +7325,11 @@ def _web_verify_card_strict(row, rank, lang, market_snapshot=None):
 
 def _web_row_has_numeric_price(row):
     val, _cur = _web_price_number_and_currency(str((row or {}).get('price') or ''))
-    return bool(val and val > 0)
+    if not (val and val > 0):
+        return False
+    if _price_collides_with_product_spec(val, (row or {}).get('title'), (row or {}).get('_offer_meta')):
+        return False
+    return True
 
 def _web_enrich_price_via_shopping(row, rank, market_snapshot):
     if not (WEB_PRICE_ENRICH_SHOPPING_FALLBACK and SERPAPI_API_KEY):
@@ -7574,6 +7608,58 @@ def _web_prepare_stream_query_sync(query, country, lang, selected_option='', ori
             rtype = 'SPECIFIC'
     return {'ok': True, 'query': q, 'market': market, 'rtype': rtype, 'force_specific': force_specific}
 
+def _web_repair_text_price_outliers(rows, lang, market):
+    """Verify obvious same-product price outliers against the retailer page.
+
+    This specifically prevents product specs (e.g. 1440p) or stale metadata from
+    showing as a price. Only strong outliers are re-fetched, so normal search speed
+    is preserved.
+    """
+    rows = [dict(r or {}) for r in (rows or [])]
+    groups = defaultdict(list)
+    for idx, row in enumerate(rows):
+        val, cur = _web_price_number_and_currency(str(row.get('price') or ''))
+        rank = row.get('market_rank')
+        if rank not in (0, 1, 2):
+            rank = {'local': 0, 'us': 1, 'china': 2}.get(str(row.get('market') or '').lower(), 99)
+        if val and val > 0:
+            groups[(rank, cur or '')].append((idx, float(val)))
+    suspects = set()
+    for _key, seq in groups.items():
+        if len(seq) < 2:
+            continue
+        vals = sorted(v for _, v in seq)
+        mid = len(vals)//2
+        median = vals[mid] if len(vals)%2 else (vals[mid-1]+vals[mid])/2.0
+        if median <= 0:
+            continue
+        for idx, val in seq:
+            if val > median * 4.0 or val < median / 4.0:
+                suspects.add(idx)
+    # Always verify values that collide with an explicit product specification.
+    for idx, row in enumerate(rows):
+        val, _cur = _web_price_number_and_currency(str(row.get('price') or ''))
+        if val and _price_collides_with_product_spec(val, row.get('title'), row.get('_offer_meta')):
+            suspects.add(idx)
+    if not suspects:
+        return rows
+    market_snapshot = dict(market or current_market())
+    with ThreadPoolExecutor(max_workers=min(4, len(suspects))) as pool:
+        futs = {pool.submit(_web_enrich_row_price_sync, rows[i], lang, market_snapshot, True): i for i in suspects}
+        for fut, idx in list(futs.items()):
+            try:
+                fixed = fut.result(timeout=WEB_PRODUCT_VERIFY_TIMEOUT_SECONDS + 2.5)
+            except Exception:
+                fixed = None
+            if fixed and _web_row_has_numeric_price(fixed):
+                rows[idx] = fixed
+            else:
+                # Better to say "price at store" than publish a clearly impossible number.
+                rows[idx]['price'] = ''
+                rows[idx]['price_verified'] = False
+                rows[idx]['price_pending'] = True
+    return rows
+
 def _web_search_text_sync(query, country, lang, selected_option='', original_query='', force_specific=False):
     market = _web_market(country)
     MARKET_CTX.value = market
@@ -7607,6 +7693,7 @@ def _web_search_text_sync(query, country, lang, selected_option='', original_que
     if not txt or not text77_extract_store_offers(txt, limit=30):
         return {'ok': True, 'type': 'results', 'query': q, 'market': market, 'results': []}
     results = _web_build_text_items(txt, urls, lang, q)
+    results = _web_repair_text_price_outliers(results, lang, market)
     return {'ok': True, 'type': 'results', 'query': q, 'market': market, 'results': results}
 
 def _web_search_image_sync(image_b64, mime, caption, country, lang, progress_callback=None):
@@ -8124,7 +8211,7 @@ Brand/model/SKU names must not be translated. Do not output markdown tables.
 Return ONLY valid JSON with this exact shape:
 {{"answer":"direct answer in 1-3 compact paragraphs, usually under 120 words","bullets":["0-5 concise bullets"],"comparison":[{{"name":"product","why":"key difference / best use","best_for":"short","price_note":"optional"}}],"suggested_questions":["3-6 short follow-up shopping questions"]}}
 For action=suggestions, answer and bullets may be empty and suggested_questions must contain 5-7 useful questions tailored to this product.
-For action=compare, compare the current product with 2-4 genuinely similar products or variants, prioritizing the same brand/ecosystem when relevant.
+For action=compare, compare the current product with 2-4 genuinely similar products or variants, prioritizing the same brand/ecosystem when relevant. Each comparison.name MUST be a clean, searchable commercial product name (brand + model/variant), with no commentary appended, because the UI turns it into a Findzia search link.
 For reviews/customer questions, summarize reliable themes; do not fabricate ratings or quote unverifiable reviews.'''
     user = f'''ACTION: {action}
 CURRENT PRODUCT: {product_text}
@@ -8211,6 +8298,50 @@ async def web_ai_observe_prices(request: Request):
     offers = payload.get('offers') if isinstance(payload.get('offers'), list) else []
     country = str(payload.get('country') or DEFAULT_COUNTRY)
     return await asyncio.to_thread(_ai_record_observations, product, offers, country)
+
+@app.post('/api/ai/price-intelligence')
+async def web_ai_price_intelligence(request: Request):
+    if not AI_SHOPPING_ENABLED:
+        return Response(content=json.dumps({'ok': False, 'error': 'ai_shopping_disabled'}), media_type='application/json', status_code=503)
+    try:
+        payload = await request.json()
+    except Exception:
+        return Response(content=json.dumps({'ok': False, 'error': 'invalid_json'}), media_type='application/json', status_code=400)
+    product = payload.get('product') if isinstance(payload.get('product'), dict) else {}
+    offers = payload.get('offers') if isinstance(payload.get('offers'), list) else []
+    country = str(payload.get('country') or DEFAULT_COUNTRY)
+    market = _web_market(country)
+    fallback_cur = str(product.get('currency') or market.get('currency') or '').upper()
+    values = []
+    for offer in offers[:AI_SHOPPING_MAX_OFFERS]:
+        val, cur = _ai_price_value_currency(offer, fallback_cur)
+        if val is None or val <= 0 or not cur:
+            continue
+        # Product offers passed by the UI are normalized to the visitor's display currency.
+        if fallback_cur and cur != fallback_cur:
+            converted = _web_convert_to_market(val, cur, market)
+            if converted is None:
+                continue
+            val, cur = converted, fallback_cur
+        values.append({'price': float(val), 'currency': cur, 'store': str(offer.get('store') or '').strip(), 'market': str(offer.get('market') or '').strip()})
+    if not values:
+        val, cur = _ai_price_value_currency(product, fallback_cur)
+        if val is not None and val > 0 and cur:
+            values.append({'price': float(val), 'currency': cur, 'store': str(product.get('store') or '').strip(), 'market': str(product.get('market') or '').strip()})
+    if not values:
+        return {'ok': True, 'count': 0, 'currency': fallback_cur, 'min': None, 'max': None, 'average': None, 'median': None, 'best_store': ''}
+    cur = values[0]['currency']
+    nums = sorted(v['price'] for v in values if v['currency'] == cur and v['price'] > 0)
+    if not nums:
+        return {'ok': True, 'count': 0, 'currency': cur, 'min': None, 'max': None, 'average': None, 'median': None, 'best_store': ''}
+    mid = len(nums)//2
+    median = nums[mid] if len(nums)%2 else (nums[mid-1]+nums[mid])/2.0
+    minimum, maximum = min(nums), max(nums)
+    average = sum(nums)/len(nums)
+    best = min((v for v in values if v['currency']==cur), key=lambda x:x['price'])
+    spread_pct = ((maximum-minimum)/average*100.0) if average > 0 and len(nums)>1 else 0.0
+    saving_vs_avg = ((average-minimum)/average*100.0) if average > 0 else 0.0
+    return {'ok': True, 'count': len(nums), 'currency': cur, 'min': round(minimum,4), 'max': round(maximum,4), 'average': round(average,4), 'median': round(median,4), 'best_store': best.get('store') or '', 'spread_percent': round(spread_pct,1), 'saving_vs_average_percent': round(max(0.0,saving_vs_avg),1)}
 
 @app.post('/api/ai/price-history')
 async def web_ai_price_history(request: Request):
@@ -8344,7 +8475,7 @@ async def web_api_search_stream(request: Request):
             if rtype == 'NONE':
                 yield _web_stream_event({'event': 'error', 'error': 'not_a_product_query'})
                 return
-            if WEB_MATCH_WHATSAPP_EXACT:
+            if WEB_MATCH_WHATSAPP_EXACT and (not WEB_TEXT_DENSE_PARITY):
                 final_task = asyncio.create_task(asyncio.to_thread(_web_search_text_sync, q, country, lang, '', '', True))
                 while not final_task.done():
                     try:
@@ -8786,4 +8917,4 @@ async def web_api_image_search(request: Request):
 
 @app.get('/')
 async def health():
-    return {'status': 'v107 RESULT-QUALITY + GLOBAL-GEO + STRONG-LOCAL + MULTI-CURRENCY + 10-LANG + CAPS-4-3-3', 'lens_direct_mode': LENS_DIRECT_MODE, 'build': BUILD_ID, 'market_source': 'phone_prefix', 'languages': ['ar', 'en', 'fr', 'es', 'pt', 'tr', 'ru', 'zh', 'hi', 'ur']}
+    return {'status': 'v107 RESULT-QUALITY + GLOBAL-GEO + STRONG-LOCAL + MULTI-CURRENCY + 10-LANG + CAPS-4-3-3', 'lens_direct_mode': LENS_DIRECT_MODE, 'build': BUILD_ID, 'market_source': 'phone_prefix', 'languages': ['ar','en','de','fr','it','es','pt','tr','ru','ja','zh','ko','hi','ur','id','ms']}
