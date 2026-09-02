@@ -17,7 +17,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept'], max_age=86400)
-BUILD_ID = 'v107.18-turbo-fastpath'
+BUILD_ID = 'v107.19-v106.5-extraction-engine'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -73,6 +73,10 @@ def env_bool(name, default=False):
         return default
     return value.strip().lower() in ('1', 'true', 'yes', 'on')
 OLD_LAYER_ENABLED = env_bool('OLD_LAYER_ENABLED', True)
+# v107.19: the proven v106.5 result-extraction path is authoritative again.
+# Keep the newer UI, AI and "more stores" endpoints, but do not let their
+# enrichment work enter the critical path of the first search.
+USE_V106_5_RESULT_PIPELINE = env_bool('USE_V106_5_RESULT_PIPELINE', True)
 LENS_OVERLAP_MARKET_FALLBACK = env_bool('LENS_OVERLAP_MARKET_FALLBACK', True)
 ANDROID_IMAGE_PROGRESSIVE = env_bool('ANDROID_IMAGE_PROGRESSIVE', True)
 ANDROID_IMAGE_PROGRESSIVE_MIN_RESULTS = max(1, min(6, int(os.environ.get('ANDROID_IMAGE_PROGRESSIVE_MIN_RESULTS', '2'))))
@@ -88,6 +92,11 @@ CACHE_DB_PATH = os.environ.get('CACHE_DB_PATH', '/tmp/coop_search_cache.sqlite3'
 CACHE_DB_LOCK = threading.Lock()
 MAX_STORES = int(os.environ.get('MAX_STORES', '5'))
 MAX_URLS_MERGED = int(os.environ.get('MAX_URLS_MERGED', '8'))
+if USE_V106_5_RESULT_PIPELINE:
+    # Clamp Railway overrides too; otherwise old MAX_STORES=14/24 variables can
+    # silently bring the slow v107 candidate volume back after deployment.
+    MAX_STORES = min(MAX_STORES, 5)
+    MAX_URLS_MERGED = min(MAX_URLS_MERGED, 8)
 ENABLE_SEARCH_RETRY = env_bool('ENABLE_SEARCH_RETRY', True)
 MAX_SEARCH_ATTEMPTS = max(2, int(os.environ.get('MAX_SEARCH_ATTEMPTS', '3')))
 MAX_IDENTIFY_ATTEMPTS = max(2, int(os.environ.get('MAX_IDENTIFY_ATTEMPTS', '3')))
@@ -102,12 +111,19 @@ if not PUBLIC_BASE_URL:
         print(f'PUBLIC_BASE_URL auto-derived from Railway: {PUBLIC_BASE_URL}')
 ENABLE_GOOGLE_LENS = env_bool('ENABLE_GOOGLE_LENS', True)
 LENS_DIRECT_MODE = env_bool('LENS_DIRECT_MODE', True)
-LENS_DIRECT_MAX_LINES = max(3, min(20, int(os.environ.get('LENS_DIRECT_MAX_LINES', '14'))))
+LENS_DIRECT_MAX_LINES = max(3, min(10, int(os.environ.get('LENS_DIRECT_MAX_LINES', '10'))))
 LENS_DIRECT_LOCAL_MAX = max(0, min(4, int(os.environ.get('LENS_DIRECT_LOCAL_MAX', '4'))))
 LENS_DIRECT_US_MAX = max(0, min(3, int(os.environ.get('LENS_DIRECT_US_MAX', '3'))))
 LENS_DIRECT_CN_MAX = max(0, min(3, int(os.environ.get('LENS_DIRECT_CN_MAX', '3'))))
+if USE_V106_5_RESULT_PIPELINE:
+    LENS_DIRECT_MAX_LINES = min(LENS_DIRECT_MAX_LINES, 10)
+    LENS_DIRECT_LOCAL_MAX = min(LENS_DIRECT_LOCAL_MAX, 4)
+    LENS_DIRECT_US_MAX = min(LENS_DIRECT_US_MAX, 3)
+    LENS_DIRECT_CN_MAX = min(LENS_DIRECT_CN_MAX, 3)
 LENS_DIRECT_MAX_CTA = max(1, int(os.environ.get('LENS_DIRECT_MAX_CTA', str(LENS_DIRECT_LOCAL_MAX + LENS_DIRECT_US_MAX + LENS_DIRECT_CN_MAX))))
 RESULT_CANDIDATE_SCAN_MAX = max(10, int(os.environ.get('RESULT_CANDIDATE_SCAN_MAX', '12')))
+if USE_V106_5_RESULT_PIPELINE:
+    RESULT_CANDIDATE_SCAN_MAX = min(RESULT_CANDIDATE_SCAN_MAX, 12)
 MORE_LOCAL_MAX = max(0, int(os.environ.get('MORE_LOCAL_MAX', '3')))
 MORE_US_MAX = max(0, int(os.environ.get('MORE_US_MAX', '2')))
 MORE_CN_MAX = max(0, int(os.environ.get('MORE_CN_MAX', '2')))
@@ -137,6 +153,8 @@ SHOPPING_POOL = ThreadPoolExecutor(max_workers=4)
 LOCAL_SHOPPING_POOL = ThreadPoolExecutor(max_workers=max(4, int(os.environ.get('LOCAL_SHOPPING_WORKERS', '6'))))
 LOCAL_SHOPPING_PRIMARY_PASSES = max(1, min(3, int(os.environ.get('LOCAL_SHOPPING_PRIMARY_PASSES', '2'))))
 LOCAL_RESULTS_TARGET = max(2, int(os.environ.get('LOCAL_RESULTS_TARGET', '4')))
+if USE_V106_5_RESULT_PIPELINE:
+    LOCAL_RESULTS_TARGET = min(LOCAL_RESULTS_TARGET, 4)
 LOCAL_STORE_RESCUE_MAX = max(0, min(4, int(os.environ.get('LOCAL_STORE_RESCUE_MAX', '3'))))
 LOCAL_COUNTRY_RESCUE_ENABLED = env_bool('LOCAL_COUNTRY_RESCUE_ENABLED', True)
 LOCAL_COUNTRY_RESCUE_PASSES = max(1, min(2, int(os.environ.get('LOCAL_COUNTRY_RESCUE_PASSES', '1'))))
@@ -6283,10 +6301,9 @@ WEB_PRODUCT_VERIFY_CACHE = {}
 WEB_PRODUCT_VERIFY_LOCK = threading.Lock()
 WEB_MATCH_WHATSAPP_EXACT = env_bool('WEB_MATCH_WHATSAPP_EXACT', True)
 # Dense web parity keeps the authoritative WhatsApp final set, but also streams store probes in parallel.
-WEB_TEXT_DENSE_PARITY = env_bool('WEB_TEXT_DENSE_PARITY', False)
-WEB_TEXT_IMAGE_ENRICH_ENABLED = env_bool('WEB_TEXT_IMAGE_ENRICH_ENABLED', False)
-WEB_TEXT_IMAGE_ENRICH_MAX_ROWS = max(1, min(20, int(os.environ.get('WEB_TEXT_IMAGE_ENRICH_MAX_ROWS', '6'))))
-WEB_SYNC_TEXT_EXPANSION = env_bool('WEB_SYNC_TEXT_EXPANSION', False)
+WEB_TEXT_DENSE_PARITY = env_bool('WEB_TEXT_DENSE_PARITY', True)
+WEB_TEXT_IMAGE_ENRICH_ENABLED = env_bool('WEB_TEXT_IMAGE_ENRICH_ENABLED', True)
+WEB_TEXT_IMAGE_ENRICH_MAX_ROWS = max(1, min(20, int(os.environ.get('WEB_TEXT_IMAGE_ENRICH_MAX_ROWS', '14'))))
 WEB_LOCAL_MAX = LENS_DIRECT_LOCAL_MAX
 WEB_US_MAX = LENS_DIRECT_US_MAX
 WEB_CN_MAX = LENS_DIRECT_CN_MAX
@@ -6294,11 +6311,19 @@ WEB_RESULT_CAPS = {0: WEB_LOCAL_MAX, 1: WEB_US_MAX, 2: WEB_CN_MAX}
 WEB_LOCAL_STORE_PROBES = max(0, min(9, int(os.environ.get('WEB_LOCAL_STORE_PROBES', '6'))))
 WEB_FAST_SKIP_PRODUCT_PAGE_VERIFY = env_bool('WEB_FAST_SKIP_PRODUCT_PAGE_VERIFY', True)
 WEB_KEEP_PRICELESS_RESULTS = env_bool('WEB_KEEP_PRICELESS_RESULTS', True)
-WEB_PRICE_ENRICH_ENABLED = env_bool('WEB_PRICE_ENRICH_ENABLED', False)
-WEB_PRICE_ENRICH_MAX_ROWS = max(2, min(24, int(os.environ.get('WEB_PRICE_ENRICH_MAX_ROWS', '6'))))
-WEB_PRICE_ENRICH_MAX_WAIT_SECONDS = max(1.0, min(12.0, float(os.environ.get('WEB_PRICE_ENRICH_MAX_WAIT_SECONDS', '2.0'))))
-WEB_PRICE_ENRICH_SHOPPING_FALLBACK = env_bool('WEB_PRICE_ENRICH_SHOPPING_FALLBACK', False)
-WEB_PRICE_ENRICH_SHOPPING_MAX = max(0, min(10, int(os.environ.get('WEB_PRICE_ENRICH_SHOPPING_MAX', '2'))))
+WEB_PRICE_ENRICH_ENABLED = env_bool('WEB_PRICE_ENRICH_ENABLED', True)
+WEB_PRICE_ENRICH_MAX_ROWS = max(2, min(24, int(os.environ.get('WEB_PRICE_ENRICH_MAX_ROWS', '14'))))
+WEB_PRICE_ENRICH_MAX_WAIT_SECONDS = max(2.0, min(12.0, float(os.environ.get('WEB_PRICE_ENRICH_MAX_WAIT_SECONDS', '6.5'))))
+WEB_PRICE_ENRICH_SHOPPING_FALLBACK = env_bool('WEB_PRICE_ENRICH_SHOPPING_FALLBACK', True)
+WEB_PRICE_ENRICH_SHOPPING_MAX = max(0, min(10, int(os.environ.get('WEB_PRICE_ENRICH_SHOPPING_MAX', '6'))))
+if USE_V106_5_RESULT_PIPELINE:
+    # Exact v106.5 extraction: return the engine winners immediately. Product
+    # page image fetches, market expansion and price repair remain available to
+    # the separate "more stores" flow, never to the initial search response.
+    WEB_TEXT_DENSE_PARITY = False
+    WEB_TEXT_IMAGE_ENRICH_ENABLED = False
+    WEB_PRICE_ENRICH_ENABLED = False
+    WEB_REQUIRE_PRODUCT_IMAGE = False
 WEB_API_MAX_QUERY_CHARS = max(40, min(500, int(os.environ.get('WEB_API_MAX_QUERY_CHARS', '220'))))
 WEB_API_MAX_IMAGE_BYTES = max(512000, min(12 * 1024 * 1024, int(os.environ.get('WEB_API_MAX_IMAGE_BYTES', str(6 * 1024 * 1024)))))
 # Raw iPhone HEIC uploads may be larger before server-side JPEG conversion.
@@ -6324,8 +6349,7 @@ WEB_CHINA_GLOBAL_MAX_STORES = max(4, min(9, int(os.environ.get('WEB_CHINA_GLOBAL
 WEB_CHINA_ORGANIC_NUM = max(3, min(10, int(os.environ.get('WEB_CHINA_ORGANIC_NUM', '8'))))
 WEB_RATE_BUCKETS = defaultdict(deque)
 WEB_RATE_LOCK = threading.Lock()
-print(f'ANDROID/WEB PARITY exact={WEB_MATCH_WHATSAPP_EXACT} caps local/us/cn={WEB_LOCAL_MAX}/{WEB_US_MAX}/{WEB_CN_MAX} legacy_turbo_available={WEB_STREAM_FAST_WAVE} store_timeout={WEB_STREAM_STORE_TIMEOUT}s progressive={ANDROID_IMAGE_PROGRESSIVE} shopping_geo_guard={SHOPPING_GEO_GUARD}')
-print(f'TURBO FASTPATH dense={WEB_TEXT_DENSE_PARITY} sync_expand={WEB_SYNC_TEXT_EXPANSION} image_enrich={WEB_TEXT_IMAGE_ENRICH_ENABLED} price_enrich={WEB_PRICE_ENRICH_ENABLED} max_stores={MAX_STORES} max_urls={MAX_URLS_MERGED}')
+print(f'ANDROID/WEB PARITY exact={WEB_MATCH_WHATSAPP_EXACT} v106_pipeline={USE_V106_5_RESULT_PIPELINE} caps local/us/cn={WEB_LOCAL_MAX}/{WEB_US_MAX}/{WEB_CN_MAX} legacy_turbo_available={WEB_STREAM_FAST_WAVE} store_timeout={WEB_STREAM_STORE_TIMEOUT}s progressive={ANDROID_IMAGE_PROGRESSIVE} shopping_geo_guard={SHOPPING_GEO_GUARD}')
 
 def _web_request_ip(request):
     forwarded = str(request.headers.get('x-forwarded-for') or '').split(',')[0].strip()
@@ -6624,8 +6648,11 @@ def _web_build_text_items(txt, urls, lang, query):
         title = _compact_ui_title(raw_title or query)
         store = _ui_plain_store_name(item.get('source') or '', item.get('link') or '') or U(lang, 'store')
         results.append({'market': _web_market_label(rank), 'market_rank': rank, 'country': rank_cc.get(rank, ''), 'flag': country_flag_emoji(rank_cc.get(rank, '')), 'store': store, 'title': title, 'price': shown_price, 'url': item.get('link') or '', 'image': item.get('thumbnail') or item.get('image') or '', 'match_score': round(_findzia_match_score(query, raw_title or title or query), 3)})
-    # Text results need a product photo just like Lens. Fetch product-page media in parallel;
-    # the fast web wave can still stream while this authoritative set is being enriched.
+    if USE_V106_5_RESULT_PIPELINE:
+        # Exact stopping point from main_v106.5: do not reopen product pages,
+        # do not wait for image downloads, and do not remove valid winners just
+        # because a retailer blocks image scraping.
+        return results
     results = _web_enrich_text_result_images(results)
     return _web_require_product_image_rows(results)
 
@@ -7782,15 +7809,20 @@ def _web_search_text_sync(query, country, lang, selected_option='', original_que
         elif rtype == 'NONE':
             return {'ok': False, 'type': 'chat', 'error': 'not_a_product_query', 'query': q, 'market': market}
     txt, urls = v26_text_search(q, lang)
+    if USE_V106_5_RESULT_PIPELINE:
+        # Copied execution order from main_v106.5: one authoritative extraction
+        # pass, convert it to cards, return. No empty-market expansion, page
+        # verification, price repair or image enrichment in the critical path.
+        if not txt or not text77_extract_store_offers(txt, limit=30):
+            return {'ok': True, 'type': 'results', 'query': q, 'market': market, 'results': []}
+        results = _web_build_text_items(txt, urls, lang, q)
+        return {'ok': True, 'type': 'results', 'query': q, 'market': market, 'results': results, 'source': 'v106.5_exact'}
     if not txt or not text77_extract_store_offers(txt, limit=30):
-        results = _web_expand_text_results(q, country, lang, []) if WEB_SYNC_TEXT_EXPANSION else []
+        results = _web_expand_text_results(q, country, lang, [])
         return {'ok': True, 'type': 'results', 'query': q, 'market': market, 'results': results, 'source': 'direct_market_fallback'}
     results = _web_build_text_items(txt, urls, lang, q)
-    # TURBO: do not block first/final response on page re-fetch + three-market expansion.
-    # The streaming fast-wave/store probes can still supplement visible results independently.
-    if WEB_SYNC_TEXT_EXPANSION:
-        results = _web_repair_text_price_outliers(results, lang, market)
-        results = _web_expand_text_results(q, country, lang, results)
+    results = _web_repair_text_price_outliers(results, lang, market)
+    results = _web_expand_text_results(q, country, lang, results)
     return {'ok': True, 'type': 'results', 'query': q, 'market': market, 'results': results}
 
 def _web_more_seen_domain(value):
@@ -7941,7 +7973,7 @@ def _web_search_image_sync(image_b64, mime, caption, country, lang, progress_cal
             items = _web_build_lens_items(lens_direct, lang, caption)
             if items:
                 identity = (lens_direct.get('visual_identity') or lens_direct.get('relevance_target') or lens_direct.get('query') or caption or '').strip()
-                if WEB_MATCH_WHATSAPP_EXACT and (not WEB_TEXT_DENSE_PARITY):
+                if USE_V106_5_RESULT_PIPELINE or (WEB_MATCH_WHATSAPP_EXACT and (not WEB_TEXT_DENSE_PARITY)):
                     print(f'ANDROID IMAGE TRUE PARITY: direct WhatsApp Lens set -> {len(items)} result(s); no WEB v89 supplement')
                     return {'ok': True, 'type': 'results', 'query': identity, 'market': market, 'results': items, 'source': 'whatsapp_direct_lens_exact'}
                 if WEB_IMAGE_SUPPLEMENT_WEAK_MARKETS and identity:
@@ -8966,7 +8998,7 @@ async def web_api_search_stream(request: Request):
             if rtype == 'NONE':
                 yield _web_stream_event({'event': 'error', 'error': 'not_a_product_query'})
                 return
-            if WEB_MATCH_WHATSAPP_EXACT and (not WEB_TEXT_DENSE_PARITY):
+            if USE_V106_5_RESULT_PIPELINE or (WEB_MATCH_WHATSAPP_EXACT and (not WEB_TEXT_DENSE_PARITY)):
                 final_task = asyncio.create_task(asyncio.to_thread(_web_search_text_sync, q, country, lang, '', '', True))
                 while not final_task.done():
                     try:
@@ -8977,18 +9009,10 @@ async def web_api_search_stream(request: Request):
                 if final.get('type') == 'recommendations':
                     yield _web_stream_event({'event': 'recommendations', 'data': final, 'elapsed_ms': int((time.time() - started) * 1000)})
                 else:
-                    price_tasks, priced_keys = ({}, set())
                     exact_rows = final.get('results') or []
                     for item in exact_rows:
                         yield _web_stream_event({'event': 'result', 'phase': 'whatsapp_exact', 'market': str(item.get('market') or 'other'), 'item': item, 'elapsed_ms': int((time.time() - started) * 1000)})
-                        key = str(item.get('url') or '').strip() or str(item.get('market') or 'other') + '|' + str(item.get('store') or '') + '|' + str(item.get('title') or '')
-                        if _web_row_has_numeric_price(item):
-                            priced_keys.add(key)
-                        else:
-                            _web_spawn_price_enrich_task(price_tasks, key, item, lang, market)
                         await asyncio.sleep(0.005)
-                    async for _ev in _web_drain_price_enrich_events(price_tasks, priced_keys, started):
-                        yield _ev
                 yield _web_stream_event({'event': 'done', 'count': len(final.get('results') or []), 'elapsed_ms': int((time.time() - started) * 1000)})
                 return
             sent = set()
@@ -9408,4 +9432,4 @@ async def web_api_image_search(request: Request):
 
 @app.get('/')
 async def health():
-    return {'status': 'v107.18 BLUE-Z + GLOBAL-TEXT + SAME-PRODUCT-MORE-STORES', 'lens_direct_mode': LENS_DIRECT_MODE, 'build': BUILD_ID, 'market_source': 'phone_prefix', 'languages': ['ar','en','de','fr','it','es','pt','tr','ru','ja','zh','ko','hi','ur','id','ms']}
+    return {'status': 'v107.19 V106.5 EXTRACTION + BLUE-Z + GLOBAL-TEXT + SAME-PRODUCT-MORE-STORES', 'lens_direct_mode': LENS_DIRECT_MODE, 'v106_pipeline': USE_V106_5_RESULT_PIPELINE, 'build': BUILD_ID, 'market_source': 'phone_prefix', 'languages': ['ar','en','de','fr','it','es','pt','tr','ru','ja','zh','ko','hi','ur','id','ms']}
