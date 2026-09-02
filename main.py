@@ -17,7 +17,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept'], max_age=86400)
-BUILD_ID = 'v107.17-full-z-text-image-json-guard'
+BUILD_ID = 'v107.18-blue-z-global-text-more-stores'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -112,6 +112,7 @@ MORE_LOCAL_MAX = max(0, int(os.environ.get('MORE_LOCAL_MAX', '3')))
 MORE_US_MAX = max(0, int(os.environ.get('MORE_US_MAX', '2')))
 MORE_CN_MAX = max(0, int(os.environ.get('MORE_CN_MAX', '2')))
 MORE_TOTAL_MAX = max(1, MORE_LOCAL_MAX + MORE_US_MAX + MORE_CN_MAX)
+WEB_MORE_TOTAL_MAX = max(1, min(5, int(os.environ.get('WEB_MORE_TOTAL_MAX', '5'))))
 LENS_PRIMARY_MODE = env_bool('LENS_PRIMARY_MODE', True)
 LENS_PRIMARY_EXCEPT_TEXT_HEAVY = env_bool('LENS_PRIMARY_EXCEPT_TEXT_HEAVY', True)
 ENABLE_LENS_WIDE_FALLBACK = env_bool('ENABLE_LENS_WIDE_FALLBACK', True)
@@ -6859,7 +6860,6 @@ def _web_fast_market_wave_sync(query, country, lang, rank):
     cap = {0: WEB_LOCAL_MAX, 1: WEB_US_MAX, 2: WEB_CN_MAX}.get(rank, 4)
     candidates = _market_presence_fallback(query, rank, limit=max(cap + 2, cap))
     rows = _web_market_candidates_to_items(candidates, rank, lang, query)
-    rows = _web_enrich_text_result_images(rows)
     return _web_require_product_image_rows(rows)
 
 def _web_stream_store_specs(query, country, rank):
@@ -7548,8 +7548,7 @@ def _web_store_probe_sync(query, country, lang, rank, label, domain, gl):
     if rank == 2 and domain and WEB_CHINA_ORGANIC_FIRST:
         candidates = _serpapi_china_global_site_request(q, label, domain, timeout_seconds=WEB_CHINA_ORGANIC_TIMEOUT)
         rows = _web_market_candidates_to_items(candidates, rank, lang, q)
-        rows = _web_enrich_text_result_images(rows[:_web_marketplace_repeat_cap(domain)])
-        return _web_require_product_image_rows(rows)
+        return _web_require_product_image_rows(rows[:_web_marketplace_repeat_cap(domain)])
     if not candidates:
         hl = country_search_hl(gl) if rank == 0 else 'en'
         if rank == 0 and SHOPPING_GEO_GUARD and (not _shopping_gl_supported(gl)):
@@ -7579,8 +7578,7 @@ def _web_store_probe_sync(query, country, lang, rank, label, domain, gl):
     cap = _web_marketplace_repeat_cap(domain)
     if cap > WEB_STREAM_RESULTS_PER_STORE and rows:
         print(f'WEB MARKETPLACE MULTI store={label} cap={cap} rows={len(rows)}')
-    rows = _web_enrich_text_result_images(rows[:cap])
-    return _web_require_product_image_rows(rows)
+    return _web_require_product_image_rows(rows[:cap])
 
 def _web_image_seed_sync(image_b64, mime, caption, country, lang):
     market = _web_market(country)
@@ -7783,11 +7781,148 @@ def _web_search_text_sync(query, country, lang, selected_option='', original_que
             return {'ok': False, 'type': 'chat', 'error': 'not_a_product_query', 'query': q, 'market': market}
     txt, urls = v26_text_search(q, lang)
     if not txt or not text77_extract_store_offers(txt, limit=30):
-        return {'ok': True, 'type': 'results', 'query': q, 'market': market, 'results': []}
+        results = _web_expand_text_results(q, country, lang, [])
+        return {'ok': True, 'type': 'results', 'query': q, 'market': market, 'results': results, 'source': 'direct_market_fallback'}
     results = _web_build_text_items(txt, urls, lang, q)
     results = _web_repair_text_price_outliers(results, lang, market)
     results = _web_expand_text_results(q, country, lang, results)
     return {'ok': True, 'type': 'results', 'query': q, 'market': market, 'results': results}
+
+def _web_more_seen_domain(value):
+    raw = str(value or '').strip().lower()
+    if not raw:
+        return ''
+    if '://' in raw:
+        return _more_result_domain(raw)
+    raw = raw.split('/', 1)[0].split(':', 1)[0]
+    return raw[4:] if raw.startswith('www.') else raw
+
+def _web_more_request_image(payload):
+    raw = str((payload or {}).get('image_base64') or '').strip()
+    if not raw:
+        return ('', '')
+    mime = str((payload or {}).get('mime_type') or 'image/jpeg').strip().lower()
+    if ',' in raw and raw.lower().startswith('data:image/'):
+        raw = raw.split(',', 1)[1]
+    try:
+        image_bytes = base64.b64decode(raw, validate=True)
+    except Exception as exc:
+        raise ValueError('invalid_image') from exc
+    if not image_bytes or len(image_bytes) > WEB_API_RAW_IMAGE_MAX_BYTES:
+        raise ValueError('image_too_large')
+    image_bytes, mime = _web_normalize_uploaded_image_bytes(image_bytes, mime)
+    if len(image_bytes) > WEB_API_MAX_IMAGE_BYTES:
+        raise ValueError('image_too_large_after_convert')
+    return (base64.b64encode(image_bytes).decode('ascii'), mime)
+
+def _web_more_stores_sync(query, country, lang, shown_urls=None, shown_domains=None, image_b64='', image_mime=''):
+    """WhatsApp-parity expansion for new merchants selling the same product.
+
+    This is deliberately not a fresh broad search: it preserves the resolved
+    product identity, excludes every merchant already displayed, and returns at
+    most five additional stores from the selected local market, the US and China.
+    """
+    market = _web_market(country)
+    MARKET_CTX.value = market
+    q = re.sub('\\s+', ' ', str(query or '')).strip()[:WEB_API_MAX_QUERY_CHARS]
+    seen_urls = {
+        _canonical_result_url(str(url or '').strip())
+        for url in list(shown_urls or [])[:80]
+        if str(url or '').strip()
+    }
+    seen_domains = {
+        _web_more_seen_domain(domain)
+        for domain in list(shown_domains or [])[:80]
+        if _web_more_seen_domain(domain)
+    }
+    for url in list(shown_urls or [])[:80]:
+        domain = _more_result_domain(url)
+        if domain:
+            seen_domains.add(domain)
+
+    candidates = []
+    source = 'whatsapp_more_text'
+    if image_b64 and image_mime:
+        source = 'whatsapp_more_lens'
+        exclusion = ' '.join((f'-site:{domain}' for domain in sorted(seen_domains)[:7]))
+        hint = re.sub('\\s+', ' ', f'{q} buy shop other retailers {exclusion}').strip()[:220]
+        try:
+            lens = google_lens_lookup(image_b64, image_mime, lang, hint, light=True)
+        except Exception as exc:
+            print(f'WEB MORE LENS ERR: {exc.__class__.__name__}')
+            lens = {'matches': []}
+        if lens.get('matches'):
+            filtered_lens = dict(lens)
+            filtered_lens['matches'] = [
+                item for item in lens.get('matches') or []
+                if _canonical_result_url(str(item.get('link') or '')) not in seen_urls
+                and _more_result_domain(item.get('link') or '') not in seen_domains
+            ]
+            candidates.extend(_web_build_lens_items(filtered_lens, lang, q))
+    else:
+        try:
+            txt, urls = legacy_text_product_search_more(q, lang, seen_domains)
+        except Exception as exc:
+            print(f'WEB MORE TEXT ENGINE ERR: {exc.__class__.__name__}')
+            txt, urls = ('', {})
+        if txt and urls:
+            candidates.extend(_web_build_text_items(txt, urls, lang, q))
+
+    # The same exact query is also checked against structured market sources.
+    # This supplies image-backed cards when the conversational engine found a
+    # valid store but its page did not expose a usable product image.
+    if len(candidates) < WEB_MORE_TOTAL_MAX and SERPAPI_API_KEY:
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            futures = {
+                pool.submit(_web_fast_market_wave_sync, q, country, lang, rank): rank
+                for rank in (0, 1, 2)
+            }
+            for future, rank in list(futures.items()):
+                try:
+                    candidates.extend(future.result(timeout=WEB_STREAM_MARKET_TIMEOUT + 3) or [])
+                except Exception as exc:
+                    print(f'WEB MORE MARKET ERR rank={rank}: {exc.__class__.__name__}')
+
+    selected = []
+    new_domains = set()
+    new_urls = set()
+    for row in sorted(
+        (dict(item or {}) for item in candidates),
+        key=lambda item: (
+            int(item.get('market_rank', 99)),
+            -float(item.get('match_score') or 0),
+            0 if _web_row_has_numeric_price(item) else 1,
+        ),
+    ):
+        url = str(row.get('url') or row.get('link') or '').strip()
+        canonical = _canonical_result_url(url)
+        domain = _more_result_domain(url)
+        if not canonical or not domain:
+            continue
+        if canonical in seen_urls or canonical in new_urls:
+            continue
+        if domain in seen_domains or domain in new_domains:
+            continue
+        if not _web_is_direct_product_page_url(url, row.get('store') or row.get('source') or ''):
+            continue
+        if not _web_has_product_image(row):
+            continue
+        selected.append(row)
+        new_urls.add(canonical)
+        new_domains.add(domain)
+        if len(selected) >= WEB_MORE_TOTAL_MAX:
+            break
+
+    return {
+        'ok': True,
+        'type': 'results',
+        'query': q,
+        'market': market,
+        'results': selected,
+        'source': source,
+        'excluded_store_count': len(seen_domains),
+        'exhausted': not bool(selected),
+    }
 
 def _web_search_image_sync(image_b64, mime, caption, country, lang, progress_callback=None):
     market = _web_market(country)
@@ -8660,6 +8795,130 @@ async def web_ai_shopping(request: Request):
 async def web_api_health():
     return {'ok': True, 'web_api': WEB_API_ENABLED, 'build': BUILD_ID, 'lens': bool(ENABLE_GOOGLE_LENS and SERPAPI_API_KEY)}
 
+@app.post('/api/search/more')
+async def web_api_search_more(request: Request):
+    if not WEB_API_ENABLED:
+        return Response(content=json.dumps({'ok': False, 'error': 'web_api_disabled'}), media_type='application/json', status_code=503)
+    if not _web_rate_allowed(request):
+        return Response(content=json.dumps({'ok': False, 'error': 'rate_limit'}), media_type='application/json', status_code=429)
+    try:
+        payload = await request.json()
+    except Exception:
+        return Response(content=json.dumps({'ok': False, 'error': 'invalid_json'}), media_type='application/json', status_code=400)
+    query = re.sub('\\s+', ' ', str(payload.get('query') or '')).strip()[:WEB_API_MAX_QUERY_CHARS]
+    if not query:
+        return Response(content=json.dumps({'ok': False, 'error': 'empty_query'}), media_type='application/json', status_code=400)
+    shown_urls = payload.get('shown_urls') if isinstance(payload.get('shown_urls'), list) else []
+    shown_domains = payload.get('shown_domains') if isinstance(payload.get('shown_domains'), list) else []
+    try:
+        image_b64, image_mime = _web_more_request_image(payload)
+    except ValueError as exc:
+        error = str(exc)
+        status = 413 if error.startswith('image_too_large') else 400
+        return Response(content=json.dumps({'ok': False, 'error': error}), media_type='application/json', status_code=status)
+    lang = _web_language(payload.get('lang'))
+    country, country_source = await asyncio.to_thread(_web_resolve_request_country, request, payload.get('country'))
+    started = time.time()
+    result = await asyncio.to_thread(
+        _web_more_stores_sync,
+        query,
+        country,
+        lang,
+        shown_urls,
+        shown_domains,
+        image_b64,
+        image_mime,
+    )
+    result['elapsed_ms'] = int((time.time() - started) * 1000)
+    result['country_source'] = country_source
+    return result
+
+@app.post('/api/search/more/stream')
+async def web_api_search_more_stream(request: Request):
+    if not WEB_API_ENABLED or not WEB_STREAM_ENABLED:
+        return Response(content=json.dumps({'ok': False, 'error': 'web_stream_disabled'}), media_type='application/json', status_code=503)
+    if not _web_rate_allowed(request):
+        return Response(content=json.dumps({'ok': False, 'error': 'rate_limit'}), media_type='application/json', status_code=429)
+    try:
+        payload = await request.json()
+    except Exception:
+        return Response(content=json.dumps({'ok': False, 'error': 'invalid_json'}), media_type='application/json', status_code=400)
+    query = re.sub('\\s+', ' ', str(payload.get('query') or '')).strip()[:WEB_API_MAX_QUERY_CHARS]
+    if not query:
+        return Response(content=json.dumps({'ok': False, 'error': 'empty_query'}), media_type='application/json', status_code=400)
+    shown_urls = payload.get('shown_urls') if isinstance(payload.get('shown_urls'), list) else []
+    shown_domains = payload.get('shown_domains') if isinstance(payload.get('shown_domains'), list) else []
+    try:
+        image_b64, image_mime = _web_more_request_image(payload)
+    except ValueError as exc:
+        error = str(exc)
+        status = 413 if error.startswith('image_too_large') else 400
+        return Response(content=json.dumps({'ok': False, 'error': error}), media_type='application/json', status_code=status)
+    lang = _web_language(payload.get('lang'))
+    country, country_source = await asyncio.to_thread(_web_resolve_request_country, request, payload.get('country'))
+
+    async def _generator():
+        started = time.time()
+        yield _web_stream_event({'event': 'start', 'ok': True, 'mode': 'same_product_more_stores', 'elapsed_ms': 0})
+        yield _web_stream_event({'event': 'query', 'query': query, 'market': _web_market(country)})
+        task = asyncio.create_task(asyncio.to_thread(
+            _web_more_stores_sync,
+            query,
+            country,
+            lang,
+            shown_urls,
+            shown_domains,
+            image_b64,
+            image_mime,
+        ))
+        try:
+            while not task.done():
+                try:
+                    await asyncio.wait_for(asyncio.shield(task), timeout=1.8)
+                except asyncio.TimeoutError:
+                    yield _web_stream_event({
+                        'event': 'status',
+                        'stage': 'same_product_more_stores',
+                        'elapsed_ms': int((time.time() - started) * 1000),
+                    })
+            result = await task
+            for item in result.get('results') or []:
+                yield _web_stream_event({
+                    'event': 'result',
+                    'phase': 'same_product_more_stores',
+                    'market': str(item.get('market') or 'other'),
+                    'item': item,
+                    'elapsed_ms': int((time.time() - started) * 1000),
+                })
+                await asyncio.sleep(0.012)
+            yield _web_stream_event({
+                'event': 'done',
+                'count': len(result.get('results') or []),
+                'exhausted': bool(result.get('exhausted')),
+                'country_source': country_source,
+                'elapsed_ms': int((time.time() - started) * 1000),
+            })
+        except asyncio.CancelledError:
+            task.cancel()
+            raise
+        except Exception as exc:
+            print(f'WEB MORE STREAM ERR: {exc}')
+            yield _web_stream_event({
+                'event': 'error',
+                'error': 'more_stores_failed',
+                'elapsed_ms': int((time.time() - started) * 1000),
+            })
+
+    return StreamingResponse(
+        _generator(),
+        media_type='application/x-ndjson',
+        headers={
+            'Cache-Control': 'no-cache, no-transform',
+            'X-Accel-Buffering': 'no',
+            'Connection': 'keep-alive',
+        },
+    )
+
 @app.post('/api/search/stream')
 async def web_api_search_stream(request: Request):
     if not WEB_API_ENABLED or not WEB_STREAM_ENABLED:
@@ -9144,4 +9403,4 @@ async def web_api_image_search(request: Request):
 
 @app.get('/')
 async def health():
-    return {'status': 'v107 RESULT-QUALITY + GLOBAL-GEO + STRONG-LOCAL + MULTI-CURRENCY + 10-LANG + CAPS-4-3-3', 'lens_direct_mode': LENS_DIRECT_MODE, 'build': BUILD_ID, 'market_source': 'phone_prefix', 'languages': ['ar','en','de','fr','it','es','pt','tr','ru','ja','zh','ko','hi','ur','id','ms']}
+    return {'status': 'v107.18 BLUE-Z + GLOBAL-TEXT + SAME-PRODUCT-MORE-STORES', 'lens_direct_mode': LENS_DIRECT_MODE, 'build': BUILD_ID, 'market_source': 'phone_prefix', 'languages': ['ar','en','de','fr','it','es','pt','tr','ru','ja','zh','ko','hi','ur','id','ms']}
