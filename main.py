@@ -17,7 +17,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept'], max_age=86400)
-BUILD_ID = 'v107.21-lens-zero-race-guard'
+BUILD_ID = 'v107.22-lens-sparse-fill-turbo'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -142,6 +142,8 @@ LENS_HTTP_TIMEOUT_SECONDS = max(6, int(os.environ.get('LENS_HTTP_TIMEOUT_SECONDS
 LENS_TOTAL_TIMEOUT_SECONDS = max(8, int(os.environ.get('LENS_TOTAL_TIMEOUT_SECONDS', '12')))
 LENS_TURBO_MAX_WAIT_SECONDS = max(2.5, min(6.0, float(os.environ.get('LENS_TURBO_MAX_WAIT_SECONDS', '4.5'))))
 LENS_TURBO_EMPTY_GRACE_SECONDS = max(1.0, min(5.0, float(os.environ.get('LENS_TURBO_EMPTY_GRACE_SECONDS', '3.5'))))
+LENS_TURBO_SPARSE_GRACE_SECONDS = max(0.5, min(2.5, float(os.environ.get('LENS_TURBO_SPARSE_GRACE_SECONDS', '1.5'))))
+LENS_TURBO_STRONG_RESULT_TARGET = max(5, min(10, int(os.environ.get('LENS_TURBO_STRONG_RESULT_TARGET', '8'))))
 LENS_IMAGE_TTL = max(120, int(os.environ.get('LENS_IMAGE_TTL_SECONDS', '600')))
 LENS_IMAGE_STORE = {}
 LENS_IMAGE_LOCK = threading.Lock()
@@ -1657,6 +1659,30 @@ def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=Fal
                 print(f'LENS ZERO-RACE RESCUED useful={sum(rank_counts.values())} grace_elapsed={time.monotonic() - rescue_started:.2f}s')
             else:
                 print(f'LENS ZERO-RACE EMPTY after_grace={LENS_TURBO_EMPTY_GRACE_SECONDS}s')
+        # The first snapshot is already on its way to Android. If it is usable
+        # but sparse, give one late products pass a very small enrichment window
+        # before the authoritative final snapshot. This does not delay first paint.
+        sparse_useful = sum(1 for x in merged if result_market_rank(x) in (0, 1, 2))
+        if USE_FAST_LENS_PIPELINE and 0 < sparse_useful < LENS_TURBO_STRONG_RESULT_TARGET and pending:
+            sparse_started = time.monotonic()
+            sparse_deadline = sparse_started + LENS_TURBO_SPARSE_GRACE_SECONDS
+            before_sparse = sparse_useful
+            while pending and time.monotonic() < sparse_deadline:
+                sparse_left = max(0.0, sparse_deadline - time.monotonic())
+                just_done, pending = wait(pending, timeout=sparse_left, return_when=FIRST_COMPLETED)
+                if not just_done:
+                    break
+                done_fast |= set(just_done)
+                for fut in just_done:
+                    lens_type, country, auto_crop = future_map[fut]
+                    try:
+                        _merge(fut.result())
+                    except Exception as e:
+                        print(f'GOOGLE LENS SPARSE FUTURE ERR type={lens_type} country={country}: {e}')
+                sparse_useful = sum(1 for x in merged if result_market_rank(x) in (0, 1, 2))
+                if sparse_useful >= LENS_TURBO_STRONG_RESULT_TARGET:
+                    break
+            print(f'LENS SPARSE FILL useful={before_sparse}->{sparse_useful} grace_elapsed={time.monotonic() - sparse_started:.2f}s')
         rank_counts = {r: sum((1 for x in merged if result_market_rank(x) == r)) for r in (0, 1, 2)}
         market_prefetch = None
         prefetch_query = (query_hint or '').strip()
@@ -6404,7 +6430,7 @@ WEB_CHINA_GLOBAL_MAX_STORES = max(4, min(9, int(os.environ.get('WEB_CHINA_GLOBAL
 WEB_CHINA_ORGANIC_NUM = max(3, min(10, int(os.environ.get('WEB_CHINA_ORGANIC_NUM', '8'))))
 WEB_RATE_BUCKETS = defaultdict(deque)
 WEB_RATE_LOCK = threading.Lock()
-print(f'ANDROID/WEB PARITY exact={WEB_MATCH_WHATSAPP_EXACT} v106_pipeline={USE_V106_5_RESULT_PIPELINE} fast_lens={USE_FAST_LENS_PIPELINE} lens_wait={LENS_TURBO_MAX_WAIT_SECONDS}s empty_grace={LENS_TURBO_EMPTY_GRACE_SECONDS}s caps local/us/cn={WEB_LOCAL_MAX}/{WEB_US_MAX}/{WEB_CN_MAX} legacy_turbo_available={WEB_STREAM_FAST_WAVE} store_timeout={WEB_STREAM_STORE_TIMEOUT}s progressive={ANDROID_IMAGE_PROGRESSIVE} shopping_geo_guard={SHOPPING_GEO_GUARD}')
+print(f'ANDROID/WEB PARITY exact={WEB_MATCH_WHATSAPP_EXACT} v106_pipeline={USE_V106_5_RESULT_PIPELINE} fast_lens={USE_FAST_LENS_PIPELINE} lens_wait={LENS_TURBO_MAX_WAIT_SECONDS}s empty_grace={LENS_TURBO_EMPTY_GRACE_SECONDS}s sparse_grace={LENS_TURBO_SPARSE_GRACE_SECONDS}s strong_target={LENS_TURBO_STRONG_RESULT_TARGET} caps local/us/cn={WEB_LOCAL_MAX}/{WEB_US_MAX}/{WEB_CN_MAX} legacy_turbo_available={WEB_STREAM_FAST_WAVE} store_timeout={WEB_STREAM_STORE_TIMEOUT}s progressive={ANDROID_IMAGE_PROGRESSIVE} shopping_geo_guard={SHOPPING_GEO_GUARD}')
 
 def _web_request_ip(request):
     forwarded = str(request.headers.get('x-forwarded-for') or '').split(',')[0].strip()
@@ -6800,6 +6826,35 @@ def _web_build_lens_items(lens, lang, caption=''):
                 break
         if len(selected) >= LENS_DIRECT_MAX_CTA:
             break
+    if USE_FAST_LENS_PIPELINE:
+        # Market caps are priorities, not a reason to throw away good cards.
+        # If China (or another market) has no result, backfill its unused slots
+        # from the remaining LOCAL/US Lens matches up to the same total cap.
+        target_total = min(LENS_DIRECT_MAX_CTA, sum(caps.values()))
+        before_backfill = len(selected)
+        if len(selected) < target_total:
+            for rank in (0, 1, 2):
+                for m in buckets[rank]:
+                    url = (m.get('link') or '').strip()
+                    try:
+                        host = urllib.parse.urlparse(url).netloc.lower()
+                    except Exception:
+                        host = ''
+                    if not (url.startswith('http') and host and ('google.' not in host)):
+                        continue
+                    merchant = merchant_key(m)
+                    canonical = _canonical_result_url(url)
+                    if canonical in seen_urls or merchant_counts[merchant] >= RESULTS_PER_STORE_MAX:
+                        continue
+                    selected.append(m)
+                    seen_urls.add(canonical)
+                    merchant_counts[merchant] += 1
+                    if len(selected) >= target_total:
+                        break
+                if len(selected) >= target_total:
+                    break
+        if len(selected) > before_backfill:
+            print(f'LENS UNUSED-MARKET BACKFILL results={before_backfill}->{len(selected)} target={target_total}')
     selected = _fill_prices_from_existing_lens_pool(selected, raw_matches)
     display_titles = ([(m.get('title') or '').strip() for m in selected] if USE_FAST_LENS_PIPELINE else translate_ui_titles([(m.get('title') or '').strip() for m in selected], lang))
     local_cc = (current_market().get('country') or DEFAULT_COUNTRY).lower()
@@ -9488,4 +9543,4 @@ async def web_api_image_search(request: Request):
 
 @app.get('/')
 async def health():
-    return {'status': 'v107.21 LENS ZERO-RACE GUARD + FIRST-RESULT TURBO', 'lens_direct_mode': LENS_DIRECT_MODE, 'fast_lens': USE_FAST_LENS_PIPELINE, 'v106_pipeline': USE_V106_5_RESULT_PIPELINE, 'build': BUILD_ID, 'market_source': 'phone_prefix', 'languages': ['ar','en','de','fr','it','es','pt','tr','ru','ja','zh','ko','hi','ur','id','ms']}
+    return {'status': 'v107.22 LENS SPARSE-FILL + UNUSED-MARKET BACKFILL', 'lens_direct_mode': LENS_DIRECT_MODE, 'fast_lens': USE_FAST_LENS_PIPELINE, 'v106_pipeline': USE_V106_5_RESULT_PIPELINE, 'build': BUILD_ID, 'market_source': 'phone_prefix', 'languages': ['ar','en','de','fr','it','es','pt','tr','ru','ja','zh','ko','hi','ur','id','ms']}
