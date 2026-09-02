@@ -17,7 +17,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept'], max_age=86400)
-BUILD_ID = 'v107.20-lens-first-result-turbo'
+BUILD_ID = 'v107.21-lens-zero-race-guard'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -141,6 +141,7 @@ LENS_RESULT_LIMIT = max(12, int(os.environ.get('LENS_RESULT_LIMIT', '40')))
 LENS_HTTP_TIMEOUT_SECONDS = max(6, int(os.environ.get('LENS_HTTP_TIMEOUT_SECONDS', '13')))
 LENS_TOTAL_TIMEOUT_SECONDS = max(8, int(os.environ.get('LENS_TOTAL_TIMEOUT_SECONDS', '12')))
 LENS_TURBO_MAX_WAIT_SECONDS = max(2.5, min(6.0, float(os.environ.get('LENS_TURBO_MAX_WAIT_SECONDS', '4.5'))))
+LENS_TURBO_EMPTY_GRACE_SECONDS = max(1.0, min(5.0, float(os.environ.get('LENS_TURBO_EMPTY_GRACE_SECONDS', '3.5'))))
 LENS_IMAGE_TTL = max(120, int(os.environ.get('LENS_IMAGE_TTL_SECONDS', '600')))
 LENS_IMAGE_STORE = {}
 LENS_IMAGE_LOCK = threading.Lock()
@@ -1630,6 +1631,32 @@ def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=Fal
             if USE_FAST_LENS_PIPELINE and enough_fast:
                 print(f'LENS TURBO EARLY RETURN READY useful={sum(rank_counts.values())} elapsed={time.monotonic() - fast_started:.2f}s')
                 break
+        # Race guard: Railway can finish the SerpApi responses a fraction after
+        # the 4.5s fast deadline. Previously we cancelled all four futures with
+        # merged=0, then paid for the much slower Vision/Shopping fallback even
+        # though Lens printed 60 results immediately afterwards. When the pool is
+        # completely empty, wait only for the first real Lens response.
+        if USE_FAST_LENS_PIPELINE and not merged and pending:
+            rescue_started = time.monotonic()
+            rescue_deadline = rescue_started + LENS_TURBO_EMPTY_GRACE_SECONDS
+            while pending and not merged and time.monotonic() < rescue_deadline:
+                rescue_left = max(0.0, rescue_deadline - time.monotonic())
+                just_done, pending = wait(pending, timeout=rescue_left, return_when=FIRST_COMPLETED)
+                if not just_done:
+                    break
+                done_fast |= set(just_done)
+                for fut in just_done:
+                    lens_type, country, auto_crop = future_map[fut]
+                    try:
+                        _merge(fut.result())
+                    except Exception as e:
+                        print(f'GOOGLE LENS RESCUE FUTURE ERR type={lens_type} country={country}: {e}')
+            if merged:
+                rank_counts = {r: sum((1 for x in merged if result_market_rank(x) == r)) for r in (0, 1, 2)}
+                enough_fast = sum(rank_counts.values()) >= max(1, LENS_MIN_MATCHES)
+                print(f'LENS ZERO-RACE RESCUED useful={sum(rank_counts.values())} grace_elapsed={time.monotonic() - rescue_started:.2f}s')
+            else:
+                print(f'LENS ZERO-RACE EMPTY after_grace={LENS_TURBO_EMPTY_GRACE_SECONDS}s')
         rank_counts = {r: sum((1 for x in merged if result_market_rank(x) == r)) for r in (0, 1, 2)}
         market_prefetch = None
         prefetch_query = (query_hint or '').strip()
@@ -6377,7 +6404,7 @@ WEB_CHINA_GLOBAL_MAX_STORES = max(4, min(9, int(os.environ.get('WEB_CHINA_GLOBAL
 WEB_CHINA_ORGANIC_NUM = max(3, min(10, int(os.environ.get('WEB_CHINA_ORGANIC_NUM', '8'))))
 WEB_RATE_BUCKETS = defaultdict(deque)
 WEB_RATE_LOCK = threading.Lock()
-print(f'ANDROID/WEB PARITY exact={WEB_MATCH_WHATSAPP_EXACT} v106_pipeline={USE_V106_5_RESULT_PIPELINE} fast_lens={USE_FAST_LENS_PIPELINE} lens_wait={LENS_TURBO_MAX_WAIT_SECONDS}s caps local/us/cn={WEB_LOCAL_MAX}/{WEB_US_MAX}/{WEB_CN_MAX} legacy_turbo_available={WEB_STREAM_FAST_WAVE} store_timeout={WEB_STREAM_STORE_TIMEOUT}s progressive={ANDROID_IMAGE_PROGRESSIVE} shopping_geo_guard={SHOPPING_GEO_GUARD}')
+print(f'ANDROID/WEB PARITY exact={WEB_MATCH_WHATSAPP_EXACT} v106_pipeline={USE_V106_5_RESULT_PIPELINE} fast_lens={USE_FAST_LENS_PIPELINE} lens_wait={LENS_TURBO_MAX_WAIT_SECONDS}s empty_grace={LENS_TURBO_EMPTY_GRACE_SECONDS}s caps local/us/cn={WEB_LOCAL_MAX}/{WEB_US_MAX}/{WEB_CN_MAX} legacy_turbo_available={WEB_STREAM_FAST_WAVE} store_timeout={WEB_STREAM_STORE_TIMEOUT}s progressive={ANDROID_IMAGE_PROGRESSIVE} shopping_geo_guard={SHOPPING_GEO_GUARD}')
 
 def _web_request_ip(request):
     forwarded = str(request.headers.get('x-forwarded-for') or '').split(',')[0].strip()
@@ -9461,4 +9488,4 @@ async def web_api_image_search(request: Request):
 
 @app.get('/')
 async def health():
-    return {'status': 'v107.20 LENS FIRST-RESULT TURBO + V106.5 TEXT EXTRACTION', 'lens_direct_mode': LENS_DIRECT_MODE, 'fast_lens': USE_FAST_LENS_PIPELINE, 'v106_pipeline': USE_V106_5_RESULT_PIPELINE, 'build': BUILD_ID, 'market_source': 'phone_prefix', 'languages': ['ar','en','de','fr','it','es','pt','tr','ru','ja','zh','ko','hi','ur','id','ms']}
+    return {'status': 'v107.21 LENS ZERO-RACE GUARD + FIRST-RESULT TURBO', 'lens_direct_mode': LENS_DIRECT_MODE, 'fast_lens': USE_FAST_LENS_PIPELINE, 'v106_pipeline': USE_V106_5_RESULT_PIPELINE, 'build': BUILD_ID, 'market_source': 'phone_prefix', 'languages': ['ar','en','de','fr','it','es','pt','tr','ru','ja','zh','ko','hi','ur','id','ms']}
