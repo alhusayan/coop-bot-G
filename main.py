@@ -1,15 +1,23 @@
 # -*- coding: utf-8 -*-
-import os, re, time, base64, requests, json, asyncio, urllib.parse, hashlib, sqlite3, threading
+import os, re, time, base64, requests, json, asyncio, urllib.parse, hashlib, sqlite3, threading, io
 from collections import deque, defaultdict
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from fastapi import FastAPI, Request, Response, BackgroundTasks
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from bs4 import BeautifulSoup
+try:
+    from PIL import Image as PILImage
+    from pillow_heif import register_heif_opener
+    register_heif_opener()
+    WEB_HEIC_ENABLED = True
+except Exception:
+    PILImage = None
+    WEB_HEIC_ENABLED = False
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept'], max_age=86400)
-BUILD_ID = 'v107.12-web-density-images-ai-fix'
+BUILD_ID = 'v107.13-web-density-images-ai-fix'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -7860,6 +7868,25 @@ AI_SHOPPING_TIMEOUT_SECONDS = max(8.0, min(35.0, float(os.environ.get('AI_SHOPPI
 
 AI_SHOPPING_MAX_OFFERS = max(3, min(12, int(os.environ.get('AI_SHOPPING_MAX_OFFERS', '8'))))
 AI_SHOPPING_MAX_HISTORY_DAYS = max(30, min(730, int(os.environ.get('AI_SHOPPING_MAX_HISTORY_DAYS', '365'))))
+AI_SHOPPING_RATE_PER_MINUTE = max(5, min(60, int(os.environ.get('AI_SHOPPING_RATE_PER_MINUTE', '20'))))
+AI_RATE_BUCKETS = defaultdict(deque)
+AI_RATE_LOCK = threading.Lock()
+
+def _ai_rate_allowed(request):
+    key = _web_request_ip(request)
+    now = time.time()
+    with AI_RATE_LOCK:
+        q = AI_RATE_BUCKETS[key]
+        while q and now - q[0] > 60:
+            q.popleft()
+        if len(q) >= AI_SHOPPING_RATE_PER_MINUTE:
+            return False
+        q.append(now)
+        if len(AI_RATE_BUCKETS) > 5000:
+            stale = [k for k, v in AI_RATE_BUCKETS.items() if not v or now - v[-1] > 300]
+            for k in stale[:1000]:
+                AI_RATE_BUCKETS.pop(k, None)
+    return True
 
 _AI_LANG_NAMES = {
     'en': 'English', 'ar': 'Arabic', 'de': 'German', 'fr': 'French', 'it': 'Italian', 'es': 'Spanish', 'pt': 'Portuguese',
@@ -8069,17 +8096,40 @@ CURRENT FINDZIA OFFERS: {offer_text}
 USER QUESTION: {question or 'Generate the most useful shopping questions for this exact product.'}'''
     return system, user
 
+def _ai_shopping_fallback(product, offers, question, lang, action):
+    title = _ai_product_identity_text(product) or 'this product'
+    price = str((product or {}).get('price') or '').strip()
+    q = str(question or '').lower()
+    is_ar = lang == 'ar'
+    if action == 'compare':
+        if is_ar:
+            answer = f'تعذر التحقق من بدائل موثوقة لـ {title} الآن. لن أذكر موديلات غير مؤكدة. جرّب مرة أخرى بعد قليل.'
+        else:
+            answer = f'I could not verify reliable alternatives for {title} right now, so I will not invent models. Please try again shortly.'
+    elif re.search(r'customer|review|rating|reviews|عملاء|مراجعات|تقييم', q, re.I):
+        if is_ar:
+            answer = f'تعذر التحقق من آراء العملاء الموثوقة عن {title} الآن. لن أخمّن التقييمات أو المراجعات.'
+        else:
+            answer = f'I could not verify reliable customer feedback for {title} right now, so I will not guess ratings or reviews.'
+    else:
+        if is_ar:
+            answer = f'{title}' + (f' معروض حالياً في Findzia بسعر {price}.' if price else '.') + ' قبل الشراء تأكد من الموديل/المقاس/التوافق المطلوب. أقدر أعيد فحص التفاصيل عندما يكون البحث الخارجي متاحاً.'
+        else:
+            answer = f'{title}' + (f' is currently shown by Findzia at {price}.' if price else '.') + ' Before buying, confirm the exact model, size, or compatibility you need. I can re-check the product details when external lookup is available.'
+    return {'ok': True, 'answer': answer, 'bullets': [], 'comparison': [], 'suggested_questions': [], 'sources': [], 'fallback': True}
+
 def _ai_shopping_call_sync(product, offers, question, lang, country, action):
     system, prompt = _ai_shopping_prompt(product, offers, question, lang, action)
     market = _web_market(country)
-    use_search = action not in ('suggestions',)
+    qlow = str(question or '').lower()
+    # Keep normal Q&A fast. Use grounded search only where outside evidence is essential.
+    use_search = action == 'compare' or bool(re.search(r'customer|review|rating|reviews|عملاء|مراجعات|تقييم|alternative|similar|بديل|مشابه', qlow, re.I))
+    raw, urls = ('', {})
     try:
         raw, urls = _run_with_market(market, call_gemini, [{'text': prompt}], system=system, use_search=use_search)
     except Exception as e:
         print(f'AI SHOPPING GEMINI ERR search={use_search}: {e}')
-        raw, urls = ('', {})
-    # Grounded search can occasionally fail/quota/time out. Keep the copilot responsive
-    # with a non-search Gemini fallback rather than leaving the sheet spinning forever.
+    # If grounded search fails, retry once without Search for responsiveness.
     if not str(raw or '').strip() and use_search:
         try:
             raw, urls = _run_with_market(market, call_gemini, [{'text': prompt}], system=system, use_search=False)
@@ -8087,8 +8137,10 @@ def _ai_shopping_call_sync(product, offers, question, lang, country, action):
             print(f'AI SHOPPING GEMINI FALLBACK ERR: {e}')
             raw, urls = ('', {})
     data = _ai_json_object(raw)
-    if not data:
+    if not data and str(raw or '').strip():
         data = {'answer': str(raw or '').strip()[:1800], 'bullets': [], 'comparison': [], 'suggested_questions': []}
+    if not data:
+        return _ai_shopping_fallback(product, offers, question, lang, action)
     data['answer'] = str(data.get('answer') or '').strip()[:2200]
     data['bullets'] = [str(x).strip()[:360] for x in (data.get('bullets') or []) if str(x).strip()][:6]
     comp = []
@@ -8102,9 +8154,13 @@ def _ai_shopping_call_sync(product, offers, question, lang, country, action):
             'price_note': str(x.get('price_note') or '').strip()[:120],
         })
     data['comparison'] = comp
-    data['suggested_questions'] = [str(x).strip()[:160] for x in (data.get('suggested_questions') or []) if str(x).strip()][:7]
+    # Keep UI navigation questions fixed in the frontend; model suggestions are ignored there.
+    data['suggested_questions'] = []
     data['sources'] = list(dict.fromkeys([u for u in (urls or {}).values() if _web_is_http_url(u)]))[:5]
     data['ok'] = True
+    # Never return a silent success to the sheet.
+    if not data['answer'] and not data['bullets'] and not data['comparison']:
+        return _ai_shopping_fallback(product, offers, question, lang, action)
     return data
 
 @app.post('/api/ai/observe-prices')
@@ -8177,8 +8233,8 @@ async def web_ai_price_alert(request: Request):
 async def web_ai_shopping(request: Request):
     if not AI_SHOPPING_ENABLED:
         return Response(content=json.dumps({'ok': False, 'error': 'ai_shopping_disabled'}), media_type='application/json', status_code=503)
-    if not _web_rate_allowed(request):
-        return Response(content=json.dumps({'ok': False, 'error': 'rate_limit'}), media_type='application/json', status_code=429)
+    if not _ai_rate_allowed(request):
+        return Response(content=json.dumps({'ok': False, 'error': 'ai_rate_limit'}), media_type='application/json', status_code=429)
     try:
         payload = await request.json()
     except Exception:
@@ -8400,6 +8456,20 @@ async def web_api_search_stream(request: Request):
                 yield _web_stream_event({'event': 'error', 'error': 'search_failed', 'elapsed_ms': int((time.time() - started) * 1000)})
     return StreamingResponse(_generator(), media_type='application/x-ndjson', headers={'Cache-Control': 'no-cache, no-transform', 'X-Accel-Buffering': 'no', 'Connection': 'keep-alive'})
 
+def _web_normalize_uploaded_image_bytes(image_bytes, mime):
+    mime = str(mime or 'image/jpeg').strip().lower()
+    if mime in ('image/jpeg', 'image/png', 'image/webp'):
+        return image_bytes, mime
+    if mime in ('image/heic', 'image/heif') or mime.endswith('/heic') or mime.endswith('/heif'):
+        if not WEB_HEIC_ENABLED or PILImage is None:
+            raise ValueError('heic_support_unavailable')
+        with PILImage.open(io.BytesIO(image_bytes)) as im:
+            im = im.convert('RGB')
+            out = io.BytesIO()
+            im.save(out, format='JPEG', quality=92, optimize=True)
+            return out.getvalue(), 'image/jpeg'
+    raise ValueError('unsupported_image_type')
+
 @app.post('/api/search/image/stream')
 async def web_api_image_search_stream(request: Request):
     if not WEB_API_ENABLED or not WEB_STREAM_ENABLED:
@@ -8414,8 +8484,6 @@ async def web_api_image_search_stream(request: Request):
     if not raw:
         return Response(content=json.dumps({'ok': False, 'error': 'missing_image'}), media_type='application/json', status_code=400)
     mime = str(payload.get('mime_type') or 'image/jpeg').strip().lower()
-    if mime not in ('image/jpeg', 'image/png', 'image/webp'):
-        return Response(content=json.dumps({'ok': False, 'error': 'unsupported_image_type'}), media_type='application/json', status_code=400)
     if ',' in raw and raw.lower().startswith('data:image/'):
         raw = raw.split(',', 1)[1]
     try:
@@ -8424,6 +8492,10 @@ async def web_api_image_search_stream(request: Request):
         return Response(content=json.dumps({'ok': False, 'error': 'invalid_image'}), media_type='application/json', status_code=400)
     if not image_bytes or len(image_bytes) > WEB_API_MAX_IMAGE_BYTES:
         return Response(content=json.dumps({'ok': False, 'error': 'image_too_large'}), media_type='application/json', status_code=413)
+    try:
+        image_bytes, mime = _web_normalize_uploaded_image_bytes(image_bytes, mime)
+    except ValueError as e:
+        return Response(content=json.dumps({'ok': False, 'error': str(e)}), media_type='application/json', status_code=400)
     image_b64 = base64.b64encode(image_bytes).decode('ascii')
     lang = _web_language(payload.get('lang'))
     country, country_source = await asyncio.to_thread(_web_resolve_request_country, request, payload.get('country'))
@@ -8646,8 +8718,6 @@ async def web_api_image_search(request: Request):
     if not raw:
         return Response(content=json.dumps({'ok': False, 'error': 'missing_image'}), media_type='application/json', status_code=400)
     mime = str(payload.get('mime_type') or 'image/jpeg').strip().lower()
-    if mime not in ('image/jpeg', 'image/png', 'image/webp'):
-        return Response(content=json.dumps({'ok': False, 'error': 'unsupported_image_type'}), media_type='application/json', status_code=400)
     if ',' in raw and raw.lower().startswith('data:image/'):
         raw = raw.split(',', 1)[1]
     try:
@@ -8656,6 +8726,10 @@ async def web_api_image_search(request: Request):
         return Response(content=json.dumps({'ok': False, 'error': 'invalid_image'}), media_type='application/json', status_code=400)
     if not image_bytes or len(image_bytes) > WEB_API_MAX_IMAGE_BYTES:
         return Response(content=json.dumps({'ok': False, 'error': 'image_too_large'}), media_type='application/json', status_code=413)
+    try:
+        image_bytes, mime = _web_normalize_uploaded_image_bytes(image_bytes, mime)
+    except ValueError as e:
+        return Response(content=json.dumps({'ok': False, 'error': str(e)}), media_type='application/json', status_code=400)
     image_b64 = base64.b64encode(image_bytes).decode('ascii')
     lang = _web_language(payload.get('lang'))
     country, country_source = await asyncio.to_thread(_web_resolve_request_country, request, payload.get('country'))
