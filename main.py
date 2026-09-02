@@ -9,7 +9,7 @@ from bs4 import BeautifulSoup
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept'], max_age=86400)
-BUILD_ID = 'v107.4-lean-size-aware-price-more-results-20260901'
+BUILD_ID = 'v107.12-web-density-images-ai-fix'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -6243,6 +6243,10 @@ WEB_PRODUCT_VERIFY_CACHE_TTL_SECONDS = max(300, int(os.environ.get('WEB_PRODUCT_
 WEB_PRODUCT_VERIFY_CACHE = {}
 WEB_PRODUCT_VERIFY_LOCK = threading.Lock()
 WEB_MATCH_WHATSAPP_EXACT = env_bool('WEB_MATCH_WHATSAPP_EXACT', True)
+# Dense web parity keeps the authoritative WhatsApp final set, but also streams store probes in parallel.
+WEB_TEXT_DENSE_PARITY = env_bool('WEB_TEXT_DENSE_PARITY', True)
+WEB_TEXT_IMAGE_ENRICH_ENABLED = env_bool('WEB_TEXT_IMAGE_ENRICH_ENABLED', True)
+WEB_TEXT_IMAGE_ENRICH_MAX_ROWS = max(1, min(20, int(os.environ.get('WEB_TEXT_IMAGE_ENRICH_MAX_ROWS', '14'))))
 WEB_LOCAL_MAX = LENS_DIRECT_LOCAL_MAX
 WEB_US_MAX = LENS_DIRECT_US_MAX
 WEB_CN_MAX = LENS_DIRECT_CN_MAX
@@ -6465,6 +6469,41 @@ def _web_best_card_image(primary_url='', page_url='', rescue_page=False):
             return _web_public_image_url(rescued)
     return ''
 
+def _web_enrich_text_result_image(row):
+    row = dict(row or {})
+    existing = str(row.get('image') or '').strip()
+    if existing and (not WEB_VERIFY_PRODUCT_IMAGE or _web_image_fetchable(existing)):
+        row['image'] = _web_public_image_url(_web_unproxy_image_url(existing)) if _web_is_http_url(_web_unproxy_image_url(existing)) else existing
+        return row
+    url = str(row.get('url') or row.get('link') or '').strip()
+    if not _web_is_http_url(url):
+        return row
+    try:
+        snap = _web_verified_page_snapshot(url)
+        image = _web_choose_verified_product_image(row, snap)
+        if not image:
+            image = _web_best_card_image('', url, rescue_page=True)
+        if image:
+            row['image'] = image
+    except Exception as e:
+        print(f"WEB TEXT IMAGE ENRICH ERR store={row.get('store')}: {e.__class__.__name__}")
+    return row
+
+def _web_enrich_text_result_images(rows):
+    rows = [dict(x or {}) for x in (rows or [])]
+    if not WEB_TEXT_IMAGE_ENRICH_ENABLED or not rows:
+        return rows
+    upto = min(len(rows), WEB_TEXT_IMAGE_ENRICH_MAX_ROWS)
+    out = list(rows)
+    with ThreadPoolExecutor(max_workers=min(8, upto)) as pool:
+        jobs = [(i, pool.submit(_web_enrich_text_result_image, rows[i])) for i in range(upto)]
+        for i, fut in jobs:
+            try:
+                out[i] = fut.result()
+            except Exception:
+                pass
+    return out
+
 def _web_build_text_items(txt, urls, lang, query):
     total_cap = max(1, WEB_LOCAL_MAX + WEB_US_MAX + WEB_CN_MAX)
     offers = text77_extract_store_offers(txt or '', limit=max(total_cap * 2, total_cap))
@@ -6528,6 +6567,9 @@ def _web_build_text_items(txt, urls, lang, query):
         title = _compact_ui_title(raw_title or query)
         store = _ui_plain_store_name(item.get('source') or '', item.get('link') or '') or U(lang, 'store')
         results.append({'market': _web_market_label(rank), 'market_rank': rank, 'country': rank_cc.get(rank, ''), 'flag': country_flag_emoji(rank_cc.get(rank, '')), 'store': store, 'title': title, 'price': shown_price, 'url': item.get('link') or '', 'image': item.get('thumbnail') or item.get('image') or '', 'match_score': round(_findzia_match_score(query, raw_title or title or query), 3)})
+    # Text results need a product photo just like Lens. Fetch product-page media in parallel;
+    # the fast web wave can still stream while this authoritative set is being enriched.
+    results = _web_enrich_text_result_images(results)
     return results
 
 def _web_brand_comparison(query, lang):
@@ -7569,7 +7611,7 @@ def _web_search_image_sync(image_b64, mime, caption, country, lang, progress_cal
             items = _web_build_lens_items(lens_direct, lang, caption)
             if items:
                 identity = (lens_direct.get('visual_identity') or lens_direct.get('relevance_target') or lens_direct.get('query') or caption or '').strip()
-                if WEB_MATCH_WHATSAPP_EXACT:
+                if WEB_MATCH_WHATSAPP_EXACT and (not WEB_TEXT_DENSE_PARITY):
                     print(f'ANDROID IMAGE TRUE PARITY: direct WhatsApp Lens set -> {len(items)} result(s); no WEB v89 supplement')
                     return {'ok': True, 'type': 'results', 'query': identity, 'market': market, 'results': items, 'source': 'whatsapp_direct_lens_exact'}
                 if WEB_IMAGE_SUPPLEMENT_WEAK_MARKETS and identity:
@@ -7814,6 +7856,8 @@ async def web_api_img_proxy(request: Request):
 # Product-aware Q&A, similar-item comparison, observed price history, price alerts.
 # =============================================================================
 AI_SHOPPING_ENABLED = env_bool('AI_SHOPPING_ENABLED', True)
+AI_SHOPPING_TIMEOUT_SECONDS = max(8.0, min(35.0, float(os.environ.get('AI_SHOPPING_TIMEOUT_SECONDS', '20'))))
+
 AI_SHOPPING_MAX_OFFERS = max(3, min(12, int(os.environ.get('AI_SHOPPING_MAX_OFFERS', '8'))))
 AI_SHOPPING_MAX_HISTORY_DAYS = max(30, min(730, int(os.environ.get('AI_SHOPPING_MAX_HISTORY_DAYS', '365'))))
 
@@ -8032,8 +8076,16 @@ def _ai_shopping_call_sync(product, offers, question, lang, country, action):
     try:
         raw, urls = _run_with_market(market, call_gemini, [{'text': prompt}], system=system, use_search=use_search)
     except Exception as e:
-        print(f'AI SHOPPING GEMINI ERR: {e}')
+        print(f'AI SHOPPING GEMINI ERR search={use_search}: {e}')
         raw, urls = ('', {})
+    # Grounded search can occasionally fail/quota/time out. Keep the copilot responsive
+    # with a non-search Gemini fallback rather than leaving the sheet spinning forever.
+    if not str(raw or '').strip() and use_search:
+        try:
+            raw, urls = _run_with_market(market, call_gemini, [{'text': prompt}], system=system, use_search=False)
+        except Exception as e:
+            print(f'AI SHOPPING GEMINI FALLBACK ERR: {e}')
+            raw, urls = ('', {})
     data = _ai_json_object(raw)
     if not data:
         data = {'answer': str(raw or '').strip()[:1800], 'bullets': [], 'comparison': [], 'suggested_questions': []}
@@ -8142,7 +8194,13 @@ async def web_ai_shopping(request: Request):
     lang = _web_language(payload.get('lang'))
     country = str(payload.get('country') or DEFAULT_COUNTRY)
     await asyncio.to_thread(_ai_record_observations, product, offers, country)
-    result = await asyncio.to_thread(_ai_shopping_call_sync, product, offers, question, lang, country, action)
+    try:
+        result = await asyncio.wait_for(
+            asyncio.to_thread(_ai_shopping_call_sync, product, offers, question, lang, country, action),
+            timeout=AI_SHOPPING_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        return Response(content=json.dumps({'ok': False, 'error': 'ai_timeout'}), media_type='application/json', status_code=504)
     result['product_key'] = _ai_product_key(product)
     return result
 
