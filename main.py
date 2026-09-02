@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-import os, re, time, base64, requests, json, asyncio, urllib.parse, hashlib, sqlite3, threading, io
+import os, re, time, base64, requests, json, asyncio, urllib.parse, hashlib, sqlite3, threading, io, ast
 from collections import deque, defaultdict
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from fastapi import FastAPI, Request, Response, BackgroundTasks
@@ -17,7 +17,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept'], max_age=86400)
-BUILD_ID = 'v107.15-market-price-ai-intelligence'
+BUILD_ID = 'v107.17-full-z-text-image-json-guard'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -6544,6 +6544,20 @@ def _web_enrich_text_result_images(rows):
                 pass
     return out
 
+def _web_has_product_image(row):
+    raw = _web_unproxy_image_url(str((row or {}).get('image') or '').strip())
+    return _web_is_http_url(raw)
+
+def _web_require_product_image_rows(rows):
+    rows = [dict(x or {}) for x in (rows or [])]
+    if not WEB_REQUIRE_PRODUCT_IMAGE:
+        return rows
+    kept = [row for row in rows if _web_has_product_image(row)]
+    dropped = len(rows) - len(kept)
+    if dropped:
+        print(f'WEB PRODUCT IMAGE REQUIRED: dropped={dropped} kept={len(kept)}')
+    return kept
+
 def _web_build_text_items(txt, urls, lang, query):
     total_cap = max(1, WEB_LOCAL_MAX + WEB_US_MAX + WEB_CN_MAX)
     offers = text77_extract_store_offers(txt or '', limit=max(total_cap * 2, total_cap))
@@ -6610,7 +6624,7 @@ def _web_build_text_items(txt, urls, lang, query):
     # Text results need a product photo just like Lens. Fetch product-page media in parallel;
     # the fast web wave can still stream while this authoritative set is being enriched.
     results = _web_enrich_text_result_images(results)
-    return results
+    return _web_require_product_image_rows(results)
 
 def _web_brand_comparison(query, lang):
     lang_name = language_name_en(lang)
@@ -6844,7 +6858,9 @@ def _web_fast_market_wave_sync(query, country, lang, rank):
     MARKET_CTX.value = market
     cap = {0: WEB_LOCAL_MAX, 1: WEB_US_MAX, 2: WEB_CN_MAX}.get(rank, 4)
     candidates = _market_presence_fallback(query, rank, limit=max(cap + 2, cap))
-    return _web_market_candidates_to_items(candidates, rank, lang, query)
+    rows = _web_market_candidates_to_items(candidates, rank, lang, query)
+    rows = _web_enrich_text_result_images(rows)
+    return _web_require_product_image_rows(rows)
 
 def _web_stream_store_specs(query, country, rank):
     market = _web_market(country)
@@ -7532,7 +7548,8 @@ def _web_store_probe_sync(query, country, lang, rank, label, domain, gl):
     if rank == 2 and domain and WEB_CHINA_ORGANIC_FIRST:
         candidates = _serpapi_china_global_site_request(q, label, domain, timeout_seconds=WEB_CHINA_ORGANIC_TIMEOUT)
         rows = _web_market_candidates_to_items(candidates, rank, lang, q)
-        return rows[:_web_marketplace_repeat_cap(domain)]
+        rows = _web_enrich_text_result_images(rows[:_web_marketplace_repeat_cap(domain)])
+        return _web_require_product_image_rows(rows)
     if not candidates:
         hl = country_search_hl(gl) if rank == 0 else 'en'
         if rank == 0 and SHOPPING_GEO_GUARD and (not _shopping_gl_supported(gl)):
@@ -7562,7 +7579,8 @@ def _web_store_probe_sync(query, country, lang, rank, label, domain, gl):
     cap = _web_marketplace_repeat_cap(domain)
     if cap > WEB_STREAM_RESULTS_PER_STORE and rows:
         print(f'WEB MARKETPLACE MULTI store={label} cap={cap} rows={len(rows)}')
-    return rows[:cap]
+    rows = _web_enrich_text_result_images(rows[:cap])
+    return _web_require_product_image_rows(rows)
 
 def _web_image_seed_sync(image_b64, mime, caption, country, lang):
     market = _web_market(country)
@@ -7660,6 +7678,80 @@ def _web_repair_text_price_outliers(rows, lang, market):
                 rows[idx]['price_pending'] = True
     return rows
 
+def _web_expand_text_results(query, country, lang, rows):
+    """Fill weak typed searches from direct Shopping market waves.
+
+    The AI text answer remains the relevance anchor, while structured Shopping
+    results add genuine local/US/China product cards with images when a market
+    came back sparse.
+    """
+    rows = _web_require_product_image_rows(rows)
+    caps = {0: WEB_LOCAL_MAX, 1: WEB_US_MAX, 2: WEB_CN_MAX}
+    counts = defaultdict(int)
+    for row in rows:
+        rank = row.get('market_rank')
+        if rank in caps:
+            counts[rank] += 1
+    wanted = [rank for rank in (0, 1, 2) if counts[rank] < caps[rank]]
+    if not wanted or not SERPAPI_API_KEY:
+        return rows
+
+    supplements = {}
+    with ThreadPoolExecutor(max_workers=len(wanted)) as pool:
+        futures = {
+            pool.submit(_web_fast_market_wave_sync, query, country, lang, rank): rank
+            for rank in wanted
+        }
+        for future, rank in list(futures.items()):
+            try:
+                supplements[rank] = future.result(timeout=WEB_STREAM_MARKET_TIMEOUT + 3) or []
+            except Exception as exc:
+                print(f'WEB TEXT EXPAND ERR rank={rank}: {exc.__class__.__name__}')
+                supplements[rank] = []
+
+    out = list(rows)
+    seen_urls = {
+        _canonical_result_url(str(row.get('url') or ''))
+        for row in out
+        if str(row.get('url') or '').strip()
+    }
+    merchant_counts = defaultdict(int)
+    for row in out:
+        try:
+            host = urllib.parse.urlparse(str(row.get('url') or '')).netloc.lower().replace('www.', '')
+        except Exception:
+            host = ''
+        if host:
+            merchant_counts[host] += 1
+
+    for rank in (0, 1, 2):
+        for row in supplements.get(rank, []):
+            if counts[rank] >= caps[rank]:
+                break
+            url = str(row.get('url') or '').strip()
+            canonical = _canonical_result_url(url)
+            try:
+                host = urllib.parse.urlparse(url).netloc.lower().replace('www.', '')
+            except Exception:
+                host = ''
+            if not canonical or canonical in seen_urls or not host:
+                continue
+            if merchant_counts[host] >= RESULTS_PER_STORE_MAX:
+                continue
+            if not _web_has_product_image(row):
+                continue
+            out.append(row)
+            seen_urls.add(canonical)
+            merchant_counts[host] += 1
+            counts[rank] += 1
+
+    out.sort(key=lambda row: (
+        int(row.get('market_rank', 99)),
+        -float(row.get('match_score') or 0),
+        0 if _web_row_has_numeric_price(row) else 1,
+    ))
+    return out[:sum(caps.values())]
+
 def _web_search_text_sync(query, country, lang, selected_option='', original_query='', force_specific=False):
     market = _web_market(country)
     MARKET_CTX.value = market
@@ -7694,6 +7786,7 @@ def _web_search_text_sync(query, country, lang, selected_option='', original_que
         return {'ok': True, 'type': 'results', 'query': q, 'market': market, 'results': []}
     results = _web_build_text_items(txt, urls, lang, q)
     results = _web_repair_text_price_outliers(results, lang, market)
+    results = _web_expand_text_results(q, country, lang, results)
     return {'ok': True, 'type': 'results', 'query': q, 'market': market, 'results': results}
 
 def _web_search_image_sync(image_b64, mime, caption, country, lang, progress_callback=None):
@@ -7949,11 +8042,11 @@ async def web_api_img_proxy(request: Request):
 
 
 # =============================================================================
-# FINDZIA AI FOR SHOPPING · WEB COPILOT v107.10
+# FINDZIA AI FOR SHOPPING · WEB COPILOT v107.16
 # Product-aware Q&A, similar-item comparison, observed price history, price alerts.
 # =============================================================================
 AI_SHOPPING_ENABLED = env_bool('AI_SHOPPING_ENABLED', True)
-AI_SHOPPING_TIMEOUT_SECONDS = max(8.0, min(35.0, float(os.environ.get('AI_SHOPPING_TIMEOUT_SECONDS', '20'))))
+AI_SHOPPING_TIMEOUT_SECONDS = max(8.0, min(35.0, float(os.environ.get('AI_SHOPPING_TIMEOUT_SECONDS', '32'))))
 
 AI_SHOPPING_MAX_OFFERS = max(3, min(12, int(os.environ.get('AI_SHOPPING_MAX_OFFERS', '8'))))
 AI_SHOPPING_MAX_HISTORY_DAYS = max(30, min(730, int(os.environ.get('AI_SHOPPING_MAX_HISTORY_DAYS', '365'))))
@@ -8147,72 +8240,119 @@ def _ai_history(product, window_days, country=''):
             'points': points, 'summary': summary, 'window_days': days}
 
 def _ai_json_object(raw):
-    """Parse Gemini JSON defensively, including fenced or double-encoded JSON."""
+    """Parse Gemini JSON defensively without ever exposing raw JSON to the UI."""
     text = str(raw or '').strip()
     if not text:
         return {}
-    text = re.sub(r'^```(?:json)?\s*', '', text, flags=re.I | re.S)
-    text = re.sub(r'\s*```$', '', text, flags=re.I | re.S).strip()
 
-    def _coerce(value, depth=0):
-        if depth > 2:
-            return {}
-        if isinstance(value, dict):
-            # Gemini can occasionally put the whole JSON object inside "answer".
-            ans = str(value.get('answer') or '').strip()
-            if ans:
-                nested_text = re.sub(r'^```(?:json)?\s*', '', ans, flags=re.I | re.S)
-                nested_text = re.sub(r'\s*```$', '', nested_text, flags=re.I | re.S).strip()
-                if nested_text.startswith('{'):
-                    try:
-                        nested = _coerce(json.loads(nested_text), depth + 1)
-                        if nested:
-                            merged = dict(value)
-                            merged.update(nested)
-                            value = merged
-                    except Exception:
-                        value['answer'] = nested_text
-                else:
-                    value['answer'] = nested_text
-            return value
-        if isinstance(value, str):
-            s = value.strip()
-            s = re.sub(r'^```(?:json)?\s*', '', s, flags=re.I | re.S)
-            s = re.sub(r'\s*```$', '', s, flags=re.I | re.S).strip()
+    def _strip_fences(s):
+        s = str(s or '').strip().lstrip('\ufeff')
+        s = re.sub(r'^```(?:json|javascript|js)?\s*', '', s, flags=re.I | re.S)
+        s = re.sub(r'\s*```$', '', s, flags=re.I | re.S).strip()
+        return s
+
+    def _candidate_variants(s):
+        s = _strip_fences(s)
+        out = [s]
+        first, last = s.find('{'), s.rfind('}')
+        if first >= 0 and last > first:
+            out.append(s[first:last + 1])
+        out += [re.sub(r',\s*([}\]])', r'\1', x) for x in list(out)]
+        seen, unique = set(), []
+        for x in out:
+            x = x.strip()
+            if x and x not in seen:
+                seen.add(x)
+                unique.append(x)
+        return unique
+
+    def _load_object(s):
+        for candidate in _candidate_variants(s):
             try:
-                return _coerce(json.loads(s), depth + 1)
+                value = json.loads(candidate)
+                if isinstance(value, dict):
+                    return value
+                if isinstance(value, str):
+                    nested = _load_object(value)
+                    if nested:
+                        return nested
             except Exception:
-                return {}
+                pass
+
+            if candidate.startswith('{') and candidate.endswith('}'):
+                try:
+                    value = ast.literal_eval(candidate)
+                    if isinstance(value, dict):
+                        return value
+                except Exception:
+                    pass
         return {}
 
-    try:
-        obj = _coerce(json.loads(text))
-        if obj:
-            return obj
-    except Exception:
-        pass
-    m = re.search(r'\{.*\}', text, re.S)
-    if m:
+    def _coerce(value, depth=0):
+        if depth > 3 or not isinstance(value, dict):
+            return {}
+        value = dict(value)
+        ans = value.get('answer')
+        if isinstance(ans, str):
+            nested = _load_object(ans)
+            if nested:
+                merged = dict(value)
+                merged.update(_coerce(nested, depth + 1) or nested)
+                value = merged
+            else:
+                value['answer'] = _strip_fences(ans)
+        return value
+
+    parsed = _load_object(text)
+    if parsed:
+        return _coerce(parsed)
+
+    # A nearly-valid model object must never be sent to the UI as visible JSON.
+    # Recover only its quoted answer; otherwise the normal safe fallback runs.
+    match = re.search(r'["\']answer["\']\s*:\s*"((?:\\.|[^"\\])*)"', text, flags=re.I | re.S)
+    if match:
         try:
-            return _coerce(json.loads(m.group(0)))
+            answer = json.loads('"' + match.group(1) + '"')
         except Exception:
-            pass
+            answer = match.group(1).replace('\\n', '\n').replace('\\"', '"')
+        if str(answer or '').strip():
+            return {
+                'answer': str(answer).strip(),
+                'bullets': [],
+                'comparison': [],
+                'ratings': {},
+                'suggested_questions': [],
+            }
     return {}
 
 def _ai_shopping_prompt(product, offers, question, lang, action):
     target = _AI_LANG_NAMES.get(lang, 'English')
+    language_rule = (
+        'Use clear Modern Standard Arabic (العربية الفصحى المبسطة). '
+        'Never use Kuwaiti, Gulf, or colloquial Arabic wording.'
+        if lang == 'ar' else ''
+    )
     product_text = json.dumps(product or {}, ensure_ascii=False)
     offer_text = json.dumps(list(offers or [])[:AI_SHOPPING_MAX_OFFERS], ensure_ascii=False)
     action = action or 'qa'
     system = f'''You are Findzia AI for shopping, a product-aware shopping copilot.
-Answer in {target}. Be concise, practical, and specific to the exact product context supplied. Think like a senior shopping expert: first identify the user's decision, then answer only what helps that decision.
-Never invent compatibility, warranty, customer sentiment, price history, availability, or specifications. Distinguish facts from inference. If current web evidence is uncertain, say so briefly. Use CURRENT FINDZIA OFFERS as the authoritative live price context and never replace a Findzia-observed price with an unrelated web price.
+Answer in {target}. {language_rule}
+Be concise, practical, and specific to the exact product context supplied. Think like a senior shopping expert: first identify the user's decision, then answer only what helps that decision.
+Never invent compatibility, warranty, customer sentiment, price history, availability, specifications, review scores, or review counts. Distinguish facts from inference. If current web evidence is uncertain, say so briefly. Use CURRENT FINDZIA OFFERS as the authoritative live price context and never replace a Findzia-observed price with an unrelated web price.
 Brand/model/SKU names must not be translated. Do not output markdown tables.
-Return ONLY valid JSON with this exact shape:
-{{"answer":"direct answer in 1-3 compact paragraphs, usually under 120 words","bullets":["0-5 concise bullets"],"comparison":[{{"name":"product","why":"key difference / best use","best_for":"short","price_note":"optional"}}],"suggested_questions":["3-6 short follow-up shopping questions"]}}
+Return ONLY valid JSON. Do not wrap JSON in markdown or quotes. Do not add trailing commas.
+Use this exact shape:
+{{"answer":"direct answer in 1-3 compact paragraphs, usually under 120 words","bullets":["0-5 concise bullets"],"comparison":[{{"name":"product","why":"key difference / best use","best_for":"short","price_note":"optional"}}],"ratings":{{"expert_score":null,"expert_source":"","customer_score":null,"customer_count":null,"customer_source":""}},"suggested_questions":["3-6 short follow-up shopping questions"]}}
+Rating rules:
+- All scores are on a 0-5 scale.
+- expert_score is allowed ONLY when an established professional/editorial review explicitly provides a numeric rating or score. Normalize that explicit score to 5. Otherwise return null.
+- expert_source must be the exact publication/site name tied to that explicit professional score.
+- customer_score is allowed ONLY when a reliable aggregate customer rating is visible in grounded evidence. Otherwise return null.
+- customer_count must be a verified review count when visible; otherwise null.
+- Never convert general positive/negative prose into stars.
 For action=suggestions, answer and bullets may be empty and suggested_questions must contain 5-7 useful questions tailored to this product.
 For action=compare, compare the current product with 2-4 genuinely similar products or variants, prioritizing the same brand/ecosystem when relevant. Each comparison.name MUST be a clean, searchable commercial product name (brand + model/variant), with no commentary appended, because the UI turns it into a Findzia search link.
-For reviews/customer questions, summarize reliable themes; do not fabricate ratings or quote unverifiable reviews.'''
+For action=reviews, use grounded web evidence, summarize recurring customer themes, and include a verified expert/customer star rating only when the rules above are satisfied.'''
     user = f'''ACTION: {action}
 CURRENT PRODUCT: {product_text}
 CURRENT FINDZIA OFFERS: {offer_text}
@@ -8226,46 +8366,98 @@ def _ai_shopping_fallback(product, offers, question, lang, action):
     is_ar = lang == 'ar'
     if action == 'compare':
         if is_ar:
-            answer = f'تعذر التحقق من بدائل موثوقة لـ {title} الآن. لن أذكر موديلات غير مؤكدة. جرّب مرة أخرى بعد قليل.'
+            answer = f'تعذر التحقق من بدائل موثوقة لـ {title} الآن. لن أذكر طرازات غير مؤكدة. حاول مرة أخرى بعد قليل.'
         else:
             answer = f'I could not verify reliable alternatives for {title} right now, so I will not invent models. Please try again shortly.'
-    elif re.search(r'customer|review|rating|reviews|عملاء|مراجعات|تقييم', q, re.I):
+    elif action == 'reviews' or re.search(r'customer|review|rating|reviews|عملاء|مراجعات|تقييم', q, re.I):
         if is_ar:
-            answer = f'تعذر التحقق من آراء العملاء الموثوقة عن {title} الآن. لن أخمّن التقييمات أو المراجعات.'
+            answer = f'تعذر التحقق من آراء العملاء أو تقييمات الخبراء الموثوقة عن {title} الآن، لذلك لن أعرض تقييمًا أو عدد مراجعات غير مؤكد.'
         else:
-            answer = f'I could not verify reliable customer feedback for {title} right now, so I will not guess ratings or reviews.'
+            answer = f'I could not verify reliable customer feedback or expert ratings for {title} right now, so I will not guess ratings or review counts.'
     else:
         if is_ar:
-            answer = f'{title}' + (f' معروض حالياً في Findzia بسعر {price}.' if price else '.') + ' قبل الشراء تأكد من الموديل/المقاس/التوافق المطلوب. أقدر أعيد فحص التفاصيل عندما يكون البحث الخارجي متاحاً.'
+            answer = f'{title}' + (f' معروض حاليًا في Findzia بسعر {price}.' if price else '.') + ' قبل الشراء، تأكد من الطراز أو المقاس أو التوافق المطلوب. يمكنني إعادة فحص التفاصيل عندما يصبح البحث الخارجي متاحًا.'
         else:
             answer = f'{title}' + (f' is currently shown by Findzia at {price}.' if price else '.') + ' Before buying, confirm the exact model, size, or compatibility you need. I can re-check the product details when external lookup is available.'
-    return {'ok': True, 'answer': answer, 'bullets': [], 'comparison': [], 'suggested_questions': [], 'sources': [], 'fallback': True}
+    return {
+        'ok': True,
+        'answer': answer,
+        'bullets': [],
+        'comparison': [],
+        'ratings': {
+            'expert_score': None,
+            'expert_source': '',
+            'customer_score': None,
+            'customer_count': None,
+            'customer_source': '',
+        },
+        'suggested_questions': [],
+        'sources': [],
+        'fallback': True,
+    }
 
 def _ai_shopping_call_sync(product, offers, question, lang, country, action):
     system, prompt = _ai_shopping_prompt(product, offers, question, lang, action)
     market = _web_market(country)
     qlow = str(question or '').lower()
-    # Keep normal Q&A fast. Use grounded search only where outside evidence is essential.
-    use_search = action == 'compare' or bool(re.search(r'customer|review|rating|reviews|عملاء|مراجعات|تقييم|alternative|similar|بديل|مشابه', qlow, re.I))
+
+    use_search = (
+        action in ('compare', 'reviews')
+        or bool(re.search(r'customer|review|rating|reviews|عملاء|مراجعات|تقييم|alternative|similar|بديل|مشابه', qlow, re.I))
+    )
+
     raw, urls = ('', {})
     try:
-        raw, urls = _run_with_market(market, call_gemini, [{'text': prompt}], system=system, use_search=use_search)
+        raw, urls = _run_with_market(
+            market,
+            call_gemini,
+            [{'text': prompt}],
+            system=system,
+            use_search=use_search,
+        )
     except Exception as e:
         print(f'AI SHOPPING GEMINI ERR search={use_search}: {e}')
-    # If grounded search fails, retry once without Search for responsiveness.
-    if not str(raw or '').strip() and use_search:
+
+    if not str(raw or '').strip() and use_search and action != 'reviews':
         try:
-            raw, urls = _run_with_market(market, call_gemini, [{'text': prompt}], system=system, use_search=False)
+            raw, urls = _run_with_market(
+                market,
+                call_gemini,
+                [{'text': prompt}],
+                system=system,
+                use_search=False,
+            )
         except Exception as e:
             print(f'AI SHOPPING GEMINI FALLBACK ERR: {e}')
             raw, urls = ('', {})
+
     data = _ai_json_object(raw)
-    if not data and str(raw or '').strip():
-        data = {'answer': str(raw or '').strip()[:1800], 'bullets': [], 'comparison': [], 'suggested_questions': []}
+
+    raw_text = str(raw or '').strip()
+    if not data and raw_text:
+        looks_structured = (
+            raw_text.startswith('{')
+            or bool(re.search(r'["\'](?:answer|bullets|comparison|ratings)["\']\s*:', raw_text, re.I))
+        )
+        if not looks_structured:
+            data = {
+                'answer': raw_text[:1800],
+                'bullets': [],
+                'comparison': [],
+                'ratings': {},
+                'suggested_questions': [],
+            }
+
     if not data:
         return _ai_shopping_fallback(product, offers, question, lang, action)
+
     data['answer'] = str(data.get('answer') or '').strip()[:2200]
-    data['bullets'] = [str(x).strip()[:360] for x in (data.get('bullets') or []) if str(x).strip()][:6]
+    data['bullets'] = [
+        str(x).strip()[:360]
+        for x in (data.get('bullets') or [])
+        if str(x).strip()
+    ][:6]
+
     comp = []
     for x in (data.get('comparison') or [])[:5]:
         if not isinstance(x, dict):
@@ -8277,13 +8469,48 @@ def _ai_shopping_call_sync(product, offers, question, lang, country, action):
             'price_note': str(x.get('price_note') or '').strip()[:120],
         })
     data['comparison'] = comp
-    # Keep UI navigation questions fixed in the frontend; model suggestions are ignored there.
+
+    def _score5(value):
+        try:
+            n = float(value)
+        except Exception:
+            return None
+        if not (0 < n <= 5):
+            return None
+        return round(n, 2)
+
+    ratings_raw = data.get('ratings') if isinstance(data.get('ratings'), dict) else {}
+    grounded_reviews = bool(urls)
+    expert_score = _score5(ratings_raw.get('expert_score')) if grounded_reviews else None
+    customer_score = _score5(ratings_raw.get('customer_score')) if grounded_reviews else None
+
+    customer_count = ratings_raw.get('customer_count')
+    try:
+        customer_count = int(str(customer_count).replace(',', '').strip()) if customer_count not in (None, '') else None
+        if customer_count is not None and customer_count < 0:
+            customer_count = None
+    except Exception:
+        customer_count = None
+
+    data['ratings'] = {
+        'expert_score': expert_score,
+        'expert_source': str(ratings_raw.get('expert_source') or '').strip()[:120] if expert_score is not None else '',
+        'customer_score': customer_score,
+        'customer_count': customer_count if customer_score is not None else None,
+        'customer_source': str(ratings_raw.get('customer_source') or '').strip()[:120] if customer_score is not None else '',
+    }
+
     data['suggested_questions'] = []
-    data['sources'] = list(dict.fromkeys([u for u in (urls or {}).values() if _web_is_http_url(u)]))[:5]
+    data['sources'] = list(dict.fromkeys([
+        u for u in (urls or {}).values() if _web_is_http_url(u)
+    ]))[:5]
     data['ok'] = True
-    # Never return a silent success to the sheet.
-    if not data['answer'] and not data['bullets'] and not data['comparison']:
+
+    if not data['answer'] and not data['bullets'] and not data['comparison'] and not any(
+        data['ratings'].get(k) is not None for k in ('expert_score', 'customer_score')
+    ):
         return _ai_shopping_fallback(product, offers, question, lang, action)
+
     return data
 
 @app.post('/api/ai/observe-prices')
@@ -8412,7 +8639,7 @@ async def web_ai_shopping(request: Request):
     offers = payload.get('offers') if isinstance(payload.get('offers'), list) else []
     question = str(payload.get('question') or '').strip()[:1200]
     action = str(payload.get('action') or 'qa').strip().lower()
-    if action not in ('suggestions', 'qa', 'compare'):
+    if action not in ('suggestions', 'qa', 'compare', 'reviews'):
         action = 'qa'
     lang = _web_language(payload.get('lang'))
     country = str(payload.get('country') or DEFAULT_COUNTRY)
