@@ -6269,6 +6269,8 @@ WEB_PRICE_ENRICH_SHOPPING_FALLBACK = env_bool('WEB_PRICE_ENRICH_SHOPPING_FALLBAC
 WEB_PRICE_ENRICH_SHOPPING_MAX = max(0, min(10, int(os.environ.get('WEB_PRICE_ENRICH_SHOPPING_MAX', '6'))))
 WEB_API_MAX_QUERY_CHARS = max(40, min(500, int(os.environ.get('WEB_API_MAX_QUERY_CHARS', '220'))))
 WEB_API_MAX_IMAGE_BYTES = max(512000, min(12 * 1024 * 1024, int(os.environ.get('WEB_API_MAX_IMAGE_BYTES', str(6 * 1024 * 1024)))))
+# Raw iPhone HEIC uploads may be larger before server-side JPEG conversion.
+WEB_API_RAW_IMAGE_MAX_BYTES = max(WEB_API_MAX_IMAGE_BYTES, min(20 * 1024 * 1024, int(os.environ.get('WEB_API_RAW_IMAGE_MAX_BYTES', str(16 * 1024 * 1024)))))
 WEB_API_RATE_PER_MINUTE = max(5, min(120, int(os.environ.get('WEB_API_RATE_PER_MINUTE', '30'))))
 WEB_STREAM_ENABLED = env_bool('WEB_STREAM_ENABLED', True)
 WEB_IMAGE_SUPPLEMENT_WEAK_MARKETS = env_bool('WEB_IMAGE_SUPPLEMENT_WEAK_MARKETS', True)
@@ -8058,20 +8060,54 @@ def _ai_history(product, window_days, country=''):
             'points': points, 'summary': summary, 'window_days': days}
 
 def _ai_json_object(raw):
+    """Parse Gemini JSON defensively, including fenced or double-encoded JSON."""
     text = str(raw or '').strip()
     if not text:
         return {}
-    text = re.sub(r'^```(?:json)?\s*|\s*```$', '', text, flags=re.I | re.S).strip()
+    text = re.sub(r'^```(?:json)?\s*', '', text, flags=re.I | re.S)
+    text = re.sub(r'\s*```$', '', text, flags=re.I | re.S).strip()
+
+    def _coerce(value, depth=0):
+        if depth > 2:
+            return {}
+        if isinstance(value, dict):
+            # Gemini can occasionally put the whole JSON object inside "answer".
+            ans = str(value.get('answer') or '').strip()
+            if ans:
+                nested_text = re.sub(r'^```(?:json)?\s*', '', ans, flags=re.I | re.S)
+                nested_text = re.sub(r'\s*```$', '', nested_text, flags=re.I | re.S).strip()
+                if nested_text.startswith('{'):
+                    try:
+                        nested = _coerce(json.loads(nested_text), depth + 1)
+                        if nested:
+                            merged = dict(value)
+                            merged.update(nested)
+                            value = merged
+                    except Exception:
+                        value['answer'] = nested_text
+                else:
+                    value['answer'] = nested_text
+            return value
+        if isinstance(value, str):
+            s = value.strip()
+            s = re.sub(r'^```(?:json)?\s*', '', s, flags=re.I | re.S)
+            s = re.sub(r'\s*```$', '', s, flags=re.I | re.S).strip()
+            try:
+                return _coerce(json.loads(s), depth + 1)
+            except Exception:
+                return {}
+        return {}
+
     try:
-        obj = json.loads(text)
-        return obj if isinstance(obj, dict) else {}
+        obj = _coerce(json.loads(text))
+        if obj:
+            return obj
     except Exception:
         pass
     m = re.search(r'\{.*\}', text, re.S)
     if m:
         try:
-            obj = json.loads(m.group(0))
-            return obj if isinstance(obj, dict) else {}
+            return _coerce(json.loads(m.group(0)))
         except Exception:
             pass
     return {}
@@ -8465,8 +8501,13 @@ def _web_normalize_uploaded_image_bytes(image_bytes, mime):
             raise ValueError('heic_support_unavailable')
         with PILImage.open(io.BytesIO(image_bytes)) as im:
             im = im.convert('RGB')
+            # iPhone HEIC files can be very large. Resize before JPEG encoding so
+            # Lens receives a fast, web-sized image rather than the full camera original.
+            max_side = 1800
+            if max(im.size) > max_side:
+                im.thumbnail((max_side, max_side))
             out = io.BytesIO()
-            im.save(out, format='JPEG', quality=92, optimize=True)
+            im.save(out, format='JPEG', quality=90, optimize=True)
             return out.getvalue(), 'image/jpeg'
     raise ValueError('unsupported_image_type')
 
@@ -8490,12 +8531,14 @@ async def web_api_image_search_stream(request: Request):
         image_bytes = base64.b64decode(raw, validate=True)
     except Exception:
         return Response(content=json.dumps({'ok': False, 'error': 'invalid_image'}), media_type='application/json', status_code=400)
-    if not image_bytes or len(image_bytes) > WEB_API_MAX_IMAGE_BYTES:
+    if not image_bytes or len(image_bytes) > WEB_API_RAW_IMAGE_MAX_BYTES:
         return Response(content=json.dumps({'ok': False, 'error': 'image_too_large'}), media_type='application/json', status_code=413)
     try:
         image_bytes, mime = _web_normalize_uploaded_image_bytes(image_bytes, mime)
     except ValueError as e:
         return Response(content=json.dumps({'ok': False, 'error': str(e)}), media_type='application/json', status_code=400)
+    if len(image_bytes) > WEB_API_MAX_IMAGE_BYTES:
+        return Response(content=json.dumps({'ok': False, 'error': 'image_too_large_after_convert'}), media_type='application/json', status_code=413)
     image_b64 = base64.b64encode(image_bytes).decode('ascii')
     lang = _web_language(payload.get('lang'))
     country, country_source = await asyncio.to_thread(_web_resolve_request_country, request, payload.get('country'))
@@ -8724,12 +8767,14 @@ async def web_api_image_search(request: Request):
         image_bytes = base64.b64decode(raw, validate=True)
     except Exception:
         return Response(content=json.dumps({'ok': False, 'error': 'invalid_image'}), media_type='application/json', status_code=400)
-    if not image_bytes or len(image_bytes) > WEB_API_MAX_IMAGE_BYTES:
+    if not image_bytes or len(image_bytes) > WEB_API_RAW_IMAGE_MAX_BYTES:
         return Response(content=json.dumps({'ok': False, 'error': 'image_too_large'}), media_type='application/json', status_code=413)
     try:
         image_bytes, mime = _web_normalize_uploaded_image_bytes(image_bytes, mime)
     except ValueError as e:
         return Response(content=json.dumps({'ok': False, 'error': str(e)}), media_type='application/json', status_code=400)
+    if len(image_bytes) > WEB_API_MAX_IMAGE_BYTES:
+        return Response(content=json.dumps({'ok': False, 'error': 'image_too_large_after_convert'}), media_type='application/json', status_code=413)
     image_b64 = base64.b64encode(image_bytes).decode('ascii')
     lang = _web_language(payload.get('lang'))
     country, country_source = await asyncio.to_thread(_web_resolve_request_country, request, payload.get('country'))
