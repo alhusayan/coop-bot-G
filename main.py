@@ -17,7 +17,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept'], max_age=86400)
-BUILD_ID = 'v107.22-lens-sparse-fill-turbo'
+BUILD_ID = 'v107.23-ios-instant-progress'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -1599,6 +1599,28 @@ def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=Fal
         fast_deadline = fast_started + (LENS_TURBO_MAX_WAIT_SECONDS if USE_FAST_LENS_PIPELINE else min(LENS_FAST_READY_SECONDS, LENS_TOTAL_TIMEOUT_SECONDS))
         enough_fast = False
         last_progress_size = 0
+
+        def _emit_progress_snapshot(reason):
+            """Publish usable Lens rows regardless of which fast-path produced them."""
+            nonlocal last_progress_size
+            if not (light and progress_callback):
+                return False
+            preview_allowed = [dict(x) for x in merged if result_market_rank(x) != 99]
+            if len(preview_allowed) <= last_progress_size:
+                return False
+            preview_counts = {r: sum((1 for x in preview_allowed if result_market_rank(x) == r)) for r in (0, 1, 2)}
+            if len(preview_allowed) < ANDROID_IMAGE_PROGRESSIVE_MIN_RESULTS or preview_counts[0] < ANDROID_IMAGE_PROGRESSIVE_MIN_LOCAL:
+                return False
+            try:
+                preview_allowed.sort(key=lambda m: (result_market_rank(m), 0 if m.get('exact') else 1, 0 if m.get('section') == 'visual_matches' else 1, int(m.get('position') or 999)))
+                progress_callback({'aliases': [], 'matches': preview_allowed, 'query': (query_hint or (preview_allowed[0].get('title') if preview_allowed else '') or '').strip(), 'visual_identity': '', 'chosen': preview_allowed[0] if preview_allowed else {}, 'signature': {}, 'progressive': True})
+                last_progress_size = len(preview_allowed)
+                print(f'LENS PROGRESSIVE SNAPSHOT reason={reason} raw={len(preview_allowed)} counts={preview_counts} elapsed={time.monotonic() - fast_started:.1f}s')
+                return True
+            except Exception as e:
+                print(f'LENS PROGRESSIVE CALLBACK ERR reason={reason}: {e}')
+                return False
+
         while pending and time.monotonic() < fast_deadline:
             remaining_fast = max(0.0, fast_deadline - time.monotonic())
             just_done, pending = wait(pending, timeout=min(0.35, remaining_fast), return_when=FIRST_COMPLETED)
@@ -1619,17 +1641,7 @@ def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=Fal
                 enough_fast = useful >= max(6, LENS_MIN_MATCHES)
             else:
                 enough_fast = rank_counts[0] >= 2 and rank_counts[1] >= 1 and (rank_counts[2] >= 1) and (len(merged) >= max(5, LENS_MIN_MATCHES))
-            if light and progress_callback and (last_progress_size == 0) and (len(merged) > last_progress_size):
-                preview_allowed = [dict(x) for x in merged if result_market_rank(x) != 99]
-                preview_counts = {r: sum((1 for x in preview_allowed if result_market_rank(x) == r)) for r in (0, 1, 2)}
-                if len(preview_allowed) >= ANDROID_IMAGE_PROGRESSIVE_MIN_RESULTS and preview_counts[0] >= ANDROID_IMAGE_PROGRESSIVE_MIN_LOCAL:
-                    try:
-                        preview_allowed.sort(key=lambda m: (result_market_rank(m), 0 if m.get('exact') else 1, 0 if m.get('section') == 'visual_matches' else 1, int(m.get('position') or 999)))
-                        progress_callback({'aliases': [], 'matches': preview_allowed, 'query': (query_hint or (preview_allowed[0].get('title') if preview_allowed else '') or '').strip(), 'visual_identity': '', 'chosen': preview_allowed[0] if preview_allowed else {}, 'signature': {}, 'progressive': True})
-                        last_progress_size = len(merged)
-                        print(f'LENS PROGRESSIVE SNAPSHOT raw={len(preview_allowed)} counts={preview_counts} elapsed={time.monotonic() - fast_started:.1f}s')
-                    except Exception as e:
-                        print(f'LENS PROGRESSIVE CALLBACK ERR: {e}')
+            _emit_progress_snapshot('fast_pass')
             if USE_FAST_LENS_PIPELINE and enough_fast:
                 print(f'LENS TURBO EARLY RETURN READY useful={sum(rank_counts.values())} elapsed={time.monotonic() - fast_started:.2f}s')
                 break
@@ -1657,12 +1669,15 @@ def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=Fal
                 rank_counts = {r: sum((1 for x in merged if result_market_rank(x) == r)) for r in (0, 1, 2)}
                 enough_fast = sum(rank_counts.values()) >= max(1, LENS_MIN_MATCHES)
                 print(f'LENS ZERO-RACE RESCUED useful={sum(rank_counts.values())} grace_elapsed={time.monotonic() - rescue_started:.2f}s')
+                _emit_progress_snapshot('zero_race')
             else:
                 print(f'LENS ZERO-RACE EMPTY after_grace={LENS_TURBO_EMPTY_GRACE_SECONDS}s')
-        # The first snapshot is already on its way to Android. If it is usable
-        # but sparse, give one late products pass a very small enrichment window
-        # before the authoritative final snapshot. This does not delay first paint.
+        # Send the usable first screen before waiting for sparse enrichment.
+        # The previous implementation assumed this snapshot had already been
+        # emitted, which was false when the rows arrived at the fast deadline.
         sparse_useful = sum(1 for x in merged if result_market_rank(x) in (0, 1, 2))
+        if USE_FAST_LENS_PIPELINE and sparse_useful:
+            _emit_progress_snapshot('pre_sparse')
         if USE_FAST_LENS_PIPELINE and 0 < sparse_useful < LENS_TURBO_STRONG_RESULT_TARGET and pending:
             sparse_started = time.monotonic()
             sparse_deadline = sparse_started + LENS_TURBO_SPARSE_GRACE_SECONDS
@@ -1680,6 +1695,7 @@ def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=Fal
                     except Exception as e:
                         print(f'GOOGLE LENS SPARSE FUTURE ERR type={lens_type} country={country}: {e}')
                 sparse_useful = sum(1 for x in merged if result_market_rank(x) in (0, 1, 2))
+                _emit_progress_snapshot('sparse_fill')
                 if sparse_useful >= LENS_TURBO_STRONG_RESULT_TARGET:
                     break
             print(f'LENS SPARSE FILL useful={before_sparse}->{sparse_useful} grace_elapsed={time.monotonic() - sparse_started:.2f}s')
@@ -9325,12 +9341,32 @@ async def web_api_image_search_stream(request: Request):
                 final_task = asyncio.create_task(asyncio.to_thread(_web_search_image_sync, image_b64, mime, caption, country, lang, _lens_progress_callback if ANDROID_IMAGE_PROGRESSIVE else None))
                 preview_keys = set()
                 query_sent = False
-                while not final_task.done():
-                    try:
-                        partial_lens = await asyncio.wait_for(progress_queue.get(), timeout=1.0)
-                    except asyncio.TimeoutError:
+                progress_get_task = None
+                while True:
+                    if final_task.done():
+                        break
+                    if progress_get_task is None:
+                        progress_get_task = asyncio.create_task(progress_queue.get())
+                    ready, _ = await asyncio.wait(
+                        {final_task, progress_get_task},
+                        timeout=1.0,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if not ready:
                         yield _web_stream_event({'event': 'status', 'stage': 'whatsapp_image_engine', 'elapsed_ms': int((time.time() - started) * 1000)})
                         continue
+                    final_ready = final_task in ready
+                    if progress_get_task not in ready:
+                        if final_ready:
+                            progress_get_task.cancel()
+                            await asyncio.gather(progress_get_task, return_exceptions=True)
+                            progress_get_task = None
+                            break
+                        continue
+                    try:
+                        partial_lens = progress_get_task.result()
+                    finally:
+                        progress_get_task = None
                     try:
                         preview_items = await asyncio.to_thread(_run_with_market, market_snapshot, _web_build_lens_items, partial_lens, lang, caption)
                     except Exception as e:
@@ -9358,6 +9394,11 @@ async def web_api_image_search_stream(request: Request):
                             await asyncio.sleep(0.003)
                         if emitted_now:
                             print(f'ANDROID PROGRESSIVE PREVIEW sent={emitted_now} total_preview={len(preview_keys)} elapsed={time.time() - started:.1f}s')
+                    if final_ready:
+                        break
+                if progress_get_task is not None:
+                    progress_get_task.cancel()
+                    await asyncio.gather(progress_get_task, return_exceptions=True)
                 final = await final_task
                 identity = str(final.get('query') or caption or '').strip()
                 if identity and (not query_sent):
