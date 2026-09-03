@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-import os, re, time, base64, requests, json, asyncio, urllib.parse, hashlib, sqlite3, threading, io, ast
+import os, re, time, base64, requests, json, asyncio, urllib.parse, hashlib, hmac, sqlite3, threading, io, ast
 from collections import deque, defaultdict
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from fastapi import FastAPI, Request, Response, BackgroundTasks
@@ -17,7 +17,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept'], max_age=86400)
-BUILD_ID = 'v107.25-text-search-whatsapp-parity-v1'
+BUILD_ID = 'v107.26-serpapi-cost-saver-no-regression'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -105,6 +105,13 @@ MAX_SEARCH_ATTEMPTS = max(2, int(os.environ.get('MAX_SEARCH_ATTEMPTS', '3')))
 MAX_IDENTIFY_ATTEMPTS = max(2, int(os.environ.get('MAX_IDENTIFY_ATTEMPTS', '3')))
 AUTO_SEND_PRODUCT_MAPS = env_bool('AUTO_SEND_PRODUCT_MAPS', False)
 SERPAPI_API_KEY = os.environ.get('SERPAPI_API_KEY', '').strip()
+SERPAPI_RESULT_CACHE_ENABLED = env_bool('SERPAPI_RESULT_CACHE_ENABLED', True)
+SERPAPI_RESULT_CACHE_TTL_SECONDS = max(60, min(86400, int(os.environ.get('SERPAPI_RESULT_CACHE_TTL_SECONDS', '3600'))))
+SERPAPI_SINGLEFLIGHT_ENABLED = env_bool('SERPAPI_SINGLEFLIGHT_ENABLED', True)
+SERPAPI_SINGLEFLIGHT_WAIT_SECONDS = max(3.0, min(30.0, float(os.environ.get('SERPAPI_SINGLEFLIGHT_WAIT_SECONDS', '20'))))
+SERPAPI_CACHE_MAX_ROWS = max(500, min(50000, int(os.environ.get('SERPAPI_CACHE_MAX_ROWS', '10000'))))
+SERPAPI_INFLIGHT = {}
+SERPAPI_INFLIGHT_LOCK = threading.Lock()
 PUBLIC_BASE_URL = os.environ.get('PUBLIC_BASE_URL', '').strip().rstrip('/')
 if not PUBLIC_BASE_URL:
     _railway_domain = (os.environ.get('RAILWAY_PUBLIC_DOMAIN', '') or os.environ.get('RAILWAY_STATIC_URL', '')).strip()
@@ -729,6 +736,144 @@ def _cache_db_put(key, entry):
         print(f'CACHE DB PUT ERR: {e}')
 _cache_db_init()
 
+# -----------------------------------------------------------------------------
+# SerpApi cost guard
+#
+# SerpApi serves an identical request from its one-hour cache for free.  Keep a
+# local persistent copy as well, and coalesce concurrent requests from WhatsApp,
+# web and mobile so only one worker can spend a credit for a given request.
+# This layer never changes the query, result order, market, or number of passes.
+# -----------------------------------------------------------------------------
+def _serpapi_cache_db_init():
+    if not SERPAPI_RESULT_CACHE_ENABLED:
+        return
+    try:
+        with CACHE_DB_LOCK, _cache_db_connect() as conn:
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS serpapi_response_cache (
+                    cache_key TEXT PRIMARY KEY,
+                    engine TEXT NOT NULL,
+                    response_json TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    expires_at REAL NOT NULL
+                )
+            ''')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_serpapi_cache_expiry ON serpapi_response_cache(expires_at)')
+            conn.execute('DELETE FROM serpapi_response_cache WHERE expires_at <= ?', (time.time(),))
+    except Exception as e:
+        print(f'SERPAPI CACHE INIT ERR: {e}')
+
+def _serpapi_cache_key(params):
+    safe = {str(k): str(v) for k, v in (params or {}).items() if k not in ('api_key',)}
+    canonical = json.dumps(safe, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+    return hashlib.sha256(canonical.encode('utf-8')).hexdigest()
+
+def _serpapi_cache_get(key):
+    if not SERPAPI_RESULT_CACHE_ENABLED:
+        return None
+    try:
+        now = time.time()
+        with CACHE_DB_LOCK, _cache_db_connect() as conn:
+            row = conn.execute(
+                'SELECT response_json, expires_at FROM serpapi_response_cache WHERE cache_key=?',
+                (key,),
+            ).fetchone()
+            if not row:
+                return None
+            if float(row[1] or 0) <= now:
+                conn.execute('DELETE FROM serpapi_response_cache WHERE cache_key=?', (key,))
+                return None
+        data = json.loads(row[0] or '{}')
+        return data if isinstance(data, dict) else None
+    except Exception as e:
+        print(f'SERPAPI CACHE GET ERR: {e}')
+        return None
+
+def _serpapi_cache_put(key, engine, data, ttl_seconds=None):
+    if not SERPAPI_RESULT_CACHE_ENABLED or not isinstance(data, dict):
+        return
+    now = time.time()
+    ttl = float(ttl_seconds or SERPAPI_RESULT_CACHE_TTL_SECONDS)
+    try:
+        with CACHE_DB_LOCK, _cache_db_connect() as conn:
+            conn.execute('''
+                INSERT INTO serpapi_response_cache(cache_key, engine, response_json, created_at, expires_at)
+                VALUES(?,?,?,?,?)
+                ON CONFLICT(cache_key) DO UPDATE SET
+                    engine=excluded.engine,
+                    response_json=excluded.response_json,
+                    created_at=excluded.created_at,
+                    expires_at=excluded.expires_at
+            ''', (key, engine or '', json.dumps(data, ensure_ascii=False, separators=(',', ':')), now, now + ttl))
+            count_row = conn.execute('SELECT COUNT(*) FROM serpapi_response_cache').fetchone()
+            if count_row and int(count_row[0] or 0) > SERPAPI_CACHE_MAX_ROWS:
+                trim = max(100, int(SERPAPI_CACHE_MAX_ROWS * 0.1))
+                conn.execute('''
+                    DELETE FROM serpapi_response_cache WHERE cache_key IN (
+                        SELECT cache_key FROM serpapi_response_cache ORDER BY expires_at ASC LIMIT ?
+                    )
+                ''', (trim,))
+    except Exception as e:
+        print(f'SERPAPI CACHE PUT ERR: {e}')
+
+def _serpapi_cached_json(params, timeout, label='SERPAPI'):
+    """Return the exact SerpApi JSON while avoiding duplicate paid requests."""
+    engine = str((params or {}).get('engine') or 'unknown')
+    key = _serpapi_cache_key(params)
+    cached = _serpapi_cache_get(key)
+    if cached is not None:
+        print(f'SERPAPI CACHE HIT engine={engine} label={label} key={key[:10]}')
+        return cached
+
+    leader = True
+    event = None
+    if SERPAPI_SINGLEFLIGHT_ENABLED:
+        with SERPAPI_INFLIGHT_LOCK:
+            event = SERPAPI_INFLIGHT.get(key)
+            if event is None:
+                event = threading.Event()
+                SERPAPI_INFLIGHT[key] = event
+            else:
+                leader = False
+        if not leader:
+            print(f'SERPAPI SINGLEFLIGHT WAIT engine={engine} label={label} key={key[:10]}')
+            event.wait(SERPAPI_SINGLEFLIGHT_WAIT_SECONDS)
+            cached = _serpapi_cache_get(key)
+            if cached is not None:
+                print(f'SERPAPI SINGLEFLIGHT HIT engine={engine} label={label} key={key[:10]}')
+                return cached
+            # The leader failed or exceeded the wait budget. Preserve the old
+            # behavior by attempting the live request instead of returning less.
+
+    try:
+        print(f'SERPAPI LIVE REQUEST engine={engine} label={label} key={key[:10]}')
+        response = requests.get('https://serpapi.com/search.json', params=params, timeout=timeout)
+        if response.status_code >= 400:
+            print(f'{label} HTTP {response.status_code}: {response.text[:300]}')
+            return None
+        data = response.json()
+        if not isinstance(data, dict):
+            print(f'{label} INVALID JSON TYPE: {type(data).__name__}')
+            return None
+        if data.get('error'):
+            print(f"{label} ERROR: {data.get('error')}")
+            return None
+        _serpapi_cache_put(key, engine, data)
+        return data
+    except Exception as e:
+        print(f'{label} EXCEPTION: {e}')
+        return None
+    finally:
+        if SERPAPI_SINGLEFLIGHT_ENABLED and leader and event is not None:
+            with SERPAPI_INFLIGHT_LOCK:
+                current = SERPAPI_INFLIGHT.get(key)
+                if current is event:
+                    SERPAPI_INFLIGHT.pop(key, None)
+                    event.set()
+
+_serpapi_cache_db_init()
+print(f'SERPAPI COST GUARD cache={SERPAPI_RESULT_CACHE_ENABLED} ttl={SERPAPI_RESULT_CACHE_TTL_SECONDS}s singleflight={SERPAPI_SINGLEFLIGHT_ENABLED} wait={SERPAPI_SINGLEFLIGHT_WAIT_SECONDS}s stable_lens_url=True')
+
 def load_user_preferences(phone):
     if phone in USER_LANG or phone in USER_MARKET or phone in USER_LOCATION_TS:
         return
@@ -1261,9 +1406,20 @@ def publish_image_for_lens(image_b64, mime_type):
     if not raw or len(raw) > 15 * 1024 * 1024:
         return ''
     _cleanup_lens_images()
-    token = hashlib.sha256(raw + os.urandom(16)).hexdigest()[:32]
+    # Content-addressed and signed: the same uploaded bytes now produce the
+    # same Lens URL across WhatsApp, web and mobile.  This is required for
+    # SerpApi's free exact-request cache; the previous random salt guaranteed a
+    # different URL (and therefore a paid cache miss) on every retry.
+    signing_secret = (os.environ.get('LENS_URL_SIGNING_SECRET') or VERIFY_TOKEN or SERPAPI_API_KEY or 'findzia-lens').encode('utf-8')
+    raw_digest = hashlib.sha256(raw).digest()
+    token = hmac.new(signing_secret, raw_digest, hashlib.sha256).hexdigest()[:32]
     with LENS_IMAGE_LOCK:
-        LENS_IMAGE_STORE[token] = {'content': raw, 'mime': mime_type or 'image/jpeg', 'expires_at': time.time() + LENS_IMAGE_TTL}
+        LENS_IMAGE_STORE[token] = {
+            'content': raw,
+            'mime': mime_type or 'image/jpeg',
+            'content_sha256': raw_digest.hex(),
+            'expires_at': time.time() + LENS_IMAGE_TTL,
+        }
     return f'{PUBLIC_BASE_URL}/lens-image/{token}'
 
 def _collect_lens_items(data, items, seen):
@@ -1299,13 +1455,12 @@ def _serpapi_lens_request(public_url, lens_type, country, auto_crop, query_hint)
         params['q'] = query_hint[:120]
     try:
         lens_read_timeout = min(float(LENS_HTTP_TIMEOUT_SECONDS), max(6.0, float(LENS_TOTAL_TIMEOUT_SECONDS) - 0.5))
-        r = requests.get('https://serpapi.com/search.json', params=params, timeout=(5, lens_read_timeout))
-        if r.status_code >= 400:
-            print(f"GOOGLE LENS HTTP {r.status_code} type={lens_type or 'all'} country={country or '-'}: {r.text[:300]}")
-            return []
-        data = r.json()
-        if data.get('error'):
-            print(f"GOOGLE LENS ERROR type={lens_type or 'all'} country={country or '-'}: {data.get('error')}")
+        data = _serpapi_cached_json(
+            params,
+            timeout=(5, lens_read_timeout),
+            label=f"GOOGLE LENS type={lens_type or 'all'} country={country or '-'}",
+        )
+        if data is None:
             return []
         items, seen = ([], set())
         _collect_lens_items(data, items, seen)
@@ -2836,13 +2991,12 @@ def _serpapi_shopping_request(query, gl, hl='en', timeout_seconds=None):
     if gl:
         params['gl'] = gl
     try:
-        r = requests.get('https://serpapi.com/search.json', params=params, timeout=(4, timeout_seconds or SERPAPI_TIMEOUT_SECONDS))
-        if r.status_code >= 400:
-            print(f'GOOGLE SHOPPING HTTP {r.status_code}: {r.text[:300]}')
-            return []
-        data = r.json()
-        if data.get('error'):
-            print(f"GOOGLE SHOPPING ERROR: {data.get('error')}")
+        data = _serpapi_cached_json(
+            params,
+            timeout=(4, timeout_seconds or SERPAPI_TIMEOUT_SECONDS),
+            label=f"GOOGLE SHOPPING gl={gl or '-'}",
+        )
+        if data is None:
             return []
         results = data.get('shopping_results') or []
         print(f"GOOGLE SHOPPING: q={query[:60]!r} gl={gl or '-'} -> {len(results)} cards")
@@ -2860,13 +3014,12 @@ def _serpapi_google_organic_market_request(query, gl, hl='en', domain='', timeou
     search_q = f'{q} site:{domain}' if domain else q
     params = {'engine': 'google', 'q': search_q, 'api_key': SERPAPI_API_KEY, 'google_domain': 'google.com', 'gl': (gl or 'us').lower(), 'hl': hl or 'en', 'num': max(3, min(10, int(limit or 8))), 'output': 'json'}
     try:
-        r = requests.get('https://serpapi.com/search.json', params=params, timeout=(3.5, timeout_seconds or MARKET_FALLBACK_TIMEOUT_SECONDS))
-        if r.status_code >= 400:
-            print(f"LOCAL GOOGLE SEARCH HTTP {r.status_code} gl={gl or '-'} domain={domain or '-'}: {r.text[:220]}")
-            return []
-        data = r.json()
-        if data.get('error'):
-            print(f"LOCAL GOOGLE SEARCH ERROR gl={gl or '-'} domain={domain or '-'}: {data.get('error')}")
+        data = _serpapi_cached_json(
+            params,
+            timeout=(3.5, timeout_seconds or MARKET_FALLBACK_TIMEOUT_SECONDS),
+            label=f"LOCAL GOOGLE SEARCH gl={gl or '-'} domain={domain or '-'}",
+        )
+        if data is None:
             return []
         rows = data.get('organic_results') or []
         out = []
@@ -2898,13 +3051,12 @@ def _immersive_product_stores(page_token):
     if IMMERSIVE_MORE_STORES:
         params['more_stores'] = 'true'
     try:
-        r = requests.get('https://serpapi.com/search.json', params=params, timeout=(4, SERPAPI_TIMEOUT_SECONDS))
-        if r.status_code >= 400:
-            print(f'IMMERSIVE HTTP {r.status_code}: {r.text[:200]}')
-            return []
-        data = r.json()
-        if data.get('error'):
-            print(f"IMMERSIVE ERROR: {data.get('error')}")
+        data = _serpapi_cached_json(
+            params,
+            timeout=(4, SERPAPI_TIMEOUT_SECONDS),
+            label='IMMERSIVE PRODUCT',
+        )
+        if data is None:
             return []
         stores = (data.get('product_results') or {}).get('stores') or []
         print(f'IMMERSIVE PRODUCT: {len(stores)} store offers')
@@ -8147,13 +8299,12 @@ def _web_verify_rows_strict(rows, lang):
 def _serpapi_china_global_site_request(query, label, domain, timeout_seconds=None):
     params = {'engine': 'google', 'q': f'{query} site:{domain}', 'api_key': SERPAPI_API_KEY, 'google_domain': 'google.com', 'gl': 'us', 'hl': 'en', 'num': WEB_CHINA_ORGANIC_NUM, 'output': 'json'}
     try:
-        r = requests.get('https://serpapi.com/search.json', params=params, timeout=(3.5, timeout_seconds or WEB_CHINA_ORGANIC_TIMEOUT))
-        if r.status_code >= 400:
-            print(f'WEB CHINA GOOGLE HTTP {r.status_code} store={label}: {r.text[:220]}')
-            return []
-        data = r.json()
-        if data.get('error'):
-            print(f"WEB CHINA GOOGLE ERROR store={label}: {data.get('error')}")
+        data = _serpapi_cached_json(
+            params,
+            timeout=(3.5, timeout_seconds or WEB_CHINA_ORGANIC_TIMEOUT),
+            label=f'WEB CHINA GOOGLE store={label}',
+        )
+        if data is None:
             return []
         rows = data.get('organic_results') or []
         out = []
@@ -10096,4 +10247,4 @@ async def web_api_image_search(request: Request):
 
 @app.get('/')
 async def health():
-    return {'status': 'v107.25 WHATSAPP TEXT ENGINE PARITY', 'lens_direct_mode': LENS_DIRECT_MODE, 'fast_lens': USE_FAST_LENS_PIPELINE, 'v106_pipeline': USE_V106_5_RESULT_PIPELINE, 'text_search_whatsapp_parity': TEXT_SEARCH_WHATSAPP_PARITY, 'build': BUILD_ID, 'market_source': 'phone_prefix_or_explicit_client_country', 'languages': ['ar','en','de','fr','it','es','pt','tr','ru','ja','zh','ko','hi','ur','id','ms']}
+    return {'status': 'v107.26 SERPAPI COST SAVER NO REGRESSION', 'lens_direct_mode': LENS_DIRECT_MODE, 'fast_lens': USE_FAST_LENS_PIPELINE, 'v106_pipeline': USE_V106_5_RESULT_PIPELINE, 'text_search_whatsapp_parity': TEXT_SEARCH_WHATSAPP_PARITY, 'serpapi_cache': SERPAPI_RESULT_CACHE_ENABLED, 'serpapi_singleflight': SERPAPI_SINGLEFLIGHT_ENABLED, 'build': BUILD_ID, 'market_source': 'phone_prefix_or_explicit_client_country', 'languages': ['ar','en','de','fr','it','es','pt','tr','ru','ja','zh','ko','hi','ur','id','ms']}
