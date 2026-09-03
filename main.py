@@ -17,7 +17,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept'], max_age=86400)
-BUILD_ID = 'v107.29-adaptive-visual-identity'
+BUILD_ID = 'v107.30-quantity-safe-visual-identity'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -5136,6 +5136,13 @@ _FINDZIA_ACCESSORY_TOKENS = {'case', 'cover', 'protector', 'guard', 'skin', 'sti
 _FINDZIA_CONFLICT_GROUPS = (({'tennis', 'تنس'}, {'running', 'runner', 'jogging', 'basketball', 'soccer', 'football', 'golf', 'hiking', 'trail', 'padel', 'تنس', 'جري', 'ركض', 'سله', 'سلة', 'قدم', 'جولف', 'بادل'}), ({'running', 'runner', 'jogging', 'جري', 'ركض'}, {'tennis', 'basketball', 'soccer', 'football', 'golf', 'hiking', 'padel', 'تنس', 'سله', 'سلة', 'قدم', 'جولف', 'بادل'}), ({'padel', 'بادل'}, {'tennis', 'running', 'basketball', 'soccer', 'football', 'golf', 'hiking', 'تنس', 'جري', 'سله', 'سلة', 'قدم', 'جولف'}))
 _FINDZIA_QUERY_FILLER = {'buy', 'best', 'price', 'cheap', 'cheapest', 'online', 'shop', 'shopping', 'for', 'the', 'a', 'an', 'of', 'in', 'with', 'new', 'original', 'ابي', 'أبي', 'اريد', 'أريد', 'افضل', 'أفضل', 'ارخص', 'أرخص', 'سعر', 'شراء', 'اونلاين', 'أونلاين'}
 _FINDZIA_SPEC_UNITS = {'gb', 'tb', 'mb', 'kb', 'kg', 'g', 'mg', 'lb', 'lbs', 'oz', 'fl', 'floz', 'ounce', 'ounces', 'ml', 'l', 'cl', 'cc', 'liter', 'liters', 'litre', 'litres', 'cm', 'mm', 'm', 'inch', 'inches', 'in', 'ft', 'w', 'kw', 'watt', 'watts', 'mah', 'hz', 'khz', 'mhz', 'ghz', 'mp', 'pcs', 'pc', 'piece', 'pieces', 'count', 'ct', 'pack', 'packs', 'set', 'sets'}
+_FINDZIA_QUANTITY_WORDS = _FINDZIA_SPEC_UNITS | {
+    'of', 'per', 'each', 'pair', 'pairs', 'box', 'boxes', 'bottle', 'bottles',
+    'jar', 'jars', 'can', 'cans', 'case', 'cases', 'bundle', 'bundles',
+    'dozen', 'dozens', 'pk', 'pkt', 'qty', 'quantity', 'size', 'sizes',
+    'عدد', 'حبه', 'حبة', 'حبات', 'قطعه', 'قطعة', 'قطع', 'علبه', 'علبة',
+    'علب', 'زجاجه', 'زجاجة', 'زوج', 'طقم', 'كرتون', 'عبوه', 'عبوة'
+}
 _FINDZIA_PRICE_WORDS = {'kwd', 'kd', 'usd', 'sar', 'aed', 'qar', 'omr', 'bhd', 'cny', 'rmb', 'eur', 'gbp', 'دينار', 'ريال', 'درهم'}
 
 def _findzia_model_tokens(value):
@@ -5146,6 +5153,8 @@ def _findzia_model_tokens(value):
             continue
         low = tok.lower()
         if any((re.fullmatch(f'\\d+(?:\\.\\d+)?{re.escape(unit)}', low) for unit in _FINDZIA_SPEC_UNITS)):
+            continue
+        if any((re.fullmatch(f'{re.escape(word)}\\d+', low) for word in _FINDZIA_QUANTITY_WORDS)):
             continue
         if low in _FINDZIA_PRICE_WORDS:
             continue
@@ -5259,6 +5268,7 @@ def _findzia_model_signatures(value):
         if word in _FINDZIA_MODEL_JOIN_STOP or word in _FINDZIA_SPEC_UNITS or word in _FINDZIA_PRICE_WORDS:
             continue
         number_index = index + 1 if right_num else index
+        word_index = index if left_alpha else index + 1
         neighbours = {
             pieces[pos].lower() for pos in (number_index - 1, number_index + 1)
             if 0 <= pos < len(pieces)
@@ -5266,8 +5276,24 @@ def _findzia_model_signatures(value):
         # "Touch 500 ml", "Oil 245 ml" and "12 fl oz" describe a
         # quantity/size, not a SKU.  Ignore the number even when the preceding
         # product word is short enough to look like a model prefix.
-        if neighbours & _FINDZIA_SPEC_UNITS:
+        if neighbours & _FINDZIA_QUANTITY_WORDS:
             continue
+        dimension_number = any(
+            0 <= number_index + direction < len(pieces)
+            and pieces[number_index + direction].lower() == 'x'
+            and 0 <= number_index + (2 * direction) < len(pieces)
+            and pieces[number_index + (2 * direction)].isdigit()
+            for direction in (-1, 1)
+        )
+        if dimension_number:
+            continue
+        if word == 'x':
+            other_numeric = any(
+                0 <= pos < len(pieces) and pieces[pos].isdigit() and pos != number_index
+                for pos in (word_index - 1, word_index + 1)
+            )
+            if other_numeric:
+                continue
         # Short alpha prefixes (RB 4179 / X 100) and long serial numbers are
         # useful identifiers.  Avoid turning ordinary phrases such as
         # "women 2024" into fake model numbers.
@@ -5291,6 +5317,36 @@ def _lens_generic_consensus_anchor(sample, chosen_title=''):
         return str(chosen_title or '').strip()
     if len(candidates) == 1:
         return str(candidates[0].get('title') or chosen_title or '').strip()
+
+    # Detect a repeated distinctive identity near the beginning of multiple
+    # titles (for example GLADELIG).  Do not let a majority store/category word
+    # such as IKEA, mug or grey become the identity merely because it appears
+    # in almost every listing.
+    token_stats = defaultdict(lambda: [0, 0.0])
+    for item in candidates:
+        raw_title = normalize_ar(str(item.get('title') or '')).lower()
+        ordered = re.findall('[\\w\\u0600-\\u06ff]+', raw_title)
+        seen = set()
+        for position, token in enumerate(ordered):
+            token = token[2:] if token.startswith('ال') and len(token) > 4 else token
+            if token in seen or token.isdigit() or len(token) < 3:
+                continue
+            if token in _FINDZIA_QUERY_FILLER or token in _FINDZIA_VISUAL_COLORS or token in _FINDZIA_QUANTITY_WORDS or token in _FINDZIA_PRICE_WORDS:
+                continue
+            seen.add(token)
+            token_stats[token][0] += 1
+            token_stats[token][1] += position
+    max_cluster_docs = max(2, (len(candidates) * 3 + 4) // 5)
+    identity_tokens = []
+    for token, (count, position_sum) in token_stats.items():
+        if 2 <= count <= max_cluster_docs:
+            average_position = position_sum / count
+            identity_tokens.append((-average_position, len(token), -count, token))
+    if identity_tokens:
+        identity_token = max(identity_tokens)[-1]
+        clustered = [m for m in candidates if identity_token in norm_tokens(m.get('title') or '')]
+        if len(clustered) >= 2:
+            candidates = clustered
 
     ranked = []
     for index, item in enumerate(candidates):
@@ -10266,4 +10322,4 @@ async def web_api_image_search(request: Request):
 
 @app.get('/')
 async def health():
-    return {'status': 'v107.29 ADAPTIVE VISUAL IDENTITY + LIVE PRICES', 'lens_direct_mode': LENS_DIRECT_MODE, 'fast_lens': USE_FAST_LENS_PIPELINE, 'visual_exact_gate': LENS_VISUAL_EXACT_GATE, 'v106_pipeline': USE_V106_5_RESULT_PIPELINE, 'build': BUILD_ID, 'market_source': 'phone_prefix', 'languages': ['ar','en','de','fr','it','es','pt','tr','ru','ja','zh','ko','hi','ur','id','ms']}
+    return {'status': 'v107.30 QUANTITY-SAFE VISUAL IDENTITY + LIVE PRICES', 'lens_direct_mode': LENS_DIRECT_MODE, 'fast_lens': USE_FAST_LENS_PIPELINE, 'visual_exact_gate': LENS_VISUAL_EXACT_GATE, 'v106_pipeline': USE_V106_5_RESULT_PIPELINE, 'build': BUILD_ID, 'market_source': 'phone_prefix', 'languages': ['ar','en','de','fr','it','es','pt','tr','ru','ja','zh','ko','hi','ur','id','ms']}
