@@ -17,7 +17,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept'], max_age=86400)
-BUILD_ID = 'v107.28-visual-exact-price-fix'
+BUILD_ID = 'v107.29-adaptive-visual-identity'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -5135,7 +5135,7 @@ def _clean_store_name(name):
 _FINDZIA_ACCESSORY_TOKENS = {'case', 'cover', 'protector', 'guard', 'skin', 'sticker', 'decal', 'cable', 'cord', 'charger', 'adapter', 'adaptor', 'dock', 'stand', 'mount', 'holder', 'strap', 'band', 'sleeve', 'pouch', 'bag', 'lace', 'laces', 'shoelace', 'shoelaces', 'insole', 'insoles', 'sock', 'socks', 'replacement', 'spare', 'part', 'parts', 'accessory', 'accessories', 'manual', 'handbook', 'pdf', 'كفر', 'غطاء', 'حمايه', 'حماية', 'شاحن', 'كيبل', 'كابل', 'وصله', 'وصلة', 'حامل', 'سوار', 'رباط', 'اربطة', 'أربطة', 'جوارب', 'نعل', 'قطع', 'غيار', 'اكسسوار', 'اكسسوارات'}
 _FINDZIA_CONFLICT_GROUPS = (({'tennis', 'تنس'}, {'running', 'runner', 'jogging', 'basketball', 'soccer', 'football', 'golf', 'hiking', 'trail', 'padel', 'تنس', 'جري', 'ركض', 'سله', 'سلة', 'قدم', 'جولف', 'بادل'}), ({'running', 'runner', 'jogging', 'جري', 'ركض'}, {'tennis', 'basketball', 'soccer', 'football', 'golf', 'hiking', 'padel', 'تنس', 'سله', 'سلة', 'قدم', 'جولف', 'بادل'}), ({'padel', 'بادل'}, {'tennis', 'running', 'basketball', 'soccer', 'football', 'golf', 'hiking', 'تنس', 'جري', 'سله', 'سلة', 'قدم', 'جولف'}))
 _FINDZIA_QUERY_FILLER = {'buy', 'best', 'price', 'cheap', 'cheapest', 'online', 'shop', 'shopping', 'for', 'the', 'a', 'an', 'of', 'in', 'with', 'new', 'original', 'ابي', 'أبي', 'اريد', 'أريد', 'افضل', 'أفضل', 'ارخص', 'أرخص', 'سعر', 'شراء', 'اونلاين', 'أونلاين'}
-_FINDZIA_SPEC_UNITS = {'gb', 'tb', 'mb', 'kb', 'kg', 'g', 'mg', 'lb', 'lbs', 'oz', 'ml', 'l', 'cl', 'cm', 'mm', 'm', 'inch', 'inches', 'in', 'ft', 'w', 'kw', 'mah', 'hz', 'khz', 'mhz', 'ghz', 'mp', 'mm', 'pcs', 'pc', 'pack', 'packs', 'set', 'sets'}
+_FINDZIA_SPEC_UNITS = {'gb', 'tb', 'mb', 'kb', 'kg', 'g', 'mg', 'lb', 'lbs', 'oz', 'fl', 'floz', 'ounce', 'ounces', 'ml', 'l', 'cl', 'cc', 'liter', 'liters', 'litre', 'litres', 'cm', 'mm', 'm', 'inch', 'inches', 'in', 'ft', 'w', 'kw', 'watt', 'watts', 'mah', 'hz', 'khz', 'mhz', 'ghz', 'mp', 'pcs', 'pc', 'piece', 'pieces', 'count', 'ct', 'pack', 'packs', 'set', 'sets'}
 _FINDZIA_PRICE_WORDS = {'kwd', 'kd', 'usd', 'sar', 'aed', 'qar', 'omr', 'bhd', 'cny', 'rmb', 'eur', 'gbp', 'دينار', 'ريال', 'درهم'}
 
 def _findzia_model_tokens(value):
@@ -5247,7 +5247,8 @@ def _findzia_model_signatures(value):
     raw = normalize_ar(str(value or '')).lower()
     signatures = set(_findzia_model_tokens(raw))
     pieces = re.findall('[a-z\\u0600-\\u06ff]+|\\d+', raw, flags=re.I)
-    for left, right in zip(pieces, pieces[1:]):
+    for index in range(len(pieces) - 1):
+        left, right = pieces[index], pieces[index + 1]
         left_low, right_low = left.lower(), right.lower()
         left_alpha, right_alpha = left_low.isalpha(), right_low.isalpha()
         left_num, right_num = left_low.isdigit(), right_low.isdigit()
@@ -5256,6 +5257,16 @@ def _findzia_model_signatures(value):
         word = left_low if left_alpha else right_low
         number = right_low if right_num else left_low
         if word in _FINDZIA_MODEL_JOIN_STOP or word in _FINDZIA_SPEC_UNITS or word in _FINDZIA_PRICE_WORDS:
+            continue
+        number_index = index + 1 if right_num else index
+        neighbours = {
+            pieces[pos].lower() for pos in (number_index - 1, number_index + 1)
+            if 0 <= pos < len(pieces)
+        }
+        # "Touch 500 ml", "Oil 245 ml" and "12 fl oz" describe a
+        # quantity/size, not a SKU.  Ignore the number even when the preceding
+        # product word is short enough to look like a model prefix.
+        if neighbours & _FINDZIA_SPEC_UNITS:
             continue
         # Short alpha prefixes (RB 4179 / X 100) and long serial numbers are
         # useful identifiers.  Avoid turning ordinary phrases such as
@@ -5266,6 +5277,45 @@ def _findzia_model_signatures(value):
 
 def _findzia_visual_colors(value):
     return {x.lower() for x in norm_tokens(value) if x.lower() in _FINDZIA_VISUAL_COLORS}
+
+def _lens_generic_consensus_anchor(sample, chosen_title=''):
+    """Pick the title best supported by the Lens result cluster.
+
+    Generic goods often have no SKU.  In that case the first US result can be
+    a look-alike, while several later local/visual results agree on the actual
+    brand and product.  A small in-memory medoid calculation is more stable
+    than locking the first title and adds no network latency.
+    """
+    candidates = [m for m in list(sample or [])[:12] if (m.get('title') or '').strip()]
+    if not candidates:
+        return str(chosen_title or '').strip()
+    if len(candidates) == 1:
+        return str(candidates[0].get('title') or chosen_title or '').strip()
+
+    ranked = []
+    for index, item in enumerate(candidates):
+        title = str(item.get('title') or '').strip()
+        similarities = []
+        for other_index, other in enumerate(candidates):
+            if other_index == index:
+                continue
+            other_title = str(other.get('title') or '').strip()
+            forward = _findzia_match_score(title, other_title)
+            reverse = _findzia_match_score(other_title, title)
+            similarities.append((forward + reverse) / 2.0)
+        similarities.sort(reverse=True)
+        strong_support = sum(1 for score in similarities if score >= 0.44)
+        support_score = sum(similarities[:5])
+        ranked.append((
+            strong_support,
+            round(support_score, 4),
+            1 if item.get('exact') else 0,
+            1 if item.get('section') == 'visual_matches' else 0,
+            1 if title == chosen_title else 0,
+            -int(item.get('position') or 999),
+            title,
+        ))
+    return max(ranked)[-1]
 
 def _lens_visual_exact_gate(lens, matches):
     """Keep the photographed product, not merely visually similar products.
@@ -5287,7 +5337,9 @@ def _lens_visual_exact_gate(lens, matches):
 
     sample = sorted(seq, key=priority)[:14]
     chosen_title = str(((lens or {}).get('chosen') or {}).get('title') or '').strip()
-    locked_anchor = str((lens or {}).get('visual_identity') or (lens or {}).get('relevance_target') or '').strip()
+    dynamic_consensus = bool((lens or {}).get('_visual_consensus_dynamic'))
+    locked_relevance = '' if dynamic_consensus else str((lens or {}).get('relevance_target') or '').strip()
+    locked_anchor = str((lens or {}).get('visual_identity') or locked_relevance).strip()
     supplied_anchor = locked_anchor or chosen_title
 
     signature_counts = defaultdict(int)
@@ -5322,10 +5374,15 @@ def _lens_visual_exact_gate(lens, matches):
         )[0]
 
     anchor = supplied_anchor
+    identity_basis = 'locked' if locked_anchor else 'chosen'
     if trusted_model:
         model_rows = [m for m in sample if trusted_model in _findzia_model_signatures(m.get('title') or '')]
         if model_rows:
             anchor = str(model_rows[0].get('title') or anchor).strip()
+        identity_basis = 'model'
+    elif not locked_anchor:
+        anchor = _lens_generic_consensus_anchor(sample, chosen_title) or anchor
+        identity_basis = 'consensus'
     if not anchor:
         anchor = str(sample[0].get('title') or '').strip()
 
@@ -5400,10 +5457,17 @@ def _lens_visual_exact_gate(lens, matches):
                 break
 
     strict.sort(key=lambda item: (int(item.get('_visual_exact_tier', 9)), priority(item)))
-    if anchor and (trusted_model or locked_anchor):
+    if anchor:
         lens['relevance_target'] = anchor
+        if trusted_model or locked_anchor:
+            lens.pop('_visual_consensus_dynamic', None)
+        else:
+            # Make the current consensus available to local rescue and price
+            # search, but allow a later, larger progressive snapshot to refine
+            # it instead of permanently locking an early two-card guess.
+            lens['_visual_consensus_dynamic'] = True
     tier_text = ','.join(f'{tier}:{count}' for tier, count in sorted(tiers.items())) or 'none'
-    print(f'LENS VISUAL EXACT GATE model={trusted_model or "none"} kept={len(strict)}/{len(seq)} rejected={len(seq) - len(strict)} tiers={tier_text} anchor={anchor[:90]}')
+    print(f'LENS VISUAL EXACT GATE basis={identity_basis} model={trusted_model or "none"} kept={len(strict)}/{len(seq)} rejected={len(seq) - len(strict)} tiers={tier_text} anchor={anchor[:90]}')
     return strict
 
 def _findzia_stream_candidate_ok(query, item):
@@ -10202,4 +10266,4 @@ async def web_api_image_search(request: Request):
 
 @app.get('/')
 async def health():
-    return {'status': 'v107.28 VISUAL EXACT + LIVE PRICE FALLBACK FIX', 'lens_direct_mode': LENS_DIRECT_MODE, 'fast_lens': USE_FAST_LENS_PIPELINE, 'visual_exact_gate': LENS_VISUAL_EXACT_GATE, 'v106_pipeline': USE_V106_5_RESULT_PIPELINE, 'build': BUILD_ID, 'market_source': 'phone_prefix', 'languages': ['ar','en','de','fr','it','es','pt','tr','ru','ja','zh','ko','hi','ur','id','ms']}
+    return {'status': 'v107.29 ADAPTIVE VISUAL IDENTITY + LIVE PRICES', 'lens_direct_mode': LENS_DIRECT_MODE, 'fast_lens': USE_FAST_LENS_PIPELINE, 'visual_exact_gate': LENS_VISUAL_EXACT_GATE, 'v106_pipeline': USE_V106_5_RESULT_PIPELINE, 'build': BUILD_ID, 'market_source': 'phone_prefix', 'languages': ['ar','en','de','fr','it','es','pt','tr','ru','ja','zh','ko','hi','ur','id','ms']}
