@@ -17,7 +17,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept'], max_age=86400)
-BUILD_ID = 'v107.25-instant-cards-live-prices-classified-only'
+BUILD_ID = 'v107.25-instant-cards-live-prices-classified-v3'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -7034,11 +7034,124 @@ _WEB_CLASSIFICATION_LABELS = {
     'ms': ('Padanan tepat', 'Produk serupa'),
 }
 
+_WEB_CLASSIFICATION_SEO_TAIL = re.compile(
+    r'\b(?:order|buy|shop|available|sale|price|prices|offers?)\s+(?:it\s+)?(?:now\s+)?(?:online|in)\b.*$',
+    re.I,
+)
+_WEB_CLASSIFICATION_COUNTRY_TAIL = re.compile(
+    r'\s+(?:(?:in|at|from|for\s+sale\s+in)\s+)?(?:kuwait|ksa|saudi\s+arabia|saudi|uae|united\s+arab\s+emirates|qatar|oman|bahrain|kw)\s*$',
+    re.I,
+)
+_WEB_CLASSIFICATION_MERCHANT_PREFIX = re.compile(
+    r'^\s*(?:amazon(?:\.[a-z.]+)?|walmart|ebay|noon|ubuy(?:\s+kuwait)?|aliexpress|temu|etsy|best\s*buy|xcite(?:\s+alghanim)?)\s*[:\-–—]\s*',
+    re.I,
+)
+_WEB_CLASSIFICATION_MEASUREMENT = re.compile(
+    r'(?<![a-z\u0600-\u06ff])\d+(?:[.,]\d+)?\s*(?:gb|tb|mb|kb|kg|mg|g|lb|lbs|oz|ml|cl|cm|mm|inch|inches|ft|mah|hz|khz|mhz|ghz|mp|pcs|pc|مل|مم|سم|غرام|جرام|كجم|كيلو)(?![a-z\u0600-\u06ff])',
+    re.I,
+)
+_WEB_CLASSIFICATION_GENERIC_CLUSTER = {
+    'product', 'products', 'item', 'items', 'original', 'new', 'women', 'woman', 'men', 'man',
+    'body', 'spray', 'mist', 'perfume', 'shoes', 'shoe', 'watch', 'watches', 'phone', 'phones',
+    'online', 'shop', 'store', 'buy', 'best', 'price', 'sale', 'for', 'with', 'the', 'and',
+    'منتج', 'منتجات', 'اصلي', 'أصلي', 'جديد', 'بخاخ', 'جسم', 'عطر', 'حذاء', 'احذية', 'أحذية',
+    'ساعة', 'ساعات', 'هاتف', 'هواتف', 'شراء', 'متجر', 'سعر',
+}
+
+def _web_clean_classification_identity(value):
+    """Remove merchant/location SEO decoration from captured product text."""
+    text = re.sub(r'\s+', ' ', str(value or '')).strip(' \t\r\n-|•–—')
+    if not text:
+        return ''
+    # Lens identities frequently arrive as ``product | merchant | section``.
+    # Only the product segment is useful for Exact/Similar classification.
+    text = next((part.strip() for part in re.split(r'\s*[|•]\s*', text) if part.strip()), text)
+    text = _WEB_CLASSIFICATION_MERCHANT_PREFIX.sub('', text).strip(' \t\r\n-|•–—')
+    text = _WEB_CLASSIFICATION_SEO_TAIL.sub('', text).strip(' \t\r\n-|•–—')
+    text = _WEB_CLASSIFICATION_COUNTRY_TAIL.sub('', text).strip(' \t\r\n-|•–—')
+    return re.sub(r'\s+', ' ', text).strip()
+
+def _web_classification_numbers(value):
+    """Keep standalone generation/size numbers, including one-digit models."""
+    raw = normalize_ar(str(value or '')).lower()
+    raw = re.sub(r'\b\d+(?:[.,]\d+)?\s*(?:kwd|kd|usd|sar|aed|qar|omr|bhd|cny|rmb|eur|gbp)\b', ' ', raw, flags=re.I)
+    # Measurements describe capacity/size, not a product generation.  Removing
+    # them keeps ``Ultra 2`` significant while preventing ``125 ml`` from
+    # turning a genuine match into Similar merely because spacing differs.
+    raw = _WEB_CLASSIFICATION_MEASUREMENT.sub(' ', raw)
+    return set(re.findall(r'(?<![a-z\u0600-\u06ff])\d{1,5}(?![a-z\u0600-\u06ff])', raw))
+
+def _web_classification_comparable(value):
+    """Normalize measurement formatting before existing mismatch checks."""
+    return re.sub(r'\s+', ' ', _WEB_CLASSIFICATION_MEASUREMENT.sub(' ', str(value or ''))).strip()
+
+def _web_classification_script(value):
+    text = str(value or '')
+    arabic = len(re.findall(r'[\u0600-\u06ff]', text))
+    latin = len(re.findall(r'[a-z]', text, flags=re.I))
+    if arabic > latin:
+        return 'arabic'
+    if latin > arabic:
+        return 'latin'
+    return 'mixed'
+
+def _web_classification_peer_score(left, right):
+    left_cmp = _web_classification_comparable(left)
+    right_cmp = _web_classification_comparable(right)
+    if not left_cmp or not right_cmp or _findzia_hard_product_mismatch(left_cmp, right_cmp):
+        return 0.0
+    left_tokens = _findzia_lexical_tokens(left_cmp)
+    right_tokens = _findzia_lexical_tokens(right_cmp)
+    distinctive = (left_tokens & right_tokens) - _WEB_CLASSIFICATION_GENERIC_CLUSTER
+    model_overlap = _findzia_model_tokens(left) & _findzia_model_tokens(right)
+    if not distinctive and not model_overlap:
+        return 0.0
+    return max(_findzia_match_score(left_cmp, right_cmp), _findzia_match_score(right_cmp, left_cmp))
+
+def _web_classification_anchor(identity, results):
+    """Choose a clean identity, or the strongest repeated result cluster."""
+    clean_identity = _web_clean_classification_identity(identity)
+    titles = [_web_clean_classification_identity((row or {}).get('title') or '') for row in (results or [])]
+    titles = [title for title in titles if title]
+    if not titles:
+        return clean_identity
+
+    identity_script = _web_classification_script(clean_identity)
+    title_scripts = [_web_classification_script(title) for title in titles]
+    same_script = sum(1 for script in title_scripts if script == identity_script)
+    clean_identity_cmp = _web_classification_comparable(clean_identity)
+    direct_scores = [_findzia_match_score(clean_identity_cmp, _web_classification_comparable(title)) for title in titles] if clean_identity_cmp else []
+    # Trust the cleaned Lens identity when the cards use the same language and
+    # at least one card actually supports it.  This is the normal fast path.
+    if clean_identity and same_script and max(direct_scores or [0.0]) >= 0.50:
+        return clean_identity
+
+    # If Lens supplied a generic Arabic identity while cards are English (or
+    # vice versa), use the most cohesive repeated product cluster as the anchor.
+    best_title = titles[0]
+    best_rank = (-1, -1.0, -1, 0)
+    for index, title in enumerate(titles):
+        peers = []
+        for other in titles:
+            score = _web_classification_peer_score(title, other)
+            if score >= 0.50:
+                peers.append(score)
+        rank = (len(peers), sum(peers), len(_findzia_model_tokens(title)), -index)
+        if rank > best_rank:
+            best_rank = rank
+            best_title = title
+    # A single uncorroborated title must not replace a usable Lens identity.
+    if best_rank[0] < 2 and clean_identity:
+        return clean_identity
+    return best_title
+
 def _web_captured_result_is_exact(identity, title):
     """Classify one already-captured card without filtering or doing I/O."""
-    identity = str(identity or '').strip()
-    title = str(title or '').strip()
-    if not identity or not title or _findzia_hard_product_mismatch(identity, title):
+    identity = _web_clean_classification_identity(identity)
+    title = _web_clean_classification_identity(title)
+    identity_cmp = _web_classification_comparable(identity)
+    title_cmp = _web_classification_comparable(title)
+    if not identity_cmp or not title_cmp or _findzia_hard_product_mismatch(identity_cmp, title_cmp):
         return False
     identity_models = _findzia_model_tokens(identity)
     title_models = _findzia_model_tokens(title)
@@ -7047,9 +7160,13 @@ def _web_captured_result_is_exact(identity, title):
         # explicitly carries that same model.  Other models remain visible in
         # Similar; nothing is discarded.
         return bool(identity_models & title_models)
-    # Without a model number, require strong coverage of the captured Lens
-    # identity.  The existing result order and contents remain untouched.
-    return _findzia_match_score(identity, title) >= 0.62
+    identity_numbers = _web_classification_numbers(identity)
+    title_numbers = _web_classification_numbers(title)
+    if identity_numbers and (not title_numbers or not identity_numbers & title_numbers):
+        return False
+    # Without a model number, require strong coverage of the post-capture
+    # identity/consensus anchor.  The result list itself is never changed.
+    return _findzia_match_score(identity_cmp, title_cmp) >= 0.52
 
 def _web_attach_captured_result_sections(payload, lang):
     """Add Exact/Similar views while preserving ``results`` byte-for-byte."""
@@ -7057,12 +7174,13 @@ def _web_attach_captured_result_sections(payload, lang):
     original_results = out.get('results')
     results = list(original_results or [])
     identity = str(out.get('query') or '').strip()
+    classification_anchor = _web_classification_anchor(identity, results)
     exact_results = []
     similar_results = []
     classified_results = []
     for original in results:
         row = dict(original or {})
-        if _web_captured_result_is_exact(identity, row.get('title') or ''):
+        if _web_captured_result_is_exact(classification_anchor, row.get('title') or ''):
             row['match_type'] = 'exact'
             row['result_section'] = 'exact'
             row['best_price_eligible'] = True
@@ -7082,11 +7200,12 @@ def _web_attach_captured_result_sections(payload, lang):
     out['all_results'] = classified_results
     out['result_sections'] = [
         {'id': 'exact', 'title': exact_label, 'collapsed': False, 'best_price_eligible': True, 'count': len(exact_results), 'results': exact_results},
-        {'id': 'similar', 'title': similar_label, 'collapsed': True, 'best_price_eligible': False, 'count': len(similar_results), 'results': similar_results},
+        {'id': 'similar', 'title': similar_label, 'collapsed': bool(exact_results), 'best_price_eligible': False, 'count': len(similar_results), 'results': similar_results},
     ]
     out['exact_count'] = len(exact_results)
     out['similar_count'] = len(similar_results)
-    print(f'WEB POST-CAPTURE CLASSIFICATION total={len(results)} exact={len(exact_results)} similar={len(similar_results)} identity={identity[:90]!r}')
+    out['classification_anchor'] = classification_anchor
+    print(f'WEB POST-CAPTURE CLASSIFICATION total={len(results)} exact={len(exact_results)} similar={len(similar_results)} anchor={classification_anchor[:90]!r}')
     return out
 
 def _web_fallback_product_items(txt, urls, lang, query):
@@ -9945,4 +10064,4 @@ async def web_api_image_search(request: Request):
 
 @app.get('/')
 async def health():
-    return {'status': 'v107.25 ORIGINAL ENGINE + POST-CAPTURE EXACT/SIMILAR CLASSIFICATION', 'lens_direct_mode': LENS_DIRECT_MODE, 'fast_lens': USE_FAST_LENS_PIPELINE, 'v106_pipeline': USE_V106_5_RESULT_PIPELINE, 'build': BUILD_ID, 'market_source': 'phone_prefix', 'languages': ['ar','en','de','fr','it','es','pt','tr','ru','ja','zh','ko','hi','ur','id','ms']}
+    return {'status': 'v107.25 ORIGINAL ENGINE + POST-CAPTURE EXACT/SIMILAR CLASSIFICATION V3', 'lens_direct_mode': LENS_DIRECT_MODE, 'fast_lens': USE_FAST_LENS_PIPELINE, 'v106_pipeline': USE_V106_5_RESULT_PIPELINE, 'build': BUILD_ID, 'market_source': 'phone_prefix', 'languages': ['ar','en','de','fr','it','es','pt','tr','ru','ja','zh','ko','hi','ur','id','ms']}
