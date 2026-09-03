@@ -17,7 +17,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept'], max_age=86400)
-BUILD_ID = 'v107.25-instant-cards-live-prices-classified-v3'
+BUILD_ID = 'v107.25-text-search-whatsapp-parity-v1'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -6521,6 +6521,10 @@ WEB_PRODUCT_VERIFY_CACHE_TTL_SECONDS = max(300, int(os.environ.get('WEB_PRODUCT_
 WEB_PRODUCT_VERIFY_CACHE = {}
 WEB_PRODUCT_VERIFY_LOCK = threading.Lock()
 WEB_MATCH_WHATSAPP_EXACT = env_bool('WEB_MATCH_WHATSAPP_EXACT', True)
+# Text search parity is independent from the heavier image pipeline switches.
+# Keep it on by default so a future Railway override cannot silently send web
+# or iOS through a weaker text-only expansion path.
+TEXT_SEARCH_WHATSAPP_PARITY = env_bool('TEXT_SEARCH_WHATSAPP_PARITY', True)
 # Dense web parity keeps the authoritative WhatsApp final set, but also streams store probes in parallel.
 WEB_TEXT_DENSE_PARITY = env_bool('WEB_TEXT_DENSE_PARITY', True)
 WEB_TEXT_IMAGE_ENRICH_ENABLED = env_bool('WEB_TEXT_IMAGE_ENRICH_ENABLED', True)
@@ -6877,7 +6881,7 @@ def _web_build_text_items(txt, urls, lang, query):
         title = _compact_ui_title(raw_title or query)
         store = _ui_plain_store_name(item.get('source') or '', item.get('link') or '') or U(lang, 'store')
         results.append({'market': _web_market_label(rank), 'market_rank': rank, 'country': rank_cc.get(rank, ''), 'flag': country_flag_emoji(rank_cc.get(rank, '')), 'store': store, 'title': title, 'price': shown_price, 'url': item.get('link') or '', 'image': item.get('thumbnail') or item.get('image') or '', 'match_score': round(_findzia_match_score(query, raw_title or title or query), 3)})
-    if USE_V106_5_RESULT_PIPELINE:
+    if USE_V106_5_RESULT_PIPELINE or TEXT_SEARCH_WHATSAPP_PARITY:
         # Exact stopping point from main_v106.5: do not reopen product pages,
         # do not wait for image downloads, and do not remove valid winners just
         # because a retailer blocks image scraping.
@@ -8412,14 +8416,25 @@ def _web_search_text_sync(query, country, lang, selected_option='', original_que
         elif rtype == 'NONE':
             return {'ok': False, 'type': 'chat', 'error': 'not_a_product_query', 'query': q, 'market': market}
     txt, urls = v26_text_search(q, lang)
-    if USE_V106_5_RESULT_PIPELINE:
+    if USE_V106_5_RESULT_PIPELINE or TEXT_SEARCH_WHATSAPP_PARITY:
         # Copied execution order from main_v106.5: one authoritative extraction
         # pass, convert it to cards, return. No empty-market expansion, page
         # verification, price repair or image enrichment in the critical path.
         if not txt or not text77_extract_store_offers(txt, limit=30):
-            return {'ok': True, 'type': 'results', 'query': q, 'market': market, 'results': []}
+            return {'ok': True, 'type': 'results', 'query': q, 'market': market, 'results': [], 'source': 'whatsapp_text_engine', 'authoritative': True}
         results = _web_build_text_items(txt, urls, lang, q)
-        return {'ok': True, 'type': 'results', 'query': q, 'market': market, 'results': results, 'source': 'v106.5_exact'}
+        return {
+            'ok': True,
+            'type': 'results',
+            'query': q,
+            'market': market,
+            'results': results,
+            # The web and app must treat this list as the same authoritative
+            # winner set that the WhatsApp sender consumes. Client-side image
+            # availability is presentation only and must never remove a row.
+            'source': 'whatsapp_text_engine',
+            'authoritative': True,
+        }
     if not txt or not text77_extract_store_offers(txt, limit=30):
         results = _web_expand_text_results(q, country, lang, [])
         return {'ok': True, 'type': 'results', 'query': q, 'market': market, 'results': results, 'source': 'direct_market_fallback'}
@@ -9577,6 +9592,7 @@ async def web_api_search_stream(request: Request):
     selected_option = str(payload.get('selected_option') or '').strip()
     original_query = str(payload.get('original_query') or '').strip()
     force_specific = bool(payload.get('force_specific'))
+    client_name = re.sub('[^a-z0-9_-]+', '', str(payload.get('client') or 'web').strip().lower())[:24] or 'web'
 
     async def _generator():
         started = time.time()
@@ -9601,7 +9617,7 @@ async def web_api_search_stream(request: Request):
             if rtype == 'NONE':
                 yield _web_stream_event({'event': 'error', 'error': 'not_a_product_query'})
                 return
-            if USE_V106_5_RESULT_PIPELINE or (WEB_MATCH_WHATSAPP_EXACT and (not WEB_TEXT_DENSE_PARITY)):
+            if TEXT_SEARCH_WHATSAPP_PARITY or USE_V106_5_RESULT_PIPELINE or (WEB_MATCH_WHATSAPP_EXACT and (not WEB_TEXT_DENSE_PARITY)):
                 final_task = asyncio.create_task(asyncio.to_thread(_web_search_text_sync, q, country, lang, '', '', True))
                 while not final_task.done():
                     try:
@@ -9616,6 +9632,22 @@ async def web_api_search_stream(request: Request):
                     for item in exact_rows:
                         yield _web_stream_event({'event': 'result', 'phase': 'whatsapp_exact', 'market': str(item.get('market') or 'other'), 'item': item, 'elapsed_ms': int((time.time() - started) * 1000)})
                         await asyncio.sleep(0.005)
+                    # One canonical final list prevents browser/app state,
+                    # provisional events or client-side de-duplication from
+                    # producing a weaker set than WhatsApp.
+                    yield _web_stream_event({
+                        'event': 'snapshot',
+                        'phase': 'whatsapp_text_final',
+                        'authoritative': True,
+                        'source': 'whatsapp_text_engine',
+                        'query': final.get('query') or q,
+                        'market': final.get('market') or market,
+                        'results': exact_rows,
+                        'count': len(exact_rows),
+                        'elapsed_ms': int((time.time() - started) * 1000),
+                    })
+                    _market_counts = Counter(str(row.get('market') or 'other') for row in exact_rows)
+                    print(f'TEXT PARITY FINAL client={client_name} count={len(exact_rows)} markets={dict(_market_counts)} engine=whatsapp_text_engine')
                 yield _web_stream_event({'event': 'done', 'count': len(final.get('results') or []), 'elapsed_ms': int((time.time() - started) * 1000)})
                 return
             sent = set()
@@ -10064,4 +10096,4 @@ async def web_api_image_search(request: Request):
 
 @app.get('/')
 async def health():
-    return {'status': 'v107.25 ORIGINAL ENGINE + POST-CAPTURE EXACT/SIMILAR CLASSIFICATION V3', 'lens_direct_mode': LENS_DIRECT_MODE, 'fast_lens': USE_FAST_LENS_PIPELINE, 'v106_pipeline': USE_V106_5_RESULT_PIPELINE, 'build': BUILD_ID, 'market_source': 'phone_prefix', 'languages': ['ar','en','de','fr','it','es','pt','tr','ru','ja','zh','ko','hi','ur','id','ms']}
+    return {'status': 'v107.25 WHATSAPP TEXT ENGINE PARITY', 'lens_direct_mode': LENS_DIRECT_MODE, 'fast_lens': USE_FAST_LENS_PIPELINE, 'v106_pipeline': USE_V106_5_RESULT_PIPELINE, 'text_search_whatsapp_parity': TEXT_SEARCH_WHATSAPP_PARITY, 'build': BUILD_ID, 'market_source': 'phone_prefix_or_explicit_client_country', 'languages': ['ar','en','de','fr','it','es','pt','tr','ru','ja','zh','ko','hi','ur','id','ms']}
