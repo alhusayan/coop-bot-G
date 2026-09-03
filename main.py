@@ -17,7 +17,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept'], max_age=86400)
-BUILD_ID = 'v107.30-quantity-safe-visual-identity'
+BUILD_ID = 'v107.31-relevance-aware-local-lane'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -1638,15 +1638,19 @@ def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=Fal
         fast_started = time.monotonic()
         fast_deadline = fast_started + (LENS_TURBO_MAX_WAIT_SECONDS if USE_FAST_LENS_PIPELINE else min(LENS_FAST_READY_SECONDS, LENS_TOTAL_TIMEOUT_SECONDS))
         enough_fast = False
-        last_progress_size = 0
+        last_progress_signature = ()
 
         def _emit_progress_snapshot(reason, allow_foreign_first=False):
             """Publish usable Lens rows regardless of which fast-path produced them."""
-            nonlocal last_progress_size
+            nonlocal last_progress_signature
             if not (light and progress_callback):
                 return False
-            preview_allowed = [dict(x) for x in merged if result_market_rank(x) != 99]
-            if len(preview_allowed) <= last_progress_size:
+            preview_allowed, _, raw_local_count, relevant_local_count = _lens_relevance_state(merged, query_hint)
+            preview_signature = tuple(sorted(
+                ((x.get('title') or '').lower(), (x.get('link') or '').lower())
+                for x in preview_allowed
+            ))
+            if preview_signature == last_progress_signature:
                 return False
             preview_counts = {r: sum((1 for x in preview_allowed if result_market_rank(x) == r)) for r in (0, 1, 2)}
             if len(preview_allowed) < ANDROID_IMAGE_PROGRESSIVE_MIN_RESULTS:
@@ -1656,8 +1660,8 @@ def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=Fal
             try:
                 preview_allowed.sort(key=lambda m: (result_market_rank(m), 0 if m.get('exact') else 1, 0 if m.get('section') == 'visual_matches' else 1, int(m.get('position') or 999)))
                 progress_callback({'aliases': [], 'matches': preview_allowed, 'query': (query_hint or (preview_allowed[0].get('title') if preview_allowed else '') or '').strip(), 'visual_identity': '', 'chosen': preview_allowed[0] if preview_allowed else {}, 'signature': {}, 'progressive': True})
-                last_progress_size = len(preview_allowed)
-                print(f'LENS PROGRESSIVE SNAPSHOT reason={reason} raw={len(preview_allowed)} counts={preview_counts} elapsed={time.monotonic() - fast_started:.1f}s')
+                last_progress_signature = preview_signature
+                print(f'LENS PROGRESSIVE SNAPSHOT reason={reason} relevant={len(preview_allowed)} counts={preview_counts} raw_local={raw_local_count} relevant_local={relevant_local_count} elapsed={time.monotonic() - fast_started:.1f}s')
                 return True
             except Exception as e:
                 print(f'LENS PROGRESSIVE CALLBACK ERR reason={reason}: {e}')
@@ -1667,13 +1671,13 @@ def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=Fal
             nonlocal local_rescue_future, local_rescue_started
             if local_rescue_started or (not LENS_LOCAL_LANE_RESCUE):
                 return local_rescue_future
-            local_count = sum(1 for x in merged if result_market_rank(x) == 0)
-            if local_count or not merged:
+            _, relevance_identity, raw_local_count, relevant_local_count = _lens_relevance_state(merged, query_hint)
+            if relevant_local_count >= LENS_LOCAL_LANE_TARGET or not merged:
                 return local_rescue_future
             elapsed = time.monotonic() - fast_started
             if (not force) and elapsed < LENS_LOCAL_RESCUE_AFTER_SECONDS:
                 return local_rescue_future
-            rescue_query = (query_hint or (merged[0].get('title') if merged else '') or '').strip()
+            rescue_query = (relevance_identity or query_hint or (merged[0].get('title') if merged else '') or '').strip()
             if not rescue_query:
                 return local_rescue_future
             local_rescue_started = True
@@ -1685,7 +1689,7 @@ def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=Fal
                 LENS_LOCAL_LANE_GRACE_SECONDS,
                 max(LENS_LOCAL_LANE_TARGET + 2, LENS_LOCAL_LANE_TARGET),
             )
-            print(f'LENS LOCAL LANE RESCUE START elapsed={elapsed:.1f}s country={user_country}')
+            print(f'LENS LOCAL LANE RESCUE START elapsed={elapsed:.1f}s country={user_country} raw_local={raw_local_count} relevant_local={relevant_local_count} query={rescue_query[:90]!r}')
             return local_rescue_future
 
         while pending and time.monotonic() < fast_deadline:
@@ -1711,7 +1715,8 @@ def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=Fal
             # First paint is never held back by a slow local market. The local
             # lane below remains alive and will replace/reorder the snapshot.
             _emit_progress_snapshot('fast_pass', allow_foreign_first=True)
-            if rank_counts[0] == 0:
+            _, _, _, relevant_local_count = _lens_relevance_state(merged, query_hint)
+            if relevant_local_count == 0:
                 _start_local_rescue_if_needed()
             if USE_FAST_LENS_PIPELINE and enough_fast:
                 print(f'LENS TURBO EARLY RETURN READY useful={sum(rank_counts.values())} elapsed={time.monotonic() - fast_started:.2f}s')
@@ -1755,14 +1760,14 @@ def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=Fal
         if USE_FAST_LENS_PIPELINE and sparse_useful:
             _emit_progress_snapshot('pre_local_lane', allow_foreign_first=True)
 
-        local_count = sum(1 for x in merged if result_market_rank(x) == 0)
+        _, _, raw_local_count, local_count = _lens_relevance_state(merged, query_hint)
         if USE_FAST_LENS_PIPELINE and merged and local_count < LENS_LOCAL_LANE_TARGET:
             local_lane_started = time.monotonic()
             rescue_due_at = fast_started + LENS_LOCAL_RESCUE_AFTER_SECONDS
-            print(f'LENS LOCAL LANE START local={local_count}/{LENS_LOCAL_LANE_TARGET} pending={len(pending)}')
+            print(f'LENS LOCAL LANE START relevant_local={local_count}/{LENS_LOCAL_LANE_TARGET} raw_local={raw_local_count} pending={len(pending)}')
             while local_count < LENS_LOCAL_LANE_TARGET and time.monotonic() < post_fast_deadline:
                 local_lens_pending = {fut for fut in pending if future_map[fut][1] == user_country}
-                _start_local_rescue_if_needed(force=(local_count == 0 and not local_lens_pending))
+                _start_local_rescue_if_needed(force=(not local_lens_pending))
                 waiters = set(local_lens_pending)
                 if local_rescue_future is not None:
                     waiters.add(local_rescue_future)
@@ -1794,9 +1799,9 @@ def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=Fal
                         _merge(fut.result() or [])
                     except Exception as e:
                         print(f'LENS LOCAL LANE FUTURE ERR type={lens_type} country={country}: {e}')
-                local_count = sum(1 for x in merged if result_market_rank(x) == 0)
+                _, _, raw_local_count, local_count = _lens_relevance_state(merged, query_hint)
                 _emit_progress_snapshot('local_lane', allow_foreign_first=True)
-            print(f'LENS LOCAL LANE DONE local={local_count}/{LENS_LOCAL_LANE_TARGET} elapsed={time.monotonic() - local_lane_started:.2f}s rescue={local_rescue_started}')
+            print(f'LENS LOCAL LANE DONE relevant_local={local_count}/{LENS_LOCAL_LANE_TARGET} raw_local={raw_local_count} elapsed={time.monotonic() - local_lane_started:.2f}s rescue={local_rescue_started}')
 
         sparse_useful = sum(1 for x in merged if result_market_rank(x) in (0, 1, 2))
         if USE_FAST_LENS_PIPELINE and 0 < sparse_useful < LENS_TURBO_STRONG_RESULT_TARGET and pending:
@@ -1895,6 +1900,11 @@ def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=Fal
             market_rows = [m for m in allowed if result_market_rank(m) == rank]
             matches.extend(market_rows[:keep_caps[rank]])
         matches = matches[:max(LENS_RESULT_LIMIT, sum(keep_caps.values()))]
+        # Never let an unrelated raw local card become the chosen identity or
+        # suppress the actual local rescue.  The UI still receives global rows
+        # immediately; this is an in-memory filter with no network wait.
+        matches, relevance_identity, raw_local_count, relevant_local_count = _lens_relevance_state(matches, query_hint)
+        print(f'LENS RELEVANCE-AWARE FINAL raw_local={raw_local_count} relevant_local={relevant_local_count} identity={relevance_identity[:90]!r}')
         if not matches:
             print('GOOGLE LENS: no visual matches after all passes')
             return {'aliases': [], 'matches': [], 'query': ''}
@@ -5373,7 +5383,7 @@ def _lens_generic_consensus_anchor(sample, chosen_title=''):
         ))
     return max(ranked)[-1]
 
-def _lens_visual_exact_gate(lens, matches):
+def _lens_visual_exact_gate(lens, matches, log=True):
     """Keep the photographed product, not merely visually similar products.
 
     The gate uses Lens consensus, model/SKU signatures, colour conflicts and
@@ -5523,8 +5533,49 @@ def _lens_visual_exact_gate(lens, matches):
             # it instead of permanently locking an early two-card guess.
             lens['_visual_consensus_dynamic'] = True
     tier_text = ','.join(f'{tier}:{count}' for tier, count in sorted(tiers.items())) or 'none'
-    print(f'LENS VISUAL EXACT GATE basis={identity_basis} model={trusted_model or "none"} kept={len(strict)}/{len(seq)} rejected={len(seq) - len(strict)} tiers={tier_text} anchor={anchor[:90]}')
+    if log:
+        print(f'LENS VISUAL EXACT GATE basis={identity_basis} model={trusted_model or "none"} kept={len(strict)}/{len(seq)} rejected={len(seq) - len(strict)} tiers={tier_text} anchor={anchor[:90]}')
     return strict
+
+def _lens_relevance_state(matches, query_hint=''):
+    """Return only identity-matching Lens rows and accurate local counts.
+
+    Lens can return a local card for a visually similar product before the
+    correct global cluster arrives.  Raw market counts must therefore never
+    decide whether the local lane is complete.  This helper reuses the exact
+    visual gate without logging or network work, then counts only survivors.
+    """
+    candidates = [dict(m) for m in list(matches or []) if result_market_rank(m) != 99 and (m.get('title') or '').strip()]
+    raw_local_count = sum(1 for m in candidates if result_market_rank(m) == 0)
+    if not candidates:
+        return [], (query_hint or '').strip(), raw_local_count, 0
+
+    def priority(item):
+        return (
+            0 if item.get('exact') else 1,
+            0 if item.get('section') == 'visual_matches' else 1,
+            int(item.get('position') or 999),
+        )
+
+    chosen = min(candidates, key=priority)
+    context = {
+        'aliases': [],
+        'matches': candidates,
+        'query': (query_hint or '').strip(),
+        'visual_identity': '',
+        'chosen': chosen,
+        'signature': {},
+    }
+    try:
+        relevant = _lens_visual_exact_gate(context, candidates, log=False)
+    except Exception as exc:
+        # Keep the search usable if a future gate change fails, but expose the
+        # fallback in logs so a raw local row is never silently trusted.
+        print(f'LENS RELEVANCE STATE FALLBACK: {exc}')
+        relevant = candidates
+    identity = str(context.get('relevance_target') or query_hint or chosen.get('title') or '').strip()
+    relevant_local_count = sum(1 for m in relevant if result_market_rank(m) == 0)
+    return relevant, identity, raw_local_count, relevant_local_count
 
 def _findzia_stream_candidate_ok(query, item):
     title = str((item or {}).get('title') or (item or {}).get('line') or '')
@@ -10322,4 +10373,4 @@ async def web_api_image_search(request: Request):
 
 @app.get('/')
 async def health():
-    return {'status': 'v107.30 QUANTITY-SAFE VISUAL IDENTITY + LIVE PRICES', 'lens_direct_mode': LENS_DIRECT_MODE, 'fast_lens': USE_FAST_LENS_PIPELINE, 'visual_exact_gate': LENS_VISUAL_EXACT_GATE, 'v106_pipeline': USE_V106_5_RESULT_PIPELINE, 'build': BUILD_ID, 'market_source': 'phone_prefix', 'languages': ['ar','en','de','fr','it','es','pt','tr','ru','ja','zh','ko','hi','ur','id','ms']}
+    return {'status': 'v107.31 RELEVANCE-AWARE LOCAL LANE + LIVE PRICES', 'lens_direct_mode': LENS_DIRECT_MODE, 'fast_lens': USE_FAST_LENS_PIPELINE, 'visual_exact_gate': LENS_VISUAL_EXACT_GATE, 'v106_pipeline': USE_V106_5_RESULT_PIPELINE, 'build': BUILD_ID, 'market_source': 'phone_prefix', 'languages': ['ar','en','de','fr','it','es','pt','tr','ru','ja','zh','ko','hi','ur','id','ms']}
