@@ -17,7 +17,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept'], max_age=86400)
-BUILD_ID = 'v107.33-exact-and-similar-sections'
+BUILD_ID = 'v107.34-live-local-update'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -1459,11 +1459,38 @@ def _market_presence_fallback(base_query, rank, limit=6):
     print(f'MARKET PRESENCE FALLBACK rank={rank} query={q[:70]!r} -> {len(merged)}')
     return merged
 
+def _lens_local_search_query(base_query):
+    """Return a product-only identity suitable for country-local search.
+
+    Lens titles often arrive as ``Amazon.com: Product`` or
+    ``Product | eBay``.  Sending those merchant decorations to a local Google
+    query suppresses genuine local stores, especially in smaller markets.
+    This cleanup is deliberately conservative and keeps brand/model/size.
+    """
+    q = _shopping_clean_query(base_query or '')
+    if not q:
+        return ''
+    q = re.sub(
+        r'^\s*(?:buy|shop|order)?\s*(?:amazon(?:\.[a-z]{2,3})?|ebay|walmart|best\s*buy|aliexpress|temu|shein|ubuy)(?:\.[a-z]{2,3})?\s*[:|\-–—]+\s*',
+        '',
+        q,
+        flags=re.I,
+    )
+    # A trailing pipe segment is normally the source/store emitted by Lens.
+    parts = [part.strip() for part in re.split(r'\s*[|•]\s*', q) if part.strip()]
+    if len(parts) > 1:
+        non_store = [part for part in parts if not re.fullmatch(r'(?i)(?:amazon(?:\.com)?|ebay|walmart|best\s*buy|aliexpress|temu|shein|ubuy|[\w .&\'-]{2,35}\.(?:com|net|org|shop))', part)]
+        if non_store:
+            q = max(non_store, key=len)
+    q = re.sub(r'^\s*(?:buy|shop|order)\s+', '', q, flags=re.I)
+    q = re.sub(r'\s+(?:online|for\s+sale)(?:\s+(?:at|from)\s+[^|]{1,45})?\s*$', '', q, flags=re.I)
+    return re.sub(r'\s+', ' ', q).strip()
+
 def _single_local_lane_rescue(base_query, timeout_seconds=3.5, limit=6):
     """One quota-bounded local request used only while foreign rows are visible."""
     if not SERPAPI_API_KEY:
         return []
-    q = _shopping_clean_query(base_query or '')
+    q = _lens_local_search_query(base_query)
     if not q:
         return []
     local_cc = (current_market().get('country') or DEFAULT_COUNTRY).lower()
@@ -7033,6 +7060,9 @@ WEB_ASYNC_PRICE_CACHE_TTL_SECONDS = max(30, min(1800, int(os.environ.get('WEB_AS
 WEB_ASYNC_PRICE_EXACT_RESCUE = env_bool('WEB_ASYNC_PRICE_EXACT_RESCUE', True)
 WEB_ASYNC_PRICE_EXACT_RESCUE_MAX = max(0, min(3, int(os.environ.get('WEB_ASYNC_PRICE_EXACT_RESCUE_MAX', '2'))))
 WEB_ASYNC_PRICE_EXACT_MIN_SCORE = max(0.72, min(0.95, float(os.environ.get('WEB_ASYNC_PRICE_EXACT_MIN_SCORE', '0.78'))))
+WEB_LATE_LOCAL_UPDATE_ENABLED = env_bool('WEB_LATE_LOCAL_UPDATE_ENABLED', True)
+WEB_LATE_LOCAL_UPDATE_TIMEOUT_SECONDS = max(3.0, min(8.0, float(os.environ.get('WEB_LATE_LOCAL_UPDATE_TIMEOUT_SECONDS', '5.5'))))
+WEB_LATE_LOCAL_UPDATE_TARGET = max(1, min(WEB_LOCAL_MAX or 1, int(os.environ.get('WEB_LATE_LOCAL_UPDATE_TARGET', str(WEB_LOCAL_MAX or 1)))))
 WEB_ASYNC_PRICE_CACHE = {}
 WEB_ASYNC_PRICE_CACHE_LOCK = threading.Lock()
 if USE_V106_5_RESULT_PIPELINE:
@@ -7070,7 +7100,7 @@ WEB_CHINA_GLOBAL_MAX_STORES = max(4, min(9, int(os.environ.get('WEB_CHINA_GLOBAL
 WEB_CHINA_ORGANIC_NUM = max(3, min(10, int(os.environ.get('WEB_CHINA_ORGANIC_NUM', '8'))))
 WEB_RATE_BUCKETS = defaultdict(deque)
 WEB_RATE_LOCK = threading.Lock()
-print(f'ANDROID/WEB PARITY exact={WEB_MATCH_WHATSAPP_EXACT} v106_pipeline={USE_V106_5_RESULT_PIPELINE} fast_lens={USE_FAST_LENS_PIPELINE} visual_exact_gate={LENS_VISUAL_EXACT_GATE} lens_wait={LENS_TURBO_MAX_WAIT_SECONDS}s empty_grace={LENS_TURBO_EMPTY_GRACE_SECONDS}s sparse_grace={LENS_TURBO_SPARSE_GRACE_SECONDS}s local_lane={LENS_LOCAL_LANE_TARGET}@{LENS_LOCAL_LANE_GRACE_SECONDS}s rescue_after={LENS_LOCAL_RESCUE_AFTER_SECONDS}s live_prices={WEB_ASYNC_PRICE_ENRICH_ENABLED} price_page_window={WEB_ASYNC_PRICE_PAGE_WINDOW_SECONDS}s shared_price_markets={WEB_ASYNC_PRICE_SHARED_MARKETS} exact_price_rescue={WEB_ASYNC_PRICE_EXACT_RESCUE_MAX} strong_target={LENS_TURBO_STRONG_RESULT_TARGET} caps local/us/cn={WEB_LOCAL_MAX}/{WEB_US_MAX}/{WEB_CN_MAX} legacy_turbo_available={WEB_STREAM_FAST_WAVE} store_timeout={WEB_STREAM_STORE_TIMEOUT}s progressive={ANDROID_IMAGE_PROGRESSIVE} shopping_geo_guard={SHOPPING_GEO_GUARD}')
+print(f'ANDROID/WEB PARITY exact={WEB_MATCH_WHATSAPP_EXACT} v106_pipeline={USE_V106_5_RESULT_PIPELINE} fast_lens={USE_FAST_LENS_PIPELINE} visual_exact_gate={LENS_VISUAL_EXACT_GATE} lens_wait={LENS_TURBO_MAX_WAIT_SECONDS}s empty_grace={LENS_TURBO_EMPTY_GRACE_SECONDS}s sparse_grace={LENS_TURBO_SPARSE_GRACE_SECONDS}s local_lane={LENS_LOCAL_LANE_TARGET}@{LENS_LOCAL_LANE_GRACE_SECONDS}s rescue_after={LENS_LOCAL_RESCUE_AFTER_SECONDS}s late_local={WEB_LATE_LOCAL_UPDATE_ENABLED}:{WEB_LATE_LOCAL_UPDATE_TARGET}@{WEB_LATE_LOCAL_UPDATE_TIMEOUT_SECONDS}s live_prices={WEB_ASYNC_PRICE_ENRICH_ENABLED} price_page_window={WEB_ASYNC_PRICE_PAGE_WINDOW_SECONDS}s shared_price_markets={WEB_ASYNC_PRICE_SHARED_MARKETS} exact_price_rescue={WEB_ASYNC_PRICE_EXACT_RESCUE_MAX} strong_target={LENS_TURBO_STRONG_RESULT_TARGET} caps local/us/cn={WEB_LOCAL_MAX}/{WEB_US_MAX}/{WEB_CN_MAX} legacy_turbo_available={WEB_STREAM_FAST_WAVE} store_timeout={WEB_STREAM_STORE_TIMEOUT}s progressive={ANDROID_IMAGE_PROGRESSIVE} shopping_geo_guard={SHOPPING_GEO_GUARD}')
 
 def _web_request_ip(request):
     forwarded = str(request.headers.get('x-forwarded-for') or '').split(',')[0].strip()
@@ -7588,6 +7618,28 @@ def _web_stream_event(payload):
     return (json.dumps(payload, ensure_ascii=False, separators=(',', ':')) + '\n').encode('utf-8')
 _WEB_BAD_PRICE_TERMS = ('per month', 'monthly', 'month plan', 'installment', 'instalment', 'pay monthly', 'monthly payment', 'emi', 'finance payment', 'قسطي', 'قسط', 'اقساط', 'أقساط', 'شهري')
 _WEB_WHOLESALE_TERMS = ('minimum order', 'min order', 'moq', 'wholesale', 'bulk order', 'fob', 'per piece', '/piece', 'piece price', 'sample price', 'supplier', 'حد ادنى للطلب', 'الحد الأدنى للطلب', 'جملة', 'بالجملة')
+_WEB_PRICE_USD_PER_UNIT = {'USD': 1.0, 'KWD': 3.25, 'BHD': 2.65, 'OMR': 2.60, 'GBP': 1.30, 'EUR': 1.10, 'AED': 0.272, 'SAR': 0.267, 'QAR': 0.275, 'CNY': 0.14, 'RMB': 0.14, 'JPY': 0.0068, 'CAD': 0.74, 'AUD': 0.66, 'CHF': 1.12, 'INR': 0.012, 'KRW': 0.00073, 'TRY': 0.031, 'RUB': 0.011}
+
+def _web_price_plausible_for_product(value, currency, title=''):
+    """Reject obvious minor-unit/page-number prices without delaying search."""
+    try:
+        numeric = float(value)
+    except Exception:
+        return False
+    if numeric <= 0:
+        return False
+    cur = str(currency or '').upper().strip()
+    usd_value = numeric * _WEB_PRICE_USD_PER_UNIT.get(cur, 1.0)
+    family = _findzia_similar_family(title or '')
+    if family in {'body_spray', 'body_oil', 'body_lotion', 'drinkware'}:
+        cap_usd = 5000.0
+    elif family in {'running_footwear', 'tennis_footwear', 'hiking_footwear', 'footwear'}:
+        cap_usd = 10000.0
+    elif family == 'perfume':
+        cap_usd = 20000.0
+    else:
+        cap_usd = 100000.0
+    return usd_value <= cap_usd
 
 def _web_fast_price_guard(row):
     row = dict(row or {})
@@ -7617,6 +7669,10 @@ def _web_fast_finalize_rows(rows, lang):
         val, _cur = _web_price_number_and_currency(existing)
         if val and _price_collides_with_product_spec(val, row.get('title'), row.get('_offer_meta')):
             print(f"WEB SIZE-AS-PRICE BLOCK store={row.get('store') or row.get('source')} value={val} title={(row.get('title') or '')[:90]}")
+            val = None
+            row['price'] = ''
+        if val and not _web_price_plausible_for_product(val, _cur or _web_market_currency(market_snapshot), row.get('title')):
+            print(f"WEB IMPLAUSIBLE PRICE BLOCK store={row.get('store') or row.get('source')} value={val} {_cur} title={(row.get('title') or '')[:90]}")
             val = None
             row['price'] = ''
         if val and val > 0:
@@ -7694,6 +7750,81 @@ def _web_fast_market_wave_sync(query, country, lang, rank):
     candidates = _market_presence_fallback(query, rank, limit=max(cap + 2, cap))
     rows = _web_market_candidates_to_items(candidates, rank, lang, query)
     return _web_require_product_image_rows(rows)
+
+def _web_result_identity_key(row):
+    row = row or {}
+    url = str(row.get('url') or row.get('link') or '').strip()
+    if url:
+        return 'url|' + _canonical_result_url(url)
+    return 'text|' + str(row.get('store') or row.get('source') or '').strip().casefold() + '|' + normalize_name(row.get('title') or '')
+
+def _web_late_local_update_sync(identity, country, lang, existing_exact, existing_similar):
+    """Find missing local cards after the first authoritative snapshot.
+
+    This runs outside the first-render path.  Results still pass the existing
+    exact text/model guard; it only changes *when* a slow country market is
+    allowed to arrive, not what counts as the photographed product.
+    """
+    query = _lens_local_search_query(identity)
+    exact = [dict(row or {}) for row in list(existing_exact or [])]
+    similar = [dict(row or {}) for row in list(existing_similar or [])]
+    if not query:
+        return None
+    current_local = sum(1 for row in exact if int(row.get('market_rank', 99)) == 0)
+    if current_local >= WEB_LATE_LOCAL_UPDATE_TARGET:
+        return None
+    market = _web_market(country)
+    MARKET_CTX.value = market
+    try:
+        late_rows = _web_fast_market_wave_sync(query, country, lang, 0)
+    except Exception as exc:
+        print(f'WEB LATE LOCAL SEARCH ERR query={query[:80]!r}: {exc}')
+        return None
+    late_rows = [dict(row or {}) for row in late_rows if int((row or {}).get('market_rank', 99)) == 0]
+    if not late_rows:
+        print(f'WEB LATE LOCAL EMPTY query={query[:80]!r}')
+        return None
+
+    existing_keys = {_web_result_identity_key(row) for row in exact + similar}
+    added = []
+    for row in late_rows:
+        key = _web_result_identity_key(row)
+        if not key or key in existing_keys:
+            continue
+        row['match_type'] = 'exact'
+        row['result_section'] = 'exact'
+        row['best_price_eligible'] = True
+        row['late_local_update'] = True
+        added.append(row)
+        existing_keys.add(key)
+        if current_local + len(added) >= WEB_LATE_LOCAL_UPDATE_TARGET:
+            break
+    if not added:
+        return None
+
+    local_exact = []
+    seen = set()
+    for row in [row for row in exact if int(row.get('market_rank', 99)) == 0] + added:
+        key = _web_result_identity_key(row)
+        if key in seen:
+            continue
+        seen.add(key)
+        local_exact.append(row)
+    global_exact = []
+    for row in exact:
+        if int(row.get('market_rank', 99)) == 0:
+            continue
+        key = _web_result_identity_key(row)
+        if key in seen:
+            continue
+        seen.add(key)
+        global_exact.append(row)
+    total_cap = max(1, LENS_DIRECT_MAX_CTA)
+    merged_exact = (local_exact[:WEB_LOCAL_MAX] + global_exact)[:total_cap]
+    exact_keys = {_web_result_identity_key(row) for row in merged_exact}
+    merged_similar = [row for row in similar if _web_result_identity_key(row) not in exact_keys]
+    print(f'WEB LATE LOCAL UPDATE query={query[:70]!r} local={current_local}->{sum(1 for row in merged_exact if int(row.get("market_rank", 99)) == 0)} exact={len(exact)}->{len(merged_exact)} added={len(added)}')
+    return {'exact_results': merged_exact, 'similar_results': merged_similar, 'added_results': added, 'query': query}
 
 def _web_stream_store_specs(query, country, rank):
     market = _web_market(country)
@@ -8149,6 +8280,10 @@ def _web_verify_card_strict(row, rank, lang, market_snapshot=None):
     if page_price and page_price > 0:
         if not page_cur:
             page_cur = _web_market_currency(market_snapshot) if rank == 0 else 'USD' if rank == 1 else 'CNY'
+        if not _web_price_plausible_for_product(page_price, page_cur, row.get('title')):
+            print(f"WEB PAGE PRICE REJECT store={row.get('store') or row.get('source')} value={page_price:g} {page_cur} title={(row.get('title') or '')[:90]}")
+            page_price = None
+    if page_price and page_price > 0:
         raw_price = f'{page_price:g} {page_cur}'.strip()
         row['price'] = _web_price_local_explicit(raw_price, rank, lang, market_snapshot)
         row['price'] = _web_normalize_existing_price_to_market(row['price'], rank, lang, market_snapshot)
@@ -8157,11 +8292,13 @@ def _web_verify_card_strict(row, rank, lang, market_snapshot=None):
         return row
     existing = str(row.get('price') or '').strip()
     val, cur = _web_price_number_and_currency(existing)
-    if val and val > 0:
+    if val and val > 0 and _web_price_plausible_for_product(val, cur or (_web_market_currency(market_snapshot) if rank == 0 else 'USD' if rank == 1 else 'CNY'), row.get('title')):
         row['price'] = _web_normalize_existing_price_to_market(existing, rank, lang, market_snapshot)
         row['price_verified'] = True
         row['price_source'] = row.get('price_source') or 'search_structured_rebased'
         return row
+    if val and val > 0:
+        print(f"WEB EXISTING PRICE REJECT store={row.get('store') or row.get('source')} value={val:g} {cur} title={(row.get('title') or '')[:90]}")
     if WEB_REQUIRE_NUMERIC_PRICE and (not WEB_KEEP_PRICELESS_RESULTS):
         print(f"WEB STRICT REJECT NO PRICE store={row.get('store') or row.get('source')} url={url[:140]}")
         return None
@@ -8177,6 +8314,8 @@ def _web_row_has_numeric_price(row):
     if not (val and val > 0):
         return False
     if _price_collides_with_product_spec(val, (row or {}).get('title'), (row or {}).get('_offer_meta')):
+        return False
+    if not _web_price_plausible_for_product(val, _cur or _web_market_currency(), (row or {}).get('title')):
         return False
     return True
 
@@ -8262,11 +8401,15 @@ def _web_enrich_row_price_sync(row, lang, market_snapshot, allow_shopping=True):
         if page_price and page_price > 0:
             if not page_cur:
                 page_cur = _web_market_currency(market_snapshot) if rank == 0 else 'USD' if rank == 1 else 'CNY'
-            raw_price = f'{page_price:g} {page_cur}'.strip()
-            source_tag = 'product_page'
-        elif allow_shopping:
+            if _web_price_plausible_for_product(page_price, page_cur, row.get('title')):
+                raw_price = f'{page_price:g} {page_cur}'.strip()
+                source_tag = 'product_page'
+            else:
+                print(f'WEB PAGE PRICE REJECT store={store} value={page_price:g} {page_cur} title={str(row.get("title") or "")[:90]}')
+        if not raw_price and allow_shopping:
             fb_val, fb_raw = _web_enrich_price_via_shopping(row, rank, market_snapshot)
-            if fb_val and fb_val > 0:
+            fb_cur = detect_currency_code(fb_raw, _web_market_currency(market_snapshot) if rank == 0 else 'USD' if rank == 1 else 'CNY')
+            if fb_val and fb_val > 0 and _web_price_plausible_for_product(fb_val, fb_cur, row.get('title')):
                 raw_price = fb_raw
                 source_tag = 'google_shopping_fallback'
         if not raw_price:
@@ -8364,6 +8507,9 @@ def _web_shared_price_market_sync(entries, rank, lang, market_snapshot):
             if not value or value <= 0:
                 continue
             currency = str(cand.get('currency') or '').upper().strip()
+            currency = currency or detect_currency_code(raw, _web_market_currency(market_snapshot) if rank == 0 else 'USD' if rank == 1 else 'CNY')
+            if not _web_price_plausible_for_product(value, currency, row_title):
+                continue
             if not raw:
                 currency = currency or (_web_market_currency(market_snapshot) if rank == 0 else 'USD' if rank == 1 else 'CNY')
                 raw = f'{value:g} {currency}'
@@ -8478,6 +8624,9 @@ def _web_exact_card_price_rescue(key, source_row, lang, market_snapshot):
         if not value or value <= 0 or _price_collides_with_product_spec(value, title, cand.get('_offer_meta')):
             continue
         currency = str(cand.get('currency') or '').upper().strip()
+        currency = currency or detect_currency_code(raw_price, _web_market_currency(market_snapshot) if rank == 0 else 'USD' if rank == 1 else 'CNY')
+        if not _web_price_plausible_for_product(value, currency, title):
+            continue
         if not raw_price:
             currency = currency or (_web_market_currency(market_snapshot) if rank == 0 else 'USD' if rank == 1 else 'CNY')
             raw_price = f'{value:g} {currency}'
@@ -10387,6 +10536,14 @@ async def web_api_image_search_stream(request: Request):
                 final_results = list(final.get('results') or [])
                 final_similar_results = list(final.get('similar_results') or [])
                 final_all_results = final_results + final_similar_results
+                late_local_task = None
+                initial_local_count = sum(1 for row in final_results if int((row or {}).get('market_rank', 99)) == 0)
+                if WEB_LATE_LOCAL_UPDATE_ENABLED and SERPAPI_API_KEY and identity and initial_local_count < WEB_LATE_LOCAL_UPDATE_TARGET:
+                    late_local_task = asyncio.create_task(asyncio.wait_for(
+                        asyncio.to_thread(_web_late_local_update_sync, identity, country, lang, final_results, final_similar_results),
+                        timeout=WEB_LATE_LOCAL_UPDATE_TIMEOUT_SECONDS,
+                    ))
+                    print(f'WEB LATE LOCAL START local={initial_local_count}/{WEB_LATE_LOCAL_UPDATE_TARGET} identity={_lens_local_search_query(identity)[:90]!r}')
                 yield _web_stream_event({'event': 'snapshot', 'phase': 'whatsapp_sectioned_final', 'authoritative': True, 'layout': 'exact_and_similar_v1', 'query': identity, 'market': final.get('market'), 'results': final_results, 'exact_results': final_results, 'similar_results': final_similar_results, 'all_results': final_all_results, 'result_sections': _web_result_sections(final_results, final_similar_results, lang), 'exact_count': len(final_results), 'similar_count': len(final_similar_results), 'elapsed_ms': int((time.time() - started) * 1000)})
                 print(f'ANDROID SECTIONED FINAL SNAPSHOT exact={len(final_results)} similar={len(final_similar_results)} preview={len(preview_keys)} elapsed={time.time() - started:.1f}s')
                 sent = {str(item.get('url') or '').strip() or str(item.get('market') or 'other') + '|' + str(item.get('store') or '') + '|' + str(item.get('title') or '') for item in final_all_results}
@@ -10399,6 +10556,36 @@ async def web_api_image_search_stream(request: Request):
                             t.cancel()
                     else:
                         _web_spawn_price_enrich_task(price_tasks, key, item, lang, market_snapshot)
+                if late_local_task is not None:
+                    try:
+                        local_update = await late_local_task
+                    except asyncio.TimeoutError:
+                        local_update = None
+                        print(f'WEB LATE LOCAL TIMEOUT after={WEB_LATE_LOCAL_UPDATE_TIMEOUT_SECONDS}s identity={_lens_local_search_query(identity)[:80]!r}')
+                    except Exception as exc:
+                        local_update = None
+                        print(f'WEB LATE LOCAL ERR: {exc}')
+                    if local_update:
+                        final_results = list(local_update.get('exact_results') or final_results)
+                        final_similar_results = list(local_update.get('similar_results') or final_similar_results)
+                        final_all_results = final_results + final_similar_results
+                        current_keys = {str(item.get('url') or '').strip() or str(item.get('market') or 'other') + '|' + str(item.get('store') or '') + '|' + str(item.get('title') or '') for item in final_all_results}
+                        for stale_key in [key for key in price_tasks if key not in current_keys]:
+                            stale_task = price_tasks.pop(stale_key, None)
+                            if stale_task:
+                                stale_task.cancel()
+                        sent = current_keys
+                        yield _web_stream_event({'event': 'snapshot', 'phase': 'local_late_update', 'authoritative': True, 'local_update': True, 'layout': 'exact_and_similar_v1', 'query': identity, 'market': final.get('market'), 'results': final_results, 'exact_results': final_results, 'similar_results': final_similar_results, 'all_results': final_all_results, 'result_sections': _web_result_sections(final_results, final_similar_results, lang), 'exact_count': len(final_results), 'similar_count': len(final_similar_results), 'local_count': sum(1 for row in final_results if int((row or {}).get('market_rank', 99)) == 0), 'elapsed_ms': int((time.time() - started) * 1000)})
+                        for item in final_all_results:
+                            key = str(item.get('url') or '').strip() or str(item.get('market') or 'other') + '|' + str(item.get('store') or '') + '|' + str(item.get('title') or '')
+                            if _web_row_has_numeric_price(item):
+                                priced_keys.add(key)
+                                stale_task = price_tasks.pop(key, None)
+                                if stale_task:
+                                    stale_task.cancel()
+                            else:
+                                _web_spawn_price_enrich_task(price_tasks, key, item, lang, market_snapshot)
+                        print(f'ANDROID LOCAL UPDATE SNAPSHOT exact={len(final_results)} local={sum(1 for row in final_results if int((row or {}).get("market_rank", 99)) == 0)} elapsed={time.time() - started:.1f}s')
                 async for _ev in _web_drain_price_enrich_events(price_tasks, priced_keys, started):
                     yield _ev
                 yield _web_stream_event({'event': 'done', 'count': len(sent), 'exact_count': len(final_results), 'similar_count': len(final_similar_results), 'elapsed_ms': int((time.time() - started) * 1000)})
@@ -10567,4 +10754,4 @@ async def web_api_image_search(request: Request):
 
 @app.get('/')
 async def health():
-    return {'status': 'v107.33 EXACT + SIMILAR SECTIONS | LOCKED IDENTITY | SAFE LIVE PRICES', 'lens_direct_mode': LENS_DIRECT_MODE, 'fast_lens': USE_FAST_LENS_PIPELINE, 'visual_exact_gate': LENS_VISUAL_EXACT_GATE, 'similar_sections': LENS_SIMILAR_RESULTS_ENABLED, 'v106_pipeline': USE_V106_5_RESULT_PIPELINE, 'build': BUILD_ID, 'market_source': 'phone_prefix', 'languages': ['ar','en','de','fr','it','es','pt','tr','ru','ja','zh','ko','hi','ur','id','ms']}
+    return {'status': 'v107.34 LIVE LOCAL UPDATE | EXACT + SIMILAR | SAFE LIVE PRICES', 'lens_direct_mode': LENS_DIRECT_MODE, 'fast_lens': USE_FAST_LENS_PIPELINE, 'visual_exact_gate': LENS_VISUAL_EXACT_GATE, 'late_local_update': WEB_LATE_LOCAL_UPDATE_ENABLED, 'similar_sections': LENS_SIMILAR_RESULTS_ENABLED, 'v106_pipeline': USE_V106_5_RESULT_PIPELINE, 'build': BUILD_ID, 'market_source': 'phone_prefix', 'languages': ['ar','en','de','fr','it','es','pt','tr','ru','ja','zh','ko','hi','ur','id','ms']}
