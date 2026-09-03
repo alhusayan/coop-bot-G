@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 import os, re, time, base64, requests, json, asyncio, urllib.parse, hashlib, sqlite3, threading, io, ast
 from collections import deque, defaultdict
-from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED, ALL_COMPLETED
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from fastapi import FastAPI, Request, Response, BackgroundTasks
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -17,7 +17,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept'], max_age=86400)
-BUILD_ID = 'v107.35-local-exact-similar'
+BUILD_ID = 'v107.25-instant-cards-live-prices-classified-only'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -64,7 +64,6 @@ OLD_SEARCH_POOL = ThreadPoolExecutor(max_workers=8)
 LENS_POOL = ThreadPoolExecutor(max_workers=4)
 LENS_HTTP_POOL = ThreadPoolExecutor(max_workers=12)
 MARKET_SUPPLEMENT_POOL = ThreadPoolExecutor(max_workers=3)
-PRICE_RESCUE_POOL = ThreadPoolExecutor(max_workers=4)
 OLD_LAYER_DUPLICATES = max(1, min(2, int(os.environ.get('OLD_LAYER_DUPLICATES', '1'))))
 HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
 
@@ -81,15 +80,6 @@ USE_V106_5_RESULT_PIPELINE = env_bool('USE_V106_5_RESULT_PIPELINE', True)
 # The old Lens flow still launched seven requests and two Gemini validators.
 # This switch makes first useful Lens evidence authoritative immediately.
 USE_FAST_LENS_PIPELINE = env_bool('USE_FAST_LENS_PIPELINE', True)
-# Pure-Python relevance gate for the fast Lens path.  It never calls Gemini or
-# opens product pages, so it can reject look-alike products without delaying
-# the first progressive snapshot.
-LENS_VISUAL_EXACT_GATE = env_bool('LENS_VISUAL_EXACT_GATE', True)
-LENS_VISUAL_EXACT_MIN_RESULTS = max(1, min(4, int(os.environ.get('LENS_VISUAL_EXACT_MIN_RESULTS', '2'))))
-LENS_VISUAL_EXACT_MODEL_SCORE = max(0.45, min(0.90, float(os.environ.get('LENS_VISUAL_EXACT_MODEL_SCORE', '0.64'))))
-LENS_VISUAL_EXACT_GENERIC_SCORE = max(0.40, min(0.85, float(os.environ.get('LENS_VISUAL_EXACT_GENERIC_SCORE', '0.54'))))
-LENS_SIMILAR_RESULTS_ENABLED = env_bool('LENS_SIMILAR_RESULTS_ENABLED', True)
-LENS_SIMILAR_MAX_RESULTS = max(2, min(18, int(os.environ.get('LENS_SIMILAR_MAX_RESULTS', '10'))))
 LENS_OVERLAP_MARKET_FALLBACK = env_bool('LENS_OVERLAP_MARKET_FALLBACK', True)
 ANDROID_IMAGE_PROGRESSIVE = env_bool('ANDROID_IMAGE_PROGRESSIVE', True)
 ANDROID_IMAGE_PROGRESSIVE_MIN_RESULTS = max(1, min(6, int(os.environ.get('ANDROID_IMAGE_PROGRESSIVE_MIN_RESULTS', '2'))))
@@ -1459,47 +1449,11 @@ def _market_presence_fallback(base_query, rank, limit=6):
     print(f'MARKET PRESENCE FALLBACK rank={rank} query={q[:70]!r} -> {len(merged)}')
     return merged
 
-def _lens_local_search_query(base_query):
-    """Return a product-only identity suitable for country-local search.
-
-    Lens titles often arrive as ``Amazon.com: Product`` or
-    ``Product | eBay``.  Sending those merchant decorations to a local Google
-    query suppresses genuine local stores, especially in smaller markets.
-    This cleanup is deliberately conservative and keeps brand/model/size.
-    """
-    q = _shopping_clean_query(base_query or '')
-    if not q:
-        return ''
-    q = re.sub(
-        r'^\s*(?:buy|shop|order)?\s*(?:amazon(?:\.[a-z]{2,3})?|ebay|walmart|best\s*buy|aliexpress|temu|shein|ubuy)(?:\.[a-z]{2,3})?\s*[:|\-–—]+\s*',
-        '',
-        q,
-        flags=re.I,
-    )
-    # A trailing pipe segment is normally the source/store emitted by Lens.
-    parts = [part.strip() for part in re.split(r'\s*[|•]\s*', q) if part.strip()]
-    if len(parts) > 1:
-        non_store = [part for part in parts if not re.fullmatch(r'(?i)(?:amazon(?:\.com)?|ebay|walmart|best\s*buy|aliexpress|temu|shein|ubuy|[\w .&\'-]{2,35}\.(?:com|net|org|shop))', part)]
-        if non_store:
-            q = max(non_store, key=len)
-    # Lens also appends a merchant after a Unicode dash (for example
-    # ``Marble Whisky Glasses ... – Macy's``).  Strip only known merchant
-    # names here so legitimate colour/model suffixes remain part of identity.
-    q = re.sub(
-        r'\s+[-–—]\s*(?:macy[\'\u2019]?s|amazon(?:\.[a-z]{2,3})?|ebay|walmart|best\s*buy|target|nordstrom|bloomingdale[\'\u2019]?s|harrods|dick[\'\u2019]?s\s+sporting\s+goods|level\s+shoes|noon|ubuy(?:\s+kuwait)?|intersport|svd|6th\s+street|aliexpress|temu|shein)(?:\.[a-z]{2,3})?\s*$',
-        '',
-        q,
-        flags=re.I,
-    )
-    q = re.sub(r'^\s*(?:buy|shop|order)\s+', '', q, flags=re.I)
-    q = re.sub(r'\s+(?:online|for\s+sale)(?:\s+(?:at|from)\s+[^|]{1,45})?\s*$', '', q, flags=re.I)
-    return re.sub(r'\s+', ' ', q).strip()
-
 def _single_local_lane_rescue(base_query, timeout_seconds=3.5, limit=6):
     """One quota-bounded local request used only while foreign rows are visible."""
     if not SERPAPI_API_KEY:
         return []
-    q = _lens_local_search_query(base_query)
+    q = _shopping_clean_query(base_query or '')
     if not q:
         return []
     local_cc = (current_market().get('country') or DEFAULT_COUNTRY).lower()
@@ -1676,46 +1630,15 @@ def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=Fal
         fast_started = time.monotonic()
         fast_deadline = fast_started + (LENS_TURBO_MAX_WAIT_SECONDS if USE_FAST_LENS_PIPELINE else min(LENS_FAST_READY_SECONDS, LENS_TOTAL_TIMEOUT_SECONDS))
         enough_fast = False
-        last_progress_signature = ()
-        relevance_lock = ''
-        first_relevance_identity = ''
-
-        def _search_relevance_state(items=None):
-            """Keep one stable photographed-product identity for this search."""
-            nonlocal relevance_lock, first_relevance_identity
-            source_items = merged if items is None else items
-            relevant, identity, raw_local, relevant_local = _lens_relevance_state(
-                source_items,
-                query_hint,
-                locked_identity=relevance_lock,
-            )
-            if not first_relevance_identity and identity and relevant:
-                first_relevance_identity = identity
-            # Two agreeing rows from the first completed Lens wave establish a
-            # stable photographed-product identity.  Later merchant/local rows
-            # can add stores, but cannot replace its brand/model with another
-            # visually similar product.
-            if not relevance_lock and identity and len(relevant) >= 2:
-                relevance_lock = identity
-                print(f'LENS IDENTITY LOCKED support={len(relevant)} identity={relevance_lock[:100]!r}')
-                relevant, identity, raw_local, relevant_local = _lens_relevance_state(
-                    source_items,
-                    query_hint,
-                    locked_identity=relevance_lock,
-                )
-            return relevant, identity, raw_local, relevant_local
+        last_progress_size = 0
 
         def _emit_progress_snapshot(reason, allow_foreign_first=False):
             """Publish usable Lens rows regardless of which fast-path produced them."""
-            nonlocal last_progress_signature
+            nonlocal last_progress_size
             if not (light and progress_callback):
                 return False
-            preview_allowed, _, raw_local_count, relevant_local_count = _search_relevance_state()
-            preview_signature = tuple(sorted(
-                ((x.get('title') or '').lower(), (x.get('link') or '').lower())
-                for x in preview_allowed
-            ))
-            if preview_signature == last_progress_signature:
+            preview_allowed = [dict(x) for x in merged if result_market_rank(x) != 99]
+            if len(preview_allowed) <= last_progress_size:
                 return False
             preview_counts = {r: sum((1 for x in preview_allowed if result_market_rank(x) == r)) for r in (0, 1, 2)}
             if len(preview_allowed) < ANDROID_IMAGE_PROGRESSIVE_MIN_RESULTS:
@@ -1725,8 +1648,8 @@ def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=Fal
             try:
                 preview_allowed.sort(key=lambda m: (result_market_rank(m), 0 if m.get('exact') else 1, 0 if m.get('section') == 'visual_matches' else 1, int(m.get('position') or 999)))
                 progress_callback({'aliases': [], 'matches': preview_allowed, 'query': (query_hint or (preview_allowed[0].get('title') if preview_allowed else '') or '').strip(), 'visual_identity': '', 'chosen': preview_allowed[0] if preview_allowed else {}, 'signature': {}, 'progressive': True})
-                last_progress_signature = preview_signature
-                print(f'LENS PROGRESSIVE SNAPSHOT reason={reason} relevant={len(preview_allowed)} counts={preview_counts} raw_local={raw_local_count} relevant_local={relevant_local_count} elapsed={time.monotonic() - fast_started:.1f}s')
+                last_progress_size = len(preview_allowed)
+                print(f'LENS PROGRESSIVE SNAPSHOT reason={reason} raw={len(preview_allowed)} counts={preview_counts} elapsed={time.monotonic() - fast_started:.1f}s')
                 return True
             except Exception as e:
                 print(f'LENS PROGRESSIVE CALLBACK ERR reason={reason}: {e}')
@@ -1736,13 +1659,13 @@ def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=Fal
             nonlocal local_rescue_future, local_rescue_started
             if local_rescue_started or (not LENS_LOCAL_LANE_RESCUE):
                 return local_rescue_future
-            relevant_rows, relevance_identity, raw_local_count, relevant_local_count = _search_relevance_state()
-            if relevant_local_count >= LENS_LOCAL_LANE_TARGET or not merged:
+            local_count = sum(1 for x in merged if result_market_rank(x) == 0)
+            if local_count or not merged:
                 return local_rescue_future
             elapsed = time.monotonic() - fast_started
             if (not force) and elapsed < LENS_LOCAL_RESCUE_AFTER_SECONDS:
                 return local_rescue_future
-            rescue_query = (relevance_identity or query_hint or (merged[0].get('title') if merged else '') or '').strip()
+            rescue_query = (query_hint or (merged[0].get('title') if merged else '') or '').strip()
             if not rescue_query:
                 return local_rescue_future
             local_rescue_started = True
@@ -1754,7 +1677,7 @@ def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=Fal
                 LENS_LOCAL_LANE_GRACE_SECONDS,
                 max(LENS_LOCAL_LANE_TARGET + 2, LENS_LOCAL_LANE_TARGET),
             )
-            print(f'LENS LOCAL LANE RESCUE START elapsed={elapsed:.1f}s country={user_country} raw_local={raw_local_count} relevant_local={relevant_local_count} query={rescue_query[:90]!r}')
+            print(f'LENS LOCAL LANE RESCUE START elapsed={elapsed:.1f}s country={user_country}')
             return local_rescue_future
 
         while pending and time.monotonic() < fast_deadline:
@@ -1780,8 +1703,7 @@ def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=Fal
             # First paint is never held back by a slow local market. The local
             # lane below remains alive and will replace/reorder the snapshot.
             _emit_progress_snapshot('fast_pass', allow_foreign_first=True)
-            _, _, _, relevant_local_count = _search_relevance_state()
-            if relevant_local_count == 0:
+            if rank_counts[0] == 0:
                 _start_local_rescue_if_needed()
             if USE_FAST_LENS_PIPELINE and enough_fast:
                 print(f'LENS TURBO EARLY RETURN READY useful={sum(rank_counts.values())} elapsed={time.monotonic() - fast_started:.2f}s')
@@ -1825,14 +1747,14 @@ def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=Fal
         if USE_FAST_LENS_PIPELINE and sparse_useful:
             _emit_progress_snapshot('pre_local_lane', allow_foreign_first=True)
 
-        _, _, raw_local_count, local_count = _search_relevance_state()
+        local_count = sum(1 for x in merged if result_market_rank(x) == 0)
         if USE_FAST_LENS_PIPELINE and merged and local_count < LENS_LOCAL_LANE_TARGET:
             local_lane_started = time.monotonic()
             rescue_due_at = fast_started + LENS_LOCAL_RESCUE_AFTER_SECONDS
-            print(f'LENS LOCAL LANE START relevant_local={local_count}/{LENS_LOCAL_LANE_TARGET} raw_local={raw_local_count} pending={len(pending)}')
+            print(f'LENS LOCAL LANE START local={local_count}/{LENS_LOCAL_LANE_TARGET} pending={len(pending)}')
             while local_count < LENS_LOCAL_LANE_TARGET and time.monotonic() < post_fast_deadline:
                 local_lens_pending = {fut for fut in pending if future_map[fut][1] == user_country}
-                _start_local_rescue_if_needed(force=(not local_lens_pending))
+                _start_local_rescue_if_needed(force=(local_count == 0 and not local_lens_pending))
                 waiters = set(local_lens_pending)
                 if local_rescue_future is not None:
                     waiters.add(local_rescue_future)
@@ -1864,9 +1786,9 @@ def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=Fal
                         _merge(fut.result() or [])
                     except Exception as e:
                         print(f'LENS LOCAL LANE FUTURE ERR type={lens_type} country={country}: {e}')
-                _, _, raw_local_count, local_count = _search_relevance_state()
+                local_count = sum(1 for x in merged if result_market_rank(x) == 0)
                 _emit_progress_snapshot('local_lane', allow_foreign_first=True)
-            print(f'LENS LOCAL LANE DONE relevant_local={local_count}/{LENS_LOCAL_LANE_TARGET} raw_local={raw_local_count} elapsed={time.monotonic() - local_lane_started:.2f}s rescue={local_rescue_started}')
+            print(f'LENS LOCAL LANE DONE local={local_count}/{LENS_LOCAL_LANE_TARGET} elapsed={time.monotonic() - local_lane_started:.2f}s rescue={local_rescue_started}')
 
         sparse_useful = sum(1 for x in merged if result_market_rank(x) in (0, 1, 2))
         if USE_FAST_LENS_PIPELINE and 0 < sparse_useful < LENS_TURBO_STRONG_RESULT_TARGET and pending:
@@ -1965,22 +1887,8 @@ def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=Fal
             market_rows = [m for m in allowed if result_market_rank(m) == rank]
             matches.extend(market_rows[:keep_caps[rank]])
         matches = matches[:max(LENS_RESULT_LIMIT, sum(keep_caps.values()))]
-        all_section_candidates = [dict(m) for m in matches]
-        # Never let an unrelated raw local card become the chosen identity or
-        # suppress the actual local rescue.  The UI still receives global rows
-        # immediately; this is an in-memory filter with no network wait.
-        matches, relevance_identity, raw_local_count, relevant_local_count = _search_relevance_state(matches)
-        # Sparse searches may never reach two agreeing rows.  Preserve the
-        # first credible visual identity instead of allowing the last/slowest
-        # merchant pass to rename the photographed product.
-        if not relevance_lock and first_relevance_identity:
-            relevance_lock = first_relevance_identity
-            matches, relevance_identity, raw_local_count, relevant_local_count = _search_relevance_state(matches)
-            print(f'LENS IDENTITY FINALIZED FROM FIRST WAVE identity={relevance_identity[:100]!r}')
-        similar_matches = _lens_similar_matches(relevance_identity, all_section_candidates, matches)
-        print(f'LENS SECTIONED FINAL exact={len(matches)} similar={len(similar_matches)} raw_local={raw_local_count} relevant_local={relevant_local_count} identity={relevance_identity[:90]!r}')
-        if not matches and not similar_matches:
-            print('GOOGLE LENS: no exact or safely similar visual matches after all passes')
+        if not matches:
+            print('GOOGLE LENS: no visual matches after all passes')
             return {'aliases': [], 'matches': [], 'query': ''}
         for i, m in enumerate(matches[:5], 1):
             print(f"LENS MATCH {i}: {m.get('title', '')} | {m.get('source', '')} | section={m.get('section', '')} exact={m.get('exact', False)}")
@@ -1998,13 +1906,13 @@ def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=Fal
             if m.get('thumbnail') or m.get('image'):
                 score += 20
             ranked.append((score, m))
-        chosen = max(ranked, key=lambda x: x[0])[1] if ranked else (matches[0] if matches else {'title': relevance_identity})
-        chosen_title = (relevance_identity or chosen.get('title') or '').strip()
+        chosen = max(ranked, key=lambda x: x[0])[1] if ranked else matches[0]
+        chosen_title = (chosen.get('title') or '').strip()
         if light:
             if USE_FAST_LENS_PIPELINE:
                 # Lens already identified and ranked the product. Returning its
                 # commercial title avoids the extra image-Gemini round trip.
-                return {'aliases': [chosen_title] if chosen_title else [], 'matches': matches, 'similar_matches': similar_matches, 'query': chosen_title, 'visual_identity': '', 'relevance_target': relevance_identity, 'chosen': chosen, 'signature': {}, 'source': 'lens_turbo'}
+                return {'aliases': [chosen_title] if chosen_title else [], 'matches': matches, 'query': chosen_title, 'visual_identity': '', 'chosen': chosen, 'signature': {}, 'source': 'lens_turbo'}
             visual_identity = ''
             try:
                 id_system = 'Identify the physical product in the image for shopping search. Return one concise English commercial identity only: product type + brand/model if visibly supported. Do not guess a brand/model. Do not mention colors unless identity-critical. No explanation.'
@@ -2013,7 +1921,7 @@ def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=Fal
                 print(f'LENS VISUAL IDENTITY: {visual_identity}')
             except Exception as e:
                 print(f'LENS VISUAL IDENTITY FAIL: {e}')
-            return {'aliases': [x for x in (visual_identity, chosen_title) if x], 'matches': matches, 'similar_matches': similar_matches, 'query': visual_identity or chosen_title, 'visual_identity': visual_identity, 'chosen': chosen, 'signature': {}}
+            return {'aliases': [x for x in (visual_identity, chosen_title) if x], 'matches': matches, 'query': visual_identity or chosen_title, 'visual_identity': visual_identity, 'chosen': chosen, 'signature': {}}
         sig_system = 'أنت خبير منتجات. الصورة هي المرجع الوحيد. استخرج اسماً عربياً وإنجليزياً ووصفاً شكلياً محافظاً. لا تخترع رقم موديل. حدد اللون الأساسي، النقشة أو الخامة الظاهرة، وهل المنتج مسطح أو بكعب. الرد سطر واحد فقط: Arabic name | English name | COLOR | PATTERN | HEEL | TYPE. HEEL واحدة من FLAT, LOW, HIGH, NONE, UNKNOWN. TYPE مثل MULES, SLIPPERS, SHOES, BAG, ELECTRONICS.'
         sig_txt, _ = call_gemini([{'inline_data': {'mime_type': mime_type, 'data': image_b64}}, {'text': f'Google Lens title hint: {chosen_title}'}], system=sig_system, use_search=False)
         fields = [x.strip() for x in ((sig_txt or '').strip().splitlines()[0] if sig_txt else '').split('|')]
@@ -2028,7 +1936,7 @@ def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=Fal
         query = ' | '.join(aliases[:3])
         print(f'GOOGLE LENS DIRECT MATCH: {query}')
         print(f'GOOGLE LENS SIGNATURE: {signature}')
-        return {'aliases': aliases[:3], 'matches': matches, 'similar_matches': similar_matches, 'query': query, 'chosen': chosen, 'signature': signature}
+        return {'aliases': aliases[:3], 'matches': matches, 'query': query, 'chosen': chosen, 'signature': signature}
     except Exception as e:
         print(f'GOOGLE LENS EXCEPTION: {e}')
         return {'aliases': [], 'matches': [], 'query': ''}
@@ -4763,7 +4671,6 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption='', image_
     raw_matches = [m for m in lens.get('matches') or [] if (m.get('title') or '').strip()]
     if exclude_domains or exclude_urls:
         raw_matches = [m for m in raw_matches if str(m.get('link') or '').strip() not in exclude_urls and _more_result_domain(m.get('link')) not in exclude_domains]
-    raw_matches = _lens_visual_exact_gate(lens, raw_matches)
     if not USE_FAST_LENS_PIPELINE:
         lens_for_filter = dict(lens or {})
         lens_for_filter['matches'] = raw_matches
@@ -4780,7 +4687,7 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption='', image_
             buckets[rank].append(m)
     for rank in buckets:
         _anchor = str(lens.get('visual_identity') or lens.get('relevance_target') or (lens.get('chosen') or {}).get('title') or '')
-        buckets[rank].sort(key=lambda m: (int(m.get('_visual_exact_tier', 9)), 0 if m.get('exact') else 1, 0 if m.get('section') == 'visual_matches' else 1, -round(_findzia_match_score(_anchor, m.get('title') or ''), 1) if _anchor else 0, 0 if _lens_has_price(m) else 1, int(m.get('position') or 999), _us_store_priority(m.get('source'), m.get('link')) if rank == 1 else _china_store_priority(m.get('source'), m.get('link')) if rank == 2 else 99))
+        buckets[rank].sort(key=lambda m: (0 if m.get('exact') else 1, 0 if m.get('section') == 'visual_matches' else 1, -_findzia_match_score(_anchor, m.get('title') or '') if _anchor else 0, 0 if _lens_has_price(m) else 1, int(m.get('position') or 999), _us_store_priority(m.get('source'), m.get('link')) if rank == 1 else _china_store_priority(m.get('source'), m.get('link')) if rank == 2 else 99))
         _active_probe_caps = {0: MORE_LOCAL_MAX, 1: MORE_US_MAX, 2: MORE_CN_MAX} if more_mode else {0: LENS_DIRECT_LOCAL_MAX, 1: LENS_DIRECT_US_MAX, 2: LENS_DIRECT_CN_MAX}
         _cap = _active_probe_caps.get(rank, 0)
         _probe_n = max(_cap + 2, _cap)
@@ -5219,14 +5126,7 @@ def _clean_store_name(name):
 _FINDZIA_ACCESSORY_TOKENS = {'case', 'cover', 'protector', 'guard', 'skin', 'sticker', 'decal', 'cable', 'cord', 'charger', 'adapter', 'adaptor', 'dock', 'stand', 'mount', 'holder', 'strap', 'band', 'sleeve', 'pouch', 'bag', 'lace', 'laces', 'shoelace', 'shoelaces', 'insole', 'insoles', 'sock', 'socks', 'replacement', 'spare', 'part', 'parts', 'accessory', 'accessories', 'manual', 'handbook', 'pdf', 'كفر', 'غطاء', 'حمايه', 'حماية', 'شاحن', 'كيبل', 'كابل', 'وصله', 'وصلة', 'حامل', 'سوار', 'رباط', 'اربطة', 'أربطة', 'جوارب', 'نعل', 'قطع', 'غيار', 'اكسسوار', 'اكسسوارات'}
 _FINDZIA_CONFLICT_GROUPS = (({'tennis', 'تنس'}, {'running', 'runner', 'jogging', 'basketball', 'soccer', 'football', 'golf', 'hiking', 'trail', 'padel', 'تنس', 'جري', 'ركض', 'سله', 'سلة', 'قدم', 'جولف', 'بادل'}), ({'running', 'runner', 'jogging', 'جري', 'ركض'}, {'tennis', 'basketball', 'soccer', 'football', 'golf', 'hiking', 'padel', 'تنس', 'سله', 'سلة', 'قدم', 'جولف', 'بادل'}), ({'padel', 'بادل'}, {'tennis', 'running', 'basketball', 'soccer', 'football', 'golf', 'hiking', 'تنس', 'جري', 'سله', 'سلة', 'قدم', 'جولف'}))
 _FINDZIA_QUERY_FILLER = {'buy', 'best', 'price', 'cheap', 'cheapest', 'online', 'shop', 'shopping', 'for', 'the', 'a', 'an', 'of', 'in', 'with', 'new', 'original', 'ابي', 'أبي', 'اريد', 'أريد', 'افضل', 'أفضل', 'ارخص', 'أرخص', 'سعر', 'شراء', 'اونلاين', 'أونلاين'}
-_FINDZIA_SPEC_UNITS = {'gb', 'tb', 'mb', 'kb', 'kg', 'g', 'mg', 'lb', 'lbs', 'oz', 'fl', 'floz', 'ounce', 'ounces', 'ml', 'l', 'cl', 'cc', 'liter', 'liters', 'litre', 'litres', 'cm', 'mm', 'm', 'inch', 'inches', 'in', 'ft', 'w', 'kw', 'watt', 'watts', 'mah', 'hz', 'khz', 'mhz', 'ghz', 'mp', 'pcs', 'pc', 'piece', 'pieces', 'count', 'ct', 'pack', 'packs', 'set', 'sets'}
-_FINDZIA_QUANTITY_WORDS = _FINDZIA_SPEC_UNITS | {
-    'of', 'per', 'each', 'pair', 'pairs', 'box', 'boxes', 'bottle', 'bottles',
-    'jar', 'jars', 'can', 'cans', 'case', 'cases', 'bundle', 'bundles',
-    'dozen', 'dozens', 'pk', 'pkt', 'qty', 'quantity', 'size', 'sizes',
-    'عدد', 'حبه', 'حبة', 'حبات', 'قطعه', 'قطعة', 'قطع', 'علبه', 'علبة',
-    'علب', 'زجاجه', 'زجاجة', 'زوج', 'طقم', 'كرتون', 'عبوه', 'عبوة'
-}
+_FINDZIA_SPEC_UNITS = {'gb', 'tb', 'mb', 'kb', 'kg', 'g', 'mg', 'lb', 'lbs', 'oz', 'ml', 'l', 'cl', 'cm', 'mm', 'm', 'inch', 'inches', 'in', 'ft', 'w', 'kw', 'mah', 'hz', 'khz', 'mhz', 'ghz', 'mp', 'mm', 'pcs', 'pc', 'pack', 'packs', 'set', 'sets'}
 _FINDZIA_PRICE_WORDS = {'kwd', 'kd', 'usd', 'sar', 'aed', 'qar', 'omr', 'bhd', 'cny', 'rmb', 'eur', 'gbp', 'دينار', 'ريال', 'درهم'}
 
 def _findzia_model_tokens(value):
@@ -5237,8 +5137,6 @@ def _findzia_model_tokens(value):
             continue
         low = tok.lower()
         if any((re.fullmatch(f'\\d+(?:\\.\\d+)?{re.escape(unit)}', low) for unit in _FINDZIA_SPEC_UNITS)):
-            continue
-        if any((re.fullmatch(f'{re.escape(word)}\\d+', low) for word in _FINDZIA_QUANTITY_WORDS)):
             continue
         if low in _FINDZIA_PRICE_WORDS:
             continue
@@ -5286,16 +5184,12 @@ def _findzia_hard_product_mismatch(query, title):
         other = set(alternatives) - set(wanted)
         if t & other and (not t & wanted):
             return True
-    q_models = _findzia_model_signatures(q_raw)
-    t_models = _findzia_model_signatures(t_raw)
+    q_models = _findzia_model_tokens(q_raw)
+    t_models = _findzia_model_tokens(t_raw)
     if q_models and t_models and (not q_models & t_models):
         return True
     q_nums = _findzia_pure_numbers(q_raw)
     t_nums = _findzia_pure_numbers(t_raw)
-    q_identifier_nums = {n for signature in q_models for n in re.findall('\\d+', signature)}
-    t_identifier_nums = {n for signature in t_models for n in re.findall('\\d+', signature)}
-    q_nums -= q_identifier_nums
-    t_nums -= t_identifier_nums
     shared_lex = _findzia_lexical_tokens(q_raw) & _findzia_lexical_tokens(t_raw)
     if q_nums and t_nums and (len(shared_lex) >= 2):
         shared_nums = q_nums & t_nums
@@ -5313,445 +5207,13 @@ def _findzia_match_score(query, title):
     if not q or not t:
         return 0.0
     overlap = len(q & t) / max(1, len(q))
-    q_models = _findzia_model_signatures(query)
-    t_models = _findzia_model_signatures(title)
+    q_models = _findzia_model_tokens(query)
+    t_models = _findzia_model_tokens(title)
     model_bonus = 0.38 if q_models and q_models & t_models else 0.0
     q_nums = _findzia_pure_numbers(query)
     t_nums = _findzia_pure_numbers(title)
     numeric_bonus = 0.12 if q_nums and q_nums & t_nums else 0.0
     return min(0.99, overlap * (0.5 if model_bonus else 0.78) + model_bonus + numeric_bonus)
-
-_FINDZIA_MODEL_JOIN_STOP = {
-    'for', 'with', 'and', 'the', 'new', 'men', 'mens', 'women', 'womens',
-    'size', 'sizes', 'model', 'item', 'pack', 'set', 'series', 'version',
-    'لرجال', 'للرجال', 'للنساء', 'نساء', 'رجال', 'مقاس', 'موديل', 'اصدار', 'إصدار'
-}
-_FINDZIA_VISUAL_COLORS = {
-    'black', 'white', 'red', 'blue', 'green', 'yellow', 'orange', 'purple',
-    'pink', 'brown', 'beige', 'grey', 'gray', 'silver', 'gold', 'navy',
-    'maroon', 'clear', 'transparent', 'multicolor', 'multicolour',
-    'اسود', 'أسود', 'ابيض', 'أبيض', 'احمر', 'أحمر', 'ازرق', 'أزرق',
-    'اخضر', 'أخضر', 'اصفر', 'أصفر', 'برتقالي', 'بنفسجي', 'وردي',
-    'بني', 'بيج', 'رمادي', 'فضي', 'ذهبي', 'شفاف', 'كحلي', 'عنابي'
-}
-
-def _findzia_model_signatures(value):
-    """Conservative SKU/model fingerprints, including split forms like RB 4179."""
-    raw = normalize_ar(str(value or '')).lower()
-    signatures = set(_findzia_model_tokens(raw))
-    pieces = re.findall('[a-z\\u0600-\\u06ff]+|\\d+', raw, flags=re.I)
-    for index in range(len(pieces) - 1):
-        left, right = pieces[index], pieces[index + 1]
-        left_low, right_low = left.lower(), right.lower()
-        left_alpha, right_alpha = left_low.isalpha(), right_low.isalpha()
-        left_num, right_num = left_low.isdigit(), right_low.isdigit()
-        if not ((left_alpha and right_num) or (left_num and right_alpha)):
-            continue
-        word = left_low if left_alpha else right_low
-        number = right_low if right_num else left_low
-        if word in _FINDZIA_MODEL_JOIN_STOP or word in _FINDZIA_SPEC_UNITS or word in _FINDZIA_PRICE_WORDS:
-            continue
-        number_index = index + 1 if right_num else index
-        word_index = index if left_alpha else index + 1
-        neighbours = {
-            pieces[pos].lower() for pos in (number_index - 1, number_index + 1)
-            if 0 <= pos < len(pieces)
-        }
-        # "Touch 500 ml", "Oil 245 ml" and "12 fl oz" describe a
-        # quantity/size, not a SKU.  Ignore the number even when the preceding
-        # product word is short enough to look like a model prefix.
-        if neighbours & _FINDZIA_QUANTITY_WORDS:
-            continue
-        dimension_number = any(
-            0 <= number_index + direction < len(pieces)
-            and pieces[number_index + direction].lower() == 'x'
-            and 0 <= number_index + (2 * direction) < len(pieces)
-            and pieces[number_index + (2 * direction)].isdigit()
-            for direction in (-1, 1)
-        )
-        if dimension_number:
-            continue
-        if word == 'x':
-            other_numeric = any(
-                0 <= pos < len(pieces) and pieces[pos].isdigit() and pos != number_index
-                for pos in (word_index - 1, word_index + 1)
-            )
-            if other_numeric:
-                continue
-        # Short alpha prefixes (RB 4179 / X 100) and long serial numbers are
-        # useful identifiers.  Avoid turning ordinary phrases such as
-        # "women 2024" into fake model numbers.
-        if len(word) <= 5:
-            signatures.add(left_low + right_low)
-    return {x for x in signatures if 3 <= len(x) <= 32}
-
-def _findzia_visual_colors(value):
-    return {x.lower() for x in norm_tokens(value) if x.lower() in _FINDZIA_VISUAL_COLORS}
-
-def _lens_generic_consensus_anchor(sample, chosen_title=''):
-    """Pick the title best supported by the Lens result cluster.
-
-    Generic goods often have no SKU.  In that case the first US result can be
-    a look-alike, while several later local/visual results agree on the actual
-    brand and product.  A small in-memory medoid calculation is more stable
-    than locking the first title and adds no network latency.
-    """
-    candidates = [m for m in list(sample or [])[:12] if (m.get('title') or '').strip()]
-    if not candidates:
-        return str(chosen_title or '').strip()
-    if len(candidates) == 1:
-        return str(candidates[0].get('title') or chosen_title or '').strip()
-
-    # Detect a repeated distinctive identity near the beginning of multiple
-    # titles (for example GLADELIG).  Do not let a majority store/category word
-    # such as IKEA, mug or grey become the identity merely because it appears
-    # in almost every listing.
-    token_stats = defaultdict(lambda: [0, 0.0])
-    for item in candidates:
-        raw_title = normalize_ar(str(item.get('title') or '')).lower()
-        ordered = re.findall('[\\w\\u0600-\\u06ff]+', raw_title)
-        seen = set()
-        for position, token in enumerate(ordered):
-            token = token[2:] if token.startswith('ال') and len(token) > 4 else token
-            if token in seen or token.isdigit() or len(token) < 3:
-                continue
-            if token in _FINDZIA_QUERY_FILLER or token in _FINDZIA_VISUAL_COLORS or token in _FINDZIA_QUANTITY_WORDS or token in _FINDZIA_PRICE_WORDS:
-                continue
-            seen.add(token)
-            token_stats[token][0] += 1
-            token_stats[token][1] += position
-    max_cluster_docs = max(2, (len(candidates) * 3 + 4) // 5)
-    identity_tokens = []
-    for token, (count, position_sum) in token_stats.items():
-        if 2 <= count <= max_cluster_docs:
-            average_position = position_sum / count
-            identity_tokens.append((-average_position, len(token), -count, token))
-    if identity_tokens:
-        identity_token = max(identity_tokens)[-1]
-        clustered = [m for m in candidates if identity_token in norm_tokens(m.get('title') or '')]
-        if len(clustered) >= 2:
-            candidates = clustered
-
-    ranked = []
-    for index, item in enumerate(candidates):
-        title = str(item.get('title') or '').strip()
-        similarities = []
-        for other_index, other in enumerate(candidates):
-            if other_index == index:
-                continue
-            other_title = str(other.get('title') or '').strip()
-            forward = _findzia_match_score(title, other_title)
-            reverse = _findzia_match_score(other_title, title)
-            similarities.append((forward + reverse) / 2.0)
-        similarities.sort(reverse=True)
-        strong_support = sum(1 for score in similarities if score >= 0.44)
-        support_score = sum(similarities[:5])
-        ranked.append((
-            strong_support,
-            round(support_score, 4),
-            1 if item.get('exact') else 0,
-            1 if item.get('section') == 'visual_matches' else 0,
-            1 if title == chosen_title else 0,
-            -int(item.get('position') or 999),
-            title,
-        ))
-    return max(ranked)[-1]
-
-def _lens_visual_exact_gate(lens, matches, log=True):
-    """Keep the photographed product, not merely visually similar products.
-
-    The gate uses Lens consensus, model/SKU signatures, colour conflicts and
-    the existing deterministic mismatch score.  It performs no network or AI
-    work and therefore remains safe in the instant-results path.
-    """
-    seq = [m for m in list(matches or []) if (m.get('title') or '').strip()]
-    if not LENS_VISUAL_EXACT_GATE or not seq:
-        return seq
-
-    def priority(item):
-        return (
-            0 if item.get('exact') else 1,
-            0 if item.get('section') == 'visual_matches' else 1,
-            int(item.get('position') or 999),
-        )
-
-    sample = sorted(seq, key=priority)[:14]
-    chosen_title = str(((lens or {}).get('chosen') or {}).get('title') or '').strip()
-    dynamic_consensus = bool((lens or {}).get('_visual_consensus_dynamic'))
-    locked_relevance = '' if dynamic_consensus else str((lens or {}).get('relevance_target') or '').strip()
-    locked_anchor = str((lens or {}).get('visual_identity') or locked_relevance).strip()
-    supplied_anchor = locked_anchor or chosen_title
-
-    signature_counts = defaultdict(int)
-    signature_first = {}
-    for index, item in enumerate(sample):
-        for signature in _findzia_model_signatures(item.get('title') or ''):
-            signature_counts[signature] += 1
-            signature_first.setdefault(signature, index)
-
-    chosen_signatures = _findzia_model_signatures(chosen_title)
-    exact_signatures = set()
-    for item in sample:
-        if item.get('exact'):
-            exact_signatures.update(_findzia_model_signatures(item.get('title') or ''))
-
-    trusted_signatures = {
-        signature for signature, count in signature_counts.items()
-        if count >= 2 or signature in exact_signatures
-    }
-    locked_signatures = _findzia_model_signatures(locked_anchor)
-    trusted_model = ''
-    model_pool = locked_signatures or trusted_signatures
-    if model_pool:
-        trusted_model = sorted(
-            model_pool,
-            key=lambda signature: (
-                -signature_counts.get(signature, 0),
-                0 if signature in chosen_signatures else 1,
-                signature_first.get(signature, 999),
-                -len(signature),
-            ),
-        )[0]
-
-    anchor = supplied_anchor
-    identity_basis = 'locked' if locked_anchor else 'chosen'
-    if trusted_model:
-        model_rows = [m for m in sample if trusted_model in _findzia_model_signatures(m.get('title') or '')]
-        if model_rows:
-            anchor = str(model_rows[0].get('title') or anchor).strip()
-        identity_basis = 'model'
-    elif not locked_anchor:
-        anchor = _lens_generic_consensus_anchor(sample, chosen_title) or anchor
-        identity_basis = 'consensus'
-    if not anchor:
-        anchor = str(sample[0].get('title') or '').strip()
-
-    anchor_colors = _findzia_visual_colors(anchor)
-    strict = []
-    rejected = []
-    tiers = defaultdict(int)
-    for item in seq:
-        title = str(item.get('title') or '').strip()
-        score = _findzia_match_score(anchor, title) if anchor else 0.0
-        item['_visual_match_score'] = round(score, 4)
-        if item.get('exact') and not _findzia_hard_product_mismatch(anchor, title):
-            item['_visual_exact_tier'] = 0
-            strict.append(item)
-            tiers[0] += 1
-            continue
-        if _findzia_hard_product_mismatch(anchor, title):
-            rejected.append(item)
-            continue
-
-        candidate_signatures = _findzia_model_signatures(title)
-        candidate_colors = _findzia_visual_colors(title)
-        color_conflict = bool(anchor_colors and candidate_colors and not (anchor_colors & candidate_colors))
-        if color_conflict:
-            rejected.append(item)
-            continue
-
-        if trusted_model:
-            if trusted_model in candidate_signatures:
-                item['_visual_exact_tier'] = 1
-                strict.append(item)
-                tiers[1] += 1
-                continue
-            # A different explicit SKU is a neighboring model, even when its
-            # shape is almost identical to the photographed item.
-            if candidate_signatures:
-                rejected.append(item)
-                continue
-            if score >= LENS_VISUAL_EXACT_MODEL_SCORE and item.get('section') == 'visual_matches':
-                item['_visual_exact_tier'] = 2
-                strict.append(item)
-                tiers[2] += 1
-                continue
-            rejected.append(item)
-            continue
-
-        threshold = LENS_VISUAL_EXACT_GENERIC_SCORE if item.get('section') == 'visual_matches' else max(0.64, LENS_VISUAL_EXACT_GENERIC_SCORE)
-        if score >= threshold:
-            item['_visual_exact_tier'] = 3
-            strict.append(item)
-            tiers[3] += 1
-        else:
-            rejected.append(item)
-
-    # With weak Lens identity, avoid an empty/one-card result caused by noisy
-    # listing titles.  The fallback is deliberately limited to the top visual
-    # matches and still rejects known accessories/model/category conflicts.
-    if len(strict) < LENS_VISUAL_EXACT_MIN_RESULTS and not trusted_model:
-        seen = {id(m) for m in strict}
-        for item in sample:
-            if id(item) in seen:
-                continue
-            title = str(item.get('title') or '').strip()
-            if item.get('section') != 'visual_matches' or _findzia_hard_product_mismatch(anchor, title):
-                continue
-            item['_visual_exact_tier'] = 4
-            item['_visual_match_score'] = round(_findzia_match_score(anchor, title), 4)
-            strict.append(item)
-            seen.add(id(item))
-            tiers[4] += 1
-            if len(strict) >= LENS_VISUAL_EXACT_MIN_RESULTS:
-                break
-
-    strict.sort(key=lambda item: (int(item.get('_visual_exact_tier', 9)), priority(item)))
-    if anchor:
-        lens['relevance_target'] = anchor
-        if trusted_model or locked_anchor:
-            lens.pop('_visual_consensus_dynamic', None)
-        else:
-            # Make the current consensus available to local rescue and price
-            # search, but allow a later, larger progressive snapshot to refine
-            # it instead of permanently locking an early two-card guess.
-            lens['_visual_consensus_dynamic'] = True
-    tier_text = ','.join(f'{tier}:{count}' for tier, count in sorted(tiers.items())) or 'none'
-    if log:
-        print(f'LENS VISUAL EXACT GATE basis={identity_basis} model={trusted_model or "none"} kept={len(strict)}/{len(seq)} rejected={len(seq) - len(strict)} tiers={tier_text} anchor={anchor[:90]}')
-    return strict
-
-_FINDZIA_SIMILAR_FAMILY_PATTERNS = (
-    ('body_spray', (r'\bbody\s+(?:spray|mist)\b', r'\bfragrance\s+mist\b', r'بودي\s*(?:سبراي|ميست)', r'معطر\s+جسم')),
-    ('body_oil', (r'\bbody\s+oil\b', r'زيت\s+جسم')),
-    ('body_lotion', (r'\bbody\s+(?:lotion|cream|butter)\b', r'لوشن\s+جسم', r'كريم\s+جسم')),
-    ('perfume', (r'\b(?:perfume|parfum|cologne|eau\s+de|fragrance)\b', r'\bعطر\b')),
-    ('running_footwear', (r'\b(?:running|jogging)\s+(?:shoe|shoes|sneaker|sneakers|trainer|trainers)\b', r'حذاء\s+(?:جري|ركض)')),
-    ('tennis_footwear', (r'\btennis\s+(?:shoe|shoes|sneaker|sneakers)\b', r'حذاء\s+تنس')),
-    ('hiking_footwear', (r'\b(?:hiking|trail)\s+(?:shoe|shoes|boot|boots)\b', r'حذاء\s+(?:هايكنج|مشي)')),
-    ('footwear', (r'\b(?:shoe|shoes|sneaker|sneakers|slipper|slippers|sandal|sandals|mule|mules|boot|boots|footwear)\b', r'\b(?:حذاء|احذيه|أحذية|صندل|شبشب|بوت)\b')),
-    ('sunglasses', (r'\b(?:sunglass|sunglasses|eyewear)\b', r'نظاره\s+شمسيه', r'نظارة\s+شمسية')),
-    ('drinkware', (r'\b(?:mug|mugs|coffee\s+cup|tea\s+cup|tumbler|tumblers)\b', r'\b(?:كوب|اكواب|أكواب|مج)\b')),
-    ('calculator', (r'\bcalculators?\b', r'\badding\s+machine\b', r'\b(?:حاسبه|حاسبة)\b')),
-    ('table_lamp', (r'\b(?:table|desk|bedside)\s+lamps?\b', r'\blamps?\b', r'\b(?:مصباح|لمبة)\s+(?:طاولة|مكتب)\b')),
-    ('handbag', (r'\b(?:handbag|handbags|purse|purses|tote\s+bag|shoulder\s+bag|crossbody)\b', r'\b(?:حقيبه|حقيبة|شنطه|شنطة)\b')),
-    ('dress', (r'\b(?:dress|dresses|gown|gowns)\b', r'\b(?:فستان|فساتين)\b')),
-    ('shirt', (r'\b(?:shirt|shirts|blouse|blouses|t-shirt|tee)\b', r'\b(?:قميص|بلوزه|بلوزة)\b')),
-    ('trousers', (r'\b(?:trouser|trousers|pants|jeans|leggings)\b', r'\b(?:بنطلون|جينز|ليقنز)\b')),
-    ('watch', (r'\b(?:watch|watches|smartwatch)\b', r'\b(?:ساعه|ساعة)\b')),
-    ('smartphone', (r'\b(?:smartphone|mobile\s+phone|iphone|galaxy\s+s\d+)\b', r'\b(?:هاتف|تلفون|موبايل)\b')),
-    ('laptop', (r'\b(?:laptop|notebook\s+computer|macbook|chromebook)\b', r'\b(?:لابتوب|لاب\s+توب)\b')),
-    ('tablet', (r'\b(?:tablet|ipad)\b', r'\b(?:تابلت|ايباد|آيباد)\b')),
-    ('headphones', (r'\b(?:headphone|headphones|earphone|earphones|earbuds|airpods)\b', r'\b(?:سماعه|سماعة|سماعات)\b')),
-    ('router', (r'\b(?:router|mesh\s+wifi|wi-?fi\s+router)\b', r'\b(?:راوتر|مقوي\s+شبكه|مقوي\s+شبكة)\b')),
-    ('camera', (r'\b(?:camera|mirrorless|dslr)\b', r'\b(?:كاميرا|كامره)\b')),
-)
-
-def _findzia_similar_family(value):
-    raw = normalize_ar(str(value or '')).lower()
-    for family, patterns in _FINDZIA_SIMILAR_FAMILY_PATTERNS:
-        if any(re.search(pattern, raw, flags=re.I) for pattern in patterns):
-            return family
-    return ''
-
-def _findzia_similar_candidate_ok(anchor, title):
-    """Require the same product family while allowing another brand/model."""
-    anchor = str(anchor or '').strip()
-    title = str(title or '').strip()
-    if not anchor or not title:
-        return False
-    q = norm_tokens(anchor)
-    t = norm_tokens(title)
-    if not q or not t:
-        return False
-    # Accessories never become alternatives to the complete photographed item.
-    if (t & _FINDZIA_ACCESSORY_TOKENS) - (q & _FINDZIA_ACCESSORY_TOKENS):
-        return False
-    for wanted, alternatives in _FINDZIA_CONFLICT_GROUPS:
-        if q & wanted:
-            other = set(alternatives) - set(wanted)
-            if t & other and not t & wanted:
-                return False
-    anchor_family = _findzia_similar_family(anchor)
-    candidate_family = _findzia_similar_family(title)
-    if anchor_family:
-        return candidate_family == anchor_family
-    shared = _findzia_lexical_tokens(anchor) & _findzia_lexical_tokens(title)
-    return len(shared) >= 2
-
-def _lens_similar_matches(anchor, candidates, exact_matches, limit=None):
-    """Recover safe alternatives from already-fetched Lens rows, without I/O."""
-    if not LENS_SIMILAR_RESULTS_ENABLED:
-        return []
-    limit = LENS_SIMILAR_MAX_RESULTS if limit is None else max(0, int(limit))
-    exact_keys = {
-        (_canonical_result_url(m.get('link') or ''), normalize_name(m.get('title') or ''))
-        for m in exact_matches or []
-    }
-    selected = []
-    seen = set()
-    q_tokens = _findzia_lexical_tokens(anchor)
-    for item in candidates or []:
-        title = str(item.get('title') or '').strip()
-        url = str(item.get('link') or '').strip()
-        key = (_canonical_result_url(url), normalize_name(title))
-        if not title or result_market_rank(item) == 99 or key in exact_keys or key in seen:
-            continue
-        if item.get('section') not in ('visual_matches', 'products', 'exact_matches', 'market_presence_fallback', 'local_google_organic_fallback'):
-            continue
-        if not _findzia_similar_candidate_ok(anchor, title):
-            continue
-        t_tokens = _findzia_lexical_tokens(title)
-        overlap = len(q_tokens & t_tokens) / max(1, len(q_tokens | t_tokens))
-        candidate = dict(item)
-        candidate['_visual_match_type'] = 'similar'
-        candidate['_similar_score'] = round(overlap, 4)
-        selected.append(candidate)
-        seen.add(key)
-    selected.sort(key=lambda m: (
-        result_market_rank(m),
-        0 if m.get('section') == 'visual_matches' else 1,
-        -float(m.get('_similar_score') or 0),
-        0 if _lens_has_price(m) else 1,
-        int(m.get('position') or 999),
-    ))
-    return selected[:limit]
-
-def _lens_relevance_state(matches, query_hint='', locked_identity=''):
-    """Return only identity-matching Lens rows and accurate local counts.
-
-    Lens can return a local card for a visually similar product before the
-    correct global cluster arrives.  Raw market counts must therefore never
-    decide whether the local lane is complete.  This helper reuses the exact
-    visual gate without logging or network work, then counts only survivors.
-    """
-    candidates = [dict(m) for m in list(matches or []) if result_market_rank(m) != 99 and (m.get('title') or '').strip()]
-    raw_local_count = sum(1 for m in candidates if result_market_rank(m) == 0)
-    if not candidates:
-        return [], (query_hint or '').strip(), raw_local_count, 0
-
-    def priority(item):
-        return (
-            0 if item.get('exact') else 1,
-            0 if item.get('section') == 'visual_matches' else 1,
-            int(item.get('position') or 999),
-        )
-
-    chosen = min(candidates, key=priority)
-    locked_identity = str(locked_identity or '').strip()
-    context = {
-        'aliases': [],
-        'matches': candidates,
-        'query': (query_hint or '').strip(),
-        'visual_identity': locked_identity,
-        'relevance_target': locked_identity,
-        'chosen': chosen,
-        'signature': {},
-    }
-    try:
-        relevant = _lens_visual_exact_gate(context, candidates, log=False)
-        if LENS_VISUAL_EXACT_GATE:
-            # Tier 4 was the old sparse-result fallback.  It belongs in the
-            # clearly-labelled Similar section, never in Exact matches.
-            relevant = [m for m in relevant if int(m.get('_visual_exact_tier', 9)) <= 3]
-    except Exception as exc:
-        # Keep the search usable if a future gate change fails, but expose the
-        # fallback in logs so a raw local row is never silently trusted.
-        print(f'LENS RELEVANCE STATE FALLBACK: {exc}')
-        relevant = candidates
-    identity = str(context.get('relevance_target') or query_hint or chosen.get('title') or '').strip()
-    relevant_local_count = sum(1 for m in relevant if result_market_rank(m) == 0)
-    return relevant, identity, raw_local_count, relevant_local_count
 
 def _findzia_stream_candidate_ok(query, item):
     title = str((item or {}).get('title') or (item or {}).get('line') or '')
@@ -7079,12 +6541,6 @@ WEB_PRICE_ENRICH_SHOPPING_MAX = max(0, min(10, int(os.environ.get('WEB_PRICE_ENR
 WEB_ASYNC_PRICE_PAGE_WINDOW_SECONDS = max(1.0, min(WEB_PRICE_ENRICH_MAX_WAIT_SECONDS, float(os.environ.get('WEB_ASYNC_PRICE_PAGE_WINDOW_SECONDS', '3.5'))))
 WEB_ASYNC_PRICE_SHARED_MARKETS = max(0, min(3, int(os.environ.get('WEB_ASYNC_PRICE_SHARED_MARKETS', '2'))))
 WEB_ASYNC_PRICE_CACHE_TTL_SECONDS = max(30, min(1800, int(os.environ.get('WEB_ASYNC_PRICE_CACHE_TTL_SECONDS', '300'))))
-WEB_ASYNC_PRICE_EXACT_RESCUE = env_bool('WEB_ASYNC_PRICE_EXACT_RESCUE', True)
-WEB_ASYNC_PRICE_EXACT_RESCUE_MAX = max(0, min(3, int(os.environ.get('WEB_ASYNC_PRICE_EXACT_RESCUE_MAX', '2'))))
-WEB_ASYNC_PRICE_EXACT_MIN_SCORE = max(0.72, min(0.95, float(os.environ.get('WEB_ASYNC_PRICE_EXACT_MIN_SCORE', '0.78'))))
-WEB_LATE_LOCAL_UPDATE_ENABLED = env_bool('WEB_LATE_LOCAL_UPDATE_ENABLED', True)
-WEB_LATE_LOCAL_UPDATE_TIMEOUT_SECONDS = max(3.0, min(8.0, float(os.environ.get('WEB_LATE_LOCAL_UPDATE_TIMEOUT_SECONDS', '7.0'))))
-WEB_LATE_LOCAL_UPDATE_TARGET = max(1, min(WEB_LOCAL_MAX or 1, int(os.environ.get('WEB_LATE_LOCAL_UPDATE_TARGET', str(WEB_LOCAL_MAX or 1)))))
 WEB_ASYNC_PRICE_CACHE = {}
 WEB_ASYNC_PRICE_CACHE_LOCK = threading.Lock()
 if USE_V106_5_RESULT_PIPELINE:
@@ -7122,7 +6578,7 @@ WEB_CHINA_GLOBAL_MAX_STORES = max(4, min(9, int(os.environ.get('WEB_CHINA_GLOBAL
 WEB_CHINA_ORGANIC_NUM = max(3, min(10, int(os.environ.get('WEB_CHINA_ORGANIC_NUM', '8'))))
 WEB_RATE_BUCKETS = defaultdict(deque)
 WEB_RATE_LOCK = threading.Lock()
-print(f'ANDROID/WEB PARITY exact={WEB_MATCH_WHATSAPP_EXACT} v106_pipeline={USE_V106_5_RESULT_PIPELINE} fast_lens={USE_FAST_LENS_PIPELINE} visual_exact_gate={LENS_VISUAL_EXACT_GATE} lens_wait={LENS_TURBO_MAX_WAIT_SECONDS}s empty_grace={LENS_TURBO_EMPTY_GRACE_SECONDS}s sparse_grace={LENS_TURBO_SPARSE_GRACE_SECONDS}s local_lane={LENS_LOCAL_LANE_TARGET}@{LENS_LOCAL_LANE_GRACE_SECONDS}s rescue_after={LENS_LOCAL_RESCUE_AFTER_SECONDS}s late_local={WEB_LATE_LOCAL_UPDATE_ENABLED}:{WEB_LATE_LOCAL_UPDATE_TARGET}@{WEB_LATE_LOCAL_UPDATE_TIMEOUT_SECONDS}s live_prices={WEB_ASYNC_PRICE_ENRICH_ENABLED} price_page_window={WEB_ASYNC_PRICE_PAGE_WINDOW_SECONDS}s shared_price_markets={WEB_ASYNC_PRICE_SHARED_MARKETS} exact_price_rescue={WEB_ASYNC_PRICE_EXACT_RESCUE_MAX} strong_target={LENS_TURBO_STRONG_RESULT_TARGET} caps local/us/cn={WEB_LOCAL_MAX}/{WEB_US_MAX}/{WEB_CN_MAX} legacy_turbo_available={WEB_STREAM_FAST_WAVE} store_timeout={WEB_STREAM_STORE_TIMEOUT}s progressive={ANDROID_IMAGE_PROGRESSIVE} shopping_geo_guard={SHOPPING_GEO_GUARD}')
+print(f'ANDROID/WEB PARITY exact={WEB_MATCH_WHATSAPP_EXACT} v106_pipeline={USE_V106_5_RESULT_PIPELINE} fast_lens={USE_FAST_LENS_PIPELINE} lens_wait={LENS_TURBO_MAX_WAIT_SECONDS}s empty_grace={LENS_TURBO_EMPTY_GRACE_SECONDS}s sparse_grace={LENS_TURBO_SPARSE_GRACE_SECONDS}s local_lane={LENS_LOCAL_LANE_TARGET}@{LENS_LOCAL_LANE_GRACE_SECONDS}s rescue_after={LENS_LOCAL_RESCUE_AFTER_SECONDS}s live_prices={WEB_ASYNC_PRICE_ENRICH_ENABLED} price_page_window={WEB_ASYNC_PRICE_PAGE_WINDOW_SECONDS}s shared_price_markets={WEB_ASYNC_PRICE_SHARED_MARKETS} strong_target={LENS_TURBO_STRONG_RESULT_TARGET} caps local/us/cn={WEB_LOCAL_MAX}/{WEB_US_MAX}/{WEB_CN_MAX} legacy_turbo_available={WEB_STREAM_FAST_WAVE} store_timeout={WEB_STREAM_STORE_TIMEOUT}s progressive={ANDROID_IMAGE_PROGRESSIVE} shopping_geo_guard={SHOPPING_GEO_GUARD}')
 
 def _web_request_ip(request):
     forwarded = str(request.headers.get('x-forwarded-for') or '').split(',')[0].strip()
@@ -7458,15 +6914,9 @@ def _web_brand_comparison(query, lang):
     txt = re.sub('\\n{3,}', '\n\n', '\n'.join(cleaned)).strip()
     return {'summary': txt, 'options': options}
 
-def _web_build_lens_items(lens, lang, caption='', match_group='exact'):
-    match_group = 'similar' if match_group == 'similar' else 'exact'
-    source_key = 'similar_matches' if match_group == 'similar' else 'matches'
-    raw_matches = [m for m in lens.get(source_key) or [] if (m.get('title') or '').strip()]
-    if match_group == 'exact':
-        raw_matches = _lens_visual_exact_gate(lens, raw_matches)
-        if LENS_VISUAL_EXACT_GATE:
-            raw_matches = [m for m in raw_matches if int(m.get('_visual_exact_tier', 9)) <= 3]
-    if match_group == 'exact' and not USE_FAST_LENS_PIPELINE:
+def _web_build_lens_items(lens, lang, caption=''):
+    raw_matches = [m for m in lens.get('matches') or [] if (m.get('title') or '').strip()]
+    if not USE_FAST_LENS_PIPELINE:
         lens_for_filter = dict(lens or {})
         lens_for_filter['matches'] = raw_matches
         raw_matches = _lens_ai_relevance_filter(lens_for_filter)
@@ -7482,7 +6932,7 @@ def _web_build_lens_items(lens, lang, caption='', match_group='exact'):
             buckets[rank].append(m)
     for rank in buckets:
         _anchor = str(lens.get('visual_identity') or lens.get('relevance_target') or (lens.get('chosen') or {}).get('title') or '')
-        buckets[rank].sort(key=lambda m: (int(m.get('_visual_exact_tier', 9)), 0 if m.get('exact') else 1, 0 if m.get('section') == 'visual_matches' else 1, -round(_findzia_match_score(_anchor, m.get('title') or ''), 1) if _anchor else 0, 0 if _lens_has_price(m) else 1, int(m.get('position') or 999), _us_store_priority(m.get('source'), m.get('link')) if rank == 1 else _china_store_priority(m.get('source'), m.get('link')) if rank == 2 else 99))
+        buckets[rank].sort(key=lambda m: (0 if m.get('exact') else 1, 0 if m.get('section') == 'visual_matches' else 1, -_findzia_match_score(_anchor, m.get('title') or '') if _anchor else 0, 0 if _lens_has_price(m) else 1, int(m.get('position') or 999), _us_store_priority(m.get('source'), m.get('link')) if rank == 1 else _china_store_priority(m.get('source'), m.get('link')) if rank == 2 else 99))
         cap = {0: WEB_LOCAL_MAX, 1: WEB_US_MAX, 2: WEB_CN_MAX}.get(rank, 0)
         probe_n = max(cap + 2, cap)
         head = _filter_confirmed_oos(buckets[rank][:probe_n], f'WEB-LENS-{rank}')
@@ -7562,10 +7012,10 @@ def _web_build_lens_items(lens, lang, caption='', match_group='exact'):
         rank = result_market_rank(m)
         cc = rank_cc.get(rank, '')
         shown_price = _lens_price_text_local(m, rank, lang)
-        results.append({'market': _web_market_label(rank), 'market_rank': rank, 'country': cc, 'flag': country_flag_emoji(cc), 'store': _ui_plain_store_name(m.get('source') or '', m.get('link') or '') or U(lang, 'store'), 'title': _compact_ui_title(display_title or m.get('title') or ''), 'price': shown_price, 'price_pending': not bool(shown_price), 'price_verified': bool(shown_price), 'url': (m.get('link') or '').strip(), 'image': m.get('thumbnail') or m.get('image') or '', 'match_type': match_group, 'result_section': match_group, 'best_price_eligible': match_group == 'exact'})
+        results.append({'market': _web_market_label(rank), 'market_rank': rank, 'country': cc, 'flag': country_flag_emoji(cc), 'store': _ui_plain_store_name(m.get('source') or '', m.get('link') or '') or U(lang, 'store'), 'title': _compact_ui_title(display_title or m.get('title') or ''), 'price': shown_price, 'price_pending': not bool(shown_price), 'price_verified': bool(shown_price), 'url': (m.get('link') or '').strip(), 'image': m.get('thumbnail') or m.get('image') or ''})
     return results
 
-_WEB_RESULT_SECTION_LABELS = {
+_WEB_CLASSIFICATION_LABELS = {
     'ar': ('مطابق للمنتج', 'منتجات مشابهة'),
     'en': ('Exact matches', 'Similar products'),
     'de': ('Exakte Treffer', 'Ähnliche Produkte'),
@@ -7584,32 +7034,60 @@ _WEB_RESULT_SECTION_LABELS = {
     'ms': ('Padanan tepat', 'Produk serupa'),
 }
 
-def _web_result_sections(exact_results, similar_results, lang):
-    exact_results = list(exact_results or [])
-    similar_results = list(similar_results or [])
-    exact_label, similar_label = _WEB_RESULT_SECTION_LABELS.get(lang, _WEB_RESULT_SECTION_LABELS['en'])
-    return [
+def _web_captured_result_is_exact(identity, title):
+    """Classify one already-captured card without filtering or doing I/O."""
+    identity = str(identity or '').strip()
+    title = str(title or '').strip()
+    if not identity or not title or _findzia_hard_product_mismatch(identity, title):
+        return False
+    identity_models = _findzia_model_tokens(identity)
+    title_models = _findzia_model_tokens(title)
+    if identity_models:
+        # A model-bearing photographed identity is exact only when the card
+        # explicitly carries that same model.  Other models remain visible in
+        # Similar; nothing is discarded.
+        return bool(identity_models & title_models)
+    # Without a model number, require strong coverage of the captured Lens
+    # identity.  The existing result order and contents remain untouched.
+    return _findzia_match_score(identity, title) >= 0.62
+
+def _web_attach_captured_result_sections(payload, lang):
+    """Add Exact/Similar views while preserving ``results`` byte-for-byte."""
+    out = dict(payload or {})
+    original_results = out.get('results')
+    results = list(original_results or [])
+    identity = str(out.get('query') or '').strip()
+    exact_results = []
+    similar_results = []
+    classified_results = []
+    for original in results:
+        row = dict(original or {})
+        if _web_captured_result_is_exact(identity, row.get('title') or ''):
+            row['match_type'] = 'exact'
+            row['result_section'] = 'exact'
+            row['best_price_eligible'] = True
+            exact_results.append(row)
+        else:
+            row['match_type'] = 'similar'
+            row['result_section'] = 'similar'
+            row['best_price_eligible'] = False
+            similar_results.append(row)
+        classified_results.append(row)
+    exact_label, similar_label = _WEB_CLASSIFICATION_LABELS.get(lang, _WEB_CLASSIFICATION_LABELS['en'])
+    # Keep the exact same original object/list under the legacy key so old web
+    # and app clients continue to receive every card in the original order.
+    out['results'] = original_results if original_results is not None else []
+    out['exact_results'] = exact_results
+    out['similar_results'] = similar_results
+    out['all_results'] = classified_results
+    out['result_sections'] = [
         {'id': 'exact', 'title': exact_label, 'collapsed': False, 'best_price_eligible': True, 'count': len(exact_results), 'results': exact_results},
         {'id': 'similar', 'title': similar_label, 'collapsed': True, 'best_price_eligible': False, 'count': len(similar_results), 'results': similar_results},
     ]
-
-def _web_sectioned_result_payload(base, exact_results, similar_results, lang):
-    payload = dict(base or {})
-    exact_results = list(exact_results or [])
-    similar_results = list(similar_results or [])
-    payload.update({
-        'layout': 'exact_and_similar_v1',
-        # Backward compatibility: old clients continue to treat only exact
-        # matches as the normal results/best-price pool.
-        'results': exact_results,
-        'exact_results': exact_results,
-        'similar_results': similar_results,
-        'all_results': exact_results + similar_results,
-        'result_sections': _web_result_sections(exact_results, similar_results, lang),
-        'exact_count': len(exact_results),
-        'similar_count': len(similar_results),
-    })
-    return payload
+    out['exact_count'] = len(exact_results)
+    out['similar_count'] = len(similar_results)
+    print(f'WEB POST-CAPTURE CLASSIFICATION total={len(results)} exact={len(exact_results)} similar={len(similar_results)} identity={identity[:90]!r}')
+    return out
 
 def _web_fallback_product_items(txt, urls, lang, query):
     offers = extract_store_offers(txt or '')
@@ -7640,28 +7118,6 @@ def _web_stream_event(payload):
     return (json.dumps(payload, ensure_ascii=False, separators=(',', ':')) + '\n').encode('utf-8')
 _WEB_BAD_PRICE_TERMS = ('per month', 'monthly', 'month plan', 'installment', 'instalment', 'pay monthly', 'monthly payment', 'emi', 'finance payment', 'قسطي', 'قسط', 'اقساط', 'أقساط', 'شهري')
 _WEB_WHOLESALE_TERMS = ('minimum order', 'min order', 'moq', 'wholesale', 'bulk order', 'fob', 'per piece', '/piece', 'piece price', 'sample price', 'supplier', 'حد ادنى للطلب', 'الحد الأدنى للطلب', 'جملة', 'بالجملة')
-_WEB_PRICE_USD_PER_UNIT = {'USD': 1.0, 'KWD': 3.25, 'BHD': 2.65, 'OMR': 2.60, 'GBP': 1.30, 'EUR': 1.10, 'AED': 0.272, 'SAR': 0.267, 'QAR': 0.275, 'CNY': 0.14, 'RMB': 0.14, 'JPY': 0.0068, 'CAD': 0.74, 'AUD': 0.66, 'CHF': 1.12, 'INR': 0.012, 'KRW': 0.00073, 'TRY': 0.031, 'RUB': 0.011}
-
-def _web_price_plausible_for_product(value, currency, title=''):
-    """Reject obvious minor-unit/page-number prices without delaying search."""
-    try:
-        numeric = float(value)
-    except Exception:
-        return False
-    if numeric <= 0:
-        return False
-    cur = str(currency or '').upper().strip()
-    usd_value = numeric * _WEB_PRICE_USD_PER_UNIT.get(cur, 1.0)
-    family = _findzia_similar_family(title or '')
-    if family in {'body_spray', 'body_oil', 'body_lotion', 'drinkware'}:
-        cap_usd = 5000.0
-    elif family in {'running_footwear', 'tennis_footwear', 'hiking_footwear', 'footwear'}:
-        cap_usd = 10000.0
-    elif family == 'perfume':
-        cap_usd = 20000.0
-    else:
-        cap_usd = 100000.0
-    return usd_value <= cap_usd
 
 def _web_fast_price_guard(row):
     row = dict(row or {})
@@ -7691,10 +7147,6 @@ def _web_fast_finalize_rows(rows, lang):
         val, _cur = _web_price_number_and_currency(existing)
         if val and _price_collides_with_product_spec(val, row.get('title'), row.get('_offer_meta')):
             print(f"WEB SIZE-AS-PRICE BLOCK store={row.get('store') or row.get('source')} value={val} title={(row.get('title') or '')[:90]}")
-            val = None
-            row['price'] = ''
-        if val and not _web_price_plausible_for_product(val, _cur or _web_market_currency(market_snapshot), row.get('title')):
-            print(f"WEB IMPLAUSIBLE PRICE BLOCK store={row.get('store') or row.get('source')} value={val} {_cur} title={(row.get('title') or '')[:90]}")
             val = None
             row['price'] = ''
         if val and val > 0:
@@ -7772,154 +7224,6 @@ def _web_fast_market_wave_sync(query, country, lang, rank):
     candidates = _market_presence_fallback(query, rank, limit=max(cap + 2, cap))
     rows = _web_market_candidates_to_items(candidates, rank, lang, query)
     return _web_require_product_image_rows(rows)
-
-def _web_result_identity_key(row):
-    row = row or {}
-    url = str(row.get('url') or row.get('link') or '').strip()
-    if url:
-        return 'url|' + _canonical_result_url(url)
-    return 'text|' + str(row.get('store') or row.get('source') or '').strip().casefold() + '|' + normalize_name(row.get('title') or '')
-
-def _web_late_local_update_sync(identity, country, lang, existing_exact, existing_similar):
-    """Add slow local cards after first paint, split into Exact and Similar.
-
-    The strict existing model guard owns Exact.  Same-family local products
-    rejected by that guard are retained only in the labelled Similar section.
-    This work is outside the first-render path and therefore cannot delay it.
-    """
-    query = _lens_local_search_query(identity)
-    exact = [dict(row or {}) for row in list(existing_exact or [])]
-    similar = [dict(row or {}) for row in list(existing_similar or [])]
-    if not query:
-        return None
-    current_local = sum(1 for row in exact if int(row.get('market_rank', 99)) == 0)
-    if current_local >= WEB_LATE_LOCAL_UPDATE_TARGET:
-        return None
-    market = _web_market(country)
-    MARKET_CTX.value = market
-    try:
-        raw_limit = max(WEB_LOCAL_MAX + LENS_SIMILAR_MAX_RESULTS + 4, 12)
-        raw_candidates = _market_presence_fallback(query, 0, limit=raw_limit)
-    except Exception as exc:
-        print(f'WEB LATE LOCAL SEARCH ERR query={query[:80]!r}: {exc}')
-        return None
-    raw_candidates = [dict(row or {}) for row in list(raw_candidates or []) if result_market_rank(row) == 0]
-    if not raw_candidates:
-        print(f'WEB LATE LOCAL EMPTY query={query[:80]!r}')
-        return None
-
-    # Exact conversion reuses the same strict model/text checks as the normal
-    # stream.  It deliberately does not weaken Exact to improve local counts.
-    late_exact_rows = _web_market_candidates_to_items(raw_candidates, 0, lang, query)
-    late_exact_rows = _web_require_product_image_rows(late_exact_rows)
-    exact_candidate_urls = {
-        _canonical_result_url(row.get('url') or '')
-        for row in late_exact_rows
-        if row.get('url')
-    }
-    raw_exact_candidates = [
-        row for row in raw_candidates
-        if _canonical_result_url(row.get('link') or '') in exact_candidate_urls
-    ]
-
-    # The remaining same-family rows are useful alternatives (for example a
-    # different Casio calculator model), but must never be presented as Exact.
-    raw_similar_candidates = _lens_similar_matches(
-        query,
-        raw_candidates,
-        raw_exact_candidates,
-        limit=max(LENS_SIMILAR_MAX_RESULTS, WEB_LOCAL_MAX),
-    )
-    similar_lens = {
-        'matches': [],
-        'similar_matches': raw_similar_candidates,
-        'query': query,
-        'visual_identity': query,
-        'relevance_target': query,
-        'chosen': {'title': query},
-    }
-    late_similar_rows = _web_build_lens_items(similar_lens, lang, '', 'similar')
-
-    existing_keys = {_web_result_identity_key(row) for row in exact + similar}
-    added_exact = []
-    for row in late_exact_rows:
-        key = _web_result_identity_key(row)
-        if not key or key in existing_keys:
-            continue
-        row['match_type'] = 'exact'
-        row['result_section'] = 'exact'
-        row['best_price_eligible'] = True
-        row['late_local_update'] = True
-        added_exact.append(row)
-        existing_keys.add(key)
-        if current_local + len(added_exact) >= WEB_LATE_LOCAL_UPDATE_TARGET:
-            break
-
-    added_similar = []
-    for row in late_similar_rows:
-        key = _web_result_identity_key(row)
-        if not key or key in existing_keys:
-            continue
-        row['match_type'] = 'similar'
-        row['result_section'] = 'similar'
-        row['best_price_eligible'] = False
-        row['late_local_update'] = True
-        added_similar.append(row)
-        existing_keys.add(key)
-        if len(added_similar) >= WEB_LOCAL_MAX:
-            break
-    if not added_exact and not added_similar:
-        print(f'WEB LATE LOCAL NO NEW CARDS query={query[:80]!r} raw={len(raw_candidates)}')
-        return None
-
-    local_exact = []
-    seen = set()
-    for row in [row for row in exact if int(row.get('market_rank', 99)) == 0] + added_exact:
-        key = _web_result_identity_key(row)
-        if key in seen:
-            continue
-        seen.add(key)
-        local_exact.append(row)
-    global_exact = []
-    for row in exact:
-        if int(row.get('market_rank', 99)) == 0:
-            continue
-        key = _web_result_identity_key(row)
-        if key in seen:
-            continue
-        seen.add(key)
-        global_exact.append(row)
-    total_cap = max(1, LENS_DIRECT_MAX_CTA)
-    merged_exact = (local_exact[:WEB_LOCAL_MAX] + global_exact)[:total_cap]
-    exact_keys = {_web_result_identity_key(row) for row in merged_exact}
-    local_similar = [row for row in similar if int(row.get('market_rank', 99)) == 0] + added_similar
-    global_similar = [row for row in similar if int(row.get('market_rank', 99)) != 0]
-    merged_similar = []
-    similar_seen = set(exact_keys)
-    for row in local_similar + global_similar:
-        key = _web_result_identity_key(row)
-        if not key or key in similar_seen:
-            continue
-        similar_seen.add(key)
-        merged_similar.append(row)
-        if len(merged_similar) >= LENS_SIMILAR_MAX_RESULTS:
-            break
-    final_exact_local = sum(1 for row in merged_exact if int(row.get('market_rank', 99)) == 0)
-    final_similar_local = sum(1 for row in merged_similar if int(row.get('market_rank', 99)) == 0)
-    added = added_exact + added_similar
-    print(
-        f'WEB LATE LOCAL UPDATE query={query[:70]!r} '
-        f'exact_local={current_local}->{final_exact_local} similar_local={final_similar_local} '
-        f'exact_added={len(added_exact)} similar_added={len(added_similar)} raw={len(raw_candidates)}'
-    )
-    return {
-        'exact_results': merged_exact,
-        'similar_results': merged_similar,
-        'added_results': added,
-        'query': query,
-        'local_exact_count': final_exact_local,
-        'local_similar_count': final_similar_local,
-    }
 
 def _web_stream_store_specs(query, country, rank):
     market = _web_market(country)
@@ -8375,10 +7679,6 @@ def _web_verify_card_strict(row, rank, lang, market_snapshot=None):
     if page_price and page_price > 0:
         if not page_cur:
             page_cur = _web_market_currency(market_snapshot) if rank == 0 else 'USD' if rank == 1 else 'CNY'
-        if not _web_price_plausible_for_product(page_price, page_cur, row.get('title')):
-            print(f"WEB PAGE PRICE REJECT store={row.get('store') or row.get('source')} value={page_price:g} {page_cur} title={(row.get('title') or '')[:90]}")
-            page_price = None
-    if page_price and page_price > 0:
         raw_price = f'{page_price:g} {page_cur}'.strip()
         row['price'] = _web_price_local_explicit(raw_price, rank, lang, market_snapshot)
         row['price'] = _web_normalize_existing_price_to_market(row['price'], rank, lang, market_snapshot)
@@ -8387,13 +7687,11 @@ def _web_verify_card_strict(row, rank, lang, market_snapshot=None):
         return row
     existing = str(row.get('price') or '').strip()
     val, cur = _web_price_number_and_currency(existing)
-    if val and val > 0 and _web_price_plausible_for_product(val, cur or (_web_market_currency(market_snapshot) if rank == 0 else 'USD' if rank == 1 else 'CNY'), row.get('title')):
+    if val and val > 0:
         row['price'] = _web_normalize_existing_price_to_market(existing, rank, lang, market_snapshot)
         row['price_verified'] = True
         row['price_source'] = row.get('price_source') or 'search_structured_rebased'
         return row
-    if val and val > 0:
-        print(f"WEB EXISTING PRICE REJECT store={row.get('store') or row.get('source')} value={val:g} {cur} title={(row.get('title') or '')[:90]}")
     if WEB_REQUIRE_NUMERIC_PRICE and (not WEB_KEEP_PRICELESS_RESULTS):
         print(f"WEB STRICT REJECT NO PRICE store={row.get('store') or row.get('source')} url={url[:140]}")
         return None
@@ -8409,8 +7707,6 @@ def _web_row_has_numeric_price(row):
     if not (val and val > 0):
         return False
     if _price_collides_with_product_spec(val, (row or {}).get('title'), (row or {}).get('_offer_meta')):
-        return False
-    if not _web_price_plausible_for_product(val, _cur or _web_market_currency(), (row or {}).get('title')):
         return False
     return True
 
@@ -8496,15 +7792,11 @@ def _web_enrich_row_price_sync(row, lang, market_snapshot, allow_shopping=True):
         if page_price and page_price > 0:
             if not page_cur:
                 page_cur = _web_market_currency(market_snapshot) if rank == 0 else 'USD' if rank == 1 else 'CNY'
-            if _web_price_plausible_for_product(page_price, page_cur, row.get('title')):
-                raw_price = f'{page_price:g} {page_cur}'.strip()
-                source_tag = 'product_page'
-            else:
-                print(f'WEB PAGE PRICE REJECT store={store} value={page_price:g} {page_cur} title={str(row.get("title") or "")[:90]}')
-        if not raw_price and allow_shopping:
+            raw_price = f'{page_price:g} {page_cur}'.strip()
+            source_tag = 'product_page'
+        elif allow_shopping:
             fb_val, fb_raw = _web_enrich_price_via_shopping(row, rank, market_snapshot)
-            fb_cur = detect_currency_code(fb_raw, _web_market_currency(market_snapshot) if rank == 0 else 'USD' if rank == 1 else 'CNY')
-            if fb_val and fb_val > 0 and _web_price_plausible_for_product(fb_val, fb_cur, row.get('title')):
+            if fb_val and fb_val > 0:
                 raw_price = fb_raw
                 source_tag = 'google_shopping_fallback'
         if not raw_price:
@@ -8602,9 +7894,6 @@ def _web_shared_price_market_sync(entries, rank, lang, market_snapshot):
             if not value or value <= 0:
                 continue
             currency = str(cand.get('currency') or '').upper().strip()
-            currency = currency or detect_currency_code(raw, _web_market_currency(market_snapshot) if rank == 0 else 'USD' if rank == 1 else 'CNY')
-            if not _web_price_plausible_for_product(value, currency, row_title):
-                continue
             if not raw:
                 currency = currency or (_web_market_currency(market_snapshot) if rank == 0 else 'USD' if rank == 1 else 'CNY')
                 raw = f'{value:g} {currency}'
@@ -8620,152 +7909,6 @@ def _web_shared_price_market_sync(entries, rank, lang, market_snapshot):
         enriched[key] = row
         print(f"WEB LIVE PRICE OK store={row.get('store')} rank={rank} score={best[1]:.2f} -> {row.get('price')}")
     return enriched
-
-def _web_url_product_ids(url):
-    raw = str(url or '')
-    found = set(re.findall(r'(?<!\d)\d{6,15}(?!\d)', raw))
-    try:
-        parsed = urllib.parse.urlparse(raw)
-        params = {str(k).lower(): v for k, v in urllib.parse.parse_qs(parsed.query).items()}
-        for key in ('id', 'item', 'itemid', 'product', 'productid', 'sku', 'skuid'):
-            for value in params.get(key, []):
-                token = re.sub('[^A-Za-z0-9_-]+', '', str(value))
-                if len(token) >= 5:
-                    found.add(token.lower())
-    except Exception:
-        pass
-    return found
-
-def _web_exact_card_price_rescue(key, source_row, lang, market_snapshot):
-    """Recover one blocked card by exact URL id/model and the same merchant."""
-    if market_snapshot:
-        MARKET_CTX.value = dict(market_snapshot)
-    row = dict(source_row or {})
-    url = str(row.get('url') or '').strip()
-    title = str(row.get('title') or '').strip()
-    host = _web_price_host(url)
-    if not url or not title or not host:
-        return None
-    cache_key = 'exact|' + _canonical_result_url(url)
-    now = time.time()
-    with WEB_ASYNC_PRICE_CACHE_LOCK:
-        cached = WEB_ASYNC_PRICE_CACHE.get(cache_key)
-    if cached and now - float(cached.get('ts') or 0) < WEB_ASYNC_PRICE_CACHE_TTL_SECONDS:
-        raw_cached = str(cached.get('price') or '')
-        if raw_cached:
-            row['price'] = _web_price_local_explicit(raw_cached, int(row.get('market_rank', 99)), lang, market_snapshot)
-            row['price'] = _web_normalize_existing_price_to_market(row['price'], int(row.get('market_rank', 99)), lang, market_snapshot)
-            row['price_verified'] = True
-            row['price_source'] = 'exact_card_cache'
-            row.pop('price_pending', None)
-            print(f"WEB EXACT PRICE CACHE HIT store={row.get('store')} -> {row.get('price')}")
-            return (key, row)
-    rank = int(row.get('market_rank', 99))
-    local_cc = str((market_snapshot or {}).get('country') or DEFAULT_COUNTRY).lower()
-    gl = local_cc if rank == 0 else 'us'
-    hl = country_search_hl(gl) if rank == 0 else 'en'
-    product_ids = _web_url_product_ids(url)
-    model_tokens = {str(x) for x in _findzia_model_tokens(title) if len(str(x)) >= 3}
-    identity_tokens = sorted(product_ids, key=len, reverse=True)[:2] + sorted(model_tokens, key=len, reverse=True)[:3]
-    exact_query = ' '.join(identity_tokens) or _shopping_clean_query(title)
-    request_futures = [PRICE_RESCUE_POOL.submit(_serpapi_google_organic_market_request, exact_query, gl, hl, host, WEB_STREAM_STORE_HTTP_TIMEOUT, 8)]
-    if _shopping_gl_supported(gl):
-        request_futures.append(PRICE_RESCUE_POOL.submit(_serpapi_shopping_request, f'{_shopping_clean_query(title)} site:{host}', gl, hl, WEB_STREAM_STORE_HTTP_TIMEOUT))
-    request_done, request_pending = wait(set(request_futures), timeout=WEB_STREAM_STORE_HTTP_TIMEOUT, return_when=ALL_COMPLETED)
-    candidates = []
-    for fut in request_done:
-        try:
-            returned = fut.result() or []
-        except Exception:
-            returned = []
-        if fut is request_futures[0]:
-            candidates.extend(returned)
-            continue
-        lens_cc = local_cc if rank == 0 else 'us' if rank == 1 else 'cn'
-        for card in returned:
-            item = _shopping_card_to_market_item(card, row.get('store') or '', lens_cc)
-            if item:
-                candidates.append(item)
-    for fut in request_pending:
-        fut.cancel()
-    best = None
-    best_quality = (-1, 0.0)
-    row_size = extract_pack_size(title)
-    for cand in candidates:
-        cand_url = str(cand.get('link') or '').strip()
-        cand_host = _web_price_host(cand_url)
-        if not cand_host or not (host == cand_host or host.endswith('.' + cand_host) or cand_host.endswith('.' + host)):
-            continue
-        cand_title = str(cand.get('title') or '')
-        cand_ids = _web_url_product_ids(cand_url)
-        id_match = int(bool(product_ids and (product_ids & cand_ids or any((pid in cand_url.lower() for pid in product_ids)))))
-        if (not id_match) and (_findzia_hard_product_mismatch(title, cand_title) or not sizes_compatible(row_size, extract_pack_size(cand_title))):
-            continue
-        score = _price_identity_score(title, cand_title)
-        # A title-only 0.68 match is too weak for price assignment: it allowed
-        # unrelated page numbers to become prices (for example 9000 KWD for a
-        # body spray). URL/product-id matches remain authoritative; otherwise
-        # require a much tighter same-product title match.
-        if not id_match and score < WEB_ASYNC_PRICE_EXACT_MIN_SCORE:
-            continue
-        raw_price = str(cand.get('price') or '').strip()
-        value = cand.get('price_value')
-        try:
-            value = float(value) if value not in (None, '') else None
-        except Exception:
-            value = None
-        if not value or value <= 0:
-            value, _ = _web_price_number_and_currency(raw_price)
-        if not value or value <= 0 or _price_collides_with_product_spec(value, title, cand.get('_offer_meta')):
-            continue
-        currency = str(cand.get('currency') or '').upper().strip()
-        currency = currency or detect_currency_code(raw_price, _web_market_currency(market_snapshot) if rank == 0 else 'USD' if rank == 1 else 'CNY')
-        if not _web_price_plausible_for_product(value, currency, title):
-            continue
-        if not raw_price:
-            currency = currency or (_web_market_currency(market_snapshot) if rank == 0 else 'USD' if rank == 1 else 'CNY')
-            raw_price = f'{value:g} {currency}'
-        quality = (id_match, score)
-        if quality > best_quality:
-            best = raw_price
-            best_quality = quality
-    with WEB_ASYNC_PRICE_CACHE_LOCK:
-        WEB_ASYNC_PRICE_CACHE[cache_key] = {'ts': now, 'price': best or ''}
-    if not best:
-        print(f'WEB EXACT PRICE MISS store={row.get("store")} ids={sorted(product_ids)[:2]} model={sorted(model_tokens)[:3]}')
-        return None
-    row['price'] = _web_price_local_explicit(best, rank, lang, market_snapshot)
-    row['price'] = _web_normalize_existing_price_to_market(row['price'], rank, lang, market_snapshot)
-    row['price_verified'] = True
-    row['price_source'] = 'exact_card_rescue'
-    row.pop('price_pending', None)
-    print(f'WEB EXACT PRICE OK store={row.get("store")} id_match={best_quality[0]} score={best_quality[1]:.2f} -> {row.get("price")}')
-    return (key, row)
-
-def _web_exact_price_rescue_batch(entries, lang, market_snapshot):
-    selected = sorted(
-        list((entries or {}).items()),
-        key=lambda kv: (0 if _web_url_product_ids((kv[1] or {}).get('url')) else 1, 0 if _findzia_model_tokens((kv[1] or {}).get('title') or '') else 1),
-    )[:WEB_ASYNC_PRICE_EXACT_RESCUE_MAX]
-    if not selected:
-        return {}
-    futures = {
-        LENS_HTTP_POOL.submit(_web_exact_card_price_rescue, key, row, lang, market_snapshot): key
-        for key, row in selected
-    }
-    done, pending = wait(set(futures), timeout=WEB_PRICE_ENRICH_MAX_WAIT_SECONDS, return_when=ALL_COMPLETED)
-    updates = {}
-    for fut in done:
-        try:
-            recovered = fut.result()
-        except Exception as e:
-            print(f'WEB EXACT PRICE ERR key={futures[fut][:90]}: {e}')
-            recovered = None
-        if recovered:
-            updates[recovered[0]] = recovered[1]
-    for fut in pending:
-        fut.cancel()
-    return updates
 
 def _web_spawn_price_enrich_task(price_tasks, key, item, lang, market_snapshot):
     if not ((WEB_PRICE_ENRICH_ENABLED or WEB_ASYNC_PRICE_ENRICH_ENABLED) and WEB_KEEP_PRICELESS_RESULTS):
@@ -8822,32 +7965,30 @@ async def _web_drain_price_enrich_events(price_tasks, priced_keys, started):
         task.cancel()
     market_snapshot = dict(next((getattr(task, '_findzia_price_market', {}) for task in price_tasks.values() if getattr(task, '_findzia_price_market', None)), {}) or {})
     lang = next((getattr(task, '_findzia_price_lang', '') for task in price_tasks.values() if getattr(task, '_findzia_price_lang', '')), 'en')
-    fallback_tasks = {}
     if WEB_ASYNC_PRICE_ENRICH_ENABLED and WEB_PRICE_ENRICH_SHOPPING_FALLBACK and missing and WEB_ASYNC_PRICE_SHARED_MARKETS > 0:
         ranks = [rank for rank in (0, 1, 2) if any((int((row or {}).get('market_rank', 99)) == rank for row in missing.values()))][:WEB_ASYNC_PRICE_SHARED_MARKETS]
-        for rank in ranks:
-            fallback_tasks[asyncio.create_task(asyncio.to_thread(_web_shared_price_market_sync, missing, rank, lang, market_snapshot))] = ('market', rank)
-    if WEB_ASYNC_PRICE_ENRICH_ENABLED and WEB_ASYNC_PRICE_EXACT_RESCUE and missing and WEB_ASYNC_PRICE_EXACT_RESCUE_MAX > 0:
-        fallback_tasks[asyncio.create_task(asyncio.to_thread(_web_exact_price_rescue_batch, missing, lang, market_snapshot))] = ('exact', None)
-    while fallback_tasks and loop.time() < deadline:
-        done, _ = await asyncio.wait(set(fallback_tasks), timeout=max(0.0, deadline - loop.time()), return_when=asyncio.FIRST_COMPLETED)
-        if not done:
-            break
-        for task in done:
-            kind, rank = fallback_tasks.pop(task)
-            try:
-                updates = task.result() or {}
-            except Exception as e:
-                print(f'WEB LIVE PRICE FALLBACK ERR kind={kind} rank={rank}: {e}')
-                updates = {}
-            phase = 'exact_card_price' if kind == 'exact' else 'shared_market_price'
-            for key, enriched in updates.items():
-                if key in priced_keys:
-                    continue
-                priced_keys.add(key)
-                yield _web_stream_event({'event': 'upsert', 'phase': phase, 'market': str(enriched.get('market') or 'other'), 'item': enriched, 'elapsed_ms': int((time.time() - started) * 1000)})
-    for task in fallback_tasks:
-        task.cancel()
+        shared_tasks = {
+            asyncio.create_task(asyncio.to_thread(_web_shared_price_market_sync, missing, rank, lang, market_snapshot)): rank
+            for rank in ranks
+        }
+        while shared_tasks and loop.time() < deadline:
+            done, _ = await asyncio.wait(set(shared_tasks), timeout=max(0.0, deadline - loop.time()), return_when=asyncio.FIRST_COMPLETED)
+            if not done:
+                break
+            for task in done:
+                rank = shared_tasks.pop(task)
+                try:
+                    updates = task.result() or {}
+                except Exception as e:
+                    print(f'WEB LIVE PRICE MARKET ERR rank={rank}: {e}')
+                    updates = {}
+                for key, enriched in updates.items():
+                    if key in priced_keys:
+                        continue
+                    priced_keys.add(key)
+                    yield _web_stream_event({'event': 'upsert', 'phase': 'shared_market_price', 'market': str(enriched.get('market') or 'other'), 'item': enriched, 'elapsed_ms': int((time.time() - started) * 1000)})
+        for task in shared_tasks:
+            task.cancel()
     for key, row in missing.items():
         if key in priced_keys:
             continue
@@ -9312,14 +8453,13 @@ def _web_search_image_sync(image_b64, mime, caption, country, lang, progress_cal
     if LENS_DIRECT_MODE and ENABLE_GOOGLE_LENS and SERPAPI_API_KEY and PUBLIC_BASE_URL:
         direct_attempted = True
         lens_direct = google_lens_lookup(image_b64, mime, lang, caption, light=True, progress_callback=progress_callback)
-        if lens_direct.get('matches') or lens_direct.get('similar_matches'):
+        if lens_direct.get('matches'):
             items = _web_build_lens_items(lens_direct, lang, caption)
-            similar_items = _web_build_lens_items(lens_direct, lang, caption, 'similar')
-            if items or similar_items:
+            if items:
                 identity = (lens_direct.get('visual_identity') or lens_direct.get('relevance_target') or lens_direct.get('query') or caption or '').strip()
                 if USE_V106_5_RESULT_PIPELINE or (WEB_MATCH_WHATSAPP_EXACT and (not WEB_TEXT_DENSE_PARITY)):
-                    print(f'ANDROID IMAGE SECTIONED PARITY: exact={len(items)} similar={len(similar_items)}; no WEB v89 supplement')
-                    return _web_sectioned_result_payload({'ok': True, 'type': 'results', 'query': identity, 'market': market, 'source': 'whatsapp_direct_lens_sectioned'}, items, similar_items, lang)
+                    print(f'ANDROID IMAGE TRUE PARITY: direct WhatsApp Lens set -> {len(items)} result(s); no WEB v89 supplement')
+                    return _web_attach_captured_result_sections({'ok': True, 'type': 'results', 'query': identity, 'market': market, 'results': items, 'source': 'whatsapp_direct_lens_exact'}, lang)
                 if WEB_IMAGE_SUPPLEMENT_WEAK_MARKETS and identity:
                     target = {0: WEB_IMAGE_TARGET_LOCAL, 1: WEB_IMAGE_TARGET_US, 2: WEB_IMAGE_TARGET_CN}
                     counts = {0: 0, 1: 0, 2: 0}
@@ -9355,10 +8495,6 @@ def _web_search_image_sync(image_b64, mime, caption, country, lang, progress_cal
                             if need <= 0:
                                 continue
                             for row in extra_by_rank.get(rank, []):
-                                row = dict(row or {})
-                                row['match_type'] = 'exact'
-                                row['result_section'] = 'exact'
-                                row['best_price_eligible'] = True
                                 url = str(row.get('url') or '').strip()
                                 sig = (str(row.get('store') or '').strip().lower(), normalize_name(row.get('title') or ''))
                                 if url and url in seen_urls or sig in seen_sig:
@@ -9373,7 +8509,7 @@ def _web_search_image_sync(image_b64, mime, caption, country, lang, progress_cal
                                     break
                         items.sort(key=lambda x: (int(x.get('market_rank', 99)), 0 if x.get('price') else 1))
                         print(f'WEB IMAGE v89 after supplement counts={counts} total={len(items)}')
-                return _web_sectioned_result_payload({'ok': True, 'type': 'results', 'query': identity, 'market': market, 'source': 'lens_direct_plus_market_supplement'}, items, similar_items, lang)
+                return _web_attach_captured_result_sections({'ok': True, 'type': 'results', 'query': identity, 'market': market, 'results': items, 'source': 'lens_direct_plus_market_supplement'}, lang)
     lens_future = None
     if not direct_attempted and LENS_PARALLEL_WITH_VISION and ENABLE_GOOGLE_LENS and SERPAPI_API_KEY and PUBLIC_BASE_URL:
         lens_future = LENS_POOL.submit(_run_with_market, market, google_lens_lookup, image_b64, mime, lang, caption)
@@ -9423,13 +8559,9 @@ def _web_search_image_sync(image_b64, mime, caption, country, lang, progress_cal
     else:
         txt, urls, query = ('', {}, caption)
     if not txt:
-        return _web_sectioned_result_payload({'ok': True, 'type': 'results', 'query': query, 'market': market, 'source': 'image_fallback'}, [], [], lang)
+        return _web_attach_captured_result_sections({'ok': True, 'type': 'results', 'query': query, 'market': market, 'results': [], 'source': 'image_fallback'}, lang)
     items = _web_fallback_product_items(txt, urls, lang, query)
-    for item in items:
-        item['match_type'] = 'exact'
-        item['result_section'] = 'exact'
-        item['best_price_eligible'] = True
-    return _web_sectioned_result_payload({'ok': True, 'type': 'results', 'query': query, 'market': market, 'source': 'image_fallback'}, items, [], lang)
+    return _web_attach_captured_result_sections({'ok': True, 'type': 'results', 'query': query, 'market': market, 'results': items, 'source': 'image_fallback'}, lang)
 
 def _web_normalize_country_code(value):
     cc = str(value or '').strip().lower()
@@ -10629,20 +9761,14 @@ async def web_api_image_search_stream(request: Request):
                 if identity and (not query_sent):
                     yield _web_stream_event({'event': 'query', 'query': identity, 'market': final.get('market')})
                 final_results = list(final.get('results') or [])
+                final_exact_results = list(final.get('exact_results') or [])
                 final_similar_results = list(final.get('similar_results') or [])
-                final_all_results = final_results + final_similar_results
-                late_local_task = None
-                initial_local_count = sum(1 for row in final_results if int((row or {}).get('market_rank', 99)) == 0)
-                if WEB_LATE_LOCAL_UPDATE_ENABLED and SERPAPI_API_KEY and identity and initial_local_count < WEB_LATE_LOCAL_UPDATE_TARGET:
-                    late_local_task = asyncio.create_task(asyncio.wait_for(
-                        asyncio.to_thread(_web_late_local_update_sync, identity, country, lang, final_results, final_similar_results),
-                        timeout=WEB_LATE_LOCAL_UPDATE_TIMEOUT_SECONDS,
-                    ))
-                    print(f'WEB LATE LOCAL START local={initial_local_count}/{WEB_LATE_LOCAL_UPDATE_TARGET} identity={_lens_local_search_query(identity)[:90]!r}')
-                yield _web_stream_event({'event': 'snapshot', 'phase': 'whatsapp_sectioned_final', 'authoritative': True, 'layout': 'exact_and_similar_v1', 'query': identity, 'market': final.get('market'), 'results': final_results, 'exact_results': final_results, 'similar_results': final_similar_results, 'all_results': final_all_results, 'result_sections': _web_result_sections(final_results, final_similar_results, lang), 'exact_count': len(final_results), 'similar_count': len(final_similar_results), 'elapsed_ms': int((time.time() - started) * 1000)})
-                print(f'ANDROID SECTIONED FINAL SNAPSHOT exact={len(final_results)} similar={len(final_similar_results)} preview={len(preview_keys)} elapsed={time.time() - started:.1f}s')
-                sent = {str(item.get('url') or '').strip() or str(item.get('market') or 'other') + '|' + str(item.get('store') or '') + '|' + str(item.get('title') or '') for item in final_all_results}
-                for item in final_all_results:
+                final_classified_results = list(final.get('all_results') or final_results)
+                final_sections = list(final.get('result_sections') or [])
+                yield _web_stream_event({'event': 'snapshot', 'phase': 'whatsapp_exact_final', 'authoritative': True, 'layout': 'exact_and_similar_v1', 'classification': 'post_capture_only', 'query': identity, 'market': final.get('market'), 'results': final_results, 'exact_results': final_exact_results, 'similar_results': final_similar_results, 'all_results': final_classified_results, 'result_sections': final_sections, 'exact_count': len(final_exact_results), 'similar_count': len(final_similar_results), 'elapsed_ms': int((time.time() - started) * 1000)})
+                print(f'ANDROID PROGRESSIVE FINAL SNAPSHOT results={len(final_results)} exact={len(final_exact_results)} similar={len(final_similar_results)} preview={len(preview_keys)} elapsed={time.time() - started:.1f}s')
+                sent = {str(item.get('url') or '').strip() or str(item.get('market') or 'other') + '|' + str(item.get('store') or '') + '|' + str(item.get('title') or '') for item in final_results}
+                for item in final_results:
                     key = str(item.get('url') or '').strip() or str(item.get('market') or 'other') + '|' + str(item.get('store') or '') + '|' + str(item.get('title') or '')
                     if _web_row_has_numeric_price(item):
                         priced_keys.add(key)
@@ -10651,41 +9777,9 @@ async def web_api_image_search_stream(request: Request):
                             t.cancel()
                     else:
                         _web_spawn_price_enrich_task(price_tasks, key, item, lang, market_snapshot)
-                if late_local_task is not None:
-                    try:
-                        local_update = await late_local_task
-                    except asyncio.TimeoutError:
-                        local_update = None
-                        print(f'WEB LATE LOCAL TIMEOUT after={WEB_LATE_LOCAL_UPDATE_TIMEOUT_SECONDS}s identity={_lens_local_search_query(identity)[:80]!r}')
-                    except Exception as exc:
-                        local_update = None
-                        print(f'WEB LATE LOCAL ERR: {exc}')
-                    if local_update:
-                        final_results = list(local_update.get('exact_results') or final_results)
-                        final_similar_results = list(local_update.get('similar_results') or final_similar_results)
-                        final_all_results = final_results + final_similar_results
-                        current_keys = {str(item.get('url') or '').strip() or str(item.get('market') or 'other') + '|' + str(item.get('store') or '') + '|' + str(item.get('title') or '') for item in final_all_results}
-                        for stale_key in [key for key in price_tasks if key not in current_keys]:
-                            stale_task = price_tasks.pop(stale_key, None)
-                            if stale_task:
-                                stale_task.cancel()
-                        sent = current_keys
-                        local_exact_count = sum(1 for row in final_results if int((row or {}).get('market_rank', 99)) == 0)
-                        local_similar_count = sum(1 for row in final_similar_results if int((row or {}).get('market_rank', 99)) == 0)
-                        yield _web_stream_event({'event': 'snapshot', 'phase': 'local_late_update', 'authoritative': True, 'local_update': True, 'layout': 'exact_and_similar_v1', 'query': identity, 'market': final.get('market'), 'results': final_results, 'exact_results': final_results, 'similar_results': final_similar_results, 'all_results': final_all_results, 'result_sections': _web_result_sections(final_results, final_similar_results, lang), 'exact_count': len(final_results), 'similar_count': len(final_similar_results), 'local_count': local_exact_count, 'local_exact_count': local_exact_count, 'local_similar_count': local_similar_count, 'elapsed_ms': int((time.time() - started) * 1000)})
-                        for item in final_all_results:
-                            key = str(item.get('url') or '').strip() or str(item.get('market') or 'other') + '|' + str(item.get('store') or '') + '|' + str(item.get('title') or '')
-                            if _web_row_has_numeric_price(item):
-                                priced_keys.add(key)
-                                stale_task = price_tasks.pop(key, None)
-                                if stale_task:
-                                    stale_task.cancel()
-                            else:
-                                _web_spawn_price_enrich_task(price_tasks, key, item, lang, market_snapshot)
-                        print(f'ANDROID LOCAL UPDATE SNAPSHOT exact={len(final_results)} similar={len(final_similar_results)} local_exact={local_exact_count} local_similar={local_similar_count} elapsed={time.time() - started:.1f}s')
                 async for _ev in _web_drain_price_enrich_events(price_tasks, priced_keys, started):
                     yield _ev
-                yield _web_stream_event({'event': 'done', 'count': len(sent), 'exact_count': len(final_results), 'similar_count': len(final_similar_results), 'elapsed_ms': int((time.time() - started) * 1000)})
+                yield _web_stream_event({'event': 'done', 'count': len(sent), 'exact_count': len(final_exact_results), 'similar_count': len(final_similar_results), 'elapsed_ms': int((time.time() - started) * 1000)})
                 return
             seed = await asyncio.to_thread(_web_image_seed_sync, image_b64, mime, caption, country, lang)
             identity = str(seed.get('query') or caption or '').strip()
@@ -10851,4 +9945,4 @@ async def web_api_image_search(request: Request):
 
 @app.get('/')
 async def health():
-    return {'status': 'v107.35 LOCAL EXACT + LOCAL SIMILAR | STABLE IMAGE IDENTITY | SAFE LIVE PRICES', 'lens_direct_mode': LENS_DIRECT_MODE, 'fast_lens': USE_FAST_LENS_PIPELINE, 'visual_exact_gate': LENS_VISUAL_EXACT_GATE, 'late_local_update': WEB_LATE_LOCAL_UPDATE_ENABLED, 'similar_sections': LENS_SIMILAR_RESULTS_ENABLED, 'v106_pipeline': USE_V106_5_RESULT_PIPELINE, 'build': BUILD_ID, 'market_source': 'phone_prefix', 'languages': ['ar','en','de','fr','it','es','pt','tr','ru','ja','zh','ko','hi','ur','id','ms']}
+    return {'status': 'v107.25 ORIGINAL ENGINE + POST-CAPTURE EXACT/SIMILAR CLASSIFICATION', 'lens_direct_mode': LENS_DIRECT_MODE, 'fast_lens': USE_FAST_LENS_PIPELINE, 'v106_pipeline': USE_V106_5_RESULT_PIPELINE, 'build': BUILD_ID, 'market_source': 'phone_prefix', 'languages': ['ar','en','de','fr','it','es','pt','tr','ru','ja','zh','ko','hi','ur','id','ms']}
