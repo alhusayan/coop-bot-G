@@ -17,7 +17,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept'], max_age=86400)
-BUILD_ID = 'v107.24-local-lane-turbo'
+BUILD_ID = 'v107.25-instant-cards-live-prices'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -6533,16 +6533,24 @@ WEB_LOCAL_STORE_PROBES = max(0, min(9, int(os.environ.get('WEB_LOCAL_STORE_PROBE
 WEB_FAST_SKIP_PRODUCT_PAGE_VERIFY = env_bool('WEB_FAST_SKIP_PRODUCT_PAGE_VERIFY', True)
 WEB_KEEP_PRICELESS_RESULTS = env_bool('WEB_KEEP_PRICELESS_RESULTS', True)
 WEB_PRICE_ENRICH_ENABLED = env_bool('WEB_PRICE_ENRICH_ENABLED', True)
+WEB_ASYNC_PRICE_ENRICH_ENABLED = env_bool('WEB_ASYNC_PRICE_ENRICH_ENABLED', True)
 WEB_PRICE_ENRICH_MAX_ROWS = max(2, min(24, int(os.environ.get('WEB_PRICE_ENRICH_MAX_ROWS', '14'))))
 WEB_PRICE_ENRICH_MAX_WAIT_SECONDS = max(2.0, min(12.0, float(os.environ.get('WEB_PRICE_ENRICH_MAX_WAIT_SECONDS', '6.5'))))
 WEB_PRICE_ENRICH_SHOPPING_FALLBACK = env_bool('WEB_PRICE_ENRICH_SHOPPING_FALLBACK', True)
 WEB_PRICE_ENRICH_SHOPPING_MAX = max(0, min(10, int(os.environ.get('WEB_PRICE_ENRICH_SHOPPING_MAX', '6'))))
+WEB_ASYNC_PRICE_PAGE_WINDOW_SECONDS = max(1.0, min(WEB_PRICE_ENRICH_MAX_WAIT_SECONDS, float(os.environ.get('WEB_ASYNC_PRICE_PAGE_WINDOW_SECONDS', '3.5'))))
+WEB_ASYNC_PRICE_SHARED_MARKETS = max(0, min(3, int(os.environ.get('WEB_ASYNC_PRICE_SHARED_MARKETS', '2'))))
+WEB_ASYNC_PRICE_CACHE_TTL_SECONDS = max(30, min(1800, int(os.environ.get('WEB_ASYNC_PRICE_CACHE_TTL_SECONDS', '300'))))
+WEB_ASYNC_PRICE_CACHE = {}
+WEB_ASYNC_PRICE_CACHE_LOCK = threading.Lock()
 if USE_V106_5_RESULT_PIPELINE:
     # Exact v106.5 extraction: return the engine winners immediately. Product
     # page image fetches, market expansion and price repair remain available to
     # the separate "more stores" flow, never to the initial search response.
     WEB_TEXT_DENSE_PARITY = False
     WEB_TEXT_IMAGE_ENRICH_ENABLED = False
+    # Blocking price verification stays disabled. The separate asynchronous
+    # hydrator may update already-visible cards without delaying first paint.
     WEB_PRICE_ENRICH_ENABLED = False
     WEB_REQUIRE_PRODUCT_IMAGE = False
 WEB_API_MAX_QUERY_CHARS = max(40, min(500, int(os.environ.get('WEB_API_MAX_QUERY_CHARS', '220'))))
@@ -6570,7 +6578,7 @@ WEB_CHINA_GLOBAL_MAX_STORES = max(4, min(9, int(os.environ.get('WEB_CHINA_GLOBAL
 WEB_CHINA_ORGANIC_NUM = max(3, min(10, int(os.environ.get('WEB_CHINA_ORGANIC_NUM', '8'))))
 WEB_RATE_BUCKETS = defaultdict(deque)
 WEB_RATE_LOCK = threading.Lock()
-print(f'ANDROID/WEB PARITY exact={WEB_MATCH_WHATSAPP_EXACT} v106_pipeline={USE_V106_5_RESULT_PIPELINE} fast_lens={USE_FAST_LENS_PIPELINE} lens_wait={LENS_TURBO_MAX_WAIT_SECONDS}s empty_grace={LENS_TURBO_EMPTY_GRACE_SECONDS}s sparse_grace={LENS_TURBO_SPARSE_GRACE_SECONDS}s local_lane={LENS_LOCAL_LANE_TARGET}@{LENS_LOCAL_LANE_GRACE_SECONDS}s rescue_after={LENS_LOCAL_RESCUE_AFTER_SECONDS}s strong_target={LENS_TURBO_STRONG_RESULT_TARGET} caps local/us/cn={WEB_LOCAL_MAX}/{WEB_US_MAX}/{WEB_CN_MAX} legacy_turbo_available={WEB_STREAM_FAST_WAVE} store_timeout={WEB_STREAM_STORE_TIMEOUT}s progressive={ANDROID_IMAGE_PROGRESSIVE} shopping_geo_guard={SHOPPING_GEO_GUARD}')
+print(f'ANDROID/WEB PARITY exact={WEB_MATCH_WHATSAPP_EXACT} v106_pipeline={USE_V106_5_RESULT_PIPELINE} fast_lens={USE_FAST_LENS_PIPELINE} lens_wait={LENS_TURBO_MAX_WAIT_SECONDS}s empty_grace={LENS_TURBO_EMPTY_GRACE_SECONDS}s sparse_grace={LENS_TURBO_SPARSE_GRACE_SECONDS}s local_lane={LENS_LOCAL_LANE_TARGET}@{LENS_LOCAL_LANE_GRACE_SECONDS}s rescue_after={LENS_LOCAL_RESCUE_AFTER_SECONDS}s live_prices={WEB_ASYNC_PRICE_ENRICH_ENABLED} price_page_window={WEB_ASYNC_PRICE_PAGE_WINDOW_SECONDS}s shared_price_markets={WEB_ASYNC_PRICE_SHARED_MARKETS} strong_target={LENS_TURBO_STRONG_RESULT_TARGET} caps local/us/cn={WEB_LOCAL_MAX}/{WEB_US_MAX}/{WEB_CN_MAX} legacy_turbo_available={WEB_STREAM_FAST_WAVE} store_timeout={WEB_STREAM_STORE_TIMEOUT}s progressive={ANDROID_IMAGE_PROGRESSIVE} shopping_geo_guard={SHOPPING_GEO_GUARD}')
 
 def _web_request_ip(request):
     forwarded = str(request.headers.get('x-forwarded-for') or '').split(',')[0].strip()
@@ -7003,7 +7011,8 @@ def _web_build_lens_items(lens, lang, caption=''):
     for m, display_title in zip(selected, display_titles):
         rank = result_market_rank(m)
         cc = rank_cc.get(rank, '')
-        results.append({'market': _web_market_label(rank), 'market_rank': rank, 'country': cc, 'flag': country_flag_emoji(cc), 'store': _ui_plain_store_name(m.get('source') or '', m.get('link') or '') or U(lang, 'store'), 'title': _compact_ui_title(display_title or m.get('title') or ''), 'price': _lens_price_text_local(m, rank, lang), 'url': (m.get('link') or '').strip(), 'image': m.get('thumbnail') or m.get('image') or ''})
+        shown_price = _lens_price_text_local(m, rank, lang)
+        results.append({'market': _web_market_label(rank), 'market_rank': rank, 'country': cc, 'flag': country_flag_emoji(cc), 'store': _ui_plain_store_name(m.get('source') or '', m.get('link') or '') or U(lang, 'store'), 'title': _compact_ui_title(display_title or m.get('title') or ''), 'price': shown_price, 'price_pending': not bool(shown_price), 'price_verified': bool(shown_price), 'url': (m.get('link') or '').strip(), 'image': m.get('thumbnail') or m.get('image') or ''})
     return results
 
 def _web_fallback_product_items(txt, urls, lang, query):
@@ -7732,8 +7741,103 @@ def _web_enrich_row_price_sync(row, lang, market_snapshot, allow_shopping=True):
         print(f'WEB PRICE ENRICH ERR: {e}')
         return None
 
+def _web_price_host(url):
+    try:
+        host = urllib.parse.urlparse(str(url or '')).netloc.lower().split(':')[0]
+        return host[4:] if host.startswith('www.') else host
+    except Exception:
+        return ''
+
+def _web_shared_price_candidates(query, rank, market_snapshot):
+    """One cached Shopping/Search request for every missing market, not every card."""
+    q = _shopping_clean_query(query or '')
+    if not q:
+        return []
+    local_cc = str((market_snapshot or {}).get('country') or DEFAULT_COUNTRY).lower()
+    gl = local_cc if rank == 0 else 'us'
+    cache_key = f'{rank}|{gl}|{q.casefold()}'
+    now = time.time()
+    with WEB_ASYNC_PRICE_CACHE_LOCK:
+        cached = WEB_ASYNC_PRICE_CACHE.get(cache_key)
+        if cached and now - float(cached.get('ts') or 0) < WEB_ASYNC_PRICE_CACHE_TTL_SECONDS:
+            print(f'WEB LIVE PRICE CACHE HIT rank={rank} query={q[:65]!r}')
+            return [dict(x) for x in cached.get('items') or []]
+    if rank == 0 and SHOPPING_GEO_GUARD and (not _shopping_gl_supported(gl)):
+        rows = _serpapi_google_organic_market_request(q, gl, hl=country_search_hl(gl), domain='', timeout_seconds=WEB_STREAM_STORE_HTTP_TIMEOUT, limit=10) if SHOPPING_UNSUPPORTED_ORGANIC_FALLBACK else []
+    else:
+        search_q = q
+        if rank == 2:
+            search_q = f'{q} site:aliexpress.com OR site:temu.com OR site:shein.com'
+        cards = _serpapi_shopping_request(search_q, gl, hl=country_search_hl(gl) if rank == 0 else 'en', timeout_seconds=WEB_STREAM_STORE_HTTP_TIMEOUT)
+        lens_cc = local_cc if rank == 0 else 'us' if rank == 1 else 'cn'
+        rows = []
+        for card in cards or []:
+            item = _shopping_card_to_market_item(card, card.get('source') or '', lens_cc)
+            if item and result_market_rank(item) == rank:
+                rows.append(item)
+    with WEB_ASYNC_PRICE_CACHE_LOCK:
+        WEB_ASYNC_PRICE_CACHE[cache_key] = {'ts': now, 'items': [dict(x) for x in rows]}
+        if len(WEB_ASYNC_PRICE_CACHE) > 1000:
+            oldest = sorted(WEB_ASYNC_PRICE_CACHE.items(), key=lambda kv: kv[1].get('ts', 0))[:200]
+            for old_key, _ in oldest:
+                WEB_ASYNC_PRICE_CACHE.pop(old_key, None)
+    print(f'WEB LIVE PRICE POOL rank={rank} query={q[:65]!r} -> {len(rows)} candidate(s)')
+    return rows
+
+def _web_shared_price_market_sync(entries, rank, lang, market_snapshot):
+    if market_snapshot:
+        MARKET_CTX.value = dict(market_snapshot)
+    rows = {key: dict(row) for key, row in (entries or {}).items() if int((row or {}).get('market_rank', 99)) == rank}
+    if not rows:
+        return {}
+    representative = max(rows.values(), key=lambda row: len(_identity_tokens(row.get('title') or '')))
+    candidates = _web_shared_price_candidates(representative.get('title') or '', rank, market_snapshot)
+    enriched = {}
+    for key, row in rows.items():
+        row_host = _web_price_host(row.get('url'))
+        row_title = str(row.get('title') or '')
+        row_size = extract_pack_size(row_title)
+        best = None
+        best_score = 0.0
+        for cand in candidates:
+            cand_host = _web_price_host(cand.get('link'))
+            if not row_host or not cand_host or not (row_host == cand_host or row_host.endswith('.' + cand_host) or cand_host.endswith('.' + row_host)):
+                continue
+            cand_title = str(cand.get('title') or '')
+            if _findzia_hard_product_mismatch(row_title, cand_title) or not sizes_compatible(row_size, extract_pack_size(cand_title)):
+                continue
+            score = _price_identity_score(row_title, cand_title)
+            if score < 0.62 or score <= best_score:
+                continue
+            raw = str(cand.get('price') or '').strip()
+            value = cand.get('price_value')
+            try:
+                value = float(value) if value not in (None, '') else None
+            except Exception:
+                value = None
+            if not value or value <= 0:
+                value, _ = _web_price_number_and_currency(raw)
+            if not value or value <= 0:
+                continue
+            currency = str(cand.get('currency') or '').upper().strip()
+            if not raw:
+                currency = currency or (_web_market_currency(market_snapshot) if rank == 0 else 'USD' if rank == 1 else 'CNY')
+                raw = f'{value:g} {currency}'
+            best = (raw, score)
+            best_score = score
+        if not best:
+            continue
+        row['price'] = _web_price_local_explicit(best[0], rank, lang, market_snapshot)
+        row['price'] = _web_normalize_existing_price_to_market(row['price'], rank, lang, market_snapshot)
+        row['price_verified'] = True
+        row['price_source'] = 'shared_market_price_pool'
+        row.pop('price_pending', None)
+        enriched[key] = row
+        print(f"WEB LIVE PRICE OK store={row.get('store')} rank={rank} score={best[1]:.2f} -> {row.get('price')}")
+    return enriched
+
 def _web_spawn_price_enrich_task(price_tasks, key, item, lang, market_snapshot):
-    if not (WEB_PRICE_ENRICH_ENABLED and WEB_KEEP_PRICELESS_RESULTS):
+    if not ((WEB_PRICE_ENRICH_ENABLED or WEB_ASYNC_PRICE_ENRICH_ENABLED) and WEB_KEEP_PRICELESS_RESULTS):
         return
     if key in price_tasks or len(price_tasks) >= WEB_PRICE_ENRICH_MAX_ROWS:
         return
@@ -7741,9 +7845,15 @@ def _web_spawn_price_enrich_task(price_tasks, key, item, lang, market_snapshot):
         return
     if not str((item or {}).get('url') or '').strip():
         return
-    allow_shopping = len(price_tasks) < WEB_PRICE_ENRICH_SHOPPING_MAX
+    # The live path reads the product page only. Google fallback is shared by
+    # market later, preventing one paid request per missing card.
+    allow_shopping = bool(WEB_PRICE_ENRICH_ENABLED and (not WEB_ASYNC_PRICE_ENRICH_ENABLED) and len(price_tasks) < WEB_PRICE_ENRICH_SHOPPING_MAX)
     try:
-        price_tasks[key] = asyncio.create_task(asyncio.to_thread(_web_enrich_row_price_sync, dict(item), lang, market_snapshot, allow_shopping))
+        task = asyncio.create_task(asyncio.to_thread(_web_enrich_row_price_sync, dict(item), lang, market_snapshot, allow_shopping))
+        task._findzia_price_row = dict(item)
+        task._findzia_price_lang = lang
+        task._findzia_price_market = dict(market_snapshot or {})
+        price_tasks[key] = task
         print(f"WEB PRICE ENRICH SPAWN store={item.get('store') or item.get('source')} fallback={('on' if allow_shopping else 'quota_off')} url={str(item.get('url'))[:110]}")
     except Exception as e:
         print(f'WEB PRICE ENRICH SPAWN ERR: {e}')
@@ -7753,19 +7863,68 @@ async def _web_drain_price_enrich_events(price_tasks, priced_keys, started):
         return
     loop = asyncio.get_running_loop()
     deadline = loop.time() + WEB_PRICE_ENRICH_MAX_WAIT_SECONDS
-    for key, task in list(price_tasks.items()):
-        remaining = deadline - loop.time()
-        if remaining <= 0:
+    page_deadline = min(deadline, loop.time() + WEB_ASYNC_PRICE_PAGE_WINDOW_SECONDS)
+    pending = {task: key for key, task in list(price_tasks.items())}
+    missing = {}
+    while pending and loop.time() < page_deadline:
+        done, _ = await asyncio.wait(set(pending), timeout=max(0.0, page_deadline - loop.time()), return_when=asyncio.FIRST_COMPLETED)
+        if not done:
+            break
+        for task in done:
+            key = pending.pop(task)
+            source_row = dict(getattr(task, '_findzia_price_row', {}) or {})
+            try:
+                enriched = task.result()
+            except asyncio.CancelledError:
+                enriched = None
+            except Exception:
+                enriched = None
+            if enriched and key not in priced_keys:
+                priced_keys.add(key)
+                yield _web_stream_event({'event': 'upsert', 'phase': 'price_enrich', 'market': str(enriched.get('market') or 'other'), 'item': enriched, 'elapsed_ms': int((time.time() - started) * 1000)})
+            elif source_row and key not in priced_keys:
+                missing[key] = source_row
+    for task, key in list(pending.items()):
+        source_row = dict(getattr(task, '_findzia_price_row', {}) or {})
+        if source_row and key not in priced_keys:
+            missing[key] = source_row
+        task.cancel()
+    market_snapshot = dict(next((getattr(task, '_findzia_price_market', {}) for task in price_tasks.values() if getattr(task, '_findzia_price_market', None)), {}) or {})
+    lang = next((getattr(task, '_findzia_price_lang', '') for task in price_tasks.values() if getattr(task, '_findzia_price_lang', '')), 'en')
+    if WEB_ASYNC_PRICE_ENRICH_ENABLED and WEB_PRICE_ENRICH_SHOPPING_FALLBACK and missing and WEB_ASYNC_PRICE_SHARED_MARKETS > 0:
+        ranks = [rank for rank in (0, 1, 2) if any((int((row or {}).get('market_rank', 99)) == rank for row in missing.values()))][:WEB_ASYNC_PRICE_SHARED_MARKETS]
+        shared_tasks = {
+            asyncio.create_task(asyncio.to_thread(_web_shared_price_market_sync, missing, rank, lang, market_snapshot)): rank
+            for rank in ranks
+        }
+        while shared_tasks and loop.time() < deadline:
+            done, _ = await asyncio.wait(set(shared_tasks), timeout=max(0.0, deadline - loop.time()), return_when=asyncio.FIRST_COMPLETED)
+            if not done:
+                break
+            for task in done:
+                rank = shared_tasks.pop(task)
+                try:
+                    updates = task.result() or {}
+                except Exception as e:
+                    print(f'WEB LIVE PRICE MARKET ERR rank={rank}: {e}')
+                    updates = {}
+                for key, enriched in updates.items():
+                    if key in priced_keys:
+                        continue
+                    priced_keys.add(key)
+                    yield _web_stream_event({'event': 'upsert', 'phase': 'shared_market_price', 'market': str(enriched.get('market') or 'other'), 'item': enriched, 'elapsed_ms': int((time.time() - started) * 1000)})
+        for task in shared_tasks:
             task.cancel()
+    for key, row in missing.items():
+        if key in priced_keys:
             continue
-        try:
-            enriched = await asyncio.wait_for(task, timeout=remaining)
-        except Exception:
-            enriched = None
-        if not enriched or key in priced_keys:
-            continue
+        unresolved = dict(row)
+        unresolved['price'] = ''
+        unresolved['price_pending'] = False
+        unresolved['price_unavailable'] = True
+        unresolved['price_status'] = 'store_only'
         priced_keys.add(key)
-        yield _web_stream_event({'event': 'upsert', 'phase': 'price_enrich', 'market': str(enriched.get('market') or 'other'), 'item': enriched, 'elapsed_ms': int((time.time() - started) * 1000)})
+        yield _web_stream_event({'event': 'upsert', 'phase': 'price_unavailable', 'market': str(unresolved.get('market') or 'other'), 'item': unresolved, 'elapsed_ms': int((time.time() - started) * 1000)})
 
 def _web_verify_rows_strict(rows, lang):
     rows = list(rows or [])
@@ -9708,4 +9867,4 @@ async def web_api_image_search(request: Request):
 
 @app.get('/')
 async def health():
-    return {'status': 'v107.24 LOCAL-LANE TURBO + INSTANT PROGRESS', 'lens_direct_mode': LENS_DIRECT_MODE, 'fast_lens': USE_FAST_LENS_PIPELINE, 'v106_pipeline': USE_V106_5_RESULT_PIPELINE, 'build': BUILD_ID, 'market_source': 'phone_prefix', 'languages': ['ar','en','de','fr','it','es','pt','tr','ru','ja','zh','ko','hi','ur','id','ms']}
+    return {'status': 'v107.25 LOCAL-LANE TURBO + LIVE CARD PRICES', 'lens_direct_mode': LENS_DIRECT_MODE, 'fast_lens': USE_FAST_LENS_PIPELINE, 'v106_pipeline': USE_V106_5_RESULT_PIPELINE, 'build': BUILD_ID, 'market_source': 'phone_prefix', 'languages': ['ar','en','de','fr','it','es','pt','tr','ru','ja','zh','ko','hi','ur','id','ms']}
