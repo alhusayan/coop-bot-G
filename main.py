@@ -17,7 +17,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept'], max_age=86400)
-BUILD_ID = 'v107.27-ai-batch-exact-local-classifier'
+BUILD_ID = 'v107.27.1-hybrid-instant-classifier'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -6679,7 +6679,7 @@ WEB_MATCH_WHATSAPP_EXACT = env_bool('WEB_MATCH_WHATSAPP_EXACT', True)
 # path as much as possible; the proven deterministic classifier remains the
 # immediate fallback.
 WEB_AI_CLASSIFIER_ENABLED = env_bool('WEB_AI_CLASSIFIER_ENABLED', True)
-WEB_AI_CLASSIFIER_TIMEOUT_SECONDS = max(1.5, min(5.0, float(os.environ.get('WEB_AI_CLASSIFIER_TIMEOUT_SECONDS', '3.2'))))
+WEB_AI_CLASSIFIER_TIMEOUT_SECONDS = max(1.0, min(3.0, float(os.environ.get('WEB_AI_CLASSIFIER_TIMEOUT_SECONDS', '2.0'))))
 WEB_AI_CLASSIFIER_CACHE_TTL_SECONDS = max(3600, min(30 * 86400, int(os.environ.get('WEB_AI_CLASSIFIER_CACHE_TTL_SECONDS', '604800'))))
 WEB_AI_CLASSIFIER_MAX_RESULTS = max(4, min(16, int(os.environ.get('WEB_AI_CLASSIFIER_MAX_RESULTS', '12'))))
 WEB_AI_CLASSIFIER_MIN_CONFIDENCE = max(50, min(95, int(os.environ.get('WEB_AI_CLASSIFIER_MIN_CONFIDENCE', '68'))))
@@ -7044,7 +7044,7 @@ def _web_build_text_items(txt, urls, lang, query):
         shown_price = _text_price_local(raw_price, rank, lang) if raw_price else ''
         title = _compact_ui_title(raw_title or query)
         store = _ui_plain_store_name(item.get('source') or '', item.get('link') or '') or U(lang, 'store')
-        results.append({'market': _web_market_label(rank), 'market_rank': rank, 'country': rank_cc.get(rank, ''), 'flag': country_flag_emoji(rank_cc.get(rank, '')), 'store': store, 'title': title, 'price': shown_price, 'url': item.get('link') or '', 'image': item.get('thumbnail') or item.get('image') or '', 'match_score': round(_findzia_match_score(query, raw_title or title or query), 3)})
+        results.append({'market': _web_market_label(rank), 'market_rank': rank, 'country': rank_cc.get(rank, ''), 'flag': country_flag_emoji(rank_cc.get(rank, '')), 'store': store, 'title': title, 'raw_title': raw_title or item.get('title') or title, 'price': shown_price, 'url': item.get('link') or '', 'image': item.get('thumbnail') or item.get('image') or '', 'match_score': round(_findzia_match_score(query, raw_title or title or query), 3)})
     if USE_V106_5_RESULT_PIPELINE or TEXT_SEARCH_WHATSAPP_PARITY:
         # Exact stopping point from main_v106.5: do not reopen product pages,
         # do not wait for image downloads, and do not remove valid winners just
@@ -7180,7 +7180,7 @@ def _web_build_lens_items(lens, lang, caption=''):
         rank = result_market_rank(m)
         cc = rank_cc.get(rank, '')
         shown_price = _lens_price_text_local(m, rank, lang)
-        results.append({'market': _web_market_label(rank), 'market_rank': rank, 'country': cc, 'flag': country_flag_emoji(cc), 'store': _ui_plain_store_name(m.get('source') or '', m.get('link') or '') or U(lang, 'store'), 'title': _compact_ui_title(display_title or m.get('title') or ''), 'price': shown_price, 'price_pending': not bool(shown_price), 'price_verified': bool(shown_price), 'url': (m.get('link') or '').strip(), 'image': m.get('thumbnail') or m.get('image') or ''})
+        results.append({'market': _web_market_label(rank), 'market_rank': rank, 'country': cc, 'flag': country_flag_emoji(cc), 'store': _ui_plain_store_name(m.get('source') or '', m.get('link') or '') or U(lang, 'store'), 'title': _compact_ui_title(display_title or m.get('title') or ''), 'raw_title': (m.get('title') or display_title or '').strip(), 'price': shown_price, 'price_pending': not bool(shown_price), 'price_verified': bool(shown_price), 'url': (m.get('link') or '').strip(), 'image': m.get('thumbnail') or m.get('image') or ''})
     return results
 
 _WEB_CLASSIFICATION_LABELS = {
@@ -7313,6 +7313,61 @@ def _web_classification_anchor(identity, results):
         return clean_identity
     return best_title
 
+_WEB_STRONG_ACCESSORY_RE = re.compile(
+    r'\b(?:straps?\s+only|bands?\s+only|accessory\s+(?:strap|band|charger|cable|case)|'
+    r'replacement\s+(?:strap|band|charger|cable)|(?:strap|band|case|cover)\s+for\b|'
+    r'compatible\s+with\b|coreknit\s+(?:accessory\s+)?(?:strap|band)|strap\s+band|'
+    r'watch\s+band|wrist\s*band|charger|charging\s+(?:cable|dock)|protective\s+case|'
+    r'screen\s+protector|حزام\s+فقط|سوار\s+فقط|اكسسوار|إكسسوار|متوافق\s+مع|شاحن|كفر)\b',
+    re.I,
+)
+_WEB_FULL_DEVICE_RE = re.compile(
+    r'\b(?:wearable|fitness\s+tracker|activity\s+tracker|health\s+tracker|smart\s*watch|smartwatch|'
+    r'complete\s+(?:device|tracker)|device\s+bundle|tracker\s+bundle|جهاز|ساعة\s+ذكية|متتبع\s+(?:لياقة|نشاط))\b',
+    re.I,
+)
+_WEB_MEMBERSHIP_RE = re.compile(r'\b(?:membership|subscription|plan|اشتراك|عضوية|خطة)\b', re.I)
+
+def _web_result_classification_title(row):
+    """Use the unshortened captured title for classification, never UI ellipsis."""
+    row = row or {}
+    return re.sub(r'\s+', ' ', str(row.get('raw_title') or row.get('title') or '')).strip()
+
+def _web_semantic_match_guard(identity, row):
+    """Resolve obvious device/accessory cases instantly, without any I/O."""
+    identity = _web_clean_classification_identity(identity)
+    title = _web_clean_classification_identity(_web_result_classification_title(row))
+    if not identity or not title:
+        return None
+    identity_accessory = bool(_WEB_STRONG_ACCESSORY_RE.search(identity))
+    title_accessory = bool(_WEB_STRONG_ACCESSORY_RE.search(title))
+    if title_accessory and not identity_accessory:
+        return ('similar', 'accessory_guard', 99)
+    identity_device = bool(_WEB_FULL_DEVICE_RE.search(identity))
+    title_device = bool(_WEB_FULL_DEVICE_RE.search(title))
+    if _WEB_MEMBERSHIP_RE.search(title) and not title_device and identity_device:
+        return ('similar', 'membership_only_guard', 98)
+    if not title_device or title_accessory:
+        return None
+    identity_cmp = _web_classification_comparable(identity)
+    title_cmp = _web_classification_comparable(title)
+    if _findzia_hard_product_mismatch(identity_cmp, title_cmp):
+        return None
+    shared = (_findzia_lexical_tokens(identity_cmp) & _findzia_lexical_tokens(title_cmp)) - _WEB_CLASSIFICATION_GENERIC_CLUSTER
+    identity_models = _findzia_model_tokens(identity)
+    title_models = _findzia_model_tokens(title)
+    if identity_models and title_models and not identity_models & title_models:
+        return ('similar', 'different_model_guard', 97)
+    identity_numbers = _web_classification_numbers(identity)
+    title_numbers = _web_classification_numbers(title)
+    if identity_numbers and title_numbers and not identity_numbers & title_numbers:
+        return None
+    if shared and max(_findzia_match_score(identity_cmp, title_cmp), _findzia_match_score(title_cmp, identity_cmp)) >= 0.45:
+        # Device terms outrank the word "membership": WHOOP wearable/tracker
+        # bundles are products, while membership-only listings are caught above.
+        return ('exact', 'full_device_guard', 98)
+    return None
+
 def _web_captured_result_is_exact(identity, title):
     """Classify one already-captured card without filtering or doing I/O."""
     identity = _web_clean_classification_identity(identity)
@@ -7358,12 +7413,13 @@ def _web_ai_classifier_cache_key(identity, results, market):
     rows = []
     for row in list(results or [])[:WEB_AI_CLASSIFIER_MAX_RESULTS]:
         rows.append({
-            'title': re.sub(r'\s+', ' ', str((row or {}).get('title') or '')).strip().lower(),
+            'id': (row or {}).get('_classification_id'),
+            'title': _web_result_classification_title(row).lower(),
             'store': re.sub(r'\s+', ' ', str((row or {}).get('store') or '')).strip().lower(),
             'url': _canonical_result_url(str((row or {}).get('url') or (row or {}).get('link') or '')),
         })
     material = {
-        'v': 2,
+        'v': 3,
         'country': str((market or {}).get('country') or DEFAULT_COUNTRY).lower(),
         'identity': _web_clean_classification_identity(identity).lower(),
         'rows': rows,
@@ -7411,9 +7467,14 @@ def _web_ai_classifier_request(identity, results, market):
     candidates = []
     for index, row in enumerate(list(results or [])[:WEB_AI_CLASSIFIER_MAX_RESULTS]):
         rank = int((row or {}).get('market_rank', 99)) if str((row or {}).get('market_rank', '')).lstrip('-').isdigit() else 99
+        try:
+            classification_id = int((row or {}).get('_classification_id', index))
+        except Exception:
+            classification_id = index
         candidates.append({
-            'id': index,
-            'title': re.sub(r'\s+', ' ', str((row or {}).get('title') or '')).strip()[:240],
+            'id': classification_id,
+            'title': _web_result_classification_title(row)[:420],
+            'display_title': re.sub(r'\s+', ' ', str((row or {}).get('title') or '')).strip()[:240],
             'store': re.sub(r'\s+', ' ', str((row or {}).get('store') or '')).strip()[:100],
             'url': str((row or {}).get('url') or (row or {}).get('link') or '').strip()[:500],
             'price': str((row or {}).get('price') or '').strip()[:80],
@@ -7425,9 +7486,9 @@ def _web_ai_classifier_request(identity, results, market):
 Classify every candidate independently on two axes. Never remove, add, reorder, merge, or browse for results.
 
 MATCH AXIS:
-- exact: the same core product, brand, family, generation/model, and material variant/bundle shown by the reference identity. A device bundle that includes its required membership may be exact.
+- exact: the same core product, brand, family, generation/model, and material variant/bundle shown by the reference identity. A wearable/tracker/device bundle remains exact when it includes a required membership or subscription.
 - similar: a different model/generation/tier, compatible accessory, replacement strap/band/charger/case, membership/service without the device, generic alternative, or uncertain/wrong product.
-For WHOOP specifically, a WHOOP wearable/device bundle can be exact when its named generation/tier agrees with the reference. A strap/band, charger, accessory, membership-only listing, or another WHOOP tier/model is similar.
+For WHOOP specifically, titles containing wearable, fitness tracker, activity tracker, or device bundle describe the full product even when they also say 12-Month Membership; classify them exact when the WHOOP tier/model agrees. A straps-only/band-only item, charger, accessory, compatible band, membership-only listing with no wearable/tracker/device, or another WHOOP tier/model is similar. Product-page marketing images can show the full device for an accessory, so trust the complete title and product type over the image.
 
 MARKET AXIS:
 - local: the listing is a storefront/offer for the user's country, including a local country domain/path, local currency, local branch, or a global merchant's localized country storefront that sells/delivers there (for Kuwait examples include Xcite, Noon Kuwait, Ubuy Kuwait, .com.kw, /kw, /kuwait-en, or a clearly Kuwaiti store).
@@ -7474,6 +7535,7 @@ Include every supplied id exactly once. Confidence is an integer 0-100.'''
             return {}
         normalized = []
         seen = set()
+        valid_ids = {int(item['id']) for item in candidates}
         for item in parsed_items:
             if not isinstance(item, dict):
                 continue
@@ -7484,7 +7546,7 @@ Include every supplied id exactly once. Confidence is an integer 0-100.'''
                 continue
             match_type = str(item.get('match') or '').strip().lower()
             market_scope = str(item.get('market') or '').strip().lower()
-            if index < 0 or index >= len(candidates) or index in seen:
+            if index not in valid_ids or index in seen:
                 continue
             if match_type not in ('exact', 'similar') or market_scope not in ('local', 'global'):
                 continue
@@ -7556,7 +7618,7 @@ def _web_ai_market_rank(row, market_scope, confidence):
     }
     return 2 if is_china_market_result(probe) else 1
 
-def _web_attach_captured_result_sections(payload, lang):
+def _web_attach_captured_result_sections(payload, lang, allow_ai=True):
     """Classify captured cards without deleting, merging, or reordering them."""
     out = dict(payload or {})
     original_results = out.get('results')
@@ -7565,7 +7627,20 @@ def _web_attach_captured_result_sections(payload, lang):
     classification_anchor = _web_classification_anchor(identity, results)
     market_snapshot = dict(out.get('market') or current_market() or {})
     ai_started = time.time()
-    ai_result, ai_source = _web_ai_classify_captured_batch(classification_anchor, results, market_snapshot)
+    semantic_by_id = {}
+    ai_candidates = []
+    for index, original in enumerate(results):
+        guard = _web_semantic_match_guard(classification_anchor, original)
+        if guard is not None:
+            semantic_by_id[index] = guard
+            continue
+        candidate = dict(original or {})
+        candidate['_classification_id'] = index
+        ai_candidates.append(candidate)
+    if allow_ai and ai_candidates:
+        ai_result, ai_source = _web_ai_classify_captured_batch(classification_anchor, ai_candidates, market_snapshot)
+    else:
+        ai_result, ai_source = ({}, 'instant-rules' if not allow_ai else 'semantic-only')
     ai_by_id = {int(item.get('id')): item for item in (ai_result.get('items') or []) if isinstance(item, dict) and str(item.get('id', '')).lstrip('-').isdigit()}
     exact_results = []
     similar_results = []
@@ -7573,24 +7648,33 @@ def _web_attach_captured_result_sections(payload, lang):
     global_results = []
     classified_results = []
     ai_used_count = 0
+    semantic_used_count = 0
     local_cc = str(market_snapshot.get('country') or DEFAULT_COUNTRY).lower()
     rank_cc = {0: local_cc, 1: 'us', 2: 'cn'}
     for index, original in enumerate(results):
         row = dict(original or {})
-        heuristic_exact = _web_captured_result_is_exact(classification_anchor, row.get('title') or '')
+        classification_title = _web_result_classification_title(row)
+        heuristic_exact = _web_captured_result_is_exact(classification_anchor, classification_title)
         try:
             heuristic_rank = int(row.get('market_rank', 99))
         except Exception:
             heuristic_rank = 99
         ai_item = ai_by_id.get(index) or {}
+        semantic_item = semantic_by_id.get(index)
         try:
             confidence = max(0, min(100, int(ai_item.get('confidence', 0))))
         except Exception:
             confidence = 0
-        use_ai = confidence >= WEB_AI_CLASSIFIER_MIN_CONFIDENCE
+        use_semantic = semantic_item is not None
+        use_ai = (not use_semantic) and confidence >= WEB_AI_CLASSIFIER_MIN_CONFIDENCE
+        if use_semantic:
+            semantic_used_count += 1
         if use_ai:
             ai_used_count += 1
-        is_exact = (ai_item.get('match') == 'exact') if use_ai else heuristic_exact
+        if use_semantic:
+            is_exact = semantic_item[0] == 'exact'
+        else:
+            is_exact = (ai_item.get('match') == 'exact') if use_ai else heuristic_exact
         market_scope = str(ai_item.get('market') or '').lower() if use_ai else ('local' if heuristic_rank == 0 else 'global')
         rank = _web_ai_market_rank(row, market_scope, confidence) if use_ai else heuristic_rank
         cc = rank_cc.get(rank, '')
@@ -7599,9 +7683,9 @@ def _web_attach_captured_result_sections(payload, lang):
         row['market_scope'] = 'local' if rank == 0 else 'global'
         row['country'] = cc
         row['flag'] = country_flag_emoji(cc) if cc else ''
-        row['classification_source'] = 'ai' if use_ai else 'rules'
-        row['classification_confidence'] = confidence if use_ai else None
-        row['classification_reason'] = str(ai_item.get('reason') or 'rules_fallback') if use_ai else 'rules_fallback'
+        row['classification_source'] = 'semantic_guard' if use_semantic else ('ai' if use_ai else 'rules')
+        row['classification_confidence'] = semantic_item[2] if use_semantic else (confidence if use_ai else None)
+        row['classification_reason'] = semantic_item[1] if use_semantic else (str(ai_item.get('reason') or 'rules_fallback') if use_ai else 'rules_fallback')
         if is_exact:
             row['match_type'] = 'exact'
             row['result_section'] = 'exact'
@@ -7644,12 +7728,13 @@ def _web_attach_captured_result_sections(payload, lang):
         'similar_global': [row for row in similar_results if row.get('market_scope') == 'global'],
     }
     out['classification_anchor'] = classification_anchor
-    out['classification_engine'] = 'gemini_batch' if ai_used_count else 'rules_fallback'
+    out['classification_engine'] = 'hybrid_semantic_gemini' if ai_used_count else ('semantic_rules' if semantic_used_count else 'rules_fallback')
     out['ai_classified_count'] = ai_used_count
-    out['rules_fallback_count'] = len(results) - ai_used_count
+    out['semantic_classified_count'] = semantic_used_count
+    out['rules_fallback_count'] = len(results) - ai_used_count - semantic_used_count
     out['classification_cache'] = ai_source
     out['classification_elapsed_ms'] = int((time.time() - ai_started) * 1000)
-    print(f'WEB AI POST-CAPTURE CLASSIFICATION source={ai_source} total={len(results)} ai={ai_used_count} rules={len(results) - ai_used_count} exact={len(exact_results)} similar={len(similar_results)} local={len(local_results)} global={len(global_results)} elapsed={time.time() - ai_started:.2f}s anchor={classification_anchor[:90]!r}')
+    print(f'WEB HYBRID POST-CAPTURE CLASSIFICATION source={ai_source} total={len(results)} semantic={semantic_used_count} ai={ai_used_count} rules={len(results) - ai_used_count - semantic_used_count} exact={len(exact_results)} similar={len(similar_results)} local={len(local_results)} global={len(global_results)} elapsed={time.time() - ai_started:.2f}s anchor={classification_anchor[:90]!r}')
     return out
 
 _web_ai_classifier_db_init()
@@ -7676,7 +7761,7 @@ def _web_fallback_product_items(txt, urls, lang, query):
             cc = 'cn'
         else:
             cc = ''
-        rows.append({'market': _web_market_label(rank), 'market_rank': rank, 'country': cc, 'flag': country_flag_emoji(cc) if cc else '', 'store': _ui_plain_store_name(name, url) or U(lang, 'store'), 'title': _compact_ui_title(title or query), 'price': _text_price_local(raw_price, rank, lang) if raw_price and rank in (0, 1, 2) else raw_price, 'url': url, 'image': ''})
+        rows.append({'market': _web_market_label(rank), 'market_rank': rank, 'country': cc, 'flag': country_flag_emoji(cc) if cc else '', 'store': _ui_plain_store_name(name, url) or U(lang, 'store'), 'title': _compact_ui_title(title or query), 'raw_title': title or detail or query, 'price': _text_price_local(raw_price, rank, lang) if raw_price and rank in (0, 1, 2) else raw_price, 'url': url, 'image': ''})
     return rows
 
 def _web_stream_event(payload):
@@ -7775,7 +7860,7 @@ def _web_market_candidates_to_items(candidates, rank, lang, query):
         merchant_counts[merchant] += 1
         raw_price = str(item.get('price') or '').strip()
         shown_price = _text_price_local(raw_price, rank, lang) if raw_price else ''
-        out.append({'market': _web_market_label(rank), 'market_rank': rank, 'country': cc, 'flag': country_flag_emoji(cc), 'store': _ui_plain_store_name(item.get('source') or '', url) or U(lang, 'store'), 'title': _compact_ui_title(item.get('title') or query), 'price': shown_price, 'url': url, 'image': _web_best_card_image(item.get('thumbnail') or item.get('image') or '', '', False), 'match_score': round(_findzia_match_score(query, item.get('title') or query), 3), '_offer_meta': item.get('_offer_meta') or ''})
+        out.append({'market': _web_market_label(rank), 'market_rank': rank, 'country': cc, 'flag': country_flag_emoji(cc), 'store': _ui_plain_store_name(item.get('source') or '', url) or U(lang, 'store'), 'title': _compact_ui_title(item.get('title') or query), 'raw_title': item.get('title') or query, 'price': shown_price, 'url': url, 'image': _web_best_card_image(item.get('thumbnail') or item.get('image') or '', '', False), 'match_score': round(_findzia_match_score(query, item.get('title') or query), 3), '_offer_meta': item.get('_offer_meta') or ''})
         if len(out) >= cap:
             break
     if WEB_FAST_SKIP_PRODUCT_PAGE_VERIFY:
@@ -9020,7 +9105,7 @@ def _web_more_stores_sync(query, country, lang, shown_urls=None, shown_domains=N
         'exhausted': not bool(selected),
     }
 
-def _web_search_image_sync(image_b64, mime, caption, country, lang, progress_callback=None):
+def _web_search_image_sync(image_b64, mime, caption, country, lang, progress_callback=None, classify_with_ai=True):
     market = _web_market(country)
     MARKET_CTX.value = market
     caption = re.sub('\\s+', ' ', str(caption or '')).strip()[:WEB_API_MAX_QUERY_CHARS]
@@ -9034,7 +9119,7 @@ def _web_search_image_sync(image_b64, mime, caption, country, lang, progress_cal
                 identity = (lens_direct.get('visual_identity') or lens_direct.get('relevance_target') or lens_direct.get('query') or caption or '').strip()
                 if USE_V106_5_RESULT_PIPELINE or (WEB_MATCH_WHATSAPP_EXACT and (not WEB_TEXT_DENSE_PARITY)):
                     print(f'ANDROID IMAGE TRUE PARITY: direct WhatsApp Lens set -> {len(items)} result(s); no WEB v89 supplement')
-                    return _web_attach_captured_result_sections({'ok': True, 'type': 'results', 'query': identity, 'market': market, 'results': items, 'source': 'whatsapp_direct_lens_exact'}, lang)
+                    return _web_attach_captured_result_sections({'ok': True, 'type': 'results', 'query': identity, 'market': market, 'results': items, 'source': 'whatsapp_direct_lens_exact'}, lang, allow_ai=classify_with_ai)
                 if WEB_IMAGE_SUPPLEMENT_WEAK_MARKETS and identity:
                     target = {0: WEB_IMAGE_TARGET_LOCAL, 1: WEB_IMAGE_TARGET_US, 2: WEB_IMAGE_TARGET_CN}
                     counts = {0: 0, 1: 0, 2: 0}
@@ -9084,7 +9169,7 @@ def _web_search_image_sync(image_b64, mime, caption, country, lang, progress_cal
                                     break
                         items.sort(key=lambda x: (int(x.get('market_rank', 99)), 0 if x.get('price') else 1))
                         print(f'WEB IMAGE v89 after supplement counts={counts} total={len(items)}')
-                return _web_attach_captured_result_sections({'ok': True, 'type': 'results', 'query': identity, 'market': market, 'results': items, 'source': 'lens_direct_plus_market_supplement'}, lang)
+                return _web_attach_captured_result_sections({'ok': True, 'type': 'results', 'query': identity, 'market': market, 'results': items, 'source': 'lens_direct_plus_market_supplement'}, lang, allow_ai=classify_with_ai)
     lens_future = None
     if not direct_attempted and LENS_PARALLEL_WITH_VISION and ENABLE_GOOGLE_LENS and SERPAPI_API_KEY and PUBLIC_BASE_URL:
         lens_future = LENS_POOL.submit(_run_with_market, market, google_lens_lookup, image_b64, mime, lang, caption)
@@ -9134,9 +9219,9 @@ def _web_search_image_sync(image_b64, mime, caption, country, lang, progress_cal
     else:
         txt, urls, query = ('', {}, caption)
     if not txt:
-        return _web_attach_captured_result_sections({'ok': True, 'type': 'results', 'query': query, 'market': market, 'results': [], 'source': 'image_fallback'}, lang)
+        return _web_attach_captured_result_sections({'ok': True, 'type': 'results', 'query': query, 'market': market, 'results': [], 'source': 'image_fallback'}, lang, allow_ai=classify_with_ai)
     items = _web_fallback_product_items(txt, urls, lang, query)
-    return _web_attach_captured_result_sections({'ok': True, 'type': 'results', 'query': query, 'market': market, 'results': items, 'source': 'image_fallback'}, lang)
+    return _web_attach_captured_result_sections({'ok': True, 'type': 'results', 'query': query, 'market': market, 'results': items, 'source': 'image_fallback'}, lang, allow_ai=classify_with_ai)
 
 def _web_normalize_country_code(value):
     cc = str(value or '').strip().lower()
@@ -10287,7 +10372,10 @@ async def web_api_image_search_stream(request: Request):
                         loop.call_soon_threadsafe(progress_queue.put_nowait, partial_lens)
                     except Exception as e:
                         print(f'ANDROID PROGRESSIVE QUEUE ERR: {e}')
-                final_task = asyncio.create_task(asyncio.to_thread(_web_search_image_sync, image_b64, mime, caption, country, lang, _lens_progress_callback if ANDROID_IMAGE_PROGRESSIVE else None))
+                # The search task returns an instant deterministic snapshot.
+                # Gemini classification is launched only after cards are on
+                # screen, so it can never delay first paint.
+                final_task = asyncio.create_task(asyncio.to_thread(_web_search_image_sync, image_b64, mime, caption, country, lang, _lens_progress_callback if ANDROID_IMAGE_PROGRESSIVE else None, False))
                 preview_keys = set()
                 query_sent = False
                 progress_get_task = None
@@ -10359,8 +10447,33 @@ async def web_api_image_search_stream(request: Request):
                 final_global_results = list(final.get('global_results') or [])
                 final_classified_results = list(final.get('all_results') or final_results)
                 final_sections = list(final.get('result_sections') or [])
-                yield _web_stream_event({'event': 'snapshot', 'phase': 'whatsapp_exact_final', 'authoritative': True, 'layout': 'exact_and_similar_v1', 'classification': 'ai_batch_with_rules_fallback', 'classification_engine': final.get('classification_engine'), 'classification_cache': final.get('classification_cache'), 'ai_classified_count': final.get('ai_classified_count', 0), 'rules_fallback_count': final.get('rules_fallback_count', len(final_results)), 'query': identity, 'market': final.get('market'), 'results': final_results, 'exact_results': final_exact_results, 'similar_results': final_similar_results, 'local_results': final_local_results, 'global_results': final_global_results, 'all_results': final_classified_results, 'result_sections': final_sections, 'classification_matrix': final.get('classification_matrix') or {}, 'exact_count': len(final_exact_results), 'similar_count': len(final_similar_results), 'local_count': len(final_local_results), 'global_count': len(final_global_results), 'elapsed_ms': int((time.time() - started) * 1000)})
-                print(f'ANDROID PROGRESSIVE FINAL SNAPSHOT results={len(final_results)} exact={len(final_exact_results)} similar={len(final_similar_results)} local={len(final_local_results)} global={len(final_global_results)} classifier={final.get("classification_engine")} preview={len(preview_keys)} elapsed={time.time() - started:.1f}s')
+                yield _web_stream_event({'event': 'snapshot', 'phase': 'whatsapp_exact_final', 'authoritative': True, 'classification_final': False, 'layout': 'exact_and_similar_v1', 'classification': 'instant_semantic_rules', 'classification_engine': final.get('classification_engine'), 'classification_cache': final.get('classification_cache'), 'ai_classified_count': 0, 'semantic_classified_count': final.get('semantic_classified_count', 0), 'rules_fallback_count': final.get('rules_fallback_count', len(final_results)), 'query': identity, 'market': final.get('market'), 'results': final_results, 'exact_results': final_exact_results, 'similar_results': final_similar_results, 'local_results': final_local_results, 'global_results': final_global_results, 'all_results': final_classified_results, 'result_sections': final_sections, 'classification_matrix': final.get('classification_matrix') or {}, 'exact_count': len(final_exact_results), 'similar_count': len(final_similar_results), 'local_count': len(final_local_results), 'global_count': len(final_global_results), 'elapsed_ms': int((time.time() - started) * 1000)})
+                print(f'ANDROID INSTANT FINAL SNAPSHOT results={len(final_results)} exact={len(final_exact_results)} similar={len(final_similar_results)} local={len(final_local_results)} global={len(final_global_results)} classifier={final.get("classification_engine")} preview={len(preview_keys)} elapsed={time.time() - started:.1f}s')
+
+                # Refine only ambiguous cards after the instant snapshot is
+                # already visible. This reuses captured titles/URLs and makes
+                # no Lens, Shopping, Search, or product-page request.
+                if final_results and WEB_AI_CLASSIFIER_ENABLED and GEMINI_API_KEY:
+                    captured_for_ai = list(final.get('captured_results') or final_results)
+                    classifier_payload = {
+                        'ok': True,
+                        'type': 'results',
+                        'query': identity,
+                        'market': final.get('market'),
+                        'results': captured_for_ai,
+                        'source': final.get('source') or 'whatsapp_direct_lens_exact',
+                    }
+                    refined = await asyncio.to_thread(_web_attach_captured_result_sections, classifier_payload, lang, True)
+                    final = refined
+                    final_results = list(refined.get('results') or final_results)
+                    final_exact_results = list(refined.get('exact_results') or [])
+                    final_similar_results = list(refined.get('similar_results') or [])
+                    final_local_results = list(refined.get('local_results') or [])
+                    final_global_results = list(refined.get('global_results') or [])
+                    final_classified_results = list(refined.get('all_results') or final_results)
+                    final_sections = list(refined.get('result_sections') or [])
+                    yield _web_stream_event({'event': 'snapshot', 'phase': 'ai_classification_update', 'authoritative': True, 'classification_final': True, 'layout': 'exact_and_similar_v1', 'classification': 'hybrid_semantic_ai', 'classification_engine': refined.get('classification_engine'), 'classification_cache': refined.get('classification_cache'), 'ai_classified_count': refined.get('ai_classified_count', 0), 'semantic_classified_count': refined.get('semantic_classified_count', 0), 'rules_fallback_count': refined.get('rules_fallback_count', 0), 'query': identity, 'market': refined.get('market'), 'results': final_results, 'exact_results': final_exact_results, 'similar_results': final_similar_results, 'local_results': final_local_results, 'global_results': final_global_results, 'all_results': final_classified_results, 'result_sections': final_sections, 'classification_matrix': refined.get('classification_matrix') or {}, 'exact_count': len(final_exact_results), 'similar_count': len(final_similar_results), 'local_count': len(final_local_results), 'global_count': len(final_global_results), 'elapsed_ms': int((time.time() - started) * 1000)})
+                    print(f'ANDROID AI CLASSIFICATION UPDATE exact={len(final_exact_results)} similar={len(final_similar_results)} local={len(final_local_results)} global={len(final_global_results)} classifier={refined.get("classification_engine")} elapsed={time.time() - started:.1f}s')
                 sent = {str(item.get('url') or '').strip() or str(item.get('market') or 'other') + '|' + str(item.get('store') or '') + '|' + str(item.get('title') or '') for item in final_results}
                 for item in final_results:
                     key = str(item.get('url') or '').strip() or str(item.get('market') or 'other') + '|' + str(item.get('store') or '') + '|' + str(item.get('title') or '')
@@ -10539,4 +10652,4 @@ async def web_api_image_search(request: Request):
 
 @app.get('/')
 async def health():
-    return {'status': 'v107.27 AI BATCH EXACT LOCAL CLASSIFIER', 'lens_direct_mode': LENS_DIRECT_MODE, 'fast_lens': USE_FAST_LENS_PIPELINE, 'v106_pipeline': USE_V106_5_RESULT_PIPELINE, 'text_search_whatsapp_parity': TEXT_SEARCH_WHATSAPP_PARITY, 'serpapi_cache': SERPAPI_RESULT_CACHE_ENABLED, 'serpapi_singleflight': SERPAPI_SINGLEFLIGHT_ENABLED, 'ai_result_classifier': WEB_AI_CLASSIFIER_ENABLED, 'ai_classifier_timeout_seconds': WEB_AI_CLASSIFIER_TIMEOUT_SECONDS, 'build': BUILD_ID, 'market_source': 'phone_prefix_or_explicit_client_country', 'languages': ['ar','en','de','fr','it','es','pt','tr','ru','ja','zh','ko','hi','ur','id','ms']}
+    return {'status': 'v107.27.1 HYBRID INSTANT CLASSIFIER', 'lens_direct_mode': LENS_DIRECT_MODE, 'fast_lens': USE_FAST_LENS_PIPELINE, 'v106_pipeline': USE_V106_5_RESULT_PIPELINE, 'text_search_whatsapp_parity': TEXT_SEARCH_WHATSAPP_PARITY, 'serpapi_cache': SERPAPI_RESULT_CACHE_ENABLED, 'serpapi_singleflight': SERPAPI_SINGLEFLIGHT_ENABLED, 'ai_result_classifier': WEB_AI_CLASSIFIER_ENABLED, 'ai_classifier_timeout_seconds': WEB_AI_CLASSIFIER_TIMEOUT_SECONDS, 'build': BUILD_ID, 'market_source': 'phone_prefix_or_explicit_client_country', 'languages': ['ar','en','de','fr','it','es','pt','tr','ru','ja','zh','ko','hi','ur','id','ms']}
