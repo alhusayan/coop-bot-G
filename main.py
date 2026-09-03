@@ -17,7 +17,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept'], max_age=86400)
-BUILD_ID = 'v107.26-price-complete-cards'
+BUILD_ID = 'v107.27-visual-exact-gate'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -81,6 +81,13 @@ USE_V106_5_RESULT_PIPELINE = env_bool('USE_V106_5_RESULT_PIPELINE', True)
 # The old Lens flow still launched seven requests and two Gemini validators.
 # This switch makes first useful Lens evidence authoritative immediately.
 USE_FAST_LENS_PIPELINE = env_bool('USE_FAST_LENS_PIPELINE', True)
+# Pure-Python relevance gate for the fast Lens path.  It never calls Gemini or
+# opens product pages, so it can reject look-alike products without delaying
+# the first progressive snapshot.
+LENS_VISUAL_EXACT_GATE = env_bool('LENS_VISUAL_EXACT_GATE', True)
+LENS_VISUAL_EXACT_MIN_RESULTS = max(1, min(4, int(os.environ.get('LENS_VISUAL_EXACT_MIN_RESULTS', '2'))))
+LENS_VISUAL_EXACT_MODEL_SCORE = max(0.45, min(0.90, float(os.environ.get('LENS_VISUAL_EXACT_MODEL_SCORE', '0.64'))))
+LENS_VISUAL_EXACT_GENERIC_SCORE = max(0.40, min(0.85, float(os.environ.get('LENS_VISUAL_EXACT_GENERIC_SCORE', '0.54'))))
 LENS_OVERLAP_MARKET_FALLBACK = env_bool('LENS_OVERLAP_MARKET_FALLBACK', True)
 ANDROID_IMAGE_PROGRESSIVE = env_bool('ANDROID_IMAGE_PROGRESSIVE', True)
 ANDROID_IMAGE_PROGRESSIVE_MIN_RESULTS = max(1, min(6, int(os.environ.get('ANDROID_IMAGE_PROGRESSIVE_MIN_RESULTS', '2'))))
@@ -4672,6 +4679,7 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption='', image_
     raw_matches = [m for m in lens.get('matches') or [] if (m.get('title') or '').strip()]
     if exclude_domains or exclude_urls:
         raw_matches = [m for m in raw_matches if str(m.get('link') or '').strip() not in exclude_urls and _more_result_domain(m.get('link')) not in exclude_domains]
+    raw_matches = _lens_visual_exact_gate(lens, raw_matches)
     if not USE_FAST_LENS_PIPELINE:
         lens_for_filter = dict(lens or {})
         lens_for_filter['matches'] = raw_matches
@@ -4688,7 +4696,7 @@ def send_lens_direct_results(from_number, lens, bot_id, lang, caption='', image_
             buckets[rank].append(m)
     for rank in buckets:
         _anchor = str(lens.get('visual_identity') or lens.get('relevance_target') or (lens.get('chosen') or {}).get('title') or '')
-        buckets[rank].sort(key=lambda m: (0 if m.get('exact') else 1, 0 if m.get('section') == 'visual_matches' else 1, -round(_findzia_match_score(_anchor, m.get('title') or ''), 1) if _anchor else 0, 0 if _lens_has_price(m) else 1, int(m.get('position') or 999), _us_store_priority(m.get('source'), m.get('link')) if rank == 1 else _china_store_priority(m.get('source'), m.get('link')) if rank == 2 else 99))
+        buckets[rank].sort(key=lambda m: (int(m.get('_visual_exact_tier', 9)), 0 if m.get('exact') else 1, 0 if m.get('section') == 'visual_matches' else 1, -round(_findzia_match_score(_anchor, m.get('title') or ''), 1) if _anchor else 0, 0 if _lens_has_price(m) else 1, int(m.get('position') or 999), _us_store_priority(m.get('source'), m.get('link')) if rank == 1 else _china_store_priority(m.get('source'), m.get('link')) if rank == 2 else 99))
         _active_probe_caps = {0: MORE_LOCAL_MAX, 1: MORE_US_MAX, 2: MORE_CN_MAX} if more_mode else {0: LENS_DIRECT_LOCAL_MAX, 1: LENS_DIRECT_US_MAX, 2: LENS_DIRECT_CN_MAX}
         _cap = _active_probe_caps.get(rank, 0)
         _probe_n = max(_cap + 2, _cap)
@@ -5185,12 +5193,16 @@ def _findzia_hard_product_mismatch(query, title):
         other = set(alternatives) - set(wanted)
         if t & other and (not t & wanted):
             return True
-    q_models = _findzia_model_tokens(q_raw)
-    t_models = _findzia_model_tokens(t_raw)
+    q_models = _findzia_model_signatures(q_raw)
+    t_models = _findzia_model_signatures(t_raw)
     if q_models and t_models and (not q_models & t_models):
         return True
     q_nums = _findzia_pure_numbers(q_raw)
     t_nums = _findzia_pure_numbers(t_raw)
+    q_identifier_nums = {n for signature in q_models for n in re.findall('\\d+', signature)}
+    t_identifier_nums = {n for signature in t_models for n in re.findall('\\d+', signature)}
+    q_nums -= q_identifier_nums
+    t_nums -= t_identifier_nums
     shared_lex = _findzia_lexical_tokens(q_raw) & _findzia_lexical_tokens(t_raw)
     if q_nums and t_nums and (len(shared_lex) >= 2):
         shared_nums = q_nums & t_nums
@@ -5208,13 +5220,191 @@ def _findzia_match_score(query, title):
     if not q or not t:
         return 0.0
     overlap = len(q & t) / max(1, len(q))
-    q_models = _findzia_model_tokens(query)
-    t_models = _findzia_model_tokens(title)
+    q_models = _findzia_model_signatures(query)
+    t_models = _findzia_model_signatures(title)
     model_bonus = 0.38 if q_models and q_models & t_models else 0.0
     q_nums = _findzia_pure_numbers(query)
     t_nums = _findzia_pure_numbers(title)
     numeric_bonus = 0.12 if q_nums and q_nums & t_nums else 0.0
     return min(0.99, overlap * (0.5 if model_bonus else 0.78) + model_bonus + numeric_bonus)
+
+_FINDZIA_MODEL_JOIN_STOP = {
+    'for', 'with', 'and', 'the', 'new', 'men', 'mens', 'women', 'womens',
+    'size', 'sizes', 'model', 'item', 'pack', 'set', 'series', 'version',
+    'لرجال', 'للرجال', 'للنساء', 'نساء', 'رجال', 'مقاس', 'موديل', 'اصدار', 'إصدار'
+}
+_FINDZIA_VISUAL_COLORS = {
+    'black', 'white', 'red', 'blue', 'green', 'yellow', 'orange', 'purple',
+    'pink', 'brown', 'beige', 'grey', 'gray', 'silver', 'gold', 'navy',
+    'maroon', 'clear', 'transparent', 'multicolor', 'multicolour',
+    'اسود', 'أسود', 'ابيض', 'أبيض', 'احمر', 'أحمر', 'ازرق', 'أزرق',
+    'اخضر', 'أخضر', 'اصفر', 'أصفر', 'برتقالي', 'بنفسجي', 'وردي',
+    'بني', 'بيج', 'رمادي', 'فضي', 'ذهبي', 'شفاف', 'كحلي', 'عنابي'
+}
+
+def _findzia_model_signatures(value):
+    """Conservative SKU/model fingerprints, including split forms like RB 4179."""
+    raw = normalize_ar(str(value or '')).lower()
+    signatures = set(_findzia_model_tokens(raw))
+    pieces = re.findall('[a-z\\u0600-\\u06ff]+|\\d+', raw, flags=re.I)
+    for left, right in zip(pieces, pieces[1:]):
+        left_low, right_low = left.lower(), right.lower()
+        left_alpha, right_alpha = left_low.isalpha(), right_low.isalpha()
+        left_num, right_num = left_low.isdigit(), right_low.isdigit()
+        if not ((left_alpha and right_num) or (left_num and right_alpha)):
+            continue
+        word = left_low if left_alpha else right_low
+        number = right_low if right_num else left_low
+        if word in _FINDZIA_MODEL_JOIN_STOP or word in _FINDZIA_SPEC_UNITS or word in _FINDZIA_PRICE_WORDS:
+            continue
+        # Short alpha prefixes (RB 4179 / X 100) and long serial numbers are
+        # useful identifiers.  Avoid turning ordinary phrases such as
+        # "women 2024" into fake model numbers.
+        if len(word) <= 5:
+            signatures.add(left_low + right_low)
+    return {x for x in signatures if 3 <= len(x) <= 32}
+
+def _findzia_visual_colors(value):
+    return {x.lower() for x in norm_tokens(value) if x.lower() in _FINDZIA_VISUAL_COLORS}
+
+def _lens_visual_exact_gate(lens, matches):
+    """Keep the photographed product, not merely visually similar products.
+
+    The gate uses Lens consensus, model/SKU signatures, colour conflicts and
+    the existing deterministic mismatch score.  It performs no network or AI
+    work and therefore remains safe in the instant-results path.
+    """
+    seq = [m for m in list(matches or []) if (m.get('title') or '').strip()]
+    if not LENS_VISUAL_EXACT_GATE or not seq:
+        return seq
+
+    def priority(item):
+        return (
+            0 if item.get('exact') else 1,
+            0 if item.get('section') == 'visual_matches' else 1,
+            int(item.get('position') or 999),
+        )
+
+    sample = sorted(seq, key=priority)[:14]
+    chosen_title = str(((lens or {}).get('chosen') or {}).get('title') or '').strip()
+    locked_anchor = str((lens or {}).get('visual_identity') or (lens or {}).get('relevance_target') or '').strip()
+    supplied_anchor = locked_anchor or chosen_title
+
+    signature_counts = defaultdict(int)
+    signature_first = {}
+    for index, item in enumerate(sample):
+        for signature in _findzia_model_signatures(item.get('title') or ''):
+            signature_counts[signature] += 1
+            signature_first.setdefault(signature, index)
+
+    chosen_signatures = _findzia_model_signatures(chosen_title)
+    exact_signatures = set()
+    for item in sample:
+        if item.get('exact'):
+            exact_signatures.update(_findzia_model_signatures(item.get('title') or ''))
+
+    trusted_signatures = {
+        signature for signature, count in signature_counts.items()
+        if count >= 2 or signature in exact_signatures
+    }
+    locked_signatures = _findzia_model_signatures(locked_anchor)
+    trusted_model = ''
+    model_pool = locked_signatures or trusted_signatures
+    if model_pool:
+        trusted_model = sorted(
+            model_pool,
+            key=lambda signature: (
+                -signature_counts.get(signature, 0),
+                0 if signature in chosen_signatures else 1,
+                signature_first.get(signature, 999),
+                -len(signature),
+            ),
+        )[0]
+
+    anchor = supplied_anchor
+    if trusted_model:
+        model_rows = [m for m in sample if trusted_model in _findzia_model_signatures(m.get('title') or '')]
+        if model_rows:
+            anchor = str(model_rows[0].get('title') or anchor).strip()
+    if not anchor:
+        anchor = str(sample[0].get('title') or '').strip()
+
+    anchor_colors = _findzia_visual_colors(anchor)
+    strict = []
+    rejected = []
+    tiers = defaultdict(int)
+    for item in seq:
+        title = str(item.get('title') or '').strip()
+        score = _findzia_match_score(anchor, title) if anchor else 0.0
+        item['_visual_match_score'] = round(score, 4)
+        if item.get('exact') and not _findzia_hard_product_mismatch(anchor, title):
+            item['_visual_exact_tier'] = 0
+            strict.append(item)
+            tiers[0] += 1
+            continue
+        if _findzia_hard_product_mismatch(anchor, title):
+            rejected.append(item)
+            continue
+
+        candidate_signatures = _findzia_model_signatures(title)
+        candidate_colors = _findzia_visual_colors(title)
+        color_conflict = bool(anchor_colors and candidate_colors and not (anchor_colors & candidate_colors))
+        if color_conflict:
+            rejected.append(item)
+            continue
+
+        if trusted_model:
+            if trusted_model in candidate_signatures:
+                item['_visual_exact_tier'] = 1
+                strict.append(item)
+                tiers[1] += 1
+                continue
+            # A different explicit SKU is a neighboring model, even when its
+            # shape is almost identical to the photographed item.
+            if candidate_signatures:
+                rejected.append(item)
+                continue
+            if score >= LENS_VISUAL_EXACT_MODEL_SCORE and item.get('section') == 'visual_matches':
+                item['_visual_exact_tier'] = 2
+                strict.append(item)
+                tiers[2] += 1
+                continue
+            rejected.append(item)
+            continue
+
+        threshold = LENS_VISUAL_EXACT_GENERIC_SCORE if item.get('section') == 'visual_matches' else max(0.64, LENS_VISUAL_EXACT_GENERIC_SCORE)
+        if score >= threshold:
+            item['_visual_exact_tier'] = 3
+            strict.append(item)
+            tiers[3] += 1
+        else:
+            rejected.append(item)
+
+    # With weak Lens identity, avoid an empty/one-card result caused by noisy
+    # listing titles.  The fallback is deliberately limited to the top visual
+    # matches and still rejects known accessories/model/category conflicts.
+    if len(strict) < LENS_VISUAL_EXACT_MIN_RESULTS and not trusted_model:
+        seen = {id(m) for m in strict}
+        for item in sample:
+            if id(item) in seen:
+                continue
+            title = str(item.get('title') or '').strip()
+            if item.get('section') != 'visual_matches' or _findzia_hard_product_mismatch(anchor, title):
+                continue
+            item['_visual_exact_tier'] = 4
+            item['_visual_match_score'] = round(_findzia_match_score(anchor, title), 4)
+            strict.append(item)
+            seen.add(id(item))
+            tiers[4] += 1
+            if len(strict) >= LENS_VISUAL_EXACT_MIN_RESULTS:
+                break
+
+    strict.sort(key=lambda item: (int(item.get('_visual_exact_tier', 9)), priority(item)))
+    if anchor and (trusted_model or locked_anchor):
+        lens['relevance_target'] = anchor
+    tier_text = ','.join(f'{tier}:{count}' for tier, count in sorted(tiers.items())) or 'none'
+    print(f'LENS VISUAL EXACT GATE model={trusted_model or "none"} kept={len(strict)}/{len(seq)} rejected={len(seq) - len(strict)} tiers={tier_text} anchor={anchor[:90]}')
+    return strict
 
 def _findzia_stream_candidate_ok(query, item):
     title = str((item or {}).get('title') or (item or {}).get('line') or '')
@@ -6581,7 +6771,7 @@ WEB_CHINA_GLOBAL_MAX_STORES = max(4, min(9, int(os.environ.get('WEB_CHINA_GLOBAL
 WEB_CHINA_ORGANIC_NUM = max(3, min(10, int(os.environ.get('WEB_CHINA_ORGANIC_NUM', '8'))))
 WEB_RATE_BUCKETS = defaultdict(deque)
 WEB_RATE_LOCK = threading.Lock()
-print(f'ANDROID/WEB PARITY exact={WEB_MATCH_WHATSAPP_EXACT} v106_pipeline={USE_V106_5_RESULT_PIPELINE} fast_lens={USE_FAST_LENS_PIPELINE} lens_wait={LENS_TURBO_MAX_WAIT_SECONDS}s empty_grace={LENS_TURBO_EMPTY_GRACE_SECONDS}s sparse_grace={LENS_TURBO_SPARSE_GRACE_SECONDS}s local_lane={LENS_LOCAL_LANE_TARGET}@{LENS_LOCAL_LANE_GRACE_SECONDS}s rescue_after={LENS_LOCAL_RESCUE_AFTER_SECONDS}s live_prices={WEB_ASYNC_PRICE_ENRICH_ENABLED} price_page_window={WEB_ASYNC_PRICE_PAGE_WINDOW_SECONDS}s shared_price_markets={WEB_ASYNC_PRICE_SHARED_MARKETS} exact_price_rescue={WEB_ASYNC_PRICE_EXACT_RESCUE_MAX} strong_target={LENS_TURBO_STRONG_RESULT_TARGET} caps local/us/cn={WEB_LOCAL_MAX}/{WEB_US_MAX}/{WEB_CN_MAX} legacy_turbo_available={WEB_STREAM_FAST_WAVE} store_timeout={WEB_STREAM_STORE_TIMEOUT}s progressive={ANDROID_IMAGE_PROGRESSIVE} shopping_geo_guard={SHOPPING_GEO_GUARD}')
+print(f'ANDROID/WEB PARITY exact={WEB_MATCH_WHATSAPP_EXACT} v106_pipeline={USE_V106_5_RESULT_PIPELINE} fast_lens={USE_FAST_LENS_PIPELINE} visual_exact_gate={LENS_VISUAL_EXACT_GATE} lens_wait={LENS_TURBO_MAX_WAIT_SECONDS}s empty_grace={LENS_TURBO_EMPTY_GRACE_SECONDS}s sparse_grace={LENS_TURBO_SPARSE_GRACE_SECONDS}s local_lane={LENS_LOCAL_LANE_TARGET}@{LENS_LOCAL_LANE_GRACE_SECONDS}s rescue_after={LENS_LOCAL_RESCUE_AFTER_SECONDS}s live_prices={WEB_ASYNC_PRICE_ENRICH_ENABLED} price_page_window={WEB_ASYNC_PRICE_PAGE_WINDOW_SECONDS}s shared_price_markets={WEB_ASYNC_PRICE_SHARED_MARKETS} exact_price_rescue={WEB_ASYNC_PRICE_EXACT_RESCUE_MAX} strong_target={LENS_TURBO_STRONG_RESULT_TARGET} caps local/us/cn={WEB_LOCAL_MAX}/{WEB_US_MAX}/{WEB_CN_MAX} legacy_turbo_available={WEB_STREAM_FAST_WAVE} store_timeout={WEB_STREAM_STORE_TIMEOUT}s progressive={ANDROID_IMAGE_PROGRESSIVE} shopping_geo_guard={SHOPPING_GEO_GUARD}')
 
 def _web_request_ip(request):
     forwarded = str(request.headers.get('x-forwarded-for') or '').split(',')[0].strip()
@@ -6919,6 +7109,7 @@ def _web_brand_comparison(query, lang):
 
 def _web_build_lens_items(lens, lang, caption=''):
     raw_matches = [m for m in lens.get('matches') or [] if (m.get('title') or '').strip()]
+    raw_matches = _lens_visual_exact_gate(lens, raw_matches)
     if not USE_FAST_LENS_PIPELINE:
         lens_for_filter = dict(lens or {})
         lens_for_filter['matches'] = raw_matches
@@ -6935,7 +7126,7 @@ def _web_build_lens_items(lens, lang, caption=''):
             buckets[rank].append(m)
     for rank in buckets:
         _anchor = str(lens.get('visual_identity') or lens.get('relevance_target') or (lens.get('chosen') or {}).get('title') or '')
-        buckets[rank].sort(key=lambda m: (0 if m.get('exact') else 1, 0 if m.get('section') == 'visual_matches' else 1, -round(_findzia_match_score(_anchor, m.get('title') or ''), 1) if _anchor else 0, 0 if _lens_has_price(m) else 1, int(m.get('position') or 999), _us_store_priority(m.get('source'), m.get('link')) if rank == 1 else _china_store_priority(m.get('source'), m.get('link')) if rank == 2 else 99))
+        buckets[rank].sort(key=lambda m: (int(m.get('_visual_exact_tier', 9)), 0 if m.get('exact') else 1, 0 if m.get('section') == 'visual_matches' else 1, -round(_findzia_match_score(_anchor, m.get('title') or ''), 1) if _anchor else 0, 0 if _lens_has_price(m) else 1, int(m.get('position') or 999), _us_store_priority(m.get('source'), m.get('link')) if rank == 1 else _china_store_priority(m.get('source'), m.get('link')) if rank == 2 else 99))
         cap = {0: WEB_LOCAL_MAX, 1: WEB_US_MAX, 2: WEB_CN_MAX}.get(rank, 0)
         probe_n = max(cap + 2, cap)
         head = _filter_confirmed_oos(buckets[rank][:probe_n], f'WEB-LENS-{rank}')
@@ -10011,4 +10202,4 @@ async def web_api_image_search(request: Request):
 
 @app.get('/')
 async def health():
-    return {'status': 'v107.26 PRICE-COMPLETE CARDS + EXACT SKU RESCUE', 'lens_direct_mode': LENS_DIRECT_MODE, 'fast_lens': USE_FAST_LENS_PIPELINE, 'v106_pipeline': USE_V106_5_RESULT_PIPELINE, 'build': BUILD_ID, 'market_source': 'phone_prefix', 'languages': ['ar','en','de','fr','it','es','pt','tr','ru','ja','zh','ko','hi','ur','id','ms']}
+    return {'status': 'v107.27 VISUAL EXACT GATE + PRICE-COMPLETE CARDS', 'lens_direct_mode': LENS_DIRECT_MODE, 'fast_lens': USE_FAST_LENS_PIPELINE, 'visual_exact_gate': LENS_VISUAL_EXACT_GATE, 'v106_pipeline': USE_V106_5_RESULT_PIPELINE, 'build': BUILD_ID, 'market_source': 'phone_prefix', 'languages': ['ar','en','de','fr','it','es','pt','tr','ru','ja','zh','ko','hi','ur','id','ms']}
