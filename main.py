@@ -17,7 +17,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept'], max_age=86400)
-BUILD_ID = 'v107.26-serpapi-cost-saver-no-regression'
+BUILD_ID = 'v107.27-ai-batch-exact-local-classifier'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -6673,6 +6673,18 @@ WEB_PRODUCT_VERIFY_CACHE_TTL_SECONDS = max(300, int(os.environ.get('WEB_PRODUCT_
 WEB_PRODUCT_VERIFY_CACHE = {}
 WEB_PRODUCT_VERIFY_LOCK = threading.Lock()
 WEB_MATCH_WHATSAPP_EXACT = env_bool('WEB_MATCH_WHATSAPP_EXACT', True)
+# One low-cost Gemini request classifies the already-captured card batch.  It
+# never launches another Lens/Search request and it never removes a result.
+# A short timeout plus persistent cache keeps this outside the critical search
+# path as much as possible; the proven deterministic classifier remains the
+# immediate fallback.
+WEB_AI_CLASSIFIER_ENABLED = env_bool('WEB_AI_CLASSIFIER_ENABLED', True)
+WEB_AI_CLASSIFIER_TIMEOUT_SECONDS = max(1.5, min(5.0, float(os.environ.get('WEB_AI_CLASSIFIER_TIMEOUT_SECONDS', '3.2'))))
+WEB_AI_CLASSIFIER_CACHE_TTL_SECONDS = max(3600, min(30 * 86400, int(os.environ.get('WEB_AI_CLASSIFIER_CACHE_TTL_SECONDS', '604800'))))
+WEB_AI_CLASSIFIER_MAX_RESULTS = max(4, min(16, int(os.environ.get('WEB_AI_CLASSIFIER_MAX_RESULTS', '12'))))
+WEB_AI_CLASSIFIER_MIN_CONFIDENCE = max(50, min(95, int(os.environ.get('WEB_AI_CLASSIFIER_MIN_CONFIDENCE', '68'))))
+WEB_AI_CLASSIFIER_INFLIGHT = {}
+WEB_AI_CLASSIFIER_INFLIGHT_LOCK = threading.Lock()
 # Text search parity is independent from the heavier image pipeline switches.
 # Keep it on by default so a future Railway override cannot silently send web
 # or iOS through a weaker text-only expansion path.
@@ -6734,7 +6746,7 @@ WEB_CHINA_GLOBAL_MAX_STORES = max(4, min(9, int(os.environ.get('WEB_CHINA_GLOBAL
 WEB_CHINA_ORGANIC_NUM = max(3, min(10, int(os.environ.get('WEB_CHINA_ORGANIC_NUM', '8'))))
 WEB_RATE_BUCKETS = defaultdict(deque)
 WEB_RATE_LOCK = threading.Lock()
-print(f'ANDROID/WEB PARITY exact={WEB_MATCH_WHATSAPP_EXACT} v106_pipeline={USE_V106_5_RESULT_PIPELINE} fast_lens={USE_FAST_LENS_PIPELINE} lens_wait={LENS_TURBO_MAX_WAIT_SECONDS}s empty_grace={LENS_TURBO_EMPTY_GRACE_SECONDS}s sparse_grace={LENS_TURBO_SPARSE_GRACE_SECONDS}s local_lane={LENS_LOCAL_LANE_TARGET}@{LENS_LOCAL_LANE_GRACE_SECONDS}s rescue_after={LENS_LOCAL_RESCUE_AFTER_SECONDS}s live_prices={WEB_ASYNC_PRICE_ENRICH_ENABLED} price_page_window={WEB_ASYNC_PRICE_PAGE_WINDOW_SECONDS}s shared_price_markets={WEB_ASYNC_PRICE_SHARED_MARKETS} strong_target={LENS_TURBO_STRONG_RESULT_TARGET} caps local/us/cn={WEB_LOCAL_MAX}/{WEB_US_MAX}/{WEB_CN_MAX} legacy_turbo_available={WEB_STREAM_FAST_WAVE} store_timeout={WEB_STREAM_STORE_TIMEOUT}s progressive={ANDROID_IMAGE_PROGRESSIVE} shopping_geo_guard={SHOPPING_GEO_GUARD}')
+print(f'ANDROID/WEB PARITY exact={WEB_MATCH_WHATSAPP_EXACT} v106_pipeline={USE_V106_5_RESULT_PIPELINE} fast_lens={USE_FAST_LENS_PIPELINE} lens_wait={LENS_TURBO_MAX_WAIT_SECONDS}s empty_grace={LENS_TURBO_EMPTY_GRACE_SECONDS}s sparse_grace={LENS_TURBO_SPARSE_GRACE_SECONDS}s local_lane={LENS_LOCAL_LANE_TARGET}@{LENS_LOCAL_LANE_GRACE_SECONDS}s rescue_after={LENS_LOCAL_RESCUE_AFTER_SECONDS}s live_prices={WEB_ASYNC_PRICE_ENRICH_ENABLED} price_page_window={WEB_ASYNC_PRICE_PAGE_WINDOW_SECONDS}s shared_price_markets={WEB_ASYNC_PRICE_SHARED_MARKETS} ai_classifier={WEB_AI_CLASSIFIER_ENABLED}@{WEB_AI_CLASSIFIER_TIMEOUT_SECONDS}s ai_cache={WEB_AI_CLASSIFIER_CACHE_TTL_SECONDS}s strong_target={LENS_TURBO_STRONG_RESULT_TARGET} caps local/us/cn={WEB_LOCAL_MAX}/{WEB_US_MAX}/{WEB_CN_MAX} legacy_turbo_available={WEB_STREAM_FAST_WAVE} store_timeout={WEB_STREAM_STORE_TIMEOUT}s progressive={ANDROID_IMAGE_PROGRESSIVE} shopping_geo_guard={SHOPPING_GEO_GUARD}')
 
 def _web_request_ip(request):
     forwarded = str(request.headers.get('x-forwarded-for') or '').split(',')[0].strip()
@@ -7324,19 +7336,273 @@ def _web_captured_result_is_exact(identity, title):
     # identity/consensus anchor.  The result list itself is never changed.
     return _findzia_match_score(identity_cmp, title_cmp) >= 0.52
 
+def _web_ai_classifier_db_init():
+    if not WEB_AI_CLASSIFIER_ENABLED:
+        return
+    try:
+        with CACHE_DB_LOCK, _cache_db_connect() as conn:
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS ai_result_classification_cache (
+                    cache_key TEXT PRIMARY KEY,
+                    response_json TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    expires_at REAL NOT NULL
+                )
+            ''')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_ai_result_classifier_expiry ON ai_result_classification_cache(expires_at)')
+            conn.execute('DELETE FROM ai_result_classification_cache WHERE expires_at <= ?', (time.time(),))
+    except Exception as e:
+        print(f'WEB AI CLASSIFIER DB INIT ERR: {e}')
+
+def _web_ai_classifier_cache_key(identity, results, market):
+    rows = []
+    for row in list(results or [])[:WEB_AI_CLASSIFIER_MAX_RESULTS]:
+        rows.append({
+            'title': re.sub(r'\s+', ' ', str((row or {}).get('title') or '')).strip().lower(),
+            'store': re.sub(r'\s+', ' ', str((row or {}).get('store') or '')).strip().lower(),
+            'url': _canonical_result_url(str((row or {}).get('url') or (row or {}).get('link') or '')),
+        })
+    material = {
+        'v': 2,
+        'country': str((market or {}).get('country') or DEFAULT_COUNTRY).lower(),
+        'identity': _web_clean_classification_identity(identity).lower(),
+        'rows': rows,
+    }
+    return hashlib.sha256(json.dumps(material, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode('utf-8')).hexdigest()
+
+def _web_ai_classifier_cache_get(key):
+    try:
+        now = time.time()
+        with CACHE_DB_LOCK, _cache_db_connect() as conn:
+            row = conn.execute(
+                'SELECT response_json, expires_at FROM ai_result_classification_cache WHERE cache_key=?',
+                (key,),
+            ).fetchone()
+            if not row:
+                return None
+            if float(row[1] or 0) <= now:
+                conn.execute('DELETE FROM ai_result_classification_cache WHERE cache_key=?', (key,))
+                return None
+        value = json.loads(row[0] or '{}')
+        return value if isinstance(value, dict) else None
+    except Exception as e:
+        print(f'WEB AI CLASSIFIER CACHE GET ERR: {e}')
+        return None
+
+def _web_ai_classifier_cache_put(key, value):
+    try:
+        now = time.time()
+        with CACHE_DB_LOCK, _cache_db_connect() as conn:
+            conn.execute('''
+                INSERT INTO ai_result_classification_cache(cache_key, response_json, created_at, expires_at)
+                VALUES(?,?,?,?)
+                ON CONFLICT(cache_key) DO UPDATE SET
+                    response_json=excluded.response_json,
+                    created_at=excluded.created_at,
+                    expires_at=excluded.expires_at
+            ''', (key, json.dumps(value, ensure_ascii=False, separators=(',', ':')), now, now + WEB_AI_CLASSIFIER_CACHE_TTL_SECONDS))
+    except Exception as e:
+        print(f'WEB AI CLASSIFIER CACHE PUT ERR: {e}')
+
+def _web_ai_classifier_request(identity, results, market):
+    """Classify one captured batch with one text-only Gemini request."""
+    country = str((market or {}).get('country') or DEFAULT_COUNTRY).lower()
+    country_name = str((market or {}).get('country_name') or COUNTRY_NAMES.get(country, country.upper()))
+    candidates = []
+    for index, row in enumerate(list(results or [])[:WEB_AI_CLASSIFIER_MAX_RESULTS]):
+        rank = int((row or {}).get('market_rank', 99)) if str((row or {}).get('market_rank', '')).lstrip('-').isdigit() else 99
+        candidates.append({
+            'id': index,
+            'title': re.sub(r'\s+', ' ', str((row or {}).get('title') or '')).strip()[:240],
+            'store': re.sub(r'\s+', ' ', str((row or {}).get('store') or '')).strip()[:100],
+            'url': str((row or {}).get('url') or (row or {}).get('link') or '').strip()[:500],
+            'price': str((row or {}).get('price') or '').strip()[:80],
+            'current_scope_hint': 'local' if rank == 0 else 'global',
+        })
+    if not candidates:
+        return {}
+    system = '''You are Findzia's strict post-capture ecommerce classifier.
+Classify every candidate independently on two axes. Never remove, add, reorder, merge, or browse for results.
+
+MATCH AXIS:
+- exact: the same core product, brand, family, generation/model, and material variant/bundle shown by the reference identity. A device bundle that includes its required membership may be exact.
+- similar: a different model/generation/tier, compatible accessory, replacement strap/band/charger/case, membership/service without the device, generic alternative, or uncertain/wrong product.
+For WHOOP specifically, a WHOOP wearable/device bundle can be exact when its named generation/tier agrees with the reference. A strap/band, charger, accessory, membership-only listing, or another WHOOP tier/model is similar.
+
+MARKET AXIS:
+- local: the listing is a storefront/offer for the user's country, including a local country domain/path, local currency, local branch, or a global merchant's localized country storefront that sells/delivers there (for Kuwait examples include Xcite, Noon Kuwait, Ubuy Kuwait, .com.kw, /kw, /kuwait-en, or a clearly Kuwaiti store).
+- global: a foreign/default international storefront or offer not localized to the user's country.
+Do not call a listing global merely because the merchant brand operates worldwide.
+
+Return strict JSON only: {"identity":"...","items":[{"id":0,"match":"exact|similar","market":"local|global","confidence":0,"reason":"same_model|different_variant|accessory|membership_only|wrong_product|local_storefront|foreign_storefront|uncertain"}]}.
+Include every supplied id exactly once. Confidence is an integer 0-100.'''
+    user_data = {
+        'reference_identity': _web_clean_classification_identity(identity),
+        'user_country_code': country,
+        'user_country_name': country_name,
+        'user_currency': str((market or {}).get('currency') or ''),
+        'candidates': candidates,
+    }
+    model = GEMINI_FAST_MODEL
+    gemini_url = f'{GEMINI_BASE_URL}/{model}:generateContent'
+    payload = {
+        'systemInstruction': {'parts': [{'text': system}]},
+        'contents': [{'role': 'user', 'parts': [{'text': json.dumps(user_data, ensure_ascii=False, separators=(',', ':'))}]}],
+        'generationConfig': {'temperature': 0, 'maxOutputTokens': 1800, 'responseMimeType': 'application/json'},
+    }
+    try:
+        with GEMINI_STATS_LOCK:
+            GEMINI_STATS['plain_calls'] += 1
+            print(f'GEMINI CALL model={model} search=False purpose=result_classifier totals={GEMINI_STATS}')
+        response = requests.post(
+            gemini_url,
+            params={'key': GEMINI_API_KEY},
+            json=payload,
+            timeout=(2.0, WEB_AI_CLASSIFIER_TIMEOUT_SECONDS),
+        )
+        if response.status_code >= 400:
+            print(f'WEB AI CLASSIFIER HTTP {response.status_code}: {response.text[:240]}')
+            return {}
+        data = response.json()
+        model_candidates = data.get('candidates') or []
+        if not model_candidates:
+            return {}
+        raw = ''.join(str(part.get('text') or '') for part in (model_candidates[0].get('content') or {}).get('parts', [])).strip()
+        parsed = _ai_json_object(raw)
+        parsed_items = parsed.get('items') if isinstance(parsed, dict) else None
+        if not isinstance(parsed_items, list):
+            return {}
+        normalized = []
+        seen = set()
+        for item in parsed_items:
+            if not isinstance(item, dict):
+                continue
+            try:
+                index = int(item.get('id'))
+                confidence = max(0, min(100, int(float(item.get('confidence', 0)))))
+            except Exception:
+                continue
+            match_type = str(item.get('match') or '').strip().lower()
+            market_scope = str(item.get('market') or '').strip().lower()
+            if index < 0 or index >= len(candidates) or index in seen:
+                continue
+            if match_type not in ('exact', 'similar') or market_scope not in ('local', 'global'):
+                continue
+            seen.add(index)
+            normalized.append({
+                'id': index,
+                'match': match_type,
+                'market': market_scope,
+                'confidence': confidence,
+                'reason': re.sub(r'[^a-z0-9_]+', '_', str(item.get('reason') or 'uncertain').strip().lower())[:40] or 'uncertain',
+            })
+        # A partial model response is still useful. Missing rows use the proven
+        # deterministic classifier, so no card is ever lost.
+        if not normalized:
+            return {}
+        return {'identity': str(parsed.get('identity') or identity).strip()[:240], 'items': normalized}
+    except requests.Timeout:
+        print(f'WEB AI CLASSIFIER TIMEOUT after={WEB_AI_CLASSIFIER_TIMEOUT_SECONDS}s')
+        return {}
+    except Exception as e:
+        print(f'WEB AI CLASSIFIER ERR: {e.__class__.__name__}: {e}')
+        return {}
+
+def _web_ai_classify_captured_batch(identity, results, market):
+    if not WEB_AI_CLASSIFIER_ENABLED or not GEMINI_API_KEY or not results:
+        return ({}, 'disabled')
+    key = _web_ai_classifier_cache_key(identity, results, market)
+    cached = _web_ai_classifier_cache_get(key)
+    if cached:
+        return (cached, 'cache')
+    owner = False
+    with WEB_AI_CLASSIFIER_INFLIGHT_LOCK:
+        event = WEB_AI_CLASSIFIER_INFLIGHT.get(key)
+        if event is None:
+            event = threading.Event()
+            WEB_AI_CLASSIFIER_INFLIGHT[key] = event
+            owner = True
+    if not owner:
+        event.wait(WEB_AI_CLASSIFIER_TIMEOUT_SECONDS + 0.4)
+        cached = _web_ai_classifier_cache_get(key)
+        return (cached or {}, 'singleflight-cache' if cached else 'singleflight-fallback')
+    try:
+        value = _web_ai_classifier_request(identity, results, market)
+        if value:
+            _web_ai_classifier_cache_put(key, value)
+        return (value, 'live' if value else 'fallback')
+    finally:
+        with WEB_AI_CLASSIFIER_INFLIGHT_LOCK:
+            WEB_AI_CLASSIFIER_INFLIGHT.pop(key, None)
+            event.set()
+
+def _web_ai_market_rank(row, market_scope, confidence):
+    try:
+        current_rank = int((row or {}).get('market_rank', 99))
+    except Exception:
+        current_rank = 99
+    if confidence < WEB_AI_CLASSIFIER_MIN_CONFIDENCE:
+        return current_rank
+    if market_scope == 'local':
+        return 0
+    if market_scope != 'global':
+        return current_rank
+    if current_rank in (1, 2):
+        return current_rank
+    probe = {
+        'link': (row or {}).get('url') or (row or {}).get('link') or '',
+        'source': (row or {}).get('store') or (row or {}).get('source') or '',
+        'title': (row or {}).get('title') or '',
+    }
+    return 2 if is_china_market_result(probe) else 1
+
 def _web_attach_captured_result_sections(payload, lang):
-    """Add Exact/Similar views while preserving ``results`` byte-for-byte."""
+    """Classify captured cards without deleting, merging, or reordering them."""
     out = dict(payload or {})
     original_results = out.get('results')
     results = list(original_results or [])
     identity = str(out.get('query') or '').strip()
     classification_anchor = _web_classification_anchor(identity, results)
+    market_snapshot = dict(out.get('market') or current_market() or {})
+    ai_started = time.time()
+    ai_result, ai_source = _web_ai_classify_captured_batch(classification_anchor, results, market_snapshot)
+    ai_by_id = {int(item.get('id')): item for item in (ai_result.get('items') or []) if isinstance(item, dict) and str(item.get('id', '')).lstrip('-').isdigit()}
     exact_results = []
     similar_results = []
+    local_results = []
+    global_results = []
     classified_results = []
-    for original in results:
+    ai_used_count = 0
+    local_cc = str(market_snapshot.get('country') or DEFAULT_COUNTRY).lower()
+    rank_cc = {0: local_cc, 1: 'us', 2: 'cn'}
+    for index, original in enumerate(results):
         row = dict(original or {})
-        if _web_captured_result_is_exact(classification_anchor, row.get('title') or ''):
+        heuristic_exact = _web_captured_result_is_exact(classification_anchor, row.get('title') or '')
+        try:
+            heuristic_rank = int(row.get('market_rank', 99))
+        except Exception:
+            heuristic_rank = 99
+        ai_item = ai_by_id.get(index) or {}
+        try:
+            confidence = max(0, min(100, int(ai_item.get('confidence', 0))))
+        except Exception:
+            confidence = 0
+        use_ai = confidence >= WEB_AI_CLASSIFIER_MIN_CONFIDENCE
+        if use_ai:
+            ai_used_count += 1
+        is_exact = (ai_item.get('match') == 'exact') if use_ai else heuristic_exact
+        market_scope = str(ai_item.get('market') or '').lower() if use_ai else ('local' if heuristic_rank == 0 else 'global')
+        rank = _web_ai_market_rank(row, market_scope, confidence) if use_ai else heuristic_rank
+        cc = rank_cc.get(rank, '')
+        row['market_rank'] = rank
+        row['market'] = _web_market_label(rank)
+        row['market_scope'] = 'local' if rank == 0 else 'global'
+        row['country'] = cc
+        row['flag'] = country_flag_emoji(cc) if cc else ''
+        row['classification_source'] = 'ai' if use_ai else 'rules'
+        row['classification_confidence'] = confidence if use_ai else None
+        row['classification_reason'] = str(ai_item.get('reason') or 'rules_fallback') if use_ai else 'rules_fallback'
+        if is_exact:
             row['match_type'] = 'exact'
             row['result_section'] = 'exact'
             row['best_price_eligible'] = True
@@ -7346,23 +7612,47 @@ def _web_attach_captured_result_sections(payload, lang):
             row['result_section'] = 'similar'
             row['best_price_eligible'] = False
             similar_results.append(row)
+        if row['market_scope'] == 'local':
+            local_results.append(row)
+        else:
+            global_results.append(row)
         classified_results.append(row)
     exact_label, similar_label = _WEB_CLASSIFICATION_LABELS.get(lang, _WEB_CLASSIFICATION_LABELS['en'])
-    # Keep the exact same original object/list under the legacy key so old web
-    # and app clients continue to receive every card in the original order.
-    out['results'] = original_results if original_results is not None else []
+    # Old iPhone/web clients read only ``results`` from the authoritative
+    # snapshot.  Return the same cards in the same order with classification
+    # metadata and corrected market labels attached.  The untouched captured
+    # list remains available for diagnostics and compatibility checks.
+    out['captured_results'] = original_results if original_results is not None else []
+    out['results'] = classified_results
     out['exact_results'] = exact_results
     out['similar_results'] = similar_results
+    out['local_results'] = local_results
+    out['global_results'] = global_results
     out['all_results'] = classified_results
     out['result_sections'] = [
-        {'id': 'exact', 'title': exact_label, 'collapsed': False, 'best_price_eligible': True, 'count': len(exact_results), 'results': exact_results},
-        {'id': 'similar', 'title': similar_label, 'collapsed': bool(exact_results), 'best_price_eligible': False, 'count': len(similar_results), 'results': similar_results},
+        {'id': 'exact', 'title': exact_label, 'collapsed': False, 'best_price_eligible': True, 'count': len(exact_results), 'local_count': sum(1 for row in exact_results if row.get('market_scope') == 'local'), 'global_count': sum(1 for row in exact_results if row.get('market_scope') == 'global'), 'local_results': [row for row in exact_results if row.get('market_scope') == 'local'], 'global_results': [row for row in exact_results if row.get('market_scope') == 'global'], 'results': exact_results},
+        {'id': 'similar', 'title': similar_label, 'collapsed': bool(exact_results), 'best_price_eligible': False, 'count': len(similar_results), 'local_count': sum(1 for row in similar_results if row.get('market_scope') == 'local'), 'global_count': sum(1 for row in similar_results if row.get('market_scope') == 'global'), 'local_results': [row for row in similar_results if row.get('market_scope') == 'local'], 'global_results': [row for row in similar_results if row.get('market_scope') == 'global'], 'results': similar_results},
     ]
     out['exact_count'] = len(exact_results)
     out['similar_count'] = len(similar_results)
+    out['local_count'] = len(local_results)
+    out['global_count'] = len(global_results)
+    out['classification_matrix'] = {
+        'exact_local': [row for row in exact_results if row.get('market_scope') == 'local'],
+        'exact_global': [row for row in exact_results if row.get('market_scope') == 'global'],
+        'similar_local': [row for row in similar_results if row.get('market_scope') == 'local'],
+        'similar_global': [row for row in similar_results if row.get('market_scope') == 'global'],
+    }
     out['classification_anchor'] = classification_anchor
-    print(f'WEB POST-CAPTURE CLASSIFICATION total={len(results)} exact={len(exact_results)} similar={len(similar_results)} anchor={classification_anchor[:90]!r}')
+    out['classification_engine'] = 'gemini_batch' if ai_used_count else 'rules_fallback'
+    out['ai_classified_count'] = ai_used_count
+    out['rules_fallback_count'] = len(results) - ai_used_count
+    out['classification_cache'] = ai_source
+    out['classification_elapsed_ms'] = int((time.time() - ai_started) * 1000)
+    print(f'WEB AI POST-CAPTURE CLASSIFICATION source={ai_source} total={len(results)} ai={ai_used_count} rules={len(results) - ai_used_count} exact={len(exact_results)} similar={len(similar_results)} local={len(local_results)} global={len(global_results)} elapsed={time.time() - ai_started:.2f}s anchor={classification_anchor[:90]!r}')
     return out
+
+_web_ai_classifier_db_init()
 
 def _web_fallback_product_items(txt, urls, lang, query):
     offers = extract_store_offers(txt or '')
@@ -10065,10 +10355,12 @@ async def web_api_image_search_stream(request: Request):
                 final_results = list(final.get('results') or [])
                 final_exact_results = list(final.get('exact_results') or [])
                 final_similar_results = list(final.get('similar_results') or [])
+                final_local_results = list(final.get('local_results') or [])
+                final_global_results = list(final.get('global_results') or [])
                 final_classified_results = list(final.get('all_results') or final_results)
                 final_sections = list(final.get('result_sections') or [])
-                yield _web_stream_event({'event': 'snapshot', 'phase': 'whatsapp_exact_final', 'authoritative': True, 'layout': 'exact_and_similar_v1', 'classification': 'post_capture_only', 'query': identity, 'market': final.get('market'), 'results': final_results, 'exact_results': final_exact_results, 'similar_results': final_similar_results, 'all_results': final_classified_results, 'result_sections': final_sections, 'exact_count': len(final_exact_results), 'similar_count': len(final_similar_results), 'elapsed_ms': int((time.time() - started) * 1000)})
-                print(f'ANDROID PROGRESSIVE FINAL SNAPSHOT results={len(final_results)} exact={len(final_exact_results)} similar={len(final_similar_results)} preview={len(preview_keys)} elapsed={time.time() - started:.1f}s')
+                yield _web_stream_event({'event': 'snapshot', 'phase': 'whatsapp_exact_final', 'authoritative': True, 'layout': 'exact_and_similar_v1', 'classification': 'ai_batch_with_rules_fallback', 'classification_engine': final.get('classification_engine'), 'classification_cache': final.get('classification_cache'), 'ai_classified_count': final.get('ai_classified_count', 0), 'rules_fallback_count': final.get('rules_fallback_count', len(final_results)), 'query': identity, 'market': final.get('market'), 'results': final_results, 'exact_results': final_exact_results, 'similar_results': final_similar_results, 'local_results': final_local_results, 'global_results': final_global_results, 'all_results': final_classified_results, 'result_sections': final_sections, 'classification_matrix': final.get('classification_matrix') or {}, 'exact_count': len(final_exact_results), 'similar_count': len(final_similar_results), 'local_count': len(final_local_results), 'global_count': len(final_global_results), 'elapsed_ms': int((time.time() - started) * 1000)})
+                print(f'ANDROID PROGRESSIVE FINAL SNAPSHOT results={len(final_results)} exact={len(final_exact_results)} similar={len(final_similar_results)} local={len(final_local_results)} global={len(final_global_results)} classifier={final.get("classification_engine")} preview={len(preview_keys)} elapsed={time.time() - started:.1f}s')
                 sent = {str(item.get('url') or '').strip() or str(item.get('market') or 'other') + '|' + str(item.get('store') or '') + '|' + str(item.get('title') or '') for item in final_results}
                 for item in final_results:
                     key = str(item.get('url') or '').strip() or str(item.get('market') or 'other') + '|' + str(item.get('store') or '') + '|' + str(item.get('title') or '')
@@ -10081,7 +10373,7 @@ async def web_api_image_search_stream(request: Request):
                         _web_spawn_price_enrich_task(price_tasks, key, item, lang, market_snapshot)
                 async for _ev in _web_drain_price_enrich_events(price_tasks, priced_keys, started):
                     yield _ev
-                yield _web_stream_event({'event': 'done', 'count': len(sent), 'exact_count': len(final_exact_results), 'similar_count': len(final_similar_results), 'elapsed_ms': int((time.time() - started) * 1000)})
+                yield _web_stream_event({'event': 'done', 'count': len(sent), 'exact_count': len(final_exact_results), 'similar_count': len(final_similar_results), 'local_count': len(final_local_results), 'global_count': len(final_global_results), 'classification_engine': final.get('classification_engine'), 'elapsed_ms': int((time.time() - started) * 1000)})
                 return
             seed = await asyncio.to_thread(_web_image_seed_sync, image_b64, mime, caption, country, lang)
             identity = str(seed.get('query') or caption or '').strip()
@@ -10247,4 +10539,4 @@ async def web_api_image_search(request: Request):
 
 @app.get('/')
 async def health():
-    return {'status': 'v107.26 SERPAPI COST SAVER NO REGRESSION', 'lens_direct_mode': LENS_DIRECT_MODE, 'fast_lens': USE_FAST_LENS_PIPELINE, 'v106_pipeline': USE_V106_5_RESULT_PIPELINE, 'text_search_whatsapp_parity': TEXT_SEARCH_WHATSAPP_PARITY, 'serpapi_cache': SERPAPI_RESULT_CACHE_ENABLED, 'serpapi_singleflight': SERPAPI_SINGLEFLIGHT_ENABLED, 'build': BUILD_ID, 'market_source': 'phone_prefix_or_explicit_client_country', 'languages': ['ar','en','de','fr','it','es','pt','tr','ru','ja','zh','ko','hi','ur','id','ms']}
+    return {'status': 'v107.27 AI BATCH EXACT LOCAL CLASSIFIER', 'lens_direct_mode': LENS_DIRECT_MODE, 'fast_lens': USE_FAST_LENS_PIPELINE, 'v106_pipeline': USE_V106_5_RESULT_PIPELINE, 'text_search_whatsapp_parity': TEXT_SEARCH_WHATSAPP_PARITY, 'serpapi_cache': SERPAPI_RESULT_CACHE_ENABLED, 'serpapi_singleflight': SERPAPI_SINGLEFLIGHT_ENABLED, 'ai_result_classifier': WEB_AI_CLASSIFIER_ENABLED, 'ai_classifier_timeout_seconds': WEB_AI_CLASSIFIER_TIMEOUT_SECONDS, 'build': BUILD_ID, 'market_source': 'phone_prefix_or_explicit_client_country', 'languages': ['ar','en','de','fr','it','es','pt','tr','ru','ja','zh','ko','hi','ur','id','ms']}
