@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
-import os, re, time, base64, requests, json, asyncio, urllib.parse, hashlib, hmac, sqlite3, threading, io, ast, ipaddress
-from collections import deque, defaultdict
+import os, re, time, base64, requests, json, asyncio, urllib.parse, hashlib, hmac, sqlite3, threading, io, ast, ipaddress, socket
+from collections import Counter, deque, defaultdict
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
+from functools import lru_cache
 from fastapi import FastAPI, Request, Response, BackgroundTasks
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -22,7 +23,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept'], max_age=86400)
-BUILD_ID = 'v107.30-universal-reference-first-classifier'
+BUILD_ID = 'v107.41-open-world-multimodal-identity-match-score'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -1163,12 +1164,17 @@ SYSTEM_PROMPT = '\nأنت مساعد تسوق عالمي يعتمد سوق ال�
 def fetch_html(url):
     if not url or not url.startswith('http'):
         return ''
+    r = None
     try:
-        r = requests.get(url, headers=HEADERS, timeout=10)
-        if r.status_code == 200 and len(r.text) > 1500:
-            return r.text
+        r = _web_safe_get(url, headers=HEADERS, timeout=(3, 10), stream=True)
+        body = _web_read_limited_response(r, 1500000)
+        html = body.decode(r.encoding or 'utf-8', errors='replace') if body is not None else ''
+        if r.status_code == 200 and len(html) > 1500:
+            return html
     except Exception as e:
         print(f'fetch err {e} {url[:80]}')
+    finally:
+        _web_safe_response_close(r)
     return ''
 
 def parse_product_data(html, url):
@@ -2166,18 +2172,29 @@ def filter_verified_with_lens(verified, lens_context):
 def get_final_url(url: str):
     if not url or not url.startswith(('http://', 'https://')):
         return ''
+    # Search/AI output is untrusted. Reject private/non-standard targets
+    # before caching or returning a URL that another stage may fetch later.
+    if not _web_validated_outbound_url(url):
+        return ''
     now = time.time()
     with FINAL_URL_CACHE_LOCK:
         hit = FINAL_URL_CACHE.get(url)
         if hit and now - hit['ts'] < FINAL_URL_CACHE_TTL:
             return hit['url']
     final = url
+    r = None
     try:
-        r = requests.get(url, allow_redirects=True, timeout=(3, RESOLVE_TIMEOUT_SECONDS), stream=True, headers=HEADERS)
+        r = _web_safe_get(
+            url,
+            headers=HEADERS,
+            timeout=(3, RESOLVE_TIMEOUT_SECONDS),
+            stream=True,
+        )
         final = r.url or url
-        r.close()
     except Exception as e:
         print(f'resolve err {e} {url[:80]}')
+    finally:
+        _web_safe_response_close(r)
     with FINAL_URL_CACHE_LOCK:
         if len(FINAL_URL_CACHE) >= 2000:
             oldest = sorted(FINAL_URL_CACHE.items(), key=lambda kv: kv[1].get('ts', 0))[:1000]
@@ -4494,7 +4511,7 @@ def identity_candidates_agree(vision_name, lens_title):
     a, b = (_identity_tokens(vision_name), _identity_tokens(lens_title))
     if not a or not b:
         return False
-    ma, mb = (_findzia_model_tokens(vision_name), _findzia_model_tokens(lens_title))
+    ma, mb = (_web_model_tokens_from_listing(vision_name), _web_model_tokens_from_listing(lens_title))
     if ma or mb:
         return bool(ma & mb)
     inter = {x for x in a & b if not x.isdigit()}
@@ -4676,7 +4693,7 @@ def _price_identity_score(a, b):
     ta, tb = (_identity_tokens(a or ''), _identity_tokens(b or ''))
     if not ta or not tb:
         return 0.0
-    ma, mb = (_findzia_model_tokens(a), _findzia_model_tokens(b))
+    ma, mb = (_web_model_tokens_from_listing(a), _web_model_tokens_from_listing(b))
     if (ma or mb) and (not ma & mb):
         return 0.0
     inter = len(ta & tb)
@@ -5283,7 +5300,17 @@ def _clean_store_name(name):
 _FINDZIA_ACCESSORY_TOKENS = {'case', 'cover', 'protector', 'guard', 'skin', 'sticker', 'decal', 'cable', 'cord', 'charger', 'adapter', 'adaptor', 'dock', 'stand', 'mount', 'holder', 'strap', 'band', 'sleeve', 'pouch', 'bag', 'lace', 'laces', 'shoelace', 'shoelaces', 'insole', 'insoles', 'sock', 'socks', 'replacement', 'spare', 'part', 'parts', 'accessory', 'accessories', 'manual', 'handbook', 'pdf', 'كفر', 'غطاء', 'حمايه', 'حماية', 'شاحن', 'كيبل', 'كابل', 'وصله', 'وصلة', 'حامل', 'سوار', 'رباط', 'اربطة', 'أربطة', 'جوارب', 'نعل', 'قطع', 'غيار', 'اكسسوار', 'اكسسوارات'}
 _FINDZIA_CONFLICT_GROUPS = (({'tennis', 'تنس'}, {'running', 'runner', 'jogging', 'basketball', 'soccer', 'football', 'golf', 'hiking', 'trail', 'padel', 'تنس', 'جري', 'ركض', 'سله', 'سلة', 'قدم', 'جولف', 'بادل'}), ({'running', 'runner', 'jogging', 'جري', 'ركض'}, {'tennis', 'basketball', 'soccer', 'football', 'golf', 'hiking', 'padel', 'تنس', 'سله', 'سلة', 'قدم', 'جولف', 'بادل'}), ({'padel', 'بادل'}, {'tennis', 'running', 'basketball', 'soccer', 'football', 'golf', 'hiking', 'تنس', 'جري', 'سله', 'سلة', 'قدم', 'جولف'}))
 _FINDZIA_QUERY_FILLER = {'buy', 'best', 'price', 'cheap', 'cheapest', 'online', 'shop', 'shopping', 'for', 'the', 'a', 'an', 'of', 'in', 'with', 'new', 'original', 'ابي', 'أبي', 'اريد', 'أريد', 'افضل', 'أفضل', 'ارخص', 'أرخص', 'سعر', 'شراء', 'اونلاين', 'أونلاين'}
-_FINDZIA_SPEC_UNITS = {'gb', 'tb', 'mb', 'kb', 'kg', 'g', 'mg', 'lb', 'lbs', 'oz', 'ml', 'l', 'cl', 'cm', 'mm', 'm', 'inch', 'inches', 'in', 'ft', 'w', 'kw', 'mah', 'hz', 'khz', 'mhz', 'ghz', 'mp', 'mm', 'pcs', 'pc', 'pack', 'packs', 'set', 'sets'}
+_FINDZIA_SPEC_UNITS = {
+    'tb', 'gb', 'mb', 'kb', 'kg', 'g', 'gm', 'gr', 'mg', 'lb', 'lbs',
+    'pound', 'pounds', 'oz', 'ounce', 'ounces', 'floz', 'cc', 'ml', 'l',
+    'ltr', 'liter', 'liters', 'litre', 'litres', 'cl', 'cm', 'mm', 'm',
+    'meter', 'meters', 'metre', 'metres', 'inch', 'inches', 'in', 'ft',
+    'feet', 'w', 'watt', 'watts', 'kw', 'v', 'volt', 'volts', 'wh', 'mah',
+    'hz', 'khz', 'mhz', 'ghz', 'mp', 'pcs', 'pc', 'piece', 'pieces',
+    'count', 'ct', 'unit', 'units', 'pack', 'packs', 'box', 'boxes',
+    'bottle', 'bottles', 'can', 'cans', 'capsule', 'capsules', 'tablet',
+    'tablets', 'pair', 'pairs', 'set', 'sets',
+}
 _FINDZIA_PRICE_WORDS = {'kwd', 'kd', 'usd', 'sar', 'aed', 'qar', 'omr', 'bhd', 'cny', 'rmb', 'eur', 'gbp', 'دينار', 'ريال', 'درهم'}
 
 def _findzia_model_tokens(value):
@@ -5293,7 +5320,9 @@ def _findzia_model_tokens(value):
         if len(tok) < 3 or not any((c.isdigit() for c in tok)) or (not any((c.isalpha() for c in tok))):
             continue
         low = tok.lower()
-        if any((re.fullmatch(f'\\d+(?:\\.\\d+)?{re.escape(unit)}', low) for unit in _FINDZIA_SPEC_UNITS)):
+        if any((re.fullmatch(f'\\d+(?:[.,]\\d+)?{re.escape(unit)}', low) for unit in _FINDZIA_SPEC_UNITS)):
+            continue
+        if re.fullmatch(r'(?:pack|box|count|set)\d{1,7}', low):
             continue
         if low in _FINDZIA_PRICE_WORDS:
             continue
@@ -5306,7 +5335,13 @@ def _findzia_pure_numbers(value):
     raw = re.sub(f'{currency}\\s*\\d+(?:[.,]\\d+)?|\\d+(?:[.,]\\d+)?\\s*{currency}', ' ', raw, flags=re.I)
     raw = re.sub('\\b\\d+(?:[.,]\\d+)?\\s*%', ' ', raw)
     raw = re.sub('\\b\\d(?:[.,]\\d)?\\s*(?:/\\s*5|stars?|نجوم?)\\b', ' ', raw, flags=re.I)
-    return set(re.findall('(?<![a-z\\u0600-\\u06ff])\\d{2,5}(?![a-z\\u0600-\\u06ff])', raw))
+    try:
+        raw = _WEB_CLASSIFICATION_MEASUREMENT.sub(' ', raw)
+    except NameError:
+        pass
+    # Digit boundaries matter too: the old expression extracted ``50`` from
+    # ``500cc`` and treated it as a model-generation conflict with ``500 ml``.
+    return set(re.findall('(?<![a-z0-9\\u0600-\\u06ff])\\d{2,5}(?![a-z0-9\\u0600-\\u06ff])', raw))
 
 def _findzia_lexical_tokens(value):
     return {x for x in norm_tokens(value) - _FINDZIA_QUERY_FILLER if not x.isdigit() and x.lower() not in _FINDZIA_PRICE_WORDS}
@@ -5341,8 +5376,8 @@ def _findzia_hard_product_mismatch(query, title):
         other = set(alternatives) - set(wanted)
         if t & other and (not t & wanted):
             return True
-    q_models = _findzia_model_tokens(q_raw)
-    t_models = _findzia_model_tokens(t_raw)
+    q_models = _web_model_tokens_from_listing(q_raw)
+    t_models = _web_model_tokens_from_listing(t_raw)
     if q_models and t_models and (not q_models & t_models):
         return True
     q_nums = _findzia_pure_numbers(q_raw)
@@ -5364,8 +5399,8 @@ def _findzia_match_score(query, title):
     if not q or not t:
         return 0.0
     overlap = len(q & t) / max(1, len(q))
-    q_models = _findzia_model_tokens(query)
-    t_models = _findzia_model_tokens(title)
+    q_models = _web_model_tokens_from_listing(query)
+    t_models = _web_model_tokens_from_listing(title)
     model_bonus = 0.38 if q_models and q_models & t_models else 0.0
     q_nums = _findzia_pure_numbers(query)
     t_nums = _findzia_pure_numbers(title)
@@ -5379,7 +5414,7 @@ def _findzia_stream_candidate_ok(query, item):
             print(f'FINDZIA GUARD HARD-DROP: {title[:100]}')
         return False
     score = _findzia_match_score(query, title)
-    strong_model = bool(_findzia_model_tokens(query) & _findzia_model_tokens(title))
+    strong_model = bool(_web_model_tokens_from_listing(query) & _web_model_tokens_from_listing(title))
     threshold = 0.46 if strong_model else 0.56
     if score < threshold:
         print(f'FINDZIA GUARD HOLD score={score:.2f}: {title[:100]}')
@@ -5388,7 +5423,7 @@ def _findzia_stream_candidate_ok(query, item):
 
 def _fast_relevance_confident(query, candidates):
     seq = list(candidates or [])
-    q_models = _findzia_model_tokens(query)
+    q_models = _web_model_tokens_from_listing(query)
     if not seq or not q_models:
         return False
     considered = confident = 0
@@ -5399,7 +5434,7 @@ def _fast_relevance_confident(query, candidates):
         considered += 1
         if _findzia_hard_product_mismatch(query, title):
             continue
-        if q_models & _findzia_model_tokens(title):
+        if q_models & _web_model_tokens_from_listing(title):
             confident += 1
     return considered >= 2 and confident / considered >= 0.8
 
@@ -5451,7 +5486,7 @@ def filter_relevant_offers(query, offers, urls, use_ai=True, mode='exact'):
 
 def url_is_alive(url):
     u = str(url or '').strip()
-    if not u.startswith('http'):
+    if not u.startswith('http') or not _web_validated_outbound_url(u):
         return False
     key = u.split('?')[0][:200]
     with _URL_ALIVE_LOCK:
@@ -5459,16 +5494,17 @@ def url_is_alive(url):
         if hit and time.time() - hit['ts'] < 21600:
             return hit['ok']
     ok = False
+    r = None
     try:
-        r = requests.head(u, headers=HEADERS, timeout=6, allow_redirects=True)
+        # A streamed GET preserves the effective liveness check while routing
+        # every redirect through the same SSRF/DNS guard. No body is consumed.
+        r = _web_safe_get(u, headers=HEADERS, timeout=(3, 8), stream=True)
         ok = r.status_code < 400
-        if not ok and r.status_code in (403, 405, 501):
-            r = requests.get(u, headers=HEADERS, timeout=8, stream=True)
-            ok = r.status_code < 400
-            r.close()
     except Exception as e:
         print(f'URL ALIVE FAIL: {u[:80]} -> {e.__class__.__name__}')
         ok = False
+    finally:
+        _web_safe_response_close(r)
     with _URL_ALIVE_LOCK:
         if len(_URL_ALIVE_CACHE) > 3000:
             _URL_ALIVE_CACHE.clear()
@@ -6666,8 +6702,11 @@ WEB_IMAGE_PROXY_TIMEOUT_SECONDS = max(3.0, min(12.0, float(os.environ.get('WEB_I
 WEB_IMAGE_PAGE_TIMEOUT_SECONDS = max(2.0, min(8.0, float(os.environ.get('WEB_IMAGE_PAGE_TIMEOUT_SECONDS', '4.5'))))
 WEB_IMAGE_CACHE_TTL_SECONDS = max(3600, int(os.environ.get('WEB_IMAGE_CACHE_TTL_SECONDS', '86400')))
 WEB_IMAGE_PROXY_MAX_BYTES = max(512000, min(8 * 1024 * 1024, int(os.environ.get('WEB_IMAGE_PROXY_MAX_BYTES', str(4 * 1024 * 1024)))))
+WEB_IMAGE_PROXY_RATE_PER_MINUTE = max(30, min(600, int(os.environ.get('WEB_IMAGE_PROXY_RATE_PER_MINUTE', '240'))))
 WEB_IMAGE_CACHE = {}
 WEB_IMAGE_CACHE_LOCK = threading.Lock()
+WEB_IMAGE_PROXY_RATE_BUCKETS = defaultdict(deque)
+WEB_IMAGE_PROXY_RATE_LOCK = threading.Lock()
 WEB_STRICT_PRODUCT_PAGE = env_bool('WEB_STRICT_PRODUCT_PAGE', True)
 WEB_REQUIRE_NUMERIC_PRICE = env_bool('WEB_REQUIRE_NUMERIC_PRICE', True)
 WEB_REQUIRE_PRODUCT_IMAGE = env_bool('WEB_REQUIRE_PRODUCT_IMAGE', True)
@@ -6686,7 +6725,7 @@ WEB_MATCH_WHATSAPP_EXACT = env_bool('WEB_MATCH_WHATSAPP_EXACT', True)
 WEB_AI_CLASSIFIER_ENABLED = env_bool('WEB_AI_CLASSIFIER_ENABLED', True)
 WEB_AI_CLASSIFIER_TIMEOUT_SECONDS = max(1.0, min(3.0, float(os.environ.get('WEB_AI_CLASSIFIER_TIMEOUT_SECONDS', '2.0'))))
 WEB_AI_CLASSIFIER_CACHE_TTL_SECONDS = max(3600, min(30 * 86400, int(os.environ.get('WEB_AI_CLASSIFIER_CACHE_TTL_SECONDS', '604800'))))
-WEB_AI_CLASSIFIER_MAX_RESULTS = max(4, min(16, int(os.environ.get('WEB_AI_CLASSIFIER_MAX_RESULTS', '12'))))
+WEB_AI_CLASSIFIER_MAX_RESULTS = max(4, min(12, int(os.environ.get('WEB_AI_CLASSIFIER_MAX_RESULTS', '12'))))
 WEB_AI_CLASSIFIER_MIN_CONFIDENCE = max(50, min(95, int(os.environ.get('WEB_AI_CLASSIFIER_MIN_CONFIDENCE', '68'))))
 WEB_AI_CLASSIFIER_INFLIGHT = {}
 WEB_AI_CLASSIFIER_INFLIGHT_LOCK = threading.Lock()
@@ -6699,8 +6738,9 @@ WEB_VISUAL_CLASSIFIER_ENABLED = env_bool('WEB_VISUAL_CLASSIFIER_ENABLED', True)
 WEB_VISUAL_CLASSIFIER_TIMEOUT_SECONDS = max(2.0, min(5.0, float(os.environ.get('WEB_VISUAL_CLASSIFIER_TIMEOUT_SECONDS', '3.2'))))
 WEB_VISUAL_CLASSIFIER_FETCH_TIMEOUT_SECONDS = max(0.6, min(2.0, float(os.environ.get('WEB_VISUAL_CLASSIFIER_FETCH_TIMEOUT_SECONDS', '1.15'))))
 WEB_VISUAL_CLASSIFIER_MAX_RESULTS = max(3, min(10, int(os.environ.get('WEB_VISUAL_CLASSIFIER_MAX_RESULTS', '10'))))
-WEB_VISUAL_CLASSIFIER_IMAGE_EDGE = max(192, min(512, int(os.environ.get('WEB_VISUAL_CLASSIFIER_IMAGE_EDGE', '320'))))
-WEB_VISUAL_CLASSIFIER_JPEG_QUALITY = max(55, min(85, int(os.environ.get('WEB_VISUAL_CLASSIFIER_JPEG_QUALITY', '70'))))
+WEB_VISUAL_CLASSIFIER_IMAGE_EDGE = max(192, min(512, int(os.environ.get('WEB_VISUAL_CLASSIFIER_IMAGE_EDGE', '384'))))
+WEB_VISUAL_REFERENCE_IMAGE_EDGE = max(320, min(640, int(os.environ.get('WEB_VISUAL_REFERENCE_IMAGE_EDGE', '512'))))
+WEB_VISUAL_CLASSIFIER_JPEG_QUALITY = max(55, min(85, int(os.environ.get('WEB_VISUAL_CLASSIFIER_JPEG_QUALITY', '78'))))
 WEB_VISUAL_CLASSIFIER_MAX_DOWNLOAD_BYTES = max(384000, min(3 * 1024 * 1024, int(os.environ.get('WEB_VISUAL_CLASSIFIER_MAX_DOWNLOAD_BYTES', str(1536 * 1024)))))
 WEB_VISUAL_CLASSIFIER_MIN_CONFIDENCE = max(70, min(95, int(os.environ.get('WEB_VISUAL_CLASSIFIER_MIN_CONFIDENCE', '80'))))
 WEB_VISUAL_CLASSIFIER_EXACT_SCORE = max(86, min(98, int(os.environ.get('WEB_VISUAL_CLASSIFIER_EXACT_SCORE', '92'))))
@@ -6793,6 +6833,22 @@ def _web_rate_allowed(request):
             stale = [k for k, v in WEB_RATE_BUCKETS.items() if not v or now - v[-1] > 300]
             for k in stale[:1000]:
                 WEB_RATE_BUCKETS.pop(k, None)
+    return True
+
+def _web_image_proxy_rate_allowed(request):
+    key = _web_request_ip(request)
+    now = time.time()
+    with WEB_IMAGE_PROXY_RATE_LOCK:
+        bucket = WEB_IMAGE_PROXY_RATE_BUCKETS[key]
+        while bucket and now - bucket[0] > 60:
+            bucket.popleft()
+        if len(bucket) >= WEB_IMAGE_PROXY_RATE_PER_MINUTE:
+            return False
+        bucket.append(now)
+        if len(WEB_IMAGE_PROXY_RATE_BUCKETS) > 5000:
+            stale = [k for k, values in WEB_IMAGE_PROXY_RATE_BUCKETS.items() if not values or now - values[-1] > 300]
+            for stale_key in stale[:1000]:
+                WEB_IMAGE_PROXY_RATE_BUCKETS.pop(stale_key, None)
     return True
 
 def _web_language(value):
@@ -6919,29 +6975,55 @@ def _web_rescue_product_image(page_url):
         headers = dict(HEADERS)
         headers.setdefault('Accept', 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8')
         headers.setdefault('Referer', f'{parsed.scheme}://{parsed.netloc}/')
-        resp = requests.get(page_url, headers=headers, timeout=(2.5, WEB_IMAGE_PAGE_TIMEOUT_SECONDS), allow_redirects=True)
-        if resp.status_code >= 400:
-            _web_image_cache_set(cache_key, '')
-            return ''
-        content_type = (resp.headers.get('content-type') or '').split(';', 1)[0].strip().lower()
-        if content_type.startswith('image/'):
-            _web_image_cache_set(cache_key, resp.url or page_url)
-            return resp.url or page_url
-        html = resp.text[:400000]
-        found = _web_extract_product_image_from_html(html, resp.url or page_url)
-        _web_image_cache_set(cache_key, found)
-        return found
+        resp = _web_safe_get(page_url, headers=headers, timeout=(2.5, WEB_IMAGE_PAGE_TIMEOUT_SECONDS), stream=True)
+        try:
+            if resp.status_code >= 400:
+                _web_image_cache_set(cache_key, '')
+                return ''
+            content_type = (resp.headers.get('content-type') or '').split(';', 1)[0].strip().lower()
+            if content_type.startswith('image/'):
+                _web_image_cache_set(cache_key, resp.url or page_url)
+                return resp.url or page_url
+            body = _web_read_limited_response(resp, 400000)
+            html = body.decode(resp.encoding or 'utf-8', errors='replace') if body is not None else ''
+            found = _web_extract_product_image_from_html(html, resp.url or page_url)
+            _web_image_cache_set(cache_key, found)
+            return found
+        finally:
+            _web_safe_response_close(resp)
     except Exception as e:
         print(f'WEB IMAGE RESCUE ERR: {page_url[:120]} -> {e.__class__.__name__}')
         _web_image_cache_set(cache_key, '')
         return ''
+
+def _web_image_proxy_signature(raw_url, expires_at):
+    secret_text = (
+        os.environ.get('WEB_IMAGE_PROXY_SIGNING_SECRET')
+        or os.environ.get('LENS_URL_SIGNING_SECRET')
+        or os.environ.get('VERIFY_TOKEN')
+        or SERPAPI_API_KEY
+    )
+    if not secret_text:
+        return ''
+    secret = secret_text.encode('utf-8')
+    material = f'{int(expires_at)}\n{str(raw_url or "")}'.encode('utf-8')
+    return hmac.new(secret, material, hashlib.sha256).hexdigest()
 
 def _web_public_image_url(raw_url):
     raw_url = str(raw_url or '').strip()
     if not _web_is_http_url(raw_url):
         return ''
     if WEB_IMAGE_PROXY_ENABLED and PUBLIC_BASE_URL:
-        return f"{PUBLIC_BASE_URL}/api/img-proxy?u={urllib.parse.quote(raw_url, safe='')}"
+        expires_at = int(time.time()) + 7 * 86400
+        signature = _web_image_proxy_signature(raw_url, expires_at)
+        if not signature:
+            return raw_url
+        query = urllib.parse.urlencode({
+            'u': raw_url,
+            'exp': str(expires_at),
+            'sig': signature,
+        })
+        return f'{PUBLIC_BASE_URL}/api/img-proxy?{query}'
     return raw_url
 
 def _web_best_card_image(primary_url='', page_url='', rescue_page=False):
@@ -7237,16 +7319,121 @@ _WEB_CLASSIFICATION_MERCHANT_PREFIX = re.compile(
     re.I,
 )
 _WEB_CLASSIFICATION_MEASUREMENT = re.compile(
-    r'(?<![a-z\u0600-\u06ff])\d+(?:[.,]\d+)?\s*(?:gb|tb|mb|kb|kg|mg|g|lb|lbs|oz|ml|cl|cm|mm|inch|inches|ft|mah|hz|khz|mhz|ghz|mp|pcs|pc|مل|مم|سم|غرام|جرام|كجم|كيلو)(?![a-z\u0600-\u06ff])',
+    r'(?<![a-z\u0600-\u06ff])\d+(?:[.,\u066b]\d+)*\s*(?:tb|gb|mb|kb|kg|mg|g|lbs?|pounds?|ounces?|oz|fl\.?\s*oz|gallons?|gal|cc|ml|cl|liters?|litres?|ltr|l|cm|mm|meters?|metres?|inch(?:es)?|in(?!\s*(?:[-–—]?\s*\d+\b|stock\b))|ft|feet|mah|wh|kw|watts?|w|volts?|v|hz|khz|mhz|ghz|mp|pcs?|pieces?|count|ct|packs?|boxes?|bottles?|cans?|capsules?|tablets|pairs?|units?|مل|ملي|لتر|مم|سم|غرام|جرام|جم|غ|كجم|كيلو)(?![a-z\u0600-\u06ff])',
     re.I,
+)
+_WEB_CLASSIFICATION_PRODUCT_PHRASES = (
+    # Canonical retail synonyms.  These are identity-preserving vocabulary
+    # differences, not fuzzy guesses: the strict form/model/variant guards
+    # below still reject EDP vs EDT, Laptop vs Tablet, Pro vs base, etc.
+    (re.compile(r'(?i)\bbrand[- ]new\b'), ' new '),
+    (re.compile(r'(?i)\b(?:eau\s+de\s+parfum|edp)\b'), ' fragrance_edp '),
+    (re.compile(r'(?i)\b(?:eau\s+de\s+toilette|edt)\b'), ' fragrance_edt '),
+    (re.compile(r'(?i)\b(?:eau\s+de\s+cologne|edc)\b'), ' fragrance_edc '),
+    (re.compile(r'(?i)\b(?:perfume\s+extract|extrait(?:\s+de\s+parfum)?|pure\s+parfum|parfum)\b'), ' fragrance_parfum '),
+    (re.compile(r'(?i)\b(?:body\s+(?:spray|mist)|fragrance\s+mist|all[- ]over\s+spray|بخاخ\s+جسم|معطر\s+جسم)\b'), ' body_spray '),
+    (re.compile(r'(?i)\b(?:laptop|notebook(?:\s+computer)?)\b'), ' laptop '),
+    (re.compile(r'(?i)\b(?:mobile\s+phone|smart\s*phone|cell(?:ular)?\s+phone)\b'), ' smartphone '),
+    (re.compile(r'(?i)\b(?:vacuum\s+cleaner|hoover)\b'), ' vacuum '),
+    (re.compile(r'(?i)\b(?:washing\s+machine|washer)\b'), ' washing_machine '),
+    (re.compile(r'(?i)\b(?:tool\s+kit|tool\s+set|tool\s+bundle)\b'), ' tool_set '),
+    (re.compile(r'(?i)\b(?:drum\s+kit|drum\s+set)\b'), ' drum_set '),
+    (re.compile(r'(?i)\b(?:first\s+aid\s+kit|first\s+aid\s+set)\b'), ' first_aid_set '),
+    (re.compile(r'(?i)\b(?:sewing\s+kit|sewing\s+set)\b'), ' sewing_set '),
+    (re.compile(r'(?i)\b(?:art\s+kit|art\s+set)\b'), ' art_set '),
+    (re.compile(r'(?i)\b(?:makeup|cosmetic)\s+(?:brush(?:es)?\s+)?(?:kit|set|bundle)\b'), ' makeup_set '),
+    (re.compile(r'(?i)\b(?:craft\s+kit|craft\s+set)\b'), ' craft_set '),
+    (re.compile(r'(?i)\b(?:dinnerware|tableware)\s+(?:set|kit|bundle|combo)\b'), ' dinnerware tableware '),
+    (re.compile(r'(?i)\bsae\b'), ' '),
+    (re.compile(r'(?i)\b(?:play\s*station\s*5|ps\s*5)\b'), ' ps5 '),
+    (re.compile(r'(?i)\b(?:play\s*station\s*4|ps\s*4)\b'), ' ps4 '),
+    (re.compile(r'(?i)\b(?:play\s*station\s*3|ps\s*3)\b'), ' ps3 '),
+    (re.compile(r'(?i)\bapple\s+(?=iphone|ipad|airpods?|watch|macbook)\b'), ' '),
+    # Merchant vocabulary differs even for the same lighting topology. Keep
+    # the mounting role in the canonical token so a pendant never collapses
+    # into a table/floor/wall light merely because both are made of glass.
+    (re.compile(r'(?i)\b(?:(?:pendant|hanging|suspension|drop)\s+)+(?:lamp|light|lighting|fixture)\b|\bchandelier\b'), ' suspended_light '),
+    (re.compile(r'(?i)\b(?:table|desk|bedside|nightstand)\s+(?:lamp|light)\b'), ' tabletop_light '),
+    (re.compile(r'(?i)\b(?:floor|standing|torchiere)\s+(?:lamp|light)\b'), ' floorstanding_light '),
+    (re.compile(r'(?i)\b(?:wall\s+(?:lamp|light|fixture)|sconce)\b'), ' wall_light '),
+    (re.compile(r'(?i)\b(?:flush|semi[- ]flush|ceiling)\s+(?:mount|lamp|light|fixture)\b'), ' ceiling_light '),
+    (re.compile(r'(?i)\b(?:fitness|activity|health)\s+tracker\b'), ' fitness_tracker '),
+    (re.compile(r'(?i)\btelevisions?\b'), ' tv '),
+    (re.compile(r'(?i)\bcouch(?:es)?\b'), ' sofa '),
+    (re.compile(r'(?i)\bfridges?\b'), ' refrigerator '),
+    (re.compile(r'(?i)\bgrey\b'), ' gray '),
+    (re.compile(r'(?:للرجال\s+والنساء|للنساء\s+والرجال)'), ' audience_unisex '),
+    (re.compile(r"(?i)\b(?:men['’]?s|mens|man|male|gentlemen|gents)\b|(?:للرجال|رجالي|رجال|رجل|ذكوري)"), ' audience_male '),
+    (re.compile(r"(?i)\b(?:women['’]?s|womens|woman|female|ladies|lady)\b|(?:للنساء|نسائي|نساء|امرأة|امراة|حريمي|حريم|أنثوي|انثوي)"), ' audience_female '),
+    (re.compile(r'(?i)\b(?:boys?|young\s+men)\b|(?:للأولاد|للاولاد|أولاد|اولاد|ولادي|صبيان)'), ' audience_boys '),
+    (re.compile(r'(?i)\b(?:girls?|young\s+women)\b|(?<![\u0600-\u06ff])(?:للبنات|بناتي|بنات)(?![\u0600-\u06ff])'), ' audience_girls '),
+    (re.compile(r'(?i)\b(?:kids?|children|child|youth|junior)\b|(?:للأطفال|للاطفال|أطفال|اطفال|طفل|صغار|ناشئين)'), ' audience_kids '),
+    (re.compile(r'(?i)\b(?:unisex|gender[- ]?neutral)\b|(?:للجنسين|يونيسكس)'), ' audience_unisex '),
+    # Bundle/combo are interchangeable merchant words. Context-specific
+    # ``kit`` spellings are canonicalized above so a repair kit never becomes
+    # a generic bundle merely because it contains several pieces.
+    (re.compile(r'(?i)\b(?:bundle|combo)\b'), ' bundle '),
+    # Primary-package vocabulary is structural evidence compared separately;
+    # spelling and language variants must not remain as false identity tokens.
+    (re.compile(r'(?i)\b(?:bottles?|flacons?|زجاج(?:ة|ات)|زجاجه|قنين(?:ة|ات)|قنينه)\b'), ' bottle '),
+    (re.compile(r'(?i)\b(?:cans?|tins?|علبة\s+معدنية|علب\s+معدنية)\b'), ' can '),
+    (re.compile(r'(?i)\b(?:boxes?|cartons?|tetra\s*pak|tetrapak|كرتون|علب|علبة)\b'), ' box '),
+    (re.compile(r'(?i)\b(?:pouch(?:es)?|stand[- ]?up\s+bags?|كيس|أكياس|اكياس)\b'), ' pouch '),
+    (re.compile(r'(?i)\b(?:sachets?|packets?|ظرف|أظرف|اظرف)\b'), ' sachet '),
+    (re.compile(r'(?i)\b(?:jars?|مرطبان|مرطبانات|برطمان|برطمانات)\b'), ' jar '),
+    (re.compile(r'(?i)\b(?:tubes?|أنابيب|انابيب|أنبوب|انبوب)\b'), ' tube '),
+    (re.compile(r'(?i)\b(?:tubs?)\b'), ' tub '),
+    # "10th Generation", "10th Gen" and bare "10" are the same model
+    # evidence once the ordinal number itself has been retained.
+    (re.compile(r'(?i)\b(?:generation|gen\.?|\u0627\u0644\u062c\u064a\u0644|\u062c\u064a\u0644)\b'), ' '),
+    # Listing field labels may trail the code ("A1502 Model") or precede it.
+    # The typed-code extractor preserves the identifier before this cleanup.
+    (re.compile(r'(?i)\b(?:model|m\s*[-/]\s*n|mpn|sku|asin|item\s+(?:number|no\.?)|'
+                r'product\s+code|(?:mfr|manufacturer)\.?\s+(?:part|number|no\.?)|'
+                r'part\s+(?:number|no\.?))\b'), ' '),
+)
+_WEB_SEPARATED_MODEL_TOKEN_RE = re.compile(
+    r'(?i)(?<![a-z0-9])([a-z0-9]+(?:[._/-][a-z0-9]+)+)(?![a-z0-9])'
+)
+_WEB_SPACED_MODEL_TOKEN_RE = re.compile(
+    r'(?i)(?<![a-z0-9])([a-z]{1,20})\s+(\d[a-z0-9]*(?:\.\d+)?)(?![a-z0-9])'
+)
+_WEB_ACRONYM_MODEL_TOKEN_RE = re.compile(
+    r'(?<![A-Za-z0-9])([A-Z]{2,8})\s+([A-Z]\d[A-Za-z0-9]*)(?![A-Za-z0-9])'
+)
+_WEB_SPACED_MODEL_STOP_PREFIXES = frozenset({
+    'pack', 'packs', 'set', 'sets', 'box', 'boxes', 'count', 'quantity',
+    'piece', 'pieces', 'bottle', 'bottles', 'can', 'cans', 'unit', 'units',
+    'hp', 'dell', 'laserjet', 'tv', 'cartridge', 'toner', 'ink',
+})
+_WEB_COMPACT_TIER_SUFFIX_RE = re.compile(
+    r'(?i)(?<![a-z0-9])([a-z][a-z0-9]*\d[a-z0-9]*?)(mini|air|lite|plus|pro|max|ultra|se|fe|fold|flip|edge|slim)(?![a-z0-9])'
 )
 _WEB_CLASSIFICATION_GENERIC_CLUSTER = {
     'product', 'products', 'item', 'items', 'original', 'new', 'women', 'woman', 'men', 'man',
     'body', 'spray', 'mist', 'perfume', 'shoes', 'shoe', 'watch', 'watches', 'phone', 'phones',
     'online', 'shop', 'store', 'buy', 'best', 'price', 'sale', 'for', 'with', 'the', 'and',
+    'each', 'per', 'pack', 'packs', 'set', 'sets', 'box', 'boxes', 'bottle', 'bottles',
+    'bundle', 'bundles', 'combo', 'combos', 'kit', 'kits',
+    'can', 'cans', 'piece', 'pieces', 'unit', 'units', 'count', 'ct', 'pcs', 'pc',
+    'pair', 'pairs', 'serving', 'servings', 'roll', 'rolls', 'sheet', 'sheets',
+    'softgel', 'softgels', 'capsule', 'capsules', 'generation', 'gen',
+    'pk', 'qty', 'quantity',
+    'color', 'colour', 'edition', 'version', 'باللون', 'لون',
     'منتج', 'منتجات', 'اصلي', 'أصلي', 'جديد', 'بخاخ', 'جسم', 'عطر', 'حذاء', 'احذية', 'أحذية',
-    'ساعة', 'ساعات', 'هاتف', 'هواتف', 'شراء', 'متجر', 'سعر',
+    'ساعة', 'ساعات', 'هاتف', 'هواتف', 'شراء', 'متجر', 'سعر', 'من', 'في', 'مع',
+    # Arabic retail-count/container grammar is evaluated structurally by the
+    # pack and measurement guards.  It must not survive as a model/name token.
+    'عدد', 'عبوة', 'عبوه', 'عبوات', 'علبة', 'علبه', 'علب', 'علبات',
+    'زجاجة', 'زجاجه', 'زجاجات', 'قنينة', 'قنينه', 'قنينات',
+    'قطعة', 'قطعه', 'قطع', 'حبة', 'حبه', 'حبات', 'كل', 'واحدة', 'واحده',
 }
+_WEB_SHARED_MODEL_DESCRIPTOR_TOKENS = frozenset({
+    # Non-sellable wording differences that merchants commonly add around an
+    # already identical model. Product tiers/colors/bundles are intentionally
+    # absent and remain hard differences.
+    'cordless', 'wearable', 'mirrorless', 'repair',
+})
 
 def _web_clean_classification_identity(value):
     """Remove merchant/location SEO decoration from captured product text."""
@@ -7263,17 +7450,214 @@ def _web_clean_classification_identity(value):
 
 def _web_classification_numbers(value):
     """Keep standalone generation/size numbers, including one-digit models."""
-    raw = normalize_ar(str(value or '')).lower()
+    # Preserve Arabic taa marbuta until count grammar has been removed.
+    # Normalizing عبوة -> عبوه before the count regex leaves the count behind
+    # and can falsely reinterpret it as a model generation.
+    raw = _web_expand_measurement_fractions(_web_ascii_digits(str(value or ''))).lower()
+    try:
+        raw = _web_numericize_pack_words(raw)
+    except NameError:
+        pass
     raw = re.sub(r'\b\d+(?:[.,]\d+)?\s*(?:kwd|kd|usd|sar|aed|qar|omr|bhd|cny|rmb|eur|gbp)\b', ' ', raw, flags=re.I)
+    try:
+        for pattern in _WEB_PACK_COUNT_PATTERNS:
+            raw = pattern.sub(' ', raw)
+        raw = _WEB_SINGLE_ITEM_RE.sub(' ', raw)
+        # Remove the complete measured offer, including suffix quantity in
+        # ``500ml x2``. Count is compared separately as a quantity fact.
+        spans = []
+        for match in _WEB_IDENTITY_MEASURE_RE.finditer(raw):
+            if not _web_identity_measure_match_allowed(raw, match):
+                continue
+            end = match.end()
+            suffix = re.match(r'\s*[x\u00d7*]\s*' + _WEB_COUNT_NUMBER_PATTERN, raw[end:], flags=re.I)
+            if suffix:
+                end += suffix.end()
+            spans.append((match.start(), end))
+        for start, end in reversed(spans):
+            raw = raw[:start] + ' ' + raw[end:]
+    except NameError:
+        pass
+    # Apply the same model/ordinal canonicalizer used by lexical comparison so
+    # digits inside MK-2/A-1502/iPhone15 are not reinterpreted as standalone
+    # generation numbers on only one side.
+    raw = _web_classification_comparable(raw)
     # Measurements describe capacity/size, not a product generation.  Removing
     # them keeps ``Ultra 2`` significant while preventing ``125 ml`` from
     # turning a genuine match into Similar merely because spacing differs.
     raw = _WEB_CLASSIFICATION_MEASUREMENT.sub(' ', raw)
-    return set(re.findall(r'(?<![a-z\u0600-\u06ff])\d{1,5}(?![a-z\u0600-\u06ff])', raw))
+    return set(re.findall(r'(?<![a-z0-9\u0600-\u06ff])\d{1,5}(?![a-z0-9\u0600-\u06ff])', raw))
 
 def _web_classification_comparable(value):
-    """Normalize measurement formatting before existing mismatch checks."""
-    return re.sub(r'\s+', ' ', _WEB_CLASSIFICATION_MEASUREMENT.sub(' ', str(value or ''))).strip()
+    """Return only residual product identity, not equivalent offer notation.
+
+    Capacity/dimension and sold-count facts are compared structurally by
+    ``_web_identity_fact_conflicts``.  Leaving fragments such as ``x2``,
+    ``pack2`` or Arabic-grouped measurements in this lexical string makes the
+    later residual-token guard contradict those already-equivalent facts.
+    Strip each complete fact here while keeping real model/generation tokens.
+    """
+    raw = _web_expand_measurement_fractions(_web_ascii_digits(str(value or '')))
+    # Engine-oil viscosity is an alphanumeric grade, never electrical power.
+    raw = re.sub(
+        r'(?i)(?<![a-z0-9])(?:sae\s*)?(\d{1,2})\s*w\s*[-–—]?\s*(\d{1,2})(?![a-z0-9])',
+        r' viscosity\1w\2 ',
+        raw,
+    )
+    try:
+        raw = _web_numericize_pack_words(raw)
+        # Remove explicit sold-count syntax before scanning measurements.
+        # Otherwise ``Qty:2 2x500ml Bottle`` can lose the measured span first
+        # and leave the misleading residue ``Qty:`` behind.
+        for pattern in _WEB_PACK_COUNT_PATTERNS:
+            raw = pattern.sub(' ', raw)
+        raw = _WEB_SINGLE_ITEM_RE.sub(' ', raw)
+        spans = []
+        for match in _WEB_IDENTITY_DIMENSION_CHAIN_RE.finditer(raw):
+            spans.append((match.start(), match.end()))
+        for match in _WEB_IDENTITY_MEASURE_RE.finditer(raw):
+            if not _web_identity_measure_match_allowed(raw, match):
+                continue
+            end = match.end()
+            suffix = re.match(
+                r'\s*[x\u00d7*]\s*' + _WEB_COUNT_NUMBER_PATTERN,
+                raw[end:],
+                flags=re.I,
+            )
+            if suffix:
+                end += suffix.end()
+            spans.append((match.start(), end))
+        # Merge overlaps before deleting so dimension chains such as
+        # ``20 x 30 x 40 cm`` disappear as one fact rather than debris.
+        merged = []
+        for start, end in sorted(spans):
+            if merged and start <= merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+            else:
+                merged.append((start, end))
+        for start, end in reversed(merged):
+            raw = raw[:start] + ' ' + raw[end:]
+        for pattern in _WEB_PACK_COUNT_PATTERNS:
+            raw = pattern.sub(' ', raw)
+        raw = _WEB_SINGLE_ITEM_RE.sub(' ', raw)
+        # Defensive cleanup for uncommon compact suffixes after a marketplace
+        # formats a quantity outside the measurement regex span.
+        raw = re.sub(
+            r'(?i)(?<![a-z0-9])(?:x\s*' + _WEB_COUNT_NUMBER_BODY +
+            r'|' + _WEB_COUNT_NUMBER_BODY + r'\s*x)(?![a-z0-9])',
+            ' ',
+            raw,
+        )
+    except NameError:
+        # Import-time callers are not expected, but retain the earlier safe
+        # normalizer if declarations below have not yet executed.
+        pass
+    raw = _WEB_CLASSIFICATION_MEASUREMENT.sub(' ', raw)
+    try:
+        # ``Model A1502`` and ``A1502`` carry identical evidence; the field
+        # label itself is not a variant. Preserve the actual identifier.
+        raw = _WEB_TYPED_LISTING_CODE_RE.sub(lambda match: ' ' + match.group(1) + ' ', raw)
+    except NameError:
+        pass
+
+    def compact_model_notation(match):
+        token = match.group(1)
+        parts = re.split(r'[._/-]+', token)
+        mixed_part = any(
+            any(ch.isalpha() for ch in part) and any(ch.isdigit() for ch in part)
+            for part in parts
+        )
+        short_prefix_code = bool(
+            len(parts) == 2
+            and parts[0].isalpha() and len(parts[0]) <= 4
+            and parts[1].isdigit() and len(parts[1]) >= 1
+        )
+        if mixed_part or short_prefix_code:
+            return re.sub(r'[^a-z0-9]+', '', token.lower())
+        return token
+
+    generation_words = {
+        'first': '1', 'one': '1', 'second': '2', 'two': '2',
+        'third': '3', 'three': '3', 'fourth': '4', 'four': '4',
+        'fifth': '5', 'five': '5', 'sixth': '6', 'six': '6',
+        'seventh': '7', 'seven': '7', 'eighth': '8', 'eight': '8',
+        'ninth': '9', 'nine': '9', 'tenth': '10', 'ten': '10',
+        'eleventh': '11', 'eleven': '11', 'twelfth': '12', 'twelve': '12',
+    }
+    generation_word_pattern = '|'.join(sorted(generation_words, key=len, reverse=True))
+    raw = re.sub(
+        r'(?i)\b(' + generation_word_pattern + r')\s+(?:gen(?:eration)?\.?)\b',
+        lambda match: ' generation' + generation_words[match.group(1).lower()] + ' ',
+        raw,
+    )
+    raw = re.sub(
+        r'(?i)\b(?:gen(?:eration)?\.?)\s+(' + generation_word_pattern + r')\b',
+        lambda match: ' generation' + generation_words[match.group(1).lower()] + ' ',
+        raw,
+    )
+    raw = re.sub(r'(?i)(?<![a-z0-9])(\d+)(?:st|nd|rd|th)(?![a-z0-9])', r'\1', raw)
+    roman_revision = {'i': '1', 'ii': '2', 'iii': '3', 'iv': '4'}
+    raw = re.sub(
+        r'(?i)(?<![a-z0-9])(?:mark|mk)\s*[-–—]?\s*(iv|iii|ii|i|[1-9])(?![a-z0-9])',
+        lambda match: ' mark' + roman_revision.get(match.group(1).lower(), match.group(1)) + ' ',
+        raw,
+    )
+    raw = re.sub(r'(?i)\b(?:gen(?:eration)?\s*[-–—]?\s*(\d+))\b', r' generation\1 ', raw)
+    raw = re.sub(r'(?i)\b(\d+)\s+(?:gen(?:eration)?\.?)\b', r' generation\1 ', raw)
+    # Camera families are printed both as "EOS R5" and "R5 EOS".  Preserve
+    # their alphanumeric identity while making harmless word order irrelevant.
+    raw = re.sub(r'(?i)\b(?:eos\s*[- ]?\s*(r\d+[a-z0-9]*)|(r\d+[a-z0-9]*)\s*[- ]?\s*eos)\b',
+                 lambda match: ' eos' + (match.group(1) or match.group(2)).lower() + ' ', raw)
+    family = r'(?:iphone|ipad|airpods?|galaxy|pixel|surface|kindle|echo|playstation|ps|xbox|watch)'
+    family_variant = r'(?:paperwhite|colorsoft|oasis|scribe|dot|show|studio|pro|air|mini|go|fold|flip|tab|series)'
+    raw = re.sub(
+        r'(?i)\bgeneration(\d+)\s*[\)\]]*\s+(' + family + r')'
+        r'(?:\s+(' + family_variant + r'))?\b',
+        lambda m: ' ' + m.group(2) + m.group(1) + ((' ' + m.group(3)) if m.group(3) else '') + ' ', raw,
+    )
+    raw = re.sub(
+        r'(?i)\b(' + family + r')(?:\s+(' + family_variant + r'))?'
+        r'\s*[\(\[]*\s*generation(\d+)\s*[\)\]]*',
+        lambda m: ' ' + m.group(1) + m.group(3) + ((' ' + m.group(2)) if m.group(2) else '') + ' ', raw,
+    )
+    # Keep the commercial feature "2-in-1" out of the generic spaced-model
+    # compactor.  All punctuation/spacing variants become one atomic token.
+    raw = re.sub(
+        r'(?i)(?<![a-z0-9])(\d+)\s*[-\u2013\u2014]?\s*in\s*[-\u2013\u2014]?\s*(\d+)(?![a-z0-9])',
+        r' \1in\2 ',
+        raw,
+    )
+    # Seating capacity is a structural variant, not a brand/model joined by
+    # the generic "word + number" compactor (Oslo 3-seat != model oslo3).
+    raw = re.sub(
+        r'(?i)(?<![a-z0-9])(\d{1,2})\s*[-\u2013\u2014]?\s*seat(?:er)?s?(?![a-z0-9])',
+        r' seats\1 ',
+        raw,
+    )
+    raw = _WEB_SEPARATED_MODEL_TOKEN_RE.sub(compact_model_notation, raw)
+    raw = _WEB_ACRONYM_MODEL_TOKEN_RE.sub(
+        lambda match: (
+            match.group(0)
+            if match.group(1).lower() in _WEB_SPACED_MODEL_STOP_PREFIXES
+            else (match.group(1) + match.group(2)).lower()
+        ),
+        raw,
+    )
+    raw = _WEB_SPACED_MODEL_TOKEN_RE.sub(
+        lambda match: (
+            match.group(0)
+            if match.group(1).lower() in _WEB_SPACED_MODEL_STOP_PREFIXES
+            else (match.group(1) + match.group(2)).lower()
+        ),
+        raw,
+    )
+    # Compact storefront titles often glue a commercial tier to the model
+    # (S24Ultra/iPhone15Pro). Split only a known sellable qualifier so the
+    # tier guard still sees it and can reject one-sided Pro/Slim/etc.
+    raw = _WEB_COMPACT_TIER_SUFFIX_RE.sub(r'\1 \2', raw)
+    for pattern, replacement in _WEB_CLASSIFICATION_PRODUCT_PHRASES:
+        raw = pattern.sub(replacement, raw)
+    return re.sub(r'\s+', ' ', raw).strip()
 
 def _web_classification_script(value):
     text = str(value or '')
@@ -7293,7 +7677,7 @@ def _web_classification_peer_score(left, right):
     left_tokens = _findzia_lexical_tokens(left_cmp)
     right_tokens = _findzia_lexical_tokens(right_cmp)
     distinctive = (left_tokens & right_tokens) - _WEB_CLASSIFICATION_GENERIC_CLUSTER
-    model_overlap = _findzia_model_tokens(left) & _findzia_model_tokens(right)
+    model_overlap = _web_model_tokens_from_listing(left) & _web_model_tokens_from_listing(right)
     if not distinctive and not model_overlap:
         return 0.0
     return max(_findzia_match_score(left_cmp, right_cmp), _findzia_match_score(right_cmp, left_cmp))
@@ -7326,7 +7710,7 @@ def _web_classification_anchor(identity, results):
             score = _web_classification_peer_score(title, other)
             if score >= 0.50:
                 peers.append(score)
-        rank = (len(peers), sum(peers), len(_findzia_model_tokens(title)), -index)
+        rank = (len(peers), sum(peers), len(_web_model_tokens_from_listing(title)), -index)
         if rank > best_rank:
             best_rank = rank
             best_title = title
@@ -7340,24 +7724,257 @@ _WEB_STRONG_ACCESSORY_RE = re.compile(
     r'replacement\s+(?:strap|band|charger|cable)|(?:strap|band|case|cover)\s+for\b|'
     r'compatible\s+with\b|coreknit\s+(?:accessory\s+)?(?:strap|band)|strap\s+band|'
     r'watch\s+band|wrist\s*band|charger|charging\s+(?:cable|dock)|protective\s+case|'
-    r'screen\s+protector|حزام\s+فقط|سوار\s+فقط|اكسسوار|إكسسوار|متوافق\s+مع|شاحن|كفر)\b',
+    r'screen\s+protector|accessor(?:y|ies)|'
+    r'ink\s+cartridge|toner\s+cartridge|battery\s+grip|lens\s+kit|camera\s+tripod|'
+    r'(?:silicone|leather|protective|phone|tablet|laptop|watch)\s+(?:case|cover)|'
+    r'apple\s+pencil|\bps5\s+(?:controller|game)\b|\blaptop\s+keyboard\b|airpods?|'
+    r'(?:tripod|stylus|controller|keyboard|cartridge|pencil|lens)\s+(?:only|for|compatible\s+with)|'
+    r'(?:tripod|stylus|controller|keyboard|cartridge|pencil|lens|game)\s*$|'
+    r'(?:case|cover|protector|toner|ink|cartridge|strap|band|charger|cable)\s*$|'
+    r'(?:dyson|roomba|vacuum|robot\s+vacuum|air\s+purifier)\s+(?:filters?|bags?|brush(?:es)?|rollers?|mop\s+pads?)\s*$|'
+    r'(?:nespresso|keurig|coffee\s+machine)\s+(?:capsules?|pods?)\s*$|'
+    # Host/model words may appear between the brand and the consumable.  Keep
+    # the window bounded and require the accessory noun, so a full vacuum or
+    # coffee machine that merely mentions a feature is not retyped by order.
+    r'(?:dyson|roomba)\b(?:\s+[a-z0-9._/-]+){0,4}\s+(?:hepa\s+)?(?:filters?|bags?|brush(?:es)?|rollers?|mop\s+pads?)\b|'
+    r'(?:nespresso|keurig)\b(?:\s+[a-z0-9._/-]+){0,5}\s+(?:capsules?|pods?)\b|'
+    # Marketplaces often lead with the replacement item instead of the host
+    # product ("HEPA Filter for Dyson", "Toner for HP").  Word order must not
+    # let those rows impersonate the photographed main product.
+    r'(?:hepa\s+)?(?:filters?|bags?|capsules?|pods?|toner|ink|brush(?:es)?|rollers?|mop\s+pads?)\s+'
+    r'(?:only|for|compatible\s+with)\b|'
+    r'(?:case|cover|protector|guard|skin|cable|cord|adapter|adaptor|dock|stand|mount|holder|'
+    r'strap|band|sleeve|pouch|wallet|keychain|clasp|buckle)\s+(?:only|for|compatible\s+with)|'
+    r'حزام\s+فقط|سوار\s+فقط|اكسسوار|إكسسوار|متوافق\s+مع|شاحن|كفر)\b',
     re.I,
 )
 _WEB_FULL_DEVICE_RE = re.compile(
     r'\b(?:wearable|fitness\s+tracker|activity\s+tracker|health\s+tracker|smart\s*watch|smartwatch|'
-    r'complete\s+(?:device|tracker)|device\s+bundle|tracker\s+bundle|جهاز|ساعة\s+ذكية|متتبع\s+(?:لياقة|نشاط))\b',
+    r'complete\s+(?:device|tracker)|device\s+bundle|tracker\s+bundle|smart\s*phone|smartphone|'
+    r'iphone|ipad|tablet|laptop|notebook|desktop|computer|camera|television|\btv\b|monitor|'
+    r'game\s+console|console|\bps[345]\b|xbox|nintendo\s+switch|printer|router|headphones?|'
+    r'earbuds?|speaker|جهاز|هاتف|جوال|حاسوب|كمبيوتر|كاميرا|تلفزيون|ساعة\s+ذكية|'
+    r'متتبع\s+(?:لياقة|نشاط))\b',
     re.I,
 )
 _WEB_MEMBERSHIP_RE = re.compile(r'\b(?:membership|subscription|plan|اشتراك|عضوية|خطة)\b', re.I)
+_WEB_MEMBERSHIP_ONLY_RE = re.compile(
+    r'\b(?:membership|subscription|plan)\s+(?:only|renewal|code|card|access)\b|'
+    r'\b(?:digital|online)\s+(?:membership|subscription)\b|'
+    r'\b(?:renewal|activation)\s+(?:membership|subscription|plan)\b|'
+    r'\b(?:اشتراك|عضوية|خطة)\s+(?:فقط|رقمية|تجديد)\b',
+    re.I,
+)
+# Product pages frequently repeat the main device model in titles for a
+# replacement component.  Lexical/model overlap must never turn that part into
+# the photographed device.  Keep the patterns contextual so ordinary device
+# specifications such as "5000 mAh battery" or "OLED display" are not treated
+# as replacement offers.
+_WEB_COMPONENT_ONLY_RE = re.compile(
+    r'\b(?:replacement|spare)\s+(?:battery|batteries|screen|display|lcd|oled|digitizer|'
+    r'sensor|camera|speaker|microphone|clasp|buckle|assembly|module|panel)\b|'
+    r'\b(?:battery|batteries)\s+(?:replacement|assembly|module|for|compatible\s+with|only)\b|'
+    r'\b(?:screen|display|lcd|oled|touch\s*screen|touchscreen)\s+'
+    r'(?:assembly|digitizer|replacement|panel|module|for|compatible\s+with|only)\b|'
+    r'\bdigitizer(?:\s+(?:assembly|screen|replacement|for|compatible\s+with|only))?\b|'
+    r'\b(?:sensor|camera|speaker|microphone)\s+(?:assembly|module|replacement|for|only)\b|'
+    r'\b(?:clasp|buckle)\s+(?:replacement|for|compatible\s+with|only)\b|'
+    r'\b(?:replacement|spare)\s+(?:clasp|buckle)\b|'
+    r'\b(?:battery|batteries|clasp|buckle)\s*(?:only)?\s*$|'
+    r'\b(?:battery|display|screen|sensor|camera|digitizer)\s+(?:assembly|module)\b|'
+    r'(?:بطارية|شاشة|حساس|مستشعر|كاميرا)\s+(?:بديلة|بديل|قطعة|وحدة|لـ|متوافقة\s+مع)',
+    re.I,
+)
+
+_WEB_SELLABLE_VARIANT_TOKENS = frozenset({
+    # Candidate-only colours are sellable variants, not incidental words.
+    'black', 'white', 'blue', 'red', 'green', 'yellow', 'orange', 'purple',
+    'pink', 'brown', 'gray', 'grey', 'silver', 'gold', 'beige', 'navy',
+    'teal', 'cyan', 'magenta', 'bronze', 'graphite', 'titanium',
+    'اسود', 'أسود', 'ابيض', 'أبيض', 'ازرق', 'أزرق', 'احمر', 'أحمر', 'اخضر',
+    'أخضر', 'رمادي', 'فضي', 'ذهبي', 'بني', 'بيج',
+    # Commercial trims whose omission changes the buyable product.
+    'slim', 'elixir', 'mini', 'air', 'lite', 'plus', 'pro', 'max', 'ultra',
+    'se', 'fe', 'fold', 'flip', 'edge', 'digital',
+})
+_WEB_BUNDLE_OFFER_RE = re.compile(
+    r'\b(?:bundle|kit|combo)\b|'
+    r'\b(?:tool|drum|first\s+aid|sewing|art|makeup|cosmetic|craft|medical|dinnerware)'
+    r'(?:\s+[a-z0-9-]+){0,2}\s+set\b|'
+    r'\b(?:طقم|حزمة|عدة)\b',
+    re.I,
+)
+
+def _web_sellable_variant_tokens(value):
+    aliases = {'grey': 'gray'}
+    source = str(value or '')
+    variants = {
+        aliases.get(str(token).lower(), str(token).lower())
+        for token in norm_tokens(_web_classification_comparable(source))
+        if str(token).lower() in _WEB_SELLABLE_VARIANT_TOKENS
+    }
+    # "Air" and "Ultra" are ordinary product-type/spec words in these
+    # contexts, not commercial trims (Air Conditioner == A/C; Ultra HD == UHD).
+    normalized = re.sub(r'[^a-z0-9]+', ' ', _web_ascii_digits(source.lower()))
+    if re.search(
+        r'\bair\s+(?:conditioner|conditioning|purifier|cleaner|filter|fryer|pump|compressor|'
+        r'mattress|freshener|cooler|handler|vent|quality)\b',
+        normalized,
+    ):
+        variants.discard('air')
+    if re.search(r'\bultra\s+hd\b', normalized):
+        variants.discard('ultra')
+    # Roman "Mark" revisions are model-defining even when the marketplace
+    # omits a machine-readable part number (EOS R5 is not EOS R5 Mark II).
+    mark = re.search(r'\b(?:mark|mk)\s*[- ]?\s*(iv|iii|ii|i|[1-9])\b', normalized)
+    if mark:
+        roman = {'i': '1', 'ii': '2', 'iii': '3', 'iv': '4'}
+        revision = roman.get(mark.group(1), mark.group(1))
+        variants.add('mark_' + revision)
+    return variants
 _WEB_PRODUCT_FORM_PATTERNS = (
     ('eau_de_toilette', re.compile(r'\b(?:eau\s+de\s+toilette|edt)\b', re.I)),
     ('eau_de_parfum', re.compile(r'\b(?:eau\s+de\s+parfum|edp)\b', re.I)),
     ('eau_de_cologne', re.compile(r'\b(?:eau\s+de\s+cologne|edc)\b', re.I)),
     ('parfum', re.compile(r'\b(?:parfum|perfume\s+extract|extrait(?:\s+de\s+parfum)?)\b', re.I)),
-    ('body_spray', re.compile(r'\b(?:body\s+(?:spray|mist)|fragrance\s+mist|بخاخ\s+جسم|معطر\s+جسم)\b', re.I)),
+    ('body_spray', re.compile(r'\b(?:body\s+(?:spray|mist)|fragrance\s+mist|all[- ]over\s+spray|بخاخ\s+جسم|معطر\s+جسم)\b', re.I)),
+)
+_WEB_AUDIENCE_PATTERNS = (
+    ('unisex', re.compile(r'(?i)\b(?:unisex|gender[- ]?neutral)\b|(?:للرجال\s+والنساء|للنساء\s+والرجال|للجنسين|يونيسكس)')),
+    ('adult_male', re.compile(r"(?i)\b(?:men['’]?s?|mens|man|male|gentlemen|gents)\b|(?:للرجال|رجالي|رجال|رجل|ذكوري)")),
+    ('adult_female', re.compile(r"(?i)\b(?:women['’]?s?|womens|woman|female|ladies|lady)\b|(?:للنساء|نسائي|نساء|امرأة|امراة|حريمي|حريم|أنثوي|انثوي)")),
+    ('boys', re.compile(r'(?i)\b(?:boys?|young\s+men)\b|(?:للأولاد|للاولاد|أولاد|اولاد|ولادي|صبيان)')),
+    ('girls', re.compile(r'(?i)\b(?:girls?|young\s+women)\b|(?<![\u0600-\u06ff])(?:للبنات|بناتي|بنات)(?![\u0600-\u06ff])')),
+    ('kids', re.compile(r'(?i)\b(?:kids?|children|child|youth|junior)\b|(?:للأطفال|للاطفال|أطفال|اطفال|طفل|صغار|ناشئين)')),
+)
+
+# Merchant titles are authoritative when they explicitly name a product type.
+# This compact taxonomy is intentionally brand-neutral. It blocks a shared
+# model code from making a phone equal a watch, shampoo equal conditioner, or
+# a pendant equal a table lamp; unlisted categories remain handled by the
+# universal visual fingerprint rather than guessed from adjectives.
+_WEB_PRODUCT_KIND_PATTERNS = (
+    ('fitness_tracker', re.compile(r'(?i)\b(?:fitness|activity|health)\s+tracker\b|(?:متتبع\s+(?:لياقة|نشاط|صحة))')),
+    ('smartwatch', re.compile(r'(?i)\b(?:smart\s*watch|apple\s+watch|wearable\s+watch)\b|(?:ساعة\s+ذكية)')),
+    ('watch', re.compile(r'(?i)\b(?:wrist\s*watch|watch)\b|(?:ساعة\s+يد)')),
+    ('smartphone', re.compile(
+        r'(?i)\b(?:smart\s*phone|mobile\s+phone|cell(?:ular)?\s+phone|iphone|'
+        r'galaxy\s+(?:s|z|a|note)\s*\d*|'
+        r'(?:s|z|a|note)\s*\d+\b(?:\s+[a-z0-9-]+){0,4}\s+galaxy)\b|'
+        r'(?:هاتف|جوال|موبايل)'
+    )),
+    ('tablet', re.compile(r'(?i)\b(?:tablet(?:\s+computer)?|ipad)\b|(?:جهاز\s+لوحي|تابلت)')),
+    ('laptop', re.compile(r'(?i)\b(?:laptop|notebook(?:\s+computer)?|macbook)\b|(?:حاسوب\s+محمول|لابتوب)')),
+    ('desktop', re.compile(r'(?i)\b(?:desktop(?:\s+computer)?|all[- ]in[- ]one\s+pc|tower\s+pc)\b|(?:حاسوب\s+مكتبي)')),
+    ('camera_lens', re.compile(r'(?i)\b(?:camera\s+lens|interchangeable\s+lens|prime\s+lens|zoom\s+lens)\b|(?:عدسة\s+كاميرا)')),
+    ('camera', re.compile(r'(?i)\b(?:mirrorless|dslr|digital|instant|action)\s+camera\b|\bcamera\b|(?:كاميرا)')),
+    ('television', re.compile(r'(?i)\b(?:television|smart\s+tv|oled\s+tv|qled\s+tv|tv)\b|(?:تلفزيون)')),
+    ('monitor', re.compile(r'(?i)\b(?:computer|gaming|display)\s+monitor\b|\bmonitor\b|(?:شاشة\s+كمبيوتر)')),
+    ('printer', re.compile(r'(?i)\b(?:laser|inkjet|photo)?\s*printer\b|(?:طابعة)')),
+    ('headphones', re.compile(r'(?i)\b(?:headphones?|headset)\b|(?:سماعة\s+رأس)')),
+    ('earbuds', re.compile(r'(?i)\b(?:earbuds?|earphones?|airpods?)\b|(?:سماعات\s+أذن|سماعات\s+اذن)')),
+    ('speaker', re.compile(r'(?i)\b(?:bluetooth|wireless|smart)?\s*speakers?\b|(?:مكبر\s+صوت)')),
+    ('game_console', re.compile(r'(?i)\b(?:game\s+console|play\s*station|ps[345]|xbox|nintendo\s+switch)\b|(?:جهاز\s+ألعاب|جهاز\s+العاب)')),
+    ('refrigerator', re.compile(r'(?i)\b(?:refrigerator|fridge)\b|(?:ثلاجة)')),
+    ('washing_machine', re.compile(r'(?i)\b(?:washing\s+machine|clothes\s+washer)\b|(?:غسالة)')),
+    ('vacuum', re.compile(r'(?i)\b(?:vacuum(?:\s+cleaner)?|hoover)\b|(?:مكنسة)')),
+    ('air_conditioner', re.compile(r'(?i)\b(?:air[-\s]+conditioner|a\s*/\s*c|ac\s+unit)\b|(?:مكيف)')),
+    ('air_purifier', re.compile(r'(?i)\bair\s+purifier\b|(?:منقي\s+هواء)')),
+    ('coffee_machine', re.compile(r'(?i)\b(?:coffee|espresso)\s+(?:machine|maker)\b|(?:ماكينة\s+قهوة)')),
+    ('hair_shampoo', re.compile(r'(?i)\bshampoo\b|(?:شامبو)')),
+    ('hair_conditioner', re.compile(r'(?i)\bhair\s+conditioner\b|(?<!air )\bconditioner\b|(?:بلسم\s+شعر)')),
+    ('body_lotion', re.compile(r'(?i)\b(?:body|hand|face)?\s*lotion\b|(?:لوشن)')),
+    ('serum', re.compile(r'(?i)\b(?:face|hair|skin)?\s*serum\b|(?:سيروم)')),
+    ('razor', re.compile(r'(?i)\b(?:electric\s+)?razor\b|(?:ماكينة\s+حلاقة|شفرة\s+حلاقة)')),
+    ('shoes', re.compile(r'(?i)\b(?:shoes?|sneakers?|trainers?|boots?|sandals?)\b|(?:حذاء|أحذية|احذية)')),
+    # Lighting is separated by use/topology before generic furniture words.
+    # The same glass, colour and silhouette do not make a hanging pendant the
+    # same sellable product as a table/floor/wall/ceiling lamp.
+    ('pendant_light', re.compile(r'(?i)\b(?:pendant|hanging|suspension|drop)\b(?:\s+[a-z0-9&/\'’-]+){0,6}\s+(?:lamp|light|lighting|fixture)\b|\bchandelier\b|(?:مصباح\s+معلق|ثريا)')),
+    ('table_lamp', re.compile(r'(?i)\b(?:table|desk|bedside|nightstand)\b(?:\s+[a-z0-9&/\'’-]+){0,6}\s+(?:lamp|light)\b|(?:مصباح\s+(?:طاولة|مكتب))')),
+    ('floor_lamp', re.compile(r'(?i)\b(?:floor|standing|torchiere)\b(?:\s+[a-z0-9&/\'’-]+){0,6}\s+(?:lamp|light)\b|(?:مصباح\s+ارضي)')),
+    ('wall_light', re.compile(r'(?i)\bwall\b(?:\s+[a-z0-9&/\'’-]+){0,6}\s+(?:lamp|light|fixture)\b|\bsconce\b|(?:مصباح\s+جداري)')),
+    ('ceiling_light', re.compile(r'(?i)\b(?:flush|semi[- ]flush|ceiling)\b(?:\s+[a-z0-9&/\'’-]+){0,6}\s+(?:mount|lamp|light|fixture)\b|(?:مصباح\s+سقف)')),
+    ('umbrella_stand', re.compile(r'(?i)\b(?:umbrella|parasol)\s+stands?\b|(?:حامل\s+مظلات)')),
+    ('vase', re.compile(r'(?i)\b(?:flower\s+)?vases?\b|(?:مزهرية|مزهريه)')),
+    ('chair', re.compile(r'(?i)\b(?:chairs?|armchairs?|stools?)\b|(?:كرسي|كراسي)')),
+    ('table', re.compile(r'(?i)\b(?:dining|coffee|side|console)?\s*tables?\b|(?:طاولة|طاولات)')),
+    ('sofa', re.compile(r'(?i)\b(?:sofas?|couch(?:es)?|loveseats?)\b|(?:كنبة|أريكة|اريكة)')),
+    ('mattress', re.compile(r'(?i)\bmattress(?:es)?\b|(?:مرتبة|مراتب)')),
+    ('candle', re.compile(r'(?i)\b(?:flameless|pillar|scented)?\s*candles?\b|(?:شمعة|شموع)')),
+    ('planter', re.compile(r'(?i)\b(?:plant(?:er|pot)|flowerpot)s?\b|(?:حوض\s+نبات|أصيص|اصيص)')),
+)
+
+_WEB_LABELED_VARIANT_AXES = {
+    'flavor': r'flavou?r|نكهة',
+    'scent': r'scent|fragrance|رائحة',
+    'shade': r'shade|درجة',
+}
+
+def _web_labeled_variants(value):
+    """Extract only explicitly labelled variants; never guess from adjectives."""
+    text = re.sub(r'\s+', ' ', _web_ascii_digits(str(value or ''))).strip()
+    out = {}
+    for axis, label in _WEB_LABELED_VARIANT_AXES.items():
+        prefix = re.search(
+            r'(?i)\b(?:' + label + r')\s*[:#=-]\s*([a-z0-9\u0600-\u06ff-]+)',
+            text,
+        )
+        suffix = re.search(
+            r'(?i)\b([a-z0-9\u0600-\u06ff-]+)\s+(?:' + label + r')\b'
+            r'(?!\s+(?:mist|spray|perfume|cologne|oil|water|lotion)\b)',
+            text,
+        )
+        raw = prefix.group(1) if prefix else (suffix.group(1) if suffix else '')
+        if raw:
+            raw = re.split(r'(?i)\b(?:\d+(?:[.,]\d+)?\s*(?:ml|g|kg|oz|lb)|pack|set|count|qty)\b', raw, maxsplit=1)[0]
+            code = re.sub(r'[^a-z0-9\u0600-\u06ff]+', '_', normalize_ar(raw.lower())).strip('_')
+            if code:
+                out[axis] = code
+    return out
+
+_WEB_PACKAGING_FORM_PATTERNS = (
+    ('bottle', re.compile(r'\b(?:bottles?|flacons?|زجاج(?:ة|ه|ات|تان|تين)|قنين(?:ة|ه|ات|تان|تين))\b', re.I)),
+    ('can', re.compile(r'\b(?:cans?|tins?|علبة\s+معدنية|علب\s+معدنية)\b', re.I)),
+    ('jar', re.compile(r'\b(?:jars?|مرطبان|مرطبانات|برطمان|برطمانات)\b', re.I)),
+    ('tube', re.compile(r'\b(?:tubes?|أنابيب|انابيب|أنبوب|انبوب)\b', re.I)),
+    ('tub', re.compile(r'\b(?:tubs?|حوض)\b', re.I)),
+    ('pouch', re.compile(r'\b(?:pouch(?:es)?|stand[- ]?up\s+bags?|كيس|كيسان|كيسين|أكياس|اكياس)\b', re.I)),
+    ('sachet', re.compile(r'\b(?:sachets?|packets?|ظرف|ظرفان|ظرفين|ظروف|أظرف|اظرف)\b', re.I)),
+    # A carton/box used as the primary measured container (juice, milk,
+    # detergent...) differs from a bottle/can. "Box of 12" is only the outer
+    # count operator and is deliberately excluded by the extractor below.
+    ('box', re.compile(r'\b(?:boxes|box|cartons?|tetra\s*pak|tetrapak|كرتون|علب|علبة)\b', re.I)),
+)
+_WEB_NON_PRODUCT_OFFER_PATTERNS = (
+    ('service', re.compile(
+        r'\b(?:repair|installation|setup|maintenance|diagnostic|cleaning)\s+(?:service|appointment)\b|'
+        r'\b(?:service|installation|repair)\s+(?:plan|booking|appointment)\b|'
+        # A physical "repair tape/pen/cream" is a sellable product, whereas a
+        # bare repair/repair-service offer is not.  Keep the exception list
+        # concrete and noun-based so service rows still fail closed.
+        r'\b(?:repair(?!\s+(?:kit|tool|part|manual|tape|pen|cream|paste|compound|patch|adhesive|paint|balm|gel|serum|spray|liquid|cloth|fabric|mask|treatment|shampoo|conditioner|wax|filler|sealant))|rental|insurance)\b|'
+        r'\bdiagnostic(?!\s+(?:tool|scanner|device))\b|'
+        r'\binstallation(?!\s+(?:kit|hardware|accessory|parts?))\b|'
+        r'\b(?:خدمة|صيانة|تصليح|تركيب)\b', re.I,
+    )),
+    ('empty_packaging', re.compile(
+        r'\b(?:empty\s+(?:box|bottle|container|packaging)|(?:box|packaging)\s+only|'
+        r'replacement\s+(?:box|packaging)|original\s+box\s+only)\b|'
+        r'\b(?:علبة|عبوة)\s+فارغة\b', re.I,
+    )),
+    ('gift_value', re.compile(
+        r'\b(?:e[- ]?gift|gift)\s+(?:card|voucher|certificate)|store\s+credit\b|'
+        r'\b(?:بطاقة|قسيمة)\s+هدايا\b', re.I,
+    )),
+    ('coupon', re.compile(
+        r'\b(?:coupon|discount|promo(?:tional)?)\s+(?:code|voucher)|coupon\s+voucher\b|'
+        r'\b(?:قسيمة|كوبون)\s+خصم\b', re.I,
+    )),
 )
 _WEB_PRODUCT_EDITION_PATTERNS = (
-    ('gift_set', re.compile(r'\b(?:gift\s+set|set\s+of\s+\d+|طقم\s+هدايا)\b', re.I)),
+    # A numeric set is packaging quantity, not automatically a gift edition.
+    ('gift_set', re.compile(r'\b(?:gift\s+set|set\s+of\s+\d+\s+gifts?|طقم\s+هدايا)\b', re.I)),
     ('limited_edition', re.compile(r'\b(?:limited\s+edition|special\s+edition|اصدار\s+محدود|إصدار\s+محدود)\b', re.I)),
     ('tester', re.compile(r'\b(?:tester|تستر)\b', re.I)),
     ('refill', re.compile(r'\b(?:refill|عبوة\s+تعبئة|اعادة\s+تعبئة|إعادة\s+تعبئة)\b', re.I)),
@@ -7368,14 +7985,140 @@ _WEB_PRODUCT_CONDITION_PATTERNS = (
     ('refurbished', re.compile(r'\b(?:refurbished|renewed|مجدد)\b', re.I)),
     ('open_box', re.compile(r'\b(?:open\s+box|علبة\s+مفتوحة)\b', re.I)),
 )
-_WEB_PACK_COUNT_PATTERNS = (
-    re.compile(r'\bpack\s+of\s+(\d{1,3})\b', re.I),
-    re.compile(r'\b(\d{1,3})\s*(?:pack|packs|pcs|pieces|count|ct)\b', re.I),
-    re.compile(r'\b(?:طقم|عبوة)\s*(\d{1,3})\b', re.I),
+_WEB_COUNT_NUMBER_BODY = r'(?:\d{1,3}(?:[.,]\d{3})+|\d{1,7}(?:\u066b\d+)?)'
+_WEB_COUNT_NUMBER_PATTERN = r'(?<![\d.,])(' + _WEB_COUNT_NUMBER_BODY + r')(?![\d.,])'
+_WEB_COUNT_NOUN_BODY = (
+    r'(?:packs?|pcs?|pieces?|count|ct|boxes?|bottles?|cans?|capsules?|tablets|'
+    r'pairs?|units?|servings?|rolls?|sheets?|softgels?|sachets?|packets?|pods?|bags?|'
+    r'عبوة|عبوه|عبوات|علبة|علبه|علب|علبات|زجاجة|زجاجه|زجاجات|قنينة|قنينه|قنينات|'
+    r'قطع|قطعه|قطعة|حبات|حبه|حبة|ظرف|ظروف|أظرف|اظرف)'
 )
+_WEB_PACK_COUNT_PATTERNS = (
+    # Nested retail count: ``2 x 60 Count`` means two containers/items whose
+    # inner advertised count is 60.  The outer multiplier is the sold pack;
+    # consuming the complete phrase prevents the inner 60 from winning as a
+    # false pack count or becoming a model number.
+    re.compile(
+        r'\b' + _WEB_COUNT_NUMBER_PATTERN + r'\s*[x\u00d7*]\s*'
+        + _WEB_COUNT_NUMBER_BODY
+        + r'\s*(?:count|ct|pcs?|pieces?|capsules?|tablets?|softgels?|pods?|servings?|sheets?|rolls?)\b',
+        re.I,
+    ),
+    re.compile(r'\bpack\s+of\s+' + _WEB_COUNT_NUMBER_PATTERN + r'(?:\s+' + _WEB_COUNT_NOUN_BODY + r')?\b', re.I),
+    re.compile(r'\bset\s+of\s+' + _WEB_COUNT_NUMBER_PATTERN + r'(?:\s+' + _WEB_COUNT_NOUN_BODY + r')?\b', re.I),
+    re.compile(r'\bbox\s+of\s+' + _WEB_COUNT_NUMBER_PATTERN + r'(?:\s+' + _WEB_COUNT_NOUN_BODY + r')?\b', re.I),
+    # Parse an explicit Arabic count label before the generic ``2 bottles``
+    # rule. Otherwise substitutions can consume ``2 عبوة`` first and later
+    # misread the following 500ml amount as ``عدد 500``.
+    re.compile(r'\b(?:طقم|عدد)\s*' + _WEB_COUNT_NUMBER_PATTERN + r'(?:\s*' + _WEB_COUNT_NOUN_BODY + r')?\b', re.I),
+    re.compile(r'\b' + _WEB_COUNT_NUMBER_PATTERN + r'\s*[- ]?\s*' + _WEB_COUNT_NOUN_BODY + r'\b', re.I),
+    re.compile(r'\b(?:pack|box|count|set)\s*(?:of\s+|[-:#]\s*)' + _WEB_COUNT_NUMBER_PATTERN + r'(?:\s+' + _WEB_COUNT_NOUN_BODY + r')?\b', re.I),
+    re.compile(r'\b(?:pack|box|count|set)' + _WEB_COUNT_NUMBER_PATTERN + r'\b', re.I),
+    re.compile(r'\b(?:pack|count|set)\s+' + _WEB_COUNT_NUMBER_PATTERN + r'\b', re.I),
+    re.compile(r'\b' + _WEB_COUNT_NUMBER_PATTERN + r'\s*[- ]?\s*(?:pk|pks)\b', re.I),
+    re.compile(r'\b(?:qty|quantity)\s*[:#_-]?\s*' + _WEB_COUNT_NUMBER_PATTERN + r'\b', re.I),
+    re.compile(r'\b' + _WEB_COUNT_NUMBER_PATTERN + r'\s*' + _WEB_COUNT_NOUN_BODY + r'\b', re.I),
+    # "عبوة 500 مل" is one 500ml bottle, not a 500-pack.  Prefix-container
+    # counts are accepted only when the number is not immediately a unit.
+    re.compile(r'\bعبوة\s*' + _WEB_COUNT_NUMBER_PATTERN + r'(?!\s*(?:مل|ملي|لتر|جم|جرام|غرام|كجم|كيلو)\b)', re.I),
+)
+_WEB_SINGLE_ITEM_RE = re.compile(r'\b(?:single|one[- ]pack|1[- ]pack|1\s*pk|qty\s*[:#_-]?\s*1|pack\s+of\s+1|set\s+of\s+1)\b', re.I)
+_WEB_COUNT_WORD_VALUES = {
+    'one': 1, 'single': 1,
+    'two': 2, 'twin': 2, 'duo': 2, 'double': 2, 'pair': 2,
+    'three': 3, 'trio': 3, 'triple': 3,
+    'four': 4, 'quad': 4, 'quadruple': 4,
+    'five': 5, 'six': 6, 'seven': 7, 'eight': 8, 'nine': 9, 'ten': 10,
+}
+_WEB_COUNT_WORD_PATTERN = '|'.join(
+    sorted((re.escape(word) for word in _WEB_COUNT_WORD_VALUES), key=len, reverse=True)
+)
+_WEB_ARABIC_COUNT_WORD_SPELLINGS = {
+    'واحد', 'واحدة', 'واحده',
+    'اثنان', 'اثنين', 'اثنتان', 'اثنتين',
+    'ثلاث', 'ثلاثة', 'ثلاثه', 'اربعة', 'أربعة', 'اربعه', 'اربع', 'أربع',
+    'خمس', 'خمسة', 'خمسه', 'ست', 'ستة', 'سته', 'سبع', 'سبعة', 'سبعه',
+    'ثمان', 'ثماني', 'ثمانية', 'ثمانيه', 'تسع', 'تسعة', 'تسعه', 'عشر', 'عشرة', 'عشره',
+}
+_WEB_ARABIC_COUNT_WORD_VALUES = {
+    'واحد': 1, 'واحده': 1,
+    'اثنان': 2, 'اثنين': 2, 'اثنتان': 2, 'اثنتين': 2,
+    'ثلاث': 3, 'ثلاثه': 3, 'اربع': 4, 'اربعه': 4,
+    'خمس': 5, 'خمسه': 5, 'ست': 6, 'سته': 6, 'سبع': 7, 'سبعه': 7,
+    'ثمان': 8, 'ثماني': 8, 'ثمانيه': 8, 'تسع': 9, 'تسعه': 9, 'عشر': 10, 'عشره': 10,
+}
+_WEB_ARABIC_COUNT_WORD_PATTERN = '|'.join(
+    sorted((re.escape(word) for word in _WEB_ARABIC_COUNT_WORD_SPELLINGS), key=len, reverse=True)
+)
+
+def _web_numericize_pack_words(value):
+    """Canonicalize written retail counts without touching product names.
+
+    ``WHOOP One`` stays untouched; only a number word joined to pack/set/box
+    vocabulary is converted. This lets OCR and merchant titles freely use
+    ``pack of two``, ``two-pack``, ``twin pack`` or ``duo set``.
+    """
+    text = str(value or '')
+
+    def after_label(match):
+        label, word = match.group(1), match.group(2).lower()
+        return f'{label} of {_WEB_COUNT_WORD_VALUES[word]}'
+
+    def before_label(match):
+        word, label = match.group(1).lower(), match.group(2)
+        return f'{_WEB_COUNT_WORD_VALUES[word]}-{label}'
+
+    text = re.sub(
+        rf'(?i)\b(pack|set|box|count)\s+(?:of\s+)?({_WEB_COUNT_WORD_PATTERN})\b',
+        after_label,
+        text,
+    )
+    text = re.sub(
+        rf'(?i)\b({_WEB_COUNT_WORD_PATTERN})[-\s]+(packs?|sets?|boxes?|bottles?|cans?|pairs?|units?|servings?|rolls?|sheets?|softgels?|capsules?|sachets?|pods?|bags?)\b',
+        before_label,
+        text,
+    )
+    def before_arabic_label(match):
+        word = normalize_ar(match.group(1))
+        count = _WEB_ARABIC_COUNT_WORD_VALUES.get(word)
+        return f'{count}-{match.group(2)}' if count else match.group(0)
+
+    text = re.sub(
+        r'(?<![\w\u0600-\u06ff])(' + _WEB_ARABIC_COUNT_WORD_PATTERN + r')\s+('
+        + _WEB_COUNT_NOUN_BODY + r')(?![\w\u0600-\u06ff])',
+        before_arabic_label,
+        text,
+    )
+    # Common Arabic dual retail forms are already exact quantities even
+    # without a written numeral.
+    text = re.sub(
+        r'(?i)(?<![\w\u0600-\u06ff])(?:عبوتان|عبوتين|حبتان|حبتين|قطعتان|قطعتين|زجاجتان|زجاجتين|علبتان|علبتين|قنينتان|قنينتين|ظرفان|ظرفين|كيسان|كيسين|زوج)(?![\w\u0600-\u06ff])',
+        ' 2-pack ',
+        text,
+    )
+    # Arabic storefronts commonly glue the amount to ``one package``. Keep
+    # the following measurement intact while making the sold count explicit.
+    text = re.sub(
+        r'(?i)(?<![\w\u0600-\u06ff])(?:عبوة|عبوه|علبة|علبه|زجاجة|زجاجه|قنينة|قنينه|قطعة|قطعه|حبة|حبه)'
+        r'\s+(?:واحدة|واحده|واحد)\s*(?=\d|$)',
+        ' 1-pack ',
+        text,
+    )
+    # OCR often glues Arabic package grammar directly to the amount
+    # (``عبوة500مل`` / ``من500مل``). Restore a separator before measurement
+    # parsing; no number or product token is changed.
+    text = re.sub(
+        r'(?i)(عبوة|عبوه|عبوات|علبة|علبه|علب|زجاجة|زجاجه|زجاجات|قنينة|قنينه|قنينات|من|كل)\s*(?=\d)',
+        r'\1 ',
+        text,
+    )
+    return text
 _WEB_TIER_GROUPS = (
     frozenset({'one', 'peak', 'life', 'mg'}),
     frozenset({'mini', 'air', 'lite', 'plus', 'pro', 'max', 'ultra'}),
+    frozenset({'se', 'fe'}),
+    frozenset({'fold', 'flip'}),
+    frozenset({'edge'}),
 )
 
 def _web_result_classification_title(row):
@@ -7390,41 +8133,753 @@ def _web_first_named_pattern(value, patterns):
             return name
     return ''
 
+def _web_packaging_forms(value):
+    """Return primary retail container evidence, excluding outer count boxes."""
+    text = _web_ascii_digits(str(value or ''))
+    text = re.sub(
+        r'(?i)\b(?:box|carton)\s+of\s+' + _WEB_COUNT_NUMBER_BODY +
+        r'(?:\s+' + _WEB_COUNT_NOUN_BODY + r')?',
+        ' ',
+        text,
+    )
+    return sorted({name for name, pattern in _WEB_PACKAGING_FORM_PATTERNS if pattern.search(text)})
+
+_WEB_PHYSICAL_REPAIR_NOUN_RE = re.compile(
+    r'\b(?:kit|tool|part|tape|pen|cream|paste|compound|patch|adhesive|paint|balm|gel|serum|'
+    r'spray|liquid|cloth|fabric|mask|treatment|shampoo|conditioner|wax|polish|filler|sealant)\b|'
+    r'(?:عدة|اداة|أداة|قطعة|شريط|قلم|كريم|معجون|لاصق|رقعة|دهان|جل|سيروم|بخاخ|سائل|قماش|ماسك|شامبو|بلسم|شمع|ملمع)',
+    re.I,
+)
+_WEB_REPAIR_WORD_RE = re.compile(r'\b(?:repair|mend(?:ing)?)\b|(?:تصليح|اصلاح|إصلاح|ترميم)', re.I)
+_WEB_EXPLICIT_SERVICE_CONTEXT_RE = re.compile(
+    r'\b(?:service|appointment|booking|labor|labour)\b|(?:خدمة|موعد)', re.I,
+)
+_WEB_MAIN_WITH_COMPONENT_RE = re.compile(
+    r'\b(?:vacuum(?:\s+cleaner)?|robot\s+vacuum|air\s+purifier|coffee\s+(?:machine|maker))\b'
+    r'.{0,80}\b(?:with|includes?|featuring)\b.{0,60}'
+    r'\b(?:hepa\s+)?(?:filters?|bags?|brush(?:es)?|rollers?|mop\s+pads?|capsules?|pods?)\b',
+    re.I,
+)
+
+def _web_non_product_offer(value):
+    title = str(value or '')
+    offer = _web_first_named_pattern(title, _WEB_NON_PRODUCT_OFFER_PATTERNS)
+    # ``repair`` is also a function adjective on physical goods and can occur
+    # before or after their noun (Hair Repair Mask / Leather Tape Repair).
+    # Explicit service wording wins; otherwise a concrete sellable noun keeps
+    # the row in product matching.
+    if (
+        offer == 'service'
+        and _WEB_REPAIR_WORD_RE.search(title)
+        and _WEB_PHYSICAL_REPAIR_NOUN_RE.search(title)
+        and not _WEB_EXPLICIT_SERVICE_CONTEXT_RE.search(title)
+    ):
+        return ''
+    return offer
+
+def _web_is_accessory_offer(value):
+    title = str(value or '')
+    if not _WEB_STRONG_ACCESSORY_RE.search(title):
+        return False
+    # A device title may mention an included filter/pod as a feature. That is
+    # still the main product; host-first rows ending in the component remain
+    # accessories and word order no longer changes their role.
+    if _WEB_MAIN_WITH_COMPONENT_RE.search(title):
+        return False
+    return True
+
 def _web_pack_count(value):
-    text = str(value or '')
-    for pattern in _WEB_PACK_COUNT_PATTERNS:
-        match = pattern.search(text)
-        if match:
+    text = _web_numericize_pack_words(_web_ascii_digits(str(value or '')))
+    try:
+        leading_measure_pack = _WEB_LEADING_COUNT_MEASURE_PACK_RE.search(text)
+        if leading_measure_pack:
+            count = int(_web_parse_identity_number(leading_measure_pack.group(1)))
+            if 1 <= count <= 1000000:
+                return count
+    except (NameError, TypeError, ValueError):
+        pass
+    for pattern_index, pattern in enumerate(_WEB_PACK_COUNT_PATTERNS):
+        for match in pattern.finditer(text):
             try:
-                count = int(match.group(1))
-                return count if 1 < count <= 100 else None
+                # Marketplace MOQ/range copy is not the sold pack: "100
+                # Pieces (MOQ)" and "10-12 pcs" must not become variants.
+                # MOQ/range text can surround any spelling of a pack count,
+                # including "pack of 100". Apply the safety window to every
+                # pattern instead of relying on fragile tuple indexes.
+                generic_count = True
+                window = text[max(0, match.start() - 32):min(len(text), match.end() + 32)]
+                if generic_count and re.search(r'(?i)\b(?:moq|min(?:imum)?\s+order|order\s+quantity)\b|اقل\s+طلب|الحد\s+الادن[ىي]', window):
+                    continue
+                before = text[max(0, match.start() - 20):match.start()]
+                if generic_count and re.search(r'(?i)\d\s*(?:-|–|—|to)\s*$', before):
+                    continue
+                parsed = _web_parse_identity_number(match.group(1))
+                if not float(parsed).is_integer():
+                    continue
+                count = int(parsed)
+                return count if 1 <= count <= 1000000 else None
             except Exception:
                 pass
+    if _WEB_SINGLE_ITEM_RE.search(text):
+        return 1
     return None
 
+_WEB_CONTAINED_COUNT_NOUN_BODY = (
+    r'(?:count|ct|capsules?|tablets?|softgels?|pods?|servings?|sheets?|rolls?|'
+    r'كبسولات|اقراص|أقراص)'
+)
+_WEB_NESTED_CONTAINED_COUNT_NOUN_BODY = (
+    r'(?:count|ct|pcs?|pieces?|capsules?|tablets?|softgels?|pods?|servings?|'
+    r'sheets?|rolls?|حبات|حبه|حبة|قطع|قطعه|قطعة|كبسولات|اقراص|أقراص)'
+)
+_WEB_NESTED_CONTAINED_COUNT_RE = re.compile(
+    r'(?i)(?<![\d.,])' + _WEB_COUNT_NUMBER_BODY + r'(?![\d.,])\s*[x\u00d7*]\s*'
+    r'(' + _WEB_COUNT_NUMBER_BODY + r')\s*' + _WEB_NESTED_CONTAINED_COUNT_NOUN_BODY + r'\b'
+)
+_WEB_CONTAINED_COUNT_RE = re.compile(
+    r'(?i)(?<![\d.,])(' + _WEB_COUNT_NUMBER_BODY + r')(?![\d.,])\s*[- ]?\s*'
+    + _WEB_CONTAINED_COUNT_NOUN_BODY + r'\b'
+)
+_WEB_PACKED_PIECE_CONTENT_RE = re.compile(
+    r'(?i)(?<![\d.,])(' + _WEB_COUNT_NUMBER_BODY + r')(?![\d.,])\s*[- ]?\s*'
+    r'(?:pcs?|pieces?|حبات|حبه|حبة|قطع|قطعه|قطعة)\b'
+    r'(?=.{0,48}\b(?:pack|box|set)\s*(?:of\s+|[-:#]\s*)?' + _WEB_COUNT_NUMBER_BODY + r'\b)'
+)
+_WEB_ARABIC_CONTAINER_CONTENT_RE = re.compile(
+    r'(?i)(?<![\w\u0600-\u06ff])(?:'
+    r'\d+\s*[- ]?pack|'
+    r'(?:\d+\s*)?(?:عبوه|عبوات|علبه|علب|زجاجه|زجاجات|قنينه|قنينات)'
+    r')\b(?:\s+(?:كل|في|لكل|بها|تحتوي|يحتوي|من))*\s*'
+    r'(' + _WEB_COUNT_NUMBER_BODY + r')\s*'
+    r'(?:حبات|حبه|قطع|قطعه)(?![\w\u0600-\u06ff])'
+)
+
+def _web_contained_unit_count(value):
+    """Return the per-container/item count, separate from the sold pack.
+
+    ``2 x 60 Count`` and ``60 Count, Pack of 2`` both describe two sold
+    containers with 60 units in each.  Keeping the inner 60 as its own fact
+    prevents a 90-count variant from being promoted to Exact merely because
+    both listings sell two containers.
+    """
+    text = _web_numericize_pack_words(_web_ascii_digits(normalize_ar(str(value or ''))))
+    match = _WEB_NESTED_CONTAINED_COUNT_RE.search(text)
+    if not match:
+        match = _WEB_PACKED_PIECE_CONTENT_RE.search(text)
+    if not match:
+        match = _WEB_ARABIC_CONTAINER_CONTENT_RE.search(text)
+    if not match:
+        match = _WEB_CONTAINED_COUNT_RE.search(text)
+    if not match:
+        return None
+    try:
+        count = int(_web_parse_identity_number(match.group(1)))
+    except Exception:
+        return None
+    return count if 1 <= count <= 1000000 else None
+
+_WEB_IDENTITY_MEASURE_RE = re.compile(
+    r'(?i)(?<![a-z0-9_\u0600-\u06ff])(?:(' + _WEB_COUNT_NUMBER_BODY + r')\s*[x\u00d7*]\s*)?'
+    r'(\d+(?:[.,\u066b]\d+)*)\s*'
+    r'(fluid\s*ounces?|fluid\s*oz|fl\.?\s*ounces?|fl\.?\s*oz|cubic\s*centimet(?:er|re)s?|cc|'
+    r'millilit(?:er|re)s?|centilit(?:er|re)s?|gallons?|gal|ml|cl|liters?|litres?|ltr|l|'
+    r'milligrams?|mg|grams?|grammes?|gm|gr|g|kilograms?|kilogrammes?|kg|lbs?|pounds?|ounces?|oz|'
+    r'millimet(?:er|re)s?|centimet(?:er|re)s?|mm|cm|meters?|metres?|m|inches?|inch|in|foot|ft|feet|'
+    r'terabytes?|gigabytes?|megabytes?|kilobytes?|tb|gb|mb|kb|megapixels?|mp|'
+    r'milliamp(?:ere)?[- ]?hours?|mah|watt[- ]?hours?|wh|kilowatts?|kw|watts?|w|'
+    r'volts?|v|kilohertz|megahertz|gigahertz|hertz|khz|mhz|ghz|hz|'
+    r'\u0645\u0644|\u0645\u0644\u064a|\u0644\u062a\u0631|\u0645\u062c\u0645|\u0645\u0644\u063a|\u062c\u0631\u0627\u0645|\u063a\u0631\u0627\u0645|\u062c\u0645|\u063a|\u0643\u062c\u0645|\u0643\u064a\u0644\u0648|\u0645\u0645|\u0633\u0645)\b'
+)
+_WEB_LEADING_COUNT_MEASURE_PACK_RE = re.compile(
+    r'(?i)(?<![\d.,])(' + _WEB_COUNT_NUMBER_BODY + r')(?![\d.,])\s+'
+    r'\d+(?:[.,\u066b]\d+)*\s*'
+    r'(?:ml|cl|l|mg|g|kg|oz|lb|mm|cm|m|in|ft|gb|tb|مل|ملي|لتر|جم|جرام|غرام|كجم|كيلو)\s*'
+    r'(?:bottles?|cans?|boxes?|jars?|tubes?|pouches?|sachets?|عبوة|عبوات|زجاجة|زجاجات|علبة|علب|قنينة|قنينات)\b'
+)
+_WEB_LIQUID_OZ_CONTEXT_RE = re.compile(
+    r'(?i)\b(?:perfume|parfum|fragrance|cologne|eau\s+de|edt|edp|edc|body\s+(?:spray|mist)|'
+    r'lotion|shampoo|conditioner|serum|toner|cleanser|liquid|oil|juice|drink|beverage)\b|'
+    r'\b(?:عطر|بخاخ|لوشن|شامبو|سيروم|سائل|زيت|عصير|مشروب)\b'
+)
+_WEB_FRACTION_UNIT_LOOKAHEAD = (
+    r'(?:fluid\s*(?:ounces?|oz)|fl\.?\s*(?:ounces?|oz)|gallons?|gal|cc|ml|cl|lit(?:er|re)s?|ltr|l|'
+    r'millilit(?:er|re)s?|centilit(?:er|re)s?|mg|g|gm|gr|kg|lbs?|pounds?|ounces?|oz|'
+    r'milligrams?|grams?|grammes?|kilograms?|kilogrammes?|mm|cm|meters?|metres?|m|'
+    r'millimet(?:er|re)s?|centimet(?:er|re)s?|inches?|inch|in|foot|feet|ft|'
+    r'tb|gb|mb|kb|terabytes?|gigabytes?|megabytes?|kilobytes?|mp|mah|wh|kw|w|v|hz|khz|mhz|ghz|'
+    r'\u0645\u0644|\u0645\u0644\u064a|\u0644\u062a\u0631|\u0645\u062c\u0645|\u0645\u0644\u063a|\u062c\u0631\u0627\u0645|\u063a\u0631\u0627\u0645|\u062c\u0645|\u063a|\u0643\u062c\u0645|\u0643\u064a\u0644\u0648|\u0645\u0645|\u0633\u0645)'
+)
+_WEB_UNICODE_FRACTIONS = {
+    '¼': 0.25, '½': 0.5, '¾': 0.75,
+    '⅓': 1 / 3, '⅔': 2 / 3,
+    '⅛': 0.125, '⅜': 0.375, '⅝': 0.625, '⅞': 0.875,
+}
+
+def _web_expand_measurement_fractions(value):
+    """Turn measurement-only fractions into decimals before fact parsing."""
+    text = str(value or '')
+    # OCR frequently glues Arabic retail connectors to the amount (من500مل).
+    text = re.sub(r'(?<=من)(?=\d)', ' ', text)
+    arabic_unit = r'(?:كيلو(?:\s*(?:جرام|غرام))?|كجم|لتر)'
+    text = re.sub(r'(?<![\w\u0600-\u06ff])(?:نصف|نص)\s*(' + arabic_unit + r')\b', r'0.5 \1', text)
+    text = re.sub(r'(?<![\w\u0600-\u06ff])ربع\s*(' + arabic_unit + r')\b', r'0.25 \1', text)
+    text = re.sub(r'(?<![\w\u0600-\u06ff])ثلاث(?:ة|ه)?\s+ارباع\s*(' + arabic_unit + r')\b', r'0.75 \1', text)
+    text = re.sub(r'(?<![\w\u0600-\u06ff])(' + arabic_unit + r')\s+ونصف\b', r'1.5 \1', text)
+
+    def ascii_fraction(match):
+        whole = float(match.group(1) or 0)
+        numerator = float(match.group(2))
+        denominator = float(match.group(3))
+        if denominator <= 0:
+            return match.group(0)
+        return f'{whole + numerator / denominator:g}'
+
+    text = re.sub(
+        rf'(?<![\w.])(?:(\d+)\s+)?(\d+)\s*/\s*(\d+)(?=\s*{_WEB_FRACTION_UNIT_LOOKAHEAD}\b)',
+        ascii_fraction,
+        text,
+        flags=re.I,
+    )
+
+    def unicode_fraction(match):
+        whole = float(match.group(1) or 0)
+        return f'{whole + _WEB_UNICODE_FRACTIONS[match.group(2)]:g}'
+
+    chars = ''.join(re.escape(ch) for ch in _WEB_UNICODE_FRACTIONS)
+    return re.sub(
+        rf'(?<![\w.])(\d+)?\s*([{chars}])(?=\s*{_WEB_FRACTION_UNIT_LOOKAHEAD}\b)',
+        unicode_fraction,
+        text,
+        flags=re.I,
+    )
+
+def _web_identity_measure_match_allowed(text, match):
+    """Reject ambiguous English ``in`` when it means 'in one' or stock."""
+    try:
+        unit = re.sub(r'\s+', ' ', str(match.group(3) or '').lower()).strip()
+    except Exception:
+        return True
+    tail = str(text or '')[match.end():match.end() + 28]
+    if unit == 'in':
+        return not bool(re.match(r'(?i)^\s*(?:[-–—]?\s*\d+\b|stock\b)', tail))
+    # SAE oil grades such as 5W-30 use W for winter viscosity, not watts.
+    if unit == 'w' and re.match(r'^\s*[-–—]\s*\d+\b', tail):
+        return False
+    return True
+
+_WEB_IDENTITY_DIMENSION_CHAIN_RE = re.compile(
+    r'(?i)(?<![a-z0-9_\u0600-\u06ff])'
+    r'(\d+(?:[.,\u066b]\d+)?(?:\s*[x\u00d7*]\s*\d+(?:[.,\u066b]\d+)?){1,3})\s*'
+    r'(mm|cm|meters?|metres?|m|inches?|inch|in|ft|feet|\u0645\u0645|\u0633\u0645)\b'
+)
+_WEB_TYPED_LISTING_CODE_RE = re.compile(
+    r'(?i)\b(?:model(?:\s+(?:number|no\.?))?|m\s*[-/]\s*n|mpn|sku|asin|'
+    r'item\s+(?:number|no\.?|#)|product\s+code|'
+    r'(?:mfr|manufacturer)\.?\s+(?:part|number|no\.?)|'
+    r'p\s*/\s*n|pn|part(?:\s+number|\s+no\.?)?)'
+    r'\s*[:#_-]?\s*([a-z0-9][a-z0-9._/-]{1,})'
+)
+_WEB_IDENTITY_UNIT_FACTORS = {
+    'ml': ('volume', 1.0), 'milliliter': ('volume', 1.0), 'milliliters': ('volume', 1.0),
+    'millilitre': ('volume', 1.0), 'millilitres': ('volume', 1.0),
+    '\u0645\u0644': ('volume', 1.0), '\u0645\u0644\u064a': ('volume', 1.0),
+    'cc': ('volume', 1.0), 'cubic centimeter': ('volume', 1.0), 'cubic centimeters': ('volume', 1.0),
+    'cubic centimetre': ('volume', 1.0), 'cubic centimetres': ('volume', 1.0),
+    'cl': ('volume', 10.0), 'centiliter': ('volume', 10.0), 'centiliters': ('volume', 10.0),
+    'centilitre': ('volume', 10.0), 'centilitres': ('volume', 10.0),
+    'l': ('volume', 1000.0), 'ltr': ('volume', 1000.0),
+    'liter': ('volume', 1000.0), 'liters': ('volume', 1000.0),
+    'litre': ('volume', 1000.0), 'litres': ('volume', 1000.0), '\u0644\u062a\u0631': ('volume', 1000.0),
+    'mg': ('mass', 0.001), 'milligram': ('mass', 0.001), 'milligrams': ('mass', 0.001), '\u0645\u062c\u0645': ('mass', 0.001), '\u0645\u0644\u063a': ('mass', 0.001),
+    'g': ('mass', 1.0), 'gm': ('mass', 1.0), 'gr': ('mass', 1.0),
+    'gram': ('mass', 1.0), 'grams': ('mass', 1.0), 'gramme': ('mass', 1.0),
+    'grammes': ('mass', 1.0), '\u062c\u0631\u0627\u0645': ('mass', 1.0), '\u063a\u0631\u0627\u0645': ('mass', 1.0),
+    '\u062c\u0645': ('mass', 1.0), '\u063a': ('mass', 1.0),
+    'kg': ('mass', 1000.0), 'kilogram': ('mass', 1000.0), 'kilograms': ('mass', 1000.0),
+    'kilogramme': ('mass', 1000.0), 'kilogrammes': ('mass', 1000.0), '\u0643\u062c\u0645': ('mass', 1000.0), '\u0643\u064a\u0644\u0648': ('mass', 1000.0),
+    'lb': ('mass', 453.59237), 'lbs': ('mass', 453.59237), 'pound': ('mass', 453.59237), 'pounds': ('mass', 453.59237),
+    'fl oz': ('volume', 29.5735296), 'fl. oz': ('volume', 29.5735296), 'fl.oz': ('volume', 29.5735296),
+    'fl ounce': ('volume', 29.5735296), 'fl ounces': ('volume', 29.5735296),
+    'fl. ounce': ('volume', 29.5735296), 'fl. ounces': ('volume', 29.5735296),
+    'fluid oz': ('volume', 29.5735296), 'fluid ounce': ('volume', 29.5735296), 'fluid ounces': ('volume', 29.5735296),
+    'gal': ('volume', 3785.411784), 'gallon': ('volume', 3785.411784), 'gallons': ('volume', 3785.411784),
+    'oz': ('mass', 28.349523125), 'ounce': ('mass', 28.349523125), 'ounces': ('mass', 28.349523125),
+    'mm': ('length', 1.0), 'millimeter': ('length', 1.0), 'millimeters': ('length', 1.0),
+    'millimetre': ('length', 1.0), 'millimetres': ('length', 1.0), '\u0645\u0645': ('length', 1.0),
+    'cm': ('length', 10.0), 'centimeter': ('length', 10.0), 'centimeters': ('length', 10.0),
+    'centimetre': ('length', 10.0), 'centimetres': ('length', 10.0), '\u0633\u0645': ('length', 10.0),
+    'm': ('length', 1000.0), 'meter': ('length', 1000.0), 'meters': ('length', 1000.0),
+    'metre': ('length', 1000.0), 'metres': ('length', 1000.0),
+    'in': ('length', 25.4), 'inch': ('length', 25.4), 'inches': ('length', 25.4),
+    'ft': ('length', 304.8), 'foot': ('length', 304.8), 'feet': ('length', 304.8),
+    'kb': ('storage', 1.0), 'kilobyte': ('storage', 1.0), 'kilobytes': ('storage', 1.0),
+    'mb': ('storage', 1000.0), 'megabyte': ('storage', 1000.0), 'megabytes': ('storage', 1000.0),
+    'gb': ('storage', 1000000.0), 'gigabyte': ('storage', 1000000.0), 'gigabytes': ('storage', 1000000.0),
+    'tb': ('storage', 1000000000.0), 'terabyte': ('storage', 1000000000.0), 'terabytes': ('storage', 1000000000.0),
+    'mp': ('camera_resolution', 1.0), 'megapixel': ('camera_resolution', 1.0), 'megapixels': ('camera_resolution', 1.0),
+    'mah': ('battery_capacity', 1.0), 'milliamp-hour': ('battery_capacity', 1.0), 'milliamp-hours': ('battery_capacity', 1.0),
+    'milliampere-hour': ('battery_capacity', 1.0), 'milliampere-hours': ('battery_capacity', 1.0),
+    'milliamp hour': ('battery_capacity', 1.0), 'milliamp hours': ('battery_capacity', 1.0),
+    'milliampere hour': ('battery_capacity', 1.0), 'milliampere hours': ('battery_capacity', 1.0),
+    'wh': ('energy', 1.0), 'watt-hour': ('energy', 1.0), 'watt-hours': ('energy', 1.0),
+    'watt hour': ('energy', 1.0), 'watt hours': ('energy', 1.0),
+    'w': ('power', 1.0), 'watt': ('power', 1.0), 'watts': ('power', 1.0),
+    'kw': ('power', 1000.0), 'kilowatt': ('power', 1000.0), 'kilowatts': ('power', 1000.0),
+    'v': ('voltage', 1.0), 'volt': ('voltage', 1.0), 'volts': ('voltage', 1.0),
+    'hz': ('frequency', 1.0), 'hertz': ('frequency', 1.0),
+    'khz': ('frequency', 1000.0), 'kilohertz': ('frequency', 1000.0),
+    'mhz': ('frequency', 1000000.0), 'megahertz': ('frequency', 1000000.0),
+    'ghz': ('frequency', 1000000000.0), 'gigahertz': ('frequency', 1000000000.0),
+}
+
+def _web_ascii_digits(value):
+    return str(value or '').translate(str.maketrans(
+        '\u0660\u0661\u0662\u0663\u0664\u0665\u0666\u0667\u0668\u0669\u06f0\u06f1\u06f2\u06f3\u06f4\u06f5\u06f6\u06f7\u06f8\u06f9',
+        '01234567890123456789',
+    )).replace('\u066c', ',')
+
+def _web_parse_identity_number(value):
+    raw = _web_ascii_digits(value).strip().replace(' ', '')
+    if not raw:
+        raise ValueError('empty number')
+    if '\u066b' in raw:
+        # Arabic decimal separator is explicit, unlike a western dot that is
+        # frequently a thousands separator in commerce copy (``1.000``).
+        raw = raw.replace(',', '').replace('.', '').replace('\u066b', '.')
+        return float(raw)
+    if ',' in raw and '.' in raw:
+        # The last separator is decimal; earlier separators are grouping.
+        if raw.rfind(',') > raw.rfind('.'):
+            raw = raw.replace('.', '').replace(',', '.')
+        else:
+            raw = raw.replace(',', '')
+    elif ',' in raw:
+        parts = raw.split(',')
+        if len(parts) > 1 and all(len(part) == 3 for part in parts[1:]) and parts[0].lstrip('+-').isdigit() and parts[0].lstrip('+-') != '0':
+            raw = ''.join(parts)
+        else:
+            raw = ''.join(parts[:-1]) + '.' + parts[-1]
+    elif '.' in raw:
+        parts = raw.split('.')
+        # A lone three-digit suffix in commerce copy is commonly a grouping
+        # separator (1.000 g). Other forms, including Arabic ١٫٥, stay decimal.
+        if len(parts) > 1 and all(len(part) == 3 for part in parts[1:]) and parts[0].lstrip('+-').isdigit() and parts[0].lstrip('+-') != '0':
+            raw = ''.join(parts)
+    return float(raw)
+
+def _web_identity_measure_facts(value):
+    """Preserve per-item amount and sold count; never collapse 2x125 into 1x250."""
+    text = _web_expand_measurement_fractions(
+        _web_numericize_pack_words(_web_ascii_digits(normalize_ar(str(value or ''))))
+    )
+    facts = []
+    protected_code_spans = [match.span(1) for match in _WEB_TYPED_LISTING_CODE_RE.finditer(text)]
+    dimension_spans = []
+    for chain in _WEB_IDENTITY_DIMENSION_CHAIN_RE.finditer(text):
+        unit = re.sub(r'\s+', ' ', chain.group(2).lower()).strip()
+        dimension, factor = _WEB_IDENTITY_UNIT_FACTORS.get(unit, ('', 0.0))
+        if dimension != 'length':
+            continue
+        values = re.split(r'\s*[x\u00d7*]\s*', chain.group(1))
+        parsed_values = []
+        try:
+            parsed_values = [_web_parse_identity_number(value) for value in values]
+        except Exception:
+            parsed_values = []
+        if len(parsed_values) >= 2 and all(value > 0 for value in parsed_values):
+            dimension_spans.append(chain.span())
+            for amount in parsed_values:
+                facts.append({
+                    'dimension': 'length',
+                    'each': round(amount * factor, 6),
+                    'count': 1,
+                    'explicit_count': None,
+                    'unit': unit,
+                })
+    for match in _WEB_IDENTITY_MEASURE_RE.finditer(text):
+        if not _web_identity_measure_match_allowed(text, match):
+            continue
+        if any(match.start() >= start and match.end() <= end for start, end in dimension_spans):
+            continue
+        if any(match.start() >= start and match.end() <= end for start, end in protected_code_spans):
+            continue
+        try:
+            suffix_count_match = re.match(
+                r'\s*[x\u00d7*]\s*(' + _WEB_COUNT_NUMBER_BODY + r')(?![\d.,])',
+                text[match.end():],
+                flags=re.I,
+            )
+            suffix_count = int(_web_parse_identity_number(suffix_count_match.group(1))) if suffix_count_match else None
+            inline_count = int(_web_parse_identity_number(match.group(1))) if match.group(1) else suffix_count
+            amount = _web_parse_identity_number(match.group(2))
+        except Exception:
+            continue
+        local_prefix_count = None
+        local_suffix_count = None
+        prefix_match = re.search(
+            r'(?i)(?:(?:pack|box|set)\s*(?:of\s+|[-:#]\s*)?'
+            r'(?P<count0>' + _WEB_COUNT_NUMBER_BODY + r')|'
+            r'(?P<count1>' + _WEB_COUNT_NUMBER_BODY + r')\s*[- ]?\s*'
+            r'(?:packs?|pcs?|pieces?|count|ct|boxes?|bottles?|cans?|capsules?|tablets|pairs?|units?))'
+            r'(?:\s+of)?\s*[:\-]?\s*$',
+            text[max(0, match.start() - 48):match.start()],
+        )
+        if prefix_match:
+            raw_count = prefix_match.groupdict().get('count0') or prefix_match.groupdict().get('count1')
+            try:
+                local_prefix_count = int(_web_parse_identity_number(raw_count)) if raw_count else None
+            except Exception:
+                local_prefix_count = None
+        suffix_word_match = re.match(
+            r'(?i)^\s*(?:[-: ]\s*)?(?:(?:pack|box|set)\s*(?:of\s+|[-:#]\s*)?'
+            r'(?P<count2>' + _WEB_COUNT_NUMBER_BODY + r')|(?P<count3>' + _WEB_COUNT_NUMBER_BODY + r')\s*[- ]?\s*'
+            r'(?:packs?|pcs?|pieces?|count|ct|boxes?|bottles?|cans?|capsules?|tablets|pairs?|units?))\b',
+            text[match.end():match.end() + 48],
+        )
+        if suffix_word_match:
+            raw_count = suffix_word_match.groupdict().get('count2') or suffix_word_match.groupdict().get('count3')
+            try:
+                local_suffix_count = int(_web_parse_identity_number(raw_count)) if raw_count else None
+            except Exception:
+                local_suffix_count = None
+        unit = re.sub(r'\s+', ' ', match.group(3).lower()).strip()
+        unit = re.sub(r'^fl\.?\s*oz$', 'fl oz', unit)
+        dimension, factor = _WEB_IDENTITY_UNIT_FACTORS.get(unit, ('', 0.0))
+        # Fragrance/liquid listings commonly abbreviate fluid ounces as just
+        # "oz". Restrict this reinterpretation to an explicit liquid context;
+        # food/hardware ounces remain mass.
+        if unit in {'oz', 'ounce', 'ounces'} and _WEB_LIQUID_OZ_CONTEXT_RE.search(text):
+            dimension, factor = ('volume', 29.5735296)
+        if not dimension or amount <= 0:
+            continue
+        # ``2 x 5W`` and ``2 x 12MP`` sell two units just as ``2 x 500ml``
+        # does. Length chains are parsed separately as physical dimensions.
+        inline_pack_count = inline_count if dimension != 'length' else None
+        explicit_count = inline_pack_count or local_prefix_count or local_suffix_count
+        count = explicit_count or 1
+        facts.append({
+            'dimension': dimension,
+            'each': round(amount * factor, 6),
+            'count': max(1, min(1000000, int(count))),
+            'explicit_count': max(1, min(1000000, int(explicit_count))) if explicit_count else None,
+            'unit': unit,
+        })
+    # Storefronts often print the same capacity twice in metric and imperial
+    # notation (100ml / 3.4fl oz). Collapse only established equivalent labels
+    # so the second notation cannot look like an extra component.
+    unique_facts = []
+    for fact in facts:
+        duplicate = any(
+            fact.get('count') == existing.get('count')
+            and _web_identity_measure_values_equivalent(fact, existing)
+            for existing in unique_facts
+        )
+        if not duplicate:
+            unique_facts.append(fact)
+    return unique_facts[:12]
+
+def _web_identity_measure_values_equivalent(left_fact, right_fact):
+    if left_fact.get('dimension') != right_fact.get('dimension'):
+        return False
+    left_value = float(left_fact.get('each') or 0.0)
+    right_value = float(right_fact.get('each') or 0.0)
+    if abs(left_value - right_value) <= 1e-9:
+        return True
+    imperial_units = {
+        'lb', 'lbs', 'pound', 'pounds', 'oz', 'ounce', 'ounces',
+        'fl oz', 'fl. oz', 'fl.oz', 'fl ounce', 'fl ounces',
+        'fl. ounce', 'fl. ounces', 'fluid oz', 'fluid ounce', 'fluid ounces',
+        'gal', 'gallon', 'gallons',
+        'in', 'inch', 'inches', 'ft', 'foot', 'feet',
+    }
+    left_imperial = str(left_fact.get('unit') or '') in imperial_units
+    right_imperial = str(right_fact.get('unit') or '') in imperial_units
+    if left_imperial == right_imperial or left_fact.get('dimension') not in {'mass', 'volume'}:
+        return False
+    imperial_fact = left_fact if left_imperial else right_fact
+    metric_fact = right_fact if left_imperial else left_fact
+    factor = _WEB_IDENTITY_UNIT_FACTORS.get(str(imperial_fact.get('unit') or ''), ('', 0.0))[1]
+    # Contextual bare oz may have been parsed as fluid volume above.
+    if imperial_fact.get('dimension') == 'volume' and str(imperial_fact.get('unit') or '') in {'oz', 'ounce', 'ounces'}:
+        factor = 29.5735296
+    original = float(imperial_fact.get('each') or 0.0) / float(factor or 1.0)
+    nominal_pairs = {
+        'volume': (
+            (1.0, 30.0), (1.7, 50.0), (2.5, 75.0), (3.4, 100.0),
+            (6.7, 200.0), (8.5, 250.0), (16.0, 473.0), (33.8, 1000.0),
+        ),
+        'mass': (
+            (1.0, 28.0), (3.5, 100.0), (7.0, 200.0), (8.8, 250.0),
+            (16.0, 454.0), (1.1, 500.0), (2.2, 1000.0),
+        ),
+    }.get(left_fact.get('dimension'), ())
+    if abs(float(metric_fact.get('each') or 0.0) - round(float(imperial_fact.get('each') or 0.0))) <= 0.001:
+        return True
+    return any(
+        abs(original - imperial_amount) <= 0.011
+        and abs(float(metric_fact.get('each') or 0.0) - metric_amount) <= 0.001
+        for imperial_amount, metric_amount in nominal_pairs
+    )
+
+def _web_identity_fact_conflicts(left, right):
+    """Return strict exact-identity conflicts without changing broad search tolerances."""
+    left_facts = _web_identity_measure_facts(left)
+    right_facts = _web_identity_measure_facts(right)
+    conflicts = []
+    def effective_pack(raw, facts):
+        explicit = _web_pack_count(_web_ascii_digits(raw))
+        if explicit is not None:
+            return explicit
+        inline = {int(fact['explicit_count']) for fact in facts if fact.get('explicit_count') is not None}
+        return next(iter(inline)) if len(inline) == 1 else None
+
+    left_pack = effective_pack(left, left_facts)
+    right_pack = effective_pack(right, right_facts)
+    if (left_pack is None) != (right_pack is None):
+        # An unspecified retail quantity means one item. Explicit "single" or
+        # "1-pack" is equivalent; only a one-sided count greater than one is
+        # a real bundle conflict.
+        explicit_one = left_pack if left_pack is not None else right_pack
+        if explicit_one != 1:
+            conflicts.append('quantity_bundle')
+    elif left_pack is not None and right_pack is not None and left_pack != right_pack:
+        conflicts.append('quantity_bundle')
+
+    left_by_dimension = defaultdict(list)
+    right_by_dimension = defaultdict(list)
+    for fact in left_facts:
+        left_by_dimension[fact['dimension']].append(fact)
+    for fact in right_facts:
+        right_by_dimension[fact['dimension']].append(fact)
+    left_dimensions = set(left_by_dimension)
+    right_dimensions = set(right_by_dimension)
+    if bool(left_facts) != bool(right_facts) or (left_facts and right_facts and left_dimensions != right_dimensions):
+        conflicts.append('dimensions')
+    for dimension in left_dimensions & right_dimensions:
+        left_values = sorted(left_by_dimension[dimension], key=lambda fact: (fact['each'], fact['count']))
+        right_values = sorted(right_by_dimension[dimension], key=lambda fact: (fact['each'], fact['count']))
+        # A missing secondary capacity/dimension is insufficient identity
+        # proof: 500+100 is not assumed equal to a listing that only says 500.
+        if len(left_values) != len(right_values):
+            conflicts.append('dimensions')
+            continue
+        for left_fact, right_fact in zip(left_values, right_values):
+            lo, hi = sorted((float(left_fact['each']), float(right_fact['each'])))
+            # Relative tolerance must stay relative in canonical units. A
+            # 0.01 absolute floor would incorrectly merge 1mg with 5mg and
+            # 512KB with 1024KB after conversion to g/GB.
+            # Metric conversions are exact commercial identities; a blanket
+            # 1% tolerance incorrectly merges 990ml with 1L. Only common
+            # rounded imperial labels get a narrow, explicit allowance.
+            imperial_units = {
+                'lb', 'lbs', 'pound', 'pounds', 'oz', 'ounce', 'ounces',
+                'fl oz', 'fl. oz', 'fl.oz', 'fl ounce', 'fl ounces',
+                'fl. ounce', 'fl. ounces', 'fluid oz', 'fluid ounce', 'fluid ounces',
+                'gal', 'gallon', 'gallons',
+                'in', 'inch', 'inches', 'ft', 'foot', 'feet',
+            }
+            cross_imperial = (str(left_fact.get('unit') or '') in imperial_units) ^ (str(right_fact.get('unit') or '') in imperial_units)
+            # Metric/catalog values are identity evidence, not fuzzy search
+            # hints.  Once converted to the same canonical unit, only binary
+            # floating-point noise is tolerated; 999.6g is not a 1kg Exact
+            # match and 999.6MB is not 1GB.  Human-rounded imperial labels are
+            # handled by the explicit whitelist immediately below.
+            equivalent = hi - lo <= 1e-9
+            if cross_imperial and dimension in {'mass', 'volume'} and not equivalent:
+                # Permit only the conventional whole-metric label obtained by
+                # rounding the exact imperial conversion (1oz≈28g,
+                # 1lb≈454g, 1fl oz≈30ml). Do not accept arbitrary nearby
+                # values such as 28.7g, 460g or 25.7mm.
+                imperial_fact = left_fact if str(left_fact.get('unit') or '') in imperial_units else right_fact
+                metric_fact = right_fact if imperial_fact is left_fact else left_fact
+                rounded_metric = round(float(imperial_fact['each']))
+                equivalent = abs(float(metric_fact['each']) - rounded_metric) <= 0.001
+                if not equivalent:
+                    # Standard retail labels deliberately use nominal metric
+                    # capacities/weights (for example perfume 3.4 fl oz =
+                    # 100ml and food 3.5oz = 100g), not the long scientific
+                    # conversion. Only these established pairs are accepted.
+                    unit_factor = _WEB_IDENTITY_UNIT_FACTORS.get(
+                        str(imperial_fact.get('unit') or ''), ('', 0.0)
+                    )[1]
+                    if dimension == 'volume' and str(imperial_fact.get('unit') or '') in {'oz', 'ounce', 'ounces'}:
+                        unit_factor = 29.5735296
+                    original_amount = (
+                        float(imperial_fact['each']) / float(unit_factor)
+                        if unit_factor else 0.0
+                    )
+                    nominal_pairs = {
+                        'volume': (
+                            (1.0, 30.0), (1.7, 50.0), (2.5, 75.0),
+                            (3.4, 100.0), (6.7, 200.0), (8.5, 250.0),
+                            (16.0, 473.0), (33.8, 1000.0),
+                        ),
+                        'mass': (
+                            (1.0, 28.0), (3.5, 100.0), (7.0, 200.0),
+                            (8.8, 250.0), (16.0, 454.0),
+                            (1.1, 500.0), (2.2, 1000.0),
+                        ),
+                    }.get(dimension, ())
+                    equivalent = any(
+                        abs(original_amount - imperial_amount) <= 0.011
+                        and abs(float(metric_fact['each']) - metric_amount) <= 0.001
+                        for imperial_amount, metric_amount in nominal_pairs
+                    )
+            if not equivalent:
+                conflicts.append('dimensions' if dimension == 'length' else 'variant')
+            # A single measured item can express its sold quantity beside the
+            # measure (``2x500ml``) or elsewhere in the title (``500ml each,
+            # pack of 2`` / ``2 bottles of 500ml``). The global pack fact is
+            # authoritative in that unambiguous single-measure case. Do not
+            # apply it to mixed bundles, whose per-component counts matter.
+            left_count = (
+                int(left_pack) if left_pack is not None and len(left_facts) == 1
+                else int(left_fact['count'])
+            )
+            right_count = (
+                int(right_pack) if right_pack is not None and len(right_facts) == 1
+                else int(right_fact['count'])
+            )
+            if left_count != right_count:
+                conflicts.append('quantity_bundle')
+    return list(dict.fromkeys(conflicts))
+
+def _web_identity_facts_equivalent(left, right):
+    if _web_identity_fact_conflicts(left, right):
+        return False
+    left_facts = _web_identity_measure_facts(left)
+    right_facts = _web_identity_measure_facts(right)
+    left_pack = _web_pack_count(_web_ascii_digits(left))
+    right_pack = _web_pack_count(_web_ascii_digits(right))
+    if left_pack is None:
+        counts = {int(fact['explicit_count']) for fact in left_facts if fact.get('explicit_count') is not None}
+        left_pack = next(iter(counts)) if len(counts) == 1 else None
+    if right_pack is None:
+        counts = {int(fact['explicit_count']) for fact in right_facts if fact.get('explicit_count') is not None}
+        right_pack = next(iter(counts)) if len(counts) == 1 else None
+    if left_pack is not None and right_pack is not None and left_pack == right_pack and not left_facts and not right_facts:
+        return True
+    if not left_facts or not right_facts:
+        return False
+    return bool({fact['dimension'] for fact in left_facts} & {fact['dimension'] for fact in right_facts})
+
+def _web_model_tokens_from_listing(value):
+    """Extract model tokens only after removing quantities and specifications."""
+    original_sanitized = _web_expand_measurement_fractions(
+        _web_numericize_pack_words(_web_ascii_digits(str(value or '')))
+    )
+    sanitized = original_sanitized
+    protected_models = {
+        re.sub(r'[^a-z0-9]+', '', match.group(1).lower())
+        for match in _WEB_TYPED_LISTING_CODE_RE.finditer(sanitized)
+        if any(ch.isdigit() for ch in match.group(1))
+    }
+    sanitized = _web_classification_comparable(sanitized)
+    sanitized = _SPEC_NUMBER_RE.sub(' ', sanitized)
+    for pattern in _WEB_PACK_COUNT_PATTERNS:
+        sanitized = pattern.sub(' ', sanitized)
+    sanitized = _WEB_SINGLE_ITEM_RE.sub(' ', sanitized)
+    sanitized = re.sub(r'(?i)\b\d+(?:[.,]\d+)?\s*(?:%|dpi|ppi|nits?|rpm|mp)\b', ' ', sanitized)
+    models = set(_findzia_model_tokens(sanitized)) | {model for model in protected_models if model}
+    # Keep standalone mixed identifiers before word-order normalization. This
+    # recovers model 58A whether the title says "HP 58A Toner" or
+    # "HP Toner Cartridge 58A".
+    raw_model_tokens = {
+        token.lower()
+        for token in re.findall(
+            r'(?i)(?<![a-z0-9])(?=[a-z0-9]{2,24}(?![a-z0-9]))(?=[a-z0-9]*[a-z])(?=[a-z0-9]*\d)[a-z0-9]+',
+            original_sanitized,
+        )
+    }
+    measurement_token = re.compile(
+        r'(?i)(?:\d+x)?\d+(?:ml|cl|l|mg|g|kg|oz|lb|mm|cm|m|in|ft|kb|mb|gb|tb|mp|mah|wh|w|kw|v|hz|khz|mhz|ghz)'
+    )
+    for token in raw_model_tokens:
+        # Quantities, ordinal labels and the source spelling of a normalized
+        # generation/revision/viscosity are specifications, not extra models.
+        if (
+            measurement_token.fullmatch(token)
+            or re.fullmatch(r'\d+(?:st|nd|rd|th)', token, re.I)
+            or re.fullmatch(r'\d+x\d+', token, re.I)
+            or re.fullmatch(r'\d+(?:pk|pks|ct|pcs?)', token, re.I)
+        ):
+            continue
+        if re.fullmatch(r'gen\d+', token, re.I) and ('generation' + token[3:]) in models:
+            continue
+        if re.fullmatch(r'mk\d+', token, re.I) and ('mark' + token[2:]) in models:
+            continue
+        if re.fullmatch(r'(?:sae)?\d+w\d+', token, re.I) and any(str(model).startswith('viscosity') for model in models):
+            continue
+        models.add(token)
+    # A nearby brand/category word may have been joined to a mixed model by a
+    # storefront (HP58A / Cartridge58A / WH1000XM5). Preserve the distinctive
+    # numeric suffix as an additional comparison key; never replace the full
+    # code with this weaker alias.
+    for model in list(models):
+        suffix = re.match(r'^[a-z]{1,20}(\d+[a-z]+[a-z0-9]*)$', model, re.I)
+        if suffix and len(suffix.group(1)) >= 3:
+            models.add(suffix.group(1).lower())
+    # Retail feature notation, not a unique model identifier.
+    models = {model for model in models if not re.fullmatch(r'\d+in\d+', model, re.I)}
+    for short in re.findall(r'(?i)(?<![a-z0-9])(?:[a-z]\d|\d[a-z])(?![a-z0-9])', sanitized):
+        token = short.lower()
+        if token not in {'x2', 'x3', 'x4', '2x', '3x', '4x', '2d', '3d', '4k', '5g', '4g', '3g', '2g', '8k'}:
+            models.add(token)
+    return models
+
 def _web_product_tiers(value):
-    tokens = {str(token).lower() for token in norm_tokens(str(value or ''))}
+    tokens = _web_sellable_variant_tokens(value)
     return [sorted(tokens & group) for group in _WEB_TIER_GROUPS if tokens & group]
 
+def _web_semantic_fingerprint_text(value):
+    """Canonicalize only unambiguous product-type abbreviations for guards."""
+    text = str(value or '')
+    text = re.sub(
+        r'(?i)\b(?:air[-\s]+conditioner|air[-\s]+conditioning|a\s*/\s*c)\b',
+        ' airconditioner ',
+        text,
+    )
+    text = re.sub(r'(?i)\b(?:ultra\s+hd|uhd)\b', ' ultrahd ', text)
+    return re.sub(r'\s+', ' ', text).strip()
+
+@lru_cache(maxsize=8192)
 def _web_product_fingerprint(value):
     """Build a deterministic, JSON-safe identity fingerprint with no I/O."""
     title = _web_clean_classification_identity(value)
-    comparable = _web_classification_comparable(title)
+    comparable = _web_classification_comparable(_web_semantic_fingerprint_text(title))
     size = extract_pack_size(title)
     distinctive = (_findzia_lexical_tokens(comparable) - _WEB_CLASSIFICATION_GENERIC_CLUSTER)
     return {
         'title': title,
-        'models': sorted(_findzia_model_tokens(title)),
+        'models': sorted(_web_model_tokens_from_listing(title)),
         'numbers': sorted(_web_classification_numbers(title)),
         'size': [size[0], round(float(size[1]), 4)] if size else None,
         'form': _web_first_named_pattern(title, _WEB_PRODUCT_FORM_PATTERNS),
-        'pack_count': _web_pack_count(title),
+        'audience': _web_first_named_pattern(title, _WEB_AUDIENCE_PATTERNS),
+        'product_kind': _web_first_named_pattern(title, _WEB_PRODUCT_KIND_PATTERNS),
+        'labeled_variants': _web_labeled_variants(title),
+        'packaging_forms': _web_packaging_forms(title),
+        'non_product_offer': _web_non_product_offer(title),
+        'pack_count': _web_pack_count(_web_ascii_digits(title)),
+        'contained_unit_count': _web_contained_unit_count(title),
+        'measure_facts': _web_identity_measure_facts(title),
         'edition': _web_first_named_pattern(title, _WEB_PRODUCT_EDITION_PATTERNS),
         'condition': _web_first_named_pattern(title, _WEB_PRODUCT_CONDITION_PATTERNS),
+        'mounting': _web_first_named_pattern(title, _WEB_TITLE_MOUNTING_PATTERNS),
         'tiers': _web_product_tiers(title),
-        'accessory': bool(_WEB_STRONG_ACCESSORY_RE.search(title)),
+        'accessory': _web_is_accessory_offer(title),
+        'component_only': bool(_WEB_COMPONENT_ONLY_RE.search(title)),
         'device': bool(_WEB_FULL_DEVICE_RE.search(title)),
         'membership': bool(_WEB_MEMBERSHIP_RE.search(title)),
+        'membership_only': bool(
+            _WEB_MEMBERSHIP_RE.search(title)
+            and (
+                _WEB_MEMBERSHIP_ONLY_RE.search(title)
+                or not _WEB_FULL_DEVICE_RE.search(title)
+            )
+        ),
+        'bundle_offer': bool(_WEB_BUNDLE_OFFER_RE.search(title)),
+        'sellable_variants': sorted(_web_sellable_variant_tokens(title)),
         'distinctive': sorted(distinctive, key=lambda token: (-len(token), token))[:18],
     }
 
@@ -7442,26 +8897,80 @@ def _web_semantic_match_guard(identity, row):
     """Resolve high-confidence product identity cases instantly, without I/O."""
     identity = _web_clean_classification_identity(identity)
     title = _web_clean_classification_identity(_web_result_classification_title(row))
-    if not identity or not title:
-        return None
     url = str((row or {}).get('url') or (row or {}).get('link') or '').strip()
     store = str((row or {}).get('store') or (row or {}).get('source') or '').strip()
     if url and not _web_is_direct_product_page_url(url, store):
         return ('similar', 'collection_page_guard', 99)
+    if not identity or not title:
+        return None
     identity_fp = _web_product_fingerprint(identity)
     title_fp = _web_product_fingerprint(title)
+    if identity_fp['audience'] != title_fp['audience'] and (identity_fp['audience'] or title_fp['audience']):
+        reason = 'different_audience' if identity_fp['audience'] and title_fp['audience'] else 'audience_not_proven'
+        return ('similar', reason, 99)
+    if (
+        identity_fp['product_kind'] and title_fp['product_kind']
+        and identity_fp['product_kind'] != title_fp['product_kind']
+    ):
+        return ('similar', 'different_product_type', 99)
+    identity_labeled = dict(identity_fp.get('labeled_variants') or {})
+    title_labeled = dict(title_fp.get('labeled_variants') or {})
+    for axis in set(identity_labeled) | set(title_labeled):
+        if identity_labeled.get(axis) != title_labeled.get(axis):
+            return ('similar', 'different_labeled_variant_' + axis, 99)
+    early_identity_models = set(identity_fp['models'])
+    early_title_models = set(title_fp['models'])
+    if (
+        early_identity_models and early_title_models
+        and early_identity_models & early_title_models
+        and bool(identity_fp['product_kind']) != bool(title_fp['product_kind'])
+    ):
+        return ('similar', 'product_type_not_proven', 96)
+    if identity_fp['non_product_offer'] != title_fp['non_product_offer'] and (
+        identity_fp['non_product_offer'] or title_fp['non_product_offer']
+    ):
+        return ('similar', 'non_product_offer_guard', 99)
     if title_fp['accessory'] != identity_fp['accessory']:
         return ('similar', 'accessory_guard', 99)
+    if title_fp['component_only'] != identity_fp['component_only']:
+        return ('similar', 'component_vs_main_product_guard', 99)
+    if title_fp['membership_only'] != identity_fp['membership_only']:
+        return ('similar', 'membership_only_guard', 99)
     if title_fp['membership'] and not title_fp['device'] and identity_fp['device']:
         return ('similar', 'membership_only_guard', 98)
     if identity_fp['membership'] and not identity_fp['device'] and title_fp['device']:
         return ('similar', 'device_vs_membership_guard', 98)
-    if identity_fp['form'] and title_fp['form'] and identity_fp['form'] != title_fp['form']:
+    if title_fp['bundle_offer'] != identity_fp['bundle_offer']:
+        return ('similar', 'different_bundle_offer', 99)
+    if identity_fp['mounting'] and title_fp['mounting'] and identity_fp['mounting'] != title_fp['mounting']:
+        return ('similar', 'different_mounting_topology', 99)
+    if set(identity_fp['sellable_variants']) != set(title_fp['sellable_variants']):
+        return ('similar', 'different_named_variant', 99)
+    if identity_fp['form'] != title_fp['form'] and (identity_fp['form'] or title_fp['form']):
         return ('similar', 'different_product_form', 99)
+    if (
+        identity_fp['packaging_forms'] and title_fp['packaging_forms']
+        and set(identity_fp['packaging_forms']) != set(title_fp['packaging_forms'])
+    ):
+        return ('similar', 'different_packaging_form', 99)
     identity_size = tuple(identity_fp['size']) if identity_fp['size'] else None
     title_size = tuple(title_fp['size']) if title_fp['size'] else None
-    if identity_size and title_size and not sizes_compatible(identity_size, title_size):
+    fact_conflicts = _web_identity_fact_conflicts(identity, title)
+    if 'quantity_bundle' in fact_conflicts:
+        return ('similar', 'different_pack_count', 99)
+    if fact_conflicts:
         return ('similar', 'different_size_or_capacity', 99)
+    identity_contained_count = identity_fp.get('contained_unit_count')
+    title_contained_count = title_fp.get('contained_unit_count')
+    if identity_contained_count != title_contained_count and (
+        identity_contained_count is not None or title_contained_count is not None
+    ):
+        reason = (
+            'different_contained_quantity'
+            if identity_contained_count is not None and title_contained_count is not None
+            else 'contained_quantity_not_proven'
+        )
+        return ('similar', reason, 99)
     if identity_fp['pack_count'] and title_fp['pack_count'] and identity_fp['pack_count'] != title_fp['pack_count']:
         return ('similar', 'different_pack_count', 98)
     if (identity_fp['edition'] or title_fp['edition']) and title_fp['edition'] != identity_fp['edition']:
@@ -7475,28 +8984,69 @@ def _web_semantic_match_guard(identity, row):
     if _findzia_hard_product_mismatch(identity_cmp, title_cmp):
         return ('similar', 'hard_product_conflict', 97)
     shared = set(identity_fp['distinctive']) & set(title_fp['distinctive'])
+    identity_distinctive = set(identity_fp['distinctive'])
+    identity_coverage = len(shared) / max(1, len(identity_distinctive))
     identity_models = set(identity_fp['models'])
     title_models = set(title_fp['models'])
     if identity_models and title_models and not identity_models & title_models:
         return ('similar', 'different_model_guard', 97)
     identity_numbers = set(identity_fp['numbers'])
     title_numbers = set(title_fp['numbers'])
+    if identity_numbers != title_numbers and (identity_numbers or title_numbers):
+        if identity_numbers and title_numbers and not identity_numbers & title_numbers:
+            return ('similar', 'different_generation', 96)
+        if title_numbers - identity_numbers:
+            return ('similar', 'extra_numeric_identity', 95)
+        if identity_numbers - title_numbers:
+            return ('similar', 'missing_numeric_identity', 94)
     if identity_numbers and title_numbers and not identity_numbers & title_numbers:
         return ('similar', 'different_generation', 96)
     score = max(_findzia_match_score(identity_cmp, title_cmp), _findzia_match_score(title_cmp, identity_cmp))
-    if title_fp['device'] and not title_fp['accessory'] and shared and score >= 0.45:
-        return ('exact', 'full_device_guard', 98)
-    if identity_models and identity_models & title_models and score >= 0.44:
-        return ('exact', 'same_model_guard', 98)
-    if identity_fp['form'] and identity_fp['form'] == title_fp['form'] and len(shared) >= 2 and score >= 0.50:
+    # A repeated device noun/model is not sufficient for Exact: accessory,
+    # service, empty-box, game, lens-kit and bundle titles routinely repeat
+    # the main device name. Exact is reached only through the bidirectional
+    # identity checks below (or reference-image proof), never this shortcut.
+    if identity_models and identity_models & title_models:
+        # A shared model is necessary but not sufficient: an extra named
+        # variant/trim in the merchant title changes the buyable product.
+        title_distinctive = set(title_fp['distinctive'])
+        title_coverage = len(shared) / max(1, len(title_distinctive))
+        if identity_distinctive == title_distinctive:
+            return ('exact', 'same_model_guard', 98)
+        identity_residual = identity_distinctive - _WEB_SHARED_MODEL_DESCRIPTOR_TOKENS
+        title_residual = title_distinctive - _WEB_SHARED_MODEL_DESCRIPTOR_TOKENS
+        if identity_residual == title_residual:
+            return ('exact', 'same_model_descriptor_alias', 98)
+        # With an identical model/MPN, every remaining named identity token
+        # still matters. This blocks X100 Watch vs X100 Phone and flavour/name
+        # variants that previously slipped through the model-only heuristic.
+        if identity_residual != title_residual:
+            return ('similar', 'different_identity_token_same_model', 97)
+        if identity_coverage >= 0.85 and title_distinctive - identity_distinctive:
+            return ('similar', 'extra_identity_token', 92)
+    if identity_fp['form'] and identity_fp['form'] == title_fp['form'] and len(shared) >= 2 and identity_coverage >= 0.85 and score >= 0.50:
         reason = 'structured_form_size_guard' if identity_size and title_size else 'same_form_identity'
         return ('exact', reason, 97)
-    if len(shared) >= 2 and score >= 0.62:
+    title_distinctive = set(title_fp['distinctive'])
+    title_coverage = len(shared) / max(1, len(title_distinctive))
+    if len(shared) >= 2 and identity_distinctive == title_distinctive and score >= 0.62:
         structured_identity = bool(
             (identity_numbers and title_numbers and identity_numbers & title_numbers)
-            or (identity_size and title_size and sizes_compatible(identity_size, title_size))
+            or _web_identity_facts_equivalent(identity, title)
         )
         return ('exact', 'structured_identity_guard' if structured_identity else 'strong_fingerprint_match', 96)
+    identity_only = identity_distinctive - set(title_fp['distinctive'])
+    title_only = set(title_fp['distinctive']) - identity_distinctive
+    if len(shared) >= 2 and identity_only and title_only:
+        return ('similar', 'different_identity_token', 94)
+    if len(shared) >= 2 and title_only and identity_coverage >= 0.85:
+        return ('similar', 'extra_identity_token', 92)
+    if len(shared) >= 2 and identity_only and title_coverage >= 0.85:
+        return ('similar', 'missing_identity_token', 92)
+    if not identity_models and not title_models and shared and identity_distinctive != title_distinctive:
+        if identity_distinctive < title_distinctive or title_distinctive < identity_distinctive:
+            return ('similar', 'one_sided_named_family', 95)
+        return ('similar', 'different_named_family', 95)
     return None
 
 def _web_market_scope_guard(row, market_snapshot):
@@ -7538,12 +9088,49 @@ def _web_market_scope_guard(row, market_snapshot):
         return ('global', 'foreign_currency', 96)
     return None
 
+def _web_match_guard_conflict_axis(match_guard):
+    """Map authoritative merchant-title contradictions to a score axis."""
+    if not match_guard or str(match_guard[0] or '').lower() != 'similar':
+        return ''
+    reason = str(match_guard[1] or '').lower()
+    if (
+        'accessory' in reason or 'component' in reason or 'replacement' in reason
+        or 'membership' in reason or 'subscription' in reason or 'device_vs' in reason
+        or 'non_product' in reason or 'service' in reason or 'gift' in reason
+    ):
+        return 'product_role'
+    if 'pack' in reason or 'quantity' in reason or 'bundle' in reason:
+        return 'quantity_bundle'
+    if 'size' in reason or 'capacity' in reason:
+        return 'dimensions'
+    if 'form' in reason:
+        return 'form_factor'
+    if 'mounting' in reason or 'topology' in reason:
+        return 'mounting'
+    if 'audience' in reason:
+        return 'intended_use'
+    if 'product_type' in reason:
+        return 'subtype'
+    if 'labeled_variant' in reason or 'named_family' in reason:
+        return 'variant'
+    if 'condition' in reason:
+        return 'condition'
+    if 'edition' in reason:
+        return 'configuration'
+    if 'model' in reason or 'generation' in reason or 'numeric' in reason or 'tier' in reason:
+        return 'alphanumeric_identity'
+    if 'identity_token' in reason or 'named_variant' in reason:
+        return 'variant'
+    return 'product_name'
+
 def _web_classification_signature(rows):
     return tuple(
         (
             _canonical_result_url(str((row or {}).get('url') or (row or {}).get('link') or '')),
             str((row or {}).get('match_type') or ''),
             str((row or {}).get('market_scope') or ''),
+            int((row or {}).get('match_percentage') or 0),
+            bool((row or {}).get('match_percentage_final')),
         )
         for row in (rows or [])
     )
@@ -7556,8 +9143,10 @@ def _web_captured_result_is_exact(identity, title):
     title_cmp = _web_classification_comparable(title)
     if not identity_cmp or not title_cmp or _findzia_hard_product_mismatch(identity_cmp, title_cmp):
         return False
-    identity_models = _findzia_model_tokens(identity)
-    title_models = _findzia_model_tokens(title)
+    if _web_identity_fact_conflicts(identity, title):
+        return False
+    identity_models = _web_model_tokens_from_listing(identity)
+    title_models = _web_model_tokens_from_listing(title)
     if identity_models:
         # A model-bearing photographed identity is exact only when the card
         # explicitly carries that same model.  Other models remain visible in
@@ -7569,27 +9158,92 @@ def _web_captured_result_is_exact(identity, title):
         return False
     # Without a model number, require strong coverage of the post-capture
     # identity/consensus anchor.  The result list itself is never changed.
-    return _findzia_match_score(identity_cmp, title_cmp) >= 0.52
+    identity_tokens = (
+        _findzia_lexical_tokens(identity_cmp) - _WEB_CLASSIFICATION_GENERIC_CLUSTER
+    )
+    title_tokens = (
+        _findzia_lexical_tokens(title_cmp) - _WEB_CLASSIFICATION_GENERIC_CLUSTER
+    )
+    coverage = len(identity_tokens & title_tokens) / max(1, len(identity_tokens))
+    return coverage >= 0.85 and _findzia_match_score(identity_cmp, title_cmp) >= 0.52
 
 _WEB_VISUAL_AXES = (
-    'category', 'subtype', 'intended_use', 'function',
+    'category', 'subtype', 'intended_use', 'audience', 'function', 'product_role',
+    'mounting', 'installation', 'support_base', 'power_source', 'orientation',
     'brand', 'product_name', 'model', 'variant',
     'structure', 'components', 'form_factor', 'silhouette',
-    'proportions', 'material', 'texture', 'finish', 'color', 'pattern',
+    'proportions', 'shape_geometry', 'material', 'texture', 'finish', 'color', 'pattern',
+    'distinctive_features',
     'size_class', 'dimensions', 'quantity_bundle', 'configuration',
-    'compatibility', 'condition', 'text_identity',
+    'compatibility', 'condition', 'text_identity', 'visible_markings',
+    'alphanumeric_identity',
 )
 _WEB_VISUAL_HARD_DIFFERENCE_AXES = frozenset(_WEB_VISUAL_AXES)
 _WEB_VISUAL_PHYSICAL_PROOF_AXES = frozenset({
     'structure', 'components', 'form_factor', 'silhouette', 'proportions',
-    'material', 'texture', 'finish', 'color', 'pattern', 'size_class',
+    'shape_geometry', 'support_base',
+    'material', 'texture', 'finish', 'color', 'pattern', 'distinctive_features', 'size_class',
     'dimensions', 'quantity_bundle', 'configuration',
 })
-_WEB_VISUAL_USE_PROOF_AXES = frozenset({'subtype', 'intended_use', 'function', 'form_factor'})
+_WEB_VISUAL_USE_PROOF_AXES = frozenset({
+    'subtype', 'intended_use', 'function', 'product_role', 'mounting',
+    'installation', 'form_factor',
+})
+_WEB_VISUAL_FUNCTION_PROOF_AXES = frozenset({'function', 'product_role', 'intended_use'})
+_WEB_VISUAL_TOPOLOGY_PROOF_AXES = frozenset({'mounting', 'installation', 'form_factor', 'subtype'})
+
+_WEB_MATCH_SCORE_AXIS_CAPS = {
+    'category': 18,
+    'function': 20,
+    'product_role': 20,
+    'mounting': 20,
+    'installation': 24,
+    'compatibility': 25,
+    'subtype': 38,
+    'model': 38,
+    'alphanumeric_identity': 38,
+    'intended_use': 42,
+    'audience': 42,
+    'support_base': 45,
+    'structure': 55,
+    'components': 58,
+    'distinctive_features': 58,
+    'form_factor': 60,
+    'configuration': 62,
+    'product_name': 65,
+    'power_source': 65,
+    'variant': 72,
+    'text_identity': 72,
+    'visible_markings': 72,
+    'quantity_bundle': 76,
+    'dimensions': 78,
+    'size_class': 80,
+    'condition': 80,
+    'silhouette': 74,
+    'proportions': 76,
+    'shape_geometry': 76,
+    'material': 82,
+    'pattern': 80,
+    'finish': 82,
+    'texture': 85,
+    'color': 80,
+    'brand': 60,
+    'orientation': 88,
+}
+_WEB_MATCH_SCORE_VERSION = 'universal_evidence_v14'
 
 def _web_match_guard_is_hard(match_guard):
     """Only contradictions are immutable; an Exact claim may be visually audited."""
     return bool(match_guard and str(match_guard[0] or '').lower() == 'similar')
+
+def _web_match_guard_is_anchor_independent(match_guard):
+    """Guards proven by the offer itself rather than a fallible Lens title."""
+    return bool(
+        match_guard
+        and str(match_guard[1] or '').lower() in {
+            'collection_page_guard', 'non_product_offer_guard',
+        }
+    )
 
 def _web_visual_exact_requires_proof(match_guard):
     """Every Exact claim in an image search needs candidate-image evidence.
@@ -7614,19 +9268,19 @@ def _web_visual_reference_digest(image_b64):
         return ''
 
 def _web_visual_review_needed(reference_image_b64, reference_image_mime, results, match_guards):
-    """Audit every non-contradictory card whenever the query has a real photo."""
-    if not WEB_VISUAL_CLASSIFIER_ENABLED or PILImage is None:
-        return False
+    """A real user photo makes visual proof mandatory for every card.
+
+    This intentionally does not depend on Pillow, Gemini or candidate-image
+    availability.  If any visual component is unavailable, cards remain
+    Similar/unverified instead of silently inheriting an Exact label from a
+    potentially wrong Lens caption or result-list consensus.
+    """
     if not _web_visual_reference_digest(reference_image_b64):
         return False
     mime = str(reference_image_mime or '').lower()
     if mime and not mime.startswith('image/'):
         return False
-    for index, _row in enumerate(results or []):
-        if _web_match_guard_is_hard((match_guards or {}).get(index)):
-            continue
-        return True
-    return False
+    return bool(results)
 
 def _web_visual_cache_get(key):
     now = time.time()
@@ -7648,7 +9302,7 @@ def _web_visual_cache_set(key, value):
             for old_key, _ in stale:
                 WEB_VISUAL_IMAGE_CACHE.pop(old_key, None)
 
-def _web_visual_inline_from_bytes(image_bytes):
+def _web_visual_inline_from_bytes(image_bytes, edge=None, quality=None):
     """Normalize one image to a small, orientation-correct JPEG for Gemini."""
     if PILImage is None or not image_bytes:
         return None
@@ -7658,7 +9312,9 @@ def _web_visual_inline_from_bytes(image_bytes):
             if width < 48 or height < 48 or width * height > 40_000_000:
                 return None
             image = PILImageOps.exif_transpose(source) if PILImageOps is not None else source.copy()
-            image.thumbnail((WEB_VISUAL_CLASSIFIER_IMAGE_EDGE, WEB_VISUAL_CLASSIFIER_IMAGE_EDGE), getattr(PILImage, 'Resampling', PILImage).LANCZOS)
+            edge = int(edge or WEB_VISUAL_CLASSIFIER_IMAGE_EDGE)
+            quality = int(quality or WEB_VISUAL_CLASSIFIER_JPEG_QUALITY)
+            image.thumbnail((edge, edge), getattr(PILImage, 'Resampling', PILImage).LANCZOS)
             if image.mode in ('RGBA', 'LA') or (image.mode == 'P' and 'transparency' in image.info):
                 rgba = image.convert('RGBA')
                 flattened = PILImage.new('RGB', rgba.size, (255, 255, 255))
@@ -7667,7 +9323,7 @@ def _web_visual_inline_from_bytes(image_bytes):
             elif image.mode != 'RGB':
                 image = image.convert('RGB')
             output = io.BytesIO()
-            image.save(output, format='JPEG', quality=WEB_VISUAL_CLASSIFIER_JPEG_QUALITY, optimize=True)
+            image.save(output, format='JPEG', quality=quality, optimize=True)
             encoded = output.getvalue()
             if not encoded:
                 return None
@@ -7690,29 +9346,180 @@ def _web_visual_reference_inline(image_b64):
         image_bytes = base64.b64decode(raw, validate=True)
     except Exception:
         return None
-    return _web_visual_inline_from_bytes(image_bytes)
+    normalized = _web_visual_inline_from_bytes(
+        image_bytes,
+        edge=WEB_VISUAL_REFERENCE_IMAGE_EDGE,
+        quality=max(WEB_VISUAL_CLASSIFIER_JPEG_QUALITY, 80),
+    )
+    if normalized:
+        return normalized
+    # Fail closed for Exact but keep the reference available to Gemini when
+    # Pillow/HEIC support is absent. Only recognized, bounded web formats pass.
+    if not image_bytes or len(image_bytes) > WEB_VISUAL_CLASSIFIER_MAX_DOWNLOAD_BYTES * 2:
+        return None
+    if image_bytes.startswith(b'\xff\xd8\xff'):
+        mime = 'image/jpeg'
+    elif image_bytes.startswith(b'\x89PNG\r\n\x1a\n'):
+        mime = 'image/png'
+    elif image_bytes.startswith((b'GIF87a', b'GIF89a')):
+        mime = 'image/gif'
+    elif len(image_bytes) > 12 and image_bytes[:4] == b'RIFF' and image_bytes[8:12] == b'WEBP':
+        mime = 'image/webp'
+    else:
+        return None
+    return {
+        'mime_type': mime,
+        'data': base64.b64encode(image_bytes).decode('ascii'),
+        'sha256': hashlib.sha256(image_bytes).hexdigest(),
+        'width': 0,
+        'height': 0,
+        'bytes': len(image_bytes),
+    }
 
 def _web_visual_host_allowed(host):
     host = str(host or '').strip().lower().rstrip('.')
-    if not host or host == 'localhost' or host.endswith(('.localhost', '.local')):
+    if (
+        not host
+        or host in {'localhost', 'metadata', 'metadata.google.internal', 'host.docker.internal'}
+        or host.endswith(('.localhost', '.local', '.internal'))
+    ):
         return False
     try:
         address = ipaddress.ip_address(host)
     except ValueError:
-        return True
-    return not (address.is_private or address.is_loopback or address.is_link_local or address.is_reserved or address.is_multicast or address.is_unspecified)
+        try:
+            answers = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+            addresses = {
+                ipaddress.ip_address(answer[4][0].split('%', 1)[0])
+                for answer in answers
+                if answer and len(answer) > 4 and answer[4]
+            }
+        except Exception:
+            return False
+        # Mixed public/private DNS is rejected too; an attacker must not be
+        # able to choose which answer the HTTP stack connects to.
+        return bool(addresses) and all(address.is_global for address in addresses)
+    return address.is_global
 
-def _web_visual_candidate_inline(row):
+def _web_validated_outbound_url(raw_url):
+    """Return a validated public HTTP(S) URL, or an empty string."""
+    value = str(raw_url or '').strip()
+    if not value or any(ord(ch) < 32 for ch in value) or '\\' in value:
+        return ''
+    try:
+        parsed = urllib.parse.urlsplit(value)
+        if parsed.scheme.lower() not in {'http', 'https'} or not parsed.hostname:
+            return ''
+        if parsed.username is not None or parsed.password is not None:
+            return ''
+        port = parsed.port
+        if port is not None and port not in {80, 443}:
+            return ''
+        host = parsed.hostname.encode('idna').decode('ascii').lower().rstrip('.')
+        if not _web_visual_host_allowed(host):
+            return ''
+        netloc = host
+        if ':' in host and not host.startswith('['):
+            netloc = f'[{host}]'
+        if port is not None:
+            netloc = f'{netloc}:{port}'
+        return urllib.parse.urlunsplit((parsed.scheme.lower(), netloc, parsed.path or '/', parsed.query, ''))
+    except Exception:
+        return ''
+
+def _web_response_peer_is_public(response):
+    """Best-effort post-connect defense against DNS rebinding."""
+    try:
+        connection = getattr(getattr(response, 'raw', None), '_connection', None)
+        sock = getattr(connection, 'sock', None)
+        peer = sock.getpeername()[0] if sock is not None else ''
+        return bool(peer) and ipaddress.ip_address(str(peer).split('%', 1)[0]).is_global
+    except Exception:
+        # Some adapters do not expose their socket. Pre-hop DNS validation is
+        # still enforced; production egress ACL remains the final boundary.
+        return True
+
+def _web_safe_response_close(response):
+    if response is None:
+        return
+    try:
+        response.close()
+    finally:
+        try:
+            session = getattr(response, '_findzia_session', None)
+            if session is not None:
+                session.close()
+        except Exception:
+            pass
+
+def _web_safe_get(raw_url, *, headers=None, timeout=(2.0, 8.0), stream=True, max_redirects=3):
+    """GET an untrusted URL while validating DNS and every redirect hop."""
+    current = _web_validated_outbound_url(raw_url)
+    if not current:
+        raise ValueError('unsafe_outbound_url')
+    session = requests.Session()
+    session.trust_env = False
+    response = None
+    try:
+        for hop in range(max_redirects + 1):
+            response = session.get(
+                current,
+                headers=dict(headers or {}),
+                timeout=timeout,
+                stream=stream,
+                allow_redirects=False,
+            )
+            if not _web_response_peer_is_public(response):
+                raise ValueError('unsafe_connected_peer')
+            if response.status_code not in {301, 302, 303, 307, 308}:
+                response._findzia_session = session
+                return response
+            if hop >= max_redirects:
+                raise ValueError('too_many_redirects')
+            location = str(response.headers.get('location') or '').strip()
+            next_url = _web_validated_outbound_url(urllib.parse.urljoin(current, location))
+            _web_safe_response_close(response)
+            response = None
+            if not next_url:
+                raise ValueError('unsafe_redirect')
+            current = next_url
+    except Exception:
+        _web_safe_response_close(response)
+        session.close()
+        raise
+
+def _web_read_limited_response(response, max_bytes, cancel_event=None):
+    try:
+        declared = int(response.headers.get('content-length') or 0)
+    except Exception:
+        declared = 0
+    if declared > int(max_bytes):
+        return None
+    chunks, total = [], 0
+    for chunk in response.iter_content(32768):
+        if cancel_event is not None and cancel_event.is_set():
+            return None
+        if not chunk:
+            continue
+        total += len(chunk)
+        if total > int(max_bytes):
+            return None
+        chunks.append(chunk)
+    return b''.join(chunks)
+
+def _web_visual_candidate_inline(row, force_refresh=False, cancel_event=None):
     raw_url = _web_unproxy_image_url(str((row or {}).get('image') or (row or {}).get('thumbnail') or ''))
     if not _web_is_http_url(raw_url):
         return None
     cache_key = 'visual:' + hashlib.sha256(raw_url.encode('utf-8')).hexdigest()
     cached, value = _web_visual_cache_get(cache_key)
-    if cached:
+    if cached and not force_refresh:
         return value
     value = None
     response = None
     try:
+        if cancel_event is not None and cancel_event.is_set():
+            return None
         parsed = urllib.parse.urlparse(raw_url)
         host = parsed.hostname or ''
         if not _web_visual_host_allowed(host):
@@ -7721,16 +9528,12 @@ def _web_visual_candidate_inline(row):
         headers = dict(HEADERS)
         headers['Accept'] = 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8'
         headers['Referer'] = f'{parsed.scheme}://{parsed.netloc}/'
-        response = requests.get(
+        response = _web_safe_get(
             raw_url,
             headers=headers,
             timeout=(0.65, WEB_VISUAL_CLASSIFIER_FETCH_TIMEOUT_SECONDS),
             stream=True,
-            allow_redirects=True,
         )
-        if not _web_visual_host_allowed(urllib.parse.urlparse(str(response.url or raw_url)).hostname or ''):
-            _web_visual_cache_set(cache_key, None)
-            return None
         content_type = (response.headers.get('content-type') or '').split(';', 1)[0].strip().lower()
         try:
             declared = int(response.headers.get('content-length') or 0)
@@ -7739,29 +9542,20 @@ def _web_visual_candidate_inline(row):
         if response.status_code >= 400 or not content_type.startswith('image/') or declared > WEB_VISUAL_CLASSIFIER_MAX_DOWNLOAD_BYTES:
             _web_visual_cache_set(cache_key, None)
             return None
-        chunks, total = ([], 0)
-        for chunk in response.iter_content(32768):
-            if not chunk:
-                continue
-            total += len(chunk)
-            if total > WEB_VISUAL_CLASSIFIER_MAX_DOWNLOAD_BYTES:
-                chunks = []
-                break
-            chunks.append(chunk)
-        if chunks:
-            value = _web_visual_inline_from_bytes(b''.join(chunks))
+        body = _web_read_limited_response(response, WEB_VISUAL_CLASSIFIER_MAX_DOWNLOAD_BYTES, cancel_event)
+        if body:
+            value = _web_visual_inline_from_bytes(body)
     except Exception:
         value = None
     finally:
         try:
-            if response is not None:
-                response.close()
+            _web_safe_response_close(response)
         except Exception:
             pass
     _web_visual_cache_set(cache_key, value)
     return value
 
-def _web_visual_collect_evidence(reference_image_b64, results):
+def _web_visual_collect_evidence(reference_image_b64, results, cancel_event=None):
     """Fetch card thumbnails concurrently under one strict aggregate deadline."""
     reference = _web_visual_reference_inline(reference_image_b64)
     if not reference:
@@ -7769,13 +9563,17 @@ def _web_visual_collect_evidence(reference_image_b64, results):
     evidence = {}
     jobs = {}
     for fallback_index, row in enumerate(list(results or [])[:WEB_VISUAL_CLASSIFIER_MAX_RESULTS]):
+        if cancel_event is not None and cancel_event.is_set():
+            break
         try:
             classification_id = int((row or {}).get('_classification_id', fallback_index))
         except Exception:
             classification_id = fallback_index
         if not _web_is_http_url(_web_unproxy_image_url(str((row or {}).get('image') or (row or {}).get('thumbnail') or ''))):
             continue
-        jobs[WEB_VISUAL_CLASSIFIER_POOL.submit(_web_visual_candidate_inline, row)] = classification_id
+        # A URL can change bytes while remaining identical. Always refresh in
+        # the background visual audit; the first streamed cards are unaffected.
+        jobs[WEB_VISUAL_CLASSIFIER_POOL.submit(_web_visual_candidate_inline, row, True, cancel_event)] = classification_id
     if jobs:
         done, pending = wait(set(jobs), timeout=WEB_VISUAL_CLASSIFIER_FETCH_TIMEOUT_SECONDS + 0.25)
         for future in done:
@@ -7817,7 +9615,850 @@ def _web_visual_item_axes(item):
                 axes[axis] = state
     return axes
 
-def _web_visual_exact_proof_failure(axes, visual_score):
+_WEB_VISUAL_PROFILE_TEXT_FIELDS = (
+    'category', 'subtype', 'object_family', 'product_type', 'intended_use', 'audience', 'function',
+    'product_role', 'mounting', 'installation', 'support_base',
+    'power_source', 'orientation', 'brand', 'product_name', 'model',
+    'variant', 'visible_text', 'structure', 'form_factor', 'material',
+    'silhouette', 'proportions', 'shape_geometry', 'texture', 'finish', 'pattern', 'size_class', 'dimensions',
+    'quantity_bundle', 'configuration', 'compatibility', 'condition',
+)
+_WEB_VISUAL_PROFILE_LIST_FIELDS = (
+    'components', 'colors', 'distinctive_features', 'identifiers',
+    'numbers_units', 'visible_markings',
+)
+
+def _web_visual_normalize_profile(value):
+    """Normalize the compact, domain-neutral product fingerprint from AI."""
+    raw = value if isinstance(value, dict) else {}
+    profile = {}
+    for key in _WEB_VISUAL_PROFILE_TEXT_FIELDS:
+        profile[key] = re.sub(r'\s+', ' ', str(raw.get(key) or '')).strip()[:180]
+    for key in _WEB_VISUAL_PROFILE_LIST_FIELDS:
+        values = raw.get(key) if isinstance(raw.get(key), list) else []
+        profile[key] = [
+            re.sub(r'\s+', ' ', str(item or '')).strip()[:120]
+            for item in values[:12]
+            if str(item or '').strip()
+        ]
+    return profile
+
+def _web_profile_code(value):
+    value = normalize_ar(_web_ascii_digits(str(value or '').strip().lower()))
+    value = re.sub(r'[^a-z0-9\u0600-\u06ff]+', '_', value).strip('_')
+    if value in ('', 'unknown', 'uncertain', 'unclear', 'not_visible', 'not_applicable', 'n_a'):
+        return ''
+    aliases = {
+        'pendant': 'suspended', 'pendant_light': 'suspended',
+        'hanging': 'suspended', 'hanging_light': 'suspended',
+        'ceiling_suspended': 'suspended', 'cord_hung': 'suspended',
+        'desk': 'tabletop', 'table': 'tabletop', 'table_lamp': 'tabletop',
+        'desk_lamp': 'tabletop', 'countertop': 'tabletop',
+        'floor': 'floorstanding', 'floor_lamp': 'floorstanding',
+        'wall': 'wall_mounted', 'wall_light': 'wall_mounted',
+        'wall_lamp': 'wall_mounted', 'sconce': 'wall_mounted',
+        'ceiling': 'ceiling_fixed', 'ceiling_mounted': 'ceiling_fixed',
+        'main': 'main_product', 'product': 'main_product',
+        'replacement': 'replacement_part', 'part': 'replacement_part',
+        'multi_pack': 'bundle', 'multipack': 'bundle', 'set': 'bundle',
+        'cord': 'cord_chain', 'chain': 'cord_chain',
+        'hanging_cord': 'cord_chain', 'hanging_chain': 'cord_chain',
+        'table_base': 'base', 'pedestal': 'base',
+    }
+    return aliases.get(value, value)
+
+def _web_profile_identity_tokens(value):
+    values = value if isinstance(value, list) else [value]
+    tokens = set()
+    for item in values:
+        compact = re.sub(r'[^a-z0-9]+', '', str(item or '').lower())
+        if compact and any(ch.isdigit() for ch in compact):
+            tokens.add(compact)
+    return tokens
+
+def _web_profile_typed_identity_tokens(value):
+    values = value if isinstance(value, list) else [value]
+    typed = {}
+    pattern = re.compile(
+        r'(?i)\b(gtin|ean|upc|isbn|mpn|model|sku|asin|part(?:\s+number|\s+no)?)\s*[:#-]?\s*([a-z0-9][a-z0-9._/-]{2,})'
+    )
+    for item in values:
+        raw_item = str(item or '')
+        found_typed = False
+        for kind, token in pattern.findall(raw_item):
+            found_typed = True
+            namespace = re.sub(r'[^a-z]+', '', kind.lower())
+            if namespace.startswith('part'):
+                namespace = 'mpn'
+            elif namespace in {'gtin', 'ean', 'upc'}:
+                namespace = 'barcode'
+            compact = re.sub(r'[^a-z0-9]+', '', token.lower())
+            if compact:
+                typed.setdefault(namespace, set()).add(compact)
+        # The model is instructed to put visible part/model codes in the
+        # identifiers array, but it may return the bare code (for example
+        # ``A1502``). Preserve that strong evidence instead of silently
+        # dropping it just because a SKU/MPN prefix was not visible.
+        if not found_typed:
+            compact = re.sub(r'[^a-z0-9]+', '', _web_ascii_digits(raw_item).lower())
+            if compact.isdigit() and len(compact) in {8, 12, 13, 14}:
+                typed.setdefault('barcode', set()).add(compact)
+            elif compact.isdigit() and 4 <= len(compact) <= 18:
+                # identifiers[] is already an identity-specific field. Keep
+                # bare ISBN-10, numeric MPN/model and serial-like codes here;
+                # ordinary capacities/specs belong in numbers_units instead.
+                typed.setdefault('raw_numeric', set()).add(compact)
+            elif (
+                len(compact) >= 3
+                and any(ch.isalpha() for ch in compact)
+                and any(ch.isdigit() for ch in compact)
+            ):
+                typed.setdefault('raw', set()).add(compact)
+    return typed
+
+_WEB_TITLE_MOUNTING_PATTERNS = (
+    ('suspended', re.compile(r'(?i)\b(?:pendant|hanging|suspension|drop)\s+(?:lamp|light|lighting|fixture)\b|\bchandelier\b')),
+    ('tabletop', re.compile(r'(?i)\b(?:table|desk|bedside|nightstand)\s+(?:lamp|light)\b')),
+    ('floorstanding', re.compile(r'(?i)\b(?:floor|standing|torchiere)\s+(?:lamp|light)\b')),
+    ('wall_mounted', re.compile(r'(?i)\b(?:wall\s+(?:lamp|light|fixture)|sconce)\b')),
+    ('ceiling_fixed', re.compile(r'(?i)\b(?:flush|semi[- ]flush|ceiling)\s+(?:mount|lamp|light|fixture)\b')),
+    ('wearable', re.compile(r'(?i)\b(?:wearable|wrist[- ]worn|body[- ]worn)\b')),
+    ('vehicle_mounted', re.compile(r'(?i)\b(?:vehicle|car|automotive)[- ]mounted\b')),
+)
+_WEB_TITLE_ROLE_PATTERNS = (
+    ('service', _WEB_NON_PRODUCT_OFFER_PATTERNS[0][1]),
+    ('empty_packaging', _WEB_NON_PRODUCT_OFFER_PATTERNS[1][1]),
+    ('gift_value', _WEB_NON_PRODUCT_OFFER_PATTERNS[2][1]),
+    ('coupon', _WEB_NON_PRODUCT_OFFER_PATTERNS[3][1]),
+    ('replacement_part', _WEB_COMPONENT_ONLY_RE),
+    ('replacement_part', re.compile(r'(?i)\b(?:replacement|spare)\s+(?:part|component|piece)\b|\b(?:part only|replacement only)\b')),
+    ('refill', re.compile(r'(?i)\b(?:refill|replenishment|cartridge only)\b')),
+    ('accessory', re.compile(r'(?i)\b(?:accessory|case|cover|strap|band|holder|mount|adapter|charger|cable)\s+(?:for|compatible with)\b|\b(?:accessory only|strap only|band only|case only)\b')),
+    ('bundle', re.compile(r'(?i)\b(?:bundle|multi[- ]?pack|\d+[- ]pack|set of \d+)\b')),
+)
+_WEB_NUMBER_UNIT_RE = re.compile(
+    r'(?i)\b\d+(?:[.,]\d+)?\s*(?:ml|cl|l|mg|g|kg|oz|lb|mm|cm|m|in|inch|ft|gb|tb|mah|wh|w|kw|v|hz|count|ct|pack|pcs?)\b'
+)
+
+_WEB_TITLE_MARKING_SKIP = {
+    'NEW', 'ORIGINAL', 'GENUINE', 'AUTHENTIC', 'SALE', 'DEAL', 'BEST', 'PRICE',
+    'BUY', 'SHOP', 'ONLINE', 'FREE', 'SHIPPING', 'DELIVERY', 'WITH', 'FOR',
+    'THE', 'AND', 'USB', 'LED', 'OLED', 'LCD', 'HD', 'FHD', 'QHD', 'UHD',
+    'WIFI', 'GPS', 'NFC', 'EDT', 'EDP', 'PARFUM', 'KWD', 'USD', 'CNY',
+    'ML', 'CL', 'L', 'MG', 'G', 'KG', 'OZ', 'LB', 'MM', 'CM', 'M', 'IN', 'FT',
+    'KB', 'MB', 'GB', 'TB', 'MAH', 'WH', 'W', 'KW', 'V', 'HZ', 'KHZ', 'MHZ', 'GHZ',
+}
+
+def _web_title_named_markers(text, profile):
+    """Extract label-like uppercase variant words without category rules."""
+    raw_tokens = {
+        token for token in re.findall(r'(?<![A-Za-z0-9])[A-Z][A-Z-]{1,24}(?![A-Za-z0-9])', str(text or ''))
+        if token not in _WEB_TITLE_MARKING_SKIP
+    }
+    known = _web_profile_words([
+        (profile or {}).get('brand'),
+        (profile or {}).get('product_name'),
+        (profile or {}).get('model'),
+    ])
+    return sorted(token.lower() for token in raw_tokens if token.lower() not in known)
+
+def _web_enrich_candidate_profile_from_text(profile, text):
+    """Enforce exact merchant-title facts over fallible AI profile guesses."""
+    profile = dict(profile or {})
+    text = re.sub(r'\s+', ' ', str(text or '')).strip()
+    title_evidence_axes = set(profile.get('_title_evidence_axes') or [])
+    for code, pattern in _WEB_TITLE_MOUNTING_PATTERNS:
+        if pattern.search(text):
+            profile['mounting'] = code
+            title_evidence_axes.add('mounting')
+            break
+    for code, pattern in _WEB_TITLE_ROLE_PATTERNS:
+        if pattern.search(text):
+            profile['product_role'] = code
+            title_evidence_axes.add('product_role')
+            break
+    models = sorted(_web_model_tokens_from_listing(text))[:10]
+    if models:
+        profile['model'] = ' '.join(models)
+        title_evidence_axes.add('model')
+    normalized_measure_text = _web_ascii_digits(text)
+    title_measures = [
+        re.sub(r'\s+', ' ', match.group(0)).strip()
+        for match in _WEB_IDENTITY_MEASURE_RE.finditer(normalized_measure_text)
+        if _web_identity_measure_match_allowed(normalized_measure_text, match)
+    ][:12]
+    if title_measures:
+        profile['numbers_units'] = title_measures
+        title_evidence_axes.add('dimensions')
+    product_form = _web_first_named_pattern(text, _WEB_PRODUCT_FORM_PATTERNS)
+    if product_form:
+        profile['form_factor'] = product_form
+        title_evidence_axes.add('form_factor')
+    audience = _web_first_named_pattern(text, _WEB_AUDIENCE_PATTERNS)
+    if audience:
+        profile['audience'] = audience
+        title_evidence_axes.add('audience')
+    product_kind = _web_first_named_pattern(text, _WEB_PRODUCT_KIND_PATTERNS)
+    if product_kind:
+        profile['product_type'] = product_kind
+        title_evidence_axes.add('subtype')
+    labeled_variants = _web_labeled_variants(text)
+    if labeled_variants:
+        profile['variant'] = ' '.join(
+            value for _, value in sorted(labeled_variants.items())
+        )
+        title_evidence_axes.add('variant')
+    condition = _web_first_named_pattern(text, _WEB_PRODUCT_CONDITION_PATTERNS)
+    if condition:
+        profile['condition'] = condition
+        title_evidence_axes.add('condition')
+    edition = _web_first_named_pattern(text, _WEB_PRODUCT_EDITION_PATTERNS)
+    if edition:
+        profile['configuration'] = edition
+        title_evidence_axes.add('configuration')
+    pack_count = _web_pack_count(_web_ascii_digits(text))
+    if pack_count is not None:
+        profile['quantity_bundle'] = f'{pack_count}-pack'
+        title_evidence_axes.add('quantity_bundle')
+    else:
+        for fact in _web_identity_measure_facts(text):
+            if fact.get('explicit_count') is not None:
+                profile['quantity_bundle'] = f'{fact["explicit_count"]}-pack'
+                title_evidence_axes.add('quantity_bundle')
+                break
+    facts = _web_identity_measure_facts(text)
+    if facts:
+        profile['dimensions'] = ' | '.join(
+            f'{fact["count"]}x{fact["each"]:g} {fact["dimension"]}'
+            for fact in facts[:12]
+        )
+        title_evidence_axes.add('dimensions')
+    compatibility = re.search(
+        r'(?i)\b(?:compatible\s+with|fits?|made\s+for)\s+([^|,;]{3,100})', text,
+    )
+    if compatibility:
+        profile['compatibility'] = compatibility.group(1).strip(' -')
+        title_evidence_axes.add('compatibility')
+    title_identifiers = []
+    for match in _WEB_TYPED_LISTING_CODE_RE.finditer(text):
+        prefix = re.match(r'(?i)\s*(model|mpn|sku|asin|part(?:\s+number|\s+no)?)', match.group(0))
+        label = prefix.group(1) if prefix else 'model'
+        title_identifiers.append(f'{label}: {match.group(1)}')
+    if title_identifiers:
+        profile['identifiers'] = title_identifiers[:12]
+        title_evidence_axes.add('alphanumeric_identity')
+    named_markers = _web_title_named_markers(text, profile)
+    if named_markers:
+        profile['variant'] = ' '.join(named_markers)
+        title_evidence_axes.add('variant')
+    profile['_title_evidence_axes'] = sorted(title_evidence_axes)
+    return profile
+
+_WEB_PROFILE_DESCRIPTOR_TOKENS = {
+    'product', 'item', 'object', 'type', 'kind', 'use', 'used', 'provide', 'provides',
+    'variant', 'scent', 'flavour', 'flavor', 'shade', 'colour', 'color', 'edition',
+    'style', 'model', 'series', 'version', 'hold', 'holds', 'holding',
+    'منتج', 'غرض', 'نوع', 'استخدام', 'نسخه', 'نسخة', 'اصدار', 'إصدار', 'لون', 'رائحه', 'رائحة',
+}
+
+def _web_profile_flat_value(value):
+    values = value if isinstance(value, list) else [value]
+    return ' '.join(re.sub(r'\s+', ' ', str(item or '')).strip() for item in values if str(item or '').strip()).strip()
+
+def _web_profile_words(value):
+    return {
+        token.lower() for token in _findzia_lexical_tokens(_web_profile_flat_value(value))
+        if token.lower() not in _WEB_PROFILE_DESCRIPTOR_TOKENS
+    }
+
+def _web_profile_qualifier_conflict(reference_words, candidate_words):
+    reference_words = set(reference_words or ())
+    candidate_words = set(candidate_words or ())
+    for group in _WEB_TIER_GROUPS:
+        reference_tier = reference_words & group
+        candidate_tier = candidate_words & group
+        if reference_tier != candidate_tier and (reference_tier or candidate_tier):
+            return True
+    return False
+
+def _web_profile_scalar_state(reference_value, candidate_value, *, loose=False):
+    reference_text = _web_profile_flat_value(reference_value)
+    candidate_text = _web_profile_flat_value(candidate_value)
+    if not _web_profile_code(reference_text):
+        return None
+    if not _web_profile_code(candidate_text):
+        return 'unknown'
+    if _web_profile_code(reference_text) == _web_profile_code(candidate_text):
+        return 'same'
+    reference_words = _web_profile_words(reference_text)
+    candidate_words = _web_profile_words(candidate_text)
+    if reference_words and candidate_words:
+        if _web_profile_qualifier_conflict(reference_words, candidate_words):
+            return 'different'
+        if reference_words == candidate_words:
+            return 'same'
+        overlap = reference_words & candidate_words
+        if loose and overlap:
+            reference_coverage = len(overlap) / len(reference_words)
+            candidate_coverage = len(overlap) / len(candidate_words)
+            # A generic shared word ("Labs", "Zero", "lamp", "Elixir")
+            # is not identity evidence. Partial overlap remains unknown so it
+            # can never turn an AI-unknown axis into Exact proof.
+            if reference_coverage >= 0.80 and candidate_coverage >= 0.80:
+                return 'same'
+            return 'unknown'
+    return 'different'
+
+def _web_profile_evidence_text(profile, *extra):
+    profile = profile or {}
+    values = [
+        profile.get('variant'), profile.get('model'), profile.get('dimensions'),
+        profile.get('size_class'), profile.get('quantity_bundle'),
+        profile.get('configuration'), profile.get('compatibility'),
+        profile.get('visible_text'), profile.get('numbers_units'),
+        profile.get('visible_markings'), profile.get('identifiers'),
+    ]
+    values.extend(extra)
+    return ' | '.join(_web_profile_flat_value(value) for value in values if _web_profile_flat_value(value))
+
+def _web_profile_explicit_quantity(profile):
+    profile = profile or {}
+    quantity_text = _web_profile_flat_value(profile.get('quantity_bundle'))
+    explicit = _web_pack_count(_web_ascii_digits(quantity_text)) if quantity_text else None
+    if explicit is not None:
+        return explicit
+    facts_text = ' '.join((
+        _web_profile_flat_value(profile.get('numbers_units')),
+        _web_profile_flat_value(profile.get('dimensions')),
+    ))
+    for fact in _web_identity_measure_facts(facts_text):
+        if fact.get('explicit_count') is not None:
+            return int(fact['explicit_count'])
+    return None
+
+def _web_compatibility_state(reference_value, candidate_value):
+    reference_text = _web_profile_flat_value(reference_value)
+    candidate_text = _web_profile_flat_value(candidate_value)
+    if not _web_profile_code(reference_text):
+        return None
+    if not _web_profile_code(candidate_text):
+        return 'unknown'
+
+    def compatible_text(value):
+        normalized = re.sub(r'(?i)play\s*station', 'ps', _web_ascii_digits(value))
+        return re.sub(r'[^a-z0-9\u0600-\u06ff]+', '', normalized.lower())
+
+    reference_words = _web_profile_words(reference_text)
+    candidate_words = _web_profile_words(candidate_text)
+    reference_compact = compatible_text(reference_text)
+    candidate_compact = compatible_text(candidate_text)
+    candidate_segments = [
+        segment.strip() for segment in re.split(r'(?i)\s*(?:/|,|;|\bor\b|\band\b)\s*', candidate_text)
+        if segment.strip()
+    ]
+    if reference_compact and reference_compact == candidate_compact:
+        return 'same'
+    for segment in candidate_segments:
+        segment_compact = compatible_text(segment)
+        segment_words = _web_profile_words(segment)
+        if reference_compact and segment_compact == reference_compact:
+            return 'same'
+        if len(candidate_segments) > 1:
+            if _web_profile_qualifier_conflict(reference_words, segment_words):
+                continue
+            reference_numbers = _web_classification_numbers(reference_text)
+            segment_numbers = _web_classification_numbers(segment)
+            # A list segment must contain the complete requested family,
+            # generation and qualifier set. One shared token/number cannot
+            # make iPhone 15 SE equal iPhone 15, or Pixel Fold equal Pixel.
+            if (
+                reference_words
+                and reference_words <= segment_words
+                and (not reference_numbers or reference_numbers <= segment_numbers)
+            ):
+                return 'same'
+    if len(candidate_segments) > 1:
+        return 'different'
+    if reference_words and reference_words <= candidate_words:
+        if _web_profile_qualifier_conflict(reference_words, candidate_words):
+            return 'different'
+        return 'same'
+    reference_models = _web_profile_identity_tokens(reference_text)
+    candidate_models = _web_profile_identity_tokens(candidate_text)
+    if reference_models and candidate_models:
+        return 'same' if reference_models & candidate_models else 'different'
+    return 'unknown'
+
+def _web_profile_model_state(reference_value, candidate_value):
+    reference_text = _web_profile_flat_value(reference_value)
+    candidate_text = _web_profile_flat_value(candidate_value)
+    if not _web_profile_code(reference_text):
+        return None
+    if not _web_profile_code(candidate_text):
+        return 'unknown'
+    if _web_profile_code(reference_text) == _web_profile_code(candidate_text):
+        return 'same'
+    reference_words = _web_profile_words(reference_text)
+    candidate_words = _web_profile_words(candidate_text)
+    if _web_profile_qualifier_conflict(reference_words, candidate_words):
+        return 'different'
+    reference_models = _web_profile_identity_tokens(reference_text)
+    candidate_models = _web_profile_identity_tokens(candidate_text)
+    reference_family = reference_words - reference_models
+    candidate_family = candidate_words - candidate_models
+    if (
+        reference_family and candidate_family
+        and not reference_family & candidate_family
+    ):
+        # A shared generation/code cannot merge conflicting product families,
+        # including Arabic names such as جالاكسي 24 and ايفون 24.
+        return 'different'
+    if reference_models or candidate_models:
+        if reference_models and candidate_models:
+            return 'same' if reference_models & candidate_models else 'different'
+        # A generation/part token present on only one side is not the same
+        # proven model, even when the family words match.
+        return 'different'
+    overlap = reference_words & candidate_words
+    if reference_words and reference_words == candidate_words:
+        return 'same'
+    # A family word is not the full model: Galaxy is not Galaxy Fold and
+    # Pixel is not Pixel Fold. Partial overlap remains unproven.
+    return 'unknown' if overlap else 'different'
+
+def _web_visual_profile_states(reference_profile, candidate_profile):
+    """Validate AI profiles as same/different/unknown using generic product facts."""
+    reference_profile = reference_profile or {}
+    candidate_profile = candidate_profile or {}
+    states = {}
+
+    for field, axis, loose in (
+        ('category', 'category', True),
+        ('object_family', 'category', True),
+        ('subtype', 'subtype', True),
+        ('product_type', 'subtype', True),
+        ('intended_use', 'intended_use', True),
+        ('audience', 'audience', False),
+        ('function', 'function', False),
+        ('mounting', 'mounting', False),
+        ('installation', 'installation', False),
+        ('support_base', 'support_base', False),
+        ('power_source', 'power_source', False),
+        ('orientation', 'orientation', False),
+        ('brand', 'brand', False),
+        ('product_name', 'product_name', False),
+        ('variant', 'variant', False),
+        ('structure', 'structure', False),
+        ('form_factor', 'form_factor', False),
+        ('silhouette', 'silhouette', False),
+        ('proportions', 'proportions', False),
+        ('shape_geometry', 'shape_geometry', False),
+        ('material', 'material', False),
+        ('texture', 'texture', False),
+        ('finish', 'finish', False),
+        ('pattern', 'pattern', False),
+        ('size_class', 'size_class', False),
+        ('configuration', 'configuration', False),
+        ('condition', 'condition', False),
+    ):
+        state = _web_profile_scalar_state(
+            reference_profile.get(field), candidate_profile.get(field), loose=loose,
+        )
+        if state is None and _web_profile_code(candidate_profile.get(field)) and field in {
+            'subtype', 'product_type', 'function', 'mounting', 'installation', 'support_base', 'power_source',
+            'brand', 'product_name', 'variant', 'audience', 'form_factor', 'configuration',
+            'compatibility', 'condition',
+        }:
+            # A candidate-only sellable fact is not proof of equality. For
+            # Exact classification we fail closed; the card remains visible
+            # in Similar with a capped percentage.
+            state = 'different'
+        if state:
+            # Two profile fields can map to the same axis. A contradiction
+            # always wins, then same, then unknown.
+            previous = states.get(axis)
+            if state == 'different' or previous is None or (state == 'same' and previous == 'unknown'):
+                states[axis] = state
+
+    role_state = _web_profile_scalar_state(
+        reference_profile.get('product_role'), candidate_profile.get('product_role'), loose=False,
+    )
+    if role_state is None and _web_profile_code(candidate_profile.get('product_role')):
+        role_state = 'different'
+    if role_state:
+        reference_role = _web_profile_code(reference_profile.get('product_role'))
+        candidate_role = _web_profile_code(candidate_profile.get('product_role'))
+        if role_state == 'different' and {reference_role, candidate_role} <= {'main_product', 'bundle'}:
+            states['quantity_bundle'] = 'different'
+        else:
+            states['product_role'] = role_state
+
+    for field, axis in (
+        ('colors', 'color'),
+        ('components', 'components'),
+        ('material', 'material'),
+        ('finish', 'finish'),
+        ('pattern', 'pattern'),
+    ):
+        reference_values = _web_profile_words(reference_profile.get(field))
+        candidate_values = _web_profile_words(candidate_profile.get(field))
+        if not reference_values:
+            continue
+        if not candidate_values:
+            states[axis] = 'unknown'
+            continue
+        overlap = reference_values & candidate_values
+        reference_coverage = len(overlap) / max(1, len(reference_values))
+        candidate_coverage = len(overlap) / max(1, len(candidate_values))
+        previous = states.get(axis)
+        if reference_values == candidate_values:
+            list_state = 'same'
+        elif field == 'components':
+            # An extra charger, pouch, shade, leg, cartridge, etc. changes
+            # what is being bought. Partial component overlap is insufficient
+            # proof, even when every reference component is present.
+            list_state = 'unknown' if overlap else 'different'
+        else:
+            # Exact identity requires equal sets. Partial color/material/
+            # finish/pattern overlap can support Similar, never erase a
+            # scalar conflict or prove Exact.
+            list_state = 'unknown' if overlap else 'different'
+        if previous == 'different' or list_state == 'different':
+            states[axis] = 'different'
+        elif previous is None or (previous == 'unknown' and list_state == 'same'):
+            states[axis] = list_state
+
+    feature_state = _web_profile_scalar_state(
+        reference_profile.get('distinctive_features'),
+        candidate_profile.get('distinctive_features'),
+        loose=False,
+    )
+    if feature_state:
+        states['distinctive_features'] = feature_state
+
+    for field, axis in (('visible_text', 'text_identity'), ('visible_markings', 'visible_markings')):
+        reference_text = _web_profile_flat_value(reference_profile.get(field))
+        candidate_text = _web_profile_flat_value(candidate_profile.get(field))
+        if not _web_profile_code(reference_text):
+            continue
+        if not _web_profile_code(candidate_text):
+            states[axis] = 'unknown'
+            continue
+        reference_words = _web_profile_words(reference_text)
+        candidate_words = _web_profile_words(candidate_text)
+        overlap = reference_words & candidate_words
+        reference_coverage = len(overlap) / max(1, len(reference_words))
+        candidate_coverage = len(overlap) / max(1, len(candidate_words))
+        # One changed word can be the sellable variant (SALT vs TONKA) even
+        # inside a long label. Partial overlap is evidence for Similar only;
+        # only an equal normalized set proves the text identity.
+        states[axis] = (
+            'same' if reference_words == candidate_words
+            else ('unknown' if overlap else 'different')
+        )
+
+    model_state = _web_profile_model_state(
+        reference_profile.get('model'), candidate_profile.get('model'),
+    )
+    if model_state is None and _web_profile_code(candidate_profile.get('model')):
+        model_state = 'different'
+    if model_state:
+        states['model'] = model_state
+
+    reference_ids = _web_profile_typed_identity_tokens(reference_profile.get('identifiers'))
+    candidate_ids = _web_profile_typed_identity_tokens(candidate_profile.get('identifiers'))
+    if reference_ids:
+        reference_all_ids = set().union(*reference_ids.values()) if reference_ids else set()
+        candidate_all_ids = set().union(*candidate_ids.values()) if candidate_ids else set()
+        shared_namespaces = set(reference_ids) & set(candidate_ids)
+        namespace_conflict = any(
+            reference_ids[namespace] != candidate_ids[namespace]
+            for namespace in shared_namespaces
+        )
+        if namespace_conflict:
+            # A matching SKU cannot erase a conflicting EAN/UPC/MPN.
+            states['alphanumeric_identity'] = 'different'
+        elif not candidate_ids:
+            states['alphanumeric_identity'] = 'unknown'
+        elif not shared_namespaces:
+            states['alphanumeric_identity'] = (
+                'different' if 'raw' in reference_ids or 'raw' in candidate_ids else 'unknown'
+            )
+        else:
+            # A token collision across SKU/model/barcode namespaces is not
+            # identity proof. Within a shared namespace, the complete sets
+            # must agree; supersets can contain a second conflicting model.
+            states['alphanumeric_identity'] = 'same'
+    elif candidate_ids:
+        states['alphanumeric_identity'] = 'different'
+
+    reference_facts = _web_profile_evidence_text(reference_profile)
+    candidate_facts = _web_profile_evidence_text(candidate_profile)
+    reference_measures = _web_identity_measure_facts(reference_facts)
+    candidate_measures = _web_identity_measure_facts(candidate_facts)
+    if reference_measures:
+        if not candidate_measures:
+            states['dimensions'] = 'unknown'
+        elif any(
+            conflict != 'quantity_bundle'
+            for conflict in _web_identity_fact_conflicts(reference_facts, candidate_facts)
+        ):
+            states['dimensions'] = 'different'
+        elif (
+            {fact['dimension'] for fact in reference_measures}
+            & {fact['dimension'] for fact in candidate_measures}
+        ):
+            states['dimensions'] = 'same'
+    elif candidate_measures:
+        states['dimensions'] = 'different'
+
+    reference_quantity = _web_profile_explicit_quantity(reference_profile)
+    candidate_quantity = _web_profile_explicit_quantity(candidate_profile)
+    if reference_quantity is not None:
+        quantity_state = (
+            'unknown' if candidate_quantity is None
+            else ('same' if reference_quantity == candidate_quantity else 'different')
+        )
+        if states.get('quantity_bundle') != 'different' or quantity_state == 'different':
+            states['quantity_bundle'] = quantity_state
+    elif candidate_quantity is not None:
+        states['quantity_bundle'] = 'different'
+
+    compatibility_state = _web_compatibility_state(
+        reference_profile.get('compatibility'), candidate_profile.get('compatibility'),
+    )
+    if compatibility_state:
+        states['compatibility'] = compatibility_state
+    elif _web_profile_code(candidate_profile.get('compatibility')):
+        states['compatibility'] = 'different'
+
+    # Merchant-title facts are independent evidence, not optional AI prose.
+    # If the reference provides no matching sellable fact, that axis is not
+    # eligible for Exact. Cross-check model codes against reference identifiers
+    # too so a copied AI SKU cannot conceal a different title model.
+    title_axes = set(candidate_profile.get('_title_evidence_axes') or [])
+    if 'model' in title_axes or 'alphanumeric_identity' in title_axes:
+        reference_codes = _web_profile_identity_tokens(reference_profile.get('model'))
+        for values in _web_profile_typed_identity_tokens(reference_profile.get('identifiers')).values():
+            reference_codes.update(values)
+        title_model_codes = (
+            _web_profile_identity_tokens(candidate_profile.get('model'))
+            if 'model' in title_axes else set()
+        )
+        title_identifier_codes = set()
+        if 'alphanumeric_identity' in title_axes:
+            for values in _web_profile_typed_identity_tokens(candidate_profile.get('identifiers')).values():
+                title_identifier_codes.update(values)
+        authoritative_candidate_codes = title_model_codes | title_identifier_codes
+        if authoritative_candidate_codes and (
+            not reference_codes or not authoritative_candidate_codes <= reference_codes
+        ):
+            states['model'] = 'different'
+            states['alphanumeric_identity'] = 'different'
+    if 'quantity_bundle' in title_axes and reference_quantity is None:
+        states['quantity_bundle'] = 'different'
+    if 'dimensions' in title_axes and not reference_measures:
+        states['dimensions'] = 'different'
+    for axis, reference_field in (
+        ('condition', 'condition'),
+        ('configuration', 'configuration'),
+        ('compatibility', 'compatibility'),
+        ('audience', 'audience'),
+        ('mounting', 'mounting'),
+        ('product_role', 'product_role'),
+        ('form_factor', 'form_factor'),
+    ):
+        if axis in title_axes and not _web_profile_code(reference_profile.get(reference_field)):
+            states[axis] = 'different'
+    if 'variant' in title_axes:
+        reference_variant_words = _web_profile_words([
+            reference_profile.get('variant'),
+            reference_profile.get('colors'),
+            reference_profile.get('visible_text'),
+            reference_profile.get('visible_markings'),
+        ])
+        candidate_variant_words = _web_profile_words(candidate_profile.get('variant'))
+        if candidate_variant_words and (
+            not reference_variant_words
+            or not candidate_variant_words <= reference_variant_words
+        ):
+            states['variant'] = 'different'
+    return states
+
+def _web_visual_profile_conflicts(reference_profile, candidate_profile):
+    """Compatibility wrapper used by tests and score diagnostics."""
+    return [
+        axis for axis, state in _web_visual_profile_states(reference_profile, candidate_profile).items()
+        if state == 'different'
+    ]
+
+def _web_match_guard_percentage(match_guard):
+    if not match_guard:
+        return None
+    if str(match_guard[0] or '').lower() == 'exact':
+        return 96
+    reason = str(match_guard[1] or '').lower()
+    if any(token in reason for token in (
+        'category', 'function', 'accessory', 'component', 'replacement',
+        'membership', 'subscription', 'wrong_product', 'product_type',
+        'mounting', 'topology', 'non_product', 'service',
+    )):
+        return 20
+    if 'audience' in reason:
+        return 42
+    if any(token in reason for token in ('model', 'generation', 'compatibility')):
+        return 38
+    if any(token in reason for token in ('variant', 'named_family', 'size', 'quantity', 'bundle')):
+        return 72
+    return 55
+
+def _web_match_score_metadata(
+    *, is_exact, ai_item, match_guard, heuristic_exact, visual_review,
+    visual_exact_unproven, use_ai_match, use_structured_match, confidence,
+):
+    """Calibrate same-buyable-product probability without delaying results."""
+    ai_item = ai_item or {}
+    axes = dict(ai_item.get('visual_axes') or {})
+    matched = [axis for axis in _WEB_VISUAL_AXES if axes.get(axis) == 'same']
+    conflicts = [axis for axis in _WEB_VISUAL_AXES if axes.get(axis) == 'different']
+    unknown = [axis for axis in _WEB_VISUAL_AXES if axes.get(axis) == 'unknown']
+
+    raw_score = ai_item.get('model_match_score')
+    if raw_score is None:
+        raw_score = ai_item.get('visual_score')
+    try:
+        raw_score = max(0, min(100, int(round(float(raw_score)))))
+    except Exception:
+        raw_score = None
+
+    if use_ai_match and raw_score is not None:
+        percentage = raw_score
+        source = 'visual_ai' if ai_item.get('visual_evidence') else 'reference_text_ai'
+        final = bool(ai_item.get('visual_evidence') or not visual_review)
+    elif use_structured_match:
+        percentage = _web_match_guard_percentage(match_guard)
+        source = 'fingerprint'
+        final = _web_match_guard_is_anchor_independent(match_guard) or not visual_review
+    else:
+        percentage = 86 if heuristic_exact else 58
+        source = 'provisional_visual' if visual_review else 'rules'
+        final = not visual_review
+
+    if percentage is None:
+        percentage = 58
+    if visual_exact_unproven:
+        percentage = min(89, percentage)
+        final = bool(use_ai_match and str(ai_item.get('match') or '') == 'similar')
+
+    known_count = len(matched) + len(conflicts)
+    trusted_identifier = bool(
+        {'model', 'alphanumeric_identity'} & set(matched)
+        and not ({'model', 'alphanumeric_identity'} & set(conflicts))
+    )
+    # A high model number with little supporting evidence is not a high
+    # probability. This is a score calibration only; it performs no I/O.
+    if use_ai_match and not trusted_identifier:
+        if known_count < 6:
+            percentage = min(percentage, 69)
+        elif known_count < 10:
+            percentage = min(percentage, 84)
+        elif known_count < 12:
+            percentage = min(percentage, 91)
+    for axis in conflicts:
+        percentage = min(percentage, _WEB_MATCH_SCORE_AXIS_CAPS.get(axis, 88))
+
+    if visual_review:
+        exact_evidence_ready = bool(
+            use_ai_match
+            and bool(ai_item.get('visual_evidence'))
+            and known_count >= 12
+            and raw_score is not None
+            and raw_score >= WEB_VISUAL_CLASSIFIER_EXACT_SCORE
+        )
+    else:
+        exact_evidence_ready = bool(
+            (use_structured_match and match_guard and str(match_guard[0]).lower() == 'exact')
+            or heuristic_exact
+            or (
+                use_ai_match
+                and raw_score is not None
+                and raw_score >= WEB_VISUAL_CLASSIFIER_EXACT_SCORE
+                and (trusted_identifier or known_count >= 12)
+            )
+        )
+    effective_exact = bool(is_exact and not conflicts and exact_evidence_ready)
+    if effective_exact:
+        percentage = max(WEB_VISUAL_CLASSIFIER_EXACT_SCORE, percentage)
+    else:
+        percentage = min(WEB_VISUAL_CLASSIFIER_EXACT_SCORE - 1, percentage)
+    percentage = max(0, min(100, int(percentage)))
+
+    evidence_coverage = int(round(known_count * 100 / max(1, len(_WEB_VISUAL_AXES))))
+    if percentage >= WEB_VISUAL_CLASSIFIER_EXACT_SCORE:
+        band = 'exact'
+    elif percentage >= 75:
+        band = 'probable'
+    elif percentage >= 40:
+        band = 'similar'
+    else:
+        band = 'low'
+    return {
+        'match_percentage': percentage,
+        'match_percentage_final': bool(final),
+        'match_percentage_source': source,
+        'match_band': band,
+        'match_score_confidence': max(0, min(100, int(
+            (match_guard[2] if use_structured_match and match_guard else confidence) or 0
+        ))),
+        'match_evidence_coverage': evidence_coverage,
+        'matched_attributes': matched,
+        'conflicts': conflicts,
+        'unknown_attributes': unknown,
+        'match_score_version': _WEB_MATCH_SCORE_VERSION,
+    }
+
+def _web_fail_closed_visual_row(row, reason='visual_verification_pending'):
+    """Keep a streamed image card visible without ever implying Exact proof."""
+    safe = dict(row or {})
+    safe['match_type'] = 'similar'
+    safe['result_section'] = 'similar'
+    safe['match'] = 'similar'
+    safe['section'] = 'similar'
+    safe['exact'] = False
+    safe['is_exact'] = False
+    safe['best_price_eligible'] = False
+    safe['price_comparable'] = False
+    safe['visual_exact_required'] = True
+    safe['classification_source'] = 'visual_pending'
+    safe['classification_reason'] = str(reason or 'visual_verification_pending')
+    safe['classification_confidence'] = None
+    try:
+        percentage = int(round(float(safe.get('match_percentage'))))
+    except Exception:
+        try:
+            percentage = int(round(float(safe.get('visual_score'))))
+        except Exception:
+            percentage = 58
+    percentage = max(0, min(WEB_VISUAL_CLASSIFIER_EXACT_SCORE - 1, percentage))
+    safe['match_percentage'] = percentage
+    safe['match_percentage_final'] = False
+    safe['match_percentage_source'] = 'provisional_visual'
+    safe['match_band'] = 'probable' if percentage >= 75 else ('similar' if percentage >= 40 else 'low')
+    safe.setdefault('match_score_confidence', 0)
+    safe.setdefault('match_evidence_coverage', 0)
+    safe.setdefault('matched_attributes', [])
+    safe.setdefault('conflicts', [])
+    safe.setdefault('unknown_attributes', list(_WEB_VISUAL_AXES))
+    safe['match_score_version'] = _WEB_MATCH_SCORE_VERSION
+    try:
+        rank = int(safe.get('market_rank', 99))
+    except Exception:
+        rank = 99
+    if str(safe.get('market_scope') or '').lower() not in ('local', 'global'):
+        safe['market_scope'] = 'local' if rank == 0 else 'global'
+    return safe
+
+def _web_visual_exact_proof_failure(axes, visual_score, reference_profile=None):
     """Return the universal proof failure that prevents an image Exact label."""
     different_axes = [
         axis for axis, value in (axes or {}).items()
@@ -7830,12 +10471,59 @@ def _web_visual_exact_proof_failure(axes, visual_score):
     same_axes = {axis for axis, value in (axes or {}).items() if value == 'same'}
     if 'category' not in same_axes:
         return ('visual_category_not_proven', different_axes)
-    if not (same_axes & _WEB_VISUAL_USE_PROOF_AXES):
+    if not (same_axes & _WEB_VISUAL_FUNCTION_PROOF_AXES):
         return ('visual_function_not_proven', different_axes)
-    if len(same_axes & _WEB_VISUAL_PHYSICAL_PROOF_AXES) < 3:
+    if not (same_axes & _WEB_VISUAL_TOPOLOGY_PROOF_AXES):
+        return ('visual_topology_not_proven', different_axes)
+    if len(same_axes & _WEB_VISUAL_PHYSICAL_PROOF_AXES) < 4:
         return ('visual_physical_identity_not_proven', different_axes)
-    if len(same_axes) < 8:
+    if len(same_axes) < 12:
         return ('visual_identity_axes_not_proven', different_axes)
+    reference_profile = reference_profile or {}
+    required_profile_proofs = (
+        (('subtype', 'product_type'), {'subtype'}, 'visual_subtype_not_proven'),
+        (('intended_use',), {'intended_use'}, 'visual_use_not_proven'),
+        (('audience',), {'audience'}, 'visual_audience_not_proven'),
+        (('function',), {'function'}, 'visual_function_not_proven'),
+        (('product_role',), {'product_role'}, 'visual_product_role_not_proven'),
+        (('mounting',), {'mounting'}, 'visual_mounting_not_proven'),
+        (('installation',), {'installation'}, 'visual_installation_not_proven'),
+        (('support_base',), {'support_base'}, 'visual_support_not_proven'),
+        (('power_source',), {'power_source'}, 'visual_power_source_not_proven'),
+        (('orientation',), {'orientation'}, 'visual_orientation_not_proven'),
+        (('brand',), {'brand'}, 'visual_brand_not_proven'),
+        (('product_name',), {'product_name'}, 'visual_product_name_not_proven'),
+        (('model',), {'model'}, 'visual_model_not_proven'),
+        (('identifiers',), {'alphanumeric_identity'}, 'visual_identifier_not_proven'),
+        (('variant',), {'variant'}, 'visual_variant_not_proven'),
+        (('visible_text',), {'text_identity'}, 'visual_text_not_proven'),
+        (('visible_markings',), {'visible_markings'}, 'visual_markings_not_proven'),
+        (('structure',), {'structure'}, 'visual_structure_not_proven'),
+        (('components',), {'components'}, 'visual_components_not_proven'),
+        (('form_factor',), {'form_factor'}, 'visual_form_not_proven'),
+        (('silhouette',), {'silhouette'}, 'visual_silhouette_not_proven'),
+        (('proportions',), {'proportions'}, 'visual_proportions_not_proven'),
+        (('shape_geometry',), {'shape_geometry'}, 'visual_geometry_not_proven'),
+        (('material',), {'material'}, 'visual_material_not_proven'),
+        (('texture',), {'texture'}, 'visual_texture_not_proven'),
+        (('finish',), {'finish'}, 'visual_finish_not_proven'),
+        (('colors',), {'color'}, 'visual_color_not_proven'),
+        (('pattern',), {'pattern'}, 'visual_pattern_not_proven'),
+        (('distinctive_features',), {'distinctive_features'}, 'visual_features_not_proven'),
+        (('numbers_units', 'dimensions'), {'dimensions'}, 'visual_dimensions_not_proven'),
+        (('size_class',), {'size_class'}, 'visual_size_class_not_proven'),
+        (('quantity_bundle',), {'quantity_bundle'}, 'visual_quantity_not_proven'),
+        (('configuration',), {'configuration'}, 'visual_configuration_not_proven'),
+        (('compatibility',), {'compatibility'}, 'visual_compatibility_not_proven'),
+        (('condition',), {'condition'}, 'visual_condition_not_proven'),
+    )
+    for profile_fields, proof_axes, reason in required_profile_proofs:
+        has_reference_fact = any(
+            _web_profile_code(_web_profile_flat_value(reference_profile.get(field)))
+            for field in profile_fields
+        )
+        if has_reference_fact and not (proof_axes & same_axes):
+            return (reason, different_axes)
     return ('', different_axes)
 
 def _web_ai_classifier_db_init():
@@ -7869,7 +10557,7 @@ def _web_ai_classifier_cache_key(identity, results, market, visual_context=None)
             'locked_market': (row or {}).get('_locked_market'),
         })
     material = {
-        'v': 6,
+        'v': 17,
         'country': str((market or {}).get('country') or DEFAULT_COUNTRY).lower(),
         'identity': _web_clean_classification_identity(identity).lower(),
         'source_identity': _web_clean_classification_identity((visual_context or {}).get('source_identity')).lower(),
@@ -7912,7 +10600,7 @@ def _web_ai_classifier_cache_put(key, value, ttl_seconds=None):
     except Exception as e:
         print(f'WEB AI CLASSIFIER CACHE PUT ERR: {e}')
 
-def _web_ai_classifier_request(identity, results, market, visual_context=None):
+def _web_ai_classifier_request(identity, results, market, visual_context=None, cancel_event=None):
     """Classify one captured batch with one text or multimodal Gemini request."""
     country = str((market or {}).get('country') or DEFAULT_COUNTRY).lower()
     country_name = str((market or {}).get('country_name') or COUNTRY_NAMES.get(country, country.upper()))
@@ -7940,12 +10628,18 @@ def _web_ai_classifier_request(identity, results, market, visual_context=None):
     if not candidates:
         return {}
     reference_inline, visual_evidence = (None, {})
+    if cancel_event is not None and cancel_event.is_set():
+        return {}
     if visual_context and WEB_VISUAL_CLASSIFIER_ENABLED:
         reference_inline, visual_evidence = _web_visual_collect_evidence(
             (visual_context or {}).get('image_b64'),
             results,
+            cancel_event,
         )
-    visual_mode = bool(reference_inline and visual_evidence)
+    # The reference photo is useful even if a merchant blocks its thumbnail.
+    # Candidate-image absence limits Exact proof, but must not discard the
+    # user's image or let result titles redefine the photographed product.
+    visual_mode = bool(reference_inline)
     visual_evidence_ids = set(visual_evidence)
     visual_requested_count = sum(
         1 for row in list(results or [])[:WEB_VISUAL_CLASSIFIER_MAX_RESULTS]
@@ -7962,7 +10656,16 @@ REFERENCE-FIRST RULE:
 - Read visible reference text carefully: brand, product name, model, variant/flavour/scent/shade, capacity, strength and count. SALT is not TONKA. One model, scent, shade, flavour, generation, edition or size is not another.
 - CANDIDATE_IMAGE shows appearance. The candidate's complete title/URL is authoritative for candidate-only hidden facts such as exact model, pack count, compatibility, accessory status and variant. Candidate evidence may clarify that candidate; it must never alter the reference identity.
 
-EXACT MEANS THE SAME BUYABLE PRODUCT AND VARIANT, not the same category or a look-alike. All observable identity-critical attributes must agree: category, subtype, function/use, brand/product line, product name, model/generation, variant, form factor, components, configuration, compatibility, condition, size/capacity/dimensions, quantity, material/finish, pattern and color. Any meaningful conflict => similar. Unknown or insufficient proof => similar.
+EXACT MEANS THE SAME BUYABLE PRODUCT AND VARIANT, not the same category or a look-alike. All observable identity-critical attributes must agree: category, subtype, function/use, intended audience/gender/age, brand/product line, product name, model/generation, variant, form factor, components, configuration, compatibility, condition, size/capacity/dimensions, quantity, material/finish, pattern and color. Any meaningful conflict => similar. Unknown or insufficient proof => similar.
+
+IDENTITY EVIDENCE AND TOPOLOGY:
+- First extract a domain-neutral fingerprint for the reference and each candidate. Product function, product role (main product/accessory/replacement/refill/bundle), installation or mounting, support/base topology and component connections outrank broad silhouette and color.
+- Use these exact canonical codes when applicable. mounting: suspended, ceiling_fixed, wall_mounted, tabletop, floorstanding, freestanding, handheld, wearable, built_in, vehicle_mounted, none, unknown. product_role: main_product, accessory, replacement_part, refill, consumable, bundle, unknown. support_base: cord_chain, bracket, base, legs, wheels, handle, strap, socket, none, unknown. power_source: mains, battery, manual, passive, fuel, none, unknown.
+- A suspended/pendant light and a tabletop lamp are different functions and mountings even when their glass body, ombre finish and color are nearly identical. A main device and its accessory/refill/replacement part are never exact.
+- Read every visible letter, logo, number and unit from the reference. Compare exact alphanumeric identifiers conservatively: XM4 is not XM5, A1502 is not A150Z, 125 ml is not 100 ml, 128 GB is not 256 GB and 1-pack is not 3-pack. Unit conversion is allowed only when values are truly equivalent.
+- Repeated copies installed in a room or lifestyle scene are scene_instances, not evidence of a multipack. Compare quantity_bundle only from retail packaging, listing text, or a clearly sold set.
+- The candidate title/URL and visible candidate text are authoritative candidate facts. If candidate imagery looks like one product but its title names another type, model, function, mounting or variant, report the conflict and keep it similar.
+- Fill reference_profile and candidate_profile with the same field set. Use consistent lower_snake_case canonical values for equivalent facts inside this response. audience means the explicitly shown or named intended gender/age group; unknown is not equality. variant means a printed/named scent, flavour, shade, colorway, edition or trim; do not invent a variant from incidental lighting alone.
 
 UNIVERSAL CATEGORY CHECKS:
 - Furniture/home: function first (planter vs umbrella stand vs candle), then geometry, openings, arms/legs/back, proportions, dimensions, construction, material, finish, texture, pattern, color and included pieces.
@@ -7976,9 +10679,9 @@ UNIVERSAL CATEGORY CHECKS:
 VISUAL COMPARISON:
 - Ignore background, scene, camera angle, crop, apparent scale, lighting, shadows, people, watermarks and retail-page chrome. Do not compare incidental contents such as a plant, food or liquid as part of the product; scene context may help infer function only when the object's own geometry supports it.
 - Shared color, broad shape, material or category never proves exact by itself. Compare topology/components, functional openings, silhouette, proportions, construction, texture/finish and distinctive details.
-- visual_score is same-product identity confidence from 0-100. Use 92+ only when the same exact design and variant are proven with no meaningful conflict.
+- visual_score is the estimated probability from 0-100 that the offer is the same buyable product and variant, not a generic visual-similarity score. Use 92+ only when the same exact design and variant are proven with no meaningful conflict.
 - Report only axes you can establish. Put them in same_axes or different_axes using names from AXES. Omitted axes are unknown.
-AXES: category, subtype, intended_use, function, brand, product_name, model, variant, structure, components, form_factor, silhouette, proportions, material, texture, finish, color, pattern, size_class, dimensions, quantity_bundle, configuration, compatibility, condition, text_identity.
+AXES: category, subtype, intended_use, audience, function, product_role, mounting, installation, support_base, power_source, orientation, brand, product_name, model, variant, structure, components, form_factor, silhouette, proportions, shape_geometry, material, texture, finish, color, pattern, distinctive_features, size_class, dimensions, quantity_bundle, configuration, compatibility, condition, text_identity, visible_markings, alphanumeric_identity.
 
 MARKET:
 - local: a storefront/offer localized to the user's country by country domain/path, local currency/branch, or localized global storefront that sells there.
@@ -7988,7 +10691,7 @@ LOCKS:
 - A non-empty locked_match or locked_market is proven. Copy it exactly and classify only the unlocked axis.
 
 Return strict compact JSON only:
-{"identity":"reference product","reference_profile":{"category":"","subtype":"","intended_use":"","function":"","brand":"","product_name":"","model":"","variant":"","visible_text":"","structure":"","components":[],"form_factor":"","material":"","texture":"","finish":"","colors":[],"pattern":"","size_class":"","dimensions":"","quantity_bundle":"","configuration":"","compatibility":"","condition":"","distinctive_features":[]},"items":[{"id":0,"match":"exact|similar","market":"local|global","confidence":0,"visual_score":0,"same_axes":["category"],"different_axes":["variant"],"differences":["short factual difference"],"match_reason":"same_product|different_category|different_function|different_name|different_model|different_variant|different_structure|different_components|different_form|different_color|different_material|different_size|different_quantity|different_compatibility|different_condition|accessory|wrong_product|uncertain","market_reason":"local_storefront|foreign_storefront|uncertain"}]}.
+{"identity":"reference product","reference_profile":{"category":"","subtype":"","object_family":"","product_type":"","intended_use":"","audience":"","function":"","product_role":"unknown","mounting":"unknown","installation":"unknown","support_base":"unknown","power_source":"unknown","orientation":"","brand":"","product_name":"","model":"","variant":"","visible_text":"","identifiers":[],"numbers_units":[],"visible_markings":[],"structure":"","components":[],"form_factor":"","silhouette":"","proportions":"","shape_geometry":"","material":"","texture":"","finish":"","colors":[],"pattern":"","size_class":"","dimensions":"","quantity_bundle":"","configuration":"","compatibility":"","condition":"","distinctive_features":[]},"items":[{"id":0,"match":"exact|similar","market":"local|global","confidence":0,"visual_score":0,"candidate_profile":{"category":"","subtype":"","object_family":"","product_type":"","intended_use":"","audience":"","function":"","product_role":"unknown","mounting":"unknown","installation":"unknown","support_base":"unknown","power_source":"unknown","orientation":"","brand":"","product_name":"","model":"","variant":"","visible_text":"","identifiers":[],"numbers_units":[],"visible_markings":[],"structure":"","components":[],"form_factor":"","silhouette":"","proportions":"","shape_geometry":"","material":"","texture":"","finish":"","colors":[],"pattern":"","size_class":"","dimensions":"","quantity_bundle":"","configuration":"","compatibility":"","condition":"","distinctive_features":[]},"same_axes":["category"],"different_axes":["variant"],"differences":["short factual difference"],"match_reason":"same_product|different_category|different_function|different_audience|different_name|different_model|different_variant|different_structure|different_components|different_form|different_color|different_material|different_size|different_quantity|different_compatibility|different_condition|accessory|wrong_product|uncertain","market_reason":"local_storefront|foreign_storefront|uncertain"}]}.
 Include every supplied id exactly once. Confidence is an integer 0-100.'''
     user_data = {
         'reference_identity': reference_identity,
@@ -8018,10 +10721,12 @@ Include every supplied id exactly once. Confidence is an integer 0-100.'''
     payload = {
         'systemInstruction': {'parts': [{'text': system}]},
         'contents': [{'role': 'user', 'parts': user_parts}],
-        'generationConfig': {'temperature': 0, 'maxOutputTokens': 2200 if visual_mode else 1300, 'responseMimeType': 'application/json'},
+        'generationConfig': {'temperature': 0, 'maxOutputTokens': 2800 if visual_mode else 1600, 'responseMimeType': 'application/json'},
     }
     effective_timeout = WEB_VISUAL_CLASSIFIER_TIMEOUT_SECONDS if visual_mode else WEB_AI_CLASSIFIER_TIMEOUT_SECONDS
     try:
+        if cancel_event is not None and cancel_event.is_set():
+            return {}
         with GEMINI_STATS_LOCK:
             GEMINI_STATS['plain_calls'] += 1
             purpose = 'visual_result_classifier' if visual_mode else 'result_classifier'
@@ -8044,9 +10749,11 @@ Include every supplied id exactly once. Confidence is an integer 0-100.'''
         parsed_items = parsed.get('items') if isinstance(parsed, dict) else None
         if not isinstance(parsed_items, list):
             return {}
+        reference_profile = _web_visual_normalize_profile(parsed.get('reference_profile'))
         normalized = []
         seen = set()
         valid_ids = {int(item['id']) for item in candidates}
+        candidate_input_by_id = {int(item['id']): item for item in candidates}
         for item in parsed_items:
             if not isinstance(item, dict):
                 continue
@@ -8063,15 +10770,76 @@ Include every supplied id exactly once. Confidence is an integer 0-100.'''
             if match_type not in ('exact', 'similar') or market_scope not in ('local', 'global'):
                 continue
             axes = _web_visual_item_axes(item)
+            candidate_input = candidate_input_by_id.get(index) or {}
+            candidate_profile = _web_enrich_candidate_profile_from_text(
+                _web_visual_normalize_profile(item.get('candidate_profile')),
+                _web_result_classification_title(candidate_input),
+            )
+            profile_states = _web_visual_profile_states(reference_profile, candidate_profile)
+            for axis, state in profile_states.items():
+                if axis not in axes:
+                    continue
+                if state == 'different':
+                    axes[axis] = 'different'
+                elif state == 'unknown' and axes.get(axis) == 'same':
+                    # Missing candidate evidence cannot prove a reference fact.
+                    axes[axis] = 'unknown'
+                elif state == 'same' and axes.get(axis) == 'unknown':
+                    axes[axis] = 'same'
+            # Candidate title/URL facts are merchant-authored and therefore
+            # override an AI profile that accidentally copies the reference.
+            # This closes cross-field lies (reference SKU A1502 while the
+            # title says A1708), candidate-only pack/condition/generation,
+            # and named-variant additions before Exact can be emitted.
+            merchant_title_guard = _web_semantic_match_guard(reference_identity, candidate_input)
+            merchant_conflict_axis = _web_match_guard_conflict_axis(merchant_title_guard)
+            if merchant_conflict_axis:
+                profile_states[merchant_conflict_axis] = 'different'
+                axes[merchant_conflict_axis] = 'different'
+                item['match_reason'] = 'merchant_' + str(merchant_title_guard[1] or 'title_conflict')
+            profile_conflicts = [
+                axis for axis, state in profile_states.items() if state == 'different'
+            ]
             has_visual_evidence = bool(visual_mode and index in visual_evidence_ids)
+            locked_match = str(candidate_input.get('locked_match') or '').lower()
+            if locked_match in ('exact', 'similar'):
+                match_type = locked_match
+            elif match_type == 'exact' and not has_visual_evidence and not visual_mode:
+                known_axes = {
+                    axis for axis, value in axes.items()
+                    if value in ('same', 'different')
+                }
+                trusted_identifier = bool(
+                    {'model', 'alphanumeric_identity'}
+                    & {axis for axis, value in axes.items() if value == 'same'}
+                ) and not bool(
+                    {'model', 'alphanumeric_identity'}
+                    & {axis for axis, value in axes.items() if value == 'different'}
+                )
+                if (
+                    visual_score < WEB_VISUAL_CLASSIFIER_EXACT_SCORE
+                    or profile_conflicts
+                    or (not trusted_identifier and len(known_axes) < 12)
+                ):
+                    match_type = 'similar'
+                    item['match_reason'] = 'text_exact_evidence_insufficient'
             differences = []
             if isinstance(item.get('differences'), list):
                 for difference in item.get('differences')[:5]:
                     cleaned = re.sub(r'\s+', ' ', str(difference or '')).strip()[:120]
                     if cleaned:
                         differences.append(cleaned)
+            if profile_conflicts and match_type == 'exact':
+                match_type = 'similar'
+                item['match_reason'] = 'profile_hard_conflict_' + profile_conflicts[0]
+            if profile_conflicts and not differences:
+                differences = profile_conflicts[:5]
             if has_visual_evidence:
-                proof_failure, different_axes = _web_visual_exact_proof_failure(axes, visual_score)
+                proof_failure, different_axes = _web_visual_exact_proof_failure(
+                    axes,
+                    visual_score,
+                    reference_profile,
+                )
                 if match_type == 'exact' and proof_failure:
                     match_type = 'similar'
                     item['match_reason'] = proof_failure
@@ -8085,10 +10853,12 @@ Include every supplied id exactly once. Confidence is an integer 0-100.'''
                 'match': match_type,
                 'market': market_scope,
                 'confidence': confidence,
+                'model_match_score': visual_score,
                 'visual_score': visual_score if has_visual_evidence else None,
                 'visual_evidence': has_visual_evidence,
-                'visual_axes': axes if has_visual_evidence else {},
+                'visual_axes': axes,
                 'visual_differences': differences,
+                'candidate_profile': candidate_profile,
                 'reason': match_reason,
                 'match_reason': match_reason,
                 'market_reason': market_reason,
@@ -8097,13 +10867,6 @@ Include every supplied id exactly once. Confidence is an integer 0-100.'''
         # deterministic classifier, so no card is ever lost.
         if not normalized:
             return {}
-        profile = parsed.get('reference_profile') if isinstance(parsed.get('reference_profile'), dict) else {}
-        reference_profile = {}
-        for key in ('category', 'subtype', 'intended_use', 'function', 'brand', 'product_name', 'model', 'variant', 'visible_text', 'structure', 'form_factor', 'material', 'texture', 'finish', 'pattern', 'size_class', 'dimensions', 'quantity_bundle', 'configuration', 'compatibility', 'condition'):
-            reference_profile[key] = re.sub(r'\s+', ' ', str(profile.get(key) or '')).strip()[:160]
-        for key in ('components', 'colors', 'distinctive_features'):
-            values = profile.get(key) if isinstance(profile.get(key), list) else []
-            reference_profile[key] = [re.sub(r'\s+', ' ', str(value or '')).strip()[:100] for value in values[:8] if str(value or '').strip()]
         return {
             'identity': str(parsed.get('identity') or identity).strip()[:240],
             'items': normalized,
@@ -8119,11 +10882,14 @@ Include every supplied id exactly once. Confidence is an integer 0-100.'''
         print(f'WEB AI CLASSIFIER ERR: {e.__class__.__name__}: {e}')
         return {}
 
-def _web_ai_classify_captured_batch(identity, results, market, visual_context=None):
-    if not WEB_AI_CLASSIFIER_ENABLED or not GEMINI_API_KEY or not results:
+def _web_ai_classify_captured_batch(identity, results, market, visual_context=None, cancel_event=None):
+    if not WEB_AI_CLASSIFIER_ENABLED or not GEMINI_API_KEY or not results or (cancel_event is not None and cancel_event.is_set()):
         return ({}, 'disabled')
     key = _web_ai_classifier_cache_key(identity, results, market, visual_context)
-    cached = _web_ai_classifier_cache_get(key)
+    # Text classification is stable and may use the persistent cache. Visual
+    # classification must inspect today's candidate bytes: merchant/CDN URLs
+    # can change content without changing their string.
+    cached = None if visual_context else _web_ai_classifier_cache_get(key)
     if cached:
         return (cached, 'visual-cache' if cached.get('visual_mode') else 'cache')
     owner = False
@@ -8136,14 +10902,19 @@ def _web_ai_classify_captured_batch(identity, results, market, visual_context=No
     if not owner:
         wait_timeout = WEB_VISUAL_CLASSIFIER_TIMEOUT_SECONDS if visual_context else WEB_AI_CLASSIFIER_TIMEOUT_SECONDS
         event.wait(wait_timeout + WEB_VISUAL_CLASSIFIER_FETCH_TIMEOUT_SECONDS + 0.6)
+        if visual_context:
+            # Never let a visual waiter consume an older URL-keyed verdict.
+            # The live owner may have been cancelled or failed; fail closed
+            # and let this request keep its Similar/provisional rows.
+            return ({}, 'visual-singleflight-fallback')
         cached = _web_ai_classifier_cache_get(key)
         return (cached or {}, 'singleflight-cache' if cached else 'singleflight-fallback')
     try:
-        value = _web_ai_classifier_request(identity, results, market, visual_context)
+        value = _web_ai_classifier_request(identity, results, market, visual_context, cancel_event)
         if value:
             requested = int(value.get('visual_requested_count', 0) or 0)
             captured = int(value.get('visual_evidence_count', 0) or 0)
-            cache_ttl = 1800 if requested and captured < requested else None
+            cache_ttl = 60 if value.get('visual_mode') else (1800 if requested and captured < requested else None)
             _web_ai_classifier_cache_put(key, value, cache_ttl)
         if value and value.get('visual_mode'):
             source = 'visual-live'
@@ -8175,7 +10946,7 @@ def _web_ai_market_rank(row, market_scope, confidence):
     }
     return 2 if is_china_market_result(probe) else 1
 
-def _web_attach_captured_result_sections(payload, lang, allow_ai=True):
+def _web_attach_captured_result_sections(payload, lang, allow_ai=True, cancel_event=None):
     """Classify captured cards without deleting, merging, or reordering them."""
     out = dict(payload or {})
     reference_image_b64 = str(out.pop('_reference_image_b64', '') or '').strip()
@@ -8183,7 +10954,17 @@ def _web_attach_captured_result_sections(payload, lang, allow_ai=True):
     original_results = out.get('results')
     results = list(original_results or [])
     identity = str(out.get('query') or '').strip()
-    classification_anchor = _web_classification_anchor(identity, results)
+    has_reference_photo = bool(_web_visual_reference_digest(reference_image_b64)) and (
+        not reference_image_mime or reference_image_mime.startswith('image/')
+    )
+    # Result-list consensus is useful for text search, but in an image search
+    # it can amplify one wrong Lens guess across every card. Keep the original
+    # Lens/OCR identity as a hint and let the reference photo remain primary.
+    classification_anchor = (
+        _web_clean_classification_identity(identity)
+        if has_reference_photo
+        else _web_classification_anchor(identity, results)
+    )
     market_snapshot = dict(out.get('market') or current_market() or {})
     ai_started = time.time()
     match_guard_by_id = {}
@@ -8210,7 +10991,7 @@ def _web_attach_captured_result_sections(payload, lang, allow_ai=True):
         # Every non-contradictory card in an image search needs visual proof
         # before it may enter Exact.  A missing/unfetchable thumbnail is lack
         # of proof, not permission to fall back to title similarity.
-        visual_candidate = bool(visual_review and not _web_match_guard_is_hard(match_guard))
+        visual_candidate = bool(visual_review)
         if visual_candidate:
             visual_candidate_count += 1
             visual_candidate_ids.add(index)
@@ -8218,17 +10999,24 @@ def _web_attach_captured_result_sections(payload, lang, allow_ai=True):
             continue
         candidate = dict(original or {})
         candidate['_classification_id'] = index
-        candidate['_locked_match'] = match_guard[0] if match_guard and not visual_candidate else ''
+        candidate['_locked_match'] = (
+            match_guard[0]
+            if match_guard and (
+                not visual_candidate
+                or _web_match_guard_is_anchor_independent(match_guard)
+            )
+            else ''
+        )
         candidate['_locked_market'] = market_guard[0] if market_guard else ''
         candidate['_visual_review'] = visual_candidate
         ai_candidates.append(candidate)
-    if allow_ai and ai_candidates:
+    if allow_ai and ai_candidates and not (cancel_event is not None and cancel_event.is_set()):
         visual_context = {
             'image_b64': reference_image_b64,
             'mime_type': reference_image_mime,
             'source_identity': identity,
         } if visual_review else None
-        ai_result, ai_source = _web_ai_classify_captured_batch(classification_anchor, ai_candidates, market_snapshot, visual_context)
+        ai_result, ai_source = _web_ai_classify_captured_batch(classification_anchor, ai_candidates, market_snapshot, visual_context, cancel_event)
     else:
         ai_result, ai_source = ({}, 'instant-rules' if not allow_ai else 'semantic-only')
     ai_by_id = {int(item.get('id')): item for item in (ai_result.get('items') or []) if isinstance(item, dict) and str(item.get('id', '')).lstrip('-').isdigit()}
@@ -8260,12 +11048,17 @@ def _web_attach_captured_result_sections(payload, lang, allow_ai=True):
             confidence = 0
         visual_evidence = bool(ai_item.get('visual_evidence'))
         match_threshold = WEB_VISUAL_CLASSIFIER_MIN_CONFIDENCE if visual_evidence else WEB_AI_CLASSIFIER_MIN_CONFIDENCE
-        hard_match_guard = _web_match_guard_is_hard(match_guard)
+        # Lens/OCR text is fallible in image search. A semantic contradiction
+        # may demote the instant card, but must not block reference-image AI
+        # from correcting it when candidate evidence becomes available.
+        hard_match_guard = _web_match_guard_is_hard(match_guard) and (
+            not visual_review
+            or _web_match_guard_is_anchor_independent(match_guard)
+        )
         ai_match_value = str(ai_item.get('match') or '').lower()
         needs_visual_exact_proof = bool(
             visual_review
             and index in visual_candidate_ids
-            and _web_visual_exact_requires_proof(match_guard)
         )
         use_ai_match = (
             not hard_match_guard
@@ -8274,10 +11067,43 @@ def _web_attach_captured_result_sections(payload, lang, allow_ai=True):
             and (match_guard is None or visual_evidence or ai_match_value == 'similar')
             and (ai_match_value != 'exact' or not needs_visual_exact_proof or visual_evidence)
         )
+        ai_axes_for_proof = dict(ai_item.get('visual_axes') or {})
+        ai_known_for_proof = {
+            axis for axis, value in ai_axes_for_proof.items()
+            if value in ('same', 'different')
+        }
+        ai_conflicts_for_proof = {
+            axis for axis, value in ai_axes_for_proof.items()
+            if value == 'different'
+        }
+        ai_trusted_identifier = bool(
+            {'model', 'alphanumeric_identity'}
+            & {axis for axis, value in ai_axes_for_proof.items() if value == 'same'}
+        ) and not bool({'model', 'alphanumeric_identity'} & ai_conflicts_for_proof)
+        try:
+            ai_score_for_proof = max(0, min(100, int(round(float(
+                ai_item.get('model_match_score') if ai_item.get('model_match_score') is not None
+                else ai_item.get('visual_score', 0)
+            )))))
+        except Exception:
+            ai_score_for_proof = 0
+        text_ai_exact_unproven = bool(
+            not visual_review
+            and use_ai_match
+            and ai_match_value == 'exact'
+            and not (match_guard and str(match_guard[0] or '').lower() == 'exact')
+            and (
+                ai_score_for_proof < WEB_VISUAL_CLASSIFIER_EXACT_SCORE
+                or
+                ai_conflicts_for_proof
+                or (not ai_trusted_identifier and len(ai_known_for_proof) < 12)
+            )
+        )
         use_structured_match = match_guard is not None and not use_ai_match
         visual_exact_unproven = bool(
             needs_visual_exact_proof
             and not use_ai_match
+            and not _web_match_guard_is_hard(match_guard)
         )
         use_structured_market = market_guard is not None
         use_ai_market = (not use_structured_market) and confidence >= WEB_AI_CLASSIFIER_MIN_CONFIDENCE and ai_item.get('market') in ('local', 'global')
@@ -8296,6 +11122,32 @@ def _web_attach_captured_result_sections(payload, lang, allow_ai=True):
             is_exact = match_guard[0] == 'exact'
         else:
             is_exact = (ai_item.get('match') == 'exact') if use_ai_match else heuristic_exact
+        if text_ai_exact_unproven:
+            is_exact = False
+        defensive_proof_failure = ''
+        if is_exact and needs_visual_exact_proof:
+            try:
+                defensive_visual_score = max(0, min(100, int(round(float(
+                    ai_item.get('visual_score') if ai_item.get('visual_score') is not None
+                    else ai_item.get('model_match_score', 0)
+                )))))
+            except Exception:
+                defensive_visual_score = 0
+            defensive_proof_failure, _ = _web_visual_exact_proof_failure(
+                dict(ai_item.get('visual_axes') or {}),
+                defensive_visual_score,
+                dict(ai_result.get('reference_profile') or {}),
+            )
+            if defensive_proof_failure:
+                # Defense in depth for stale/malformed cache rows or tests that
+                # bypass request normalization: sparse AI evidence cannot
+                # create an Exact card or trigger the Exact score floor.
+                is_exact = False
+        if is_exact and any(
+            value == 'different'
+            for value in dict(ai_item.get('visual_axes') or {}).values()
+        ):
+            is_exact = False
         if use_structured_market:
             market_scope = market_guard[0]
             market_confidence = market_guard[2]
@@ -8323,15 +11175,30 @@ def _web_attach_captured_result_sections(payload, lang, allow_ai=True):
             source_parts.append('rules')
         row['classification_source'] = '+'.join(source_parts)
         row['classification_confidence'] = None if visual_exact_unproven else (match_guard[2] if use_structured_match else (confidence if use_ai_match else None))
-        row['classification_reason'] = 'visual_exact_unverified' if visual_exact_unproven else (match_guard[1] if use_structured_match else (str(ai_item.get('match_reason') or ai_item.get('reason') or 'rules_fallback') if use_ai_match else 'rules_fallback'))
+        row['classification_reason'] = defensive_proof_failure or ('text_exact_evidence_insufficient' if text_ai_exact_unproven else ('visual_exact_unverified' if visual_exact_unproven else (match_guard[1] if use_structured_match else (str(ai_item.get('match_reason') or ai_item.get('reason') or 'rules_fallback') if use_ai_match else 'rules_fallback'))))
         row['market_classification_confidence'] = market_guard[2] if use_structured_market else (confidence if use_ai_market else None)
         row['market_classification_reason'] = market_guard[1] if use_structured_market else (str(ai_item.get('market_reason') or 'rules_fallback') if use_ai_market else 'rules_fallback')
         row['classification_anchor'] = classification_anchor
+        row['reference_search_kind'] = 'image' if visual_review else 'text'
+        row['visual_exact_required'] = bool(visual_review)
+        if ai_item.get('visual_axes'):
+            row['visual_axes'] = dict(ai_item.get('visual_axes') or {})
+            row['visual_differences'] = list(ai_item.get('visual_differences') or [])[:5]
         if visual_evidence:
             row['visual_match_score'] = ai_item.get('visual_score')
             row['visual_classification_confidence'] = confidence
-            row['visual_axes'] = dict(ai_item.get('visual_axes') or {})
-            row['visual_differences'] = list(ai_item.get('visual_differences') or [])[:5]
+        score_metadata = _web_match_score_metadata(
+            is_exact=is_exact,
+            ai_item=ai_item,
+            match_guard=match_guard,
+            heuristic_exact=heuristic_exact,
+            visual_review=visual_review,
+            visual_exact_unproven=visual_exact_unproven,
+            use_ai_match=use_ai_match,
+            use_structured_match=use_structured_match,
+            confidence=confidence,
+        )
+        row.update(score_metadata)
         if is_exact:
             row['match_type'] = 'exact'
             row['result_section'] = 'exact'
@@ -8784,21 +11651,35 @@ def _web_verified_page_snapshot(url):
         parsed = urllib.parse.urlparse(url)
         headers = dict(HEADERS)
         headers.update({'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8', 'Accept-Language': 'en-US,en;q=0.8', 'Referer': f'{parsed.scheme}://{parsed.netloc}/'})
-        r = requests.get(url, headers=headers, timeout=(2.5, WEB_PRODUCT_VERIFY_TIMEOUT_SECONDS), allow_redirects=True)
-        if (r.status_code >= 400 or not r.text) and r.status_code != 404:
+
+        def _fetch_page(page_headers):
+            response = _web_safe_get(
+                url,
+                headers=page_headers,
+                timeout=(2.5, WEB_PRODUCT_VERIFY_TIMEOUT_SECONDS),
+                stream=True,
+            )
+            try:
+                body = _web_read_limited_response(response, 1500000)
+                text = body.decode(response.encoding or 'utf-8', errors='replace') if body is not None else ''
+                return (response.status_code, text, str(response.url or url))
+            finally:
+                _web_safe_response_close(response)
+
+        status_code, page_text, final_url = _fetch_page(headers)
+        if (status_code >= 400 or not page_text) and status_code != 404:
             try:
                 alt = dict(_WEB_MOBILE_HEADERS)
                 alt['Referer'] = f'{parsed.scheme}://{parsed.netloc}/'
-                r2 = requests.get(url, headers=alt, timeout=(2.5, WEB_PRODUCT_VERIFY_TIMEOUT_SECONDS), allow_redirects=True)
-                if r2.status_code < 400 and r2.text:
-                    print(f'WEB PAGE MOBILE-UA RESCUE host={parsed.netloc} status={r.status_code}->{r2.status_code}')
-                    r = r2
+                retry_status, retry_text, retry_url = _fetch_page(alt)
+                if retry_status < 400 and retry_text:
+                    print(f'WEB PAGE MOBILE-UA RESCUE host={parsed.netloc} status={status_code}->{retry_status}')
+                    status_code, page_text, final_url = (retry_status, retry_text, retry_url)
             except Exception as e2:
                 print(f'WEB PAGE MOBILE-UA RETRY ERR host={parsed.netloc}: {e2.__class__.__name__}')
-        final_url = str(r.url or url)
         data['url'] = final_url
-        if r.status_code < 400 and r.text:
-            html = r.text[:1500000]
+        if status_code < 400 and page_text:
+            html = page_text
             parsed_data = parse_product_data(html, final_url) or {}
             data['price'] = parsed_data.get('price')
             data['currency'] = str(parsed_data.get('currency') or '').upper().strip()
@@ -8862,18 +11743,27 @@ def _web_image_fetchable(value):
     if cached in ('1', '0'):
         return cached == '1'
     ok = False
+    r = None
     try:
         p = urllib.parse.urlparse(raw)
         headers = dict(HEADERS)
         headers['Accept'] = 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8'
         headers['Referer'] = f'{p.scheme}://{p.netloc}/'
-        r = requests.get(raw, headers=headers, timeout=(2.0, WEB_PRODUCT_IMAGE_VERIFY_TIMEOUT_SECONDS), stream=True, allow_redirects=True)
+        r = _web_safe_get(
+            raw,
+            headers=headers,
+            timeout=(2.0, WEB_PRODUCT_IMAGE_VERIFY_TIMEOUT_SECONDS),
+            stream=True,
+        )
         ctype = (r.headers.get('content-type') or '').split(';', 1)[0].strip().lower()
         if r.status_code < 400 and ctype.startswith('image/'):
+            # Only the first bounded chunk is needed for this reachability probe.
             first = next(r.iter_content(4096), b'')
             ok = bool(first)
     except Exception:
         ok = False
+    finally:
+        _web_safe_response_close(r)
     _web_image_cache_set(cache_key, '1' if ok else '0')
     return ok
 
@@ -9135,6 +12025,17 @@ def _web_refresh_classification_from_latest_title(row):
     if guard is None:
         return row
     is_exact = guard[0] == 'exact'
+    visual_locked = bool(
+        row.get('visual_exact_required')
+        or row.get('reference_search_kind') == 'image'
+        or row.get('visual_axes')
+        or str(row.get('classification_source') or '').find('visual') >= 0
+    )
+    if visual_locked:
+        # Price enrichment is price-only for image searches. Its semantic
+        # anchor is a fallible Lens hint, so it may neither promote nor demote
+        # the reference-image verdict or replace its calibrated percentage.
+        return row
     row['match_type'] = 'exact' if is_exact else 'similar'
     row['result_section'] = row['match_type']
     row['best_price_eligible'] = bool(is_exact and _web_is_direct_product_page_url(str(row.get('url') or ''), str(row.get('store') or '')))
@@ -9298,7 +12199,20 @@ async def _web_drain_price_enrich_events(price_tasks, priced_keys, started):
                 enriched = None
             if enriched and key not in priced_keys:
                 merged = dict(source_row)
-                merged.update(dict(enriched or {}))
+                enriched_row = dict(enriched or {})
+                # A price task may have started from an early preview. Copy
+                # only price facts so stale title/market/classification fields
+                # cannot overwrite the authoritative snapshot.
+                for field in (
+                    'price', 'price_verified', 'price_source',
+                    'price_unavailable', 'availability', 'stock_status',
+                ):
+                    if field in enriched_row:
+                        merged[field] = enriched_row[field]
+                if enriched_row.get('price_pending'):
+                    merged['price_pending'] = True
+                else:
+                    merged.pop('price_pending', None)
                 enriched = _web_refresh_classification_from_latest_title(merged)
                 priced_keys.add(key)
                 yield _web_stream_event({'event': 'upsert', 'phase': 'price_enrich', 'market': str(enriched.get('market') or 'other'), 'item': enriched, 'elapsed_ms': int((time.time() - started) * 1000)})
@@ -9645,7 +12559,10 @@ def _web_search_text_sync(query, country, lang, selected_option='', original_que
         if not txt or not text77_extract_store_offers(txt, limit=30):
             return {'ok': True, 'type': 'results', 'query': q, 'market': market, 'results': [], 'source': 'whatsapp_text_engine', 'authoritative': True}
         results = _web_build_text_items(txt, urls, lang, q)
-        return {
+        # Attach deterministic sections and a calibrated percentage to every
+        # WhatsApp-parity card. This is CPU-only and does not add a network or
+        # Gemini wait to first paint; the captured winner set/order is intact.
+        classified = _web_attach_captured_result_sections({
             'ok': True,
             'type': 'results',
             'query': q,
@@ -9656,14 +12573,24 @@ def _web_search_text_sync(query, country, lang, selected_option='', original_que
             # availability is presentation only and must never remove a row.
             'source': 'whatsapp_text_engine',
             'authoritative': True,
-        }
+        }, lang, allow_ai=False)
+        classified['authoritative'] = True
+        return classified
     if not txt or not text77_extract_store_offers(txt, limit=30):
         results = _web_expand_text_results(q, country, lang, [])
-        return {'ok': True, 'type': 'results', 'query': q, 'market': market, 'results': results, 'source': 'direct_market_fallback'}
+        return _web_attach_captured_result_sections(
+            {'ok': True, 'type': 'results', 'query': q, 'market': market, 'results': results, 'source': 'direct_market_fallback'},
+            lang,
+            allow_ai=False,
+        )
     results = _web_build_text_items(txt, urls, lang, q)
     results = _web_repair_text_price_outliers(results, lang, market)
     results = _web_expand_text_results(q, country, lang, results)
-    return {'ok': True, 'type': 'results', 'query': q, 'market': market, 'results': results}
+    return _web_attach_captured_result_sections(
+        {'ok': True, 'type': 'results', 'query': q, 'market': market, 'results': results},
+        lang,
+        allow_ai=False,
+    )
 
 def _web_more_seen_domain(value):
     raw = str(value or '').strip().lower()
@@ -9692,7 +12619,7 @@ def _web_more_request_image(payload):
         raise ValueError('image_too_large_after_convert')
     return (base64.b64encode(image_bytes).decode('ascii'), mime)
 
-def _web_more_stores_sync(query, country, lang, shown_urls=None, shown_domains=None, image_b64='', image_mime=''):
+def _web_more_stores_sync(query, country, lang, shown_urls=None, shown_domains=None, image_b64='', image_mime='', search_kind='text'):
     """WhatsApp-parity expansion for new merchants selling the same product.
 
     This is deliberately not a fresh broad search: it preserves the resolved
@@ -9702,6 +12629,7 @@ def _web_more_stores_sync(query, country, lang, shown_urls=None, shown_domains=N
     market = _web_market(country)
     MARKET_CTX.value = market
     q = re.sub('\\s+', ' ', str(query or '')).strip()[:WEB_API_MAX_QUERY_CHARS]
+    image_origin = str(search_kind or '').strip().lower() == 'image' or bool(image_b64 or image_mime)
     seen_urls = {
         _canonical_result_url(str(url or '').strip())
         for url in list(shown_urls or [])[:80]
@@ -9718,7 +12646,7 @@ def _web_more_stores_sync(query, country, lang, shown_urls=None, shown_domains=N
             seen_domains.add(domain)
 
     candidates = []
-    source = 'whatsapp_more_text'
+    source = 'whatsapp_more_image_unverified' if image_origin else 'whatsapp_more_text'
     if image_b64 and image_mime:
         source = 'whatsapp_more_lens'
         exclusion = ' '.join((f'-site:{domain}' for domain in sorted(seen_domains)[:7]))
@@ -9790,6 +12718,30 @@ def _web_more_stores_sync(query, country, lang, shown_urls=None, shown_domains=N
         if len(selected) >= WEB_MORE_TOTAL_MAX:
             break
 
+    classified = _web_attach_captured_result_sections({
+        'ok': True,
+        'type': 'results',
+        'query': q,
+        'market': market,
+        'results': selected,
+        'source': source,
+        '_reference_image_b64': image_b64,
+        '_reference_image_mime': image_mime,
+    }, lang, allow_ai=bool(image_b64 and image_mime))
+    selected = list(classified.get('results') or [])
+    if image_origin and not (image_b64 and image_mime):
+        # A continuation must never silently change an image-origin search
+        # into text Exact just because the client can no longer read the
+        # temporary upload. Keep the stores, but label all as unverified
+        # Similar until the reference photo is available again.
+        selected = [
+            _web_fail_closed_visual_row(row, 'image_reference_unavailable_for_more_stores')
+            for row in selected
+        ]
+        classified['results'] = selected
+        classified['exact_count'] = 0
+        classified['similar_count'] = len(selected)
+
     return {
         'ok': True,
         'type': 'results',
@@ -9797,25 +12749,44 @@ def _web_more_stores_sync(query, country, lang, shown_urls=None, shown_domains=N
         'market': market,
         'results': selected,
         'source': source,
+        'search_kind': 'image' if image_origin else 'text',
+        'classification_engine': classified.get('classification_engine'),
+        'exact_count': classified.get('exact_count', 0),
+        'similar_count': classified.get('similar_count', 0),
         'excluded_store_count': len(seen_domains),
         'exhausted': not bool(selected),
     }
 
-def _web_search_image_sync(image_b64, mime, caption, country, lang, progress_callback=None, classify_with_ai=True):
+def _web_search_image_sync(image_b64, mime, caption, country, lang, progress_callback=None, classify_with_ai=True, cancel_event=None):
     market = _web_market(country)
     MARKET_CTX.value = market
     caption = re.sub('\\s+', ' ', str(caption or '')).strip()[:WEB_API_MAX_QUERY_CHARS]
+    def cancelled():
+        return cancel_event is not None and cancel_event.is_set()
+    def cancelled_result(query=''):
+        return {
+            'ok': False,
+            'type': 'results',
+            'query': str(query or caption or ''),
+            'market': market,
+            'results': [],
+            'source': 'client_cancelled',
+        }
+    if cancelled():
+        return cancelled_result()
     direct_attempted = False
     if LENS_DIRECT_MODE and ENABLE_GOOGLE_LENS and SERPAPI_API_KEY and PUBLIC_BASE_URL:
         direct_attempted = True
         lens_direct = google_lens_lookup(image_b64, mime, lang, caption, light=True, progress_callback=progress_callback)
+        if cancelled():
+            return cancelled_result(lens_direct.get('query'))
         if lens_direct.get('matches'):
             items = _web_build_lens_items(lens_direct, lang, caption)
             if items:
                 identity = (lens_direct.get('visual_identity') or lens_direct.get('relevance_target') or lens_direct.get('query') or caption or '').strip()
                 if USE_V106_5_RESULT_PIPELINE or (WEB_MATCH_WHATSAPP_EXACT and (not WEB_TEXT_DENSE_PARITY)):
                     print(f'ANDROID IMAGE TRUE PARITY: direct WhatsApp Lens set -> {len(items)} result(s); no WEB v89 supplement')
-                    return _web_attach_captured_result_sections({'ok': True, 'type': 'results', 'query': identity, 'market': market, 'results': items, 'source': 'whatsapp_direct_lens_exact', '_reference_image_b64': image_b64, '_reference_image_mime': mime}, lang, allow_ai=classify_with_ai)
+                    return _web_attach_captured_result_sections({'ok': True, 'type': 'results', 'query': identity, 'market': market, 'results': items, 'source': 'whatsapp_direct_lens_exact', '_reference_image_b64': image_b64, '_reference_image_mime': mime}, lang, allow_ai=classify_with_ai, cancel_event=cancel_event)
                 if WEB_IMAGE_SUPPLEMENT_WEAK_MARKETS and identity:
                     target = {0: WEB_IMAGE_TARGET_LOCAL, 1: WEB_IMAGE_TARGET_US, 2: WEB_IMAGE_TARGET_CN}
                     counts = {0: 0, 1: 0, 2: 0}
@@ -9831,6 +12802,8 @@ def _web_search_image_sync(image_b64, mime, caption, country, lang, progress_cal
 
                         def _supp(rank):
                             MARKET_CTX.value = market_snapshot
+                            if cancelled():
+                                return (rank, [])
                             try:
                                 return (rank, _web_fast_market_wave_sync(identity, country, lang, rank))
                             except Exception as e:
@@ -9839,6 +12812,10 @@ def _web_search_image_sync(image_b64, mime, caption, country, lang, progress_cal
                         with ThreadPoolExecutor(max_workers=max(1, len(weak))) as ex:
                             futs = [ex.submit(_supp, r) for r in weak]
                             for fut in futs:
+                                if cancelled():
+                                    for pending_future in futs:
+                                        pending_future.cancel()
+                                    return cancelled_result(identity)
                                 try:
                                     rank, rows = fut.result(timeout=SERPAPI_TIMEOUT_SECONDS + 5)
                                     extra_by_rank[rank] = rows or []
@@ -9865,11 +12842,15 @@ def _web_search_image_sync(image_b64, mime, caption, country, lang, progress_cal
                                     break
                         items.sort(key=lambda x: (int(x.get('market_rank', 99)), 0 if x.get('price') else 1))
                         print(f'WEB IMAGE v89 after supplement counts={counts} total={len(items)}')
-                return _web_attach_captured_result_sections({'ok': True, 'type': 'results', 'query': identity, 'market': market, 'results': items, 'source': 'lens_direct_plus_market_supplement', '_reference_image_b64': image_b64, '_reference_image_mime': mime}, lang, allow_ai=classify_with_ai)
+                return _web_attach_captured_result_sections({'ok': True, 'type': 'results', 'query': identity, 'market': market, 'results': items, 'source': 'lens_direct_plus_market_supplement', '_reference_image_b64': image_b64, '_reference_image_mime': mime}, lang, allow_ai=classify_with_ai, cancel_event=cancel_event)
     lens_future = None
     if not direct_attempted and LENS_PARALLEL_WITH_VISION and ENABLE_GOOGLE_LENS and SERPAPI_API_KEY and PUBLIC_BASE_URL:
         lens_future = LENS_POOL.submit(_run_with_market, market, google_lens_lookup, image_b64, mime, lang, caption)
     vision_name = identify_product_with_retry(image_b64, mime, lang)
+    if cancelled():
+        if lens_future is not None:
+            lens_future.cancel()
+        return cancelled_result(vision_name)
     force_fashion_lens = is_fashion_identity(vision_name, caption)
     use_lens, _route_reason = lens_routing_decision(vision_name, caption)
     use_lens = force_fashion_lens or use_lens
@@ -9884,6 +12865,8 @@ def _web_search_image_sync(image_b64, mime, caption, country, lang, progress_cal
                 pass
         else:
             lens = google_lens_lookup(image_b64, mime, lang, caption or vision_name)
+        if cancelled():
+            return cancelled_result(vision_name)
     elif lens_future is not None:
         lens_future.cancel()
     active_lens = None
@@ -9914,10 +12897,12 @@ def _web_search_image_sync(image_b64, mime, caption, country, lang, progress_cal
         query = combined_name
     else:
         txt, urls, query = ('', {}, caption)
+    if cancelled():
+        return cancelled_result(query)
     if not txt:
-        return _web_attach_captured_result_sections({'ok': True, 'type': 'results', 'query': query, 'market': market, 'results': [], 'source': 'image_fallback', '_reference_image_b64': image_b64, '_reference_image_mime': mime}, lang, allow_ai=classify_with_ai)
+        return _web_attach_captured_result_sections({'ok': True, 'type': 'results', 'query': query, 'market': market, 'results': [], 'source': 'image_fallback', '_reference_image_b64': image_b64, '_reference_image_mime': mime}, lang, allow_ai=classify_with_ai, cancel_event=cancel_event)
     items = _web_fallback_product_items(txt, urls, lang, query)
-    return _web_attach_captured_result_sections({'ok': True, 'type': 'results', 'query': query, 'market': market, 'results': items, 'source': 'image_fallback', '_reference_image_b64': image_b64, '_reference_image_mime': mime}, lang, allow_ai=classify_with_ai)
+    return _web_attach_captured_result_sections({'ok': True, 'type': 'results', 'query': query, 'market': market, 'results': items, 'source': 'image_fallback', '_reference_image_b64': image_b64, '_reference_image_mime': mime}, lang, allow_ai=classify_with_ai, cancel_event=cancel_event)
 
 def _web_normalize_country_code(value):
     cc = str(value or '').strip().lower()
@@ -10006,37 +12991,66 @@ async def web_api_geo(request: Request):
 async def web_api_img_proxy(request: Request):
     if not WEB_API_ENABLED or not WEB_IMAGE_PROXY_ENABLED:
         return Response(content=b'', status_code=404)
+    if not _web_image_proxy_rate_allowed(request):
+        return Response(content=b'', status_code=429)
     raw_url = str(request.query_params.get('u') or '').strip()
     if not _web_is_http_url(raw_url):
         return Response(content=b'', status_code=400)
+    try:
+        expires_at = int(str(request.query_params.get('exp') or '0'))
+    except Exception:
+        expires_at = 0
+    supplied_signature = str(request.query_params.get('sig') or '').strip().lower()
+    now = int(time.time())
+    if (
+        expires_at < now
+        or expires_at > now + 8 * 86400
+        or not supplied_signature
+        or not hmac.compare_digest(supplied_signature, _web_image_proxy_signature(raw_url, expires_at))
+    ):
+        return Response(content=b'', status_code=403)
+
+    def _raster_mime(body):
+        if body.startswith(b'\xff\xd8\xff'):
+            return 'image/jpeg'
+        if body.startswith(b'\x89PNG\r\n\x1a\n'):
+            return 'image/png'
+        if body.startswith((b'GIF87a', b'GIF89a')):
+            return 'image/gif'
+        if len(body) > 12 and body[:4] == b'RIFF' and body[8:12] == b'WEBP':
+            return 'image/webp'
+        if len(body) > 16 and body[4:12] in {b'ftypavif', b'ftypavis'}:
+            return 'image/avif'
+        return ''
 
     def _fetch_image(target_url):
         parsed = urllib.parse.urlparse(target_url)
         headers = dict(HEADERS)
         headers['Accept'] = 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8'
         headers['Referer'] = f'{parsed.scheme}://{parsed.netloc}/'
-        resp = requests.get(target_url, headers=headers, timeout=(2.5, WEB_IMAGE_PROXY_TIMEOUT_SECONDS), stream=True, allow_redirects=True)
-        if resp.status_code >= 400:
-            return (resp.status_code, '', b'', '')
-        content_type = (resp.headers.get('content-type') or '').split(';', 1)[0].strip().lower()
-        body = b''
-        if content_type.startswith('image/'):
-            chunks = []
-            total = 0
-            for chunk in resp.iter_content(65536):
-                if not chunk:
-                    continue
-                total += len(chunk)
-                if total > WEB_IMAGE_PROXY_MAX_BYTES:
-                    break
-                chunks.append(chunk)
-            body = b''.join(chunks)
-            return (200, content_type or 'image/jpeg', body, '')
+        resp = _web_safe_get(
+            target_url,
+            headers=headers,
+            timeout=(2.5, WEB_IMAGE_PROXY_TIMEOUT_SECONDS),
+            stream=True,
+        )
         try:
-            html = resp.text[:400000]
-        except Exception:
-            html = ''
-        return (200, content_type or 'text/html', b'', html)
+            if resp.status_code >= 400:
+                return (resp.status_code, '', b'', '')
+            content_type = (resp.headers.get('content-type') or '').split(';', 1)[0].strip().lower()
+            limit = WEB_IMAGE_PROXY_MAX_BYTES if content_type.startswith('image/') else 400000
+            body = _web_read_limited_response(resp, limit)
+            if body is None:
+                return (413, '', b'', '')
+            if content_type.startswith('image/'):
+                detected_mime = _raster_mime(body)
+                if not detected_mime:
+                    return (415, '', b'', '')
+                return (200, detected_mime, body, '')
+            html = body.decode(resp.encoding or 'utf-8', errors='replace')
+            return (200, content_type or 'text/html', b'', html)
+        finally:
+            _web_safe_response_close(resp)
     try:
         status, content_type, body, html = await asyncio.to_thread(_fetch_image, raw_url)
         if status >= 400:
@@ -10687,6 +13701,7 @@ async def web_api_search_more(request: Request):
         return Response(content=json.dumps({'ok': False, 'error': 'empty_query'}), media_type='application/json', status_code=400)
     shown_urls = payload.get('shown_urls') if isinstance(payload.get('shown_urls'), list) else []
     shown_domains = payload.get('shown_domains') if isinstance(payload.get('shown_domains'), list) else []
+    search_kind = 'image' if str(payload.get('search_kind') or '').strip().lower() == 'image' else 'text'
     try:
         image_b64, image_mime = _web_more_request_image(payload)
     except ValueError as exc:
@@ -10705,6 +13720,7 @@ async def web_api_search_more(request: Request):
         shown_domains,
         image_b64,
         image_mime,
+        search_kind,
     )
     result['elapsed_ms'] = int((time.time() - started) * 1000)
     result['country_source'] = country_source
@@ -10725,6 +13741,7 @@ async def web_api_search_more_stream(request: Request):
         return Response(content=json.dumps({'ok': False, 'error': 'empty_query'}), media_type='application/json', status_code=400)
     shown_urls = payload.get('shown_urls') if isinstance(payload.get('shown_urls'), list) else []
     shown_domains = payload.get('shown_domains') if isinstance(payload.get('shown_domains'), list) else []
+    search_kind = 'image' if str(payload.get('search_kind') or '').strip().lower() == 'image' else 'text'
     try:
         image_b64, image_mime = _web_more_request_image(payload)
     except ValueError as exc:
@@ -10747,6 +13764,7 @@ async def web_api_search_more_stream(request: Request):
             shown_domains,
             image_b64,
             image_mime,
+            search_kind,
         ))
         try:
             while not task.done():
@@ -10861,15 +13879,67 @@ async def web_api_search_stream(request: Request):
                         'event': 'snapshot',
                         'phase': 'whatsapp_text_final',
                         'authoritative': True,
+                        'classification_final': False,
                         'source': 'whatsapp_text_engine',
                         'query': final.get('query') or q,
                         'market': final.get('market') or market,
                         'results': exact_rows,
+                        'exact_results': final.get('exact_results') or [],
+                        'similar_results': final.get('similar_results') or [],
+                        'local_results': final.get('local_results') or [],
+                        'global_results': final.get('global_results') or [],
+                        'all_results': final.get('all_results') or exact_rows,
+                        'result_sections': final.get('result_sections') or [],
+                        'classification_matrix': final.get('classification_matrix') or {},
+                        'exact_count': final.get('exact_count', 0),
+                        'similar_count': final.get('similar_count', 0),
                         'count': len(exact_rows),
                         'elapsed_ms': int((time.time() - started) * 1000),
                     })
                     _market_counts = Counter(str(row.get('market') or 'other') for row in exact_rows)
                     print(f'TEXT PARITY FINAL client={client_name} count={len(exact_rows)} markets={dict(_market_counts)} engine=whatsapp_text_engine')
+                    # Refine the already-visible cards with one cached batch AI
+                    # call. No search/Lens/merchant request is repeated, and
+                    # first paint has already happened before this await.
+                    if exact_rows and WEB_AI_CLASSIFIER_ENABLED and GEMINI_API_KEY:
+                        captured_for_ai = list(final.get('captured_results') or exact_rows)
+                        refined = await asyncio.to_thread(
+                            _web_attach_captured_result_sections,
+                            {
+                                'ok': True,
+                                'type': 'results',
+                                'query': final.get('query') or q,
+                                'market': final.get('market') or market,
+                                'results': captured_for_ai,
+                                'source': 'whatsapp_text_engine',
+                            },
+                            lang,
+                            True,
+                        )
+                        refined_rows = list(refined.get('results') or exact_rows)
+                        if _web_classification_signature(refined_rows) != _web_classification_signature(exact_rows):
+                            yield _web_stream_event({
+                                'event': 'snapshot',
+                                'phase': 'ai_text_classification_update',
+                                'authoritative': True,
+                                'classification_final': True,
+                                'source': 'whatsapp_text_engine+ai',
+                                'query': refined.get('query') or q,
+                                'market': refined.get('market') or market,
+                                'results': refined_rows,
+                                'exact_results': refined.get('exact_results') or [],
+                                'similar_results': refined.get('similar_results') or [],
+                                'local_results': refined.get('local_results') or [],
+                                'global_results': refined.get('global_results') or [],
+                                'all_results': refined.get('all_results') or refined_rows,
+                                'result_sections': refined.get('result_sections') or [],
+                                'classification_matrix': refined.get('classification_matrix') or {},
+                                'exact_count': refined.get('exact_count', 0),
+                                'similar_count': refined.get('similar_count', 0),
+                                'classification_engine': refined.get('classification_engine'),
+                                'elapsed_ms': int((time.time() - started) * 1000),
+                            })
+                            final = refined
                 yield _web_stream_event({'event': 'done', 'count': len(final.get('results') or []), 'elapsed_ms': int((time.time() - started) * 1000)})
                 return
             sent = set()
@@ -11050,19 +14120,26 @@ async def web_api_image_search_stream(request: Request):
     async def _generator():
         started = time.time()
         sent = set()
+        last_stream_rows = {}
+        authoritative_snapshot_emitted = False
         price_tasks, priced_keys = ({}, set())
         enrich_market = _web_market(country)
         market_counts = {'local': 0, 'us': 0, 'china': 0}
-        yield _web_stream_event({'event': 'start', 'ok': True, 'kind': 'image'})
-        yield _web_stream_event({'event': 'status', 'stage': 'identify', 'elapsed_ms': 0})
+        cancel_event = threading.Event()
+        final_task = None
+        refine_task = None
+        progress_get_task = None
+        store_tasks = []
         try:
+            yield _web_stream_event({'event': 'start', 'ok': True, 'kind': 'image'})
+            yield _web_stream_event({'event': 'status', 'stage': 'identify', 'elapsed_ms': 0})
             if WEB_MATCH_WHATSAPP_EXACT:
                 progress_queue = asyncio.Queue()
                 loop = asyncio.get_running_loop()
                 market_snapshot = _web_market(country)
 
                 def _lens_progress_callback(partial_lens):
-                    if not ANDROID_IMAGE_PROGRESSIVE:
+                    if not ANDROID_IMAGE_PROGRESSIVE or cancel_event.is_set():
                         return
                     try:
                         loop.call_soon_threadsafe(progress_queue.put_nowait, partial_lens)
@@ -11071,10 +14148,9 @@ async def web_api_image_search_stream(request: Request):
                 # The search task returns an instant deterministic snapshot.
                 # Gemini classification is launched only after cards are on
                 # screen, so it can never delay first paint.
-                final_task = asyncio.create_task(asyncio.to_thread(_web_search_image_sync, image_b64, mime, caption, country, lang, _lens_progress_callback if ANDROID_IMAGE_PROGRESSIVE else None, False))
+                final_task = asyncio.create_task(asyncio.to_thread(_web_search_image_sync, image_b64, mime, caption, country, lang, _lens_progress_callback if ANDROID_IMAGE_PROGRESSIVE else None, False, cancel_event))
                 preview_keys = set()
                 query_sent = False
-                progress_get_task = None
                 while True:
                     if final_task.done():
                         break
@@ -11112,12 +14188,14 @@ async def web_api_image_search_stream(request: Request):
                             query_sent = True
                         emitted_now = 0
                         for item in preview_items:
+                            item = _web_fail_closed_visual_row(item, 'progressive_visual_verification_pending')
                             market_name = str(item.get('market') or 'other')
                             key = str(item.get('url') or '').strip() or market_name + '|' + str(item.get('store') or '') + '|' + str(item.get('title') or '')
                             if key in preview_keys:
                                 continue
                             preview_keys.add(key)
                             sent.add(key)
+                            last_stream_rows[key] = dict(item)
                             emitted_now += 1
                             yield _web_stream_event({'event': 'result', 'phase': 'progressive_preview', 'provisional': True, 'market': market_name, 'item': item, 'elapsed_ms': int((time.time() - started) * 1000)})
                             if _web_row_has_numeric_price(item):
@@ -11136,14 +14214,36 @@ async def web_api_image_search_stream(request: Request):
                 identity = str(final.get('query') or caption or '').strip()
                 if identity and (not query_sent):
                     yield _web_stream_event({'event': 'query', 'query': identity, 'market': final.get('market')})
-                final_results = list(final.get('results') or [])
-                final_exact_results = list(final.get('exact_results') or [])
-                final_similar_results = list(final.get('similar_results') or [])
-                final_local_results = list(final.get('local_results') or [])
-                final_global_results = list(final.get('global_results') or [])
-                final_classified_results = list(final.get('all_results') or final_results)
-                final_sections = list(final.get('result_sections') or [])
-                yield _web_stream_event({'event': 'snapshot', 'phase': 'whatsapp_exact_final', 'authoritative': True, 'classification_final': False, 'layout': 'exact_and_similar_v1', 'classification': 'instant_semantic_rules', 'classification_engine': final.get('classification_engine'), 'classification_cache': final.get('classification_cache'), 'ai_classified_count': 0, 'visual_review_required': final.get('visual_review_required', False), 'visual_candidate_count': final.get('visual_candidate_count', 0), 'semantic_classified_count': final.get('semantic_classified_count', 0), 'rules_fallback_count': final.get('rules_fallback_count', len(final_results)), 'query': identity, 'market': final.get('market'), 'results': final_results, 'exact_results': final_exact_results, 'similar_results': final_similar_results, 'local_results': final_local_results, 'global_results': final_global_results, 'all_results': final_classified_results, 'result_sections': final_sections, 'classification_matrix': final.get('classification_matrix') or {}, 'exact_count': len(final_exact_results), 'similar_count': len(final_similar_results), 'local_count': len(final_local_results), 'global_count': len(final_global_results), 'elapsed_ms': int((time.time() - started) * 1000)})
+                # The first authoritative paint stays fast, but every card is
+                # explicitly Similar/unverified until candidate-image proof is
+                # complete. This prevents a client default or a later timeout
+                # from leaving a provisional card inside Exact.
+                final_results = [
+                    _web_fail_closed_visual_row(row, 'instant_visual_verification_pending')
+                    for row in list(final.get('results') or [])
+                ]
+                final_exact_results = []
+                final_similar_results = list(final_results)
+                final_local_results = [row for row in final_results if row.get('market_scope') == 'local']
+                final_global_results = [row for row in final_results if row.get('market_scope') != 'local']
+                final_classified_results = list(final_results)
+                exact_label, similar_label = _WEB_CLASSIFICATION_LABELS.get(lang, _WEB_CLASSIFICATION_LABELS['en'])
+                final_sections = [
+                    {'id': 'exact', 'title': exact_label, 'collapsed': False, 'best_price_eligible': True, 'count': 0, 'local_count': 0, 'global_count': 0, 'local_results': [], 'global_results': [], 'results': []},
+                    {'id': 'similar', 'title': similar_label, 'collapsed': False, 'best_price_eligible': False, 'count': len(final_similar_results), 'local_count': len(final_local_results), 'global_count': len(final_global_results), 'local_results': final_local_results, 'global_results': final_global_results, 'results': final_similar_results},
+                ]
+                final_matrix = {
+                    'exact_local': [],
+                    'exact_global': [],
+                    'similar_local': final_local_results,
+                    'similar_global': final_global_results,
+                }
+                yield _web_stream_event({'event': 'snapshot', 'phase': 'whatsapp_exact_final', 'authoritative': True, 'classification_final': False, 'layout': 'exact_and_similar_v1', 'classification': 'instant_visual_unverified', 'classification_engine': final.get('classification_engine'), 'classification_cache': final.get('classification_cache'), 'ai_classified_count': 0, 'visual_review_required': final.get('visual_review_required', False), 'visual_candidate_count': final.get('visual_candidate_count', 0), 'semantic_classified_count': final.get('semantic_classified_count', 0), 'rules_fallback_count': final.get('rules_fallback_count', len(final_results)), 'query': identity, 'market': final.get('market'), 'results': final_results, 'exact_results': final_exact_results, 'similar_results': final_similar_results, 'local_results': final_local_results, 'global_results': final_global_results, 'all_results': final_classified_results, 'result_sections': final_sections, 'classification_matrix': final_matrix, 'exact_count': len(final_exact_results), 'similar_count': len(final_similar_results), 'local_count': len(final_local_results), 'global_count': len(final_global_results), 'elapsed_ms': int((time.time() - started) * 1000)})
+                authoritative_snapshot_emitted = True
+                last_stream_rows = {
+                    (str(row.get('url') or '').strip() or str(row.get('market') or 'other') + '|' + str(row.get('store') or '') + '|' + str(row.get('title') or '')): dict(row)
+                    for row in final_results
+                }
                 print(f'ANDROID INSTANT FINAL SNAPSHOT results={len(final_results)} exact={len(final_exact_results)} similar={len(final_similar_results)} local={len(final_local_results)} global={len(final_global_results)} classifier={final.get("classification_engine")} preview={len(preview_keys)} elapsed={time.time() - started:.1f}s')
                 instant_classification_signature = _web_classification_signature(final_results)
 
@@ -11162,7 +14262,14 @@ async def web_api_image_search_stream(request: Request):
                         '_reference_image_b64': image_b64,
                         '_reference_image_mime': mime,
                     }
-                    refined = await asyncio.to_thread(_web_attach_captured_result_sections, classifier_payload, lang, True)
+                    refine_task = asyncio.create_task(asyncio.to_thread(
+                        _web_attach_captured_result_sections,
+                        classifier_payload,
+                        lang,
+                        True,
+                        cancel_event,
+                    ))
+                    refined = await refine_task
                     final = refined
                     final_results = list(refined.get('results') or final_results)
                     final_exact_results = list(refined.get('exact_results') or [])
@@ -11171,6 +14278,10 @@ async def web_api_image_search_stream(request: Request):
                     final_global_results = list(refined.get('global_results') or [])
                     final_classified_results = list(refined.get('all_results') or final_results)
                     final_sections = list(refined.get('result_sections') or [])
+                    last_stream_rows = {
+                        (str(row.get('url') or '').strip() or str(row.get('market') or 'other') + '|' + str(row.get('store') or '') + '|' + str(row.get('title') or '')): dict(row)
+                        for row in final_results
+                    }
                     refined_signature = _web_classification_signature(final_results)
                     if refined_signature != instant_classification_signature:
                         yield _web_stream_event({'event': 'snapshot', 'phase': 'ai_classification_update', 'authoritative': True, 'classification_final': True, 'layout': 'exact_and_similar_v1', 'classification': 'hybrid_multimodal_fingerprint_ai' if refined.get('visual_classified_count', 0) else 'hybrid_fingerprint_ai', 'classification_engine': refined.get('classification_engine'), 'classification_cache': refined.get('classification_cache'), 'ai_classified_count': refined.get('ai_classified_count', 0), 'ai_candidate_count': refined.get('ai_candidate_count', 0), 'visual_candidate_count': refined.get('visual_candidate_count', 0), 'visual_evidence_count': refined.get('visual_evidence_count', 0), 'visual_classified_count': refined.get('visual_classified_count', 0), 'reference_visual_profile': refined.get('reference_visual_profile') or {}, 'structured_match_count': refined.get('structured_match_count', 0), 'structured_market_count': refined.get('structured_market_count', 0), 'semantic_classified_count': refined.get('semantic_classified_count', 0), 'rules_fallback_count': refined.get('rules_fallback_count', 0), 'query': identity, 'market': refined.get('market'), 'results': final_results, 'exact_results': final_exact_results, 'similar_results': final_similar_results, 'local_results': final_local_results, 'global_results': final_global_results, 'all_results': final_classified_results, 'result_sections': final_sections, 'classification_matrix': refined.get('classification_matrix') or {}, 'exact_count': len(final_exact_results), 'similar_count': len(final_similar_results), 'local_count': len(final_local_results), 'global_count': len(final_global_results), 'elapsed_ms': int((time.time() - started) * 1000)})
@@ -11178,6 +14289,14 @@ async def web_api_image_search_stream(request: Request):
                     else:
                         print(f'ANDROID AI CLASSIFICATION NO-CHANGE candidates={refined.get("ai_candidate_count", 0)} classifier={refined.get("classification_engine")} elapsed={time.time() - started:.1f}s')
                 sent = {str(item.get('url') or '').strip() or str(item.get('market') or 'other') + '|' + str(item.get('store') or '') + '|' + str(item.get('title') or '') for item in final_results}
+                # Provisional cards that were not retained by the authoritative
+                # WhatsApp-equivalent snapshot must never reappear later as a
+                # price-only upsert.
+                for stale_key, stale_task in list(price_tasks.items()):
+                    if stale_key in sent:
+                        continue
+                    stale_task.cancel()
+                    price_tasks.pop(stale_key, None)
                 for item in final_results:
                     key = str(item.get('url') or '').strip() or str(item.get('market') or 'other') + '|' + str(item.get('store') or '') + '|' + str(item.get('title') or '')
                     if _web_row_has_numeric_price(item):
@@ -11186,7 +14305,14 @@ async def web_api_image_search_stream(request: Request):
                         if t:
                             t.cancel()
                     else:
-                        _web_spawn_price_enrich_task(price_tasks, key, item, lang, market_snapshot)
+                        existing_task = price_tasks.get(key)
+                        if existing_task is not None:
+                            # Keep the authoritative classification/market row
+                            # while reusing the already-running price request.
+                            existing_task._findzia_price_row = dict(item)
+                            existing_task._findzia_price_market = dict(market_snapshot or {})
+                        else:
+                            _web_spawn_price_enrich_task(price_tasks, key, item, lang, market_snapshot)
                 async for _ev in _web_drain_price_enrich_events(price_tasks, priced_keys, started):
                     yield _ev
                 yield _web_stream_event({'event': 'done', 'count': len(sent), 'exact_count': len(final_exact_results), 'similar_count': len(final_similar_results), 'local_count': len(final_local_results), 'global_count': len(final_global_results), 'classification_engine': final.get('classification_engine'), 'elapsed_ms': int((time.time() - started) * 1000)})
@@ -11195,11 +14321,13 @@ async def web_api_image_search_stream(request: Request):
             identity = str(seed.get('query') or caption or '').strip()
             yield _web_stream_event({'event': 'query', 'query': identity, 'market': seed.get('market')})
             for item in seed.get('items') or []:
+                item = _web_fail_closed_visual_row(item, 'lens_seed_visual_verification_pending')
                 market_name = str(item.get('market') or 'other')
                 key = str(item.get('url') or '').strip() or market_name + '|' + str(item.get('store') or '') + '|' + str(item.get('title') or '')
                 if key in sent:
                     continue
                 sent.add(key)
+                last_stream_rows[key] = dict(item)
                 if market_name in market_counts:
                     market_counts[market_name] += 1
                 yield _web_stream_event({'event': 'result', 'phase': 'lens_seed', 'market': market_name, 'item': item, 'elapsed_ms': int((time.time() - started) * 1000)})
@@ -11242,10 +14370,12 @@ async def web_api_image_search_stream(request: Request):
                             r, rows = (rank, [])
                         market_name = _web_market_label(r)
                         for item in rows or []:
+                            item = _web_fail_closed_visual_row(item, 'store_probe_visual_verification_pending')
                             key = str(item.get('url') or '').strip() or market_name + '|' + str(item.get('store') or '') + '|' + str(item.get('title') or '')
                             if key in sent:
                                 continue
                             sent.add(key)
+                            last_stream_rows[key] = dict(item)
                             if market_name in market_counts:
                                 market_counts[market_name] += 1
                             yield _web_stream_event({'event': 'result', 'phase': 'store_fifo', 'market': market_name, 'store_probe': label, 'item': item, 'elapsed_ms': int((time.time() - started) * 1000)})
@@ -11263,10 +14393,24 @@ async def web_api_image_search_stream(request: Request):
                     if rank_remaining.get(r, 0) > 0:
                         yield _web_stream_event({'event': 'market_fast_done', 'market': _web_market_label(r), 'elapsed_ms': int((time.time() - started) * 1000)})
             if len(sent) < WEB_STREAM_IMAGE_FINAL_MIN_RESULTS or market_counts.get('local', 0) == 0:
-                final = await asyncio.to_thread(_web_search_image_sync, image_b64, mime, caption, country, lang)
+                final_task = asyncio.create_task(asyncio.to_thread(
+                    _web_search_image_sync,
+                    image_b64,
+                    mime,
+                    caption,
+                    country,
+                    lang,
+                    None,
+                    True,
+                    cancel_event,
+                ))
+                final = await final_task
                 for item in final.get('results') or []:
+                    if str((item or {}).get('match_type') or '').lower() not in ('exact', 'similar'):
+                        item = _web_fail_closed_visual_row(item, 'final_visual_classification_missing')
                     market_name = str(item.get('market') or 'other')
                     key = str(item.get('url') or '').strip() or market_name + '|' + str(item.get('store') or '') + '|' + str(item.get('title') or '')
+                    last_stream_rows[key] = dict(item)
                     if _web_row_has_numeric_price(item):
                         priced_keys.add(key)
                         t = price_tasks.pop(key, None)
@@ -11284,13 +14428,38 @@ async def web_api_image_search_stream(request: Request):
                 yield _ev
             yield _web_stream_event({'event': 'done', 'count': len(sent), 'elapsed_ms': int((time.time() - started) * 1000)})
         except asyncio.CancelledError:
+            cancel_event.set()
             raise
         except Exception as e:
             print(f'WEB IMAGE STORE FIFO STREAM ERROR: {e}')
             if 'sent' in locals() and sent:
+                if (not authoritative_snapshot_emitted) and last_stream_rows:
+                    safe_results = [
+                        _web_fail_closed_visual_row(row, 'visual_classification_interrupted')
+                        for row in last_stream_rows.values()
+                    ]
+                    safe_local = [row for row in safe_results if row.get('market_scope') == 'local']
+                    safe_global = [row for row in safe_results if row.get('market_scope') != 'local']
+                    exact_label, similar_label = _WEB_CLASSIFICATION_LABELS.get(lang, _WEB_CLASSIFICATION_LABELS['en'])
+                    safe_sections = [
+                        {'id': 'exact', 'title': exact_label, 'collapsed': False, 'best_price_eligible': True, 'count': 0, 'local_count': 0, 'global_count': 0, 'local_results': [], 'global_results': [], 'results': []},
+                        {'id': 'similar', 'title': similar_label, 'collapsed': False, 'best_price_eligible': False, 'count': len(safe_results), 'local_count': len(safe_local), 'global_count': len(safe_global), 'local_results': safe_local, 'global_results': safe_global, 'results': safe_results},
+                    ]
+                    yield _web_stream_event({'event': 'snapshot', 'phase': 'visual_fail_closed', 'authoritative': True, 'classification_final': False, 'partial': True, 'layout': 'exact_and_similar_v1', 'classification': 'visual_unverified', 'classification_engine': 'fail_closed', 'query': caption, 'market': market_snapshot if 'market_snapshot' in locals() else {}, 'results': safe_results, 'exact_results': [], 'similar_results': safe_results, 'local_results': safe_local, 'global_results': safe_global, 'all_results': safe_results, 'result_sections': safe_sections, 'exact_count': 0, 'similar_count': len(safe_results), 'local_count': len(safe_local), 'global_count': len(safe_global), 'elapsed_ms': int((time.time() - started) * 1000)})
                 yield _web_stream_event({'event': 'done', 'count': len(sent), 'partial': True, 'elapsed_ms': int((time.time() - started) * 1000)})
             else:
                 yield _web_stream_event({'event': 'error', 'error': 'image_search_failed', 'elapsed_ms': int((time.time() - started) * 1000)})
+        finally:
+            cancel_event.set()
+            tracked = [final_task, refine_task, progress_get_task]
+            tracked.extend(list(store_tasks or []))
+            tracked.extend(list(price_tasks.values()))
+            tracked = [task for task in tracked if task is not None]
+            for task in tracked:
+                if not task.done():
+                    task.cancel()
+            if tracked:
+                await asyncio.gather(*tracked, return_exceptions=True)
     return StreamingResponse(_generator(), media_type='application/x-ndjson', headers={'Cache-Control': 'no-cache, no-transform', 'X-Accel-Buffering': 'no', 'Connection': 'keep-alive'})
 
 @app.post('/api/search')
@@ -11355,4 +14524,4 @@ async def web_api_image_search(request: Request):
 
 @app.get('/')
 async def health():
-    return {'status': 'v107.30 UNIVERSAL REFERENCE-FIRST CLASSIFIER', 'lens_direct_mode': LENS_DIRECT_MODE, 'fast_lens': USE_FAST_LENS_PIPELINE, 'v106_pipeline': USE_V106_5_RESULT_PIPELINE, 'text_search_whatsapp_parity': TEXT_SEARCH_WHATSAPP_PARITY, 'serpapi_cache': SERPAPI_RESULT_CACHE_ENABLED, 'serpapi_singleflight': SERPAPI_SINGLEFLIGHT_ENABLED, 'ai_result_classifier': WEB_AI_CLASSIFIER_ENABLED, 'ai_classifier_timeout_seconds': WEB_AI_CLASSIFIER_TIMEOUT_SECONDS, 'visual_result_classifier': WEB_VISUAL_CLASSIFIER_ENABLED, 'visual_classifier_timeout_seconds': WEB_VISUAL_CLASSIFIER_TIMEOUT_SECONDS, 'visual_classifier_max_results': WEB_VISUAL_CLASSIFIER_MAX_RESULTS, 'visual_exact_score': WEB_VISUAL_CLASSIFIER_EXACT_SCORE, 'visual_exact_policy': 'reference_first_all_products', 'build': BUILD_ID, 'market_source': 'phone_prefix_or_explicit_client_country', 'languages': ['ar','en','de','fr','it','es','pt','tr','ru','ja','zh','ko','hi','ur','id','ms']}
+    return {'status': BUILD_ID, 'lens_direct_mode': LENS_DIRECT_MODE, 'fast_lens': USE_FAST_LENS_PIPELINE, 'v106_pipeline': USE_V106_5_RESULT_PIPELINE, 'text_search_whatsapp_parity': TEXT_SEARCH_WHATSAPP_PARITY, 'serpapi_cache': SERPAPI_RESULT_CACHE_ENABLED, 'serpapi_singleflight': SERPAPI_SINGLEFLIGHT_ENABLED, 'ai_result_classifier': WEB_AI_CLASSIFIER_ENABLED, 'ai_classifier_timeout_seconds': WEB_AI_CLASSIFIER_TIMEOUT_SECONDS, 'visual_result_classifier': WEB_VISUAL_CLASSIFIER_ENABLED, 'visual_classifier_timeout_seconds': WEB_VISUAL_CLASSIFIER_TIMEOUT_SECONDS, 'visual_classifier_max_results': WEB_VISUAL_CLASSIFIER_MAX_RESULTS, 'visual_exact_score': WEB_VISUAL_CLASSIFIER_EXACT_SCORE, 'visual_exact_policy': 'reference_first_all_products', 'match_score_version': _WEB_MATCH_SCORE_VERSION, 'build': BUILD_ID, 'market_source': 'phone_prefix_or_explicit_client_country', 'languages': ['ar','en','de','fr','it','es','pt','tr','ru','ja','zh','ko','hi','ur','id','ms']}
