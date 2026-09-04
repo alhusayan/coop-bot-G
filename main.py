@@ -23,7 +23,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept'], max_age=86400)
-BUILD_ID = 'v107.41-open-world-multimodal-identity-match-score'
+BUILD_ID = 'v107.42-product-identity-invariant-match-score'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -955,7 +955,7 @@ def cache_put(query, lang, txt, urls):
     entry = {'txt': txt, 'urls': dict(urls), 'ts': now, 'expires_at': now + ttl, 'tokens': norm_tokens(query), 'query': query, 'lang': lang}
     SEARCH_CACHE[key] = entry
     _cache_db_put(key, entry)
-IDENTIFY_SYSTEM = 'أنت خبير تعرف على المنتجات من الصور.\nأرجع دائماً اسمين قابلين للبحث بهذا الشكل فقط:\n[الاسم التجاري بالعربية] | [commercial product name in English]\nضع البراند ورقم الموديل إن ظهر. إذا ظهر حجم أو وزن أو سعة على العبوة (مثل 1 لتر، 500 مل، 250 جم، 256GB) أدخله في الاسمين، فهو جزء من هوية المنتج.\nاستنتج نوع المنتج من الشعار والشكل والنص الظاهر.\nلا ترفض التحديد لمجرد أن الصورة غير كاملة؛ أعطِ أقرب اسم تجاري مفيد للبحث.\nمثال: حليب المراعي كامل الدسم 1 لتر | Almarai Full Fat Milk 1L\nسطر واحد فقط، بدون شرح.'
+IDENTIFY_SYSTEM = 'أنت خبير تعرف على المنتجات من الصور.\nأرجع دائماً اسمين قابلين للبحث بهذا الشكل فقط:\n[الاسم التجاري بالعربية] | [commercial product name in English]\nضع البراند ورقم الموديل فقط إذا كانا ظاهرين أو مقروءين فعلاً. إذا ظهر حجم أو وزن أو سعة على العبوة (مثل 1 لتر، 500 مل، 250 جم، 256GB) أدخله في الاسمين، فهو جزء من هوية المنتج.\nاستنتج نوع المنتج من الشعار والشكل والنص الظاهر، لكن لا تخترع براند أو موديل أو إصدار قريب لمجرد التشابه البصري.\nإذا كانت الصورة غير كاملة أعط نوعاً عاماً مفيداً للبحث، واترك التفاصيل غير المثبتة خارج الاسم. زاوية التصوير والإضاءة والظل والخلفية وحالة الاستعمال لا تغيّر هوية المنتج.\nمثال: حليب المراعي كامل الدسم 1 لتر | Almarai Full Fat Milk 1L\nسطر واحد فقط، بدون شرح.'
 MSG = {'ar': {'identifying': '✨ ثواني.. أحدد المنتج وأدور لك أفضل الخيارات.', 'searching': '🔎 أدور لك على {q}...', 'not_found': 'ما لقيت المنتج متوفر حالياً بسعر مؤكد 😅 جرب صياغة ثانية أو دز صورة أوضح.', 'identified_not_found': 'حددت المنتج ({p}) بس ما لقيت له سعر مؤكد حالياً 😅 جرب تكتب اسمه بصيغة ثانية.', 'cant_identify': 'بحثت أكثر من مرة، لكن ما قدرت أحدد المنتج أو ألقى له نتيجة مؤكدة. دز صورة أوضح أو اكتب اسم المنتج.', 'image_error': 'صار خلل بسيط وأنا أحمّل الصورة 😅 عيد إرسالها مرة ثانية.', 'multi_text': 'تمام لقيت {c} منتجات، أسوي سلة...', 'multi_images': 'تمام لقطت {c} منتجات، أسوي سلة...', 'maps_body': '📍 تبي أقرب مكان؟\n\nاضغط الزر والخريطة بتفتح على أقرب الأماكن حولك 👇', 'maps_btn': '📍 افتح الخريطة', 'maps_body_loc': '📍 بحثك الأخير كان عن ({p})\n\nجهزت لك أقرب الأماكن حولك، اضغط الزر وافتح الخريطة 👇', 'no_saved_product': 'ما عندي منتج محفوظ حالياً 😅. ابحث عن منتج أول، وبعدها أدلك على أقرب مكان يبيعه!', 'lang_saved': 'تمام، بكلمك عربي من هني ورايح 🇰🇼\nدز صورة منتج أو اكتب اسمه وأنا حاضر!', 'ask_global': 'ما لقيت نتيجة محلية مؤكدة لهذا المنتج في موقعك الحالي. تبي أدور لك في المتاجر العالمية؟ 🌍', 'global_yes': 'نعم، ابحث عالميًا 🌍', 'global_no': 'لا، محلي فقط', 'global_searching': '🌍 أدور لك عالميًا على أفضل النتائج المطابقة...', 'global_none': 'حتى بالبحث العالمي ما لقيت نتيجة مؤكدة ومباشرة لهذا المنتج.', 'ask_not_found': 'ما لقيت نفس المنتج بالضبط متوفر عندك محلياً 😅\n\nشرايك، وش تبيني أسوي؟ 👇', 'opt_global': '🌍 دوّر عالمياً', 'opt_similar': '🔄 بدائل مشابهة', 'opt_no': 'لا شكراً 🙏', 'similar_searching': '🔄 أدور لك على أفضل البدائل المشابهة المتوفرة عندك...', 'similar_none': 'ما لقيت بدائل مشابهة بسعر مؤكد حالياً 😅 جرب صياغة ثانية.', 'declined_ok': 'تمام 🙏 إذا احتجت شي ثاني أنا حاضر!', 'welcome_reply': 'هلا والله! 🌟\nدز صورة المنتج أو اكتب اسمه، وأدور لك أفضل الأسعار والمتاجر القريبة منك 🛒', 'thanks_reply': 'العفو! 🌹 في الخدمة دايماً.. أي منتج ثاني تبيه أنا حاضر!', 'lens_header': '✨ لقيت لك هالنتائج المطابقة:', 'lens_none': '🔎 ما لقيت نتائج كافية من الصورة، بجرب لك طريقة ثانية...', 'market_from_phone': '✅ تم تحديد بلدك من رقم WhatsApp: {country}'}, 'en': {'identifying': '✨ One moment.. identifying the product and finding the best options.', 'searching': '🔎 Looking for {q}...', 'not_found': "Couldn't find it in-stock with a verified price 😅 try another phrasing or a clearer photo.", 'identified_not_found': "I identified the product ({p}) but couldn't find a verified price right now 😅 try typing its name differently.", 'cant_identify': 'I searched several times but couldn’t identify the product or find a verified result. Send a clearer photo or type the product name.', 'image_error': 'Something went wrong while loading the image 😅 please send it again.', 'multi_text': 'Got it, found {c} products. Building your cart...', 'multi_images': 'Nice, spotted {c} products. Building your cart...', 'maps_body': '📍 Want the nearest place?\n\nTap the button and the map will open on the closest spots around you 👇', 'maps_btn': '📍 Open Map', 'maps_body_loc': "📍 Your last search was ({p})\n\nI've lined up the closest places around you. Tap the button to open the map 👇", 'no_saved_product': "I don't have a saved product yet 😅. Search for a product first, then I'll point you to the nearest store!", 'lang_saved': "Great, I'll speak English with you from now on 🇬🇧\nSend a product photo or type its name and I'm on it!", 'ask_global': "I couldn't find a verified local result in your current market. Search international stores instead? 🌍", 'global_yes': 'Yes, search globally 🌍', 'global_no': 'No, local only', 'global_searching': '🌍 Searching international stores for the closest matches...', 'global_none': "I still couldn't find a verified direct result globally.", 'ask_not_found': "I couldn't find this exact product available locally 😅\n\nWhat would you like me to do? 👇", 'opt_global': '🌍 Search globally', 'opt_similar': '🔄 Similar items', 'opt_no': 'No thanks 🙏', 'similar_searching': '🔄 Looking for the best similar alternatives available near you...', 'similar_none': "I couldn't find similar alternatives with a verified price right now 😅 try another phrasing.", 'declined_ok': "No problem 🙏 I'm here whenever you need me!", 'welcome_reply': "Hello! 🌟\nSend a product photo or type its name, and I'll find you the best prices and nearby stores 🛒", 'thanks_reply': "You're welcome! 🌹 Anytime.. just send me the next product!", 'lens_header': '✨ Here are the matching results I found:', 'lens_none': '🔎 I didn’t find enough results from the image, trying another method...', 'market_from_phone': '✅ Your country is set from your WhatsApp number: {country}'}}
 MSG['hi'] = {'identifying': '✨ एक पल... प्रोडक्ट पहचान रहा हूँ और सबसे अच्छे विकल्प ढूँढ रहा हूँ।', 'searching': '🔎 {q} ढूँढ रहा हूँ...', 'not_found': 'अभी पक्की कीमत के साथ उपलब्ध नतीजा नहीं मिला 😅 नाम थोड़ा अलग लिखें या साफ़ फोटो भेजें।', 'identified_not_found': 'मैंने प्रोडक्ट ({p}) पहचान लिया, लेकिन अभी पक्की कीमत नहीं मिली 😅 नाम दूसरी तरह लिखकर देखें।', 'cant_identify': 'कई बार कोशिश की, लेकिन प्रोडक्ट ठीक से पहचान नहीं पाया या पक्का नतीजा नहीं मिला। साफ़ फोटो भेजें या प्रोडक्ट का नाम लिखें।', 'image_error': 'फोटो लोड करते समय छोटी-सी समस्या हुई 😅 कृपया फोटो दोबारा भेजें।', 'multi_text': 'ठीक है, {c} प्रोडक्ट मिले। कार्ट बना रहा हूँ...', 'multi_images': 'अच्छा, {c} प्रोडक्ट पहचान लिए। कार्ट बना रहा हूँ...', 'maps_body': '📍 आस-पास कहाँ मिलता है देखना है? नीचे बटन दबाकर मैप खोलें 👇', 'maps_btn': '📍 मैप खोलें', 'maps_body_loc': '📍 आपकी पिछली खोज ({p}) थी। नीचे बटन दबाकर आस-पास के स्टोर देखें 👇', 'no_saved_product': 'अभी कोई प्रोडक्ट सेव नहीं है 😅 पहले किसी प्रोडक्ट की खोज करें।', 'lang_saved': 'ठीक है, अब से मैं हिंदी में बात करूँगा 🇮🇳\nप्रोडक्ट की फोटो भेजें या नाम लिखें।', 'ask_global': 'आपके देश में पक्का नतीजा नहीं मिला। क्या अंतरराष्ट्रीय स्टोर में खोजूँ? 🌍', 'global_yes': 'हाँ, दुनिया भर में खोजें 🌍', 'global_no': 'नहीं, केवल स्थानीय', 'global_searching': '🌍 अंतरराष्ट्रीय स्टोर में सबसे मिलते-जुलते नतीजे ढूँढ रहा हूँ...', 'global_none': 'अंतरराष्ट्रीय खोज में भी पक्का सीधा नतीजा नहीं मिला।', 'ask_not_found': 'यह बिल्कुल वही प्रोडक्ट स्थानीय रूप से नहीं मिला 😅\n\nआप क्या करना चाहेंगे? 👇', 'opt_global': '🌍 दुनिया भर में खोजें', 'opt_similar': '🔄 मिलते-जुलते विकल्प', 'opt_no': 'नहीं धन्यवाद 🙏', 'similar_searching': '🔄 आपके लिए सबसे अच्छे मिलते-जुलते विकल्प ढूँढ रहा हूँ...', 'similar_none': 'अभी पक्की कीमत के साथ मिलते-जुलते विकल्प नहीं मिले 😅 दूसरी तरह लिखकर देखें।', 'declined_ok': 'ठीक है 🙏 जब चाहें मैं यहाँ हूँ!', 'welcome_reply': 'नमस्ते! 🌟\nप्रोडक्ट की फोटो भेजें या नाम लिखें, मैं कीमतें और अच्छे स्टोर ढूँढ दूँगा 🛒', 'thanks_reply': 'आपका स्वागत है! 🌹 अगला प्रोडक्ट भेज दीजिए।', 'lens_header': '✨ ये मिलते-जुलते नतीजे मिले:', 'lens_none': '🔎 फोटो से पर्याप्त नतीजे नहीं मिले, दूसरी विधि आज़मा रहा हूँ...', 'market_from_phone': '✅ आपका देश WhatsApp नंबर से तय कर दिया गया है: {country}'}
 MSG['ur'] = {'identifying': '✨ ایک لمحہ... پروڈکٹ پہچان رہا ہوں اور بہترین آپشنز تلاش کر رہا ہوں۔', 'searching': '🔎 {q} تلاش کر رہا ہوں...', 'not_found': 'ابھی تصدیق شدہ قیمت کے ساتھ دستیاب نتیجہ نہیں ملا 😅 نام مختلف انداز میں لکھیں یا صاف تصویر بھیجیں۔', 'identified_not_found': 'میں نے پروڈکٹ ({p}) پہچان لیا، مگر ابھی تصدیق شدہ قیمت نہیں ملی 😅 نام دوسری طرح لکھ کر دیکھیں۔', 'cant_identify': 'کئی بار کوشش کی، مگر پروڈکٹ درست طور پر پہچان نہیں سکا یا پکا نتیجہ نہیں ملا۔ صاف تصویر بھیجیں یا پروڈکٹ کا نام لکھیں۔', 'image_error': 'تصویر لوڈ کرتے وقت معمولی مسئلہ ہوا 😅 براہِ کرم دوبارہ بھیجیں۔', 'multi_text': 'ٹھیک ہے، {c} پروڈکٹس مل گئے۔ کارٹ بنا رہا ہوں...', 'multi_images': 'اچھا، {c} پروڈکٹس پہچان لیے۔ کارٹ بنا رہا ہوں...', 'maps_body': '📍 قریب کہاں ملتا ہے؟ نیچے بٹن دبا کر نقشہ کھولیں 👇', 'maps_btn': '📍 نقشہ کھولیں', 'maps_body_loc': '📍 آپ کی آخری تلاش ({p}) تھی۔ نیچے بٹن دبا کر قریب کے اسٹور دیکھیں 👇', 'no_saved_product': 'ابھی کوئی پروڈکٹ محفوظ نہیں 😅 پہلے کسی پروڈکٹ کی تلاش کریں۔', 'lang_saved': 'ٹھیک ہے، اب سے میں اردو میں بات کروں گا 🇵🇰\nپروڈکٹ کی تصویر بھیجیں یا نام لکھیں۔', 'ask_global': 'آپ کے ملک میں تصدیق شدہ نتیجہ نہیں ملا۔ کیا بین الاقوامی اسٹورز میں تلاش کروں؟ 🌍', 'global_yes': 'ہاں، دنیا بھر میں تلاش کریں 🌍', 'global_no': 'نہیں، صرف مقامی', 'global_searching': '🌍 بین الاقوامی اسٹورز میں قریب ترین نتائج تلاش کر رہا ہوں...', 'global_none': 'بین الاقوامی تلاش میں بھی تصدیق شدہ براہِ راست نتیجہ نہیں ملا۔', 'ask_not_found': 'یہ بالکل وہی پروڈکٹ مقامی طور پر نہیں ملا 😅\n\nآپ کیا کرنا چاہیں گے؟ 👇', 'opt_global': '🌍 دنیا بھر میں تلاش کریں', 'opt_similar': '🔄 ملتے جلتے متبادل', 'opt_no': 'نہیں شکریہ 🙏', 'similar_searching': '🔄 آپ کے لیے بہترین ملتے جلتے متبادل تلاش کر رہا ہوں...', 'similar_none': 'ابھی تصدیق شدہ قیمت کے ساتھ ملتے جلتے متبادل نہیں ملے 😅 دوسری طرح لکھ کر دیکھیں۔', 'declined_ok': 'ٹھیک ہے 🙏 جب چاہیں میں حاضر ہوں!', 'welcome_reply': 'السلام علیکم! 🌟\nپروڈکٹ کی تصویر بھیجیں یا نام لکھیں، میں بہترین قیمتیں اور اسٹورز تلاش کر دوں گا 🛒', 'thanks_reply': 'خوش آمدید! 🌹 اگلا پروڈکٹ بھیج دیں۔', 'lens_header': '✨ یہ ملتے جلتے نتائج ملے:', 'lens_none': '🔎 تصویر سے کافی نتائج نہیں ملے، دوسرا طریقہ آزما رہا ہوں...', 'market_from_phone': '✅ آپ کا ملک WhatsApp نمبر سے طے کیا گیا ہے: {country}'}
@@ -4488,7 +4488,7 @@ async def process_image_buffer(from_number):
         await asyncio.to_thread(process_multi_images, data['images'], from_number, data['bot_id'], lang)
 
 def identify_product_with_retry(b64, mime, lang='ar'):
-    prompts = ['حدد المنتج من الشعار والشكل والنص. اكتب الاسم العربي ثم الإنجليزي مفصولين بـ |.', 'افحص الصورة بدقة أكبر، خصوصاً الشعار والأزرار ورقم الموديل. اكتب Arabic name | English name.', 'استنتج أقرب اسم تجاري قابل للبحث حتى لو الصورة جزئية. Arabic | English only.']
+    prompts = ['حدد المنتج من الشعار والشكل والنص. اكتب الاسم العربي ثم الإنجليزي مفصولين بـ |.', 'افحص الصورة بدقة أكبر، خصوصاً الشعار والأزرار ورقم الموديل. لا تخمن أي حرف أو رقم غير مقروء. اكتب Arabic name | English name.', 'إذا الصورة جزئية اكتب نوع المنتج العام فقط، ولا تخترع براند أو موديل قريب. Arabic | English only.']
     bad_phrases = ('ما قدرت', 'لا استطيع', 'لا أستطيع', 'غير واضح', 'لا يمكن تحديد', "couldn't identify", 'cannot identify', "can't identify", 'unable to identify', 'unknown product', 'not sure')
     for attempt in range(MAX_IDENTIFY_ATTEMPTS):
         ident, _ = call_gemini([{'inline_data': {'mime_type': mime, 'data': b64}}, {'text': prompts[min(attempt, len(prompts) - 1)]}], system=IDENTIFY_SYSTEM, use_search=False)
@@ -7985,6 +7985,16 @@ _WEB_PRODUCT_CONDITION_PATTERNS = (
     ('refurbished', re.compile(r'\b(?:refurbished|renewed|مجدد)\b', re.I)),
     ('open_box', re.compile(r'\b(?:open\s+box|علبة\s+مفتوحة)\b', re.I)),
 )
+_WEB_PRODUCT_CONDITION_NOISE_RE = re.compile(
+    r'(?i)\b(?:used|pre[-\s]?owned|second[-\s]?hand|refurbished|renewed|'
+    r'open[-\s]?box|like[-\s]?new|as[-\s]?is|scratch(?:ed|es)?|scuff(?:ed|s)?|'
+    r'worn|wear|faded|damaged|مستعمل|مجدد|مجددة|علبة\s+مفتوحة|كالجديد|'
+    r'خدش|خدوش|مخدوش|تالف)\b'
+)
+
+def _web_product_identity_text(value):
+    """Remove offer/physical condition without touching product identity."""
+    return re.sub(r'\s+', ' ', _WEB_PRODUCT_CONDITION_NOISE_RE.sub(' ', str(value or ''))).strip()
 _WEB_COUNT_NUMBER_BODY = r'(?:\d{1,3}(?:[.,]\d{3})+|\d{1,7}(?:\u066b\d+)?)'
 _WEB_COUNT_NUMBER_PATTERN = r'(?<![\d.,])(' + _WEB_COUNT_NUMBER_BODY + r')(?![\d.,])'
 _WEB_COUNT_NOUN_BODY = (
@@ -8846,7 +8856,9 @@ def _web_semantic_fingerprint_text(value):
 def _web_product_fingerprint(value):
     """Build a deterministic, JSON-safe identity fingerprint with no I/O."""
     title = _web_clean_classification_identity(value)
-    comparable = _web_classification_comparable(_web_semantic_fingerprint_text(title))
+    comparable = _web_classification_comparable(
+        _web_semantic_fingerprint_text(_web_product_identity_text(title))
+    )
     size = extract_pack_size(title)
     distinctive = (_findzia_lexical_tokens(comparable) - _WEB_CLASSIFICATION_GENERIC_CLUSTER)
     return {
@@ -8905,9 +8917,11 @@ def _web_semantic_match_guard(identity, row):
         return None
     identity_fp = _web_product_fingerprint(identity)
     title_fp = _web_product_fingerprint(title)
-    if identity_fp['audience'] != title_fp['audience'] and (identity_fp['audience'] or title_fp['audience']):
-        reason = 'different_audience' if identity_fp['audience'] and title_fp['audience'] else 'audience_not_proven'
-        return ('similar', reason, 99)
+    if (
+        identity_fp['audience'] and title_fp['audience']
+        and identity_fp['audience'] != title_fp['audience']
+    ):
+        return ('similar', 'different_audience', 99)
     if (
         identity_fp['product_kind'] and title_fp['product_kind']
         and identity_fp['product_kind'] != title_fp['product_kind']
@@ -8915,7 +8929,7 @@ def _web_semantic_match_guard(identity, row):
         return ('similar', 'different_product_type', 99)
     identity_labeled = dict(identity_fp.get('labeled_variants') or {})
     title_labeled = dict(title_fp.get('labeled_variants') or {})
-    for axis in set(identity_labeled) | set(title_labeled):
+    for axis in set(identity_labeled) & set(title_labeled):
         if identity_labeled.get(axis) != title_labeled.get(axis):
             return ('similar', 'different_labeled_variant_' + axis, 99)
     early_identity_models = set(identity_fp['models'])
@@ -8944,9 +8958,15 @@ def _web_semantic_match_guard(identity, row):
         return ('similar', 'different_bundle_offer', 99)
     if identity_fp['mounting'] and title_fp['mounting'] and identity_fp['mounting'] != title_fp['mounting']:
         return ('similar', 'different_mounting_topology', 99)
-    if set(identity_fp['sellable_variants']) != set(title_fp['sellable_variants']):
+    if (
+        identity_fp['sellable_variants'] and title_fp['sellable_variants']
+        and set(identity_fp['sellable_variants']) != set(title_fp['sellable_variants'])
+    ):
         return ('similar', 'different_named_variant', 99)
-    if identity_fp['form'] != title_fp['form'] and (identity_fp['form'] or title_fp['form']):
+    if (
+        identity_fp['form'] and title_fp['form']
+        and identity_fp['form'] != title_fp['form']
+    ):
         return ('similar', 'different_product_form', 99)
     if (
         identity_fp['packaging_forms'] and title_fp['packaging_forms']
@@ -8955,32 +8975,39 @@ def _web_semantic_match_guard(identity, row):
         return ('similar', 'different_packaging_form', 99)
     identity_size = tuple(identity_fp['size']) if identity_fp['size'] else None
     title_size = tuple(title_fp['size']) if title_fp['size'] else None
-    fact_conflicts = _web_identity_fact_conflicts(identity, title)
+    # Missing capacity/count on a partial reference image is unknown, not a
+    # contradiction. Compare facts only when both sides explicitly expose
+    # them; the structured visual profile will keep one-sided facts unproven.
+    fact_conflicts = (
+        _web_identity_fact_conflicts(identity, title)
+        if identity_fp.get('measure_facts') and title_fp.get('measure_facts')
+        else []
+    )
     if 'quantity_bundle' in fact_conflicts:
         return ('similar', 'different_pack_count', 99)
     if fact_conflicts:
         return ('similar', 'different_size_or_capacity', 99)
     identity_contained_count = identity_fp.get('contained_unit_count')
     title_contained_count = title_fp.get('contained_unit_count')
-    if identity_contained_count != title_contained_count and (
-        identity_contained_count is not None or title_contained_count is not None
+    if (
+        identity_contained_count is not None and title_contained_count is not None
+        and identity_contained_count != title_contained_count
     ):
-        reason = (
-            'different_contained_quantity'
-            if identity_contained_count is not None and title_contained_count is not None
-            else 'contained_quantity_not_proven'
-        )
-        return ('similar', reason, 99)
+        return ('similar', 'different_contained_quantity', 99)
     if identity_fp['pack_count'] and title_fp['pack_count'] and identity_fp['pack_count'] != title_fp['pack_count']:
         return ('similar', 'different_pack_count', 98)
-    if (identity_fp['edition'] or title_fp['edition']) and title_fp['edition'] != identity_fp['edition']:
+    if (
+        identity_fp['edition'] and title_fp['edition']
+        and title_fp['edition'] != identity_fp['edition']
+    ):
         return ('similar', 'different_edition_or_pack', 98)
-    if (identity_fp['condition'] or title_fp['condition']) and title_fp['condition'] != identity_fp['condition']:
-        return ('similar', 'different_condition', 98)
+    # Offer condition (new/used/refurbished, scratches, fading or wear) is not
+    # product identity.  It may be shown separately by the UI, but the same
+    # model remains the same product regardless of its physical condition.
     if _web_tier_conflict(identity_fp, title_fp):
         return ('similar', 'different_tier', 99)
-    identity_cmp = _web_classification_comparable(identity)
-    title_cmp = _web_classification_comparable(title)
+    identity_cmp = _web_classification_comparable(_web_product_identity_text(identity))
+    title_cmp = _web_classification_comparable(_web_product_identity_text(title))
     if _findzia_hard_product_mismatch(identity_cmp, title_cmp):
         return ('similar', 'hard_product_conflict', 97)
     shared = set(identity_fp['distinctive']) & set(title_fp['distinctive'])
@@ -8992,8 +9019,8 @@ def _web_semantic_match_guard(identity, row):
         return ('similar', 'different_model_guard', 97)
     identity_numbers = set(identity_fp['numbers'])
     title_numbers = set(title_fp['numbers'])
-    if identity_numbers != title_numbers and (identity_numbers or title_numbers):
-        if identity_numbers and title_numbers and not identity_numbers & title_numbers:
+    if identity_numbers and title_numbers and identity_numbers != title_numbers:
+        if not identity_numbers & title_numbers:
             return ('similar', 'different_generation', 96)
         if title_numbers - identity_numbers:
             return ('similar', 'extra_numeric_identity', 95)
@@ -9114,7 +9141,7 @@ def _web_match_guard_conflict_axis(match_guard):
     if 'labeled_variant' in reason or 'named_family' in reason:
         return 'variant'
     if 'condition' in reason:
-        return 'condition'
+        return ''
     if 'edition' in reason:
         return 'configuration'
     if 'model' in reason or 'generation' in reason or 'numeric' in reason or 'tier' in reason:
@@ -9139,11 +9166,16 @@ def _web_captured_result_is_exact(identity, title):
     """Classify one already-captured card without filtering or doing I/O."""
     identity = _web_clean_classification_identity(identity)
     title = _web_clean_classification_identity(title)
-    identity_cmp = _web_classification_comparable(identity)
-    title_cmp = _web_classification_comparable(title)
+    identity_cmp = _web_classification_comparable(_web_product_identity_text(identity))
+    title_cmp = _web_classification_comparable(_web_product_identity_text(title))
     if not identity_cmp or not title_cmp or _findzia_hard_product_mismatch(identity_cmp, title_cmp):
         return False
-    if _web_identity_fact_conflicts(identity, title):
+    identity_fp = _web_product_fingerprint(identity)
+    title_fp = _web_product_fingerprint(title)
+    if (
+        identity_fp.get('measure_facts') and title_fp.get('measure_facts')
+        and _web_identity_fact_conflicts(identity, title)
+    ):
         return False
     identity_models = _web_model_tokens_from_listing(identity)
     title_models = _web_model_tokens_from_listing(title)
@@ -9178,7 +9210,43 @@ _WEB_VISUAL_AXES = (
     'compatibility', 'condition', 'text_identity', 'visible_markings',
     'alphanumeric_identity',
 )
-_WEB_VISUAL_HARD_DIFFERENCE_AXES = frozenset(_WEB_VISUAL_AXES)
+# A product identity must be invariant to how the product happened to be
+# photographed.  Keep these fields for diagnostics only; they must never
+# lower the identity percentage or block an Exact decision.
+_WEB_IDENTITY_OBSERVATION_AXES = frozenset({'orientation', 'condition'})
+
+# These are actual sellable-product contradictions when they are established
+# from readable text/identifiers or view-invariant product structure.  Surface
+# appearance is deliberately excluded: lighting, reflections, wear and camera
+# viewpoint can change perceived colour, texture, finish, silhouette and
+# proportions without changing the product's identity.
+_WEB_VISUAL_HARD_DIFFERENCE_AXES = frozenset({
+    'category', 'subtype', 'intended_use', 'audience', 'function',
+    'product_role', 'mounting', 'installation', 'support_base',
+    'power_source', 'brand', 'product_name', 'model', 'variant',
+    'structure', 'components', 'form_factor', 'distinctive_features',
+    'size_class', 'dimensions', 'quantity_bundle', 'configuration',
+    'compatibility', 'text_identity', 'visible_markings',
+    'alphanumeric_identity',
+})
+_WEB_IDENTITY_SURFACE_AXES = frozenset({
+    'silhouette', 'proportions', 'shape_geometry', 'material', 'texture',
+    'finish', 'color', 'pattern',
+})
+_WEB_IDENTITY_IDENTIFIER_AXES = frozenset({'model', 'alphanumeric_identity'})
+_WEB_IDENTITY_NAMED_AXES = frozenset({
+    'brand', 'product_name', 'variant', 'text_identity', 'visible_markings',
+})
+_WEB_IDENTITY_FUNCTION_AXES = frozenset({
+    'category', 'subtype', 'intended_use', 'function', 'product_role',
+    'mounting', 'installation', 'support_base', 'power_source',
+})
+_WEB_IDENTITY_STRUCTURE_AXES = frozenset({
+    # Semantic topology only.  Surface appearance is deliberately excluded
+    # from both positive and negative identity evidence because viewpoint,
+    # light, reflections and wear can change it in either direction.
+    'structure', 'components', 'form_factor', 'distinctive_features',
+})
 _WEB_VISUAL_PHYSICAL_PROOF_AXES = frozenset({
     'structure', 'components', 'form_factor', 'silhouette', 'proportions',
     'shape_geometry', 'support_base',
@@ -9230,7 +9298,30 @@ _WEB_MATCH_SCORE_AXIS_CAPS = {
     'brand': 60,
     'orientation': 88,
 }
-_WEB_MATCH_SCORE_VERSION = 'universal_evidence_v14'
+_WEB_MATCH_SCORE_VERSION = 'product_identity_invariant_v16'
+_WEB_LEGACY_SIMILARITY_SCORE_KEYS = (
+    'visual_match_score', 'visual_score', 'model_match_score', 'match_score',
+)
+
+def _web_without_legacy_similarity_scores(value):
+    """Return a public row without any score that means image/text closeness."""
+    safe = dict(value or {})
+    for key in _WEB_LEGACY_SIMILARITY_SCORE_KEYS:
+        safe.pop(key, None)
+    return safe
+
+def _web_published_identity_is_exact(value):
+    """Keep result lanes consistent with the deployed identity threshold."""
+    row = value or {}
+    try:
+        percentage = int(row.get('identity_match_percentage'))
+    except (TypeError, ValueError):
+        return False
+    return bool(
+        row.get('match_percentage_final')
+        and percentage >= WEB_VISUAL_CLASSIFIER_EXACT_SCORE
+        and not row.get('conflicts')
+    )
 
 def _web_match_guard_is_hard(match_guard):
     """Only contradictions are immutable; an Exact claim may be visually audited."""
@@ -10044,7 +10135,6 @@ def _web_visual_profile_states(reference_profile, candidate_profile):
         ('installation', 'installation', False),
         ('support_base', 'support_base', False),
         ('power_source', 'power_source', False),
-        ('orientation', 'orientation', False),
         ('brand', 'brand', False),
         ('product_name', 'product_name', False),
         ('variant', 'variant', False),
@@ -10059,7 +10149,6 @@ def _web_visual_profile_states(reference_profile, candidate_profile):
         ('pattern', 'pattern', False),
         ('size_class', 'size_class', False),
         ('configuration', 'configuration', False),
-        ('condition', 'condition', False),
     ):
         state = _web_profile_scalar_state(
             reference_profile.get(field), candidate_profile.get(field), loose=loose,
@@ -10067,12 +10156,12 @@ def _web_visual_profile_states(reference_profile, candidate_profile):
         if state is None and _web_profile_code(candidate_profile.get(field)) and field in {
             'subtype', 'product_type', 'function', 'mounting', 'installation', 'support_base', 'power_source',
             'brand', 'product_name', 'variant', 'audience', 'form_factor', 'configuration',
-            'compatibility', 'condition',
+            'compatibility',
         }:
-            # A candidate-only sellable fact is not proof of equality. For
-            # Exact classification we fail closed; the card remains visible
-            # in Similar with a capped percentage.
-            state = 'different'
+            # A fact visible only in the merchant listing is not a conflict
+            # with a cropped/angled reference photo.  It remains unknown and
+            # therefore cannot prove Exact, but it must not lower identity.
+            state = 'unknown'
         if state:
             # Two profile fields can map to the same axis. A contradiction
             # always wins, then same, then unknown.
@@ -10084,7 +10173,7 @@ def _web_visual_profile_states(reference_profile, candidate_profile):
         reference_profile.get('product_role'), candidate_profile.get('product_role'), loose=False,
     )
     if role_state is None and _web_profile_code(candidate_profile.get('product_role')):
-        role_state = 'different'
+        role_state = 'unknown'
     if role_state:
         reference_role = _web_profile_code(reference_profile.get('product_role'))
         candidate_role = _web_profile_code(candidate_profile.get('product_role'))
@@ -10161,7 +10250,7 @@ def _web_visual_profile_states(reference_profile, candidate_profile):
         reference_profile.get('model'), candidate_profile.get('model'),
     )
     if model_state is None and _web_profile_code(candidate_profile.get('model')):
-        model_state = 'different'
+        model_state = 'unknown'
     if model_state:
         states['model'] = model_state
 
@@ -10190,7 +10279,7 @@ def _web_visual_profile_states(reference_profile, candidate_profile):
             # must agree; supersets can contain a second conflicting model.
             states['alphanumeric_identity'] = 'same'
     elif candidate_ids:
-        states['alphanumeric_identity'] = 'different'
+        states['alphanumeric_identity'] = 'unknown'
 
     reference_facts = _web_profile_evidence_text(reference_profile)
     candidate_facts = _web_profile_evidence_text(candidate_profile)
@@ -10210,7 +10299,7 @@ def _web_visual_profile_states(reference_profile, candidate_profile):
         ):
             states['dimensions'] = 'same'
     elif candidate_measures:
-        states['dimensions'] = 'different'
+        states['dimensions'] = 'unknown'
 
     reference_quantity = _web_profile_explicit_quantity(reference_profile)
     candidate_quantity = _web_profile_explicit_quantity(candidate_profile)
@@ -10222,7 +10311,7 @@ def _web_visual_profile_states(reference_profile, candidate_profile):
         if states.get('quantity_bundle') != 'different' or quantity_state == 'different':
             states['quantity_bundle'] = quantity_state
     elif candidate_quantity is not None:
-        states['quantity_bundle'] = 'different'
+        states['quantity_bundle'] = 'unknown'
 
     compatibility_state = _web_compatibility_state(
         reference_profile.get('compatibility'), candidate_profile.get('compatibility'),
@@ -10230,7 +10319,7 @@ def _web_visual_profile_states(reference_profile, candidate_profile):
     if compatibility_state:
         states['compatibility'] = compatibility_state
     elif _web_profile_code(candidate_profile.get('compatibility')):
-        states['compatibility'] = 'different'
+        states['compatibility'] = 'unknown'
 
     # Merchant-title facts are independent evidence, not optional AI prose.
     # If the reference provides no matching sellable fact, that axis is not
@@ -10250,17 +10339,18 @@ def _web_visual_profile_states(reference_profile, candidate_profile):
             for values in _web_profile_typed_identity_tokens(candidate_profile.get('identifiers')).values():
                 title_identifier_codes.update(values)
         authoritative_candidate_codes = title_model_codes | title_identifier_codes
-        if authoritative_candidate_codes and (
-            not reference_codes or not authoritative_candidate_codes <= reference_codes
-        ):
-            states['model'] = 'different'
-            states['alphanumeric_identity'] = 'different'
+        if authoritative_candidate_codes:
+            if reference_codes and not authoritative_candidate_codes <= reference_codes:
+                states['model'] = 'different'
+                states['alphanumeric_identity'] = 'different'
+            elif not reference_codes:
+                states['model'] = 'unknown'
+                states['alphanumeric_identity'] = 'unknown'
     if 'quantity_bundle' in title_axes and reference_quantity is None:
-        states['quantity_bundle'] = 'different'
+        states['quantity_bundle'] = 'unknown'
     if 'dimensions' in title_axes and not reference_measures:
-        states['dimensions'] = 'different'
+        states['dimensions'] = 'unknown'
     for axis, reference_field in (
-        ('condition', 'condition'),
         ('configuration', 'configuration'),
         ('compatibility', 'compatibility'),
         ('audience', 'audience'),
@@ -10269,7 +10359,7 @@ def _web_visual_profile_states(reference_profile, candidate_profile):
         ('form_factor', 'form_factor'),
     ):
         if axis in title_axes and not _web_profile_code(reference_profile.get(reference_field)):
-            states[axis] = 'different'
+            states[axis] = 'unknown'
     if 'variant' in title_axes:
         reference_variant_words = _web_profile_words([
             reference_profile.get('variant'),
@@ -10278,11 +10368,11 @@ def _web_visual_profile_states(reference_profile, candidate_profile):
             reference_profile.get('visible_markings'),
         ])
         candidate_variant_words = _web_profile_words(candidate_profile.get('variant'))
-        if candidate_variant_words and (
-            not reference_variant_words
-            or not candidate_variant_words <= reference_variant_words
-        ):
-            states['variant'] = 'different'
+        if candidate_variant_words:
+            if reference_variant_words and not candidate_variant_words <= reference_variant_words:
+                states['variant'] = 'different'
+            elif not reference_variant_words:
+                states['variant'] = 'unknown'
     return states
 
 def _web_visual_profile_conflicts(reference_profile, candidate_profile):
@@ -10312,89 +10402,169 @@ def _web_match_guard_percentage(match_guard):
         return 72
     return 55
 
+def _web_identity_axis_evidence(axes):
+    """Return view-invariant evidence sets used by the public match score.
+
+    AI image comparison supplies structured facts, never the percentage.  The
+    deterministic scorer below intentionally ignores capture orientation and
+    product condition.  Surface axes may support an unbranded item, but can
+    neither prove nor disprove identity on their own.
+    """
+    normalized = {
+        axis: str((axes or {}).get(axis) or 'unknown').strip().lower()
+        for axis in _WEB_VISUAL_AXES
+    }
+    same = {axis for axis, state in normalized.items() if state == 'same'}
+    different = {axis for axis, state in normalized.items() if state == 'different'}
+    identity_same = same - _WEB_IDENTITY_OBSERVATION_AXES
+    identity_different = different & _WEB_VISUAL_HARD_DIFFERENCE_AXES
+    observation_differences = different & _WEB_IDENTITY_OBSERVATION_AXES
+    surface_differences = different & _WEB_IDENTITY_SURFACE_AXES
+    return {
+        'same': identity_same,
+        'different': identity_different,
+        'observation_differences': observation_differences,
+        'surface_differences': surface_differences,
+        'identifiers': identity_same & _WEB_IDENTITY_IDENTIFIER_AXES,
+        'named': identity_same & _WEB_IDENTITY_NAMED_AXES,
+        'function': identity_same & _WEB_IDENTITY_FUNCTION_AXES,
+        'structure': identity_same & _WEB_IDENTITY_STRUCTURE_AXES,
+    }
+
+def _web_identity_percentage_from_evidence(axes, match_guard=None):
+    """Calibrate probability of the same product identity, not image likeness.
+
+    The returned number is derived from stable evidence tiers.  A visual-only
+    nearest neighbour with no product-identity evidence returns ``None``.
+    """
+    evidence = _web_identity_axis_evidence(axes)
+    same = evidence['same']
+    conflicts = evidence['different']
+    identifiers = evidence['identifiers']
+    named = evidence['named']
+    function = evidence['function']
+    structure = evidence['structure']
+
+    guard_percentage = _web_match_guard_percentage(match_guard)
+    if conflicts:
+        percentage = guard_percentage if guard_percentage is not None else 88
+        for axis in conflicts:
+            percentage = min(percentage, _WEB_MATCH_SCORE_AXIS_CAPS.get(axis, 88))
+        return max(0, min(WEB_VISUAL_CLASSIFIER_EXACT_SCORE - 1, int(percentage)))
+
+    # Exact barcode/GTIN/SKU/MPN or model agreement dominates presentation.
+    if 'alphanumeric_identity' in identifiers:
+        return 99 if (named or function) else 97
+    if 'model' in identifiers:
+        return 98 if (named or len(function) >= 2) else 95
+
+    # Named commercial identity: brand/name/printed variant plus at least one
+    # independent functional or structural confirmation.
+    if len(named) >= 4 and function:
+        return 96
+    if len(named) >= 3 and (function or structure):
+        return 94
+    if len(named) >= 2 and function and len(structure) >= 2:
+        return 92
+    if len(named) >= 2 and (function or len(structure) >= 2):
+        return 89
+
+    # Generic/unbranded products can be strongly supported by invariant
+    # topology, components and distinctive construction, but are not called
+    # an exact SKU without textual/model evidence.
+    if len(function) >= 2 and len(structure) >= 4:
+        return 84
+    if function and len(structure) >= 3:
+        return 78
+    if len(structure) >= 4:
+        return 72
+    if function and structure:
+        return 64
+
+    # A deterministic title/model guard may still carry identity evidence when
+    # a merchant image is unavailable.  It remains marked provisional for an
+    # image-origin search by the caller.
+    if guard_percentage is not None:
+        return int(guard_percentage)
+    return None
+
 def _web_match_score_metadata(
     *, is_exact, ai_item, match_guard, heuristic_exact, visual_review,
     visual_exact_unproven, use_ai_match, use_structured_match, confidence,
 ):
-    """Calibrate same-buyable-product probability without delaying results."""
+    """Return an identity percentage that is independent of capture quality."""
     ai_item = ai_item or {}
     axes = dict(ai_item.get('visual_axes') or {})
-    matched = [axis for axis in _WEB_VISUAL_AXES if axes.get(axis) == 'same']
-    conflicts = [axis for axis in _WEB_VISUAL_AXES if axes.get(axis) == 'different']
-    unknown = [axis for axis in _WEB_VISUAL_AXES if axes.get(axis) == 'unknown']
+    evidence = _web_identity_axis_evidence(axes)
+    matched = sorted(evidence['same'])
+    conflicts = sorted(evidence['different'])
+    observation_differences = sorted(evidence['observation_differences'])
+    surface_differences = sorted(evidence['surface_differences'])
+    identity_axes = set(_WEB_VISUAL_AXES) - _WEB_IDENTITY_OBSERVATION_AXES
+    unknown = sorted(axis for axis in identity_axes if axes.get(axis) == 'unknown')
+    stable_evidence = bool(
+        evidence['identifiers']
+        or evidence['named']
+        or evidence['function']
+        or evidence['structure']
+        or evidence['different']
+    )
 
-    raw_score = ai_item.get('model_match_score')
-    if raw_score is None:
-        raw_score = ai_item.get('visual_score')
-    try:
-        raw_score = max(0, min(100, int(round(float(raw_score)))))
-    except Exception:
-        raw_score = None
-
-    if use_ai_match and raw_score is not None:
-        percentage = raw_score
-        source = 'visual_ai' if ai_item.get('visual_evidence') else 'reference_text_ai'
-        final = bool(ai_item.get('visual_evidence') or not visual_review)
+    percentage = None
+    source = 'unavailable'
+    final = False
+    if use_ai_match:
+        # Gemini extracts stable evidence and an exact/similar decision.  The
+        # public percentage is intentionally computed here instead of copying
+        # a generative visual-similarity number.
+        # Never backfill a photo result from its Lens/OCR title hint.  The AI
+        # must expose stable axes from the actual reference/candidate pair.
+        percentage = _web_identity_percentage_from_evidence(
+            axes,
+            None if visual_review else match_guard,
+        )
+        source = 'identity_evidence_ai'
+        final = bool(stable_evidence and (ai_item.get('visual_evidence') or not visual_review))
     elif use_structured_match:
-        percentage = _web_match_guard_percentage(match_guard)
-        source = 'fingerprint'
-        final = _web_match_guard_is_anchor_independent(match_guard) or not visual_review
-    else:
-        percentage = 86 if heuristic_exact else 58
-        source = 'provisional_visual' if visual_review else 'rules'
-        final = not visual_review
+        source = 'identity_fingerprint'
+        if visual_review:
+            # A collection/non-product lock can classify the card, but it is
+            # not evidence that identifies the photographed product.  Keep
+            # the reason and lane while publishing no product-match percent.
+            percentage = None
+            final = False
+        else:
+            percentage = _web_identity_percentage_from_evidence(axes, match_guard)
+            final = bool(percentage is not None)
+    elif not visual_review:
+        percentage = 92 if heuristic_exact else None
+        source = 'identity_rules' if heuristic_exact else 'unavailable'
+        final = bool(heuristic_exact)
 
-    if percentage is None:
-        percentage = 58
+    # Missing identity evidence is represented honestly.  It is not replaced
+    # with 58%, 69% or any nearest-image similarity estimate.
+    if percentage is not None:
+        percentage = max(0, min(100, int(round(float(percentage)))))
+    else:
+        final = False
     if visual_exact_unproven:
-        percentage = min(89, percentage)
-        final = bool(use_ai_match and str(ai_item.get('match') or '') == 'similar')
+        final = False
+
+    effective_exact = bool(
+        is_exact
+        and final
+        and percentage is not None
+        and percentage >= WEB_VISUAL_CLASSIFIER_EXACT_SCORE
+        and not conflicts
+    )
+    if percentage is not None and not effective_exact:
+        percentage = min(WEB_VISUAL_CLASSIFIER_EXACT_SCORE - 1, percentage)
 
     known_count = len(matched) + len(conflicts)
-    trusted_identifier = bool(
-        {'model', 'alphanumeric_identity'} & set(matched)
-        and not ({'model', 'alphanumeric_identity'} & set(conflicts))
-    )
-    # A high model number with little supporting evidence is not a high
-    # probability. This is a score calibration only; it performs no I/O.
-    if use_ai_match and not trusted_identifier:
-        if known_count < 6:
-            percentage = min(percentage, 69)
-        elif known_count < 10:
-            percentage = min(percentage, 84)
-        elif known_count < 12:
-            percentage = min(percentage, 91)
-    for axis in conflicts:
-        percentage = min(percentage, _WEB_MATCH_SCORE_AXIS_CAPS.get(axis, 88))
-
-    if visual_review:
-        exact_evidence_ready = bool(
-            use_ai_match
-            and bool(ai_item.get('visual_evidence'))
-            and known_count >= 12
-            and raw_score is not None
-            and raw_score >= WEB_VISUAL_CLASSIFIER_EXACT_SCORE
-        )
-    else:
-        exact_evidence_ready = bool(
-            (use_structured_match and match_guard and str(match_guard[0]).lower() == 'exact')
-            or heuristic_exact
-            or (
-                use_ai_match
-                and raw_score is not None
-                and raw_score >= WEB_VISUAL_CLASSIFIER_EXACT_SCORE
-                and (trusted_identifier or known_count >= 12)
-            )
-        )
-    effective_exact = bool(is_exact and not conflicts and exact_evidence_ready)
-    if effective_exact:
-        percentage = max(WEB_VISUAL_CLASSIFIER_EXACT_SCORE, percentage)
-    else:
-        percentage = min(WEB_VISUAL_CLASSIFIER_EXACT_SCORE - 1, percentage)
-    percentage = max(0, min(100, int(percentage)))
-
-    evidence_coverage = int(round(known_count * 100 / max(1, len(_WEB_VISUAL_AXES))))
-    if percentage >= WEB_VISUAL_CLASSIFIER_EXACT_SCORE:
+    evidence_coverage = int(round(known_count * 100 / max(1, len(identity_axes))))
+    if percentage is None:
+        band = 'unknown'
+    elif percentage >= WEB_VISUAL_CLASSIFIER_EXACT_SCORE:
         band = 'exact'
     elif percentage >= 75:
         band = 'probable'
@@ -10402,18 +10572,27 @@ def _web_match_score_metadata(
         band = 'similar'
     else:
         band = 'low'
+    score_confidence = 0 if percentage is None else max(0, min(100, int(
+        (
+            match_guard[2]
+            if use_structured_match and not use_ai_match and match_guard
+            else confidence
+        ) or 0
+    )))
     return {
         'match_percentage': percentage,
+        'identity_match_percentage': percentage,
         'match_percentage_final': bool(final),
         'match_percentage_source': source,
         'match_band': band,
-        'match_score_confidence': max(0, min(100, int(
-            (match_guard[2] if use_structured_match and match_guard else confidence) or 0
-        ))),
+        'match_score_confidence': score_confidence,
         'match_evidence_coverage': evidence_coverage,
         'matched_attributes': matched,
         'conflicts': conflicts,
         'unknown_attributes': unknown,
+        'observation_differences': observation_differences,
+        'surface_differences': surface_differences,
+        'observation_quality': ai_item.get('observation_quality'),
         'match_score_version': _WEB_MATCH_SCORE_VERSION,
     }
 
@@ -10432,23 +10611,24 @@ def _web_fail_closed_visual_row(row, reason='visual_verification_pending'):
     safe['classification_source'] = 'visual_pending'
     safe['classification_reason'] = str(reason or 'visual_verification_pending')
     safe['classification_confidence'] = None
-    try:
-        percentage = int(round(float(safe.get('match_percentage'))))
-    except Exception:
-        try:
-            percentage = int(round(float(safe.get('visual_score'))))
-        except Exception:
-            percentage = 58
-    percentage = max(0, min(WEB_VISUAL_CLASSIFIER_EXACT_SCORE - 1, percentage))
-    safe['match_percentage'] = percentage
+    # Do not turn an unverified nearest-image score into a product-identity
+    # percentage.  The AI/fingerprint update will fill this once stable
+    # evidence exists; until then the UI should show no percentage.
+    safe['match_percentage'] = None
+    safe['identity_match_percentage'] = None
     safe['match_percentage_final'] = False
-    safe['match_percentage_source'] = 'provisional_visual'
-    safe['match_band'] = 'probable' if percentage >= 75 else ('similar' if percentage >= 40 else 'low')
+    safe['match_percentage_source'] = 'identity_unverified'
+    safe['match_band'] = 'unknown'
+    for key in _WEB_LEGACY_SIMILARITY_SCORE_KEYS:
+        safe.pop(key, None)
     safe.setdefault('match_score_confidence', 0)
     safe.setdefault('match_evidence_coverage', 0)
     safe.setdefault('matched_attributes', [])
     safe.setdefault('conflicts', [])
     safe.setdefault('unknown_attributes', list(_WEB_VISUAL_AXES))
+    safe.setdefault('observation_differences', [])
+    safe.setdefault('surface_differences', [])
+    safe.setdefault('observation_quality', None)
     safe['match_score_version'] = _WEB_MATCH_SCORE_VERSION
     try:
         rank = int(safe.get('market_rank', 99))
@@ -10458,64 +10638,41 @@ def _web_fail_closed_visual_row(row, reason='visual_verification_pending'):
         safe['market_scope'] = 'local' if rank == 0 else 'global'
     return safe
 
-def _web_visual_exact_proof_failure(axes, visual_score, reference_profile=None):
-    """Return the universal proof failure that prevents an image Exact label."""
-    different_axes = [
-        axis for axis, value in (axes or {}).items()
-        if value == 'different' and axis in _WEB_VISUAL_HARD_DIFFERENCE_AXES
-    ]
+def _web_visual_exact_proof_failure(axes, identity_score, reference_profile=None):
+    """Return why stable product-identity evidence cannot support Exact.
+
+    ``identity_score`` is accepted for compatibility/diagnostics, but the
+    decision is recomputed from evidence axes.  Camera angle, lighting,
+    shadows, background, crop, apparent scale, orientation and item condition
+    are never proof requirements and never mismatches.
+    """
+    evidence = _web_identity_axis_evidence(axes)
+    different_axes = sorted(evidence['different'])
     if different_axes:
-        return ('visual_hard_difference_' + different_axes[0], different_axes)
-    if visual_score < WEB_VISUAL_CLASSIFIER_EXACT_SCORE:
-        return ('visual_exact_score_too_low', different_axes)
-    same_axes = {axis for axis, value in (axes or {}).items() if value == 'same'}
-    if 'category' not in same_axes:
-        return ('visual_category_not_proven', different_axes)
-    if not (same_axes & _WEB_VISUAL_FUNCTION_PROOF_AXES):
-        return ('visual_function_not_proven', different_axes)
-    if not (same_axes & _WEB_VISUAL_TOPOLOGY_PROOF_AXES):
-        return ('visual_topology_not_proven', different_axes)
-    if len(same_axes & _WEB_VISUAL_PHYSICAL_PROOF_AXES) < 4:
-        return ('visual_physical_identity_not_proven', different_axes)
-    if len(same_axes) < 12:
-        return ('visual_identity_axes_not_proven', different_axes)
+        return ('identity_hard_difference_' + different_axes[0], different_axes)
+
+    evidence_percentage = _web_identity_percentage_from_evidence(axes)
+    if evidence_percentage is None or evidence_percentage < WEB_VISUAL_CLASSIFIER_EXACT_SCORE:
+        return ('identity_evidence_insufficient', different_axes)
+
+    same_axes = evidence['same']
     reference_profile = reference_profile or {}
+    # Facts visible on the reference that define a buyable variant must be
+    # confirmed before any model/barcode fast-path may declare Exact.  Unknown
+    # is not a mismatch, but it is not enough proof for Exact either.
     required_profile_proofs = (
-        (('subtype', 'product_type'), {'subtype'}, 'visual_subtype_not_proven'),
-        (('intended_use',), {'intended_use'}, 'visual_use_not_proven'),
-        (('audience',), {'audience'}, 'visual_audience_not_proven'),
-        (('function',), {'function'}, 'visual_function_not_proven'),
-        (('product_role',), {'product_role'}, 'visual_product_role_not_proven'),
-        (('mounting',), {'mounting'}, 'visual_mounting_not_proven'),
-        (('installation',), {'installation'}, 'visual_installation_not_proven'),
-        (('support_base',), {'support_base'}, 'visual_support_not_proven'),
-        (('power_source',), {'power_source'}, 'visual_power_source_not_proven'),
-        (('orientation',), {'orientation'}, 'visual_orientation_not_proven'),
-        (('brand',), {'brand'}, 'visual_brand_not_proven'),
-        (('product_name',), {'product_name'}, 'visual_product_name_not_proven'),
-        (('model',), {'model'}, 'visual_model_not_proven'),
-        (('identifiers',), {'alphanumeric_identity'}, 'visual_identifier_not_proven'),
-        (('variant',), {'variant'}, 'visual_variant_not_proven'),
-        (('visible_text',), {'text_identity'}, 'visual_text_not_proven'),
-        (('visible_markings',), {'visible_markings'}, 'visual_markings_not_proven'),
-        (('structure',), {'structure'}, 'visual_structure_not_proven'),
-        (('components',), {'components'}, 'visual_components_not_proven'),
-        (('form_factor',), {'form_factor'}, 'visual_form_not_proven'),
-        (('silhouette',), {'silhouette'}, 'visual_silhouette_not_proven'),
-        (('proportions',), {'proportions'}, 'visual_proportions_not_proven'),
-        (('shape_geometry',), {'shape_geometry'}, 'visual_geometry_not_proven'),
-        (('material',), {'material'}, 'visual_material_not_proven'),
-        (('texture',), {'texture'}, 'visual_texture_not_proven'),
-        (('finish',), {'finish'}, 'visual_finish_not_proven'),
-        (('colors',), {'color'}, 'visual_color_not_proven'),
-        (('pattern',), {'pattern'}, 'visual_pattern_not_proven'),
-        (('distinctive_features',), {'distinctive_features'}, 'visual_features_not_proven'),
-        (('numbers_units', 'dimensions'), {'dimensions'}, 'visual_dimensions_not_proven'),
-        (('size_class',), {'size_class'}, 'visual_size_class_not_proven'),
-        (('quantity_bundle',), {'quantity_bundle'}, 'visual_quantity_not_proven'),
-        (('configuration',), {'configuration'}, 'visual_configuration_not_proven'),
-        (('compatibility',), {'compatibility'}, 'visual_compatibility_not_proven'),
-        (('condition',), {'condition'}, 'visual_condition_not_proven'),
+        (('brand',), {'brand'}, 'identity_brand_not_proven'),
+        (('product_name',), {'product_name'}, 'identity_product_name_not_proven'),
+        (('model',), {'model'}, 'identity_model_not_proven'),
+        (('identifiers',), {'alphanumeric_identity'}, 'identity_identifier_not_proven'),
+        (('variant',), {'variant'}, 'identity_variant_not_proven'),
+        (('visible_text',), {'text_identity'}, 'identity_text_not_proven'),
+        (('visible_markings',), {'visible_markings'}, 'identity_markings_not_proven'),
+        (('size_class',), {'size_class'}, 'identity_size_not_proven'),
+        (('dimensions', 'numbers_units'), {'dimensions'}, 'identity_dimensions_not_proven'),
+        (('quantity_bundle',), {'quantity_bundle'}, 'identity_quantity_not_proven'),
+        (('configuration',), {'configuration'}, 'identity_configuration_not_proven'),
+        (('compatibility',), {'compatibility'}, 'identity_compatibility_not_proven'),
     )
     for profile_fields, proof_axes, reason in required_profile_proofs:
         has_reference_fact = any(
@@ -10524,6 +10681,21 @@ def _web_visual_exact_proof_failure(axes, visual_score, reference_profile=None):
         )
         if has_reference_fact and not (proof_axes & same_axes):
             return (reason, different_axes)
+
+    # A trusted matching model/GTIN/SKU/MPN plus one independent named or
+    # functional fact is sufficient even when glare/crop hides most geometry.
+    if evidence['identifiers'] and (evidence['named'] or evidence['function']):
+        return ('', different_axes)
+
+    # Without a decisive identifier, require a commercial name/text signal
+    # and independent semantic topology.  Surface appearance never supplies
+    # this proof, so matching light/background cannot inflate the result.
+    if len(evidence['named']) < 2:
+        return ('identity_name_not_proven', different_axes)
+    if not evidence['function']:
+        return ('identity_function_not_proven', different_axes)
+    if len(evidence['structure']) < 2:
+        return ('identity_structure_not_proven', different_axes)
     return ('', different_axes)
 
 def _web_ai_classifier_db_init():
@@ -10557,10 +10729,12 @@ def _web_ai_classifier_cache_key(identity, results, market, visual_context=None)
             'locked_market': (row or {}).get('_locked_market'),
         })
     material = {
-        'v': 17,
+        'v': 20,
         'country': str((market or {}).get('country') or DEFAULT_COUNTRY).lower(),
-        'identity': _web_clean_classification_identity(identity).lower(),
-        'source_identity': _web_clean_classification_identity((visual_context or {}).get('source_identity')).lower(),
+        # A photo audit is keyed by the image bytes, not by a fallible Lens
+        # caption.  Changing that caption cannot change or select the verdict.
+        'identity': '' if visual_context else _web_clean_classification_identity(identity).lower(),
+        'source_identity': '',
         'reference_image': _web_visual_reference_digest((visual_context or {}).get('image_b64')),
         'rows': rows,
     }
@@ -10599,6 +10773,18 @@ def _web_ai_classifier_cache_put(key, value, ttl_seconds=None):
             ''', (key, json.dumps(value, ensure_ascii=False, separators=(',', ':')), now, now + (ttl_seconds or WEB_AI_CLASSIFIER_CACHE_TTL_SECONDS)))
     except Exception as e:
         print(f'WEB AI CLASSIFIER CACHE PUT ERR: {e}')
+
+def _web_ai_reference_context(reference_identity, identity, visual_mode):
+    """Build reference input without leaking a Lens guess into photo proof."""
+    if visual_mode:
+        return {'reference_source': 'reference_image_only'}
+    reference_identity = _web_clean_classification_identity(reference_identity)
+    return {
+        'reference_source': 'text_query',
+        'reference_identity': reference_identity,
+        'classification_anchor': _web_clean_classification_identity(identity),
+        'reference_fingerprint': _web_product_fingerprint(reference_identity),
+    }
 
 def _web_ai_classifier_request(identity, results, market, visual_context=None, cancel_event=None):
     """Classify one captured batch with one text or multimodal Gemini request."""
@@ -10653,10 +10839,12 @@ Classify every candidate independently on MATCH and MARKET. Never browse, add, r
 
 REFERENCE-FIRST RULE:
 - REFERENCE_IMAGE is the ground truth for the requested physical product. reference_identity is only a Lens/OCR hint. Never let a candidate title, the majority of results, price, merchant or visual resemblance rewrite the reference product.
+- In a photo audit, no reference_identity, classification_anchor or reference_fingerprint is supplied. Derive reference_profile exclusively from REFERENCE_IMAGE; never infer it from candidate titles or their consensus.
+- Use reference_identity only as a search hint unless its words, letters or numbers are supported by the reference image. A nearest-looking Lens label is not identity evidence.
 - Read visible reference text carefully: brand, product name, model, variant/flavour/scent/shade, capacity, strength and count. SALT is not TONKA. One model, scent, shade, flavour, generation, edition or size is not another.
 - CANDIDATE_IMAGE shows appearance. The candidate's complete title/URL is authoritative for candidate-only hidden facts such as exact model, pack count, compatibility, accessory status and variant. Candidate evidence may clarify that candidate; it must never alter the reference identity.
 
-EXACT MEANS THE SAME BUYABLE PRODUCT AND VARIANT, not the same category or a look-alike. All observable identity-critical attributes must agree: category, subtype, function/use, intended audience/gender/age, brand/product line, product name, model/generation, variant, form factor, components, configuration, compatibility, condition, size/capacity/dimensions, quantity, material/finish, pattern and color. Any meaningful conflict => similar. Unknown or insufficient proof => similar.
+EXACT MEANS THE SAME PRODUCT IDENTITY AND COMMERCIAL VARIANT, not the same category or a look-alike. Identity-critical attributes include category, subtype, function/use, brand/product line, product name, model/generation, printed variant, form factor, components, configuration, compatibility, size/capacity/dimensions and quantity. New, used, refurbished, scratched, faded, dented or otherwise worn examples of the same model remain the same product identity. Surface color/material/finish/pattern is identity-critical only when text, model data or a clearly named commercial colorway/finish proves it; an apparent image-only difference is not a conflict. Unknown evidence is unknown, never automatically different.
 
 IDENTITY EVIDENCE AND TOPOLOGY:
 - First extract a domain-neutral fingerprint for the reference and each candidate. Product function, product role (main product/accessory/replacement/refill/bundle), installation or mounting, support/base topology and component connections outrank broad silhouette and color.
@@ -10665,21 +10853,22 @@ IDENTITY EVIDENCE AND TOPOLOGY:
 - Read every visible letter, logo, number and unit from the reference. Compare exact alphanumeric identifiers conservatively: XM4 is not XM5, A1502 is not A150Z, 125 ml is not 100 ml, 128 GB is not 256 GB and 1-pack is not 3-pack. Unit conversion is allowed only when values are truly equivalent.
 - Repeated copies installed in a room or lifestyle scene are scene_instances, not evidence of a multipack. Compare quantity_bundle only from retail packaging, listing text, or a clearly sold set.
 - The candidate title/URL and visible candidate text are authoritative candidate facts. If candidate imagery looks like one product but its title names another type, model, function, mounting or variant, report the conflict and keep it similar.
-- Fill reference_profile and candidate_profile with the same field set. Use consistent lower_snake_case canonical values for equivalent facts inside this response. audience means the explicitly shown or named intended gender/age group; unknown is not equality. variant means a printed/named scent, flavour, shade, colorway, edition or trim; do not invent a variant from incidental lighting alone.
+- Fill reference_profile and candidate_profile with the same field set. Use consistent lower_snake_case canonical values for equivalent facts inside this response. audience means the explicitly shown or named intended gender/age group. variant means a printed/named scent, flavour, shade, colorway, edition or trim; do not invent a variant from incidental lighting alone. Keep orientation and condition only as observations; never put them in same_axes/different_axes and never use them for match or identity_score.
 
 UNIVERSAL CATEGORY CHECKS:
 - Furniture/home: function first (planter vs umbrella stand vs candle), then geometry, openings, arms/legs/back, proportions, dimensions, construction, material, finish, texture, pattern, color and included pieces.
 - Fragrance/cosmetics/consumables: brand, line, exact name, scent/flavour/shade, EDT/EDP/parfum/spray form, concentration/strength, volume, edition and pack count. Nearly identical packaging with a different printed variant is similar.
 - Electronics/appliances: brand, exact model/part number, generation, tier, capacity, connectivity/region, configuration, color and bundle. Accessory/replacement part is not the main device.
 - Fashion/footwear: product type, cut/silhouette, material, pattern, colorway, size/gender and edition.
-- Food/medicine/supplements: exact product, flavour/variant, strength, weight/volume, dosage, count and condition.
+- Food/medicine/supplements: exact product, flavour/variant, strength, weight/volume, dosage and count. Package wear/condition is not identity.
 - Automotive/tools/parts: exact part number, function, dimensions, fitment/compatibility, generation and included pieces.
 - Sets/bundles: single item, multipack, set, refill, sample, membership-only offer and main product are different variants.
 
-VISUAL COMPARISON:
-- Ignore background, scene, camera angle, crop, apparent scale, lighting, shadows, people, watermarks and retail-page chrome. Do not compare incidental contents such as a plant, food or liquid as part of the product; scene context may help infer function only when the object's own geometry supports it.
-- Shared color, broad shape, material or category never proves exact by itself. Compare topology/components, functional openings, silhouette, proportions, construction, texture/finish and distinctive details.
-- visual_score is the estimated probability from 0-100 that the offer is the same buyable product and variant, not a generic visual-similarity score. Use 92+ only when the same exact design and variant are proven with no meaningful conflict.
+PRODUCT-IDENTITY VERIFICATION:
+- First mentally normalize both images to the same neutral view. Ignore background, scene, camera angle, perspective, crop, rotation, apparent scale, lighting, exposure, white balance, shadows, glare, reflections, people, watermarks, retail-page chrome, wear and product condition. A difference explained by any of these factors must be unknown, not different, and must not reduce identity_score.
+- Shared color, broad shape, material or category never proves identity by itself. Compare readable brand/model/SKU/letters/numbers first, then function/topology/components, functional openings, view-invariant geometry, construction and distinctive details.
+- identity_score is the estimated probability from 0-100 that this is the same product identity and commercial variant after removing every capture/condition factor above. It is NOT image similarity. Use 92+ only when stable identity evidence proves the product; use no high score for a merely close visual neighbour.
+- observation_quality is a separate integer 0-100 describing how much stable evidence is visible. Low observation_quality must not lower identity_score; it increases unknown axes instead. If stable identity evidence is insufficient, return match=similar with identity_score=0 and reason=uncertain so the server can show no percentage rather than invent one.
 - Report only axes you can establish. Put them in same_axes or different_axes using names from AXES. Omitted axes are unknown.
 AXES: category, subtype, intended_use, audience, function, product_role, mounting, installation, support_base, power_source, orientation, brand, product_name, model, variant, structure, components, form_factor, silhouette, proportions, shape_geometry, material, texture, finish, color, pattern, distinctive_features, size_class, dimensions, quantity_bundle, configuration, compatibility, condition, text_identity, visible_markings, alphanumeric_identity.
 
@@ -10691,12 +10880,10 @@ LOCKS:
 - A non-empty locked_match or locked_market is proven. Copy it exactly and classify only the unlocked axis.
 
 Return strict compact JSON only:
-{"identity":"reference product","reference_profile":{"category":"","subtype":"","object_family":"","product_type":"","intended_use":"","audience":"","function":"","product_role":"unknown","mounting":"unknown","installation":"unknown","support_base":"unknown","power_source":"unknown","orientation":"","brand":"","product_name":"","model":"","variant":"","visible_text":"","identifiers":[],"numbers_units":[],"visible_markings":[],"structure":"","components":[],"form_factor":"","silhouette":"","proportions":"","shape_geometry":"","material":"","texture":"","finish":"","colors":[],"pattern":"","size_class":"","dimensions":"","quantity_bundle":"","configuration":"","compatibility":"","condition":"","distinctive_features":[]},"items":[{"id":0,"match":"exact|similar","market":"local|global","confidence":0,"visual_score":0,"candidate_profile":{"category":"","subtype":"","object_family":"","product_type":"","intended_use":"","audience":"","function":"","product_role":"unknown","mounting":"unknown","installation":"unknown","support_base":"unknown","power_source":"unknown","orientation":"","brand":"","product_name":"","model":"","variant":"","visible_text":"","identifiers":[],"numbers_units":[],"visible_markings":[],"structure":"","components":[],"form_factor":"","silhouette":"","proportions":"","shape_geometry":"","material":"","texture":"","finish":"","colors":[],"pattern":"","size_class":"","dimensions":"","quantity_bundle":"","configuration":"","compatibility":"","condition":"","distinctive_features":[]},"same_axes":["category"],"different_axes":["variant"],"differences":["short factual difference"],"match_reason":"same_product|different_category|different_function|different_audience|different_name|different_model|different_variant|different_structure|different_components|different_form|different_color|different_material|different_size|different_quantity|different_compatibility|different_condition|accessory|wrong_product|uncertain","market_reason":"local_storefront|foreign_storefront|uncertain"}]}.
+{"identity":"reference product","reference_profile":{"category":"","subtype":"","object_family":"","product_type":"","intended_use":"","audience":"","function":"","product_role":"unknown","mounting":"unknown","installation":"unknown","support_base":"unknown","power_source":"unknown","orientation":"","brand":"","product_name":"","model":"","variant":"","visible_text":"","identifiers":[],"numbers_units":[],"visible_markings":[],"structure":"","components":[],"form_factor":"","silhouette":"","proportions":"","shape_geometry":"","material":"","texture":"","finish":"","colors":[],"pattern":"","size_class":"","dimensions":"","quantity_bundle":"","configuration":"","compatibility":"","condition":"","distinctive_features":[]},"items":[{"id":0,"match":"exact|similar","market":"local|global","confidence":0,"identity_score":0,"observation_quality":0,"candidate_profile":{"category":"","subtype":"","object_family":"","product_type":"","intended_use":"","audience":"","function":"","product_role":"unknown","mounting":"unknown","installation":"unknown","support_base":"unknown","power_source":"unknown","orientation":"","brand":"","product_name":"","model":"","variant":"","visible_text":"","identifiers":[],"numbers_units":[],"visible_markings":[],"structure":"","components":[],"form_factor":"","silhouette":"","proportions":"","shape_geometry":"","material":"","texture":"","finish":"","colors":[],"pattern":"","size_class":"","dimensions":"","quantity_bundle":"","configuration":"","compatibility":"","condition":"","distinctive_features":[]},"same_axes":["category"],"different_axes":["variant"],"differences":["short factual difference"],"match_reason":"same_product|different_category|different_function|different_audience|different_name|different_model|different_variant|different_structure|different_components|different_form|different_color|different_material|different_size|different_quantity|different_compatibility|accessory|wrong_product|uncertain","market_reason":"local_storefront|foreign_storefront|uncertain"}]}.
 Include every supplied id exactly once. Confidence is an integer 0-100.'''
     user_data = {
-        'reference_identity': reference_identity,
-        'classification_anchor': _web_clean_classification_identity(identity),
-        'reference_fingerprint': _web_product_fingerprint(reference_identity),
+        **_web_ai_reference_context(reference_identity, identity, visual_mode),
         'user_country_code': country,
         'user_country_name': country_name,
         'user_currency': str((market or {}).get('currency') or ''),
@@ -10760,7 +10947,10 @@ Include every supplied id exactly once. Confidence is an integer 0-100.'''
             try:
                 index = int(item.get('id'))
                 confidence = max(0, min(100, int(float(item.get('confidence', 0)))))
-                visual_score = max(0, min(100, int(float(item.get('visual_score', 0)))))
+                identity_score = max(0, min(100, int(float(
+                    item.get('identity_score', item.get('model_match_score', item.get('visual_score', 0)))
+                ))))
+                observation_quality = max(0, min(100, int(float(item.get('observation_quality', 0)))))
             except Exception:
                 continue
             match_type = str(item.get('match') or '').strip().lower()
@@ -10789,37 +10979,37 @@ Include every supplied id exactly once. Confidence is an integer 0-100.'''
             # Candidate title/URL facts are merchant-authored and therefore
             # override an AI profile that accidentally copies the reference.
             # This closes cross-field lies (reference SKU A1502 while the
-            # title says A1708), candidate-only pack/condition/generation,
+            # title says A1708), candidate-only pack/generation,
             # and named-variant additions before Exact can be emitted.
             merchant_title_guard = _web_semantic_match_guard(reference_identity, candidate_input)
+            if (
+                visual_mode
+                and merchant_title_guard
+                and not _web_match_guard_is_anchor_independent(merchant_title_guard)
+            ):
+                # ``reference_identity`` is only a Lens/OCR search hint in a
+                # photo search.  It must never overrule the identity profile
+                # extracted from the actual reference image.  Candidate-title
+                # facts are already merged above and compared to that profile.
+                merchant_title_guard = None
             merchant_conflict_axis = _web_match_guard_conflict_axis(merchant_title_guard)
             if merchant_conflict_axis:
                 profile_states[merchant_conflict_axis] = 'different'
                 axes[merchant_conflict_axis] = 'different'
                 item['match_reason'] = 'merchant_' + str(merchant_title_guard[1] or 'title_conflict')
             profile_conflicts = [
-                axis for axis, state in profile_states.items() if state == 'different'
+                axis for axis, state in profile_states.items()
+                if state == 'different' and axis in _WEB_VISUAL_HARD_DIFFERENCE_AXES
             ]
             has_visual_evidence = bool(visual_mode and index in visual_evidence_ids)
             locked_match = str(candidate_input.get('locked_match') or '').lower()
             if locked_match in ('exact', 'similar'):
                 match_type = locked_match
             elif match_type == 'exact' and not has_visual_evidence and not visual_mode:
-                known_axes = {
-                    axis for axis, value in axes.items()
-                    if value in ('same', 'different')
-                }
-                trusted_identifier = bool(
-                    {'model', 'alphanumeric_identity'}
-                    & {axis for axis, value in axes.items() if value == 'same'}
-                ) and not bool(
-                    {'model', 'alphanumeric_identity'}
-                    & {axis for axis, value in axes.items() if value == 'different'}
-                )
                 if (
-                    visual_score < WEB_VISUAL_CLASSIFIER_EXACT_SCORE
+                    (_web_identity_percentage_from_evidence(axes, merchant_title_guard) or 0)
+                    < WEB_VISUAL_CLASSIFIER_EXACT_SCORE
                     or profile_conflicts
-                    or (not trusted_identifier and len(known_axes) < 12)
                 ):
                     match_type = 'similar'
                     item['match_reason'] = 'text_exact_evidence_insufficient'
@@ -10837,10 +11027,13 @@ Include every supplied id exactly once. Confidence is an integer 0-100.'''
             if has_visual_evidence:
                 proof_failure, different_axes = _web_visual_exact_proof_failure(
                     axes,
-                    visual_score,
+                    identity_score,
                     reference_profile,
                 )
-                if match_type == 'exact' and proof_failure:
+                if not proof_failure and locked_match != 'similar':
+                    match_type = 'exact'
+                    item['match_reason'] = 'stable_identity_evidence'
+                elif match_type == 'exact' and proof_failure:
                     match_type = 'similar'
                     item['match_reason'] = proof_failure
                 if not differences:
@@ -10853,8 +11046,9 @@ Include every supplied id exactly once. Confidence is an integer 0-100.'''
                 'match': match_type,
                 'market': market_scope,
                 'confidence': confidence,
-                'model_match_score': visual_score,
-                'visual_score': visual_score if has_visual_evidence else None,
+                'identity_match_score': identity_score,
+                'identity_score': identity_score,
+                'observation_quality': observation_quality,
                 'visual_evidence': has_visual_evidence,
                 'visual_axes': axes,
                 'visual_differences': differences,
@@ -11068,35 +11262,23 @@ def _web_attach_captured_result_sections(payload, lang, allow_ai=True, cancel_ev
             and (ai_match_value != 'exact' or not needs_visual_exact_proof or visual_evidence)
         )
         ai_axes_for_proof = dict(ai_item.get('visual_axes') or {})
-        ai_known_for_proof = {
-            axis for axis, value in ai_axes_for_proof.items()
-            if value in ('same', 'different')
-        }
         ai_conflicts_for_proof = {
             axis for axis, value in ai_axes_for_proof.items()
-            if value == 'different'
+            if value == 'different' and axis in _WEB_VISUAL_HARD_DIFFERENCE_AXES
         }
-        ai_trusted_identifier = bool(
-            {'model', 'alphanumeric_identity'}
-            & {axis for axis, value in ai_axes_for_proof.items() if value == 'same'}
-        ) and not bool({'model', 'alphanumeric_identity'} & ai_conflicts_for_proof)
-        try:
-            ai_score_for_proof = max(0, min(100, int(round(float(
-                ai_item.get('model_match_score') if ai_item.get('model_match_score') is not None
-                else ai_item.get('visual_score', 0)
-            )))))
-        except Exception:
-            ai_score_for_proof = 0
+        ai_score_for_proof = _web_identity_percentage_from_evidence(
+            ai_axes_for_proof,
+            None if visual_review else match_guard,
+        )
         text_ai_exact_unproven = bool(
             not visual_review
             and use_ai_match
             and ai_match_value == 'exact'
             and not (match_guard and str(match_guard[0] or '').lower() == 'exact')
             and (
-                ai_score_for_proof < WEB_VISUAL_CLASSIFIER_EXACT_SCORE
+                (ai_score_for_proof or 0) < WEB_VISUAL_CLASSIFIER_EXACT_SCORE
                 or
                 ai_conflicts_for_proof
-                or (not ai_trusted_identifier and len(ai_known_for_proof) < 12)
             )
         )
         use_structured_match = match_guard is not None and not use_ai_match
@@ -11127,15 +11309,14 @@ def _web_attach_captured_result_sections(payload, lang, allow_ai=True, cancel_ev
         defensive_proof_failure = ''
         if is_exact and needs_visual_exact_proof:
             try:
-                defensive_visual_score = max(0, min(100, int(round(float(
-                    ai_item.get('visual_score') if ai_item.get('visual_score') is not None
-                    else ai_item.get('model_match_score', 0)
+                defensive_identity_score = max(0, min(100, int(round(float(
+                    ai_item.get('identity_match_score', ai_item.get('identity_score', 0))
                 )))))
             except Exception:
-                defensive_visual_score = 0
+                defensive_identity_score = 0
             defensive_proof_failure, _ = _web_visual_exact_proof_failure(
                 dict(ai_item.get('visual_axes') or {}),
-                defensive_visual_score,
+                defensive_identity_score,
                 dict(ai_result.get('reference_profile') or {}),
             )
             if defensive_proof_failure:
@@ -11144,8 +11325,8 @@ def _web_attach_captured_result_sections(payload, lang, allow_ai=True, cancel_ev
                 # create an Exact card or trigger the Exact score floor.
                 is_exact = False
         if is_exact and any(
-            value == 'different'
-            for value in dict(ai_item.get('visual_axes') or {}).values()
+            value == 'different' and axis in _WEB_VISUAL_HARD_DIFFERENCE_AXES
+            for axis, value in dict(ai_item.get('visual_axes') or {}).items()
         ):
             is_exact = False
         if use_structured_market:
@@ -11168,7 +11349,7 @@ def _web_attach_captured_result_sections(payload, lang, allow_ai=True, cancel_ev
         if use_structured_match or use_structured_market:
             source_parts.append('fingerprint')
         if use_ai:
-            source_parts.append('visual_ai' if visual_evidence else 'ai')
+            source_parts.append('identity_ai' if visual_evidence else 'ai')
         if visual_exact_unproven:
             source_parts.append('visual_pending')
         if not source_parts:
@@ -11184,9 +11365,13 @@ def _web_attach_captured_result_sections(payload, lang, allow_ai=True, cancel_ev
         if ai_item.get('visual_axes'):
             row['visual_axes'] = dict(ai_item.get('visual_axes') or {})
             row['visual_differences'] = list(ai_item.get('visual_differences') or [])[:5]
-        if visual_evidence:
-            row['visual_match_score'] = ai_item.get('visual_score')
-            row['visual_classification_confidence'] = confidence
+        if use_ai_match:
+            row['identity_match_score'] = _web_identity_percentage_from_evidence(
+                dict(ai_item.get('visual_axes') or {}),
+                None if visual_review else match_guard,
+            )
+            row['observation_quality'] = ai_item.get('observation_quality')
+            row['identity_classification_confidence'] = confidence
         score_metadata = _web_match_score_metadata(
             is_exact=is_exact,
             ai_item=ai_item,
@@ -11199,6 +11384,18 @@ def _web_attach_captured_result_sections(payload, lang, allow_ai=True, cancel_ev
             confidence=confidence,
         )
         row.update(score_metadata)
+        # The published section must agree with the configured identity-score
+        # threshold as well as the proof decision.  This also remains correct
+        # if deployment raises WEB_VISUAL_CLASSIFIER_EXACT_SCORE above 92.
+        is_exact = bool(is_exact and _web_published_identity_is_exact(row))
+        # Legacy clients may otherwise prefer an old image-similarity field.
+        # Never publish those keys, even when an identity percentage exists.
+        for key in _WEB_LEGACY_SIMILARITY_SCORE_KEYS:
+            row.pop(key, None)
+        row['exact'] = is_exact
+        row['is_exact'] = is_exact
+        row['match'] = 'exact' if is_exact else 'similar'
+        row['section'] = 'exact' if is_exact else 'similar'
         if is_exact:
             row['match_type'] = 'exact'
             row['result_section'] = 'exact'
@@ -11221,7 +11418,10 @@ def _web_attach_captured_result_sections(payload, lang, allow_ai=True, cancel_ev
     # snapshot.  Return the same cards in the same order with classification
     # metadata and corrected market labels attached.  The untouched captured
     # list remains available for diagnostics and compatibility checks.
-    out['captured_results'] = original_results if original_results is not None else []
+    out['captured_results'] = [
+        _web_without_legacy_similarity_scores(row)
+        for row in (original_results or [])
+    ]
     out['results'] = classified_results
     out['exact_results'] = exact_results
     out['similar_results'] = similar_results
@@ -14524,4 +14724,4 @@ async def web_api_image_search(request: Request):
 
 @app.get('/')
 async def health():
-    return {'status': BUILD_ID, 'lens_direct_mode': LENS_DIRECT_MODE, 'fast_lens': USE_FAST_LENS_PIPELINE, 'v106_pipeline': USE_V106_5_RESULT_PIPELINE, 'text_search_whatsapp_parity': TEXT_SEARCH_WHATSAPP_PARITY, 'serpapi_cache': SERPAPI_RESULT_CACHE_ENABLED, 'serpapi_singleflight': SERPAPI_SINGLEFLIGHT_ENABLED, 'ai_result_classifier': WEB_AI_CLASSIFIER_ENABLED, 'ai_classifier_timeout_seconds': WEB_AI_CLASSIFIER_TIMEOUT_SECONDS, 'visual_result_classifier': WEB_VISUAL_CLASSIFIER_ENABLED, 'visual_classifier_timeout_seconds': WEB_VISUAL_CLASSIFIER_TIMEOUT_SECONDS, 'visual_classifier_max_results': WEB_VISUAL_CLASSIFIER_MAX_RESULTS, 'visual_exact_score': WEB_VISUAL_CLASSIFIER_EXACT_SCORE, 'visual_exact_policy': 'reference_first_all_products', 'match_score_version': _WEB_MATCH_SCORE_VERSION, 'build': BUILD_ID, 'market_source': 'phone_prefix_or_explicit_client_country', 'languages': ['ar','en','de','fr','it','es','pt','tr','ru','ja','zh','ko','hi','ur','id','ms']}
+    return {'status': BUILD_ID, 'lens_direct_mode': LENS_DIRECT_MODE, 'fast_lens': USE_FAST_LENS_PIPELINE, 'v106_pipeline': USE_V106_5_RESULT_PIPELINE, 'text_search_whatsapp_parity': TEXT_SEARCH_WHATSAPP_PARITY, 'serpapi_cache': SERPAPI_RESULT_CACHE_ENABLED, 'serpapi_singleflight': SERPAPI_SINGLEFLIGHT_ENABLED, 'ai_result_classifier': WEB_AI_CLASSIFIER_ENABLED, 'ai_classifier_timeout_seconds': WEB_AI_CLASSIFIER_TIMEOUT_SECONDS, 'visual_result_classifier': WEB_VISUAL_CLASSIFIER_ENABLED, 'visual_classifier_timeout_seconds': WEB_VISUAL_CLASSIFIER_TIMEOUT_SECONDS, 'visual_classifier_max_results': WEB_VISUAL_CLASSIFIER_MAX_RESULTS, 'visual_exact_score': WEB_VISUAL_CLASSIFIER_EXACT_SCORE, 'visual_exact_policy': 'view_invariant_product_identity', 'identity_match_policy': 'identifiers_text_function_structure_no_capture_or_condition_penalty', 'match_score_version': _WEB_MATCH_SCORE_VERSION, 'build': BUILD_ID, 'market_source': 'phone_prefix_or_explicit_client_country', 'languages': ['ar','en','de','fr','it','es','pt','tr','ru','ja','zh','ko','hi','ur','id','ms']}
