@@ -23,7 +23,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept'], max_age=86400)
-BUILD_ID = 'v107.43-independent-product-identity-evidence'
+BUILD_ID = 'v107.44-reviewed-identity-estimates'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -9298,7 +9298,7 @@ _WEB_MATCH_SCORE_AXIS_CAPS = {
     'brand': 60,
     'orientation': 88,
 }
-_WEB_MATCH_SCORE_VERSION = 'product_identity_independent_evidence_v17'
+_WEB_MATCH_SCORE_VERSION = 'product_identity_reviewed_estimates_v18'
 _WEB_LEGACY_SIMILARITY_SCORE_KEYS = (
     'visual_match_score', 'visual_score', 'model_match_score', 'match_score',
 )
@@ -10546,6 +10546,21 @@ def _web_match_score_metadata(
 
     # Missing identity evidence is represented honestly.  It is not replaced
     # with 58%, 69% or any nearest-image similarity estimate.
+    # Classification confidence decides the Exact lane, not whether a user
+    # can see a supported preliminary identity estimate. Only an actual
+    # reference/candidate image review qualifies; never use Lens rank or the
+    # model's raw visual score. Non-product/collection locks still win.
+    if (
+        percentage is None and visual_review and not use_ai_match
+        and ai_item.get('visual_evidence') and stable_evidence
+        and 0 < confidence < WEB_VISUAL_CLASSIFIER_MIN_CONFIDENCE
+        and str(ai_item.get('match') or '').lower() in {'exact', 'similar'}
+        and not _web_match_guard_is_anchor_independent(match_guard)
+    ):
+        percentage = _web_identity_percentage_from_evidence(axes)
+        if percentage is not None:
+            source = 'provisional_identity_evidence_ai'
+            final = False
     if percentage is not None:
         percentage = max(0, min(100, int(round(float(percentage)))))
     else:
@@ -10598,6 +10613,11 @@ def _web_match_score_metadata(
         'observation_quality': ai_item.get('observation_quality'),
         'match_score_version': _WEB_MATCH_SCORE_VERSION,
         'match_score_calibrated': False,
+        'match_assessment_status': (
+            'confirmed' if final else 'estimated' if percentage is not None
+            else 'insufficient_identity_evidence' if ai_item.get('visual_evidence')
+            else 'review_unavailable'
+        ),
     }
 
 def _web_fail_closed_visual_row(row, reason='visual_verification_pending'):
@@ -10733,7 +10753,7 @@ def _web_ai_classifier_cache_key(identity, results, market, visual_context=None)
             'locked_market': (row or {}).get('_locked_market'),
         })
     material = {
-        'v': 21,
+        'v': 22,
         'match_score_version': _WEB_MATCH_SCORE_VERSION,
         'country': str((market or {}).get('country') or DEFAULT_COUNTRY).lower(),
         # A photo audit is keyed by the image bytes, not by a fallible Lens
@@ -10778,6 +10798,11 @@ def _web_ai_classifier_cache_put(key, value, ttl_seconds=None):
             ''', (key, json.dumps(value, ensure_ascii=False, separators=(',', ':')), now, now + (ttl_seconds or WEB_AI_CLASSIFIER_CACHE_TTL_SECONDS)))
     except Exception as e:
         print(f'WEB AI CLASSIFIER CACHE PUT ERR: {e}')
+
+def _web_identity_output_budget(candidate_count, visual_mode):
+    """Room for sparse per-product facts, bounded without extra model calls."""
+    count = max(1, min(12, int(candidate_count)))
+    return min(12000, 1200 + count * (850 if visual_mode else 550))
 
 def _web_ai_reference_context(reference_identity, identity, visual_mode):
     """Build reference input without leaking a Lens guess into photo proof."""
@@ -10887,6 +10912,7 @@ LOCKS:
 Return strict compact JSON only:
 {"identity":"reference product","reference_profile":{"category":"","subtype":"","object_family":"","product_type":"","intended_use":"","audience":"","function":"","product_role":"unknown","mounting":"unknown","installation":"unknown","support_base":"unknown","power_source":"unknown","orientation":"","brand":"","product_name":"","model":"","variant":"","visible_text":"","identifiers":[],"numbers_units":[],"visible_markings":[],"structure":"","components":[],"form_factor":"","silhouette":"","proportions":"","shape_geometry":"","material":"","texture":"","finish":"","colors":[],"pattern":"","size_class":"","dimensions":"","quantity_bundle":"","configuration":"","compatibility":"","condition":"","distinctive_features":[]},"items":[{"id":0,"match":"exact|similar","market":"local|global","confidence":0,"identity_score":0,"observation_quality":0,"candidate_profile":{"category":"","subtype":"","object_family":"","product_type":"","intended_use":"","audience":"","function":"","product_role":"unknown","mounting":"unknown","installation":"unknown","support_base":"unknown","power_source":"unknown","orientation":"","brand":"","product_name":"","model":"","variant":"","visible_text":"","identifiers":[],"numbers_units":[],"visible_markings":[],"structure":"","components":[],"form_factor":"","silhouette":"","proportions":"","shape_geometry":"","material":"","texture":"","finish":"","colors":[],"pattern":"","size_class":"","dimensions":"","quantity_bundle":"","configuration":"","compatibility":"","condition":"","distinctive_features":[]},"same_axes":["category"],"different_axes":["variant"],"differences":["short factual difference"],"match_reason":"same_product|different_category|different_function|different_audience|different_name|different_model|different_variant|different_structure|different_components|different_form|different_color|different_material|different_size|different_quantity|different_compatibility|accessory|wrong_product|uncertain","market_reason":"local_storefront|foreign_storefront|uncertain"}]}.
 Include every supplied id exactly once. Confidence is an integer 0-100.'''
+    system += '''\nOUTPUT BUDGET: Profiles must be sparse. Omit unknown, empty and observation-only fields (do not emit empty strings or lists). Include all identity facts actually used in same_axes/different_axes so they can be verified. Use short canonical values. Never omit a candidate id to save tokens. identity_score is not the public percentage; structured identity evidence is required for it. A product can lack a readable brand/model but still have verifiable construction, components, form_factor, function and distinctive_features; report those facts if genuinely visible, without inventing names or using lighting/color resemblance as identity evidence.\n'''
     user_data = {
         **_web_ai_reference_context(reference_identity, identity, visual_mode),
         'user_country_code': country,
@@ -10913,7 +10939,7 @@ Include every supplied id exactly once. Confidence is an integer 0-100.'''
     payload = {
         'systemInstruction': {'parts': [{'text': system}]},
         'contents': [{'role': 'user', 'parts': user_parts}],
-        'generationConfig': {'temperature': 0, 'maxOutputTokens': 2800 if visual_mode else 1600, 'responseMimeType': 'application/json'},
+        'generationConfig': {'temperature': 0, 'maxOutputTokens': _web_identity_output_budget(len(candidates), visual_mode), 'responseMimeType': 'application/json'},
     }
     effective_timeout = WEB_VISUAL_CLASSIFIER_TIMEOUT_SECONDS if visual_mode else WEB_AI_CLASSIFIER_TIMEOUT_SECONDS
     try:
@@ -10935,11 +10961,16 @@ Include every supplied id exactly once. Confidence is an integer 0-100.'''
         data = response.json()
         model_candidates = data.get('candidates') or []
         if not model_candidates:
+            print('WEB IDENTITY REVIEW unavailable=no_candidates')
             return {}
+        finish_reason = str(model_candidates[0].get('finishReason') or '')
+        if finish_reason == 'MAX_TOKENS':
+            print(f'WEB IDENTITY REVIEW truncated candidates={len(candidates)}')
         raw = ''.join(str(part.get('text') or '') for part in (model_candidates[0].get('content') or {}).get('parts', [])).strip()
         parsed = _ai_json_object(raw)
         parsed_items = parsed.get('items') if isinstance(parsed, dict) else None
         if not isinstance(parsed_items, list):
+            print(f'WEB IDENTITY REVIEW unavailable=invalid_items finish={finish_reason}')
             return {}
         reference_profile = _web_visual_normalize_profile(parsed.get('reference_profile'))
         normalized = []
