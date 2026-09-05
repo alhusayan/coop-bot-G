@@ -23,7 +23,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept'], max_age=86400)
-BUILD_ID = 'v107.46-model-normalization-fix'
+BUILD_ID = 'v107.47-structured-identity-response-fix'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -9300,7 +9300,7 @@ _WEB_MATCH_SCORE_AXIS_CAPS = {
     'brand': 60,
     'orientation': 88,
 }
-_WEB_MATCH_SCORE_VERSION = 'product_identity_normalized_models_v20'
+_WEB_MATCH_SCORE_VERSION = 'product_identity_structured_response_v21'
 _WEB_LEGACY_SIMILARITY_SCORE_KEYS = (
     'visual_match_score', 'visual_score', 'model_match_score', 'match_score',
 )
@@ -9709,7 +9709,7 @@ def _web_visual_item_axes(item):
     return axes
 
 _WEB_VISUAL_PROFILE_TEXT_FIELDS = (
-    'category', 'subtype', 'object_family', 'product_type', 'intended_use', 'audience', 'function',
+    'category', 'subtype', 'object_family', 'product_type', 'intended_use', 'audience', 'function', 'product_role',
     'product_role', 'mounting', 'installation', 'support_base',
     'power_source', 'orientation', 'brand', 'product_name', 'model',
     'variant', 'visible_text', 'structure', 'form_factor', 'material',
@@ -10772,7 +10772,7 @@ def _web_ai_classifier_cache_key(identity, results, market, visual_context=None)
             'locked_market': (row or {}).get('_locked_market'),
         })
     material = {
-        'v': 24,
+        'v': 25,
         'match_score_version': _WEB_MATCH_SCORE_VERSION,
         'country': str((market or {}).get('country') or DEFAULT_COUNTRY).lower(),
         # A photo audit is keyed by the image bytes, not by a fallible Lens
@@ -10817,6 +10817,73 @@ def _web_ai_classifier_cache_put(key, value, ttl_seconds=None):
             ''', (key, json.dumps(value, ensure_ascii=False, separators=(',', ':')), now, now + (ttl_seconds or WEB_AI_CLASSIFIER_CACHE_TTL_SECONDS)))
     except Exception as e:
         print(f'WEB AI CLASSIFIER CACHE PUT ERR: {e}')
+
+def _web_identity_response_schema(candidate_count):
+    """Constrain the API response itself, rather than relying on JSON prose."""
+    profile = {'type': 'object', 'properties': {
+        **{key: {'type': 'string'} for key in _WEB_VISUAL_PROFILE_TEXT_FIELDS},
+        'product_role': {'type': 'string'},
+        **{key: {'type': 'array', 'items': {'type': 'string'}}
+           for key in _WEB_VISUAL_PROFILE_LIST_FIELDS},
+    }, 'additionalProperties': False}
+    axis_list = {'type': 'array', 'items': {'type': 'string', 'enum': list(_WEB_VISUAL_AXES)}}
+    score = {'type': 'integer', 'minimum': 0, 'maximum': 100}
+    item = {'type': 'object', 'properties': {
+        'id': {'type': 'integer'},
+        'match': {'type': 'string', 'enum': ['exact', 'similar']},
+        'market': {'type': 'string', 'enum': ['local', 'global']},
+        'confidence': score, 'identity_score': score, 'observation_quality': score,
+        'candidate_profile': profile,
+        'same_axes': axis_list, 'different_axes': axis_list,
+        'differences': {'type': 'array', 'items': {'type': 'string'}},
+        'match_reason': {'type': 'string'}, 'market_reason': {'type': 'string'},
+    }, 'required': ['id', 'match', 'market', 'confidence', 'identity_score',
+                    'observation_quality', 'candidate_profile', 'same_axes', 'different_axes'],
+        'additionalProperties': False}
+    return {'type': 'object', 'properties': {
+        'identity': {'type': 'string'}, 'reference_profile': profile,
+        'items': {'type': 'array', 'items': item, 'minItems': 1,
+                  'maxItems': max(1, int(candidate_count))},
+    }, 'required': ['reference_profile', 'items'], 'additionalProperties': False}
+
+def _web_identity_response_text(candidate):
+    """Read final answer text only, excluding optional thinking parts."""
+    return ''.join(part.get('text', '') for part in
+        ((candidate or {}).get('content') or {}).get('parts', [])
+        if isinstance(part, dict) and not part.get('thought')
+        and isinstance(part.get('text'), str)).strip()
+
+def _web_parse_identity_response(raw):
+    """Bounded JSON decoding without invented IDs, profiles or percentages."""
+    value = raw
+    for _ in range(5):
+        if isinstance(value, str):
+            text = value.strip().lstrip('\ufeff')
+            text = re.sub(r'^```(?:json)?\s*', '', text, flags=re.I)
+            text = re.sub(r'\s*```$', '', text).strip()
+            try:
+                value = json.loads(text)
+            except (ValueError, TypeError):
+                return {}, 'malformed_json'
+            continue
+        if isinstance(value, list) and len(value) == 1 and isinstance(value[0], dict) and 'items' in value[0]:
+            value = value[0]
+            continue
+        if isinstance(value, dict):
+            if 'items' in value:
+                if not isinstance(value['items'], list):
+                    return {}, 'items_not_array'
+                if not isinstance(value.get('reference_profile'), dict):
+                    return {}, 'reference_profile_missing'
+                return value, ''
+            wrappers = [value[key] for key in ('data', 'result', 'response', 'answer')
+                        if key in value and isinstance(value[key], (dict, str))]
+            if len(wrappers) == 1:
+                value = wrappers[0]
+                continue
+            return {}, 'items_missing'
+        return {}, 'unexpected_root_type'
+    return {}, 'excessive_wrapping'
 
 def _web_identity_review_failure(reason, visual_mode=False, evidence_count=0):
     """Safe operational diagnostic: no credentials, response bodies or images."""
@@ -10937,6 +11004,12 @@ Return strict compact JSON only:
 {"identity":"reference product","reference_profile":{"category":"","subtype":"","object_family":"","product_type":"","intended_use":"","audience":"","function":"","product_role":"unknown","mounting":"unknown","installation":"unknown","support_base":"unknown","power_source":"unknown","orientation":"","brand":"","product_name":"","model":"","variant":"","visible_text":"","identifiers":[],"numbers_units":[],"visible_markings":[],"structure":"","components":[],"form_factor":"","silhouette":"","proportions":"","shape_geometry":"","material":"","texture":"","finish":"","colors":[],"pattern":"","size_class":"","dimensions":"","quantity_bundle":"","configuration":"","compatibility":"","condition":"","distinctive_features":[]},"items":[{"id":0,"match":"exact|similar","market":"local|global","confidence":0,"identity_score":0,"observation_quality":0,"candidate_profile":{"category":"","subtype":"","object_family":"","product_type":"","intended_use":"","audience":"","function":"","product_role":"unknown","mounting":"unknown","installation":"unknown","support_base":"unknown","power_source":"unknown","orientation":"","brand":"","product_name":"","model":"","variant":"","visible_text":"","identifiers":[],"numbers_units":[],"visible_markings":[],"structure":"","components":[],"form_factor":"","silhouette":"","proportions":"","shape_geometry":"","material":"","texture":"","finish":"","colors":[],"pattern":"","size_class":"","dimensions":"","quantity_bundle":"","configuration":"","compatibility":"","condition":"","distinctive_features":[]},"same_axes":["category"],"different_axes":["variant"],"differences":["short factual difference"],"match_reason":"same_product|different_category|different_function|different_audience|different_name|different_model|different_variant|different_structure|different_components|different_form|different_color|different_material|different_size|different_quantity|different_compatibility|accessory|wrong_product|uncertain","market_reason":"local_storefront|foreign_storefront|uncertain"}]}.
 Include every supplied id exactly once. Confidence is an integer 0-100.'''
     system += '''\nOUTPUT BUDGET: Profiles must be sparse. Omit unknown, empty and observation-only fields (do not emit empty strings or lists). Include all identity facts actually used in same_axes/different_axes so they can be verified. Use short canonical values. Never omit a candidate id to save tokens. identity_score is not the public percentage; structured identity evidence is required for it. A product can lack a readable brand/model but still have verifiable construction, components, form_factor, function and distinctive_features; report those facts if genuinely visible, without inventing names or using lighting/color resemblance as identity evidence.\n'''
+    # The schema is supplied through generationConfig. Remove the duplicated
+    # example skeleton so empty example fields cannot become the whole reply.
+    schema_prompt_start = system.find('Return strict compact JSON only:')
+    schema_prompt_end = system.find('Include every supplied id exactly once.', schema_prompt_start)
+    if schema_prompt_start >= 0 and schema_prompt_end > schema_prompt_start:
+        system = system[:schema_prompt_start] + 'Follow the supplied response schema. ' + system[schema_prompt_end:]
     user_data = {
         **_web_ai_reference_context(reference_identity, identity, visual_mode),
         'user_country_code': country,
@@ -10963,7 +11036,7 @@ Include every supplied id exactly once. Confidence is an integer 0-100.'''
     payload = {
         'systemInstruction': {'parts': [{'text': system}]},
         'contents': [{'role': 'user', 'parts': user_parts}],
-        'generationConfig': {'temperature': 0, 'maxOutputTokens': _web_identity_output_budget(len(candidates), visual_mode), 'responseMimeType': 'application/json'},
+        'generationConfig': {'temperature': 0, 'maxOutputTokens': _web_identity_output_budget(len(candidates), visual_mode), 'responseMimeType': 'application/json', 'responseJsonSchema': _web_identity_response_schema(len(candidates))},
     }
     effective_timeout = WEB_VISUAL_CLASSIFIER_TIMEOUT_SECONDS if visual_mode else WEB_AI_CLASSIFIER_TIMEOUT_SECONDS
     try:
@@ -10990,12 +11063,12 @@ Include every supplied id exactly once. Confidence is an integer 0-100.'''
         finish_reason = str(model_candidates[0].get('finishReason') or '')
         if finish_reason == 'MAX_TOKENS':
             print(f'WEB IDENTITY REVIEW truncated candidates={len(candidates)}')
-        raw = ''.join(str(part.get('text') or '') for part in (model_candidates[0].get('content') or {}).get('parts', [])).strip()
-        parsed = _ai_json_object(raw)
+        raw = _web_identity_response_text(model_candidates[0])
+        parsed, parse_error = _web_parse_identity_response(raw)
         parsed_items = parsed.get('items') if isinstance(parsed, dict) else None
         if not isinstance(parsed_items, list):
-            print(f'WEB IDENTITY REVIEW unavailable=invalid_items finish={finish_reason}')
-            return _web_identity_review_failure('output_truncated' if finish_reason == 'MAX_TOKENS' else 'invalid_json', visual_mode, len(visual_evidence_ids))
+            print(f'WEB IDENTITY REVIEW unavailable={parse_error or "invalid_items"} finish={finish_reason} response_chars={len(raw)}')
+            return _web_identity_review_failure('output_truncated' if finish_reason == 'MAX_TOKENS' else (parse_error or 'invalid_items'), visual_mode, len(visual_evidence_ids))
         reference_profile = _web_visual_normalize_profile(parsed.get('reference_profile'))
         normalized = []
         seen = set()
