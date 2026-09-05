@@ -23,7 +23,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept'], max_age=86400)
-BUILD_ID = 'v107.42-product-identity-invariant-match-score'
+BUILD_ID = 'v107.43-independent-product-identity-evidence'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -9298,7 +9298,7 @@ _WEB_MATCH_SCORE_AXIS_CAPS = {
     'brand': 60,
     'orientation': 88,
 }
-_WEB_MATCH_SCORE_VERSION = 'product_identity_invariant_v16'
+_WEB_MATCH_SCORE_VERSION = 'product_identity_independent_evidence_v17'
 _WEB_LEGACY_SIMILARITY_SCORE_KEYS = (
     'visual_match_score', 'visual_score', 'model_match_score', 'match_score',
 )
@@ -10107,9 +10107,9 @@ def _web_profile_model_state(reference_value, candidate_value):
     if reference_models or candidate_models:
         if reference_models and candidate_models:
             return 'same' if reference_models & candidate_models else 'different'
-        # A generation/part token present on only one side is not the same
-        # proven model, even when the family words match.
-        return 'different'
+        # A missing generation is incomplete evidence, not an observed
+        # contradiction. Conflicting families were rejected above.
+        return 'unknown'
     overlap = reference_words & candidate_words
     if reference_words and reference_words == candidate_words:
         return 'same'
@@ -10407,8 +10407,8 @@ def _web_identity_axis_evidence(axes):
 
     AI image comparison supplies structured facts, never the percentage.  The
     deterministic scorer below intentionally ignores capture orientation and
-    product condition.  Surface axes may support an unbranded item, but can
-    neither prove nor disprove identity on their own.
+    product condition. Surface observations are reported separately and do
+    not count toward identity support or evidence coverage.
     """
     normalized = {
         axis: str((axes or {}).get(axis) or 'unknown').strip().lower()
@@ -10416,7 +10416,7 @@ def _web_identity_axis_evidence(axes):
     }
     same = {axis for axis, state in normalized.items() if state == 'same'}
     different = {axis for axis, state in normalized.items() if state == 'different'}
-    identity_same = same - _WEB_IDENTITY_OBSERVATION_AXES
+    identity_same = same - _WEB_IDENTITY_OBSERVATION_AXES - _WEB_IDENTITY_SURFACE_AXES
     identity_different = different & _WEB_VISUAL_HARD_DIFFERENCE_AXES
     observation_differences = different & _WEB_IDENTITY_OBSERVATION_AXES
     surface_differences = different & _WEB_IDENTITY_SURFACE_AXES
@@ -10432,7 +10432,7 @@ def _web_identity_axis_evidence(axes):
     }
 
 def _web_identity_percentage_from_evidence(axes, match_guard=None):
-    """Calibrate probability of the same product identity, not image likeness.
+    """Estimate identity support using conservative, uncalibrated evidence tiers.
 
     The returned number is derived from stable evidence tiers.  A visual-only
     nearest neighbour with no product-identity evidence returns ``None``.
@@ -10458,15 +10458,15 @@ def _web_identity_percentage_from_evidence(axes, match_guard=None):
     if 'model' in identifiers:
         return 98 if (named or len(function) >= 2) else 95
 
-    # Named commercial identity: brand/name/printed variant plus at least one
-    # independent functional or structural confirmation.
-    if len(named) >= 4 and function:
-        return 96
-    if len(named) >= 3 and (function or structure):
+    # Repeating a label in name, OCR and markings is one source of evidence.
+    # Require brand/name plus independent construction/function support;
+    # duplicated printed text must never manufacture an exact identity.
+    commercial_identity = {'brand', 'product_name'} <= named
+    if commercial_identity and 'variant' in named and function and len(structure) >= 2:
         return 94
-    if len(named) >= 2 and function and len(structure) >= 2:
+    if commercial_identity and function and len(structure) >= 2:
         return 92
-    if len(named) >= 2 and (function or len(structure) >= 2):
+    if commercial_identity and (function or len(structure) >= 2):
         return 89
 
     # Generic/unbranded products can be strongly supported by invariant
@@ -10500,8 +10500,11 @@ def _web_match_score_metadata(
     conflicts = sorted(evidence['different'])
     observation_differences = sorted(evidence['observation_differences'])
     surface_differences = sorted(evidence['surface_differences'])
-    identity_axes = set(_WEB_VISUAL_AXES) - _WEB_IDENTITY_OBSERVATION_AXES
-    unknown = sorted(axis for axis in identity_axes if axes.get(axis) == 'unknown')
+    identity_axes = set(_WEB_VISUAL_AXES) - _WEB_IDENTITY_OBSERVATION_AXES - _WEB_IDENTITY_SURFACE_AXES
+    unknown = sorted(
+        axis for axis in identity_axes
+        if str(axes.get(axis) or 'unknown').strip().lower() not in {'same', 'different'}
+    )
     stable_evidence = bool(
         evidence['identifiers']
         or evidence['named']
@@ -10594,6 +10597,7 @@ def _web_match_score_metadata(
         'surface_differences': surface_differences,
         'observation_quality': ai_item.get('observation_quality'),
         'match_score_version': _WEB_MATCH_SCORE_VERSION,
+        'match_score_calibrated': False,
     }
 
 def _web_fail_closed_visual_row(row, reason='visual_verification_pending'):
@@ -10729,7 +10733,8 @@ def _web_ai_classifier_cache_key(identity, results, market, visual_context=None)
             'locked_market': (row or {}).get('_locked_market'),
         })
     material = {
-        'v': 20,
+        'v': 21,
+        'match_score_version': _WEB_MATCH_SCORE_VERSION,
         'country': str((market or {}).get('country') or DEFAULT_COUNTRY).lower(),
         # A photo audit is keyed by the image bytes, not by a fallible Lens
         # caption.  Changing that caption cannot change or select the verdict.
