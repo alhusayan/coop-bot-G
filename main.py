@@ -23,7 +23,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept'], max_age=86400)
-BUILD_ID = 'v107.45-identity-review-transport-fix'
+BUILD_ID = 'v107.46-model-normalization-fix'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -9300,7 +9300,7 @@ _WEB_MATCH_SCORE_AXIS_CAPS = {
     'brand': 60,
     'orientation': 88,
 }
-_WEB_MATCH_SCORE_VERSION = 'product_identity_review_transport_v19'
+_WEB_MATCH_SCORE_VERSION = 'product_identity_normalized_models_v20'
 _WEB_LEGACY_SIMILARITY_SCORE_KEYS = (
     'visual_match_score', 'visual_score', 'model_match_score', 'match_score',
 )
@@ -10095,10 +10095,33 @@ def _web_profile_model_state(reference_value, candidate_value):
     candidate_words = _web_profile_words(candidate_text)
     if _web_profile_qualifier_conflict(reference_words, candidate_words):
         return 'different'
-    reference_models = _web_profile_identity_tokens(reference_text)
-    candidate_models = _web_profile_identity_tokens(candidate_text)
-    reference_family = reference_words - reference_models
-    candidate_family = candidate_words - candidate_models
+    # Merchant titles are enriched using this extractor. Apply the SAME
+    # normalization to reference models before comparing: "WHOOP 5.0"
+    # and the enriched token "whoop5" must not become a hard mismatch.
+    reference_models = set(_web_model_tokens_from_listing(reference_text))
+    candidate_models = set(_web_model_tokens_from_listing(candidate_text))
+    if reference_models and candidate_models:
+        reference_names = {word for word in reference_words
+                           if not word.isdigit() and not any(word in code for code in reference_models)}
+        candidate_names = {word for word in candidate_words
+                           if not word.isdigit() and not any(word in code for code in candidate_models)}
+        if reference_names and candidate_names and not reference_names & candidate_names:
+            # Sharing a short code (A15) cannot merge different named families.
+            return 'different'
+        if reference_models == candidate_models:
+            return 'same'
+        # A listing can mention multiple compatible models. Partial overlap
+        # is incomplete proof, not a different observed generation.
+        return 'unknown' if reference_models & candidate_models else 'different'
+    if reference_models or candidate_models:
+        # "5.0" alone does not establish the complete "WHOOP 5.0" model.
+        return 'unknown'
+    reference_numeric = re.fullmatch(r'\d+(?:[.,]\d+)?', _web_ascii_digits(reference_text))
+    candidate_numeric = re.fullmatch(r'\d+(?:[.,]\d+)?', _web_ascii_digits(candidate_text))
+    if reference_numeric and candidate_numeric:
+        return 'same' if float(reference_numeric[0].replace(',', '.')) == float(candidate_numeric[0].replace(',', '.')) else 'different'
+    reference_family = reference_words
+    candidate_family = candidate_words
     if (
         reference_family and candidate_family
         and not reference_family & candidate_family
@@ -10106,12 +10129,6 @@ def _web_profile_model_state(reference_value, candidate_value):
         # A shared generation/code cannot merge conflicting product families,
         # including Arabic names such as جالاكسي 24 and ايفون 24.
         return 'different'
-    if reference_models or candidate_models:
-        if reference_models and candidate_models:
-            return 'same' if reference_models & candidate_models else 'different'
-        # A missing generation is incomplete evidence, not an observed
-        # contradiction. Conflicting families were rejected above.
-        return 'unknown'
     overlap = reference_words & candidate_words
     if reference_words and reference_words == candidate_words:
         return 'same'
@@ -10755,7 +10772,7 @@ def _web_ai_classifier_cache_key(identity, results, market, visual_context=None)
             'locked_market': (row or {}).get('_locked_market'),
         })
     material = {
-        'v': 23,
+        'v': 24,
         'match_score_version': _WEB_MATCH_SCORE_VERSION,
         'country': str((market or {}).get('country') or DEFAULT_COUNTRY).lower(),
         # A photo audit is keyed by the image bytes, not by a fallible Lens
