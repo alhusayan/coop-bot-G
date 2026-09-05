@@ -23,7 +23,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept'], max_age=86400)
-BUILD_ID = 'v107.44-reviewed-identity-estimates'
+BUILD_ID = 'v107.45-identity-review-transport-fix'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -6723,7 +6723,9 @@ WEB_MATCH_WHATSAPP_EXACT = env_bool('WEB_MATCH_WHATSAPP_EXACT', True)
 # path as much as possible; the proven deterministic classifier remains the
 # immediate fallback.
 WEB_AI_CLASSIFIER_ENABLED = env_bool('WEB_AI_CLASSIFIER_ENABLED', True)
-WEB_AI_CLASSIFIER_TIMEOUT_SECONDS = max(1.0, min(3.0, float(os.environ.get('WEB_AI_CLASSIFIER_TIMEOUT_SECONDS', '2.0'))))
+# Separate identity-audit budgets from obsolete fast-classifier settings.
+# Old Railway values (2/3.2 seconds) cannot silently disable the new audit.
+WEB_AI_CLASSIFIER_TIMEOUT_SECONDS = max(10.0, min(45.0, float(os.environ.get('WEB_IDENTITY_TEXT_TIMEOUT_SECONDS', '20'))))
 WEB_AI_CLASSIFIER_CACHE_TTL_SECONDS = max(3600, min(30 * 86400, int(os.environ.get('WEB_AI_CLASSIFIER_CACHE_TTL_SECONDS', '604800'))))
 WEB_AI_CLASSIFIER_MAX_RESULTS = max(4, min(12, int(os.environ.get('WEB_AI_CLASSIFIER_MAX_RESULTS', '12'))))
 WEB_AI_CLASSIFIER_MIN_CONFIDENCE = max(50, min(95, int(os.environ.get('WEB_AI_CLASSIFIER_MIN_CONFIDENCE', '68'))))
@@ -6735,8 +6737,8 @@ WEB_AI_CLASSIFIER_INFLIGHT_LOCK = threading.Lock()
 # only after the instant snapshot, never launches another Lens/Search request,
 # and never removes or reorders a result.
 WEB_VISUAL_CLASSIFIER_ENABLED = env_bool('WEB_VISUAL_CLASSIFIER_ENABLED', True)
-WEB_VISUAL_CLASSIFIER_TIMEOUT_SECONDS = max(2.0, min(5.0, float(os.environ.get('WEB_VISUAL_CLASSIFIER_TIMEOUT_SECONDS', '3.2'))))
-WEB_VISUAL_CLASSIFIER_FETCH_TIMEOUT_SECONDS = max(0.6, min(2.0, float(os.environ.get('WEB_VISUAL_CLASSIFIER_FETCH_TIMEOUT_SECONDS', '1.15'))))
+WEB_VISUAL_CLASSIFIER_TIMEOUT_SECONDS = max(15.0, min(60.0, float(os.environ.get('WEB_IDENTITY_REVIEW_TIMEOUT_SECONDS', '35'))))
+WEB_VISUAL_CLASSIFIER_FETCH_TIMEOUT_SECONDS = max(1.0, min(12.0, float(os.environ.get('WEB_IDENTITY_IMAGE_FETCH_TIMEOUT_SECONDS', '6'))))
 WEB_VISUAL_CLASSIFIER_MAX_RESULTS = max(3, min(10, int(os.environ.get('WEB_VISUAL_CLASSIFIER_MAX_RESULTS', '10'))))
 WEB_VISUAL_CLASSIFIER_IMAGE_EDGE = max(192, min(512, int(os.environ.get('WEB_VISUAL_CLASSIFIER_IMAGE_EDGE', '384'))))
 WEB_VISUAL_REFERENCE_IMAGE_EDGE = max(320, min(640, int(os.environ.get('WEB_VISUAL_REFERENCE_IMAGE_EDGE', '512'))))
@@ -9298,7 +9300,7 @@ _WEB_MATCH_SCORE_AXIS_CAPS = {
     'brand': 60,
     'orientation': 88,
 }
-_WEB_MATCH_SCORE_VERSION = 'product_identity_reviewed_estimates_v18'
+_WEB_MATCH_SCORE_VERSION = 'product_identity_review_transport_v19'
 _WEB_LEGACY_SIMILARITY_SCORE_KEYS = (
     'visual_match_score', 'visual_score', 'model_match_score', 'match_score',
 )
@@ -10753,7 +10755,7 @@ def _web_ai_classifier_cache_key(identity, results, market, visual_context=None)
             'locked_market': (row or {}).get('_locked_market'),
         })
     material = {
-        'v': 22,
+        'v': 23,
         'match_score_version': _WEB_MATCH_SCORE_VERSION,
         'country': str((market or {}).get('country') or DEFAULT_COUNTRY).lower(),
         # A photo audit is keyed by the image bytes, not by a fallible Lens
@@ -10798,6 +10800,11 @@ def _web_ai_classifier_cache_put(key, value, ttl_seconds=None):
             ''', (key, json.dumps(value, ensure_ascii=False, separators=(',', ':')), now, now + (ttl_seconds or WEB_AI_CLASSIFIER_CACHE_TTL_SECONDS)))
     except Exception as e:
         print(f'WEB AI CLASSIFIER CACHE PUT ERR: {e}')
+
+def _web_identity_review_failure(reason, visual_mode=False, evidence_count=0):
+    """Safe operational diagnostic: no credentials, response bodies or images."""
+    return {'items': [], 'review_error': str(reason), 'visual_mode': bool(visual_mode),
+            'visual_evidence_count': int(evidence_count)}
 
 def _web_identity_output_budget(candidate_count, visual_mode):
     """Room for sparse per-product facts, bounded without extra model calls."""
@@ -10953,16 +10960,16 @@ Include every supplied id exactly once. Confidence is an integer 0-100.'''
             gemini_url,
             params={'key': GEMINI_API_KEY},
             json=payload,
-            timeout=(2.0, effective_timeout),
+            timeout=(5.0, effective_timeout),
         )
         if response.status_code >= 400:
             print(f'WEB AI CLASSIFIER HTTP {response.status_code}: {response.text[:240]}')
-            return {}
+            return _web_identity_review_failure('http_' + str(response.status_code), visual_mode, len(visual_evidence_ids))
         data = response.json()
         model_candidates = data.get('candidates') or []
         if not model_candidates:
             print('WEB IDENTITY REVIEW unavailable=no_candidates')
-            return {}
+            return _web_identity_review_failure('no_candidates', visual_mode, len(visual_evidence_ids))
         finish_reason = str(model_candidates[0].get('finishReason') or '')
         if finish_reason == 'MAX_TOKENS':
             print(f'WEB IDENTITY REVIEW truncated candidates={len(candidates)}')
@@ -10971,7 +10978,7 @@ Include every supplied id exactly once. Confidence is an integer 0-100.'''
         parsed_items = parsed.get('items') if isinstance(parsed, dict) else None
         if not isinstance(parsed_items, list):
             print(f'WEB IDENTITY REVIEW unavailable=invalid_items finish={finish_reason}')
-            return {}
+            return _web_identity_review_failure('output_truncated' if finish_reason == 'MAX_TOKENS' else 'invalid_json', visual_mode, len(visual_evidence_ids))
         reference_profile = _web_visual_normalize_profile(parsed.get('reference_profile'))
         normalized = []
         seen = set()
@@ -11096,7 +11103,7 @@ Include every supplied id exactly once. Confidence is an integer 0-100.'''
         # A partial model response is still useful. Missing rows use the proven
         # deterministic classifier, so no card is ever lost.
         if not normalized:
-            return {}
+            return _web_identity_review_failure('no_valid_items', visual_mode, len(visual_evidence_ids))
         return {
             'identity': str(parsed.get('identity') or identity).strip()[:240],
             'items': normalized,
@@ -11107,14 +11114,16 @@ Include every supplied id exactly once. Confidence is an integer 0-100.'''
         }
     except requests.Timeout:
         print(f'WEB AI CLASSIFIER TIMEOUT visual={visual_mode} after={effective_timeout}s')
-        return {}
+        return _web_identity_review_failure('timeout', visual_mode, len(visual_evidence_ids))
     except Exception as e:
         print(f'WEB AI CLASSIFIER ERR: {e.__class__.__name__}: {e}')
-        return {}
+        return _web_identity_review_failure('request_or_parse_error', visual_mode, len(visual_evidence_ids))
 
 def _web_ai_classify_captured_batch(identity, results, market, visual_context=None, cancel_event=None):
     if not WEB_AI_CLASSIFIER_ENABLED or not GEMINI_API_KEY or not results or (cancel_event is not None and cancel_event.is_set()):
-        return ({}, 'disabled')
+        reason = ('disabled' if not WEB_AI_CLASSIFIER_ENABLED else 'missing_api_key'
+                  if not GEMINI_API_KEY else 'no_results' if not results else 'cancelled')
+        return (_web_identity_review_failure(reason), reason)
     key = _web_ai_classifier_cache_key(identity, results, market, visual_context)
     # Text classification is stable and may use the persistent cache. Visual
     # classification must inspect today's candidate bytes: merchant/CDN URLs
@@ -11131,16 +11140,22 @@ def _web_ai_classify_captured_batch(identity, results, market, visual_context=No
             owner = True
     if not owner:
         wait_timeout = WEB_VISUAL_CLASSIFIER_TIMEOUT_SECONDS if visual_context else WEB_AI_CLASSIFIER_TIMEOUT_SECONDS
-        event.wait(wait_timeout + WEB_VISUAL_CLASSIFIER_FETCH_TIMEOUT_SECONDS + 0.6)
+        completed = event.wait(wait_timeout + WEB_VISUAL_CLASSIFIER_FETCH_TIMEOUT_SECONDS + 5.5)
         if visual_context:
-            # Never let a visual waiter consume an older URL-keyed verdict.
-            # The live owner may have been cancelled or failed; fail closed
-            # and let this request keep its Similar/provisional rows.
-            return ({}, 'visual-singleflight-fallback')
+            # Share only this in-flight request's completed response, never an
+            # older URL cache entry. Previously every duplicate lost its audit.
+            live = getattr(event, '_findzia_identity_result', None) if completed else None
+            if live is not None:
+                return live
+            return (_web_identity_review_failure('inflight_timeout'), 'inflight_timeout')
         cached = _web_ai_classifier_cache_get(key)
         return (cached or {}, 'singleflight-cache' if cached else 'singleflight-fallback')
     try:
         value = _web_ai_classifier_request(identity, results, market, visual_context, cancel_event)
+        if value.get('review_error'):
+            result = (value, 'error_' + value['review_error'])
+            event._findzia_identity_result = result
+            return result
         if value:
             requested = int(value.get('visual_requested_count', 0) or 0)
             captured = int(value.get('visual_evidence_count', 0) or 0)
@@ -11150,6 +11165,7 @@ def _web_ai_classify_captured_batch(identity, results, market, visual_context=No
             source = 'visual-live'
         else:
             source = 'live' if value else 'fallback'
+        event._findzia_identity_result = (value, source)
         return (value, source)
     finally:
         with WEB_AI_CLASSIFIER_INFLIGHT_LOCK:
@@ -11420,6 +11436,7 @@ def _web_attach_captured_result_sections(payload, lang, allow_ai=True, cancel_ev
             confidence=confidence,
         )
         row.update(score_metadata)
+        row['identity_review_error'] = ai_result.get('review_error')
         # The published section must agree with the configured identity-score
         # threshold as well as the proof decision.  This also remains correct
         # if deployment raises WEB_VISUAL_CLASSIFIER_EXACT_SCORE above 92.
@@ -11493,6 +11510,8 @@ def _web_attach_captured_result_sections(payload, lang, allow_ai=True, cancel_ev
     out['semantic_classified_count'] = structured_any_count
     out['rules_fallback_count'] = sum(1 for index in range(len(results)) if index not in match_guard_by_id and index not in ai_by_id)
     out['classification_cache'] = ai_source
+    out['identity_review_error'] = ai_result.get('review_error')
+    out['identity_review_status'] = 'failed' if ai_result.get('review_error') else 'completed' if ai_result.get('items') else 'not_completed'
     out['classification_elapsed_ms'] = int((time.time() - ai_started) * 1000)
     print(f'WEB PRODUCT-INTELLIGENCE CLASSIFICATION source={ai_source} total={len(results)} match_rules={structured_match_count} market_rules={structured_market_count} ai_candidates={len(ai_candidates)} ai_used={ai_used_count} visual_candidates={visual_candidate_count} visual_evidence={out["visual_evidence_count"]} visual_used={visual_used_count} fallback={out["rules_fallback_count"]} exact={len(exact_results)} similar={len(similar_results)} local={len(local_results)} global={len(global_results)} elapsed={time.time() - ai_started:.2f}s anchor={classification_anchor[:90]!r}')
     return out
@@ -14519,11 +14538,20 @@ async def web_api_image_search_stream(request: Request):
                         for row in final_results
                     }
                     refined_signature = _web_classification_signature(final_results)
-                    if refined_signature != instant_classification_signature:
+                    # Completion/failure matters even when every percentage
+                    # remains null. Never suppress the terminal audit event.
+                    if refined_signature != instant_classification_signature or refined.get('identity_review_status'):
                         yield _web_stream_event({'event': 'snapshot', 'phase': 'ai_classification_update', 'authoritative': True, 'classification_final': True, 'layout': 'exact_and_similar_v1', 'classification': 'hybrid_multimodal_fingerprint_ai' if refined.get('visual_classified_count', 0) else 'hybrid_fingerprint_ai', 'classification_engine': refined.get('classification_engine'), 'classification_cache': refined.get('classification_cache'), 'ai_classified_count': refined.get('ai_classified_count', 0), 'ai_candidate_count': refined.get('ai_candidate_count', 0), 'visual_candidate_count': refined.get('visual_candidate_count', 0), 'visual_evidence_count': refined.get('visual_evidence_count', 0), 'visual_classified_count': refined.get('visual_classified_count', 0), 'reference_visual_profile': refined.get('reference_visual_profile') or {}, 'structured_match_count': refined.get('structured_match_count', 0), 'structured_market_count': refined.get('structured_market_count', 0), 'semantic_classified_count': refined.get('semantic_classified_count', 0), 'rules_fallback_count': refined.get('rules_fallback_count', 0), 'query': identity, 'market': refined.get('market'), 'results': final_results, 'exact_results': final_exact_results, 'similar_results': final_similar_results, 'local_results': final_local_results, 'global_results': final_global_results, 'all_results': final_classified_results, 'result_sections': final_sections, 'classification_matrix': refined.get('classification_matrix') or {}, 'exact_count': len(final_exact_results), 'similar_count': len(final_similar_results), 'local_count': len(final_local_results), 'global_count': len(final_global_results), 'elapsed_ms': int((time.time() - started) * 1000)})
                         print(f'ANDROID AI CLASSIFICATION UPDATE exact={len(final_exact_results)} similar={len(final_similar_results)} local={len(final_local_results)} global={len(final_global_results)} classifier={refined.get("classification_engine")} elapsed={time.time() - started:.1f}s')
                     else:
                         print(f'ANDROID AI CLASSIFICATION NO-CHANGE candidates={refined.get("ai_candidate_count", 0)} classifier={refined.get("classification_engine")} elapsed={time.time() - started:.1f}s')
+                yield _web_stream_event({'event': 'identity_review', 'build': BUILD_ID,
+                    'status': final.get('identity_review_status', 'not_started'),
+                    'error': final.get('identity_review_error'),
+                    'source': final.get('classification_cache'),
+                    'scored_count': sum(row.get('identity_match_percentage') is not None for row in final_results),
+                    'reviewed_count': final.get('ai_classified_count', 0),
+                    'image_count': final.get('visual_evidence_count', 0)})
                 sent = {str(item.get('url') or '').strip() or str(item.get('market') or 'other') + '|' + str(item.get('store') or '') + '|' + str(item.get('title') or '') for item in final_results}
                 # Provisional cards that were not retained by the authoritative
                 # WhatsApp-equivalent snapshot must never reappear later as a
