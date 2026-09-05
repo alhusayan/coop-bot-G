@@ -23,7 +23,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept'], max_age=86400)
-BUILD_ID = 'v107.50-product-family-image-ranking'
+BUILD_ID = 'v107.51-bounded-lens-image-recovery'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -1859,6 +1859,7 @@ def _lens_product_kinds(value):
         'conditioner': r'\b(?:conditioner|بلسم)\b',
         'remote': r'\b(?:remote|remotes|ريموت|kumanda)\b',
         'receiver': r'\b(?:receiver|set top box|iptv box|رسيفر)\b',
+        'footwear': r'\b(?:slides?|slippers?|sandals?|mules?|clogs?|footwear|شبشب|شباشب|نعال|صندل)\b',
     }
     return {kind for kind, pattern in patterns.items() if re.search(pattern, text)}
 
@@ -1910,8 +1911,32 @@ def _lens_reference_priority(item, reference):
         return 1
     return -1
 
+def _lens_reference_fallback_eligible(item, reference):
+    """Allow image review of uncertain labels, never an invented name match."""
+    picture = str(item.get('thumbnail') or item.get('image') or '')
+    if not picture.startswith(('https://', 'http://')):
+        return False
+    text = _photo_identity_text(str(item.get('title') or '') + ' ' + urllib.parse.unquote(str(item.get('link') or '')))
+    expected = _lens_product_kinds(reference.get('product_type'))
+    actual = _lens_product_kinds(text)
+    if expected and actual and expected.isdisjoint(actual):
+        return False
+    brand_words = set(_photo_identity_text(reference.get('brand')).split()) - {'al', 'the'}
+    name_words = set(_photo_identity_text(reference.get('product_name')).split())
+    name_words -= {'mask', 'masque', 'masks', 'masques', 'face', 'sos', 'cream', 'creme',
+                   'spray', 'body', 'all', 'over', 'ماسك', 'قناع', 'كريم'}
+    # Keep the named-line safeguard for a clearly recognized manufacturer.
+    # A missed/uncertain brand spelling alone cannot reject all Lens images.
+    if brand_words and brand_words.issubset(set(text.split())) and name_words and not name_words.issubset(set(text.split())):
+        return False
+    if expected:
+        return bool(expected.intersection(actual))
+    type_words = set(_photo_identity_text(reference.get('product_type')).split())
+    type_words -= {'product', 'item', 'white', 'black', 'blue', 'small', 'large', 'for', 'the'}
+    return bool(type_words) and type_words.issubset(set(text.split()))
+
 def _lens_reference_rows(rows, reference):
-    output = []
+    output, uncertain = [], []
     for original in rows:
         item = dict(original)
         url = str(item.get('link') or '')
@@ -1923,10 +1948,17 @@ def _lens_reference_rows(rows, reference):
             continue
         priority = _lens_reference_priority(item, reference)
         if priority < 0:
+            if _lens_reference_fallback_eligible(item, reference):
+                item['_reference_priority'] = 0
+                item['_reference_fallback'] = True
+                uncertain.append(item)
             continue
         item['_reference_priority'] = priority
         output.append(item)
-    return output
+    # Strict named matches stay first. Recovery is only for an otherwise
+    # empty set and still requires the same function plus a candidate image.
+    # These rows are unverified until the existing reference-image audit.
+    return output if output else uncertain
 
 def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=False, progress_callback=None):
     if not ENABLE_GOOGLE_LENS or not SERPAPI_API_KEY or (not PUBLIC_BASE_URL):
@@ -2274,8 +2306,12 @@ def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=Fal
             matches.extend(market_rows[:keep_caps[rank]])
         matches = matches[:max(LENS_RESULT_LIMIT, sum(keep_caps.values()))]
         if not matches:
-            print('GOOGLE LENS: no visual matches after all passes')
-            return {'aliases': [], 'matches': [], 'query': ''}
+            print(f'GOOGLE LENS EMPTY raw={len(merged)} retained=0 reference={bool(reference)} recovery=bounded_structured')
+            return {'aliases': [], 'matches': [], 'query': fallback_query,
+                    'visual_identity': reference.get('query', ''), 'reference_identity': dict(reference),
+                    'raw_match_count': len(merged), 'source': 'lens_empty_reference'}
+        recovered = sum(bool(m.get('_reference_fallback')) for m in matches)
+        print(f'LENS REFERENCE FILTER raw={len(merged)} retained={len(matches)} uncertain={recovered}')
         for i, m in enumerate(matches[:5], 1):
             print(f"LENS MATCH {i}: {m.get('title', '')} | {m.get('source', '')} | section={m.get('section', '')} exact={m.get('exact', False)}")
         generic = re.compile('^(mules?|shoes?|slippers?|sandals?|footwear|بوتيغا فينيتا|bottega veneta)$', re.I)
@@ -13532,6 +13568,40 @@ def _web_more_stores_sync(query, country, lang, shown_urls=None, shown_domains=N
         'exhausted': not bool(selected),
     }
 
+def _web_bounded_image_recovery(lens, country, lang, cancel_event=None):
+    """One local and one global structured request; preserve image fields.
+
+    Never enter the multi-query text/immersive pipeline for a failed fast Lens
+    lookup. All jobs share one display deadline and the original photo hint.
+    """
+    query = str(lens.get('visual_identity') or lens.get('query') or '').strip()
+    reference = dict(lens.get('reference_identity') or {})
+    market = dict(_web_market(country))
+    if not query or (cancel_event is not None and cancel_event.is_set()):
+        return dict(lens, matches=[], source='lens_recovery_no_identity')
+    jobs = {}
+    for cc in dict.fromkeys((country, 'us')):
+        jobs[MARKET_SUPPLEMENT_POOL.submit(
+            _run_with_market, market, _serpapi_google_organic_market_request,
+            query, cc, country_search_hl(cc), '', 3.0, 6)] = cc
+    rows = []
+    done, pending = wait(set(jobs), timeout=4.0)
+    for future in done:
+        try:
+            rows.extend(future.result() or [])
+        except Exception as exc:
+            print('LENS STRUCTURED RECOVERY ERR: ' + type(exc).__name__)
+    for future in pending:
+        future.cancel()
+    if cancel_event is not None and cancel_event.is_set():
+        rows = []
+    # Filtering/caps and the reference-photo audit are the same as Lens.
+    # Preserve full objects (title, URL, thumbnail, price) across the boundary.
+    rows = _lens_reference_rows(rows, reference)
+    print(f'LENS STRUCTURED RECOVERY calls={len(jobs)} completed={len(done)} retained={len(rows)} deadline=4s')
+    return dict(lens, matches=rows, query=query, visual_identity=query,
+                reference_identity=reference, source='lens_bounded_structured_recovery')
+
 def _web_search_image_sync(image_b64, mime, caption, country, lang, progress_callback=None, classify_with_ai=True, cancel_event=None):
     market = _web_market(country)
     MARKET_CTX.value = market
@@ -13618,6 +13688,21 @@ def _web_search_image_sync(image_b64, mime, caption, country, lang, progress_cal
                         items.sort(key=lambda x: (int(x.get('market_rank', 99)), 0 if x.get('price') else 1))
                         print(f'WEB IMAGE v89 after supplement counts={counts} total={len(items)}')
                 return _web_attach_captured_result_sections({'ok': True, 'type': 'results', 'query': identity, 'market': market, 'results': items, 'source': 'lens_direct_plus_market_supplement', '_reference_image_b64': image_b64, '_reference_image_mime': mime}, lang, allow_ai=classify_with_ai, cancel_event=cancel_event)
+    if direct_attempted and USE_FAST_LENS_PIPELINE:
+        # OCR uncertainty or a provider timeout cannot trigger 3 query attempts
+        # in each of two legacy layers plus serial Shopping/immersive retries.
+        # Keep the photographed identity even when no direct offer is found.
+        if not lens_direct.get('query') and caption:
+            lens_direct = dict(lens_direct, query=caption)
+        recovered = _web_bounded_image_recovery(lens_direct, country, lang, cancel_event)
+        if cancelled():
+            return cancelled_result(recovered.get('query'))
+        items = _web_build_lens_items(recovered, lang, caption)
+        return _web_attach_captured_result_sections({
+            'ok': True, 'type': 'results', 'query': recovered.get('query') or caption,
+            'market': market, 'results': items, 'source': recovered.get('source'),
+            '_reference_image_b64': image_b64, '_reference_image_mime': mime,
+        }, lang, allow_ai=classify_with_ai, cancel_event=cancel_event)
     lens_future = None
     if not direct_attempted and LENS_PARALLEL_WITH_VISION and ENABLE_GOOGLE_LENS and SERPAPI_API_KEY and PUBLIC_BASE_URL:
         lens_future = LENS_POOL.submit(_run_with_market, market, google_lens_lookup, image_b64, mime, lang, caption)
