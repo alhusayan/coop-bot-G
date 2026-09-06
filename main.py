@@ -1,5 +1,62 @@
 # -*- coding: utf-8 -*-
-import os, re, time, base64, requests, json, asyncio, urllib.parse, hashlib, hmac, sqlite3, threading, io, ast, ipaddress, socket, unicodedata
+"""Findzia v107.57 — Smart API Cost Guard (based on the supplied v107.55).
+
+INSTALLATION
+Replace your existing Python entrypoint with this complete file and restart
+the service. Keep your existing environment variables and dependencies.
+This update adds only Python standard-library code; no new paid service.
+
+WHAT CHANGED
+* Identical concurrent SerpApi requests share their response directly, even
+  if the disk cache is disabled/unavailable. A waiting user cannot silently
+  start a duplicate request while the original is still running. Failed
+  responses are not cached; a subsequent independent search can retry.
+* Visual audits now cache independent per-offer proofs. Reordering cards,
+  regrouping preview/final batches, or changing a price does not require a
+  new Gemini audit when the actual evidence is identical. Missing or changed
+  evidence requires a fresh audit. Each proof keeps its own reference profile.
+* Merchant images are still fetched before proof reuse. The key covers the
+  actual model-input image bytes, titles, product URL, merchant, market,
+  proof locks, model, and match thresholds. A URL or Lens caption alone
+  never establishes a cache hit. No perceptual/approximate-image matching.
+* Overlapping batches share repeated offers. One user's cancellation does
+  not cancel the proof needed by another user. Incomplete reviews remain
+  explicitly incomplete; they do not become a false completed/Exact verdict.
+
+COST / QUALITY LIMITS
+The first uncached image still schedules the original distinct Lens passes:
+local products + local all + US all + China all (three when local is US/CN).
+Photo identification, visual audits and conditional price/local recovery can
+add provider calls. Four Lens passes are not the total API bill. Retrieval,
+local/global coverage, model prompts, thresholds and streaming are retained.
+Savings depend on repeated/overlapping work; no fixed percentage or measured
+production latency improvement is claimed. The existing SerpApi cache TTL
+(default one hour) is unchanged. Identity-proof caching never freezes prices.
+
+SETTINGS (already enabled by default)
+WEB_IDENTITY_OFFER_CACHE_ENABLED=true   # false restores the old batch audit
+WEB_IDENTITY_OFFER_CACHE_MAX_ROWS=10000 # bounded per-offer proof cache
+WEB_IDENTITY_CONTENT_CACHE_TTL=86400    # existing proof TTL, not a price TTL
+SERPAPI_SINGLEFLIGHT_ENABLED=true      # existing switch, repaired sharing
+CACHE_DB_PATH                         # existing SQLite path; a persistent
+                                      # volume retains cache across restarts
+
+DIAGNOSTICS
+Logs: IDENTITY COST candidates=... reused=... reviewed=...
+api_cost_snapshot() returns process-local HTTP/reuse counters for debugging.
+These counters are NOT a provider billing meter, and reset on restart.
+SerpApi documentation states that identical provider-cached requests are free:
+https://serpapi.com/google-lens-api
+
+VALIDATION — 2026-09-06
+30 offline regression tests passed, including full FastAPI import/health,
+eight concurrent identical requests sharing one HTTP response, reordered and
+overlapping audit batches, byte/title/model/market changes, partial results,
+cache expiry/bounds, cancellation isolation, and uncached prompt/verdict parity.
+Python compilation and undefined-name checks passed. No live provider calls,
+production deployment, or production latency/billing measurement was performed.
+"""
+import os, re, time, base64, requests, json, asyncio, urllib.parse, hashlib, hmac, sqlite3, threading, io, ast, ipaddress, socket, unicodedata, copy
 from collections import Counter, deque, defaultdict
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from functools import lru_cache
@@ -23,7 +80,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept'], max_age=86400)
-BUILD_ID = 'v107.55-progressive-identity-batches'
+BUILD_ID = 'v107.57-smart-api-cost-guard'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -121,6 +178,19 @@ SERPAPI_SINGLEFLIGHT_WAIT_SECONDS = max(3.0, min(30.0, float(os.environ.get('SER
 SERPAPI_CACHE_MAX_ROWS = max(500, min(50000, int(os.environ.get('SERPAPI_CACHE_MAX_ROWS', '10000'))))
 SERPAPI_INFLIGHT = {}
 SERPAPI_INFLIGHT_LOCK = threading.Lock()
+API_COST_STATS = Counter()
+API_COST_STATS_LOCK = threading.Lock()
+
+def _api_cost_record(event, count=1):
+    # Process-local diagnostics, not a billing meter. Provider-side free cache
+    # hits cannot be inferred reliably from the number of HTTP requests.
+    with API_COST_STATS_LOCK:
+        API_COST_STATS[str(event)] += int(count)
+
+def api_cost_snapshot():
+    with API_COST_STATS_LOCK:
+        return dict(API_COST_STATS)
+
 PUBLIC_BASE_URL = os.environ.get('PUBLIC_BASE_URL', '').strip().rstrip('/')
 if not PUBLIC_BASE_URL:
     _railway_domain = (os.environ.get('RAILWAY_PUBLIC_DOMAIN', '') or os.environ.get('RAILWAY_STATIC_URL', '')).strip()
@@ -829,57 +899,82 @@ def _serpapi_cache_put(key, engine, data, ttl_seconds=None):
         print(f'SERPAPI CACHE PUT ERR: {e}')
 
 def _serpapi_cached_json(params, timeout, label='SERPAPI'):
-    """Return the exact SerpApi JSON while avoiding duplicate paid requests."""
+    """Share the exact response, including when the persistent cache is down.
+
+    Followers never start another paid request while the owner is running.
+    A failed wave is not cached: the next independent search can retry.
+    """
     engine = str((params or {}).get('engine') or 'unknown')
     key = _serpapi_cache_key(params)
-    cached = _serpapi_cache_get(key)
+    bypass = str((params or {}).get('no_cache', '')).lower() in ('true', '1')
+    cached = None if bypass else _serpapi_cache_get(key)
     if cached is not None:
+        _api_cost_record('serpapi_cache_hits')
         print(f'SERPAPI CACHE HIT engine={engine} label={label} key={key[:10]}')
         return cached
 
     leader = True
     event = None
-    if SERPAPI_SINGLEFLIGHT_ENABLED:
+    if SERPAPI_SINGLEFLIGHT_ENABLED and not bypass:
         with SERPAPI_INFLIGHT_LOCK:
             event = SERPAPI_INFLIGHT.get(key)
             if event is None:
                 event = threading.Event()
+                try:
+                    parts = timeout if isinstance(timeout, (tuple, list)) else (timeout,)
+                    budget = sum(max(0.0, float(x)) for x in parts if x is not None) + 1.0
+                except (TypeError, ValueError):
+                    budget = SERPAPI_SINGLEFLIGHT_WAIT_SECONDS
+                event._findzia_deadline = time.monotonic() + max(budget, SERPAPI_SINGLEFLIGHT_WAIT_SECONDS)
                 SERPAPI_INFLIGHT[key] = event
             else:
                 leader = False
         if not leader:
             print(f'SERPAPI SINGLEFLIGHT WAIT engine={engine} label={label} key={key[:10]}')
-            event.wait(SERPAPI_SINGLEFLIGHT_WAIT_SECONDS)
-            cached = _serpapi_cache_get(key)
-            if cached is not None:
+            completed = event.wait(max(0.0, event._findzia_deadline - time.monotonic()))
+            if completed:
+                shared = getattr(event, '_findzia_result', None)
+                _api_cost_record('serpapi_shared_responses')
                 print(f'SERPAPI SINGLEFLIGHT HIT engine={engine} label={label} key={key[:10]}')
-                return cached
-            # The leader failed or exceeded the wait budget. Preserve the old
-            # behavior by attempting the live request instead of returning less.
+                return copy.deepcopy(shared)
+            _api_cost_record('serpapi_shared_timeouts')
+            print(f'SERPAPI SINGLEFLIGHT TIMEOUT engine={engine} key={key[:10]} duplicate_request=False')
+            return None
 
+    result = None
     try:
+        # Close the race between the first cache read and owner election.
+        cached = None if bypass else _serpapi_cache_get(key)
+        if cached is not None:
+            result = cached
+            _api_cost_record('serpapi_cache_hits')
+            return copy.deepcopy(result)
+        _api_cost_record('serpapi_http_requests')
         print(f'SERPAPI LIVE REQUEST engine={engine} label={label} key={key[:10]}')
         response = requests.get('https://serpapi.com/search.json', params=params, timeout=timeout)
         if response.status_code >= 400:
-            print(f'{label} HTTP {response.status_code}: {response.text[:300]}')
+            print(f'{label} HTTP {response.status_code}')
             return None
         data = response.json()
         if not isinstance(data, dict):
             print(f'{label} INVALID JSON TYPE: {type(data).__name__}')
             return None
         if data.get('error'):
-            print(f"{label} ERROR: {data.get('error')}")
+            print(f'{label} PROVIDER ERROR')
             return None
-        _serpapi_cache_put(key, engine, data)
-        return data
+        result = data
+        if not bypass:
+            _serpapi_cache_put(key, engine, data)
+        return copy.deepcopy(result)
     except Exception as e:
-        print(f'{label} EXCEPTION: {e}')
+        print(f'{label} EXCEPTION: {type(e).__name__}')
         return None
     finally:
         if SERPAPI_SINGLEFLIGHT_ENABLED and leader and event is not None:
             with SERPAPI_INFLIGHT_LOCK:
                 current = SERPAPI_INFLIGHT.get(key)
                 if current is event:
+                    event._findzia_result = copy.deepcopy(result)
                     SERPAPI_INFLIGHT.pop(key, None)
                     event.set()
 
@@ -6943,6 +7038,11 @@ WEB_IDENTITY_BATCH_PARALLEL = max(1, min(4, int(os.environ.get('WEB_IDENTITY_BAT
 WEB_IDENTITY_REVIEW_POOL = ThreadPoolExecutor(max_workers=max(3, min(12, int(os.environ.get('WEB_IDENTITY_REVIEW_WORKERS', '6')))))
 WEB_IDENTITY_HEARTBEAT_SECONDS = 1.0
 WEB_IDENTITY_CONTENT_CACHE_TTL = max(60, min(86400, int(os.environ.get('WEB_IDENTITY_CONTENT_CACHE_TTL', '86400'))))
+# Reuse only previously audited per-offer proofs with freshly matched pixels.
+WEB_IDENTITY_OFFER_CACHE_ENABLED = env_bool('WEB_IDENTITY_OFFER_CACHE_ENABLED', True)
+WEB_IDENTITY_OFFER_CACHE_MAX_ROWS = max(500, min(50000, int(os.environ.get('WEB_IDENTITY_OFFER_CACHE_MAX_ROWS', '10000'))))
+WEB_IDENTITY_OFFER_INFLIGHT = {}
+WEB_IDENTITY_OFFER_INFLIGHT_LOCK = threading.Lock()
 # Text search parity is independent from the heavier image pipeline switches.
 # Keep it on by default so a future Railway override cannot silently send web
 # or iOS through a weaker text-only expansion path.
@@ -11156,7 +11256,10 @@ def _web_identity_http_error(response):
 
 def _web_identity_post_response(gemini_url, payload, timeout, cancel_event=None):
     """One bounded compatibility retry, only for an explicit schema rejection."""
+    if cancel_event is not None and cancel_event.is_set():
+        raise RuntimeError('identity_request_cancelled')
     deadline = time.monotonic() + timeout
+    _api_cost_record('gemini_identity_http_requests')
     response = requests.post(gemini_url, params={'key': GEMINI_API_KEY},
                              json=payload, timeout=(5.0, timeout))
     if _web_identity_http_error(response) != 'http_400_schema':
@@ -11174,6 +11277,8 @@ def _web_identity_post_response(gemini_url, payload, timeout, cancel_event=None)
     print('WEB IDENTITY REVIEW retry=schema_compatibility attempts=2')
     with GEMINI_STATS_LOCK:
         GEMINI_STATS['plain_calls'] += 1
+    _api_cost_record('gemini_identity_http_requests')
+    _api_cost_record('gemini_identity_schema_retries')
     return requests.post(gemini_url, params={'key': GEMINI_API_KEY},
                          json=compatible, timeout=(min(5.0, remaining), remaining))
 
@@ -11274,12 +11379,7 @@ def _web_identity_content_key(candidates, market, reference, evidence):
     return 'identity-content:' + hashlib.sha256(json.dumps(blob, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
-def _web_ai_classifier_request(identity, results, market, visual_context=None, cancel_event=None):
-    """Classify one captured batch with one text or multimodal Gemini request."""
-    country = str((market or {}).get('country') or DEFAULT_COUNTRY).lower()
-    country_name = str((market or {}).get('country_name') or COUNTRY_NAMES.get(country, country.upper()))
-    source_identity = _web_clean_classification_identity((visual_context or {}).get('source_identity'))
-    reference_identity = source_identity or _web_clean_classification_identity(identity)
+def _web_identity_candidates(results):
     candidates = []
     for index, row in enumerate(list(results or [])[:WEB_AI_CLASSIFIER_MAX_RESULTS]):
         rank = int((row or {}).get('market_rank', 99)) if str((row or {}).get('market_rank', '')).lstrip('-').isdigit() else 99
@@ -11299,12 +11399,217 @@ def _web_ai_classifier_request(identity, results, market, visual_context=None, c
             'locked_market': str((row or {}).get('_locked_market') or ''),
             'fingerprint': _web_product_fingerprint(_web_result_classification_title(row)),
         })
+    return candidates
+
+
+def _web_identity_offer_content_key(candidate, market, reference, inline):
+    """Proof identity excludes only display order/id and the mutable price.
+
+    Merchant bytes are fetched anew before this function is called. Neither
+    URL similarity nor a matching caption is sufficient for proof reuse.
+    """
+    if not reference or not reference.get('data') or not inline or not inline.get('data'):
+        return ''
+    def image_identity(value):
+        return [str(value.get('mime_type') or ''),
+                hashlib.sha256(str(value['data']).encode('ascii')).hexdigest()]
+    material = {
+        'policy': 'v107.57-independent-offer-proof-1',
+        'score_version': _WEB_MATCH_SCORE_VERSION,
+        'model': GEMINI_FAST_MODEL,
+        'reference': image_identity(reference),
+        'candidate_image': image_identity(inline),
+        'candidate': {k: v for k, v in candidate.items() if k not in ('id', 'price')},
+        'country': str((market or {}).get('country') or DEFAULT_COUNTRY).lower(),
+        'currency': str((market or {}).get('currency') or ''),
+        'confidence_gate': WEB_VISUAL_CLASSIFIER_MIN_CONFIDENCE,
+        'exact_gate': WEB_VISUAL_CLASSIFIER_EXACT_SCORE,
+    }
+    return 'identity-offer:' + hashlib.sha256(json.dumps(
+        material, sort_keys=True, ensure_ascii=False, separators=(',', ':')).encode()).hexdigest()
+
+
+def _web_identity_offer_proof(value):
+    """Do not reuse failed, unobserved, or incomplete visual evidence."""
+    if not isinstance(value, dict) or not value.get('reference_profile'):
+        return None
+    item = value.get('item')
+    if not isinstance(item, dict) or not item.get('visual_evidence') or not item.get('candidate_profile'):
+        return None
+    if item.get('match') not in ('exact', 'similar') or item.get('market') not in ('local', 'global'):
+        return None
+    if not any(v in ('same', 'different') for v in (item.get('visual_axes') or {}).values()):
+        return None
+    return copy.deepcopy(value)
+
+
+def _web_identity_offer_cache_trim():
+    try:
+        with CACHE_DB_LOCK, _cache_db_connect() as conn:
+            conn.execute('DELETE FROM ai_result_classification_cache WHERE expires_at <= ?', (time.time(),))
+            conn.execute('''DELETE FROM ai_result_classification_cache WHERE cache_key IN (
+                SELECT cache_key FROM ai_result_classification_cache
+                WHERE cache_key GLOB 'identity-offer:*'
+                ORDER BY expires_at DESC LIMIT -1 OFFSET ?
+            )''', (WEB_IDENTITY_OFFER_CACHE_MAX_ROWS,))
+    except Exception as exc:
+        print('IDENTITY OFFER CACHE TRIM unavailable=' + type(exc).__name__)
+
+
+def _web_ai_classifier_request(identity, results, market, visual_context=None, cancel_event=None, *, _retry_cancelled=True):
+    """Audit only new/changed proofs; keep the same model and Exact validators.
+
+    This shares per-offer proofs even when previews/final snapshots split them
+    into different batches. Each reused item keeps its own reference profile.
+    Owners publish before waiting for overlapping owners, preventing deadlocks.
+    """
+    if not WEB_IDENTITY_OFFER_CACHE_ENABLED or not visual_context or not WEB_VISUAL_CLASSIFIER_ENABLED:
+        return _web_ai_classifier_request_live(identity, results, market, visual_context, cancel_event)
+    if cancel_event is not None and cancel_event.is_set():
+        return _web_identity_review_failure('cancelled')
+    reference, evidence = _web_visual_collect_evidence(visual_context.get('image_b64'), results, cancel_event)
+    if not reference:
+        return _web_ai_classifier_request_live(identity, results, market, visual_context, cancel_event,
+                                               _prepared_evidence=(reference, evidence))
+    candidates = _web_identity_candidates(results)
+    source_rows = list(results or [])[:WEB_AI_CLASSIFIER_MAX_RESULTS]
+    entries, owned, waiting, hits, live_rows = [], {}, [], {}, []
+    for candidate, row in zip(candidates, source_rows):
+        cid = candidate['id']
+        candidate['image_attached'] = cid in evidence
+        key = _web_identity_offer_content_key(candidate, market, reference, evidence.get(cid))
+        entries.append((cid, key))
+        proof = _web_identity_offer_proof(_web_ai_classifier_cache_get(key)) if key else None
+        if proof:
+            hits[cid] = proof
+            _api_cost_record('gemini_offer_cache_hits')
+            continue
+        prepared = dict(row, _classification_id=cid)
+        if cid in evidence:
+            prepared['_identity_prepared_inline'] = evidence[cid]
+        if not key:
+            live_rows.append(prepared)
+            continue
+        with WEB_IDENTITY_OFFER_INFLIGHT_LOCK:
+            event = WEB_IDENTITY_OFFER_INFLIGHT.get(key)
+            if event is None:
+                event = threading.Event()
+                WEB_IDENTITY_OFFER_INFLIGHT[key] = event
+                owned[key] = (cid, event)
+                live_rows.append(prepared)
+            else:
+                waiting.append((cid, key, event))
+    live, direct = {}, {}
+    try:
+        if live_rows and not (cancel_event is not None and cancel_event.is_set()):
+            # A producer may have completed after our initial cache lookup.
+            needed = []
+            keys_by_id = dict(entries)
+            for row in live_rows:
+                cid = row['_classification_id']
+                key = keys_by_id.get(cid)
+                proof = _web_identity_offer_proof(_web_ai_classifier_cache_get(key)) if key else None
+                if proof:
+                    hits[cid] = proof
+                    _api_cost_record('gemini_offer_cache_hits')
+                else:
+                    needed.append(row)
+            if needed:
+                needed_ids = {row['_classification_id'] for row in needed}
+                _api_cost_record('gemini_offer_audits_requested', len(needed))
+                live = _web_ai_classifier_request_live(
+                    identity, needed, market, visual_context, cancel_event,
+                    _prepared_evidence=(reference, {k: v for k, v in evidence.items() if k in needed_ids})) or {}
+                for item in live.get('items') or []:
+                    if not isinstance(item, dict) or item.get('id') not in needed_ids:
+                        continue
+                    cid = item['id']
+                    direct[cid] = {'item': copy.deepcopy(item),
+                                   'reference_profile': copy.deepcopy(live.get('reference_profile') or {})}
+                    proof = _web_identity_offer_proof(direct[cid])
+                    key = keys_by_id.get(cid)
+                    if key and proof and not live.get('review_error'):
+                        proof['item'].pop('id', None)
+                        _web_ai_classifier_cache_put(key, proof, WEB_IDENTITY_CONTENT_CACHE_TTL)
+                _web_identity_offer_cache_trim()
+    except Exception as exc:
+        print('IDENTITY OFFER AUDIT unavailable=' + type(exc).__name__)
+        live = _web_identity_review_failure('request_or_parse_error', True, len(evidence))
+    finally:
+        # Share only valid evidence; failure never poisons a later request.
+        with WEB_IDENTITY_OFFER_INFLIGHT_LOCK:
+            for key, (cid, event) in owned.items():
+                event._findzia_proof = _web_identity_offer_proof(hits.get(cid) or direct.get(cid))
+                event._findzia_cancelled = bool(cancel_event is not None and cancel_event.is_set())
+                event.set()
+                if WEB_IDENTITY_OFFER_INFLIGHT.get(key) is event:
+                    WEB_IDENTITY_OFFER_INFLIGHT.pop(key, None)
+    wait_deadline = time.monotonic() + WEB_VISUAL_CLASSIFIER_TIMEOUT_SECONDS + 6.0
+    retry_ids = set()
+    for cid, key, event in waiting:
+        while not event.is_set() and time.monotonic() < wait_deadline:
+            if cancel_event is not None and cancel_event.is_set():
+                break
+            event.wait(min(0.1, max(0.0, wait_deadline - time.monotonic())))
+        proof = _web_identity_offer_proof(getattr(event, '_findzia_proof', None)) if event.is_set() else None
+        if proof:
+            hits[cid] = proof
+            _api_cost_record('gemini_offer_shared_hits')
+        elif (_retry_cancelled and event.is_set() and getattr(event, '_findzia_cancelled', False)
+              and not (cancel_event is not None and cancel_event.is_set())):
+            retry_ids.add(cid)
+    if retry_ids:
+        # One user's cancellation must not cancel another user's audit. Retry
+        # only after that owner has stopped; the normal election shares this
+        # recovery among remaining users. Never recursively retry twice.
+        retry_rows = [dict(row, _classification_id=candidate['id'])
+                      for candidate, row in zip(candidates, source_rows) if candidate['id'] in retry_ids]
+        recovery = _web_ai_classifier_request(identity, retry_rows, market, visual_context,
+                                             cancel_event, _retry_cancelled=False)
+        for item in recovery.get('items') or []:
+            if item.get('id') in retry_ids:
+                direct[item['id']] = {'item': copy.deepcopy(item), 'reference_profile': copy.deepcopy(
+                    item.get('_reference_profile') or recovery.get('reference_profile') or {})}
+    items = []
+    for cid, key in entries:
+        proof = hits.get(cid) or direct.get(cid)
+        if proof:
+            item = copy.deepcopy(proof['item'])
+            item['id'] = cid
+            item['_reference_profile'] = copy.deepcopy(proof['reference_profile'])
+            items.append(item)
+    result = dict(live, items=items, visual_mode=True,
+                  visual_requested_count=sum(1 for row in source_rows[:WEB_VISUAL_CLASSIFIER_MAX_RESULTS]
+                                             if _web_is_http_url(_web_unproxy_image_url(str(
+                                                 row.get('image') or row.get('thumbnail') or '')))),
+                  visual_evidence_count=len(evidence), offer_cache_hits=len(hits),
+                  content_cache_hit=bool(items and len(hits) == len(candidates)),
+                  reference_profile=copy.deepcopy((items[0].get('_reference_profile') if items else None) or
+                                                   live.get('reference_profile') or {}))
+    if len(items) < len(candidates):
+        result['review_error'] = result.get('review_error') or 'partial_offer_review'
+    else:
+        result.pop('review_error', None)
+    print(f'IDENTITY COST candidates={len(candidates)} reused={len(hits)} reviewed={len(direct)}')
+    return result
+
+
+
+def _web_ai_classifier_request_live(identity, results, market, visual_context=None, cancel_event=None, _prepared_evidence=None):
+    """Classify one captured batch with one text or multimodal Gemini request."""
+    country = str((market or {}).get('country') or DEFAULT_COUNTRY).lower()
+    country_name = str((market or {}).get('country_name') or COUNTRY_NAMES.get(country, country.upper()))
+    source_identity = _web_clean_classification_identity((visual_context or {}).get('source_identity'))
+    reference_identity = source_identity or _web_clean_classification_identity(identity)
+    candidates = _web_identity_candidates(results)
     if not candidates:
         return {}
     reference_inline, visual_evidence = (None, {})
     if cancel_event is not None and cancel_event.is_set():
         return {}
-    if visual_context and WEB_VISUAL_CLASSIFIER_ENABLED:
+    if _prepared_evidence is not None:
+        reference_inline, visual_evidence = _prepared_evidence
+    elif visual_context and WEB_VISUAL_CLASSIFIER_ENABLED:
         reference_inline, visual_evidence = _web_visual_collect_evidence(
             (visual_context or {}).get('image_b64'),
             results,
@@ -11633,7 +11938,7 @@ def _web_ai_classify_captured_batch(identity, results, market, visual_context=No
             cache_ttl = 60 if value.get('visual_mode') else (1800 if requested and captured < requested else None)
             _web_ai_classifier_cache_put(key, value, cache_ttl)
         if value and value.get('visual_mode'):
-            source = 'visual-content-cache' if value.get('content_cache_hit') else 'visual-live'
+            source = 'visual-content-cache' if value.get('content_cache_hit') else 'visual-mixed-cache' if value.get('offer_cache_hits') else 'visual-live'
         else:
             source = 'live' if value else 'fallback'
         event._findzia_identity_result = (value, source)
@@ -11852,7 +12157,7 @@ def _web_attach_captured_result_sections(payload, lang, allow_ai=True, cancel_ev
             defensive_proof_failure, _ = _web_visual_exact_proof_failure(
                 dict(ai_item.get('visual_axes') or {}),
                 defensive_identity_score,
-                dict(ai_result.get('reference_profile') or {}),
+                dict(ai_item.get('_reference_profile') or ai_result.get('reference_profile') or {}),
             )
             if defensive_proof_failure:
                 # Defense in depth for stale/malformed cache rows or tests that
@@ -11995,7 +12300,7 @@ def _web_attach_captured_result_sections(payload, lang, allow_ai=True, cancel_ev
     out['rules_fallback_count'] = sum(1 for index in range(len(results)) if index not in match_guard_by_id and index not in ai_by_id)
     out['classification_cache'] = ai_source
     out['identity_review_error'] = ai_result.get('review_error')
-    out['identity_review_status'] = 'failed' if ai_result.get('review_error') else 'completed' if ai_result.get('items') else 'not_completed'
+    out['identity_review_status'] = 'failed' if ai_result.get('review_error') else 'partial' if len(ai_result.get('items') or []) < len(ai_candidates) and ai_result.get('items') else 'completed' if ai_result.get('items') else 'not_completed'
     out['classification_elapsed_ms'] = int((time.time() - ai_started) * 1000)
     print(f'WEB PRODUCT-INTELLIGENCE CLASSIFICATION source={ai_source} total={len(results)} match_rules={structured_match_count} market_rules={structured_market_count} ai_candidates={len(ai_candidates)} ai_used={ai_used_count} visual_candidates={visual_candidate_count} visual_evidence={out["visual_evidence_count"]} visual_used={visual_used_count} fallback={out["rules_fallback_count"]} exact={len(exact_results)} similar={len(similar_results)} local={len(local_results)} global={len(global_results)} elapsed={time.time() - ai_started:.2f}s anchor={classification_anchor[:90]!r}')
     return out
