@@ -80,7 +80,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization'], max_age=86400)
-BUILD_ID = 'v109-live-exact-prices'
+BUILD_ID = 'v110-auto-prices-auto-country'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -12754,7 +12754,7 @@ def _web_fetch_page_snapshot(url):
                 _web_safe_response_close(response)
 
         status_code, page_text, final_url = _fetch_page(headers)
-        if (status_code >= 400 or not page_text) and status_code != 404:
+        if (status_code >= 400 or not page_text) and status_code not in (401, 403, 404, 429):
             try:
                 alt = dict(_WEB_MOBILE_HEADERS)
                 alt['Referer'] = f'{parsed.scheme}://{parsed.netloc}/'
@@ -12983,7 +12983,7 @@ def _web_verify_card_strict(row, rank, lang, market_snapshot=None):
     row['price_source'] = 'pending_page_price'
     return row
 
-# Live prices v109. This block is embedded in the deployable single-file server.
+# Live prices v110. This block is embedded in the deployable single-file server.
 from contextvars import ContextVar
 from decimal import Decimal, InvalidOperation
 
@@ -13005,10 +13005,18 @@ def _web_price_url_key(url):
         p = urllib.parse.urlsplit(str(url or ''))
         if p.scheme not in ('http', 'https') or not p.hostname:
             return ''
+        tracking = {'gclid', 'fbclid', 'msclkid', 'srsltid'}
         query = [(k, v) for k, v in urllib.parse.parse_qsl(p.query, keep_blank_values=True)
-                 if not k.lower().startswith('utm_') and k.lower() not in ('gclid', 'fbclid', 'msclkid')]
+                 if not k.lower().startswith('utm_') and k.lower() not in tracking]
         host = p.netloc.lower().removeprefix('www.')
-        return urllib.parse.urlunsplit(('https', host, p.path.rstrip('/') or '/',
+        path = p.path.rstrip('/') or '/'
+        # ASIN identifies the exact variant; keep seller/offer/currency query keys.
+        if re.fullmatch(r'amazon\.(?:com|ca|de|fr|it|es|co\.uk|co\.jp|com\.au|ae|sa|in)', host):
+            asin = re.search(r'/(?:dp|gp/product)/([A-Z0-9]{10})(?:/|$)', path, re.I)
+            if asin:
+                path = '/dp/' + asin.group(1).upper()
+                query = [(k, v) for k, v in query if k.lower() not in {'tag', 'ref', 'ref_', 'psc', 'th', 'linkcode', 'creative', 'creativeasin'}]
+        return urllib.parse.urlunsplit(('https', host, path,
                                        urllib.parse.urlencode(sorted(query)), ''))
     except ValueError:
         return ''
@@ -13078,6 +13086,22 @@ def _web_extract_exact_page_price(html, url):
         offers = offers if isinstance(offers, list) else [offers]
         resolved = [deref(o) for o in offers if isinstance(o, dict)]
         exact_offers = [o for o in resolved if same(o.get('url'))]
+        if not exact_offers and not urllib.parse.urlsplit(_web_price_url_key(url)).query:
+            # A base product link frequently has one default variant offer URL.
+            # Accept only same product/path and identical prices for ALL offers.
+            # Distinct variant prices are still rejected, never reduced to the cheapest.
+            candidates = []
+            for candidate in resolved:
+                candidate_url = urllib.parse.urljoin(url, str(candidate.get('url') or ''))
+                parsed = urllib.parse.urlsplit(candidate_url)
+                params = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+                remaining = [(k, v) for k, v in params if k != 'variant']
+                base = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urllib.parse.urlencode(remaining), ''))
+                if same(base) and _web_exact_money(candidate.get('price'), candidate.get('priceCurrency')):
+                    candidates.append(candidate)
+            monies = {_web_exact_money(c.get('price'), c.get('priceCurrency')) for c in candidates}
+            if candidates and len(candidates) == len(resolved) and len(monies) == 1:
+                exact_offers = candidates
         # Never borrow a price from a different URL/variant of the same product.
         resolved = exact_offers or [o for o in resolved if not o.get('url')]
         for offer in resolved:
@@ -13260,6 +13284,106 @@ def _web_live_pool_prices(rows, rank, lang, market):
     return _web_shared_price_market_sync(rows, rank, lang, market)
 
 
+def _web_automatic_price_batches(rows):
+    """Bounded shared recovery queries, local rows first, never one call per card."""
+    # Stable grouping makes identical result sets reuse the same cached query,
+    # even when concurrent retrieval delivered the cards in another order.
+    ordered = sorted(rows.items(), key=lambda entry: (
+        0 if entry[1].get('market_rank') == 0 else 1,
+        _web_price_url_key(entry[1].get('url')),
+    ))
+    batches = []
+    for start in range(0, len(ordered), 10):
+        if len(batches) >= WEB_ASYNC_PRICE_SHARED_MARKETS:
+            break
+        batches.append(dict(ordered[start:start + 10]))
+    return batches
+
+
+def _web_indexed_offer_money(item):
+    """Only explicit product price fields, not a number borrowed from a snippet."""
+    if not isinstance(item, dict):
+        return None
+    candidates = [(item.get('price'), item.get('currency') or '')]
+    snippet = item.get('rich_snippet')
+    snippet = snippet if isinstance(snippet, dict) else {}
+    for side in ('top', 'bottom'):
+        block = snippet.get(side)
+        if not isinstance(block, dict):
+            continue
+        detected = block.get('detected_extensions')
+        detected = detected if isinstance(detected, dict) else {}
+        extensions = block.get('extensions')
+        extensions = extensions if isinstance(extensions, list) else []
+        joined = ' '.join(str(x) for x in extensions)
+        if re.search(r'\b(from|starting|up to)\b|ابتداء|\d\s*[-–—]\s*[$€£¥]?\s*\d', joined, re.I):
+            continue
+        candidates.append((detected.get('price'), detected.get('currency') or ''))
+        for extension in extensions:
+            candidates.extend((piece.strip(), '') for piece in re.split(r'[|·]', str(extension)))
+    for value, currency in candidates:
+        if value in (None, '') or isinstance(value, (dict, list, bool)):
+            continue
+        raw = str(value).strip()
+        explicit = str(currency or '').upper()
+        if explicit not in KNOWN_CURRENCY_CODES:
+            if ('$' in raw or '¥' in raw or '￥' in raw) and not re.search(r'\b(?:USD|CAD|AUD|HKD|SGD|CNY|JPY)\b|US\$', raw, re.I):
+                continue
+            _, explicit = _web_price_number_and_currency(raw)
+        if not explicit:
+            continue
+        display = raw if re.search(r'[A-Za-z$€£¥￥₹₩₺₽د]', raw) else f'{raw} {explicit}'
+        if not _web_row_has_numeric_price({'price': display, 'currency': explicit}):
+            continue
+        amount, _ = _web_price_number_and_currency(display, explicit)
+        money = _web_exact_money(amount, explicit)
+        if money:
+            return money
+    return None
+
+
+def _web_targeted_price_updates(entries, lang, market):
+    """Alternate source after a failed merchant page: indexed exact listing URLs."""
+    MARKET_CTX.value = dict(market)
+    terms = []
+    for row in entries.values():
+        key = _web_price_url_key(row.get('url'))
+        if not key:
+            continue
+        parsed = urllib.parse.urlsplit(key)
+        if parsed.path in ('', '/'):
+            continue
+        path = urllib.parse.quote(urllib.parse.unquote(parsed.path), safe='/-._~')
+        terms.append('site:' + parsed.netloc + path)
+    if not terms or not SERPAPI_API_KEY:
+        return {}
+    query = '(' + ' OR '.join(dict.fromkeys(terms)) + ')'
+    params = {'engine': 'google', 'q': query, 'gl': str(market.get('country') or 'us'),
+              'hl': country_search_hl(str(market.get('country') or 'us')), 'num': 10,
+              'api_key': SERPAPI_API_KEY, 'output': 'json'}
+    data = _serpapi_cached_json(params, timeout=(2.5, WEB_STREAM_STORE_HTTP_TIMEOUT),
+                               label='AUTOMATIC EXACT-LISTING PRICES') or {}
+    updates = {}
+    for item in data.get('organic_results') or []:
+        if not isinstance(item, dict):
+            continue
+        money = _web_indexed_offer_money(item)
+        if not money:
+            continue
+        for key, row in entries.items():
+            if _web_price_url_key(item.get('link')) != _web_price_url_key(row.get('url')):
+                continue
+            title = str(item.get('title') or '')
+            original = str(row.get('raw_title') or row.get('title') or '')
+            if title and original and _findzia_hard_product_mismatch(original, title):
+                continue
+            updates[key] = {**_web_live_money_fields(*money, market),
+                'price_source': 'exact_listing_index', 'price_source_url': item.get('link'),
+                'price_checked_at': time.time(), 'price_verified': False,
+                'price_status': 'indexed', 'price_pending': False, 'price_unavailable': False}
+    return updates
+
+
 def _web_live_snapshot(event, rows):
     """Keep every emitted card when classification snapshots replace their lists."""
     event = dict(event)
@@ -13291,7 +13415,8 @@ async def _web_with_live_prices(source, lang, country, allow_paid=True):
     token = _WEB_LIVE_PRICE_ACTIVE.set(True)
     market = _web_market(country)
     rows, facts, jobs, attempted = {}, {}, {}, set()
-    shared, shared_ranks = {}, set()
+    shared = {}
+    recovery_started = False
     loop = asyncio.get_running_loop()
     started = loop.time()
     finish_by = None
@@ -13382,19 +13507,15 @@ async def _web_with_live_prices(source, lang, country, allow_paid=True):
                     data = None
                 if data and key in rows:
                     yield update_event(key, data, 'live_page_price')
-            # Shared paid recovery starts only after all merchant jobs finish, or
-            # late in the final grace window. It never cancels a slower page.
-            if finish_by is not None and (not jobs or loop.time() >= finish_by - 5):
+            # Automatically change source instead of asking the customer to
+            # retry the same blocked page. Reserve time for the alternate source.
+            if not recovery_started and finish_by is not None and (not jobs or loop.time() >= finish_by - 8):
+                recovery_started = True
                 missing = {k: r for k, r in rows.items() if not _web_row_has_numeric_price(r)}
                 if missing and allow_paid and WEB_PRICE_ENRICH_SHOPPING_FALLBACK and SERPAPI_API_KEY:
-                    for rank in (0, 1, 2):
-                        if rank in shared_ranks or len(shared_ranks) >= WEB_ASYNC_PRICE_SHARED_MARKETS:
-                            continue
-                        if not any(r.get('market_rank') == rank for r in missing.values()):
-                            continue
-                        shared_ranks.add(rank)
-                        task = asyncio.create_task(asyncio.to_thread(_web_live_pool_prices, missing, rank, lang, dict(market)))
-                        shared[task] = rank
+                    for index, batch in enumerate(_web_automatic_price_batches(missing)):
+                        task = asyncio.create_task(asyncio.to_thread(_web_targeted_price_updates, batch, lang, dict(market)))
+                        shared[task] = index
             for task in done & set(shared):
                 shared.pop(task)
                 try:
@@ -14557,12 +14678,19 @@ def _web_geo_country_from_ip(ip):
     ip = str(ip or '').strip()
     if not WEB_GEO_ENABLED or not ip:
         return ('', 'disabled')
-    if ip in ('127.0.0.1', '::1') or ip.startswith(('10.', '192.168.', '172.16.', '172.17.', '172.18.', '172.19.', '172.2', '172.30.', '172.31.')):
-        return ('', 'private_ip')
+    import ipaddress
+    try:
+        parsed_ip = ipaddress.ip_address(ip)
+        if not parsed_ip.is_global:
+            return ('', 'private_ip')
+        ip = str(parsed_ip)
+    except ValueError:
+        return ('', 'invalid_ip')
     now = time.time()
     with WEB_GEO_CACHE_LOCK:
         cached = WEB_GEO_CACHE.get(ip)
-        if cached and now - cached.get('ts', 0) < WEB_GEO_CACHE_TTL_SECONDS:
+        ttl = WEB_GEO_CACHE_TTL_SECONDS if cached and cached.get('country') else 15
+        if cached and now - cached.get('ts', 0) < ttl:
             return (cached.get('country', ''), 'cache')
     cc = ''
     try:
@@ -14608,7 +14736,9 @@ async def web_api_geo(request: Request):
         if not cc:
             cc, source = (_web_normalize_country_code(DEFAULT_COUNTRY) or 'kw', 'default')
     currencies = COUNTRY_CURRENCY_CODES.get(cc) or tuple()
-    return {'ok': True, 'country': cc.upper(), 'country_code': cc, 'country_name': COUNTRY_NAMES.get(cc, cc.upper()), 'currency': currencies[0] if currencies else COUNTRY_CURRENCIES.get(cc, ''), 'source': source}
+    return Response(content=json.dumps({'ok': True, 'country': cc.upper(), 'country_code': cc, 'country_name': COUNTRY_NAMES.get(cc, cc.upper()), 'currency': currencies[0] if currencies else COUNTRY_CURRENCIES.get(cc, ''), 'source': source}),
+        media_type='application/json', headers={'Cache-Control': 'private, no-store',
+        'Vary': 'CF-IPCountry, X-Forwarded-For, X-Real-IP'})
 
 @app.get('/api/img-proxy')
 async def web_api_img_proxy(request: Request):
@@ -16281,5 +16411,3 @@ async def web_api_image_search(request: Request):
 @app.get('/')
 async def health():
     return {'status': BUILD_ID, 'lens_direct_mode': LENS_DIRECT_MODE, 'fast_lens': USE_FAST_LENS_PIPELINE, 'v106_pipeline': USE_V106_5_RESULT_PIPELINE, 'text_search_whatsapp_parity': TEXT_SEARCH_WHATSAPP_PARITY, 'serpapi_cache': SERPAPI_RESULT_CACHE_ENABLED, 'serpapi_singleflight': SERPAPI_SINGLEFLIGHT_ENABLED, 'ai_result_classifier': WEB_AI_CLASSIFIER_ENABLED, 'ai_classifier_timeout_seconds': WEB_AI_CLASSIFIER_TIMEOUT_SECONDS, 'visual_result_classifier': WEB_VISUAL_CLASSIFIER_ENABLED, 'visual_classifier_timeout_seconds': WEB_VISUAL_CLASSIFIER_TIMEOUT_SECONDS, 'visual_classifier_max_results': WEB_VISUAL_CLASSIFIER_MAX_RESULTS, 'visual_exact_score': WEB_VISUAL_CLASSIFIER_EXACT_SCORE, 'visual_exact_policy': 'view_invariant_product_identity', 'identity_stream_batches': True, 'identity_batch_size': WEB_IDENTITY_BATCH_SIZE, 'identity_batch_parallel': WEB_IDENTITY_BATCH_PARALLEL, 'identity_first_batch': WEB_IDENTITY_FIRST_BATCH, 'result_caps': {'local': WEB_LOCAL_MAX, 'us': WEB_US_MAX, 'china': WEB_CN_MAX, 'total': LENS_DIRECT_MAX_CTA}, 'identity_match_policy': 'identifiers_text_function_structure_no_capture_or_condition_penalty', 'match_score_version': _WEB_MATCH_SCORE_VERSION, 'build': BUILD_ID, 'market_source': 'phone_prefix_or_explicit_client_country', 'languages': ['ar','en','de','fr','it','es','pt','tr','ru','ja','zh','ko','hi','ur','id','ms']}
-
-
