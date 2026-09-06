@@ -80,7 +80,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization'], max_age=86400)
-BUILD_ID = 'v110-auto-prices-auto-country'
+BUILD_ID = 'v111-local-market-discovery'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -253,6 +253,11 @@ LOCAL_COUNTRY_RESCUE_PASSES = max(1, min(2, int(os.environ.get('LOCAL_COUNTRY_RE
 LOCAL_AI_QUERY_RESCUE_ENABLED = env_bool('LOCAL_AI_QUERY_RESCUE_ENABLED', True)
 LOCAL_QUERY_CACHE = {}
 LOCAL_QUERY_CACHE_LOCK = threading.Lock()
+LOCAL_DISCOVERY_ENABLED = env_bool('LOCAL_DISCOVERY_ENABLED', True)
+LOCAL_DISCOVERY_MAX_CALLS = max(0, min(2, int(os.environ.get('LOCAL_DISCOVERY_MAX_CALLS', '2'))))
+LOCAL_DISCOVERY_TIMEOUT = max(1.0, min(8.0, float(os.environ.get('LOCAL_DISCOVERY_TIMEOUT', '4.0'))))
+LOCAL_DISCOVERY_BAIDU = env_bool('LOCAL_DISCOVERY_BAIDU', True)
+LOCAL_DISCOVERY_POOL = ThreadPoolExecutor(max_workers=8, thread_name_prefix='local-discovery')
 COUNTRY_META = {'ae': ('United Arab Emirates', ('AED',), 'en'), 'af': ('Afghanistan', ('AFN',), 'ps'), 'ag': ('Antigua and Barbuda', ('XCD',), 'en'), 'ai': ('Anguilla', ('XCD',), 'en'), 'al': ('Albania', ('ALL',), 'sq'), 'am': ('Armenia', ('AMD',), 'hy'), 'ao': ('Angola', ('AOA',), 'pt'), 'ar': ('Argentina', ('ARS',), 'es'), 'as': ('American Samoa', ('USD',), 'en'), 'at': ('Austria', ('EUR',), 'de'), 'au': ('Australia', ('AUD',), 'en'), 'aw': ('Aruba', ('AWG',), 'nl'), 'az': ('Azerbaijan', ('AZN',), 'az'), 'ba': ('Bosnia and Herzegovina', ('BAM',), 'bs'), 'bb': ('Barbados', ('BBD',), 'en'), 'bd': ('Bangladesh', ('BDT',), 'en'), 'be': ('Belgium', ('EUR',), 'nl'), 'bf': ('Burkina Faso', ('XOF',), 'fr'), 'bg': ('Bulgaria', ('BGN',), 'bg'), 'bh': ('Bahrain', ('BHD',), 'ar'), 'bi': ('Burundi', ('BIF',), 'fr'), 'bj': ('Benin', ('XOF',), 'fr'), 'bm': ('Bermuda', ('BMD',), 'en'), 'bn': ('Brunei Darussalam', ('BND',), 'ms'), 'bo': ('Bolivia, Plurinational State of', ('BOB',), 'es'), 'br': ('Brazil', ('BRL',), 'pt'), 'bs': ('Bahamas', ('BSD',), 'en'), 'bt': ('Bhutan', ('INR', 'BTN'), 'dz'), 'bw': ('Botswana', ('BWP',), 'en'), 'by': ('Belarus', ('BYN',), 'ru'), 'bz': ('Belize', ('BZD',), 'en'), 'ca': ('Canada', ('CAD',), 'en'), 'cc': ('Cocos (Keeling) Islands', ('AUD',), 'en'), 'cd': ('Congo, The Democratic Republic of the', ('CDF',), 'fr'), 'cf': ('Central African Republic', ('XAF',), 'fr'), 'cg': ('Congo', ('XAF',), 'fr'), 'ch': ('Switzerland', ('CHF',), 'de'), 'ci': ("Côte d'Ivoire", ('XOF',), 'fr'), 'ck': ('Cook Islands', ('NZD',), 'en'), 'cl': ('Chile', ('CLP',), 'es'), 'cm': ('Cameroon', ('XAF',), 'en'), 'cn': ('China', ('CNY',), 'zh'), 'co': ('Colombia', ('COP',), 'es'), 'cr': ('Costa Rica', ('CRC',), 'es'), 'cu': ('Cuba', ('CUP',), 'es'), 'cv': ('Cabo Verde', ('CVE',), 'pt'), 'cx': ('Christmas Island', ('AUD',), 'en'), 'cy': ('Cyprus', ('EUR',), 'el'), 'cz': ('Czechia', ('CZK',), 'cs'), 'de': ('Germany', ('EUR',), 'de'), 'dj': ('Djibouti', ('DJF',), 'fr'), 'dk': ('Denmark', ('DKK',), 'da'), 'dm': ('Dominica', ('XCD',), 'en'), 'do': ('Dominican Republic', ('DOP',), 'es'), 'dz': ('Algeria', ('DZD',), 'fr'), 'ec': ('Ecuador', ('USD',), 'es'), 'ee': ('Estonia', ('EUR',), 'et'), 'eg': ('Egypt', ('EGP',), 'ar'), 'eh': ('Western Sahara', ('MAD',), 'es'), 'er': ('Eritrea', ('ERN',), 'ti'), 'es': ('Spain', ('EUR',), 'es'), 'et': ('Ethiopia', ('ETB',), 'am'), 'fi': ('Finland', ('EUR',), 'fi'), 'fj': ('Fiji', ('FJD',), 'en'), 'fk': ('Falkland Islands (Malvinas)', ('FKP',), 'en'), 'fm': ('Micronesia, Federated States of', ('USD',), 'en'), 'fo': ('Faroe Islands', ('DKK',), 'fo'), 'fr': ('France', ('EUR',), 'fr'), 'ga': ('Gabon', ('XAF',), 'fr'), 'gb': ('United Kingdom', ('GBP',), 'en'), 'gd': ('Grenada', ('XCD',), 'en'), 'ge': ('Georgia', ('GEL',), 'ka'), 'gf': ('French Guiana', ('EUR',), 'fr'), 'gg': ('Guernsey', ('GBP',), 'en'), 'gh': ('Ghana', ('GHS',), 'en'), 'gi': ('Gibraltar', ('GIP',), 'en'), 'gl': ('Greenland', ('DKK',), 'kl'), 'gm': ('Gambia', ('GMD',), 'en'), 'gn': ('Guinea', ('GNF',), 'fr'), 'gp': ('Guadeloupe', ('EUR',), 'fr'), 'gq': ('Equatorial Guinea', ('XAF',), 'es'), 'gr': ('Greece', ('EUR',), 'el'), 'gs': ('South Georgia and the South Sandwich Islands', ('GBP',), 'en'), 'gt': ('Guatemala', ('GTQ',), 'es'), 'gu': ('Guam', ('USD',), 'en'), 'gw': ('Guinea-Bissau', ('XOF',), 'pt'), 'gy': ('Guyana', ('GYD',), 'en'), 'hk': ('Hong Kong', ('HKD',), 'en'), 'hm': ('Heard Island and McDonald Islands', ('AUD',), 'en'), 'hn': ('Honduras', ('HNL',), 'es'), 'hr': ('Croatia', ('EUR',), 'hr'), 'ht': ('Haiti', ('HTG', 'USD'), 'fr'), 'hu': ('Hungary', ('HUF',), 'hu'), 'id': ('Indonesia', ('IDR',), 'id'), 'ie': ('Ireland', ('EUR',), 'en'), 'il': ('Israel', ('ILS',), 'he'), 'im': ('Isle of Man', ('GBP',), 'en'), 'in': ('India', ('INR',), 'en'), 'io': ('British Indian Ocean Territory', ('USD',), 'en'), 'iq': ('Iraq', ('IQD',), 'ar'), 'ir': ('Iran, Islamic Republic of', ('IRR',), 'fa'), 'is': ('Iceland', ('ISK',), 'is'), 'it': ('Italy', ('EUR',), 'it'), 'je': ('Jersey', ('GBP',), 'en'), 'jm': ('Jamaica', ('JMD',), 'en'), 'jo': ('Jordan', ('JOD',), 'ar'), 'jp': ('Japan', ('JPY',), 'ja'), 'ke': ('Kenya', ('KES',), 'en'), 'kg': ('Kyrgyzstan', ('KGS',), 'ky'), 'kh': ('Cambodia', ('KHR',), 'km'), 'ki': ('Kiribati', ('AUD',), 'en'), 'km': ('Comoros', ('KMF',), 'ar'), 'kn': ('Saint Kitts and Nevis', ('XCD',), 'en'), 'kp': ("Korea, Democratic People's Republic of", ('KPW',), 'ko'), 'kr': ('Korea, Republic of', ('KRW',), 'ko'), 'kw': ('Kuwait', ('KWD',), 'ar'), 'ky': ('Cayman Islands', ('KYD',), 'en'), 'kz': ('Kazakhstan', ('KZT',), 'ru'), 'la': ("Lao People's Democratic Republic", ('LAK',), 'lo'), 'lb': ('Lebanon', ('LBP',), 'ar'), 'lc': ('Saint Lucia', ('XCD',), 'en'), 'li': ('Liechtenstein', ('CHF',), 'de'), 'lk': ('Sri Lanka', ('LKR',), 'si'), 'lr': ('Liberia', ('LRD',), 'en'), 'ls': ('Lesotho', ('ZAR', 'LSL'), 'en'), 'lt': ('Lithuania', ('EUR',), 'lt'), 'lu': ('Luxembourg', ('EUR',), 'fr'), 'lv': ('Latvia', ('EUR',), 'lv'), 'ly': ('Libya', ('LYD',), 'ar'), 'ma': ('Morocco', ('MAD',), 'fr'), 'mc': ('Monaco', ('EUR',), 'fr'), 'md': ('Moldova, Republic of', ('MDL',), 'ro'), 'mg': ('Madagascar', ('MGA',), 'fr'), 'mh': ('Marshall Islands', ('USD',), 'en'), 'mk': ('North Macedonia', ('MKD',), 'mk'), 'ml': ('Mali', ('XOF',), 'fr'), 'mn': ('Mongolia', ('MNT',), 'mn'), 'mo': ('Macao', ('MOP',), 'zh'), 'mp': ('Northern Mariana Islands', ('USD',), 'en'), 'mq': ('Martinique', ('EUR',), 'fr'), 'mr': ('Mauritania', ('MRU',), 'ar'), 'ms': ('Montserrat', ('XCD',), 'en'), 'mt': ('Malta', ('EUR',), 'mt'), 'mu': ('Mauritius', ('MUR',), 'en'), 'mv': ('Maldives', ('MVR',), 'dv'), 'mw': ('Malawi', ('MWK',), 'en'), 'mx': ('Mexico', ('MXN',), 'es'), 'my': ('Malaysia', ('MYR',), 'en'), 'mz': ('Mozambique', ('MZN',), 'pt'), 'na': ('Namibia', ('ZAR', 'NAD'), 'en'), 'nc': ('New Caledonia', ('XPF',), 'fr'), 'ne': ('Niger', ('XOF',), 'fr'), 'nf': ('Norfolk Island', ('AUD',), 'en'), 'ng': ('Nigeria', ('NGN',), 'en'), 'ni': ('Nicaragua', ('NIO',), 'es'), 'nl': ('Netherlands', ('EUR',), 'nl'), 'no': ('Norway', ('NOK',), 'no'), 'np': ('Nepal', ('NPR',), 'ne'), 'nr': ('Nauru', ('AUD',), 'en'), 'nu': ('Niue', ('NZD',), 'en'), 'nz': ('New Zealand', ('NZD',), 'en'), 'om': ('Oman', ('OMR',), 'ar'), 'pa': ('Panama', ('PAB', 'USD'), 'es'), 'pe': ('Peru', ('PEN',), 'es'), 'pf': ('French Polynesia', ('XPF',), 'fr'), 'pg': ('Papua New Guinea', ('PGK',), 'en'), 'ph': ('Philippines', ('PHP',), 'en'), 'pk': ('Pakistan', ('PKR',), 'en'), 'pl': ('Poland', ('PLN',), 'pl'), 'pm': ('Saint Pierre and Miquelon', ('EUR',), 'fr'), 'pn': ('Pitcairn', ('NZD',), 'en'), 'pr': ('Puerto Rico', ('USD',), 'es'), 'pt': ('Portugal', ('EUR',), 'pt'), 'pw': ('Palau', ('USD',), 'en'), 'py': ('Paraguay', ('PYG',), 'es'), 'qa': ('Qatar', ('QAR',), 'ar'), 're': ('Réunion', ('EUR',), 'fr'), 'ro': ('Romania', ('RON',), 'ro'), 'rs': ('Serbia', ('RSD',), 'rs'), 'ru': ('Russian Federation', ('RUB',), 'ru'), 'rw': ('Rwanda', ('RWF',), 'rw'), 'sa': ('Saudi Arabia', ('SAR',), 'ar'), 'sb': ('Solomon Islands', ('SBD',), 'en'), 'sc': ('Seychelles', ('SCR',), 'fr'), 'sd': ('Sudan', ('SDG',), 'ar'), 'se': ('Sweden', ('SEK',), 'sv'), 'sg': ('Singapore', ('SGD',), 'en'), 'sh': ('Saint Helena, Ascension and Tristan da Cunha', ('SHP',), 'en'), 'si': ('Slovenia', ('EUR',), 'sl'), 'sj': ('Svalbard and Jan Mayen', ('NOK',), 'no'), 'sk': ('Slovakia', ('EUR',), 'sk'), 'sl': ('Sierra Leone', ('SLE',), 'en'), 'sm': ('San Marino', ('EUR',), 'it'), 'sn': ('Senegal', ('XOF',), 'fr'), 'so': ('Somalia', ('SOS',), 'so'), 'sr': ('Suriname', ('SRD',), 'nl'), 'ss': ('South Sudan', ('SSP',), 'en'), 'st': ('Sao Tome and Principe', ('STN',), 'pt'), 'sv': ('El Salvador', ('USD',), 'es'), 'sy': ('Syrian Arab Republic', ('SYP',), 'ar'), 'sz': ('Eswatini', ('SZL',), 'en'), 'td': ('Chad', ('XAF',), 'fr'), 'tf': ('French Southern Territories', ('EUR',), 'fr'), 'tg': ('Togo', ('XOF',), 'fr'), 'th': ('Thailand', ('THB',), 'th'), 'tj': ('Tajikistan', ('TJS',), 'tg'), 'tk': ('Tokelau', ('NZD',), 'en'), 'tl': ('Timor-Leste', ('USD',), 'pt'), 'tm': ('Turkmenistan', ('TMT',), 'tk'), 'tn': ('Tunisia', ('TND',), 'fr'), 'to': ('Tonga', ('TOP',), 'en'), 'tr': ('Türkiye', ('TRY',), 'tr'), 'tt': ('Trinidad and Tobago', ('TTD',), 'en'), 'tv': ('Tuvalu', ('AUD',), 'en'), 'tw': ('Taiwan, Province of China', ('TWD',), 'zh'), 'tz': ('Tanzania, United Republic of', ('TZS',), 'en'), 'ua': ('Ukraine', ('UAH',), 'uk'), 'ug': ('Uganda', ('UGX',), 'en'), 'us': ('United States', ('USD',), 'en'), 'uy': ('Uruguay', ('UYU',), 'es'), 'uz': ('Uzbekistan', ('UZS',), 'uz'), 'vc': ('Saint Vincent and the Grenadines', ('XCD',), 'en'), 've': ('Venezuela, Bolivarian Republic of', ('VES',), 'es'), 'vn': ('Viet Nam', ('VND',), 'vi'), 'vu': ('Vanuatu', ('VUV',), 'bi'), 'wf': ('Wallis and Futuna', ('XPF',), 'fr'), 'ws': ('Samoa', ('WST',), 'sm'), 'xk': ('Kosovo', ('EUR',), 'sq'), 'ye': ('Yemen', ('YER',), 'ar'), 'yt': ('Mayotte', ('EUR',), 'fr'), 'za': ('South Africa', ('ZAR',), 'en'), 'zm': ('Zambia', ('ZMW',), 'en'), 'zw': ('Zimbabwe', ('USD', 'ZWG'), 'en')}
 CALLING_CODE_TO_COUNTRY = {'1': 'us', '7': 'ru', '20': 'eg', '27': 'za', '30': 'gr', '31': 'nl', '32': 'be', '33': 'fr', '34': 'es', '36': 'hu', '39': 'it', '40': 'ro', '41': 'ch', '43': 'at', '44': 'gb', '45': 'dk', '46': 'se', '47': 'no', '48': 'pl', '49': 'de', '51': 'pe', '52': 'mx', '53': 'cu', '54': 'ar', '55': 'br', '56': 'cl', '57': 'co', '58': 've', '60': 'my', '61': 'au', '62': 'id', '63': 'ph', '64': 'nz', '65': 'sg', '66': 'th', '76': 'kz', '77': 'kz', '81': 'jp', '82': 'kr', '84': 'vn', '86': 'cn', '90': 'tr', '91': 'in', '92': 'pk', '93': 'af', '94': 'lk', '98': 'ir', '211': 'ss', '212': 'ma', '213': 'dz', '216': 'tn', '218': 'ly', '220': 'gm', '221': 'sn', '222': 'mr', '223': 'ml', '224': 'gn', '225': 'ci', '226': 'bf', '227': 'ne', '228': 'tg', '229': 'bj', '230': 'mu', '231': 'lr', '232': 'sl', '233': 'gh', '234': 'ng', '235': 'td', '236': 'cf', '237': 'cm', '238': 'cv', '239': 'st', '240': 'gq', '241': 'ga', '242': 'cg', '243': 'cd', '244': 'ao', '245': 'gw', '246': 'io', '248': 'sc', '249': 'sd', '250': 'rw', '251': 'et', '252': 'so', '253': 'dj', '254': 'ke', '255': 'tz', '256': 'ug', '257': 'bi', '258': 'mz', '260': 'zm', '261': 'mg', '262': 're', '263': 'zw', '264': 'na', '265': 'mw', '266': 'ls', '267': 'bw', '268': 'sz', '269': 'km', '290': 'sh', '291': 'er', '297': 'aw', '298': 'fo', '299': 'gl', '350': 'gi', '351': 'pt', '352': 'lu', '353': 'ie', '354': 'is', '355': 'al', '356': 'mt', '357': 'cy', '358': 'fi', '359': 'bg', '370': 'lt', '371': 'lv', '372': 'ee', '373': 'md', '374': 'am', '375': 'by', '377': 'mc', '378': 'sm', '380': 'ua', '381': 'rs', '385': 'hr', '386': 'si', '387': 'ba', '389': 'mk', '420': 'cz', '421': 'sk', '423': 'li', '500': 'fk', '501': 'bz', '502': 'gt', '503': 'sv', '504': 'hn', '505': 'ni', '506': 'cr', '507': 'pa', '508': 'pm', '509': 'ht', '590': 'gp', '591': 'bo', '592': 'gy', '593': 'ec', '594': 'gf', '595': 'py', '596': 'mq', '597': 'sr', '598': 'uy', '670': 'tl', '672': 'nf', '673': 'bn', '674': 'nr', '675': 'pg', '676': 'to', '677': 'sb', '678': 'vu', '679': 'fj', '680': 'pw', '681': 'wf', '682': 'ck', '683': 'nu', '685': 'ws', '686': 'ki', '687': 'nc', '688': 'tv', '689': 'pf', '690': 'tk', '691': 'fm', '692': 'mh', '850': 'kp', '852': 'hk', '853': 'mo', '855': 'kh', '856': 'la', '880': 'bd', '886': 'tw', '960': 'mv', '961': 'lb', '962': 'jo', '963': 'sy', '964': 'iq', '965': 'kw', '966': 'sa', '967': 'ye', '968': 'om', '971': 'ae', '972': 'il', '973': 'bh', '974': 'qa', '975': 'bt', '976': 'mn', '977': 'np', '992': 'tj', '993': 'tm', '994': 'az', '995': 'ge', '996': 'kg', '998': 'uz', '1242': 'bs', '1246': 'bb', '1264': 'ai', '1268': 'ag', '1345': 'ky', '1441': 'bm', '1473': 'gd', '1664': 'ms', '1670': 'mp', '1671': 'gu', '1684': 'as', '1758': 'lc', '1767': 'dm', '1784': 'vc', '1787': 'pr', '1809': 'do', '1829': 'do', '1849': 'do', '1868': 'tt', '1869': 'kn', '1876': 'jm', '1939': 'pr', '4779': 'sj'}
 NANP_CANADA_AREA_CODES = {'204', '226', '236', '249', '250', '257', '263', '289', '306', '343', '354', '365', '367', '368', '382', '403', '416', '418', '428', '431', '437', '438', '450', '468', '474', '506', '514', '519', '548', '579', '581', '584', '587', '604', '613', '639', '647', '672', '683', '705', '709', '742', '753', '778', '780', '782', '807', '819', '825', '867', '873', '879', '902', '905'}
@@ -262,6 +267,7 @@ COUNTRY_NAMES = {cc: meta[0] for cc, meta in COUNTRY_META.items()}
 COUNTRY_CURRENCY_CODES = {cc: tuple(meta[1]) for cc, meta in COUNTRY_META.items()}
 COUNTRY_CURRENCIES = {cc: meta[1][0] if meta[1] else '' for cc, meta in COUNTRY_META.items()}
 COUNTRY_SEARCH_HL = {cc: meta[2] or 'en' for cc, meta in COUNTRY_META.items()}
+COUNTRY_SEARCH_HL.update({'cn': 'zh-cn', 'tw': 'zh-tw', 'hk': 'zh-tw'})
 COUNTRY_TLDS = {cc: ('.uk',) if cc == 'gb' else (f'.{cc}',) for cc in COUNTRY_META}
 COUNTRY_TLDS['gb'] = ('.uk', '.co.uk')
 COUNTRY_TLDS['us'] = ('.us',)
@@ -482,8 +488,12 @@ def current_market():
     return getattr(MARKET_CTX, 'value', None) or {'country': base_cc, 'country_name': COUNTRY_NAMES.get(base_cc, 'Kuwait'), 'currency': base_codes[0] if base_codes else 'KWD', 'currencies': list(base_codes), 'search_hl': COUNTRY_SEARCH_HL.get(base_cc, 'ar'), 'tlds': list(country_tlds(base_cc))}
 
 def _run_with_market(market, fn, *args, **kwargs):
-    MARKET_CTX.value = market
-    return fn(*args, **kwargs)
+    previous = getattr(MARKET_CTX, 'value', None)
+    MARKET_CTX.value = dict(market)
+    try:
+        return fn(*args, **kwargs)
+    finally:
+        MARKET_CTX.value = previous
 
 def currency_label(lang='ar'):
     code = current_market().get('currency') or ''
@@ -583,6 +593,9 @@ def is_lens_product_url(url, item=None):
         return False
     if not p.path or p.path == '/':
         return False
+    domestic = _china_domestic_product_url(url)
+    if domestic is not None:
+        return domestic
     # Marketplace category pages may have thumbnails, but are not offers.
     if re.search(r'(^|\.)amazon\.[a-z.]+$', host) and not re.search(r'/(?:dp|gp/product)/[a-z0-9]{10}(?:/|$)', p.path, re.I):
         return False
@@ -1556,7 +1569,7 @@ def _collect_lens_items(data, items, seen):
     return items
 
 def _serpapi_lens_request(public_url, lens_type, country, auto_crop, query_hint):
-    params = {'engine': 'google_lens', 'url': public_url, 'api_key': SERPAPI_API_KEY, 'hl': 'en', 'safe': 'active', 'output': 'json'}
+    params = {'engine': 'google_lens', 'url': public_url, 'api_key': SERPAPI_API_KEY, 'hl': country_search_hl(country), 'safe': 'active', 'output': 'json'}
     if lens_type:
         params['type'] = lens_type
     if country:
@@ -1656,6 +1669,9 @@ def _market_presence_fallback(base_query, rank, limit=6):
     q = _shopping_clean_query(base_query or '')
     if not q:
         return []
+    if rank == 0 and LOCAL_DISCOVERY_ENABLED:
+        return _local_market_discovery(q, dict(current_market()), limit=limit,
+                                       timeout_seconds=MARKET_FALLBACK_TIMEOUT_SECONDS)
     if rank == 2:
         return _china_store_search_fallback(q, limit=limit)
     local_cc = (current_market().get('country') or DEFAULT_COUNTRY).lower()
@@ -1690,7 +1706,8 @@ def _market_presence_fallback(base_query, rank, limit=6):
                 continue
             out.append(item)
         return out
-    futures = {LENS_HTTP_POOL.submit(_one, label, domain, gl): (label, domain) for label, domain, gl in specs}
+    market_snapshot = dict(current_market())
+    futures = {LENS_HTTP_POOL.submit(_run_with_market, market_snapshot, _one, label, domain, gl): (label, domain) for label, domain, gl in specs}
     merged, seen = ([], set())
     done, pending = wait(list(futures), timeout=MARKET_FALLBACK_TIMEOUT_SECONDS)
     gathered = []
@@ -1723,6 +1740,9 @@ def _single_local_lane_rescue(base_query, timeout_seconds=3.5, limit=6):
     q = _shopping_clean_query(base_query or '')
     if not q:
         return []
+    if LOCAL_DISCOVERY_ENABLED:
+        return _local_market_discovery(q, dict(current_market()), limit=limit,
+                                       timeout_seconds=timeout_seconds)
     local_cc = (current_market().get('country') or DEFAULT_COUNTRY).lower()
     local_hl = country_search_hl(local_cc)
     out = []
@@ -2161,9 +2181,8 @@ def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=Fal
             nonlocal local_rescue_future, local_rescue_started
             if local_rescue_started or (not LENS_LOCAL_LANE_RESCUE):
                 return local_rescue_future
-            local_count = sum(1 for x in _candidate_rows() if result_market_rank(x) == 0
-                              and (not reference.get('named') or x.get('_reference_priority', 0) >= 3))
-            if local_count or not merged:
+            local_count = _local_lane_count(_candidate_rows(), reference)
+            if local_count >= min(LOCAL_RESULTS_TARGET, LENS_LOCAL_LANE_TARGET):
                 return local_rescue_future
             elapsed = time.monotonic() - fast_started
             if (not force) and elapsed < LENS_LOCAL_RESCUE_AFTER_SECONDS:
@@ -2208,8 +2227,7 @@ def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=Fal
             # First paint is never held back by a slow local market. The local
             # lane below remains alive and will replace/reorder the snapshot.
             _emit_progress_snapshot('fast_pass', allow_foreign_first=True)
-            if rank_counts[0] == 0:
-                _start_local_rescue_if_needed()
+            _start_local_rescue_if_needed()
             if USE_FAST_LENS_PIPELINE and enough_fast:
                 print(f'LENS TURBO EARLY RETURN READY useful={sum(rank_counts.values())} elapsed={time.monotonic() - fast_started:.2f}s')
                 break
@@ -2252,21 +2270,21 @@ def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=Fal
         if USE_FAST_LENS_PIPELINE and sparse_useful:
             _emit_progress_snapshot('pre_local_lane', allow_foreign_first=True)
 
-        local_count = sum(1 for x in _candidate_rows() if result_market_rank(x) == 0)
-        if USE_FAST_LENS_PIPELINE and merged and local_count < LENS_LOCAL_LANE_TARGET:
+        local_count = _local_lane_count(_candidate_rows(), reference)
+        if USE_FAST_LENS_PIPELINE and local_count < LENS_LOCAL_LANE_TARGET:
             local_lane_started = time.monotonic()
             rescue_due_at = fast_started + LENS_LOCAL_RESCUE_AFTER_SECONDS
             print(f'LENS LOCAL LANE START local={local_count}/{LENS_LOCAL_LANE_TARGET} pending={len(pending)}')
             while local_count < LENS_LOCAL_LANE_TARGET and time.monotonic() < post_fast_deadline:
                 local_lens_pending = {fut for fut in pending if future_map[fut][1] == user_country}
-                _start_local_rescue_if_needed(force=(local_count == 0 and not local_lens_pending))
+                _start_local_rescue_if_needed(force=not local_lens_pending)
                 waiters = set(local_lens_pending)
                 if local_rescue_future is not None:
                     waiters.add(local_rescue_future)
                 if not waiters:
                     break
                 wait_deadline = post_fast_deadline
-                if local_count == 0 and not local_rescue_started:
+                if local_count < min(LOCAL_RESULTS_TARGET, LENS_LOCAL_LANE_TARGET) and not local_rescue_started:
                     wait_deadline = min(wait_deadline, rescue_due_at)
                 wait_seconds = max(0.0, wait_deadline - time.monotonic())
                 if wait_seconds <= 0:
@@ -2291,7 +2309,7 @@ def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=Fal
                         _merge(fut.result() or [])
                     except Exception as e:
                         print(f'LENS LOCAL LANE FUTURE ERR type={lens_type} country={country}: {e}')
-                local_count = sum(1 for x in _candidate_rows() if result_market_rank(x) == 0)
+                local_count = _local_lane_count(_candidate_rows(), reference)
                 _emit_progress_snapshot('local_lane', allow_foreign_first=True)
             print(f'LENS LOCAL LANE DONE local={local_count}/{LENS_LOCAL_LANE_TARGET} elapsed={time.monotonic() - local_lane_started:.2f}s rescue={local_rescue_started}')
 
@@ -2575,8 +2593,317 @@ CATEGORY_KEYWORDS = {'sports': ('كره سله', 'كره قدم', 'كره طاي
 CATEGORY_SPECIALISTS = {'sports': ['Pro Sports Kuwait (prosportskw.com)', 'Intersport Kuwait', 'Decathlon Kuwait', 'Sun & Sand Sports', 'Foot Locker Kuwait'], 'gaming': ['3RoodQ8 (3roodq8.com)', 'Xcite', 'Eureka', 'Blink', 'Jarir'], 'electronics': ['Xcite', 'Eureka', 'Best Al-Yousifi', 'Blink', 'Jarir', '3RoodQ8 (3roodq8.com)'], 'appliances': ['Xcite', 'Eureka', 'Best Al-Yousifi', 'Blink'], 'beauty': ['Boutiqaat', 'Faces', 'Sephora Kuwait', "Bloomingdale's Kuwait"], 'pharmacy': ['Boots Kuwait', 'YIACO', 'Royal Pharmacy'], 'grocery': ['جمعية دوت كوم', 'Lulu', 'Carrefour', 'Taw9eel'], 'food_delivery': ['Keeta', 'Talabat', 'Deliveroo'], 'fashion': ['Namshi', 'Sun & Sand Sports', 'Foot Locker Kuwait', 'Centrepoint', 'H&M Kuwait'], 'furniture': ['IKEA Kuwait', 'The One', 'Home Centre', 'Midas'], 'kids_toys': ['Tigro (tigro.app)', 'Toys R Us Kuwait', '3RoodQ8 (3roodq8.com)', 'Mothercare', 'Babyshop'], 'auto': ['AlMailem Tires', 'Tires Plus', 'Xcite']}
 COUNTRY_MAJOR_STORE_DOMAINS = {'us': [('Amazon', 'amazon.com'), ('Walmart', 'walmart.com'), ('Target', 'target.com'), ('Best Buy', 'bestbuy.com'), ('eBay', 'ebay.com')], 'ca': [('Amazon Canada', 'amazon.ca'), ('Walmart Canada', 'walmart.ca'), ('Best Buy Canada', 'bestbuy.ca'), ('Canadian Tire', 'canadiantire.ca')], 'gb': [('Amazon UK', 'amazon.co.uk'), ('Argos', 'argos.co.uk'), ('Currys', 'currys.co.uk'), ('John Lewis', 'johnlewis.com')], 'fr': [('Amazon France', 'amazon.fr'), ('Fnac', 'fnac.com'), ('Darty', 'darty.com'), ('Cdiscount', 'cdiscount.com'), ('Carrefour', 'carrefour.fr')], 'de': [('Amazon Germany', 'amazon.de'), ('MediaMarkt', 'mediamarkt.de'), ('Saturn', 'saturn.de'), ('Otto', 'otto.de')], 'es': [('Amazon Spain', 'amazon.es'), ('El Corte Inglés', 'elcorteingles.es'), ('MediaMarkt', 'mediamarkt.es'), ('Carrefour', 'carrefour.es')], 'it': [('Amazon Italy', 'amazon.it'), ('MediaWorld', 'mediaworld.it'), ('Unieuro', 'unieuro.it')], 'nl': [('bol', 'bol.com'), ('Coolblue', 'coolblue.nl'), ('MediaMarkt', 'mediamarkt.nl'), ('Amazon Netherlands', 'amazon.nl')], 'be': [('bol', 'bol.com'), ('Coolblue', 'coolblue.be'), ('MediaMarkt', 'mediamarkt.be'), ('Amazon Belgium', 'amazon.com.be')], 'ch': [('Galaxus', 'galaxus.ch'), ('Digitec', 'digitec.ch'), ('Brack', 'brack.ch'), ('Manor', 'manor.ch')], 'at': [('MediaMarkt', 'mediamarkt.at'), ('Amazon Germany', 'amazon.de'), ('Otto Austria', 'ottoversand.at')], 'ie': [('Currys Ireland', 'currys.ie'), ('Harvey Norman', 'harveynorman.ie'), ('Amazon UK', 'amazon.co.uk')], 'pt': [('Worten', 'worten.pt'), ('Fnac Portugal', 'fnac.pt'), ('Continente', 'continente.pt')], 'pl': [('Allegro', 'allegro.pl'), ('Media Expert', 'mediaexpert.pl'), ('RTV Euro AGD', 'euro.com.pl')], 'cz': [('Alza', 'alza.cz'), ('Datart', 'datart.cz'), ('Mall', 'mall.cz')], 'se': [('Amazon Sweden', 'amazon.se'), ('Elgiganten', 'elgiganten.se'), ('CDON', 'cdon.se')], 'no': [('Elkjøp', 'elkjop.no'), ('Komplett', 'komplett.no'), ('Power', 'power.no')], 'dk': [('Elgiganten', 'elgiganten.dk'), ('Proshop', 'proshop.dk'), ('Power', 'power.dk')], 'fi': [('Verkkokauppa', 'verkkokauppa.com'), ('Gigantti', 'gigantti.fi'), ('Power', 'power.fi')], 'tr': [('Trendyol', 'trendyol.com'), ('Hepsiburada', 'hepsiburada.com'), ('Amazon Turkey', 'amazon.com.tr'), ('n11', 'n11.com')], 'ru': [('Ozon', 'ozon.ru'), ('Wildberries', 'wildberries.ru'), ('Yandex Market', 'market.yandex.ru')], 'ua': [('Rozetka', 'rozetka.com.ua'), ('Prom', 'prom.ua'), ('Epicentr', 'epicentrk.ua')], 'sa': [('Amazon Saudi', 'amazon.sa'), ('Noon', 'noon.com'), ('Jarir', 'jarir.com'), ('eXtra', 'extra.com'), ('Carrefour', 'carrefourksa.com')], 'ae': [('Amazon UAE', 'amazon.ae'), ('Noon', 'noon.com'), ('Carrefour UAE', 'carrefouruae.com'), ('Sharaf DG', 'sharafdg.com'), ('Jumbo', 'jumbo.ae')], 'eg': [('Amazon Egypt', 'amazon.eg'), ('Noon', 'noon.com'), ('B.TECH', 'btech.com'), ('Carrefour Egypt', 'carrefouregypt.com')], 'in': [('Amazon India', 'amazon.in'), ('Flipkart', 'flipkart.com'), ('Croma', 'croma.com'), ('Reliance Digital', 'reliancedigital.in'), ('Myntra', 'myntra.com')], 'pk': [('Daraz', 'daraz.pk'), ('PriceOye', 'priceoye.pk')], 'bd': [('Daraz Bangladesh', 'daraz.com.bd'), ('Pickaboo', 'pickaboo.com')], 'cn': [('JD', 'jd.com'), ('Tmall', 'tmall.com'), ('Taobao', 'taobao.com'), ('Suning', 'suning.com')], 'jp': [('Amazon Japan', 'amazon.co.jp'), ('Rakuten', 'rakuten.co.jp'), ('Yodobashi', 'yodobashi.com'), ('Bic Camera', 'biccamera.com')], 'kr': [('Coupang', 'coupang.com'), ('Gmarket', 'gmarket.co.kr'), ('11st', '11st.co.kr')], 'sg': [('Shopee Singapore', 'shopee.sg'), ('Lazada Singapore', 'lazada.sg'), ('Amazon Singapore', 'amazon.sg'), ('Courts', 'courts.com.sg')], 'my': [('Shopee Malaysia', 'shopee.com.my'), ('Lazada Malaysia', 'lazada.com.my'), ('Harvey Norman', 'harveynorman.com.my')], 'id': [('Tokopedia', 'tokopedia.com'), ('Shopee Indonesia', 'shopee.co.id'), ('Blibli', 'blibli.com'), ('Lazada Indonesia', 'lazada.co.id')], 'ph': [('Shopee Philippines', 'shopee.ph'), ('Lazada Philippines', 'lazada.com.ph')], 'th': [('Shopee Thailand', 'shopee.co.th'), ('Lazada Thailand', 'lazada.co.th'), ('Central', 'central.co.th'), ('Power Buy', 'powerbuy.co.th')], 'vn': [('Shopee Vietnam', 'shopee.vn'), ('Lazada Vietnam', 'lazada.vn'), ('Tiki', 'tiki.vn')], 'au': [('Amazon Australia', 'amazon.com.au'), ('JB Hi-Fi', 'jbhifi.com.au'), ('Harvey Norman', 'harveynorman.com.au'), ('Kmart', 'kmart.com.au')], 'nz': [('The Warehouse', 'thewarehouse.co.nz'), ('Noel Leeming', 'noelleeming.co.nz'), ('Mighty Ape', 'mightyape.co.nz'), ('Harvey Norman', 'harveynorman.co.nz')], 'br': [('Mercado Livre', 'mercadolivre.com.br'), ('Amazon Brazil', 'amazon.com.br'), ('Magazine Luiza', 'magazineluiza.com.br')], 'mx': [('Mercado Libre', 'mercadolibre.com.mx'), ('Amazon Mexico', 'amazon.com.mx'), ('Walmart Mexico', 'walmart.com.mx'), ('Liverpool', 'liverpool.com.mx')], 'ar': [('Mercado Libre', 'mercadolibre.com.ar'), ('Frávega', 'fravega.com')], 'cl': [('Mercado Libre', 'mercadolibre.cl'), ('Falabella', 'falabella.com'), ('Paris', 'paris.cl')], 'co': [('Mercado Libre', 'mercadolibre.com.co'), ('Falabella', 'falabella.com.co'), ('Éxito', 'exito.com')], 'pe': [('Mercado Libre', 'mercadolibre.com.pe'), ('Falabella', 'falabella.com.pe'), ('Ripley', 'ripley.com.pe')], 'za': [('Takealot', 'takealot.com'), ('Makro', 'makro.co.za'), ('Woolworths', 'woolworths.co.za')], 'ng': [('Jumia Nigeria', 'jumia.com.ng'), ('Konga', 'konga.com')], 'ke': [('Jumia Kenya', 'jumia.co.ke'), ('Carrefour Kenya', 'carrefour.ke')], 'ma': [('Jumia Morocco', 'jumia.ma'), ('Marjane', 'marjane.ma')], 'il': [('KSP', 'ksp.co.il'), ('Ivory', 'ivory.co.il')]}
 
+CHINA_DOMESTIC_STORES = (
+    ('JD', 'jd.com'), ('Tmall', 'tmall.com'), ('Taobao', 'taobao.com'),
+    ('Suning', 'suning.com'), ('Pinduoduo', 'yangkeduo.com'),
+    ('1688', '1688.com'), ('Pinduoduo', 'pinduoduo.com'),
+    ('Xiaomi China', 'm.mi.com'),
+)
+
+
+def _storefront_country(url):
+    """Explicit storefront locale, not a country mentioned in a product title."""
+    try:
+        parsed = urllib.parse.urlsplit(str(url or ''))
+        query = urllib.parse.parse_qs(parsed.query)
+        aliases = {'uk': 'gb', 'usa': 'us', 'uae': 'ae', 'ksa': 'sa', 'saudi': 'sa'}
+        for key in ('country', 'country_code', 'market'):
+            value = str((query.get(key) or [''])[0]).lower()
+            value = aliases.get(value, value)
+            if value in COUNTRY_META:
+                return value
+        parts = [p.lower() for p in parsed.path.split('/') if p]
+        if parts and parts[0] in {'shop', 'store', 'locale'}:
+            parts = parts[1:]
+        if not parts:
+            return ''
+        first = parts[0]
+        if first in {'global', 'world', 'international'}:
+            return 'global'
+        if first in aliases:
+            return aliases[first]
+        if first in COUNTRY_META:
+            return first
+        if re.fullmatch(r'[a-z]{2,5}[-_][a-z]{2,5}', first):
+            left, right = re.split('[-_]', first)
+            left, right = aliases.get(left, left), aliases.get(right, right)
+            if right in COUNTRY_META:
+                return right
+            if left in COUNTRY_META:
+                return left
+        for cc, name in COUNTRY_NAMES.items():
+            if first == name.lower().replace(' ', '-'):
+                return cc
+    except (ValueError, TypeError):
+        pass
+    return ''
+
+
+def _local_storefront_evidence(item, market):
+    cc = str(market.get('country') or DEFAULT_COUNTRY).lower()
+    explicit = _explicit_market_country(item)
+    if explicit:
+        return 'explicit_country' if explicit == cc else ''
+    url = str(item.get('link') or item.get('url') or '')
+    try:
+        host = (urllib.parse.urlsplit(url).hostname or '').lower()
+    except ValueError:
+        return ''
+    if not host:
+        return ''
+    locale = _storefront_country(url)
+    if locale:
+        return 'storefront_locale' if locale == cc else ''
+    host_cc = _host_country_code(host)
+    if host_cc:
+        return 'country_domain' if host_cc == cc else ''
+    if host.startswith(('global.', 'world.', 'international.')):
+        return ''
+    own = country_major_store_specs(cc)
+    if cc == 'kw':
+        own += list(STORE_DOMAINS.items())
+    domains = [domain for _, domain in own if _host_matches_any(host, (domain,))]
+    codes = _explicit_currency_codes({'price': item.get('price'), 'currency': item.get('currency')})
+    local_codes = set(country_currency_codes(cc))
+    if domains:
+        # A shared .com (e.g. Noon) is not proof of one country's storefront.
+        other_markets = {other for other, specs in COUNTRY_MAJOR_STORE_DOMAINS.items()
+                         if other != cc and any(_host_matches_any(host, (d,)) for _, d in specs)}
+        if not other_markets:
+            return 'domestic_merchant'
+        if codes & local_codes and not codes - local_codes:
+            return 'merchant_currency'
+    # Small local .com merchants must not be rejected solely for not being in
+    # our catalog. Require both local search targeting and unambiguous currency.
+    unique_codes = {code for code in local_codes if sum(code in v for v in COUNTRY_CURRENCY_CODES.values()) == 1}
+    known_foreign = _host_matches_any(host, US_STORE_HINTS + CHINA_STORE_HINTS)
+    if not known_foreign and _search_geo_country(item) == cc and codes & unique_codes and not codes - local_codes:
+        return 'local_targeting_currency'
+    return ''
+
+
+def _china_domestic_product_url(url):
+    """None means another merchant; False means a known marketplace non-offer."""
+    try:
+        p = urllib.parse.urlsplit(str(url or ''))
+        host, path, qs = (p.hostname or '').lower(), p.path.lower(), urllib.parse.parse_qs(p.query)
+        if not _host_matches_any(host, tuple(d for _, d in CHINA_DOMESTIC_STORES)):
+            return None
+        if host.startswith(('login.', 'passport.', 'search.', 'shop.')):
+            return False
+        if _host_matches_any(host, ('jd.com',)):
+            return bool(re.fullmatch(r'/\d+\.html', path) or re.fullmatch(r'/product/\d+\.html', path))
+        if _host_matches_any(host, ('taobao.com', 'tmall.com')):
+            return path.endswith(('/item.htm', '/detail.htm')) and bool(re.fullmatch(r'\d+', (qs.get('id') or [''])[0]))
+        if _host_matches_any(host, ('1688.com',)):
+            return bool(re.fullmatch(r'/offer/\d+\.html', path))
+        if _host_matches_any(host, ('suning.com',)):
+            return bool(re.fullmatch(r'/\d+/\d+\.html', path))
+        if _host_matches_any(host, ('m.mi.com',)):
+            return bool(re.fullmatch(r'/commodity/detail/\d+', path))
+        return path.endswith('/goods.html') and bool(re.fullmatch(r'\d+', (qs.get('goods_id') or [''])[0]))
+    except (ValueError, TypeError):
+        return False
+
+
+def _local_discovery_query(query, market, scoped=False):
+    # Keep model numbers, original script and pack size; no paid translation.
+    q = re.sub(r'\s+', ' ', str(query or '')).strip()[:220]
+    cc = str(market.get('country') or DEFAULT_COUNTRY).lower()
+    words = {'cn': '价格 购买', 'de': 'kaufen Preis', 'fr': 'acheter prix',
+             'it': 'acquista prezzo', 'es': 'comprar precio', 'tr': 'satın al fiyat',
+             'jp': '価格 通販', 'kr': '가격 구매', 'ar': 'شراء سعر'}
+    cue = words.get(cc, words.get(country_search_hl(cc), 'buy price'))
+    if not scoped:
+        return f'{q} {market.get("country_name") or cc.upper()} {cue}'
+    specs = _run_with_market(market, local_rescue_store_specs, q, 6)
+    scopes = list(dict.fromkeys('site:' + domain for _, domain in specs))
+    # Discover independent shops too; this is not a closed store whitelist.
+    scopes += ['site:' + tld.lstrip('.') for tld in country_tlds(cc)[:1]]
+    return f'{q} ({" OR ".join(scopes)}) {cue}'
+
+
+def _local_discovery_direct_link(row):
+    """Use observed, complete links only; never invent a URL from a store name."""
+    values = [row.get('link')]
+    try:
+        p = urllib.parse.urlsplit(str(row.get('link') or ''))
+        host = p.hostname or ''
+        if _host_matches_any(host, ('baidu.com', 'miaozhen.com')):
+            # Baidu may expose the full destination as displayed_link.
+            values.append(row.get('displayed_link'))
+            if _host_matches_any(host, ('miaozhen.com',)):
+                values.extend(urllib.parse.parse_qs(p.query).get('o') or [])
+                # This tracker also puts its ampersand-separated parameters
+                # in the path (without '?'), as in Baidu's shopping schema.
+                target = re.search(r'[?&]o=([^&]+)', str(row.get('link') or ''))
+                if target:
+                    values.append(urllib.parse.unquote(target.group(1)))
+    except ValueError:
+        pass
+    for value in values:
+        raw = str(value or '').strip()
+        if any(token in raw for token in ('…', '...', ' ', '\\')):
+            continue
+        try:
+            p = urllib.parse.urlsplit(raw)
+            if p.scheme not in ('http', 'https') or not p.hostname or p.username or p.password:
+                continue
+            if p.port not in (None, 80, 443):
+                continue
+            try:
+                if not ipaddress.ip_address(p.hostname).is_global:
+                    continue
+            except ValueError:
+                if '.' not in p.hostname or p.hostname.endswith(('.localhost', '.local', '.internal')):
+                    continue
+            if _host_matches_any(p.hostname, ('baidu.com', 'miaozhen.com')):
+                continue
+            if _web_is_direct_product_page_url(raw):
+                return raw
+        except ValueError:
+            continue
+    return ''
+
+
+def _local_discovery_rows(data, query, market, provider):
+    out, seen = [], set()
+    sections = ('organic_results', 'shopping_results')  # B2B tier quotes are not retail prices.
+    for section in sections:
+        records = data.get(section)
+        for row in records[:30] if isinstance(records, list) else []:
+            if not isinstance(row, dict):
+                continue
+            url = _local_discovery_direct_link(row)
+            title = str(row.get('title') or '').strip()
+            if not url or not title or is_blocked_store(row.get('source') or '', url):
+                continue
+            host = urllib.parse.urlsplit(url).hostname or ''
+            item = {'title': title, 'link': url, 'source': str(row.get('source') or host),
+                    '_shopping_gl': market['country'], '_lens_country': market['country'],
+                    'price': str(row.get('price') or ''), 'currency': str(row.get('currency') or '')}
+            money_row = dict(row)
+            if market['country'] == 'cn' and _china_domestic_product_url(url):
+                if re.fullmatch(r'[¥￥]\s*\d[\d,.]*', item['price']):
+                    money_row['currency'] = item['currency'] = 'CNY'
+            if not _local_storefront_evidence(item, market):
+                continue
+            if not _findzia_stream_candidate_ok(query, item):
+                continue
+            canonical = _canonical_result_url(url)
+            if canonical in seen:
+                continue
+            seen.add(canonical)
+            # Product price only, not prose mentioning freight or a minimum order.
+            money = None if re.search(r'起|起批|运费|批发|\bMOQ\b', item['price'], re.I) else _web_indexed_offer_money(money_row)
+            if _host_matches_any(host, ('1688.com',)):
+                money = None  # Quantity-tier wholesale prices need the actual offer.
+            pic = row.get('thumbnail') or ''
+            pic = pic if isinstance(pic, str) and pic.startswith(('https://', 'http://')) else ''
+            item.update(position=len(out) + 1, section='local_discovery', exact=False,
+                        thumbnail=pic, image=pic, price=f'{format_price(money[0], money[1])} {money[1]}' if money else '',
+                        price_value=money[0] if money else None, currency=money[1] if money else '',
+                        market_country=market['country'], in_stock=None, condition='',
+                        price_source=provider, price_verified=False, _local_discovery=True)
+            out.append(item)
+    return out
+
+
+def _local_discovery_request(query, market, kind, timeout_seconds):
+    cc = market['country']
+    if kind == 'shopping':
+        cards = _serpapi_shopping_request(_shopping_clean_query(query), cc,
+                    hl=country_search_hl(cc), timeout_seconds=timeout_seconds)
+        return _local_discovery_rows({'shopping_results': cards}, query, market, 'local_shopping')
+    if kind == 'baidu':
+        params = {'engine': 'baidu', 'q': f'{query} 价格 购买', 'ct': 2,
+                  'device': 'mobile', 'api_key': SERPAPI_API_KEY, 'output': 'json'}
+    else:
+        params = {'engine': 'google', 'q': _local_discovery_query(query, market, scoped=kind == 'scoped'),
+                  'gl': cc, 'hl': country_search_hl(cc), 'num': 10,
+                  'api_key': SERPAPI_API_KEY, 'output': 'json'}
+    data = _serpapi_cached_json(params, timeout=(min(1.5, timeout_seconds), timeout_seconds),
+                               label=f'LOCAL DISCOVERY {cc}/{kind}') or {}
+    return _local_discovery_rows(data, query, market, 'local_' + kind) if isinstance(data, dict) else []
+
+
+def _local_lane_count(rows, reference=None):
+    reference = reference or {}
+    return len({_more_result_domain(row.get('link') or row.get('url')) for row in rows
+                if result_market_rank(row) == 0 and
+                (not reference.get('named') or row.get('_reference_priority', 0) >= 3)})
+
+
+def _local_market_discovery(query, market, limit=8, timeout_seconds=None):
+    """At most two shared searches; distinct stores, deadlines, no one-call-per-store fan-out."""
+    if not (LOCAL_DISCOVERY_ENABLED and LOCAL_DISCOVERY_MAX_CALLS and SERPAPI_API_KEY):
+        return []
+    q = re.sub(r'\s+', ' ', str(query or '')).strip()[:220]
+    if not q:
+        return []
+    market = dict(market)
+    cc = str(market.get('country') or DEFAULT_COUNTRY).lower()
+    market['country'] = cc
+    duration = max(.1, min(LOCAL_DISCOVERY_TIMEOUT, timeout_seconds or LOCAL_DISCOVERY_TIMEOUT))
+    deadline = time.monotonic() + duration
+    if cc == 'cn':
+        kinds = ['scoped'] + (['baidu'] if LOCAL_DISCOVERY_BAIDU else [])
+    else:
+        kinds = ['shopping' if ENABLE_GOOGLE_SHOPPING and _shopping_gl_supported(cc) else 'broad', 'scoped']
+    kinds = kinds[:LOCAL_DISCOVERY_MAX_CALLS]
+    rows, seen = [], set()
+    calls = 0
+    def consume(future):
+        try:
+            values = future.result() or []
+        except Exception as exc:
+            print(f'LOCAL DISCOVERY ERR {cc}: {type(exc).__name__}')
+            return
+        for item in values:
+            key = _canonical_result_url(item.get('link'))
+            if key and key not in seen:
+                seen.add(key)
+                rows.append(item)
+    # China's two indexes complement one another; elsewhere only deepen when
+    # the primary search is genuinely sparse. All work shares one deadline.
+    phases = [kinds] if cc == 'cn' else [[kind] for kind in kinds]
+    for phase in phases:
+        remaining = deadline - time.monotonic()
+        if remaining <= .05:
+            break
+        jobs = [LOCAL_DISCOVERY_POOL.submit(_run_with_market, market,
+                _local_discovery_request, q, market, kind, max(.1, remaining / (2 if len(phases) > 1 and calls == 0 else 1)))
+                for kind in phase]
+        calls += len(jobs)
+        done, pending = wait(jobs, timeout=max(0, deadline - time.monotonic()))
+        for job in jobs:
+            if job in done:
+                consume(job)
+        for job in pending:
+            job.cancel()
+        merchants = {_more_result_domain(row.get('link')) for row in rows}
+        if len(merchants) >= min(LOCAL_RESULTS_TARGET, limit):
+            break
+    # Round-robin merchants prevents one marketplace consuming the local pool.
+    groups = {}
+    for row in rows:
+        groups.setdefault(_more_result_domain(row.get('link')), []).append(row)
+    output = []
+    while groups and len(output) < limit:
+        for domain in list(groups):
+            output.append(groups[domain].pop(0))
+            if not groups[domain]:
+                del groups[domain]
+            if len(output) >= limit:
+                break
+    print(f'LOCAL DISCOVERY country={cc} calls={calls} rows={len(output)} stores={len({_more_result_domain(r.get("link")) for r in output})}')
+    return output
+
+
 def country_major_store_specs(cc=None):
     cc = (cc or current_market().get('country') or DEFAULT_COUNTRY).lower()
+    if cc == 'cn':
+        return list(CHINA_DOMESTIC_STORES)
     return list(COUNTRY_MAJOR_STORE_DOMAINS.get(cc, ()))
 
 def detect_category(query):
@@ -3134,27 +3461,7 @@ def is_china_market_result(item):
     return False
 
 def is_local_lens_result(item):
-    m = current_market()
-    cc = (m.get('country') or DEFAULT_COUNTRY).lower()
-    explicit = _explicit_market_country(item)
-    if explicit:
-        return explicit == cc
-    hay, host = _result_hay_host(item)
-    link = str((item or {}).get('link') or (item or {}).get('url') or '').lower()
-    host_cc = _host_country_code(host)
-    if host_cc:
-        return host_cc == cc
-    if _dynamic_country_url_hit(cc, link, host):
-        return True
-    country_name = str(m.get('country_name') or '').lower()
-    if country_name and country_name in hay:
-        return True
-    if cc == 'kw' and any((h in hay for h in KUWAIT_STORE_HINTS)):
-        return True
-    for label, domain in country_major_store_specs(cc):
-        if _host_matches_any(host, (domain,)) or normalize_name(label) in normalize_name(hay):
-            return True
-    return False
+    return bool(_local_storefront_evidence(item or {}, current_market()))
 
 def is_foreign_lens_result(item):
     if is_local_lens_result(item):
@@ -3188,16 +3495,18 @@ def result_market_rank(item):
         return 0 if cc == 'cn' else 1 if cc == 'us' else 2
     if explicit and explicit not in {cc, 'us', 'cn'}:
         return 99
+    if is_local_lens_result(item):
+        return 0
     if cc != 'us' and is_us_market_result(item):
         return 1
     if cc != 'cn' and is_china_market_result(item):
         return 1 if cc == 'us' else 2
-    if is_local_lens_result(item):
-        return 0
     if is_us_market_result(item):
         return 0 if cc == 'us' else 1
     if is_china_market_result(item):
-        return 0 if cc == 'cn' else 1 if cc == 'us' else 2
+        # Export-oriented Chinese storefronts are not evidence of a domestic
+        # Chinese offer. Keep them as global cards, not as a filled local lane.
+        return 1 if cc == 'us' else 2
     _, host = _result_hay_host(item)
     host_cc = _host_country_code(host)
     if host_cc and host_cc not in {cc, 'us', 'cn'}:
@@ -12528,6 +12837,9 @@ def _web_is_direct_product_page_url(url, store_name=''):
     raw = str(url or '').strip()
     if not _web_is_http_url(raw):
         return False
+    domestic = _china_domestic_product_url(raw)
+    if domestic is not None:
+        return domestic
     try:
         u = urllib.parse.urlparse(raw)
         host = u.netloc.lower().split(':')[0]
@@ -13549,7 +13861,109 @@ async def _web_with_live_prices(source, lang, country, allow_paid=True):
         _WEB_LIVE_PRICE_ACTIVE.reset(token)
 
 
-async def _web_complete_result_prices(result, lang, country):
+def _web_local_discovery_rows_sync(query, country, lang, existing):
+    market = _web_market(country)
+    def discover():
+        local_domains = {_more_result_domain(r.get('url')) for r in existing if r.get('market_rank') == 0}
+        needed = max(0, min(LOCAL_RESULTS_TARGET, WEB_LOCAL_MAX) - len(local_domains))
+        if not needed:
+            return []
+        raw = _local_market_discovery(query, market, limit=max(8, LOCAL_RESULTS_TARGET))
+        known = {_canonical_result_url(r.get('url')) for r in existing}
+        rows = []
+        for item in raw:
+            url = item['link']
+            key = _canonical_result_url(url)
+            domain = _more_result_domain(url)
+            if key in known or domain in local_domains:
+                continue
+            known.add(key)
+            local_domains.add(domain)
+            row = {'url': url, 'title': item['title'], 'raw_title': item['title'],
+                   'store': _ui_plain_store_name(item['source'], url), 'market': 'local',
+                   'market_rank': 0, 'country': country, 'flag': country_flag_emoji(country),
+                   'image': item.get('thumbnail') or '', 'price': item.get('price') or '',
+                   'price_source': item.get('price_source') or 'local_discovery',
+                   'price_source_url': url, 'price_checked_at': time.time(),
+                   'price_verified': False, 'price_status': 'indexed' if item.get('price_value') else 'loading',
+                   'price_pending': not bool(item.get('price_value'))}
+            if item.get('price_value'):
+                row.update(_web_live_money_fields(item['price_value'], item['currency'], market))
+            rows.append(row)
+            if len(rows) >= needed:
+                break
+        if not rows:
+            return []
+        classified = _web_attach_captured_result_sections({'ok': True, 'type': 'results',
+            'query': query, 'market': market, 'results': rows, 'source': 'local_discovery'}, lang, allow_ai=False)
+        return classified.get('results') or []
+    return _run_with_market(market, discover)
+
+
+async def _web_with_local_discovery(source, lang, country):
+    """Text-only additive recovery; original results paint before the extra I/O."""
+    rows, query, final = {}, '', None
+    failed = recommendations = False
+    task = None
+    added = 0
+    started = time.monotonic()
+    try:
+        async for raw in source:
+            event = json.loads(raw) if isinstance(raw, (str, bytes)) else dict(raw)
+            query = str(event.get('query') or query)
+            failed = failed or event.get('event') == 'error'
+            recommendations = recommendations or event.get('event') == 'recommendations'
+            values = list(event.get('results') or [])
+            if isinstance(event.get('item'), dict):
+                values.append(event['item'])
+            for row in values:
+                if isinstance(row, dict):
+                    rows[_web_identity_offer_key(row)] = row
+            if event.get('event') == 'done':
+                final = event
+            else:
+                yield _web_stream_event(event)
+        if final is None:
+            return  # Do not manufacture success for an interrupted core search.
+        local_count = len({_more_result_domain(r.get('url')) for r in rows.values() if r.get('market_rank') == 0})
+        if (query and not failed and not recommendations and LOCAL_DISCOVERY_ENABLED
+                and LOCAL_DISCOVERY_MAX_CALLS and SERPAPI_API_KEY
+                and local_count < min(LOCAL_RESULTS_TARGET, WEB_LOCAL_MAX)):
+            task = asyncio.create_task(asyncio.to_thread(_web_local_discovery_rows_sync,
+                                         query, country, lang, list(rows.values())))
+            deadline = asyncio.get_running_loop().time() + LOCAL_DISCOVERY_TIMEOUT + .5
+            while not task.done() and asyncio.get_running_loop().time() < deadline:
+                done, _ = await asyncio.wait({task}, timeout=min(.5, max(.01, deadline - asyncio.get_running_loop().time())))
+                if not done:
+                    yield _web_stream_event({'event': 'status', 'stage': 'local_market_discovery',
+                        'elapsed_ms': int((time.monotonic() - started) * 1000)})
+            if task.done():
+                try:
+                    additions = task.result() or []
+                except Exception as exc:
+                    print(f'LOCAL STREAM DISCOVERY ERR: {type(exc).__name__}')
+                    additions = []
+                for item in additions:
+                    key = _web_identity_offer_key(item)
+                    if key in rows:
+                        continue
+                    rows[key] = item
+                    added += 1
+                    yield _web_stream_event({'event': 'result', 'phase': 'local_market_discovery',
+                        'market': 'local', 'item': item, 'elapsed_ms': int((time.monotonic() - started) * 1000)})
+            else:
+                task.cancel()
+        final['count'] = len(rows)
+        final['local_discovery_added'] = added
+        yield _web_stream_event(final)
+    finally:
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        await source.aclose()
+
+
+async def _web_complete_result_prices(result, lang, country, discover_local=False):
     if not isinstance(result.get('results'), list):
         return result
     async def events():
@@ -13557,12 +13971,13 @@ async def _web_complete_result_prices(result, lang, country):
         yield _web_stream_event({'event': 'done'})
     rows = {}
     final = dict(result)
-    async for raw in _web_with_live_prices(events(), lang, country):
+    source = _web_with_local_discovery(events(), lang, country) if discover_local and result.get('type') == 'results' else events()
+    async for raw in _web_with_live_prices(source, lang, country):
         event = json.loads(raw)
         if event.get('event') == 'snapshot':
             for row in event.get('results') or []:
                 rows[_web_identity_offer_key(row)] = row
-        elif event.get('event') == 'upsert':
+        elif event.get('event') in ('upsert', 'result'):
             row = event['item']
             rows[_web_identity_offer_key(row)] = row
         elif event.get('event') == 'done':
@@ -15817,7 +16232,7 @@ async def web_api_search_stream(request: Request):
                 yield _web_stream_event({'event': 'done', 'count': len(sent), 'partial': True, 'elapsed_ms': int((time.time() - started) * 1000)})
             else:
                 yield _web_stream_event({'event': 'error', 'error': 'search_failed', 'elapsed_ms': int((time.time() - started) * 1000)})
-    return StreamingResponse(_web_with_live_prices(_generator(), lang, country), media_type='application/x-ndjson', headers={'Cache-Control': 'no-cache, no-transform', 'X-Accel-Buffering': 'no', 'Connection': 'keep-alive'})
+    return StreamingResponse(_web_with_live_prices(_web_with_local_discovery(_generator(), lang, country), lang, country), media_type='application/x-ndjson', headers={'Cache-Control': 'no-cache, no-transform', 'X-Accel-Buffering': 'no', 'Connection': 'keep-alive'})
 
 def _web_normalize_uploaded_image_bytes(image_bytes, mime):
     mime = str(mime or 'image/jpeg').strip().lower()
@@ -16366,7 +16781,7 @@ async def web_api_search(request: Request):
     force_specific = bool(payload.get('force_specific'))
     started = time.time()
     result = await asyncio.to_thread(_web_search_text_sync, query, country, lang, selected_option, original_query, force_specific)
-    result = await _web_complete_result_prices(result, lang, country)
+    result = await _web_complete_result_prices(result, lang, country, discover_local=True)
     result['elapsed_ms'] = int((time.time() - started) * 1000)
     return result
 
