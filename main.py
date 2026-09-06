@@ -1,5 +1,19 @@
 # -*- coding: utf-8 -*-
-"""Findzia v107.57 — Smart API Cost Guard (based on the supplied v107.55).
+"""Findzia v112 — Local Market Completion Fix.
+
+v112 repairs the v111 production regression shown in the supplied logs:
+first paint no longer ends pending Lens/local requests; each completed local
+source streams immediately. Local discovery defaults to a shared 12-second
+budget, Lens to a 16-second read timeout, without adding new search passes.
+Translated functional nouns no longer fail the English overlap threshold;
+Chinese label text is preserved. Conflicting models, audiences and functions
+still reject, and image Exact verdicts still require the existing visual proof.
+Set LOCAL_DISCOVERY_TIMEOUT=12 and LENS_HTTP_TIMEOUT_SECONDS=16 if you previously
+overrode them with shorter values. No additional API key/dependency is needed.
+Validation: offline transport/endpoint, delayed-country and identity/cost tests;
+no live paid-provider or Railway latency/coverage measurement was performed.
+
+INHERITED COST GUARD (v107.57, based on the supplied v107.55)
 
 INSTALLATION
 Replace your existing Python entrypoint with this complete file and restart
@@ -28,7 +42,7 @@ The first uncached image still schedules the original distinct Lens passes:
 local products + local all + US all + China all (three when local is US/CN).
 Photo identification, visual audits and conditional price/local recovery can
 add provider calls. Four Lens passes are not the total API bill. Retrieval,
-local/global coverage, model prompts, thresholds and streaming are retained.
+identity proof thresholds remain in force. v112 retrieval changes are above.
 Savings depend on repeated/overlapping work; no fixed percentage or measured
 production latency improvement is claimed. The existing SerpApi cache TTL
 (default one hour) is unchanged. Identity-proof caching never freezes prices.
@@ -80,7 +94,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization'], max_age=86400)
-BUILD_ID = 'v111-local-market-discovery'
+BUILD_ID = 'v112-local-market-completion'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -219,7 +233,7 @@ ENABLE_LENS_WIDE_FALLBACK = env_bool('ENABLE_LENS_WIDE_FALLBACK', True)
 LENS_MIN_MATCHES = max(3, min(5, int(os.environ.get('LENS_MIN_MATCHES', '5'))))
 LENS_PARALLEL_WITH_VISION = env_bool('LENS_PARALLEL_WITH_VISION', True)
 LENS_RESULT_LIMIT = max(12, int(os.environ.get('LENS_RESULT_LIMIT', '40')))
-LENS_HTTP_TIMEOUT_SECONDS = max(6, int(os.environ.get('LENS_HTTP_TIMEOUT_SECONDS', '13')))
+LENS_HTTP_TIMEOUT_SECONDS = max(6, int(os.environ.get('LENS_HTTP_TIMEOUT_SECONDS', '16')))
 LENS_TOTAL_TIMEOUT_SECONDS = max(8, int(os.environ.get('LENS_TOTAL_TIMEOUT_SECONDS', '12')))
 LENS_TURBO_MAX_WAIT_SECONDS = max(2.5, min(6.0, float(os.environ.get('LENS_TURBO_MAX_WAIT_SECONDS', '4.5'))))
 LENS_TURBO_EMPTY_GRACE_SECONDS = max(1.0, min(5.0, float(os.environ.get('LENS_TURBO_EMPTY_GRACE_SECONDS', '3.5'))))
@@ -255,9 +269,11 @@ LOCAL_QUERY_CACHE = {}
 LOCAL_QUERY_CACHE_LOCK = threading.Lock()
 LOCAL_DISCOVERY_ENABLED = env_bool('LOCAL_DISCOVERY_ENABLED', True)
 LOCAL_DISCOVERY_MAX_CALLS = max(0, min(2, int(os.environ.get('LOCAL_DISCOVERY_MAX_CALLS', '2'))))
-LOCAL_DISCOVERY_TIMEOUT = max(1.0, min(8.0, float(os.environ.get('LOCAL_DISCOVERY_TIMEOUT', '4.0'))))
+LOCAL_DISCOVERY_TIMEOUT = max(1.0, min(20.0, float(os.environ.get('LOCAL_DISCOVERY_TIMEOUT', '12.0'))))
+LOCAL_DISCOVERY_HEDGE_SECONDS = max(.5, min(6.0, float(os.environ.get('LOCAL_DISCOVERY_HEDGE_SECONDS', '3.0'))))
 LOCAL_DISCOVERY_BAIDU = env_bool('LOCAL_DISCOVERY_BAIDU', True)
 LOCAL_DISCOVERY_POOL = ThreadPoolExecutor(max_workers=8, thread_name_prefix='local-discovery')
+print(f'LOCAL MARKET CONFIG provider_budget={LOCAL_DISCOVERY_TIMEOUT}s lens_read={LENS_HTTP_TIMEOUT_SECONDS}s hedge_after={LOCAL_DISCOVERY_HEDGE_SECONDS}s calls_max={LOCAL_DISCOVERY_MAX_CALLS} progressive_completion=True')
 COUNTRY_META = {'ae': ('United Arab Emirates', ('AED',), 'en'), 'af': ('Afghanistan', ('AFN',), 'ps'), 'ag': ('Antigua and Barbuda', ('XCD',), 'en'), 'ai': ('Anguilla', ('XCD',), 'en'), 'al': ('Albania', ('ALL',), 'sq'), 'am': ('Armenia', ('AMD',), 'hy'), 'ao': ('Angola', ('AOA',), 'pt'), 'ar': ('Argentina', ('ARS',), 'es'), 'as': ('American Samoa', ('USD',), 'en'), 'at': ('Austria', ('EUR',), 'de'), 'au': ('Australia', ('AUD',), 'en'), 'aw': ('Aruba', ('AWG',), 'nl'), 'az': ('Azerbaijan', ('AZN',), 'az'), 'ba': ('Bosnia and Herzegovina', ('BAM',), 'bs'), 'bb': ('Barbados', ('BBD',), 'en'), 'bd': ('Bangladesh', ('BDT',), 'en'), 'be': ('Belgium', ('EUR',), 'nl'), 'bf': ('Burkina Faso', ('XOF',), 'fr'), 'bg': ('Bulgaria', ('BGN',), 'bg'), 'bh': ('Bahrain', ('BHD',), 'ar'), 'bi': ('Burundi', ('BIF',), 'fr'), 'bj': ('Benin', ('XOF',), 'fr'), 'bm': ('Bermuda', ('BMD',), 'en'), 'bn': ('Brunei Darussalam', ('BND',), 'ms'), 'bo': ('Bolivia, Plurinational State of', ('BOB',), 'es'), 'br': ('Brazil', ('BRL',), 'pt'), 'bs': ('Bahamas', ('BSD',), 'en'), 'bt': ('Bhutan', ('INR', 'BTN'), 'dz'), 'bw': ('Botswana', ('BWP',), 'en'), 'by': ('Belarus', ('BYN',), 'ru'), 'bz': ('Belize', ('BZD',), 'en'), 'ca': ('Canada', ('CAD',), 'en'), 'cc': ('Cocos (Keeling) Islands', ('AUD',), 'en'), 'cd': ('Congo, The Democratic Republic of the', ('CDF',), 'fr'), 'cf': ('Central African Republic', ('XAF',), 'fr'), 'cg': ('Congo', ('XAF',), 'fr'), 'ch': ('Switzerland', ('CHF',), 'de'), 'ci': ("Côte d'Ivoire", ('XOF',), 'fr'), 'ck': ('Cook Islands', ('NZD',), 'en'), 'cl': ('Chile', ('CLP',), 'es'), 'cm': ('Cameroon', ('XAF',), 'en'), 'cn': ('China', ('CNY',), 'zh'), 'co': ('Colombia', ('COP',), 'es'), 'cr': ('Costa Rica', ('CRC',), 'es'), 'cu': ('Cuba', ('CUP',), 'es'), 'cv': ('Cabo Verde', ('CVE',), 'pt'), 'cx': ('Christmas Island', ('AUD',), 'en'), 'cy': ('Cyprus', ('EUR',), 'el'), 'cz': ('Czechia', ('CZK',), 'cs'), 'de': ('Germany', ('EUR',), 'de'), 'dj': ('Djibouti', ('DJF',), 'fr'), 'dk': ('Denmark', ('DKK',), 'da'), 'dm': ('Dominica', ('XCD',), 'en'), 'do': ('Dominican Republic', ('DOP',), 'es'), 'dz': ('Algeria', ('DZD',), 'fr'), 'ec': ('Ecuador', ('USD',), 'es'), 'ee': ('Estonia', ('EUR',), 'et'), 'eg': ('Egypt', ('EGP',), 'ar'), 'eh': ('Western Sahara', ('MAD',), 'es'), 'er': ('Eritrea', ('ERN',), 'ti'), 'es': ('Spain', ('EUR',), 'es'), 'et': ('Ethiopia', ('ETB',), 'am'), 'fi': ('Finland', ('EUR',), 'fi'), 'fj': ('Fiji', ('FJD',), 'en'), 'fk': ('Falkland Islands (Malvinas)', ('FKP',), 'en'), 'fm': ('Micronesia, Federated States of', ('USD',), 'en'), 'fo': ('Faroe Islands', ('DKK',), 'fo'), 'fr': ('France', ('EUR',), 'fr'), 'ga': ('Gabon', ('XAF',), 'fr'), 'gb': ('United Kingdom', ('GBP',), 'en'), 'gd': ('Grenada', ('XCD',), 'en'), 'ge': ('Georgia', ('GEL',), 'ka'), 'gf': ('French Guiana', ('EUR',), 'fr'), 'gg': ('Guernsey', ('GBP',), 'en'), 'gh': ('Ghana', ('GHS',), 'en'), 'gi': ('Gibraltar', ('GIP',), 'en'), 'gl': ('Greenland', ('DKK',), 'kl'), 'gm': ('Gambia', ('GMD',), 'en'), 'gn': ('Guinea', ('GNF',), 'fr'), 'gp': ('Guadeloupe', ('EUR',), 'fr'), 'gq': ('Equatorial Guinea', ('XAF',), 'es'), 'gr': ('Greece', ('EUR',), 'el'), 'gs': ('South Georgia and the South Sandwich Islands', ('GBP',), 'en'), 'gt': ('Guatemala', ('GTQ',), 'es'), 'gu': ('Guam', ('USD',), 'en'), 'gw': ('Guinea-Bissau', ('XOF',), 'pt'), 'gy': ('Guyana', ('GYD',), 'en'), 'hk': ('Hong Kong', ('HKD',), 'en'), 'hm': ('Heard Island and McDonald Islands', ('AUD',), 'en'), 'hn': ('Honduras', ('HNL',), 'es'), 'hr': ('Croatia', ('EUR',), 'hr'), 'ht': ('Haiti', ('HTG', 'USD'), 'fr'), 'hu': ('Hungary', ('HUF',), 'hu'), 'id': ('Indonesia', ('IDR',), 'id'), 'ie': ('Ireland', ('EUR',), 'en'), 'il': ('Israel', ('ILS',), 'he'), 'im': ('Isle of Man', ('GBP',), 'en'), 'in': ('India', ('INR',), 'en'), 'io': ('British Indian Ocean Territory', ('USD',), 'en'), 'iq': ('Iraq', ('IQD',), 'ar'), 'ir': ('Iran, Islamic Republic of', ('IRR',), 'fa'), 'is': ('Iceland', ('ISK',), 'is'), 'it': ('Italy', ('EUR',), 'it'), 'je': ('Jersey', ('GBP',), 'en'), 'jm': ('Jamaica', ('JMD',), 'en'), 'jo': ('Jordan', ('JOD',), 'ar'), 'jp': ('Japan', ('JPY',), 'ja'), 'ke': ('Kenya', ('KES',), 'en'), 'kg': ('Kyrgyzstan', ('KGS',), 'ky'), 'kh': ('Cambodia', ('KHR',), 'km'), 'ki': ('Kiribati', ('AUD',), 'en'), 'km': ('Comoros', ('KMF',), 'ar'), 'kn': ('Saint Kitts and Nevis', ('XCD',), 'en'), 'kp': ("Korea, Democratic People's Republic of", ('KPW',), 'ko'), 'kr': ('Korea, Republic of', ('KRW',), 'ko'), 'kw': ('Kuwait', ('KWD',), 'ar'), 'ky': ('Cayman Islands', ('KYD',), 'en'), 'kz': ('Kazakhstan', ('KZT',), 'ru'), 'la': ("Lao People's Democratic Republic", ('LAK',), 'lo'), 'lb': ('Lebanon', ('LBP',), 'ar'), 'lc': ('Saint Lucia', ('XCD',), 'en'), 'li': ('Liechtenstein', ('CHF',), 'de'), 'lk': ('Sri Lanka', ('LKR',), 'si'), 'lr': ('Liberia', ('LRD',), 'en'), 'ls': ('Lesotho', ('ZAR', 'LSL'), 'en'), 'lt': ('Lithuania', ('EUR',), 'lt'), 'lu': ('Luxembourg', ('EUR',), 'fr'), 'lv': ('Latvia', ('EUR',), 'lv'), 'ly': ('Libya', ('LYD',), 'ar'), 'ma': ('Morocco', ('MAD',), 'fr'), 'mc': ('Monaco', ('EUR',), 'fr'), 'md': ('Moldova, Republic of', ('MDL',), 'ro'), 'mg': ('Madagascar', ('MGA',), 'fr'), 'mh': ('Marshall Islands', ('USD',), 'en'), 'mk': ('North Macedonia', ('MKD',), 'mk'), 'ml': ('Mali', ('XOF',), 'fr'), 'mn': ('Mongolia', ('MNT',), 'mn'), 'mo': ('Macao', ('MOP',), 'zh'), 'mp': ('Northern Mariana Islands', ('USD',), 'en'), 'mq': ('Martinique', ('EUR',), 'fr'), 'mr': ('Mauritania', ('MRU',), 'ar'), 'ms': ('Montserrat', ('XCD',), 'en'), 'mt': ('Malta', ('EUR',), 'mt'), 'mu': ('Mauritius', ('MUR',), 'en'), 'mv': ('Maldives', ('MVR',), 'dv'), 'mw': ('Malawi', ('MWK',), 'en'), 'mx': ('Mexico', ('MXN',), 'es'), 'my': ('Malaysia', ('MYR',), 'en'), 'mz': ('Mozambique', ('MZN',), 'pt'), 'na': ('Namibia', ('ZAR', 'NAD'), 'en'), 'nc': ('New Caledonia', ('XPF',), 'fr'), 'ne': ('Niger', ('XOF',), 'fr'), 'nf': ('Norfolk Island', ('AUD',), 'en'), 'ng': ('Nigeria', ('NGN',), 'en'), 'ni': ('Nicaragua', ('NIO',), 'es'), 'nl': ('Netherlands', ('EUR',), 'nl'), 'no': ('Norway', ('NOK',), 'no'), 'np': ('Nepal', ('NPR',), 'ne'), 'nr': ('Nauru', ('AUD',), 'en'), 'nu': ('Niue', ('NZD',), 'en'), 'nz': ('New Zealand', ('NZD',), 'en'), 'om': ('Oman', ('OMR',), 'ar'), 'pa': ('Panama', ('PAB', 'USD'), 'es'), 'pe': ('Peru', ('PEN',), 'es'), 'pf': ('French Polynesia', ('XPF',), 'fr'), 'pg': ('Papua New Guinea', ('PGK',), 'en'), 'ph': ('Philippines', ('PHP',), 'en'), 'pk': ('Pakistan', ('PKR',), 'en'), 'pl': ('Poland', ('PLN',), 'pl'), 'pm': ('Saint Pierre and Miquelon', ('EUR',), 'fr'), 'pn': ('Pitcairn', ('NZD',), 'en'), 'pr': ('Puerto Rico', ('USD',), 'es'), 'pt': ('Portugal', ('EUR',), 'pt'), 'pw': ('Palau', ('USD',), 'en'), 'py': ('Paraguay', ('PYG',), 'es'), 'qa': ('Qatar', ('QAR',), 'ar'), 're': ('Réunion', ('EUR',), 'fr'), 'ro': ('Romania', ('RON',), 'ro'), 'rs': ('Serbia', ('RSD',), 'rs'), 'ru': ('Russian Federation', ('RUB',), 'ru'), 'rw': ('Rwanda', ('RWF',), 'rw'), 'sa': ('Saudi Arabia', ('SAR',), 'ar'), 'sb': ('Solomon Islands', ('SBD',), 'en'), 'sc': ('Seychelles', ('SCR',), 'fr'), 'sd': ('Sudan', ('SDG',), 'ar'), 'se': ('Sweden', ('SEK',), 'sv'), 'sg': ('Singapore', ('SGD',), 'en'), 'sh': ('Saint Helena, Ascension and Tristan da Cunha', ('SHP',), 'en'), 'si': ('Slovenia', ('EUR',), 'sl'), 'sj': ('Svalbard and Jan Mayen', ('NOK',), 'no'), 'sk': ('Slovakia', ('EUR',), 'sk'), 'sl': ('Sierra Leone', ('SLE',), 'en'), 'sm': ('San Marino', ('EUR',), 'it'), 'sn': ('Senegal', ('XOF',), 'fr'), 'so': ('Somalia', ('SOS',), 'so'), 'sr': ('Suriname', ('SRD',), 'nl'), 'ss': ('South Sudan', ('SSP',), 'en'), 'st': ('Sao Tome and Principe', ('STN',), 'pt'), 'sv': ('El Salvador', ('USD',), 'es'), 'sy': ('Syrian Arab Republic', ('SYP',), 'ar'), 'sz': ('Eswatini', ('SZL',), 'en'), 'td': ('Chad', ('XAF',), 'fr'), 'tf': ('French Southern Territories', ('EUR',), 'fr'), 'tg': ('Togo', ('XOF',), 'fr'), 'th': ('Thailand', ('THB',), 'th'), 'tj': ('Tajikistan', ('TJS',), 'tg'), 'tk': ('Tokelau', ('NZD',), 'en'), 'tl': ('Timor-Leste', ('USD',), 'pt'), 'tm': ('Turkmenistan', ('TMT',), 'tk'), 'tn': ('Tunisia', ('TND',), 'fr'), 'to': ('Tonga', ('TOP',), 'en'), 'tr': ('Türkiye', ('TRY',), 'tr'), 'tt': ('Trinidad and Tobago', ('TTD',), 'en'), 'tv': ('Tuvalu', ('AUD',), 'en'), 'tw': ('Taiwan, Province of China', ('TWD',), 'zh'), 'tz': ('Tanzania, United Republic of', ('TZS',), 'en'), 'ua': ('Ukraine', ('UAH',), 'uk'), 'ug': ('Uganda', ('UGX',), 'en'), 'us': ('United States', ('USD',), 'en'), 'uy': ('Uruguay', ('UYU',), 'es'), 'uz': ('Uzbekistan', ('UZS',), 'uz'), 'vc': ('Saint Vincent and the Grenadines', ('XCD',), 'en'), 've': ('Venezuela, Bolivarian Republic of', ('VES',), 'es'), 'vn': ('Viet Nam', ('VND',), 'vi'), 'vu': ('Vanuatu', ('VUV',), 'bi'), 'wf': ('Wallis and Futuna', ('XPF',), 'fr'), 'ws': ('Samoa', ('WST',), 'sm'), 'xk': ('Kosovo', ('EUR',), 'sq'), 'ye': ('Yemen', ('YER',), 'ar'), 'yt': ('Mayotte', ('EUR',), 'fr'), 'za': ('South Africa', ('ZAR',), 'en'), 'zm': ('Zambia', ('ZMW',), 'en'), 'zw': ('Zimbabwe', ('USD', 'ZWG'), 'en')}
 CALLING_CODE_TO_COUNTRY = {'1': 'us', '7': 'ru', '20': 'eg', '27': 'za', '30': 'gr', '31': 'nl', '32': 'be', '33': 'fr', '34': 'es', '36': 'hu', '39': 'it', '40': 'ro', '41': 'ch', '43': 'at', '44': 'gb', '45': 'dk', '46': 'se', '47': 'no', '48': 'pl', '49': 'de', '51': 'pe', '52': 'mx', '53': 'cu', '54': 'ar', '55': 'br', '56': 'cl', '57': 'co', '58': 've', '60': 'my', '61': 'au', '62': 'id', '63': 'ph', '64': 'nz', '65': 'sg', '66': 'th', '76': 'kz', '77': 'kz', '81': 'jp', '82': 'kr', '84': 'vn', '86': 'cn', '90': 'tr', '91': 'in', '92': 'pk', '93': 'af', '94': 'lk', '98': 'ir', '211': 'ss', '212': 'ma', '213': 'dz', '216': 'tn', '218': 'ly', '220': 'gm', '221': 'sn', '222': 'mr', '223': 'ml', '224': 'gn', '225': 'ci', '226': 'bf', '227': 'ne', '228': 'tg', '229': 'bj', '230': 'mu', '231': 'lr', '232': 'sl', '233': 'gh', '234': 'ng', '235': 'td', '236': 'cf', '237': 'cm', '238': 'cv', '239': 'st', '240': 'gq', '241': 'ga', '242': 'cg', '243': 'cd', '244': 'ao', '245': 'gw', '246': 'io', '248': 'sc', '249': 'sd', '250': 'rw', '251': 'et', '252': 'so', '253': 'dj', '254': 'ke', '255': 'tz', '256': 'ug', '257': 'bi', '258': 'mz', '260': 'zm', '261': 'mg', '262': 're', '263': 'zw', '264': 'na', '265': 'mw', '266': 'ls', '267': 'bw', '268': 'sz', '269': 'km', '290': 'sh', '291': 'er', '297': 'aw', '298': 'fo', '299': 'gl', '350': 'gi', '351': 'pt', '352': 'lu', '353': 'ie', '354': 'is', '355': 'al', '356': 'mt', '357': 'cy', '358': 'fi', '359': 'bg', '370': 'lt', '371': 'lv', '372': 'ee', '373': 'md', '374': 'am', '375': 'by', '377': 'mc', '378': 'sm', '380': 'ua', '381': 'rs', '385': 'hr', '386': 'si', '387': 'ba', '389': 'mk', '420': 'cz', '421': 'sk', '423': 'li', '500': 'fk', '501': 'bz', '502': 'gt', '503': 'sv', '504': 'hn', '505': 'ni', '506': 'cr', '507': 'pa', '508': 'pm', '509': 'ht', '590': 'gp', '591': 'bo', '592': 'gy', '593': 'ec', '594': 'gf', '595': 'py', '596': 'mq', '597': 'sr', '598': 'uy', '670': 'tl', '672': 'nf', '673': 'bn', '674': 'nr', '675': 'pg', '676': 'to', '677': 'sb', '678': 'vu', '679': 'fj', '680': 'pw', '681': 'wf', '682': 'ck', '683': 'nu', '685': 'ws', '686': 'ki', '687': 'nc', '688': 'tv', '689': 'pf', '690': 'tk', '691': 'fm', '692': 'mh', '850': 'kp', '852': 'hk', '853': 'mo', '855': 'kh', '856': 'la', '880': 'bd', '886': 'tw', '960': 'mv', '961': 'lb', '962': 'jo', '963': 'sy', '964': 'iq', '965': 'kw', '966': 'sa', '967': 'ye', '968': 'om', '971': 'ae', '972': 'il', '973': 'bh', '974': 'qa', '975': 'bt', '976': 'mn', '977': 'np', '992': 'tj', '993': 'tm', '994': 'az', '995': 'ge', '996': 'kg', '998': 'uz', '1242': 'bs', '1246': 'bb', '1264': 'ai', '1268': 'ag', '1345': 'ky', '1441': 'bm', '1473': 'gd', '1664': 'ms', '1670': 'mp', '1671': 'gu', '1684': 'as', '1758': 'lc', '1767': 'dm', '1784': 'vc', '1787': 'pr', '1809': 'do', '1829': 'do', '1849': 'do', '1868': 'tt', '1869': 'kn', '1876': 'jm', '1939': 'pr', '4779': 'sj'}
 NANP_CANADA_AREA_CODES = {'204', '226', '236', '249', '250', '257', '263', '289', '306', '343', '354', '365', '367', '368', '382', '403', '416', '418', '428', '431', '437', '438', '450', '468', '474', '506', '514', '519', '548', '579', '581', '584', '587', '604', '613', '639', '647', '672', '683', '705', '709', '742', '753', '778', '780', '782', '807', '819', '825', '867', '873', '879', '902', '905'}
@@ -1579,10 +1595,12 @@ def _serpapi_lens_request(public_url, lens_type, country, auto_crop, query_hint)
     if query_hint and lens_type in (None, '', 'all', 'visual_matches', 'products'):
         params['q'] = query_hint[:120]
     try:
-        lens_read_timeout = min(float(LENS_HTTP_TIMEOUT_SECONDS), max(6.0, float(LENS_TOTAL_TIMEOUT_SECONDS) - 0.5))
+        # First paint and provider completion are separate budgets. A fast US
+        # response must not shorten the Chinese/local provider's read timeout.
+        lens_read_timeout = float(LENS_HTTP_TIMEOUT_SECONDS)
         data = _serpapi_cached_json(
             params,
-            timeout=(5, lens_read_timeout),
+            timeout=(2, lens_read_timeout),
             label=f"GOOGLE LENS type={lens_type or 'all'} country={country or '-'}",
         )
         if data is None:
@@ -1733,16 +1751,18 @@ def _market_presence_fallback(base_query, rank, limit=6):
     print(f'MARKET PRESENCE FALLBACK rank={rank} query={q[:70]!r} -> {len(merged)}')
     return merged
 
-def _single_local_lane_rescue(base_query, timeout_seconds=3.5, limit=6):
+def _single_local_lane_rescue(base_query, timeout_seconds=None, limit=6, progress_callback=None, cancel_event=None):
     """One quota-bounded local request used only while foreign rows are visible."""
-    if not SERPAPI_API_KEY:
+    if not SERPAPI_API_KEY or (cancel_event is not None and cancel_event.is_set()):
         return []
     q = _shopping_clean_query(base_query or '')
     if not q:
         return []
     if LOCAL_DISCOVERY_ENABLED:
         return _local_market_discovery(q, dict(current_market()), limit=limit,
-                                       timeout_seconds=timeout_seconds)
+                                       timeout_seconds=timeout_seconds,
+                                       progress_callback=progress_callback, cancel_event=cancel_event)
+    timeout_seconds = timeout_seconds or LOCAL_DISCOVERY_TIMEOUT
     local_cc = (current_market().get('country') or DEFAULT_COUNTRY).lower()
     local_hl = country_search_hl(local_cc)
     out = []
@@ -1859,14 +1879,14 @@ def _supplement_missing_markets(candidates, query, label='FIRST', prefetch=None)
 def _photo_identity_text(value):
     text = unicodedata.normalize('NFKD', normalize_ar(str(value or '')))
     text = ''.join(ch for ch in text if not unicodedata.combining(ch))
-    return ' '.join(re.findall(r'[a-z0-9\u0600-\u06ff]+', text))
+    return ' '.join(re.findall(r'[^\W_]+', text, flags=re.UNICODE))
 
 def _photo_identity_key(image_b64):
     try:
         raw = base64.b64decode(image_b64, validate=True)
     except Exception:
         return ''
-    return 'photo-reference-v2:' + hashlib.sha256(raw).hexdigest() if raw else ''
+    return 'photo-reference-v3:' + hashlib.sha256(raw).hexdigest() if raw else ''
 
 def _photo_identity_validate(value):
     """Only literal, readable label facts can become named search constraints."""
@@ -1878,7 +1898,8 @@ def _photo_identity_validate(value):
     for field in ('brand', 'product_name', 'model', 'variant'):
         fact = re.sub(r'\s+', ' ', str(value.get(field) or '')).strip()[:90]
         cmp = _photo_identity_text(fact)
-        if cmp and (' ' + cmp + ' ') in visible_cmp:
+        cjk = bool(re.search(r'[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]', fact))
+        if cmp and (cmp in visible_cmp if cjk else (' ' + cmp + ' ') in visible_cmp):
             profile[field] = fact
     product_type = re.sub(r'\s+', ' ', str(value.get('product_type') or '')).strip()[:70]
     if _photo_identity_text(product_type) not in ('', 'unknown', 'product', 'item'):
@@ -1957,7 +1978,7 @@ def _photo_identity(image_b64, mime_type):
 
 def _lens_product_kinds(value):
     """Explicit functional nouns only; missing vocabulary is not a conflict."""
-    text = _photo_identity_text(value)
+    text = _photo_identity_text(_local_retrieval_text(value))
     patterns = {
         'mask': r'\b(?:mask|masks|masque|masques|ماسك|قناع)\b',
         'cream': r'\b(?:cream|creme|كريم)\b',
@@ -1969,7 +1990,9 @@ def _lens_product_kinds(value):
         'conditioner': r'\b(?:conditioner|بلسم)\b',
         'remote': r'\b(?:remote|remotes|ريموت|kumanda)\b',
         'receiver': r'\b(?:receiver|set top box|iptv box|رسيفر)\b',
-        'footwear': r'\b(?:slides?|slippers?|sandals?|mules?|clogs?|footwear|شبشب|شباشب|نعال|صندل)\b',
+        'footwear': r'\b(?:shoes?|slides?|slippers?|sandals?|mules?|clogs?|footwear|شبشب|شباشب|نعال|صندل)\b',
+        'planter': r'\bplanter\b', 'headphones': r'\bheadphones\b',
+        'keyboard': r'\bkeyboard\b', 'phone': r'\bphone\b', 'lamp': r'\blamp\b',
     }
     return {kind for kind, pattern in patterns.items() if re.search(pattern, text)}
 
@@ -1985,6 +2008,8 @@ def _lens_reference_priority(item, reference):
     tokens = set(text.split())
     def hits(field):
         value = _photo_identity_text(reference.get(field))
+        if value and re.search(r'[\u3040-\u30ff\u3400-\u9fff]', value) and value in text:
+            return True
         parts = set(value.split()) - {'al', 'the', 'by', 'and', 'for'}
         if field == 'product_name':
             # Commercial line names survive translated functional words.
@@ -2074,7 +2099,7 @@ def _lens_reference_rows(rows, reference):
     # These rows are unverified until the existing reference-image audit.
     return output if output else uncertain
 
-def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=False, progress_callback=None):
+def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=False, progress_callback=None, cancel_event=None):
     if not ENABLE_GOOGLE_LENS or not SERPAPI_API_KEY or (not PUBLIC_BASE_URL):
         print('GOOGLE LENS SKIPPED: missing SERPAPI_API_KEY or PUBLIC_BASE_URL')
         return {'aliases': [], 'matches': [], 'query': ''}
@@ -2084,6 +2109,8 @@ def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=Fal
         return {'aliases': [], 'matches': [], 'query': ''}
     try:
         user_country = current_market().get('country', DEFAULT_COUNTRY)
+        def cancelled():
+            return cancel_event is not None and cancel_event.is_set()
         reference_future = PHOTO_IDENTITY_POOL.submit(_photo_identity, image_b64, mime_type) if light and USE_FAST_LENS_PIPELINE else None
         reference = {}
         def _refresh_reference(wait_seconds=0):
@@ -2148,15 +2175,24 @@ def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=Fal
         lens_market_snapshot = dict(current_market())
         local_rescue_future = None
         local_rescue_started = False
+        local_updates, local_updates_lock = deque(), threading.Lock()
+        def local_progress(batch):
+            if not cancelled():
+                with local_updates_lock:
+                    local_updates.append([dict(item) for item in batch])
         fast_started = time.monotonic()
         fast_deadline = fast_started + (LENS_TURBO_MAX_WAIT_SECONDS if USE_FAST_LENS_PIPELINE else min(LENS_FAST_READY_SECONDS, LENS_TOTAL_TIMEOUT_SECONDS))
+        # Keep already purchased responses alive after the first cards paint.
+        completion_deadline = fast_started + max(
+            LENS_TOTAL_TIMEOUT_SECONDS, LENS_HTTP_TIMEOUT_SECONDS + 2.5,
+            LENS_LOCAL_RESCUE_AFTER_SECONDS + LOCAL_DISCOVERY_TIMEOUT + .5)
         enough_fast = False
         last_progress_signature = None
 
         def _emit_progress_snapshot(reason, allow_foreign_first=False):
             """Publish usable Lens rows regardless of which fast-path produced them."""
             nonlocal last_progress_signature
-            if not (light and progress_callback):
+            if cancelled() or not (light and progress_callback):
                 return False
             preview_allowed = [dict(x) for x in _candidate_rows() if result_market_rank(x) != 99]
             signature = tuple(sorted((str(x.get('link') or ''), str(x.get('title') or ''), str(x.get('thumbnail') or ''), str(x.get('price') or '')) for x in preview_allowed))
@@ -2179,7 +2215,7 @@ def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=Fal
 
         def _start_local_rescue_if_needed(force=False):
             nonlocal local_rescue_future, local_rescue_started
-            if local_rescue_started or (not LENS_LOCAL_LANE_RESCUE):
+            if cancelled() or local_rescue_started or (not LENS_LOCAL_LANE_RESCUE):
                 return local_rescue_future
             local_count = _local_lane_count(_candidate_rows(), reference)
             if local_count >= min(LOCAL_RESULTS_TARGET, LENS_LOCAL_LANE_TARGET):
@@ -2190,19 +2226,23 @@ def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=Fal
             rescue_query = _reference_query()
             if not rescue_query:
                 return local_rescue_future
+            budget = min(LOCAL_DISCOVERY_TIMEOUT, completion_deadline - time.monotonic())
+            if budget <= .1:
+                return local_rescue_future
             local_rescue_started = True
             local_rescue_future = MARKET_SUPPLEMENT_POOL.submit(
                 _run_with_market,
                 lens_market_snapshot,
                 _single_local_lane_rescue,
                 rescue_query,
-                LENS_LOCAL_LANE_GRACE_SECONDS,
+                budget,
                 max(LENS_LOCAL_LANE_TARGET + 2, LENS_LOCAL_LANE_TARGET),
+                local_progress, cancel_event,
             )
             print(f'LENS LOCAL LANE RESCUE START elapsed={elapsed:.1f}s country={user_country}')
             return local_rescue_future
 
-        while pending and time.monotonic() < fast_deadline:
+        while pending and time.monotonic() < fast_deadline and not cancelled():
             remaining_fast = max(0.0, fast_deadline - time.monotonic())
             just_done, pending = wait(pending, timeout=min(0.35, remaining_fast), return_when=FIRST_COMPLETED)
             if not just_done:
@@ -2218,8 +2258,7 @@ def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=Fal
                     print(f'GOOGLE LENS FUTURE ERR type={lens_type} country={country}: {e}')
             rank_counts = {r: sum((1 for x in _candidate_rows() if result_market_rank(x) == r)) for r in (0, 1, 2)}
             if USE_FAST_LENS_PIPELINE:
-                # Do not hold 60 useful cards hostage because one market bucket
-                # is missing. The separate "more stores" action can deepen it.
+                # First paint may be global; it does not finish retrieval.
                 useful = sum(rank_counts.values())
                 enough_fast = useful >= max(6, LENS_MIN_MATCHES)
             else:
@@ -2239,7 +2278,7 @@ def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=Fal
         if USE_FAST_LENS_PIPELINE and not merged and pending:
             rescue_started = time.monotonic()
             rescue_deadline = rescue_started + LENS_TURBO_EMPTY_GRACE_SECONDS
-            while pending and not merged and time.monotonic() < rescue_deadline:
+            while pending and not merged and time.monotonic() < rescue_deadline and not cancelled():
                 rescue_left = max(0.0, rescue_deadline - time.monotonic())
                 just_done, pending = wait(pending, timeout=rescue_left, return_when=FIRST_COMPLETED)
                 if not just_done:
@@ -2259,82 +2298,51 @@ def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=Fal
             else:
                 print(f'LENS ZERO-RACE EMPTY after_grace={LENS_TURBO_EMPTY_GRACE_SECONDS}s')
 
-        # Foreign rows are allowed to paint immediately, but they cannot cancel
-        # a slower local Lens pass. Keep only the local lane alive inside one
-        # shared post-fast budget, then rebalance the authoritative snapshot.
-        post_fast_deadline = min(
-            fast_started + LENS_TOTAL_TIMEOUT_SECONDS,
-            time.monotonic() + max(LENS_LOCAL_LANE_GRACE_SECONDS, LENS_TURBO_SPARSE_GRACE_SECONDS),
-        )
-        sparse_useful = sum(1 for x in _candidate_rows() if result_market_rank(x) in (0, 1, 2))
-        if USE_FAST_LENS_PIPELINE and sparse_useful:
-            _emit_progress_snapshot('pre_local_lane', allow_foreign_first=True)
-
-        local_count = _local_lane_count(_candidate_rows(), reference)
-        if USE_FAST_LENS_PIPELINE and local_count < LENS_LOCAL_LANE_TARGET:
-            local_lane_started = time.monotonic()
-            rescue_due_at = fast_started + LENS_LOCAL_RESCUE_AFTER_SECONDS
-            print(f'LENS LOCAL LANE START local={local_count}/{LENS_LOCAL_LANE_TARGET} pending={len(pending)}')
-            while local_count < LENS_LOCAL_LANE_TARGET and time.monotonic() < post_fast_deadline:
-                local_lens_pending = {fut for fut in pending if future_map[fut][1] == user_country}
-                _start_local_rescue_if_needed(force=not local_lens_pending)
-                waiters = set(local_lens_pending)
+        # Consume every issued Lens pass, plus each local discovery batch, as
+        # soon as it completes. The fast deadline controls first paint only.
+        # This same lane serves every country and also retains late CN global
+        # rows when the user's country is elsewhere.
+        if USE_FAST_LENS_PIPELINE:
+            print(f'LENS COMPLETION START country={user_country} pending={len(pending)}')
+            while not cancelled() and time.monotonic() < completion_deadline:
+                _start_local_rescue_if_needed(force=not pending)
+                with local_updates_lock:
+                    batches = list(local_updates)
+                    local_updates.clear()
+                for batch in batches:
+                    _merge(batch)
+                if batches:
+                    _emit_progress_snapshot('local_discovery_batch', allow_foreign_first=True)
+                waiters = set(pending)
                 if local_rescue_future is not None:
                     waiters.add(local_rescue_future)
                 if not waiters:
                     break
-                wait_deadline = post_fast_deadline
-                if local_count < min(LOCAL_RESULTS_TARGET, LENS_LOCAL_LANE_TARGET) and not local_rescue_started:
-                    wait_deadline = min(wait_deadline, rescue_due_at)
-                wait_seconds = max(0.0, wait_deadline - time.monotonic())
-                if wait_seconds <= 0:
-                    _start_local_rescue_if_needed()
-                    continue
-                just_done, _ = wait(waiters, timeout=wait_seconds, return_when=FIRST_COMPLETED)
-                if not just_done:
-                    _start_local_rescue_if_needed()
-                    continue
+                just_done, _ = wait(waiters, timeout=min(.15, max(0, completion_deadline - time.monotonic())),
+                                    return_when=FIRST_COMPLETED)
                 for fut in just_done:
                     if fut is local_rescue_future:
                         try:
                             _merge(fut.result() or [])
-                        except Exception as e:
-                            print(f'LENS LOCAL LANE RESCUE ERR: {e}')
+                        except Exception as exc:
+                            print(f'LENS LOCAL RESCUE ERR: {type(exc).__name__}')
                         local_rescue_future = None
-                        continue
-                    pending.discard(fut)
-                    done_fast.add(fut)
-                    lens_type, country, auto_crop = future_map[fut]
-                    try:
-                        _merge(fut.result() or [])
-                    except Exception as e:
-                        print(f'LENS LOCAL LANE FUTURE ERR type={lens_type} country={country}: {e}')
-                local_count = _local_lane_count(_candidate_rows(), reference)
-                _emit_progress_snapshot('local_lane', allow_foreign_first=True)
-            print(f'LENS LOCAL LANE DONE local={local_count}/{LENS_LOCAL_LANE_TARGET} elapsed={time.monotonic() - local_lane_started:.2f}s rescue={local_rescue_started}')
-
-        sparse_useful = sum(1 for x in _candidate_rows() if result_market_rank(x) in (0, 1, 2))
-        if USE_FAST_LENS_PIPELINE and 0 < sparse_useful < LENS_TURBO_STRONG_RESULT_TARGET and pending:
-            sparse_started = time.monotonic()
-            sparse_deadline = min(post_fast_deadline, sparse_started + LENS_TURBO_SPARSE_GRACE_SECONDS)
-            before_sparse = sparse_useful
-            while pending and time.monotonic() < sparse_deadline:
-                sparse_left = max(0.0, sparse_deadline - time.monotonic())
-                just_done, pending = wait(pending, timeout=sparse_left, return_when=FIRST_COMPLETED)
-                if not just_done:
-                    break
-                done_fast |= set(just_done)
-                for fut in just_done:
-                    lens_type, country, auto_crop = future_map[fut]
-                    try:
-                        _merge(fut.result())
-                    except Exception as e:
-                        print(f'GOOGLE LENS SPARSE FUTURE ERR type={lens_type} country={country}: {e}')
-                sparse_useful = sum(1 for x in _candidate_rows() if result_market_rank(x) in (0, 1, 2))
-                _emit_progress_snapshot('sparse_fill', allow_foreign_first=True)
-                if sparse_useful >= LENS_TURBO_STRONG_RESULT_TARGET:
-                    break
-            print(f'LENS SPARSE FILL useful={before_sparse}->{sparse_useful} grace_elapsed={time.monotonic() - sparse_started:.2f}s')
+                    else:
+                        pending.discard(fut)
+                        done_fast.add(fut)
+                        lens_type, country, _ = future_map[fut]
+                        try:
+                            _merge(fut.result() or [])
+                        except Exception as exc:
+                            print(f'LENS COMPLETION ERR country={country} type={lens_type}: {type(exc).__name__}')
+                if just_done:
+                    _emit_progress_snapshot('provider_completed', allow_foreign_first=True)
+            with local_updates_lock:
+                for batch in local_updates:
+                    _merge(batch)
+                local_updates.clear()
+            _emit_progress_snapshot('completion', allow_foreign_first=True)
+            print(f'LENS COMPLETION DONE country={user_country} local={_local_lane_count(_candidate_rows(), reference)} pending={len(pending)} elapsed={time.monotonic() - fast_started:.2f}s')
         rank_counts = {r: sum((1 for x in _candidate_rows() if result_market_rank(x) == r)) for r in (0, 1, 2)}
         market_prefetch = None
         prefetch_query = _reference_query()
@@ -2363,23 +2371,27 @@ def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=Fal
                     print(f'LENS LOCAL LANE RESCUE DEADLINE ERR: {e}')
             else:
                 local_rescue_future.cancel()
-                print('LENS LOCAL LANE RESCUE LEFT RUNNING AFTER DISPLAY DEADLINE')
+                print('LENS LOCAL RESCUE COMPLETION DEADLINE REACHED')
             local_rescue_future = None
         for fut in pending:
             lens_type, country, _ = future_map[fut]
             fut.cancel()
-            print(f'GOOGLE LENS PASS SKIPPED AFTER FAST/TOTAL TIMEOUT type={lens_type} country={country}')
+            print(f'GOOGLE LENS PROVIDER DEADLINE type={lens_type} country={country}')
         print(f'GOOGLE LENS PARALLEL DONE completed={len(done)}/{len(future_map)} fast_ready={enough_fast} max_wait={(LENS_TURBO_MAX_WAIT_SECONDS if USE_FAST_LENS_PIPELINE else LENS_TOTAL_TIMEOUT_SECONDS)}s')
         # Resolve the image identity inside one bounded parallel budget before
         # choosing the authoritative product set or a rescue query.
+        if cancelled():
+            return {'aliases': [], 'matches': [], 'query': '', 'cancelled': True}
         _refresh_reference(max(0.0, 13.0 - (time.monotonic() - fast_started)))
         allowed = [m for m in _candidate_rows() if result_market_rank(m) != 99]
         fallback_query = _reference_query()
         if not fallback_query and merged and reference_future is None:
             fallback_query = (merged[0].get('title') or '').strip()
-        if reference.get('named') and not any(result_market_rank(m) == 0 and m.get('_reference_priority', 0) >= 3 for m in allowed) and not local_rescue_started:
+        if LENS_LOCAL_LANE_RESCUE and reference.get('named') and not any(result_market_rank(m) == 0 and m.get('_reference_priority', 0) >= 3 for m in allowed) and not local_rescue_started:
             local_rescue_started = True
-            rescued = _single_local_lane_rescue(fallback_query, timeout_seconds=3.5, limit=6)
+            remaining = max(0.0, completion_deadline - time.monotonic())
+            rescued = _single_local_lane_rescue(fallback_query, timeout_seconds=min(LOCAL_DISCOVERY_TIMEOUT, remaining), limit=6,
+                                               cancel_event=cancel_event) if remaining > .1 else []
             _merge(rescued)
             allowed = [m for m in _candidate_rows() if result_market_rank(m) != 99]
         if not USE_FAST_LENS_PIPELINE:
@@ -2706,10 +2718,101 @@ def _china_domestic_product_url(url):
         return False
 
 
+# Retrieval vocabulary only: these translations are never identity proof and
+# never replace the visible product title, model, variant, or price.
+_LOCAL_RETRIEVAL_NOUNS = {
+    'shoes': {'en': 'shoes|shoe|footwear', 'zh': '鞋|运动鞋', 'ja': '靴|シューズ', 'de': 'Schuhe|Schuh', 'fr': 'chaussures|chaussure', 'it': 'scarpe', 'es': 'zapatos', 'tr': 'ayakkabı', 'ar': 'حذاء|أحذية'},
+    'planter': {'en': 'plant pot|plant pots|flower pot|flower pots|planters|planter', 'zh': '花盆', 'ja': '植木鉢', 'de': 'Blumentopf|Blumentöpfe', 'fr': 'pot de fleurs', 'it': 'vaso per piante', 'es': 'maceta', 'tr': 'saksı', 'ar': 'أصيص|اصيص'},
+    'headphones': {'en': 'headphones|headphone|headset|earphones', 'zh': '耳机|耳機', 'ja': 'ヘッドホン|イヤホン', 'de': 'Kopfhörer', 'fr': 'casque audio', 'it': 'cuffie', 'es': 'auriculares', 'tr': 'kulaklık', 'ar': 'سماعات|سماعة'},
+    'keyboard': {'en': 'keyboards|keyboard', 'zh': '键盘|鍵盤', 'ja': 'キーボード', 'de': 'Tastatur', 'fr': 'clavier', 'it': 'tastiera', 'es': 'teclado', 'tr': 'klavye', 'ar': 'لوحة مفاتيح'},
+    'phone': {'en': 'smartphone|mobile phone|phones|phone', 'zh': '手机|手機', 'ja': 'スマートフォン', 'de': 'Smartphone', 'fr': 'téléphone', 'it': 'telefono', 'es': 'teléfono', 'tr': 'telefon', 'ar': 'هاتف'},
+    'lamp': {'en': 'lamps|lamp', 'zh': '台灯|灯具', 'ja': 'ランプ', 'de': 'Lampe', 'fr': 'lampe', 'it': 'lampada', 'es': 'lámpara', 'tr': 'lamba', 'ar': 'مصباح'},
+    'mask': {'en': 'mask|masks|masque', 'zh': '面膜', 'ja': 'フェイスマスク', 'de': 'Gesichtsmaske', 'fr': 'masque', 'it': 'maschera', 'es': 'mascarilla', 'tr': 'maske', 'ar': 'ماسك|قناع'},
+    'cream': {'en': 'creams|cream', 'zh': '面霜', 'ja': 'クリーム', 'de': 'Creme', 'fr': 'crème', 'it': 'crema', 'es': 'crema', 'tr': 'krem', 'ar': 'كريم'},
+}
+
+
+def _local_term_pattern(term):
+    term = re.escape(term)
+    # Chinese/Japanese nouns need no whitespace word boundary. Latin and Arabic
+    # names still do, so a short noun cannot match the middle of a model/name.
+    return term if re.search(r'[\u3040-\u30ff\u3400-\u9fff]', term) else r'(?<!\w)' + term + r'(?!\w)'
+
+
+@lru_cache(maxsize=1)
+def _local_retrieval_rules():
+    audience = {'男鞋': 'men shoes', '女鞋': 'women shoes', '童鞋': 'kids shoes',
+                '男士': 'men', '女士': 'women', '鞋架': 'shoe rack', '手机壳': 'phone case',
+                '斯凯奇': 'skechers', '斯凱奇': 'skechers'}
+    entries = [(term.casefold(), canonical) for canonical, languages in _LOCAL_RETRIEVAL_NOUNS.items()
+               for terms in languages.values() for term in terms.split('|')]
+    entries += list(audience.items())
+    replacements = dict(entries)
+    pattern = '|'.join(_local_term_pattern(term) for term in sorted(replacements, key=len, reverse=True))
+    return re.compile(pattern), replacements
+
+
+def _local_retrieval_text(value):
+    text = unicodedata.normalize('NFKC', str(value or '')).casefold()
+    pattern, replacements = _local_retrieval_rules()
+    return pattern.sub(lambda m: ' ' + replacements[m.group(0)] + ' ', text)
+
+
+def _local_native_query(query, cc):
+    """Translate known functional nouns only; keep every unknown word/digit."""
+    language = country_search_hl(cc).split('-')[0]
+    text = re.sub(r'\s+', ' ', str(query or '')).strip()[:220]
+    replacements = {term.casefold(): languages[language].split('|')[0]
+        for languages in _LOCAL_RETRIEVAL_NOUNS.values() if language in languages and language != 'en'
+        for term in languages['en'].split('|')}
+    if not replacements:
+        return text
+    pattern = '|'.join(_local_term_pattern(term) for term in sorted(replacements, key=len, reverse=True))
+    return re.sub(pattern, lambda m: replacements[m.group(0).casefold()], text, flags=re.I)
+
+
+def _local_discovery_candidate_ok(query, item):
+    """A translated noun is not a missing match; explicit conflicts still reject."""
+    title = str(item.get('title') or '')
+    q, t = _local_retrieval_text(query), _local_retrieval_text(title)
+    if _findzia_hard_product_mismatch(q, t):
+        return False
+    def audience(text):
+        patterns = {'male': r"\b(?:men|mens|men['’]s|male|herren|homme)\b|رجالي",
+                    'female': r"\b(?:women|womens|women['’]s|female|damen|femme)\b|نسائي",
+                    'children': r'\b(?:kids|children|kinder|enfants)\b|اطفال|أطفال'}
+        return {key for key, pattern in patterns.items() if re.search(pattern, text, re.I)}
+    q_audience, t_audience = audience(q), audience(t)
+    if q_audience and t_audience and q_audience.isdisjoint(t_audience):
+        return False
+    q_kinds = set(_LOCAL_RETRIEVAL_NOUNS) & set(q.split())
+    t_kinds = set(_LOCAL_RETRIEVAL_NOUNS) & set(t.split())
+    if q_kinds and t_kinds and q_kinds.isdisjoint(t_kinds):
+        return False
+    normalized_query = _photo_identity_text(query)
+    if (re.search(r'[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]', normalized_query)
+            and normalized_query in _photo_identity_text(title)):
+        return True
+    # A retail search for footwear must not return its storage/accessories.
+    if 'shoes' in q_kinds and 'shoe rack' in t and 'shoe rack' not in q:
+        return False
+    if _findzia_stream_candidate_ok(q, dict(item, title=t)):
+        return True
+    # Unknown translations can reach the existing visual audit when a brand
+    # or model survives. This is eligibility, never an invented exact score.
+    non_latin = r'[\u0600-\u06ff\u0900-\u097f\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]'
+    shared = (_findzia_lexical_tokens(q) & _findzia_lexical_tokens(t)) - set(_LOCAL_RETRIEVAL_NOUNS)
+    if shared and re.search(non_latin, title) and item.get('thumbnail') and not (
+            _web_model_tokens_from_listing(q) and not (_web_model_tokens_from_listing(q) & _web_model_tokens_from_listing(t))):
+        item['_local_match_uncertain'] = True
+        return True
+    return False
+
+
 def _local_discovery_query(query, market, scoped=False):
     # Keep model numbers, original script and pack size; no paid translation.
-    q = re.sub(r'\s+', ' ', str(query or '')).strip()[:220]
     cc = str(market.get('country') or DEFAULT_COUNTRY).lower()
+    q = re.sub(r'\s+', ' ', str(query or '')).strip()[:220] if scoped else _local_native_query(query, cc)
     words = {'cn': '价格 购买', 'de': 'kaufen Preis', 'fr': 'acheter prix',
              'it': 'acquista prezzo', 'es': 'comprar precio', 'tr': 'satın al fiyat',
              'jp': '価格 通販', 'kr': '가격 구매', 'ar': 'شراء سعر'}
@@ -2768,27 +2871,33 @@ def _local_discovery_direct_link(row):
 
 def _local_discovery_rows(data, query, market, provider):
     out, seen = [], set()
+    stats = Counter()
     sections = ('organic_results', 'shopping_results')  # B2B tier quotes are not retail prices.
     for section in sections:
         records = data.get(section)
         for row in records[:30] if isinstance(records, list) else []:
+            stats['raw'] += 1
             if not isinstance(row, dict):
                 continue
             url = _local_discovery_direct_link(row)
             title = str(row.get('title') or '').strip()
             if not url or not title or is_blocked_store(row.get('source') or '', url):
+                stats['invalid_offer'] += 1
                 continue
             host = urllib.parse.urlsplit(url).hostname or ''
             item = {'title': title, 'link': url, 'source': str(row.get('source') or host),
                     '_shopping_gl': market['country'], '_lens_country': market['country'],
-                    'price': str(row.get('price') or ''), 'currency': str(row.get('currency') or '')}
+                    'price': str(row.get('price') or ''), 'currency': str(row.get('currency') or ''),
+                    'thumbnail': row.get('thumbnail') or ''}
             money_row = dict(row)
             if market['country'] == 'cn' and _china_domestic_product_url(url):
                 if re.fullmatch(r'[¥￥]\s*\d[\d,.]*', item['price']):
                     money_row['currency'] = item['currency'] = 'CNY'
             if not _local_storefront_evidence(item, market):
+                stats['foreign'] += 1
                 continue
-            if not _findzia_stream_candidate_ok(query, item):
+            if not _local_discovery_candidate_ok(query, item):
+                stats['mismatch'] += 1
                 continue
             canonical = _canonical_result_url(url)
             if canonical in seen:
@@ -2806,6 +2915,7 @@ def _local_discovery_rows(data, query, market, provider):
                         market_country=market['country'], in_stock=None, condition='',
                         price_source=provider, price_verified=False, _local_discovery=True)
             out.append(item)
+    print(f'LOCAL FILTER country={market["country"]} provider={provider} raw={stats["raw"]} invalid_offer={stats["invalid_offer"]} foreign={stats["foreign"]} mismatch={stats["mismatch"]} accepted={len(out)}')
     return out
 
 
@@ -2813,16 +2923,17 @@ def _local_discovery_request(query, market, kind, timeout_seconds):
     cc = market['country']
     if kind == 'shopping':
         cards = _serpapi_shopping_request(_shopping_clean_query(query), cc,
-                    hl=country_search_hl(cc), timeout_seconds=timeout_seconds)
+                    hl=country_search_hl(cc), timeout_seconds=timeout_seconds, timeout_total=True)
         return _local_discovery_rows({'shopping_results': cards}, query, market, 'local_shopping')
     if kind == 'baidu':
-        params = {'engine': 'baidu', 'q': f'{query} 价格 购买', 'ct': 2,
+        params = {'engine': 'baidu', 'q': f'{_local_native_query(query, cc)} 价格 购买', 'ct': 2,
                   'device': 'mobile', 'api_key': SERPAPI_API_KEY, 'output': 'json'}
     else:
         params = {'engine': 'google', 'q': _local_discovery_query(query, market, scoped=kind == 'scoped'),
                   'gl': cc, 'hl': country_search_hl(cc), 'num': 10,
                   'api_key': SERPAPI_API_KEY, 'output': 'json'}
-    data = _serpapi_cached_json(params, timeout=(min(1.5, timeout_seconds), timeout_seconds),
+    connect = min(1.5, max(.01, timeout_seconds * .15))
+    data = _serpapi_cached_json(params, timeout=(connect, max(.01, timeout_seconds - connect)),
                                label=f'LOCAL DISCOVERY {cc}/{kind}') or {}
     return _local_discovery_rows(data, query, market, 'local_' + kind) if isinstance(data, dict) else []
 
@@ -2834,9 +2945,11 @@ def _local_lane_count(rows, reference=None):
                 (not reference.get('named') or row.get('_reference_priority', 0) >= 3)})
 
 
-def _local_market_discovery(query, market, limit=8, timeout_seconds=None):
-    """At most two shared searches; distinct stores, deadlines, no one-call-per-store fan-out."""
+def _local_market_discovery(query, market, limit=8, timeout_seconds=None, progress_callback=None, cancel_event=None):
+    """Two searches at most, incremental batches and one provider-completion deadline."""
     if not (LOCAL_DISCOVERY_ENABLED and LOCAL_DISCOVERY_MAX_CALLS and SERPAPI_API_KEY):
+        return []
+    if timeout_seconds is not None and timeout_seconds <= 0:
         return []
     q = re.sub(r'\s+', ' ', str(query or '')).strip()[:220]
     if not q:
@@ -2844,47 +2957,74 @@ def _local_market_discovery(query, market, limit=8, timeout_seconds=None):
     market = dict(market)
     cc = str(market.get('country') or DEFAULT_COUNTRY).lower()
     market['country'] = cc
-    duration = max(.1, min(LOCAL_DISCOVERY_TIMEOUT, timeout_seconds or LOCAL_DISCOVERY_TIMEOUT))
-    deadline = time.monotonic() + duration
-    if cc == 'cn':
-        kinds = ['scoped'] + (['baidu'] if LOCAL_DISCOVERY_BAIDU else [])
-    else:
-        kinds = ['shopping' if ENABLE_GOOGLE_SHOPPING and _shopping_gl_supported(cc) else 'broad', 'scoped']
+    duration = max(.01, min(LOCAL_DISCOVERY_TIMEOUT, timeout_seconds if timeout_seconds is not None else LOCAL_DISCOVERY_TIMEOUT))
+    started = time.monotonic()
+    deadline = started + duration
+    kinds = (['scoped'] + (['baidu'] if LOCAL_DISCOVERY_BAIDU else [])) if cc == 'cn' else [
+        'shopping' if ENABLE_GOOGLE_SHOPPING and _shopping_gl_supported(cc) else 'broad', 'scoped']
     kinds = kinds[:LOCAL_DISCOVERY_MAX_CALLS]
-    rows, seen = [], set()
+    rows, seen, pending = [], set(), {}
     calls = 0
+    def cancelled():
+        return cancel_event is not None and cancel_event.is_set()
+    def worker(kind):
+        remaining = deadline - time.monotonic()
+        if cancelled() or remaining <= .01:
+            return []
+        began = time.monotonic()
+        values = _local_discovery_request(q, market, kind, remaining) or []
+        print(f'LOCAL PROVIDER country={cc} kind={kind} accepted={len(values)} elapsed={time.monotonic() - began:.2f}s')
+        return values
+    def launch(kind):
+        nonlocal calls
+        if not cancelled() and deadline - time.monotonic() > .02:
+            pending[LOCAL_DISCOVERY_POOL.submit(_run_with_market, market, worker, kind)] = kind
+            calls += 1
     def consume(future):
         try:
             values = future.result() or []
         except Exception as exc:
             print(f'LOCAL DISCOVERY ERR {cc}: {type(exc).__name__}')
             return
+        batch = []
         for item in values:
             key = _canonical_result_url(item.get('link'))
             if key and key not in seen:
                 seen.add(key)
                 rows.append(item)
-    # China's two indexes complement one another; elsewhere only deepen when
-    # the primary search is genuinely sparse. All work shares one deadline.
-    phases = [kinds] if cc == 'cn' else [[kind] for kind in kinds]
-    for phase in phases:
-        remaining = deadline - time.monotonic()
-        if remaining <= .05:
-            break
-        jobs = [LOCAL_DISCOVERY_POOL.submit(_run_with_market, market,
-                _local_discovery_request, q, market, kind, max(.1, remaining / (2 if len(phases) > 1 and calls == 0 else 1)))
-                for kind in phase]
-        calls += len(jobs)
-        done, pending = wait(jobs, timeout=max(0, deadline - time.monotonic()))
-        for job in jobs:
-            if job in done:
+                batch.append(item)
+        if batch and progress_callback and not cancelled():
+            try:
+                progress_callback(batch)
+            except Exception as exc:
+                print(f'LOCAL DISCOVERY CALLBACK ERR: {type(exc).__name__}')
+    if kinds:
+        launch(kinds[0])
+    if cc == 'cn' and len(kinds) > 1:
+        launch(kinds[1])
+    # Slow primary searches get one hedged fallback, not half a timeout each.
+    # Fast, sufficient Shopping results still cost only the primary search.
+    hedge_at = started + min(LOCAL_DISCOVERY_HEDGE_SECONDS, duration * .5)
+    try:
+        while pending and not cancelled() and time.monotonic() < deadline:
+            done, _ = wait(pending, timeout=min(.1, max(0, deadline - time.monotonic())),
+                           return_when=FIRST_COMPLETED)
+            for job in list(pending):
+                if job in done:
+                    pending.pop(job)
+                    consume(job)
+            merchants = {_more_result_domain(row.get('link')) for row in rows}
+            if (cc != 'cn' and calls < len(kinds) and len(merchants) < min(LOCAL_RESULTS_TARGET, limit)
+                    and (not pending or time.monotonic() >= hedge_at)):
+                launch(kinds[calls])
+        # Include responses that completed at the deadline boundary.
+        for job in list(pending):
+            if job.done() and not job.cancelled() and not cancelled():
+                pending.pop(job)
                 consume(job)
+    finally:
         for job in pending:
             job.cancel()
-        merchants = {_more_result_domain(row.get('link')) for row in rows}
-        if len(merchants) >= min(LOCAL_RESULTS_TARGET, limit):
-            break
-    # Round-robin merchants prevents one marketplace consuming the local pool.
     groups = {}
     for row in rows:
         groups.setdefault(_more_result_domain(row.get('link')), []).append(row)
@@ -2896,7 +3036,7 @@ def _local_market_discovery(query, market, limit=8, timeout_seconds=None):
                 del groups[domain]
             if len(output) >= limit:
                 break
-    print(f'LOCAL DISCOVERY country={cc} calls={calls} rows={len(output)} stores={len({_more_result_domain(r.get("link")) for r in output})}')
+    print(f'LOCAL DISCOVERY country={cc} calls={calls} rows={len(output)} stores={len({_more_result_domain(r.get("link")) for r in output})} pending={len(pending)} elapsed={time.monotonic() - started:.2f}s')
     return output
 
 
@@ -3668,7 +3808,7 @@ def _log_unsupported_shopping_gl(gl):
         _SHOPPING_UNSUPPORTED_LOGGED.add(cc)
     print(f'GOOGLE SHOPPING SKIP unsupported_gl={cc}; fallback=google_search+lens')
 
-def _serpapi_shopping_request(query, gl, hl='en', timeout_seconds=None):
+def _serpapi_shopping_request(query, gl, hl='en', timeout_seconds=None, timeout_total=False):
     if SHOPPING_GEO_GUARD and gl and (not _shopping_gl_supported(gl)):
         _log_unsupported_shopping_gl(gl)
         return []
@@ -3676,9 +3816,11 @@ def _serpapi_shopping_request(query, gl, hl='en', timeout_seconds=None):
     if gl:
         params['gl'] = gl
     try:
+        budget = timeout_seconds or SERPAPI_TIMEOUT_SECONDS
+        connect = min(1.5, max(.01, budget * .15)) if timeout_total else 4
         data = _serpapi_cached_json(
             params,
-            timeout=(4, timeout_seconds or SERPAPI_TIMEOUT_SECONDS),
+            timeout=(connect, max(.01, budget - connect) if timeout_total else budget),
             label=f"GOOGLE SHOPPING gl={gl or '-'}",
         )
         if data is None:
@@ -13861,52 +14003,82 @@ async def _web_with_live_prices(source, lang, country, allow_paid=True):
         _WEB_LIVE_PRICE_ACTIVE.reset(token)
 
 
-def _web_local_discovery_rows_sync(query, country, lang, existing):
+def _web_local_discovery_rows_sync(query, country, lang, existing, progress_callback=None, cancel_event=None):
     market = _web_market(country)
     def discover():
         local_domains = {_more_result_domain(r.get('url')) for r in existing if r.get('market_rank') == 0}
         needed = max(0, min(LOCAL_RESULTS_TARGET, WEB_LOCAL_MAX) - len(local_domains))
         if not needed:
             return []
-        raw = _local_market_discovery(query, market, limit=max(8, LOCAL_RESULTS_TARGET))
         known = {_canonical_result_url(r.get('url')) for r in existing}
-        rows = []
-        for item in raw:
-            url = item['link']
-            key = _canonical_result_url(url)
-            domain = _more_result_domain(url)
-            if key in known or domain in local_domains:
-                continue
-            known.add(key)
-            local_domains.add(domain)
-            row = {'url': url, 'title': item['title'], 'raw_title': item['title'],
-                   'store': _ui_plain_store_name(item['source'], url), 'market': 'local',
-                   'market_rank': 0, 'country': country, 'flag': country_flag_emoji(country),
-                   'image': item.get('thumbnail') or '', 'price': item.get('price') or '',
-                   'price_source': item.get('price_source') or 'local_discovery',
-                   'price_source_url': url, 'price_checked_at': time.time(),
-                   'price_verified': False, 'price_status': 'indexed' if item.get('price_value') else 'loading',
-                   'price_pending': not bool(item.get('price_value'))}
-            if item.get('price_value'):
-                row.update(_web_live_money_fields(item['price_value'], item['currency'], market))
-            rows.append(row)
-            if len(rows) >= needed:
-                break
-        if not rows:
-            return []
-        classified = _web_attach_captured_result_sections({'ok': True, 'type': 'results',
-            'query': query, 'market': market, 'results': rows, 'source': 'local_discovery'}, lang, allow_ai=False)
-        return classified.get('results') or []
+        results = []
+        def absorb(raw):
+            rows, uncertain = [], set()
+            for item in raw:
+                if len(results) + len(rows) >= needed:
+                    break
+                url = item['link']
+                key = _canonical_result_url(url)
+                domain = _more_result_domain(url)
+                if key in known or domain in local_domains:
+                    continue
+                known.add(key)
+                local_domains.add(domain)
+                row = {'url': url, 'title': item['title'], 'raw_title': item['title'],
+                       'store': _ui_plain_store_name(item['source'], url), 'market': 'local',
+                       'market_rank': 0, 'country': country, 'flag': country_flag_emoji(country),
+                       'image': item.get('thumbnail') or '', 'price': item.get('price') or '',
+                       'price_source': item.get('price_source') or 'local_discovery',
+                       'price_source_url': url, 'price_checked_at': time.time(),
+                       'price_verified': False, 'price_status': 'indexed' if item.get('price_value') else 'loading',
+                       'price_pending': not bool(item.get('price_value'))}
+                if item.get('price_value'):
+                    row.update(_web_live_money_fields(item['price_value'], item['currency'], market))
+                if item.get('_local_match_uncertain'):
+                    uncertain.add(url)
+                rows.append(row)
+            if not rows:
+                return
+            classified = _web_attach_captured_result_sections({'ok': True, 'type': 'results',
+                'query': query, 'market': market, 'results': rows, 'source': 'local_discovery'}, lang, allow_ai=False)
+            batch = [_web_fail_closed_visual_row(row, 'localized_listing_review_required')
+                     if row.get('url') in uncertain else row for row in classified.get('results') or []]
+            results.extend(batch)
+            if batch and progress_callback:
+                progress_callback(batch)
+        raw = _local_market_discovery(query, market, limit=max(8, LOCAL_RESULTS_TARGET),
+                                      progress_callback=absorb, cancel_event=cancel_event)
+        absorb(raw)
+        return results
     return _run_with_market(market, discover)
 
 
 async def _web_with_local_discovery(source, lang, country):
-    """Text-only additive recovery; original results paint before the extra I/O."""
+    """Text recovery interleaves each source's cards before search completion."""
     rows, query, final = {}, '', None
     failed = recommendations = False
-    task = None
+    task = next_batch = None
     added = 0
     started = time.monotonic()
+    cancel_event = threading.Event()
+    loop = asyncio.get_running_loop()
+    batches = asyncio.Queue()
+    def progress(batch):
+        if not cancel_event.is_set():
+            try:
+                loop.call_soon_threadsafe(batches.put_nowait, batch)
+            except RuntimeError:
+                pass
+    def events(batch):
+        nonlocal added
+        for item in batch:
+            key = _web_identity_offer_key(item)
+            if key in rows:
+                continue
+            rows[key] = item
+            added += 1
+            yield _web_stream_event({'event': 'result', 'phase': 'local_market_discovery',
+                'market': 'local', 'item': item, 'elapsed_ms': int((time.monotonic() - started) * 1000)})
     try:
         async for raw in source:
             event = json.loads(raw) if isinstance(raw, (str, bytes)) else dict(raw)
@@ -13924,42 +14096,52 @@ async def _web_with_local_discovery(source, lang, country):
             else:
                 yield _web_stream_event(event)
         if final is None:
-            return  # Do not manufacture success for an interrupted core search.
+            return
         local_count = len({_more_result_domain(r.get('url')) for r in rows.values() if r.get('market_rank') == 0})
         if (query and not failed and not recommendations and LOCAL_DISCOVERY_ENABLED
                 and LOCAL_DISCOVERY_MAX_CALLS and SERPAPI_API_KEY
                 and local_count < min(LOCAL_RESULTS_TARGET, WEB_LOCAL_MAX)):
             task = asyncio.create_task(asyncio.to_thread(_web_local_discovery_rows_sync,
-                                         query, country, lang, list(rows.values())))
-            deadline = asyncio.get_running_loop().time() + LOCAL_DISCOVERY_TIMEOUT + .5
-            while not task.done() and asyncio.get_running_loop().time() < deadline:
-                done, _ = await asyncio.wait({task}, timeout=min(.5, max(.01, deadline - asyncio.get_running_loop().time())))
+                query, country, lang, list(rows.values()), progress, cancel_event))
+            deadline = loop.time() + LOCAL_DISCOVERY_TIMEOUT + .5
+            while not task.done() and loop.time() < deadline:
+                if next_batch is None:
+                    next_batch = asyncio.create_task(batches.get())
+                done, _ = await asyncio.wait({task, next_batch}, timeout=min(.5, max(.01, deadline - loop.time())),
+                                             return_when=asyncio.FIRST_COMPLETED)
+                if next_batch in done:
+                    for event in events(next_batch.result()):
+                        yield event
+                    next_batch = None
                 if not done:
                     yield _web_stream_event({'event': 'status', 'stage': 'local_market_discovery',
                         'elapsed_ms': int((time.monotonic() - started) * 1000)})
+            if next_batch is not None and next_batch.done() and not next_batch.cancelled():
+                for event in events(next_batch.result()):
+                    yield event
+            while not batches.empty():
+                for event in events(batches.get_nowait()):
+                    yield event
             if task.done():
                 try:
                     additions = task.result() or []
                 except Exception as exc:
                     print(f'LOCAL STREAM DISCOVERY ERR: {type(exc).__name__}')
                     additions = []
-                for item in additions:
-                    key = _web_identity_offer_key(item)
-                    if key in rows:
-                        continue
-                    rows[key] = item
-                    added += 1
-                    yield _web_stream_event({'event': 'result', 'phase': 'local_market_discovery',
-                        'market': 'local', 'item': item, 'elapsed_ms': int((time.monotonic() - started) * 1000)})
+                for event in events(additions):
+                    yield event
             else:
                 task.cancel()
         final['count'] = len(rows)
         final['local_discovery_added'] = added
         yield _web_stream_event(final)
     finally:
-        if task is not None and not task.done():
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
+        cancel_event.set()
+        tasks = [t for t in (task, next_batch) if t is not None]
+        for future in tasks:
+            future.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
         await source.aclose()
 
 
@@ -14921,7 +15103,7 @@ def _web_search_image_sync(image_b64, mime, caption, country, lang, progress_cal
     direct_attempted = False
     if LENS_DIRECT_MODE and ENABLE_GOOGLE_LENS and SERPAPI_API_KEY and PUBLIC_BASE_URL:
         direct_attempted = True
-        lens_direct = google_lens_lookup(image_b64, mime, lang, caption, light=True, progress_callback=progress_callback)
+        lens_direct = google_lens_lookup(image_b64, mime, lang, caption, light=True, progress_callback=progress_callback, cancel_event=cancel_event)
         if cancelled():
             return cancelled_result(lens_direct.get('query'))
         if lens_direct.get('matches'):
