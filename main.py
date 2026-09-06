@@ -94,7 +94,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization'], max_age=86400)
-BUILD_ID = 'v112-local-market-completion'
+BUILD_ID = 'v113-progressive-match-scores'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -10449,7 +10449,9 @@ def _web_prepare_identity_cards(results, cancel_event=None):
         done, pending = wait(set(jobs), timeout=WEB_IDENTITY_PAGE_BUDGET_SECONDS)
         for future in done:
             try:
-                rows[jobs[future]] = future.result()
+                prepared = future.result()
+                prepared['_identity_image_attempted'] = True
+                rows[jobs[future]] = prepared
             except Exception:
                 pass
         for future in pending:
@@ -10474,6 +10476,10 @@ def _web_visual_collect_evidence(reference_image_b64, results, cancel_event=None
             classification_id = fallback_index
         if row.get('_identity_prepared_inline'):
             evidence[classification_id] = row['_identity_prepared_inline']
+            continue
+        if row.get('_identity_image_attempted'):
+            # This audit already tried the thumbnail and merchant-image rescue.
+            # Do not repeat the same failed fetch; a later search retries fresh.
             continue
         if not _web_is_http_url(_web_unproxy_image_url(str((row or {}).get('image') or (row or {}).get('thumbnail') or ''))):
             continue
@@ -11705,6 +11711,182 @@ def _web_identity_http_error(response):
             category = '_image'
     return 'http_' + str(response.status_code) + category
 
+def _web_identity_unique_object(pairs):
+    """Ambiguous JSON cannot establish a streamed identity fact."""
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError('duplicate_identity_field')
+        value[key] = item
+    return value
+
+
+def _web_identity_partial_response(raw):
+    """Decode only complete JSON values; never repair an unfinished profile/item.
+
+    String contents, escaped quotes and nested arrays are handled by the JSON
+    decoder. If the provider sends items first, wait for the reference profile.
+    """
+    decoder = json.JSONDecoder(object_pairs_hook=_web_identity_unique_object)
+    text = raw.lstrip('\ufeff \r\n\t')
+    if not text.startswith('{'):
+        return {}
+    profile, items, keys = None, [], set()
+    pos = 1
+    try:
+        while pos < len(text):
+            while pos < len(text) and text[pos].isspace():
+                pos += 1
+            if pos >= len(text) or text[pos] == '}':
+                break
+            key, pos = decoder.raw_decode(text, pos)
+            if not isinstance(key, str) or key in keys:
+                return {}
+            keys.add(key)
+            while pos < len(text) and text[pos].isspace():
+                pos += 1
+            if pos >= len(text) or text[pos] != ':':
+                break
+            pos += 1
+            while pos < len(text) and text[pos].isspace():
+                pos += 1
+            if key == 'items':
+                if pos >= len(text) or text[pos] != '[':
+                    break
+                pos += 1
+                while pos < len(text):
+                    while pos < len(text) and text[pos].isspace():
+                        pos += 1
+                    if pos >= len(text):
+                        break
+                    if text[pos] == ']':
+                        pos += 1
+                        break
+                    item, pos = decoder.raw_decode(text, pos)
+                    if not isinstance(item, dict):
+                        return {}
+                    items.append(item)
+                    while pos < len(text) and text[pos].isspace():
+                        pos += 1
+                    if pos < len(text) and text[pos] == ',':
+                        pos += 1
+                    elif pos < len(text) and text[pos] == ']':
+                        pos += 1
+                        break
+                    else:
+                        break
+            else:
+                value, pos = decoder.raw_decode(text, pos)
+                if key == 'reference_profile':
+                    profile = value
+            while pos < len(text) and text[pos].isspace():
+                pos += 1
+            if pos < len(text) and text[pos] == ',':
+                pos += 1
+            else:
+                break
+    except json.JSONDecodeError:
+        pass  # The last value is still arriving; earlier closed values stand.
+    except (ValueError, TypeError):
+        return {}
+    if not isinstance(profile, (dict, list)) or not items:
+        return {}
+    required = set(_web_identity_response_schema(1)['properties']['items']['items']['required'])
+    ids = [item.get('id') for item in items]
+    if any(type(cid) is not int for cid in ids) or len(ids) != len(set(ids)):
+        return {}
+    complete = [item for item in items if required.issubset(item)
+                and all(type(item.get(k)) is int and 0 <= item[k] <= 100
+                        for k in ('confidence', 'identity_score', 'observation_quality'))]
+    parsed, error = _web_parse_identity_response({'reference_profile': profile, 'items': complete})
+    return parsed if not error else {}
+
+
+def _web_identity_stream_response(gemini_url, payload, timeout, on_text, cancel_event=None):
+    """Same multimodal audit over SSE, with bounded reads and no blind retries."""
+    deadline = time.monotonic() + timeout
+    url = gemini_url.removesuffix(':generateContent') + ':streamGenerateContent'
+    stream_payload = copy.deepcopy(payload)
+    schema = stream_payload.get('generationConfig', {}).get('responseSchema')
+    if schema:
+        schema['propertyOrdering'] = ['reference_profile', 'items']
+    raw, finish_reason = '', ''
+    response = None
+    try:
+        for attempt in range(2):
+            if cancel_event is not None and cancel_event.is_set():
+                raise RuntimeError('identity_request_cancelled')
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise requests.Timeout('identity_stream_deadline')
+            _api_cost_record('gemini_identity_http_requests')
+            response = requests.post(url, params={'key': GEMINI_API_KEY, 'alt': 'sse'},
+                                     json=stream_payload, timeout=(min(5.0, remaining), remaining), stream=True)
+            error = _web_identity_http_error(response) if response.status_code >= 400 else ''
+            if error != 'http_400_schema' or attempt or deadline - time.monotonic() <= 1:
+                break
+            _web_safe_response_close(response)
+            response = None
+            stream_payload['generationConfig'].pop('responseSchema', None)
+            with GEMINI_STATS_LOCK:
+                GEMINI_STATS['plain_calls'] += 1
+            _api_cost_record('gemini_identity_schema_retries')
+        if error:
+            return {}, error
+        response.encoding = 'utf-8'
+        event_lines, event_size, total_size = [], 0, 0
+
+        def consume(lines):
+            nonlocal raw, finish_reason
+            event = json.loads('\n'.join(lines))
+            if event.get('error'):
+                raise ValueError('identity_stream_provider_error')
+            candidates = event.get('candidates') or []
+            if not candidates:
+                return
+            candidate = candidates[0]
+            finish_reason = str(candidate.get('finishReason') or finish_reason)
+            # Do not strip chunk boundaries: a split word must remain a word.
+            chunk = ''.join(part.get('text', '') for part in
+                            (candidate.get('content') or {}).get('parts', [])
+                            if isinstance(part, dict) and not part.get('thought')
+                            and isinstance(part.get('text'), str))
+            raw += chunk
+            if len(raw) > 512000:
+                raise ValueError('identity_stream_too_large')
+            if chunk:
+                on_text(raw)
+
+        for line in response.iter_lines(chunk_size=256, decode_unicode=True):
+            if cancel_event is not None and cancel_event.is_set():
+                raise RuntimeError('identity_request_cancelled')
+            if time.monotonic() >= deadline:
+                raise requests.Timeout('identity_stream_deadline')
+            if isinstance(line, bytes):
+                line = line.decode('utf-8')
+            total_size += len(line)
+            if total_size > 2000000:
+                raise ValueError('identity_stream_too_large')
+            if not line:
+                if event_lines:
+                    consume(event_lines)
+                    event_lines, event_size = [], 0
+                continue
+            if line.startswith('data:'):
+                data = line[5:].lstrip(' ')
+                if data == '[DONE]':
+                    break
+                event_lines.append(data)
+                event_size += len(data)
+                if event_size > 512000:
+                    raise ValueError('identity_stream_event_too_large')
+        if event_lines:
+            consume(event_lines)
+        return {'candidates': [{'content': {'parts': [{'text': raw}]}, 'finishReason': finish_reason}]}, ''
+    finally:
+        _web_safe_response_close(response)
+
+
 def _web_identity_post_response(gemini_url, payload, timeout, cancel_event=None):
     """One bounded compatibility retry, only for an explicit schema rejection."""
     if cancel_event is not None and cancel_event.is_set():
@@ -11907,21 +12089,22 @@ def _web_identity_offer_cache_trim():
         print('IDENTITY OFFER CACHE TRIM unavailable=' + type(exc).__name__)
 
 
-def _web_ai_classifier_request(identity, results, market, visual_context=None, cancel_event=None, *, _retry_cancelled=True):
+def _web_ai_classifier_request(identity, results, market, visual_context=None, cancel_event=None, *, _retry_cancelled=True, progress_callback=None):
     """Audit only new/changed proofs; keep the same model and Exact validators.
 
     This shares per-offer proofs even when previews/final snapshots split them
     into different batches. Each reused item keeps its own reference profile.
     Owners publish before waiting for overlapping owners, preventing deadlocks.
     """
+    progress_kw = {'progress_callback': progress_callback} if progress_callback is not None else {}
     if not WEB_IDENTITY_OFFER_CACHE_ENABLED or not visual_context or not WEB_VISUAL_CLASSIFIER_ENABLED:
-        return _web_ai_classifier_request_live(identity, results, market, visual_context, cancel_event)
+        return _web_ai_classifier_request_live(identity, results, market, visual_context, cancel_event, **progress_kw)
     if cancel_event is not None and cancel_event.is_set():
         return _web_identity_review_failure('cancelled')
     reference, evidence = _web_visual_collect_evidence(visual_context.get('image_b64'), results, cancel_event)
     if not reference:
         return _web_ai_classifier_request_live(identity, results, market, visual_context, cancel_event,
-                                               _prepared_evidence=(reference, evidence))
+                                               _prepared_evidence=(reference, evidence), **progress_kw)
     candidates = _web_identity_candidates(results)
     source_rows = list(results or [])[:WEB_AI_CLASSIFIER_MAX_RESULTS]
     entries, owned, waiting, hits, live_rows = [], {}, [], {}, []
@@ -11950,8 +12133,24 @@ def _web_ai_classifier_request(identity, results, market, visual_context=None, c
                 live_rows.append(prepared)
             else:
                 waiting.append((cid, key, event))
+    published_hits = set()
+    def publish_hits():
+        if progress_callback is None or (cancel_event is not None and cancel_event.is_set()):
+            return
+        for cid, proof in hits.items():
+            if cid in published_hits:
+                continue
+            item = copy.deepcopy(proof['item'])
+            item['id'] = cid
+            item['_reference_profile'] = copy.deepcopy(proof['reference_profile'])
+            progress_callback({'items': [item], 'visual_mode': True,
+                               'reference_profile': copy.deepcopy(proof['reference_profile']),
+                               'visual_evidence_count': 1, 'content_cache_hit': True})
+            published_hits.add(cid)
+
     live, direct = {}, {}
     try:
+        publish_hits()
         if live_rows and not (cancel_event is not None and cancel_event.is_set()):
             # A producer may have completed after our initial cache lookup.
             needed = []
@@ -11965,12 +12164,13 @@ def _web_ai_classifier_request(identity, results, market, visual_context=None, c
                     _api_cost_record('gemini_offer_cache_hits')
                 else:
                     needed.append(row)
+            publish_hits()
             if needed:
                 needed_ids = {row['_classification_id'] for row in needed}
                 _api_cost_record('gemini_offer_audits_requested', len(needed))
                 live = _web_ai_classifier_request_live(
                     identity, needed, market, visual_context, cancel_event,
-                    _prepared_evidence=(reference, {k: v for k, v in evidence.items() if k in needed_ids})) or {}
+                    _prepared_evidence=(reference, {k: v for k, v in evidence.items() if k in needed_ids}), **progress_kw) or {}
                 for item in live.get('items') or []:
                     if not isinstance(item, dict) or item.get('id') not in needed_ids:
                         continue
@@ -12006,6 +12206,7 @@ def _web_ai_classifier_request(identity, results, market, visual_context=None, c
         if proof:
             hits[cid] = proof
             _api_cost_record('gemini_offer_shared_hits')
+            publish_hits()
         elif (_retry_cancelled and event.is_set() and getattr(event, '_findzia_cancelled', False)
               and not (cancel_event is not None and cancel_event.is_set())):
             retry_ids.add(cid)
@@ -12016,7 +12217,7 @@ def _web_ai_classifier_request(identity, results, market, visual_context=None, c
         retry_rows = [dict(row, _classification_id=candidate['id'])
                       for candidate, row in zip(candidates, source_rows) if candidate['id'] in retry_ids]
         recovery = _web_ai_classifier_request(identity, retry_rows, market, visual_context,
-                                             cancel_event, _retry_cancelled=False)
+                                             cancel_event, _retry_cancelled=False, **progress_kw)
         for item in recovery.get('items') or []:
             if item.get('id') in retry_ids:
                 direct[item['id']] = {'item': copy.deepcopy(item), 'reference_profile': copy.deepcopy(
@@ -12046,7 +12247,7 @@ def _web_ai_classifier_request(identity, results, market, visual_context=None, c
 
 
 
-def _web_ai_classifier_request_live(identity, results, market, visual_context=None, cancel_event=None, _prepared_evidence=None):
+def _web_ai_classifier_request_live(identity, results, market, visual_context=None, cancel_event=None, _prepared_evidence=None, progress_callback=None):
     """Classify one captured batch with one text or multimodal Gemini request."""
     country = str((market or {}).get('country') or DEFAULT_COUNTRY).lower()
     country_name = str((market or {}).get('country_name') or COUNTRY_NAMES.get(country, country.upper()))
@@ -12171,32 +12372,8 @@ Include every supplied id exactly once. Confidence is an integer 0-100.'''
         'generationConfig': {'temperature': 0, 'maxOutputTokens': _web_identity_output_budget(len(candidates), visual_mode), 'responseMimeType': 'application/json', 'responseSchema': _web_identity_response_schema(len(candidates))},
     }
     effective_timeout = WEB_VISUAL_CLASSIFIER_TIMEOUT_SECONDS if visual_mode else WEB_AI_CLASSIFIER_TIMEOUT_SECONDS
-    try:
-        if cancel_event is not None and cancel_event.is_set():
-            return {}
-        with GEMINI_STATS_LOCK:
-            GEMINI_STATS['plain_calls'] += 1
-            purpose = 'visual_result_classifier' if visual_mode else 'result_classifier'
-            print(f'GEMINI CALL model={model} search=False purpose={purpose} images={1 + len(visual_evidence) if visual_mode else 0} totals={GEMINI_STATS}')
-        response = _web_identity_post_response(gemini_url, payload, effective_timeout, cancel_event)
-        if response.status_code >= 400:
-            error = _web_identity_http_error(response)
-            print(f'WEB IDENTITY REVIEW unavailable={error}')
-            return _web_identity_review_failure(error, visual_mode, len(visual_evidence_ids))
-        data = response.json()
-        model_candidates = data.get('candidates') or []
-        if not model_candidates:
-            print('WEB IDENTITY REVIEW unavailable=no_candidates')
-            return _web_identity_review_failure('no_candidates', visual_mode, len(visual_evidence_ids))
-        finish_reason = str(model_candidates[0].get('finishReason') or '')
-        if finish_reason == 'MAX_TOKENS':
-            print(f'WEB IDENTITY REVIEW truncated candidates={len(candidates)}')
-        raw = _web_identity_response_text(model_candidates[0])
-        parsed, parse_error = _web_parse_identity_response(raw)
-        parsed_items = parsed.get('items') if isinstance(parsed, dict) else None
-        if not isinstance(parsed_items, list):
-            print(f'WEB IDENTITY REVIEW unavailable={parse_error or "invalid_items"} finish={finish_reason} response_chars={len(raw)}')
-            return _web_identity_review_failure('output_truncated' if finish_reason == 'MAX_TOKENS' else (parse_error or 'invalid_items'), visual_mode, len(visual_evidence_ids))
+    def normalize(parsed):
+        parsed_items = parsed.get('items') or []
         reference_profile = _web_visual_normalize_profile(parsed.get('reference_profile'))
         normalized = []
         seen = set()
@@ -12330,6 +12507,64 @@ Include every supplied id exactly once. Confidence is an integer 0-100.'''
             'visual_evidence_count': len(visual_evidence_ids) if visual_mode else 0,
             'reference_profile': reference_profile if visual_mode else {},
         }
+        return value
+
+    published = set()
+    def on_text(raw):
+        parsed = _web_identity_partial_response(raw)
+        if not parsed or not parsed.get('items'):
+            return
+        parsed['items'] = [item for item in parsed['items'] if item['id'] not in published]
+        if not parsed['items']:
+            return
+        value = normalize(parsed)
+        if value.get('items') and not value.get('review_error'):
+            published.update(item['id'] for item in value['items'])
+            progress_callback(value)
+
+    try:
+        if cancel_event is not None and cancel_event.is_set():
+            return {}
+        with GEMINI_STATS_LOCK:
+            GEMINI_STATS['plain_calls'] += 1
+            purpose = 'visual_result_classifier' if visual_mode else 'result_classifier'
+            print(f'GEMINI CALL model={model} search=False purpose={purpose} images={1 + len(visual_evidence) if visual_mode else 0} totals={GEMINI_STATS}')
+        if progress_callback is not None and visual_mode:
+            data, error = _web_identity_stream_response(
+                gemini_url, payload, effective_timeout, on_text, cancel_event)
+            if error:
+                return _web_identity_review_failure(error, visual_mode, len(visual_evidence_ids))
+        else:
+            response = _web_identity_post_response(gemini_url, payload, effective_timeout, cancel_event)
+            if response.status_code >= 400:
+                error = _web_identity_http_error(response)
+                print(f'WEB IDENTITY REVIEW unavailable={error}')
+                return _web_identity_review_failure(error, visual_mode, len(visual_evidence_ids))
+            data = response.json()
+        model_candidates = data.get('candidates') or []
+        if not model_candidates:
+            print('WEB IDENTITY REVIEW unavailable=no_candidates')
+            return _web_identity_review_failure('no_candidates', visual_mode, len(visual_evidence_ids))
+        finish_reason = str(model_candidates[0].get('finishReason') or '')
+        if finish_reason == 'MAX_TOKENS':
+            print(f'WEB IDENTITY REVIEW truncated candidates={len(candidates)}')
+        raw = _web_identity_response_text(model_candidates[0])
+        if progress_callback is not None and visual_mode:
+            # A conflicting duplicate field/id must revoke any provisional score.
+            strict = json.loads(raw, object_pairs_hook=_web_identity_unique_object)
+            ids = [item.get('id') for item in strict.get('items', []) if isinstance(item, dict)]
+            if any(type(cid) is not int for cid in ids) or len(ids) != len(set(ids)):
+                return _web_identity_review_failure('duplicate_or_invalid_ids', visual_mode, len(visual_evidence_ids))
+        parsed, parse_error = _web_parse_identity_response(raw)
+        parsed_items = parsed.get('items') if isinstance(parsed, dict) else None
+        if not isinstance(parsed_items, list):
+            print(f'WEB IDENTITY REVIEW unavailable={parse_error or "invalid_items"} finish={finish_reason} response_chars={len(raw)}')
+            return _web_identity_review_failure('output_truncated' if finish_reason == 'MAX_TOKENS' else (parse_error or 'invalid_items'), visual_mode, len(visual_evidence_ids))
+        value = normalize(parsed)
+        if value.get('review_error'):
+            return value
+        normalized = value['items']
+        reference_profile = value['reference_profile']
         # Failed/partial reviews never poison later searches. A cache hit still
         # goes through the existing local conflict and Exact-proof validators.
         cacheable = bool(reference_profile) and all(
@@ -12346,7 +12581,7 @@ Include every supplied id exactly once. Confidence is an integer 0-100.'''
         print(f'WEB AI CLASSIFIER ERR: {e.__class__.__name__}: {e}')
         return _web_identity_review_failure('request_or_parse_error', visual_mode, len(visual_evidence_ids))
 
-def _web_ai_classify_captured_batch(identity, results, market, visual_context=None, cancel_event=None):
+def _web_ai_classify_captured_batch(identity, results, market, visual_context=None, cancel_event=None, progress_callback=None):
     if not WEB_AI_CLASSIFIER_ENABLED or not GEMINI_API_KEY or not results or (cancel_event is not None and cancel_event.is_set()):
         reason = ('disabled' if not WEB_AI_CLASSIFIER_ENABLED else 'missing_api_key'
                   if not GEMINI_API_KEY else 'no_results' if not results else 'cancelled')
@@ -12378,7 +12613,8 @@ def _web_ai_classify_captured_batch(identity, results, market, visual_context=No
         cached = _web_ai_classifier_cache_get(key)
         return (cached or {}, 'singleflight-cache' if cached else 'singleflight-fallback')
     try:
-        value = _web_ai_classifier_request(identity, results, market, visual_context, cancel_event)
+        progress_kw = {'progress_callback': progress_callback} if progress_callback is not None else {}
+        value = _web_ai_classifier_request(identity, results, market, visual_context, cancel_event, **progress_kw)
         if value.get('review_error'):
             result = (value, 'error_' + value['review_error'])
             event._findzia_identity_result = result
@@ -12427,7 +12663,7 @@ def _web_identity_result_sort_key(row):
     return (not valid, -float(value) if valid else 0,
             str(row.get('url') or row.get('link') or ''), str(row.get('store') or ''))
 
-def _web_attach_captured_result_sections(payload, lang, allow_ai=True, cancel_event=None):
+def _web_attach_captured_result_sections(payload, lang, allow_ai=True, cancel_event=None, progress_callback=None, *, _review_result=None):
     """Audit direct offers and rank their published identity evidence."""
     out = dict(payload or {})
     reference_image_b64 = str(out.pop('_reference_image_b64', '') or '').strip()
@@ -12439,7 +12675,7 @@ def _web_attach_captured_result_sections(payload, lang, allow_ai=True, cancel_ev
     has_reference_photo = bool(_web_visual_reference_digest(reference_image_b64)) and (
         not reference_image_mime or reference_image_mime.startswith('image/')
     )
-    if allow_ai and has_reference_photo:
+    if allow_ai and has_reference_photo and _review_result is None:
         results = _web_prepare_identity_cards(results, cancel_event)
     # Result-list consensus is useful for text search, but in an image search
     # it can amplify one wrong Lens guess across every card. Keep the original
@@ -12494,13 +12730,27 @@ def _web_attach_captured_result_sections(payload, lang, allow_ai=True, cancel_ev
         candidate['_locked_market'] = market_guard[0] if market_guard else ''
         candidate['_visual_review'] = visual_candidate
         ai_candidates.append(candidate)
-    if allow_ai and ai_candidates and not (cancel_event is not None and cancel_event.is_set()):
+    def publish_review(value):
+        if cancel_event is not None and cancel_event.is_set():
+            return
+        ids = {item['id'] for item in value.get('items', [])}
+        prepared = dict(payload, results=results)
+        report = _web_attach_captured_result_sections(
+            prepared, lang, allow_ai, cancel_event, _review_result=value)
+        keys = {_web_identity_offer_key(row) for index, row in enumerate(results) if index in ids}
+        report['results'] = [row for row in report['results'] if _web_identity_offer_key(row) in keys]
+        progress_callback(report)
+
+    if _review_result is not None:
+        ai_result, ai_source = (_review_result, 'visual-item-stream')
+    elif allow_ai and ai_candidates and not (cancel_event is not None and cancel_event.is_set()):
         visual_context = {
             'image_b64': reference_image_b64,
             'mime_type': reference_image_mime,
             'source_identity': identity,
         } if visual_review else None
-        ai_result, ai_source = _web_ai_classify_captured_batch(classification_anchor, ai_candidates, market_snapshot, visual_context, cancel_event)
+        progress_kw = {'progress_callback': publish_review} if progress_callback is not None else {}
+        ai_result, ai_source = _web_ai_classify_captured_batch(classification_anchor, ai_candidates, market_snapshot, visual_context, cancel_event, **progress_kw)
     else:
         ai_result, ai_source = ({}, 'instant-rules' if not allow_ai else 'semantic-only')
     ai_by_id = {int(item.get('id')): item for item in (ai_result.get('items') or []) if isinstance(item, dict) and str(item.get('id', '')).lstrip('-').isdigit()}
@@ -12518,6 +12768,7 @@ def _web_attach_captured_result_sections(payload, lang, allow_ai=True, cancel_ev
     for index, original in enumerate(results):
         row = dict(original or {})
         row.pop('_identity_prepared_inline', None)
+        row.pop('_identity_image_attempted', None)
         classification_title = _web_result_classification_title(row)
         heuristic_exact = _web_captured_result_is_exact(classification_anchor, classification_title)
         try:
@@ -16485,22 +16736,24 @@ def _web_identity_stream_snapshot(rows, query, market, lang, completed, elapsed_
 async def _web_stream_image_identity_batches(image_b64, mime, caption, country, lang, cancel_event):
     """Stream the shared search set and independent, bounded identity audits.
 
-    At most one tiny preview batch is speculative. Final membership is owned
-    by the WhatsApp search engine. A late score or price cannot resurrect a
-    removed offer, reset a completed score, or classify a changed title/image.
+    Start audits as offers arrive; retrieval never gates the remaining cards.
+    Final membership is owned by the search engine. Late audits cannot
+    resurrect removed offers or classify a changed title/image.
     """
     started = time.time()
     clock = time.monotonic()
     market = _web_market(country)
     loop = asyncio.get_running_loop()
     progress = asyncio.Queue(maxsize=1)
+    review_updates = asyncio.Queue()
     rows, captures, reviews = {}, {}, {}
-    completed_reviews, queued = {}, []
+    completed_reviews, partial_reviews, queued = {}, {}, []
+    queued_tokens = set()
     price_tasks, priced_keys = {}, set()
     identity, query_sent = str(caption or '').strip(), ''
     final_ready = False
-    preview_audit_started = False
     progress_task = None
+    review_update_task = None
     search_task = None
     review_count = 0
     first_results_ms = first_match_ms = None
@@ -16532,20 +16785,44 @@ async def _web_stream_image_identity_batches(image_b64, mime, caption, country, 
 
     def schedule(batch, query):
         nonlocal review_count
+        pairs = [(dict(r), _web_identity_capture_key(r, query)) for r in batch]
+        def review_callback(report):
+            if not cancel_event.is_set():
+                try:
+                    loop.call_soon_threadsafe(review_updates.put_nowait, (pairs, report))
+                except RuntimeError:
+                    pass
         payload = {'ok': True, 'type': 'results', 'query': query, 'market': market,
                    'results': [dict(r) for r in batch], 'source': 'whatsapp_direct_lens_exact',
                    '_reference_image_b64': image_b64, '_reference_image_mime': mime}
         future = WEB_IDENTITY_REVIEW_POOL.submit(
-            _run_with_market, market, _web_attach_captured_result_sections, payload, lang, True, cancel_event)
+            _run_with_market, market, _web_attach_captured_result_sections,
+            payload, lang, True, cancel_event, review_callback)
         task = asyncio.wrap_future(future)
-        reviews[task] = [(dict(r), _web_identity_capture_key(r, query)) for r in batch]
+        reviews[task] = pairs
         review_count += 1
+
+    def queue_rows(candidates):
+        inflight = {token for pairs in reviews.values() for _, token in pairs}
+        for original in candidates:
+            token = _web_identity_capture_key(original, identity)
+            if token not in completed_reviews and token not in inflight and token not in queued_tokens:
+                queued.append((dict(original), token))
+                queued_tokens.add(token)
 
     def fill_review_slots():
         while enabled and queued and len(reviews) < WEB_IDENTITY_BATCH_PARALLEL:
-            batch = queued[:WEB_IDENTITY_BATCH_SIZE]
-            del queued[:WEB_IDENTITY_BATCH_SIZE]
-            schedule(batch, identity)
+            batch = []
+            size = WEB_IDENTITY_FIRST_BATCH if review_count == 0 else WEB_IDENTITY_BATCH_SIZE
+            while queued and len(batch) < size:
+                original, token = queued.pop(0)
+                queued_tokens.discard(token)
+                key = _web_identity_offer_key(original)
+                if (key in captures and _web_identity_capture_key(captures[key], identity) == token
+                        and token not in completed_reviews):
+                    batch.append(original)
+            if batch:
+                schedule(batch, identity)
 
     try:
         search_task = asyncio.create_task(asyncio.to_thread(
@@ -16555,6 +16832,15 @@ async def _web_stream_image_identity_batches(image_b64, mime, caption, country, 
             if not final_ready and progress_task is None:
                 progress_task = asyncio.create_task(progress.get())
             waiting = set(reviews)
+            if review_update_task is None and (reviews or not review_updates.empty()):
+                review_update_task = asyncio.create_task(review_updates.get())
+            if review_update_task is not None:
+                if reviews or not review_updates.empty() or review_update_task.done():
+                    waiting.add(review_update_task)
+                else:
+                    review_update_task.cancel()
+                    await asyncio.gather(review_update_task, return_exceptions=True)
+                    review_update_task = None
             if not final_ready:
                 waiting.add(search_task)
                 waiting.add(progress_task)
@@ -16575,12 +16861,14 @@ async def _web_stream_image_identity_batches(image_b64, mime, caption, country, 
                 captured = list(final.get('captured_results') or final.get('results') or [])
                 captures = {_web_identity_offer_key(r): dict(r) for r in captured}
                 rows = {}
-                inflight = {token for pairs in reviews.values() for _, token in pairs}
+                queued.clear()
+                queued_tokens.clear()
                 for key, original in captures.items():
                     token = _web_identity_capture_key(original, identity)
-                    rows[key] = dict(completed_reviews[token]) if token in completed_reviews else pending_row(original)
-                    if enabled and token not in completed_reviews and token not in inflight:
-                        queued.append(original)
+                    reviewed = completed_reviews.get(token) or partial_reviews.get(token)
+                    rows[key] = dict(reviewed) if reviewed else pending_row(original)
+                if enabled:
+                    queue_rows(captures.values())
                 final_ready = True
                 if progress_task is not None:
                     progress_task.cancel()
@@ -16619,9 +16907,36 @@ async def _web_stream_image_identity_batches(image_b64, mime, caption, country, 
                     if not _web_row_has_numeric_price(rows[key]):
                         _web_spawn_price_enrich_task(price_tasks, key, rows[key], lang, market)
                 identity = query
-                if enabled and preview and not preview_audit_started:
-                    schedule(preview[:WEB_IDENTITY_FIRST_BATCH], query)
-                    preview_audit_started = True
+                if enabled:
+                    queue_rows(preview)
+                    fill_review_slots()
+
+            if review_update_task is not None and review_update_task in done:
+                inputs, report = review_update_task.result()
+                review_update_task = None
+                outputs = {_web_identity_offer_key(r): r for r in (report.get('results') or [])}
+                for original, token in inputs:
+                    key = _web_identity_offer_key(original)
+                    if (token in completed_reviews or key not in outputs or key not in captures
+                            or _web_identity_capture_key(captures[key], identity) != token):
+                        continue
+                    item = _web_identity_public_row(outputs[key])
+                    if item.get('identity_match_percentage') is None:
+                        continue
+                    # A complete item's evidence is useful immediately. The
+                    # whole response still needs validation before Exact/best
+                    # price eligibility becomes final.
+                    item.update(classification_final=False, match_percentage_final=False,
+                                identity_review_status='streaming', exact=False, is_exact=False,
+                                match='similar', section='similar', match_type='similar',
+                                result_section='similar', best_price_eligible=False, price_comparable=False)
+                    partial_reviews[token] = item
+                    rows[key] = dict(item)
+                    if first_match_ms is None:
+                        first_match_ms = elapsed()
+                    yield _web_stream_event({'event': 'upsert', 'phase': 'ai_classification_update',
+                                             'classification_final': False, 'provisional': True,
+                                             'market': item.get('market'), 'item': item, 'elapsed_ms': elapsed()})
 
             changed = False
             for task in list(done & set(reviews)):
@@ -16640,6 +16955,7 @@ async def _web_stream_image_identity_batches(image_b64, mime, caption, country, 
                     item['identity_review_error'] = report.get('identity_review_error')
                     item = _web_identity_public_row(item)
                     completed_reviews[token] = item
+                    partial_reviews.pop(token, None)
                     if key not in captures or _web_identity_capture_key(captures[key], identity) != token:
                         continue
                     rows[key] = dict(item)
@@ -16649,11 +16965,10 @@ async def _web_stream_image_identity_batches(image_b64, mime, caption, country, 
                     yield _web_stream_event({'event': 'upsert', 'phase': 'ai_classification_update',
                                              'provisional': not final_ready, 'classification_final': True,
                                              'market': item.get('market'), 'item': item, 'elapsed_ms': elapsed()})
-            if final_ready:
-                fill_review_slots()
-                if changed:
-                    yield _web_stream_event(_web_identity_stream_snapshot(
-                        rows.values(), identity, market, lang, False, elapsed()))
+            fill_review_slots()
+            if final_ready and changed:
+                yield _web_stream_event(_web_identity_stream_snapshot(
+                    rows.values(), identity, market, lang, False, elapsed()))
 
         if cancel_event.is_set():
             return
@@ -16696,7 +17011,7 @@ async def _web_stream_image_identity_batches(image_b64, mime, caption, country, 
     finally:
         cancel_event.set()
         tasks = list(reviews) + list(price_tasks.values())
-        tasks += [t for t in (search_task, progress_task) if t is not None]
+        tasks += [t for t in (search_task, progress_task, review_update_task) if t is not None]
         for task in tasks:
             task.cancel()
         if tasks:
