@@ -1,5 +1,14 @@
 # -*- coding: utf-8 -*-
-"""Findzia v115 — Global Market Image Search Fix.
+"""Findzia v116 — Storefront Country Fix.
+
+Fixes Arabic /ar/ storefront URLs being labelled as Argentina. Language-only
+paths abstain from country classification; explicit region/domain evidence
+and verified merchant URL conventions resolve genuine country storefronts.
+Argentina's discovery cues now follow Spanish, independently of its ar code.
+No new HTTP calls, provider, API key, or dependency. Existing v114 iOS works.
+See STOREFRONT_COUNTRY_FIX_AR.md for evidence and installation.
+
+INHERITED v115 — Global Market Image Search Fix
 
 Fixes local-to-global image searches: an identity returned by the previous
 search is no longer sent as an extra Lens q filter. The same image and target
@@ -101,7 +110,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization'], max_age=86400)
-BUILD_ID = 'v115-global-market-image-fix'
+BUILD_ID = 'v116-storefront-country-fix'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -2620,18 +2629,38 @@ CHINA_DOMESTIC_STORES = (
 )
 
 
+# A language prefix is not a country selector. `ar` is both Arabic and
+# Argentina; the same collision exists for ca, be, de, fr, uk, and others.
+# ISO 639-1 names from the bundled CLDR catalog.
+# Embedded here so deployment needs no new package or network lookup.
+_STOREFRONT_LANGUAGE_CODES = frozenset('aa ab ae af ak am an ar as av ay az ba be bg bi bm bn bo br bs ca ce ch co cr cs cu cv cy da de dv dz ee el en eo es et eu fa ff fi fj fo fr fy ga gd gl gn gu gv ha he hi ho hr ht hu hy hz ia id ie ig ii ik io is it iu ja jv ka kg ki kj kk kl km kn ko kr ks ku kv kw ky la lb lg li ln lo lt lu lv mg mh mi mk ml mn mr ms mt my na nb nd ne ng nl nn no nr nv ny oc oj om or os pa pi pl ps pt qu rm rn ro ru rw sa sc sd se sg sh si sk sl sm sn so sq sr ss st su sv sw ta te tg th ti tk tl tn to tr ts tt tw ty ug uk ur uz ve vi vo wa wo xh yi yo za zh zu'.split())
+# Compound routes below recognize the commerce/UI languages used by this app.
+_STOREFRONT_LANGUAGES = frozenset(hl.split('-')[0] for hl in COUNTRY_SEARCH_HL.values()) | frozenset(
+    'en ar be ca cs da de el es et fa fi fr he hi hr hu id is it ja ko lt lv ms nb nl nn no pl pt ro ru sk sl sr sv th tr uk ur vi zh'.split())
+# Verified merchant URL conventions, not a whitelist of allowed shops.
+# farfetch.com/ar/shopping/ is Argentina, while unknown .com/ar/ is ambiguous.
+# fendi.com/kw-ar/ and theluxurycloset.com/uae-ar/ are country-language.
+_STOREFRONT_COUNTRY_PREFIX_HOSTS = ('farfetch.com', 'temu.com')
+_STOREFRONT_COUNTRY_LANGUAGE_HOSTS = ('fendi.com', 'noon.com', 'theluxurycloset.com')
+
+
 def _storefront_country(url):
-    """Explicit storefront locale, not a country mentioned in a product title."""
+    """Resolve explicit region selectors; language-only/ambiguous paths abstain."""
     try:
         parsed = urllib.parse.urlsplit(str(url or ''))
+        host = (parsed.hostname or '').lower()
         query = urllib.parse.parse_qs(parsed.query)
         aliases = {'uk': 'gb', 'usa': 'us', 'uae': 'ae', 'ksa': 'sa', 'saudi': 'sa'}
+        countries = set()
         for key in ('country', 'country_code', 'market'):
-            value = str((query.get(key) or [''])[0]).lower()
-            value = aliases.get(value, value)
-            if value in COUNTRY_META:
-                return value
+            for value in query.get(key, []):
+                value = aliases.get(value.lower(), value.lower())
+                if value in COUNTRY_META:
+                    countries.add(value)
+        if countries:
+            return next(iter(countries)) if len(countries) == 1 else 'conflict'
         parts = [p.lower() for p in parsed.path.split('/') if p]
+        locale_context = bool(parts and parts[0] == 'locale')
         if parts and parts[0] in {'shop', 'store', 'locale'}:
             parts = parts[1:]
         if not parts:
@@ -2639,17 +2668,25 @@ def _storefront_country(url):
         first = parts[0]
         if first in {'global', 'world', 'international'}:
             return 'global'
-        if first in aliases:
-            return aliases[first]
-        if first in COUNTRY_META:
-            return first
-        if re.fullmatch(r'[a-z]{2,5}[-_][a-z]{2,5}', first):
-            left, right = re.split('[-_]', first)
-            left, right = aliases.get(left, left), aliases.get(right, right)
-            if right in COUNTRY_META:
-                return right
-            if left in COUNTRY_META:
-                return left
+        code = aliases.get(first, first)
+        if code in COUNTRY_META:
+            if first not in _STOREFRONT_LANGUAGE_CODES or _host_matches_any(host, _STOREFRONT_COUNTRY_PREFIX_HOSTS):
+                return code
+            return ''
+        pieces = re.split('[-_]', first)
+        if len(pieces) == 3 and pieces[0] in _STOREFRONT_LANGUAGES and re.fullmatch(r'[a-z]{4}', pieces[1]):
+            return pieces[2] if pieces[2] in COUNTRY_META else ''
+        if len(pieces) == 2:
+            left, right = pieces
+            left_cc, right_cc = aliases.get(left, left), aliases.get(right, right)
+            language_country = left in _STOREFRONT_LANGUAGES and right_cc in COUNTRY_META
+            country_language = left_cc in COUNTRY_META and right in _STOREFRONT_LANGUAGES
+            if country_language and _host_matches_any(host, _STOREFRONT_COUNTRY_LANGUAGE_HOSTS):
+                return left_cc
+            if language_country and locale_context:
+                return right_cc
+            candidates = ({right_cc} if language_country else set()) | ({left_cc} if country_language else set())
+            return next(iter(candidates)) if len(candidates) == 1 else ''
         for cc, name in COUNTRY_NAMES.items():
             if first == name.lower().replace(' ', '-'):
                 return cc
@@ -2671,9 +2708,13 @@ def _local_storefront_evidence(item, market):
     if not host:
         return ''
     locale = _storefront_country(url)
+    host_cc = _host_country_code(host)
+    # A language path cannot override a country domain. Contradictory explicit
+    # region/domain evidence is not sufficient to label either market.
+    if host_cc and locale and host_cc != locale:
+        return ''
     if locale:
         return 'storefront_locale' if locale == cc else ''
-    host_cc = _host_country_code(host)
     if host_cc:
         return 'country_domain' if host_cc == cc else ''
     if host.startswith(('global.', 'world.', 'international.')):
@@ -2820,10 +2861,12 @@ def _local_discovery_query(query, market, scoped=False):
     # Keep model numbers, original script and pack size; no paid translation.
     cc = str(market.get('country') or DEFAULT_COUNTRY).lower()
     q = re.sub(r'\s+', ' ', str(query or '')).strip()[:220] if scoped and cc != 'cn' else _local_native_query(query, cc)
-    words = {'cn': '价格 购买', 'de': 'kaufen Preis', 'fr': 'acheter prix',
+    # Keys here are LANGUAGES. Country ar means Argentina and must use es,
+    # whereas language ar belongs to Kuwait/Saudi/etc. Do not mix namespaces.
+    words = {'zh': '价格 购买', 'de': 'kaufen Preis', 'fr': 'acheter prix',
              'it': 'acquista prezzo', 'es': 'comprar precio', 'tr': 'satın al fiyat',
-             'jp': '価格 通販', 'kr': '가격 구매', 'ar': 'شراء سعر'}
-    cue = words.get(cc, words.get(country_search_hl(cc), 'buy price'))
+             'ja': '価格 通販', 'ko': '가격 구매', 'ar': 'شراء سعر'}
+    cue = words.get(country_search_hl(cc).split('-')[0], 'buy price')
     if not scoped:
         return f'{q} {market.get("country_name") or cc.upper()} {cue}'
     specs = _run_with_market(market, local_rescue_store_specs, q, 6)
@@ -3631,9 +3674,7 @@ def _dynamic_country_url_hit(cc, link, host):
     cc = (cc or '').lower()
     if not cc or len(cc) != 2:
         return False
-    text = f'{host} {link}'.lower()
-    tokens = (f'/{cc}/', f'-{cc}/', f'-{cc}.', f'_{cc}', f'{cc}-en', f'{cc}-ar', f'{cc}-fr', f'{cc}-es')
-    return any((t in text for t in tokens))
+    return _storefront_country(link) == cc and _host_country_code(host) in ('', cc)
 
 def _explicit_currency_codes(item):
     hay, _ = _result_hay_host(item)
@@ -9925,10 +9966,9 @@ def _web_market_scope_guard(row, market_snapshot):
     host_cc = _host_country_code(host) if host else None
     if host_cc and host_cc != cc:
         return ('global', 'foreign_country_domain', 98)
-    country_name = str((market_snapshot or {}).get('country_name') or COUNTRY_NAMES.get(cc, '')).lower()
-    local_path_tokens = {cc, country_name.replace(' ', '-'), country_name.replace(' ', '')}
-    if any(token and (f'/{token}/' in path or f'-{token}/' in path or token in store) for token in local_path_tokens):
-        return ('local', 'localized_storefront', 96)
+    storefront = _storefront_country(url)
+    if storefront in COUNTRY_META:
+        return ('local' if storefront == cc else 'global', 'localized_storefront', 96)
     if rank == 0:
         return ('local', 'captured_local_lane', 99)
     if rank in (1, 2):
