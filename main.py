@@ -1,5 +1,12 @@
 # -*- coding: utf-8 -*-
-"""Findzia v114 — Selected Global Markets.
+"""Findzia v115 — Global Market Image Search Fix.
+
+Fixes local-to-global image searches: an identity returned by the previous
+search is no longer sent as an extra Lens q filter. The same image and target
+country now reuse the same provider request/cache, regardless of display role.
+Text discovery and product/merchant verification still use the identity.
+Compatible with the v114 Flutter app; no iOS rebuild is needed for this fix.
+See GLOBAL_MARKET_FIX_AR.md for reproduction, validation and installation.
 
 Adds /api/search/markets/stream with up to three selected global countries
 plus the user's local market (defaults US/CN). China uses domestic Google
@@ -94,7 +101,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization'], max_age=86400)
-BUILD_ID = 'v114-selected-global-markets'
+BUILD_ID = 'v115-global-market-image-fix'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -17190,7 +17197,13 @@ def _web_selected_market_search(query, country, lang, global_countries, *, image
             if cancelled() or remaining <= .01:
                 return []
             if kind == 'lens':
-                return _serpapi_lens_request(public_url, 'all', cc, True, q)
+                # v114 iOS sends the previous photo identity as `query` on a
+                # global-only refresh, but an empty caption on first capture.
+                # Lens `q` is an additional search constraint, not metadata:
+                # adding the generated OCR changed 59 GB hits to zero and
+                # split the provider cache. Discover from the image alone in
+                # both roles. Keep q for textual rescue and identity checks.
+                return _serpapi_lens_request(public_url, 'all', cc, True, '')
             return _local_discovery_request(q, target, kind, min(LOCAL_DISCOVERY_TIMEOUT, remaining))
         job = SELECTED_MARKET_POOL.submit(_run_with_market, target, fetch)
         jobs[job] = (cc, kind)
@@ -17241,15 +17254,19 @@ def _web_selected_market_search(query, country, lang, global_countries, *, image
                 except Exception as exc:
                     states[cc] = {'status': 'partial', 'count': by_market[cc], 'reason': type(exc).__name__}
                     values = []
+                raw_count = len(values)
                 # A named photo reference limits retrieval only; visual audits
                 # still decide every identity percentage and exact claim.
                 if kind == 'lens' and reference:
                     values = _lens_reference_rows(values, reference)
+                eligible = 0
+                count_before = by_market[cc]
                 changed = False
                 for raw in values:
                     row = _web_selected_offer(raw, cc, market, query)
                     if not row:
                         continue
+                    eligible += 1
                     key = _canonical_result_url(row['url'])
                     domain = _more_result_domain(row['url']).removeprefix('www.')
                     if key in excluded or domain in excluded_domains:
@@ -17268,6 +17285,7 @@ def _web_selected_market_search(query, country, lang, global_countries, *, image
                     rows[key] = row
                     by_market[cc] += 1
                     changed = True
+                print(f'SELECTED SOURCE country={cc} provider={kind} raw={raw_count} reference_kept={len(values)} eligible={eligible} added={by_market[cc]-count_before} total={by_market[cc]}')
                 if changed:
                     publish()
             if not jobs and reference_job is None:
