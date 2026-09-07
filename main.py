@@ -1,17 +1,17 @@
 # -*- coding: utf-8 -*-
-"""Findzia v112 — Local Market Completion Fix.
+"""Findzia v114 — Selected Global Markets.
 
-v112 repairs the v111 production regression shown in the supplied logs:
-first paint no longer ends pending Lens/local requests; each completed local
-source streams immediately. Local discovery defaults to a shared 12-second
-budget, Lens to a 16-second read timeout, without adding new search passes.
-Translated functional nouns no longer fail the English overlap threshold;
-Chinese label text is preserved. Conflicting models, audiences and functions
-still reject, and image Exact verdicts still require the existing visual proof.
-Set LOCAL_DISCOVERY_TIMEOUT=12 and LENS_HTTP_TIMEOUT_SECONDS=16 if you previously
-overrode them with shorter values. No additional API key/dependency is needed.
-Validation: offline transport/endpoint, delayed-country and identity/cost tests;
-no live paid-provider or Railway latency/coverage measurement was performed.
+Adds /api/search/markets/stream with up to three selected global countries
+plus the user's local market (defaults US/CN). China uses domestic Google
+and Baidu discovery even when selected globally. Provider work is bounded
+per country; results, automatic prices and v113 identity scores stream
+independently. Merchant-country evidence and exact-product proof remain
+mandatory. No extra paid provider or API key is introduced.
+
+Legacy endpoints keep their contracts. The new market picker requires the
+v114 Flutter app AND this backend. See SELECTED_MARKETS_AR.md in the project.
+Offline tests verify scope, cost bounds, cancellation and country preservation;
+production coverage/latency has not been measured or guaranteed.
 
 INHERITED COST GUARD (v107.57, based on the supplied v107.55)
 
@@ -75,7 +75,7 @@ from collections import Counter, deque, defaultdict
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from functools import lru_cache
 from fastapi import FastAPI, Request, Response, BackgroundTasks
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from bs4 import BeautifulSoup
 try:
@@ -94,7 +94,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization'], max_age=86400)
-BUILD_ID = 'v113-progressive-match-scores'
+BUILD_ID = 'v114-selected-global-markets'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -2812,7 +2812,7 @@ def _local_discovery_candidate_ok(query, item):
 def _local_discovery_query(query, market, scoped=False):
     # Keep model numbers, original script and pack size; no paid translation.
     cc = str(market.get('country') or DEFAULT_COUNTRY).lower()
-    q = re.sub(r'\s+', ' ', str(query or '')).strip()[:220] if scoped else _local_native_query(query, cc)
+    q = re.sub(r'\s+', ' ', str(query or '')).strip()[:220] if scoped and cc != 'cn' else _local_native_query(query, cc)
     words = {'cn': '价格 购买', 'de': 'kaufen Preis', 'fr': 'acheter prix',
              'it': 'acquista prezzo', 'es': 'comprar precio', 'tr': 'satın al fiyat',
              'jp': '価格 通販', 'kr': '가격 구매', 'ar': 'شراء سعر'}
@@ -2828,7 +2828,7 @@ def _local_discovery_query(query, market, scoped=False):
 
 def _local_discovery_direct_link(row):
     """Use observed, complete links only; never invent a URL from a store name."""
-    values = [row.get('link')]
+    values = [row.get(key) for key in ('direct_link', 'product_link', 'merchant_link', 'link')]
     try:
         p = urllib.parse.urlsplit(str(row.get('link') or ''))
         host = p.hostname or ''
@@ -2861,6 +2861,8 @@ def _local_discovery_direct_link(row):
                 if '.' not in p.hostname or p.hostname.endswith(('.localhost', '.local', '.internal')):
                     continue
             if _host_matches_any(p.hostname, ('baidu.com', 'miaozhen.com')):
+                continue
+            if re.search(r'(?:^|\.)google\.[a-z.]+$', p.hostname) or _host_matches_any(p.hostname, ('bing.com', 'gstatic.com')):
                 continue
             if _web_is_direct_product_page_url(raw):
                 return raw
@@ -2919,7 +2921,61 @@ def _local_discovery_rows(data, query, market, provider):
     return out
 
 
+BAIDU_LINK_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix='baidu-destination')
+
+
+def _local_resolve_baidu_links(data, timeout_seconds):
+    """Resolve at most six observed Baidu redirects, within one shared budget.
+
+    No destination is inferred from a truncated displayed URL. The normal
+    public-host and redirect checks still run at every HTTP hop.
+    """
+    if timeout_seconds <= .05:
+        return data
+    data = dict(data)
+    source_rows = data.get('organic_results')
+    if not isinstance(source_rows, list):
+        return data
+    records = [dict(row) for row in source_rows if isinstance(row, dict)]
+    data['organic_results'] = records
+    deadline = time.monotonic() + min(2.0, timeout_seconds)
+    def resolve(url):
+        if time.monotonic() >= deadline:
+            return ''
+        response = None
+        try:
+            response = _web_safe_get(url, timeout=(.35, .65), stream=True, max_redirects=2)
+            return _local_discovery_direct_link({'link': response.url})
+        except Exception:
+            return ''
+        finally:
+            _web_safe_response_close(response)
+    jobs = {}
+    for row in records:
+        if len(jobs) >= 6:
+            break
+        if _local_discovery_direct_link(row):
+            continue
+        url = str(row.get('link') or '')
+        try:
+            parsed = urllib.parse.urlsplit(url)
+            if parsed.scheme in ('http', 'https') and _host_matches_any(parsed.hostname or '', ('baidu.com',)) and parsed.path == '/link':
+                jobs[BAIDU_LINK_POOL.submit(resolve, url)] = row
+        except ValueError:
+            pass
+    done, _ = wait(jobs, timeout=max(0, deadline - time.monotonic())) if jobs else (set(), set())
+    for job, row in jobs.items():
+        if job in done:
+            result = job.result()
+            if result:
+                row['direct_link'] = result
+        else:
+            job.cancel()
+    return data
+
+
 def _local_discovery_request(query, market, kind, timeout_seconds):
+    started = time.monotonic()
     cc = market['country']
     if kind == 'shopping':
         cards = _serpapi_shopping_request(_shopping_clean_query(query), cc,
@@ -2935,6 +2991,8 @@ def _local_discovery_request(query, market, kind, timeout_seconds):
     connect = min(1.5, max(.01, timeout_seconds * .15))
     data = _serpapi_cached_json(params, timeout=(connect, max(.01, timeout_seconds - connect)),
                                label=f'LOCAL DISCOVERY {cc}/{kind}') or {}
+    if kind == 'baidu' and isinstance(data, dict):
+        data = _local_resolve_baidu_links(data, timeout_seconds - (time.monotonic() - started))
     return _local_discovery_rows(data, query, market, 'local_' + kind) if isinstance(data, dict) else []
 
 
@@ -3812,7 +3870,7 @@ def _serpapi_shopping_request(query, gl, hl='en', timeout_seconds=None, timeout_
     if SHOPPING_GEO_GUARD and gl and (not _shopping_gl_supported(gl)):
         _log_unsupported_shopping_gl(gl)
         return []
-    params = {'engine': 'google_shopping', 'q': query, 'api_key': SERPAPI_API_KEY, 'hl': hl, 'output': 'json'}
+    params = {'engine': 'google_shopping', 'q': query, 'api_key': SERPAPI_API_KEY, 'hl': hl, 'output': 'json', 'direct_link': 'true'}
     if gl:
         params['gl'] = gl
     try:
@@ -12882,8 +12940,15 @@ def _web_attach_captured_result_sections(payload, lang, allow_ai=True, cancel_ev
             market_confidence = 0
         rank = _web_ai_market_rank(row, market_scope, market_confidence) if (use_structured_market or use_ai_market) else heuristic_rank
         cc = rank_cc.get(rank, '')
+        if 'global_countries' in market_snapshot:
+            # Selected-market rows carry merchant evidence established at
+            # retrieval. A legacy US/CN lane or AI cannot relabel Germany.
+            actual_cc = _explicit_market_country(row)
+            if actual_cc in [local_cc] + list(market_snapshot['global_countries']):
+                cc = actual_cc
+                rank = 0 if cc == local_cc else 1
         row['market_rank'] = rank
-        row['market'] = _web_market_label(rank)
+        row['market'] = ('local' if rank == 0 else 'global') if 'global_countries' in market_snapshot else _web_market_label(rank)
         row['market_scope'] = 'local' if rank == 0 else 'global'
         row['country'] = cc
         row['flag'] = country_flag_emoji(cc) if cc else ''
@@ -16733,7 +16798,8 @@ def _web_identity_stream_snapshot(rows, query, market, lang, completed, elapsed_
             'visual_review_required': True, 'elapsed_ms': elapsed_ms}
 
 
-async def _web_stream_image_identity_batches(image_b64, mime, caption, country, lang, cancel_event):
+async def _web_stream_image_identity_batches(image_b64, mime, caption, country, lang, cancel_event,
+                                             *, search_fn=None, build_items_fn=None, market_snapshot=None):
     """Stream the shared search set and independent, bounded identity audits.
 
     Start audits as offers arrive; retrieval never gates the remaining cards.
@@ -16742,7 +16808,7 @@ async def _web_stream_image_identity_batches(image_b64, mime, caption, country, 
     """
     started = time.time()
     clock = time.monotonic()
-    market = _web_market(country)
+    market = dict(market_snapshot or _web_market(country))
     loop = asyncio.get_running_loop()
     progress = asyncio.Queue(maxsize=1)
     review_updates = asyncio.Queue()
@@ -16826,8 +16892,8 @@ async def _web_stream_image_identity_batches(image_b64, mime, caption, country, 
 
     try:
         search_task = asyncio.create_task(asyncio.to_thread(
-            _web_search_image_sync, image_b64, mime, caption, country, lang,
-            callback if ANDROID_IMAGE_PROGRESSIVE else None, False, cancel_event))
+            search_fn or _web_search_image_sync, image_b64, mime, caption, country, lang,
+            callback if search_fn or ANDROID_IMAGE_PROGRESSIVE else None, False, cancel_event))
         while not cancel_event.is_set():
             if not final_ready and progress_task is None:
                 progress_task = asyncio.create_task(progress.get())
@@ -16886,7 +16952,7 @@ async def _web_stream_image_identity_batches(image_b64, mime, caption, country, 
             elif not final_ready and progress_task in done:
                 partial = progress_task.result()
                 progress_task = None
-                preview = await asyncio.to_thread(_run_with_market, market, _web_build_lens_items, partial, lang, caption)
+                preview = await asyncio.to_thread(_run_with_market, market, build_items_fn or _web_build_lens_items, partial, lang, caption)
                 query = str(partial.get('relevance_target') or partial.get('query') or caption or '').strip()
                 if query and query != query_sent:
                     yield _web_stream_event({'event': 'query', 'query': query, 'market': market})
@@ -16907,7 +16973,7 @@ async def _web_stream_image_identity_batches(image_b64, mime, caption, country, 
                     if not _web_row_has_numeric_price(rows[key]):
                         _web_spawn_price_enrich_task(price_tasks, key, rows[key], lang, market)
                 identity = query
-                if enabled:
+                if enabled and (query or search_fn is None):
                     queue_rows(preview)
                     fill_review_slots()
 
@@ -17016,6 +17082,338 @@ async def _web_stream_image_identity_batches(image_b64, mime, caption, country, 
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+
+
+# v114: request-scoped market selection. Legacy endpoints keep their contracts.
+GLOBAL_MARKET_LIMIT = 3
+DEFAULT_GLOBAL_COUNTRIES = ('us', 'cn')
+# https://serpapi.com/google-lens-countries (2026-09-07); unsupported scopes use web discovery.
+SELECTED_LENS_COUNTRIES = frozenset('ae af ag ai al am ao ar at au aw az ba bb bd be bg bh bj bn bo br bs bw by bz ca cg ch ci cl cm cn co cr cv cy cz de dk do dz ec ee eg es et fi fr gb ge gh gp gr gt gy hk hn hr ht hu id ie il in iq ir is it jm jo jp ke kg kh kr kw ky kz la lb lc lk lt lu lv ly ma md me mg mk ml mm mn mo mq mt mu mv mx my mz na nc ng ni nl no np nz om pa pe ph pk pl pr ps pt py qa re ro rs ru sa sc sd se sg si sk sn sr sv sy th tn tr tt tw tz ua ug us uy uz vc ve vn xk ye za zm zw'.split())
+SELECTED_MARKET_TIMEOUT = 20.0
+SELECTED_MARKET_HEDGE = 2.5
+SELECTED_MARKET_POOL = ThreadPoolExecutor(max_workers=16, thread_name_prefix='selected-market')
+
+
+def _web_global_countries(value, local_country):
+    if value is None:
+        value = list(DEFAULT_GLOBAL_COUNTRIES)
+    if not isinstance(value, list) or len(value) > 250:
+        raise ValueError('invalid_global_countries')
+    result = []
+    for entry in value:
+        if not isinstance(entry, str):
+            raise ValueError('invalid_global_country')
+        cc = entry.strip().lower()
+        cc = {'uk': 'gb', 'uae': 'ae'}.get(cc, cc)
+        if cc not in COUNTRY_META:
+            raise ValueError('invalid_global_country')
+        if cc != local_country and cc not in result:
+            result.append(cc)
+    if len(result) > GLOBAL_MARKET_LIMIT:
+        raise ValueError('too_many_global_countries')
+    return result
+
+
+def _web_selected_market_items(partial, lang, caption=''):
+    """Already normalized, verified-country rows; no legacy US/CN cap/filter."""
+    return [dict(row) for row in partial.get('results', [])]
+
+
+def _web_selected_offer(raw, cc, display_market, query=''):
+    url = _local_discovery_direct_link(raw)
+    title = str(raw.get('title') or '').strip()
+    if not url or not title or is_blocked_store(raw.get('source') or '', url):
+        return None
+    item = dict(raw, link=url)
+    # A provider's target is a ranking hint, never evidence of a storefront.
+    item.pop('country', None)
+    item.pop('market_country', None)
+    item['_shopping_gl'] = cc
+    evidence = _local_storefront_evidence(item, _web_market(cc))
+    if not evidence or (query and not _local_discovery_candidate_ok(query, item)):
+        return None
+    money = _web_indexed_offer_money(item)
+    rank = 0 if cc == display_market['country'] else 1
+    row = {'url': url, 'title': _compact_ui_title(title), 'raw_title': title,
+           'store': _ui_plain_store_name(raw.get('source') or '', url),
+           'image': raw.get('thumbnail') or raw.get('image') or '',
+           'country': cc, 'market_country': cc, 'flag': country_flag_emoji(cc),
+           'market': 'local' if rank == 0 else 'global', 'market_scope': 'local' if rank == 0 else 'global',
+           'market_rank': rank, 'market_evidence': evidence,
+           'price': '', 'price_pending': not bool(money), 'price_verified': False,
+           'price_source': raw.get('price_source') or 'indexed_offer',
+           'exact': False, 'is_exact': False, 'match_type': 'similar'}
+    if money:
+        row.update(_web_live_money_fields(money[0], money[1], display_market))
+    return row
+
+
+def _web_selected_market_search(query, country, lang, global_countries, *, image_b64='', mime='image/jpeg',
+                                 global_only=False, shown_urls=(), shown_domains=(),
+                                 progress_callback=None, cancel_event=None):
+    """One primary plus at most one rescue per market. Publish each completion.
+
+    China uses two domestic discovery sources, whether local OR global. Other
+    image markets start Lens immediately and hedge sparse/slow results once.
+    No US/CN expansion can escape the user's selection. No per-card discovery.
+    """
+    market = dict(_web_market(country), global_countries=list(global_countries))
+    scopes = ([] if global_only else [country]) + list(global_countries)
+    deadline = time.monotonic() + SELECTED_MARKET_TIMEOUT
+    started = time.monotonic()
+    query = str(query or '').strip()[:WEB_API_MAX_QUERY_CHARS]
+    reference = {}
+    reference_job = None
+    jobs, launched, rows, states = {}, {cc: set() for cc in scopes}, {}, {}
+    excluded = {_canonical_result_url(url) for url in shown_urls}
+    excluded_domains = {str(d).lower().removeprefix('www.') for d in shown_domains}
+    by_market = Counter()
+    def cancelled():
+        return cancel_event is not None and cancel_event.is_set()
+    def snapshot():
+        return {'ok': True, 'type': 'results', 'query': query, 'market': market,
+                'results': list(rows.values()), 'captured_results': list(rows.values()),
+                'market_progress': dict(states), 'source': 'selected_markets',
+                'retrieval_calls': sum(len(v) for v in launched.values())}
+    def publish():
+        if progress_callback and not cancelled():
+            progress_callback(snapshot())
+    def launch(cc, kind, public_url=''):
+        if kind in launched[cc] or len(launched[cc]) >= 2 or cancelled() or time.monotonic() >= deadline:
+            return
+        launched[cc].add(kind)
+        target = _web_market(cc)
+        # Work queued behind another request checks the deadline before I/O.
+        q = query
+        def fetch():
+            remaining = deadline - time.monotonic()
+            if cancelled() or remaining <= .01:
+                return []
+            if kind == 'lens':
+                return _serpapi_lens_request(public_url, 'all', cc, True, q)
+            return _local_discovery_request(q, target, kind, min(LOCAL_DISCOVERY_TIMEOUT, remaining))
+        job = SELECTED_MARKET_POOL.submit(_run_with_market, target, fetch)
+        jobs[job] = (cc, kind)
+        states[cc] = {'status': 'searching', 'count': by_market[cc]}
+    if cancelled() or not scopes:
+        return snapshot()
+    if image_b64:
+        reference_job = PHOTO_IDENTITY_POOL.submit(_photo_identity, image_b64, mime)
+        public_url = publish_image_for_lens(image_b64, mime) if ENABLE_GOOGLE_LENS and SERPAPI_API_KEY and PUBLIC_BASE_URL else ''
+        if public_url:
+            for cc in scopes:
+                if cc != 'cn' and cc in SELECTED_LENS_COUNTRIES:
+                    launch(cc, 'lens', public_url)
+    try:
+        while not cancelled() and time.monotonic() < deadline:
+            if reference_job is not None and reference_job.done():
+                try:
+                    reference = reference_job.result() or {}
+                except Exception:
+                    reference = {}
+                query = str(reference.get('query') or query).strip()
+                reference_job = None
+                publish()
+            if query and SERPAPI_API_KEY:
+                for cc in scopes:
+                    if cc == 'cn':
+                        launch(cc, 'scoped')
+                        if LOCAL_DISCOVERY_BAIDU:
+                            launch(cc, 'baidu')
+                    else:
+                        if not launched[cc]:
+                            launch(cc, 'shopping' if ENABLE_GOOGLE_SHOPPING and _shopping_gl_supported(cc) else 'broad')
+                        primary_pending = any(c == cc for c, _ in jobs.values())
+                        if by_market[cc] < LOCAL_RESULTS_TARGET and (
+                                not primary_pending or time.monotonic() - started >= SELECTED_MARKET_HEDGE):
+                            launch(cc, 'scoped')
+            if not jobs:
+                if reference_job is None:
+                    break
+                # Wait for reference identity without starting speculative searches.
+                wait([reference_job], timeout=.05)
+                continue
+            done, _ = wait(jobs, timeout=.05, return_when=FIRST_COMPLETED)
+            for job in done:
+                cc, kind = jobs.pop(job)
+                try:
+                    values = job.result() or []
+                except Exception as exc:
+                    states[cc] = {'status': 'partial', 'count': by_market[cc], 'reason': type(exc).__name__}
+                    values = []
+                # A named photo reference limits retrieval only; visual audits
+                # still decide every identity percentage and exact claim.
+                if kind == 'lens' and reference:
+                    values = _lens_reference_rows(values, reference)
+                changed = False
+                for raw in values:
+                    row = _web_selected_offer(raw, cc, market, query)
+                    if not row:
+                        continue
+                    key = _canonical_result_url(row['url'])
+                    domain = _more_result_domain(row['url']).removeprefix('www.')
+                    if key in excluded or domain in excluded_domains:
+                        continue
+                    old = rows.get(key)
+                    if old:
+                        # Duplicate provider evidence can fill a price, never
+                        # blank one or relabel a previously verified merchant.
+                        if not _web_row_has_numeric_price(old) and _web_row_has_numeric_price(row):
+                            old.update({k: v for k, v in row.items() if k.startswith('price') or k in ('currency', 'original_currency', 'original_price')})
+                            changed = True
+                        continue
+                    cap = 6 if cc == country else 4
+                    if by_market[cc] >= cap:
+                        continue
+                    rows[key] = row
+                    by_market[cc] += 1
+                    changed = True
+                if changed:
+                    publish()
+            if not jobs and reference_job is None:
+                # Loop once more to start an eligible empty-result rescue.
+                can_rescue = bool(query and SERPAPI_API_KEY and any(
+                    cc != 'cn' and len(launched[cc]) < 2 and by_market[cc] < LOCAL_RESULTS_TARGET for cc in scopes))
+                if not can_rescue:
+                    break
+        for cc in scopes:
+            pending = any(c == cc for c, _ in jobs.values())
+            states[cc] = {'status': 'timeout' if pending else 'complete' if by_market[cc] else 'empty',
+                          'count': by_market[cc], 'retrieval_calls': len(launched[cc])}
+        result = snapshot()
+        print(f'SELECTED MARKETS local={country} globals={global_countries} global_only={global_only} calls={result["retrieval_calls"]} counts={dict(by_market)} elapsed={time.monotonic()-started:.2f}s')
+        return result
+    finally:
+        for job in jobs:
+            job.cancel()
+        if reference_job is not None:
+            reference_job.cancel()
+
+
+@app.post('/api/search/markets/stream')
+async def web_api_selected_markets_stream(request: Request):
+    if not WEB_API_ENABLED or not WEB_STREAM_ENABLED:
+        return JSONResponse({'ok': False, 'error': 'web_stream_disabled'}, status_code=503)
+    if not _web_rate_allowed(request):
+        return JSONResponse({'ok': False, 'error': 'rate_limit'}, status_code=429)
+    try:
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            raise ValueError()
+    except Exception:
+        return JSONResponse({'ok': False, 'error': 'invalid_json'}, status_code=400)
+    country, _ = await asyncio.to_thread(_web_resolve_request_country, request, payload.get('country'))
+    try:
+        countries = _web_global_countries(payload.get('global_countries'), country)
+        for name in ('shown_urls', 'shown_domains'):
+            if name in payload and (not isinstance(payload[name], list) or len(payload[name]) > 250 or
+                                    any(not isinstance(v, str) or len(v) > 4096 for v in payload[name])):
+                raise ValueError('invalid_' + name)
+        if 'global_only' in payload and not isinstance(payload['global_only'], bool):
+            raise ValueError('invalid_global_only')
+    except ValueError as exc:
+        return JSONResponse({'ok': False, 'error': str(exc), 'max_global_countries': GLOBAL_MARKET_LIMIT}, status_code=422)
+    lang = _web_language(payload.get('lang'))
+    raw = str(payload.get('image_base64') or '').strip()
+    query = str(payload.get('caption') or payload.get('query') or '').strip()[:WEB_API_MAX_QUERY_CHARS]
+    mime = str(payload.get('mime_type') or 'image/jpeg')
+    if raw:
+        if len(raw) > WEB_API_RAW_IMAGE_MAX_BYTES * 4 // 3 + 1024:
+            return JSONResponse({'ok': False, 'error': 'image_too_large'}, status_code=413)
+        try:
+            image_bytes = base64.b64decode(raw.split(',', 1)[-1] if raw.startswith('data:image/') else raw, validate=True)
+            if not image_bytes or len(image_bytes) > WEB_API_RAW_IMAGE_MAX_BYTES:
+                raise ValueError('invalid_image')
+            image_bytes, mime = _web_normalize_uploaded_image_bytes(image_bytes, mime)
+            if len(image_bytes) > WEB_API_MAX_IMAGE_BYTES:
+                return JSONResponse({'ok': False, 'error': 'image_too_large_after_convert'}, status_code=413)
+            raw = base64.b64encode(image_bytes).decode('ascii')
+        except Exception:
+            return JSONResponse({'ok': False, 'error': 'invalid_image'}, status_code=400)
+    elif payload.get('search_kind') == 'image':
+        return JSONResponse({'ok': False, 'error': 'missing_image'}, status_code=400)
+    elif not query:
+        return JSONResponse({'ok': False, 'error': 'empty_query'}, status_code=400)
+    market = dict(_web_market(country), global_countries=countries)
+    cancel = threading.Event()
+    args = {'global_only': payload.get('global_only', False),
+            'shown_urls': payload.get('shown_urls', []), 'shown_domains': payload.get('shown_domains', [])}
+    async def source():
+        nonlocal query
+        yield _web_stream_event({'event': 'start', 'ok': True, 'market': market})
+        try:
+            if raw:
+                def search(image_b64, image_mime, caption, user_country, ui_lang, progress_callback, classify_with_ai, cancel_event):
+                    return _web_selected_market_search(caption, user_country, ui_lang, countries,
+                        image_b64=image_b64, mime=image_mime, progress_callback=progress_callback,
+                        cancel_event=cancel_event, **args)
+                async for event in _web_stream_image_identity_batches(raw, mime, query, country, lang, cancel,
+                    search_fn=search, build_items_fn=_web_selected_market_items, market_snapshot=market):
+                    yield event
+                return
+            prep = await asyncio.to_thread(_web_prepare_stream_query_sync, query, country, lang,
+                str(payload.get('selected_option') or ''), str(payload.get('original_query') or ''), bool(payload.get('force_specific')))
+            query = prep.get('query') or query
+            if prep.get('rtype') == 'GENERIC':
+                # Call the recommendation-only function. Its failure must not
+                # fall into the legacy engine's fixed US/CN search expansion.
+                comparison = await asyncio.to_thread(_web_brand_comparison, query, lang)
+                if comparison:
+                    report = {'ok': True, 'type': 'recommendations', 'query': query, 'market': market,
+                              'comparison': comparison['summary'], 'options': comparison['options']}
+                    yield _web_stream_event({'event': 'recommendations', 'data': report})
+                    yield _web_stream_event({'event': 'done', 'count': 0})
+                    return
+            if prep.get('rtype') in ('NONE', 'SERVICE') or not prep.get('ok'):
+                yield _web_stream_event({'event': 'error', 'error': 'not_a_product_query'})
+                return
+            yield _web_stream_event({'event': 'query', 'query': query, 'market': market})
+            loop = asyncio.get_running_loop()
+            queue = asyncio.Queue(maxsize=1)
+            def put(snapshot):
+                if not cancel.is_set():
+                    if queue.full():
+                        queue.get_nowait()
+                    queue.put_nowait(snapshot)
+            def callback(snapshot):
+                if not cancel.is_set():
+                    loop.call_soon_threadsafe(put, snapshot)
+            task = asyncio.create_task(asyncio.to_thread(_web_selected_market_search, query, country, lang,
+                countries, progress_callback=callback, cancel_event=cancel, **args))
+            latest = {}
+            try:
+                while True:
+                    if task.done():
+                        latest = task.result()
+                        final = True
+                    else:
+                        try:
+                            latest = await asyncio.wait_for(queue.get(), timeout=.3)
+                        except asyncio.TimeoutError:
+                            yield _web_stream_event({'event': 'status', 'stage': 'selected_markets'})
+                            continue
+                        final = False
+                    classified = await asyncio.to_thread(_run_with_market, market,
+                        _web_attach_captured_result_sections, dict(latest), lang, False)
+                    classified.update(event='snapshot', classification_final=final)
+                    yield _web_stream_event(classified)
+                    if final:
+                        break
+                yield _web_stream_event({'event': 'done', 'count': len(latest.get('results', [])),
+                    'market_progress': latest.get('market_progress'), 'retrieval_calls': latest.get('retrieval_calls')})
+            finally:
+                cancel.set()
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            print(f'SELECTED MARKETS STREAM ERR: {type(exc).__name__}')
+            yield _web_stream_event({'event': 'error', 'error': 'partial_search_failure'})
+        finally:
+            cancel.set()
+    return StreamingResponse(_web_with_live_prices(source(), lang, country), media_type='application/x-ndjson',
+        headers={'Cache-Control': 'no-cache, no-transform', 'X-Accel-Buffering': 'no'})
 
 
 @app.post('/api/search/image/stream')
