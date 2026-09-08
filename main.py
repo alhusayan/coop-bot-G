@@ -1,5 +1,36 @@
 # -*- coding: utf-8 -*-
-"""Findzia v122 — Market Routing and Direct Offer Recovery.
+"""Findzia v123 — Local Market Recovery, Indexed Prices, Arab & China Vocabulary.
+
+WHAT CHANGED IN v123 (see LOCAL_MARKET_RECOVERY_AR.md)
+* Indexed prices were being thrown away: a Lens/Shopping price such as
+  "$27.99*" (bare symbol, provider asterisk) was skipped, so every card went
+  to a merchant page fetch and ended as "price unavailable". Symbol prices are
+  now resolved through the searched market (a US-targeted "$" is USD, a
+  Canadian one CAD, a Japanese "¥" JPY) and the provider's extracted_value is
+  used as a second source. Estimated (*) prices stay marked as estimated.
+* Google Lens rows are visual candidates; they are no longer rejected by the
+  text-overlap threshold when the photo identity is generic ("stuffed toy").
+  Hard conflicts (accessory, model, audience, product kind) still reject; the
+  existing reference-image audit decides the percentage. Generic text queries
+  use a relaxed threshold on rows that carry a thumbnail.
+* A consensus name is extracted from agreeing Lens titles (e.g. "ikea
+  djungelskog orangutan") and, for an unnamed photo, strengthens the text
+  lanes (China scoped/Baidu, shopping/organic rescue). Retrieval only.
+* Baidu rows without a title fall back to name/snippet fields, Baidu is
+  queried on desktop by default (LOCAL_DISCOVERY_BAIDU_DEVICE), redirects are
+  resolved from the Location header without connecting to the merchant, and
+  a one-time LOCAL ROW SHAPE log shows unknown result shapes.
+* Image searches in Google-Shopping markets hedge with a Shopping pass when the
+  product is named (many priced stores) instead of an organic site: pass.
+* Per-market caps are configurable: SELECTED_LOCAL_CAP=8, SELECTED_GLOBAL_CAP=5.
+  The automatic exact-listing price lookup gets a realistic timeout.
+* Ported from the parallel v116 line: GCC short price codes (KD/SR/QR/BD/RO/
+  Dhs), Arabic currency words as merchant-country evidence, store catalogs for
+  KW/QA/BH/OM/JO/IQ/LB/DZ/TN, storefront locale paths (/kuwait-en/, /en/kw/),
+  ~150 Chinese/Arabic brand aliases, ~45 product nouns, CJK/Latin tokenization,
+  more domestic Chinese stores, brand-only visual match tiers (80-88%).
+
+INHERITED v122 — Market Routing and Direct Offer Recovery.
 
 Resolve catalog/storefront country before assigning local/global display scope.
 Legacy lanes keep stable meanings: 0 local, 1 US, 2 China. A Chinese marketplace
@@ -156,7 +187,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization'], max_age=86400)
-BUILD_ID = 'v122-market-routing-fix'
+BUILD_ID = 'v123-local-market-recovery'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -338,6 +369,8 @@ SHOPPING_POOL = ThreadPoolExecutor(max_workers=4)
 LOCAL_SHOPPING_POOL = ThreadPoolExecutor(max_workers=max(4, int(os.environ.get('LOCAL_SHOPPING_WORKERS', '6'))))
 LOCAL_SHOPPING_PRIMARY_PASSES = max(1, min(3, int(os.environ.get('LOCAL_SHOPPING_PRIMARY_PASSES', '2'))))
 LOCAL_RESULTS_TARGET = max(2, int(os.environ.get('LOCAL_RESULTS_TARGET', '4')))
+LOCAL_DISCOVERY_BAIDU_DEVICE = (os.environ.get('LOCAL_DISCOVERY_BAIDU_DEVICE', 'desktop').strip().lower() or 'desktop')
+_LOCAL_ROW_SHAPE_LOGGED = set()
 if USE_V106_5_RESULT_PIPELINE:
     LOCAL_RESULTS_TARGET = min(LOCAL_RESULTS_TARGET, 4)
 LOCAL_STORE_RESCUE_MAX = max(0, min(4, int(os.environ.get('LOCAL_STORE_RESCUE_MAX', '3'))))
@@ -401,6 +434,80 @@ FX_CACHE_TTL = max(3600, int(os.environ.get('FX_CACHE_TTL_HOURS', '12')) * 3600)
 FX_API_URL = os.environ.get('FX_API_URL', 'https://open.er-api.com/v6/latest/{base}')
 CURRENCY_SYMBOL_MAP = {'us$': 'USD', '€': 'EUR', '₹': 'INR', '₩': 'KRW', '₺': 'TRY', '₽': 'RUB', 'r$': 'BRL', 'a$': 'AUD', 'c$': 'CAD', 'hk$': 'HKD', 's$': 'SGD', 'nz$': 'NZD', 'nt$': 'TWD', 'د.إ': 'AED', 'ر.س': 'SAR', 'ر.ق': 'QAR', 'ر.ع': 'OMR', 'د.ب': 'BHD', 'د.ك': 'KWD', 'ج.م': 'EGP', 'د.أ': 'JOD', '₪': 'ILS', '₴': 'UAH', '₸': 'KZT', '₾': 'GEL', '₼': 'AZN', '฿': 'THB', '₫': 'VND', '₱': 'PHP', '₦': 'NGN', '₵': 'GHS', '৳': 'BDT', '₲': 'PYG', '₭': 'LAK', '₮': 'MNT', 'zł': 'PLN', 'kč': 'CZK', 'ft': 'HUF'}
 KNOWN_CURRENCY_CODES = set((code for codes in COUNTRY_CURRENCY_CODES.values() for code in codes)) | {'USD', 'EUR', 'GBP', 'JPY', 'CNY', 'INR', 'AED', 'SAR', 'QAR', 'OMR', 'BHD', 'KWD', 'TRY', 'EGP', 'JOD', 'AUD', 'CAD', 'CHF', 'SEK', 'NOK', 'DKK', 'PLN', 'RUB', 'BRL', 'MXN', 'ZAR', 'KRW', 'SGD', 'MYR', 'THB', 'IDR', 'PHP', 'VND', 'PKR', 'HKD', 'NZD', 'TWD'}
+# Arab-market currency markers. Explicit phrases/abbreviations are unambiguous;
+# short Latin codes count only next to a number (KD 12.500 / 199 SR), and the
+# generic family words (ريال/دينار/درهم/جنيه/ليرة) resolve through the market.
+_ARABIC_CURRENCY_EXPLICIT = (
+    ('ريال سعودي', 'SAR'), ('ريال سعودى', 'SAR'), ('ريال قطري', 'QAR'), ('ريال قطرى', 'QAR'),
+    ('ريال عماني', 'OMR'), ('ريال عمانى', 'OMR'), ('ريال يمني', 'YER'), ('ريال يمنى', 'YER'),
+    ('دينار كويتي', 'KWD'), ('دينار كويتى', 'KWD'), ('دينار بحريني', 'BHD'), ('دينار بحرينى', 'BHD'),
+    ('دينار اردني', 'JOD'), ('دينار أردني', 'JOD'), ('دينار اردنى', 'JOD'), ('دينار عراقي', 'IQD'),
+    ('دينار جزائري', 'DZD'), ('دينار تونسي', 'TND'), ('دينار ليبي', 'LYD'),
+    ('درهم اماراتي', 'AED'), ('درهم إماراتي', 'AED'), ('درهم مغربي', 'MAD'),
+    ('جنيه مصري', 'EGP'), ('جنيه مصرى', 'EGP'), ('جنيه استرليني', 'GBP'), ('جنيه إسترليني', 'GBP'),
+    ('ليرة تركية', 'TRY'), ('ليرة لبنانية', 'LBP'), ('ليرة سورية', 'SYP'),
+    ('د.ك', 'KWD'), ('ر.س', 'SAR'), ('د.إ', 'AED'), ('د.ا', 'AED'), ('ر.ق', 'QAR'), ('ر.ع', 'OMR'),
+    ('د.ب', 'BHD'), ('ج.م', 'EGP'), ('د.أ', 'JOD'), ('د.ع', 'IQD'), ('د.م', 'MAD'), ('د.ت', 'TND'),
+)
+_ARABIC_CURRENCY_FAMILIES = {
+    'ريال': ('SAR', 'QAR', 'OMR', 'YER', 'IRR'),
+    'دينار': ('KWD', 'BHD', 'JOD', 'IQD', 'DZD', 'TND', 'LYD', 'RSD', 'MKD'),
+    'درهم': ('AED', 'MAD'),
+    'جنيه': ('EGP', 'GBP', 'SDG', 'SSP'),
+    'ليرة': ('TRY', 'LBP', 'SYP'), 'ليره': ('TRY', 'LBP', 'SYP'),
+}
+_ARABIC_SHORT_CODES = (('KD', 'KWD'), ('K.D', 'KWD'), ('SR', 'SAR'), ('S.R', 'SAR'), ('QR', 'QAR'),
+                       ('Q.R', 'QAR'), ('BD', 'BHD'), ('B.D', 'BHD'), ('RO', 'OMR'), ('R.O', 'OMR'),
+                       ('JD', 'JOD'), ('J.D', 'JOD'), ('DHS', 'AED'), ('DH', 'AED'), ('LE', 'EGP'),
+                       ('L.E', 'EGP'), ('EGP', 'EGP'), ('دك', 'KWD'), ('رس', 'SAR'), ('دإ', 'AED'))
+_ARABIC_SHORT_CODE_ALT = '|'.join(re.escape(c) for c, _ in _ARABIC_SHORT_CODES)
+# Code-first form ("KD 89.900", "(SR 199)"): nothing but spaces/punctuation may
+# precede the code, so "Skechers Work SR 12" is a model, not a Saudi price.
+_ARABIC_SHORT_CODE_FIRST_RE = re.compile(r'^[^A-Za-z\u0600-\u06ff\d]*(' + _ARABIC_SHORT_CODE_ALT + r')\.?\s*(?=\d)', re.I)
+# Number-first form ("89.900 KD", "1,299 SR"): needs decimals or 3+ digits, so
+# "Air Max 90 SR" is not read as ninety riyals.
+_ARABIC_SHORT_CODE_LAST_RE = re.compile(r'(?:\d[\d,]*[.,]\d{2,3}|\d{3,}(?:,\d{3})*)\s*(' + _ARABIC_SHORT_CODE_ALT + r')(?![A-Za-z\u0600-\u06ff])', re.I)
+_ARABIC_SHORT_CODE_LENIENT_RE = re.compile(r'(?<=\d)\s*(' + _ARABIC_SHORT_CODE_ALT + r')(?![A-Za-z\u0600-\u06ff])', re.I)
+_ARABIC_SHORT_CODE_MAP = {c.lower(): code for c, code in _ARABIC_SHORT_CODES}
+
+def _arabic_short_currency_codes(text, allow=(), lenient=False):
+    """ISO codes for GCC/Arab short codes that sit next to a number.
+
+    ``allow`` lists codes that may also match the plain number-first form
+    ("45 SR") because they are the searched market's own currency; ``lenient``
+    does the same for every code and is reserved for structured price fields.
+    """
+    out = set()
+    hay = str(text or '').strip()
+    for pattern in (_ARABIC_SHORT_CODE_FIRST_RE, _ARABIC_SHORT_CODE_LAST_RE):
+        for m in pattern.finditer(hay):
+            code = _ARABIC_SHORT_CODE_MAP.get((m.group(1) or '').lower())
+            if code:
+                out.add(code)
+    if lenient or allow:
+        for m in _ARABIC_SHORT_CODE_LENIENT_RE.finditer(hay):
+            code = _ARABIC_SHORT_CODE_MAP.get((m.group(1) or '').lower())
+            if code and (lenient or code in allow):
+                out.add(code)
+    return out
+
+def _arabic_explicit_currency_codes(text):
+    hay = normalize_ar(str(text or ''))
+    return {code for phrase, code in _ARABIC_CURRENCY_EXPLICIT if normalize_ar(phrase) in hay}
+
+def _arabic_family_currency_code(text, cc='', preferred=''):
+    """Generic Arabic currency word resolved by the market it was found in."""
+    hay = ' ' + normalize_ar(str(text or '')) + ' '
+    local = tuple(COUNTRY_CURRENCY_CODES.get((cc or '').lower(), ()))
+    for word, codes in _ARABIC_CURRENCY_FAMILIES.items():
+        if re.search(r'(?<![\w\u0600-\u06ff])' + re.escape(normalize_ar(word)) + r'(?![\w\u0600-\u06ff])', hay):
+            if preferred in codes:
+                return preferred
+            for code in local:
+                if code in codes:
+                    return code
+    return ''
+
 DOLLAR_LIKE_CODES = {'USD', 'CAD', 'AUD', 'NZD', 'SGD', 'HKD', 'TWD', 'MXN', 'ARS', 'CLP', 'COP', 'UYU', 'BMD', 'BBD', 'BSD', 'BZD', 'BND', 'FJD', 'GYD', 'JMD', 'KYD', 'LRD', 'NAD', 'SBD', 'SRD', 'TTD', 'XCD'}
 YEN_LIKE_CODES = {'JPY', 'CNY'}
 POUND_LIKE_CODES = {'GBP', 'EGP', 'FKP', 'GIP', 'SHP', 'SSP', 'SYP'}
@@ -463,6 +570,15 @@ def detect_currency_code(text, fallback='', country_code=None):
     cc = (country_code or (current_market().get('country') if 'current_market' in globals() else '') or '').lower()
     local_codes = set(COUNTRY_CURRENCY_CODES.get(cc, ()))
     preferred = fallback or (next(iter(local_codes)) if len(local_codes) == 1 else '')
+    explicit_ar = _arabic_explicit_currency_codes(hay)
+    if len(explicit_ar) == 1:
+        return next(iter(explicit_ar))
+    short = _arabic_short_currency_codes(hay, allow=set(local_codes) | ({preferred} if preferred else set()))
+    if len(short) == 1:
+        return next(iter(short))
+    family = _arabic_family_currency_code(hay, cc, preferred)
+    if family:
+        return family
     if '$' in hay:
         if preferred in DOLLAR_LIKE_CODES:
             return preferred
@@ -887,7 +1003,7 @@ def _number_overlaps_measurement_span(text, start, end):
     return False
 
 def norm_tokens(query):
-    t = normalize_ar(query)
+    t = normalize_ar(_cjk_boundary_spaces(query))
     toks = re.findall('[\\w\\u0600-\\u06FF]+', t)
     toks = [w[2:] if w.startswith('ال') and len(w) > 4 else w for w in toks]
     return set(toks)
@@ -3149,13 +3265,15 @@ STORE_DOMAINS = {'اليوسفي': 'best.com.kw', 'بستاليوسفي': 'best.
 GENERAL_MARKETPLACES = ['جمعية دوت كوم', 'طلبات', 'كيتا', 'نون', 'لولو', 'كارفور']
 CATEGORY_KEYWORDS = {'sports': ('كره سله', 'كره قدم', 'كره طايره', 'كره تنس', 'كره', 'مضرب', 'تنس', 'بادل', 'سكواش', 'ريشه', 'بادمنتون', 'جيم', 'لياقه', 'دمبل', 'اثقال', 'بار حديد', 'سير كهربائي', 'دراجه هوائيه', 'دراجه ثابته', 'سباحه', 'نظاره سباحه', 'حبل قفز', 'سجاده يوغا', 'يوغا', 'بروتين رياضي', 'جوتي رياضي', 'حذاء رياضي', 'ملابس رياضيه', 'basketball', 'football', 'soccer', 'volleyball', 'tennis', 'padel', 'racket', 'squash', 'badminton', 'gym', 'fitness', 'dumbbell', 'barbell', 'kettlebell', 'treadmill', 'bike', 'bicycle', 'cycling', 'swimming', 'goggles', 'jump rope', 'yoga', 'sneaker', 'running shoe', 'sportswear', 'cricket', 'darts'), 'gaming': ('بلايستيشن', 'اكس بوكس', 'نينتندو', 'سويتش', 'يد تحكم', 'لعبه فيديو', 'العاب فيديو', 'قير', 'شاشه قيمنق', 'كرسي قيمنق', 'سماعه قيمنق', 'كيبورد', 'ماوس', 'playstation', 'ps5', 'ps4', 'xbox', 'nintendo', 'switch', 'controller', 'gaming', 'gamepad', 'headset', 'keyboard', 'mouse', 'steam deck', 'video game'), 'electronics': ('ايفون', 'سامسونج', 'لابتوب', 'تابلت', 'ايباد', 'تلفزيون', 'الكترون', 'هاتف', 'جوال', 'ساعه ابل', 'ساعه ذكيه', 'سماعه', 'ايربودز', 'كاميرا', 'شاحن', 'باور بانك', 'iphone', 'samsung', 'laptop', 'tablet', 'ipad', 'television', 'tv', 'phone', 'smartwatch', 'airpods', 'earbuds', 'camera', 'charger', 'power bank', 'drone'), 'appliances': ('ثلاجه', 'غساله', 'فرن', 'مكيف', 'جلايه', 'مكنسه', 'قلايه', 'ميكرويف', 'fridge', 'refrigerator', 'washer', 'washing machine', 'oven', 'air conditioner', 'dishwasher', 'vacuum', 'air fryer', 'microwave'), 'beauty': ('عطر', 'عطور', 'برفان', 'مكياج', 'روج', 'فاونديشن', 'ماسكرا', 'كريم', 'سيروم', 'عنايه', 'شامبو', 'واقي شمس', 'perfume', 'makeup', 'foundation', 'mascara', 'cream', 'serum', 'skincare', 'shampoo', 'sunscreen', 'cosmetic'), 'pharmacy': ('دواء', 'صيدليه', 'فيتامين', 'مكمل', 'حفاض', 'حفاظ', 'بروتين', 'medicine', 'pharmacy', 'vitamin', 'supplement', 'diaper'), 'grocery': ('بيبسي', 'شيبس', 'حليب', 'قهوه', 'شاي', 'سكر', 'رز', 'زيت', 'ماء', 'عصير', 'بسكوت', 'منظف', 'صابون', 'معجون', 'تونه', 'نسكافيه', 'برينجلز', 'كيتكات', 'grocery', 'milk', 'coffee', 'tea', 'rice', 'detergent'), 'food_delivery': ('مطعم', 'وجبه', 'برجر', 'بيتزا', 'فلات وايت', 'شاورما', 'دجاج مقلي', 'restaurant', 'burger', 'pizza', 'shawarma', 'meal'), 'fashion': ('ملابس', 'قميص', 'بنطلون', 'فستان', 'جاكيت', 'كاب', 'قبعه', 'شنطه', 'حقيبه', 'حذاء', 'جوتي', 'عبايه', 'بيجامه', 'clothing', 'shirt', 'pants', 'dress', 'jacket', 'cap', 'bag', 'shoe', 'abaya'), 'furniture': ('اثاث', 'كرسي', 'طاوله', 'سرير', 'كنب', 'صوفا', 'مرتبه', 'دولاب', 'furniture', 'chair', 'table', 'bed', 'sofa', 'mattress', 'wardrobe'), 'kids_toys': ('لعبه اطفال', 'العاب اطفال', 'لعبه', 'العاب', 'دميه', 'ليغو', 'ليجو', 'مكعبات', 'عربانه', 'عربه اطفال', 'رضاعه', 'كرسي طفل', 'بزل', 'toy', 'toys', 'doll', 'lego', 'puzzle', 'stroller', 'baby'), 'auto': ('سياره', 'بطاريه سياره', 'اطار', 'تواير', 'زيت محرك', 'اكسسوارات سياره', 'قطع غيار', 'car battery', 'tyre', 'tire', 'engine oil', 'car accessories', 'auto parts')}
 CATEGORY_SPECIALISTS = {'sports': ['Pro Sports Kuwait (prosportskw.com)', 'Intersport Kuwait', 'Decathlon Kuwait', 'Sun & Sand Sports', 'Foot Locker Kuwait'], 'gaming': ['3RoodQ8 (3roodq8.com)', 'Xcite', 'Eureka', 'Blink', 'Jarir'], 'electronics': ['Xcite', 'Eureka', 'Best Al-Yousifi', 'Blink', 'Jarir', '3RoodQ8 (3roodq8.com)'], 'appliances': ['Xcite', 'Eureka', 'Best Al-Yousifi', 'Blink'], 'beauty': ['Boutiqaat', 'Faces', 'Sephora Kuwait', "Bloomingdale's Kuwait"], 'pharmacy': ['Boots Kuwait', 'YIACO', 'Royal Pharmacy'], 'grocery': ['جمعية دوت كوم', 'Lulu', 'Carrefour', 'Taw9eel'], 'food_delivery': ['Keeta', 'Talabat', 'Deliveroo'], 'fashion': ['Namshi', 'Sun & Sand Sports', 'Foot Locker Kuwait', 'Centrepoint', 'H&M Kuwait'], 'furniture': ['IKEA Kuwait', 'The One', 'Home Centre', 'Midas'], 'kids_toys': ['Tigro (tigro.app)', 'Toys R Us Kuwait', '3RoodQ8 (3roodq8.com)', 'Mothercare', 'Babyshop'], 'auto': ['AlMailem Tires', 'Tires Plus', 'Xcite']}
-COUNTRY_MAJOR_STORE_DOMAINS = {'us': [('Amazon', 'amazon.com'), ('Walmart', 'walmart.com'), ('Target', 'target.com'), ('Best Buy', 'bestbuy.com'), ('eBay', 'ebay.com')], 'ca': [('Amazon Canada', 'amazon.ca'), ('Walmart Canada', 'walmart.ca'), ('Best Buy Canada', 'bestbuy.ca'), ('Canadian Tire', 'canadiantire.ca')], 'gb': [('Amazon UK', 'amazon.co.uk'), ('Argos', 'argos.co.uk'), ('Currys', 'currys.co.uk'), ('John Lewis', 'johnlewis.com')], 'fr': [('Amazon France', 'amazon.fr'), ('Fnac', 'fnac.com'), ('Darty', 'darty.com'), ('Cdiscount', 'cdiscount.com'), ('Carrefour', 'carrefour.fr')], 'de': [('Amazon Germany', 'amazon.de'), ('MediaMarkt', 'mediamarkt.de'), ('Saturn', 'saturn.de'), ('Otto', 'otto.de')], 'es': [('Amazon Spain', 'amazon.es'), ('El Corte Inglés', 'elcorteingles.es'), ('MediaMarkt', 'mediamarkt.es'), ('Carrefour', 'carrefour.es')], 'it': [('Amazon Italy', 'amazon.it'), ('MediaWorld', 'mediaworld.it'), ('Unieuro', 'unieuro.it')], 'nl': [('bol', 'bol.com'), ('Coolblue', 'coolblue.nl'), ('MediaMarkt', 'mediamarkt.nl'), ('Amazon Netherlands', 'amazon.nl')], 'be': [('bol', 'bol.com'), ('Coolblue', 'coolblue.be'), ('MediaMarkt', 'mediamarkt.be'), ('Amazon Belgium', 'amazon.com.be')], 'ch': [('Galaxus', 'galaxus.ch'), ('Digitec', 'digitec.ch'), ('Brack', 'brack.ch'), ('Manor', 'manor.ch')], 'at': [('MediaMarkt', 'mediamarkt.at'), ('Amazon Germany', 'amazon.de'), ('Otto Austria', 'ottoversand.at')], 'ie': [('Currys Ireland', 'currys.ie'), ('Harvey Norman', 'harveynorman.ie'), ('Amazon UK', 'amazon.co.uk')], 'pt': [('Worten', 'worten.pt'), ('Fnac Portugal', 'fnac.pt'), ('Continente', 'continente.pt')], 'pl': [('Allegro', 'allegro.pl'), ('Media Expert', 'mediaexpert.pl'), ('RTV Euro AGD', 'euro.com.pl')], 'cz': [('Alza', 'alza.cz'), ('Datart', 'datart.cz'), ('Mall', 'mall.cz')], 'se': [('Amazon Sweden', 'amazon.se'), ('Elgiganten', 'elgiganten.se'), ('CDON', 'cdon.se')], 'no': [('Elkjøp', 'elkjop.no'), ('Komplett', 'komplett.no'), ('Power', 'power.no')], 'dk': [('Elgiganten', 'elgiganten.dk'), ('Proshop', 'proshop.dk'), ('Power', 'power.dk')], 'fi': [('Verkkokauppa', 'verkkokauppa.com'), ('Gigantti', 'gigantti.fi'), ('Power', 'power.fi')], 'tr': [('Trendyol', 'trendyol.com'), ('Hepsiburada', 'hepsiburada.com'), ('Amazon Turkey', 'amazon.com.tr'), ('n11', 'n11.com')], 'ru': [('Ozon', 'ozon.ru'), ('Wildberries', 'wildberries.ru'), ('Yandex Market', 'market.yandex.ru')], 'ua': [('Rozetka', 'rozetka.com.ua'), ('Prom', 'prom.ua'), ('Epicentr', 'epicentrk.ua')], 'sa': [('Amazon Saudi', 'amazon.sa'), ('Noon', 'noon.com'), ('Jarir', 'jarir.com'), ('eXtra', 'extra.com'), ('Carrefour', 'carrefourksa.com')], 'ae': [('Amazon UAE', 'amazon.ae'), ('Noon', 'noon.com'), ('Carrefour UAE', 'carrefouruae.com'), ('Sharaf DG', 'sharafdg.com'), ('Jumbo', 'jumbo.ae')], 'eg': [('Amazon Egypt', 'amazon.eg'), ('Noon', 'noon.com'), ('B.TECH', 'btech.com'), ('Carrefour Egypt', 'carrefouregypt.com')], 'in': [('Amazon India', 'amazon.in'), ('Flipkart', 'flipkart.com'), ('Croma', 'croma.com'), ('Reliance Digital', 'reliancedigital.in'), ('Myntra', 'myntra.com')], 'pk': [('Daraz', 'daraz.pk'), ('PriceOye', 'priceoye.pk')], 'bd': [('Daraz Bangladesh', 'daraz.com.bd'), ('Pickaboo', 'pickaboo.com')], 'cn': [('JD', 'jd.com'), ('Tmall', 'tmall.com'), ('Taobao', 'taobao.com'), ('Suning', 'suning.com')], 'jp': [('Amazon Japan', 'amazon.co.jp'), ('Rakuten', 'rakuten.co.jp'), ('Yodobashi', 'yodobashi.com'), ('Bic Camera', 'biccamera.com')], 'kr': [('Coupang', 'coupang.com'), ('Gmarket', 'gmarket.co.kr'), ('11st', '11st.co.kr')], 'sg': [('Shopee Singapore', 'shopee.sg'), ('Lazada Singapore', 'lazada.sg'), ('Amazon Singapore', 'amazon.sg'), ('Courts', 'courts.com.sg')], 'my': [('Shopee Malaysia', 'shopee.com.my'), ('Lazada Malaysia', 'lazada.com.my'), ('Harvey Norman', 'harveynorman.com.my')], 'id': [('Tokopedia', 'tokopedia.com'), ('Shopee Indonesia', 'shopee.co.id'), ('Blibli', 'blibli.com'), ('Lazada Indonesia', 'lazada.co.id')], 'ph': [('Shopee Philippines', 'shopee.ph'), ('Lazada Philippines', 'lazada.com.ph')], 'th': [('Shopee Thailand', 'shopee.co.th'), ('Lazada Thailand', 'lazada.co.th'), ('Central', 'central.co.th'), ('Power Buy', 'powerbuy.co.th')], 'vn': [('Shopee Vietnam', 'shopee.vn'), ('Lazada Vietnam', 'lazada.vn'), ('Tiki', 'tiki.vn')], 'au': [('Amazon Australia', 'amazon.com.au'), ('JB Hi-Fi', 'jbhifi.com.au'), ('Harvey Norman', 'harveynorman.com.au'), ('Kmart', 'kmart.com.au')], 'nz': [('The Warehouse', 'thewarehouse.co.nz'), ('Noel Leeming', 'noelleeming.co.nz'), ('Mighty Ape', 'mightyape.co.nz'), ('Harvey Norman', 'harveynorman.co.nz')], 'br': [('Mercado Livre', 'mercadolivre.com.br'), ('Amazon Brazil', 'amazon.com.br'), ('Magazine Luiza', 'magazineluiza.com.br')], 'mx': [('Mercado Libre', 'mercadolibre.com.mx'), ('Amazon Mexico', 'amazon.com.mx'), ('Walmart Mexico', 'walmart.com.mx'), ('Liverpool', 'liverpool.com.mx')], 'ar': [('Mercado Libre', 'mercadolibre.com.ar'), ('Frávega', 'fravega.com')], 'cl': [('Mercado Libre', 'mercadolibre.cl'), ('Falabella', 'falabella.com'), ('Paris', 'paris.cl')], 'co': [('Mercado Libre', 'mercadolibre.com.co'), ('Falabella', 'falabella.com.co'), ('Éxito', 'exito.com')], 'pe': [('Mercado Libre', 'mercadolibre.com.pe'), ('Falabella', 'falabella.com.pe'), ('Ripley', 'ripley.com.pe')], 'za': [('Takealot', 'takealot.com'), ('Makro', 'makro.co.za'), ('Woolworths', 'woolworths.co.za')], 'ng': [('Jumia Nigeria', 'jumia.com.ng'), ('Konga', 'konga.com')], 'ke': [('Jumia Kenya', 'jumia.co.ke'), ('Carrefour Kenya', 'carrefour.ke')], 'ma': [('Jumia Morocco', 'jumia.ma'), ('Marjane', 'marjane.ma')], 'il': [('KSP', 'ksp.co.il'), ('Ivory', 'ivory.co.il')]}
+COUNTRY_MAJOR_STORE_DOMAINS = {'us': [('Amazon', 'amazon.com'), ('Walmart', 'walmart.com'), ('Target', 'target.com'), ('Best Buy', 'bestbuy.com'), ('eBay', 'ebay.com')], 'ca': [('Amazon Canada', 'amazon.ca'), ('Walmart Canada', 'walmart.ca'), ('Best Buy Canada', 'bestbuy.ca'), ('Canadian Tire', 'canadiantire.ca')], 'gb': [('Amazon UK', 'amazon.co.uk'), ('Argos', 'argos.co.uk'), ('Currys', 'currys.co.uk'), ('John Lewis', 'johnlewis.com')], 'fr': [('Amazon France', 'amazon.fr'), ('Fnac', 'fnac.com'), ('Darty', 'darty.com'), ('Cdiscount', 'cdiscount.com'), ('Carrefour', 'carrefour.fr')], 'de': [('Amazon Germany', 'amazon.de'), ('MediaMarkt', 'mediamarkt.de'), ('Saturn', 'saturn.de'), ('Otto', 'otto.de')], 'es': [('Amazon Spain', 'amazon.es'), ('El Corte Inglés', 'elcorteingles.es'), ('MediaMarkt', 'mediamarkt.es'), ('Carrefour', 'carrefour.es')], 'it': [('Amazon Italy', 'amazon.it'), ('MediaWorld', 'mediaworld.it'), ('Unieuro', 'unieuro.it')], 'nl': [('bol', 'bol.com'), ('Coolblue', 'coolblue.nl'), ('MediaMarkt', 'mediamarkt.nl'), ('Amazon Netherlands', 'amazon.nl')], 'be': [('bol', 'bol.com'), ('Coolblue', 'coolblue.be'), ('MediaMarkt', 'mediamarkt.be'), ('Amazon Belgium', 'amazon.com.be')], 'ch': [('Galaxus', 'galaxus.ch'), ('Digitec', 'digitec.ch'), ('Brack', 'brack.ch'), ('Manor', 'manor.ch')], 'at': [('MediaMarkt', 'mediamarkt.at'), ('Amazon Germany', 'amazon.de'), ('Otto Austria', 'ottoversand.at')], 'ie': [('Currys Ireland', 'currys.ie'), ('Harvey Norman', 'harveynorman.ie'), ('Amazon UK', 'amazon.co.uk')], 'pt': [('Worten', 'worten.pt'), ('Fnac Portugal', 'fnac.pt'), ('Continente', 'continente.pt')], 'pl': [('Allegro', 'allegro.pl'), ('Media Expert', 'mediaexpert.pl'), ('RTV Euro AGD', 'euro.com.pl')], 'cz': [('Alza', 'alza.cz'), ('Datart', 'datart.cz'), ('Mall', 'mall.cz')], 'se': [('Amazon Sweden', 'amazon.se'), ('Elgiganten', 'elgiganten.se'), ('CDON', 'cdon.se')], 'no': [('Elkjøp', 'elkjop.no'), ('Komplett', 'komplett.no'), ('Power', 'power.no')], 'dk': [('Elgiganten', 'elgiganten.dk'), ('Proshop', 'proshop.dk'), ('Power', 'power.dk')], 'fi': [('Verkkokauppa', 'verkkokauppa.com'), ('Gigantti', 'gigantti.fi'), ('Power', 'power.fi')], 'tr': [('Trendyol', 'trendyol.com'), ('Hepsiburada', 'hepsiburada.com'), ('Amazon Turkey', 'amazon.com.tr'), ('n11', 'n11.com')], 'ru': [('Ozon', 'ozon.ru'), ('Wildberries', 'wildberries.ru'), ('Yandex Market', 'market.yandex.ru')], 'ua': [('Rozetka', 'rozetka.com.ua'), ('Prom', 'prom.ua'), ('Epicentr', 'epicentrk.ua')], 'sa': [('Amazon Saudi', 'amazon.sa'), ('Noon', 'noon.com'), ('Jarir', 'jarir.com'), ('eXtra', 'extra.com'), ('Carrefour', 'carrefourksa.com'), ('Nahdi', 'nahdionline.com'), ('Whites', 'whites.net'), ('Namshi', 'namshi.com'), ('Danube', 'danube.sa'), ('Panda', 'panda.sa'), ('Lulu Saudi', 'luluhypermarket.com'), ('Sivvi', 'sivvi.com'), ('Ounass', 'ounass.com'), ('Virgin Megastore Saudi', 'virginmegastore.sa')], 'ae': [('Amazon UAE', 'amazon.ae'), ('Noon', 'noon.com'), ('Carrefour UAE', 'carrefouruae.com'), ('Sharaf DG', 'sharafdg.com'), ('Jumbo', 'jumbo.ae'), ('Emax', 'emaxme.com'), ('Lulu UAE', 'luluhypermarket.com'), ('Namshi', 'namshi.com'), ('Virgin Megastore UAE', 'virginmegastore.ae'), ('Dubai Duty Free', 'dubaidutyfree.com'), ('Ounass', 'ounass.com'), ('6thStreet', '6thstreet.com'), ('Ubuy UAE', 'ubuy.ae')], 'eg': [('Amazon Egypt', 'amazon.eg'), ('Noon', 'noon.com'), ('B.TECH', 'btech.com'), ('Carrefour Egypt', 'carrefouregypt.com'), ('Jumia Egypt', 'jumia.com.eg'), ('2B', '2b.com.eg'), ('Raneen', 'raneen.com'), ('Dubai Phone', 'dubaiphone.net'), ('Tradeline', 'tradelinestores.com')], 'kw': [('Xcite', 'xcite.com'), ('Eureka', 'eureka.com.kw'), ('Best Al-Yousifi', 'best.com.kw'), ('Blink', 'blink.com.kw'), ('Jarir Kuwait', 'jarir.com'), ('Lulu Kuwait', 'luluhypermarket.com'), ('Carrefour Kuwait', 'carrefourkuwait.com'), ('Boutiqaat', 'boutiqaat.com'), ('Namshi', 'namshi.com'), ('Jm3eia', 'jm3eia.com'), ('Taw9eel', 'taw9eel.com'), ('3RoodQ8', '3roodq8.com'), ('Tigro', 'tigro.app'), ('Ubuy Kuwait', 'ubuy.com.kw'), ('Ounass', 'ounass.com'), ('6thStreet', '6thstreet.com')], 'qa': [('Jarir Qatar', 'jarir.com'), ('Lulu Qatar', 'luluhypermarket.com'), ('Carrefour Qatar', 'carrefourqatar.com'), ('Virgin Megastore Qatar', 'virginmegastore.qa'), ('Alaneesqatar', 'alaneesqatar.qa'), ('Starlink', 'starlinkqatar.com'), ('Ansar Gallery', 'ansargallery.com'), ('Namshi', 'namshi.com'), ('Ounass', 'ounass.com'), ('6thStreet', '6thstreet.com')], 'bh': [('Sharaf DG Bahrain', 'sharafdg.com'), ('eXtra Bahrain', 'extra.com'), ('Jarir Bahrain', 'jarir.com'), ('Lulu Bahrain', 'luluhypermarket.com'), ('Carrefour Bahrain', 'carrefourbahrain.com'), ('Namshi', 'namshi.com'), ('6thStreet', '6thstreet.com')], 'om': [('Sharaf DG Oman', 'sharafdg.com'), ('eXtra Oman', 'extra.com'), ('Lulu Oman', 'luluhypermarket.com'), ('Carrefour Oman', 'carrefouroman.com'), ('Emax', 'emaxme.com'), ('Namshi', 'namshi.com'), ('6thStreet', '6thstreet.com')], 'jo': [('SmartBuy', 'smartbuy-me.com'), ('Carrefour Jordan', 'carrefourjordan.com'), ('Leaders Center', 'leaders.jo'), ('Jamalon', 'jamalon.com')], 'iq': [('Miswag', 'miswag.net'), ('Orisdi', 'orisdi.com')], 'lb': [('Khoury Home', 'khouryhome.com'), ('Abed Tahan', 'abedtahan.com')], 'dz': [('Jumia Algeria', 'jumia.dz')], 'tn': [('Jumia Tunisia', 'jumia.com.tn'), ('Mytek', 'mytek.tn'), ('Tunisianet', 'tunisianet.com.tn')], 'in': [('Amazon India', 'amazon.in'), ('Flipkart', 'flipkart.com'), ('Croma', 'croma.com'), ('Reliance Digital', 'reliancedigital.in'), ('Myntra', 'myntra.com')], 'pk': [('Daraz', 'daraz.pk'), ('PriceOye', 'priceoye.pk')], 'bd': [('Daraz Bangladesh', 'daraz.com.bd'), ('Pickaboo', 'pickaboo.com')], 'cn': [('JD', 'jd.com'), ('Tmall', 'tmall.com'), ('Taobao', 'taobao.com'), ('Suning', 'suning.com')], 'jp': [('Amazon Japan', 'amazon.co.jp'), ('Rakuten', 'rakuten.co.jp'), ('Yodobashi', 'yodobashi.com'), ('Bic Camera', 'biccamera.com')], 'kr': [('Coupang', 'coupang.com'), ('Gmarket', 'gmarket.co.kr'), ('11st', '11st.co.kr')], 'sg': [('Shopee Singapore', 'shopee.sg'), ('Lazada Singapore', 'lazada.sg'), ('Amazon Singapore', 'amazon.sg'), ('Courts', 'courts.com.sg')], 'my': [('Shopee Malaysia', 'shopee.com.my'), ('Lazada Malaysia', 'lazada.com.my'), ('Harvey Norman', 'harveynorman.com.my')], 'id': [('Tokopedia', 'tokopedia.com'), ('Shopee Indonesia', 'shopee.co.id'), ('Blibli', 'blibli.com'), ('Lazada Indonesia', 'lazada.co.id')], 'ph': [('Shopee Philippines', 'shopee.ph'), ('Lazada Philippines', 'lazada.com.ph')], 'th': [('Shopee Thailand', 'shopee.co.th'), ('Lazada Thailand', 'lazada.co.th'), ('Central', 'central.co.th'), ('Power Buy', 'powerbuy.co.th')], 'vn': [('Shopee Vietnam', 'shopee.vn'), ('Lazada Vietnam', 'lazada.vn'), ('Tiki', 'tiki.vn')], 'au': [('Amazon Australia', 'amazon.com.au'), ('JB Hi-Fi', 'jbhifi.com.au'), ('Harvey Norman', 'harveynorman.com.au'), ('Kmart', 'kmart.com.au')], 'nz': [('The Warehouse', 'thewarehouse.co.nz'), ('Noel Leeming', 'noelleeming.co.nz'), ('Mighty Ape', 'mightyape.co.nz'), ('Harvey Norman', 'harveynorman.co.nz')], 'br': [('Mercado Livre', 'mercadolivre.com.br'), ('Amazon Brazil', 'amazon.com.br'), ('Magazine Luiza', 'magazineluiza.com.br')], 'mx': [('Mercado Libre', 'mercadolibre.com.mx'), ('Amazon Mexico', 'amazon.com.mx'), ('Walmart Mexico', 'walmart.com.mx'), ('Liverpool', 'liverpool.com.mx')], 'ar': [('Mercado Libre', 'mercadolibre.com.ar'), ('Frávega', 'fravega.com')], 'cl': [('Mercado Libre', 'mercadolibre.cl'), ('Falabella', 'falabella.com'), ('Paris', 'paris.cl')], 'co': [('Mercado Libre', 'mercadolibre.com.co'), ('Falabella', 'falabella.com.co'), ('Éxito', 'exito.com')], 'pe': [('Mercado Libre', 'mercadolibre.com.pe'), ('Falabella', 'falabella.com.pe'), ('Ripley', 'ripley.com.pe')], 'za': [('Takealot', 'takealot.com'), ('Makro', 'makro.co.za'), ('Woolworths', 'woolworths.co.za')], 'ng': [('Jumia Nigeria', 'jumia.com.ng'), ('Konga', 'konga.com')], 'ke': [('Jumia Kenya', 'jumia.co.ke'), ('Carrefour Kenya', 'carrefour.ke')], 'ma': [('Jumia Morocco', 'jumia.ma'), ('Marjane', 'marjane.ma'), ('Electroplanet', 'electroplanet.ma')], 'il': [('KSP', 'ksp.co.il'), ('Ivory', 'ivory.co.il')]}
 
 CHINA_DOMESTIC_STORES = (
     ('JD', 'jd.com'), ('Tmall', 'tmall.com'), ('Taobao', 'taobao.com'),
     ('Suning', 'suning.com'), ('Pinduoduo', 'yangkeduo.com'),
     ('1688', '1688.com'), ('Pinduoduo', 'pinduoduo.com'),
-    ('Xiaomi China', 'm.mi.com'),
+    ('Xiaomi China', 'm.mi.com'), ('Vipshop', 'vip.com'), ('Dangdang', 'dangdang.com'),
+    ('Kaola', 'kaola.com'), ('Huawei Vmall', 'vmall.com'), ('Xiaomi', 'mi.com'),
+    ('Gome', 'gome.com.cn'), ('Apple China', 'apple.com.cn'), ('Xiaomi Youpin', 'xiaomiyoupin.com'),
 )
 
 
@@ -3172,6 +3290,22 @@ _STOREFRONT_LANGUAGES = frozenset(hl.split('-')[0] for languages in COUNTRY_SEAR
 # fendi.com/kw-ar/ and theluxurycloset.com/uae-ar/ are country-language.
 _STOREFRONT_COUNTRY_PREFIX_HOSTS = ('farfetch.com', 'temu.com')
 _STOREFRONT_COUNTRY_LANGUAGE_HOSTS = ('fendi.com', 'noon.com', 'theluxurycloset.com')
+
+
+_STOREFRONT_UI_LANGUAGES = frozenset({'en', 'ar', 'fr', 'de', 'es', 'it', 'pt', 'tr', 'ru', 'nl', 'ja', 'zh', 'ko', 'pl', 'sv', 'da', 'fi', 'no', 'cs', 'el', 'he', 'th', 'vi', 'id', 'ms', 'hi', 'ur'})
+_STOREFRONT_NAME_ALIASES = {'kuwait': 'kw', 'saudi': 'sa', 'saudi-arabia': 'sa', 'ksa': 'sa', 'uae': 'ae', 'emirates': 'ae', 'qatar': 'qa',
+                            'bahrain': 'bh', 'oman': 'om', 'egypt': 'eg', 'jordan': 'jo', 'iraq': 'iq', 'lebanon': 'lb', 'morocco': 'ma',
+                            'algeria': 'dz', 'tunisia': 'tn', 'libya': 'ly', 'usa': 'us', 'uk': 'gb', 'england': 'gb', 'turkey': 'tr',
+                            'india': 'in', 'china': 'cn', 'japan': 'jp', 'korea': 'kr', 'germany': 'de', 'france': 'fr', 'spain': 'es',
+                            'italy': 'it', 'canada': 'ca', 'australia': 'au', 'pakistan': 'pk', 'philippines': 'ph', 'malaysia': 'my',
+                            'singapore': 'sg', 'indonesia': 'id', 'thailand': 'th', 'vietnam': 'vn', 'mexico': 'mx', 'brazil': 'br'}
+
+
+@lru_cache(maxsize=1)
+def _storefront_country_names():
+    names = {name.lower().replace(' ', '-'): cc for cc, name in COUNTRY_NAMES.items()}
+    names.update(_STOREFRONT_NAME_ALIASES)
+    return names
 
 
 def _storefront_country(url):
@@ -3198,6 +3332,19 @@ def _storefront_country(url):
         first = parts[0]
         if first in {'global', 'world', 'international'}:
             return 'global'
+        names = _storefront_country_names()
+        second = parts[1] if len(parts) > 1 else ''
+        # Unambiguous spelled-out regions: /kuwait/, /saudi-arabia/, /egypt-en/.
+        if first in names and first not in COUNTRY_META:
+            return names[first]
+        # /kw/en/ (country then UI language) and /en/kw/ (UI language then
+        # country) are the two conventions GCC storefronts use; a two-letter
+        # code that is also an ISO-639 language (kw = Cornish) is resolved by
+        # that neighbouring language segment instead of abstaining.
+        if second in _STOREFRONT_UI_LANGUAGES and aliases.get(first, first) in COUNTRY_META:
+            return aliases.get(first, first)
+        if first in _STOREFRONT_UI_LANGUAGES and (aliases.get(second, second) in COUNTRY_META or second in names):
+            return names.get(second) or aliases.get(second, second)
         code = aliases.get(first, first)
         if code in COUNTRY_META:
             if first not in _STOREFRONT_LANGUAGE_CODES or _host_matches_any(host, _STOREFRONT_COUNTRY_PREFIX_HOSTS):
@@ -3209,6 +3356,17 @@ def _storefront_country(url):
         if len(pieces) == 2:
             left, right = pieces
             left_cc, right_cc = aliases.get(left, left), aliases.get(right, right)
+            # Spelled-out region on either side: /kuwait-en/, /egypt-en/, /en-saudi/.
+            if left in names and left not in COUNTRY_META and right in _STOREFRONT_UI_LANGUAGES:
+                return names[left]
+            if right in names and right not in COUNTRY_META and left in _STOREFRONT_UI_LANGUAGES:
+                return names[right]
+            # BCP-47 language-COUNTRY (fr-ca, de-de, ar-sa) and the storefront
+            # COUNTRY-language form (kw-en, sa-ar) with a common UI language.
+            if left in _STOREFRONT_UI_LANGUAGES and right_cc in COUNTRY_META:
+                return right_cc
+            if right in _STOREFRONT_UI_LANGUAGES and left_cc in COUNTRY_META:
+                return left_cc
             language_country = left in _STOREFRONT_LANGUAGES and right_cc in COUNTRY_META
             country_language = left_cc in COUNTRY_META and right in _STOREFRONT_LANGUAGES
             if country_language and _host_matches_any(host, _STOREFRONT_COUNTRY_LANGUAGE_HOSTS):
@@ -3260,6 +3418,11 @@ def _local_storefront_evidence(item, market):
     domains = [domain for _, domain in own if _host_matches_any(host, (domain,))]
     codes = _explicit_currency_codes({'price': item.get('price'), 'currency': item.get('currency')})
     local_codes = set(country_currency_codes(cc))
+    hay, _ = _result_hay_host(item)
+    geo_targeted = _search_geo_country(item) == cc
+    # "ريال/دينار/درهم" next to a price is local-currency evidence only when the
+    # search itself targeted this market and no foreign code contradicts it.
+    arabic_family = bool(not codes and geo_targeted and _arabic_family_currency_code(hay, cc))
     if domains:
         # A shared .com (e.g. Noon) is not proof of one country's storefront.
         other_markets = {other for other, specs in COUNTRY_MAJOR_STORE_DOMAINS.items()
@@ -3268,11 +3431,15 @@ def _local_storefront_evidence(item, market):
             return 'domestic_merchant'
         if codes & local_codes and not codes - local_codes:
             return 'merchant_currency'
+        if arabic_family:
+            return 'merchant_currency'
     # Small local .com merchants must not be rejected solely for not being in
     # our catalog. Require both local search targeting and unambiguous currency.
     unique_codes = {code for code in local_codes if sum(code in v for v in COUNTRY_CURRENCY_CODES.values()) == 1}
     known_foreign = _host_matches_any(host, US_STORE_HINTS + CHINA_STORE_HINTS)
-    if not known_foreign and _search_geo_country(item) == cc and codes & unique_codes and not codes - local_codes:
+    if not known_foreign and geo_targeted and codes & unique_codes and not codes - local_codes:
+        return 'local_targeting_currency'
+    if not known_foreign and arabic_family:
         return 'local_targeting_currency'
     return ''
 
@@ -3298,6 +3465,23 @@ def _china_domestic_product_url(url):
             return bool(re.fullmatch(r'/\d+/\d+\.html', path))
         if _host_matches_any(host, ('m.mi.com',)):
             return bool(re.fullmatch(r'/commodity/detail/\d+', path))
+        if _host_matches_any(host, ('mi.com',)):
+            return path.startswith('/shop/buy/detail') and bool(re.fullmatch(r'\d+', (qs.get('product_id') or [''])[0]))
+        if _host_matches_any(host, ('vip.com',)):
+            return bool(re.fullmatch(r'/detail-\d+-\d+\.html', path))
+        if _host_matches_any(host, ('dangdang.com',)):
+            return bool(re.fullmatch(r'/\d+\.html', path))
+        if _host_matches_any(host, ('kaola.com',)):
+            return bool(re.fullmatch(r'/product/\d+\.html', path))
+        if _host_matches_any(host, ('vmall.com',)):
+            return bool(re.fullmatch(r'/product/\d+\.html', path)) or (
+                path.startswith('/product/comdetail') and bool(re.fullmatch(r'\d+', (qs.get('prdid') or qs.get('prdId') or [''])[0])))
+        if _host_matches_any(host, ('gome.com.cn',)):
+            return host.startswith('item.') and bool(re.fullmatch(r'/[a-z0-9-]{6,}\.html', path))
+        if _host_matches_any(host, ('apple.com.cn',)):
+            return path.startswith('/shop/buy-') and len(path) > len('/shop/buy-') + 2
+        if _host_matches_any(host, ('xiaomiyoupin.com',)):
+            return path.rstrip('/') == '/detail' and bool(re.fullmatch(r'\d+', (qs.get('gid') or [''])[0]))
         return path.endswith(('/goods.html', '/duo_goods.html')) and bool(re.fullmatch(r'\d+', (qs.get('goods_id') or [''])[0]))
     except (ValueError, TypeError):
         return False
@@ -3305,20 +3489,108 @@ def _china_domestic_product_url(url):
 
 # Retrieval vocabulary only: these translations are never identity proof and
 # never replace the visible product title, model, variant, or price.
+# Brand names as written by Chinese marketplaces and by Arabic-speaking users;
+# every alias maps back to the Latin brand for query building and matching.
+_LOCAL_BRAND_ALIASES = {
+    'sony': {'zh': '索尼', 'ar': 'سوني'}, 'samsung': {'zh': '三星', 'ar': 'سامسونج|سامسونغ'},
+    'apple': {'zh': '苹果', 'ar': 'ابل|آبل|أبل'}, 'iphone': {'zh': '苹果手机', 'ar': 'ايفون|آيفون'},
+    'ipad': {'ar': 'ايباد|آيباد'}, 'airpods': {'ar': 'ايربودز|ايربود'}, 'macbook': {'ar': 'ماك بوك|ماكبوك'},
+    'xiaomi': {'zh': '小米', 'ar': 'شاومي'}, 'huawei': {'zh': '华为', 'ar': 'هواوي'}, 'honor': {'zh': '荣耀'},
+    'oppo': {'zh': '欧珀', 'ar': 'اوبو'}, 'vivo': {'ar': 'فيفو'}, 'oneplus': {'zh': '一加', 'ar': 'ون بلس'},
+    'realme': {'zh': '真我', 'ar': 'ريلمي'}, 'lenovo': {'zh': '联想', 'ar': 'لينوفو'}, 'dell': {'zh': '戴尔', 'ar': 'ديل'},
+    'hp': {'zh': '惠普', 'ar': 'اتش بي'}, 'asus': {'zh': '华硕', 'ar': 'اسوس'}, 'acer': {'zh': '宏碁', 'ar': 'ايسر'},
+    'microsoft': {'zh': '微软', 'ar': 'مايكروسوفت'}, 'google': {'zh': '谷歌', 'ar': 'قوقل|جوجل'},
+    'nintendo': {'zh': '任天堂', 'ar': 'نينتندو'}, 'playstation': {'zh': '索尼PS|PlayStation', 'ar': 'بلايستيشن|بلاي ستيشن|سوني بلايستيشن'},
+    'xbox': {'zh': '微软Xbox', 'ar': 'اكس بوكس|اكسبوكس|إكس بوكس'}, 'logitech': {'zh': '罗技', 'ar': 'لوجيتك|لوجيتيك'},
+    'razer': {'zh': '雷蛇', 'ar': 'ريزر'}, 'anker': {'zh': '安克', 'ar': 'انكر'}, 'baseus': {'zh': '倍思', 'ar': 'بيسوس'},
+    'bose': {'zh': '博士', 'ar': 'بوز'}, 'jbl': {'ar': 'جي بي ال|جيبيال'}, 'beats': {'ar': 'بيتس'},
+    'sennheiser': {'zh': '森海塞尔', 'ar': 'سينهايزر'}, 'marshall': {'zh': '马歇尔', 'ar': 'مارشال'},
+    'dyson': {'zh': '戴森', 'ar': 'دايسون'}, 'philips': {'zh': '飞利浦', 'ar': 'فيليبس'}, 'panasonic': {'zh': '松下', 'ar': 'باناسونيك'},
+    'lg': {'ar': 'ال جي|إل جي'}, 'bosch': {'zh': '博世', 'ar': 'بوش'}, 'siemens': {'zh': '西门子', 'ar': 'سيمنز'},
+    'braun': {'zh': '博朗', 'ar': 'براون'}, 'tefal': {'zh': '特福', 'ar': 'تيفال'}, 'delonghi': {'zh': '德龙', 'ar': 'ديلونجي'},
+    'nespresso': {'zh': '奈斯派索', 'ar': 'نسبريسو'}, 'ninja': {'ar': 'نينجا'}, 'kitchenaid': {'ar': 'كيتشن ايد'},
+    'midea': {'zh': '美的'}, 'haier': {'zh': '海尔'}, 'gree': {'zh': '格力'}, 'hisense': {'zh': '海信', 'ar': 'هايسنس'},
+    'tcl': {'ar': 'تي سي ال'}, 'canon': {'zh': '佳能', 'ar': 'كانون'}, 'nikon': {'zh': '尼康', 'ar': 'نيكون'},
+    'gopro': {'ar': 'جو برو|قو برو'}, 'dji': {'zh': '大疆'}, 'garmin': {'zh': '佳明', 'ar': 'قارمن|جارمن|غارمن'},
+    'fitbit': {'ar': 'فيتبيت'}, 'casio': {'zh': '卡西欧', 'ar': 'كاسيو'}, 'seiko': {'zh': '精工', 'ar': 'سيكو'},
+    'rolex': {'zh': '劳力士', 'ar': 'رولكس'}, 'omega': {'zh': '欧米茄', 'ar': 'اوميغا|اوميجا'}, 'tissot': {'zh': '天梭', 'ar': 'تيسوت'},
+    'swatch': {'zh': '斯沃琪', 'ar': 'سواتش'}, 'fossil': {'ar': 'فوسيل'}, 'nike': {'zh': '耐克', 'ar': 'نايك|نايكي'},
+    'adidas': {'zh': '阿迪达斯', 'ar': 'اديداس|أديداس'}, 'puma': {'zh': '彪马', 'ar': 'بوما'}, 'skechers': {'zh': '斯凯奇', 'ar': 'سكيتشرز|سكتشرز'},
+    'newbalance': {'zh': '新百伦', 'ar': 'نيو بالانس'}, 'underarmour': {'zh': '安德玛', 'ar': 'اندر ارمور'},
+    'reebok': {'zh': '锐步', 'ar': 'ريبوك'}, 'asics': {'zh': '亚瑟士', 'ar': 'اسيكس'}, 'vans': {'zh': '范斯', 'ar': 'فانز'},
+    'converse': {'zh': '匡威', 'ar': 'كونفرس'}, 'crocs': {'zh': '卡骆驰', 'ar': 'كروكس'}, 'birkenstock': {'zh': '勃肯', 'ar': 'بيركنستوك'},
+    'timberland': {'zh': '添柏岚', 'ar': 'تمبرلاند'}, 'uniqlo': {'zh': '优衣库', 'ar': 'يونيكلو'}, 'zara': {'ar': 'زارا'},
+    'lego': {'zh': '乐高', 'ar': 'ليغو|ليجو|ليقو'}, 'barbie': {'zh': '芭比', 'ar': 'باربي'}, 'hotwheels': {'zh': '风火轮', 'ar': 'هوت ويلز'},
+    'pokemon': {'zh': '宝可梦', 'ar': 'بوكيمون'}, 'pampers': {'zh': '帮宝适', 'ar': 'بامبرز'}, 'huggies': {'zh': '好奇', 'ar': 'هقيز|هاجيز'},
+    'nestle': {'zh': '雀巢', 'ar': 'نستله'}, 'pringles': {'zh': '品客', 'ar': 'برينجلز|برنجلز'}, 'oreo': {'zh': '奥利奥', 'ar': 'اوريو'},
+    'kitkat': {'ar': 'كيتكات|كيت كات'}, 'nutella': {'ar': 'نوتيلا'}, 'loreal': {'zh': '欧莱雅', 'ar': 'لوريال'},
+    'esteelauder': {'zh': '雅诗兰黛', 'ar': 'استي لودر'}, 'lancome': {'zh': '兰蔻', 'ar': 'لانكوم'}, 'shiseido': {'zh': '资生堂', 'ar': 'شيسيدو'},
+    'clinique': {'zh': '倩碧', 'ar': 'كلينيك'}, 'kiehls': {'zh': '科颜氏', 'ar': 'كيلز'}, 'cerave': {'zh': '适乐肤', 'ar': 'سيرافي'},
+    'cetaphil': {'zh': '丝塔芙', 'ar': 'سيتافيل'}, 'larocheposay': {'zh': '理肤泉', 'ar': 'لاروش بوزيه|لاروش'},
+    'vichy': {'zh': '薇姿', 'ar': 'فيشي'}, 'bioderma': {'zh': '贝德玛', 'ar': 'بيوديرما'}, 'neutrogena': {'zh': '露得清', 'ar': 'نيوتروجينا'},
+    'nivea': {'zh': '妮维雅', 'ar': 'نيفيا'}, 'olay': {'zh': '玉兰油', 'ar': 'اولاي'}, 'dove': {'zh': '多芬', 'ar': 'دوف'},
+    'vaseline': {'zh': '凡士林', 'ar': 'فازلين'}, 'gillette': {'zh': '吉列', 'ar': 'جيليت'}, 'oralb': {'zh': '欧乐B', 'ar': 'اورال بي'},
+    'pantene': {'zh': '潘婷', 'ar': 'بانتين'}, 'headshoulders': {'zh': '海飞丝', 'ar': 'هيد اند شولدرز'},
+    'maybelline': {'zh': '美宝莲', 'ar': 'ميبيلين'}, 'mac': {'zh': '魅可', 'ar': 'ماك'}, 'dior': {'zh': '迪奥', 'ar': 'ديور'},
+    'chanel': {'zh': '香奈儿', 'ar': 'شانيل'}, 'gucci': {'zh': '古驰', 'ar': 'قوتشي|غوتشي'}, 'louisvuitton': {'zh': '路易威登', 'ar': 'لويس فيتون'},
+    'hermes': {'zh': '爱马仕', 'ar': 'هيرمس'}, 'coach': {'zh': '蔻驰', 'ar': 'كوتش'}, 'michaelkors': {'zh': '迈克高仕', 'ar': 'مايكل كورس'},
+    'rayban': {'zh': '雷朋', 'ar': 'ريبان'}, 'oakley': {'zh': '欧克利', 'ar': 'اوكلي'}, 'samsonite': {'zh': '新秀丽', 'ar': 'سامسونايت'},
+    'rimowa': {'zh': '日默瓦', 'ar': 'ريموا'}, 'stanley': {'zh': '史丹利', 'ar': 'ستانلي'}, 'thermos': {'zh': '膳魔师', 'ar': 'ثيرموس'},
+    'yeti': {'ar': 'يتي'}, 'ikea': {'zh': '宜家', 'ar': 'ايكيا'}, 'starbucks': {'zh': '星巴克', 'ar': 'ستاربكس'},
+    'kindle': {'ar': 'كيندل'}, 'instax': {'zh': '拍立得', 'ar': 'انستاكس'}, 'fujifilm': {'zh': '富士', 'ar': 'فوجي'},
+}
 _LOCAL_RETRIEVAL_NOUNS = {
     'coffeecup': {'en': 'coffee cups|coffee cup', 'zh': '咖啡杯', 'ar': 'فنجان قهوة|كوب قهوة', 'de': 'Kaffeetasse', 'fr': 'tasse à café', 'es': 'taza de café'},
-    'shoes': {'en': 'shoes|shoe|footwear', 'zh': '鞋|运动鞋', 'ja': '靴|シューズ', 'de': 'Schuhe|Schuh', 'fr': 'chaussures|chaussure', 'it': 'scarpe', 'es': 'zapatos', 'tr': 'ayakkabı', 'ar': 'حذاء|أحذية'},
+    'shoes': {'en': 'shoes|shoe|footwear|sneakers|sneaker|trainers|boots|boot|sandals|sandal|slippers|slipper', 'zh': '鞋|运动鞋|跑鞋|靴子|凉鞋|拖鞋|板鞋', 'ja': '靴|シューズ|スニーカー', 'de': 'Schuhe|Schuh|Sneaker|Stiefel', 'fr': 'chaussures|chaussure|baskets|bottes', 'it': 'scarpe', 'es': 'zapatos|zapatillas', 'tr': 'ayakkabı', 'ar': 'حذاء|أحذية|احذيه|جوتي|جواتي|بوت|صندل|نعال|شبشب|سنيكرز'},
     'planter': {'en': 'plant pot|plant pots|flower pot|flower pots|planters|planter', 'zh': '花盆', 'ja': '植木鉢', 'de': 'Blumentopf|Blumentöpfe', 'fr': 'pot de fleurs', 'it': 'vaso per piante', 'es': 'maceta', 'tr': 'saksı', 'ar': 'أصيص|اصيص'},
-    'headphones': {'en': 'headphones|headphone|headset|earphones', 'zh': '耳机|耳機', 'ja': 'ヘッドホン|イヤホン', 'de': 'Kopfhörer', 'fr': 'casque audio', 'it': 'cuffie', 'es': 'auriculares', 'tr': 'kulaklık', 'ar': 'سماعات|سماعة'},
+    'headphones': {'en': 'headphones|headphone|headset|earphones|earphone|earbuds|earbud', 'zh': '耳机|耳機|无线耳机|蓝牙耳机|耳塞|头戴式耳机', 'ja': 'ヘッドホン|イヤホン', 'de': 'Kopfhörer|Ohrhörer', 'fr': 'casque audio|écouteurs', 'it': 'cuffie', 'es': 'auriculares', 'tr': 'kulaklık', 'ar': 'سماعات|سماعة|سماعه|سماعات اذن|سماعات راس'},
     'keyboard': {'en': 'keyboards|keyboard', 'zh': '键盘|鍵盤', 'ja': 'キーボード', 'de': 'Tastatur', 'fr': 'clavier', 'it': 'tastiera', 'es': 'teclado', 'tr': 'klavye', 'ar': 'لوحة مفاتيح'},
-    'phone': {'en': 'smartphone|mobile phone|phones|phone', 'zh': '手机|手機', 'ja': 'スマートフォン', 'de': 'Smartphone', 'fr': 'téléphone', 'it': 'telefono', 'es': 'teléfono', 'tr': 'telefon', 'ar': 'هاتف'},
+    'phone': {'en': 'smartphone|mobile phone|phones|phone', 'zh': '手机|手機|智能手机', 'ja': 'スマートフォン', 'de': 'Smartphone', 'fr': 'téléphone', 'it': 'telefono', 'es': 'teléfono', 'tr': 'telefon', 'ar': 'هاتف|جوال|تلفون|موبايل'},
     'lamp': {'en': 'lamps|lamp', 'zh': '台灯|灯具', 'ja': 'ランプ', 'de': 'Lampe', 'fr': 'lampe', 'it': 'lampada', 'es': 'lámpara', 'tr': 'lamba', 'ar': 'مصباح'},
     'mask': {'en': 'mask|masks|masque', 'zh': '面膜', 'ja': 'フェイスマスク', 'de': 'Gesichtsmaske', 'fr': 'masque', 'it': 'maschera', 'es': 'mascarilla', 'tr': 'maske', 'ar': 'ماسك|قناع'},
     'cream': {'en': 'creams|cream', 'zh': '面霜', 'ja': 'クリーム', 'de': 'Creme', 'fr': 'crème', 'it': 'crema', 'es': 'crema', 'tr': 'krem', 'ar': 'كريم'},
+    'toy': {'en': 'stuffed toy|stuffed animal|soft toy|plush toy|plushie|plush|toy|toys|figure|figurine|action figure', 'zh': '毛绒玩具|毛绒公仔|公仔|玩偶|布娃娃|娃娃|玩具|手办', 'ja': 'ぬいぐるみ|おもちゃ|フィギュア', 'de': 'Plüschtier|Kuscheltier|Spielzeug|Figur', 'fr': 'peluche|jouet|figurine', 'es': 'peluche|juguete|figura', 'tr': 'peluş|oyuncak', 'ar': 'لعبة|لعبه|العاب|دمية|دميه|دبدوب|مجسم|فقير'},
+    'laptop': {'en': 'laptop|laptops|notebook computer|notebook pc|ultrabook|chromebook', 'zh': '笔记本电脑|笔记本|手提电脑', 'ja': 'ノートパソコン', 'de': 'Laptop|Notebook', 'fr': 'ordinateur portable', 'es': 'portátil', 'tr': 'dizüstü', 'ar': 'لابتوب|لاب توب|لابتوبات'},
+    'tablet': {'en': 'tablet|tablets', 'zh': '平板电脑|平板', 'ja': 'タブレット', 'de': 'Tablet', 'fr': 'tablette', 'es': 'tableta', 'ar': 'تابلت|جهاز لوحي'},
+    'tv': {'en': 'tv|tvs|television|televisions|smart tv', 'zh': '电视|电视机|智能电视', 'ja': 'テレビ', 'de': 'Fernseher', 'fr': 'téléviseur|télévision', 'es': 'televisor|televisión', 'tr': 'televizyon', 'ar': 'تلفزيون|تلفزيونات|تلفاز|شاشة تلفزيون'},
+    'monitor': {'en': 'monitor|monitors|computer screen', 'zh': '显示器|电脑显示器', 'ja': 'モニター', 'de': 'Monitor', 'fr': 'moniteur|écran pc', 'ar': 'شاشة كمبيوتر|شاشه كمبيوتر|مونيتر'},
+    'camera': {'en': 'camera|cameras|camcorder', 'zh': '相机|照相机|摄像机|运动相机', 'ja': 'カメラ', 'de': 'Kamera', 'fr': 'appareil photo|caméra', 'es': 'cámara', 'tr': 'kamera', 'ar': 'كاميرا|كاميرات|كامره'},
+    'perfume': {'en': 'perfume|perfumes|fragrance|eau de parfum|eau de toilette|cologne', 'zh': '香水', 'ja': '香水', 'de': 'Parfum|Parfüm', 'fr': 'parfum', 'es': 'perfume', 'tr': 'parfüm', 'ar': 'عطر|عطور|برفان|بارفان'},
+    'sunscreen': {'en': 'sunscreen|sunblock|sun cream|spf cream', 'zh': '防晒霜|防晒', 'ja': '日焼け止め', 'de': 'Sonnencreme', 'fr': 'crème solaire', 'es': 'protector solar', 'ar': 'واقي شمس|واقي الشمس|صن بلوك|صن سكرين'},
+    'shampoo': {'en': 'shampoo|shampoos', 'zh': '洗发水|洗发露', 'ja': 'シャンプー', 'de': 'Shampoo', 'fr': 'shampooing', 'es': 'champú', 'tr': 'şampuan', 'ar': 'شامبو'},
+    'toothbrush': {'en': 'toothbrush|toothbrushes|electric toothbrush', 'zh': '牙刷|电动牙刷', 'ja': '歯ブラシ', 'de': 'Zahnbürste', 'fr': 'brosse à dents', 'es': 'cepillo de dientes', 'ar': 'فرشاة اسنان|فرشاه اسنان|فرشاة أسنان'},
+    'vacuum': {'en': 'vacuum|vacuum cleaner|vacuums|robot vacuum|cordless vacuum', 'zh': '吸尘器|扫地机器人|无线吸尘器', 'ja': '掃除機', 'de': 'Staubsauger', 'fr': 'aspirateur', 'es': 'aspiradora', 'tr': 'süpürge', 'ar': 'مكنسة|مكنسه|مكنسة كهربائية|مكنسه كهربائيه'},
+    'airfryer': {'en': 'air fryer|airfryer|air fryers', 'zh': '空气炸锅', 'ja': 'ノンフライヤー', 'de': 'Heißluftfritteuse', 'fr': 'friteuse sans huile', 'es': 'freidora de aire', 'ar': 'قلاية هوائية|قلايه هوائيه|قلاية بدون زيت|اير فراير'},
+    'fridge': {'en': 'fridge|refrigerator|fridges|refrigerators', 'zh': '冰箱|电冰箱', 'ja': '冷蔵庫', 'de': 'Kühlschrank', 'fr': 'réfrigérateur|frigo', 'es': 'refrigerador|nevera', 'tr': 'buzdolabı', 'ar': 'ثلاجة|ثلاجه|ثلاجات'},
+    'washer': {'en': 'washing machine|washer|washers|washing machines', 'zh': '洗衣机', 'ja': '洗濯機', 'de': 'Waschmaschine', 'fr': 'lave-linge|machine à laver', 'es': 'lavadora', 'tr': 'çamaşır makinesi', 'ar': 'غسالة|غساله|غسالات'},
+    'aircon': {'en': 'air conditioner|air conditioners|split ac|ac unit', 'zh': '空调|空调机', 'ja': 'エアコン', 'de': 'Klimaanlage', 'fr': 'climatiseur', 'es': 'aire acondicionado', 'tr': 'klima', 'ar': 'مكيف|مكيفات|مكيف سبليت'},
+    'stroller': {'en': 'stroller|strollers|pushchair|pram|buggy', 'zh': '婴儿车|婴儿推车', 'ja': 'ベビーカー', 'de': 'Kinderwagen', 'fr': 'poussette', 'es': 'cochecito', 'ar': 'عربة اطفال|عربه اطفال|عربانة|عربانه|عربية اطفال'},
+    'diapers': {'en': 'diapers|diaper|nappies|nappy', 'zh': '纸尿裤|尿不湿', 'ja': 'おむつ', 'de': 'Windeln', 'fr': 'couches', 'es': 'pañales', 'ar': 'حفاضات|حفاض|حفاظات|بامبرز'},
+    'backpack': {'en': 'backpack|backpacks|rucksack|school bag', 'zh': '背包|双肩包|书包', 'ja': 'リュック|バックパック', 'de': 'Rucksack', 'fr': 'sac à dos', 'es': 'mochila', 'tr': 'sırt çantası', 'ar': 'شنطة ظهر|شنطه ظهر|حقيبة ظهر|حقيبه ظهر|شنطة مدرسية'},
+    'wallet': {'en': 'wallet|wallets|purse|cardholder|card holder', 'zh': '钱包|卡包', 'ja': '財布', 'de': 'Geldbörse|Portemonnaie', 'fr': 'portefeuille', 'es': 'cartera|billetera', 'ar': 'محفظة|محفظه|محافظ'},
+    'sunglasses': {'en': 'sunglasses|sunglass|shades', 'zh': '太阳镜|墨镜', 'ja': 'サングラス', 'de': 'Sonnenbrille', 'fr': 'lunettes de soleil', 'es': 'gafas de sol', 'tr': 'güneş gözlüğü', 'ar': 'نظارة شمسية|نظاره شمسيه|نظارات شمسية|نظارات شمسيه|نظارة شمس'},
+    'jacket': {'en': 'jacket|jackets|coat|coats|hoodie|hoodies|windbreaker|puffer', 'zh': '夹克|外套|羽绒服|卫衣|风衣', 'ja': 'ジャケット|コート|パーカー', 'de': 'Jacke|Mantel', 'fr': 'veste|manteau|blouson', 'es': 'chaqueta|abrigo', 'tr': 'ceket|mont', 'ar': 'جاكيت|جاكت|معطف|هودي|جكيت'},
+    'pants': {'en': 'pants|trousers|jeans|joggers|leggings|shorts', 'zh': '裤子|牛仔裤|长裤|短裤|运动裤', 'ja': 'パンツ|ズボン|ジーンズ', 'de': 'Hose|Jeans', 'fr': 'pantalon|jean', 'es': 'pantalón|pantalones|vaqueros', 'ar': 'بنطلون|بنطال|جينز|بناطيل|شورت'},
+    'shirt': {'en': 'shirt|shirts|t-shirt|t shirt|tshirt|tee|polo|blouse', 'zh': 'T恤|衬衫|衬衣|上衣|polo衫', 'ja': 'シャツ|Tシャツ', 'de': 'Hemd|T-Shirt|Shirt', 'fr': 'chemise|t-shirt', 'es': 'camisa|camiseta', 'tr': 'gömlek|tişört', 'ar': 'قميص|تيشيرت|تي شيرت|بلوزة|بلوزه|قمصان'},
+    'mattress': {'en': 'mattress|mattresses', 'zh': '床垫', 'ja': 'マットレス', 'de': 'Matratze', 'fr': 'matelas', 'es': 'colchón', 'ar': 'مرتبة|مرتبه|مراتب|فرشة|فرشه'},
+    'sofa': {'en': 'sofa|sofas|couch|sectional|loveseat', 'zh': '沙发', 'ja': 'ソファ', 'de': 'Sofa|Couch', 'fr': 'canapé', 'es': 'sofá', 'tr': 'kanepe|koltuk', 'ar': 'كنب|كنبة|كنبه|صوفا|صالون'},
+    'chair': {'en': 'chair|chairs|armchair|office chair|gaming chair', 'zh': '椅子|办公椅|电竞椅|电脑椅', 'ja': '椅子|チェア', 'de': 'Stuhl|Sessel', 'fr': 'chaise|fauteuil', 'es': 'silla|sillón', 'tr': 'sandalye|koltuk', 'ar': 'كرسي|كراسي|كرسي مكتب|كرسي قيمنق'},
+    'drone': {'en': 'drone|drones|quadcopter', 'zh': '无人机', 'ja': 'ドローン', 'de': 'Drohne', 'fr': 'drone', 'es': 'dron', 'ar': 'درون|طائرة بدون طيار|طائره بدون طيار'},
+    'printer': {'en': 'printer|printers', 'zh': '打印机|打印一体机', 'ja': 'プリンター', 'de': 'Drucker', 'fr': 'imprimante', 'es': 'impresora', 'tr': 'yazıcı', 'ar': 'طابعة|طابعه|طابعات'},
+    'router': {'en': 'router|routers|wifi router|mesh wifi', 'zh': '路由器', 'ja': 'ルーター', 'de': 'Router', 'fr': 'routeur', 'es': 'router', 'ar': 'راوتر|راوترات'},
+    'console': {'en': 'game console|gaming console|console', 'zh': '游戏机|主机', 'ja': 'ゲーム機', 'de': 'Spielkonsole|Konsole', 'fr': 'console de jeux|console', 'es': 'consola', 'ar': 'جهاز العاب|جهاز ألعاب|كونسول'},
+    'controller': {'en': 'controller|controllers|gamepad|joystick', 'zh': '手柄|游戏手柄', 'ja': 'コントローラー', 'de': 'Controller', 'fr': 'manette', 'es': 'mando', 'ar': 'يد تحكم|ايادي تحكم|قير|جوي ستيك'},
+    'powerbank': {'en': 'power bank|powerbank|portable charger', 'zh': '充电宝|移动电源', 'ja': 'モバイルバッテリー', 'de': 'Powerbank', 'fr': 'batterie externe', 'es': 'batería externa', 'ar': 'باور بانك|بور بانك|شاحن متنقل'},
+    'mouse': {'en': 'mouse|mice|computer mouse|gaming mouse', 'zh': '鼠标|游戏鼠标|无线鼠标', 'ja': 'マウス', 'de': 'Maus', 'fr': 'souris', 'es': 'ratón', 'ar': 'ماوس|فأرة'},
+    'bottle': {'en': 'water bottle|bottle|thermos|tumbler|flask', 'zh': '水杯|保温杯|水壶|随行杯', 'ja': '水筒|ボトル|タンブラー', 'de': 'Trinkflasche|Thermosflasche', 'fr': 'gourde|bouteille|thermos', 'es': 'botella|termo', 'ar': 'مطارة|مطاره|ترمس|زجاجة ماء|زجاجه ماء|كوب حراري'},
+    'helmet': {'en': 'helmet|helmets', 'zh': '头盔', 'ja': 'ヘルメット', 'de': 'Helm', 'fr': 'casque', 'es': 'casco', 'ar': 'خوذة|خوذه'},
+    'tent': {'en': 'tent|tents', 'zh': '帐篷', 'ja': 'テント', 'de': 'Zelt', 'fr': 'tente', 'es': 'tienda de campaña', 'ar': 'خيمة|خيمه|خيم'},
+    'bicycle': {'en': 'bicycle|bike|bikes|bicycles|e-bike|ebike', 'zh': '自行车|单车|电动自行车', 'ja': '自転車', 'de': 'Fahrrad|E-Bike', 'fr': 'vélo', 'es': 'bicicleta', 'tr': 'bisiklet', 'ar': 'دراجة|دراجه|سيكل|دراجة هوائية|دراجه هوائيه'},
+    'speaker': {'en': 'speaker|speakers|bluetooth speaker|soundbar', 'zh': '音箱|音响|蓝牙音箱|回音壁', 'ja': 'スピーカー|サウンドバー', 'de': 'Lautsprecher|Soundbar', 'fr': 'enceinte|haut-parleur', 'es': 'altavoz', 'tr': 'hoparlör', 'ar': 'سبيكر|مكبر صوت|ساوند بار'},
     'teaset': {'en': 'tea cup set|tea set', 'ar': 'طقم شاي|طقم فناجين شاي', 'ur': 'چائے کے کپ کا سیٹ', 'hi': 'चाय के कप का सेट', 'bn': 'চায়ের কাপ সেট', 'zh': '茶具套装', 'fr': 'service à thé', 'de': 'Teeservice', 'es': 'juego de té'},
     'scale': {'en': 'bathroom scale|weighing scale', 'ar': 'ميزان وزن|ميزان حمام', 'ur': 'وزن کرنے کا ترازو', 'hi': 'वजन मापने की मशीन', 'bn': 'ওজন মাপার যন্ত্র', 'zh': '体重秤', 'fr': 'pèse-personne', 'de': 'Personenwaage', 'es': 'báscula de baño'},
     'dress': {'en': 'dress|dresses', 'ar': 'فستان|فساتين', 'ur': 'لباس', 'hi': 'ड्रेस', 'bn': 'পোশাক', 'zh': '连衣裙', 'fr': 'robe', 'de': 'Kleid', 'es': 'vestido'},
-    'watch': {'en': 'wristwatch|wrist watch', 'ar': 'ساعة يد', 'ur': 'کلائی کی گھڑی', 'hi': 'कलाई घड़ी', 'bn': 'হাতঘড়ি', 'zh': '腕表', 'fr': 'montre-bracelet', 'de': 'Armbanduhr', 'es': 'reloj de pulsera'},
+    'watch': {'en': 'wristwatch|wrist watch|watch|watches|smartwatch|smart watch', 'ar': 'ساعة يد|ساعة|ساعه|ساعات|ساعة ذكية|ساعه ذكيه', 'ur': 'کلائی کی گھڑی', 'hi': 'कलाई घड़ी', 'bn': 'হাতঘড়ি', 'zh': '腕表', 'fr': 'montre-bracelet', 'de': 'Armbanduhr', 'es': 'reloj de pulsera'},
 }
 for _noun, _ur, _hi, _bn in (
     ('shoes', 'جوتے', 'जूते', 'জুতা'), ('planter', 'گملا', 'गमला', 'ফুলের টব'),
@@ -3328,20 +3600,37 @@ for _noun, _ur, _hi, _bn in (
     _LOCAL_RETRIEVAL_NOUNS[_noun].update(ur=_ur, hi=_hi, bn=_bn)
 
 
+_CJK_BOUNDARY_RE = re.compile(r'(?<=[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af])(?=[A-Za-z0-9])|(?<=[A-Za-z0-9])(?=[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af])')
+
+
+def _cjk_boundary_spaces(text):
+    """"戴森V12吸尘器" -> "戴森 V12 吸尘器" so model codes inside CJK titles become tokens."""
+    return _CJK_BOUNDARY_RE.sub(' ', str(text or ''))
+
+
 def _local_term_pattern(term):
-    term = re.escape(term)
+    escaped = re.escape(term)
     # Chinese/Japanese nouns need no whitespace word boundary. Latin and Arabic
     # names still do, so a short noun cannot match the middle of a model/name.
-    return term if re.search(r'[\u3040-\u30ff\u3400-\u9fff]', term) else r'(?<!\w)' + term + r'(?!\w)'
+    if re.search(r'[\u3040-\u30ff\u3400-\u9fff]', term):
+        return escaped
+    if re.search(r'[\u0600-\u06ff]', term):
+        # Accept the definite article and a leading conjunction: السماعات / وسماعة.
+        return r'(?<!\w)(?:و?ال|و)?' + escaped + r'(?!\w)'
+    return r'(?<!\w)' + escaped + r'(?!\w)'
 
 
 @lru_cache(maxsize=1)
 def _local_retrieval_rules():
     audience = {'男鞋': 'men shoes', '女鞋': 'women shoes', '童鞋': 'kids shoes',
-                '男士': 'men', '女士': 'women', '鞋架': 'shoe rack', '手机壳': 'phone case',
-                '斯凯奇': 'skechers', '斯凱奇': 'skechers'}
-    entries = [(term.casefold(), canonical) for canonical, languages in _LOCAL_RETRIEVAL_NOUNS.items()
+                '男士': 'men', '女士': 'women', '男款': 'men', '女款': 'women', '儿童': 'kids', '鞋架': 'shoe rack', '手机壳': 'phone case',
+                '斯凯奇': 'skechers', '斯凱奇': 'skechers',
+                'رجالي': 'men', 'رجاليه': 'men', 'للرجال': 'men', 'نسائي': 'women', 'نسائيه': 'women', 'حريمي': 'women',
+                'للنساء': 'women', 'اطفال': 'kids', 'للاطفال': 'kids', 'ولادي': 'boys', 'بناتي': 'girls'}
+    entries = [(normalize_ar(term.casefold()), canonical) for canonical, languages in _LOCAL_RETRIEVAL_NOUNS.items()
                for terms in languages.values() for term in terms.split('|')]
+    entries += [(normalize_ar(alias.casefold()), brand) for brand, languages in _LOCAL_BRAND_ALIASES.items()
+                for terms in languages.values() for alias in terms.split('|')]
     entries += list(audience.items())
     replacements = dict(entries)
     pattern = '|'.join(_local_term_pattern(term) for term in sorted(replacements, key=len, reverse=True))
@@ -3349,7 +3638,7 @@ def _local_retrieval_rules():
 
 
 def _local_retrieval_text(value):
-    text = unicodedata.normalize('NFKC', str(value or '')).casefold()
+    text = normalize_ar(_cjk_boundary_spaces(unicodedata.normalize('NFKC', str(value or '')).casefold()))
     pattern, replacements = _local_retrieval_rules()
     return pattern.sub(lambda m: ' ' + replacements[m.group(0)] + ' ', text)
 
@@ -3591,10 +3880,26 @@ def _market_query_bridge(query, title, cc):
     return text
 
 
-def _local_discovery_candidate_ok(query, item):
-    """A translated noun is not a missing match; explicit conflicts still reject."""
+def _query_is_generic(query):
+    """No brand/model evidence and at most three content words ("stuffed toy")."""
+    q = _local_retrieval_text(query)
+    if _web_model_tokens_from_listing(q):
+        return False
+    lexical = _findzia_lexical_tokens(q)
+    if any(token in _LOCAL_BRAND_ALIASES for token in lexical):
+        return False
+    return len(lexical) <= 3
+
+
+def _local_discovery_candidate_ok(query, item, visual=False):
+    """A translated noun is not a missing match; explicit conflicts still reject.
+
+    ``visual`` rows come from an image engine (Google Lens): only hard conflicts
+    reject them; the reference-image audit decides identity, never text overlap.
+    """
     title = str(item.get('title') or '')
     q, t = _local_retrieval_text(query), _local_retrieval_text(title)
+    t_original = t
     if _findzia_hard_product_mismatch(q, t):
         return False
     cc = item.get('_shopping_gl') or item.get('_lens_country') or current_market().get('country') or DEFAULT_COUNTRY
@@ -3621,12 +3926,24 @@ def _local_discovery_candidate_ok(query, item):
             and normalized_query in _photo_identity_text(title)):
         return True
     # A retail search for footwear must not return its storage/accessories.
-    if 'shoes' in q_kinds and 'shoe rack' in t and 'shoe rack' not in q:
+    # Checked on the untranslated title too: a reverse-translation edit may
+    # split a longer CJK word (鞋架 -> "shoes架") and hide the accessory.
+    if 'shoes' in q_kinds and ('shoe rack' in t or 'shoe rack' in t_original) and 'shoe rack' not in q:
         return False
+    if visual:
+        item['_local_match_uncertain'] = True
+        return True
     if _findzia_stream_candidate_ok(q, dict(item, title=t)):
         if translated:
             item['_local_match_uncertain'] = True
         return True
+    # A generic identity ("stuffed toy") cannot be matched by word overlap; any
+    # shared product word plus a thumbnail lets the visual audit decide.
+    if item.get('thumbnail') and _query_is_generic(query):
+        q_lex, t_lex = _findzia_lexical_tokens(q), _findzia_lexical_tokens(t)
+        if (q_lex & t_lex) or (q_kinds and q_kinds & t_kinds):
+            item['_local_match_uncertain'] = True
+            return True
     # Unknown translations can reach the existing visual audit when a brand
     # or model survives. This is eligibility, never an invented exact score.
     non_latin = r'[\u0600-\u06ff\u0900-\u0dff\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]'
@@ -3780,6 +4097,50 @@ def _local_discovery_records(data):
     return records[:80]
 
 
+def _local_discovery_snippet_price(row):
+    """Indexed price text from a Google organic rich snippet, or an empty string."""
+    snippet = row.get('rich_snippet') if isinstance(row, dict) else None
+    if not isinstance(snippet, dict):
+        return ''
+    for side in ('top', 'bottom'):
+        block = snippet.get(side)
+        if not isinstance(block, dict):
+            continue
+        detected = block.get('detected_extensions')
+        detected = detected if isinstance(detected, dict) else {}
+        extensions = block.get('extensions')
+        extensions = extensions if isinstance(extensions, list) else []
+        joined = ' '.join(str(x) for x in extensions)
+        if re.search(r'\b(from|starting|up to)\b|ابتداء|\d\s*[-–—]\s*[$€£¥]?\s*\d', joined, re.I):
+            continue
+        price, currency = detected.get('price'), str(detected.get('currency') or '')
+        if price not in (None, '') and not isinstance(price, (dict, list, bool)):
+            return f'{currency} {price}'.strip()
+        for extension in extensions:
+            for piece in re.split(r'[|·]', str(extension)):
+                piece = piece.strip()
+                if piece and any(pat.search(piece) for pat in _WEB_PRICE_PATS):
+                    return piece[:40]
+    return ''
+
+
+def _local_discovery_title(row):
+    """Provider rows do not always carry ``title``; fall back to other name fields."""
+    for key in ('title', 'name', 'product_title', 'heading', 'headline', 'label'):
+        value = row.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    words = row.get('snippet_highlighted_words')
+    if isinstance(words, list) and words:
+        joined = ' '.join(str(w) for w in words if str(w).strip())[:120].strip()
+        if joined:
+            return joined
+    snippet = row.get('snippet') or row.get('description')
+    if isinstance(snippet, str) and snippet.strip():
+        return re.split(r'[。！？!?\n]', snippet.strip(), maxsplit=1)[0][:120].strip()
+    return ''
+
+
 def _local_discovery_rows(data, query, market, provider):
     out, seen = [], set()
     stats = Counter()
@@ -3789,17 +4150,28 @@ def _local_discovery_rows(data, query, market, provider):
         if not isinstance(row, dict):
             continue
         url = _local_discovery_direct_link(row)
-        title = str(row.get('title') or '').strip()
+        title = _local_discovery_title(row)
         if not url or not title or is_blocked_store(row.get('source') or '', url):
             stats['invalid_offer'] += 1
             for reason in _local_invalid_offer_reason(row, url, title):
                 stats[reason] += 1
+            # Log an unknown provider row shape once, so a silent zero can be
+            # diagnosed from the deploy log without another guess.
+            shape_key = (provider, 'title' if not title else 'link')
+            if shape_key not in _LOCAL_ROW_SHAPE_LOGGED and len(_LOCAL_ROW_SHAPE_LOGGED) < 32:
+                _LOCAL_ROW_SHAPE_LOGGED.add(shape_key)
+                sample = {k: (str(v)[:80] if not isinstance(v, (dict, list)) else type(v).__name__) for k, v in list(row.items())[:14]}
+                print(f'LOCAL ROW SHAPE provider={provider} reason={shape_key[1]} keys={sorted(row.keys())[:20]} sample={sample}')
             continue
         host = urllib.parse.urlsplit(url).hostname or ''
         item = {'title': title, 'link': url, 'source': str(row.get('source') or host),
                 '_shopping_gl': market['country'], '_lens_country': market['country'],
                 'price': str(row.get('price') or ''), 'currency': str(row.get('currency') or ''),
                 'thumbnail': row.get('thumbnail') or ''}
+        if not item['price']:
+            # Organic rows carry the indexed price inside rich_snippet; surface
+            # it as text so merchant-country evidence can read "KD 12.500".
+            item['price'] = _local_discovery_snippet_price(row)
         money_row = dict(row)
         if market['country'] == 'cn' and _china_domestic_product_url(url):
             if re.fullmatch(r'[¥￥]\s*\d[\d,.]*', item['price']):
@@ -3867,7 +4239,10 @@ def _local_resolve_baidu_links(data, timeout_seconds):
             return ''
         response = None
         try:
-            response = _web_safe_get(url, timeout=(.35, .65), stream=True, max_redirects=2)
+            # Follow Baidu's own hops only; the merchant is never connected, so
+            # resolution does not depend on the server's distance from China.
+            response = _web_safe_get(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36'},
+                                     timeout=(.5, 1.0), stream=True, max_redirects=3, stop_hosts=('baidu.com', 'miaozhen.com'))
             return _local_discovery_direct_link({'link': response.url})
         except Exception:
             return ''
@@ -3938,7 +4313,9 @@ def _local_discovery_request(query, market, kind, timeout_seconds):
         return rows
     if kind == 'baidu':
         params = {'engine': 'baidu', 'q': f'{search_query} 价格 购买 -百科 -知道 -视频', 'ct': 2,
-                  'device': 'mobile', 'api_key': SERPAPI_API_KEY, 'output': 'json'}
+                  'api_key': SERPAPI_API_KEY, 'output': 'json'}
+        if LOCAL_DISCOVERY_BAIDU_DEVICE in ('mobile', 'tablet'):
+            params['device'] = LOCAL_DISCOVERY_BAIDU_DEVICE
     else:
         params = {'engine': 'google', 'q': _local_discovery_query(search_query, market, scoped=kind == 'scoped', language=hl),
                   'gl': cc, 'hl': hl, 'num': 10,
@@ -4635,7 +5012,13 @@ def _dynamic_country_url_hit(cc, link, host):
 
 def _explicit_currency_codes(item):
     hay, _ = _result_hay_host(item)
-    return set(re.findall('\\b[A-Z]{3}\\b', hay.upper())) & KNOWN_CURRENCY_CODES
+    codes = set(re.findall('\\b[A-Z]{3}\\b', hay.upper())) & KNOWN_CURRENCY_CODES
+    codes |= _arabic_explicit_currency_codes(hay)
+    # Short codes (KD/SR/QR/BD/RO/Dhs...) are only trusted inside price fields,
+    # never inside a free-text title where "SR" or "RO" may be a product word.
+    price_fields = ' '.join(str((item or {}).get(k) or '') for k in ('price', 'price_text', 'currency', 'extracted_price_text'))
+    codes |= _arabic_short_currency_codes(price_fields, lenient=True)
+    return codes
 
 def is_us_market_result(item):
     url_market = _merchant_url_market(item.get('link') or item.get('url'))
@@ -7099,7 +7482,7 @@ def _clean_store_name(name):
     return ' '.join(n.split()).strip(' -—–:،') or str(name or '').strip()
 _FINDZIA_ACCESSORY_TOKENS = {'case', 'cover', 'protector', 'guard', 'skin', 'sticker', 'decal', 'cable', 'cord', 'charger', 'adapter', 'adaptor', 'dock', 'stand', 'mount', 'holder', 'strap', 'band', 'sleeve', 'pouch', 'bag', 'lace', 'laces', 'shoelace', 'shoelaces', 'insole', 'insoles', 'sock', 'socks', 'replacement', 'spare', 'part', 'parts', 'accessory', 'accessories', 'manual', 'handbook', 'pdf', 'كفر', 'غطاء', 'حمايه', 'حماية', 'شاحن', 'كيبل', 'كابل', 'وصله', 'وصلة', 'حامل', 'سوار', 'رباط', 'اربطة', 'أربطة', 'جوارب', 'نعل', 'قطع', 'غيار', 'اكسسوار', 'اكسسوارات'}
 _FINDZIA_CONFLICT_GROUPS = (({'tennis', 'تنس'}, {'running', 'runner', 'jogging', 'basketball', 'soccer', 'football', 'golf', 'hiking', 'trail', 'padel', 'تنس', 'جري', 'ركض', 'سله', 'سلة', 'قدم', 'جولف', 'بادل'}), ({'running', 'runner', 'jogging', 'جري', 'ركض'}, {'tennis', 'basketball', 'soccer', 'football', 'golf', 'hiking', 'padel', 'تنس', 'سله', 'سلة', 'قدم', 'جولف', 'بادل'}), ({'padel', 'بادل'}, {'tennis', 'running', 'basketball', 'soccer', 'football', 'golf', 'hiking', 'تنس', 'جري', 'سله', 'سلة', 'قدم', 'جولف'}))
-_FINDZIA_QUERY_FILLER = {'buy', 'best', 'price', 'cheap', 'cheapest', 'online', 'shop', 'shopping', 'for', 'the', 'a', 'an', 'of', 'in', 'with', 'new', 'original', 'ابي', 'أبي', 'اريد', 'أريد', 'افضل', 'أفضل', 'ارخص', 'أرخص', 'سعر', 'شراء', 'اونلاين', 'أونلاين'}
+_FINDZIA_QUERY_FILLER = {'buy', 'best', 'price', 'cheap', 'cheapest', 'online', 'shop', 'shopping', 'for', 'the', 'a', 'an', 'of', 'in', 'with', 'new', 'original', 'ابي', 'أبي', 'ابغى', 'ابغي', 'ودي', 'اريد', 'أريد', 'افضل', 'أفضل', 'ارخص', 'أرخص', 'سعر', 'سعره', 'بكم', 'شراء', 'اونلاين', 'أونلاين', 'وين', 'القى', 'الاقي', 'عندكم', 'متوفر', 'موجود', 'جديد', 'جديده', 'اصلي', 'اصليه', 'ماركه', 'ماركة', 'نوع'}
 _FINDZIA_SPEC_UNITS = {
     'tb', 'gb', 'mb', 'kb', 'kg', 'g', 'gm', 'gr', 'mg', 'lb', 'lbs',
     'pound', 'pounds', 'oz', 'ounce', 'ounces', 'floz', 'cc', 'ml', 'l',
@@ -7111,7 +7494,7 @@ _FINDZIA_SPEC_UNITS = {
     'bottle', 'bottles', 'can', 'cans', 'capsule', 'capsules', 'tablet',
     'tablets', 'pair', 'pairs', 'set', 'sets',
 }
-_FINDZIA_PRICE_WORDS = {'kwd', 'kd', 'usd', 'sar', 'aed', 'qar', 'omr', 'bhd', 'cny', 'rmb', 'eur', 'gbp', 'دينار', 'ريال', 'درهم'}
+_FINDZIA_PRICE_WORDS = {'kwd', 'kd', 'usd', 'sar', 'aed', 'dhs', 'qar', 'omr', 'bhd', 'jod', 'egp', 'mad', 'dzd', 'tnd', 'iqd', 'lbp', 'cny', 'rmb', 'eur', 'gbp', 'دينار', 'ريال', 'درهم', 'جنيه', 'ليره', 'ليرة', 'دك'}
 
 def _findzia_model_tokens(value):
     toks = norm_tokens(value)
@@ -7131,7 +7514,7 @@ def _findzia_model_tokens(value):
 
 def _findzia_pure_numbers(value):
     raw = normalize_ar(str(value or '')).lower()
-    currency = '(?:kwd|kd|usd|sar|aed|qar|omr|bhd|cny|rmb|eur|gbp|د\\.ك|دك|ر\\.س|ر\\.س|د\\.إ|دإ|ر\\.ق|ر\\.ع|د\\.ب|دينار|ريال|درهم|\\$|€|£|¥|￥)'
+    currency = '(?:kwd|kd|usd|sar|sr|aed|dhs|dh|qar|qr|omr|ro|bhd|bd|jod|jd|egp|le|mad|dzd|tnd|iqd|lbp|cny|rmb|eur|gbp|د\\.ك|دك|ر\\.س|ر\\.س|د\\.إ|دإ|ر\\.ق|ر\\.ع|د\\.ب|د\\.أ|ج\\.م|دينار|ريال|درهم|جنيه|ليرة|ليره|\\$|€|£|¥|￥)'
     raw = re.sub(f'{currency}\\s*\\d+(?:[.,]\\d+)?|\\d+(?:[.,]\\d+)?\\s*{currency}', ' ', raw, flags=re.I)
     raw = re.sub('\\b\\d+(?:[.,]\\d+)?\\s*%', ' ', raw)
     raw = re.sub('\\b\\d(?:[.,]\\d)?\\s*(?:/\\s*5|stars?|نجوم?)\\b', ' ', raw, flags=re.I)
@@ -11390,8 +11773,14 @@ def _web_safe_response_close(response):
         except Exception:
             pass
 
-def _web_safe_get(raw_url, *, headers=None, timeout=(2.0, 8.0), stream=True, max_redirects=3):
-    """GET an untrusted URL while validating DNS and every redirect hop."""
+def _web_safe_get(raw_url, *, headers=None, timeout=(2.0, 8.0), stream=True, max_redirects=3, stop_hosts=()):
+    """GET an untrusted URL while validating DNS and every redirect hop.
+
+    With ``stop_hosts`` (a tracker such as Baidu), only hops on those hosts are
+    fetched; the first redirect that leaves them is returned unfetched as a
+    ``_WebRedirectStop`` whose ``url`` is the merchant destination. A 200 page on
+    a stop host is scanned (64 KB) for a meta-refresh/JavaScript redirect.
+    """
     current = _web_validated_outbound_url(raw_url)
     if not current:
         raise ValueError('unsafe_outbound_url')
@@ -11409,22 +11798,40 @@ def _web_safe_get(raw_url, *, headers=None, timeout=(2.0, 8.0), stream=True, max
             )
             if not _web_response_peer_is_public(response):
                 raise ValueError('unsafe_connected_peer')
-            if response.status_code not in {301, 302, 303, 307, 308}:
+            status = response.status_code
+            location = str(response.headers.get('location') or '').strip() if status in {301, 302, 303, 307, 308} else ''
+            if not location and stop_hosts and _host_matches_any(urllib.parse.urlsplit(current).hostname or '', stop_hosts):
+                body = _web_read_limited_response(response, 65536) or b''
+                found = _WEB_META_REDIRECT_RE.search(body.decode('utf-8', 'replace'))
+                location = found.group(1) if found else ''
+            if not location:
                 response._findzia_session = session
                 return response
             if hop >= max_redirects:
                 raise ValueError('too_many_redirects')
-            location = str(response.headers.get('location') or '').strip()
             next_url = _web_validated_outbound_url(urllib.parse.urljoin(current, location))
             _web_safe_response_close(response)
             response = None
             if not next_url:
                 raise ValueError('unsafe_redirect')
+            if stop_hosts and not _host_matches_any(urllib.parse.urlsplit(next_url).hostname or '', stop_hosts):
+                session.close()
+                return _WebRedirectStop(next_url, status)
             current = next_url
     except Exception:
         _web_safe_response_close(response)
         session.close()
         raise
+
+_WEB_META_REDIRECT_RE = re.compile(r'(?:URL\s*=\s*|location\.(?:replace|href|assign)\s*[(=]\s*)[\'"]([^\'"\s]+)[\'"]', re.I)
+
+
+class _WebRedirectStop:
+    """An unfetched redirect target returned by ``_web_safe_get(stop_hosts=...)``."""
+    def __init__(self, url, status_code):
+        self.url, self.status_code, self.headers = url, status_code, {}
+    def close(self):
+        pass
 
 def _web_read_limited_response(response, max_bytes, cancel_event=None):
     try:
@@ -12392,6 +12799,16 @@ def _web_identity_percentage_from_evidence(axes, match_guard=None):
         return 92
     if commercial_identity and (function or len(structure) >= 2):
         return 89
+
+    # A readable brand without a product name is stronger than an anonymous
+    # shape match but is never an exact SKU claim (stays below the exact bar).
+    brand_identity = 'brand' in named
+    if brand_identity and function and len(structure) >= 3:
+        return 88
+    if brand_identity and function and len(structure) >= 2:
+        return 85
+    if brand_identity and (function or len(structure) >= 2):
+        return 80
 
     # Generic/unbranded products can be strongly supported by invariant
     # topology, components and distinctive construction, but are not called
@@ -14433,8 +14850,8 @@ def _web_price_local_explicit(raw_price, market_rank, lang, market_snapshot=None
 
 def _web_price_token_to_float(token, currency_code=''):
     return _normalize_price_token(token, currency_code)
-_WEB_PRICE_CUR_WORDS = 'USD|US\\$|EUR|GBP|KWD|KD|SAR|AED|QAR|BHD|OMR|CNY|RMB|JPY|CAD|AUD|CHF|INR|KRW|TRY|RUB'
-_WEB_PRICE_CUR_SYMS = '[$€£¥￥₹₩₺₽]|د\\.ك|ر\\.س|د\\.إ|ر\\.ق|د\\.ب|ر\\.ع'
+_WEB_PRICE_CUR_WORDS = '(?<![A-Za-z])(?:USD|US\\$|EUR|GBP|KWD|K\\.?D|SAR|S\\.?R|AED|DHS|DH|QAR|Q\\.?R|BHD|B\\.?D|OMR|R\\.?O|JOD|J\\.?D|EGP|L\\.?E|MAD|DZD|TND|IQD|LBP|LYD|CNY|RMB|JPY|CAD|AUD|CHF|INR|KRW|TRY|RUB)(?![A-Za-z])'
+_WEB_PRICE_CUR_SYMS = '[$€£¥￥₹₩₺₽]|د\\.ك|ر\\.س|د\\.إ|ر\\.ق|د\\.ب|ر\\.ع|د\\.أ|ج\\.م|د\\.م|د\\.ت|دك|ريال|دينار|درهم|جنيه|ليرة|ليره'
 _WEB_PRICE_NUM = '([0-9]{1,3}(?:,[0-9]{3})+(?:\\.[0-9]{1,3})?|[0-9]+(?:[.,][0-9]{1,3})?)'
 _WEB_PRICE_PATS = (re.compile('(?:%s|%s)\\s*%s' % (_WEB_PRICE_CUR_WORDS, _WEB_PRICE_CUR_SYMS, _WEB_PRICE_NUM), re.I), re.compile('%s\\s*(?:%s|%s)' % (_WEB_PRICE_NUM, _WEB_PRICE_CUR_WORDS, _WEB_PRICE_CUR_SYMS), re.I))
 
@@ -14449,7 +14866,7 @@ def _web_price_number_and_currency(text, fallback_currency=''):
             val = _web_price_token_to_float(m.group(1), cur)
             if val and val > 0:
                 return (val, cur)
-    if extract_pack_size(raw) and (not re.search('\\b(?:USD|EUR|GBP|KWD|KD|SAR|AED|QAR|BHD|OMR|CNY|RMB|JPY|CAD|AUD|CHF|INR|KRW|TRY|RUB)\\b|[$€£¥￥₹₩₺₽]|د\\.ك|ر\\.س|د\\.إ|ر\\.ق|د\\.ب|ر\\.ع', raw, re.I)):
+    if extract_pack_size(raw) and (not re.search('\\b(?:USD|EUR|GBP|KWD|KD|SAR|SR|AED|DHS|QAR|QR|BHD|BD|OMR|RO|JOD|EGP|MAD|DZD|TND|IQD|LBP|CNY|RMB|JPY|CAD|AUD|CHF|INR|KRW|TRY|RUB)\\b|[$€£¥￥₹₩₺₽]|د\\.ك|ر\\.س|د\\.إ|ر\\.ق|د\\.ب|ر\\.ع|دك|ريال|دينار|درهم|جنيه|ليرة|ليره', raw, re.I)):
         return (None, cur)
     if len(raw) <= 50:
         m = re.search(r'(?<![0-9])([0-9]+(?:[.,][0-9]{1,3})?)(?![0-9])', _normalize_price_chars(raw))
@@ -14461,7 +14878,7 @@ def _web_price_number_and_currency(text, fallback_currency=''):
 _WEB_DEEP_PRICE_SPECIFIC_PATS = (re.compile('"(?:salePrice|sale_price|specialPrice|special_price|sellingPrice|selling_price|offerPrice|offer_price|finalPrice|final_price|currentPrice|current_price|discountedPrice|discounted_price)"\\s*:\\s*\\{[^{}]{0,140}?"(?:amount|value|raw)"\\s*:\\s*"?([0-9]+(?:\\.[0-9]{1,4})?)', re.I), re.compile('"(?:salePrice|specialPrice|sellingPrice|offerPrice|finalPrice|currentPrice|discountedPrice|price_amount|priceAmount|priceValue|price_value)"\\s*:\\s*"?([0-9]+(?:\\.[0-9]{1,4})?)"?', re.I), re.compile('"price"\\s*:\\s*\\{[^{}]{0,140}?"(?:amount|value|raw)"\\s*:\\s*"?([0-9]+(?:\\.[0-9]{1,4})?)', re.I))
 _WEB_DEEP_PRICE_GENERIC_PAT = re.compile('"price"\\s*:\\s*"?([0-9]+(?:\\.[0-9]{1,4})?)"?', re.I)
 _WEB_DEEP_CURRENCY_PAT = re.compile('"(?:currency|currencyCode|currency_code|priceCurrency|currencyIsoCode)"\\s*:\\s*"([A-Za-z]{3})"', re.I)
-_WEB_URL_CURRENCY_HINTS = ((('kuwait', '/kw/', '/kw-', '-kw/', '.kw/'), 'KWD'), (('saudi', '/sa/', '/sa-', '-sa/', '.sa/'), 'SAR'), (('/uae', 'uae/', '/ae/', '/ae-', '.ae/'), 'AED'), (('qatar', '/qa/', '.qa/'), 'QAR'), (('bahrain', '/bh/', '.bh/'), 'BHD'), (('oman', '/om/', '.om/'), 'OMR'), (('egypt', '/eg/', '.eg/'), 'EGP'))
+_WEB_URL_CURRENCY_HINTS = ((('kuwait', '/kw/', '/kw-', '-kw/', '.kw/'), 'KWD'), (('saudi', '/sa/', '/sa-', '-sa/', '.sa/'), 'SAR'), (('/uae', 'uae/', '/ae/', '/ae-', '.ae/'), 'AED'), (('qatar', '/qa/', '.qa/'), 'QAR'), (('bahrain', '/bh/', '.bh/'), 'BHD'), (('oman', '/om/', '.om/'), 'OMR'), (('egypt', '/eg/', '.eg/'), 'EGP'), (('jordan', '/jo/', '.jo/'), 'JOD'), (('iraq', '/iq/', '.iq/'), 'IQD'), (('lebanon', '/lb/', '.lb/'), 'LBP'), (('morocco', '/ma/', '.ma/'), 'MAD'), (('algeria', '/dz/', '.dz/'), 'DZD'), (('tunisia', '/tn/', '.tn/'), 'TND'))
 
 def _web_currency_from_url(url):
     low = str(url or '').lower()
@@ -15131,6 +15548,11 @@ def _web_indexed_offer_money(item):
     if not isinstance(item, dict):
         return None
     candidates = [(item.get('price'), item.get('currency') or '')]
+    # Lens/Shopping rows also expose a parsed amount; it shares the same currency.
+    if item.get('price_value') not in (None, '', 0) and not isinstance(item.get('price_value'), (dict, list, bool)):
+        candidates.append((item.get('price_value'), item.get('currency') or ''))
+    market_cc = _search_geo_country(item) or _explicit_market_country(item)
+    market_codes = set(COUNTRY_CURRENCY_CODES.get(market_cc, ())) if market_cc else set()
     snippet = item.get('rich_snippet')
     snippet = snippet if isinstance(snippet, dict) else {}
     for side in ('top', 'bottom'):
@@ -15150,15 +15572,29 @@ def _web_indexed_offer_money(item):
     for value, currency in candidates:
         if value in (None, '') or isinstance(value, (dict, list, bool)):
             continue
-        raw = str(value).strip()
-        explicit = str(currency or '').upper()
+        # Providers mark estimated prices with a trailing asterisk ("$27.99*").
+        raw = re.sub(r'\s*\*+\s*$', '', str(value).strip()).strip()
+        if not raw:
+            continue
+        explicit = str(currency or '').strip().upper()
         if explicit not in KNOWN_CURRENCY_CODES:
-            if ('$' in raw or '¥' in raw or '￥' in raw) and not re.search(r'\b(?:USD|CAD|AUD|HKD|SGD|CNY|JPY)\b|US\$', raw, re.I):
-                continue
-            _, explicit = _web_price_number_and_currency(raw)
+            symbol = explicit if explicit in {'$', '¥', '￥', '€', '£', 'US$'} else ''
+            probe = raw if re.search(r'[$¥￥€£]|[A-Za-z]{2,}', raw) else f'{symbol}{raw}'.strip()
+            ambiguous = ('$' in probe or '¥' in probe or '￥' in probe) and not re.search(r'\b(?:USD|CAD|AUD|HKD|SGD|NZD|MXN|TWD|CNY|JPY)\b|US\$', probe, re.I)
+            if ambiguous:
+                # A bare symbol is only trusted through the market the row was
+                # retrieved for: a US-targeted "$" is USD, a Canadian one CAD.
+                resolved = detect_currency_code(probe, '', market_cc) if market_cc else ''
+                if resolved and resolved in market_codes:
+                    explicit = resolved
+                else:
+                    continue
+            else:
+                _, explicit = _web_price_number_and_currency(probe)
+            raw = probe
         if not explicit:
             continue
-        display = raw if re.search(r'[A-Za-z$€£¥￥₹₩₺₽د]', raw) else f'{raw} {explicit}'
+        display = raw if re.search(r'[A-Za-z$€£¥￥₹₩₺₽\u0600-\u06ff]', raw) else f'{raw} {explicit}'
         if not _web_row_has_numeric_price({'price': display, 'currency': explicit}):
             continue
         amount, _ = _web_price_number_and_currency(display, explicit)
@@ -15187,7 +15623,7 @@ def _web_targeted_price_updates(entries, lang, market):
     params = {'engine': 'google', 'q': query, 'gl': str(market.get('country') or 'us'),
               'hl': country_search_hl(str(market.get('country') or 'us')), 'num': 10,
               'api_key': SERPAPI_API_KEY, 'output': 'json'}
-    data = _serpapi_cached_json(params, timeout=(2.5, WEB_STREAM_STORE_HTTP_TIMEOUT),
+    data = _serpapi_cached_json(params, timeout=(2.5, max(9.0, WEB_STREAM_STORE_HTTP_TIMEOUT)),
                                label='AUTOMATIC EXACT-LISTING PRICES') or {}
     updates = {}
     for item in data.get('organic_results') or []:
@@ -15546,10 +15982,13 @@ def _web_row_has_numeric_price(row):
         return False
     # A legacy converted display may include the original price in parentheses.
     primary = raw.split(' (', 1)[0]
-    if re.search(r'[^\d\s.,A-Za-z$€£¥￥₹₩₺₽دكرسإقبع]', primary):
+    if re.search(r'[^\d\s.,A-Za-z$€£¥￥₹₩₺₽\u0600-\u06ff]', primary):
         return False
     letters = re.sub(r'[\d\s.,$€£¥￥₹₩₺₽]', '', primary).upper()
-    if letters and letters not in KNOWN_CURRENCY_CODES and letters not in ('KD', 'RMB', 'دك', 'دإ', 'رس', 'رق', 'دب', 'رع'):
+    allowed_words = {'KD', 'K.D', 'SR', 'S.R', 'QR', 'Q.R', 'BD', 'B.D', 'RO', 'R.O', 'JD', 'J.D', 'DHS', 'DH', 'LE', 'L.E', 'RMB',
+                     'دك', 'دإ', 'رس', 'رق', 'دب', 'رع', 'د.ك', 'ر.س', 'د.إ', 'ر.ق', 'د.ب', 'ر.ع', 'د.أ', 'ج.م', 'د.م', 'د.ت',
+                     'ريال', 'دينار', 'درهم', 'جنيه', 'ليرة', 'ليره'}
+    if letters and letters not in KNOWN_CURRENCY_CODES and letters not in allowed_words and normalize_ar(letters) not in {normalize_ar(w) for w in allowed_words}:
         return False
     val, _cur = _web_price_number_and_currency(primary, str(row.get('currency') or ''))
     if not _cur:
@@ -18219,6 +18658,46 @@ DEFAULT_GLOBAL_COUNTRIES = ('us', 'cn')
 SELECTED_LENS_COUNTRIES = frozenset('ae af ag ai al am ao ar at au aw az ba bb bd be bg bh bj bn bo br bs bw by bz ca cg ch ci cl cm cn co cr cv cy cz de dk do dz ec ee eg es et fi fr gb ge gh gp gr gt gy hk hn hr ht hu id ie il in iq ir is it jm jo jp ke kg kh kr kw ky kz la lb lc lk lt lu lv ly ma md me mg mk ml mm mn mo mq mt mu mv mx my mz na nc ng ni nl no np nz om pa pe ph pk pl pr ps pt py qa re ro rs ru sa sc sd se sg si sk sn sr sv sy th tn tr tt tw tz ua ug us uy uz vc ve vn xk ye za zm zw'.split())
 SELECTED_MARKET_TIMEOUT = 20.0
 SELECTED_MARKET_HEDGE = 2.5
+SELECTED_LOCAL_CAP = max(2, min(16, int(os.environ.get('SELECTED_LOCAL_CAP', '8'))))
+SELECTED_GLOBAL_CAP = max(1, min(12, int(os.environ.get('SELECTED_GLOBAL_CAP', '5'))))
+LENS_CONSENSUS_WAIT = max(0.0, min(8.0, float(os.environ.get('LENS_CONSENSUS_WAIT', '4.0'))))
+_LENS_CONSENSUS_STOP = frozenset({
+    'the', 'and', 'for', 'with', 'new', 'brand', 'inch', 'inches', 'cm', 'mm', 'size', 'large', 'small', 'mini', 'big',
+    'giant', 'set', 'pack', 'pcs', 'piece', 'pieces', 'free', 'shipping', 'sale', 'price', 'cheap', 'best', 'buy',
+    'online', 'shop', 'store', 'official', 'genuine', 'original', 'authentic', 'used', 'like', 'condition', 'tags',
+    'black', 'white', 'brown', 'blue', 'red', 'green', 'pink', 'grey', 'gray', 'yellow', 'orange', 'purple', 'beige',
+    'kids', 'baby', 'men', 'women', 'boys', 'girls', 'adult', 'gift', 'gifts', 'toy', 'toys', 'plush', 'soft', 'stuffed',
+    'animal', 'animals', 'doll', 'cute', 'amazon', 'ebay', 'walmart', 'etsy', 'mercari', 'aliexpress', 'com', 'www',
+    'x', 'in', 'ft', 'to', 'of', 'on', 'by', 'at', 'is', 'it', 'or', 'a', 'an', 'vs', 'from', 'up', 'off',
+})
+
+
+def _lens_consensus_terms(rows, limit=3):
+    """Words that agreeing Lens titles share (rare, non-generic) — retrieval only.
+
+    "ikea", "djungelskog", "orangutan" appear in most matches of an IKEA plush
+    even when the photo shows no readable label. Returns up to ``limit`` terms
+    in title order of the best-supported row, or [] when titles disagree.
+    """
+    titles = []
+    for row in rows[:24]:
+        title = normalize_ar(str((row or {}).get('title') or '')).lower()
+        tokens = [t for t in re.findall(r'[a-z0-9\u0600-\u06ff\u3400-\u9fff]{2,}', title)
+                  if t not in _LENS_CONSENSUS_STOP and not t.isdigit() and t not in _LOCAL_RETRIEVAL_NOUNS]
+        if tokens:
+            titles.append(tokens)
+    if len(titles) < 3:
+        return []
+    counts = Counter()
+    for tokens in titles:
+        counts.update(set(tokens))
+    floor = max(3, int(len(titles) * .34 + .999))
+    strong = {token for token, n in counts.items() if n >= floor}
+    if not strong:
+        return []
+    best = max(titles, key=lambda tokens: sum(1 for t in tokens if t in strong))
+    ordered = [t for t in dict.fromkeys(best) if t in strong]
+    return ordered[:limit]
 SELECTED_MARKET_POOL = ThreadPoolExecutor(max_workers=16, thread_name_prefix='selected-market')
 
 
@@ -18247,7 +18726,7 @@ def _web_selected_market_items(partial, lang, caption=''):
     return [dict(row) for row in partial.get('results', [])]
 
 
-def _web_selected_offer(raw, cc, display_market, query=''):
+def _web_selected_offer(raw, cc, display_market, query='', visual=False):
     url = _local_discovery_direct_link(raw)
     title = str(raw.get('title') or '').strip()
     if not url or not title or is_blocked_store(raw.get('source') or '', url):
@@ -18258,7 +18737,7 @@ def _web_selected_offer(raw, cc, display_market, query=''):
     item.pop('market_country', None)
     item['_shopping_gl'] = cc
     evidence = _local_storefront_evidence(item, _web_market(cc))
-    if not evidence or (query and not _local_discovery_candidate_ok(query, item)):
+    if not evidence or (query and not _local_discovery_candidate_ok(query, item, visual=visual)):
         return None
     money = _web_indexed_offer_money(item)
     rank = 0 if cc == display_market['country'] else 1
@@ -18291,6 +18770,8 @@ def _web_selected_market_search(query, country, lang, global_countries, *, image
     scopes = ([] if global_only else [country]) + list(global_countries)
     targets = {cc: _web_market(cc) for cc in scopes}
     warmed_query = None
+    consensus_done = False
+    lens_seen = 0
     deadline = time.monotonic() + SELECTED_MARKET_TIMEOUT
     started = time.monotonic()
     query = str(query or '').strip()[:WEB_API_MAX_QUERY_CHARS]
@@ -18352,22 +18833,31 @@ def _web_selected_market_search(query, country, lang, global_countries, *, image
                 query = str(reference.get('query') or query).strip()
                 reference_job = None
                 publish()
-            if query and SERPAPI_API_KEY:
+            # An unnamed photo ("stuffed toy") waits briefly for agreeing Lens
+            # titles so text lanes search for the actual product name.
+            lens_pending = any(kind == 'lens' for _, kind in jobs.values())
+            hold_text_lanes = (bool(image_b64) and reference_job is None and bool(reference) and not reference.get('named')
+                               and not consensus_done and lens_pending and time.monotonic() - started < LENS_CONSENSUS_WAIT)
+            if query and SERPAPI_API_KEY and not hold_text_lanes:
                 if query != warmed_query:
                     _market_query_warm(query, scopes)
                     warmed_query = query
+                named = bool(reference.get('named') or consensus_done or not image_b64)
                 for cc in scopes:
                     if cc == 'cn':
                         launch(cc, 'scoped')
                         if LOCAL_DISCOVERY_BAIDU:
                             launch(cc, 'baidu')
                     else:
+                        shopping_ok = ENABLE_GOOGLE_SHOPPING and _shopping_gl_supported(cc)
                         if not launched[cc]:
-                            launch(cc, 'shopping' if ENABLE_GOOGLE_SHOPPING and _shopping_gl_supported(cc) else 'broad')
+                            launch(cc, 'shopping' if shopping_ok else 'broad')
                         primary_pending = any(c == cc for c, _ in jobs.values())
                         if by_market[cc] < LOCAL_RESULTS_TARGET and (
                                 not primary_pending or time.monotonic() - started >= SELECTED_MARKET_HEDGE):
-                            launch(cc, 'scoped')
+                            # A named product in a Shopping market gets priced
+                            # merchant cards; anything else the organic rescue.
+                            launch(cc, 'shopping' if shopping_ok and named and 'shopping' not in launched[cc] else 'scoped')
             if not jobs:
                 if reference_job is None:
                     break
@@ -18387,11 +18877,21 @@ def _web_selected_market_search(query, country, lang, global_countries, *, image
                 # still decide every identity percentage and exact claim.
                 if kind == 'lens' and reference:
                     values = _lens_reference_rows(values, reference)
+                if kind == 'lens':
+                    lens_seen += 1
+                    if not consensus_done and reference and not reference.get('named'):
+                        terms = _lens_consensus_terms(values)
+                        consensus_done = True
+                        if terms:
+                            base = str(reference.get('product_type') or query).strip()
+                            strengthened = ' '.join(dict.fromkeys(terms + base.lower().split()))
+                            print(f'LENS CONSENSUS terms={terms} query={strengthened!r}')
+                            query = strengthened[:WEB_API_MAX_QUERY_CHARS]
                 eligible = 0
                 count_before = by_market[cc]
                 changed = False
                 for raw in values:
-                    row = _web_selected_offer(raw, cc, market, query)
+                    row = _web_selected_offer(raw, cc, market, query, visual=kind == 'lens')
                     if not row:
                         continue
                     eligible += 1
@@ -18407,7 +18907,7 @@ def _web_selected_market_search(query, country, lang, global_countries, *, image
                             old.update({k: v for k, v in row.items() if k.startswith('price') or k in ('currency', 'original_currency', 'original_price')})
                             changed = True
                         continue
-                    cap = 6 if cc == country else 4
+                    cap = SELECTED_LOCAL_CAP if cc == country else SELECTED_GLOBAL_CAP
                     if by_market[cc] >= cap:
                         continue
                     rows[key] = row
@@ -18417,9 +18917,12 @@ def _web_selected_market_search(query, country, lang, global_countries, *, image
                 if changed:
                     publish()
             if not jobs and reference_job is None:
-                # Loop once more to start an eligible empty-result rescue.
+                # Loop once more to start an eligible empty-result rescue, or the
+                # China lanes that were held back for the Lens consensus name.
+                cn_lanes = 2 if LOCAL_DISCOVERY_BAIDU else 1
                 can_rescue = bool(query and SERPAPI_API_KEY and any(
-                    cc != 'cn' and len(launched[cc]) < 2 and by_market[cc] < LOCAL_RESULTS_TARGET for cc in scopes))
+                    (cc != 'cn' and len(launched[cc]) < 2 and by_market[cc] < LOCAL_RESULTS_TARGET)
+                    or (cc == 'cn' and len(launched[cc]) < cn_lanes) for cc in scopes))
                 if not can_rescue:
                     break
         for cc in scopes:
@@ -18870,3 +19373,16 @@ async def web_api_image_search(request: Request):
 @app.get('/')
 async def health():
     return {'status': BUILD_ID, 'lens_direct_mode': LENS_DIRECT_MODE, 'fast_lens': USE_FAST_LENS_PIPELINE, 'v106_pipeline': USE_V106_5_RESULT_PIPELINE, 'text_search_whatsapp_parity': TEXT_SEARCH_WHATSAPP_PARITY, 'serpapi_cache': SERPAPI_RESULT_CACHE_ENABLED, 'serpapi_singleflight': SERPAPI_SINGLEFLIGHT_ENABLED, 'ai_result_classifier': WEB_AI_CLASSIFIER_ENABLED, 'ai_classifier_timeout_seconds': WEB_AI_CLASSIFIER_TIMEOUT_SECONDS, 'visual_result_classifier': WEB_VISUAL_CLASSIFIER_ENABLED, 'visual_classifier_timeout_seconds': WEB_VISUAL_CLASSIFIER_TIMEOUT_SECONDS, 'visual_classifier_max_results': WEB_VISUAL_CLASSIFIER_MAX_RESULTS, 'visual_exact_score': WEB_VISUAL_CLASSIFIER_EXACT_SCORE, 'visual_exact_policy': 'view_invariant_product_identity', 'identity_stream_batches': True, 'identity_batch_size': WEB_IDENTITY_BATCH_SIZE, 'identity_batch_parallel': WEB_IDENTITY_BATCH_PARALLEL, 'identity_first_batch': WEB_IDENTITY_FIRST_BATCH, 'result_caps': {'local': WEB_LOCAL_MAX, 'us': WEB_US_MAX, 'china': WEB_CN_MAX, 'total': LENS_DIRECT_MAX_CTA}, 'identity_match_policy': 'identifiers_text_function_structure_no_capture_or_condition_penalty', 'match_score_version': _WEB_MATCH_SCORE_VERSION, 'build': BUILD_ID, 'market_source': 'phone_prefix_or_explicit_client_country', 'languages': ['ar','en','de','fr','it','es','pt','tr','ru','ja','zh','ko','hi','ur','id','ms']}
+
+
+# Optional authenticated account API; all search-provider behavior is retained.
+# One file serves both deployments: with server/findzia_accounts.py present the
+# account routes are installed, without it the engine runs in search-only mode.
+try:
+    from findzia_accounts import install_accounts as _install_accounts
+except ImportError:
+    _install_accounts = None
+if _install_accounts is not None:
+    _install_accounts(app)
+else:
+    print('ACCOUNTS: findzia_accounts.py not found; running search-only (guest) mode')
