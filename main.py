@@ -1,5 +1,24 @@
 # -*- coding: utf-8 -*-
-"""Findzia v123 — Local Market Recovery, Indexed Prices, Arab & China Vocabulary.
+"""Findzia v124 — Match Percentage Calibration.
+
+WHAT CHANGED IN v124 (see MATCH_CALIBRATION_AR.md)
+* Printed identity decides for text-bearing products. When the photo shows
+  readable text ("NEW YORK JETS 1960"), a candidate whose printed text is
+  different is capped at 52%, and one whose text could not be read is capped
+  at 70%; agreement on printed text + construction reaches 91-93%.
+* Colour/pattern of the product itself is a variant, not a capture artefact:
+  a different colourway caps at 70% (62% when pattern also differs). Lighting,
+  angle, wear and background remain ignored (the audit reports those as
+  unknown, never different).
+* Brand agreement alone (a team or label logo) no longer reaches 80%+ on a
+  product whose printed identity is unread or different.
+* Unconfirmed (estimated, "~") percentages are capped at 74% until the
+  reference-image audit confirms them; confirmed matches keep the full scale.
+* Different brand / product name / variant caps tightened (42 / 55 / 70).
+* Every audited candidate logs one IDENTITY AXES line (same / different /
+  surface / unknown axes and the resulting percentage) for calibration.
+
+INHERITED v123 — Local Market Recovery, Indexed Prices, Arab & China Vocabulary.
 
 WHAT CHANGED IN v123 (see LOCAL_MARKET_RECOVERY_AR.md)
 * Indexed prices were being thrown away: a Lens/Shopping price such as
@@ -187,7 +206,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization'], max_age=86400)
-BUILD_ID = 'v123-local-market-recovery'
+BUILD_ID = 'v124-match-calibration'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -11508,11 +11527,11 @@ _WEB_MATCH_SCORE_AXIS_CAPS = {
     'distinctive_features': 58,
     'form_factor': 60,
     'configuration': 62,
-    'product_name': 65,
+    'product_name': 55,
     'power_source': 65,
-    'variant': 72,
-    'text_identity': 72,
-    'visible_markings': 72,
+    'variant': 70,
+    'text_identity': 52,
+    'visible_markings': 52,
     'quantity_bundle': 76,
     'dimensions': 78,
     'size_class': 80,
@@ -11524,11 +11543,24 @@ _WEB_MATCH_SCORE_AXIS_CAPS = {
     'pattern': 80,
     'finish': 82,
     'texture': 85,
-    'color': 80,
-    'brand': 60,
+    'color': 70,
+    'brand': 42,
     'orientation': 88,
 }
-_WEB_MATCH_SCORE_VERSION = 'product_identity_family_ocr_v25'
+# Estimated ("~") percentages wait for the reference-image audit; until then
+# they cannot present as a probable/exact match.
+WEB_MATCH_ESTIMATE_CAP = max(50, min(89, int(os.environ.get('WEB_MATCH_ESTIMATE_CAP', '74'))))
+_WEB_IDENTITY_TEXT_AXES = frozenset({'text_identity', 'visible_markings'})
+_WEB_IDENTITY_COLOUR_AXES = frozenset({'color', 'pattern'})
+
+
+def _web_reference_has_printed_text(reference_profile):
+    """True when the photographed product carries readable printed identity."""
+    profile = reference_profile if isinstance(reference_profile, dict) else {}
+    text = re.sub(r'\s+', ' ', str(profile.get('visible_text') or '')).strip()
+    letters = re.findall(r'[A-Za-z\u0600-\u06ff\u3400-\u9fff]{2,}|\d{2,}', text)
+    return len(letters) >= 1 and len(text) >= 3
+_WEB_MATCH_SCORE_VERSION = 'product_identity_family_ocr_v26_calibrated'
 _WEB_LEGACY_SIMILARITY_SCORE_KEYS = (
     'visual_match_score', 'visual_score', 'model_match_score', 'match_score',
 )
@@ -12730,7 +12762,7 @@ def _web_match_guard_percentage(match_guard):
     if any(token in reason for token in ('model', 'generation', 'compatibility')):
         return 38
     if any(token in reason for token in ('variant', 'named_family', 'size', 'quantity', 'bundle')):
-        return 72
+        return 70
     return 55
 
 def _web_identity_axis_evidence(axes):
@@ -12762,11 +12794,16 @@ def _web_identity_axis_evidence(axes):
         'structure': identity_same & _WEB_IDENTITY_STRUCTURE_AXES,
     }
 
-def _web_identity_percentage_from_evidence(axes, match_guard=None):
+def _web_identity_percentage_from_evidence(axes, match_guard=None, reference_profile=None):
     """Estimate identity support using conservative, uncalibrated evidence tiers.
 
     The returned number is derived from stable evidence tiers.  A visual-only
     nearest neighbour with no product-identity evidence returns ``None``.
+
+    v124 calibration: printed identity (text_identity / visible_markings) is
+    the deciding evidence for a product whose photo carries readable text, the
+    product's own colour/pattern is a variant (capped, never a hard reject),
+    and a brand/logo alone cannot reach a probable percentage.
     """
     evidence = _web_identity_axis_evidence(axes)
     same = evidence['same']
@@ -12775,66 +12812,101 @@ def _web_identity_percentage_from_evidence(axes, match_guard=None):
     named = evidence['named']
     function = evidence['function']
     structure = evidence['structure']
+    surface_differences = evidence['surface_differences']
+
+    text_same = bool(named & _WEB_IDENTITY_TEXT_AXES)
+    text_unknown = not text_same and not (conflicts & _WEB_IDENTITY_TEXT_AXES)
+    printed_reference = _web_reference_has_printed_text(reference_profile)
+    colour_differences = surface_differences & _WEB_IDENTITY_COLOUR_AXES
+    colour_cap = None
+    if colour_differences:
+        colour_cap = 62 if len(colour_differences) >= 2 else 70
+
+    def finish(value, identity_confirmed=False):
+        if value is None:
+            return None
+        if colour_cap is not None:
+            value = min(value, colour_cap)
+        if printed_reference and text_unknown and not identity_confirmed:
+            # The photo shows printed identity that the candidate did not
+            # confirm: probable at most, never exact. A matching model number,
+            # identifier or brand+product name already confirms that identity.
+            value = min(value, 70)
+        return int(value)
 
     guard_percentage = _web_match_guard_percentage(match_guard)
     if conflicts:
         percentage = guard_percentage if guard_percentage is not None else 88
         for axis in conflicts:
             percentage = min(percentage, _WEB_MATCH_SCORE_AXIS_CAPS.get(axis, 88))
+        if colour_cap is not None:
+            percentage = min(percentage, colour_cap)
         return max(0, min(WEB_VISUAL_CLASSIFIER_EXACT_SCORE - 1, int(percentage)))
 
     # Exact barcode/GTIN/SKU/MPN or model agreement dominates presentation.
     if 'alphanumeric_identity' in identifiers:
-        return 99 if (named or function) else 97
+        return finish(99 if (named or function) else 97, identity_confirmed=True)
     if 'model' in identifiers:
-        return 98 if (named or len(function) >= 2) else 95
+        return finish(98 if (named or len(function) >= 2) else 95, identity_confirmed=True)
 
     # Repeating a label in name, OCR and markings is one source of evidence.
     # Require brand/name plus independent construction/function support;
     # duplicated printed text must never manufacture an exact identity.
     commercial_identity = {'brand', 'product_name'} <= named
     if commercial_identity and 'variant' in named and function and len(structure) >= 2:
-        return 94
+        return finish(94, identity_confirmed=True)
     if commercial_identity and function and len(structure) >= 2:
-        return 92
+        return finish(92, identity_confirmed=True)
     if commercial_identity and (function or len(structure) >= 2):
-        return 89
+        return finish(89, identity_confirmed=True)
+
+    # Printed identity agreement (the same lettering/markings read on both
+    # images) plus construction is the strongest evidence a text-bearing
+    # product can give without a model number.
+    if text_same and function and len(structure) >= 2:
+        return finish(93 if 'brand' in named else 91)
+    if text_same and (function or len(structure) >= 2):
+        return finish(86)
 
     # A readable brand without a product name is stronger than an anonymous
     # shape match but is never an exact SKU claim (stays below the exact bar).
-    brand_identity = 'brand' in named
+    # A team/label logo on a product whose printed identity was not confirmed
+    # is not brand-level evidence.
+    brand_identity = 'brand' in named and not (printed_reference and text_unknown)
     if brand_identity and function and len(structure) >= 3:
-        return 88
+        return finish(88)
     if brand_identity and function and len(structure) >= 2:
-        return 85
+        return finish(85)
     if brand_identity and (function or len(structure) >= 2):
-        return 80
+        return finish(80)
 
     # Generic/unbranded products can be strongly supported by invariant
     # topology, components and distinctive construction, but are not called
     # an exact SKU without textual/model evidence.
     if len(function) >= 2 and len(structure) >= 4:
-        return 84
+        return finish(84)
     if function and len(structure) >= 3:
-        return 78
+        return finish(78)
     if len(structure) >= 4:
-        return 72
+        return finish(72)
     if function and structure:
-        return 64
+        return finish(64)
 
     # A deterministic title/model guard may still carry identity evidence when
     # a merchant image is unavailable.  It remains marked provisional for an
     # image-origin search by the caller.
     if guard_percentage is not None:
-        return int(guard_percentage)
+        return finish(int(guard_percentage))
     return None
 
 def _web_match_score_metadata(
     *, is_exact, ai_item, match_guard, heuristic_exact, visual_review,
     visual_exact_unproven, use_ai_match, use_structured_match, confidence,
+    reference_profile=None,
 ):
     """Return an identity percentage that is independent of capture quality."""
     ai_item = ai_item or {}
+    reference_profile = dict(reference_profile or ai_item.get('_reference_profile') or {})
     axes = dict(ai_item.get('visual_axes') or {})
     evidence = _web_identity_axis_evidence(axes)
     matched = sorted(evidence['same'])
@@ -12866,6 +12938,7 @@ def _web_match_score_metadata(
         percentage = _web_identity_percentage_from_evidence(
             axes,
             None if visual_review else match_guard,
+            reference_profile,
         )
         source = 'identity_evidence_ai'
         final = bool(stable_evidence and (ai_item.get('visual_evidence') or not visual_review))
@@ -12878,7 +12951,7 @@ def _web_match_score_metadata(
             percentage = None
             final = False
         else:
-            percentage = _web_identity_percentage_from_evidence(axes, match_guard)
+            percentage = _web_identity_percentage_from_evidence(axes, match_guard, reference_profile)
             final = bool(percentage is not None)
     elif not visual_review:
         percentage = 92 if heuristic_exact else None
@@ -12898,7 +12971,7 @@ def _web_match_score_metadata(
         and str(ai_item.get('match') or '').lower() in {'exact', 'similar'}
         and not _web_match_guard_is_anchor_independent(match_guard)
     ):
-        percentage = _web_identity_percentage_from_evidence(axes)
+        percentage = _web_identity_percentage_from_evidence(axes, None, reference_profile)
         if percentage is not None:
             source = 'provisional_identity_evidence_ai'
             final = False
@@ -12918,6 +12991,10 @@ def _web_match_score_metadata(
     )
     if percentage is not None and not effective_exact:
         percentage = min(WEB_VISUAL_CLASSIFIER_EXACT_SCORE - 1, percentage)
+    if percentage is not None and not final:
+        # An estimate that the reference-image audit has not confirmed is shown
+        # with "~" and stays below the probable band.
+        percentage = min(WEB_MATCH_ESTIMATE_CAP, percentage)
 
     known_count = len(matched) + len(conflicts)
     evidence_coverage = int(round(known_count * 100 / max(1, len(identity_axes))))
@@ -14443,10 +14520,12 @@ def _web_attach_captured_result_sections(payload, lang, allow_ai=True, cancel_ev
         if ai_item.get('visual_axes'):
             row['visual_axes'] = dict(ai_item.get('visual_axes') or {})
             row['visual_differences'] = list(ai_item.get('visual_differences') or [])[:5]
+        scoring_reference = dict(ai_item.get('_reference_profile') or ai_result.get('reference_profile') or {})
         if use_ai_match:
             row['identity_match_score'] = _web_identity_percentage_from_evidence(
                 dict(ai_item.get('visual_axes') or {}),
                 None if visual_review else match_guard,
+                scoring_reference,
             )
             row['observation_quality'] = ai_item.get('observation_quality')
             row['identity_classification_confidence'] = confidence
@@ -14460,8 +14539,18 @@ def _web_attach_captured_result_sections(payload, lang, allow_ai=True, cancel_ev
             use_ai_match=use_ai_match,
             use_structured_match=use_structured_match,
             confidence=confidence,
+            reference_profile=scoring_reference,
         )
         row.update(score_metadata)
+        if ai_item.get('visual_axes'):
+            # One calibration line per audited candidate: what agreed, what
+            # differed, what the audit could not read, and the resulting score.
+            _axis_evidence = _web_identity_axis_evidence(dict(ai_item.get('visual_axes') or {}))
+            _host = (urllib.parse.urlsplit(str(row.get('url') or '')).hostname or '')[:40]
+            print(f"IDENTITY AXES pct={score_metadata.get('match_percentage')} final={score_metadata.get('match_percentage_final')} "
+                  f"same={sorted(_axis_evidence['same'])} different={sorted(_axis_evidence['different'])} "
+                  f"surface_diff={sorted(_axis_evidence['surface_differences'])} unknown={len(score_metadata.get('unknown_attributes') or [])} "
+                  f"ref_text={_web_reference_has_printed_text(scoring_reference)} host={_host}")
         row['identity_review_error'] = ai_result.get('review_error')
         # The published section must agree with the configured identity-score
         # threshold as well as the proof decision.  This also remains correct
