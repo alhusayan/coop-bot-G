@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
-"""Findzia v124 — Match Percentage Calibration.
+"""Findzia v124.1 — Match Percentage Calibration + Product Image Recovery.
+
+v124.1: Adds signed product-image alternatives and same-product-page recovery,
+shared/cached image downloads, and stable image URLs. No new paid search calls.
+All v124 matching, indexed-price and local-market changes below are retained.
 
 WHAT CHANGED IN v124 (see MATCH_CALIBRATION_AR.md)
 * Printed identity decides for text-bearing products. When the photo shows
@@ -206,7 +210,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization'], max_age=86400)
-BUILD_ID = 'v124-match-calibration'
+BUILD_ID = 'v124.1-match-calibration-product-images'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -9231,7 +9235,7 @@ def _web_public_image_url(raw_url):
     if not _web_is_http_url(raw_url):
         return ''
     if WEB_IMAGE_PROXY_ENABLED and PUBLIC_BASE_URL:
-        expires_at = int(time.time()) + 7 * 86400
+        expires_at = (int(time.time()) // 86400 + 7) * 86400
         signature = _web_image_proxy_signature(raw_url, expires_at)
         if not signature:
             return raw_url
@@ -14659,8 +14663,53 @@ def _web_fallback_product_items(txt, urls, lang, query):
         rows.append({'market': _web_market_label(rank), 'market_rank': rank, 'country': cc, 'flag': country_flag_emoji(cc) if cc else '', 'store': _ui_plain_store_name(name, url) or U(lang, 'store'), 'title': _compact_ui_title(title or query), 'raw_title': title or detail or query, 'price': _text_price_local(raw_price, rank, lang) if raw_price and rank in (0, 1, 2) else raw_price, 'url': url, 'image': ''})
     return rows
 
+def _web_card_image_sources(row):
+    """Transport metadata only: no network call, new search, or invented image."""
+    row = dict(row)
+    sources = []
+    def collect(value):
+        if isinstance(value, str):
+            raw = _web_unproxy_image_url(value)
+            if _web_is_http_url(raw) and raw not in sources and len(sources) < 4:
+                sources.append(raw)
+        elif isinstance(value, dict):
+            collect(value.get('url') or value.get('src') or value.get('contentUrl'))
+        elif isinstance(value, list):
+            for entry in value[:8]:
+                if isinstance(entry, (str, dict)):
+                    collect(entry)
+    for field in ('image', 'thumbnail', 'image_url', 'product_image', 'images', 'image_candidates'):
+        collect(row.get(field))
+    row['image_candidates'] = [_web_public_image_url(raw) for raw in sources]
+    if sources:
+        row['image'] = row['image_candidates'][0]
+    page = str(row.get('url') or '').strip()
+    # A result without an image can recover one from its own product page.
+    # Never substitute a query photo, another merchant, or a catalog image.
+    if _web_is_direct_product_page_url(page, str(row.get('store') or '')):
+        recovery = _web_public_image_url(page)
+        if '/api/img-proxy?' in recovery:
+            row['image_recovery_url'] = recovery
+    return row
+
+
+def _web_image_transport(value, depth=0):
+    if depth > 10:
+        return value
+    if isinstance(value, list):
+        return [_web_image_transport(entry, depth + 1) for entry in value]
+    if isinstance(value, dict):
+        result = {key: _web_image_transport(entry, depth + 1)
+                  for key, entry in value.items()}
+        if result.get('url') and (result.get('store') or result.get('market')):
+            return _web_card_image_sources(result)
+        return result
+    return value
+
+
 def _web_stream_event(payload):
-    return (json.dumps(payload, ensure_ascii=False, separators=(',', ':')) + '\n').encode('utf-8')
+    return (json.dumps(_web_image_transport(payload), ensure_ascii=False,
+                       separators=(',', ':')) + '\n').encode('utf-8')
 _WEB_BAD_PRICE_TERMS = ('per month', 'monthly', 'month plan', 'installment', 'instalment', 'pay monthly', 'monthly payment', 'emi', 'finance payment', 'قسطي', 'قسط', 'اقساط', 'أقساط', 'شهري')
 _WEB_WHOLESALE_TERMS = ('minimum order', 'min order', 'moq', 'wholesale', 'bulk order', 'fob', 'per piece', '/piece', 'piece price', 'sample price', 'supplier', 'حد ادنى للطلب', 'الحد الأدنى للطلب', 'جملة', 'بالجملة')
 
@@ -16061,7 +16110,7 @@ async def _web_complete_result_prices(result, lang, country, discover_local=Fals
             rows[_web_identity_offer_key(row)] = row
         elif event.get('event') == 'done':
             final.update({k: event[k] for k in ('priced_count', 'missing_price_count')})
-    return _web_live_snapshot(final, rows)
+    return _web_image_transport(_web_live_snapshot(final, rows))
 
 
 def _web_row_has_numeric_price(row):
@@ -17237,6 +17286,100 @@ async def web_api_geo(request: Request):
         media_type='application/json', headers={'Cache-Control': 'private, no-store',
         'Vary': 'CF-IPCountry, X-Forwarded-For, X-Real-IP'})
 
+def _web_card_raster_mime(body):
+    if body.startswith(b'\xff\xd8\xff'):
+        return 'image/jpeg'
+    if body.startswith(b'\x89PNG\r\n\x1a\n'):
+        return 'image/png'
+    if body.startswith((b'GIF87a', b'GIF89a')):
+        return 'image/gif'
+    if len(body) > 12 and body[:4] == b'RIFF' and body[8:12] == b'WEBP':
+        return 'image/webp'
+    if len(body) > 16 and body[4:12] in {b'ftypavif', b'ftypavis'}:
+        return 'image/avif'
+    return ''
+
+def _web_card_fetch_image(target_url):
+    parsed = urllib.parse.urlparse(target_url)
+    headers = dict(HEADERS)
+    headers['Accept'] = 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8'
+    headers['Referer'] = f'{parsed.scheme}://{parsed.netloc}/'
+    resp = _web_safe_get(
+        target_url,
+        headers=headers,
+        timeout=(2.5, WEB_IMAGE_PROXY_TIMEOUT_SECONDS),
+        stream=True,
+    )
+    try:
+        if resp.status_code >= 400:
+            return (resp.status_code, '', b'', '')
+        content_type = (resp.headers.get('content-type') or '').split(';', 1)[0].strip().lower()
+        limit = WEB_IMAGE_PROXY_MAX_BYTES if content_type.startswith('image/') or content_type == 'application/octet-stream' else 400000
+        body = _web_read_limited_response(resp, limit)
+        if body is None:
+            return (413, '', b'', '')
+        if content_type.startswith('image/') or _web_card_raster_mime(body):
+            detected_mime = _web_card_raster_mime(body)
+            if not detected_mime:
+                return (415, '', b'', '')
+            return (200, detected_mime, body, '')
+        html = body.decode(resp.encoding or 'utf-8', errors='replace')
+        return (200, content_type or 'text/html', b'', html)
+    finally:
+        _web_safe_response_close(resp)
+
+_WEB_CARD_IMAGE_CACHE = {}
+_WEB_CARD_IMAGE_INFLIGHT = {}
+_WEB_CARD_IMAGE_GATE = asyncio.Semaphore(8)
+
+
+def _web_card_image_download(raw_url):
+    status, content_type, body, html = _web_card_fetch_image(raw_url)
+    if status < 400 and content_type.startswith('image/') and body:
+        return (200, content_type, body)
+    if status < 400 and html:
+        rescued = _web_extract_product_image_from_html(html, raw_url)
+        if rescued and rescued != raw_url:
+            status, content_type, body, _ = _web_card_fetch_image(rescued)
+            if status < 400 and content_type.startswith('image/') and body:
+                return (200, content_type, body)
+    return (404, '', b'')
+
+
+async def _web_card_image_cached(raw_url):
+    now = time.monotonic()
+    cached = _WEB_CARD_IMAGE_CACHE.get(raw_url)
+    if cached and cached[0] > now:
+        return cached[1]
+    async def load():
+        try:
+            async with _WEB_CARD_IMAGE_GATE:
+                result = await asyncio.to_thread(_web_card_image_download, raw_url)
+        except Exception as exc:
+            print(f'WEB CARD IMAGE unavailable={type(exc).__name__}')
+            result = (404, '', b'')
+        stamp = time.monotonic()
+        # Bounded positive/negative caches; never cache a failure for a full day.
+        for key, entry in list(_WEB_CARD_IMAGE_CACHE.items()):
+            if entry[0] <= stamp:
+                _WEB_CARD_IMAGE_CACHE.pop(key, None)
+        _WEB_CARD_IMAGE_CACHE[raw_url] = (stamp + (3600 if result[0] == 200 else 45), result)
+        while (len(_WEB_CARD_IMAGE_CACHE) > 256 or
+               sum(len(entry[1][2]) for entry in _WEB_CARD_IMAGE_CACHE.values()) > 32 * 1024 * 1024):
+            _WEB_CARD_IMAGE_CACHE.pop(next(iter(_WEB_CARD_IMAGE_CACHE)))
+        return result
+    task = _WEB_CARD_IMAGE_INFLIGHT.get(raw_url)
+    if task is None:
+        if len(_WEB_CARD_IMAGE_INFLIGHT) >= 32:
+            return (503, '', b'')
+        task = asyncio.create_task(load())
+        _WEB_CARD_IMAGE_INFLIGHT[raw_url] = task
+        def finished(done):
+            if _WEB_CARD_IMAGE_INFLIGHT.get(raw_url) is done:
+                _WEB_CARD_IMAGE_INFLIGHT.pop(raw_url, None)
+        task.add_done_callback(finished)
+    return await asyncio.shield(task)
+
 @app.get('/api/img-proxy')
 async def web_api_img_proxy(request: Request):
     if not WEB_API_ENABLED or not WEB_IMAGE_PROXY_ENABLED:
@@ -17260,61 +17403,11 @@ async def web_api_img_proxy(request: Request):
     ):
         return Response(content=b'', status_code=403)
 
-    def _raster_mime(body):
-        if body.startswith(b'\xff\xd8\xff'):
-            return 'image/jpeg'
-        if body.startswith(b'\x89PNG\r\n\x1a\n'):
-            return 'image/png'
-        if body.startswith((b'GIF87a', b'GIF89a')):
-            return 'image/gif'
-        if len(body) > 12 and body[:4] == b'RIFF' and body[8:12] == b'WEBP':
-            return 'image/webp'
-        if len(body) > 16 and body[4:12] in {b'ftypavif', b'ftypavis'}:
-            return 'image/avif'
-        return ''
-
-    def _fetch_image(target_url):
-        parsed = urllib.parse.urlparse(target_url)
-        headers = dict(HEADERS)
-        headers['Accept'] = 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8'
-        headers['Referer'] = f'{parsed.scheme}://{parsed.netloc}/'
-        resp = _web_safe_get(
-            target_url,
-            headers=headers,
-            timeout=(2.5, WEB_IMAGE_PROXY_TIMEOUT_SECONDS),
-            stream=True,
-        )
-        try:
-            if resp.status_code >= 400:
-                return (resp.status_code, '', b'', '')
-            content_type = (resp.headers.get('content-type') or '').split(';', 1)[0].strip().lower()
-            limit = WEB_IMAGE_PROXY_MAX_BYTES if content_type.startswith('image/') else 400000
-            body = _web_read_limited_response(resp, limit)
-            if body is None:
-                return (413, '', b'', '')
-            if content_type.startswith('image/'):
-                detected_mime = _raster_mime(body)
-                if not detected_mime:
-                    return (415, '', b'', '')
-                return (200, detected_mime, body, '')
-            html = body.decode(resp.encoding or 'utf-8', errors='replace')
-            return (200, content_type or 'text/html', b'', html)
-        finally:
-            _web_safe_response_close(resp)
-    try:
-        status, content_type, body, html = await asyncio.to_thread(_fetch_image, raw_url)
-        if status >= 400:
-            return Response(content=b'', status_code=status)
-        if content_type.startswith('image/') and body:
-            return Response(content=body, media_type=content_type, headers={'Cache-Control': 'public, max-age=86400'})
-        rescued = _web_extract_product_image_from_html(html, raw_url) if html else ''
-        if rescued and rescued != raw_url:
-            status2, content_type2, body2, _ = await asyncio.to_thread(_fetch_image, rescued)
-            if status2 < 400 and content_type2.startswith('image/') and body2:
-                return Response(content=body2, media_type=content_type2, headers={'Cache-Control': 'public, max-age=86400'})
-    except Exception as e:
-        print(f'WEB IMG PROXY ERR: {raw_url[:120]} -> {e.__class__.__name__}')
-    return Response(content=b'', status_code=404)
+    status, content_type, body = await _web_card_image_cached(raw_url)
+    if status == 200:
+        return Response(content=body, media_type=content_type, headers={
+            'Cache-Control': 'public, max-age=3600', 'X-Content-Type-Options': 'nosniff'})
+    return Response(content=b'', status_code=status, headers={'Cache-Control': 'no-store'})
 
 
 # =============================================================================
