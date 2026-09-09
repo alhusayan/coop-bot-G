@@ -1,5 +1,26 @@
 # -*- coding: utf-8 -*-
-"""Findzia v127 — Images, Price Separators, Page-Price Guards, SerpApi Fan-out.
+"""Findzia v128 — Price Cascade.
+
+WHAT CHANGED IN v128 (see PRICE_CASCADE_AR.md)
+* A merchant page now yields a price through a cascade instead of one tier:
+  structured data (JSON-LD / OpenGraph / microdata / Shopify JSON) -> store
+  adapters (JD price API without loading the page, Amazon core price block,
+  Next.js __NEXT_DATA__ product objects) -> inline JSON price keys with an
+  explicit currency -> DOM price elements (class/id/itemprop "price",
+  excluding old/was/compare/shipping/instalment/unit elements) with the
+  page currency. Every tier applies the same guards: product page only,
+  same product as the card, amount not a model/spec number, explicit or
+  page-level currency (never invented), plausible range.
+* The currency of a page without an explicit code falls back to the store's
+  country (URL locale, ccTLD, the card's market), never to the visitor's.
+* Prices are flagged as outliers against the other offers of the same
+  product in the same market: an unverified price 8x below or above the
+  median is hidden instead of shown as the cheapest store.
+* Every priced row carries price_compare_value/price_compare_currency (the
+  amount converted to the visitor's market currency by the cached FX table)
+  so clients can sort and compare across currencies consistently.
+
+INHERITED v127 — Images, Price Separators, Page-Price Guards, SerpApi Fan-out.
 
 WHAT CHANGED IN v127 (see IMAGES_PRICES_AR.md)
 * Images: the merchant page that is already fetched for a live price now also
@@ -261,7 +282,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization'], max_age=86400)
-BUILD_ID = 'v127-images-prices-fanout'
+BUILD_ID = 'v128-price-cascade'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -15335,13 +15356,185 @@ def _web_product_page_metadata(html, base_url):
         data['image'] = data['image'] or _web_absolute_url(base_url, picture)
     return data
 
-def _web_fetch_page_snapshot(url):
+_WEB_PRICE_ELEMENT_EXCLUDE = re.compile(
+    r'old|was|compare|strike|regular|list[-_ ]?price|rrp|msrp|save|saving|ship|deliver|install|month|per[-_ ]|unit|from|range|min|max|'
+    r'total|cart|subtotal|discount|crossed|before|original|prev|history|loyalty|member|coupon|badge|label|installment|'
+    r'quantity|tier|bulk|wholesale|deposit|fee|tax|vat|point|reward|credit|emi|bnpl|tabby|tamara|klarna|affirm|afterpay', re.I)
+_WEB_PRICE_ELEMENT_PREFER = re.compile(r'sale|now|current|special|final|our|offer|selling|deal|new[-_ ]?price|actual', re.I)
+_WEB_AMAZON_CURRENCY = {'amazon.com': 'USD', 'amazon.ca': 'CAD', 'amazon.co.uk': 'GBP', 'amazon.de': 'EUR', 'amazon.fr': 'EUR', 'amazon.it': 'EUR',
+                        'amazon.es': 'EUR', 'amazon.nl': 'EUR', 'amazon.com.be': 'EUR', 'amazon.se': 'SEK', 'amazon.pl': 'PLN', 'amazon.co.jp': 'JPY',
+                        'amazon.in': 'INR', 'amazon.com.au': 'AUD', 'amazon.sg': 'SGD', 'amazon.ae': 'AED', 'amazon.sa': 'SAR', 'amazon.eg': 'EGP',
+                        'amazon.com.tr': 'TRY', 'amazon.com.br': 'BRL', 'amazon.com.mx': 'MXN'}
+WEB_PRICE_FALLBACK_TIERS = env_bool('WEB_PRICE_FALLBACK_TIERS', True)
+WEB_STORE_PRICE_APIS = env_bool('WEB_STORE_PRICE_APIS', True)
+
+
+def _web_page_currency_default(url, country=''):
+    """Currency of the store's own market: URL locale, ccTLD, then the card's country. Never the visitor's."""
+    for candidate in (_web_currency_from_url(url), ):
+        if candidate:
+            return candidate
+    for cc in (_storefront_country(url), _host_country_code(urllib.parse.urlsplit(str(url or '')).hostname or ''), str(country or '').lower()):
+        if cc and cc in COUNTRY_META:
+            codes = COUNTRY_CURRENCY_CODES.get(cc) or ()
+            if len(codes) == 1:
+                return codes[0]
+    return ''
+
+
+def _web_page_currency_hint(soup, html, url, country=''):
+    """Explicit page-level currency first, store market currency second."""
+    for attrs in ({'property': 'product:price:currency'}, {'property': 'og:price:currency'}, {'itemprop': 'priceCurrency'}):
+        el = soup.find('meta', attrs=attrs)
+        code = str((el.get('content') if el else '') or '').strip().upper()
+        if code in KNOWN_CURRENCY_CODES:
+            return code, 'page'
+    m = _WEB_DEEP_CURRENCY_PAT.search(html[:600000])
+    if m and m.group(1).upper() in KNOWN_CURRENCY_CODES:
+        return m.group(1).upper(), 'page'
+    default = _web_page_currency_default(url, country)
+    return (default, 'store') if default else ('', '')
+
+
+def _web_store_price_api(url, country=''):
+    """Public price endpoints for stores whose pages block datacenter fetches."""
+    if not WEB_STORE_PRICE_APIS:
+        return None
+    try:
+        p = urllib.parse.urlsplit(str(url or ''))
+        host = (p.hostname or '').lower()
+        if _host_matches_any(host, ('jd.com',)) and not host.endswith('jd.hk'):
+            m = re.fullmatch(r'/(?:product/)?(\d+)\.html', p.path.lower())
+            if not m:
+                return None
+            sku = m.group(1)
+            response = _web_safe_get(f'https://p.3.cn/prices/mgets?skuIds=J_{sku}&type=1',
+                                     headers={'User-Agent': HEADERS.get('User-Agent', 'Mozilla/5.0'), 'Referer': 'https://item.jd.com/'},
+                                     timeout=(2.0, 3.5), stream=True, max_redirects=1)
+            try:
+                body = _web_read_limited_response(response, 20000) or b''
+            finally:
+                _web_safe_response_close(response)
+            rows = json.loads(body.decode('utf-8', 'replace') or '[]')
+            entry = rows[0] if isinstance(rows, list) and rows and isinstance(rows[0], dict) else {}
+            value = _web_price_token_to_float(str(entry.get('p') or entry.get('op') or ''), 'CNY') if entry else None
+            if value and value > 0 and str(entry.get('id') or '').endswith(sku):
+                print(f'STORE PRICE API jd sku={sku} price={value}')
+                return {'price': value, 'currency': 'CNY', 'price_source': 'jd_price_api', 'price_confidence': 'high', 'ok': True}
+    except Exception as exc:
+        print(f'STORE PRICE API ERR {type(exc).__name__}')
+    return None
+
+
+def _web_amazon_page_price(soup, url):
+    host = (urllib.parse.urlsplit(url).hostname or '').lower().removeprefix('www.')
+    currency = next((code for domain, code in _WEB_AMAZON_CURRENCY.items() if host == domain or host.endswith('.' + domain)), '')
+    if not currency:
+        return None
+    for selector in ('#corePrice_feature_div .a-price .a-offscreen', '#corePriceDisplay_desktop_feature_div .a-price .a-offscreen',
+                     '#apex_desktop .a-price .a-offscreen', '#priceblock_dealprice', '#priceblock_ourprice', '#priceblock_saleprice',
+                     '#centerCol .a-price .a-offscreen', '#tp_price_block_total_price_ww .a-offscreen'):
+        el = soup.select_one(selector)
+        text = el.get_text(' ', strip=True) if el else ''
+        value, _ = _web_price_number_and_currency(text, currency)
+        if value and value > 0:
+            return {'price': value, 'currency': currency, 'price_source': 'amazon_price_block', 'price_confidence': 'high'}
+    return None
+
+
+def _web_next_data_price(soup, url, currency_hint):
+    """Next.js product stores (Walmart, Noon, many Shopify headless fronts) embed the product in __NEXT_DATA__."""
+    script = soup.find('script', id='__NEXT_DATA__')
+    if not script:
+        return None
+    blob = (script.string or script.get_text() or '')[:1500000]
+    price, currency = _web_deep_json_price_scan(blob, url)
+    currency = currency or currency_hint
+    if price and currency in KNOWN_CURRENCY_CODES:
+        return {'price': price, 'currency': currency, 'price_source': 'next_data', 'price_confidence': 'medium'}
+    return None
+
+
+def _web_dom_price(soup, url, currency_hint, title):
+    """Visible price elements; the first current-price element after the product heading wins."""
+    heading = soup.find('h1')
+    heading_line = getattr(heading, 'sourceline', None) or 0
+    candidates = []
+    for el in soup.select('[itemprop="price"], [data-price], [data-product-price], [class*="price" i], [id*="price" i]')[:80]:
+        label = ' '.join([str(el.get('id') or '')] + [str(c) for c in (el.get('class') or [])] + [str(el.get('itemprop') or '')])
+        if _WEB_PRICE_ELEMENT_EXCLUDE.search(label):
+            continue
+        if el.find_parent(lambda tag: tag.name in ('s', 'del', 'strike')) is not None:
+            continue
+        text = str(el.get('content') or el.get('data-price') or el.get('data-product-price') or '').strip() or el.get_text(' ', strip=True)
+        text = text[:80]
+        if not text or len(re.findall(r'\d[\d.,]*', text)) > 2:
+            continue  # ranges / lists are not one price
+        value, currency = _web_price_number_and_currency(text, currency_hint)
+        if not value or value <= 0 or currency not in KNOWN_CURRENCY_CODES:
+            continue
+        if _price_collides_with_product_spec(value, title):
+            continue
+        preferred = bool(_WEB_PRICE_ELEMENT_PREFER.search(label))
+        line = getattr(el, 'sourceline', None) or 10 ** 9
+        candidates.append((0 if preferred else 1, 0 if line >= heading_line else 1, line, value, currency))
+    if not candidates:
+        return None
+    candidates.sort()
+    _, _, _, value, currency = candidates[0]
+    return {'price': value, 'currency': currency, 'price_source': 'page_dom', 'price_confidence': 'medium'}
+
+
+def _web_fallback_page_price(html, url, metadata, country=''):
+    """Store adapters -> inline JSON -> DOM price elements, all under the same guards."""
+    if not WEB_PRICE_FALLBACK_TIERS or not html:
+        return {}
+    soup = BeautifulSoup(html[:900000], 'html.parser')
+    title = str((metadata or {}).get('title') or '')
+    currency_hint, hint_source = _web_page_currency_hint(soup, html, url, country)
+    for finder in (lambda: _web_amazon_page_price(soup, url), lambda: _web_next_data_price(soup, url, currency_hint)):
+        found = finder()
+        if found and not _price_collides_with_product_spec(found['price'], title):
+            return found
+    price, currency = _web_deep_json_price_scan(html, url)
+    confidence = 'medium'
+    if price is None:
+        # A page whose scripts mention exactly one distinct "price" value has
+        # no recommendation widgets competing with it; accept it at low confidence.
+        distinct = set()
+        for match in _WEB_DEEP_PRICE_GENERIC_PAT.finditer(html[:1200000]):
+            try:
+                value = float(match.group(1))
+            except ValueError:
+                continue
+            if 0.05 <= value <= 1000000:
+                distinct.add(value)
+            if len(distinct) > 1:
+                break
+        if len(distinct) == 1:
+            price, confidence = distinct.pop(), 'low'
+    currency = currency or currency_hint
+    if price and currency in KNOWN_CURRENCY_CODES and not _price_collides_with_product_spec(price, title):
+        return {'price': price, 'currency': currency, 'price_source': 'page_json', 'price_confidence': confidence}
+    if currency_hint:
+        found = _web_dom_price(soup, url, currency_hint, title)
+        if found:
+            return found
+    return {}
+
+
+def _web_fetch_page_snapshot(url, country=''):
     url = str(url or '').strip()
     if not _web_is_http_url(url):
         return None
     data = {'ok': False, 'url': url, 'price': None, 'currency': '', 'image': '', 'title': '', 'is_product': False}
     try:
         parsed = urllib.parse.urlparse(url)
+        adapter = _web_store_price_api(url, country)
+        if adapter:
+            # A public price API answers even when the page itself is blocked.
+            data.update(adapter)
+            data['is_product'] = True
         headers = dict(HEADERS)
         headers.update({'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8', 'Accept-Language': 'en-US,en;q=0.8', 'Referer': f'{parsed.scheme}://{parsed.netloc}/'})
 
@@ -15383,9 +15576,17 @@ def _web_fetch_page_snapshot(url):
                 # A malformed price must not discard the offer's title/image.
                 print('WEB PRODUCT PRICE PARSE ERR host=' + parsed.netloc + ': ' + type(exc).__name__)
                 parsed_data = {}
+            if not parsed_data.get('price') and data.get('price'):
+                parsed_data = dict(parsed_data, price=data['price'], currency=data['currency'], price_source=data.get('price_source'))
+            if not parsed_data.get('price'):
+                try:
+                    parsed_data = _web_fallback_page_price(html, final_url, metadata, country) or parsed_data
+                except Exception as exc:
+                    print('WEB PAGE PRICE FALLBACK ERR host=' + parsed.netloc + ': ' + type(exc).__name__)
             data['price'] = parsed_data.get('price')
             data['currency'] = str(parsed_data.get('currency') or '').upper().strip()
             data['price_source'] = parsed_data.get('price_source') or ''
+            data['price_confidence'] = parsed_data.get('price_confidence') or ('high' if data['price'] else '')
             data['availability'] = parsed_data.get('availability') or ''
             if data['price']:
                 data['is_product'] = True
@@ -15799,10 +16000,11 @@ def _web_extract_exact_page_price(html, url):
     return {}
 
 
-def _web_verified_page_snapshot(url):
+def _web_verified_page_snapshot(url, country=''):
     """Short fresh cache and single-flight, shared by every search/client."""
     market = dict(current_market())
-    key = (_web_price_url_key(url), str(market.get('country') or ''), _web_market_currency(market))
+    country = str(country or '').lower()
+    key = (_web_price_url_key(url), str(market.get('country') or ''), _web_market_currency(market), country)
     now = time.monotonic()
     with WEB_PRODUCT_VERIFY_LOCK:
         cached = WEB_PRODUCT_VERIFY_CACHE.get(key)
@@ -15818,7 +16020,7 @@ def _web_verified_page_snapshot(url):
             return None  # Do not start a duplicate request on a follower timeout.
         return dict(flight['data'] or {})
     try:
-        data = _web_fetch_page_snapshot(url) or {}
+        data = _web_fetch_page_snapshot(url, country) or {}
         data['price_checked_at'] = time.time()
         with WEB_PRODUCT_VERIFY_LOCK:
             WEB_PRODUCT_VERIFY_CACHE[key] = {'ts': time.monotonic(), 'data': dict(data)}
@@ -15855,12 +16057,15 @@ def _web_live_money_fields(amount, currency, market):
             'price_amount': converted[0] if converted else amount,
             'currency': target if converted else currency,
             'original_price': original, 'original_currency': currency,
-            'price_estimated': bool(converted)}
+            'price_estimated': bool(converted),
+            # One comparable number per card, in the visitor's market currency.
+            'price_compare_value': converted[0] if converted else (amount if currency == target else None),
+            'price_compare_currency': target if (converted or currency == target) else ''}
 
 
 def _web_live_page_price(row, market):
     MARKET_CTX.value = dict(market)
-    snap = _web_verified_page_snapshot(row.get('url')) or {}
+    snap = _web_verified_page_snapshot(row.get('url'), row.get('country') or row.get('market_country') or '') or {}
     money = _web_exact_money(snap.get('price'), snap.get('currency'))
     if not money or not snap.get('is_product'):
         image = _web_live_page_image(row, snap)
@@ -15878,12 +16083,16 @@ def _web_live_page_price(row, market):
         if any(before.get(k) != after.get(k) for k in ('variant', 'sku', 'size', 'color', 'currency') if k in before):
             return None
     amount, currency = money
+    if _price_collides_with_product_spec(amount, original, title):
+        return None
+    confident = str(snap.get('price_confidence') or 'high') == 'high'
     return {**_web_live_money_fields(amount, currency, market),
             'price_source': snap.get('price_source') or 'product_page',
             'price_source_url': snap.get('url') or row.get('url'),
             'price_checked_at': snap.get('price_checked_at') or time.time(),
-            'price_verified': True, 'price_pending': False, 'price_unavailable': False,
-            'price_status': 'verified', 'availability': snap.get('availability') or '',
+            'price_verified': confident, 'price_pending': False, 'price_unavailable': False,
+            'price_status': 'verified' if confident else 'page', 'availability': snap.get('availability') or '',
+            'price_confidence': snap.get('price_confidence') or 'high',
             'page_image': _web_live_page_image(row, snap)}
 
 
@@ -15904,7 +16113,7 @@ def _web_live_page_image(row, snap):
 def _web_live_page_image_only(row, market):
     """A page image for a card that already has a price but no picture."""
     MARKET_CTX.value = dict(market)
-    snap = _web_verified_page_snapshot(row.get('url')) or {}
+    snap = _web_verified_page_snapshot(row.get('url'), row.get('country') or row.get('market_country') or '') or {}
     image = _web_live_page_image(row, snap)
     return {'page_image': image} if image else None
 
@@ -16047,8 +16256,43 @@ def _web_targeted_price_updates(entries, lang, market):
     return updates
 
 
+WEB_PRICE_OUTLIER_FACTOR = max(3.0, min(50.0, float(os.environ.get('WEB_PRICE_OUTLIER_FACTOR', '8'))))
+
+
+def _web_flag_price_outliers(rows):
+    """Hide an unverified price that is far outside the other offers of the same product/market.
+
+    Groups by market lane and currency; needs at least three priced rows. A
+    verified page price is never hidden. The hidden amount stays in
+    price_suspect_value for diagnostics.
+    """
+    groups = {}
+    for key, row in rows.items():
+        if not _web_row_has_numeric_price(row):
+            continue
+        value, currency = _web_price_number_and_currency(str(row.get('price') or ''), str(row.get('currency') or ''))
+        if not value or value <= 0:
+            continue
+        groups.setdefault((row.get('market_rank'), currency), []).append((key, float(value)))
+    for (_rank, currency), members in groups.items():
+        if len(members) < 3:
+            continue
+        values = sorted(v for _, v in members)
+        median = values[len(values) // 2]
+        for key, value in members:
+            row = rows[key]
+            if row.get('price_verified') or row.get('price_suspect_value') is not None:
+                continue
+            if value * WEB_PRICE_OUTLIER_FACTOR < median or value > median * WEB_PRICE_OUTLIER_FACTOR:
+                print(f'PRICE OUTLIER hidden value={value} median={median} currency={currency} url={str(row.get("url") or "")[:60]}')
+                row.update(price='', price_amount=None, price_pending=False, price_unavailable=True, price_status='suspect',
+                           price_suspect_value=value, price_compare_value=None, price_compare_currency='')
+    return rows
+
+
 def _web_live_snapshot(event, rows):
     """Keep every emitted card when classification snapshots replace their lists."""
+    _web_flag_price_outliers(rows)
     event = dict(event)
     # Keep the engine's order for the rows it listed (lane, identity, price),
     # then append every earlier card the snapshot did not mention.
