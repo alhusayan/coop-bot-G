@@ -1,5 +1,41 @@
 # -*- coding: utf-8 -*-
-"""Findzia v124 — Match Percentage Calibration.
+"""Findzia v126 — Strong Text Search.
+
+WHAT CHANGED IN v126 (see TEXT_SEARCH_AR.md)
+* Typed queries no longer wait for two Gemini round trips (intent parsing +
+  request classification) before the first store request: a query that names
+  a brand, model, product noun or two content words is a product search and
+  starts the market lanes immediately; Gemini classification runs only for
+  vague wording, and even then products beat "which brand?" chips whenever
+  the market lanes found real offers.
+* The local market gets three retrieval lanes on text searches (organic +
+  two store-scoped passes over different catalogs) and keeps filling until
+  the local cap; global countries keep two lanes.
+* Arabic descriptors (colours, wireless/bluetooth, sizes, materials,
+  accessories) and brand aliases are translated for retrieval and matching;
+  untranslatable Arabic filler no longer sinks a Latin-titled offer.
+* TEXT ROUTE / TEXT LANES log lines show routing and lane counts per query.
+
+INHERITED v125 — Hybrid Text Search.
+
+WHAT CHANGED IN v125 (see HYBRID_TEXT_SEARCH_AR.md)
+* Typed searches on the web/app no longer depend on the Gemini grounded
+  answer alone. The same deterministic market retrieval that image search
+  uses (Google Shopping / organic with merchant-country evidence / Baidu for
+  China, indexed prices) runs in parallel for the local market plus the
+  selected or default global markets, and the two result sets are merged
+  (deduplicated by URL, at most TEXT_HYBRID_STORE_CAP rows per store).
+* /api/search/stream paints market offers as they arrive (usually 2-5 s)
+  while the Gemini tournament is still running, then emits the merged
+  authoritative snapshot, a bounded indexed-price recovery for rows without a
+  price, and finally the AI classification update as before.
+* When the Gemini engine returns nothing or times out, the market offers are
+  the answer instead of an empty page. /api/search (non-stream) and the
+  iOS text path share the same merge.
+* TEXT_SEARCH_HYBRID_MARKETS=false restores the previous Gemini-only text
+  engine. WhatsApp text replies are unchanged.
+
+INHERITED v124 — Match Percentage Calibration.
 
 WHAT CHANGED IN v124 (see MATCH_CALIBRATION_AR.md)
 * Printed identity decides for text-bearing products. When the photo shows
@@ -182,7 +218,7 @@ cache expiry/bounds, cancellation isolation, and uncached prompt/verdict parity.
 Python compilation and undefined-name checks passed. No live provider calls,
 production deployment, or production latency/billing measurement was performed.
 """
-import os, re, time, base64, requests, json, asyncio, urllib.parse, hashlib, hmac, sqlite3, threading, io, ast, ipaddress, socket, unicodedata, copy, html
+import os, re, time, base64, requests, json, asyncio, urllib.parse, hashlib, hmac, sqlite3, threading, io, ast, ipaddress, socket, unicodedata, copy, html, queue
 from collections import Counter, deque, defaultdict
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from functools import lru_cache
@@ -206,7 +242,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization'], max_age=86400)
-BUILD_ID = 'v124-match-calibration'
+BUILD_ID = 'v126-strong-text-search'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -3506,6 +3542,51 @@ def _china_domestic_product_url(url):
         return False
 
 
+# Descriptors (never product kinds): colours, connectivity, sizes, materials
+# and accessory words as typed by Arabic/Chinese shoppers. Retrieval only.
+_LOCAL_DESCRIPTOR_TERMS = {
+    'wireless': {'en': 'wireless|cordless', 'ar': 'لاسلكي|لاسلكية|لاسلكيه|وايرلس', 'zh': '无线'},
+    'bluetooth': {'en': 'bluetooth', 'ar': 'بلوتوث', 'zh': '蓝牙'},
+    'black': {'en': 'black', 'ar': 'اسود|أسود|سوداء|اسوود', 'zh': '黑色'},
+    'white': {'en': 'white', 'ar': 'ابيض|أبيض|بيضاء', 'zh': '白色'},
+    'red': {'en': 'red', 'ar': 'احمر|أحمر|حمراء', 'zh': '红色'},
+    'blue': {'en': 'blue|navy', 'ar': 'ازرق|أزرق|زرقاء|كحلي', 'zh': '蓝色'},
+    'green': {'en': 'green', 'ar': 'اخضر|أخضر|خضراء', 'zh': '绿色'},
+    'grey': {'en': 'grey|gray', 'ar': 'رمادي|رصاصي|رماديه', 'zh': '灰色'},
+    'gold': {'en': 'gold|golden', 'ar': 'ذهبي|ذهبيه|ذهبية', 'zh': '金色'},
+    'silver': {'en': 'silver', 'ar': 'فضي|فضيه|فضية', 'zh': '银色'},
+    'pink': {'en': 'pink|rose', 'ar': 'وردي|زهري|بينك', 'zh': '粉色'},
+    'purple': {'en': 'purple|violet', 'ar': 'بنفسجي|موف', 'zh': '紫色'},
+    'brown': {'en': 'brown|beige', 'ar': 'بني|بيج', 'zh': '棕色|米色'},
+    'large': {'en': 'large|big|xl', 'ar': 'كبير|كبيره|كبيرة', 'zh': '大号'},
+    'small': {'en': 'small|mini', 'ar': 'صغير|صغيره|صغيرة|ميني', 'zh': '小号|迷你'},
+    'size': {'en': 'size', 'ar': 'مقاس|قياس', 'zh': '尺码|尺寸'},
+    'charger': {'en': 'charger|charging', 'ar': 'شاحن|شحن', 'zh': '充电器'},
+    'case': {'en': 'case|cover', 'ar': 'كفر|غطاء|جراب|حافظة|حافظه', 'zh': '保护壳|手机壳'},
+    'protector': {'en': 'screen protector|protector', 'ar': 'حماية شاشة|حمايه شاشه|واقي شاشة|حماية', 'zh': '钢化膜|保护膜'},
+    'original': {'en': 'original|genuine', 'ar': 'اصلي|أصلي|اصليه|اصلية', 'zh': '正品|原装'},
+    'used': {'en': 'used|second hand|pre-owned', 'ar': 'مستعمل|مستعمله|مستعملة', 'zh': '二手'},
+    'leather': {'en': 'leather', 'ar': 'جلد|جلدي', 'zh': '皮革|真皮'},
+    'cotton': {'en': 'cotton', 'ar': 'قطن|قطني', 'zh': ''},
+    'steel': {'en': 'stainless steel|steel', 'ar': 'ستانلس|استانلس|فولاذ', 'zh': '不锈钢'},
+    'inch': {'en': 'inch|inches', 'ar': 'بوصة|بوصه|انش', 'zh': '英寸'},
+    'liter': {'en': 'liter|litre|liters|litres', 'ar': 'لتر', 'zh': ''},
+    'kg': {'en': 'kg|kilogram', 'ar': 'كيلو|كجم', 'zh': '公斤'},
+    'gb': {'en': 'gb|gigabyte', 'ar': 'جيجا|قيقا|غيغا', 'zh': 'gb'},
+    'tb': {'en': 'tb|terabyte', 'ar': 'تيرا', 'zh': 'tb'},
+    'pcs': {'en': 'pcs|pieces|pack', 'ar': 'حبة|حبه|حبات|قطعة|قطعه|قطع|عبوة|عبوه', 'zh': ''},
+    'set': {'en': 'set|kit', 'ar': 'طقم|مجموعة|مجموعه', 'zh': '套装'},
+    'sport': {'en': 'sport|sports|running|gym', 'ar': 'رياضي|رياضيه|رياضية|جري|جيم', 'zh': '运动|跑步'},
+    'smart': {'en': 'smart', 'ar': 'ذكي|ذكيه|ذكية', 'zh': '智能'},
+    'electric': {'en': 'electric|electrical', 'ar': 'كهربائي|كهربائيه|كهربائية|كهرباء', 'zh': '电动'},
+    'portable': {'en': 'portable|travel', 'ar': 'متنقل|محمول|سفر', 'zh': '便携|旅行'},
+    'waterproof': {'en': 'waterproof|water resistant', 'ar': 'ضد الماء|مقاوم للماء', 'zh': '防水'},
+    'fast': {'en': 'fast', 'ar': 'سريع|سريعه|سريعة', 'zh': '快速|快充'},
+    'rechargeable': {'en': 'rechargeable', 'ar': 'قابل للشحن|قابلة للشحن', 'zh': '可充电'},
+    'baby': {'en': 'baby|infant|newborn', 'ar': 'بيبي|رضيع|رضع|مواليد', 'zh': '婴儿|宝宝'},
+    'gift': {'en': 'gift', 'ar': 'هدية|هديه|هدايا', 'zh': '礼物|礼品'},
+}
+
 # Retrieval vocabulary only: these translations are never identity proof and
 # never replace the visible product title, model, variant, or price.
 # Brand names as written by Chinese marketplaces and by Arabic-speaking users;
@@ -3650,16 +3731,27 @@ def _local_retrieval_rules():
                for terms in languages.values() for term in terms.split('|')]
     entries += [(normalize_ar(alias.casefold()), brand) for brand, languages in _LOCAL_BRAND_ALIASES.items()
                 for terms in languages.values() for alias in terms.split('|')]
+    entries += [(normalize_ar(term.casefold()), canonical) for canonical, languages in _LOCAL_DESCRIPTOR_TERMS.items()
+                for terms in languages.values() for term in terms.split('|')]
     entries += list(audience.items())
     replacements = dict(entries)
     pattern = '|'.join(_local_term_pattern(term) for term in sorted(replacements, key=len, reverse=True))
     return re.compile(pattern), replacements
 
 
+def _local_retrieval_term(replacements, matched):
+    """Look up a matched term; Arabic matches may carry a و/ال prefix."""
+    key = matched.casefold()
+    hit = replacements.get(key)
+    if hit is None:
+        hit = replacements.get(re.sub(r'^(?:و?ال|و)', '', key))
+    return hit if hit is not None else matched
+
+
 def _local_retrieval_text(value):
     text = normalize_ar(_cjk_boundary_spaces(unicodedata.normalize('NFKC', str(value or '')).casefold()))
     pattern, replacements = _local_retrieval_rules()
-    return pattern.sub(lambda m: ' ' + replacements[m.group(0)] + ' ', text)
+    return pattern.sub(lambda m: ' ' + _local_retrieval_term(replacements, m.group(0)) + ' ', text)
 
 
 def _market_query_languages(cc, query=''):
@@ -3745,16 +3837,31 @@ def _market_query_static(query, language):
     text = _market_query_key(query, language)[0]
     language = language.split('-')[0]
     replacements = {term.casefold(): row[language].split('|')[0]
-        for row in _LOCAL_RETRIEVAL_NOUNS.values() if language in row
+        for table in (_LOCAL_RETRIEVAL_NOUNS, _LOCAL_DESCRIPTOR_TERMS)
+        for row in table.values() if language in row
         for terms in row.values() for term in terms.split('|')
         if term.casefold() != row[language].split('|')[0].casefold()}
+    # Brand aliases: Arabic/Chinese spellings -> Latin brand for English and
+    # Latin markets; Latin brand -> "中文 Latin" pair for Chinese indexes.
+    for brand, languages in _LOCAL_BRAND_ALIASES.items():
+        zh_pair = (languages['zh'].split('|')[0] + ' ' + brand) if 'zh' in languages else brand
+        if language == 'zh' and 'zh' in languages:
+            replacements.setdefault(brand, zh_pair)
+        for lang_code, terms in languages.items():
+            if lang_code == language:
+                continue
+            for alias in terms.split('|'):
+                replacements.setdefault(alias.casefold(), zh_pair if language == 'zh' else brand)
     if not replacements:
         return {'query': text, 'edits': []}
     pattern = '|'.join(_local_term_pattern(term) for term in sorted(replacements, key=len, reverse=True))
     edits = []
     def replace(match):
-        target = replacements[match.group(0).casefold()]
-        edits.append({'source': match.group(0), 'target': target})
+        target = _local_retrieval_term(replacements, match.group(0))
+        matched = match.group(0)
+        if language == 'zh' and matched.casefold() in _LOCAL_BRAND_ALIASES and target.endswith(' ' + matched.casefold()):
+            target = target[:-len(matched.casefold())] + matched  # 索尼 Sony, not 索尼 sony
+        edits.append({'source': matched, 'target': target})
         return target
     return {'query': re.sub(pattern, replace, text, flags=re.I), 'edits': edits}
 
@@ -3956,6 +4063,23 @@ def _local_discovery_candidate_ok(query, item, visual=False):
         if translated:
             item['_local_match_uncertain'] = True
         return True
+    # Untranslatable Arabic filler ("ابي", "حق", "مال") cannot appear in a
+    # Latin title; judge the Latin/translated part of the query on its own.
+    if not re.search(r'[\u0600-\u06ff]', title):
+        latin_only = ' '.join(tok for tok in q.split() if not re.search(r'[\u0600-\u06ff]', tok))
+        latin_tokens = _findzia_lexical_tokens(latin_only)
+        if latin_tokens and latin_tokens != _findzia_lexical_tokens(q):
+            if _findzia_stream_candidate_ok(latin_only, dict(item, title=t)):
+                item['_local_match_uncertain'] = True
+                return True
+            # A shared brand or model plus half of the translated words is a
+            # candidate for the audit ("سماعة سوني حق الجوال" -> Sony headphones).
+            shared = latin_tokens & _findzia_lexical_tokens(t)
+            anchored = any(tok in _LOCAL_BRAND_ALIASES for tok in shared) or bool(
+                _web_model_tokens_from_listing(latin_only) & _web_model_tokens_from_listing(t))
+            if anchored and len(shared) * 2 >= len(latin_tokens):
+                item['_local_match_uncertain'] = True
+                return True
     # A generic identity ("stuffed toy") cannot be matched by word overlap; any
     # shared product word plus a thumbnail lets the visual audit decide.
     if item.get('thumbnail') and _query_is_generic(query):
@@ -3974,7 +4098,7 @@ def _local_discovery_candidate_ok(query, item, visual=False):
     return False
 
 
-def _local_discovery_query(query, market, scoped=False, language=None):
+def _local_discovery_query(query, market, scoped=False, language=None, store_offset=0):
     # Wording is prepared once per search, independently of merchant scopes.
     cc = str(market.get('country') or DEFAULT_COUNTRY).lower()
     language = language or _market_query_languages(cc, query)[0]
@@ -4002,10 +4126,14 @@ def _local_discovery_query(query, market, scoped=False, language=None):
         return (f'{q} (site:item.jd.com OR site:item.m.jd.com OR site:item.taobao.com '
                 'OR site:detail.tmall.com OR site:detail.1688.com OR site:product.suning.com) '
                 '-inurl:search -inurl:category -inurl:login')
-    specs = _run_with_market(market, local_rescue_store_specs, q, 6)
+    offset = max(0, int(store_offset or 0))
+    specs = _run_with_market(market, local_rescue_store_specs, q, 6 + offset)[offset:]
     scopes = list(dict.fromkeys('site:' + domain for _, domain in specs))
+    if offset and not scopes:
+        return ''
     # Discover independent shops too; this is not a closed store whitelist.
-    scopes += ['site:' + tld.lstrip('.') for tld in country_tlds(cc)[:1]]
+    if not offset:
+        scopes += ['site:' + tld.lstrip('.') for tld in country_tlds(cc)[:1]]
     return f'{q} ({" OR ".join(scopes)}) {cue}'
 
 
@@ -4312,7 +4440,7 @@ def _local_discovery_request(query, market, kind, timeout_seconds):
                 # Never copy a price, availability, or title between sellers.
                 stores.append(row)
         return _local_discovery_rows({'shopping_results': stores}, query, market, 'local_shopping_stores')
-    search_query, hl = _market_query_request_variant(query, market, kind, timeout_seconds)
+    search_query, hl = _market_query_request_variant(query, market, 'scoped' if kind == 'scoped2' else kind, timeout_seconds)
     timeout_seconds -= time.monotonic() - started
     if timeout_seconds <= .01:
         return []
@@ -4336,7 +4464,11 @@ def _local_discovery_request(query, market, kind, timeout_seconds):
         if LOCAL_DISCOVERY_BAIDU_DEVICE in ('mobile', 'tablet'):
             params['device'] = LOCAL_DISCOVERY_BAIDU_DEVICE
     else:
-        params = {'engine': 'google', 'q': _local_discovery_query(search_query, market, scoped=kind == 'scoped', language=hl),
+        scoped_query = _local_discovery_query(search_query, market, scoped=kind in ('scoped', 'scoped2'), language=hl,
+                                              store_offset=6 if kind == 'scoped2' else 0)
+        if not scoped_query:
+            return []
+        params = {'engine': 'google', 'q': scoped_query,
                   'gl': cc, 'hl': hl, 'num': 10,
                   'api_key': SERPAPI_API_KEY, 'output': 'json'}
     connect = min(1.5, max(.01, timeout_seconds * .15))
@@ -8514,6 +8646,34 @@ def execute_product_search(from_number, product, bot_id, lang):
 REQUEST_CLASSIFIER_SYSTEM = 'أنت مصنف نية شراء ذكي لبوت تسوق عالمي على واتساب. المستخدم قد يكتب بالعربية أو بأي لغة مدعومة.\nصنّف الرسالة بدقة وأجب بكلمة واحدة فقط بدون أي شرح: GENERIC أو SPECIFIC أو SERVICE أو NONE\n\nالمبدأ الأساسي:\n- لا تحكم حسب نوع الفئة وحدها (طعام/إلكترونيات/ملابس...). افهم هل المستخدم حدّد منتجاً بعينه أم ما زال يطلب فئة عامة.\n- GENERIC يعني أن العبارة تصف فئة/نوعاً عاماً ويمكن أن توجد عدة براندات أو منتجات مناسبة، لذلك الأفضل أن نعرض توصيات ذكية أولاً.\n- SPECIFIC يعني أن المستخدم حدّد براند أو موديل أو SKU أو اسم منتج تجاري واضح أو وصفاً شديد التحديد يكفي للبحث عن نفس المنتج مباشرة.\n\nGENERIC أمثلة:\nشاورما دجاج، برجر دجاج، حليب، رز، ماء، قهوة، شوكولاتة، شامبو، حفاضات، مضرب تنس، حذاء تنس للأطفال، لابتوب للدراسة، سماعة بلوتوث، قلاية هوائية، عطر رجالي، سيارة عائلية، مولد كهرباء.\nChicken shawarma, tennis racket, kids tennis shoes, laptop for university, protein bar, olive oil.\nإذا لم توجد ماركة/موديل واضحان وكانت هناك عدة خيارات ومنتجات محتملة، اختر GENERIC.\n\nSPECIFIC أمثلة:\nNabil Chicken Shawarma 400g، حليب المراعي كامل الدسم 1 لتر، Pepsi 330ml، Yonex EZONE 100، Wilson Blade 98 V9، iPhone 16 Pro 256GB، Nike Vapor Pro 2 Junior، Head & Shoulders Classic Clean 400ml.\nذكر ماركة مع نوع المنتج غالباً SPECIFIC حتى لو لم يذكر المقاس، مثل: حليب المراعي، شامبو Pantene، حذاء Adidas.\n\nSERVICE = طلب خدمة أو فني أو تصليح أو صيانة أو عامل وليس شراء منتج.\nأمثلة: كهربائي، فني تكييف، سباك، بنشر متنقل، تصليح غسالة، مكافحة حشرات.\n\nNONE = الرسالة ليست طلب شراء ولا خدمة: تحية، شكر، عتاب، مزح، اختبار، أو كلام موجه للبوت.\nأمثلة: هلا، شكراً، وينك، ليش ما ترد، تمام، ok، تجربة.\n\nقواعد الحسم:\n1) لا تعتبر الطعام أو التموينات SPECIFIC تلقائياً. «شاورما دجاج» GENERIC، بينما «Nabil Chicken Shawarma 400g» SPECIFIC.\n2) لا تعتبر كلمة واحدة SPECIFIC تلقائياً. «حليب» GENERIC، بينما «حليب المراعي 1 لتر» SPECIFIC.\n3) إذا توجد ماركة/موديل/SKU واضح = SPECIFIC.\n4) إذا الطلب فئة عامة بلا ماركة واضحة = GENERIC.\n5) إذا شككت بين GENERIC وSPECIFIC ولم توجد هوية تجارية واضحة، اختر GENERIC.\n6) أجب بكلمة التصنيف فقط.'
 _REQUEST_CLASS_CACHE = {}
 _REQUEST_CLASS_LOCK = threading.Lock()
+
+def _text_query_is_product(query):
+    """Deterministic: a brand, model, product noun or two content words mean a
+    product search and need no Gemini classification round trip."""
+    q = re.sub(r'\s+', ' ', str(query or '')).strip()
+    if not q or is_service_request(q):
+        return False
+    retrieval = _local_retrieval_text(q)
+    tokens = retrieval.split()
+    if _web_model_tokens_from_listing(retrieval):
+        return True
+    if any(tok in _LOCAL_BRAND_ALIASES for tok in tokens):
+        return True
+    if any(tok in _LOCAL_RETRIEVAL_NOUNS for tok in tokens):
+        return True
+    content = [tok for tok in _findzia_lexical_tokens(retrieval)
+               if tok not in _FINDZIA_QUERY_FILLER and tok not in _LOCAL_DESCRIPTOR_TERMS]
+    if re.search(r'\d', q) and content:
+        return True
+    # Two content words with at least one Latin token ("air fryer ninja");
+    # vague Arabic wording ("شي حلو", "هدية لزوجتي") still goes to the classifier.
+    return len(content) >= 2 and any(re.fullmatch(r'[a-z0-9][a-z0-9.\-]*', tok) for tok in content)
+
+
+def _text_query_needs_intent_parse(query):
+    q = str(query or '')
+    return bool(re.search(r'[,،;]|\s(?:و|and|or|او|أو)\s', q)) or len(q.split()) > 7
+
 
 def classify_request_type(query):
     q = ' '.join(str(query or '').split()).strip()
@@ -12751,6 +12911,11 @@ def _web_match_guard_percentage(match_guard):
     if str(match_guard[0] or '').lower() == 'exact':
         return 96
     reason = str(match_guard[1] or '').lower()
+    if reason == 'product_type_not_proven':
+        # The model number agrees and nothing contradicts; only one side named
+        # the product kind ("Sony WH-1000XM5" vs "... Wireless Headphones").
+        # That is a probable identity, not a category mismatch.
+        return 85
     if any(token in reason for token in (
         'category', 'function', 'accessory', 'component', 'replacement',
         'membership', 'subscription', 'wrong_product', 'product_type',
@@ -15738,7 +15903,15 @@ def _web_targeted_price_updates(entries, lang, market):
 def _web_live_snapshot(event, rows):
     """Keep every emitted card when classification snapshots replace their lists."""
     event = dict(event)
-    ordered = list(rows.values())
+    # Keep the engine's order for the rows it listed (lane, identity, price),
+    # then append every earlier card the snapshot did not mention.
+    ordered, seen = [], set()
+    for item in event.get('results') or []:
+        key = _web_identity_offer_key(item) if isinstance(item, dict) else None
+        if key in rows and key not in seen:
+            seen.add(key)
+            ordered.append(rows[key])
+    ordered.extend(row for key, row in rows.items() if key not in seen)
     exact = [r for r in ordered if r.get('result_section', r.get('match_type')) == 'exact']
     similar = [r for r in ordered if r not in exact]
     local = [r for r in ordered if r.get('market_rank') == 0 or r.get('market_scope') == 'local']
@@ -16573,20 +16746,24 @@ def _web_prepare_stream_query_sync(query, country, lang, selected_option='', ori
         force_specific = True
     if not q:
         return {'ok': False, 'error': 'empty_query', 'market': market, 'query': q}
-    try:
-        parsed = parse_user_intent(q, lang)
-        products = [p for p in parsed.get('products') or [] if str(p).strip()]
-        if len(products) == 1:
-            q = products[0]
-    except Exception:
-        pass
+    started = time.monotonic()
+    fast = _text_query_is_product(q)
+    if _text_query_needs_intent_parse(q):
+        try:
+            parsed = parse_user_intent(q, lang)
+            products = [p for p in parsed.get('products') or [] if str(p).strip()]
+            if len(products) == 1:
+                q = products[0]
+        except Exception:
+            pass
     rtype = 'SPECIFIC'
-    if not force_specific:
+    if not force_specific and not fast:
         try:
             rtype = classify_request_type(q)
         except Exception:
             rtype = 'SPECIFIC'
-    return {'ok': True, 'query': q, 'market': market, 'rtype': rtype, 'force_specific': force_specific}
+    print(f'TEXT ROUTE q={q[:60]!r} country={country} rtype={rtype} fast={fast} elapsed={time.monotonic()-started:.2f}s')
+    return {'ok': True, 'query': q, 'market': market, 'rtype': rtype, 'force_specific': force_specific, 'fast': fast}
 
 def _web_repair_text_price_outliers(rows, lang, market):
     """Verify obvious same-product price outliers against the retailer page.
@@ -16714,7 +16891,119 @@ def _web_expand_text_results(query, country, lang, rows):
     ))
     return out[:sum(caps.values())]
 
-def _web_search_text_sync(query, country, lang, selected_option='', original_query='', force_specific=False):
+TEXT_SEARCH_HYBRID_MARKETS = env_bool('TEXT_SEARCH_HYBRID_MARKETS', True)
+TEXT_HYBRID_STORE_CAP = max(1, min(4, int(os.environ.get('TEXT_HYBRID_STORE_CAP', '2'))))
+TEXT_LOCAL_LANES = max(2, min(4, int(os.environ.get('TEXT_LOCAL_LANES', '3'))))
+TEXT_GENERIC_PRODUCT_WAIT = max(0.0, min(10.0, float(os.environ.get('TEXT_GENERIC_PRODUCT_WAIT', '6.0'))))
+TEXT_HYBRID_TIMEOUT = max(6.0, min(25.0, float(os.environ.get('TEXT_HYBRID_TIMEOUT_SECONDS', '18'))))
+TEXT_HYBRID_POOL = ThreadPoolExecutor(max_workers=8, thread_name_prefix='text-hybrid')
+
+
+def _web_text_hybrid_globals(country, requested=None):
+    try:
+        return _web_global_countries(list(requested) if isinstance(requested, list) else None, country)
+    except ValueError:
+        return [cc for cc in DEFAULT_GLOBAL_COUNTRIES if cc != country]
+
+
+def _web_text_market_rows(query, country, lang, global_countries=None, progress_callback=None, cancel_event=None):
+    """Deterministic merchant offers for a typed query (Shopping/organic/Baidu with evidence).
+
+    This is the retrieval that image search already trusts; the typed query is
+    the reference. It never invents a price or a storefront country.
+    """
+    text = re.sub(r'\s+', ' ', str(query or '')).strip()
+    if not (TEXT_SEARCH_HYBRID_MARKETS and SERPAPI_API_KEY and text):
+        return []
+    try:
+        result = _web_selected_market_search(text, country, lang, _web_text_hybrid_globals(country, global_countries),
+                                             image_b64='', progress_callback=progress_callback, cancel_event=cancel_event,
+                                             local_lanes=TEXT_LOCAL_LANES, local_target=SELECTED_LOCAL_CAP)
+    except Exception as exc:
+        print(f'TEXT MARKET ROWS ERR: {type(exc).__name__}')
+        return []
+    return [row for row in (result.get('results') or []) if isinstance(row, dict) and row.get('url')]
+
+
+def _web_text_market_row(row, market):
+    """Re-label a selected-market row with the text engine's local/us/china lanes."""
+    out = _web_apply_market_context(dict(row), market)
+    local = str((market or {}).get('country') or DEFAULT_COUNTRY).lower()
+    actual = _explicit_market_country(out) or local
+    rank = 0 if actual == local else (2 if actual == 'cn' else 1)
+    out.update(market=_web_market_label(rank), market_rank=rank, market_scope='local' if rank == 0 else 'global',
+               country=actual, flag=country_flag_emoji(actual), price_source=out.get('price_source') or 'market_offer',
+               retrieval='market_offers')
+    out.setdefault('raw_title', out.get('title') or '')
+    if 'match_score' not in out:
+        out['match_score'] = round(_findzia_match_score(str((market or {}).get('_query') or ''), out.get('raw_title') or out.get('title') or ''), 3) if market.get('_query') else 0.0
+    return out
+
+
+def _web_text_hybrid_merge(primary_rows, market_rows, market, query=''):
+    """Union of the AI text answer and deterministic market offers.
+
+    The AI rows keep their order and fields; market rows are appended when
+    their URL is new, filling a missing price on an identical URL. At most
+    TEXT_HYBRID_STORE_CAP rows per store domain; the result is sorted by
+    market lane (local, US, China) and then by match score.
+    """
+    market = dict(market or {})
+    if query:
+        market['_query'] = query
+    out, by_key, per_domain = [], {}, Counter()
+    def key_of(row):
+        return _canonical_result_url(str(row.get('url') or row.get('link') or ''))
+    def domain_of(row):
+        return (_more_result_domain(str(row.get('url') or row.get('link') or '')) or '').removeprefix('www.')
+    for row in primary_rows or []:
+        key = key_of(row)
+        if not key or key in by_key:
+            continue
+        by_key[key] = row
+        per_domain[domain_of(row)] += 1
+        out.append(row)
+    added = 0
+    for raw in market_rows or []:
+        key = key_of(raw)
+        if not key:
+            continue
+        if key in by_key:
+            old = by_key[key]
+            if not _web_row_has_numeric_price(old) and _web_row_has_numeric_price(raw):
+                old.update({k: v for k, v in raw.items() if k.startswith('price') or k in ('currency', 'original_currency', 'original_price')})
+                old['price_pending'] = False
+            if not old.get('image') and (raw.get('image') or raw.get('thumbnail')):
+                old['image'] = raw.get('image') or raw.get('thumbnail')
+            continue
+        domain = domain_of(raw)
+        if domain and per_domain[domain] >= TEXT_HYBRID_STORE_CAP:
+            continue
+        row = _web_text_market_row(raw, market)
+        by_key[key] = row
+        per_domain[domain] += 1
+        out.append(row)
+        added += 1
+    out.sort(key=lambda row: (int(row.get('market_rank', 99)) if isinstance(row.get('market_rank'), int) else 99,
+                              0 if _web_row_has_numeric_price(row) else 1,
+                              -float(row.get('match_score') or 0)))
+    if market_rows is not None:
+        print(f'TEXT HYBRID MERGE ai_rows={len(primary_rows or [])} market_rows={len(market_rows or [])} added={added} total={len(out)}')
+    return out
+
+
+def _web_text_lane_sort(rows):
+    """Local lane first, then US, then China; inside a lane best identity, priced first."""
+    def key(row):
+        rank = row.get('market_rank')
+        rank = rank if isinstance(rank, int) and not isinstance(rank, bool) else 99
+        pct = row.get('identity_match_percentage', row.get('match_percentage'))
+        pct = float(pct) if isinstance(pct, (int, float)) and not isinstance(pct, bool) else -1.0
+        return (rank, -pct, 0 if _web_row_has_numeric_price(row) else 1, str(row.get('url') or ''))
+    return sorted(rows or [], key=key)
+
+
+def _web_search_text_sync(query, country, lang, selected_option='', original_query='', force_specific=False, hybrid=None):
     market = _web_market(country)
     MARKET_CTX.value = market
     q = re.sub('\\s+', ' ', str(query or '')).strip()[:WEB_API_MAX_QUERY_CHARS]
@@ -16723,13 +17012,16 @@ def _web_search_text_sync(query, country, lang, selected_option='', original_que
         force_specific = True
     if not q:
         return {'ok': False, 'error': 'empty_query'}
-    try:
-        parsed = parse_user_intent(q, lang)
-        products = [p for p in parsed.get('products') or [] if str(p).strip()]
-        if len(products) == 1:
-            q = products[0]
-    except Exception:
-        pass
+    if _text_query_needs_intent_parse(q):
+        try:
+            parsed = parse_user_intent(q, lang)
+            products = [p for p in parsed.get('products') or [] if str(p).strip()]
+            if len(products) == 1:
+                q = products[0]
+        except Exception:
+            pass
+    if not force_specific and _text_query_is_product(q):
+        force_specific = True
     if not force_specific:
         try:
             rtype = classify_request_type(q)
@@ -16743,14 +17035,37 @@ def _web_search_text_sync(query, country, lang, selected_option='', original_que
             return {'ok': False, 'type': 'service', 'error': 'service_search_not_enabled_on_web_yet', 'query': q, 'market': market}
         elif rtype == 'NONE':
             return {'ok': False, 'type': 'chat', 'error': 'not_a_product_query', 'query': q, 'market': market}
+    hybrid = TEXT_SEARCH_HYBRID_MARKETS if hybrid is None else bool(hybrid)
+    market_job = None
+    if hybrid and SERPAPI_API_KEY:
+        # Deterministic market offers run alongside the Gemini tournament, so
+        # a weak or empty AI answer still yields real priced merchant cards.
+        market_job = TEXT_HYBRID_POOL.submit(_run_with_market, dict(market), _web_text_market_rows, q, country, lang, None)
     txt, urls = v26_text_search(q, lang)
     if USE_V106_5_RESULT_PIPELINE or TEXT_SEARCH_WHATSAPP_PARITY:
         # Copied execution order from main_v106.5: one authoritative extraction
         # pass, convert it to cards, return. No empty-market expansion, page
         # verification, price repair or image enrichment in the critical path.
+        market_rows = None
+        if market_job is not None:
+            try:
+                market_rows = market_job.result(timeout=TEXT_HYBRID_TIMEOUT) or []
+            except Exception as exc:
+                print(f'TEXT HYBRID WAIT: {type(exc).__name__}')
+                market_rows = []
         if not txt or not text77_extract_store_offers(txt, limit=30):
-            return {'ok': True, 'type': 'results', 'query': q, 'market': market, 'results': [], 'source': 'whatsapp_text_engine', 'authoritative': True}
+            merged = _web_text_hybrid_merge([], market_rows, market, q) if market_rows else []
+            if not merged:
+                return {'ok': True, 'type': 'results', 'query': q, 'market': market, 'results': [], 'source': 'whatsapp_text_engine', 'authoritative': True}
+            classified = _web_attach_captured_result_sections({
+                'ok': True, 'type': 'results', 'query': q, 'market': market, 'results': merged,
+                'source': 'market_offers', 'authoritative': True}, lang, allow_ai=False)
+            classified['authoritative'] = True
+            classified['results'] = _web_text_lane_sort(classified.get('results'))
+            return classified
         results = _web_build_text_items(txt, urls, lang, q)
+        if market_rows:
+            results = _web_text_hybrid_merge(results, market_rows, market, q)
         # Attach deterministic sections and a calibrated percentage to every
         # WhatsApp-parity card. This is CPU-only and does not add a network or
         # Gemini wait to first paint; the captured winner set/order is intact.
@@ -16763,11 +17078,15 @@ def _web_search_text_sync(query, country, lang, selected_option='', original_que
             # The web and app must treat this list as the same authoritative
             # winner set that the WhatsApp sender consumes. Client-side image
             # availability is presentation only and must never remove a row.
-            'source': 'whatsapp_text_engine',
+            'source': 'whatsapp_text_engine' + ('+market_offers' if market_rows else ''),
             'authoritative': True,
         }, lang, allow_ai=False)
         classified['authoritative'] = True
+        if market_rows:
+            classified['results'] = _web_text_lane_sort(classified.get('results'))
         return classified
+    if market_job is not None:
+        market_job.cancel()
     if not txt or not text77_extract_store_offers(txt, limit=30):
         results = _web_expand_text_results(q, country, lang, [])
         return _web_attach_captured_result_sections(
@@ -18088,9 +18407,22 @@ async def web_api_search_stream(request: Request):
     async def _generator():
         started = time.time()
         yield _web_stream_event({'event': 'start', 'ok': True, 'elapsed_ms': 0})
+        # The deterministic market lanes start on the typed words before any
+        # Gemini routing: first store cards do not wait for classification.
+        hybrid = bool(TEXT_SEARCH_HYBRID_MARKETS and SERPAPI_API_KEY)
+        market_queue = queue.Queue()
+        market_cancel = threading.Event()
+        market_task = None
+        early_query = query if (query and not selected_option and _text_query_is_product(query)) else ''
+        if hybrid and early_query:
+            hybrid_globals = _web_text_hybrid_globals(country, payload.get('global_countries'))
+            market_task = asyncio.create_task(asyncio.to_thread(
+                _run_with_market, dict(_web_market(country)), _web_text_market_rows, early_query, country, lang, hybrid_globals,
+                market_queue.put, market_cancel))
         try:
             prep = await asyncio.to_thread(_web_prepare_stream_query_sync, query, country, lang, selected_option, original_query, force_specific)
             if not prep.get('ok'):
+                market_cancel.set()
                 yield _web_stream_event({'event': 'error', 'error': prep.get('error') or 'bad_query'})
                 return
             q = prep['query']
@@ -18098,24 +18430,91 @@ async def web_api_search_stream(request: Request):
             rtype = prep.get('rtype') or 'SPECIFIC'
             yield _web_stream_event({'event': 'query', 'query': q, 'market': market})
             if rtype == 'GENERIC' and (not force_specific):
-                result = await asyncio.to_thread(_web_search_text_sync, q, country, lang, '', '', False)
-                yield _web_stream_event({'event': 'recommendations', 'data': result, 'elapsed_ms': int((time.time() - started) * 1000)})
-                yield _web_stream_event({'event': 'done', 'elapsed_ms': int((time.time() - started) * 1000)})
-                return
+                # Real offers beat a "which brand?" question. Give the market
+                # lanes a bounded chance before falling back to recommendations.
+                found = []
+                if market_task is not None:
+                    try:
+                        found = await asyncio.wait_for(asyncio.shield(market_task), timeout=TEXT_GENERIC_PRODUCT_WAIT) or []
+                    except (asyncio.TimeoutError, Exception):
+                        found = []
+                        while True:
+                            try:
+                                snap = market_queue.get_nowait()
+                            except queue.Empty:
+                                break
+                            found.extend((snap or {}).get('results') or [])
+                if len(found) >= 2:
+                    rtype = 'SPECIFIC'
+                    print(f'TEXT ROUTE generic query kept as product search: offers={len(found)}')
+                else:
+                    market_cancel.set()
+                    result = await asyncio.to_thread(_web_search_text_sync, q, country, lang, '', '', False, False)
+                    yield _web_stream_event({'event': 'recommendations', 'data': result, 'elapsed_ms': int((time.time() - started) * 1000)})
+                    yield _web_stream_event({'event': 'done', 'elapsed_ms': int((time.time() - started) * 1000)})
+                    return
             if rtype == 'SERVICE':
+                market_cancel.set()
                 yield _web_stream_event({'event': 'error', 'error': 'service_search_not_enabled_on_web_yet'})
                 return
             if rtype == 'NONE':
+                market_cancel.set()
                 yield _web_stream_event({'event': 'error', 'error': 'not_a_product_query'})
                 return
             if TEXT_SEARCH_WHATSAPP_PARITY or USE_V106_5_RESULT_PIPELINE or (WEB_MATCH_WHATSAPP_EXACT and (not WEB_TEXT_DENSE_PARITY)):
-                final_task = asyncio.create_task(asyncio.to_thread(_web_search_text_sync, q, country, lang, '', '', True))
+                if hybrid and market_task is None:
+                    hybrid_globals = _web_text_hybrid_globals(country, payload.get('global_countries'))
+                    market_task = asyncio.create_task(asyncio.to_thread(
+                        _run_with_market, dict(market), _web_text_market_rows, q, country, lang, hybrid_globals,
+                        market_queue.put, market_cancel))
+                final_task = asyncio.create_task(asyncio.to_thread(_web_search_text_sync, q, country, lang, '', '', True, False))
+                early_keys = {}
+                def drain_market_rows():
+                    fresh = []
+                    while True:
+                        try:
+                            snap = market_queue.get_nowait()
+                        except queue.Empty:
+                            break
+                        for raw in (snap or {}).get('results') or []:
+                            key = _canonical_result_url(str(raw.get('url') or ''))
+                            if key and key not in early_keys:
+                                row = _web_text_market_row(raw, dict(market, _query=q))
+                                early_keys[key] = row
+                                fresh.append(row)
+                    return fresh
+                status_tick = 0.0
                 while not final_task.done():
                     try:
-                        await asyncio.wait_for(asyncio.shield(final_task), timeout=2.0)
+                        await asyncio.wait_for(asyncio.shield(final_task), timeout=0.35)
                     except asyncio.TimeoutError:
-                        yield _web_stream_event({'event': 'status', 'stage': 'whatsapp_engine', 'elapsed_ms': int((time.time() - started) * 1000)})
+                        pass
+                    for row in drain_market_rows():
+                        yield _web_stream_event({'event': 'result', 'phase': 'market_offers', 'market': str(row.get('market') or 'other'),
+                                                 'item': row, 'elapsed_ms': int((time.time() - started) * 1000)})
+                    if time.time() - status_tick >= 2.0:
+                        status_tick = time.time()
+                        yield _web_stream_event({'event': 'status', 'stage': 'whatsapp_engine', 'market_offers': len(early_keys),
+                                                 'elapsed_ms': int((time.time() - started) * 1000)})
                 final = await final_task
+                market_rows = []
+                if market_task is not None:
+                    try:
+                        market_rows = await asyncio.wait_for(asyncio.shield(market_task), timeout=max(0.5, TEXT_HYBRID_TIMEOUT - (time.time() - started)))
+                    except (asyncio.TimeoutError, Exception) as exc:
+                        market_cancel.set()
+                        print(f'TEXT HYBRID STREAM WAIT: {type(exc).__name__}')
+                        market_rows = [dict(r) for r in early_keys.values()]
+                    for row in drain_market_rows():
+                        yield _web_stream_event({'event': 'result', 'phase': 'market_offers', 'market': str(row.get('market') or 'other'),
+                                                 'item': row, 'elapsed_ms': int((time.time() - started) * 1000)})
+                if market_rows and final.get('type') != 'recommendations':
+                    merged = _web_text_hybrid_merge(list(final.get('results') or []), market_rows, market, q)
+                    final = _web_attach_captured_result_sections({
+                        'ok': True, 'type': 'results', 'query': final.get('query') or q, 'market': final.get('market') or market,
+                        'results': merged, 'source': 'whatsapp_text_engine+market_offers', 'authoritative': True}, lang, allow_ai=False)
+                    final['authoritative'] = True
+                    final['results'] = _web_text_lane_sort(final.get('results'))
                 if final.get('type') == 'recommendations':
                     yield _web_stream_event({'event': 'recommendations', 'data': final, 'elapsed_ms': int((time.time() - started) * 1000)})
                 else:
@@ -18148,7 +18547,27 @@ async def web_api_search_stream(request: Request):
                         'elapsed_ms': int((time.time() - started) * 1000),
                     })
                     _market_counts = Counter(str(row.get('market') or 'other') for row in exact_rows)
-                    print(f'TEXT PARITY FINAL client={client_name} count={len(exact_rows)} markets={dict(_market_counts)} engine=whatsapp_text_engine')
+                    print(f'TEXT PARITY FINAL client={client_name} count={len(exact_rows)} markets={dict(_market_counts)} engine={final.get("source") or "whatsapp_text_engine"}')
+                    # Bounded indexed-price recovery for merged market rows that
+                    # arrived without a price: shared queries, never one per card.
+                    _pending = {str(r.get('url') or ''): r for r in exact_rows if r.get('url') and not _web_row_has_numeric_price(r)}
+                    if _pending and SERPAPI_API_KEY and WEB_PRICE_ENRICH_SHOPPING_FALLBACK:
+                        _price_updates = {}
+                        for _batch in _web_automatic_price_batches(_pending):
+                            try:
+                                _price_updates.update(await asyncio.wait_for(
+                                    asyncio.to_thread(_web_targeted_price_updates, _batch, lang, dict(market)), timeout=12) or {})
+                            except Exception as exc:
+                                print(f'TEXT HYBRID PRICE RECOVERY: {type(exc).__name__}')
+                        if _price_updates:
+                            for _key, _data in _price_updates.items():
+                                if _key in _pending and not _web_row_has_numeric_price(_pending[_key]):
+                                    _pending[_key].update(_data)
+                            yield _web_stream_event({'event': 'snapshot', 'phase': 'market_price_update', 'authoritative': True,
+                                                     'classification_final': False, 'source': final.get('source') or 'whatsapp_text_engine',
+                                                     'query': final.get('query') or q, 'market': final.get('market') or market,
+                                                     'results': exact_rows, 'all_results': exact_rows, 'count': len(exact_rows),
+                                                     'elapsed_ms': int((time.time() - started) * 1000)})
                     # Refine the already-visible cards with one cached batch AI
                     # call. No search/Lens/merchant request is repeated, and
                     # first paint has already happened before this await.
@@ -18848,7 +19267,7 @@ def _web_selected_offer(raw, cc, display_market, query='', visual=False):
 
 def _web_selected_market_search(query, country, lang, global_countries, *, image_b64='', mime='image/jpeg',
                                  global_only=False, shown_urls=(), shown_domains=(),
-                                 progress_callback=None, cancel_event=None):
+                                 progress_callback=None, cancel_event=None, local_lanes=2, local_target=None):
     """One primary plus at most one rescue per market. Publish each completion.
 
     China uses two domestic discovery sources, whether local OR global. Other
@@ -18880,8 +19299,12 @@ def _web_selected_market_search(query, country, lang, global_countries, *, image
     def publish():
         if progress_callback and not cancelled():
             progress_callback(snapshot())
+    def lanes_for(cc):
+        return max(2, int(local_lanes)) if cc == country else 2
+    def target_for(cc):
+        return max(LOCAL_RESULTS_TARGET, int(local_target)) if (cc == country and local_target) else LOCAL_RESULTS_TARGET
     def launch(cc, kind, public_url=''):
-        if kind in launched[cc] or len(launched[cc]) >= 2 or cancelled() or time.monotonic() >= deadline:
+        if kind in launched[cc] or len(launched[cc]) >= lanes_for(cc) or cancelled() or time.monotonic() >= deadline:
             return
         launched[cc].add(kind)
         target = targets[cc]
@@ -18942,11 +19365,14 @@ def _web_selected_market_search(query, country, lang, global_countries, *, image
                         if not launched[cc]:
                             launch(cc, 'shopping' if shopping_ok else 'broad')
                         primary_pending = any(c == cc for c, _ in jobs.values())
-                        if by_market[cc] < LOCAL_RESULTS_TARGET and (
+                        if by_market[cc] < target_for(cc) and (
                                 not primary_pending or time.monotonic() - started >= SELECTED_MARKET_HEDGE):
                             # A named product in a Shopping market gets priced
                             # merchant cards; anything else the organic rescue.
                             launch(cc, 'shopping' if shopping_ok and named and 'shopping' not in launched[cc] else 'scoped')
+                            if lanes_for(cc) >= 3 and 'scoped' in launched[cc] and by_market[cc] < target_for(cc):
+                                # Third local lane: the next catalog slice of store-scoped discovery.
+                                launch(cc, 'scoped2')
             if not jobs:
                 if reference_job is None:
                     break
@@ -19010,7 +19436,7 @@ def _web_selected_market_search(query, country, lang, global_countries, *, image
                 # China lanes that were held back for the Lens consensus name.
                 cn_lanes = 2 if LOCAL_DISCOVERY_BAIDU else 1
                 can_rescue = bool(query and SERPAPI_API_KEY and any(
-                    (cc != 'cn' and len(launched[cc]) < 2 and by_market[cc] < LOCAL_RESULTS_TARGET)
+                    (cc != 'cn' and len(launched[cc]) < lanes_for(cc) and by_market[cc] < target_for(cc))
                     or (cc == 'cn' and len(launched[cc]) < cn_lanes) for cc in scopes))
                 if not can_rescue:
                     break
@@ -19019,7 +19445,7 @@ def _web_selected_market_search(query, country, lang, global_countries, *, image
             states[cc] = {'status': 'timeout' if pending else 'complete' if by_market[cc] else 'empty',
                           'count': by_market[cc], 'retrieval_calls': len(launched[cc])}
         result = snapshot()
-        print(f'SELECTED MARKETS local={country} globals={global_countries} global_only={global_only} calls={result["retrieval_calls"]} counts={dict(by_market)} elapsed={time.monotonic()-started:.2f}s')
+        print(f'SELECTED MARKETS local={country} globals={global_countries} global_only={global_only} calls={result["retrieval_calls"]} counts={dict(by_market)} lanes={ {cc: sorted(k) for cc, k in launched.items()} } elapsed={time.monotonic()-started:.2f}s')
         return result
     finally:
         for job in jobs:
