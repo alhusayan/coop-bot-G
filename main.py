@@ -1,5 +1,24 @@
 # -*- coding: utf-8 -*-
-"""Findzia v126 — Strong Text Search.
+"""Findzia v127 — Images, Price Separators, Page-Price Guards, SerpApi Fan-out.
+
+WHAT CHANGED IN v127 (see IMAGES_PRICES_AR.md)
+* Images: the merchant page that is already fetched for a live price now also
+  supplies the product image (og:image / product metadata) for cards that
+  arrived without one, streamed as an upsert; Google Shopping merchant rows
+  (immersive product API) carry the product thumbnail; up to
+  SHOPPING_MERCHANT_CARDS=3 products are expanded into their merchant lists
+  inside the Shopping lane instead of one.
+* Price separators are currency-aware: "1.299,00 €" = 1299.00, "2.299 €" =
+  2299, "1 234,56 €" = 1234.56, "₹1,29,999" = 129999, "R$ 1.299,00" = 1299.00,
+  "KD 12.500" = 12.500, "¥2,299" = 2299; "TL" is TRY.
+* Wrong-number guards for indexed prices: pieces such as "Save $20",
+  "$5.99 shipping", "$12/mo", "was $59", "1,234 reviews" are never a price,
+  and an amount equal to a model/spec number in the title is rejected.
+* The Gemini text engine no longer fans out 4 US + 6 China Google Shopping
+  requests per query when the market lanes already run (this concurrency
+  caused the GOOGLE SHOPPING gl=us ReadTimeouts on the real lanes).
+
+INHERITED v126 — Strong Text Search.
 
 WHAT CHANGED IN v126 (see TEXT_SEARCH_AR.md)
 * Typed queries no longer wait for two Gemini round trips (intent parsing +
@@ -242,7 +261,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization'], max_age=86400)
-BUILD_ID = 'v126-strong-text-search'
+BUILD_ID = 'v127-images-prices-fanout'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -511,7 +530,7 @@ _ARABIC_CURRENCY_FAMILIES = {
     'جنيه': ('EGP', 'GBP', 'SDG', 'SSP'),
     'ليرة': ('TRY', 'LBP', 'SYP'), 'ليره': ('TRY', 'LBP', 'SYP'),
 }
-_ARABIC_SHORT_CODES = (('KD', 'KWD'), ('K.D', 'KWD'), ('SR', 'SAR'), ('S.R', 'SAR'), ('QR', 'QAR'),
+_ARABIC_SHORT_CODES = (('TL', 'TRY'), ('KD', 'KWD'), ('K.D', 'KWD'), ('SR', 'SAR'), ('S.R', 'SAR'), ('QR', 'QAR'),
                        ('Q.R', 'QAR'), ('BD', 'BHD'), ('B.D', 'BHD'), ('RO', 'OMR'), ('R.O', 'OMR'),
                        ('JD', 'JOD'), ('J.D', 'JOD'), ('DHS', 'AED'), ('DH', 'AED'), ('LE', 'EGP'),
                        ('L.E', 'EGP'), ('EGP', 'EGP'), ('دك', 'KWD'), ('رس', 'SAR'), ('دإ', 'AED'))
@@ -3496,6 +3515,11 @@ def _local_storefront_evidence(item, market):
         return 'local_targeting_currency'
     if not known_foreign and arabic_family:
         return 'local_targeting_currency'
+    # A merchant listed on this market's own Google Shopping product page (the
+    # immersive product API for gl=cc) sells into this market; it is accepted
+    # when its price is in the market currency and no foreign signal exists.
+    if not known_foreign and item.get('_shopping_market_listing') and geo_targeted and codes and not codes - local_codes:
+        return 'shopping_market_listing'
     return ''
 
 
@@ -4315,6 +4339,8 @@ def _local_discovery_rows(data, query, market, provider):
                 '_shopping_gl': market['country'], '_lens_country': market['country'],
                 'price': str(row.get('price') or ''), 'currency': str(row.get('currency') or ''),
                 'thumbnail': row.get('thumbnail') or ''}
+        if row.get('_shopping_market_listing'):
+            item['_shopping_market_listing'] = True
         if not item['price']:
             # Organic rows carry the indexed price inside rich_snippet; surface
             # it as text so merchant-country evidence can read "KD 12.500".
@@ -4419,6 +4445,55 @@ def _local_resolve_baidu_links(data, timeout_seconds):
     return data
 
 
+SHOPPING_MERCHANT_CARDS = max(0, min(5, int(os.environ.get('SHOPPING_MERCHANT_CARDS', '3'))))
+SHOPPING_MERCHANT_POOL = ThreadPoolExecutor(max_workers=6, thread_name_prefix='shopping-merchants')
+
+
+def _local_shopping_store_rows(product, market, card_thumbnail=''):
+    """Merchant offers of one Google Shopping product, each with the product picture."""
+    thumbnails = product.get('thumbnails') if isinstance(product, dict) else None
+    picture = ''
+    if isinstance(thumbnails, list):
+        picture = next((str(t) for t in thumbnails if isinstance(t, str) and t.startswith(('https://', 'http://'))), '')
+    picture = picture or card_thumbnail or ''
+    product_title = str((product or {}).get('title') or '')
+    stores = []
+    for store in (product or {}).get('stores') or []:
+        if not isinstance(store, dict) or not (store.get('title') or product_title):
+            continue
+        row = dict(store, title=store.get('title') or product_title, source=store.get('name') or '',
+                   currency=store.get('currency') or market.get('currency', ''), _shopping_market_listing=True)
+        if not row.get('thumbnail') and picture:
+            row['thumbnail'] = picture  # same product, same picture; never a price or title
+        # Never copy a price, availability, or title between sellers.
+        stores.append(row)
+    return stores
+
+
+def _local_shopping_merchant_rows(tokens, query, market, timeout_seconds):
+    """Expand up to SHOPPING_MERCHANT_CARDS products into merchant rows, bounded and parallel."""
+    def one(token, thumbnail):
+        params = {'engine': 'google_immersive_product', 'page_token': token,
+                  'more_stores': 'true', 'api_key': SERPAPI_API_KEY, 'output': 'json'}
+        connect = min(1.5, max(.01, timeout_seconds * .15))
+        data = _serpapi_cached_json(params, timeout=(connect, max(.01, timeout_seconds - connect)),
+                                   label=f'LOCAL SHOPPING MERCHANTS {market["country"]}') or {}
+        product = (data or {}).get('product_results') or {}
+        return _local_discovery_rows({'shopping_results': _local_shopping_store_rows(product, market, thumbnail)},
+                                     query, market, 'local_shopping_stores')
+    jobs = {SHOPPING_MERCHANT_POOL.submit(_run_with_market, market, one, token, thumbnail): token for token, thumbnail, _ in tokens}
+    done, pending = wait(jobs, timeout=max(.5, timeout_seconds))
+    for job in pending:
+        job.cancel()
+    rows = []
+    for job in done:
+        try:
+            rows.extend(job.result() or [])
+        except Exception as exc:
+            print(f'LOCAL SHOPPING MERCHANTS ERR: {type(exc).__name__}')
+    return rows
+
+
 def _local_discovery_request(query, market, kind, timeout_seconds):
     started = time.monotonic()
     deadline = started + timeout_seconds
@@ -4433,12 +4508,7 @@ def _local_discovery_request(query, market, kind, timeout_seconds):
         data = _serpapi_cached_json(params, timeout=(connect, max(.01, timeout_seconds - connect)),
                                    label=f'LOCAL SHOPPING MERCHANTS {cc}') or {}
         product = data.get('product_results') or {}
-        stores = []
-        for store in product.get('stores') or []:
-            if isinstance(store, dict) and store.get('title'):
-                row = dict(store, source=store.get('name') or '', currency=store.get('currency') or market.get('currency', ''))
-                # Never copy a price, availability, or title between sellers.
-                stores.append(row)
+        stores = _local_shopping_store_rows(product, market, recovery.get('thumbnail') or '')
         return _local_discovery_rows({'shopping_results': stores}, query, market, 'local_shopping_stores')
     search_query, hl = _market_query_request_variant(query, market, 'scoped' if kind == 'scoped2' else kind, timeout_seconds)
     timeout_seconds -= time.monotonic() - started
@@ -4450,13 +4520,28 @@ def _local_discovery_request(query, market, kind, timeout_seconds):
                     hl=hl, timeout_seconds=timeout_seconds, timeout_total=True)
         rows = _local_discovery_rows({'shopping_results': cards}, query, market, 'local_shopping')
         market.pop('_shopping_recovery', None)
-        if not rows:
-            for card in cards or []:
-                if not isinstance(card, dict) or not card.get('immersive_product_page_token'):
-                    continue
-                if card.get('title') and _local_discovery_candidate_ok(query, dict(card)):
-                    market['_shopping_recovery'] = {'query': query, 'token': card['immersive_product_page_token']}
-                    break
+        # Google Shopping no longer exposes merchant links on most cards; the
+        # immersive product API does (one call per product, many merchants).
+        # Expand the best few matching products inside this lane, in parallel.
+        tokens = []
+        for card in cards or []:
+            if not isinstance(card, dict) or not card.get('immersive_product_page_token') or not card.get('title'):
+                continue
+            if _local_discovery_candidate_ok(query, dict(card)):
+                tokens.append((card['immersive_product_page_token'], str(card.get('thumbnail') or ''), str(card.get('title') or '')))
+            if len(tokens) >= SHOPPING_MERCHANT_CARDS:
+                break
+        remaining = deadline - time.monotonic()
+        if tokens and remaining > 1.5:
+            merchant_rows = _local_shopping_merchant_rows(tokens, query, market, remaining)
+            seen = {_canonical_result_url(r.get('link') or '') for r in rows}
+            for row in merchant_rows:
+                key = _canonical_result_url(row.get('link') or '')
+                if key not in seen:
+                    seen.add(key)
+                    rows.append(row)
+        elif not rows and tokens:
+            market['_shopping_recovery'] = {'query': query, 'token': tokens[0][0], 'thumbnail': tokens[0][1]}
         return rows
     if kind == 'baidu':
         params = {'engine': 'baidu', 'q': f'{search_query} 价格 购买 -百科 -知道 -视频', 'ct': 2,
@@ -5919,39 +6004,44 @@ def _normalize_price_token(token, currency_code=''):
     t = re.sub('\\s+', '', t)
     if not t:
         return None
-    t = re.sub('[^0-9,.-]', '', t)
+    t = re.sub("[^0-9,.'-]", '', t)
     if not re.search('\\d', t):
         return None
     neg = t.startswith('-')
-    t = t.lstrip('-')
+    t = t.lstrip('-').replace("'", '')
     dots, commas = (t.count('.'), t.count(','))
     decimals = CURRENCY_DECIMALS.get((currency_code or '').upper(), 2)
     if dots and commas:
+        # Both separators present: the last one is the decimal mark
+        # (1.299,00 -> 1299.00 ; 1,234.56 -> 1234.56 ; 1,29,999.00 -> 129999.00).
         last_dot, last_comma = (t.rfind('.'), t.rfind(','))
         dec_sep = '.' if last_dot > last_comma else ','
+        thou = ',' if dec_sep == '.' else '.'
         tail = len(t) - max(last_dot, last_comma) - 1
-        if tail in ({decimals} if decimals in (0, 3) else {1, 2}):
-            thou = ',' if dec_sep == '.' else '.'
+        if tail <= 3 and t.count(dec_sep) == 1:
             t = t.replace(thou, '').replace(dec_sep, '.')
         else:
             t = t.replace('.', '').replace(',', '')
-    elif commas:
-        pos = t.rfind(',')
+    elif dots or commas:
+        sep = '.' if dots else ','
+        pos = t.rfind(sep)
         tail = len(t) - pos - 1
-        if decimals == 3 and tail == 3 or (decimals == 2 and tail in (1, 2)):
-            t = t[:pos].replace(',', '') + '.' + t[pos + 1:]
-        else:
-            t = t.replace(',', '')
-    elif dots:
-        pos = t.rfind('.')
-        tail = len(t) - pos - 1
-        if t.count('.') > 1:
-            if decimals == 3 and tail == 3 or (decimals == 2 and tail in (1, 2)):
-                t = t[:pos].replace('.', '') + '.' + t[pos + 1:]
+        head = t[:pos].replace(sep, '')
+        if t.count(sep) > 1:
+            # 1.234.567 / 1,29,999: repeated separator is grouping unless the
+            # last group is a real fraction for this currency.
+            if (decimals == 3 and tail == 3) or (decimals >= 2 and tail in (1, 2)):
+                t = head + '.' + t[pos + 1:]
             else:
-                t = t.replace('.', '')
-        elif decimals == 0 and tail == 3:
-            t = t.replace('.', '')
+                t = t.replace(sep, '')
+        elif tail == 3:
+            # One separator and three digits: a fraction only for 3-decimal
+            # currencies (KD 12.500); otherwise a thousands group (2.299 €, 2,299 $).
+            t = head + '.' + t[pos + 1:] if (decimals == 3 and len(head) <= 3) or len(head) > 3 else head + t[pos + 1:]
+        elif tail in (1, 2):
+            t = head + '.' + t[pos + 1:]
+        else:
+            t = t.replace(sep, '')
     try:
         val = float(t)
         return -val if neg else val
@@ -9161,6 +9251,22 @@ if USE_V106_5_RESULT_PIPELINE:
     WEB_PRICE_ENRICH_ENABLED = False
     WEB_REQUIRE_PRODUCT_IMAGE = False
 WEB_API_MAX_QUERY_CHARS = max(40, min(500, int(os.environ.get('WEB_API_MAX_QUERY_CHARS', '220'))))
+# A photo search from the web page is the photo alone: text left in the search
+# box must not narrow it. Clients that mean the text as a refinement send
+# caption_intent="refine"; the iOS global refresh keeps sending its identity.
+WEB_IMAGE_IGNORE_WEB_CAPTION = env_bool('WEB_IMAGE_IGNORE_WEB_CAPTION', True)
+
+
+def _web_image_caption(payload):
+    caption = str((payload or {}).get('caption') or '').strip()
+    if not caption:
+        return ''
+    client = re.sub('[^a-z0-9_-]+', '', str((payload or {}).get('client') or '').strip().lower())
+    intent = str((payload or {}).get('caption_intent') or '').strip().lower()
+    if WEB_IMAGE_IGNORE_WEB_CAPTION and client == 'web' and intent != 'refine':
+        print(f'IMAGE CAPTION ignored (web typed text): {caption[:40]!r}')
+        return ''
+    return caption
 WEB_API_MAX_IMAGE_BYTES = max(512000, min(12 * 1024 * 1024, int(os.environ.get('WEB_API_MAX_IMAGE_BYTES', str(6 * 1024 * 1024)))))
 # Raw iPhone HEIC uploads may be larger before server-side JPEG conversion.
 WEB_API_RAW_IMAGE_MAX_BYTES = max(WEB_API_MAX_IMAGE_BYTES, min(20 * 1024 * 1024, int(os.environ.get('WEB_API_RAW_IMAGE_MAX_BYTES', str(16 * 1024 * 1024)))))
@@ -9463,7 +9569,7 @@ def _web_require_product_image_rows(rows):
         print(f'WEB PRODUCT IMAGE REQUIRED: dropped={dropped} kept={len(kept)}')
     return kept
 
-def _web_build_text_items(txt, urls, lang, query):
+def _web_build_text_items(txt, urls, lang, query, supplement=True):
     total_cap = max(1, WEB_LOCAL_MAX + WEB_US_MAX + WEB_CN_MAX)
     offers = text77_extract_store_offers(txt or '', limit=max(total_cap * 2, total_cap))
     candidates = []
@@ -9476,7 +9582,8 @@ def _web_build_text_items(txt, urls, lang, query):
             continue
         item['market_rank'] = rank
         candidates.append(item)
-    candidates = _supplement_missing_markets(candidates, query, 'WEB-TEXT')
+    if supplement:
+        candidates = _supplement_missing_markets(candidates, query, 'WEB-TEXT')
     for item in candidates:
         item['market_rank'] = result_market_rank(item)
     candidates = [x for x in candidates if x.get('market_rank') in (0, 1, 2)]
@@ -15106,7 +15213,9 @@ def _web_price_token_to_float(token, currency_code=''):
     return _normalize_price_token(token, currency_code)
 _WEB_PRICE_CUR_WORDS = '(?<![A-Za-z])(?:USD|US\\$|EUR|GBP|KWD|K\\.?D|SAR|S\\.?R|AED|DHS|DH|QAR|Q\\.?R|BHD|B\\.?D|OMR|R\\.?O|JOD|J\\.?D|EGP|L\\.?E|MAD|DZD|TND|IQD|LBP|LYD|CNY|RMB|JPY|CAD|AUD|CHF|INR|KRW|TRY|RUB)(?![A-Za-z])'
 _WEB_PRICE_CUR_SYMS = '[$€£¥￥₹₩₺₽]|د\\.ك|ر\\.س|د\\.إ|ر\\.ق|د\\.ب|ر\\.ع|د\\.أ|ج\\.م|د\\.م|د\\.ت|دك|ريال|دينار|درهم|جنيه|ليرة|ليره'
-_WEB_PRICE_NUM = '([0-9]{1,3}(?:,[0-9]{3})+(?:\\.[0-9]{1,3})?|[0-9]+(?:[.,][0-9]{1,3})?)'
+# Grouped numbers in every convention: 1,234.56 / 1.234,56 / 1 234,56 / 1'234.56 /
+# 1,29,999 (lakh) / 12.500 (3-decimal dinar) / 2299 — the currency decides later.
+_WEB_PRICE_NUM = "((?:[0-9]{1,3}(?:(?:[ \u00a0\u202f'][0-9]{3})|(?:[.,][0-9]{2,3}))+(?:[.,][0-9]{1,3})?|[0-9]+(?:[.,][0-9]{1,3})?)(?![0-9]))"
 _WEB_PRICE_PATS = (re.compile('(?:%s|%s)\\s*%s' % (_WEB_PRICE_CUR_WORDS, _WEB_PRICE_CUR_SYMS, _WEB_PRICE_NUM), re.I), re.compile('%s\\s*(?:%s|%s)' % (_WEB_PRICE_NUM, _WEB_PRICE_CUR_WORDS, _WEB_PRICE_CUR_SYMS), re.I))
 
 def _web_price_number_and_currency(text, fallback_currency=''):
@@ -15490,6 +15599,7 @@ WEB_LIVE_PRICE_WAIT = max(2.0, min(25.0, float(os.environ.get('WEB_LIVE_PRICE_WA
 WEB_LIVE_PRICE_CACHE_TTL = max(15, min(900, int(os.environ.get('WEB_LIVE_PRICE_CACHE_TTL', '300'))))
 WEB_LIVE_PRICE_POOL = ThreadPoolExecutor(max_workers=WEB_LIVE_PRICE_WORKERS, thread_name_prefix='price')
 _WEB_PAGE_FLIGHTS = {}
+WEB_LIVE_PAGE_IMAGES = env_bool('WEB_LIVE_PAGE_IMAGES', True)
 _WEB_PRICE_FIELDS = ('price', 'price_amount', 'currency', 'price_source', 'price_source_url',
                      'price_checked_at', 'price_verified', 'price_pending', 'price_status',
                      'price_unavailable', 'availability', 'original_price', 'original_currency',
@@ -15753,7 +15863,8 @@ def _web_live_page_price(row, market):
     snap = _web_verified_page_snapshot(row.get('url')) or {}
     money = _web_exact_money(snap.get('price'), snap.get('currency'))
     if not money or not snap.get('is_product'):
-        return None
+        image = _web_live_page_image(row, snap)
+        return {'page_image': image} if image else None
     title = str(snap.get('title') or '')
     original = str(row.get('raw_title') or row.get('title') or '')
     if title and original and _findzia_hard_product_mismatch(original, title):
@@ -15772,7 +15883,30 @@ def _web_live_page_price(row, market):
             'price_source_url': snap.get('url') or row.get('url'),
             'price_checked_at': snap.get('price_checked_at') or time.time(),
             'price_verified': True, 'price_pending': False, 'price_unavailable': False,
-            'price_status': 'verified', 'availability': snap.get('availability') or ''}
+            'price_status': 'verified', 'availability': snap.get('availability') or '',
+            'page_image': _web_live_page_image(row, snap)}
+
+
+def _web_live_page_image(row, snap):
+    """Product image from the page already fetched for the price; '' when unknown."""
+    try:
+        if not snap or not snap.get('is_product'):
+            return ''
+        title = str(snap.get('title') or '')
+        original = str(row.get('raw_title') or row.get('title') or '')
+        if title and original and _findzia_hard_product_mismatch(original, title):
+            return ''
+        return _web_choose_verified_product_image({'image': '', 'thumbnail': ''}, snap) or ''
+    except Exception:
+        return ''
+
+
+def _web_live_page_image_only(row, market):
+    """A page image for a card that already has a price but no picture."""
+    MARKET_CTX.value = dict(market)
+    snap = _web_verified_page_snapshot(row.get('url')) or {}
+    image = _web_live_page_image(row, snap)
+    return {'page_image': image} if image else None
 
 
 def _web_live_pool_prices(rows, rank, lang, market):
@@ -15795,6 +15929,12 @@ def _web_automatic_price_batches(rows):
             break
         batches.append(dict(ordered[start:start + 10]))
     return batches
+
+
+_WEB_NOT_A_PRICE_PIECE = re.compile(
+    r'\b(?:save|saving|savings|off|shipping|delivery|deliver|postage|was|reg\.?|regular|orig\.?|original|list price|rrp|msrp|'
+    r'per\s*month|/\s*mo\b|month|installment|instalment|deposit|fee|tax|vat|coupon|voucher|rebate|cashback|points|'
+    r'rating|ratings|review|reviews|stars?|sold|answers?|questions?|discount)\b|%|توصيل|شحن|وفر|خصم|شهري|قسط|تقييم|مراجعات', re.I)
 
 
 def _web_indexed_offer_money(item):
@@ -15822,7 +15962,13 @@ def _web_indexed_offer_money(item):
             continue
         candidates.append((detected.get('price'), detected.get('currency') or ''))
         for extension in extensions:
-            candidates.extend((piece.strip(), '') for piece in re.split(r'[|·]', str(extension)))
+            for piece in re.split(r'[|·]', str(extension)):
+                piece = piece.strip()
+                # Shipping, savings, instalments, old prices, ratings and review
+                # counts sit next to prices in snippets and are never the price.
+                if _WEB_NOT_A_PRICE_PIECE.search(piece):
+                    continue
+                candidates.append((piece, ''))
     for value, currency in candidates:
         if value in (None, '') or isinstance(value, (dict, list, bool)):
             continue
@@ -15849,7 +15995,8 @@ def _web_indexed_offer_money(item):
         if not explicit:
             continue
         display = raw if re.search(r'[A-Za-z$€£¥￥₹₩₺₽\u0600-\u06ff]', raw) else f'{raw} {explicit}'
-        if not _web_row_has_numeric_price({'price': display, 'currency': explicit}):
+        # The title guard rejects an amount that is really a model/spec number.
+        if not _web_row_has_numeric_price({'price': display, 'currency': explicit, 'title': item.get('title') or item.get('raw_title') or ''}):
             continue
         amount, _ = _web_price_number_and_currency(display, explicit)
         money = _web_exact_money(amount, explicit)
@@ -15952,10 +16099,19 @@ async def _web_with_live_prices(source, lang, country, allow_paid=True):
         async with gate:
             # Isolate merchant I/O from retrieval/identity workers.
             return await asyncio.wrap_future(WEB_LIVE_PRICE_POOL.submit(_web_live_page_price, row, dict(market)))
+    async def image_only(row):
+        if not WEB_LIVE_PAGE_IMAGES:
+            return None
+        async with gate:
+            return await asyncio.wrap_future(WEB_LIVE_PRICE_POOL.submit(_web_live_page_image_only, row, dict(market)))
     def absorb(item):
         item = dict(item)
         key = _web_identity_offer_key(item)
         merged = dict(rows.get(key) or {})
+        # A later duplicate without a picture must not blank an earlier one.
+        if not _web_is_http_url(_web_unproxy_image_url(item.get('image') or '')) and _web_is_http_url(_web_unproxy_image_url(merged.get('image') or '')):
+            item.pop('image', None)
+            item.pop('thumbnail', None)
         previous_price = _web_price_facts(merged) if _web_row_has_numeric_price(merged) else {}
         merged.update(item)
         if not _web_row_has_numeric_price(merged) and previous_price:
@@ -15971,11 +16127,22 @@ async def _web_with_live_prices(source, lang, country, allow_paid=True):
         rows[key] = merged
         if key not in attempted and _web_is_http_url(merged.get('url') or ''):
             attempted.add(key)
-            jobs[asyncio.create_task(page(dict(merged)))] = key
+            if has_price and _web_is_http_url(_web_unproxy_image_url(merged.get('image') or '')):
+                pass  # nothing to fetch
+            elif has_price:
+                jobs[asyncio.create_task(image_only(dict(merged)))] = key
+            else:
+                jobs[asyncio.create_task(page(dict(merged)))] = key
         return merged
     def update_event(key, data, phase):
-        facts[key] = _web_price_facts(data)
-        rows[key] = dict(rows[key], **facts[key])
+        price_facts = _web_price_facts(data)
+        if price_facts:
+            facts[key] = price_facts
+        page_image = str((data or {}).get('page_image') or '').strip()
+        current = rows.get(key) or {}
+        if page_image and not _web_is_http_url(_web_unproxy_image_url(current.get('image') or current.get('thumbnail') or '')):
+            facts[key] = dict(facts.get(key) or {}, image=page_image, thumbnail=page_image, image_source='product_page')
+        rows[key] = dict(rows[key], **(facts.get(key) or {}))
         return _web_stream_event({'event': 'upsert', 'phase': phase, 'item': rows[key],
                                   'market': rows[key].get('market'),
                                   'elapsed_ms': int((loop.time() - started) * 1000)})
@@ -17063,7 +17230,9 @@ def _web_search_text_sync(query, country, lang, selected_option='', original_que
             classified['authoritative'] = True
             classified['results'] = _web_text_lane_sort(classified.get('results'))
             return classified
-        results = _web_build_text_items(txt, urls, lang, q)
+        # The market lanes already cover local/US/China; the legacy 4+6 Google
+        # Shopping supplement requests only throttled the real lanes.
+        results = _web_build_text_items(txt, urls, lang, q, supplement=not (hybrid and SERPAPI_API_KEY))
         if market_rows:
             results = _web_text_hybrid_merge(results, market_rows, market, q)
         # Attach deterministic sections and a calibrated percentage to every
@@ -19614,7 +19783,7 @@ async def web_api_image_search_stream(request: Request):
     image_b64 = base64.b64encode(image_bytes).decode('ascii')
     lang = _web_language(payload.get('lang'))
     country, country_source = await asyncio.to_thread(_web_resolve_request_country, request, payload.get('country'))
-    caption = str(payload.get('caption') or '').strip()
+    caption = _web_image_caption(payload)
 
     async def _generator():
         started = time.time()
@@ -19878,7 +20047,7 @@ async def web_api_image_search(request: Request):
     image_b64 = base64.b64encode(image_bytes).decode('ascii')
     lang = _web_language(payload.get('lang'))
     country, country_source = await asyncio.to_thread(_web_resolve_request_country, request, payload.get('country'))
-    caption = str(payload.get('caption') or '').strip()
+    caption = _web_image_caption(payload)
     started = time.time()
     result = await asyncio.to_thread(_web_search_image_sync, image_b64, mime, caption, country, lang)
     result = await _web_complete_result_prices(result, lang, country)
