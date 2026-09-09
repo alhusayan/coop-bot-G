@@ -298,7 +298,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization'], max_age=86400)
-BUILD_ID = 'v131-egress-arabic-match'
+BUILD_ID = 'v132-serpapi-budgets'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -435,7 +435,7 @@ if USE_V106_5_RESULT_PIPELINE:
 LOCAL_STORE_RESCUE_MAX = max(0, min(4, int(os.environ.get('LOCAL_STORE_RESCUE_MAX', '3'))))
 LOCAL_AI_QUERY_RESCUE_ENABLED = env_bool('LOCAL_AI_QUERY_RESCUE_ENABLED', True)
 LOCAL_DISCOVERY_MAX_CALLS = max(0, min(2, int(os.environ.get('LOCAL_DISCOVERY_MAX_CALLS', '2'))))
-LOCAL_DISCOVERY_TIMEOUT = max(1.0, min(20.0, float(os.environ.get('LOCAL_DISCOVERY_TIMEOUT', '12.0'))))
+LOCAL_DISCOVERY_TIMEOUT = max(1.0, min(20.0, float(os.environ.get('LOCAL_DISCOVERY_TIMEOUT', '15.0'))))
 LOCAL_DISCOVERY_HEDGE_SECONDS = max(.5, min(6.0, float(os.environ.get('LOCAL_DISCOVERY_HEDGE_SECONDS', '3.0'))))
 LOCAL_DISCOVERY_BAIDU = env_bool('LOCAL_DISCOVERY_BAIDU', True)
 print(f'LOCAL MARKET CONFIG provider_budget={LOCAL_DISCOVERY_TIMEOUT}s lens_read={LENS_HTTP_TIMEOUT_SECONDS}s hedge_after={LOCAL_DISCOVERY_HEDGE_SECONDS}s calls_max={LOCAL_DISCOVERY_MAX_CALLS} progressive_completion=True')
@@ -1961,7 +1961,7 @@ def _photo_identity(image_b64, mime_type):
 
 def _photo_literal_contains(haystack, needle):
     """Complete OCR words only; never complete an unreadable model suffix."""
-    if not isinstance(needle, str) or not needle.strip() or re.search(r'[?… ]', needle):
+    if not isinstance(needle, str) or not needle.strip() or re.search(r'[?…�]', needle):
         return False
     text, value = _photo_identity_text(haystack), _photo_identity_text(needle)
     if not value or value in ('unknown', 'unclear', 'unreadable', 'غير معروف', 'غير واضح'):
@@ -3460,6 +3460,9 @@ def _local_resolve_baidu_links(data, timeout_seconds):
 
 
 SHOPPING_MERCHANT_CARDS = max(0, min(5, int(os.environ.get('SHOPPING_MERCHANT_CARDS', '3'))))
+# The immersive product API is slow (often 6-10s); merchant expansion may run past the lane
+# deadline by this much because it yields most priced cards of a Shopping market.
+SHOPPING_MERCHANT_EXTRA_SECONDS = max(0.0, min(10.0, float(os.environ.get('SHOPPING_MERCHANT_EXTRA_SECONDS', '6'))))
 SHOPPING_MERCHANT_POOL = ThreadPoolExecutor(max_workers=6, thread_name_prefix='shopping-merchants')
 
 
@@ -3545,7 +3548,7 @@ def _local_discovery_request(query, market, kind, timeout_seconds):
                 tokens.append((card['immersive_product_page_token'], str(card.get('thumbnail') or ''), str(card.get('title') or '')))
             if len(tokens) >= SHOPPING_MERCHANT_CARDS:
                 break
-        remaining = deadline - time.monotonic()
+        remaining = deadline - time.monotonic() + SHOPPING_MERCHANT_EXTRA_SECONDS
         if tokens and remaining > 1.5:
             merchant_rows = _local_shopping_merchant_rows(tokens, query, market, remaining)
             seen = {_canonical_result_url(r.get('link') or '') for r in rows}
@@ -11157,6 +11160,7 @@ _WEB_AMAZON_CURRENCY = {'amazon.com': 'USD', 'amazon.ca': 'CAD', 'amazon.co.uk':
                         'amazon.in': 'INR', 'amazon.com.au': 'AUD', 'amazon.sg': 'SGD', 'amazon.ae': 'AED', 'amazon.sa': 'SAR', 'amazon.eg': 'EGP',
                         'amazon.com.tr': 'TRY', 'amazon.com.br': 'BRL', 'amazon.com.mx': 'MXN'}
 WEB_PRICE_FALLBACK_TIERS = env_bool('WEB_PRICE_FALLBACK_TIERS', True)
+_STORE_API_DIAG_LOGGED = set()
 WEB_STORE_PRICE_APIS = env_bool('WEB_STORE_PRICE_APIS', True)
 
 
@@ -11199,21 +11203,40 @@ def _web_store_price_api(url, country=''):
             if not m:
                 return None
             sku = m.group(1)
-            response = _web_safe_get(f'https://p.3.cn/prices/mgets?skuIds=J_{sku}&type=1',
-                                     headers={'User-Agent': HEADERS.get('User-Agent', 'Mozilla/5.0'), 'Referer': 'https://item.jd.com/'},
-                                     timeout=(2.0, 3.5), stream=True, max_redirects=1)
-            try:
-                body = _web_read_limited_response(response, 20000) or b''
-            finally:
-                _web_safe_response_close(response)
-            rows = json.loads(body.decode('utf-8', 'replace') or '[]')
-            entry = rows[0] if isinstance(rows, list) and rows and isinstance(rows[0], dict) else {}
-            value = _web_price_token_to_float(str(entry.get('p') or entry.get('op') or ''), 'CNY') if entry else None
-            if value and value > 0 and str(entry.get('id') or '').endswith(sku):
-                print(f'STORE PRICE API jd sku={sku} price={value}')
-                return {'price': value, 'currency': 'CNY', 'price_source': 'jd_price_api', 'price_confidence': 'high', 'ok': True}
+            headers = {'User-Agent': HEADERS.get('User-Agent', 'Mozilla/5.0'), 'Referer': f'https://item.jd.com/{sku}.html',
+                       'Accept': 'application/json,text/plain,*/*', 'Accept-Language': 'zh-CN,zh;q=0.9'}
+            endpoints = (f'https://p.3.cn/prices/mgets?skuIds=J_{sku}&type=1&area=1_72_2799_0',
+                         f'https://item-soa.jd.com/getWareBusiness?skuId={sku}&area=1_72_2799_0')
+            for endpoint in endpoints:
+                response = _web_safe_get(endpoint, headers=headers, timeout=(2.0, 3.5), stream=True, max_redirects=1)
+                try:
+                    status = response.status_code
+                    body = _web_read_limited_response(response, 60000) or b''
+                finally:
+                    _web_safe_response_close(response)
+                text = body.decode('utf-8', 'replace').strip()
+                try:
+                    data = json.loads(text) if text else None
+                except ValueError:
+                    data = None
+                value = None
+                if isinstance(data, list) and data and isinstance(data[0], dict) and str(data[0].get('id') or '').endswith(sku):
+                    value = _web_price_token_to_float(str(data[0].get('p') or data[0].get('op') or ''), 'CNY')
+                elif isinstance(data, dict):
+                    price = data.get('price') if isinstance(data.get('price'), dict) else {}
+                    value = _web_price_token_to_float(str(price.get('p') or price.get('op') or ''), 'CNY')
+                if value and value > 0:
+                    print(f'STORE PRICE API jd sku={sku} price={value} via={urllib.parse.urlsplit(endpoint).hostname}')
+                    return {'price': value, 'currency': 'CNY', 'price_source': 'jd_price_api', 'price_confidence': 'high', 'ok': True}
+                key = ('jd', urllib.parse.urlsplit(endpoint).hostname)
+                if key not in _STORE_API_DIAG_LOGGED and len(_STORE_API_DIAG_LOGGED) < 8:
+                    _STORE_API_DIAG_LOGGED.add(key)
+                    print(f'STORE PRICE API jd no-price status={status} host={key[1]} sample={text[:100]!r}')
     except Exception as exc:
-        print(f'STORE PRICE API ERR {type(exc).__name__}')
+        key = ('jd-err', type(exc).__name__)
+        if key not in _STORE_API_DIAG_LOGGED and len(_STORE_API_DIAG_LOGGED) < 8:
+            _STORE_API_DIAG_LOGGED.add(key)
+            print(f'STORE PRICE API ERR {type(exc).__name__}: {str(exc)[:80]}')
     return None
 
 
@@ -11961,7 +11984,7 @@ def _web_targeted_price_updates(entries, lang, market):
     params = {'engine': 'google', 'q': query, 'gl': str(market.get('country') or 'us'),
               'hl': country_search_hl(str(market.get('country') or 'us')), 'num': 10,
               'api_key': SERPAPI_API_KEY, 'output': 'json'}
-    data = _serpapi_cached_json(params, timeout=(2.5, max(14.0, WEB_STREAM_STORE_HTTP_TIMEOUT)),
+    data = _serpapi_cached_json(params, timeout=(2.5, max(20.0, WEB_STREAM_STORE_HTTP_TIMEOUT)),
                                label='AUTOMATIC EXACT-LISTING PRICES') or {}
     updates = {}
     for item in data.get('organic_results') or []:
@@ -13883,7 +13906,7 @@ async def web_api_search_stream(request: Request):
                         for _batch in _web_automatic_price_batches(_pending):
                             try:
                                 _price_updates.update(await asyncio.wait_for(
-                                    asyncio.to_thread(_web_targeted_price_updates, _batch, lang, dict(market)), timeout=12) or {})
+                                    asyncio.to_thread(_web_targeted_price_updates, _batch, lang, dict(market)), timeout=22) or {})
                             except Exception as exc:
                                 print(f'TEXT HYBRID PRICE RECOVERY: {type(exc).__name__}')
                         if _price_updates:
