@@ -274,7 +274,7 @@ cache expiry/bounds, cancellation isolation, and uncached prompt/verdict parity.
 Python compilation and undefined-name checks passed. No live provider calls,
 production deployment, or production latency/billing measurement was performed.
 """
-import os, re, time, base64, requests, json, asyncio, urllib.parse, hashlib, hmac, sqlite3, threading, io, ast, ipaddress, socket, unicodedata, copy, html, queue
+import os, re, time, base64, requests, json, asyncio, urllib.parse, hashlib, hmac, sqlite3, threading, io, ast, ipaddress, socket, unicodedata, copy, html, queue, difflib
 from collections import Counter, deque, defaultdict
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from functools import lru_cache
@@ -298,7 +298,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization'], max_age=86400)
-BUILD_ID = 'v130-package-split'
+BUILD_ID = 'v131-egress-arabic-match'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -1961,7 +1961,7 @@ def _photo_identity(image_b64, mime_type):
 
 def _photo_literal_contains(haystack, needle):
     """Complete OCR words only; never complete an unreadable model suffix."""
-    if not isinstance(needle, str) or not needle.strip() or re.search(r'[?…�]', needle):
+    if not isinstance(needle, str) or not needle.strip() or re.search(r'[?… ]', needle):
         return False
     text, value = _photo_identity_text(haystack), _photo_identity_text(needle)
     if not value or value in ('unknown', 'unclear', 'unreadable', 'غير معروف', 'غير واضح'):
@@ -2551,6 +2551,20 @@ _LOCAL_BRAND_ALIASES = {
     'rimowa': {'zh': '日默瓦', 'ar': 'ريموا'}, 'stanley': {'zh': '史丹利', 'ar': 'ستانلي'}, 'thermos': {'zh': '膳魔师', 'ar': 'ثيرموس'},
     'yeti': {'ar': 'يتي'}, 'ikea': {'zh': '宜家', 'ar': 'ايكيا'}, 'starbucks': {'zh': '星巴克', 'ar': 'ستاربكس'},
     'kindle': {'ar': 'كيندل'}, 'instax': {'zh': '拍立得', 'ar': 'انستاكس'}, 'fujifilm': {'zh': '富士', 'ar': 'فوجي'},
+    # Gulf / Arab grocery and FMCG brands as written on Arabic storefronts.
+    'almarai': {'ar': 'المراعي|مراعي'}, 'nadec': {'ar': 'نادك'}, 'alsafi': {'ar': 'الصافي'}, 'alrabie': {'ar': 'الربيع'},
+    'saudia': {'ar': 'السعودية للالبان|السعوديه للالبان'}, 'kdd': {'ar': 'كي دي دي|كيدي دي'}, 'kdcow': {'ar': 'كي دي كاو'},
+    'lusine': {'ar': 'لوزين'}, 'suntop': {'ar': 'سن توب|صن توب'}, 'vimto': {'ar': 'فيمتو'}, 'rani': {'ar': 'راني'},
+    'pepsi': {'ar': 'بيبسي'}, 'cocacola': {'ar': 'كوكاكولا|كوكا كولا'}, '7up': {'ar': 'سفن اب|سفن أب'}, 'nova': {'ar': 'نوفا'},
+    'alain': {'ar': 'العين'}, 'hana': {'ar': 'هنا'}, 'danone': {'ar': 'دانون'}, 'kraft': {'ar': 'كرافت'}, 'kiri': {'ar': 'كيري'},
+    'puck': {'ar': 'بوك'}, 'lurpak': {'ar': 'لورباك'}, 'alalali': {'ar': 'العلالي'}, 'gandour': {'ar': 'غندور|غاندور'},
+    'halwani': {'ar': 'حلواني'}, 'savola': {'ar': 'صافولا'}, 'afia': {'ar': 'عافية|عافيه'}, 'sunny': {'ar': 'صني'},
+    'goody': {'ar': 'قودي|جودي'}, 'alwatania': {'ar': 'الوطنية|الوطنيه'}, 'americana': {'ar': 'امريكانا|أمريكانا'},
+    'sadia': {'ar': 'ساديا'}, 'tanmiah': {'ar': 'تنمية|تنميه'}, 'alkabeer': {'ar': 'الكبير'}, 'deemah': {'ar': 'ديمه|ديمة'},
+    'lays': {'ar': 'ليز'}, 'doritos': {'ar': 'دوريتوس'}, 'galaxy': {'ar': 'جالكسي|غالاكسي'}, 'cadbury': {'ar': 'كادبوري'},
+    'lipton': {'ar': 'ليبتون'}, 'nescafe': {'ar': 'نسكافيه'}, 'maggi': {'ar': 'ماجي'}, 'indomie': {'ar': 'اندومي|إندومي'},
+    'tide': {'ar': 'تايد'}, 'ariel': {'ar': 'اريال|أريال'}, 'persil': {'ar': 'برسيل'}, 'fairy': {'ar': 'فيري'}, 'dettol': {'ar': 'ديتول'},
+    'clorox': {'ar': 'كلوركس'}, 'fine': {'ar': 'فاين'}, 'sanita': {'ar': 'سانيتا'}, 'molfix': {'ar': 'مولفكس'}, 'bebem': {'ar': 'بيبيم'},
 }
 _LOCAL_RETRIEVAL_NOUNS = {
     'coffeecup': {'en': 'coffee cups|coffee cup', 'zh': '咖啡杯', 'ar': 'فنجان قهوة|كوب قهوة', 'de': 'Kaffeetasse', 'fr': 'tasse à café', 'es': 'taza de café'},
@@ -2600,6 +2614,27 @@ _LOCAL_RETRIEVAL_NOUNS = {
     'tent': {'en': 'tent|tents', 'zh': '帐篷', 'ja': 'テント', 'de': 'Zelt', 'fr': 'tente', 'es': 'tienda de campaña', 'ar': 'خيمة|خيمه|خيم'},
     'bicycle': {'en': 'bicycle|bike|bikes|bicycles|e-bike|ebike', 'zh': '自行车|单车|电动自行车', 'ja': '自転車', 'de': 'Fahrrad|E-Bike', 'fr': 'vélo', 'es': 'bicicleta', 'tr': 'bisiklet', 'ar': 'دراجة|دراجه|سيكل|دراجة هوائية|دراجه هوائيه'},
     'speaker': {'en': 'speaker|speakers|bluetooth speaker|soundbar', 'zh': '音箱|音响|蓝牙音箱|回音壁', 'ja': 'スピーカー|サウンドバー', 'de': 'Lautsprecher|Soundbar', 'fr': 'enceinte|haut-parleur', 'es': 'altavoz', 'tr': 'hoparlör', 'ar': 'سبيكر|مكبر صوت|ساوند بار'},
+    'laban': {'en': 'laban|buttermilk|labneh|labaneh', 'ar': 'لبن|لبنة|لبنه|لبن رائب'},
+    'milk': {'en': 'milk|long life milk|fresh milk', 'zh': '牛奶', 'ar': 'حليب|حليب طازج'},
+    'yogurt': {'en': 'yogurt|yoghurt|zabadi', 'zh': '酸奶', 'ar': 'زبادي|روب|يوغرت'},
+    'cheese': {'en': 'cheese|cheeses', 'zh': '奶酪|芝士', 'ar': 'جبن|جبنة|جبنه|اجبان'},
+    'juice': {'en': 'juice|juices|nectar', 'zh': '果汁', 'ar': 'عصير|عصائر'},
+    'water': {'en': 'drinking water|mineral water|water bottles', 'zh': '矿泉水|饮用水', 'ar': 'مياه|ماء'},
+    'chocolate': {'en': 'chocolate|chocolates|cocoa', 'zh': '巧克力', 'ar': 'شوكولاتة|شوكولاته|شوكلاته|كاكاو'},
+    'chips': {'en': 'chips|crisps', 'zh': '薯片', 'ar': 'شيبس|بطاطس مقرمشة|بطاطس'},
+    'rice': {'en': 'rice|basmati', 'zh': '大米', 'ar': 'رز|ارز|أرز|بسمتي'},
+    'oil': {'en': 'cooking oil|olive oil|sunflower oil|corn oil', 'zh': '食用油|橄榄油', 'ar': 'زيت|زيت زيتون|زيت ذرة|زيت دوار الشمس'},
+    'sugar': {'en': 'sugar', 'zh': '白糖|糖', 'ar': 'سكر'},
+    'coffee': {'en': 'coffee|ground coffee|instant coffee|coffee capsules', 'zh': '咖啡', 'ar': 'قهوة|قهوه|بن|كبسولات قهوة'},
+    'tea': {'en': 'tea|tea bags|black tea|green tea', 'zh': '茶|茶叶', 'ar': 'شاي|شاهي'},
+    'bread': {'en': 'bread|toast|buns', 'zh': '面包', 'ar': 'خبز|توست|صامولي'},
+    'butter': {'en': 'butter|ghee', 'zh': '黄油', 'ar': 'زبدة|زبده|سمن'},
+    'eggs': {'en': 'eggs|egg', 'zh': '鸡蛋', 'ar': 'بيض'},
+    'chicken': {'en': 'chicken|whole chicken|chicken breast', 'zh': '鸡肉', 'ar': 'دجاج|صدور دجاج'},
+    'meat': {'en': 'meat|beef|lamb|mutton', 'zh': '牛肉|羊肉|肉', 'ar': 'لحم|لحمة|لحمه|لحوم'},
+    'dates': {'en': 'dates|date', 'zh': '椰枣', 'ar': 'تمر|تمور'},
+    'detergent': {'en': 'detergent|laundry detergent|washing powder|laundry liquid', 'zh': '洗衣液|洗衣粉', 'ar': 'مسحوق غسيل|منظف غسيل|سائل غسيل|صابون غسيل'},
+    'tissues': {'en': 'tissues|facial tissues|toilet paper|kitchen roll|paper towels', 'zh': '纸巾|卫生纸', 'ar': 'مناديل|محارم|ورق تواليت|رول مطبخ'},
     'teaset': {'en': 'tea cup set|tea set', 'ar': 'طقم شاي|طقم فناجين شاي', 'ur': 'چائے کے کپ کا سیٹ', 'hi': 'चाय के कप का सेट', 'bn': 'চায়ের কাপ সেট', 'zh': '茶具套装', 'fr': 'service à thé', 'de': 'Teeservice', 'es': 'juego de té'},
     'scale': {'en': 'bathroom scale|weighing scale', 'ar': 'ميزان وزن|ميزان حمام', 'ur': 'وزن کرنے کا ترازو', 'hi': 'वजन मापने की मशीन', 'bn': 'ওজন মাপার যন্ত্র', 'zh': '体重秤', 'fr': 'pèse-personne', 'de': 'Personenwaage', 'es': 'báscula de baño'},
     'dress': {'en': 'dress|dresses', 'ar': 'فستان|فساتين', 'ur': 'لباس', 'hi': 'ड्रेस', 'bn': 'পোশাক', 'zh': '连衣裙', 'fr': 'robe', 'de': 'Kleid', 'es': 'vestido'},
@@ -2663,6 +2698,8 @@ def _local_retrieval_term(replacements, matched):
 
 def _local_retrieval_text(value):
     text = normalize_ar(_cjk_boundary_spaces(unicodedata.normalize('NFKC', str(value or '')).casefold()))
+    # Latin "al marai" / "al-marai" is the same word as "almarai".
+    text = re.sub(r'\bal[\s-](?=[a-z]{3,})', 'al', text)
     pattern, replacements = _local_retrieval_rules()
     return pattern.sub(lambda m: ' ' + _local_retrieval_term(replacements, m.group(0)) + ' ', text)
 
@@ -2930,6 +2967,84 @@ def _query_is_generic(query):
     return len(lexical) <= 3
 
 
+_AR_TRANSLIT = {'ا': 'a', 'أ': 'a', 'إ': 'a', 'آ': 'a', 'ب': 'b', 'ت': 't', 'ث': 'th', 'ج': 'j', 'ح': 'h', 'خ': 'kh', 'د': 'd', 'ذ': 'dh',
+                'ر': 'r', 'ز': 's', 'س': 's', 'ش': 'sh', 'ص': 's', 'ض': 'd', 'ط': 't', 'ظ': 'z', 'ع': 'a', 'غ': 'gh', 'ف': 'f', 'ق': 'k',
+                'ك': 'k', 'ل': 'l', 'م': 'm', 'ن': 'n', 'ه': 'h', 'و': 'o', 'ي': 'i', 'ى': 'a', 'ة': '', 'ء': '', 'ئ': 'i', 'ؤ': 'o',
+                'گ': 'g', 'چ': 'ch', 'پ': 'b', 'ڤ': 'f'}
+
+
+def _translit_skeleton(token):
+    """Comparable Latin skeleton of an Arabic or Latin token (al-/the- stripped, p=b, c/q=k, z=s, y=i)."""
+    text = normalize_ar(str(token or '').casefold())
+    if re.search(r'[\u0600-\u06ff]', text):
+        text = re.sub(r'^(?:و?ال|و)', '', text)
+        text = ''.join(_AR_TRANSLIT.get(ch, '') for ch in text)
+    else:
+        text = re.sub(r'^(?:al[-\s]?|el[-\s]?)', '', text)
+        text = text.replace('ph', 'f').replace('ck', 'k').replace('q', 'k').replace('c', 'k').replace('p', 'b').replace('z', 's')
+        text = text.replace('y', 'i').replace('ee', 'i').replace('oo', 'o').replace('ou', 'o').replace('w', 'o').replace('u', 'o').replace('g', 'j')
+    text = re.sub(r'[^a-z]', '', text)
+    text = re.sub(r'(.)\1+', r'\1', text)
+    return text[:-1] if text.endswith('h') and len(text) > 3 else text
+
+
+def _translit_tokens_match(latin_token, arabic_token):
+    """"almarai" ~ "المراعي", "laban" ~ "لبن", "nadec" ~ "نادك"; short/generic tokens never match."""
+    a, b = _translit_skeleton(latin_token), _translit_skeleton(arabic_token)
+    if len(a) < 3 or len(b) < 3:
+        return False
+    if a == b or (len(a) >= 4 and (a in b or b in a)):
+        return True
+    return difflib.SequenceMatcher(None, a, b).ratio() >= 0.72
+
+
+@lru_cache(maxsize=1)
+def _brand_skeletons():
+    out = set()
+    for brand, languages in _LOCAL_BRAND_ALIASES.items():
+        out.add(_translit_skeleton(brand))
+        for terms in languages.values():
+            for alias in terms.split('|'):
+                out.add(_translit_skeleton(alias))
+    return frozenset(x for x in out if len(x) >= 3)
+
+
+class _BrandSkeletonSet:
+    def __contains__(self, item):
+        return item in _brand_skeletons()
+
+
+_BRAND_SKELETONS = _BrandSkeletonSet()
+
+
+def _local_transliteration_overlap(query, title):
+    """Fraction of the query's Latin content words that an Arabic title spells in Arabic (or the reverse)."""
+    q_tokens = [t for t in norm_tokens(query) if t not in _FINDZIA_QUERY_FILLER and len(t) >= 3]
+    t_tokens = [t for t in norm_tokens(title) if len(t) >= 2]
+    if not q_tokens or not t_tokens:
+        return 0.0, 0
+    q_latin = [t for t in q_tokens if not re.search(r'[\u0600-\u06ff]', t)]
+    q_arabic = [t for t in q_tokens if re.search(r'[\u0600-\u06ff]', t)]
+    t_latin = [t for t in t_tokens if not re.search(r'[\u0600-\u06ff]', t)]
+    t_arabic = [t for t in t_tokens if re.search(r'[\u0600-\u06ff]', t)]
+    matched = 0
+    matched_tokens = set()
+    for token in q_latin:
+        if any(_translit_tokens_match(token, other) for other in t_arabic) or token in t_latin:
+            matched += 1
+            matched_tokens.add(token)
+    for token in q_arabic:
+        if any(_translit_tokens_match(other, token) for other in t_latin) or token in t_arabic:
+            matched += 1
+            matched_tokens.add(token)
+    # A named brand in the query must be the brand on the title: "laban almarai"
+    # is not "لبن نادك" even though the product word matches.
+    brands = [t for t in q_tokens if t in _LOCAL_BRAND_ALIASES or _translit_skeleton(t) in _BRAND_SKELETONS]
+    if brands and not all(t in matched_tokens for t in brands):
+        return 0.0, 0
+    return matched / max(1, len(q_tokens)), matched
+
+
 def _local_discovery_candidate_ok(query, item, visual=False):
     """A translated noun is not a missing match; explicit conflicts still reject.
 
@@ -2996,6 +3111,13 @@ def _local_discovery_candidate_ok(query, item, visual=False):
             if anchored and len(shared) * 2 >= len(latin_tokens):
                 item['_local_match_uncertain'] = True
                 return True
+    # Latin query against an Arabic title (or the reverse): "Laban almarai" is
+    # "لبن المراعي". Transliteration skeletons decide, brand-length tokens only.
+    if bool(re.search(r'[\u0600-\u06ff]', title)) != bool(re.search(r'[\u0600-\u06ff]', query)):
+        ratio, matched = _local_transliteration_overlap(query, title)
+        if matched >= 1 and ratio >= 0.5:
+            item['_local_match_uncertain'] = True
+            return True
     # A generic identity ("stuffed toy") cannot be matched by word overlap; any
     # shared product word plus a thumbnail lets the visual audit decide.
     if item.get('thumbnail') and _query_is_generic(query):
@@ -7881,13 +8003,44 @@ def _web_validated_outbound_url(raw_url):
     except Exception:
         return ''
 
+# Platforms such as Railway route outbound traffic through a NAT/egress hop in
+# the RFC 6598 shared address space (100.64.0.0/10). The connected peer is then
+# that hop, not the merchant, and must not be mistaken for a private target.
+_OUTBOUND_TRUSTED_PEER_NETS = []
+for _cidr in (os.environ.get('OUTBOUND_TRUSTED_PEER_CIDRS', '100.64.0.0/10').split(',')):
+    _cidr = _cidr.strip()
+    if _cidr:
+        try:
+            _OUTBOUND_TRUSTED_PEER_NETS.append(ipaddress.ip_network(_cidr, strict=False))
+        except ValueError:
+            print(f'OUTBOUND_TRUSTED_PEER_CIDRS ignored: {_cidr!r}')
+_OUTBOUND_PEER_LOGGED = set()
+
+
 def _web_response_peer_is_public(response):
-    """Best-effort post-connect defense against DNS rebinding."""
+    """Best-effort post-connect defense against DNS rebinding.
+
+    DNS is validated before every hop; this only rejects a connection whose
+    peer turned out to be a private/loopback address. A platform egress hop
+    (shared address space) is trusted, otherwise every merchant page, price and
+    image would be refused on such hosting.
+    """
     try:
         connection = getattr(getattr(response, 'raw', None), '_connection', None)
         sock = getattr(connection, 'sock', None)
         peer = sock.getpeername()[0] if sock is not None else ''
-        return bool(peer) and ipaddress.ip_address(str(peer).split('%', 1)[0]).is_global
+        if not peer:
+            return True
+        address = ipaddress.ip_address(str(peer).split('%', 1)[0])
+        if address.is_global:
+            return True
+        if any(address in net for net in _OUTBOUND_TRUSTED_PEER_NETS):
+            key = str(address)
+            if key not in _OUTBOUND_PEER_LOGGED and len(_OUTBOUND_PEER_LOGGED) < 8:
+                _OUTBOUND_PEER_LOGGED.add(key)
+                print(f'OUTBOUND EGRESS HOP trusted peer={key}')
+            return True
+        return False
     except Exception:
         # Some adapters do not expose their socket. Pre-hop DNS validation is
         # still enforced; production egress ACL remains the final boundary.
@@ -11808,7 +11961,7 @@ def _web_targeted_price_updates(entries, lang, market):
     params = {'engine': 'google', 'q': query, 'gl': str(market.get('country') or 'us'),
               'hl': country_search_hl(str(market.get('country') or 'us')), 'num': 10,
               'api_key': SERPAPI_API_KEY, 'output': 'json'}
-    data = _serpapi_cached_json(params, timeout=(2.5, max(9.0, WEB_STREAM_STORE_HTTP_TIMEOUT)),
+    data = _serpapi_cached_json(params, timeout=(2.5, max(14.0, WEB_STREAM_STORE_HTTP_TIMEOUT)),
                                label='AUTOMATIC EXACT-LISTING PRICES') or {}
     updates = {}
     for item in data.get('organic_results') or []:
