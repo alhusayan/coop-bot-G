@@ -1,19 +1,22 @@
 # -*- coding: utf-8 -*-
-"""Findzia v134 — Offer images and prices, streamed without serial recovery.
+"""Findzia v135 — Generic-Request Fallback Fix.
 
-v134 fixes:
-* Preserve provider image lists/objects/protocol-relative URLs and nested money.
-* Recover exact-listing images/prices while discovery is still running, under
-  the unchanged SerpApi call cap; query product IDs and preserve SKU/variant.
-* Keep same-offer media/money across duplicate discovery and final snapshots.
-* Use product-scoped images only; no unrelated image-search replacements.
-* Compare outliers only within the same product title, market and currency.
-Provider schema references:
-https://serpapi.com/organic-results
-https://serpapi.com/google-immersive-product-api
-https://serpapi.com/google-lens-api
+WHAT CHANGED IN v135
+* The streaming endpoint (/api/search/stream, what the web page actually
+  calls) had a gap the non-streaming endpoint didn't: when a request was
+  classified GENERIC ("Football") and the Gemini comparison call failed or
+  returned nothing usable, execution fell through into a literal product
+  search for the bare category word. No store sells a product literally
+  named "Football", so this silently produced "Nothing matched that search"
+  instead of a clear, retryable error. The stream path now fails the same
+  way the JSON path already did: an explicit `error: comparison_unavailable`
+  event, so the client can show a real message and offer to retry instead of
+  a dead end.
 
-Inherited v129+ release history follows.
+Package layout unchanged since v130 (see SPLIT_AR.md): this file plus
+engine/*.py is Findzia's server, executed in order into one namespace.
+
+INHERITED v129 — Lean, One Engine.
 
 WHAT CHANGED IN v129 (see LEAN_AR.md)
 * The WhatsApp channel is removed (webhook routes, message sending, sessions,
@@ -312,7 +315,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization'], max_age=86400)
-BUILD_ID = 'v134-offer-media-recovery'
+BUILD_ID = 'v135-generic-fallback-diagnostics'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -1685,7 +1688,7 @@ def _collect_lens_items(data, items, seen):
                 print(f'LENS BLOCKED STORE SKIP: {source} -> {link}')
                 continue
             seen.add(sig)
-            items.append({'title': title, 'link': link, 'source': source, 'position': int(x.get('position') or len(items) + 1), 'section': key, 'exact': key == 'exact_matches' or bool(x.get('exact_match')), 'thumbnail': next(iter(_web_offer_image_candidates(x)), ''), 'image': next(iter(_web_offer_image_candidates(x)), ''), 'image_candidates': _web_offer_image_candidates(x), 'price': (x.get('price') or {}).get('value') if isinstance(x.get('price'), dict) else str(x.get('price') or ''), 'price_value': (x.get('price') or {}).get('extracted_value') if isinstance(x.get('price'), dict) else x.get('extracted_price'), 'currency': (x.get('price') or {}).get('currency') if isinstance(x.get('price'), dict) else '', 'in_stock': x.get('in_stock'), 'condition': (x.get('condition') or '').strip()})
+            items.append({'title': title, 'link': link, 'source': source, 'position': int(x.get('position') or len(items) + 1), 'section': key, 'exact': key == 'exact_matches' or bool(x.get('exact_match')), 'thumbnail': (x.get('thumbnail') or x.get('image') or '').strip(), 'image': (x.get('image') or x.get('thumbnail') or '').strip(), 'price': (x.get('price') or {}).get('value') if isinstance(x.get('price'), dict) else str(x.get('price') or ''), 'price_value': (x.get('price') or {}).get('extracted_value') if isinstance(x.get('price'), dict) else x.get('extracted_price'), 'currency': (x.get('price') or {}).get('currency') if isinstance(x.get('price'), dict) else '', 'in_stock': x.get('in_stock'), 'condition': (x.get('condition') or '').strip()})
     return items
 
 def _serpapi_lens_request(public_url, lens_type, country, auto_crop, query_hint):
@@ -3313,50 +3316,10 @@ def _local_discovery_direct_link(row):
     return ''
 
 
-def _web_offer_image_candidates(row):
-    """Observed images of one listing. Never source logos or unrelated page children."""
-    urls, seen = [], set()
-    def add(value, depth=0):
-        if depth > 4 or len(urls) >= 8:
-            return
-        if isinstance(value, (list, tuple)):
-            for child in value[:8]:
-                add(child, depth + 1)
-        elif isinstance(value, dict):
-            for key in ('url', 'src', 'contentUrl', 'original', 'thumbnail'):
-                if value.get(key):
-                    add(value[key], depth + 1)
-        elif isinstance(value, str):
-            raw = html.unescape(value.strip()).replace('\\/', '/')
-            if raw.startswith('//'):
-                raw = 'https:' + raw
-            raw = _web_unproxy_image_url(raw)
-            if _web_is_http_url(raw) and raw not in seen:
-                seen.add(raw)
-                urls.append(raw)
-    for field in ('thumbnail', 'image', 'image_url', 'product_image', 'thumbnails', 'images', 'image_candidates'):
-        add((row or {}).get(field))
-    return urls
-
-
-def _web_merge_offer_images(previous, incoming):
-    pictures = list(dict.fromkeys(_web_offer_image_candidates(previous) + _web_offer_image_candidates(incoming)))[:8]
-    if not pictures:
-        return {}
-    # Keep raw first for fast CDN delivery; signed alternatives handle hotlink/CORS paths.
-    candidates = []
-    for picture in pictures[:4]:
-        for candidate in (picture, _web_public_image_url(picture)):
-            if candidate and candidate not in candidates:
-                candidates.append(candidate)
-    return {'image': previous.get('image') or pictures[0],
-            'thumbnail': previous.get('thumbnail') or pictures[0], 'image_candidates': candidates}
-
-
 def _local_discovery_records(data):
     """Flatten observed result children; never borrow a parent's price/title."""
     records = []
-    for section in ('organic_results', 'shopping_results', 'inline_shopping_results'):
+    for section in ('organic_results', 'shopping_results'):
         rows = data.get(section)
         for row in rows[:30] if isinstance(rows, list) else []:
             if not isinstance(row, dict):
@@ -3385,7 +3348,7 @@ def _local_discovery_snippet_price(row):
         extensions = block.get('extensions')
         extensions = extensions if isinstance(extensions, list) else []
         joined = ' '.join(str(x) for x in extensions)
-        if any(detected.get(k) is not None for k in ('price_from', 'price_to')) or re.search(r'\b(from|starting|up to)\b|ابتداء|\d\s*[-–—]\s*[$€£¥]?\s*\d', joined, re.I):
+        if re.search(r'\b(from|starting|up to)\b|ابتداء|\d\s*[-–—]\s*[$€£¥]?\s*\d', joined, re.I):
             continue
         price, currency = detected.get('price'), str(detected.get('currency') or '')
         if price not in (None, '') and not isinstance(price, (dict, list, bool)):
@@ -3440,9 +3403,8 @@ def _local_discovery_rows(data, query, market, provider):
         host = urllib.parse.urlsplit(url).hostname or ''
         item = {'title': title, 'link': url, 'source': str(row.get('source') or host),
                 '_shopping_gl': market['country'], '_lens_country': market['country'],
-                'price': (row.get('price', {}).get('value') if isinstance(row.get('price'), dict) else row.get('price')) or '',
-                'currency': str(row.get('currency') or ''),
-                'thumbnail': next(iter(_web_offer_image_candidates(row)), '')}
+                'price': str(row.get('price') or ''), 'currency': str(row.get('currency') or ''),
+                'thumbnail': row.get('thumbnail') or ''}
         if row.get('_shopping_market_listing'):
             item['_shopping_market_listing'] = True
         if market.get('_export_mode'):
@@ -3468,25 +3430,21 @@ def _local_discovery_rows(data, query, market, provider):
         if not _local_discovery_candidate_ok(query, item):
             stats['mismatch'] += 1
             continue
-        canonical = _web_price_url_key(url)
-                # Product price only, not prose mentioning freight or a minimum order.
+        canonical = _canonical_result_url(url)
+        if canonical in seen:
+            continue
+        seen.add(canonical)
+        # Product price only, not prose mentioning freight or a minimum order.
         money = None if re.search(r'起|起批|运费|批发|\bMOQ\b', item['price'], re.I) else _web_indexed_offer_money(money_row)
         if _host_matches_any(host, ('1688.com',)):
             money = None  # Quantity-tier wholesale prices need the actual offer.
-        pictures = _web_offer_image_candidates(row)
-        pic = pictures[0] if pictures else ''
+        pic = row.get('thumbnail') or ''
+        pic = pic if isinstance(pic, str) and pic.startswith(('https://', 'http://')) else ''
         item.update(position=len(out) + 1, section='local_discovery', exact=False,
-                    thumbnail=pic, image=pic, image_candidates=pictures, price=f'{format_price(money[0], money[1])} {money[1]}' if money else '',
+                    thumbnail=pic, image=pic, price=f'{format_price(money[0], money[1])} {money[1]}' if money else '',
                     price_value=money[0] if money else None, currency=money[1] if money else '',
                     market_country=market['country'], in_stock=None, condition='',
                     price_source=provider, price_verified=False, _local_discovery=True)
-        if canonical in seen:
-            old = next(r for r in out if _web_price_url_key(r['link']) == canonical)
-            old.update(_web_merge_offer_images(old, item))
-            if not old.get('price') and item.get('price'):
-                old.update({k: item[k] for k in ('price', 'price_value', 'currency', 'price_source')})
-            continue
-        seen.add(canonical)
         out.append(item)
     print(f'LOCAL FILTER country={market["country"]} provider={provider} raw={stats["raw"]} invalid_offer={stats["invalid_offer"]} foreign={stats["foreign"]} mismatch={stats["mismatch"]} accepted={len(out)}')
     if stats['invalid_offer']:
@@ -3571,16 +3529,18 @@ SHOPPING_MERCHANT_POOL = ThreadPoolExecutor(max_workers=6, thread_name_prefix='s
 
 def _local_shopping_store_rows(product, market, card_thumbnail=''):
     """Merchant offers of one Google Shopping product, each with the product picture."""
-    pictures = _web_offer_image_candidates(product)
-    picture = next(iter(pictures), '') or card_thumbnail or ''
+    thumbnails = product.get('thumbnails') if isinstance(product, dict) else None
+    picture = ''
+    if isinstance(thumbnails, list):
+        picture = next((str(t) for t in thumbnails if isinstance(t, str) and t.startswith(('https://', 'http://'))), '')
+    picture = picture or card_thumbnail or ''
     product_title = str((product or {}).get('title') or '')
     stores = []
     for store in (product or {}).get('stores') or []:
         if not isinstance(store, dict) or not (store.get('title') or product_title):
             continue
         row = dict(store, title=store.get('title') or product_title, source=store.get('name') or '',
-                   currency=store.get('currency') or '', _shopping_market_listing=True,
-                   _shopping_gl=market.get('country', ''))
+                   currency=store.get('currency') or market.get('currency', ''), _shopping_market_listing=True)
         if not row.get('thumbnail') and picture:
             row['thumbnail'] = picture  # same product, same picture; never a price or title
         # Never copy a price, availability, or title between sellers.
@@ -5590,8 +5550,7 @@ def _web_image_cache_get(key):
     now = time.time()
     with WEB_IMAGE_CACHE_LOCK:
         item = WEB_IMAGE_CACHE.get(key)
-        ttl = 20 if item and item.get('value') in ('', '0') else WEB_IMAGE_CACHE_TTL_SECONDS
-        if item and now - float(item.get('ts') or 0) < ttl:
+        if item and now - float(item.get('ts') or 0) < WEB_IMAGE_CACHE_TTL_SECONDS:
             return item.get('value') or ''
     return ''
 
@@ -5725,7 +5684,7 @@ def _web_image_proxy_signature(raw_url, expires_at):
     return hmac.new(secret, material, hashlib.sha256).hexdigest()
 
 def _web_public_image_url(raw_url):
-    raw_url = _web_unproxy_image_url(raw_url)
+    raw_url = str(raw_url or '').strip()
     if not _web_is_http_url(raw_url):
         return ''
     if WEB_IMAGE_PROXY_ENABLED and PUBLIC_BASE_URL:
@@ -5872,7 +5831,25 @@ def _web_build_text_items(txt, urls, lang, query, supplement=True):
     results = _web_enrich_text_result_images(results)
     return _web_require_product_image_rows(results)
 
+_WEB_COMPARE_LABEL_TAGS = {
+    'overall': 'best_overall', 'quality': 'best_quality', 'value': 'best_value', 'fourth': 'notable_strength',
+}
+
+
+def _web_compare_tag(label_key, ui):
+    for key, tag in _WEB_COMPARE_LABEL_TAGS.items():
+        if ui.get(key) and label_key.strip().lower() == ui[key].strip().lower():
+            return tag
+    return 'other'
+
+
 def _web_brand_comparison(query, lang):
+    """Structured picks for a generic request: a card per option, never free prose on the client.
+
+    ``picks`` is the canonical shape clients render (icon/title/reason/tag);
+    ``options`` lists the same product names for re-search when a pick is
+    chosen; ``summary`` is the legacy sentence, kept only as a text fallback.
+    """
     lang_name = language_name_en(lang)
     prompt = f"Generic shopping request: {query}\nCurrent market: {current_market().get('country_name', 'Kuwait')}\nCompare 3-4 strong concrete options for this request. Output only in {lang_name}. {TEXT77_lang_instr(lang)}"
     txt, options = ('', [])
@@ -5889,7 +5866,24 @@ def _web_brand_comparison(query, lang):
         if options:
             break
     if not txt or not options:
+        print(f'BRAND COMPARISON empty: query={query!r} lang={lang} txt_len={len(txt)} options={len(options)} '
+              f'(Gemini call failed, timed out, or returned no OPTIONS line — check TEXT77 GEMINI/HTTP logs above)')
         return None
+    ui = compare_ui(lang)
+    entries = _compare_entries_from_text(txt)
+    picks = []
+    seen_products = set()
+    for entry in entries:
+        product = entry['product']
+        key = product.casefold()
+        if key in seen_products:
+            continue
+        seen_products.add(key)
+        picks.append({'tag': _web_compare_tag(entry['label'], ui), 'label': entry['label'],
+                      'emoji': entry['emoji'], 'product': product, 'reason': entry['reason']})
+    title_label = re.escape(ui.get('title') or '')
+    category_match = re.search(f'(?im)^\\s*⚖️\\s*{title_label}\\s+(.+)$', txt) if title_label else None
+    category = _clean_pick_label(category_match.group(1)) if category_match else ''
     cleaned = []
     for line in txt.splitlines():
         stripped = line.strip()
@@ -5899,7 +5893,8 @@ def _web_brand_comparison(query, lang):
             continue
         cleaned.append(line)
     txt = re.sub('\\n{3,}', '\n\n', '\n'.join(cleaned)).strip()
-    return {'summary': txt, 'options': options}
+    return {'summary': txt, 'options': options, 'picks': picks, 'category': category,
+            'compare_title': ui.get('title') or ''}
 
 
 _WEB_CLASSIFICATION_LABELS = {
@@ -11239,53 +11234,51 @@ def _web_deep_json_price_scan(html, url=''):
 _WEB_MOBILE_HEADERS = {'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1', 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8', 'Accept-Language': 'en-US,en;q=0.9,ar;q=0.8'}
 
 def _web_product_page_metadata(html, base_url):
-    """Select the current product, or its canonical OpenGraph image on a direct listing."""
+    """Product metadata only: never use arbitrary gallery/recommendation images."""
     soup = BeautifulSoup(html or '', 'html.parser')
     data = {'title': '', 'image': '', 'is_product': False}
-    def same(value):
-        return bool(value) and _web_price_url_key(urllib.parse.urljoin(base_url, str(value))) == _web_price_url_key(base_url)
-    def meta(prop):
-        node = soup.find('meta', property=prop) or soup.find('meta', attrs={'name': prop})
-        return str(node.get('content') or '').strip() if node else ''
-    nodes = []
     for script in soup.find_all('script', type='application/ld+json')[:12]:
         try:
             root = json.loads(script.string or script.get_text() or '')
-        except (ValueError, TypeError):
+        except Exception:
             continue
-        queue = list(root) if isinstance(root, list) else [root]
-        for node in queue:
+        nodes = list(root) if isinstance(root, list) else [root]
+        for node in list(nodes):
+            if isinstance(node, dict):
+                graph = node.get('@graph')
+                if isinstance(graph, list):
+                    nodes.extend(graph)
+                main = node.get('mainEntity')
+                if isinstance(main, dict):
+                    nodes.append(main)
+        for node in nodes:
             if not isinstance(node, dict):
                 continue
-            kinds = node.get('@type') or []
-            kinds = kinds if isinstance(kinds, list) else [kinds]
-            if any(str(t).rsplit('/', 1)[-1] in ('Product', 'ProductGroup') for t in kinds):
-                nodes.append(node)
-            for field in ('@graph', 'mainEntity', 'hasVariant'):
-                child = node.get(field)
-                queue.extend(child if isinstance(child, list) else [child] if isinstance(child, dict) else [])
-    selected = [node for node in nodes if same(node.get('url') or node.get('@id'))]
-    if not selected and len(nodes) == 1 and not nodes[0].get('url') and not str(nodes[0].get('@id') or '').startswith('http'):
-        selected = nodes
-    if len(selected) == 1:
-        data['is_product'] = True
-        data['title'] = str(selected[0].get('name') or '')[:420]
-        pictures = selected[0].get('image') or ''
-        if isinstance(pictures, str):
-            pictures = _web_absolute_url(base_url, pictures)
-        data['image'] = next(iter(_web_offer_image_candidates({'image': pictures})), '')
-    canonical = soup.find('link', rel='canonical')
-    canonical_url = (canonical.get('href') if canonical else '') or meta('og:url')
-    page_ok = not canonical_url or same(canonical_url)
-    page_title = meta('og:title')
-    # Many Chinese storefronts publish og:type=website, not Product.
-    # Accept only this exact product URL + its own title/image, never arbitrary img tags.
-    if page_ok and _web_is_direct_product_page_url(base_url) and page_title:
-        data['title'] = data['title'] or page_title
-        picture = _web_absolute_url(base_url, meta('og:image') or meta('twitter:image'))
-        if picture and not re.search(r'(?:logo|favicon|sprite)', picture, re.I):
-            data['image'] = data['image'] or picture
+            types = node.get('@type') or []
+            types = types if isinstance(types, list) else [types]
+            if not any(t in ('Product', 'ProductGroup') for t in types):
+                continue
             data['is_product'] = True
+            data['title'] = str(node.get('name') or '')[:420]
+            picture = node.get('image')
+            if isinstance(picture, list):
+                picture = picture[0] if picture else ''
+            if isinstance(picture, dict):
+                picture = picture.get('url') or picture.get('contentUrl')
+            if isinstance(picture, str):
+                data['image'] = _web_absolute_url(base_url, picture)
+            if data['image']:
+                return data
+    def meta(prop):
+        node = soup.find('meta', property=prop) or soup.find('meta', attrs={'name': prop})
+        return str(node.get('content') or '').strip() if node else ''
+    title = meta('og:title')
+    data['title'] = data['title'] or title
+    if meta('og:type').lower() in ('product', 'og:product') or meta('product:price:amount'):
+        data['is_product'] = True
+    if data['is_product']:
+        picture = meta('og:image') or meta('twitter:image')
+        data['image'] = data['image'] or _web_absolute_url(base_url, picture)
     return data
 
 _WEB_PRICE_ELEMENT_EXCLUDE = re.compile(
@@ -11696,8 +11689,7 @@ WEB_LIVE_PAGE_IMAGES = env_bool('WEB_LIVE_PAGE_IMAGES', True)
 _WEB_PRICE_FIELDS = ('price', 'price_amount', 'currency', 'price_source', 'price_source_url',
                      'price_checked_at', 'price_verified', 'price_pending', 'price_status',
                      'price_unavailable', 'availability', 'original_price', 'original_currency',
-                     'price_estimated', 'price_compare_value', 'price_compare_currency', 'price_confidence',
-                     'price_suspect_value')
+                     'price_estimated')
 
 
 def _web_price_url_key(url):
@@ -11710,9 +11702,6 @@ def _web_price_url_key(url):
         query = [(k, v) for k, v in urllib.parse.parse_qsl(p.query, keep_blank_values=True)
                  if not k.lower().startswith('utm_') and k.lower() not in tracking]
         host = p.netloc.lower().removeprefix('www.')
-        if _host_matches_any(host, ('aliexpress.com', 'alibaba.com', 'taobao.com', 'tmall.com', '1688.com', 'temu.com', 'shein.com')):
-            tracking_cn = {'spm', 'scm', 'scm_id', 'pvid', 'algo_pvid', 'algo_exp_id', 'aff_fcid', 'aff_fsk', 'aff_platform', 'aff_trace_key', 'af', 'cv', 'dp', 'mall_affr', 'sk', 'terminal_id'}
-            query = [(k, v) for k, v in query if k.lower() not in tracking_cn]
         path = p.path.rstrip('/') or '/'
         # ASIN identifies the exact variant; keep seller/offer/currency query keys.
         if re.fullmatch(r'amazon\.(?:com|ca|de|fr|it|es|co\.uk|co\.jp|com\.au|ae|sa|in)', host):
@@ -12002,12 +11991,9 @@ def _web_live_page_image(row, snap):
             return ''
         title = str(snap.get('title') or '')
         original = str(row.get('raw_title') or row.get('title') or '')
-        if _web_price_url_key(snap.get('url')) != _web_price_url_key(row.get('url')):
-            return ''
         if title and original and _findzia_hard_product_mismatch(original, title):
             return ''
-        image = snap.get('product_image') or snap.get('image') or ''
-        return _web_public_image_url(image) if _web_is_http_url(image) else ''
+        return _web_choose_verified_product_image({'image': '', 'thumbnail': ''}, snap) or ''
     except Exception:
         return ''
 
@@ -12046,24 +12032,10 @@ def _web_indexed_offer_money(item):
     """Only explicit product price fields, not a number borrowed from a snippet."""
     if not isinstance(item, dict):
         return None
-    price = item.get('price')
-    price_obj = price if isinstance(price, dict) else {}
-    currency = price_obj.get('currency') or item.get('currency') or ''
-    price_text = price_obj.get('value') if price_obj else price
-    # A parsed range minimum, instalment or quantity-tier amount is not a price.
-    if any(item.get(k) for k in ('installments_description', 'monthly_payment_duration', 'down_payment')):
-        return None
-    if re.search(r'\b(?:from|starting|up to|MOQ)\b|起|起批|批发|运费|(?:\d|[.,])\s*[-–—~～至]\s*[$€£¥￥]?\s*\d', str(price_text or ''), re.I):
-        return None
-    if _WEB_NOT_A_PRICE_PIECE.search(str(price_text or '')):
-        return None
-    candidates = [(price_text, currency)]
-    # Only fall back to a parsed amount when the displayed price is absent.
-    # Otherwise a rejected '$5-$20' could silently become the extracted 5.
-    if price_text in (None, ''):
-        for field in ('price_value', 'extracted_price'):
-            candidates.append((item.get(field), currency))
-        candidates.append((price_obj.get('extracted_value'), currency))
+    candidates = [(item.get('price'), item.get('currency') or '')]
+    # Lens/Shopping rows also expose a parsed amount; it shares the same currency.
+    if item.get('price_value') not in (None, '', 0) and not isinstance(item.get('price_value'), (dict, list, bool)):
+        candidates.append((item.get('price_value'), item.get('currency') or ''))
     market_cc = str(item.get('_price_market') or '').lower() or _search_geo_country(item) or _explicit_market_country(item)
     market_codes = set(COUNTRY_CURRENCY_CODES.get(market_cc, ())) if market_cc else set()
     snippet = item.get('rich_snippet')
@@ -12077,7 +12049,7 @@ def _web_indexed_offer_money(item):
         extensions = block.get('extensions')
         extensions = extensions if isinstance(extensions, list) else []
         joined = ' '.join(str(x) for x in extensions)
-        if any(detected.get(k) is not None for k in ('price_from', 'price_to')) or re.search(r'\b(from|starting|up to)\b|ابتداء|\d\s*[-–—]\s*[$€£¥]?\s*\d', joined, re.I):
+        if re.search(r'\b(from|starting|up to)\b|ابتداء|\d\s*[-–—]\s*[$€£¥]?\s*\d', joined, re.I):
             continue
         candidates.append((detected.get('price'), detected.get('currency') or ''))
         for extension in extensions:
@@ -12092,10 +12064,7 @@ def _web_indexed_offer_money(item):
         if value in (None, '') or isinstance(value, (dict, list, bool)):
             continue
         # Providers mark estimated prices with a trailing asterisk ("$27.99*").
-        raw = re.sub(r'\s*\*+\s*$', '', _normalize_price_chars(str(value).strip())).strip()
-        raw = re.sub(r'\bUS\s*\$', 'USD ', raw, flags=re.I)
-        if market_cc == 'cn' and re.fullmatch(r'(?:人民币\s*)?[\d.,]+\s*元', raw):
-            raw = re.sub(r'人民币|元', '', raw).strip() + ' CNY'
+        raw = re.sub(r'\s*\*+\s*$', '', str(value).strip()).strip()
         if not raw:
             continue
         explicit = str(currency or '').strip().upper()
@@ -12128,7 +12097,7 @@ def _web_indexed_offer_money(item):
 
 
 def _web_targeted_price_updates(entries, lang, market):
-    """One bounded indexed lookup for exact listing URLs; recover image and money independently."""
+    """Alternate source after a failed merchant page: indexed exact listing URLs."""
     MARKET_CTX.value = dict(market)
     terms = []
     for row in entries.values():
@@ -12139,53 +12108,33 @@ def _web_targeted_price_updates(entries, lang, market):
         if parsed.path in ('', '/'):
             continue
         path = urllib.parse.quote(urllib.parse.unquote(parsed.path), safe='/-._~')
-        term = 'site:' + parsed.netloc + path
-        # Taobao/Tmall/1688 identify offers in the query, not the path.
-        ids = [v for k, v in urllib.parse.parse_qsl(parsed.query)
-               if k.lower() in {'id', 'itemid', 'item_id', 'goods_id', 'goodsid', 'offerid', 'sku', 'skuid', 'sku_id', 'variant'}]
-        if ids:
-            term += ' ' + ' '.join('"' + re.sub(r'[^a-zA-Z0-9_-]', '', value) + '"' for value in ids)
-        terms.append('(' + term + ')')
+        terms.append('site:' + parsed.netloc + path)
     if not terms or not SERPAPI_API_KEY:
         return {}
-    params = {'engine': 'google', 'q': '(' + ' OR '.join(dict.fromkeys(terms)) + ')',
-              'gl': str(market.get('country') or 'us'),
+    query = '(' + ' OR '.join(dict.fromkeys(terms)) + ')'
+    params = {'engine': 'google', 'q': query, 'gl': str(market.get('country') or 'us'),
               'hl': country_search_hl(str(market.get('country') or 'us')), 'num': 10,
               'api_key': SERPAPI_API_KEY, 'output': 'json'}
-    data = _serpapi_cached_json(params, timeout=(1.0, 5.0), label='EXACT-LISTING MEDIA/PRICES') or {}
+    data = _serpapi_cached_json(params, timeout=(2.5, max(20.0, WEB_STREAM_STORE_HTTP_TIMEOUT)),
+                               label='AUTOMATIC EXACT-LISTING PRICES') or {}
     updates = {}
-    for item in _local_discovery_records(data):
-        link = _local_discovery_direct_link(item)
-        item_key = _web_price_url_key(link)
-        if not item_key:
+    for item in data.get('organic_results') or []:
+        if not isinstance(item, dict):
+            continue
+        money = _web_indexed_offer_money(item)
+        if not money:
             continue
         for key, row in entries.items():
-            if item_key != _web_price_url_key(row.get('url')):
+            if _web_price_url_key(item.get('link')) != _web_price_url_key(row.get('url')):
                 continue
-            title = _local_discovery_title(item)
+            title = str(item.get('title') or '')
             original = str(row.get('raw_title') or row.get('title') or '')
             if title and original and _findzia_hard_product_mismatch(original, title):
                 continue
-            # The old parser ran before binding the listing and had no country:
-            # every ambiguous $ / yuan symbol from this fallback was discarded.
-            cc = str(row.get('country') or row.get('market_country') or market.get('country') or '')
-            evidence = dict(item, _shopping_gl=cc)
-            if row.get('export_store'):
-                evidence['_price_market'] = 'us'
-            money = _web_indexed_offer_money(evidence)
-            change = dict(updates.get(key) or {})
-            if money and not _host_matches_any(urllib.parse.urlsplit(link).hostname or '', ('1688.com',)):
-                change.update(_web_live_money_fields(*money, market),
-                    price_source='exact_listing_index', price_source_url=link,
-                    price_checked_at=time.time(), price_verified=False,
-                    price_status='indexed', price_pending=False, price_unavailable=False)
-            pictures = _web_offer_image_candidates(item)
-            if pictures:
-                change['page_image'] = pictures[0]
-                change['image_candidates'] = pictures
-                change['image_source'] = 'exact_listing_index'
-            if change:
-                updates[key] = change
+            updates[key] = {**_web_live_money_fields(*money, market),
+                'price_source': 'exact_listing_index', 'price_source_url': item.get('link'),
+                'price_checked_at': time.time(), 'price_verified': False,
+                'price_status': 'indexed', 'price_pending': False, 'price_unavailable': False}
     return updates
 
 
@@ -12206,11 +12155,8 @@ def _web_flag_price_outliers(rows):
         value, currency = _web_price_number_and_currency(str(row.get('price') or ''), str(row.get('currency') or ''))
         if not value or value <= 0:
             continue
-        identity = _web_clean_classification_identity(row.get('raw_title') or row.get('title') or '')
-        if not identity:
-            continue
-        groups.setdefault((row.get('country') or row.get('market_country'), currency, identity), []).append((key, float(value)))
-    for (_country, currency, _identity), members in groups.items():
+        groups.setdefault((row.get('market_rank'), currency), []).append((key, float(value)))
+    for (_rank, currency), members in groups.items():
         if len(members) < 3:
             continue
         values = sorted(v for _, v in members)
@@ -12267,11 +12213,9 @@ async def _web_with_live_prices(source, lang, country, allow_paid=True):
     market = _web_market(country)
     rows, facts, jobs, attempted = {}, {}, {}, set()
     shared = {}
-    recovery_attempted, recovery_calls = set(), 0
-    missing_since, page_finished = {}, set()
+    recovery_started = False
     loop = asyncio.get_running_loop()
     started = loop.time()
-    last_status = started
     finish_by = None
     final_event = {'event': 'done'}
     had_error = False
@@ -12290,19 +12234,16 @@ async def _web_with_live_prices(source, lang, country, allow_paid=True):
         item = dict(item)
         key = _web_identity_offer_key(item)
         merged = dict(rows.get(key) or {})
-        image_fields = _web_merge_offer_images(merged, item)
         # A later duplicate without a picture must not blank an earlier one.
         if not _web_is_http_url(_web_unproxy_image_url(item.get('image') or '')) and _web_is_http_url(_web_unproxy_image_url(merged.get('image') or '')):
             item.pop('image', None)
             item.pop('thumbnail', None)
         previous_price = _web_price_facts(merged) if _web_row_has_numeric_price(merged) else {}
         merged.update(item)
-        merged.update(image_fields)
         if not _web_row_has_numeric_price(merged) and previous_price:
             merged.update(previous_price)
         if key in facts:
             merged.update(facts[key])
-            merged.update(_web_merge_offer_images(merged, image_fields))
         has_price = _web_row_has_numeric_price(merged)
         if has_price:
             merged['price_pending'] = False
@@ -12310,8 +12251,6 @@ async def _web_with_live_prices(source, lang, country, allow_paid=True):
         elif key not in attempted:
             merged.update(price='', price_pending=True, price_unavailable=False, price_status='loading')
         rows[key] = merged
-        if not has_price or not _web_offer_image_candidates(merged):
-            missing_since.setdefault(key, loop.time())
         if key not in attempted and _web_is_http_url(merged.get('url') or ''):
             attempted.add(key)
             if has_price and _web_is_http_url(_web_unproxy_image_url(merged.get('image') or '')):
@@ -12322,18 +12261,14 @@ async def _web_with_live_prices(source, lang, country, allow_paid=True):
                 jobs[asyncio.create_task(page(dict(merged)))] = key
         return merged
     def update_event(key, data, phase):
-        current = rows.get(key) or {}
         price_facts = _web_price_facts(data)
-        # A late indexed response cannot replace a verified/live price.
-        if price_facts and not (phase == 'live_index_price' and _web_row_has_numeric_price(current)):
-            facts[key] = dict(facts.get(key) or {}, **price_facts)
+        if price_facts:
+            facts[key] = price_facts
         page_image = str((data or {}).get('page_image') or '').strip()
-        pictures = _web_merge_offer_images(current, {'image': page_image, 'image_candidates': data.get('image_candidates') or []})
-        if pictures:
-            facts[key] = dict(facts.get(key) or {}, **pictures)
-            if page_image:
-                facts[key]['image_source'] = data.get('image_source') or 'product_page'
-        rows[key] = dict(current, **(facts.get(key) or {}))
+        current = rows.get(key) or {}
+        if page_image and not _web_is_http_url(_web_unproxy_image_url(current.get('image') or current.get('thumbnail') or '')):
+            facts[key] = dict(facts.get(key) or {}, image=page_image, thumbnail=page_image, image_source='product_page')
+        rows[key] = dict(rows[key], **(facts.get(key) or {}))
         return _web_stream_event({'event': 'upsert', 'phase': phase, 'item': rows[key],
                                   'market': rows[key].get('market'),
                                   'elapsed_ms': int((loop.time() - started) * 1000)})
@@ -12347,11 +12282,10 @@ async def _web_with_live_prices(source, lang, country, allow_paid=True):
                 break
             if not waiting:
                 break
-            done, _ = await asyncio.wait(waiting, timeout=min(.25, max(.01, finish_by - loop.time()))
-                                         if finish_by is not None else .25,
+            done, _ = await asyncio.wait(waiting, timeout=min(1.0, max(.01, finish_by - loop.time()))
+                                         if finish_by is not None else 1.0,
                                          return_when=asyncio.FIRST_COMPLETED)
-            if not done and loop.time() - last_status >= 1.0:
-                last_status = loop.time()
+            if not done:
                 yield _web_stream_event({'event': 'status', 'stage': 'price_enrich',
                                          'elapsed_ms': int((loop.time() - started) * 1000)})
             if next_event is not None and next_event in done:
@@ -12383,7 +12317,6 @@ async def _web_with_live_prices(source, lang, country, allow_paid=True):
                         next_event = asyncio.create_task(anext(source))
             for task in done & set(jobs):
                 key = jobs.pop(task)
-                page_finished.add(key)
                 try:
                     data = task.result()
                 except Exception as exc:
@@ -12391,22 +12324,15 @@ async def _web_with_live_prices(source, lang, country, allow_paid=True):
                     data = None
                 if data and key in rows:
                     yield update_event(key, data, 'live_page_price')
-            # Hedge during retrieval, not after it. Coalesce listings into the
-            # existing bounded batch budget; all normal API rate guards still apply.
-            eligible = {k: r for k, r in rows.items() if k not in recovery_attempted
-                        and (not _web_row_has_numeric_price(r) or not _web_offer_image_candidates(r))
-                        and (k in page_finished or loop.time() - missing_since.get(k, loop.time()) >= .75
-                             or next_event is None)}
-            if eligible and allow_paid and WEB_PRICE_ENRICH_SHOPPING_FALLBACK and SERPAPI_API_KEY:
-                # Hold the final budget slot for later lanes until retrieval ends.
-                slots = WEB_ASYNC_PRICE_SHARED_MARKETS - recovery_calls
-                if next_event is not None:
-                    slots = min(slots, max(0, WEB_ASYNC_PRICE_SHARED_MARKETS - 1 - recovery_calls))
-                for batch in _web_automatic_price_batches(eligible)[:slots]:
-                    recovery_attempted.update(batch)
-                    task = asyncio.create_task(asyncio.to_thread(_web_targeted_price_updates, batch, lang, dict(market)))
-                    shared[task] = recovery_calls
-                    recovery_calls += 1
+            # Automatically change source instead of asking the customer to
+            # retry the same blocked page. Reserve time for the alternate source.
+            if not recovery_started and finish_by is not None and (not jobs or loop.time() >= finish_by - 8):
+                recovery_started = True
+                missing = {k: r for k, r in rows.items() if not _web_row_has_numeric_price(r)}
+                if missing and allow_paid and WEB_PRICE_ENRICH_SHOPPING_FALLBACK and SERPAPI_API_KEY:
+                    for index, batch in enumerate(_web_automatic_price_batches(missing)):
+                        task = asyncio.create_task(asyncio.to_thread(_web_targeted_price_updates, batch, lang, dict(market)))
+                        shared[task] = index
             for task in done & set(shared):
                 shared.pop(task)
                 try:
@@ -12415,9 +12341,8 @@ async def _web_with_live_prices(source, lang, country, allow_paid=True):
                     print(f'LIVE PRICE POOL ERR: {type(exc).__name__}')
                     updates = {}
                 for key, data in updates.items():
-                    if key in rows:
+                    if key in rows and not _web_row_has_numeric_price(rows[key]):
                         yield update_event(key, data, 'live_index_price')
-        _web_flag_price_outliers(rows)
         missing_count = 0
         for key, row in list(rows.items()):
             if not _web_row_has_numeric_price(row):
@@ -12430,7 +12355,7 @@ async def _web_with_live_prices(source, lang, country, allow_paid=True):
         if rows or not had_error:
             if had_error:
                 final_event['partial'] = True
-            yield _web_stream_event(_web_live_snapshot(final_event, rows))
+            yield _web_stream_event(final_event)
     finally:
         tasks = list(jobs) + list(shared) + ([next_event] if next_event else [])
         for task in tasks:
@@ -13021,7 +12946,16 @@ def _web_search_text_sync(query, country, lang, selected_option='', original_que
         if rtype == 'GENERIC':
             comparison = _web_brand_comparison(q, lang)
             if comparison:
-                return {'ok': True, 'type': 'recommendations', 'query': q, 'market': market, 'comparison': comparison['summary'], 'options': comparison['options']}
+                return {'ok': True, 'type': 'recommendations', 'query': q, 'market': market, 'comparison': comparison['summary'],
+                        'options': comparison['options'], 'picks': comparison.get('picks') or [],
+                        'category': comparison.get('category') or '', 'compare_title': comparison.get('compare_title') or ''}
+            # The comparison call failed or returned nothing usable. A bare
+            # category word ("Football") almost never matches a store's own
+            # product title, so silently falling into the market search below
+            # would show "Nothing matched" with no explanation. Fail loudly
+            # here instead of a confusing empty result screen.
+            print(f'GENERIC FALLBACK: no comparison for {q!r}; refusing the bare-category market search')
+            return {'ok': False, 'type': 'recommendations_failed', 'error': 'comparison_unavailable', 'query': q, 'market': market}
         elif rtype == 'SERVICE':
             return {'ok': False, 'type': 'service', 'error': 'service_search_not_enabled_on_web_yet', 'query': q, 'market': market}
         elif rtype == 'NONE':
@@ -13209,7 +13143,7 @@ async def web_api_img_proxy(request: Request):
         parsed = urllib.parse.urlparse(target_url)
         headers = dict(HEADERS)
         headers['Accept'] = 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8'
-        headers.pop('Referer', None)
+        headers['Referer'] = f'{parsed.scheme}://{parsed.netloc}/'
         resp = _web_safe_get(
             target_url,
             headers=headers,
@@ -13220,17 +13154,15 @@ async def web_api_img_proxy(request: Request):
             if resp.status_code >= 400:
                 return (resp.status_code, '', b'', '')
             content_type = (resp.headers.get('content-type') or '').split(';', 1)[0].strip().lower()
-            limit = 400000 if content_type in ('text/html', 'application/xhtml+xml') else WEB_IMAGE_PROXY_MAX_BYTES
+            limit = WEB_IMAGE_PROXY_MAX_BYTES if content_type.startswith('image/') else 400000
             body = _web_read_limited_response(resp, limit)
             if body is None:
                 return (413, '', b'', '')
-            detected_mime = _raster_mime(body)
-            if detected_mime:
-                return (200, detected_mime, body, '')
             if content_type.startswith('image/'):
-                return (415, '', b'', '')
-            if _web_price_url_key(resp.url) != _web_price_url_key(target_url):
-                return (404, '', b'', '')
+                detected_mime = _raster_mime(body)
+                if not detected_mime:
+                    return (415, '', b'', '')
+                return (200, detected_mime, body, '')
             html = body.decode(resp.encoding or 'utf-8', errors='replace')
             return (200, content_type or 'text/html', b'', html)
         finally:
@@ -13241,7 +13173,7 @@ async def web_api_img_proxy(request: Request):
             return Response(content=b'', status_code=status)
         if content_type.startswith('image/') and body:
             return Response(content=body, media_type=content_type, headers={'Cache-Control': 'public, max-age=86400'})
-        rescued = (_web_product_page_metadata(html, raw_url).get('image') or '') if html else ''
+        rescued = _web_extract_product_image_from_html(html, raw_url) if html else ''
         if rescued and rescued != raw_url:
             status2, content_type2, body2, _ = await asyncio.to_thread(_fetch_image, rescued)
             if status2 < 400 and content_type2.startswith('image/') and body2:
@@ -14009,6 +13941,17 @@ async def web_api_search_stream(request: Request):
                 else:
                     market_cancel.set()
                     result = await asyncio.to_thread(_web_search_text_sync, q, country, lang, '', '', False, False)
+                    # _web_search_text_sync returns {'ok': False, 'type': 'recommendations_failed', ...}
+                    # when the Gemini comparison call itself failed. Wrapping
+                    # that directly in a 'recommendations' event gave the
+                    # client empty picks/options, which rendered as a plain
+                    # "Nothing matched that search" with no way to tell this
+                    # was a transient failure rather than a real empty result.
+                    if not result.get('ok') or result.get('type') != 'recommendations':
+                        print(f'GENERIC FALLBACK (stream): no comparison for {q!r}; refusing the bare-category market search')
+                        yield _web_stream_event({'event': 'error', 'error': result.get('error') or 'comparison_unavailable',
+                                                 'elapsed_ms': int((time.time() - started) * 1000)})
+                        return
                     yield _web_stream_event({'event': 'recommendations', 'data': result, 'elapsed_ms': int((time.time() - started) * 1000)})
                     yield _web_stream_event({'event': 'done', 'elapsed_ms': int((time.time() - started) * 1000)})
                     return
@@ -14709,18 +14652,13 @@ def _web_selected_offer(raw, cc, display_market, query='', visual=False, target_
     export_store = _china_export_store(url) if target.get('_export_mode') else None
     row = {'url': url, 'title': _compact_ui_title(title), 'raw_title': title,
            'store': export_store[0] if export_store else _ui_plain_store_name(raw.get('source') or '', url),
-           'image': next(iter(_web_offer_image_candidates(raw)), ''),
+           'image': raw.get('thumbnail') or raw.get('image') or '',
            'country': cc, 'market_country': cc, 'flag': country_flag_emoji(cc),
            'market': 'local' if rank == 0 else 'global', 'market_scope': 'local' if rank == 0 else 'global',
            'market_rank': rank, 'market_evidence': evidence,
            'price': '', 'price_pending': not bool(money), 'price_verified': False,
            'price_source': raw.get('price_source') or 'indexed_offer',
            'exact': False, 'is_exact': False, 'match_type': 'similar'}
-    row.update(_web_merge_offer_images({}, raw))
-    if _web_is_http_url(url):
-        recovery = _web_public_image_url(url)
-        if '/api/img-proxy?' in recovery:
-            row['image_recovery_url'] = recovery
     if export_store:
         row['export_store'] = export_store[1]
     if item.get('_local_match_uncertain'):
@@ -14755,7 +14693,7 @@ def _web_selected_market_search(query, country, lang, global_countries, *, image
     reference = {}
     reference_job = None
     jobs, launched, rows, states = {}, {cc: set() for cc in scopes}, {}, {}
-    excluded = {_web_price_url_key(url) for url in shown_urls}
+    excluded = {_canonical_result_url(url) for url in shown_urls}
     excluded_domains = {str(d).lower().removeprefix('www.') for d in shown_domains}
     by_market = Counter()
     def cancelled():
@@ -14894,24 +14832,22 @@ def _web_selected_market_search(query, country, lang, global_countries, *, image
                         row_cc = 'cn'
                     if not row:
                         continue
+                    if row_cc == 'cn' and export_mode:
+                        store = row.get('export_store') or ''
+                        if export_store_counts[store] >= CHINA_EXPORT_PER_STORE_CAP:
+                            continue
                     eligible += 1
-                    key = _web_price_url_key(row['url'])
+                    key = _canonical_result_url(row['url'])
                     domain = _more_result_domain(row['url']).removeprefix('www.')
                     if key in excluded or domain in excluded_domains:
                         continue
                     old = rows.get(key)
                     if old:
-                        pictures = _web_merge_offer_images(old, row)
-                        if pictures and pictures != {k: old.get(k) for k in pictures}:
-                            old.update(pictures)
-                            changed = True
                         # Duplicate provider evidence can fill a price, never
                         # blank one or relabel a previously verified merchant.
                         if not _web_row_has_numeric_price(old) and _web_row_has_numeric_price(row):
                             old.update({k: v for k, v in row.items() if k.startswith('price') or k in ('currency', 'original_currency', 'original_price')})
                             changed = True
-                        continue
-                    if row_cc == 'cn' and export_mode and export_store_counts[row.get('export_store') or ''] >= CHINA_EXPORT_PER_STORE_CAP:
                         continue
                     cap = SELECTED_LOCAL_CAP if row_cc == country else (CHINA_EXPORT_GLOBAL_CAP if (row_cc == 'cn' and export_mode) else SELECTED_GLOBAL_CAP)
                     if by_market[row_cc] >= cap:
@@ -15024,11 +14960,16 @@ async def _web_markets_stream_response(request, payload):
             query = prep.get('query') or query
             if prep.get('rtype') == 'GENERIC':
                 # Call the recommendation-only function. Its failure must not
-                # fall into the legacy engine's fixed US/CN search expansion.
+                # fall into the legacy engine's fixed US/CN search expansion —
+                # this endpoint's own selected-market search below (scoped to
+                # the caller's chosen countries) is the correct fallback, not
+                # a hard error: it still returns real, correctly scoped offers.
                 comparison = await asyncio.to_thread(_web_brand_comparison, query, lang)
                 if comparison:
                     report = {'ok': True, 'type': 'recommendations', 'query': query, 'market': market,
-                              'comparison': comparison['summary'], 'options': comparison['options']}
+                              'comparison': comparison['summary'], 'options': comparison['options'],
+                              'picks': comparison.get('picks') or [], 'category': comparison.get('category') or '',
+                              'compare_title': comparison.get('compare_title') or ''}
                     yield _web_stream_event({'event': 'recommendations', 'data': report})
                     yield _web_stream_event({'event': 'done', 'count': 0})
                     return
