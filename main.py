@@ -288,7 +288,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization'], max_age=86400)
-BUILD_ID = 'v128.3-separated-markets-media-recovery'
+BUILD_ID = 'v128.4-merchant-challenge-fallback'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -9690,31 +9690,13 @@ def _web_rescue_product_image(page_url):
     cached = _web_image_cache_get(cache_key)
     if cached:
         return cached
-    try:
-        parsed = urllib.parse.urlparse(page_url)
-        headers = dict(HEADERS)
-        headers.setdefault('Accept', 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8')
-        headers.setdefault('Referer', f'{parsed.scheme}://{parsed.netloc}/')
-        resp = _web_safe_get(page_url, headers=headers, timeout=(2.5, WEB_IMAGE_PAGE_TIMEOUT_SECONDS), stream=True)
-        try:
-            if resp.status_code >= 400:
-                _web_image_cache_set(cache_key, '')
-                return ''
-            content_type = (resp.headers.get('content-type') or '').split(';', 1)[0].strip().lower()
-            if content_type.startswith('image/'):
-                _web_image_cache_set(cache_key, resp.url or page_url)
-                return resp.url or page_url
-            body = _web_read_limited_response(resp, 400000)
-            html = body.decode(resp.encoding or 'utf-8', errors='replace') if body is not None else ''
-            found = (_web_product_page_metadata(html, resp.url or page_url).get('image') or '') if _web_price_url_key(resp.url or page_url) == _web_price_url_key(page_url) else ''
-            _web_image_cache_set(cache_key, found)
-            return found
-        finally:
-            _web_safe_response_close(resp)
-    except Exception as e:
-        print(f'WEB IMAGE RESCUE ERR: {page_url[:120]} -> {e.__class__.__name__}')
-        _web_image_cache_set(cache_key, '')
+    document = _web_merchant_document(page_url, headers=dict(HEADERS),
+                    timeout=(2.0, WEB_IMAGE_PAGE_TIMEOUT_SECONDS), max_bytes=400000)
+    if document['reason'] or _web_price_url_key(document['url']) != _web_price_url_key(page_url):
         return ''
+    found = _web_product_page_metadata(document['text'], page_url).get('image') or ''
+    _web_image_cache_set(cache_key, found)
+    return found
 
 def _web_image_proxy_signature(raw_url, expires_at):
     secret_text = (
@@ -15548,6 +15530,8 @@ _WEB_MOBILE_HEADERS = {'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 li
 
 def _web_product_page_metadata(html, base_url):
     """Select the current product, or its canonical OpenGraph image on a direct listing."""
+    if _web_merchant_access_reason(200, {}, html, base_url):
+        return {'title': '', 'image': '', 'is_product': False}
     soup = BeautifulSoup(html or '', 'html.parser')
     data = {'title': '', 'image': '', 'is_product': False}
     def same(value):
@@ -15656,17 +15640,17 @@ def _web_store_price_api(url, country=''):
             if not m:
                 return None
             sku = m.group(1)
-            response = _web_safe_get(f'https://p.3.cn/prices/mgets?skuIds=J_{sku}&type=1',
+            document = _web_merchant_document(f'https://p.3.cn/prices/mgets?skuIds=J_{sku}&type=1',
+                                     purpose='api',
                                      headers={'User-Agent': HEADERS.get('User-Agent', 'Mozilla/5.0'), 'Referer': 'https://item.jd.com/'},
-                                     timeout=(2.0, 3.5), stream=True, max_redirects=1)
-            try:
-                body = _web_read_limited_response(response, 20000) or b''
-            finally:
-                _web_safe_response_close(response)
+                                     timeout=(2.0, 3.5), max_bytes=20000, max_redirects=1)
+            if document['reason']:
+                return None
+            body = document['body']
             rows = json.loads(body.decode('utf-8', 'replace') or '[]')
             entry = rows[0] if isinstance(rows, list) and rows and isinstance(rows[0], dict) else {}
-            value = _web_price_token_to_float(str(entry.get('p') or entry.get('op') or ''), 'CNY') if entry else None
-            if value and value > 0 and str(entry.get('id') or '').endswith(sku):
+            value = _web_price_token_to_float(str(entry.get('p') or ''), 'CNY') if entry else None
+            if value and value > 0 and str(entry.get('id') or '') == 'J_' + sku:
                 print(f'STORE PRICE API jd sku={sku} price={value}')
                 return {'price': value, 'currency': 'CNY', 'price_source': 'jd_price_api', 'price_confidence': 'high', 'ok': True}
     except Exception as exc:
@@ -15735,6 +15719,8 @@ def _web_dom_price(soup, url, currency_hint, title):
 
 def _web_fallback_page_price(html, url, metadata, country=''):
     """Store adapters -> inline JSON -> DOM price elements, all under the same guards."""
+    if _web_merchant_access_reason(200, {}, html, url):
+        return {}
     if not WEB_PRICE_FALLBACK_TIERS or not html:
         return {}
     soup = BeautifulSoup(html[:900000], 'html.parser')
@@ -15771,6 +15757,173 @@ def _web_fallback_page_price(html, url, metadata, country=''):
     return {}
 
 
+# Merchant failures are distinct from a product with missing data.
+# Cooldowns affect optional direct fetches only; search/API discovery stays open.
+import math
+WEB_MERCHANT_BACKOFF_SECONDS = max(15, min(1800, int(os.environ.get('WEB_MERCHANT_BACKOFF_SECONDS', '300'))))
+_WEB_MERCHANT_BACKOFF = {}
+_WEB_MERCHANT_BACKOFF_LOCK = threading.Lock()
+
+
+def _web_merchant_access_reason(status, headers, body='', final_url=''):
+    headers = {str(k).lower(): str(v).lower() for k, v in (headers or {}).items()}
+    if headers.get('cf-mitigated') == 'challenge':
+        return 'challenge'
+    if status == 429:
+        return 'rate_limited'
+    if status == 401:
+        return 'login_required'
+    if status == 403:
+        return 'access_denied'
+    try:
+        path = urllib.parse.urlsplit(final_url).path.lower()
+        if re.search(r'/(?:ap/signin|(?:member/)?login|signin|sign-in|passport/login)(?:/|$|\.(?:html?|aspx?|jsp)(?:/|$))', path):
+            return 'login_required'
+        if re.search(r'/(?:errors/validatecaptcha|captcha|challenge-platform)(?:[./]|$)', path):
+            return 'challenge'
+    except ValueError:
+        pass
+    if isinstance(body, bytes):
+        body = body[:180000].decode('utf-8', 'replace')
+    text = str(body or '')[:180000]
+    if not text or '<' not in text:
+        return ''
+    # A review widget loading reCAPTCHA, or a "robot vacuum", is not a block.
+    title = re.search(r'<title[^>]*>(.*?)</title>', text, re.I | re.S)
+    heading = re.sub(r'<[^>]+>', ' ', title.group(1)) if title else ''
+    if re.fullmatch(r'\s*(?:robot check|robot or human\??|just a moment[.!…]*|'
+                    r'access denied|security verification|security check|安全验证|访问验证|'
+                    r'人机验证|验证中心)\s*', html.unescape(heading), re.I):
+        return 'challenge'
+    if re.search(r'(?:action|src)\s*=\s*["\'][^"\']*/(?:errors/validateCaptcha|cdn-cgi/challenge-platform)/?', text, re.I):
+        return 'challenge'
+    has_product = bool(re.search(r'["\']@type["\']\s*:\s*(?:["\']Product(?:Group)?["\']|\[[^\]]*["\']Product["\'])', text, re.I))
+    visible = re.sub(r'<(?:script|style)\b[^>]*>.*?</(?:script|style)>', ' ', text, flags=re.I | re.S)
+    visible = re.sub(r'\s+', ' ', html.unescape(re.sub(r'<[^>]+>', ' ', visible))).lower()
+    if not has_product and any(p in visible for p in (
+            'verify you are human', 'verify that you are human', 'confirm you are human',
+            'sorry, we just need to make sure you', 'automated access to amazon',
+            'press and hold to confirm you are', '请完成安全验证', '请先完成验证',
+            '请拖动滑块', '拖动滑块完成拼图', '访问过于频繁', '检测到异常访问',
+            'تحقق من أنك إنسان', 'تأكد من أنك لست روبوت')):
+        return 'challenge'
+    return ''
+
+
+def _web_merchant_access_key(url, purpose):
+    try:
+        p = urllib.parse.urlsplit(str(url or ''))
+        return (str(p.hostname or '').lower(), p.port, purpose)
+    except ValueError:
+        return ('', None, purpose)
+
+
+def _web_merchant_cooldown(url, purpose='page'):
+    key = _web_merchant_access_key(url, purpose)
+    now = time.monotonic()
+    with _WEB_MERCHANT_BACKOFF_LOCK:
+        record = _WEB_MERCHANT_BACKOFF.get(key)
+        if record and record['until'] > now:
+            return dict(record, retry_after=max(1, int(record['until'] - now)))
+        _WEB_MERCHANT_BACKOFF.pop(key, None)
+    return {}
+
+
+def _web_merchant_record_block(url, purpose, reason, headers=None):
+    delay = WEB_MERCHANT_BACKOFF_SECONDS
+    if headers:
+        retry = next((str(v) for k, v in (headers or {}).items() if str(k).lower() == 'retry-after'), '')
+        try:
+            delay = max(delay, float(retry))
+        except ValueError:
+            try:
+                from email.utils import parsedate_to_datetime
+                delay = max(delay, parsedate_to_datetime(retry).timestamp() - time.time())
+            except (ValueError, TypeError, OverflowError):
+                pass
+    if not math.isfinite(delay):
+        delay = WEB_MERCHANT_BACKOFF_SECONDS
+    key = _web_merchant_access_key(url, purpose)
+    if not key[0]:
+        return {}
+    record = {'reason': reason, 'until': time.monotonic() + delay}
+    with _WEB_MERCHANT_BACKOFF_LOCK:
+        _WEB_MERCHANT_BACKOFF[key] = record
+        while len(_WEB_MERCHANT_BACKOFF) > 2048:
+            _WEB_MERCHANT_BACKOFF.pop(next(iter(_WEB_MERCHANT_BACKOFF)))
+    print(f'MERCHANT ACCESS host={key[0]} resource={purpose} reason={reason} direct_retry_after={int(delay)} fallback=indexed')
+    return dict(record, retry_after=max(1, int(delay)))
+
+
+def _web_merchant_document(url, *, purpose='page', headers=None, timeout=(2.0, 5.0),
+                           max_bytes=1500000, max_redirects=3):
+    """One bounded request. No challenge solving, identity switching, or repeated retries."""
+    blocked = _web_merchant_cooldown(url, purpose)
+    result = {'url': url, 'status': 0, 'headers': {}, 'body': b'', 'text': '', 'reason': '', 'retry_after': 0}
+    if blocked:
+        return dict(result, reason=blocked['reason'], retry_after=blocked['retry_after'])
+    response = None
+    try:
+        response = _web_safe_get(url, headers=headers, timeout=timeout, stream=True, max_redirects=max_redirects)
+        result.update(url=str(response.url or url), status=response.status_code, headers=dict(response.headers))
+        reason = _web_merchant_access_reason(response.status_code, response.headers, final_url=result['url'])
+        if not reason and response.status_code < 400:
+            body = _web_read_limited_response(response, max_bytes)
+            if body is None:
+                return dict(result, reason='too_large')
+            raster = (body.startswith((b'\xff\xd8\xff', b'\x89PNG\r\n\x1a\n', b'GIF87a', b'GIF89a'))
+                      or (body[:4] == b'RIFF' and body[8:12] == b'WEBP')
+                      or body[4:12] in (b'ftypavif', b'ftypavis'))
+            text = ''
+            if not raster:
+                content_type = next((str(v) for k, v in response.headers.items() if str(k).lower() == 'content-type'), '')
+                # Native Chinese stores may declare GBK/GB18030 rather than UTF-8.
+                declared = re.search(r'charset\s*=\s*["\']?([a-zA-Z0-9_-]+)',
+                                     content_type + ' ' + body[:4096].decode('ascii', 'ignore'), re.I)
+                encoding = declared.group(1) if declared else getattr(response, 'encoding', None) or 'utf-8'
+                if not declared and encoding.lower() in ('iso-8859-1', 'latin-1'):
+                    encoding = 'utf-8'
+                try:
+                    text = body.decode(encoding, errors='replace')
+                except LookupError:
+                    text = body.decode('utf-8', errors='replace')
+                reason = _web_merchant_access_reason(response.status_code, response.headers, text, result['url'])
+            if not reason:
+                result.update(body=body, text=text)
+        if reason:
+            blocked = _web_merchant_record_block(url, purpose, reason, response.headers)
+            result.update(reason=reason, retry_after=blocked.get('retry_after', 0))
+        elif response.status_code >= 400:
+            result['reason'] = 'not_found' if response.status_code == 404 else 'http_error'
+        return result
+    except Exception as exc:
+        print(f'MERCHANT FETCH host={_web_merchant_access_key(url, purpose)[0]} error={type(exc).__name__}')
+        return dict(result, reason='network_error')
+    finally:
+        _web_safe_response_close(response)
+
+
+def _web_page_access_fields(snap):
+    return {key: snap[key] for key in ('page_fetch_status', 'page_fetch_reason', 'page_retry_after') if key in snap}
+
+
+def _web_indexed_media_records(data):
+    """Indexed thumbnails are usable only with their observed merchant page URL."""
+    records = list(_local_discovery_records(data))
+    for item in (data.get('inline_images') or [])[:30]:
+        if not isinstance(item, dict):
+            continue
+        # SerpApi 'link' goes to Google image search; 'source' is the merchant page.
+        url = _local_discovery_direct_link({'link': item.get('source')})
+        if not url:
+            continue
+        records.append({'link': url, 'title': item.get('title') or '',
+                        'source': item.get('source_name') or '',
+                        'thumbnail': item.get('thumbnail') or '',
+                        'image': item.get('original') or ''})
+    return records
+
+
 def _web_fetch_page_snapshot(url, country=''):
     url = str(url or '').strip()
     if not _web_is_http_url(url):
@@ -15786,31 +15939,16 @@ def _web_fetch_page_snapshot(url, country=''):
         headers = dict(HEADERS)
         headers.update({'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8', 'Accept-Language': 'en-US,en;q=0.8', 'Referer': f'{parsed.scheme}://{parsed.netloc}/'})
 
-        def _fetch_page(page_headers):
-            response = _web_safe_get(
-                url,
-                headers=page_headers,
-                timeout=(2.5, WEB_PRODUCT_VERIFY_TIMEOUT_SECONDS),
-                stream=True,
-            )
-            try:
-                body = _web_read_limited_response(response, 1500000)
-                text = body.decode(response.encoding or 'utf-8', errors='replace') if body is not None else ''
-                return (response.status_code, text, str(response.url or url))
-            finally:
-                _web_safe_response_close(response)
-
-        status_code, page_text, final_url = _fetch_page(headers)
-        if (status_code >= 400 or not page_text) and status_code not in (401, 403, 404, 429):
-            try:
-                alt = dict(_WEB_MOBILE_HEADERS)
-                alt['Referer'] = f'{parsed.scheme}://{parsed.netloc}/'
-                retry_status, retry_text, retry_url = _fetch_page(alt)
-                if retry_status < 400 and retry_text:
-                    print(f'WEB PAGE MOBILE-UA RESCUE host={parsed.netloc} status={status_code}->{retry_status}')
-                    status_code, page_text, final_url = (retry_status, retry_text, retry_url)
-            except Exception as e2:
-                print(f'WEB PAGE MOBILE-UA RETRY ERR host={parsed.netloc}: {e2.__class__.__name__}')
+        document = _web_merchant_document(url, headers=headers,
+                    timeout=(2.0, WEB_PRODUCT_VERIFY_TIMEOUT_SECONDS))
+        reason = document['reason']
+        data.update(page_fetch_status='blocked' if reason in ('challenge', 'login_required', 'access_denied', 'rate_limited') else 'failed' if reason else 'loaded',
+                    page_fetch_reason=reason, page_retry_after=document['retry_after'])
+        if reason:
+            # Preserve a separately verified API price on the ORIGINAL offer.
+            # A login redirect is never the price source or a product image.
+            return data
+        status_code, page_text, final_url = document['status'], document['text'], document['url']
         data['url'] = final_url
         if status_code < 400 and page_text:
             html = page_text
@@ -15877,6 +16015,8 @@ def _web_image_fetchable(value):
     raw = _web_unproxy_image_url(value)
     if not _web_is_http_url(raw):
         return False
+    if _web_merchant_cooldown(raw, 'image'):
+        return False
     cache_key = 'imgok:' + raw
     cached = _web_image_cache_get(cache_key)
     if cached in ('1', '0'):
@@ -15894,6 +16034,10 @@ def _web_image_fetchable(value):
             timeout=(2.0, WEB_PRODUCT_IMAGE_VERIFY_TIMEOUT_SECONDS),
             stream=True,
         )
+        reason = _web_merchant_access_reason(r.status_code, r.headers, final_url=r.url)
+        if reason:
+            _web_merchant_record_block(raw, 'image', reason, r.headers)
+            return False
         ctype = (r.headers.get('content-type') or '').split(';', 1)[0].strip().lower()
         if r.status_code < 400 and ctype.startswith('image/'):
             # Only the first bounded chunk is needed for this reachability probe.
@@ -16098,6 +16242,8 @@ def _web_exact_money(value, currency):
 
 def _web_extract_exact_page_price(html, url):
     """Read the current product's offer, never the first price anywhere in HTML."""
+    if _web_merchant_access_reason(200, {}, html, url):
+        return {}
     soup = BeautifulSoup(html or '', 'html.parser')
     def meta(name):
         el = soup.find('meta', property=name) or soup.find('meta', attrs={'name': name})
@@ -16321,7 +16467,7 @@ def _web_live_page_price(row, market):
     money = _web_exact_money(snap.get('price'), snap.get('currency'))
     if not money or not snap.get('is_product'):
         image = _web_live_page_image(row, snap)
-        return {'page_image': image} if image else None
+        return dict(_web_page_access_fields(snap), **({'page_image': image} if image else {})) or None
     title = str(snap.get('title') or '')
     original = str(row.get('raw_title') or row.get('title') or '')
     if title and original and _findzia_hard_product_mismatch(original, title):
@@ -16338,7 +16484,7 @@ def _web_live_page_price(row, market):
     if _price_collides_with_product_spec(amount, original, title):
         return None
     confident = str(snap.get('price_confidence') or 'high') == 'high'
-    return {**_web_live_money_fields(amount, currency, market),
+    return {**_web_page_access_fields(snap), **_web_live_money_fields(amount, currency, market),
             'price_source': snap.get('price_source') or 'product_page',
             'price_source_url': snap.get('url') or row.get('url'),
             'price_checked_at': snap.get('price_checked_at') or time.time(),
@@ -16351,7 +16497,7 @@ def _web_live_page_price(row, market):
 def _web_live_page_image(row, snap):
     """Product image from the page already fetched for the price; '' when unknown."""
     try:
-        if not snap or not snap.get('is_product'):
+        if not snap or not snap.get('is_product') or snap.get('page_fetch_status') == 'blocked':
             return ''
         title = str(snap.get('title') or '')
         original = str(row.get('raw_title') or row.get('title') or '')
@@ -16370,7 +16516,7 @@ def _web_live_page_image_only(row, market):
     MARKET_CTX.value = dict(market)
     snap = _web_verified_page_snapshot(row.get('url'), row.get('country') or row.get('market_country') or '') or {}
     image = _web_live_page_image(row, snap)
-    return {'page_image': image} if image else None
+    return dict(_web_page_access_fields(snap), **({'page_image': image} if image else {})) or None
 
 
 def _web_live_pool_prices(rows, rank, lang, market):
@@ -16516,7 +16662,7 @@ def _web_targeted_price_updates(entries, lang, market):
               'api_key': SERPAPI_API_KEY, 'output': 'json'}
     data = _serpapi_cached_json(params, timeout=(1.0, 5.0), label='EXACT-LISTING MEDIA/PRICES') or {}
     updates = {}
-    for item in _local_discovery_records(data):
+    for item in _web_indexed_media_records(data):
         link = _local_discovery_direct_link(item)
         item_key = _web_price_url_key(link)
         if not item_key:
@@ -16675,6 +16821,11 @@ async def _web_with_live_prices(source, lang, country, allow_paid=True):
         elif key not in attempted:
             merged.update(price='', price_pending=True, price_unavailable=False, price_status='loading')
         rows[key] = merged
+        cooldown = _web_merchant_cooldown(merged.get('url') or '')
+        if cooldown:
+            merged.update(page_fetch_status='blocked', page_fetch_reason=cooldown['reason'],
+                          page_retry_after=cooldown['retry_after'])
+            page_finished.add(key)
         if not has_price or not _web_offer_image_candidates(merged):
             missing_since.setdefault(key, loop.time())
         if key not in attempted and _web_is_http_url(merged.get('url') or ''):
@@ -16688,6 +16839,9 @@ async def _web_with_live_prices(source, lang, country, allow_paid=True):
         return merged
     def update_event(key, data, phase):
         current = rows.get(key) or {}
+        access = _web_page_access_fields(data)
+        if access:
+            facts[key] = dict(facts.get(key) or {}, **access)
         price_facts = _web_price_facts(data)
         # A late indexed response cannot replace a verified/live price.
         if price_facts and not (phase == 'live_index_price' and _web_row_has_numeric_price(current)):
@@ -18316,35 +18470,29 @@ async def web_api_img_proxy(request: Request):
         return ''
 
     def _fetch_image(target_url):
-        parsed = urllib.parse.urlparse(target_url)
+        path = urllib.parse.urlsplit(target_url).path.lower()
+        picture_path = bool(re.search(r'\.(?:jpe?g|png|webp|gif|avif)(?:[^a-z]|$)', path))
+        purpose = 'page' if not picture_path and _web_is_direct_product_page_url(target_url) else 'image'
         headers = dict(HEADERS)
-        headers['Accept'] = 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8'
+        headers.update(Accept='image/avif,image/webp,image/apng,image/*,*/*;q=0.8')
         headers.pop('Referer', None)
-        resp = _web_safe_get(
-            target_url,
-            headers=headers,
-            timeout=(2.5, WEB_IMAGE_PROXY_TIMEOUT_SECONDS),
-            stream=True,
-        )
-        try:
-            if resp.status_code >= 400:
-                return (resp.status_code, '', b'', '')
-            content_type = (resp.headers.get('content-type') or '').split(';', 1)[0].strip().lower()
-            limit = 400000 if content_type in ('text/html', 'application/xhtml+xml') else WEB_IMAGE_PROXY_MAX_BYTES
-            body = _web_read_limited_response(resp, limit)
-            if body is None:
-                return (413, '', b'', '')
-            detected_mime = _raster_mime(body)
-            if detected_mime:
-                return (200, detected_mime, body, '')
-            if content_type.startswith('image/'):
-                return (415, '', b'', '')
-            if _web_price_url_key(resp.url) != _web_price_url_key(target_url):
-                return (404, '', b'', '')
-            html = body.decode(resp.encoding or 'utf-8', errors='replace')
-            return (200, content_type or 'text/html', b'', html)
-        finally:
-            _web_safe_response_close(resp)
+        document = _web_merchant_document(target_url, purpose=purpose, headers=headers,
+                    timeout=(2.0, WEB_IMAGE_PROXY_TIMEOUT_SECONDS),
+                    max_bytes=400000 if purpose == 'page' else WEB_IMAGE_PROXY_MAX_BYTES)
+        if document['reason']:
+            status = document['status'] if document['status'] >= 400 else 503
+            return (status, '', b'', '')
+        body = document['body']
+        detected_mime = _raster_mime(body)
+        if detected_mime:
+            return (200, detected_mime, body, '')
+        if _web_price_url_key(document['url']) != _web_price_url_key(target_url):
+            return (404, '', b'', '')
+        content_type = next((str(v).split(';', 1)[0].lower() for k, v in document['headers'].items()
+                             if str(k).lower() == 'content-type'), '')
+        if content_type.startswith('image/'):
+            return (415, '', b'', '')
+        return (200, content_type or 'text/html', b'', document['text'])
     try:
         status, content_type, body, html = await asyncio.to_thread(_fetch_image, raw_url)
         if status >= 400:
