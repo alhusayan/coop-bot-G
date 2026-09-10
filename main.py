@@ -1,5 +1,9 @@
 # v128.2: Separate open domestic discovery from approved global catalogs.
 # -*- coding: utf-8 -*-
+# v128.5: CN global = scoped image index + product-page organic index;
+# both cover all four approved exporters with the existing two request slots.
+# Preserve indexed thumbnails and exact-listing price/currency binding.
+# Merchant-controlled browser challenges cannot be disabled by this backend.
 """Findzia v128.1 — Brand comparison restored.
 
 v128.1: Generic typed searches show the existing brand comparison and choices
@@ -288,7 +292,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization'], max_age=86400)
-BUILD_ID = 'v128.4-merchant-challenge-fallback'
+BUILD_ID = 'v128.5-china-indexed-images'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -4206,6 +4210,16 @@ def _local_native_query_unlocked(query, language):
     return (record or _market_query_static(query, language))['query']
 
 
+def _web_unescape_url(value):
+    """Decode explicit HTML entities without corrupting URL query keys.
+
+    html.unescape('&currency=USD') becomes a currency symbol followed by
+    'cy=USD'. Only semicolon-terminated entities are markup in a raw URL.
+    """
+    return re.sub(r'&(?:\#[xX][0-9a-fA-F]+|\#\d+|[a-zA-Z][a-zA-Z0-9]+);',
+                  lambda match: html.unescape(match.group(0)), str(value or ''))
+
+
 def _local_discovery_direct_link(row):
     """Use observed, complete links only; never invent a URL from a store name."""
     values = [row.get(key) for key in ('direct_link', 'merchant_link', 'product_link', 'link', 'url', 'original_link')]
@@ -4228,7 +4242,7 @@ def _local_discovery_direct_link(row):
     for value in values:
         if len(seen) >= 16:
             break
-        raw = html.unescape(str(value or '').strip())
+        raw = _web_unescape_url(str(value or '').strip())
         if raw.startswith('//'):
             raw = 'https:' + raw
         if raw in seen:
@@ -4279,14 +4293,14 @@ def _web_offer_image_candidates(row):
                 if value.get(key):
                     add(value[key], depth + 1)
         elif isinstance(value, str):
-            raw = html.unescape(value.strip()).replace('\\/', '/')
+            raw = _web_unescape_url(value.strip()).replace('\\/', '/')
             if raw.startswith('//'):
                 raw = 'https:' + raw
             raw = _web_unproxy_image_url(raw)
             if _web_is_http_url(raw) and raw not in seen:
                 seen.add(raw)
                 urls.append(raw)
-    for field in ('thumbnail', 'image', 'image_url', 'product_image', 'thumbnails', 'images', 'image_candidates'):
+    for field in ('serpapi_thumbnail', 'thumbnail', 'image', 'image_url', 'product_image', 'thumbnails', 'images', 'image_candidates'):
         add((row or {}).get(field))
     return urls
 
@@ -4322,6 +4336,35 @@ def _web_offer_media_fields(row):
     return fields
 
 
+def _web_image_search_records(data):
+    """Google Images links name the product PAGE; originals name image files.
+
+    Preserve only images and prices observed on the same result. A logo,
+    related-content link or CDN URL is never substituted for the listing.
+    """
+    records = []
+    items = data.get('images_results') or []
+    for item in items[:100] if isinstance(items, list) else []:
+        if not isinstance(item, dict):
+            continue
+        url = _local_discovery_direct_link({'link': item.get('link')})
+        if not url:
+            continue
+        row = {'link': url, 'title': item.get('title') or '',
+               'source': item.get('source') or '',
+               'serpapi_thumbnail': item.get('serpapi_thumbnail') or '',
+               'thumbnail': item.get('thumbnail') or '',
+               'image': item.get('original') or ''}
+        for field in ('price', 'extracted_price', 'currency', 'rich_snippet',
+                      'monthly_payment_duration'):
+            if field in item:
+                row[field] = item[field]
+        records.append(row)
+        if len(records) >= 60:
+            break
+    return records
+
+
 def _local_discovery_records(data):
     """Flatten observed result children; never borrow a parent's price/title."""
     records = []
@@ -4337,6 +4380,7 @@ def _local_discovery_records(data):
             for child in children[:8] if isinstance(children, list) else []:
                 if isinstance(child, dict) and child.get('title'):
                     records.append(child)
+    records.extend(_web_image_search_records(data))
     return records[:80]
 
 
@@ -4652,7 +4696,7 @@ def _local_discovery_request(query, market, kind, timeout_seconds):
 
 
 def _global_discovery_request(query, country, kind, timeout_seconds):
-    """Approved global catalogs only. No domestic Baidu/store list is reused."""
+    """Independent, bounded sources; all global China sources cover the allowlist."""
     if country not in GLOBAL_MARKET_STORES or kind not in ('global', 'global2', 'global_all'):
         return []
     target = dict(_web_market(country), _retrieval_role='global')
@@ -4660,7 +4704,7 @@ def _global_discovery_request(query, country, kind, timeout_seconds):
     started = time.monotonic()
     search_query, _ = _market_query_request_variant(query, wording, 'broad', timeout_seconds)
     stores = list(GLOBAL_MARKET_STORES[country])
-    if kind != 'global_all':
+    if country != 'cn' and kind != 'global_all':
         split = (len(stores) + 1) // 2
         stores = stores[:split] if kind == 'global' else stores[split:]
     if not stores:
@@ -4668,13 +4712,32 @@ def _global_discovery_request(query, country, kind, timeout_seconds):
     remaining = timeout_seconds - (time.monotonic() - started)
     if remaining <= .01:
         return []
+    image_source = country == 'cn' and kind == 'global'
     scopes = ' OR '.join('site:' + domain for _, domain in stores)
-    params = {'engine': 'google', 'q': f'{search_query} ({scopes})',
-              'gl': 'us', 'hl': 'en', 'num': 10, 'api_key': SERPAPI_API_KEY, 'output': 'json'}
+    if country == 'cn' and not image_source:
+        # Search real listing paths instead of wholesale/category landing pages.
+        # These are query constraints, never fabricated click destinations.
+        paths = {'aliexpress.com': '/item/', 'temu.com': '-g-',
+                 'shein.com': '-p-', 'alibaba.com': '/product-detail/'}
+        scopes = ' OR '.join('(site:' + domain +
+                    (' inurl:' + paths[domain] if domain in paths else '') + ')'
+                    for _, domain in stores)
+    params = {'engine': 'google_images' if image_source else 'google',
+              'q': f'{search_query} ({scopes})', 'gl': 'us', 'hl': 'en',
+              'api_key': SERPAPI_API_KEY, 'output': 'json'}
+    if not image_source:
+        params['num'] = 10
     connect = min(1.5, max(.01, remaining * .15))
     data = _serpapi_cached_json(params, timeout=(connect, max(.01, remaining - connect)),
-                               label=f'GLOBAL CATALOG {country}/{kind}') or {}
-    return _local_discovery_rows(data, query, target, 'global_' + country)
+                               label=f'GLOBAL CATALOG {country}/{kind} engine={params["engine"]}')
+    if not isinstance(data, dict):
+        print(f'GLOBAL SOURCE country={country} provider={kind} engine={params["engine"]} status=failed')
+        return []
+    rows = _local_discovery_rows(data, query, target, 'global_' + country)
+    print(f'GLOBAL SOURCE country={country} provider={kind} engine={params["engine"]} status=returned'
+          f' offers={len(rows)} images={sum(bool(_web_offer_image_candidates(row)) for row in rows)}'
+          f' prices={sum(bool(row.get("price")) for row in rows)}')
+    return rows
 
 
 def _global_market_discovery(query, country, limit=8, timeout_seconds=None, progress_callback=None, cancel_event=None):
@@ -4692,7 +4755,7 @@ def _global_market_discovery(query, country, limit=8, timeout_seconds=None, prog
         remaining = deadline - time.monotonic()
         return [] if cancelled() or remaining <= .01 else _global_discovery_request(query, country, kind, remaining)
     jobs = {LOCAL_DISCOVERY_POOL.submit(run, kind) for kind in ('global', 'global2')}
-    rows, seen = [], set()
+    rows, seen = [], {}
     try:
         while jobs and not cancelled() and time.monotonic() < deadline:
             done, _ = wait(jobs, timeout=min(.1, max(0., deadline-time.monotonic())), return_when=FIRST_COMPLETED)
@@ -4704,9 +4767,20 @@ def _global_market_discovery(query, country, limit=8, timeout_seconds=None, prog
                     values = []
                 batch = []
                 for item in values:
-                    key = _canonical_result_url(item.get('link'))
-                    if key and key not in seen and len(rows) < limit:
-                        seen.add(key)
+                    key = _web_price_url_key(item.get('link'))
+                    if key in seen:
+                        old = seen[key]
+                        pictures = _web_merge_offer_images(old, item)
+                        changed = bool(pictures and pictures != {k: old.get(k) for k in pictures})
+                        old.update(pictures)
+                        if not _web_row_has_numeric_price(old) and _web_row_has_numeric_price(item):
+                            old.update({k: v for k, v in item.items() if k.startswith('price') or
+                                        k in ('currency', 'original_currency', 'original_price')})
+                            changed = True
+                        if changed:
+                            batch.append(old)
+                    elif key and len(rows) < limit:
+                        seen[key] = item
                         rows.append(item)
                         batch.append(item)
                 if batch and progress_callback and not cancelled():
@@ -16656,11 +16730,22 @@ def _web_targeted_price_updates(entries, lang, market):
         return {}
     first = next(iter(entries.values()), {})
     search_cc = 'us' if any(row.get('export_store') for row in entries.values()) else str(first.get('country') or first.get('market_country') or market.get('country') or 'us')
-    params = {'engine': 'google', 'q': '(' + ' OR '.join(dict.fromkeys(terms)) + ')',
+    # An image batch uses the image index rather than hoping an organic
+    # snippet includes a thumbnail. Mixed batches still recover prices too.
+    image_source = all(not _web_offer_image_candidates(row) for row in entries.values())
+    params = {'engine': 'google_images' if image_source else 'google',
+              'q': '(' + ' OR '.join(dict.fromkeys(terms)) + ')',
               'gl': search_cc,
               'hl': country_search_hl(search_cc), 'num': 10,
               'api_key': SERPAPI_API_KEY, 'output': 'json'}
-    data = _serpapi_cached_json(params, timeout=(1.0, 5.0), label='EXACT-LISTING MEDIA/PRICES') or {}
+    if image_source:
+        params.pop('num', None)
+    # Runs asynchronously inside the existing live-enrichment window.
+    # The previous five-second read deadline repeatedly expired in production.
+    budget = max(.2, min(10.0, WEB_LIVE_PRICE_WAIT))
+    connect = min(1.0, budget * .15)
+    data = _serpapi_cached_json(params, timeout=(connect, budget - connect),
+                label='EXACT-LISTING ' + ('IMAGES' if image_source else 'MEDIA/PRICES')) or {}
     updates = {}
     for item in _web_indexed_media_records(data):
         link = _local_discovery_direct_link(item)
@@ -16694,6 +16779,9 @@ def _web_targeted_price_updates(entries, lang, market):
                 change['image_source'] = 'exact_listing_index'
             if change:
                 updates[key] = change
+    print(f'EXACT-LISTING RECOVERY engine={params["engine"]} requested={len(entries)}'
+          f' recovered_images={sum(bool(value.get("page_image")) for value in updates.values())}'
+          f' recovered_prices={sum(bool(value.get("price")) for value in updates.values())}')
     return updates
 
 
