@@ -1,5 +1,22 @@
 # -*- coding: utf-8 -*-
-"""Findzia v129 — Lean, One Engine.
+"""Findzia v135 — Generic-Request Fallback Fix.
+
+WHAT CHANGED IN v135
+* The streaming endpoint (/api/search/stream, what the web page actually
+  calls) had a gap the non-streaming endpoint didn't: when a request was
+  classified GENERIC ("Football") and the Gemini comparison call failed or
+  returned nothing usable, execution fell through into a literal product
+  search for the bare category word. No store sells a product literally
+  named "Football", so this silently produced "Nothing matched that search"
+  instead of a clear, retryable error. The stream path now fails the same
+  way the JSON path already did: an explicit `error: comparison_unavailable`
+  event, so the client can show a real message and offer to retry instead of
+  a dead end.
+
+Package layout unchanged since v130 (see SPLIT_AR.md): this file plus
+engine/*.py is Findzia's server, executed in order into one namespace.
+
+INHERITED v129 — Lean, One Engine.
 
 WHAT CHANGED IN v129 (see LEAN_AR.md)
 * The WhatsApp channel is removed (webhook routes, message sending, sessions,
@@ -298,7 +315,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization'], max_age=86400)
-BUILD_ID = 'v134-structured-recommendations'
+BUILD_ID = 'v135-generic-fallback-diagnostics'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -5849,6 +5866,8 @@ def _web_brand_comparison(query, lang):
         if options:
             break
     if not txt or not options:
+        print(f'BRAND COMPARISON empty: query={query!r} lang={lang} txt_len={len(txt)} options={len(options)} '
+              f'(Gemini call failed, timed out, or returned no OPTIONS line — check TEXT77 GEMINI/HTTP logs above)')
         return None
     ui = compare_ui(lang)
     entries = _compare_entries_from_text(txt)
@@ -12930,6 +12949,13 @@ def _web_search_text_sync(query, country, lang, selected_option='', original_que
                 return {'ok': True, 'type': 'recommendations', 'query': q, 'market': market, 'comparison': comparison['summary'],
                         'options': comparison['options'], 'picks': comparison.get('picks') or [],
                         'category': comparison.get('category') or '', 'compare_title': comparison.get('compare_title') or ''}
+            # The comparison call failed or returned nothing usable. A bare
+            # category word ("Football") almost never matches a store's own
+            # product title, so silently falling into the market search below
+            # would show "Nothing matched" with no explanation. Fail loudly
+            # here instead of a confusing empty result screen.
+            print(f'GENERIC FALLBACK: no comparison for {q!r}; refusing the bare-category market search')
+            return {'ok': False, 'type': 'recommendations_failed', 'error': 'comparison_unavailable', 'query': q, 'market': market}
         elif rtype == 'SERVICE':
             return {'ok': False, 'type': 'service', 'error': 'service_search_not_enabled_on_web_yet', 'query': q, 'market': market}
         elif rtype == 'NONE':
@@ -13915,6 +13941,17 @@ async def web_api_search_stream(request: Request):
                 else:
                     market_cancel.set()
                     result = await asyncio.to_thread(_web_search_text_sync, q, country, lang, '', '', False, False)
+                    # _web_search_text_sync returns {'ok': False, 'type': 'recommendations_failed', ...}
+                    # when the Gemini comparison call itself failed. Wrapping
+                    # that directly in a 'recommendations' event gave the
+                    # client empty picks/options, which rendered as a plain
+                    # "Nothing matched that search" with no way to tell this
+                    # was a transient failure rather than a real empty result.
+                    if not result.get('ok') or result.get('type') != 'recommendations':
+                        print(f'GENERIC FALLBACK (stream): no comparison for {q!r}; refusing the bare-category market search')
+                        yield _web_stream_event({'event': 'error', 'error': result.get('error') or 'comparison_unavailable',
+                                                 'elapsed_ms': int((time.time() - started) * 1000)})
+                        return
                     yield _web_stream_event({'event': 'recommendations', 'data': result, 'elapsed_ms': int((time.time() - started) * 1000)})
                     yield _web_stream_event({'event': 'done', 'elapsed_ms': int((time.time() - started) * 1000)})
                     return
@@ -14923,7 +14960,10 @@ async def _web_markets_stream_response(request, payload):
             query = prep.get('query') or query
             if prep.get('rtype') == 'GENERIC':
                 # Call the recommendation-only function. Its failure must not
-                # fall into the legacy engine's fixed US/CN search expansion.
+                # fall into the legacy engine's fixed US/CN search expansion —
+                # this endpoint's own selected-market search below (scoped to
+                # the caller's chosen countries) is the correct fallback, not
+                # a hard error: it still returns real, correctly scoped offers.
                 comparison = await asyncio.to_thread(_web_brand_comparison, query, lang)
                 if comparison:
                     report = {'ok': True, 'type': 'recommendations', 'query': query, 'market': market,
