@@ -1,5 +1,10 @@
 # -*- coding: utf-8 -*-
-"""Findzia v128 — Price Cascade.
+"""Findzia v128.1 — Brand comparison restored.
+
+v128.1: Generic typed searches show the existing brand comparison and choices
+before merchant offers. Brand/model/SKU searches and confirmed choices keep
+using the original direct-search engine. Image search is unchanged.
+
 
 WHAT CHANGED IN v128 (see PRICE_CASCADE_AR.md)
 * A merchant page now yields a price through a cascade instead of one tier:
@@ -282,7 +287,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization'], max_age=86400)
-BUILD_ID = 'v128-price-cascade'
+BUILD_ID = 'v128.1-brand-comparison-restored'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -8754,31 +8759,32 @@ def execute_product_search(from_number, product, bot_id, lang):
     if not send_text_lens_style_results(from_number, txt, urls, bot_id, lang, product):
         send_whatsapp_text(from_number, T(lang, 'not_found'), bot_id)
         return
-REQUEST_CLASSIFIER_SYSTEM = 'أنت مصنف نية شراء ذكي لبوت تسوق عالمي على واتساب. المستخدم قد يكتب بالعربية أو بأي لغة مدعومة.\nصنّف الرسالة بدقة وأجب بكلمة واحدة فقط بدون أي شرح: GENERIC أو SPECIFIC أو SERVICE أو NONE\n\nالمبدأ الأساسي:\n- لا تحكم حسب نوع الفئة وحدها (طعام/إلكترونيات/ملابس...). افهم هل المستخدم حدّد منتجاً بعينه أم ما زال يطلب فئة عامة.\n- GENERIC يعني أن العبارة تصف فئة/نوعاً عاماً ويمكن أن توجد عدة براندات أو منتجات مناسبة، لذلك الأفضل أن نعرض توصيات ذكية أولاً.\n- SPECIFIC يعني أن المستخدم حدّد براند أو موديل أو SKU أو اسم منتج تجاري واضح أو وصفاً شديد التحديد يكفي للبحث عن نفس المنتج مباشرة.\n\nGENERIC أمثلة:\nشاورما دجاج، برجر دجاج، حليب، رز، ماء، قهوة، شوكولاتة، شامبو، حفاضات، مضرب تنس، حذاء تنس للأطفال، لابتوب للدراسة، سماعة بلوتوث، قلاية هوائية، عطر رجالي، سيارة عائلية، مولد كهرباء.\nChicken shawarma, tennis racket, kids tennis shoes, laptop for university, protein bar, olive oil.\nإذا لم توجد ماركة/موديل واضحان وكانت هناك عدة خيارات ومنتجات محتملة، اختر GENERIC.\n\nSPECIFIC أمثلة:\nNabil Chicken Shawarma 400g، حليب المراعي كامل الدسم 1 لتر، Pepsi 330ml، Yonex EZONE 100، Wilson Blade 98 V9، iPhone 16 Pro 256GB، Nike Vapor Pro 2 Junior، Head & Shoulders Classic Clean 400ml.\nذكر ماركة مع نوع المنتج غالباً SPECIFIC حتى لو لم يذكر المقاس، مثل: حليب المراعي، شامبو Pantene، حذاء Adidas.\n\nSERVICE = طلب خدمة أو فني أو تصليح أو صيانة أو عامل وليس شراء منتج.\nأمثلة: كهربائي، فني تكييف، سباك، بنشر متنقل، تصليح غسالة، مكافحة حشرات.\n\nNONE = الرسالة ليست طلب شراء ولا خدمة: تحية، شكر، عتاب، مزح، اختبار، أو كلام موجه للبوت.\nأمثلة: هلا، شكراً، وينك، ليش ما ترد، تمام، ok، تجربة.\n\nقواعد الحسم:\n1) لا تعتبر الطعام أو التموينات SPECIFIC تلقائياً. «شاورما دجاج» GENERIC، بينما «Nabil Chicken Shawarma 400g» SPECIFIC.\n2) لا تعتبر كلمة واحدة SPECIFIC تلقائياً. «حليب» GENERIC، بينما «حليب المراعي 1 لتر» SPECIFIC.\n3) إذا توجد ماركة/موديل/SKU واضح = SPECIFIC.\n4) إذا الطلب فئة عامة بلا ماركة واضحة = GENERIC.\n5) إذا شككت بين GENERIC وSPECIFIC ولم توجد هوية تجارية واضحة، اختر GENERIC.\n6) أجب بكلمة التصنيف فقط.'
+REQUEST_CLASSIFIER_SYSTEM = 'أنت مصنف نية شراء ذكي لبوت تسوق عالمي على واتساب. المستخدم قد يكتب بالعربية أو بأي لغة مدعومة.\nصنّف الرسالة بدقة وأجب بكلمة واحدة فقط بدون أي شرح: GENERIC أو SPECIFIC أو SERVICE أو NONE\n\nالمبدأ الأساسي:\n- لا تحكم حسب نوع الفئة وحدها (طعام/إلكترونيات/ملابس...). افهم هل المستخدم حدّد منتجاً بعينه أم ما زال يطلب فئة عامة.\n- GENERIC يعني أن العبارة تصف فئة/نوعاً عاماً ويمكن أن توجد عدة براندات أو منتجات مناسبة، لذلك الأفضل أن نعرض توصيات ذكية أولاً.\n- SPECIFIC يعني أن المستخدم حدّد براند أو موديل أو SKU أو اسم منتج تجاري واضح وليس مجرد مقاس أو سعة أو لون أو استخدام.\n\nGENERIC أمثلة:\nشاورما دجاج، برجر دجاج، حليب، رز، ماء، قهوة، شوكولاتة، شامبو، حفاضات، مضرب تنس، حذاء تنس للأطفال، لابتوب للدراسة، سماعة بلوتوث، قلاية هوائية، عطر رجالي، سيارة عائلية، مولد كهرباء.\nChicken shawarma, tennis racket, kids tennis shoes, laptop for university, protein bar, olive oil.\nإذا لم توجد ماركة/موديل واضحان وكانت هناك عدة خيارات ومنتجات محتملة، اختر GENERIC.\n\nSPECIFIC أمثلة:\nNabil Chicken Shawarma 400g، حليب المراعي كامل الدسم 1 لتر، Pepsi 330ml، Yonex EZONE 100، Wilson Blade 98 V9، iPhone 16 Pro 256GB، Nike Vapor Pro 2 Junior، Head & Shoulders Classic Clean 400ml.\nذكر ماركة مع نوع المنتج غالباً SPECIFIC حتى لو لم يذكر المقاس، مثل: حليب المراعي، شامبو Pantene، حذاء Adidas.\n\nSERVICE = طلب خدمة أو فني أو تصليح أو صيانة أو عامل وليس شراء منتج.\nأمثلة: كهربائي، فني تكييف، سباك، بنشر متنقل، تصليح غسالة، مكافحة حشرات.\n\nNONE = الرسالة ليست طلب شراء ولا خدمة: تحية، شكر، عتاب، مزح، اختبار، أو كلام موجه للبوت.\nأمثلة: هلا، شكراً، وينك، ليش ما ترد، تمام، ok، تجربة.\n\nقواعد الحسم:\n1) لا تعتبر الطعام أو التموينات SPECIFIC تلقائياً. «شاورما دجاج» GENERIC، بينما «Nabil Chicken Shawarma 400g» SPECIFIC.\n2) لا تعتبر كلمة واحدة SPECIFIC تلقائياً. «حليب» GENERIC، بينما «حليب المراعي 1 لتر» SPECIFIC.\n3) إذا توجد ماركة/موديل/SKU واضح = SPECIFIC.\n4) إذا الطلب فئة عامة بلا ماركة واضحة = GENERIC.\n5) إذا شككت بين GENERIC وSPECIFIC ولم توجد هوية تجارية واضحة، اختر GENERIC. المقاس والسعة واللون والميزانية والاستخدام لا تحدد ماركة: حليب 1 لتر، laptop 16GB، 4K TV، حذاء أطفال مقاس 35 كلها GENERIC ما لم توجد ماركة أو موديل صريح.\n6) أجب بكلمة التصنيف فقط.'
 _REQUEST_CLASS_CACHE = {}
 _REQUEST_CLASS_LOCK = threading.Lock()
 
 def _text_query_is_product(query):
-    """Deterministic: a brand, model, product noun or two content words mean a
-    product search and need no Gemini classification round trip."""
+    """Fast direct-search evidence: a named brand or a printed model/SKU.
+
+    A category, two content words, a capacity or a size is not an identity.
+    Unrecognized brands/product names are left to the existing classifier.
+    """
     q = re.sub(r'\s+', ' ', str(query or '')).strip()
     if not q or is_service_request(q):
         return False
     retrieval = _local_retrieval_text(q)
-    tokens = retrieval.split()
-    if _web_model_tokens_from_listing(retrieval):
-        return True
-    if any(tok in _LOCAL_BRAND_ALIASES for tok in tokens):
-        return True
-    if any(tok in _LOCAL_RETRIEVAL_NOUNS for tok in tokens):
-        return True
-    content = [tok for tok in _findzia_lexical_tokens(retrieval)
-               if tok not in _FINDZIA_QUERY_FILLER and tok not in _LOCAL_DESCRIPTOR_TERMS]
-    if re.search(r'\d', q) and content:
-        return True
-    # Two content words with at least one Latin token ("air fryer ninja");
-    # vague Arabic wording ("شي حلو", "هدية لزوجتي") still goes to the classifier.
-    return len(content) >= 2 and any(re.fullmatch(r'[a-z0-9][a-z0-9.\-]*', tok) for tok in content)
+    # Match complete brand aliases, including multiword names; not substrings.
+    for brand in _LOCAL_BRAND_ALIASES:
+        if re.search(_local_term_pattern(normalize_ar(brand.casefold())), retrieval):
+            return True
+    models = _web_model_tokens_from_listing(retrieval)
+    printed = {re.sub(r'[-_]', '', token) for token in
+               re.findall(r'(?i)(?<![a-z0-9])[a-z0-9]+(?:[-_][a-z0-9]+)*(?![a-z0-9])', retrieval)}
+    features = {'4k', '8k', '16k', '2k', '1080p', '1440p', '2160p',
+                '2g', '3g', '4g', '5g', '2d', '3d', 'x2', 'x3', 'x4', '2x', '3x', '4x'}
+    return any(model in printed and model not in features
+               and not re.fullmatch(r'(?:size|grade|generation|gen|version|pack)\d+|\d+in\d+', model)
+               for model in models)
 
 
 def _text_query_needs_intent_parse(query):
@@ -8790,7 +8796,7 @@ def classify_request_type(query):
     q = ' '.join(str(query or '').split()).strip()
     if not q:
         return 'SPECIFIC'
-    key = re.sub('\\s+', ' ', normalize_ar(q))[:150]
+    key = 'brand-first-v128.1:' + re.sub('\\s+', ' ', normalize_ar(q).casefold())[:WEB_API_MAX_QUERY_CHARS]
     with _REQUEST_CLASS_LOCK:
         hit = _REQUEST_CLASS_CACHE.get(key)
     if hit:
@@ -8806,6 +8812,12 @@ def classify_request_type(query):
         return verdict
     if is_service_request(q):
         return _remember('SERVICE', 'fast-service')
+    if _text_query_is_product(q):
+        return _remember('SPECIFIC', 'brand-or-model')
+    # Common bare categories need no classification network round trip.
+    category = ' '.join(_local_retrieval_text(q).split())
+    if category in _LOCAL_RETRIEVAL_NOUNS:
+        return _remember('GENERIC', 'bare-category')
     verdict = ''
     try:
         raw, _ = text77_call_gemini([{'text': q}], system=REQUEST_CLASSIFIER_SYSTEM, use_search=False)
@@ -8817,11 +8829,9 @@ def classify_request_type(query):
     except Exception as e:
         print(f'REQUEST CLASSIFIER AI ERR: {e}')
     if not verdict:
-        if re.search('\\d', q) or len(q.split()) >= 4:
-            verdict = 'SPECIFIC'
-        else:
-            verdict = 'GENERIC'
-    return _remember(verdict, 'one-pass-ai' if verdict else 'fallback')
+        # Length, quantities and budgets must never bypass the brand choice.
+        return _remember('GENERIC', 'classification-unavailable')
+    return _remember(verdict, 'one-pass-ai')
 SERVICE_WORDS = ('فني', 'كهربائي', 'سباك', 'نجار', 'حداد', 'تصليح', 'اصلاح', 'إصلاح', 'صيانه', 'صيانة', 'تركيب', 'تمديد', 'معلم', 'مقاول', 'شركه تنظيف', 'شركة تنظيف', 'مكافحه', 'مكافحة', 'بنشر', 'ونش', 'سطحه', 'سطحة', 'غسيل سياره', 'غسيل سيارة', 'technician', 'electrician', 'plumber', 'repair', 'maintenance', 'installation', 'cleaning company', 'pest control', 'towing')
 
 def is_service_request(text):
@@ -9661,6 +9671,21 @@ def _web_build_text_items(txt, urls, lang, query, supplement=True):
         return results
     results = _web_enrich_text_result_images(results)
     return _web_require_product_image_rows(results)
+
+def _web_recommendations_response(query, lang, market):
+    """The comparison is a terminal step until the shopper selects an option."""
+    MARKET_CTX.value = dict(market)
+    try:
+        comparison = _web_brand_comparison(query, lang)
+    except Exception as exc:
+        print(f'BRAND COMPARISON ERR: {type(exc).__name__}')
+        comparison = None
+    if not comparison:
+        return {'ok': False, 'type': 'recommendations', 'query': query, 'market': market,
+                'error': 'comparison_unavailable', 'comparison': '', 'options': []}
+    return {'ok': True, 'type': 'recommendations', 'query': query, 'market': market,
+            'comparison': comparison['summary'], 'options': comparison['options']}
+
 
 def _web_brand_comparison(query, lang):
     lang_name = language_name_en(lang)
@@ -17158,8 +17183,7 @@ def _web_prepare_stream_query_sync(query, country, lang, selected_option='', ori
     if not q:
         return {'ok': False, 'error': 'empty_query', 'market': market, 'query': q}
     started = time.monotonic()
-    fast = _text_query_is_product(q)
-    if _text_query_needs_intent_parse(q):
+    if not force_specific and _text_query_needs_intent_parse(q):
         try:
             parsed = parse_user_intent(q, lang)
             products = [p for p in parsed.get('products') or [] if str(p).strip()]
@@ -17167,12 +17191,13 @@ def _web_prepare_stream_query_sync(query, country, lang, selected_option='', ori
                 q = products[0]
         except Exception:
             pass
+    fast = bool(force_specific or _text_query_is_product(q))
     rtype = 'SPECIFIC'
     if not force_specific and not fast:
         try:
             rtype = classify_request_type(q)
         except Exception:
-            rtype = 'SPECIFIC'
+            rtype = 'GENERIC'
     print(f'TEXT ROUTE q={q[:60]!r} country={country} rtype={rtype} fast={fast} elapsed={time.monotonic()-started:.2f}s')
     return {'ok': True, 'query': q, 'market': market, 'rtype': rtype, 'force_specific': force_specific, 'fast': fast}
 
@@ -17415,37 +17440,17 @@ def _web_text_lane_sort(rows):
 
 
 def _web_search_text_sync(query, country, lang, selected_option='', original_query='', force_specific=False, hybrid=None):
-    market = _web_market(country)
-    MARKET_CTX.value = market
-    q = re.sub('\\s+', ' ', str(query or '')).strip()[:WEB_API_MAX_QUERY_CHARS]
-    if selected_option:
-        q = ai_recommendation_pick_search_query(original_query or q, selected_option, lang)
-        force_specific = True
-    if not q:
-        return {'ok': False, 'error': 'empty_query'}
-    if _text_query_needs_intent_parse(q):
-        try:
-            parsed = parse_user_intent(q, lang)
-            products = [p for p in parsed.get('products') or [] if str(p).strip()]
-            if len(products) == 1:
-                q = products[0]
-        except Exception:
-            pass
-    if not force_specific and _text_query_is_product(q):
-        force_specific = True
-    if not force_specific:
-        try:
-            rtype = classify_request_type(q)
-        except Exception:
-            rtype = 'SPECIFIC'
-        if rtype == 'GENERIC':
-            comparison = _web_brand_comparison(q, lang)
-            if comparison:
-                return {'ok': True, 'type': 'recommendations', 'query': q, 'market': market, 'comparison': comparison['summary'], 'options': comparison['options']}
-        elif rtype == 'SERVICE':
-            return {'ok': False, 'type': 'service', 'error': 'service_search_not_enabled_on_web_yet', 'query': q, 'market': market}
-        elif rtype == 'NONE':
-            return {'ok': False, 'type': 'chat', 'error': 'not_a_product_query', 'query': q, 'market': market}
+    prep = _web_prepare_stream_query_sync(query, country, lang, selected_option, original_query, force_specific)
+    if not prep.get('ok'):
+        return {'ok': False, 'error': prep.get('error') or 'empty_query'}
+    q, market = prep['query'], prep['market']
+    rtype = prep['rtype']
+    if rtype == 'GENERIC':
+        return _web_recommendations_response(q, lang, market)
+    if rtype == 'SERVICE':
+        return {'ok': False, 'type': 'service', 'error': 'service_search_not_enabled_on_web_yet', 'query': q, 'market': market}
+    if rtype == 'NONE':
+        return {'ok': False, 'type': 'chat', 'error': 'not_a_product_query', 'query': q, 'market': market}
     hybrid = TEXT_SEARCH_HYBRID_MARKETS if hybrid is None else bool(hybrid)
     market_job = None
     if hybrid and SERPAPI_API_KEY:
@@ -18842,30 +18847,12 @@ async def web_api_search_stream(request: Request):
             market = prep['market']
             rtype = prep.get('rtype') or 'SPECIFIC'
             yield _web_stream_event({'event': 'query', 'query': q, 'market': market})
-            if rtype == 'GENERIC' and (not force_specific):
-                # Real offers beat a "which brand?" question. Give the market
-                # lanes a bounded chance before falling back to recommendations.
-                found = []
-                if market_task is not None:
-                    try:
-                        found = await asyncio.wait_for(asyncio.shield(market_task), timeout=TEXT_GENERIC_PRODUCT_WAIT) or []
-                    except (asyncio.TimeoutError, Exception):
-                        found = []
-                        while True:
-                            try:
-                                snap = market_queue.get_nowait()
-                            except queue.Empty:
-                                break
-                            found.extend((snap or {}).get('results') or [])
-                if len(found) >= 2:
-                    rtype = 'SPECIFIC'
-                    print(f'TEXT ROUTE generic query kept as product search: offers={len(found)}')
-                else:
-                    market_cancel.set()
-                    result = await asyncio.to_thread(_web_search_text_sync, q, country, lang, '', '', False, False)
-                    yield _web_stream_event({'event': 'recommendations', 'data': result, 'elapsed_ms': int((time.time() - started) * 1000)})
-                    yield _web_stream_event({'event': 'done', 'elapsed_ms': int((time.time() - started) * 1000)})
-                    return
+            if rtype == 'GENERIC':
+                market_cancel.set()
+                result = await asyncio.to_thread(_web_recommendations_response, q, lang, market)
+                yield _web_stream_event({'event': 'recommendations', 'data': result, 'elapsed_ms': int((time.time() - started) * 1000)})
+                yield _web_stream_event({'event': 'done', 'elapsed_ms': int((time.time() - started) * 1000)})
+                return
             if rtype == 'SERVICE':
                 market_cancel.set()
                 yield _web_stream_event({'event': 'error', 'error': 'service_search_not_enabled_on_web_yet'})
@@ -19935,15 +19922,10 @@ async def web_api_selected_markets_stream(request: Request):
                 str(payload.get('selected_option') or ''), str(payload.get('original_query') or ''), bool(payload.get('force_specific')))
             query = prep.get('query') or query
             if prep.get('rtype') == 'GENERIC':
-                # Call the recommendation-only function. Its failure must not
-                # fall into the legacy engine's fixed US/CN search expansion.
-                comparison = await asyncio.to_thread(_web_brand_comparison, query, lang)
-                if comparison:
-                    report = {'ok': True, 'type': 'recommendations', 'query': query, 'market': market,
-                              'comparison': comparison['summary'], 'options': comparison['options']}
-                    yield _web_stream_event({'event': 'recommendations', 'data': report})
-                    yield _web_stream_event({'event': 'done', 'count': 0})
-                    return
+                report = await asyncio.to_thread(_web_recommendations_response, query, lang, market)
+                yield _web_stream_event({'event': 'recommendations', 'data': report})
+                yield _web_stream_event({'event': 'done', 'count': 0})
+                return
             if prep.get('rtype') in ('NONE', 'SERVICE') or not prep.get('ok'):
                 yield _web_stream_event({'event': 'error', 'error': 'not_a_product_query'})
                 return
