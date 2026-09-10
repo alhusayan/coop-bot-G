@@ -1,3 +1,4 @@
+# v128.2: Separate open domestic discovery from approved global catalogs.
 # -*- coding: utf-8 -*-
 """Findzia v128.1 — Brand comparison restored.
 
@@ -287,7 +288,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization'], max_age=86400)
-BUILD_ID = 'v128.1-brand-comparison-restored'
+BUILD_ID = 'v128.2-separated-local-global-markets'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -390,7 +391,7 @@ SERPAPI_RESULT_CACHE_TTL_SECONDS = max(60, min(86400, int(os.environ.get('SERPAP
 SERPAPI_SINGLEFLIGHT_ENABLED = env_bool('SERPAPI_SINGLEFLIGHT_ENABLED', True)
 SERPAPI_SINGLEFLIGHT_WAIT_SECONDS = max(3.0, min(30.0, float(os.environ.get('SERPAPI_SINGLEFLIGHT_WAIT_SECONDS', '20'))))
 SERPAPI_CACHE_MAX_ROWS = max(500, min(50000, int(os.environ.get('SERPAPI_CACHE_MAX_ROWS', '10000'))))
-SERPAPI_BUDGET_ENABLED = env_bool('SERPAPI_BUDGET_ENABLED', True)
+SERPAPI_BUDGET_ENABLED = env_bool('SERPAPI_BUDGET_ENABLED', False)
 SERPAPI_BUDGET_USE_PERCENT = max(10, min(100, int(os.environ.get('SERPAPI_BUDGET_USE_PERCENT', '90'))))
 SERPAPI_BUDGET_ACCOUNT_TTL_SECONDS = max(10, min(300, int(os.environ.get('SERPAPI_BUDGET_ACCOUNT_TTL_SECONDS', '30'))))
 SERPAPI_BUDGET_FALLBACK_HOURLY = max(1, int(os.environ.get('SERPAPI_BUDGET_FALLBACK_HOURLY', '180')))
@@ -2061,57 +2062,13 @@ def _serpapi_lens_request(public_url, lens_type, country, auto_crop, query_hint)
         return []
 
 def _china_store_search_fallback(base_query, limit=8):
-    if not SERPAPI_API_KEY:
-        return []
     q = _shopping_clean_query(base_query or '')
-    if not q:
+    if not q or not SERPAPI_API_KEY:
         return []
-    targets = [('AliExpress', 'aliexpress.com'), ('Temu', 'temu.com'), ('Alibaba', 'alibaba.com'), ('1688', '1688.com'), ('Taobao', 'taobao.com'), ('SHEIN', 'shein.com')]
-
-    def _one(label, domain):
-        cards = _serpapi_shopping_request(f'{q} site:{domain}', 'us', hl='en', timeout_seconds=MARKET_FALLBACK_TIMEOUT_SECONDS)
-        out = []
-        for pos, card in enumerate(cards or [], 1):
-            link = (card.get('link') or '').strip()
-            if not link:
-                continue
-            direct = _shopping_direct_url(link) or link
-            try:
-                host = urllib.parse.urlparse(direct).netloc.lower().replace('www.', '')
-            except Exception:
-                host = ''
-            if not _host_matches_any(host, (domain,)):
-                continue
-            title = (card.get('title') or '').strip()
-            source = (card.get('source') or label).strip() or label
-            price_text = str(card.get('price') or '').strip()
-            price_value = card.get('extracted_price')
-            currency = detect_currency_code(price_text, 'CNY', 'cn')
-            out.append({'title': title or q, 'link': direct, 'source': source, 'position': pos, 'section': 'china_store_fallback', 'exact': False, 'thumbnail': (card.get('thumbnail') or '').strip(), 'image': (card.get('thumbnail') or '').strip(), 'price': price_text, 'price_value': price_value, 'currency': currency, 'in_stock': None, 'condition': '', '_lens_country': 'cn', '_china_fallback': True})
-        return out
-    futures = {LENS_HTTP_POOL.submit(_one, label, domain): (label, domain) for label, domain in targets}
-    merged, seen = ([], set())
-    done, not_done = wait(list(futures), timeout=MARKET_FALLBACK_TIMEOUT_SECONDS)
-    for fut in done:
-        label, domain = futures[fut]
-        try:
-            for it in fut.result() or []:
-                sig = ((it.get('title') or '').lower(), (it.get('link') or '').lower())
-                if sig in seen or not is_china_market_result(it):
-                    continue
-                seen.add(sig)
-                merged.append(it)
-                if len(merged) >= limit:
-                    break
-        except Exception as e:
-            print(f'CHINA FALLBACK ERR {label}/{domain}: {e}')
-        if len(merged) >= limit:
-            break
-    for fut in not_done:
-        fut.cancel()
-    print(f'CHINA STORE FALLBACK: query={q[:70]!r} -> {len(merged)} results')
-    return merged[:limit]
-
+    if str(current_market().get('country') or DEFAULT_COUNTRY).lower() == 'cn':
+        return _local_market_discovery(q, dict(current_market()), limit=limit,
+                                       timeout_seconds=MARKET_FALLBACK_TIMEOUT_SECONDS)
+    return _global_market_discovery(q, 'cn', limit=limit, timeout_seconds=MARKET_FALLBACK_TIMEOUT_SECONDS)
 def _shopping_card_to_market_item(card, fallback_source='', lens_country=''):
     link = (card.get('link') or '').strip()
     if not link:
@@ -2135,8 +2092,9 @@ def _market_presence_fallback(base_query, rank, limit=6):
     if rank == 0 and LOCAL_DISCOVERY_ENABLED:
         return _local_market_discovery(q, dict(current_market()), limit=limit,
                                        timeout_seconds=MARKET_FALLBACK_TIMEOUT_SECONDS)
-    if rank == 2:
-        return _china_store_search_fallback(q, limit=limit)
+    if rank in (1, 2):
+        return _global_market_discovery(q, 'us' if rank == 1 else 'cn', limit=limit,
+                                        timeout_seconds=MARKET_FALLBACK_TIMEOUT_SECONDS)
     local_cc = (current_market().get('country') or DEFAULT_COUNTRY).lower()
     if rank == 0:
         specs = [('Local', '', local_cc)]
@@ -2844,7 +2802,7 @@ def _lens_market_passes(user_country, fast=True):
             for kind in (('products', 'all') if not fast or cc == user_country else ('all',))]
 
 
-def _china_native_image_discovery(reference_future, query_hint, deadline, progress_callback=None, cancel_event=None):
+def _china_native_image_discovery(reference_future, query_hint, deadline, progress_callback=None, cancel_event=None, viewer_country=None):
     """Reuse photo identity, then at most two native searches; no CN Lens retry."""
     if cancel_event is not None and cancel_event.is_set():
         return []
@@ -2858,6 +2816,11 @@ def _china_native_image_discovery(reference_future, query_hint, deadline, progre
     remaining = deadline - time.monotonic()
     if not query or remaining <= .05 or (cancel_event is not None and cancel_event.is_set()):
         return []
+    viewer_country = str(viewer_country or current_market().get('country') or DEFAULT_COUNTRY).lower()
+    if viewer_country != 'cn':
+        return _global_market_discovery(query, 'cn', limit=max(8, LENS_DIRECT_CN_MAX),
+            timeout_seconds=min(LOCAL_DISCOVERY_TIMEOUT, remaining),
+            progress_callback=progress_callback, cancel_event=cancel_event)
     return _local_market_discovery(query, _web_market('cn'), limit=max(8, LENS_DIRECT_CN_MAX),
         timeout_seconds=min(LOCAL_DISCOVERY_TIMEOUT, remaining),
         progress_callback=progress_callback, cancel_event=cancel_event)
@@ -2934,13 +2897,13 @@ def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=Fal
         if USE_FAST_LENS_PIPELINE and LOCAL_DISCOVERY_ENABLED:
             cn_future = MARKET_SUPPLEMENT_POOL.submit(_run_with_market, _web_market('cn'),
                 _china_native_image_discovery, reference_future, query_hint,
-                completion_deadline, local_progress, cancel_event)
+                completion_deadline, local_progress, cancel_event, user_country)
             future_map[cn_future] = ('native-discovery', 'cn', True)
             all_futures.add(cn_future)
             pending.add(cn_future)
             # The native future already owns the local China discovery budget.
             local_rescue_started = user_country == 'cn'
-            print(f'IMAGE MARKET ROUTING local={user_country} lens_passes={len(passes)} china=native_discovery china_calls_max={LOCAL_DISCOVERY_MAX_CALLS}')
+            print(f"IMAGE MARKET ROUTING local={user_country} lens_passes={len(passes)} china={'domestic' if user_country == 'cn' else 'approved_global'} china_calls_max={LOCAL_DISCOVERY_MAX_CALLS}")
         enough_fast = False
         last_progress_signature = None
 
@@ -3367,6 +3330,16 @@ CATEGORY_KEYWORDS = {'sports': ('كره سله', 'كره قدم', 'كره طاي
 CATEGORY_SPECIALISTS = {'sports': ['Pro Sports Kuwait (prosportskw.com)', 'Intersport Kuwait', 'Decathlon Kuwait', 'Sun & Sand Sports', 'Foot Locker Kuwait'], 'gaming': ['3RoodQ8 (3roodq8.com)', 'Xcite', 'Eureka', 'Blink', 'Jarir'], 'electronics': ['Xcite', 'Eureka', 'Best Al-Yousifi', 'Blink', 'Jarir', '3RoodQ8 (3roodq8.com)'], 'appliances': ['Xcite', 'Eureka', 'Best Al-Yousifi', 'Blink'], 'beauty': ['Boutiqaat', 'Faces', 'Sephora Kuwait', "Bloomingdale's Kuwait"], 'pharmacy': ['Boots Kuwait', 'YIACO', 'Royal Pharmacy'], 'grocery': ['جمعية دوت كوم', 'Lulu', 'Carrefour', 'Taw9eel'], 'food_delivery': ['Keeta', 'Talabat', 'Deliveroo'], 'fashion': ['Namshi', 'Sun & Sand Sports', 'Foot Locker Kuwait', 'Centrepoint', 'H&M Kuwait'], 'furniture': ['IKEA Kuwait', 'The One', 'Home Centre', 'Midas'], 'kids_toys': ['Tigro (tigro.app)', 'Toys R Us Kuwait', '3RoodQ8 (3roodq8.com)', 'Mothercare', 'Babyshop'], 'auto': ['AlMailem Tires', 'Tires Plus', 'Xcite']}
 COUNTRY_MAJOR_STORE_DOMAINS = {'us': [('Amazon', 'amazon.com'), ('Walmart', 'walmart.com'), ('Target', 'target.com'), ('Best Buy', 'bestbuy.com'), ('eBay', 'ebay.com')], 'ca': [('Amazon Canada', 'amazon.ca'), ('Walmart Canada', 'walmart.ca'), ('Best Buy Canada', 'bestbuy.ca'), ('Canadian Tire', 'canadiantire.ca')], 'gb': [('Amazon UK', 'amazon.co.uk'), ('Argos', 'argos.co.uk'), ('Currys', 'currys.co.uk'), ('John Lewis', 'johnlewis.com')], 'fr': [('Amazon France', 'amazon.fr'), ('Fnac', 'fnac.com'), ('Darty', 'darty.com'), ('Cdiscount', 'cdiscount.com'), ('Carrefour', 'carrefour.fr')], 'de': [('Amazon Germany', 'amazon.de'), ('MediaMarkt', 'mediamarkt.de'), ('Saturn', 'saturn.de'), ('Otto', 'otto.de')], 'es': [('Amazon Spain', 'amazon.es'), ('El Corte Inglés', 'elcorteingles.es'), ('MediaMarkt', 'mediamarkt.es'), ('Carrefour', 'carrefour.es')], 'it': [('Amazon Italy', 'amazon.it'), ('MediaWorld', 'mediaworld.it'), ('Unieuro', 'unieuro.it')], 'nl': [('bol', 'bol.com'), ('Coolblue', 'coolblue.nl'), ('MediaMarkt', 'mediamarkt.nl'), ('Amazon Netherlands', 'amazon.nl')], 'be': [('bol', 'bol.com'), ('Coolblue', 'coolblue.be'), ('MediaMarkt', 'mediamarkt.be'), ('Amazon Belgium', 'amazon.com.be')], 'ch': [('Galaxus', 'galaxus.ch'), ('Digitec', 'digitec.ch'), ('Brack', 'brack.ch'), ('Manor', 'manor.ch')], 'at': [('MediaMarkt', 'mediamarkt.at'), ('Amazon Germany', 'amazon.de'), ('Otto Austria', 'ottoversand.at')], 'ie': [('Currys Ireland', 'currys.ie'), ('Harvey Norman', 'harveynorman.ie'), ('Amazon UK', 'amazon.co.uk')], 'pt': [('Worten', 'worten.pt'), ('Fnac Portugal', 'fnac.pt'), ('Continente', 'continente.pt')], 'pl': [('Allegro', 'allegro.pl'), ('Media Expert', 'mediaexpert.pl'), ('RTV Euro AGD', 'euro.com.pl')], 'cz': [('Alza', 'alza.cz'), ('Datart', 'datart.cz'), ('Mall', 'mall.cz')], 'se': [('Amazon Sweden', 'amazon.se'), ('Elgiganten', 'elgiganten.se'), ('CDON', 'cdon.se')], 'no': [('Elkjøp', 'elkjop.no'), ('Komplett', 'komplett.no'), ('Power', 'power.no')], 'dk': [('Elgiganten', 'elgiganten.dk'), ('Proshop', 'proshop.dk'), ('Power', 'power.dk')], 'fi': [('Verkkokauppa', 'verkkokauppa.com'), ('Gigantti', 'gigantti.fi'), ('Power', 'power.fi')], 'tr': [('Trendyol', 'trendyol.com'), ('Hepsiburada', 'hepsiburada.com'), ('Amazon Turkey', 'amazon.com.tr'), ('n11', 'n11.com')], 'ru': [('Ozon', 'ozon.ru'), ('Wildberries', 'wildberries.ru'), ('Yandex Market', 'market.yandex.ru')], 'ua': [('Rozetka', 'rozetka.com.ua'), ('Prom', 'prom.ua'), ('Epicentr', 'epicentrk.ua')], 'sa': [('Amazon Saudi', 'amazon.sa'), ('Noon', 'noon.com'), ('Jarir', 'jarir.com'), ('eXtra', 'extra.com'), ('Carrefour', 'carrefourksa.com'), ('Nahdi', 'nahdionline.com'), ('Whites', 'whites.net'), ('Namshi', 'namshi.com'), ('Danube', 'danube.sa'), ('Panda', 'panda.sa'), ('Lulu Saudi', 'luluhypermarket.com'), ('Sivvi', 'sivvi.com'), ('Ounass', 'ounass.com'), ('Virgin Megastore Saudi', 'virginmegastore.sa')], 'ae': [('Amazon UAE', 'amazon.ae'), ('Noon', 'noon.com'), ('Carrefour UAE', 'carrefouruae.com'), ('Sharaf DG', 'sharafdg.com'), ('Jumbo', 'jumbo.ae'), ('Emax', 'emaxme.com'), ('Lulu UAE', 'luluhypermarket.com'), ('Namshi', 'namshi.com'), ('Virgin Megastore UAE', 'virginmegastore.ae'), ('Dubai Duty Free', 'dubaidutyfree.com'), ('Ounass', 'ounass.com'), ('6thStreet', '6thstreet.com'), ('Ubuy UAE', 'ubuy.ae')], 'eg': [('Amazon Egypt', 'amazon.eg'), ('Noon', 'noon.com'), ('B.TECH', 'btech.com'), ('Carrefour Egypt', 'carrefouregypt.com'), ('Jumia Egypt', 'jumia.com.eg'), ('2B', '2b.com.eg'), ('Raneen', 'raneen.com'), ('Dubai Phone', 'dubaiphone.net'), ('Tradeline', 'tradelinestores.com')], 'kw': [('Xcite', 'xcite.com'), ('Eureka', 'eureka.com.kw'), ('Best Al-Yousifi', 'best.com.kw'), ('Blink', 'blink.com.kw'), ('Jarir Kuwait', 'jarir.com'), ('Lulu Kuwait', 'luluhypermarket.com'), ('Carrefour Kuwait', 'carrefourkuwait.com'), ('Boutiqaat', 'boutiqaat.com'), ('Namshi', 'namshi.com'), ('Jm3eia', 'jm3eia.com'), ('Taw9eel', 'taw9eel.com'), ('3RoodQ8', '3roodq8.com'), ('Tigro', 'tigro.app'), ('Ubuy Kuwait', 'ubuy.com.kw'), ('Ounass', 'ounass.com'), ('6thStreet', '6thstreet.com')], 'qa': [('Jarir Qatar', 'jarir.com'), ('Lulu Qatar', 'luluhypermarket.com'), ('Carrefour Qatar', 'carrefourqatar.com'), ('Virgin Megastore Qatar', 'virginmegastore.qa'), ('Alaneesqatar', 'alaneesqatar.qa'), ('Starlink', 'starlinkqatar.com'), ('Ansar Gallery', 'ansargallery.com'), ('Namshi', 'namshi.com'), ('Ounass', 'ounass.com'), ('6thStreet', '6thstreet.com')], 'bh': [('Sharaf DG Bahrain', 'sharafdg.com'), ('eXtra Bahrain', 'extra.com'), ('Jarir Bahrain', 'jarir.com'), ('Lulu Bahrain', 'luluhypermarket.com'), ('Carrefour Bahrain', 'carrefourbahrain.com'), ('Namshi', 'namshi.com'), ('6thStreet', '6thstreet.com')], 'om': [('Sharaf DG Oman', 'sharafdg.com'), ('eXtra Oman', 'extra.com'), ('Lulu Oman', 'luluhypermarket.com'), ('Carrefour Oman', 'carrefouroman.com'), ('Emax', 'emaxme.com'), ('Namshi', 'namshi.com'), ('6thStreet', '6thstreet.com')], 'jo': [('SmartBuy', 'smartbuy-me.com'), ('Carrefour Jordan', 'carrefourjordan.com'), ('Leaders Center', 'leaders.jo'), ('Jamalon', 'jamalon.com')], 'iq': [('Miswag', 'miswag.net'), ('Orisdi', 'orisdi.com')], 'lb': [('Khoury Home', 'khouryhome.com'), ('Abed Tahan', 'abedtahan.com')], 'dz': [('Jumia Algeria', 'jumia.dz')], 'tn': [('Jumia Tunisia', 'jumia.com.tn'), ('Mytek', 'mytek.tn'), ('Tunisianet', 'tunisianet.com.tn')], 'in': [('Amazon India', 'amazon.in'), ('Flipkart', 'flipkart.com'), ('Croma', 'croma.com'), ('Reliance Digital', 'reliancedigital.in'), ('Myntra', 'myntra.com')], 'pk': [('Daraz', 'daraz.pk'), ('PriceOye', 'priceoye.pk')], 'bd': [('Daraz Bangladesh', 'daraz.com.bd'), ('Pickaboo', 'pickaboo.com')], 'cn': [('JD', 'jd.com'), ('Tmall', 'tmall.com'), ('Taobao', 'taobao.com'), ('Suning', 'suning.com')], 'jp': [('Amazon Japan', 'amazon.co.jp'), ('Rakuten', 'rakuten.co.jp'), ('Yodobashi', 'yodobashi.com'), ('Bic Camera', 'biccamera.com')], 'kr': [('Coupang', 'coupang.com'), ('Gmarket', 'gmarket.co.kr'), ('11st', '11st.co.kr')], 'sg': [('Shopee Singapore', 'shopee.sg'), ('Lazada Singapore', 'lazada.sg'), ('Amazon Singapore', 'amazon.sg'), ('Courts', 'courts.com.sg')], 'my': [('Shopee Malaysia', 'shopee.com.my'), ('Lazada Malaysia', 'lazada.com.my'), ('Harvey Norman', 'harveynorman.com.my')], 'id': [('Tokopedia', 'tokopedia.com'), ('Shopee Indonesia', 'shopee.co.id'), ('Blibli', 'blibli.com'), ('Lazada Indonesia', 'lazada.co.id')], 'ph': [('Shopee Philippines', 'shopee.ph'), ('Lazada Philippines', 'lazada.com.ph')], 'th': [('Shopee Thailand', 'shopee.co.th'), ('Lazada Thailand', 'lazada.co.th'), ('Central', 'central.co.th'), ('Power Buy', 'powerbuy.co.th')], 'vn': [('Shopee Vietnam', 'shopee.vn'), ('Lazada Vietnam', 'lazada.vn'), ('Tiki', 'tiki.vn')], 'au': [('Amazon Australia', 'amazon.com.au'), ('JB Hi-Fi', 'jbhifi.com.au'), ('Harvey Norman', 'harveynorman.com.au'), ('Kmart', 'kmart.com.au')], 'nz': [('The Warehouse', 'thewarehouse.co.nz'), ('Noel Leeming', 'noelleeming.co.nz'), ('Mighty Ape', 'mightyape.co.nz'), ('Harvey Norman', 'harveynorman.co.nz')], 'br': [('Mercado Livre', 'mercadolivre.com.br'), ('Amazon Brazil', 'amazon.com.br'), ('Magazine Luiza', 'magazineluiza.com.br')], 'mx': [('Mercado Libre', 'mercadolibre.com.mx'), ('Amazon Mexico', 'amazon.com.mx'), ('Walmart Mexico', 'walmart.com.mx'), ('Liverpool', 'liverpool.com.mx')], 'ar': [('Mercado Libre', 'mercadolibre.com.ar'), ('Frávega', 'fravega.com')], 'cl': [('Mercado Libre', 'mercadolibre.cl'), ('Falabella', 'falabella.com'), ('Paris', 'paris.cl')], 'co': [('Mercado Libre', 'mercadolibre.com.co'), ('Falabella', 'falabella.com.co'), ('Éxito', 'exito.com')], 'pe': [('Mercado Libre', 'mercadolibre.com.pe'), ('Falabella', 'falabella.com.pe'), ('Ripley', 'ripley.com.pe')], 'za': [('Takealot', 'takealot.com'), ('Makro', 'makro.co.za'), ('Woolworths', 'woolworths.co.za')], 'ng': [('Jumia Nigeria', 'jumia.com.ng'), ('Konga', 'konga.com')], 'ke': [('Jumia Kenya', 'jumia.co.ke'), ('Carrefour Kenya', 'carrefour.ke')], 'ma': [('Jumia Morocco', 'jumia.ma'), ('Marjane', 'marjane.ma'), ('Electroplanet', 'electroplanet.ma')], 'il': [('KSP', 'ksp.co.il'), ('Ivory', 'ivory.co.il')]}
 
+# Global lists are purchasing policy, not the domestic merchant directory.
+# These restore the approved cross-border stores from the supplied v133 file;
+# Amazon retains its US catalog identity. No domestic CN catalog is added here.
+GLOBAL_MARKET_STORES = {
+    'cn': (('AliExpress', 'aliexpress.com'), ('Temu', 'temu.com'),
+           ('SHEIN', 'shein.com'), ('Alibaba', 'alibaba.com')),
+    'us': (('Amazon', 'amazon.com'), ('eBay', 'ebay.com'),
+           ('Etsy', 'etsy.com'), ('Walmart', 'walmart.com')),
+}
+
 CHINA_DOMESTIC_STORES = (
     ('JD', 'jd.com'), ('Tmall', 'tmall.com'), ('Taobao', 'taobao.com'),
     ('Suning', 'suning.com'), ('Pinduoduo', 'yangkeduo.com'),
@@ -3485,11 +3458,18 @@ def _storefront_country(url):
 
 def _local_storefront_evidence(item, market):
     cc = str(market.get('country') or DEFAULT_COUNTRY).lower()
+    if market.get('_retrieval_role') == 'global' and cc in GLOBAL_MARKET_STORES:
+        return _global_catalog_evidence(item, cc)
     url_market = _merchant_url_market(item.get('link') or item.get('url') or '')
     if url_market.get('conflict'):
         return ''
     if url_market.get('country'):
         return url_market['evidence'] if url_market['country'] == cc else ''
+    proof = item.get('_local_storefront_proof')
+    if (isinstance(proof, dict) and proof.get('country') == cc
+            and proof.get('url') == _canonical_result_url(item.get('link') or item.get('url') or '')
+            and proof.get('kind') in ('local_targeting_currency', 'shopping_market_listing', 'merchant_currency')):
+        return proof['kind']
     explicit = _explicit_market_country(item)
     if explicit:
         return 'explicit_country' if explicit == cc else ''
@@ -3537,6 +3517,15 @@ def _local_storefront_evidence(item, market):
     # our catalog. Require both local search targeting and unambiguous currency.
     unique_codes = {code for code in local_codes if sum(code in v for v in COUNTRY_CURRENCY_CODES.values()) == 1}
     known_foreign = _host_matches_any(host, US_STORE_HINTS + CHINA_STORE_HINTS)
+    other_catalogs = {other for other, specs in COUNTRY_MAJOR_STORE_DOMAINS.items()
+                      if other != cc and any(_host_matches_any(host, (d,)) for _, d in specs)}
+    if other_catalogs:
+        known_foreign = True
+    # USD is shared by several countries, but US-targeted commercial results
+    # with USD and no foreign catalog/locale are eligible local candidates.
+    # This grants no exact-match percentage and does not bypass title checks.
+    if cc == 'us' and not known_foreign and geo_targeted and codes == {'USD'}:
+        return 'local_targeting_currency'
     if not known_foreign and geo_targeted and codes & unique_codes and not codes - local_codes:
         return 'local_targeting_currency'
     if not known_foreign and arabic_family:
@@ -4361,9 +4350,12 @@ def _local_discovery_rows(data, query, market, provider):
                 print(f'LOCAL ROW SHAPE provider={provider} reason={shape_key[1]} keys={sorted(row.keys())[:20]} sample={sample}')
             continue
         host = urllib.parse.urlsplit(url).hostname or ''
+        price_geo = 'us' if market.get('_retrieval_role') == 'global' and market['country'] in GLOBAL_MARKET_STORES else market['country']
         item = {'title': title, 'link': url, 'source': str(row.get('source') or host),
                 '_shopping_gl': market['country'], '_lens_country': market['country'],
-                'price': str(row.get('price') or ''), 'currency': str(row.get('currency') or ''),
+                'price': (row.get('price', {}).get('value') if isinstance(row.get('price'), dict) else row.get('price')) or '',
+                'currency': str(row.get('currency') or ''),
+                '_price_market': price_geo,
                 'thumbnail': row.get('thumbnail') or ''}
         if row.get('_shopping_market_listing'):
             item['_shopping_market_listing'] = True
@@ -4371,11 +4363,15 @@ def _local_discovery_rows(data, query, market, provider):
             # Organic rows carry the indexed price inside rich_snippet; surface
             # it as text so merchant-country evidence can read "KD 12.500".
             item['price'] = _local_discovery_snippet_price(row)
-        money_row = dict(row)
+        money_row = dict(row, _shopping_gl=price_geo, _price_market=price_geo)
+        source_money = _web_indexed_offer_money(money_row)
+        if source_money:
+            item['currency'] = source_money[1]
         if market['country'] == 'cn' and _china_domestic_product_url(url):
             if re.fullmatch(r'[¥￥]\s*\d[\d,.]*', item['price']):
                 money_row['currency'] = item['currency'] = 'CNY'
-        if not _local_storefront_evidence(item, market):
+        country_evidence = _local_storefront_evidence(item, market)
+        if not country_evidence:
             stats['foreign'] += 1
             continue
         if not _local_discovery_candidate_ok(query, item):
@@ -4395,7 +4391,10 @@ def _local_discovery_rows(data, query, market, provider):
                     thumbnail=pic, image=pic, price=f'{format_price(money[0], money[1])} {money[1]}' if money else '',
                     price_value=money[0] if money else None, currency=money[1] if money else '',
                     market_country=market['country'], in_stock=None, condition='',
-                    price_source=provider, price_verified=False, _local_discovery=True)
+                    price_source=provider, price_verified=False, _local_discovery=True,
+                    _local_storefront_proof={'country': market['country'], 'url': canonical, 'kind': country_evidence})
+        if market.get('_retrieval_role') == 'global' and market['country'] == 'cn':
+            item['export_store'] = _global_store_match(url, 'cn')[1]
         out.append(item)
     print(f'LOCAL FILTER country={market["country"]} provider={provider} raw={stats["raw"]} invalid_offer={stats["invalid_offer"]} foreign={stats["foreign"]} mismatch={stats["mismatch"]} accepted={len(out)}')
     if stats['invalid_offer']:
@@ -4488,7 +4487,8 @@ def _local_shopping_store_rows(product, market, card_thumbnail=''):
         if not isinstance(store, dict) or not (store.get('title') or product_title):
             continue
         row = dict(store, title=store.get('title') or product_title, source=store.get('name') or '',
-                   currency=store.get('currency') or market.get('currency', ''), _shopping_market_listing=True)
+                   currency=store.get('currency') or '', _shopping_market_listing=True,
+                   _shopping_gl=market.get('country', ''))
         if not row.get('thumbnail') and picture:
             row['thumbnail'] = picture  # same product, same picture; never a price or title
         # Never copy a price, availability, or title between sellers.
@@ -4590,6 +4590,72 @@ def _local_discovery_request(query, market, kind, timeout_seconds):
     return _local_discovery_rows(data, query, market, 'local_' + kind) if isinstance(data, dict) else []
 
 
+def _global_discovery_request(query, country, kind, timeout_seconds):
+    """Approved global catalogs only. No domestic Baidu/store list is reused."""
+    if country not in GLOBAL_MARKET_STORES or kind not in ('global', 'global2', 'global_all'):
+        return []
+    target = dict(_web_market(country), _retrieval_role='global')
+    wording = _web_market('us')
+    started = time.monotonic()
+    search_query, _ = _market_query_request_variant(query, wording, 'broad', timeout_seconds)
+    stores = list(GLOBAL_MARKET_STORES[country])
+    if kind != 'global_all':
+        split = (len(stores) + 1) // 2
+        stores = stores[:split] if kind == 'global' else stores[split:]
+    if not stores:
+        return []
+    remaining = timeout_seconds - (time.monotonic() - started)
+    if remaining <= .01:
+        return []
+    scopes = ' OR '.join('site:' + domain for _, domain in stores)
+    params = {'engine': 'google', 'q': f'{search_query} ({scopes})',
+              'gl': 'us', 'hl': 'en', 'num': 10, 'api_key': SERPAPI_API_KEY, 'output': 'json'}
+    connect = min(1.5, max(.01, remaining * .15))
+    data = _serpapi_cached_json(params, timeout=(connect, max(.01, remaining - connect)),
+                               label=f'GLOBAL CATALOG {country}/{kind}') or {}
+    return _local_discovery_rows(data, query, target, 'global_' + country)
+
+
+def _global_market_discovery(query, country, limit=8, timeout_seconds=None, progress_callback=None, cancel_event=None):
+    """Legacy/WhatsApp global discovery shares the same whitelist and deadline."""
+    if not SERPAPI_API_KEY or not query or country not in GLOBAL_MARKET_STORES:
+        return []
+    duration = min(LOCAL_DISCOVERY_TIMEOUT, timeout_seconds if timeout_seconds is not None else LOCAL_DISCOVERY_TIMEOUT)
+    if duration <= 0:
+        return []
+    deadline = time.monotonic() + duration
+    _market_query_warm(query, ['us'])
+    def cancelled():
+        return cancel_event is not None and cancel_event.is_set()
+    def run(kind):
+        remaining = deadline - time.monotonic()
+        return [] if cancelled() or remaining <= .01 else _global_discovery_request(query, country, kind, remaining)
+    jobs = {LOCAL_DISCOVERY_POOL.submit(run, kind) for kind in ('global', 'global2')}
+    rows, seen = [], set()
+    try:
+        while jobs and not cancelled() and time.monotonic() < deadline:
+            done, _ = wait(jobs, timeout=min(.1, max(0., deadline-time.monotonic())), return_when=FIRST_COMPLETED)
+            for job in done:
+                jobs.remove(job)
+                try:
+                    values = job.result() or []
+                except Exception:
+                    values = []
+                batch = []
+                for item in values:
+                    key = _canonical_result_url(item.get('link'))
+                    if key and key not in seen and len(rows) < limit:
+                        seen.add(key)
+                        rows.append(item)
+                        batch.append(item)
+                if batch and progress_callback and not cancelled():
+                    progress_callback(batch)
+        return rows
+    finally:
+        for job in jobs:
+            job.cancel()
+
+
 def _local_lane_count(rows, reference=None):
     reference = reference or {}
     return len({_more_result_domain(row.get('link') or row.get('url')) for row in rows
@@ -4613,8 +4679,9 @@ def _local_market_discovery(query, market, limit=8, timeout_seconds=None, progre
     duration = max(.01, min(LOCAL_DISCOVERY_TIMEOUT, timeout_seconds if timeout_seconds is not None else LOCAL_DISCOVERY_TIMEOUT))
     started = time.monotonic()
     deadline = started + duration
-    kinds = (['scoped'] + (['baidu'] if LOCAL_DISCOVERY_BAIDU else [])) if cc == 'cn' else [
-        'shopping' if ENABLE_GOOGLE_SHOPPING and _shopping_gl_supported(cc) else 'broad', 'scoped']
+    kinds = (['broad'] + (['baidu'] if LOCAL_DISCOVERY_BAIDU else ['scoped'])) if cc == 'cn' else [
+        'shopping' if ENABLE_GOOGLE_SHOPPING and _shopping_gl_supported(cc) else 'broad',
+        'broad' if cc == 'us' and ENABLE_GOOGLE_SHOPPING and _shopping_gl_supported(cc) else 'scoped']
     kinds = kinds[:LOCAL_DISCOVERY_MAX_CALLS]
     rows, seen, pending = [], set(), {}
     calls = 0
@@ -5172,7 +5239,7 @@ def _lens_source_name(item, index):
     except Exception:
         return f'Lens {index}'
 KUWAIT_STORE_HINTS = ('.com.kw', '.kw', 'kuwait', 'الكويت', 'xcite', 'eureka', 'best al yousifi', 'best alyousifi', 'jarir', 'level shoes', 'future store', 'blink', 'noon kuwait', 'carrefour kuwait', 'lulu kuwait', 'jm3eia', 'جمعية', 'taw9eel', 'توصيل', 'intersport kuwait', 'decathlon kuwait', 'boutiqaat', 'boots kuwait', 'yiaco', 'royal pharmacy', 'talabat kuwait', 'keeta kuwait')
-US_STORE_HINTS = ('amazon.com', 'walmart.com', 'target.com', 'bestbuy.com', 'costco.com', 'homedepot.com', 'lowes.com', 'macys.com', 'nordstrom.com', 'zappos.com', 'bhphotovideo.com', 'newegg.com', 'rei.com', 'dickssportinggoods.com', 'ebay.com')
+US_STORE_HINTS = ('amazon.com', 'walmart.com', 'target.com', 'bestbuy.com', 'costco.com', 'homedepot.com', 'lowes.com', 'macys.com', 'nordstrom.com', 'zappos.com', 'bhphotovideo.com', 'newegg.com', 'rei.com', 'dickssportinggoods.com', 'ebay.com', 'etsy.com')
 CHINA_STORE_HINTS = ('aliexpress.com', 'alibaba.com', '1688.com', 'taobao.com', 'tmall.com', 'shein.com', 'temu.com', 'dhgate.com', 'made-in-china.com', 'banggood.com', 'gearbest.com', 'jd.com', 'pinduoduo.com')
 
 def _result_hay_host(item):
@@ -5190,6 +5257,76 @@ def _host_matches_any(host, domains):
         if host == d or host.endswith('.' + d):
             return True
     return False
+
+
+def _global_store_match(url, country):
+    try:
+        parsed = urllib.parse.urlsplit(str(url or ''))
+        host = (parsed.hostname or '').lower().rstrip('.')
+        if parsed.scheme not in ('http', 'https') or parsed.username or parsed.password:
+            return None
+    except ValueError:
+        return None
+    return next(((label, domain) for label, domain in GLOBAL_MARKET_STORES.get(country, ())
+                 if _host_matches_any(host, (domain,))), None)
+
+
+def _global_catalog_evidence(item, country):
+    url = (item or {}).get('link') or (item or {}).get('url') or ''
+    if not _global_store_match(url, country):
+        return ''
+    evidence = _merchant_url_market(url)
+    if evidence.get('conflict'):
+        return ''
+    # A CN export platform can have a localized storefront for its buyer.
+    # Its export catalog belongs to the global lane, not to a CN domestic list.
+    if country == 'cn':
+        return 'approved_cross_border_catalog'
+    if evidence.get('country') not in ('', None, country):
+        return ''
+    return 'approved_global_catalog'
+
+
+def _market_offer_allowed(item, market):
+    """Publication policy. A domestic market has no store allowlist."""
+    item = item or {}
+    url = item.get('url') or item.get('link') or ''
+    if not url or is_blocked_store(item.get('store') or item.get('source') or '', url):
+        return False
+    local = str((market or {}).get('country') or DEFAULT_COUNTRY).lower()
+    evidence = _merchant_url_market(url)
+    if evidence.get('conflict'):
+        return False
+    # Only a URL-bound, approved export identity survives relabeling/caches.
+    if item.get('export_store') and _global_store_match(url, 'cn'):
+        actual = 'cn'
+    else:
+        actual = evidence.get('country') or _explicit_market_country(item)
+    if not actual:
+        codes = _explicit_currency_codes(item)
+        actual = 'cn' if codes == {'CNY'} else 'us' if codes == {'USD'} else ''
+    if not actual and (item.get('market_scope') == 'global' or item.get('market') in ('global', 'us', 'china')
+                       or item.get('market_rank') in (1, 2)):
+        return any(_global_catalog_evidence(item, cc) for cc in GLOBAL_MARKET_STORES)
+    if actual == local:
+        return True
+    if actual in GLOBAL_MARKET_STORES:
+        return bool(_global_catalog_evidence(item, actual))
+    # Other explicitly selected countries keep their existing country policy.
+    return True
+
+
+def _global_search_instruction():
+    local = str(current_market().get('country') or DEFAULT_COUNTRY).lower()
+    parts = ['DOMESTIC RULE: Search all genuine local merchants, including independent stores. '
+             'The global store lists below never restrict the current local market.']
+    for cc, stores in GLOBAL_MARKET_STORES.items():
+        if cc != local:
+            parts.append('GLOBAL ' + cc.upper() + ' ONLY: ' + ', '.join(d for _, d in stores) + '.')
+    if local != 'cn':
+        parts.append('Never return Chinese domestic catalogs (JD, Taobao, Tmall, 1688, Suning, '
+                     'Pinduoduo or other domestic Chinese stores) in Global.')
+    return '\n' + '\n'.join(parts) + '\n'
 
 
 def _merchant_url_market(url):
@@ -5231,6 +5368,9 @@ def _web_apply_market_context(row, market):
     row = dict(row or {})
     evidence = _merchant_url_market(row.get('url') or row.get('link'))
     actual = evidence.get('country')
+    if row.get('export_store') and _global_store_match(row.get('url') or row.get('link'), 'cn'):
+        actual = 'cn'
+        evidence = {'country': 'cn', 'evidence': 'approved_cross_border_catalog', 'kind': 'cross_border_catalog'}
     if not actual:
         return row
     local = str((market or {}).get('country') or DEFAULT_COUNTRY).lower()
@@ -5335,6 +5475,8 @@ def is_foreign_lens_result(item):
     return bool(host and (_host_matches_any(host, US_STORE_HINTS) or _host_matches_any(host, CHINA_STORE_HINTS)))
 
 def result_market_rank(item):
+    if not _market_offer_allowed(item, current_market()):
+        return 99
     cc = (current_market().get('country') or DEFAULT_COUNTRY).lower()
     url = str((item or {}).get('link') or (item or {}).get('url') or '')
     source = str((item or {}).get('source') or (item or {}).get('name') or '')
@@ -5344,6 +5486,8 @@ def result_market_rank(item):
     if url_market.get('conflict'):
         return 99
     actual_cc = url_market.get('country')
+    if item.get('export_store') and _global_store_match(url, 'cn'):
+        actual_cc = 'cn'
     if actual_cc:
         return 0 if actual_cc == cc else {'us': 1, 'cn': 2}.get(actual_cc, 99)
     explicit = _explicit_market_country(item)
@@ -6855,7 +6999,7 @@ def legacy_text_product_search_more(product, lang, seen_domains):
     alt = (alt or '').strip()
     extra_name = f' والاسم الآخر لنفس المنتج هو {alt}.' if alt and alt.lower() != str(product).strip().lower() else ''
     prompt = f'ابحث مرة أخرى بعمق عن نفس المنتج بالضبط: {product}.{extra_name} المستخدم شاهد نتائج سابقة ويريد متاجر إضافية جديدة فقط.{exclusion} نفس ترتيب البحث الأصلي لكن بحدود الدفعة الإضافية: أولاً متاجر {market_name} المحلية حتى {MORE_LOCAL_MAX}، ثم الولايات المتحدة حتى {MORE_US_MAX}، ثم الصين حتى {MORE_CN_MAX}. لا تعرض دولة رابعة. لا تكرر أي متجر أو دومين ظهر سابقاً. كل نتيجة يجب أن تكون نفس المنتج والموديل/الحجم، بسعر رقمي ورابط صفحة منتج مباشر. {TEXT77_lang_instr(lang)}'
-    return legacy_v26_best_of_search([{'text': prompt}], total_cap, True, product)
+    return legacy_v26_best_of_search([{'text': prompt + _global_search_instruction()}], total_cap, True, product)
 
 def run_more_results_search(phone, item):
     activate_market(phone)
@@ -7585,7 +7729,7 @@ def text77_market_instruction():
     tlds = ', '.join(country_tlds(cc))
     local_stores = priority_stores_for('')
     stores_hint = ', '.join(local_stores[:6]) if local_stores else 'strong local specialist stores and marketplaces'
-    return f"\nIMPORTANT TYPED-TEXT GEO RULE: local market is {place} (gl={cc}, hl={hl}, ccTLD={tlds}). Accepted local currencies: {currencies}; primary display currency: {currency}. LOCAL IS THE MAIN PRODUCT: search it deeply before foreign markets. Use the user's wording, commercial English name, and local-commerce wording when useful. Check {stores_hint}, then broaden to smaller genuine local merchants indexed by Google; this is not a whitelist. Return in strict order: up to {LENS_DIRECT_LOCAL_MAX} LOCAL {place} results, then up to {LENS_DIRECT_US_MAX} US, then up to {LENS_DIRECT_CN_MAX} China. Reject every fourth country. Heureka/heureka.cz/heureka.sk is blocked globally as a comparison site; Eureka Kuwait is allowed. Local prices use a valid local source currency ({currencies}); US stays USD; China stays source USD or CNY/RMB. Never convert foreign prices in the AI response. A .com domain can still be local when Google local targeting, local currency, country path/text, or merchant identity ties it to the local market. For SERVICES keep providers local only.\n"
+    return _global_search_instruction() + f"\nIMPORTANT TYPED-TEXT GEO RULE: local market is {place} (gl={cc}, hl={hl}, ccTLD={tlds}). Accepted local currencies: {currencies}; primary display currency: {currency}. LOCAL IS THE MAIN PRODUCT: search it deeply before foreign markets. Use the user's wording, commercial English name, and local-commerce wording when useful. Check {stores_hint}, then broaden to smaller genuine local merchants indexed by Google; this is not a whitelist. Return in strict order: up to {LENS_DIRECT_LOCAL_MAX} LOCAL {place} results, then up to {LENS_DIRECT_US_MAX} US, then up to {LENS_DIRECT_CN_MAX} China. Reject every fourth country. Heureka/heureka.cz/heureka.sk is blocked globally as a comparison site; Eureka Kuwait is allowed. Local prices use a valid local source currency ({currencies}); US stays USD; China stays source USD or CNY/RMB. Never convert foreign prices in the AI response. A .com domain can still be local when Google local targeting, local currency, country path/text, or merchant identity ties it to the local market. For SERVICES keep providers local only.\n"
 
 def text77_store_domain(name):
     return store_domain(name)
@@ -8537,7 +8681,7 @@ def _china_store_priority(name, url):
     return 99
 
 def legacy_text_product_search(product, lang):
-    cache_query = f'__TEXT79_MARKET_COVERAGE__::{product}'
+    cache_query = f'__TEXT1282_MARKET_ROLES__::{product}'
     cached = cache_get(cache_query, lang)
     if cached:
         return cached
@@ -8554,7 +8698,7 @@ def legacy_text_product_search(product, lang):
 
     def _attempt(primary, secondary=''):
         extra = f' وابحث أيضاً بالاسم الآخر لنفس المنتج: {secondary}.' if secondary else ''
-        prompt = f'ابحث عن نفس المنتج بالضبط: {primary}.{extra} إذا كان اسم المنتج مكتوباً بلغة غير لغة المتجر، افهم الاسم التجاري المكافئ تلقائياً أثناء بحث Google. LOCAL SEARCH BOOST: في {market_name} ابحث بصياغة المستخدم + الاسم التجاري الإنجليزي + صياغة لغة السوق {local_hl}. استخدم إشارات السوق gl={local_cc} و ccTLD={local_tlds} والعملات المحلية {local_currencies}. ابدأ بالمتاجر القوية مثل {local_store_hint} ثم وسّع للمتاجر المحلية الصغيرة المفهرسة؛ القائمة ليست whitelist. ابحث تلقائياً في ثلاث مجموعات فقط وبالترتيب الإلزامي: أولاً متاجر {market_name} المحلية حتى {LENS_DIRECT_LOCAL_MAX}، ثم متاجر الولايات المتحدة حتى {LENS_DIRECT_US_MAX}، ثم المتاجر الصينية حتى {LENS_DIRECT_CN_MAX}. بالنسبة لأمريكا: ابحث بشكل طبيعي في المتاجر الأمريكية، وإذا ظهرت نتائج مطابقة فرتبها داخل القسم الأمريكي بهذه الأولوية فقط: Amazon ثم eBay ثم Walmart ثم باقي المتاجر الأمريكية. لا تفرض ظهور أي متجر إذا لم توجد نتيجة مطابقة. بالنسبة للصين ابحث مباشرة في AliExpress وTemu وAlibaba وSHEIN عندما توجد نتيجة مطابقة، ويمكن استخدام متاجر صينية أخرى. لا تعرض أي دولة رابعة. استبعد Heureka/heureka.cz/heureka.sk نهائياً ولا تعتبره متجراً محلياً. لا تجعل الأعداد حصصاً إلزامية؛ اعرض الموجود المطابق فقط. مهم جداً: لا تنه البحث قبل فحص الأسواق الثلاثة كلها. إذا كان نفس المنتج المطابق موجوداً في السوق المحلي أو أمريكا أو الصين فيجب أن يظهر على الأقل متجر واحد من ذلك السوق؛ لا تحذف سوقاً كاملاً بسبب أن سوقاً آخر أعاد نتائج أكثر أو أسرع. لكل نتيجة اذكر اسم المتجر، اسم المنتج المطابق، السعر الرقمي والعملة، واربطه بصفحة المنتج المباشرة. {TEXT77_lang_instr(lang)}'
+        prompt = f'ابحث عن نفس المنتج بالضبط: {primary}.{extra} إذا كان اسم المنتج مكتوباً بلغة غير لغة المتجر، افهم الاسم التجاري المكافئ تلقائياً أثناء بحث Google. LOCAL SEARCH BOOST: في {market_name} ابحث بصياغة المستخدم + الاسم التجاري الإنجليزي + صياغة لغة السوق {local_hl}. استخدم إشارات السوق gl={local_cc} و ccTLD={local_tlds} والعملات المحلية {local_currencies}. ابدأ بالمتاجر القوية مثل {local_store_hint} ثم وسّع للمتاجر المحلية الصغيرة المفهرسة؛ القائمة ليست whitelist. ابحث تلقائياً في ثلاث مجموعات فقط وبالترتيب الإلزامي: أولاً متاجر {market_name} المحلية حتى {LENS_DIRECT_LOCAL_MAX}، ثم متاجر الولايات المتحدة حتى {LENS_DIRECT_US_MAX}، ثم المتاجر الصينية حتى {LENS_DIRECT_CN_MAX}. بالنسبة لأمريكا: ابحث بشكل طبيعي في المتاجر الأمريكية، وإذا ظهرت نتائج مطابقة فرتبها داخل القسم الأمريكي بهذه الأولوية فقط: Amazon ثم eBay ثم Walmart ثم باقي المتاجر الأمريكية. لا تفرض ظهور أي متجر إذا لم توجد نتيجة مطابقة. بالنسبة للصين ابحث مباشرة في AliExpress وTemu وAlibaba وSHEIN عندما توجد نتيجة مطابقة، والتزم بقائمة المتاجر العالمية المعتمدة فقط. لا تعرض أي دولة رابعة. استبعد Heureka/heureka.cz/heureka.sk نهائياً ولا تعتبره متجراً محلياً. لا تجعل الأعداد حصصاً إلزامية؛ اعرض الموجود المطابق فقط. مهم جداً: لا تنه البحث قبل فحص الأسواق الثلاثة كلها. إذا كان نفس المنتج المطابق موجوداً في السوق المحلي أو أمريكا أو الصين فيجب أن يظهر على الأقل متجر واحد من ذلك السوق؛ لا تحذف سوقاً كاملاً بسبب أن سوقاً آخر أعاد نتائج أكثر أو أسرع. لكل نتيجة اذكر اسم المتجر، اسم المنتج المطابق، السعر الرقمي والعملة، واربطه بصفحة المنتج المباشرة. {TEXT77_lang_instr(lang)}'
         return legacy_v26_best_of_search([{'text': prompt}], total_cap, True, product)
     txt, urls = _attempt(product)
     if txt and (not is_no_result_answer(txt)) and text77_extract_store_offers(txt, limit=total_cap):
@@ -9829,7 +9973,7 @@ def _web_build_lens_items(lens, lang, caption=''):
         cc = rank_cc.get(rank, '')
         shown_price = _lens_price_text_local(m, rank, lang)
         results.append({'market': _web_market_label(rank), 'market_rank': rank, 'country': cc, 'flag': country_flag_emoji(cc), 'store': _ui_plain_store_name(m.get('source') or '', m.get('link') or '') or U(lang, 'store'), 'title': _compact_ui_title(display_title or m.get('title') or ''), 'raw_title': (m.get('title') or display_title or '').strip(), 'price': shown_price, 'price_pending': not bool(shown_price), 'price_verified': bool(shown_price), 'url': (m.get('link') or '').strip(), 'image': m.get('thumbnail') or m.get('image') or ''})
-    return [_web_apply_market_context(row, current_market()) for row in results]
+    return [_web_apply_market_context(row, current_market()) for row in results if _market_offer_allowed(row, current_market())]
 
 _WEB_CLASSIFICATION_LABELS = {
     'ar': ('مطابق للمنتج', 'منتجات مشابهة'),
@@ -11642,6 +11786,10 @@ def _web_market_scope_guard(row, market_snapshot):
     except Exception:
         rank = 99
     cc = str((market_snapshot or {}).get('country') or DEFAULT_COUNTRY).lower()
+    if not _market_offer_allowed(row, market_snapshot):
+        return None
+    if row.get('export_store') and _global_store_match(row.get('url') or row.get('link'), 'cn'):
+        return ('local' if cc == 'cn' else 'global', 'approved_cross_border_catalog', 99)
     url_market = _merchant_url_market(row.get('url') or row.get('link'))
     if url_market.get('conflict'):
         return None
@@ -14590,7 +14738,8 @@ def _web_attach_captured_result_sections(payload, lang, allow_ai=True, cancel_ev
     reference_image_mime = str(out.pop('_reference_image_mime', '') or '').strip().lower()
     original_results = out.get('results')
     results = [dict(row) for row in (original_results or [])
-               if is_lens_product_url(str(row.get('url') or row.get('link') or ''))]
+               if is_lens_product_url(str(row.get('url') or row.get('link') or ''))
+               and _market_offer_allowed(row, out.get('market') or current_market())]
     identity = str(out.get('query') or '').strip()
     has_reference_photo = bool(_web_visual_reference_digest(reference_image_b64)) and (
         not reference_image_mime or reference_image_mime.startswith('image/')
@@ -15100,9 +15249,9 @@ def _web_stream_store_specs(query, country, rank):
         except Exception:
             pass
     elif rank == 1:
-        specs = [('Amazon', 'amazon.com', 'us'), ('eBay', 'ebay.com', 'us'), ('Etsy', 'etsy.com', 'us'), ('Walmart', 'walmart.com', 'us')]
+        specs = [(label, domain, 'us') for label, domain in GLOBAL_MARKET_STORES['us']]
     else:
-        specs = [('AliExpress', 'aliexpress.com', 'us'), ('Temu', 'temu.com', 'us'), ('SHEIN', 'shein.com', 'us'), ('DHgate', 'dhgate.com', 'us'), ('Banggood', 'banggood.com', 'us'), ('Alibaba', 'alibaba.com', 'us'), ('Made-in-China', 'made-in-china.com', 'us')][:WEB_CHINA_GLOBAL_MAX_STORES]
+        specs = [(label, domain, 'us') for label, domain in GLOBAL_MARKET_STORES['cn']]
     out, seen = ([], set())
     for label, domain, gl in specs:
         key = (str(domain or '').lower(), str(gl or '').lower())
@@ -16175,11 +16324,25 @@ def _web_indexed_offer_money(item):
     """Only explicit product price fields, not a number borrowed from a snippet."""
     if not isinstance(item, dict):
         return None
-    candidates = [(item.get('price'), item.get('currency') or '')]
-    # Lens/Shopping rows also expose a parsed amount; it shares the same currency.
-    if item.get('price_value') not in (None, '', 0) and not isinstance(item.get('price_value'), (dict, list, bool)):
-        candidates.append((item.get('price_value'), item.get('currency') or ''))
-    market_cc = _search_geo_country(item) or _explicit_market_country(item)
+    price = item.get('price')
+    price_obj = price if isinstance(price, dict) else {}
+    currency = price_obj.get('currency') or item.get('currency') or ''
+    price_text = price_obj.get('value') if price_obj else price
+    # A parsed range minimum, instalment or quantity-tier amount is not a price.
+    if any(item.get(k) for k in ('installments_description', 'monthly_payment_duration', 'down_payment')):
+        return None
+    if re.search(r'\b(?:from|starting|up to|MOQ)\b|起|起批|批发|运费|(?:\d|[.,])\s*[-–—~～至]\s*[$€£¥￥]?\s*\d', str(price_text or ''), re.I):
+        return None
+    if _WEB_NOT_A_PRICE_PIECE.search(str(price_text or '')):
+        return None
+    candidates = [(price_text, currency)]
+    # Only fall back to a parsed amount when the displayed price is absent.
+    # Otherwise a rejected '$5-$20' could silently become the extracted 5.
+    if price_text in (None, ''):
+        for field in ('price_value', 'extracted_price'):
+            candidates.append((item.get(field), currency))
+        candidates.append((price_obj.get('extracted_value'), currency))
+    market_cc = str(item.get('_price_market') or '').lower() or _search_geo_country(item) or _explicit_market_country(item)
     market_codes = set(COUNTRY_CURRENCY_CODES.get(market_cc, ())) if market_cc else set()
     snippet = item.get('rich_snippet')
     snippet = snippet if isinstance(snippet, dict) else {}
@@ -16192,7 +16355,7 @@ def _web_indexed_offer_money(item):
         extensions = block.get('extensions')
         extensions = extensions if isinstance(extensions, list) else []
         joined = ' '.join(str(x) for x in extensions)
-        if re.search(r'\b(from|starting|up to)\b|ابتداء|\d\s*[-–—]\s*[$€£¥]?\s*\d', joined, re.I):
+        if any(detected.get(k) is not None for k in ('price_from', 'price_to')) or re.search(r'\b(from|starting|up to)\b|ابتداء|\d\s*[-–—]\s*[$€£¥]?\s*\d', joined, re.I):
             continue
         candidates.append((detected.get('price'), detected.get('currency') or ''))
         for extension in extensions:
@@ -16207,7 +16370,10 @@ def _web_indexed_offer_money(item):
         if value in (None, '') or isinstance(value, (dict, list, bool)):
             continue
         # Providers mark estimated prices with a trailing asterisk ("$27.99*").
-        raw = re.sub(r'\s*\*+\s*$', '', str(value).strip()).strip()
+        raw = re.sub(r'\s*\*+\s*$', '', _normalize_price_chars(str(value).strip())).strip()
+        raw = re.sub(r'\bUS\s*\$', 'USD ', raw, flags=re.I)
+        if market_cc == 'cn' and re.fullmatch(r'(?:人民币\s*)?[\d.,]+\s*元', raw):
+            raw = re.sub(r'人民币|元', '', raw).strip() + ' CNY'
         if not raw:
             continue
         explicit = str(currency or '').strip().upper()
@@ -16237,7 +16403,6 @@ def _web_indexed_offer_money(item):
         if money:
             return money
     return None
-
 
 def _web_targeted_price_updates(entries, lang, market):
     """Alternate source after a failed merchant page: indexed exact listing URLs."""
@@ -16374,6 +16539,8 @@ async def _web_with_live_prices(source, lang, country, allow_paid=True):
         async with gate:
             return await asyncio.wrap_future(WEB_LIVE_PRICE_POOL.submit(_web_live_page_image_only, row, dict(market)))
     def absorb(item):
+        if not _market_offer_allowed(item, market):
+            return None
         item = dict(item)
         key = _web_identity_offer_key(item)
         merged = dict(rows.get(key) or {})
@@ -16446,6 +16613,9 @@ async def _web_with_live_prices(source, lang, country, allow_paid=True):
                         had_error = True
                     if isinstance(event.get('item'), dict):
                         event['item'] = absorb(event['item'])
+                        if event['item'] is None:
+                            next_event = asyncio.create_task(anext(source))
+                            continue
                     if isinstance(event.get('results'), list):
                         for item in event['results']:
                             if isinstance(item, dict):
@@ -17393,6 +17563,8 @@ def _web_text_hybrid_merge(primary_rows, market_rows, market, query=''):
     def domain_of(row):
         return (_more_result_domain(str(row.get('url') or row.get('link') or '')) or '').removeprefix('www.')
     for row in primary_rows or []:
+        if not _market_offer_allowed(row, market):
+            continue
         key = key_of(row)
         if not key or key in by_key:
             continue
@@ -17401,6 +17573,8 @@ def _web_text_hybrid_merge(primary_rows, market_rows, market, query=''):
         out.append(row)
     added = 0
     for raw in market_rows or []:
+        if not _market_offer_allowed(raw, market):
+            continue
         key = key_of(raw)
         if not key:
             continue
@@ -19170,7 +19344,7 @@ def _web_identity_public_row(row):
 
 
 def _web_identity_stream_snapshot(rows, query, market, lang, completed, elapsed_ms):
-    ordered = sorted((_web_identity_public_row(_web_apply_market_context(r, market)) for r in rows), key=_web_identity_result_sort_key)
+    ordered = sorted((_web_identity_public_row(_web_apply_market_context(r, market)) for r in rows if _market_offer_allowed(r, market)), key=_web_identity_result_sort_key)
     exact = [r for r in ordered if r.get('match_type') == 'exact']
     similar = [r for r in ordered if r.get('match_type') != 'exact']
     local = [r for r in ordered if r.get('market_scope') == 'local']
@@ -19631,7 +19805,7 @@ def _web_global_countries(value, local_country):
 
 def _web_selected_market_items(partial, lang, caption=''):
     """Already normalized, verified-country rows; no legacy US/CN cap/filter."""
-    return [dict(row) for row in partial.get('results', [])]
+    return [dict(row) for row in partial.get('results', []) if _market_offer_allowed(row, partial.get('market') or current_market())]
 
 
 def _web_selected_offer(raw, cc, display_market, query='', visual=False):
@@ -19644,10 +19818,16 @@ def _web_selected_offer(raw, cc, display_market, query='', visual=False):
     item.pop('country', None)
     item.pop('market_country', None)
     item['_shopping_gl'] = cc
-    evidence = _local_storefront_evidence(item, _web_market(cc))
+    target = _web_market(cc)
+    if cc != display_market['country'] and cc in GLOBAL_MARKET_STORES:
+        target = dict(target, _retrieval_role='global')
+        item['_price_market'] = item.get('_price_market') or 'us'
+    money = _web_indexed_offer_money(item)
+    if money and not item.get('currency'):
+        item['currency'] = money[1]
+    evidence = _local_storefront_evidence(item, target)
     if not evidence or (query and not _local_discovery_candidate_ok(query, item, visual=visual)):
         return None
-    money = _web_indexed_offer_money(item)
     rank = 0 if cc == display_market['country'] else 1
     row = {'url': url, 'title': _compact_ui_title(title), 'raw_title': title,
            'store': _ui_plain_store_name(raw.get('source') or '', url),
@@ -19658,6 +19838,8 @@ def _web_selected_offer(raw, cc, display_market, query='', visual=False):
            'price': '', 'price_pending': not bool(money), 'price_verified': False,
            'price_source': raw.get('price_source') or 'indexed_offer',
            'exact': False, 'is_exact': False, 'match_type': 'similar'}
+    if target.get('_retrieval_role') == 'global' and cc == 'cn':
+        row['export_store'] = _global_store_match(url, cc)[1]
     if item.get('_local_match_uncertain'):
         row['_local_match_uncertain'] = True
     if money:
@@ -19670,13 +19852,14 @@ def _web_selected_market_search(query, country, lang, global_countries, *, image
                                  progress_callback=None, cancel_event=None, local_lanes=2, local_target=None):
     """One primary plus at most one rescue per market. Publish each completion.
 
-    China uses two domestic discovery sources, whether local OR global. Other
-    image markets start Lens immediately and hedge sparse/slow results once.
+    Local China uses open native discovery. Global CN/US use only approved
+    catalogs. US local Lens/Shopping also has an independent broad organic lane.
     No US/CN expansion can escape the user's selection. No per-card discovery.
     """
     market = dict(_web_market(country), global_countries=list(global_countries))
     scopes = ([] if global_only else [country]) + list(global_countries)
     targets = {cc: _web_market(cc) for cc in scopes}
+    global_catalogs = {cc for cc in scopes if cc != country and cc in GLOBAL_MARKET_STORES}
     warmed_query = None
     consensus_done = False
     lens_seen = 0
@@ -19700,7 +19883,7 @@ def _web_selected_market_search(query, country, lang, global_countries, *, image
         if progress_callback and not cancelled():
             progress_callback(snapshot())
     def lanes_for(cc):
-        return max(2, int(local_lanes)) if cc == country else 2
+        return max(3 if cc in ('us', 'cn') else 2, int(local_lanes)) if cc == country else 2
     def target_for(cc):
         return max(LOCAL_RESULTS_TARGET, int(local_target)) if (cc == country and local_target) else LOCAL_RESULTS_TARGET
     def launch(cc, kind, public_url=''):
@@ -19714,6 +19897,8 @@ def _web_selected_market_search(query, country, lang, global_countries, *, image
             remaining = deadline - time.monotonic()
             if cancelled() or remaining <= .01:
                 return []
+            if cc in global_catalogs and kind != 'lens':
+                return _global_discovery_request(q, cc, kind, min(LOCAL_DISCOVERY_TIMEOUT, remaining))
             if kind == 'lens':
                 # v114 iOS sends the previous photo identity as `query` on a
                 # global-only refresh, but an empty caption on first capture.
@@ -19752,26 +19937,43 @@ def _web_selected_market_search(query, country, lang, global_countries, *, image
                                and not consensus_done and lens_pending and time.monotonic() - started < LENS_CONSENSUS_WAIT)
             if query and SERPAPI_API_KEY and not hold_text_lanes:
                 if query != warmed_query:
-                    _market_query_warm(query, scopes)
+                    _market_query_warm(query, list(dict.fromkeys('us' if cc in global_catalogs else cc for cc in scopes)))
                     warmed_query = query
                 named = bool(reference.get('named') or consensus_done or not image_b64)
                 for cc in scopes:
-                    if cc == 'cn':
-                        launch(cc, 'scoped')
+                    primary_pending = any(c == cc for c, _ in jobs.values())
+                    sparse_or_slow = by_market[cc] < target_for(cc) and (
+                        not primary_pending or time.monotonic() - started >= SELECTED_MARKET_HEDGE)
+                    if cc in global_catalogs:
+                        if 'lens' in launched[cc]:
+                            if sparse_or_slow:
+                                launch(cc, 'global_all')
+                        else:
+                            launch(cc, 'global')
+                            launch(cc, 'global2')
+                    elif cc == 'cn':
+                        # Open search covers independent .cn and .com shops;
+                        # domestic marketplace scopes are a separate sparse rescue.
+                        launch(cc, 'broad')
                         if LOCAL_DISCOVERY_BAIDU:
                             launch(cc, 'baidu')
+                        if sparse_or_slow:
+                            launch(cc, 'scoped')
                     else:
                         shopping_ok = ENABLE_GOOGLE_SHOPPING and _shopping_gl_supported(cc)
                         if not launched[cc]:
                             launch(cc, 'shopping' if shopping_ok else 'broad')
-                        primary_pending = any(c == cc for c, _ in jobs.values())
-                        if by_market[cc] < target_for(cc) and (
-                                not primary_pending or time.monotonic() - started >= SELECTED_MARKET_HEDGE):
-                            # A named product in a Shopping market gets priced
-                            # merchant cards; anything else the organic rescue.
+                        if cc == country == 'us' and sparse_or_slow:
+                            # Never let Lens + Shopping use every domestic lane:
+                            # independent shops need an unscoped organic query.
+                            if shopping_ok and named:
+                                launch(cc, 'shopping')
+                            launch(cc, 'broad')
+                            if not any(c == cc for c, _ in jobs.values()):
+                                launch(cc, 'scoped')
+                        elif sparse_or_slow:
                             launch(cc, 'shopping' if shopping_ok and named and 'shopping' not in launched[cc] else 'scoped')
                             if lanes_for(cc) >= 3 and 'scoped' in launched[cc] and by_market[cc] < target_for(cc):
-                                # Third local lane: the next catalog slice of store-scoped discovery.
                                 launch(cc, 'scoped2')
             if not jobs:
                 if reference_job is None:
@@ -19834,10 +20036,10 @@ def _web_selected_market_search(query, country, lang, global_countries, *, image
             if not jobs and reference_job is None:
                 # Loop once more to start an eligible empty-result rescue, or the
                 # China lanes that were held back for the Lens consensus name.
-                cn_lanes = 2 if LOCAL_DISCOVERY_BAIDU else 1
+                cn_lanes = 3 if LOCAL_DISCOVERY_BAIDU else 2
                 can_rescue = bool(query and SERPAPI_API_KEY and any(
-                    (cc != 'cn' and len(launched[cc]) < lanes_for(cc) and by_market[cc] < target_for(cc))
-                    or (cc == 'cn' and len(launched[cc]) < cn_lanes) for cc in scopes))
+                    len(launched[cc]) < min(lanes_for(cc), cn_lanes if cc == country == 'cn' else lanes_for(cc))
+                    and by_market[cc] < target_for(cc) for cc in scopes))
                 if not can_rescue:
                     break
         for cc in scopes:
