@@ -293,7 +293,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization'], max_age=86400)
-BUILD_ID = 'v128.5.1-choice-price-integrity'
+BUILD_ID = 'v128.5.2-price-ranges-more-stores'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -4472,7 +4472,8 @@ def _local_discovery_rows(data, query, market, provider):
             # it as text so merchant-country evidence can read "KD 12.500".
             item['price'] = _local_discovery_snippet_price(row)
         money_row = dict(row, _shopping_gl=price_geo, _price_market=price_geo)
-        source_money = _web_indexed_offer_money(money_row)
+        source_quote = _web_indexed_offer_quote(money_row)
+        source_money = ((source_quote['min'] or source_quote['max']), source_quote['currency']) if source_quote else None
         if source_money:
             item['currency'] = source_money[1]
         if market['country'] == 'cn' and _china_domestic_product_url(url):
@@ -4487,13 +4488,14 @@ def _local_discovery_rows(data, query, market, provider):
             continue
         canonical = _canonical_result_url(url)
         # Product price only, not prose mentioning freight or a minimum order.
-        money = None if re.search(r'起|起批|运费|批发|\bMOQ\b', str(item['price']), re.I) else _web_indexed_offer_money(money_row)
-        if _host_matches_any(host, ('1688.com',)):
-            money = None  # Quantity-tier wholesale prices need the actual offer.
+        quote = _web_indexed_offer_quote(money_row)
+        if _host_matches_any(host, ('1688.com',)) and quote and quote['kind']=='exact':
+            quote = None  # A single wholesale tier is not an unconditional retail price.
+        money = ((quote['min'] or quote['max']),quote['currency']) if quote else None
         pictures = _web_offer_image_candidates(row)
         pic = pictures[0] if pictures else ''
         item.update(position=len(out) + 1, section='local_discovery', exact=False,
-                    thumbnail=pic, image=pic, image_candidates=pictures, price=f'{format_price(money[0], money[1])} {money[1]}' if money else '',
+                    thumbnail=pic, image=pic, image_candidates=pictures, price=_web_format_quote(quote) if quote else '',
                     price_value=money[0] if money else None, currency=money[1] if money else '',
                     market_country=market['country'], in_stock=None, condition='',
                     price_source=provider, price_verified=False, _local_discovery=True,
@@ -6425,7 +6427,7 @@ def _authoritative_price_value(price_value, price_text='', currency_code=''):
         r'\b(?:USD|EUR|GBP|KWD|KD|SAR|AED|QAR|BHD|OMR|CNY|RMB|JPY|CAD|AUD|CHF|INR|KRW|TRY|RUB)\b|US\$|A\$|C\$|S\$|HK\$|NZ\$|NT\$|[$€£¥￥₹₩₺₽₪]|د\.ك|ر\.س|د\.إ|ر\.ق|ر\.ع|د\.ب',
         raw, re.I
     ))
-    if raw and explicit_currency:
+    if raw and (explicit_currency or str(currency_code or '').upper() in KNOWN_CURRENCY_CODES):
         parsed = _extract_numeric_price(raw, currency_code)
         if parsed is None:
             return None
@@ -7562,6 +7564,9 @@ def _fill_prices_from_existing_lens_pool(selected, pool):
     return out
 
 def _lens_price_text_local(m, market_rank, lang):
+    quote = _web_price_quote(m.get('price'), m.get('currency') or '', m.get('_price_market') or m.get('_lens_country') or '')
+    if quote and quote['kind'] != 'exact':
+        return _web_live_quote_fields(quote, current_market())['price']
     raw_price = str(m.get('price') or '').strip()
     price_value = m.get('price_value')
     currency = (m.get('currency') or '').upper().strip()
@@ -8948,6 +8953,9 @@ def _text_price_local(raw_price, market_rank, lang):
             src = 'USD'
         elif market_rank == 2:
             src = 'CNY'
+    quote = _web_price_quote(raw,src)
+    if quote and quote['kind'] != 'exact':
+        return _web_live_quote_fields(quote,current_market())['price']
     if market_rank == 0 and (not src or src == local_cur):
         return format_lens_price(raw, None, lang, local_cur or src or None)
     numeric = None
@@ -10109,7 +10117,7 @@ def _web_build_lens_items(lens, lang, caption=''):
         rank = result_market_rank(m)
         cc = rank_cc.get(rank, '')
         shown_price = _lens_price_text_local(m, rank, lang)
-        results.append({'market': _web_market_label(rank), 'market_rank': rank, 'country': cc, 'flag': country_flag_emoji(cc), 'store': _ui_plain_store_name(m.get('source') or '', m.get('link') or '') or U(lang, 'store'), 'title': _compact_ui_title(display_title or m.get('title') or ''), 'raw_title': (m.get('title') or display_title or '').strip(), 'price': shown_price, 'price_pending': not bool(shown_price), 'price_verified': False, 'price_source': 'lens_index', 'price_source_url': (m.get('link') or '').strip(), 'url': (m.get('link') or '').strip(), 'image': m.get('thumbnail') or m.get('image') or ''})
+        results.append({'market': _web_market_label(rank), 'market_rank': rank, 'country': cc, 'flag': country_flag_emoji(cc), 'store': _ui_plain_store_name(m.get('source') or '', m.get('link') or '') or U(lang, 'store'), 'title': _compact_ui_title(display_title or m.get('title') or ''), 'raw_title': (m.get('title') or display_title or '').strip(), 'price': shown_price, 'price_raw': str(m.get('price') or ''), 'price_raw_currency': str(m.get('currency') or ''), 'price_pending': not bool(shown_price), 'price_verified': False, 'price_source': 'lens_index', 'price_source_url': (m.get('link') or '').strip(), 'url': (m.get('link') or '').strip(), 'image': m.get('thumbnail') or m.get('image') or ''})
     return [_web_apply_market_context(row, current_market()) for row in results if _market_offer_allowed(row, current_market())]
 
 _WEB_CLASSIFICATION_LABELS = {
@@ -15530,6 +15538,9 @@ def _web_price_local_explicit(raw_price, market_rank, lang, market_snapshot=None
     src = detect_currency_code(raw, local_cur if market_rank == 0 else 'USD' if market_rank == 1 else 'CNY' if market_rank == 2 else '', local_cc if market_rank == 0 else 'us' if market_rank == 1 else 'cn' if market_rank == 2 else '')
     if not src:
         src = local_cur if market_rank == 0 else 'USD' if market_rank == 1 else 'CNY' if market_rank == 2 else ''
+    quote = _web_price_quote(raw,src)
+    if quote and quote['kind'] != 'exact':
+        return _web_live_quote_fields(quote,m)['price']
     numeric = _extract_numeric_price(raw, src)
     if numeric is None:
         return raw
@@ -15791,19 +15802,30 @@ def _web_dom_price(soup, url, currency_hint, title):
         text = text[:80]
         if not text or len(re.findall(r'\d[\d.,]*', text)) > 2:
             continue  # ranges / lists are not one price
-        value, currency = _web_price_number_and_currency(text, currency_hint)
+        tax_note = ''
+        included = re.search(r'(?:TVA\s*(?:incl(?:use)?\.?|comprise)|(?:VAT|tax)\s*incl(?:uded)?\.?|incl\.?\s*(?:VAT|tax)|TTC)\s*[:：]?\s*(.+)$', text, re.I)
+        if included:
+            text, tax_note = included.group(1).strip(), 'Incl. VAT'
+        else:
+            excluded = re.search(r'\s*(?:hors\s+TVA|HT|excl\.?\s*(?:VAT|tax)|(?:VAT|tax)\s*excl(?:uded)?\.?)\s*$', text, re.I)
+            if excluded:
+                text, tax_note = text[:excluded.start()].strip(), 'Excl. VAT'
+        quote = _web_price_quote(text, currency_hint)
+        value = (quote['min'] or quote['max']) if quote else None
+        currency = quote['currency'] if quote else ''
         if not value or value <= 0 or currency not in KNOWN_CURRENCY_CODES:
             continue
         if _price_collides_with_product_spec(value, title):
             continue
         preferred = bool(_WEB_PRICE_ELEMENT_PREFER.search(label))
         line = getattr(el, 'sourceline', None) or 10 ** 9
-        candidates.append((0 if preferred else 1, 0 if line >= heading_line else 1, line, value, currency))
+        candidates.append((0 if preferred else 1, 0 if line >= heading_line else 1, line, value, currency, quote, tax_note))
     if not candidates:
         return None
     candidates.sort()
-    _, _, _, value, currency = candidates[0]
-    return {'price': value, 'currency': currency, 'price_source': 'page_dom', 'price_confidence': 'medium'}
+    _, _, _, value, currency, quote, tax_note = candidates[0]
+    return {'price': value, 'currency': currency, 'price_source': 'page_dom', 'price_confidence': 'medium',
+            'price_kind':quote['kind'],'price_min':quote['min'],'price_max':quote['max'],'price_unit':quote['unit'],'price_tax_note':tax_note}
 
 
 def _web_fallback_page_price(html, url, metadata, country=''):
@@ -16058,6 +16080,7 @@ def _web_fetch_page_snapshot(url, country=''):
                     parsed_data = _web_fallback_page_price(html, final_url, metadata, country) or parsed_data
                 except Exception as exc:
                     print('WEB PAGE PRICE FALLBACK ERR host=' + parsed.netloc + ': ' + type(exc).__name__)
+            data.update({k:parsed_data[k] for k in ('price_kind','price_min','price_max','price_unit','price_tax_note','price_tax_note') if k in parsed_data})
             data['price'] = parsed_data.get('price')
             data['currency'] = str(parsed_data.get('currency') or '').upper().strip()
             data['price_source'] = parsed_data.get('price_source') or ''
@@ -16156,6 +16179,9 @@ def _web_choose_verified_product_image(row, snap):
     return ''
 
 def _web_price_pairs(text):
+    quote = _web_price_quote(str(text or '').split(' (',1)[0])
+    if quote:
+        return [(quote['min'] or quote['max'],quote['currency'])]
     raw = str(text or '')
     pairs = []
     pats = ('(?i)(KWD|KD|USD|EUR|GBP|JPY|CNY|RMB|SAR|AED|QAR|BHD|OMR|CAD|AUD|CHF|INR|KRW|TRY|RUB)\\s*([0-9]+(?:[.,][0-9]{1,3})?)', '(?i)([0-9]+(?:[.,][0-9]{1,3})?)\\s*(KWD|KD|USD|EUR|GBP|JPY|CNY|RMB|SAR|AED|QAR|BHD|OMR|CAD|AUD|CHF|INR|KRW|TRY|RUB)')
@@ -16191,6 +16217,9 @@ def _web_normalize_existing_price_to_market(display_price, rank, lang, market_sn
     if not raw:
         return ''
     market = market_snapshot or current_market()
+    quote = _web_price_quote(raw)
+    if quote:
+        return _web_live_quote_fields(quote, market)['price']
     local_cur = _web_market_currency(market)
     pairs = _web_price_pairs(raw)
     if not pairs:
@@ -16248,6 +16277,10 @@ def _web_verify_card_strict(row, rank, lang, market_snapshot=None):
     if page_price and page_price > 0:
         if not page_cur:
             page_cur = _web_market_currency(market_snapshot) if rank == 0 else 'USD' if rank == 1 else 'CNY'
+        if (snap or {}).get('price_kind') in ('range','from','up_to'):
+            row.update(_web_live_quote_fields(_web_quote_from_fields(snap),market_snapshot or current_market()),
+                       price_verified=True,price_source=snap.get('price_source') or 'product_page',price_source_url=snap.get('url') or url)
+            return row
         raw_price = f'{page_price:g} {page_cur}'.strip()
         row['price'] = _web_price_local_explicit(raw_price, rank, lang, market_snapshot)
         row['price'] = _web_normalize_existing_price_to_market(row['price'], rank, lang, market_snapshot)
@@ -16288,7 +16321,9 @@ _WEB_PRICE_FIELDS = ('price', 'price_amount', 'currency', 'price_source', 'price
                      'price_estimated', 'price_compare_value', 'price_compare_currency',
                      'price_confidence', 'price_suspect_value',
                      'price_contract', 'price_display_ready', 'price_display_major',
-                     'price_display_minor', 'price_display_currency')
+                     'price_display_minor', 'price_display_currency', 'price_raw','price_raw_currency',
+                     'price_kind','price_min','price_max','price_unit',
+                     'price_display_high_major','price_display_high_minor')
 
 
 def _web_price_url_key(url):
@@ -16378,6 +16413,7 @@ def _web_extract_exact_page_price(html, url):
                           not products[0].get('url') and not products[0].get('@id', '').startswith('http') else [])
     prices = []
     ambiguous = False
+    ranges = []
     for product in selected:
         offers = product.get('offers') or []
         offers = offers if isinstance(offers, list) else [offers]
@@ -16410,10 +16446,13 @@ def _web_extract_exact_page_price(html, url):
             if 'AggregateOffer' in types(offer):
                 low = _web_exact_money(offer.get('lowPrice'), offer.get('priceCurrency'))
                 high = _web_exact_money(offer.get('highPrice'), offer.get('priceCurrency'))
-                if not low or low != high:
-                    ambiguous = True
+                if low and high and low[1]==high[1] and low[0]<=high[0]:
+                    ranges.append({'price':low[0], 'currency':low[1], 'price_kind':'range' if low[0]!=high[0] else 'exact',
+                                   'price_min':low[0], 'price_max':high[0], 'price_source':'product_jsonld',
+                                   'availability':str(offer.get('availability') or '').rsplit('/',1)[-1]})
                     continue
-                value = low[0]
+                ambiguous = True
+                continue
             money = _web_exact_money(value, offer.get('priceCurrency'))
             if not money:
                 spec = offer.get('priceSpecification')
@@ -16423,6 +16462,10 @@ def _web_extract_exact_page_price(html, url):
             if money:
                 prices.append((money, offer.get('availability') or ''))
     if ambiguous:
+        return {}
+    if ranges:
+        if not prices and len({(v['price_min'],v['price_max'],v['currency']) for v in ranges})==1:
+            return ranges[0]
         return {}
     if prices:
         if len({p[0] for p in prices}) == 1:
@@ -16575,13 +16618,14 @@ def _web_live_page_price(row, market):
     if _price_collides_with_product_spec(amount, original, title):
         return None
     confident = str(snap.get('price_confidence') or 'high') == 'high'
-    return {**_web_page_access_fields(snap), **_web_live_money_fields(amount, currency, market),
+    return {**_web_page_access_fields(snap), **_web_live_quote_fields(_web_quote_from_fields(snap), market),
             'price_source': snap.get('price_source') or 'product_page',
             'price_source_url': snap.get('url') or row.get('url'),
             'price_checked_at': snap.get('price_checked_at') or time.time(),
             'price_verified': confident, 'price_pending': False, 'price_unavailable': False,
             'price_status': 'verified' if confident else 'page', 'availability': snap.get('availability') or '',
             'price_confidence': snap.get('price_confidence') or 'high',
+            'price_tax_note':snap.get('price_tax_note') or '',
             'page_image': _web_live_page_image(row, snap)}
 
 
@@ -16648,6 +16692,9 @@ def _web_indexed_offer_money(item):
     price_obj = price if isinstance(price, dict) else {}
     currency = price_obj.get('currency') or item.get('currency') or ''
     price_text = price_obj.get('value') if price_obj else price
+    quote = _web_price_quote(price_text, currency, str(item.get('_price_market') or item.get('_shopping_gl') or ''))
+    if quote and quote['kind'] != 'exact':
+        return None  # Range-aware callers use _web_indexed_offer_quote instead.
     # A parsed range minimum, instalment or quantity-tier amount is not a price.
     if any(item.get(k) for k in ('installments_description', 'monthly_payment_duration', 'down_payment')):
         return None
@@ -16800,10 +16847,11 @@ def _web_targeted_price_updates(entries, lang, market):
             evidence = dict(item, _shopping_gl=cc)
             if row.get('export_store'):
                 evidence['_price_market'] = 'us'
-            money = _web_indexed_offer_money(evidence)
+            quote = _web_indexed_offer_quote(evidence)
+            money = ((quote['min'] or quote['max']),quote['currency']) if quote else None
             change = dict(updates.get(key) or {})
-            if money and not _host_matches_any(urllib.parse.urlsplit(link).hostname or '', ('1688.com',)):
-                change.update(_web_live_money_fields(*money, market),
+            if money and (quote['kind']!='exact' or not _host_matches_any(urllib.parse.urlsplit(link).hostname or '', ('1688.com',))):
+                change.update(_web_live_quote_fields(quote, market),
                     price_source='exact_listing_index', price_source_url=link,
                     price_checked_at=time.time(), price_verified=False,
                     price_status='indexed', price_pending=False, price_unavailable=False)
@@ -16832,6 +16880,8 @@ def _web_flag_price_outliers(rows):
     """
     groups = {}
     for key, row in rows.items():
+        if (_web_price_quote(row.get('price'),row.get('currency') or '') or {}).get('kind','exact') != 'exact':
+            continue
         if not _web_row_has_numeric_price(row):
             continue
         value, currency = _web_price_number_and_currency(str(row.get('price') or ''), str(row.get('currency') or ''))
@@ -16895,28 +16945,172 @@ def _web_live_snapshot(event, rows):
 
 
 
+def _web_price_quote(text, fallback_currency='', country=''):
+    """A complete displayed price: one amount, an explicit range, or an open bound."""
+    original = str(text or '').strip().split(' (', 1)[0]
+    raw = _normalize_price_chars(original).replace('\xa0', ' ').replace('\u202f', ' ').strip()
+    raw = re.sub(r'\bUS\s*\$', 'USD ', raw, flags=re.I)
+    if not raw or len(raw) > 180:
+        return None
+    unit = ''
+    suffix = re.search(r'\s*/\s*(pieces?|pcs?|units?|kg|g|m|sets?|pairs?|个|件|套|公斤|قطعة|كجم)\s*$', raw, re.I)
+    if suffix:
+        unit, raw = suffix.group(1), raw[:suffix.start()].strip()
+    # Prices must not silently absorb finance, freight, discounts or an order quantity.
+    if re.search(r'\b(?:save|saving|shipping|delivery|monthly|instalments?|installments?|MOQ|VAT|TVA)\b|运费|起批|شهري|قسط|خصم', raw, re.I):
+        return None
+    kind = 'exact'
+    prefix = re.match(r'^(?:from|starting(?:\s+at)?|à\s+partir\s+de|ab|desde|a\s+partir\s+de|ابتداء[ًا]*\s*من|من|起价|起價)\s*', raw, re.I)
+    upper = re.match(r'^(?:up\s+to|jusqu[’\x27]à|hasta|حتى|最高)\s*', raw, re.I)
+    if prefix or upper:
+        match = prefix or upper
+        kind = 'from' if prefix else 'up_to'
+        raw = raw[match.end():].strip()
+    if raw.endswith('起'):
+        kind, raw = 'from', raw[:-1].strip()
+    parts = re.split(r'\s*(?:[-–—~～]|至|到|\bto\b|\bà\b|إلى|الى)\s*', raw, flags=re.I)
+    if len(parts) > 2 or any(not p for p in parts):
+        return None
+    if len(parts) == 2:
+        kind = 'range'
+    currency = detect_currency_code(raw, fallback_currency or '', country) or fallback_currency or ''
+    currency = str(currency).upper()
+    if currency not in KNOWN_CURRENCY_CODES:
+        return None
+    atom = re.compile(r'\s*(?:(?:'+_WEB_PRICE_CUR_WORDS+'|'+_WEB_PRICE_CUR_SYMS+r'|人民币)\s*)?'+
+                      _WEB_PRICE_NUM+r'\s*(?:(?:'+_WEB_PRICE_CUR_WORDS+'|'+_WEB_PRICE_CUR_SYMS+r'|元))?\s*', re.I)
+    values = []
+    for part in parts:
+        match = atom.fullmatch(part)
+        if not match:
+            return None
+        token = match.group(1)
+        explicit = detect_currency_code(re.sub(re.escape(token), '', part, count=1), '', country)
+        currency_text = re.sub(re.escape(token), '', part, count=1).strip()
+        if currency_text in ('$', '¥', '￥'):
+            explicit = currency
+        if explicit and explicit != currency:
+            return None
+        value = _normalize_price_token(token, currency, '.' if '٫' in original else '')
+        if value is None or not math.isfinite(value) or value <= 0:
+            return None
+        values.append(value)
+    low = None if kind == 'up_to' else values[0]
+    high = values[-1] if kind in ('range','up_to','exact') else None
+    if low is not None and high is not None and low > high:
+        return None
+    if kind == 'range' and low == high:
+        kind = 'exact'
+    return {'kind':kind, 'min':low, 'max':high, 'currency':currency, 'unit':unit, 'raw':original}
+
+
+def _web_quote_from_fields(row):
+    code = str(row.get('currency') or '').upper()
+    kind = row.get('price_kind') or 'exact'
+    if kind in ('range', 'from', 'up_to'):
+        low = _web_exact_money(row.get('price_min'), code)
+        high = _web_exact_money(row.get('price_max'), code)
+        if (kind=='range' and (not low or not high or low[0]>high[0]) or
+                kind=='from' and not low or kind=='up_to' and not high):
+            return None
+        return {'kind':kind,'min':low[0] if low else None,'max':high[0] if high else None,
+                'currency':code,'unit':str(row.get('price_unit') or '')}
+    money = _web_exact_money(row.get('price'), code)
+    return {'kind':'exact','min':money[0],'max':money[0],'currency':code,'unit':''} if money else None
+
+
+def _web_format_quote(quote):
+    kind, code = quote['kind'], quote['currency']
+    low = format_price(quote['min'],code) if quote.get('min') is not None else ''
+    high = format_price(quote['max'],code) if quote.get('max') is not None else ''
+    amount = low+'–'+high if kind=='range' else 'From '+low if kind=='from' else 'Up to '+high if kind=='up_to' else low
+    return amount+' '+code+(' /'+quote['unit'] if quote.get('unit') else '')
+
+
+def _web_live_quote_fields(quote, market):
+    """Convert both bounds using the same cached FX rate, never just the minimum."""
+    if not quote:
+        return {}
+    anchor = quote['min'] if quote.get('min') is not None else quote['max']
+    fields = _web_live_money_fields(anchor, quote['currency'], market)
+    shown = dict(quote)
+    if fields['currency'] != quote['currency']:
+        ratio = fields['price_amount']/anchor
+        shown.update(currency=fields['currency'],
+                     min=quote['min']*ratio if quote.get('min') is not None else None,
+                     max=quote['max']*ratio if quote.get('max') is not None else None)
+    original = _web_format_quote(quote)
+    fields.update(price=_web_format_quote(shown)+(f' ({original})' if shown['currency']!=quote['currency'] else ''),
+                  price_kind=shown['kind'],price_min=shown.get('min'),price_max=shown.get('max'),price_unit=shown.get('unit',''),
+                  original_price=original,price_raw=quote.get('raw') or original)
+    return fields
+
+
+def _web_indexed_offer_quote(item):
+    if not isinstance(item, dict) or any(item.get(k) for k in ('installments_description','monthly_payment_duration','down_payment')):
+        return None
+    obj = item.get('price') if isinstance(item.get('price'),dict) else {}
+    text = obj.get('value') if obj else item.get('price')
+    country = str(item.get('_price_market') or '').lower() or _search_geo_country(item) or _explicit_market_country(item)
+    code = obj.get('currency') or item.get('currency') or ''
+    # Use explicit display evidence before provider-derived numeric fields.
+    if isinstance(text,str) and text.strip():
+        quote = _web_price_quote(text,code,country)
+        if quote and not _price_collides_with_product_spec(quote['min'] or quote['max'],item.get('title') or ''):
+            if quote['kind']=='exact' and not _web_indexed_offer_money(item):
+                return None
+            return quote
+        return None
+    for side in ('top','bottom'):
+        block = (item.get('rich_snippet') or {}).get(side) or {}
+        detected = block.get('detected_extensions') or {}
+        extensions = block.get('extensions') or []
+        low, high = detected.get('price_from'), detected.get('price_to')
+        if low is not None or high is not None:
+            cur = detected.get('currency') or code
+            cur = detect_currency_code(str(cur), '', country) or cur
+            return _web_quote_from_fields({'price_kind':'range' if low is not None and high is not None else 'from' if low is not None else 'up_to',
+                                          'price_min':low,'price_max':high,'currency':cur})
+        for piece in extensions:
+            quote = _web_price_quote(piece,code,country)
+            if quote:
+                return quote
+        # Range endpoints must have a declared currency, never infer from the UI.
+        cur = detected.get('currency') or code
+        low, high = detected.get('price_from'), detected.get('price_to')
+        if low is not None or high is not None:
+            return _web_quote_from_fields({'price_kind':'range' if low is not None and high is not None else 'from' if low is not None else 'up_to',
+                                          'price_min':low,'price_max':high,'currency':cur})
+    money = _web_indexed_offer_money(item)
+    return {'kind':'exact','min':money[0],'max':money[0],'currency':money[1],'unit':''} if money else None
+
+
 def _web_price_display_fields(row):
+    blank = {'price_contract':'findzia-money-v1','price_display_ready':False,
+             'price_display_major':'','price_display_minor':'','price_display_currency':'',
+             'price_display_high_major':'','price_display_high_minor':'','price_kind':'exact',
+             'price_min':None,'price_max':None,'price_unit':''}
+    if row.get('price_unavailable') or row.get('price_status') in ('suspect','unavailable'):
+        return blank
     raw = str(row.get('price') or '').strip()
-    if (row.get('price_unavailable') or row.get('price_status') in ('suspect','unavailable')
-            or not _web_row_has_numeric_price(row)):
-        return {'price_contract':'findzia-money-v1','price_display_major':'',
-                'price_display_minor':'','price_display_currency':'','price_display_ready':False}
-    # The display amount, its currency and its grouping travel together.
-    value, code = _web_price_number_and_currency(raw,str(row.get('currency') or ''))
-    if not value or code not in KNOWN_CURRENCY_CODES:
-        return {'price_contract':'findzia-money-v1','price_display_ready':False,
-                'price_display_major':'','price_display_minor':'','price_display_currency':''}
-    formatted = format_price(value,code)
+    quote = _web_price_quote(raw,str(row.get('currency') or ''),str(row.get('country') or ''))
+    if not quote:
+        return blank
+    anchor = quote['min'] if quote.get('min') is not None else quote['max']
+    formatted = format_price(anchor,quote['currency'])
     if not formatted or Decimal(formatted.replace(',','')) <= 0:
-        return {'price_contract':'findzia-money-v1','price_display_ready':False,
-                'price_display_major':'','price_display_minor':'','price_display_currency':''}
+        return blank
     major, _, fraction = formatted.partition('.')
+    upper = format_price(quote['max'],quote['currency']) if quote['kind']=='range' else ''
+    high_major, _, high_minor = upper.partition('.')
     suffix = raw.split(' (',1)[1] if ' (' in raw else ''
-    return {'price':formatted+' '+code+(' ('+suffix if suffix else ''),
-            'price_amount':value,'currency':code,'price_pending':False,
+    return {'price':_web_format_quote(quote)+(' ('+suffix if suffix else ''),
+            'price_amount':anchor,'currency':quote['currency'],'price_pending':False,
+            'price_kind':quote['kind'],'price_min':quote['min'],'price_max':quote['max'],'price_unit':quote['unit'],
             'price_contract':'findzia-money-v1','price_display_ready':True,
             'price_display_major':major,'price_display_minor':'.'+fraction if fraction else '',
-            'price_display_currency':code}
+            'price_display_high_major':high_major,'price_display_high_minor':'.'+high_minor if high_minor else '',
+            'price_display_currency':quote['currency']}
 
 
 def _web_confirmable_price(row):
@@ -17163,7 +17357,8 @@ def _web_local_discovery_rows_sync(query, country, lang, existing, progress_call
                        'price_verified': False, 'price_status': 'indexed' if item.get('price_value') else 'loading',
                        'price_pending': not bool(item.get('price_value'))}
                 if item.get('price_value'):
-                    row.update(_web_live_money_fields(item['price_value'], item['currency'], market))
+                    quote = _web_price_quote(item.get('price'),item.get('currency') or '',country)
+                    row.update(_web_live_quote_fields(quote,market) if quote else _web_live_money_fields(item['price_value'], item['currency'], market))
                 if item.get('_local_match_uncertain'):
                     uncertain.add(url)
                 rows.append(row)
@@ -17299,6 +17494,9 @@ async def _web_complete_result_prices(result, lang, country, discover_local=Fals
 
 def _web_row_has_numeric_price(row):
     row = row or {}
+    quote = _web_price_quote(row.get('price'),str(row.get('currency') or ''),str(row.get('country') or ''))
+    if quote and quote['kind'] != 'exact':
+        return not _price_collides_with_product_spec(quote['min'] or quote['max'], row.get('title') or row.get('raw_title') or '')
     raw = _normalize_price_chars(str(row.get('price') or '')).strip()
     if re.search(r'\b(from|starting|up to)\b|ابتداء|إلى|\d\s*[-–—]\s*\d|[-−]\s*\d', raw, re.I):
         return False
@@ -17533,27 +17731,16 @@ def _web_shared_price_market_sync(entries, rank, lang, market_snapshot):
             score = _price_identity_score(row_title, cand_title)
             if score <= best_score:
                 continue
-            raw = str(cand.get('price') or '').strip()
-            value = cand.get('price_value')
-            try:
-                value = float(value) if value not in (None, '') else None
-            except Exception:
-                value = None
-            if not value or value <= 0:
-                value, _ = _web_price_number_and_currency(raw)
-            if not value or value <= 0:
+            quote = _web_indexed_offer_quote(cand)
+            if not quote:
                 continue
-            currency = str(cand.get('currency') or '').upper().strip()
-            if not currency:
-                _, currency = _web_price_number_and_currency(raw)
-            if not _web_exact_money(value, currency):
-                continue
-            raw = f'{format_price(value, currency)} {currency}'
-            best = (raw, score, value, currency, cand.get('link'))
+            value, currency = quote['min'] or quote['max'], quote['currency']
+            raw = _web_format_quote(quote)
+            best = (raw, score, value, currency, cand.get('link'), quote)
             best_score = score
         if not best:
             continue
-        row.update(_web_live_money_fields(best[2], best[3], market_snapshot))
+        row.update(_web_live_quote_fields(best[5],market_snapshot))
         row['price_source_url'] = best[4]
         row['price_checked_at'] = time.time()
         row['price_verified'] = False  # Indexed price, not a live merchant quote.
@@ -20273,7 +20460,8 @@ def _web_selected_offer(raw, cc, display_market, query='', visual=False):
     if cc != display_market['country'] and cc in GLOBAL_MARKET_STORES:
         target = dict(target, _retrieval_role='global')
         item['_price_market'] = item.get('_price_market') or 'us'
-    money = _web_indexed_offer_money(item)
+    quote = _web_indexed_offer_quote(item)
+    money = ((quote['min'] or quote['max']),quote['currency']) if quote else None
     if money and not item.get('currency'):
         item['currency'] = money[1]
     evidence = _local_storefront_evidence(item, target)
@@ -20295,7 +20483,7 @@ def _web_selected_offer(raw, cc, display_market, query='', visual=False):
     if item.get('_local_match_uncertain'):
         row['_local_match_uncertain'] = True
     if money:
-        row.update(_web_live_money_fields(money[0], money[1], display_market))
+        row.update(_web_live_quote_fields(quote, display_market))
     return _web_apply_market_context(row, display_market)
 
 
