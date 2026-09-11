@@ -293,7 +293,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization'], max_age=86400)
-BUILD_ID = 'v128.5.2-price-ranges-more-stores'
+BUILD_ID = 'v128.5.3-merchant-price-primary-image'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -4307,7 +4307,7 @@ def _web_offer_image_candidates(row):
             if _web_is_http_url(raw) and raw not in seen:
                 seen.add(raw)
                 urls.append(raw)
-    for field in ('serpapi_thumbnail', 'thumbnail', 'image', 'image_url', 'product_image', 'thumbnails', 'images', 'image_candidates'):
+    for field in ('primary_image', 'serpapi_thumbnail', 'thumbnail', 'image', 'image_url', 'product_image', 'thumbnails', 'images', 'image_candidates'):
         add((row or {}).get(field))
     return urls
 
@@ -4318,7 +4318,9 @@ def _web_merge_offer_images(previous, incoming):
     fresh = [url for url in incoming_pictures if url not in before]
     # Keep the current primary, but never drop a newly recovered picture
     # behind a full list of older (possibly failed) thumbnails.
-    pictures = list(dict.fromkeys(before[:1] + fresh + before[1:] + incoming_pictures))[:8]
+    primary = incoming.get('primary_image') or previous.get('primary_image') or ''
+    preferred = _web_offer_image_candidates({'primary_image':primary})
+    pictures = list(dict.fromkeys(preferred + before[:1] + fresh + before[1:] + incoming_pictures))[:8]
     if not pictures:
         return {}
     # Keep raw first for fast CDN delivery; signed alternatives handle hotlink/CORS paths.
@@ -4327,8 +4329,9 @@ def _web_merge_offer_images(previous, incoming):
         for candidate in (picture, _web_public_image_url(picture)):
             if candidate and candidate not in candidates:
                 candidates.append(candidate)
-    return {'image': previous.get('image') or pictures[0],
-            'thumbnail': previous.get('thumbnail') or pictures[0], 'image_candidates': candidates}
+    return {'image': preferred[0] if preferred else previous.get('image') or pictures[0],
+            'thumbnail': preferred[0] if preferred else previous.get('thumbnail') or pictures[0],
+            'primary_image': preferred[0] if preferred else '', 'image_candidates': candidates}
 
 
 
@@ -9710,6 +9713,9 @@ def _web_extract_product_image_from_html(html, base_url):
         soup = BeautifulSoup(html or '', 'html.parser')
     except Exception:
         return ''
+    primary = _web_product_page_metadata(html, base_url).get('image') or ''
+    if primary:
+        return primary
     candidates = []
     for attrs in ({'property': 'og:image'}, {'property': 'og:image:url'}, {'name': 'twitter:image'}, {'property': 'twitter:image'}, {'itemprop': 'image'}):
         for tag in soup.find_all('meta', attrs=attrs):
@@ -15628,6 +15634,171 @@ def _web_deep_json_price_scan(html, url=''):
     return (price, cur)
 _WEB_MOBILE_HEADERS = {'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1', 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8', 'Accept-Language': 'en-US,en;q=0.9,ar;q=0.8'}
 
+_WEB_REQUEST_PRICE = re.compile(
+    r'(?<![a-z])p\.?\s*o\.?\s*a\.?(?![a-z])|price\s+(?:on|upon)\s+(?:application|request)|'
+    r'(?:call|contact|enquire|inquire)\s+(?:us\s+)?for\s+(?:a\s+)?price|request\s+(?:a\s+)?quote|'
+    r'السعر\s*(?:عند|حسب)\s*الطلب|السعر\s*عند\s*التواصل|询价|面议|价格面谈|prix\s+sur\s+demande', re.I)
+_WEB_OTHER_PRODUCT_BLOCK = re.compile(
+    r'(?:^|[\s_-])(?:related|recommendations?|recommended|upsells?|cross[-_]?sells?|recently[-_]?viewed|'
+    r'cart|mini[-_]?cart|footer|navigation)(?:$|[\s_-])', re.I)
+
+
+def _web_price_on_request(value):
+    """Only call on an offer's price field, never the whole page or description."""
+    if isinstance(value, dict):
+        value = value.get('value') or value.get('text') or value.get('price') or ''
+    return isinstance(value, str) and len(value) < 180 and bool(_WEB_REQUEST_PRICE.search(value))
+
+
+def _web_request_price_fields(url='', checked_at=None):
+    return {'price':'', 'price_amount':None, 'price_min':None, 'price_max':None,
+            'price_raw':'POA', 'price_pending':False, 'price_unavailable':True,
+            'price_status':'on_request', 'price_verified':False,
+            'price_source':'product_page', 'price_source_url':url,
+            'price_checked_at':checked_at or time.time(), 'price_compare_value':None,
+            'price_compare_currency':'', 'original_price':'', 'compare_price':'',
+            'compare_at_price':'', 'sale_compare':'', 'compare_price_verified':False}
+
+
+def _web_current_product_dom(soup, url):
+    """Find the main product around its H1 and remove unrelated/hidden widgets."""
+    if not _web_is_direct_product_page_url(url):
+        return None
+    canonical = soup.select_one('link[rel="canonical"]')
+    if canonical and _web_price_url_key(urllib.parse.urljoin(url, canonical.get('href') or '')) != _web_price_url_key(url):
+        return None
+    # A server-rendered default price/gallery cannot prove a selected variant.
+    query = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)
+    if any(k.lower() in ('variant','sku','skuid','size','color') for k in query):
+        return None
+    heading = soup.find('h1')
+    if not heading:
+        return None
+    root = None
+    for parent in heading.parents:
+        classes = parent.get('class') or []
+        if ('product' in classes or parent.get('itemtype','').endswith('/Product') or
+                re.match(r'^product-\d+$', parent.get('id') or '')):
+            root = parent
+            break
+    if root is None:
+        root = heading.find_parent('main')
+    if root is None:
+        # A small explicit product-summary container also binds the offer.
+        root = heading.find_parent(class_=lambda c: c and c in ('summary','product__info-container','product-info-main'))
+    if root is None:
+        return None
+    scoped = BeautifulSoup(str(root), 'html.parser')
+    for el in list(scoped.find_all(True)):
+        if el.attrs is None:
+            continue
+        label = ' '.join([el.get('id') or ''] + (el.get('class') or []))
+        hidden = el.has_attr('hidden') or el.get('aria-hidden') == 'true' or re.search(r'display\s*:\s*none|visibility\s*:\s*hidden',el.get('style') or '',re.I)
+        if hidden or el.name in ('nav','footer','script','style','template','noscript') or _WEB_OTHER_PRODUCT_BLOCK.search(label):
+            el.decompose()
+    return scoped
+
+
+def _web_current_product_price(soup, url, country=''):
+    """Visible primary offer takes precedence over stale schema/index prices."""
+    scope = _web_current_product_dom(soup, url)
+    if scope is None:
+        return {}
+    currency, _ = _web_page_currency_hint(soup, str(soup), url, country)
+    heading = scope.find('h1')
+    if not heading:
+        return {}
+    # Restrict to the first price block after the product name. It may be in
+    # a builder wrapper rather than WooCommerce's .summary.
+    found_heading = False
+    blocks = []
+    for el in scope.find_all(True):
+        if el is heading:
+            found_heading = True
+        if not found_heading or el.name not in ('p','div','span','section'):
+            continue
+        label = ' '.join([el.get('id') or ''] + (el.get('class') or []))
+        if not re.search(r'price|offer',label,re.I) or _WEB_PRICE_ELEMENT_EXCLUDE.search(label):
+            continue
+        if any(re.search(r'(?:^|[\s_-])(?:member|members|loyalty|coupon|installment)(?:$|[\s_-])',
+               ' '.join([a.get('id') or '']+(a.get('class') or [])),re.I)
+               for a in el.parents if a.attrs):
+            continue
+        if el.find_parent(['del','s','strike']):
+            continue
+        text = el.get_text(' ', strip=True)
+        if not text or len(text)>180:
+            continue
+        if any(el in parent.descendants for parent in blocks):
+            continue
+        blocks.append(el)
+    for el in blocks[:4]:
+        text = el.get_text(' ',strip=True)
+        # A shipping quote or coupon near a valid product price is not POA.
+        if re.search(r'shipping|delivery|coupon|member|installment|per\s+month|شحن|تقسيط',text,re.I):
+            continue
+        if _web_price_on_request(text):
+            return dict(_web_request_price_fields(url), is_product=True, currency=currency)
+        old_nodes = el.select('del, s, strike') or el.select('.price-item--regular, .old-price, .regular-price')
+        new_nodes = el.select('ins') or el.select('.price-item--sale, .special-price, .sale-price')
+        def quote(node):
+            return _web_price_quote(node.get_text(' ',strip=True), currency, country)
+        if len(old_nodes)==1 and len(new_nodes)==1:
+            old, new = quote(old_nodes[0]), quote(new_nodes[0])
+            if (old and new and old['kind']==new['kind']=='exact' and
+                    old['currency']==new['currency'] and old['min']>new['min']):
+                return {'price':new['min'], 'currency':new['currency'],
+                        'price_kind':'exact','price_min':new['min'],'price_max':new['min'],
+                        'compare_price_amount':old['min'],'compare_price_currency':old['currency'],
+                        'compare_price_verified':True,'price_source':'page_current_offer',
+                        'price_confidence':'high', 'is_product':True}
+            # Never treat an invalid discount pair as a range/current amount.
+            return {}
+        if old_nodes or new_nodes:
+            continue
+        current = _web_price_quote(text,currency,country)
+        if current:
+            return {'price':current['min'] or current['max'],'currency':current['currency'],
+                    'price_kind':current['kind'],'price_min':current['min'],'price_max':current['max'],
+                    'price_unit':current['unit'],'price_source':'page_current_offer',
+                    'price_confidence':'high', 'is_product':True}
+    return {}
+
+
+def _web_primary_gallery_image(soup, url):
+    scope = _web_current_product_dom(soup, url)
+    if scope is None:
+        return ''
+    # Merchant-selected hero first. Gallery details must never outrank it.
+    for selector in ('.woocommerce-product-gallery img.wp-post-image',
+                     '.woocommerce-product-gallery__image img',
+                     'img[data-main-image]', '.product__media img'):
+        img = scope.select_one(selector)
+        if not img:
+            continue
+        for key in ('data-large_image','data-src','src'):
+            image = _web_absolute_url(url, img.get(key) or '')
+            if _web_is_http_url(image) and not re.search(r'logo|placeholder|spinner|sprite',image,re.I):
+                return image
+    return ''
+
+
+def _web_live_compare_fields(snapshot, money_fields, market):
+    """Convert a proven old/current pair together, using only the cached FX rate."""
+    blank = {'compare_price':'', 'compare_at_price':'', 'sale_compare':'',
+             'compare_price_verified':False, 'compare_price_amount':None, 'compare_price_currency':''}
+    old = _web_exact_money(snapshot.get('compare_price_amount'),snapshot.get('compare_price_currency'))
+    current = _web_exact_money(snapshot.get('price'),snapshot.get('currency'))
+    if not (snapshot.get('compare_price_verified') and old and current and old[1]==current[1]
+            and old[0]>current[0] and snapshot.get('price_kind','exact')=='exact'):
+        return blank
+    # Use exactly the current price's conversion ratio, never a separate FX call.
+    target = money_fields.get('currency')
+    value = old[0] * money_fields['price_amount'] / current[0]
+    return dict(blank, compare_price=f'{format_price(value,target)} {target}',
+                compare_price_amount=value, compare_price_currency=target, compare_price_verified=True)
+
+
 def _web_product_page_metadata(html, base_url):
     """Select the current product, or its canonical OpenGraph image on a direct listing."""
     if _web_merchant_access_reason(200, {}, html, base_url):
@@ -15686,6 +15857,12 @@ def _web_product_page_metadata(html, base_url):
         if picture and not re.search(r'(?:logo|favicon|sprite)', picture, re.I):
             data['image'] = data['image'] or picture
             data['is_product'] = True
+    if page_ok:
+        primary = _web_primary_gallery_image(soup, base_url)
+        if primary:
+            data['image'] = primary
+            data['is_product'] = True
+            data['title'] = data['title'] or (soup.h1.get_text(' ',strip=True) if soup.h1 else '')
     return data
 
 _WEB_PRICE_ELEMENT_EXCLUDE = re.compile(
@@ -15835,6 +16012,9 @@ def _web_fallback_page_price(html, url, metadata, country=''):
     if not WEB_PRICE_FALLBACK_TIERS or not html:
         return {}
     soup = BeautifulSoup(html[:900000], 'html.parser')
+    visible = _web_current_product_price(soup, url, country)
+    if visible:
+        return visible
     title = str((metadata or {}).get('title') or '')
     currency_hint, hint_source = _web_page_currency_hint(soup, html, url, country)
     for finder in (lambda: _web_amazon_page_price(soup, url), lambda: _web_next_data_price(soup, url, currency_hint)):
@@ -16073,14 +16253,14 @@ def _web_fetch_page_snapshot(url, country=''):
                 # A malformed price must not discard the offer's title/image.
                 print('WEB PRODUCT PRICE PARSE ERR host=' + parsed.netloc + ': ' + type(exc).__name__)
                 parsed_data = {}
-            if not parsed_data.get('price') and data.get('price'):
+            if not parsed_data.get('price') and parsed_data.get('price_status') != 'on_request' and data.get('price'):
                 parsed_data = dict(parsed_data, price=data['price'], currency=data['currency'], price_source=data.get('price_source'))
-            if not parsed_data.get('price'):
+            if not parsed_data.get('price') and parsed_data.get('price_status') != 'on_request':
                 try:
                     parsed_data = _web_fallback_page_price(html, final_url, metadata, country) or parsed_data
                 except Exception as exc:
                     print('WEB PAGE PRICE FALLBACK ERR host=' + parsed.netloc + ': ' + type(exc).__name__)
-            data.update({k:parsed_data[k] for k in ('price_kind','price_min','price_max','price_unit','price_tax_note','price_tax_note') if k in parsed_data})
+            data.update({k:parsed_data[k] for k in ('price_kind','price_min','price_max','price_unit','price_tax_note','price_status','price_unavailable','compare_price_amount','compare_price_currency','compare_price_verified') if k in parsed_data})
             data['price'] = parsed_data.get('price')
             data['currency'] = str(parsed_data.get('currency') or '').upper().strip()
             data['price_source'] = parsed_data.get('price_source') or ''
@@ -16323,7 +16503,9 @@ _WEB_PRICE_FIELDS = ('price', 'price_amount', 'currency', 'price_source', 'price
                      'price_contract', 'price_display_ready', 'price_display_major',
                      'price_display_minor', 'price_display_currency', 'price_raw','price_raw_currency',
                      'price_kind','price_min','price_max','price_unit',
-                     'price_display_high_major','price_display_high_minor')
+                     'price_display_high_major','price_display_high_minor','price_tax_note',
+                     'compare_price','compare_at_price','sale_compare','compare_price_amount',
+                     'compare_price_currency','compare_price_verified')
 
 
 def _web_price_url_key(url):
@@ -16371,6 +16553,9 @@ def _web_extract_exact_page_price(html, url):
     if _web_merchant_access_reason(200, {}, html, url):
         return {}
     soup = BeautifulSoup(html or '', 'html.parser')
+    visible = _web_current_product_price(soup, url)
+    if visible:
+        return visible
     def meta(name):
         el = soup.find('meta', property=name) or soup.find('meta', attrs={'name': name})
         return str(el.get('content') or '').strip() if el else ''
@@ -16412,6 +16597,7 @@ def _web_extract_exact_page_price(html, url):
     selected = variant_matched or matched or ([products[0]] if len(products) == 1 and
                           not products[0].get('url') and not products[0].get('@id', '').startswith('http') else [])
     prices = []
+    comparisons = []
     ambiguous = False
     ranges = []
     for product in selected:
@@ -16443,6 +16629,9 @@ def _web_extract_exact_page_price(html, url):
             if offer.get('businessFunction') and not str(offer['businessFunction']).endswith('Sell'):
                 continue
             value = offer.get('price')
+            if _web_price_on_request(value) and len(selected)==1 and len(resolved)==1:
+                return dict(_web_request_price_fields(url),is_product=True,
+                            currency=str(offer.get('priceCurrency') or ''))
             if 'AggregateOffer' in types(offer):
                 low = _web_exact_money(offer.get('lowPrice'), offer.get('priceCurrency'))
                 high = _web_exact_money(offer.get('highPrice'), offer.get('priceCurrency'))
@@ -16461,6 +16650,18 @@ def _web_extract_exact_page_price(html, url):
                     money = _web_exact_money(spec.get('price'), spec.get('priceCurrency'))
             if money:
                 prices.append((money, offer.get('availability') or ''))
+                specs = offer.get('priceSpecification') or []
+                specs = specs if isinstance(specs,list) else [specs]
+                old_prices = []
+                for spec in specs:
+                    if not isinstance(spec,dict) or str(spec.get('priceType') or '').rsplit('/',1)[-1] != 'StrikethroughPrice':
+                        continue
+                    if any(spec.get(k) for k in ('validForMemberTier','referenceQuantity','billingDuration','unitCode','eligibleQuantity')):
+                        continue
+                    old = _web_exact_money(spec.get('price'),spec.get('priceCurrency') or money[1])
+                    if old and old[1]==money[1] and old[0]>money[0]:
+                        old_prices.append(old)
+                comparisons.append(old_prices[0] if len(set(old_prices))==1 else None)
     if ambiguous:
         return {}
     if ranges:
@@ -16469,7 +16670,10 @@ def _web_extract_exact_page_price(html, url):
         return {}
     if prices:
         if len({p[0] for p in prices}) == 1:
-            return result(prices[0][0], 'product_jsonld', prices[0][1])
+            found = result(prices[0][0], 'product_jsonld', prices[0][1])
+            if comparisons and all(comparisons) and len(set(comparisons))==1:
+                found.update(compare_price_amount=comparisons[0][0],compare_price_currency=comparisons[0][1],compare_price_verified=True)
+            return found
         # Multiple variants/offers with different prices need an explicit selection.
         return {}
     # Product-scoped OpenGraph metadata; never og:price guesses on category pages.
@@ -16517,7 +16721,7 @@ def _web_extract_exact_page_price(html, url):
             variant = (urllib.parse.parse_qs(urllib.parse.urlsplit(url).query).get('variant') or [''])[0]
             if variant:
                 variants = [v for v in variants if isinstance(v, dict) and str(v.get('id')) == variant]
-            values = []
+            values, comparisons = [], []
             for item in variants:
                 if not isinstance(item, dict) or isinstance(item.get('price'), bool):
                     continue
@@ -16527,8 +16731,16 @@ def _web_extract_exact_page_price(html, url):
                     money = None
                 if money:
                     values.append(money)
+                    try:
+                        old = _web_exact_money(Decimal(str(item.get('compare_at_price'))) / 100,currency)
+                    except InvalidOperation:
+                        old = None
+                    comparisons.append(old if old and old[0]>money[0] else None)
             if values and len(values) == len(variants) and len(set(values)) == 1:
-                return result(values[0], 'shopify_product_json')
+                found = result(values[0], 'shopify_product_json')
+                if comparisons and all(comparisons) and len(set(comparisons))==1:
+                    found.update(compare_price_amount=comparisons[0][0],compare_price_currency=comparisons[0][1],compare_price_verified=True)
+                return found
     return {}
 
 
@@ -16540,7 +16752,7 @@ def _web_verified_page_snapshot(url, country=''):
     now = time.monotonic()
     with WEB_PRODUCT_VERIFY_LOCK:
         cached = WEB_PRODUCT_VERIFY_CACHE.get(key)
-        if cached and now - cached['ts'] < (WEB_LIVE_PRICE_CACHE_TTL if cached['data'].get('price') else 15):
+        if cached and now - cached['ts'] < (WEB_LIVE_PRICE_CACHE_TTL if cached['data'].get('price') or cached['data'].get('price_status')=='on_request' else 15):
             return dict(cached['data'])
         flight = _WEB_PAGE_FLIGHTS.get(key)
         owner = flight is None
@@ -16599,7 +16811,7 @@ def _web_live_page_price(row, market):
     MARKET_CTX.value = dict(market)
     snap = _web_verified_page_snapshot(row.get('url'), row.get('country') or row.get('market_country') or '') or {}
     money = _web_exact_money(snap.get('price'), snap.get('currency'))
-    if not money or not snap.get('is_product'):
+    if (not money and snap.get('price_status') != 'on_request') or not snap.get('is_product'):
         image = _web_live_page_image(row, snap)
         return dict(_web_page_access_fields(snap), **({'page_image': image} if image else {})) or None
     title = str(snap.get('title') or '')
@@ -16614,11 +16826,16 @@ def _web_live_page_price(row, market):
         after = urllib.parse.parse_qs(urllib.parse.urlsplit(snap.get('url') or '').query)
         if any(before.get(k) != after.get(k) for k in ('variant', 'sku', 'size', 'color', 'currency') if k in before):
             return None
+    if snap.get('price_status') == 'on_request':
+        return dict(_web_request_price_fields(snap.get('url'),snap.get('price_checked_at')),
+                    page_image=_web_live_page_image(row,snap))
     amount, currency = money
     if _price_collides_with_product_spec(amount, original, title):
         return None
     confident = str(snap.get('price_confidence') or 'high') == 'high'
-    return {**_web_page_access_fields(snap), **_web_live_quote_fields(_web_quote_from_fields(snap), market),
+    money_fields = _web_live_quote_fields(_web_quote_from_fields(snap), market)
+    return {**_web_page_access_fields(snap), **money_fields,
+            **_web_live_compare_fields(snap,money_fields,market),
             'price_source': snap.get('price_source') or 'product_page',
             'price_source_url': snap.get('url') or row.get('url'),
             'price_checked_at': snap.get('price_checked_at') or time.time(),
@@ -16649,9 +16866,7 @@ def _web_live_page_image(row, snap):
 def _web_live_page_image_only(row, market):
     """A page image for a card that already has a price but no picture."""
     MARKET_CTX.value = dict(market)
-    snap = _web_verified_page_snapshot(row.get('url'), row.get('country') or row.get('market_country') or '') or {}
-    image = _web_live_page_image(row, snap)
-    return dict(_web_page_access_fields(snap), **({'page_image': image} if image else {})) or None
+    return _web_live_page_price(row, market)
 
 
 def _web_live_pool_prices(rows, rank, lang, market):
@@ -16686,6 +16901,8 @@ _WEB_NOT_A_PRICE_PIECE = re.compile(
 
 def _web_indexed_offer_money(item):
     """Only explicit product price fields, not a number borrowed from a snippet."""
+    if _web_price_on_request(item.get('price')):
+        return None
     if not isinstance(item, dict):
         return None
     price = item.get('price')
@@ -17047,6 +17264,8 @@ def _web_live_quote_fields(quote, market):
 
 
 def _web_indexed_offer_quote(item):
+    if _web_price_on_request(item.get('price')):
+        return None
     if not isinstance(item, dict) or any(item.get(k) for k in ('installments_description','monthly_payment_duration','down_payment')):
         return None
     obj = item.get('price') if isinstance(item.get('price'),dict) else {}
@@ -17123,7 +17342,7 @@ def _web_confirmable_price(row):
     observed = source.startswith(('local_','global_')) or source in {
         'lens_index','indexed_offer','exact_listing_index','product_page','product_jsonld',
         'jsonld','product_meta','product_microdata','microdata','shopify_product_json','jd_price_api','amazon_price_block','next_data',
-        'page_dom','page_json','search_structured','shared_exact_index'}
+        'page_dom','page_json','page_current_offer','search_structured','shared_exact_index'}
     bound = row.get('price_source_url')
     return bool(observed and (not bound or _web_price_url_key(bound)==_web_price_url_key(row.get('url'))))
 
@@ -17157,6 +17376,8 @@ async def _web_with_live_prices(source, lang, country, allow_paid=True):
         if not _market_offer_allowed(item, market):
             return None
         item = dict(item)
+        if _web_price_on_request(item.get('price')) or _web_price_on_request(item.get('price_raw')):
+            item.update(_web_request_price_fields(item.get('url')))
         if item.get('price') and not _web_confirmable_price(item):
             item.update(price_unconfirmed=str(item['price']),price='',price_amount=None,
                         price_verified=False,price_pending=True,price_status='loading')
@@ -17171,7 +17392,7 @@ async def _web_with_live_prices(source, lang, country, allow_paid=True):
         previous_price = _web_price_facts(merged) if _web_row_has_numeric_price(merged) else {}
         merged.update(item)
         merged.update(image_fields)
-        if not _web_row_has_numeric_price(merged) and previous_price:
+        if not _web_row_has_numeric_price(merged) and previous_price and not item.get('price_unavailable'):
             merged.update(previous_price)
         if key in facts:
             merged.update(facts[key])
@@ -17180,7 +17401,7 @@ async def _web_with_live_prices(source, lang, country, allow_paid=True):
         if has_price:
             merged['price_pending'] = False
             merged['price_unavailable'] = False
-        elif key not in attempted:
+        elif key not in attempted and merged.get('price_status') != 'on_request':
             merged.update(price='', price_pending=True, price_unavailable=False, price_status='loading')
         merged.update(_web_price_display_fields(merged))
         rows[key] = merged
@@ -17193,11 +17414,9 @@ async def _web_with_live_prices(source, lang, country, allow_paid=True):
             missing_since.setdefault(key, loop.time())
         if key not in attempted and _web_is_http_url(merged.get('url') or ''):
             attempted.add(key)
-            if has_price and _web_is_http_url(_web_unproxy_image_url(merged.get('image') or '')):
-                pass  # nothing to fetch
-            elif has_price:
-                jobs[asyncio.create_task(image_only(dict(merged)))] = key
-            else:
+            # Priced cards also need a current offer/hero check. Reuse the
+            # shared page cache; never add a paid search or delay first results.
+            if merged.get('price_status') != 'on_request' and not cooldown:
                 jobs[asyncio.create_task(page(dict(merged)))] = key
         return merged
     def update_event(key, data, phase):
@@ -17207,10 +17426,10 @@ async def _web_with_live_prices(source, lang, country, allow_paid=True):
             facts[key] = dict(facts.get(key) or {}, **access)
         price_facts = _web_price_facts(data)
         # A late indexed response cannot replace a verified/live price.
-        if price_facts and not (phase == 'live_index_price' and _web_row_has_numeric_price(current)):
+        if price_facts and not (phase == 'live_index_price' and (_web_row_has_numeric_price(current) or current.get('price_status')=='on_request')):
             facts[key] = dict(facts.get(key) or {}, **price_facts)
         page_image = str((data or {}).get('page_image') or '').strip()
-        pictures = _web_merge_offer_images(current, {'image': page_image, 'image_candidates': data.get('image_candidates') or []})
+        pictures = _web_merge_offer_images(current, {'image': page_image, 'primary_image':page_image if phase=='live_page_price' else '', 'image_candidates': data.get('image_candidates') or []})
         if pictures:
             facts[key] = dict(facts.get(key) or {}, **pictures)
             if page_image:
@@ -17279,7 +17498,7 @@ async def _web_with_live_prices(source, lang, country, allow_paid=True):
                     yield update_event(key, data, 'live_page_price')
             # Hedge during retrieval, not after it. Coalesce listings into the
             # existing bounded batch budget; all normal API rate guards still apply.
-            eligible = {k: r for k, r in rows.items() if k not in recovery_attempted
+            eligible = {k: r for k, r in rows.items() if k not in recovery_attempted and r.get('price_status') != 'on_request'
                         and (not _web_row_has_numeric_price(r) or not _web_offer_image_candidates(r))
                         and (k in page_finished or loop.time() - missing_since.get(k, loop.time()) >= .75
                              or next_event is None)}
@@ -17308,6 +17527,8 @@ async def _web_with_live_prices(source, lang, country, allow_paid=True):
         for key, row in list(rows.items()):
             if not _web_row_has_numeric_price(row):
                 missing_count += 1
+                if row.get('price_status') == 'on_request':
+                    continue
                 yield update_event(key, {'price': '', 'price_pending': False, 'price_unavailable': True,
                                         'price_verified': False, 'price_status': 'unavailable'}, 'price_unavailable')
         final_event.update(count=len(rows), priced_count=len(rows) - missing_count,
@@ -17493,6 +17714,8 @@ async def _web_complete_result_prices(result, lang, country, discover_local=Fals
 
 
 def _web_row_has_numeric_price(row):
+    if row and (row.get('price_unavailable') or row.get('price_status') in ('on_request','unavailable','suspect')):
+        return False
     row = row or {}
     quote = _web_price_quote(row.get('price'),str(row.get('currency') or ''),str(row.get('country') or ''))
     if quote and quote['kind'] != 'exact':
