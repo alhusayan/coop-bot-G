@@ -1,3 +1,4 @@
+# v128.7: English + native market queries, independent China media and automatic visitor country.
 # v128.6: Preserve photo structure, stream text media, normalize recommendation picks and group prices.
 # -*- coding: utf-8 -*-
 # v128.5: CN global = scoped image index + product-page organic index;
@@ -292,7 +293,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization'], max_age=86400)
-BUILD_ID = 'v128.6-visual-text-refinements'
+BUILD_ID = 'v128.7-bilingual-markets-auto-country'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -485,7 +486,7 @@ LOCAL_AI_QUERY_RESCUE_ENABLED = env_bool('LOCAL_AI_QUERY_RESCUE_ENABLED', True)
 LOCAL_QUERY_CACHE = {}
 LOCAL_QUERY_CACHE_LOCK = threading.Lock()
 LOCAL_DISCOVERY_ENABLED = env_bool('LOCAL_DISCOVERY_ENABLED', True)
-LOCAL_DISCOVERY_MAX_CALLS = max(0, min(2, int(os.environ.get('LOCAL_DISCOVERY_MAX_CALLS', '2'))))
+LOCAL_DISCOVERY_MAX_CALLS = max(0, min(3, int(os.environ.get('LOCAL_DISCOVERY_MAX_CALLS', '3'))))
 LOCAL_DISCOVERY_TIMEOUT = max(1.0, min(20.0, float(os.environ.get('LOCAL_DISCOVERY_TIMEOUT', '12.0'))))
 LOCAL_DISCOVERY_HEDGE_SECONDS = max(.5, min(6.0, float(os.environ.get('LOCAL_DISCOVERY_HEDGE_SECONDS', '3.0'))))
 LOCAL_DISCOVERY_BAIDU = env_bool('LOCAL_DISCOVERY_BAIDU', True)
@@ -856,7 +857,7 @@ def market_instruction():
     kuwait_extra = ''
     if cc == 'kw':
         kuwait_extra = ' Kuwait premium local discovery: actively check Pro Sports, Intersport, Decathlon, Sun & Sand Sports for sports; Xcite, Eureka Kuwait, Best Al-Yousifi, Blink, Jarir and 3RoodQ8 for electronics/gaming; Tigro and Toys R Us for toys; Jm3eia, Lulu, Carrefour and Taw9eel for grocery, plus any smaller Kuwait merchant indexed by Google Shopping.'
-    return f"\nIMPORTANT CURRENT USER MARKET: {country} (ISO country {cc.upper()}, Google gl={cc}, preferred hl={hl}). Accepted local currencies: {currencies}; primary display currency: {currency}; local ccTLD evidence: {tlds}. LOCAL RESULTS ARE THE CORE PRODUCT: exhaust the local market before relying on foreign results. Search the product using the user's wording, its commercial English name, and when useful the main local commerce language ({hl}). Prioritize {stores}, but never limit discovery to a fixed list: include small genuine local merchants indexed in Google Shopping/Search. Use geography in this exact order: (1) the user's local country, (2) United States, (3) China only. Reject every fourth country. Do not move a cheaper US/China offer above a genuine local offer. Foreign stores do not need to ship locally. Treat Heureka/heureka.cz/heureka.sk as blocked comparison sites in every market; do NOT confuse them with Eureka Kuwait. A local .com merchant is valid when Google local targeting, local currency, country text/path, or merchant evidence clearly ties it to the user's market. " + kuwait_extra + '\n'
+    return f"\nIMPORTANT CURRENT USER MARKET: {country} (ISO country {cc.upper()}, Google gl={cc}, preferred hl={hl}). Accepted local currencies: {currencies}; primary display currency: {currency}; local ccTLD evidence: {tlds}. LOCAL RESULTS ARE THE CORE PRODUCT: exhaust the local market before relying on foreign results. Search the product using the user's wording, its commercial English name, and the main local commerce language ({hl}); both retrieval languages are required. Prioritize {stores}, but never limit discovery to a fixed list: include small genuine local merchants indexed in Google Shopping/Search. Use geography in this exact order: (1) the user's local country, (2) United States, (3) China only. Reject every fourth country. Do not move a cheaper US/China offer above a genuine local offer. Foreign stores do not need to ship locally. Treat Heureka/heureka.cz/heureka.sk as blocked comparison sites in every market; do NOT confuse them with Eureka Kuwait. A local .com merchant is valid when Google local targeting, local currency, country text/path, or merchant evidence clearly ties it to the user's market. " + kuwait_extra + '\n' + _bilingual_search_instruction(cc)
 GROCERY_WORDS = ['بيبسي', 'شيبس', 'حليب', 'قهوه', 'قهوة', 'شاي', 'سكر', 'رز', 'زيت', 'صابون', 'شامبو', 'برينجلز', 'كيتكات', 'نسكافيه', 'تونه', 'ماء', 'عصير', 'بسكوت', 'منظف', 'معجون', 'حفاض']
 print(f"ECONOMIC CONFIG search_model={GEMINI_SEARCH_MODEL} fast_model={GEMINI_FAST_MODEL} max_stores={MAX_STORES} search_attempts={MAX_SEARCH_ATTEMPTS} identify_attempts={MAX_IDENTIFY_ATTEMPTS} auto_maps={AUTO_SEND_PRODUCT_MAPS} lens_wide_fallback={ENABLE_LENS_WIDE_FALLBACK} lens_parallel={LENS_PARALLEL_WITH_VISION} google_shopping={ENABLE_GOOGLE_SHOPPING} immersive_max={IMMERSIVE_LOOKUPS_MAX} public_base_url={('SET' if PUBLIC_BASE_URL else 'MISSING')}")
 VERIFIED_PAGE_CACHE = {}
@@ -1739,7 +1740,7 @@ def auto_language_from_text(phone, text, persist=True):
     if changed:
         print(f"AUTO LANGUAGE: {phone} {previous or '-'} -> {detected} ({language_name_en(detected)})")
     return (detected, changed)
-SYSTEM_PROMPT = '\nأنت مساعد تسوق عالمي يعتمد سوق المستخدم المحلي الحالي. السوق المحلي هو أهم جزء في الخدمة ويجب البحث فيه بقوة قبل النتائج الأجنبية.\n\nأولاً حدد نوع الطلب:\n\n【الحالة 1】منتج محدد بعلامة/موديل واضح:\nقارن نفس المنتج ونفس المواصفات. رتب جغرافياً دائماً: بلد المستخدم المحلي أولاً، ثم الولايات المتحدة، ثم الصين فقط. داخل كل سوق رتب من الأرخص إلى الأغلى.\n📦 [اسم المنتج]\n✅ [المتجر] — [السعر الرقمي + العملة]\n• [المتجر] — [السعر الرقمي + العملة]\n\nقاعدة المحلي: ابحث في المتاجر المتخصصة القوية في بلد المستخدم ثم المنصات العامة، ووسّع لأي متجر محلي حقيقي مفهرس في Google Shopping/Search. لا تحصر البحث في قائمة ثابتة، ولا تفترض أن .com يعني متجر أمريكي؛ قد يكون متجراً محلياً.\n\n【الحالة 2】طلب عام بدون براند/موديل محدد:\nلا تبحث عن الأرخص فقط. اقترح أفضل الخيارات المناسبة والمتاحة في سوق المستخدم المحلي، وباللغة التي طلبها المستخدم، ثم اسمح له باختيار منتج للبحث عن أسعاره.\n\n【الحالة 3】طلب خدمة:\nابحث محلياً في بلد المستخدم. لا تكتب رقم هاتف إلا إذا ظهر حرفياً في نتائج البحث.\n\n【الحالة 4】سؤال معلوماتي عن منتج:\nأجب عن السؤال مباشرة ولا تعرض مقارنة أسعار إلا إذا طلب المستخدم ذلك.\n\nقواعد جودة صارمة:\n- السوق المحلي أولاً دائماً، وبعده الولايات المتحدة ثم الصين فقط؛ ارفض أي دولة رابعة.\n- لا تجعل السعر الأرخص في أمريكا/الصين يتقدم على عرض محلي صحيح.\n- قارن نفس المواصفات فقط: الحجم/السعة/الوزن/الموديل واللون إذا كان يؤثر في السعر.\n- كل رابط شراء يجب أن يكون صفحة منتج مباشرة، وليس Google ولا صفحة بحث/تصنيف.\n- لا تخترع سعراً أو متجراً. استخدم السعر الموجود في نتيجة البحث الحالية.\n- اكتب السعر بالعملة الصحيحة للسوق كما تظهر، والتطبيق يتولى التنسيق والتحويل عند الحاجة.\n- استبعد Heureka / heureka.cz / heureka.sk دائماً لأنه موقع مقارنة وليس متجراً مباشراً. لا تستبعد Eureka الكويتية.\n- لا تفترض أن رمز $ يعني USD دائماً؛ احترم سياق بلد المستخدم والعملة التي يحددها التطبيق.\n- في البحث المحلي استخدم اسم المنتج بصياغة المستخدم + الاسم التجاري الإنجليزي + لغة التجارة المحلية عندما تفيد الفهرسة.\n\nفي نتائج المتاجر أضف سطر LINKS داخلياً لربط أسماء المتاجر بالمصادر، ولا تعرض روابط خام للمستخدم.\nلغة الرد: التزم حصراً بلغة المستخدم المحددة في الواجهة.\n'
+SYSTEM_PROMPT = '\nأنت مساعد تسوق عالمي يعتمد سوق المستخدم المحلي الحالي. السوق المحلي هو أهم جزء في الخدمة ويجب البحث فيه بقوة قبل النتائج الأجنبية.\n\nأولاً حدد نوع الطلب:\n\n【الحالة 1】منتج محدد بعلامة/موديل واضح:\nقارن نفس المنتج ونفس المواصفات. رتب جغرافياً دائماً: بلد المستخدم المحلي أولاً، ثم الولايات المتحدة، ثم الصين فقط. داخل كل سوق رتب من الأرخص إلى الأغلى.\n📦 [اسم المنتج]\n✅ [المتجر] — [السعر الرقمي + العملة]\n• [المتجر] — [السعر الرقمي + العملة]\n\nقاعدة المحلي: ابحث في المتاجر المتخصصة القوية في بلد المستخدم ثم المنصات العامة، ووسّع لأي متجر محلي حقيقي مفهرس في Google Shopping/Search. لا تحصر البحث في قائمة ثابتة، ولا تفترض أن .com يعني متجر أمريكي؛ قد يكون متجراً محلياً.\n\n【الحالة 2】طلب عام بدون براند/موديل محدد:\nلا تبحث عن الأرخص فقط. اقترح أفضل الخيارات المناسبة والمتاحة في سوق المستخدم المحلي، وباللغة التي طلبها المستخدم، ثم اسمح له باختيار منتج للبحث عن أسعاره.\n\n【الحالة 3】طلب خدمة:\nابحث محلياً في بلد المستخدم. لا تكتب رقم هاتف إلا إذا ظهر حرفياً في نتائج البحث.\n\n【الحالة 4】سؤال معلوماتي عن منتج:\nأجب عن السؤال مباشرة ولا تعرض مقارنة أسعار إلا إذا طلب المستخدم ذلك.\n\nقواعد جودة صارمة:\n- السوق المحلي أولاً دائماً، وبعده الولايات المتحدة ثم الصين فقط؛ ارفض أي دولة رابعة.\n- لا تجعل السعر الأرخص في أمريكا/الصين يتقدم على عرض محلي صحيح.\n- قارن نفس المواصفات فقط: الحجم/السعة/الوزن/الموديل واللون إذا كان يؤثر في السعر.\n- كل رابط شراء يجب أن يكون صفحة منتج مباشرة، وليس Google ولا صفحة بحث/تصنيف.\n- لا تخترع سعراً أو متجراً. استخدم السعر الموجود في نتيجة البحث الحالية.\n- اكتب السعر بالعملة الصحيحة للسوق كما تظهر، والتطبيق يتولى التنسيق والتحويل عند الحاجة.\n- استبعد Heureka / heureka.cz / heureka.sk دائماً لأنه موقع مقارنة وليس متجراً مباشراً. لا تستبعد Eureka الكويتية.\n- لا تفترض أن رمز $ يعني USD دائماً؛ احترم سياق بلد المستخدم والعملة التي يحددها التطبيق.\n- في البحث المحلي استخدم اسم المنتج بصياغة المستخدم + الاسم التجاري الإنجليزي + لغة التجارة المحلية إلزامياً مع الحفاظ على البراند والموديل.\n\nفي نتائج المتاجر أضف سطر LINKS داخلياً لربط أسماء المتاجر بالمصادر، ولا تعرض روابط خام للمستخدم.\nلغة الرد: التزم حصراً بلغة المستخدم المحددة في الواجهة.\n'
 
 def fetch_html(url):
     if not url or not url.startswith('http'):
@@ -2828,7 +2829,7 @@ def _photo_retrieval_query(profile, fallback=''):
 
 
 def _china_native_image_discovery(reference_future, query_hint, deadline, progress_callback=None, cancel_event=None, viewer_country=None):
-    """Reuse photo identity, then at most two native searches; no CN Lens retry."""
+    """Reuse photo structure; independent bilingual domestic/export routing."""
     if cancel_event is not None and cancel_event.is_set():
         return []
     query = str(query_hint or '').strip()
@@ -3705,6 +3706,11 @@ _LOCAL_BRAND_ALIASES = {
     'kindle': {'ar': 'كيندل'}, 'instax': {'zh': '拍立得', 'ar': 'انستاكس'}, 'fujifilm': {'zh': '富士', 'ar': 'فوجي'},
 }
 _LOCAL_RETRIEVAL_NOUNS = {
+    'antenna': {'en': 'antenna|antennas', 'zh': '天线|天線', 'ar': 'هوائي|أنتينا|انتينا',
+               'de': 'Antenne|Antennen', 'fr': 'antenne|antennes', 'es': 'antena|antenas',
+               'it': 'antenna|antenne', 'pt': 'antena|antenas', 'ja': 'アンテナ', 'ko': '안테나',
+               'hi': 'एंटीना', 'tr': 'anten', 'ru': 'антенна'},
+
     'coffeecup': {'en': 'coffee cups|coffee cup', 'zh': '咖啡杯', 'ar': 'فنجان قهوة|كوب قهوة', 'de': 'Kaffeetasse', 'fr': 'tasse à café', 'es': 'taza de café'},
     'shoes': {'en': 'shoes|shoe|footwear|sneakers|sneaker|trainers|boots|boot|sandals|sandal|slippers|slipper', 'zh': '鞋|运动鞋|跑鞋|靴子|凉鞋|拖鞋|板鞋', 'ja': '靴|シューズ|スニーカー', 'de': 'Schuhe|Schuh|Sneaker|Stiefel', 'fr': 'chaussures|chaussure|baskets|bottes', 'it': 'scarpe', 'es': 'zapatos|zapatillas', 'tr': 'ayakkabı', 'ar': 'حذاء|أحذية|احذيه|جوتي|جواتي|بوت|صندل|نعال|شبشب|سنيكرز'},
     'planter': {'en': 'plant pot|plant pots|flower pot|flower pots|planters|planter', 'zh': '花盆', 'ja': '植木鉢', 'de': 'Blumentopf|Blumentöpfe', 'fr': 'pot de fleurs', 'it': 'vaso per piante', 'es': 'maceta', 'tr': 'saksı', 'ar': 'أصيص|اصيص'},
@@ -3878,8 +3884,8 @@ def _market_query_validate_edits(query, edits):
         # forbidden by the prompt; original-query identity audits still apply.
         if _web_model_tokens_from_listing(source):
             return {}
-        known = {v.casefold() for row in _LOCAL_RETRIEVAL_NOUNS.values()
-                 for terms in row.values() for v in terms.split('|')}
+        known = {v.casefold() for table in (_LOCAL_RETRIEVAL_NOUNS, _LOCAL_DESCRIPTOR_TERMS)
+                 for row in table.values() for terms in row.values() for v in terms.split('|') if v}
         if source.casefold() not in known and re.search(r'\b[A-Z][A-Za-z]+', source):
             return {}
         positions = list(re.finditer(_local_term_pattern(source), query))
@@ -3903,7 +3909,7 @@ def _market_query_static(query, language):
     language = language.split('-')[0]
     replacements = {term.casefold(): row[language].split('|')[0]
         for table in (_LOCAL_RETRIEVAL_NOUNS, _LOCAL_DESCRIPTOR_TERMS)
-        for row in table.values() if language in row
+        for row in table.values() if row.get(language, '').strip()
         for terms in row.values() for term in terms.split('|')
         if term.casefold() != row[language].split('|')[0].casefold()}
     # Brand aliases: Arabic/Chinese spellings -> Latin brand for English and
@@ -3959,9 +3965,11 @@ def _market_query_translate_batch(query, languages):
         f'{GEMINI_BASE_URL}/{MARKET_QUERY_TRANSLATION_MODEL}:generateContent', payload,
         MARKET_QUERY_TRANSLATION_TIMEOUT, lambda _: None)
     if error:
+        print(f'MARKET LANGUAGE status=failed reason={re.sub(r'[^a-zA-Z0-9_:-]', '_', str(error))[:60]}')
         return {}
     candidate = (data.get('candidates') or [{}])[0]
     if candidate.get('finishReason') != 'STOP':
+        print(f'MARKET LANGUAGE status=incomplete finish={str(candidate.get("finishReason") or "missing")[:40]}')
         return {}
     raw = ''.join(p.get('text', '') for p in (candidate.get('content') or {}).get('parts', []))
     value = json.loads(raw)
@@ -3985,12 +3993,8 @@ def _market_query_warm(query, countries):
         profile = _market_query_languages(cc, query)
         # Native-script inputs may also need an English complement. English
         # markets with a second domestic language (Canada etc.) retain it.
-        wanted = [profile[0]] + ([profile[1]] if len(profile) > 1 and profile[0] == 'en' else [])
-        if re.search(r'[^\x00-\x7f]', query) and 'en' in profile:
-            wanted.append('en')
+        wanted = ['en', next((hl for hl in profile if hl != 'en'), 'en')]
         for language in wanted:
-            if language == 'en' and not re.search(r'[^\x00-\x7f]', query):
-                continue
             if language not in languages:
                 languages.append(language)
     missing = []
@@ -4000,7 +4004,18 @@ def _market_query_warm(query, countries):
         for edit in known['edits']:
             remaining = remaining.replace(edit['source'], '')
         # Dictionary nouns plus unchanged Latin identifiers need no model.
-        if not re.search(r'[^\W\d_]', re.sub(r'\b[A-Z][\w./-]*|\b\w*\d\w*', '', remaining), re.UNICODE):
+        # Remove generic words already in the requested language as well.
+        # Complete known English queries need no AI round trip.
+        for table in (_LOCAL_RETRIEVAL_NOUNS, _LOCAL_DESCRIPTOR_TERMS):
+            for row in table.values():
+                for term in row.get(language.split('-')[0], '').split('|'):
+                    if term:
+                        remaining = re.sub(_local_term_pattern(term), '', remaining, flags=re.I)
+        protected = set(_LOCAL_BRAND_ALIASES) | {'wi-fi', 'wifi', 'usb', 'tp-link'}
+        residual = re.sub(r'\b(?=[A-Za-z0-9./-]*[0-9])[A-Za-z0-9]+(?:[./-][A-Za-z0-9]+)*', '', remaining)
+        for token in protected:
+            residual = re.sub(_local_term_pattern(token), '', residual, flags=re.I)
+        if not re.search(r'[^\W\d_]', residual, re.UNICODE):
             _market_query_store(query, language, known)
             continue
         if _market_query_cached(query, language) is None:
@@ -4203,26 +4218,24 @@ def _local_discovery_query(query, market, scoped=False, language=None, store_off
 
 
 def _market_query_request_variant(query, market, kind, timeout_seconds):
-    cc = market['country']
+    """Bind language to a lane; concurrent completion order cannot choose it."""
+    cc = str(market['country']).lower()
     languages = _market_query_languages(cc, query)
-    hl = languages[0]
-    # Translation is optional; Lens starts without it. Text work uses only a
-    # small part of the same request deadline, never extends that deadline.
-    _market_query_wait(query, hl, min(.8 if kind in ('scoped', 'baidu') else .15,
-                                    max(0., timeout_seconds * .15)))
-    native = _local_native_query(query, cc, hl)
-    original = _market_query_key(query, '')[0]
-    with MARKET_QUERY_LOCK:
-        used = market.setdefault('_language_searches', {}).setdefault(original, [])
-        candidates = [(native, hl)]
-        if cc != 'cn':
-            if original != native:
-                candidates.append((original, 'en' if original.isascii() else hl))
-            candidates.extend((_local_native_query_unlocked(query, language), language)
-                              for language in languages[1:2])
-        chosen = next((spec for spec in candidates if spec not in used), candidates[0])
-        used.append(chosen)
-    return chosen
+    native = next((hl for hl in languages if hl != 'en'), 'en')
+    hl = native if kind in ('scoped', 'scoped2', 'images', 'baidu', 'global2') else 'en'
+    # English retrieval starts immediately for English inputs. A native lane
+    # can finish the shared translation within its existing provider deadline.
+    record = _market_query_cached(query, hl)
+    static = _market_query_static(query, hl)
+    if record is None:
+        _market_query_wait(query, hl, min(MARKET_QUERY_TRANSLATION_TIMEOUT,
+                                        max(0., float(timeout_seconds) - 1.0)))
+        record = _market_query_cached(query, hl)
+    chosen = (record or static)['query']
+    # No-op AI output must not discard a usable deterministic translation.
+    if chosen == _market_query_key(query, '')[0] and static.get('edits'):
+        chosen = static['query']
+    return chosen, hl
 
 
 def _local_native_query_unlocked(query, language):
@@ -4675,7 +4688,7 @@ def _local_discovery_request(query, market, kind, timeout_seconds):
         product = data.get('product_results') or {}
         stores = _local_shopping_store_rows(product, market, recovery.get('thumbnail') or '')
         return _local_discovery_rows({'shopping_results': stores}, query, market, 'local_shopping_stores')
-    search_query, hl = _market_query_request_variant(query, market, 'scoped' if kind == 'scoped2' else kind, timeout_seconds)
+    search_query, hl = _market_query_request_variant(query, market, kind, timeout_seconds)
     timeout_seconds -= time.monotonic() - started
     if timeout_seconds <= .01:
         return []
@@ -4714,7 +4727,7 @@ def _local_discovery_request(query, market, kind, timeout_seconds):
         if LOCAL_DISCOVERY_BAIDU_DEVICE in ('mobile', 'tablet'):
             params['device'] = LOCAL_DISCOVERY_BAIDU_DEVICE
     else:
-        scoped_query = _local_discovery_query(search_query, market, scoped=kind in ('scoped', 'scoped2', 'images'), language=hl,
+        scoped_query = _local_discovery_query(search_query, market, scoped=(kind in ('scoped', 'scoped2', 'images') and not (cc == 'cn' and kind == 'images')), language=hl,
                                               store_offset=6 if kind == 'scoped2' else 0)
         if not scoped_query:
             return []
@@ -4725,10 +4738,16 @@ def _local_discovery_request(query, market, kind, timeout_seconds):
         params.pop('num', None)
     connect = min(1.5, max(.01, timeout_seconds * .15))
     data = _serpapi_cached_json(params, timeout=(connect, max(.01, timeout_seconds - connect)),
-                               label=f'LOCAL DISCOVERY {cc}/{kind}') or {}
+                               label=f'LOCAL DISCOVERY {cc}/{kind}')
+    if not isinstance(data, dict) or data.get('error'):
+        print(f'LOCAL SOURCE country={cc} provider={kind} hl={hl} status=failed')
+        return []
     if kind == 'baidu' and isinstance(data, dict):
         data = _local_resolve_baidu_links(data, max(0., deadline - time.monotonic()))
-    return _local_discovery_rows(data, query, market, 'local_' + kind) if isinstance(data, dict) else []
+    rows = _local_discovery_rows(data, query, market, 'local_' + kind)
+    print(f'LOCAL SOURCE country={cc} provider={kind} hl={hl} status=returned offers={len(rows)}'
+          f' images={sum(bool(_web_offer_image_candidates(row)) for row in rows)}')
+    return rows
 
 
 def _global_discovery_request(query, country, kind, timeout_seconds):
@@ -4736,9 +4755,9 @@ def _global_discovery_request(query, country, kind, timeout_seconds):
     if country not in GLOBAL_MARKET_STORES or kind not in ('global', 'global2', 'global_all'):
         return []
     target = dict(_web_market(country), _retrieval_role='global')
-    wording = _web_market('us')
+    wording = _web_market(country)
     started = time.monotonic()
-    search_query, _ = _market_query_request_variant(query, wording, 'broad', timeout_seconds)
+    search_query, hl = _market_query_request_variant(query, wording, kind, timeout_seconds)
     stores = list(GLOBAL_MARKET_STORES[country])
     if country != 'cn' and kind != 'global_all':
         split = (len(stores) + 1) // 2
@@ -4759,7 +4778,7 @@ def _global_discovery_request(query, country, kind, timeout_seconds):
                     (' inurl:' + paths[domain] if domain in paths else '') + ')'
                     for _, domain in stores)
     params = {'engine': 'google_images' if image_source else 'google',
-              'q': f'{search_query} ({scopes})', 'gl': 'us', 'hl': 'en',
+              'q': f'{search_query} ({scopes})', 'gl': 'us', 'hl': hl,
               'api_key': SERPAPI_API_KEY, 'output': 'json'}
     if not image_source:
         params['num'] = 10
@@ -4784,7 +4803,7 @@ def _global_market_discovery(query, country, limit=8, timeout_seconds=None, prog
     if duration <= 0:
         return []
     deadline = time.monotonic() + duration
-    _market_query_warm(query, ['us'])
+    _market_query_warm(query, [country])
     def cancelled():
         return cancel_event is not None and cancel_event.is_set()
     def run(kind):
@@ -4835,7 +4854,7 @@ def _local_lane_count(rows, reference=None):
 
 
 def _local_market_discovery(query, market, limit=8, timeout_seconds=None, progress_callback=None, cancel_event=None):
-    """Two searches at most, incremental batches and one provider-completion deadline."""
+    """Bilingual primary lanes and one bounded CN fallback; one shared deadline."""
     if not (LOCAL_DISCOVERY_ENABLED and LOCAL_DISCOVERY_MAX_CALLS and SERPAPI_API_KEY):
         return []
     if timeout_seconds is not None and timeout_seconds <= 0:
@@ -4850,11 +4869,14 @@ def _local_market_discovery(query, market, limit=8, timeout_seconds=None, progre
     duration = max(.01, min(LOCAL_DISCOVERY_TIMEOUT, timeout_seconds if timeout_seconds is not None else LOCAL_DISCOVERY_TIMEOUT))
     started = time.monotonic()
     deadline = started + duration
-    kinds = (['broad'] + (['baidu'] if LOCAL_DISCOVERY_BAIDU else ['scoped'])) if cc == 'cn' else [
+    bilingual = any(hl != 'en' for hl in _market_query_languages(cc, q))
+    kinds = (['broad', 'images'] + (['baidu'] if LOCAL_DISCOVERY_BAIDU else ['scoped'])) if cc == 'cn' else [
         'shopping' if ENABLE_GOOGLE_SHOPPING and _shopping_gl_supported(cc) else 'broad',
         'broad' if cc == 'us' and ENABLE_GOOGLE_SHOPPING and _shopping_gl_supported(cc) else 'scoped']
-    kinds = kinds[:LOCAL_DISCOVERY_MAX_CALLS]
-    rows, seen, pending = [], set(), {}
+    # Two language passes are required for multilingual markets. The third
+    # China source is a hedge, never an unbounded retry of a failed engine.
+    kinds = kinds[:max(2 if bilingual else 1, LOCAL_DISCOVERY_MAX_CALLS)]
+    rows, seen, pending = [], {}, {}
     calls = 0
     def cancelled():
         return cancel_event is not None and cancel_event.is_set()
@@ -4881,9 +4903,20 @@ def _local_market_discovery(query, market, limit=8, timeout_seconds=None, progre
         for item in values:
             key = _canonical_result_url(item.get('link'))
             if key and key not in seen:
-                seen.add(key)
+                seen[key] = item
                 rows.append(item)
                 batch.append(item)
+            elif key:
+                old = seen[key]
+                pictures = _web_merge_offer_images(old, item)
+                changed = bool(pictures and pictures != {k: old.get(k) for k in pictures})
+                old.update(pictures)
+                if not _web_row_has_numeric_price(old) and _web_row_has_numeric_price(item):
+                    old.update({k: v for k, v in item.items() if k.startswith('price') or
+                                k in ('currency', 'original_currency', 'original_price')})
+                    changed = True
+                if changed:
+                    batch.append(old)
         if batch and progress_callback and not cancelled():
             try:
                 progress_callback(batch)
@@ -4891,7 +4924,7 @@ def _local_market_discovery(query, market, limit=8, timeout_seconds=None, progre
                 print(f'LOCAL DISCOVERY CALLBACK ERR: {type(exc).__name__}')
     if kinds:
         launch(kinds[0])
-    if cc == 'cn' and len(kinds) > 1:
+    if bilingual and len(kinds) > 1:
         launch(kinds[1])
     # Slow primary searches get one hedged fallback, not half a timeout each.
     # Fast, sufficient Shopping results still cost only the primary search.
@@ -4905,7 +4938,7 @@ def _local_market_discovery(query, market, limit=8, timeout_seconds=None, progre
                     pending.pop(job)
                     consume(job)
             merchants = {_more_result_domain(row.get('link')) for row in rows}
-            if (cc != 'cn' and calls < len(kinds) and len(merchants) < min(LOCAL_RESULTS_TARGET, limit)
+            if (calls < len(kinds) and len(merchants) < min(LOCAL_RESULTS_TARGET, limit)
                     and (not pending or time.monotonic() >= hedge_at)):
                 launch(kinds[calls])
         # Include responses that completed at the deadline boundary.
@@ -5487,6 +5520,20 @@ def _market_offer_allowed(item, market):
     return True
 
 
+def _bilingual_search_instruction(cc):
+    languages = _market_query_languages(cc)
+    native = next((language for language in languages if language != 'en'), 'en')
+    if native == 'en':
+        rule = 'Use an English commercial query; do not repeat an identical English query.'
+    else:
+        rule = (f'Use BOTH an English commercial query (en) AND a separate native-commerce '
+                f'query ({native}) for this market, even when English finds offers. '
+                'Translate generic product words, not just the search-engine hl parameter.')
+    return ('\nRETRIEVAL LANGUAGE RULE: ' + rule +
+            ' Preserve brand/model/SKU numbers and observed product features. '
+            'The UI response language controls display only, never discovery languages.\n')
+
+
 def _global_search_instruction():
     local = str(current_market().get('country') or DEFAULT_COUNTRY).lower()
     parts = ['DOMESTIC RULE: Search all genuine local merchants, including independent stores. '
@@ -5966,22 +6013,18 @@ def google_shopping_offers(query, lang='ar', allow_global=False, lens_context=No
     if allow_global:
         specs = [(en_q or raw_q, 'us', 'en')]
     else:
-        _market_query_warm(raw_q or en_q, [local_cc])
-        local_query = _local_native_query(raw_q or en_q, local_cc, local_hl)
-        specs = [(local_query, local_cc, local_hl)]
-        complement = (en_q or raw_q, local_cc, 'en')
-        if complement not in specs:
-            specs.append(complement)
-        elif len(_market_query_languages(local_cc, raw_q)) > 1:
-            second_hl = _market_query_languages(local_cc, raw_q)[1]
-            specs.append((_local_native_query(raw_q or en_q, local_cc, second_hl), local_cc, second_hl))
-        specs = specs[:LOCAL_SHOPPING_PRIMARY_PASSES]
+        base = raw_q or en_q
+        _market_query_warm(base, [local_cc])
+        native_hl = next((hl for hl in _market_query_languages(local_cc, base) if hl != 'en'), 'en')
+        specs = [(base, local_cc, 'en')]
+        if native_hl != 'en':
+            specs.append((base, local_cc, native_hl))
 
     def _fetch_spec(spec):
         q, gl, hl = spec
         if not allow_global:
-            _market_query_wait(raw_q or en_q, hl, .15)
-            q = _local_native_query(raw_q or en_q, gl, hl) if hl != 'en' else q
+            q, hl = _market_query_request_variant(raw_q or en_q, m,
+                'broad' if hl == 'en' else 'scoped', SERPAPI_TIMEOUT_SECONDS)
         cards = _serpapi_shopping_request(q, gl, hl=hl)
         out = []
         for card in cards or []:
@@ -7900,7 +7943,7 @@ def text77_market_instruction():
     tlds = ', '.join(country_tlds(cc))
     local_stores = priority_stores_for('')
     stores_hint = ', '.join(local_stores[:6]) if local_stores else 'strong local specialist stores and marketplaces'
-    return _global_search_instruction() + f"\nIMPORTANT TYPED-TEXT GEO RULE: local market is {place} (gl={cc}, hl={hl}, ccTLD={tlds}). Accepted local currencies: {currencies}; primary display currency: {currency}. LOCAL IS THE MAIN PRODUCT: search it deeply before foreign markets. Use the user's wording, commercial English name, and local-commerce wording when useful. Check {stores_hint}, then broaden to smaller genuine local merchants indexed by Google; this is not a whitelist. Return in strict order: up to {LENS_DIRECT_LOCAL_MAX} LOCAL {place} results, then up to {LENS_DIRECT_US_MAX} US, then up to {LENS_DIRECT_CN_MAX} China. Reject every fourth country. Heureka/heureka.cz/heureka.sk is blocked globally as a comparison site; Eureka Kuwait is allowed. Local prices use a valid local source currency ({currencies}); US stays USD; China stays source USD or CNY/RMB. Never convert foreign prices in the AI response. A .com domain can still be local when Google local targeting, local currency, country path/text, or merchant identity ties it to the local market. For SERVICES keep providers local only.\n"
+    return _global_search_instruction() + _bilingual_search_instruction(cc) + f"\nIMPORTANT TYPED-TEXT GEO RULE: local market is {place} (gl={cc}, hl={hl}, ccTLD={tlds}). Accepted local currencies: {currencies}; primary display currency: {currency}. LOCAL IS THE MAIN PRODUCT: search it deeply before foreign markets. Use the user's wording plus BOTH the commercial English name and native-commerce wording. Check {stores_hint}, then broaden to smaller genuine local merchants indexed by Google; this is not a whitelist. Return in strict order: up to {LENS_DIRECT_LOCAL_MAX} LOCAL {place} results, then up to {LENS_DIRECT_US_MAX} US, then up to {LENS_DIRECT_CN_MAX} China. Reject every fourth country. Heureka/heureka.cz/heureka.sk is blocked globally as a comparison site; Eureka Kuwait is allowed. Local prices use a valid local source currency ({currencies}); US stays USD; China stays source USD or CNY/RMB. Never convert foreign prices in the AI response. A .com domain can still be local when Google local targeting, local currency, country path/text, or merchant identity ties it to the local market. For SERVICES keep providers local only.\n"
 
 def text77_store_domain(name):
     return store_domain(name)
@@ -18624,17 +18667,22 @@ def _web_normalize_country_code(value):
     return ''
 
 def _web_client_ip(request: Request):
-    for header in ('cf-connecting-ip', 'true-client-ip', 'x-real-ip'):
-        value = str(request.headers.get(header) or '').strip()
-        if value:
-            return value.split(',')[0].strip()
-    forwarded = str(request.headers.get('x-forwarded-for') or '').strip()
-    if forwarded:
-        return forwarded.split(',')[0].strip()
+    import ipaddress
+    candidates = []
+    for header in ('cf-connecting-ip', 'true-client-ip', 'x-real-ip', 'x-forwarded-for'):
+        candidates.extend(str(request.headers.get(header) or '').split(','))
     try:
-        return str(request.client.host or '').strip()
+        candidates.append(str(request.client.host or ''))
     except Exception:
-        return ''
+        pass
+    for candidate in candidates:
+        try:
+            ip = ipaddress.ip_address(candidate.strip())
+            if ip.is_global:
+                return str(ip)
+        except ValueError:
+            continue
+    return ''
 
 def _web_country_from_headers(request: Request):
     for header in ('cf-ipcountry', 'x-vercel-ip-country', 'cloudfront-viewer-country', 'x-country-code', 'x-geo-country'):
@@ -20435,7 +20483,7 @@ def _web_selected_market_search(query, country, lang, global_countries, *, image
         if progress_callback and not cancelled():
             progress_callback(snapshot())
     def lanes_for(cc):
-        return max(3 if cc in ('us', 'cn') else 2, int(local_lanes)) if cc == country else 2
+        return max(3 if cc in ('us', 'cn') or image_b64 else 2, int(local_lanes)) if cc == country else 2
     def target_for(cc):
         return max(LOCAL_RESULTS_TARGET, int(local_target)) if (cc == country and local_target) else LOCAL_RESULTS_TARGET
     def launch(cc, kind, public_url=''):
@@ -20489,7 +20537,7 @@ def _web_selected_market_search(query, country, lang, global_countries, *, image
                                and not consensus_done and lens_pending and time.monotonic() - started < LENS_CONSENSUS_WAIT)
             if query and SERPAPI_API_KEY and not hold_text_lanes:
                 if query != warmed_query:
-                    _market_query_warm(query, list(dict.fromkeys('us' if cc in global_catalogs else cc for cc in scopes)))
+                    _market_query_warm(_photo_retrieval_query(reference, query) if image_b64 and reference else query, scopes)
                     warmed_query = query
                 named = bool(reference.get('named') or consensus_done or not image_b64)
                 for cc in scopes:
@@ -20506,15 +20554,17 @@ def _web_selected_market_search(query, country, lang, global_countries, *, image
                     elif cc == 'cn':
                         # Open search covers independent .cn and .com shops;
                         # domestic marketplace scopes are a separate sparse rescue.
-                        launch(cc, 'broad')
-                        if LOCAL_DISCOVERY_BAIDU:
-                            launch(cc, 'baidu')
+                        launch(cc, 'broad')   # English, open merchant discovery.
+                        launch(cc, 'images')  # Native, independent indexed media.
                         if sparse_or_slow:
-                            launch(cc, 'scoped')
+                            launch(cc, 'baidu' if LOCAL_DISCOVERY_BAIDU else 'scoped')
                     else:
                         shopping_ok = ENABLE_GOOGLE_SHOPPING and _shopping_gl_supported(cc)
-                        if not launched[cc]:
+                        bilingual = any(hl != 'en' for hl in _market_query_languages(cc, query))
+                        if not launched[cc] or bilingual:
                             launch(cc, 'shopping' if shopping_ok else 'broad')
+                        if bilingual:
+                            launch(cc, 'scoped')
                         if cc == country == 'us' and sparse_or_slow:
                             # Never let Lens + Shopping use every domestic lane:
                             # independent shops need an unscoped organic query.
@@ -20592,7 +20642,7 @@ def _web_selected_market_search(query, country, lang, global_countries, *, image
             if not jobs and reference_job is None:
                 # Loop once more to start an eligible empty-result rescue, or the
                 # China lanes that were held back for the Lens consensus name.
-                cn_lanes = 3 if LOCAL_DISCOVERY_BAIDU else 2
+                cn_lanes = 3
                 can_rescue = bool(query and SERPAPI_API_KEY and any(
                     len(launched[cc]) < min(lanes_for(cc), cn_lanes if cc == country == 'cn' else lanes_for(cc))
                     and by_market[cc] < target_for(cc) for cc in scopes))
