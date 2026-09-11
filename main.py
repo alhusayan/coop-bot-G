@@ -1,3 +1,4 @@
+# v128.5.1: v128.5 retrieval preserved; clean recommendation choices and one money contract for web.
 # v128.2: Separate open domestic discovery from approved global catalogs.
 # -*- coding: utf-8 -*-
 # v128.5: CN global = scoped image index + product-page organic index;
@@ -292,7 +293,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization'], max_age=86400)
-BUILD_ID = 'v128.5-china-indexed-images'
+BUILD_ID = 'v128.5.1-choice-price-integrity'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -530,7 +531,9 @@ MARKET_QUERY_POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix='market
 COUNTRY_TLDS = {cc: ('.uk',) if cc == 'gb' else (f'.{cc}',) for cc in COUNTRY_META}
 COUNTRY_TLDS['gb'] = ('.uk', '.co.uk')
 COUNTRY_TLDS['us'] = ('.us',)
-CURRENCY_DECIMALS = {'AFN': 0, 'ALL': 0, 'BHD': 3, 'BIF': 0, 'CLP': 0, 'DJF': 0, 'GNF': 0, 'IQD': 0, 'IRR': 0, 'ISK': 0, 'JOD': 3, 'JPY': 0, 'KMF': 0, 'KPW': 0, 'KRW': 0, 'KWD': 3, 'LAK': 0, 'LBP': 0, 'LYD': 3, 'MGA': 0, 'OMR': 3, 'PYG': 0, 'RSD': 0, 'RWF': 0, 'SOS': 0, 'SYP': 0, 'TND': 3, 'UGX': 0, 'VND': 0, 'VUV': 0, 'XAF': 0, 'XOF': 0, 'XPF': 0, 'YER': 0}
+# Currency minor units (retail amounts, not payment-provider scaled integers).
+# https://www.six-group.com/en/products-services/financial-information/market-reference-data/data-standards.html
+CURRENCY_DECIMALS = {'BIF': 0, 'CLP': 0, 'DJF': 0, 'GNF': 0, 'ISK': 0, 'JPY': 0, 'KMF': 0, 'KRW': 0, 'PYG': 0, 'RWF': 0, 'UGX': 0, 'VND': 0, 'VUV': 0, 'XAF': 0, 'XOF': 0, 'XPF': 0, 'BHD': 3, 'IQD': 3, 'JOD': 3, 'KWD': 3, 'LYD': 3, 'OMR': 3, 'TND': 3, 'CLF': 4, 'UYW': 4}
 THREE_DECIMAL_CURRENCIES = {code for code, digits in CURRENCY_DECIMALS.items() if digits == 3}
 ZERO_DECIMAL_CURRENCIES = {code for code, digits in CURRENCY_DECIMALS.items() if digits == 0}
 FX_CACHE = {}
@@ -882,13 +885,17 @@ def is_blocked_store(name='', url=''):
     return any((host == d or host.endswith('.' + d) for d in BLOCKED_STORE_DOMAINS))
 
 def format_price(p, currency=None):
-    try:
-        pf = float(p)
-    except Exception:
-        return str(p)
+    from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
     code = (currency or current_market().get('currency') or 'KWD').upper().strip()
     digits = int(CURRENCY_DECIMALS.get(code, 2))
-    return f'{pf:.{digits}f}'
+    try:
+        value = Decimal(str(p))
+        if not value.is_finite() or value < 0:
+            return ''
+        value = value.quantize(Decimal(1).scaleb(-digits), rounding=ROUND_HALF_UP)
+        return f'{value:,.{digits}f}'
+    except (InvalidOperation, ValueError, TypeError):
+        return ''
 
 def format_lens_price(price_text, price_value, lang='ar', currency_code=None):
     numeric = _authoritative_price_value(price_value, price_text, currency_code)
@@ -2583,7 +2590,7 @@ def _photo_identity(image_b64, mime_type):
 
 def _photo_literal_contains(haystack, needle):
     """Complete OCR words only; never complete an unreadable model suffix."""
-    if not isinstance(needle, str) or not needle.strip() or re.search(r'[?… ]', needle):
+    if not isinstance(needle, str) or not needle.strip() or re.search(r'[?…�]', needle):
         return False
     text, value = _photo_identity_text(haystack), _photo_identity_text(needle)
     if not value or value in ('unknown', 'unclear', 'unreadable', 'غير معروف', 'غير واضح'):
@@ -6304,78 +6311,104 @@ _PRICE_CHAR_TRANSLATION = str.maketrans({**{ord(a): b for a, b in zip('٠١٢٣�
 def _normalize_price_chars(value):
     return str(value or '').translate(_PRICE_CHAR_TRANSLATION)
 
-def _normalize_price_token(token, currency_code=''):
-    t = _normalize_price_chars(token).replace('\xa0', ' ').replace('\u202f', ' ').strip()
-    t = re.sub('\\s+', '', t)
-    if not t:
+def _normalize_price_token(token, currency_code='', decimal_separator=''):
+    """Parse a displayed amount; structured JSON numbers never use this parser."""
+    if isinstance(token, bool) or token is None:
         return None
-    t = re.sub("[^0-9,.'-]", '', t)
-    if not re.search('\\d', t):
+    if isinstance(token, (int, float, Decimal)):
+        try:
+            value = float(token)
+            return value if math.isfinite(value) else None
+        except (ValueError, TypeError, OverflowError):
+            return None
+    raw = str(token).strip()
+    if '٫' in raw:
+        decimal_separator = '.'
+    t = _normalize_price_chars(raw).replace('\xa0', ' ').replace('\u202f', ' ').replace('’', "'")
+    if not re.fullmatch(r'-?[0-9][0-9.,\' ]*', t):
         return None
-    neg = t.startswith('-')
-    t = t.lstrip('-').replace("'", '')
-    dots, commas = (t.count('.'), t.count(','))
-    decimals = CURRENCY_DECIMALS.get((currency_code or '').upper(), 2)
+    negative = t.startswith('-')
+    t = t.lstrip('-')
+    digits = CURRENCY_DECIMALS.get(str(currency_code or '').upper(), 2)
+    def grouped(value, separator):
+        parts = value.split(separator)
+        return (bool(re.fullmatch(r'[0-9]{1,3}', parts[0])) and len(parts) > 1 and
+                (all(len(p)==3 and p.isdigit() for p in parts[1:]) or
+                 (separator==',' and parts[-1].isdigit() and len(parts[-1])==3 and
+                  all(p.isdigit() and len(p)==2 for p in parts[1:-1]))))
+    # Spaces/apostrophes are grouping, never an invitation to join two prices.
+    for sep in ("'", ' '):
+        if sep not in t:
+            continue
+        head = re.split(r'[.,]', t, maxsplit=1)[0]
+        if not grouped(head, sep):
+            return None
+        t = t.replace(sep, '')
+    dots, commas = t.count('.'), t.count(',')
     if dots and commas:
-        # Both separators present: the last one is the decimal mark
-        # (1.299,00 -> 1299.00 ; 1,234.56 -> 1234.56 ; 1,29,999.00 -> 129999.00).
-        last_dot, last_comma = (t.rfind('.'), t.rfind(','))
-        dec_sep = '.' if last_dot > last_comma else ','
-        thou = ',' if dec_sep == '.' else '.'
-        tail = len(t) - max(last_dot, last_comma) - 1
-        if tail <= 3 and t.count(dec_sep) == 1:
-            t = t.replace(thou, '').replace(dec_sep, '.')
-        else:
-            t = t.replace('.', '').replace(',', '')
+        decimal = '.' if t.rfind('.') > t.rfind(',') else ','
+        grouping = ',' if decimal == '.' else '.'
+        whole, fraction = t.rsplit(decimal, 1)
+        if (t.count(decimal) != 1 or not fraction.isdigit() or
+                not 1 <= len(fraction) <= max(2,digits) or not grouped(whole, grouping)):
+            return None
+        t = whole.replace(grouping,'') + '.' + fraction
     elif dots or commas:
         sep = '.' if dots else ','
-        pos = t.rfind(sep)
-        tail = len(t) - pos - 1
-        head = t[:pos].replace(sep, '')
         if t.count(sep) > 1:
-            # 1.234.567 / 1,29,999: repeated separator is grouping unless the
-            # last group is a real fraction for this currency.
-            if (decimals == 3 and tail == 3) or (decimals >= 2 and tail in (1, 2)):
-                t = head + '.' + t[pos + 1:]
-            else:
-                t = t.replace(sep, '')
-        elif tail == 3:
-            # One separator and three digits: a fraction only for 3-decimal
-            # currencies (KD 12.500); otherwise a thousands group (2.299 €, 2,299 $).
-            t = head + '.' + t[pos + 1:] if (decimals == 3 and len(head) <= 3) or len(head) > 3 else head + t[pos + 1:]
-        elif tail in (1, 2):
-            t = head + '.' + t[pos + 1:]
+            if not grouped(t, sep):
+                return None
+            t = t.replace(sep,'')
         else:
-            t = t.replace(sep, '')
+            whole, fraction = t.split(sep)
+            if not whole.isdigit() or not fraction.isdigit():
+                return None
+            if decimal_separator:
+                if sep != decimal_separator:
+                    if not grouped(t,sep): return None
+                    t = t.replace(sep,'')
+                else:
+                    if len(fraction) > max(4,digits): return None
+                    t = whole+'.'+fraction
+            elif int(whole)==0 and 1 <= len(fraction) <= 4:
+                t = whole+'.'+fraction
+            elif len(fraction) in (1,2):
+                t = whole+'.'+fraction
+            elif sep=='.' and digits in (3,4) and len(fraction)==digits:
+                t = whole+'.'+fraction
+            elif len(fraction)==3 and grouped(t,sep):
+                t = whole+fraction
+            else:
+                # An ambiguous/malformed value must be checked against the page.
+                return None
     try:
-        val = float(t)
-        return -val if neg else val
-    except Exception:
+        value = float(t)
+        return (-value if negative else value) if math.isfinite(value) else None
+    except (ValueError, OverflowError):
         return None
 
-def _extract_numeric_price(line):
-    text = _normalize_price_chars(line).replace('\xa0', ' ').replace('\u202f', ' ')
-    cur = detect_currency_code(text, '')
-    parts = re.split('\\s+(?:—|–|-)\\s+', text)
-    zones = [parts[-1]] if len(parts) > 1 else []
-    zones.append(text)
-    number_re = re.compile("(?<!\\w)(\\d{1,3}(?:,\\d{2})+,\\d{3}(?:\\.\\d{1,3})?|\\d{1,3}(?:[ .,'’]\\d{3})+(?:[.,]\\d{1,3})?|\\d+(?:[.,]\\d{1,3})?)(?!\\w)")
+def _extract_numeric_price(line, currency_code=''):
+    original = str(line or '')
+    if '_WEB_PRICE_PATS' in globals():
+        amount, _ = _web_price_number_and_currency(original, currency_code)
+        if amount is not None:
+            return amount
+    text = _normalize_price_chars(original).replace('\xa0',' ').replace('\u202f',' ')
+    decimal = '.' if '٫' in original else ''
+    parts = re.split(r'\s+(?:—|–|-)\s+',text)
+    zones = ([parts[-1]] if len(parts)>1 else []) + [text]
+    number = re.compile(r"(?<![\w.,])([0-9](?:[0-9.,'’ ]*[0-9])?)(?![\w.,])")
     for zone in zones:
-        matches = list(number_re.finditer(zone))
-        if not matches:
-            continue
-        ranked = []
-        for mm in matches:
-            if _number_overlaps_measurement_span(zone, mm.start(), mm.end()):
+        ranked=[]
+        for match in number.finditer(zone):
+            if _number_overlaps_measurement_span(zone,match.start(),match.end()):
                 continue
-            context = zone[max(0, mm.start() - 12):min(len(zone), mm.end() + 12)]
-            has_cur = bool(re.search('\\b[A-Z]{3}\\b|US\\$|A\\$|C\\$|S\\$|HK\\$|NZ\\$|NT\\$|[$€£¥￥₹₩₺₽₪₴₸₾₼฿₫₱₦₵৳₲₭₮]|د\\.ك|ر\\.س|د\\.إ|ر\\.ق|ر\\.ع|د\\.ب|KD\\b|RMB\\b', context, re.I))
-            ranked.append((1 if has_cur else 0, mm.start(), mm.group(1)))
-        ranked.sort(reverse=True)
-        for _, _, token in ranked:
-            val = _normalize_price_token(token, cur)
-            if val is not None and val > 0:
-                return val
+            context=zone[max(0,match.start()-12):min(len(zone),match.end()+12)]
+            cur=detect_currency_code(context,currency_code) or currency_code
+            ranked.append((bool(cur),match.start(),match.group(1),cur))
+        for _,_,token,cur in sorted(ranked,reverse=True):
+            value=_normalize_price_token(token,cur,decimal)
+            if value is not None and value>0: return value
     return None
 
 
@@ -6393,7 +6426,9 @@ def _authoritative_price_value(price_value, price_text='', currency_code=''):
         raw, re.I
     ))
     if raw and explicit_currency:
-        parsed = _extract_numeric_price(raw)
+        parsed = _extract_numeric_price(raw, currency_code)
+        if parsed is None:
+            return None
         if parsed is not None and parsed > 0:
             try:
                 upstream = float(price_value) if price_value not in (None, '') else None
@@ -6408,7 +6443,7 @@ def _authoritative_price_value(price_value, price_text='', currency_code=''):
         upstream = None
     if upstream is not None and upstream > 0:
         return upstream
-    parsed = _extract_numeric_price(raw) if raw else None
+    parsed = _extract_numeric_price(raw, currency_code) if raw else None
     return parsed if parsed is not None and parsed > 0 else None
 
 def _result_offers(txt, urls, layer, lens_context=None):
@@ -8916,9 +8951,7 @@ def _text_price_local(raw_price, market_rank, lang):
     if market_rank == 0 and (not src or src == local_cur):
         return format_lens_price(raw, None, lang, local_cur or src or None)
     numeric = None
-    m = re.search(r'(?<!\d)(\d+(?:[.,]\d{1,3})?)(?!\d)', _normalize_price_chars(raw))
-    if m:
-        numeric = _normalize_price_token(m.group(1), src)
+    numeric, _ = _web_price_number_and_currency(raw, src)
     if numeric is None:
         return raw
     converted = convert_to_local(numeric, src) if src else None
@@ -9178,38 +9211,10 @@ def _short_pick_title(value, max_chars=24):
     return ' '.join(out) if out else s[:max_chars].rstrip(' -_/.,')
 
 def _recommendation_pick_search_query(original_query, picked):
-    original = re.sub('\\s+', ' ', str(original_query or '')).strip()
-    choice = _clean_pick_label(picked)
-    if not choice:
-        return original
-    if not original:
-        return choice
-    cleaned = original
-    for pat in ('^\\s*(?:ابي|أبي|اريد|أريد|ابغى|أبغى|احتاج|أحتاج)\\s+', '^\\s*(?:افضل|أفضل)\\s+', '^\\s*(?:دور لي|دوّر لي|ابحث لي|أبحث لي)\\s+(?:عن\\s+)?', '^\\s*(?:recommend|find|show me|i want|i need|best)\\s+'):
-        cleaned = re.sub(pat, '', cleaned, flags=re.I).strip()
-    if normalize_ar(choice).lower() in normalize_ar(original).lower():
-        return original
-    return ' '.join(f'{cleaned} {choice}'.split()[:24])
+    return _clean_pick_label(picked) or re.sub(r'\s+',' ',str(original_query or '')).strip()
 
 def ai_recommendation_pick_search_query(original_query, picked, lang='ar'):
-    original = re.sub('\\s+', ' ', str(original_query or '')).strip()
-    choice = _clean_pick_label(picked)
-    if not choice:
-        return original
-    system = "You normalize a user's selected shopping recommendation into ONE high-precision product search query.\nReturn ONLY the final search query on one line, no labels, no explanation, no quotes.\nRules:\n- The selected option is authoritative. Keep its exact brand and model.\n- Add only the minimum product-category/context words from the original request that help shopping search accuracy.\n- Remove recommendation/question words such as best, recommend, compare, I want, show me.\n- Never turn it into a sentence or question.\n- Never add a different model, size, gender, generation or specification unless it was explicitly present in the selected option or original request.\n- Prefer the standard international/English product-category wording for search-engine accuracy while preserving brand/model exactly.\nExamples:\nOriginal: tennis racket | Pick: Yonex EZONE 100 -> Yonex EZONE 100 tennis racket\nOriginal: chaussures de tennis homme | Pick: ASICS Solution Speed FF 3 -> ASICS Solution Speed FF 3 men's tennis shoes\nOriginal: बच्चों का टेनिस रैकेट | Pick: Babolat Pure Aero Junior 25 -> Babolat Pure Aero Junior 25 junior tennis racket\n"
-    user = f'Original generic request: {original}\nSelected recommendation: {choice}'
-    try:
-        txt, _ = text77_call_gemini([{'text': user}], system=system, use_search=False)
-        q = re.sub('^[\\s\\"\'`]+|[\\s\\"\'`]+$', '', (txt or '').splitlines()[0].strip()) if txt else ''
-        q = re.sub('^(?:SEARCH_QUERY|QUERY)\\s*:\\s*', '', q, flags=re.I).strip()
-        if q and len(q) <= 180 and (normalize_ar(choice).lower() in normalize_ar(q).lower()):
-            print(f'SMART PICK QUERY: original={original!r} picked={choice!r} -> {q!r}')
-            return q
-    except Exception as e:
-        print(f'SMART PICK QUERY ERR: {e}')
-    fallback = _recommendation_pick_search_query(original, choice)
-    print(f'SMART PICK QUERY FALLBACK: {fallback!r}')
-    return fallback
+    return _recommendation_pick_search_query(original_query, picked)
 
 def _pick_description(original_query, lang='ar'):
     q = re.sub('\\s+', ' ', str(original_query or '')).strip()
@@ -9925,7 +9930,7 @@ def _web_build_text_items(txt, urls, lang, query, supplement=True):
         shown_price = _text_price_local(raw_price, rank, lang) if raw_price else ''
         title = _compact_ui_title(raw_title or query)
         store = _ui_plain_store_name(item.get('source') or '', item.get('link') or '') or U(lang, 'store')
-        results.append({'market': _web_market_label(rank), 'market_rank': rank, 'country': rank_cc.get(rank, ''), 'flag': country_flag_emoji(rank_cc.get(rank, '')), 'store': store, 'title': title, 'raw_title': raw_title or item.get('title') or title, 'price': shown_price, 'url': item.get('link') or '', 'image': item.get('thumbnail') or item.get('image') or '', 'match_score': round(_findzia_match_score(query, raw_title or title or query), 3)})
+        results.append({'market': _web_market_label(rank), 'market_rank': rank, 'country': rank_cc.get(rank, ''), 'flag': country_flag_emoji(rank_cc.get(rank, '')), 'store': store, 'title': title, 'raw_title': raw_title or item.get('title') or title, 'price': shown_price, 'price_source': item.get('price_source') or 'ai_text', 'price_source_url': item.get('link') or '', 'url': item.get('link') or '', 'image': item.get('thumbnail') or item.get('image') or '', 'match_score': round(_findzia_match_score(query, raw_title or title or query), 3)})
     for row in results:
         row.update(_web_offer_media_fields(row))
     if USE_V106_5_RESULT_PIPELINE or TEXT_SEARCH_WHATSAPP_PARITY:
@@ -9949,6 +9954,18 @@ def _web_recommendations_response(query, lang, market):
                 'error': 'comparison_unavailable', 'comparison': '', 'options': []}
     return {'ok': True, 'type': 'recommendations', 'query': query, 'market': market,
             'comparison': comparison['summary'], 'options': comparison['options']}
+
+
+
+def _web_comparison_without_prices(text):
+    currencies = '|'.join(sorted(KNOWN_CURRENCY_CODES,key=len,reverse=True))
+    labels = r'(?:price|cost|سعر|السعر|تكلفة|prix|precio|prezzo|preis|价格|售价|цена|कीमत)'
+    amount = r'[0-9٠-٩۰-۹][0-9٠-٩۰-۹.,٫٬ \'’]*'
+    code = r'(?:' + currencies + r'|KD|RMB|د\.ك|ر\.س|د\.إ|[$€£¥￥₹₩₺₽])'
+    # Remove the whole labelled price phrase, including qualifiers/ranges.
+    text = re.sub(r'(?i)\b'+labels+r'\s*[:：]?\s*(?:'+code+r'\s*)?'+amount+r'\s*(?:'+code+r')?', '', str(text or ''))
+    text = re.sub(r'(?i)(?:'+code+r'\s*'+amount+'|'+amount+r'\s*'+code+r')', '', text)
+    return re.sub(r'[ \t]{2,}',' ',text).strip()
 
 
 def _web_brand_comparison(query, lang):
@@ -9978,7 +9995,7 @@ def _web_brand_comparison(query, lang):
             continue
         cleaned.append(line)
     txt = re.sub('\\n{3,}', '\n\n', '\n'.join(cleaned)).strip()
-    return {'summary': txt, 'options': options}
+    return {'summary': _web_comparison_without_prices(txt), 'options': options}
 
 def _lens_select_direct_rows(lens, lang, caption='', more_mode=False, exclude_domains=None, exclude_urls=None):
     raw_matches = [m for m in lens.get('matches') or [] if (m.get('title') or '').strip()]
@@ -10092,7 +10109,7 @@ def _web_build_lens_items(lens, lang, caption=''):
         rank = result_market_rank(m)
         cc = rank_cc.get(rank, '')
         shown_price = _lens_price_text_local(m, rank, lang)
-        results.append({'market': _web_market_label(rank), 'market_rank': rank, 'country': cc, 'flag': country_flag_emoji(cc), 'store': _ui_plain_store_name(m.get('source') or '', m.get('link') or '') or U(lang, 'store'), 'title': _compact_ui_title(display_title or m.get('title') or ''), 'raw_title': (m.get('title') or display_title or '').strip(), 'price': shown_price, 'price_pending': not bool(shown_price), 'price_verified': bool(shown_price), 'url': (m.get('link') or '').strip(), 'image': m.get('thumbnail') or m.get('image') or ''})
+        results.append({'market': _web_market_label(rank), 'market_rank': rank, 'country': cc, 'flag': country_flag_emoji(cc), 'store': _ui_plain_store_name(m.get('source') or '', m.get('link') or '') or U(lang, 'store'), 'title': _compact_ui_title(display_title or m.get('title') or ''), 'raw_title': (m.get('title') or display_title or '').strip(), 'price': shown_price, 'price_pending': not bool(shown_price), 'price_verified': False, 'price_source': 'lens_index', 'price_source_url': (m.get('link') or '').strip(), 'url': (m.get('link') or '').strip(), 'image': m.get('thumbnail') or m.get('image') or ''})
     return [_web_apply_market_context(row, current_market()) for row in results if _market_offer_allowed(row, current_market())]
 
 _WEB_CLASSIFICATION_LABELS = {
@@ -15243,7 +15260,7 @@ def _web_fallback_product_items(txt, urls, lang, query):
             cc = 'cn'
         else:
             cc = ''
-        rows.append({'market': _web_market_label(rank), 'market_rank': rank, 'country': cc, 'flag': country_flag_emoji(cc) if cc else '', 'store': _ui_plain_store_name(name, url) or U(lang, 'store'), 'title': _compact_ui_title(title or query), 'raw_title': title or detail or query, 'price': _text_price_local(raw_price, rank, lang) if raw_price and rank in (0, 1, 2) else raw_price, 'url': url, 'image': ''})
+        rows.append({'market': _web_market_label(rank), 'market_rank': rank, 'country': cc, 'flag': country_flag_emoji(cc) if cc else '', 'store': _ui_plain_store_name(name, url) or U(lang, 'store'), 'title': _compact_ui_title(title or query), 'raw_title': title or detail or query, 'price': _text_price_local(raw_price, rank, lang) if raw_price and rank in (0, 1, 2) else raw_price, 'url': url, 'image': '', 'price_source': 'ai_text'})
     return rows
 
 def _web_stream_event(payload):
@@ -15513,7 +15530,7 @@ def _web_price_local_explicit(raw_price, market_rank, lang, market_snapshot=None
     src = detect_currency_code(raw, local_cur if market_rank == 0 else 'USD' if market_rank == 1 else 'CNY' if market_rank == 2 else '', local_cc if market_rank == 0 else 'us' if market_rank == 1 else 'cn' if market_rank == 2 else '')
     if not src:
         src = local_cur if market_rank == 0 else 'USD' if market_rank == 1 else 'CNY' if market_rank == 2 else ''
-    numeric = _extract_numeric_price(raw)
+    numeric = _extract_numeric_price(raw, src)
     if numeric is None:
         return raw
     if market_rank == 0 and src == local_cur:
@@ -15526,33 +15543,31 @@ def _web_price_local_explicit(raw_price, market_rank, lang, market_snapshot=None
 
 def _web_price_token_to_float(token, currency_code=''):
     return _normalize_price_token(token, currency_code)
-_WEB_PRICE_CUR_WORDS = '(?<![A-Za-z])(?:USD|US\\$|EUR|GBP|KWD|K\\.?D|SAR|S\\.?R|AED|DHS|DH|QAR|Q\\.?R|BHD|B\\.?D|OMR|R\\.?O|JOD|J\\.?D|EGP|L\\.?E|MAD|DZD|TND|IQD|LBP|LYD|CNY|RMB|JPY|CAD|AUD|CHF|INR|KRW|TRY|RUB)(?![A-Za-z])'
+_WEB_PRICE_CUR_WORDS = r'(?<![A-Za-z])(?:' + '|'.join(sorted(KNOWN_CURRENCY_CODES, key=len, reverse=True)) + r'|US\$|K\.?D|S\.?R|DHS|DH|Q\.?R|B\.?D|R\.?O|J\.?D|L\.?E|RMB)(?![A-Za-z])'
 _WEB_PRICE_CUR_SYMS = '[$€£¥￥₹₩₺₽]|د\\.ك|ر\\.س|د\\.إ|ر\\.ق|د\\.ب|ر\\.ع|د\\.أ|ج\\.م|د\\.م|د\\.ت|دك|ريال|دينار|درهم|جنيه|ليرة|ليره'
 # Grouped numbers in every convention: 1,234.56 / 1.234,56 / 1 234,56 / 1'234.56 /
 # 1,29,999 (lakh) / 12.500 (3-decimal dinar) / 2299 — the currency decides later.
-_WEB_PRICE_NUM = "((?:[0-9]{1,3}(?:(?:[ \u00a0\u202f'][0-9]{3})|(?:[.,][0-9]{2,3}))+(?:[.,][0-9]{1,3})?|[0-9]+(?:[.,][0-9]{1,3})?)(?![0-9]))"
+_WEB_PRICE_NUM = "([0-9](?:[0-9.,'’ \\u00a0\\u202f]*[0-9])?)"
 _WEB_PRICE_PATS = (re.compile('(?:%s|%s)\\s*%s' % (_WEB_PRICE_CUR_WORDS, _WEB_PRICE_CUR_SYMS, _WEB_PRICE_NUM), re.I), re.compile('%s\\s*(?:%s|%s)' % (_WEB_PRICE_NUM, _WEB_PRICE_CUR_WORDS, _WEB_PRICE_CUR_SYMS), re.I))
 
 def _web_price_number_and_currency(text, fallback_currency=''):
-    raw = str(text or '').strip()
+    original = str(text or '').strip().split(' (',1)[0]
+    raw = _normalize_price_chars(original).replace('\xa0',' ').replace('\u202f',' ').strip()
     if not raw:
         return (None, '')
     cur = detect_currency_code(raw, fallback_currency or '') or fallback_currency or ''
-    for pat in _WEB_PRICE_PATS:
-        m = pat.search(raw)
-        if m:
-            val = _web_price_token_to_float(m.group(1), cur)
-            if val and val > 0:
-                return (val, cur)
-    if extract_pack_size(raw) and (not re.search('\\b(?:USD|EUR|GBP|KWD|KD|SAR|SR|AED|DHS|QAR|QR|BHD|BD|OMR|RO|JOD|EGP|MAD|DZD|TND|IQD|LBP|CNY|RMB|JPY|CAD|AUD|CHF|INR|KRW|TRY|RUB)\\b|[$€£¥￥₹₩₺₽]|د\\.ك|ر\\.س|د\\.إ|ر\\.ق|د\\.ب|ر\\.ع|دك|ريال|دينار|درهم|جنيه|ليرة|ليره', raw, re.I)):
-        return (None, cur)
-    if len(raw) <= 50:
-        m = re.search(r'(?<![0-9])([0-9]+(?:[.,][0-9]{1,3})?)(?![0-9])', _normalize_price_chars(raw))
-        if m:
-            val = _normalize_price_token(m.group(1), cur)
-            if val is not None and val > 0:
-                return (val, cur)
-    return (None, cur)
+    decimal = '.' if '٫' in original else ''
+    for pattern in _WEB_PRICE_PATS:
+        match = pattern.search(raw)
+        if match:
+            value = _normalize_price_token(match.group(1),cur,decimal)
+            if value is not None and value > 0:
+                return (value,cur)
+            return (None,cur)
+    if cur and re.fullmatch(_WEB_PRICE_NUM,raw):
+        value = _normalize_price_token(raw,cur,decimal)
+        return (value if value is not None and value > 0 else None,cur)
+    return (None,cur)
 _WEB_DEEP_PRICE_SPECIFIC_PATS = (re.compile('"(?:salePrice|sale_price|specialPrice|special_price|sellingPrice|selling_price|offerPrice|offer_price|finalPrice|final_price|currentPrice|current_price|discountedPrice|discounted_price)"\\s*:\\s*\\{[^{}]{0,140}?"(?:amount|value|raw)"\\s*:\\s*"?([0-9]+(?:\\.[0-9]{1,4})?)', re.I), re.compile('"(?:salePrice|specialPrice|sellingPrice|offerPrice|finalPrice|currentPrice|discountedPrice|price_amount|priceAmount|priceValue|price_value)"\\s*:\\s*"?([0-9]+(?:\\.[0-9]{1,4})?)"?', re.I), re.compile('"price"\\s*:\\s*\\{[^{}]{0,140}?"(?:amount|value|raw)"\\s*:\\s*"?([0-9]+(?:\\.[0-9]{1,4})?)', re.I))
 _WEB_DEEP_PRICE_GENERIC_PAT = re.compile('"price"\\s*:\\s*"?([0-9]+(?:\\.[0-9]{1,4})?)"?', re.I)
 _WEB_DEEP_CURRENCY_PAT = re.compile('"(?:currency|currencyCode|currency_code|priceCurrency|currencyIsoCode)"\\s*:\\s*"([A-Za-z]{3})"', re.I)
@@ -16271,7 +16286,9 @@ _WEB_PRICE_FIELDS = ('price', 'price_amount', 'currency', 'price_source', 'price
                      'price_checked_at', 'price_verified', 'price_pending', 'price_status',
                      'price_unavailable', 'availability', 'original_price', 'original_currency',
                      'price_estimated', 'price_compare_value', 'price_compare_currency',
-                     'price_confidence', 'price_suspect_value')
+                     'price_confidence', 'price_suspect_value',
+                     'price_contract', 'price_display_ready', 'price_display_major',
+                     'price_display_minor', 'price_display_currency')
 
 
 def _web_price_url_key(url):
@@ -16672,6 +16689,13 @@ def _web_indexed_offer_money(item):
     for value, currency in candidates:
         if value in (None, '') or isinstance(value, (dict, list, bool)):
             continue
+        if isinstance(value, (int,float,Decimal)):
+            code = str(currency or '').strip().upper()
+            money = _web_exact_money(value,code)
+            if money and not _price_collides_with_product_spec(money[0],item.get('title') or ''):
+                return money
+            if code in KNOWN_CURRENCY_CODES:
+                continue
         # Providers mark estimated prices with a trailing asterisk ("$27.99*").
         raw = re.sub(r'\s*\*+\s*$', '', _normalize_price_chars(str(value).strip())).strip()
         raw = re.sub(r'\bUS\s*\$', 'USD ', raw, flags=re.I)
@@ -16702,6 +16726,17 @@ def _web_indexed_offer_money(item):
         if not _web_row_has_numeric_price({'price': display, 'currency': explicit, 'title': item.get('title') or item.get('raw_title') or ''}):
             continue
         amount, _ = _web_price_number_and_currency(display, explicit)
+        # A single three-digit separator can disagree with structured
+        # evidence by 1000x. Do not guess which convention the store meant.
+        upstream = price_obj.get('extracted_value', item.get('extracted_price'))
+        token = re.sub(r'[^0-9.,]', '', raw)
+        if amount and re.fullmatch(r'[0-9]+[.,][0-9]{3}', token) and upstream is not None:
+            try:
+                hint = float(upstream)
+                if hint > 0 and abs(amount - hint * 1000) < .00001:
+                    continue
+            except (ValueError, TypeError):
+                pass
         money = _web_exact_money(amount, explicit)
         if money:
             return money
@@ -16825,6 +16860,8 @@ def _web_flag_price_outliers(rows):
 def _web_live_snapshot(event, rows):
     """Keep every emitted card when classification snapshots replace their lists."""
     _web_flag_price_outliers(rows)
+    for row in rows.values():
+        row.update(_web_price_display_fields(row))
     event = dict(event)
     # Keep the engine's order for the rows it listed (lane, identity, price),
     # then append every earlier card the snapshot did not mention.
@@ -16857,6 +16894,46 @@ def _web_live_snapshot(event, rows):
     return event
 
 
+
+def _web_price_display_fields(row):
+    raw = str(row.get('price') or '').strip()
+    if (row.get('price_unavailable') or row.get('price_status') in ('suspect','unavailable')
+            or not _web_row_has_numeric_price(row)):
+        return {'price_contract':'findzia-money-v1','price_display_major':'',
+                'price_display_minor':'','price_display_currency':'','price_display_ready':False}
+    # The display amount, its currency and its grouping travel together.
+    value, code = _web_price_number_and_currency(raw,str(row.get('currency') or ''))
+    if not value or code not in KNOWN_CURRENCY_CODES:
+        return {'price_contract':'findzia-money-v1','price_display_ready':False,
+                'price_display_major':'','price_display_minor':'','price_display_currency':''}
+    formatted = format_price(value,code)
+    if not formatted or Decimal(formatted.replace(',','')) <= 0:
+        return {'price_contract':'findzia-money-v1','price_display_ready':False,
+                'price_display_major':'','price_display_minor':'','price_display_currency':''}
+    major, _, fraction = formatted.partition('.')
+    suffix = raw.split(' (',1)[1] if ' (' in raw else ''
+    return {'price':formatted+' '+code+(' ('+suffix if suffix else ''),
+            'price_amount':value,'currency':code,'price_pending':False,
+            'price_contract':'findzia-money-v1','price_display_ready':True,
+            'price_display_major':major,'price_display_minor':'.'+fraction if fraction else '',
+            'price_display_currency':code}
+
+
+def _web_confirmable_price(row):
+    """Accept prices observed on the same listing; generated prose is a hint."""
+    source = str(row.get('price_source') or '').lower()
+    if source in ('ai_text','search_structured_fast','search_structured_rebased'):
+        return False
+    if not source:
+        return bool(row.get('price_verified') and row.get('price_source_url'))
+    observed = source.startswith(('local_','global_')) or source in {
+        'lens_index','indexed_offer','exact_listing_index','product_page','product_jsonld',
+        'jsonld','product_meta','product_microdata','microdata','shopify_product_json','jd_price_api','amazon_price_block','next_data',
+        'page_dom','page_json','search_structured','shared_exact_index'}
+    bound = row.get('price_source_url')
+    return bool(observed and (not bound or _web_price_url_key(bound)==_web_price_url_key(row.get('url'))))
+
+
 async def _web_with_live_prices(source, lang, country, allow_paid=True):
     """Deliver rows immediately; interleave prices during retrieval AND AI review."""
     token = _WEB_LIVE_PRICE_ACTIVE.set(True)
@@ -16886,6 +16963,9 @@ async def _web_with_live_prices(source, lang, country, allow_paid=True):
         if not _market_offer_allowed(item, market):
             return None
         item = dict(item)
+        if item.get('price') and not _web_confirmable_price(item):
+            item.update(price_unconfirmed=str(item['price']),price='',price_amount=None,
+                        price_verified=False,price_pending=True,price_status='loading')
         item.update(_web_offer_media_fields(item))
         key = _web_identity_offer_key(item)
         merged = dict(rows.get(key) or {})
@@ -16908,6 +16988,7 @@ async def _web_with_live_prices(source, lang, country, allow_paid=True):
             merged['price_unavailable'] = False
         elif key not in attempted:
             merged.update(price='', price_pending=True, price_unavailable=False, price_status='loading')
+        merged.update(_web_price_display_fields(merged))
         rows[key] = merged
         cooldown = _web_merchant_cooldown(merged.get('url') or '')
         if cooldown:
@@ -16941,6 +17022,7 @@ async def _web_with_live_prices(source, lang, country, allow_paid=True):
             if page_image:
                 facts[key]['image_source'] = data.get('image_source') or 'product_page'
         rows[key] = dict(current, **(facts.get(key) or {}))
+        rows[key].update(_web_price_display_fields(rows[key]))
         return _web_stream_event({'event': 'upsert', 'phase': phase, 'item': rows[key],
                                   'market': rows[key].get('market'),
                                   'elapsed_ms': int((loop.time() - started) * 1000)})
@@ -17222,9 +17304,9 @@ def _web_row_has_numeric_price(row):
         return False
     # A legacy converted display may include the original price in parentheses.
     primary = raw.split(' (', 1)[0]
-    if re.search(r'[^\d\s.,A-Za-z$€£¥￥₹₩₺₽\u0600-\u06ff]', primary):
+    if re.search(r"[^\d\s.,'’A-Za-z$€£¥￥₹₩₺₽\u0600-\u06ff]", primary):
         return False
-    letters = re.sub(r'[\d\s.,$€£¥￥₹₩₺₽]', '', primary).upper()
+    letters = re.sub(r"[\d\s.,'’$€£¥￥₹₩₺₽]", '', primary).upper()
     allowed_words = {'KD', 'K.D', 'SR', 'S.R', 'QR', 'Q.R', 'BD', 'B.D', 'RO', 'R.O', 'JD', 'J.D', 'DHS', 'DH', 'LE', 'L.E', 'RMB',
                      'دك', 'دإ', 'رس', 'رق', 'دب', 'رع', 'د.ك', 'ر.س', 'د.إ', 'ر.ق', 'د.ب', 'ر.ع', 'د.أ', 'ج.م', 'د.م', 'د.ت',
                      'ريال', 'دينار', 'درهم', 'جنيه', 'ليرة', 'ليره'}
