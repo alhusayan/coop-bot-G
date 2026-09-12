@@ -313,7 +313,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization'], max_age=86400)
-BUILD_ID = 'v128.5.9-ready-links'
+BUILD_ID = 'v128.5.10-ratings-specs'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -2106,6 +2106,7 @@ def _collect_lens_items(data, items, seen):
                 continue
             seen.add(sig)
             items.append({'title': title, 'link': link, 'source': source, 'position': int(x.get('position') or len(items) + 1), 'section': key, 'exact': key == 'exact_matches' or bool(x.get('exact_match')), 'thumbnail': next(iter(_web_offer_image_candidates(x)), ''), 'image': next(iter(_web_offer_image_candidates(x)), ''), 'image_candidates': _web_offer_image_candidates(x), 'price': (x.get('price') or {}).get('value') if isinstance(x.get('price'), dict) else str(x.get('price') or ''), 'price_value': (x.get('price') or {}).get('extracted_value') if isinstance(x.get('price'), dict) else x.get('extracted_price'), 'currency': (x.get('price') or {}).get('currency') if isinstance(x.get('price'), dict) else '', 'in_stock': x.get('in_stock'), 'condition': (x.get('condition') or '').strip()})
+            items[-1].update(_web_capture_listing_evidence(x, 'Google Lens'))
     return items
 
 def _serpapi_lens_request(public_url, lens_type, country, auto_crop, query_hint):
@@ -2159,7 +2160,9 @@ def _shopping_card_to_market_item(card, fallback_source='', lens_country=''):
         print(f'SHOPPING BLOCKED STORE SKIP: {source} -> {direct}')
         return None
     price_text = str(card.get('price') or '').strip()
-    return {'title': (card.get('title') or '').strip(), 'link': direct, 'source': source, 'position': int(card.get('position') or 999), 'section': 'market_presence_fallback', 'exact': False, 'thumbnail': (card.get('thumbnail') or '').strip(), 'image': (card.get('thumbnail') or '').strip(), 'price': price_text, 'price_value': card.get('extracted_price'), 'currency': detect_currency_code(price_text, '', lens_country), '_offer_meta': ' '.join((str(card.get(k) or '') for k in ('installment', 'monthly_payment', 'payment', 'price_description', 'snippet', 'extensions', 'badge', 'tag', 'delivery'))), 'in_stock': None, 'condition': '', '_lens_country': lens_country, '_market_presence_fallback': True}
+    out = {'title': (card.get('title') or '').strip(), 'link': direct, 'source': source, 'position': int(card.get('position') or 999), 'section': 'market_presence_fallback', 'exact': False, 'thumbnail': (card.get('thumbnail') or '').strip(), 'image': (card.get('thumbnail') or '').strip(), 'price': price_text, 'price_value': card.get('extracted_price'), 'currency': detect_currency_code(price_text, '', lens_country), '_offer_meta': ' '.join((str(card.get(k) or '') for k in ('installment', 'monthly_payment', 'payment', 'price_description', 'snippet', 'extensions', 'badge', 'tag', 'delivery'))), 'in_stock': None, 'condition': '', '_lens_country': lens_country, '_market_presence_fallback': True}
+    out.update(_web_capture_listing_evidence(card, 'Google Shopping'))
+    return out
 
 def _market_presence_fallback(base_query, rank, limit=6):
     if not SERPAPI_API_KEY:
@@ -4532,6 +4535,7 @@ def _local_discovery_rows(data, query, market, provider):
                 'currency': str(row.get('currency') or ''),
                 '_price_market': price_geo,
                 'thumbnail': next(iter(_web_offer_image_candidates(row)), '')}
+        item.update(_web_capture_listing_evidence(row, 'Google'))
         if row.get('_shopping_market_listing'):
             item['_shopping_market_listing'] = True
         if not item['price']:
@@ -5940,6 +5944,7 @@ def _serpapi_google_organic_market_request(query, gl, hl=None, domain='', timeou
                 source = host.split('.')[0].replace('-', ' ').title() if host else 'Google'
             price_text = _google_organic_price_text(row)
             out.append({'title': str(row.get('title') or q).strip(), 'link': link, 'source': source, 'position': int(row.get('position') or pos), 'section': 'local_google_organic_fallback', 'exact': False, 'thumbnail': str(row.get('thumbnail') or '').strip(), 'image': str(row.get('thumbnail') or '').strip(), 'price': price_text, 'price_value': _extract_numeric_price(price_text) if price_text else None, 'currency': detect_currency_code(price_text, '', (gl or '').lower()) if price_text else '', 'in_stock': None, 'condition': '', '_lens_country': (gl or '').lower(), '_market_presence_fallback': True, '_google_organic_fallback': True})
+            out[-1].update(_web_capture_listing_evidence(row, 'Google'))
             if len(out) >= limit:
                 break
         print(f"LOCAL GOOGLE SEARCH gl={gl or '-'} domain={domain or '-'} -> {len(out)} result(s)")
@@ -10187,6 +10192,7 @@ def _web_build_lens_items(lens, lang, caption=''):
         cc = rank_cc.get(rank, '')
         shown_price = _lens_price_text_local(m, rank, lang)
         results.append({'market': _web_market_label(rank), 'market_rank': rank, 'country': cc, 'flag': country_flag_emoji(cc), 'store': _ui_plain_store_name(m.get('source') or '', m.get('link') or '') or U(lang, 'store'), 'title': _compact_ui_title(display_title or m.get('title') or ''), 'raw_title': (m.get('title') or display_title or '').strip(), 'price': shown_price, 'price_raw': str(m.get('price') or ''), 'price_raw_currency': str(m.get('currency') or ''), 'price_pending': not bool(shown_price), 'price_verified': False, 'price_source': 'lens_index', 'price_source_url': (m.get('link') or '').strip(), 'url': (m.get('link') or '').strip(), 'image': m.get('thumbnail') or m.get('image') or ''})
+        results[-1].update(_web_capture_listing_evidence(m, 'Google Lens'))
     return [_web_apply_market_context(row, current_market()) for row in results if _market_offer_allowed(row, current_market())]
 
 _WEB_CLASSIFICATION_LABELS = {
@@ -15070,6 +15076,8 @@ def _web_attach_captured_result_sections(payload, lang, allow_ai=True, cancel_ev
         except Exception:
             heuristic_rank = 99
         ai_item = ai_by_id.get(index) or {}
+        if isinstance(ai_item.get('candidate_profile'), dict):
+            row['card_candidate_profile'] = ai_item['candidate_profile']
         match_guard = match_guard_by_id.get(index)
         market_guard = market_guard_by_id.get(index)
         try:
@@ -15350,8 +15358,396 @@ def _web_fallback_product_items(txt, urls, lang, query):
         rows.append({'market': _web_market_label(rank), 'market_rank': rank, 'country': cc, 'flag': country_flag_emoji(cc) if cc else '', 'store': _ui_plain_store_name(name, url) or U(lang, 'store'), 'title': _compact_ui_title(title or query), 'raw_title': title or detail or query, 'price': _text_price_local(raw_price, rank, lang) if raw_price and rank in (0, 1, 2) else raw_price, 'url': url, 'image': '', 'price_source': 'ai_text'})
     return rows
 
+# Compact, source-backed offer facts. No network or AI calls in card rendering.
+_CARD_NUMBER = r'\d+(?:[.,٫]\d+)?'
+_CARD_UNIT = r'(?:fl\.?\s*oz|millilit(?:er|re)s?|ml|cl|lit(?:er|re)s?|ltr|kg|mg|grams?|g|oz|lbs?|l|مل(?:ليلتر)?|ملي|لتر|كجم|كيلوجرام|كيلو|غرام|جرام|جم|غ|毫升|毫升装|升|千克|公斤|克)'
+_CARD_MEASURE = re.compile(r'(?<![\w.])(?:(\d+)\s*[x×*]\s*)?('+_CARD_NUMBER+r')\s*('+_CARD_UNIT+r')(?![a-zA-Z\u0600-\u06ff])(?:\s*[x×*]\s*(\d+)(?![\d.]))?', re.I)
+_CARD_DIMENSIONS = re.compile(r'(?<![\w.])'+_CARD_NUMBER+r'\s*[x×*]\s*'+_CARD_NUMBER+r'(?:\s*[x×*]\s*'+_CARD_NUMBER+r')?\s*(?:cm|mm|m|inches?|in|ft|سم|مم|متر|厘米|毫米)(?!\w)', re.I)
+_CARD_EXTRA_PATTERNS = (
+    ('size', r'\b(?:EU|UK|US)\s*\d{1,2}(?:[.,]\d)?\b|(?:\bsize|\btaille|\btalla|\bgröße|\bbeden|مقاس|مقاسات|尺码)\s*[:：-]?\s*(?:\d{1,3}(?:[.,]\d)?|[2-6]?X{0,3}[SML]|small|medium|large)\b'),
+    ('concentration', r'\b(?:EDP|EDT|EDC|extrait(?:\s+de\s+parfum)?|eau\s+de\s+(?:parfum|toilette|cologne))\b|او\s+دو\s+(?:بارفان|تواليت)|أو\s+دو\s+بارفان'),
+    ('configuration', r'\b(?:OLED|QLED|Mini[- ]LED|4K|8K|1080p|1440p|DDR[3-6]|RTX\s*\d{4}(?:\s*Ti)?|Core\s+i[3579][- ]?\d*\w*|Ryzen\s*[3579](?:\s*\d{4}\w*)?|M[1-9]\s*(?:Pro|Max|Ultra))\b'),
+    ('grade', r'\b(?:\d{1,2}\s*(?:karat|carat|kt)|(?:14|18|21|22|24)\s*[kK]|925\s*(?:silver|sterling))\b|عيار\s*\d{1,2}'),
+    ('fitment', r'\b\d{3}/\d{2}\s*R\s*\d{2}\b|\b\d{1,2}W[- ]\d{2}\b'),
+    ('type', r'\b(?:refill|tester|sample|concentrate|solid\s+wood|genuine\s+leather|stainless\s+steel)\b|عبوة\s+تعبئة|تستر|خشب\s+طبيعي|جلد\s+طبيعي'),
+)
+_CARD_SPEC_KEYS = re.compile(r'(?i)^(?:size|volume|capacity|net\s*weight|weight|dimensions?|material|concentration|count|quantity|number\s*of\s*(?:items|pieces)|pack\s*(?:size|count)|unit\s*count|storage|memory|ram|processor|power|voltage|screen\s*size|compatibility|fitment|edition|model|color|colour|flavou?r|scent|shade|finish|الحجم|الوزن|المقاس|العدد|السعة|الخامة|التركيز|اللون|容量|尺寸|数量|材质|重量)$')
+_CARD_FACT_FIELDS = ('key_specs','item_condition','stock_status','product_rating','merchant_rating',
+                     'merchant_rating_token','merchant_domain','card_attributes','card_evidence_title','card_candidate_profile')
+
+
+def _card_text(value, limit=160):
+    return re.sub(r'\s+', ' ', str(value or '')).strip()[:limit]
+
+
+def _card_count(value):
+    if isinstance(value, bool):
+        return None
+    text = _web_ascii_digits(str(value or '')).strip().replace('\u202f','').replace('\xa0','').replace(' ','')
+    if re.fullmatch(r'\d{1,3}(?:[,،.]\d{3})+',text):
+        text = re.sub(r'[,،.]','',text)
+    return int(text) if text.isdigit() and 0 < int(text) < 1000000000 else None
+
+
+def _card_rating(value, count=None, source='', url='', kind='product'):
+    if isinstance(value,bool):
+        return None
+    try:
+        number = float(_web_ascii_digits(str(value)).replace(',','.').replace('٫','.'))
+    except (TypeError,ValueError):
+        return None
+    if not math.isfinite(number) or not 0 < number <= 5:
+        return None
+    out = {'value':number,'count':_card_count(count),'source':source,'source_url':url,
+           'kind':kind,'checked_at':int(time.time())}
+    return out
+
+
+def _web_capture_listing_evidence(raw, source=''):
+    """Keep product stars distinct from explicit merchant stars at ingestion."""
+    out = {k:copy.deepcopy(raw[k]) for k in _CARD_FACT_FIELDS if k in raw}
+    for key in ('condition','availability','in_stock','specifications','attributes','extensions'):
+        if key in raw:
+            out[key] = copy.deepcopy(raw[key])
+    url = str(raw.get('link') or raw.get('url') or '')
+    product = _card_rating(raw.get('rating'),raw.get('reviews'),source,url)
+    if product and source:
+        out['product_rating'] = product
+    # Only an explicitly named store_rating is a merchant rating. Plain rating
+    # on Lens, Shopping, and immersive stores is the PRODUCT rating.
+    merchant = _card_rating(raw.get('store_rating'),raw.get('store_reviews'),source,url,'store')
+    for side in ('top','bottom'):
+        block = ((raw.get('rich_snippet') or {}).get(side) or {}) if isinstance(raw.get('rich_snippet'),dict) else {}
+        if not isinstance(block,dict):
+            continue
+        ext = block.get('detected_extensions') or {}
+        if not isinstance(ext,dict):
+            continue
+        merchant = merchant or _card_rating(ext.get('store_rating'),ext.get('store_reviews'),source,url,'store')
+        if not product:
+            product = _card_rating(ext.get('rating'),ext.get('reviews'),source,url)
+            if product and source:
+                out['product_rating'] = product
+    if merchant and source:
+        out['merchant_rating'] = merchant
+    return out
+
+
+def _card_structured_attributes(node):
+    out = []
+    units={'GRM':'g','KGM':'kg','MLT':'ml','LTR':'L','CMT':'cm','MMT':'mm','MTR':'m','INH':'in','ONZ':'oz','LBR':'lb'}
+    for key in ('size','weight','width','height','depth','material','color'):
+        val = node.get(key)
+        if isinstance(val,dict):
+            unit=str(val.get('unitText') or units.get(val.get('unitCode'),'') or '')
+            val = str(val.get('value') or '')+' '+unit if unit or key in ('size','material','color') else ''
+        if isinstance(val,(str,int,float)) and str(val).strip():
+            out.append({'name':key,'value':_card_text(val,60)})
+    props = node.get('additionalProperty') or []
+    props = props if isinstance(props,list) else [props]
+    for prop in props[:40]:
+        if not isinstance(prop,dict) or not _CARD_SPEC_KEYS.fullmatch(str(prop.get('name') or '')):
+            continue
+        val = prop.get('value')
+        if isinstance(val,(str,int,float)) and not isinstance(val,bool):
+            unit = str(prop.get('unitText') or units.get(prop.get('unitCode'),'') or '')
+            out.append({'name':str(prop['name']),'value':_card_text(str(val)+' '+unit,60)})
+    return out
+
+
+def _card_page_metadata(node, base_url):
+    out = {'card_attributes':_card_structured_attributes(node)}
+    rating = node.get('aggregateRating') or {}
+    if isinstance(rating,dict) and str(rating.get('bestRating') or '5') in ('5','5.0'):
+        parsed = _card_rating(rating.get('ratingValue'),rating.get('reviewCount') or rating.get('ratingCount'),
+                              'Store page',base_url,'product')
+        if parsed:
+            out['product_rating'] = parsed
+    if node.get('itemCondition'):
+        out['condition'] = str(node['itemCondition'])
+    offers = node.get('offers') or []
+    offers = offers if isinstance(offers,list) else [offers]
+    # An unrelated variant/seller's availability must never label this card.
+    matched = [offer for offer in offers if isinstance(offer,dict) and
+        (not offer.get('url') or _web_price_url_key(urllib.parse.urljoin(base_url,str(offer['url']))) == _web_price_url_key(base_url))]
+    if len(matched)==1:
+        if matched[0].get('availability'):
+            out['availability'] = str(matched[0]['availability'])
+        if matched[0].get('itemCondition'):
+            out['condition'] = str(matched[0]['itemCondition'])
+    return out
+
+
+def _card_key_specs(row):
+    title = _web_ascii_digits(unicodedata.normalize('NFKC',_web_expand_measurement_fractions(_card_text(row.get('card_evidence_title') or row.get('raw_title') or row.get('title'),1000))))
+    found, used = [], []
+    structured_kinds=set()
+    def add(kind,value,evidence,source='listing',span=None):
+        value = _card_text(value,64)
+        if not value or value.casefold() in {x['value'].casefold() for x in found}:
+            return
+        if source!='structured' and kind in structured_kinds:
+            return
+        if span and any(span[0]<b and span[1]>a for a,b in used):
+            return
+        found.append({'kind':kind,'value':value,'evidence':_card_text(evidence,120),'source':source})
+        if span:
+            used.append(span)
+    attributes = row.get('card_attributes') or row.get('specifications') or row.get('attributes') or []
+    if isinstance(attributes,dict):
+        attributes = [{'name':k,'value':v} for k,v in attributes.items()]
+    if not isinstance(attributes,list):
+        attributes=[]
+    # Structured values from this exact offer precede incidental title wording.
+    for attr in attributes[:32]:
+        if not isinstance(attr,dict):
+            continue
+        name,val=str(attr.get('name') or ''),attr.get('value')
+        if _CARD_SPEC_KEYS.fullmatch(name) and isinstance(val,(str,int,float)) and not isinstance(val,bool):
+            kind = name.lower()
+            value = _card_text(val,48)
+            if not value:
+                continue
+            if kind in ('size','count','quantity','number of items','unit count','pack size','pack count','storage','memory','ram','processor','model','power','voltage'):
+                value = name+': '+value
+            add(kind,value,str(val),'structured')
+            structured_kinds.add(kind)
+    for match in _CARD_DIMENSIONS.finditer(title):
+        add('dimensions',re.sub(r'\s*[x×*]\s*',' × ',match.group()),match.group(),span=match.span())
+    pack = _web_pack_count(title)
+    measured = list(_CARD_MEASURE.finditer(title))
+    for match in measured:
+        if re.search(r'\b(?:MOQ|minimum\s+order)\b|اقل\s+طلب|الحد\s+الأدنى',title[max(0,match.start()-25):match.end()+20],re.I):
+            continue
+        count = match.group(1) or match.group(4)
+        if not count and len(measured)==1 and pack:
+            count = str(pack)
+        amount = match.group(2)+' '+match.group(3)
+        value = (str(count)+' × ' if count else '')+amount
+        unit=match.group(3).lower()
+        kind='volume' if re.fullmatch(r'(?i)ml|cl|l|ltr|millilit(?:er|re)s?|lit(?:er|re)s?|fl\.?\s*oz|مل|ملي|لتر|毫升|升',unit) else 'weight'
+        add('pack' if count else kind,value,match.group() if not count or match.group(1) or match.group(4) else title,span=match.span())
+    # Nested containers preserve both counts, e.g. 2 × 60 capsules.
+    nested = re.search(r'(?i)\b\d+\s*[x×*]\s*\d+\s*(?:capsules?|tablets?|count|ct|pcs?|pieces?|كبسولة|كبسولات|قرص|أقراص|حبة|حبات)\b',title)
+    if nested:
+        add('pack',re.sub(r'\s*[x×*]\s*',' × ',nested.group()),nested.group(),span=nested.span())
+    elif pack and not measured:
+        inner = _web_contained_unit_count(title)
+        value = f'{pack} × {inner} ct' if inner and inner != pack else f'{pack} pcs'
+        add('pack',value,title)
+    for match in _WEB_IDENTITY_MEASURE_RE.finditer(title):
+        if not _web_identity_measure_match_allowed(title,match):
+            continue
+        if re.search(r'\b(?:MOQ|minimum\s+order)\b|اقل\s+طلب|الحد\s+الأدنى',title[max(0,match.start()-25):match.end()+20],re.I):
+            continue
+        text = match.group()
+        role = re.match(r'\s*(RAM|SSD|HDD)\b',title[match.end():],re.I)
+        if role:
+            text += ' '+role.group(1).upper()
+        add('spec',text,match.group(),span=match.span())
+    for kind,pattern in _CARD_EXTRA_PATTERNS:
+        for match in re.finditer(pattern,title,re.I):
+            value = match.group()
+            if kind=='concentration':
+                value = re.sub(r'(?i)eau\s+de\s+parfum','EDP',value)
+                value = re.sub(r'(?i)eau\s+de\s+toilette','EDT',value)
+            add(kind,value,match.group(),span=match.span())
+    # Existing image AI may identify category-dependent facts beyond the unit
+    # patterns. Reuse only literal candidate-title evidence, never photo guesses.
+    profile = row.get('card_candidate_profile') or {}
+    if isinstance(profile,dict):
+        for field in ('size_class','quantity_bundle','configuration','compatibility','material','variant'):
+            value = profile.get(field)
+            if isinstance(value,str) and 1<len(value)<=48 and value.casefold() in title.casefold() and value.lower() not in ('unknown','none'):
+                add(field,value,value,'candidate_title')
+    priority = {'pack':0,'size':1,'volume':1,'capacity':1,'weight':1,'dimensions':1,'concentration':2,
+                'storage':2,'memory':2,'ram':2,'spec':2,'fitment':2,'grade':2,'configuration':3,'model':8,'color':9,'colour':9}
+    found.sort(key=lambda x:priority.get(x['kind'],4))
+    unique=[]
+    for fact in found:
+        compact = re.sub(r'[\s:：]','',fact['value']).casefold()
+        if any(compact in re.sub(r'[\s:：]','',f['value']).casefold() or re.sub(r'[\s:：]','',f['value']).casefold() in compact for f in unique):
+            continue
+        unique.append(fact)
+    return unique[:3]
+
+
+def _card_offer_state(row):
+    title = str(row.get('card_evidence_title') or row.get('raw_title') or row.get('title') or '')
+    condition = str(row.get('condition') or row.get('provider_second_hand_condition') or '')+' '+title
+    out={}
+    if str(row.get('condition') or '').strip().lower()=='new':
+        out['item_condition']='new'
+    for kind,pattern in (
+        ('refurbished',r'\b(?:refurbished|renewed|reconditioned|refurbishedcondition)\b|مجدد|مجدّد'),
+        ('used',r'\b(?:pre[- ]?(?:owned|loved)|usedcondition|used|second[- ]hand)\b|مستعمل'),
+        ('new',r'\b(?:newcondition|brand[- ]new|never\s+(?:used|worn))\b|جديد')):
+        if re.search(pattern,condition,re.I):
+            out['item_condition']=kind;break
+    availability = str(row.get('availability') or '')
+    if re.search(r'OutOfStock|SoldOut|Discontinued|out\s+of\s+stock|sold\s+out|غير\s+متوفر|مباع|نفد|售罄|缺货',availability+' '+title,re.I) or row.get('in_stock') is False:
+        out['stock_status']='out_of_stock'
+    elif re.search(r'PreOrder|BackOrder|pre[- ]order',availability,re.I):
+        out['stock_status']='preorder'
+    elif re.search(r'InStock|LimitedAvailability|in\s+stock',availability,re.I) or row.get('in_stock') is True:
+        out['stock_status']='in_stock'
+    return out
+
+
+def _card_merchant_domain(url):
+    try:
+        value = _shopping_ready_merchant_url(url)
+        host = (urllib.parse.urlsplit(value).hostname or '').lower().removeprefix('www.')
+        return host if re.fullmatch(r'(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,63}',host) else ''
+    except (ValueError,TypeError):
+        return ''
+
+
+def _card_reputation_token(domain,country):
+    expiry=(int(time.time())//3600+3)*3600
+    value=f'{domain}|{country}|{expiry}'
+    signature=hmac.new(_SHOPPING_LINK_SECRET,('store-rating-v1:'+value).encode(),hashlib.sha256).hexdigest()
+    return value+'|'+signature
+
+
+def _card_reputation_payload(token):
+    try:
+        if not isinstance(token,str) or len(token)>400:
+            return None
+        domain,country,expiry,signature=token.split('|')
+        value='|'.join((domain,country,expiry))
+        expected=hmac.new(_SHOPPING_LINK_SECRET,('store-rating-v1:'+value).encode(),hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(signature,expected) or int(expiry)<time.time():
+            return None
+        if _card_merchant_domain('https://'+domain)!=domain or not re.fullmatch(r'[a-z]{2}',country):
+            return None
+        return domain,country
+    except (ValueError,TypeError,AttributeError):
+        return None
+
+
+def _web_card_fields(row):
+    out=dict(row)
+    out['key_specs']=_card_key_specs(row)
+    out.update(_card_offer_state(row))
+    if out.get('stock_status')=='out_of_stock':
+        out['best_price_eligible']=False
+    domain=_card_merchant_domain(row.get('url') or row.get('link'))
+    if domain:
+        country=str(row.get('country') or row.get('search_country') or 'us').lower()
+        country=country if re.fullmatch(r'[a-z]{2}',country) else 'us'
+        out['merchant_domain']=domain
+        out['merchant_rating_token']=_card_reputation_token(domain,country)
+    return out
+
+
+def _web_card_payload(payload):
+    if isinstance(payload,list):
+        return [_web_card_payload(row) for row in payload]
+    if not isinstance(payload,dict):
+        return payload
+    out=dict(payload)
+    if (out.get('url') or out.get('link')) and (out.get('title') or out.get('raw_title')) and ('price' in out or 'store' in out):
+        return _web_card_fields(out)
+    for key in ('item','results','all_results','captured_results','exact_results','similar_results','local_results','global_results','result_sections'):
+        if key in out:
+            out[key]=_web_card_payload(out[key])
+    return out
+
+
+# Reputation is a separate, bounded background request. Never blocks search.
+STORE_REPUTATION_ENABLED=env_bool('STORE_REPUTATION_ENABLED',True)
+_STORE_REPUTATION_CACHE={}
+_STORE_REPUTATION_LOCK=threading.Lock()
+_STORE_REPUTATION_POOL=ThreadPoolExecutor(max_workers=3,thread_name_prefix='store-reputation')
+
+
+def _store_reputation_from_search(data,domain):
+    for row in (data.get('organic_results') or [])[:10]:
+        if not isinstance(row,dict):
+            continue
+        url=str(row.get('link') or '')
+        p=urllib.parse.urlsplit(url)
+        review_domain=p.path.rstrip('/').lower().removeprefix('/review/').removeprefix('www.')
+        is_trustpilot=(p.hostname=='trustpilot.com' or str(p.hostname or '').endswith('.trustpilot.com')) and p.path.startswith('/review/') and review_domain==domain
+        is_google=p.hostname in ('www.google.com','google.com') and p.path.startswith('/shopping/ratings/') and urllib.parse.parse_qs(p.query).get('q')==[domain]
+        if not is_trustpilot and not is_google:
+            continue
+        for side in ('top','bottom'):
+            rich=row.get('rich_snippet')
+            block=rich.get(side) if isinstance(rich,dict) else None
+            ext=block.get('detected_extensions') if isinstance(block,dict) else None
+            if not isinstance(ext,dict):
+                continue
+            rating=_card_rating(ext.get('store_rating',ext.get('rating')),ext.get('reviews') or ext.get('review_count') or ext.get('votes'),
+                                'Trustpilot' if is_trustpilot else 'Google',url,'store')
+            if rating:
+                return dict(rating,domain=domain)
+    return None
+
+
+def _store_reputation_lookup(domain,country):
+    key=domain+'|'+country
+    now=time.time()
+    with _STORE_REPUTATION_LOCK:
+        cached=_STORE_REPUTATION_CACHE.get(key)
+        if cached and cached[0]>now:
+            return copy.deepcopy(cached[1])
+    cache_key='store-reputation-v1:'+hashlib.sha256(key.encode()).hexdigest()
+    cached=_serpapi_cache_get(cache_key)
+    if isinstance(cached,dict) and cached.get('domain')==domain:
+        return cached.get('rating')
+    rating=None
+    if SERPAPI_API_KEY and STORE_REPUTATION_ENABLED:
+        # Exact review profile URL, not a similarly named branch or product.
+        data=_serpapi_cached_json({'engine':'google','q':f'site:trustpilot.com/review/ "{domain}"',
+              'gl':country,'hl':'en','num':5,'api_key':SERPAPI_API_KEY},timeout=(1.5,4.5),label='STORE REPUTATION') or {}
+        rating=_store_reputation_from_search(data,domain)
+        _serpapi_cache_put(cache_key,'google',{'domain':domain,'rating':rating},86400 if rating else 3600)
+    with _STORE_REPUTATION_LOCK:
+        if len(_STORE_REPUTATION_CACHE)>5000:
+            _STORE_REPUTATION_CACHE.clear()
+        _STORE_REPUTATION_CACHE[key]=(now+(86400 if rating else 3600),rating)
+    return copy.deepcopy(rating)
+
+
+async def _store_reputation_response(request):
+    if not WEB_API_ENABLED or not _web_rate_allowed(request):
+        return JSONResponse({'ok':False,'error':'rate_limit'},status_code=429)
+    try:
+        body=await request.json()
+        tokens=body.get('tokens') if isinstance(body,dict) else None
+        if not isinstance(tokens,list) or not 1<=len(tokens)<=3:
+            raise ValueError('invalid_batch')
+        payloads=[_card_reputation_payload(token) for token in tokens]
+        if not all(payloads):
+            raise ValueError('invalid_token')
+    except (ValueError,TypeError):
+        return JSONResponse({'ok':False,'error':'invalid_request'},status_code=400)
+    async def lookup(pair):
+        domain,country=pair
+        try:
+            value=await asyncio.wait_for(asyncio.wrap_future(_STORE_REPUTATION_POOL.submit(_store_reputation_lookup,domain,country)),timeout=7)
+        except Exception:
+            value=None
+        return {'domain':domain,'rating':value}
+    return {'ok':True,'stores':await asyncio.gather(*(lookup(pair) for pair in dict.fromkeys(payloads)))}
+
+
+def _card_safe_page_facts(row, snap):
+    """Reuse an already loaded, exact product page; no new page requests."""
+    if not snap.get('is_product') or snap.get('page_fetch_status') == 'blocked':
+        return {}
+    if _web_price_url_key(snap.get('url')) != _web_price_url_key(row.get('url')):
+        return {}
+    original = str(row.get('raw_title') or row.get('title') or '')
+    title = str(snap.get('title') or '')
+    if title and original and _findzia_hard_product_mismatch(original, title):
+        return {}
+    return {k:snap[k] for k in ('card_attributes','card_evidence_title','product_rating','condition','availability') if k in snap}
+
 def _web_stream_event(payload):
-    return (json.dumps(payload, ensure_ascii=False, separators=(',', ':')) + '\n').encode('utf-8')
+    return (json.dumps(_web_card_payload(payload), ensure_ascii=False, separators=(',', ':')) + '\n').encode('utf-8')
 _WEB_BAD_PRICE_TERMS = ('per month', 'monthly', 'month plan', 'installment', 'instalment', 'pay monthly', 'monthly payment', 'emi', 'finance payment', 'قسطي', 'قسط', 'اقساط', 'أقساط', 'شهري')
 _WEB_WHOLESALE_TERMS = ('minimum order', 'min order', 'moq', 'wholesale', 'bulk order', 'fob', 'per piece', '/piece', 'piece price', 'sample price', 'supplier', 'حد ادنى للطلب', 'الحد الأدنى للطلب', 'جملة', 'بالجملة')
 
@@ -15447,6 +15843,7 @@ def _web_market_candidates_to_items(candidates, rank, lang, query):
         raw_price = str(item.get('price') or '').strip()
         shown_price = _text_price_local(raw_price, rank, lang) if raw_price else ''
         out.append({'market': _web_market_label(rank), 'market_rank': rank, 'country': cc, 'flag': country_flag_emoji(cc), 'store': _ui_plain_store_name(item.get('source') or '', url) or U(lang, 'store'), 'title': _compact_ui_title(item.get('title') or query), 'raw_title': item.get('title') or query, 'price': shown_price, 'url': url, 'image': _web_best_card_image(item.get('thumbnail') or item.get('image') or '', '', False), 'match_score': round(_findzia_match_score(query, item.get('title') or query), 3), '_offer_meta': item.get('_offer_meta') or ''})
+        out[-1].update(_web_capture_listing_evidence(item, 'Google'))
         if len(out) >= cap:
             break
     if WEB_FAST_SKIP_PRODUCT_PAGE_VERIFY:
@@ -15740,6 +16137,7 @@ def _web_product_page_metadata(html, base_url):
         selected = nodes
     if len(selected) == 1:
         data['is_product'] = True
+        data.update(_card_page_metadata(selected[0], base_url))
         data['title'] = str(selected[0].get('name') or '')[:420]
         pictures = selected[0].get('image') or ''
         def absolute_images(value):
@@ -16146,6 +16544,8 @@ def _web_fetch_page_snapshot(url, country=''):
             data['product_image'] = metadata.get('image') or ''
             data['title'] = metadata.get('title') or ''
             data['is_product'] = bool(metadata.get('is_product'))
+            data.update({k:metadata[k] for k in ('card_attributes','product_rating','condition','availability') if k in metadata})
+            data['card_evidence_title'] = metadata.get('title') or ''
             try:
                 parsed_data = _web_extract_exact_page_price(html, final_url) or {}
             except Exception as exc:
@@ -16164,7 +16564,7 @@ def _web_fetch_page_snapshot(url, country=''):
             data['currency'] = str(parsed_data.get('currency') or '').upper().strip()
             data['price_source'] = parsed_data.get('price_source') or ''
             data['price_confidence'] = parsed_data.get('price_confidence') or ('high' if data['price'] else '')
-            data['availability'] = parsed_data.get('availability') or ''
+            data['availability'] = parsed_data.get('availability') or metadata.get('availability') or ''
             if data['price']:
                 data['is_product'] = True
             data['image'] = data['product_image'] or parsed_data.get('image_url') or ''
@@ -16680,7 +17080,7 @@ def _web_live_page_price(row, market):
     money = _web_exact_money(snap.get('price'), snap.get('currency'))
     if not money or not snap.get('is_product'):
         image = _web_live_page_image(row, snap)
-        return dict(_web_page_access_fields(snap), **({'page_image': image} if image else {})) or None
+        return dict(_web_page_access_fields(snap), **_card_safe_page_facts(row, snap), **({'page_image': image} if image else {})) or None
     title = str(snap.get('title') or '')
     original = str(row.get('raw_title') or row.get('title') or '')
     if title and original and _findzia_hard_product_mismatch(original, title):
@@ -16697,7 +17097,7 @@ def _web_live_page_price(row, market):
     if _price_collides_with_product_spec(amount, original, title):
         return None
     confident = str(snap.get('price_confidence') or 'high') == 'high'
-    return {**_web_page_access_fields(snap), **_web_live_quote_fields(_web_quote_from_fields(snap), market),
+    return {**_web_page_access_fields(snap), **_card_safe_page_facts(row, snap), **_web_live_quote_fields(_web_quote_from_fields(snap), market),
             'price_source': snap.get('price_source') or 'product_page',
             'price_source_url': snap.get('url') or row.get('url'),
             'price_checked_at': snap.get('price_checked_at') or time.time(),
@@ -16730,7 +17130,7 @@ def _web_live_page_image_only(row, market):
     MARKET_CTX.value = dict(market)
     snap = _web_verified_page_snapshot(row.get('url'), row.get('country') or row.get('market_country') or '') or {}
     image = _web_live_page_image(row, snap)
-    return dict(_web_page_access_fields(snap), **({'page_image': image} if image else {})) or None
+    return dict(_web_page_access_fields(snap), **_card_safe_page_facts(row, snap), **({'page_image': image} if image else {})) or None
 
 
 def _web_live_pool_prices(rows, rank, lang, market):
@@ -17284,6 +17684,9 @@ async def _web_with_live_prices(source, lang, country, allow_paid=True):
         access = _web_page_access_fields(data)
         if access:
             facts[key] = dict(facts.get(key) or {}, **access)
+        detail_facts = {k:data[k] for k in _CARD_FACT_FIELDS + ('condition','availability') if k in data}
+        if detail_facts:
+            facts[key] = dict(facts.get(key) or {}, **detail_facts)
         price_facts = _web_price_facts(data)
         # A late indexed response cannot replace a verified/live price.
         if price_facts and not (phase == 'live_index_price' and _web_row_has_numeric_price(current)):
@@ -17552,9 +17955,9 @@ async def _web_with_local_discovery(source, lang, country):
 
 async def _web_complete_result_prices(result, lang, country, discover_local=False):
     if result.get('provider_passthrough') and result.get('source') == 'google_shopping_copy':
-        return result
+        return _web_card_payload(result)
     if not isinstance(result.get('results'), list):
-        return result
+        return _web_card_payload(result)
     async def events():
         yield _web_stream_event(dict(result, event='snapshot'))
         yield _web_stream_event({'event': 'done'})
@@ -17573,7 +17976,7 @@ async def _web_complete_result_prices(result, lang, country, discover_local=Fals
             rows[_web_identity_offer_key(row)] = row
         elif event.get('event') == 'done':
             final.update({k: event[k] for k in ('priced_count', 'missing_price_count')})
-    return _web_live_snapshot(final, rows)
+    return _web_card_payload(_web_live_snapshot(final, rows))
 
 
 def _web_row_has_numeric_price(row):
@@ -17997,6 +18400,7 @@ def _serpapi_china_global_site_request(query, label, domain, timeout_seconds=Non
                 continue
             price_text = _google_organic_price_text(row)
             out.append({'title': str(row.get('title') or query).strip(), 'link': link, 'source': label, 'position': int(row.get('position') or pos), 'section': 'web_china_global_google', 'exact': False, 'thumbnail': str(row.get('thumbnail') or '').strip(), 'image': str(row.get('thumbnail') or '').strip(), 'price': price_text, 'price_value': None, 'currency': detect_currency_code(price_text, '', 'cn') if price_text else '', 'in_stock': None, 'condition': '', '_lens_country': 'cn', '_china_fallback': True, '_web_global_china': True})
+            out[-1].update(_web_capture_listing_evidence(row, 'Google'))
             if len(out) >= _web_marketplace_repeat_cap(domain):
                 break
         print(f'WEB CHINA GLOBAL GOOGLE store={label} -> {len(out)} result(s)')
@@ -19069,6 +19473,11 @@ def _shopping_resolve_merchant(payload, deadline=None):
     return url
 
 
+@app.post('/api/stores/ratings')
+async def api_store_ratings(request: Request):
+    return await _store_reputation_response(request)
+
+
 @app.post('/api/shopping/resolve')
 async def web_api_shopping_resolve(request: Request):
     headers = {'Cache-Control':'no-store'}
@@ -19171,6 +19580,7 @@ def _web_shopping_copy_rows(data, query, country, lang):
                       'alternative_price','second_hand_condition','tag','badge','snippet','extensions'):
             if field in raw:
                 row['provider_' + field] = copy.deepcopy(raw[field])
+        row.update(_web_capture_listing_evidence(raw, 'Google Shopping'))
         result.append(row)
     return result
 
@@ -19327,7 +19737,7 @@ def _shopping_prepare_results(result, on_ready=None, stop_event=None):
 
 def _web_shopping_copy_search(query, country, lang, selected_option='', sort_by='', on_ready=None, stop_event=None):
     result = _web_shopping_copy_retrieve(query, country, lang, selected_option, sort_by)
-    return _shopping_prepare_results(result, on_ready, stop_event)
+    return _web_card_payload(_shopping_prepare_results(result, on_ready, stop_event))
 
 
 async def _web_stream_shopping_copy(query, country, lang, selected_option='', request=None, sort_by=''):
@@ -21618,6 +22028,7 @@ def _web_selected_offer(raw, cc, display_market, query='', visual=False):
            'price_source': raw.get('price_source') or 'indexed_offer',
            'exact': False, 'is_exact': False, 'match_type': 'similar'}
     row.update(_web_offer_media_fields(dict(raw, url=url)))
+    row.update(_web_capture_listing_evidence(raw, 'Google'))
     if target.get('_retrieval_role') == 'global' and cc == 'cn':
         row['export_store'] = _global_store_match(url, cc)[1]
     if item.get('_local_match_uncertain'):
