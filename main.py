@@ -1,3 +1,9 @@
+# v128.5.5 — User-requested Google Shopping passthrough for ALL text searches.
+# Install with Findzia_v140_shopping_copy.liquid. Photo search is unchanged.
+# Query/positions/titles/prices/images are taken from a single Shopping response.
+# No AI rewrite, offer filtering, currency conversion, enrichment, or fan-out.
+# Unsupported markets are never replaced with another country's results.
+# TEXT_SHOPPING_COPY_ENABLED=false restores the previous text behavior.
 # v128.5.4: Based on ranges_more; direct, incremental text retrieval for web/iOS.
 # Generic comparison and clean selected-product queries remain in place.
 # Local English/native sources run in parallel with approved US/CN catalogs.
@@ -307,7 +313,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization'], max_age=86400)
-BUILD_ID = 'v128.5.4-text-direct-stream'
+BUILD_ID = 'v128.5.5-shopping-copy'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -17496,6 +17502,8 @@ async def _web_with_local_discovery(source, lang, country):
 
 
 async def _web_complete_result_prices(result, lang, country, discover_local=False):
+    if result.get('provider_passthrough') and result.get('source') == 'google_shopping_copy':
+        return result
     if not isinstance(result.get('results'), list):
         return result
     async def events():
@@ -18621,7 +18629,201 @@ async def _web_stream_text_direct(query, country, lang, request=None):
         await asyncio.gather(task, return_exceptions=True)
 
 
+# A deliberate passthrough for text search. No Gemini, market fan-out,
+# merchant scraping, semantic filtering, price repair, conversion or re-ranking.
+# Schema: https://serpapi.com/shopping-results
+# Country/pagination limits: https://serpapi.com/google-shopping-api
+TEXT_SHOPPING_COPY_ENABLED = env_bool('TEXT_SHOPPING_COPY_ENABLED', True)
+TEXT_SHOPPING_COPY_TIMEOUT = max(5., min(30., float(os.environ.get('TEXT_SHOPPING_COPY_TIMEOUT', '15'))))
+
+
+def _web_shopping_copy_url(value):
+    """A display link, not a server-side fetch. Keep the observed URL intact."""
+    if not isinstance(value, str):
+        return ''
+    value = value.strip()
+    if value.startswith('//'):
+        value = 'https:' + value
+    try:
+        parsed = urllib.parse.urlsplit(value)
+        if parsed.scheme not in ('https', 'http') or not parsed.hostname or parsed.username or parsed.password:
+            return ''
+        host = parsed.hostname.lower()
+        if host == 'localhost' or host.endswith(('.localhost', '.local', '.internal')):
+            return ''
+        try:
+            if not ipaddress.ip_address(host).is_global:
+                return ''
+        except ValueError:
+            pass  # No DNS/merchant request is needed to display an indexed URL.
+        return value
+    except ValueError:
+        return ''
+
+
+def _web_shopping_copy_query(query, selected_option=''):
+    # A comparison choice is a new search, never concatenated with its parent.
+    return str(selected_option or query or '').strip()
+
+
+def _web_shopping_copy_params(query, country, lang, sort_by=''):
+    params = {'engine': 'google_shopping', 'q': query, 'gl': country,
+            'hl': _web_language(lang), 'location': COUNTRY_NAMES.get(country, country.upper()),
+            'google_domain': 'google.com', 'api_key': SERPAPI_API_KEY, 'output': 'json'}
+    if str(sort_by) in ('1','2'):
+        params['sort_by'] = str(sort_by)
+    return params
+
+
+def _web_shopping_copy_link(query, country, lang):
+    return 'https://www.google.com/search?' + urllib.parse.urlencode(
+        {'q': query, 'udm': '28', 'gl': country, 'hl': _web_language(lang)})
+
+
+def _web_shopping_copy_rows(data, query, country, lang):
+    """One displayed card per provider card, including Google product links.
+
+    Keep array order, duplicate URLs, missing prices, and all returned cards.
+    Only fields supplied on this same card can supply its price or images.
+    Numeric values are separate optional sorting hints, never display repairs.
+    """
+    cards = []
+    for field, values in data.items():
+        if field in ('shopping_results', 'inline_shopping_results') and isinstance(values, list):
+            cards.extend((row, field, '') for row in values if isinstance(row, dict))
+        elif field == 'categorized_shopping_results' and isinstance(values, list):
+            for group in values:
+                if not isinstance(group, dict):
+                    continue
+                rows = group.get('shopping_results')
+                if isinstance(rows, list):
+                    cards.extend((row, field, str(group.get('title') or group.get('name') or ''))
+                                 for row in rows if isinstance(row, dict))
+    result = []
+    scope = hashlib.sha256(json.dumps([query,country,lang], ensure_ascii=False).encode()).hexdigest()[:16]
+    for index, (raw, section, group) in enumerate(cards):
+        pictures = []
+        def picture(value):
+            if isinstance(value, list):
+                for entry in value:
+                    picture(entry)
+            elif isinstance(value, dict):
+                picture(value.get('url') or value.get('src') or value.get('original'))
+            else:
+                url = _web_shopping_copy_url(value)
+                if url and url not in pictures:
+                    pictures.append(url)
+        for field in ('thumbnail','thumbnails','serpapi_thumbnail','serpapi_thumbnails'):
+            picture(raw.get(field))
+        link = next((url for field in ('product_link','link','direct_link')
+                     if (url := _web_shopping_copy_url(raw.get(field)))), '')
+        # Some layouts expose only the Google catalog ID. Its documented
+        # product route opens Google itself; never invent a merchant URL.
+        product_id = str(raw.get('product_id') or '')
+        if not link and re.fullmatch(r'[0-9]{1,24}', product_id):
+            link = 'https://www.google.com/shopping/product/' + product_id + '?' + urllib.parse.urlencode(
+                {'gl':country,'hl':_web_language(lang)})
+        price = raw.get('price')
+        price = price if isinstance(price, str) else str(price) if isinstance(price, (float,int)) and not isinstance(price,bool) else ''
+        row = {'result_id': f'shopping:{scope}:{index}', 'provider_order': index,
+               'provider_position': raw.get('position'), 'provider_section': section,
+               'provider_group': group, 'provider_passthrough': True, 'retrieval': 'google_shopping_copy',
+               'url': link, 'title': str(raw.get('title') or ''), 'raw_title': str(raw.get('title') or ''),
+               'store': str(raw.get('source') or ''), 'product_id': product_id,
+               'image': pictures[0] if pictures else '', 'thumbnail': pictures[0] if pictures else '',
+               'image_candidates': pictures, 'price': price, 'provider_price_text': price,
+               'price_source': 'google_shopping', 'price_verified': False, 'price_pending': False,
+               'price_status': 'indexed' if price else 'not_provided',
+               'currency': str(raw.get('currency') or ''), 'market': 'shopping', 'market_scope': 'shopping',
+               'search_country': country, 'country': '', 'market_country': '', 'flag': ''}
+        amount = raw.get('extracted_price')
+        if isinstance(amount,(int,float)) and not isinstance(amount,bool) and math.isfinite(amount):
+            row['provider_extracted_price'] = amount
+        for field in ('old_price','delivery','rating','reviews','multiple_sources','installment',
+                      'alternative_price','second_hand_condition','tag','badge','snippet','extensions'):
+            if field in raw:
+                row['provider_' + field] = copy.deepcopy(raw[field])
+        result.append(row)
+    return result
+
+
+def _web_shopping_copy_search(query, country, lang, selected_option='', sort_by=''):
+    query = _web_shopping_copy_query(query, selected_option)
+    base = {'query': query, 'type': 'results', 'source': 'google_shopping_copy',
+            'provider_passthrough': True, 'authoritative': True, 'preserve_provider_order': True,
+            'market': _web_market(country), 'results': [], 'local_discovery_complete': True,
+            'google_shopping_url': _web_shopping_copy_link(query,country,lang),
+            'retrieval_calls': 0, 'exhausted': True}
+    if not query:
+        return dict(base, ok=False, error='empty_query')
+    if len(query) > WEB_API_MAX_QUERY_CHARS:
+        return dict(base, ok=False, error='query_too_long')
+    if not SERPAPI_API_KEY:
+        return dict(base, ok=False, error='shopping_not_configured')
+    params = _web_shopping_copy_params(query,country,lang,sort_by)
+    started = time.monotonic()
+    # Try the requested country, including newly supported countries. Never
+    # silently substitute US/Saudi results for an unsupported local market.
+    try:
+        data = _serpapi_cached_json(params, timeout=(2, TEXT_SHOPPING_COPY_TIMEOUT-2), label='SHOPPING COPY')
+    except Exception as exc:
+        print(f'SHOPPING COPY FAILED reason={type(exc).__name__}')
+        data = None
+    base['retrieval_calls'] = 1
+    base['elapsed_ms'] = int((time.monotonic()-started)*1000)
+    if not isinstance(data, dict) or data.get('error'):
+        error = 'shopping_unavailable_for_market' if not _shopping_gl_supported(country) else 'shopping_provider_unavailable'
+        return dict(base, ok=False, error=error)
+    effective = data.get('search_parameters')
+    effective = effective if isinstance(effective,dict) else {}
+    actual = str(effective.get('gl') or country).lower()
+    if {'uk':'gb'}.get(actual,actual) != {'uk':'gb'}.get(country,country):
+        return dict(base, ok=False, error='shopping_market_mismatch')
+    rows = _web_shopping_copy_rows(data,query,country,lang)
+    result = dict(base, ok=True, results=rows, count=len(rows))
+    info = data.get('search_information')
+    info = info if isinstance(info,dict) else {}
+    result['provider_query'] = str(info.get('query_displayed') or query)
+    print(f'SHOPPING COPY country={country} rows={len(rows)} images={sum(bool(r["image"]) for r in rows)}'
+          f' prices={sum(bool(r["price"]) for r in rows)} calls=1 elapsed_ms={base["elapsed_ms"]} raw_order=True')
+    return result
+
+
+async def _web_stream_shopping_copy(query, country, lang, selected_option='', request=None, sort_by=''):
+    started = time.monotonic()
+    query = _web_shopping_copy_query(query,selected_option)
+    yield _web_stream_event({'event':'start','ok':True,'source':'google_shopping_copy','provider_passthrough':True})
+    yield _web_stream_event({'event':'query','query':query,'provider_passthrough':True,
+                            'google_shopping_url':_web_shopping_copy_link(query,country,lang)})
+    task = asyncio.create_task(asyncio.to_thread(_web_shopping_copy_search,query,country,lang,'',sort_by))
+    try:
+        while not task.done():
+            if request is not None and await request.is_disconnected():
+                return
+            done,_ = await asyncio.wait({task},timeout=.5)
+            if not done:
+                if time.monotonic()-started > TEXT_SHOPPING_COPY_TIMEOUT+1:
+                    yield _web_stream_event({'event':'error','error':'shopping_provider_unavailable',
+                        'provider_passthrough':True,'google_shopping_url':_web_shopping_copy_link(query,country,lang)})
+                    return
+                yield _web_stream_event({'event':'status','stage':'google_shopping'})
+        result = await task
+        if not result.get('ok'):
+            yield _web_stream_event(dict(result,event='error'))
+            return
+        # One completed provider response, no fake per-store network delay.
+        yield _web_stream_event(dict(result,event='snapshot'))
+        yield _web_stream_event({'event':'done','count':len(result['results']), 'source':'google_shopping_copy',
+            'provider_passthrough':True,'exhausted':True,'retrieval_calls':1,
+            'google_shopping_url':result['google_shopping_url'], 'elapsed_ms':result['elapsed_ms']})
+    finally:
+        task.cancel()
+        await asyncio.gather(task,return_exceptions=True)
+
+
 def _web_search_text_sync(query, country, lang, selected_option='', original_query='', force_specific=False, hybrid=None):
+    if TEXT_SHOPPING_COPY_ENABLED:
+        return _web_shopping_copy_search(query, country, lang, selected_option)
     prep = _web_prepare_stream_query_sync(query, country, lang, selected_option, original_query, force_specific)
     if not prep.get('ok'):
         return {'ok': False, 'error': prep.get('error') or 'empty_query'}
@@ -18743,6 +18945,10 @@ def _web_more_stores_sync(query, country, lang, shown_urls=None, shown_domains=N
     MARKET_CTX.value = market
     q = re.sub('\\s+', ' ', str(query or '')).strip()[:WEB_API_MAX_QUERY_CHARS]
     image_origin = str(search_kind or '').strip().lower() == 'image' or bool(image_b64 or image_mime)
+    if TEXT_SHOPPING_COPY_ENABLED and not image_origin:
+        return {'ok':True,'type':'results','query':q,'results':[],'exhausted':True,
+                'source':'google_shopping_copy','provider_passthrough':True,
+                'google_shopping_url':_web_shopping_copy_link(q,country,lang)}
     seen_urls = {
         _canonical_result_url(str(url or '').strip())
         for url in list(shown_urls or [])[:80]
@@ -20001,6 +20207,11 @@ async def web_api_search_stream(request: Request):
     original_query = str(payload.get('original_query') or '').strip()
     force_specific = bool(payload.get('force_specific'))
     client_name = re.sub('[^a-z0-9_-]+', '', str(payload.get('client') or 'web').strip().lower())[:24] or 'web'
+
+    if TEXT_SHOPPING_COPY_ENABLED:
+        return StreamingResponse(_web_stream_shopping_copy(query, country, lang, selected_option, request, payload.get('sort_by')),
+            media_type='application/x-ndjson',
+            headers={'Cache-Control':'no-cache, no-transform','X-Accel-Buffering':'no'})
 
     async def _generator():
         started = time.time()
@@ -21456,7 +21667,10 @@ async def web_api_search(request: Request):
     original_query = str(payload.get('original_query') or '').strip()
     force_specific = bool(payload.get('force_specific'))
     started = time.time()
-    result = await asyncio.to_thread(_web_search_text_sync, query, country, lang, selected_option, original_query, force_specific)
+    if TEXT_SHOPPING_COPY_ENABLED:
+        result = await asyncio.to_thread(_web_shopping_copy_search, query, country, lang, selected_option, payload.get('sort_by'))
+    else:
+        result = await asyncio.to_thread(_web_search_text_sync, query, country, lang, selected_option, original_query, force_specific)
     result = await _web_complete_result_prices(result, lang, country, discover_local=True)
     result['elapsed_ms'] = int((time.time() - started) * 1000)
     return result
