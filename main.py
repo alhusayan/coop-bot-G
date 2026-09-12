@@ -313,7 +313,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization'], max_age=86400)
-BUILD_ID = 'v128.5.10-ratings-specs'
+BUILD_ID = 'v128.5.11-variant-groups'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -15373,7 +15373,7 @@ _CARD_EXTRA_PATTERNS = (
 )
 _CARD_SPEC_KEYS = re.compile(r'(?i)^(?:size|volume|capacity|net\s*weight|weight|dimensions?|material|concentration|count|quantity|number\s*of\s*(?:items|pieces)|pack\s*(?:size|count)|unit\s*count|storage|memory|ram|processor|power|voltage|screen\s*size|compatibility|fitment|edition|model|color|colour|flavou?r|scent|shade|finish|الحجم|الوزن|المقاس|العدد|السعة|الخامة|التركيز|اللون|容量|尺寸|数量|材质|重量)$')
 _CARD_FACT_FIELDS = ('key_specs','item_condition','stock_status','product_rating','merchant_rating',
-                     'merchant_rating_token','merchant_domain','card_attributes','card_evidence_title','card_candidate_profile')
+                     'merchant_rating_token','merchant_domain','card_attributes','card_evidence_title','card_candidate_profile','card_model','card_brand','variant_profile')
 
 
 def _card_text(value, limit=160):
@@ -15409,6 +15409,11 @@ def _web_capture_listing_evidence(raw, source=''):
     for key in ('condition','availability','in_stock','specifications','attributes','extensions'):
         if key in raw:
             out[key] = copy.deepcopy(raw[key])
+    for target, field in (('card_model','model'),('card_brand','brand')):
+        value = raw.get(field)
+        if isinstance(value,dict): value = value.get('name')
+        if isinstance(value,(str,int)) and not isinstance(value,bool) and str(value).strip():
+            out[target] = _card_text(value,120)
     url = str(raw.get('link') or raw.get('url') or '')
     product = _card_rating(raw.get('rating'),raw.get('reviews'),source,url)
     if product and source:
@@ -15457,6 +15462,10 @@ def _card_structured_attributes(node):
 
 def _card_page_metadata(node, base_url):
     out = {'card_attributes':_card_structured_attributes(node)}
+    for field in ('model','brand'):
+        value = node.get(field)
+        if isinstance(value,dict):value = value.get('name')
+        if isinstance(value,(str,int)) and not isinstance(value,bool):out['card_'+field] = _card_text(value,120)
     rating = node.get('aggregateRating') or {}
     if isinstance(rating,dict) and str(rating.get('bestRating') or '5') in ('5','5.0'):
         parsed = _card_rating(rating.get('ratingValue'),rating.get('reviewCount') or rating.get('ratingCount'),
@@ -15478,7 +15487,7 @@ def _card_page_metadata(node, base_url):
     return out
 
 
-def _card_key_specs(row):
+def _card_key_specs(row, limit=3):
     title = _web_ascii_digits(unicodedata.normalize('NFKC',_web_expand_measurement_fractions(_card_text(row.get('card_evidence_title') or row.get('raw_title') or row.get('title'),1000))))
     found, used = [], []
     structured_kinds=set()
@@ -15569,7 +15578,7 @@ def _card_key_specs(row):
         if any(compact in re.sub(r'[\s:：]','',f['value']).casefold() or re.sub(r'[\s:：]','',f['value']).casefold() in compact for f in unique):
             continue
         unique.append(fact)
-    return unique[:3]
+    return unique if limit is None else unique[:limit]
 
 
 def _card_offer_state(row):
@@ -15626,10 +15635,273 @@ def _card_reputation_payload(token):
         return None
 
 
+# Variant grouping uses only this offer's evidence, never its price or the query.
+_VARIANT_AXIS_ORDER = ('model','brand','volume','mass','count','contained_count','size','dimensions','length','storage','ram',
+                       'condition','concentration','edition','role','configuration','display','resolution','processor','gpu','power','voltage','frequency',
+                       'battery_capacity','energy','camera_resolution','material','grade','fitment')
+_VARIANT_FEATURE_CODES = {'4k','8k','2k','1080p','1440p','2160p','3g','4g','5g','2d','3d','x2','x3','x4','2x','3x','4x'}
+_VARIANT_AMOUNT_RANGE = re.compile(r'(?i)(?<!\w)\d+(?:[.,]\d+)?\s*[-–—]\s*\d+(?:[.,]\d+)?\s*(?:ml|cl|l|g|kg|oz|مل|لتر|جم|غرام|毫升|克)(?![a-z])')
+_VARIANT_APPAREL = re.compile(r'(?i)\b(?:shirt|t[- ]shirt|dress|jacket|hoodie|pants|trousers|jeans|sweater|coat|bra|skirt|shorts|leggings)\b|قميص|فستان|بنطلون|تيشيرت|جاكيت|عباية|ملابس')
+_VARIANT_NAME_NOISE = re.compile(r'(?i)\b(?:men[’\x27]?s?|women[’\x27]?s?|unisex|kids?|children[’\x27]?s?|boys?|girls?|laced|lace[- ]up|'
+    r'shoes?|sneakers?|trainers?|running|athletic|casual|footwear|sandals?|boots?|coffee|side|end|dining|tables?|'
+    r'headphones?|earphones?|wireless|bluetooth|noise|cancelling|canceling|smartphones?|phones?|mobile|unlocked|'
+    r'perfume|fragrance|spray|parfum|cologne|eau|de|toilette|EDP|EDT|EDC|new|used|refurbished|renewed|'
+    r'authentic|original|genuine|sale|buy|online|delivery|shipping|free|black|white|blue|red|green|gray|grey|pink|'
+    r'brown|beige|silver|gold|yellow|orange|purple|size|pack|count|pcs|small|medium|large|of|and|with|the|for)\b')
+_VARIANT_BRAND_SPELLINGS={'newbalance':'new balance','underarmour':'under armour','hotwheels':'hot wheels',
+    'esteelauder':'estee lauder','larocheposay':'la roche posay','headshoulders':'head and shoulders'}
+_VARIANT_CONDITIONS=(
+    ('open_box',r'open[- ]box|علبة\s+مفتوحة|bo[iî]te\s+ouverte|geöffnete\s+verpackung|caja\s+abierta|开箱'),
+    ('refurbished',r'\b(?:refurbished|renewed|reconditionn[ée]|generalüberholt|reacondicionado|ricondizionato|recondicionado|yenilenmiş)\b|مجدد|مجدّد|翻新|再生品|리퍼'),
+    ('used',r'\b(?:used|pre[- ]owned|second[- ]hand|occasion|gebraucht|usado|usata|usato|kullanılmış|bekas|terpakai)\b|مستعمل|二手|中古|중고|like\s+new|comme\s+neuf|كالجديد'),
+    ('new',r'\b(?:newcondition|brand[- ]new|neuf|neuware|nuevo|nueva|nuovo|nuova)\b|جديد|全新|未使用|新品|새\s*상품'),
+)
+
+def _variant_normal(value):
+    value=_web_ascii_digits(unicodedata.normalize('NFKC',str(value or ''))).casefold()
+    return re.sub(r'[\W_]+','',normalize_ar(value))
+
+def _variant_literal(value,title):
+    value=_variant_normal(value)
+    return bool(value and len(value)>1 and value not in ('unknown','none','na','notvisible') and value in _variant_normal(title))
+
+def _variant_number(value):
+    return f'{float(value):.6f}'.rstrip('0').rstrip('.')
+
+def _variant_measure_text(value):
+    value=_web_ascii_digits(_web_expand_measurement_fractions(str(value or '')))
+    for old,new in (('毫升',' ml'),('千克',' kg'),('公斤',' kg'),('克',' g'),('厘米',' cm'),('毫米',' mm'),('升',' L'),('كيلوجرام','kg')):
+        value=value.replace(old,new)
+    return value
+
+def _variant_measure(value):
+    """Exact unit conversion; no approximate/fuzzy merging of adjacent sizes."""
+    facts=_web_identity_measure_facts(_variant_measure_text(value))
+    if not facts:return None
+    dimensions={f['dimension'] for f in facts}
+    if len(dimensions)!=1:return None
+    axis=next(iter(dimensions))
+    # Dimensions preserve their order; matching area/total volume is insufficient.
+    nums=[_variant_number(f['each']) for f in facts]
+    key='x'.join(nums)
+    labels={'volume':'ml','mass':'g','length':'mm','storage':'GB','power':'W','voltage':'V',
+        'frequency':'Hz','battery_capacity':'mAh','energy':'Wh','camera_resolution':'MP'}
+    amounts=[float(f['each']) for f in facts]
+    unit=labels.get(axis,axis)
+    if axis=='storage':amounts=[v/1000000 for v in amounts]
+    elif axis=='length':amounts=[v/10 for v in amounts];unit='cm'
+    elif axis=='mass' and all(v>=1000 for v in amounts):amounts=[v/1000 for v in amounts];unit='kg'
+    elif axis=='volume' and all(v>=1000 for v in amounts):amounts=[v/1000 for v in amounts];unit='L'
+    label=' × '.join(_variant_number(v) for v in amounts)+' '+unit
+    return axis,key,label
+
+def _variant_model(row,title,specs):
+    source=_local_retrieval_text(title)
+    brands=sorted({b for b in _LOCAL_BRAND_ALIASES if re.search(_local_term_pattern(b),source)})
+    brands+= [b for b,spelling in _VARIANT_BRAND_SPELLINGS.items() if re.search(_local_term_pattern(spelling),source)]
+    brands=[{'iphone':'apple','ipad':'apple','airpods':'apple','macbook':'apple'}.get(b,b) for b in brands]
+    brands=list(dict.fromkeys(brands))
+    direct=row.get('card_model')
+    brand=row.get('card_brand')
+    profile=row.get('card_candidate_profile') or {}
+    if not direct and isinstance(profile,dict) and _variant_literal(profile.get('model'),title):
+        direct=profile['model']
+    if isinstance(brand,dict):brand=brand.get('name')
+    if not brand and len(brands)==1:brand=brands[0]
+    sanitized=_card_text(direct,120) if direct else _variant_measure_text(title)
+    # Retailer SKU, barcodes, and prices are not product model names.
+    sanitized=re.sub(r'(?i)\b(?:sku|asin|gtin|ean|upc|isbn)\s*[:#-]?\s*[a-z0-9._/-]+',' ',sanitized)
+    if not direct:
+        sanitized=_CARD_DIMENSIONS.sub(' ',sanitized)
+        sanitized=_VARIANT_AMOUNT_RANGE.sub(' ',sanitized)
+        sanitized=_CARD_MEASURE.sub(' ',sanitized)
+        for pattern in _WEB_PACK_COUNT_PATTERNS:sanitized=pattern.sub(' ',sanitized)
+        sanitized=_WEB_IDENTITY_MEASURE_RE.sub(' ',sanitized)
+        sanitized=re.sub(r'(?i)\b(?:EU|UK|US|size|مقاس)\s*\d+(?:[.,]\d+)?',' ',sanitized)
+        if _VARIANT_APPAREL.search(title):sanitized=re.sub(r'(?<!\w)(?:[2-6]?X{0,3}[SML])(?!\w)',' ',sanitized)
+    sanitized=_local_retrieval_text(sanitized)
+    # A spaced brand must not become part of a numeric model merely because
+    # another seller added a colour or category word after it.
+    numeric_model=None
+    for b in brands:
+        spelling=_VARIANT_BRAND_SPELLINGS.get(b,b)
+        match=re.search(_local_term_pattern(spelling)+r'\s+(\d{2,6})(?![\w.,])',sanitized)
+        if match:numeric_model=match.group(1)
+        sanitized=re.sub(_local_term_pattern(spelling),' ',sanitized)
+        sanitized=re.sub(_local_term_pattern(b),' ',sanitized)
+    sanitized=re.sub(r'\s+',' ',sanitized).strip()
+    models=_web_model_tokens_from_listing(sanitized)-_VARIANT_FEATURE_CODES
+    if numeric_model:models.add(numeric_model)
+    models={v for v in models if not re.fullmatch(r'(?:ac|ax|be)\d{3,5}|(?:size|pack|grade)\d+|\d+(?:xl|pack|ct)',v)}
+    # Ignore aliases added by the older identity matcher; keep full identifiers.
+    models={v for v in models if not any(other!=v and other.endswith(v) for other in models)}
+    if models:
+        canonical=' '.join(sorted(models))
+        tier=re.search(r'(?i)\b(?:pro\s+max|pro\s+plus|ultra|pro|plus|mini|lite|fe)\b',sanitized)
+        suffix=' '+tier.group().casefold() if tier else ''
+        family=re.search(r'(?i)\b(macbook|ipad|imac|mac\s+mini|mac\s+studio)\b(?:\s+(air|pro))?',sanitized)
+        if family:
+            family_label=family.group().casefold()
+            if not _variant_normal(canonical).startswith(_variant_normal(family_label)):
+                canonical=family_label+' '+canonical
+            if family.group(2)=='pro' and suffix==' pro':suffix=''
+        return _variant_normal(canonical+suffix),(canonical+suffix).upper(),brand
+    if direct and len(str(direct))<=80:
+        value=str(direct)
+        for b in brands:
+            value=re.sub(_local_term_pattern(b),' ',value,flags=re.I)
+            if b in _VARIANT_BRAND_SPELLINGS:value=re.sub(_local_term_pattern(_VARIANT_BRAND_SPELLINGS[b]),' ',value,flags=re.I)
+        value=_card_text(value,80)
+        return _variant_normal(value),value,brand
+    # For word-only named models use the existing multilingual brand vocabulary.
+    # Descriptive category/ad copy is removed, not folded into a model identifier.
+    # Grocery descriptions such as "drinking water" / "water" are not model
+    # identifiers. Their measured variants are extracted separately below.
+    grocery=bool(re.search(r'(?i)\b(?:water|cereal|corn\s*flakes|rice|milk|juice|biscuits?|cookies?|crisps?|chips?)\b|ماء|مياه|حليب|حبوب\s+افطار|عصير',title))
+    if brand and not grocery:
+        remaining=sanitized
+        for b in brands:
+            remaining=re.sub(_local_term_pattern(b),' ',remaining)
+            if b in _VARIANT_BRAND_SPELLINGS:remaining=re.sub(_local_term_pattern(_VARIANT_BRAND_SPELLINGS[b]),' ',remaining)
+        remaining=_VARIANT_NAME_NOISE.sub(' ',remaining)
+        words=re.findall(r'[^\W_]+',remaining,flags=re.U)
+        words=[w for w in words if len(w)>1]
+        if 1<=len(words)<=5:
+            label=' '.join(words)
+            return _variant_normal(label),label.title(),brand
+    return '', '', brand
+
+def _card_variant_facts(row):
+    fields=('title','raw_title','card_evidence_title','card_attributes','specifications','attributes',
+            'card_model','card_brand','card_candidate_profile','condition','provider_second_hand_condition')
+    key=json.dumps({k:row[k] for k in fields if k in row},ensure_ascii=False,sort_keys=True,default=str)
+    return copy.deepcopy(_variant_facts_cached(key))
+
+@lru_cache(maxsize=4096)
+def _variant_facts_cached(key):
+    row=json.loads(key)
+    title=_card_text(row.get('card_evidence_title') or row.get('raw_title') or row.get('title'),1000)
+    specs=_card_key_specs(row,limit=None)
+    facts={};conflicts=set();priorities={}
+    def put(axis,key,label,evidence,source='listing'):
+        if axis not in _VARIANT_AXIS_ORDER or not key or not label:return
+        priority=2 if source=='structured' else 1
+        if priority<priorities.get(axis,0):return
+        old=facts.get(axis)
+        if priority>priorities.get(axis,0):old=None;conflicts.discard(axis)
+        priorities[axis]=priority
+        if axis in conflicts:return
+        if old and old['key']!=str(key):
+            facts.pop(axis,None);conflicts.add(axis);return
+        facts[axis]={'key':str(key),'label':_card_text(label,96),'evidence':_card_text(evidence,160),'source':source}
+    for fact in specs:
+        kind,value,source=fact['kind'],fact['value'],fact['source']
+        measured=_variant_measure(value)
+        if measured:
+            axis,key,label=measured
+            if kind=='dimensions':axis='dimensions'
+            if axis=='storage':
+                axis='ram' if kind in ('ram','memory') or re.search(r'\bRAM\b',value,re.I) else 'storage'
+            put(axis,key,label,fact['evidence'],source)
+        if kind=='size' and not measured:
+            size=re.sub(r'(?i)^(?:size|taille|talla|größe|beden|مقاس|المقاس|尺码)\s*[:：]?\s*','',value).strip()
+            size=re.sub(r'(?i)\bsmall\b','S',size);size=re.sub(r'(?i)\bmedium\b','M',size);size=re.sub(r'(?i)\blarge\b','L',size)
+            put('size',_variant_normal(size),size.upper(),fact['evidence'],source)
+        if kind=='concentration':
+            canonical=re.sub(r'(?i)eau\s+de\s+parfum','EDP',value)
+            canonical=re.sub(r'(?i)eau\s+de\s+toilette','EDT',canonical)
+            canonical=re.sub(r'(?i)eau\s+de\s+cologne','EDC',canonical)
+            put('concentration',_variant_normal(canonical),canonical.upper(),fact['evidence'],source)
+        if kind in ('material','grade','fitment','configuration') and not measured:
+            axis=kind
+            if kind=='configuration':
+                if re.search(r'OLED|QLED|Mini[- ]LED',value,re.I):axis='display'
+                elif re.fullmatch(r'4K|8K|1080p|1440p',value,re.I):axis='resolution'
+                elif re.search(r'Core|Ryzen|M[1-9]',value,re.I):axis='processor'
+                elif re.search(r'RTX',value,re.I):axis='gpu'
+            put(axis,_variant_normal(value),value,fact['evidence'],source)
+        if kind in ('count','quantity','number of items','unit count','pack count','pack size','العدد','数量'):
+            number=re.search(r'(?<!\d)\d+(?!\d)',_web_ascii_digits(str(fact['evidence'])))
+            if number:put('count',number.group(),number.group()+' pcs',fact['evidence'],source)
+    normalized=_variant_measure_text(title)
+    # A page that prints both 100 ml and its conventional 3.4 fl oz label is
+    # one capacity. Reuse only the established equivalence proof from that title.
+    whole_measures=_web_identity_measure_facts(normalized)
+    # The identity unit reader also handles unspaced Asian listing units.
+    for axis in ('volume','mass'):
+        candidates=[f for f in whole_measures if f['dimension']==axis]
+        if axis not in facts and axis not in conflicts and len(candidates)==1:
+            f=candidates[0];unit='ml' if axis=='volume' else 'g'
+            put(axis,_variant_number(f['each']),_variant_number(f['each'])+' '+unit,title)
+    for axis in ('volume','mass'):
+        candidates=[f for f in whole_measures if f['dimension']==axis]
+        if axis in conflicts and len(candidates)==1 and re.search(r'\boz\b|\bpounds?\b|\blbs?\b',normalized,re.I):
+            f=candidates[0];conflicts.discard(axis)
+            label=_variant_number(f['each'])+(' ml' if axis=='volume' else ' g')
+            put(axis,_variant_number(f['each']),label,title)
+    count=_web_pack_count(normalized)
+    if not count and not re.search(r'(?i)\bMOQ\b|minimum\s+order|اقل\s+طلب|起订|起批',title):
+        match=re.search(r'(?i)(?:lot\s+de|pack\s+de|paquete\s+de|pacote\s+de|set\s+of)\s*(\d+)|(?<!\d)(\d+)\s*(?:Stück|Stueck|bouteilles?|unidades?|瓶|罐|盒|袋|件|个|枚|本)(?![a-z])',title)
+        if match:count=int(match.group(1) or match.group(2))
+    if count:put('count',str(count),str(count)+' pcs',title)
+    # Inline × counts also work with Chinese units, even when pack words are absent.
+    for measured in _web_identity_measure_facts(normalized):
+        if measured.get('explicit_count'):
+            count=measured['explicit_count'];put('count',str(count),str(count)+' pcs',title)
+    contained=_web_contained_unit_count(normalized)
+    nested=any(pattern.search(normalized) for pattern in (_WEB_NESTED_CONTAINED_COUNT_RE,_WEB_PACKED_PIECE_CONTENT_RE,_WEB_ARABIC_CONTAINER_CONTENT_RE))
+    nested=nested or bool(contained and re.search(r'(?i)\b(?:pack|set|case)\s+of\s+\d+',normalized))
+    if contained and count and (contained!=count or nested):put('contained_count',str(contained),str(contained)+' ct / pack',title)
+    for key,val in _card_offer_state(row).items():
+        if key=='item_condition':put('condition',val,val,row.get('condition') or title)
+    # Explicit open-box condition and ranges must never merge into a single size.
+    condition=str(row.get('condition') or '')+' '+title
+    for label,pattern in _VARIANT_CONDITIONS:
+        if re.search(pattern,condition,re.I):
+            # Prefer the specific category: "refurbished, like new" is still
+            # refurbished, and "like new" never becomes a new item.
+            conflicts.discard('condition')
+            facts['condition']={'key':label,'label':label,'evidence':_card_text(condition,160),'source':'listing'}
+            break
+    if re.search(r'(?i)open[- ]box|علبة\s+مفتوحة',condition):
+        facts['condition']={'key':'open_box','label':'Open box','evidence':_card_text(condition,160),'source':'listing'}
+    elif 'condition' not in facts and re.search(r'(?i)(?:^new\s+(?!balance|era|look|year|model|collection)|[|,(]\s*new\s*[),|]|\bnew\s*$)',title):
+        put('condition','new','new',title)
+    if _VARIANT_APPAREL.search(title):
+        for m in re.finditer(r'(?<!\w)(?:[2-6]?X{0,3}[SML])(?!\w)',title):
+            label=re.sub(r'^([2-6])X',lambda x:'X'*int(x.group(1)),m.group())
+            put('size',label.casefold(),label,m.group())
+    for m in re.finditer(r'(?i)(?:\b(?:size[s]?|EU|UK|US)|مقاس|尺码)\s*[:：]?\s*\d+(?:[.,]\d+)?\s*[-–—/]\s*\d+(?:[.,]\d+)?',title):
+        label=m.group();facts['size']={'key':'range:'+_variant_normal(label),'label':label,'evidence':label,'source':'listing'}
+    for m in re.finditer(r'(?i)(?<!\w)(\d+(?:[.,]\d+)?)\s*[-–—]\s*(\d+(?:[.,]\d+)?)\s*(ml|cl|l|g|kg|oz|مل|لتر|جم|غرام|毫升|克)(?![a-z])',title):
+        low,high=m.group(1)+' '+m.group(3),m.group(2)+' '+m.group(3)
+        left,right=_variant_measure(low),_variant_measure(high)
+        if left and right and left[0]==right[0]:
+            facts[left[0]]={'key':'range:'+left[1]+'-'+right[1],'label':m.group(),'evidence':m.group(),'source':'listing'}
+    edition=_web_first_named_pattern(title,_WEB_PRODUCT_EDITION_PATTERNS)
+    if edition:put('edition',edition,edition.replace('_',' '),title)
+    explicit=str(row.get('condition') or '').strip().rsplit('/',1)[-1].casefold()
+    explicit={'new':'new','newcondition':'new','used':'used','usedcondition':'used','refurbished':'refurbished',
+              'refurbishedcondition':'refurbished','open_box':'open_box','open box':'open_box'}.get(explicit)
+    if explicit:
+        conflicts.discard('condition')
+        facts['condition']={'key':explicit,'label':explicit,'evidence':str(row['condition']),'source':'structured'}
+    model,label,brand=_variant_model(row,title,specs)
+    if model:put('model',model,label,title,'structured' if row.get('card_model') else 'listing')
+    if brand:put('brand',_variant_normal(brand),str(brand).title(),title,'structured' if row.get('card_brand') else 'listing')
+    # Visible source facts only. A missing field is never filled from a query or
+    # another retailer; conflicting evidence remains unresolved.
+    return {'version':1,'facts':facts,'conflicts':sorted(conflicts)}
+
+
 def _web_card_fields(row):
     out=dict(row)
     out['key_specs']=_card_key_specs(row)
+    out['variant_profile']=_card_variant_facts(row)
     out.update(_card_offer_state(row))
+    condition = out['variant_profile']['facts'].get('condition')
+    if condition:out['item_condition'] = condition['key']
+    elif 'condition' in out['variant_profile']['conflicts']:out.pop('item_condition',None)
     if out.get('stock_status')=='out_of_stock':
         out['best_price_eligible']=False
     domain=_card_merchant_domain(row.get('url') or row.get('link'))
@@ -15744,7 +16016,7 @@ def _card_safe_page_facts(row, snap):
     title = str(snap.get('title') or '')
     if title and original and _findzia_hard_product_mismatch(original, title):
         return {}
-    return {k:snap[k] for k in ('card_attributes','card_evidence_title','product_rating','condition','availability') if k in snap}
+    return {k:snap[k] for k in ('card_attributes','card_evidence_title','card_model','card_brand','product_rating','condition','availability') if k in snap}
 
 def _web_stream_event(payload):
     return (json.dumps(_web_card_payload(payload), ensure_ascii=False, separators=(',', ':')) + '\n').encode('utf-8')
@@ -16544,7 +16816,7 @@ def _web_fetch_page_snapshot(url, country=''):
             data['product_image'] = metadata.get('image') or ''
             data['title'] = metadata.get('title') or ''
             data['is_product'] = bool(metadata.get('is_product'))
-            data.update({k:metadata[k] for k in ('card_attributes','product_rating','condition','availability') if k in metadata})
+            data.update({k:metadata[k] for k in ('card_attributes','card_model','card_brand','product_rating','condition','availability') if k in metadata})
             data['card_evidence_title'] = metadata.get('title') or ''
             try:
                 parsed_data = _web_extract_exact_page_price(html, final_url) or {}
