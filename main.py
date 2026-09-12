@@ -313,7 +313,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization'], max_age=86400)
-BUILD_ID = 'v128.5.6-shopping-compare-direct'
+BUILD_ID = 'v128.5.8-shopping-fast-links'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -1396,54 +1396,74 @@ def serpapi_budget_snapshot():
             'last_block_reason': SERPAPI_BUDGET_STATE.get('last_block_reason') or '',
         }
 
-def _serpapi_cached_json(params, timeout, label='SERPAPI'):
-    """Share the exact response, including when the persistent cache is down.
+def _serpapi_cached_json(params, timeout, label='SERPAPI', *, return_error=False, retry_connect=False):
+    """Coalesce one request wave; preserve failure reasons for opted-in callers.
 
-    Followers never start another paid request while the owner is running.
-    A failed wave is not cached: the next independent search can retry.
+    ReadTimeout is ambiguous: upstream may already have spent a search credit.
+    Never automatically issue another search on a read timeout. Only connection
+    establishment failures and 502/503/504 can retry once, within the SAME budget.
     """
     engine = str((params or {}).get('engine') or 'unknown')
     key = _serpapi_cache_key(params)
-    bypass = str((params or {}).get('no_cache', '')).lower() in ('true', '1')
+    bypass = str((params or {}).get('no_cache', '')).lower() in ('true','1')
+    started = time.monotonic()
+    error_info = None
+    attempts = 0
+
+    def failure(reason, status=0):
+        nonlocal error_info
+        error_info = {'reason':reason, 'http_status':int(status), 'attempts':attempts,
+                      'elapsed_ms':int((time.monotonic()-started)*1000)}
+        print(f'SERPAPI FAILURE engine={engine} label={label} reason={reason} http={status}'
+              f' attempts={attempts} elapsed_ms={error_info["elapsed_ms"]} key={key[:10]}')
+        return {'error':'serpapi_request_failed','_serpapi_failure':dict(error_info)} if return_error else None
+
+    def error_reason(data, status):
+        message = str(data.get('error') or '').casefold() if isinstance(data,dict) else ''
+        if status in (401,403) or any(s in message for s in ('invalid api key','account is not active','account has been suspended')):
+            return 'account'
+        if status == 429 or any(s in message for s in ('run out of searches','rate limit','searches per hour','quota exceeded')):
+            return 'quota'
+        if ('country' in message or 'gl parameter' in message) and any(s in message for s in ('not supported','unsupported','invalid')):
+            return 'market'
+        return 'provider'
+
     cached = None if bypass else _serpapi_cache_get(key)
     if cached is not None:
         _api_cost_record('serpapi_cache_hits')
         print(f'SERPAPI CACHE HIT engine={engine} label={label} key={key[:10]}')
         return cached
-
-    leader = True
-    event = None
+    try:
+        parts = timeout if isinstance(timeout,(tuple,list)) else (timeout,)
+        budget = sum(max(0.,float(x)) for x in parts if x is not None)
+    except (TypeError,ValueError):
+        budget = SERPAPI_SINGLEFLIGHT_WAIT_SECONDS
+    deadline = started + budget
+    leader, event = True, None
     if SERPAPI_SINGLEFLIGHT_ENABLED and not bypass:
         with SERPAPI_INFLIGHT_LOCK:
             event = SERPAPI_INFLIGHT.get(key)
             if event is None:
                 event = threading.Event()
-                try:
-                    parts = timeout if isinstance(timeout, (tuple, list)) else (timeout,)
-                    budget = sum(max(0.0, float(x)) for x in parts if x is not None) + 1.0
-                except (TypeError, ValueError):
-                    budget = SERPAPI_SINGLEFLIGHT_WAIT_SECONDS
-                event._findzia_deadline = time.monotonic() + max(budget, SERPAPI_SINGLEFLIGHT_WAIT_SECONDS)
+                event._findzia_deadline = started + max(budget+2, SERPAPI_SINGLEFLIGHT_WAIT_SECONDS)
                 SERPAPI_INFLIGHT[key] = event
             else:
                 leader = False
         if not leader:
             print(f'SERPAPI SINGLEFLIGHT WAIT engine={engine} label={label} key={key[:10]}')
-            completed = event.wait(max(0.0, event._findzia_deadline - time.monotonic()))
-            if completed:
-                shared = getattr(event, '_findzia_result', None)
+            if event.wait(max(0.,event._findzia_deadline-time.monotonic())):
+                shared = getattr(event,'_findzia_result',None)
+                if shared is None and return_error:
+                    info = getattr(event,'_findzia_failure',None)
+                    if info:
+                        return {'error':'serpapi_request_failed','_serpapi_failure':copy.deepcopy(info)}
                 _api_cost_record('serpapi_shared_responses')
-                print(f'SERPAPI SINGLEFLIGHT HIT engine={engine} label={label} key={key[:10]}')
                 return copy.deepcopy(shared)
             _api_cost_record('serpapi_shared_timeouts')
-            print(f'SERPAPI SINGLEFLIGHT TIMEOUT engine={engine} key={key[:10]} duplicate_request=False')
-            return None
+            return failure('shared_timeout')
 
-    result = None
-    budget_reserved = False
-    billable_success = False
+    result, budget_reserved, billable_success = None, False, False
     try:
-        # Close the race between the first cache read and owner election.
         cached = None if bypass else _serpapi_cache_get(key)
         if cached is not None:
             result = cached
@@ -1451,37 +1471,64 @@ def _serpapi_cached_json(params, timeout, label='SERPAPI'):
             return copy.deepcopy(result)
         budget_reserved = _serpapi_budget_reserve()
         if not budget_reserved:
-            return None
-        _api_cost_record('serpapi_http_requests')
-        print(f'SERPAPI LIVE REQUEST engine={engine} label={label} key={key[:10]}')
-        response = requests.get('https://serpapi.com/search.json', params=params, timeout=timeout)
+            return failure('budget')
+        response = None
+        for attempt in range(2 if retry_connect else 1):
+            attempt_timeout = timeout
+            if attempt:
+                remaining = deadline-time.monotonic()
+                if remaining < 3:
+                    break
+                connect = min(2., remaining/3)
+                attempt_timeout = (connect,max(.1,remaining-connect))
+                print(f'SERPAPI RETRY engine={engine} reason=connection_or_gateway attempt=2 key={key[:10]}')
+            attempts += 1
+            _api_cost_record('serpapi_http_requests')
+            print(f'SERPAPI LIVE REQUEST engine={engine} label={label} key={key[:10]} attempt={attempts} timeout={attempt_timeout}')
+            try:
+                response = requests.get('https://serpapi.com/search.json',params=params,timeout=attempt_timeout)
+            except requests.exceptions.ConnectTimeout:
+                if retry_connect and not attempt and deadline-time.monotonic() >= 3:
+                    continue
+                return failure('connect_timeout')
+            if response.status_code in (502,503,504) and retry_connect and not attempt and deadline-time.monotonic() >= 3:
+                response.close()
+                continue
+            break
+        if response is None:
+            return failure('connect_timeout')
+        try:
+            data = response.json()
+        except (ValueError,TypeError):
+            return failure(error_reason({},response.status_code) if response.status_code >= 400 else 'invalid_response',response.status_code)
         if response.status_code >= 400:
-            print(f'{label} HTTP {response.status_code}')
-            return None
-        data = response.json()
-        if not isinstance(data, dict):
-            print(f'{label} INVALID JSON TYPE: {type(data).__name__}')
-            return None
+            return failure(error_reason(data,response.status_code),response.status_code)
+        if not isinstance(data,dict):
+            return failure('invalid_response',response.status_code)
         if data.get('error'):
-            print(f'{label} PROVIDER ERROR')
-            return None
-        billable_success = True
-        result = data
+            return failure(error_reason(data,response.status_code),response.status_code)
+        billable_success, result = True, data
         if not bypass:
-            _serpapi_cache_put(key, engine, data)
+            _serpapi_cache_put(key,engine,data)
         return copy.deepcopy(result)
-    except Exception as e:
-        print(f'{label} EXCEPTION: {type(e).__name__}')
-        return None
+    except requests.exceptions.ReadTimeout:
+        return failure('read_timeout')
+    except requests.exceptions.Timeout:
+        return failure('timeout')
+    except requests.exceptions.ConnectionError:
+        return failure('connection')
+    except Exception as exc:
+        print(f'{label} EXCEPTION: {type(exc).__name__}')
+        return failure('internal')
     finally:
         if budget_reserved:
             _serpapi_budget_finish(billable_success)
         if SERPAPI_SINGLEFLIGHT_ENABLED and leader and event is not None:
             with SERPAPI_INFLIGHT_LOCK:
-                current = SERPAPI_INFLIGHT.get(key)
-                if current is event:
+                if SERPAPI_INFLIGHT.get(key) is event:
                     event._findzia_result = copy.deepcopy(result)
-                    SERPAPI_INFLIGHT.pop(key, None)
+                    event._findzia_failure = copy.deepcopy(error_info)
+                    SERPAPI_INFLIGHT.pop(key,None)
                     event.set()
 
 _serpapi_cache_db_init()
@@ -7951,7 +7998,7 @@ def text77_extract_store_offers(txt, limit=None):
     cap = MAX_STORES if limit is None else max(1, int(limit))
     return offers[:cap]
 
-def text77_call_gemini(parts, system=TEXT77_SYSTEM_PROMPT, use_search=True):
+def text77_call_gemini(parts, system=TEXT77_SYSTEM_PROMPT, use_search=True, resolve_links=True):
     model = GEMINI_SEARCH_MODEL if use_search else GEMINI_FAST_MODEL
     gemini_url = f'{GEMINI_BASE_URL}/{model}:generateContent'
     payload = {'systemInstruction': {'parts': [{'text': system + (text77_market_instruction() if use_search else '')}]}, 'contents': [{'role': 'user', 'parts': parts}], 'generationConfig': {'temperature': 0, 'maxOutputTokens': 1000 if use_search else 300}}
@@ -7987,7 +8034,7 @@ def text77_call_gemini(parts, system=TEXT77_SYSTEM_PROMPT, use_search=True):
         metadata = cand.get('groundingMetadata', {}) or {}
         chunks = metadata.get('groundingChunks', []) or []
         uris = [(c.get('web') or {}).get('uri', '') for c in chunks]
-        finals = resolve_all(uris[:12]) if uris else []
+        finals = resolve_all(uris[:12]) if uris and resolve_links else []
         records = []
         for i, chunk in enumerate(chunks[:12]):
             web = chunk.get('web') or {}
@@ -10003,7 +10050,7 @@ def _web_brand_comparison(query, lang):
     prompt = f"Generic shopping request: {query}\nCurrent market: {current_market().get('country_name', 'Kuwait')}\nCompare 3-4 strong concrete options for this request. Output only in {lang_name}. {TEXT77_lang_instr(lang)}"
     txt, options = ('', [])
     for _ in (1, 2):
-        txt, _urls = text77_call_gemini([{'text': prompt}], system=brand_compare_system(lang))
+        txt, _urls = text77_call_gemini([{'text': prompt}], system=brand_compare_system(lang), resolve_links=False)
         if not txt:
             continue
         m = re.search('(?im)^\\s*OPTIONS\\s*:\\s*(.+)$', txt)
@@ -18636,7 +18683,13 @@ async def _web_stream_text_direct(query, country, lang, request=None):
 # Schema: https://serpapi.com/shopping-results
 # Country/pagination limits: https://serpapi.com/google-shopping-api
 TEXT_SHOPPING_COPY_ENABLED = env_bool('TEXT_SHOPPING_COPY_ENABLED', True)
-TEXT_SHOPPING_COPY_TIMEOUT = max(5., min(30., float(os.environ.get('TEXT_SHOPPING_COPY_TIMEOUT', '15'))))
+# Light omits rich widgets; all returned product cards/prices/images are retained.
+# https://serpapi.com/google-shopping-light-api
+TEXT_SHOPPING_COPY_ENGINE = os.environ.get('TEXT_SHOPPING_COPY_ENGINE', 'google_shopping_light')
+if TEXT_SHOPPING_COPY_ENGINE not in ('google_shopping_light', 'google_shopping'):
+    TEXT_SHOPPING_COPY_ENGINE = 'google_shopping_light'
+# A bounded wait, not a target latency; cached responses return immediately.
+TEXT_SHOPPING_COPY_TIMEOUT = max(5., min(12., float(os.environ.get('TEXT_SHOPPING_COPY_TIMEOUT', '12'))))
 
 
 def _web_shopping_copy_url(value):
@@ -18669,11 +18722,10 @@ def _web_shopping_copy_query(query, selected_option=''):
 
 
 def _web_shopping_copy_params(query, country, lang, sort_by=''):
-    params = {'engine': 'google_shopping', 'q': query, 'gl': country,
+    params = {'engine': TEXT_SHOPPING_COPY_ENGINE, 'q': query, 'gl': country,
             'hl': _web_language(lang), 'location': COUNTRY_NAMES.get(country, country.upper()),
             'google_domain': 'google.com', 'api_key': SERPAPI_API_KEY, 'output': 'json'}
-    if str(sort_by) in ('1','2'):
-        params['sort_by'] = str(sort_by)
+    # Sort is a client operation. It must never fragment the retrieval cache.
     return params
 
 
@@ -18910,6 +18962,11 @@ def _shopping_open_link(raw, country, lang):
         'exp':(int(time.time())//86400 + 31)*86400}
     if not payload['token'] and not (payload['id'] and payload['title']):
         return '', 'unavailable'
+    cache_key = hashlib.sha256(json.dumps({k:v for k,v in payload.items() if k!='exp'}, sort_keys=True).encode()).hexdigest()
+    with _SHOPPING_LINK_LOCK:
+        hit = _SHOPPING_LINK_CACHE.get(cache_key)
+    if hit and hit[1] and time.monotonic()-hit[0] < 3600:
+        return hit[1], 'direct'
     encoded = base64.urlsafe_b64encode(json.dumps(payload, separators=(',',':'), ensure_ascii=False).encode()).decode().rstrip('=')
     signature = hmac.new(_SHOPPING_LINK_SECRET, b'shopping-open-v1:'+encoded.encode(), hashlib.sha256).hexdigest()
     path = '/api/shopping/open/' + encoded + '.' + signature
@@ -18935,7 +18992,7 @@ def _shopping_open_payload(signed):
 def _shopping_store_key(value):
     value = unicodedata.normalize('NFKC', str(value or '')).casefold().strip()
     value = re.sub(r'^https?://|^www\.', '', value)
-    value = re.sub(r'\.(?:com|co\.uk|co|net)(?:\.[a-z]{2})?$', '', value)
+    value = re.sub(r'\.(?:com|co|net|org)(?:\.[a-z]{2})?$|\.[a-z]{2}$', '', value)
     return re.sub(r'[\W_]+', '', value, flags=re.U)
 
 
@@ -18969,7 +19026,7 @@ def _shopping_resolve_merchant(payload):
     key = hashlib.sha256(json.dumps({k:v for k,v in payload.items() if k!='exp'}, sort_keys=True).encode()).hexdigest()
     with _SHOPPING_LINK_LOCK:
         hit = _SHOPPING_LINK_CACHE.get(key)
-    if hit and time.monotonic()-hit[0] < (3600 if hit[1] else 30):
+    if hit and time.monotonic()-hit[0] < 3600 and hit[1]:
         return hit[1]
     token = payload.get('token') or ''
     # Old catalog-ID-only cards need a current immersive token. Recover only
@@ -19000,8 +19057,33 @@ def _shopping_resolve_merchant(payload):
     with _SHOPPING_LINK_LOCK:
         if len(_SHOPPING_LINK_CACHE) > 6000:
             _SHOPPING_LINK_CACHE.clear()
-        _SHOPPING_LINK_CACHE[key] = (time.monotonic(), url)
+        if url:
+            _SHOPPING_LINK_CACHE[key] = (time.monotonic(), url)
     return url
+
+
+@app.post('/api/shopping/resolve')
+async def web_api_shopping_resolve(request: Request):
+    headers = {'Cache-Control':'no-store'}
+    if not WEB_API_ENABLED or not _web_rate_allowed(request):
+        return JSONResponse({'ok':False,'error':'merchant_link_rate_limited'}, status_code=429, headers=headers)
+    try:
+        body = await request.json()
+        signed = body.get('token') if isinstance(body,dict) else None
+        payload = _shopping_open_payload(signed) if isinstance(signed,str) else None
+    except (ValueError, TypeError):
+        payload = None
+    if not payload:
+        return JSONResponse({'ok':False,'error':'merchant_link_expired'}, status_code=410, headers=headers)
+    try:
+        url = await asyncio.wait_for(asyncio.to_thread(_shopping_resolve_merchant, payload), timeout=12)
+    except Exception as exc:
+        print(f'SHOPPING RESOLVE failed={type(exc).__name__}')
+        url = ''
+    if url and _shopping_merchant_url(url) == url:
+        return JSONResponse({'ok':True,'url':url}, headers=headers)
+    # Recoverable inline state, never a redirect to Google, Railway or another seller.
+    return JSONResponse({'ok':False,'error':'merchant_link_unavailable','retryable':True}, headers=headers)
 
 
 @app.get('/api/shopping/open/{signed}')
@@ -19104,15 +19186,22 @@ def _web_shopping_copy_search(query, country, lang, selected_option='', sort_by=
     # Try the requested country, including newly supported countries. Never
     # silently substitute US/Saudi results for an unsupported local market.
     try:
-        data = _serpapi_cached_json(params, timeout=(2, TEXT_SHOPPING_COPY_TIMEOUT-2), label='SHOPPING COPY')
+        data = _serpapi_cached_json(params, timeout=(2, TEXT_SHOPPING_COPY_TIMEOUT-2), label='SHOPPING COPY',
+            return_error=True, retry_connect=True)
     except Exception as exc:
         print(f'SHOPPING COPY FAILED reason={type(exc).__name__}')
         data = None
     base['retrieval_calls'] = 1
     base['elapsed_ms'] = int((time.monotonic()-started)*1000)
     if not isinstance(data, dict) or data.get('error'):
-        error = 'shopping_unavailable_for_market' if not _shopping_gl_supported(country) else 'shopping_provider_unavailable'
-        return dict(base, ok=False, error=error)
+        failure = data.get('_serpapi_failure', {}) if isinstance(data,dict) else {}
+        reason = failure.get('reason', 'provider')
+        error = {'read_timeout':'shopping_timeout', 'timeout':'shopping_timeout', 'shared_timeout':'shopping_timeout',
+                 'connect_timeout':'shopping_connection', 'connection':'shopping_connection',
+                 'quota':'shopping_rate_limited', 'account':'shopping_account_error', 'budget':'shopping_budget_blocked',
+                 'market':'shopping_unavailable_for_market'}.get(reason,'shopping_provider_unavailable')
+        return dict(base, ok=False, error=error, retryable=reason in ('read_timeout','timeout','shared_timeout','connect_timeout','connection','provider'),
+                    upstream_status=int(failure.get('http_status') or 0))
     effective = data.get('search_parameters')
     effective = effective if isinstance(effective,dict) else {}
     actual = str(effective.get('gl') or country).lower()
@@ -19123,7 +19212,7 @@ def _web_shopping_copy_search(query, country, lang, selected_option='', sort_by=
     info = data.get('search_information')
     info = info if isinstance(info,dict) else {}
     result['provider_query'] = str(info.get('query_displayed') or query)
-    print(f'SHOPPING COPY country={country} rows={len(rows)} images={sum(bool(r["image"]) for r in rows)}'
+    print(f'SHOPPING COPY engine={TEXT_SHOPPING_COPY_ENGINE} country={country} rows={len(rows)} images={sum(bool(r["image"]) for r in rows)}'
           f' prices={sum(bool(r["price"]) for r in rows)} calls=1 elapsed_ms={base["elapsed_ms"]} raw_order=True')
     return result
 
@@ -19142,10 +19231,11 @@ async def _web_stream_shopping_copy(query, country, lang, selected_option='', re
             done,_ = await asyncio.wait({task},timeout=.5)
             if not done:
                 if time.monotonic()-started > TEXT_SHOPPING_COPY_TIMEOUT+1:
-                    yield _web_stream_event({'event':'error','error':'shopping_provider_unavailable',
+                    yield _web_stream_event({'event':'error','error':'shopping_timeout','retryable':True,
                         'provider_passthrough':True,'google_shopping_url':_web_shopping_copy_link(query,country,lang)})
                     return
-                yield _web_stream_event({'event':'status','stage':'google_shopping'})
+                yield _web_stream_event({'event':'status','stage':'google_shopping_slow' if time.monotonic()-started > 8 else 'google_shopping',
+                    'elapsed_ms':int((time.monotonic()-started)*1000)})
         result = await task
         if not result.get('ok'):
             yield _web_stream_event(dict(result,event='error'))
