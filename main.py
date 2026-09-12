@@ -313,7 +313,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization'], max_age=86400)
-BUILD_ID = 'v128.5.8-shopping-fast-links'
+BUILD_ID = 'v128.5.9-ready-links'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -18990,7 +18990,8 @@ def _shopping_open_payload(signed):
 
 
 def _shopping_store_key(value):
-    value = unicodedata.normalize('NFKC', str(value or '')).casefold().strip()
+    value = unicodedata.normalize('NFKD', str(value or '')).casefold().strip()
+    value = ''.join(c for c in value if not unicodedata.combining(c)).replace('ı', 'i')
     value = re.sub(r'^https?://|^www\.', '', value)
     value = re.sub(r'\.(?:com|co|net|org)(?:\.[a-z]{2})?$|\.[a-z]{2}$', '', value)
     return re.sub(r'[\W_]+', '', value, flags=re.U)
@@ -19022,7 +19023,13 @@ def _shopping_matching_merchant(payload, stores):
     return candidates[0][1] if candidates else ''
 
 
-def _shopping_resolve_merchant(payload):
+def _shopping_resolve_merchant(payload, deadline=None):
+    def timeout(limit):
+        remaining = min(limit, deadline-time.monotonic()) if deadline is not None else limit
+        if remaining < .3:
+            raise TimeoutError('merchant preparation deadline')
+        connect = min(2., remaining/3)
+        return (connect, remaining-connect)
     key = hashlib.sha256(json.dumps({k:v for k,v in payload.items() if k!='exp'}, sort_keys=True).encode()).hexdigest()
     with _SHOPPING_LINK_LOCK:
         hit = _SHOPPING_LINK_CACHE.get(key)
@@ -19033,7 +19040,7 @@ def _shopping_resolve_merchant(payload):
     # that same product ID from Shopping, never a similarly named substitute.
     if not token and payload.get('id') and payload.get('title'):
         data = _serpapi_cached_json(_web_shopping_copy_params(payload['title'], payload['country'], payload['lang']),
-            timeout=(2,6), label='SHOPPING LINK TOKEN') or {}
+            timeout=timeout(8), label='SHOPPING LINK TOKEN') or {}
         cards = list(data.get('shopping_results') or []) + list(data.get('inline_shopping_results') or [])
         for group in data.get('categorized_shopping_results') or []:
             if isinstance(group, dict):
@@ -19050,7 +19057,7 @@ def _shopping_resolve_merchant(payload):
     url = ''
     if token:
         data = _serpapi_cached_json({'engine':'google_immersive_product', 'page_token':token,
-            'more_stores':'true', 'api_key':SERPAPI_API_KEY}, timeout=(2,8), label='SHOPPING MERCHANT LINK') or {}
+            'more_stores':'true', 'api_key':SERPAPI_API_KEY}, timeout=timeout(10), label='SHOPPING MERCHANT LINK') or {}
         product = data.get('product_results') or {}
         if isinstance(product, dict):
             url = _shopping_matching_merchant(payload, product.get('stores') or [])
@@ -19168,7 +19175,7 @@ def _web_shopping_copy_rows(data, query, country, lang):
     return result
 
 
-def _web_shopping_copy_search(query, country, lang, selected_option='', sort_by=''):
+def _web_shopping_copy_retrieve(query, country, lang, selected_option='', sort_by=''):
     query = _web_shopping_copy_query(query, selected_option)
     base = {'query': query, 'type': 'results', 'source': 'google_shopping_copy',
             'provider_passthrough': True, 'authoritative': True, 'preserve_provider_order': True,
@@ -19217,35 +19224,155 @@ def _web_shopping_copy_search(query, country, lang, selected_option='', sort_by=
     return result
 
 
+# At most eight link preparations run across the process. Per-search work is
+# bounded in time and queued incrementally; a cancelled visitor queues no more.
+SHOPPING_READY_LINK_WORKERS = max(1, min(8, int(os.environ.get('SHOPPING_READY_LINK_WORKERS', '6'))))
+SHOPPING_READY_LINK_SECONDS = max(3., min(16., float(os.environ.get('SHOPPING_READY_LINK_SECONDS', '12'))))
+SHOPPING_READY_LINK_POOL = ThreadPoolExecutor(max_workers=8, thread_name_prefix='shopping-links')
+
+
+def _shopping_ready_merchant_url(value):
+    url = _shopping_merchant_url(value)
+    if not url:
+        return ''
+    parsed = urllib.parse.urlsplit(url)
+    own_host = urllib.parse.urlsplit(PUBLIC_BASE_URL).hostname if PUBLIC_BASE_URL else None
+    if parsed.hostname == own_host or parsed.path.startswith('/api/shopping/'):
+        return ''
+    return url
+
+
+def _shopping_prepare_offer(row, deadline, stop):
+    if stop.is_set() or time.monotonic() >= deadline:
+        return None
+    try:
+        parsed = urllib.parse.urlsplit(str(row.get('url') or ''))
+        if not parsed.path.startswith('/api/shopping/open/'):
+            return None
+        payload = _shopping_open_payload(parsed.path.rsplit('/', 1)[-1])
+        if not payload:
+            return None
+        url = _shopping_ready_merchant_url(_shopping_resolve_merchant(payload, deadline=deadline))
+        if url:
+            return dict(row, url=url, merchant_link_status='direct', merchant_link_ready=True)
+    except Exception as exc:
+        print(f'SHOPPING PREPARE failed={type(exc).__name__}')
+    return None
+
+
+def _shopping_prepare_results(result, on_ready=None, stop_event=None):
+    """Emit only cards with merchant URLs. Unresolved cards never reach clients."""
+    if not result.get('ok'):
+        return result
+    stop = stop_event if stop_event is not None else threading.Event()
+    rows = list(result.get('results') or [])
+    ready, waiting = [], []
+    started = time.monotonic()
+    deadline = started + SHOPPING_READY_LINK_SECONDS
+    attempts = 0
+    def emit(batch):
+        if not batch or stop.is_set():
+            return
+        ready.extend(batch)
+        if on_ready:
+            on_ready(batch)
+    direct = []
+    for row in rows:
+        if url := _shopping_ready_merchant_url(row.get('url')):
+            direct.append(dict(row, url=url, merchant_link_status='direct', merchant_link_ready=True))
+        else:
+            waiting.append(row)
+    emit(direct)  # Native merchant links have no extra preparation wait.
+    iterator = iter(waiting)
+    pending = set()
+    def fill():
+        nonlocal attempts
+        while len(pending) < SHOPPING_READY_LINK_WORKERS and not stop.is_set() and time.monotonic() < deadline:
+            row = next(iterator, None)
+            if row is None:
+                break
+            pending.add(SHOPPING_READY_LINK_POOL.submit(_shopping_prepare_offer, row, deadline, stop))
+            attempts += 1
+    try:
+        fill()
+        while pending and not stop.is_set():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            finished, _ = wait(pending, timeout=min(.2, remaining), return_when=FIRST_COMPLETED)
+            batch = []
+            for future in finished:
+                pending.remove(future)
+                try:
+                    row = future.result()
+                    if row:
+                        batch.append(row)
+                except Exception as exc:
+                    print(f'SHOPPING PREPARE failed={type(exc).__name__}')
+            emit(sorted(batch, key=lambda row:row.get('provider_order', 0)))
+            fill()
+    finally:
+        for future in pending:
+            future.cancel()
+    ready.sort(key=lambda row:row.get('provider_order', 0))
+    reply = dict(result, results=ready, count=len(ready), merchant_links_ready=True,
+        provider_count=len(rows), unavailable_links=len(rows)-len(ready),
+        link_preparation_attempts=attempts, link_preparation_ms=int((time.monotonic()-started)*1000))
+    if rows and not ready and not stop.is_set():
+        reply.update(ok=False, error='shopping_links_unavailable', retryable=True)
+    print(f'SHOPPING READY cards={len(ready)} unavailable={reply["unavailable_links"]}'
+          f' preparations={attempts} elapsed_ms={reply["link_preparation_ms"]}')
+    return reply
+
+
+def _web_shopping_copy_search(query, country, lang, selected_option='', sort_by='', on_ready=None, stop_event=None):
+    result = _web_shopping_copy_retrieve(query, country, lang, selected_option, sort_by)
+    return _shopping_prepare_results(result, on_ready, stop_event)
+
+
 async def _web_stream_shopping_copy(query, country, lang, selected_option='', request=None, sort_by=''):
     started = time.monotonic()
-    query = _web_shopping_copy_query(query,selected_option)
-    yield _web_stream_event({'event':'start','ok':True,'source':'google_shopping_copy','provider_passthrough':True})
-    yield _web_stream_event({'event':'query','query':query,'provider_passthrough':True,
-                            'google_shopping_url':_web_shopping_copy_link(query,country,lang)})
-    task = asyncio.create_task(asyncio.to_thread(_web_shopping_copy_search,query,country,lang,'',sort_by))
+    query = _web_shopping_copy_query(query, selected_option)
+    common = {'source':'google_shopping_copy','provider_passthrough':True,
+              'google_shopping_url':_web_shopping_copy_link(query,country,lang)}
+    yield _web_stream_event(dict(common, event='start', ok=True))
+    yield _web_stream_event(dict(common, event='query', query=query))
+    batches = queue.Queue()
+    stop = threading.Event()
+    sent = 0
+    task = asyncio.create_task(asyncio.to_thread(_web_shopping_copy_search, query, country, lang,
+        '', sort_by, batches.put, stop))
     try:
-        while not task.done():
+        while True:
             if request is not None and await request.is_disconnected():
                 return
-            done,_ = await asyncio.wait({task},timeout=.5)
-            if not done:
-                if time.monotonic()-started > TEXT_SHOPPING_COPY_TIMEOUT+1:
-                    yield _web_stream_event({'event':'error','error':'shopping_timeout','retryable':True,
-                        'provider_passthrough':True,'google_shopping_url':_web_shopping_copy_link(query,country,lang)})
-                    return
-                yield _web_stream_event({'event':'status','stage':'google_shopping_slow' if time.monotonic()-started > 8 else 'google_shopping',
+            while not batches.empty():
+                batch = batches.get_nowait()
+                sent += len(batch)
+                yield _web_stream_event(dict(common, event='snapshot', results=batch, merchant_links_ready=True))
+            if task.done():
+                break
+            if time.monotonic()-started > TEXT_SHOPPING_COPY_TIMEOUT + SHOPPING_READY_LINK_SECONDS + 2:
+                if not sent:
+                    yield _web_stream_event(dict(common, event='error', error='shopping_timeout', retryable=True))
+                else:
+                    yield _web_stream_event(dict(common, event='done', count=sent, partial=True, exhausted=True))
+                return
+            await asyncio.wait({task}, timeout=.15)
+            if not task.done() and batches.empty():
+                yield _web_stream_event({'event':'status', 'stage':'preparing_offers',
                     'elapsed_ms':int((time.monotonic()-started)*1000)})
         result = await task
         if not result.get('ok'):
             yield _web_stream_event(dict(result,event='error'))
             return
-        # One completed provider response, no fake per-store network delay.
+        # Final complete snapshot preserves the provider's relative ordering.
         yield _web_stream_event(dict(result,event='snapshot'))
-        yield _web_stream_event({'event':'done','count':len(result['results']), 'source':'google_shopping_copy',
-            'provider_passthrough':True,'exhausted':True,'retrieval_calls':1,
-            'google_shopping_url':result['google_shopping_url'], 'elapsed_ms':result['elapsed_ms']})
+        yield _web_stream_event(dict(common,event='done',count=len(result['results']),exhausted=True,
+            merchant_links_ready=True,unavailable_links=result.get('unavailable_links',0),
+            elapsed_ms=int((time.monotonic()-started)*1000)))
     finally:
+        stop.set()
         task.cancel()
         await asyncio.gather(task,return_exceptions=True)
 
