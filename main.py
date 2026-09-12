@@ -1,3 +1,7 @@
+# v128.5.4: Based on ranges_more; direct, incremental text retrieval for web/iOS.
+# Generic comparison and clean selected-product queries remain in place.
+# Local English/native sources run in parallel with approved US/CN catalogs.
+# Same-listing images/prices/ranges retained; one bounded pass, no duplicate rescue.
 # v128.5.1: v128.5 retrieval preserved; clean recommendation choices and one money contract for web.
 # v128.2: Separate open domestic discovery from approved global catalogs.
 # -*- coding: utf-8 -*-
@@ -5,7 +9,17 @@
 # both cover all four approved exporters with the existing two request slots.
 # Preserve indexed thumbnails and exact-listing price/currency binding.
 # Merchant-controlled browser challenges cannot be disabled by this backend.
-"""Findzia v128.1 — Brand comparison restored.
+"""Findzia v128.5.4 — Direct incremental text search on ranges_more.
+
+Specific text searches and selected comparison products now retrieve indexed
+merchant offers directly. Generic queries still enter brand comparison.
+TEXT_DIRECT_SEARCH_ENABLED=false restores the inherited text route for rollback;
+TEXT_SEARCH_HYBRID_MARKETS applies only to that inherited route. Image retrieval,
+price parsing/ranges, global allowlists and existing client event formats remain.
+Install as the backend main.py; no Shopify/iOS source changes are required.
+
+Inherited version notes below:
+Findzia v128.1 — Brand comparison restored.
 
 v128.1: Generic typed searches show the existing brand comparison and choices
 before merchant offers. Brand/model/SKU searches and confirmed choices keep
@@ -293,7 +307,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization'], max_age=86400)
-BUILD_ID = 'v128.5.2-price-ranges-more-stores'
+BUILD_ID = 'v128.5.4-text-direct-stream'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -2590,7 +2604,7 @@ def _photo_identity(image_b64, mime_type):
 
 def _photo_literal_contains(haystack, needle):
     """Complete OCR words only; never complete an unreadable model suffix."""
-    if not isinstance(needle, str) or not needle.strip() or re.search(r'[?…�]', needle):
+    if not isinstance(needle, str) or not needle.strip() or re.search(r'[?… ]', needle):
         return False
     text, value = _photo_identity_text(haystack), _photo_identity_text(needle)
     if not value or value in ('unknown', 'unclear', 'unreadable', 'غير معروف', 'غير واضح'):
@@ -12387,16 +12401,26 @@ def _web_validated_outbound_url(raw_url):
         return ''
 
 def _web_response_peer_is_public(response):
-    """Best-effort post-connect defense against DNS rebinding."""
-    try:
-        connection = getattr(getattr(response, 'raw', None), '_connection', None)
-        sock = getattr(connection, 'sock', None)
-        peer = sock.getpeername()[0] if sock is not None else ''
-        return bool(peer) and ipaddress.ip_address(str(peer).split('%', 1)[0]).is_global
-    except Exception:
-        # Some adapters do not expose their socket. Pre-hop DNS validation is
-        # still enforced; production egress ACL remains the final boundary.
-        return True
+    """Validate a streamed peer even after urllib3 releases its connection."""
+    paths = (('raw', '_connection', 'sock'), ('raw', 'connection', 'sock'),
+             ('raw', '_fp', 'fp', 'raw', '_sock'), ('raw', '_fp', 'fp', '_sock'))
+    observed = False
+    for path in paths:
+        sock = response
+        for attr in path:
+            sock = getattr(sock, attr, None)
+        if sock is None:
+            continue
+        try:
+            peer = ipaddress.ip_address(str(sock.getpeername()[0]).split('%', 1)[0])
+            peer = getattr(peer, 'ipv4_mapped', None) or peer
+            if not peer.is_global:
+                return False
+            observed = True
+        except (AttributeError, OSError, TypeError, ValueError, IndexError):
+            continue
+    return observed
+
 
 def _web_safe_response_close(response):
     if response is None:
@@ -17381,7 +17405,7 @@ def _web_local_discovery_rows_sync(query, country, lang, existing, progress_call
 async def _web_with_local_discovery(source, lang, country):
     """Text recovery interleaves each source's cards before search completion."""
     rows, query, final = {}, '', None
-    failed = recommendations = False
+    failed = recommendations = retrieval_complete = False
     task = next_batch = None
     added = 0
     started = time.monotonic()
@@ -17410,6 +17434,7 @@ async def _web_with_local_discovery(source, lang, country):
             query = str(event.get('query') or query)
             failed = failed or event.get('event') == 'error'
             recommendations = recommendations or event.get('event') == 'recommendations'
+            retrieval_complete = retrieval_complete or bool(event.get('local_discovery_complete'))
             values = list(event.get('results') or [])
             if isinstance(event.get('item'), dict):
                 values.append(event['item'])
@@ -17423,7 +17448,7 @@ async def _web_with_local_discovery(source, lang, country):
         if final is None:
             return
         local_count = len({_more_result_domain(r.get('url')) for r in rows.values() if r.get('market_rank') == 0})
-        if (query and not failed and not recommendations and LOCAL_DISCOVERY_ENABLED
+        if (query and not failed and not recommendations and not retrieval_complete and LOCAL_DISCOVERY_ENABLED
                 and LOCAL_DISCOVERY_MAX_CALLS and SERPAPI_API_KEY
                 and local_count < min(LOCAL_RESULTS_TARGET, WEB_LOCAL_MAX)):
             task = asyncio.create_task(asyncio.to_thread(_web_local_discovery_rows_sync,
@@ -17478,7 +17503,9 @@ async def _web_complete_result_prices(result, lang, country, discover_local=Fals
         yield _web_stream_event({'event': 'done'})
     rows = {}
     final = dict(result)
-    source = _web_with_local_discovery(events(), lang, country) if discover_local and result.get('type') == 'results' else events()
+    source = (_web_with_local_discovery(events(), lang, country)
+              if discover_local and result.get('type') == 'results' and not result.get('local_discovery_complete')
+              else events())
     async for raw in _web_with_live_prices(source, lang, country):
         event = json.loads(raw)
         if event.get('event') == 'snapshot':
@@ -18255,6 +18282,345 @@ def _web_text_lane_sort(rows):
     return sorted(rows or [], key=key)
 
 
+# Text retrieval has its own coordinator. Image/Lens and WhatsApp keep their
+# existing routes. All HTTP still passes through the provider cache/budget guard.
+TEXT_DIRECT_SEARCH_ENABLED = env_bool('TEXT_DIRECT_SEARCH_ENABLED', True)
+TEXT_DIRECT_TIMEOUT_SECONDS = max(4., min(25., float(os.environ.get('TEXT_DIRECT_TIMEOUT_SECONDS', '12'))))
+TEXT_DIRECT_LOCAL_MAX = max(8, min(40, int(os.environ.get('TEXT_DIRECT_LOCAL_MAX', '24'))))
+TEXT_DIRECT_GLOBAL_MAX = max(5, min(24, int(os.environ.get('TEXT_DIRECT_GLOBAL_MAX', '12'))))
+TEXT_DIRECT_TRANSLATION_WAIT = max(.1, min(4., float(os.environ.get('TEXT_DIRECT_TRANSLATION_WAIT', '2.5'))))
+TEXT_DIRECT_POOL = ThreadPoolExecutor(max_workers=16, thread_name_prefix='text-direct')
+print(f'TEXT DIRECT CONFIG enabled={TEXT_DIRECT_SEARCH_ENABLED} deadline={TEXT_DIRECT_TIMEOUT_SECONDS}s'
+      f' local_max={TEXT_DIRECT_LOCAL_MAX} global_max={TEXT_DIRECT_GLOBAL_MAX} bilingual=True incremental=True')
+
+
+def _web_text_direct_enabled():
+    return bool(TEXT_DIRECT_SEARCH_ENABLED and SERPAPI_API_KEY)
+
+
+def _web_text_direct_specs(query, country):
+    """Open local English/native discovery; closed approved export catalogs.
+
+    Language is explicit on each job, not chosen by racing worker threads.
+    Names/model numbers stay intact; only known category words are translated.
+    """
+    native = next((hl for hl in _market_query_languages(country, query) if hl != 'en'), 'en')
+    specs = []
+    def add(cc, role, engine, hl, geo_cue=False):
+        specs.append({'country': cc, 'role': role, 'engine': engine, 'hl': hl,
+                      'geo_cue': geo_cue})
+    # gl ranks by country but does not restrict results to that country. Pair
+    # a country-named open query with an independent native-language query.
+    add(country, 'local', 'google', 'en', True)
+    if native != 'en':
+        add(country, 'local', 'google', native)
+    add(country, 'local', 'google_images', native, native == 'en')
+    if ENABLE_GOOGLE_SHOPPING and _shopping_gl_supported(country):
+        add(country, 'local', 'google_shopping', 'en')
+    elif country == 'cn' and LOCAL_DISCOVERY_BAIDU:
+        add(country, 'local', 'baidu', native)
+    for cc in DEFAULT_GLOBAL_COUNTRIES:
+        if cc == country or cc not in GLOBAL_MARKET_STORES:
+            continue
+        add(cc, 'global', 'google', 'en')
+        add(cc, 'global', 'google_shopping' if cc == 'us' and ENABLE_GOOGLE_SHOPPING
+            else 'google_images', 'en')
+    return specs
+
+
+def _web_text_direct_params(query, spec, page_token=''):
+    engine, country, role, hl = (spec[k] for k in ('engine', 'country', 'role', 'hl'))
+    if page_token:
+        return {'engine': 'google_immersive_product', 'page_token': page_token,
+                'more_stores': 'true', 'api_key': SERPAPI_API_KEY, 'output': 'json'}
+    # English jobs start immediately; native jobs share the one translation
+    # batch already used by market-language retrieval. No AI shopping answer.
+    if hl != 'en' or not query.isascii():
+        _market_query_wait(query, hl, TEXT_DIRECT_TRANSLATION_WAIT)
+    record = _market_query_cached(query, hl) or _market_query_static(query, hl)
+    wording = str(record.get('query') or query).strip()
+    if role == 'global':
+        domains = ' OR '.join('site:' + domain for _, domain in GLOBAL_MARKET_STORES[country])
+        wording = f'{wording} ({domains})'
+    elif engine in ('google', 'google_images'):
+        if spec.get('geo_cue'):
+            wording = f'{wording} {COUNTRY_NAMES.get(country, country.upper())}'
+        else:
+            wording = _local_discovery_query(wording, _web_market(country), scoped=False, language=hl)
+    elif engine == 'baidu':
+        wording = f'{wording} 价格 购买 -百科 -知道 -视频'
+    params = {'engine': engine, 'q': wording, 'api_key': SERPAPI_API_KEY, 'output': 'json'}
+    if engine == 'baidu':
+        params['ct'] = 2
+    else:
+        params.update(gl=country if role == 'local' else 'us', hl=hl)
+        if engine == 'google':
+            params.update(num=10, nfpr=1)
+        if engine == 'google_shopping':
+            params['direct_link'] = 'true'
+    return params
+
+
+def _web_text_direct_fetch(query, spec, deadline, cancel, page_token=''):
+    """One request only; queued/expired work cannot launch another HTTP call."""
+    if cancel.is_set() or time.monotonic() >= deadline:
+        return None
+    params = _web_text_direct_params(query, spec, page_token)
+    remaining = deadline - time.monotonic()
+    if cancel.is_set() or remaining <= .05:
+        return None
+    connect = min(1.5, max(.05, remaining * .15))
+    began = time.monotonic()
+    data = _serpapi_cached_json(params, timeout=(connect, max(.01, remaining - connect)),
+        label=f'TEXT DIRECT {spec["role"]}/{spec["country"]}/{params["engine"]}/{spec["hl"]}')
+    if params['engine'] == 'baidu' and isinstance(data, dict) and not cancel.is_set():
+        data = _local_resolve_baidu_links(data, max(0., deadline-time.monotonic()))
+    print(f'TEXT SOURCE country={spec["country"]} role={spec["role"]} engine={params["engine"]}'
+          f' hl={spec["hl"]} status={"returned" if isinstance(data, dict) else "unavailable"}'
+          f' elapsed_ms={int((time.monotonic()-began)*1000)}')
+    return data
+
+
+def _web_text_direct_records(data):
+    """Keep every usable card in the paid response, including category groups.
+
+    A parent image/price is never copied to an unrelated nested product.
+    """
+    data = dict(data or {})
+    shopping = list(data.get('shopping_results') or [])
+    for group in data.get('categorized_shopping_results') or []:
+        if isinstance(group, dict):
+            shopping.extend(x for x in group.get('shopping_results') or [] if isinstance(x, dict))
+    data['shopping_results'] = shopping
+    organic = []
+    for raw in data.get('organic_results') or []:
+        if not isinstance(raw, dict):
+            continue
+        row = dict(raw)
+        pagemap = row.get('pagemap')
+        if isinstance(pagemap, dict):
+            images = _web_offer_image_candidates(row)
+            for field in ('cse_image', 'cse_thumbnail'):
+                for media in pagemap.get(field) or []:
+                    if isinstance(media, dict):
+                        images.extend(_web_offer_image_candidates({'image': media.get('src')}))
+            row['image_candidates'] = list(dict.fromkeys(images))[:8]
+        organic.append(row)
+    data['organic_results'] = organic
+    return data, shopping
+
+
+def _web_text_direct_candidates(data, query, target, provider):
+    # The legacy normalizer reads 30 cards per section. Feed it chunks so a
+    # 40-card Shopping response is actually used without buying another page.
+    rows = []
+    for field in ('organic_results', 'shopping_results', 'inline_shopping_results'):
+        records = data.get(field)
+        if not isinstance(records, list):
+            continue
+        for start in range(0, min(120, len(records)), 30):
+            rows.extend(_local_discovery_rows({field: records[start:start+30]}, query, target, provider))
+    if data.get('images_results'):
+        rows.extend(_local_discovery_rows({'images_results': data['images_results']}, query, target, provider))
+    return rows
+
+
+def _web_text_direct_search(query, country, lang, progress_callback=None, cancel_event=None):
+    """One retrieval pass shared by web/iOS REST and streaming clients.
+
+    Emit each completed source while slow sources are still running. Reuse
+    existing country/identity/price guards; only identical listing URLs merge.
+    """
+    cancel = cancel_event if cancel_event is not None else threading.Event()
+    started = time.monotonic()
+    deadline = started + TEXT_DIRECT_TIMEOUT_SECONDS
+    market = dict(_web_market(country), _query=query,
+                  global_countries=[c for c in DEFAULT_GLOBAL_COUNTRIES if c != country])
+    jobs, rows, counts, merchant_counts = {}, {}, Counter(), Counter()
+    expanded = set()
+    expansions = Counter()
+    source_states = {}
+    first_ms = None
+    _market_query_warm(query, [country, 'us'])
+    def snapshot():
+        # Take copies: native/media providers update earlier rows while the
+        # asyncio consumer serializes previous snapshots on another thread.
+        return {'ok': True, 'type': 'results', 'query': query, 'market': dict(market),
+                'results': _web_text_lane_sort([dict(r) for r in rows.values()]),
+                'source': 'text_direct', 'authoritative': True,
+                'local_discovery_complete': True, 'market_progress': dict(source_states),
+                'retrieval_calls': launched, 'first_result_ms': first_ms}
+    launched = 0
+    def submit(spec, token='', thumbnail=''):
+        nonlocal launched
+        if cancel.is_set() or time.monotonic() >= deadline:
+            return
+        target = dict(_web_market(spec['country']))
+        if spec['role'] == 'global':
+            target['_retrieval_role'] = 'global'
+        future = TEXT_DIRECT_POOL.submit(_run_with_market, target,
+            _web_text_direct_fetch, query, spec, deadline, cancel, token)
+        jobs[future] = (spec, target, token, thumbnail)
+        launched += 1
+    try:
+        for spec in _web_text_direct_specs(query, country):
+            submit(spec)
+        while jobs and not cancel.is_set() and time.monotonic() < deadline:
+            done, _ = wait(jobs, timeout=min(.05, max(0., deadline-time.monotonic())), return_when=FIRST_COMPLETED)
+            for future in done:
+                spec, target, token, thumbnail = jobs.pop(future)
+                try:
+                    data = future.result()
+                except Exception as exc:
+                    print(f'TEXT SOURCE FAILED engine={spec["engine"]} reason={type(exc).__name__}')
+                    data = None
+                if cancel.is_set() or time.monotonic() >= deadline:
+                    break
+                name = f'{spec["role"]}:{spec["country"]}:{spec["engine"]}:{spec["hl"]}' + (':merchants' if token else '')
+                source_states[name] = 'complete' if isinstance(data, dict) else 'unavailable'
+                if not isinstance(data, dict):
+                    continue
+                try:
+                    if token:
+                        product = data.get('product_results')
+                        if not isinstance(product, dict):
+                            source_states[name] = 'unavailable'
+                            continue
+                        data = {'shopping_results': _local_shopping_store_rows(product, target, thumbnail)}
+                    data, cards = _web_text_direct_records(data)
+                    candidates = _run_with_market(target, _web_text_direct_candidates, data, query, target,
+                        ('local_' if spec['role'] == 'local' else 'global_') + 'text_' + spec['engine'])
+                except (TypeError, ValueError, AttributeError) as exc:
+                    source_states[name] = 'unavailable'
+                    print(f'TEXT SOURCE SHAPE engine={spec["engine"]} reason={type(exc).__name__}')
+                    continue
+                batch = []
+                for raw in candidates:
+                    row = _web_selected_offer(raw, spec['country'], market, query)
+                    if row:
+                        batch.append(_web_text_market_row(row, market))
+                if batch:
+                    classified = _run_with_market(market, _web_attach_captured_result_sections,
+                        {'ok': True, 'type': 'results', 'query': query, 'market': market,
+                         'results': batch, 'source': 'text_direct'}, lang, False)
+                    batch = classified.get('results') or []
+                changed = False
+                # Prefer complete offers when a source contains many variants.
+                batch.sort(key=lambda r: (not _web_row_has_numeric_price(r), not bool(r.get('image')),
+                                          -float(r.get('match_score') or 0)))
+                for row in batch:
+                    key = _web_price_url_key(row.get('url'))
+                    if not key:
+                        continue
+                    previous = rows.get(key)
+                    if previous is not None:
+                        merged = dict(previous)
+                        merged.update(_web_merge_offer_images(previous, row))
+                        if not _web_row_has_numeric_price(previous) and _web_row_has_numeric_price(row):
+                            merged.update(_web_price_facts(row))
+                        if merged != previous:
+                            rows[key] = merged
+                            changed = True
+                        continue
+                    cc = spec['country']
+                    host = _more_result_domain(row['url'])
+                    cap = TEXT_DIRECT_LOCAL_MAX if spec['role'] == 'local' else TEXT_DIRECT_GLOBAL_MAX
+                    if counts[cc] >= cap or merchant_counts[(cc, host)] >= 4:
+                        continue
+                    rows[key] = dict(row)
+                    counts[cc] += 1
+                    merchant_counts[(cc, host)] += 1
+                    changed = True
+                if changed:
+                    if first_ms is None:
+                        first_ms = int((time.monotonic()-started)*1000)
+                    if progress_callback:
+                        progress_callback(snapshot())
+                # Google may return an aggregate product without a seller URL.
+                # Expand a bounded number of products into ALL observed sellers;
+                # schedule independently so other sources can already be shown.
+                if not token and spec['engine'] == 'google_shopping':
+                    allowance = min(SHOPPING_MERCHANT_CARDS, 2 if spec['role'] == 'local' else 1)
+                    for card in cards:
+                        if expansions[spec['country']] >= allowance:
+                            break
+                        if not isinstance(card, dict):
+                            continue
+                        page_token = card.get('immersive_product_page_token')
+                        if not isinstance(page_token, str):
+                            continue
+                        token_key = (spec['country'], page_token)
+                        if not page_token or token_key in expanded or not card.get('title'):
+                            continue
+                        if not _run_with_market(target, _local_discovery_candidate_ok, query, dict(card)):
+                            continue
+                        if time.monotonic() >= deadline - .25 or cancel.is_set():
+                            break
+                        expanded.add(token_key)
+                        expansions[spec['country']] += 1
+                        submit(spec, page_token, next(iter(_web_offer_image_candidates(card)), ''))
+        result = _run_with_market(market, _web_attach_captured_result_sections, snapshot(), lang, False)
+        result['partial'] = (bool(jobs) or cancel.is_set() or time.monotonic() >= deadline
+                             or any(v == 'unavailable' for v in source_states.values()))
+        print(f'TEXT DIRECT FINAL country={country} rows={len(rows)} markets={dict(counts)}'
+              f' images={sum(bool(r.get("image")) for r in rows.values())}'
+              f' prices={sum(_web_row_has_numeric_price(r) for r in rows.values())}'
+              f' first_ms={first_ms} elapsed_ms={int((time.monotonic()-started)*1000)} calls={launched}')
+        return result
+    finally:
+        cancel.set()
+        for future in jobs:
+            future.cancel()
+
+
+async def _web_stream_text_direct(query, country, lang, request=None):
+    """The same retrieval as REST, with URL-keyed incremental updates."""
+    events = queue.Queue()
+    cancel = threading.Event()
+    started = time.monotonic()
+    task = asyncio.create_task(asyncio.to_thread(_run_with_market, _web_market(country),
+        _web_text_direct_search, query, country, lang, events.put, cancel))
+    sent = {}
+    def updates():
+        while True:
+            try:
+                snap = events.get_nowait()
+            except queue.Empty:
+                return
+            for row in snap.get('results') or []:
+                key = _web_price_url_key(row.get('url'))
+                if sent.get(key) == row:
+                    continue
+                event = 'upsert' if key in sent else 'result'
+                sent[key] = dict(row)
+                yield _web_stream_event({'event': event, 'phase': 'text_direct', 'item': row,
+                    'market': row.get('market'), 'elapsed_ms': int((time.monotonic()-started)*1000)})
+    tick = 0.
+    try:
+        while not task.done():
+            if request is not None and await request.is_disconnected():
+                return
+            await asyncio.wait({task}, timeout=.05)
+            for event in updates():
+                yield event
+            if time.monotonic() - tick >= 1.:
+                tick = time.monotonic()
+                yield _web_stream_event({'event': 'status', 'stage': 'text_direct',
+                    'elapsed_ms': int((tick-started)*1000)})
+        final = await task
+        for event in updates():
+            yield event
+        yield _web_stream_event(dict(final, event='snapshot', phase='text_direct_final', classification_final=True))
+        yield _web_stream_event({'event': 'done', 'count': len(final.get('results') or []),
+            'source': 'text_direct', 'local_discovery_complete': True, 'partial': final.get('partial', False),
+            'first_result_ms': final.get('first_result_ms'), 'retrieval_calls': final.get('retrieval_calls'),
+            'elapsed_ms': int((time.monotonic()-started)*1000)})
+    finally:
+        cancel.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
 def _web_search_text_sync(query, country, lang, selected_option='', original_query='', force_specific=False, hybrid=None):
     prep = _web_prepare_stream_query_sync(query, country, lang, selected_option, original_query, force_specific)
     if not prep.get('ok'):
@@ -18267,6 +18633,8 @@ def _web_search_text_sync(query, country, lang, selected_option='', original_que
         return {'ok': False, 'type': 'service', 'error': 'service_search_not_enabled_on_web_yet', 'query': q, 'market': market}
     if rtype == 'NONE':
         return {'ok': False, 'type': 'chat', 'error': 'not_a_product_query', 'query': q, 'market': market}
+    if _web_text_direct_enabled():
+        return _run_with_market(market, _web_text_direct_search, q, country, lang)
     hybrid = TEXT_SEARCH_HYBRID_MARKETS if hybrid is None else bool(hybrid)
     market_job = None
     if hybrid and SERPAPI_API_KEY:
@@ -19639,7 +20007,8 @@ async def web_api_search_stream(request: Request):
         yield _web_stream_event({'event': 'start', 'ok': True, 'elapsed_ms': 0})
         # The deterministic market lanes start on the typed words before any
         # Gemini routing: first store cards do not wait for classification.
-        hybrid = bool(TEXT_SEARCH_HYBRID_MARKETS and SERPAPI_API_KEY)
+        direct_text = _web_text_direct_enabled()
+        hybrid = bool(TEXT_SEARCH_HYBRID_MARKETS and SERPAPI_API_KEY and not direct_text)
         market_queue = queue.Queue()
         market_cancel = threading.Event()
         market_task = None
@@ -19672,6 +20041,10 @@ async def web_api_search_stream(request: Request):
             if rtype == 'NONE':
                 market_cancel.set()
                 yield _web_stream_event({'event': 'error', 'error': 'not_a_product_query'})
+                return
+            if direct_text:
+                async for event in _web_stream_text_direct(q, country, lang, request):
+                    yield event
                 return
             if TEXT_SEARCH_WHATSAPP_PARITY or USE_V106_5_RESULT_PIPELINE or (WEB_MATCH_WHATSAPP_EXACT and (not WEB_TEXT_DENSE_PARITY)):
                 if hybrid and market_task is None:
