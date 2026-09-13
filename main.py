@@ -1,3 +1,8 @@
+# v128.5.15 — Fix premature 6.5s provider timeout; stream observed product offers.
+# Install as main.py; keep the current Liquid and iOS app.
+# Defaults: provider read limit 18s, total retrieval limit 24s; finish immediately
+# when work completes, and stream ready cards without waiting for other stores.
+# Indexed product offers keep their observed prices and unknown stock remains unknown.
 # v128.5.14 — Google WEB product offers, enabled by default.
 # Text + selected models + more stores use engine=google (ordinary results).
 # Merchant sale price, image and identity must be observed before publication.
@@ -323,7 +328,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization'], max_age=86400)
-BUILD_ID = 'v128.5.14-google-web-products'
+BUILD_ID = 'v128.5.15-google-web-recovery'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -16767,8 +16772,12 @@ def _web_merchant_document(url, *, purpose='page', headers=None, timeout=(2.0, 5
             result['reason'] = 'not_found' if response.status_code == 404 else 'http_error'
         return result
     except Exception as exc:
-        print(f'MERCHANT FETCH host={_web_merchant_access_key(url, purpose)[0]} error={type(exc).__name__}')
-        return dict(result, reason='network_error')
+        # Log only known reason codes. Keep every DNS/redirect/peer check intact.
+        allowed = {'unsafe_outbound_url','unsafe_connected_peer','unsafe_redirect','too_many_redirects'}
+        detail = str(exc) if isinstance(exc, ValueError) and str(exc) in allowed else ''
+        reason = detail or 'network_error'
+        print(f'MERCHANT FETCH host={_web_merchant_access_key(url, purpose)[0]} error={type(exc).__name__} reason={reason}')
+        return dict(result, reason=reason)
     finally:
         _web_safe_response_close(response)
 
@@ -20269,16 +20278,19 @@ async def _web_stream_shopping_copy(query, country, lang, selected_option='', re
         await asyncio.gather(task,return_exceptions=True)
 
 
-# v128.5.14 — ordinary Google results -> observed merchant offers.
+# v128.5.15 — keep slow provider responses and publish complete indexed offers.
 # Organic schema: https://serpapi.com/organic-results
 # Search parameters: https://serpapi.com/search-api
 # No Shopping, Images, immersive-product expansion or click-time resolution.
 TEXT_GOOGLE_WEB_ENABLED = env_bool('TEXT_GOOGLE_WEB_ENABLED', True)
-TEXT_GOOGLE_WEB_SECONDS = max(4., min(20., float(os.environ.get('TEXT_GOOGLE_WEB_SECONDS', '12'))))
+TEXT_GOOGLE_WEB_SECONDS = max(4., min(30., float(os.environ.get('TEXT_GOOGLE_WEB_SECONDS', '24'))))
+TEXT_GOOGLE_WEB_READ_SECONDS = max(2., min(24., float(os.environ.get('TEXT_GOOGLE_WEB_READ_SECONDS', '18'))))
 _GOOGLE_WEB_SEARCH_POOL = ThreadPoolExecutor(max_workers=12, thread_name_prefix='google-web')
 _GOOGLE_WEB_PAGE_POOL = ThreadPoolExecutor(max_workers=12, thread_name_prefix='google-offers')
 _GOOGLE_WEB_PAGE_CACHE = {}
 _GOOGLE_WEB_PAGE_LOCK = threading.Lock()
+print(f'GOOGLE WEB CONFIG total_limit={TEXT_GOOGLE_WEB_SECONDS}s read_limit={TEXT_GOOGLE_WEB_READ_SECONDS}s'
+      ' incremental=True indexed_prices=True shopping=False')
 
 
 def _google_web_product_url(value):
@@ -20303,6 +20315,25 @@ def _google_web_specs(query, country):
     return [spec for spec in _web_text_direct_specs(query, country) if spec['engine'] == 'google']
 
 
+def _google_web_indexed_product_path(url):
+    """Explicit product routes, not a generic editorial or category slug."""
+    parsed = urllib.parse.urlsplit(url)
+    path = urllib.parse.unquote(parsed.path).lower()
+    return bool(re.search(r'/(?:products?|p|dp|gp/product|itm|item|ip|pd)/[^/]+|'
+                          r'[-/]p\d{5,}(?:[/.]|$)|-g-\d{5,}\.html$', path))
+
+
+def _google_web_foreign_storefront(url, country):
+    evidence = _merchant_url_market(url)
+    if evidence.get('conflict'):
+        return True
+    actual = evidence.get('country')
+    if not actual or actual == country:
+        return False  # A neutral .com may still prove a local offer by currency.
+    return not any(_global_catalog_evidence({'url': url}, cc)
+                   for cc in DEFAULT_GLOBAL_COUNTRIES if cc != country)
+
+
 def _google_web_exclusions(shown_urls=None, shown_domains=None):
     urls = {_web_price_url_key(u) for u in list(shown_urls or [])[:80] if isinstance(u, str)}
     domains = set()
@@ -20324,12 +20355,18 @@ def _google_web_fetch(query, spec, excluded_domains, deadline, cancel):
     buy = {'ar': 'شراء', 'zh': '购买', 'fr': 'acheter', 'de': 'kaufen', 'en': 'buy'}
     params['q'] += ' ' + buy.get(spec['hl'], 'buy')
     params['q'] += ''.join(' -site:' + host for host in sorted(excluded_domains)[:20])
-    params.update(engine='google', nfpr=1, num=10)
-    remaining = min(8., deadline - time.monotonic())
+    params.update(engine='google', nfpr=1, num=10,
+                  json_restrictor='search_metadata,search_parameters,search_information,organic_results,error')
+    # The old min(8, remaining)-connect timeout killed every response at 6.5s.
+    # This is an upper bound, never a sleep or a barrier for already-ready cards.
+    # Keep a short page-verification window inside the coordinator's deadline.
+    remaining = deadline - time.monotonic()
     if cancel.is_set() or remaining <= .1:
         return {'error': 'expired'}
-    connect = min(1.5, remaining / 4)
-    return _serpapi_cached_json(params, timeout=(connect, remaining-connect),
+    reserve = min(3., remaining/5)
+    connect = min(2., remaining/5)
+    read = min(TEXT_GOOGLE_WEB_READ_SECONDS, max(.05, remaining-connect-reserve))
+    return _serpapi_cached_json(params, timeout=(connect, read),
         label=f'GOOGLE WEB {spec["role"]}/{spec["country"]}/{spec["hl"]}', return_error=True)
 
 
@@ -20355,16 +20392,19 @@ def _google_web_stock(raw):
     return state, availability
 
 
-def _google_web_candidates(data, query, spec):
+def _google_web_candidates(data, query, spec, diagnostics=None):
     rows = []
+    diagnostics = diagnostics if diagnostics is not None else Counter()
     organic = data.get('organic_results')
     for position, raw in enumerate((organic if isinstance(organic, list) else [])[:10]):
         if not isinstance(raw, dict):
             continue
+        diagnostics['organic_rows'] += 1
         # Only link, not redirect_link, sitelinks, related pages or ads.
         url = _google_web_product_url(raw.get('link'))
         title = str(raw.get('title') or '').strip()
         if not url or not title or re.search(r'\b(?:review|manual|tutorial|unboxing)\b', title, re.I):
+            diagnostics['not_product_listing'] += 1
             continue
         row = {k: copy.deepcopy(raw[k]) for k in ('title', 'source', 'snippet', 'rich_snippet',
                'price', 'currency', 'thumbnail', 'image', 'availability', 'in_stock') if k in raw}
@@ -20394,9 +20434,13 @@ def _google_web_candidates(data, query, spec):
         row.update(availability=availability, stock_status=state)
         if state != 'out_of_stock':
             rows.append(row)
+        else:
+            diagnostics['out_of_stock'] += 1
     # Same-script titles use deterministic identity checks; other scripts use
     # the existing cached, bounded semantic batch. Never match by URL or seller.
-    return _shopping_filter_identity(rows, query)[0]
+    accepted, reasons = _shopping_filter_identity(rows, query)
+    diagnostics.update({'identity_' + k: v for k, v in reasons.items()})
+    return accepted
 
 
 def _google_web_page(url, country, deadline, cancel):
@@ -20440,12 +20484,16 @@ def _google_web_page(url, country, deadline, cancel):
     return result
 
 
-def _google_web_ready(raw, query, spec, display_country, page=None):
+def _google_web_ready(raw, query, spec, display_country, page=None, diagnostics=None):
     row = dict(raw)
+    def reject(reason):
+        if diagnostics is not None:
+            diagnostics[reason] += 1
+        return None
     verified = page is not None
     if verified:
         if page.get('error') or not page.get('is_product'):
-            return None
+            return reject('page_' + str(page.get('error') or 'not_product'))
         title = str(page.get('title') or '')
         # A captured structured brand may complete a manufacturer title that
         # contains only its model. Never manufacture a missing model name.
@@ -20453,9 +20501,9 @@ def _google_web_ready(raw, query, spec, display_country, page=None):
         if isinstance(brand, str) and brand.casefold() not in title.casefold():
             title = brand + ' ' + title
         if not _shopping_filter_identity([{'title': title}], query)[0]:
-            return None
+            return reject('page_identity_mismatch')
         if _findzia_hard_product_mismatch(raw['title'], title):
-            return None
+            return reject('page_product_mismatch')
         quote = _web_quote_from_fields(page)
         row.update(url=page['url'], link=page['url'], title=title, raw_title=title,
                    availability=page.get('availability') or raw.get('availability') or '',
@@ -20463,17 +20511,22 @@ def _google_web_ready(raw, query, spec, display_country, page=None):
         images = _web_offer_image_candidates({'image': page.get('image') or page.get('image_url')})
         images += _web_offer_image_candidates(raw)
     else:
-        # Fast path requires an indexed price AND explicit positive stock.
-        # Missing evidence triggers a bounded page read, never an invented price.
+        # A matching direct product route + observed price + product thumbnail
+        # is an indexed sale offer even when Google omits the stock label.
+        # Unknown stock stays unknown; explicit sold-out evidence still rejects.
         quote = _web_indexed_offer_quote(raw)
-        if _google_web_stock(raw)[0] != 'in_stock':
-            return None
+        if _google_web_stock(raw)[0] not in ('in_stock','preorder') and not _google_web_indexed_product_path(raw['url']):
+            return reject('needs_product_page_proof')
         images = _web_offer_image_candidates(raw)
-    if not quote or not images or _google_web_stock(row)[0] == 'out_of_stock':
-        return None
+    if not quote:
+        return reject('page_no_price' if verified else 'indexed_no_price')
+    if not images:
+        return reject('page_no_image' if verified else 'indexed_no_image')
+    if _google_web_stock(row)[0] == 'out_of_stock':
+        return reject('out_of_stock')
     url = _google_web_product_url(row['url'])
     if not url:
-        return None
+        return reject('not_product_url')
     # Classify the final merchant URL, not the country Google searched from.
     evidence_row = dict(row, price=_web_format_quote(quote), currency=quote['currency'])
     local_target = dict(_web_market(display_country), _retrieval_role='local')
@@ -20487,7 +20540,7 @@ def _google_web_ready(raw, query, spec, display_country, page=None):
                     cc, evidence = global_cc, proof
                     break
     if not cc:
-        return None
+        return reject('market_mismatch')
     rank = 0 if cc == display_country else 2 if cc == 'cn' else 1
     fields = _web_capture_listing_evidence(raw, 'Google')
     fields.update({k: row[k] for k in ('card_attributes','card_model','card_brand','condition','product_rating','availability') if k in row})
@@ -20515,7 +20568,7 @@ def _google_web_products(query, country, lang, progress=None, cancel_event=None,
     market = dict(_web_market(country), _query=query)
     excluded_urls, excluded_domains = _google_web_exclusions(shown_urls, shown_domains)
     jobs, rows, seen, page_urls = {}, {}, set(), set()
-    counts, pages_by_host = Counter(), Counter()
+    counts, pages_by_host, diagnostics = Counter(), Counter(), Counter()
     source_ok, failures, first_ms, skipped_pages = 0, [], None, 0
     _market_query_warm(query, [country, 'us'])
 
@@ -20533,6 +20586,7 @@ def _google_web_products(query, country, lang, progress=None, cancel_event=None,
         if counts[row['country']] >= cap:
             return
         rows[key] = row
+        diagnostics['page_published' if row['price_verified'] else 'indexed_published'] += 1
         counts[row['country']] += 1
         if first_ms is None:
             first_ms = int((time.monotonic()-began)*1000)
@@ -20559,22 +20613,26 @@ def _google_web_products(query, country, lang, progress=None, cancel_event=None,
                 if kind == 'page':
                     if data.get('error'):
                         failures.append('merchant_page')
-                    publish(_google_web_ready(raw, query, spec, country, data))
+                    publish(_google_web_ready(raw, query, spec, country, data, diagnostics))
                     continue
                 if not isinstance(data, dict) or data.get('error'):
                     reason = ((data or {}).get('_serpapi_failure') or {}).get('reason') if isinstance(data, dict) else ''
                     failures.append(reason or 'provider')
+                    diagnostics['source_' + (reason or 'provider')] += 1
                     continue
                 source_ok += 1
-                for candidate in _google_web_candidates(data, query, spec):
+                for candidate in _google_web_candidates(data, query, spec, diagnostics):
                     url = candidate['url']
+                    if _google_web_foreign_storefront(url, country):
+                        diagnostics['foreign_storefront'] += 1
+                        continue
                     # Include retrieval country in the dedupe key: a bare $ can
                     # be ambiguous in one lane and valid in another.
                     key = (_web_price_url_key(url), candidate['_price_market'])
                     if key in seen or excluded(url):
                         continue
                     seen.add(key)
-                    ready = _google_web_ready(candidate, query, spec, country)
+                    ready = _google_web_ready(candidate, query, spec, country, diagnostics=diagnostics)
                     if ready:
                         publish(ready)
                         continue
@@ -20605,7 +20663,8 @@ def _google_web_products(query, country, lang, progress=None, cancel_event=None,
                           else 'product_pages_unavailable' if source_ok else 'search_provider_unavailable')
             result.pop('match_status', None)
         print(f'GOOGLE WEB FINAL country={country} sources={source_ok} rows={len(result_rows)}'
-              f' pages={sum(pages_by_host.values())} partial={partial} first_ms={first_ms} elapsed_ms={result["elapsed_ms"]}')
+              f' pages={sum(pages_by_host.values())} partial={partial} first_ms={first_ms} elapsed_ms={result["elapsed_ms"]}'
+              f' diagnostics={dict(diagnostics)}')
         return result
     finally:
         cancel.set()
