@@ -1,3 +1,7 @@
+# v128.5.23: accent-folded title matching (Nestlé/Nestle), length-aware relevance
+# threshold for long typed queries, country cue on the fast local lanes, and a
+# provider-health breaker: while SerpApi keeps timing out, only the essential lanes
+# run and paid price-recovery calls pause (see /api/health/serpapi -> provider).
 # v128.5.22: a paid SerpApi search is never abandoned at the stream deadline (late
 # replies are cached for the retry); an empty result set waits a bounded extra window
 # before `done`; GET /api/health/serpapi?probe=1 measures provider latency + account.
@@ -339,7 +343,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization'], max_age=86400)
-BUILD_ID = 'v128.5.22-text-fast'
+BUILD_ID = 'v128.5.23-text-fast'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -456,6 +460,44 @@ SERPAPI_BUDGET_STATE = {
 }
 API_COST_STATS = Counter()
 API_COST_STATS_LOCK = threading.Lock()
+
+# Provider health: recent fresh-call outcomes decide whether the search fans
+# out to every lane or only the essential ones (a hung provider still bills).
+SERPAPI_HEALTH_WINDOW_SECONDS = max(60., min(1800., float(os.environ.get('SERPAPI_HEALTH_WINDOW_SECONDS', '240'))))
+SERPAPI_HEALTH_MIN_TIMEOUTS = max(2, min(30, int(os.environ.get('SERPAPI_HEALTH_MIN_TIMEOUTS', '5'))))
+_SERPAPI_HEALTH = {'ok': deque(), 'timeout': deque(), 'degraded_since': 0.}
+_SERPAPI_HEALTH_LOCK = threading.Lock()
+
+def _serpapi_health_record(outcome):
+    now = time.time()
+    with _SERPAPI_HEALTH_LOCK:
+        bucket = _SERPAPI_HEALTH['ok' if outcome == 'ok' else 'timeout']
+        bucket.append(now)
+        for name in ('ok', 'timeout'):
+            q = _SERPAPI_HEALTH[name]
+            while q and now - q[0] > SERPAPI_HEALTH_WINDOW_SECONDS:
+                q.popleft()
+        degraded = (len(_SERPAPI_HEALTH['timeout']) >= SERPAPI_HEALTH_MIN_TIMEOUTS
+                    and len(_SERPAPI_HEALTH['timeout']) > len(_SERPAPI_HEALTH['ok']))
+        was = bool(_SERPAPI_HEALTH['degraded_since'])
+        if degraded and not was:
+            _SERPAPI_HEALTH['degraded_since'] = now
+            print(f'SERPAPI HEALTH DEGRADED timeouts={len(_SERPAPI_HEALTH["timeout"])} ok={len(_SERPAPI_HEALTH["ok"])}'
+                  f' window={int(SERPAPI_HEALTH_WINDOW_SECONDS)}s -> essential lanes only, paid recovery paused')
+        elif was and not degraded:
+            _SERPAPI_HEALTH['degraded_since'] = 0.
+            print(f'SERPAPI HEALTH RECOVERED timeouts={len(_SERPAPI_HEALTH["timeout"])} ok={len(_SERPAPI_HEALTH["ok"])}')
+
+def serpapi_provider_degraded():
+    with _SERPAPI_HEALTH_LOCK:
+        return bool(_SERPAPI_HEALTH['degraded_since'])
+
+def serpapi_health_snapshot():
+    with _SERPAPI_HEALTH_LOCK:
+        return {'degraded': bool(_SERPAPI_HEALTH['degraded_since']),
+                'degraded_for_seconds': int(time.time()-_SERPAPI_HEALTH['degraded_since']) if _SERPAPI_HEALTH['degraded_since'] else 0,
+                'recent_ok': len(_SERPAPI_HEALTH['ok']), 'recent_timeouts': len(_SERPAPI_HEALTH['timeout']),
+                'window_seconds': int(SERPAPI_HEALTH_WINDOW_SECONDS)}
 
 def _api_cost_record(event, count=1):
     # Process-local diagnostics, not a billing meter. Provider-side free cache
@@ -1160,11 +1202,17 @@ def _number_overlaps_measurement_span(text, start, end):
             return True
     return False
 
+def _fold_latin_accents(token):
+    """Nestlé -> nestle, Müller -> muller. Non-Latin scripts are left intact."""
+    if not re.search('[\u00c0-\u024f]', token):
+        return token
+    return ''.join(ch for ch in unicodedata.normalize('NFKD', token) if not unicodedata.combining(ch))
+
 def norm_tokens(query):
     t = normalize_ar(_cjk_boundary_spaces(query))
     toks = re.findall('[\\w\\u0600-\\u06FF]+', t)
     toks = [w[2:] if w.startswith('ال') and len(w) > 4 else w for w in toks]
-    return set(toks)
+    return {_fold_latin_accents(w) for w in toks}
 
 def has_model_token(a, b):
 
@@ -1440,6 +1488,8 @@ def _serpapi_cached_json(params, timeout, label='SERPAPI', *, return_error=False
         nonlocal error_info
         error_info = {'reason':reason, 'http_status':int(status), 'attempts':attempts,
                       'elapsed_ms':int((time.monotonic()-started)*1000)}
+        if reason in ('read_timeout', 'timeout', 'connect_timeout', 'connection'):
+            _serpapi_health_record('timeout')
         print(f'SERPAPI FAILURE engine={engine} label={label} reason={reason} http={status}'
               f' attempts={attempts} elapsed_ms={error_info["elapsed_ms"]} key={key[:10]}')
         if isinstance(data, dict):
@@ -1554,6 +1604,7 @@ def _serpapi_cached_json(params, timeout, label='SERPAPI', *, return_error=False
             else:
                 return failure(error_reason(data,response.status_code),response.status_code,data)
         billable_success, result = True, data
+        _serpapi_health_record('ok')
         if not bypass:
             _serpapi_cache_put(key,engine,data)
         return copy.deepcopy(result)
@@ -8335,9 +8386,20 @@ def _findzia_stream_candidate_ok(query, item):
         return False
     score = _findzia_match_score(query, title)
     strong_model = bool(_web_model_tokens_from_listing(query) & _web_model_tokens_from_listing(title))
-    threshold = 0.46 if strong_model else 0.56
-    if score < threshold:
-        print(f'FINDZIA GUARD HOLD score={score:.2f}: {title[:100]}')
+    # A long typed description carries optional words ("chocolate wafer"); a
+    # merchant title that keeps the majority of it is the same listing family.
+    # Explicit conflicts were already rejected above; identity is settled later.
+    words = len(_findzia_lexical_tokens(query))
+    if strong_model:
+        threshold = 0.46
+    elif words >= 7:
+        threshold = 0.45
+    elif words >= 5:
+        threshold = 0.50
+    else:
+        threshold = 0.56
+    if score + 1e-9 < threshold:
+        print(f'FINDZIA GUARD HOLD score={score:.2f} threshold={threshold:.2f}: {title[:100]}')
         return False
     return True
 
@@ -19263,10 +19325,19 @@ def _web_text_direct_specs(query, country):
     # Fastest first: Google Light (organic, ~1-2 s) and Google Images Light
     # paint cards while the full Google page (inline shopping units, rich
     # snippet prices) is still on its way.
+    # Every English local lane names the country ("... Kuwait"): gl only ranks,
+    # and an unnamed market returned 8/10 foreign stores in production.
+    degraded = serpapi_provider_degraded()
     if TEXT_DIRECT_LIGHT_LANE:
-        add(country, 'local', 'google_light', 'en')
-    add(country, 'local', TEXT_DIRECT_IMAGES_ENGINE, 'en')
+        add(country, 'local', 'google_light', 'en', True)
+    add(country, 'local', TEXT_DIRECT_IMAGES_ENGINE, 'en', True)
     add(country, 'local', 'google', 'en', True)
+    if degraded:
+        # A provider that is not answering still bills each lane. Keep the
+        # three lanes that carry the local market and skip the rest until
+        # fresh calls succeed again (see SERPAPI HEALTH in the log).
+        print(f'TEXT DIRECT LANES degraded_provider=True lanes={len(specs)} country={country}')
+        return specs
     if native != 'en':
         add(country, 'local', 'google', native)
         add(country, 'local', TEXT_DIRECT_IMAGES_ENGINE, native)
@@ -23200,7 +23271,7 @@ async def _web_stream_text_fast(query, country, lang, selected_option='', reques
     # are bounded so `done` always arrives within deadline + price tail.
     source = _web_stream_text_direct(q, country, lang, request, TEXT_FAST_TIMEOUT_SECONDS,
                                      TEXT_FAST_EMPTY_EXTENSION_SECONDS)
-    stream = _web_with_live_prices(source, lang, country, allow_paid=True,
+    stream = _web_with_live_prices(source, lang, country, allow_paid=not serpapi_provider_degraded(),
                                    wait_seconds=TEXT_FAST_PRICE_WAIT_SECONDS)
     first_card = None
     count = 0
@@ -23330,6 +23401,7 @@ async def web_api_health_serpapi(request: Request):
                'text_fast': {'deadline_seconds': TEXT_FAST_TIMEOUT_SECONDS,
                              'empty_extension_seconds': TEXT_FAST_EMPTY_EXTENSION_SECONDS,
                              'late_read_seconds': TEXT_DIRECT_LATE_READ_SECONDS},
+               'provider': serpapi_health_snapshot(),
                'budget': serpapi_budget_snapshot(), 'cost_counters': api_cost_snapshot()}
     return Response(content=json.dumps(payload, ensure_ascii=False, default=str), media_type='application/json',
                     headers={'Cache-Control': 'no-store'})
