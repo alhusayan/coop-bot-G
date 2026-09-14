@@ -1,3 +1,6 @@
+# v128.5.22: a paid SerpApi search is never abandoned at the stream deadline (late
+# replies are cached for the retry); an empty result set waits a bounded extra window
+# before `done`; GET /api/health/serpapi?probe=1 measures provider latency + account.
 # v128.5.21-text-fast: typed text search retrieves merchant offers directly at t=0.
 # No reference-photo lookup, no Gemini classification and no translation wait gate
 # the first card for brand/model queries. Google organic (with inline shopping units)
@@ -336,7 +339,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization'], max_age=86400)
-BUILD_ID = 'v128.5.21-text-fast'
+BUILD_ID = 'v128.5.22-text-fast'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -19221,7 +19224,10 @@ TEXT_DIRECT_TIMEOUT_SECONDS = max(4., min(25., float(os.environ.get('TEXT_DIRECT
 TEXT_DIRECT_LOCAL_MAX = max(8, min(40, int(os.environ.get('TEXT_DIRECT_LOCAL_MAX', '24'))))
 TEXT_DIRECT_GLOBAL_MAX = max(5, min(24, int(os.environ.get('TEXT_DIRECT_GLOBAL_MAX', '12'))))
 TEXT_DIRECT_TRANSLATION_WAIT = max(.1, min(4., float(os.environ.get('TEXT_DIRECT_TRANSLATION_WAIT', '2.5'))))
-TEXT_DIRECT_POOL = ThreadPoolExecutor(max_workers=24, thread_name_prefix='text-direct')
+TEXT_DIRECT_POOL = ThreadPoolExecutor(max_workers=32, thread_name_prefix='text-direct')
+# The stream stops WAITING at its deadline; the HTTP read itself stays open this
+# long so a slow provider reply (already billed) is cached instead of discarded.
+TEXT_DIRECT_LATE_READ_SECONDS = max(6., min(40., float(os.environ.get('TEXT_DIRECT_LATE_READ_SECONDS', '20'))))
 # v128.5.21 — engines per lane. The full `google` engine is kept for the local
 # lanes because it carries inline shopping units / immersive product cards
 # (image + price + seller) for markets without a Shopping tab, e.g. Kuwait.
@@ -19330,7 +19336,7 @@ def _web_text_direct_fetch(query, spec, deadline, cancel, page_token=''):
         return None
     connect = min(1.5, max(.05, remaining * .15))
     began = time.monotonic()
-    data = _serpapi_cached_json(params, timeout=(connect, max(.01, remaining - connect)),
+    data = _serpapi_cached_json(params, timeout=(connect, max(remaining - connect, TEXT_DIRECT_LATE_READ_SECONDS)),
         label=f'TEXT DIRECT {spec["role"]}/{spec["country"]}/{params["engine"]}/{spec["hl"]}')
     if params['engine'] == 'baidu' and isinstance(data, dict) and not cancel.is_set():
         data = _local_resolve_baidu_links(data, max(0., deadline-time.monotonic()))
@@ -19394,7 +19400,7 @@ TEXT_DIRECT_GLOBAL_GRACE_SECONDS = max(.5, min(8., float(os.environ.get('TEXT_DI
 
 
 def _web_text_direct_search(query, country, lang, progress_callback=None, cancel_event=None,
-                            deadline_seconds=None):
+                            deadline_seconds=None, empty_extension_seconds=0.):
     """One retrieval pass shared by web/iOS REST and streaming clients.
 
     Emit each completed source while slow sources are still running. Reuse
@@ -19403,6 +19409,10 @@ def _web_text_direct_search(query, country, lang, progress_callback=None, cancel
     cancel = cancel_event if cancel_event is not None else threading.Event()
     started = time.monotonic()
     deadline = started + float(deadline_seconds or TEXT_DIRECT_TIMEOUT_SECONDS)
+    # With nothing to show yet, keep listening for a bounded extra window
+    # rather than closing on an empty page while replies are still in flight.
+    empty_deadline = deadline + max(0., float(empty_extension_seconds or 0.))
+    extended = False
     market = dict(_web_market(country), _query=query,
                   global_countries=[c for c in DEFAULT_GLOBAL_COUNTRIES if c != country])
     jobs, rows, counts, merchant_counts = {}, {}, Counter(), Counter()
@@ -19434,8 +19444,20 @@ def _web_text_direct_search(query, country, lang, progress_callback=None, cancel
     try:
         for spec in _web_text_direct_specs(query, country):
             submit(spec)
-        while jobs and not cancel.is_set() and time.monotonic() < deadline:
-            done, _ = wait(jobs, timeout=min(.05, max(0., deadline-time.monotonic())), return_when=FIRST_COMPLETED)
+        while jobs and not cancel.is_set():
+            now = time.monotonic()
+            if not rows and now >= deadline and not extended:
+                extended = True
+                print(f'TEXT DIRECT EMPTY EXTENSION country={country} pending={len(jobs)}'
+                      f' until_ms={int((empty_deadline-started)*1000)}')
+            if extended and rows and now >= deadline:
+                # The first cards landed inside the extension: the other lanes
+                # of the same slow wave are usually milliseconds behind them.
+                deadline = min(empty_deadline, now + TEXT_DIRECT_GLOBAL_GRACE_SECONDS)
+            limit = deadline if rows else empty_deadline
+            if now >= limit:
+                break
+            done, _ = wait(jobs, timeout=min(.05, max(0., limit-now)), return_when=FIRST_COMPLETED)
             for future in done:
                 spec, target, token, thumbnail = jobs.pop(future)
                 try:
@@ -19443,7 +19465,7 @@ def _web_text_direct_search(query, country, lang, progress_callback=None, cancel
                 except Exception as exc:
                     print(f'TEXT SOURCE FAILED engine={spec["engine"]} reason={type(exc).__name__}')
                     data = None
-                if cancel.is_set() or time.monotonic() >= deadline:
+                if cancel.is_set() or time.monotonic() >= (deadline if rows else empty_deadline):
                     break
                 name = f'{spec["role"]}:{spec["country"]}:{spec["engine"]}:{spec["hl"]}' + (':merchants' if token else '')
                 source_states[name] = 'complete' if isinstance(data, dict) else 'unavailable'
@@ -19542,7 +19564,8 @@ def _web_text_direct_search(query, country, lang, progress_callback=None, cancel
         print(f'TEXT DIRECT FINAL country={country} rows={len(rows)} markets={dict(counts)}'
               f' images={sum(bool(r.get("image")) for r in rows.values())}'
               f' prices={sum(_web_row_has_numeric_price(r) for r in rows.values())}'
-              f' first_ms={first_ms} elapsed_ms={int((time.monotonic()-started)*1000)} calls={launched}')
+              f' first_ms={first_ms} elapsed_ms={int((time.monotonic()-started)*1000)} calls={launched}'
+              f' pending={len(jobs)} extended={extended}')
         return result
     finally:
         cancel.set()
@@ -19550,13 +19573,15 @@ def _web_text_direct_search(query, country, lang, progress_callback=None, cancel
             future.cancel()
 
 
-async def _web_stream_text_direct(query, country, lang, request=None, deadline_seconds=None):
+async def _web_stream_text_direct(query, country, lang, request=None, deadline_seconds=None,
+                                  empty_extension_seconds=0.):
     """The same retrieval as REST, with URL-keyed incremental updates."""
     events = queue.Queue()
     cancel = threading.Event()
     started = time.monotonic()
     task = asyncio.create_task(asyncio.to_thread(_run_with_market, _web_market(country),
-        _web_text_direct_search, query, country, lang, events.put, cancel, deadline_seconds))
+        _web_text_direct_search, query, country, lang, events.put, cancel, deadline_seconds,
+        empty_extension_seconds))
     sent = {}
     def updates():
         while True:
@@ -23073,8 +23098,10 @@ TEXT_FAST_ENABLED = env_bool('TEXT_FAST_ENABLED', True)
 TEXT_FAST_TIMEOUT_SECONDS = max(3., min(15., float(os.environ.get('TEXT_FAST_TIMEOUT_SECONDS', '8'))))
 TEXT_FAST_PRICE_WAIT_SECONDS = max(.5, min(10., float(os.environ.get('TEXT_FAST_PRICE_WAIT_SECONDS', '3'))))
 TEXT_FAST_CLASSIFY_WAIT_SECONDS = max(.3, min(4., float(os.environ.get('TEXT_FAST_CLASSIFY_WAIT_SECONDS', '1.5'))))
+TEXT_FAST_EMPTY_EXTENSION_SECONDS = max(0., min(15., float(os.environ.get('TEXT_FAST_EMPTY_EXTENSION_SECONDS', '7'))))
 TEXT_FAST_STATUS_INTERVAL = .75
 print(f'TEXT FAST CONFIG enabled={TEXT_FAST_ENABLED} deadline={TEXT_FAST_TIMEOUT_SECONDS}s'
+      f' empty_extension={TEXT_FAST_EMPTY_EXTENSION_SECONDS}s late_read={TEXT_DIRECT_LATE_READ_SECONDS}s'
       f' price_tail={TEXT_FAST_PRICE_WAIT_SECONDS}s classify_wait={TEXT_FAST_CLASSIFY_WAIT_SECONDS}s'
       f' lanes=light+images_light+google(local,en/native)+us/cn light_lane={TEXT_DIRECT_LIGHT_LANE}'
       f' images_engine={TEXT_DIRECT_IMAGES_ENGINE} immersive_local={TEXT_DIRECT_IMMERSIVE_LOCAL}'
@@ -23171,7 +23198,8 @@ async def _web_stream_text_fast(query, country, lang, selected_option='', reques
     # Retrieval streams URL-keyed cards as each source returns; the live-price
     # wrapper fills missing prices/images from merchant pages meanwhile. Both
     # are bounded so `done` always arrives within deadline + price tail.
-    source = _web_stream_text_direct(q, country, lang, request, TEXT_FAST_TIMEOUT_SECONDS)
+    source = _web_stream_text_direct(q, country, lang, request, TEXT_FAST_TIMEOUT_SECONDS,
+                                     TEXT_FAST_EMPTY_EXTENSION_SECONDS)
     stream = _web_with_live_prices(source, lang, country, allow_paid=True,
                                    wait_seconds=TEXT_FAST_PRICE_WAIT_SECONDS)
     first_card = None
@@ -23215,6 +23243,96 @@ async def _web_text_fast_result(query, country, lang, selected_option='', origin
             final.update({k: v for k, v in event.items() if k not in ('event',)})
     final['elapsed_ms'] = int((time.monotonic()-started)*1000)
     return _web_card_payload(final)
+
+
+
+_SERPAPI_PROBE_LAST = {}
+
+
+def _serpapi_probe_sync(country='kw'):
+    """One fresh Google Light search plus the account snapshot, timed end to end.
+
+    Output is safe to expose: no key, no query string beyond the fixed probe.
+    """
+    out = {'ok': bool(SERPAPI_API_KEY), 'at': time.time(), 'country': country}
+    if not SERPAPI_API_KEY:
+        return dict(out, error='no_api_key')
+    # 1) plain reachability (TCP+TLS+HTTP) without spending a search
+    began = time.monotonic()
+    try:
+        r = requests.get('https://serpapi.com/', timeout=(5, 10), allow_redirects=False)
+        out['reach_ms'] = int((time.monotonic()-began)*1000)
+        out['reach_http'] = r.status_code
+        r.close()
+    except Exception as exc:
+        out['reach_ms'] = int((time.monotonic()-began)*1000)
+        out['reach_error'] = type(exc).__name__
+    # 2) one fresh (uncached, billed) light search with a generous read window
+    began = time.monotonic()
+    try:
+        r = requests.get('https://serpapi.com/search.json', params={
+            'engine': 'google_light', 'q': 'inverter generator 1000w', 'gl': country, 'hl': 'en',
+            'no_cache': 'true', 'api_key': SERPAPI_API_KEY, 'output': 'json'}, timeout=(5, 45))
+        out['search_wall_ms'] = int((time.monotonic()-began)*1000)
+        out['search_http'] = r.status_code
+        try:
+            data = r.json()
+        except ValueError:
+            data = {}
+        meta = data.get('search_metadata') or {}
+        out['search_provider_seconds'] = meta.get('total_time_taken')
+        out['search_status'] = meta.get('status')
+        out['search_rows'] = len(data.get('organic_results') or [])
+        if data.get('error'):
+            out['search_error'] = re.sub(r'https?://\S+', '[url]', str(data['error']))[:200]
+        r.close()
+    except requests.exceptions.Timeout:
+        out['search_wall_ms'] = int((time.monotonic()-began)*1000)
+        out['search_error'] = 'timeout_45s'
+    except Exception as exc:
+        out['search_wall_ms'] = int((time.monotonic()-began)*1000)
+        out['search_error'] = type(exc).__name__
+    # 3) account usage / limits (no search credit)
+    began = time.monotonic()
+    try:
+        r = requests.get('https://serpapi.com/account.json', params={'api_key': SERPAPI_API_KEY}, timeout=(5, 15))
+        account = r.json() if r.status_code < 500 else {}
+        r.close()
+        out['account'] = {k: account.get(k) for k in (
+            'account_status', 'plan_name', 'searches_per_month', 'plan_searches_left',
+            'this_month_usage', 'total_searches_left', 'account_rate_limit_per_hour',
+            'this_hour_searches', 'extra_credits') if k in account}
+        if account.get('error'):
+            out['account_error'] = str(account['error'])[:120]
+        out['account_ms'] = int((time.monotonic()-began)*1000)
+    except Exception as exc:
+        out['account_error'] = type(exc).__name__
+    out['verdict'] = ('provider_slow' if (out.get('search_provider_seconds') or 0) >= 5
+                      else 'network_slow' if (out.get('search_wall_ms') or 0) - 1000*(out.get('search_provider_seconds') or 0) >= 3000
+                      else 'timeout' if 'timeout' in str(out.get('search_error') or '')
+                      else 'ok' if out.get('search_rows') else 'check_error')
+    print('SERPAPI PROBE ' + json.dumps({k: v for k, v in out.items() if k != 'account'}, ensure_ascii=False))
+    _SERPAPI_PROBE_LAST.clear(); _SERPAPI_PROBE_LAST.update(out)
+    return out
+
+
+@app.get('/api/health/serpapi')
+async def web_api_health_serpapi(request: Request):
+    """Diagnostics for provider latency. ?probe=1 spends ONE search credit."""
+    if not WEB_API_ENABLED:
+        return Response(content=json.dumps({'ok': False, 'error': 'web_api_disabled'}), media_type='application/json', status_code=503)
+    if not _web_rate_allowed(request):
+        return Response(content=json.dumps({'ok': False, 'error': 'rate_limit'}), media_type='application/json', status_code=429)
+    probe = str(request.query_params.get('probe') or '').strip().lower() in ('1', 'true', 'yes')
+    country = _web_normalize_country_code(str(request.query_params.get('country') or 'kw')) or 'kw'
+    result = await asyncio.to_thread(_serpapi_probe_sync, country) if probe else dict(_SERPAPI_PROBE_LAST)
+    payload = {'ok': True, 'build': BUILD_ID, 'probe_ran': probe, 'probe': result,
+               'text_fast': {'deadline_seconds': TEXT_FAST_TIMEOUT_SECONDS,
+                             'empty_extension_seconds': TEXT_FAST_EMPTY_EXTENSION_SECONDS,
+                             'late_read_seconds': TEXT_DIRECT_LATE_READ_SECONDS},
+               'budget': serpapi_budget_snapshot(), 'cost_counters': api_cost_snapshot()}
+    return Response(content=json.dumps(payload, ensure_ascii=False, default=str), media_type='application/json',
+                    headers={'Cache-Control': 'no-store'})
 
 
 @app.post('/api/search/stream')
