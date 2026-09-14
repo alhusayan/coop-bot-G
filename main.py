@@ -1,4 +1,9 @@
-# v128.5.21: fast text-to-photo bridge; reliable provider thumbnails, fail-fast fallback, unchanged photo Lens.
+# v128.5.21-text-fast: typed text search retrieves merchant offers directly at t=0.
+# No reference-photo lookup, no Gemini classification and no translation wait gate
+# the first card for brand/model queries. Google organic (with inline shopping units)
+# + Google Light + Google Images Light + approved US/CN catalogs run in parallel and
+# stream as each source returns; immersive product cards expand into seller lists.
+# TEXT_FAST_ENABLED=false restores the v128.5.20 text-photo (Lens) route unchanged.
 # v128.5.19: realistic reference deadline; one request, streaming progress, unchanged Lens.
 # TEXT_LENS_ENABLED=true overrides earlier text experiment flags for web API.
 # v128.5.16 — Google Light organic search; on-demand ratings; complete-offer cache.
@@ -331,7 +336,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization'], max_age=86400)
-BUILD_ID = 'v128.5.21-text-photo-fast'
+BUILD_ID = 'v128.5.21-text-fast'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -11898,8 +11903,14 @@ def _web_tier_conflict(left_fp, right_fp):
             return True
     return False
 
-def _web_semantic_match_guard(identity, row):
-    """Resolve high-confidence product identity cases instantly, without I/O."""
+def _web_semantic_match_guard(identity, row, typed_query=False):
+    """Resolve high-confidence product identity cases instantly, without I/O.
+
+    typed_query: the identity is the user's own typed brand/model wording (no
+    reference photo). A merchant title that repeats that wording and only adds
+    the product kind or descriptors is the same buyable product; every model,
+    tier, variant, numeric and accessory conflict above still rejects.
+    """
     identity = _web_clean_classification_identity(identity)
     title = _web_clean_classification_identity(_web_result_classification_title(row))
     url = str((row or {}).get('url') or (row or {}).get('link') or '').strip()
@@ -11931,6 +11942,7 @@ def _web_semantic_match_guard(identity, row):
         early_identity_models and early_title_models
         and early_identity_models & early_title_models
         and bool(identity_fp['product_kind']) != bool(title_fp['product_kind'])
+        and not (typed_query and not identity_fp['product_kind'])
     ):
         return ('similar', 'product_type_not_proven', 96)
     if identity_fp['non_product_offer'] != title_fp['non_product_offer'] and (
@@ -12041,6 +12053,15 @@ def _web_semantic_match_guard(identity, row):
         # still matters. This blocks X100 Watch vs X100 Phone and flavour/name
         # variants that previously slipped through the model-only heuristic.
         if identity_residual != title_residual:
+            extra_tier = ({tier for group in title_fp.get('tiers') or [] for tier in group}
+                          - {tier for group in identity_fp.get('tiers') or [] for tier in group})
+            extra_audience = bool(title_fp.get('audience')) and title_fp.get('audience') != identity_fp.get('audience')
+            if typed_query and identity_residual <= title_residual and not extra_tier and not extra_audience:
+                # "Firman SPS1000i" vs "Firman SPS1000i 1000W Inverter
+                # Generator": the typed identity is fully present and the
+                # title only adds kind/descriptor words. An added tier (Pro,
+                # Max) or audience (Womens) is a different buyable product.
+                return ('exact', 'typed_model_superset_title', 95)
             return ('similar', 'different_identity_token_same_model', 97)
         if identity_coverage >= 0.85 and title_distinctive - identity_distinctive:
             return ('similar', 'extra_identity_token', 92)
@@ -15140,8 +15161,9 @@ def _web_attach_captured_result_sections(payload, lang, allow_ai=True, cancel_ev
     match_guard_by_id = {}
     market_guard_by_id = {}
     ai_candidates = []
+    typed_query = bool(not has_reference_photo and str(out.get('source') or '') in ('text_direct', 'text_fast'))
     for index, original in enumerate(results):
-        match_guard = _web_semantic_match_guard(classification_anchor, original)
+        match_guard = _web_semantic_match_guard(classification_anchor, original, typed_query=typed_query)
         market_guard = _web_market_scope_guard(original, market_snapshot)
         if match_guard is not None:
             match_guard_by_id[index] = match_guard
@@ -18051,8 +18073,9 @@ def _web_confirmable_price(row):
     return bool(observed and (not bound or _web_price_url_key(bound)==_web_price_url_key(row.get('url'))))
 
 
-async def _web_with_live_prices(source, lang, country, allow_paid=True):
+async def _web_with_live_prices(source, lang, country, allow_paid=True, wait_seconds=None):
     """Deliver rows immediately; interleave prices during retrieval AND AI review."""
+    tail_wait = WEB_LIVE_PRICE_WAIT if wait_seconds is None else max(.5, float(wait_seconds))
     token = _WEB_LIVE_PRICE_ACTIVE.set(True)
     market = _web_market(country)
     rows, facts, jobs, attempted = {}, {}, {}, set()
@@ -18103,6 +18126,8 @@ async def _web_with_live_prices(source, lang, country, allow_paid=True):
         if has_price:
             merged['price_pending'] = False
             merged['price_unavailable'] = False
+            if merged.get('price_status') == 'loading':
+                merged['price_status'] = 'indexed'  # a later source supplied the price
         elif key not in attempted:
             merged.update(price='', price_pending=True, price_unavailable=False, price_status='loading')
         merged.update(_web_price_display_fields(merged))
@@ -18168,7 +18193,7 @@ async def _web_with_live_prices(source, lang, country, allow_paid=True):
                     raw = next_event.result()
                 except StopAsyncIteration:
                     next_event = None
-                    finish_by = loop.time() + WEB_LIVE_PRICE_WAIT
+                    finish_by = loop.time() + tail_wait
                 else:
                     event = json.loads(raw) if isinstance(raw, (str, bytes)) else dict(raw)
                     if isinstance(event.get('market'), dict):
@@ -18189,7 +18214,7 @@ async def _web_with_live_prices(source, lang, country, allow_paid=True):
                     if kind == 'done':
                         final_event = event
                         next_event = None
-                        finish_by = loop.time() + WEB_LIVE_PRICE_WAIT
+                        finish_by = loop.time() + tail_wait
                     else:
                         yield _web_stream_event(event)
                         next_event = asyncio.create_task(anext(source))
@@ -19196,7 +19221,18 @@ TEXT_DIRECT_TIMEOUT_SECONDS = max(4., min(25., float(os.environ.get('TEXT_DIRECT
 TEXT_DIRECT_LOCAL_MAX = max(8, min(40, int(os.environ.get('TEXT_DIRECT_LOCAL_MAX', '24'))))
 TEXT_DIRECT_GLOBAL_MAX = max(5, min(24, int(os.environ.get('TEXT_DIRECT_GLOBAL_MAX', '12'))))
 TEXT_DIRECT_TRANSLATION_WAIT = max(.1, min(4., float(os.environ.get('TEXT_DIRECT_TRANSLATION_WAIT', '2.5'))))
-TEXT_DIRECT_POOL = ThreadPoolExecutor(max_workers=16, thread_name_prefix='text-direct')
+TEXT_DIRECT_POOL = ThreadPoolExecutor(max_workers=24, thread_name_prefix='text-direct')
+# v128.5.21 — engines per lane. The full `google` engine is kept for the local
+# lanes because it carries inline shopping units / immersive product cards
+# (image + price + seller) for markets without a Shopping tab, e.g. Kuwait.
+# The Light engines answer in ~1-2 s and paint the first cards.
+TEXT_DIRECT_IMAGES_ENGINE = os.environ.get('TEXT_DIRECT_IMAGES_ENGINE', 'google_images_light').strip() or 'google_images_light'
+if TEXT_DIRECT_IMAGES_ENGINE not in ('google_images', 'google_images_light'):
+    TEXT_DIRECT_IMAGES_ENGINE = 'google_images_light'
+TEXT_DIRECT_LIGHT_LANE = env_bool('TEXT_DIRECT_LIGHT_LANE', True)
+TEXT_DIRECT_LOCATION = env_bool('TEXT_DIRECT_LOCATION', True)
+TEXT_DIRECT_IMMERSIVE_LOCAL = max(0, min(5, int(os.environ.get('TEXT_DIRECT_IMMERSIVE_LOCAL', '3'))))
+TEXT_DIRECT_IMMERSIVE_GLOBAL = max(0, min(3, int(os.environ.get('TEXT_DIRECT_IMMERSIVE_GLOBAL', '1'))))
 print(f'TEXT DIRECT CONFIG enabled={TEXT_DIRECT_SEARCH_ENABLED} deadline={TEXT_DIRECT_TIMEOUT_SECONDS}s'
       f' local_max={TEXT_DIRECT_LOCAL_MAX} global_max={TEXT_DIRECT_GLOBAL_MAX} bilingual=True incremental=True')
 
@@ -19218,10 +19254,16 @@ def _web_text_direct_specs(query, country):
                       'geo_cue': geo_cue})
     # gl ranks by country but does not restrict results to that country. Pair
     # a country-named open query with an independent native-language query.
+    # Fastest first: Google Light (organic, ~1-2 s) and Google Images Light
+    # paint cards while the full Google page (inline shopping units, rich
+    # snippet prices) is still on its way.
+    if TEXT_DIRECT_LIGHT_LANE:
+        add(country, 'local', 'google_light', 'en')
+    add(country, 'local', TEXT_DIRECT_IMAGES_ENGINE, 'en')
     add(country, 'local', 'google', 'en', True)
     if native != 'en':
         add(country, 'local', 'google', native)
-    add(country, 'local', 'google_images', native, native == 'en')
+        add(country, 'local', TEXT_DIRECT_IMAGES_ENGINE, native)
     if ENABLE_GOOGLE_SHOPPING and _shopping_gl_supported(country):
         add(country, 'local', 'google_shopping', 'en')
     elif country == 'cn' and LOCAL_DISCOVERY_BAIDU:
@@ -19231,7 +19273,7 @@ def _web_text_direct_specs(query, country):
             continue
         add(cc, 'global', 'google', 'en')
         add(cc, 'global', 'google_shopping' if cc == 'us' and ENABLE_GOOGLE_SHOPPING
-            else 'google_images', 'en')
+            else TEXT_DIRECT_IMAGES_ENGINE, 'en')
     return specs
 
 
@@ -19249,7 +19291,7 @@ def _web_text_direct_params(query, spec, page_token=''):
     if role == 'global':
         domains = ' OR '.join('site:' + domain for _, domain in GLOBAL_MARKET_STORES[country])
         wording = f'{wording} ({domains})'
-    elif engine in ('google', 'google_images'):
+    elif engine in ('google', 'google_light', 'google_images', 'google_images_light'):
         if spec.get('geo_cue'):
             wording = f'{wording} {COUNTRY_NAMES.get(country, country.upper())}'
         else:
@@ -19263,6 +19305,16 @@ def _web_text_direct_params(query, spec, page_token=''):
         params.update(gl=country if role == 'local' else 'us', hl=hl)
         if engine == 'google':
             params.update(num=10, nfpr=1)
+            if role == 'local' and TEXT_DIRECT_LOCATION and COUNTRY_NAMES.get(country):
+                # A localized results page carries the market's shopping units
+                # and local-currency rich snippets (KWD for Kuwait).
+                params['location'] = COUNTRY_NAMES[country]
+        elif engine == 'google_light':
+            # nfpr keeps an uncommon model code from being 'corrected'.
+            params.update(nfpr=1, json_restrictor='search_metadata,search_parameters,'
+                          'search_information,organic_results,error')
+        elif engine in ('google_images', 'google_images_light'):
+            params['nfpr'] = 1
         if engine == 'google_shopping':
             params['direct_link'] = 'true'
     return params
@@ -19299,6 +19351,12 @@ def _web_text_direct_records(data):
         if isinstance(group, dict):
             shopping.extend(x for x in group.get('shopping_results') or [] if isinstance(x, dict))
     data['shopping_results'] = shopping
+    # Google's page-level product units carry a token instead of a seller
+    # link; they are expansion cards only (never displayed without a URL).
+    cards = list(shopping)
+    for raw in list(data.get('immersive_products') or []) + list(data.get('inline_shopping_results') or []):
+        if isinstance(raw, dict) and raw.get('immersive_product_page_token') and raw.get('title'):
+            cards.append(raw)
     organic = []
     for raw in data.get('organic_results') or []:
         if not isinstance(raw, dict):
@@ -19314,7 +19372,7 @@ def _web_text_direct_records(data):
             row['image_candidates'] = list(dict.fromkeys(images))[:8]
         organic.append(row)
     data['organic_results'] = organic
-    return data, shopping
+    return data, cards
 
 
 def _web_text_direct_candidates(data, query, target, provider):
@@ -19332,7 +19390,11 @@ def _web_text_direct_candidates(data, query, target, provider):
     return rows
 
 
-def _web_text_direct_search(query, country, lang, progress_callback=None, cancel_event=None):
+TEXT_DIRECT_GLOBAL_GRACE_SECONDS = max(.5, min(8., float(os.environ.get('TEXT_DIRECT_GLOBAL_GRACE_SECONDS', '2.5'))))
+
+
+def _web_text_direct_search(query, country, lang, progress_callback=None, cancel_event=None,
+                            deadline_seconds=None):
     """One retrieval pass shared by web/iOS REST and streaming clients.
 
     Emit each completed source while slow sources are still running. Reuse
@@ -19340,7 +19402,7 @@ def _web_text_direct_search(query, country, lang, progress_callback=None, cancel
     """
     cancel = cancel_event if cancel_event is not None else threading.Event()
     started = time.monotonic()
-    deadline = started + TEXT_DIRECT_TIMEOUT_SECONDS
+    deadline = started + float(deadline_seconds or TEXT_DIRECT_TIMEOUT_SECONDS)
     market = dict(_web_market(country), _query=query,
                   global_countries=[c for c in DEFAULT_GLOBAL_COUNTRIES if c != country])
     jobs, rows, counts, merchant_counts = {}, {}, Counter(), Counter()
@@ -19443,11 +19505,19 @@ def _web_text_direct_search(query, country, lang, progress_callback=None, cancel
                         first_ms = int((time.monotonic()-started)*1000)
                     if progress_callback:
                         progress_callback(snapshot())
+                # Once every local lane (and its seller expansions) has
+                # answered, a slow foreign catalog gets a short grace period
+                # rather than the whole budget: local cards are already shown.
+                if rows and not any(j[0]['role'] == 'local' for j in jobs.values()):
+                    deadline = min(deadline, time.monotonic() + TEXT_DIRECT_GLOBAL_GRACE_SECONDS)
                 # Google may return an aggregate product without a seller URL.
                 # Expand a bounded number of products into ALL observed sellers;
                 # schedule independently so other sources can already be shown.
-                if not token and spec['engine'] == 'google_shopping':
-                    allowance = min(SHOPPING_MERCHANT_CARDS, 2 if spec['role'] == 'local' else 1)
+                if not token and spec['engine'] in ('google_shopping', 'google'):
+                    if spec['engine'] == 'google_shopping':
+                        allowance = min(SHOPPING_MERCHANT_CARDS, 2 if spec['role'] == 'local' else 1)
+                    else:
+                        allowance = TEXT_DIRECT_IMMERSIVE_LOCAL if spec['role'] == 'local' else TEXT_DIRECT_IMMERSIVE_GLOBAL
                     for card in cards:
                         if expansions[spec['country']] >= allowance:
                             break
@@ -19480,13 +19550,13 @@ def _web_text_direct_search(query, country, lang, progress_callback=None, cancel
             future.cancel()
 
 
-async def _web_stream_text_direct(query, country, lang, request=None):
+async def _web_stream_text_direct(query, country, lang, request=None, deadline_seconds=None):
     """The same retrieval as REST, with URL-keyed incremental updates."""
     events = queue.Queue()
     cancel = threading.Event()
     started = time.monotonic()
     task = asyncio.create_task(asyncio.to_thread(_run_with_market, _web_market(country),
-        _web_text_direct_search, query, country, lang, events.put, cancel))
+        _web_text_direct_search, query, country, lang, events.put, cancel, deadline_seconds))
     sent = {}
     def updates():
         while True:
@@ -22380,18 +22450,13 @@ TEXT_LENS_ENABLED = env_bool('TEXT_LENS_ENABLED', True)
 # (3 - .7) * .65 calculation aborted healthy provider replies at ~1.5 seconds.
 # Retain the legacy variable as a UI timing target; the actual deadline is
 # explicit and independently configurable. Fast replies return immediately.
-TEXT_LENS_REFERENCE_TARGET_SECONDS = max(.5, min(2.5, float(os.environ.get('TEXT_LENS_REFERENCE_SECONDS', '1.5'))))
-# Text->photo is only a bridge into the existing Lens pipeline. It must never
-# become the longest stage of the search. Google Images Light is normally fast;
-# four seconds is a hard escape hatch, not a target response time.
-TEXT_LENS_REFERENCE_SECONDS = max(2.5, min(4., float(os.environ.get('TEXT_LENS_REFERENCE_HARD_SECONDS', '4'))))
-TEXT_LENS_SEMANTIC_TITLE_FALLBACK = env_bool('TEXT_LENS_SEMANTIC_TITLE_FALLBACK', False)
+TEXT_LENS_REFERENCE_TARGET_SECONDS = max(.5, min(3., float(os.environ.get('TEXT_LENS_REFERENCE_SECONDS', '2'))))
+TEXT_LENS_REFERENCE_SECONDS = max(4., min(20., float(os.environ.get('TEXT_LENS_REFERENCE_HARD_SECONDS', '10'))))
 print(f'TEXT LENS CONFIG target={TEXT_LENS_REFERENCE_TARGET_SECONDS}s hard_limit={TEXT_LENS_REFERENCE_SECONDS}s '
-      f'provider_requests=1 semantic_title={TEXT_LENS_SEMANTIC_TITLE_FALLBACK} photo_cache=7d')
+      'provider_requests=1 late_reply=continue photo_cache=7d')
 TEXT_LENS_RESULTS_SECONDS = max(8., min(20., float(os.environ.get('TEXT_LENS_RESULTS_SECONDS', '10'))))
 TEXT_LENS_REFERENCE_TTL = 7 * 86400
-TEXT_LENS_REFERENCE_MAX_BYTES = max(256 * 1024, min(2 * 1024 * 1024,
-    int(os.environ.get('TEXT_LENS_REFERENCE_MAX_BYTES', str(1536 * 1024)))))
+TEXT_LENS_REFERENCE_MAX_BYTES = 512 * 1024
 _TEXT_LENS_REFERENCES = {}
 _TEXT_LENS_INFLIGHT = {}
 _TEXT_LENS_LOCK = threading.Lock()
@@ -22504,80 +22569,42 @@ def _text_lens_title_match(query, title):
 
 
 def _text_lens_image_record(raw):
-    if not isinstance(raw, dict) or raw.get('unsafe') is True:
+    if not isinstance(raw, dict):
         return None
     title, page = str(raw.get('title') or '').strip(), str(raw.get('link') or '').strip()
     if not title or not _web_is_http_url(page):
         return None
     if re.search(r'\b(?:logo|icon|wallpaper|drawing|illustration|clipart|ai.generated)\b', title, re.I):
         return None
-    # Google Images Light exposes a SerpApi-hosted thumbnail in addition to the
-    # Google thumbnail and the merchant/CDN original. The proxy thumbnail is the
-    # best fast-path because it is already provider-observed and is far less
-    # likely to reject a datacenter request than a merchant CDN. Original stays
-    # last as a quality fallback, never as the first thing the user waits for.
     urls = []
-    for name in ('serpapi_thumbnail', 'thumbnail', 'original'):
+    for name in ('original', 'thumbnail'):
         url = str(raw.get(name) or '').strip()
         if (_web_is_http_url(url) and url not in urls and url != page
                 and not re.search(r'\.(?:html?|pdf)(?:[?#]|$)', url, re.I)):
             urls.append(url)
     return {'title': title[:500], 'source_page': page, 'urls': urls,
-            'position': int(raw.get('position') or 999),
             'product': raw.get('is_product') is True} if urls else None
 
 
 def _text_lens_candidates(data, query):
-    """Choose a reference photo without turning title wording into a bottleneck.
-
-    Strict title identity is preferred. If Google ranked an image for the exact
-    typed query but its title merely omits some wording, it may still seed Lens
-    provided there is no explicit model/spec/accessory conflict. This fallback
-    is reference evidence only; the downstream text-constrained Lens filter
-    still decides which merchant offers are eligible for publication.
-    """
-    strict, ranked, rejected = [], [], defaultdict(int)
-    qcodes = _shopping_identity_codes(query)
-    hard_conflicts = {
-        'different_model_code', 'different_model_tier', 'different_model_suffix',
-        'different_requested_specification', 'accessory_or_service',
-        'different_product_kind', 'different_audience',
-    }
+    candidates, rejected = [], defaultdict(int)
+    # The provider returns up to 100 observations. Inspecting their metadata
+    # is local work; arbitrarily discarding everything after #30 bought nothing.
     for raw in (data.get('images_results') or [])[:100]:
         candidate = _text_lens_image_record(raw)
         if not candidate:
             rejected['invalid_image_record'] += 1
             continue
         compact, reason = _text_lens_title_match(query, candidate['title'])
-        if not reason:
-            strict.append(dict(candidate, matched_query=compact, match_evidence='title'))
-            if len(strict) >= 3:
-                break
+        if reason:
+            rejected[reason] += 1
             continue
-        rejected[reason] += 1
-        if reason in hard_conflicts:
-            continue
-        # The relaxed path is intentionally narrow: Google Images ranking may
-        # compensate for an abbreviated/translated title, but never for a
-        # contradictory model code or a known factual conflict.
-        tcodes = _shopping_identity_codes(candidate['title'])
-        if qcodes and tcodes and not (qcodes & tcodes):
-            rejected['ranked_different_code'] += 1
-            continue
-        if _web_identity_fact_conflicts(query, candidate['title']):
-            rejected['ranked_fact_conflict'] += 1
-            continue
-        if reason == 'product_identity_not_found' and (candidate['product'] or candidate['position'] <= 8):
-            ranked.append(dict(candidate, matched_query=query, match_evidence='google_images_rank'))
-            if len(ranked) >= 3:
-                # Keep scanning only until strict matches appear; otherwise the
-                # first high-ranked safe images are enough to seed Lens.
-                continue
-    chosen = strict[:3] if strict else ranked[:3]
-    print('TEXT LENS TITLE GATE ' + json.dumps({'accepted': len(chosen),
-          'strict': len(strict), 'ranked_fallback': 0 if strict else len(chosen),
+        candidates.append(dict(candidate, matched_query=compact, match_evidence='title'))
+        if len(candidates) >= 6 and sum(c['product'] for c in candidates) >= 3:
+            break
+    print('TEXT LENS TITLE GATE ' + json.dumps({'accepted': len(candidates),
           'rejected': dict(rejected)}, separators=(',', ':')))
-    return chosen
+    return sorted(candidates, key=lambda row: not row['product'])[:3]
 
 
 def _text_lens_semantic_candidates(data, query, deadline):
@@ -22795,10 +22822,10 @@ def _text_lens_download(candidate, deadline, cancel_event=None):
             # Per-image I/O has a short, explicit budget inside the overall
             # deadline. Parallel thumbnail/original jobs do not wait for each
             # other's headers. Existing public-DNS/peer/redirect guards apply.
-            budget = min(1.35, remaining - .05)
+            budget = min(2., remaining - .05)
             if index == 0 and len(candidate['urls']) > 1:
                 budget = min(budget, remaining / 2)
-            connect = min(.35, budget / 3)
+            connect = min(.5, budget / 3)
             response = _web_safe_get(url, headers={**HEADERS, 'Accept': 'image/*'},
                                      timeout=(connect, max(.05, budget-connect)), stream=True)
             status = response.status_code
@@ -22831,7 +22858,7 @@ def _text_lens_download(candidate, deadline, cancel_event=None):
             with PILImage.open(io.BytesIO(raw)) as picture:
                 width, height = picture.size
                 mime = {'JPEG': 'image/jpeg', 'PNG': 'image/png', 'WEBP': 'image/webp'}.get(picture.format)
-                if not mime or min(width, height) < 72 or width * height > 16000000:
+                if not mime or min(width, height) < 100 or width * height > 16000000:
                     reason = 'unsupported_image'
                     continue
                 picture.verify()
@@ -22881,14 +22908,13 @@ def _text_lens_lookup(query, country, lang, specific, query_key, deadline):
         return {'ok': False, 'error': 'reference_timeout'}
     if not SERPAPI_API_KEY:
         return {'ok': False, 'error': 'search_service_unavailable'}
-    search_hl = 'en' if q.isascii() else (country_search_hl(country) or lang or 'en')
-    params = {'engine': 'google_images_light', 'q': q, 'gl': country, 'hl': search_hl,
-              'nfpr': 1, 'device': 'desktop', 'api_key': SERPAPI_API_KEY, 'output': 'json'}
-    # One provider request only. Reserve enough time to validate/download a
-    # provider thumbnail, while giving the image index most of the hard budget.
-    photo_reserve = min(.9, max(.5, remaining * .25))
-    provider_budget = max(.15, remaining - photo_reserve)
-    connect_timeout = min(.65, provider_budget / 4)
+    params = {'engine': 'google_images_light', 'q': q, 'gl': country, 'hl': lang,
+              'nfpr': 1, 'api_key': SERPAPI_API_KEY, 'output': 'json'}
+    # Spend the available provider budget once. No fractional second-stage
+    # cutoff, no retry wave, and no deliberate wait after a fast response.
+    photo_reserve = min(1.5, remaining / 4)
+    provider_budget = remaining - photo_reserve
+    connect_timeout = min(1., provider_budget / 4)
     read_timeout = max(.05, provider_budget - connect_timeout)
     source_started = time.monotonic()
     data = _serpapi_cached_json(params, (connect_timeout, read_timeout),
@@ -22903,32 +22929,25 @@ def _text_lens_lookup(query, country, lang, specific, query_key, deadline):
             error = 'search_service_unavailable'
         return {'ok': False, 'error': error}
     candidates = _text_lens_candidates(data, q)
-    # Gemini title semantics are useful for diagnostics/edge languages but are
-    # deliberately off the latency-critical path by default. Lens will visually
-    # arbitrate the safe Google-ranked fallback candidates.
-    if not candidates and TEXT_LENS_SEMANTIC_TITLE_FALLBACK:
+    if not candidates:
         candidates = _text_lens_semantic_candidates(data, q, deadline)
     print(f'TEXT LENS SOURCE elapsed_ms={source_ms} rows={len(data.get("images_results") or [])}'
           f' matching_photos={len(candidates)} remaining_ms={int(max(0.,deadline-time.monotonic())*1000)}')
     if not candidates:
         return {'ok': False, 'error': 'reference_not_found'}
-    # Interleave by URL preference: provider thumbnails from several matching
-    # results start before any merchant originals. One blocked CDN therefore
-    # cannot consume the bridge deadline. Downloads do not spend search credits.
+    # Start the original and the SAME listing's thumbnail together. A blocked
+    # merchant image cannot hold up Google's already observed thumbnail. Use
+    # at most three downloads; another matched source can recover a bad image.
+    # This spends one image-search credit, never a credit for each download.
     download_candidates, seen_images = [], set()
-    preferred = candidates[:3]
-    for slot in range(max((len(c['urls']) for c in preferred), default=0)):
-        for candidate in preferred:
-            if slot >= len(candidate['urls']):
-                continue
-            url = candidate['urls'][slot]
-            if url in seen_images:
-                continue
-            download_candidates.append(dict(candidate, urls=[url]))
-            seen_images.add(url)
+    for candidate in candidates[:2]:
+        for url in candidate['urls']:
+            if url not in seen_images:
+                download_candidates.append(dict(candidate, urls=[url]))
+                seen_images.add(url)
     download_cancel = threading.Event()
     jobs = [_TEXT_LENS_DOWNLOAD_POOL.submit(_text_lens_download, candidate, deadline, download_cancel)
-            for candidate in download_candidates[:4]]
+            for candidate in download_candidates[:3]]
     try:
         pending = set(jobs)
         while pending and time.monotonic() < deadline:
@@ -22991,7 +23010,7 @@ async def _text_lens_prepare(query, country, lang, selected_option='', force_spe
     return dict(result, reference_lookup_ms=elapsed)
 
 
-async def _web_stream_text_lens(query, country, lang, selected_option='', request=None, force_specific=False, original_query=''):
+async def _web_stream_text_lens(query, country, lang, selected_option='', request=None, force_specific=False):
     yield _web_stream_event({'event': 'start', 'ok': True, 'source': 'text_lens'})
     yield _web_stream_event({'event': 'status', 'stage': 'finding_reference_image'})
     # Keep the same in-flight provider request alive and send progress while
@@ -23014,30 +23033,7 @@ async def _web_stream_text_lens(query, country, lang, selected_option='', reques
     if request is not None and await request.is_disconnected():
         return
     if not ref.get('ok'):
-        reason = ref.get('error') or 'reference_not_found'
-        # A missing reference photo must never turn a perfectly valid typed
-        # product search into an empty page. Fall back to the existing Google
-        # Light text offer path only after the single image request failed.
-        if TEXT_GOOGLE_WEB_ENABLED:
-            print(f'TEXT LENS FALLBACK reason={reason} -> google_web_products')
-            yield _web_stream_event({'event': 'status', 'stage': 'text_offer_fallback',
-                                     'reference_error': reason})
-            fallback = _web_stream_google_text(query, country, lang, selected_option, request,
-                                               original_query, force_specific)
-            try:
-                async for raw in fallback:
-                    event = json.loads(raw)
-                    if event.get('event') == 'start':
-                        continue  # text_lens already emitted the stream start.
-                    if event.get('event') == 'done':
-                        event['reference_error'] = reason
-                        event['reference_fallback'] = True
-                        raw = _web_stream_event(event)
-                    yield raw
-            finally:
-                await fallback.aclose()
-            return
-        yield _web_stream_event({'event': 'error', 'error': reason})
+        yield _web_stream_event({'event': 'error', 'error': ref.get('error') or 'reference_not_found'})
         return
     if ref.get('type') == 'generic':
         report = await asyncio.to_thread(_web_recommendations_response, ref['query'], lang, _web_market(country))
@@ -23055,25 +23051,171 @@ async def _web_stream_text_lens(query, country, lang, selected_option='', reques
         await stream.aclose()
 
 
-async def _web_text_lens_result(query, country, lang, selected_option='', force_specific=False, original_query=''):
+async def _web_text_lens_result(query, country, lang, selected_option='', force_specific=False):
     started = time.monotonic()
     ref = await _text_lens_prepare(query, country, lang, selected_option, force_specific)
     if not ref.get('ok'):
-        reason = ref.get('error') or 'reference_not_found'
-        if TEXT_GOOGLE_WEB_ENABLED:
-            print(f'TEXT LENS FALLBACK nonstream reason={reason} -> google_web_products')
-            fallback = await asyncio.to_thread(_web_google_text_search, query, country, lang,
-                                               selected_option, original_query, force_specific)
-            return dict(fallback, reference_error=reason, reference_fallback=True,
-                        reference_lookup_ms=ref.get('reference_lookup_ms'),
-                        elapsed_ms=int((time.monotonic()-started)*1000))
-        return {'ok': False, 'error': reason, 'reference_lookup_ms': ref.get('reference_lookup_ms')}
+        return {'ok': False, 'error': ref.get('error'), 'reference_lookup_ms': ref.get('reference_lookup_ms')}
     if ref.get('type') == 'generic':
         return await asyncio.to_thread(_web_recommendations_response, ref['query'], lang, _web_market(country))
     result = await _web_text_reference_result(ref, country, lang)
     return dict(result, image_reference=ref['reference'], source='text_lens',
                 reference_lookup_ms=ref['reference_lookup_ms'], reference_cache_hit=ref['cache_hit'],
                 elapsed_ms=int((time.monotonic()-started)*1000))
+
+# ---------------------------------------------------------------------------
+# v128.5.21 — FAST TEXT SEARCH
+# A typed brand/model query is an identity already; it does not need a photo
+# to be searched. Retrieval starts on the first byte of the request. The
+# reference-photo/Lens bridge (v128.5.19/20) stays installed for rollback and
+# for `image_reference` tokens still held by clients.
+TEXT_FAST_ENABLED = env_bool('TEXT_FAST_ENABLED', True)
+TEXT_FAST_TIMEOUT_SECONDS = max(3., min(15., float(os.environ.get('TEXT_FAST_TIMEOUT_SECONDS', '8'))))
+TEXT_FAST_PRICE_WAIT_SECONDS = max(.5, min(10., float(os.environ.get('TEXT_FAST_PRICE_WAIT_SECONDS', '3'))))
+TEXT_FAST_CLASSIFY_WAIT_SECONDS = max(.3, min(4., float(os.environ.get('TEXT_FAST_CLASSIFY_WAIT_SECONDS', '1.5'))))
+TEXT_FAST_STATUS_INTERVAL = .75
+print(f'TEXT FAST CONFIG enabled={TEXT_FAST_ENABLED} deadline={TEXT_FAST_TIMEOUT_SECONDS}s'
+      f' price_tail={TEXT_FAST_PRICE_WAIT_SECONDS}s classify_wait={TEXT_FAST_CLASSIFY_WAIT_SECONDS}s'
+      f' lanes=light+images_light+google(local,en/native)+us/cn light_lane={TEXT_DIRECT_LIGHT_LANE}'
+      f' images_engine={TEXT_DIRECT_IMAGES_ENGINE} immersive_local={TEXT_DIRECT_IMMERSIVE_LOCAL}'
+      ' photo_gate=False ai_gate=False')
+
+
+def _web_text_fast_prepare(query, country, lang, selected_option='', original_query='', force_specific=False):
+    """Decide the search wording without any network call for product queries.
+
+    Brand/model evidence, a confirmed comparison choice or force_specific goes
+    straight to retrieval. Only a bare category consults the (cached) planner,
+    and that call is bounded by the caller; a slow planner never blocks.
+    """
+    q = re.sub(r'\s+', ' ', str(selected_option or query or '')).strip()
+    base = {'ok': bool(q), 'query': q, 'market': _web_market(country), 'rtype': 'SPECIFIC', 'planner': 'none'}
+    if not q or len(q) > WEB_API_MAX_QUERY_CHARS:
+        return dict(base, ok=False, error='empty_query' if not q else 'query_too_long')
+    if selected_option:
+        # A comparison pick is a new, specific search; the label is already clean.
+        return dict(base, query=_recommendation_pick_search_query(original_query, q) or q)
+    if force_specific:
+        return base
+    if is_service_request(q):
+        return dict(base, rtype='SERVICE')
+    if _text_query_is_product(q):
+        return base
+    if ' '.join(_local_retrieval_text(q).split()) in _LOCAL_RETRIEVAL_NOUNS:
+        return dict(base, rtype='GENERIC', planner='bare-category')
+    planned = _shopping_query_ai(q, lang)  # cached 24h; bounded by SHOPPING_QUERY_AI_TIMEOUT
+    if not planned:
+        # Planner unavailable: search the typed words rather than fail the user.
+        return dict(base, planner='unavailable')
+    return dict(base, **planned, planner='ai')
+
+
+async def _web_stream_text_fast(query, country, lang, selected_option='', request=None,
+                                original_query='', force_specific=False):
+    started = time.monotonic()
+    yield _web_stream_event({'event': 'start', 'ok': True, 'source': 'text_fast', 'build': BUILD_ID})
+    q0 = re.sub(r'\s+', ' ', str(selected_option or query or '')).strip()
+    instant = bool(selected_option or force_specific or (q0 and _text_query_is_product(q0)))
+    if instant:
+        prep = _web_text_fast_prepare(query, country, lang, selected_option, original_query, force_specific)
+    else:
+        # Category-style wording: bounded planning, and translation warm-up in
+        # parallel so a GENERIC verdict is not the only thing this second buys.
+        yield _web_stream_event({'event': 'status', 'stage': 'preparing_query', 'elapsed_ms': 0})
+        plan = asyncio.create_task(asyncio.to_thread(
+            _web_text_fast_prepare, query, country, lang, selected_option, original_query, force_specific))
+        warm = asyncio.create_task(asyncio.to_thread(_market_query_warm, q0, [country, 'us']))
+        try:
+            prep = await asyncio.wait_for(asyncio.shield(plan), timeout=TEXT_FAST_CLASSIFY_WAIT_SECONDS)
+        except asyncio.TimeoutError:
+            # Search the typed words now; do not hold the user for a planner.
+            prep = {'ok': True, 'query': q0, 'market': _web_market(country), 'rtype': 'SPECIFIC', 'planner': 'timeout'}
+            plan.cancel()
+        except Exception as exc:
+            print(f'TEXT FAST PLANNER ERR {type(exc).__name__}')
+            prep = {'ok': True, 'query': q0, 'market': _web_market(country), 'rtype': 'SPECIFIC', 'planner': 'error'}
+        finally:
+            warm.cancel()
+            await asyncio.gather(warm, return_exceptions=True)
+    if request is not None and await request.is_disconnected():
+        return
+    if not prep.get('ok'):
+        yield _web_stream_event({'event': 'error', 'error': prep.get('error') or 'empty_query'})
+        return
+    q, market, rtype = prep['query'], prep['market'], prep.get('rtype') or 'SPECIFIC'
+    print(f'TEXT FAST PREP query={q!r} rtype={rtype} planner={prep.get("planner")} instant={instant}'
+          f' country={country} elapsed_ms={int((time.monotonic()-started)*1000)}')
+    if rtype in ('SERVICE', 'NONE'):
+        yield _web_stream_event({'event': 'error', 'error': 'not_a_product_query'})
+        return
+    yield _web_stream_event({'event': 'query', 'query': q, 'market': market, 'source': 'text_fast'})
+    if rtype == 'GENERIC':
+        task = asyncio.create_task(asyncio.to_thread(_web_recommendations_response, q, lang, market))
+        try:
+            while not task.done():
+                if request is not None and await request.is_disconnected():
+                    return
+                done, _ = await asyncio.wait({task}, timeout=TEXT_FAST_STATUS_INTERVAL)
+                if not done:
+                    yield _web_stream_event({'event': 'status', 'stage': 'brand_comparison',
+                                             'elapsed_ms': int((time.monotonic()-started)*1000)})
+            report = await task
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        yield _web_stream_event({'event': 'recommendations', 'data': report,
+                                 'elapsed_ms': int((time.monotonic()-started)*1000)})
+        yield _web_stream_event({'event': 'done', 'count': 0, 'source': 'text_fast',
+                                 'elapsed_ms': int((time.monotonic()-started)*1000)})
+        return
+    # Retrieval streams URL-keyed cards as each source returns; the live-price
+    # wrapper fills missing prices/images from merchant pages meanwhile. Both
+    # are bounded so `done` always arrives within deadline + price tail.
+    source = _web_stream_text_direct(q, country, lang, request, TEXT_FAST_TIMEOUT_SECONDS)
+    stream = _web_with_live_prices(source, lang, country, allow_paid=True,
+                                   wait_seconds=TEXT_FAST_PRICE_WAIT_SECONDS)
+    first_card = None
+    count = 0
+    try:
+        async for raw in stream:
+            event = json.loads(raw)
+            kind = event.get('event')
+            if kind == 'result':
+                count += 1
+                if first_card is None:
+                    first_card = int((time.monotonic()-started)*1000)
+                    print(f'TEXT FAST FIRST CARD ms={first_card} query={q!r} country={country}')
+            if kind == 'done':
+                event.update(source='text_fast', first_card_ms=first_card,
+                             elapsed_ms=int((time.monotonic()-started)*1000))
+                print(f'TEXT FAST DONE cards={count} first_card_ms={first_card}'
+                      f' elapsed_ms={event["elapsed_ms"]} partial={event.get("partial")} country={country}')
+                raw = _web_stream_event(event)
+            yield raw
+    finally:
+        await stream.aclose()
+
+
+async def _web_text_fast_result(query, country, lang, selected_option='', original_query='', force_specific=False):
+    """REST twin of the stream: same lanes, same bounds, one JSON card payload."""
+    started = time.monotonic()
+    final = {'ok': True, 'type': 'results', 'query': query, 'market': _web_market(country),
+             'results': [], 'source': 'text_fast'}
+    async for raw in _web_stream_text_fast(query, country, lang, selected_option, None, original_query, force_specific):
+        event = json.loads(raw)
+        kind = event.get('event')
+        if kind == 'error':
+            return {'ok': False, 'error': event.get('error') or 'search_failed',
+                    'elapsed_ms': int((time.monotonic()-started)*1000)}
+        if kind == 'recommendations':
+            return dict(event.get('data') or {}, elapsed_ms=int((time.monotonic()-started)*1000))
+        if kind == 'query':
+            final['query'] = event.get('query') or final['query']
+        if kind == 'done':
+            final.update({k: v for k, v in event.items() if k not in ('event',)})
+    final['elapsed_ms'] = int((time.monotonic()-started)*1000)
+    return _web_card_payload(final)
+
 
 @app.post('/api/search/stream')
 async def web_api_search_stream(request: Request):
@@ -23095,8 +23237,12 @@ async def web_api_search_stream(request: Request):
     force_specific = bool(payload.get('force_specific'))
     client_name = re.sub('[^a-z0-9_-]+', '', str(payload.get('client') or 'web').strip().lower())[:24] or 'web'
 
+    if TEXT_FAST_ENABLED:
+        return StreamingResponse(_web_stream_text_fast(query, country, lang, selected_option, request, original_query, force_specific),
+            media_type='application/x-ndjson',
+            headers={'Cache-Control':'no-cache, no-transform','X-Accel-Buffering':'no'})
     if TEXT_LENS_ENABLED:
-        return StreamingResponse(_web_stream_text_lens(query, country, lang, selected_option, request, force_specific, original_query),
+        return StreamingResponse(_web_stream_text_lens(query, country, lang, selected_option, request, force_specific),
             media_type='application/x-ndjson',
             headers={'Cache-Control':'no-cache, no-transform','X-Accel-Buffering':'no'})
     if TEXT_GOOGLE_WEB_ENABLED:
@@ -24568,8 +24714,10 @@ async def web_api_search(request: Request):
     original_query = str(payload.get('original_query') or '').strip()
     force_specific = bool(payload.get('force_specific'))
     started = time.time()
+    if TEXT_FAST_ENABLED:
+        return await _web_text_fast_result(query, country, lang, selected_option, original_query, force_specific)
     if TEXT_LENS_ENABLED:
-        return await _web_text_lens_result(query, country, lang, selected_option, force_specific, original_query)
+        return await _web_text_lens_result(query, country, lang, selected_option, force_specific)
     if TEXT_GOOGLE_WEB_ENABLED:
         result = await asyncio.to_thread(_web_google_text_search, query, country, lang, selected_option, original_query, force_specific)
     elif TEXT_SHOPPING_COPY_ENABLED:
@@ -24623,7 +24771,7 @@ async def web_api_image_search(request: Request):
 
 @app.get('/')
 async def health():
-    return {'status': BUILD_ID, 'text_lens_enabled': TEXT_LENS_ENABLED, 'text_reference_budget_seconds': TEXT_LENS_REFERENCE_SECONDS, 'text_reference_target_seconds': TEXT_LENS_REFERENCE_TARGET_SECONDS, 'text_lens_results_seconds': TEXT_LENS_RESULTS_SECONDS, 'text_identity_policy': 'typed_model_with_retrieved_photo', 'lens_direct_mode': LENS_DIRECT_MODE, 'fast_lens': USE_FAST_LENS_PIPELINE, 'v106_pipeline': USE_V106_5_RESULT_PIPELINE, 'text_search_whatsapp_parity': TEXT_SEARCH_WHATSAPP_PARITY, 'serpapi_cache': SERPAPI_RESULT_CACHE_ENABLED, 'serpapi_singleflight': SERPAPI_SINGLEFLIGHT_ENABLED, 'ai_result_classifier': WEB_AI_CLASSIFIER_ENABLED, 'ai_classifier_timeout_seconds': WEB_AI_CLASSIFIER_TIMEOUT_SECONDS, 'visual_result_classifier': WEB_VISUAL_CLASSIFIER_ENABLED, 'visual_classifier_timeout_seconds': WEB_VISUAL_CLASSIFIER_TIMEOUT_SECONDS, 'visual_classifier_max_results': WEB_VISUAL_CLASSIFIER_MAX_RESULTS, 'visual_exact_score': WEB_VISUAL_CLASSIFIER_EXACT_SCORE, 'visual_exact_policy': 'view_invariant_product_identity', 'identity_stream_batches': True, 'identity_batch_size': WEB_IDENTITY_BATCH_SIZE, 'identity_batch_parallel': WEB_IDENTITY_BATCH_PARALLEL, 'identity_first_batch': WEB_IDENTITY_FIRST_BATCH, 'result_caps': {'local': WEB_LOCAL_MAX, 'us': WEB_US_MAX, 'china': WEB_CN_MAX, 'total': LENS_DIRECT_MAX_CTA}, 'identity_match_policy': 'identifiers_text_function_structure_no_capture_or_condition_penalty', 'match_score_version': _WEB_MATCH_SCORE_VERSION, 'build': BUILD_ID, 'market_source': 'phone_prefix_or_explicit_client_country', 'languages': ['ar','en','de','fr','it','es','pt','tr','ru','ja','zh','ko','hi','ur','id','ms']}
+    return {'status': BUILD_ID, 'text_route': 'text_fast' if TEXT_FAST_ENABLED else ('text_lens' if TEXT_LENS_ENABLED else 'legacy'), 'text_fast_enabled': TEXT_FAST_ENABLED, 'text_fast_deadline_seconds': TEXT_FAST_TIMEOUT_SECONDS, 'text_fast_price_tail_seconds': TEXT_FAST_PRICE_WAIT_SECONDS, 'text_fast_images_engine': TEXT_DIRECT_IMAGES_ENGINE, 'text_fast_light_lane': TEXT_DIRECT_LIGHT_LANE, 'text_lens_enabled': TEXT_LENS_ENABLED, 'text_reference_budget_seconds': TEXT_LENS_REFERENCE_SECONDS, 'text_reference_target_seconds': TEXT_LENS_REFERENCE_TARGET_SECONDS, 'text_lens_results_seconds': TEXT_LENS_RESULTS_SECONDS, 'text_identity_policy': 'typed_model_with_retrieved_photo', 'lens_direct_mode': LENS_DIRECT_MODE, 'fast_lens': USE_FAST_LENS_PIPELINE, 'v106_pipeline': USE_V106_5_RESULT_PIPELINE, 'text_search_whatsapp_parity': TEXT_SEARCH_WHATSAPP_PARITY, 'serpapi_cache': SERPAPI_RESULT_CACHE_ENABLED, 'serpapi_singleflight': SERPAPI_SINGLEFLIGHT_ENABLED, 'ai_result_classifier': WEB_AI_CLASSIFIER_ENABLED, 'ai_classifier_timeout_seconds': WEB_AI_CLASSIFIER_TIMEOUT_SECONDS, 'visual_result_classifier': WEB_VISUAL_CLASSIFIER_ENABLED, 'visual_classifier_timeout_seconds': WEB_VISUAL_CLASSIFIER_TIMEOUT_SECONDS, 'visual_classifier_max_results': WEB_VISUAL_CLASSIFIER_MAX_RESULTS, 'visual_exact_score': WEB_VISUAL_CLASSIFIER_EXACT_SCORE, 'visual_exact_policy': 'view_invariant_product_identity', 'identity_stream_batches': True, 'identity_batch_size': WEB_IDENTITY_BATCH_SIZE, 'identity_batch_parallel': WEB_IDENTITY_BATCH_PARALLEL, 'identity_first_batch': WEB_IDENTITY_FIRST_BATCH, 'result_caps': {'local': WEB_LOCAL_MAX, 'us': WEB_US_MAX, 'china': WEB_CN_MAX, 'total': LENS_DIRECT_MAX_CTA}, 'identity_match_policy': 'identifiers_text_function_structure_no_capture_or_condition_penalty', 'match_score_version': _WEB_MATCH_SCORE_VERSION, 'build': BUILD_ID, 'market_source': 'phone_prefix_or_explicit_client_country', 'languages': ['ar','en','de','fr','it','es','pt','tr','ru','ja','zh','ko','hi','ur','id','ms']}
 
 
 # Optional authenticated account API; all search-provider behavior is retained.
