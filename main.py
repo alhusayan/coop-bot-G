@@ -1,8 +1,8 @@
-# v128.5.15 — Fix premature 6.5s provider timeout; stream observed product offers.
-# Install as main.py; keep the current Liquid and iOS app.
-# Defaults: provider read limit 18s, total retrieval limit 24s; finish immediately
-# when work completes, and stream ready cards without waiting for other stores.
-# Indexed product offers keep their observed prices and unknown stock remains unknown.
+# v128.5.16 — Google Light organic search; on-demand ratings; complete-offer cache.
+# Install as main.py with Findzia_v149_3_lazy_ratings.liquid.
+# Google Light: 6s read limit / 12s retrieval limit, not guaranteed response times.
+# Overrides: TEXT_GOOGLE_LIGHT_READ_SECONDS / TEXT_GOOGLE_LIGHT_TOTAL_SECONDS.
+# Products must retain observed identity, price, image and direct merchant URL.
 # v128.5.14 — Google WEB product offers, enabled by default.
 # Text + selected models + more stores use engine=google (ordinary results).
 # Merchant sale price, image and identity must be observed before publication.
@@ -328,7 +328,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization'], max_age=86400)
-BUILD_ID = 'v128.5.15-google-web-recovery'
+BUILD_ID = 'v128.5.16-google-light'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -1425,12 +1425,25 @@ def _serpapi_cached_json(params, timeout, label='SERPAPI', *, return_error=False
     error_info = None
     attempts = 0
 
-    def failure(reason, status=0):
+    def failure(reason, status=0, data=None):
         nonlocal error_info
         error_info = {'reason':reason, 'http_status':int(status), 'attempts':attempts,
                       'elapsed_ms':int((time.monotonic()-started)*1000)}
         print(f'SERPAPI FAILURE engine={engine} label={label} reason={reason} http={status}'
               f' attempts={attempts} elapsed_ms={error_info["elapsed_ms"]} key={key[:10]}')
+        if isinstance(data, dict):
+            # Error details belong in server logs only. Never log the request
+            # parameters, API key, a URL query string, or multiline content.
+            message = str(data.get('error') or '')
+            for secret in (str((params or {}).get('api_key') or ''), str(SERPAPI_API_KEY or '')):
+                if secret:
+                    message = message.replace(secret, '[redacted]')
+            message = re.sub(r'https?://\S+', '[url]', message)
+            message = re.sub(r'(?i)api[_ -]?key\s*[:=]\s*\S+', 'api_key=[redacted]', message)
+            message = re.sub(r'\s+', ' ', message)[:200]
+            search_id = str((data.get('search_metadata') or {}).get('id') or '')
+            search_id = search_id if re.fullmatch(r'[a-fA-F0-9]{16,64}', search_id) else ''
+            print(f'SERPAPI DETAIL reason={reason} search_id={search_id} message={message!r}')
         return {'error':'serpapi_request_failed','_serpapi_failure':dict(error_info)} if return_error else None
 
     def error_reason(data, status):
@@ -1517,11 +1530,18 @@ def _serpapi_cached_json(params, timeout, label='SERPAPI', *, return_error=False
         except (ValueError,TypeError):
             return failure(error_reason({},response.status_code) if response.status_code >= 400 else 'invalid_response',response.status_code)
         if response.status_code >= 400:
-            return failure(error_reason(data,response.status_code),response.status_code)
+            return failure(error_reason(data,response.status_code),response.status_code,data)
         if not isinstance(data,dict):
             return failure('invalid_response',response.status_code)
         if data.get('error'):
-            return failure(error_reason(data,response.status_code),response.status_code)
+            empty_messages = {"google hasn't returned any results for this query.",
+                              "google hasn't returned any results for this query"}
+            message = str(data.get('error') or '').strip().casefold()
+            if engine in ('google', 'google_light') and message in empty_messages:
+                data = dict(data, organic_results=[], _serpapi_empty_results=True)
+                data.pop('error', None)
+            else:
+                return failure(error_reason(data,response.status_code),response.status_code,data)
         billable_success, result = True, data
         if not bypass:
             _serpapi_cache_put(key,engine,data)
@@ -1536,6 +1556,11 @@ def _serpapi_cached_json(params, timeout, label='SERPAPI', *, return_error=False
         print(f'{label} EXCEPTION: {type(exc).__name__}')
         return failure('internal')
     finally:
+        if 'response' in locals() and response is not None:
+            try:
+                response.close()
+            except Exception:
+                pass
         if budget_reserved:
             _serpapi_budget_finish(billable_success)
         if SERPAPI_SINGLEFLIGHT_ENABLED and leader and event is not None:
@@ -12476,8 +12501,61 @@ def _web_validated_outbound_url(raw_url):
     except Exception:
         return ''
 
+from urllib3.connection import HTTPConnection as _WebHTTPConnection, HTTPSConnection as _WebHTTPSConnection
+from urllib3.connectionpool import HTTPConnectionPool as _WebHTTPPool, HTTPSConnectionPool as _WebHTTPSPool
+
+
+class _WebPublicConnectionMixin:
+    def _new_conn(self):
+        # Check the connected IP before any HTTP request bytes are sent. Some
+        # zero-length redirects release/close their socket before Response is
+        # returned, so checking only Response.raw loses this evidence.
+        sock = super()._new_conn()
+        try:
+            peer = ipaddress.ip_address(str(sock.getpeername()[0]).split('%',1)[0])
+            peer = getattr(peer,'ipv4_mapped',None) or peer
+            if not peer.is_global:
+                raise ValueError('unsafe_connected_peer')
+        except Exception:
+            sock.close()
+            raise ValueError('unsafe_connected_peer') from None
+        return sock
+
+
+class _WebPublicHTTPConnection(_WebPublicConnectionMixin, _WebHTTPConnection):
+    pass
+
+
+class _WebPublicHTTPSConnection(_WebPublicConnectionMixin, _WebHTTPSConnection):
+    pass
+
+
+class _WebPublicHTTPPool(_WebHTTPPool):
+    ConnectionCls = _WebPublicHTTPConnection
+
+
+class _WebPublicHTTPSPool(_WebHTTPSPool):
+    ConnectionCls = _WebPublicHTTPSConnection
+
+
+class _WebPublicAdapter(requests.adapters.HTTPAdapter):
+    def init_poolmanager(self, connections, maxsize, block=False, **kwargs):
+        super().init_poolmanager(connections,maxsize,block=block,**kwargs)
+        # Per-adapter assignment; never mutate urllib3's shared global pools.
+        self.poolmanager.pool_classes_by_scheme = {
+            'http':_WebPublicHTTPPool,'https':_WebPublicHTTPSPool}
+
+    def send(self, request, **kwargs):
+        response = super().send(request,**kwargs)
+        pool = getattr(response.raw,'_pool',None)
+        response._findzia_peer_verified = isinstance(pool,(_WebPublicHTTPPool,_WebPublicHTTPSPool))
+        return response
+
+
 def _web_response_peer_is_public(response):
     """Validate a streamed peer even after urllib3 releases its connection."""
+    if getattr(response,'_findzia_peer_verified',False) is True:
+        return True
     paths = (('raw', '_connection', 'sock'), ('raw', 'connection', 'sock'),
              ('raw', '_fp', 'fp', 'raw', '_sock'), ('raw', '_fp', 'fp', '_sock'))
     observed = False
@@ -12524,6 +12602,8 @@ def _web_safe_get(raw_url, *, headers=None, timeout=(2.0, 8.0), stream=True, max
         raise ValueError('unsafe_outbound_url')
     session = requests.Session()
     session.trust_env = False
+    session.mount('https://',_WebPublicAdapter())
+    session.mount('http://',_WebPublicAdapter())
     response = None
     try:
         for hop in range(max_redirects + 1):
@@ -15960,6 +16040,10 @@ def _store_reputation_from_search(data,domain):
         is_google=p.hostname in ('www.google.com','google.com') and p.path.startswith('/shopping/ratings/') and urllib.parse.parse_qs(p.query).get('q')==[domain]
         if not is_trustpilot and not is_google:
             continue
+        rating = _card_rating(row.get('rating'),row.get('reviews'),
+                             'Trustpilot' if is_trustpilot else 'Google',url,'store')
+        if rating:
+            return dict(rating,domain=domain)
         for side in ('top','bottom'):
             rich=row.get('rich_snippet')
             block=rich.get(side) if isinstance(rich,dict) else None
@@ -15987,8 +16071,8 @@ def _store_reputation_lookup(domain,country):
     rating=None
     if SERPAPI_API_KEY and STORE_REPUTATION_ENABLED:
         # Exact review profile URL, not a similarly named branch or product.
-        data=_serpapi_cached_json({'engine':'google','q':f'site:trustpilot.com/review/ "{domain}"',
-              'gl':country,'hl':'en','num':5,'api_key':SERPAPI_API_KEY},timeout=(1.5,4.5),label='STORE REPUTATION') or {}
+        data=_serpapi_cached_json({'engine':'google_light','q':f'site:trustpilot.com/review/ "{domain}"',
+              'gl':country,'hl':'en','api_key':SERPAPI_API_KEY},timeout=(1.5,4.5),label='STORE REPUTATION') or {}
         rating=_store_reputation_from_search(data,domain)
         _serpapi_cache_put(cache_key,'google',{'domain':domain,'rating':rating},86400 if rating else 3600)
     with _STORE_REPUTATION_LOCK:
@@ -16013,6 +16097,13 @@ async def _store_reputation_response(request):
         return JSONResponse({'ok':False,'error':'invalid_request'},status_code=400)
     async def lookup(pair):
         domain,country=pair
+        if body.get('intent') != 'details' or len(tokens) != 1:
+            # Old clients used to crawl every merchant after every search.
+            # Serve already-known data; external lookup requires an opened card.
+            with _STORE_REPUTATION_LOCK:
+                entry = _STORE_REPUTATION_CACHE.get(domain+'|'+country)
+                value = copy.deepcopy(entry[1]) if entry and entry[0] > time.time() else None
+            return {'domain':domain,'rating':value,'deferred':True}
         try:
             value=await asyncio.wait_for(asyncio.wrap_future(_STORE_REPUTATION_POOL.submit(_store_reputation_lookup,domain,country)),timeout=7)
         except Exception:
@@ -20278,19 +20369,19 @@ async def _web_stream_shopping_copy(query, country, lang, selected_option='', re
         await asyncio.gather(task,return_exceptions=True)
 
 
-# v128.5.15 — keep slow provider responses and publish complete indexed offers.
+# v128.5.16 — lighter ordinary Google retrieval, never Google Shopping.
 # Organic schema: https://serpapi.com/organic-results
 # Search parameters: https://serpapi.com/search-api
 # No Shopping, Images, immersive-product expansion or click-time resolution.
 TEXT_GOOGLE_WEB_ENABLED = env_bool('TEXT_GOOGLE_WEB_ENABLED', True)
-TEXT_GOOGLE_WEB_SECONDS = max(4., min(30., float(os.environ.get('TEXT_GOOGLE_WEB_SECONDS', '24'))))
-TEXT_GOOGLE_WEB_READ_SECONDS = max(2., min(24., float(os.environ.get('TEXT_GOOGLE_WEB_READ_SECONDS', '18'))))
+TEXT_GOOGLE_WEB_SECONDS = max(4., min(20., float(os.environ.get('TEXT_GOOGLE_LIGHT_TOTAL_SECONDS', '12'))))
+TEXT_GOOGLE_WEB_READ_SECONDS = max(2., min(12., float(os.environ.get('TEXT_GOOGLE_LIGHT_READ_SECONDS', '6'))))
 _GOOGLE_WEB_SEARCH_POOL = ThreadPoolExecutor(max_workers=12, thread_name_prefix='google-web')
 _GOOGLE_WEB_PAGE_POOL = ThreadPoolExecutor(max_workers=12, thread_name_prefix='google-offers')
 _GOOGLE_WEB_PAGE_CACHE = {}
 _GOOGLE_WEB_PAGE_LOCK = threading.Lock()
-print(f'GOOGLE WEB CONFIG total_limit={TEXT_GOOGLE_WEB_SECONDS}s read_limit={TEXT_GOOGLE_WEB_READ_SECONDS}s'
-      ' incremental=True indexed_prices=True shopping=False')
+print(f'GOOGLE WEB CONFIG engine=google_light total_limit={TEXT_GOOGLE_WEB_SECONDS}s read_limit={TEXT_GOOGLE_WEB_READ_SECONDS}s'
+      ' incremental=True indexed_prices=True shopping=False ratings=on_demand')
 
 
 def _google_web_product_url(value):
@@ -20355,19 +20446,26 @@ def _google_web_fetch(query, spec, excluded_domains, deadline, cancel):
     buy = {'ar': 'شراء', 'zh': '购买', 'fr': 'acheter', 'de': 'kaufen', 'en': 'buy'}
     params['q'] += ' ' + buy.get(spec['hl'], 'buy')
     params['q'] += ''.join(' -site:' + host for host in sorted(excluded_domains)[:20])
-    params.update(engine='google', nfpr=1, num=10,
+    params.pop('num', None)  # Not a documented Google Light parameter.
+    params.update(engine='google_light', nfpr=1,
                   json_restrictor='search_metadata,search_parameters,search_information,organic_results,error')
-    # The old min(8, remaining)-connect timeout killed every response at 6.5s.
-    # This is an upper bound, never a sleep or a barrier for already-ready cards.
-    # Keep a short page-verification window inside the coordinator's deadline.
+    # This engine retrieves the lighter Google results page. No slow-engine
+    # retry or Shopping fallback; leave time for actual merchant product pages.
     remaining = deadline - time.monotonic()
     if cancel.is_set() or remaining <= .1:
         return {'error': 'expired'}
     reserve = min(3., remaining/5)
     connect = min(2., remaining/5)
     read = min(TEXT_GOOGLE_WEB_READ_SECONDS, max(.05, remaining-connect-reserve))
-    return _serpapi_cached_json(params, timeout=(connect, read),
+    data = _serpapi_cached_json(params, timeout=(connect, read),
         label=f'GOOGLE WEB {spec["role"]}/{spec["country"]}/{spec["hl"]}', return_error=True)
+    if isinstance(data, dict) and not data.get('error'):
+        metadata = data.get('search_metadata') or {}
+        elapsed = metadata.get('total_time_taken')
+        elapsed = elapsed if isinstance(elapsed, (int, float)) else None
+        print(f'GOOGLE WEB SOURCE engine=google_light role={spec["role"]} country={spec["country"]}'
+              f' rows={len(data.get("organic_results") or [])} provider_seconds={elapsed}')
+    return data
 
 
 def _google_web_stock(raw):
@@ -20418,6 +20516,16 @@ def _google_web_candidates(data, query, spec, diagnostics=None):
                         if isinstance(block.get('extensions'), list) else [],
                     'detected_extensions': block.get('detected_extensions')
                         if isinstance(block.get('detected_extensions'), dict) else {}}
+        # Google Light uses top-level extensions/rating/reviews; regular Google
+        # uses rich_snippet.bottom. Normalize only the same observed listing.
+        extensions = raw.get('extensions')
+        if isinstance(extensions, list):
+            block = row['rich_snippet'].setdefault('bottom', {'extensions':[], 'detected_extensions':{}})
+            block['extensions'] += [v for v in extensions if isinstance(v, str)]
+        if any(isinstance(raw.get(k), (int, float)) for k in ('rating','reviews')):
+            block = row['rich_snippet'].setdefault('bottom', {'extensions':[], 'detected_extensions':{}})
+            block['detected_extensions'].update({k:raw[k] for k in ('rating','reviews')
+                                                 if isinstance(raw.get(k), (int,float))})
         # gl is retrieval context only. It never proves the merchant's market.
         row.update(url=url, link=url, raw_title=title, provider_order=position,
                    _price_market=spec['country'] if spec['role']=='local' else 'us',
@@ -20505,6 +20613,12 @@ def _google_web_ready(raw, query, spec, display_country, page=None, diagnostics=
         if _findzia_hard_product_mismatch(raw['title'], title):
             return reject('page_product_mismatch')
         quote = _web_quote_from_fields(page)
+        if not quote:
+            # The exact product page can supply the missing photograph while
+            # Google supplies its explicit listing price. Do not claim that
+            # this indexed price was verified on the page.
+            quote = _web_indexed_offer_quote(raw)
+            verified = False
         row.update(url=page['url'], link=page['url'], title=title, raw_title=title,
                    availability=page.get('availability') or raw.get('availability') or '',
                    **{k: page[k] for k in ('card_attributes','card_model','card_brand','condition','product_rating') if k in page})
@@ -20567,6 +20681,23 @@ def _google_web_products(query, country, lang, progress=None, cancel_event=None,
     deadline = began + TEXT_GOOGLE_WEB_SECONDS
     market = dict(_web_market(country), _query=query)
     excluded_urls, excluded_domains = _google_web_exclusions(shown_urls, shown_domains)
+    cache_key = 'google-light-offers-v16:' + hashlib.sha256(
+        json.dumps([query.strip().casefold(),country,lang],ensure_ascii=False).encode()).hexdigest()
+    cacheable = not excluded_urls and not excluded_domains
+    cached = _serpapi_cache_get(cache_key) if cacheable and not cancel.is_set() else None
+    if (isinstance(cached,dict) and cached.get('ok') and cached.get('results')
+            and cached.get('source')=='google_web_products'
+            and 0 <= time.time()-float(cached.get('_offers_cached_at') or 0) < (30 if cached.get('partial') else 300)):
+        cached = copy.deepcopy(cached)
+        cached.pop('_offers_cached_at',None)
+        cached.update(cache_hit=True,elapsed_ms=int((time.monotonic()-began)*1000),first_result_ms=0)
+        if progress:
+            for row in cached['results']:
+                if cancel.is_set():
+                    return dict(ok=False,error='cancelled',results=[])
+                progress({'event':'result','item':row,'phase':'google_web_products','market':row['market']})
+        print(f'GOOGLE WEB CACHE country={country} rows={len(cached["results"])}')
+        return cached
     jobs, rows, seen, page_urls = {}, {}, set(), set()
     counts, pages_by_host, diagnostics = Counter(), Counter(), Counter()
     source_ok, failures, first_ms, skipped_pages = 0, [], None, 0
@@ -20665,6 +20796,8 @@ def _google_web_products(query, country, lang, progress=None, cancel_event=None,
         print(f'GOOGLE WEB FINAL country={country} sources={source_ok} rows={len(result_rows)}'
               f' pages={sum(pages_by_host.values())} partial={partial} first_ms={first_ms} elapsed_ms={result["elapsed_ms"]}'
               f' diagnostics={dict(diagnostics)}')
+        if cacheable and result_rows and result.get('ok') and not cancel.is_set():
+            _serpapi_cache_put(cache_key,'google_light_offers',dict(result,_offers_cached_at=time.time()),30 if partial else 300)
         return result
     finally:
         cancel.set()
