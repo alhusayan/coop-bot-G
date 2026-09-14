@@ -1,4 +1,4 @@
-# v128.5.18: text -> observed product photo -> unchanged photo/Lens pipeline.
+# v128.5.19: realistic reference deadline; one request, streaming progress, unchanged Lens.
 # TEXT_LENS_ENABLED=true overrides earlier text experiment flags for web API.
 # v128.5.16 — Google Light organic search; on-demand ratings; complete-offer cache.
 # Install as main.py with Findzia_v149_3_lazy_ratings.liquid.
@@ -330,7 +330,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization'], max_age=86400)
-BUILD_ID = 'v128.5.18-text-lens'
+BUILD_ID = 'v128.5.19-reference-recovery'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -361,7 +361,7 @@ MARKET_CTX = threading.local()
 DEFAULT_COUNTRY = os.environ.get('DEFAULT_COUNTRY', 'kw').strip().lower() or 'kw'
 PENDING_IMAGES = defaultdict(lambda: {'images': [], 'bot_id': ''})
 IMAGE_BUFFER_IDLE_SECONDS = max(0.35, float(os.environ.get('IMAGE_BUFFER_IDLE_SECONDS', '0.6')))
-IMAGE_BUFFER_MAX_WAIT_SECONDS = max(IMAGE_BUFFER_IDLE_SECONDS, float(os.environ.get('IMAGE_BUFFER_MAX_WAIT_SECONDS', '4')))
+IMAGE_BUFFER_MAX_WAIT_SECONDS = max(IMAGE_BUFFER_IDLE_SECONDS, float(os.environ.get('IMAGE_BUFFER_MAX_WAIT_SECONDS', '1.5')))
 GEMINI_SEARCH_TIMEOUT_SECONDS = max(15, int(os.environ.get('GEMINI_SEARCH_TIMEOUT_SECONDS', '28')))
 GEMINI_PLAIN_TIMEOUT_SECONDS = max(8, int(os.environ.get('GEMINI_PLAIN_TIMEOUT_SECONDS', '22')))
 SERPAPI_TIMEOUT_SECONDS = max(8, int(os.environ.get('SERPAPI_TIMEOUT_SECONDS', '13')))
@@ -490,10 +490,10 @@ LENS_HTTP_TIMEOUT_SECONDS = max(6, int(os.environ.get('LENS_HTTP_TIMEOUT_SECONDS
 LENS_TOTAL_TIMEOUT_SECONDS = max(8, int(os.environ.get('LENS_TOTAL_TIMEOUT_SECONDS', '12')))
 LENS_TURBO_MAX_WAIT_SECONDS = max(2.5, min(6.0, float(os.environ.get('LENS_TURBO_MAX_WAIT_SECONDS', '4.5'))))
 LENS_TURBO_EMPTY_GRACE_SECONDS = max(1.0, min(5.0, float(os.environ.get('LENS_TURBO_EMPTY_GRACE_SECONDS', '3.5'))))
-LENS_TURBO_SPARSE_GRACE_SECONDS = max(0.5, min(2.5, float(os.environ.get('LENS_TURBO_SPARSE_GRACE_SECONDS', '3'))))
+LENS_TURBO_SPARSE_GRACE_SECONDS = max(0.5, min(2.5, float(os.environ.get('LENS_TURBO_SPARSE_GRACE_SECONDS', '1.5'))))
 LENS_TURBO_STRONG_RESULT_TARGET = max(5, min(24, int(os.environ.get('LENS_TURBO_STRONG_RESULT_TARGET', str(LENS_DIRECT_MAX_CTA)))))
 LENS_LOCAL_LANE_TARGET = max(1, min(LENS_DIRECT_LOCAL_MAX or 1, int(os.environ.get('LENS_LOCAL_LANE_TARGET', str(LENS_DIRECT_LOCAL_MAX or 1)))))
-LENS_LOCAL_LANE_GRACE_SECONDS = max(3, min(5.0, float(os.environ.get('LENS_LOCAL_LANE_GRACE_SECONDS', '3.5'))))
+LENS_LOCAL_LANE_GRACE_SECONDS = max(1.5, min(5.0, float(os.environ.get('LENS_LOCAL_LANE_GRACE_SECONDS', '3.5'))))
 LENS_LOCAL_RESCUE_AFTER_SECONDS = max(1.0, min(LENS_TURBO_MAX_WAIT_SECONDS, float(os.environ.get('LENS_LOCAL_RESCUE_AFTER_SECONDS', '2.5'))))
 LENS_LOCAL_LANE_RESCUE = env_bool('LENS_LOCAL_LANE_RESCUE', True)
 LENS_IMAGE_TTL = max(120, int(os.environ.get('LENS_IMAGE_TTL_SECONDS', '600')))
@@ -22312,7 +22312,14 @@ async def web_api_search_more_stream(request: Request):
 # Text input supplies only a reference photo. All offer retrieval, visual
 # classification, market lanes and price handling remain in the upload pipeline.
 TEXT_LENS_ENABLED = env_bool('TEXT_LENS_ENABLED', True)
-TEXT_LENS_REFERENCE_SECONDS = max(1., min(6., float(os.environ.get('TEXT_LENS_REFERENCE_SECONDS', '3'))))
+# A latency goal must not become a destructive socket timeout. The previous
+# (3 - .7) * .65 calculation aborted healthy provider replies at ~1.5 seconds.
+# Retain the legacy variable as a UI timing target; the actual deadline is
+# explicit and independently configurable. Fast replies return immediately.
+TEXT_LENS_REFERENCE_TARGET_SECONDS = max(.5, min(3., float(os.environ.get('TEXT_LENS_REFERENCE_SECONDS', '2'))))
+TEXT_LENS_REFERENCE_SECONDS = max(4., min(20., float(os.environ.get('TEXT_LENS_REFERENCE_HARD_SECONDS', '10'))))
+print(f'TEXT LENS CONFIG target={TEXT_LENS_REFERENCE_TARGET_SECONDS}s hard_limit={TEXT_LENS_REFERENCE_SECONDS}s '
+      'provider_requests=1 late_reply=continue photo_cache=7d')
 TEXT_LENS_REFERENCE_TTL = 7 * 86400
 TEXT_LENS_REFERENCE_MAX_BYTES = 512 * 1024
 _TEXT_LENS_REFERENCES = {}
@@ -22415,61 +22422,89 @@ def _text_lens_candidates(data, query):
     return sorted(candidates, key=lambda row: not row['product'])[:3]
 
 
-def _text_lens_download(candidate, deadline):
+def _text_lens_download(candidate, deadline, cancel_event=None):
     if PILImage is None:
         return None
+    def stopped():
+        return time.monotonic() >= deadline or (cancel_event is not None and cancel_event.is_set())
     for index, url in enumerate(candidate['urls']):
         remaining = deadline - time.monotonic()
-        if remaining < .1:
+        if stopped() or remaining < .1:
             break
-        response = None
+        response, reason, status = None, 'unavailable', 0
+        host = urllib.parse.urlsplit(url).hostname or ''
         try:
-            # Leave time for the same listing's thumbnail if the original is
-            # large or inaccessible. Existing DNS, peer and redirect guards apply.
-            budget = remaining * (.55 if index == 0 and len(candidate['urls']) > 1 else .9)
+            # Per-image I/O has a short, explicit budget inside the overall
+            # deadline. Parallel thumbnail/original jobs do not wait for each
+            # other's headers. Existing public-DNS/peer/redirect guards apply.
+            budget = min(2., remaining - .05)
+            if index == 0 and len(candidate['urls']) > 1:
+                budget = min(budget, remaining / 2)
+            connect = min(.5, budget / 3)
             response = _web_safe_get(url, headers={**HEADERS, 'Accept': 'image/*'},
-                                     timeout=(min(.35, budget / 3), max(.05, budget * .65)), stream=True)
-            if response.status_code != 200:
+                                     timeout=(connect, max(.05, budget-connect)), stream=True)
+            status = response.status_code
+            if status != 200:
+                reason = 'http_status'
+                continue
+            if stopped():
+                return None
+            try:
+                declared = int(response.headers.get('content-length') or 0)
+            except (TypeError, ValueError):
+                declared = 0
+            if declared > TEXT_LENS_REFERENCE_MAX_BYTES:
+                reason = 'image_too_large'
                 continue
             parts, size = [], 0
             for chunk in response.iter_content(16384):
-                if time.monotonic() >= deadline:
+                if stopped():
                     return None
                 size += len(chunk)
                 if size > TEXT_LENS_REFERENCE_MAX_BYTES:
                     break
                 parts.append(chunk)
             if not size or size > TEXT_LENS_REFERENCE_MAX_BYTES:
+                reason = 'image_too_large' if size else 'empty_image'
                 continue
             raw = b''.join(parts)
-            # Decode/verify actual bytes; never trust a .jpg suffix or MIME alone.
+            # Preserve the validated original bytes; this is exactly what the
+            # upload pipeline receives, without re-encoding or generating pixels.
             with PILImage.open(io.BytesIO(raw)) as picture:
                 width, height = picture.size
                 mime = {'JPEG': 'image/jpeg', 'PNG': 'image/png', 'WEBP': 'image/webp'}.get(picture.format)
                 if not mime or min(width, height) < 100 or width * height > 16000000:
+                    reason = 'unsupported_image'
                     continue
                 picture.verify()
             with PILImage.open(io.BytesIO(raw)) as picture:
                 picture.load()
             raw, mime = _web_normalize_uploaded_image_bytes(raw, mime)
-            if time.monotonic() >= deadline:
+            if stopped():
                 return None
+            reason = 'ready'
             return {'image_base64': base64.b64encode(raw).decode('ascii'), 'mime_type': mime,
                     'title': candidate['title'], 'source_page': candidate['source_page'],
                     'source_image': url, 'width': width, 'height': height}
+        except requests.exceptions.Timeout:
+            reason = 'image_timeout'
+        except ValueError as exc:
+            reason = 'unsafe_image_url' if str(exc).startswith('unsafe_') else 'invalid_image'
         except Exception:
-            # An unavailable or invalid reference does not authorize broadening.
-            continue
+            reason = 'invalid_or_unavailable_image'
         finally:
             _web_safe_response_close(response)
+            if not (cancel_event is not None and cancel_event.is_set()):
+                print(f'TEXT LENS PHOTO host={host} http={status} status={reason}')
     return None
-
 
 def _text_lens_lookup(query, country, lang, specific, query_key, deadline):
     began = time.monotonic()
     hit = _text_lens_cache(query_key=query_key)
     if hit:
         return dict(hit, ok=True, cache_hit=True, reference_lookup_ms=int((time.monotonic()-began)*1000))
+    if time.monotonic() >= deadline:
+        return {'ok': False, 'error': 'reference_timeout'}
     q = query
     if is_service_request(q):
         return {'ok': False, 'error': 'not_a_product_query'}
@@ -22489,10 +22524,16 @@ def _text_lens_lookup(query, country, lang, specific, query_key, deadline):
         return {'ok': False, 'error': 'search_service_unavailable'}
     params = {'engine': 'google_images_light', 'q': q, 'gl': country, 'hl': lang,
               'nfpr': 1, 'api_key': SERPAPI_API_KEY, 'output': 'json'}
-    # One provider request, reserving part of the wall-clock budget for bytes.
-    budget = max(.1, remaining - .7)
-    data = _serpapi_cached_json(params, (min(.4, budget/3), budget*.65),
+    # Spend the available provider budget once. No fractional second-stage
+    # cutoff, no retry wave, and no deliberate wait after a fast response.
+    photo_reserve = min(1.5, remaining / 4)
+    provider_budget = remaining - photo_reserve
+    connect_timeout = min(1., provider_budget / 4)
+    read_timeout = max(.05, provider_budget - connect_timeout)
+    source_started = time.monotonic()
+    data = _serpapi_cached_json(params, (connect_timeout, read_timeout),
                               label='TEXT LENS REFERENCE', return_error=True) or {}
+    source_ms = int((time.monotonic()-source_started)*1000)
     if time.monotonic() >= deadline:
         return {'ok': False, 'error': 'reference_timeout'}
     if data.get('error'):
@@ -22502,11 +22543,23 @@ def _text_lens_lookup(query, country, lang, specific, query_key, deadline):
             error = 'search_service_unavailable'
         return {'ok': False, 'error': error}
     candidates = _text_lens_candidates(data, q)
+    print(f'TEXT LENS SOURCE elapsed_ms={source_ms} rows={len(data.get("images_results") or [])}'
+          f' matching_photos={len(candidates)} remaining_ms={int(max(0.,deadline-time.monotonic())*1000)}')
     if not candidates:
         return {'ok': False, 'error': 'reference_not_found'}
-    # Two matching sources may race; no extra paid source search is made.
-    jobs = [_TEXT_LENS_DOWNLOAD_POOL.submit(_text_lens_download, candidate, deadline)
-            for candidate in candidates[:2]]
+    # Start the original and the SAME listing's thumbnail together. A blocked
+    # merchant image cannot hold up Google's already observed thumbnail. Use
+    # at most three downloads; another matched source can recover a bad image.
+    # This spends one image-search credit, never a credit for each download.
+    download_candidates, seen_images = [], set()
+    for candidate in candidates[:2]:
+        for url in candidate['urls']:
+            if url not in seen_images:
+                download_candidates.append(dict(candidate, urls=[url]))
+                seen_images.add(url)
+    download_cancel = threading.Event()
+    jobs = [_TEXT_LENS_DOWNLOAD_POOL.submit(_text_lens_download, candidate, deadline, download_cancel)
+            for candidate in download_candidates[:3]]
     try:
         pending = set(jobs)
         while pending and time.monotonic() < deadline:
@@ -22520,6 +22573,7 @@ def _text_lens_lookup(query, country, lang, specific, query_key, deadline):
                     _text_lens_cache(save=ref)
                     return ref
     finally:
+        download_cancel.set()
         for job in jobs:
             job.cancel()
     return {'ok': False, 'error': 'reference_timeout' if time.monotonic() >= deadline else 'reference_not_found'}
@@ -22570,7 +22624,23 @@ async def _text_lens_prepare(query, country, lang, selected_option='', force_spe
 async def _web_stream_text_lens(query, country, lang, selected_option='', request=None, force_specific=False):
     yield _web_stream_event({'event': 'start', 'ok': True, 'source': 'text_lens'})
     yield _web_stream_event({'event': 'status', 'stage': 'finding_reference_image'})
-    ref = await _text_lens_prepare(query, country, lang, selected_option, force_specific)
+    # Keep the same in-flight provider request alive and send progress while
+    # it completes. Crossing the speed target is not a failed/empty search.
+    preparation = asyncio.create_task(_text_lens_prepare(query, country, lang, selected_option, force_specific))
+    began = time.monotonic()
+    try:
+        while not preparation.done():
+            if request is not None and await request.is_disconnected():
+                return
+            done, _ = await asyncio.wait({preparation}, timeout=.75)
+            if not done:
+                yield _web_stream_event({'event': 'heartbeat', 'stage': 'finding_reference_image',
+                                        'elapsed_ms': int((time.monotonic()-began)*1000)})
+        ref = await preparation
+    finally:
+        if not preparation.done():
+            preparation.cancel()
+        await asyncio.gather(preparation, return_exceptions=True)
     if request is not None and await request.is_disconnected():
         return
     if not ref.get('ok'):
@@ -24152,7 +24222,7 @@ async def web_api_image_search(request: Request):
 
 @app.get('/')
 async def health():
-    return {'status': BUILD_ID, 'text_lens_enabled': TEXT_LENS_ENABLED, 'text_reference_budget_seconds': TEXT_LENS_REFERENCE_SECONDS, 'lens_direct_mode': LENS_DIRECT_MODE, 'fast_lens': USE_FAST_LENS_PIPELINE, 'v106_pipeline': USE_V106_5_RESULT_PIPELINE, 'text_search_whatsapp_parity': TEXT_SEARCH_WHATSAPP_PARITY, 'serpapi_cache': SERPAPI_RESULT_CACHE_ENABLED, 'serpapi_singleflight': SERPAPI_SINGLEFLIGHT_ENABLED, 'ai_result_classifier': WEB_AI_CLASSIFIER_ENABLED, 'ai_classifier_timeout_seconds': WEB_AI_CLASSIFIER_TIMEOUT_SECONDS, 'visual_result_classifier': WEB_VISUAL_CLASSIFIER_ENABLED, 'visual_classifier_timeout_seconds': WEB_VISUAL_CLASSIFIER_TIMEOUT_SECONDS, 'visual_classifier_max_results': WEB_VISUAL_CLASSIFIER_MAX_RESULTS, 'visual_exact_score': WEB_VISUAL_CLASSIFIER_EXACT_SCORE, 'visual_exact_policy': 'view_invariant_product_identity', 'identity_stream_batches': True, 'identity_batch_size': WEB_IDENTITY_BATCH_SIZE, 'identity_batch_parallel': WEB_IDENTITY_BATCH_PARALLEL, 'identity_first_batch': WEB_IDENTITY_FIRST_BATCH, 'result_caps': {'local': WEB_LOCAL_MAX, 'us': WEB_US_MAX, 'china': WEB_CN_MAX, 'total': LENS_DIRECT_MAX_CTA}, 'identity_match_policy': 'identifiers_text_function_structure_no_capture_or_condition_penalty', 'match_score_version': _WEB_MATCH_SCORE_VERSION, 'build': BUILD_ID, 'market_source': 'phone_prefix_or_explicit_client_country', 'languages': ['ar','en','de','fr','it','es','pt','tr','ru','ja','zh','ko','hi','ur','id','ms']}
+    return {'status': BUILD_ID, 'text_lens_enabled': TEXT_LENS_ENABLED, 'text_reference_budget_seconds': TEXT_LENS_REFERENCE_SECONDS, 'text_reference_target_seconds': TEXT_LENS_REFERENCE_TARGET_SECONDS, 'lens_direct_mode': LENS_DIRECT_MODE, 'fast_lens': USE_FAST_LENS_PIPELINE, 'v106_pipeline': USE_V106_5_RESULT_PIPELINE, 'text_search_whatsapp_parity': TEXT_SEARCH_WHATSAPP_PARITY, 'serpapi_cache': SERPAPI_RESULT_CACHE_ENABLED, 'serpapi_singleflight': SERPAPI_SINGLEFLIGHT_ENABLED, 'ai_result_classifier': WEB_AI_CLASSIFIER_ENABLED, 'ai_classifier_timeout_seconds': WEB_AI_CLASSIFIER_TIMEOUT_SECONDS, 'visual_result_classifier': WEB_VISUAL_CLASSIFIER_ENABLED, 'visual_classifier_timeout_seconds': WEB_VISUAL_CLASSIFIER_TIMEOUT_SECONDS, 'visual_classifier_max_results': WEB_VISUAL_CLASSIFIER_MAX_RESULTS, 'visual_exact_score': WEB_VISUAL_CLASSIFIER_EXACT_SCORE, 'visual_exact_policy': 'view_invariant_product_identity', 'identity_stream_batches': True, 'identity_batch_size': WEB_IDENTITY_BATCH_SIZE, 'identity_batch_parallel': WEB_IDENTITY_BATCH_PARALLEL, 'identity_first_batch': WEB_IDENTITY_FIRST_BATCH, 'result_caps': {'local': WEB_LOCAL_MAX, 'us': WEB_US_MAX, 'china': WEB_CN_MAX, 'total': LENS_DIRECT_MAX_CTA}, 'identity_match_policy': 'identifiers_text_function_structure_no_capture_or_condition_penalty', 'match_score_version': _WEB_MATCH_SCORE_VERSION, 'build': BUILD_ID, 'market_source': 'phone_prefix_or_explicit_client_country', 'languages': ['ar','en','de','fr','it','es','pt','tr','ru','ja','zh','ko','hi','ur','id','ms']}
 
 
 # Optional authenticated account API; all search-provider behavior is retained.
