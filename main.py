@@ -1,3 +1,4 @@
+# v128.5.21: fast text-to-photo bridge; reliable provider thumbnails, fail-fast fallback, unchanged photo Lens.
 # v128.5.19: realistic reference deadline; one request, streaming progress, unchanged Lens.
 # TEXT_LENS_ENABLED=true overrides earlier text experiment flags for web API.
 # v128.5.16 — Google Light organic search; on-demand ratings; complete-offer cache.
@@ -330,7 +331,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization'], max_age=86400)
-BUILD_ID = 'v128.5.20-text-identity'
+BUILD_ID = 'v128.5.21-text-photo-fast'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -22379,13 +22380,18 @@ TEXT_LENS_ENABLED = env_bool('TEXT_LENS_ENABLED', True)
 # (3 - .7) * .65 calculation aborted healthy provider replies at ~1.5 seconds.
 # Retain the legacy variable as a UI timing target; the actual deadline is
 # explicit and independently configurable. Fast replies return immediately.
-TEXT_LENS_REFERENCE_TARGET_SECONDS = max(.5, min(3., float(os.environ.get('TEXT_LENS_REFERENCE_SECONDS', '2'))))
-TEXT_LENS_REFERENCE_SECONDS = max(4., min(20., float(os.environ.get('TEXT_LENS_REFERENCE_HARD_SECONDS', '10'))))
+TEXT_LENS_REFERENCE_TARGET_SECONDS = max(.5, min(2.5, float(os.environ.get('TEXT_LENS_REFERENCE_SECONDS', '1.5'))))
+# Text->photo is only a bridge into the existing Lens pipeline. It must never
+# become the longest stage of the search. Google Images Light is normally fast;
+# four seconds is a hard escape hatch, not a target response time.
+TEXT_LENS_REFERENCE_SECONDS = max(2.5, min(4., float(os.environ.get('TEXT_LENS_REFERENCE_HARD_SECONDS', '4'))))
+TEXT_LENS_SEMANTIC_TITLE_FALLBACK = env_bool('TEXT_LENS_SEMANTIC_TITLE_FALLBACK', False)
 print(f'TEXT LENS CONFIG target={TEXT_LENS_REFERENCE_TARGET_SECONDS}s hard_limit={TEXT_LENS_REFERENCE_SECONDS}s '
-      'provider_requests=1 late_reply=continue photo_cache=7d')
+      f'provider_requests=1 semantic_title={TEXT_LENS_SEMANTIC_TITLE_FALLBACK} photo_cache=7d')
 TEXT_LENS_RESULTS_SECONDS = max(8., min(20., float(os.environ.get('TEXT_LENS_RESULTS_SECONDS', '10'))))
 TEXT_LENS_REFERENCE_TTL = 7 * 86400
-TEXT_LENS_REFERENCE_MAX_BYTES = 512 * 1024
+TEXT_LENS_REFERENCE_MAX_BYTES = max(256 * 1024, min(2 * 1024 * 1024,
+    int(os.environ.get('TEXT_LENS_REFERENCE_MAX_BYTES', str(1536 * 1024)))))
 _TEXT_LENS_REFERENCES = {}
 _TEXT_LENS_INFLIGHT = {}
 _TEXT_LENS_LOCK = threading.Lock()
@@ -22498,42 +22504,80 @@ def _text_lens_title_match(query, title):
 
 
 def _text_lens_image_record(raw):
-    if not isinstance(raw, dict):
+    if not isinstance(raw, dict) or raw.get('unsafe') is True:
         return None
     title, page = str(raw.get('title') or '').strip(), str(raw.get('link') or '').strip()
     if not title or not _web_is_http_url(page):
         return None
     if re.search(r'\b(?:logo|icon|wallpaper|drawing|illustration|clipart|ai.generated)\b', title, re.I):
         return None
+    # Google Images Light exposes a SerpApi-hosted thumbnail in addition to the
+    # Google thumbnail and the merchant/CDN original. The proxy thumbnail is the
+    # best fast-path because it is already provider-observed and is far less
+    # likely to reject a datacenter request than a merchant CDN. Original stays
+    # last as a quality fallback, never as the first thing the user waits for.
     urls = []
-    for name in ('original', 'thumbnail'):
+    for name in ('serpapi_thumbnail', 'thumbnail', 'original'):
         url = str(raw.get(name) or '').strip()
         if (_web_is_http_url(url) and url not in urls and url != page
                 and not re.search(r'\.(?:html?|pdf)(?:[?#]|$)', url, re.I)):
             urls.append(url)
     return {'title': title[:500], 'source_page': page, 'urls': urls,
+            'position': int(raw.get('position') or 999),
             'product': raw.get('is_product') is True} if urls else None
 
 
 def _text_lens_candidates(data, query):
-    candidates, rejected = [], defaultdict(int)
-    # The provider returns up to 100 observations. Inspecting their metadata
-    # is local work; arbitrarily discarding everything after #30 bought nothing.
+    """Choose a reference photo without turning title wording into a bottleneck.
+
+    Strict title identity is preferred. If Google ranked an image for the exact
+    typed query but its title merely omits some wording, it may still seed Lens
+    provided there is no explicit model/spec/accessory conflict. This fallback
+    is reference evidence only; the downstream text-constrained Lens filter
+    still decides which merchant offers are eligible for publication.
+    """
+    strict, ranked, rejected = [], [], defaultdict(int)
+    qcodes = _shopping_identity_codes(query)
+    hard_conflicts = {
+        'different_model_code', 'different_model_tier', 'different_model_suffix',
+        'different_requested_specification', 'accessory_or_service',
+        'different_product_kind', 'different_audience',
+    }
     for raw in (data.get('images_results') or [])[:100]:
         candidate = _text_lens_image_record(raw)
         if not candidate:
             rejected['invalid_image_record'] += 1
             continue
         compact, reason = _text_lens_title_match(query, candidate['title'])
-        if reason:
-            rejected[reason] += 1
+        if not reason:
+            strict.append(dict(candidate, matched_query=compact, match_evidence='title'))
+            if len(strict) >= 3:
+                break
             continue
-        candidates.append(dict(candidate, matched_query=compact, match_evidence='title'))
-        if len(candidates) >= 6 and sum(c['product'] for c in candidates) >= 3:
-            break
-    print('TEXT LENS TITLE GATE ' + json.dumps({'accepted': len(candidates),
+        rejected[reason] += 1
+        if reason in hard_conflicts:
+            continue
+        # The relaxed path is intentionally narrow: Google Images ranking may
+        # compensate for an abbreviated/translated title, but never for a
+        # contradictory model code or a known factual conflict.
+        tcodes = _shopping_identity_codes(candidate['title'])
+        if qcodes and tcodes and not (qcodes & tcodes):
+            rejected['ranked_different_code'] += 1
+            continue
+        if _web_identity_fact_conflicts(query, candidate['title']):
+            rejected['ranked_fact_conflict'] += 1
+            continue
+        if reason == 'product_identity_not_found' and (candidate['product'] or candidate['position'] <= 8):
+            ranked.append(dict(candidate, matched_query=query, match_evidence='google_images_rank'))
+            if len(ranked) >= 3:
+                # Keep scanning only until strict matches appear; otherwise the
+                # first high-ranked safe images are enough to seed Lens.
+                continue
+    chosen = strict[:3] if strict else ranked[:3]
+    print('TEXT LENS TITLE GATE ' + json.dumps({'accepted': len(chosen),
+          'strict': len(strict), 'ranked_fallback': 0 if strict else len(chosen),
           'rejected': dict(rejected)}, separators=(',', ':')))
-    return sorted(candidates, key=lambda row: not row['product'])[:3]
+    return chosen
 
 
 def _text_lens_semantic_candidates(data, query, deadline):
@@ -22751,10 +22795,10 @@ def _text_lens_download(candidate, deadline, cancel_event=None):
             # Per-image I/O has a short, explicit budget inside the overall
             # deadline. Parallel thumbnail/original jobs do not wait for each
             # other's headers. Existing public-DNS/peer/redirect guards apply.
-            budget = min(2., remaining - .05)
+            budget = min(1.35, remaining - .05)
             if index == 0 and len(candidate['urls']) > 1:
                 budget = min(budget, remaining / 2)
-            connect = min(.5, budget / 3)
+            connect = min(.35, budget / 3)
             response = _web_safe_get(url, headers={**HEADERS, 'Accept': 'image/*'},
                                      timeout=(connect, max(.05, budget-connect)), stream=True)
             status = response.status_code
@@ -22787,7 +22831,7 @@ def _text_lens_download(candidate, deadline, cancel_event=None):
             with PILImage.open(io.BytesIO(raw)) as picture:
                 width, height = picture.size
                 mime = {'JPEG': 'image/jpeg', 'PNG': 'image/png', 'WEBP': 'image/webp'}.get(picture.format)
-                if not mime or min(width, height) < 100 or width * height > 16000000:
+                if not mime or min(width, height) < 72 or width * height > 16000000:
                     reason = 'unsupported_image'
                     continue
                 picture.verify()
@@ -22837,13 +22881,14 @@ def _text_lens_lookup(query, country, lang, specific, query_key, deadline):
         return {'ok': False, 'error': 'reference_timeout'}
     if not SERPAPI_API_KEY:
         return {'ok': False, 'error': 'search_service_unavailable'}
-    params = {'engine': 'google_images_light', 'q': q, 'gl': country, 'hl': lang,
-              'nfpr': 1, 'api_key': SERPAPI_API_KEY, 'output': 'json'}
-    # Spend the available provider budget once. No fractional second-stage
-    # cutoff, no retry wave, and no deliberate wait after a fast response.
-    photo_reserve = min(1.5, remaining / 4)
-    provider_budget = remaining - photo_reserve
-    connect_timeout = min(1., provider_budget / 4)
+    search_hl = 'en' if q.isascii() else (country_search_hl(country) or lang or 'en')
+    params = {'engine': 'google_images_light', 'q': q, 'gl': country, 'hl': search_hl,
+              'nfpr': 1, 'device': 'desktop', 'api_key': SERPAPI_API_KEY, 'output': 'json'}
+    # One provider request only. Reserve enough time to validate/download a
+    # provider thumbnail, while giving the image index most of the hard budget.
+    photo_reserve = min(.9, max(.5, remaining * .25))
+    provider_budget = max(.15, remaining - photo_reserve)
+    connect_timeout = min(.65, provider_budget / 4)
     read_timeout = max(.05, provider_budget - connect_timeout)
     source_started = time.monotonic()
     data = _serpapi_cached_json(params, (connect_timeout, read_timeout),
@@ -22858,25 +22903,32 @@ def _text_lens_lookup(query, country, lang, specific, query_key, deadline):
             error = 'search_service_unavailable'
         return {'ok': False, 'error': error}
     candidates = _text_lens_candidates(data, q)
-    if not candidates:
+    # Gemini title semantics are useful for diagnostics/edge languages but are
+    # deliberately off the latency-critical path by default. Lens will visually
+    # arbitrate the safe Google-ranked fallback candidates.
+    if not candidates and TEXT_LENS_SEMANTIC_TITLE_FALLBACK:
         candidates = _text_lens_semantic_candidates(data, q, deadline)
     print(f'TEXT LENS SOURCE elapsed_ms={source_ms} rows={len(data.get("images_results") or [])}'
           f' matching_photos={len(candidates)} remaining_ms={int(max(0.,deadline-time.monotonic())*1000)}')
     if not candidates:
         return {'ok': False, 'error': 'reference_not_found'}
-    # Start the original and the SAME listing's thumbnail together. A blocked
-    # merchant image cannot hold up Google's already observed thumbnail. Use
-    # at most three downloads; another matched source can recover a bad image.
-    # This spends one image-search credit, never a credit for each download.
+    # Interleave by URL preference: provider thumbnails from several matching
+    # results start before any merchant originals. One blocked CDN therefore
+    # cannot consume the bridge deadline. Downloads do not spend search credits.
     download_candidates, seen_images = [], set()
-    for candidate in candidates[:2]:
-        for url in candidate['urls']:
-            if url not in seen_images:
-                download_candidates.append(dict(candidate, urls=[url]))
-                seen_images.add(url)
+    preferred = candidates[:3]
+    for slot in range(max((len(c['urls']) for c in preferred), default=0)):
+        for candidate in preferred:
+            if slot >= len(candidate['urls']):
+                continue
+            url = candidate['urls'][slot]
+            if url in seen_images:
+                continue
+            download_candidates.append(dict(candidate, urls=[url]))
+            seen_images.add(url)
     download_cancel = threading.Event()
     jobs = [_TEXT_LENS_DOWNLOAD_POOL.submit(_text_lens_download, candidate, deadline, download_cancel)
-            for candidate in download_candidates[:3]]
+            for candidate in download_candidates[:4]]
     try:
         pending = set(jobs)
         while pending and time.monotonic() < deadline:
@@ -22939,7 +22991,7 @@ async def _text_lens_prepare(query, country, lang, selected_option='', force_spe
     return dict(result, reference_lookup_ms=elapsed)
 
 
-async def _web_stream_text_lens(query, country, lang, selected_option='', request=None, force_specific=False):
+async def _web_stream_text_lens(query, country, lang, selected_option='', request=None, force_specific=False, original_query=''):
     yield _web_stream_event({'event': 'start', 'ok': True, 'source': 'text_lens'})
     yield _web_stream_event({'event': 'status', 'stage': 'finding_reference_image'})
     # Keep the same in-flight provider request alive and send progress while
@@ -22962,7 +23014,30 @@ async def _web_stream_text_lens(query, country, lang, selected_option='', reques
     if request is not None and await request.is_disconnected():
         return
     if not ref.get('ok'):
-        yield _web_stream_event({'event': 'error', 'error': ref.get('error') or 'reference_not_found'})
+        reason = ref.get('error') or 'reference_not_found'
+        # A missing reference photo must never turn a perfectly valid typed
+        # product search into an empty page. Fall back to the existing Google
+        # Light text offer path only after the single image request failed.
+        if TEXT_GOOGLE_WEB_ENABLED:
+            print(f'TEXT LENS FALLBACK reason={reason} -> google_web_products')
+            yield _web_stream_event({'event': 'status', 'stage': 'text_offer_fallback',
+                                     'reference_error': reason})
+            fallback = _web_stream_google_text(query, country, lang, selected_option, request,
+                                               original_query, force_specific)
+            try:
+                async for raw in fallback:
+                    event = json.loads(raw)
+                    if event.get('event') == 'start':
+                        continue  # text_lens already emitted the stream start.
+                    if event.get('event') == 'done':
+                        event['reference_error'] = reason
+                        event['reference_fallback'] = True
+                        raw = _web_stream_event(event)
+                    yield raw
+            finally:
+                await fallback.aclose()
+            return
+        yield _web_stream_event({'event': 'error', 'error': reason})
         return
     if ref.get('type') == 'generic':
         report = await asyncio.to_thread(_web_recommendations_response, ref['query'], lang, _web_market(country))
@@ -22980,11 +23055,19 @@ async def _web_stream_text_lens(query, country, lang, selected_option='', reques
         await stream.aclose()
 
 
-async def _web_text_lens_result(query, country, lang, selected_option='', force_specific=False):
+async def _web_text_lens_result(query, country, lang, selected_option='', force_specific=False, original_query=''):
     started = time.monotonic()
     ref = await _text_lens_prepare(query, country, lang, selected_option, force_specific)
     if not ref.get('ok'):
-        return {'ok': False, 'error': ref.get('error'), 'reference_lookup_ms': ref.get('reference_lookup_ms')}
+        reason = ref.get('error') or 'reference_not_found'
+        if TEXT_GOOGLE_WEB_ENABLED:
+            print(f'TEXT LENS FALLBACK nonstream reason={reason} -> google_web_products')
+            fallback = await asyncio.to_thread(_web_google_text_search, query, country, lang,
+                                               selected_option, original_query, force_specific)
+            return dict(fallback, reference_error=reason, reference_fallback=True,
+                        reference_lookup_ms=ref.get('reference_lookup_ms'),
+                        elapsed_ms=int((time.monotonic()-started)*1000))
+        return {'ok': False, 'error': reason, 'reference_lookup_ms': ref.get('reference_lookup_ms')}
     if ref.get('type') == 'generic':
         return await asyncio.to_thread(_web_recommendations_response, ref['query'], lang, _web_market(country))
     result = await _web_text_reference_result(ref, country, lang)
@@ -23013,7 +23096,7 @@ async def web_api_search_stream(request: Request):
     client_name = re.sub('[^a-z0-9_-]+', '', str(payload.get('client') or 'web').strip().lower())[:24] or 'web'
 
     if TEXT_LENS_ENABLED:
-        return StreamingResponse(_web_stream_text_lens(query, country, lang, selected_option, request, force_specific),
+        return StreamingResponse(_web_stream_text_lens(query, country, lang, selected_option, request, force_specific, original_query),
             media_type='application/x-ndjson',
             headers={'Cache-Control':'no-cache, no-transform','X-Accel-Buffering':'no'})
     if TEXT_GOOGLE_WEB_ENABLED:
@@ -24486,7 +24569,7 @@ async def web_api_search(request: Request):
     force_specific = bool(payload.get('force_specific'))
     started = time.time()
     if TEXT_LENS_ENABLED:
-        return await _web_text_lens_result(query, country, lang, selected_option, force_specific)
+        return await _web_text_lens_result(query, country, lang, selected_option, force_specific, original_query)
     if TEXT_GOOGLE_WEB_ENABLED:
         result = await asyncio.to_thread(_web_google_text_search, query, country, lang, selected_option, original_query, force_specific)
     elif TEXT_SHOPPING_COPY_ENABLED:
