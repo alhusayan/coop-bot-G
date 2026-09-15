@@ -1,3 +1,8 @@
+# v128.5.32: global markets (approved US + China catalogs) get the same three Serper lanes as
+# the local market — Google Shopping (gl=us, direct merchant links + USD prices), Google
+# Images scoped to the catalogs (product pages with photos, the old google_images role) and
+# scoped organic search — instead of one organic lane. Shopping units price catalog rows
+# through a per-market ledger (USD accepted for the US/China catalogs).
 # v128.5.31: a local-market card whose price turns out to be in a foreign currency (INR on a
 # Kuwait card) is removed instead of shown; foreign currency symbols/codes and other-country
 # words in the indexed title/snippet block the geo-targeting evidence; merchant-page images
@@ -381,7 +386,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization'], max_age=86400)
-BUILD_ID = 'v128.5.31-text-fast'
+BUILD_ID = 'v128.5.32-text-fast'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -4886,10 +4891,11 @@ def _shopping_unit_price_for(row, market):
             continue  # same store, different model
         score = max(_findzia_match_score(unit['title'], title), _findzia_match_score(title, unit['title']))
         if (row_models & unit_models) or score >= 0.6:
-            quote = _web_price_quote(unit['price'], '', cc)
+            price_cc = 'us' if market.get('_retrieval_role') == 'global' else cc
+            quote = _web_price_quote(unit['price'], '', price_cc)
             if quote and quote.get('kind') == 'exact' and (quote.get('min') or quote.get('max')):
-                local_codes = set(country_currency_codes(cc))
-                if not quote.get('currency') or quote['currency'] in local_codes:
+                allowed = set(country_currency_codes(cc)) | (set(country_currency_codes('us')) if price_cc == 'us' else set())
+                if not quote.get('currency') or quote['currency'] in allowed:
                     return unit['price']
     return ''
 
@@ -4899,6 +4905,7 @@ def _shopping_unit_fill(rows, market):
     if not market.get('_shopping_units'):
         return []
     cc = str(market.get('country') or DEFAULT_COUNTRY).lower()
+    price_cc = 'us' if market.get('_retrieval_role') == 'global' else cc
     changed = []
     for row in rows:
         if not isinstance(row, dict) or _web_row_has_numeric_price(row):
@@ -4906,7 +4913,7 @@ def _shopping_unit_fill(rows, market):
         piece = _shopping_unit_price_for(row, market)
         if not piece:
             continue
-        quote = _web_price_quote(piece, '', cc)
+        quote = _web_price_quote(piece, '', price_cc)
         if not quote:
             continue
         row.update(price=_web_format_quote(quote), price_value=(quote['min'] or quote['max']), currency=quote['currency'] or row.get('currency') or '',
@@ -4920,8 +4927,7 @@ def _shopping_unit_fill(rows, market):
 
 def _local_discovery_rows(data, query, market, provider):
     records = _local_discovery_records(data)
-    if market.get('_retrieval_role') != 'global':
-        _shopping_unit_ledger_add(market, records, provider)
+    _shopping_unit_ledger_add(market, records, provider)
     token = _GUARD_BATCH_DF.set(_findzia_batch_term_frequencies(
         [_local_discovery_title(row) for row in records if isinstance(row, dict)]))
     try:
@@ -4977,7 +4983,7 @@ def _local_discovery_rows_inner(records, query, market, provider):
                 item['price'] = piece
                 row = dict(row, price=piece)
                 stats['snippet_price'] += 1
-        if not item['price'] and market.get('_retrieval_role') != 'global':
+        if not item['price']:
             # The market's Google shopping unit for this merchant + product.
             piece = _shopping_unit_price_for(item, market)
             if piece:
@@ -20201,12 +20207,20 @@ def _web_text_direct_specs(query, country):
         if native != 'en' and native in ('ar',):
             add(country, 'local', f'{provider}_search', native)
     if serper_primary():
-        # Approved US/CN catalogs through Serper (site: operators need a paid
-        # Serper plan; a plan that rejects them falls back to SerpApi below).
-        if _fast_provider_supports_operators('serper'):
-            for cc in DEFAULT_GLOBAL_COUNTRIES:
-                if cc != country and cc in GLOBAL_MARKET_STORES:
-                    add(cc, 'global', 'serper_search', 'en')
+        # Approved US/CN catalogs through Serper: Google Shopping (gl=us, real
+        # merchant links + USD prices), catalog-scoped Google Images (product
+        # pages with photos) and catalog-scoped organic search. site: operators
+        # need a paid Serper plan; a plan that rejects them falls back to SerpApi.
+        operators = _fast_provider_supports_operators('serper')
+        for cc in DEFAULT_GLOBAL_COUNTRIES:
+            if cc == country or cc not in GLOBAL_MARKET_STORES:
+                continue
+            if FAST_PROVIDER_SHOPPING:
+                add(cc, 'global', 'serper_shopping', 'en')
+            if operators:
+                add(cc, 'global', 'serper_search', 'en')
+                if FAST_PROVIDER_IMAGES:
+                    add(cc, 'global', 'serper_images', 'en')
         return specs
     if TEXT_DIRECT_LIGHT_LANE:
         add(country, 'local', 'google_light', 'en', True)
@@ -20259,9 +20273,11 @@ def _web_text_direct_params(query, spec, page_token=''):
         _market_query_wait(query, hl, TEXT_DIRECT_TRANSLATION_WAIT)
     record = _market_query_cached(query, hl) or _market_query_static(query, hl)
     wording = str(record.get('query') or query).strip()
-    if role == 'global':
+    if role == 'global' and engine != 'serper_shopping':
         domains = ' OR '.join('site:' + domain for _, domain in GLOBAL_MARKET_STORES[country])
         wording = f'{wording} ({domains})'
+    elif role == 'global':
+        pass  # Google Shopping has no site: operator; the catalog filter selects rows.
     elif engine in ('google', 'google_light', 'google_images', 'google_images_light') or engine.startswith(('serper_', 'cse_')):
         if spec.get('geo_cue'):
             wording = f'{wording} {COUNTRY_NAMES.get(country, country.upper())}'
@@ -20394,10 +20410,11 @@ def _web_text_direct_search(query, country, lang, progress_callback=None, cancel
     extended = False
     market = dict(_web_market(country), _query=query,
                   global_countries=[c for c in DEFAULT_GLOBAL_COUNTRIES if c != country])
-    # One price ledger for the whole search: every lane's target shares the
-    # same list object, so a shopping unit seen by one lane prices another's row.
-    shopping_units = []
-    market['_shopping_units'] = shopping_units
+    # One price ledger per market: every lane's target for that market shares
+    # the same list object, so a shopping unit seen by one lane prices another's row.
+    ledgers = {country: []}
+    ledger_targets = {}
+    market['_shopping_units'] = ledgers[country]
     jobs, rows, counts, merchant_counts = {}, {}, Counter(), Counter()
     expanded = set()
     expansions = Counter()
@@ -20420,8 +20437,8 @@ def _web_text_direct_search(query, country, lang, progress_callback=None, cancel
         target = dict(_web_market(spec['country']))
         if spec['role'] == 'global':
             target['_retrieval_role'] = 'global'
-        if spec['country'] == country:
-            target['_shopping_units'] = shopping_units
+        target['_shopping_units'] = ledgers.setdefault(spec['country'], [])
+        ledger_targets.setdefault(spec['country'], target)
         future = TEXT_DIRECT_POOL.submit(_run_with_market, target,
             _web_text_direct_fetch, query, spec, deadline, cancel, token)
         jobs[future] = (spec, target, token, thumbnail)
@@ -20535,8 +20552,9 @@ def _web_text_direct_search(query, country, lang, progress_callback=None, cancel
                     counts[cc] += 1
                     merchant_counts[(cc, host)] += 1
                     changed = True
-                if _shopping_unit_fill(list(rows.values()), market):
-                    changed = True
+                for ledger_cc, ledger_target in list(ledger_targets.items()):
+                    if _shopping_unit_fill([r for r in rows.values() if r.get('country') == ledger_cc], ledger_target):
+                        changed = True
                 if changed:
                     if first_ms is None:
                         first_ms = int((time.monotonic()-started)*1000)
