@@ -1,3 +1,9 @@
+# v128.5.29: provider policy. SEARCH_PROVIDER_PRIMARY=serper (default once SERPER_API_KEY is
+# set) runs text search, the Lens local rescue and the approved catalogs on Serper only;
+# SerpApi search lanes launch only as a bounded backup when the primary lanes fail or
+# return fewer than SERPAPI_BACKUP_MIN_ROWS cards. Google Lens itself stays on SerpApi.
+# SerpApi-only price/media recovery calls are off while Serper is primary. Serper
+# autocorrect is disabled for model-number queries (SerpApi nfpr=1 equivalent).
 # v128.5.28: document/social hosts (yumpu, issuu, scribd, manualslib...) are never offers;
 # adjacent query words also match their joined spelling (AccuLean IQ ~ AccuLeanIQ);
 # 5+ word identities need 3 matching words; the provider-health breaker is tracked per
@@ -365,7 +371,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization'], max_age=86400)
-BUILD_ID = 'v128.5.28-text-fast'
+BUILD_ID = 'v128.5.29-text-fast'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -5269,8 +5275,11 @@ def _global_market_discovery(query, country, limit=8, timeout_seconds=None, prog
     def run(kind):
         remaining = deadline - time.monotonic()
         return [] if cancelled() or remaining <= .01 else _global_discovery_request(query, country, kind, remaining)
-    jobs = {LOCAL_DISCOVERY_POOL.submit(run, kind)
-            for kind in (('global', 'global2') + (('global_fast',) if FAST_PROVIDERS else ()))}
+    if serper_primary() and _fast_provider_supports_operators('serper'):
+        kinds = ('global_fast',)
+    else:
+        kinds = ('global', 'global2') + (('global_fast',) if FAST_PROVIDERS else ())
+    jobs = {LOCAL_DISCOVERY_POOL.submit(run, kind) for kind in kinds}
     rows, seen = [], {}
     try:
         while jobs and not cancelled() and time.monotonic() < deadline:
@@ -5383,7 +5392,9 @@ def _local_market_discovery(query, market, limit=8, timeout_seconds=None, progre
         # Outside the SerpApi call budget: answers in ~1-2 s next to the primary.
         if not cancelled() and deadline - time.monotonic() > .02:
             pending[LOCAL_DISCOVERY_POOL.submit(_run_with_market, market, worker, fast_kind)] = fast_kind
-    if kinds:
+    if kinds and not (serper_primary() and fast_kinds):
+        # Serper-primary: the SerpApi lane is launched by the sparse/hedge rule
+        # below only after the fast lanes have answered.
         launch(kinds[0])
     if cc == 'cn' and len(kinds) > 1:
         launch(kinds[1])
@@ -5399,8 +5410,12 @@ def _local_market_discovery(query, market, limit=8, timeout_seconds=None, progre
                     pending.pop(job)
                     consume(job)
             merchants = {_more_result_domain(row.get('link')) for row in rows}
+            fast_pending = any(_is_fast_discovery_kind(k) for k in pending.values())
             if (cc != 'cn' and calls < len(kinds) and len(merchants) < min(LOCAL_RESULTS_TARGET, limit)
-                    and (not pending or time.monotonic() >= hedge_at)):
+                    and (not pending or time.monotonic() >= hedge_at)
+                    and not (serper_primary() and (fast_pending or not SERPAPI_BACKUP_ENABLED or serpapi_provider_degraded()))):
+                if serper_primary() and calls == 0:
+                    print(f'LOCAL DISCOVERY BACKUP provider=serpapi kind={kinds[0]} rows={len(rows)} country={cc}')
                 launch(kinds[calls])
         # Include responses that completed at the deadline boundary.
         for job in list(pending):
@@ -18264,6 +18279,8 @@ def _web_indexed_offer_money(item):
 
 def _web_targeted_price_updates(entries, lang, market):
     """One bounded indexed lookup for exact listing URLs; recover image and money independently."""
+    if not serpapi_recovery_allowed():
+        return {}
     MARKET_CTX.value = dict(market)
     terms = []
     for row in entries.values():
@@ -19785,8 +19802,28 @@ FAST_PROVIDER_NUM = max(10, min(20, int(os.environ.get('FAST_PROVIDER_NUM', '20'
 FAST_PROVIDER_IMAGES = env_bool('FAST_PROVIDER_IMAGES', True)
 FAST_PROVIDER_SHOPPING = env_bool('FAST_PROVIDER_SHOPPING', True)
 FAST_PROVIDERS = [name for name, on in (('serper', bool(SERPER_API_KEY)), ('cse', bool(GOOGLE_CSE_KEY and GOOGLE_CSE_CX))) if on]
+SEARCH_PROVIDER_PRIMARY = (os.environ.get('SEARCH_PROVIDER_PRIMARY') or ('serper' if 'serper' in FAST_PROVIDERS else 'serpapi')).strip().lower()
+if SEARCH_PROVIDER_PRIMARY not in ('serper', 'serpapi', 'both') or (SEARCH_PROVIDER_PRIMARY == 'serper' and 'serper' not in FAST_PROVIDERS):
+    SEARCH_PROVIDER_PRIMARY = 'both' if FAST_PROVIDERS else 'serpapi'
+SERPAPI_BACKUP_ENABLED = env_bool('SERPAPI_BACKUP_ENABLED', True)
+SERPAPI_BACKUP_MIN_ROWS = max(0, min(20, int(os.environ.get('SERPAPI_BACKUP_MIN_ROWS', '4'))))
+SERPAPI_BACKUP_WINDOW_SECONDS = max(2., min(15., float(os.environ.get('SERPAPI_BACKUP_WINDOW_SECONDS', '6'))))
+
+
+def serper_primary():
+    return SEARCH_PROVIDER_PRIMARY == 'serper'
+
+
+def serpapi_recovery_allowed():
+    """SerpApi-only price/media recovery calls: not while Serper is primary or SerpApi is stalled."""
+    return bool(SERPAPI_API_KEY) and not serper_primary() and not serpapi_provider_degraded()
+
+
 print(f'FAST PROVIDER CONFIG providers={FAST_PROVIDERS or "none (SerpApi only)"} timeout={FAST_PROVIDER_TIMEOUT_SECONDS}s'
       f' num={FAST_PROVIDER_NUM} images={FAST_PROVIDER_IMAGES} shopping={FAST_PROVIDER_SHOPPING}')
+print(f'SEARCH PROVIDER POLICY primary={SEARCH_PROVIDER_PRIMARY} serpapi_backup={SERPAPI_BACKUP_ENABLED}'
+      f' backup_min_rows={SERPAPI_BACKUP_MIN_ROWS} backup_window={SERPAPI_BACKUP_WINDOW_SECONDS}s lens=serpapi'
+      f' serpapi_recovery={"off" if serper_primary() else "on"}')
 
 
 _FAST_PROVIDER_FLAGS = {}
@@ -19994,6 +20031,8 @@ def _fast_provider_search(engine, wording, country, hl, timeout):
         body = {'q': wording, 'gl': country, 'hl': hl, 'num': FAST_PROVIDER_NUM}
         if COUNTRY_NAMES.get(country) and kind != 'images':
             body['location'] = COUNTRY_NAMES[country]
+        if _web_model_tokens_from_listing(wording):
+            body['autocorrect'] = False  # keep SPS1000i as typed (SerpApi nfpr=1 equivalent)
         raw = _serper_json(kind, body, timeout)
         data = _serper_to_serpapi(kind, raw) if isinstance(raw, dict) else None
     elif provider == 'cse':
@@ -20031,7 +20070,7 @@ def _web_text_direct_specs(query, country):
     # and an unnamed market returned 8/10 foreign stores in production.
     degraded = serpapi_provider_degraded()
     # Fast providers first: they answer in 1-2 s and are not tied to SerpApi.
-    for provider in FAST_PROVIDERS:
+    for provider in (FAST_PROVIDERS if SEARCH_PROVIDER_PRIMARY != 'serpapi' else []):
         add(country, 'local', f'{provider}_search', 'en', True)
         if FAST_PROVIDER_IMAGES:
             add(country, 'local', f'{provider}_images', 'en', True)
@@ -20041,6 +20080,14 @@ def _web_text_direct_specs(query, country):
             add(country, 'local', 'serper_shopping', 'en')
         if native != 'en' and native in ('ar',):
             add(country, 'local', f'{provider}_search', native)
+    if serper_primary():
+        # Approved US/CN catalogs through Serper (site: operators need a paid
+        # Serper plan; a plan that rejects them falls back to SerpApi below).
+        if _fast_provider_supports_operators('serper'):
+            for cc in DEFAULT_GLOBAL_COUNTRIES:
+                if cc != country and cc in GLOBAL_MARKET_STORES:
+                    add(cc, 'global', 'serper_search', 'en')
+        return specs
     if TEXT_DIRECT_LIGHT_LANE:
         add(country, 'local', 'google_light', 'en', True)
     add(country, 'local', TEXT_DIRECT_IMAGES_ENGINE, 'en', True)
@@ -20064,6 +20111,20 @@ def _web_text_direct_specs(query, country):
         add(cc, 'global', 'google', 'en')
         add(cc, 'global', 'google_shopping' if cc == 'us' and ENABLE_GOOGLE_SHOPPING
             else TEXT_DIRECT_IMAGES_ENGINE, 'en')
+    return specs
+
+
+def _web_text_direct_backup_specs(query, country):
+    """SerpApi lanes used only when the primary provider fails or returns too little."""
+    native = next((hl for hl in _market_query_languages(country, query) if hl != 'en'), 'en')
+    specs = [{'country': country, 'role': 'local', 'engine': 'google', 'hl': 'en', 'geo_cue': True},
+             {'country': country, 'role': 'local', 'engine': TEXT_DIRECT_IMAGES_ENGINE, 'hl': 'en', 'geo_cue': True}]
+    if native != 'en':
+        specs.append({'country': country, 'role': 'local', 'engine': 'google', 'hl': native, 'geo_cue': False})
+    if not _fast_provider_supports_operators('serper'):
+        for cc in DEFAULT_GLOBAL_COUNTRIES:
+            if cc != country and cc in GLOBAL_MARKET_STORES:
+                specs.append({'country': cc, 'role': 'global', 'engine': 'google', 'hl': 'en', 'geo_cue': False})
     return specs
 
 
@@ -20242,8 +20303,32 @@ def _web_text_direct_search(query, country, lang, progress_callback=None, cancel
     try:
         specs = _web_text_direct_specs(query, country)
         fast_lane_count = sum(1 for spec in specs if spec['engine'].startswith(('serper_', 'cse_')))
+        backup_launched = False
+        fast_unavailable = 0
         for spec in specs:
             submit(spec)
+        def maybe_launch_backup():
+            """Serper-primary: SerpApi lanes exist only as a bounded backup, launched
+            once the primary lanes have answered and left too little on the page."""
+            nonlocal backup_launched, deadline, empty_deadline
+            if (not serper_primary() or not SERPAPI_BACKUP_ENABLED or backup_launched or not SERPAPI_API_KEY
+                    or cancel.is_set() or serpapi_provider_degraded()
+                    or any(j[0]['engine'].startswith(('serper_', 'cse_')) for j in jobs.values())):
+                return
+            unavailable = fast_unavailable >= max(1, fast_lane_count)
+            if len(rows) >= SERPAPI_BACKUP_MIN_ROWS and not unavailable:
+                return
+            backup_launched = True
+            now = time.monotonic()
+            backup = _web_text_direct_backup_specs(query, country)
+            deadline = max(deadline, min(started + TEXT_DIRECT_TIMEOUT_SECONDS + 4., now + SERPAPI_BACKUP_WINDOW_SECONDS))
+            empty_deadline = max(empty_deadline, deadline)
+            for spec in backup:
+                submit(spec)
+            print(f'TEXT DIRECT BACKUP provider=serpapi lanes={len(backup)} reason='
+                  f'{"primary_unavailable" if unavailable else "sparse"}'
+                  f' rows={len(rows)} country={country} elapsed_ms={int((now-started)*1000)}')
+        maybe_launch_backup()
         while jobs and not cancel.is_set():
             now = time.monotonic()
             if not rows and now >= deadline and not extended:
@@ -20270,6 +20355,8 @@ def _web_text_direct_search(query, country, lang, progress_callback=None, cancel
                 name = f'{spec["role"]}:{spec["country"]}:{spec["engine"]}:{spec["hl"]}' + (':merchants' if token else '')
                 source_states[name] = 'complete' if isinstance(data, dict) else 'unavailable'
                 if not isinstance(data, dict):
+                    if spec['engine'].startswith(('serper_', 'cse_')):
+                        fast_unavailable += 1
                     continue
                 try:
                     if token:
@@ -20365,6 +20452,7 @@ def _web_text_direct_search(query, country, lang, progress_callback=None, cancel
                         expanded.add(token_key)
                         expansions[spec['country']] += 1
                         submit(spec, page_token, next(iter(_web_offer_image_candidates(card)), ''))
+            maybe_launch_backup()
         result = _run_with_market(market, _web_attach_captured_result_sections, snapshot(), lang, False)
         result['partial'] = (bool(jobs) or cancel.is_set() or time.monotonic() >= deadline
                              or any(v == 'unavailable' for v in source_states.values()))
@@ -24007,7 +24095,7 @@ async def _web_stream_text_fast(query, country, lang, selected_option='', reques
     # are bounded so `done` always arrives within deadline + price tail.
     source = _web_stream_text_direct(q, country, lang, request, TEXT_FAST_TIMEOUT_SECONDS,
                                      TEXT_FAST_EMPTY_EXTENSION_SECONDS)
-    stream = _web_with_live_prices(source, lang, country, allow_paid=not serpapi_provider_degraded(),
+    stream = _web_with_live_prices(source, lang, country, allow_paid=serpapi_recovery_allowed(),
                                    wait_seconds=TEXT_FAST_PRICE_WAIT_SECONDS)
     first_card = None
     count = 0
@@ -24138,6 +24226,9 @@ async def web_api_health_serpapi(request: Request):
                              'empty_extension_seconds': TEXT_FAST_EMPTY_EXTENSION_SECONDS,
                              'late_read_seconds': TEXT_DIRECT_LATE_READ_SECONDS},
                'provider': serpapi_health_snapshot(), 'fast_providers': FAST_PROVIDERS,
+               'policy': {'primary': SEARCH_PROVIDER_PRIMARY, 'serpapi_backup': SERPAPI_BACKUP_ENABLED,
+                          'backup_min_rows': SERPAPI_BACKUP_MIN_ROWS, 'lens': 'serpapi',
+                          'serper_operators': _fast_provider_supports_operators('serper')},
                'budget': serpapi_budget_snapshot(), 'cost_counters': api_cost_snapshot()}
     return Response(content=json.dumps(payload, ensure_ascii=False, default=str), media_type='application/json',
                     headers={'Cache-Control': 'no-store'})
@@ -25143,7 +25234,11 @@ def _web_selected_market_search(query, country, lang, global_countries, *, image
                     if cc in global_catalogs:
                         if FAST_PROVIDERS:
                             launch(cc, 'global_fast')
-                        if 'lens' in launched[cc]:
+                        if serper_primary() and _fast_provider_supports_operators('serper'):
+                            # SerpApi catalog lanes only as a sparse backup.
+                            if sparse_or_slow and 'global_fast' not in {k for c, k in jobs.values() if c == cc} and SERPAPI_BACKUP_ENABLED:
+                                launch(cc, 'global_all')
+                        elif 'lens' in launched[cc]:
                             if sparse_or_slow:
                                 launch(cc, 'global_all')
                         else:
