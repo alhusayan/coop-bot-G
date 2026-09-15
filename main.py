@@ -1,3 +1,8 @@
+# v128.5.24: second search provider (Serper.dev and/or Google Custom Search JSON API)
+# runs as parallel lanes next to SerpApi and paints first when SerpApi is slow;
+# relevance guard requires a query word that is rare within the retrieved batch
+# ("Livia" vs every other Home Centre dining table); typed queries are their own
+# classification anchor; the static translation scan is cached (was ~1 s/60 rows).
 # v128.5.23: accent-folded title matching (Nestlé/Nestle), length-aware relevance
 # threshold for long typed queries, country cue on the fast local lanes, and a
 # provider-health breaker: while SerpApi keeps timing out, only the essential lanes
@@ -343,7 +348,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization'], max_age=86400)
-BUILD_ID = 'v128.5.23-text-fast'
+BUILD_ID = 'v128.5.24-text-fast'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -3999,7 +4004,12 @@ def _local_retrieval_term(replacements, matched):
 
 
 def _local_retrieval_text(value):
-    text = normalize_ar(_cjk_boundary_spaces(unicodedata.normalize('NFKC', str(value or '')).casefold()))
+    return _local_retrieval_text_cached(str(value or '')[:600])
+
+
+@lru_cache(maxsize=8192)
+def _local_retrieval_text_cached(value):
+    text = normalize_ar(_cjk_boundary_spaces(unicodedata.normalize('NFKC', value).casefold()))
     pattern, replacements = _local_retrieval_rules()
     return pattern.sub(lambda m: ' ' + _local_retrieval_term(replacements, m.group(0)) + ' ', text)
 
@@ -4083,16 +4093,29 @@ def _market_query_validate_edits(query, edits):
     return {'query': result, 'edits': accepted}
 
 
+_MARKET_STATIC_TABLE = {}
+_MARKET_STATIC_TABLE_LOCK = threading.Lock()
+
+
 def _market_query_static(query, language):
+    """Static (table-driven) translation of generic words. Pure: memoised."""
     text = _market_query_key(query, language)[0]
     language = language.split('-')[0]
+    result = _market_query_static_cached(text, language)
+    return {'query': result[0], 'edits': [dict(edit) for edit in result[1]]}
+
+
+def _market_query_static_table(language):
+    """Replacement map + one compiled alternation per language, built once."""
+    with _MARKET_STATIC_TABLE_LOCK:
+        hit = _MARKET_STATIC_TABLE.get(language)
+    if hit is not None:
+        return hit
     replacements = {term.casefold(): row[language].split('|')[0]
         for table in (_LOCAL_RETRIEVAL_NOUNS, _LOCAL_DESCRIPTOR_TERMS)
         for row in table.values() if language in row
         for terms in row.values() for term in terms.split('|')
         if term.casefold() != row[language].split('|')[0].casefold()}
-    # Brand aliases: Arabic/Chinese spellings -> Latin brand for English and
-    # Latin markets; Latin brand -> "中文 Latin" pair for Chinese indexes.
     for brand, languages in _LOCAL_BRAND_ALIASES.items():
         zh_pair = (languages['zh'].split('|')[0] + ' ' + brand) if 'zh' in languages else brand
         if language == 'zh' and 'zh' in languages:
@@ -4102,9 +4125,18 @@ def _market_query_static(query, language):
                 continue
             for alias in terms.split('|'):
                 replacements.setdefault(alias.casefold(), zh_pair if language == 'zh' else brand)
-    if not replacements:
-        return {'query': text, 'edits': []}
-    pattern = '|'.join(_local_term_pattern(term) for term in sorted(replacements, key=len, reverse=True))
+    compiled = re.compile('|'.join(_local_term_pattern(term) for term in sorted(replacements, key=len, reverse=True)), re.I) if replacements else None
+    hit = (replacements, compiled)
+    with _MARKET_STATIC_TABLE_LOCK:
+        _MARKET_STATIC_TABLE[language] = hit
+    return hit
+
+
+@lru_cache(maxsize=4096)
+def _market_query_static_cached(text, language):
+    replacements, compiled = _market_query_static_table(language)
+    if not replacements or compiled is None:
+        return (text, ())
     edits = []
     def replace(match):
         target = _local_retrieval_term(replacements, match.group(0))
@@ -4113,7 +4145,7 @@ def _market_query_static(query, language):
             target = target[:-len(matched.casefold())] + matched  # 索尼 Sony, not 索尼 sony
         edits.append({'source': matched, 'target': target})
         return target
-    return {'query': re.sub(pattern, replace, text, flags=re.I), 'edits': edits}
+    return (compiled.sub(replace, text), tuple(edits))
 
 
 def _market_query_translate_batch(query, languages):
@@ -4636,10 +4668,20 @@ def _local_discovery_title(row):
 
 
 def _local_discovery_rows(data, query, market, provider):
+    records = _local_discovery_records(data)
+    token = _GUARD_BATCH_DF.set(_findzia_batch_term_frequencies(
+        [_local_discovery_title(row) for row in records if isinstance(row, dict)]))
+    try:
+        return _local_discovery_rows_inner(records, query, market, provider)
+    finally:
+        _GUARD_BATCH_DF.reset(token)
+
+
+def _local_discovery_rows_inner(records, query, market, provider):
     out, seen = [], set()
     stats = Counter()
     # B2B tier quotes are still not retail prices.
-    for row in _local_discovery_records(data):
+    for row in records:
         stats['raw'] += 1
         if not isinstance(row, dict):
             continue
@@ -8378,12 +8420,84 @@ def _findzia_match_score(query, title):
     numeric_bonus = 0.12 if q_nums and q_nums & t_nums else 0.0
     return min(0.99, overlap * (0.5 if model_bonus else 0.78) + model_bonus + numeric_bonus)
 
+# Term frequencies of the batch being filtered (set by _local_discovery_rows).
+# A query word that most retrieved titles share ("dining", "table") tells
+# nothing; a word few titles share ("livia") is what the shopper asked for.
+from contextvars import ContextVar as _GuardContextVar
+_GUARD_BATCH_DF = _GuardContextVar('findzia_guard_batch_df', default=None)
+FINDZIA_GUARD_RARE_SHARE = max(.1, min(.9, float(os.environ.get('FINDZIA_GUARD_RARE_SHARE', '0.5'))))
+
+
+def _findzia_batch_term_frequencies(titles):
+    """Document frequency of every token across the batch (accent-folded)."""
+    df = Counter()
+    docs = 0
+    for title in titles:
+        tokens = _findzia_lexical_tokens(_local_retrieval_text(title))
+        if not tokens:
+            continue
+        docs += 1
+        df.update(tokens)
+    return {'docs': docs, 'df': df}
+
+
+def _findzia_token_present(token, title_tokens):
+    """Exact token, or a close spelling for names (livia ~ olivia, colour/color)."""
+    if token in title_tokens:
+        return True
+    if len(token) < 4:
+        return False
+    for other in title_tokens:
+        if len(other) < 4:
+            continue
+        if token in other or other in token:
+            return True
+        if len(token) >= 5 and abs(len(token) - len(other)) <= 1:
+            # one edit apart
+            i = j = edits = 0
+            while i < len(token) and j < len(other):
+                if token[i] == other[j]:
+                    i += 1; j += 1
+                    continue
+                edits += 1
+                if edits > 1:
+                    break
+                if len(token) > len(other):
+                    i += 1
+                elif len(other) > len(token):
+                    j += 1
+                else:
+                    i += 1; j += 1
+            if edits + (len(token) - i) + (len(other) - j) <= 1:
+                return True
+    return False
+
+
+def _findzia_rare_query_tokens(query):
+    """Query words that fewer than FINDZIA_GUARD_RARE_SHARE of the batch titles carry."""
+    batch = _GUARD_BATCH_DF.get()
+    if not batch or batch.get('docs', 0) < 4:
+        return set()
+    q_tokens = _findzia_lexical_tokens(query)
+    if not q_tokens or re.search(r'[\u0600-\u06ff\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]', query):
+        return set()
+    docs, df = batch['docs'], batch['df']
+    return {tok for tok in q_tokens if len(tok) >= 3 and df.get(tok, 0) <= docs * FINDZIA_GUARD_RARE_SHARE}
+
+
 def _findzia_stream_candidate_ok(query, item):
     title = str((item or {}).get('title') or (item or {}).get('line') or '')
     if not title or _findzia_hard_product_mismatch(query, title):
         if title:
             print(f'FINDZIA GUARD HARD-DROP: {title[:100]}')
         return False
+    rare = _findzia_rare_query_tokens(query)
+    if rare:
+        title_tokens = _findzia_lexical_tokens(title)
+        models_shared = bool(_web_model_tokens_from_listing(query) & _web_model_tokens_from_listing(title))
+        if not models_shared and not any(_findzia_token_present(tok, title_tokens) for tok in rare):
+            print(f'FINDZIA GUARD HOLD reason=no_distinctive_word rare={sorted(rare)[:4]}: {title[:100]}')
+            return False
     score = _findzia_match_score(query, title)
     strong_model = bool(_web_model_tokens_from_listing(query) & _web_model_tokens_from_listing(title))
     # A long typed description carries optional words ("chocolate wafer"); a
@@ -11824,6 +11938,15 @@ def _web_identity_facts_equivalent(left, right):
 
 def _web_model_tokens_from_listing(value):
     """Extract model tokens only after removing quantities and specifications."""
+    return set(_web_model_tokens_from_listing_cached(str(value or '')[:600]))
+
+
+@lru_cache(maxsize=8192)
+def _web_model_tokens_from_listing_cached(value):
+    return frozenset(_web_model_tokens_from_listing_uncached(value))
+
+
+def _web_model_tokens_from_listing_uncached(value):
     original_sanitized = _web_expand_measurement_fractions(
         _web_numericize_pack_words(_web_ascii_digits(str(value or '')))
     )
@@ -11967,6 +12090,24 @@ def _web_tier_conflict(left_fp, right_fp):
         if left and right and left != right:
             return True
     return False
+
+def _web_store_name_tokens(row):
+    """Tokens of a listing's own merchant name and host (home, centre, homecentre, xcite)."""
+    out = set()
+    for value in (row.get('store'), row.get('source'), row.get('merchant')):
+        words = [w for w in re.findall(r'[a-z0-9]+', _fold_latin_accents(str(value or '').casefold())) if w]
+        out.update(words)
+        if len(words) > 1:
+            out.add(''.join(words))
+    try:
+        host = (urllib.parse.urlsplit(str(row.get('url') or row.get('link') or '')).hostname or '').casefold()
+    except ValueError:
+        host = ''
+    for label in host.split('.'):
+        if label and label not in ('www', 'com', 'net', 'org', 'co', 'shop', 'store', 'en', 'ar', 'm') and len(label) > 2 and not label.isdigit():
+            out.add(label)
+    return {tok for tok in out if len(tok) >= 3}
+
 
 def _web_semantic_match_guard(identity, row, typed_query=False):
     """Resolve high-confidence product identity cases instantly, without I/O.
@@ -12143,6 +12284,16 @@ def _web_semantic_match_guard(identity, row, typed_query=False):
         return ('exact', 'structured_identity_guard' if structured_identity else 'strong_fingerprint_match', 96)
     identity_only = identity_distinctive - set(title_fp['distinctive'])
     title_only = set(title_fp['distinctive']) - identity_distinctive
+    if typed_query and identity_only and not identity_models:
+        # "Homecentre Livia Dining Table": the shopper names the store in the
+        # query. Once the store's own name is set aside, every typed product
+        # word is in the title -> the listing is the product they asked for.
+        store_tokens = _web_store_name_tokens(row)
+        extra_tier = ({tier for group in title_fp.get('tiers') or [] for tier in group}
+                      - {tier for group in identity_fp.get('tiers') or [] for tier in group})
+        extra_audience = bool(title_fp.get('audience')) and title_fp.get('audience') != identity_fp.get('audience')
+        if store_tokens and not (identity_only - store_tokens) and not extra_tier and not extra_audience and shared:
+            return ('exact', 'typed_identity_present', 94)
     if len(shared) >= 2 and identity_only and title_only:
         return ('similar', 'different_identity_token', 94)
     if len(shared) >= 2 and title_only and identity_coverage >= 0.85:
@@ -15215,9 +15366,12 @@ def _web_attach_captured_result_sections(payload, lang, allow_ai=True, cancel_ev
     # Result-list consensus is useful for text search, but in an image search
     # it can amplify one wrong Lens guess across every card. Keep the original
     # Lens/OCR identity as a hint and let the reference photo remain primary.
+    typed_query = bool(not has_reference_photo and str(out.get('source') or '') in ('text_direct', 'text_fast'))
+    # A typed brand/model is the shopper's own identity: never let a cluster of
+    # neighbouring listings ("Heaven 8-Seater...") replace "Livia" as the anchor.
     classification_anchor = (
         _web_clean_classification_identity(identity)
-        if has_reference_photo
+        if has_reference_photo or typed_query
         else _web_classification_anchor(identity, results)
     )
     market_snapshot = dict(out.get('market') or current_market() or {})
@@ -15226,7 +15380,6 @@ def _web_attach_captured_result_sections(payload, lang, allow_ai=True, cancel_ev
     match_guard_by_id = {}
     market_guard_by_id = {}
     ai_candidates = []
-    typed_query = bool(not has_reference_photo and str(out.get('source') or '') in ('text_direct', 'text_fast'))
     for index, original in enumerate(results):
         match_guard = _web_semantic_match_guard(classification_anchor, original, typed_query=typed_query)
         market_guard = _web_market_scope_guard(original, market_snapshot)
@@ -19309,6 +19462,235 @@ def _web_text_direct_enabled():
     return bool(TEXT_DIRECT_SEARCH_ENABLED and SERPAPI_API_KEY)
 
 
+# ---------------------------------------------------------------------------
+# v128.5.24 — SECOND SEARCH PROVIDER (fast lanes next to SerpApi)
+# Each adapter returns SerpApi-shaped JSON (organic_results / images_results /
+# shopping_results with the same keys) so every downstream step — market
+# evidence, relevance guard, identity, prices — runs unchanged.
+SERPER_API_KEY = os.environ.get('SERPER_API_KEY', '').strip()
+GOOGLE_CSE_KEY = os.environ.get('GOOGLE_CSE_KEY', '').strip()
+GOOGLE_CSE_CX = os.environ.get('GOOGLE_CSE_CX', '').strip()
+FAST_PROVIDER_TIMEOUT_SECONDS = max(2., min(15., float(os.environ.get('FAST_PROVIDER_TIMEOUT_SECONDS', '6'))))
+FAST_PROVIDER_NUM = max(10, min(20, int(os.environ.get('FAST_PROVIDER_NUM', '20'))))
+FAST_PROVIDER_IMAGES = env_bool('FAST_PROVIDER_IMAGES', True)
+FAST_PROVIDER_SHOPPING = env_bool('FAST_PROVIDER_SHOPPING', True)
+FAST_PROVIDERS = [name for name, on in (('serper', bool(SERPER_API_KEY)), ('cse', bool(GOOGLE_CSE_KEY and GOOGLE_CSE_CX))) if on]
+print(f'FAST PROVIDER CONFIG providers={FAST_PROVIDERS or "none (SerpApi only)"} timeout={FAST_PROVIDER_TIMEOUT_SECONDS}s'
+      f' num={FAST_PROVIDER_NUM} images={FAST_PROVIDER_IMAGES} shopping={FAST_PROVIDER_SHOPPING}')
+
+
+def _fast_price_number(value):
+    m = re.search(r'\d[\d,]*(?:\.\d+)?', str(value or ''))
+    if not m:
+        return None
+    try:
+        return float(m.group(0).replace(',', ''))
+    except ValueError:
+        return None
+
+
+def _fast_currency_code(value):
+    text = str(value or '')
+    m = re.search(r'\b(KWD|SAR|AED|QAR|BHD|OMR|USD|EUR|GBP|CNY|EGP|JOD|TRY|INR|KD|SR|AED|Dhs|Rs)\b', text, re.I)
+    if m:
+        return m.group(1).upper()
+    for symbol, code in (('$', 'USD'), ('€', 'EUR'), ('£', 'GBP'), ('¥', 'CNY'), ('د.ك', 'KWD'), ('ر.س', 'SAR'), ('د.إ', 'AED')):
+        if symbol in text:
+            return code
+    return ''
+
+
+def _fast_rich_snippet(price_text, currency=''):
+    """A SerpApi-style rich snippet block carrying an indexed price."""
+    amount = _fast_price_number(price_text)
+    if amount is None:
+        return None
+    code = str(currency or '').strip().upper() or _fast_currency_code(price_text)
+    block = {'detected_extensions': {'price': amount}, 'extensions': [str(price_text)[:40]]}
+    if code:
+        block['detected_extensions']['currency'] = code
+    return {'top': block}
+
+
+def _serper_json(path, body, timeout):
+    """POST to Serper.dev; returns the parsed JSON or None. Never logs the key."""
+    began = time.monotonic()
+    try:
+        r = requests.post(f'https://google.serper.dev/{path}', json=body, timeout=timeout,
+                          headers={'X-API-KEY': SERPER_API_KEY, 'Content-Type': 'application/json'})
+        status = r.status_code
+        data = r.json() if status < 500 else {}
+        r.close()
+    except requests.exceptions.Timeout:
+        print(f'FAST PROVIDER FAILURE provider=serper path={path} reason=timeout elapsed_ms={int((time.monotonic()-began)*1000)}')
+        return None
+    except Exception as exc:
+        print(f'FAST PROVIDER FAILURE provider=serper path={path} reason={type(exc).__name__} elapsed_ms={int((time.monotonic()-began)*1000)}')
+        return None
+    if status != 200 or not isinstance(data, dict):
+        message = re.sub(r'\s+', ' ', str((data or {}).get('message') or (data or {}).get('error') or ''))[:120] if isinstance(data, dict) else ''
+        print(f'FAST PROVIDER FAILURE provider=serper path={path} reason=http_{status} elapsed_ms={int((time.monotonic()-began)*1000)} message={message!r}')
+        return None
+    return data
+
+
+def _serper_to_serpapi(kind, data):
+    """Map Serper's organic/images/shopping arrays onto SerpApi keys."""
+    out = {'search_metadata': {'status': 'Success', 'provider': 'serper'}}
+    if kind in ('search', 'shopping'):
+        organic = []
+        for i, row in enumerate(data.get('organic') or []):
+            if not isinstance(row, dict) or not row.get('link'):
+                continue
+            item = {'position': i + 1, 'title': row.get('title') or '', 'link': row['link'],
+                    'snippet': row.get('snippet') or '', 'displayed_link': row.get('domain') or urllib.parse.urlsplit(row['link']).hostname or ''}
+            if row.get('imageUrl'):
+                item['thumbnail'] = row['imageUrl']
+            if row.get('price'):
+                snippet = _fast_rich_snippet(row.get('price'), row.get('currency'))
+                if snippet:
+                    item['rich_snippet'] = snippet
+            children = row.get('sitelinks')
+            if isinstance(children, list) and children:
+                item['sitelinks'] = {'inline': [{'title': c.get('title') or '', 'link': c.get('link') or ''} for c in children if isinstance(c, dict) and c.get('link')]}
+            organic.append(item)
+        if organic:
+            out['organic_results'] = organic
+        shopping = []
+        for i, row in enumerate(data.get('shopping') or []):
+            if not isinstance(row, dict) or not row.get('link') or not row.get('title'):
+                continue
+            item = {'position': i + 1, 'title': row['title'], 'link': row['link'], 'source': row.get('source') or '',
+                    'price': str(row.get('price') or ''), 'thumbnail': row.get('imageUrl') or ''}
+            amount = _fast_price_number(item['price'])
+            if amount is not None:
+                item['extracted_price'] = amount
+            if row.get('delivery'):
+                item['delivery'] = row['delivery']
+            shopping.append(item)
+        if shopping:
+            out['shopping_results' if kind == 'shopping' else 'inline_shopping_results'] = shopping
+    elif kind == 'images':
+        images = []
+        for i, row in enumerate(data.get('images') or []):
+            if not isinstance(row, dict) or not row.get('link') or not row.get('imageUrl'):
+                continue
+            images.append({'position': i + 1, 'title': row.get('title') or '', 'link': row['link'],
+                           'original': row['imageUrl'], 'thumbnail': row.get('thumbnailUrl') or row['imageUrl'],
+                           'source': row.get('domain') or row.get('source') or ''})
+        if images:
+            out['images_results'] = images
+    return out
+
+
+def _cse_json(params, timeout):
+    """GET Google Custom Search JSON API; returns parsed JSON or None."""
+    began = time.monotonic()
+    try:
+        r = requests.get('https://www.googleapis.com/customsearch/v1', params=dict(params, key=GOOGLE_CSE_KEY, cx=GOOGLE_CSE_CX), timeout=timeout)
+        status = r.status_code
+        data = r.json() if status < 500 else {}
+        r.close()
+    except requests.exceptions.Timeout:
+        print(f'FAST PROVIDER FAILURE provider=cse reason=timeout elapsed_ms={int((time.monotonic()-began)*1000)}')
+        return None
+    except Exception as exc:
+        print(f'FAST PROVIDER FAILURE provider=cse reason={type(exc).__name__} elapsed_ms={int((time.monotonic()-began)*1000)}')
+        return None
+    if status != 200 or not isinstance(data, dict):
+        message = ''
+        if isinstance(data, dict):
+            message = re.sub(r'\s+', ' ', str(((data.get('error') or {}).get('message') if isinstance(data.get('error'), dict) else data.get('error')) or ''))[:120]
+        print(f'FAST PROVIDER FAILURE provider=cse reason=http_{status} elapsed_ms={int((time.monotonic()-began)*1000)} message={message!r}')
+        return None
+    return data
+
+
+def _cse_to_serpapi(kind, data):
+    out = {'search_metadata': {'status': 'Success', 'provider': 'cse'}}
+    items = data.get('items') or []
+    if kind == 'images':
+        images = []
+        for i, row in enumerate(items):
+            if not isinstance(row, dict):
+                continue
+            meta = row.get('image') if isinstance(row.get('image'), dict) else {}
+            page = meta.get('contextLink') or ''
+            if not page or not row.get('link'):
+                continue
+            images.append({'position': i + 1, 'title': row.get('title') or '', 'link': page, 'original': row['link'],
+                           'thumbnail': meta.get('thumbnailLink') or row['link'], 'source': row.get('displayLink') or ''})
+        if images:
+            out['images_results'] = images
+        return out
+    organic = []
+    for i, row in enumerate(items):
+        if not isinstance(row, dict) or not row.get('link'):
+            continue
+        item = {'position': i + 1, 'title': row.get('title') or '', 'link': row['link'],
+                'snippet': row.get('snippet') or '', 'displayed_link': row.get('displayLink') or ''}
+        pagemap = row.get('pagemap') if isinstance(row.get('pagemap'), dict) else {}
+        metatags = (pagemap.get('metatags') or [{}])[0] if isinstance(pagemap.get('metatags'), list) else {}
+        metatags = metatags if isinstance(metatags, dict) else {}
+        for key in ('cse_image', 'cse_thumbnail'):
+            entries = pagemap.get(key)
+            if isinstance(entries, list) and entries and isinstance(entries[0], dict) and entries[0].get('src'):
+                item['thumbnail'] = entries[0]['src']
+                break
+        if not item.get('thumbnail') and metatags.get('og:image'):
+            item['thumbnail'] = metatags['og:image']
+        price, currency = None, ''
+        offers = pagemap.get('offer')
+        if isinstance(offers, list) and offers and isinstance(offers[0], dict):
+            price, currency = offers[0].get('price'), offers[0].get('pricecurrency') or ''
+        if price in (None, ''):
+            for pkey, ckey in (('product:price:amount', 'product:price:currency'), ('og:price:amount', 'og:price:currency'),
+                               ('product:sale_price:amount', 'product:sale_price:currency')):
+                if metatags.get(pkey):
+                    price, currency = metatags[pkey], metatags.get(ckey) or ''
+                    break
+        if price not in (None, ''):
+            snippet = _fast_rich_snippet(f'{currency} {price}'.strip(), currency)
+            if snippet:
+                item['rich_snippet'] = snippet
+        organic.append(item)
+    if organic:
+        out['organic_results'] = organic
+    return out
+
+
+def _fast_provider_search(engine, wording, country, hl, timeout):
+    """engine: serper_search|serper_images|serper_shopping|cse_search|cse_images."""
+    provider, kind = engine.split('_', 1)
+    cache_params = {'engine': engine, 'q': wording, 'gl': country, 'hl': hl}
+    key = _serpapi_cache_key(cache_params)
+    cached = _serpapi_cache_get(key)
+    if isinstance(cached, dict):
+        print(f'FAST PROVIDER CACHE HIT provider={provider} kind={kind} key={key[:10]}')
+        return copy.deepcopy(cached)
+    began = time.monotonic()
+    data = None
+    if provider == 'serper':
+        body = {'q': wording, 'gl': country, 'hl': hl, 'num': FAST_PROVIDER_NUM}
+        if COUNTRY_NAMES.get(country) and kind != 'images':
+            body['location'] = COUNTRY_NAMES[country]
+        raw = _serper_json(kind, body, timeout)
+        data = _serper_to_serpapi(kind, raw) if isinstance(raw, dict) else None
+    elif provider == 'cse':
+        params = {'q': wording, 'gl': country, 'hl': hl, 'num': 10, 'safe': 'off'}
+        if kind == 'images':
+            params['searchType'] = 'image'
+        raw = _cse_json(params, timeout)
+        data = _cse_to_serpapi(kind, raw) if isinstance(raw, dict) else None
+    rows = sum(len(data.get(k) or []) for k in ('organic_results', 'images_results', 'shopping_results', 'inline_shopping_results')) if isinstance(data, dict) else 0
+    print(f'FAST PROVIDER provider={provider} kind={kind} country={country} hl={hl} status={"returned" if data else "unavailable"}'
+          f' rows={rows} elapsed_ms={int((time.monotonic()-began)*1000)}')
+    _api_cost_record(f'fast_provider_{provider}')
+    if isinstance(data, dict) and rows:
+        _serpapi_cache_put(key, engine, data)
+    return data
+
+
 def _web_text_direct_specs(query, country):
     """Open local English/native discovery; closed approved export catalogs.
 
@@ -19328,6 +19710,15 @@ def _web_text_direct_specs(query, country):
     # Every English local lane names the country ("... Kuwait"): gl only ranks,
     # and an unnamed market returned 8/10 foreign stores in production.
     degraded = serpapi_provider_degraded()
+    # Fast providers first: they answer in 1-2 s and are not tied to SerpApi.
+    for provider in FAST_PROVIDERS:
+        add(country, 'local', f'{provider}_search', 'en', True)
+        if FAST_PROVIDER_IMAGES:
+            add(country, 'local', f'{provider}_images', 'en', True)
+        if provider == 'serper' and FAST_PROVIDER_SHOPPING and _shopping_gl_supported(country):
+            add(country, 'local', 'serper_shopping', 'en')
+        if native != 'en' and native in ('ar',):
+            add(country, 'local', f'{provider}_search', native)
     if TEXT_DIRECT_LIGHT_LANE:
         add(country, 'local', 'google_light', 'en', True)
     add(country, 'local', TEXT_DIRECT_IMAGES_ENGINE, 'en', True)
@@ -19368,11 +19759,13 @@ def _web_text_direct_params(query, spec, page_token=''):
     if role == 'global':
         domains = ' OR '.join('site:' + domain for _, domain in GLOBAL_MARKET_STORES[country])
         wording = f'{wording} ({domains})'
-    elif engine in ('google', 'google_light', 'google_images', 'google_images_light'):
+    elif engine in ('google', 'google_light', 'google_images', 'google_images_light') or engine.startswith(('serper_', 'cse_')):
         if spec.get('geo_cue'):
             wording = f'{wording} {COUNTRY_NAMES.get(country, country.upper())}'
         else:
             wording = _local_discovery_query(wording, _web_market(country), scoped=False, language=hl)
+    if engine.startswith(('serper_', 'cse_')):
+        return {'engine': engine, 'q': wording, 'gl': country if role == 'local' else 'us', 'hl': hl}
     elif engine == 'baidu':
         wording = f'{wording} 价格 购买 -百科 -知道 -视频'
     params = {'engine': engine, 'q': wording, 'api_key': SERPAPI_API_KEY, 'output': 'json'}
@@ -19407,6 +19800,13 @@ def _web_text_direct_fetch(query, spec, deadline, cancel, page_token=''):
         return None
     connect = min(1.5, max(.05, remaining * .15))
     began = time.monotonic()
+    if params['engine'].startswith(('serper_', 'cse_')):
+        data = _fast_provider_search(params['engine'], params['q'], params['gl'], params['hl'],
+                                     (connect, max(1., min(remaining - connect, FAST_PROVIDER_TIMEOUT_SECONDS))))
+        print(f'TEXT SOURCE country={spec["country"]} role={spec["role"]} engine={params["engine"]}'
+              f' hl={spec["hl"]} status={"returned" if isinstance(data, dict) else "unavailable"}'
+              f' elapsed_ms={int((time.monotonic()-began)*1000)}')
+        return data
     data = _serpapi_cached_json(params, timeout=(connect, max(remaining - connect, TEXT_DIRECT_LATE_READ_SECONDS)),
         label=f'TEXT DIRECT {spec["role"]}/{spec["country"]}/{params["engine"]}/{spec["hl"]}')
     if params['engine'] == 'baidu' and isinstance(data, dict) and not cancel.is_set():
@@ -19468,6 +19868,11 @@ def _web_text_direct_candidates(data, query, target, provider):
 
 
 TEXT_DIRECT_GLOBAL_GRACE_SECONDS = max(.5, min(8., float(os.environ.get('TEXT_DIRECT_GLOBAL_GRACE_SECONDS', '2.5'))))
+# Once the fast providers have answered with a real page of cards, the slower
+# SerpApi lanes get this long to add theirs before `done` (they keep filling
+# the cache afterwards, so the retry is complete).
+TEXT_DIRECT_FAST_SETTLE_SECONDS = max(1., min(10., float(os.environ.get('TEXT_DIRECT_FAST_SETTLE_SECONDS', '3'))))
+TEXT_DIRECT_FAST_SETTLE_ROWS = max(1, min(20, int(os.environ.get('TEXT_DIRECT_FAST_SETTLE_ROWS', '4'))))
 
 
 def _web_text_direct_search(query, country, lang, progress_callback=None, cancel_event=None,
@@ -19513,7 +19918,9 @@ def _web_text_direct_search(query, country, lang, progress_callback=None, cancel
         jobs[future] = (spec, target, token, thumbnail)
         launched += 1
     try:
-        for spec in _web_text_direct_specs(query, country):
+        specs = _web_text_direct_specs(query, country)
+        fast_lane_count = sum(1 for spec in specs if spec['engine'].startswith(('serper_', 'cse_')))
+        for spec in specs:
             submit(spec)
         while jobs and not cancel.is_set():
             now = time.monotonic()
@@ -19603,6 +20010,11 @@ def _web_text_direct_search(query, country, lang, progress_callback=None, cancel
                 # rather than the whole budget: local cards are already shown.
                 if rows and not any(j[0]['role'] == 'local' for j in jobs.values()):
                     deadline = min(deadline, time.monotonic() + TEXT_DIRECT_GLOBAL_GRACE_SECONDS)
+                # Fast providers done with a real page: SerpApi lanes get a
+                # bounded settle window instead of the whole budget.
+                if (fast_lane_count and len(rows) >= TEXT_DIRECT_FAST_SETTLE_ROWS
+                        and not any(j[0]['engine'].startswith(('serper_', 'cse_')) for j in jobs.values())):
+                    deadline = min(deadline, time.monotonic() + TEXT_DIRECT_FAST_SETTLE_SECONDS)
                 # Google may return an aggregate product without a seller URL.
                 # Expand a bounded number of products into ALL observed sellers;
                 # schedule independently so other sources can already be shown.
@@ -23401,7 +23813,7 @@ async def web_api_health_serpapi(request: Request):
                'text_fast': {'deadline_seconds': TEXT_FAST_TIMEOUT_SECONDS,
                              'empty_extension_seconds': TEXT_FAST_EMPTY_EXTENSION_SECONDS,
                              'late_read_seconds': TEXT_DIRECT_LATE_READ_SECONDS},
-               'provider': serpapi_health_snapshot(),
+               'provider': serpapi_health_snapshot(), 'fast_providers': FAST_PROVIDERS,
                'budget': serpapi_budget_snapshot(), 'cost_counters': api_cost_snapshot()}
     return Response(content=json.dumps(payload, ensure_ascii=False, default=str), media_type='application/json',
                     headers={'Cache-Control': 'no-store'})
