@@ -1,8 +1,10 @@
-# v128.5.32: global markets (approved US + China catalogs) get the same three Serper lanes as
-# the local market — Google Shopping (gl=us, direct merchant links + USD prices), Google
-# Images scoped to the catalogs (product pages with photos, the old google_images role) and
-# scoped organic search — instead of one organic lane. Shopping units price catalog rows
-# through a per-market ledger (USD accepted for the US/China catalogs).
+# v128.5.32: US/CN catalog recovery is independent of local result counts.
+# Restore parallel product-path organic + image sources on Serper; use a bounded
+# same-provider recovery wave, then a per-market SerpApi backup only with budget.
+# Exact-listing Serper media/price recovery retains URL binding. Preserve provider
+# price/media/direct-link fields, reject navigation pages, and keep CN export identity.
+# No new dependency or API key. Replace main.py; existing clients stay compatible.
+# Validation is offline with fixtures; real catalog coverage depends on the provider.
 # v128.5.31: a local-market card whose price turns out to be in a foreign currency (INR on a
 # Kuwait card) is removed instead of shown; foreign currency symbols/codes and other-country
 # words in the indexed title/snippet block the geo-targeting evidence; merchant-page images
@@ -386,7 +388,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization'], max_age=86400)
-BUILD_ID = 'v128.5.32-text-fast'
+BUILD_ID = 'v128.5.32-global-recovery'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -2842,7 +2844,7 @@ def _photo_identity(image_b64, mime_type):
 
 def _photo_literal_contains(haystack, needle):
     """Complete OCR words only; never complete an unreadable model suffix."""
-    if not isinstance(needle, str) or not needle.strip() or re.search(r'[?…�]', needle):
+    if not isinstance(needle, str) or not needle.strip() or re.search(r'[?… ]', needle):
         return False
     text, value = _photo_identity_text(haystack), _photo_identity_text(needle)
     if not value or value in ('unknown', 'unclear', 'unreadable', 'غير معروف', 'غير واضح'):
@@ -4008,6 +4010,7 @@ _LOCAL_BRAND_ALIASES = {
     'kindle': {'ar': 'كيندل'}, 'instax': {'zh': '拍立得', 'ar': 'انستاكس'}, 'fujifilm': {'zh': '富士', 'ar': 'فوجي'},
 }
 _LOCAL_RETRIEVAL_NOUNS = {
+    'socks': {'en': 'stockings|stocking|socks|sock', 'ar': 'جوارب|جورب', 'zh': '长筒袜|长袜|袜子'},
     'coffeecup': {'en': 'coffee cups|coffee cup', 'zh': '咖啡杯', 'ar': 'فنجان قهوة|كوب قهوة', 'de': 'Kaffeetasse', 'fr': 'tasse à café', 'es': 'taza de café'},
     'shoes': {'en': 'shoes|shoe|footwear|sneakers|sneaker|trainers|boots|boot|sandals|sandal|slippers|slipper', 'zh': '鞋|运动鞋|跑鞋|靴子|凉鞋|拖鞋|板鞋', 'ja': '靴|シューズ|スニーカー', 'de': 'Schuhe|Schuh|Sneaker|Stiefel', 'fr': 'chaussures|chaussure|baskets|bottes', 'it': 'scarpe', 'es': 'zapatos|zapatillas', 'tr': 'ayakkabı', 'ar': 'حذاء|أحذية|احذيه|جوتي|جواتي|بوت|صندل|نعال|شبشب|سنيكرز'},
     'planter': {'en': 'plant pot|plant pots|flower pot|flower pots|planters|planter', 'zh': '花盆', 'ja': '植木鉢', 'de': 'Blumentopf|Blumentöpfe', 'fr': 'pot de fleurs', 'it': 'vaso per piante', 'es': 'maceta', 'tr': 'saksı', 'ar': 'أصيص|اصيص'},
@@ -4708,6 +4711,8 @@ def _web_image_search_records(data):
                'thumbnail': item.get('thumbnail') or '',
                'image': item.get('original') or ''}
         for field in ('price', 'extracted_price', 'currency', 'rich_snippet',
+                      'snippet', 'description', 'delivery', 'installment', 'installments_description',
+                      'direct_link', 'merchant_link', 'product_link', 'image_candidates',
                       'monthly_payment_duration'):
             if field in item:
                 row[field] = item[field]
@@ -4769,17 +4774,22 @@ _LOCAL_SNIPPET_PRICE_NOISE = re.compile(
 
 
 def _local_discovery_plain_snippet_price(row, country):
-    """One unambiguous local-currency price in the indexed snippet text, else ''."""
+    """One unambiguous product price, never shipping/savings/monthly charges."""
     text = ' '.join(str(row.get(k) or '') for k in ('snippet', 'description') if isinstance(row.get(k), str))
-    if not text or len(text) > 600:
+    if not text or len(text) > 600 or _LOCAL_SNIPPET_PRICE_NOISE.search(text):
         return ''
     pieces = []
+    fees = r'(?:shipping|delivery|postage|freight|tax|vat|deposit|fee|رسوم|شحن|توصيل|ضريبه|ضريبة)'
     for pat in _WEB_PRICE_PATS:
         for match in pat.finditer(text):
+            before, after = text[max(0, match.start()-60):match.start()], text[match.end():match.end()+40]
+            if (re.search(fees + r'(?:\s+(?:fee|cost|charge|is))?\s*[:=\-]?\s*$', before, re.I)
+                    or re.search(r'^\s*(?:for\s+)?' + fees + r'\b', after, re.I)):
+                continue
             piece = re.sub(r'\s+', ' ', match.group(0)).strip(' .,;')
             if piece and piece not in pieces:
                 pieces.append(piece)
-    if len(pieces) != 1 or _LOCAL_SNIPPET_PRICE_NOISE.search(text):
+    if len(pieces) != 1:
         return ''
     piece = pieces[0]
     if _WEB_NOT_A_PRICE_PIECE.search(piece):
@@ -4790,7 +4800,7 @@ def _local_discovery_plain_snippet_price(row, country):
     local_codes = set(country_currency_codes(country))
     if quote.get('currency') and quote['currency'] not in local_codes:
         return ''
-    return piece[:40]
+    return piece[:80]
 
 
 def _local_discovery_title(row):
@@ -4891,11 +4901,10 @@ def _shopping_unit_price_for(row, market):
             continue  # same store, different model
         score = max(_findzia_match_score(unit['title'], title), _findzia_match_score(title, unit['title']))
         if (row_models & unit_models) or score >= 0.6:
-            price_cc = 'us' if market.get('_retrieval_role') == 'global' else cc
-            quote = _web_price_quote(unit['price'], '', price_cc)
+            quote = _web_price_quote(unit['price'], '', cc)
             if quote and quote.get('kind') == 'exact' and (quote.get('min') or quote.get('max')):
-                allowed = set(country_currency_codes(cc)) | (set(country_currency_codes('us')) if price_cc == 'us' else set())
-                if not quote.get('currency') or quote['currency'] in allowed:
+                local_codes = set(country_currency_codes(cc))
+                if not quote.get('currency') or quote['currency'] in local_codes:
                     return unit['price']
     return ''
 
@@ -4905,7 +4914,6 @@ def _shopping_unit_fill(rows, market):
     if not market.get('_shopping_units'):
         return []
     cc = str(market.get('country') or DEFAULT_COUNTRY).lower()
-    price_cc = 'us' if market.get('_retrieval_role') == 'global' else cc
     changed = []
     for row in rows:
         if not isinstance(row, dict) or _web_row_has_numeric_price(row):
@@ -4913,7 +4921,7 @@ def _shopping_unit_fill(rows, market):
         piece = _shopping_unit_price_for(row, market)
         if not piece:
             continue
-        quote = _web_price_quote(piece, '', price_cc)
+        quote = _web_price_quote(piece, '', cc)
         if not quote:
             continue
         row.update(price=_web_format_quote(quote), price_value=(quote['min'] or quote['max']), currency=quote['currency'] or row.get('currency') or '',
@@ -4927,7 +4935,8 @@ def _shopping_unit_fill(rows, market):
 
 def _local_discovery_rows(data, query, market, provider):
     records = _local_discovery_records(data)
-    _shopping_unit_ledger_add(market, records, provider)
+    if market.get('_retrieval_role') != 'global':
+        _shopping_unit_ledger_add(market, records, provider)
     token = _GUARD_BATCH_DF.set(_findzia_batch_term_frequencies(
         [_local_discovery_title(row) for row in records if isinstance(row, dict)]))
     try:
@@ -4983,7 +4992,7 @@ def _local_discovery_rows_inner(records, query, market, provider):
                 item['price'] = piece
                 row = dict(row, price=piece)
                 stats['snippet_price'] += 1
-        if not item['price']:
+        if not item['price'] and market.get('_retrieval_role') != 'global':
             # The market's Google shopping unit for this merchant + product.
             piece = _shopping_unit_price_for(item, market)
             if piece:
@@ -5309,58 +5318,103 @@ def _global_discovery_request(query, country, kind, timeout_seconds):
 
 
 def _global_market_discovery(query, country, limit=8, timeout_seconds=None, progress_callback=None, cancel_event=None):
-    """Legacy/WhatsApp global discovery shares the same whitelist and deadline."""
-    if not SERPAPI_API_KEY or not query or country not in GLOBAL_MARKET_STORES:
+    """Bounded per-catalog retrieval shared by Lens, legacy and selected markets.
+
+    Two initial sources, one optional fast recovery wave, then a bounded backup.
+    No currency/identity/link guard is relaxed and no country waits for another.
+    """
+    if not query or country not in GLOBAL_MARKET_STORES or not (SERPAPI_API_KEY or FAST_PROVIDERS):
         return []
     duration = min(LOCAL_DISCOVERY_TIMEOUT, timeout_seconds if timeout_seconds is not None else LOCAL_DISCOVERY_TIMEOUT)
-    if duration <= 0:
+    if duration <= 0 or limit <= 0:
         return []
-    deadline = time.monotonic() + duration
+    cancel = cancel_event if cancel_event is not None else threading.Event()
+    started = time.monotonic()
+    deadline = started + duration
+    target = dict(_web_market(country), _retrieval_role='global')
     _market_query_warm(query, ['us'])
-    def cancelled():
-        return cancel_event is not None and cancel_event.is_set()
-    def run(kind):
-        remaining = deadline - time.monotonic()
-        return [] if cancelled() or remaining <= .01 else _global_discovery_request(query, country, kind, remaining)
-    if serper_primary() and _fast_provider_supports_operators('serper'):
-        kinds = ('global_fast',)
-    else:
-        kinds = ('global', 'global2') + (('global_fast',) if FAST_PROVIDERS else ())
-    jobs = {LOCAL_DISCOVERY_POOL.submit(run, kind) for kind in kinds}
-    rows, seen = [], {}
+    jobs, rows = {}, {}
+    launched = set()
+    stage = 'initial'
+    def submit(spec):
+        name = _global_spec_name(spec)
+        if name in launched or cancel.is_set() or time.monotonic() >= deadline:
+            return
+        launched.add(name)
+        jobs[LOCAL_DISCOVERY_POOL.submit(_run_with_market, target,
+            _web_text_direct_fetch, query, spec, deadline, cancel)] = spec
+    for spec in _global_catalog_specs(country):
+        submit(spec)
     try:
-        while jobs and not cancelled() and time.monotonic() < deadline:
+        while jobs and not cancel.is_set() and time.monotonic() < deadline:
             done, _ = wait(jobs, timeout=min(.1, max(0., deadline-time.monotonic())), return_when=FIRST_COMPLETED)
             for job in done:
-                jobs.remove(job)
+                spec = jobs.pop(job)
                 try:
-                    values = job.result() or []
-                except Exception:
+                    data = job.result()
+                    data, _ = _web_text_direct_records(data) if isinstance(data, dict) else ({}, [])
+                    values = _run_with_market(target, _web_text_direct_candidates,
+                        data, query, target, 'global_' + country + '_' + spec['engine'])
+                except Exception as exc:
+                    print(f'GLOBAL SOURCE country={country} error={type(exc).__name__}')
                     values = []
                 batch = []
                 for item in values:
                     key = _web_price_url_key(item.get('link'))
-                    if key in seen:
-                        old = seen[key]
-                        pictures = _web_merge_offer_images(old, item)
-                        changed = bool(pictures and pictures != {k: old.get(k) for k in pictures})
-                        old.update(pictures)
+                    if not key:
+                        continue
+                    old = rows.get(key)
+                    if old is not None:
+                        merged = dict(old)
+                        merged.update(_web_merge_offer_images(old, item))
                         if not _web_row_has_numeric_price(old) and _web_row_has_numeric_price(item):
-                            old.update({k: v for k, v in item.items() if k.startswith('price') or
-                                        k in ('currency', 'original_currency', 'original_price')})
-                            changed = True
-                        if changed:
-                            batch.append(old)
-                    elif key and len(rows) < limit:
-                        seen[key] = item
-                        rows.append(item)
-                        batch.append(item)
-                if batch and progress_callback and not cancelled():
-                    progress_callback(batch)
-        return rows
+                            merged.update({k: v for k, v in item.items() if k.startswith('price') or k == 'currency'})
+                        if merged != old:
+                            rows[key] = merged
+                            batch.append(merged)
+                    else:
+                        rows[key] = dict(item)
+                        batch.append(rows[key])
+                if batch and progress_callback and not cancel.is_set():
+                    progress_callback(_global_diverse_rows(batch, limit))
+            if not jobs and not _global_catalog_sufficient(rows.values()):
+                remaining = deadline - time.monotonic()
+                if stage == 'initial':
+                    stage = 'recovery'
+                    if remaining >= 1.5:
+                        for spec in _global_catalog_specs(country, stage, rows.values()):
+                            submit(spec)
+                if not jobs and stage == 'recovery':
+                    stage = 'backup'
+                    if (SEARCH_PROVIDER_PRIMARY != 'serpapi' and SERPAPI_API_KEY and SERPAPI_BACKUP_ENABLED
+                            and not serpapi_provider_degraded() and remaining >= SERPAPI_BACKUP_MIN_REMAINING_SECONDS):
+                        for spec in _global_catalog_specs(country, stage):
+                            submit(spec)
+        output = _global_diverse_rows(rows.values(), limit)
+        print(f'GLOBAL FINAL country={country} calls={len(launched)} pending={len(jobs)} '
+              f'coverage={_global_catalog_coverage(output)} elapsed_ms={int((time.monotonic()-started)*1000)}')
+        return output
     finally:
+        # This cancellation event may belong to a parent search; never set it.
         for job in jobs:
             job.cancel()
+
+
+def _global_diverse_rows(rows, limit):
+    """Round robin merchants, complete offers first within each merchant."""
+    groups = {}
+    for row in sorted(rows, key=lambda r: (not _web_row_has_numeric_price(r),
+                        not bool(_web_offer_image_candidates(r)), int(r.get('position') or 999))):
+        groups.setdefault(_more_result_domain(row.get('link') or row.get('url')), []).append(row)
+    out = []
+    while groups and len(out) < limit:
+        for host in list(groups):
+            out.append(groups[host].pop(0))
+            if not groups[host]:
+                groups.pop(host)
+            if len(out) >= limit:
+                break
+    return out
 
 
 def _local_lane_count(rows, reference=None):
@@ -8654,7 +8708,7 @@ def _clean_store_name(name):
     return ' '.join(n.split()).strip(' -—–:،') or str(name or '').strip()
 _FINDZIA_ACCESSORY_TOKENS = {'case', 'cover', 'protector', 'guard', 'skin', 'sticker', 'decal', 'cable', 'cord', 'charger', 'adapter', 'adaptor', 'dock', 'stand', 'mount', 'holder', 'strap', 'band', 'sleeve', 'pouch', 'bag', 'lace', 'laces', 'shoelace', 'shoelaces', 'insole', 'insoles', 'sock', 'socks', 'replacement', 'spare', 'part', 'parts', 'accessory', 'accessories', 'manual', 'handbook', 'pdf', 'كفر', 'غطاء', 'حمايه', 'حماية', 'شاحن', 'كيبل', 'كابل', 'وصله', 'وصلة', 'حامل', 'سوار', 'رباط', 'اربطة', 'أربطة', 'جوارب', 'نعل', 'قطع', 'غيار', 'اكسسوار', 'اكسسوارات'}
 _FINDZIA_CONFLICT_GROUPS = (({'tennis', 'تنس'}, {'running', 'runner', 'jogging', 'basketball', 'soccer', 'football', 'golf', 'hiking', 'trail', 'padel', 'تنس', 'جري', 'ركض', 'سله', 'سلة', 'قدم', 'جولف', 'بادل'}), ({'running', 'runner', 'jogging', 'جري', 'ركض'}, {'tennis', 'basketball', 'soccer', 'football', 'golf', 'hiking', 'padel', 'تنس', 'سله', 'سلة', 'قدم', 'جولف', 'بادل'}), ({'padel', 'بادل'}, {'tennis', 'running', 'basketball', 'soccer', 'football', 'golf', 'hiking', 'تنس', 'جري', 'سله', 'سلة', 'قدم', 'جولف'}))
-_FINDZIA_QUERY_FILLER = {'buy', 'best', 'price', 'cheap', 'cheapest', 'online', 'shop', 'shopping', 'for', 'the', 'a', 'an', 'of', 'in', 'with', 'new', 'original', 'ابي', 'أبي', 'ابغى', 'ابغي', 'ودي', 'اريد', 'أريد', 'افضل', 'أفضل', 'ارخص', 'أرخص', 'سعر', 'سعره', 'بكم', 'شراء', 'اونلاين', 'أونلاين', 'وين', 'القى', 'الاقي', 'عندكم', 'متوفر', 'موجود', 'جديد', 'جديده', 'اصلي', 'اصليه', 'ماركه', 'ماركة', 'نوع'}
+_FINDZIA_QUERY_FILLER = {'generic', 'unbranded', 'buy', 'best', 'price', 'cheap', 'cheapest', 'online', 'shop', 'shopping', 'for', 'the', 'a', 'an', 'of', 'in', 'with', 'new', 'original', 'ابي', 'أبي', 'ابغى', 'ابغي', 'ودي', 'اريد', 'أريد', 'افضل', 'أفضل', 'ارخص', 'أرخص', 'سعر', 'سعره', 'بكم', 'شراء', 'اونلاين', 'أونلاين', 'وين', 'القى', 'الاقي', 'عندكم', 'متوفر', 'موجود', 'جديد', 'جديده', 'اصلي', 'اصليه', 'ماركه', 'ماركة', 'نوع'}
 _FINDZIA_SPEC_UNITS = {
     'tb', 'gb', 'mb', 'kb', 'kg', 'g', 'gm', 'gr', 'mg', 'lb', 'lbs',
     'pound', 'pounds', 'oz', 'ounce', 'ounces', 'floz', 'cc', 'ml', 'l',
@@ -8721,6 +8775,17 @@ def _findzia_hard_product_mismatch(query, title):
     t = norm_tokens(t_raw)
     if not q or not t:
         return False
+    # These spelling variants name the product itself, not an added accessory.
+    hosiery = {'sock', 'socks', 'stocking', 'stockings', 'جوارب', 'جورب'}
+    if q & hosiery:
+        q |= hosiery
+    if t & hosiery:
+        t |= hosiery
+    for left, right in ((r'\bopen[ -]toe\b', r'\bclosed[ -]toe\b'),
+                        (r'\bthigh[ -]high\b', r'\bknee[ -]high\b')):
+        if ((re.search(left, q_raw) and re.search(right, t_raw) and not re.search(left, t_raw))
+                or (re.search(right, q_raw) and re.search(left, t_raw) and not re.search(right, t_raw))):
+            return True
     q_acc = q & _FINDZIA_ACCESSORY_TOKENS
     t_acc = t & _FINDZIA_ACCESSORY_TOKENS
     if t_acc - q_acc:
@@ -17018,24 +17083,40 @@ def _google_organic_price_text(row):
 
 def _china_global_product_url(domain, url):
     try:
-        u = urllib.parse.urlparse(str(url or '').strip())
-        host = u.netloc.lower().split(':')[0]
-        host = host[4:] if host.startswith('www.') else host
-        path = (u.path or '').lower()
-        query = (u.query or '').lower()
-        pathq = path + ('?' + query if query else '')
-    except Exception:
+        p = urllib.parse.urlsplit(str(url or '').strip())
+        host = (p.hostname or '').lower()
+        path = p.path.lower()
+        query = urllib.parse.parse_qs(p.query)
+        if p.scheme not in ('http', 'https') or p.username or p.password or p.port not in (None, 80, 443):
+            return False
+    except (ValueError, TypeError):
         return False
     if not _host_matches_any(host, (domain,)):
         return False
-    if not path or path == '/':
+    if host.startswith(('login.', 'passport.', 'search.', 'seller.', 'sso.')):
         return False
-    bad_markers = ('/search', '/category', '/categories', '/catalog', '/collections', '/store/', '/stores/', '/shop/', '/shops/', '/wholesale/', '/products?', '/product-list', '/list/', '/listing/', '/all-products', 'searchtext=', 'searchkey=', 'keyword=', 'q=', 'query=', 'search=')
-    if any((marker in pathq for marker in bad_markers)):
+    if set(path.strip('/').split('/')) & {'search', 'category', 'categories', 'catalog', 'collections', 'store', 'stores', 'shop', 'shops', 'wholesale', 'login'}:
         return False
-    checks = {'aliexpress.com': lambda: bool(re.search('/item/(?:\\d+)(?:\\.html)?', path)), 'temu.com': lambda: '/goods.html' in path and ('goods_id=' in query or 'goodsid=' in query) or bool(re.search('-g-\\d+', path)) or bool(re.search('/goods/[^/]+', path)), 'shein.com': lambda: bool(re.search('(?:-p-|/product-p-)\\d+', path)), 'dhgate.com': lambda: '/product/' in path and bool(re.search('(?:/|-)\\d{6,}(?:\\.html)?$', path)), 'banggood.com': lambda: bool(re.search('(?:-p-|/p-)\\d+(?:\\.html)?', path)), 'alibaba.com': lambda: '/product-detail/' in path and bool(re.search('(?:_|/)\\d{6,}(?:\\.html)?$', path)), 'made-in-china.com': lambda: '/product/' in path and path.endswith('.html') and (len(path.strip('/')) >= 18)}
-    checker = checks.get(domain)
-    return bool(checker and checker())
+    # Recognize a complete, observed listing route BEFORE looking at tracking
+    # parameters. Never manufacture a destination from a merchant name or SKU.
+    if domain == 'aliexpress.com':
+        return bool(re.fullmatch(r'/(?:[a-z]{2}/)?item/\d+(?:\.html)?/?', path))
+    if domain == 'temu.com':
+        return bool(re.search(r'-g-\d+(?:\.html)?/?$', path)
+                    or (re.fullmatch(r'/(?:[a-z]{2}(?:-[a-z]{2})?/)?goods\.html', path)
+                        and any(re.fullmatch(r'\d+', v) for k in ('goods_id', 'goodsid') for v in query.get(k, [])))
+                    or re.fullmatch(r'/(?:[a-z]{2}/)?goods/(?:[^/]*-)?\d+(?:\.html)?/?', path))
+    if domain == 'shein.com':
+        return bool(re.search(r'(?:-p-|/product-p-)\d+(?:\.html)?/?$', path))
+    if domain == 'alibaba.com':
+        return bool(re.fullmatch(r'/product-detail/[^/]+_\d{6,}\.html', path))
+    if domain == 'dhgate.com':
+        return bool('/product/' in path and re.search(r'(?:/|-)\d{6,}(?:\.html)?$', path))
+    if domain == 'banggood.com':
+        return bool(re.search(r'(?:-p-|/p-)\d+(?:\.html)?/?$', path))
+    if domain == 'made-in-china.com':
+        return bool('/product/' in path and path.endswith('.html') and len(path.strip('/')) >= 18)
+    return False
 
 def _web_marketplace_repeat_cap(domain_or_url):
     raw = str(domain_or_url or '').strip().lower()
@@ -18388,7 +18469,8 @@ def _web_indexed_offer_money(item):
 
 def _web_targeted_price_updates(entries, lang, market):
     """One bounded indexed lookup for exact listing URLs; recover image and money independently."""
-    if not serpapi_recovery_allowed():
+    use_fast = serper_primary() and bool(SERPER_API_KEY) and _fast_provider_supports_operators('serper')
+    if not use_fast and not serpapi_recovery_allowed():
         return {}
     MARKET_CTX.value = dict(market)
     terms = []
@@ -18407,7 +18489,7 @@ def _web_targeted_price_updates(entries, lang, market):
         if ids:
             term += ' ' + ' '.join('"' + re.sub(r'[^a-zA-Z0-9_-]', '', value) + '"' for value in ids)
         terms.append('(' + term + ')')
-    if not terms or not SERPAPI_API_KEY:
+    if not terms or not (use_fast or SERPAPI_API_KEY):
         return {}
     first = next(iter(entries.values()), {})
     search_cc = 'us' if any(row.get('export_store') for row in entries.values()) else str(first.get('country') or first.get('market_country') or market.get('country') or 'us')
@@ -18425,8 +18507,14 @@ def _web_targeted_price_updates(entries, lang, market):
     # The previous five-second read deadline repeatedly expired in production.
     budget = max(.2, min(10.0, WEB_LIVE_PRICE_WAIT))
     connect = min(1.0, budget * .15)
-    data = _serpapi_cached_json(params, timeout=(connect, budget - connect),
-                label='EXACT-LISTING ' + ('IMAGES' if image_source else 'MEDIA/PRICES')) or {}
+    if use_fast:
+        params['engine'] = 'serper_images' if image_source else 'serper_search'
+        data = _fast_provider_search(params['engine'], params['q'], search_cc, params['hl'],
+                                    (connect, max(.05, budget - connect))) or {}
+    else:
+        data = _serpapi_cached_json(params, timeout=(connect, budget - connect),
+                    label='EXACT-LISTING ' + ('IMAGES' if image_source else 'MEDIA/PRICES')) or {}
+
     updates = {}
     for item in _web_indexed_media_records(data):
         link = _local_discovery_direct_link(item)
@@ -18446,6 +18534,11 @@ def _web_targeted_price_updates(entries, lang, market):
             evidence = dict(item, _shopping_gl=cc)
             if row.get('export_store'):
                 evidence['_price_market'] = 'us'
+            if not evidence.get('price'):
+                piece = _local_discovery_plain_snippet_price(item, evidence.get('_price_market') or cc)
+                if piece:
+                    evidence['price'] = piece
+
             quote = _web_indexed_offer_quote(evidence)
             money = ((quote['min'] or quote['max']),quote['currency']) if quote else None
             change = dict(updates.get(key) or {})
@@ -18727,7 +18820,7 @@ def _web_confirmable_price(row):
     return bool(observed and (not bound or _web_price_url_key(bound)==_web_price_url_key(row.get('url'))))
 
 
-async def _web_with_live_prices(source, lang, country, allow_paid=True, wait_seconds=None):
+async def _web_with_live_prices_internal(source, lang, country, allow_paid=True, wait_seconds=None):
     """Deliver rows immediately; interleave prices during retrieval AND AI review."""
     tail_wait = WEB_LIVE_PRICE_WAIT if wait_seconds is None else max(.5, float(wait_seconds))
     token = _WEB_LIVE_PRICE_ACTIVE.set(True)
@@ -18902,12 +18995,16 @@ async def _web_with_live_prices(source, lang, country, allow_paid=True, wait_sec
                         and (not _web_row_has_numeric_price(r) or not _web_offer_image_candidates(r))
                         and (k in page_finished or loop.time() - missing_since.get(k, loop.time()) >= .75
                              or next_event is None)}
-            if eligible and allow_paid and WEB_PRICE_ENRICH_SHOPPING_FALLBACK and SERPAPI_API_KEY:
+            fast_global_media = bool(GLOBAL_CATALOG_MEDIA_RECOVERY and serper_primary() and SERPER_API_KEY
+                                     and _fast_provider_supports_operators('serper'))
+            recovery_entries = (eligible if allow_paid else
+                                {k: r for k, r in eligible.items() if fast_global_media and _global_row_country(r)})
+            if recovery_entries and (allow_paid or fast_global_media) and WEB_PRICE_ENRICH_SHOPPING_FALLBACK and (SERPAPI_API_KEY or SERPER_API_KEY):
                 # Hold the final budget slot for later lanes until retrieval ends.
                 slots = WEB_ASYNC_PRICE_SHARED_MARKETS - recovery_calls
                 if next_event is not None:
                     slots = min(slots, max(0, WEB_ASYNC_PRICE_SHARED_MARKETS - 1 - recovery_calls))
-                for batch in _web_automatic_price_batches(eligible)[:slots]:
+                for batch in _web_automatic_price_batches(recovery_entries)[:slots]:
                     recovery_attempted.update(batch)
                     task = asyncio.create_task(asyncio.to_thread(_web_targeted_price_updates, batch, lang, dict(market)))
                     shared[task] = recovery_calls
@@ -18944,6 +19041,64 @@ async def _web_with_live_prices(source, lang, country, allow_paid=True, wait_sec
             await asyncio.gather(*tasks, return_exceptions=True)
         await source.aclose()
         _WEB_LIVE_PRICE_ACTIVE.reset(token)
+
+
+async def _web_with_live_prices(source, lang, country, allow_paid=True, wait_seconds=None):
+    """Enrich all candidates internally, publish complete global offers as ready.
+
+    Pending global candidates are not false zero-price cards. Their first ready
+    update is a `result`, subsequent updates are `upsert`; snapshots use the same
+    predicate. Local behavior and all existing event names remain compatible.
+    """
+    stream = _web_with_live_prices_internal(source, lang, country, allow_paid, wait_seconds)
+    emitted = set()
+    def ready(row):
+        if row.get('hidden'):
+            return False
+        if not GLOBAL_REQUIRE_COMPLETE_OFFERS or not _global_row_country(row):
+            return True
+        return bool(_web_row_has_numeric_price(row) and _web_confirmable_price(row)
+                    and _web_offer_image_candidates(row) and not row.get('price_unavailable'))
+    try:
+        async for raw in stream:
+            event = json.loads(raw) if isinstance(raw, (str, bytes)) else dict(raw)
+            item = event.get('item')
+            if isinstance(item, dict):
+                key = _web_identity_offer_key(item)
+                if not ready(item):
+                    if key in emitted:
+                        emitted.discard(key)
+                        event.update(event='upsert', item=dict(item, hidden=True))
+                        yield _web_stream_event(event)
+                    continue
+                if event.get('event') in ('result', 'upsert'):
+                    event['event'] = 'upsert' if key in emitted else 'result'
+                    emitted.add(key)
+            if isinstance(event.get('results'), list):
+                candidates = [dict(r) for r in event['results'] if isinstance(r, dict)]
+                _web_flag_price_outliers({_web_identity_offer_key(r): r for r in candidates})
+                filtered = {_web_identity_offer_key(r): dict(r) for r in candidates if isinstance(r, dict) and ready(r)}
+                hidden_global = sum(bool(_global_row_country(r)) and not ready(r) for r in candidates if isinstance(r, dict))
+                event = _web_live_snapshot(event, filtered)
+                if 'captured_results' in event:
+                    event['captured_results'] = list(event['results'])
+                event.update(global_unconfirmed_count=hidden_global,
+                             priced_count=sum(_web_row_has_numeric_price(r) for r in event['results']),
+                             missing_price_count=sum(not _web_row_has_numeric_price(r) for r in event['results']))
+                # Final ready cards may be learned from a snapshot. Announce them
+                # once for clients relying on incremental results, before done.
+                for row in event.get('global_results') or []:
+                    key = _web_identity_offer_key(row)
+                    if key not in emitted:
+                        emitted.add(key)
+                        yield _web_stream_event({'event': 'result', 'phase': 'global_offer_ready',
+                            'item': row, 'market': row.get('market'), 'elapsed_ms': event.get('elapsed_ms', 0)})
+                if event.get('event') == 'done':
+                    print(f'GLOBAL PUBLICATION visible={len(event.get("global_results") or [])} '
+                          f'unconfirmed={hidden_global}')
+            yield _web_stream_event(event)
+    finally:
+        await stream.aclose()
 
 
 def _web_local_discovery_rows_sync(query, country, lang, existing, progress_callback=None, cancel_event=None):
@@ -19993,74 +20148,107 @@ def _fast_rich_snippet(price_text, currency=''):
 
 
 def _serper_json(path, body, timeout):
-    """POST to Serper.dev; returns the parsed JSON or None. Never logs the key."""
+    """POST to Serper; close failed responses too and never log credentials."""
     began = time.monotonic()
+    response = None
     try:
-        r = requests.post(f'https://google.serper.dev/{path}', json=body, timeout=timeout,
-                          headers={'X-API-KEY': SERPER_API_KEY, 'Content-Type': 'application/json'})
-        status = r.status_code
-        data = r.json() if status < 500 else {}
-        r.close()
+        response = requests.post(f'https://google.serper.dev/{path}', json=body, timeout=timeout,
+                                 headers={'X-API-KEY': SERPER_API_KEY, 'Content-Type': 'application/json'})
+        status = response.status_code
+        data = response.json() if status < 500 else {}
     except requests.exceptions.Timeout:
         print(f'FAST PROVIDER FAILURE provider=serper path={path} reason=timeout elapsed_ms={int((time.monotonic()-began)*1000)}')
         return None
     except Exception as exc:
         print(f'FAST PROVIDER FAILURE provider=serper path={path} reason={type(exc).__name__} elapsed_ms={int((time.monotonic()-began)*1000)}')
         return None
+    finally:
+        if response is not None:
+            try:
+                response.close()
+            except Exception:
+                pass
     if status != 200 or not isinstance(data, dict):
-        message = re.sub(r'\s+', ' ', str((data or {}).get('message') or (data or {}).get('error') or ''))[:120] if isinstance(data, dict) else ''
+        message = str((data or {}).get('message') or (data or {}).get('error') or '') if isinstance(data, dict) else ''
+        for secret in (SERPER_API_KEY, SERPAPI_API_KEY):
+            if secret:
+                message = message.replace(secret, '[redacted]')
+        message = re.sub(r'https?://\S+', '[url]', message)
+        message = re.sub(r'\s+', ' ', message)[:160]
         print(f'FAST PROVIDER FAILURE provider=serper path={path} reason=http_{status} elapsed_ms={int((time.monotonic()-began)*1000)} message={message!r}')
-        if status == 400 and 'pattern not allowed' in message.lower() and not _FAST_PROVIDER_FLAGS.get('serper_no_operators'):
+        if status == 400 and 'pattern not allowed' in message.lower():
             _FAST_PROVIDER_FLAGS['serper_no_operators'] = True
-            print('FAST PROVIDER NOTE serper plan rejects search operators (site:) -> scoped global lane disabled for this process')
+            print('FAST PROVIDER NOTE operators rejected -> plain merchant-wording recovery; catalog allowlist retained')
         return None
     return data
 
 
+def _serper_offer_fields(row):
+    """Copy observed fields of ONE result; never a parent, knowledge panel or sibling."""
+    item = {}
+    for key in ('price', 'currency', 'extracted_price', 'rich_snippet', 'snippet', 'description',
+                'delivery', 'installments_description', 'monthly_payment_duration', 'down_payment',
+                'direct_link', 'merchant_link', 'product_link', 'original_link'):
+        if row.get(key) not in (None, ''):
+            item[key] = copy.deepcopy(row[key])
+    for source, target in (('directLink', 'direct_link'), ('merchantLink', 'merchant_link'), ('productLink', 'product_link')):
+        if isinstance(row.get(source), str) and row[source]:
+            item.setdefault(target, row[source])
+    pictures = _web_offer_image_candidates({'image': row.get('imageUrl'), 'thumbnail': row.get('thumbnailUrl'),
+                                          'image_candidates': _web_offer_image_candidates(row)})
+    if pictures:
+        item.update(thumbnail=pictures[0], image_candidates=pictures)
+    return item
+
+
 def _serper_to_serpapi(kind, data):
-    """Map Serper's organic/images/shopping arrays onto SerpApi keys."""
+    """Preserve direct targets and indexed price/image evidence across every lane."""
     out = {'search_metadata': {'status': 'Success', 'provider': 'serper'}}
+    if not isinstance(data, dict):
+        return out
     if kind in ('search', 'shopping'):
         organic = []
         for i, row in enumerate(data.get('organic') or []):
-            if not isinstance(row, dict) or not row.get('link'):
+            if not isinstance(row, dict):
                 continue
-            item = {'position': i + 1, 'title': row.get('title') or '', 'link': row['link'],
-                    'snippet': row.get('snippet') or '', 'displayed_link': row.get('domain') or urllib.parse.urlsplit(row['link']).hostname or ''}
-            if row.get('imageUrl'):
-                item['thumbnail'] = row['imageUrl']
-            if row.get('price'):
-                snippet = _fast_rich_snippet(row.get('price'), row.get('currency'))
-                if snippet:
-                    item['rich_snippet'] = snippet
+            fields = _serper_offer_fields(row)
+            link = _local_discovery_direct_link(dict(row, **fields)) or row.get('link') or ''
+            if not link:
+                continue
+            item = dict(fields, position=i + 1, title=row.get('title') or '', link=link,
+                        displayed_link=row.get('domain') or urllib.parse.urlsplit(link).hostname or '')
+            # Preserve the original string/range and currency; no amount is
+            # inferred from a title, a discount, an image or another merchant.
             children = row.get('sitelinks')
-            if isinstance(children, list) and children:
-                item['sitelinks'] = {'inline': [{'title': c.get('title') or '', 'link': c.get('link') or ''} for c in children if isinstance(c, dict) and c.get('link')]}
+            if isinstance(children, list):
+                item['sitelinks'] = {'inline': [dict(c) for c in children if isinstance(c, dict) and c.get('link')]}
             organic.append(item)
         if organic:
             out['organic_results'] = organic
         shopping = []
         for i, row in enumerate(data.get('shopping') or []):
-            if not isinstance(row, dict) or not row.get('link') or not row.get('title'):
+            if not isinstance(row, dict) or not row.get('title'):
                 continue
-            item = {'position': i + 1, 'title': row['title'], 'link': row['link'], 'source': row.get('source') or '',
-                    'price': str(row.get('price') or ''), 'thumbnail': row.get('imageUrl') or ''}
-            amount = _fast_price_number(item['price'])
-            if amount is not None:
-                item['extracted_price'] = amount
-            if row.get('delivery'):
-                item['delivery'] = row['delivery']
-            shopping.append(item)
+            fields = _serper_offer_fields(row)
+            link = _local_discovery_direct_link(dict(row, **fields)) or row.get('link') or ''
+            if link:
+                shopping.append(dict(fields, position=i + 1, title=row['title'], link=link,
+                                     source=row.get('source') or ''))
         if shopping:
             out['shopping_results' if kind == 'shopping' else 'inline_shopping_results'] = shopping
     elif kind == 'images':
         images = []
         for i, row in enumerate(data.get('images') or []):
-            if not isinstance(row, dict) or not row.get('link') or not row.get('imageUrl'):
+            if not isinstance(row, dict):
                 continue
-            images.append({'position': i + 1, 'title': row.get('title') or '', 'link': row['link'],
-                           'original': row['imageUrl'], 'thumbnail': row.get('thumbnailUrl') or row['imageUrl'],
-                           'source': row.get('domain') or row.get('source') or ''})
+            fields = _serper_offer_fields(row)
+            link = _local_discovery_direct_link(dict(row, **fields)) or row.get('link') or ''
+            image = row.get('imageUrl') or fields.get('thumbnail') or ''
+            if not link or not image:
+                continue
+            images.append(dict(fields, position=i + 1, title=row.get('title') or '', link=link,
+                               original=image, thumbnail=row.get('thumbnailUrl') or image,
+                               source=row.get('domain') or row.get('source') or ''))
         if images:
             out['images_results'] = images
     return out
@@ -20142,38 +20330,187 @@ def _cse_to_serpapi(kind, data):
     return out
 
 
+_FAST_PROVIDER_FLIGHTS = {}
+_FAST_PROVIDER_FLIGHT_LOCK = threading.Lock()
+_FAST_PROVIDER_SLOTS = threading.BoundedSemaphore(max(4, min(32, int(os.environ.get('FAST_PROVIDER_MAX_INFLIGHT', '16')))))
+
+
 def _fast_provider_search(engine, wording, country, hl, timeout):
-    """engine: serper_search|serper_images|serper_shopping|cse_search|cse_images."""
+    """Coalesce identical requests; bound process-wide I/O and preserve evidence."""
     provider, kind = engine.split('_', 1)
-    cache_params = {'engine': engine, 'q': wording, 'gl': country, 'hl': hl}
+    cache_params = {'engine': engine, 'q': wording, 'gl': country, 'hl': hl, 'adapter': 'observed-offer-v32'}
     key = _serpapi_cache_key(cache_params)
     cached = _serpapi_cache_get(key)
     if isinstance(cached, dict):
         print(f'FAST PROVIDER CACHE HIT provider={provider} kind={kind} key={key[:10]}')
         return copy.deepcopy(cached)
     began = time.monotonic()
+    try:
+        parts = timeout if isinstance(timeout, (tuple, list)) else (timeout,)
+        budget = sum(max(.01, float(v)) for v in parts if v is not None)
+    except (TypeError, ValueError):
+        budget = FAST_PROVIDER_TIMEOUT_SECONDS
+    deadline = began + budget
+    with _FAST_PROVIDER_FLIGHT_LOCK:
+        flight = _FAST_PROVIDER_FLIGHTS.get(key)
+        leader = flight is None
+        if leader:
+            flight = {'event': threading.Event(), 'data': None}
+            _FAST_PROVIDER_FLIGHTS[key] = flight
+    if not leader:
+        if flight['event'].wait(max(0., deadline - time.monotonic())):
+            _api_cost_record('fast_provider_shared')
+            return copy.deepcopy(flight['data'])
+        return None  # never duplicate a still-running paid request
     data = None
-    if provider == 'serper':
-        body = {'q': wording, 'gl': country, 'hl': hl, 'num': FAST_PROVIDER_NUM}
-        if COUNTRY_NAMES.get(country) and kind != 'images':
-            body['location'] = COUNTRY_NAMES[country]
-        if _web_model_tokens_from_listing(wording):
-            body['autocorrect'] = False  # keep SPS1000i as typed (SerpApi nfpr=1 equivalent)
-        raw = _serper_json(kind, body, timeout)
-        data = _serper_to_serpapi(kind, raw) if isinstance(raw, dict) else None
-    elif provider == 'cse':
-        params = {'q': wording, 'gl': country, 'hl': hl, 'num': 10, 'safe': 'off'}
-        if kind == 'images':
-            params['searchType'] = 'image'
-        raw = _cse_json(params, timeout)
-        data = _cse_to_serpapi(kind, raw) if isinstance(raw, dict) else None
-    rows = sum(len(data.get(k) or []) for k in ('organic_results', 'images_results', 'shopping_results', 'inline_shopping_results')) if isinstance(data, dict) else 0
-    print(f'FAST PROVIDER provider={provider} kind={kind} country={country} hl={hl} status={"returned" if data else "unavailable"}'
-          f' rows={rows} elapsed_ms={int((time.monotonic()-began)*1000)}')
-    _api_cost_record(f'fast_provider_{provider}')
-    if isinstance(data, dict) and rows:
-        _serpapi_cache_put(key, engine, data)
-    return data
+    acquired = False
+    try:
+        acquired = _FAST_PROVIDER_SLOTS.acquire(timeout=max(0., deadline-time.monotonic()))
+        remaining = deadline - time.monotonic()
+        if not acquired or remaining <= .05:
+            return None
+        connect = min(1.5, max(.01, remaining * .15))
+        bounded = (connect, max(.01, remaining-connect))
+        if provider == 'serper':
+            body = {'q': wording, 'gl': country, 'hl': hl, 'num': FAST_PROVIDER_NUM, 'autocorrect': False}
+            if COUNTRY_NAMES.get(country) and kind != 'images':
+                body['location'] = COUNTRY_NAMES[country]
+            raw = _serper_json(kind, body, bounded)
+            data = _serper_to_serpapi(kind, raw) if isinstance(raw, dict) else None
+        elif provider == 'cse':
+            params = {'q': wording, 'gl': country, 'hl': hl, 'num': 10, 'safe': 'off'}
+            if kind == 'images':
+                params['searchType'] = 'image'
+            raw = _cse_json(params, bounded)
+            data = _cse_to_serpapi(kind, raw) if isinstance(raw, dict) else None
+        _api_cost_record(f'fast_provider_{provider}')
+        count = sum(len(data.get(k) or []) for k in ('organic_results', 'images_results', 'shopping_results', 'inline_shopping_results')) if isinstance(data, dict) else 0
+        print(f'FAST PROVIDER provider={provider} kind={kind} country={country} hl={hl} '
+              f'status={"returned" if isinstance(data, dict) else "unavailable"} rows={count} '
+              f'elapsed_ms={int((time.monotonic()-began)*1000)}')
+        if isinstance(data, dict) and count:
+            _serpapi_cache_put(key, engine, data)
+        return copy.deepcopy(data)
+    finally:
+        if acquired:
+            _FAST_PROVIDER_SLOTS.release()
+        with _FAST_PROVIDER_FLIGHT_LOCK:
+            flight['data'] = copy.deepcopy(data)
+            if _FAST_PROVIDER_FLIGHTS.get(key) is flight:
+                _FAST_PROVIDER_FLIGHTS.pop(key, None)
+            flight['event'].set()
+
+
+# Bounded catalog recovery; caps are ceilings, never permission to add a bad offer.
+GLOBAL_CATALOG_TARGET_ROWS = max(1, min(12, int(os.environ.get('GLOBAL_CATALOG_TARGET_ROWS', '4'))))
+GLOBAL_CATALOG_TARGET_STORES = max(1, min(4, int(os.environ.get('GLOBAL_CATALOG_TARGET_STORES', '2'))))
+GLOBAL_CATALOG_RECOVERY_MAX_CALLS = max(0, min(4, int(os.environ.get('GLOBAL_CATALOG_RECOVERY_MAX_CALLS', '3'))))
+GLOBAL_CATALOG_BACKUP_MAX_CALLS = max(0, min(2, int(os.environ.get('GLOBAL_CATALOG_BACKUP_MAX_CALLS', '2'))))
+GLOBAL_CATALOG_MEDIA_RECOVERY = env_bool('GLOBAL_CATALOG_MEDIA_RECOVERY', True)
+GLOBAL_REQUIRE_COMPLETE_OFFERS = env_bool('GLOBAL_REQUIRE_COMPLETE_OFFERS', True)
+_GLOBAL_PRODUCT_PATHS = {
+    'amazon.com': ('/dp/', '/gp/product/'), 'ebay.com': ('/itm/',),
+    'etsy.com': ('/listing/',), 'walmart.com': ('/ip/',),
+    'aliexpress.com': ('/item/',), 'temu.com': ('-g-', '/goods.html', '/goods/'),
+    'shein.com': ('-p-',), 'alibaba.com': ('/product-detail/',),
+}
+
+
+def _global_row_country(row):
+    """Only already-labelled global rows; never reinterpret the user's local market."""
+    if not isinstance(row, dict) or row.get('market_scope') == 'local' or row.get('market') == 'local' or row.get('market_rank') == 0:
+        return ''
+    cc = str(row.get('market_country') or row.get('country') or '').lower()
+    url = row.get('url') or row.get('link') or ''
+    if cc in GLOBAL_MARKET_STORES and _global_catalog_evidence(row, cc):
+        return cc
+    if row.get('export_store') and _global_store_match(url, 'cn'):
+        return 'cn'
+    if row.get('market_scope') == 'global' or row.get('market') in ('global', 'us', 'china') or row.get('market_rank') in (1, 2):
+        return next((catalog for catalog in GLOBAL_MARKET_STORES if _global_catalog_evidence(row, catalog)), '')
+    return ''
+
+
+def _global_rows_for(rows, country):
+    return [r for r in rows if _global_row_country(r) == country]
+
+
+def _global_catalog_coverage(rows):
+    rows = list(rows or [])
+    return {'rows': len(rows),
+            'stores': len({_more_result_domain(r.get('url') or r.get('link')) for r in rows}),
+            'priced': sum(_web_row_has_numeric_price(r) for r in rows),
+            'images': sum(bool(_web_offer_image_candidates(r)) for r in rows),
+            'complete': sum(_web_row_has_numeric_price(r) and bool(_web_offer_image_candidates(r)) for r in rows)}
+
+
+def _global_catalog_sufficient(rows):
+    complete = [r for r in rows if _web_row_has_numeric_price(r) and _web_offer_image_candidates(r)]
+    coverage = _global_catalog_coverage(complete)
+    return coverage['rows'] >= GLOBAL_CATALOG_TARGET_ROWS and coverage['stores'] >= GLOBAL_CATALOG_TARGET_STORES
+
+
+def _global_catalog_specs(country, stage='initial', existing=()):
+    """At most 2 initial + 3 fast rescue + 2 conditional backup requests per market.
+
+    A rejected operator never disables a whole market: ordinary merchant words
+    remain query hints, while the unchanged domain allowlist decides acceptance.
+    """
+    stores = list(GLOBAL_MARKET_STORES.get(country, ()))
+    if not stores:
+        return []
+    provider = ('serper' if serper_primary() else FAST_PROVIDERS[0]) if FAST_PROVIDERS and SEARCH_PROVIDER_PRIMARY != 'serpapi' else ''
+    fast = bool(provider and stage != 'backup')
+    supports = not fast or _fast_provider_supports_operators(provider)
+    def spec(kind, domains, suffix):
+        engine = (provider + '_' + kind) if fast else (TEXT_DIRECT_IMAGES_ENGINE if kind == 'images' else 'google')
+        return {'country': country, 'role': 'global', 'engine': engine, 'hl': 'en',
+                'geo_cue': False, 'catalog_domains': tuple(domains), 'catalog_stage': stage,
+                'catalog_id': suffix, 'product_paths': kind != 'shopping',
+                'plain_catalog': not supports, '_backup': stage == 'backup'}
+    domains = [d for _, d in stores]
+    if stage == 'backup':
+        return [spec('search', domains, 'backup-products'), spec('images', domains, 'backup-images')][:GLOBAL_CATALOG_BACKUP_MAX_CALLS]
+    if not supports:
+        covered = {_global_store_match(r.get('url') or r.get('link'), country) for r in existing}
+        ordered = [s for s in stores if s not in covered] + [s for s in stores if s in covered]
+        selected = ordered[:2] if stage == 'initial' else ordered[:GLOBAL_CATALOG_RECOVERY_MAX_CALLS]
+        return [spec('images' if stage == 'initial' and i == 1 and FAST_PROVIDER_IMAGES else 'search',
+                     [d], 'plain-' + d) for i, (_, d) in enumerate(selected)]
+    if stage == 'initial':
+        return [spec('search', domains, 'products')] + ([spec('images', domains, 'images')] if not fast or FAST_PROVIDER_IMAGES else [])
+    if not fast:
+        return []
+    middle = (len(domains) + 1) // 2
+    out = [spec('search', group, 'stores-' + str(i))
+           for i, group in enumerate((domains[:middle], domains[middle:])) if group]
+    if provider == 'serper' and FAST_PROVIDER_SHOPPING:
+        out.insert(0, spec('shopping', domains, 'shopping'))
+    return out[:GLOBAL_CATALOG_RECOVERY_MAX_CALLS]
+
+
+def _global_catalog_wording(query, spec):
+    country = spec['country']
+    allowed = dict((domain, label) for label, domain in GLOBAL_MARKET_STORES[country])
+    domains = [d for d in spec.get('catalog_domains', tuple(allowed)) if d in allowed]
+    if not domains:
+        return query  # acceptance still requires the global allowlist
+    # "Generic" is not a manufacturer; all remaining named words/numbers stay.
+    wording = re.sub(r'(?i)^(?:generic|unbranded)\s+', '', str(query or '').strip())
+    if spec.get('plain_catalog') or (spec['engine'].startswith('serper_') and not _fast_provider_supports_operators('serper')):
+        return f'{wording} {allowed[domains[0]]}'.strip()
+    scopes = []
+    for domain in domains:
+        paths = _GLOBAL_PRODUCT_PATHS.get(domain, ()) if spec.get('product_paths', not spec['engine'].endswith('shopping')) else ()
+        if paths:
+            scopes.extend('(site:' + domain + ' inurl:' + path + ')' for path in paths)
+        else:
+            scopes.append('site:' + domain)
+    return wording + ' (' + ' OR '.join(scopes) + ')'
+
+
+def _global_spec_name(spec):
+    return ':'.join(str(spec.get(k) or '') for k in ('role', 'country', 'engine', 'hl', 'catalog_stage', 'catalog_id'))
 
 
 def _web_text_direct_specs(query, country):
@@ -20206,21 +20543,11 @@ def _web_text_direct_specs(query, country):
             add(country, 'local', 'serper_shopping', 'en')
         if native != 'en' and native in ('ar',):
             add(country, 'local', f'{provider}_search', native)
-    if serper_primary():
-        # Approved US/CN catalogs through Serper: Google Shopping (gl=us, real
-        # merchant links + USD prices), catalog-scoped Google Images (product
-        # pages with photos) and catalog-scoped organic search. site: operators
-        # need a paid Serper plan; a plan that rejects them falls back to SerpApi.
-        operators = _fast_provider_supports_operators('serper')
+    if SEARCH_PROVIDER_PRIMARY != 'serpapi' and FAST_PROVIDERS:
         for cc in DEFAULT_GLOBAL_COUNTRIES:
-            if cc == country or cc not in GLOBAL_MARKET_STORES:
-                continue
-            if FAST_PROVIDER_SHOPPING:
-                add(cc, 'global', 'serper_shopping', 'en')
-            if operators:
-                add(cc, 'global', 'serper_search', 'en')
-                if FAST_PROVIDER_IMAGES:
-                    add(cc, 'global', 'serper_images', 'en')
+            if cc != country and cc in GLOBAL_MARKET_STORES:
+                specs.extend(_global_catalog_specs(cc, stage='initial'))
+    if serper_primary():
         return specs
     if TEXT_DIRECT_LIGHT_LANE:
         add(country, 'local', 'google_light', 'en', True)
@@ -20248,18 +20575,20 @@ def _web_text_direct_specs(query, country):
     return specs
 
 
-def _web_text_direct_backup_specs(query, country):
-    """SerpApi lanes used only when the primary provider fails or returns too little."""
-    native = next((hl for hl in _market_query_languages(country, query) if hl != 'en'), 'en')
-    specs = [{'country': country, 'role': 'local', 'engine': 'google', 'hl': 'en', 'geo_cue': True},
-             {'country': country, 'role': 'local', 'engine': TEXT_DIRECT_IMAGES_ENGINE, 'hl': 'en', 'geo_cue': True}]
-    if native != 'en':
-        specs.append({'country': country, 'role': 'local', 'engine': 'google', 'hl': native, 'geo_cue': False})
-    if not _fast_provider_supports_operators('serper'):
-        for cc in DEFAULT_GLOBAL_COUNTRIES:
-            if cc != country and cc in GLOBAL_MARKET_STORES:
-                specs.append({'country': cc, 'role': 'global', 'engine': 'google', 'hl': 'en', 'geo_cue': False})
-    return specs
+def _web_text_direct_backup_specs(query, country, needed_countries=None):
+    """Only weak markets receive backups; local success cannot suppress US/CN."""
+    wanted = set(needed_countries) if needed_countries is not None else {country, *DEFAULT_GLOBAL_COUNTRIES}
+    specs = []
+    if country in wanted:
+        native = next((hl for hl in _market_query_languages(country, query) if hl != 'en'), 'en')
+        specs = [{'country': country, 'role': 'local', 'engine': 'google', 'hl': 'en', 'geo_cue': True},
+                 {'country': country, 'role': 'local', 'engine': TEXT_DIRECT_IMAGES_ENGINE, 'hl': 'en', 'geo_cue': True}]
+        if native != 'en':
+            specs.append({'country': country, 'role': 'local', 'engine': 'google', 'hl': native, 'geo_cue': False})
+    for cc in DEFAULT_GLOBAL_COUNTRIES:
+        if cc != country and cc in wanted and cc in GLOBAL_MARKET_STORES:
+            specs.extend(_global_catalog_specs(cc, stage='backup'))
+    return [dict(spec, _backup=True) for spec in specs]
 
 
 def _web_text_direct_params(query, spec, page_token=''):
@@ -20273,11 +20602,8 @@ def _web_text_direct_params(query, spec, page_token=''):
         _market_query_wait(query, hl, TEXT_DIRECT_TRANSLATION_WAIT)
     record = _market_query_cached(query, hl) or _market_query_static(query, hl)
     wording = str(record.get('query') or query).strip()
-    if role == 'global' and engine != 'serper_shopping':
-        domains = ' OR '.join('site:' + domain for _, domain in GLOBAL_MARKET_STORES[country])
-        wording = f'{wording} ({domains})'
-    elif role == 'global':
-        pass  # Google Shopping has no site: operator; the catalog filter selects rows.
+    if role == 'global':
+        wording = _global_catalog_wording(wording, spec)
     elif engine in ('google', 'google_light', 'google_images', 'google_images_light') or engine.startswith(('serper_', 'cse_')):
         if spec.get('geo_cue'):
             wording = f'{wording} {COUNTRY_NAMES.get(country, country.upper())}'
@@ -20326,7 +20652,10 @@ def _web_text_direct_fetch(query, spec, deadline, cancel, page_token=''):
               f' hl={spec["hl"]} status={"returned" if isinstance(data, dict) else "unavailable"}'
               f' elapsed_ms={int((time.monotonic()-began)*1000)}')
         return data
-    data = _serpapi_cached_json(params, timeout=(connect, max(remaining - connect, TEXT_DIRECT_LATE_READ_SECONDS)),
+    if spec.get('_backup') and remaining < SERPAPI_BACKUP_MIN_REMAINING_SECONDS:
+        return None
+    read_seconds = max(.05, remaining - connect) if spec.get('_backup') else max(remaining - connect, TEXT_DIRECT_LATE_READ_SECONDS)
+    data = _serpapi_cached_json(params, timeout=(connect, read_seconds),
         label=f'TEXT DIRECT {spec["role"]}/{spec["country"]}/{params["engine"]}/{spec["hl"]}')
     if params['engine'] == 'baidu' and isinstance(data, dict) and not cancel.is_set():
         data = _local_resolve_baidu_links(data, max(0., deadline-time.monotonic()))
@@ -20410,11 +20739,10 @@ def _web_text_direct_search(query, country, lang, progress_callback=None, cancel
     extended = False
     market = dict(_web_market(country), _query=query,
                   global_countries=[c for c in DEFAULT_GLOBAL_COUNTRIES if c != country])
-    # One price ledger per market: every lane's target for that market shares
-    # the same list object, so a shopping unit seen by one lane prices another's row.
-    ledgers = {country: []}
-    ledger_targets = {}
-    market['_shopping_units'] = ledgers[country]
+    # One price ledger for the whole search: every lane's target shares the
+    # same list object, so a shopping unit seen by one lane prices another's row.
+    shopping_units = []
+    market['_shopping_units'] = shopping_units
     jobs, rows, counts, merchant_counts = {}, {}, Counter(), Counter()
     expanded = set()
     expansions = Counter()
@@ -20437,8 +20765,8 @@ def _web_text_direct_search(query, country, lang, progress_callback=None, cancel
         target = dict(_web_market(spec['country']))
         if spec['role'] == 'global':
             target['_retrieval_role'] = 'global'
-        target['_shopping_units'] = ledgers.setdefault(spec['country'], [])
-        ledger_targets.setdefault(spec['country'], target)
+        if spec['country'] == country:
+            target['_shopping_units'] = shopping_units
         future = TEXT_DIRECT_POOL.submit(_run_with_market, target,
             _web_text_direct_fetch, query, spec, deadline, cancel, token)
         jobs[future] = (spec, target, token, thumbnail)
@@ -20446,31 +20774,61 @@ def _web_text_direct_search(query, country, lang, progress_callback=None, cancel
     try:
         specs = _web_text_direct_specs(query, country)
         fast_lane_count = sum(1 for spec in specs if spec['engine'].startswith(('serper_', 'cse_')))
-        backup_launched = False
+        backup_launched = set()
+        global_recovered = set()
         fast_unavailable = 0
         for spec in specs:
             submit(spec)
         def maybe_launch_backup():
-            """Serper-primary: SerpApi lanes exist only as a bounded backup, launched
-            once the primary lanes have answered and left too little on the page."""
-            nonlocal backup_launched, deadline, empty_deadline
-            if (not serper_primary() or not SERPAPI_BACKUP_ENABLED or backup_launched or not SERPAPI_API_KEY
-                    or cancel.is_set() or serpapi_provider_degraded()
-                    or any(j[0]['engine'].startswith(('serper_', 'cse_')) for j in jobs.values())):
+            """Recover EACH weak market immediately after its own fast lanes finish.
+
+            No additional deadline is created: local progress cannot shorten an
+            unfinished global wave, and an expired/queued request never starts I/O.
+            """
+            if cancel.is_set() or time.monotonic() >= deadline:
                 return
-            unavailable = fast_unavailable >= max(1, fast_lane_count)
-            if len(rows) >= SERPAPI_BACKUP_MIN_ROWS and not unavailable:
-                return
-            backup_launched = True
             now = time.monotonic()
-            backup = _web_text_direct_backup_specs(query, country)
-            deadline = max(deadline, min(started + TEXT_DIRECT_TIMEOUT_SECONDS + 4., now + SERPAPI_BACKUP_WINDOW_SECONDS))
-            empty_deadline = max(empty_deadline, deadline)
+            global_targets = [cc for cc in market['global_countries'] if cc in GLOBAL_MARKET_STORES]
+            for cc in global_targets:
+                pending_here = [j[0] for j in jobs.values() if j[0]['country'] == cc and j[0]['role'] == 'global']
+                if pending_here:
+                    continue
+                current = _global_rows_for(rows.values(), cc)
+                if _global_catalog_sufficient(current):
+                    continue
+                if FAST_PROVIDERS and SEARCH_PROVIDER_PRIMARY != 'serpapi' and cc not in global_recovered:
+                    global_recovered.add(cc)
+                    rescue = _global_catalog_specs(cc, 'recovery', current)
+                    if deadline - now >= 1.5 and rescue:
+                        for spec in rescue:
+                            submit(spec)
+                        print(f'GLOBAL RECOVERY country={cc} provider=fast lanes={len(rescue)} '
+                              f'coverage={_global_catalog_coverage(current)} remaining={deadline-now:.2f}')
+                        continue
+                if (cc not in backup_launched and SERPAPI_BACKUP_ENABLED and SERPAPI_API_KEY
+                        and SEARCH_PROVIDER_PRIMARY != 'serpapi' and not serpapi_provider_degraded()
+                        and deadline - now >= SERPAPI_BACKUP_MIN_REMAINING_SECONDS):
+                    backup_launched.add(cc)
+                    backup = _web_text_direct_backup_specs(query, country, [cc])
+                    for spec in backup:
+                        submit(spec)
+                    print(f'GLOBAL BACKUP country={cc} provider=serpapi lanes={len(backup)} '
+                          f'coverage={_global_catalog_coverage(current)} remaining={deadline-now:.2f}')
+            # Local fallback stays independent too. Global success cannot starve
+            # the user's local market, and local success cannot fill its quota.
+            if (not serper_primary() or country in backup_launched or not SERPAPI_BACKUP_ENABLED
+                    or not SERPAPI_API_KEY or serpapi_provider_degraded()
+                    or deadline - now < SERPAPI_BACKUP_MIN_REMAINING_SECONDS
+                    or any(j[0]['role'] == 'local' for j in jobs.values())):
+                return
+            if counts[country] >= SERPAPI_BACKUP_MIN_ROWS:
+                return
+            backup_launched.add(country)
+            backup = _web_text_direct_backup_specs(query, country, [country])
             for spec in backup:
                 submit(spec)
-            print(f'TEXT DIRECT BACKUP provider=serpapi lanes={len(backup)} reason='
-                  f'{"primary_unavailable" if unavailable else "sparse"}'
-                  f' rows={len(rows)} country={country} elapsed_ms={int((now-started)*1000)}')
+            print(f'TEXT DIRECT BACKUP provider=serpapi lanes={len(backup)} reason=local_sparse '
+                  f'rows={counts[country]} country={country} elapsed_ms={int((now-started)*1000)}')
         maybe_launch_backup()
         while jobs and not cancel.is_set():
             now = time.monotonic()
@@ -20495,7 +20853,7 @@ def _web_text_direct_search(query, country, lang, progress_callback=None, cancel
                     data = None
                 if cancel.is_set() or time.monotonic() >= (deadline if rows else empty_deadline):
                     break
-                name = f'{spec["role"]}:{spec["country"]}:{spec["engine"]}:{spec["hl"]}' + (':merchants' if token else '')
+                name = _global_spec_name(spec) + (':merchants' if token else '')
                 source_states[name] = 'complete' if isinstance(data, dict) else 'unavailable'
                 if not isinstance(data, dict):
                     if spec['engine'].startswith(('serper_', 'cse_')):
@@ -20552,9 +20910,8 @@ def _web_text_direct_search(query, country, lang, progress_callback=None, cancel
                     counts[cc] += 1
                     merchant_counts[(cc, host)] += 1
                     changed = True
-                for ledger_cc, ledger_target in list(ledger_targets.items()):
-                    if _shopping_unit_fill([r for r in rows.values() if r.get('country') == ledger_cc], ledger_target):
-                        changed = True
+                if _shopping_unit_fill(list(rows.values()), market):
+                    changed = True
                 if changed:
                     if first_ms is None:
                         first_ms = int((time.monotonic()-started)*1000)
@@ -20563,12 +20920,16 @@ def _web_text_direct_search(query, country, lang, progress_callback=None, cancel
                 # Once every local lane (and its seller expansions) has
                 # answered, a slow foreign catalog gets a short grace period
                 # rather than the whole budget: local cards are already shown.
-                if rows and not any(j[0]['role'] == 'local' for j in jobs.values()):
+                if (rows and not any(j[0]['role'] == 'local' for j in jobs.values())
+                        and all(_global_catalog_sufficient(_global_rows_for(rows.values(), cc))
+                                for cc in market['global_countries'] if cc in GLOBAL_MARKET_STORES)):
                     deadline = min(deadline, time.monotonic() + TEXT_DIRECT_GLOBAL_GRACE_SECONDS)
                 # Fast providers done with a real page: SerpApi lanes get a
                 # bounded settle window instead of the whole budget.
                 if (fast_lane_count and len(rows) >= TEXT_DIRECT_FAST_SETTLE_ROWS
-                        and not any(j[0]['engine'].startswith(('serper_', 'cse_')) for j in jobs.values())):
+                        and not any(j[0]['engine'].startswith(('serper_', 'cse_')) for j in jobs.values())
+                        and all(_global_catalog_sufficient(_global_rows_for(rows.values(), cc))
+                                for cc in market['global_countries'] if cc in GLOBAL_MARKET_STORES)):
                     deadline = min(deadline, time.monotonic() + TEXT_DIRECT_FAST_SETTLE_SECONDS)
                 # Google may return an aggregate product without a seller URL.
                 # Expand a bounded number of products into ALL observed sellers;
@@ -20598,6 +20959,8 @@ def _web_text_direct_search(query, country, lang, progress_callback=None, cancel
                         submit(spec, page_token, next(iter(_web_offer_image_candidates(card)), ''))
             maybe_launch_backup()
         result = _run_with_market(market, _web_attach_captured_result_sections, snapshot(), lang, False)
+        result['global_coverage'] = {cc: _global_catalog_coverage(_global_rows_for(rows.values(), cc))
+                                     for cc in market['global_countries'] if cc in GLOBAL_MARKET_STORES}
         result['partial'] = (bool(jobs) or cancel.is_set() or time.monotonic() >= deadline
                              or any(v == 'unavailable' for v in source_states.values()))
         print(f'TEXT DIRECT FINAL country={country} rows={len(rows)} markets={dict(counts)}'
@@ -24278,7 +24641,7 @@ async def _web_text_fast_result(query, country, lang, selected_option='', origin
             return dict(event.get('data') or {}, elapsed_ms=int((time.monotonic()-started)*1000))
         if kind == 'query':
             final['query'] = event.get('query') or final['query']
-        if kind == 'done':
+        if kind in ('snapshot', 'done'):
             final.update({k: v for k, v in event.items() if k not in ('event',)})
     final['elapsed_ms'] = int((time.monotonic()-started)*1000)
     return _web_card_payload(final)
@@ -25298,6 +25661,7 @@ def _web_selected_market_search(query, country, lang, global_countries, *, image
     reference = {}
     reference_job = None
     jobs, launched, rows, states = {}, {cc: set() for cc in scopes}, {}, {}
+    global_updates = queue.Queue()
     excluded = {_canonical_result_url(url) for url in shown_urls}
     excluded_domains = {str(d).lower().removeprefix('www.') for d in shown_domains}
     by_market = Counter()
@@ -25329,7 +25693,9 @@ def _web_selected_market_search(query, country, lang, global_countries, *, image
             if cancelled() or remaining <= .01:
                 return []
             if cc in global_catalogs and kind != 'lens':
-                return _global_discovery_request(q, cc, kind, min(LOCAL_DISCOVERY_TIMEOUT, remaining))
+                return _global_market_discovery(q, cc, limit=TEXT_DIRECT_GLOBAL_MAX,
+                    timeout_seconds=min(LOCAL_DISCOVERY_TIMEOUT, remaining), cancel_event=cancel_event,
+                    progress_callback=lambda batch: global_updates.put((cc, [dict(r) for r in batch])))
             if kind == 'lens':
                 # v114 iOS sends the previous photo identity as `query` on a
                 # global-only refresh, but an empty caption on first capture.
@@ -25376,18 +25742,7 @@ def _web_selected_market_search(query, country, lang, global_countries, *, image
                     sparse_or_slow = by_market[cc] < target_for(cc) and (
                         not primary_pending or time.monotonic() - started >= SELECTED_MARKET_HEDGE)
                     if cc in global_catalogs:
-                        if FAST_PROVIDERS:
-                            launch(cc, 'global_fast')
-                        if serper_primary() and _fast_provider_supports_operators('serper'):
-                            # SerpApi catalog lanes only as a sparse backup.
-                            if sparse_or_slow and 'global_fast' not in {k for c, k in jobs.values() if c == cc} and SERPAPI_BACKUP_ENABLED:
-                                launch(cc, 'global_all')
-                        elif 'lens' in launched[cc]:
-                            if sparse_or_slow:
-                                launch(cc, 'global_all')
-                        else:
-                            launch(cc, 'global')
-                            launch(cc, 'global2')
+                        launch(cc, 'global_fast')  # one bounded coordinator; no second backup owner
                     elif cc == 'cn':
                         # Open search covers independent .cn and .com shops;
                         # domestic marketplace scopes are a separate sparse rescue.
@@ -25415,6 +25770,14 @@ def _web_selected_market_search(query, country, lang, global_countries, *, image
                             launch(cc, 'shopping' if shopping_ok and named and 'shopping' not in launched[cc] else 'scoped')
                             if lanes_for(cc) >= 3 and 'scoped' in launched[cc] and by_market[cc] < target_for(cc):
                                 launch(cc, 'scoped2')
+            while True:
+                try:
+                    batch_cc, batch = global_updates.get_nowait()
+                except queue.Empty:
+                    break
+                ready = Future()
+                ready.set_result(batch)
+                jobs[ready] = (batch_cc, 'global_batch')
             if not jobs:
                 if reference_job is None:
                     break
@@ -25943,7 +26306,7 @@ async def web_api_image_search(request: Request):
 
 @app.get('/')
 async def health():
-    return {'status': BUILD_ID, 'text_route': 'text_fast' if TEXT_FAST_ENABLED else ('text_lens' if TEXT_LENS_ENABLED else 'legacy'), 'text_fast_enabled': TEXT_FAST_ENABLED, 'text_fast_deadline_seconds': TEXT_FAST_TIMEOUT_SECONDS, 'text_fast_price_tail_seconds': TEXT_FAST_PRICE_WAIT_SECONDS, 'text_fast_images_engine': TEXT_DIRECT_IMAGES_ENGINE, 'text_fast_light_lane': TEXT_DIRECT_LIGHT_LANE, 'text_lens_enabled': TEXT_LENS_ENABLED, 'text_reference_budget_seconds': TEXT_LENS_REFERENCE_SECONDS, 'text_reference_target_seconds': TEXT_LENS_REFERENCE_TARGET_SECONDS, 'text_lens_results_seconds': TEXT_LENS_RESULTS_SECONDS, 'text_identity_policy': 'typed_model_with_retrieved_photo', 'lens_direct_mode': LENS_DIRECT_MODE, 'fast_lens': USE_FAST_LENS_PIPELINE, 'v106_pipeline': USE_V106_5_RESULT_PIPELINE, 'text_search_whatsapp_parity': TEXT_SEARCH_WHATSAPP_PARITY, 'serpapi_cache': SERPAPI_RESULT_CACHE_ENABLED, 'serpapi_singleflight': SERPAPI_SINGLEFLIGHT_ENABLED, 'ai_result_classifier': WEB_AI_CLASSIFIER_ENABLED, 'ai_classifier_timeout_seconds': WEB_AI_CLASSIFIER_TIMEOUT_SECONDS, 'visual_result_classifier': WEB_VISUAL_CLASSIFIER_ENABLED, 'visual_classifier_timeout_seconds': WEB_VISUAL_CLASSIFIER_TIMEOUT_SECONDS, 'visual_classifier_max_results': WEB_VISUAL_CLASSIFIER_MAX_RESULTS, 'visual_exact_score': WEB_VISUAL_CLASSIFIER_EXACT_SCORE, 'visual_exact_policy': 'view_invariant_product_identity', 'identity_stream_batches': True, 'identity_batch_size': WEB_IDENTITY_BATCH_SIZE, 'identity_batch_parallel': WEB_IDENTITY_BATCH_PARALLEL, 'identity_first_batch': WEB_IDENTITY_FIRST_BATCH, 'result_caps': {'local': WEB_LOCAL_MAX, 'us': WEB_US_MAX, 'china': WEB_CN_MAX, 'total': LENS_DIRECT_MAX_CTA}, 'identity_match_policy': 'identifiers_text_function_structure_no_capture_or_condition_penalty', 'match_score_version': _WEB_MATCH_SCORE_VERSION, 'build': BUILD_ID, 'market_source': 'phone_prefix_or_explicit_client_country', 'languages': ['ar','en','de','fr','it','es','pt','tr','ru','ja','zh','ko','hi','ur','id','ms']}
+    return {'status': BUILD_ID, 'global_catalog_recovery': {'primary': SEARCH_PROVIDER_PRIMARY, 'providers': FAST_PROVIDERS, 'per_market_initial_calls': 2, 'per_market_fast_recovery_max': GLOBAL_CATALOG_RECOVERY_MAX_CALLS, 'per_market_backup_max': GLOBAL_CATALOG_BACKUP_MAX_CALLS, 'target_complete_rows': GLOBAL_CATALOG_TARGET_ROWS, 'target_stores': GLOBAL_CATALOG_TARGET_STORES, 'require_price_and_image': GLOBAL_REQUIRE_COMPLETE_OFFERS}, 'text_route': 'text_fast' if TEXT_FAST_ENABLED else ('text_lens' if TEXT_LENS_ENABLED else 'legacy'), 'text_fast_enabled': TEXT_FAST_ENABLED, 'text_fast_deadline_seconds': TEXT_FAST_TIMEOUT_SECONDS, 'text_fast_price_tail_seconds': TEXT_FAST_PRICE_WAIT_SECONDS, 'text_fast_images_engine': TEXT_DIRECT_IMAGES_ENGINE, 'text_fast_light_lane': TEXT_DIRECT_LIGHT_LANE, 'text_lens_enabled': TEXT_LENS_ENABLED, 'text_reference_budget_seconds': TEXT_LENS_REFERENCE_SECONDS, 'text_reference_target_seconds': TEXT_LENS_REFERENCE_TARGET_SECONDS, 'text_lens_results_seconds': TEXT_LENS_RESULTS_SECONDS, 'text_identity_policy': 'typed_model_with_retrieved_photo', 'lens_direct_mode': LENS_DIRECT_MODE, 'fast_lens': USE_FAST_LENS_PIPELINE, 'v106_pipeline': USE_V106_5_RESULT_PIPELINE, 'text_search_whatsapp_parity': TEXT_SEARCH_WHATSAPP_PARITY, 'serpapi_cache': SERPAPI_RESULT_CACHE_ENABLED, 'serpapi_singleflight': SERPAPI_SINGLEFLIGHT_ENABLED, 'ai_result_classifier': WEB_AI_CLASSIFIER_ENABLED, 'ai_classifier_timeout_seconds': WEB_AI_CLASSIFIER_TIMEOUT_SECONDS, 'visual_result_classifier': WEB_VISUAL_CLASSIFIER_ENABLED, 'visual_classifier_timeout_seconds': WEB_VISUAL_CLASSIFIER_TIMEOUT_SECONDS, 'visual_classifier_max_results': WEB_VISUAL_CLASSIFIER_MAX_RESULTS, 'visual_exact_score': WEB_VISUAL_CLASSIFIER_EXACT_SCORE, 'visual_exact_policy': 'view_invariant_product_identity', 'identity_stream_batches': True, 'identity_batch_size': WEB_IDENTITY_BATCH_SIZE, 'identity_batch_parallel': WEB_IDENTITY_BATCH_PARALLEL, 'identity_first_batch': WEB_IDENTITY_FIRST_BATCH, 'result_caps': {'local': WEB_LOCAL_MAX, 'us': WEB_US_MAX, 'china': WEB_CN_MAX, 'total': LENS_DIRECT_MAX_CTA}, 'identity_match_policy': 'identifiers_text_function_structure_no_capture_or_condition_penalty', 'match_score_version': _WEB_MATCH_SCORE_VERSION, 'build': BUILD_ID, 'market_source': 'phone_prefix_or_explicit_client_country', 'languages': ['ar','en','de','fr','it','es','pt','tr','ru','ja','zh','ko','hi','ur','id','ms']}
 
 
 # Optional authenticated account API; all search-provider behavior is retained.
