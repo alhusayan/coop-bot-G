@@ -1,3 +1,8 @@
+# v128.5.30: the shopping-unit price ledger is shared across the text-search lanes (it was
+# kept per lane, so 46 KWD units filled 0 cards); a brand named only in the listing's own
+# domain (eshop.kddc.com, atyabalmarshoud.com) satisfies the rare-word rule and counts in
+# the overlap score; SerpApi backup lanes are not launched with under 4 s of budget left;
+# regional TLDs (.eu, .asia) are never local evidence.
 # v128.5.29: provider policy. SEARCH_PROVIDER_PRIMARY=serper (default once SERPER_API_KEY is
 # set) runs text search, the Lens local rescue and the approved catalogs on Serper only;
 # SerpApi search lanes launch only as a bounded backup when the primary lanes fail or
@@ -371,7 +376,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization'], max_age=86400)
-BUILD_ID = 'v128.5.29-text-fast'
+BUILD_ID = 'v128.5.30-text-fast'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -3816,7 +3821,8 @@ def _local_storefront_evidence(item, market):
     # domain, locale, catalog or currency — is Google's own local ranking.
     # Identity and price checks still apply; this is candidacy, not proof.
     if (LOCAL_GEO_TARGETING_EVIDENCE and geo_targeted and not known_foreign and not codes
-            and not host_cc and not locale and item.get('_local_discovery_lane')):
+            and not host_cc and not locale and item.get('_local_discovery_lane')
+            and not host.endswith(('.eu', '.asia', '.africa', '.lat', '.arab'))):
         return 'search_geo_targeting'
     return ''
 
@@ -5413,7 +5419,8 @@ def _local_market_discovery(query, market, limit=8, timeout_seconds=None, progre
             fast_pending = any(_is_fast_discovery_kind(k) for k in pending.values())
             if (cc != 'cn' and calls < len(kinds) and len(merchants) < min(LOCAL_RESULTS_TARGET, limit)
                     and (not pending or time.monotonic() >= hedge_at)
-                    and not (serper_primary() and (fast_pending or not SERPAPI_BACKUP_ENABLED or serpapi_provider_degraded()))):
+                    and not (serper_primary() and (fast_pending or not SERPAPI_BACKUP_ENABLED or serpapi_provider_degraded()
+                                                   or deadline - time.monotonic() < SERPAPI_BACKUP_MIN_REMAINING_SECONDS))):
                 if serper_primary() and calls == 0:
                     print(f'LOCAL DISCOVERY BACKUP provider=serpapi kind={kinds[0]} rows={len(rows)} country={cc}')
                 launch(kinds[calls])
@@ -8711,11 +8718,34 @@ def _findzia_ordered_tokens(value):
     return out
 
 
-def _findzia_matched_query_tokens(query, title):
-    """Query tokens found in the title, counting 'AccuLean IQ' as found in 'AccuLeanIQ'."""
+def _findzia_host_tokens(item):
+    """Domain labels of a listing (eshop.kddc.com -> kddc, kdd via prefix match downstream)."""
+    url = str((item or {}).get('link') or (item or {}).get('url') or '')
+    try:
+        host = (urllib.parse.urlsplit(url).hostname or '').casefold()
+    except ValueError:
+        return set()
+    labels = set()
+    for part in host.split('.'):
+        for label in part.split('-'):
+            if len(label) >= 3 and label not in _SHOPPING_UNIT_GENERIC_LABELS and not label.isdigit():
+                labels.add(label)
+    return labels
+
+
+def _findzia_matched_query_tokens(query, title, host_tokens=()):
+    """Query tokens found in the title, counting 'AccuLean IQ' as found in 'AccuLeanIQ'.
+
+    A brand that appears only in the store's own domain (kddc.com for "KDD",
+    atyabalmarshoud.com for "Atyab Al Marshoud") counts as present: the
+    merchant does not repeat its own name in every product title.
+    """
     q_ordered, t_ordered = _findzia_ordered_tokens(query), _findzia_ordered_tokens(title)
     q, t = set(q_ordered), set(t_ordered)
     matched = q & t
+    for tok in q - matched:
+        if len(tok) >= 3 and any(tok in label or (len(tok) >= 5 and label in tok) for label in host_tokens):
+            matched.add(tok)
     for a, b in zip(q_ordered, q_ordered[1:]):
         if a + b in t:
             matched |= {a, b}
@@ -8725,10 +8755,10 @@ def _findzia_matched_query_tokens(query, title):
     return q, t, matched
 
 
-def _findzia_match_score(query, title):
+def _findzia_match_score(query, title, host_tokens=()):
     if _findzia_hard_product_mismatch(query, title):
         return 0.0
-    q, t, matched = _findzia_matched_query_tokens(query, title)
+    q, t, matched = _findzia_matched_query_tokens(query, title, host_tokens)
     if not q or not t:
         return 0.0
     overlap = len(matched) / max(1, len(q))
@@ -8811,16 +8841,20 @@ def _findzia_stream_candidate_ok(query, item):
         if title:
             print(f'FINDZIA GUARD HARD-DROP: {title[:100]}')
         return False
+    host_tokens = _findzia_host_tokens(item)
     rare = _findzia_rare_query_tokens(query)
     if rare and re.search(r'[\u0600-\u06ff\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]', title):
         rare = set()  # A translated/untranslated title is judged by the script-aware paths below.
     if rare:
         title_tokens = _findzia_lexical_tokens(title)
         models_shared = bool(_web_model_tokens_from_listing(query) & _web_model_tokens_from_listing(title))
-        if not models_shared and not any(_findzia_token_present(tok, title_tokens) for tok in rare):
+        def in_host(tok):
+            # kdd -> kddc.com, atyab -> atyabalmarshoud.com
+            return len(tok) >= 3 and any(label.startswith(tok) or (len(tok) >= 4 and tok in label) for label in host_tokens)
+        if not models_shared and not any(_findzia_token_present(tok, title_tokens) or in_host(tok) for tok in rare):
             print(f'FINDZIA GUARD HOLD reason=no_distinctive_word rare={sorted(rare)[:4]}: {title[:100]}')
             return False
-    score = _findzia_match_score(query, title)
+    score = _findzia_match_score(query, title, host_tokens)
     strong_model = bool(_web_model_tokens_from_listing(query) & _web_model_tokens_from_listing(title))
     # A long typed description carries optional words ("chocolate wafer"); a
     # merchant title that keeps the majority of it is the same listing family.
@@ -19808,6 +19842,9 @@ if SEARCH_PROVIDER_PRIMARY not in ('serper', 'serpapi', 'both') or (SEARCH_PROVI
 SERPAPI_BACKUP_ENABLED = env_bool('SERPAPI_BACKUP_ENABLED', True)
 SERPAPI_BACKUP_MIN_ROWS = max(0, min(20, int(os.environ.get('SERPAPI_BACKUP_MIN_ROWS', '4'))))
 SERPAPI_BACKUP_WINDOW_SECONDS = max(2., min(15., float(os.environ.get('SERPAPI_BACKUP_WINDOW_SECONDS', '6'))))
+# A SerpApi search needs a few seconds; launching it into a nearly spent budget
+# only bills a credit for a reply nobody waits for.
+SERPAPI_BACKUP_MIN_REMAINING_SECONDS = max(1., min(10., float(os.environ.get('SERPAPI_BACKUP_MIN_REMAINING_SECONDS', '4'))))
 
 
 def serper_primary():
@@ -20274,6 +20311,10 @@ def _web_text_direct_search(query, country, lang, progress_callback=None, cancel
     extended = False
     market = dict(_web_market(country), _query=query,
                   global_countries=[c for c in DEFAULT_GLOBAL_COUNTRIES if c != country])
+    # One price ledger for the whole search: every lane's target shares the
+    # same list object, so a shopping unit seen by one lane prices another's row.
+    shopping_units = []
+    market['_shopping_units'] = shopping_units
     jobs, rows, counts, merchant_counts = {}, {}, Counter(), Counter()
     expanded = set()
     expansions = Counter()
@@ -20296,6 +20337,8 @@ def _web_text_direct_search(query, country, lang, progress_callback=None, cancel
         target = dict(_web_market(spec['country']))
         if spec['role'] == 'global':
             target['_retrieval_role'] = 'global'
+        if spec['country'] == country:
+            target['_shopping_units'] = shopping_units
         future = TEXT_DIRECT_POOL.submit(_run_with_market, target,
             _web_text_direct_fetch, query, spec, deadline, cancel, token)
         jobs[future] = (spec, target, token, thumbnail)
