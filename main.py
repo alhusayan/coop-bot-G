@@ -1,3 +1,6 @@
+# v128.5.26: image (Lens) search parity — the fast provider lanes (Serper/CSE search,
+# images, shopping) also run inside the Lens local-lane rescue, the shared local
+# discovery coordinator and the approved US/CN catalog lanes, next to SerpApi.
 # v128.5.25: indexed prices are read from the plain result snippet ("KD 3.960") when
 # it names exactly one local-currency price; a geo-targeted local lane no longer drops
 # a .com store that shows no foreign signal ("foreign" was 40-60% of local rows);
@@ -352,7 +355,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization'], max_age=86400)
-BUILD_ID = 'v128.5.25-text-fast'
+BUILD_ID = 'v128.5.26-text-fast'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -587,7 +590,7 @@ LOCAL_DISCOVERY_MAX_CALLS = max(0, min(2, int(os.environ.get('LOCAL_DISCOVERY_MA
 LOCAL_DISCOVERY_TIMEOUT = max(1.0, min(20.0, float(os.environ.get('LOCAL_DISCOVERY_TIMEOUT', '12.0'))))
 LOCAL_DISCOVERY_HEDGE_SECONDS = max(.5, min(6.0, float(os.environ.get('LOCAL_DISCOVERY_HEDGE_SECONDS', '3.0'))))
 LOCAL_DISCOVERY_BAIDU = env_bool('LOCAL_DISCOVERY_BAIDU', True)
-LOCAL_DISCOVERY_POOL = ThreadPoolExecutor(max_workers=8, thread_name_prefix='local-discovery')
+LOCAL_DISCOVERY_POOL = ThreadPoolExecutor(max_workers=16, thread_name_prefix='local-discovery')
 print(f'LOCAL MARKET CONFIG provider_budget={LOCAL_DISCOVERY_TIMEOUT}s lens_read={LENS_HTTP_TIMEOUT_SECONDS}s hedge_after={LOCAL_DISCOVERY_HEDGE_SECONDS}s calls_max={LOCAL_DISCOVERY_MAX_CALLS} progressive_completion=True')
 COUNTRY_META = {'ae': ('United Arab Emirates', ('AED',), 'en'), 'af': ('Afghanistan', ('AFN',), 'ps'), 'ag': ('Antigua and Barbuda', ('XCD',), 'en'), 'ai': ('Anguilla', ('XCD',), 'en'), 'al': ('Albania', ('ALL',), 'sq'), 'am': ('Armenia', ('AMD',), 'hy'), 'ao': ('Angola', ('AOA',), 'pt'), 'ar': ('Argentina', ('ARS',), 'es'), 'as': ('American Samoa', ('USD',), 'en'), 'at': ('Austria', ('EUR',), 'de'), 'au': ('Australia', ('AUD',), 'en'), 'aw': ('Aruba', ('AWG',), 'nl'), 'az': ('Azerbaijan', ('AZN',), 'az'), 'ba': ('Bosnia and Herzegovina', ('BAM',), 'bs'), 'bb': ('Barbados', ('BBD',), 'en'), 'bd': ('Bangladesh', ('BDT',), 'en'), 'be': ('Belgium', ('EUR',), 'nl'), 'bf': ('Burkina Faso', ('XOF',), 'fr'), 'bg': ('Bulgaria', ('BGN',), 'bg'), 'bh': ('Bahrain', ('BHD',), 'ar'), 'bi': ('Burundi', ('BIF',), 'fr'), 'bj': ('Benin', ('XOF',), 'fr'), 'bm': ('Bermuda', ('BMD',), 'en'), 'bn': ('Brunei Darussalam', ('BND',), 'ms'), 'bo': ('Bolivia, Plurinational State of', ('BOB',), 'es'), 'br': ('Brazil', ('BRL',), 'pt'), 'bs': ('Bahamas', ('BSD',), 'en'), 'bt': ('Bhutan', ('INR', 'BTN'), 'dz'), 'bw': ('Botswana', ('BWP',), 'en'), 'by': ('Belarus', ('BYN',), 'ru'), 'bz': ('Belize', ('BZD',), 'en'), 'ca': ('Canada', ('CAD',), 'en'), 'cc': ('Cocos (Keeling) Islands', ('AUD',), 'en'), 'cd': ('Congo, The Democratic Republic of the', ('CDF',), 'fr'), 'cf': ('Central African Republic', ('XAF',), 'fr'), 'cg': ('Congo', ('XAF',), 'fr'), 'ch': ('Switzerland', ('CHF',), 'de'), 'ci': ("Côte d'Ivoire", ('XOF',), 'fr'), 'ck': ('Cook Islands', ('NZD',), 'en'), 'cl': ('Chile', ('CLP',), 'es'), 'cm': ('Cameroon', ('XAF',), 'en'), 'cn': ('China', ('CNY',), 'zh'), 'co': ('Colombia', ('COP',), 'es'), 'cr': ('Costa Rica', ('CRC',), 'es'), 'cu': ('Cuba', ('CUP',), 'es'), 'cv': ('Cabo Verde', ('CVE',), 'pt'), 'cx': ('Christmas Island', ('AUD',), 'en'), 'cy': ('Cyprus', ('EUR',), 'el'), 'cz': ('Czechia', ('CZK',), 'cs'), 'de': ('Germany', ('EUR',), 'de'), 'dj': ('Djibouti', ('DJF',), 'fr'), 'dk': ('Denmark', ('DKK',), 'da'), 'dm': ('Dominica', ('XCD',), 'en'), 'do': ('Dominican Republic', ('DOP',), 'es'), 'dz': ('Algeria', ('DZD',), 'fr'), 'ec': ('Ecuador', ('USD',), 'es'), 'ee': ('Estonia', ('EUR',), 'et'), 'eg': ('Egypt', ('EGP',), 'ar'), 'eh': ('Western Sahara', ('MAD',), 'es'), 'er': ('Eritrea', ('ERN',), 'ti'), 'es': ('Spain', ('EUR',), 'es'), 'et': ('Ethiopia', ('ETB',), 'am'), 'fi': ('Finland', ('EUR',), 'fi'), 'fj': ('Fiji', ('FJD',), 'en'), 'fk': ('Falkland Islands (Malvinas)', ('FKP',), 'en'), 'fm': ('Micronesia, Federated States of', ('USD',), 'en'), 'fo': ('Faroe Islands', ('DKK',), 'fo'), 'fr': ('France', ('EUR',), 'fr'), 'ga': ('Gabon', ('XAF',), 'fr'), 'gb': ('United Kingdom', ('GBP',), 'en'), 'gd': ('Grenada', ('XCD',), 'en'), 'ge': ('Georgia', ('GEL',), 'ka'), 'gf': ('French Guiana', ('EUR',), 'fr'), 'gg': ('Guernsey', ('GBP',), 'en'), 'gh': ('Ghana', ('GHS',), 'en'), 'gi': ('Gibraltar', ('GIP',), 'en'), 'gl': ('Greenland', ('DKK',), 'kl'), 'gm': ('Gambia', ('GMD',), 'en'), 'gn': ('Guinea', ('GNF',), 'fr'), 'gp': ('Guadeloupe', ('EUR',), 'fr'), 'gq': ('Equatorial Guinea', ('XAF',), 'es'), 'gr': ('Greece', ('EUR',), 'el'), 'gs': ('South Georgia and the South Sandwich Islands', ('GBP',), 'en'), 'gt': ('Guatemala', ('GTQ',), 'es'), 'gu': ('Guam', ('USD',), 'en'), 'gw': ('Guinea-Bissau', ('XOF',), 'pt'), 'gy': ('Guyana', ('GYD',), 'en'), 'hk': ('Hong Kong', ('HKD',), 'en'), 'hm': ('Heard Island and McDonald Islands', ('AUD',), 'en'), 'hn': ('Honduras', ('HNL',), 'es'), 'hr': ('Croatia', ('EUR',), 'hr'), 'ht': ('Haiti', ('HTG', 'USD'), 'fr'), 'hu': ('Hungary', ('HUF',), 'hu'), 'id': ('Indonesia', ('IDR',), 'id'), 'ie': ('Ireland', ('EUR',), 'en'), 'il': ('Israel', ('ILS',), 'he'), 'im': ('Isle of Man', ('GBP',), 'en'), 'in': ('India', ('INR',), 'en'), 'io': ('British Indian Ocean Territory', ('USD',), 'en'), 'iq': ('Iraq', ('IQD',), 'ar'), 'ir': ('Iran, Islamic Republic of', ('IRR',), 'fa'), 'is': ('Iceland', ('ISK',), 'is'), 'it': ('Italy', ('EUR',), 'it'), 'je': ('Jersey', ('GBP',), 'en'), 'jm': ('Jamaica', ('JMD',), 'en'), 'jo': ('Jordan', ('JOD',), 'ar'), 'jp': ('Japan', ('JPY',), 'ja'), 'ke': ('Kenya', ('KES',), 'en'), 'kg': ('Kyrgyzstan', ('KGS',), 'ky'), 'kh': ('Cambodia', ('KHR',), 'km'), 'ki': ('Kiribati', ('AUD',), 'en'), 'km': ('Comoros', ('KMF',), 'ar'), 'kn': ('Saint Kitts and Nevis', ('XCD',), 'en'), 'kp': ("Korea, Democratic People's Republic of", ('KPW',), 'ko'), 'kr': ('Korea, Republic of', ('KRW',), 'ko'), 'kw': ('Kuwait', ('KWD',), 'ar'), 'ky': ('Cayman Islands', ('KYD',), 'en'), 'kz': ('Kazakhstan', ('KZT',), 'ru'), 'la': ("Lao People's Democratic Republic", ('LAK',), 'lo'), 'lb': ('Lebanon', ('LBP',), 'ar'), 'lc': ('Saint Lucia', ('XCD',), 'en'), 'li': ('Liechtenstein', ('CHF',), 'de'), 'lk': ('Sri Lanka', ('LKR',), 'si'), 'lr': ('Liberia', ('LRD',), 'en'), 'ls': ('Lesotho', ('ZAR', 'LSL'), 'en'), 'lt': ('Lithuania', ('EUR',), 'lt'), 'lu': ('Luxembourg', ('EUR',), 'fr'), 'lv': ('Latvia', ('EUR',), 'lv'), 'ly': ('Libya', ('LYD',), 'ar'), 'ma': ('Morocco', ('MAD',), 'fr'), 'mc': ('Monaco', ('EUR',), 'fr'), 'md': ('Moldova, Republic of', ('MDL',), 'ro'), 'mg': ('Madagascar', ('MGA',), 'fr'), 'mh': ('Marshall Islands', ('USD',), 'en'), 'mk': ('North Macedonia', ('MKD',), 'mk'), 'ml': ('Mali', ('XOF',), 'fr'), 'mn': ('Mongolia', ('MNT',), 'mn'), 'mo': ('Macao', ('MOP',), 'zh'), 'mp': ('Northern Mariana Islands', ('USD',), 'en'), 'mq': ('Martinique', ('EUR',), 'fr'), 'mr': ('Mauritania', ('MRU',), 'ar'), 'ms': ('Montserrat', ('XCD',), 'en'), 'mt': ('Malta', ('EUR',), 'mt'), 'mu': ('Mauritius', ('MUR',), 'en'), 'mv': ('Maldives', ('MVR',), 'dv'), 'mw': ('Malawi', ('MWK',), 'en'), 'mx': ('Mexico', ('MXN',), 'es'), 'my': ('Malaysia', ('MYR',), 'en'), 'mz': ('Mozambique', ('MZN',), 'pt'), 'na': ('Namibia', ('ZAR', 'NAD'), 'en'), 'nc': ('New Caledonia', ('XPF',), 'fr'), 'ne': ('Niger', ('XOF',), 'fr'), 'nf': ('Norfolk Island', ('AUD',), 'en'), 'ng': ('Nigeria', ('NGN',), 'en'), 'ni': ('Nicaragua', ('NIO',), 'es'), 'nl': ('Netherlands', ('EUR',), 'nl'), 'no': ('Norway', ('NOK',), 'no'), 'np': ('Nepal', ('NPR',), 'ne'), 'nr': ('Nauru', ('AUD',), 'en'), 'nu': ('Niue', ('NZD',), 'en'), 'nz': ('New Zealand', ('NZD',), 'en'), 'om': ('Oman', ('OMR',), 'ar'), 'pa': ('Panama', ('PAB', 'USD'), 'es'), 'pe': ('Peru', ('PEN',), 'es'), 'pf': ('French Polynesia', ('XPF',), 'fr'), 'pg': ('Papua New Guinea', ('PGK',), 'en'), 'ph': ('Philippines', ('PHP',), 'en'), 'pk': ('Pakistan', ('PKR',), 'en'), 'pl': ('Poland', ('PLN',), 'pl'), 'pm': ('Saint Pierre and Miquelon', ('EUR',), 'fr'), 'pn': ('Pitcairn', ('NZD',), 'en'), 'pr': ('Puerto Rico', ('USD',), 'es'), 'pt': ('Portugal', ('EUR',), 'pt'), 'pw': ('Palau', ('USD',), 'en'), 'py': ('Paraguay', ('PYG',), 'es'), 'qa': ('Qatar', ('QAR',), 'ar'), 're': ('Réunion', ('EUR',), 'fr'), 'ro': ('Romania', ('RON',), 'ro'), 'rs': ('Serbia', ('RSD',), 'rs'), 'ru': ('Russian Federation', ('RUB',), 'ru'), 'rw': ('Rwanda', ('RWF',), 'rw'), 'sa': ('Saudi Arabia', ('SAR',), 'ar'), 'sb': ('Solomon Islands', ('SBD',), 'en'), 'sc': ('Seychelles', ('SCR',), 'fr'), 'sd': ('Sudan', ('SDG',), 'ar'), 'se': ('Sweden', ('SEK',), 'sv'), 'sg': ('Singapore', ('SGD',), 'en'), 'sh': ('Saint Helena, Ascension and Tristan da Cunha', ('SHP',), 'en'), 'si': ('Slovenia', ('EUR',), 'sl'), 'sj': ('Svalbard and Jan Mayen', ('NOK',), 'no'), 'sk': ('Slovakia', ('EUR',), 'sk'), 'sl': ('Sierra Leone', ('SLE',), 'en'), 'sm': ('San Marino', ('EUR',), 'it'), 'sn': ('Senegal', ('XOF',), 'fr'), 'so': ('Somalia', ('SOS',), 'so'), 'sr': ('Suriname', ('SRD',), 'nl'), 'ss': ('South Sudan', ('SSP',), 'en'), 'st': ('Sao Tome and Principe', ('STN',), 'pt'), 'sv': ('El Salvador', ('USD',), 'es'), 'sy': ('Syrian Arab Republic', ('SYP',), 'ar'), 'sz': ('Eswatini', ('SZL',), 'en'), 'td': ('Chad', ('XAF',), 'fr'), 'tf': ('French Southern Territories', ('EUR',), 'fr'), 'tg': ('Togo', ('XOF',), 'fr'), 'th': ('Thailand', ('THB',), 'th'), 'tj': ('Tajikistan', ('TJS',), 'tg'), 'tk': ('Tokelau', ('NZD',), 'en'), 'tl': ('Timor-Leste', ('USD',), 'pt'), 'tm': ('Turkmenistan', ('TMT',), 'tk'), 'tn': ('Tunisia', ('TND',), 'fr'), 'to': ('Tonga', ('TOP',), 'en'), 'tr': ('Türkiye', ('TRY',), 'tr'), 'tt': ('Trinidad and Tobago', ('TTD',), 'en'), 'tv': ('Tuvalu', ('AUD',), 'en'), 'tw': ('Taiwan, Province of China', ('TWD',), 'zh'), 'tz': ('Tanzania, United Republic of', ('TZS',), 'en'), 'ua': ('Ukraine', ('UAH',), 'uk'), 'ug': ('Uganda', ('UGX',), 'en'), 'us': ('United States', ('USD',), 'en'), 'uy': ('Uruguay', ('UYU',), 'es'), 'uz': ('Uzbekistan', ('UZS',), 'uz'), 'vc': ('Saint Vincent and the Grenadines', ('XCD',), 'en'), 've': ('Venezuela, Bolivarian Republic of', ('VES',), 'es'), 'vn': ('Viet Nam', ('VND',), 'vi'), 'vu': ('Vanuatu', ('VUV',), 'bi'), 'wf': ('Wallis and Futuna', ('XPF',), 'fr'), 'ws': ('Samoa', ('WST',), 'sm'), 'xk': ('Kosovo', ('EUR',), 'sq'), 'ye': ('Yemen', ('YER',), 'ar'), 'yt': ('Mayotte', ('EUR',), 'fr'), 'za': ('South Africa', ('ZAR',), 'en'), 'zm': ('Zambia', ('ZMW',), 'en'), 'zw': ('Zimbabwe', ('USD', 'ZWG'), 'en')}
 CALLING_CODE_TO_COUNTRY = {'1': 'us', '7': 'ru', '20': 'eg', '27': 'za', '30': 'gr', '31': 'nl', '32': 'be', '33': 'fr', '34': 'es', '36': 'hu', '39': 'it', '40': 'ro', '41': 'ch', '43': 'at', '44': 'gb', '45': 'dk', '46': 'se', '47': 'no', '48': 'pl', '49': 'de', '51': 'pe', '52': 'mx', '53': 'cu', '54': 'ar', '55': 'br', '56': 'cl', '57': 'co', '58': 've', '60': 'my', '61': 'au', '62': 'id', '63': 'ph', '64': 'nz', '65': 'sg', '66': 'th', '76': 'kz', '77': 'kz', '81': 'jp', '82': 'kr', '84': 'vn', '86': 'cn', '90': 'tr', '91': 'in', '92': 'pk', '93': 'af', '94': 'lk', '98': 'ir', '211': 'ss', '212': 'ma', '213': 'dz', '216': 'tn', '218': 'ly', '220': 'gm', '221': 'sn', '222': 'mr', '223': 'ml', '224': 'gn', '225': 'ci', '226': 'bf', '227': 'ne', '228': 'tg', '229': 'bj', '230': 'mu', '231': 'lr', '232': 'sl', '233': 'gh', '234': 'ng', '235': 'td', '236': 'cf', '237': 'cm', '238': 'cv', '239': 'st', '240': 'gq', '241': 'ga', '242': 'cg', '243': 'cd', '244': 'ao', '245': 'gw', '246': 'io', '248': 'sc', '249': 'sd', '250': 'rw', '251': 'et', '252': 'so', '253': 'dj', '254': 'ke', '255': 'tz', '256': 'ug', '257': 'bi', '258': 'mz', '260': 'zm', '261': 'mg', '262': 're', '263': 'zw', '264': 'na', '265': 'mw', '266': 'ls', '267': 'bw', '268': 'sz', '269': 'km', '290': 'sh', '291': 'er', '297': 'aw', '298': 'fo', '299': 'gl', '350': 'gi', '351': 'pt', '352': 'lu', '353': 'ie', '354': 'is', '355': 'al', '356': 'mt', '357': 'cy', '358': 'fi', '359': 'bg', '370': 'lt', '371': 'lv', '372': 'ee', '373': 'md', '374': 'am', '375': 'by', '377': 'mc', '378': 'sm', '380': 'ua', '381': 'rs', '385': 'hr', '386': 'si', '387': 'ba', '389': 'mk', '420': 'cz', '421': 'sk', '423': 'li', '500': 'fk', '501': 'bz', '502': 'gt', '503': 'sv', '504': 'hn', '505': 'ni', '506': 'cr', '507': 'pa', '508': 'pm', '509': 'ht', '590': 'gp', '591': 'bo', '592': 'gy', '593': 'ec', '594': 'gf', '595': 'py', '596': 'mq', '597': 'sr', '598': 'uy', '670': 'tl', '672': 'nf', '673': 'bn', '674': 'nr', '675': 'pg', '676': 'to', '677': 'sb', '678': 'vu', '679': 'fj', '680': 'pw', '681': 'wf', '682': 'ck', '683': 'nu', '685': 'ws', '686': 'ki', '687': 'nc', '688': 'tv', '689': 'pf', '690': 'tk', '691': 'fm', '692': 'mh', '850': 'kp', '852': 'hk', '853': 'mo', '855': 'kh', '856': 'la', '880': 'bd', '886': 'tw', '960': 'mv', '961': 'lb', '962': 'jo', '963': 'sy', '964': 'iq', '965': 'kw', '966': 'sa', '967': 'ye', '968': 'om', '971': 'ae', '972': 'il', '973': 'bh', '974': 'qa', '975': 'bt', '976': 'mn', '977': 'np', '992': 'tj', '993': 'tm', '994': 'az', '995': 'ge', '996': 'kg', '998': 'uz', '1242': 'bs', '1246': 'bb', '1264': 'ai', '1268': 'ag', '1345': 'ky', '1441': 'bm', '1473': 'gd', '1664': 'ms', '1670': 'mp', '1671': 'gu', '1684': 'as', '1758': 'lc', '1767': 'dm', '1784': 'vc', '1787': 'pr', '1809': 'do', '1829': 'do', '1849': 'do', '1868': 'tt', '1869': 'kn', '1876': 'jm', '1939': 'pr', '4779': 'sj'}
@@ -4756,11 +4759,11 @@ def _local_discovery_rows_inner(records, query, market, provider):
             # Organic rows carry the indexed price inside rich_snippet; surface
             # it as text so merchant-country evidence can read "KD 12.500".
             item['price'] = _local_discovery_snippet_price(row)
-        if not item['price'] and market.get('_retrieval_role') != 'global':
+        if not item['price']:
             # Google's indexed description often carries the store's own price
             # text ("Chocolate Milk 250 ML. KD 3.960."). One unambiguous
-            # local-currency price is an indexed price, like a rich snippet.
-            piece = _local_discovery_plain_snippet_price(row, market['country'])
+            # market-currency price is an indexed price, like a rich snippet.
+            piece = _local_discovery_plain_snippet_price(row, price_geo)
             if piece:
                 item['price'] = piece
                 row = dict(row, price=piece)
@@ -4928,10 +4931,34 @@ def _local_shopping_merchant_rows(tokens, query, market, timeout_seconds):
     return rows
 
 
+def _fast_discovery_kinds():
+    """Fast-provider lane kinds for a local market (empty without a configured provider)."""
+    kinds = []
+    for provider in FAST_PROVIDERS:
+        kinds.append(f'{provider}_search')
+        if FAST_PROVIDER_IMAGES:
+            kinds.append(f'{provider}_images')
+        if provider == 'serper' and FAST_PROVIDER_SHOPPING:
+            kinds.append('serper_shopping')
+    return kinds
+
+
+def _is_fast_discovery_kind(kind):
+    return str(kind or '').startswith(('serper_', 'cse_', 'global_fast'))
+
+
 def _local_discovery_request(query, market, kind, timeout_seconds):
     started = time.monotonic()
     deadline = started + timeout_seconds
     cc = market['country']
+    if _is_fast_discovery_kind(kind):
+        # Same lanes as typed search: country-cued organic + images, and the
+        # shopping units; rows go through the same market/identity filters.
+        wording = query if kind.endswith('_shopping') else f'{query} {COUNTRY_NAMES.get(cc, cc.upper())}'
+        connect = min(1.5, max(.05, timeout_seconds * .15))
+        data = _fast_provider_search(kind, wording, cc, 'en',
+                                     (connect, max(1., min(timeout_seconds - connect, FAST_PROVIDER_TIMEOUT_SECONDS))))
+        return _local_discovery_rows(data, query, market, 'local_' + kind) if isinstance(data, dict) else []
     recovery = market.get('_shopping_recovery')
     if kind == 'scoped' and recovery and recovery.get('query') == query:
         # Spend the existing second discovery slot on real merchant links.
@@ -5000,8 +5027,24 @@ def _local_discovery_request(query, market, kind, timeout_seconds):
 
 def _global_discovery_request(query, country, kind, timeout_seconds):
     """Independent, bounded sources; all global China sources cover the allowlist."""
-    if country not in GLOBAL_MARKET_STORES or kind not in ('global', 'global2', 'global_all'):
+    if country not in GLOBAL_MARKET_STORES or kind not in ('global', 'global2', 'global_all', 'global_fast'):
         return []
+    if kind == 'global_fast':
+        if not FAST_PROVIDERS:
+            return []
+        target = dict(_web_market(country), _retrieval_role='global')
+        scopes = ' OR '.join('site:' + domain for _, domain in GLOBAL_MARKET_STORES[country])
+        engine = f'{FAST_PROVIDERS[0]}_search'
+        connect = min(1.5, max(.05, timeout_seconds * .15))
+        data = _fast_provider_search(engine, f'{query} ({scopes})', 'us', 'en',
+                                     (connect, max(1., min(timeout_seconds - connect, FAST_PROVIDER_TIMEOUT_SECONDS))))
+        if not isinstance(data, dict):
+            print(f'GLOBAL SOURCE country={country} provider=global_fast engine={engine} status=failed')
+            return []
+        rows = _local_discovery_rows(data, query, target, 'global_' + country)
+        print(f'GLOBAL SOURCE country={country} provider=global_fast engine={engine} status=returned'
+              f' offers={len(rows)} prices={sum(bool(row.get("price")) for row in rows)}')
+        return rows
     target = dict(_web_market(country), _retrieval_role='global')
     wording = _web_market('us')
     started = time.monotonic()
@@ -5057,7 +5100,8 @@ def _global_market_discovery(query, country, limit=8, timeout_seconds=None, prog
     def run(kind):
         remaining = deadline - time.monotonic()
         return [] if cancelled() or remaining <= .01 else _global_discovery_request(query, country, kind, remaining)
-    jobs = {LOCAL_DISCOVERY_POOL.submit(run, kind) for kind in ('global', 'global2')}
+    jobs = {LOCAL_DISCOVERY_POOL.submit(run, kind)
+            for kind in (('global', 'global2') + (('global_fast',) if FAST_PROVIDERS else ()))}
     rows, seen = [], {}
     try:
         while jobs and not cancelled() and time.monotonic() < deadline:
@@ -5156,6 +5200,11 @@ def _local_market_discovery(query, market, limit=8, timeout_seconds=None, progre
                 progress_callback(batch)
             except Exception as exc:
                 print(f'LOCAL DISCOVERY CALLBACK ERR: {type(exc).__name__}')
+    fast_kinds = _fast_discovery_kinds()
+    for fast_kind in fast_kinds:
+        # Outside the SerpApi call budget: answers in ~1-2 s next to the primary.
+        if not cancelled() and deadline - time.monotonic() > .02:
+            pending[LOCAL_DISCOVERY_POOL.submit(_run_with_market, market, worker, fast_kind)] = fast_kind
     if kinds:
         launch(kinds[0])
     if cc == 'cn' and len(kinds) > 1:
@@ -5194,7 +5243,7 @@ def _local_market_discovery(query, market, limit=8, timeout_seconds=None, progre
                 del groups[domain]
             if len(output) >= limit:
                 break
-    print(f'LOCAL DISCOVERY country={cc} calls={calls} rows={len(output)} stores={len({_more_result_domain(r.get("link")) for r in output})} pending={len(pending)} elapsed={time.monotonic() - started:.2f}s')
+    print(f'LOCAL DISCOVERY country={cc} calls={calls} fast_lanes={len(fast_kinds)} rows={len(output)} stores={len({_more_result_domain(r.get("link")) for r in output})} pending={len(pending)} elapsed={time.monotonic() - started:.2f}s')
     return output
 
 
@@ -24813,7 +24862,9 @@ def _web_selected_market_search(query, country, lang, global_countries, *, image
     def target_for(cc):
         return max(LOCAL_RESULTS_TARGET, int(local_target)) if (cc == country and local_target) else LOCAL_RESULTS_TARGET
     def launch(cc, kind, public_url=''):
-        if kind in launched[cc] or len(launched[cc]) >= lanes_for(cc) or cancelled() or time.monotonic() >= deadline:
+        if kind in launched[cc] or cancelled() or time.monotonic() >= deadline:
+            return
+        if not _is_fast_discovery_kind(kind) and sum(1 for k in launched[cc] if not _is_fast_discovery_kind(k)) >= lanes_for(cc):
             return
         launched[cc].add(kind)
         target = targets[cc]
@@ -24871,6 +24922,8 @@ def _web_selected_market_search(query, country, lang, global_countries, *, image
                     sparse_or_slow = by_market[cc] < target_for(cc) and (
                         not primary_pending or time.monotonic() - started >= SELECTED_MARKET_HEDGE)
                     if cc in global_catalogs:
+                        if FAST_PROVIDERS:
+                            launch(cc, 'global_fast')
                         if 'lens' in launched[cc]:
                             if sparse_or_slow:
                                 launch(cc, 'global_all')
@@ -24887,7 +24940,10 @@ def _web_selected_market_search(query, country, lang, global_countries, *, image
                             launch(cc, 'scoped')
                     else:
                         shopping_ok = ENABLE_GOOGLE_SHOPPING and _shopping_gl_supported(cc)
-                        if not launched[cc]:
+                        if cc == country:
+                            for fast_kind in _fast_discovery_kinds():
+                                launch(cc, fast_kind)
+                        if not any(not _is_fast_discovery_kind(k) for k in launched[cc]):
                             launch(cc, 'shopping' if shopping_ok else 'broad')
                         if cc == country == 'us' and sparse_or_slow:
                             # Never let Lens + Shopping use every domestic lane:
