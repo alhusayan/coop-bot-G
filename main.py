@@ -1,3 +1,7 @@
+# v128.5.25: indexed prices are read from the plain result snippet ("KD 3.960") when
+# it names exactly one local-currency price; a geo-targeted local lane no longer drops
+# a .com store that shows no foreign signal ("foreign" was 40-60% of local rows);
+# Serper shopping runs for every market; the rare-word guard skips non-Latin titles.
 # v128.5.24: second search provider (Serper.dev and/or Google Custom Search JSON API)
 # runs as parallel lanes next to SerpApi and paints first when SerpApi is slow;
 # relevance guard requires a query word that is rare within the retrieved batch
@@ -348,7 +352,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization'], max_age=86400)
-BUILD_ID = 'v128.5.24-text-fast'
+BUILD_ID = 'v128.5.25-text-fast'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -3684,7 +3688,7 @@ def _local_storefront_evidence(item, market):
     proof = item.get('_local_storefront_proof')
     if (isinstance(proof, dict) and proof.get('country') == cc
             and proof.get('url') == _canonical_result_url(item.get('link') or item.get('url') or '')
-            and proof.get('kind') in ('local_targeting_currency', 'shopping_market_listing', 'merchant_currency')):
+            and proof.get('kind') in ('local_targeting_currency', 'shopping_market_listing', 'merchant_currency', 'search_geo_targeting')):
         return proof['kind']
     explicit = _explicit_market_country(item)
     if explicit:
@@ -3751,6 +3755,13 @@ def _local_storefront_evidence(item, market):
     # when its price is in the market currency and no foreign signal exists.
     if not known_foreign and item.get('_shopping_market_listing') and geo_targeted and codes and not codes - local_codes:
         return 'shopping_market_listing'
+    # A market-targeted retrieval lane (gl=cc, "Kuwait" in the query) that
+    # returns a .com store with no foreign signal at all — no other-country
+    # domain, locale, catalog or currency — is Google's own local ranking.
+    # Identity and price checks still apply; this is candidacy, not proof.
+    if (LOCAL_GEO_TARGETING_EVIDENCE and geo_targeted and not known_foreign and not codes
+            and not host_cc and not locale and item.get('_local_discovery_lane')):
+        return 'search_geo_targeting'
     return ''
 
 
@@ -4650,6 +4661,36 @@ def _local_discovery_snippet_price(row):
     return ''
 
 
+_LOCAL_SNIPPET_PRICE_NOISE = re.compile(
+    r'\b(?:from|starting|up ?to|was|save|off|per month|/mo|installment|instalment|monthly|MOQ|min(?:imum)? order)\b'
+    r'|ابتداء|توفير|خصم|شهري|تقسيط|أقساط|اقساط', re.I)
+
+
+def _local_discovery_plain_snippet_price(row, country):
+    """One unambiguous local-currency price in the indexed snippet text, else ''."""
+    text = ' '.join(str(row.get(k) or '') for k in ('snippet', 'description') if isinstance(row.get(k), str))
+    if not text or len(text) > 600:
+        return ''
+    pieces = []
+    for pat in _WEB_PRICE_PATS:
+        for match in pat.finditer(text):
+            piece = re.sub(r'\s+', ' ', match.group(0)).strip(' .,;')
+            if piece and piece not in pieces:
+                pieces.append(piece)
+    if len(pieces) != 1 or _LOCAL_SNIPPET_PRICE_NOISE.search(text):
+        return ''
+    piece = pieces[0]
+    if _WEB_NOT_A_PRICE_PIECE.search(piece):
+        return ''
+    quote = _web_price_quote(piece, '', country)
+    if not quote or quote.get('kind') != 'exact' or not (quote.get('min') or quote.get('max')):
+        return ''
+    local_codes = set(country_currency_codes(country))
+    if quote.get('currency') and quote['currency'] not in local_codes:
+        return ''
+    return piece[:40]
+
+
 def _local_discovery_title(row):
     """Provider rows do not always carry ``title``; fall back to other name fields."""
     for key in ('title', 'name', 'product_title', 'heading', 'headline', 'label'):
@@ -4702,6 +4743,7 @@ def _local_discovery_rows_inner(records, query, market, provider):
         host = urllib.parse.urlsplit(url).hostname or ''
         price_geo = 'us' if market.get('_retrieval_role') == 'global' and market['country'] in GLOBAL_MARKET_STORES else market['country']
         item = {'title': title, 'link': url, 'source': str(row.get('source') or host),
+                '_local_discovery_lane': market.get('_retrieval_role') != 'global',
                 '_shopping_gl': market['country'], '_lens_country': market['country'],
                 'price': (row.get('price', {}).get('value') if isinstance(row.get('price'), dict) else row.get('price')) or '',
                 'currency': str(row.get('currency') or ''),
@@ -4714,6 +4756,15 @@ def _local_discovery_rows_inner(records, query, market, provider):
             # Organic rows carry the indexed price inside rich_snippet; surface
             # it as text so merchant-country evidence can read "KD 12.500".
             item['price'] = _local_discovery_snippet_price(row)
+        if not item['price'] and market.get('_retrieval_role') != 'global':
+            # Google's indexed description often carries the store's own price
+            # text ("Chocolate Milk 250 ML. KD 3.960."). One unambiguous
+            # local-currency price is an indexed price, like a rich snippet.
+            piece = _local_discovery_plain_snippet_price(row, market['country'])
+            if piece:
+                item['price'] = piece
+                row = dict(row, price=piece)
+                stats['snippet_price'] += 1
         money_row = dict(row, _shopping_gl=price_geo, _price_market=price_geo)
         source_quote = _web_indexed_offer_quote(money_row)
         source_money = ((source_quote['min'] or source_quote['max']), source_quote['currency']) if source_quote else None
@@ -4754,7 +4805,7 @@ def _local_discovery_rows_inner(records, query, market, provider):
             continue
         seen.add(offer_key)
         out.append(item)
-    print(f'LOCAL FILTER country={market["country"]} provider={provider} raw={stats["raw"]} invalid_offer={stats["invalid_offer"]} foreign={stats["foreign"]} mismatch={stats["mismatch"]} accepted={len(out)}')
+    print(f'LOCAL FILTER country={market["country"]} provider={provider} raw={stats["raw"]} invalid_offer={stats["invalid_offer"]} foreign={stats["foreign"]} mismatch={stats["mismatch"]} snippet_prices={stats["snippet_price"]} accepted={len(out)}')
     if stats['invalid_offer']:
         print(f'LOCAL LINK DIAGNOSTICS country={market["country"]} provider={provider} missing={stats["missing_link"]} intermediary={stats["intermediary_link"]} non_product={stats["non_product_link"]} missing_title={stats["missing_title"]}')
     return out
@@ -5626,6 +5677,7 @@ def _lens_source_name(item, index):
     except Exception:
         return f'Lens {index}'
 KUWAIT_STORE_HINTS = ('.com.kw', '.kw', 'kuwait', 'الكويت', 'xcite', 'eureka', 'best al yousifi', 'best alyousifi', 'jarir', 'level shoes', 'future store', 'blink', 'noon kuwait', 'carrefour kuwait', 'lulu kuwait', 'jm3eia', 'جمعية', 'taw9eel', 'توصيل', 'intersport kuwait', 'decathlon kuwait', 'boutiqaat', 'boots kuwait', 'yiaco', 'royal pharmacy', 'talabat kuwait', 'keeta kuwait')
+LOCAL_GEO_TARGETING_EVIDENCE = env_bool('LOCAL_GEO_TARGETING_EVIDENCE', True)
 US_STORE_HINTS = ('amazon.com', 'walmart.com', 'target.com', 'bestbuy.com', 'costco.com', 'homedepot.com', 'lowes.com', 'macys.com', 'nordstrom.com', 'zappos.com', 'bhphotovideo.com', 'newegg.com', 'rei.com', 'dickssportinggoods.com', 'ebay.com', 'etsy.com')
 CHINA_STORE_HINTS = ('aliexpress.com', 'alibaba.com', '1688.com', 'taobao.com', 'tmall.com', 'shein.com', 'temu.com', 'dhgate.com', 'made-in-china.com', 'banggood.com', 'gearbest.com', 'jd.com', 'pinduoduo.com')
 
@@ -8492,6 +8544,8 @@ def _findzia_stream_candidate_ok(query, item):
             print(f'FINDZIA GUARD HARD-DROP: {title[:100]}')
         return False
     rare = _findzia_rare_query_tokens(query)
+    if rare and re.search(r'[\u0600-\u06ff\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]', title):
+        rare = set()  # A translated/untranslated title is judged by the script-aware paths below.
     if rare:
         title_tokens = _findzia_lexical_tokens(title)
         models_shared = bool(_web_model_tokens_from_listing(query) & _web_model_tokens_from_listing(title))
@@ -19715,7 +19769,9 @@ def _web_text_direct_specs(query, country):
         add(country, 'local', f'{provider}_search', 'en', True)
         if FAST_PROVIDER_IMAGES:
             add(country, 'local', f'{provider}_images', 'en', True)
-        if provider == 'serper' and FAST_PROVIDER_SHOPPING and _shopping_gl_supported(country):
+        if provider == 'serper' and FAST_PROVIDER_SHOPPING:
+            # Google's shopping units exist for markets without a Shopping tab
+            # (Kuwait shows KWD cards); the log's rows= says whether it pays.
             add(country, 'local', 'serper_shopping', 'en')
         if native != 'en' and native in ('ar',):
             add(country, 'local', f'{provider}_search', native)
