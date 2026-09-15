@@ -1,3 +1,9 @@
+# v128.5.27: Google shopping units (Serper shopping: merchant name + price, Google link)
+# become a per-search price ledger that fills the price of the same merchant's own
+# listing from any lane; hyphenated compounds match either spelling (Wi-Fi/wifi,
+# TP-Link/tplink); a Serper plan that rejects search operators stops the scoped global
+# lane instead of failing it each time; image local discovery settles ~3 s after the
+# fast lanes deliver a full page instead of waiting for a stalled SerpApi lane.
 # v128.5.26: image (Lens) search parity — the fast provider lanes (Serper/CSE search,
 # images, shopping) also run inside the Lens local-lane rescue, the shared local
 # discovery coordinator and the approved US/CN catalog lanes, next to SerpApi.
@@ -355,7 +361,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization'], max_age=86400)
-BUILD_ID = 'v128.5.26-text-fast'
+BUILD_ID = 'v128.5.27-text-fast'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -1220,8 +1226,22 @@ def _fold_latin_accents(token):
         return token
     return ''.join(ch for ch in unicodedata.normalize('NFKD', token) if not unicodedata.combining(ch))
 
+_FINDZIA_COMPOUNDS = (('wi', 'fi'), ('hi', 'fi'), ('tp', 'link'), ('d', 'link'), ('e', 'bike'), ('e', 'scooter'),
+                      ('t', 'shirt'), ('blu', 'ray'), ('usb', 'c'), ('type', 'c'), ('micro', 'sd'), ('air', 'pods'),
+                      ('mac', 'book'), ('power', 'bank'), ('smart', 'watch'), ('head', 'phones'), ('ear', 'buds'),
+                      ('play', 'station'), ('x', 'box'), ('i', 'phone'), ('i', 'pad'), ('sound', 'bar'), ('air', 'fryer'))
+_FINDZIA_COMPOUND_RES = tuple((re.compile(r'\b' + a + r'[\s\-]+' + b + r'\b', re.I), a + b) for a, b in _FINDZIA_COMPOUNDS)
+
+
+def _findzia_join_compounds(text):
+    """Wi-Fi / wi fi / wifi are one token; TP-Link / tp link / tplink too."""
+    for pattern, joined in _FINDZIA_COMPOUND_RES:
+        text = pattern.sub(joined, text)
+    return text
+
+
 def norm_tokens(query):
-    t = normalize_ar(_cjk_boundary_spaces(query))
+    t = normalize_ar(_findzia_join_compounds(_cjk_boundary_spaces(query)))
     toks = re.findall('[\\w\\u0600-\\u06FF]+', t)
     toks = [w[2:] if w.startswith('ال') and len(w) > 4 else w for w in toks]
     return {_fold_latin_accents(w) for w in toks}
@@ -4711,8 +4731,123 @@ def _local_discovery_title(row):
     return ''
 
 
+_SHOPPING_UNIT_GENERIC_LABELS = {'www', 'com', 'net', 'org', 'co', 'kw', 'sa', 'ae', 'qa', 'bh', 'om', 'eg', 'uk', 'shop', 'store',
+                                 'online', 'en', 'ar', 'app', 'the', 'kuwait', 'saudi', 'uae', 'qatar', 'bahrain', 'oman', 'egypt',
+                                 'official', 'electronics', 'trading', 'hypermarket', 'supermarket', 'group', 'llc', 'wll'}
+
+
+def _shopping_unit_merchant_tokens(name):
+    words = re.findall(r'[a-z0-9]+', _fold_latin_accents(str(name or '').casefold()))
+    out = {w for w in words if len(w) >= 3 and w not in _SHOPPING_UNIT_GENERIC_LABELS}
+    if len(words) > 1:
+        out.add(''.join(words))       # pckuwait, starlightkuwait
+        out.add(''.join(words[:2]))   # starlight, bestal
+    return out
+
+
+def _shopping_unit_merchant_matches(name, host, cc):
+    """Does this merchant name (from a shopping unit) belong to this listing host?"""
+    host = str(host or '').casefold()
+    if not host or not name:
+        return False
+    tokens = _shopping_unit_merchant_tokens(name)
+    if not tokens:
+        return False
+    # Known store names of the market first (Best Al-Yousifi -> best.com.kw).
+    for spec_name, domain in country_major_store_specs(cc):
+        spec_tokens = _shopping_unit_merchant_tokens(spec_name)
+        if spec_tokens and (spec_tokens & tokens) and _host_matches_any(host, (domain,)):
+            return True
+    labels = {label for part in host.split('.') for label in part.split('-') if label and label not in _SHOPPING_UNIT_GENERIC_LABELS}
+    return bool(tokens & labels)
+
+
+def _shopping_unit_ledger_add(market, records, provider):
+    """Keep merchant name + title + price of units whose link is a Google page."""
+    ledger = market.setdefault('_shopping_units', [])
+    added = 0
+    for row in records:
+        if not isinstance(row, dict):
+            continue
+        link = str(row.get('link') or row.get('product_link') or '')
+        try:
+            host = urllib.parse.urlsplit(link).hostname or ''
+        except ValueError:
+            host = ''
+        if not re.fullmatch(r'(?:[a-z0-9-]+\.)?google\.[a-z.]+', host):
+            continue
+        price = row.get('price')
+        price = price.get('value') if isinstance(price, dict) else price
+        source, title = str(row.get('source') or '').strip(), _local_discovery_title(row)
+        if not (price and source and title):
+            continue
+        ledger.append({'merchant': source, 'title': title, 'price': str(price)[:40], 'thumbnail': str(row.get('thumbnail') or ''),
+                       'provider': provider})
+        added += 1
+    if added:
+        print(f'SHOPPING UNIT LEDGER country={market.get("country")} provider={provider} added={added} total={len(ledger)}')
+    return added
+
+
+def _shopping_unit_price_for(row, market):
+    """An indexed shopping-unit price from the same merchant for the same listing, else ''."""
+    ledger = market.get('_shopping_units') or []
+    if not ledger:
+        return ''
+    url = str(row.get('link') or row.get('url') or '')
+    try:
+        host = urllib.parse.urlsplit(url).hostname or ''
+    except ValueError:
+        return ''
+    title = str(row.get('title') or '')
+    if not host or not title:
+        return ''
+    cc = str(market.get('country') or DEFAULT_COUNTRY).lower()
+    row_models = _web_model_tokens_from_listing(title)
+    for unit in ledger:
+        if not _shopping_unit_merchant_matches(unit['merchant'], host, cc):
+            continue
+        unit_models = _web_model_tokens_from_listing(unit['title'])
+        if row_models and unit_models and not (row_models & unit_models):
+            continue  # same store, different model
+        score = max(_findzia_match_score(unit['title'], title), _findzia_match_score(title, unit['title']))
+        if (row_models & unit_models) or score >= 0.6:
+            quote = _web_price_quote(unit['price'], '', cc)
+            if quote and quote.get('kind') == 'exact' and (quote.get('min') or quote.get('max')):
+                local_codes = set(country_currency_codes(cc))
+                if not quote.get('currency') or quote['currency'] in local_codes:
+                    return unit['price']
+    return ''
+
+
+def _shopping_unit_fill(rows, market):
+    """Fill missing prices of already-built rows from the ledger; returns changed rows."""
+    if not market.get('_shopping_units'):
+        return []
+    cc = str(market.get('country') or DEFAULT_COUNTRY).lower()
+    changed = []
+    for row in rows:
+        if not isinstance(row, dict) or _web_row_has_numeric_price(row):
+            continue
+        piece = _shopping_unit_price_for(row, market)
+        if not piece:
+            continue
+        quote = _web_price_quote(piece, '', cc)
+        if not quote:
+            continue
+        row.update(price=_web_format_quote(quote), price_value=(quote['min'] or quote['max']), currency=quote['currency'] or row.get('currency') or '',
+                   price_source='local_shopping_unit', price_verified=False, price_pending=False, price_unavailable=False,
+                   price_status='indexed')
+        changed.append(row)
+    if changed:
+        print(f'SHOPPING UNIT FILL country={cc} priced={len(changed)}')
+    return changed
+
+
 def _local_discovery_rows(data, query, market, provider):
     records = _local_discovery_records(data)
+    if market.get('_retrieval_role') != 'global':
+        _shopping_unit_ledger_add(market, records, provider)
     token = _GUARD_BATCH_DF.set(_findzia_batch_term_frequencies(
         [_local_discovery_title(row) for row in records if isinstance(row, dict)]))
     try:
@@ -4768,6 +4903,13 @@ def _local_discovery_rows_inner(records, query, market, provider):
                 item['price'] = piece
                 row = dict(row, price=piece)
                 stats['snippet_price'] += 1
+        if not item['price'] and market.get('_retrieval_role') != 'global':
+            # The market's Google shopping unit for this merchant + product.
+            piece = _shopping_unit_price_for(item, market)
+            if piece:
+                item['price'] = piece
+                row = dict(row, price=piece)
+                stats['unit_price'] += 1
         money_row = dict(row, _shopping_gl=price_geo, _price_market=price_geo)
         source_quote = _web_indexed_offer_quote(money_row)
         source_money = ((source_quote['min'] or source_quote['max']), source_quote['currency']) if source_quote else None
@@ -4808,7 +4950,7 @@ def _local_discovery_rows_inner(records, query, market, provider):
             continue
         seen.add(offer_key)
         out.append(item)
-    print(f'LOCAL FILTER country={market["country"]} provider={provider} raw={stats["raw"]} invalid_offer={stats["invalid_offer"]} foreign={stats["foreign"]} mismatch={stats["mismatch"]} snippet_prices={stats["snippet_price"]} accepted={len(out)}')
+    print(f'LOCAL FILTER country={market["country"]} provider={provider} raw={stats["raw"]} invalid_offer={stats["invalid_offer"]} foreign={stats["foreign"]} mismatch={stats["mismatch"]} snippet_prices={stats["snippet_price"]} unit_prices={stats["unit_price"]} accepted={len(out)}')
     if stats['invalid_offer']:
         print(f'LOCAL LINK DIAGNOSTICS country={market["country"]} provider={provider} missing={stats["missing_link"]} intermediary={stats["intermediary_link"]} non_product={stats["non_product_link"]} missing_title={stats["missing_title"]}')
     return out
@@ -5030,7 +5172,7 @@ def _global_discovery_request(query, country, kind, timeout_seconds):
     if country not in GLOBAL_MARKET_STORES or kind not in ('global', 'global2', 'global_all', 'global_fast'):
         return []
     if kind == 'global_fast':
-        if not FAST_PROVIDERS:
+        if not FAST_PROVIDERS or not _fast_provider_supports_operators(FAST_PROVIDERS[0]):
             return []
         target = dict(_web_market(country), _retrieval_role='global')
         scopes = ' OR '.join('site:' + domain for _, domain in GLOBAL_MARKET_STORES[country])
@@ -5167,6 +5309,7 @@ def _local_market_discovery(query, market, limit=8, timeout_seconds=None, progre
     kinds = kinds[:LOCAL_DISCOVERY_MAX_CALLS]
     rows, seen, pending = [], set(), {}
     calls = 0
+    fast_kinds = _fast_discovery_kinds()
     def cancelled():
         return cancel_event is not None and cancel_event.is_set()
     def worker(kind):
@@ -5183,6 +5326,7 @@ def _local_market_discovery(query, market, limit=8, timeout_seconds=None, progre
             pending[LOCAL_DISCOVERY_POOL.submit(_run_with_market, market, worker, kind)] = kind
             calls += 1
     def consume(future):
+        nonlocal deadline
         try:
             values = future.result() or []
         except Exception as exc:
@@ -5195,12 +5339,19 @@ def _local_market_discovery(query, market, limit=8, timeout_seconds=None, progre
                 seen.add(key)
                 rows.append(item)
                 batch.append(item)
+        for filled in _shopping_unit_fill(rows, market):
+            if filled not in batch:
+                batch.append(filled)
+        # Fast lanes done with a full page: a stalled SerpApi lane gets a
+        # short settle window, not the rest of the budget.
+        if fast_kinds and len(rows) >= max(LOCAL_RESULTS_TARGET, 4) and not any(
+                _is_fast_discovery_kind(k) for k in pending.values()):
+            deadline = min(deadline, time.monotonic() + TEXT_DIRECT_FAST_SETTLE_SECONDS)
         if batch and progress_callback and not cancelled():
             try:
                 progress_callback(batch)
             except Exception as exc:
                 print(f'LOCAL DISCOVERY CALLBACK ERR: {type(exc).__name__}')
-    fast_kinds = _fast_discovery_kinds()
     for fast_kind in fast_kinds:
         # Outside the SerpApi call budget: answers in ~1-2 s next to the primary.
         if not cancelled() and deadline - time.monotonic() > .02:
@@ -8611,7 +8762,9 @@ def _findzia_stream_candidate_ok(query, item):
         threshold = 0.46
     elif words >= 7:
         threshold = 0.45
-    elif words >= 5:
+    elif words >= 5 or words <= 3:
+        # 5-6 words: 4 of them; 3 words: 2 of them ("tp-link wifi adapter" vs
+        # "TP-Link ... Wireless USB Adapter"). Identity is settled later.
         threshold = 0.50
     else:
         threshold = 0.56
@@ -19582,6 +19735,13 @@ print(f'FAST PROVIDER CONFIG providers={FAST_PROVIDERS or "none (SerpApi only)"}
       f' num={FAST_PROVIDER_NUM} images={FAST_PROVIDER_IMAGES} shopping={FAST_PROVIDER_SHOPPING}')
 
 
+_FAST_PROVIDER_FLAGS = {}
+
+
+def _fast_provider_supports_operators(provider):
+    return not (provider == 'serper' and _FAST_PROVIDER_FLAGS.get('serper_no_operators'))
+
+
 def _fast_price_number(value):
     m = re.search(r'\d[\d,]*(?:\.\d+)?', str(value or ''))
     if not m:
@@ -19633,6 +19793,9 @@ def _serper_json(path, body, timeout):
     if status != 200 or not isinstance(data, dict):
         message = re.sub(r'\s+', ' ', str((data or {}).get('message') or (data or {}).get('error') or ''))[:120] if isinstance(data, dict) else ''
         print(f'FAST PROVIDER FAILURE provider=serper path={path} reason=http_{status} elapsed_ms={int((time.monotonic()-began)*1000)} message={message!r}')
+        if status == 400 and 'pattern not allowed' in message.lower() and not _FAST_PROVIDER_FLAGS.get('serper_no_operators'):
+            _FAST_PROVIDER_FLAGS['serper_no_operators'] = True
+            print('FAST PROVIDER NOTE serper plan rejects search operators (site:) -> scoped global lane disabled for this process')
         return None
     return data
 
@@ -20104,6 +20267,8 @@ def _web_text_direct_search(query, country, lang, progress_callback=None, cancel
                     rows[key] = dict(row)
                     counts[cc] += 1
                     merchant_counts[(cc, host)] += 1
+                    changed = True
+                if _shopping_unit_fill(list(rows.values()), market):
                     changed = True
                 if changed:
                     if first_ms is None:
