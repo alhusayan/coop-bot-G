@@ -1,3 +1,8 @@
+# v128.5.31: a local-market card whose price turns out to be in a foreign currency (INR on a
+# Kuwait card) is removed instead of shown; foreign currency symbols/codes and other-country
+# words in the indexed title/snippet block the geo-targeting evidence; merchant-page images
+# that are site-wide banners (app promos, share images, the same og:image on several product
+# pages of one host) are never used as the product photo.
 # v128.5.30: the shopping-unit price ledger is shared across the text-search lanes (it was
 # kept per lane, so 46 KWD units filled 0 cards); a brand named only in the listing's own
 # domain (eshop.kddc.com, atyabalmarshoud.com) satisfies the rare-word rule and counts in
@@ -376,7 +381,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization'], max_age=86400)
-BUILD_ID = 'v128.5.30-text-fast'
+BUILD_ID = 'v128.5.31-text-fast'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -3737,6 +3742,35 @@ def _storefront_country(url):
     return ''
 
 
+_LOCAL_FOREIGN_CURRENCY_TEXT = re.compile(
+    r'(?<![A-Za-z])(?:INR|Rs\.?|PKR|USD|GBP|EUR|AED|SAR|QAR|BHD|OMR|EGP|JOD|TRY|CNY|RMB|LKR|BDT|NPR|Dhs|SR)(?![A-Za-z])|[₹$£€¥]', re.I)
+_LOCAL_FOREIGN_PLACE_TEXT = re.compile(
+    r'\b(?:india|indian|pakistan|bangladesh|sri lanka|nepal|dubai|abu dhabi|sharjah|uae|emirates|saudi|riyadh|jeddah|dammam|qatar|doha|'
+    r'bahrain|manama|oman|muscat|egypt|cairo|jordan|amman|lebanon|beirut|turkey|istanbul|usa|united states|america|uk|london|'
+    r'germany|france|italy|spain|canada|australia|singapore|malaysia|philippines|china|shenzhen|guangzhou)\b', re.I)
+_LOCAL_CURRENCY_BY_TOKEN = {'inr': 'INR', 'rs': 'INR', 'rs.': 'INR', '₹': 'INR', 'pkr': 'PKR', 'usd': 'USD', '$': 'USD', 'gbp': 'GBP', '£': 'GBP',
+                            'eur': 'EUR', '€': 'EUR', '¥': 'CNY', 'aed': 'AED', 'dhs': 'AED', 'sar': 'SAR', 'sr': 'SAR', 'qar': 'QAR',
+                            'bhd': 'BHD', 'omr': 'OMR', 'egp': 'EGP', 'jod': 'JOD', 'try': 'TRY', 'cny': 'CNY', 'rmb': 'CNY',
+                            'lkr': 'LKR', 'bdt': 'BDT', 'npr': 'NPR'}
+
+
+def _local_text_foreign_signal(item, cc):
+    """A foreign currency or another country named in the indexed text of a .com listing."""
+    text = ' '.join(str(item.get(k) or '') for k in ('title', 'snippet', 'description', 'source') if item.get(k))
+    if not text:
+        return ''
+    local_codes = set(country_currency_codes(cc))
+    local_name = str(COUNTRY_NAMES.get(cc) or '').casefold()
+    for match in _LOCAL_FOREIGN_CURRENCY_TEXT.finditer(text):
+        code = _LOCAL_CURRENCY_BY_TOKEN.get(match.group(0).casefold().rstrip('.'))
+        if code and code not in local_codes:
+            return f'currency:{code}'
+    if local_name and local_name in text.casefold():
+        return ''
+    place = _LOCAL_FOREIGN_PLACE_TEXT.search(text)
+    return f'place:{place.group(0).lower()}' if place else ''
+
+
 def _local_storefront_evidence(item, market):
     cc = str(market.get('country') or DEFAULT_COUNTRY).lower()
     if market.get('_retrieval_role') == 'global' and cc in GLOBAL_MARKET_STORES:
@@ -3822,7 +3856,8 @@ def _local_storefront_evidence(item, market):
     # Identity and price checks still apply; this is candidacy, not proof.
     if (LOCAL_GEO_TARGETING_EVIDENCE and geo_targeted and not known_foreign and not codes
             and not host_cc and not locale and item.get('_local_discovery_lane')
-            and not host.endswith(('.eu', '.asia', '.africa', '.lat', '.arab'))):
+            and not host.endswith(('.eu', '.asia', '.africa', '.lat', '.arab'))
+            and not _local_text_foreign_signal(item, cc)):
         return 'search_geo_targeting'
     return ''
 
@@ -10393,6 +10428,38 @@ def _web_absolute_url(base_url, value):
     except Exception:
         return raw if _web_is_http_url(raw) else ''
 
+_WEB_GENERIC_IMAGE_PATTERN = re.compile(
+    r'banner|promo|campaign|hero|share[-_]?image|og[-_]?(?:default|image|share)|default[-_]?(?:og|image|share)|opengraph|'
+    r'social[-_]?(?:image|share|card)|app[-_]?(?:store|download|promo|banner)|marketing|placeholder|no[-_]?image|fallback|'
+    r'seo[-_]?image|meta[-_]?image|site[-_]?image|homepage|storefront|brand[-_]?story|logo|favicon|sprite|/static/(?:images/)?(?:og|share)|'
+    r'/(?:share|og|social|default)\.(?:png|jpe?g|webp|gif)(?:\?|$)', re.I)
+_WEB_HOST_IMAGE_SEEN = {}
+_WEB_HOST_IMAGE_LOCK = threading.Lock()
+
+
+def _web_image_is_generic(image_url, page_url):
+    """Site-wide pictures: promo banners, share images, or one og:image reused
+    across several product pages of the same host."""
+    low = str(image_url or '').lower()
+    if not low:
+        return True
+    if _WEB_GENERIC_IMAGE_PATTERN.search(low):
+        return True
+    try:
+        host = (urllib.parse.urlsplit(str(page_url or '')).hostname or '').lower()
+    except ValueError:
+        host = ''
+    if not host:
+        return False
+    page_key = _web_price_url_key(page_url) or str(page_url)
+    with _WEB_HOST_IMAGE_LOCK:
+        pages = _WEB_HOST_IMAGE_SEEN.setdefault(host, {}).setdefault(low, set())
+        pages.add(page_key)
+        if len(_WEB_HOST_IMAGE_SEEN) > 2000:
+            _WEB_HOST_IMAGE_SEEN.clear()
+        return len(pages) >= 2
+
+
 def _web_extract_product_image_from_html(html, base_url):
     try:
         soup = BeautifulSoup(html or '', 'html.parser')
@@ -10453,6 +10520,8 @@ def _web_extract_product_image_from_html(html, base_url):
         seen.add(url)
         low = url.lower()
         if any((x in low for x in ('logo', 'icon', 'sprite'))):
+            continue
+        if _web_image_is_generic(url, base_url):
             continue
         return url
     return ''
@@ -17194,7 +17263,7 @@ def _web_product_page_metadata(html, base_url):
     if page_ok and _web_is_direct_product_page_url(base_url) and page_title:
         data['title'] = data['title'] or page_title
         picture = _web_absolute_url(base_url, meta('og:image') or meta('twitter:image'))
-        if picture and not re.search(r'(?:logo|favicon|sprite)', picture, re.I):
+        if picture and not re.search(r'(?:logo|favicon|sprite)', picture, re.I) and not _web_image_is_generic(picture, base_url):
             data['image'] = data['image'] or picture
             data['is_product'] = True
     return data
@@ -18729,6 +18798,20 @@ async def _web_with_live_prices(source, lang, country, allow_paid=True, wait_sec
         return merged
     def update_event(key, data, phase):
         current = rows.get(key) or {}
+        # A Kuwait card priced in rupees is not a Kuwait card: the merchant's own
+        # page settled the market. Drop it rather than show a foreign price.
+        live_currency = str((data or {}).get('currency') or '').upper()
+        if (current and live_currency and str(current.get('market') or '') == 'local'
+                and _web_row_has_numeric_price(dict(current, **_web_price_facts(data)))):
+            cc = str(current.get('country') or (market or {}).get('country') or '').lower()
+            if cc and live_currency not in set(country_currency_codes(cc)):
+                rows.pop(key, None)
+                facts.pop(key, None)
+                print(f'LIVE PRICE FOREIGN CURRENCY country={cc} currency={live_currency} host={_more_result_domain(current.get("url"))} -> removed from local')
+                return _web_stream_event({'event': 'upsert', 'phase': 'foreign_currency_removed',
+                                          'item': dict(current, hidden=True, price='', price_pending=False, price_unavailable=True,
+                                                       price_verified=False, price_status='unavailable', removed_reason='foreign_currency'),
+                                          'market': current.get('market'), 'elapsed_ms': int((loop.time() - started) * 1000)})
         access = _web_page_access_fields(data)
         if access:
             facts[key] = dict(facts.get(key) or {}, **access)
