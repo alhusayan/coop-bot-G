@@ -1,3 +1,7 @@
+# v128.5.28: document/social hosts (yumpu, issuu, scribd, manualslib...) are never offers;
+# adjacent query words also match their joined spelling (AccuLean IQ ~ AccuLeanIQ);
+# 5+ word identities need 3 matching words; the provider-health breaker is tracked per
+# engine family (Lens vs search) so fast Lens replies no longer hide stalled search lanes.
 # v128.5.27: Google shopping units (Serper shopping: merchant name + price, Google link)
 # become a per-search price ledger that fills the price of the same merchant's own
 # listing from any lane; hyphenated compounds match either spelling (Wi-Fi/wifi,
@@ -361,7 +365,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization'], max_age=86400)
-BUILD_ID = 'v128.5.27-text-fast'
+BUILD_ID = 'v128.5.28-text-fast'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -483,39 +487,52 @@ API_COST_STATS_LOCK = threading.Lock()
 # out to every lane or only the essential ones (a hung provider still bills).
 SERPAPI_HEALTH_WINDOW_SECONDS = max(60., min(1800., float(os.environ.get('SERPAPI_HEALTH_WINDOW_SECONDS', '240'))))
 SERPAPI_HEALTH_MIN_TIMEOUTS = max(2, min(30, int(os.environ.get('SERPAPI_HEALTH_MIN_TIMEOUTS', '5'))))
-_SERPAPI_HEALTH = {'ok': deque(), 'timeout': deque(), 'degraded_since': 0.}
+_SERPAPI_HEALTH = {}
 _SERPAPI_HEALTH_LOCK = threading.Lock()
 
-def _serpapi_health_record(outcome):
+def _serpapi_health_family(engine):
+    """Lens and the search engines stall independently; judge them separately."""
+    return 'lens' if str(engine or '').startswith('google_lens') else 'search'
+
+
+def _serpapi_health_state(family):
+    return _SERPAPI_HEALTH.setdefault(family, {'ok': deque(), 'timeout': deque(), 'degraded_since': 0.})
+
+
+def _serpapi_health_record(outcome, engine=''):
     now = time.time()
+    family = _serpapi_health_family(engine)
     with _SERPAPI_HEALTH_LOCK:
-        bucket = _SERPAPI_HEALTH['ok' if outcome == 'ok' else 'timeout']
-        bucket.append(now)
+        state = _serpapi_health_state(family)
+        state['ok' if outcome == 'ok' else 'timeout'].append(now)
         for name in ('ok', 'timeout'):
-            q = _SERPAPI_HEALTH[name]
+            q = state[name]
             while q and now - q[0] > SERPAPI_HEALTH_WINDOW_SECONDS:
                 q.popleft()
-        degraded = (len(_SERPAPI_HEALTH['timeout']) >= SERPAPI_HEALTH_MIN_TIMEOUTS
-                    and len(_SERPAPI_HEALTH['timeout']) > len(_SERPAPI_HEALTH['ok']))
-        was = bool(_SERPAPI_HEALTH['degraded_since'])
+        degraded = (len(state['timeout']) >= SERPAPI_HEALTH_MIN_TIMEOUTS and len(state['timeout']) > len(state['ok']))
+        was = bool(state['degraded_since'])
         if degraded and not was:
-            _SERPAPI_HEALTH['degraded_since'] = now
-            print(f'SERPAPI HEALTH DEGRADED timeouts={len(_SERPAPI_HEALTH["timeout"])} ok={len(_SERPAPI_HEALTH["ok"])}'
+            state['degraded_since'] = now
+            print(f'SERPAPI HEALTH DEGRADED family={family} timeouts={len(state["timeout"])} ok={len(state["ok"])}'
                   f' window={int(SERPAPI_HEALTH_WINDOW_SECONDS)}s -> essential lanes only, paid recovery paused')
         elif was and not degraded:
-            _SERPAPI_HEALTH['degraded_since'] = 0.
-            print(f'SERPAPI HEALTH RECOVERED timeouts={len(_SERPAPI_HEALTH["timeout"])} ok={len(_SERPAPI_HEALTH["ok"])}')
+            state['degraded_since'] = 0.
+            print(f'SERPAPI HEALTH RECOVERED family={family} timeouts={len(state["timeout"])} ok={len(state["ok"])}')
 
-def serpapi_provider_degraded():
+def serpapi_provider_degraded(family='search'):
     with _SERPAPI_HEALTH_LOCK:
-        return bool(_SERPAPI_HEALTH['degraded_since'])
+        return bool(_serpapi_health_state(family)['degraded_since'])
 
 def serpapi_health_snapshot():
     with _SERPAPI_HEALTH_LOCK:
-        return {'degraded': bool(_SERPAPI_HEALTH['degraded_since']),
-                'degraded_for_seconds': int(time.time()-_SERPAPI_HEALTH['degraded_since']) if _SERPAPI_HEALTH['degraded_since'] else 0,
-                'recent_ok': len(_SERPAPI_HEALTH['ok']), 'recent_timeouts': len(_SERPAPI_HEALTH['timeout']),
-                'window_seconds': int(SERPAPI_HEALTH_WINDOW_SECONDS)}
+        out = {}
+        for family in ('search', 'lens'):
+            state = _serpapi_health_state(family)
+            out[family] = {'degraded': bool(state['degraded_since']),
+                           'degraded_for_seconds': int(time.time()-state['degraded_since']) if state['degraded_since'] else 0,
+                           'recent_ok': len(state['ok']), 'recent_timeouts': len(state['timeout'])}
+        out['window_seconds'] = int(SERPAPI_HEALTH_WINDOW_SECONDS)
+        return out
 
 def _api_cost_record(event, count=1):
     # Process-local diagnostics, not a billing meter. Provider-side free cache
@@ -1035,6 +1052,13 @@ def is_direct_store_url(url):
         return False
     return True
 
+NON_STORE_HOSTS = ('yumpu.com', 'issuu.com', 'scribd.com', 'manualslib.com', 'manualzz.com', 'slideshare.net', 'docplayer.net',
+                   'pdfcoffee.com', 'calameo.com', 'fliphtml5.com', 'anyflip.com', 'dokumen.pub', 'studocu.com', 'coursehero.com',
+                   'academia.edu', 'researchgate.net', 'archive.org', 'wikipedia.org', 'wikimedia.org', 'youtube.com', 'facebook.com',
+                   'instagram.com', 'tiktok.com', 'pinterest.com', 'twitter.com', 'x.com', 'reddit.com', 'linkedin.com', 'quora.com',
+                   'medium.com', 'vimeo.com', 'dailymotion.com')
+
+
 def is_lens_product_url(url, item=None):
     if not url or not url.startswith(('http://', 'https://')):
         return False
@@ -1043,6 +1067,9 @@ def is_lens_product_url(url, item=None):
         host = p.netloc.lower().replace('www.', '')
         path_q = (p.path + ('?' + p.query if p.query else '')).lower()
     except Exception:
+        return False
+    # Brochure/PDF hosts, encyclopedias and social feeds are never a merchant offer.
+    if any(host == h or host.endswith('.' + h) for h in NON_STORE_HOSTS):
         return False
     if any((host == h or host.endswith('.' + h) for h in ('google.com', 'google.com.kw', 'googleusercontent.com', 'gstatic.com', 'bing.com', 'yahoo.com'))):
         return False
@@ -1521,7 +1548,7 @@ def _serpapi_cached_json(params, timeout, label='SERPAPI', *, return_error=False
         error_info = {'reason':reason, 'http_status':int(status), 'attempts':attempts,
                       'elapsed_ms':int((time.monotonic()-started)*1000)}
         if reason in ('read_timeout', 'timeout', 'connect_timeout', 'connection'):
-            _serpapi_health_record('timeout')
+            _serpapi_health_record('timeout', engine)
         print(f'SERPAPI FAILURE engine={engine} label={label} reason={reason} http={status}'
               f' attempts={attempts} elapsed_ms={error_info["elapsed_ms"]} key={key[:10]}')
         if isinstance(data, dict):
@@ -1636,7 +1663,7 @@ def _serpapi_cached_json(params, timeout, label='SERPAPI', *, return_error=False
             else:
                 return failure(error_reason(data,response.status_code),response.status_code,data)
         billable_success, result = True, data
-        _serpapi_health_record('ok')
+        _serpapi_health_record('ok', engine)
         if not bypass:
             _serpapi_cache_put(key,engine,data)
         return copy.deepcopy(result)
@@ -8656,14 +8683,40 @@ def _findzia_hard_product_mismatch(query, title):
             return True
     return False
 
+def _findzia_ordered_tokens(value):
+    """_findzia_lexical_tokens in text order (for adjacent-word joins)."""
+    text = normalize_ar(_findzia_join_compounds(_cjk_boundary_spaces(value)))
+    out = []
+    for w in re.findall(r'[\w\u0600-\u06FF]+', text):
+        w = w[2:] if w.startswith('ال') and len(w) > 4 else w
+        w = _fold_latin_accents(w)
+        if w in _FINDZIA_QUERY_FILLER or w.isdigit() or w.lower() in _FINDZIA_PRICE_WORDS:
+            continue
+        out.append(w)
+    return out
+
+
+def _findzia_matched_query_tokens(query, title):
+    """Query tokens found in the title, counting 'AccuLean IQ' as found in 'AccuLeanIQ'."""
+    q_ordered, t_ordered = _findzia_ordered_tokens(query), _findzia_ordered_tokens(title)
+    q, t = set(q_ordered), set(t_ordered)
+    matched = q & t
+    for a, b in zip(q_ordered, q_ordered[1:]):
+        if a + b in t:
+            matched |= {a, b}
+    for a, b in zip(t_ordered, t_ordered[1:]):
+        if a + b in q:
+            matched.add(a + b)
+    return q, t, matched
+
+
 def _findzia_match_score(query, title):
     if _findzia_hard_product_mismatch(query, title):
         return 0.0
-    q = _findzia_lexical_tokens(query)
-    t = _findzia_lexical_tokens(title)
+    q, t, matched = _findzia_matched_query_tokens(query, title)
     if not q or not t:
         return 0.0
-    overlap = len(q & t) / max(1, len(q))
+    overlap = len(matched) / max(1, len(q))
     q_models = _web_model_tokens_from_listing(query)
     t_models = _web_model_tokens_from_listing(title)
     model_bonus = 0.38 if q_models and q_models & t_models else 0.0
@@ -8760,14 +8813,15 @@ def _findzia_stream_candidate_ok(query, item):
     words = len(_findzia_lexical_tokens(query))
     if strong_model:
         threshold = 0.46
-    elif words >= 7:
+    elif words >= 5:
+        # 3 of 5 ("Zeltex AccuLean IQ meat analyzer" vs "portable ground meat
+        # analyzer ... Zeltex"); the rare-word rule and identity classification
+        # (or the visual audit) settle exactness afterwards.
         threshold = 0.45
-    elif words >= 5 or words <= 3:
-        # 5-6 words: 4 of them; 3 words: 2 of them ("tp-link wifi adapter" vs
-        # "TP-Link ... Wireless USB Adapter"). Identity is settled later.
-        threshold = 0.50
+    elif words <= 3:
+        threshold = 0.50   # 2 of 3
     else:
-        threshold = 0.56
+        threshold = 0.56   # 3 of 4
     if score + 1e-9 < threshold:
         print(f'FINDZIA GUARD HOLD score={score:.2f} threshold={threshold:.2f}: {title[:100]}')
         return False
