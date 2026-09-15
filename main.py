@@ -1,3 +1,18 @@
+# v128.5.30: the shopping-unit price ledger is shared across the text-search lanes (it was
+# kept per lane, so 46 KWD units filled 0 cards); a brand named only in the listing's own
+# domain (eshop.kddc.com, atyabalmarshoud.com) satisfies the rare-word rule and counts in
+# the overlap score; SerpApi backup lanes are not launched with under 4 s of budget left;
+# regional TLDs (.eu, .asia) are never local evidence.
+# v128.5.29: provider policy. SEARCH_PROVIDER_PRIMARY=serper (default once SERPER_API_KEY is
+# set) runs text search, the Lens local rescue and the approved catalogs on Serper only;
+# SerpApi search lanes launch only as a bounded backup when the primary lanes fail or
+# return fewer than SERPAPI_BACKUP_MIN_ROWS cards. Google Lens itself stays on SerpApi.
+# SerpApi-only price/media recovery calls are off while Serper is primary. Serper
+# autocorrect is disabled for model-number queries (SerpApi nfpr=1 equivalent).
+# v128.5.28: document/social hosts (yumpu, issuu, scribd, manualslib...) are never offers;
+# adjacent query words also match their joined spelling (AccuLean IQ ~ AccuLeanIQ);
+# 5+ word identities need 3 matching words; the provider-health breaker is tracked per
+# engine family (Lens vs search) so fast Lens replies no longer hide stalled search lanes.
 # v128.5.27: Google shopping units (Serper shopping: merchant name + price, Google link)
 # become a per-search price ledger that fills the price of the same merchant's own
 # listing from any lane; hyphenated compounds match either spelling (Wi-Fi/wifi,
@@ -361,7 +376,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization'], max_age=86400)
-BUILD_ID = 'v128.5.27-text-fast'
+BUILD_ID = 'v128.5.30-text-fast'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -483,39 +498,52 @@ API_COST_STATS_LOCK = threading.Lock()
 # out to every lane or only the essential ones (a hung provider still bills).
 SERPAPI_HEALTH_WINDOW_SECONDS = max(60., min(1800., float(os.environ.get('SERPAPI_HEALTH_WINDOW_SECONDS', '240'))))
 SERPAPI_HEALTH_MIN_TIMEOUTS = max(2, min(30, int(os.environ.get('SERPAPI_HEALTH_MIN_TIMEOUTS', '5'))))
-_SERPAPI_HEALTH = {'ok': deque(), 'timeout': deque(), 'degraded_since': 0.}
+_SERPAPI_HEALTH = {}
 _SERPAPI_HEALTH_LOCK = threading.Lock()
 
-def _serpapi_health_record(outcome):
+def _serpapi_health_family(engine):
+    """Lens and the search engines stall independently; judge them separately."""
+    return 'lens' if str(engine or '').startswith('google_lens') else 'search'
+
+
+def _serpapi_health_state(family):
+    return _SERPAPI_HEALTH.setdefault(family, {'ok': deque(), 'timeout': deque(), 'degraded_since': 0.})
+
+
+def _serpapi_health_record(outcome, engine=''):
     now = time.time()
+    family = _serpapi_health_family(engine)
     with _SERPAPI_HEALTH_LOCK:
-        bucket = _SERPAPI_HEALTH['ok' if outcome == 'ok' else 'timeout']
-        bucket.append(now)
+        state = _serpapi_health_state(family)
+        state['ok' if outcome == 'ok' else 'timeout'].append(now)
         for name in ('ok', 'timeout'):
-            q = _SERPAPI_HEALTH[name]
+            q = state[name]
             while q and now - q[0] > SERPAPI_HEALTH_WINDOW_SECONDS:
                 q.popleft()
-        degraded = (len(_SERPAPI_HEALTH['timeout']) >= SERPAPI_HEALTH_MIN_TIMEOUTS
-                    and len(_SERPAPI_HEALTH['timeout']) > len(_SERPAPI_HEALTH['ok']))
-        was = bool(_SERPAPI_HEALTH['degraded_since'])
+        degraded = (len(state['timeout']) >= SERPAPI_HEALTH_MIN_TIMEOUTS and len(state['timeout']) > len(state['ok']))
+        was = bool(state['degraded_since'])
         if degraded and not was:
-            _SERPAPI_HEALTH['degraded_since'] = now
-            print(f'SERPAPI HEALTH DEGRADED timeouts={len(_SERPAPI_HEALTH["timeout"])} ok={len(_SERPAPI_HEALTH["ok"])}'
+            state['degraded_since'] = now
+            print(f'SERPAPI HEALTH DEGRADED family={family} timeouts={len(state["timeout"])} ok={len(state["ok"])}'
                   f' window={int(SERPAPI_HEALTH_WINDOW_SECONDS)}s -> essential lanes only, paid recovery paused')
         elif was and not degraded:
-            _SERPAPI_HEALTH['degraded_since'] = 0.
-            print(f'SERPAPI HEALTH RECOVERED timeouts={len(_SERPAPI_HEALTH["timeout"])} ok={len(_SERPAPI_HEALTH["ok"])}')
+            state['degraded_since'] = 0.
+            print(f'SERPAPI HEALTH RECOVERED family={family} timeouts={len(state["timeout"])} ok={len(state["ok"])}')
 
-def serpapi_provider_degraded():
+def serpapi_provider_degraded(family='search'):
     with _SERPAPI_HEALTH_LOCK:
-        return bool(_SERPAPI_HEALTH['degraded_since'])
+        return bool(_serpapi_health_state(family)['degraded_since'])
 
 def serpapi_health_snapshot():
     with _SERPAPI_HEALTH_LOCK:
-        return {'degraded': bool(_SERPAPI_HEALTH['degraded_since']),
-                'degraded_for_seconds': int(time.time()-_SERPAPI_HEALTH['degraded_since']) if _SERPAPI_HEALTH['degraded_since'] else 0,
-                'recent_ok': len(_SERPAPI_HEALTH['ok']), 'recent_timeouts': len(_SERPAPI_HEALTH['timeout']),
-                'window_seconds': int(SERPAPI_HEALTH_WINDOW_SECONDS)}
+        out = {}
+        for family in ('search', 'lens'):
+            state = _serpapi_health_state(family)
+            out[family] = {'degraded': bool(state['degraded_since']),
+                           'degraded_for_seconds': int(time.time()-state['degraded_since']) if state['degraded_since'] else 0,
+                           'recent_ok': len(state['ok']), 'recent_timeouts': len(state['timeout'])}
+        out['window_seconds'] = int(SERPAPI_HEALTH_WINDOW_SECONDS)
+        return out
 
 def _api_cost_record(event, count=1):
     # Process-local diagnostics, not a billing meter. Provider-side free cache
@@ -1035,6 +1063,13 @@ def is_direct_store_url(url):
         return False
     return True
 
+NON_STORE_HOSTS = ('yumpu.com', 'issuu.com', 'scribd.com', 'manualslib.com', 'manualzz.com', 'slideshare.net', 'docplayer.net',
+                   'pdfcoffee.com', 'calameo.com', 'fliphtml5.com', 'anyflip.com', 'dokumen.pub', 'studocu.com', 'coursehero.com',
+                   'academia.edu', 'researchgate.net', 'archive.org', 'wikipedia.org', 'wikimedia.org', 'youtube.com', 'facebook.com',
+                   'instagram.com', 'tiktok.com', 'pinterest.com', 'twitter.com', 'x.com', 'reddit.com', 'linkedin.com', 'quora.com',
+                   'medium.com', 'vimeo.com', 'dailymotion.com')
+
+
 def is_lens_product_url(url, item=None):
     if not url or not url.startswith(('http://', 'https://')):
         return False
@@ -1043,6 +1078,9 @@ def is_lens_product_url(url, item=None):
         host = p.netloc.lower().replace('www.', '')
         path_q = (p.path + ('?' + p.query if p.query else '')).lower()
     except Exception:
+        return False
+    # Brochure/PDF hosts, encyclopedias and social feeds are never a merchant offer.
+    if any(host == h or host.endswith('.' + h) for h in NON_STORE_HOSTS):
         return False
     if any((host == h or host.endswith('.' + h) for h in ('google.com', 'google.com.kw', 'googleusercontent.com', 'gstatic.com', 'bing.com', 'yahoo.com'))):
         return False
@@ -1521,7 +1559,7 @@ def _serpapi_cached_json(params, timeout, label='SERPAPI', *, return_error=False
         error_info = {'reason':reason, 'http_status':int(status), 'attempts':attempts,
                       'elapsed_ms':int((time.monotonic()-started)*1000)}
         if reason in ('read_timeout', 'timeout', 'connect_timeout', 'connection'):
-            _serpapi_health_record('timeout')
+            _serpapi_health_record('timeout', engine)
         print(f'SERPAPI FAILURE engine={engine} label={label} reason={reason} http={status}'
               f' attempts={attempts} elapsed_ms={error_info["elapsed_ms"]} key={key[:10]}')
         if isinstance(data, dict):
@@ -1636,7 +1674,7 @@ def _serpapi_cached_json(params, timeout, label='SERPAPI', *, return_error=False
             else:
                 return failure(error_reason(data,response.status_code),response.status_code,data)
         billable_success, result = True, data
-        _serpapi_health_record('ok')
+        _serpapi_health_record('ok', engine)
         if not bypass:
             _serpapi_cache_put(key,engine,data)
         return copy.deepcopy(result)
@@ -3783,7 +3821,8 @@ def _local_storefront_evidence(item, market):
     # domain, locale, catalog or currency — is Google's own local ranking.
     # Identity and price checks still apply; this is candidacy, not proof.
     if (LOCAL_GEO_TARGETING_EVIDENCE and geo_targeted and not known_foreign and not codes
-            and not host_cc and not locale and item.get('_local_discovery_lane')):
+            and not host_cc and not locale and item.get('_local_discovery_lane')
+            and not host.endswith(('.eu', '.asia', '.africa', '.lat', '.arab'))):
         return 'search_geo_targeting'
     return ''
 
@@ -5242,8 +5281,11 @@ def _global_market_discovery(query, country, limit=8, timeout_seconds=None, prog
     def run(kind):
         remaining = deadline - time.monotonic()
         return [] if cancelled() or remaining <= .01 else _global_discovery_request(query, country, kind, remaining)
-    jobs = {LOCAL_DISCOVERY_POOL.submit(run, kind)
-            for kind in (('global', 'global2') + (('global_fast',) if FAST_PROVIDERS else ()))}
+    if serper_primary() and _fast_provider_supports_operators('serper'):
+        kinds = ('global_fast',)
+    else:
+        kinds = ('global', 'global2') + (('global_fast',) if FAST_PROVIDERS else ())
+    jobs = {LOCAL_DISCOVERY_POOL.submit(run, kind) for kind in kinds}
     rows, seen = [], {}
     try:
         while jobs and not cancelled() and time.monotonic() < deadline:
@@ -5356,7 +5398,9 @@ def _local_market_discovery(query, market, limit=8, timeout_seconds=None, progre
         # Outside the SerpApi call budget: answers in ~1-2 s next to the primary.
         if not cancelled() and deadline - time.monotonic() > .02:
             pending[LOCAL_DISCOVERY_POOL.submit(_run_with_market, market, worker, fast_kind)] = fast_kind
-    if kinds:
+    if kinds and not (serper_primary() and fast_kinds):
+        # Serper-primary: the SerpApi lane is launched by the sparse/hedge rule
+        # below only after the fast lanes have answered.
         launch(kinds[0])
     if cc == 'cn' and len(kinds) > 1:
         launch(kinds[1])
@@ -5372,8 +5416,13 @@ def _local_market_discovery(query, market, limit=8, timeout_seconds=None, progre
                     pending.pop(job)
                     consume(job)
             merchants = {_more_result_domain(row.get('link')) for row in rows}
+            fast_pending = any(_is_fast_discovery_kind(k) for k in pending.values())
             if (cc != 'cn' and calls < len(kinds) and len(merchants) < min(LOCAL_RESULTS_TARGET, limit)
-                    and (not pending or time.monotonic() >= hedge_at)):
+                    and (not pending or time.monotonic() >= hedge_at)
+                    and not (serper_primary() and (fast_pending or not SERPAPI_BACKUP_ENABLED or serpapi_provider_degraded()
+                                                   or deadline - time.monotonic() < SERPAPI_BACKUP_MIN_REMAINING_SECONDS))):
+                if serper_primary() and calls == 0:
+                    print(f'LOCAL DISCOVERY BACKUP provider=serpapi kind={kinds[0]} rows={len(rows)} country={cc}')
                 launch(kinds[calls])
         # Include responses that completed at the deadline boundary.
         for job in list(pending):
@@ -8656,14 +8705,63 @@ def _findzia_hard_product_mismatch(query, title):
             return True
     return False
 
-def _findzia_match_score(query, title):
+def _findzia_ordered_tokens(value):
+    """_findzia_lexical_tokens in text order (for adjacent-word joins)."""
+    text = normalize_ar(_findzia_join_compounds(_cjk_boundary_spaces(value)))
+    out = []
+    for w in re.findall(r'[\w\u0600-\u06FF]+', text):
+        w = w[2:] if w.startswith('ال') and len(w) > 4 else w
+        w = _fold_latin_accents(w)
+        if w in _FINDZIA_QUERY_FILLER or w.isdigit() or w.lower() in _FINDZIA_PRICE_WORDS:
+            continue
+        out.append(w)
+    return out
+
+
+def _findzia_host_tokens(item):
+    """Domain labels of a listing (eshop.kddc.com -> kddc, kdd via prefix match downstream)."""
+    url = str((item or {}).get('link') or (item or {}).get('url') or '')
+    try:
+        host = (urllib.parse.urlsplit(url).hostname or '').casefold()
+    except ValueError:
+        return set()
+    labels = set()
+    for part in host.split('.'):
+        for label in part.split('-'):
+            if len(label) >= 3 and label not in _SHOPPING_UNIT_GENERIC_LABELS and not label.isdigit():
+                labels.add(label)
+    return labels
+
+
+def _findzia_matched_query_tokens(query, title, host_tokens=()):
+    """Query tokens found in the title, counting 'AccuLean IQ' as found in 'AccuLeanIQ'.
+
+    A brand that appears only in the store's own domain (kddc.com for "KDD",
+    atyabalmarshoud.com for "Atyab Al Marshoud") counts as present: the
+    merchant does not repeat its own name in every product title.
+    """
+    q_ordered, t_ordered = _findzia_ordered_tokens(query), _findzia_ordered_tokens(title)
+    q, t = set(q_ordered), set(t_ordered)
+    matched = q & t
+    for tok in q - matched:
+        if len(tok) >= 3 and any(tok in label or (len(tok) >= 5 and label in tok) for label in host_tokens):
+            matched.add(tok)
+    for a, b in zip(q_ordered, q_ordered[1:]):
+        if a + b in t:
+            matched |= {a, b}
+    for a, b in zip(t_ordered, t_ordered[1:]):
+        if a + b in q:
+            matched.add(a + b)
+    return q, t, matched
+
+
+def _findzia_match_score(query, title, host_tokens=()):
     if _findzia_hard_product_mismatch(query, title):
         return 0.0
-    q = _findzia_lexical_tokens(query)
-    t = _findzia_lexical_tokens(title)
+    q, t, matched = _findzia_matched_query_tokens(query, title, host_tokens)
     if not q or not t:
         return 0.0
-    overlap = len(q & t) / max(1, len(q))
+    overlap = len(matched) / max(1, len(q))
     q_models = _web_model_tokens_from_listing(query)
     t_models = _web_model_tokens_from_listing(title)
     model_bonus = 0.38 if q_models and q_models & t_models else 0.0
@@ -8743,16 +8841,20 @@ def _findzia_stream_candidate_ok(query, item):
         if title:
             print(f'FINDZIA GUARD HARD-DROP: {title[:100]}')
         return False
+    host_tokens = _findzia_host_tokens(item)
     rare = _findzia_rare_query_tokens(query)
     if rare and re.search(r'[\u0600-\u06ff\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]', title):
         rare = set()  # A translated/untranslated title is judged by the script-aware paths below.
     if rare:
         title_tokens = _findzia_lexical_tokens(title)
         models_shared = bool(_web_model_tokens_from_listing(query) & _web_model_tokens_from_listing(title))
-        if not models_shared and not any(_findzia_token_present(tok, title_tokens) for tok in rare):
+        def in_host(tok):
+            # kdd -> kddc.com, atyab -> atyabalmarshoud.com
+            return len(tok) >= 3 and any(label.startswith(tok) or (len(tok) >= 4 and tok in label) for label in host_tokens)
+        if not models_shared and not any(_findzia_token_present(tok, title_tokens) or in_host(tok) for tok in rare):
             print(f'FINDZIA GUARD HOLD reason=no_distinctive_word rare={sorted(rare)[:4]}: {title[:100]}')
             return False
-    score = _findzia_match_score(query, title)
+    score = _findzia_match_score(query, title, host_tokens)
     strong_model = bool(_web_model_tokens_from_listing(query) & _web_model_tokens_from_listing(title))
     # A long typed description carries optional words ("chocolate wafer"); a
     # merchant title that keeps the majority of it is the same listing family.
@@ -8760,14 +8862,15 @@ def _findzia_stream_candidate_ok(query, item):
     words = len(_findzia_lexical_tokens(query))
     if strong_model:
         threshold = 0.46
-    elif words >= 7:
+    elif words >= 5:
+        # 3 of 5 ("Zeltex AccuLean IQ meat analyzer" vs "portable ground meat
+        # analyzer ... Zeltex"); the rare-word rule and identity classification
+        # (or the visual audit) settle exactness afterwards.
         threshold = 0.45
-    elif words >= 5 or words <= 3:
-        # 5-6 words: 4 of them; 3 words: 2 of them ("tp-link wifi adapter" vs
-        # "TP-Link ... Wireless USB Adapter"). Identity is settled later.
-        threshold = 0.50
+    elif words <= 3:
+        threshold = 0.50   # 2 of 3
     else:
-        threshold = 0.56
+        threshold = 0.56   # 3 of 4
     if score + 1e-9 < threshold:
         print(f'FINDZIA GUARD HOLD score={score:.2f} threshold={threshold:.2f}: {title[:100]}')
         return False
@@ -18210,6 +18313,8 @@ def _web_indexed_offer_money(item):
 
 def _web_targeted_price_updates(entries, lang, market):
     """One bounded indexed lookup for exact listing URLs; recover image and money independently."""
+    if not serpapi_recovery_allowed():
+        return {}
     MARKET_CTX.value = dict(market)
     terms = []
     for row in entries.values():
@@ -19731,8 +19836,31 @@ FAST_PROVIDER_NUM = max(10, min(20, int(os.environ.get('FAST_PROVIDER_NUM', '20'
 FAST_PROVIDER_IMAGES = env_bool('FAST_PROVIDER_IMAGES', True)
 FAST_PROVIDER_SHOPPING = env_bool('FAST_PROVIDER_SHOPPING', True)
 FAST_PROVIDERS = [name for name, on in (('serper', bool(SERPER_API_KEY)), ('cse', bool(GOOGLE_CSE_KEY and GOOGLE_CSE_CX))) if on]
+SEARCH_PROVIDER_PRIMARY = (os.environ.get('SEARCH_PROVIDER_PRIMARY') or ('serper' if 'serper' in FAST_PROVIDERS else 'serpapi')).strip().lower()
+if SEARCH_PROVIDER_PRIMARY not in ('serper', 'serpapi', 'both') or (SEARCH_PROVIDER_PRIMARY == 'serper' and 'serper' not in FAST_PROVIDERS):
+    SEARCH_PROVIDER_PRIMARY = 'both' if FAST_PROVIDERS else 'serpapi'
+SERPAPI_BACKUP_ENABLED = env_bool('SERPAPI_BACKUP_ENABLED', True)
+SERPAPI_BACKUP_MIN_ROWS = max(0, min(20, int(os.environ.get('SERPAPI_BACKUP_MIN_ROWS', '4'))))
+SERPAPI_BACKUP_WINDOW_SECONDS = max(2., min(15., float(os.environ.get('SERPAPI_BACKUP_WINDOW_SECONDS', '6'))))
+# A SerpApi search needs a few seconds; launching it into a nearly spent budget
+# only bills a credit for a reply nobody waits for.
+SERPAPI_BACKUP_MIN_REMAINING_SECONDS = max(1., min(10., float(os.environ.get('SERPAPI_BACKUP_MIN_REMAINING_SECONDS', '4'))))
+
+
+def serper_primary():
+    return SEARCH_PROVIDER_PRIMARY == 'serper'
+
+
+def serpapi_recovery_allowed():
+    """SerpApi-only price/media recovery calls: not while Serper is primary or SerpApi is stalled."""
+    return bool(SERPAPI_API_KEY) and not serper_primary() and not serpapi_provider_degraded()
+
+
 print(f'FAST PROVIDER CONFIG providers={FAST_PROVIDERS or "none (SerpApi only)"} timeout={FAST_PROVIDER_TIMEOUT_SECONDS}s'
       f' num={FAST_PROVIDER_NUM} images={FAST_PROVIDER_IMAGES} shopping={FAST_PROVIDER_SHOPPING}')
+print(f'SEARCH PROVIDER POLICY primary={SEARCH_PROVIDER_PRIMARY} serpapi_backup={SERPAPI_BACKUP_ENABLED}'
+      f' backup_min_rows={SERPAPI_BACKUP_MIN_ROWS} backup_window={SERPAPI_BACKUP_WINDOW_SECONDS}s lens=serpapi'
+      f' serpapi_recovery={"off" if serper_primary() else "on"}')
 
 
 _FAST_PROVIDER_FLAGS = {}
@@ -19940,6 +20068,8 @@ def _fast_provider_search(engine, wording, country, hl, timeout):
         body = {'q': wording, 'gl': country, 'hl': hl, 'num': FAST_PROVIDER_NUM}
         if COUNTRY_NAMES.get(country) and kind != 'images':
             body['location'] = COUNTRY_NAMES[country]
+        if _web_model_tokens_from_listing(wording):
+            body['autocorrect'] = False  # keep SPS1000i as typed (SerpApi nfpr=1 equivalent)
         raw = _serper_json(kind, body, timeout)
         data = _serper_to_serpapi(kind, raw) if isinstance(raw, dict) else None
     elif provider == 'cse':
@@ -19977,7 +20107,7 @@ def _web_text_direct_specs(query, country):
     # and an unnamed market returned 8/10 foreign stores in production.
     degraded = serpapi_provider_degraded()
     # Fast providers first: they answer in 1-2 s and are not tied to SerpApi.
-    for provider in FAST_PROVIDERS:
+    for provider in (FAST_PROVIDERS if SEARCH_PROVIDER_PRIMARY != 'serpapi' else []):
         add(country, 'local', f'{provider}_search', 'en', True)
         if FAST_PROVIDER_IMAGES:
             add(country, 'local', f'{provider}_images', 'en', True)
@@ -19987,6 +20117,14 @@ def _web_text_direct_specs(query, country):
             add(country, 'local', 'serper_shopping', 'en')
         if native != 'en' and native in ('ar',):
             add(country, 'local', f'{provider}_search', native)
+    if serper_primary():
+        # Approved US/CN catalogs through Serper (site: operators need a paid
+        # Serper plan; a plan that rejects them falls back to SerpApi below).
+        if _fast_provider_supports_operators('serper'):
+            for cc in DEFAULT_GLOBAL_COUNTRIES:
+                if cc != country and cc in GLOBAL_MARKET_STORES:
+                    add(cc, 'global', 'serper_search', 'en')
+        return specs
     if TEXT_DIRECT_LIGHT_LANE:
         add(country, 'local', 'google_light', 'en', True)
     add(country, 'local', TEXT_DIRECT_IMAGES_ENGINE, 'en', True)
@@ -20010,6 +20148,20 @@ def _web_text_direct_specs(query, country):
         add(cc, 'global', 'google', 'en')
         add(cc, 'global', 'google_shopping' if cc == 'us' and ENABLE_GOOGLE_SHOPPING
             else TEXT_DIRECT_IMAGES_ENGINE, 'en')
+    return specs
+
+
+def _web_text_direct_backup_specs(query, country):
+    """SerpApi lanes used only when the primary provider fails or returns too little."""
+    native = next((hl for hl in _market_query_languages(country, query) if hl != 'en'), 'en')
+    specs = [{'country': country, 'role': 'local', 'engine': 'google', 'hl': 'en', 'geo_cue': True},
+             {'country': country, 'role': 'local', 'engine': TEXT_DIRECT_IMAGES_ENGINE, 'hl': 'en', 'geo_cue': True}]
+    if native != 'en':
+        specs.append({'country': country, 'role': 'local', 'engine': 'google', 'hl': native, 'geo_cue': False})
+    if not _fast_provider_supports_operators('serper'):
+        for cc in DEFAULT_GLOBAL_COUNTRIES:
+            if cc != country and cc in GLOBAL_MARKET_STORES:
+                specs.append({'country': cc, 'role': 'global', 'engine': 'google', 'hl': 'en', 'geo_cue': False})
     return specs
 
 
@@ -20159,6 +20311,10 @@ def _web_text_direct_search(query, country, lang, progress_callback=None, cancel
     extended = False
     market = dict(_web_market(country), _query=query,
                   global_countries=[c for c in DEFAULT_GLOBAL_COUNTRIES if c != country])
+    # One price ledger for the whole search: every lane's target shares the
+    # same list object, so a shopping unit seen by one lane prices another's row.
+    shopping_units = []
+    market['_shopping_units'] = shopping_units
     jobs, rows, counts, merchant_counts = {}, {}, Counter(), Counter()
     expanded = set()
     expansions = Counter()
@@ -20181,6 +20337,8 @@ def _web_text_direct_search(query, country, lang, progress_callback=None, cancel
         target = dict(_web_market(spec['country']))
         if spec['role'] == 'global':
             target['_retrieval_role'] = 'global'
+        if spec['country'] == country:
+            target['_shopping_units'] = shopping_units
         future = TEXT_DIRECT_POOL.submit(_run_with_market, target,
             _web_text_direct_fetch, query, spec, deadline, cancel, token)
         jobs[future] = (spec, target, token, thumbnail)
@@ -20188,8 +20346,32 @@ def _web_text_direct_search(query, country, lang, progress_callback=None, cancel
     try:
         specs = _web_text_direct_specs(query, country)
         fast_lane_count = sum(1 for spec in specs if spec['engine'].startswith(('serper_', 'cse_')))
+        backup_launched = False
+        fast_unavailable = 0
         for spec in specs:
             submit(spec)
+        def maybe_launch_backup():
+            """Serper-primary: SerpApi lanes exist only as a bounded backup, launched
+            once the primary lanes have answered and left too little on the page."""
+            nonlocal backup_launched, deadline, empty_deadline
+            if (not serper_primary() or not SERPAPI_BACKUP_ENABLED or backup_launched or not SERPAPI_API_KEY
+                    or cancel.is_set() or serpapi_provider_degraded()
+                    or any(j[0]['engine'].startswith(('serper_', 'cse_')) for j in jobs.values())):
+                return
+            unavailable = fast_unavailable >= max(1, fast_lane_count)
+            if len(rows) >= SERPAPI_BACKUP_MIN_ROWS and not unavailable:
+                return
+            backup_launched = True
+            now = time.monotonic()
+            backup = _web_text_direct_backup_specs(query, country)
+            deadline = max(deadline, min(started + TEXT_DIRECT_TIMEOUT_SECONDS + 4., now + SERPAPI_BACKUP_WINDOW_SECONDS))
+            empty_deadline = max(empty_deadline, deadline)
+            for spec in backup:
+                submit(spec)
+            print(f'TEXT DIRECT BACKUP provider=serpapi lanes={len(backup)} reason='
+                  f'{"primary_unavailable" if unavailable else "sparse"}'
+                  f' rows={len(rows)} country={country} elapsed_ms={int((now-started)*1000)}')
+        maybe_launch_backup()
         while jobs and not cancel.is_set():
             now = time.monotonic()
             if not rows and now >= deadline and not extended:
@@ -20216,6 +20398,8 @@ def _web_text_direct_search(query, country, lang, progress_callback=None, cancel
                 name = f'{spec["role"]}:{spec["country"]}:{spec["engine"]}:{spec["hl"]}' + (':merchants' if token else '')
                 source_states[name] = 'complete' if isinstance(data, dict) else 'unavailable'
                 if not isinstance(data, dict):
+                    if spec['engine'].startswith(('serper_', 'cse_')):
+                        fast_unavailable += 1
                     continue
                 try:
                     if token:
@@ -20311,6 +20495,7 @@ def _web_text_direct_search(query, country, lang, progress_callback=None, cancel
                         expanded.add(token_key)
                         expansions[spec['country']] += 1
                         submit(spec, page_token, next(iter(_web_offer_image_candidates(card)), ''))
+            maybe_launch_backup()
         result = _run_with_market(market, _web_attach_captured_result_sections, snapshot(), lang, False)
         result['partial'] = (bool(jobs) or cancel.is_set() or time.monotonic() >= deadline
                              or any(v == 'unavailable' for v in source_states.values()))
@@ -23953,7 +24138,7 @@ async def _web_stream_text_fast(query, country, lang, selected_option='', reques
     # are bounded so `done` always arrives within deadline + price tail.
     source = _web_stream_text_direct(q, country, lang, request, TEXT_FAST_TIMEOUT_SECONDS,
                                      TEXT_FAST_EMPTY_EXTENSION_SECONDS)
-    stream = _web_with_live_prices(source, lang, country, allow_paid=not serpapi_provider_degraded(),
+    stream = _web_with_live_prices(source, lang, country, allow_paid=serpapi_recovery_allowed(),
                                    wait_seconds=TEXT_FAST_PRICE_WAIT_SECONDS)
     first_card = None
     count = 0
@@ -24084,6 +24269,9 @@ async def web_api_health_serpapi(request: Request):
                              'empty_extension_seconds': TEXT_FAST_EMPTY_EXTENSION_SECONDS,
                              'late_read_seconds': TEXT_DIRECT_LATE_READ_SECONDS},
                'provider': serpapi_health_snapshot(), 'fast_providers': FAST_PROVIDERS,
+               'policy': {'primary': SEARCH_PROVIDER_PRIMARY, 'serpapi_backup': SERPAPI_BACKUP_ENABLED,
+                          'backup_min_rows': SERPAPI_BACKUP_MIN_ROWS, 'lens': 'serpapi',
+                          'serper_operators': _fast_provider_supports_operators('serper')},
                'budget': serpapi_budget_snapshot(), 'cost_counters': api_cost_snapshot()}
     return Response(content=json.dumps(payload, ensure_ascii=False, default=str), media_type='application/json',
                     headers={'Cache-Control': 'no-store'})
@@ -25089,7 +25277,11 @@ def _web_selected_market_search(query, country, lang, global_countries, *, image
                     if cc in global_catalogs:
                         if FAST_PROVIDERS:
                             launch(cc, 'global_fast')
-                        if 'lens' in launched[cc]:
+                        if serper_primary() and _fast_provider_supports_operators('serper'):
+                            # SerpApi catalog lanes only as a sparse backup.
+                            if sparse_or_slow and 'global_fast' not in {k for c, k in jobs.values() if c == cc} and SERPAPI_BACKUP_ENABLED:
+                                launch(cc, 'global_all')
+                        elif 'lens' in launched[cc]:
                             if sparse_or_slow:
                                 launch(cc, 'global_all')
                         else:
