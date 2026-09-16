@@ -1,3 +1,8 @@
+# v128.5.37: highlight tags. When a text search ends with a priced page, up to four cards are
+# tagged — Best overall, Best value, Best quality, Top rated — by a bounded Gemini pick with
+# a one-line reason (deterministic scoring when the model is unavailable). Rows carry
+# `highlights` [{id,label,label_en,label_ar,reason}] and `highlight` (primary id); a
+# `highlights` event precedes `done`. The frontend renders them like the Cheapest tag.
 # v128.5.35: listing-page expansion. When a result's merchant page is a listing (a marketplace
 # category, search or collection page with several offers), every offer on it that matches
 # the query becomes its own card — own title, price, image and link — instead of one card
@@ -399,7 +404,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization'], max_age=86400)
-BUILD_ID = 'v128.5.35-text-fast'
+BUILD_ID = 'v128.5.37-text-fast'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -24543,6 +24548,202 @@ def _web_text_fast_prepare(query, country, lang, selected_option='', original_qu
     return dict(base, **planned, planner='ai')
 
 
+# ---------------------------------------------------------------------------
+# v128.5.37 — HIGHLIGHT TAGS ("Best overall", "Best value", "Best quality", "Top rated")
+TEXT_FAST_HIGHLIGHTS = env_bool('TEXT_FAST_HIGHLIGHTS', True)
+HIGHLIGHTS_AI = env_bool('HIGHLIGHTS_AI', True)
+HIGHLIGHTS_AI_TIMEOUT_SECONDS = max(1., min(6., float(os.environ.get('HIGHLIGHTS_AI_TIMEOUT_SECONDS', '2.5'))))
+HIGHLIGHTS_MIN_CARDS = max(2, min(10, int(os.environ.get('HIGHLIGHTS_MIN_CARDS', '3'))))
+HIGHLIGHT_LABELS = {
+    'best_overall': {'en': 'Best overall', 'ar': 'الأفضل عموماً'},
+    'best_value': {'en': 'Best value', 'ar': 'أفضل قيمة'},
+    'best_quality': {'en': 'Best quality', 'ar': 'أعلى جودة'},
+    'top_rated': {'en': 'Top rated', 'ar': 'الأعلى تقييماً'},
+}
+_HIGHLIGHT_ORDER = ('best_overall', 'best_value', 'best_quality', 'top_rated')
+_HIGHLIGHT_QUALITY_WORDS = re.compile(r'\b(?:pro|max|ultra|plus|premium|deluxe|official|genuine|original|authentic|titanium|professional|full option|vxr|limited)\b', re.I)
+_HIGHLIGHT_WEAK_WORDS = re.compile(r'\b(?:refurbished|renewed|used|open box|pre-owned|clone|copy|replica|compatible|generic|unbranded|damaged|for parts)\b', re.I)
+
+
+def _highlight_candidates(rows, market):
+    """Priced, comparable cards with a numeric market price (FX'd when foreign)."""
+    out = []
+    for row in rows or []:
+        if not isinstance(row, dict) or row.get('hidden') or row.get('price_unavailable'):
+            continue
+        amount = row.get('price_compare_value')
+        if amount is None:
+            amount = row.get('price_value') if not row.get('currency') or row.get('currency') == _web_market_currency(market) else None
+        try:
+            amount = float(amount)
+        except (TypeError, ValueError):
+            continue
+        if amount <= 0:
+            continue
+        out.append((row, amount))
+    return out
+
+
+def _highlight_scores(query, candidates, market):
+    """Deterministic 0..1 scores: price rank, quality signals, trust, rating."""
+    amounts = [a for _, a in candidates]
+    lo, hi = min(amounts), max(amounts)
+    scored = []
+    for row, amount in candidates:
+        price_rank = 1.0 if hi == lo else 1.0 - (amount - lo) / (hi - lo)
+        title = str(row.get('title') or '')
+        quality = 0.35
+        quality += 0.15 if str(row.get('section') or row.get('result_section') or '') == 'exact' else 0.0
+        quality += 0.10 if _HIGHLIGHT_QUALITY_WORDS.search(title) else 0.0
+        quality -= 0.25 if _HIGHLIGHT_WEAK_WORDS.search(title) else 0.0
+        try:
+            pct = float(row.get('match_percentage') or 0)
+            quality += 0.15 * min(1.0, pct / 100.0)
+        except (TypeError, ValueError):
+            pass
+        rating = None
+        for key in ('product_rating', 'rating', 'expert_score', 'store_rating'):
+            try:
+                value = float(row.get(key)) if row.get(key) not in (None, '') else None
+            except (TypeError, ValueError):
+                value = None
+            if value:
+                rating = max(rating or 0, min(5.0, value if value <= 5 else value / 20.0))
+        if rating:
+            quality += 0.15 * (rating / 5.0)
+        trust = 0.4
+        trust += 0.25 if row.get('price_verified') else 0.0
+        trust += 0.15 if str(row.get('market') or '') == 'local' else 0.0
+        trust += 0.10 if _web_is_http_url(_web_unproxy_image_url(row.get('image') or '')) else 0.0
+        trust += 0.10 if str(row.get('price_status') or '') in ('verified', 'page') else 0.0
+        quality = max(0.0, min(1.0, quality))
+        trust = max(0.0, min(1.0, trust))
+        scored.append({'row': row, 'amount': amount, 'price_rank': price_rank, 'quality': quality, 'trust': trust, 'rating': rating,
+                       'overall': 0.45 * quality + 0.30 * price_rank + 0.25 * trust,
+                       'value': 0.55 * quality + 0.45 * price_rank})
+    return scored
+
+
+def _highlight_rule_picks(scored, lang):
+    picks = {}
+    used = set()
+    def take(kind, key_fn, reason):
+        ordered = sorted((s for s in scored if id(s['row']) not in used), key=key_fn, reverse=True)
+        if not ordered:
+            return
+        best = ordered[0]
+        used.add(id(best['row']))
+        picks[kind] = {'row': best['row'], 'reason': reason(best)}
+    ar = lang == 'ar'
+    take('best_overall', lambda s: s['overall'],
+         lambda s: ('توازن جيد بين السعر والمواصفات والمتجر' if ar else 'Balanced price, specification and store'))
+    take('best_value', lambda s: s['value'],
+         lambda s: ('أقل سعر بين البطاقات ذات الجودة المقبولة' if ar else 'Lowest price among the solid options'))
+    take('best_quality', lambda s: (s['quality'], s['amount']),
+         lambda s: ('أعلى مواصفات ودرجة مطابقة' if ar else 'Highest specification and match grade'))
+    rated = [s for s in scored if s.get('rating')]
+    if rated:
+        take('top_rated', lambda s: (s.get('rating') or 0, s['overall']),
+             lambda s: (f'تقييم {s["rating"]:.1f} من 5' if ar else f'Rated {s["rating"]:.1f} / 5'))
+    return picks
+
+
+def _highlight_ai_picks(query, scored, lang, market):
+    """One bounded Gemini call: indices + one-line reasons in the shopper's language."""
+    if not (HIGHLIGHTS_AI and GEMINI_API_KEY) or len(scored) < HIGHLIGHTS_MIN_CARDS:
+        return {}
+    currency = _web_market_currency(market)
+    items = []
+    for index, s in enumerate(scored[:24]):
+        row = s['row']
+        items.append({'i': index, 'title': str(row.get('title') or '')[:110], 'price': f'{s["amount"]:.3f} {currency}',
+                      'store': str(row.get('store') or row.get('source') or '')[:40],
+                      'market': str(row.get('market') or ''), 'match': str(row.get('section') or row.get('result_section') or ''),
+                      **({'rating': round(s['rating'], 1)} if s.get('rating') else {})})
+    system = ('You are a shopping editor. From the offer list pick at most one index for each tag: '
+              'best_overall (balance of specification, price and store), best_value (most product for the money), '
+              'best_quality (highest specification/trim/build regardless of price), top_rated (only if ratings exist). '
+              'Different offers for different tags where reasonable; skip a tag if nothing deserves it. '
+              'Return ONLY JSON: {"picks":[{"tag":"best_overall","i":0,"reason":"..."}]} with reasons of at most 10 words '
+              f'written in {"Arabic" if lang == "ar" else "English"}. Never invent facts not in the list.')
+    payload = {'systemInstruction': {'parts': [{'text': system}]},
+               'contents': [{'role': 'user', 'parts': [{'text': json.dumps({'query': query, 'offers': items}, ensure_ascii=False)}]}],
+               'generationConfig': {'temperature': 0, 'maxOutputTokens': 320, 'responseMimeType': 'application/json'}}
+    began = time.monotonic()
+    try:
+        with GEMINI_STATS_LOCK:
+            GEMINI_STATS['plain_calls'] += 1
+        response = requests.post(f'{GEMINI_BASE_URL}/{GEMINI_FAST_MODEL}:generateContent', params={'key': GEMINI_API_KEY},
+                                 json=payload, timeout=(1, max(1.0, HIGHLIGHTS_AI_TIMEOUT_SECONDS - 0.5)))
+        response.raise_for_status()
+        data = response.json()
+        parts = ((data.get('candidates') or [{}])[0].get('content') or {}).get('parts') or []
+        answer = _ai_json_object(''.join(p.get('text', '') for p in parts if not p.get('thought'))) or {}
+    except Exception as exc:
+        print(f'HIGHLIGHTS AI fallback={type(exc).__name__} elapsed_ms={int((time.monotonic()-began)*1000)}')
+        return {}
+    picks, used = {}, set()
+    for pick in answer.get('picks') or []:
+        if not isinstance(pick, dict):
+            continue
+        tag = str(pick.get('tag') or '').strip().lower()
+        try:
+            index = int(pick.get('i'))
+        except (TypeError, ValueError):
+            continue
+        if tag not in HIGHLIGHT_LABELS or tag in picks or not (0 <= index < len(scored)) or index in used:
+            continue
+        if tag == 'top_rated' and not scored[index].get('rating'):
+            continue
+        used.add(index)
+        picks[tag] = {'row': scored[index]['row'], 'reason': str(pick.get('reason') or '').strip()[:120]}
+    print(f'HIGHLIGHTS AI picks={list(picks)} elapsed_ms={int((time.monotonic()-began)*1000)} offers={len(items)}')
+    return picks
+
+
+def _web_pick_highlights(query, rows, lang, market, use_ai=True):
+    """Return {url_key: [highlight,...]} for the cards worth tagging."""
+    candidates = _highlight_candidates(rows, market)
+    if len(candidates) < HIGHLIGHTS_MIN_CARDS:
+        return {}
+    scored = _highlight_scores(query, candidates, market)
+    picks = _highlight_ai_picks(query, scored, lang, market) if use_ai else {}
+    source = 'ai'
+    if not picks:
+        picks = _highlight_rule_picks(scored, lang)
+        source = 'rules'
+    out = {}
+    for tag in _HIGHLIGHT_ORDER:
+        pick = picks.get(tag)
+        if not pick:
+            continue
+        key = _web_price_url_key(pick['row'].get('url'))
+        if not key:
+            continue
+        labels = HIGHLIGHT_LABELS[tag]
+        out.setdefault(key, []).append({'id': tag, 'label': labels.get(lang) or labels['en'], 'label_en': labels['en'],
+                                        'label_ar': labels['ar'], 'reason': pick.get('reason') or '', 'source': source})
+    return out
+
+
+def _web_apply_highlights(rows, highlights):
+    """Attach highlight fields to the matching rows in place; returns the tagged rows."""
+    tagged = []
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        key = _web_price_url_key(row.get('url'))
+        tags = highlights.get(key) if key else None
+        if not tags:
+            continue
+        row['highlights'] = tags
+        row['highlight'] = tags[0]['id']
+        row['highlight_label'] = tags[0]['label']
+        row['highlight_reason'] = tags[0]['reason']
+        tagged.append(row)
+    return tagged
+
+
 async def _web_stream_text_fast(query, country, lang, selected_option='', request=None,
                                 original_query='', force_specific=False):
     started = time.monotonic()
@@ -24640,6 +24841,24 @@ async def _web_stream_text_fast(query, country, lang, selected_option='', reques
                     suggest_task.cancel()
                     await asyncio.gather(suggest_task, return_exceptions=True)
                     suggest_task = None
+                if TEXT_FAST_HIGHLIGHTS and isinstance(event.get('results'), list):
+                    # Tag the page: bounded editor pick, deterministic fallback.
+                    try:
+                        highlights = await asyncio.wait_for(asyncio.to_thread(
+                            _web_pick_highlights, q, event['results'], lang, market), timeout=HIGHLIGHTS_AI_TIMEOUT_SECONDS + 1.0)
+                    except Exception as exc:
+                        print(f'HIGHLIGHTS ERR {type(exc).__name__}')
+                        highlights = {}
+                    if highlights:
+                        tagged = _web_apply_highlights(event['results'], highlights)
+                        for row in tagged:
+                            yield _web_stream_event({'event': 'upsert', 'phase': 'highlights', 'item': row,
+                                                     'market': row.get('market'), 'elapsed_ms': int((time.monotonic()-started)*1000)})
+                        yield _web_stream_event({'event': 'highlights', 'items': {
+                            key: tags for key, tags in highlights.items()}, 'count': len(tagged),
+                            'elapsed_ms': int((time.monotonic()-started)*1000)})
+                        event['highlights'] = {row.get('url'): row['highlights'] for row in tagged}
+                        print(f'HIGHLIGHTS tagged={len(tagged)} tags={[t["id"] for tags in highlights.values() for t in tags]}')
                 event.update(source='text_fast', first_card_ms=first_card,
                              elapsed_ms=int((time.monotonic()-started)*1000))
                 print(f'TEXT FAST DONE cards={count} first_card_ms={first_card}'
