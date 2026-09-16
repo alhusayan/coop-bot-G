@@ -1,3 +1,7 @@
+# v128.5.36: listing extraction merges JSON-LD and the DOM (JSON-LD alone can be image
+# captions without prices, as on qatarliving), keeps up to 60 offers before relevance,
+# strips 'Picture/Image' caption prefixes, and a listing page whose offers none match
+# the query is removed instead of staying as a card with the page's first price.
 # v128.5.35: listing-page expansion. When a result's merchant page is a listing (a marketplace
 # category, search or collection page with several offers), every offer on it that matches
 # the query becomes its own card — own title, price, image and link — instead of one card
@@ -399,7 +403,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization'], max_age=86400)
-BUILD_ID = 'v128.5.35-text-fast'
+BUILD_ID = 'v128.5.36-text-fast'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -10477,6 +10481,7 @@ _WEB_GENERIC_IMAGE_PATTERN = re.compile(
     r'banner|promo|campaign|hero|share[-_]?image|og[-_]?(?:default|image|share)|default[-_]?(?:og|image|share)|opengraph|'
     r'social[-_]?(?:image|share|card)|app[-_]?(?:store|download|promo|banner)|marketing|placeholder|no[-_]?image|fallback|'
     r'seo[-_]?image|meta[-_]?image|site[-_]?image|homepage|storefront|brand[-_]?story|logo|favicon|sprite|/static/(?:images/)?(?:og|share)|'
+    r'facebook|twitter|instagram|linkedin|whatsapp|telegram|'
     r'/(?:share|og|social|default)\.(?:png|jpe?g|webp|gif)(?:\?|$)', re.I)
 _WEB_HOST_IMAGE_SEEN = {}
 _WEB_HOST_IMAGE_LOCK = threading.Lock()
@@ -17773,7 +17778,15 @@ def _web_listing_dom_offers(html, base_url):
             found = []
             for pat in _WEB_PRICE_PATS:
                 found.extend(m.group(0).strip() for m in pat.finditer(text))
-            distinct = {re.sub(r'\s+', ' ', p) for p in found}
+            distinct = []
+            for piece in found:
+                piece = re.sub(r'\s+', ' ', piece)
+                if piece not in distinct:
+                    distinct.append(piece)
+            # "2009 QAR" is a model year next to a currency word, not a price.
+            real = [p for p in distinct if not re.fullmatch(r'(?:19|20)\d{2}(?:\.0+)?', re.sub(r'[^\d.]', '', p).strip('.') or '')]
+            if real:
+                distinct = real
             if distinct:
                 if len(distinct) > 3:
                     break
@@ -17815,22 +17828,37 @@ def _web_listing_dom_offers(html, base_url):
     return out
 
 
+_WEB_LISTING_CAPTION_PREFIX = re.compile(r'^(?:picture|image|photo|img|pic)s?\s*(?:of\s+)?[:\-]?\s*', re.I)
+
+
 def _web_listing_page_offers(html, base_url, country=''):
-    """All offers a listing page shows, each with its own title/price/image/link."""
+    """All offers a listing page shows, each with its own title/price/image/link.
+
+    JSON-LD and the DOM are merged by URL: structured data often carries the
+    name/image (sometimes only an image caption), the DOM carries the price.
+    """
     if not html or not WEB_LISTING_EXPANSION:
         return []
-    offers = _web_listing_jsonld_offers(html, base_url)
-    if len(offers) < 2:
-        offers = offers + [o for o in _web_listing_dom_offers(html, base_url)
-                           if _web_price_url_key(o['url']) not in {_web_price_url_key(x['url']) for x in offers}]
-    cleaned, seen = [], set()
-    for offer in offers:
-        key = _web_price_url_key(offer['url'])
-        if not key or key in seen or not offer.get('title') or not offer.get('price'):
+    merged = {}
+    order = []
+    for offer in _web_listing_dom_offers(html, base_url) + _web_listing_jsonld_offers(html, base_url):
+        key = _web_price_url_key(offer.get('url'))
+        if not key:
             continue
-        seen.add(key)
-        cleaned.append(offer)
-    return cleaned
+        offer['title'] = _WEB_LISTING_CAPTION_PREFIX.sub('', str(offer.get('title') or '')).strip()
+        if key not in merged:
+            merged[key] = dict(offer)
+            order.append(key)
+            continue
+        current = merged[key]
+        for field in ('title', 'price', 'image', 'currency'):
+            if not current.get(field) and offer.get(field):
+                current[field] = offer[field]
+        # The DOM heading is the listing's real title; structured names only
+        # fill a missing or generic one.
+        if offer.get('source') == 'jsonld' and offer.get('title') and (not current.get('title') or _WEB_LISTING_GENERIC_ANCHOR.match(current['title'])):
+            current['title'] = offer['title']
+    return [merged[k] for k in order if merged[k].get('title') and merged[k].get('price')]
 
 
 def _web_fetch_page_snapshot(url, country=''):
@@ -17914,7 +17942,7 @@ def _web_fetch_page_snapshot(url, country=''):
                     print('WEB LISTING PARSE ERR host=' + parsed.netloc + ': ' + type(exc).__name__)
                     listing = []
                 if len(listing) >= 2:
-                    data['listing_offers'] = listing[:WEB_LISTING_EXPAND_MAX * 2]
+                    data['listing_offers'] = listing[:60]
                     data['is_listing'] = True
                     print(f'LISTING PAGE host={host} offers={len(listing)} jsonld={sum(1 for o in listing if o.get("source") == "jsonld")} url={final_url[:100]}')
     except Exception as e:
@@ -19120,6 +19148,16 @@ async def _web_with_live_prices(source, lang, country, allow_paid=True, wait_sec
             elif current.get('_listing_candidate'):
                 rows.pop(key, None)  # nothing usable on the page: never shown
                 return None
+            elif replace_base:
+                # A listing page whose offers do not match the search is not an
+                # offer itself: drop it rather than show the page's first price.
+                rows.pop(key, None)
+                facts.pop(key, None)
+                print(f'LISTING PAGE REMOVED host={_more_result_domain(current.get("url"))} offers={len(data["listing_offers"])} reason=no_matching_offer')
+                return _web_stream_event({'event': 'upsert', 'phase': 'listing_removed',
+                                          'item': dict(current, hidden=True, price='', price_pending=False, price_unavailable=True,
+                                                       price_verified=False, price_status='unavailable', removed_reason='listing_no_match'),
+                                          'market': current.get('market'), 'elapsed_ms': int((loop.time() - started) * 1000)})
             if replace_base:
                 data = {k: v for k, v in data.items() if k not in ('listing_offers', 'listing_url', 'listing_replace_base')}
         if current.get('_listing_candidate'):
