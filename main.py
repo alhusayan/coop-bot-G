@@ -1,11 +1,3 @@
-# v128.5.34: image (Lens) search no longer uses the Serper lanes (FAST_PROVIDER_IMAGE_SEARCH=false
-# by default): its local rescue and US/China catalog lanes run on SerpApi as before, because
-# text lanes driven by a Lens-guessed identity drifted away from the photographed product.
-# Serper remains the primary provider for typed text search only.
-# v128.5.33: generic queries search directly and show every card (TEXT_FAST_GENERIC_MODE=search;
-# 'suggest' restores the brand-comparison screen, 'both' streams cards then suggestions when
-# the page is rich); the per-store cap in text search was a hard 4 (one Amazon = 4 US cards)
-# and is now 6 local / 8 global (TEXT_DIRECT_HOST_CAP_LOCAL/GLOBAL); US/China card caps 8/6.
 # v128.5.32: global markets (approved US + China catalogs) get the same three Serper lanes as
 # the local market — Google Shopping (gl=us, direct merchant links + USD prices), Google
 # Images scoped to the catalogs (product pages with photos, the old google_images role) and
@@ -394,7 +386,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization'], max_age=86400)
-BUILD_ID = 'v128.5.34-text-fast'
+BUILD_ID = 'v128.5.32-text-fast'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -586,8 +578,8 @@ LENS_DIRECT_MODE = env_bool('LENS_DIRECT_MODE', True)
 # never quotas to fill with unrelated products or duplicate merchants.
 LENS_DIRECT_MAX_LINES = max(3, min(24, int(os.environ.get('LENS_DIRECT_MAX_LINES', '16'))))
 LENS_DIRECT_LOCAL_MAX = max(0, min(16, int(os.environ.get('LENS_DIRECT_LOCAL_MAX', '8'))))
-LENS_DIRECT_US_MAX = max(0, min(12, int(os.environ.get('LENS_DIRECT_US_MAX', '8'))))
-LENS_DIRECT_CN_MAX = max(0, min(8, int(os.environ.get('LENS_DIRECT_CN_MAX', '6'))))
+LENS_DIRECT_US_MAX = max(0, min(12, int(os.environ.get('LENS_DIRECT_US_MAX', '5'))))
+LENS_DIRECT_CN_MAX = max(0, min(8, int(os.environ.get('LENS_DIRECT_CN_MAX', '3'))))
 LENS_DIRECT_MAX_CTA = max(1, min(24, int(os.environ.get('LENS_DIRECT_MAX_CTA', str(LENS_DIRECT_LOCAL_MAX + LENS_DIRECT_US_MAX + LENS_DIRECT_CN_MAX)))))
 RESULT_CANDIDATE_SCAN_MAX = max(LENS_DIRECT_MAX_CTA, min(48, int(os.environ.get('RESULT_CANDIDATE_SCAN_MAX', '24'))))
 MORE_LOCAL_MAX = max(0, int(os.environ.get('MORE_LOCAL_MAX', '3')))
@@ -5162,11 +5154,8 @@ def _local_shopping_merchant_rows(tokens, query, market, timeout_seconds):
 
 
 def _fast_discovery_kinds():
-    """Fast-provider lane kinds for a local market (empty without a configured provider,
-    and empty for image search unless FAST_PROVIDER_IMAGE_SEARCH is on)."""
+    """Fast-provider lane kinds for a local market (empty without a configured provider)."""
     kinds = []
-    if not FAST_PROVIDER_IMAGE_SEARCH:
-        return kinds
     for provider in FAST_PROVIDERS:
         kinds.append(f'{provider}_search')
         if FAST_PROVIDER_IMAGES:
@@ -5263,7 +5252,7 @@ def _global_discovery_request(query, country, kind, timeout_seconds):
     if country not in GLOBAL_MARKET_STORES or kind not in ('global', 'global2', 'global_all', 'global_fast'):
         return []
     if kind == 'global_fast':
-        if not FAST_PROVIDERS or not FAST_PROVIDER_IMAGE_SEARCH or not _fast_provider_supports_operators(FAST_PROVIDERS[0]):
+        if not FAST_PROVIDERS or not _fast_provider_supports_operators(FAST_PROVIDERS[0]):
             return []
         target = dict(_web_market(country), _retrieval_role='global')
         scopes = ' OR '.join('site:' + domain for _, domain in GLOBAL_MARKET_STORES[country])
@@ -5333,10 +5322,10 @@ def _global_market_discovery(query, country, limit=8, timeout_seconds=None, prog
     def run(kind):
         remaining = deadline - time.monotonic()
         return [] if cancelled() or remaining <= .01 else _global_discovery_request(query, country, kind, remaining)
-    if FAST_PROVIDER_IMAGE_SEARCH and serper_primary() and _fast_provider_supports_operators('serper'):
+    if serper_primary() and _fast_provider_supports_operators('serper'):
         kinds = ('global_fast',)
     else:
-        kinds = ('global', 'global2') + (('global_fast',) if FAST_PROVIDERS and FAST_PROVIDER_IMAGE_SEARCH else ())
+        kinds = ('global', 'global2') + (('global_fast',) if FAST_PROVIDERS else ())
     jobs = {LOCAL_DISCOVERY_POOL.submit(run, kind) for kind in kinds}
     rows, seen = [], {}
     try:
@@ -5469,14 +5458,11 @@ def _local_market_discovery(query, market, limit=8, timeout_seconds=None, progre
                     consume(job)
             merchants = {_more_result_domain(row.get('link')) for row in rows}
             fast_pending = any(_is_fast_discovery_kind(k) for k in pending.values())
-            # SerpApi is a *backup* here only when fast lanes exist for this search;
-            # with FAST_PROVIDER_IMAGE_SEARCH off it is the primary, as before.
-            serper_gate = serper_primary() and bool(fast_kinds)
             if (cc != 'cn' and calls < len(kinds) and len(merchants) < min(LOCAL_RESULTS_TARGET, limit)
                     and (not pending or time.monotonic() >= hedge_at)
-                    and not (serper_gate and (fast_pending or not SERPAPI_BACKUP_ENABLED or serpapi_provider_degraded()
-                                              or deadline - time.monotonic() < SERPAPI_BACKUP_MIN_REMAINING_SECONDS))):
-                if serper_gate and calls == 0:
+                    and not (serper_primary() and (fast_pending or not SERPAPI_BACKUP_ENABLED or serpapi_provider_degraded()
+                                                   or deadline - time.monotonic() < SERPAPI_BACKUP_MIN_REMAINING_SECONDS))):
+                if serper_primary() and calls == 0:
                     print(f'LOCAL DISCOVERY BACKUP provider=serpapi kind={kinds[0]} rows={len(rows)} country={cc}')
                 launch(kinds[calls])
         # Include responses that completed at the deadline boundary.
@@ -19901,11 +19887,7 @@ def _web_text_lane_sort(rows):
 TEXT_DIRECT_SEARCH_ENABLED = env_bool('TEXT_DIRECT_SEARCH_ENABLED', True)
 TEXT_DIRECT_TIMEOUT_SECONDS = max(4., min(25., float(os.environ.get('TEXT_DIRECT_TIMEOUT_SECONDS', '12'))))
 TEXT_DIRECT_LOCAL_MAX = max(8, min(40, int(os.environ.get('TEXT_DIRECT_LOCAL_MAX', '24'))))
-TEXT_DIRECT_GLOBAL_MAX = max(5, min(24, int(os.environ.get('TEXT_DIRECT_GLOBAL_MAX', '16'))))
-# Cards per store per market. Global catalogs are few (Amazon, eBay, AliExpress),
-# so one store must be allowed to carry most of a market's page.
-TEXT_DIRECT_HOST_CAP_LOCAL = max(1, min(20, int(os.environ.get('TEXT_DIRECT_HOST_CAP_LOCAL', '6'))))
-TEXT_DIRECT_HOST_CAP_GLOBAL = max(1, min(20, int(os.environ.get('TEXT_DIRECT_HOST_CAP_GLOBAL', '8'))))
+TEXT_DIRECT_GLOBAL_MAX = max(5, min(24, int(os.environ.get('TEXT_DIRECT_GLOBAL_MAX', '12'))))
 TEXT_DIRECT_TRANSLATION_WAIT = max(.1, min(4., float(os.environ.get('TEXT_DIRECT_TRANSLATION_WAIT', '2.5'))))
 TEXT_DIRECT_POOL = ThreadPoolExecutor(max_workers=32, thread_name_prefix='text-direct')
 # The stream stops WAITING at its deadline; the HTTP read itself stays open this
@@ -19942,9 +19924,6 @@ FAST_PROVIDER_TIMEOUT_SECONDS = max(2., min(15., float(os.environ.get('FAST_PROV
 FAST_PROVIDER_NUM = max(10, min(20, int(os.environ.get('FAST_PROVIDER_NUM', '20'))))
 FAST_PROVIDER_IMAGES = env_bool('FAST_PROVIDER_IMAGES', True)
 FAST_PROVIDER_SHOPPING = env_bool('FAST_PROVIDER_SHOPPING', True)
-# Fast-provider lanes inside image (Lens) search. Off: photo search keeps its
-# SerpApi local rescue and catalog lanes; Serper serves typed text search only.
-FAST_PROVIDER_IMAGE_SEARCH = env_bool('FAST_PROVIDER_IMAGE_SEARCH', False)
 FAST_PROVIDERS = [name for name, on in (('serper', bool(SERPER_API_KEY)), ('cse', bool(GOOGLE_CSE_KEY and GOOGLE_CSE_CX))) if on]
 SEARCH_PROVIDER_PRIMARY = (os.environ.get('SEARCH_PROVIDER_PRIMARY') or ('serper' if 'serper' in FAST_PROVIDERS else 'serpapi')).strip().lower()
 if SEARCH_PROVIDER_PRIMARY not in ('serper', 'serpapi', 'both') or (SEARCH_PROVIDER_PRIMARY == 'serper' and 'serper' not in FAST_PROVIDERS):
@@ -19967,8 +19946,7 @@ def serpapi_recovery_allowed():
 
 
 print(f'FAST PROVIDER CONFIG providers={FAST_PROVIDERS or "none (SerpApi only)"} timeout={FAST_PROVIDER_TIMEOUT_SECONDS}s'
-      f' num={FAST_PROVIDER_NUM} images={FAST_PROVIDER_IMAGES} shopping={FAST_PROVIDER_SHOPPING}'
-      f' image_search={"serper+serpapi" if FAST_PROVIDER_IMAGE_SEARCH else "serpapi only"}')
+      f' num={FAST_PROVIDER_NUM} images={FAST_PROVIDER_IMAGES} shopping={FAST_PROVIDER_SHOPPING}')
 print(f'SEARCH PROVIDER POLICY primary={SEARCH_PROVIDER_PRIMARY} serpapi_backup={SERPAPI_BACKUP_ENABLED}'
       f' backup_min_rows={SERPAPI_BACKUP_MIN_ROWS} backup_window={SERPAPI_BACKUP_WINDOW_SECONDS}s lens=serpapi'
       f' serpapi_recovery={"off" if serper_primary() else "on"}')
@@ -20568,8 +20546,7 @@ def _web_text_direct_search(query, country, lang, progress_callback=None, cancel
                     cc = spec['country']
                     host = _more_result_domain(row['url'])
                     cap = TEXT_DIRECT_LOCAL_MAX if spec['role'] == 'local' else TEXT_DIRECT_GLOBAL_MAX
-                    host_cap = TEXT_DIRECT_HOST_CAP_LOCAL if spec['role'] == 'local' else TEXT_DIRECT_HOST_CAP_GLOBAL
-                    if counts[cc] >= cap or merchant_counts[(cc, host)] >= host_cap:
+                    if counts[cc] >= cap or merchant_counts[(cc, host)] >= 4:
                         continue
                     rows[key] = dict(row)
                     counts[cc] += 1
@@ -24161,15 +24138,8 @@ TEXT_FAST_TIMEOUT_SECONDS = max(3., min(15., float(os.environ.get('TEXT_FAST_TIM
 TEXT_FAST_PRICE_WAIT_SECONDS = max(.5, min(10., float(os.environ.get('TEXT_FAST_PRICE_WAIT_SECONDS', '3'))))
 TEXT_FAST_CLASSIFY_WAIT_SECONDS = max(.3, min(4., float(os.environ.get('TEXT_FAST_CLASSIFY_WAIT_SECONDS', '1.5'))))
 TEXT_FAST_EMPTY_EXTENSION_SECONDS = max(0., min(15., float(os.environ.get('TEXT_FAST_EMPTY_EXTENSION_SECONDS', '7'))))
-# What a category-style query gets: 'search' = every card directly (like Google);
-# 'suggest' = the brand-comparison suggestions screen; 'both' = cards first, then
-# suggestions only when the page came back rich (>= TEXT_FAST_SUGGEST_MIN_CARDS).
-TEXT_FAST_GENERIC_MODE = (os.environ.get('TEXT_FAST_GENERIC_MODE') or 'search').strip().lower()
-if TEXT_FAST_GENERIC_MODE not in ('search', 'suggest', 'both'):
-    TEXT_FAST_GENERIC_MODE = 'search'
-TEXT_FAST_SUGGEST_MIN_CARDS = max(1, min(40, int(os.environ.get('TEXT_FAST_SUGGEST_MIN_CARDS', '8'))))
 TEXT_FAST_STATUS_INTERVAL = .75
-print(f'TEXT FAST CONFIG enabled={TEXT_FAST_ENABLED} deadline={TEXT_FAST_TIMEOUT_SECONDS}s generic={TEXT_FAST_GENERIC_MODE}'
+print(f'TEXT FAST CONFIG enabled={TEXT_FAST_ENABLED} deadline={TEXT_FAST_TIMEOUT_SECONDS}s'
       f' empty_extension={TEXT_FAST_EMPTY_EXTENSION_SECONDS}s late_read={TEXT_DIRECT_LATE_READ_SECONDS}s'
       f' price_tail={TEXT_FAST_PRICE_WAIT_SECONDS}s classify_wait={TEXT_FAST_CLASSIFY_WAIT_SECONDS}s'
       f' lanes=light+images_light+google(local,en/native)+us/cn light_lane={TEXT_DIRECT_LIGHT_LANE}'
@@ -24245,7 +24215,7 @@ async def _web_stream_text_fast(query, country, lang, selected_option='', reques
         yield _web_stream_event({'event': 'error', 'error': 'not_a_product_query'})
         return
     yield _web_stream_event({'event': 'query', 'query': q, 'market': market, 'source': 'text_fast'})
-    if rtype == 'GENERIC' and TEXT_FAST_GENERIC_MODE == 'suggest':
+    if rtype == 'GENERIC':
         task = asyncio.create_task(asyncio.to_thread(_web_recommendations_response, q, lang, market))
         try:
             while not task.done():
@@ -24264,13 +24234,6 @@ async def _web_stream_text_fast(query, country, lang, selected_option='', reques
         yield _web_stream_event({'event': 'done', 'count': 0, 'source': 'text_fast',
                                  'elapsed_ms': int((time.monotonic()-started)*1000)})
         return
-    # A category query searches like any other: every card is shown directly,
-    # so the shopper never lands on a list of suggestions that lead nowhere.
-    suggest_task = None
-    if rtype == 'GENERIC' and TEXT_FAST_GENERIC_MODE == 'both':
-        suggest_task = asyncio.create_task(asyncio.to_thread(_web_recommendations_response, q, lang, market))
-    if rtype == 'GENERIC':
-        print(f'TEXT FAST GENERIC query={q!r} mode={TEXT_FAST_GENERIC_MODE} -> direct search')
     # Retrieval streams URL-keyed cards as each source returns; the live-price
     # wrapper fills missing prices/images from merchant pages meanwhile. Both
     # are bounded so `done` always arrives within deadline + price tail.
@@ -24290,19 +24253,6 @@ async def _web_stream_text_fast(query, country, lang, selected_option='', reques
                     first_card = int((time.monotonic()-started)*1000)
                     print(f'TEXT FAST FIRST CARD ms={first_card} query={q!r} country={country}')
             if kind == 'done':
-                if suggest_task is not None:
-                    # Rich page: offer the comparison as a refinement, never instead of cards.
-                    if count >= TEXT_FAST_SUGGEST_MIN_CARDS:
-                        try:
-                            report = await asyncio.wait_for(suggest_task, timeout=2.0)
-                            if isinstance(report, dict) and report.get('ok'):
-                                yield _web_stream_event({'event': 'recommendations', 'data': report, 'supplement': True,
-                                                         'elapsed_ms': int((time.monotonic()-started)*1000)})
-                        except Exception:
-                            pass
-                    suggest_task.cancel()
-                    await asyncio.gather(suggest_task, return_exceptions=True)
-                    suggest_task = None
                 event.update(source='text_fast', first_card_ms=first_card,
                              elapsed_ms=int((time.monotonic()-started)*1000))
                 print(f'TEXT FAST DONE cards={count} first_card_ms={first_card}'
@@ -24310,9 +24260,6 @@ async def _web_stream_text_fast(query, country, lang, selected_option='', reques
                 raw = _web_stream_event(event)
             yield raw
     finally:
-        if suggest_task is not None:
-            suggest_task.cancel()
-            await asyncio.gather(suggest_task, return_exceptions=True)
         await stream.aclose()
 
 
@@ -25429,9 +25376,9 @@ def _web_selected_market_search(query, country, lang, global_countries, *, image
                     sparse_or_slow = by_market[cc] < target_for(cc) and (
                         not primary_pending or time.monotonic() - started >= SELECTED_MARKET_HEDGE)
                     if cc in global_catalogs:
-                        if FAST_PROVIDERS and FAST_PROVIDER_IMAGE_SEARCH:
+                        if FAST_PROVIDERS:
                             launch(cc, 'global_fast')
-                        if FAST_PROVIDER_IMAGE_SEARCH and serper_primary() and _fast_provider_supports_operators('serper'):
+                        if serper_primary() and _fast_provider_supports_operators('serper'):
                             # SerpApi catalog lanes only as a sparse backup.
                             if sparse_or_slow and 'global_fast' not in {k for c, k in jobs.values() if c == cc} and SERPAPI_BACKUP_ENABLED:
                                 launch(cc, 'global_all')
