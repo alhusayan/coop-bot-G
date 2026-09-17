@@ -1,3 +1,4 @@
+# v128.5.42: fast observed card media and bounded per-product merchant collection expansion.
 # v128.5.38: Serper photo alternatives; independent US/CN domestic discovery.
 # v128.5.32: global markets (approved US + China catalogs) get the same three Serper lanes as
 # the local market — Google Shopping (gl=us, direct merchant links + USD prices), Google
@@ -387,7 +388,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization'], max_age=86400)
-BUILD_ID = 'v128.5.41-image-market-depth'
+BUILD_ID = 'v128.5.42-product-photos-collections'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -2402,6 +2403,7 @@ def _serpapi_lens_request(public_url, lens_type, country, auto_crop, query_hint)
             return []
         items, seen = ([], set())
         _collect_lens_items(data, items, seen)
+        items = _web_expand_collection_rows(items)
         for item in items:
             item['_lens_country'] = (country or '').lower()
         print(f"GOOGLE LENS PASS type={lens_type or 'all'} country={country or '-'} auto_crop={auto_crop} -> {len(items)} items")
@@ -3563,7 +3565,7 @@ def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=Fal
             market_rows = [m for m in allowed if result_market_rank(m) == rank]
             matches.extend([m for m in market_rows if _web_result_group(m) != 'alternative'][:keep_caps[rank]])
             matches.extend([m for m in market_rows if _web_result_group(m) == 'alternative'][:keep_caps[rank]])
-        matches = matches[:max(LENS_RESULT_LIMIT, 2 * sum(keep_caps.values()))]
+        matches = _web_keep_collection_children(matches[:max(LENS_RESULT_LIMIT, 2 * sum(keep_caps.values()))], allowed)
         if reference_context:
             reasons = defaultdict(int)
             for row in merged:
@@ -4838,14 +4840,8 @@ def _web_merge_offer_images(previous, incoming):
 
 
 def _web_offer_media_fields(row):
-    """Only observed listing pictures; a signed page rescue is always a last resort."""
-    fields = _web_merge_offer_images({}, row)
-    url = row.get('url') or row.get('link') or ''
-    if _web_is_http_url(url):
-        rescue = _web_public_image_url(url)
-        if '/api/img-proxy?' in rescue:
-            fields['image_recovery_url'] = rescue
-    return fields
+    """Observed image URLs only; HTML page recovery runs in the server tail."""
+    return _web_merge_offer_images({}, row)
 
 
 def _web_image_search_records(data):
@@ -5085,8 +5081,271 @@ def _shopping_unit_fill(rows, market):
     return changed
 
 
+# Collection pages are discovery sources, never individual offers. Only static,
+# observed product links are expanded; no pagination or speculative URL building.
+COLLECTION_PRODUCTS_MAX = 40
+COLLECTION_PAGES_MAX = 2
+COLLECTION_WAIT_SECONDS = 2.2
+_COLLECTION_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix='merchant-list')
+_COLLECTION_LOCK = threading.Lock()
+_COLLECTION_JOBS = {}
+
+
+def _web_collection_url(value):
+    try:
+        u = urllib.parse.urlsplit(str(value or ''))
+        host, path = (u.hostname or '').lower(), u.path.lower()
+        if u.scheme not in ('http', 'https') or not host or path in ('', '/') or u.username or u.password:
+            return False
+        if _host_matches_any(host, tuple(NON_STORE_HOSTS) + ('google.com', 'bing.com', 'baidu.com', 'gstatic.com', 'googleusercontent.com')):
+            return False
+        if _host_matches_any(host, ('hm.com',)) and '/products/' in path:
+            return True
+        # Product routes can contain a collection prefix or search tracking.
+        if re.search(r'/(?:products?|dp|gp/product|ip|itm|item|product-detail|listing)/', path) or re.search(r'-p-\d+\.html$', path):
+            return False
+        platform_list = ((_host_matches_any(host, ('shein.com',)) and re.search(r'-c-\d+\.html$|/pdsearch/', path))
+                         or (_host_matches_any(host, ('aliexpress.com', 'nike.com')) and path.startswith('/w/'))
+                         or (_host_matches_any(host, ('alibaba.com',)) and path.startswith('/showroom/'))
+                         or (_host_matches_any(host, ('macys.com',)) and path.startswith('/shop/'))
+                         or (_host_matches_any(host, ('ebay.com',)) and path.startswith('/sch/'))
+                         or (_host_matches_any(host, ('farfetch.com',)) and path.endswith('/items.aspx')))
+        return bool(platform_list or re.search(r'/(?:collections?|categor(?:y|ies)|catalog|browse|search(?:_result|_product)?|results|list|c|b|shop-all|all-products)(?:/|\.html?$|$)', path)
+                    or re.search(r'/(?:men|women|shoes|mules|pyjamas|pajamas)/?$', path)
+                    or (path == '/s' and 'k=' in u.query)
+                    or re.search(r'/(?:brands?|designers)/[^/]+(?:/[^/]+)?/?$', path))
+    except (TypeError, ValueError):
+        return False
+
+
+def _web_collection_products(document, page_url):
+    """Extract each observed product's own URL/photo/offer, never parent facts."""
+    if not _web_collection_url(page_url) or not document:
+        return []
+    soup = BeautifulSoup(document[:1200000], 'html.parser')
+    host = (urllib.parse.urlsplit(page_url).hostname or '').lower().removeprefix('www.')
+    products = {}
+
+    def absolute(value):
+        if not isinstance(value, str) or not value.strip():
+            return ''
+        raw = urllib.parse.urljoin(page_url, value.strip())
+        try:
+            u = urllib.parse.urlsplit(raw)
+            if u.scheme in ('http', 'https') and u.hostname and not u.username and not u.password:
+                return raw
+        except ValueError:
+            pass
+        return ''
+
+    def add(url, title, image='', price='', currency='', availability=''):
+        url = absolute(url)
+        title = re.sub(r'\s+', ' ', str(title or '')).strip()[:300]
+        if not url or not title or len(title) < 3:
+            return
+        child_host = (urllib.parse.urlsplit(url).hostname or '').lower().removeprefix('www.')
+        # Marketplaces often split navigation and products across hosts:
+        # list.jd.com -> item.jd.com, s.taobao.com -> item.taobao.com.
+        platforms = ('jd.com', 'taobao.com', 'tmall.com', '1688.com', 'alibaba.com',
+                     'aliexpress.com', 'shein.com', 'temu.com', 'amazon.com',
+                     'amazon.co.uk', 'amazon.fr', 'walmart.com', 'lululemon.com')
+        same_platform = any(_host_matches_any(host, (base,)) and _host_matches_any(child_host, (base,)) for base in platforms)
+        if child_host != host and not same_platform:
+            return
+        if _web_collection_url(url) or not _web_is_direct_product_page_url(url):
+            return
+        if isinstance(image, list):
+            image = next((v for v in image if v), '')
+        if isinstance(image, dict):
+            image = image.get('contentUrl') or image.get('url') or ''
+        image = absolute(image)
+        if image == url:
+            image = ''
+        key = _web_price_url_key(url)
+        row = {'link': url, 'title': title, 'source': host, 'thumbnail': image, 'image': image,
+               'price': str(price or ''), 'currency': str(currency or ''),
+               'collection_product': True, 'collection_url': page_url,
+               'retrieval_sources': ['merchant_collection'], 'section': 'merchant_collection',
+               'price_source': 'local_collection', 'exact': False}
+        if isinstance(availability, str) and availability:
+            row['availability'] = availability
+        if key in products:
+            old = products[key]
+            if not old.get('image') and image:
+                old.update(image=image, thumbnail=image)
+            if not old.get('price') and price:
+                old.update(price=str(price), currency=str(currency or ''))
+        elif len(products) < COLLECTION_PRODUCTS_MAX:
+            products[key] = row
+
+    nodes, ids = [], {}
+    def walk(value, depth=0):
+        if depth > 18 or len(nodes) >= 2000:
+            return
+        if isinstance(value, list):
+            for node in value[:500]:
+                walk(node, depth+1)
+        elif isinstance(value, dict):
+            nodes.append(value)
+            if isinstance(value.get('@id'), str):
+                ids[value['@id']] = value
+            for key, child in value.items():
+                if isinstance(child, (dict, list)):
+                    walk(child, depth+1)
+    for script in soup.find_all('script', type='application/ld+json', limit=30):
+        try:
+            walk(json.loads(script.string or script.get_text()))
+        except (TypeError, ValueError, RecursionError):
+            continue
+    def types(node):
+        value = node.get('@type') or []
+        return set(value if isinstance(value, list) else [value])
+    for node in nodes:
+        item = node
+        if 'ListItem' in types(node):
+            item = node.get('item') or node
+            if isinstance(item, str):
+                item = ids.get(item, {})
+            elif isinstance(item, dict) and len(item) == 1 and item.get('@id'):
+                item = ids.get(item['@id'], item)
+        if not isinstance(item, dict) or not (types(item) & {'Product', 'IndividualProduct', 'ProductModel'} or 'ListItem' in types(node)):
+            continue
+        offers = item.get('offers') or {}
+        if isinstance(offers, list):
+            offers = offers[0] if len(offers) == 1 else {}
+        if not isinstance(offers, dict):
+            offers = {}
+        # Aggregate ranges and multiple variants are not an exact offer price.
+        price = offers.get('price') if 'AggregateOffer' not in types(offers) else ''
+        url = item.get('url') or offers.get('url') or item.get('@id') or node.get('url')
+        add(url, item.get('name') or node.get('name'), item.get('image'), price, offers.get('priceCurrency'), offers.get('availability'))
+    # Card-local fallback for stores that emit a grid without JSON-LD Products.
+    for anchor in soup.select('a[href]')[:1800]:
+        href = absolute(anchor.get('href'))
+        if not href or _web_collection_url(href) or not _web_is_direct_product_page_url(href):
+            continue
+        card = anchor
+        for parent in [anchor] + list(anchor.parents)[:4]:
+            if getattr(parent, 'name', '') in ('html', 'body'):
+                break
+            classes = ' '.join(parent.get('class', []))
+            if (re.search(r'(?:^|\s)(?:product|goods|item)[-_](?:card|tile|item|block)(?:\s|$|-wrapper)', classes, re.I)
+                    or 'card-wrapper' in classes or parent.get('data-product-id')
+                    or re.search(r'product[-_]?(?:card|tile|grid-item)', parent.get('data-testid', ''), re.I)
+                    or parent.get('itemtype', '').endswith('/Product')):
+                card = parent
+                break
+        pic = card.find('img')
+        if pic is None:
+            continue
+        # Never borrow a picture/price from a wrapper spanning multiple products.
+        links = {_web_price_url_key(absolute(a.get('href'))) for a in card.select('a[href]')
+                 if _web_is_direct_product_page_url(absolute(a.get('href'))) and not _web_collection_url(absolute(a.get('href')))}
+        if links - {_web_price_url_key(href)}:
+            continue
+        name = card.select_one('[itemprop="name"], [class*="product-title"], [class*="product-name"], h2, h3')
+        title = name.get_text(' ', strip=True) if name else pic.get('alt') or anchor.get('title') or anchor.get_text(' ', strip=True)
+        image = pic.get('data-src') or pic.get('data-original') or ''
+        if not image:
+            srcset = pic.get('data-srcset') or pic.get('srcset') or ''
+            image = srcset.split(',')[0].strip().split(' ')[0] if srcset else pic.get('src') or ''
+        prices = []
+        for tag in card.select('[itemprop="price"], [class*="price"]'):
+            if tag.name in ('del', 's') or tag.find_parent(['del', 's']) or re.search(r'old|compare|original|regular', ' '.join(tag.get('class', [])), re.I):
+                continue
+            value = tag.get('content') or tag.get_text(' ', strip=True)
+            if value and len(value) < 80 and value not in prices:
+                prices.append(value)
+        currency = card.select_one('[itemprop="priceCurrency"]')
+        currency = (currency.get('content') or currency.get_text(' ', strip=True)) if currency else ''
+        add(href, title, image, prices[0] if len(prices) == 1 else '', currency)
+    return list(products.values())
+
+
+def _web_fetch_collection(url):
+    page = _web_merchant_document(url, purpose='collection', headers=dict(HEADERS), timeout=(.8, 1.4),
+                                  max_bytes=1200000, max_redirects=2, html_prefix=True)
+    if page.get('reason') or not page.get('text'):
+        return []
+    # Login, redirected home pages and direct products are never grids.
+    return _web_collection_products(page['text'], page.get('url') or url)
+
+
+def _web_expand_collection_rows(records, *, budget=COLLECTION_WAIT_SECONDS):
+    """Bounded, shared fetches; direct siblings survive failed/blocked lists."""
+    output, pending, requested = [], [], set()
+    started = time.monotonic()
+    deadline = time.monotonic() + max(0., float(budget))
+    for raw in records:
+        if not isinstance(raw, dict):
+            continue
+        url = str(raw.get('link') or raw.get('url') or raw.get('product_link') or '')
+        if not _web_collection_url(url):
+            output.append(raw)
+            continue
+        key = _web_price_url_key(url)
+        if key in requested or len(requested) >= COLLECTION_PAGES_MAX or time.monotonic() >= deadline:
+            continue
+        requested.add(key)
+        with _COLLECTION_LOCK:
+            now = time.monotonic()
+            for old, (stamp, job) in list(_COLLECTION_JOBS.items()):
+                if job.done() and (now-stamp > 90 or len(_COLLECTION_JOBS) > 96):
+                    del _COLLECTION_JOBS[old]
+            cached = _COLLECTION_JOBS.get(key)
+            if cached:
+                job = cached[1]
+            elif sum(not j.done() for _, j in _COLLECTION_JOBS.values()) < 8:
+                job = _COLLECTION_POOL.submit(_web_fetch_collection, url)
+                _COLLECTION_JOBS[key] = (now, job)
+            else:
+                continue
+        pending.append((raw, job))
+    if pending:
+        wait([job for _, job in pending], timeout=max(0., deadline-time.monotonic()))
+    expanded_count = 0
+    for parent, job in pending:
+        if not job.done() or job.cancelled():
+            continue
+        try:
+            children = job.result()
+        except Exception:
+            continue
+        for child in children:
+            row = dict(child)
+            # Children have their own evidence. Lens matched the parent grid,
+            # so its exact/visual claims cannot be transferred to each child.
+            sources = [s for s in parent.get('retrieval_sources') or [] if 'serper' in s.lower()]
+            row['retrieval_sources'] = sorted(set(row['retrieval_sources'] + sources))
+            if parent.get('image_query_result'):
+                row['image_query_result'] = True
+            output.append(row)
+            expanded_count += 1
+    if requested:
+        print(f'COLLECTION EXPANSION pages={len(requested)} products={expanded_count} '
+              f'pending={sum(not job.done() for _, job in pending)} elapsed_ms={int((time.monotonic()-started)*1000)}')
+    return output
+
+
+def _web_keep_collection_children(selected, candidates):
+    """Preserve expanded products past legacy one-product-per-store quotas."""
+    out = list(selected)
+    seen = {_web_price_url_key(r.get('url') or r.get('link')) for r in out}
+    added = 0
+    for row in candidates:
+        key = _web_price_url_key(row.get('url') or row.get('link'))
+        if row.get('collection_product') and key and key not in seen:
+            out.append(row)
+            seen.add(key)
+            added += 1
+            if added >= COLLECTION_PRODUCTS_MAX:
+                break
+    return out
+
+
 def _local_discovery_rows(data, query, market, provider):
-    records = _local_discovery_records(data)
+    records = _web_expand_collection_rows(_local_discovery_records(data),
+        budget=min(COLLECTION_WAIT_SECONDS, max(0., market.get('_collection_deadline', time.monotonic()+COLLECTION_WAIT_SECONDS)-time.monotonic())))
     _shopping_unit_ledger_add(market, records, provider)
     token = _GUARD_BATCH_DF.set(_findzia_batch_term_frequencies(
         [_local_discovery_title(row) for row in records if isinstance(row, dict)]))
@@ -5722,7 +5981,7 @@ def _local_market_discovery(query, market, limit=8, timeout_seconds=None, progre
           f'alternatives={sum(_web_result_group(r) == "alternative" for r in rows)} '
           f'unpriced={sum(not _web_row_has_numeric_price(r) for r in rows)}')
     print(f'LOCAL DISCOVERY country={cc} calls={calls} fast_lanes={len(fast_kinds)} rows={len(output)} stores={len({_more_result_domain(r.get("link")) for r in output})} pending={len(pending)} elapsed={time.monotonic() - started:.2f}s')
-    return output
+    return _web_keep_collection_children(output, rows)
 
 
 def country_major_store_specs(cc=None):
@@ -11175,7 +11434,7 @@ def _lens_select_direct_rows(lens, lang, caption='', more_mode=False, exclude_do
                     break
         if len(selected) > before_backfill:
             print(f'LENS UNUSED-MARKET BACKFILL results={before_backfill}->{len(selected)} target={target_total}')
-    return (selected, raw_matches)
+    return (_web_keep_collection_children(selected, [m for m in matches if caps.get(result_market_rank(m), 0) > 0]), raw_matches)
 
 def _web_build_lens_items(lens, lang, caption=''):
     selected, raw_matches = _lens_select_direct_rows(lens, lang, caption)
@@ -11190,6 +11449,7 @@ def _web_build_lens_items(lens, lang, caption=''):
         shown_price = _lens_price_text_local(m, rank, lang)
         results.append({'market': _web_market_label(rank), 'market_rank': rank, 'country': cc, 'flag': country_flag_emoji(cc), 'store': _ui_plain_store_name(m.get('source') or '', m.get('link') or '') or U(lang, 'store'), 'title': _compact_ui_title(display_title or m.get('title') or ''), 'raw_title': (m.get('title') or display_title or '').strip(), 'price': shown_price, 'price_raw': str(m.get('price') or ''), 'price_raw_currency': str(m.get('currency') or ''), 'price_pending': not bool(shown_price), 'price_verified': False, 'price_source': m.get('price_source') or 'lens_index', 'price_source_url': (m.get('link') or '').strip(), 'url': (m.get('link') or '').strip(), 'image': m.get('thumbnail') or m.get('image') or ''})
         results[-1].update(_web_capture_listing_evidence(m, 'Google Lens'))
+        results[-1].update(_web_offer_media_fields(m))
     return [_web_apply_market_context(row, current_market()) for row in results if _market_offer_allowed(row, current_market())]
 
 _WEB_CLASSIFICATION_LABELS = {
@@ -16547,7 +16807,7 @@ def _web_capture_listing_evidence(raw, source=''):
     out = {k:copy.deepcopy(raw[k]) for k in _CARD_FACT_FIELDS if k in raw}
     for key in ('condition','availability','in_stock','specifications','attributes','extensions',
                 'retrieval_sources','image_query_result','result_group','alternative_reason',
-                'export_store','_price_market'):
+                'export_store','_price_market','collection_url','collection_product'):
         if key in raw:
             out[key] = copy.deepcopy(raw[key])
     for target, field in (('card_model','model'),('card_brand','brand')):
@@ -17037,6 +17297,8 @@ def _variant_facts_cached(key):
 
 def _web_card_fields(row):
     out=_web_set_result_group(row)
+    out.update(_web_offer_media_fields(row))
+    out.pop('image_recovery_url', None)
     out['key_specs']=_card_key_specs(row)
     out['variant_profile']=_card_variant_facts(row)
     out.update(_card_offer_state(row))
@@ -20764,6 +21026,7 @@ def _web_text_direct_search(query, country, lang, progress_callback=None, cancel
     ledger_targets = {}
     market['_shopping_units'] = ledgers[country]
     jobs, rows, counts, merchant_counts = {}, {}, Counter(), Counter()
+    collection_counts = Counter()
     expanded = set()
     expansions = Counter()
     source_states = {}
@@ -20790,7 +21053,7 @@ def _web_text_direct_search(query, country, lang, progress_callback=None, cancel
         if spec_key in submitted_specs:
             return
         submitted_specs.add(spec_key)
-        target = dict(_web_market(spec['country']))
+        target = dict(_web_market(spec['country']), _collection_deadline=deadline)
         if spec['role'] == 'global':
             target['_retrieval_role'] = 'global'
         target['_shopping_units'] = ledgers.setdefault(spec['country'], [])
@@ -20903,11 +21166,16 @@ def _web_text_direct_search(query, country, lang, progress_callback=None, cancel
                     cc = spec['country']
                     host = _more_result_domain(row['url'])
                     cap = TEXT_DIRECT_LOCAL_MAX if spec['role'] == 'local' else TEXT_DIRECT_GLOBAL_MAX
-                    if counts[cc] >= cap or merchant_counts[(cc, host)] >= 4:
+                    if row.get('collection_product'):
+                        if collection_counts[cc] >= COLLECTION_PRODUCTS_MAX:
+                            continue
+                        collection_counts[cc] += 1
+                    elif counts[cc] - collection_counts[cc] >= cap or merchant_counts[(cc, host)] >= 4:
                         continue
                     rows[key] = dict(row)
                     counts[cc] += 1
-                    merchant_counts[(cc, host)] += 1
+                    if not row.get('collection_product'):
+                        merchant_counts[(cc, host)] += 1
                     changed = True
                 for ledger_cc, ledger_target in list(ledger_targets.items()):
                     if _shopping_unit_fill([r for r in rows.values() if r.get('country') == ledger_cc], ledger_target):
@@ -22052,7 +22320,9 @@ def _google_web_candidates(data, query, spec, diagnostics=None):
     rows = []
     diagnostics = diagnostics if diagnostics is not None else Counter()
     organic = data.get('organic_results')
-    for position, raw in enumerate((organic if isinstance(organic, list) else [])[:10]):
+    organic = _web_expand_collection_rows((organic if isinstance(organic, list) else [])[:10],
+        budget=min(COLLECTION_WAIT_SECONDS, max(0., spec.get('_collection_deadline', time.monotonic()+COLLECTION_WAIT_SECONDS)-time.monotonic())))
+    for position, raw in enumerate(organic):
         if not isinstance(raw, dict):
             continue
         diagnostics['organic_rows'] += 1
@@ -22063,7 +22333,8 @@ def _google_web_candidates(data, query, spec, diagnostics=None):
             diagnostics['not_product_listing'] += 1
             continue
         row = {k: copy.deepcopy(raw[k]) for k in ('title', 'source', 'snippet', 'rich_snippet',
-               'price', 'currency', 'thumbnail', 'image', 'availability', 'in_stock') if k in raw}
+               'price', 'currency', 'thumbnail', 'image', 'availability', 'in_stock',
+               'collection_product', 'collection_url', 'retrieval_sources', 'price_source') if k in raw}
         rich = row.get('rich_snippet')
         row['rich_snippet'] = {}
         for side in ('top', 'bottom'):
@@ -22289,7 +22560,7 @@ def _google_web_products(query, country, lang, progress=None, cancel_event=None,
     deadline = began + TEXT_GOOGLE_WEB_SECONDS
     market = dict(_web_market(country), _query=query)
     excluded_urls, excluded_domains = _google_web_exclusions(shown_urls, shown_domains)
-    cache_key = 'google-light-offers-v17:' + hashlib.sha256(
+    cache_key = 'google-light-offers-v18:' + hashlib.sha256(
         json.dumps([query.strip().casefold(),country,lang],ensure_ascii=False).encode()).hexdigest()
     cacheable = not excluded_urls and not excluded_domains
     cached = _serpapi_cache_get(cache_key) if cacheable and not cancel.is_set() else None
@@ -22308,6 +22579,7 @@ def _google_web_products(query, country, lang, progress=None, cancel_event=None,
         return cached
     jobs, rows, seen, page_urls = {}, {}, set(), set()
     counts, pages_by_host, diagnostics = Counter(), Counter(), Counter()
+    collection_counts = Counter()
     source_ok, failures, first_ms, skipped_pages = 0, [], None, 0
     _market_query_warm(query, [country, 'us'])
 
@@ -22322,7 +22594,12 @@ def _google_web_products(query, country, lang, progress=None, cancel_event=None,
         if key in rows:
             return
         cap = 24 if row['market_scope']=='local' else 12
-        if counts[row['country']] >= cap:
+        cc = row['country']
+        if row.get('collection_product'):
+            if collection_counts[cc] >= COLLECTION_PRODUCTS_MAX:
+                return
+            collection_counts[cc] += 1
+        elif counts[cc] - collection_counts[cc] >= cap:
             return
         rows[key] = row
         diagnostics['page_published' if row['price_verified'] else 'indexed_published'] += 1
@@ -22360,7 +22637,7 @@ def _google_web_products(query, country, lang, progress=None, cancel_event=None,
                     diagnostics['source_' + (reason or 'provider')] += 1
                     continue
                 source_ok += 1
-                for candidate in _google_web_candidates(data, query, spec, diagnostics):
+                for candidate in _google_web_candidates(data, query, dict(spec, _collection_deadline=deadline), diagnostics):
                     url = candidate['url']
                     if _google_web_foreign_storefront(url, country):
                         diagnostics['foreign_storefront'] += 1
@@ -25690,6 +25967,7 @@ def _web_selected_market_search(query, country, lang, global_countries, *, image
     excluded_domains = {str(d).lower().removeprefix('www.') for d in shown_domains}
     by_market = Counter()
     by_group = Counter()
+    collection_counts = Counter()
     def cancelled():
         return cancel_event is not None and cancel_event.is_set()
     def snapshot():
@@ -25847,6 +26125,9 @@ def _web_selected_market_search(query, country, lang, global_countries, *, image
                         if old_sources != tuple(old.get('retrieval_sources') or []):
                             changed = True
                         if old_group != new_group:
+                            if old.get('collection_product'):
+                                collection_counts[(cc, old_group)] -= 1
+                                collection_counts[(cc, new_group)] += 1
                             by_group[(cc, old_group)] -= 1
                             by_group[(cc, new_group)] += 1
                             changed = True
@@ -25862,7 +26143,11 @@ def _web_selected_market_search(query, country, lang, global_countries, *, image
                         continue
                     cap = SELECTED_LOCAL_CAP if cc == country else SELECTED_GLOBAL_CAP
                     group = _web_result_group(row)
-                    if by_group[(cc, group)] >= cap:
+                    if row.get('collection_product'):
+                        if collection_counts[(cc, group)] >= COLLECTION_PRODUCTS_MAX:
+                            continue
+                        collection_counts[(cc, group)] += 1
+                    elif by_group[(cc, group)] - collection_counts[(cc, group)] >= cap:
                         continue
                     rows[key] = row
                     by_market[cc] += 1
