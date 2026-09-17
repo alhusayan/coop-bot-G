@@ -387,7 +387,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization'], max_age=86400)
-BUILD_ID = 'v128.5.39-local-market-fix'
+BUILD_ID = 'v128.5.40-local-relevance-recovery'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -1086,7 +1086,7 @@ def _offer_is_editorial_url(url):
     try:
         p = urllib.parse.urlsplit(str(url or ''))
         host = (p.hostname or '').lower()
-        if _host_matches_any(host, NON_STORE_HOSTS + ('anbmedia.com', 'wwd.com', 'baijiahao.baidu.com')):
+        if _host_matches_any(host, NON_STORE_HOSTS + ('anbmedia.com', 'wwd.com', 'baijiahao.baidu.com', 'wiki.smzdm.com', 'dealmoon.com')):
             return True
         parts = set(urllib.parse.unquote(p.path).lower().strip('/').split('/'))
         return bool(parts & {'news', 'fashion-news', 'article', 'articles', 'blog', 'blogs',
@@ -3159,10 +3159,11 @@ def _lens_market_passes(user_country, fast=True):
             for kind in (('products', 'all') if not fast or cc == user_country else ('all',))]
 
 
-def _china_native_image_discovery(reference_future, query_hint, deadline, progress_callback=None, cancel_event=None, viewer_country=None, image_discovery=True):
+def _china_native_image_discovery(reference_future, query_hint, deadline, progress_callback=None, cancel_event=None, viewer_country=None, image_discovery=True, visual_futures=()):
     """Reuse photo identity for domestic discovery or the approved global catalog."""
     if cancel_event is not None and cancel_event.is_set():
         return []
+    identity = {}
     query = str(query_hint or '').strip()
     if reference_future is not None:
         try:
@@ -3170,6 +3171,23 @@ def _china_native_image_discovery(reference_future, query_hint, deadline, progre
             query = str(identity.get('query') or query).strip()
         except Exception:
             pass
+    if image_discovery and not identity.get('named'):
+        candidates = []
+        pending_visual = set(visual_futures)
+        visual_deadline = min(deadline - 2., time.monotonic() + LENS_CONSENSUS_WAIT)
+        while pending_visual and time.monotonic() < visual_deadline:
+            if cancel_event is not None and cancel_event.is_set():
+                return []
+            done, pending_visual = wait(pending_visual, timeout=min(.1, max(0., visual_deadline-time.monotonic())), return_when=FIRST_COMPLETED)
+            for job in done:
+                try:
+                    candidates.extend(job.result() or [])
+                except Exception:
+                    pass
+            if _lens_consensus_terms(candidates):
+                break
+        query = _photo_discovery_query(identity, candidates, query_hint)
+        print(f'PHOTO DISCOVERY QUERY country=cn observed={identity.get("query", "")!r} retrieval={query!r} visual_rows={len(candidates)}')
     remaining = deadline - time.monotonic()
     if not query or remaining <= .05 or (cancel_event is not None and cancel_event.is_set()):
         return []
@@ -3267,7 +3285,7 @@ def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=Fal
         if USE_FAST_LENS_PIPELINE and LOCAL_DISCOVERY_ENABLED:
             cn_future = MARKET_SUPPLEMENT_POOL.submit(_run_with_market, _web_market('cn'),
                 _china_native_image_discovery, reference_future, query_hint,
-                completion_deadline, local_progress, cancel_event, user_country, not bool(reference_context))
+                completion_deadline, local_progress, cancel_event, user_country, not bool(reference_context), tuple(all_futures))
             future_map[cn_future] = ('native-discovery', 'cn', True)
             all_futures.add(cn_future)
             pending.add(cn_future)
@@ -3311,7 +3329,8 @@ def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=Fal
             elapsed = time.monotonic() - fast_started
             if (not force) and elapsed < LENS_LOCAL_RESCUE_AFTER_SECONDS:
                 return local_rescue_future
-            rescue_query = _reference_query()
+            _refresh_reference()
+            rescue_query = _photo_discovery_query(reference, merged, query_hint)
             if not rescue_query:
                 return local_rescue_future
             budget = min(LOCAL_DISCOVERY_TIMEOUT, completion_deadline - time.monotonic())
@@ -3741,7 +3760,7 @@ _STOREFRONT_LANGUAGES = frozenset(hl.split('-')[0] for languages in COUNTRY_SEAR
 # Verified merchant URL conventions, not a whitelist of allowed shops.
 # farfetch.com/ar/shopping/ is Argentina, while unknown .com/ar/ is ambiguous.
 # fendi.com/kw-ar/ and theluxurycloset.com/uae-ar/ are country-language.
-_STOREFRONT_COUNTRY_PREFIX_HOSTS = ('farfetch.com', 'temu.com')
+_STOREFRONT_COUNTRY_PREFIX_HOSTS = ('farfetch.com', 'temu.com', 'lacoste.com')
 _STOREFRONT_COUNTRY_LANGUAGE_HOSTS = ('fendi.com', 'noon.com', 'theluxurycloset.com')
 
 
@@ -3969,7 +3988,7 @@ def _local_storefront_evidence(item, market):
     # returns a .com store with no foreign signal at all — no other-country
     # domain, locale, catalog or currency — is Google's own local ranking.
     # Identity and price checks still apply; this is candidacy, not proof.
-    if (LOCAL_GEO_TARGETING_EVIDENCE and geo_targeted and not known_foreign and not codes
+    if (LOCAL_GEO_TARGETING_EVIDENCE and cc != 'cn' and geo_targeted and not known_foreign and not codes
             and not host_cc and not locale and item.get('_local_discovery_lane')
             and not host.endswith(('.eu', '.asia', '.africa', '.lat', '.arab'))
             and not _local_text_foreign_signal(item, cc)):
@@ -4070,6 +4089,7 @@ _LOCAL_DESCRIPTOR_TERMS = {
 # Brand names as written by Chinese marketplaces and by Arabic-speaking users;
 # every alias maps back to the Latin brand for query building and matching.
 _LOCAL_BRAND_ALIASES = {
+    'ralphlauren': {'en': 'Polo Ralph Lauren|Ralph Lauren'},
     'sony': {'zh': '索尼', 'ar': 'سوني'}, 'samsung': {'zh': '三星', 'ar': 'سامسونج|سامسونغ'},
     'apple': {'zh': '苹果', 'ar': 'ابل|آبل|أبل'}, 'iphone': {'zh': '苹果手机', 'ar': 'ايفون|آيفون'},
     'ipad': {'ar': 'ايباد|آيباد'}, 'airpods': {'ar': 'ايربودز|ايربود'}, 'macbook': {'ar': 'ماك بوك|ماكبوك'},
@@ -4118,6 +4138,7 @@ _LOCAL_BRAND_ALIASES = {
     'kindle': {'ar': 'كيندل'}, 'instax': {'zh': '拍立得', 'ar': 'انستاكس'}, 'fujifilm': {'zh': '富士', 'ar': 'فوجي'},
 }
 _LOCAL_RETRIEVAL_NOUNS = {
+    'poloshirt': {'en': 'polo shirt|polo shirts|polo|polos', 'zh': 'POLO衫|马球衫|polo衬衫', 'fr': 'polo|polos', 'de': 'Poloshirt|Polohemd', 'ar': 'قميص بولو|تيشيرت بولو|بولو'},
     'handbag': {'en': 'handbag|handbags|hand bag|shoulder bag|shoulder bags|tote bag|tote bags|crossbody bag|crossbody bags', 'zh': '手提包|手袋|手提袋|斜挎包|单肩包|包包|女包|男包', 'ja': 'ハンドバッグ', 'de': 'Handtasche|Handtaschen', 'fr': 'sac à main|sacs à main', 'it': 'borsa a mano', 'es': 'bolso de mano', 'ar': 'حقيبة يد|حقيبه يد|شنطة يد|شنطه يد'},
     'coffeecup': {'en': 'coffee cups|coffee cup', 'zh': '咖啡杯', 'ar': 'فنجان قهوة|كوب قهوة', 'de': 'Kaffeetasse', 'fr': 'tasse à café', 'es': 'taza de café'},
     'shoes': {'en': 'shoes|shoe|footwear|sneakers|sneaker|trainers|boots|boot|sandals|sandal|slippers|slipper', 'zh': '鞋|运动鞋|跑鞋|靴子|凉鞋|拖鞋|板鞋', 'ja': '靴|シューズ|スニーカー', 'de': 'Schuhe|Schuh|Sneaker|Stiefel', 'fr': 'chaussures|chaussure|baskets|bottes', 'it': 'scarpe', 'es': 'zapatos|zapatillas', 'tr': 'ayakkabı', 'ar': 'حذاء|أحذية|احذيه|جوتي|جواتي|بوت|صندل|نعال|شبشب|سنيكرز'},
@@ -4150,7 +4171,7 @@ _LOCAL_RETRIEVAL_NOUNS = {
     'sunglasses': {'en': 'sunglasses|sunglass|shades', 'zh': '太阳镜|墨镜', 'ja': 'サングラス', 'de': 'Sonnenbrille', 'fr': 'lunettes de soleil', 'es': 'gafas de sol', 'tr': 'güneş gözlüğü', 'ar': 'نظارة شمسية|نظاره شمسيه|نظارات شمسية|نظارات شمسيه|نظارة شمس'},
     'jacket': {'en': 'jacket|jackets|coat|coats|hoodie|hoodies|windbreaker|puffer', 'zh': '夹克|外套|羽绒服|卫衣|风衣', 'ja': 'ジャケット|コート|パーカー', 'de': 'Jacke|Mantel', 'fr': 'veste|manteau|blouson', 'es': 'chaqueta|abrigo', 'tr': 'ceket|mont', 'ar': 'جاكيت|جاكت|معطف|هودي|جكيت'},
     'pants': {'en': 'pants|trousers|jeans|joggers|leggings|shorts', 'zh': '裤子|牛仔裤|长裤|短裤|运动裤', 'ja': 'パンツ|ズボン|ジーンズ', 'de': 'Hose|Jeans', 'fr': 'pantalon|jean', 'es': 'pantalón|pantalones|vaqueros', 'ar': 'بنطلون|بنطال|جينز|بناطيل|شورت'},
-    'shirt': {'en': 'shirt|shirts|t-shirt|t shirt|tshirt|tee|polo|blouse', 'zh': 'T恤|衬衫|衬衣|上衣|polo衫', 'ja': 'シャツ|Tシャツ', 'de': 'Hemd|T-Shirt|Shirt', 'fr': 'chemise|t-shirt', 'es': 'camisa|camiseta', 'tr': 'gömlek|tişört', 'ar': 'قميص|تيشيرت|تي شيرت|بلوزة|بلوزه|قمصان'},
+    'shirt': {'en': 'shirt|shirts|t-shirt|t shirt|tshirt|tee|blouse', 'zh': 'T恤|衬衫|衬衣|上衣', 'ja': 'シャツ|Tシャツ', 'de': 'Hemd|T-Shirt|Shirt', 'fr': 'chemise|t-shirt', 'es': 'camisa|camiseta', 'tr': 'gömlek|tişört', 'ar': 'قميص|تيشيرت|تي شيرت|بلوزة|بلوزه|قمصان'},
     'mattress': {'en': 'mattress|mattresses', 'zh': '床垫', 'ja': 'マットレス', 'de': 'Matratze', 'fr': 'matelas', 'es': 'colchón', 'ar': 'مرتبة|مرتبه|مراتب|فرشة|فرشه'},
     'sofa': {'en': 'sofa|sofas|couch|sectional|loveseat', 'zh': '沙发', 'ja': 'ソファ', 'de': 'Sofa|Couch', 'fr': 'canapé', 'es': 'sofá', 'tr': 'kanepe|koltuk', 'ar': 'كنب|كنبة|كنبه|صوفا|صالون'},
     'chair': {'en': 'chair|chairs|armchair|office chair|gaming chair', 'zh': '椅子|办公椅|电竞椅|电脑椅', 'ja': '椅子|チェア', 'de': 'Stuhl|Sessel', 'fr': 'chaise|fauteuil', 'es': 'silla|sillón', 'tr': 'sandalye|koltuk', 'ar': 'كرسي|كراسي|كرسي مكتب|كرسي قيمنق'},
@@ -4209,11 +4230,11 @@ def _local_retrieval_rules():
                 '斯凯奇': 'skechers', '斯凱奇': 'skechers',
                 'رجالي': 'men', 'رجاليه': 'men', 'للرجال': 'men', 'نسائي': 'women', 'نسائيه': 'women', 'حريمي': 'women',
                 'للنساء': 'women', 'اطفال': 'kids', 'للاطفال': 'kids', 'ولادي': 'boys', 'بناتي': 'girls'}
-    entries = [(normalize_ar(term.strip().casefold()), canonical) for canonical, languages in _LOCAL_RETRIEVAL_NOUNS.items()
+    entries = [(normalize_ar(_cjk_boundary_spaces(term.strip().casefold())), canonical) for canonical, languages in _LOCAL_RETRIEVAL_NOUNS.items()
                for terms in languages.values() for term in terms.split('|') if term.strip()]
-    entries += [(normalize_ar(alias.strip().casefold()), brand) for brand, languages in _LOCAL_BRAND_ALIASES.items()
+    entries += [(normalize_ar(_cjk_boundary_spaces(alias.strip().casefold())), brand) for brand, languages in _LOCAL_BRAND_ALIASES.items()
                 for terms in languages.values() for alias in terms.split('|') if alias.strip()]
-    entries += [(normalize_ar(term.strip().casefold()), canonical) for canonical, languages in _LOCAL_DESCRIPTOR_TERMS.items()
+    entries += [(normalize_ar(_cjk_boundary_spaces(term.strip().casefold())), canonical) for canonical, languages in _LOCAL_DESCRIPTOR_TERMS.items()
                 for terms in languages.values() for term in terms.split('|') if term.strip()]
     entries += list(audience.items())
     replacements = dict(entries)
@@ -4344,15 +4365,18 @@ def _market_query_static_table(language):
         for terms in row.values() for term in terms.split('|')
         if term.strip() and term.strip().casefold() != row[language].split('|')[0].strip().casefold()}
     for brand, languages in _LOCAL_BRAND_ALIASES.items():
-        zh_pair = (languages['zh'].split('|')[0] + ' ' + brand) if 'zh' in languages else brand
+        display_brand = languages.get('en', brand).split('|')[0]
+        zh_pair = (languages['zh'].split('|')[0] + ' ' + display_brand) if languages.get('zh') else display_brand
         if language == 'zh' and 'zh' in languages:
             replacements.setdefault(brand, zh_pair)
         for lang_code, terms in languages.items():
-            if lang_code == language:
+            if lang_code == language and lang_code != 'en':
                 continue
             for alias in terms.split('|'):
                 if alias.strip():
-                    replacements.setdefault(alias.strip().casefold(), zh_pair if language == 'zh' else brand)
+                    replacements.setdefault(alias.strip().casefold(),
+                        alias.strip() if lang_code == 'en' and not languages.get('zh') else
+                        zh_pair if language == 'zh' else display_brand)
     compiled = re.compile('|'.join(_local_term_pattern(term) for term in sorted(replacements, key=len, reverse=True)), re.I) if replacements else None
     hit = (replacements, compiled)
     with _MARKET_STATIC_TABLE_LOCK:
@@ -6242,6 +6266,9 @@ def _merchant_url_market(url):
             return {}
     except ValueError:
         return {}
+    # Matsuya Ginza's /cn/ and /en/ choose UI language for its Japanese catalog.
+    if _host_matches_any(host, ('matsuyaginza.com',)):
+        return {'country': 'jp', 'evidence': 'merchant_domestic_catalog', 'kind': 'domestic_catalog'}
     domain_cc = _host_country_code(host)
     storefront_cc = _storefront_country(url)
     if storefront_cc == 'conflict':
@@ -8885,6 +8912,13 @@ def _canonical_result_url(url):
     except Exception:
         return u.split('#', 1)[0]
 
+def _findzia_accessory_evidence(value):
+    text = normalize_ar(str(value or ''))
+    if re.search(r'\b(?:shirt|shirts|polo|poloshirt|dress|blouse|jacket|sweater|sweatshirt|hoodie)\b|قميص|تيشيرت|فستان', text, re.I):
+        text = re.sub(r'\b(?:short|long|full|half|cap|raglan|puff|bell|three[ -]quarter)[ -]+sleeves?\b', '', text, flags=re.I)
+    return norm_tokens(text) & _FINDZIA_ACCESSORY_TOKENS
+
+
 def _findzia_hard_product_mismatch(query, title):
     q_raw = normalize_ar(str(query or ''))
     t_raw = normalize_ar(str(title or ''))
@@ -8892,8 +8926,8 @@ def _findzia_hard_product_mismatch(query, title):
     t = norm_tokens(t_raw)
     if not q or not t:
         return False
-    q_acc = q & _FINDZIA_ACCESSORY_TOKENS
-    t_acc = t & _FINDZIA_ACCESSORY_TOKENS
+    q_acc = _findzia_accessory_evidence(q_raw)
+    t_acc = _findzia_accessory_evidence(t_raw)
     if t_acc - q_acc:
         return True
     for wanted, alternatives in _FINDZIA_CONFLICT_GROUPS:
@@ -16927,7 +16961,7 @@ def _web_card_fields(row):
 
 def _web_card_payload(payload):
     if isinstance(payload,list):
-        return [_web_card_payload(row) for row in payload]
+        return [_web_card_payload(row) for row in payload if not (isinstance(row, dict) and row.get('hidden'))]
     if not isinstance(payload,dict):
         return payload
     out=dict(payload)
@@ -18697,6 +18731,7 @@ def _web_flag_price_outliers(rows):
 
 def _web_live_snapshot(event, rows):
     """Keep every emitted card when classification snapshots replace their lists."""
+    rows = {key: row for key, row in rows.items() if not row.get('hidden')}
     _web_flag_price_outliers(rows)
     for row in rows.values():
         row.update(_web_price_display_fields(row))
@@ -18923,6 +18958,7 @@ async def _web_with_live_prices(source, lang, country, allow_paid=True, wait_sec
     market = _web_market(country)
     rows, facts, jobs, attempted = {}, {}, {}, set()
     shared = {}
+    rejected = set()
     recovery_attempted, recovery_calls = set(), 0
     missing_since, page_finished = {}, set()
     loop = asyncio.get_running_loop()
@@ -18943,7 +18979,7 @@ async def _web_with_live_prices(source, lang, country, allow_paid=True, wait_sec
         async with gate:
             return await asyncio.wrap_future(WEB_LIVE_PRICE_POOL.submit(_web_live_page_image_only, row, dict(market)))
     def absorb(item):
-        if not _market_offer_allowed(item, market):
+        if item.get('hidden') or _web_identity_offer_key(item) in rejected or not _market_offer_allowed(item, market):
             return None
         item = dict(item)
         if item.get('price') and not _web_confirmable_price(item):
@@ -19000,6 +19036,7 @@ async def _web_with_live_prices(source, lang, country, allow_paid=True, wait_sec
                 and _web_row_has_numeric_price(dict(current, **_web_price_facts(data)))):
             cc = str(current.get('country') or (market or {}).get('country') or '').lower()
             if cc and live_currency not in set(country_currency_codes(cc)):
+                rejected.add(key)
                 rows.pop(key, None)
                 facts.pop(key, None)
                 print(f'LIVE PRICE FOREIGN CURRENCY country={cc} currency={live_currency} host={_more_result_domain(current.get("url"))} -> removed from local')
@@ -20445,12 +20482,14 @@ def _web_text_direct_specs(query, country):
 
 
 def _web_text_direct_backup_specs(query, country):
-    """SerpApi lanes used only when the primary provider fails or returns too little."""
-    native = next((hl for hl in _market_query_languages(country, query) if hl != 'en'), 'en')
-    specs = [{'country': country, 'role': 'local', 'engine': 'google', 'hl': 'en', 'geo_cue': True},
-             {'country': country, 'role': 'local', 'engine': TEXT_DIRECT_IMAGES_ENGINE, 'hl': 'en', 'geo_cue': True}]
-    if native != 'en':
-        specs.append({'country': country, 'role': 'local', 'engine': 'google', 'hl': native, 'geo_cue': False})
+    """The same domestic offer protocol as image rescue, within two search lanes."""
+    hl = _market_query_languages(country, query)[0]
+    primary, _ = _local_primary_discovery_kinds(country)
+    specs = [{'country': country, 'role': 'local',
+              'engine': 'google_shopping' if primary == 'shopping' else 'google',
+              'hl': hl, 'geo_cue': False},
+             {'country': country, 'role': 'local', 'engine': 'google',
+              'hl': hl, 'geo_cue': False, 'domestic_scope': True}]
     if not _fast_provider_supports_operators('serper'):
         for cc in DEFAULT_GLOBAL_COUNTRIES:
             if cc != country and cc in GLOBAL_MARKET_STORES:
@@ -20474,6 +20513,8 @@ def _web_text_direct_params(query, spec, page_token=''):
         wording = f'{wording} ({domains})'
     elif role == 'global':
         pass  # Google Shopping has no site: operator; the catalog filter selects rows.
+    elif spec.get('domestic_scope'):
+        wording = _local_discovery_query(wording, _web_market(country), scoped=True, language=hl)
     elif engine in ('google', 'google_light', 'google_images', 'google_images_light') or engine.startswith(('serper_', 'cse_')):
         if spec.get('geo_cue'):
             wording = f'{wording} {COUNTRY_NAMES.get(country, country.upper())}'
@@ -20625,6 +20666,8 @@ def _web_text_direct_search(query, country, lang, progress_callback=None, cancel
                 'source': 'text_direct', 'authoritative': True,
                 'local_discovery_complete': True, 'market_progress': dict(source_states),
                 'retrieval_calls': launched, 'first_result_ms': first_ms}
+    def ready_local():
+        return len(_local_ready_merchants([r for r in rows.values() if r.get('country') == country]))
     launched = 0
     def submit(spec, token='', thumbnail=''):
         nonlocal launched
@@ -20652,10 +20695,10 @@ def _web_text_direct_search(query, country, lang, progress_callback=None, cancel
             nonlocal backup_launched, deadline, empty_deadline
             if (not serper_primary() or not SERPAPI_BACKUP_ENABLED or backup_launched or not SERPAPI_API_KEY
                     or cancel.is_set() or serpapi_provider_degraded()
-                    or any(j[0]['engine'].startswith(('serper_', 'cse_')) for j in jobs.values())):
+                    or any(j[0]['role'] == 'local' and j[0]['engine'].startswith(('serper_', 'cse_')) for j in jobs.values())):
                 return
             unavailable = fast_unavailable >= max(1, fast_lane_count)
-            if len(rows) >= SERPAPI_BACKUP_MIN_ROWS and not unavailable:
+            if ready_local() >= SERPAPI_BACKUP_MIN_ROWS and not unavailable:
                 return
             backup_launched = True
             now = time.monotonic()
@@ -20666,7 +20709,7 @@ def _web_text_direct_search(query, country, lang, progress_callback=None, cancel
                 submit(spec)
             print(f'TEXT DIRECT BACKUP provider=serpapi lanes={len(backup)} reason='
                   f'{"primary_unavailable" if unavailable else "sparse"}'
-                  f' rows={len(rows)} country={country} elapsed_ms={int((now-started)*1000)}')
+                  f' rows={len(rows)} ready_local={ready_local()} country={country} elapsed_ms={int((now-started)*1000)}')
         maybe_launch_backup()
         while jobs and not cancel.is_set():
             now = time.monotonic()
@@ -20760,11 +20803,11 @@ def _web_text_direct_search(query, country, lang, progress_callback=None, cancel
                 # Once every local lane (and its seller expansions) has
                 # answered, a slow foreign catalog gets a short grace period
                 # rather than the whole budget: local cards are already shown.
-                if rows and not any(j[0]['role'] == 'local' for j in jobs.values()):
+                if ready_local() >= max(1, SERPAPI_BACKUP_MIN_ROWS) and not any(j[0]['role'] == 'local' for j in jobs.values()):
                     deadline = min(deadline, time.monotonic() + TEXT_DIRECT_GLOBAL_GRACE_SECONDS)
                 # Fast providers done with a real page: SerpApi lanes get a
                 # bounded settle window instead of the whole budget.
-                if (fast_lane_count and len(rows) >= TEXT_DIRECT_FAST_SETTLE_ROWS
+                if (fast_lane_count and ready_local() >= TEXT_DIRECT_FAST_SETTLE_ROWS
                         and not any(j[0]['engine'].startswith(('serper_', 'cse_')) for j in jobs.values())):
                     deadline = min(deadline, time.monotonic() + TEXT_DIRECT_FAST_SETTLE_SECONDS)
                 # Google may return an aggregate product without a seller URL.
@@ -20799,7 +20842,7 @@ def _web_text_direct_search(query, country, lang, progress_callback=None, cancel
                              or any(v == 'unavailable' for v in source_states.values()))
         print(f'TEXT DIRECT FINAL country={country} rows={len(rows)} markets={dict(counts)}'
               f' images={sum(bool(r.get("image")) for r in rows.values())}'
-              f' prices={sum(_web_row_has_numeric_price(r) for r in rows.values())}'
+              f' prices={sum(_web_row_has_numeric_price(r) for r in rows.values())} ready_local={ready_local()}'
               f' first_ms={first_ms} elapsed_ms={int((time.monotonic()-started)*1000)} calls={launched}'
               f' pending={len(jobs)} extended={extended}')
         return result
@@ -25382,31 +25425,49 @@ _LENS_CONSENSUS_STOP = frozenset({
 
 
 def _lens_consensus_terms(rows, limit=3):
-    """Words that agreeing Lens titles share (rare, non-generic) — retrieval only.
-
-    "ikea", "djungelskog", "orangutan" appear in most matches of an IKEA plush
-    even when the photo shows no readable label. Returns up to ``limit`` terms
-    in title order of the best-supported row, or [] when titles disagree.
-    """
-    titles = []
-    for row in rows[:24]:
-        title = normalize_ar(str((row or {}).get('title') or '')).lower()
+    """Majority terms across independent Lens merchants; retrieval hints only."""
+    titles, seen = [], set()
+    for row in rows:
+        sources = set(row.get('retrieval_sources') or [])
+        if sources and 'google_lens' not in sources:
+            continue
+        url = row.get('link') or row.get('url') or ''
+        if not is_lens_product_url(url):
+            continue
+        host = _more_result_domain(url)
+        if not host or host in seen:
+            continue
+        title = _local_retrieval_text(str(row.get('title') or ''))
         tokens = [t for t in re.findall(r'[a-z0-9\u0600-\u06ff\u3400-\u9fff]{2,}', title)
                   if t not in _LENS_CONSENSUS_STOP and not t.isdigit() and t not in _LOCAL_RETRIEVAL_NOUNS]
         if tokens:
             titles.append(tokens)
+            seen.add(host)
+        if len(titles) >= 12:
+            break
     if len(titles) < 3:
         return []
-    counts = Counter()
-    for tokens in titles:
-        counts.update(set(tokens))
-    floor = max(3, int(len(titles) * .34 + .999))
-    strong = {token for token, n in counts.items() if n >= floor}
+    counts = Counter(t for tokens in titles for t in set(tokens))
+    floor = max(3, math.ceil(len(titles) * .6))
+    strong = {token for token, count in counts.items() if count >= floor}
     if not strong:
         return []
-    best = max(titles, key=lambda tokens: sum(1 for t in tokens if t in strong))
-    ordered = [t for t in dict.fromkeys(best) if t in strong]
-    return ordered[:limit]
+    best = max(titles, key=lambda tokens: sum(t in strong for t in tokens))
+    return [t for t in dict.fromkeys(best) if t in strong][:limit]
+
+
+def _photo_discovery_query(reference, visual_rows=(), query_hint=''):
+    """Improve retrieval without promoting inferred brands to observed identity."""
+    reference = reference or {}
+    query = str(reference.get('query') or query_hint or '').strip()
+    if reference.get('named') or reference.get('_text_search'):
+        return query
+    terms = _lens_consensus_terms(list(visual_rows))
+    if terms:
+        base = str(reference.get('product_type') or query)
+        return ' '.join(dict.fromkeys(terms + base.split()))[:220]
+    features = [str(p.get('en') or '').strip() for p in reference.get('features', []) if isinstance(p, dict)]
+    return ' '.join([query] + [feature for feature in features[:2] if feature])[:220]
 SELECTED_MARKET_POOL = ThreadPoolExecutor(max_workers=16, thread_name_prefix='selected-market')
 
 
