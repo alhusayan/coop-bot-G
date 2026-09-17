@@ -1,4 +1,3 @@
-# v128.5.43: English + domestic language retrieval; shared US/CN local/global merchant catalogs.
 # v128.5.42: fast observed card media and bounded per-product merchant collection expansion.
 # v128.5.38: Serper photo alternatives; independent US/CN domestic discovery.
 # v128.5.32: global markets (approved US + China catalogs) get the same three Serper lanes as
@@ -389,7 +388,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization'], max_age=86400)
-BUILD_ID = 'v128.5.43-bilingual-market-stores'
+BUILD_ID = 'v128.5.42-product-photos-collections'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -2382,8 +2381,7 @@ def _collect_lens_items(data, items, seen):
     return items
 
 def _serpapi_lens_request(public_url, lens_type, country, auto_crop, query_hint):
-    hl = 'en' if lens_type == 'products' else _market_query_languages(country, query_hint)[0]
-    params = {'engine': 'google_lens', 'url': public_url, 'api_key': SERPAPI_API_KEY, 'hl': hl, 'safe': 'active', 'output': 'json'}
+    params = {'engine': 'google_lens', 'url': public_url, 'api_key': SERPAPI_API_KEY, 'hl': country_search_hl(country), 'safe': 'active', 'output': 'json'}
     if lens_type:
         params['type'] = lens_type
     if country:
@@ -2391,7 +2389,7 @@ def _serpapi_lens_request(public_url, lens_type, country, auto_crop, query_hint)
     if auto_crop:
         params['auto_crop'] = 'true'
     if query_hint and lens_type in (None, '', 'all', 'visual_matches', 'products'):
-        params['q'] = _local_native_query(query_hint, country, hl)[:120]
+        params['q'] = query_hint[:120]
     try:
         # First paint and provider completion are separate budgets. A fast US
         # response must not shorten the Chinese/local provider's read timeout.
@@ -2399,7 +2397,7 @@ def _serpapi_lens_request(public_url, lens_type, country, auto_crop, query_hint)
         data = _serpapi_cached_json(
             params,
             timeout=(2, lens_read_timeout),
-            label=f"GOOGLE LENS type={lens_type or 'all'} country={country or '-'} hl={hl}",
+            label=f"GOOGLE LENS type={lens_type or 'all'} country={country or '-'}",
         )
         if data is None:
             return []
@@ -2408,8 +2406,7 @@ def _serpapi_lens_request(public_url, lens_type, country, auto_crop, query_hint)
         items = _web_expand_collection_rows(items)
         for item in items:
             item['_lens_country'] = (country or '').lower()
-            item['_retrieval_language'] = hl
-        print(f"GOOGLE LENS PASS type={lens_type or 'all'} country={country or '-'} hl={hl} auto_crop={auto_crop} -> {len(items)} items")
+        print(f"GOOGLE LENS PASS type={lens_type or 'all'} country={country or '-'} auto_crop={auto_crop} -> {len(items)} items")
         return items
     except Exception as e:
         print(f"GOOGLE LENS PASS EXCEPTION type={lens_type or 'all'}: {e}")
@@ -2935,7 +2932,7 @@ def _photo_identity(image_b64, mime_type):
 
 def _photo_literal_contains(haystack, needle):
     """Complete OCR words only; never complete an unreadable model suffix."""
-    if not isinstance(needle, str) or not needle.strip() or re.search(r'[?… ]', needle):
+    if not isinstance(needle, str) or not needle.strip() or re.search(r'[?…�]', needle):
         return False
     text, value = _photo_identity_text(haystack), _photo_identity_text(needle)
     if not value or value in ('unknown', 'unclear', 'unreadable', 'غير معروف', 'غير واضح'):
@@ -3747,14 +3744,19 @@ def normalize_name(value):
     return re.sub('[^\\w\\u0600-\\u06FF]+', '', (value or '').lower())
 STORE_DOMAINS = {'اليوسفي': 'best.com.kw', 'بستاليوسفي': 'best.com.kw', 'اكسايت': 'xcite.com', 'الغانم': 'xcite.com', 'نون': 'noon.com', 'بلينك': 'blink.com.kw', 'يوريكا': 'eureka.com.kw', 'جرير': 'jarir.com', 'كارفور': 'carrefourkuwait.com', 'لولو': 'luluhypermarket.com', 'امازون': 'amazon.ae', 'طلبات': 'talabat.com', 'ديليفرو': 'deliveroo.com.kw', 'بوتيكات': 'boutiqaat.com', 'جمعية دوت كوم': 'jm3eia.com', 'جمعيه دوت كوم': 'jm3eia.com', 'جميعة': 'jm3eia.com', 'jm3eia': 'jm3eia.com', 'كيتا': 'mykeeta.com', 'keeta': 'mykeeta.com', 'توصيل': 'taw9eel.com', 'التوصيل': 'taw9eel.com', 'taw9eel': 'taw9eel.com', 'taw9el': 'taw9eel.com', 'انترسبورت': 'intersport.com.kw', 'إنترسبورت': 'intersport.com.kw', 'intersport': 'intersport.com.kw', 'ديكاثلون': 'decathlon.com.kw', 'decathlon': 'decathlon.com.kw', 'بروسبورتس': 'prosportskw.com', 'برو سبورتس': 'prosportskw.com', 'prosports': 'prosportskw.com', 'pro sports': 'prosportskw.com', 'تيجرو': 'tigro.app', 'تيغرو': 'tigro.app', 'tigro': 'tigro.app', 'عروض كيو ايت': '3roodq8.com', 'عروضكيوايت': '3roodq8.com', '3roodq8': '3roodq8.com', '3rstore': '3roodq8.com', 'سن اند ساند': 'sssports.com', 'sun and sand': 'sssports.com', 'sunandsand': 'sssports.com', 'sssports': 'sssports.com', 'فوت لوكر': 'footlocker.com.kw', 'footlocker': 'footlocker.com.kw', 'نمشي': 'namshi.com', 'namshi': 'namshi.com'}
 GENERAL_MARKETPLACES = ['جمعية دوت كوم', 'طلبات', 'كيتا', 'نون', 'لولو', 'كارفور']
-CATEGORY_KEYWORDS = {'sports': ('كره سله', 'كره قدم', 'كره طايره', 'كره تنس', 'كره', 'مضرب', 'تنس', 'بادل', 'سكواش', 'ريشه', 'بادمنتون', 'جيم', 'لياقه', 'دمبل', 'اثقال', 'بار حديد', 'سير كهربائي', 'دراجه هوائيه', 'دراجه ثابته', 'سباحه', 'نظاره سباحه', 'حبل قفز', 'سجاده يوغا', 'يوغا', 'بروتين رياضي', 'جوتي رياضي', 'حذاء رياضي', 'ملابس رياضيه', 'basketball', 'football', 'soccer', 'volleyball', 'tennis', 'padel', 'racket', 'squash', 'badminton', 'gym', 'fitness', 'dumbbell', 'barbell', 'kettlebell', 'treadmill', 'bike', 'bicycle', 'cycling', 'swimming', 'goggles', 'jump rope', 'yoga', 'sneaker', 'running shoe', 'sportswear', 'cricket', 'darts'), 'gaming': ('بلايستيشن', 'اكس بوكس', 'نينتندو', 'سويتش', 'يد تحكم', 'لعبه فيديو', 'العاب فيديو', 'قير', 'شاشه قيمنق', 'كرسي قيمنق', 'سماعه قيمنق', 'كيبورد', 'ماوس', 'playstation', 'ps5', 'ps4', 'xbox', 'nintendo', 'switch', 'controller', 'gaming', 'gamepad', 'headset', 'keyboard', 'mouse', 'steam deck', 'video game'), 'electronics': ('ايفون', 'سامسونج', 'لابتوب', 'تابلت', 'ايباد', 'تلفزيون', 'الكترون', 'هاتف', 'جوال', 'ساعه ابل', 'ساعه ذكيه', 'سماعه', 'ايربودز', 'كاميرا', 'شاحن', 'باور بانك', 'iphone', 'samsung', 'laptop', 'tablet', 'ipad', 'television', 'tv', 'phone', 'smartwatch', 'airpods', 'earbuds', 'camera', 'charger', 'power bank', 'drone'), 'appliances': ('ثلاجه', 'غساله', 'فرن', 'مكيف', 'جلايه', 'مكنسه', 'قلايه', 'ميكرويف', 'fridge', 'refrigerator', 'washer', 'washing machine', 'oven', 'air conditioner', 'dishwasher', 'vacuum', 'air fryer', 'microwave'), 'beauty': ('عطر', 'عطور', 'برفان', 'مكياج', 'روج', 'فاونديشن', 'ماسكرا', 'كريم', 'سيروم', 'عنايه', 'شامبو', 'واقي شمس', 'perfume', 'makeup', 'foundation', 'mascara', 'cream', 'serum', 'skincare', 'shampoo', 'sunscreen', 'cosmetic'), 'pharmacy': ('دواء', 'صيدليه', 'فيتامين', 'مكمل', 'حفاض', 'حفاظ', 'بروتين', 'medicine', 'pharmacy', 'vitamin', 'supplement', 'diaper'), 'grocery': ('بيبسي', 'شيبس', 'حليب', 'قهوه', 'شاي', 'سكر', 'رز', 'زيت', 'ماء', 'عصير', 'بسكوت', 'منظف', 'صابون', 'معجون', 'تونه', 'نسكافيه', 'برينجلز', 'كيتكات', 'grocery', 'milk', 'coffee', 'tea', 'rice', 'detergent'), 'food_delivery': ('مطعم', 'وجبه', 'برجر', 'بيتزا', 'فلات وايت', 'شاورما', 'دجاج مقلي', 'restaurant', 'burger', 'pizza', 'shawarma', 'meal'), 'fashion': ('ملابس', 'قميص', 'بنطلون', 'فستان', 'جاكيت', 'كاب', 'قبعه', 'شنطه', 'حقيبه', 'حذاء', 'جوتي', 'عبايه', 'بيجامه', 'clothing', 'shirt', 'pants', 'dress', 'jacket', 'cap', 'bag', 'shoe', 'abaya'), 'furniture': ('اثاث', 'كرسي', 'طاوله', 'سرير', 'كنب', 'صوفا', 'مرتبه', 'دولاب', 'furniture', 'chair', 'table', 'bed', 'sofa', 'mattress', 'wardrobe'), 'kids_toys': ('لعبه اطفال', 'العاب اطفال', 'لعبه', 'العاب', 'دميه', 'ليغو', 'ليجو', 'مكعبات', 'عربانه', 'عربه اطفال', 'رضاعه', 'كرسي طفل', 'بزل', 'toy', 'toys', 'doll', 'lego', 'puzzle', 'stroller', 'baby'), 'auto': ('سياره', 'بطاريه سياره', 'اطار', 'تواير', 'زيت محرك', 'اكسسوارات سياره', 'قطع غيار', 'car battery', 'tyre', 'tire', 'engine oil', 'car accessories', 'auto parts', 'brake pads', 'brake parts', 'auto parts', 'car parts', 'spark plug', 'oil filter', 'rockauto')}
+CATEGORY_KEYWORDS = {'sports': ('كره سله', 'كره قدم', 'كره طايره', 'كره تنس', 'كره', 'مضرب', 'تنس', 'بادل', 'سكواش', 'ريشه', 'بادمنتون', 'جيم', 'لياقه', 'دمبل', 'اثقال', 'بار حديد', 'سير كهربائي', 'دراجه هوائيه', 'دراجه ثابته', 'سباحه', 'نظاره سباحه', 'حبل قفز', 'سجاده يوغا', 'يوغا', 'بروتين رياضي', 'جوتي رياضي', 'حذاء رياضي', 'ملابس رياضيه', 'basketball', 'football', 'soccer', 'volleyball', 'tennis', 'padel', 'racket', 'squash', 'badminton', 'gym', 'fitness', 'dumbbell', 'barbell', 'kettlebell', 'treadmill', 'bike', 'bicycle', 'cycling', 'swimming', 'goggles', 'jump rope', 'yoga', 'sneaker', 'running shoe', 'sportswear', 'cricket', 'darts'), 'gaming': ('بلايستيشن', 'اكس بوكس', 'نينتندو', 'سويتش', 'يد تحكم', 'لعبه فيديو', 'العاب فيديو', 'قير', 'شاشه قيمنق', 'كرسي قيمنق', 'سماعه قيمنق', 'كيبورد', 'ماوس', 'playstation', 'ps5', 'ps4', 'xbox', 'nintendo', 'switch', 'controller', 'gaming', 'gamepad', 'headset', 'keyboard', 'mouse', 'steam deck', 'video game'), 'electronics': ('ايفون', 'سامسونج', 'لابتوب', 'تابلت', 'ايباد', 'تلفزيون', 'الكترون', 'هاتف', 'جوال', 'ساعه ابل', 'ساعه ذكيه', 'سماعه', 'ايربودز', 'كاميرا', 'شاحن', 'باور بانك', 'iphone', 'samsung', 'laptop', 'tablet', 'ipad', 'television', 'tv', 'phone', 'smartwatch', 'airpods', 'earbuds', 'camera', 'charger', 'power bank', 'drone'), 'appliances': ('ثلاجه', 'غساله', 'فرن', 'مكيف', 'جلايه', 'مكنسه', 'قلايه', 'ميكرويف', 'fridge', 'refrigerator', 'washer', 'washing machine', 'oven', 'air conditioner', 'dishwasher', 'vacuum', 'air fryer', 'microwave'), 'beauty': ('عطر', 'عطور', 'برفان', 'مكياج', 'روج', 'فاونديشن', 'ماسكرا', 'كريم', 'سيروم', 'عنايه', 'شامبو', 'واقي شمس', 'perfume', 'makeup', 'foundation', 'mascara', 'cream', 'serum', 'skincare', 'shampoo', 'sunscreen', 'cosmetic'), 'pharmacy': ('دواء', 'صيدليه', 'فيتامين', 'مكمل', 'حفاض', 'حفاظ', 'بروتين', 'medicine', 'pharmacy', 'vitamin', 'supplement', 'diaper'), 'grocery': ('بيبسي', 'شيبس', 'حليب', 'قهوه', 'شاي', 'سكر', 'رز', 'زيت', 'ماء', 'عصير', 'بسكوت', 'منظف', 'صابون', 'معجون', 'تونه', 'نسكافيه', 'برينجلز', 'كيتكات', 'grocery', 'milk', 'coffee', 'tea', 'rice', 'detergent'), 'food_delivery': ('مطعم', 'وجبه', 'برجر', 'بيتزا', 'فلات وايت', 'شاورما', 'دجاج مقلي', 'restaurant', 'burger', 'pizza', 'shawarma', 'meal'), 'fashion': ('ملابس', 'قميص', 'بنطلون', 'فستان', 'جاكيت', 'كاب', 'قبعه', 'شنطه', 'حقيبه', 'حذاء', 'جوتي', 'عبايه', 'بيجامه', 'clothing', 'shirt', 'pants', 'dress', 'jacket', 'cap', 'bag', 'shoe', 'abaya'), 'furniture': ('اثاث', 'كرسي', 'طاوله', 'سرير', 'كنب', 'صوفا', 'مرتبه', 'دولاب', 'furniture', 'chair', 'table', 'bed', 'sofa', 'mattress', 'wardrobe'), 'kids_toys': ('لعبه اطفال', 'العاب اطفال', 'لعبه', 'العاب', 'دميه', 'ليغو', 'ليجو', 'مكعبات', 'عربانه', 'عربه اطفال', 'رضاعه', 'كرسي طفل', 'بزل', 'toy', 'toys', 'doll', 'lego', 'puzzle', 'stroller', 'baby'), 'auto': ('سياره', 'بطاريه سياره', 'اطار', 'تواير', 'زيت محرك', 'اكسسوارات سياره', 'قطع غيار', 'car battery', 'tyre', 'tire', 'engine oil', 'car accessories', 'auto parts')}
 CATEGORY_SPECIALISTS = {'sports': ['Pro Sports Kuwait (prosportskw.com)', 'Intersport Kuwait', 'Decathlon Kuwait', 'Sun & Sand Sports', 'Foot Locker Kuwait'], 'gaming': ['3RoodQ8 (3roodq8.com)', 'Xcite', 'Eureka', 'Blink', 'Jarir'], 'electronics': ['Xcite', 'Eureka', 'Best Al-Yousifi', 'Blink', 'Jarir', '3RoodQ8 (3roodq8.com)'], 'appliances': ['Xcite', 'Eureka', 'Best Al-Yousifi', 'Blink'], 'beauty': ['Boutiqaat', 'Faces', 'Sephora Kuwait', "Bloomingdale's Kuwait"], 'pharmacy': ['Boots Kuwait', 'YIACO', 'Royal Pharmacy'], 'grocery': ['جمعية دوت كوم', 'Lulu', 'Carrefour', 'Taw9eel'], 'food_delivery': ['Keeta', 'Talabat', 'Deliveroo'], 'fashion': ['Namshi', 'Sun & Sand Sports', 'Foot Locker Kuwait', 'Centrepoint', 'H&M Kuwait'], 'furniture': ['IKEA Kuwait', 'The One', 'Home Centre', 'Midas'], 'kids_toys': ['Tigro (tigro.app)', 'Toys R Us Kuwait', '3RoodQ8 (3roodq8.com)', 'Mothercare', 'Babyshop'], 'auto': ['AlMailem Tires', 'Tires Plus', 'Xcite']}
-COUNTRY_MAJOR_STORE_DOMAINS = {'us': [('Amazon', 'amazon.com'), ('Walmart', 'walmart.com'), ('eBay', 'ebay.com'), ('Target', 'target.com'), ('Best Buy', 'bestbuy.com'), ("Macy's", 'macys.com'), ('Nordstrom', 'nordstrom.com'), ('iHerb', 'iherb.com'), ('Pottery Barn', 'potterybarn.com'), ('Etsy', 'etsy.com'), ('Home Depot', 'homedepot.com'), ('Chewy', 'chewy.com'), ("Carter's", 'carters.com'), ('RockAuto', 'rockauto.com')], 'ca': [('Amazon Canada', 'amazon.ca'), ('Walmart Canada', 'walmart.ca'), ('Best Buy Canada', 'bestbuy.ca'), ('Canadian Tire', 'canadiantire.ca')], 'gb': [('Amazon UK', 'amazon.co.uk'), ('Argos', 'argos.co.uk'), ('Currys', 'currys.co.uk'), ('John Lewis', 'johnlewis.com')], 'fr': [('Amazon France', 'amazon.fr'), ('Fnac', 'fnac.com'), ('Darty', 'darty.com'), ('Cdiscount', 'cdiscount.com'), ('Carrefour', 'carrefour.fr')], 'de': [('Amazon Germany', 'amazon.de'), ('MediaMarkt', 'mediamarkt.de'), ('Saturn', 'saturn.de'), ('Otto', 'otto.de')], 'es': [('Amazon Spain', 'amazon.es'), ('El Corte Inglés', 'elcorteingles.es'), ('MediaMarkt', 'mediamarkt.es'), ('Carrefour', 'carrefour.es')], 'it': [('Amazon Italy', 'amazon.it'), ('MediaWorld', 'mediaworld.it'), ('Unieuro', 'unieuro.it')], 'nl': [('bol', 'bol.com'), ('Coolblue', 'coolblue.nl'), ('MediaMarkt', 'mediamarkt.nl'), ('Amazon Netherlands', 'amazon.nl')], 'be': [('bol', 'bol.com'), ('Coolblue', 'coolblue.be'), ('MediaMarkt', 'mediamarkt.be'), ('Amazon Belgium', 'amazon.com.be')], 'ch': [('Galaxus', 'galaxus.ch'), ('Digitec', 'digitec.ch'), ('Brack', 'brack.ch'), ('Manor', 'manor.ch')], 'at': [('MediaMarkt', 'mediamarkt.at'), ('Amazon Germany', 'amazon.de'), ('Otto Austria', 'ottoversand.at')], 'ie': [('Currys Ireland', 'currys.ie'), ('Harvey Norman', 'harveynorman.ie'), ('Amazon UK', 'amazon.co.uk')], 'pt': [('Worten', 'worten.pt'), ('Fnac Portugal', 'fnac.pt'), ('Continente', 'continente.pt')], 'pl': [('Allegro', 'allegro.pl'), ('Media Expert', 'mediaexpert.pl'), ('RTV Euro AGD', 'euro.com.pl')], 'cz': [('Alza', 'alza.cz'), ('Datart', 'datart.cz'), ('Mall', 'mall.cz')], 'se': [('Amazon Sweden', 'amazon.se'), ('Elgiganten', 'elgiganten.se'), ('CDON', 'cdon.se')], 'no': [('Elkjøp', 'elkjop.no'), ('Komplett', 'komplett.no'), ('Power', 'power.no')], 'dk': [('Elgiganten', 'elgiganten.dk'), ('Proshop', 'proshop.dk'), ('Power', 'power.dk')], 'fi': [('Verkkokauppa', 'verkkokauppa.com'), ('Gigantti', 'gigantti.fi'), ('Power', 'power.fi')], 'tr': [('Trendyol', 'trendyol.com'), ('Hepsiburada', 'hepsiburada.com'), ('Amazon Turkey', 'amazon.com.tr'), ('n11', 'n11.com')], 'ru': [('Ozon', 'ozon.ru'), ('Wildberries', 'wildberries.ru'), ('Yandex Market', 'market.yandex.ru')], 'ua': [('Rozetka', 'rozetka.com.ua'), ('Prom', 'prom.ua'), ('Epicentr', 'epicentrk.ua')], 'sa': [('Amazon Saudi', 'amazon.sa'), ('Noon', 'noon.com'), ('Jarir', 'jarir.com'), ('eXtra', 'extra.com'), ('Carrefour', 'carrefourksa.com'), ('Nahdi', 'nahdionline.com'), ('Whites', 'whites.net'), ('Namshi', 'namshi.com'), ('Danube', 'danube.sa'), ('Panda', 'panda.sa'), ('Lulu Saudi', 'luluhypermarket.com'), ('Sivvi', 'sivvi.com'), ('Ounass', 'ounass.com'), ('Virgin Megastore Saudi', 'virginmegastore.sa')], 'ae': [('Amazon UAE', 'amazon.ae'), ('Noon', 'noon.com'), ('Carrefour UAE', 'carrefouruae.com'), ('Sharaf DG', 'sharafdg.com'), ('Jumbo', 'jumbo.ae'), ('Emax', 'emaxme.com'), ('Lulu UAE', 'luluhypermarket.com'), ('Namshi', 'namshi.com'), ('Virgin Megastore UAE', 'virginmegastore.ae'), ('Dubai Duty Free', 'dubaidutyfree.com'), ('Ounass', 'ounass.com'), ('6thStreet', '6thstreet.com'), ('Ubuy UAE', 'ubuy.ae')], 'eg': [('Amazon Egypt', 'amazon.eg'), ('Noon', 'noon.com'), ('B.TECH', 'btech.com'), ('Carrefour Egypt', 'carrefouregypt.com'), ('Jumia Egypt', 'jumia.com.eg'), ('2B', '2b.com.eg'), ('Raneen', 'raneen.com'), ('Dubai Phone', 'dubaiphone.net'), ('Tradeline', 'tradelinestores.com')], 'kw': [('Xcite', 'xcite.com'), ('Eureka', 'eureka.com.kw'), ('Best Al-Yousifi', 'best.com.kw'), ('Blink', 'blink.com.kw'), ('Jarir Kuwait', 'jarir.com'), ('Lulu Kuwait', 'luluhypermarket.com'), ('Carrefour Kuwait', 'carrefourkuwait.com'), ('Boutiqaat', 'boutiqaat.com'), ('Namshi', 'namshi.com'), ('Jm3eia', 'jm3eia.com'), ('Taw9eel', 'taw9eel.com'), ('3RoodQ8', '3roodq8.com'), ('Tigro', 'tigro.app'), ('Ubuy Kuwait', 'ubuy.com.kw'), ('Ounass', 'ounass.com'), ('6thStreet', '6thstreet.com')], 'qa': [('Jarir Qatar', 'jarir.com'), ('Lulu Qatar', 'luluhypermarket.com'), ('Carrefour Qatar', 'carrefourqatar.com'), ('Virgin Megastore Qatar', 'virginmegastore.qa'), ('Alaneesqatar', 'alaneesqatar.qa'), ('Starlink', 'starlinkqatar.com'), ('Ansar Gallery', 'ansargallery.com'), ('Namshi', 'namshi.com'), ('Ounass', 'ounass.com'), ('6thStreet', '6thstreet.com')], 'bh': [('Sharaf DG Bahrain', 'sharafdg.com'), ('eXtra Bahrain', 'extra.com'), ('Jarir Bahrain', 'jarir.com'), ('Lulu Bahrain', 'luluhypermarket.com'), ('Carrefour Bahrain', 'carrefourbahrain.com'), ('Namshi', 'namshi.com'), ('6thStreet', '6thstreet.com')], 'om': [('Sharaf DG Oman', 'sharafdg.com'), ('eXtra Oman', 'extra.com'), ('Lulu Oman', 'luluhypermarket.com'), ('Carrefour Oman', 'carrefouroman.com'), ('Emax', 'emaxme.com'), ('Namshi', 'namshi.com'), ('6thStreet', '6thstreet.com')], 'jo': [('SmartBuy', 'smartbuy-me.com'), ('Carrefour Jordan', 'carrefourjordan.com'), ('Leaders Center', 'leaders.jo'), ('Jamalon', 'jamalon.com')], 'iq': [('Miswag', 'miswag.net'), ('Orisdi', 'orisdi.com')], 'lb': [('Khoury Home', 'khouryhome.com'), ('Abed Tahan', 'abedtahan.com')], 'dz': [('Jumia Algeria', 'jumia.dz')], 'tn': [('Jumia Tunisia', 'jumia.com.tn'), ('Mytek', 'mytek.tn'), ('Tunisianet', 'tunisianet.com.tn')], 'in': [('Amazon India', 'amazon.in'), ('Flipkart', 'flipkart.com'), ('Croma', 'croma.com'), ('Reliance Digital', 'reliancedigital.in'), ('Myntra', 'myntra.com')], 'pk': [('Daraz', 'daraz.pk'), ('PriceOye', 'priceoye.pk')], 'bd': [('Daraz Bangladesh', 'daraz.com.bd'), ('Pickaboo', 'pickaboo.com')], 'cn': [('JD', 'jd.com'), ('Tmall', 'tmall.com'), ('Taobao', 'taobao.com'), ('Suning', 'suning.com')], 'jp': [('Amazon Japan', 'amazon.co.jp'), ('Rakuten', 'rakuten.co.jp'), ('Yodobashi', 'yodobashi.com'), ('Bic Camera', 'biccamera.com')], 'kr': [('Coupang', 'coupang.com'), ('Gmarket', 'gmarket.co.kr'), ('11st', '11st.co.kr')], 'sg': [('Shopee Singapore', 'shopee.sg'), ('Lazada Singapore', 'lazada.sg'), ('Amazon Singapore', 'amazon.sg'), ('Courts', 'courts.com.sg')], 'my': [('Shopee Malaysia', 'shopee.com.my'), ('Lazada Malaysia', 'lazada.com.my'), ('Harvey Norman', 'harveynorman.com.my')], 'id': [('Tokopedia', 'tokopedia.com'), ('Shopee Indonesia', 'shopee.co.id'), ('Blibli', 'blibli.com'), ('Lazada Indonesia', 'lazada.co.id')], 'ph': [('Shopee Philippines', 'shopee.ph'), ('Lazada Philippines', 'lazada.com.ph')], 'th': [('Shopee Thailand', 'shopee.co.th'), ('Lazada Thailand', 'lazada.co.th'), ('Central', 'central.co.th'), ('Power Buy', 'powerbuy.co.th')], 'vn': [('Shopee Vietnam', 'shopee.vn'), ('Lazada Vietnam', 'lazada.vn'), ('Tiki', 'tiki.vn')], 'au': [('Amazon Australia', 'amazon.com.au'), ('JB Hi-Fi', 'jbhifi.com.au'), ('Harvey Norman', 'harveynorman.com.au'), ('Kmart', 'kmart.com.au')], 'nz': [('The Warehouse', 'thewarehouse.co.nz'), ('Noel Leeming', 'noelleeming.co.nz'), ('Mighty Ape', 'mightyape.co.nz'), ('Harvey Norman', 'harveynorman.co.nz')], 'br': [('Mercado Livre', 'mercadolivre.com.br'), ('Amazon Brazil', 'amazon.com.br'), ('Magazine Luiza', 'magazineluiza.com.br')], 'mx': [('Mercado Libre', 'mercadolibre.com.mx'), ('Amazon Mexico', 'amazon.com.mx'), ('Walmart Mexico', 'walmart.com.mx'), ('Liverpool', 'liverpool.com.mx')], 'ar': [('Mercado Libre', 'mercadolibre.com.ar'), ('Frávega', 'fravega.com')], 'cl': [('Mercado Libre', 'mercadolibre.cl'), ('Falabella', 'falabella.com'), ('Paris', 'paris.cl')], 'co': [('Mercado Libre', 'mercadolibre.com.co'), ('Falabella', 'falabella.com.co'), ('Éxito', 'exito.com')], 'pe': [('Mercado Libre', 'mercadolibre.com.pe'), ('Falabella', 'falabella.com.pe'), ('Ripley', 'ripley.com.pe')], 'za': [('Takealot', 'takealot.com'), ('Makro', 'makro.co.za'), ('Woolworths', 'woolworths.co.za')], 'ng': [('Jumia Nigeria', 'jumia.com.ng'), ('Konga', 'konga.com')], 'ke': [('Jumia Kenya', 'jumia.co.ke'), ('Carrefour Kenya', 'carrefour.ke')], 'ma': [('Jumia Morocco', 'jumia.ma'), ('Marjane', 'marjane.ma'), ('Electroplanet', 'electroplanet.ma')], 'il': [('KSP', 'ksp.co.il'), ('Ivory', 'ivory.co.il')]}
+COUNTRY_MAJOR_STORE_DOMAINS = {'us': [('Amazon', 'amazon.com'), ('Walmart', 'walmart.com'), ('Target', 'target.com'), ('Best Buy', 'bestbuy.com'), ('eBay', 'ebay.com')], 'ca': [('Amazon Canada', 'amazon.ca'), ('Walmart Canada', 'walmart.ca'), ('Best Buy Canada', 'bestbuy.ca'), ('Canadian Tire', 'canadiantire.ca')], 'gb': [('Amazon UK', 'amazon.co.uk'), ('Argos', 'argos.co.uk'), ('Currys', 'currys.co.uk'), ('John Lewis', 'johnlewis.com')], 'fr': [('Amazon France', 'amazon.fr'), ('Fnac', 'fnac.com'), ('Darty', 'darty.com'), ('Cdiscount', 'cdiscount.com'), ('Carrefour', 'carrefour.fr')], 'de': [('Amazon Germany', 'amazon.de'), ('MediaMarkt', 'mediamarkt.de'), ('Saturn', 'saturn.de'), ('Otto', 'otto.de')], 'es': [('Amazon Spain', 'amazon.es'), ('El Corte Inglés', 'elcorteingles.es'), ('MediaMarkt', 'mediamarkt.es'), ('Carrefour', 'carrefour.es')], 'it': [('Amazon Italy', 'amazon.it'), ('MediaWorld', 'mediaworld.it'), ('Unieuro', 'unieuro.it')], 'nl': [('bol', 'bol.com'), ('Coolblue', 'coolblue.nl'), ('MediaMarkt', 'mediamarkt.nl'), ('Amazon Netherlands', 'amazon.nl')], 'be': [('bol', 'bol.com'), ('Coolblue', 'coolblue.be'), ('MediaMarkt', 'mediamarkt.be'), ('Amazon Belgium', 'amazon.com.be')], 'ch': [('Galaxus', 'galaxus.ch'), ('Digitec', 'digitec.ch'), ('Brack', 'brack.ch'), ('Manor', 'manor.ch')], 'at': [('MediaMarkt', 'mediamarkt.at'), ('Amazon Germany', 'amazon.de'), ('Otto Austria', 'ottoversand.at')], 'ie': [('Currys Ireland', 'currys.ie'), ('Harvey Norman', 'harveynorman.ie'), ('Amazon UK', 'amazon.co.uk')], 'pt': [('Worten', 'worten.pt'), ('Fnac Portugal', 'fnac.pt'), ('Continente', 'continente.pt')], 'pl': [('Allegro', 'allegro.pl'), ('Media Expert', 'mediaexpert.pl'), ('RTV Euro AGD', 'euro.com.pl')], 'cz': [('Alza', 'alza.cz'), ('Datart', 'datart.cz'), ('Mall', 'mall.cz')], 'se': [('Amazon Sweden', 'amazon.se'), ('Elgiganten', 'elgiganten.se'), ('CDON', 'cdon.se')], 'no': [('Elkjøp', 'elkjop.no'), ('Komplett', 'komplett.no'), ('Power', 'power.no')], 'dk': [('Elgiganten', 'elgiganten.dk'), ('Proshop', 'proshop.dk'), ('Power', 'power.dk')], 'fi': [('Verkkokauppa', 'verkkokauppa.com'), ('Gigantti', 'gigantti.fi'), ('Power', 'power.fi')], 'tr': [('Trendyol', 'trendyol.com'), ('Hepsiburada', 'hepsiburada.com'), ('Amazon Turkey', 'amazon.com.tr'), ('n11', 'n11.com')], 'ru': [('Ozon', 'ozon.ru'), ('Wildberries', 'wildberries.ru'), ('Yandex Market', 'market.yandex.ru')], 'ua': [('Rozetka', 'rozetka.com.ua'), ('Prom', 'prom.ua'), ('Epicentr', 'epicentrk.ua')], 'sa': [('Amazon Saudi', 'amazon.sa'), ('Noon', 'noon.com'), ('Jarir', 'jarir.com'), ('eXtra', 'extra.com'), ('Carrefour', 'carrefourksa.com'), ('Nahdi', 'nahdionline.com'), ('Whites', 'whites.net'), ('Namshi', 'namshi.com'), ('Danube', 'danube.sa'), ('Panda', 'panda.sa'), ('Lulu Saudi', 'luluhypermarket.com'), ('Sivvi', 'sivvi.com'), ('Ounass', 'ounass.com'), ('Virgin Megastore Saudi', 'virginmegastore.sa')], 'ae': [('Amazon UAE', 'amazon.ae'), ('Noon', 'noon.com'), ('Carrefour UAE', 'carrefouruae.com'), ('Sharaf DG', 'sharafdg.com'), ('Jumbo', 'jumbo.ae'), ('Emax', 'emaxme.com'), ('Lulu UAE', 'luluhypermarket.com'), ('Namshi', 'namshi.com'), ('Virgin Megastore UAE', 'virginmegastore.ae'), ('Dubai Duty Free', 'dubaidutyfree.com'), ('Ounass', 'ounass.com'), ('6thStreet', '6thstreet.com'), ('Ubuy UAE', 'ubuy.ae')], 'eg': [('Amazon Egypt', 'amazon.eg'), ('Noon', 'noon.com'), ('B.TECH', 'btech.com'), ('Carrefour Egypt', 'carrefouregypt.com'), ('Jumia Egypt', 'jumia.com.eg'), ('2B', '2b.com.eg'), ('Raneen', 'raneen.com'), ('Dubai Phone', 'dubaiphone.net'), ('Tradeline', 'tradelinestores.com')], 'kw': [('Xcite', 'xcite.com'), ('Eureka', 'eureka.com.kw'), ('Best Al-Yousifi', 'best.com.kw'), ('Blink', 'blink.com.kw'), ('Jarir Kuwait', 'jarir.com'), ('Lulu Kuwait', 'luluhypermarket.com'), ('Carrefour Kuwait', 'carrefourkuwait.com'), ('Boutiqaat', 'boutiqaat.com'), ('Namshi', 'namshi.com'), ('Jm3eia', 'jm3eia.com'), ('Taw9eel', 'taw9eel.com'), ('3RoodQ8', '3roodq8.com'), ('Tigro', 'tigro.app'), ('Ubuy Kuwait', 'ubuy.com.kw'), ('Ounass', 'ounass.com'), ('6thStreet', '6thstreet.com')], 'qa': [('Jarir Qatar', 'jarir.com'), ('Lulu Qatar', 'luluhypermarket.com'), ('Carrefour Qatar', 'carrefourqatar.com'), ('Virgin Megastore Qatar', 'virginmegastore.qa'), ('Alaneesqatar', 'alaneesqatar.qa'), ('Starlink', 'starlinkqatar.com'), ('Ansar Gallery', 'ansargallery.com'), ('Namshi', 'namshi.com'), ('Ounass', 'ounass.com'), ('6thStreet', '6thstreet.com')], 'bh': [('Sharaf DG Bahrain', 'sharafdg.com'), ('eXtra Bahrain', 'extra.com'), ('Jarir Bahrain', 'jarir.com'), ('Lulu Bahrain', 'luluhypermarket.com'), ('Carrefour Bahrain', 'carrefourbahrain.com'), ('Namshi', 'namshi.com'), ('6thStreet', '6thstreet.com')], 'om': [('Sharaf DG Oman', 'sharafdg.com'), ('eXtra Oman', 'extra.com'), ('Lulu Oman', 'luluhypermarket.com'), ('Carrefour Oman', 'carrefouroman.com'), ('Emax', 'emaxme.com'), ('Namshi', 'namshi.com'), ('6thStreet', '6thstreet.com')], 'jo': [('SmartBuy', 'smartbuy-me.com'), ('Carrefour Jordan', 'carrefourjordan.com'), ('Leaders Center', 'leaders.jo'), ('Jamalon', 'jamalon.com')], 'iq': [('Miswag', 'miswag.net'), ('Orisdi', 'orisdi.com')], 'lb': [('Khoury Home', 'khouryhome.com'), ('Abed Tahan', 'abedtahan.com')], 'dz': [('Jumia Algeria', 'jumia.dz')], 'tn': [('Jumia Tunisia', 'jumia.com.tn'), ('Mytek', 'mytek.tn'), ('Tunisianet', 'tunisianet.com.tn')], 'in': [('Amazon India', 'amazon.in'), ('Flipkart', 'flipkart.com'), ('Croma', 'croma.com'), ('Reliance Digital', 'reliancedigital.in'), ('Myntra', 'myntra.com')], 'pk': [('Daraz', 'daraz.pk'), ('PriceOye', 'priceoye.pk')], 'bd': [('Daraz Bangladesh', 'daraz.com.bd'), ('Pickaboo', 'pickaboo.com')], 'cn': [('JD', 'jd.com'), ('Tmall', 'tmall.com'), ('Taobao', 'taobao.com'), ('Suning', 'suning.com')], 'jp': [('Amazon Japan', 'amazon.co.jp'), ('Rakuten', 'rakuten.co.jp'), ('Yodobashi', 'yodobashi.com'), ('Bic Camera', 'biccamera.com')], 'kr': [('Coupang', 'coupang.com'), ('Gmarket', 'gmarket.co.kr'), ('11st', '11st.co.kr')], 'sg': [('Shopee Singapore', 'shopee.sg'), ('Lazada Singapore', 'lazada.sg'), ('Amazon Singapore', 'amazon.sg'), ('Courts', 'courts.com.sg')], 'my': [('Shopee Malaysia', 'shopee.com.my'), ('Lazada Malaysia', 'lazada.com.my'), ('Harvey Norman', 'harveynorman.com.my')], 'id': [('Tokopedia', 'tokopedia.com'), ('Shopee Indonesia', 'shopee.co.id'), ('Blibli', 'blibli.com'), ('Lazada Indonesia', 'lazada.co.id')], 'ph': [('Shopee Philippines', 'shopee.ph'), ('Lazada Philippines', 'lazada.com.ph')], 'th': [('Shopee Thailand', 'shopee.co.th'), ('Lazada Thailand', 'lazada.co.th'), ('Central', 'central.co.th'), ('Power Buy', 'powerbuy.co.th')], 'vn': [('Shopee Vietnam', 'shopee.vn'), ('Lazada Vietnam', 'lazada.vn'), ('Tiki', 'tiki.vn')], 'au': [('Amazon Australia', 'amazon.com.au'), ('JB Hi-Fi', 'jbhifi.com.au'), ('Harvey Norman', 'harveynorman.com.au'), ('Kmart', 'kmart.com.au')], 'nz': [('The Warehouse', 'thewarehouse.co.nz'), ('Noel Leeming', 'noelleeming.co.nz'), ('Mighty Ape', 'mightyape.co.nz'), ('Harvey Norman', 'harveynorman.co.nz')], 'br': [('Mercado Livre', 'mercadolivre.com.br'), ('Amazon Brazil', 'amazon.com.br'), ('Magazine Luiza', 'magazineluiza.com.br')], 'mx': [('Mercado Libre', 'mercadolibre.com.mx'), ('Amazon Mexico', 'amazon.com.mx'), ('Walmart Mexico', 'walmart.com.mx'), ('Liverpool', 'liverpool.com.mx')], 'ar': [('Mercado Libre', 'mercadolibre.com.ar'), ('Frávega', 'fravega.com')], 'cl': [('Mercado Libre', 'mercadolibre.cl'), ('Falabella', 'falabella.com'), ('Paris', 'paris.cl')], 'co': [('Mercado Libre', 'mercadolibre.com.co'), ('Falabella', 'falabella.com.co'), ('Éxito', 'exito.com')], 'pe': [('Mercado Libre', 'mercadolibre.com.pe'), ('Falabella', 'falabella.com.pe'), ('Ripley', 'ripley.com.pe')], 'za': [('Takealot', 'takealot.com'), ('Makro', 'makro.co.za'), ('Woolworths', 'woolworths.co.za')], 'ng': [('Jumia Nigeria', 'jumia.com.ng'), ('Konga', 'konga.com')], 'ke': [('Jumia Kenya', 'jumia.co.ke'), ('Carrefour Kenya', 'carrefour.ke')], 'ma': [('Jumia Morocco', 'jumia.ma'), ('Marjane', 'marjane.ma'), ('Electroplanet', 'electroplanet.ma')], 'il': [('KSP', 'ksp.co.il'), ('Ivory', 'ivory.co.il')]}
 
 # Global lists are purchasing policy, not the domestic merchant directory.
 # These restore the approved cross-border stores from the supplied v133 file;
 # Amazon retains its US catalog identity. No domestic CN catalog is added here.
-GLOBAL_MARKET_STORES = {'cn': (('AliExpress', 'aliexpress.com'), ('Temu', 'temu.com'), ('SHEIN', 'shein.com'), ('Made-in-China', 'made-in-china.com'), ('Alibaba', 'alibaba.com')), 'us': (('Amazon', 'amazon.com'), ('Walmart', 'walmart.com'), ('eBay', 'ebay.com'), ('Target', 'target.com'), ('Best Buy', 'bestbuy.com'), ("Macy's", 'macys.com'), ('Nordstrom', 'nordstrom.com'), ('iHerb', 'iherb.com'), ('Pottery Barn', 'potterybarn.com'), ('Etsy', 'etsy.com'), ('Home Depot', 'homedepot.com'), ('Chewy', 'chewy.com'), ("Carter's", 'carters.com'), ('RockAuto', 'rockauto.com'))}
+GLOBAL_MARKET_STORES = {
+    'cn': (('AliExpress', 'aliexpress.com'), ('Temu', 'temu.com'),
+           ('SHEIN', 'shein.com'), ('Alibaba', 'alibaba.com')),
+    'us': (('Amazon', 'amazon.com'), ('eBay', 'ebay.com'),
+           ('Etsy', 'etsy.com'), ('Walmart', 'walmart.com')),
+}
 
 CHINA_DOMESTIC_STORES = (
     ('JD', 'jd.com'), ('Tmall', 'tmall.com'), ('Taobao', 'taobao.com'),
@@ -3819,10 +3821,6 @@ def _storefront_country(url):
         if not parts:
             return ''
         first = parts[0]
-        # iHerb /pr/ is its product route, not the Puerto Rico selector.
-        # Explicit query/subdomain country evidence is still respected.
-        if first == 'pr' and _host_matches_any(host, ('iherb.com',)):
-            return ''
         if first in {'global', 'world', 'international'}:
             return 'global'
         names = _storefront_country_names()
@@ -4300,9 +4298,7 @@ def _market_query_languages(cc, query=''):
             languages.remove(language)
             languages.insert(0, language)
             break
-    native = next((hl for hl in languages if hl != 'en'), '')
-    # English must remain in the first two lanes, including Belgium/India/etc.
-    return tuple(dict.fromkeys(([native, 'en'] if native else ['en']) + languages))
+    return tuple(languages)
 
 
 def _market_query_key(query, language):
@@ -4480,10 +4476,12 @@ def _market_query_warm(query, countries):
         profile = _market_query_languages(cc, query)
         # Native-script inputs may also need an English complement. English
         # markets with a second domestic language (Canada etc.) retain it.
-        wanted = list(profile[:2])
+        wanted = [profile[0]] + ([profile[1]] if len(profile) > 1 and profile[0] == 'en' else [])
         if re.search(r'[^\x00-\x7f]', query) and 'en' in profile:
             wanted.append('en')
         for language in wanted:
+            if language == 'en' and not re.search(r'[^\x00-\x7f]', query):
+                continue
             if language not in languages:
                 languages.append(language)
     missing = []
@@ -4492,12 +4490,6 @@ def _market_query_warm(query, countries):
         remaining = query
         for edit in known['edits']:
             remaining = remaining.replace(edit['source'], '')
-        # Already-native dictionary terms are not untranslated prose.
-        for table in (_LOCAL_RETRIEVAL_NOUNS, _LOCAL_DESCRIPTOR_TERMS):
-            for row in table.values():
-                for term in row.get(language.split('-')[0], '').split('|'):
-                    if term.strip():
-                        remaining = re.sub(_local_term_pattern(term.strip()), '', remaining, flags=re.I)
         # Dictionary nouns plus unchanged Latin identifiers need no model.
         if not re.search(r'[^\W\d_]', re.sub(r'\b[A-Z][\w./-]*|\b\w*\d\w*', '', remaining), re.UNICODE):
             _market_query_store(query, language, known)
@@ -4703,14 +4695,26 @@ def _local_discovery_query(query, market, scoped=False, language=None, store_off
 
 
 def _market_query_request_variant(query, market, kind, timeout_seconds):
-    """Deterministic bilingual jobs; completion order never chooses language."""
     cc = market['country']
     languages = _market_query_languages(cc, query)
-    hl = 'en' if kind in ('scoped', 'scoped2', 'english', 'catalog') else languages[0]
-    if kind == 'baidu':
-        hl = 'zh-cn'
-    _market_query_wait(query, hl, min(TEXT_DIRECT_TRANSLATION_WAIT, max(0., timeout_seconds * .25)))
-    return _local_native_query(query, cc, hl), hl
+    hl = languages[0]
+    # Translation is optional; Lens starts without it. Text work uses only a
+    # small part of the same request deadline, never extends that deadline.
+    _market_query_wait(query, hl, min(.8 if kind in ('scoped', 'baidu') else .15,
+                                    max(0., timeout_seconds * .15)))
+    native = _local_native_query(query, cc, hl)
+    original = _market_query_key(query, '')[0]
+    with MARKET_QUERY_LOCK:
+        used = market.setdefault('_language_searches', {}).setdefault(original, [])
+        candidates = [(native, hl)]
+        if cc != 'cn':
+            if original != native:
+                candidates.append((original, 'en' if original.isascii() else hl))
+            candidates.extend((_local_native_query_unlocked(query, language), language)
+                              for language in languages[1:2])
+        chosen = next((spec for spec in candidates if spec not in used), candidates[0])
+        used.append(chosen)
+    return chosen
 
 
 def _local_native_query_unlocked(query, language):
@@ -5590,69 +5594,15 @@ def _fast_discovery_kinds():
     return kinds
 
 
-
-MARKET_CATALOG_BATCH_SIZE = 5
-
-def _market_catalog_batches(country):
-    stores = list(GLOBAL_MARKET_STORES.get(country, ()))
-    return [stores[i:i + MARKET_CATALOG_BATCH_SIZE] for i in range(0, len(stores), MARKET_CATALOG_BATCH_SIZE)]
-
-
-def _market_catalog_scope(country, batch=None):
-    if batch is None:
-        stores = GLOBAL_MARKET_STORES.get(country, ())
-    else:
-        groups = _market_catalog_batches(country)
-        stores = groups[batch] if isinstance(batch, int) and 0 <= batch < len(groups) else ()
-    return ' OR '.join('site:' + domain for _, domain in stores)
-
-
-def _web_catalog_search_specs(specs):
-    """Cover all approved stores in small groups, without a call per store."""
-    output, seen = [], set()
-    for spec in specs:
-        catalog = spec.get('selected_catalog') or spec.get('role') == 'global'
-        batches = range(len(_market_catalog_batches(spec['country']))) if (
-            catalog and not spec['engine'].endswith('shopping') and 'catalog_batch' not in spec) else (None,)
-        for batch in batches:
-            row = dict(spec)
-            if batch is not None:
-                row['catalog_batch'] = batch
-            key = tuple(sorted(row.items()))
-            if key not in seen:
-                seen.add(key)
-                output.append(row)
-    return output
-
-
-def _global_fast_kinds(country):
-    batches = _market_catalog_batches(country)
-    return ['global_fast'] if len(batches) <= 1 else [f'global_fast:{i}' for i in range(len(batches))]
-
-
-def _local_catalog_discovery_kinds(country):
-    # Keep catalog coverage when the fast provider is absent or cannot use
-    # site: operators. CN retains its independent platform supplement.
-    if country not in GLOBAL_MARKET_STORES:
-        return []
-    if country != 'cn' and any(_fast_provider_supports_operators(p) for p in FAST_PROVIDERS):
-        return []
-    batches = _market_catalog_batches(country)
-    return ['catalog'] if len(batches) == 1 else [f'catalog:{i}' for i in range(len(batches))]
-
 def _local_fast_discovery_kinds(country, query):
     kinds = _fast_discovery_kinds()
     native = next((hl for hl in _market_query_languages(country, query) if hl != 'en'), '')
     if native:
         kinds += [kind + ':' + native for kind in kinds if kind.endswith(('_search', '_images'))]
     for provider in FAST_PROVIDERS:
-        if country in GLOBAL_MARKET_STORES and _fast_provider_supports_operators(provider):
-            if country == 'us':
-                kinds.append(f'{provider}_search:en:scoped')
-            for index, _ in enumerate(_market_catalog_batches(country)):
-                suffix = '' if len(_market_catalog_batches(country)) == 1 else ':' + str(index)
-                kinds.append(f'{provider}_search:en:catalog' + suffix)
-    return list(dict.fromkeys(kinds))
+        if country in ('us', 'cn') and _fast_provider_supports_operators(provider):
+            kinds.append(f'{provider}_search:en:' + ('catalog' if country == 'cn' else 'scoped'))
+    return kinds
 
 
 def _is_fast_discovery_kind(kind):
@@ -5672,10 +5622,6 @@ def _local_discovery_request(query, market, kind, timeout_seconds):
         spec = {'country': cc, 'role': 'local', 'engine': engine, 'hl': hl,
                 'geo_cue': hl == 'en' and not engine.endswith('_shopping')}
         spec.update(domestic_scope=lane == 'scoped', selected_catalog=lane == 'catalog')
-        if lane == 'catalog' and len(pieces) > 3:
-            spec['catalog_batch'] = int(pieces[3])
-        if kind.startswith('catalog:'):
-            spec['catalog_batch'] = int(kind.split(':')[1])
         params = _web_text_direct_params(query, spec)
         remaining = deadline - time.monotonic()
         if remaining <= .05:
@@ -5684,11 +5630,9 @@ def _local_discovery_request(query, market, kind, timeout_seconds):
         data = _fast_provider_search(engine, params['q'], params['gl'], hl,
                                      (connect, max(.01, min(remaining - connect, FAST_PROVIDER_TIMEOUT_SECONDS))))
         return _local_discovery_rows(data, query, market, 'local_' + kind) if isinstance(data, dict) else []
-    if kind == 'catalog' or kind.startswith('catalog:'):
+    if kind == 'catalog':
         # Independent of native Chinese wording; source currencies stay intact.
         spec = {'country': cc, 'role': 'local', 'engine': 'google', 'hl': 'en', 'selected_catalog': True}
-        if kind.startswith('catalog:'):
-            spec['catalog_batch'] = int(kind.split(':')[1])
         params = _web_text_direct_params(query, spec)
         remaining = deadline - time.monotonic()
         if remaining <= .05:
@@ -5765,21 +5709,16 @@ def _local_discovery_request(query, market, kind, timeout_seconds):
 
 def _global_discovery_request(query, country, kind, timeout_seconds):
     """Independent, bounded sources; all global China sources cover the allowlist."""
-    kind, _, batch_text = kind.partition(':')
-    batch = int(batch_text) if batch_text.isdigit() else None
     if country not in GLOBAL_MARKET_STORES or kind not in ('global', 'global2', 'global_all', 'global_fast'):
         return []
     if kind == 'global_fast':
         if not FAST_PROVIDERS or not _fast_provider_supports_operators(FAST_PROVIDERS[0]):
             return []
         target = dict(_web_market(country), _retrieval_role='global')
-        scopes = _market_catalog_scope(country, batch)
-        if not scopes:
-            return []
-        search_query = _web_text_direct_params(query, {'country': country, 'role': 'global', 'engine': 'serper_search', 'hl': 'en', 'catalog_batch': batch})['q']
+        scopes = ' OR '.join('site:' + domain for _, domain in GLOBAL_MARKET_STORES[country])
         engine = f'{FAST_PROVIDERS[0]}_search'
         connect = min(1.5, max(.05, timeout_seconds * .15))
-        data = _fast_provider_search(engine, search_query, 'us', 'en',
+        data = _fast_provider_search(engine, f'{query} ({scopes})', 'us', 'en',
                                      (connect, max(1., min(timeout_seconds - connect, FAST_PROVIDER_TIMEOUT_SECONDS))))
         if not isinstance(data, dict):
             print(f'GLOBAL SOURCE country={country} provider=global_fast engine={engine} status=failed')
@@ -5807,7 +5746,7 @@ def _global_discovery_request(query, country, kind, timeout_seconds):
         # Search real listing paths instead of wholesale/category landing pages.
         # These are query constraints, never fabricated click destinations.
         paths = {'aliexpress.com': '/item/', 'temu.com': '-g-',
-                 'shein.com': '-p-', 'alibaba.com': '/product-detail/', 'made-in-china.com': '/product/'}
+                 'shein.com': '-p-', 'alibaba.com': '/product-detail/'}
         scopes = ' OR '.join('(site:' + domain +
                     (' inurl:' + paths[domain] if domain in paths else '') + ')'
                     for _, domain in stores)
@@ -5844,9 +5783,9 @@ def _global_market_discovery(query, country, limit=8, timeout_seconds=None, prog
         remaining = deadline - time.monotonic()
         return [] if cancelled() or remaining <= .01 else _global_discovery_request(query, country, kind, remaining)
     if serper_primary() and _fast_provider_supports_operators('serper'):
-        kinds = tuple(_global_fast_kinds(country))
+        kinds = ('global_fast',)
     else:
-        kinds = ('global', 'global2') + (tuple(_global_fast_kinds(country)) if FAST_PROVIDERS else ())
+        kinds = ('global', 'global2') + (('global_fast',) if FAST_PROVIDERS else ())
     jobs = {LOCAL_DISCOVERY_POOL.submit(run, kind) for kind in kinds}
     rows, seen = [], {}
     try:
@@ -5908,7 +5847,7 @@ def _local_ready_merchants(rows):
 
 
 def _local_market_discovery(query, market, limit=8, timeout_seconds=None, progress_callback=None, cancel_event=None):
-    """Bilingual native lanes and bounded merchant groups; one completion deadline."""
+    """Bounded native lanes plus one CN platform lane; one completion deadline."""
     if not (LOCAL_DISCOVERY_ENABLED and LOCAL_DISCOVERY_MAX_CALLS and (SERPAPI_API_KEY or FAST_PROVIDERS)):
         return []
     if timeout_seconds is not None and timeout_seconds <= 0:
@@ -5917,7 +5856,7 @@ def _local_market_discovery(query, market, limit=8, timeout_seconds=None, progre
     if not q:
         return []
     market = dict(market)
-    market.pop('_retrieval_role', None)  # selected local market, including its approved catalogs
+    market.pop('_retrieval_role', None)  # this coordinator only discovers domestic stores
     cc = str(market.get('country') or DEFAULT_COUNTRY).lower()
     market['country'] = cc
     _market_query_warm(q, [cc])
@@ -5926,8 +5865,8 @@ def _local_market_discovery(query, market, limit=8, timeout_seconds=None, progre
     deadline = started + duration
     kinds = _local_primary_discovery_kinds(cc)
     kinds = kinds[:LOCAL_DISCOVERY_MAX_CALLS] if SERPAPI_API_KEY else []
-    if SERPAPI_API_KEY:
-        kinds.extend(_local_catalog_discovery_kinds(cc))
+    if cc == 'cn' and SERPAPI_API_KEY:
+        kinds.append('catalog')  # one bounded platform lane in addition to native discovery
     rows, seen, pending = [], set(), {}
     calls = 0
     fast_kinds = _local_fast_discovery_kinds(cc, q)
@@ -5991,7 +5930,7 @@ def _local_market_discovery(query, market, limit=8, timeout_seconds=None, progre
     if kinds and (market.get('_image_discovery') or not (serper_primary() and fast_kinds)):
         # Every photo market owns a domestic primary, independent of alternatives.
         launch(kinds[0])
-        if len(kinds) > 1 and ((cc == 'us' and market.get('_image_discovery')) or len(_market_query_languages(cc, q)) > 1):
+        if cc == 'us' and market.get('_image_discovery') and len(kinds) > 1:
             launch(kinds[1])  # US photo offers start alongside Lens, not after a sparse finish.
     # Slow primary searches get one hedged fallback, not half a timeout each.
     # Fast, sufficient Shopping results still cost only the primary search.
@@ -6048,7 +5987,7 @@ def _local_market_discovery(query, market, limit=8, timeout_seconds=None, progre
 def country_major_store_specs(cc=None):
     cc = (cc or current_market().get('country') or DEFAULT_COUNTRY).lower()
     if cc == 'cn':
-        return list(CHINA_DOMESTIC_STORES) + list(GLOBAL_MARKET_STORES['cn'])
+        return list(CHINA_DOMESTIC_STORES)
     return list(COUNTRY_MAJOR_STORE_DOMAINS.get(cc, ()))
 
 def detect_category(query):
@@ -6085,7 +6024,15 @@ def store_domain(name):
             return d
     return ''
 
-US_CATEGORY_STORE_DOMAINS = {'fashion': (('Nordstrom', 'nordstrom.com'), ("Macy's", 'macys.com'), ('Zappos', 'zappos.com')), 'sports': (("Dick's Sporting Goods", 'dickssportinggoods.com'), ('REI', 'rei.com'), ('Academy', 'academy.com')), 'electronics': (('Best Buy', 'bestbuy.com'), ('B&H', 'bhphotovideo.com'), ('Newegg', 'newegg.com')), 'gaming': (('Best Buy', 'bestbuy.com'), ('GameStop', 'gamestop.com'), ('Newegg', 'newegg.com')), 'furniture': (('Pottery Barn', 'potterybarn.com'), ('Wayfair', 'wayfair.com'), ('Home Depot', 'homedepot.com'), ("Lowe's", 'lowes.com')), 'appliances': (('Best Buy', 'bestbuy.com'), ('Home Depot', 'homedepot.com'), ("Lowe's", 'lowes.com')), 'beauty': (('iHerb', 'iherb.com'), ('Ulta', 'ulta.com'), ('Sephora', 'sephora.com'), ("Macy's", 'macys.com')), 'pharmacy': (('iHerb', 'iherb.com'), ('Walmart', 'walmart.com'), ('Target', 'target.com')), 'kids_toys': (("Carter's", 'carters.com'), ('Target', 'target.com'), ('Walmart', 'walmart.com')), 'auto': (('RockAuto', 'rockauto.com'), ('eBay', 'ebay.com'), ('Walmart', 'walmart.com'))}
+US_CATEGORY_STORE_DOMAINS = {
+    'fashion': (('Nordstrom', 'nordstrom.com'), ("Macy's", 'macys.com'), ('Zappos', 'zappos.com')),
+    'sports': (("Dick's Sporting Goods", 'dickssportinggoods.com'), ('REI', 'rei.com'), ('Academy', 'academy.com')),
+    'electronics': (('Best Buy', 'bestbuy.com'), ('B&H', 'bhphotovideo.com'), ('Newegg', 'newegg.com')),
+    'gaming': (('Best Buy', 'bestbuy.com'), ('GameStop', 'gamestop.com'), ('Newegg', 'newegg.com')),
+    'furniture': (('Wayfair', 'wayfair.com'), ('Home Depot', 'homedepot.com'), ("Lowe's", 'lowes.com')),
+    'appliances': (('Best Buy', 'bestbuy.com'), ('Home Depot', 'homedepot.com'), ("Lowe's", 'lowes.com')),
+    'beauty': (('Ulta', 'ulta.com'), ('Sephora', 'sephora.com'), ("Macy's", 'macys.com')),
+}
 US_BRAND_SEARCH_DOMAINS = {
     'lululemon': ('lululemon', 'shop.lululemon.com'), 'nike': ('Nike', 'nike.com'),
     'adidas': ('adidas', 'adidas.com'), 'apple': ('Apple', 'apple.com'),
@@ -6104,8 +6051,6 @@ def local_rescue_store_specs(query, max_count=None):
         official = [spec for brand, spec in US_BRAND_SEARCH_DOMAINS.items()
                     if re.search(r'\b' + re.escape(brand) + r'\b', normalized)]
         specialists = US_CATEGORY_STORE_DOMAINS.get(detect_category(normalized), ())
-        if re.search(r'\b(?:pet|pets|dog|dogs|cat|cats|kitten|puppy|aquarium|catnip)\b|حيوان|قطط|كلاب', normalized):
-            specialists = (('Chewy', 'chewy.com'), ('Amazon', 'amazon.com'), ('Walmart', 'walmart.com'))
         for label, domain in official + list(specialists) + country_major_store_specs('us'):
             if domain not in seen:
                 out.append((label, domain))
@@ -6547,7 +6492,7 @@ def _lens_source_name(item, index):
         return f'Lens {index}'
 KUWAIT_STORE_HINTS = ('.com.kw', '.kw', 'kuwait', 'الكويت', 'xcite', 'eureka', 'best al yousifi', 'best alyousifi', 'jarir', 'level shoes', 'future store', 'blink', 'noon kuwait', 'carrefour kuwait', 'lulu kuwait', 'jm3eia', 'جمعية', 'taw9eel', 'توصيل', 'intersport kuwait', 'decathlon kuwait', 'boutiqaat', 'boots kuwait', 'yiaco', 'royal pharmacy', 'talabat kuwait', 'keeta kuwait')
 LOCAL_GEO_TARGETING_EVIDENCE = env_bool('LOCAL_GEO_TARGETING_EVIDENCE', True)
-US_STORE_HINTS = ('amazon.com', 'walmart.com', 'target.com', 'bestbuy.com', 'costco.com', 'homedepot.com', 'lowes.com', 'macys.com', 'nordstrom.com', 'zappos.com', 'bhphotovideo.com', 'newegg.com', 'rei.com', 'dickssportinggoods.com', 'ebay.com', 'etsy.com', 'iherb.com', 'potterybarn.com', 'chewy.com', 'carters.com', 'rockauto.com')
+US_STORE_HINTS = ('amazon.com', 'walmart.com', 'target.com', 'bestbuy.com', 'costco.com', 'homedepot.com', 'lowes.com', 'macys.com', 'nordstrom.com', 'zappos.com', 'bhphotovideo.com', 'newegg.com', 'rei.com', 'dickssportinggoods.com', 'ebay.com', 'etsy.com')
 CHINA_STORE_HINTS = ('aliexpress.com', 'alibaba.com', '1688.com', 'taobao.com', 'tmall.com', 'shein.com', 'temu.com', 'dhgate.com', 'made-in-china.com', 'banggood.com', 'gearbest.com', 'jd.com', 'pinduoduo.com')
 
 def _result_hay_host(item):
@@ -6641,7 +6586,7 @@ def _global_search_instruction():
         if cc != local:
             parts.append('GLOBAL ' + cc.upper() + ' ONLY: ' + ', '.join(d for _, d in stores) + '.')
     if local == 'cn':
-        parts.append('SELECTED CHINA also includes AliExpress, Temu, SHEIN, Made-in-China and Alibaba product listings; '
+        parts.append('SELECTED CHINA also includes AliExpress, Temu, SHEIN and Alibaba product listings; '
                      'keep their observed price currency and do not imply domestic delivery.')
     if local != 'cn':
         parts.append('Never return Chinese domestic catalogs (JD, Taobao, Tmall, 1688, Suning, '
@@ -6666,13 +6611,6 @@ def _merchant_url_market(url):
     if _host_matches_any(host, ('matsuyaginza.com',)):
         return {'country': 'jp', 'evidence': 'merchant_domestic_catalog', 'kind': 'domestic_catalog'}
     domain_cc = 'us' if host == 'us.shein.com' else _host_country_code(host)
-    subdomain_cc = 'us' if host == 'us.shein.com' else ''
-    if _host_matches_any(host, ('iherb.com',)) and len(host.split('.')) == 3:
-        prefix = host.split('.')[0]
-        prefix = {'uk': 'gb'}.get(prefix, prefix)
-        if prefix in COUNTRY_META:
-            subdomain_cc = prefix
-            domain_cc = prefix
     storefront_cc = _storefront_country(url)
     if storefront_cc == 'conflict':
         return {'conflict': True}
@@ -6682,7 +6620,7 @@ def _merchant_url_market(url):
         return {'conflict': True}
     if storefront_cc or domain_cc:
         return {'country': storefront_cc or domain_cc,
-                'evidence': 'storefront_locale' if storefront_cc else 'storefront_subdomain' if subdomain_cc else 'country_domain',
+                'evidence': 'storefront_locale' if storefront_cc else 'storefront_subdomain' if host == 'us.shein.com' else 'country_domain',
                 'kind': 'regional_storefront'}
     if _host_matches_any(host, US_STORE_HINTS):
         return {'country': 'us', 'evidence': 'us_catalog', 'kind': 'marketplace_catalog'}
@@ -7862,7 +7800,7 @@ def download_whatsapp_media(mid):
     meta = _whatsapp_http_session().get(f'{GRAPH_URL}/{mid}', headers=h, timeout=(3, WHATSAPP_TIMEOUT_SECONDS)).json()
     img = _whatsapp_http_session().get(meta['url'], headers=h, timeout=(3, max(WHATSAPP_TIMEOUT_SECONDS, 15)))
     return (base64.b64encode(img.content).decode(), meta.get('mime_type', 'image/jpeg'))
-_UI_STORE_ALIASES = {'amazon.com': 'Amazon', 'amazon.sa': 'Amazon', 'amazon.ae': 'Amazon', 'ebay.com': 'eBay', 'walmart.com': 'Walmart', 'aliexpress.com': 'AliExpress', 'alibaba.com': 'Alibaba', 'temu.com': 'Temu', 'shein.com': 'SHEIN', 'underarmour.sa': 'Under Armour', 'underarmour.com': 'Under Armour', 'theathletesfoot.com.kw': "The Athlete's Foot", 'theathletesfoot.com': "The Athlete's Foot", 'sunandsandsports.com': 'Sun & Sand Sports', 'next.sa': 'Next', 'next.com': 'Next', 'made-in-china.com': 'Made-in-China', 'whizzcart.com': 'Whizzcart', 'q8supply.com': 'Q8Supply', 'target.com': 'Target', 'bestbuy.com': 'Best Buy', 'macys.com': "Macy's", 'nordstrom.com': 'Nordstrom', 'iherb.com': 'iHerb', 'potterybarn.com': 'Pottery Barn', 'etsy.com': 'Etsy', 'homedepot.com': 'Home Depot', 'chewy.com': 'Chewy', 'carters.com': "Carter's", 'rockauto.com': 'RockAuto'}
+_UI_STORE_ALIASES = {'amazon.com': 'Amazon', 'amazon.sa': 'Amazon', 'amazon.ae': 'Amazon', 'ebay.com': 'eBay', 'walmart.com': 'Walmart', 'aliexpress.com': 'AliExpress', 'alibaba.com': 'Alibaba', 'temu.com': 'Temu', 'shein.com': 'SHEIN', 'underarmour.sa': 'Under Armour', 'underarmour.com': 'Under Armour', 'theathletesfoot.com.kw': "The Athlete's Foot", 'theathletesfoot.com': "The Athlete's Foot", 'sunandsandsports.com': 'Sun & Sand Sports', 'next.sa': 'Next', 'next.com': 'Next', 'made-in-china.com': 'Made-in-China', 'whizzcart.com': 'Whizzcart', 'q8supply.com': 'Q8Supply'}
 
 def _ui_plain_store_name(source='', link=''):
     raw = re.sub('\\s+', ' ', str(source or '')).strip()
@@ -20858,9 +20796,6 @@ def _web_text_direct_specs(query, country):
         if country in ('us', 'cn') and _fast_provider_supports_operators(provider):
             add(country, 'local', f'{provider}_search', 'en')
             specs[-1]['selected_catalog' if country == 'cn' else 'domestic_scope'] = True
-            if country == 'us':
-                add(country, 'local', f'{provider}_search', 'en')
-                specs[-1]['selected_catalog'] = True
         if native != 'en':
             add(country, 'local', f'{provider}_search', native)
             if FAST_PROVIDER_IMAGES:
@@ -20883,19 +20818,17 @@ def _web_text_direct_specs(query, country):
                 add(cc, 'global', 'serper_search', 'en')
                 if FAST_PROVIDER_IMAGES:
                     add(cc, 'global', 'serper_images', 'en')
-        return _web_catalog_search_specs(specs)
+        return specs
     if TEXT_DIRECT_LIGHT_LANE:
         add(country, 'local', 'google_light', 'en', True)
     add(country, 'local', TEXT_DIRECT_IMAGES_ENGINE, 'en', True)
     add(country, 'local', 'google', 'en', True)
-    if degraded and native != 'en':
-        add(country, 'local', 'google_light', native)
     if degraded:
         # A provider that is not answering still bills each lane. Keep the
         # three lanes that carry the local market and skip the rest until
         # fresh calls succeed again (see SERPAPI HEALTH in the log).
         print(f'TEXT DIRECT LANES degraded_provider=True lanes={len(specs)} country={country}')
-        return _web_catalog_search_specs(specs)
+        return specs
     if native != 'en':
         add(country, 'local', 'google', native)
         add(country, 'local', TEXT_DIRECT_IMAGES_ENGINE, native)
@@ -20903,7 +20836,7 @@ def _web_text_direct_specs(query, country):
         add(country, 'local', 'google_shopping', 'en')
     elif country == 'cn' and LOCAL_DISCOVERY_BAIDU:
         add(country, 'local', 'baidu', native)
-    if country in GLOBAL_MARKET_STORES:
+    if country == 'cn':
         add(country, 'local', 'google', 'en')
         specs[-1]['selected_catalog'] = True
     for cc in DEFAULT_GLOBAL_COUNTRIES:
@@ -20912,7 +20845,7 @@ def _web_text_direct_specs(query, country):
         add(cc, 'global', 'google', 'en')
         add(cc, 'global', 'google_shopping' if cc == 'us' and ENABLE_GOOGLE_SHOPPING
             else TEXT_DIRECT_IMAGES_ENGINE, 'en')
-    return _web_catalog_search_specs(specs)
+    return specs
 
 
 def _web_text_direct_backup_specs(query, country):
@@ -20923,15 +20856,15 @@ def _web_text_direct_backup_specs(query, country):
               'engine': 'google_shopping' if primary == 'shopping' else 'google',
               'hl': hl, 'geo_cue': False},
              {'country': country, 'role': 'local', 'engine': 'google',
-              'hl': 'en', 'geo_cue': False, 'domestic_scope': True}]
-    if country in GLOBAL_MARKET_STORES:
+              'hl': hl, 'geo_cue': False, 'domestic_scope': True}]
+    if country == 'cn':
         specs.append({'country': country, 'role': 'local', 'engine': 'google', 'hl': 'en',
                       'geo_cue': False, 'selected_catalog': True})
     if not _fast_provider_supports_operators('serper'):
         for cc in DEFAULT_GLOBAL_COUNTRIES:
             if cc != country and cc in GLOBAL_MARKET_STORES:
                 specs.append({'country': cc, 'role': 'global', 'engine': 'google', 'hl': 'en', 'geo_cue': False})
-    return _web_catalog_search_specs(specs)
+    return specs
 
 
 def _web_text_direct_params(query, spec, page_token=''):
@@ -20941,14 +20874,15 @@ def _web_text_direct_params(query, spec, page_token=''):
                 'more_stores': 'true', 'api_key': SERPAPI_API_KEY, 'output': 'json'}
     # English jobs start immediately; native jobs share the one translation
     # batch already used by market-language retrieval. No AI shopping answer.
-    _market_query_wait(query, hl, TEXT_DIRECT_TRANSLATION_WAIT)
+    if hl != 'en' or not query.isascii():
+        _market_query_wait(query, hl, TEXT_DIRECT_TRANSLATION_WAIT)
     record = _market_query_cached(query, hl) or _market_query_static(query, hl)
     wording = str(record.get('query') or query).strip()
     if spec.get('selected_catalog'):
-        domains = _market_catalog_scope(country, spec.get('catalog_batch'))
+        domains = ' OR '.join('site:' + domain for _, domain in GLOBAL_MARKET_STORES.get(country, ()))
         wording = f'{wording} ({domains})'
     elif role == 'global' and engine != 'serper_shopping':
-        domains = _market_catalog_scope(country, spec.get('catalog_batch'))
+        domains = ' OR '.join('site:' + domain for _, domain in GLOBAL_MARKET_STORES[country])
         wording = f'{wording} ({domains})'
     elif role == 'global':
         pass  # Google Shopping has no site: operator; the catalog filter selects rows.
@@ -21115,7 +21049,7 @@ def _web_text_direct_search(query, country, lang, progress_callback=None, cancel
         if cancel.is_set() or time.monotonic() >= deadline:
             return
         spec_key = (spec['country'], spec['role'], spec['engine'], spec['hl'],
-                    bool(spec.get('domestic_scope')), bool(spec.get('selected_catalog')), spec.get('catalog_batch'), token)
+                    bool(spec.get('domestic_scope')), bool(spec.get('selected_catalog')), token)
         if spec_key in submitted_specs:
             return
         submitted_specs.add(spec_key)
@@ -21180,7 +21114,7 @@ def _web_text_direct_search(query, country, lang, progress_callback=None, cancel
                     data = None
                 if cancel.is_set() or time.monotonic() >= (deadline if rows else empty_deadline):
                     break
-                name = f'{spec["role"]}:{spec["country"]}:{spec["engine"]}:{spec["hl"]}' + (':catalog' if spec.get('selected_catalog') else ':scoped' if spec.get('domestic_scope') else '') + (':merchants' if token else '') + (':batch' + str(spec['catalog_batch']) if 'catalog_batch' in spec else '')
+                name = f'{spec["role"]}:{spec["country"]}:{spec["engine"]}:{spec["hl"]}' + (':catalog' if spec.get('selected_catalog') else ':scoped' if spec.get('domestic_scope') else '') + (':merchants' if token else '')
                 source_states[name] = 'complete' if isinstance(data, dict) else 'unavailable'
                 if not isinstance(data, dict):
                     if spec['engine'].startswith(('serper_', 'cse_')):
@@ -22290,16 +22224,7 @@ def _google_web_product_url(value):
 
 
 def _google_web_specs(query, country):
-    output, seen = [], set()
-    for spec in _web_text_direct_specs(query, country):
-        if spec['engine'] not in ('google', 'google_light', 'serper_search', 'cse_search'):
-            continue
-        row = dict(spec, engine='google')
-        key = tuple(sorted(row.items()))
-        if key not in seen:
-            seen.add(key)
-            output.append(row)
-    return output
+    return [spec for spec in _web_text_direct_specs(query, country) if spec['engine'] == 'google']
 
 
 def _google_web_indexed_product_path(url):
@@ -22343,7 +22268,6 @@ def _google_web_fetch(query, spec, excluded_domains, deadline, cancel):
     # ranking context; the existing URL/currency evidence determines market.
     # Appending a country and repeated buying terms can overconstrain it.
     if (spec['role'] == 'local' and spec['hl'] == 'en' and query.isascii()
-            and (_market_query_cached(query, 'en') or _market_query_static(query, 'en')).get('query', query) == query
             and not spec.get('selected_catalog') and not spec.get('domestic_scope')):
         params['q'] = query.strip()
     # nfpr prevents replacing an uncommon model with a more popular word.
@@ -26055,19 +25979,7 @@ def _web_selected_market_search(query, country, lang, global_countries, *, image
         if progress_callback and not cancelled():
             progress_callback(snapshot())
     def lanes_for(cc):
-        if cc != country:
-            return 2
-        return max((3 if image_b64 else 2) + (1 if cc == 'cn' else 0), int(local_lanes),
-                   2 + len(_local_catalog_discovery_kinds(cc)))
-    def has_unlaunched_rescue(cc):
-        if cc in global_catalogs:
-            planned = ('global_all',) if FAST_PROVIDERS or 'lens' in launched[cc] else ('global', 'global2')
-        else:
-            catalogs = _local_catalog_discovery_kinds(cc)
-            planned = list(_local_primary_discovery_kinds(cc)) + catalogs
-            if cc != 'cn' and not catalogs and lanes_for(cc) >= 4:
-                planned.append('scoped2')
-        return any(kind not in launched[cc] for kind in planned)
+        return max((3 if image_b64 else 2) + (1 if cc == 'cn' else 0), int(local_lanes)) if cc == country else 2
     def target_for(cc):
         return max(LOCAL_RESULTS_TARGET, int(local_target)) if (cc == country and local_target) else LOCAL_RESULTS_TARGET
     def ready_for(cc):
@@ -26075,7 +25987,7 @@ def _web_selected_market_search(query, country, lang, global_countries, *, image
     def launch(cc, kind, public_url=''):
         if kind in launched[cc] or cancelled() or time.monotonic() >= deadline:
             return
-        if not _is_fast_discovery_kind(kind) and not kind.startswith('lens') and sum(1 for k in launched[cc] if not _is_fast_discovery_kind(k) and not k.startswith('lens')) >= lanes_for(cc):
+        if not _is_fast_discovery_kind(kind) and sum(1 for k in launched[cc] if not _is_fast_discovery_kind(k)) >= lanes_for(cc):
             return
         launched[cc].add(kind)
         target = targets[cc]
@@ -26085,16 +25997,16 @@ def _web_selected_market_search(query, country, lang, global_countries, *, image
             remaining = deadline - time.monotonic()
             if cancelled() or remaining <= .01:
                 return []
-            if cc in global_catalogs and not kind.startswith('lens'):
+            if cc in global_catalogs and kind != 'lens':
                 return _global_discovery_request(q, cc, kind, min(LOCAL_DISCOVERY_TIMEOUT, remaining))
-            if kind.startswith('lens'):
+            if kind == 'lens':
                 # v114 iOS sends the previous photo identity as `query` on a
                 # global-only refresh, but an empty caption on first capture.
                 # Lens `q` is an additional search constraint, not metadata:
                 # adding the generated OCR changed 59 GB hits to zero and
                 # split the provider cache. Discover from the image alone in
                 # both roles. Keep q for textual rescue and identity checks.
-                return _serpapi_lens_request(public_url, 'products' if kind == 'lens_en' else 'all', cc, True, '')
+                return _serpapi_lens_request(public_url, 'all', cc, True, '')
             return _local_discovery_request(q, target, kind, min(LOCAL_DISCOVERY_TIMEOUT, remaining))
         job = SELECTED_MARKET_POOL.submit(_run_with_market, target, fetch)
         jobs[job] = (cc, kind)
@@ -26108,8 +26020,6 @@ def _web_selected_market_search(query, country, lang, global_countries, *, image
             for cc in scopes:
                 if cc in SELECTED_LENS_COUNTRIES and (cc != 'cn' or cc == country):
                     launch(cc, 'lens', public_url)
-                    if cc == country and len(_market_query_languages(cc, query)) > 1:
-                        launch(cc, 'lens_en', public_url)
     try:
         while not cancelled() and time.monotonic() < deadline:
             if reference_job is not None and reference_job.done():
@@ -26122,7 +26032,7 @@ def _web_selected_market_search(query, country, lang, global_countries, *, image
                 publish()
             # An unnamed photo ("stuffed toy") waits briefly for agreeing Lens
             # titles so text lanes search for the actual product name.
-            lens_pending = any(kind.startswith('lens') for _, kind in jobs.values())
+            lens_pending = any(kind == 'lens' for _, kind in jobs.values())
             hold_text_lanes = (bool(image_b64) and reference_job is None and bool(reference) and not reference.get('named')
                                and not consensus_done and lens_pending and time.monotonic() - started < LENS_CONSENSUS_WAIT)
             if query and (SERPAPI_API_KEY or FAST_PROVIDERS) and not hold_text_lanes:
@@ -26138,11 +26048,10 @@ def _web_selected_market_search(query, country, lang, global_countries, *, image
                         not primary_pending or time.monotonic() - started >= SELECTED_MARKET_HEDGE)
                     if cc in global_catalogs:
                         if FAST_PROVIDERS:
-                            for global_kind in _global_fast_kinds(cc):
-                                launch(cc, global_kind)
+                            launch(cc, 'global_fast')
                         if serper_primary() and _fast_provider_supports_operators('serper'):
                             # SerpApi catalog lanes only as a sparse backup.
-                            if sparse_or_slow and not any(k.startswith('global_fast') for c, k in jobs.values() if c == cc) and SERPAPI_BACKUP_ENABLED:
+                            if sparse_or_slow and 'global_fast' not in {k for c, k in jobs.values() if c == cc} and SERPAPI_BACKUP_ENABLED:
                                 launch(cc, 'global_all')
                         elif 'lens' in launched[cc]:
                             if sparse_or_slow:
@@ -26157,11 +26066,11 @@ def _web_selected_market_search(query, country, lang, global_countries, *, image
                         if SERPAPI_API_KEY:
                             primary, rescue = _local_primary_discovery_kinds(cc)
                             launch(cc, primary)
-                            if sparse_or_slow or (cc == 'us' and image_b64) or len(_market_query_languages(cc, retrieval_query)) > 1:
+                            if sparse_or_slow or (cc == 'us' and image_b64):
                                 launch(cc, rescue)
-                                for catalog_kind in _local_catalog_discovery_kinds(cc):
-                                    launch(cc, catalog_kind)
-                                if cc != 'cn' and not _local_catalog_discovery_kinds(cc) and lanes_for(cc) >= 4 and rescue in launched[cc]:
+                                if cc == 'cn':
+                                    launch(cc, 'catalog')
+                                if cc != 'cn' and lanes_for(cc) >= 4 and rescue in launched[cc]:
                                     launch(cc, 'scoped2')
             if not jobs:
                 if reference_job is None:
@@ -26180,9 +26089,9 @@ def _web_selected_market_search(query, country, lang, global_countries, *, image
                 raw_count = len(values)
                 # A named photo reference limits retrieval only; visual audits
                 # still decide every identity percentage and exact claim.
-                if kind.startswith('lens') and reference:
+                if kind == 'lens' and reference:
                     values = _lens_reference_rows(values, reference)
-                if kind.startswith('lens'):
+                if kind == 'lens':
                     visual_candidates.extend(values)
                     lens_seen += 1
                     if not consensus_done and reference and not reference.get('named'):
@@ -26199,7 +26108,7 @@ def _web_selected_market_search(query, country, lang, global_countries, *, image
                 for raw in values:
                     if image_b64:
                         raw = _web_image_retrieval_row(raw)
-                    row = _web_selected_offer(raw, cc, market, query, visual=kind.startswith('lens'))
+                    row = _web_selected_offer(raw, cc, market, query, visual=kind == 'lens')
                     if not row:
                         continue
                     eligible += 1
@@ -26252,8 +26161,8 @@ def _web_selected_market_search(query, country, lang, global_countries, *, image
                 # China lanes that were held back for the Lens consensus name.
                 # Fast alternatives do not consume paid domestic rescue slots.
                 can_rescue = bool(query and SERPAPI_API_KEY and any(
-                    sum(not _is_fast_discovery_kind(k) and not k.startswith('lens') for k in launched[cc]) < lanes_for(cc)
-                    and has_unlaunched_rescue(cc) and ready_for(cc) < target_for(cc) for cc in scopes))
+                    sum(not _is_fast_discovery_kind(k) for k in launched[cc]) < lanes_for(cc)
+                    and ready_for(cc) < target_for(cc) for cc in scopes))
                 if not can_rescue:
                     break
         for cc in scopes:
