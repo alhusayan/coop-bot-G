@@ -388,7 +388,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization'], max_age=86400)
-BUILD_ID = 'v128.5.52-photo-query'
+BUILD_ID = 'v128.5.53-lens-primary'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -27305,6 +27305,7 @@ def _refine_verify(context, rows):
         _refine_cache_put(key, index in accepted)
         if index in accepted:
             known.append(row)
+    print(f'REFINE VERIFY kind={context["kind"]} candidates={len(rows)} accepted={len(known)} constraints={len(required)}')
     return known
 
 
@@ -27393,7 +27394,8 @@ async def _refine_verified_events(response, context, request):
                 batch = tasks.pop(task)
                 try:
                     verified = task.result()
-                except Exception:
+                except Exception as exc:
+                    print('REFINE VERIFY unavailable=' + type(exc).__name__)
                     verified = []
                     verification_failed = True
                 for row in verified:
@@ -27666,7 +27668,7 @@ def _photo_query_event(context):
             'photo_description': _refine_query(context), 'photo_addition': context['photo'].get('addition', '')}
 
 
-def _photo_query_response(image_b64, mime, addition, country, lang, request):
+def _photo_refined_response(image_b64, mime, addition, country, lang, request):
     async def events():
         # Lens and recognition share the cached photo identity call and start
         # together. Text discovery joins as soon as that identity is available.
@@ -27713,3 +27715,126 @@ _PHOTO_PLAN_PROMPT = """
 For a photo-chip search: photo.category is the recognized product type. Show the complete flat panel immediately even when photo.addition is empty; no category wizard.
 Visual search cues in photo.attributes are EDITABLE, not fixed user constraints. Use those exact attribute keys for corresponding facets. Include the current term among the choices using the same English term so the UI can mark it. Explicit photo.requested changes are also editable and take precedence over image cues. Keep implicit brand/model identity (e.g. iPhone means Apple) fixed as usual.
 Only suggest useful independent category-appropriate filters. No dimensions, materials, authenticity or values should be inferred from a photo beyond the supplied cues. Do not invent prices. The original image remains the shape/identity anchor. Changing one filter preserves all other cues and user changes."""
+
+
+def _photo_lens_response(image_b64, mime, country, lang, request):
+    """Keep the original Lens stream authoritative. Photo-query metadata is a
+    concurrent convenience for the chip/filters, never a gate on Lens offers.
+    """
+    async def events():
+        import codecs
+        started = time.monotonic()
+        response = _web_image_stream_response(image_b64, mime, '', country, lang)
+        source = response.body_iterator
+        prepare = asyncio.create_task(asyncio.wait_for(asyncio.to_thread(
+            _photo_query_prepare, image_b64, mime, '', country, lang),
+            timeout=PHOTO_IDENTITY_TIMEOUT + 6))
+        next_event = None
+        ended = False
+        terminal = None
+        buffer = ''
+        decoder = codecs.getincrementaldecoder('utf-8')()
+        metadata_ready = False
+        rows = {}
+        first_offer_ms = None
+        print(f'PHOTO QUERY route=lens_primary country={country} explicit_changes=0')
+
+        def track(event):
+            nonlocal first_offer_ms
+            kind = event.get('event')
+            if kind in ('result', 'upsert'):
+                batch = [event.get('item') or {}]
+            elif kind == 'snapshot':
+                batch = event.get('results') or event.get('all_results') or []
+                if event.get('authoritative'):
+                    rows.clear()
+            else:
+                batch = []
+            for row in batch:
+                if isinstance(row, dict) and row.get('url'):
+                    rows[row['url']] = dict(rows.get(row['url'], {}), **row)
+                    if first_offer_ms is None and _refine_has_price(rows[row['url']]):
+                        first_offer_ms = int((time.monotonic() - started) * 1000)
+            if kind == 'remove':
+                rows.pop(event.get('url'), None)
+
+        try:
+            while not ended or prepare is not None:
+                if await request.is_disconnected():
+                    return
+                if not ended and next_event is None:
+                    next_event = asyncio.create_task(anext(source))
+                waiting = {task for task in (next_event, prepare) if task is not None}
+                done, _ = await asyncio.wait(waiting, timeout=.5,
+                                             return_when=asyncio.FIRST_COMPLETED)
+                if prepare is not None and prepare in done:
+                    try:
+                        context = prepare.result()
+                        yield _web_stream_event(_photo_query_event(context))
+                        metadata_ready = True
+                    except Exception as exc:
+                        # An optional descriptor failure must not suppress a
+                        # successful Lens search or misreport it as no results.
+                        print('PHOTO FILTER METADATA unavailable=' + type(exc).__name__)
+                        yield _web_stream_event({'event': 'status',
+                            'stage': 'photo_filters_unavailable', 'filters_available': False})
+                    prepare = None
+                if next_event is not None and next_event in done:
+                    try:
+                        chunk = next_event.result()
+                    except StopAsyncIteration:
+                        ended = True
+                        chunk = decoder.decode(b'', final=True) + '\n'
+                    next_event = None
+                    buffer += decoder.decode(chunk) if isinstance(chunk, bytes) else chunk
+                    if len(buffer) > 8000000:
+                        raise ValueError('invalid_stream')
+                    while '\n' in buffer:
+                        line, buffer = buffer.split('\n', 1)
+                        if not line.strip():
+                            continue
+                        event = json.loads(line)
+                        track(event)
+                        if event.get('event') == 'done':
+                            terminal = event
+                            ended = True
+                        else:
+                            # Preserve snapshots, prices, classification,
+                            # removals, and the original exact/similar labels.
+                            yield _web_stream_event(event)
+                if not done:
+                    yield _web_stream_event({'event': 'status',
+                        'stage': 'preparing_filters' if ended else 'searching_photo_and_text'})
+            if terminal is None:
+                terminal = {'event': 'done', 'count': len(rows), 'partial': True,
+                            'reason': 'lens_stream_interrupted'}
+            yield _web_stream_event(dict(terminal, filters_available=metadata_ready))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            print('PHOTO LENS STREAM unavailable=' + type(exc).__name__)
+            if rows:
+                yield _web_stream_event({'event': 'done', 'count': len(rows),
+                    'partial': True, 'filters_available': metadata_ready})
+            else:
+                yield _web_stream_event({'event': 'error', 'error': 'image_search_failed'})
+        finally:
+            pending = [task for task in (next_event, prepare) if task is not None]
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            await source.aclose()
+            print(f'PHOTO LENS STREAM country={country} rows={len(rows)} '
+                  f'priced={sum(_refine_has_price(r) for r in rows.values())} '
+                  f'filters_ready={metadata_ready} first_offer_ms={first_offer_ms} '
+                  f'elapsed_ms={int((time.monotonic()-started)*1000)}')
+    return StreamingResponse(events(), media_type='application/x-ndjson',
+        headers={'Cache-Control': 'no-cache, no-transform', 'X-Accel-Buffering': 'no'})
+
+
+def _photo_query_response(image_b64, mime, addition, country, lang, request):
+    if not addition.strip():
+        return _photo_lens_response(image_b64, mime, country, lang, request)
+    print(f'PHOTO QUERY route=explicit_refinement country={country}')
+    return _photo_refined_response(image_b64, mime, addition, country, lang, request)
