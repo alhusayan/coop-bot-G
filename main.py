@@ -388,7 +388,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization'], max_age=86400)
-BUILD_ID = 'v128.5.49-public-menu-pilot'
+BUILD_ID = 'v128.5.50-public-menu-recovery'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -18524,7 +18524,7 @@ def _web_price_url_key(url):
                 path = '/dp/' + asin.group(1).upper()
                 query = [(k, v) for k, v in query if k.lower() not in {'tag', 'ref', 'ref_', 'psc', 'th', 'linkcode', 'creative', 'creativeasin'}]
         return urllib.parse.urlunsplit(('https', host, path,
-                                       urllib.parse.urlencode(sorted(query)), ''))
+                                       urllib.parse.urlencode(sorted(query)), p.fragment if host=='talabat.com' and re.fullmatch(r'/(?:ar/)?kuwait/[^/]+',path) and p.fragment.startswith(':~:text=') else ''))
     except ValueError:
         return ''
 
@@ -24892,12 +24892,23 @@ async def _web_stream_text_fast(query, country, lang, selected_option='', reques
     # Retrieval streams URL-keyed cards as each source returns; the live-price
     # wrapper fills missing prices/images from merchant pages meanwhile. Both
     # are bounded so `done` always arrives within deadline + price tail.
-    source = _web_stream_text_direct(q, country, lang, request, TEXT_FAST_TIMEOUT_SECONDS,
-                                     TEXT_FAST_EMPTY_EXTENSION_SECONDS)
-    stream = _web_with_live_prices(source, lang, country, allow_paid=serpapi_recovery_allowed(),
-                                   wait_seconds=TEXT_FAST_PRICE_WAIT_SECONDS)
+    menu_plan=None
     if menu_enabled:
-        stream = _food_menu_union(stream, menu_query, country, request)
+        try:
+            menu_plan=await asyncio.wait_for(asyncio.to_thread(_food_menu_plan,menu_query,country),timeout=4.5)
+        except Exception:pass
+        if menu_plan and menu_plan.get('intent')=='retail':menu_enabled=False
+    if menu_enabled:
+        # Prepared restaurant meals cannot be served by US/CN retail catalogs.
+        # Keep dish previews outside generic price recovery: a menu's first
+        # price must never be borrowed by every dish on that page.
+        print(f'PUBLIC MENU ROUTE country={country} retail_lanes=0 build={BUILD_ID}')
+        stream = _food_menu_search(menu_query, country, request, menu_plan or {})
+    else:
+        source = _web_stream_text_direct(q, country, lang, request, TEXT_FAST_TIMEOUT_SECONDS,
+                                         TEXT_FAST_EMPTY_EXTENSION_SECONDS)
+        stream = _web_with_live_prices(source, lang, country, allow_paid=serpapi_recovery_allowed(),
+                                       wait_seconds=TEXT_FAST_PRICE_WAIT_SECONDS)
     first_card = None
     count = 0
     try:
@@ -26669,6 +26680,7 @@ _FOOD_MENU_POOL = _MenuExecutor(max_workers=6, thread_name_prefix='public-menu')
 _FOOD_MENU_LOCK = threading.Lock()
 _FOOD_MENU_ROBOTS = {}
 _FOOD_MENU_FLIGHTS = set()
+_FOOD_MENU_COOLDOWN = {}
 _FOOD_MENU_TTL = 1800
 _FOOD_MENU_BUDGET = 16.0
 _FOOD_MENU_ALIASES = (
@@ -26680,8 +26692,8 @@ _FOOD_MENU_ALIASES = (
     ('fried chicken','دجاج مقلي','بروستد'), ('pasta','باستا','معكرونه','مكرونه'),
     ('steak','ستيك'), ('salad','سلطه','سلطة'), ('soup','شوربه','شوربة'),
 )
-_FOOD_MENU_PROMPT = '''You parse a prepared-food search, not a shopping catalogue.
-Return JSON {"dish_terms":[equivalent dish names in English and Arabic],
+_FOOD_MENU_PROMPT = '''Classify this request first. For restaurant dishes return intent:prepared_food. For frozen/raw retail groceries, cooking equipment, packaging, clothing, toys, decorations, pet food, recipes or other retail items return {"intent":"retail"} ONLY. A dish word on merchandise does not make it a meal search.
+Return JSON {"intent":"prepared_food","dish_terms":[equivalent dish names in English and Arabic],
 "restaurant_terms":[equivalent names ONLY if a restaurant was requested],
 "attributes":[{"terms":[equivalent phrases for ONE requested attribute]}],
 "search_en":"dish + requested restaurant + Kuwait menu",
@@ -26714,7 +26726,7 @@ def _food_menu_has(text, term):
 def _food_menu_enabled(query, country):
     if str(country).lower() != 'kw' or not env_bool('PUBLIC_MENU_ENABLED', True):
         return False
-    if re.search(r'\b(?:frozen|raw|recipe|recipes|machine|maker|toy|pet|cat|dog)\b|مجمد|نيء|نيئ|وصفه|وصفة|ماكينه|ماكينة|اله |الة |قطط|كلاب', _food_menu_text(query)):
+    if re.search(r'\b(?:frozen|raw|recipe|recipes|machine|maker|toy|pet|cat|dog|paper|wrapping|packaging|poster|painting|equipment|cookbook|mould|mold|seasoning|oven|cutter|press|grill|pan|costume|shirt|tshirt|t-shirt|bun|buns|sauce|spice|spices|air fryer)\b|مجمد|نيء|نيئ|وصفه|وصفة|ماكينه|ماكينة|اله |الة |قطط|كلاب|ورق|تغليف|بهارات|معدات|فرن|قالب|ملابس|تيشيرت|تغليف', _food_menu_text(query)):
         return False
     return any(_food_menu_has(query, term) for group in _FOOD_MENU_ALIASES for term in group)
 
@@ -26723,18 +26735,20 @@ def _food_menu_plan(query, country):
     clean = _food_menu_text(query)
     for group in _FOOD_MENU_ALIASES:
         if clean in [_food_menu_text(t) for t in group]:
-            return {'dish_terms': list(group), 'restaurant_terms': [], 'attributes': [],
+            return {'intent':'prepared_food','dish_terms': list(group), 'restaurant_terms': [], 'attributes': [],
                     'search_en': group[0]+' Kuwait menu', 'search_local': group[-1]+' الكويت منيو'}
-    key = 'public-menu-intent-v1:' + hashlib.sha256((str(country)+str(query)).encode()).hexdigest()
+    key = 'public-menu-intent-v2:' + hashlib.sha256((str(country)+str(query)).encode()).hexdigest()
     hit = _refine_cache_get(key)
     if hit:
         return hit
     try:
         data = _refine_ai(_FOOD_MENU_PROMPT, {'query': query, 'country': country}, tokens=1000, timeout=3)
+        if data.get('intent')=='retail':
+            plan={'intent':'retail'};_refine_cache_put(key,plan);return plan
         def terms(values):
             if not isinstance(values, list):return []
             return list(dict.fromkeys(_refine_text(v, 100) for v in values if isinstance(v, str) and v.strip()))[:6]
-        plan = {'dish_terms': terms(data.get('dish_terms')), 'restaurant_terms': terms(data.get('restaurant_terms')),
+        plan = {'intent':'prepared_food','dish_terms': terms(data.get('dish_terms')), 'restaurant_terms': terms(data.get('restaurant_terms')),
                 'attributes': [terms(v.get('terms')) for v in (data.get('attributes') or [])[:10] if isinstance(v, dict)],
                 'search_en': _refine_text(data.get('search_en'), 220), 'search_local': _refine_text(data.get('search_local'), 220)}
         if not plan['dish_terms'] or any(not x for x in plan['attributes']):raise ValueError('invalid_menu_intent')
@@ -26920,10 +26934,60 @@ def _food_menu_parse(document, source_url, country='kw', observed_at=None):
     scripts=MenuScripts();scripts.feed(document)
     if scripts.next_data:
         try:
-            rows=_food_menu_deliveroo(json.loads(scripts.next_data),source_url,country,observed_at)
+            data=json.loads(scripts.next_data)
+            rows=_food_menu_talabat(data,source_url,country,observed_at)
+            if not rows:rows=_food_menu_deliveroo(data,source_url,country,observed_at)
             if rows:return rows
         except (TypeError,ValueError,KeyError):pass
     return _food_menu_jsonld(scripts.jsonld,source_url,country,observed_at)
+
+
+def _food_menu_talabat(data, source_url, country, observed_at):
+    """Public brand-page dish previews, NOT a delivery menu or price quote.
+    Only the name/image pair rendered by mostSellingItems is used. A browser
+    text fragment points to published text; it is explicitly a MENU link.
+    """
+    source_url=_food_menu_source_url(source_url)
+    p=urllib.parse.urlsplit(source_url)
+    if country!='kw' or p.hostname not in ('talabat.com','www.talabat.com'):return []
+    if not re.fullmatch(r'/(?:ar/)?kuwait/[^/]+',p.path):return []
+    props=(data.get('props') or {}).get('pageProps') or {}
+    restaurant=props.get('data') or {}
+    if data.get('page')!='/brand' or restaurant.get('countryId')!=1:return []
+    name=str(restaurant.get('name') or '').strip()
+    if not name or not restaurant.get('id'):return []
+    rows=[];seen=set()
+    for item in (props.get('mostSellingItems') or [])[:20]:
+        if not isinstance(item,dict):continue
+        title=str(item.get('name') or '').strip()[:300]
+        image=_food_menu_url(item.get('image'))
+        ident=str(item.get('id') or '')
+        if not title or not ident or not image or ident in seen:continue
+        # Reject page logos, placeholders, or unrelated external image objects.
+        pic=urllib.parse.urlsplit(image)
+        if pic.hostname!='talabat.dhmedia.io' or '/MenuItems/' not in pic.path:continue
+        seen.add(ident)
+        link=source_url+'#:~:text='+urllib.parse.quote(title,safe='').replace('-','%2D')
+        rows.append({'menu_item':True,'menu_item_id':ident,'menu_link_kind':'menu',
+          'menu_evidence_type':'public_dish_preview','menu_source_url':source_url,
+          'menu_platform':'talabat','menu_observed_at':observed_at,
+          'title':title,'raw_title':title,'description':'','image':image,'thumbnail':image,
+          'url':link,'result_id':'menu:'+hashlib.sha256(('talabat:kw:'+str(restaurant['id'])+':'+ident).encode()).hexdigest()[:24],
+          'store':name,'restaurant':name,'branch':'','menu_options':[],
+          'menu_delivery_status':'confirm_on_platform','menu_configuration_price_known':False,
+          'price':'','price_unavailable':True,'price_pending':False,'price_status':'unavailable',
+          'price_verified':False,'best_price_eligible':False,
+          'country':country,'market':'local','market_scope':'local','market_rank':0,
+          'match_type':'similar','exact_match':False,'retrieval_sources':['public_menu']})
+    return rows
+
+
+def _food_menu_filter_ready(row):
+    # The production default preserves priced cards only. Public previews are
+    # an explicit opt-in; numeric budget verification always remains strict.
+    return _refine_has_price(row) or bool(env_bool('PUBLIC_MENU_ALLOW_UNPRICED_PREVIEWS', False) and row.get('menu_item') and
+        row.get('menu_evidence_type')=='public_dish_preview' and row.get('title') and
+        row.get('image') and row.get('restaurant') and row.get('menu_source_url'))
 
 
 def _food_menu_match(row, plan):
@@ -26980,20 +27044,21 @@ def _food_menu_verify(query, rows):
     if bare:return rows
     pending=[];accepted=[]
     for row in rows:
-        evidence={k:row.get(k) for k in ('title','description','restaurant','branch','card_attributes','menu_requested_options','price','price_kind')}
+        evidence={k:row.get(k) for k in ('title','description','restaurant','branch','card_attributes','menu_requested_options','price','price_kind','menu_link_kind','menu_evidence_type')}
         key='public-menu-proof-v1:'+hashlib.sha256(json.dumps([query,evidence],ensure_ascii=False,sort_keys=True).encode()).hexdigest()
         hit=_refine_cache_get(key)
         if hit is True:accepted.append(row)
         elif hit is None:pending.append((row,evidence,key))
     if not pending:return accepted
     try:
-        response=_refine_ai(_REFINE_VERIFY_PROMPT+"\nThese offers are individually observed menu items. Their links open the item, not a category. Require every part of the ORIGINAL query, including the requested restaurant, dish, bread and spice. Only menu_requested_options describe chosen compatible options. A FROM/base price is not the total after options. Return base_match:false for unsupported exclusions, budgets, allergy claims or combinations.",
+        response=_refine_ai(_REFINE_VERIFY_PROMPT+"\nThese offers are individually observed menu items. menu_link_kind:menu means a public menu preview link, NOT a direct order link. A preview proves only its published dish name and image; missing price or options are UNKNOWN. Require every part of the ORIGINAL query, including the requested restaurant, dish, bread and spice. Only menu_requested_options describe chosen compatible options. A FROM/base price is not the total after options. Return base_match:false for unsupported exclusions, budgets, allergy claims or combinations.",
             {'base_query':query,'constraints':[], 'offers':[{'index':i,'evidence':e} for i,(_,e,_) in enumerate(pending)]},tokens=1000,timeout=3)
         approved={v.get('index') for v in response.get('matches',[]) if isinstance(v,dict) and v.get('base_match') is True and isinstance(v.get('index'),int) and not isinstance(v.get('index'),bool)}
         for i,(row,_,key) in enumerate(pending):
             _refine_cache_put(key,i in approved)
             if i in approved:accepted.append(row)
-    except Exception:pass
+    except Exception:
+        raise RuntimeError('menu_verification_unavailable') from None
     return accepted
 
 def _food_menu_db():
@@ -27041,121 +27106,190 @@ def _food_menu_robots_allowed(url, cancel):
     return bool(parser and not parser.crawl_delay('FindziaMenu') and not parser.request_rate('FindziaMenu') and parser.can_fetch('FindziaMenu',url))
 
 
-def _food_menu_fetch(url, country, deadline, cancel):
-    url=_food_menu_source_url(url)
-    if not url or cancel.is_set() or time.monotonic()>=deadline:return []
+
+def _food_menu_source_candidate(value):
+    url=_food_menu_source_url(value)
+    if not url:return ''
+    p=urllib.parse.urlsplit(url);host=(p.hostname or '').removeprefix('www.')
+    excluded=('instagram.com','tiktok.com','facebook.com','youtube.com','youtu.be','pinterest.com',
+              'x.com','twitter.com','reddit.com','etsy.com','temu.com','alibaba.com','aliexpress.com',
+              'amazon.com','wikipedia.org')
+    if any(host==h or host.endswith('.'+h) for h in excluded):return ''
+    if host=='deliveroo.com.kw':
+        if not re.match(r'^/(?:en|ar|ar-kw)/menu/kuwait/[^/]+/[^/]+',p.path,re.I):return ''
+    elif host=='talabat.com':
+        if not re.fullmatch(r'/(?:ar/)?kuwait/[^/]+',p.path):return ''
+        if p.path.rsplit('/',1)[-1] in ('restaurants','cuisines','all-areas','terms','privacy','faq','contact-us','sitemap'):return ''
+    elif re.search(r'/search(?:/|$)|/recipes?(?:/|$)|/news(?:/|$)',p.path,re.I):return ''
+    return url
+
+
+def _food_menu_source_key(url):
+    p=urllib.parse.urlsplit(url)
+    path=re.sub(r'^/(?:en|ar|ar-kw)(?=/)', '',p.path,flags=re.I).casefold()
+    return (p.hostname or '').removeprefix('www.')+path+'?'+p.query
+
+
+def _food_menu_fetch_report(url, country, deadline, cancel):
+    url=_food_menu_source_candidate(url);host=urllib.parse.urlsplit(url).hostname or ''
+    def report(rows=None,reason=''):
+        return {'rows':rows or [],'host':host,'url':url,'reason':reason,
+                'state':'complete' if not reason else 'unavailable'}
+    if not url:return report(reason='unsupported_source')
+    if cancel.is_set() or time.monotonic()>=deadline:return report(reason='deadline')
     hit=_food_menu_cache_get(country,url)
-    if hit:return hit
+    if hit:return report(hit)
     with _FOOD_MENU_LOCK:
-        if url in _FOOD_MENU_FLIGHTS:return []
+        if _FOOD_MENU_COOLDOWN.get(host,0)>time.monotonic():return report(reason='source_cooldown')
+        if url in _FOOD_MENU_FLIGHTS:return report(reason='in_flight')
         _FOOD_MENU_FLIGHTS.add(url)
     try:
-        if not _food_menu_robots_allowed(url,cancel):
-            print(f'PUBLIC MENU SKIP host={urllib.parse.urlsplit(url).hostname} reason=robots_or_unavailable')
-            return []
+        if not _food_menu_robots_allowed(url,cancel):return report(reason='robots_or_unavailable')
         remaining=deadline-time.monotonic()
-        if cancel.is_set() or remaining<.5:return []
+        if cancel.is_set() or remaining<.5:return report(reason='deadline')
         doc=_web_merchant_document(url,purpose='menu',headers={'User-Agent':'FindziaMenu/1.0','Accept':'text/html'},
             timeout=(min(1,remaining/4),max(.1,min(4,remaining*.7))),max_bytes=3500000)
-        if cancel.is_set() or doc.get('reason') or not doc.get('text'):
-            print(f'PUBLIC MENU SKIP host={urllib.parse.urlsplit(url).hostname} reason={doc.get("reason") or "cancelled_or_empty"}')
-            return []
+        reason=doc.get('reason') or ('' if doc.get('text') else 'empty_response')
+        if cancel.is_set():return report(reason='cancelled')
+        if reason:
+            if reason in ('challenge','access_denied','rate_limited','blocked'):
+                with _FOOD_MENU_LOCK:
+                    _FOOD_MENU_COOLDOWN[host]=time.monotonic()+300
+                    while len(_FOOD_MENU_COOLDOWN)>128:_FOOD_MENU_COOLDOWN.pop(next(iter(_FOOD_MENU_COOLDOWN)))
+            return report(reason=reason)
         rows=_food_menu_parse(doc['text'],doc.get('url') or url,country)
         if rows:_food_menu_cache_put(url,country,rows)
-        print(f'PUBLIC MENU country={country} host={urllib.parse.urlsplit(url).hostname} items={len(rows)}')
-        return rows
+        # A JS-only page / unknown schema is not a completed empty menu.
+        return report(rows, '' if rows else 'no_public_item_data')
     except Exception as exc:
-        print('PUBLIC MENU unavailable '+type(exc).__name__)
-        return []
+        return report(reason=type(exc).__name__)
     finally:
         with _FOOD_MENU_LOCK:_FOOD_MENU_FLIGHTS.discard(url)
 
 
+def _food_menu_fetch(url, country, deadline, cancel):
+    return _food_menu_fetch_report(url,country,deadline,cancel)['rows']
+
+
 def _food_menu_discover(wording, country, lang, deadline, cancel):
     remaining=deadline-time.monotonic()
-    if cancel.is_set() or remaining<.5:return []
-    data=None;timeout=(min(1,remaining/4),min(3.5,remaining*.7))
+    if cancel.is_set() or remaining<.5:return {'urls':[],'state':'unavailable','reason':'deadline'}
+    data=None;provider='none'
     if FAST_PROVIDERS:
-        data=_fast_provider_search(FAST_PROVIDERS[0]+'_search',wording,country,lang,timeout)
-    elif SERPAPI_API_KEY and not serpapi_provider_degraded():
-        data=_serpapi_cached_json({'engine':'google_light','q':wording,'gl':country,'hl':lang},timeout=timeout,label='PUBLIC MENU DISCOVERY')
-    if cancel.is_set() or not isinstance(data,dict):return []
-    urls=[]
-    for row in (data.get('organic_results') or [])[:12]:
-        url=_food_menu_source_url(row.get('link') or row.get('url'))
+        provider=FAST_PROVIDERS[0]
+        data=_fast_provider_search(provider+'_search',wording,country,lang,(min(1,remaining/4),min(3.5,remaining*.7)))
+    # The previous pilot stopped here after a failed Serper lane, even with an
+    # available backup. Bound the fallback by the same request deadline.
+    remaining=deadline-time.monotonic()
+    if not isinstance(data,dict) and not cancel.is_set() and remaining>.5 and SERPAPI_API_KEY and not serpapi_provider_degraded():
+        provider='serpapi'
+        data=_serpapi_cached_json({'engine':'google_light','q':wording,'gl':country,'hl':lang},
+            timeout=(min(1,remaining/4),min(3.5,remaining*.7)),label='PUBLIC MENU DISCOVERY')
+    if cancel.is_set() or not isinstance(data,dict):
+        return {'urls':[],'state':'unavailable','reason':'discovery_unavailable','provider':provider}
+    urls=[];hosts={};raw=data.get('organic_results') or []
+    for row in raw[:20]:
+        if not isinstance(row,dict):continue
+        url=_food_menu_source_candidate(row.get('link') or row.get('url'))
         if not url:continue
-        p=urllib.parse.urlsplit(url)
-        if p.hostname in ('deliveroo.com.kw','www.deliveroo.com.kw') and '/menu/' not in p.path:continue
-        # Category/search links from delivery apps contain no item evidence.
-        if re.search(r'/search(?:/|$)|/restaurants/?$',p.path):continue
-        if url not in urls:urls.append(url)
-    return urls[:4]
+        host=urllib.parse.urlsplit(url).hostname
+        if url not in urls and hosts.get(host,0)<3:
+            urls.append(url);hosts[host]=hosts.get(host,0)+1
+    print(f'PUBLIC MENU DISCOVERY language={lang} provider={provider} raw={len(raw)} admitted={len(urls)}')
+    return {'urls':urls[:8],'state':'complete','reason':'','provider':provider}
 
 
-async def _food_menu_search(query, country, request=None):
-    began=time.monotonic();deadline=began+_FOOD_MENU_BUDGET;cancel=threading.Event();tasks=[];seen=set();published=set();by_store={};partial=False
+def _food_menu_discovery_specs(plan, query):
+    specs=[]
+    operators=not FAST_PROVIDERS or _fast_provider_supports_operators(FAST_PROVIDERS[0])
+    for key,lang in [('search_en','en'),('search_local','ar')]:
+        wording=plan.get(key) or query+(' Kuwait menu' if lang=='en' else ' الكويت منيو')
+        # Equal language coverage and independent platforms: neither lane is
+        # pinned solely to Deliveroo. The second lane finds restaurant websites.
+        specs.append((wording+(' (site:talabat.com/kuwait/ OR site:talabat.com/ar/kuwait/ OR site:deliveroo.com.kw/en/menu/ OR site:deliveroo.com.kw/ar/menu/)' if operators else (' Talabat' if lang=='en' else ' طلبات')),lang))
+        specs.append((wording+(' restaurant order menu' if lang=='en' else ' مطعم قائمة الطعام طلب'),lang))
+    return specs
+
+
+async def _food_menu_search(query, country, request=None, prepared_plan=None):
+    began=time.monotonic();deadline=began+_FOOD_MENU_BUDGET;cancel=threading.Event();tasks=[]
+    seen=set();published={};by_store={};partial=False;reasons=Counter();sources={};missing_prices=set()
     loop=asyncio.get_running_loop()
     async def run(fn,*args):
         return await asyncio.wait_for(loop.run_in_executor(_FOOD_MENU_POOL,fn,*args),timeout=max(.01,deadline-time.monotonic()))
     def matches(rows,plan):
+        nonlocal partial
         out=[]
         for row in rows:
-            identity=row.get('result_id') or row.get('url')
-            if identity in seen:continue
-            store=row.get('restaurant','')
-            if by_store.get(store,0)>=8:continue
+            identity=row.get('result_id') or row.get('url');store=row.get('restaurant','')
+            if identity in seen or by_store.get(store,0)>=8:continue
             match=_food_menu_match(row,plan)
             if match:
+                if not _food_menu_filter_ready(match):
+                    if identity not in missing_prices:
+                        missing_prices.add(identity);reasons['price_unavailable']+=1
+                    partial=True
+                    continue
                 seen.add(identity);by_store[store]=by_store.get(store,0)+1;out.append(match)
             if len(seen)>=32:break
         return out
+    async def check(rows,plan):
+        return await run(_food_menu_verify,query,matches(rows,plan))
     try:
-        yield _web_stream_event({'event':'status','stage':'reading_menus','source':'public_menu'})
-        plan=await asyncio.wait_for(run(_food_menu_plan,query,country),timeout=4.5)
-        if not plan:
-            print(f'PUBLIC MENU SKIP country={country} reason=intent_unavailable')
-            return
-        cached_matches=matches(await run(_food_menu_cache_get,country),plan)
-        for row in await run(_food_menu_verify,query,cached_matches):
-            published.add(row['url'])
-            yield _web_stream_event({'event':'result','item':row})
-        discovery=[]
-        for key,lang in [('search_en','en'),('search_local','ar')]:
-            wording=plan.get(key) or query+' Kuwait menu'
-            # English lane targets verified public-menu markup; Arabic remains open.
-            if lang=='en' and (not FAST_PROVIDERS or _fast_provider_supports_operators(FAST_PROVIDERS[0])):
-                wording+=' site:deliveroo.com.kw/en/menu/'
-            discovery.append(asyncio.create_task(run(_food_menu_discover,wording,country,lang,deadline,cancel)))
-        tasks.extend(discovery);fetched=set();page_tasks=[]
-        while discovery or page_tasks:
-            if time.monotonic()>=deadline or (request is not None and await request.is_disconnected()):break
-            done,_=await asyncio.wait(discovery+page_tasks,timeout=.5,return_when=asyncio.FIRST_COMPLETED)
-            if not done:
-                yield _web_stream_event({'event':'status','stage':'reading_menus','source':'public_menu','count':len(published)})
-            for task in done:
-                if task in discovery:
-                    discovery.remove(task)
-                    try:urls=task.result()
-                    except Exception:urls=[];partial=True
-                    for url in urls:
-                        if url in fetched or len(fetched)>=6:continue
-                        fetched.add(url);t=asyncio.create_task(run(_food_menu_fetch,url,country,deadline,cancel));page_tasks.append(t);tasks.append(t)
-                else:
-                    page_tasks.remove(task)
-                    try:rows=task.result()
-                    except Exception:rows=[];partial=True
-                    for row in await run(_food_menu_verify,query,matches(rows,plan)):
-                        published.add(row['url'])
-                        yield _web_stream_event({'event':'result','item':row})
-            if len(seen)>=32:break
-        partial=partial or bool(discovery or page_tasks)
-    except (asyncio.TimeoutError,RuntimeError):partial=True
+        yield _web_stream_event({'event':'status','stage':'reading_menus','source':'public_menu','menu_status':'searching'})
+        plan=prepared_plan if prepared_plan is not None else await asyncio.wait_for(run(_food_menu_plan,query,country),timeout=4.5)
+        if not plan or plan.get('intent')=='retail':
+            partial=True;reasons['intent_unavailable']+=1
+        else:
+            for row in await check(await run(_food_menu_cache_get,country),plan):
+                published[row['url']]=row
+                yield _web_stream_event({'event':'result','item':row})
+            discovery=[asyncio.create_task(run(_food_menu_discover,wording,country,lang,deadline,cancel))
+                       for wording,lang in _food_menu_discovery_specs(plan,query)]
+            tasks.extend(discovery);fetched=set();pages={};per_host=Counter()
+            while discovery or pages:
+                if time.monotonic()>=deadline:partial=True;reasons['deadline']+=1;break
+                if request is not None and await request.is_disconnected():return
+                done,_=await asyncio.wait(discovery+list(pages),timeout=.5,return_when=asyncio.FIRST_COMPLETED)
+                if not done:yield _web_stream_event({'event':'status','stage':'reading_menus','source':'public_menu','count':len(published)})
+                for task in done:
+                    if task in discovery:
+                        discovery.remove(task)
+                        try:report=task.result()
+                        except Exception:report={'urls':[],'state':'unavailable','reason':'discovery_failed'}
+                        if report['state']!='complete':partial=True;reasons[report.get('reason') or 'discovery_failed']+=1
+                        for url in report['urls']:
+                            key=_food_menu_source_key(url);host=urllib.parse.urlsplit(url).hostname
+                            # Reserve room for independent hosts and avoid asking
+                            # the same English/Arabic menu twice in one request.
+                            if key in fetched or len(fetched)>=8 or per_host[host]>=3:continue
+                            fetched.add(key);per_host[host]+=1
+                            t=asyncio.create_task(run(_food_menu_fetch_report,url,country,deadline,cancel))
+                            pages[t]=url;tasks.append(t)
+                    else:
+                        url=pages.pop(task)
+                        try:report=task.result()
+                        except Exception:report={'rows':[],'state':'unavailable','reason':'page_failed'}
+                        sources[url]=report['state']
+                        if report['state']!='complete':partial=True;reasons[report.get('reason') or 'page_failed']+=1
+                        print(f'PUBLIC MENU SOURCE host={urllib.parse.urlsplit(url).hostname} state={report["state"]} items={len(report["rows"])} reason={report.get("reason") or "none"}')
+                        for row in await check(report['rows'],plan):
+                            published[row['url']]=row
+                            yield _web_stream_event({'event':'result','item':row})
+                if len(seen)>=32:break
+    except (asyncio.TimeoutError,RuntimeError):partial=True;reasons['deadline_or_verification']+=1
     finally:
         cancel.set()
         for task in tasks:task.cancel()
         await asyncio.gather(*tasks,return_exceptions=True)
-    print(f'PUBLIC MENU DONE country={country} candidates={len(seen)} published={len(published)} partial={partial} elapsed_ms={int((time.monotonic()-began)*1000)}')
-    yield _web_stream_event({'event':'done','source':'public_menu','count':len(published),'partial':partial})
+    rows=list(published.values());preview=sum(r.get('menu_evidence_type')=='public_dish_preview' for r in rows)
+    state='partial' if partial and rows else 'unavailable' if partial else 'ready' if rows else 'no_verified_matches'
+    if not rows and missing_prices and set(reasons)=={'price_unavailable'}:state='price_unavailable'
+    print(f'PUBLIC MENU DONE country={country} candidates={len(seen)} published={len(rows)} previews={preview} sources={len(sources)} partial={partial} status={state} reasons={dict(reasons)} elapsed_ms={int((time.monotonic()-began)*1000)}')
+    yield _web_stream_event({'event':'done','ok':True,'type':'results','source':'public_menu','query':query,
+        'results':rows,'all_results':rows,'count':len(rows),'menu_count':len(rows),'menu_preview_count':preview,
+        'menu_status':state,'menu_source_reasons':dict(reasons),'market_progress':sources,'partial':partial,
+        'reason':state,'search_intent':'prepared_food','authoritative':True})
 
 
 async def _food_menu_union(source, query, country, request=None):
@@ -27476,13 +27610,17 @@ def _refine_clean_choices(raw, base_query, maximum):
 
 
 def _refine_plan(context, samples):
-    cache_key = 'simple-stream-plan:' + hashlib.sha256(json.dumps(context, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+    food = _food_menu_enabled(_refine_query(context), context['country'])
+    cache_key = ('food-menu-plan-v2:' if food else 'simple-stream-plan:') + hashlib.sha256(json.dumps(context, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
     cached = _refine_cache_get(cache_key)
     if cached is not None:
         return cached
     query = _refine_query(context)
     currency = COUNTRY_META.get(context['country'], ('', ('',), ''))[1][0]
-    data = _refine_ai(_REFINE_PLAN_PROMPT, dict(context, query=query, sample_titles=samples, market_currency=currency), tokens=3500)
+    prompt = _REFINE_PLAN_PROMPT
+    if food:
+        prompt += "\nThis request is for a PREPARED RESTAURANT DISH. Use 2-4 independent food refinements appropriate to THIS dish, such as protein, bread, heat or portion/serving format, only where useful and not fixed already. These are search preferences, not promises that a restaurant offers customizations. Never substitute equipment, packaging, frozen groceries, retail brand, condition or country-of-manufacture filters. Do not invent restaurant names or offer restaurant, delivery, availability, dietary-safety or price facets; those require observed local data. Keep the same one-step flat panel. All explicit chosen details must be verified on each individual dish; never assume a sauce makes the main dish spicy."
+    data = _refine_ai(prompt, dict(context, query=query, sample_titles=samples, market_currency=currency), tokens=3500)
     if not isinstance(data.get('facets'), list):
         raise RuntimeError('invalid_ai_response')
     category = _refine_text(data.get('category'), 64)
@@ -27503,6 +27641,8 @@ def _refine_plan(context, samples):
             key = re.sub(r'[^a-z0-9_]', '', str(raw.get('key') or '').lower())[:40]
             label = _refine_text(raw.get('label'), 48)
             options = _refine_clean_choices(raw.get('options'), query, 7)
+            if food and re.search(r'price|budget|restaurant|brand|deliver|availab|condition|allergen|certif', key):
+                continue
             if not key or key.startswith('__') or key in used or key in fixed or not label or len(options) < 2:
                 continue
             if len(facets) >= 6: break
@@ -27548,7 +27688,7 @@ def _refine_evidence(row):
               'raw_title', 'card_evidence_title', 'card_attributes', 'card_brand', 'card_model',
               'original_price', 'original_currency', 'price_kind', 'price_unit')
     if row.get('menu_item'):
-        fields += ('menu_item','restaurant','branch','menu_requested_options','menu_delivery_status')
+        fields += ('menu_item','restaurant','branch','menu_requested_options','menu_delivery_status','menu_link_kind','menu_evidence_type','price_unavailable')
     return {key: row[key] for key in fields if row.get(key) not in (None, '', [], {})}
 
 
@@ -27596,7 +27736,7 @@ Retail uncooked meat is different from a restaurant meal; frozen is different fr
 Category pages, articles, accessories for the requested product, and unrelated variants are not the requested product.
 No inferred medical/allergy/safety guarantees. Never treat a query copied elsewhere as product evidence.'''
 
-_REFINE_VERIFY_PROMPT += "\nAn observed menu_item is a specific restaurant dish, not a category page. Only its menu_requested_options are selected compatible options; do not infer a final configuration price from a base/from price."
+_REFINE_VERIFY_PROMPT += "\nAn observed menu_item is a specific restaurant dish. menu_link_kind:menu is a public menu preview: its item name and image are evidence even though its link opens a menu. Missing price, branch, delivery availability, ingredients and options are UNKNOWN. Only its menu_requested_options are selected compatible options; do not infer a final configuration price from a base/from price."
 
 _REFINE_VERIFY_PROMPT += '''\nFor image searches the supplied reference is the identity anchor, not an immutable variant.
 Explicit selected attributes may change that attribute only. Keep the original category, form and distinctive unmodified features.
@@ -27711,6 +27851,7 @@ async def _refine_verified_events(response, context, request):
                 status['error'] = event.get('error') or 'search_failed'
             if kind == 'done':
                 status['complete'] = True
+                status['menu_status'] = event.get('menu_status') or ''
                 if event.get('partial'):status['error']='partial_sources'
             if kind in ('status','heartbeat'):
                 status['stage']=event.get('stage') or status['stage']
@@ -27738,7 +27879,7 @@ async def _refine_verified_events(response, context, request):
             if await request.is_disconnected():
                 return
             for url in list(matched):
-                if url not in rows or _refine_fingerprint(rows[url]) != matched[url] or not _refine_has_price(rows[url]):
+                if url not in rows or _refine_fingerprint(rows[url]) != matched[url] or not _food_menu_filter_ready(rows[url]):
                     matched.pop(url, None)
                     checked.pop(url, None)
                     yield _web_stream_event({'event': 'remove', 'url': url})
@@ -27756,10 +27897,10 @@ async def _refine_verified_events(response, context, request):
                     verification_failed = True
                 for row in verified:
                     url = row['url']; fingerprint = _refine_fingerprint(row)
-                    if url in rows and fingerprint == _refine_fingerprint(rows[url]) and _refine_has_price(rows[url]):
+                    if url in rows and fingerprint == _refine_fingerprint(rows[url]) and _food_menu_filter_ready(rows[url]):
                         matched[url] = fingerprint
                         yield _web_stream_event({'event': 'result', 'item': dict(rows[url], refinement_verified=True)})
-            waiting = [row for url, row in rows.items() if _refine_has_price(row) and checked.get(url) != _refine_fingerprint(row)]
+            waiting = [row for url, row in rows.items() if _food_menu_filter_ready(row) and checked.get(url) != _refine_fingerprint(row)]
             while waiting and len(tasks) < 2 and attempted < 96:
                 batch, waiting = waiting[:6], waiting[6:]
                 for row in batch:
@@ -27776,12 +27917,12 @@ async def _refine_verified_events(response, context, request):
             await asyncio.sleep(.15)
         # Reconcile final source removals/price changes, including a last event after a verifier returned.
         for url in list(matched):
-            if url not in rows or not _refine_has_price(rows[url]) or matched[url] != _refine_fingerprint(rows[url]):
+            if url not in rows or not _food_menu_filter_ready(rows[url]) or matched[url] != _refine_fingerprint(rows[url]):
                 matched.pop(url, None)
                 yield _web_stream_event({'event': 'remove', 'url': url})
         partial = bool(status['error'] or not status['complete'] or verification_failed or tasks or attempted >= 96)
         yield _web_stream_event({'event': 'done', 'count': len(matched), 'query': _refine_query(context),
-                                 'steps': context['steps'], 'partial': partial,
+                                 'steps': context['steps'], 'partial': partial, 'menu_status': status.get('menu_status',''),
                                  'reason': ('verified' if matched else 'unavailable' if partial else 'no_verified_matches')})
     finally:
         producer.cancel()
@@ -27825,7 +27966,7 @@ async def _refine_search_sources(context,request):
         response=_web_image_stream_response(context['_image_base64'],context['_mime'],_refine_query(context),context['country'],context['lang'])
         start('lens',response.body_iterator)
     membership, published, finished, done_sources={}, {},set(),set()
-    partial=False;recovered=False;began=time.monotonic()
+    partial=False;recovered=False;began=time.monotonic();menu_status=''
     try:
         while time.monotonic()-began<53:
             if await request.is_disconnected():return
@@ -27841,11 +27982,13 @@ async def _refine_search_sources(context,request):
             kind=event.get('event');owned=membership.setdefault(name,{})
             if kind=='source_end':finished.add(name);continue
             if kind=='done':
+                menu_status=event.get('menu_status') or menu_status
                 done_sources.add(name);partial=partial or bool(event.get('partial'));continue
             if kind=='error':partial=True;continue
             if kind in ('status','heartbeat','recognition','query'):
                 # Server phase only, never fabricated internal reasoning.
                 stage='checking_identity' if kind=='recognition' else 'searching_photo_and_text' if context.get('_image_base64') else 'searching_stores'
+                if event.get('stage') == 'reading_menus':stage='reading_menus'
                 yield _web_stream_event({'event':'status','stage':stage,'source':name})
                 continue
             affected=set()
@@ -27875,7 +28018,7 @@ async def _refine_search_sources(context,request):
                 if published.get(url)!=fingerprint:
                     published[url]=fingerprint
                     yield _web_stream_event({'event':'upsert','item':row})
-        yield _web_stream_event({'event':'done','partial':partial or len(done_sources)!=len(tasks),'count':len(published)})
+        yield _web_stream_event({'event':'done','partial':partial or len(done_sources)!=len(tasks),'count':len(published),'menu_status':menu_status})
     finally:
         for task in tasks:task.cancel()
         await asyncio.gather(*tasks,return_exceptions=True)
