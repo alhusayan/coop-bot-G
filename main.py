@@ -1,3 +1,4 @@
+# v128.5.52: live-grounded filters, bounded observed-variant probes, photo refinement repair.
 # v128.5.42: fast observed card media and bounded per-product merchant collection expansion.
 # v128.5.38: Serper photo alternatives; independent US/CN domestic discovery.
 # v128.5.32: global markets (approved US + China catalogs) get the same three Serper lanes as
@@ -388,7 +389,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization'], max_age=86400)
-BUILD_ID = 'v128.5.51-product-focus'
+BUILD_ID = 'v128.5.52-smart-filters'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -2733,6 +2734,7 @@ def _photo_identity_public(profile, lang='en'):
     def strings(field):
         return [p.get('ar') or p['en'] if ar else p['en'] for p in profile.get(field, []) if isinstance(p, dict) and p.get('en')]
     return {'title': title or profile['query'], 'query': profile['query'],
+            'search_description': _refine_photo_description(profile),
             'brand': profile.get('brand', ''), 'retailer': profile.get('retailer', ''),
             'visible_name': profile.get('visible_name', ''),
             'components': strings('components'), 'features': strings('features'),
@@ -21050,7 +21052,7 @@ def _web_text_direct_fetch(query, spec, deadline, cancel, page_token=''):
     """One request only; queued/expired work cannot launch another HTTP call."""
     if cancel.is_set() or time.monotonic() >= deadline:
         return None
-    params = _web_text_direct_params(query, spec, page_token)
+    params = _web_text_direct_params(spec.get('_probe_query') or query, spec, page_token)
     if spec.get('_merchant_query') and not page_token:
         params['q'] = spec['_merchant_query']
     remaining = deadline - time.monotonic()
@@ -21174,12 +21176,14 @@ def _web_text_direct_search(query, country, lang, progress_callback=None, cancel
         return len(_local_ready_merchants([r for r in rows.values() if r.get('country') == country]))
     launched = 0
     submitted_specs = set()
+    probe_seen = set()
+    normalizer = None
     def submit(spec, token='', thumbnail=''):
         nonlocal launched
         if cancel.is_set() or time.monotonic() >= deadline:
             return
         spec_key = (spec['country'], spec['role'], spec['engine'], spec['hl'],
-                    bool(spec.get('domestic_scope')), bool(spec.get('selected_catalog')), token, spec.get('_merchant_query', ''))
+                    bool(spec.get('domestic_scope')), bool(spec.get('selected_catalog')), token, spec.get('_merchant_query', ''), spec.get('_probe_query', ''))
         if spec_key in submitted_specs:
             return
         submitted_specs.add(spec_key)
@@ -21199,6 +21203,36 @@ def _web_text_direct_search(query, country, lang, progress_callback=None, cancel
         fast_unavailable = 0
         for spec in specs:
             submit(spec)
+        # No extra full local/global fan-out. At most two additional local
+        # organic probes reuse this exact coordinator and its price ledger.
+        def maybe_probe():
+            if (len(probe_seen) >= TEXT_DISCOVERY_PROBE_CALLS or cancel.is_set()
+                    or time.monotonic() > min(started + 8., deadline - 2.5)):
+                return
+            base_spec = next((s for s in specs if s['role'] == 'local'
+                and s['engine'] in ('serper_search', 'cse_search', 'google', 'google_light')
+                and not s.get('selected_catalog') and not s.get('domestic_scope')), None)
+            if not base_spec:
+                return
+            suggestions = []
+            if normalizer is not None and normalizer.done():
+                try:
+                    q = normalizer.result()
+                    if q and q.casefold() != query.casefold():
+                        suggestions.append(q)
+                except Exception:
+                    pass
+            suggestions.extend(_refine_probe_queries(query, list(rows.values()), country))
+            for wording in suggestions:
+                if wording in probe_seen or len(probe_seen) >= TEXT_DISCOVERY_PROBE_CALLS:
+                    continue
+                probe_seen.add(wording)
+                submit(dict(base_spec, _probe_query=wording))
+                print('TEXT OBSERVED PROBE market=%s ordinal=%d' % (country, len(probe_seen)))
+        # Natural-language cleanup is optional and never delays the base lanes.
+        if TEXT_DISCOVERY_PROBE_CALLS and (re.search(r'[\u0600-\u06ff]', query) or len(query.split()) > 7):
+            normalizer = TEXT_DIRECT_POOL.submit(_refine_normalize_base, query, country, lang)
+        maybe_probe()
         def maybe_launch_backup():
             """Serper-primary: SerpApi lanes exist only as a bounded backup, launched
             once the primary lanes have answered and left too little on the page."""
@@ -21222,6 +21256,7 @@ def _web_text_direct_search(query, country, lang, progress_callback=None, cancel
                   f' rows={len(rows)} ready_local={ready_local()} country={country} elapsed_ms={int((now-started)*1000)}')
         maybe_launch_backup()
         while jobs and not cancel.is_set():
+            maybe_probe()
             now = time.monotonic()
             if not rows and now >= deadline and not extended:
                 extended = True
@@ -21244,7 +21279,7 @@ def _web_text_direct_search(query, country, lang, progress_callback=None, cancel
                     data = None
                 if cancel.is_set() or time.monotonic() >= (deadline if rows else empty_deadline):
                     break
-                name = f'{spec["role"]}:{spec["country"]}:{spec["engine"]}:{spec["hl"]}' + (':catalog' if spec.get('selected_catalog') else ':scoped' if spec.get('domestic_scope') else '') + (':merchants' if token else ':shopping_links' if spec.get('_merchant_query') else '')
+                name = f'{spec["role"]}:{spec["country"]}:{spec["engine"]}:{spec["hl"]}' + (':catalog' if spec.get('selected_catalog') else ':scoped' if spec.get('domestic_scope') else '') + (':merchants' if token else ':shopping_links' if spec.get('_merchant_query') else ':probe:' + str(spec['_probe_query']) if spec.get('_probe_query') else '')
                 source_states[name] = 'complete' if isinstance(data, dict) else 'unavailable'
                 if not isinstance(data, dict):
                     if spec['engine'].startswith(('serper_', 'cse_')):
@@ -21330,6 +21365,8 @@ def _web_text_direct_search(query, country, lang, progress_callback=None, cancel
                     if _shopping_unit_fill([r for r in rows.values() if r.get('country') == ledger_cc], ledger_target):
                         changed = True
                 if changed:
+                    _refine_observe_offers(query, country, list(rows.values()))
+                    maybe_probe()
                     if first_ms is None:
                         first_ms = int((time.monotonic()-started)*1000)
                     if progress_callback:
@@ -24968,19 +25005,8 @@ async def _web_stream_text_fast(query, country, lang, selected_option='', reques
                                 original_query='', force_specific=False):
     started = time.monotonic()
     yield _web_stream_event({'event': 'start', 'ok': True, 'source': 'text_fast', 'build': BUILD_ID})
-    if not selected_option:
-        normalized=asyncio.create_task(asyncio.to_thread(_refine_normalize_base,query,country,lang))
-        began=time.monotonic()
-        try:
-            while not normalized.done() and time.monotonic()-began<4.5:
-                if request is not None and await request.is_disconnected():return
-                yield _web_stream_event({'event':'status','stage':'preparing_query'})
-                await asyncio.wait({normalized},timeout=.7)
-            if normalized.done():query=normalized.result()
-        except Exception:
-            pass  # Original request remains searchable if the formatter fails.
-        finally:
-            normalized.cancel();await asyncio.gather(normalized,return_exceptions=True)
+    # Original retrieval starts immediately. Query normalization/probes run in
+    # the existing coordinator after the primary lanes have been submitted.
     q0 = re.sub(r'\s+', ' ', str(selected_option or query or '')).strip()
     instant = bool(selected_option or force_specific or (q0 and _text_query_is_product(q0)))
     if instant:
@@ -26865,7 +26891,7 @@ def _refine_sign(context):
 
 
 def _refine_ai(system, data, tokens=2600, images=None, timeout=12):
-    if not GEMINI_API_KEY or not _REFINE_SLOTS.acquire(timeout=.1):
+    if not GEMINI_API_KEY or not _REFINE_SLOTS.acquire(timeout=.75):
         raise RuntimeError('refinement_unavailable')
     try:
         parts = [{'text': json.dumps(data, ensure_ascii=False)}]
@@ -26876,6 +26902,10 @@ def _refine_ai(system, data, tokens=2600, images=None, timeout=12):
                    'contents': [{'role': 'user', 'parts': parts}],
                    'generationConfig': {'temperature': 0, 'maxOutputTokens': tokens,
                                         'responseMimeType': 'application/json'}}
+        if re.fullmatch(r'gemini-2\.5-flash(?:-lite)?', REFINE_MODEL):
+            # Supported Flash models need no hidden thinking budget for a
+            # small quoted JSON extraction task. Keep other models untouched.
+            payload['generationConfig']['thinkingConfig'] = {'thinkingBudget': 0}
         with GEMINI_STATS_LOCK:
             GEMINI_STATS['plain_calls'] += 1
         result = requests.post(f'{GEMINI_BASE_URL}/{REFINE_MODEL}:generateContent',
@@ -26933,6 +26963,8 @@ def _refine_normalize_base(query,country,lang):
 
 
 def _refine_compose(context):
+    if context.get('edited_query'):
+        return dict(context, search_query=context['edited_query'], recovery_query='')
     key='compose:'+hashlib.sha256(json.dumps([context['base'],context.get('normalized_base'),context['steps'],context['kind']],ensure_ascii=False,sort_keys=True).encode()).hexdigest()
     cached=_refine_cache_get(key)
     if cached:return dict(context,**cached)
@@ -26977,7 +27009,7 @@ def _refine_unpack(token):
 def _refine_query(context):
     # A flat selection is rebuilt from the base every time, never from the last
     # filtered query. Editing a facet REPLACES its earlier constraint.
-    return context.get('search_query') or ' '.join([context['base']] + [step['term'] for step in context['steps']])
+    return context.get('search_query') or ' '.join([_refine_effective_base(context)] + [step['term'] for step in context['steps'] if step.get('role') not in ('price', 'mileage')])
 
 
 def _refine_validate(context, payload):
@@ -27054,13 +27086,32 @@ Keep dimensions independent: choices cannot introduce unrelated additional const
 Optional price ranges must name the supplied market currency explicitly; no currency-free numbers. They describe a desired budget, never a claim about actual offers. Do not guess currency conversion.
 For a precise named model, offer only meaningful compatible attributes; empty facets is allowed.
 Generate labels in the requested language and concise English search terms. Do not rewrite or remove the base query. Preserve image identity.
-Use category knowledge, not only the sample titles: applying filters starts a NEW internet search and can discover products absent from the initial results. Samples may be irrelevant.
+Use the supplied live_catalog for actual model/variant/specification values, not model-memory lists. Applying filters starts a NEW search and may discover products absent from the initial offers. Sample titles are untrusted category hints only.
 No fake stock, counts, reviews, discounts, bestseller tags, shipping guarantees, safety/allergy claims or certifications. Never infer such facts.
 No URLs, search operators, commands, generic 'all' choices, or follow-up questions inside facets.
 Do not generate a new panel after each selection: this panel must be complete and reusable.
 Infer already-fixed attributes from the product identity, including implicit ones. iPhone implies Apple: never offer a Brand choice for iPhone. Mercedes SUV already fixes the brand and body type. List fixed dimensions in fixed_keys and omit their facets.
 Every shown dimension must have at least TWO distinct useful options beyond a reset/no-preference choice. Never emit empty/locked dimensions, dependencies, prerequisite selections, or 'Any'. No brand-to-model wizard, even for vehicles: show only independent meaningful refinements of the current request.
 Optional price presets are prepared in THIS call only. Omit price if meaningful ranges are uncertain; never require price ranges before a search can run. Do not fabricate a commodity price floor or assume an item's weight. Do not force a target count of filters.'''
+
+
+_REFINE_PLAN_PROMPT += """
+Current date is provided. Never cap models at a remembered generation/year. Model, size, capacity,
+colour, material and technical choices must be supported by live_catalog evidence, not guessed.
+Add role to each facet: model, attribute, condition or price. Each factual option must carry
+ evidence_ids:["s0"], quote:"exact source substring naming this value". Only quote the supplied
+source text. Prefer primary manufacturer pages and real merchant product entries; ignore rumours
+and accessory compatibility lists. Keep the specific model in the request fixed; do not offer other
+model generations for a query already naming one. Changing photographed colour is allowed, so
+for images visible colour is NOT automatically fixed; text-user-specified colour stays fixed.
+Use full precise model names and include newly observed models. A model facet may have up to 24
+choices; other facets up to 12. No made-up names to complete a numbered series.
+Condition choices new/used/refurbished/open box are desired constraints, not availability claims.
+Price options must carry numeric:{min:number|null,max:number|null,currency:"supplied ISO",unit:"total"}.
+Omit price when uncertain. Do not mix monthly instalments with full prices. For image queries never
+ask clarification; generate the useful independent filters directly. If evidence is insufficient,
+return fewer options or facets rather than fabricate product specifications.
+"""
 
 
 def _refine_clean_choices(raw, base_query, maximum):
@@ -27081,52 +27132,489 @@ def _refine_clean_choices(raw, base_query, maximum):
             continue
         if len(base_query) + len(term) + 1 > WEB_API_MAX_QUERY_CHARS:
             continue
-        seen.update((norm, label_key)); result.append({'label': label, 'term': term})
+        seen.update((norm, label_key))
+        cleaned = {'label': label, 'term': term}
+        for field in ('role', 'numeric', 'source_refs'):
+            if choice.get(field) is not None:
+                cleaned[field] = copy.deepcopy(choice[field])
+        result.append(cleaned)
     return result
 
 
+# ---------------------------------------------------------------------------
+# v128.5.52: source-grounded filters and bounded first-search discovery.
+# These are retrieval hints, never evidence of a price, stock or product match.
+# No provider or API key is added; ordinary Lens entrypoints remain unchanged.
+# ---------------------------------------------------------------------------
+REFINE_LIVE_CATALOG_ENABLED = env_bool('REFINE_LIVE_CATALOG_ENABLED', True)
+REFINE_CATALOG_TTL_SECONDS = max(300, min(86400, int(os.environ.get('REFINE_CATALOG_TTL_SECONDS', '21600'))))
+TEXT_DISCOVERY_PROBE_CALLS = max(0, min(2, int(os.environ.get('TEXT_DISCOVERY_PROBE_CALLS', '2'))))
+_REFINE_CATALOG_LOCK = threading.Lock()
+_REFINE_CATALOG_PENDING = {}
+_REFINE_CATALOG_MEMORY = {}
+_REFINE_OBSERVED = {}
+_REFINE_CATALOG_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix='filter-catalog')
+_REFINE_CATALOG_SLOTS = threading.BoundedSemaphore(2)
+
+# Dated, verified fallback, NOT a maximum version or a stock assertion.
+# Source checked 2026-09-19: https://www.apple.com/iphone/compare/
+# Future names are discovered through the live evidence path below, not guessed.
+_REFINE_IPHONE_SEED = (
+    'iPhone Duo', 'iPhone 18 Pro Max', 'iPhone 18 Pro', 'iPhone 17 Pro Max', 'iPhone 17 Pro',
+    'iPhone Air', 'iPhone 17', 'iPhone 17e', 'iPhone 16 Pro Max', 'iPhone 16 Pro',
+    'iPhone 16 Plus', 'iPhone 16', 'iPhone 16e', 'iPhone 15 Pro Max',
+    'iPhone 15 Pro', 'iPhone 15 Plus', 'iPhone 15',
+)
+_REFINE_COLOR_WORDS = ('black', 'white', 'blue', 'red', 'green', 'pink', 'yellow',
+    'purple', 'orange', 'brown', 'beige', 'grey', 'gray', 'silver', 'gold', 'navy',
+    'lavender', 'sage', 'burgundy', 'teal', 'cream', 'اسود', 'أبيض', 'ابيض',
+    'أسود', 'ازرق', 'أزرق', 'وردي', 'اخضر', 'أخضر', 'احمر', 'أحمر')
+_REFINE_COLOR_RE = re.compile(r'(?<!\w)(' + '|'.join(map(re.escape, _REFINE_COLOR_WORDS)) + r')(?!\w)', re.I)
+_REFINE_MEASURE_RE = re.compile(r'(?<!\w)(\d+(?:\.\d+)?\s*(?:TB|GB|MB|mAh|kWh|kW|W|Hz|ml|litres?|liters?|L|kg|g|mm|cm|inch(?:es)?))(?!\w)', re.I)
+
+
+def _refine_catalog_key(query, country):
+    return hashlib.sha256(json.dumps([re.sub(r'\s+', ' ', str(query)).casefold().strip(), country], ensure_ascii=False).encode()).hexdigest()
+
+
+def _refine_observe_offers(query, country, offers):
+    """Server-only observations. Client sample_titles are never trusted as a catalog."""
+    key = _refine_catalog_key(query, country)
+    now = time.time()
+    with _REFINE_CATALOG_LOCK:
+        old = _REFINE_OBSERVED.get(key)
+        merged = dict(old[1]) if old and old[0] > now else {}
+        for row in (offers or [])[:80]:
+            url = str(row.get('url') or '')
+            title = _refine_text(row.get('card_evidence_title') or row.get('title') or row.get('product_name'), 220)
+            if title and _web_is_http_url(url) and not _offer_is_editorial_url(url):
+                merged[url] = {'title': title, 'snippet': _refine_text(row.get('snippet') or row.get('description'), 400),
+                               'url': url, 'source': 'server_offer', 'observed_at': int(now)}
+        _REFINE_OBSERVED[key] = (now + 900, dict(list(merged.items())[-32:]))
+        while len(_REFINE_OBSERVED) > 300:
+            _REFINE_OBSERVED.pop(next(iter(_REFINE_OBSERVED)))
+
+
+def _refine_observed(query, country):
+    with _REFINE_CATALOG_LOCK:
+        hit = _REFINE_OBSERVED.get(_refine_catalog_key(query, country))
+        return copy.deepcopy(list(hit[1].values())) if hit and hit[0] > time.time() else []
+
+
+def _refine_catalog_read(key):
+    with _REFINE_CATALOG_LOCK:
+        hit = _REFINE_CATALOG_MEMORY.get(key)
+        if hit and hit[0] > time.time():
+            return copy.deepcopy(hit[1])
+    try:
+        with CACHE_DB_LOCK, _cache_db_connect() as db:
+            db.execute('CREATE TABLE IF NOT EXISTS refine_catalog_v52 (k TEXT PRIMARY KEY, data TEXT NOT NULL, expires REAL NOT NULL)')
+            row = db.execute('SELECT data, expires FROM refine_catalog_v52 WHERE k=?', (key,)).fetchone()
+        if row and row[1] > time.time():
+            return json.loads(row[0])
+    except Exception:
+        pass  # Read-only/ephemeral filesystems retain the bounded memory cache.
+    return None
+
+
+def _refine_catalog_write(key, value, ttl):
+    expires = time.time() + ttl
+    with _REFINE_CATALOG_LOCK:
+        _REFINE_CATALOG_MEMORY[key] = (expires, copy.deepcopy(value))
+        while len(_REFINE_CATALOG_MEMORY) > 300:
+            _REFINE_CATALOG_MEMORY.pop(next(iter(_REFINE_CATALOG_MEMORY)))
+    try:
+        with CACHE_DB_LOCK, _cache_db_connect() as db:
+            db.execute('CREATE TABLE IF NOT EXISTS refine_catalog_v52 (k TEXT PRIMARY KEY, data TEXT NOT NULL, expires REAL NOT NULL)')
+            db.execute('INSERT OR REPLACE INTO refine_catalog_v52 VALUES (?,?,?)', (key, json.dumps(value, ensure_ascii=False), expires))
+            db.execute('DELETE FROM refine_catalog_v52 WHERE expires<?', (time.time(),))
+            db.execute('DELETE FROM refine_catalog_v52 WHERE k NOT IN (SELECT k FROM refine_catalog_v52 ORDER BY expires DESC LIMIT 300)')
+    except Exception:
+        pass
+
+
+def _refine_catalog_fetch(wording, country, hl):
+    """Bounded provider search. No arbitrary merchant URLs are fetched here."""
+    try:
+        if serper_primary() and 'serper' in FAST_PROVIDERS:
+            return _fast_provider_search('serper_search', wording, country, hl, (1, 3))
+        if 'cse' in FAST_PROVIDERS:
+            return _fast_provider_search('cse_search', wording, country, hl, (1, 3))
+        if SERPAPI_API_KEY and not serpapi_provider_degraded():
+            return _serpapi_cached_json({'engine': 'google_light', 'q': wording, 'gl': country,
+                'hl': hl, 'api_key': SERPAPI_API_KEY}, (1, 3), label='FILTER CATALOG')
+    except Exception as exc:
+        print('FILTER CATALOG source_unavailable=' + type(exc).__name__)
+    return None
+
+
+def _refine_catalog_records(data):
+    records = []
+    if not isinstance(data, dict):
+        return records
+    for field in ('organic_results', 'shopping_results', 'inline_shopping_results'):
+        for item in (data.get(field) or [])[:12]:
+            if not isinstance(item, dict):
+                continue
+            url = str(item.get('link') or item.get('url') or '')
+            title = _refine_text(item.get('title'), 220)
+            snippet = _refine_text(item.get('snippet') or item.get('description'), 600)
+            if not title or not _web_is_http_url(url) or _offer_is_editorial_url(url):
+                continue
+            if re.search(r'\b(?:rumou?rs?|leaks?|predictions?|concept render|unannounced)\b', title + ' ' + snippet, re.I):
+                continue
+            records.append({'title': title, 'snippet': snippet, 'url': url,
+                            'source': 'search_index', 'observed_at': int(time.time())})
+    return records
+
+
+def _refine_live_evidence(query, country):
+    """A cold panel uses <=2 searches. Same-key concurrent panels share one refresh.
+
+    Refresh is demand-driven after TTL, never a promise that every global SKU is
+    in stock. Dated fallback is labelled separately when providers are unavailable.
+    """
+    key = _refine_catalog_key(query, country)
+    cached = _refine_catalog_read(key)
+    observed = _refine_observed(query, country)
+    if cached is not None:
+        return _refine_evidence_pack(observed + cached['records'], cached.get('status', 'cached'), cached.get('checked_at'))
+    if not REFINE_LIVE_CATALOG_ENABLED:
+        return _refine_evidence_pack(observed + _refine_seed_records(query), 'disabled')
+    with _REFINE_CATALOG_LOCK:
+        shared = _REFINE_CATALOG_PENDING.get(key)
+        leader = shared is None
+        if leader:
+            shared = Future()
+            _REFINE_CATALOG_PENDING[key] = shared
+    if not leader:
+        try:
+            value = shared.result(timeout=4.5)
+            return _refine_evidence_pack(observed + value['records'], value['status'], value['checked_at'])
+        except Exception:
+            return _refine_evidence_pack(observed + _refine_seed_records(query), 'unavailable')
+    value = {'records': [], 'status': 'unavailable', 'checked_at': int(time.time())}
+    acquired = _REFINE_CATALOG_SLOTS.acquire(blocking=False)
+    jobs = []
+    try:
+        if acquired:
+            # Exact model requests stay exact; broad families discover recent names.
+            hl = country_search_hl(country)
+            secondary = query + ' specifications models ' + str(time.gmtime().tm_year)
+            jobs = [_REFINE_CATALOG_POOL.submit(_refine_catalog_fetch, q, country, hl)
+                    for q in dict.fromkeys((query, secondary))]
+            done, pending = wait(jobs, timeout=4.2)
+            for future in done:
+                try:
+                    value['records'].extend(_refine_catalog_records(future.result()))
+                except Exception:
+                    pass
+            for future in pending:
+                future.cancel()
+            if value['records']:
+                value['status'] = 'live_index'
+        value['records'].extend(_refine_seed_records(query))
+        _refine_catalog_write(key, value, REFINE_CATALOG_TTL_SECONDS if value['status'] == 'live_index' else 60)
+    finally:
+        if acquired:
+            _REFINE_CATALOG_SLOTS.release()
+        with _REFINE_CATALOG_LOCK:
+            _REFINE_CATALOG_PENDING.pop(key, None)
+        if not shared.done():
+            shared.set_result(copy.deepcopy(value))
+    print('FILTER CATALOG status=%s records=%s market=%s' % (value['status'], len(value['records']), country))
+    return _refine_evidence_pack(observed + value['records'], value['status'], value['checked_at'])
+
+
+def _refine_seed_records(query):
+    # Only a family-level fallback. No invented compatibility/capacity/colour data.
+    if not re.search(r'(?:\biphone\b|[اآأ]يفون)', query, re.I):
+        return []
+    if re.search(r'(?:iphone|[اآأ]يفون)\s*\d+|\b(?:case|cover|charger|protector|cable)\b', query, re.I):
+        return []
+    return [{'title': name, 'snippet': 'Official comparison model name. Catalog identity only; availability not asserted.',
+             'url': 'https://www.apple.com/iphone/compare/', 'source': 'official_dated_seed',
+             'verified_date': '2026-09-19'} for name in _REFINE_IPHONE_SEED]
+
+
+def _refine_evidence_pack(records, status, checked_at=None):
+    seen, clean = set(), []
+    seed = [r for r in records if r.get('source') == 'official_dated_seed']
+    live = [r for r in records if r.get('source') != 'official_dated_seed']
+    ordered = live[:16] + seed + live[16:]
+    for row in ordered:
+        key = (row.get('url'), row.get('title'))
+        if key in seen:
+            continue
+        seen.add(key)
+        clean.append(dict(row, id='s' + str(len(clean))))
+        if len(clean) >= 40:
+            break
+    return {'records': clean, 'status': status, 'checked_at': checked_at or int(time.time())}
+
+
+def _refine_canonical_key(key):
+    key = re.sub(r'[^a-z0-9_]', '', str(key or '').lower())[:40]
+    aliases = {'colour': 'color', 'storage_capacity': 'storage', 'capacity_storage': 'storage',
+               'phone_model': 'model', 'iphone_model': 'model', 'model_series': 'model', 'model_name': 'model', 'generation': 'model', 'series': 'model',
+               'price_range': 'price', 'budget': 'price', 'product_condition': 'condition'}
+    return aliases.get(key, key)
+
+
+def _refine_option_evidence(option, records):
+    """Check the exact source quote; model memory and client samples do not count."""
+    by_id = {r['id']: r for r in records}
+    refs = option.get('evidence_ids') or []
+    quote = _refine_text(option.get('quote'), 240)
+    if not isinstance(refs, list) or len(quote) < 2:
+        return []
+    norm = lambda s: re.sub(r'\s+', ' ', unicodedata.normalize('NFKC', str(s))).casefold()
+    term = _refine_text(option.get('term'), 64)
+    if not term:
+        return []
+    # Identifier/measurement assertions must be present in the cited evidence,
+    # not just an unrelated quote from the same article.
+    def tokens_of(value):
+        value = re.sub(r'(?<=[a-z])(?=\d)|(?<=\d)(?=[a-z])', ' ', norm(value))
+        return set(re.findall(r'[\w]+', value))
+    tokens = tokens_of(term)
+    accepted = []
+    for ref in refs[:4]:
+        if not isinstance(ref, str):
+            continue
+        row = by_id.get(ref)
+        if not row:
+            continue
+        text = norm(row.get('title', '') + ' ' + row.get('snippet', ''))
+        proof_tokens = tokens_of(quote)
+        native_quote = bool(re.search(r'[\u0600-\u06ff\u3400-\u9fff\u0900-\u097f]', quote))
+        hard = {token for token in tokens if re.search(r'\d', token)}
+        supports_value = hard <= proof_tokens if native_quote else tokens <= proof_tokens
+        if norm(quote) in text and supports_value:
+            accepted.append({'url': row['url'], 'quote': quote, 'source': row['source']})
+    return accepted
+
+
+def _refine_probe_queries(query, rows, country):
+    """Explore variants on the FIRST search without selecting them for the user.
+
+    All probes retain the entire original query; only observed, relevant variant
+    words can be appended. Results are still validated against the original query.
+    No price, condition, model generation or imagined feature is auto-selected.
+    """
+    if not TEXT_DISCOVERY_PROBE_CALLS or not query:
+        return []
+    text = query.casefold()
+    has_color = bool(_REFINE_COLOR_RE.search(text))
+    has_measure = bool(_REFINE_MEASURE_RE.search(text))
+    colors, measures = [], []
+    for row in (rows or [])[:40]:
+        title = _refine_text(row.get('title') or row.get('card_evidence_title'), 240)
+        if not title or not _local_discovery_candidate_ok(query, dict(row, title=title)):
+            continue
+        if not has_color:
+            colors.extend(m.group(1) for m in _REFINE_COLOR_RE.finditer(title))
+        if not has_measure:
+            measures.extend(re.sub(r'\s+', '', m.group(1)) for m in _REFINE_MEASURE_RE.finditer(title))
+    result = []
+    # One colour and one measured variant keeps coverage diverse, not all-black.
+    for values in (measures, colors):
+        counts = Counter(v.casefold() for v in values)
+        for term, _ in counts.most_common(2):
+            if term not in text:
+                probe = query + ' ' + term
+                if len(probe) <= WEB_API_MAX_QUERY_CHARS and probe not in result:
+                    result.append(probe)
+                    break
+    return result[:TEXT_DISCOVERY_PROBE_CALLS]
+
+
+def _refine_effective_base(context):
+    """An explicit image colour selection replaces that photographed colour.
+    Other properties stay locked. Text-only user specifications never get erased.
+    """
+    base = context['base']
+    if context.get('kind') != 'image':
+        return base
+    keys = {_refine_canonical_key(s.get('key')) for s in context.get('steps', [])}
+    if 'color' in keys or (context.get('user_extra') and _REFINE_COLOR_RE.search(context['user_extra'])):
+        # Do not destroy a colour word inside a readable compound brand.
+        protected = {}
+        for pattern in (r'Black\s*(?:&|and)?\s*Decker', r'The White Company', r'Red Wing', r'Golden Goose'):
+            for found in list(re.finditer(pattern, base, re.I)):
+                key = 'FZBRAND' + str(len(protected)) + 'TOKEN'
+                protected[key] = found.group()
+                base = base.replace(found.group(), key)
+        base = _REFINE_COLOR_RE.sub(' ', base)
+        for key, name in protected.items():
+            base = base.replace(key, name)
+    return re.sub(r'\s+', ' ', base).strip()
+
+
+def _refine_photo_description(profile):
+    if not isinstance(profile, dict):
+        return ''
+    query = _refine_text(profile.get('query') or profile.get('title'), 160)
+    if not query or re.search(r'https?://|[{}<>]', query, re.I):
+        return ''
+    parts = [query]
+    for feature in (profile.get('features') or [])[:3]:
+        value = _refine_text(feature.get('en') if isinstance(feature, dict) else feature, 55)
+        # Extra description adds visible colour/form, not unreadable capacities,
+        # material composition or invented model/SKU numbers.
+        if (value and not re.search(r'\d|\b(?:gold|diamond|leather|silver|steel|cotton|karat)\b', value, re.I)
+                and value.casefold() not in query.casefold()
+                and (_REFINE_COLOR_RE.search(value) or re.search(r'\b(?:round|square|rectangular|curved|striped|floral|woven)\b', value, re.I))):
+            parts.append(value)
+        if len(parts) == 3:
+            break
+    return _refine_text(' '.join(parts), min(200, WEB_API_MAX_QUERY_CHARS))
+
+
+def _refine_free_image_context(payload):
+    """Editable photo description / '+ detail' uses photo + text, never text-only."""
+    base = payload.get('base_query') or payload.get('query') or ''
+    edited = payload.get('edited_query')
+    if not isinstance(edited, str) or not _refine_safe_query(edited):
+        raise ValueError('invalid_query')
+    context = _refine_context(dict(payload, query=base or edited, kind='image', token=''))
+    parts = re.split(r'\s+\+\s*', edited, maxsplit=1)
+    if len(parts) == 2 and parts[1].strip():
+        # The text after '+' is an override/addition, not an immutable extra
+        # colour alongside the photographed colour. Compose it coherently.
+        context['base'] = parts[0].strip() or context['base']
+        extra = parts[1].strip()
+        context['steps'] = [{'key': 'custom_request', 'facet': 'Product details',
+                             'label': extra, 'term': extra, 'role': 'custom'}]
+        context['user_extra'] = extra
+        return context
+    edited = edited.rstrip(' +').strip()
+    if not edited:
+        raise ValueError('invalid_query')
+    context['steps'] = [] if edited.casefold() == context['base'].casefold() else [
+        {'key': 'custom_request', 'facet': 'Product details', 'label': edited, 'term': edited, 'role': 'custom'}]
+    context['edited_query'] = edited
+    context['search_query'] = edited
+    return context
+
+
 def _refine_plan(context, samples):
-    cache_key = 'simple-stream-plan:' + hashlib.sha256(json.dumps(context, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+    # Include the actual evidence revision in the cache key; new results and new
+    # catalog names must not be hidden by an old, model-only panel cache.
+    query = _refine_query(context)
+    evidence = _refine_live_evidence(query, context['country'])
+    records = evidence['records']
+    cache_key = 'grounded-plan-v52:' + hashlib.sha256(json.dumps(
+        [context, [(r.get('title'), r.get('snippet'), r.get('url')) for r in records]],
+        sort_keys=True, ensure_ascii=False).encode()).hexdigest()
     cached = _refine_cache_get(cache_key)
     if cached is not None:
         return cached
-    query = _refine_query(context)
     currency = COUNTRY_META.get(context['country'], ('', ('',), ''))[1][0]
-    data = _refine_ai(_REFINE_PLAN_PROMPT, dict(context, query=query, sample_titles=samples, market_currency=currency), tokens=3500)
+    data = _refine_ai(_REFINE_PLAN_PROMPT, dict(context, query=query,
+        # Samples help infer category ONLY. They are not signed product evidence.
+        sample_titles_untrusted=samples, market_currency=currency,
+        current_date=time.strftime('%Y-%m-%d', time.gmtime()), live_catalog=records), tokens=4500)
     if not isinstance(data.get('facets'), list):
         raise RuntimeError('invalid_ai_response')
     category = _refine_text(data.get('category'), 64)
     choices = _refine_clean_choices(data.get('choices'), query, 6)
-    mode = 'clarify' if data.get('mode') == 'clarify' and not context['clarified'] and len(choices) >= 2 else 'filters'
+    mode = 'clarify' if data.get('mode') == 'clarify' and not context['clarified'] and context['kind'] != 'image' and len(choices) >= 2 else 'filters'
     if mode == 'clarify':
         choices = [{'label': choice['label'], 'token': _refine_sign(dict(context, purpose='category', clarified=True,
                     steps=[{'key': '__category', 'facet': category, 'label': choice['label'], 'term': choice['term']}]))} for choice in choices]
         result = {'mode': mode, 'category': category, 'question': _refine_text(data.get('question'), 100),
                   'choices': choices, 'facets': [], 'plan_token': _refine_sign(dict(context, purpose='plan', mode=mode))}
     else:
-        # No repeated clarification, even if the model proposes one by mistake.
-        facets, used = [], {step['key'] for step in context['steps']}
-        fixed = {re.sub(r'[^a-z0-9_]', '', str(k).lower())[:40] for k in (data.get('fixed_keys') or []) if isinstance(k, str)}
-        for raw in data['facets'][:8]:
+        facets, used = [], {_refine_canonical_key(step['key']) for step in context['steps']}
+        fixed = {_refine_canonical_key(k) for k in (data.get('fixed_keys') or []) if isinstance(k, str)}
+        iphone = bool(re.search(r'(?:\biphone\b|[اآأ]يفون)', query, re.I))
+        iphone_fixed = bool(re.search(r'(?:iphone|[اآأ]يفون)\s*(?:\d+|air\b|duo\b|se\b)', query, re.I))
+        if iphone:
+            fixed.add('brand')
+        if iphone_fixed:
+            fixed.add('model')
+        if context['kind'] == 'text' and _REFINE_COLOR_RE.search(query):
+            fixed.add('color')
+        if re.search(r'\b\d+\s*(?:GB|TB)\b', query, re.I):
+            fixed.add('storage')
+        if re.search(r'\b(?:used|refurbished|pre-owned|open box)\b', query, re.I):
+            fixed.add('condition')
+        raw_facets = [f for f in data['facets'] if isinstance(f, dict)]
+        if iphone and not iphone_fixed and not re.search(r'\b(?:case|cover|charger|cable|protector)\b', query, re.I):
+            # Use literal complete names, never create "18 Plus" by counting up.
+            models = {}
+            pattern = re.compile(r'\biPhone\s+(?:\d{1,2}e?(?:\s+(?:Pro Max|Pro|Plus|mini))?|Air|Duo)\b', re.I)
+            for record in records:
+                if re.search(r'\b(?:case|cover|protector|cable|compatible with|for iPhone)\b', record['title'], re.I):
+                    continue
+                for match in pattern.finditer(record['title']):
+                    term = match.group()
+                    models.setdefault(term.casefold(), {'label': term, 'term': term, 'quote': term,
+                        'evidence_ids': [record['id']]})
+            if len(models) >= 2:
+                # Newest numeric generation first within this Apple family only.
+                options = list(models.values())
+                options.sort(key=lambda o: (int((re.search(r'\d+', o['term']) or ['0'])[0]),
+                    'pro max' in o['term'].lower(), 'pro' in o['term'].lower()), reverse=True)
+                raw_facets = [{'key': 'model', 'label': 'الموديل' if context['lang'] == 'ar' else 'Model',
+                    'role': 'model', 'options': options}] + [r for r in raw_facets if _refine_canonical_key(r.get('key')) != 'model']
+        for raw in raw_facets[:12]:
             if not isinstance(raw, dict):
                 continue
-            key = re.sub(r'[^a-z0-9_]', '', str(raw.get('key') or '').lower())[:40]
+            key = _refine_canonical_key(raw.get('key'))
             label = _refine_text(raw.get('label'), 48)
-            options = _refine_clean_choices(raw.get('options'), query, 7)
-            if not key or key.startswith('__') or key in used or key in fixed or not label or len(options) < 2:
+            if not key or key.startswith('__') or key in used or key in fixed or not label:
                 continue
-            if len(facets) >= 6: break
-            used.add(key); facets.append({'key': key, 'label': label, 'options': options})
+            role = str(raw.get('role') or ('price' if key == 'price' else 'condition' if key == 'condition' else 'attribute'))
+            safe_options = []
+            for option in (raw.get('options') or [])[:40]:
+                if not isinstance(option, dict):
+                    continue
+                proof = _refine_option_evidence(option, records)
+                # Only desired condition/budget can be offered without asserting
+                # that the corresponding variant is actually sold in this market.
+                condition = str(option.get('term') or '').casefold().strip()
+                intent_only = role == 'condition' and condition in ('new', 'used', 'refurbished', 'open box', 'pre-owned')
+                numeric = option.get('numeric')
+                if role == 'price':
+                    try:
+                        if not isinstance(numeric, dict) or numeric.get('currency') != currency:
+                            continue
+                        lo = float(numeric['min']) if numeric.get('min') is not None else None
+                        hi = float(numeric['max']) if numeric.get('max') is not None else None
+                        if lo is None and hi is None:
+                            continue
+                        if any(v is not None and (not __import__('math').isfinite(v) or v < 0) for v in (lo, hi)) or (lo is not None and hi is not None and lo > hi):
+                            continue
+                        numeric = {'min': lo, 'max': hi, 'currency': currency, 'unit': 'total'}
+                        intent_only = True
+                    except (TypeError, ValueError):
+                        continue
+                if not proof and not intent_only:
+                    continue
+                safe_options.append(dict(option, source_refs=proof, role=role,
+                    numeric=numeric if role == 'price' else None))
+            options = _refine_clean_choices(safe_options, query, 24 if role == 'model' or key == 'model' else 12)
+            if len(options) < 2:
+                continue
+            used.add(key)
+            facets.append({'key': key, 'label': label, 'role': role, 'options': options})
+            if len(facets) >= 6:
+                break
         catalog_id = hashlib.sha256(json.dumps([context, facets], sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:24]
         base = dict(context, clarified=True, catalog_id=catalog_id, mode='filters')
         for facet in facets:
             for index, option in enumerate(facet['options']):
-                step = dict(option, key=facet['key'], facet=facet['label'])
+                step = {k: v for k, v in option.items() if k not in ('source_refs',)}
+                step.update(key=facet['key'], facet=facet['label'], role=facet['role'])
                 option['token'] = _refine_sign(dict(base, purpose='filter', steps=context['steps'] + [step]))
                 option['id'] = facet['key'] + '_' + str(index)
-                option.pop('term')
+                option.pop('term', None)
         result = {'mode': 'filters', 'category': category, 'question': '', 'choices': [], 'facets': facets,
                   'plan_token': _refine_sign(dict(base, purpose='plan'))}
+    result.update(catalog_status=evidence['status'], catalog_checked_at=evidence['checked_at'],
+                  source_count=len(records), build=BUILD_ID)
     _refine_cache_put(cache_key, result)
     return result
 
@@ -27167,27 +27655,47 @@ def _refine_fingerprint(row):
 def _refine_has_price(row):
     if row.get('price_unavailable') or row.get('price_status') in ('suspect', 'unavailable'):
         return False
-    return bool(str(row.get('price') or '').strip() or row.get('price_amount') or row.get('price_min'))
+    return _web_row_has_numeric_price(row)
 
 
-def _refine_numeric_price(step,row):
-    bounds=step.get('numeric') or {}
-    currency=bounds.get('currency')
-    value=None
-    if row.get('price_compare_currency')==currency:
-        value=row.get('price_compare_value')
-    if value is None and row.get('currency')==currency:
-        value=row.get('price_amount')
+def _refine_numeric_price(step, row):
+    """A price range is within a budget only when its full observed interval is."""
+    bounds = step.get('numeric') or {}
+    currency = bounds.get('currency')
+    value = row.get('price_compare_value') if row.get('price_compare_currency') == currency else None
+    high = None
+    if value is None and row.get('currency') == currency:
+        value = row.get('price_amount') or row.get('price_min')
+        high = row.get('price_max')
     if value is None:
-        parser=globals().get('_web_price_number_and_currency')
-        if parser:
-            amount,unit=parser(str(row.get('price') or ''))
-            if unit==currency:value=amount
-    try:value=float(value)
-    except (ValueError,TypeError):return False
-    unit=bounds.get('unit','total').casefold()
-    if unit not in ('total','') and unit not in str(row.get('price_unit') or '').casefold():return False
-    return value>0 and (bounds.get('min') is None or value>=bounds['min']) and (bounds.get('max') is None or value<=bounds['max'])
+        quote = _web_price_quote(row.get('price'), str(row.get('currency') or ''), str(row.get('country') or ''))
+        if quote and quote.get('currency') == currency:
+            value, high = quote.get('min'), quote.get('max')
+        else:
+            amount, unit = _web_price_number_and_currency(str(row.get('price') or ''))
+            if unit == currency:
+                value = amount
+    try:
+        value = float(value)
+        high = float(high) if high is not None else value
+    except (ValueError, TypeError):
+        return False
+    if not all(__import__('math').isfinite(v) and v > 0 for v in (value, high)):
+        return False
+    # Do not treat a converted minimum as a converted entire price interval.
+    if row.get('price_kind') in ('range', 'from', 'up_to'):
+        if row.get('currency') != currency or row.get('price_kind') != 'range' or row.get('price_max') is None:
+            return False
+        try:
+            high = float(row['price_max'])
+        except (ValueError, TypeError):
+            return False
+    if not __import__('math').isfinite(high) or high < value:
+        return False
+    unit = str(bounds.get('unit') or 'total').casefold()
+    if unit not in ('total', '') and unit not in str(row.get('price_unit') or '').casefold():
+        return False
+    return (bounds.get('min') is None or value >= bounds['min']) and (bounds.get('max') is None or high <= bounds['max'])
 
 
 _REFINE_VERIFY_PROMPT = '''Check product offers against ALL supplied shopping constraints.
@@ -27212,11 +27720,30 @@ Base query is the original request; normalized_query is its faithful combination
 Use product-page attributes/card_evidence_title when present; these are fetched facts, not the user's query.'''
 
 
+_REFINE_VERIFY_PROMPT += """
+For a custom_request constraint, verify EVERY specification of normalized_query against the
+candidate, not merely one overlapping word. Provide exact evidence quotes for that key.
+The edited request may replace a photographed colour, pattern or size; preserve the product
+category and distinctive unmodified shape. A generic similar-looking category is not enough
+for a named brand/model. Unreadable storage/model/material/condition never becomes known.
+Do not copy an original-variant rejection: evaluate the actual selected variant independently.
+"""
+
+
+def _refine_evidence_text(value):
+    if isinstance(value, dict):
+        return '\n'.join(_refine_evidence_text(v) for v in value.values())
+    if isinstance(value, (list, tuple)):
+        return '\n'.join(_refine_evidence_text(v) for v in value)
+    return re.sub(r'\s+', ' ', html.unescape(str(value))).casefold()
+
+
 def _refine_verify(context, rows):
     known, pending = [], []
-    context_key = hashlib.sha256(json.dumps([context['base'], context['steps'],context.get('search_query'),context.get('_image_digest')], sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+    context_key = hashlib.sha256(json.dumps([context['base'], context['steps'], context.get('search_query'),
+        context.get('edited_query'), context.get('_image_digest'), context.get('kind')], sort_keys=True, ensure_ascii=False).encode()).hexdigest()
     for row in rows:
-        key = 'verify:' + context_key + ':' + _refine_fingerprint(row)
+        key = 'verify-v52:' + context_key + ':' + _refine_fingerprint(row)
         verdict = _refine_cache_get(key)
         if verdict is True:
             known.append(row)
@@ -27227,15 +27754,18 @@ def _refine_verify(context, rows):
     offers = [{'index': i, 'evidence': _refine_evidence(row)} for i, (row, _) in enumerate(pending)]
     images, visual_ids = [], set()
     if context.get('_image_base64'):
-        candidates=[dict(row,_classification_id=i) for i,(row,_) in enumerate(pending)]
-        reference,evidence=_web_visual_collect_evidence(context['_image_base64'],candidates)
+        candidates = [dict(row, _classification_id=i) for i, (row, _) in enumerate(pending)]
+        reference, evidence = _web_visual_collect_evidence(context['_image_base64'], candidates)
         if reference:
-            images.append(('Original reference; selected filters may change their corresponding attribute.',reference))
-            for i,inline in evidence.items():
-                visual_ids.add(i);images.append(('Offer index '+str(i),inline))
-    data={'base_query':context['base'],'normalized_query':_refine_query(context),'kind':context['kind'],
-          'constraints':context['steps'],'offers':offers}
-    response = _refine_ai(_REFINE_VERIFY_PROMPT,data,images=images)
+            images.append(('Original product reference. Explicit selections override ONLY the corresponding attribute.', reference))
+            for i, inline in evidence.items():
+                visual_ids.add(i)
+                images.append(('Offer index ' + str(i), inline))
+    data = {'base_query': context.get('edited_query') or _refine_effective_base(context),
+            'original_reference_description': context['base'],
+            'normalized_query': _refine_query(context), 'kind': context['kind'],
+            'constraints': context['steps'], 'offers': offers}
+    response = _refine_ai(_REFINE_VERIFY_PROMPT, data, images=images, tokens=3000)
     required = {step['key'] for step in context['steps']}
     accepted = set()
     raw_matches = response.get('matches')
@@ -27247,28 +27777,35 @@ def _refine_verify(context, rows):
         index = item.get('index')
         if isinstance(index, bool) or not isinstance(index, int) or not 0 <= index < len(pending):
             continue
-        evidence = json.dumps(offers[index]['evidence'], ensure_ascii=False).casefold()
+        # Quotation comparison uses actual field text, not JSON-escaped text.
+        evidence = _refine_evidence_text(offers[index]['evidence'])
         if index in visual_ids and item.get('visual_match') is not True:
             continue
         supported = set()
         for proof in item.get('proofs') or []:
             if not isinstance(proof, dict):
                 continue
-            quote = _refine_text(proof.get('quote'), 400).casefold()
-            if isinstance(proof.get('key'), str) and len(quote) >= 2 and quote in evidence:
-                supported.add(proof.get('key'))
-            if index in visual_ids and proof.get('visual') is True and re.fullmatch(r'(?:colou?r|pattern|style|shape)(?:_\w+)?',str(proof.get('key') or '')):
-                supported.add(proof['key'])
+            key = proof.get('key')
+            quote = _refine_evidence_text(_refine_text(proof.get('quote'), 400))
+            if isinstance(key, str) and len(quote) >= 2 and quote in evidence:
+                supported.add(key)
+            if index in visual_ids and proof.get('visual') is True and _refine_canonical_key(key) in ('color', 'pattern', 'style', 'shape'):
+                supported.add(key)
         for step in context['steps']:
-            if step.get('role')=='price' and step.get('numeric'):
+            if step.get('role') == 'price' and step.get('numeric'):
                 supported.discard(step['key'])
-                if _refine_numeric_price(step,pending[index][0]):supported.add(step['key'])
+                if _refine_numeric_price(step, pending[index][0]):
+                    supported.add(step['key'])
         if required <= supported:
             accepted.add(index)
     for index, (row, key) in enumerate(pending):
-        _refine_cache_put(key, index in accepted)
+        # A failed image download is not a durable negative product verdict.
+        if index in accepted or not context.get('_image_base64') or index in visual_ids:
+            _refine_cache_put(key, index in accepted)
         if index in accepted:
             known.append(row)
+    print('FILTER VERIFY kind=%s candidates=%d photos=%d accepted=%d' %
+          (context['kind'], len(pending), len(visual_ids), len(accepted)))
     return known
 
 
@@ -27286,6 +27823,7 @@ async def _refine_verified_events(response, context, request):
     status = {'error': None, 'complete': False, 'stage':'searching_stores'}
     started = time.monotonic()
     attempted = 0
+    retries, retry_at = {}, {}
     async def collect():
         buffer = ''
         async def consume(line):
@@ -27355,17 +27893,30 @@ async def _refine_verified_events(response, context, request):
                 batch = tasks.pop(task)
                 try:
                     verified = task.result()
-                except Exception:
+                except Exception as exc:
                     verified = []
                     verification_failed = True
+                    print('FILTER VERIFY retryable=' + type(exc).__name__)
+                    for row in batch:
+                        k = (row['url'], _refine_fingerprint(row))
+                        retries[k] = retries.get(k, 0) + 1
+                        if retries[k] < 3:
+                            checked.pop(row['url'], None)
+                            retry_at[row['url']] = time.monotonic() + .6 * retries[k]
                 for row in verified:
                     url = row['url']; fingerprint = _refine_fingerprint(row)
                     if url in rows and fingerprint == _refine_fingerprint(rows[url]) and _refine_has_price(rows[url]):
                         matched[url] = fingerprint
-                        yield _web_stream_event({'event': 'result', 'item': dict(rows[url], refinement_verified=True)})
+                        approved = dict(rows[url], refinement_verified=True)
+                        if context.get('kind') == 'image':
+                            # The combined verifier, not the original-variant
+                            # audit, owns eligibility after a filter override.
+                            approved['photo_match_status'] = 'refinement_verified'
+                        yield _web_stream_event({'event': 'result', 'item': approved})
             waiting = [row for url, row in rows.items() if _refine_has_price(row) and checked.get(url) != _refine_fingerprint(row)]
-            while waiting and len(tasks) < 2 and attempted < 96:
-                batch, waiting = waiting[:6], waiting[6:]
+            eligible = [row for row in waiting if time.monotonic() >= retry_at.get(row['url'], 0)]
+            while eligible and len(tasks) < 2 and attempted < 96:
+                batch, eligible = eligible[:6], eligible[6:]
                 for row in batch:
                     checked[row['url']] = _refine_fingerprint(row)
                 attempted += len(batch)
@@ -27426,7 +27977,7 @@ async def _refine_search_sources(context,request):
         tasks.append(asyncio.create_task(collect(name,source)))
     start('text',text_source(_refine_query(context)))
     if context.get('_image_base64'):
-        response=_web_image_stream_response(context['_image_base64'],context['_mime'],_refine_query(context),context['country'],context['lang'])
+        response=_web_image_stream_response(context['_image_base64'],context['_mime'],'',context['country'],context['lang'])
         start('lens',response.body_iterator)
     membership, published, finished, done_sources={}, {},set(),set()
     partial=False;recovered=False;began=time.monotonic()
@@ -27491,7 +28042,9 @@ async def web_api_refine_search(request: Request):
         return Response(content='{"error":"refinement_unavailable"}',status_code=429,media_type='application/json')
     try:
         payload=await request.json()
-        context=_refine_selection_context(payload)
+        if not isinstance(payload, dict):
+            raise ValueError('invalid_request')
+        context=_refine_free_image_context(payload) if payload.get('edited_query') is not None and payload.get('kind') == 'image' else _refine_selection_context(payload)
         if context['kind']=='image':
             raw=payload.get('image_base64')
             if not isinstance(raw,str) or not raw:raise ValueError('missing_image')
