@@ -398,7 +398,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization'], max_age=86400)
-BUILD_ID = 'v128.5.58-search-intent-parity'
+BUILD_ID = 'v128.5.59-photo-additions'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -28212,6 +28212,8 @@ async def web_api_refine_options(request: Request):
     try:
         payload = await request.json()
         context = _intent_options_context(payload)
+        if context.get('kind') == 'image' and 'extra_specs' in payload:
+            context = _photo_extra_context(context, payload['extra_specs'], prefer_filters=payload.get('extra_intent') == 'filters')
         if context['kind'] == 'image' and payload.get('image_base64'):
             raw = payload['image_base64']
             if not isinstance(raw, str) or len(raw)>WEB_API_RAW_IMAGE_MAX_BYTES*4//3+1024:
@@ -28229,7 +28231,7 @@ async def web_api_refine_options(request: Request):
         samples = payload.get('sample_titles')
         samples = [_refine_text(x, 180) for x in samples[:8] if isinstance(x, str)] if isinstance(samples, list) else []
         result = await asyncio.to_thread(_refine_plan, context, samples)
-        return dict(result, ok=True)
+        return dict(result, ok=True, image_refinement_version='photo-additions-v59')
     except ValueError as exc:
         return Response(content=json.dumps({'ok': False, 'error': str(exc)[:80]}), status_code=400, media_type='application/json')
     except Exception as exc:
@@ -28343,7 +28345,7 @@ def _refine_verify(context,rows):
     known,pending=[],[]
     signature=hashlib.sha256(json.dumps([_fz_public_context(context),context.get('search_query'),context.get('edited_query'),context.get('_image_digest')],sort_keys=True,ensure_ascii=False).encode()).hexdigest()
     for row in rows:
-        key='verify-v53:'+signature+':'+_refine_fingerprint(row)
+        key='verify-image-v59:'+signature+':'+_refine_fingerprint(row)
         verdict=_refine_cache_get(key)
         if verdict is True:known.append(row);continue
         if verdict is False:continue
@@ -28388,16 +28390,20 @@ Return only records you actually evaluated. A missing attribute is unknown, not 
         'kind':context['kind'],'constraints':context.get('steps',[]),'offers':offers},images=images,tokens=3500,timeout=12)
     matches=response.get('matches')
     if not isinstance(matches,list):raise RuntimeError('invalid_ai_response')
-    accepted=set();evaluated=set()
+    accepted=set();evaluated=set();conflicted=set()
     required={s['key'] for s in context.get('steps',[])}
     for item in matches:
         if not isinstance(item,dict):continue
         i=item.get('index')
         if isinstance(i,bool) or not isinstance(i,int) or not 0<=i<len(pending):continue
         evaluated.add(i)
-        if item.get('base_match') is not True:continue
-        if context.get('_image_base64') and item.get('visual_match') is not True:continue
-        evidence=_refine_evidence_text(offers[i]['evidence']);supported=set()
+        if item.get('base_match') is not True:
+            if item.get('base_match') is False: conflicted.add(i)
+            continue
+        if context.get('_image_base64') and item.get('visual_match') is not True:
+            if item.get('visual_match') is False and i in visual_ids: conflicted.add(i)
+            continue
+        evidence=_refine_evidence_text(offers[i]['evidence']);supported={s['key'] for s in context.get('steps',[]) if _fz_evidence_constraint(s,pending[i][0]) is True}
         for proof in item.get('proofs') or []:
             if not isinstance(proof,dict):continue
             quote=_refine_evidence_text(_refine_text(proof.get('quote'),400));key=proof.get('key')
@@ -28414,8 +28420,8 @@ Return only records you actually evaluated. A missing attribute is unknown, not 
             known.append(row);_refine_cache_put(key,True)
         # Do not cache incomplete model output / failed thumbnail downloads as
         # a durable negative verdict. A subsequent retry can collect evidence.
-        elif i in evaluated and (not context.get('_image_base64') or i in visual_ids):_refine_cache_put(key,False)
-    print('FILTER VERIFY v53 kind=%s candidates=%d photos=%d accepted=%d' % (context['kind'],len(pending),len(visual_ids),len(accepted)))
+        elif i in conflicted and (not context.get('_image_base64') or i in visual_ids):_refine_cache_put(key,False)
+    print('FILTER VERIFY v59 kind=%s candidates=%d photos=%d accepted=%d' % (context['kind'],len(pending),len(visual_ids),len(accepted)))
     return known
 
 
@@ -28667,7 +28673,13 @@ async def web_api_refine_search(request: Request):
         payload=await request.json()
         if not isinstance(payload, dict):
             raise ValueError('invalid_request')
-        context=_refine_free_image_context(payload) if payload.get('edited_query') is not None and payload.get('kind') == 'image' else _refine_selection_context(payload)
+        if payload.get('kind') == 'image' and 'extra_specs' in payload:
+            if payload.get('plan_token') or payload.get('context_token') or payload.get('token'):
+                context = _photo_extra_context(_refine_selection_context(payload), payload['extra_specs'], prefer_filters=payload.get('extra_intent') == 'filters')
+            else:
+                context = _refine_free_image_context(payload)
+        else:
+            context = _refine_free_image_context(payload) if payload.get('edited_query') is not None and payload.get('kind') == 'image' else _refine_selection_context(payload)
         if context['kind']=='image':
             raw=payload.get('image_base64')
             if not isinstance(raw,str) or not raw:raise ValueError('missing_image')
@@ -28693,7 +28705,15 @@ async def web_api_refine_search(request: Request):
                 await asyncio.wait({task},timeout=.8)
             prepared=task.result()
             response=StreamingResponse(_refine_search_sources(prepared,request))
-            async for event in _refine_verified_events(response,prepared,request):yield event
+            async for event in _refine_verified_events(response,prepared,request):
+                if prepared.get('kind') == 'image' and 'user_extra' in prepared:
+                    try:
+                        item=json.loads(event)
+                        if item.get('event') in ('start','done'):
+                            item['extra_specs_applied']=prepared['user_extra']
+                            event=_web_stream_event(item)
+                    except (TypeError,ValueError):pass
+                yield event
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -30845,3 +30865,158 @@ def _local_discovery_candidate_ok(query,item,visual=False):
 def _findzia_stream_candidate_ok(query,item):
     result=_parity_candidate_verdict(query,item or {})
     return result if result is not None else _findzia_stream_candidate_ok_v57(query,item)
+
+
+# ---------------------------------------------------------------------------
+# v128.5.59 — explicit photo additions, independent of the internal caption.
+# No UI text is substituted for the uploaded image. Legacy full-edit requests
+# retain their old contract; new clients send extra_specs, including "" to clear.
+# ---------------------------------------------------------------------------
+_PHOTO_ADDITION_LIMIT = min(500, WEB_API_MAX_QUERY_CHARS)
+_PHOTO_EXTRA_NEGATION = re.compile(r'(?i)\b(?:not|without|except|no|non|sin|sans|ohne)\b|بدون|ليس|غير|لا اريد|لا أريد')
+
+
+def _photo_addition_steps(extra):
+    """Split only known literal modifiers. Unparsed text remains a full constraint.
+
+    In particular a plain colour becomes `color`, so the visual checker can
+    prove it from the candidate photo; it is not an impossible textual quote
+    requirement under custom_request. Negations stay intact for semantic review.
+    """
+    if not extra: return []
+    remain = extra
+    result = []
+    def add(key, term, label):
+        result.append({'key':key,'facet':_intent_label(key,'en'), 'term':term,
+                       'label':label,'role':'attribute','origin':'photo_addition'})
+    if not _PHOTO_EXTRA_NEGATION.search(extra):
+        for key, vocab in (('color',_PARITY_COLORS),('material',_PARITY_MATERIALS)):
+            seen = _parity_values(remain,vocab)
+            if len(seen) != 1: continue
+            canonical = next(iter(seen))
+            variants=sorted(vocab[canonical],key=len,reverse=True)
+            pattern=r'(?<!\w)(?:'+ '|'.join(re.escape(v) for v in variants) +r')(?!\w)'
+            matches=list(re.finditer(pattern,remain,re.I))
+            if matches:
+                add(key,canonical,matches[0].group())
+                remain=re.sub(pattern,' ',remain,flags=re.I)
+        condition = re.fullmatch(r'(?i)\s*(?:condition\s*[:：]?\s*)?(refurbished|renewed|used|new|مجدد|مجدّد|مستعمل|جديد)\s*',remain)
+        if condition:
+            label=condition[1];term={'renewed':'refurbished','مجدد':'refurbished','مجدّد':'refurbished','مستعمل':'used','جديد':'new'}.get(label.lower(),label.lower())
+            add('condition',term,label);remain=remain[:condition.start()]+' '+remain[condition.end():]
+        capacity = re.search(r'(?i)(?<!\w)(\d+(?:\.\d+)?)\s*(GB|TB|جيجابايت|تيرابايت)\s*(RAM|SSD|HDD)?(?!\w)',remain)
+        if capacity:
+            unit={'جيجابايت':'GB','تيرابايت':'TB'}.get(capacity[2],capacity[2].upper())
+            role=(capacity[3] or '').upper();key='memory' if role=='RAM' else 'storage'
+            add(key,capacity[1]+unit+(' '+role if role else ''),capacity.group().strip())
+            remain=remain[:capacity.start()]+' '+remain[capacity.end():]
+        size=re.search(r'(?i)(?:\bsize|مقاس)\s*[:：]?\s*([A-Za-z0-9.]+)',remain)
+        if size:
+            add('size',size[1],size.group());remain=remain[:size.start()]+' '+remain[size.end():]
+    # Never discard unknown modifiers (waterproof, natural diamond, allergy, etc).
+    residue=re.sub(r'(?i)(?<!\w)(?:and|with|color|colour|باللون|لون|اللون|و)(?!\w)',' ',remain)
+    residue=re.sub(r'[\s,+;،]+',' ',residue).strip()
+    if residue:
+        result.append({'key':'custom_request','facet':'Product details','term':residue,
+                       'label':residue,'role':'custom','origin':'photo_addition'})
+    return result
+
+
+def _photo_extra_context(context, extra, prefer_filters=False):
+    if context.get('kind') != 'image': raise ValueError('image_required')
+    if not isinstance(extra,str) or len(extra)>_PHOTO_ADDITION_LIMIT: raise ValueError('invalid_photo_additions')
+    if any(ord(c)<32 and c not in '\t\r\n' for c in extra): raise ValueError('invalid_photo_additions')
+    extra=re.sub(r'\s+',' ',extra).strip().lstrip('+').strip()
+    c=dict(context)
+    # Rebuild from the immutable image base; never append the previous search.
+    added=_photo_addition_steps(extra)
+    if prefer_filters:
+        chosen={s['key']:s for s in c.get('steps',[]) if s.get('origin')!='photo_addition'}
+        shadowed={s['key'] for s in added if s['key'] in chosen and s['key']!='custom_request'}
+        if shadowed:
+            # The newly clicked filter owns its dimension. Remove that older
+            # typed addition rather than submit contradictory colours/sizes.
+            extra=' '.join(s['label'] for s in added if s['key'] not in shadowed)
+            added=[s for s in added if s['key'] not in shadowed]
+    keys={s['key'] for s in added}
+    c['steps']=[copy.deepcopy(s) for s in c.get('steps',[]) if s.get('origin')!='photo_addition' and s.get('key') not in keys]+added
+    if len(c['steps'])>16: raise ValueError('too_many_details')
+    c['user_extra']=extra
+    c.setdefault('root_reference',c['base'])
+    for field in ('edited_query','search_query','display_query','query_native','query_en','retrieval_queries','recovery_query'):
+        c.pop(field,None)
+    return c
+
+
+_refine_free_image_context_v58 = _refine_free_image_context
+_fz_public_context_v58 = _fz_public_context
+_intent_options_context_v58 = _intent_options_context
+_refine_compose_v58 = _refine_compose
+_fz_build_plan_v58 = _fz_build_plan
+_fz_evidence_constraint_v58 = _fz_evidence_constraint
+
+
+def _fz_public_context(context):
+    c=_fz_public_context_v58(context)
+    if context.get('kind')=='image' and 'user_extra' in context: c['user_extra']=context['user_extra']
+    return c
+
+
+def _refine_free_image_context(payload):
+    if 'extra_specs' not in payload: return _refine_free_image_context_v58(payload)
+    base=payload.get('base_query') or payload.get('query') or 'Product in photo'
+    if not isinstance(base,str): raise ValueError('invalid_query')
+    c=_refine_context(dict(payload,query=base,kind='image',token='',context_token=''))
+    return _photo_extra_context(c,payload['extra_specs'])
+
+
+def _intent_options_context(payload):
+    # A description may still be pending while a user adds a preference. It is
+    # an internal hint only; original bytes/digest remain mandatory for execution.
+    if isinstance(payload,dict) and payload.get('kind')=='image' and not payload.get('query') and not payload.get('plan_token') and not payload.get('context_token'):
+        payload=dict(payload,query=payload.get('base_query') or 'Product in photo')
+    return _intent_options_context_v58(payload)
+
+
+def _fz_build_plan(context, data, evidence):
+    plan=_fz_build_plan_v58(context,data,evidence)
+    if context.get('kind')=='image':
+        # Textual additions remain in their own channel, not sticky filter
+        # selections whose provenance would be lost on the next signed plan.
+        added={s['key'] for s in context.get('steps',[]) if s.get('origin')=='photo_addition'}
+        plan['selection']={k:v for k,v in (plan.get('selection') or {}).items() if k not in added}
+        plan['photo_extra_specs']=context.get('user_extra','')
+    return plan
+
+
+def _refine_compose(context):
+    if context.get('kind')!='image': return _refine_compose_v58(context)
+    c=dict(context);c.setdefault('root_reference',c['base'])
+    # New addition requests do not turn "red" into an edited product identity.
+    if 'user_extra' in c: c.pop('edited_query',None)
+    result=_refine_compose_v58(c)
+    result['user_extra']=c.get('user_extra','')
+    result['root_reference']=c['root_reference']
+    return result
+
+
+def _fz_evidence_constraint(step,row):
+    key=_refine_canonical_key(step.get('key'))
+    # Apply the same source-literal equivalences to image and text constraints.
+    if key in ('color','condition','material','size','storage','memory','accessory_type','model'):
+        verdict=_parity_constraint(step,row)
+        if verdict is not None:return verdict
+    return _fz_evidence_constraint_v58(step,row)
+
+
+_REFINE_VERIFY_PROMPT += """
+Photo additions contract v59: original_reference_description is a fallible automatic
+caption, NOT a separate shopper constraint. The reference PHOTO is authoritative
+for the original product identity. A spelling/recognition error in that caption
+must not overrule legible text in the reference. Explicit selected model/brand
+constraints still require exact supported compatibility. All supplied selections
+replace only their corresponding photographed traits. Prove a selected colour
+with visual:true under its COLOR key if its own candidate photo shows the colour.
+Never infer hidden storage, material composition, purity, allergy, or condition
+from a photo. Unknown residual custom_request text must still be verified in full.
+"""
