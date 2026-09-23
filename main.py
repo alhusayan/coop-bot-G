@@ -398,7 +398,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization'], max_age=86400)
-BUILD_ID = 'v128.5.61-smart-details'
+BUILD_ID = 'v128.5.62-price-integrity'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -3084,7 +3084,7 @@ def _photo_identity(image_b64, mime_type):
 
 def _photo_literal_contains(haystack, needle):
     """Complete OCR words only; never complete an unreadable model suffix."""
-    if not isinstance(needle, str) or not needle.strip() or re.search(r'[?…�]', needle):
+    if not isinstance(needle, str) or not needle.strip() or re.search(r'[?… ]', needle):
         return False
     text, value = _photo_identity_text(haystack), _photo_identity_text(needle)
     if not value or value in ('unknown', 'unclear', 'unreadable', 'غير معروف', 'غير واضح'):
@@ -18672,7 +18672,7 @@ def _web_fetch_page_snapshot(url, country=''):
                     parsed_data = _web_fallback_page_price(html, final_url, metadata, country) or parsed_data
                 except Exception as exc:
                     print('WEB PAGE PRICE FALLBACK ERR host=' + parsed.netloc + ': ' + type(exc).__name__)
-            data.update({k:parsed_data[k] for k in ('price_kind','price_min','price_max','price_unit','price_tax_note','price_tax_note') if k in parsed_data})
+            data.update({k:parsed_data[k] for k in ('price_kind','price_min','price_max','price_unit','price_tax_note','price_evidence_scope','price_evidence_text') if k in parsed_data})
             data['price'] = parsed_data.get('price')
             data['currency'] = str(parsed_data.get('currency') or '').upper().strip()
             data['price_source'] = parsed_data.get('price_source') or ''
@@ -19030,6 +19030,8 @@ def _web_extract_exact_page_price(html, url):
         # Never borrow a price from a different URL/variant of the same product.
         resolved = exact_offers or [o for o in resolved if not o.get('url')]
         for offer in resolved:
+            if _pi_installment_offer(offer):
+                continue
             if offer.get('priceValidUntil') and str(offer['priceValidUntil'])[:10] < time.strftime('%Y-%m-%d', time.gmtime()):
                 continue
             if offer.get('businessFunction') and not str(offer['businessFunction']).endswith('Sell'):
@@ -19077,6 +19079,8 @@ def _web_extract_exact_page_price(html, url):
     if page_ok and len(scopes) == 1:
         values = []
         for offer in scopes[0].select('[itemprop="offers"]'):
+            if _pi_dom_bad(offer):
+                continue
             if not str(offer.get('itemtype') or '').endswith('/Offer'):
                 continue
             price = offer.select_one('[itemprop="price"]')
@@ -19948,6 +19952,10 @@ async def _web_with_live_prices(source, lang, country, allow_paid=True, wait_sec
         if item.get('hidden') or _web_identity_offer_key(item) in rejected or not _market_offer_allowed(item, market):
             return None
         item = dict(item)
+        integrity_issue = _pi_price_reason(item) or (item.get('price_integrity_reason') if item.get('price_integrity_status') == 'pending' else '')
+        if integrity_issue:
+            item = _pi_quarantine(item, integrity_issue)
+            print('PRICE INTEGRITY pending reason=%s host=%s' % (integrity_issue, _more_result_domain(item.get('url'))))
         if item.get('price') and not _web_confirmable_price(item):
             item.update(price_unconfirmed=str(item['price']),price='',price_amount=None,
                         price_verified=False,price_pending=True,price_status='loading')
@@ -19962,9 +19970,9 @@ async def _web_with_live_prices(source, lang, country, allow_paid=True, wait_sec
         previous_price = _web_price_facts(merged) if _web_row_has_numeric_price(merged) else {}
         merged.update(item)
         merged.update(image_fields)
-        if not _web_row_has_numeric_price(merged) and previous_price:
+        if not _web_row_has_numeric_price(merged) and previous_price and not integrity_issue:
             merged.update(previous_price)
-        if key in facts:
+        if key in facts and (not integrity_issue or facts[key].get('price_integrity_status') == 'confirmed'):
             merged.update(facts[key])
             merged.update(_web_merge_offer_images(merged, image_fields))
         has_price = _web_row_has_numeric_price(merged)
@@ -20017,6 +20025,9 @@ async def _web_with_live_prices(source, lang, country, allow_paid=True, wait_sec
         detail_facts = {k:data[k] for k in _CARD_FACT_FIELDS + ('condition','availability') if k in data}
         if detail_facts:
             facts[key] = dict(facts.get(key) or {}, **detail_facts)
+        issue = _pi_price_reason(dict(current, **data))
+        if issue and data.get('price'):
+            data = _pi_quarantine(dict(current, **data), issue)
         price_facts = _web_price_facts(data)
         # A late indexed response cannot replace a verified/live price.
         if price_facts and not (phase == 'live_index_price' and _web_row_has_numeric_price(current)):
@@ -31579,3 +31590,526 @@ async def web_api_evaluate(request:Request):
     except Exception as exc:
         print('FINDZIA EVALUATION unavailable='+type(exc).__name__)
         return JSONResponse({'ok':False,'error':'evaluation_unavailable'},status_code=503)
+
+# ---------------------------------------------------------------------------
+# v128.5.62 — Price provenance: scoped product offers, never page-wide numbers.
+# Shared by text, Lens, image refinements, recovery, and card serialization.
+# No new provider, price inference, FX source, or eager per-card AI request.
+# ---------------------------------------------------------------------------
+_PI_VERSION = 'price-integrity-v62'
+_PI_EXPLICIT_CURRENCY = re.compile(r'(?:'+_WEB_PRICE_CUR_WORDS+'|'+_WEB_PRICE_CUR_SYMS+r'|元|人民币)',re.I)
+_PI_ANCESTOR_NOISE = re.compile(
+    r'(?:^|[\s_\-])(?:review\w*|rating\w*|stars?|recommend\w*|related\w*|upsell\w*|crosssell\w*|shipping\w*|delivery\w*|freight|postage|install\w*|monthly|financ\w*|credit\w*|payment-plan|deposit|coupon\w*|loyalty\w*|cashback|reward\w*|tax\w*|vat|old|was|compare\w*|rrp|msrp|original|regular|strike\w*|suggest\w*|lens-addon|add-on|mensual\w*|rata|rateale|spedizion\w*|livraison|mensualit\w*|versement\w*)(?:$|[\s_\-])', re.I)
+_PI_NEGATIVE_BEFORE = re.compile(
+    r'(?:shipping|delivery|postage|save|saving|savings|was|rrp|msrp|coupon|cashback|deposit|fee|tax|rating|review|'
+    r'livraison|frais(?: de port)?|mensualit[eé]s?|[eé]conomisez|ancien prix|spedizione|prezzo delle lenti|'
+    r'prix des verres|aggiungi lenti|sconto|risparmi|rata|anticipo|versand|porto|rabatt|versandkosten|'
+    r'env[ií]o|ahorra|cuota|entrada|frete|شحن|توصيل|خصم|قسط|تقييم|وفر|دفعة|توفير)\s*[:=\-]?\s*$',re.I)
+_PI_NEGATIVE_AFTER = re.compile(
+    r'^\s*(?:/\s*(?:mo(?:nth)?s?|mois|mese|mes|monat|anno|year|yr)|per\s+(?:month|year)|'
+    r'(?:par|al|pro|por|ao)\s+(?:mois|mese|mes|monat|m[eê]s)|monthly|instalments?|installments?|'
+    r'(?:for|pour)\s+\d+\s*(?:months?|mois)|(?:shipping|delivery|postage|frais|spedizione|versand)|'
+    r'%|شهري|بالشهر|/شهر|قسط|توصيل|شحن|运费|月供)',re.I)
+_PI_COLLECTION_PARTS = frozenset(('search','category','categories','collections','catalog','catalogue','browse','results','list','listing'))
+
+
+def _pi_clean(value):
+    return re.sub(r'\s+',' ',html.unescape(str(value or '')).translate(_PRICE_CHAR_TRANSLATION)).strip()
+
+
+def _pi_bad_label(value):
+    # CamelCase names are tokenized: shippingPrice, monthlyPayment, ratingValue.
+    value=re.sub(r'([a-z])([A-Z])',r'\1 \2',str(value or ''))
+    value=re.sub(r'[^A-Za-z0-9_-]+',' ',value)
+    return bool(_PI_ANCESTOR_NOISE.search(value))
+
+
+def _pi_money_mentions(value,currency='',country=''):
+    """Currency-anchored amounts with local role context. No bare review digits."""
+    text=_pi_clean(value)[:2400];hits=[];spans=[]
+    for pat in _WEB_PRICE_PATS:
+        for match in pat.finditer(text):
+            start,end=match.span()
+            # A number must be consumed completely (no '3' out of '3.199,00').
+            if start and text[start-1] in '0123456789.,':continue
+            if end<len(text) and text[end] in '0123456789.,' and end+1<len(text) and text[end+1].isdigit():continue
+            raw=match.group(0).strip()
+            before=text[max(0,start-70):start];after=text[end:end+65]
+            negative_after=bool(_PI_NEGATIVE_AFTER.search(after))
+            # '82 EUR Shipping: 4 EUR' introduces the NEXT charge. In contrast,
+            # '4 EUR shipping' labels this amount as shipping.
+            if re.match(r'^\s*(?:shipping|delivery|postage|frais|spedizione|versand)\s*[:=]?\s*(?:(?:'+_WEB_PRICE_CUR_WORDS+'|'+_WEB_PRICE_CUR_SYMS+r')\s*)?\d',after,re.I):negative_after=False
+            if _PI_NEGATIVE_BEFORE.search(before) or negative_after:continue
+            if any(start<aend and end>astart for astart,aend in spans):continue
+            quote=_web_price_quote(raw,currency,country)
+            if not quote:continue
+            spans.append((start,end));hits.append((start,quote))
+    return [q for _,q in sorted(hits,key=lambda x:x[0])]
+
+
+def _pi_visible_quote(value,currency='',country='',allow_bare=False):
+    raw=_pi_clean(value)
+    if not raw:return None
+    if _PI_NEGATIVE_BEFORE.search(raw.split(' ',1)[0]+' ') or _PI_NEGATIVE_AFTER.search(raw):return None
+    if _PI_EXPLICIT_CURRENCY.search(raw) or allow_bare:
+        q=_web_price_quote(re.sub(r'\s*\*+$','',raw),currency,country)
+        if q:return q
+    quotes=_pi_money_mentions(raw,currency,country)
+    if len({(q['kind'],q.get('min'),q.get('max'),q['currency']) for q in quotes})==1:return quotes[0]
+    return None
+
+
+def _pi_index_record(item):
+    """Sanitize provider money without altering title/URL/image/country evidence."""
+    if not isinstance(item,dict):return item
+    out=dict(item);obj=item.get('price') if isinstance(item.get('price'),dict) else {}
+    raw=obj.get('value') if obj else item.get('price')
+    currency=obj.get('currency') or item.get('currency') or ''
+    country=str(item.get('_price_market') or item.get('_shopping_gl') or item.get('country') or '').lower()
+    rich=item.get('rich_snippet');clean_rich={};visible=[]
+    for side in ('top','bottom'):
+        block=(rich or {}).get(side) if isinstance(rich,dict) else None
+        if not isinstance(block,dict):continue
+        d=dict(block.get('detected_extensions') or {});ext=[]
+        for piece in block.get('extensions') or []:
+            # An extension '4' with currency from the parent is a rating/count,
+            # NOT an explicit price. The adjacent '82,20 €' is the evidence.
+            for part in re.split(r'[|·]',str(piece)):
+                q=_pi_visible_quote(part,d.get('currency') or currency,country)
+                if q:ext.append(_web_format_quote(q));visible.append(q)
+        if ext:d={k:v for k,v in d.items() if k not in ('price','price_from','price_to','currency')}
+        elif d.get('price') is not None:
+            # Tiny *derived* integers without any displayed monetary evidence
+            # are ambiguous with a star score. Direct structured price fields
+            # and genuinely priced inexpensive products are not blocked.
+            v=d.get('price')
+            try:small=float(v).is_integer() and 0<float(v)<=5
+            except (ValueError,TypeError):small=False
+            if small:d.pop('price',None)
+        clean_rich[side]=dict(block,extensions=ext,detected_extensions=d)
+    out['rich_snippet']=clean_rich
+    if raw not in (None,''):
+        # A named price field may legitimately be numeric + declared currency.
+        q=_pi_visible_quote(raw,currency,country,allow_bare=bool(currency))
+        if not q:
+            out.update(price='',price_value=None,extracted_price=None)
+            if obj:out['price']={'value':'','currency':currency}
+        else:
+            out['price']=_web_format_quote(q)
+    elif visible:
+        values={(q['kind'],q.get('min'),q.get('max'),q['currency']) for q in visible}
+        if len(values)==1:out['price']=_web_format_quote(visible[0])
+        elif len(values)>1:
+            # Conflicting unrelated snippet amounts are not a range.
+            out.update(price='',price_value=None,extracted_price=None,rich_snippet={})
+    return out
+
+
+_pi_index_money_v61=_web_indexed_offer_money
+_pi_index_quote_v61=_web_indexed_offer_quote
+
+def _web_indexed_offer_money(item):
+    return _pi_index_money_v61(_pi_index_record(item))
+
+def _web_indexed_offer_quote(item):
+    return _pi_index_quote_v61(_pi_index_record(item))
+
+def _local_discovery_snippet_price(row):
+    q=_web_indexed_offer_quote(dict(row,price='',price_value=None,extracted_price=None))
+    return _web_format_quote(q) if q else ''
+
+def _local_discovery_plain_snippet_price(row,country):
+    text=' '.join(str(row.get(k) or '') for k in ('snippet','description'))
+    if not text or len(text)>1200:return ''
+    quote=_pi_visible_quote(text,'',country)
+    if not quote or quote['currency'] not in set(country_currency_codes(country)):return ''
+    if quote['kind']!='exact':return ''
+    return _web_format_quote(quote)
+
+def _google_organic_price_text(row):
+    if not isinstance(row,dict):return ''
+    q=_web_indexed_offer_quote(row)
+    if not q:
+        q=_pi_visible_quote(row.get('snippet') or '',str(row.get('currency') or ''),str(row.get('_price_market') or ''))
+    return _web_format_quote(q) if q else ''
+
+def _safe_embedded_price(item):
+    if not isinstance(item,dict) or _lens_has_price(item):return item
+    text=' '.join(str(item.get(k) or '') for k in ('price','snippet','extensions'))
+    q=_pi_visible_quote(text,str(item.get('currency') or ''),str(item.get('_lens_country') or ''))
+    if not q or _price_collides_with_measurement(q['min'] or q['max'],item.get('title')):return item
+    return dict(item,price=_web_format_quote(q),price_value=q['min'] or q['max'],currency=q['currency'],price_source='embedded_lens_text')
+
+
+_pi_china_url_v61=_china_global_product_url
+_pi_direct_url_v61=_web_is_direct_product_page_url
+_pi_lens_url_v61=is_lens_product_url
+
+def _china_global_product_url(domain,url):
+    """Validate an actual product ID before ignoring irrelevant tracking keys."""
+    try:
+        p=urllib.parse.urlsplit(str(url or ''));host=(p.hostname or '').lower();path=urllib.parse.unquote(p.path).lower()
+        if p.scheme not in ('https','http') or p.username or p.password or not _host_matches_any(host,(domain,)):return False
+        # Validate full route, not a '-p-123' substring on a search/store page.
+        segments=set(path.strip('/').split('/'))
+        if segments & (_PI_COLLECTION_PARTS | {'store','stores','shop','shops','wholesale','all-products'}):return False
+        if domain=='aliexpress.com':return bool(re.fullmatch(r'/(?:[a-z]{2}/)?item/\d{6,}(?:\.html)?/?',path))
+        if domain=='temu.com':
+            if re.fullmatch(r'/(?:[a-z]{2}(?:-[a-z]{2})?/)?[^/]+-g-\d{6,}(?:\.html)?/?',path):return True
+            if re.fullmatch(r'/(?:[a-z]{2}(?:-[a-z]{2})?/)?goods(?:\.html)?/?',path):
+                qs=urllib.parse.parse_qs(p.query);return any(re.fullmatch(r'\d{6,}',v or '') for k in ('goods_id','goodsid') for v in qs.get(k,[]))
+            return bool(re.fullmatch(r'/goods/\d{6,}(?:\.html)?/?',path))
+        if domain=='shein.com':return bool(re.fullmatch(r'/(?:[a-z]{2}/)?[^/]+(?:-p-|product-p-)\d{4,}(?:\.html)?/?',path))
+        return _pi_china_url_v61(domain,url)
+    except (ValueError,TypeError):return False
+
+def _pi_classified_detail(url):
+    try:
+        p=urllib.parse.urlsplit(str(url or ''))
+        if not _host_matches_any(p.hostname or '',('opensooq.com',)):return None
+        return bool(re.match(r'^/(?:[a-z]{2}/)?(?:search|post|posts|listing|listings)/\d{5,}(?:/|$)',p.path,re.I))
+    except (ValueError,TypeError):return False
+
+def _web_is_direct_product_page_url(url,store_name=''):
+    classified=_pi_classified_detail(url)
+    return classified if classified is not None else _pi_direct_url_v61(url,store_name)
+
+def is_lens_product_url(url,item=None):
+    classified=_pi_classified_detail(url)
+    if classified is not None:return classified
+    try:
+        host=urllib.parse.urlsplit(str(url or '')).hostname or ''
+        for domain in ('temu.com','aliexpress.com','shein.com'):
+            if _host_matches_any(host,(domain,)):return _china_global_product_url(domain,url)
+    except ValueError:return False
+    return _pi_lens_url_v61(url,item)
+
+
+def _pi_collection_page(soup,url):
+    if not _web_is_direct_product_page_url(url):return True
+    # ItemList is primary content only. A related carousel on a product page
+    # must NOT make the actual product disappear.
+    has_product=False;has_list=False
+    for script in soup.select('script[type="application/ld+json"]')[:24]:
+        try:root=json.loads(script.string or script.get_text() or '')
+        except (ValueError,TypeError):continue
+        queue=list(root) if isinstance(root,list) else [root]
+        for node in queue:
+            if not isinstance(node,dict):continue
+            types=node.get('@type',[]);types=types if isinstance(types,list) else [types]
+            types={str(v).rsplit('/',1)[-1] for v in types}
+            has_product=has_product or bool(types & {'Product','ProductGroup'})
+            has_list=has_list or bool(types & {'ItemList','CollectionPage','SearchResultsPage'})
+            for key in ('@graph','mainEntity'):
+                v=node.get(key);queue.extend(v if isinstance(v,list) else [v] if isinstance(v,dict) else [])
+    return has_list and not has_product
+
+
+def _pi_same_url(value,url):
+    return bool(value) and _web_price_url_key(urllib.parse.urljoin(url,str(value)))==_web_price_url_key(url)
+
+
+def _pi_json_documents(blob):
+    blob=str(blob or '')[:1200000]
+    soup=BeautifulSoup(blob,'html.parser') if not blob.lstrip().startswith(('{','[')) and '<' in blob else None
+    values=[(s.string or s.get_text() or '') for s in soup.find_all('script')[:50]] if soup else [blob]
+    decoder=json.JSONDecoder()
+    for value in values:
+        value=value.strip()
+        try:yield json.loads(value);continue
+        except (TypeError,ValueError):pass
+        # Support JSON assigned to a JS variable without evaluating JavaScript.
+        m=re.match(r'^(?:(?:window\.)?[\w.$]+|(?:var|let|const)\s+[\w$]+)\s*=\s*',value)
+        if m:
+            try:
+                doc,end=decoder.raw_decode(value[m.end():]);tail=value[m.end()+end:].strip()
+                if tail in ('',';'):yield doc
+            except (TypeError,ValueError):pass
+
+
+def _pi_node_money(node,currency):
+    """Current selling-price member of ONE already identified product object."""
+    if not isinstance(node,dict):return None
+    if any(node.get(k) for k in ('billingDuration','billingIncrement','referenceQuantity','down_payment','installments_description')):return None
+    code=node.get('priceCurrency') or node.get('currency') or node.get('currencyCode') or currency
+    choices=[]
+    for k in ('salePrice','sale_price','sellingPrice','selling_price','currentPrice','current_price','finalPrice','final_price','offerPrice','specialPrice','discountedPrice','price_amount','priceAmount','price'):
+        value=node.get(k)
+        if isinstance(value,dict):
+            code2=value.get('currency') or value.get('currencyCode') or code
+            value=next((value.get(n) for n in ('amount','value','raw','price') if value.get(n) is not None),None)
+        else:code2=code
+        if value is None or isinstance(value,(dict,list,bool)):continue
+        q=_pi_visible_quote(value,code2,allow_bare=True)
+        if q and q['kind']=='exact':choices.append((q['min'],q['currency'],k))
+    if not choices:return None
+    # Named selling price wins over regular price only within the SAME product.
+    best=choices[0];return best[0],best[1]
+
+
+def _pi_scoped_json_price(blob,url,title='',currency_hint=''):
+    candidates=[];selected_variant=(urllib.parse.parse_qs(urllib.parse.urlsplit(url).query).get('variant') or [''])[0]
+    for root in _pi_json_documents(blob):
+        queue=[(root,(),currency_hint)];visits=0
+        while queue and visits<2200:
+            node,path,cur=queue.pop(0);visits+=1
+            if len(path)>12:continue
+            if isinstance(node,list):
+                queue.extend((v,path+(str(i),),cur) for i,v in enumerate(node[:100]));continue
+            if not isinstance(node,dict):continue
+            cur=node.get('priceCurrency') or node.get('currency') or node.get('currencyCode') or cur
+            name=str(node.get('name') or node.get('title') or node.get('productName') or '')
+            link=node.get('url') or node.get('canonicalUrl') or node.get('productUrl')
+            own_id=str(node.get('sku') or node.get('productId') or node.get('id') or '')
+            type_name=str(node.get('@type') or '').lower()
+            role=' '.join(path)
+            in_product=bool(re.search(r'(?i)(?:^|[ .])(?:product|productInfo|productDetail|selectedProduct|selectedVariant)(?:$|[ .])',role))
+            has_variant_constraint=bool(selected_variant)
+            exact_link=_pi_same_url(link,url)
+            id_matches=bool(own_id and (own_id==selected_variant or re.search(r'(?<![\w])'+re.escape(own_id)+r'(?![\w])',urllib.parse.unquote(url))))
+            title_match=bool(title and name and _price_identity_score(title,name)>=.86 and not _findzia_hard_product_mismatch(title,name) and not _web_identity_fact_conflicts(title,name))
+            matched=exact_link or id_matches or (in_product and title_match and not link and not has_variant_constraint)
+            if matched and not _pi_bad_label(role) and type_name not in ('rating','aggregaterating','review','offershippingdetails'):
+                money=_pi_node_money(node,cur)
+                if money:candidates.append(money)
+                # Allow price inside the identified product's own offer, not
+                # arbitrary descendants such as recommendations or shipping.
+                offer=node.get('offers') or node.get('priceInfo')
+                if isinstance(offer,dict) and (not offer.get('url') or _pi_same_url(offer['url'],url)):
+                    money=_pi_node_money(offer,cur)
+                    if money:candidates.append(money)
+            for key,value in node.items():
+                if not isinstance(value,(dict,list)) or _pi_bad_label(key):continue
+                if key.lower() in ('itemlistelement','relatedproducts','recommendations','shippingdetails','aggregaterating','review','reviews','installments','suggestions'):continue
+                queue.append((value,path+(str(key),),cur))
+    unique=set(candidates)
+    return next(iter(unique)) if len(unique)==1 else (None,'')
+
+
+def _web_deep_json_price_scan(html,url=''):
+    # Legacy callers now receive a bound price only, not the first regex match
+    # or the most frequently repeated number elsewhere on a webpage.
+    return _pi_scoped_json_price(html,url)
+
+
+def _pi_dom_bad(el):
+    for node in [el]+list(el.parents)[:8]:
+        if getattr(node,'name',None) in ('s','del','strike','script','style','template','nav','footer','header'):return True
+        attrs=getattr(node,'attrs',{}) or {}
+        if 'hidden' in attrs or attrs.get('aria-hidden')=='true':return True
+        if re.search(r'display\s*:\s*none|visibility\s*:\s*hidden',str(attrs.get('style') or ''),re.I):return True
+        label=' '.join(str(attrs.get(k) or '') for k in ('id','class','itemprop','data-testid','aria-label'))
+        if _pi_bad_label(label):return True
+    return False
+
+
+def _web_dom_price(soup,url,currency_hint,title):
+    if _pi_collection_page(soup,url):return None
+    # Prefer the purchase container. With no explicit container, stay bounded
+    # and reject ambiguity instead of selecting the first price in DOM order.
+    scope=soup.select_one('[data-product-main], .product-summary, .product_summary, .summary.entry-summary, [id="product-info"], [id="product-details"]') or soup
+    candidates=[]
+    for el in scope.select('[itemprop="price"], [data-price], [data-product-price], [class*="price" i], [id*="price" i], [class*="prezzo" i]')[:100]:
+        if _pi_dom_bad(el):continue
+        label=' '.join([str(el.get('id') or ''),' '.join(el.get('class') or []),str(el.get('itemprop') or '')])
+        # Container prices can include an old-price child. Evaluate the leaf,
+        # never concatenate old/sale/finance amounts into one 'number'.
+        if el.select_one('[itemprop="price"], [data-product-price], [class*="price" i], [id*="price" i]'):continue
+        own=str(el.get('content') or el.get('data-price') or el.get('data-product-price') or '').strip()
+        raw=own or el.get_text(' ',strip=True)
+        if not raw or len(raw)>240:continue
+        parent=el.parent;prev=el.find_previous_sibling()
+        local=(prev.get_text(' ',strip=True) if prev and prev.name not in ('s','del','strike') else '')
+        if _PI_NEGATIVE_BEFORE.search(local):continue
+        if parent and parent is not scope:
+            ptext=parent.get_text(' ',strip=True)
+            if len(ptext)<180 and re.search(r'(?i)prezzo delle lenti|prix des verres|aggiungi lenti|shipping|livraison|spedizione|mensualit|rate mensili|قسط|توصيل|شحن',ptext):continue
+        structured=bool(own and (el.get('itemprop')=='price' or el.has_attr('data-product-price') or el.has_attr('data-price')))
+        q=_pi_visible_quote(raw,currency_hint,allow_bare=structured)
+        if not q or _price_collides_with_product_spec(q['min'] or q['max'],title):continue
+        preferred=bool(_WEB_PRICE_ELEMENT_PREFER.search(label))
+        candidates.append((int(preferred)*2+int(structured),q))
+    if not candidates:return None
+    rank=max(r for r,q in candidates);chosen=[q for r,q in candidates if r==rank]
+    unique={(q['kind'],q.get('min'),q.get('max'),q['currency']) for q in chosen}
+    if len(unique)!=1:return None
+    q=chosen[0]
+    return {'price':q['min'] or q['max'],'currency':q['currency'],'price_source':'page_dom','price_confidence':'medium',
+            'price_kind':q['kind'],'price_min':q.get('min'),'price_max':q.get('max'),'price_unit':q.get('unit',''),
+            'price_evidence_scope':'product','price_evidence_text':q.get('raw','')[:240],'price_tax_note':''}
+
+
+def _web_fallback_page_price(html,url,metadata,country=''):
+    if not WEB_PRICE_FALLBACK_TIERS or not html or _web_merchant_access_reason(200,{},html,url):return {}
+    soup=BeautifulSoup(html[:1200000],'html.parser')
+    if _pi_collection_page(soup,url):return {}
+    title=str((metadata or {}).get('title') or '')
+    hint,_=_web_page_currency_hint(soup,html,url,country)
+    if _pi_ambiguous_product_variants(soup,url):return {}
+    # Explicit WooCommerce selected/all-equal variants, then current product DOM.
+    found=_pi_woocommerce_price(soup,url,hint,title) or _web_amazon_page_price(soup,url) or _web_dom_price(soup,url,hint,title)
+    if found and not _price_collides_with_product_spec(found['price'],title):return dict(found,price_evidence_scope='product')
+    amount,currency=_pi_scoped_json_price(html,url,title,hint)
+    if amount and currency in KNOWN_CURRENCY_CODES and not _price_collides_with_product_spec(amount,title):
+        return {'price':amount,'currency':currency,'price_source':'page_json','price_confidence':'medium','price_evidence_scope':'product'}
+    return {}
+
+
+_pi_exact_page_v61=_web_extract_exact_page_price
+_pi_page_snapshot_v61=_web_fetch_page_snapshot
+_pi_live_page_v61=_web_live_page_price
+_pi_confirmable_v61=_web_confirmable_price
+_pi_card_fields_v61=_web_card_fields
+
+def _web_extract_exact_page_price(html,url):
+    soup=BeautifulSoup(html or '','html.parser')
+    if _pi_collection_page(soup,url):return {}
+    answer=_pi_exact_page_v61(html,url)
+    return dict(answer,price_evidence_scope='product') if answer else {}
+
+
+def _web_fetch_page_snapshot(url,country=''):
+    # Route check BEFORE any merchant I/O: a classified results page is never
+    # the clicked product, even when it has a price in metadata.
+    if _pi_classified_detail(url) is False:
+        return {'ok':True,'url':url,'is_product':False,'price':None,'currency':'','page_fetch_status':'not_product',
+                'price_integrity_reason':'collection_page'}
+    result=_pi_page_snapshot_v61(url,country)
+    if result and not _web_is_direct_product_page_url(result.get('url') or url):
+        result.update(is_product=False,price=None,currency='',price_integrity_reason='collection_page')
+    return result
+
+
+def _web_live_page_price(row,market):
+    MARKET_CTX.value=dict(market)
+    snap=_web_verified_page_snapshot(row.get('url'),row.get('country') or row.get('market_country') or '') or {}
+    original=str(row.get('raw_title') or row.get('title') or '')
+    if snap.get('title') and (_findzia_hard_product_mismatch(original,snap['title']) or _web_identity_fact_conflicts(original,snap['title'])):
+        return None
+    result=_pi_live_page_v61(row,market)
+    if result and result.get('price'):
+        result.update(price_integrity_status='confirmed',price_integrity_reason='',price_integrity_version=_PI_VERSION,price_evidence_scope=snap.get('price_evidence_scope','product'))
+    return result
+
+
+def _pi_price_reason(row):
+    if not isinstance(row,dict):return ''
+    url=row.get('url') or row.get('link') or ''
+    if _pi_classified_detail(url) is False:return 'collection_page'
+    raw=row.get('original_price') or row.get('price') or ''
+    if not raw:return ''
+    source=str(row.get('price_source') or '').lower()
+    if source=='page_json' and not row.get('price_evidence_scope') and row.get('price_integrity_version')!=_PI_VERSION:return 'unscoped_legacy_json'
+    if row.get('price_integrity_status')=='confirmed':return ''
+    if row.get('price_status') in ('suspect','unavailable') or row.get('price_unavailable'):return ''
+    q=_pi_visible_quote(raw,str(row.get('original_currency') or row.get('currency') or ''),str(row.get('country') or ''),allow_bare=True)
+    if not q:return 'non_product_price_text'
+    value=q['min'] or q['max'];title=_pi_clean(row.get('raw_title') or row.get('title'))
+    # A safety trigger for tiny *unverified* index numbers on identifiable
+    # high-ticket products. Not a price estimate or a store blacklist. A real
+    # merchant product offer can validate even a clearance price below this.
+    codes={'EUR':10,'USD':10,'GBP':10,'KWD':3,'SAR':35,'AED':35,'INR':700,'CNY':60}
+    identifiable=bool(re.search(r'(?i)\b(?:iphone\s*\d+|macbook|laptop|ray[- ]?ban|galaxy\s*[sz]\d+)\b|لابتوب',title))
+    accessory=bool(re.search(r'(?i)\b(?:case|cover|cable|charger|protector|replacement|spare|funda|coque|custodia|lens cloth|cleaner)\b|كفر|شاحن|واقي',title))
+    page_source=source in {'product_jsonld','product_meta','product_microdata','shopify_product_json','jd_price_api','amazon_price_block','page_dom','product_page'}
+    if identifiable and not accessory and value<codes.get(q['currency'],0) and not (page_source and row.get('price_source_url')):
+        return 'tiny_index_price_needs_page'
+    return ''
+
+
+def _pi_quarantine(row,reason):
+    out=dict(row)
+    original=out.get('price') or ''
+    for k in list(out):
+        if k.startswith('price_display_') or k in ('price_amount','price_value','price_compare_value','price_min','price_max','original_price','original_currency','evaluation_token'):
+            out.pop(k,None)
+    out.update(price='',price_pending=True,price_unavailable=False,price_status='loading',price_verified=False,
+               price_integrity_status='pending',price_integrity_reason=reason,price_integrity_version=_PI_VERSION,
+               price_contract='findzia-money-v1',price_display_ready=False,price_unconfirmed=original)
+    if reason=='collection_page':out.update(hidden=True,removed_reason=reason)
+    return out
+
+
+def _web_confirmable_price(row):
+    if _pi_price_reason(row):return False
+    if row.get('price_source')=='woocommerce_variation':
+        return bool(row.get('price_source_url') and row.get('price_evidence_scope')=='product')
+    return _pi_confirmable_v61(row)
+
+
+def _web_card_fields(row):
+    reason=_pi_price_reason(row)
+    if reason:
+        row=_pi_quarantine(row,reason)
+    return _pi_card_fields_v61(row)
+
+# New integrity fields survive asynchronous snapshot/update merging and signing.
+_WEB_PRICE_FIELDS=tuple(dict.fromkeys(tuple(_WEB_PRICE_FIELDS)+('price_integrity_status','price_integrity_reason','price_integrity_version','price_evidence_scope','price_evidence_text')))
+
+def _pi_woocommerce_price(soup,url,currency_hint,title):
+    forms=soup.select('form[data-product_variations]')
+    if len(forms)!=1 or _pi_collection_page(soup,url):return None
+    form=forms[0]
+    h=soup.find('h1'); heading=h.get_text(' ',strip=True) if h else ''
+    if not heading or (title and (_findzia_hard_product_mismatch(title,heading) or _price_identity_score(title,heading)<.75)):return None
+    canonical=soup.select_one('link[rel="canonical"]')
+    if canonical and not _pi_same_url(canonical.get('href'),url):return None
+    try:variants=json.loads(form.get('data-product_variations') or '')
+    except (ValueError,TypeError):return None
+    if not isinstance(variants,list) or not variants or len(variants)>120:return None
+    params=urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)
+    selection={k:v[-1] for k,v in params.items() if k.startswith('attribute_') and v}
+    for select in form.find_all('select',attrs={'name':re.compile(r'^attribute_')}):
+        selected=select.find('option',selected=True)
+        if selected and selected.get('value'):selection.setdefault(select['name'],selected['value'])
+    variant_id=(params.get('variation_id') or [''])[0]
+    chosen=[]
+    for variant in variants:
+        if not isinstance(variant,dict):continue
+        if variant_id and str(variant.get('variation_id'))!=variant_id:continue
+        attrs=variant.get('attributes') or {}
+        if any(str(attrs.get(k) or '')!=str(v) for k,v in selection.items()):continue
+        if variant.get('is_purchasable') is False or variant.get('variation_is_visible') is False:continue
+        money=_web_exact_money(variant.get('display_price'),currency_hint)
+        if not money:return None
+        chosen.append(money)
+    if chosen and len(set(chosen))==1:
+        return {'price':chosen[0][0],'currency':chosen[0][1],'price_source':'woocommerce_variation','price_confidence':'high',
+                'price_evidence_scope':'product','price_kind':'exact'}
+    return None
+
+
+def _pi_ambiguous_product_variants(soup,url):
+    """A fallback cannot turn an unselected multi-price product into its cheapest SKU."""
+    for root in _pi_json_documents(str(soup)):
+        nodes=list(root) if isinstance(root,list) else [root]
+        for n in nodes:
+            if not isinstance(n,dict):continue
+            for key in ('@graph','mainEntity'):
+                child=n.get(key);nodes.extend(child if isinstance(child,list) else [child] if isinstance(child,dict) else [])
+            typ=n.get('@type');types=typ if isinstance(typ,list) else [typ]
+            if not any(str(t).rsplit('/',1)[-1] in ('Product','ProductGroup') for t in types):continue
+            if n.get('url') and not _pi_same_url(n.get('url'),url):continue
+            offers=n.get('offers');offers=offers if isinstance(offers,list) else []
+            monies=set()
+            for o in offers:
+                if not isinstance(o,dict):continue
+                if o.get('url') and not _pi_same_url(o['url'],url):continue
+                money=_web_exact_money(o.get('price'),o.get('priceCurrency'))
+                if money:monies.add(money)
+            if len(monies)>1:return True
+    return False
+
+
+def _pi_installment_offer(offer):
+    if not isinstance(offer,dict):return False
+    if any(offer.get(k) for k in ('billingDuration','billingIncrement','loanTerm','down_payment','monthly_payment_duration')):return True
+    specs=offer.get('priceSpecification') or []
+    specs=specs if isinstance(specs,list) else [specs]
+    direct=_web_exact_money(offer.get('price'),offer.get('priceCurrency'))
+    for spec in specs:
+        if not isinstance(spec,dict):continue
+        if any(spec.get(k) for k in ('billingDuration','billingIncrement','loanTerm')):
+            periodic=_web_exact_money(spec.get('price'),spec.get('priceCurrency') or offer.get('priceCurrency'))
+            if not direct or direct==periodic:return True
+    return False
