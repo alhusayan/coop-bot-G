@@ -398,7 +398,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization'], max_age=86400)
-BUILD_ID = 'v128.5.64-shopper-intent'
+BUILD_ID = 'v128.5.65-recall-repair'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -4530,8 +4530,14 @@ def _market_query_static(query, language):
     """Static (table-driven) translation of generic words. Pure: memoised."""
     text = _market_query_key(query, language)[0]
     language = language.split('-')[0]
-    result = _market_query_static_cached(text, language)
-    return {'query': result[0], 'edits': [dict(edit) for edit in result[1]]}
+    # v65 handles complete category phrases before adjective-only replacement
+    # can turn 'الهواتف الذكية' into an untranslated noun plus the token 'smart'.
+    seed = _recall_english_query(text) if language == 'en' else text
+    result = _market_query_static_cached(seed, language)
+    edits = [dict(edit) for edit in result[1]]
+    if seed != text:
+        edits.insert(0, {'source': text, 'target': seed})
+    return {'query': result[0], 'edits': edits}
 
 
 def _market_query_static_table(language):
@@ -4797,6 +4803,33 @@ _RETRIEVAL_CATEGORY_DATA = {
  'grocery': ('', 'groceries|grocery|بقاله|مواد غذائيه', 'milk|coffee|tea|rice|pasta|biscuit|chocolate|cereal|juice|flour|حليب|قهوه|ارز|رز|شاي'),
  'books': ('', 'books|book|كتب|كتاب', 'novel|paperback|hardcover|workbook|روايه'),
 }
+
+# v128.5.65: category aliases are linguistic labels, NOT product/price facts.
+# "Devices -> Smartphones" denotes a leaf, not two mandatory title tokens.
+_RETRIEVAL_CATEGORY_DATA['devices'] = ('', 'devices|device|اجهزة|اجهزه|أجهزة', '')
+for _rk in ('electronics', 'appliances'):
+    _parent, _aliases, _titles = _RETRIEVAL_CATEGORY_DATA[_rk]
+    _RETRIEVAL_CATEGORY_DATA[_rk] = ('devices', _aliases, _titles)
+_RECALL_CATEGORY_ALIASES = {
+    'devices': 'dispositivos|устройства|उपकरण|آلات',
+    'electronics': 'electronic devices|electrical devices|اجهزة كهربائية|أجهزة إلكترونية|electrónica|electronique|électronique|elektronik|электроника|الکترونیک|الیکٹرانکس|इलेक्ट्रॉनिक्स',
+    'phones': 'smart phones|smart phone|cell phones|cell phone|cellphones|cellphone|mobiles|mobile|هواتف ذكية|هاتف ذكي|موبايل|موبايلات|تلفون|تلفونات|تليفونات|تليفون|هواتف محمولة|جوالات ذكية|téléphones|téléphone|téléphones intelligents|teléfonos|teléfono|móviles|telefonlar|telefon|akıllı telefon|akıllı telefonlar|смартфоны|смартфон|телефоны|телефон|گوشی|گوشی هوشمند|گوشی ها|فون|اسمارٹ فون|موبائل|स्मार्टफोन|फोन|मोबाइल|mga telepono|telepono|智能手机|手機|手机',
+    'iphone_family': 'apple iphone|apple iphones|آبل آيفون|ابل ايفون|أبل أيفون',
+    'computers': 'أجهزة كمبيوتر|حواسيب|ordinateurs|ordinateur|computadoras|computadores|bilgisayarlar|компьютеры|رایانه|کمپیوٹر|कंप्यूटर|mga computer|电脑|電腦',
+    'laptops': 'أجهزة لابتوب|حواسيب محمولة|كمبيوتر محمول|حواسيب محمولة|ordinateurs portables|ordinateur portable|portátiles|portátil|dizüstü bilgisayar|ноутбуки|ноутбук|لپ تاپ|لیپ ٹاپ|लैपटॉप|mga laptop|笔记本电脑',
+    'tablets': 'أجهزة لوحية|tablettes|tablette|tabletas|tableta|tabletler|планшеты|تبلت|ٹیبلٹ|टैबलेट|平板电脑',
+    'televisions': 'أجهزة تلفزيون|téléviseurs|téléviseur|televisores|televisor|televizyonlar|televizyon|телевизоры|تلویزیون|ٹیلی ویژن|टेलीविजन|电视',
+    'appliances': 'أجهزة منزلية|home electrical appliances|électroménager|electromenager|electrodomésticos|ev aletleri|бытовая техника|لوازم خانگی|گھریلو آلات|घरेलू उपकरण|家电',
+    'clothing': 'vêtements|vêtement|ropa|giyim|giysiler|одежда|لباس|کپڑے|कपड़े|damit|服装',
+    'dresses': 'robes|robe|vestidos|vestido|elbiseler|elbise|платья|платье|پیراهن|کپڑے خواتین|पोशाक|mga damit pambabae|连衣裙',
+    'footwear': 'chaussures|chaussure|zapatos|zapato|ayakkabılar|ayakkabı|обувь|کفش|جوتے|जूते|sapatos|鞋子',
+    'beauty': 'cosmétiques|cosméticos|kozmetik|косметика|لوازم آرایشی|کاسمیٹکس|सौंदर्य प्रसाधन|化妆品',
+    'furniture': 'meubles|meuble|muebles|mueble|mobilya|мебель|مبلمان|فرنیچر|फर्नीचर|家具',
+}
+for _rk, _more_aliases in _RECALL_CATEGORY_ALIASES.items():
+    _parent, _aliases, _titles = _RETRIEVAL_CATEGORY_DATA[_rk]
+    _RETRIEVAL_CATEGORY_DATA[_rk] = (_parent, _aliases + '|' + _more_aliases, _titles)
+
 _RETRIEVAL_MODIFIERS = {
  'female': "women|womens|women s|woman|ladies|female|نسائي|نسائيه|للسيدات|نساء",
  'male': "men|mens|men s|man|male|رجالي|رجاليه|للرجال",
@@ -4825,8 +4858,24 @@ def _retrieval_norm(value):
 
 
 def _retrieval_phrase_pattern(aliases):
-    parts = sorted({_retrieval_norm(a) for a in aliases.split('|') if a}, key=len, reverse=True)
-    return re.compile(r'(?<!\w)(?:' + '|'.join(re.escape(a) for a in parts) + r')(?!\w)')
+    """Known Arabic category/adjective phrases may carry the definite article.
+
+    Only whitelisted phrases are expanded; brand names/model tokens never lose
+    arbitrary prefixes and unrecognized adjectives remain explicit constraints.
+    """
+    parts = set()
+    for alias in aliases.split('|'):
+        words = _retrieval_norm(alias).split()
+        pattern=[]
+        for word in words:
+            if re.fullmatch(r'[\u0621-\u064a]+',word) and len(word)>2:
+                lexical_al={'الكترونيات','الكترونيه','الكتروني','العاب','الوان','الماس'}
+                stem=word[2:] if word.startswith('ال') and len(word)>4 and word not in lexical_al else word
+                pattern.append(r'(?:ال)?'+re.escape(stem))
+            else:
+                pattern.append(re.escape(word))
+        if pattern:parts.add(r'\s+'.join(pattern))
+    return re.compile(r'(?<!\w)(?:'+'|'.join(sorted(parts,key=len,reverse=True))+r')(?!\w)')
 
 
 _RETRIEVAL_CAT_QUERY = {k:_retrieval_phrase_pattern(v[1]) for k,v in _RETRIEVAL_CATEGORY_DATA.items()}
@@ -4846,7 +4895,18 @@ def _retrieval_descendants(key):
     return result
 
 
+
 _RETRIEVAL_DESC = {k:_retrieval_descendants(k) for k in _RETRIEVAL_CATEGORY_DATA}
+# Product-family evidence on retailer titles. Merely mentioning a brand, or a
+# laptop/tablet made by a phone brand, is deliberately insufficient.
+_RECALL_PHONE_FAMILY = re.compile(
+    r'\b(?:samsung\s+)?galaxy\s+(?:[samf]\s*\d+|z\s*(?:fold|flip)\s*\d+)\b|'
+    r'\b(?:google\s+)?pixel\s*\d+[a-z]*\b|\bmotorola\s+(?:moto|edge|razr)\b|'
+    r'\boneplus\s+(?:\d+[a-z]*|nord)\b|\bsony\s+xperia\b|'
+    r'\bxiaomi\s+(?:\d+|redmi|poco)\b|\b(?:redmi|poco)\s+[a-z]?\d+\b|'
+    r'\bhuawei\s+(?:p\d+|mate\s*\d+|nova\s*\d+)\b|'
+    r'\bunihertz\s+jelly\b|\bnubia\s+(?:flip|z\d+)\b', re.I)
+
 
 
 @lru_cache(maxsize=2048)
@@ -4891,6 +4951,7 @@ def _retrieval_category_verdict(query, item):
         return False
     text = _retrieval_norm(title)
     present = {k for k,p in _RETRIEVAL_CAT_TITLE.items() if p.search(text)}
+    if _RECALL_PHONE_FAMILY.search(text): present.add('phones')
     if not present & profile['allowed']:
         return False
     # A pictured/device/accessory word on a different sellable object is not
@@ -4933,6 +4994,93 @@ def _retrieval_category_verdict(query, item):
     return True
 
 
+
+def _recall_text_spans(text):
+    """Normalized matching with character positions into the ORIGINAL text."""
+    normalized=[];positions=[]
+    for token in re.finditer(r'\S+', str(text or '')):
+        value=_retrieval_norm(token.group())
+        if not value:continue
+        if normalized:
+            normalized.append(' ');positions.append((token.start(),token.start()))
+        normalized.extend(value)
+        positions.extend([(token.start(),token.end())]*len(value))
+    return ''.join(normalized),positions
+
+
+def _recall_drop_categories(text, keys):
+    raw,positions=_recall_text_spans(text)
+    spans=[]
+    for key in keys:
+        for match in _RETRIEVAL_CAT_QUERY[key].finditer(raw):
+            spans.append((positions[match.start()][0],positions[match.end()-1][1]))
+    merged=[]
+    for start,end in sorted(set(spans)):
+        if merged and start<=merged[-1][1]:merged[-1]=(merged[-1][0],max(end,merged[-1][1]))
+        else:merged.append((start,end))
+    for start,end in reversed(merged):text=text[:start]+' '+text[end:]
+    return re.sub(r'\s+',' ',text).strip(' ,،>/|')
+
+
+def _recall_compact_path(text):
+    """Remove only redundant category ancestors, not specs/brands/model codes."""
+    raw=_retrieval_norm(text)
+    if re.search(r'\b(?:not|without|except|excluding)\b|بدون|باستثناء',raw):return text
+    found=[k for k,p in _RETRIEVAL_CAT_QUERY.items() if p.search(raw)]
+    ancestors=[k for k in found if any(c!=k and c in _RETRIEVAL_DESC[k] for c in found)]
+    if not ancestors:return text
+    # An ancestor phrase may contain its child word ("electronic devices").
+    # Only remove a span if a descendant also occurs OUTSIDE that same span.
+    raw,positions=_recall_text_spans(text);spans=[]
+    for key in ancestors:
+        for match in _RETRIEVAL_CAT_QUERY[key].finditer(raw):
+            descendant=any(c!=key and c in _RETRIEVAL_DESC[key] and
+                any(m.start()>=match.end() or m.end()<=match.start() for m in _RETRIEVAL_CAT_QUERY[c].finditer(raw))
+                for c in found)
+            if descendant:spans.append((positions[match.start()][0],positions[match.end()-1][1]))
+    merged=[]
+    for start,end in sorted(set(spans)):
+        if merged and start<=merged[-1][1]:merged[-1]=(merged[-1][0],max(end,merged[-1][1]))
+        else:merged.append((start,end))
+    for start,end in reversed(merged):text=text[:start]+' '+text[end:]
+    return re.sub(r'\s+',' ',text).strip(' ,،>/|')
+
+
+def _recall_type_replaces_base(context):
+    """A selected descendant replaces a bare parent even without a UI nav node."""
+    if context.get('kind')=='image':return False
+    subtype=_intent_steps(context).get('type') or {}
+    base=_retrieval_category_profile(str(context.get('base') or ''))
+    child=_retrieval_category_profile(str(subtype.get('term') or subtype.get('label') or ''))
+    return bool(base and child and not base['attributes'] and
+        child['allowed'] <= base['allowed'])
+
+
+def _recall_english_query(query):
+    """No network: replace recognized generic labels; leave unknown facts intact."""
+    text=_recall_compact_path(query)
+    raw,positions=_recall_text_spans(text)
+    candidates=[]
+    for key,pattern in _RETRIEVAL_CAT_QUERY.items():
+        english={'devices':'devices','phones':'smartphones','iphone_family':'iPhone',
+                 'storage_furniture':'wardrobes'}.get(key,_RETRIEVAL_CATEGORY_DATA[key][1].split('|')[0])
+        for match in pattern.finditer(raw):
+            start,end=positions[match.start()][0],positions[match.end()-1][1]
+            original=text[start:end]
+            # English exact product names are never expanded or re-tokenized.
+            if original.isascii() and not (key=='phones' and original.casefold() in ('smart phones','smart phone','mobile phones','mobile phone','cell phones','cell phone')):continue
+            candidates.append((start,end,english))
+    used=[]
+    for start,end,value in sorted(candidates,key=lambda v:(-(v[1]-v[0]),v[0])):
+        if not any(start<b and end>a for a,b,_ in used):used.append((start,end,value))
+    for start,end,value in sorted(used,reverse=True):text=text[:start]+value+text[end:]
+    # Familiar literal variant words are aliases, never inferred specifications.
+    text=re.sub(r'(?<!\w)برو\s+ماكس(?!\w)','Pro Max',text)
+    text=re.sub(r'(?<!\w)برو(?!\w)','Pro',text)
+    text=re.sub(r'(?<!\w)ماكس(?!\w)','Max',text)
+    return text
+
+
 def _retrieval_category_probes(query):
     """Two diverse retrieval-only subcategories, never selected user filters."""
     profile = _retrieval_category_profile(str(query or ''))
@@ -4942,6 +5090,7 @@ def _retrieval_category_probes(query):
                 'beauty':('makeup', 'skincare'),
                 'furniture':('chairs', 'tables'),
                 'electronics':('smartphones', 'laptops'),
+                'devices':('smartphones', 'home appliances'),
                 'jewelry':('rings', 'necklaces')}
     if len(profile['categories']) != 1:
         return []
@@ -5508,6 +5657,7 @@ def _web_collection_products(document, page_url):
     soup = BeautifulSoup(document[:1200000], 'html.parser')
     host = (urllib.parse.urlsplit(page_url).hostname or '').lower().removeprefix('www.')
     products = {}
+    page_currency, _ = _web_page_currency_hint(soup, document, page_url, '')
 
     def absolute(value):
         if not isinstance(value, str) or not value.strip():
@@ -5641,7 +5791,17 @@ def _web_collection_products(document, page_url):
                 prices.append(value)
         currency = card.select_one('[itemprop="priceCurrency"]')
         currency = (currency.get('content') or currency.get_text(' ', strip=True)) if currency else ''
-        add(href, title, image, prices[0] if len(prices) == 1 else '', currency)
+        # Scope the SAME purchase-price reader to this single product card.
+        # Never let an old/saving/installment price or a sibling card fill it.
+        parsed_price = _web_dom_price(card, href, currency or page_currency, title)
+        if parsed_price:
+            currency = parsed_price['currency']
+            price_text = _web_format_quote(dict(kind=parsed_price.get('price_kind','exact'),
+                min=parsed_price.get('price_min',parsed_price['price']),
+                max=parsed_price.get('price_max',parsed_price['price']),currency=currency,unit=parsed_price.get('price_unit','')))
+        else:
+            price_text = ''
+        add(href, title, image, price_text, currency)
     return list(products.values())
 
 
@@ -19481,25 +19641,43 @@ def _retrieval_strict_shopping_identity(source_title, result_title, merchant):
 
 
 def _retrieval_bind_shopping_result(data, source, market):
-    """Only exact title/merchant matches inherit a unit's price and thumbnail."""
-    out,seen=[],set()
-    if not isinstance(data,dict) or not isinstance(source,dict):
-        return {'shopping_results':[]}
+    """Recover merchant URLs; bind unit money only to exact product facts.
+
+    A more detailed/different variant discovered at that merchant gets its OWN
+    evidence or a pending page lookup. It never inherits the unit's low price.
+    """
+    out=[];seen=set();bound=0;discovered=0
+    if not isinstance(data,dict) or not isinstance(source,dict):return {'shopping_results':[]}
     title,merchant=_local_discovery_title(source),str(source.get('source') or '')
     for candidate in _local_discovery_records(data):
         if not isinstance(candidate,dict):continue
-        link=_local_discovery_direct_link(candidate)
-        candidate_title=_local_discovery_title(candidate)
+        link=_local_discovery_direct_link(candidate);candidate_title=_local_discovery_title(candidate)
         if not link or not candidate_title or link in seen:continue
         host=urllib.parse.urlsplit(link).hostname or ''
         if not _retrieval_merchant_matches(merchant,host,market['country']):continue
-        if not _retrieval_strict_shopping_identity(title,candidate_title,merchant):continue
-        # The proven source unit stays whole: no low price from a different SKU.
-        row=dict(source,link=link,direct_link=link,title=candidate_title,
-                 source=merchant,_shopping_link_resolved=True)
-        out.append(row);seen.add(link)
-        break # Ambiguous multiple merchant URLs do not duplicate one quote.
-    print('SHOPPING LINK BIND country=%s resolved=%d' % (market['country'],len(out)))
+        if _retrieval_strict_shopping_identity(title,candidate_title,merchant):
+            out.append(dict(source,link=link,direct_link=link,title=candidate_title,
+                source=merchant,_shopping_link_resolved=True))
+            seen.add(link);bound+=1
+            break
+        # Same merchant + a compatible candidate identity is still useful URL
+        # discovery, but NOT proof that the quoted variant/price is that URL.
+        if not _local_discovery_candidate_ok(title,dict(candidate)):continue
+        if _findzia_hard_product_mismatch(title,candidate_title) or _web_identity_fact_conflicts(title,candidate_title):continue
+        # A recovery request keeps all explicitly observed variant qualifiers.
+        # Additional candidate details may be discovered, but an omitted or
+        # opposite source colour/material is not a recovery of the same unit.
+        a,b=_retrieval_norm(title),_retrieval_norm(candidate_title)
+        if any(p.search(a) and not p.search(b) for k,p in _RETRIEVAL_ATTR.items()):continue
+        fields=_parity_contract({'base':title,'query_en':title,'kind':'text','country':market['country'],'lang':'en','steps':[]})['steps']
+        for key in ('condition','storage','memory','model'):
+            if any(s['key']==key and _parity_constraint(s,dict(candidate,title=candidate_title)) is not True for s in fields):break
+        else:
+            found=dict(candidate,link=link,direct_link=link,source=merchant,_shopping_link_discovered=True)
+            out.append(found);seen.add(link);discovered+=1
+            if len(out)>=4:break
+        continue
+    print('SHOPPING LINK BIND country=%s resolved=%d discovered=%d' % (market['country'],bound,discovered))
     return {'shopping_results':out,'search_metadata':dict(data.get('search_metadata') or {})}
 
 def _web_shopping_link_query(records, query, country, role):
@@ -19555,24 +19733,31 @@ def _web_indexed_recovery_engine(image_source=False, allow_serpapi=True):
 
 
 def _shopping_unit_identity_matches(first, second, merchant=''):
-    """Conservative title identity; shared model words alone never bind money.
+    """Same product facts, ignoring retail boilerplate rather than variant words.
 
-    Remove only the observed merchant suffix and punctuation. Require every
-    remaining product/variant token, including quantities, to agree. Ambiguous
-    or abbreviated listings can still get a price from their own URL/page.
+    This is a price binding rule, not the browse recall rule. Symmetric token
+    equality is retained. Missing colour, storage, condition or model suffix
+    still prevents borrowing a shopping quote for another merchant URL.
     """
     def tokens(value):
-        text = _fold_latin_accents(str(value or '').casefold())
-        text = re.sub(r'(?<=\d)\s+(?=gb\b|tb\b|kg\b|ml\b|mm\b)', '', text)
-        parts = re.split(r'\s+[|–—]\s+|\s+[-]\s+', text)
-        merchant_tokens = set(re.findall(r'[^\W_]+', str(merchant).casefold()))
-        if len(parts) > 1 and merchant_tokens:
-            tail = set(re.findall(r'[^\W_]+', parts[-1]))
-            if tail and tail <= merchant_tokens | {'online','shop','store','com','www'}:
-                text = ' '.join(parts[:-1])
-        return sorted(re.findall(r'[^\W_]+', text))
-    left, right = tokens(first), tokens(second)
-    return bool(left and len(left) >= 2 and left == right)
+        text=_fold_latin_accents(html.unescape(str(value or '')).casefold())
+        text=re.sub(r'(?<=\d)\s+(?=gb\b|tb\b|kg\b|ml\b|mm\b)','',text)
+        # Remove HTML title escapes, not the data itself.
+        text=re.sub(r'<[^>]{0,80}>',' ',text)
+        merchant_tokens=set(re.findall(r'[^\W_]+',_fold_latin_accents(str(merchant).casefold())))
+        # Country names are allowed only in a seller suffix separated by a bar
+        # or dash. An explicit product region/version in the title is retained.
+        seller_noise={'online','shop','store','com','www','official','kuwait','ksa','uae','uk','us'}
+        parts=re.split(r'\s*[|–—]\s*|\s+[-]\s+',text)
+        if len(parts)>1 and merchant_tokens:
+            tail=set(re.findall(r'[^\W_]+',parts[-1]))
+            if tail and tail & merchant_tokens and tail <= merchant_tokens | seller_noise:text=' '.join(parts[:-1])
+        text=re.sub(r'^(?:buy|shop|purchase)\s+','',text)
+        text=re.sub(r'\s+online(?:\s+at\s+(?:the\s+)?best\s+price)?(?:\s+in)?(?:\s+(?:kuwait|ksa|uae|uk|us))?\s*$','',text)
+        text=re.sub(r'\s+at\s+(?:the\s+)?best\s+price(?:\s+in)?(?:\s+(?:kuwait|ksa|uae|uk|us))?\s*$','',text)
+        return sorted(re.findall(r'[^\W_]+',text))
+    left,right=tokens(first),tokens(second)
+    return bool(left and len(left)>=2 and left==right)
 
 
 def _web_targeted_price_updates(entries, lang, market):
@@ -21687,6 +21872,8 @@ def _web_text_direct_search(query, country, lang, progress_callback=None, cancel
     extended = False
     retrieval_page = max(1, min(TEXT_MORE_PAGE_LIMIT, int(retrieval_page)))
     browse_profile = _retrieval_category_profile(query)
+    if browse_profile:
+        print('CATEGORY RECALL query=%r leaves=%s attributes=%s' % (query,','.join(browse_profile['categories']),','.join(browse_profile['attributes'])))
     excluded_urls = {_web_price_url_key(str(u)) for u in list(shown_urls or [])[:1000]}
     link_lookup_count = 0
     link_lookup_seen = set()
@@ -29610,7 +29797,7 @@ def _intent_brand(text):
 
 def _intent_canonical_query(query):
     """A lexical rewrite, never a product/spec/stock inference."""
-    text = re.sub(r'\s+', ' ', str(query or '')).strip()
+    text = _recall_compact_path(re.sub(r'\s+', ' ', str(query or '')).strip())
     # Keep identifiers as supplied; normalize only unambiguous family nouns.
     replacements = [
         (r'(?i)\b(?:Apple\s+(?:mobile(?:\s+phones?)?|smartphones?|cell\s*phones?|phones?))\b', 'iPhone'),
@@ -29729,7 +29916,8 @@ def _intent_commercial_parts(context):
     bstep = steps.get('brand')
     base = _intent_canonical_query(base)
     subtype = steps.get('type')
-    if subtype and _fz_nav_key(dict(context,base=context['base'])) in _FZ_NAV_TREE:
+    type_replaces = bool(subtype and (_fz_nav_key(dict(context,base=context['base'])) in _FZ_NAV_TREE or _recall_type_replaces_base(context)))
+    if type_replaces:
         # A broad department is replaced by its child product type, not repeated.
         base = subtype.get('label') if language == 'ar' else subtype.get('term')
         base = str(base or context['base'])
@@ -29753,17 +29941,22 @@ def _intent_commercial_parts(context):
             'laptop': r'\b(?:laptops?|notebooks?|macbook)\b|لابتوب|ماك بوك',
         }
         if p['family'] in noun_patterns:
+            keys={'phone':('devices','electronics','phones','iphone_family'), 'tablet':('devices','electronics','tablets'), 'laptop':('devices','electronics','computers','laptops')}
+            remainder = _recall_drop_categories(remainder,keys[p['family']])
             remainder = re.sub(noun_patterns[p['family']], ' ', remainder, flags=re.I)
         if brand and brand != 'Apple' and not _intent_has(native_model, brand):
             native_model = brand + ' ' + native_model
         if language == 'ar':
             native_model = re.sub(r'(?i)\biPhone\b', 'آيفون', native_model)
             native_model = re.sub(r'(?i)\bGalaxy\b', 'جالكسي', native_model)
+        # Consume the full recognized family phrase, including Arabic articles.
+        family_keys={'phone':('devices','electronics','phones','iphone_family'), 'tablet':('devices','electronics','tablets'), 'laptop':('devices','electronics','computers','laptops')}
+        remainder = _recall_drop_categories(remainder, family_keys.get(p['family'],()))
         remainder = re.sub(r'\(\s*\)', ' ', remainder)
         base = _fz_join_unique_query([native_model, remainder])
     others = []
     for key, step in steps.items():
-        if key in ('brand','model','product_scope','accessory_type','price') or (key == 'type' and subtype and _fz_nav_key(context) in _FZ_NAV_TREE):
+        if key in ('brand','model','product_scope','accessory_type','price') or (key == 'type' and (type_replaces or bool(modelstep))):
             continue
         if step.get('role') in ('price','mileage'):
             continue
@@ -30465,6 +30658,8 @@ def _parity_constraint(step,row):
     text=_refine_evidence_text(_parity_evidence(row))
     if key=='model':return _parity_model_state(term,row,step.get('role')=='compatibility')
     if key in ('type','accessory_type'):
+        if key=='type' and _retrieval_category_profile(term) is not None and _retrieval_category_verdict(term,row) is True:
+            return True
         state=_parity_type(term,text)
         if state is not None:return state
     if key=='product_scope':
