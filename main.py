@@ -389,7 +389,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization'], max_age=86400)
-BUILD_ID = 'v128.5.42.3-domestic-recovery'
+BUILD_ID = 'v128.5.42.4-stable-media'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -4079,6 +4079,8 @@ def _china_domestic_product_url(url):
 # Descriptors (never product kinds): colours, connectivity, sizes, materials
 # and accessory words as typed by Arabic/Chinese shoppers. Retrieval only.
 _LOCAL_DESCRIPTOR_TERMS = {
+    'ssd': {'en': 'ssd|solid state drive|solid-state drive', 'zh': '固态硬盘|固态'},
+    'backless': {'en': 'backless|open back|open-back', 'zh': '露背'},
     'wireless': {'en': 'wireless|cordless', 'ar': 'لاسلكي|لاسلكية|لاسلكيه|وايرلس', 'zh': '无线'},
     'bluetooth': {'en': 'bluetooth', 'ar': 'بلوتوث', 'zh': '蓝牙'},
     'black': {'en': 'black', 'ar': 'اسود|أسود|سوداء|اسوود', 'zh': '黑色'},
@@ -4175,6 +4177,7 @@ _LOCAL_BRAND_ALIASES = {
     'kindle': {'ar': 'كيندل'}, 'instax': {'zh': '拍立得', 'ar': 'انستاكس'}, 'fujifilm': {'zh': '富士', 'ar': 'فوجي'},
 }
 _LOCAL_RETRIEVAL_NOUNS = {
+    'desktop': {'en': 'desktop|desktops|desktop computer', 'zh': '台式电脑|台式机|台式计算机', 'ar': 'كمبيوتر مكتبي'},
     'poloshirt': {'en': 'polo shirt|polo shirts|polo|polos', 'zh': 'POLO衫|马球衫|polo衬衫', 'fr': 'polo|polos', 'de': 'Poloshirt|Polohemd', 'ar': 'قميص بولو|تيشيرت بولو|بولو'},
     'handbag': {'en': 'handbag|handbags|hand bag|shoulder bag|shoulder bags|tote bag|tote bags|crossbody bag|crossbody bags', 'zh': '手提包|手袋|手提袋|斜挎包|单肩包|包包|女包|男包', 'ja': 'ハンドバッグ', 'de': 'Handtasche|Handtaschen', 'fr': 'sac à main|sacs à main', 'it': 'borsa a mano', 'es': 'bolso de mano', 'ar': 'حقيبة يد|حقيبه يد|شنطة يد|شنطه يد'},
     'coffeecup': {'en': 'coffee cups|coffee cup', 'zh': '咖啡杯', 'ar': 'فنجان قهوة|كوب قهوة', 'de': 'Kaffeetasse', 'fr': 'tasse à café', 'es': 'taza de café'},
@@ -4187,7 +4190,7 @@ _LOCAL_RETRIEVAL_NOUNS = {
     'mask': {'en': 'mask|masks|masque', 'zh': '面膜', 'ja': 'フェイスマスク', 'de': 'Gesichtsmaske', 'fr': 'masque', 'it': 'maschera', 'es': 'mascarilla', 'tr': 'maske', 'ar': 'ماسك|قناع'},
     'cream': {'en': 'creams|cream', 'zh': '面霜', 'ja': 'クリーム', 'de': 'Creme', 'fr': 'crème', 'it': 'crema', 'es': 'crema', 'tr': 'krem', 'ar': 'كريم'},
     'toy': {'en': 'stuffed toy|stuffed animal|soft toy|plush toy|plushie|plush|toy|toys|figure|figurine|action figure', 'zh': '毛绒玩具|毛绒公仔|公仔|玩偶|布娃娃|娃娃|玩具|手办', 'ja': 'ぬいぐるみ|おもちゃ|フィギュア', 'de': 'Plüschtier|Kuscheltier|Spielzeug|Figur', 'fr': 'peluche|jouet|figurine', 'es': 'peluche|juguete|figura', 'tr': 'peluş|oyuncak', 'ar': 'لعبة|لعبه|العاب|دمية|دميه|دبدوب|مجسم|فقير'},
-    'laptop': {'en': 'laptop|laptops|notebook computer|notebook pc|ultrabook|chromebook', 'zh': '笔记本电脑|笔记本|手提电脑', 'ja': 'ノートパソコン', 'de': 'Laptop|Notebook', 'fr': 'ordinateur portable', 'es': 'portátil', 'tr': 'dizüstü', 'ar': 'لابتوب|لاب توب|لابتوبات'},
+    'laptop': {'en': 'laptop|laptops|notebook computer|notebook pc|ultrabook|chromebook', 'zh': '笔记本电脑|笔记本|手提电脑|轻薄本|游戏本', 'ja': 'ノートパソコン', 'de': 'Laptop|Notebook', 'fr': 'ordinateur portable', 'es': 'portátil', 'tr': 'dizüstü', 'ar': 'لابتوب|لاب توب|لابتوبات'},
     'tablet': {'en': 'tablet|tablets', 'zh': '平板电脑|平板', 'ja': 'タブレット', 'de': 'Tablet', 'fr': 'tablette', 'es': 'tableta', 'ar': 'تابلت|جهاز لوحي'},
     'tv': {'en': 'tv|tvs|television|televisions|smart tv', 'zh': '电视|电视机|智能电视', 'ja': 'テレビ', 'de': 'Fernseher', 'fr': 'téléviseur|télévision', 'es': 'televisor|televisión', 'tr': 'televizyon', 'ar': 'تلفزيون|تلفزيونات|تلفاز|شاشة تلفزيون'},
     'monitor': {'en': 'monitor|monitors|computer screen', 'zh': '显示器|电脑显示器', 'ja': 'モニター', 'de': 'Monitor', 'fr': 'moniteur|écran pc', 'ar': 'شاشة كمبيوتر|شاشه كمبيوتر|مونيتر'},
@@ -4226,7 +4229,7 @@ _LOCAL_RETRIEVAL_NOUNS = {
     'speaker': {'en': 'speaker|speakers|bluetooth speaker|soundbar', 'zh': '音箱|音响|蓝牙音箱|回音壁', 'ja': 'スピーカー|サウンドバー', 'de': 'Lautsprecher|Soundbar', 'fr': 'enceinte|haut-parleur', 'es': 'altavoz', 'tr': 'hoparlör', 'ar': 'سبيكر|مكبر صوت|ساوند بار'},
     'teaset': {'en': 'tea cup set|tea set', 'ar': 'طقم شاي|طقم فناجين شاي', 'ur': 'چائے کے کپ کا سیٹ', 'hi': 'चाय के कप का सेट', 'bn': 'চায়ের কাপ সেট', 'zh': '茶具套装', 'fr': 'service à thé', 'de': 'Teeservice', 'es': 'juego de té'},
     'scale': {'en': 'bathroom scale|weighing scale', 'ar': 'ميزان وزن|ميزان حمام', 'ur': 'وزن کرنے کا ترازو', 'hi': 'वजन मापने की मशीन', 'bn': 'ওজন মাপার যন্ত্র', 'zh': '体重秤', 'fr': 'pèse-personne', 'de': 'Personenwaage', 'es': 'báscula de baño'},
-    'dress': {'en': 'dress|dresses', 'ar': 'فستان|فساتين', 'ur': 'لباس', 'hi': 'ड्रेस', 'bn': 'পোশাক', 'zh': '连衣裙', 'fr': 'robe', 'de': 'Kleid', 'es': 'vestido'},
+    'dress': {'en': 'dress|dresses|gown|gowns', 'ar': 'فستان|فساتين', 'ur': 'لباس', 'hi': 'ड्रेस', 'bn': 'পোশাক', 'zh': '连衣裙', 'fr': 'robe', 'de': 'Kleid', 'es': 'vestido'},
     'watch': {'en': 'wristwatch|wrist watch|watch|watches|smartwatch|smart watch', 'ar': 'ساعة يد|ساعة|ساعه|ساعات|ساعة ذكية|ساعه ذكيه', 'ur': 'کلائی کی گھڑی', 'hi': 'कलाई घड़ी', 'bn': 'হাতঘড়ি', 'zh': '腕表', 'fr': 'montre-bracelet', 'de': 'Armbanduhr', 'es': 'reloj de pulsera'},
 }
 for _noun, _ur, _hi, _bn in (
@@ -4328,6 +4331,9 @@ def _local_retrieval_text(value):
 @lru_cache(maxsize=8192)
 def _local_retrieval_text_cached(value):
     text = normalize_ar(_cjk_boundary_spaces(unicodedata.normalize('NFKC', value).casefold()))
+    text = re.sub(r'(?<=\d)\s+(gb|tb|mb)\b', r'\1', text)
+    text = re.sub(r'\bcolou?r\b(?=\s+(?:black|white|blue|green|red|pink|brown|yellow|purple|grey|gray|beige)\b)', ' ', text)
+    text = re.sub(r'\b(black|white|blue|green|red|pink|brown|yellow|purple|grey|gray|beige)\s+colou?r\b', r'\1', text)
     pattern, replacements = _local_retrieval_rules()
     return pattern.sub(lambda m: ' ' + _local_retrieval_term(replacements, m.group(0)) + ' ', text)
 
@@ -4871,7 +4877,7 @@ def _web_offer_image_candidates(row):
             if _web_is_http_url(raw) and raw not in seen:
                 seen.add(raw)
                 urls.append(raw)
-    for field in ('serpapi_thumbnail', 'thumbnail', 'image', 'image_url', 'product_image', 'thumbnails', 'images', 'image_candidates'):
+    for field in ('serpapi_thumbnail', 'thumbnail', 'image', 'image_url', 'original', 'product_image', 'thumbnails', 'images', 'image_candidates'):
         add((row or {}).get(field))
     return urls
 
@@ -5664,8 +5670,8 @@ def _local_fast_discovery_kinds(country, query):
             kinds.append(f'{provider}_search:{native or "zh-cn"}')
             if FAST_PROVIDER_IMAGES:kinds.append(f'{provider}_images:{native or "zh-cn"}')
             if _fast_provider_supports_operators(provider):
-                kinds.extend([f'{provider}_search:{native or "zh-cn"}:scoped',
-                              f'{provider}_search:{native or "zh-cn"}:independent'])
+                kinds.extend(f'{provider}_search:{native or "zh-cn"}:scoped:{group}' for group in ('jd','taobao_tmall','other'))
+                kinds.append(f'{provider}_search:{native or "zh-cn"}:independent')
         return kinds
     kinds = _fast_discovery_kinds()
     if (country == 'us' and SERPAPI_API_KEY and ENABLE_GOOGLE_SHOPPING and not serpapi_provider_degraded()):
@@ -5693,6 +5699,8 @@ def _local_discovery_request(query, market, kind, timeout_seconds):
         spec = {'country': cc, 'role': 'local', 'engine': engine, 'hl': hl,
                 'geo_cue': hl == 'en' and not engine.endswith('_shopping')}
         spec.update(domestic_scope=lane == 'scoped', independent_scope=lane == 'independent', selected_catalog=lane == 'catalog')
+        if len(pieces) > 3 and pieces[3] in ('jd','taobao_tmall','other'):
+            spec['domestic_group'] = pieces[3]
         params = _web_text_direct_params(query, spec)
         remaining = deadline - time.monotonic()
         if remaining <= .05:
@@ -5748,7 +5756,7 @@ def _local_discovery_request(query, market, kind, timeout_seconds):
         for card in cards or []:
             if not isinstance(card, dict) or not card.get('immersive_product_page_token') or not card.get('title'):
                 continue
-            if _local_discovery_candidate_ok(query, dict(card)):
+            if _local_discovery_candidate_ok(query, dict(card, _image_discovery=bool(market.get('_image_discovery')))):
                 tokens.append((card['immersive_product_page_token'], str(card.get('thumbnail') or ''), str(card.get('title') or '')))
             if len(tokens) >= SHOPPING_MERCHANT_CARDS:
                 break
@@ -5785,6 +5793,12 @@ def _local_discovery_request(query, market, kind, timeout_seconds):
     return _local_discovery_rows(data, query, market, 'local_' + kind) if isinstance(data, dict) else []
 
 
+def _web_catalog_scope(domain):
+    paths = {'aliexpress.com': '/item/', 'temu.com': '-g-',
+             'shein.com': '-p-', 'alibaba.com': '/product-detail/'}
+    return 'site:' + domain + (' inurl:' + paths[domain] if domain in paths else '')
+
+
 def _global_discovery_request(query, country, kind, timeout_seconds, image_discovery=False):
     """Independent, bounded sources; all global China sources cover the allowlist."""
     kind, _, requested_domain = kind.partition(':')
@@ -5796,7 +5810,7 @@ def _global_discovery_request(query, country, kind, timeout_seconds, image_disco
         if not FAST_PROVIDERS or not _fast_provider_supports_operators(FAST_PROVIDERS[0]):
             return []
         target = dict(_web_market(country), _retrieval_role='global', _image_discovery=bool(image_discovery))
-        scopes = ' OR '.join('site:' + domain for _, domain in GLOBAL_MARKET_STORES[country] if not requested_domain or domain == requested_domain)
+        scopes = ' OR '.join('(' + _web_catalog_scope(domain) + ')' for _, domain in GLOBAL_MARKET_STORES[country] if not requested_domain or domain == requested_domain)
         engine = f'{FAST_PROVIDERS[0]}_search'
         connect = min(1.5, max(.05, timeout_seconds * .15))
         data = _fast_provider_search(engine, f'{query} ({scopes})', 'us', 'en',
@@ -9372,6 +9386,13 @@ def _findzia_hard_product_mismatch(query, title):
     t = norm_tokens(t_raw)
     if not q or not t:
         return False
+    def storage_sizes(text):
+        found = re.findall(r'(\d+(?:\.\d+)?)\s*(gb|tb)\s*(?:ssd|hdd)\b', text, re.I)
+        found += re.findall(r'\b(?:ssd|hdd)\s*(\d+(?:\.\d+)?)\s*(gb|tb)\b', text, re.I)
+        return {float(n) * (1024 if unit.lower() == 'tb' else 1) for n, unit in found}
+    q_storage, t_storage = storage_sizes(q_raw), storage_sizes(t_raw)
+    if q_storage and t_storage and q_storage.isdisjoint(t_storage):
+        return True
     q_acc = _findzia_accessory_evidence(q_raw)
     t_acc = _findzia_accessory_evidence(t_raw)
     if t_acc - q_acc:
@@ -17732,6 +17753,8 @@ def _web_is_direct_product_page_url(url, store_name=''):
     raw = str(url or '').strip()
     if not _web_is_http_url(raw) or _offer_is_editorial_url(raw):
         return False
+    if _host_matches_any(urllib.parse.urlsplit(raw).hostname or '', ('detail.zol.com.cn', 'product.pconline.com.cn', 'product.pchome.net')):
+        return False
     domestic = _china_domestic_product_url(raw)
     if domestic is not None:
         return domestic
@@ -18091,7 +18114,7 @@ def _web_dom_price(soup, url, currency_hint, title):
         candidates.append((0 if preferred else 1, 0 if line >= heading_line else 1, line, value, currency, quote, tax_note))
     if not candidates:
         return None
-    candidates.sort()
+    candidates.sort(key=lambda candidate: candidate[:3])
     _, _, _, value, currency, quote, tax_note = candidates[0]
     return {'price': value, 'currency': currency, 'price_source': 'page_dom', 'price_confidence': 'medium',
             'price_kind':quote['kind'],'price_min':quote['min'],'price_max':quote['max'],'price_unit':quote['unit'],'price_tax_note':tax_note}
@@ -19072,8 +19095,28 @@ def _web_indexed_offer_money(item):
             return money
     return None
 
+def _web_same_index_listing(first, second):
+    a, b = _web_price_url_key(first), _web_price_url_key(second)
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    a, b = urllib.parse.urlsplit(a), urllib.parse.urlsplit(b)
+    if a.netloc != b.netloc or a.query != b.query:
+        return False
+    host = a.hostname or ''
+    marker = '-p-' if _host_matches_any(host, ('shein.com',)) else '-g-' if _host_matches_any(host, ('temu.com',)) else ''
+    if not marker:
+        return False
+    def identity(path):
+        match = re.search(re.escape(marker) + r'(\d{6,})\.html$', path, re.I)
+        # Only the product-name slug may change. Parent path is the market locale.
+        return (path.rsplit('/', 1)[0].lower(), match.group(1)) if match else None
+    return bool(identity(a.path)) and identity(a.path) == identity(b.path)
+
+
 def _web_targeted_price_updates(entries, lang, market):
-    """One bounded indexed lookup for exact listing URLs; recover image and money independently."""
+    """Bounded independent listing lookups; recover image and money independently."""
     if not _indexed_recovery_allowed():
         return {}
     MARKET_CTX.value = dict(market)
@@ -19085,13 +19128,15 @@ def _web_targeted_price_updates(entries, lang, market):
         parsed = urllib.parse.urlsplit(key)
         if parsed.path in ('', '/'):
             continue
-        path = urllib.parse.quote(urllib.parse.unquote(parsed.path), safe='/-._~')
-        term = 'site:' + parsed.netloc + path
-        # Taobao/Tmall/1688 identify offers in the query, not the path.
+        term = 'site:' + parsed.netloc
         ids = [v for k, v in urllib.parse.parse_qsl(parsed.query)
-               if k.lower() in {'id', 'itemid', 'item_id', 'goods_id', 'goodsid', 'offerid', 'sku', 'skuid', 'sku_id', 'variant'}]
-        if ids:
-            term += ' ' + ' '.join('"' + re.sub(r'[^a-zA-Z0-9_-]', '', value) + '"' for value in ids)
+               if k.lower() in {'id', 'itemid', 'item_id', 'goods_id', 'goodsid', 'offerid', 'sku', 'skuid', 'sku_id'}]
+        path_ids = re.findall(r'(?:/item/|/offer/|/product/|-p-|-g-|/)(\d{6,})(?=[./-]|$)', parsed.path)
+        if ids or path_ids:
+            term += ' ' + ' '.join('"' + re.sub(r'[^a-zA-Z0-9_-]', '', value) + '"' for value in (ids + path_ids)[:2])
+        else:
+            title = re.sub(r'["()\r\n]', ' ', str(row.get('raw_title') or row.get('title') or ''))
+            term += ' "' + title[:120].strip() + '"'
         terms.append('(' + term + ')')
     if not terms:
         return {}
@@ -19112,12 +19157,24 @@ def _web_targeted_price_updates(entries, lang, market):
     budget = max(.2, min(10.0, WEB_LIVE_PRICE_WAIT))
     connect = min(1.0, budget * .15)
     provider = next((p for p in FAST_PROVIDERS if _fast_provider_supports_operators(p)), '')
+    def lookup(term):
+        MARKET_CTX.value = dict(market)
+        try:
+            if provider:
+                return _fast_provider_search(provider + ('_images' if image_source else '_search'), term,
+                    search_cc, params['hl'], (connect, budget-connect)) or {}
+            request = dict(params, q=term)
+            return _serpapi_cached_json(request, timeout=(connect, budget-connect), label='EXACT-LISTING') or {}
+        except Exception as exc:
+            print('EXACT-LISTING lookup_failed=' + type(exc).__name__)
+            return {}
+    lookup_terms = list(dict.fromkeys(terms))[:4]
     if provider:
-        data = _fast_provider_search(provider + ('_images' if image_source else '_search'), params['q'], search_cc, params['hl'], (connect, budget-connect)) or {}
         params['engine'] = provider + ('_images' if image_source else '_search')
-    else:
-        data = _serpapi_cached_json(params, timeout=(connect, budget - connect),
-                label='EXACT-LISTING ' + ('IMAGES' if image_source else 'MEDIA/PRICES')) or {}
+    # At most four parallel requests per already bounded recovery batch.
+    with ThreadPoolExecutor(max_workers=min(4, len(lookup_terms))) as pool:
+        responses = list(pool.map(lookup, lookup_terms))
+    data = {'organic_results': [item for response in responses for item in _web_indexed_media_records(response)]}
     updates = {}
     for item in _web_indexed_media_records(data):
         link = _local_discovery_direct_link(item)
@@ -19125,7 +19182,7 @@ def _web_targeted_price_updates(entries, lang, market):
         if not item_key:
             continue
         for key, row in entries.items():
-            if item_key != _web_price_url_key(row.get('url')):
+            if not _web_same_index_listing(link, row.get('url')):
                 continue
             title = _local_discovery_title(item)
             original = str(row.get('raw_title') or row.get('title') or '')
@@ -19155,7 +19212,7 @@ def _web_targeted_price_updates(entries, lang, market):
             if change:
                 updates[key] = change
     print(f'EXACT-LISTING RECOVERY engine={params["engine"]} requested={len(entries)}'
-          f' recovered_images={sum(bool(value.get("page_image")) for value in updates.values())}'
+          f' lookups={len(lookup_terms)} recovered_images={sum(bool(value.get("page_image")) for value in updates.values())}'
           f' recovered_prices={sum(bool(value.get("price")) for value in updates.values())}')
     return updates
 
@@ -20925,6 +20982,10 @@ def _web_text_direct_specs(query, country):
             add(country, 'local', f'{provider}_search', native if country == 'cn' else 'en')
             specs[-1]['domestic_scope'] = True
             if country == 'cn':
+                specs[-1]['domestic_group'] = 'jd'
+                for group in ('taobao_tmall', 'other'):
+                    add(country, 'local', f'{provider}_search', native)
+                    specs[-1].update(domestic_scope=True, domestic_group=group)
                 add(country, 'local', f'{provider}_search', native)
                 specs[-1]['independent_scope'] = True
         if native != 'en' and country != 'cn':
@@ -20977,7 +21038,10 @@ def _web_text_direct_specs(query, country):
         add(country, 'local', 'baidu', native)
     if country == 'cn':
         add(country, 'local', 'google', native)
-        specs[-1]['domestic_scope'] = True
+        specs[-1].update(domestic_scope=True, domestic_group='jd')
+        for group in ('taobao_tmall', 'other'):
+            add(country, 'local', 'google', native)
+            specs[-1].update(domestic_scope=True, domestic_group=group)
         add(country, 'local', 'google', native)
         specs[-1]['independent_scope'] = True
     for cc in DEFAULT_GLOBAL_COUNTRIES:
@@ -21033,10 +21097,15 @@ def _web_text_direct_params(query, spec, page_token=''):
         requested = spec.get('catalog_domain')
         if requested and requested not in {d for _, d in GLOBAL_MARKET_STORES[country]}:
             raise ValueError('Unknown global catalog')
-        domains = ' OR '.join('site:' + domain for _, domain in GLOBAL_MARKET_STORES[country] if not requested or domain == requested)
+        domains = ' OR '.join('(' + _web_catalog_scope(domain) + ')' for _, domain in GLOBAL_MARKET_STORES[country] if not requested or domain == requested)
         wording = f'{wording} ({domains})'
     elif role == 'global':
         pass  # Google Shopping has no site: operator; the catalog filter selects rows.
+    elif spec.get('domestic_group'):
+        scopes = {'jd': 'site:item.jd.com OR site:item.m.jd.com',
+                  'taobao_tmall': 'site:item.taobao.com OR site:detail.tmall.com',
+                  'other': 'site:detail.1688.com OR site:product.suning.com OR site:detail.vip.com'}
+        wording = f'{wording} ({scopes[spec["domestic_group"]]}) -inurl:search -inurl:category -inurl:login'
     elif spec.get('domestic_scope'):
         wording = _local_discovery_query(wording, _web_market(country), scoped=True, language=hl)
     elif engine in ('google', 'google_light', 'google_images', 'google_images_light') or engine.startswith(('serper_', 'cse_')):
@@ -21169,7 +21238,7 @@ def _web_text_direct_search(query, country, lang, progress_callback=None, cancel
     # rather than closing on an empty page while replies are still in flight.
     empty_deadline = deadline + max(0., float(empty_extension_seconds or 0.))
     extended = False
-    market = dict(_web_market(country), _query=query,
+    market = dict(_web_market(country), _query=query, _image_discovery=bool(current_market().get('_image_discovery')),
                   global_countries=[c for c in DEFAULT_GLOBAL_COUNTRIES if c != country])
     # One price ledger per market: every lane's target for that market shares
     # the same list object, so a shopping unit seen by one lane prices another's row.
@@ -21201,11 +21270,11 @@ def _web_text_direct_search(query, country, lang, progress_callback=None, cancel
             return
         spec_key = (spec['country'], spec['role'], spec['engine'], spec['hl'],
                     bool(spec.get('domestic_scope')), bool(spec.get('selected_catalog')),
-                    bool(spec.get('independent_scope')), spec.get('catalog_domain') or '', token)
+                    bool(spec.get('independent_scope')), spec.get('catalog_domain') or '', spec.get('domestic_group') or '', token)
         if spec_key in submitted_specs:
             return
         submitted_specs.add(spec_key)
-        target = dict(_web_market(spec['country']), _collection_deadline=deadline)
+        target = dict(_web_market(spec['country']), _collection_deadline=deadline, _image_discovery=bool(market.get('_image_discovery')))
         if spec['role'] == 'global':
             target['_retrieval_role'] = 'global'
         target['_shopping_units'] = ledgers.setdefault(spec['country'], [])
@@ -21266,7 +21335,7 @@ def _web_text_direct_search(query, country, lang, progress_callback=None, cancel
                     data = None
                 if cancel.is_set() or time.monotonic() >= (deadline if rows else empty_deadline):
                     break
-                name = f'{spec["role"]}:{spec["country"]}:{spec["engine"]}:{spec["hl"]}' + (':catalog' if spec.get('selected_catalog') else ':scoped' if spec.get('domestic_scope') else '') + (':independent' if spec.get('independent_scope') else '') + (':' + spec['catalog_domain'] if spec.get('catalog_domain') else '') + (':merchants' if token else '')
+                name = f'{spec["role"]}:{spec["country"]}:{spec["engine"]}:{spec["hl"]}' + (':catalog' if spec.get('selected_catalog') else ':scoped' if spec.get('domestic_scope') else '') + (':independent' if spec.get('independent_scope') else '') + (':' + spec['catalog_domain'] if spec.get('catalog_domain') else '') + (':' + spec['domestic_group'] if spec.get('domestic_group') else '') + (':merchants' if token else '')
                 source_states[name] = 'complete' if isinstance(data, dict) else 'unavailable'
                 if not isinstance(data, dict):
                     if spec['engine'].startswith(('serper_', 'cse_')):
@@ -23465,6 +23534,23 @@ async def web_api_geo(request: Request):
         media_type='application/json', headers={'Cache-Control': 'private, no-store',
         'Vary': 'CF-IPCountry, X-Forwarded-For, X-Real-IP'})
 
+def _web_raster_is_empty(body):
+    if PILImage is None:
+        return False
+    try:
+        with PILImage.open(io.BytesIO(body)) as image:
+            if min(image.size) < 8:
+                return True
+            if image.width * image.height > 40000000:
+                return True
+            image.thumbnail((48, 48))
+            rgba = image.convert('RGBA')
+            extrema = rgba.getextrema()
+            return extrema[3][1] <= 8 or all(low >= 250 for low, high in extrema[:3])
+    except Exception:
+        return True
+
+
 @app.get('/api/img-proxy')
 async def web_api_img_proxy(request: Request):
     if not WEB_API_ENABLED or not WEB_IMAGE_PROXY_ENABLED:
@@ -23517,6 +23603,8 @@ async def web_api_img_proxy(request: Request):
         body = document['body']
         detected_mime = _raster_mime(body)
         if detected_mime:
+            if _web_raster_is_empty(body):
+                return (422, '', b'', '')
             return (200, detected_mime, body, '')
         if _web_price_url_key(document['url']) != _web_price_url_key(target_url):
             return (404, '', b'', '')
@@ -28631,7 +28719,7 @@ def _classic_photo_lookup(context,image_b64,mime,caption,country,lang,progress_c
     classifier downstream receives the original bytes and owns that judgment.
     """
     cancel=cancel_event or threading.Event()
-    market=dict(_web_market(country));MARKET_CTX.value=market
+    market=dict(_web_market(country), _image_discovery=True);MARKET_CTX.value=market
     rows={};hint=' '.join(s.get('term','') for s in context.get('steps',[]) if s.get('role')!='price')[:120]
     query=context.get('query_en') or caption
     jobs={}; child_cancel=threading.Event(); failures=[]
@@ -28679,7 +28767,7 @@ def _classic_photo_lookup(context,image_b64,mime,caption,country,lang,progress_c
                     value=f.result()
                     add(value if isinstance(value,list) else (value.get('captured_results') or value.get('results') or []))
                 except Exception as exc:
-                    failures.append(jobs[f]);print('CLASSIC PHOTO SOURCE failure='+type(exc).__name__)
+                    failures.append(jobs[f]);print('CLASSIC PHOTO SOURCE lane='+jobs[f]+' failure='+type(exc).__name__+' reason='+str(exc)[:120])
         if not rows:
             failures.append('no_refined_evidence')
         return {'ok':True,'type':'results','query':query,'market':market,'results':list(rows.values()),
@@ -28853,7 +28941,8 @@ async def web_api_health_classic():
             'insights_enabled':True,'insights_ai_configured':bool(GEMINI_API_KEY),
             'insights_on_demand':True,'china_baidu_enabled':bool(LOCAL_DISCOVERY_BAIDU and SERPAPI_API_KEY),
             'filter_first_plan_network_calls':0,'indexed_recovery_enabled':_indexed_recovery_allowed(),
-            'china_local_strategy':'native_open_baidu_domestic_independent','global_china_balanced':True}
+            'china_local_strategy':'native_balanced_domestic_open_baidu','global_china_balanced':True,
+            'indexed_listing_queries':'independent_id_or_title','image_empty_response_guard':PILImage is not None}
 
 # ===== Marketplace .42.2: signed listing facts, filters and on-demand insights =====
 # Tokens carry source observations across workers; no product-page or AI request
