@@ -388,7 +388,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization'], max_age=86400)
-BUILD_ID = 'v128.5.42.3-lens-global-facets'
+BUILD_ID = 'v128.5.42.2-age-context'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -2297,14 +2297,10 @@ def publish_image_for_lens(image_b64, mime_type):
 # A price update must never turn a Serper description search into a Lens match.
 def _web_result_group(row):
     sources = set(row.get('retrieval_sources') or [])
-    scope = str(row.get('market_scope') or row.get('market') or '').lower()
-    # Text/Serper recovery during an image search is an Alternative until the
-    # reference-image classifier proves the same product.  Once Exact is
-    # visually established, show it in its real Local/Global market lane.
-    recovered_image_row = (row.get('image_query_result') and 'google_lens' not in sources
-            and any(s == 'serper' or s.startswith('serper_') for s in sources))
-    if recovered_image_row and str(row.get('match_type') or row.get('match') or '').lower() != 'exact':
+    if (row.get('image_query_result') and 'google_lens' not in sources
+            and any(s == 'serper' or s.startswith('serper_') for s in sources)):
         return 'alternative'
+    scope = str(row.get('market_scope') or row.get('market') or '').lower()
     if scope in ('local', 'global'):
         return scope
     return 'local' if row.get('market_rank') == 0 or row.get('_local_discovery_lane') else 'global'
@@ -9439,7 +9435,148 @@ def _findzia_rare_query_tokens(query):
     return {tok for tok in q_tokens if len(tok) >= 3 and df.get(tok, 0) <= docs * FINDZIA_GUARD_RARE_SHARE}
 
 
+# ---------------------------------------------------------------------------
+# Classic 42.2 — shoe age context, not a model number or an inferred shoe size.
+# Local deterministic parsing only. The original retrieval engines, provider
+# limits, price binding and the unfiltered Lens pipeline remain unchanged.
+# Conservative: handles explicit ages 6–17 for footwear, not safety/medical
+# products, baby size charts, vintage goods, warranty periods or vague numbers.
+# ---------------------------------------------------------------------------
+_CLASSIC_AGE_DIGITS = str.maketrans('٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹०१२३४५६७८९', '012345678901234567890123456789')
+_CLASSIC_FOOTWEAR_RE = re.compile(
+    r'(?i)\b(?:shoes?|sneakers?|trainers?|footwear|boots?|sandals?|'
+    r'chaussures?|baskets?|schuhe?|tennisschuhe?|scarpe|zapatos?|zapatillas?|'
+    r'calzado|calçados|calcados|ayakkab[ıi](?:s[ıi])?|кроссовки|обувь)\b'
+    r'|حذاء|أحذية|احذية|احذيه|جوتي|جواتي|سنيكرز|كوتشي|जूते|जूता|جوتے|جوتا|シューズ|靴|鞋')
+_CLASSIC_KIDS_RE = re.compile(
+    r'(?i)\b(?:kids?(?:[’\']s)?|children(?:[’\']s)?|child(?:[’\']s)?|juniors?|jr|youth|'
+    r'boys?(?:[’\']s)?|girls?(?:[’\']s)?|grade[ -]?school|big[ -]?kids|enfants?|junioren|kinder|bambin[oi]|niñ[oa]s?|'
+    r'infantil|crianças?|çocuk|детск\w*)\b|للأطفال|للاطفال|أطفال|اطفال|ناشئين|ناشئة|صغار|بچوں|बच्चों|儿童|兒童|子供|ジュニア')
+_CLASSIC_ADULT_SHOES_RE = re.compile(
+    r'(?i)\b(?:adults?|mens?(?:[’\']s)?|womens?(?:[’\']s)?|ladies|hommes?|femmes?|'
+    r'herren|damen|uomo|donna|hombres?|mujeres?)\b|رجالي|نسائي|للكبار')
+_CLASSIC_AGE_SKIP_RE = re.compile(
+    r'(?i)\b(?:vintage|antique|warranty|guarantee|collection|used|worn|old[ -]stock|'
+    r'ago|for\s+the\s+past)\b|ضمان|كفالة|مستعمل|مستعملة|منذ')
+_CLASSIC_AGE_PATTERNS = (
+    ('en', re.compile(r'(?i)(?<![\w.])(?P<a>\d{1,2})(?:\s*(?:-|–|to)\s*(?P<b>\d{1,2}))?[ -]*(?:years?|yrs?)[ -]*old\b')),
+    ('en', re.compile(r'(?i)\b(?:aged?|ages)\s*(?P<a>\d{1,2})(?:\s*(?:-|–|to)\s*(?P<b>\d{1,2}))?(?:\s*(?:years?|yrs?)(?:\s*old)?)?\b')),
+    ('en', re.compile(r'(?i)(?<![\w.])(?P<a>\d{1,2})\s*(?:y/o|yo)\b')),
+    ('ar', re.compile(r'(?:ل?عمر(?:ه|ها|هم)?|بعمر)?\s*(?<!\d)(?P<a>\d{1,2})(?:\s*(?:-|–|إلى|الى)\s*(?P<b>\d{1,2}))?\s*(?:سنوات|سنين|سنة|سنه|أعوام|اعوام|عاما|عام)(?!\w)')),
+    ('fr', re.compile(r'(?i)(?:(?:âgé[es]*|age[es]*)\s+de\s*)?(?<!\d)(?P<a>\d{1,2})(?:\s*(?:-|–|à)\s*(?P<b>\d{1,2}))?\s*ans\b')),
+    ('de', re.compile(r'(?i)(?<!\d)(?P<a>\d{1,2})(?:\s*(?:-|–|bis)\s*(?P<b>\d{1,2}))?[ -]*(?:jahre\s+alt|jährige[nrs]?)\b')),
+    ('es', re.compile(r'(?i)(?<!\d)(?P<a>\d{1,2})(?:\s*(?:-|–|a)\s*(?P<b>\d{1,2}))?\s*años\b')),
+    ('pt', re.compile(r'(?i)(?<!\d)(?P<a>\d{1,2})(?:\s*(?:-|–|a)\s*(?P<b>\d{1,2}))?\s*anos\b')),
+    ('it', re.compile(r'(?i)(?<!\d)(?P<a>\d{1,2})(?:\s*(?:-|–|a)\s*(?P<b>\d{1,2}))?\s*anni\b')),
+    ('tr', re.compile(r'(?i)(?<!\d)(?P<a>\d{1,2})(?:\s*(?:-|–)\s*(?P<b>\d{1,2}))?\s*yaş(?:ında)?\b')),
+    ('ru', re.compile(r'(?i)(?<!\d)(?P<a>\d{1,2})(?:\s*(?:-|–|до)\s*(?P<b>\d{1,2}))?\s*(?:лет|года|год)(?!\w)')),
+    ('hi', re.compile(r'(?<!\d)(?P<a>\d{1,2})\s*(?:साल|वर्ष)(?:\s*(?:के|का|की))?')),
+    ('ur', re.compile(r'(?<!\d)(?P<a>\d{1,2})\s*سال(?:\s*(?:کے|کا|کی))?')),
+    ('zh', re.compile(r'(?<!\d)(?P<a>\d{1,2})\s*[岁歲]')),
+    ('ja', re.compile(r'(?<!\d)(?P<a>\d{1,2})\s*歳')),
+)
+_CLASSIC_KIDS_WORD = {'en':'Kids','ar':'للأطفال','fr':'enfant','de':'Kinder','es':'niños',
+    'pt':'infantil','it':'bambini','tr':'çocuk','ru':'детские','hi':'बच्चों','ur':'بچوں','zh':'儿童','ja':'ジュニア'}
+_CLASSIC_WRONG_SHOE_KIND_RE = re.compile(
+    r'(?i)\b(?:racquets?|rackets?|balls?|socks?|insoles?|laces?|bags?|books?|posters?|toys?)\b|مضرب|مضارب|جوارب|كرة|كرات')
+
+@lru_cache(maxsize=2048)
+def _classic_shoe_age_context(value):
+    """Return immutable (retail query, min age, max age) or None. Never size = age."""
+    original = str(value or '').strip()
+    if not original or len(original) > 400 or not _CLASSIC_FOOTWEAR_RE.search(original):
+        return None
+    if _CLASSIC_AGE_SKIP_RE.search(original) or _CLASSIC_ADULT_SHOES_RE.search(original):
+        return None
+    text = unicodedata.normalize('NFKC', original).translate(_CLASSIC_AGE_DIGITS)
+    candidates = []
+    for language, pattern in _CLASSIC_AGE_PATTERNS:
+        for match in pattern.finditer(text):
+            age = int(match.group('a')); end = int(match.groupdict().get('b') or age)
+            if not 6 <= age <= end <= 17:
+                return None
+            candidates.append((match.start(), match.end(), age, end, language))
+    if not candidates:
+        return None
+    # Overlapping language expressions are acceptable; multiple different ages
+    # are ambiguous (siblings, two products, etc.) and are never silently erased.
+    if len({(m[2],m[3]) for m in candidates}) != 1:
+        return None
+    merged = []
+    for start,end,*_ in sorted(candidates):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(end, merged[-1][1]))
+        else:
+            merged.append((start,end))
+    cleaned = text
+    for start,end in reversed(merged):
+        cleaned = cleaned[:start] + ' ' + cleaned[end:]
+    language = 'ar' if re.search(r'[\u0600-\u06ff]',original) and not re.search(r'[پچژگ]',original) else candidates[0][4]
+    # Only remove syntactic age recipients/filler, never arbitrary attributes.
+    cleaned = re.sub(r'(?i)\b(?:for\s+)?(?:(?:my|a|an|our)\s+)?(?P<recipient>son|daughter|child|kid|boy|girl)\b(?=\s*(?:who\s+is|aged?)?\s*$)', lambda m: ' boys ' if m['recipient'].lower() in ('son','boy') else ' girls ' if m['recipient'].lower() in ('daughter','girl') else ' ', cleaned)
+    cleaned = re.sub(r'(?i)\b(?:who\s+is|for|aged?|de|pour|para|für|di|per|для)(?:\s+(?:a|an|my|our|un))?\s*$', '', cleaned)
+    cleaned = re.sub(r'(?:ل?ولدي|ل?بنتي|ل?طفل|ل?طفلة|عمره|عمرها|بعمر|لعمر|عمر)\s*$', '', cleaned)
+    cleaned = re.sub(r'(?i)^\s*(?:please\s+)?(?:i\s+(?:want|need)|looking\s+for|find\s+me)\s+', '', cleaned)
+    cleaned = re.sub(r'^\s*(?:أبي|ابي|ابغى|أريد|اريد|بغيت)\s+', '', cleaned)
+    cleaned = re.sub(r'\s+', ' ', cleaned).strip(' ,،-–')
+    if not cleaned or not _CLASSIC_FOOTWEAR_RE.search(cleaned):
+        return None
+    if not _CLASSIC_KIDS_RE.search(cleaned):
+        word = _CLASSIC_KIDS_WORD.get(language, 'Kids')
+        cleaned = (cleaned+' '+word) if language == 'ar' else (word+' '+cleaned)
+    # No deletion of a remaining identifier, explicit size, colour or surface.
+    return (cleaned, candidates[0][2], candidates[0][3])
+
+
+def _classic_kids_footwear(value):
+    text = str(value or '')
+    return bool(len(text)<=600 and _CLASSIC_FOOTWEAR_RE.search(text) and _CLASSIC_KIDS_RE.search(text))
+
+
+def _classic_footwear_match_text(value):
+    """Canonical child/shoe synonyms for candidate recall only, NEVER price binding."""
+    text = str(value or '')
+    age = _classic_shoe_age_context(text)
+    if age:
+        text = age[0]
+    text = _CLASSIC_KIDS_RE.sub(lambda m: ' kids girls ' if re.match(r'(?i)girls?',m.group()) else ' kids boys ' if re.match(r'(?i)boys?',m.group()) else ' kids ', text)
+    text = re.sub(r'(?i)\b(?:gs|jr\.)\b', ' kids ', text)
+    text = _CLASSIC_FOOTWEAR_RE.sub(' shoes ', text)
+    text = re.sub(r'(?i)\btenis\b|\btênis\b|تنس|теннис\w*|テニス|网球|網球|टेनिस|ٹینس', ' tennis ', text)
+    return re.sub(r'\s+', ' ', text).strip()
+
+
+def _classic_age_candidate_view(query, item):
+    """Translate only the narrow child-footwear matching vocabulary.
+
+    Return (query, copied matching-only row, hard conflict). Original merchant
+    title, product URL, currency, price and photo are never rewritten/published.
+    """
+    age = _classic_shoe_age_context(str(query or ''))
+    q = age[0] if age else str(query or '')
+    if not _classic_kids_footwear(q):
+        return q, item, False
+    title = str((item or {}).get('title') or (item or {}).get('line') or '')
+    hay = title+' '+str((item or {}).get('snippet') or '')
+    canon = _classic_footwear_match_text(hay)
+    if (_CLASSIC_ADULT_SHOES_RE.search(hay) and not _CLASSIC_KIDS_RE.search(hay)
+            and not re.search(r'(?i)\b(?:gs|jr)\b',hay)):
+        return q, item, True
+    if not _CLASSIC_FOOTWEAR_RE.search(hay) and _CLASSIC_WRONG_SHOE_KIND_RE.search(hay):
+        return q, item, True
+    matched = dict(item or {})
+    matched['title'] = _classic_footwear_match_text(title)
+    # A source's literal child category in a description may resolve the audience
+    # even when its product title is shortened to a model. Do not invent features.
+    if re.search(r'\bkids\b',canon) and not re.search(r'\bkids\b',matched['title']):
+        matched['title'] += ' kids'
+    return _classic_footwear_match_text(q), matched, False
+
+
 def _findzia_stream_candidate_ok(query, item):
+    query, item, audience_conflict = _classic_age_candidate_view(query, item)
+    if audience_conflict:
+        return False
     title = str((item or {}).get('title') or (item or {}).get('line') or '')
     if not title or _findzia_hard_product_mismatch(query, title):
         if title:
@@ -10382,6 +10519,8 @@ def _text_query_is_product(query):
     q = re.sub(r'\s+', ' ', str(query or '')).strip()
     if not q or is_service_request(q):
         return False
+    if _classic_shoe_age_context(q) or _classic_kids_footwear(q):
+        return True  # explicit product + audience: no remote classifier needed
     retrieval = _local_retrieval_text(q)
     # Match complete brand aliases, including multiword names; not substrings.
     for brand in _LOCAL_BRAND_ALIASES:
@@ -23066,75 +23205,6 @@ def _web_bounded_image_recovery(lens, country, lang, cancel_event=None):
     return dict(lens, matches=rows, query=query, visual_identity=query,
                 reference_identity=reference, source='lens_bounded_structured_recovery')
 
-def _web_image_commercial_recovery(items, identity, country, lang, cancel_event=None):
-    """Recover priced market offers when Lens is quota-limited or commercially sparse.
-
-    Lens remains the identity source.  Recovery searches use that identity and
-    every recovered row is still audited against the original photo downstream.
-    This is only activated when the direct photo set lacks priced cards or a
-    priced global result, so normal healthy Lens searches keep the .42 fast path.
-    """
-    items=[dict(x) for x in (items or []) if isinstance(x,dict)]
-    identity=re.sub(r'\s+',' ',str(identity or '')).strip()[:WEB_API_MAX_QUERY_CHARS]
-    if not identity or (cancel_event is not None and cancel_event.is_set()):
-        return items
-    def ready_counts(rows):
-        counts={0:0,1:0,2:0}
-        for row in rows:
-            try: rank=int(row.get('market_rank',99))
-            except Exception: rank=99
-            if rank in counts and _web_row_has_numeric_price(row):counts[rank]+=1
-        return counts
-    counts=ready_counts(items)
-    if sum(counts.values())>=2 and (counts[1]+counts[2])>=1:
-        return items
-    weak=[rank for rank in (0,1,2) if counts[rank] < 1]
-    market_snapshot=dict(_web_market(country)); recovered=[]
-    if weak:
-        def one(rank):
-            MARKET_CTX.value=market_snapshot
-            if cancel_event is not None and cancel_event.is_set():return []
-            try:return _web_fast_market_wave_sync(identity,country,lang,rank) or []
-            except Exception as exc:
-                print(f'IMAGE COMMERCIAL RECOVERY rank={rank} error={type(exc).__name__}')
-                return []
-        with ThreadPoolExecutor(max_workers=len(weak)) as ex:
-            futures={ex.submit(one,rank):rank for rank in weak}
-            for future,rank in list(futures.items()):
-                try: recovered.extend(future.result(timeout=min(6.,SERPAPI_TIMEOUT_SECONDS+2)))
-                except Exception as exc: print(f'IMAGE COMMERCIAL RECOVERY FUTURE rank={rank} error={type(exc).__name__}')
-    seen_urls={_canonical_result_url(str(x.get('url') or '')) for x in items if x.get('url')}
-    seen_sig={(str(x.get('store') or '').casefold(),normalize_name(x.get('title') or '')) for x in items}
-    for row in recovered:
-        url=_canonical_result_url(str(row.get('url') or ''))
-        sig=(str(row.get('store') or '').casefold(),normalize_name(row.get('title') or ''))
-        if (url and url in seen_urls) or sig in seen_sig:continue
-        row=dict(row); row['image_query_result']=True
-        items.append(row)
-        if url:seen_urls.add(url)
-        seen_sig.add(sig)
-    counts=ready_counts(items)
-    # One bounded copy of the strong .42 text engine is a last resort only when
-    # Lens + fast market waves still found no priced offer at all.
-    if not sum(counts.values()) and not (cancel_event is not None and cancel_event.is_set()):
-        try:
-            direct=_web_text_direct_search(identity,country,lang,None,cancel_event,4.5,0.) or {}
-            for row in direct.get('results') or []:
-                url=_canonical_result_url(str(row.get('url') or ''))
-                sig=(str(row.get('store') or '').casefold(),normalize_name(row.get('title') or ''))
-                if (url and url in seen_urls) or sig in seen_sig:continue
-                row=dict(row); row['image_query_result']=True
-                items.append(row)
-                if url:seen_urls.add(url)
-                seen_sig.add(sig)
-        except Exception as exc:
-            print('IMAGE COMMERCIAL TEXT RECOVERY error='+type(exc).__name__)
-    counts=ready_counts(items)
-    print('IMAGE COMMERCIAL RECOVERY '+json.dumps({'query':identity[:90],'priced_local':counts[0],
-          'priced_us':counts[1],'priced_cn':counts[2],'total':len(items)},separators=(',',':')))
-    return items
-
-
 def _web_search_image_sync(image_b64, mime, caption, country, lang, progress_callback=None, classify_with_ai=True, cancel_event=None):
     market = _web_market(country)
     MARKET_CTX.value = market
@@ -23163,13 +23233,8 @@ def _web_search_image_sync(image_b64, mime, caption, country, lang, progress_cal
             if items:
                 identity = (lens_direct.get('visual_identity') or lens_direct.get('relevance_target') or lens_direct.get('query') or caption or '').strip()
                 if USE_V106_5_RESULT_PIPELINE or (WEB_MATCH_WHATSAPP_EXACT and (not WEB_TEXT_DENSE_PARITY)):
-                    ready_local=sum(1 for r in items if int(r.get('market_rank',99))==0 and _web_row_has_numeric_price(r))
-                    ready_global=sum(1 for r in items if int(r.get('market_rank',99)) in (1,2) and _web_row_has_numeric_price(r))
-                    if (ready_local+ready_global)>=2 and ready_global>=1:
-                        print(f'ANDROID IMAGE TRUE PARITY: commercially ready direct set -> {len(items)} result(s)')
-                        return _web_attach_captured_result_sections({'ok': True, 'type': 'results', 'query': identity, 'market': market, 'results': items, 'source': 'whatsapp_direct_lens_exact', '_reference_image_b64': image_b64, '_reference_image_mime': mime}, lang, allow_ai=classify_with_ai, cancel_event=cancel_event)
-                    print(f'ANDROID IMAGE TRUE PARITY RECOVERY: direct={len(items)} priced_local={ready_local} priced_global={ready_global}')
-                    items=_web_image_commercial_recovery(items,identity,country,lang,cancel_event)
+                    print(f'ANDROID IMAGE TRUE PARITY: direct WhatsApp Lens set -> {len(items)} result(s); no WEB v89 supplement')
+                    return _web_attach_captured_result_sections({'ok': True, 'type': 'results', 'query': identity, 'market': market, 'results': items, 'source': 'whatsapp_direct_lens_exact', '_reference_image_b64': image_b64, '_reference_image_mime': mime}, lang, allow_ai=classify_with_ai, cancel_event=cancel_event)
                 if WEB_IMAGE_SUPPLEMENT_WEAK_MARKETS and identity:
                     target = {0: WEB_IMAGE_TARGET_LOCAL, 1: WEB_IMAGE_TARGET_US, 2: WEB_IMAGE_TARGET_CN}
                     counts = {0: 0, 1: 0, 2: 0}
@@ -23236,10 +23301,8 @@ def _web_search_image_sync(image_b64, mime, caption, country, lang, progress_cal
         if cancelled():
             return cancelled_result(recovered.get('query'))
         items = _web_build_lens_items(recovered, lang, caption)
-        recovered_identity=recovered.get('query') or caption
-        items=_web_image_commercial_recovery(items,recovered_identity,country,lang,cancel_event)
         return _web_attach_captured_result_sections({
-            'ok': True, 'type': 'results', 'query': recovered_identity,
+            'ok': True, 'type': 'results', 'query': recovered.get('query') or caption,
             'market': market, 'results': items, 'source': recovered.get('source'),
             '_reference_image_b64': image_b64, '_reference_image_mime': mime,
         }, lang, allow_ai=classify_with_ai, cancel_event=cancel_event)
@@ -24883,7 +24946,13 @@ def _web_text_fast_prepare(query, country, lang, selected_option='', original_qu
     and that call is bounded by the caller; a slow planner never blocks.
     """
     q = re.sub(r'\s+', ' ', str(selected_option or query or '')).strip()
+    age_context = _classic_shoe_age_context(q)
+    requested_query = q
+    if age_context:
+        q = age_context[0]
     base = {'ok': bool(q), 'query': q, 'market': _web_market(country), 'rtype': 'SPECIFIC', 'planner': 'none'}
+    if age_context:
+        base.update(planner='local-age-context', original_query=requested_query, audience_age_min=age_context[1], audience_age_max=age_context[2])
     if not q or len(q) > WEB_API_MAX_QUERY_CHARS:
         return dict(base, ok=False, error='empty_query' if not q else 'query_too_long')
     if selected_option:
@@ -24942,7 +25011,10 @@ async def _web_stream_text_fast(query, country, lang, selected_option='', reques
     if rtype in ('SERVICE', 'NONE'):
         yield _web_stream_event({'event': 'error', 'error': 'not_a_product_query'})
         return
-    yield _web_stream_event({'event': 'query', 'query': q, 'market': market, 'source': 'text_fast'})
+    yield _web_stream_event({'event': 'query', 'query': q, 'market': market, 'source': 'text_fast',
+        **({'original_query':prep['original_query'], 'query_reason':'age_to_audience',
+            'audience_age_min':prep['audience_age_min'], 'audience_age_max':prep['audience_age_max']}
+           if prep.get('planner') == 'local-age-context' else {})})
     if rtype == 'GENERIC':
         task = asyncio.create_task(asyncio.to_thread(_web_recommendations_response, q, lang, market))
         try:
@@ -27437,7 +27509,7 @@ def _fz_fallback_facets(context, records):
         facet('neckline','Neckline','فتحة الرقبة',[('V-neck','رقبة V'),('Round neck','رقبة دائرية'),('Square neck','رقبة مربعة'),('High neck','رقبة عالية'),('Off shoulder','أكتاف مكشوفة')])
         facet('material','Material','الخامة',[('Velvet','مخمل'),('Satin','ساتان'),('Chiffon','شيفون'),('Crepe','كريب'),('Lace','دانتيل'),('Tulle','تول')])
         facet('embellishment','Details','الزخرفة',[('Plain','سادة'),('Sequins','ترتر'),('Beaded','خرز'),('Embroidered','تطريز')])
-    if _fz_facet_allowed(context,'color') and re.search(r'phone|iphone|chair|table|sofa|clothing|shoe|bag|makeup|lip|mascara|dress|laptop|camera|jewel|watch|ايفون|كرسي|طاول|حذاء|شنط|فستان|مجوهر',family):
+    if context['kind'] == 'image' or re.search(r'phone|iphone|chair|table|sofa|clothing|shoe|bag|makeup|lip|mascara|ايفون|كرسي|طاول',family):
         facet('color','Colour','اللون',[('Black','أسود'),('White','أبيض'),('Blue','أزرق'),('Green','أخضر'),('Red','أحمر'),('Pink','وردي'),('Beige','بيج'),('Grey','رمادي')])
     if re.search(r'phone|iphone|computer|laptop|camera|console|furniture|chair|ايفون|هاتف|لابتوب',family):
         facet('condition','Condition','الحالة',[('New','جديد'),('Used','مستعمل'),('Refurbished','مجدد'),('Open box','علبة مفتوحة')])
@@ -27517,16 +27589,9 @@ _FZ_FACET_LABELS = {
 _FZ_FACET_ORDER = {
     'dress':['type','size','color','length','silhouette','fit','sleeve','neckline','material','pattern','embellishment','occasion','brand','condition','price'],
     'phone':['model','storage','color','condition','screen_size','memory','network','sim','brand','price'],
-    'shoe':['brand','model','size','color','width','surface','material','condition','price'],
-    'clothing':['brand','type','size','color','fit','material','pattern','condition','price'],
-    'bag':['brand','type','size','color','material','style','condition','price'],
-    'supplement':['brand','type','form','quantity','strength','flavor','pack_size','condition','price'],
-    'automotive':['brand','model','part_number','vehicle_make','vehicle_model','vehicle_year','fitment','condition','price'],
-    'electronics':['brand','model','storage','memory','screen_size','color','condition','price'],
-    'beauty':['brand','type','shade','color','finish','form','size','condition','price'],
     'furniture':['type','size','dimensions','color','material','shape','style','finish','brand','condition','price'],
     'jewellery':['type','size','material','gemstone','color','shape','style','brand','condition','price'],
-    'generic':['type','model','size','material','style','brand','condition','price'],
+    'generic':['type','model','size','storage','color','length','material','shape','style','fit','finish','brand','condition','price'],
 }
 
 def _fz_facet_norm(value):
@@ -27538,41 +27603,9 @@ def _fz_filter_family(context):
     text=_fz_facet_norm(' '.join(str(context.get(k) or '') for k in ('base','base_en','category')))
     if re.search(r'\bdress(?:es)?\b|\bgown\b|فستان|فساتين',text):return 'dress'
     if re.search(r'\b(?:iphone|phone|smartphone|smartphones|mobile)\b|ايفون|هاتف|هواتف|جوال',text):return 'phone'
-    if re.search(r'\b(?:shoe|shoes|sneaker|sneakers|trainer|trainers|footwear)\b|حذاء|احذيه|جوتي|جواتي',text):return 'shoe'
-    if re.search(r'\b(?:shirt|shirts|jacket|jackets|pants|trousers|skirt|skirts|clothing|apparel)\b|ملابس|قميص|بنطلون|جاكيت|تنوره',text):return 'clothing'
-    if re.search(r'\b(?:bag|bags|handbag|handbags|backpack|backpacks|tote|clutch)\b|شنطه|شنط|حقيبه|حقائب',text):return 'bag'
-    if re.search(r'\b(?:supplement|supplements|vitamin|vitamins|capsule|capsules|tablet|tablets|nootropic|protein powder)\b|مكمل|مكملات|فيتامين|كبسول|حبوب',text):return 'supplement'
-    if re.search(r'\b(?:car part|car parts|automotive|compressor|alternator|radiator|brake|spark plug|oem part)\b|قطعه سياره|قطع سيارات|كمبريسر|كومبريسر|دينمو|رديتر|فرامل',text):return 'automotive'
-    if re.search(r'\b(?:laptop|notebook|computer|camera|headphone|headphones|earbuds|speaker|monitor|tablet)\b|لابتوب|كمبيوتر|كاميرا|سماعه|سماعات|تابلت',text):return 'electronics'
-    if re.search(r'\b(?:makeup|skincare|mascara|foundation|lipstick|perfume|fragrance|serum|moisturizer)\b|مكياج|عطر|عطور|سيروم|مرطب|بشره',text):return 'beauty'
     if re.search(r'jewel|jewell|necklace|earring|bracelet|مجوهر|قلاد|خاتم|خواتم|اقراط|اساور',text):return 'jewellery'
     if re.search(r'furniture|chair|table|sofa|كرسي|طاول|كنب|اثاث',text):return 'furniture'
     return 'generic'
-
-
-def _fz_facet_allowed(context, key):
-    """Keep only dimensions that make semantic sense for this product family.
-
-    Unknown/custom dimensions remain allowed.  This guard only blocks known
-    generic facets (especially Colour) when they would be noise, such as on a
-    dietary supplement or an automotive compressor.
-    """
-    family=_fz_filter_family(context)
-    if key == 'color':
-        return family in {'dress','phone','shoe','clothing','bag','electronics','beauty','furniture','jewellery'}
-    if key in {'length','silhouette','fit','sleeve','neckline','pattern','embellishment','occasion'}:
-        return family in {'dress','clothing'}
-    if key == 'gemstone':
-        return family == 'jewellery'
-    if key in {'storage','memory','screen_size','network','sim'}:
-        return family in {'phone','electronics'}
-    if key == 'shape':
-        return family in {'furniture','jewellery','bag'}
-    if key == 'finish':
-        return family in {'furniture','jewellery','beauty'}
-    if key == 'material':
-        return family not in {'supplement','phone','automotive'}
-    return True
 
 def _fz_facet_key(raw,context):
     key=_refine_canonical_key(raw.get('key'))
@@ -27595,7 +27628,7 @@ def _fz_merge_raw_facets(facets,context):
     for raw in facets:
         if not isinstance(raw,dict):continue
         key=_fz_facet_key(raw,context)
-        if not key or key.startswith('__') or not _fz_facet_allowed(context,key):continue
+        if not key or key.startswith('__'):continue
         raw_label=_fz_facet_norm(raw.get('label'))
         # Known independent dimensions receive distinct labels (fit != neckline != silhouette).
         if key not in _FZ_FACET_LABELS and raw_label and raw_label in labels:
@@ -27609,7 +27642,7 @@ def _fz_merge_raw_facets(facets,context):
             groups[key]=value
             if raw_label:labels.setdefault(raw_label,key)
         groups[key]['options'].extend(copy.deepcopy(o) for o in (raw.get('options') or []) if isinstance(o,dict))
-    order=_FZ_FACET_ORDER.get(_fz_filter_family(context),_FZ_FACET_ORDER['generic'])
+    order=_FZ_FACET_ORDER[_fz_filter_family(context)]
     return sorted(groups.values(),key=lambda f:(1000 if f['key']=='price' else order.index(f['key']) if f['key'] in order else 900,f['key']))
 
 def _fz_join_unique_query(parts):
@@ -28511,6 +28544,11 @@ def _refine_compose(context):
     ec['query_language']='en'
     en_native,en_english,_=_intent_commercial_parts(ec)
     if en_english and not re.search(r'[\u0600-\u06ff]',en_english): english=en_english
+    if c.get('kind') == 'text':
+        native_age = _classic_shoe_age_context(native)
+        english_age = _classic_shoe_age_context(english)
+        if native_age: native = native_age[0]
+        if english_age: english = english_age[0]
     native=_refine_safe_query(native);english=_refine_safe_query(english)
     if not native or not english: raise ValueError('query_too_long')
     c.update(query_native=native,display_query=native,query_en=english,search_query=english,
