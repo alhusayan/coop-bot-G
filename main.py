@@ -388,7 +388,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization'], max_age=86400)
-BUILD_ID = 'v128.5.42.2-age-context'
+BUILD_ID = 'v128.5.42.1-classic-filters'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -9435,148 +9435,7 @@ def _findzia_rare_query_tokens(query):
     return {tok for tok in q_tokens if len(tok) >= 3 and df.get(tok, 0) <= docs * FINDZIA_GUARD_RARE_SHARE}
 
 
-# ---------------------------------------------------------------------------
-# Classic 42.2 — shoe age context, not a model number or an inferred shoe size.
-# Local deterministic parsing only. The original retrieval engines, provider
-# limits, price binding and the unfiltered Lens pipeline remain unchanged.
-# Conservative: handles explicit ages 6–17 for footwear, not safety/medical
-# products, baby size charts, vintage goods, warranty periods or vague numbers.
-# ---------------------------------------------------------------------------
-_CLASSIC_AGE_DIGITS = str.maketrans('٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹०१२३४५६७८९', '012345678901234567890123456789')
-_CLASSIC_FOOTWEAR_RE = re.compile(
-    r'(?i)\b(?:shoes?|sneakers?|trainers?|footwear|boots?|sandals?|'
-    r'chaussures?|baskets?|schuhe?|tennisschuhe?|scarpe|zapatos?|zapatillas?|'
-    r'calzado|calçados|calcados|ayakkab[ıi](?:s[ıi])?|кроссовки|обувь)\b'
-    r'|حذاء|أحذية|احذية|احذيه|جوتي|جواتي|سنيكرز|كوتشي|जूते|जूता|جوتے|جوتا|シューズ|靴|鞋')
-_CLASSIC_KIDS_RE = re.compile(
-    r'(?i)\b(?:kids?(?:[’\']s)?|children(?:[’\']s)?|child(?:[’\']s)?|juniors?|jr|youth|'
-    r'boys?(?:[’\']s)?|girls?(?:[’\']s)?|grade[ -]?school|big[ -]?kids|enfants?|junioren|kinder|bambin[oi]|niñ[oa]s?|'
-    r'infantil|crianças?|çocuk|детск\w*)\b|للأطفال|للاطفال|أطفال|اطفال|ناشئين|ناشئة|صغار|بچوں|बच्चों|儿童|兒童|子供|ジュニア')
-_CLASSIC_ADULT_SHOES_RE = re.compile(
-    r'(?i)\b(?:adults?|mens?(?:[’\']s)?|womens?(?:[’\']s)?|ladies|hommes?|femmes?|'
-    r'herren|damen|uomo|donna|hombres?|mujeres?)\b|رجالي|نسائي|للكبار')
-_CLASSIC_AGE_SKIP_RE = re.compile(
-    r'(?i)\b(?:vintage|antique|warranty|guarantee|collection|used|worn|old[ -]stock|'
-    r'ago|for\s+the\s+past)\b|ضمان|كفالة|مستعمل|مستعملة|منذ')
-_CLASSIC_AGE_PATTERNS = (
-    ('en', re.compile(r'(?i)(?<![\w.])(?P<a>\d{1,2})(?:\s*(?:-|–|to)\s*(?P<b>\d{1,2}))?[ -]*(?:years?|yrs?)[ -]*old\b')),
-    ('en', re.compile(r'(?i)\b(?:aged?|ages)\s*(?P<a>\d{1,2})(?:\s*(?:-|–|to)\s*(?P<b>\d{1,2}))?(?:\s*(?:years?|yrs?)(?:\s*old)?)?\b')),
-    ('en', re.compile(r'(?i)(?<![\w.])(?P<a>\d{1,2})\s*(?:y/o|yo)\b')),
-    ('ar', re.compile(r'(?:ل?عمر(?:ه|ها|هم)?|بعمر)?\s*(?<!\d)(?P<a>\d{1,2})(?:\s*(?:-|–|إلى|الى)\s*(?P<b>\d{1,2}))?\s*(?:سنوات|سنين|سنة|سنه|أعوام|اعوام|عاما|عام)(?!\w)')),
-    ('fr', re.compile(r'(?i)(?:(?:âgé[es]*|age[es]*)\s+de\s*)?(?<!\d)(?P<a>\d{1,2})(?:\s*(?:-|–|à)\s*(?P<b>\d{1,2}))?\s*ans\b')),
-    ('de', re.compile(r'(?i)(?<!\d)(?P<a>\d{1,2})(?:\s*(?:-|–|bis)\s*(?P<b>\d{1,2}))?[ -]*(?:jahre\s+alt|jährige[nrs]?)\b')),
-    ('es', re.compile(r'(?i)(?<!\d)(?P<a>\d{1,2})(?:\s*(?:-|–|a)\s*(?P<b>\d{1,2}))?\s*años\b')),
-    ('pt', re.compile(r'(?i)(?<!\d)(?P<a>\d{1,2})(?:\s*(?:-|–|a)\s*(?P<b>\d{1,2}))?\s*anos\b')),
-    ('it', re.compile(r'(?i)(?<!\d)(?P<a>\d{1,2})(?:\s*(?:-|–|a)\s*(?P<b>\d{1,2}))?\s*anni\b')),
-    ('tr', re.compile(r'(?i)(?<!\d)(?P<a>\d{1,2})(?:\s*(?:-|–)\s*(?P<b>\d{1,2}))?\s*yaş(?:ında)?\b')),
-    ('ru', re.compile(r'(?i)(?<!\d)(?P<a>\d{1,2})(?:\s*(?:-|–|до)\s*(?P<b>\d{1,2}))?\s*(?:лет|года|год)(?!\w)')),
-    ('hi', re.compile(r'(?<!\d)(?P<a>\d{1,2})\s*(?:साल|वर्ष)(?:\s*(?:के|का|की))?')),
-    ('ur', re.compile(r'(?<!\d)(?P<a>\d{1,2})\s*سال(?:\s*(?:کے|کا|کی))?')),
-    ('zh', re.compile(r'(?<!\d)(?P<a>\d{1,2})\s*[岁歲]')),
-    ('ja', re.compile(r'(?<!\d)(?P<a>\d{1,2})\s*歳')),
-)
-_CLASSIC_KIDS_WORD = {'en':'Kids','ar':'للأطفال','fr':'enfant','de':'Kinder','es':'niños',
-    'pt':'infantil','it':'bambini','tr':'çocuk','ru':'детские','hi':'बच्चों','ur':'بچوں','zh':'儿童','ja':'ジュニア'}
-_CLASSIC_WRONG_SHOE_KIND_RE = re.compile(
-    r'(?i)\b(?:racquets?|rackets?|balls?|socks?|insoles?|laces?|bags?|books?|posters?|toys?)\b|مضرب|مضارب|جوارب|كرة|كرات')
-
-@lru_cache(maxsize=2048)
-def _classic_shoe_age_context(value):
-    """Return immutable (retail query, min age, max age) or None. Never size = age."""
-    original = str(value or '').strip()
-    if not original or len(original) > 400 or not _CLASSIC_FOOTWEAR_RE.search(original):
-        return None
-    if _CLASSIC_AGE_SKIP_RE.search(original) or _CLASSIC_ADULT_SHOES_RE.search(original):
-        return None
-    text = unicodedata.normalize('NFKC', original).translate(_CLASSIC_AGE_DIGITS)
-    candidates = []
-    for language, pattern in _CLASSIC_AGE_PATTERNS:
-        for match in pattern.finditer(text):
-            age = int(match.group('a')); end = int(match.groupdict().get('b') or age)
-            if not 6 <= age <= end <= 17:
-                return None
-            candidates.append((match.start(), match.end(), age, end, language))
-    if not candidates:
-        return None
-    # Overlapping language expressions are acceptable; multiple different ages
-    # are ambiguous (siblings, two products, etc.) and are never silently erased.
-    if len({(m[2],m[3]) for m in candidates}) != 1:
-        return None
-    merged = []
-    for start,end,*_ in sorted(candidates):
-        if merged and start <= merged[-1][1]:
-            merged[-1] = (merged[-1][0], max(end, merged[-1][1]))
-        else:
-            merged.append((start,end))
-    cleaned = text
-    for start,end in reversed(merged):
-        cleaned = cleaned[:start] + ' ' + cleaned[end:]
-    language = 'ar' if re.search(r'[\u0600-\u06ff]',original) and not re.search(r'[پچژگ]',original) else candidates[0][4]
-    # Only remove syntactic age recipients/filler, never arbitrary attributes.
-    cleaned = re.sub(r'(?i)\b(?:for\s+)?(?:(?:my|a|an|our)\s+)?(?P<recipient>son|daughter|child|kid|boy|girl)\b(?=\s*(?:who\s+is|aged?)?\s*$)', lambda m: ' boys ' if m['recipient'].lower() in ('son','boy') else ' girls ' if m['recipient'].lower() in ('daughter','girl') else ' ', cleaned)
-    cleaned = re.sub(r'(?i)\b(?:who\s+is|for|aged?|de|pour|para|für|di|per|для)(?:\s+(?:a|an|my|our|un))?\s*$', '', cleaned)
-    cleaned = re.sub(r'(?:ل?ولدي|ل?بنتي|ل?طفل|ل?طفلة|عمره|عمرها|بعمر|لعمر|عمر)\s*$', '', cleaned)
-    cleaned = re.sub(r'(?i)^\s*(?:please\s+)?(?:i\s+(?:want|need)|looking\s+for|find\s+me)\s+', '', cleaned)
-    cleaned = re.sub(r'^\s*(?:أبي|ابي|ابغى|أريد|اريد|بغيت)\s+', '', cleaned)
-    cleaned = re.sub(r'\s+', ' ', cleaned).strip(' ,،-–')
-    if not cleaned or not _CLASSIC_FOOTWEAR_RE.search(cleaned):
-        return None
-    if not _CLASSIC_KIDS_RE.search(cleaned):
-        word = _CLASSIC_KIDS_WORD.get(language, 'Kids')
-        cleaned = (cleaned+' '+word) if language == 'ar' else (word+' '+cleaned)
-    # No deletion of a remaining identifier, explicit size, colour or surface.
-    return (cleaned, candidates[0][2], candidates[0][3])
-
-
-def _classic_kids_footwear(value):
-    text = str(value or '')
-    return bool(len(text)<=600 and _CLASSIC_FOOTWEAR_RE.search(text) and _CLASSIC_KIDS_RE.search(text))
-
-
-def _classic_footwear_match_text(value):
-    """Canonical child/shoe synonyms for candidate recall only, NEVER price binding."""
-    text = str(value or '')
-    age = _classic_shoe_age_context(text)
-    if age:
-        text = age[0]
-    text = _CLASSIC_KIDS_RE.sub(lambda m: ' kids girls ' if re.match(r'(?i)girls?',m.group()) else ' kids boys ' if re.match(r'(?i)boys?',m.group()) else ' kids ', text)
-    text = re.sub(r'(?i)\b(?:gs|jr\.)\b', ' kids ', text)
-    text = _CLASSIC_FOOTWEAR_RE.sub(' shoes ', text)
-    text = re.sub(r'(?i)\btenis\b|\btênis\b|تنس|теннис\w*|テニス|网球|網球|टेनिस|ٹینس', ' tennis ', text)
-    return re.sub(r'\s+', ' ', text).strip()
-
-
-def _classic_age_candidate_view(query, item):
-    """Translate only the narrow child-footwear matching vocabulary.
-
-    Return (query, copied matching-only row, hard conflict). Original merchant
-    title, product URL, currency, price and photo are never rewritten/published.
-    """
-    age = _classic_shoe_age_context(str(query or ''))
-    q = age[0] if age else str(query or '')
-    if not _classic_kids_footwear(q):
-        return q, item, False
-    title = str((item or {}).get('title') or (item or {}).get('line') or '')
-    hay = title+' '+str((item or {}).get('snippet') or '')
-    canon = _classic_footwear_match_text(hay)
-    if (_CLASSIC_ADULT_SHOES_RE.search(hay) and not _CLASSIC_KIDS_RE.search(hay)
-            and not re.search(r'(?i)\b(?:gs|jr)\b',hay)):
-        return q, item, True
-    if not _CLASSIC_FOOTWEAR_RE.search(hay) and _CLASSIC_WRONG_SHOE_KIND_RE.search(hay):
-        return q, item, True
-    matched = dict(item or {})
-    matched['title'] = _classic_footwear_match_text(title)
-    # A source's literal child category in a description may resolve the audience
-    # even when its product title is shortened to a model. Do not invent features.
-    if re.search(r'\bkids\b',canon) and not re.search(r'\bkids\b',matched['title']):
-        matched['title'] += ' kids'
-    return _classic_footwear_match_text(q), matched, False
-
-
 def _findzia_stream_candidate_ok(query, item):
-    query, item, audience_conflict = _classic_age_candidate_view(query, item)
-    if audience_conflict:
-        return False
     title = str((item or {}).get('title') or (item or {}).get('line') or '')
     if not title or _findzia_hard_product_mismatch(query, title):
         if title:
@@ -10519,8 +10378,6 @@ def _text_query_is_product(query):
     q = re.sub(r'\s+', ' ', str(query or '')).strip()
     if not q or is_service_request(q):
         return False
-    if _classic_shoe_age_context(q) or _classic_kids_footwear(q):
-        return True  # explicit product + audience: no remote classifier needed
     retrieval = _local_retrieval_text(q)
     # Match complete brand aliases, including multiword names; not substrings.
     for brand in _LOCAL_BRAND_ALIASES:
@@ -24946,13 +24803,7 @@ def _web_text_fast_prepare(query, country, lang, selected_option='', original_qu
     and that call is bounded by the caller; a slow planner never blocks.
     """
     q = re.sub(r'\s+', ' ', str(selected_option or query or '')).strip()
-    age_context = _classic_shoe_age_context(q)
-    requested_query = q
-    if age_context:
-        q = age_context[0]
     base = {'ok': bool(q), 'query': q, 'market': _web_market(country), 'rtype': 'SPECIFIC', 'planner': 'none'}
-    if age_context:
-        base.update(planner='local-age-context', original_query=requested_query, audience_age_min=age_context[1], audience_age_max=age_context[2])
     if not q or len(q) > WEB_API_MAX_QUERY_CHARS:
         return dict(base, ok=False, error='empty_query' if not q else 'query_too_long')
     if selected_option:
@@ -25011,10 +24862,7 @@ async def _web_stream_text_fast(query, country, lang, selected_option='', reques
     if rtype in ('SERVICE', 'NONE'):
         yield _web_stream_event({'event': 'error', 'error': 'not_a_product_query'})
         return
-    yield _web_stream_event({'event': 'query', 'query': q, 'market': market, 'source': 'text_fast',
-        **({'original_query':prep['original_query'], 'query_reason':'age_to_audience',
-            'audience_age_min':prep['audience_age_min'], 'audience_age_max':prep['audience_age_max']}
-           if prep.get('planner') == 'local-age-context' else {})})
+    yield _web_stream_event({'event': 'query', 'query': q, 'market': market, 'source': 'text_fast'})
     if rtype == 'GENERIC':
         task = asyncio.create_task(asyncio.to_thread(_web_recommendations_response, q, lang, market))
         try:
@@ -28544,11 +28392,6 @@ def _refine_compose(context):
     ec['query_language']='en'
     en_native,en_english,_=_intent_commercial_parts(ec)
     if en_english and not re.search(r'[\u0600-\u06ff]',en_english): english=en_english
-    if c.get('kind') == 'text':
-        native_age = _classic_shoe_age_context(native)
-        english_age = _classic_shoe_age_context(english)
-        if native_age: native = native_age[0]
-        if english_age: english = english_age[0]
     native=_refine_safe_query(native);english=_refine_safe_query(english)
     if not native or not english: raise ValueError('query_too_long')
     c.update(query_native=native,display_query=native,query_en=english,search_query=english,
