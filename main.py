@@ -389,7 +389,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization'], max_age=86400)
-BUILD_ID = 'v128.5.42.7-unified-intent'
+BUILD_ID = 'v128.5.42.5-shopping-guide'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -1126,8 +1126,6 @@ def is_lens_product_url(url, item=None):
     if host == 'walmart.com' or host.endswith('.walmart.com'):
         if not re.search(r'^/ip/', p.path, re.I):
             return False
-    if _host_matches_any(host, ('opensooq.com',)):
-        return bool(re.search(r'^/(?:ar|en)/search/\d{6,}(?:/|$)', path))
     if host == 'etsy.com' or host.endswith('.etsy.com'):
         return bool(re.search(r'^/(?:[a-z]{2}/)?listing/\d+(?:/|$)', p.path, re.I))
     # v42.1: known China product links can carry q/SearchText tracking.
@@ -4868,8 +4866,6 @@ def _web_offer_image_candidates(row):
             for child in value[:8]:
                 add(child, depth + 1)
         elif isinstance(value, dict):
-            if re.search(r'logo|favicon|placeholder|شعار', str(value.get('alt') or value.get('type') or ''), re.I):
-                return
             for key in ('url', 'src', 'contentUrl', 'original', 'thumbnail'):
                 if value.get(key):
                     add(value[key], depth + 1)
@@ -4878,7 +4874,7 @@ def _web_offer_image_candidates(row):
             if raw.startswith('//'):
                 raw = 'https:' + raw
             raw = _web_unproxy_image_url(raw)
-            if _web_is_http_url(raw) and raw not in seen and not _web_image_is_generic(raw, (row or {}).get('url') or (row or {}).get('link')):
+            if _web_is_http_url(raw) and raw not in seen:
                 seen.add(raw)
                 urls.append(raw)
     for field in ('serpapi_thumbnail', 'thumbnail', 'image', 'image_url', 'original', 'product_image', 'thumbnails', 'images', 'image_candidates'):
@@ -4894,15 +4890,15 @@ def _web_merge_offer_images(previous, incoming):
     # behind a full list of older (possibly failed) thumbnails.
     pictures = list(dict.fromkeys(before[:1] + fresh + before[1:] + incoming_pictures))[:8]
     if not pictures:
-        return {'image': '', 'thumbnail': '', 'image_candidates': []}
+        return {}
     # Keep raw first for fast CDN delivery; signed alternatives handle hotlink/CORS paths.
     candidates = []
     for picture in pictures[:4]:
         for candidate in (picture, _web_public_image_url(picture)):
             if candidate and candidate not in candidates:
                 candidates.append(candidate)
-    return {'image': before[0] if before else pictures[0],
-            'thumbnail': before[0] if before else pictures[0], 'image_candidates': candidates}
+    return {'image': previous.get('image') or pictures[0],
+            'thumbnail': previous.get('thumbnail') or pictures[0], 'image_candidates': candidates}
 
 
 
@@ -5171,8 +5167,6 @@ def _web_collection_url(value):
             return False
         if _host_matches_any(host, tuple(NON_STORE_HOSTS) + ('google.com', 'bing.com', 'baidu.com', 'gstatic.com', 'googleusercontent.com')):
             return False
-        if _host_matches_any(host, ('opensooq.com',)):
-            return not bool(re.search(r'^/(?:ar|en)/search/\d{6,}(?:/|$)', path))
         if _host_matches_any(host, ('hm.com',)) and '/products/' in path:
             return True
         # Product routes can contain a collection prefix or search tracking.
@@ -11135,8 +11129,70 @@ def _web_image_is_generic(image_url, page_url):
 
 
 def _web_extract_product_image_from_html(html, base_url):
-    return str(_web_product_page_metadata(html, base_url).get('image') or '')
-
+    try:
+        soup = BeautifulSoup(html or '', 'html.parser')
+    except Exception:
+        return ''
+    candidates = []
+    for attrs in ({'property': 'og:image'}, {'property': 'og:image:url'}, {'name': 'twitter:image'}, {'property': 'twitter:image'}, {'itemprop': 'image'}):
+        for tag in soup.find_all('meta', attrs=attrs):
+            candidates.append(tag.get('content') or '')
+    for link in soup.find_all('link', attrs={'rel': True}):
+        rel = ' '.join(link.get('rel') or []).lower()
+        if rel in ('image_src', 'preload'):
+            href = link.get('href') or ''
+            as_attr = str(link.get('as') or '').lower()
+            if rel == 'image_src' or as_attr == 'image':
+                candidates.append(href)
+    for script in soup.find_all('script', attrs={'type': 'application/ld+json'})[:10]:
+        text = (script.string or script.get_text() or '').strip()
+        if not text or 'image' not in text.lower():
+            continue
+        try:
+            data = json.loads(text)
+        except Exception:
+            continue
+        stack = [data]
+        while stack:
+            obj = stack.pop()
+            if isinstance(obj, dict):
+                img = obj.get('image')
+                if isinstance(img, str):
+                    candidates.append(img)
+                elif isinstance(img, list):
+                    for x in img:
+                        if isinstance(x, str):
+                            candidates.append(x)
+                        elif isinstance(x, dict):
+                            candidates.append(x.get('url') or x.get('contentUrl') or '')
+                elif isinstance(img, dict):
+                    candidates.append(img.get('url') or img.get('contentUrl') or '')
+                stack.extend(obj.values())
+            elif isinstance(obj, list):
+                stack.extend(obj[:12])
+    if not candidates:
+        for img in soup.find_all('img')[:30]:
+            src = img.get('src') or img.get('data-src') or img.get('data-lazy-src') or img.get('data-original') or ''
+            alt = str(img.get('alt') or '').lower()
+            classes = ' '.join(img.get('class') or []).lower()
+            if any((bad in (src or '').lower() for bad in ('sprite', 'icon', 'logo', '.svg'))):
+                continue
+            if 'logo' in alt or 'logo' in classes:
+                continue
+            candidates.append(src)
+    seen = set()
+    for raw in candidates:
+        url = _web_absolute_url(base_url, raw)
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        low = url.lower()
+        if any((x in low for x in ('logo', 'icon', 'sprite'))):
+            continue
+        if _web_image_is_generic(url, base_url):
+            continue
+        return url
+    return ''
 
 def _web_rescue_product_image(page_url):
     page_url = str(page_url or '').strip()
@@ -17705,8 +17761,6 @@ def _web_is_direct_product_page_url(url, store_name=''):
     for dom in china_domains:
         if host == dom or host.endswith('.' + dom):
             return _china_global_product_url(dom, raw)
-    if _host_matches_any(host, ('opensooq.com',)):
-        return bool(re.search(r'^/(?:ar|en)/search/\d{6,}(?:/|$)', path))
     if host == 'etsy.com' or host.endswith('.etsy.com'):
         return bool(re.search('/listing/\\d{6,}(?:/|$)', path))
     # A product's tracking query or descriptive slug can contain 'search' or
@@ -17867,18 +17921,6 @@ def _web_product_page_metadata(html, base_url):
         node = soup.find('meta', property=prop) or soup.find('meta', attrs={'name': prop})
         return str(node.get('content') or '').strip() if node else ''
     nodes = []
-    branding = set()
-    def brand_images(value):
-        if isinstance(value, str):
-            branding.add(_web_absolute_url(base_url, value))
-        elif isinstance(value, list):
-            for child in value[:12]: brand_images(child)
-        elif isinstance(value, dict):
-            for field in ('url','contentUrl','src'): brand_images(value.get(field))
-    for image in soup.select('header img, nav img, [class*="logo"] img, img[class*="logo"], img[alt*="Logo"], img[alt*="logo"], img[alt*="شعار"]')[:30]:
-        # Header promotional/product photos are not automatically branding.
-        if re.search(r'logo|brand|شعار',str(image.get('class',''))+' '+str(image.get('alt',''))+' '+str(image.parent.get('class','')),re.I):
-            brand_images(image.get('src') or image.get('data-src'))
     for script in soup.find_all('script', type='application/ld+json')[:12]:
         try:
             root = json.loads(script.string or script.get_text() or '')
@@ -17890,8 +17932,6 @@ def _web_product_page_metadata(html, base_url):
                 continue
             kinds = node.get('@type') or []
             kinds = kinds if isinstance(kinds, list) else [kinds]
-            if any(str(t).rsplit('/', 1)[-1] in ('Organization','WebSite','Store','LocalBusiness') for t in kinds):
-                brand_images(node.get('logo'));brand_images(node.get('image'))
             if any(str(t).rsplit('/', 1)[-1] in ('Product', 'ProductGroup') for t in kinds):
                 nodes.append(node)
             for field in ('@graph', 'mainEntity', 'hasVariant'):
@@ -17939,8 +17979,6 @@ def _web_product_page_metadata(html, base_url):
         data['image_candidates'] = _web_offer_image_candidates({'images': pictures})[:8]
         data['image'] = next(iter(data['image_candidates']), '')
         if data['image']: data['is_product'] = True
-    data['image_candidates'] = [u for u in _web_offer_image_candidates(data) if u not in branding]
-    data['image'] = next(iter(data['image_candidates']), '')
     return data
 
 _WEB_PRICE_ELEMENT_EXCLUDE = re.compile(
@@ -21204,69 +21242,6 @@ TEXT_DIRECT_FAST_SETTLE_SECONDS = max(1., min(10., float(os.environ.get('TEXT_DI
 TEXT_DIRECT_FAST_SETTLE_ROWS = max(1, min(20, int(os.environ.get('TEXT_DIRECT_FAST_SETTLE_ROWS', '4'))))
 
 
-def _web_broad_category(query):
-    """Only unresolved retail categories, never a model or chosen specification."""
-    text=' '.join(_local_retrieval_text(query).split())
-    context=dict(base=query,steps=[],kind='text',lang='en',country='us',path=[])
-    profile=_intent_profile(context)
-    if profile['brand'] or profile['model'] or profile['fixed'] or re.search(r'\d',query):return ''
-    if text in _LOCAL_RETRIEVAL_NOUNS:return text
-    norm=_fz_facet_norm(query)
-    for key,node in _FZ_NAV_TREE.items():
-        # Node fields: localized labels, aliases, children. Only exact aliases qualify.
-        for value in node[:4]:
-            variants=value if isinstance(value,(list,tuple)) else str(value).split('|')
-            if any(_fz_facet_norm(x)==norm for x in variants if isinstance(x,str)):return key
-    return ''
-
-
-def _web_broad_queries(query, observed=None):
-    category=_web_broad_category(query)
-    if not category:return []
-    context=dict(base=query,steps=[],kind='text',country='us',lang='en',query_language='en',path=[])
-    profile=_intent_profile(context)
-    if profile['family']=='generic' and category in _LOCAL_RETRIEVAL_NOUNS:
-        canonical=_LOCAL_RETRIEVAL_NOUNS[category].get('en',category).split('|')[0]
-        profile=_intent_profile(dict(context,base=canonical))
-    suggestions=[]
-    if observed:
-        seen_brands=set()
-        for row in observed:
-            title=_refine_safe_query(row.get('title') or '')
-            if not title or len(title)>120 or _findzia_hard_product_mismatch(query,title):continue
-            p=_intent_profile(dict(context,base=title))
-            if not p['model'] or (p['brand'] and p['brand'] in seen_brands):continue
-            seen_brands.add(p['brand']);suggestions.append(p['model'])
-        return list(dict.fromkeys(suggestions))[:3]
-    # Existing catalog taxonomy/facets, with no model generations invented by AI.
-    children=_fz_fallback_navigation(context)
-    if children:
-        suggestions.extend(x.get('query_en') or x.get('term') for x in children)
-    if not suggestions:
-        for brand in _INTENT_BRAND_SEEDS.get(profile['family'],[])[:3]:
-            family=_INTENT_PRODUCT_FAMILIES.get((profile['family'],brand))
-            suggestions.append(family[0] if family else brand+' '+query)
-    if not suggestions:
-        facets=_fz_fallback_facets(context,[])
-        for key in ('style','type','material','form','color'):
-            facet=next((f for f in facets if f.get('key')==key),None)
-            if facet:
-                suggestions.extend(query+' '+str(o['term']) for o in facet.get('options',[])[:3]);break
-    return [x for x in dict.fromkeys(suggestions) if x and _fz_facet_norm(x)!=_fz_facet_norm(query)][:2]
-
-
-def _web_broad_specs(query,country,specs,observed=None):
-    seeds=_web_broad_queries(query,observed)
-    local=[s for s in specs if s['role']=='local' and s['country']==country
-           and not any(s.get(k) for k in ('catalog_domain','domestic_scope','independent_scope'))
-           and s['engine'] in ('serper_shopping','google_shopping','serper_search','cse_search','google_light','google','baidu')]
-    if not local:return []
-    preference={'serper_shopping':0,'google_shopping':1,'serper_search':2,'cse_search':3,'google_light':4,'baidu':5,'google':6}
-    if country=='cn':preference.update(baidu=0,serper_search=1,google=2)
-    lane=min(local,key=lambda s:preference.get(s['engine'],9))
-    return [dict(lane,retrieval_query=seed,broad_expansion=True) for seed in seeds]
-
-
 def _web_text_direct_search(query, country, lang, progress_callback=None, cancel_event=None,
                             deadline_seconds=None, empty_extension_seconds=0.):
     """One retrieval pass shared by web/iOS REST and streaming clients.
@@ -21313,7 +21288,7 @@ def _web_text_direct_search(query, country, lang, progress_callback=None, cancel
             return
         spec_key = (spec['country'], spec['role'], spec['engine'], spec['hl'],
                     bool(spec.get('domestic_scope')), bool(spec.get('selected_catalog')),
-                    bool(spec.get('independent_scope')), spec.get('catalog_domain') or '', spec.get('domestic_group') or '', spec.get('retrieval_query') or '', token)
+                    bool(spec.get('independent_scope')), spec.get('catalog_domain') or '', spec.get('domestic_group') or '', token)
         if spec_key in submitted_specs:
             return
         submitted_specs.add(spec_key)
@@ -21323,14 +21298,11 @@ def _web_text_direct_search(query, country, lang, progress_callback=None, cancel
         target['_shopping_units'] = ledgers.setdefault(spec['country'], [])
         ledger_targets.setdefault(spec['country'], target)
         future = TEXT_DIRECT_POOL.submit(_run_with_market, target,
-            _web_text_direct_fetch, spec.get('retrieval_query') or query, spec, deadline, cancel, token)
+            _web_text_direct_fetch, query, spec, deadline, cancel, token)
         jobs[future] = (spec, target, token, thumbnail)
         launched += 1
     try:
         specs = _web_text_direct_specs(query, country)
-        extra_specs = _web_broad_specs(query,country,specs) if not market.get('_image_discovery') else []
-        seed_queries = {s['retrieval_query'] for s in extra_specs}
-        specs = specs + extra_specs
         fast_lane_count = sum(1 for spec in specs if spec['engine'].startswith(('serper_', 'cse_')))
         backup_launched = False
         fast_unavailable = 0
@@ -21411,14 +21383,6 @@ def _web_text_direct_search(query, country, lang, progress_callback=None, cancel
                         {'ok': True, 'type': 'results', 'query': query, 'market': market,
                          'results': batch, 'source': 'text_direct'}, lang, False)
                     batch = classified.get('results') or []
-                # One more model observed in actual listings can improve recall.
-                # All added lanes share the original deadline, geo and identity checks.
-                if spec['role']=='local' and not token and len(seed_queries)<3 and not market.get('_image_discovery'):
-                    for extra in _web_broad_specs(query,country,specs,batch):
-                        seed=extra['retrieval_query']
-                        if seed in seed_queries:continue
-                        seed_queries.add(seed);submit(extra)
-                        if len(seed_queries)>=3:break
                 changed = False
                 # Prefer complete offers when a source contains many variants.
                 batch.sort(key=lambda r: (not _web_row_has_numeric_price(r), not bool(r.get('image')),
@@ -25104,17 +25068,14 @@ def _web_text_fast_prepare(query, country, lang, selected_option='', original_qu
         return base
     if is_service_request(q):
         return dict(base, rtype='SERVICE')
-    if _web_broad_category(q):
-        return dict(base,planner='broad-discovery')
     if _text_query_is_product(q):
         return base
     if ' '.join(_local_retrieval_text(q).split()) in _LOCAL_RETRIEVAL_NOUNS:
-        return dict(base, planner='broad-discovery')
+        return dict(base, rtype='GENERIC', planner='bare-category')
     planned = _shopping_query_ai(q, lang)  # cached 24h; bounded by SHOPPING_QUERY_AI_TIMEOUT
     if not planned:
         # Planner unavailable: search the typed words rather than fail the user.
         return dict(base, planner='unavailable')
-    if planned.get('rtype')=='GENERIC':return dict(base,planner='broad-discovery')
     return dict(base, **planned, planner='ai')
 
 
@@ -25123,7 +25084,7 @@ async def _web_stream_text_fast(query, country, lang, selected_option='', reques
     started = time.monotonic()
     yield _web_stream_event({'event': 'start', 'ok': True, 'source': 'text_fast', 'build': BUILD_ID})
     q0 = re.sub(r'\s+', ' ', str(selected_option or query or '')).strip()
-    instant = bool(selected_option or force_specific or (q0 and (_web_broad_category(q0) or _text_query_is_product(q0))))
+    instant = bool(selected_option or force_specific or (q0 and _text_query_is_product(q0)))
     if instant:
         prep = _web_text_fast_prepare(query, country, lang, selected_option, original_query, force_specific)
     else:
@@ -25157,6 +25118,25 @@ async def _web_stream_text_fast(query, country, lang, selected_option='', reques
         yield _web_stream_event({'event': 'error', 'error': 'not_a_product_query'})
         return
     yield _web_stream_event({'event': 'query', 'query': q, 'market': market, 'source': 'text_fast'})
+    if rtype == 'GENERIC':
+        task = asyncio.create_task(asyncio.to_thread(_web_recommendations_response, q, lang, market))
+        try:
+            while not task.done():
+                if request is not None and await request.is_disconnected():
+                    return
+                done, _ = await asyncio.wait({task}, timeout=TEXT_FAST_STATUS_INTERVAL)
+                if not done:
+                    yield _web_stream_event({'event': 'status', 'stage': 'brand_comparison',
+                                             'elapsed_ms': int((time.monotonic()-started)*1000)})
+            report = await task
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        yield _web_stream_event({'event': 'recommendations', 'data': report,
+                                 'elapsed_ms': int((time.monotonic()-started)*1000)})
+        yield _web_stream_event({'event': 'done', 'count': 0, 'source': 'text_fast',
+                                 'elapsed_ms': int((time.monotonic()-started)*1000)})
+        return
     # Retrieval streams URL-keyed cards as each source returns; the live-price
     # wrapper fills missing prices/images from merchant pages meanwhile. Both
     # are bounded so `done` always arrives within deadline + price tail.
@@ -27191,7 +27171,7 @@ def _refine_selection_context_v55(payload):
             raise ValueError('invalid_range')
         if not isinstance(limits,dict):
             raise ValueError('invalid_range')
-        bounds=_fz_price_bounds(limits,(plan.get('range_currencies') or {}).get('price') or COUNTRY_CURRENCIES[context['country']])
+        bounds=_fz_price_bounds(limits,COUNTRY_CURRENCIES[context['country']])
         label=('السعر' if context.get('query_language')=='ar' else 'Price')
         context['steps'].append({'key':'price','label':label,'term':'','role':'price','numeric':bounds})
     return _refine_validate(context,payload)
@@ -27764,9 +27744,6 @@ def _fz_join_unique_query(parts):
         new=str(part or '').strip().split()
         if not new:continue
         old_norm=[_fz_facet_norm(w) for w in words];new_norm=[_fz_facet_norm(w) for w in new]
-        if old_norm and any(new_norm[i:i+len(old_norm)]==old_norm for i in range(len(new_norm)-len(old_norm)+1)):
-            words=new
-            continue
         if any(old_norm[i:i+len(new_norm)]==new_norm for i in range(len(old_norm)-len(new_norm)+1)):continue
         overlap=0
         for n in range(1,min(len(words),len(new))+1):
@@ -28009,22 +27986,17 @@ def _intent_commercial_parts(context):
     brand = p['brand']
     bstep = steps.get('brand')
     base = _intent_canonical_query(base)
-    storage = steps.get('storage')
-    if storage:
-        base = re.sub(r'(?i)(?<![\w.])\d+(?:\.\d+)?\s*(?:GB|TB)\b(?!\s*(?:RAM|memory)\b)', ' ', base)
-        # Repair legacy orphan units such as 'iPhone 16 Pro GB 1TB'.
-        base = re.sub(r'(?i)(?<!\w)(?:GB|TB)(?!\w)', lambda match: match.group() if base[:match.start()].rstrip()[-1:].isdigit() else ' ', base)
     subtype = steps.get('type')
     type_replaces = bool(subtype and (_fz_nav_key(dict(context,base=context['base'])) in _FZ_NAV_TREE or _recall_type_replaces_base(context)))
     if type_replaces:
         # A broad department is replaced by its child product type, not repeated.
         base = subtype.get('label') if language == 'ar' else subtype.get('term')
         base = str(base or context['base'])
-    append_brand = bool(bstep and not _intent_brand(base))
+    if bstep and not _intent_brand(base):
+        base = _fz_join_unique_query([base, bstep.get('term')])
     base = _intent_canonical_query(base)
     modelstep = steps.get('model')
     if modelstep:
-        append_brand = False  # The commercial model already identifies its manufacturer.
         model = str(modelstep.get('term') or '')
         native_model = str(modelstep.get('label') or model) if language != 'en' else model
         remainder = base
@@ -28059,12 +28031,7 @@ def _intent_commercial_parts(context):
             continue
         if step.get('role') in ('price','mileage'):
             continue
-        part=str((step.get('label') if language != 'en' else step.get('term')) or '')
-        if language=='ar' and part and not _intent_has(base,part):
-            connector={'color':'بلون ','material':'بخامة ','size':'بمقاس ','storage':'بسعة '}.get(key,'')
-            if connector and not part.startswith(('بـ','بلون ','بخامة ','بمقاس ','بسعة ')):
-                part=connector+part
-        others.append(part)
+        others.append(step.get('label') if language != 'en' else step.get('term'))
     if p['scope'] == 'accessories':
         if not _INTENT_ACCESSORY_RE.search(_fz_facet_norm(base)):
             others.append((steps.get('accessory_type', {}).get('label') if language != 'en' else p['accessory_type']) or ('إكسسوارات' if language == 'ar' else 'accessories'))
@@ -28072,12 +28039,6 @@ def _intent_commercial_parts(context):
             base = re.sub(r'\baccessories\b|إكسسوارات|اكسسوارات', '', base, flags=re.I)
             others.append(steps['accessory_type'].get('label') if language != 'en' else p['accessory_type'])
     display = _intent_canonical_query(_fz_join_unique_query([base]+others))
-    if append_brand:
-        brand_label = str(bstep.get('label') or bstep.get('term') or '') if language != 'en' else str(bstep.get('term') or '')
-        if language == 'ar' and re.search(r'[\u0600-\u06ff]', brand_label):
-            brand_label = re.sub(r'\s*\([^)]*[A-Za-z][^)]*\)', '', brand_label).strip()
-        if brand_label and not _intent_has(display, brand_label):
-            display += (' من ' if language == 'ar' else ' by ' if language == 'en' else ' ') + brand_label
     english = str((_market_query_cached(display,'en') or _market_query_static(display,'en') or {}).get('query') or display)
     english = re.sub(r'سهرة|سهره', 'evening', english)
     english = re.sub(r'جالكسي|جالاكسي', 'Galaxy', english)
@@ -28198,8 +28159,7 @@ def _intent_price_presets(context, records, data, profile):
     """
     import math
     language = context.get('query_language') or context.get('lang', 'en')
-    chosen_price=next((s.get('numeric') for s in context.get('steps',[]) if s.get('role')=='price' and s.get('numeric')),{})
-    currency = chosen_price.get('currency') or COUNTRY_CURRENCIES[context['country']]
+    currency = COUNTRY_CURRENCIES[context['country']]
     facet = _fz_budget_options(currency, language)
     amounts, seen = [], set()
     for record in records:
@@ -28267,7 +28227,7 @@ def _intent_build_plan(context,data,evidence):
     facets=[]
     for f in _fz_merge_raw_facets(raw,dict(context,category=category)):
         key=f['key'];role='model' if key=='model' else 'brand' if key=='brand' else 'scope' if key=='product_scope' else f.get('role','attribute')
-        if (key in fixed and key not in steps) or key=='price' or role in ('rating','discount'):continue
+        if key in fixed or key=='price' or role in ('rating','discount'):continue
         if any(v in key for v in ('shipping','popular','purchase','certif','allerg','medical','safety','bestseller')):continue
         if key=='model' and p['model_led'] and not p['brand'] and key not in steps:continue
         if p['scope']=='accessories' and key in ('storage','memory','processor','screen_size','battery_capacity','sim','network','head_size','weight','string_pattern'):continue
@@ -28326,10 +28286,8 @@ def _intent_build_plan(context,data,evidence):
     # Root request and the selected preferences are NOT collapsed into one
     # immutable string. Every plan is flat/signed and can remove any selection.
     base=dict(_fz_public_context(context),steps=[],flow='hier-v3',mode='filters',clarified=True)
-    base.pop('guide_plan',None)
     catalog_id=hashlib.sha256(json.dumps([base,facets,p],ensure_ascii=False,sort_keys=True).encode()).hexdigest()[:24]
-    price_currency=next((f.get('currency') for f in facets if f.get('key')=='price'),COUNTRY_CURRENCIES[context['country']])
-    base.update(catalog_id=catalog_id,range_keys=['price'],range_currencies={'price':price_currency})
+    base.update(catalog_id=catalog_id,range_keys=['price'])
     selected={};ranges={}
     for facet in facets:
         for i,opt in enumerate(facet['options']):
@@ -28372,7 +28330,6 @@ def _intent_build_plan(context,data,evidence):
 
 def _refine_selection_context(payload):
     context=_refine_selection_context_v55(payload)
-    if payload.get('plan_token'): context.pop('guide_plan',None)
     p=_intent_profile(context)
     for step in context.get('steps',[]):
         required=(step.get('requires') or {}).get('brand')
@@ -28403,7 +28360,6 @@ _PARITY_MATERIALS = {
  'glass': ('glass','زجاج','玻璃'),
  'polyester': ('polyester','بوليستر','聚酯'),
  'silicone': ('silicone','silicona','silikon','سيليكون'),
- 'fabric': ('fabric','textile','woven','قماش','قماشي','نسيج','布艺'),
  'leather': ('leather','cuero','cuir','leder','pelle','couro','جلد'),
  'velvet': ('velvet','terciopelo','velours','velluto','samt','مخمل'),
  'cotton': ('cotton','algodon','algodón','coton','cotone','baumwolle','algodao','قطن'),
@@ -28510,7 +28466,6 @@ def _photo_extra_context(context, extra, prefer_filters=False):
 
 def _fz_public_context(context):
     c=_fz_public_context_v58(context)
-    if context.get('guide_plan'): c['guide_plan']=copy.deepcopy(context['guide_plan'])
     if context.get('kind')=='image' and 'user_extra' in context: c['user_extra']=context['user_extra']
     return c
 
@@ -28682,8 +28637,6 @@ def _refine_plan(context, samples, records=(), quick=False):
 def _refine_compose(context):
     """No LLM/network on Apply. Exactly one concise query goes to engine .42."""
     c=copy.deepcopy(context)
-    if c.get('guide_plan') and c.get('kind') != 'image':
-        return _fz_guide_compose(c)
     native,english,p=_intent_commercial_parts(c)
     # Canonical option terms remain distinct from localized display labels.
     # Compose a second time in English using only already signed option terms.
@@ -28695,7 +28648,6 @@ def _refine_compose(context):
     if en_english and not re.search(r'[\u0600-\u06ff]',en_english): english=en_english
     native=_refine_safe_query(native);english=_refine_safe_query(english)
     if not native or not english: raise ValueError('query_too_long')
-    native = _fz_display_budget(native, c.get('steps', []), c.get('query_language', c.get('lang','en')))
     c.update(query_native=native,display_query=native,query_en=english,search_query=english,
              retrieval_queries=list(dict.fromkeys((native,english))),recovery_query='')
     if c.get('kind')=='image':
@@ -28956,22 +28908,11 @@ async def _classic_filter_source(response,context,request):
         if final is None:
             yield _web_stream_event({'event':'error','error':'stream_interrupted'})
             return
-        retry=(context.get('guide_plan') or {}).get('retry_query')
-        if not published and retry and context.get('kind')=='text' and not final.get('partial') and not context.get('_guide_retried') and not await request.is_disconnected():
-            response2=await web_api_search_stream(_RefineRequest(request,{'query':retry,
-                'country':context['country'],'lang':context['lang'],'client':'web','force_specific':True}))
-            if response2.status_code < 400 and hasattr(response2,'body_iterator'):
-                yield _web_stream_event({'event':'progress','phase':'searching_alternative_wording','display_query':display})
-                async for out in _classic_filter_source(response2,dict(context,_guide_retried=True),request):
-                    yield out
-                return
         counters['source_rows']=len(all_rows)
         print('CLASSIC FILTER RESULT '+json.dumps(dict(counters,published=len(published),query=context.get('query_en'),kind=context['kind']),ensure_ascii=False))
         yield _web_stream_event(dict(final,event='done',count=len(published),results=list(published.values()),
             display_query=display,context_token=_fz_context_token(context),extra_specs_applied=context.get('user_extra',''),
-            filter_engine='classic42-query-builder',filter_stats=counters,
-            guide_search=bool(context.get('guide_plan')),guide_retry_used=bool(context.get('_guide_retried')),
-            empty_reason=('budget_unverified_or_exceeded' if numeric and counters['price_excluded'] else 'no_matching_offers') if not published else ''))
+            filter_engine='classic42-query-builder',filter_stats=counters))
     finally:
         if hasattr(iterator,'aclose'):await iterator.aclose()
 
@@ -29022,7 +28963,7 @@ async def web_api_health_classic():
             'indexed_listing_queries':'independent_id_or_title','image_empty_response_guard':PILImage is not None,
             'regional_price_binding':'explicit_currency_same_listing','media_recovery':'signed_exact_listing',
             'shopping_guide_enabled':True,'shopping_guide_ai_configured':bool(GEMINI_API_KEY),
-            'shopping_guide_history':'device_opt_in_editable_90_days','refinement_toolbar':'query_sentence','guide_action':'signed_budget_separated','guide_questions':'one_unanswered_at_a_time','guide_filter_sync':'signed_shared_intent','broad_search':'bounded_hidden_expansion','product_images':'listing_only_branding_excluded','guide_zero_retry':'one_equivalent_query'}
+            'shopping_guide_history':'device_opt_in_editable_90_days','refinement_toolbar':'selected_only'}
 
 # ===== Marketplace .42.2: signed listing facts, filters and on-demand insights =====
 # Tokens carry source observations across workers; no product-page or AI request
@@ -29104,7 +29045,6 @@ def _fz_filter_match(context,row):
     # source-country names, user selections, scores or AI-generated labels.
     text=_fz_listing_text(row)
     if _findzia_hard_product_mismatch(context.get('base',''),text):return False,[]
-    if context.get('guide_plan') and _findzia_hard_product_mismatch(context['guide_plan']['query'],text):return False,[]
     profile=_card_variant_facts(row).get('facts',{})
     aliases={'colour':'color','capacity':'storage','memory':'ram'}
     unknown=[]
@@ -29115,7 +29055,6 @@ def _fz_filter_match(context,row):
         if key in ('color','material'):
             vocab=_PARITY_COLORS if key=='color' else _PARITY_MATERIALS
             expected=_parity_values(term,vocab);seen=_parity_values(text,vocab)
-            if key=='material' and 'fabric' in expected and seen.intersection({'polyester','velvet','cotton','satin'}):seen.add('fabric')
             if expected and seen and expected.isdisjoint(seen):return False,[]
             if not expected or not seen:unknown.append(key)
             continue
@@ -29539,163 +29478,6 @@ def _fz_guide_point(value, sources, product):
     return {'text':text,'source_ids':list(dict.fromkeys(refs)),'inference':True}
 
 
-_FZ_GUIDE_PROMPT += "\nSEARCH ACTION IS REQUIRED on every response, including a question or recommendations. search_query is the CURRENT product need plus already answered choices, NEVER unanswered choices. Use concise commercial keywords. Never put budget words/numbers/currency, vague adjectives such as standard/best, or whole answer sentences into search_query. Retain actual model identifiers, dimensions, colour and fabric. Do not narrow to an arbitrary brand/model. Return display_query: a natural short phrase in query_language, with localized brands where available; no duplicated product nouns or mixed translated prose. It must describe exactly the same request; the server adds the budget. Brand/model identifiers may remain original.\nReturn constraints: [{key:material|color|brand|model|size|storage|condition|style|type|use,term:canonical retail value,label:localized value,quote:literal substring of query or an accepted answer}]. Only explicitly chosen constraints; never infer a budget. market_currency is the currency for a budget without an explicit currency. Do not assume USD or dollars.\nAsk one useful unanswered question at a time. Do not ask about known_attributes or current_constraints again. Once enough is known, compare real options and explain the tradeoffs; further questions are optional, not a gate to Show results. Return question_key naming the dimension if asking. Never repeat an answered question. Read current_constraints and known_attributes as authoritative. Preserve all current choices; only an accepted answer may replace that dimension. Return constraints on each choice as well as the top level, each with a quote from its accepted answer. Choice label is 2-5 words and answer concise; choice.search_query must describe the full request AFTER that choice (without budget). Answer may retain the user's budget wording.\nGive a concise useful introduction, a clear reason and tradeoff for each recommendation, and one practical buying check. When evidence is limited, offer a useful search without claiming those products exist.\n"
-
-def _fz_guide_budget(text, currency):
-    """Extract explicit money intent; never interpret model/spec numbers as money."""
-    text=_web_ascii_digits(str(text or '')).replace('٬',',').replace('٫','.')
-    codes='|'.join(sorted(set(COUNTRY_CURRENCIES.values())))
-    money=rf'(?:{codes}|\$|€|£|د\.ك|ر\.س|دولار|دينار|ريال|درهم|يورو)'
-    number=r'\d+(?:,\d{3})*(?:\.\d+)?'
-    pattern=rf'(?P<mode>\bunder\b|\bup to\b|\bless than\b|\bmaximum\b|\bmax\b|\bbudget(?: of)?\b|\bat least\b|\bover\b|أقل من|اقل من|بأقل من|بميزانية|ميزانية|حتى|بحد أقصى|بحد اقصى|تحت)\s*(?P<pre>{money})?\s*(?P<amount>{number})\s*(?P<post>{money})?'
-    bounds=None
-    def take(match):
-        nonlocal bounds
-        unit=(match.group('pre') or match.group('post') or '').strip()
-        cur=unit.upper() if unit.upper() in set(COUNTRY_CURRENCIES.values()) else {'$':'USD','دولار':'USD','€':'EUR','يورو':'EUR','£':'GBP','د.ك':'KWD','ر.س':'SAR'}.get(unit,currency)
-        amount=float(match.group('amount').replace(',',''))
-        if 0 < amount < 1e12:
-            minimum=match.group('mode').lower() in ('at least','over')
-            bounds={'min':amount if minimum else None,'max':None if minimum else amount,'currency':cur,'unit':'total'}
-        return ' '
-    cleaned=re.sub(pattern,take,text,flags=re.I)
-    return _refine_text(cleaned,WEB_API_MAX_QUERY_CHARS),bounds
-
-
-def _fz_display_budget(query, steps, language):
-    price=next((s.get('numeric') for s in reversed(steps) if s.get('role')=='price' and s.get('numeric')),None)
-    if not price:return query
-    unit=price['currency']
-    if language=='ar':unit={'KWD':'د.ك','SAR':'ر.س','AED':'د.إ','USD':'دولار','EUR':'يورو','GBP':'جنيه إسترليني'}.get(unit,unit)
-    fmt=lambda x:format(float(x),',.3f').rstrip('0').rstrip('.')
-    low,high=price.get('min'),price.get('max')
-    if low is not None and high is not None:
-        phrase=(f'بسعر من {fmt(low)} إلى {fmt(high)}' if language=='ar' else f'priced {fmt(low)}–{fmt(high)}')
-    elif high is not None:phrase=(f'بسعر حتى {fmt(high)}' if language=='ar' else f'up to {fmt(high)}')
-    else:phrase=(f'بسعر من {fmt(low)}' if language=='ar' else f'from {fmt(low)}')
-    return f'{query} {phrase} {unit}'
-
-
-def _fz_guide_compose(context):
-    c=copy.deepcopy(context);plan=c['guide_plan']
-    query=_refine_safe_query(plan['query']);display=_refine_safe_query(plan['display'])
-    if not query or not display:raise ValueError('invalid_guide_search')
-    c.update(query_native=display,display_query=display,query_en=query,search_query=query,
-             retrieval_queries=[query],recovery_query='')
-    return c
-
-
-def _fz_guide_plan(context, value):
-    """Sign search intent, independent of optional prose/recommendation fields."""
-    currency=context.get('market_currency') or COUNTRY_CURRENCIES[context['country']]
-    language=context.get('query_language') or _fz_query_language(context['query'],context['lang'])
-    original,budget=_fz_guide_budget(context['query'],currency)
-    for answer in context.get('answers',[]):
-        _,answer_budget=_fz_guide_budget(answer,currency)
-        if answer_budget:budget=answer_budget
-    selected=context.get('selected_plan') or context.get('refinement_context') or {}
-    prior=selected.get('guide_plan') or {}
-    raw=_refine_safe_query(value.get('search_query'))
-    query=raw or prior.get('query') or original
-    query,_=_fz_guide_budget(query,currency)
-    if re.search(r'\b(?:sofa|couch)\b',query,re.I):
-        query=re.sub(r'\bstandard\s+(?=sofa|couch)','',query,flags=re.I)
-        query=re.sub(r'\bfabric upholstery\b','fabric',query,flags=re.I)
-    query=_refine_safe_query(query) or original
-    # An AI rewrite cannot replace an explicit model/category with a conflict.
-    if _findzia_hard_product_mismatch(original,query):query=original
-    steps=[copy.deepcopy(x) for x in selected.get('steps',[]) if x.get('role')!='price']
-    accepted=' '.join([context['query']]+context.get('answers',[]))
-    for constraint in (value.get('constraints') or [])[:10]:
-        if not isinstance(constraint,dict):continue
-        key=constraint.get('key');quote=_card_text(constraint.get('quote'),180)
-        term=_refine_safe_query(constraint.get('term'));label=_refine_safe_query(constraint.get('label')) or term
-        if key not in ('material','color','brand','model','size','storage','condition','style','type','use') or not quote or not term:continue
-        if _fz_facet_norm(quote) not in _fz_facet_norm(accepted):continue
-        old=next((x for x in steps if x.get('key')==key),None)
-        if old and _fz_facet_norm(term)!=_fz_facet_norm(old.get('term')) and not any(_fz_facet_norm(quote) in _fz_facet_norm(a) for a in context.get('answers',[])):continue
-        steps=[x for x in steps if x.get('key')!=key]
-        steps.append({'key':key,'role':key if key in ('brand','model','condition') else 'attribute','term':term,'label':label})
-    # A common, explicitly requested fabric is enforceable even with an old AI response.
-    if not any(x.get('key')=='material' for x in steps):
-        for material in ('fabric','leather','cotton','satin','velvet'):
-            aliases=_PARITY_MATERIALS.get(material,())
-            if _parity_values(accepted,{material:aliases}) and _parity_values(query,{material:aliases}):
-                native={'fabric':'قماش','leather':'جلد','cotton':'قطن','satin':'ساتان','velvet':'مخمل'}.get(material,material) if language=='ar' else material
-                steps.append({'key':'material','role':'attribute','term':material,'label':native});break
-    if budget:
-        previous_price=next((x for x in selected.get('steps',[]) if x.get('role')=='price'),{})
-        steps.append(dict(previous_price,key='price',role='price',term='',label=previous_price.get('label',''),numeric=budget))
-    elif selected:
-        steps.extend(copy.deepcopy(x) for x in selected.get('steps',[]) if x.get('role')=='price')
-    display=_refine_safe_query(value.get('display_query'))
-    if display:display,_=_fz_guide_budget(display,currency)
-    if not display:display=prior.get('display_base') if not raw and prior else query
-    # Translate only from a known translation, never by transliterating identifiers.
-    if language=='ar' and not re.search(r'[\u0600-\u06ff]',display):
-        translated=_market_query_cached(display,'ar') or _market_query_static(display,'ar') or {}
-        candidate=str(translated.get('query') or '')
-        # Static dictionaries can return partial translations such as "fabric كنب".
-        # Keep a complete sentence in one language if a full translation is absent.
-        if candidate and not re.search(r'[A-Za-z]',candidate):display=candidate
-    if language=='ar' and re.search(r'[\u0600-\u06ff]',display) and re.search(r'[A-Za-z]',display):
-        remainder=display
-        for step in steps:
-            if step.get('key') in ('brand','model','size','storage'):
-                remainder=re.sub(re.escape(step.get('term') or '\x00'),' ',remainder,flags=re.I)
-        if re.search(r'[A-Za-z]',remainder) and not re.search(r'[\u0600-\u06ff]',query):display=query
-    display=_fz_join_unique_query([display])
-    display_base=display
-    display_language='en' if language=='ar' and not re.search(r'[\u0600-\u06ff]',display) else language
-    display=_fz_display_budget(display,steps,display_language)
-    retry=''
-    if re.search(r'\bsofa\b',query,re.I):retry=re.sub(r'\bsofa\b','couch',query,flags=re.I)
-    elif re.search(r'\bcouch\b',query,re.I):retry=re.sub(r'\bcouch\b','sofa',query,flags=re.I)
-    elif re.search(r'\boffice chair\b',query,re.I):retry=re.sub(r'\boffice chair\b','desk chair',query,flags=re.I)
-    # Keep chosen attributes editable: the retrieval phrase must not become
-    # an immutable root containing the same selected fabric/brand twice.
-    editable=query
-    for step in steps:
-        term=step.get('term') or ''
-        if term and not _parity_has(original,term):editable=_intent_remove_phrase(editable,term)
-    editable=_refine_text(re.sub(r'\b(?:by|in|with)\s*$','',editable,flags=re.I),WEB_API_MAX_QUERY_CHARS) or original
-    native_base=editable
-    if language=='ar' and not re.search(r'[\u0600-\u06ff]',editable):
-        translated=_market_query_cached(editable,'ar') or _market_query_static(editable,'ar') or {}
-        candidate=str(translated.get('query') or '')
-        if candidate and not re.search(r'[A-Za-z]',candidate):native_base=candidate
-    c={'base':native_base,'base_en':editable,'root_query':context['query'],'root_reference':context['query'],
-       'path':[],'steps':steps,'country':context['country'],'kind':context.get('kind','text'),
-       'lang':context['lang'],'query_language':language,'flow':'hier-v3','clarified':True,
-       'guide_plan':{'query':query,'display':display,'display_base':display_base,'retry_query':retry,'origin':context['query']}}
-    if selected:
-        c = dict(_fz_public_context(selected),steps=steps,lang=context['lang'],query_language=language)
-        c.pop('guide_plan',None)
-        composed = _refine_compose(c)
-        query,display = composed['query_en'],composed['display_query']
-        display_base = _fz_guide_budget(display,currency)[0]
-        retry = re.sub(r'\bsofa\b','couch',query,flags=re.I) if re.search(r'\bsofa\b',query,re.I) else ''
-        c['guide_plan']={'query':query,'display':display,'display_base':display_base,'retry_query':retry,'origin':context['query']}
-    if c['kind']=='image':
-        # Route through the existing original-image refinement, never text-only search.
-        c['base']=c['root_reference'];c['user_extra']=query
-    return {'token':_fz_context_token(c),'search_query':query,'display_query':display,
-            'budget':next((x['numeric'] for x in steps if x.get('role')=='price'),None),
-            'unchanged':not raw and not prior,'kind':c['kind']}
-
-
-def _fz_guide_known_question(value,context):
-    known=set(context.get('known_attributes') or [])
-    key=_refine_canonical_key(value.get('question_key') or '')
-    if key and key in known:return True
-    question=_fz_facet_norm(value.get('question') or '')
-    # Support older model responses lacking question_key, including the reported Pro/Pro Max loop.
-    markers={'model':r'\b(?:model|pro max)\b|موديل|طراز', 'storage':r'\b(?:storage|gb|tb)\b|تخزين|سعه',
-             'brand':r'\bbrand\b|ماركه|علامه تجاريه','color':r'\bcolou?r\b|لون|الوان',
-             'price':r'\bbudget\b|ميزانيه','material':r'\b(?:material|upholstery)\b|خامه|قماش|جلد'}
-    return any(key in known and re.search(pattern,question,re.I) for key,pattern in markers.items())
-
-
 def _fz_guide_sync(context, products):
     result={'ok':True,'status':'unavailable','intro':'','question':'','choices':[], 'recommendations':[],
             'sources':[],'search_query':'','next_tip':'','history_used':len(context['history']), 'checked_at':int(time.time()),'build':BUILD_ID}
@@ -29710,28 +29492,21 @@ def _fz_guide_sync(context, products):
     try:
         value=_refine_ai(_FZ_GUIDE_PROMPT,dict(context,products=listing,sources=sources),tokens=2200,timeout=8)
         if not isinstance(value,dict): return result
-        result.update(intro=_card_text(value.get('intro'),180),question=_card_text(value.get('question'),140),next_tip=_card_text(value.get('next_tip'),180))
-        if _fz_guide_known_question(value,context): result['question']=''
-        for choice in ((value.get('choices') or [])[:4] if result['question'] else []):
+        result.update(intro=_card_text(value.get('intro'),220),question=_card_text(value.get('question'),180),next_tip=_card_text(value.get('next_tip'),240))
+        for choice in (value.get('choices') or [])[:4]:
             if not isinstance(choice,dict): continue
             label=_card_text(choice.get('label'),55);answer=_card_text(choice.get('answer'),180)
             if not label or not answer: continue
             try: query=_refine_safe_query(choice.get('search_query') or '')
             except ValueError: query=''
-            choice_plan=_fz_guide_plan(dict(context,answers=context['answers']+[answer]),dict(search_query=query,constraints=choice.get('constraints') or [])) if query else None
-            result['choices'].append({'label':label,'answer':answer,'search_query':query,'plan':choice_plan})
+            result['choices'].append({'label':label,'answer':answer,'search_query':query})
         try: result['search_query']=_refine_safe_query(value.get('search_query') or '')
         except ValueError: pass
-        result['plan']=_fz_guide_plan(context,value)
-        result['search_query']=result['plan']['search_query']
-        plan_context=_fz_context_from_payload({'context_token':result['plan']['token']})
         if not private and not result['question']:
             for rec in (value.get('recommendations') or [])[:3]:
                 if not isinstance(rec,dict): continue
                 product=next((x for x in products if x['id']==rec.get('product_id')),None)
                 if not product: continue
-                if not _fz_filter_match(plan_context,product)[0]:continue
-                if any(not _refine_numeric_price(step,product) for step in plan_context.get('steps',[]) if step.get('role')=='price'):continue
                 reason=_fz_guide_point(rec.get('reason'),evidence,product)
                 if not reason: continue
                 tradeoff=_fz_guide_point(rec.get('tradeoff'),evidence,product)
@@ -29742,8 +29517,6 @@ def _fz_guide_sync(context, products):
         used={i for rec in result['recommendations'] for point in (rec['reason'],rec.get('tradeoff')) if point for i in point['source_ids']}
         # Return source titles/URLs only, not scraped text or unnecessary quotes.
         result['sources']=[{k:x[k] for k in ('id','title','url','kind','checked_at')} for x in evidence.values() if x['id'] in used]
-        if not result['question'] and not result['recommendations'] and not result['intro']:
-            result['intro']=('طلبك جاهز للبحث. لم نجد ترشيحًا مؤكدًا بين العروض التي راجعناها.' if context['lang']=='ar' else 'Your search is ready. None of the reviewed offers is a confirmed recommendation for these choices.')
         result['status']='ready' if result['question'] or result['choices'] or result['recommendations'] or result['search_query'] else 'insufficient'
         result['evidence_scope']='review_sources' if any(evidence[x['id']].get('independent_review') for x in result['sources']) else 'listings_only'
     except Exception as exc: print('SHOPPING GUIDE unavailable='+type(exc).__name__)
@@ -29772,26 +29545,6 @@ async def web_api_shopping_guide(request: Request):
             'answers':[_card_text(x,200) for x in (payload.get('answers') or [])[-6:] if isinstance(x,str)],
             'kind':'image' if payload.get('kind')=='image' else 'text'}
         if context['country'] not in COUNTRY_META: context['country']='us'
-        context['market_currency']=COUNTRY_CURRENCIES[context['country']]
-        context['query_language']=_fz_query_language(query,context['lang'])
-        if payload.get('refinement'):
-            refinement=payload['refinement']
-            if not isinstance(refinement,dict) or not (refinement.get('plan_token') or refinement.get('context_token')): raise ValueError('invalid_refinement')
-            current=_refine_selection_context_v55(dict(refinement,country=context['country'],kind=context['kind'],lang=context['lang']))
-            current_query=_refine_compose(current)['display_query']
-            if _findzia_hard_product_mismatch(query,current_query): raise ValueError('guide_changed')
-            context['refinement_context']=current
-        if payload.get('selection_token'):
-            selected=_fz_context_from_payload(dict(context_token=payload['selection_token'],country=context['country'],kind=context['kind']))
-            if selected.get('guide_plan',{}).get('origin') != query: raise ValueError('guide_changed')
-            context['selected_plan']=selected
-        active=context.get('selected_plan') or context.get('refinement_context')
-        if active:
-            context['current_constraints']=[{k:x[k] for k in ('key','term','label','numeric') if k in x} for x in active.get('steps',[])]
-            context['current_query']=_refine_compose(active)['display_query']
-            context['known_attributes']=sorted(set(_intent_profile(active)['fixed'])|set(_intent_steps(active)))
-        else:
-            context['known_attributes']=_intent_profile(dict(base=query,steps=[],kind=context['kind']))['fixed']
         products=[];seen=set()
         for token in (payload.get('offer_tokens') or [])[:10]:
             try: row=_fz_evaluation_row(token)
