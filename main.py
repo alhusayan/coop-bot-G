@@ -389,7 +389,7 @@ except Exception:
 app = FastAPI()
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization'], max_age=86400)
-BUILD_ID = 'v128.5.42.5-shopping-guide'
+BUILD_ID = 'v128.5.42.9-progressive-cards'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -21219,6 +21219,37 @@ def _web_text_direct_records(data):
     return data, cards
 
 
+def _web_text_split_collections(data):
+    """Separate slow category pages from direct products without discarding either.
+
+    Collection children are discovered independently and go through the same
+    market, identity and price checks when their background job completes.
+    """
+    direct, collections = dict(data), []
+    for field in ('organic_results', 'shopping_results', 'inline_shopping_results', 'images_results'):
+        records = data.get(field)
+        if not isinstance(records, list):
+            continue
+        kept = []
+        for row in records:
+            url = str(row.get('link') or row.get('url') or row.get('product_link') or '') if isinstance(row, dict) else ''
+            if _web_collection_url(url):
+                collections.append(row)
+            else:
+                kept.append(row)
+        direct[field] = kept
+    return direct, collections
+
+
+def _web_text_collection_batch(records, target, deadline, cancel):
+    """Bounded I/O outside the direct-offer publishing loop."""
+    if cancel.is_set():
+        return {'organic_results': []}
+    budget = min(COLLECTION_WAIT_SECONDS, max(0., deadline-time.monotonic()))
+    children = _web_expand_collection_rows(records, budget=budget)
+    return {'organic_results': children if not cancel.is_set() else []}
+
+
 def _web_text_direct_candidates(data, query, target, provider):
     # The legacy normalizer reads 30 cards per section. Feed it chunks so a
     # 40-card Shopping response is actually used without buying another page.
@@ -21353,10 +21384,10 @@ def _web_text_direct_search(query, country, lang, progress_callback=None, cancel
                     data = None
                 if cancel.is_set() or time.monotonic() >= (deadline if rows else empty_deadline):
                     break
-                name = f'{spec["role"]}:{spec["country"]}:{spec["engine"]}:{spec["hl"]}' + (':catalog' if spec.get('selected_catalog') else ':scoped' if spec.get('domestic_scope') else '') + (':independent' if spec.get('independent_scope') else '') + (':' + spec['catalog_domain'] if spec.get('catalog_domain') else '') + (':' + spec['domestic_group'] if spec.get('domestic_group') else '') + (':merchants' if token else '')
+                name = f'{spec["role"]}:{spec["country"]}:{spec["engine"]}:{spec["hl"]}' + (':catalog' if spec.get('selected_catalog') else ':scoped' if spec.get('domestic_scope') else '') + (':independent' if spec.get('independent_scope') else '') + (':' + spec['catalog_domain'] if spec.get('catalog_domain') else '') + (':' + spec['domestic_group'] if spec.get('domestic_group') else '') + (':merchants' if token else '') + (':collections' if spec.get('_collection_expansion') else '')
                 source_states[name] = 'complete' if isinstance(data, dict) else 'unavailable'
                 if not isinstance(data, dict):
-                    if spec['engine'].startswith(('serper_', 'cse_')):
+                    if not spec.get('_collection_expansion') and spec['engine'].startswith(('serper_', 'cse_')):
                         fast_unavailable += 1
                     continue
                 try:
@@ -21367,6 +21398,13 @@ def _web_text_direct_search(query, country, lang, progress_callback=None, cancel
                             continue
                         data = {'shopping_results': _local_shopping_store_rows(product, target, thumbnail)}
                     data, cards = _web_text_direct_records(data)
+                    if not spec.get('_collection_expansion'):
+                        data, collections = _web_text_split_collections(data)
+                        if collections and time.monotonic() < deadline and not cancel.is_set():
+                            collection_spec = dict(spec, _collection_expansion=True)
+                            collection_job = TEXT_DIRECT_POOL.submit(_run_with_market, target,
+                                _web_text_collection_batch, collections, target, deadline, cancel)
+                            jobs[collection_job] = (collection_spec, target, '', '')
                     candidates = _run_with_market(target, _web_text_direct_candidates, data, query, target,
                         ('local_' if spec['role'] == 'local' else 'global_') + 'text_' + spec['engine'])
                 except (TypeError, ValueError, AttributeError) as exc:
