@@ -5,3 +5,4 @@ beautifulsoup4
 lxml
 pillow
 pillow-heif
+PyJWT[crypto]>=2.13.0,<3
