@@ -1,4 +1,4 @@
-"""Findzia 156.3.8: server-owned credit ledger, trial and search admission.
+"""Findzia 156.3.9: guest-first trials and server-owned search credits.
 
 No public purchase-grant endpoint. Checkout remains unavailable until a payment
 adapter verifies payment, amount, currency and account ownership server-side.
@@ -6,9 +6,11 @@ SQLite transactions are intentionally short; no provider call runs in a lock.
 """
 import asyncio
 import hashlib
+import hmac
 import json
 import os
 import re
+import secrets
 import sqlite3
 import time
 
@@ -71,7 +73,14 @@ class Credits:
                     CREATE TABLE IF NOT EXISTS fz_subscriptions(
                       member TEXT PRIMARY KEY,provider TEXT NOT NULL,subscription TEXT NOT NULL,
                       plan TEXT NOT NULL,period_end INTEGER NOT NULL,cancel_at_end INTEGER NOT NULL DEFAULT 0);
+                    CREATE TABLE IF NOT EXISTS fz_credit_config(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+                    CREATE TABLE IF NOT EXISTS fz_guests(
+                      device TEXT PRIMARY KEY,member TEXT NOT NULL UNIQUE REFERENCES fz_members(id),
+                      token_hash TEXT NOT NULL UNIQUE,created INTEGER NOT NULL,
+                      linked_member TEXT REFERENCES fz_members(id));
                     ''')
+                    db.execute('INSERT OR IGNORE INTO fz_credit_config VALUES(?,?)',('guest_key',secrets.token_hex(32)))
+                    self.guest_key=db.execute("SELECT value FROM fz_credit_config WHERE key='guest_key'").fetchone()[0]
             except (OSError, sqlite3.Error):
                 self.available = False
                 print('BILLING: database unavailable; protected requests fail closed')
@@ -82,7 +91,7 @@ class Credits:
 
     def public_config(self):
         return dict(enabled=self.enabled, available=self.available, trial_credits=10,
-                    checkout_available=False, restore_available=False, plans=list(PLANS))
+                    guest_trial=True,checkout_available=False, restore_available=False, plans=list(PLANS))
 
     def ledger(self, db, member, grant, request, delta, reason, now):
         db.execute('INSERT INTO fz_credit_ledger(member,grant_id,request,delta,reason,created) VALUES(?,?,?,?,?,?)',
@@ -101,32 +110,125 @@ class Credits:
         now = int(time.time()); key = fingerprint(device)
         with self.accounts.connect() as db:
             db.execute('BEGIN IMMEDIATE')
-            if db.execute('SELECT 1 FROM fz_trial_claims WHERE member=?', (member,)).fetchone():
+            self._claim(db,member,key,now)
+
+    def _claim(self,db,member,key,now):
+        if db.execute('SELECT 1 FROM fz_trial_claims WHERE member=?', (member,)).fetchone():
+            return
+        # Eligibility is consumed even when this browser has already claimed.
+        # Rotating its identifier later cannot regrant this account's trial.
+        used = db.execute('SELECT 1 FROM fz_trial_claims WHERE device=?', (key,)).fetchone()
+        allocated = db.execute("SELECT COALESCE(SUM(quantity),0) FROM fz_credit_grants WHERE kind='trial'").fetchone()[0]
+        if not used and allocated + 10 > self.trial_budget:
+            # Pausing new trials must never lock a paying member out of
+            # an existing balance. Leave their trial eligibility intact.
+            paid = db.execute("SELECT 1 FROM fz_credit_grants WHERE member=? AND kind!='trial' AND remaining>0 AND revoked=0 AND starts<=? AND (expires IS NULL OR expires>?)", (member, now, now)).fetchone()
+            if paid:
                 return
-            # Eligibility is consumed even when this browser has already claimed.
-            # Rotating its identifier later cannot regrant this account's trial.
-            used = db.execute('SELECT 1 FROM fz_trial_claims WHERE device=?', (key,)).fetchone()
-            allocated = db.execute("SELECT COALESCE(SUM(quantity),0) FROM fz_credit_grants WHERE kind='trial'").fetchone()[0]
-            if not used and allocated + 10 > self.trial_budget:
-                # Pausing new trials must never lock a paying member out of
-                # an existing balance. Leave their trial eligibility intact.
-                paid = db.execute("SELECT 1 FROM fz_credit_grants WHERE member=? AND kind!='trial' AND remaining>0 AND revoked=0 AND starts<=? AND (expires IS NULL OR expires>?)", (member, now, now)).fetchone()
-                if paid:
-                    return
-                raise HTTPException(429, 'trial_budget_reached')
-            db.execute('INSERT INTO fz_trial_claims VALUES(?,?,?)', (member, key, now))
-            if not used:
-                gid = 'trial:' + member
-                db.execute('INSERT INTO fz_credit_grants VALUES(?,?,?,?,?,?,?,?,0)',
-                           (gid, member, 'trial', 'trial', 10, 10, now, None))
-                self.ledger(db, member, gid, None, 10, 'trial', now)
+            raise HTTPException(429, 'trial_budget_reached')
+        db.execute('INSERT INTO fz_trial_claims VALUES(?,?,?)', (member, key, now))
+        if not used:
+            gid = 'trial:' + member
+            db.execute('INSERT INTO fz_credit_grants VALUES(?,?,?,?,?,?,?,?,0)',
+                       (gid, member, 'trial', 'trial', 10, 10, now, None))
+            self.ledger(db, member, gid, None, 10, 'trial', now)
+
+    def guest(self,device):
+        """Device is a random browser secret, never a fingerprint or account id.
+
+        A deterministic server token makes simultaneous tabs/reloads idempotent.
+        The key is persisted with the ledger so deployment does not reset trials.
+        Possession authorizes only this guest's free allowance, never an account.
+        """
+        self.check()
+        if not isinstance(device,str) or not REQUEST_ID.fullmatch(device):raise HTTPException(400,'device_id_required')
+        now=int(time.time());key=fingerprint(device)
+        token='fz_guest_'+hmac.new(self.guest_key.encode(),device.encode(),hashlib.sha256).hexdigest()
+        with self.accounts.connect() as db:
+            db.execute('BEGIN IMMEDIATE');self.recover(db,now)
+            guest=db.execute('SELECT * FROM fz_guests WHERE device=?',(key,)).fetchone()
+            if not guest:
+                member='guest:'+secrets.token_hex(16)
+                db.execute('INSERT INTO fz_members(id,provider,subject,email,name,created) VALUES(?,?,?,?,?,?)',(member,'guest',key,'','',now))
+                self._claim(db,member,key,now)
+                # Upgrade from 156.3.8: its trial required a login on this exact
+                # browser. Move only that legacy free grant to the browser trial;
+                # paid grants, sessions and profile data always remain private.
+                legacy=db.execute("""SELECT g.* FROM fz_trial_claims c JOIN fz_credit_grants g
+                    ON g.id='trial:'||c.member AND g.member=c.member JOIN fz_members m ON m.id=c.member
+                    WHERE c.device=? AND m.provider IN ('google','apple') AND g.kind='trial'
+                    AND g.revoked=0 ORDER BY c.created LIMIT 1""",(key,)).fetchone()
+                if legacy:
+                    if db.execute("SELECT 1 FROM fz_credit_requests WHERE grant_id=? AND state='reserved'",(legacy['id'],)).fetchone():
+                        raise HTTPException(409,'trial_transfer_pending')
+                    db.execute('UPDATE fz_credit_grants SET member=? WHERE id=?',(member,legacy['id']))
+                    db.execute('UPDATE fz_credit_ledger SET member=? WHERE grant_id=?',(member,legacy['id']))
+                    for use in db.execute('SELECT * FROM fz_helper_usage WHERE member=?',(legacy['member'],)).fetchall():
+                        db.execute('INSERT OR IGNORE INTO fz_helper_usage VALUES(?,?,?,?)',(member,use['day'],use['kind'],use['used']))
+                db.execute('INSERT INTO fz_guests VALUES(?,?,?,?,NULL)',(key,member,fingerprint(token),now))
+                guest=db.execute('SELECT * FROM fz_guests WHERE device=?',(key,)).fetchone()
+            data=self._snapshot(db,guest['member'],now)
+            data.update(guest=True,guest_token=token,trial_linked=bool(guest['linked_member']))
+            return data
+
+    def guest_member(self,token):
+        self.check()
+        if not isinstance(token,str) or not re.fullmatch(r'fz_guest_[a-f0-9]{64}',token):raise HTTPException(401,'guest_session_expired')
+        with self.accounts.connect() as db:
+            row=db.execute('SELECT member FROM fz_guests WHERE token_hash=?',(fingerprint(token),)).fetchone()
+            if not row:raise HTTPException(401,'guest_session_expired')
+            return {'id':row['member'],'guest':True}
+
+    def actor(self,request):
+        token=self.accounts.token(request)
+        return self.guest_member(token) if token.startswith('fz_guest_') else self.accounts.member(token)
+
+    def link_guest(self,member,token):
+        """Link after verified sign-in. Returns False while a guest search is live.
+
+        Requests retain the original principal for reliable in-flight completion;
+        quotas/counts follow the grant's current owner. No login mints a second trial.
+        """
+        self.check();now=int(time.time())
+        if not isinstance(token,str) or not re.fullmatch(r'fz_guest_[a-f0-9]{64}',token):raise HTTPException(401,'guest_session_expired')
+        with self.accounts.connect() as db:
+            db.execute('BEGIN IMMEDIATE');self.recover(db,now)
+            guest=db.execute('SELECT * FROM fz_guests WHERE token_hash=?',(fingerprint(token),)).fetchone()
+            if not guest:raise HTTPException(401,'guest_session_expired')
+            if guest['linked_member']:
+                # Switching accounts on one browser must not mint a fresh trial.
+                db.execute('INSERT OR IGNORE INTO fz_trial_claims VALUES(?,?,?)',(member,guest['device'],now))
+                return True
+            owner=guest['member']
+            if db.execute("SELECT 1 FROM fz_credit_requests WHERE member IN (?,?) AND state='reserved'",(owner,member)).fetchone():return False
+            grant=db.execute("SELECT * FROM fz_credit_grants WHERE member=? AND kind='trial' AND revoked=0",(owner,)).fetchone()
+            prior_trial=db.execute("SELECT 1 FROM fz_credit_grants WHERE member=? AND kind='trial'",(member,)).fetchone()
+            if grant and not prior_trial:
+                db.execute('UPDATE fz_credit_grants SET member=? WHERE id=?',(member,grant['id']))
+                db.execute('UPDATE fz_credit_ledger SET member=? WHERE grant_id=?',(member,grant['id']))
+            elif grant:
+                # Combine consumed usage, not two ten-search allocations.
+                consumed=grant['quantity']-grant['remaining']
+                for prior in db.execute("SELECT * FROM fz_credit_grants WHERE member=? AND kind='trial' AND revoked=0",(member,)).fetchall():
+                    debit=min(consumed,prior['remaining']);consumed-=debit
+                    db.execute('UPDATE fz_credit_grants SET remaining=remaining-? WHERE id=?',(debit,prior['id']))
+                    if debit:self.ledger(db,member,prior['id'],None,-debit,'guest_usage_merge',now)
+                db.execute('UPDATE fz_credit_grants SET revoked=1 WHERE id=?',(grant['id'],))
+            db.execute('INSERT OR IGNORE INTO fz_trial_claims VALUES(?,?,?)',(member,guest['device'],now))
+            for use in db.execute('SELECT * FROM fz_helper_usage WHERE member=?',(owner,)).fetchall():
+                # A legacy trial copied this account's helper history on migration.
+                # Count that snapshot once when the same account signs back in.
+                merge='MAX(used,excluded.used)' if grant and grant['id']=='trial:'+member else 'used+excluded.used'
+                db.execute('INSERT INTO fz_helper_usage VALUES(?,?,?,?) ON CONFLICT(member,day,kind) DO UPDATE SET used='+merge,(member,use['day'],use['kind'],use['used']))
+            db.execute('UPDATE fz_guests SET linked_member=? WHERE member=?',(member,owner))
+            return True
 
     def _snapshot(self, db, member, now):
         rows = db.execute('SELECT * FROM fz_credit_grants WHERE member=? AND revoked=0 AND starts<=? AND (expires IS NULL OR expires>?)', (member, now, now)).fetchall()
         balances = {k: sum(r['remaining'] for r in rows if r['kind']==k) for k in ('trial','subscription','pack')}
         active = db.execute('SELECT * FROM fz_subscriptions WHERE member=? AND period_end>?', (member, now)).fetchone()
-        counts = {r['kind']: r['n'] for r in db.execute("SELECT kind,COUNT(*) n FROM fz_credit_requests WHERE member=? AND state='spent' GROUP BY kind", (member,))}
-        reserved = db.execute("SELECT COUNT(*) FROM fz_credit_requests WHERE member=? AND state='reserved'", (member,)).fetchone()[0]
+        counts = {r['kind']: r['n'] for r in db.execute("SELECT r.kind,COUNT(*) n FROM fz_credit_requests r JOIN fz_credit_grants g ON g.id=r.grant_id WHERE g.member=? AND r.state='spent' GROUP BY r.kind", (member,))}
+        reserved = db.execute("SELECT COUNT(*) FROM fz_credit_requests r JOIN fz_credit_grants g ON g.id=r.grant_id WHERE g.member=? AND r.state='reserved'", (member,)).fetchone()[0]
         return dict(ok=True, remaining=sum(balances.values()), balances=balances, reserved=reserved,
                     used=counts, subscription=dict(active) if active else None,
                     trial_claimed=bool(db.execute('SELECT 1 FROM fz_trial_claims WHERE member=?',(member,)).fetchone()),
@@ -145,11 +247,11 @@ class Credits:
         now=int(time.time()); day=now//86400*86400
         with self.accounts.connect() as db:
             db.execute('BEGIN IMMEDIATE'); self.recover(db,now)
-            previous=db.execute('SELECT state FROM fz_credit_requests WHERE member=? AND request=?',(member,request_id)).fetchone()
+            previous=db.execute('SELECT r.state FROM fz_credit_requests r JOIN fz_credit_grants g ON g.id=r.grant_id WHERE (r.member=? OR g.member=?) AND r.request=?',(member,member,request_id)).fetchone()
             if previous:raise HTTPException(409,'search_in_progress' if previous['state']=='reserved' else 'search_already_processed')
-            if db.execute("SELECT COUNT(*) FROM fz_credit_requests WHERE member=? AND state='reserved'",(member,)).fetchone()[0]>=2:
+            if db.execute("SELECT COUNT(*) FROM fz_credit_requests r JOIN fz_credit_grants g ON g.id=r.grant_id WHERE g.member=? AND r.state='reserved'",(member,)).fetchone()[0]>=2:
                 raise HTTPException(429,'search_in_progress')
-            if db.execute("SELECT COUNT(*) FROM fz_credit_requests WHERE member=? AND state='refunded' AND created>=?",(member,day)).fetchone()[0]>=5:
+            if db.execute("SELECT COUNT(*) FROM fz_credit_requests r JOIN fz_credit_grants g ON g.id=r.grant_id WHERE g.member=? AND r.state='refunded' AND r.created>=?",(member,day)).fetchone()[0]>=5:
                 raise HTTPException(429,'retry_limit')
             rows=db.execute('''SELECT * FROM fz_credit_grants WHERE member=? AND remaining>0 AND revoked=0
                 AND starts<=? AND (expires IS NULL OR expires>?) ORDER BY
@@ -185,7 +287,7 @@ class Credits:
             db.execute('BEGIN IMMEDIATE')
             funded=db.execute('SELECT COALESCE(SUM(quantity),0) FROM fz_credit_grants WHERE member=? AND revoked=0 AND starts<=? AND (expires IS NULL OR expires>?)',(member,now,now)).fetchone()[0]
             if not funded:raise HTTPException(402,'credits_exhausted')
-            attempts=db.execute("SELECT COUNT(*) FROM fz_credit_requests WHERE member=? AND created>=?",(member,day*86400)).fetchone()[0]
+            attempts=db.execute("SELECT COUNT(*) FROM fz_credit_requests r JOIN fz_credit_grants g ON g.id=r.grant_id WHERE g.member=? AND r.created>=?",(member,day*86400)).fetchone()[0]
             cap=min(funded, attempts+1)*per_search
             used=db.execute('SELECT used FROM fz_helper_usage WHERE member=? AND day=? AND kind=?',(member,day,kind)).fetchone()
             if used and used['used']>=cap:raise HTTPException(429,'helper_limit')
@@ -284,7 +386,7 @@ class CreditMiddleware:
             service.check()
             request=Request(scope)
             if request.headers.get('origin') not in service.accounts.origins:raise HTTPException(403,'origin_not_allowed')
-            member=await asyncio.to_thread(service.accounts.member,service.accounts.token(request))
+            member=await asyncio.to_thread(service.actor,request)
             if is_search:
                 rid=request.headers.get('x-findzia-request-id','')
                 await asyncio.to_thread(service.reserve,member['id'],rid,path);reserved=True
@@ -321,12 +423,23 @@ def install_billing(app, accounts):
     def result(data,status=200):return JSONResponse(data,status_code=status,headers={'Cache-Control':'no-store'})
     @app.get('/api/billing/config')
     async def billing_config():return result(dict(ok=True,**service.public_config()))
+    @app.post('/api/billing/guest')
+    async def guest(request:Request):
+        accounts.allow_request(request);payload=await accounts.body(request)
+        return result(await asyncio.to_thread(service.guest,payload.get('device_id')))
     @app.post('/api/billing/status')
     async def status(request:Request):
         accounts.allow_request(request);payload=await accounts.body(request)
-        member=await asyncio.to_thread(accounts.member,accounts.token(request))
-        await asyncio.to_thread(service.claim,member['id'],payload.get('device_id'))
-        return result(await asyncio.to_thread(service.status,member['id']))
+        member=await asyncio.to_thread(service.actor,request)
+        if member.get('guest'):
+            data=await asyncio.to_thread(service.status,member['id']);data['guest']=True
+            return result(data)
+        linked=True
+        if payload.get('guest_token'):
+            linked=await asyncio.to_thread(service.link_guest,member['id'],payload['guest_token'])
+        if linked:await asyncio.to_thread(service.claim,member['id'],payload.get('device_id'))
+        data=await asyncio.to_thread(service.status,member['id']);data.update(guest=False,trial_link_pending=not linked)
+        return result(data)
     @app.post('/api/billing/checkout')
     async def checkout(request:Request):
         accounts.allow_request(request)
