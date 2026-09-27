@@ -387,9 +387,11 @@ try:
 except Exception:
     WEB_HEIC_ENABLED = False
 app = FastAPI()
+from findzia_billing import CreditMiddleware, install_billing
+app.add_middleware(CreditMiddleware, owner=app)
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
-app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization'], max_age=86400)
-BUILD_ID = 'v128.5.42.12-account'
+app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization', 'X-Findzia-Request-Id'], max_age=86400)
+BUILD_ID = 'v128.5.42.13-credits'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -22038,7 +22040,15 @@ async def web_api_shopping_open(signed: str, request: Request):
     if not WEB_API_ENABLED or not _web_rate_allowed(request):
         return Response('Please try again shortly.', status_code=429, media_type='text/plain')
     try:
-        url = await asyncio.wait_for(asyncio.to_thread(_shopping_resolve_merchant, payload), timeout=20)
+        if getattr(app.state, 'findzia_credits', None) is None or app.state.findzia_credits.enabled:
+            # Public signed links may redirect to an already resolved merchant;
+            # fresh paid resolution requires the authenticated POST endpoint.
+            key = hashlib.sha256(json.dumps({k:v for k,v in payload.items() if k!='exp'}, sort_keys=True).encode()).hexdigest()
+            with _SHOPPING_LINK_LOCK:
+                hit = _SHOPPING_LINK_CACHE.get(key)
+            url = hit[1] if hit and time.monotonic()-hit[0] < 3600 else ''
+        else:
+            url = await asyncio.wait_for(asyncio.to_thread(_shopping_resolve_merchant, payload), timeout=20)
     except Exception as exc:
         print(f'SHOPPING MERCHANT LINK failed={type(exc).__name__}')
         url = ''
@@ -26970,15 +26980,16 @@ async def health():
 
 # Optional authenticated account API; all search-provider behavior is retained.
 # One file serves both deployments: with server/findzia_accounts.py present the
-# account routes are installed, without it the engine runs in search-only mode.
+# account routes are installed; protected search fails closed without it.
 try:
     from findzia_accounts import install_accounts as _install_accounts
 except ImportError:
     _install_accounts = None
 if _install_accounts is not None:
     _install_accounts(app)
+    install_billing(app, app.state.findzia_accounts)
 else:
-    print('ACCOUNTS: findzia_accounts.py not found; running search-only (guest) mode')
+    print('ACCOUNTS: findzia_accounts.py not found; authenticated search unavailable')
 
 
 # ===== Classic .42 isolated filter planner (not called by base retrieval) =====
