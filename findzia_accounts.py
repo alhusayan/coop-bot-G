@@ -245,7 +245,12 @@ def install_accounts(app):
     def result(data,status=200):return JSONResponse(data,status_code=status,headers={'Cache-Control':'no-store'})
 
     @app.get('/api/account/config')
-    async def config():return result(service.config())
+    async def config():
+        value=service.config()
+        credits=getattr(app.state,'findzia_credits',None)
+        if credits:
+            value.update(usage_scope='account',credits=credits.public_config())
+        return result(value)
 
     @app.post('/api/account/auth/start')
     async def start(request:Request):
@@ -278,7 +283,11 @@ def install_accounts(app):
     async def me(request:Request):
         service.allow_request(request,False)
         member=await asyncio.to_thread(service.member,service.token(request))
-        return result({'ok':True,'member':member,'subscription':{'status':'unavailable'},'limit':None})
+        credits=getattr(app.state,'findzia_credits',None)
+        balance=await asyncio.to_thread(credits.status,member['id']) if credits and credits.available else None
+        return result({'ok':True,'member':member,'credits':balance,
+                       'subscription':balance.get('subscription') if balance else {'status':'unavailable'},
+                       'limit':balance.get('remaining') if balance else None})
 
     @app.post('/api/account/profile')
     async def profile(request:Request):
