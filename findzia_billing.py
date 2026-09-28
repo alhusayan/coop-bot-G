@@ -445,3 +445,7 @@ def install_billing(app, accounts):
         accounts.allow_request(request)
         await asyncio.to_thread(accounts.member,accounts.token(request))
         return result({'ok':False,'error':'payments_not_connected'},503)
+
+    # Optional Paddle Sandbox integration; no changes to search admission.
+    from findzia_paddle import install_paddle
+    install_paddle(app, service)
