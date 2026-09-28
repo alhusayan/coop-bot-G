@@ -449,3 +449,5 @@ def install_billing(app, accounts):
     # Optional Paddle Sandbox integration; no changes to search admission.
     from findzia_paddle import install_paddle
     install_paddle(app, service)
+    from findzia_myfatoorah import install_myfatoorah
+    install_myfatoorah(app, service)
