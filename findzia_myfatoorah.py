@@ -1,4 +1,4 @@
-"""Findzia 156.5.1: MyFatoorah V3 embedded and hosted Pack checkout (Kuwait).
+"""Findzia 156.5.2: retry unpaid checkouts using provider state, without an hour lock.
 Disabled by default. Sandbox uses a separate key and an explicit email allowlist.
 No card data, browser prices, or redirect claims are accepted as payment proof.
 """
@@ -21,6 +21,9 @@ from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse
 
 LOG = logging.getLogger('findzia.myfatoorah')
+
+class NoInvoiceTransactions(RuntimeError):
+    """Authenticated invoice lookup explicitly reports no transactions."""
 
 FIELDS = {
     'PAYMENT_STATUS_CHANGED': ('Invoice.Id','Invoice.Status','Transaction.Status','Transaction.PaymentId','Invoice.ExternalIdentifier'),
@@ -110,8 +113,16 @@ class MyFatoorahPack:
         try:
             r = requests.request(method, self.base + path, headers=headers, json=body,
                                  timeout=(3,12), allow_redirects=False)
-            if not 200 <= r.status_code < 300: raise RuntimeError('myfatoorah_api_unavailable')
             result = r.json()
+            # V3 documents this exact response for an invoice with no transactions.
+            # Only a lookup of a server-owned numeric invoice can use this signal.
+            # Authentication errors, timeouts and generic 404s are never evidence.
+            if (method == 'GET' and re.fullmatch(r'/v3/invoices/[0-9]+',path)
+                and r.status_code in (200,400,404) and result.get('IsSuccess') is False
+                and result.get('Message') == 'No invoices match this InvoiceId'
+                and not result.get('ValidationErrors')):
+                raise NoInvoiceTransactions('no_invoice_transactions')
+            if not 200 <= r.status_code < 300: raise RuntimeError('myfatoorah_api_unavailable')
             if result.get('IsSuccess') is not True or not isinstance(result.get('Data'),dict):
                 raise RuntimeError('myfatoorah_api_unavailable')
             return result['Data']
@@ -124,6 +135,96 @@ class MyFatoorahPack:
         if p.scheme != 'https' or p.hostname not in hosts or p.username or p.password or p.port:
             raise RuntimeError('invalid_checkout_url')
         return url
+
+    def review_unfinished(self, member, include_abandoned=False):
+        """Reconcile real payments; an unused invoice is not a payment in progress.
+
+        Provider requests run outside SQLite write transactions. Final writes use
+        conditional updates so a simultaneous paid/refunded webhook always wins.
+        Retired invoices remain mapped, allowing a late payment to be credited.
+        """
+        with self.accounts.connect() as db:
+            rows=db.execute('''SELECT o.*,s.session,s.payment FROM fz_mf_orders o
+                LEFT JOIN fz_mf_sessions s ON s.intent=o.intent
+                WHERE o.member=? AND o.mode=? AND
+                (o.state IN ('creating','pending','session_processing') OR
+                 (? AND o.state='abandoned' AND o.created>?))
+                ORDER BY o.created DESC''',
+                (member['id'],self.mode,int(include_abandoned),int(time.time())-3600)).fetchall()
+        paid=False
+        for source in rows:
+            row=dict(source)
+            wait={'intent':row['intent'],'payment_pending':True}
+            if row['payment']: wait['payment_id']=row['payment']
+            if not row['invoice']:
+                # A submitted charge with a lost response is different from an
+                # unused invoice. Recover its mapping with a read, never a POST.
+                if row['state']=='session_processing' and row['session']:
+                    try:
+                        session=self.api('GET','/v3/sessions/'+identifier(row['session']))
+                        tx=session.get('TransactionResult') or {}
+                        inv=identifier(str(tx.get('Invoice',{}).get('Id') or ''))
+                        payment=identifier(tx.get('Transaction',{}).get('PaymentId'))
+                        with self.accounts.connect() as db:
+                            db.execute('BEGIN IMMEDIATE')
+                            db.execute("UPDATE fz_mf_orders SET invoice=?,state='pending' WHERE intent=? AND state='session_processing' AND invoice IS NULL",(inv,row['intent']))
+                            db.execute('UPDATE fz_mf_sessions SET payment=? WHERE intent=?',(payment,row['intent']))
+                        row.update(invoice=inv,payment=payment,state='pending')
+                        wait['payment_id']=payment
+                    except Exception:
+                        return wait
+                else: return wait
+            try:
+                data=self.api('GET','/v3/invoices/'+identifier(row['invoice']))
+                inv=data.get('Invoice',{})
+                txns=data.get('Transactions')
+                if str(inv.get('Id',''))!=row['invoice'] or not isinstance(txns,list):
+                    raise ValueError('invoice_response_mismatch')
+                inv_state=inv.get('Status')
+                if inv_state not in ('PAID','PENDING','CANCELED','CANCELLED','EXPIRED'):
+                    raise ValueError('unknown_invoice_state')
+                successes=[t for t in txns if isinstance(t,dict) and t.get('Status')=='SUCCESS']
+                if inv_state=='PAID' or successes:
+                    if not successes: raise ValueError('paid_transaction_missing')
+                    payment=identifier(successes[0].get('PaymentId'))
+                    if not self.verify(payment,row['invoice'],member['id']): return wait
+                    paid=True
+                    continue
+                # Unknown or active transactions must not be replaced. An invoice
+                # remains PENDING even when all its attempts have already failed.
+                active=[t for t in txns if not isinstance(t,dict) or t.get('Status') not in ('FAILED','CANCELED','CANCELLED')]
+                if active:
+                    if row['state']=='abandoned':
+                        with self.accounts.connect() as db:
+                            db.execute("UPDATE fz_mf_orders SET state='pending' WHERE intent=? AND state='abandoned'",(row['intent'],))
+                    if (row['url'] and row['payment'] and any(isinstance(t,dict) and
+                        t.get('PaymentId')==row['payment'] and t.get('Status')=='INPROGRESS' for t in active)):
+                        wait['authentication_url']=self.valid_url(row['url'])
+                    return wait
+                if row['payment'] and not txns:
+                    raise ValueError('known_payment_missing')
+            except NoInvoiceTransactions:
+                if row['session'] or row['payment']:
+                    return wait  # A known submitted charge needs its final status.
+            except Exception as exc:
+                LOG.warning('MF_CHECKOUT_REVIEW invoice=%s status=unavailable',row['invoice'])
+                raise HTTPException(503,'payment_verification_unavailable') from exc
+            with self.accounts.connect() as db:
+                db.execute('BEGIN IMMEDIATE')
+                db.execute("UPDATE fz_mf_orders SET state=? WHERE intent=? AND state='pending'",('failed' if row['session'] else 'abandoned',row['intent']))
+                current=db.execute('SELECT state FROM fz_mf_orders WHERE intent=?',(row['intent'],)).fetchone()
+                if current['state']=='paid': paid=True
+        return {'confirmed':True} if paid else None
+
+    def resume(self, member, intent=None):
+        self.require(member)
+        if intent:
+            identifier(intent)
+            with self.accounts.connect() as db:
+                row=db.execute('SELECT state FROM fz_mf_orders WHERE intent=? AND member=? AND mode=?',(intent,member['id'],self.mode)).fetchone()
+            if not row: raise HTTPException(404,'payment_not_found')
+            if row['state']=='paid': return {'confirmed':True}
+        return self.review_unfinished(member) or {'ready_for_payment':True}
 
     def checkout(self, member, plan):
         self.require(member)
@@ -158,22 +259,16 @@ class MyFatoorahPack:
         self.require(member)
         if not self.embedded: raise HTTPException(403,'embedded_not_available')
         if plan != 'pack': raise HTTPException(400,'pack_only')
+        previous=self.review_unfinished(member)
+        if previous: return previous
         now=int(time.time())
         with self.accounts.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             rows=db.execute("SELECT * FROM fz_mf_orders WHERE member=? AND mode=? AND state IN ('creating','pending','session_processing','session_creating','session_ready') ORDER BY created DESC",(member['id'],self.mode)).fetchall()
             for row in rows:
-                if row['state']=='session_processing':
-                    raise HTTPException(409,'payment_creation_pending')
-                if row['state'] in ('creating','pending') and row['created']>now-3600:
-                    if row['url']:
-                        session=db.execute('SELECT payment FROM fz_mf_sessions WHERE intent=?',(row['intent'],)).fetchone()
-                        if session and session['payment']:
-                            return {'intent':row['intent'],'payment_id':session['payment'],
-                                    'authentication_url':self.valid_url(row['url'])}
-                        return {'intent':row['intent'],'pending_checkout':True,
-                                'retry_after':max(1,row['created']+3600-now)}
-                    raise HTTPException(409,'payment_creation_pending')
+                if row['state'] in ('creating','pending','session_processing'):
+                    # Another request may have started payment during the lookup.
+                    return {'intent':row['intent'],'payment_pending':True}
                 if row['state']=='session_creating' and row['created']>now-60:
                     raise HTTPException(409,'payment_creation_pending')
                 if row['state']=='session_ready':
@@ -211,6 +306,18 @@ class MyFatoorahPack:
         self.require(member); identifier(intent)
         # Browser cannot supply a price, member, session ID or payment ID here.
         with self.accounts.connect() as db:
+            owned=db.execute('SELECT state FROM fz_mf_orders WHERE intent=? AND member=? AND mode=?',(intent,member['id'],self.mode)).fetchone()
+        if not owned: raise HTTPException(404,'payment_not_found')
+        if owned['state']=='session_ready':
+            # Recheck recently retired hosted invoices immediately before charging.
+            # Opening the form never charges; only this explicit completion does.
+            previous=self.review_unfinished(member,include_abandoned=True)
+            if previous:
+                if previous.get('confirmed'):
+                    with self.accounts.connect() as db:
+                        db.execute("UPDATE fz_mf_orders SET state='canceled' WHERE intent=? AND state='session_ready'",(intent,))
+                return previous
+        with self.accounts.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             row=db.execute('SELECT o.*,s.session,s.expires,s.payment FROM fz_mf_orders o JOIN fz_mf_sessions s ON s.intent=o.intent WHERE o.intent=? AND o.member=? AND o.mode=?',(intent,member['id'],self.mode)).fetchone()
             if not row: raise HTTPException(404,'payment_not_found')
@@ -218,6 +325,8 @@ class MyFatoorahPack:
             if row['state']=='pending': return {'confirmed':False,'url':row['url'],'payment_id':row['payment'],'intent':intent}
             if row['state']!='session_ready': raise HTTPException(409,'payment_creation_pending')
             if row['expires']<=int(time.time()): raise HTTPException(409,'session_expired')
+            other=db.execute("SELECT intent FROM fz_mf_orders WHERE member=? AND mode=? AND intent<>? AND state IN ('creating','pending','session_processing') LIMIT 1",(member['id'],self.mode,intent)).fetchone()
+            if other: return {'intent':other['intent'],'payment_pending':True}
             db.execute("UPDATE fz_mf_orders SET state='session_processing' WHERE intent=?",(intent,))
         body={'SourceOfFund':{'SessionId':row['session']},'OperationType':'PAY',
               'Order':{'Amount':4.99,'Currency':'USD'},
@@ -419,6 +528,10 @@ def install_myfatoorah(app, credits):
     async def complete_session(request:Request):
         m=await member(request); payload=await service.accounts.body(request)
         return result(await asyncio.to_thread(service.complete_session,m,payload.get('intent')))
+    @app.post('/api/billing/myfatoorah/resume')
+    async def resume(request:Request):
+        m=await member(request); payload=await service.accounts.body(request)
+        return result(await asyncio.to_thread(service.resume,m,payload.get('intent')))
     @app.post('/api/billing/myfatoorah/confirm')
     async def confirm(request:Request):
         m=await member(request); payload=await service.accounts.body(request)
