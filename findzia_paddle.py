@@ -1,4 +1,4 @@
-"""Findzia 156.4.9 Paddle adapter: isolated sandbox/live checkout and verification.
+"""Findzia 156.5.0 Paddle adapter: isolated sandbox/live checkout and verification.
 
 Live checkout starts with an email allowlist; LIVE_OPEN explicitly opens it to members.
 A durable inbox survives
@@ -13,8 +13,8 @@ import os
 import re
 import secrets
 import time
-from datetime import datetime
-from urllib.parse import urlsplit
+from datetime import datetime, timezone
+from urllib.parse import urlsplit, urlencode
 
 import requests
 from fastapi import HTTPException, Request
@@ -36,6 +36,22 @@ EVENTS = {'transaction.completed', 'transaction.payment_failed',
           'subscription.created', 'subscription.updated', 'subscription.canceled',
           'subscription.paused', 'subscription.resumed', 'subscription.past_due',
           'adjustment.created', 'adjustment.updated'}
+
+
+class PaddleAPIError(RuntimeError):
+    def __init__(self, status, code='unknown', request_id='unknown'):
+        self.status = status
+        self.code = code if isinstance(code, str) and re.fullmatch(r'[a-z_0-9]{1,100}', code) else 'unknown'
+        self.request_id = request_id if isinstance(request_id, str) and re.fullmatch(r'[a-zA-Z0-9_-]{1,100}', request_id) else 'unknown'
+        # Only definite request rejections are safe to retry. Timeouts/5xx remain uncertain.
+        self.rejected = status in (400, 401, 403, 404, 405, 422, 429)
+        super().__init__('paddle_api_' + str(status))
+
+    def public_code(self):
+        if self.status == 401: return 'paddle_authentication_failed'
+        if self.status == 403: return 'paddle_access_denied'
+        if self.status == 429: return 'checkout_limit'
+        return 'paddle_checkout_rejected'
 
 
 def timestamp(value):
@@ -97,22 +113,96 @@ class PaddleSandbox:
         return dict(checkout_available=self.allowed(member or {}), restore_available=self.allowed(member or {}),
                     paddle_environment=self.mode, paddle_client_token=self.client_token)
 
-    def api(self, method, path, body=None):
+    def api(self, method, path, body=None, *, envelope=False):
         # Fixed host; never follow provider/browser supplied pagination URLs.
         try:
             response = requests.request(method, self.base + path,
                 headers={'Authorization': 'Bearer ' + self.key, 'Content-Type': 'application/json', 'Paddle-Version': '1'},
                 json=body, timeout=(3, 12), allow_redirects=False)
             if not 200 <= response.status_code < 300:
-                raise RuntimeError('paddle_api_' + str(response.status_code))
-            return response.json()['data']
+                try:
+                    payload = response.json()
+                    error = payload.get('error') or {}
+                    meta = payload.get('meta') or {}
+                    exc = PaddleAPIError(response.status_code, error.get('code'), meta.get('request_id'))
+                except (ValueError, AttributeError):
+                    exc = PaddleAPIError(response.status_code)
+                # No response bodies, tokens, customer details, or URLs in logs.
+                print('PADDLE_API_ERROR mode=%s status=%s code=%s request_id=%s' %
+                      (self.mode, exc.status, exc.code, exc.request_id), flush=True)
+                raise exc
+            payload = response.json()
+            return payload if envelope else payload['data']
         except (requests.RequestException, KeyError, ValueError) as exc:
+            print('PADDLE_API_ERROR mode=%s code=transport_or_response_error' % self.mode, flush=True)
             raise RuntimeError('paddle_unavailable') from exc
+
+    def recover_unmapped_checkout(self, member):
+        # Only investigate requests whose transaction ID was NEVER returned to a client.
+        # Never reset a known transaction or delete payment/credit records.
+        with self.accounts.connect() as db:
+            row = db.execute(f"SELECT * FROM {self.prefix}checkout WHERE member=? AND txn IS NULL AND state IN ('creating','uncertain') ORDER BY created DESC LIMIT 1", (member['id'],)).fetchone()
+        if not row:
+            return
+        if int(time.time()) - row['created'] < 120:
+            raise HTTPException(409, 'checkout_pending')
+        start = datetime.fromtimestamp(max(0, row['created']-300), timezone.utc).isoformat()
+        query = {'created_at[GTE]': start, 'per_page': 30, 'order_by': 'id[ASC]'}
+        matches = []
+        seen = set()
+        deadline = time.monotonic() + 12
+        try:
+            for _ in range(20):
+                if time.monotonic() >= deadline:
+                    raise ValueError('recovery_time_limit')
+                page = self.api('GET', '/transactions?' + urlencode(query), envelope=True)
+                data = page['data']
+                pagination = page['meta']['pagination']
+                if not isinstance(data, list) or type(pagination.get('has_more')) is not bool:
+                    raise ValueError('invalid_pagination')
+                for txn in data:
+                    if (txn.get('custom_data') or {}).get('findzia_intent') == row['intent']:
+                        matches.append(txn)
+                if not pagination['has_more']:
+                    break
+                cursor = data[-1]['id'] if data else ''
+                if not re.fullmatch(r'txn_[a-z0-9]{26}', cursor) or cursor in seen:
+                    raise ValueError('invalid_pagination')
+                seen.add(cursor)
+                query['after'] = cursor
+            else:
+                raise ValueError('recovery_scan_limit')
+            if len(matches) > 1:
+                raise ValueError('multiple_matching_transactions')
+            txn = matches[0] if matches else None
+            if txn:
+                items = txn.get('items') or []
+                if (not re.fullmatch(r'txn_[a-z0-9]{26}', txn.get('id',''))
+                    or txn.get('origin') != 'api' or txn.get('currency_code') != 'USD'
+                    or txn.get('collection_mode') != 'automatic'
+                    or len(items) != 1 or items[0].get('quantity') != 1
+                    or items[0].get('price',{}).get('id') != self.prices[row['plan']]):
+                    raise ValueError('recovery_transaction_mismatch')
+                state = 'canceled' if txn.get('status') == 'canceled' else 'pending'
+            else:
+                # Complete provider scan, aged request, and no checkout ID ever exposed.
+                # Keep the old intent for audit. No credits are granted during recovery.
+                state = 'not_created'
+            with self.accounts.connect() as db:
+                db.execute(f"UPDATE {self.prefix}checkout SET txn=?,state=? WHERE intent=? AND member=? AND txn IS NULL AND state IN ('creating','uncertain')",
+                           (txn['id'] if txn else None, state, row['intent'], member['id']))
+            print('PADDLE_CHECKOUT_RECOVERY mode=%s result=%s' % (self.mode, state), flush=True)
+        except PaddleAPIError as exc:
+            raise HTTPException(503, exc.public_code()) from exc
+        except Exception as exc:
+            print('PADDLE_CHECKOUT_RECOVERY mode=%s result=verification_incomplete' % self.mode, flush=True)
+            raise HTTPException(503, 'paddle_recovery_unavailable') from exc
 
     def checkout(self, member, plan):
         self.require(member)
         if plan not in self.prices:
             raise HTTPException(400, 'invalid_plan')
+        self.recover_unmapped_checkout(member)
         now = int(time.time())
         # One pending checkout per account. Reuse it across tabs/retries.
         with self.accounts.connect() as db:
@@ -139,10 +229,13 @@ class PaddleSandbox:
             })
             if not re.fullmatch(r'txn_[a-z0-9]{26}', txn.get('id','')):
                 raise RuntimeError('invalid_transaction')
-        except Exception:
+        except Exception as exc:
+            rejected = isinstance(exc, PaddleAPIError) and exc.rejected
             with self.accounts.connect() as db:
-                db.execute(f"UPDATE {self.prefix}checkout SET state='uncertain' WHERE intent=?",(intent,))
-            raise HTTPException(503, 'checkout_pending')
+                db.execute(f"UPDATE {self.prefix}checkout SET state=? WHERE intent=?", ('rejected' if rejected else 'uncertain', intent))
+            if rejected:
+                raise HTTPException(503, exc.public_code()) from exc
+            raise HTTPException(503, 'checkout_pending') from exc
         with self.accounts.connect() as db:
             db.execute(f"UPDATE {self.prefix}checkout SET txn=?,state='pending' WHERE intent=?",(txn['id'],intent))
         return {'transaction_id': txn['id']}
