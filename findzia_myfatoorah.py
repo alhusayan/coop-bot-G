@@ -1,4 +1,4 @@
-"""Findzia 156.4.6: MyFatoorah V3 hosted Pack checkout (Kuwait).
+"""Findzia 156.4.6.1: MyFatoorah V3 hosted Pack checkout (Kuwait).
 Disabled by default. Sandbox uses a separate key and an explicit email allowlist.
 No card data, browser prices, or redirect claims are accepted as payment proof.
 """
@@ -7,6 +7,7 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import os
 import re
 import secrets
@@ -18,6 +19,8 @@ from urllib.parse import urlsplit
 import requests
 from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse
+
+LOG = logging.getLogger('findzia.myfatoorah')
 
 FIELDS = {
     'PAYMENT_STATUS_CHANGED': ('Invoice.Id','Invoice.Status','Transaction.Status','Transaction.PaymentId','Invoice.ExternalIdentifier'),
@@ -68,9 +71,20 @@ class MyFatoorahPack:
                   id TEXT PRIMARY KEY, mode TEXT NOT NULL, invoice TEXT NOT NULL,
                   payment TEXT NOT NULL, tries INTEGER NOT NULL DEFAULT 0,
                   next_try INTEGER NOT NULL DEFAULT 0, state TEXT NOT NULL DEFAULT 'pending');
+                CREATE TABLE IF NOT EXISTS fz_mf_migrations(id TEXT PRIMARY KEY);
                 CREATE TABLE IF NOT EXISTS fz_mf_refunds(
                   mode TEXT NOT NULL, invoice TEXT NOT NULL, PRIMARY KEY(mode,invoice));
                 ''')
+
+            # One-time retry of owned pending invoices rejected by the old
+            # USD-only rule. Every retry still runs the complete API verifier.
+            with self.accounts.connect() as db:
+                db.execute('BEGIN IMMEDIATE')
+                fresh=db.execute('INSERT OR IGNORE INTO fz_mf_migrations VALUES(?)',('156461_currency_'+self.mode,)).rowcount
+                if fresh:
+                    db.execute("""UPDATE fz_mf_jobs SET state='pending',tries=0,next_try=0
+                      WHERE mode=? AND state='review' AND invoice IN
+                      (SELECT invoice FROM fz_mf_orders WHERE mode=? AND state='pending')""",(self.mode,self.mode))
 
     def allowed(self, member):
         return bool(self.ready and member and not member.get('guest') and
@@ -145,10 +159,33 @@ class MyFatoorahPack:
         if str(inv.get('Id','')) != expected_invoice or str(txn.get('PaymentId','')) != payment:
             raise HTTPException(409,'payment_mismatch')
         if inv.get('Status') != 'PAID' or txn.get('Status') != 'SUCCESS': return False
-        # Never treat 4.99 KWD as 4.99 USD. Fees/receivables are not purchase amounts.
-        try: value = Decimal(str(amt.get('ValueInPayCurrency','')))
-        except InvalidOperation: raise HTTPException(409,'payment_mismatch')
-        if amt.get('PayCurrency') != 'USD' or not value.is_finite() or value != Decimal('4.99'):
+        # MyFatoorah separates display, payment and merchant base currencies.
+        # Only the authenticated API response for our server-mapped PAID invoice
+        # may establish its USD price. Never calculate today's exchange rate or
+        # trust a browser/webhook Amount field (not covered by its signature).
+        def money(field):
+            try: value = Decimal(str(amt.get(field,'')))
+            except (InvalidOperation, ValueError):
+                raise HTTPException(409,'payment_currency_or_amount_mismatch')
+            if not value.is_finite() or value <= 0:
+                raise HTTPException(409,'payment_currency_or_amount_mismatch')
+            return value
+        paid = money('ValueInPayCurrency')
+        display_usd = amt.get('DisplayCurrency') == 'USD'
+        if display_usd and money('ValueInDisplayCurrency') != Decimal('4.99'):
+            raise HTTPException(409,'payment_currency_or_amount_mismatch')
+        if amt.get('PayCurrency') == 'USD':
+            if paid != Decimal('4.99'):
+                raise HTTPException(409,'payment_currency_or_amount_mismatch')
+        elif (display_usd and amt.get('PayCurrency') == 'KWD'
+              and amt.get('BaseCurrency') == 'KWD'):
+            # Converted KWD settlement is valid for this Kuwait merchant only
+            # when the provider confirms the exact USD invoice price and the
+            # payment covers its base invoice amount (customer fees may add).
+            if paid < money('ValueInBaseCurrency'):
+                raise HTTPException(409,'payment_currency_or_amount_mismatch')
+        else:
+            LOG.warning('Findzia MF invoice=%s rejected: currency/amount evidence incomplete',expected_invoice)
             raise HTTPException(409,'payment_currency_or_amount_mismatch')
         now, gid = int(time.time()), self.grant_id(expected_invoice)
         with self.accounts.connect() as db:
@@ -175,7 +212,11 @@ class MyFatoorahPack:
             if not row['invoice']: return False
             if row['checked'] > int(time.time())-3: raise HTTPException(429,'please_wait')
             db.execute('UPDATE fz_mf_orders SET checked=? WHERE intent=?',(int(time.time()),intent))
-        return self.verify(payment,row['invoice'],member['id'])
+        try:
+            return self.verify(payment,row['invoice'],member['id'])
+        except HTTPException as exc:
+            LOG.warning('Findzia MF invoice=%s confirmation=%s',row['invoice'],exc.detail)
+            raise
 
     def receive(self, raw, signature):
         if not self.ready: raise HTTPException(503,'myfatoorah_not_ready')
@@ -216,8 +257,11 @@ class MyFatoorahPack:
                 done=self.verify(job['payment'],job['invoice'])
                 state='done' if done else 'pending'
             except HTTPException as exc:
+                LOG.warning('Findzia MF invoice=%s verification=%s',job['invoice'],exc.detail)
                 state='review' if exc.status_code==409 else 'pending'
-            except Exception: state='pending'
+            except Exception:
+                LOG.warning('Findzia MF invoice=%s provider verification temporarily unavailable',job['invoice'])
+                state='pending'
             tries=job['tries']+1
             if tries>=20 and state=='pending': state='review'
             with self.accounts.connect() as db:
