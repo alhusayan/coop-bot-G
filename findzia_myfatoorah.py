@@ -1,4 +1,4 @@
-"""Findzia 156.4.6.1: MyFatoorah V3 hosted Pack checkout (Kuwait).
+"""Findzia 156.4.7: MyFatoorah V3 embedded and hosted Pack checkout (Kuwait).
 Disabled by default. Sandbox uses a separate key and an explicit email allowlist.
 No card data, browser prices, or redirect claims are accepted as payment proof.
 """
@@ -58,6 +58,8 @@ class MyFatoorahPack:
             and not origin.query and not origin.fragment and not origin.username and not origin.port
             and (self.mode == 'live' or self.test_emails))
         self.base = 'https://apitest.myfatoorah.com' if self.mode == 'sandbox' else 'https://api.myfatoorah.com'
+        self.embedded = env.get('FINDZIA_MYFATOORAH_EMBEDDED_ENABLED','false').lower() == 'true'
+        self.apple_verified = env.get('FINDZIA_MYFATOORAH_APPLE_PAY_DOMAIN_VERIFIED','false').lower() == 'true'
         self.task = None
         if credits.available:
             with self.accounts.connect() as db:
@@ -67,6 +69,9 @@ class MyFatoorahPack:
                   invoice TEXT, url TEXT, state TEXT NOT NULL, created INTEGER NOT NULL,
                   checked INTEGER NOT NULL DEFAULT 0, UNIQUE(mode,invoice));
                 CREATE INDEX IF NOT EXISTS fz_mf_member ON fz_mf_orders(member,mode,created);
+                CREATE TABLE IF NOT EXISTS fz_mf_sessions(
+                  intent TEXT PRIMARY KEY, session TEXT NOT NULL, expires INTEGER NOT NULL,
+                  payment TEXT);
                 CREATE TABLE IF NOT EXISTS fz_mf_jobs(
                   id TEXT PRIMARY KEY, mode TEXT NOT NULL, invoice TEXT NOT NULL,
                   payment TEXT NOT NULL, tries INTEGER NOT NULL DEFAULT 0,
@@ -95,7 +100,9 @@ class MyFatoorahPack:
 
     def public(self, member):
         return {'ok': True, 'enabled': self.enabled, 'environment': self.mode,
-                'checkout_available': self.allowed(member), 'plan_id': 'pack'}
+                'checkout_available': self.allowed(member), 'plan_id': 'pack',
+                'embedded_available': self.embedded and self.allowed(member),
+                'apple_pay_domain_verified': self.apple_verified}
 
     def api(self, method, path, body=None, intent=None):
         headers = {'Authorization': 'Bearer ' + self.key, 'Content-Type':'application/json'}
@@ -124,8 +131,9 @@ class MyFatoorahPack:
         now = int(time.time())
         with self.accounts.connect() as db:
             db.execute('BEGIN IMMEDIATE')
-            row = db.execute("SELECT * FROM fz_mf_orders WHERE member=? AND mode=? AND state IN ('creating','pending') ORDER BY created DESC LIMIT 1", (member['id'],self.mode)).fetchone()
-            if row and row['created'] > now-3600:
+            db.execute("UPDATE fz_mf_orders SET state='canceled' WHERE member=? AND mode=? AND state IN ('session_creating','session_ready')",(member['id'],self.mode))
+            row = db.execute("SELECT * FROM fz_mf_orders WHERE member=? AND mode=? AND state IN ('creating','pending','session_processing') ORDER BY created DESC LIMIT 1", (member['id'],self.mode)).fetchone()
+            if row and (row['state']=='session_processing' or row['created'] > now-3600):
                 if row['url']: return {'intent':row['intent'],'url':self.valid_url(row['url'])}
                 # An ambiguous network response must never create a second invoice.
                 raise HTTPException(409, 'payment_creation_pending')
@@ -145,6 +153,95 @@ class MyFatoorahPack:
         except Exception as exc:
             # Keep intent for reconciliation, no automatic POST retry after timeouts.
             raise HTTPException(503,'payment_creation_pending') from exc
+
+    def embedded_session(self, member, plan):
+        self.require(member)
+        if not self.embedded: raise HTTPException(403,'embedded_not_available')
+        if plan != 'pack': raise HTTPException(400,'pack_only')
+        now=int(time.time())
+        with self.accounts.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            rows=db.execute("SELECT * FROM fz_mf_orders WHERE member=? AND mode=? AND state IN ('creating','pending','session_processing','session_creating','session_ready') ORDER BY created DESC",(member['id'],self.mode)).fetchall()
+            for row in rows:
+                if row['state']=='session_processing':
+                    raise HTTPException(409,'payment_creation_pending')
+                if row['state'] in ('creating','pending') and row['created']>now-3600:
+                    if row['url']: return {'intent':row['intent'],'url':self.valid_url(row['url'])}
+                    raise HTTPException(409,'payment_creation_pending')
+                if row['state']=='session_creating' and row['created']>now-60:
+                    raise HTTPException(409,'payment_creation_pending')
+                if row['state']=='session_ready':
+                    session=db.execute('SELECT * FROM fz_mf_sessions WHERE intent=?',(row['intent'],)).fetchone()
+                    if session and session['expires']>now+30:
+                        return {'intent':row['intent'],'session_id':session['session']}
+            db.execute("UPDATE fz_mf_orders SET state='canceled' WHERE member=? AND mode=? AND state IN ('session_creating','session_ready')",(member['id'],self.mode))
+            intent='fz_'+secrets.token_urlsafe(24)
+            db.execute('INSERT INTO fz_mf_orders(intent,member,mode,state,created) VALUES(?,?,?,?,?)',(intent,member['id'],self.mode,'session_creating',now))
+        methods=['googlepay','card']
+        if self.apple_verified: methods.append('applepay')
+        body={'PaymentMode':'COLLECT_DETAILS','OperationType':'PAY',
+              'Order':{'Amount':4.99,'Currency':'USD'},'SupportedPaymentMethods':methods,
+              'Language':'EN','SessionExpiry':datetime.fromtimestamp(now+900,timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+              'IntegrationUrls':{'Redirection':self.return_url+'?fz_mf_intent='+intent}}
+        try:
+            data=self.api('POST','/v3/sessions',body,intent)
+            session=identifier(data.get('SessionId'))
+            order=data.get('Order',{})
+            if order.get('Currency')!='USD' or Decimal(str(order.get('Amount'))) != Decimal('4.99'):
+                raise ValueError('session_price_mismatch')
+            with self.accounts.connect() as db:
+                db.execute('BEGIN IMMEDIATE')
+                updated=db.execute("UPDATE fz_mf_orders SET state='session_ready' WHERE intent=? AND state='session_creating'",(intent,)).rowcount
+                if not updated: raise HTTPException(409,'session_canceled')
+                db.execute('INSERT INTO fz_mf_sessions(intent,session,expires) VALUES(?,?,?)',(intent,session,now+900))
+            # Never send EncryptionKey or card details to our frontend.
+            return {'intent':intent,'session_id':session}
+        except Exception as exc:
+            with self.accounts.connect() as db:
+                db.execute("UPDATE fz_mf_orders SET state='canceled' WHERE intent=? AND state='session_creating'",(intent,))
+            raise HTTPException(503,'embedded_unavailable') from exc
+
+    def complete_session(self, member, intent):
+        self.require(member); identifier(intent)
+        # Browser cannot supply a price, member, session ID or payment ID here.
+        with self.accounts.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row=db.execute('SELECT o.*,s.session,s.expires,s.payment FROM fz_mf_orders o JOIN fz_mf_sessions s ON s.intent=o.intent WHERE o.intent=? AND o.member=? AND o.mode=?',(intent,member['id'],self.mode)).fetchone()
+            if not row: raise HTTPException(404,'payment_not_found')
+            if row['state']=='paid': return {'confirmed':True}
+            if row['state']=='pending': return {'confirmed':False,'url':row['url'],'payment_id':row['payment'],'intent':intent}
+            if row['state']!='session_ready': raise HTTPException(409,'payment_creation_pending')
+            if row['expires']<=int(time.time()): raise HTTPException(409,'session_expired')
+            db.execute("UPDATE fz_mf_orders SET state='session_processing' WHERE intent=?",(intent,))
+        body={'SourceOfFund':{'SessionId':row['session']},'OperationType':'PAY',
+              'Order':{'Amount':4.99,'Currency':'USD'},
+              'IntegrationUrls':{'Redirection':self.return_url+'?fz_mf_intent='+intent},
+              'PaymentExpiry':datetime.fromtimestamp(int(time.time())+1800,timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}
+        try:
+            data=self.api('POST','/v3/payments',body,intent)
+            invoice=identifier(str(data.get('InvoiceId') or ''))
+            payment=identifier(str(data.get('PaymentId') or ''))
+            # Only provider checkout URLs; no arbitrary redirect from the browser.
+            url=None
+            if data.get('PaymentURL'):
+                try: url=self.valid_url(data['PaymentURL'])
+                except (RuntimeError,ValueError):
+                    LOG.warning('Findzia MF invoice=%s unrecognized redirect; verification retained',invoice)
+            with self.accounts.connect() as db:
+                db.execute('BEGIN IMMEDIATE')
+                db.execute("UPDATE fz_mf_orders SET invoice=?,url=?,state='pending' WHERE intent=?",(invoice,url,intent))
+                db.execute('UPDATE fz_mf_sessions SET payment=? WHERE intent=?',(payment,intent))
+                job=hashlib.sha256((self.mode+':session:'+intent).encode()).hexdigest()
+                db.execute('INSERT OR IGNORE INTO fz_mf_jobs(id,mode,invoice,payment) VALUES(?,?,?,?)',(job,self.mode,invoice,payment))
+        except Exception as exc:
+            # Never retry a charge automatically after an ambiguous response.
+            # Keep processing state for reconciliation; hosted fallback is blocked.
+            raise HTTPException(503,'payment_creation_pending') from exc
+        confirmed=False
+        if data.get('PaymentCompleted') is True:
+            try: confirmed=self.verify(payment,invoice,member['id'])
+            except Exception: pass  # Durable verifier retries independently.
+        return {'intent':intent,'payment_id':payment,'url':None if confirmed else url,'confirmed':confirmed}
 
     def grant_id(self, invoice):
         return hashlib.sha256((self.provider+':'+invoice).encode()).hexdigest()
@@ -308,6 +405,14 @@ def install_myfatoorah(app, credits):
     async def checkout(request:Request):
         m=await member(request); payload=await service.accounts.body(request)
         return result(await asyncio.to_thread(service.checkout,m,payload.get('plan_id')))
+    @app.post('/api/billing/myfatoorah/session')
+    async def embedded_session(request:Request):
+        m=await member(request); payload=await service.accounts.body(request)
+        return result(await asyncio.to_thread(service.embedded_session,m,payload.get('plan_id')))
+    @app.post('/api/billing/myfatoorah/session/complete')
+    async def complete_session(request:Request):
+        m=await member(request); payload=await service.accounts.body(request)
+        return result(await asyncio.to_thread(service.complete_session,m,payload.get('intent')))
     @app.post('/api/billing/myfatoorah/confirm')
     async def confirm(request:Request):
         m=await member(request); payload=await service.accounts.body(request)
