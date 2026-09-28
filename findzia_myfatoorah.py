@@ -1,4 +1,4 @@
-"""Findzia 156.5.3: reconcile earlier invoices through V3 or V2 status lookup.
+"""Findzia 156.5.4: explicit separate purchases without retiring uncertain payments.
 Disabled by default. Sandbox uses a separate key and an explicit email allowlist.
 No card data, browser prices, or redirect claims are accepted as payment proof.
 """
@@ -98,6 +98,12 @@ class MyFatoorahPack:
                 CREATE TABLE IF NOT EXISTS fz_mf_migrations(id TEXT PRIMARY KEY);
                 CREATE TABLE IF NOT EXISTS fz_mf_refunds(
                   mode TEXT NOT NULL, invoice TEXT NOT NULL, PRIMARY KEY(mode,invoice));
+                CREATE TABLE IF NOT EXISTS fz_mf_reviews(
+                  intent TEXT PRIMARY KEY, requested INTEGER NOT NULL,
+                  next_try INTEGER NOT NULL DEFAULT 0, tries INTEGER NOT NULL DEFAULT 0);
+                CREATE TABLE IF NOT EXISTS fz_mf_session_reviews(
+                  intent TEXT NOT NULL, previous_intent TEXT NOT NULL,
+                  PRIMARY KEY(intent,previous_intent));
                 ''')
 
             # One-time retry of owned pending invoices rejected by the old
@@ -211,7 +217,7 @@ class MyFatoorahPack:
             raise RuntimeError('invalid_checkout_url')
         return url
 
-    def review_unfinished(self, member, include_abandoned=False):
+    def review_unfinished(self, member, include_abandoned=False, only_intent=None, tolerate_unavailable=False):
         """Reconcile real payments; an unused invoice is not a payment in progress.
 
         Provider requests run outside SQLite write transactions. Final writes use
@@ -222,14 +228,17 @@ class MyFatoorahPack:
             rows=db.execute('''SELECT o.*,s.session,s.payment FROM fz_mf_orders o
                 LEFT JOIN fz_mf_sessions s ON s.intent=o.intent
                 WHERE o.member=? AND o.mode=? AND
+                ((? IS NOT NULL AND o.intent=?) OR
+                 (? IS NULL AND NOT EXISTS (SELECT 1 FROM fz_mf_reviews r WHERE r.intent=o.intent))) AND
                 (o.state IN ('creating','pending','session_processing') OR
                  (? AND o.state='abandoned' AND o.created>?))
                 ORDER BY o.created DESC''',
-                (member['id'],self.mode,int(include_abandoned),int(time.time())-3600)).fetchall()
+                (member['id'],self.mode,only_intent,only_intent,only_intent,
+                 int(include_abandoned),int(time.time())-3600)).fetchall()
         paid=False
         for source in rows:
             row=dict(source)
-            wait={'intent':row['intent'],'payment_pending':True}
+            wait={'intent':row['intent'],'payment_pending':True,'can_start_new_purchase':True}
             if row['payment']: wait['payment_id']=row['payment']
             if not row['invoice']:
                 # A submitted charge with a lost response is different from an
@@ -283,6 +292,8 @@ class MyFatoorahPack:
                     return wait  # A known submitted charge needs its final status.
             except Exception as exc:
                 LOG.warning('MF_CHECKOUT_REVIEW invoice=%s status=unavailable reason=%s',row['invoice'],diagnostic(exc))
+                if tolerate_unavailable:
+                    return wait
                 raise HTTPException(503,'payment_verification_unavailable') from exc
             with self.accounts.connect() as db:
                 db.execute('BEGIN IMMEDIATE')
@@ -299,7 +310,38 @@ class MyFatoorahPack:
                 row=db.execute('SELECT state FROM fz_mf_orders WHERE intent=? AND member=? AND mode=?',(intent,member['id'],self.mode)).fetchone()
             if not row: raise HTTPException(404,'payment_not_found')
             if row['state']=='paid': return {'confirmed':True}
-        return self.review_unfinished(member) or {'ready_for_payment':True}
+        return self.review_unfinished(member,include_abandoned=bool(intent),only_intent=intent,tolerate_unavailable=True) or {'ready_for_payment':True}
+
+    def acknowledge_previous(self, member, intent):
+        """Explicit consent to a separate purchase, never proof that an old one failed.
+
+        The old state, invoice, session and payment mapping are preserved. Replays
+        only resume the current checkout; they cannot acknowledge another attempt.
+        """
+        identifier(intent)
+        with self.accounts.connect() as db:
+            row=db.execute('SELECT state FROM fz_mf_orders WHERE intent=? AND member=? AND mode=?',
+                           (intent,member['id'],self.mode)).fetchone()
+            acknowledged=db.execute('SELECT 1 FROM fz_mf_reviews WHERE intent=?',(intent,)).fetchone()
+        if not row: raise HTTPException(404,'payment_not_found')
+        if row['state']=='paid': return {'confirmed':True}
+        if acknowledged: return None
+        if row['state'] not in ('creating','pending','session_processing'):
+            raise HTTPException(409,'previous_payment_not_pending')
+        # Read again before allowing a separate purchase. Uncertainty stays
+        # uncertainty, even when the customer elects to open a fresh form.
+        previous=self.resume(member,intent)
+        if previous.get('confirmed'): return previous
+        if not previous.get('payment_pending'): return None
+        with self.accounts.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row=db.execute('SELECT state FROM fz_mf_orders WHERE intent=? AND member=? AND mode=?',
+                           (intent,member['id'],self.mode)).fetchone()
+            if row['state']=='paid': return {'confirmed':True}
+            if row['state'] in ('creating','pending','session_processing'):
+                db.execute('INSERT OR IGNORE INTO fz_mf_reviews(intent,requested) VALUES(?,?)',
+                           (intent,int(time.time())))
+        return None
 
     def checkout(self, member, plan):
         self.require(member)
@@ -330,20 +372,24 @@ class MyFatoorahPack:
             # Keep intent for reconciliation, no automatic POST retry after timeouts.
             raise HTTPException(503,'payment_creation_pending') from exc
 
-    def embedded_session(self, member, plan):
+    def embedded_session(self, member, plan, previous_intent=None, acknowledge_unconfirmed=False):
         self.require(member)
         if not self.embedded: raise HTTPException(403,'embedded_not_available')
         if plan != 'pack': raise HTTPException(400,'pack_only')
-        previous=self.review_unfinished(member)
+        if previous_intent is not None:
+            if acknowledge_unconfirmed is not True: raise HTTPException(400,'acknowledgement_required')
+            previous=self.acknowledge_previous(member,previous_intent)
+            if previous: return previous
+        previous=self.review_unfinished(member,tolerate_unavailable=True)
         if previous: return previous
         now=int(time.time())
         with self.accounts.connect() as db:
             db.execute('BEGIN IMMEDIATE')
-            rows=db.execute("SELECT * FROM fz_mf_orders WHERE member=? AND mode=? AND state IN ('creating','pending','session_processing','session_creating','session_ready') ORDER BY created DESC",(member['id'],self.mode)).fetchall()
+            rows=db.execute("SELECT * FROM fz_mf_orders o WHERE member=? AND mode=? AND NOT EXISTS (SELECT 1 FROM fz_mf_reviews r WHERE r.intent=o.intent) AND state IN ('creating','pending','session_processing','session_creating','session_ready') ORDER BY created DESC",(member['id'],self.mode)).fetchall()
             for row in rows:
                 if row['state'] in ('creating','pending','session_processing'):
                     # Another request may have started payment during the lookup.
-                    return {'intent':row['intent'],'payment_pending':True}
+                    return {'intent':row['intent'],'payment_pending':True,'can_start_new_purchase':True}
                 if row['state']=='session_creating' and row['created']>now-60:
                     raise HTTPException(409,'payment_creation_pending')
                 if row['state']=='session_ready':
@@ -353,6 +399,12 @@ class MyFatoorahPack:
             db.execute("UPDATE fz_mf_orders SET state='canceled' WHERE member=? AND mode=? AND state IN ('session_creating','session_ready')",(member['id'],self.mode))
             intent='fz_'+secrets.token_urlsafe(24)
             db.execute('INSERT INTO fz_mf_orders(intent,member,mode,state,created) VALUES(?,?,?,?,?)',(intent,member['id'],self.mode,'session_creating',now))
+            # Scope the pre-charge recheck to unresolved attempts acknowledged
+            # before THIS form opened. A later purchase cannot waive its guard.
+            db.execute("""INSERT INTO fz_mf_session_reviews(intent,previous_intent)
+                SELECT ?,o.intent FROM fz_mf_orders o JOIN fz_mf_reviews r ON r.intent=o.intent
+                WHERE o.member=? AND o.mode=? AND o.state IN ('creating','pending','session_processing')""",
+                (intent,member['id'],self.mode))
         methods=['googlepay','card']
         if self.apple_verified: methods.append('applepay')
         body={'PaymentMode':'COLLECT_DETAILS','OperationType':'PAY',
@@ -384,9 +436,17 @@ class MyFatoorahPack:
             owned=db.execute('SELECT state FROM fz_mf_orders WHERE intent=? AND member=? AND mode=?',(intent,member['id'],self.mode)).fetchone()
         if not owned: raise HTTPException(404,'payment_not_found')
         if owned['state']=='session_ready':
+            with self.accounts.connect() as db:
+                reviewed=db.execute('SELECT previous_intent FROM fz_mf_session_reviews WHERE intent=?',(intent,)).fetchall()
+            for old in reviewed:
+                previous=self.resume(member,old['previous_intent'])
+                if previous.get('confirmed'):
+                    with self.accounts.connect() as db:
+                        db.execute("UPDATE fz_mf_orders SET state='canceled' WHERE intent=? AND state='session_ready'",(intent,))
+                    return previous
             # Recheck recently retired hosted invoices immediately before charging.
             # Opening the form never charges; only this explicit completion does.
-            previous=self.review_unfinished(member,include_abandoned=True)
+            previous=self.review_unfinished(member,include_abandoned=True,tolerate_unavailable=True)
             if previous:
                 if previous.get('confirmed'):
                     with self.accounts.connect() as db:
@@ -400,8 +460,15 @@ class MyFatoorahPack:
             if row['state']=='pending': return {'confirmed':False,'url':row['url'],'payment_id':row['payment'],'intent':intent}
             if row['state']!='session_ready': raise HTTPException(409,'payment_creation_pending')
             if row['expires']<=int(time.time()): raise HTTPException(409,'session_expired')
-            other=db.execute("SELECT intent FROM fz_mf_orders WHERE member=? AND mode=? AND intent<>? AND state IN ('creating','pending','session_processing') LIMIT 1",(member['id'],self.mode,intent)).fetchone()
-            if other: return {'intent':other['intent'],'payment_pending':True}
+            settled=db.execute("""SELECT 1 FROM fz_mf_session_reviews r JOIN fz_mf_orders o ON o.intent=r.previous_intent
+                WHERE r.intent=? AND o.member=? AND o.mode=? AND o.state='paid' LIMIT 1""",(intent,member['id'],self.mode)).fetchone()
+            if settled:
+                db.execute("UPDATE fz_mf_orders SET state='canceled' WHERE intent=?",(intent,))
+                return {'confirmed':True}
+            other=db.execute("""SELECT o.intent FROM fz_mf_orders o WHERE member=? AND mode=? AND intent<>?
+                AND NOT EXISTS (SELECT 1 FROM fz_mf_session_reviews r WHERE r.intent=? AND r.previous_intent=o.intent)
+                AND state IN ('creating','pending','session_processing') LIMIT 1""",(member['id'],self.mode,intent,intent)).fetchone()
+            if other: return {'intent':other['intent'],'payment_pending':True,'can_start_new_purchase':True}
             db.execute("UPDATE fz_mf_orders SET state='session_processing' WHERE intent=?",(intent,))
         body={'SourceOfFund':{'SessionId':row['session']},'OperationType':'PAY',
               'Order':{'Amount':4.99,'Currency':'USD'},
@@ -554,9 +621,34 @@ class MyFatoorahPack:
             with self.accounts.connect() as db:
                 db.execute('UPDATE fz_mf_jobs SET state=?,tries=?,next_try=? WHERE id=?',(state,tries,int(time.time())+min(3600,10*2**min(tries,9)),job['id']))
 
+    def process_reviews(self):
+        """Continue reconciling acknowledged attempts, including lost responses.
+
+        A separate purchase never discards an old invoice or authorizes a charge
+        retry. Only reads run here; verified late payments retain their credits.
+        """
+        if not self.ready: return
+        now=int(time.time())
+        with self.accounts.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            rows=db.execute("""SELECT o.intent,o.member,r.tries FROM fz_mf_reviews r
+                JOIN fz_mf_orders o ON o.intent=r.intent
+                WHERE o.mode=? AND o.state IN ('creating','pending','session_processing')
+                AND r.next_try<=? ORDER BY r.next_try LIMIT 2""",(self.mode,now)).fetchall()
+            for row in rows:
+                db.execute('UPDATE fz_mf_reviews SET next_try=?,tries=tries+1 WHERE intent=?',
+                           (now+min(3600,60*2**min(row['tries'],6)),row['intent']))
+        for row in rows:
+            try:
+                self.review_unfinished({'id':row['member']},only_intent=row['intent'],tolerate_unavailable=True)
+            except Exception:
+                LOG.warning('MF_SEPARATE_PURCHASE_REVIEW status=unavailable')
+
     async def worker(self):
         while True:
-            try: await asyncio.to_thread(self.process_jobs)
+            try:
+                await asyncio.to_thread(self.process_jobs)
+                await asyncio.to_thread(self.process_reviews)
             except Exception: pass  # Durable jobs survive transient database/network failures.
             await asyncio.sleep(5)
 
@@ -569,6 +661,7 @@ def install_myfatoorah(app, credits):
         return await asyncio.to_thread(service.accounts.member,service.accounts.token(request))
     @app.on_event('startup')
     async def startup():
+        LOG.warning('MF_CHECKOUT_BUILD version=15654 embedded=%s',service.embedded)
         if service.ready: service.task=asyncio.create_task(service.worker())
     @app.on_event('shutdown')
     async def shutdown():
@@ -598,7 +691,8 @@ def install_myfatoorah(app, credits):
     @app.post('/api/billing/myfatoorah/session')
     async def embedded_session(request:Request):
         m=await member(request); payload=await service.accounts.body(request)
-        return result(await asyncio.to_thread(service.embedded_session,m,payload.get('plan_id')))
+        return result(await asyncio.to_thread(service.embedded_session,m,payload.get('plan_id'),
+                    payload.get('previous_intent'),payload.get('acknowledge_unconfirmed',False)))
     @app.post('/api/billing/myfatoorah/session/complete')
     async def complete_session(request:Request):
         m=await member(request); payload=await service.accounts.body(request)
