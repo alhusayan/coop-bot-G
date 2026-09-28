@@ -1,4 +1,4 @@
-"""Findzia 156.4.7: MyFatoorah V3 embedded and hosted Pack checkout (Kuwait).
+"""Findzia 156.5.1: MyFatoorah V3 embedded and hosted Pack checkout (Kuwait).
 Disabled by default. Sandbox uses a separate key and an explicit email allowlist.
 No card data, browser prices, or redirect claims are accepted as payment proof.
 """
@@ -166,7 +166,13 @@ class MyFatoorahPack:
                 if row['state']=='session_processing':
                     raise HTTPException(409,'payment_creation_pending')
                 if row['state'] in ('creating','pending') and row['created']>now-3600:
-                    if row['url']: return {'intent':row['intent'],'url':self.valid_url(row['url'])}
+                    if row['url']:
+                        session=db.execute('SELECT payment FROM fz_mf_sessions WHERE intent=?',(row['intent'],)).fetchone()
+                        if session and session['payment']:
+                            return {'intent':row['intent'],'payment_id':session['payment'],
+                                    'authentication_url':self.valid_url(row['url'])}
+                        return {'intent':row['intent'],'pending_checkout':True,
+                                'retry_after':max(1,row['created']+3600-now)}
                     raise HTTPException(409,'payment_creation_pending')
                 if row['state']=='session_creating' and row['created']>now-60:
                     raise HTTPException(409,'payment_creation_pending')
