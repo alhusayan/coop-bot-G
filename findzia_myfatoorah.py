@@ -1,4 +1,4 @@
-"""Findzia 156.5.2: retry unpaid checkouts using provider state, without an hour lock.
+"""Findzia 156.5.3: reconcile earlier invoices through V3 or V2 status lookup.
 Disabled by default. Sandbox uses a separate key and an explicit email allowlist.
 No card data, browser prices, or redirect claims are accepted as payment proof.
 """
@@ -24,6 +24,22 @@ LOG = logging.getLogger('findzia.myfatoorah')
 
 class NoInvoiceTransactions(RuntimeError):
     """Authenticated invoice lookup explicitly reports no transactions."""
+
+class ProviderAPIError(RuntimeError):
+    """Safe diagnostics: fixed category and HTTP status, never provider payloads."""
+    def __init__(self, reason, status=None):
+        super().__init__('myfatoorah_api_unavailable')
+        self.reason, self.status = reason, status
+
+def diagnostic(exc):
+    if isinstance(exc, ProviderAPIError):
+        return '%s http=%s' % (exc.reason, exc.status if exc.status is not None else 'none')
+    if isinstance(exc, ValueError) and str(exc) in (
+        'invoice_response_mismatch','unknown_invoice_state','invoice_response_shape',
+        'paid_transaction_missing','known_payment_missing'):
+        return str(exc)
+    if isinstance(exc, HTTPException): return 'verification_http_%s' % exc.status_code
+    return 'lookup_exception'
 
 FIELDS = {
     'PAYMENT_STATUS_CHANGED': ('Invoice.Id','Invoice.Status','Transaction.Status','Transaction.PaymentId','Invoice.ExternalIdentifier'),
@@ -113,21 +129,80 @@ class MyFatoorahPack:
         try:
             r = requests.request(method, self.base + path, headers=headers, json=body,
                                  timeout=(3,12), allow_redirects=False)
-            result = r.json()
+            try: result = r.json()
+            except ValueError as exc:
+                raise ProviderAPIError('invalid_json',r.status_code) from exc
+            if not isinstance(result,dict):
+                raise ProviderAPIError('invalid_response_shape',r.status_code)
             # V3 documents this exact response for an invoice with no transactions.
             # Only a lookup of a server-owned numeric invoice can use this signal.
             # Authentication errors, timeouts and generic 404s are never evidence.
             if (method == 'GET' and re.fullmatch(r'/v3/invoices/[0-9]+',path)
                 and r.status_code in (200,400,404) and result.get('IsSuccess') is False
-                and result.get('Message') == 'No invoices match this InvoiceId'
+                and isinstance(result.get('Message'),str)
+                and ' '.join(result['Message'].strip().rstrip('.').split()).casefold()
+                    == 'no invoices match this invoiceid'
                 and not result.get('ValidationErrors')):
                 raise NoInvoiceTransactions('no_invoice_transactions')
-            if not 200 <= r.status_code < 300: raise RuntimeError('myfatoorah_api_unavailable')
-            if result.get('IsSuccess') is not True or not isinstance(result.get('Data'),dict):
-                raise RuntimeError('myfatoorah_api_unavailable')
+            if not 200 <= r.status_code < 300:
+                raise ProviderAPIError('http_error',r.status_code)
+            if result.get('IsSuccess') is not True:
+                raise ProviderAPIError('provider_rejected',r.status_code)
+            if not isinstance(result.get('Data'),dict):
+                raise ProviderAPIError('invalid_data_shape',r.status_code)
             return result['Data']
-        except (requests.RequestException, ValueError) as exc:
-            raise RuntimeError('myfatoorah_api_unavailable') from exc
+        except requests.Timeout as exc:
+            raise ProviderAPIError('timeout') from exc
+        except requests.ConnectionError as exc:
+            raise ProviderAPIError('connection_error') from exc
+        except requests.RequestException as exc:
+            raise ProviderAPIError('transport_error') from exc
+
+    def invoice_snapshot(self, invoice):
+        """Both operations only read a server-owned invoice; neither charges.
+
+        V2 GetPaymentStatus explicitly supports invoices without transactions.
+        Its POST is a status query, not a payment request. A paid result still
+        requires the existing V3 payment/amount/ownership/refund verifier.
+        """
+        identifier(invoice)
+        def validate(data):
+            if not isinstance(data,dict) or not isinstance(data.get('Invoice'),dict):
+                raise ValueError('invoice_response_shape')
+            if str(data['Invoice'].get('Id',''))!=invoice:
+                raise ValueError('invoice_response_mismatch')
+            if not isinstance(data.get('Transactions'),list):
+                raise ValueError('invoice_response_shape')
+            if data['Invoice'].get('Status') not in ('PAID','PENDING','CANCELED','CANCELLED','EXPIRED'):
+                raise ValueError('unknown_invoice_state')
+            return data
+        try:
+            return validate(self.api('GET','/v3/invoices/'+invoice))
+        except NoInvoiceTransactions:
+            raise
+        except Exception as exc:
+            LOG.warning('MF_INVOICE_LOOKUP invoice=%s source=v3 result=unavailable reason=%s',invoice,diagnostic(exc))
+        try:
+            data=self.api('POST','/v2/GetPaymentStatus',{'Key':invoice,'KeyType':'InvoiceId'})
+            if (not isinstance(data,dict) or not isinstance(data.get('InvoiceStatus'),str)
+                or not isinstance(data.get('InvoiceTransactions'),list)):
+                raise ValueError('invoice_response_shape')
+            txns=[]
+            for txn in data['InvoiceTransactions']:
+                if not isinstance(txn,dict) or not isinstance(txn.get('TransactionStatus'),str):
+                    raise ValueError('invoice_response_shape')
+                status=txn['TransactionStatus'].strip().upper()
+                # "Succss" is the success spelling documented by the V2 API.
+                if status=='SUCCSS': status='SUCCESS'
+                txns.append({'Status':status,'PaymentId':txn.get('PaymentId')})
+            snapshot=validate({'Invoice':{'Id':data.get('InvoiceId'),
+                'Status':data['InvoiceStatus'].strip().upper()},'Transactions':txns})
+            LOG.warning('MF_INVOICE_LOOKUP invoice=%s source=v2 result=verified state=%s transactions=%s',
+                invoice,snapshot['Invoice']['Status'],len(txns))
+            return snapshot
+        except Exception as exc:
+            LOG.warning('MF_INVOICE_LOOKUP invoice=%s source=v2 result=unavailable reason=%s',invoice,diagnostic(exc))
+            raise
 
     def valid_url(self, url):
         p = urlsplit(url)
@@ -175,7 +250,7 @@ class MyFatoorahPack:
                         return wait
                 else: return wait
             try:
-                data=self.api('GET','/v3/invoices/'+identifier(row['invoice']))
+                data=self.invoice_snapshot(row['invoice'])
                 inv=data.get('Invoice',{})
                 txns=data.get('Transactions')
                 if str(inv.get('Id',''))!=row['invoice'] or not isinstance(txns,list):
@@ -207,7 +282,7 @@ class MyFatoorahPack:
                 if row['session'] or row['payment']:
                     return wait  # A known submitted charge needs its final status.
             except Exception as exc:
-                LOG.warning('MF_CHECKOUT_REVIEW invoice=%s status=unavailable',row['invoice'])
+                LOG.warning('MF_CHECKOUT_REVIEW invoice=%s status=unavailable reason=%s',row['invoice'],diagnostic(exc))
                 raise HTTPException(503,'payment_verification_unavailable') from exc
             with self.accounts.connect() as db:
                 db.execute('BEGIN IMMEDIATE')
