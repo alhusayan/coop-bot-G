@@ -14,6 +14,7 @@ import secrets
 import sqlite3
 import threading
 import time
+import unicodedata
 from pathlib import Path
 from urllib.parse import urlencode, urlsplit, parse_qs
 
@@ -48,6 +49,31 @@ def origin(value):
         return f'{u.scheme}://{u.netloc}' if u.scheme=='https' and u.hostname and not u.username and not u.password else ''
     except (TypeError,ValueError): return ''
 
+def display_name(value, strict=False):
+    """A display label only; never used to verify or link an identity."""
+    if not isinstance(value,str) or len(value)>1024:
+        if strict:raise HTTPException(400,'invalid_name')
+        return ''
+    value=unicodedata.normalize('NFC',value)
+    value=re.sub(r'[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]',' ',value)
+    value=' '.join(value.split())
+    if '<' in value or '>' in value or (strict and len(value)>100):
+        if strict:raise HTTPException(400,'invalid_name')
+        return ''
+    return value[:100].strip()
+
+def apple_display_name(raw):
+    # Apple sends this optional JSON form field on the first consent only.
+    # Read it only after code/token/state validation. Its email is not trusted.
+    if not isinstance(raw,str) or len(raw)>4096:return ''
+    try:
+        user=json.loads(raw)
+    except (ValueError,TypeError,RecursionError):return ''
+    name=user.get('name') if isinstance(user,dict) else None
+    if not isinstance(name,dict):return ''
+    parts=[display_name(name.get(key,'')) for key in ('firstName','lastName')]
+    return display_name(' '.join(part for part in parts if part))
+
 class Accounts:
     def __init__(self, config=None):
         env=os.environ if config is None else config
@@ -81,7 +107,7 @@ class Accounts:
         with self.connect() as db:
             db.executescript('''
             PRAGMA journal_mode=WAL;
-            CREATE TABLE IF NOT EXISTS fz_members(id TEXT PRIMARY KEY,provider TEXT NOT NULL,subject TEXT NOT NULL,email TEXT NOT NULL,name TEXT NOT NULL,phone TEXT NOT NULL DEFAULT '',created INTEGER NOT NULL,UNIQUE(provider,subject));
+            CREATE TABLE IF NOT EXISTS fz_members(id TEXT PRIMARY KEY,provider TEXT NOT NULL,subject TEXT NOT NULL,email TEXT NOT NULL,name TEXT NOT NULL,phone TEXT NOT NULL DEFAULT '',created INTEGER NOT NULL,name_custom INTEGER NOT NULL DEFAULT 0,UNIQUE(provider,subject));
             CREATE TABLE IF NOT EXISTS fz_sessions(hash TEXT PRIMARY KEY,member TEXT NOT NULL REFERENCES fz_members(id),expires INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS fz_oauth(state TEXT PRIMARY KEY,provider TEXT NOT NULL,nonce TEXT NOT NULL,verifier TEXT NOT NULL,challenge TEXT NOT NULL,flow TEXT NOT NULL,return_to TEXT NOT NULL,expires INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS fz_exchange(hash TEXT PRIMARY KEY,member TEXT NOT NULL REFERENCES fz_members(id),challenge TEXT NOT NULL,flow TEXT NOT NULL,origin TEXT NOT NULL,expires INTEGER NOT NULL);
@@ -89,6 +115,10 @@ class Accounts:
             CREATE INDEX IF NOT EXISTS fz_oauth_expiry ON fz_oauth(expires);
             CREATE INDEX IF NOT EXISTS fz_exchange_expiry ON fz_exchange(expires);
             ''')
+            # Preserve existing accounts, sessions and credit tables on upgrade.
+            db.execute('BEGIN IMMEDIATE')
+            if 'name_custom' not in {row['name'] for row in db.execute('PRAGMA table_info(fz_members)')}:
+                db.execute('ALTER TABLE fz_members ADD COLUMN name_custom INTEGER NOT NULL DEFAULT 0')
         os.chmod(self.db_path,0o600)
 
     def enabled(self,p):
@@ -181,7 +211,7 @@ class Accounts:
             response.raise_for_status();claims=self.verify(p,response.json().get('id_token'),row['nonce'])
             verified=claims.get('email_verified') in (True,'true')
             email=str(claims.get('email') or '')[:254] if verified else ''
-            name=re.sub(r'[\x00-\x1f\x7f]','',str(claims.get('name') or ''))[:100]
+            name=apple_display_name(params.get('user')) if p=='apple' else display_name(claims.get('name',''))
             handoff=secrets.token_urlsafe(32);now=int(time.time())
             with self.connect() as db:
                 db.execute('BEGIN IMMEDIATE')
@@ -189,7 +219,7 @@ class Accounts:
                 uid=found['id'] if found else secrets.token_urlsafe(18)
                 if found:
                     if email:db.execute('UPDATE fz_members SET email=? WHERE id=?',(email,uid))
-                    if name:db.execute('UPDATE fz_members SET name=? WHERE id=?',(name,uid))
+                    if name:db.execute("UPDATE fz_members SET name=? WHERE id=? AND name='' AND name_custom=0",(name,uid))
                 else:db.execute('INSERT INTO fz_members(id,provider,subject,email,name,created) VALUES(?,?,?,?,?,?)',(uid,p,claims['sub'],email,name,now))
                 # Never merge accounts solely because their email addresses match.
                 db.execute('INSERT INTO fz_exchange VALUES(?,?,?,?,?,?)',(digest(handoff),uid,row['challenge'],row['flow'],origin(row['return_to']),now+90))
@@ -227,11 +257,27 @@ class Accounts:
         return dict(row)
 
     def phone(self,token,value):
+        # Keep the old phone-only contract for callers already using it.
+        return self.profile(token,{'phone':value})
+
+    def profile(self,token,payload):
         member=self.member(token)
-        if not isinstance(value,str):raise HTTPException(400,'invalid_phone')
-        value=re.sub(r'[\s()-]','',value)
-        if value and not re.fullmatch(r'\+[1-9][0-9]{6,14}',value):raise HTTPException(400,'invalid_phone')
-        with self.connect() as db:db.execute('UPDATE fz_members SET phone=? WHERE id=?',(value,member['id']))
+        if not isinstance(payload,dict):raise HTTPException(400,'invalid_request')
+        updates={}
+        if 'name' in payload:
+            updates['name']=display_name(payload['name'],strict=True)
+            updates['name_custom']=1
+        if 'phone' in payload:
+            value=payload['phone']
+            if not isinstance(value,str):raise HTTPException(400,'invalid_phone')
+            value=re.sub(r'[\s()-]','',value)
+            if value and not re.fullmatch(r'\+[1-9][0-9]{6,14}',value):raise HTTPException(400,'invalid_phone')
+            updates['phone']=value
+        # Only the explicitly allowed fields above can be changed. Validate
+        # everything before the atomic write; partial updates preserve others.
+        if updates:
+            with self.connect() as db:
+                db.execute('UPDATE fz_members SET '+','.join(key+'=?' for key in updates)+' WHERE id=?',(*updates.values(),member['id']))
         return {'ok':True,'member':self.member(token),'phone_verified':False}
 
     def logout(self,token):
@@ -292,7 +338,7 @@ def install_accounts(app):
     @app.post('/api/account/profile')
     async def profile(request:Request):
         service.allow_request(request);payload=await service.body(request)
-        return result(await asyncio.to_thread(service.phone,service.token(request),payload.get('phone','')))
+        return result(await asyncio.to_thread(service.profile,service.token(request),payload))
 
     @app.post('/api/account/logout')
     async def logout(request:Request):
