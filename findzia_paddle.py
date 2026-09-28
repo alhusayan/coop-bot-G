@@ -1,0 +1,361 @@
+"""Findzia Paddle SANDBOX adapter. Live charging is deliberately disabled.
+
+Only allowlisted authenticated members may checkout. A durable inbox survives
+restarts. Credit ownership comes from server-created transaction mappings,
+never from a browser's completion event, email, or custom_data.
+"""
+import asyncio
+import hashlib
+import hmac
+import json
+import os
+import re
+import secrets
+import time
+from datetime import datetime
+from urllib.parse import urlsplit
+
+import requests
+from fastapi import HTTPException, Request
+from fastapi.responses import JSONResponse
+
+PRICES = {
+    'pack': 'pri_01m3kc8m40ag25ec202rsg1v1c',
+    'plus': 'pri_01m3kcqgb2jv4ft9maqx70y412',
+    'pro': 'pri_01m3kcvmd5nzr7znccbkgnaqdy',
+}
+CLIENT_TOKEN = 'test_2a54c0aa5fa385d256edc4d2598'
+EVENTS = {'transaction.completed', 'transaction.payment_failed',
+          'subscription.created', 'subscription.updated', 'subscription.canceled',
+          'subscription.paused', 'subscription.resumed', 'subscription.past_due',
+          'adjustment.created', 'adjustment.updated'}
+
+
+def timestamp(value):
+    if not isinstance(value, str):
+        raise ValueError('missing_period')
+    dt = datetime.fromisoformat(value.replace('Z', '+00:00'))
+    if dt.tzinfo is None:
+        raise ValueError('invalid_period')
+    return int(dt.timestamp())
+
+
+class PaddleSandbox:
+    def __init__(self, credits, env=None):
+        env = os.environ if env is None else env
+        self.credits, self.accounts = credits, credits.accounts
+        self.key = env.get('FINDZIA_PADDLE_API_KEY', '').strip()
+        self.secret = env.get('FINDZIA_PADDLE_WEBHOOK_SECRET', '').strip()
+        self.test_emails = {s.strip().lower() for s in env.get('FINDZIA_PADDLE_TEST_EMAILS', '').split(',') if s.strip()}
+        self.ready = bool(credits.available and self.key and self.secret and self.test_emails
+                          and env.get('FINDZIA_PADDLE_ENV', 'sandbox') == 'sandbox')
+        self.task = None
+        self.lock = asyncio.Lock()
+        if credits.available:
+            with self.accounts.connect() as db:
+                db.executescript('''
+                CREATE TABLE IF NOT EXISTS fz_paddle_checkout(
+                  intent TEXT PRIMARY KEY, member TEXT NOT NULL, plan TEXT NOT NULL,
+                  txn TEXT UNIQUE, created INTEGER NOT NULL, state TEXT NOT NULL);
+                CREATE INDEX IF NOT EXISTS fz_paddle_checkout_member ON fz_paddle_checkout(member,created);
+                CREATE TABLE IF NOT EXISTS fz_paddle_subscription(
+                  id TEXT PRIMARY KEY, member TEXT NOT NULL, customer TEXT NOT NULL,
+                  plan TEXT NOT NULL, status TEXT NOT NULL, updated INTEGER NOT NULL DEFAULT 0);
+                CREATE TABLE IF NOT EXISTS fz_paddle_inbox(
+                  event TEXT PRIMARY KEY, payload TEXT NOT NULL, state TEXT NOT NULL,
+                  attempts INTEGER NOT NULL DEFAULT 0, next_try INTEGER NOT NULL DEFAULT 0,
+                  error TEXT NOT NULL DEFAULT '');
+                ''')
+
+    def allowed(self, member):
+        return bool(self.ready and not member.get('guest') and member.get('email', '').lower() in self.test_emails)
+
+    def require(self, member):
+        if not self.allowed(member):
+            raise HTTPException(403, 'sandbox_test_account_required')
+
+    def public(self, member=None):
+        return dict(checkout_available=self.allowed(member or {}), restore_available=self.allowed(member or {}),
+                    paddle_environment='sandbox', paddle_client_token=CLIENT_TOKEN)
+
+    def api(self, method, path, body=None):
+        # Fixed host; never follow provider/browser supplied pagination URLs.
+        try:
+            response = requests.request(method, 'https://sandbox-api.paddle.com' + path,
+                headers={'Authorization': 'Bearer ' + self.key, 'Content-Type': 'application/json', 'Paddle-Version': '1'},
+                json=body, timeout=(3, 12), allow_redirects=False)
+            if not 200 <= response.status_code < 300:
+                raise RuntimeError('paddle_api_' + str(response.status_code))
+            return response.json()['data']
+        except (requests.RequestException, KeyError, ValueError) as exc:
+            raise RuntimeError('paddle_unavailable') from exc
+
+    def checkout(self, member, plan):
+        self.require(member)
+        if plan not in PRICES:
+            raise HTTPException(400, 'invalid_plan')
+        now = int(time.time())
+        # One pending checkout per account. Reuse it across tabs/retries.
+        with self.accounts.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            if plan != 'pack' and db.execute("SELECT 1 FROM fz_paddle_subscription WHERE member=? AND status NOT IN ('canceled','paused')", (member['id'],)).fetchone():
+                raise HTTPException(409, 'subscription_exists')
+            if plan != 'pack' and db.execute('SELECT 1 FROM fz_subscriptions WHERE member=? AND period_end>?', (member['id'],now)).fetchone():
+                raise HTTPException(409, 'subscription_exists')
+            pending = db.execute("SELECT * FROM fz_paddle_checkout WHERE member=? AND state IN ('creating','pending','uncertain') ORDER BY created DESC LIMIT 1", (member['id'],)).fetchone()
+            if pending:
+                if pending['plan'] == plan and pending['txn']:
+                    return {'transaction_id': pending['txn']}
+                # Never create another potentially chargeable transaction after a timeout.
+                raise HTTPException(409, 'checkout_pending')
+            if db.execute('SELECT COUNT(*) FROM fz_paddle_checkout WHERE member=? AND created>?', (member['id'],now-3600)).fetchone()[0] >= 10:
+                raise HTTPException(429, 'checkout_limit')
+            intent = secrets.token_hex(24)
+            db.execute('INSERT INTO fz_paddle_checkout VALUES(?,?,?,NULL,?,?)', (intent,member['id'],plan,now,'creating'))
+        try:
+            txn = self.api('POST','/transactions', {
+                'items': [{'price_id': PRICES[plan], 'quantity': 1}],
+                'currency_code': 'USD', 'collection_mode': 'automatic',
+                'custom_data': {'findzia_intent': intent},
+            })
+            if not re.fullmatch(r'txn_[a-z0-9]{26}', txn.get('id','')):
+                raise RuntimeError('invalid_transaction')
+        except Exception:
+            with self.accounts.connect() as db:
+                db.execute("UPDATE fz_paddle_checkout SET state='uncertain' WHERE intent=?",(intent,))
+            raise HTTPException(503, 'checkout_pending')
+        with self.accounts.connect() as db:
+            db.execute("UPDATE fz_paddle_checkout SET txn=?,state='pending' WHERE intent=?",(txn['id'],intent))
+        return {'transaction_id': txn['id']}
+
+    def receive(self, raw, signature):
+        if not self.ready:
+            raise HTTPException(503, 'payments_not_connected')
+        parts = [p.strip().split('=',1) for p in signature.split(';')]
+        stamps = [v for k,v in parts if k=='ts'] if all(len(p)==2 for p in parts) else []
+        hashes = [v for k,v in parts if k=='h1'] if stamps else []
+        if len(stamps)!=1 or not stamps[0].isdigit() or len(stamps[0])>12 or abs(time.time()-int(stamps[0]))>300:
+            raise HTTPException(401, 'invalid_signature')
+        expected=hmac.new(self.secret.encode(),stamps[0].encode()+b':'+raw,hashlib.sha256).hexdigest()
+        if not any(hmac.compare_digest(expected,h) for h in hashes):
+            raise HTTPException(401, 'invalid_signature')
+        try:
+            event=json.loads(raw)
+            eid=event['event_id'];kind=event['event_type'];data=event['data']
+            if not isinstance(eid,str) or not re.fullmatch(r'evt_[a-z0-9]{26}',eid) or not isinstance(data,dict):
+                raise ValueError()
+        except (ValueError,KeyError,TypeError):
+            raise HTTPException(400, 'invalid_event')
+        if kind not in EVENTS:
+            return
+        with self.accounts.connect() as db:
+            db.execute('INSERT OR IGNORE INTO fz_paddle_inbox(event,payload,state) VALUES(?,?,?)', (eid,raw.decode(),'pending'))
+
+    def owner(self, txn):
+        with self.accounts.connect() as db:
+            row=db.execute('SELECT member,plan FROM fz_paddle_checkout WHERE txn=?',(txn['id'],)).fetchone()
+            if not row and txn.get('subscription_id'):
+                row=db.execute('SELECT member,plan FROM fz_paddle_subscription WHERE id=?',(txn['subscription_id'],)).fetchone()
+        if not row:
+            raise RuntimeError('unmapped_transaction')
+        return row['member'],row['plan']
+
+    def reconcile_transaction(self, txn_id):
+        if not re.fullmatch(r'txn_[a-z0-9]{26}',txn_id):
+            raise ValueError('invalid_transaction')
+        txn=self.api('GET','/transactions/'+txn_id+'?include=adjustments')
+        member,plan_id=self.owner(txn)
+        if txn['status']=='canceled':
+            with self.accounts.connect() as db:
+                db.execute("UPDATE fz_paddle_checkout SET state='canceled' WHERE txn=?",(txn_id,))
+            return False
+        if txn['status']!='completed':
+            return False
+        from findzia_billing import PLANS, fingerprint
+        plan=next(p for p in PLANS if p['id']==plan_id)
+        items=txn.get('items') or []
+        if len(items)!=1 or items[0].get('quantity')!=1 or items[0].get('proration'):
+            raise ValueError('unexpected_items')
+        price=items[0]['price'];unit=price['unit_price']
+        if price['id']!=PRICES[plan_id] or int(unit['amount'])!=plan['amount_cents'] or unit['currency_code']!='USD' or txn.get('currency_code')!='USD' or txn.get('discount_id'):
+            raise ValueError('payment_mismatch')
+        cycle=price.get('billing_cycle')
+        if (plan_id=='pack' and cycle is not None) or (plan_id!='pack' and cycle!={'interval':'month','frequency':1}):
+            raise ValueError('billing_cycle_mismatch')
+        totals=txn.get('details',{}).get('totals',{})
+        if int(totals.get('grand_total','0'))<=0 or int(totals.get('balance','-1'))!=0 or int(totals.get('discount','0'))!=0:
+            raise ValueError('unsettled_payment')
+        # Both tax-inclusive and tax-exclusive prices are valid. Paddle computes tax.
+        gross=int(totals['total']);tax=int(totals['tax']);amount=plan['amount_cents']
+        if gross!=amount and gross-tax!=amount:
+            raise ValueError('amount_mismatch')
+        period=txn.get('billing_period') or {}
+        start=timestamp(period.get('starts_at')) if plan_id!='pack' else None
+        end=timestamp(period.get('ends_at')) if plan_id!='pack' else None
+        if plan_id!='pack' and (not re.fullmatch(r'sub_[a-z0-9]{26}',txn.get('subscription_id') or '') or not re.fullmatch(r'ctm_[a-z0-9]{26}',txn.get('customer_id') or '')):
+            raise ValueError('missing_subscription')
+        if plan_id!='pack':
+            with self.accounts.connect() as db:
+                owner=db.execute('SELECT member FROM fz_paddle_subscription WHERE id=?',(txn['subscription_id'],)).fetchone()
+                if owner and owner['member']!=member:
+                    raise ValueError('subscription_owner_conflict')
+        adjustments=txn.get('adjustments') or []
+        blocked=any(a.get('status')=='approved' and a.get('action') in ('refund','credit','chargeback','chargeback_warning') for a in adjustments)
+        # A refunded transaction that arrives before its payment event never grants.
+        if not blocked:
+            self.credits.apply_verified_purchase(provider='paddle_sandbox',event_id='txn:'+txn_id,
+                purchase_id=txn_id,member=member,plan_id=plan_id,amount_cents=amount,currency='USD',period_start=start,period_end=end)
+        gid=fingerprint('paddle_sandbox:'+txn_id)
+        with self.accounts.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            db.execute("UPDATE fz_paddle_checkout SET state='completed' WHERE txn=?",(txn_id,))
+            if blocked:
+                row=db.execute('SELECT remaining,revoked FROM fz_credit_grants WHERE id=?',(gid,)).fetchone()
+                if row and not row['revoked']:
+                    self.credits.ledger(db,member,gid,None,-row['remaining'],'paddle_refund',int(time.time()))
+                    db.execute('UPDATE fz_credit_grants SET revoked=1,remaining=0 WHERE id=?',(gid,))
+            if plan_id!='pack':
+                sid=txn.get('subscription_id');customer=txn.get('customer_id')
+                if not sid or not customer:
+                    raise ValueError('missing_subscription')
+                existing=db.execute('SELECT member FROM fz_paddle_subscription WHERE id=?',(sid,)).fetchone()
+                if existing and existing['member']!=member:
+                    raise ValueError('subscription_owner_conflict')
+                db.execute('INSERT OR IGNORE INTO fz_paddle_subscription VALUES(?,?,?,?,?,0)',(sid,member,customer,plan_id,'active'))
+                db.execute('UPDATE fz_subscriptions SET subscription=? WHERE member=? AND subscription=?',(sid,member,txn_id))
+        return not blocked
+
+    def reconcile_subscription(self, sid):
+        if not re.fullmatch(r'sub_[a-z0-9]{26}',sid):
+            raise ValueError('invalid_subscription')
+        sub=self.api('GET','/subscriptions/'+sid)
+        updated=timestamp(sub['updated_at'])
+        with self.accounts.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row=db.execute('SELECT * FROM fz_paddle_subscription WHERE id=?',(sid,)).fetchone()
+            if not row:
+                raise RuntimeError('unmapped_subscription')
+            if updated<row['updated']:
+                return
+            db.execute('UPDATE fz_paddle_subscription SET status=?,updated=? WHERE id=?',(sub['status'],updated,sid))
+            scheduled=sub.get('scheduled_change') or {}
+            db.execute('UPDATE fz_subscriptions SET cancel_at_end=? WHERE member=? AND subscription=?',(int(scheduled.get('action')=='cancel'),row['member'],sid))
+            # No credits are minted by subscription events; only settled transactions.
+            # Paid-period credits keep their original expiry when auto-renew is canceled.
+
+    def process(self, event):
+        kind=event['event_type'];data=event['data']
+        if kind=='transaction.completed' or kind.startswith('adjustment.'):
+            self.reconcile_transaction(data['id'] if kind=='transaction.completed' else data['transaction_id'])
+        elif kind.startswith('subscription.'):
+            self.reconcile_subscription(data['id'])
+        # Failed payments create no credits. Existing paid credits expire normally.
+
+    def drain(self):
+        with self.accounts.connect() as db:
+            rows=db.execute("SELECT * FROM fz_paddle_inbox WHERE state='pending' AND next_try<=? ORDER BY rowid LIMIT 10",(int(time.time()),)).fetchall()
+        for row in rows:
+            try:
+                self.process(json.loads(row['payload']))
+                with self.accounts.connect() as db:
+                    db.execute("UPDATE fz_paddle_inbox SET state='done',error='' WHERE event=?",(row['event'],))
+            except Exception as exc:
+                # Persist failures for retry/inspection; never log payloads or secrets.
+                attempts=row['attempts']+1
+                with self.accounts.connect() as db:
+                    db.execute('UPDATE fz_paddle_inbox SET attempts=?,next_try=?,error=? WHERE event=?',
+                        (attempts,int(time.time())+min(3600,2**min(attempts,11)),str(exc)[:80] if re.fullmatch(r'[a-z_0-9]+',str(exc)) else type(exc).__name__,row['event']))
+
+    async def worker(self):
+        while True:
+            try:
+                if self.ready:
+                    async with self.lock:
+                        await asyncio.to_thread(self.drain)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                print('PADDLE: inbox retry pending')
+            await asyncio.sleep(2)
+
+    def portal(self, member):
+        self.require(member)
+        with self.accounts.connect() as db:
+            row=db.execute('SELECT customer,id FROM fz_paddle_subscription WHERE member=? ORDER BY updated DESC LIMIT 1',(member['id'],)).fetchone()
+        if not row:
+            raise HTTPException(404,'no_subscription')
+        data=self.api('POST','/customers/'+row['customer']+'/portal-sessions',{'subscription_ids':[row['id']]})
+        url=data['urls']['general']['overview']
+        parts=urlsplit(url)
+        if parts.scheme!='https' or parts.hostname!='sandbox-customer-portal.paddle.com':
+            raise RuntimeError('invalid_portal_url')
+        return url
+
+    def restore(self, member):
+        self.require(member)
+        with self.accounts.connect() as db:
+            rows=db.execute('SELECT txn FROM fz_paddle_checkout WHERE member=? AND txn IS NOT NULL ORDER BY created DESC LIMIT 20',(member['id'],)).fetchall()
+            subs=db.execute('SELECT id FROM fz_paddle_subscription WHERE member=?',(member['id'],)).fetchall()
+        for row in rows:
+            self.reconcile_transaction(row['txn'])
+        # Renewal notifications normally handle this; include last 30 invoices as recovery.
+        for sub in subs:
+            txns=self.api('GET','/transactions?subscription_id='+sub['id']+'&status=completed&per_page=30')
+            for txn in txns:
+                self.reconcile_transaction(txn['id'])
+            self.reconcile_subscription(sub['id'])
+
+
+def install_paddle(app, credits):
+    service=PaddleSandbox(credits);app.state.findzia_paddle=service
+    def result(data,code=200):
+        return JSONResponse(data,status_code=code,headers={'Cache-Control':'no-store'})
+    async def member(request):
+        service.accounts.allow_request(request)
+        return await asyncio.to_thread(service.accounts.member,service.accounts.token(request))
+    @app.on_event('startup')
+    async def startup():
+        service.task=asyncio.create_task(service.worker())
+    @app.on_event('shutdown')
+    async def shutdown():
+        if service.task:
+            service.task.cancel()
+            try:await service.task
+            except asyncio.CancelledError:pass
+    @app.post('/api/billing/paddle/webhook')
+    async def webhook(request:Request):
+        raw=bytearray()
+        async for part in request.stream():
+            raw.extend(part)
+            if len(raw)>262144:raise HTTPException(413,'event_too_large')
+        await asyncio.to_thread(service.receive,bytes(raw),request.headers.get('Paddle-Signature',''))
+        return result({'ok':True})
+    @app.post('/api/billing/paddle/config')
+    async def config(request:Request):
+        m=await member(request)
+        return result({'ok':True,**service.public(m)})
+    @app.post('/api/billing/paddle/checkout')
+    async def checkout(request:Request):
+        m=await member(request);payload=await service.accounts.body(request)
+        return result({'ok':True,**await asyncio.to_thread(service.checkout,m,payload.get('plan_id'))})
+    @app.post('/api/billing/paddle/confirm')
+    async def confirm(request:Request):
+        m=await member(request);service.require(m);payload=await service.accounts.body(request)
+        tid=payload.get('transaction_id','')
+        with service.accounts.connect() as db:
+            owned=db.execute('SELECT 1 FROM fz_paddle_checkout WHERE txn=? AND member=?',(tid,m['id'])).fetchone()
+        if not owned:raise HTTPException(404,'transaction_not_found')
+        async with service.lock:
+            complete=await asyncio.to_thread(service.reconcile_transaction,tid)
+        return result({'ok':True,'confirmed':complete})
+    @app.post('/api/billing/paddle/portal')
+    async def portal(request:Request):
+        m=await member(request)
+        return result({'ok':True,'url':await asyncio.to_thread(service.portal,m)})
+    @app.post('/api/billing/paddle/restore')
+    async def restore(request:Request):
+        m=await member(request)
+        async with service.lock:
+            await asyncio.to_thread(service.restore,m)
+        return result({'ok':True,**await asyncio.to_thread(credits.status,m['id'])})
+    return service
