@@ -391,7 +391,7 @@ from findzia_billing import CreditMiddleware, install_billing
 app.add_middleware(CreditMiddleware, owner=app)
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization', 'X-Findzia-Request-Id'], max_age=86400)
-BUILD_ID = 'v128.5.42.13-credits'
+BUILD_ID = 'v128.5.42.14-media'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -2393,8 +2393,7 @@ def _serpapi_lens_request(public_url, lens_type, country, auto_crop, query_hint)
         params['type'] = lens_type
     if country:
         params['country'] = country
-    if auto_crop:
-        params['auto_crop'] = 'true'
+    params['auto_crop'] = 'true' if auto_crop else 'false'
     if query_hint and lens_type in (None, '', 'all', 'visual_matches', 'products'):
         params['q'] = query_hint[:120]
     try:
@@ -3166,7 +3165,7 @@ def _lens_reference_rows(rows, reference):
 def _lens_market_passes(user_country, fast=True):
     """The same regional image protocol for every market, including US and CN."""
     countries = list(dict.fromkeys(cc for cc in (user_country, 'us') if cc))
-    return [(kind, cc, True) for cc in countries
+    return [(kind, cc, kind != 'all' or cc != user_country) for cc in countries
             for kind in (('products', 'all') if not fast or cc == user_country else ('all',))]
 
 
@@ -3277,7 +3276,16 @@ def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=Fal
                 merged.append(it)
                 merged_by_sig[sig] = it
         passes = _lens_market_passes(user_country, USE_FAST_LENS_PIPELINE)
-        future_map = {LENS_HTTP_POOL.submit(_serpapi_lens_request, public_url, lens_type, country, auto_crop, query_hint): (lens_type, country, auto_crop) for lens_type, country, auto_crop in passes}
+        # Keep the existing regional/type budget. One local lane searches the
+        # whole product instead of repeating automatic crop on every pass.
+        full_frame = _web_lens_full_frame_url(image_b64, mime_type, public_url) if not reference_context else public_url
+        future_map = {}
+        for lens_type, country, auto_crop in passes:
+            if reference_context:
+                auto_crop = True
+            image_url = public_url if auto_crop else full_frame
+            future = LENS_HTTP_POOL.submit(_serpapi_lens_request, image_url, lens_type, country, auto_crop, query_hint)
+            future_map[future] = (lens_type, country, auto_crop)
         all_futures = set(future_map)
         visual_futures = tuple(all_futures)
         pending = set(all_futures)
@@ -21548,7 +21556,7 @@ def _web_text_direct_search(query, country, lang, progress_callback=None, cancel
         result = _run_with_market(market, _web_attach_captured_result_sections, dict(snapshot(),query=query), lang, False)
         result['query']=original_typed_query
         result['interpreted_query']=query
-        result['partial'] = (bool(jobs) or cancel.is_set() or time.monotonic() >= deadline
+        result['partial'] = (bool(jobs) or cancel.is_set()
                              or any(v == 'unavailable' for v in source_states.values()))
         print(f'TEXT DIRECT FINAL country={country} rows={len(rows)} markets={dict(counts)}'
               f' images={sum(bool(r.get("image")) for r in rows.values())}'
@@ -23657,6 +23665,86 @@ def _web_raster_is_empty(body):
         return True
 
 
+# Shared decoded thumbnails: bounded memory and one merchant fetch per URL wave.
+_FZ_PICTURE_LOCK = threading.Lock()
+_FZ_PICTURE_CACHE, _FZ_PICTURE_FLIGHTS = {}, {}
+_FZ_PICTURE_BYTES = 0
+_FZ_PICTURE_POOL = ThreadPoolExecutor(max_workers=8, thread_name_prefix='card-picture')
+_FZ_PICTURE_GATE = threading.BoundedSemaphore(24)
+
+
+def _fz_card_picture_bytes(body, mime):
+    if PILImage is None:
+        return body, mime
+    try:
+        with PILImage.open(io.BytesIO(body)) as im:
+            if im.width * im.height > 40000000:
+                return b'', ''
+            im = PILImageOps.exif_transpose(im)
+            icc = im.info.get('icc_profile')
+            if im.width <= 960 and im.height <= 960 and len(body) <= 250000:
+                return body, mime
+            if 'A' in im.getbands() or 'transparency' in im.info:
+                rgba = im.convert('RGBA'); im = PILImage.new('RGB', rgba.size, 'white'); im.paste(rgba, mask=rgba.getchannel('A'))
+            else:
+                im = im.convert('RGB')
+            if icc:
+                try:
+                    from PIL import ImageCms
+                    im = ImageCms.profileToProfile(im, ImageCms.ImageCmsProfile(io.BytesIO(icc)),
+                        ImageCms.createProfile('sRGB'), outputMode='RGB')
+                except Exception:
+                    pass
+            im.thumbnail((960, 960), getattr(PILImage, 'Resampling', PILImage).LANCZOS)
+            out = io.BytesIO()
+            im.save(out, format='JPEG', quality=86, optimize=True)
+            return out.getvalue(), 'image/jpeg'
+    except Exception:
+        return body, mime
+
+
+def _fz_picture_submit(url, fetcher):
+    """Validate signing before calling; fetcher retains DNS/redirect/size guards."""
+    global _FZ_PICTURE_BYTES
+    key = hashlib.sha256(url.encode('utf-8')).hexdigest()
+    now = time.monotonic()
+    with _FZ_PICTURE_LOCK:
+        cached = _FZ_PICTURE_CACHE.get(key)
+        if cached and cached[0] > now:
+            ready = Future();ready.set_result(cached[1]);return ready
+        if cached:
+            _FZ_PICTURE_BYTES -= len(cached[1][2]);del _FZ_PICTURE_CACHE[key]
+        current = _FZ_PICTURE_FLIGHTS.get(key)
+        if current is not None:return current
+        if not _FZ_PICTURE_GATE.acquire(False):
+            raise RuntimeError('picture_busy')
+        def work():
+            global _FZ_PICTURE_BYTES
+            try:
+                value = fetcher(url)
+                if value[0] == 200 and value[2] and value[1].startswith('image/'):
+                    body, mime = _fz_card_picture_bytes(value[2], value[1])
+                    if body:
+                        value = (200, mime, body, '')
+                        with _FZ_PICTURE_LOCK:
+                            # At most 32 MiB and 128 entries. Never cache failed fetches.
+                            while _FZ_PICTURE_CACHE and (_FZ_PICTURE_BYTES+len(body)>32*1024*1024 or len(_FZ_PICTURE_CACHE)>=128):
+                                old = _FZ_PICTURE_CACHE.pop(next(iter(_FZ_PICTURE_CACHE)))
+                                _FZ_PICTURE_BYTES -= len(old[1][2])
+                            _FZ_PICTURE_CACHE[key]=(time.monotonic()+900,value)
+                            _FZ_PICTURE_BYTES += len(body)
+                return value
+            finally:
+                with _FZ_PICTURE_LOCK:_FZ_PICTURE_FLIGHTS.pop(key,None)
+                _FZ_PICTURE_GATE.release()
+        try:
+            future = _FZ_PICTURE_POOL.submit(work)
+        except Exception:
+            _FZ_PICTURE_GATE.release();raise
+        _FZ_PICTURE_FLIGHTS[key]=future
+        return future
+
+
 @app.get('/api/img-proxy')
 async def web_api_img_proxy(request: Request):
     if not WEB_API_ENABLED or not WEB_IMAGE_PROXY_ENABLED:
@@ -23720,14 +23808,16 @@ async def web_api_img_proxy(request: Request):
             return (415, '', b'', '')
         return (200, content_type or 'text/html', b'', document['text'])
     try:
-        status, content_type, body, html = await asyncio.to_thread(_fetch_image, raw_url)
+        status, content_type, body, html = await asyncio.wait_for(
+            asyncio.shield(asyncio.wrap_future(_fz_picture_submit(raw_url, _fetch_image))), timeout=10)
         if status >= 400:
             return Response(content=b'', status_code=status)
         if content_type.startswith('image/') and body:
             return Response(content=body, media_type=content_type, headers={'Cache-Control': 'public, max-age=86400'})
         rescued = (_web_product_page_metadata(html, raw_url).get('image') or '') if html else ''
         if rescued and rescued != raw_url:
-            status2, content_type2, body2, _ = await asyncio.to_thread(_fetch_image, rescued)
+            status2, content_type2, body2, _ = await asyncio.wait_for(
+                asyncio.shield(asyncio.wrap_future(_fz_picture_submit(rescued, _fetch_image))), timeout=10)
             if status2 < 400 and content_type2.startswith('image/') and body2:
                 return Response(content=body2, media_type=content_type2, headers={'Cache-Control': 'public, max-age=86400'})
     except Exception as e:
@@ -25725,23 +25815,109 @@ async def web_api_search_stream(request: Request):
     return StreamingResponse(_web_with_live_prices(_web_with_local_discovery(_generator(), lang, country), lang, country), media_type='application/x-ndjson', headers={'Cache-Control': 'no-cache, no-transform', 'X-Accel-Buffering': 'no', 'Connection': 'keep-alive'})
 
 def _web_normalize_uploaded_image_bytes(image_bytes, mime):
+    """Bound decoding and normalize orientation/colour without changing product detail."""
     mime = str(mime or 'image/jpeg').strip().lower()
-    if mime in ('image/jpeg', 'image/png', 'image/webp'):
+    if mime not in ('image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif'):
+        raise ValueError('unsupported_image_type')
+    if mime in ('image/heic', 'image/heif') and not WEB_HEIC_ENABLED:
+        raise ValueError('heic_support_unavailable')
+    if PILImage is None:
+        # Preserve the existing non-Pillow installations; supported JPEG/PNG/WebP still work.
         return image_bytes, mime
-    if mime in ('image/heic', 'image/heif') or mime.endswith('/heic') or mime.endswith('/heif'):
-        if not WEB_HEIC_ENABLED or PILImage is None:
-            raise ValueError('heic_support_unavailable')
-        with PILImage.open(io.BytesIO(image_bytes)) as im:
-            im = im.convert('RGB')
-            # iPhone HEIC files can be very large. Resize before JPEG encoding so
-            # Lens receives a fast, web-sized image rather than the full camera original.
-            max_side = 1800
-            if max(im.size) > max_side:
-                im.thumbnail((max_side, max_side))
+    try:
+        with PILImage.open(io.BytesIO(image_bytes)) as source:
+            if source.width * source.height > 40000000:
+                raise ValueError('image_dimensions_too_large')
+            icc = source.info.get('icc_profile')
+            source.seek(0)
+            im = PILImageOps.exif_transpose(source)
+            if 'A' in im.getbands() or 'transparency' in im.info:
+                rgba = im.convert('RGBA')
+                im = PILImage.new('RGB', rgba.size, 'white')
+                im.paste(rgba, mask=rgba.getchannel('A'))
+            elif im.mode not in ('RGB', 'CMYK', 'L'):
+                im = im.convert('RGB')
+            if icc:
+                try:
+                    from PIL import ImageCms
+                    im = ImageCms.profileToProfile(im, ImageCms.ImageCmsProfile(io.BytesIO(icc)),
+                        ImageCms.createProfile('sRGB'), outputMode='RGB')
+                except Exception:
+                    im = im.convert('RGB')
+            else:
+                im = im.convert('RGB')
+            original_size = source.size
+            # Never enlarge a small image or blur away text. Keep fine model/label detail.
+            im.thumbnail((1600, 1600), getattr(PILImage, 'Resampling', PILImage).LANCZOS)
             out = io.BytesIO()
-            im.save(out, format='JPEG', quality=90, optimize=True)
-            return out.getvalue(), 'image/jpeg'
-    raise ValueError('unsupported_image_type')
+            im.save(out, format='JPEG', quality=92, subsampling=0, optimize=True)
+            value = out.getvalue()
+            print(f'IMAGE NORMALIZE input={original_size[0]}x{original_size[1]} bytes={len(image_bytes)}'
+                  f' output={im.width}x{im.height} bytes={len(value)}')
+            return value, 'image/jpeg'
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise ValueError('invalid_image') from exc
+
+
+def _web_letterbox_bounds(im):
+    """Only symmetric near-black screen bars with an abrupt bright inner edge.
+
+    Do not infer object boundaries, crop white backgrounds, or cut a product out
+    of a real scene. The original framing is retained in the other Lens pass.
+    """
+    sample = im.convert('RGB')
+    sample.thumbnail((160, 320))
+    w, h = sample.size
+    if min(w, h) < 24:
+        return (0, 0, im.width, im.height)
+    px = sample.load()
+    def edge(axis):
+        length, across = (h, w) if axis == 'y' else (w, h)
+        def level(index):
+            values = [max(px[j, index] if axis == 'y' else px[index, j]) for j in range(across)]
+            return sum(v <= 24 for v in values) >= across * .98
+        lo, hi = 0, length - 1
+        while lo < length // 3 and level(lo): lo += 1
+        while hi >= length * 2 // 3 and level(hi): hi -= 1
+        before, after = lo, length - hi - 1
+        if min(before, after) < length * .05 or abs(before-after) > length * .06:
+            return (0, length)
+        if hi-lo+1 < length * .38:
+            return (0, length)
+        # A bright discontinuity distinguishes screen bars from dark scene edges.
+        for index in (min(lo+2, hi), max(lo, hi-2)):
+            values = [max(px[j,index] if axis == 'y' else px[index,j]) for j in range(across)]
+            if sum(v >= 100 for v in values) < across * .65:
+                return (0, length)
+        return (max(0, lo-1), min(length, hi+2))
+    top, bottom = edge('y');left, right = edge('x')
+    # A frame on all four sides may be part of the photograph/product. Abstain.
+    if top and left:
+        return (0, 0, im.width, im.height)
+    return (int(left*im.width/w), int(top*im.height/h),
+            min(im.width, int(right*im.width/w+.5)), min(im.height, int(bottom*im.height/h+.5)))
+
+
+def _web_lens_full_frame_url(image_b64, mime, original_url):
+    """An independent full-frame view in an existing lane, with no extra API call."""
+    if PILImage is None:
+        return original_url
+    try:
+        with PILImage.open(io.BytesIO(base64.b64decode(image_b64))) as im:
+            if im.width * im.height > 40000000:
+                return original_url
+            im = PILImageOps.exif_transpose(im).convert('RGB')
+            bounds = _web_letterbox_bounds(im)
+            if bounds == (0, 0, im.width, im.height):
+                return original_url
+            cropped = im.crop(bounds)
+            out = io.BytesIO();cropped.save(out, format='JPEG', quality=92, subsampling=0, optimize=True)
+            print(f'LENS FULL FRAME source={im.width}x{im.height} content={cropped.width}x{cropped.height} auto_crop=False')
+            return publish_image_for_lens(base64.b64encode(out.getvalue()).decode('ascii'), 'image/jpeg') or original_url
+    except Exception:
+        return original_url
 
 def _web_identity_offer_key(row):
     return str(row.get('url') or '').strip() or '|'.join(str(row.get(k) or '') for k in ('market', 'store', 'title'))
