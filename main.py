@@ -372,6 +372,7 @@ from functools import lru_cache
 from fastapi import FastAPI, Request, Response, BackgroundTasks
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.requests import ClientDisconnect
 from bs4 import BeautifulSoup
 try:
     from PIL import Image as PILImage
@@ -391,7 +392,7 @@ from findzia_billing import CreditMiddleware, install_billing
 app.add_middleware(CreditMiddleware, owner=app)
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization', 'X-Findzia-Request-Id'], max_age=86400)
-BUILD_ID = 'v128.5.42.18-markets'
+BUILD_ID = 'v128.5.42.19-shein-media'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -4252,6 +4253,8 @@ for _noun, _ur, _hi, _bn in (
 
 
 _LOCAL_RETRIEVAL_NOUNS.update({
+    'jewelry': {'en':'jewelry|jewellery|jewelleries', 'zh':'珠宝|首饰|饰品', 'ar':'مجوهرات|مجوهره|مجوهر|حلي', 'fr':'bijoux|bijouterie', 'de':'Schmuck', 'es':'joyas|joyería'},
+    'ring': {'en':'ring|rings', 'zh':'戒指|指环', 'ar':'خاتم|خواتم', 'fr':'bague|bagues', 'de':'Ring|Ringe', 'es':'anillo|anillos'},
     'necklace': {'en':'necklace|necklaces|choker|pendant necklace|neck chain', 'zh':'项链|锁骨链|吊坠项链|颈链', 'ar':'عقد|قلادة|قلاده|سلسال|سلسلة رقبة', 'hi':'हार|नेकलेस', 'de':'Halskette|Halsketten'},
     'earrings': {'en':'earrings|earring', 'zh':'耳环|耳钉|耳饰', 'ar':'حلق|اقراط|أقراط'},
     'bracelet': {'en':'bracelet|bracelets|bangle|bangles', 'zh':'手链|手镯', 'ar':'اسورة|اسوارة|سوار|أساور'},
@@ -4665,6 +4668,17 @@ def _local_discovery_candidate_ok(query, item, visual=False):
         return False
     q_kinds = set(_LOCAL_RETRIEVAL_NOUNS) & set(q.split())
     t_kinds = set(_LOCAL_RETRIEVAL_NOUNS) & set(t.split())
+    # A general jewelry search includes finished necklaces/rings/earrings.
+    # Broaden only the category token; all brand/model/feature guards below
+    # still run. Storage, tools and raw craft supplies are not finished jewelry.
+    jewelry_children = {'necklace', 'earrings', 'bracelet', 'ring'}
+    if 'jewelry' in q_kinds:
+        accessory = r'\b(?:storage|organizer|organiser|mou?ld|pliers|needles?|display stand|jewelry box|jewellery box|beading supplies)\b|收纳|模具|工具|首饰盒|盒子|منظم|صندوق|قالب'
+        if not re.search(accessory, q + ' ' + str(query), re.I) and re.search(accessory, t + ' ' + title, re.I):
+            return False
+    if 'jewelry' in q_kinds and t_kinds & jewelry_children:
+        t += ' jewelry'
+        t_kinds.add('jewelry')
     photo_discovery = bool(item.get('_image_discovery'))
     coarse_apparel = photo_discovery and 'clothing' in q_kinds and bool(t_kinds & {'clothing','dress','jacket','shirt','pants'})
     if q_kinds and t_kinds and q_kinds.isdisjoint(t_kinds) and not coarse_apparel:
@@ -5728,8 +5742,11 @@ def _local_discovery_request(query, market, kind, timeout_seconds):
         if remaining <= .05:
             return []
         connect = min(1.5, max(.01, remaining * .15))
-        data = _fast_provider_search(engine, params['q'], params['gl'], hl,
-                                     (connect, max(.01, min(remaining - connect, FAST_PROVIDER_TIMEOUT_SECONDS))))
+        if spec.get('catalog_domain') == 'shein.com':
+            data = _web_shein_index_fetch(params, remaining)
+        else:
+            data = _fast_provider_search(engine, params['q'], params['gl'], hl,
+                                         (connect, max(.01, min(remaining - connect, FAST_PROVIDER_TIMEOUT_SECONDS))))
         return _local_discovery_rows(data, query, market, 'local_' + kind) if isinstance(data, dict) else []
     if kind == 'broad_en':
         spec = {'country': cc, 'role': 'local', 'engine': 'google', 'hl': 'en'}
@@ -5823,9 +5840,73 @@ def _local_discovery_request(query, market, kind, timeout_seconds):
 
 
 def _web_catalog_scope(domain):
-    paths = {'aliexpress.com': '/item/', 'temu.com': '-g-',
-             'shein.com': '-p-', 'alibaba.com': '/product-detail/'}
-    return 'site:' + domain + (' inurl:' + paths[domain] if domain in paths else '')
+    # Punctuation-only inurl:-p- / inurl:-g- overconstrains the index,
+    # especially Google Images. Validate the product path AFTER retrieval.
+    return 'site:' + domain
+
+
+def _web_shein_product_id(url):
+    """Observed product ID only, never a guessed URL or search/category page."""
+    if not _china_global_product_url('shein.com', url):
+        return ''
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme not in ('https', 'http') or parsed.username or parsed.password:
+        return ''
+    match = re.search(r'(?:-p-|/product-p-)(\d+)(?:\.html)?/?$', parsed.path, re.I)
+    return match.group(1) if match else ''
+
+
+def _web_shein_index_fetch(params, timeout_seconds, cancel_event=None):
+    """Use the normal index, with one independent fallback for an empty lane.
+
+    Both text and photo search share this path. Category pages do not count
+    as success. Keep the original query, language and identity constraints.
+    """
+    deadline = time.monotonic() + max(0., timeout_seconds)
+    image_lane = 'images' in params['engine']
+    sections = ('images_results',) if image_lane else ('organic_results',)
+    def stopped():
+        return ((cancel_event is not None and cancel_event.is_set()) or
+                time.monotonic() >= deadline)
+    def request(engine, reserve=False):
+        remaining = deadline - time.monotonic()
+        if stopped() or remaining < .1:
+            return None
+        budget = min(remaining, 3.5) if reserve else remaining
+        connect = min(.8, max(.02, budget * .15))
+        if engine.startswith(('serper_', 'cse_')):
+            return _fast_provider_search(engine, params['q'], params.get('gl', 'us'),
+                                         params.get('hl', 'en'), (connect, max(.02, budget-connect)))
+        request_params = dict(params, engine=engine, api_key=SERPAPI_API_KEY, output='json')
+        if 'images' in engine:
+            request_params.pop('num', None)
+            request_params.pop('location', None)
+        return _serpapi_cached_json(request_params, timeout=(connect, max(.02, budget-connect)),
+                                   label='SHEIN INDEX ' + engine)
+    primary = params['engine']
+    fallback = ''
+    if (primary.startswith(('serper_', 'cse_')) and SERPAPI_API_KEY and
+            SERPAPI_BACKUP_ENABLED and not serpapi_provider_degraded()):
+        fallback = 'google_images' if image_lane else 'google'
+    elif not primary.startswith(('serper_', 'cse_')):
+        provider = next((p for p in FAST_PROVIDERS if _fast_provider_supports_operators(p)), '')
+        if provider:
+            fallback = provider + ('_images' if image_lane else '_search')
+    data = request(primary, bool(fallback))
+    useful = sum(1 for field in sections for row in (data or {}).get(field, [])
+                 if isinstance(row, dict) and _web_shein_product_id(row.get('link') or '')
+                 and (not image_lane or _web_offer_image_candidates(row)))
+    if useful or not fallback or stopped():
+        return data
+    backup = request(fallback)
+    print(f'SHEIN INDEX fallback={fallback} hl={params.get("hl", "en")} primary_products={useful}'
+          f' returned={sum(len((backup or {}).get(field) or []) for field in sections)}')
+    if not isinstance(backup, dict):
+        return data
+    merged = dict(data or {}, search_metadata=backup.get('search_metadata') or {})
+    for field in ('organic_results', 'images_results', 'shopping_results', 'inline_shopping_results'):
+        merged[field] = list((data or {}).get(field) or []) + list(backup.get(field) or [])
+    return merged
 
 
 def _global_discovery_request(query, country, kind, timeout_seconds, image_discovery=False):
@@ -5848,8 +5929,12 @@ def _global_discovery_request(query, country, kind, timeout_seconds, image_disco
         connect = min(1.5, max(.05, timeout_seconds * .15))
         _market_query_wait(query, hl, min(TEXT_DIRECT_TRANSLATION_WAIT, timeout_seconds * .15))
         wording = (_market_query_cached(query, hl) or _market_query_static(query, hl)).get('query') or query
-        data = _fast_provider_search(engine, f'{wording} ({scopes})', 'us', hl,
-                                     (connect, max(1., min(timeout_seconds - connect, FAST_PROVIDER_TIMEOUT_SECONDS))))
+        if requested_domain == 'shein.com':
+            data = _web_shein_index_fetch({'engine': engine, 'q': f'{wording} ({scopes})',
+                                           'gl': 'us', 'hl': hl}, max(.05, timeout_seconds - connect))
+        else:
+            data = _fast_provider_search(engine, f'{wording} ({scopes})', 'us', hl,
+                                         (connect, max(1., min(timeout_seconds - connect, FAST_PROVIDER_TIMEOUT_SECONDS))))
         if not isinstance(data, dict):
             print(f'GLOBAL SOURCE country={country} provider=global_fast engine={engine} status=failed')
             return []
@@ -5874,21 +5959,18 @@ def _global_discovery_request(query, country, kind, timeout_seconds, image_disco
     image_source = country == 'cn' and kind == 'global'
     scopes = ' OR '.join('site:' + domain for _, domain in stores)
     if country == 'cn' and not image_source:
-        # Search real listing paths instead of wholesale/category landing pages.
-        # These are query constraints, never fabricated click destinations.
-        paths = {'aliexpress.com': '/item/', 'temu.com': '-g-',
-                 'shein.com': '-p-', 'alibaba.com': '/product-detail/'}
-        scopes = ' OR '.join('(site:' + domain +
-                    (' inurl:' + paths[domain] if domain in paths else '') + ')'
-                    for _, domain in stores)
+        scopes = ' OR '.join('(' + _web_catalog_scope(domain) + ')' for _, domain in stores)
     params = {'engine': 'google_images' if image_source else 'google',
               'q': f'{search_query} ({scopes})', 'gl': 'us', 'hl': hl,
               'api_key': SERPAPI_API_KEY, 'output': 'json'}
     if not image_source:
         params['num'] = 10
     connect = min(1.5, max(.01, remaining * .15))
-    data = _serpapi_cached_json(params, timeout=(connect, max(.01, remaining - connect)),
-                               label=f'GLOBAL CATALOG {country}/{kind} engine={params["engine"]}')
+    if requested_domain == 'shein.com':
+        data = _web_shein_index_fetch(params, remaining)
+    else:
+        data = _serpapi_cached_json(params, timeout=(connect, max(.01, remaining - connect)),
+                                   label=f'GLOBAL CATALOG {country}/{kind} engine={params["engine"]}')
     if not isinstance(data, dict):
         print(f'GLOBAL SOURCE country={country} provider={kind} engine={params["engine"]} status=failed')
         return []
@@ -5914,9 +5996,9 @@ def _global_market_discovery(query, country, limit=32, timeout_seconds=None, pro
         remaining = deadline - time.monotonic()
         return [] if cancelled() or remaining <= .01 else _global_discovery_request(query, country, kind, remaining, image_discovery=image_discovery)
     if serper_primary() and _fast_provider_supports_operators('serper'):
-        kinds = tuple('global_fast:' + domain + ':' + hl for _, domain in GLOBAL_MARKET_STORES[country] for hl in ('en', 'zh-cn')) + ('global_fast_images:shein.com:en',) if country == 'cn' else ('global_fast',)
+        kinds = tuple('global_fast:' + domain + ':' + hl for _, domain in GLOBAL_MARKET_STORES[country] for hl in ('en', 'zh-cn')) + ('global_fast_images:shein.com:en', 'global_fast_images:shein.com:zh-cn') if country == 'cn' else ('global_fast',)
     elif country == 'cn':
-        kinds = tuple('global2:' + domain + ':' + hl for _, domain in GLOBAL_MARKET_STORES[country] for hl in ('en', 'zh-cn')) + ('global:shein.com:en',)
+        kinds = tuple('global2:' + domain + ':' + hl for _, domain in GLOBAL_MARKET_STORES[country] for hl in ('en', 'zh-cn')) + ('global:shein.com:en', 'global:shein.com:zh-cn')
     else:
         kinds = ('global', 'global2') + (('global_fast',) if FAST_PROVIDERS else ())
     jobs = {LOCAL_DISCOVERY_POOL.submit(run, kind) for kind in kinds}
@@ -19177,7 +19259,7 @@ def _web_same_index_listing(first, second):
     return bool(identity(a.path)) and identity(a.path) == identity(b.path)
 
 
-def _web_targeted_price_updates(entries, lang, market):
+def _web_targeted_price_updates(entries, lang, market, *, image_only=False):
     """Bounded independent listing lookups; recover image and money independently."""
     if not _indexed_recovery_allowed():
         return {}
@@ -19190,7 +19272,8 @@ def _web_targeted_price_updates(entries, lang, market):
         parsed = urllib.parse.urlsplit(key)
         if parsed.path in ('', '/'):
             continue
-        term = 'site:' + parsed.netloc
+        # Keep the observed product ID while allowing mobile/locale image hits.
+        term = 'site:' + ('shein.com' if image_only and _web_shein_product_id(key) else parsed.netloc)
         ids = [v for k, v in urllib.parse.parse_qsl(parsed.query)
                if k.lower() in {'id', 'itemid', 'item_id', 'goods_id', 'goodsid', 'offerid', 'sku', 'skuid', 'sku_id'}]
         path_ids = re.findall(r'(?:/item/|/offer/|/product/|-p-|-g-|/)(\d{6,})(?=[./-]|$)', parsed.path)
@@ -19206,7 +19289,7 @@ def _web_targeted_price_updates(entries, lang, market):
     search_cc = 'us' if any(row.get('export_store') or _global_store_match(row.get('url'), 'cn') for row in entries.values()) else str(first.get('country') or first.get('market_country') or market.get('country') or 'us')
     # Price recovery needs organic snippets even when pictures are also missing.
     # Use the image index only when every listing already has a price.
-    image_source = all(_web_row_has_numeric_price(row) and not _web_offer_image_candidates(row) for row in entries.values())
+    image_source = image_only or all(_web_row_has_numeric_price(row) and not _web_offer_image_candidates(row) for row in entries.values())
     params = {'engine': 'google_images' if image_source else 'google',
               'q': '(' + ' OR '.join(dict.fromkeys(terms)) + ')',
               'gl': search_cc,
@@ -19216,12 +19299,15 @@ def _web_targeted_price_updates(entries, lang, market):
         params.pop('num', None)
     # Runs asynchronously inside the existing live-enrichment window.
     # The previous five-second read deadline repeatedly expired in production.
-    budget = max(.2, min(10.0, WEB_LIVE_PRICE_WAIT))
+    budget = max(.2, min(7.0 if image_only else 10.0, WEB_LIVE_PRICE_WAIT))
     connect = min(1.0, budget * .15)
     provider = next((p for p in FAST_PROVIDERS if _fast_provider_supports_operators(p)), '')
     def lookup(term):
         MARKET_CTX.value = dict(market)
         try:
+            if image_only and all(_web_shein_product_id(row.get('url')) for row in entries.values()):
+                request = dict(params, q=term, engine=provider + '_images' if provider else 'google_images')
+                return _web_shein_index_fetch(request, budget) or {}
             if provider:
                 return _fast_provider_search(provider + ('_images' if image_source else '_search'), term,
                     search_cc, params['hl'], (connect, budget-connect)) or {}
@@ -19244,7 +19330,8 @@ def _web_targeted_price_updates(entries, lang, market):
         if not item_key:
             continue
         for key, row in entries.items():
-            if not _web_same_index_listing(link, row.get('url')) and not (image_source and _fz_same_image_listing(link, row.get('url'))):
+            same_listing = _web_same_index_listing(link, row.get('url'))
+            if not same_listing and not (image_source and _fz_same_image_listing(link, row.get('url'))):
                 continue
             title = _local_discovery_title(item)
             original = str(row.get('raw_title') or row.get('title') or '')
@@ -19264,7 +19351,7 @@ def _web_targeted_price_updates(entries, lang, market):
                 quote = _fz_regional_index_quote(item, row.get('url'))
             money = ((quote['min'] or quote['max']),quote['currency']) if quote else None
             change = dict(updates.get(key) or {})
-            if money and (quote['kind']!='exact' or not _host_matches_any(urllib.parse.urlsplit(link).hostname or '', ('1688.com',))):
+            if money and same_listing and not image_only and (quote['kind']!='exact' or not _host_matches_any(urllib.parse.urlsplit(link).hostname or '', ('1688.com',))):
                 change.update(_web_live_quote_fields(quote, market),
                     price_source='regional_listing_text' if regional else 'exact_listing_index', price_source_url=link,
                     price_checked_at=time.time(), price_verified=False,
@@ -21082,7 +21169,8 @@ def _web_text_direct_specs(query, country):
                 for hl in ('en', 'zh-cn'):
                     add(cc, role, catalog_engine, hl, catalog_domain=domain, **extra)
                 if domain == 'shein.com':
-                    add(cc, role, image_engine, 'en', catalog_domain=domain, **extra)
+                    for hl in ('en', 'zh-cn'):
+                        add(cc, role, image_engine, hl, catalog_domain=domain, **extra)
         else:
             add(cc, role, catalog_engine, 'en')
             add(cc, role, 'serper_shopping' if serper_primary() and FAST_PROVIDER_SHOPPING else
@@ -21185,6 +21273,8 @@ def _web_text_direct_fetch(query, spec, deadline, cancel, page_token=''):
         return None
     connect = min(1.5, max(.05, remaining * .15))
     began = time.monotonic()
+    if spec.get('catalog_domain') == 'shein.com' and not page_token:
+        return _web_shein_index_fetch(params, remaining, cancel)
     if params['engine'].startswith(('serper_', 'cse_')):
         data = _fast_provider_search(params['engine'], params['q'], params['gl'], params['hl'],
                                      (connect, max(1., min(remaining - connect, FAST_PROVIDER_TIMEOUT_SECONDS))))
@@ -26571,6 +26661,7 @@ def _web_selected_market_search(query, country, lang, global_countries, *, image
                                         launch(cc, 'global_fast:' + domain + ':' + hl)
                                 if FAST_PROVIDER_IMAGES:
                                     launch(cc, 'global_fast_images:shein.com:en')
+                                    launch(cc, 'global_fast_images:shein.com:zh-cn')
                             else:
                                 launch(cc, 'global_fast')
                         if serper_primary() and _fast_provider_supports_operators('serper'):
@@ -26586,6 +26677,7 @@ def _web_selected_market_search(query, country, lang, global_countries, *, image
                             if cc == 'cn':
                                 launch(cc, 'global2::zh-cn')
                                 launch(cc, 'global:shein.com:en')
+                                launch(cc, 'global:shein.com:zh-cn')
                     else:
                         # Open local discovery for every market, never export allowlists.
                         for fast_kind in _local_fast_discovery_kinds(cc, retrieval_query):
@@ -29579,6 +29671,11 @@ def _fz_same_image_listing(a, b):
     if _web_price_url_key(a) == _web_price_url_key(b): return True
     try:
         x, y = urllib.parse.urlsplit(a), urllib.parse.urlsplit(b)
+        shein_id = _web_shein_product_id(a)
+        if shein_id and shein_id == _web_shein_product_id(b):
+            variants = lambda u: {k.lower(): v for k, v in urllib.parse.parse_qsl(u.query)
+                                  if k.lower() in ('sku', 'skucode', 'sku_id', 'color', 'color_id', 'size', 'size_id')}
+            return variants(x) == variants(y)
         # Ubuy's mobile/Arabic prefix redirects within the SAME country catalog.
         normalize = lambda h: re.sub(r'^(?:a|www)\.', '', h or '')
         host = normalize(x.hostname)
@@ -29679,7 +29776,7 @@ def _fz_recover_media(row):
         chosen=_web_live_page_image(row,snap)
         return ([chosen] if chosen else [])+(snap.get('image_candidates') or [])
     def index():
-        found=_web_targeted_price_updates({'media':dict(row,image='',thumbnail='',images=[],image_candidates=[])},'en',market).get('media',{})
+        found=_web_targeted_price_updates({'media':dict(row,image='',thumbnail='',images=[],image_candidates=[])},'en',market,image_only=True).get('media',{})
         return [found.get('page_image')]+(found.get('image_candidates') or [])
     jobs={_FZ_MEDIA_LOOKUP_POOL.submit(_run_with_market,market,fn) for fn in (page,index)}
     deadline=time.monotonic()+8; urls=[]
@@ -29710,6 +29807,9 @@ async def web_api_media_recover(request: Request):
         if not isinstance(failed,list): raise ValueError('invalid_images')
         # Exclusions are never fetch targets; the signed listing alone is fetched.
         row['_failed_images']=[x[:3000] for x in failed[:12] if isinstance(x,str)]
+    except ClientDisconnect:
+        # No media job is launched for an aborted request body.
+        return Response(status_code=204)
     except (ValueError,TypeError,AttributeError): return JSONResponse({'ok':False,'error':'invalid_request'},status_code=400)
     key = (_web_price_url_key(row['url']),tuple(sorted(row.get('_failed_images',[]))))
     with _FZ_MEDIA_LOCK:
