@@ -391,7 +391,7 @@ from findzia_billing import CreditMiddleware, install_billing
 app.add_middleware(CreditMiddleware, owner=app)
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization', 'X-Findzia-Request-Id'], max_age=86400)
-BUILD_ID = 'v128.5.42.16-guide'
+BUILD_ID = 'v128.5.42.17-guide'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -29311,6 +29311,10 @@ def _fz_evaluation_token(row):
         return ''
     data['key_specs']=[{'key':_card_text(x.get('key') or x.get('kind'),40),'value':_card_text(x.get('value'),140)}
                        for x in (row.get('key_specs') or [])[:8] if isinstance(x,dict) and x.get('value')]
+    attributes=row.get('card_attributes')
+    data['card_attributes']=[{'name':_card_text(x.get('name'),45),'value':_card_text(x.get('value'),140)}
+                             for x in (attributes if isinstance(attributes,list) else [])[:12]
+                             if isinstance(x,dict) and _CARD_SPEC_KEYS.fullmatch(str(x.get('name') or '')) and x.get('value')]
     description = row.get('card_description') or row.get('description') or row.get('snippet')
     if description: data['description']=_card_text(description,600)
     # A time bucket stabilizes tokens across snapshots with identical facts.
@@ -29930,7 +29934,9 @@ def _fz_guide_context(query, country, lang, kind='text'):
         else:
             value=_shopping_query_ai(query,lang)
             intent={'GENERIC':'generic','SPECIFIC':'specific'}.get(value.get('rtype'),'uncertain')
-    value={'ok':True,'intent':intent,'query':query,'medical':bool(_FZ_GUIDE_MEDICAL.search(query))}
+    scope=_fz_guide_scope(query,kind)
+    if scope=='brand_category': intent='specific'
+    value={'ok':True,'intent':intent,'scope':scope,'query':query,'medical':bool(_FZ_GUIDE_MEDICAL.search(query))}
     with _FZ_GUIDE_LOCK:
         _FZ_GUIDE_CONTEXT_CACHE[key]=(time.monotonic()+(1800 if intent!='uncertain' else 8),dict(value))
         while len(_FZ_GUIDE_CONTEXT_CACHE)>256: _FZ_GUIDE_CONTEXT_CACHE.pop(next(iter(_FZ_GUIDE_CONTEXT_CACHE)))
@@ -30044,10 +30050,23 @@ def _fz_compare_anchor_matches(query, record):
     panadol=r'panadol|بنادول|بانادول'
     if re.search(panadol,q,re.I) and not re.search(panadol,t,re.I): return False
     profile=_intent_profile({'base':query,'steps':[],'kind':'text'})
-    return _intent_record_matches({'title':title,'snippet':record.get('excerpt','')},profile,require_model=True)
+    match_title=title
+    # "Grip 4 3/8" describes a complete racket, not a replacement grip.
+    if _intent_family(title)=='racket':
+        match_title=re.sub(r'\b(?:racquet\s+)?grip(?:\s+sizes?)?\s*:?\s*\d[\d\s./\"]*', '', title, flags=re.I)
+    if profile.get('brand') and not _intent_record_matches({'title':match_title,'snippet':''},dict(profile,model=''),require_model=False): return False
+    # Named medicines and unrecognised commercial models must not be reduced
+    # to the brand alone (Panadol Night is not Panadol Extra).
+    if not profile.get('model') and _fz_guide_scope(query)=='exact':
+        wanted=_fz_guide_words(_fz_guide_identity_text(query))
+        generic={'shoe','shoes','sneaker','sneakers','tennis','racket','racquet','mens','womens','حذاء','جوتي','مضرب','تنس','للرجال','للنساء'}
+        wanted-=generic
+        offered=_fz_guide_words(_fz_guide_identity_text(title))
+        if wanted and not wanted<=offered: return False
+    return _intent_record_matches({'title':match_title,'snippet':record.get('excerpt','')},profile,require_model=True)
 
 
-def _fz_guide_compare(context, products):
+def _fz_guide_compare_enriched(context, products):
     result={'ok':True,'status':'insufficient','guide_mode':'compare','guide_context':context['guide_context'],
         'search_query':context['query'],'recommendations':[],'comparisons':[],'fields':[],'sources':[],
         'medical':context['guide_context']['medical'],'history_used':0,'build':BUILD_ID}
@@ -30112,6 +30131,158 @@ def _fz_guide_compare(context, products):
     return result
 
 
+def _fz_guide_identity_text(value):
+    text=_local_retrieval_text(value)
+    for brand,aliases in _INTENT_BRANDS.items():
+        for alias in aliases:
+            text=re.sub(_local_term_pattern(normalize_ar(alias.casefold())), brand.casefold(), text)
+    for pattern,replacement in ((r'بنادول|بانادول','panadol'),(r'نايت','night'),(r'اكسترا','extra'),
+                                (r'اير\s*ماكس','air max'),(r'اير','air'),(r'بليد','blade')):
+        text=re.sub(r'(?<!\w)(?:'+pattern+r')(?!\w)',replacement,text)
+    return text
+
+
+def _fz_guide_scope(query, kind='text'):
+    """A brand is a constraint, not evidence that the customer chose a model."""
+    if kind == 'image': return 'image'
+    profile = _intent_profile({'base': query, 'steps': [], 'kind': 'text'})
+    if profile.get('model') or _FZ_GUIDE_MEDICAL.search(query): return 'exact'
+    brand = profile.get('brand')
+    if not brand: return 'category' if not _text_query_is_product(query) else 'exact'
+    tail = _fz_facet_norm(query)
+    for alias in (brand,) + tuple(_INTENT_BRANDS.get(brand, ())):
+        tail = _intent_remove_phrase(tail, _fz_facet_norm(alias))
+    for _, pattern in _INTENT_FAMILY_PATTERNS:
+        tail = re.sub(pattern, ' ', tail, flags=re.I)
+    tail = re.sub(r'\b(?:tennis|running|sports?|mens?|womens?|kids?|for|by|black|white|red|blue|green|new|wireless|galaxy)\b|تنس|رياضيه|رياضي|للرجال|للنساء|اطفال|اسود|ابيض|احمر|ازرق|اخضر', ' ', tail, flags=re.I)
+    return 'brand_category' if not tail.strip() else 'exact'
+
+
+_FZ_GUIDE_FACT_LABELS = {
+    'material': ('Material', 'الخامة'), 'weight': ('Listed weight', 'الوزن المذكور'),
+    'head_size': ('Head size', 'حجم الرأس'), 'string_pattern': ('String pattern', 'نمط الأوتار'),
+    'storage': ('Storage', 'التخزين'), 'memory': ('Memory', 'الذاكرة'),
+    'size': ('Size', 'المقاس'), 'color': ('Colour', 'اللون'),
+    'condition': ('Condition', 'الحالة'), 'pack': ('Pack', 'العبوة'),
+    'form': ('Form', 'الشكل'), 'ingredients': ('Ingredients', 'المكونات'),
+    'strength': ('Label strength', 'التركيز على العبوة'),
+    'grip_size': ('Grip size', 'مقاس القبضة'),
+}
+
+
+def _fz_guide_listing_facts(row, lang, medical=False):
+    """Only signed observations and literal values, independent of an AI reply."""
+    facts = []; seen = set(); arabic = lang == 'ar'
+    family = _intent_family(row.get('raw_title') or row.get('title',''))
+    def add(key, value, label=''):
+        key = _refine_canonical_key(key)
+        value = _card_text(value, 140)
+        if not key or not value or key in seen or key in ('price', 'brand', 'model', 'rating', 'score'): return
+        if value.casefold() in ('size','sizes','color','colour','unknown','n/a'): return
+        if family=='racket' and key in ('volume','storage','memory','capacity'): return
+        if medical and key not in ('pack', 'form', 'ingredients', 'strength', 'condition'): return
+        seen.add(key)
+        labels = _FZ_GUIDE_FACT_LABELS.get(key)
+        facts.append({'key': key, 'label': labels[arabic] if labels else _card_text(label or key.replace('_', ' '), 45), 'value': value})
+    for spec in row.get('card_attributes') or []:
+        if isinstance(spec,dict): add(spec.get('name'),spec.get('value'),spec.get('name'))
+    for spec in row.get('key_specs') or []:
+        if isinstance(spec, dict): add(spec.get('key') or spec.get('kind'), spec.get('value'), spec.get('label'))
+    condition = row.get('item_condition') or row.get('condition') or ''
+    if str(condition).startswith(('http://','https://')): condition=str(condition).rsplit('/',1)[-1].replace('Condition','')
+    if condition: add('condition', condition)
+    text = _fz_listing_text(row)
+    if not medical:
+        patterns = [
+            ('material', r'\b(?:carbon fib(?:er|re)|graphite|alumin[ui]um|stainless steel|sterling silver|solid gold|\d{1,2}[ -]?(?:k|karat|carat) gold|leather|mesh|cotton|linen|polyester)\b'),
+            ('weight', r'\b\d+(?:\.\d+)?\s*(?:kg|grams?|g|oz)\b'),
+            ('head_size', r'\b\d{2,3}(?:\.\d+)?\s*(?:sq\.?\s*in\.?|square inches|in²)\b'),
+            ('storage', r'\b\d+(?:\.\d+)?\s*(?:GB|TB)\b'),
+        ]
+        if family == 'racket':
+            patterns.extend([('string_pattern', r'\b\d{2}\s*[x×]\s*\d{2}\b'),('grip_size',r'\bgrip(?:\s+sizes?)?\s*:?\s*\d(?:\s+\d/\d)?')])
+        for key, pattern in patterns:
+            match = re.search(pattern, text, re.I)
+            if match:
+                if key=='storage' and re.match(r'\s*(?:ram|memory)\b', text[match.end():], re.I): key='memory'
+                add(key, match.group(0))
+    return facts[:5]
+
+
+def _fz_guide_model_key(row):
+    title = row.get('raw_title') or row.get('title') or ''
+    profile = _intent_profile({'base': title, 'steps': [], 'kind': 'text'})
+    model = str(row.get('card_model') or '')
+    if not model or _fz_facet_norm(model) not in _fz_facet_norm(title): model = profile.get('model') or ''
+    # A family such as RF 01 / Blade needs its printed variant/generation too.
+    if profile.get('family') == 'racket':
+        match = re.search(r'\b(?:burn|blade|clash|ultra|shift|pro\s+staff|rf\s*01|defyer|energy|hope|e?zone|vcore|percept|pure\s+(?:aero|drive|strike))\b(?:\s+(?:power|team|tour|pro|xl|\d{2,3}[lsu]*|v\d+(?:\.\d+)?)){0,5}', title, re.I)
+        if match: model = match.group(0)
+    if model:
+        model = re.sub(r'\bv(\d+)\.0\b', r'v\1', model, flags=re.I)
+        tokens = re.findall(r'[a-z]+|\d+', _fz_facet_norm(model))
+        return (profile.get('brand', '').casefold(), tuple(sorted(tokens)))
+    # Strip merchandising variation, but never numbers, materials or model words.
+    text = _fz_facet_norm(title)
+    text = re.sub(r'\([^)]*\)|\b(?:tennis|racquets?|rackets?|shoes?|sneakers?|mens?|womens?|unstrung|prestrung|black|white|orange|metallic|new)\b', ' ', text)
+    text = re.sub(r'\b(?:size|grip)\s+[\w./-]+', ' ', text)
+    return ('title', tuple(sorted(set(re.findall(r'[^\W_]+', text)))))
+
+
+def _fz_guide_listing_result(context, products):
+    """A useful response from current offers; no new provider calls or credits."""
+    identity = context['guide_context']; medical = identity.get('medical', False)
+    result = {'ok': True, 'status': 'hidden', 'guide_context': identity, 'guide_mode': context.get('guide_mode'),
+              'search_query': context['query'], 'recommendations': [], 'shortlist': [], 'sources': [],
+              'medical': medical, 'history_used': 0, 'build': BUILD_ID, 'evidence_scope': 'listings_only'}
+    rows = []; seen = set()
+    for row in products:
+        if not row.get('title') or not row.get('url') or row['url'] in seen: continue
+        full_title=row.get('raw_title') or row['title']
+        if _findzia_hard_product_mismatch(context['query'], full_title): continue
+        if identity.get('intent') == 'specific' and identity.get('scope') != 'image' and not _fz_compare_anchor_matches(context['query'], {'title': full_title, 'excerpt': _fz_listing_text(row)}): continue
+        seen.add(row['url']); rows.append(row)
+    if len(rows) < 2: return result
+    by_price = False
+    if context.get('goal') == 'budget':
+        comparable = [r for r in rows if isinstance(r.get('price_amount'), (int, float)) and not isinstance(r.get('price_amount'), bool)
+                      and 0 < r['price_amount'] < float('inf') and r.get('currency')
+                      and r.get('price_kind') not in ('range', 'from', 'up_to', 'installment')
+                      and _web_price_display_fields(r).get('price_display_ready')]
+        if len(comparable) >= 2 and len({r['currency'] for r in comparable}) == 1:
+            rows = sorted(comparable, key=lambda r: r['price_amount']); by_price = True
+    chosen = []; models = set()
+    for row in rows:
+        key = _fz_guide_model_key(row)
+        if key in models: continue
+        models.add(key); chosen.append(row)
+        if len(chosen) == 3: break
+    same_product = len(chosen) < 2
+    if same_product: chosen = rows[:3]
+    result.update(status='ready', comparison_kind='offers' if same_product else 'products', sorted_by_price=by_price)
+    for row in chosen:
+        display = _web_price_display_fields(row)
+        result['shortlist'].append({'product_id': row['id'], 'title': _card_text(row.get('raw_title') or row['title'],220), 'url': row['url'],
+            'store': row.get('store') or urllib.parse.urlsplit(row['url']).hostname,
+            'price': display.get('price', '') if display.get('price_display_ready') else '',
+            'price_estimated': bool(row.get('price_estimated')), 'query': row['title'],
+            'facts': _fz_guide_listing_facts(row, context['lang'], medical)})
+    return result
+
+
+def _fz_guide_compare(context, products):
+    baseline = _fz_guide_listing_result(context, products)
+    # Brand + category (e.g. Wilson tennis racket) has no selected reference.
+    # Current distinct models already answer this request, with no network wait.
+    if context['guide_context'].get('scope') in ('brand_category', 'category', 'image'):
+        return baseline
+    # An exact model may have peer products discovered separately. Keep useful
+    # current offers if external search/AI cannot establish actual alternatives.
+    enriched = _fz_guide_compare_enriched(context, products)
+    if enriched.get('status') == 'ready' and enriched.get('comparisons'): return enriched
+    return baseline
+
+
 def _fz_guide_sync(context, products):
     identity=_fz_guide_context(context['query'],context['country'],context['lang'],context.get('kind','text'))
     context=dict(context,guide_context=identity)
@@ -30119,20 +30290,23 @@ def _fz_guide_sync(context, products):
     if identity['intent']=='uncertain' or (identity['intent']=='specific') != (mode=='compare'):
         return {'ok':True,'status':'choose_mode','guide_context':identity}
     if mode=='compare': return _fz_guide_compare(context,products)
+    baseline=_fz_guide_listing_result(context,products)
     result={'ok':True,'status':'unavailable','intro':'','question':'','choices':[], 'recommendations':[],
             'sources':[],'search_query':'','next_tip':'','history_used':len(context['history']), 'checked_at':int(time.time()),'build':BUILD_ID}
-    if not GEMINI_API_KEY: return result
+    if not GEMINI_API_KEY or not products: return baseline
     private=bool(_FZ_GUIDE_PRIVATE.search(context['query']))
     first_question = context.get('guide_mode','guided')=='guided' and not context.get('answers')
-    sources=[] if private or first_question else _fz_guide_sources(context['query'],context['country'],context['lang'])
+    # Current signed listings are sufficient to start; external enrichment is
+    # optional and must never gate the customer's whole result.
+    sources=[]
     listing=[]
     for row in products:
         listing.append({'id':row['id'],'url':row['url'],'title':row.get('title',''),
             'excerpt':_fz_listing_text(row)[:1800],'kind':'listing','checked_at':row.get('observed_at')})
     evidence={x['id']:x for x in listing+sources}
     try:
-        value=_refine_ai(_FZ_GUIDE_PROMPT,dict(context,products=listing,sources=sources),tokens=2200,timeout=8)
-        if not isinstance(value,dict): return result
+        value=_refine_ai(_FZ_GUIDE_PROMPT,dict(context,products=listing,sources=sources),tokens=2200,timeout=6)
+        if not isinstance(value,dict): return baseline
         if context.get('guide_mode')=='recommendations':
             value=dict(value,question='',question_key='',choices=[])
         if _fz_guide_repeated(value,context):
@@ -30171,9 +30345,18 @@ def _fz_guide_sync(context, products):
         used={i for rec in result['recommendations'] for point in (rec['reason'],rec.get('tradeoff')) if point for i in point['source_ids']}
         # Return source titles/URLs only, not scraped text or unnecessary quotes.
         result['sources']=[{k:x[k] for k in ('id','title','url','kind','checked_at')} for x in evidence.values() if x['id'] in used]
-        result['status']='ready' if result['question'] or result['choices'] or result['recommendations'] or result['search_query'] else 'insufficient'
+        # A copied query is not a recommendation. Questions need actual choices.
+        if len(result['choices']) < 2: result.update(question='',question_key='',choices=[])
+        refined = result['search_query']
+        changed = bool(context.get('answers') and refined and _fz_facet_norm(refined) != _fz_facet_norm(context['query'])
+                       and not _findzia_hard_product_mismatch(context['query'], refined))
+        result['status']='ready' if result['question'] or result['recommendations'] or changed else 'insufficient'
+        if changed and not result['question'] and not result['recommendations']: result['refined_search']=True
+        if result['status']!='ready': return baseline
         result['evidence_scope']='review_sources' if any(evidence[x['id']].get('independent_review') for x in result['sources']) else 'listings_only'
-    except Exception as exc: print('SHOPPING GUIDE unavailable='+type(exc).__name__)
+    except Exception as exc:
+        print('SHOPPING GUIDE enrichment unavailable='+type(exc).__name__)
+        return baseline
     return result
 
 
@@ -30183,7 +30366,7 @@ async def web_api_shopping_guide(request: Request):
     if not _web_rate_allowed(request): return JSONResponse({'ok':False,'error':'rate_limit'},status_code=429)
     try:
         raw=await request.body()
-        if len(raw)>210000: raise ValueError('request_too_large')
+        if len(raw)>400000: raise ValueError('request_too_large')
         payload=json.loads(raw)
         query=_refine_safe_query(payload.get('query'))
         if not query: raise ValueError('query_required')
@@ -30203,7 +30386,7 @@ async def web_api_shopping_guide(request: Request):
             'extra_specs':_card_text(payload.get('extra_specs'),200),**_fz_guide_strategy(payload)}
         if context['country'] not in COUNTRY_META: context['country']='us'
         products=[];seen=set()
-        for token in (payload.get('offer_tokens') or [])[:10]:
+        for token in (payload.get('offer_tokens') or [])[:24]:
             try: row=_fz_evaluation_row(token)
             except ValueError: continue
             if row['url'] in seen or _findzia_hard_product_mismatch(query,row.get('title','')): continue
