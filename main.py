@@ -392,7 +392,7 @@ from findzia_billing import CreditMiddleware, install_billing
 app.add_middleware(CreditMiddleware, owner=app)
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization', 'X-Findzia-Request-Id'], max_age=86400)
-BUILD_ID = 'v128.5.42.20-clear'
+BUILD_ID = 'v128.5.42.21-search'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -1307,6 +1307,148 @@ _FINDZIA_COMPOUNDS = (('wi', 'fi'), ('hi', 'fi'), ('tp', 'link'), ('d', 'link'),
                       ('mac', 'book'), ('power', 'bank'), ('smart', 'watch'), ('head', 'phones'), ('ear', 'buds'),
                       ('play', 'station'), ('x', 'box'), ('i', 'phone'), ('i', 'pad'), ('sound', 'bar'), ('air', 'fryer'))
 _FINDZIA_COMPOUND_RES = tuple((re.compile(r'\b' + a + r'[\s\-]+' + b + r'\b', re.I), a + b) for a, b in _FINDZIA_COMPOUNDS)
+
+
+# Shared wording and functional guards for every market/provider.
+def _fz_search_wording(value):
+    """Normalize equivalent product spellings without dropping constraints."""
+    text = unicodedata.normalize('NFKC', str(value or ''))
+    text = text.translate(str.maketrans('٠١٢٣٤٥٦٧٨٩', '0123456789'))
+    text = re.sub(r'[\u200b\u200c\u200d\ufeff]', '', text)
+    aliases = (
+        (r'mac[\s_-]*books?|ماك\s*بوك|ماكبوك', 'MacBook'),
+        (r'i[\s_-]*phone', 'iPhone'), (r'i[\s_-]*pad', 'iPad'),
+        (r'air[\s_-]*pods?', 'AirPods'), (r'play[\s_-]*station', 'PlayStation'),
+        (r'x[\s_-]*box', 'Xbox'), (r'smart[\s_-]*watch', 'smartwatch'),
+        (r'head[\s_-]*phones', 'headphones'), (r'ear[\s_-]*buds', 'earbuds'),
+    )
+    # Quoted wording is an explicit verbatim constraint.
+    parts = re.split(r'("[^"\n]*"|“[^”\n]*”)', text)
+    for i in range(0, len(parts), 2):
+        for pattern, canonical in aliases:
+            parts[i] = re.sub(r'(?<!\w)(?:' + pattern + r')(?!\w)', canonical, parts[i], flags=re.I)
+    return re.sub(r'\s+', ' ', ''.join(parts)).strip()
+
+
+def _fz_search_variants(query):
+    """Small equivalent-wording plan, never a request for neighbouring models."""
+    query = _fz_search_wording(query)
+    variants = []
+    if re.search(r'["“”]', query):
+        return variants
+    if re.search(r'\bMacBook\b', query) and not re.search(r'\bApple\b|ابل|آبل', query, re.I):
+        variants.append(re.sub(r'\bMacBook\b', 'Apple MacBook', query))
+    equivalents = (
+        (r'\bhigh[ -]heels?\b', 'pumps'), (r'\bpumps\b', 'high heels'),
+        (r'\bsneakers?\b', 'trainers'), (r'\btrainers?\b', 'sneakers'),
+        (r'\blaptops?\b', 'notebook'), (r'\bnotebooks?\b', 'laptop'),
+        (r'\bracquets?\b', 'racket'), (r'\brackets?\b', 'racquet'),
+        (r'\bearphones?\b', 'earbuds'), (r'\bjewellery\b', 'jewelry'),
+        (r'\bsofas?\b', 'couch'), (r'\bcouches?\b', 'sofa'),
+        (r'\bfridges?\b', 'refrigerator'), (r'\btelevisions?\b', 'TV'),
+    )
+    # Pumps are a shoe shape: do not turn heeled boots/sandals into pumps.
+    for pattern, replacement in equivalents:
+        if replacement == 'pumps' and re.search(r'\b(?:boots?|sandals?|mules?)\b', query, re.I):
+            continue
+        if replacement == 'high heels' and re.search(r'\b(?:water|hydraulic|breast|fuel|air|heat|vacuum)\b', query, re.I):
+            continue
+        if replacement == 'laptop' and not re.search(r'\b(?:Apple|MacBook|Dell|HP|Lenovo|Asus|Acer|Samsung|MSI|computer|Intel|AMD|RAM|SSD|Ryzen|Core)\b|\d+\s*(?:GB|TB)', query, re.I):
+            continue
+        variant = re.sub(pattern, replacement, query, flags=re.I)
+        if variant != query:
+            variants.append(variant)
+            break
+    return list(dict.fromkeys(v for v in variants if v.casefold() != query.casefold()))[:2]
+
+
+def _fz_product_form_conflict(query, title, preserve_model=True):
+    """Explicit functional conflicts, checked BEFORE broad noun translation."""
+    q, t = (normalize_ar(unicodedata.normalize('NFKC', str(v or '')).casefold()) for v in (query, title))
+    footwear = {
+        'heels': r'\b(?:high[ -]heels?|stilettos?|pumps|court shoes|kitten heels?)\b|كعب(?:\s+(?:عالي|عال))?|高跟鞋|细跟鞋|高跟单鞋|\b(?:escarpins?|tacones|pumps)\b',
+        'sport': r'\b(?:sneakers?|trainers?|running shoes?|tennis shoes?|athletic shoes?|sports? shoes?|jogging shoes?)\b|(?:حذاء|احذيه|جوتي)\s+رياضي|سنيكر|كوتشي|运动鞋|跑步鞋|跑鞋|网球鞋',
+        'flat': r'\b(?:ballet flats?|flat loafers?|flat shoes?)\b|باليرينا|حذاء مسطح|平底鞋|芭蕾鞋',
+    }
+    def types(text):
+        positive, negative = set(), set()
+        for name, pattern in footwear.items():
+            for match in re.finditer(pattern, text, re.I):
+                prefix = text[max(0, match.start()-24):match.start()]
+                excluded = re.search(r'(?:\bnot|\bno|\bwithout|\bexcluding|غير|بدون|ليس)\s*$', prefix, re.I)
+                (negative if excluded else positive).add(name)
+        return positive, negative
+    wanted, excluded = types(q)
+    actual, _ = types(t)
+    if excluded & actual:
+        return True
+    if wanted and actual and wanted.isdisjoint(actual):
+        return True
+    # Suffixes made entirely of letters are models too (Air / Pro / Neo).
+    if preserve_model and 'macbook' in _fz_search_wording(q).casefold() and 'macbook' in _fz_search_wording(t).casefold():
+        def line(text):
+            m = re.search(r'\bmacbook\s+(air|pro|neo)\b', _fz_search_wording(text), re.I)
+            return m.group(1).lower() if m else ''
+        if line(q) and line(t) and line(q) != line(t):
+            return True
+    return False
+
+
+def _fz_visual_form_rejected(item, reference):
+    """A visually confirmed wrong function is excluded, not labelled 'similar'."""
+    try:
+        confident = float(item.get('confidence') or 0) >= WEB_VISUAL_CLASSIFIER_MIN_CONFIDENCE
+    except (TypeError, ValueError):
+        return False
+    if not item.get('visual_evidence') or not confident:
+        return False
+    if item.get('match_reason') in ('different_category', 'different_function', 'accessory', 'wrong_product'):
+        return True
+    def description(profile):
+        if not isinstance(profile, dict):
+            return ''
+        return ' '.join(str(profile.get(k) or '') for k in
+                        ('category','subtype','product_type','intended_use','function')).replace('_',' ')
+    return _fz_product_form_conflict(description(reference), description(item.get('candidate_profile')))
+
+
+_FZ_FOOTWEAR_WORDING = (
+    {'en':'high heels|high heel|stilettos|stiletto', 'ar':'كعب عالي|كعب عال', 'zh':'高跟鞋|细跟鞋',
+     'fr':'talons hauts', 'de':'High Heels', 'es':'tacones altos', 'it':'tacchi alti',
+     'pt':'saltos altos', 'tr':'yüksek topuklu ayakkabı', 'ja':'ハイヒール', 'ko':'하이힐'},
+    {'en':'pumps|court shoes|slingback pumps', 'ar':'حذاء بكعب', 'zh':'尖头高跟鞋',
+     'fr':'escarpins', 'de':'Pumps', 'es':'zapatos de salón', 'it':'décolleté'},
+    {'en':'sneakers|sneaker|trainers|trainer', 'ar':'حذاء رياضي|احذية رياضية', 'zh':'运动鞋',
+     'fr':'baskets', 'de':'Sneaker', 'es':'zapatillas deportivas', 'it':'scarpe da ginnastica'},
+)
+
+
+def _fz_local_store_lanes(query, country, engine, languages):
+    """Two category-appropriate stores get their own first-wave index slots."""
+    if country in ('cn', 'us'):
+        return []  # Their domestic catalog lanes are already explicit.
+    stores = _run_with_market(_web_market(country), local_rescue_store_specs, query, 2)
+    # MacBook is a laptop family even when the customer omits 'laptop'.
+    if country == 'kw' and re.search(r'\bMacBook\b', _fz_search_wording(query)):
+        stores = [('Xcite', 'xcite.com'), ('Eureka', 'eureka.com.kw')]
+    return [dict(country=country, role='local', engine=engine, hl=hl, merchant_domain=domain)
+            for _, domain in stores[:2] for hl in languages[:2]]
+
+
+def _fz_store_next_spec(spec, data, added, remaining):
+    """At most one extra page per dedicated store/language, inside the deadline.
+
+    No follow-up when the source is exhausted, irrelevant, or failing. Only
+    observed links enter candidates; pagination never constructs product URLs.
+    """
+    if (not spec.get('merchant_domain') or spec.get('page', 1) != 1 or added < 3
+            or remaining < 2 or spec.get('engine') not in ('serper_search', 'google')):
+        return None
+    records = data.get('organic_results') or []
+    if len(records) < 10:
+        return None
+    return dict(spec, page=2)
+
 
 
 def _findzia_join_compounds(text):
@@ -3142,6 +3284,9 @@ def _lens_reference_rows(rows, reference):
     output, uncertain = [], []
     for original in rows:
         item = dict(original)
+        observed = str(reference.get('query') or '') + ' ' + str(reference.get('product_type') or '')
+        if _fz_product_form_conflict(observed, item.get('raw_title') or item.get('title')):
+            continue
         url = str(item.get('link') or '')
         host = urllib.parse.urlparse(url).netloc.lower().split(':')[0]
         social = ('instagram.com', 'facebook.com', 'tiktok.com', 'pinterest.com', 'youtube.com', 'twitter.com', 'x.com', 'reddit.com')
@@ -4273,6 +4418,8 @@ _LOCAL_DESCRIPTOR_TERMS.update({
 
 def _photo_candidate_family(query, title):
     """Recall for observed photo descriptions; never an identity/exact decision."""
+    if _fz_product_form_conflict(query, title):
+        return False
     q, t = _local_retrieval_text(query), _local_retrieval_text(title)
     qk = set(_LOCAL_RETRIEVAL_NOUNS) & set(q.split())
     tk = set(_LOCAL_RETRIEVAL_NOUNS) & set(t.split())
@@ -4343,7 +4490,7 @@ def _local_retrieval_text(value):
 
 @lru_cache(maxsize=8192)
 def _local_retrieval_text_cached(value):
-    text = normalize_ar(_cjk_boundary_spaces(unicodedata.normalize('NFKC', value).casefold()))
+    text = normalize_ar(_cjk_boundary_spaces(_findzia_join_compounds(_fz_search_wording(value)).casefold()))
     text = re.sub(r'(?<=\d)\s+(gb|tb|mb)\b', r'\1', text)
     text = re.sub(r'\bcolou?r\b(?=\s+(?:black|white|blue|green|red|pink|brown|yellow|purple|grey|gray|beige)\b)', ' ', text)
     text = re.sub(r'\b(black|white|blue|green|red|pink|brown|yellow|purple|grey|gray|beige)\s+colou?r\b', r'\1', text)
@@ -4453,6 +4600,14 @@ def _market_query_static_table(language):
         for row in table.values() if row.get(language, '').split('|')[0].strip()
         for terms in row.values() for term in terms.split('|')
         if term.strip() and term.strip().casefold() != row[language].split('|')[0].strip().casefold()}
+    # A specific footwear form must survive translation into every source query.
+    # Do not turn 'high heels' into the generic word 'shoes'.
+    for row in _FZ_FOOTWEAR_WORDING:
+        if language in row:
+            target = row[language].split('|')[0]
+            for terms in row.values():
+                for term in terms.split('|'):
+                    replacements[term.casefold()] = target
     for brand, languages in _LOCAL_BRAND_ALIASES.items():
         display_brand = languages.get('en', brand).split('|')[0]
         zh_pair = (languages['zh'].split('|')[0] + ' ' + display_brand) if languages.get('zh') else display_brand
@@ -4646,7 +4801,9 @@ def _local_discovery_candidate_ok(query, item, visual=False):
     ``visual`` rows come from an image engine (Google Lens): only hard conflicts
     reject them; the reference-image audit decides identity, never text overlap.
     """
-    title = str(item.get('title') or '')
+    title = str(item.get('raw_title') or item.get('title') or '')
+    if _fz_product_form_conflict(query, title):
+        return False
     q, t = _local_retrieval_text(query), _local_retrieval_text(title)
     t_original = t
     if _findzia_hard_product_mismatch(q, t):
@@ -4697,7 +4854,7 @@ def _local_discovery_candidate_ok(query, item, visual=False):
     if visual:
         item['_local_match_uncertain'] = True
         return True
-    if photo_discovery and _photo_candidate_family(q, t):
+    if photo_discovery and _photo_candidate_family(query, title):
         item['_local_match_uncertain'] = True
         return True
     if _findzia_stream_candidate_ok(q, dict(item, title=t)):
@@ -5197,7 +5354,7 @@ def _web_collection_url(value):
         # Product routes can contain a collection prefix or search tracking.
         if re.search(r'/(?:products?|dp|gp/product|ip|itm|item|product-detail|listing)/', path) or re.search(r'-p-\d+\.html$', path):
             return False
-        platform_list = ((_host_matches_any(host, ('shein.com',)) and re.search(r'-c-\d+\.html$|/pdsearch/', path))
+        platform_list = ((_host_matches_any(host, ('labeb.com',)) and bool(re.match(r'^/(?:[a-z]{2}/)?ct/', path))) or (_host_matches_any(host, ('shein.com',)) and re.search(r'-c-\d+\.html$|/pdsearch/', path))
                          or (_host_matches_any(host, ('aliexpress.com', 'nike.com')) and path.startswith('/w/'))
                          or (_host_matches_any(host, ('alibaba.com',)) and path.startswith('/showroom/'))
                          or (_host_matches_any(host, ('macys.com',)) and path.startswith('/shop/'))
@@ -9513,6 +9670,8 @@ def _findzia_accessory_evidence(value):
 
 
 def _findzia_hard_product_mismatch(query, title):
+    if _fz_product_form_conflict(query, title):
+        return True
     q_raw = normalize_ar(str(query or ''))
     t_raw = normalize_ar(str(title or ''))
     q = norm_tokens(q_raw)
@@ -16604,6 +16763,7 @@ def _web_attach_captured_result_sections(payload, lang, allow_ai=True, cancel_ev
                if is_lens_product_url(str(row.get('url') or row.get('link') or ''))
                and _market_offer_allowed(row, out.get('market') or current_market())]
     identity = str(out.get('query') or '').strip()
+    results = [r for r in results if not _fz_product_form_conflict(identity, r.get('raw_title') or r.get('title'))]
     has_reference_photo = bool(_web_visual_reference_digest(reference_image_b64)) and (
         not reference_image_mime or reference_image_mime.startswith('image/')
     )
@@ -16725,6 +16885,9 @@ def _web_attach_captured_result_sections(payload, lang, allow_ai=True, cancel_ev
         except Exception:
             confidence = 0
         visual_evidence = bool(ai_item.get('visual_evidence'))
+        if has_reference_photo and _fz_visual_form_rejected(
+                ai_item, ai_item.get('_reference_profile') or ai_result.get('reference_profile')):
+            row.update(hidden=True, photo_match_status='rejected', photo_match_reason='different_product_form')
         match_threshold = WEB_VISUAL_CLASSIFIER_MIN_CONFIDENCE if visual_evidence else WEB_AI_CLASSIFIER_MIN_CONFIDENCE
         # Lens/OCR text is fallible in image search. A semantic contradiction
         # may demote the instant card, but must not block reference-image AI
@@ -17877,7 +18040,7 @@ def _web_marketplace_repeat_cap(domain_or_url):
 
 def _web_is_direct_product_page_url(url, store_name=''):
     raw = str(url or '').strip()
-    if not _web_is_http_url(raw) or _offer_is_editorial_url(raw):
+    if not _web_is_http_url(raw) or _offer_is_editorial_url(raw) or _web_collection_url(raw):
         return False
     if _host_matches_any(urllib.parse.urlsplit(raw).hostname or '', ('detail.zol.com.cn', 'product.pconline.com.cn', 'product.pchome.net')):
         return False
@@ -20811,6 +20974,7 @@ TEXT_DIRECT_TIMEOUT_SECONDS = max(4., min(25., float(os.environ.get('TEXT_DIRECT
 TEXT_DIRECT_LOCAL_MAX = max(8, min(96, int(os.environ.get('TEXT_DIRECT_LOCAL_MAX', '60'))))
 TEXT_DIRECT_GLOBAL_MAX = max(5, min(80, int(os.environ.get('TEXT_DIRECT_GLOBAL_MAX', '48'))))
 TEXT_DIRECT_TRANSLATION_WAIT = max(.1, min(4., float(os.environ.get('TEXT_DIRECT_TRANSLATION_WAIT', '2.5'))))
+TEXT_DIRECT_LOCAL_STORE_MAX = max(8, min(60, int(os.environ.get('TEXT_DIRECT_LOCAL_STORE_MAX', '40'))))
 TEXT_DIRECT_POOL = ThreadPoolExecutor(max_workers=32, thread_name_prefix='text-direct')
 # The stream stops WAITING at its deadline; the HTTP read itself stays open this
 # long so a slow provider reply (already billed) is cached instead of discarded.
@@ -21070,10 +21234,13 @@ def _cse_to_serpapi(kind, data):
     return out
 
 
-def _fast_provider_search(engine, wording, country, hl, timeout):
+def _fast_provider_search(engine, wording, country, hl, timeout, page=1):
     """engine: serper_search|serper_images|serper_shopping|cse_search|cse_images."""
     provider, kind = engine.split('_', 1)
+    page = max(1, min(2, int(page)))
     cache_params = {'engine': engine, 'q': wording, 'gl': country, 'hl': hl}
+    if page > 1:
+        cache_params['page'] = page
     key = _serpapi_cache_key(cache_params)
     cached = _serpapi_cache_get(key)
     if isinstance(cached, dict):
@@ -21085,6 +21252,8 @@ def _fast_provider_search(engine, wording, country, hl, timeout):
     data = None
     if provider == 'serper':
         body = {'q': wording, 'gl': country, 'hl': hl, 'num': FAST_PROVIDER_NUM}
+        if page > 1:
+            body['page'] = page
         if COUNTRY_NAMES.get(country) and kind != 'images':
             body['location'] = COUNTRY_NAMES[country]
         if _web_model_tokens_from_listing(wording):
@@ -21093,6 +21262,8 @@ def _fast_provider_search(engine, wording, country, hl, timeout):
         data = _serper_to_serpapi(kind, raw) if isinstance(raw, dict) else None
     elif provider == 'cse':
         params = {'q': wording, 'gl': country, 'hl': hl, 'num': 10, 'safe': 'off'}
+        if page > 1:
+            params['start'] = 1 + (page-1)*10
         if kind == 'images':
             params['searchType'] = 'image'
         raw = _cse_json(params, timeout)
@@ -21155,6 +21326,16 @@ def _web_text_direct_specs(query, country):
     if SERPAPI_API_KEY and not degraded and ENABLE_GOOGLE_SHOPPING and _shopping_gl_supported(country):
         for hl in languages:
             add(country, 'local', 'google_shopping', hl)
+    # First-wave local supplements run before the global catalogs.
+    for spec in _fz_local_store_lanes(query, country, scoped, languages):
+        add(spec['country'], spec['role'], spec['engine'], spec['hl'], merchant_domain=spec['merchant_domain'])
+        if spec['hl'] == 'en':
+            media_engine = (scoped.replace('_search', '_images')
+                            if scoped.startswith(('serper_', 'cse_')) and FAST_PROVIDER_IMAGES
+                            else TEXT_DIRECT_IMAGES_ENGINE)
+            add(country, 'local', media_engine, 'en', merchant_domain=spec['merchant_domain'])
+    for variant in _fz_search_variants(query):
+        add(country, 'local', scoped, 'en', variant_query=variant, geo_cue=True)
     catalog_engine = ('serper_search' if serper_primary() and _fast_provider_supports_operators('serper') else 'google')
     image_engine = 'serper_images' if catalog_engine == 'serper_search' and FAST_PROVIDER_IMAGES else TEXT_DIRECT_IMAGES_ENGINE
     for cc in dict.fromkeys([country] + list(DEFAULT_GLOBAL_COUNTRIES)):
@@ -21200,6 +21381,7 @@ def _web_text_direct_backup_specs(query, country):
 
 def _web_text_direct_params(query, spec, page_token=''):
     engine, country, role, hl = (spec[k] for k in ('engine', 'country', 'role', 'hl'))
+    query = _fz_search_wording(spec.get('variant_query') or query)
     if page_token:
         return {'engine': 'google_immersive_product', 'page_token': page_token,
                 'more_stores': 'true', 'api_key': SERPAPI_API_KEY, 'output': 'json'}
@@ -21209,7 +21391,16 @@ def _web_text_direct_params(query, spec, page_token=''):
         _market_query_wait(query, hl, TEXT_DIRECT_TRANSLATION_WAIT)
     record = _market_query_cached(query, hl) or _market_query_static(query, hl)
     wording = str(record.get('query') or query).strip()
-    if spec.get('independent_scope'):
+    if hl.split('-')[0] == 'ar':
+        wording = re.sub(r'\bMacBook\b', 'ماك بوك', wording, flags=re.I)
+    if spec.get('merchant_domain'):
+        domain = spec['merchant_domain']
+        allowed = {d for _, d in _run_with_market(_web_market(country), local_rescue_store_specs, query, 12)}
+        allowed.update(d for _, d in COUNTRY_MAJOR_STORE_DOMAINS.get(country, ()))
+        if domain not in allowed or not re.fullmatch(r'[a-z0-9.-]+', domain):
+            raise ValueError('Unknown local merchant')
+        wording = f'{wording} site:{domain}'
+    elif spec.get('independent_scope'):
         wording = f'{wording} 价格 购买 (site:cn OR site:com.cn OR site:youzan.com OR site:weidian.com) -site:alibaba.com -site:aliexpress.com -site:temu.com -site:shein.com'
     elif spec.get('selected_catalog'):
         requested = spec.get('catalog_domain')
@@ -21238,7 +21429,7 @@ def _web_text_direct_params(query, spec, page_token=''):
         else:
             wording = _local_discovery_query(wording, _web_market(country), scoped=False, language=hl)
     if engine.startswith(('serper_', 'cse_')):
-        return {'engine': engine, 'q': wording, 'gl': country if role == 'local' and not spec.get('selected_catalog') else 'us', 'hl': hl}
+        return {'engine': engine, 'q': wording, 'gl': country if role == 'local' and not spec.get('selected_catalog') else 'us', 'hl': hl, 'page': spec.get('page', 1)}
     elif engine == 'baidu':
         wording = f'{wording} 价格 购买 -百科 -知道 -视频'
     params = {'engine': engine, 'q': wording, 'api_key': SERPAPI_API_KEY, 'output': 'json'}
@@ -21248,6 +21439,8 @@ def _web_text_direct_params(query, spec, page_token=''):
         params.update(gl=country if role == 'local' and not spec.get('selected_catalog') else 'us', hl=hl)
         if engine == 'google':
             params.update(num=10, nfpr=int(_fz_intent_exact(query)))
+            if spec.get('page', 1) > 1:
+                params['start'] = 10 * (spec['page'] - 1)
             if role == 'local' and not spec.get('selected_catalog') and TEXT_DIRECT_LOCATION and COUNTRY_NAMES.get(country):
                 # A localized results page carries the market's shopping units
                 # and local-currency rich snippets (KWD for Kuwait).
@@ -21277,7 +21470,7 @@ def _web_text_direct_fetch(query, spec, deadline, cancel, page_token=''):
         return _web_shein_index_fetch(params, remaining, cancel)
     if params['engine'].startswith(('serper_', 'cse_')):
         data = _fast_provider_search(params['engine'], params['q'], params['gl'], params['hl'],
-                                     (connect, max(1., min(remaining - connect, FAST_PROVIDER_TIMEOUT_SECONDS))))
+                                     (connect, max(.05, min(remaining - connect, FAST_PROVIDER_TIMEOUT_SECONDS))), page=params.get('page', 1))
         print(f'TEXT SOURCE country={spec["country"]} role={spec["role"]} engine={params["engine"]}'
               f' hl={spec["hl"]} status={"returned" if isinstance(data, dict) else "unavailable"}'
               f' elapsed_ms={int((time.monotonic()-began)*1000)}')
@@ -21390,11 +21583,12 @@ def _web_text_direct_search(query, country, lang, progress_callback=None, cancel
     """
     cancel = cancel_event if cancel_event is not None else threading.Event()
     original_typed_query=query
+    query = _fz_search_wording(query)
     intent_future=None if current_market().get('_image_discovery') else _fz_intent_future(query,country,lang)
     intent_applied=False
     cached=_fz_intent_cached(query,country,lang)
     if cached and cached.get('query'):
-        query=cached['query'];intent_applied=True
+        query=_fz_search_wording(cached['query']);intent_applied=True
     started = time.monotonic()
     deadline = started + float(deadline_seconds or TEXT_DIRECT_TIMEOUT_SECONDS)
     # With nothing to show yet, keep listening for a bounded extra window
@@ -21433,7 +21627,7 @@ def _web_text_direct_search(query, country, lang, progress_callback=None, cancel
             return
         spec_key = (spec['country'], spec['role'], spec['engine'], spec['hl'],
                     bool(spec.get('domestic_scope')), bool(spec.get('selected_catalog')),
-                    bool(spec.get('independent_scope')), spec.get('catalog_domain') or '', spec.get('domestic_group') or '', spec.get('store_offset', 0), token, query)
+                    bool(spec.get('independent_scope')), spec.get('catalog_domain') or '', spec.get('domestic_group') or '', spec.get('store_offset', 0), spec.get('merchant_domain', ''), spec.get('variant_query', ''), spec.get('page', 1), token, query)
         if spec_key in submitted_specs:
             return
         submitted_specs.add(spec_key)
@@ -21482,7 +21676,7 @@ def _web_text_direct_search(query, country, lang, progress_callback=None, cancel
             understood=intent_future.result() or {}
             corrected=understood.get('query')
             if not corrected or corrected==query or cancel.is_set(): return
-            query=corrected;market['_query']=query
+            query=_fz_search_wording(corrected);market['_query']=query
             _market_query_warm(query,[country,'us','cn'])
             for spec in _fz_intent_specs(specs): submit(spec)
         while (jobs or (intent_future is not None and not intent_applied and ready_local()<4)) and not cancel.is_set():
@@ -21510,7 +21704,7 @@ def _web_text_direct_search(query, country, lang, progress_callback=None, cancel
                     data = None
                 if cancel.is_set() or time.monotonic() >= (deadline if rows else empty_deadline):
                     break
-                name = f'{spec["role"]}:{spec["country"]}:{spec["engine"]}:{spec["hl"]}' + (':catalog' if spec.get('selected_catalog') else ':scoped' if spec.get('domestic_scope') else '') + (':independent' if spec.get('independent_scope') else '') + (':' + spec['catalog_domain'] if spec.get('catalog_domain') else '') + (':' + spec['domestic_group'] if spec.get('domestic_group') else '') + (':merchants' if token else '') + (':collections' if spec.get('_collection_expansion') else '')
+                name = f'{spec["role"]}:{spec["country"]}:{spec["engine"]}:{spec["hl"]}' + (':catalog' if spec.get('selected_catalog') else ':scoped' if spec.get('domestic_scope') else '') + (':independent' if spec.get('independent_scope') else '') + (':' + spec['catalog_domain'] if spec.get('catalog_domain') else '') + (':' + spec['domestic_group'] if spec.get('domestic_group') else '') + (':merchants' if token else '') + (':collections' if spec.get('_collection_expansion') else '') + (':store:' + spec['merchant_domain'] if spec.get('merchant_domain') else '') + (':variant' if spec.get('variant_query') else '') + (':page2' if spec.get('page') == 2 else '')
                 source_states[name] = 'complete' if isinstance(data, dict) else 'unavailable'
                 if not isinstance(data, dict):
                     if not spec.get('_collection_expansion') and spec['engine'].startswith(('serper_', 'cse_')):
@@ -21539,6 +21733,10 @@ def _web_text_direct_search(query, country, lang, progress_callback=None, cancel
                     continue
                 batch = []
                 for raw in candidates:
+                    if spec.get('merchant_domain') and not _host_matches_any(
+                            urllib.parse.urlsplit(str(raw.get('link') or raw.get('url') or '')).hostname or '',
+                            (spec['merchant_domain'],)):
+                        continue
                     row = _web_selected_offer(raw, spec['country'], market, query)
                     if row:
                         batch.append(_web_text_market_row(row, market))
@@ -21576,7 +21774,7 @@ def _web_text_direct_search(query, country, lang, progress_callback=None, cancel
                             continue
                         collection_counts[cc] += 1
                     elif (counts[cc] - collection_counts[cc] >= cap or merchant_counts[(cc, host)] >=
-                          min(cap, _web_marketplace_repeat_cap(host))):
+                          min(cap, TEXT_DIRECT_LOCAL_STORE_MAX if spec['role'] == 'local' else _web_marketplace_repeat_cap(host))):
                         continue
                     rows[key] = dict(row)
                     counts[cc] += 1
@@ -21591,6 +21789,11 @@ def _web_text_direct_search(query, country, lang, progress_callback=None, cancel
                         first_ms = int((time.monotonic()-started)*1000)
                     if progress_callback:
                         progress_callback(snapshot())
+                # Useful dedicated store pages may have more matching variants.
+                if not token and not spec.get('_collection_expansion'):
+                    next_spec = _fz_store_next_spec(spec, data, len(batch), deadline-time.monotonic())
+                    if next_spec:
+                        submit(next_spec)
                 # Once every local lane (and its seller expansions) has
                 # answered, a slow foreign catalog gets a short grace period
                 # rather than the whole budget: local cards are already shown.
@@ -26014,7 +26217,7 @@ def _web_identity_public_row(row):
 
 
 def _web_identity_stream_snapshot(rows, query, market, lang, completed, elapsed_ms):
-    ordered = sorted((_web_identity_public_row(_web_apply_market_context(r, market)) for r in rows if _market_offer_allowed(r, market)), key=_web_identity_result_sort_key)
+    ordered = sorted((_web_identity_public_row(_web_apply_market_context(r, market)) for r in rows if not r.get("hidden") and _market_offer_allowed(r, market) and not _fz_product_form_conflict(query, r.get('raw_title') or r.get('title'))), key=_web_identity_result_sort_key)
     exact = [r for r in ordered if r.get('match_type') == 'exact']
     similar = [r for r in ordered if r.get('match_type') != 'exact']
     local = [r for r in ordered if r.get('market_scope') == 'local']
@@ -26246,7 +26449,8 @@ async def _web_stream_image_identity_batches_core(image_b64, mime, caption, coun
                 identity = str(final.get('query') or caption or '').strip()
                 market = final.get('market') or market
                 captured = list(final.get('captured_results') or final.get('results') or [])
-                captures = {_web_identity_offer_key(r): dict(r) for r in captured}
+                captures = {_web_identity_offer_key(r): dict(r) for r in captured
+                            if not _fz_product_form_conflict(identity, r.get('raw_title') or r.get('title'))}
                 rows = {}
                 queued.clear()
                 queued_tokens.clear()
@@ -26278,6 +26482,7 @@ async def _web_stream_image_identity_batches_core(image_b64, mime, caption, coun
                 if query and query != query_sent:
                     yield _web_stream_event({'event': 'query', 'query': query, 'market': market})
                     query_sent = query
+                preview = [r for r in preview if not _fz_product_form_conflict(query, r.get('raw_title') or r.get('title'))]
                 for original in preview:
                     key = _web_identity_offer_key(original)
                     token = _web_identity_capture_key(original, query)
@@ -30522,6 +30727,7 @@ def _fz_discover_sync(context):
             title=_card_text(item.get('title'),90)
             search=_refine_safe_query(item.get('search_query'))
             if not title or not search or len(search)>200: continue
+            if _fz_product_form_conflict(query, search, preserve_model=False): continue
             normalized=unicodedata.normalize('NFKC',search).casefold()
             if normalized in seen or normalized==unicodedata.normalize('NFKC',query).casefold(): continue
             candidate=_intent_profile({'base':search,'steps':[],'kind':'text'})
