@@ -1,4 +1,4 @@
-"""Findzia 156.5.4: explicit separate purchases without retiring uncertain payments.
+"""Findzia 156.7.11: hosted checkout, verified credits and safe payment recovery.
 Disabled by default. Sandbox uses a separate key and an explicit email allowlist.
 No card data, browser prices, or redirect claims are accepted as payment proof.
 """
@@ -126,6 +126,8 @@ class MyFatoorahPack:
     def public(self, member):
         return {'ok': True, 'enabled': self.enabled, 'environment': self.mode,
                 'checkout_available': self.allowed(member), 'plan_id': 'pack',
+                'checkout_mode': 'hosted', 'checkout_build': '156.7.11',
+                'hosted_available': self.allowed(member),
                 'embedded_available': self.embedded and self.allowed(member),
                 'apple_pay_domain_verified': self.apple_verified}
 
@@ -217,7 +219,7 @@ class MyFatoorahPack:
             raise RuntimeError('invalid_checkout_url')
         return url
 
-    def review_unfinished(self, member, include_abandoned=False, only_intent=None, tolerate_unavailable=False):
+    def review_unfinished(self, member, include_abandoned=False, only_intent=None, tolerate_unavailable=False, reuse_hosted=False):
         """Reconcile real payments; an unused invoice is not a payment in progress.
 
         Provider requests run outside SQLite write transactions. Final writes use
@@ -287,9 +289,23 @@ class MyFatoorahPack:
                     return wait
                 if row['payment'] and not txns:
                     raise ValueError('known_payment_missing')
+                # Reopen the SAME uncharged hosted invoice. Do not retire it on
+                # every return/retry, and never redirect back automatically.
+                if (reuse_hosted and inv_state=='PENDING' and not row['session']
+                    and row['url'] and row['created'] > int(time.time())-1770):
+                    with self.accounts.connect() as db:
+                        current=db.execute('SELECT state FROM fz_mf_orders WHERE intent=?',(row['intent'],)).fetchone()
+                    if current['state']=='paid':
+                        paid=True
+                        continue
+                    if current['state']=='pending':
+                        return {'intent':row['intent'],'url':self.valid_url(row['url'])}
             except NoInvoiceTransactions:
                 if row['session'] or row['payment']:
                     return wait  # A known submitted charge needs its final status.
+                if (reuse_hosted and row['state']=='pending' and row['url']
+                    and row['created'] > int(time.time())-1770):
+                    return {'intent':row['intent'],'url':self.valid_url(row['url'])}
             except Exception as exc:
                 LOG.warning('MF_CHECKOUT_REVIEW invoice=%s status=unavailable reason=%s',row['invoice'],diagnostic(exc))
                 if tolerate_unavailable:
@@ -302,7 +318,7 @@ class MyFatoorahPack:
                 if current['state']=='paid': paid=True
         return {'confirmed':True} if paid else None
 
-    def resume(self, member, intent=None):
+    def resume(self, member, intent=None, hosted=False):
         self.require(member)
         if intent:
             identifier(intent)
@@ -310,7 +326,8 @@ class MyFatoorahPack:
                 row=db.execute('SELECT state FROM fz_mf_orders WHERE intent=? AND member=? AND mode=?',(intent,member['id'],self.mode)).fetchone()
             if not row: raise HTTPException(404,'payment_not_found')
             if row['state']=='paid': return {'confirmed':True}
-        return self.review_unfinished(member,include_abandoned=bool(intent),only_intent=intent,tolerate_unavailable=True) or {'ready_for_payment':True}
+            if row['state']=='refunded': return {'refunded':True}
+        return self.review_unfinished(member,include_abandoned=bool(intent),only_intent=intent,tolerate_unavailable=True,reuse_hosted=hosted) or {'ready_for_payment':True}
 
     def acknowledge_previous(self, member, intent):
         """Explicit consent to a separate purchase, never proof that an old one failed.
@@ -343,34 +360,46 @@ class MyFatoorahPack:
                            (intent,int(time.time())))
         return None
 
-    def checkout(self, member, plan):
+    def checkout(self, member, plan, language='en', previous_intent=None, acknowledge_unconfirmed=False):
         self.require(member)
         if plan != 'pack': raise HTTPException(400, 'pack_only')
+        if previous_intent is not None:
+            if acknowledge_unconfirmed is not True: raise HTTPException(400,'acknowledgement_required')
+            previous=self.acknowledge_previous(member,previous_intent)
+            if previous: return previous
+        previous=self.review_unfinished(member,tolerate_unavailable=True,reuse_hosted=True)
+        if previous: return previous
         now = int(time.time())
         with self.accounts.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             db.execute("UPDATE fz_mf_orders SET state='canceled' WHERE member=? AND mode=? AND state IN ('session_creating','session_ready')",(member['id'],self.mode))
-            row = db.execute("SELECT * FROM fz_mf_orders WHERE member=? AND mode=? AND state IN ('creating','pending','session_processing') ORDER BY created DESC LIMIT 1", (member['id'],self.mode)).fetchone()
-            if row and (row['state']=='session_processing' or row['created'] > now-3600):
-                if row['url']: return {'intent':row['intent'],'url':self.valid_url(row['url'])}
-                # An ambiguous network response must never create a second invoice.
-                raise HTTPException(409, 'payment_creation_pending')
+            row = db.execute("""SELECT o.* FROM fz_mf_orders o WHERE member=? AND mode=?
+                AND NOT EXISTS (SELECT 1 FROM fz_mf_reviews r WHERE r.intent=o.intent)
+                AND state IN ('creating','pending','session_processing') ORDER BY created DESC LIMIT 1""", (member['id'],self.mode)).fetchone()
+            if row:
+                # A concurrent request or an uncertain old charge remains owned.
+                # No time-based automatic retry can create another purchase.
+                return {'intent':row['intent'],'payment_pending':True,'can_start_new_purchase':True}
             intent = 'fz_' + secrets.token_urlsafe(24)
             db.execute('INSERT INTO fz_mf_orders(intent,member,mode,state,created) VALUES(?,?,?,?,?)', (intent,member['id'],self.mode,'creating',now))
         body = {'Order':{'Amount':4.99,'Currency':'USD'}, 'OperationType':'PAY',
-                'NotificationOption':'LINK','Language':'EN',
+                'NotificationOption':'LINK','Language':'AR' if str(language).lower()=='ar' else 'EN',
                 'IntegrationUrls':{'Redirection':self.return_url+'?fz_mf_intent='+intent},
                 'PaymentExpiry':datetime.fromtimestamp(now+1800,timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}
         try:
             data = self.api('POST','/v3/payments',body,intent)
             invoice = identifier(str(data.get('InvoiceId') or ''))
+            with self.accounts.connect() as db:
+                # Keep the mapping even if the provider returned a bad URL.
+                db.execute("UPDATE fz_mf_orders SET invoice=?,state='pending' WHERE intent=? AND state='creating'",(invoice,intent))
             url = self.valid_url(data.get('PaymentURL') or '')
             with self.accounts.connect() as db:
-                db.execute("UPDATE fz_mf_orders SET invoice=?,url=?,state='pending' WHERE intent=?",(invoice,url,intent))
+                db.execute('UPDATE fz_mf_orders SET url=? WHERE intent=?',(url,intent))
             return {'intent':intent,'url':url}
         except Exception as exc:
             # Keep intent for reconciliation, no automatic POST retry after timeouts.
-            raise HTTPException(503,'payment_creation_pending') from exc
+            LOG.warning('MF_HOSTED_CREATE status=unavailable reason=%s',diagnostic(exc))
+            return {'intent':intent,'payment_pending':True,'can_start_new_purchase':True}
 
     def embedded_session(self, member, plan, previous_intent=None, acknowledge_unconfirmed=False):
         self.require(member)
@@ -661,7 +690,7 @@ def install_myfatoorah(app, credits):
         return await asyncio.to_thread(service.accounts.member,service.accounts.token(request))
     @app.on_event('startup')
     async def startup():
-        LOG.warning('MF_CHECKOUT_BUILD version=15654 embedded=%s',service.embedded)
+        LOG.warning('MF_CHECKOUT_BUILD version=156711 mode=hosted legacy_embedded=%s',service.embedded)
         if service.ready: service.task=asyncio.create_task(service.worker())
     @app.on_event('shutdown')
     async def shutdown():
@@ -687,7 +716,8 @@ def install_myfatoorah(app, credits):
     @app.post('/api/billing/myfatoorah/checkout')
     async def checkout(request:Request):
         m=await member(request); payload=await service.accounts.body(request)
-        return result(await asyncio.to_thread(service.checkout,m,payload.get('plan_id')))
+        return result(await asyncio.to_thread(service.checkout,m,payload.get('plan_id'),payload.get('lang','en'),
+                    payload.get('previous_intent'),payload.get('acknowledge_unconfirmed',False)))
     @app.post('/api/billing/myfatoorah/session')
     async def embedded_session(request:Request):
         m=await member(request); payload=await service.accounts.body(request)
@@ -700,7 +730,7 @@ def install_myfatoorah(app, credits):
     @app.post('/api/billing/myfatoorah/resume')
     async def resume(request:Request):
         m=await member(request); payload=await service.accounts.body(request)
-        return result(await asyncio.to_thread(service.resume,m,payload.get('intent')))
+        return result(await asyncio.to_thread(service.resume,m,payload.get('intent'),payload.get('hosted') is True))
     @app.post('/api/billing/myfatoorah/confirm')
     async def confirm(request:Request):
         m=await member(request); payload=await service.accounts.body(request)
