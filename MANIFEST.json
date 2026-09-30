@@ -1,72 +1,17 @@
 {
-  "version": "156.7.0",
-  "backend": "v128.5.42.20-clear",
-  "based_on": "156.6.0 frontend + 156.6.1 SHEIN backend",
-  "deployed": false,
+  "release": "156.7.12",
   "files": {
-    "README_AR.md": {
-      "bytes": 5044,
-      "sha256": "6d06ed487a3d8b0c75ad5965f88d78c8e2c5e8fc200c56fe4a0e462a57d71c6c"
-    },
-    "findzia-account.js": {
-      "bytes": 64033,
-      "sha256": "25db344de1316ab0aaad33e15419c71f2b34cfcb45de1479e4b5abd8c8c7163e"
-    },
-    "findzia-billing.js": {
-      "bytes": 63209,
-      "sha256": "c5a3a38e5f200af9f195e4c7d34c63e65576222a211293473e5af3f168173488"
-    },
-    "findzia-filters.js": {
-      "bytes": 83116,
-      "sha256": "56da71783898596cd25a513606a4b6f81e7ba6e9d27154d1bffbfe97bfb1f40b"
-    },
-    "findzia-home.liquid": {
-      "bytes": 226262,
-      "sha256": "1907df44d9c106811263693faba0531dfb80d3fe2c762e409228a20a39b57b2a"
-    },
-    "findzia-i18n.js": {
-      "bytes": 195544,
-      "sha256": "1315ed7665d0a71ed7862e44dbed06d8d0887eecb5f12fbed8e9c964b7e64533"
-    },
-    "findzia-locales.json": {
-      "bytes": 216521,
-      "sha256": "de349f9f9d5451e4981473116f4ce139b89d940ff647246062ff9a229756a021"
-    },
-    "findzia-shell.js": {
-      "bytes": 31935,
-      "sha256": "0b9f9fee56285870c601764dfa96d2dcf27a9ecc5ce0ef576072799197485276"
-    },
-    "findzia_locale.py": {
-      "bytes": 10559,
-      "sha256": "40d9f9e4939eb17a071f89d0742c14e7bcd17d05df39c06e6345fd9a6e0d9ce0"
-    },
-    "main.py": {
-      "bytes": 1868199,
-      "sha256": "a8de1d65b83205ca0f81178c37fb613eb290da776e621f49a1e646edcce330ce"
-    },
-    "tests/dom.cjs": {
-      "bytes": 3838,
-      "sha256": "166a4feee267eefe1cdf32ebcfccacd32d5840e8c88e131e1fea09c2f8ff72cb"
-    },
-    "tests/test_clear_frontend.cjs": {
-      "bytes": 14139,
-      "sha256": "25c7513d2c76811b177b589084c56de8e6d56f5f94502a998a1e1dcc6e9ae291"
-    },
-    "tests/test_discovery.py": {
-      "bytes": 7815,
-      "sha256": "54bcb35ac2eea6ea3b054b255089c9eb8141c38aefe0631337490051cd1462b4"
-    },
-    "tests/test_locale_frontend.cjs": {
-      "bytes": 7132,
-      "sha256": "c1d065e8a6fe559b0c7e6e32ffecfe22dedd0816b07194bd6bbf46ece4217f9e"
-    },
-    "tests/test_markets_locale.py": {
-      "bytes": 13733,
-      "sha256": "b50046d58fd1b0559575ac9d068d774d70b7063b440b31ee1412567e58caa9e7"
-    },
-    "tests/test_shein_media.py": {
-      "bytes": 14524,
-      "sha256": "bbe11d73a84a7a863a8b1ce20581967e34e97dc1076e33c01091d1ce249c2978"
-    }
+    "INSTALL_AR.md": "1f8ee7cf0495dd15d286b912beba6b9aa1dd5cba57b0f6088cd19d3559dde2ae",
+    "VERIFICATION.json": "c9b397d42ae97f1871050dfc286eedbbb46f530cda2b4177ffe0aa016a102d20",
+    "apple-developer-merchantid-domain-association": "c15558d3e155e2031ef39b32775050c283b545d8575643181af3c3b9f03d46a3",
+    "findzia-billing.js": "44f7becfd624ac803ecaaeadd21cc14c474f322ab948caabe42b8dd5b67eaad9",
+    "findzia_applepay.py": "f982d9c921df67b94765afc002fe665e0e3c3784add64bf14cb3a2346fb23cd2",
+    "findzia_myfatoorah.py": "1925de22e830c74a94b742c206266958ef9b49ec37e1977e1609f3352b87c7e6",
+    "tests/dom.cjs": "166a4feee267eefe1cdf32ebcfccacd32d5840e8c88e131e1fea09c2f8ff72cb",
+    "tests/fixtures.py": "d8dce4868b69f4e50a2ac191990560af22d8cbdae3d12fc0119e00e297833cfa",
+    "tests/test_applepay.py": "80fa088a8a1a1d7912b84e8452d83417479d8f1b50fc2ea6e32c90fd2a54792f",
+    "tests/test_applepay_page.cjs": "15155694038570b7e29484141a21db0c0f2aeb991790caa63083bef6b4bb2d59",
+    "tests/test_embedded_frontend.cjs": "d311b2b51ba8a060cb4659171bba507b6ec30fdde5f3db91155f35b8368f0995",
+    "tests/test_legacy_recovery.py": "6dd996b6b29050f09545b74ddcf13355b3ba5149c652f4baa8d505817ae41bc9"
   }
 }
