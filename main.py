@@ -394,7 +394,7 @@ from findzia_billing import CreditMiddleware, install_billing
 app.add_middleware(CreditMiddleware, owner=app)
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization', 'X-Findzia-Request-Id'], max_age=86400)
-BUILD_ID = 'v128.5.42.25-media'
+BUILD_ID = 'v128.5.42.26-markets'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -4908,12 +4908,23 @@ def _query_is_generic(query):
 
 
 def _web_serper_text_passthrough(item):
-    """Only typed Serper results bypass our additional relevance rejection."""
+    """Typed provider relevance, including Shopping backup; never shopper photos."""
     if (not item.get('text_provider_passthrough') or item.get('search_origin') != 'text' or item.get('image_query_result')
             or item.get('_image_discovery') or item.get('reference_search_kind') == 'image'):
         return False
-    return any(str(source) == 'serper' or str(source).startswith('serper_')
+    return any(str(source) in ('serper', 'google_shopping', 'google_immersive_product') or str(source).startswith('serper_')
                for source in item.get('retrieval_sources') or [])
+
+
+def _web_text_admission_fields(market, provider):
+    source = str(provider).split('_text_', 1)[-1]
+    if 'serper' in source:
+        source = source[source.index('serper'):]
+    if (market.get('_text_serper_passthrough') and not market.get('_image_discovery')
+            and (source.startswith('serper_') or source in ('google_shopping', 'google_immersive_product'))):
+        return dict(search_origin='text', reference_search_kind='text', image_query_result=False,
+                    text_provider_passthrough=True, retrieval_sources=[source])
+    return {}
 
 
 def _local_discovery_candidate_ok(query, item, visual=False):
@@ -5793,6 +5804,11 @@ def _web_keep_collection_children(selected, candidates):
 
 
 def _local_discovery_rows(data, query, market, provider):
+    if market.get('_text_serper_passthrough') and not market.get('_image_discovery'):
+        data = dict(data)
+        for field in ('shopping_results', 'inline_shopping_results'):
+            if isinstance(data.get(field), list):
+                data[field] = [dict(row, _shopping_market_listing=True) if isinstance(row, dict) else row for row in data[field]]
     records = _web_expand_collection_rows(_local_discovery_records(data),
         budget=min(COLLECTION_WAIT_SECONDS, max(0., market.get('_collection_deadline', time.monotonic()+COLLECTION_WAIT_SECONDS)-time.monotonic())))
     _shopping_unit_ledger_add(market, records, provider)
@@ -5847,10 +5863,7 @@ def _local_discovery_rows_inner(records, query, market, provider):
                 '_price_market': price_geo,
                 'thumbnail': next(iter(_web_offer_image_candidates(row)), '')}
         item.update(_web_capture_listing_evidence(row, 'Google'))
-        if market.get('_text_serper_passthrough') and not market.get('_image_discovery') and 'serper' in provider:
-            source = provider[provider.index('serper'):]
-            item.update(search_origin='text', reference_search_kind='text', image_query_result=False, text_provider_passthrough=True,
-                        retrieval_sources=sorted(set(item.get('retrieval_sources') or []) | {source}))
+        item.update(_web_text_admission_fields(market, provider))
         if row.get('_shopping_market_listing'):
             item['_shopping_market_listing'] = True
         if not item['price']:
@@ -11524,14 +11537,17 @@ def _web_request_ip(request):
     except Exception:
         return 'unknown'
 
-def _web_rate_allowed(request):
-    key = _web_request_ip(request)
+def _web_rate_allowed(request, *, scope='search'):
+    # Auxiliary image repair must never spend the visitor's search allowance.
+    # Each bucket remains bounded, including calls made by older frontends.
+    key = (scope, _web_request_ip(request))
+    limit = 24 if scope == 'media' else WEB_API_RATE_PER_MINUTE
     now = time.time()
     with WEB_RATE_LOCK:
         q = WEB_RATE_BUCKETS[key]
         while q and now - q[0] > 60:
             q.popleft()
-        if len(q) >= WEB_API_RATE_PER_MINUTE:
+        if len(q) >= limit:
             return False
         q.append(now)
         if len(WEB_RATE_BUCKETS) > 5000:
@@ -21749,6 +21765,40 @@ def _web_text_direct_fetch(query, spec, deadline, cancel, page_token=''):
     return data
 
 
+def _web_text_shopping_lookup(card, spec, deadline, cancel):
+    """Recover observed merchant listings for one unusable Shopping link.
+
+    A small per-search queue owns this work. Only the same merchant's direct
+    product pages survive; prices/images stay with their original listing.
+    """
+    remaining = deadline - time.monotonic()
+    if cancel.is_set() or remaining < .4:
+        return None
+    title, merchant = str(card.get('title') or '').strip(), str(card.get('source') or '').strip()
+    if not title or not merchant:
+        return None
+    query = title[:220] + ' ' + merchant[:100]
+    budget = min(3.5, remaining)
+    data = _fast_provider_search('serper_search', query, spec['country'], spec['hl'],
+                                 (min(.6, budget/4), budget-min(.6, budget/4))) or {}
+    rows = []
+    for raw in data.get('organic_results') or []:
+        url = _local_discovery_direct_link(raw)
+        if not url or not _shopping_unit_merchant_matches(merchant, urllib.parse.urlsplit(url).hostname or '', spec['country']):
+            continue
+        row = dict(raw, link=url)
+        # Exact normalized title only: never price a related model from this unit.
+        if (_shopping_store_key(title) == _shopping_store_key(_local_discovery_title(raw))
+                and len(_shopping_store_key(title)) >= 12):
+            if not row.get('price') and card.get('price'):
+                row.update(price=card['price'], currency=card.get('currency') or '', _shopping_market_listing=True)
+            if not _web_offer_image_candidates(row):
+                row['image_candidates'] = _web_offer_image_candidates(card)
+        rows.append(row)
+    print(f'TEXT SHOPPING LINKS country={spec["country"]} rows={len(rows)}')
+    return {'organic_results': rows}
+
+
 def _web_text_direct_records(data):
     """Keep every usable card in the paid response, including category groups.
 
@@ -21872,6 +21922,7 @@ def _web_text_direct_search(query, country, lang, progress_callback=None, cancel
     collection_counts = Counter()
     expanded = set()
     expansions = Counter()
+    shopping_lookups, lookup_counts = set(), Counter()
     source_states = {}
     first_ms = None
     _market_query_warm(query, list(dict.fromkeys([country, 'us', 'cn'])))
@@ -22076,6 +22127,25 @@ def _web_text_direct_search(query, country, lang, progress_callback=None, cancel
                 if (fast_lane_count and ready_local() >= TEXT_DIRECT_FAST_SETTLE_ROWS
                         and not any(j[0]['engine'].startswith(('serper_', 'cse_')) for j in jobs.values())):
                     deadline = min(deadline, time.monotonic() + TEXT_DIRECT_FAST_SETTLE_SECONDS)
+                # Serper Shopping can return Google-only links. Recover a small
+                # number of those merchants concurrently, once per title/store.
+                if (market['_text_serper_passthrough'] and spec['engine'] == 'serper_shopping'
+                        and not token and not spec.get('_shopping_lookup')):
+                    for card in cards:
+                        if not isinstance(card, dict) or _local_discovery_direct_link(card):
+                            continue
+                        key = (spec['country'], _shopping_store_key(card.get('source')), _shopping_store_key(card.get('title')))
+                        allowance = 6 if spec['role'] == 'local' else 2
+                        if lookup_counts[spec['country']] >= allowance or time.monotonic() >= deadline-.5 or cancel.is_set():
+                            break
+                        if key in shopping_lookups or not key[1] or not key[2]:
+                            continue
+                        shopping_lookups.add(key); lookup_counts[spec['country']] += 1
+                        lookup_spec = dict(spec, engine='serper_search', _shopping_lookup=True)
+                        job = TEXT_DIRECT_POOL.submit(_run_with_market, target,
+                            _web_text_shopping_lookup, card, lookup_spec, deadline, cancel)
+                        jobs[job] = (lookup_spec, target, '', '')
+                        launched += 1
                 # Google may return an aggregate product without a seller URL.
                 # Expand a bounded number of products into ALL observed sellers;
                 # schedule independently so other sources can already be shown.
@@ -22084,6 +22154,8 @@ def _web_text_direct_search(query, country, lang, progress_callback=None, cancel
                         allowance = min(SHOPPING_MERCHANT_CARDS, 2 if spec['role'] == 'local' else 1)
                     else:
                         allowance = TEXT_DIRECT_IMMERSIVE_LOCAL if spec['role'] == 'local' else TEXT_DIRECT_IMMERSIVE_GLOBAL
+                    if market['_text_serper_passthrough'] and spec['engine'] == 'google_shopping':
+                        allowance = 8 if spec['role'] == 'local' else 2
                     for card in cards:
                         if expansions[spec['country']] >= allowance:
                             break
@@ -22095,7 +22167,8 @@ def _web_text_direct_search(query, country, lang, progress_callback=None, cancel
                         token_key = (spec['country'], page_token)
                         if not page_token or token_key in expanded or not card.get('title'):
                             continue
-                        if not _run_with_market(target, _local_discovery_candidate_ok, query, dict(card)):
+                        candidate = dict(card, **_web_text_admission_fields(target, 'local_text_'+spec['engine']))
+                        if not _run_with_market(target, _local_discovery_candidate_ok, query, candidate):
                             continue
                         if time.monotonic() >= deadline - .25 or cancel.is_set():
                             break
@@ -30289,7 +30362,8 @@ def _fz_recover_media(row):
 @app.post('/api/media/recover')
 async def web_api_media_recover(request: Request):
     if not WEB_API_ENABLED: return JSONResponse({'ok':False},status_code=503)
-    if not _web_rate_allowed(request): return JSONResponse({'ok':False},status_code=429)
+    if not _web_rate_allowed(request, scope='media'):
+        return JSONResponse({'ok':False,'error':'media_rate_limit'},status_code=429,headers={'Retry-After':'60'})
     try:
         raw = await request.body()
         if len(raw)>18000: raise ValueError('request_too_large')
