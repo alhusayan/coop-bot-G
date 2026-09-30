@@ -15,7 +15,7 @@ import re
 import threading
 import time
 
-VERSION = '156.6.0'
+VERSION = '156.7.10'
 LANGUAGES = {'en': 'English', 'ar': 'Arabic', 'de': 'German', 'fr': 'French',
              'it': 'Italian', 'es': 'Spanish', 'pt': 'Portuguese', 'tr': 'Turkish',
              'ru': 'Russian', 'ja': 'Japanese', 'zh': 'Simplified Chinese',
@@ -145,7 +145,7 @@ class LocaleService:
                     self.content_cache.popitem(last=False)
         return values
 
-    def localize_plan(self, plan, lang):
+    def localize_plan(self, plan, lang, allow_network=True):
         """Translate display-only filter labels before the ready response.
 
         Signed tokens, search terms, option values, evidence and query languages
@@ -174,7 +174,11 @@ class LocaleService:
             return plan
         # One bounded batch keeps translation inside the existing filter
         # deadline; never wait for one model call per facet or option.
-        translated = self.translate(keys[:120], lang, public=False)
+        if allow_network:
+            translated = self.translate(keys[:120], lang, public=False)
+        else:
+            with self.lock:
+                translated={k:self.cache[lang].get(k,self.content_cache.get((lang,k),k)) for k in keys[:120]}
         for obj, key in places:
             obj[key] = translated.get(obj[key], obj[key])
         plan['display_language'] = lang
