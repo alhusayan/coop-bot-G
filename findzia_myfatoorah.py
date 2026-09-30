@@ -1,4 +1,4 @@
-"""Findzia 156.7.11: hosted checkout, verified credits and safe payment recovery.
+"""Findzia 156.7.12: embedded checkout, Apple Pay window and verified credits.
 Disabled by default. Sandbox uses a separate key and an explicit email allowlist.
 No card data, browser prices, or redirect claims are accepted as payment proof.
 """
@@ -124,12 +124,13 @@ class MyFatoorahPack:
         if not self.allowed(member): raise HTTPException(403, 'myfatoorah_not_available')
 
     def public(self, member):
+        window = getattr(self, 'apple_window', None)
         return {'ok': True, 'enabled': self.enabled, 'environment': self.mode,
+                'checkout_mode': 'embedded', 'checkout_build': '156.7.12',
                 'checkout_available': self.allowed(member), 'plan_id': 'pack',
-                'checkout_mode': 'hosted', 'checkout_build': '156.7.11',
-                'hosted_available': self.allowed(member),
                 'embedded_available': self.embedded and self.allowed(member),
-                'apple_pay_domain_verified': self.apple_verified}
+                'apple_pay_domain_verified': self.apple_verified and not (window and window.configured),
+                'apple_pay_window': window.public(member) if window else {'available': False}}
 
     def api(self, method, path, body=None, intent=None):
         headers = {'Authorization': 'Bearer ' + self.key, 'Content-Type':'application/json'}
@@ -435,7 +436,8 @@ class MyFatoorahPack:
                 WHERE o.member=? AND o.mode=? AND o.state IN ('creating','pending','session_processing')""",
                 (intent,member['id'],self.mode))
         methods=['googlepay','card']
-        if self.apple_verified: methods.append('applepay')
+        if self.apple_verified or getattr(getattr(self, 'apple_window', None), 'ready', False):
+            methods.append('applepay')
         body={'PaymentMode':'COLLECT_DETAILS','OperationType':'PAY',
               'Order':{'Amount':4.99,'Currency':'USD'},'SupportedPaymentMethods':methods,
               'Language':'EN','SessionExpiry':datetime.fromtimestamp(now+900,timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
@@ -690,7 +692,7 @@ def install_myfatoorah(app, credits):
         return await asyncio.to_thread(service.accounts.member,service.accounts.token(request))
     @app.on_event('startup')
     async def startup():
-        LOG.warning('MF_CHECKOUT_BUILD version=156711 mode=hosted legacy_embedded=%s',service.embedded)
+        LOG.warning('MF_CHECKOUT_BUILD version=156712 mode=embedded enabled=%s',service.embedded)
         if service.ready: service.task=asyncio.create_task(service.worker())
     @app.on_event('shutdown')
     async def shutdown():
@@ -744,4 +746,6 @@ def install_myfatoorah(app, credits):
             if len(raw)>131072: raise HTTPException(413,'event_too_large')
         await asyncio.to_thread(service.receive,bytes(raw),request.headers.get('myfatoorah-signature',''))
         return result({})
+    from findzia_applepay import install_applepay
+    install_applepay(app, service, os.environ, member)
     return service
