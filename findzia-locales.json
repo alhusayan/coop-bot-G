@@ -1,5 +1,5 @@
 {
-  "version": "156.7.0",
+  "version": "156.7.4",
   "languages": [
     "en",
     "ar",
@@ -40,7 +40,7 @@
       "Shop smarter": "Shop smarter",
       "For you": "For you",
       "Search for something you love. Your discoveries will appear here.": "Search for something you love. Your discoveries will appear here.",
-      "Suggestions": "Suggestions",
+      "Suggestions": "AI Shopping Assistant",
       "Retry": "Retry",
       "All": "All",
       "Kuwait": "Kuwait",
@@ -806,10 +806,11 @@
       "/ month": "/ month",
       "": "",
       "Search activity saved in this browser.": "Search activity saved in this browser.",
-      "Open Suggestions, choose what matters to you, then search for a suggested product.": "Open Suggestions, choose what matters to you, then search for a suggested product.",
+      "Open Suggestions, choose what matters to you, then search for a suggested product.": "Open the AI Shopping Assistant, choose what matters to you, then start a new search.",
       "Find products. Check prices.": "Find products. Check prices.",
       "Search by photo or name. Findzia finds offers in your local market and worldwide. Complete your purchase at the store.": "Search by photo or name. Findzia finds offers in your local market and worldwide. Complete your purchase at the store.",
-      "Your activity": "Your activity"
+      "Your activity": "Your activity",
+      "AI Shopping Assistant": "AI Shopping Assistant"
     },
     "ar": {
       "Take a photo. Find the product.": "صوّر المنتج. واعثر عليه.",
@@ -1230,7 +1231,7 @@
       "Your choices": "اختياراتك",
       "1 credit": "رصيد واحد",
       "There is not enough evidence for a reliable pick yet. You can continue with your search.": "المعلومات المتاحة ما تكفي لترشيح موثوق حاليًا. تقدر تكمل ببحثك.",
-      "Suggestions": "اقتراحات",
+      "Suggestions": "مساعد التسوّق الذكي",
       "Customize search": "خصّص بحثك",
       "Search preferences": "مواصفات البحث",
       "Search with these choices · 1 credit": "ابحث بهذه الاختيارات · رصيد واحد",
@@ -1356,10 +1357,11 @@
       "/ month": "/ شهر",
       "Test mode. No real payment is collected.": "وضع التجربة، بدون تحصيل مبلغ حقيقي.",
       "Search activity saved in this browser.": "نشاط البحث المحفوظ في هذا المتصفح.",
-      "Open Suggestions, choose what matters to you, then search for a suggested product.": "افتح الاقتراحات، اختر ما يهمك، ثم ابحث عن المنتج المقترح.",
+      "Open Suggestions, choose what matters to you, then search for a suggested product.": "افتح مساعد التسوّق الذكي، اختر ما يهمك، ثم ابدأ بحثًا جديدًا.",
       "Find products. Check prices.": "اعثر على المنتج وتحقّق من سعره.",
       "Search by photo or name. Findzia finds offers in your local market and worldwide. Complete your purchase at the store.": "ابحث بصورة أو اسم. تجد Findzia عروضًا محلية وعالمية، وتكمل الشراء لدى المتجر.",
-      "Your activity": "نشاطك"
+      "Your activity": "نشاطك",
+      "AI Shopping Assistant": "مساعد التسوّق الذكي"
     },
     "de": {
       "Take a photo. Find the product.": "Ein Foto. Dein Produkt.",
@@ -1518,7 +1520,7 @@
       "{count} searches": "{count} Suchen",
       "One payment. Credits do not expire.": "Einmalige Zahlung. Guthaben verfällt nicht.",
       "New search": "Neue Suche",
-      "Suggestions": "Vorschläge",
+      "Suggestions": "KI-Einkaufsassistent",
       "Account details": "Kontodaten",
       "Preferences": "Einstellungen",
       "Find alternatives": "Alternativen finden",
@@ -1535,7 +1537,10 @@
       "Save your balance to your account.": "Speichere dein Guthaben in deinem Konto.",
       "Back to search": "Zurück zur Suche",
       "About": "Über Findzia",
-      "{count} searches · {price}": "{count} Suchen · {price}"
+      "{count} searches · {price}": "{count} Suchen · {price}",
+      "AI Shopping Assistant": "KI-Einkaufsassistent",
+      "Open Suggestions, choose what matters to you, then search for a suggested product.": "Öffne den KI-Einkaufsassistenten, wähle deine Prioritäten und starte eine neue Suche.",
+      "Help me choose": "Hilf mir bei der Auswahl"
     },
     "fr": {
       "Take a photo. Find the product.": "Une photo. Le bon produit.",
@@ -1694,7 +1699,7 @@
       "{count} searches": "{count} recherches",
       "One payment. Credits do not expire.": "Paiement unique. Les crédits n’expirent pas.",
       "New search": "Nouvelle recherche",
-      "Suggestions": "Suggestions",
+      "Suggestions": "Assistant shopping IA",
       "Account details": "Informations du compte",
       "Preferences": "Préférences",
       "Find alternatives": "Trouver des alternatives",
@@ -1711,7 +1716,10 @@
       "Save your balance to your account.": "Enregistrez votre solde sur votre compte.",
       "Back to search": "Retour à la recherche",
       "About": "À propos",
-      "{count} searches · {price}": "{count} recherches · {price}"
+      "{count} searches · {price}": "{count} recherches · {price}",
+      "AI Shopping Assistant": "Assistant shopping IA",
+      "Open Suggestions, choose what matters to you, then search for a suggested product.": "Ouvrez l’assistant shopping IA, choisissez vos priorités, puis lancez une nouvelle recherche.",
+      "Help me choose": "Aidez-moi à choisir"
     },
     "it": {
       "Search products": "Cerca prodotti",
@@ -1850,7 +1858,7 @@
       "{count} searches": "{count} ricerche",
       "One payment. Credits do not expire.": "Pagamento unico. I crediti non scadono.",
       "New search": "Nuova ricerca",
-      "Suggestions": "Suggerimenti",
+      "Suggestions": "Assistente shopping IA",
       "Account details": "Dati dell’account",
       "Preferences": "Preferenze",
       "Find alternatives": "Trova alternative",
@@ -1867,7 +1875,10 @@
       "Save your balance to your account.": "Salva il saldo nel tuo account.",
       "Back to search": "Torna alla ricerca",
       "About": "Informazioni",
-      "{count} searches · {price}": "{count} ricerche · {price}"
+      "{count} searches · {price}": "{count} ricerche · {price}",
+      "AI Shopping Assistant": "Assistente shopping IA",
+      "Open Suggestions, choose what matters to you, then search for a suggested product.": "Apri l’assistente shopping IA, scegli le tue priorità e avvia una nuova ricerca.",
+      "Help me choose": "Aiutami a scegliere"
     },
     "es": {
       "Take a photo. Find the product.": "Haz una foto. Encuentra el producto.",
@@ -2026,7 +2037,7 @@
       "{count} searches": "{count} búsquedas",
       "One payment. Credits do not expire.": "Pago único. Los créditos no caducan.",
       "New search": "Nueva búsqueda",
-      "Suggestions": "Sugerencias",
+      "Suggestions": "Asistente de compras con IA",
       "Account details": "Datos de la cuenta",
       "Preferences": "Preferencias",
       "Find alternatives": "Buscar alternativas",
@@ -2043,7 +2054,10 @@
       "Save your balance to your account.": "Guarda tu saldo en tu cuenta.",
       "Back to search": "Volver a buscar",
       "About": "Acerca de",
-      "{count} searches · {price}": "{count} búsquedas · {price}"
+      "{count} searches · {price}": "{count} búsquedas · {price}",
+      "AI Shopping Assistant": "Asistente de compras con IA",
+      "Open Suggestions, choose what matters to you, then search for a suggested product.": "Abre el asistente de compras con IA, elige tus prioridades e inicia una nueva búsqueda.",
+      "Help me choose": "Ayúdame a elegir"
     },
     "pt": {
       "Take a photo. Find the product.": "Uma foto. O produto certo.",
@@ -2201,7 +2215,7 @@
       "{count} searches": "{count} pesquisas",
       "One payment. Credits do not expire.": "Pagamento único. Os créditos não expiram.",
       "New search": "Nova pesquisa",
-      "Suggestions": "Sugestões",
+      "Suggestions": "Assistente de compras com IA",
       "Account details": "Dados da conta",
       "Preferences": "Preferências",
       "Find alternatives": "Encontrar alternativas",
@@ -2218,7 +2232,10 @@
       "Save your balance to your account.": "Salve seu saldo na sua conta.",
       "Back to search": "Voltar à pesquisa",
       "About": "Sobre",
-      "{count} searches · {price}": "{count} pesquisas · {price}"
+      "{count} searches · {price}": "{count} pesquisas · {price}",
+      "AI Shopping Assistant": "Assistente de compras com IA",
+      "Open Suggestions, choose what matters to you, then search for a suggested product.": "Abra o assistente de compras com IA, escolha suas prioridades e inicie uma nova busca.",
+      "Help me choose": "Ajude-me a escolher"
     },
     "tr": {
       "Take a photo. Find the product.": "Fotoğraf çek. Ürünü bul.",
@@ -2376,7 +2393,7 @@
       "{count} searches": "{count} arama",
       "One payment. Credits do not expire.": "Tek ödeme. Kredilerin süresi dolmaz.",
       "New search": "Yeni arama",
-      "Suggestions": "Öneriler",
+      "Suggestions": "Yapay zekâ alışveriş asistanı",
       "Account details": "Hesap bilgileri",
       "Preferences": "Tercihler",
       "Find alternatives": "Alternatif bul",
@@ -2393,7 +2410,10 @@
       "Save your balance to your account.": "Bakiyeni hesabına kaydet.",
       "Back to search": "Aramaya dön",
       "About": "Hakkında",
-      "{count} searches · {price}": "{count} arama · {price}"
+      "{count} searches · {price}": "{count} arama · {price}",
+      "AI Shopping Assistant": "Yapay zekâ alışveriş asistanı",
+      "Open Suggestions, choose what matters to you, then search for a suggested product.": "Yapay zekâ alışveriş asistanını açın, önceliklerinizi seçin ve yeni bir arama başlatın.",
+      "Help me choose": "Seçmeme yardım et"
     },
     "ru": {
       "Take a photo. Find the product.": "Сфотографируйте. Найдите товар.",
@@ -2551,7 +2571,7 @@
       "{count} searches": "Поисков: {count}",
       "One payment. Credits do not expire.": "Разовый платёж. Кредиты не сгорают.",
       "New search": "Новый поиск",
-      "Suggestions": "Рекомендации",
+      "Suggestions": "ИИ-помощник по покупкам",
       "Account details": "Данные аккаунта",
       "Preferences": "Настройки",
       "Find alternatives": "Найти альтернативы",
@@ -2568,7 +2588,10 @@
       "Save your balance to your account.": "Сохраните баланс в аккаунте.",
       "Back to search": "Вернуться к поиску",
       "About": "О Findzia",
-      "{count} searches · {price}": "Поисков: {count} · {price}"
+      "{count} searches · {price}": "Поисков: {count} · {price}",
+      "AI Shopping Assistant": "ИИ-помощник по покупкам",
+      "Open Suggestions, choose what matters to you, then search for a suggested product.": "Откройте ИИ-помощника, выберите приоритеты и начните новый поиск.",
+      "Help me choose": "Помогите выбрать"
     },
     "ja": {
       "Search products": "商品を検索",
@@ -2707,7 +2730,7 @@
       "{count} searches": "検索{count}回分",
       "One payment. Credits do not expire.": "買い切り。クレジットに有効期限はありません。",
       "New search": "新しい検索",
-      "Suggestions": "おすすめ",
+      "Suggestions": "AIショッピングアシスタント",
       "Account details": "アカウント情報",
       "Preferences": "設定",
       "Find alternatives": "他の商品を探す",
@@ -2724,7 +2747,10 @@
       "Save your balance to your account.": "残高をアカウントに保存します。",
       "Back to search": "検索に戻る",
       "About": "Findziaについて",
-      "{count} searches · {price}": "検索{count}回分 · {price}"
+      "{count} searches · {price}": "検索{count}回分 · {price}",
+      "AI Shopping Assistant": "AIショッピングアシスタント",
+      "Open Suggestions, choose what matters to you, then search for a suggested product.": "AIショッピングアシスタントを開き、重視する点を選んで新しい検索を始めます。",
+      "Help me choose": "選ぶのを手伝って"
     },
     "zh": {
       "Take a photo. Find the product.": "拍张照片，找到商品。",
@@ -2882,7 +2908,7 @@
       "{count} searches": "{count}次搜索",
       "One payment. Credits do not expire.": "一次付款，额度不过期。",
       "New search": "新搜索",
-      "Suggestions": "推荐",
+      "Suggestions": "AI购物助手",
       "Account details": "账户资料",
       "Preferences": "偏好设置",
       "Find alternatives": "寻找其他选择",
@@ -2899,7 +2925,10 @@
       "Save your balance to your account.": "将余额保存到账户。",
       "Back to search": "返回搜索",
       "About": "关于",
-      "{count} searches · {price}": "{count}次搜索 · {price}"
+      "{count} searches · {price}": "{count}次搜索 · {price}",
+      "AI Shopping Assistant": "AI购物助手",
+      "Open Suggestions, choose what matters to you, then search for a suggested product.": "打开AI购物助手，选择您看重的方面，然后开始新搜索。",
+      "Help me choose": "帮我选择"
     },
     "ko": {
       "Search products": "상품 검색",
@@ -3038,7 +3067,7 @@
       "{count} searches": "검색 {count}회",
       "One payment. Credits do not expire.": "일회성 결제. 크레딧은 만료되지 않습니다.",
       "New search": "새 검색",
-      "Suggestions": "추천",
+      "Suggestions": "AI 쇼핑 도우미",
       "Account details": "계정 정보",
       "Preferences": "환경설정",
       "Find alternatives": "다른 상품 찾기",
@@ -3055,7 +3084,10 @@
       "Save your balance to your account.": "잔액을 계정에 저장하세요.",
       "Back to search": "검색으로 돌아가기",
       "About": "소개",
-      "{count} searches · {price}": "검색 {count}회 · {price}"
+      "{count} searches · {price}": "검색 {count}회 · {price}",
+      "AI Shopping Assistant": "AI 쇼핑 도우미",
+      "Open Suggestions, choose what matters to you, then search for a suggested product.": "AI 쇼핑 도우미를 열고 중요하게 생각하는 점을 선택한 다음 새 검색을 시작하세요.",
+      "Help me choose": "선택 도와주기"
     },
     "hi": {
       "Take a photo. Find the product.": "फ़ोटो लें। उत्पाद खोजें।",
@@ -3213,7 +3245,7 @@
       "{count} searches": "{count} खोजें",
       "One payment. Credits do not expire.": "एक बार भुगतान। क्रेडिट की समय-सीमा नहीं है।",
       "New search": "नई खोज",
-      "Suggestions": "सुझाव",
+      "Suggestions": "AI शॉपिंग सहायक",
       "Account details": "खाते की जानकारी",
       "Preferences": "प्राथमिकताएँ",
       "Find alternatives": "विकल्प खोजें",
@@ -3230,7 +3262,10 @@
       "Save your balance to your account.": "अपना बैलेंस खाते में सुरक्षित करें।",
       "Back to search": "खोज पर वापस जाएँ",
       "About": "परिचय",
-      "{count} searches · {price}": "{count} खोजें · {price}"
+      "{count} searches · {price}": "{count} खोजें · {price}",
+      "AI Shopping Assistant": "AI शॉपिंग सहायक",
+      "Open Suggestions, choose what matters to you, then search for a suggested product.": "AI शॉपिंग सहायक खोलें, अपनी प्राथमिकताएँ चुनें और नई खोज शुरू करें।",
+      "Help me choose": "चुनने में मेरी मदद करें"
     },
     "ur": {
       "Take a photo. Find the product.": "تصویر لیں۔ مصنوعات تلاش کریں۔",
@@ -3388,7 +3423,7 @@
       "{count} searches": "{count} تلاشیں",
       "One payment. Credits do not expire.": "ایک بار ادائیگی۔ کریڈٹ کی میعاد ختم نہیں ہوتی۔",
       "New search": "نئی تلاش",
-      "Suggestions": "تجاویز",
+      "Suggestions": "AI شاپنگ اسسٹنٹ",
       "Account details": "اکاؤنٹ کی تفصیلات",
       "Preferences": "ترجیحات",
       "Find alternatives": "متبادل تلاش کریں",
@@ -3405,7 +3440,10 @@
       "Save your balance to your account.": "اپنا بیلنس اکاؤنٹ میں محفوظ کریں۔",
       "Back to search": "تلاش پر واپس جائیں",
       "About": "تعارف",
-      "{count} searches · {price}": "{count} تلاشیں · {price}"
+      "{count} searches · {price}": "{count} تلاشیں · {price}",
+      "AI Shopping Assistant": "AI شاپنگ اسسٹنٹ",
+      "Open Suggestions, choose what matters to you, then search for a suggested product.": "AI شاپنگ اسسٹنٹ کھولیں، اپنی ترجیحات منتخب کریں اور نئی تلاش شروع کریں۔",
+      "Help me choose": "انتخاب میں مدد کریں"
     },
     "id": {
       "Search products": "Cari produk",
@@ -3544,7 +3582,7 @@
       "{count} searches": "{count} pencarian",
       "One payment. Credits do not expire.": "Sekali bayar. Kredit tidak kedaluwarsa.",
       "New search": "Pencarian baru",
-      "Suggestions": "Saran",
+      "Suggestions": "Asisten Belanja AI",
       "Account details": "Detail akun",
       "Preferences": "Preferensi",
       "Find alternatives": "Cari alternatif",
@@ -3561,7 +3599,10 @@
       "Save your balance to your account.": "Simpan saldo di akun Anda.",
       "Back to search": "Kembali ke pencarian",
       "About": "Tentang",
-      "{count} searches · {price}": "{count} pencarian · {price}"
+      "{count} searches · {price}": "{count} pencarian · {price}",
+      "AI Shopping Assistant": "Asisten Belanja AI",
+      "Open Suggestions, choose what matters to you, then search for a suggested product.": "Buka Asisten Belanja AI, pilih prioritas Anda, lalu mulai pencarian baru.",
+      "Help me choose": "Bantu saya memilih"
     },
     "ms": {
       "Search products": "Cari produk",
@@ -3700,7 +3741,7 @@
       "{count} searches": "{count} carian",
       "One payment. Credits do not expire.": "Bayaran sekali sahaja. Kredit tidak luput.",
       "New search": "Carian baharu",
-      "Suggestions": "Cadangan",
+      "Suggestions": "Pembantu Beli-belah AI",
       "Account details": "Butiran akaun",
       "Preferences": "Keutamaan",
       "Find alternatives": "Cari alternatif",
@@ -3717,7 +3758,10 @@
       "Save your balance to your account.": "Simpan baki dalam akaun anda.",
       "Back to search": "Kembali ke carian",
       "About": "Tentang",
-      "{count} searches · {price}": "{count} carian · {price}"
+      "{count} searches · {price}": "{count} carian · {price}",
+      "AI Shopping Assistant": "Pembantu Beli-belah AI",
+      "Open Suggestions, choose what matters to you, then search for a suggested product.": "Buka Pembantu Beli-belah AI, pilih keutamaan anda, kemudian mulakan carian baharu.",
+      "Help me choose": "Bantu saya memilih"
     }
   }
 }
