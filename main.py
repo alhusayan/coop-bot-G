@@ -393,7 +393,7 @@ from findzia_billing import CreditMiddleware, install_billing
 app.add_middleware(CreditMiddleware, owner=app)
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization', 'X-Findzia-Request-Id'], max_age=86400)
-BUILD_ID = 'v128.5.42.23-alternatives'
+BUILD_ID = 'v128.5.42.24-text-serper'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -4906,12 +4906,23 @@ def _query_is_generic(query):
     return len(lexical) <= 3
 
 
+def _web_serper_text_passthrough(item):
+    """Only typed Serper results bypass our additional relevance rejection."""
+    if (not item.get('text_provider_passthrough') or item.get('search_origin') != 'text' or item.get('image_query_result')
+            or item.get('_image_discovery') or item.get('reference_search_kind') == 'image'):
+        return False
+    return any(str(source) == 'serper' or str(source).startswith('serper_')
+               for source in item.get('retrieval_sources') or [])
+
+
 def _local_discovery_candidate_ok(query, item, visual=False):
     """A translated noun is not a missing match; explicit conflicts still reject.
 
     ``visual`` rows come from an image engine (Google Lens): only hard conflicts
     reject them; the reference-image audit decides identity, never text overlap.
     """
+    if not visual and _web_serper_text_passthrough(item):
+        return True
     title = str(item.get('raw_title') or item.get('title') or '')
     if _fz_product_form_conflict(query, title):
         return False
@@ -5766,6 +5777,10 @@ def _local_discovery_rows_inner(records, query, market, provider):
                 '_price_market': price_geo,
                 'thumbnail': next(iter(_web_offer_image_candidates(row)), '')}
         item.update(_web_capture_listing_evidence(row, 'Google'))
+        if market.get('_text_serper_passthrough') and not market.get('_image_discovery') and 'serper' in provider:
+            source = provider[provider.index('serper'):]
+            item.update(search_origin='text', reference_search_kind='text', image_query_result=False, text_provider_passthrough=True,
+                        retrieval_sources=sorted(set(item.get('retrieval_sources') or []) | {source}))
         if row.get('_shopping_market_listing'):
             item['_shopping_market_listing'] = True
         if not item['price']:
@@ -16919,11 +16934,12 @@ def _web_attach_captured_result_sections(payload, lang, allow_ai=True, cancel_ev
                if is_lens_product_url(str(row.get('url') or row.get('link') or ''))
                and _market_offer_allowed(row, out.get('market') or current_market())]
     identity = str(out.get('query') or '').strip()
-    results = [r for r in results if not _fz_product_form_conflict(identity, r.get('raw_title') or r.get('title'))]
     has_reference_photo = bool(_web_visual_reference_digest(reference_image_b64)) and (
         not reference_image_mime or reference_image_mime.startswith('image/')
     )
     user_photo = bool(has_reference_photo and text_reference is None)
+    results = [r for r in results if (not user_photo and _web_serper_text_passthrough(r))
+               or not _fz_product_form_conflict(identity, r.get('raw_title') or r.get('title'))]
     if not user_photo:
         # Includes optional Lens expansion from a retailer photo for typed text.
         # Search wording/translation can use AI; result admission must not.
@@ -17385,7 +17401,7 @@ def _web_capture_listing_evidence(raw, source=''):
     """Keep product stars distinct from explicit merchant stars at ingestion."""
     out = {k:copy.deepcopy(raw[k]) for k in _CARD_FACT_FIELDS if k in raw}
     for key in ('condition','availability','in_stock','specifications','attributes','extensions',
-                'retrieval_sources','image_query_result','result_group','alternative_reason',
+                'retrieval_sources','image_query_result','search_origin','reference_search_kind','text_provider_passthrough','result_group','alternative_reason',
                 'export_store','_price_market','collection_url','collection_product'):
         if key in raw:
             out[key] = copy.deepcopy(raw[key])
@@ -21172,7 +21188,7 @@ print(f'TEXT DIRECT CONFIG enabled={TEXT_DIRECT_SEARCH_ENABLED} deadline={TEXT_D
 
 
 def _web_text_direct_enabled():
-    return bool(TEXT_DIRECT_SEARCH_ENABLED and SERPAPI_API_KEY)
+    return bool(TEXT_DIRECT_SEARCH_ENABLED and (SERPER_API_KEY or SERPAPI_API_KEY or (GOOGLE_CSE_KEY and GOOGLE_CSE_CX)))
 
 
 # ---------------------------------------------------------------------------
@@ -21460,13 +21476,16 @@ def _web_text_direct_specs(query, country):
     """Parallel English/native open discovery plus bounded store supplements.
 
     Store scopes add coverage; they never restrict the open local lanes.
-    Each source still passes listing, identity, geography and image checks.
+    Typed Serper results retain the provider's relevance; photo supplements
+    retain their existing identity rules.
     """
     native = next((hl for hl in _market_query_languages(country, query) if hl != 'en'), 'en')
     languages = list(dict.fromkeys(['en', native]))
     specs, seen = [], set()
     degraded = serpapi_provider_degraded()
-    fast = list(FAST_PROVIDERS if SEARCH_PROVIDER_PRIMARY != 'serpapi' else [])
+    text_serper = 'serper' in FAST_PROVIDERS and not current_market().get('_image_discovery')
+    primary_serper = text_serper or serper_primary()
+    fast = list(FAST_PROVIDERS if text_serper or SEARCH_PROVIDER_PRIMARY != 'serpapi' else [])
     def add(cc, role, engine, hl, **extra):
         spec = dict(country=cc, role=role, engine=engine, hl=hl, **extra)
         key = tuple(sorted(spec.items()))
@@ -21481,7 +21500,7 @@ def _web_text_direct_specs(query, country):
                 add(country, 'local', provider + '_images', hl, geo_cue=hl == 'en')
             if provider == 'serper' and FAST_PROVIDER_SHOPPING and country != 'cn':
                 add(country, 'local', 'serper_shopping', hl)
-    if not serper_primary():
+    if not primary_serper:
         for hl in languages:
             add(country, 'local', 'google_light' if TEXT_DIRECT_LIGHT_LANE else 'google', hl, geo_cue=hl == 'en')
             add(country, 'local', TEXT_DIRECT_IMAGES_ENGINE, hl, geo_cue=hl == 'en')
@@ -21513,7 +21532,7 @@ def _web_text_direct_specs(query, country):
             add(country, 'local', media_engine, 'en', merchant_domain=spec['merchant_domain'])
     for variant in _fz_search_variants(query):
         add(country, 'local', scoped, 'en', variant_query=variant, geo_cue=True)
-    catalog_engine = ('serper_search' if serper_primary() and _fast_provider_supports_operators('serper') else 'google')
+    catalog_engine = ('serper_search' if primary_serper and _fast_provider_supports_operators('serper') else 'google')
     image_engine = 'serper_images' if catalog_engine == 'serper_search' and FAST_PROVIDER_IMAGES else TEXT_DIRECT_IMAGES_ENGINE
     for cc in dict.fromkeys([country] + list(DEFAULT_GLOBAL_COUNTRIES)):
         if cc not in GLOBAL_MARKET_STORES or cc == country and country != 'cn':
@@ -21531,7 +21550,7 @@ def _web_text_direct_specs(query, country):
                         add(cc, role, image_engine, hl, catalog_domain=domain, **extra)
         else:
             add(cc, role, catalog_engine, 'en')
-            add(cc, role, 'serper_shopping' if serper_primary() and FAST_PROVIDER_SHOPPING else
+            add(cc, role, 'serper_shopping' if primary_serper and FAST_PROVIDER_SHOPPING else
                 'google_shopping' if ENABLE_GOOGLE_SHOPPING else TEXT_DIRECT_IMAGES_ENGINE, 'en')
     return specs
 
@@ -21736,7 +21755,8 @@ def _web_text_direct_candidates(data, query, target, provider):
         records = data.get(field)
         if not isinstance(records, list):
             continue
-        for start in range(0, min(120, len(records)), 30):
+        limit = len(records) if target.get('_text_serper_passthrough') and 'serper' in provider else min(120, len(records))
+        for start in range(0, limit, 30):
             rows.extend(_local_discovery_rows({field: records[start:start+30]}, query, target, provider))
     if data.get('images_results'):
         rows.extend(_local_discovery_rows({'images_results': data['images_results']}, query, target, provider))
@@ -21774,6 +21794,7 @@ def _web_text_direct_search(query, country, lang, progress_callback=None, cancel
     extended = False
     market = dict(_web_market(country), _query=query, _image_discovery=bool(current_market().get('_image_discovery')),
                   global_countries=[c for c in DEFAULT_GLOBAL_COUNTRIES if c != country])
+    market['_text_serper_passthrough'] = not market['_image_discovery']
     # One price ledger per market: every lane's target for that market shares
     # the same list object, so a shopping unit seen by one lane prices another's row.
     ledgers = {country: []}
@@ -21808,7 +21829,9 @@ def _web_text_direct_search(query, country, lang, progress_callback=None, cancel
         if spec_key in submitted_specs:
             return
         submitted_specs.add(spec_key)
-        target = dict(_web_market(spec['country']), _collection_deadline=deadline, _image_discovery=bool(market.get('_image_discovery')))
+        target = dict(_web_market(spec['country']), _collection_deadline=deadline,
+                      _image_discovery=bool(market.get('_image_discovery')),
+                      _text_serper_passthrough=market['_text_serper_passthrough'])
         if spec['role'] == 'global':
             target['_retrieval_role'] = 'global'
         target['_shopping_units'] = ledgers.setdefault(spec['country'], [])
@@ -21946,11 +21969,12 @@ def _web_text_direct_search(query, country, lang, progress_callback=None, cancel
                     if spec['role'] == 'global' and cc == 'cn':
                         host = (_global_store_match(row['url'], cc) or ('', host))[1]
                     cap = TEXT_DIRECT_LOCAL_MAX if spec['role'] == 'local' else TEXT_DIRECT_GLOBAL_MAX
+                    unrestricted = _web_serper_text_passthrough(row)
                     if row.get('collection_product'):
-                        if collection_counts[cc] >= COLLECTION_PRODUCTS_MAX:
+                        if not unrestricted and collection_counts[cc] >= COLLECTION_PRODUCTS_MAX:
                             continue
                         collection_counts[cc] += 1
-                    elif (counts[cc] - collection_counts[cc] >= cap or merchant_counts[(cc, host)] >=
+                    elif not unrestricted and (counts[cc] - collection_counts[cc] >= cap or merchant_counts[(cc, host)] >=
                           min(cap, TEXT_DIRECT_LOCAL_STORE_MAX if spec['role'] == 'local' else _web_marketplace_repeat_cap(host))):
                         continue
                     rows[key] = dict(row)
