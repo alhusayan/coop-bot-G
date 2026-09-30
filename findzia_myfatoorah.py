@@ -1,4 +1,4 @@
-"""Findzia 156.7.12: embedded checkout, Apple Pay window and verified credits.
+"""Findzia 156.7.13: embedded checkout, Apple Pay window and verified credits.
 Disabled by default. Sandbox uses a separate key and an explicit email allowlist.
 No card data, browser prices, or redirect claims are accepted as payment proof.
 """
@@ -126,10 +126,12 @@ class MyFatoorahPack:
     def public(self, member):
         window = getattr(self, 'apple_window', None)
         return {'ok': True, 'enabled': self.enabled, 'environment': self.mode,
-                'checkout_mode': 'embedded', 'checkout_build': '156.7.12',
+                'checkout_mode': 'embedded', 'checkout_build': '156.7.13',
                 'checkout_available': self.allowed(member), 'plan_id': 'pack',
                 'embedded_available': self.embedded and self.allowed(member),
-                'apple_pay_domain_verified': self.apple_verified and not (window and window.configured),
+                # The legacy flag is not domain verification. The Findzia
+                # Shopify parent must never offer the old, unverified wallet.
+                'apple_pay_domain_verified': False,
                 'apple_pay_window': window.public(member) if window else {'available': False}}
 
     def api(self, method, path, body=None, intent=None):
@@ -436,7 +438,7 @@ class MyFatoorahPack:
                 WHERE o.member=? AND o.mode=? AND o.state IN ('creating','pending','session_processing')""",
                 (intent,member['id'],self.mode))
         methods=['googlepay','card']
-        if self.apple_verified or getattr(getattr(self, 'apple_window', None), 'ready', False):
+        if getattr(getattr(self, 'apple_window', None), 'ready', False):
             methods.append('applepay')
         body={'PaymentMode':'COLLECT_DETAILS','OperationType':'PAY',
               'Order':{'Amount':4.99,'Currency':'USD'},'SupportedPaymentMethods':methods,
@@ -598,6 +600,13 @@ class MyFatoorahPack:
             if row['checked'] > int(time.time())-3: raise HTTPException(429,'please_wait')
             db.execute('UPDATE fz_mf_orders SET checked=? WHERE intent=?',(int(time.time()),intent))
         try:
+            try:
+                identifier(payment)
+            except HTTPException:
+                # 156.7.11 stored an owned intent before redirect, sometimes
+                # without a payment id. Reconcile that invoice with provider
+                # reads; absence of an id is never payment success or a retry.
+                return bool(self.resume(member, intent).get('confirmed'))
             return self.verify(payment,row['invoice'],member['id'])
         except HTTPException as exc:
             LOG.warning('Findzia MF invoice=%s confirmation=%s',row['invoice'],exc.detail)
@@ -692,7 +701,7 @@ def install_myfatoorah(app, credits):
         return await asyncio.to_thread(service.accounts.member,service.accounts.token(request))
     @app.on_event('startup')
     async def startup():
-        LOG.warning('MF_CHECKOUT_BUILD version=156712 mode=embedded enabled=%s',service.embedded)
+        LOG.warning('MF_CHECKOUT_BUILD version=156713 mode=embedded enabled=%s',service.embedded)
         if service.ready: service.task=asyncio.create_task(service.worker())
     @app.on_event('shutdown')
     async def shutdown():
