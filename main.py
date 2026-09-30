@@ -1,4 +1,4 @@
-# v128.5.42.22: Serper photo alternatives require complete reference/candidate visual admission.
+# v128.5.42.23: photo-only alternatives admit useful nearby designs; typed searches bypass visual admission.
 # Marketplace repair: progressive media, open domestic retrieval, observed filters, on-demand insights.
 # v128.5.42: fast observed card media and bounded per-product merchant collection expansion.
 # v128.5.38: Serper photo alternatives; independent US/CN domestic discovery.
@@ -393,7 +393,7 @@ from findzia_billing import CreditMiddleware, install_billing
 app.add_middleware(CreditMiddleware, owner=app)
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization', 'X-Findzia-Request-Id'], max_age=86400)
-BUILD_ID = 'v128.5.42.22-visual'
+BUILD_ID = 'v128.5.42.23-alternatives'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -2444,7 +2444,8 @@ def publish_image_for_lens(image_b64, mime_type):
 # A price update must never turn a Serper description search into a Lens match.
 def _web_result_group(row):
     sources = set(row.get('retrieval_sources') or [])
-    if (row.get('image_query_result') and 'google_lens' not in sources
+    origin = row.get('search_origin') or row.get('reference_search_kind')
+    if (origin != 'text' and row.get('image_query_result') and 'google_lens' not in sources
             and any(s == 'serper' or s.startswith('serper_') for s in sources)):
         return 'alternative'
     scope = str(row.get('market_scope') or row.get('market') or '').lower()
@@ -2464,7 +2465,52 @@ def _web_set_result_group(row):
 
 
 def _web_image_retrieval_row(row):
-    return _web_set_result_group(dict(row, image_query_result=True))
+    return _web_set_result_group(dict(row, search_origin='image', image_query_result=True,
+                                      reference_search_kind='image'))
+
+
+def _web_text_retrieval_row(row):
+    """A retailer photo retrieved for typed words is not a shopper photo query."""
+    row = dict(row)
+    audit_hidden = bool(row.get('alternative_visual_hidden')) or (
+        row.get('alternative_visual_status') in ('pending', 'unavailable', 'rejected')
+        and not row.get('hidden_reason'))
+    photo_hidden = row.get('photo_match_reason') == 'different_product_form'
+    if (audit_hidden or photo_hidden) and not row.get('hidden_reason'):
+        row.pop('hidden', None)
+    if photo_hidden:
+        row.pop('photo_match_status', None)
+        row.pop('photo_match_reason', None)
+    for key in list(row):
+        if key.startswith('alternative_visual_'):
+            row.pop(key, None)
+    row.update(search_origin='text', reference_search_kind='text', image_query_result=False)
+    return _web_set_result_group(row)
+
+
+def _web_alternative_form_conflict(reference, candidate):
+    """Keep distinct footwear uses apart, without demanding identical materials."""
+    def families(profile):
+        if not isinstance(profile, dict):
+            return set()
+        text = ' '.join(str(profile.get(k) or '') for k in
+                        ('category', 'subtype', 'product_type', 'form_factor', 'intended_use')).lower()
+        text = re.sub(r'[_-]+', ' ', text)
+        groups = {
+            'boots': r'\bboots?\b',
+            'heels': r'\b(?:heels?|pumps|stilettos?)\b',
+            'athletic': r'\b(?:trainers?|sneakers?|running shoes?|athletic shoes?)\b',
+            'sandals': r'\b(?:sandals?|flip flops?)\b',
+            'slippers': r'\b(?:slippers?|slides?)\b',
+            'slip_on': r'\b(?:slip ons?|moccasins?|loafers?)\b',
+        }
+        found = {name for name, pattern in groups.items() if re.search(pattern, text)}
+        # "Slip-on sneakers" remain athletic; closure alone does not redefine them.
+        if found - {'slip_on'}:
+            found.discard('slip_on')
+        return found
+    wanted, actual = families(reference), families(candidate)
+    return bool(wanted and actual and wanted.isdisjoint(actual))
 
 
 def _web_alternative_fingerprint(row):
@@ -2479,12 +2525,12 @@ def _web_alternative_visible(row):
     """Description-search photos are private until a complete visual audit passes."""
     return (_web_result_group(row) != 'alternative' or
             (row.get('alternative_visual_status') == 'approved'
-             and row.get('alternative_visual_policy') == '156.7.2'
+             and row.get('alternative_visual_policy') == '156.7.3'
              and row.get('alternative_visual_proof') == _web_alternative_fingerprint(row)))
 
 
 def _web_alternative_visual_gate(row, item=None, reference=None, *, complete=False):
-    """A similar identity label alone does not prove a useful photo alternative."""
+    """Accept useful near alternatives, independently of exact identity scores."""
     if _web_result_group(row) != 'alternative':
         return row
     row = dict(row)
@@ -2493,33 +2539,34 @@ def _web_alternative_visual_gate(row, item=None, reference=None, *, complete=Fal
     if complete:
         status, reason = 'unavailable', 'visual_evidence_unavailable'
         try:
-            scores = [float(item.get(key) or 0)
-                      for key in ('confidence', 'alternative_confidence')]
-            confidence = min(scores) if all(0 <= value <= 100 for value in scores) else 0
+            value = item.get('alternative_confidence')
+            confidence = float(value) if not isinstance(value, bool) else 0
+            if not 0 <= confidence <= 100:
+                confidence = 0
         except (TypeError, ValueError):
             confidence = 0
         axes = item.get('visual_axes') or {}
-        critical = {'category', 'subtype', 'intended_use', 'function', 'product_role',
-                    'mounting', 'installation', 'structure', 'form_factor', 'compatibility'}
-        shape = {'structure', 'components', 'form_factor', 'silhouette', 'shape_geometry',
-                 'material', 'texture', 'distinctive_features'}
+        critical = {'category', 'function', 'product_role', 'compatibility'}
         fit = item.get('alternative_fit')
         if item.get('visual_evidence') and reference and item.get('candidate_profile'):
-            if fit == 'different_product' or any(axes.get(k) == 'different' for k in critical):
+            if (fit == 'different_product' or any(axes.get(k) == 'different' for k in critical)
+                    or _web_alternative_form_conflict(reference, item.get('candidate_profile'))
+                    or _fz_visual_form_rejected(item, reference)):
                 status, reason = 'rejected', 'different_product_design'
             elif (fit in ('same_product', 'close_alternative')
                   and confidence >= WEB_ALTERNATIVE_MIN_CONFIDENCE
-                  and axes.get('category') == 'same'
-                  and sum(axes.get(k) == 'same' for k in shape) >= 2
-                  and not _fz_visual_form_rejected(item, reference)):
+                  and axes.get('category') == 'same'):
                 status, reason = 'approved', 'reference_photo_checked'
             else:
                 status, reason = 'unavailable', 'visual_match_uncertain'
     row.update(alternative_visual_status=status, alternative_visual_reason=reason,
-               alternative_visual_policy='156.7.2')
+               alternative_visual_policy='156.7.3')
     row['alternative_visual_proof'] = _web_alternative_fingerprint(row) if status == 'approved' else ''
     if status != 'approved':
         row['hidden'] = True
+        row['alternative_visual_hidden'] = True
+    elif row.pop('alternative_visual_hidden', False) and not row.get('photo_match_status') and not row.get('hidden_reason'):
+        row.pop('hidden', None)
     return row
 
 
@@ -11284,7 +11331,7 @@ WEB_VISUAL_REFERENCE_IMAGE_EDGE = max(320, min(640, int(os.environ.get('WEB_VISU
 WEB_VISUAL_CLASSIFIER_JPEG_QUALITY = max(55, min(85, int(os.environ.get('WEB_VISUAL_CLASSIFIER_JPEG_QUALITY', '78'))))
 WEB_VISUAL_CLASSIFIER_MAX_DOWNLOAD_BYTES = max(384000, min(3 * 1024 * 1024, int(os.environ.get('WEB_VISUAL_CLASSIFIER_MAX_DOWNLOAD_BYTES', str(1536 * 1024)))))
 WEB_VISUAL_CLASSIFIER_MIN_CONFIDENCE = max(70, min(95, int(os.environ.get('WEB_VISUAL_CLASSIFIER_MIN_CONFIDENCE', '80'))))
-WEB_ALTERNATIVE_MIN_CONFIDENCE = max(80, min(95, int(os.environ.get('WEB_ALTERNATIVE_MIN_CONFIDENCE', '85'))))
+WEB_ALTERNATIVE_MIN_CONFIDENCE = max(60, min(95, int(os.environ.get('WEB_ALTERNATIVE_MIN_CONFIDENCE', '70'))))
 WEB_VISUAL_CLASSIFIER_EXACT_SCORE = max(86, min(98, int(os.environ.get('WEB_VISUAL_CLASSIFIER_EXACT_SCORE', '92'))))
 WEB_VISUAL_IMAGE_CACHE = {}
 WEB_VISUAL_IMAGE_CACHE_LOCK = threading.Lock()
@@ -16131,7 +16178,7 @@ def _web_identity_content_key(candidates, market, reference, evidence, photo_evi
         # market and proof locks: they may expose a different sold variant.
         rows.append({k: v for k, v in candidate.items() if k != 'price'})
         rows[-1]['image_digest'] = digest(inline)
-    blob = {'policy': 'v15672-photo-alternatives-content', 'score_version': _WEB_MATCH_SCORE_VERSION,
+    blob = {'policy': 'v15673-near-photo-alternatives-content', 'score_version': _WEB_MATCH_SCORE_VERSION,
             'reference_photo_evidence': photo_evidence or {},
             'model': GEMINI_FAST_MODEL, 'reference': digest(reference), 'rows': rows,
             'country': str((market or {}).get('country') or DEFAULT_COUNTRY).lower(),
@@ -16176,7 +16223,7 @@ def _web_identity_offer_content_key(candidate, market, reference, inline, photo_
         return [str(value.get('mime_type') or ''),
                 hashlib.sha256(str(value['data']).encode('ascii')).hexdigest()]
     material = {
-        'policy': 'v15672-photo-alternatives-offer',
+        'policy': 'v15673-near-photo-alternatives-offer',
         'reference_photo_evidence': photo_evidence or {},
         'score_version': _WEB_MATCH_SCORE_VERSION,
         'model': GEMINI_FAST_MODEL,
@@ -16510,20 +16557,26 @@ before deciding whether to show this description-search result. Output
 alternative_fit: same_product, close_alternative, different_product, or uncertain;
 and alternative_confidence: integer 0-100. For other candidates use not_requested
 and 0. Missing/unreadable candidate or reference images MUST be uncertain.
-A close alternative must have the same specific product type, use, construction
-and a closely matching design: shape, components, closures, material/texture and
-recognizable details. Same brand, store, broad category or color is insufficient.
-For footwear distinguish slip-on woven/knit moccasins from lace-up athletic
-trainers, leather formal loafers, open-back slippers, sandals, pumps and boots.
-An ankle boot is not an alternative to a low-cut slip-on; a running shoe with
-laces is not a close alternative just because both are Skechers. Apply this
-specificity to EVERY category, not only shoes. A lamp/device/accessory differing
-in physical function or structure must be different_product.
-Allow camera angle, background, lighting and wear differences. A modest color
-variation may be close if the actual design and construction still agree.
-Do not infer matching construction from absent evidence. Populate same_axes,
-different_axes and the two profiles from observed facts supporting the decision.
-When resemblance is broad or uncertain, choose uncertain or different_product.
+This is a useful-alternatives search, NOT an exact-identity test. Accept a
+close_alternative when the images show the same functional product family and
+a reasonably similar overall form/use. Different brands, models, colors,
+materials, upholstery, textures, dimensions and decorative details are allowed.
+Do not lower alternative_confidence merely because exact identity is uncertain;
+it measures confidence in being a useful alternative, independently of confidence
+and identity_score. Unknown specifications are not evidence of a mismatch.
+For example, lounge/accent chairs with different frames, rope patterns, cushions
+or arm designs may be close alternatives. Low-cut casual slip-ons may differ
+in fabric, color, sole details or brand. Do not require matching multiple details.
+Still reject unrelated products, accessories instead of the whole product,
+incompatible parts, or a clearly different use/form: an ankle boot, running
+trainer or open-back slipper is not a substitute for a casual closed slip-on;
+a bar stool, folding camp chair or office chair is not a lounge-chair alternative.
+Apply the same distinction between useful variants and wrong product types to
+every category. Brand, broad category or color alone never establish relevance.
+Ignore camera angle, background, lighting and wear. Populate same_axes and
+different_axes truthfully; a different material or frame need not prevent a
+close_alternative. Use uncertain only when the actual images do not let you
+judge the product type and overall resemblance, not for ordinary design variants.
 """
     user_data = {
         **_web_ai_reference_context(reference_identity, identity, visual_mode, photo_evidence if visual_mode else None),
@@ -16870,12 +16923,19 @@ def _web_attach_captured_result_sections(payload, lang, allow_ai=True, cancel_ev
     has_reference_photo = bool(_web_visual_reference_digest(reference_image_b64)) and (
         not reference_image_mime or reference_image_mime.startswith('image/')
     )
-    if allow_ai and has_reference_photo and _review_result is None:
+    user_photo = bool(has_reference_photo and text_reference is None)
+    if not user_photo:
+        # Includes optional Lens expansion from a retailer photo for typed text.
+        # Search wording/translation can use AI; result admission must not.
+        allow_ai = False
+        _review_result = None
+        results = [_web_text_retrieval_row(row) for row in results]
+    if allow_ai and user_photo and _review_result is None:
         results = _web_prepare_identity_cards(results, cancel_event)
     # Result-list consensus is useful for text search, but in an image search
     # it can amplify one wrong Lens guess across every card. Keep the original
     # Lens/OCR identity as a hint and let the reference photo remain primary.
-    typed_query = bool(not has_reference_photo and str(out.get('source') or '') in ('text_direct', 'text_fast'))
+    typed_query = bool(text_reference is not None or (not has_reference_photo and str(out.get('source') or '') in ('text_direct', 'text_fast')))
     # A typed brand/model is the shopper's own identity: never let a cluster of
     # neighbouring listings ("Heaven 8-Seater...") replace "Livia" as the anchor.
     classification_anchor = (
@@ -16884,7 +16944,7 @@ def _web_attach_captured_result_sections(payload, lang, allow_ai=True, cancel_ev
         else _web_classification_anchor(identity, results)
     )
     market_snapshot = dict(out.get('market') or current_market() or {})
-    if has_reference_photo and not text_reference:
+    if user_photo:
         results = [_web_image_retrieval_row(row) for row in results]
     results = [_web_apply_market_context(row, market_snapshot) for row in results]
     ai_started = time.time()
@@ -16898,7 +16958,7 @@ def _web_attach_captured_result_sections(payload, lang, allow_ai=True, cancel_ev
             match_guard_by_id[index] = match_guard
         if market_guard is not None:
             market_guard_by_id[index] = market_guard
-    visual_review = _web_visual_review_needed(
+    visual_review = user_photo and _web_visual_review_needed(
         reference_image_b64,
         reference_image_mime,
         results,
@@ -16988,7 +17048,7 @@ def _web_attach_captured_result_sections(payload, lang, allow_ai=True, cancel_ev
         except Exception:
             confidence = 0
         visual_evidence = bool(ai_item.get('visual_evidence'))
-        if has_reference_photo and _fz_visual_form_rejected(
+        if user_photo and _fz_visual_form_rejected(
                 ai_item, ai_item.get('_reference_profile') or ai_result.get('reference_profile')):
             row.update(hidden=True, photo_match_status='rejected', photo_match_reason='different_product_form')
         match_threshold = WEB_VISUAL_CLASSIFIER_MIN_CONFIDENCE if visual_evidence else WEB_AI_CLASSIFIER_MIN_CONFIDENCE
@@ -17119,7 +17179,7 @@ def _web_attach_captured_result_sections(payload, lang, allow_ai=True, cancel_ev
         row['market_classification_confidence'] = market_guard[2] if use_structured_market else (confidence if use_ai_market else None)
         row['market_classification_reason'] = market_guard[1] if use_structured_market else (str(ai_item.get('market_reason') or 'rules_fallback') if use_ai_market else 'rules_fallback')
         row['classification_anchor'] = classification_anchor
-        row['reference_search_kind'] = 'image' if visual_review else 'text'
+        row['reference_search_kind'] = 'image' if user_photo else 'text'
         row['reference_text_fields_used'] = list(ai_item.get('reference_text_fields_used') or [])
         row['visual_exact_required'] = bool(visual_review)
         if ai_item.get('visual_axes'):
@@ -17156,10 +17216,11 @@ def _web_attach_captured_result_sections(payload, lang, allow_ai=True, cancel_ev
                   f"same={sorted(_axis_evidence['same'])} different={sorted(_axis_evidence['different'])} "
                   f"surface_diff={sorted(_axis_evidence['surface_differences'])} unknown={len(score_metadata.get('unknown_attributes') or [])} "
                   f"ref_text={_web_reference_has_printed_text(scoring_reference)} host={_host}")
-        if has_reference_photo and not text_reference:
+        if user_photo:
             row = _web_alternative_visual_gate(
                 row, ai_item, scoring_reference,
-                complete=bool(_review_result is None and not ai_result.get('review_error')))
+                complete=bool(_review_result is None and
+                              ai_result.get('review_error') in (None, '', 'partial_offer_review')))
         row['identity_review_error'] = ai_result.get('review_error')
         # The published section must agree with the configured identity-score
         # threshold as well as the proof decision.  This also remains correct
@@ -17238,6 +17299,13 @@ def _web_attach_captured_result_sections(payload, lang, allow_ai=True, cancel_ev
     out['identity_review_error'] = ai_result.get('review_error')
     out['identity_review_status'] = 'failed' if ai_result.get('review_error') else 'partial' if len(ai_result.get('items') or []) < len(ai_candidates) and ai_result.get('items') else 'completed' if ai_result.get('items') else 'not_completed'
     out['classification_elapsed_ms'] = int((time.time() - ai_started) * 1000)
+    if user_photo and _review_result is None:
+        alternatives = [row for row in classified_results if _web_result_group(row) == 'alternative']
+        if alternatives:
+            stats = dict(Counter(row.get('alternative_visual_status', 'pending') for row in alternatives))
+            reasons = dict(Counter(row.get('alternative_visual_reason', 'unknown') for row in alternatives))
+            out['alternative_visual_summary'] = {'candidates': len(alternatives), 'status': stats, 'reasons': reasons}
+            print('PHOTO ALTERNATIVE REVIEW ' + json.dumps(out['alternative_visual_summary'], sort_keys=True))
     print(f'WEB PRODUCT-INTELLIGENCE CLASSIFICATION source={ai_source} total={len(results)} match_rules={structured_match_count} market_rules={structured_market_count} ai_candidates={len(ai_candidates)} ai_used={ai_used_count} visual_candidates={visual_candidate_count} visual_evidence={out["visual_evidence_count"]} visual_used={visual_used_count} fallback={out["rules_fallback_count"]} exact={len(exact_results)} similar={len(similar_results)} local={len(local_results)} global={len(global_results)} elapsed={time.time() - ai_started:.2f}s anchor={classification_anchor[:90]!r}')
     return _web_group_results(out)
 
@@ -26328,7 +26396,7 @@ def _web_identity_public_row(row):
     return safe
 
 
-def _web_identity_stream_snapshot(rows, query, market, lang, completed, elapsed_ms):
+def _web_identity_stream_snapshot(rows, query, market, lang, completed, elapsed_ms, visual_review_required=True):
     ordered = sorted((_web_identity_public_row(_web_apply_market_context(r, market)) for r in rows if not r.get("hidden") and _web_alternative_visible(r) and _market_offer_allowed(r, market) and not _fz_product_form_conflict(query, r.get('raw_title') or r.get('title'))), key=_web_identity_result_sort_key)
     exact = [r for r in ordered if r.get('match_type') == 'exact']
     similar = [r for r in ordered if r.get('match_type') != 'exact']
@@ -26357,7 +26425,7 @@ def _web_identity_stream_snapshot(rows, query, market, lang, completed, elapsed_
                                       'similar_global': sections[1]['global_results']},
             'exact_count': len(exact), 'similar_count': len(similar), 'local_count': len(local),
             'global_count': len(global_rows), 'scored_count': scored, 'reviewed_count': reviewed,
-            'visual_review_required': True, 'elapsed_ms': elapsed_ms})
+            'visual_review_required': visual_review_required, 'elapsed_ms': elapsed_ms})
 
 
 async def _web_stream_image_identity_batches(image_b64, mime, caption, country, lang, cancel_event,
@@ -26457,7 +26525,9 @@ async def _web_stream_image_identity_batches_core(image_b64, mime, caption, coun
     search_task = None
     review_count = 0
     first_results_ms = first_match_ms = None
-    enabled = WEB_AI_CLASSIFIER_ENABLED and WEB_VISUAL_CLASSIFIER_ENABLED and bool(GEMINI_API_KEY)
+    text_search = reference_context is not None
+    enabled = not text_search and WEB_AI_CLASSIFIER_ENABLED and WEB_VISUAL_CLASSIFIER_ENABLED and bool(GEMINI_API_KEY)
+    origin_row = _web_text_retrieval_row if text_search else _web_image_retrieval_row
 
     def elapsed():
         return int((time.monotonic() - clock) * 1000)
@@ -26478,6 +26548,9 @@ async def _web_stream_image_identity_batches_core(image_b64, mime, caption, coun
                 pass
 
     def pending_row(row):
+        if text_search:
+            return dict(_web_text_retrieval_row(_web_apply_market_context(row, market)),
+                        classification_final=True, identity_review_status='not_required')
         item = _web_fail_closed_visual_row(_web_apply_market_context(row, market), 'identity_review_pending')
         item['classification_final'] = False
         item['identity_review_status'] = 'pending' if enabled else 'unavailable'
@@ -26561,7 +26634,7 @@ async def _web_stream_image_identity_batches_core(image_b64, mime, caption, coun
                 identity = str(final.get('query') or caption or '').strip()
                 market = final.get('market') or market
                 captured = list(final.get('captured_results') or final.get('results') or [])
-                captures = {_web_identity_offer_key(r): dict(r) for r in captured
+                captures = {_web_identity_offer_key(r): origin_row(r) for r in captured
                             if not _fz_product_form_conflict(identity, r.get('raw_title') or r.get('title'))}
                 rows = {}
                 queued.clear()
@@ -26584,7 +26657,7 @@ async def _web_stream_image_identity_batches_core(image_b64, mime, caption, coun
                     first_results_ms = elapsed()
                 fill_review_slots()
                 yield _web_stream_event(_web_identity_stream_snapshot(
-                    rows.values(), identity, market, lang, False, elapsed()))
+                    rows.values(), identity, market, lang, False, elapsed(), not text_search))
 
             elif not final_ready and progress_task in done:
                 partial = progress_task.result()
@@ -26594,7 +26667,7 @@ async def _web_stream_image_identity_batches_core(image_b64, mime, caption, coun
                 if query and query != query_sent:
                     yield _web_stream_event({'event': 'query', 'query': query, 'market': market})
                     query_sent = query
-                preview = [r for r in preview if not _fz_product_form_conflict(query, r.get('raw_title') or r.get('title'))]
+                preview = [origin_row(r) for r in preview if not _fz_product_form_conflict(query, r.get('raw_title') or r.get('title'))]
                 for original in preview:
                     key = _web_identity_offer_key(original)
                     token = _web_identity_capture_key(original, query)
@@ -26672,14 +26745,14 @@ async def _web_stream_image_identity_batches_core(image_b64, mime, caption, coun
             fill_review_slots()
             if final_ready and changed:
                 yield _web_stream_event(_web_identity_stream_snapshot(
-                    rows.values(), identity, market, lang, False, elapsed()))
+                    rows.values(), identity, market, lang, False, elapsed(), not text_search))
 
         if cancel_event.is_set():
             return
-        snapshot = _web_identity_stream_snapshot(rows.values(), identity, market, lang, True, elapsed())
+        snapshot = _web_identity_stream_snapshot(rows.values(), identity, market, lang, True, elapsed(), not text_search)
         yield _web_stream_event(snapshot)
         yield _web_stream_event({'event': 'identity_review', 'build': BUILD_ID,
-                                 'status': 'completed' if all(r.get('identity_review_status') == 'completed' for r in rows.values()) and rows else 'partial' if snapshot['scored_count'] else 'unavailable',
+                                 'status': 'not_required' if text_search else 'completed' if all(r.get('identity_review_status') == 'completed' for r in rows.values()) and rows else 'partial' if snapshot['scored_count'] else 'unavailable',
                                  'scored_count': snapshot['scored_count'], 'reviewed_count': snapshot['reviewed_count'],
                                  'batch_count': review_count, 'first_results_ms': first_results_ms, 'first_match_ms': first_match_ms})
         # Price enrichment reuses the latest full row: it cannot erase a score.
@@ -26705,16 +26778,17 @@ async def _web_stream_image_identity_batches_core(image_b64, mime, caption, coun
                                  'global_count': snapshot['global_count'], 'classification_engine': 'progressive_identity_batches',
                                  'first_results_ms': first_results_ms, 'first_match_ms': first_match_ms,
                                  'identity_batch_count': review_count, 'elapsed_ms': elapsed()})
-        print(f'WEB IDENTITY STREAM results={len(rows)} scored={snapshot["scored_count"]} batches={review_count} first_results_ms={first_results_ms} first_match_ms={first_match_ms}')
+        print(f'WEB IDENTITY STREAM captured={len(rows)} visible={len(snapshot["results"])} scored={snapshot["scored_count"]} batches={review_count} first_results_ms={first_results_ms} first_match_ms={first_match_ms}')
     except asyncio.CancelledError:
         raise
     except Exception as exc:
         # Preserve useful cards and completed audits on partial provider failure.
         print(f'WEB IDENTITY STREAM ERR: {type(exc).__name__}')
-        yield _web_stream_event({'event': 'error', 'code': 'partial_search_failure', 'recoverable': bool(rows)})
+        snapshot = _web_identity_stream_snapshot(rows.values(), identity, market, lang, True, elapsed(), not text_search)
+        yield _web_stream_event({'event': 'error', 'code': 'partial_search_failure', 'recoverable': bool(snapshot['results'])})
         if rows:
-            yield _web_stream_event(_web_identity_stream_snapshot(rows.values(), identity, market, lang, True, elapsed()))
-        yield _web_stream_event({'event': 'done', 'count': len(rows), 'partial': True, 'elapsed_ms': elapsed()})
+            yield _web_stream_event(snapshot)
+        yield _web_stream_event({'event': 'done', 'count': len(snapshot['results']), 'partial': True, 'elapsed_ms': elapsed()})
     finally:
         cancel_event.set()
         tasks = list(reviews) + list(price_tasks.values())
