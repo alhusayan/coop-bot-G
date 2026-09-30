@@ -1,4 +1,4 @@
-"""Findzia 156.7.13: own-origin Apple Pay window for Shopify storefronts.
+"""Findzia 156.7.14: registration diagnostics for the 156.7.13 Apple Pay window.
 
 The parent storefront keeps its embedded card checkout. This top-level page
 uses MyFatoorah's SDK on an origin whose verification file we can actually
@@ -26,6 +26,52 @@ PAGE_PATH = '/findzia/apple-pay'
 API = '/api/billing/myfatoorah/apple-pay'
 HEADERS = {'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer',
            'X-Content-Type-Options': 'nosniff', 'X-Frame-Options': 'DENY'}
+DIAGNOSTIC_BUILD = '156714'
+
+
+def diagnostic_text(value, secret_values=()):
+    """Bounded provider error text, never a response/body/header dump."""
+    if not isinstance(value, str):
+        return ''
+    # Redact before truncation so a partial credential cannot survive the cap.
+    for secret in sorted((s for s in secret_values if isinstance(s, str) and s), key=len, reverse=True):
+        value = value.replace(secret, '[redacted]')
+    value = re.sub(r'(?i)\bBearer\s+\S+', 'Bearer [redacted]', value)
+    value = re.sub(r'(?i)\b(?:authorization|api[_ -]?key|access[_ -]?token|secret|password)\s*[:=]\s*\S+',
+                   '[redacted credential]', value)
+    # Keep the domain/file path useful for diagnosis; omit URL queries/fragments.
+    value = re.sub(r'(https?://[^\s\"\'<>?#]+)[?#][^\s\"\'<>]*', r'\1[redacted]', value)
+    value = re.sub(r'[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}', '[redacted email]', value)
+    value = re.sub(r'[A-Za-z0-9_+/=.\-]{48,}', '[redacted token]', value)
+    value = re.sub(r'\b(?:\d[ -]?){12,19}\b', '[redacted number]', value)
+    value = ''.join(' ' if ord(c) < 32 or 127 <= ord(c) <= 159 or c in '\u2028\u2029' else c for c in value)
+    return ' '.join(value.split())[:600]
+
+
+def registration_diagnostic(response, data, secret_values):
+    """Only documented error fields. In particular, Data is never logged."""
+    result = {'http': response.status_code, 'response_format': 'json' if isinstance(data, dict) else 'non_object_or_non_json'}
+    if not isinstance(data, dict):
+        return result
+    result['provider_success'] = data.get('IsSuccess') if isinstance(data.get('IsSuccess'), bool) else None
+    if response.status_code == 200 and data.get('IsSuccess') is True:
+        return result
+    message = diagnostic_text(data.get('Message'), secret_values)
+    if message:
+        result['provider_message'] = message
+    errors = data.get('ValidationErrors')
+    if isinstance(errors, list):
+        clean = []
+        for error in errors[:4]:
+            if not isinstance(error, dict):
+                continue
+            # Do not log Name, supplied Value, or any undocumented fields.
+            message = diagnostic_text(error.get('Error'), secret_values)
+            if message:
+                clean.append(message)
+        if clean:
+            result['validation_errors'] = clean
+    return result
 
 
 def origin(value):
@@ -111,8 +157,11 @@ class ApplePayWindow:
         if now < self.next_check:
             return
         self.next_check = now + 300
+        detail = {'build': DIAGNOSTIC_BUILD, 'domain': urlsplit(self.origin).hostname,
+                  'stage': 'verification_file'}
         try:
             response = requests.get(self.origin + WELL_KNOWN, timeout=(3, 10), allow_redirects=False)
+            detail['http'] = response.status_code
             if response.status_code != 200 or response.content.strip() != self.file.strip():
                 self.ready = False
                 self.state = 'verification_file_mismatch'
@@ -123,26 +172,39 @@ class ApplePayWindow:
             if not row:
                 # This documented endpoint returns Data:null on SUCCESS. The
                 # normal v3 payment wrapper correctly expects Data to be a dict.
+                detail['stage'] = 'registration'
+                detail.pop('http', None)
                 response = requests.post(self.s.base + '/v2/RegisterApplePayDomain',
                     headers={'Authorization': 'Bearer ' + self.s.key},
                     json={'DomainName': urlsplit(self.origin).hostname},
                     timeout=(3, 15), allow_redirects=False)
-                data = response.json()
+                try:
+                    data = response.json()
+                except ValueError:
+                    data = None
+                detail.update(registration_diagnostic(response, data, (self.s.key, self.s.secret)))
                 if response.status_code != 200 or not isinstance(data, dict) or data.get('IsSuccess') is not True:
                     self.ready = False
                     self.state = 'registration_rejected'
                     return
                 with self.s.accounts.connect() as db:
                     db.execute('INSERT OR REPLACE INTO fz_mf_apple_domains VALUES(?,?)', (key, now))
+            else:
+                detail['stage'] = 'registration_cache'
             self.ready = True
             self.state = 'registered'
             self.next_check = now + 86400
-        except (requests.RequestException, ValueError, OSError):
+        except (requests.RequestException, ValueError, OSError) as error:
             self.ready = False
             self.state = 'registration_unavailable'
+            # Exception strings may contain request headers or response bodies.
+            detail['error_type'] = ('timeout' if isinstance(error, requests.Timeout) else
+                                    'tls' if isinstance(error, requests.exceptions.SSLError) else
+                                    'connection' if isinstance(error, requests.ConnectionError) else 'request_failed')
         finally:
-            # No provider response, key, account, token or payment data in logs.
             LOG.warning('MF_APPLE_PAY status=%s', self.state)
+            detail['status'] = self.state
+            LOG.warning('MF_APPLE_PAY_DETAIL %s', json.dumps(detail, ensure_ascii=True, separators=(',', ':')))
 
     def open(self, member, intent, language='en', theme='light'):
         self.s.require(member)
