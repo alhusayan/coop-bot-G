@@ -1,5 +1,5 @@
 {
-  "version": "156.7.4",
+  "version": "156.7.6",
   "languages": [
     "en",
     "ar",
@@ -810,7 +810,10 @@
       "Find products. Check prices.": "Find products. Check prices.",
       "Search by photo or name. Findzia finds offers in your local market and worldwide. Complete your purchase at the store.": "Search by photo or name. Findzia finds offers in your local market and worldwide. Complete your purchase at the store.",
       "Your activity": "Your activity",
-      "AI Shopping Assistant": "AI Shopping Assistant"
+      "AI Shopping Assistant": "AI Shopping Assistant",
+      "You’re out of search credits": "You’re out of search credits",
+      "Add credits to keep searching.": "Add credits to keep searching.",
+      "Add credits": "Add credits"
     },
     "ar": {
       "Take a photo. Find the product.": "صوّر المنتج. واعثر عليه.",
@@ -1361,7 +1364,10 @@
       "Find products. Check prices.": "اعثر على المنتج وتحقّق من سعره.",
       "Search by photo or name. Findzia finds offers in your local market and worldwide. Complete your purchase at the store.": "ابحث بصورة أو اسم. تجد Findzia عروضًا محلية وعالمية، وتكمل الشراء لدى المتجر.",
       "Your activity": "نشاطك",
-      "AI Shopping Assistant": "مساعد التسوّق الذكي"
+      "AI Shopping Assistant": "مساعد التسوّق الذكي",
+      "You’re out of search credits": "انتهى رصيد البحث",
+      "Add credits to keep searching.": "أضف رصيدًا لمتابعة البحث.",
+      "Add credits": "إضافة رصيد"
     },
     "de": {
       "Take a photo. Find the product.": "Ein Foto. Dein Produkt.",
@@ -1540,7 +1546,10 @@
       "{count} searches · {price}": "{count} Suchen · {price}",
       "AI Shopping Assistant": "KI-Einkaufsassistent",
       "Open Suggestions, choose what matters to you, then search for a suggested product.": "Öffne den KI-Einkaufsassistenten, wähle deine Prioritäten und starte eine neue Suche.",
-      "Help me choose": "Hilf mir bei der Auswahl"
+      "Help me choose": "Hilf mir bei der Auswahl",
+      "You’re out of search credits": "Dein Suchguthaben ist aufgebraucht",
+      "Add credits to keep searching.": "Lade Guthaben auf, um weiterzusuchen.",
+      "Add credits": "Guthaben aufladen"
     },
     "fr": {
       "Take a photo. Find the product.": "Une photo. Le bon produit.",
@@ -1719,7 +1728,10 @@
       "{count} searches · {price}": "{count} recherches · {price}",
       "AI Shopping Assistant": "Assistant shopping IA",
       "Open Suggestions, choose what matters to you, then search for a suggested product.": "Ouvrez l’assistant shopping IA, choisissez vos priorités, puis lancez une nouvelle recherche.",
-      "Help me choose": "Aidez-moi à choisir"
+      "Help me choose": "Aidez-moi à choisir",
+      "You’re out of search credits": "Vous n’avez plus de crédits de recherche",
+      "Add credits to keep searching.": "Ajoutez des crédits pour continuer vos recherches.",
+      "Add credits": "Ajouter des crédits"
     },
     "it": {
       "Search products": "Cerca prodotti",
@@ -1878,7 +1890,10 @@
       "{count} searches · {price}": "{count} ricerche · {price}",
       "AI Shopping Assistant": "Assistente shopping IA",
       "Open Suggestions, choose what matters to you, then search for a suggested product.": "Apri l’assistente shopping IA, scegli le tue priorità e avvia una nuova ricerca.",
-      "Help me choose": "Aiutami a scegliere"
+      "Help me choose": "Aiutami a scegliere",
+      "You’re out of search credits": "Hai esaurito i crediti di ricerca",
+      "Add credits to keep searching.": "Aggiungi crediti per continuare a cercare.",
+      "Add credits": "Aggiungi crediti"
     },
     "es": {
       "Take a photo. Find the product.": "Haz una foto. Encuentra el producto.",
@@ -2057,7 +2072,10 @@
       "{count} searches · {price}": "{count} búsquedas · {price}",
       "AI Shopping Assistant": "Asistente de compras con IA",
       "Open Suggestions, choose what matters to you, then search for a suggested product.": "Abre el asistente de compras con IA, elige tus prioridades e inicia una nueva búsqueda.",
-      "Help me choose": "Ayúdame a elegir"
+      "Help me choose": "Ayúdame a elegir",
+      "You’re out of search credits": "Se han agotado tus créditos de búsqueda",
+      "Add credits to keep searching.": "Añade créditos para seguir buscando.",
+      "Add credits": "Añadir créditos"
     },
     "pt": {
       "Take a photo. Find the product.": "Uma foto. O produto certo.",
@@ -2235,7 +2253,10 @@
       "{count} searches · {price}": "{count} pesquisas · {price}",
       "AI Shopping Assistant": "Assistente de compras com IA",
       "Open Suggestions, choose what matters to you, then search for a suggested product.": "Abra o assistente de compras com IA, escolha suas prioridades e inicie uma nova busca.",
-      "Help me choose": "Ajude-me a escolher"
+      "Help me choose": "Ajude-me a escolher",
+      "You’re out of search credits": "Seus créditos de pesquisa acabaram",
+      "Add credits to keep searching.": "Adicione créditos para continuar pesquisando.",
+      "Add credits": "Adicionar créditos"
     },
     "tr": {
       "Take a photo. Find the product.": "Fotoğraf çek. Ürünü bul.",
@@ -2413,7 +2434,10 @@
       "{count} searches · {price}": "{count} arama · {price}",
       "AI Shopping Assistant": "Yapay zekâ alışveriş asistanı",
       "Open Suggestions, choose what matters to you, then search for a suggested product.": "Yapay zekâ alışveriş asistanını açın, önceliklerinizi seçin ve yeni bir arama başlatın.",
-      "Help me choose": "Seçmeme yardım et"
+      "Help me choose": "Seçmeme yardım et",
+      "You’re out of search credits": "Arama krediniz bitti",
+      "Add credits to keep searching.": "Aramaya devam etmek için kredi ekleyin.",
+      "Add credits": "Kredi ekle"
     },
     "ru": {
       "Take a photo. Find the product.": "Сфотографируйте. Найдите товар.",
@@ -2591,7 +2615,10 @@
       "{count} searches · {price}": "Поисков: {count} · {price}",
       "AI Shopping Assistant": "ИИ-помощник по покупкам",
       "Open Suggestions, choose what matters to you, then search for a suggested product.": "Откройте ИИ-помощника, выберите приоритеты и начните новый поиск.",
-      "Help me choose": "Помогите выбрать"
+      "Help me choose": "Помогите выбрать",
+      "You’re out of search credits": "Кредиты для поиска закончились",
+      "Add credits to keep searching.": "Пополните кредиты, чтобы продолжить поиск.",
+      "Add credits": "Пополнить кредиты"
     },
     "ja": {
       "Search products": "商品を検索",
@@ -2750,7 +2777,10 @@
       "{count} searches · {price}": "検索{count}回分 · {price}",
       "AI Shopping Assistant": "AIショッピングアシスタント",
       "Open Suggestions, choose what matters to you, then search for a suggested product.": "AIショッピングアシスタントを開き、重視する点を選んで新しい検索を始めます。",
-      "Help me choose": "選ぶのを手伝って"
+      "Help me choose": "選ぶのを手伝って",
+      "You’re out of search credits": "検索クレジットを使い切りました",
+      "Add credits to keep searching.": "検索を続けるにはクレジットを追加してください。",
+      "Add credits": "クレジットを追加"
     },
     "zh": {
       "Take a photo. Find the product.": "拍张照片，找到商品。",
@@ -2928,7 +2958,10 @@
       "{count} searches · {price}": "{count}次搜索 · {price}",
       "AI Shopping Assistant": "AI购物助手",
       "Open Suggestions, choose what matters to you, then search for a suggested product.": "打开AI购物助手，选择您看重的方面，然后开始新搜索。",
-      "Help me choose": "帮我选择"
+      "Help me choose": "帮我选择",
+      "You’re out of search credits": "搜索额度已用完",
+      "Add credits to keep searching.": "添加额度以继续搜索。",
+      "Add credits": "添加额度"
     },
     "ko": {
       "Search products": "상품 검색",
@@ -3087,7 +3120,10 @@
       "{count} searches · {price}": "검색 {count}회 · {price}",
       "AI Shopping Assistant": "AI 쇼핑 도우미",
       "Open Suggestions, choose what matters to you, then search for a suggested product.": "AI 쇼핑 도우미를 열고 중요하게 생각하는 점을 선택한 다음 새 검색을 시작하세요.",
-      "Help me choose": "선택 도와주기"
+      "Help me choose": "선택 도와주기",
+      "You’re out of search credits": "검색 크레딧을 모두 사용했습니다",
+      "Add credits to keep searching.": "계속 검색하려면 크레딧을 추가하세요.",
+      "Add credits": "크레딧 추가"
     },
     "hi": {
       "Take a photo. Find the product.": "फ़ोटो लें। उत्पाद खोजें।",
@@ -3265,7 +3301,10 @@
       "{count} searches · {price}": "{count} खोजें · {price}",
       "AI Shopping Assistant": "AI शॉपिंग सहायक",
       "Open Suggestions, choose what matters to you, then search for a suggested product.": "AI शॉपिंग सहायक खोलें, अपनी प्राथमिकताएँ चुनें और नई खोज शुरू करें।",
-      "Help me choose": "चुनने में मेरी मदद करें"
+      "Help me choose": "चुनने में मेरी मदद करें",
+      "You’re out of search credits": "आपके खोज क्रेडिट खत्म हो गए हैं",
+      "Add credits to keep searching.": "खोज जारी रखने के लिए क्रेडिट जोड़ें।",
+      "Add credits": "क्रेडिट जोड़ें"
     },
     "ur": {
       "Take a photo. Find the product.": "تصویر لیں۔ مصنوعات تلاش کریں۔",
@@ -3443,7 +3482,10 @@
       "{count} searches · {price}": "{count} تلاشیں · {price}",
       "AI Shopping Assistant": "AI شاپنگ اسسٹنٹ",
       "Open Suggestions, choose what matters to you, then search for a suggested product.": "AI شاپنگ اسسٹنٹ کھولیں، اپنی ترجیحات منتخب کریں اور نئی تلاش شروع کریں۔",
-      "Help me choose": "انتخاب میں مدد کریں"
+      "Help me choose": "انتخاب میں مدد کریں",
+      "You’re out of search credits": "آپ کے تلاش کے کریڈٹس ختم ہو گئے ہیں",
+      "Add credits to keep searching.": "تلاش جاری رکھنے کے لیے کریڈٹس شامل کریں۔",
+      "Add credits": "کریڈٹس شامل کریں"
     },
     "id": {
       "Search products": "Cari produk",
@@ -3602,7 +3644,10 @@
       "{count} searches · {price}": "{count} pencarian · {price}",
       "AI Shopping Assistant": "Asisten Belanja AI",
       "Open Suggestions, choose what matters to you, then search for a suggested product.": "Buka Asisten Belanja AI, pilih prioritas Anda, lalu mulai pencarian baru.",
-      "Help me choose": "Bantu saya memilih"
+      "Help me choose": "Bantu saya memilih",
+      "You’re out of search credits": "Kredit pencarian Anda sudah habis",
+      "Add credits to keep searching.": "Tambahkan kredit untuk melanjutkan pencarian.",
+      "Add credits": "Tambah kredit"
     },
     "ms": {
       "Search products": "Cari produk",
@@ -3761,7 +3806,10 @@
       "{count} searches · {price}": "{count} carian · {price}",
       "AI Shopping Assistant": "Pembantu Beli-belah AI",
       "Open Suggestions, choose what matters to you, then search for a suggested product.": "Buka Pembantu Beli-belah AI, pilih keutamaan anda, kemudian mulakan carian baharu.",
-      "Help me choose": "Bantu saya memilih"
+      "Help me choose": "Bantu saya memilih",
+      "You’re out of search credits": "Kredit carian anda telah habis",
+      "Add credits to keep searching.": "Tambah kredit untuk terus mencari.",
+      "Add credits": "Tambah kredit"
     }
   }
 }
