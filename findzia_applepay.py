@@ -1,4 +1,4 @@
-"""Findzia 156.7.12: own-origin Apple Pay window for Shopify storefronts.
+"""Findzia 156.7.13: own-origin Apple Pay window for Shopify storefronts.
 
 The parent storefront keeps its embedded card checkout. This top-level page
 uses MyFatoorah's SDK on an origin whose verification file we can actually
@@ -46,11 +46,20 @@ class ApplePayWindow:
         self.s = service
         self.origin = ''
         self.ready = False
-        self.state = 'disabled'
+        self.state = 'missing_origin'
         self.task = None
         self.next_check = 0
         self.file = b''
         value = env.get('FINDZIA_APPLE_PAY_ORIGIN', '').strip()
+        self.origin_source = 'FINDZIA_APPLE_PAY_ORIGIN' if value else 'unset'
+        if not value:
+            domain = env.get('RAILWAY_PUBLIC_DOMAIN', '').strip()
+            if domain:
+                value = domain if domain.startswith('https://') else 'https://' + domain
+                self.origin_source = 'RAILWAY_PUBLIC_DOMAIN'
+            elif env.get('PUBLIC_BASE_URL', '').strip():
+                value = env['PUBLIC_BASE_URL'].strip()
+                self.origin_source = 'PUBLIC_BASE_URL'
         self.configured = bool(value)
         if not value:
             return
@@ -60,6 +69,11 @@ class ApplePayWindow:
             # unverified Shopify origin does not solve merchant validation.
             if self.origin in ('https://findzia.com', 'https://www.findzia.com'):
                 raise ValueError('Use the independent payment server origin')
+        except ValueError:
+            self.origin = ''
+            self.state = 'invalid_origin'
+            return
+        try:
             self.file = FILE.read_bytes()
             decoded = json.loads(bytes.fromhex(self.file.decode().strip()))
             if decoded.get('pspId') != 'C552A3D050E8C2C5F3D36AB26FCB8DBF0F085F2C8AFC29BB329A2071C4527C6B':
@@ -68,10 +82,11 @@ class ApplePayWindow:
                 self.state = 'checkout_not_ready'
                 return
             self.state = 'awaiting_registration'
-        except (ValueError, OSError, KeyError, UnicodeError):
-            self.origin = ''
-            self.state = 'invalid_configuration'
-            LOG.error('MF_APPLE_PAY status=invalid_configuration')
+        except OSError:
+            self.state = 'missing_verification_file'
+            return
+        except (ValueError, KeyError, UnicodeError):
+            self.state = 'invalid_verification_file'
             return
         with self.s.accounts.connect() as db:
             db.executescript('''
@@ -86,7 +101,7 @@ class ApplePayWindow:
 
     def public(self, member):
         return {'available': bool(self.ready and self.s.allowed(member)),
-                'origin': self.origin if self.ready else '', 'status': self.state}
+                'origin': self.origin, 'status': self.state, 'origin_source': self.origin_source}
 
     def verify_and_register(self):
         """Bounded, non-payment setup; never turns readiness on from an env flag."""
@@ -222,7 +237,9 @@ def install_applepay(app, service, env, member):
 
     @app.on_event('startup')
     async def startup():
-        if bridge.origin and service.ready and service.embedded:
+        LOG.warning('MF_APPLE_PAY status=%s source=%s domain=%s',
+                    bridge.state, bridge.origin_source, urlsplit(bridge.origin).hostname or 'unset')
+        if bridge.state == 'awaiting_registration':
             bridge.task = asyncio.create_task(bridge.worker())
 
     @app.on_event('shutdown')
