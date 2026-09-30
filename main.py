@@ -1,3 +1,4 @@
+# v128.5.42.25: skip merchant spinner assets; read real card/gallery photos and keep bounded media recovery.
 # v128.5.42.23: photo-only alternatives admit useful nearby designs; typed searches bypass visual admission.
 # Marketplace repair: progressive media, open domestic retrieval, observed filters, on-demand insights.
 # v128.5.42: fast observed card media and bounded per-product merchant collection expansion.
@@ -393,7 +394,7 @@ from findzia_billing import CreditMiddleware, install_billing
 app.add_middleware(CreditMiddleware, owner=app)
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization', 'X-Findzia-Request-Id'], max_age=86400)
-BUILD_ID = 'v128.5.42.24-text-serper'
+BUILD_ID = 'v128.5.42.25-media'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -5157,6 +5158,63 @@ def _local_discovery_direct_link(row):
     return ''
 
 
+_WEB_PLACEHOLDER_IMAGE_PATH = re.compile(
+    r'(?:^|/)(?:ajax[-_])?(?:spinner|preloader|loader|loading(?:[-_](?:spinner|icon|indicator))?|'
+    r'placeholder|no[-_]?image|image[-_]?(?:placeholder|not[-_]?(?:found|available)))'
+    r'(?:[-_.](?:[0-9a-f]{6,}|v?\d+|small|large|dark|light|white|black|grey|gray))*'
+    r'\.(?:gif|svg|png|webp|jpe?g|avif)(?:$|/)', re.I)
+
+
+def _web_image_is_placeholder(value):
+    """Named UI assets, including signed/wrapped URLs, are not product photos.
+
+    Check the asset path, not query words or product names such as fidget-spinner.
+    GIF product photos remain supported.
+    """
+    raw = _web_unescape_url(str(value or '').strip()).replace('\\/', '/')
+    for _ in range(4):
+        try:
+            parsed = urllib.parse.urlsplit(raw)
+            path = urllib.parse.unquote(urllib.parse.unquote(parsed.path))
+            if _WEB_PLACEHOLDER_IMAGE_PATH.search(path):
+                return True
+            params = urllib.parse.parse_qs(parsed.query)
+            inner = next((v for k in ('u', 'url', 'src', 'image') for v in params.get(k, [])
+                          if v.startswith(('https://', 'http://', '//'))), '')
+            if not inner or inner == raw:
+                break
+            raw = inner
+        except (TypeError, ValueError):
+            break
+    return False
+
+
+def _web_product_image_element_urls(element, base_url):
+    """Read a product-scoped img/meta; skip button spinners and prefer lazy sources."""
+    ui_classes = {'loader', 'spinner', 'preloader', 'loading-spinner', 'loading-icon',
+                  'loading-indicator', 'ajax-loader', 'icon', 'logo'}
+    for node in [element] + list(element.parents)[:3]:
+        if getattr(node, 'name', '') in ('button', 'svg') or ui_classes.intersection(node.get('class') or []):
+            return []
+    candidates = []
+    for key in ('data-zoom-image', 'data-large-image', 'data-original', 'data-src', 'data-lazy-src', 'content'):
+        candidates.append(element.get(key) or '')
+    for key in ('data-srcset', 'srcset'):
+        # Do not split commas inside CDN transformation paths (e.g. Zid w=500,q=85).
+        srcset = str(element.get(key) or '')
+        candidates.extend(re.findall(r'(\S+)\s+\d+(?:\.\d+)?[wx](?:\s*,\s*|$)', srcset))
+        if srcset and not re.search(r'\s\d+(?:\.\d+)?[wx](?:\s*,|\s*$)', srcset):
+            candidates.extend(re.split(r',\s+(?=(?:https?:)?/)', srcset))
+    candidates.append(element.get('src') or '')
+    urls = []
+    for raw in candidates:
+        image = _web_absolute_url(base_url, raw)
+        if (_web_is_http_url(image) and not _web_image_is_generic(image, base_url)
+                and image not in urls):
+            urls.append(image)
+    return urls[:8]
+
+
 def _web_offer_image_candidates(row):
     """Observed images of one listing. Never source logos or unrelated page children."""
     urls, seen = [], set()
@@ -5175,7 +5233,7 @@ def _web_offer_image_candidates(row):
             if raw.startswith('//'):
                 raw = 'https:' + raw
             raw = _web_unproxy_image_url(raw)
-            if _web_is_http_url(raw) and raw not in seen:
+            if _web_is_http_url(raw) and raw not in seen and not _web_image_is_placeholder(raw):
                 seen.add(raw)
                 urls.append(raw)
     for field in ('serpapi_thumbnail', 'thumbnail', 'image', 'image_url', 'original', 'product_image', 'thumbnails', 'images', 'image_candidates'):
@@ -5191,6 +5249,8 @@ def _web_merge_offer_images(previous, incoming):
     # behind a full list of older (possibly failed) thumbnails.
     pictures = list(dict.fromkeys(before[:1] + fresh + before[1:] + incoming_pictures))[:8]
     if not pictures:
+        if any(_web_image_is_placeholder(previous.get(k) or incoming.get(k)) for k in ('image', 'thumbnail')):
+            return {'image': '', 'thumbnail': '', 'image_candidates': []}
         return {}
     # Keep raw first for fast CDN delivery; signed alternatives handle hotlink/CORS paths.
     candidates = []
@@ -5198,8 +5258,10 @@ def _web_merge_offer_images(previous, incoming):
         for candidate in (picture, _web_public_image_url(picture)):
             if candidate and candidate not in candidates:
                 candidates.append(candidate)
-    return {'image': previous.get('image') or pictures[0],
-            'thumbnail': previous.get('thumbnail') or pictures[0], 'image_candidates': candidates}
+    def primary(field):
+        value = previous.get(field) or ''
+        return value if value and not _web_image_is_placeholder(value) else pictures[0]
+    return {'image': primary('image'), 'thumbnail': primary('thumbnail'), 'image_candidates': candidates}
 
 
 
@@ -5209,6 +5271,9 @@ def _web_offer_media_fields(row):
         # Display precisely the image that passed review, including its proxy.
         # Other thumbnails/gallery variants have not passed this photo audit.
         raw = _web_unproxy_image_url(str(row.get('image') or row.get('thumbnail') or ''))
+        if raw and _web_image_is_placeholder(raw):
+            # Never replace a reviewed photo with an unreviewed gallery variant.
+            return {'image': '', 'thumbnail': '', 'image_candidates': []}
         if raw:
             urls = list(dict.fromkeys(u for u in (raw, _web_public_image_url(raw)) if u))
             return {'image': raw, 'thumbnail': raw, 'image_candidates': urls}
@@ -5533,25 +5598,26 @@ def _web_collection_products(document, page_url):
             return
         if _web_collection_url(url) or not _web_is_direct_product_page_url(url):
             return
-        if isinstance(image, list):
-            image = next((v for v in image if v), '')
-        if isinstance(image, dict):
-            image = image.get('contentUrl') or image.get('url') or ''
-        image = absolute(image)
-        if image == url:
-            image = ''
+        images = image if isinstance(image, list) else [image]
+        pictures = []
+        for value in images[:8]:
+            if isinstance(value, dict):
+                value = value.get('contentUrl') or value.get('url') or ''
+            value = absolute(value)
+            if value and value != url and not _web_image_is_generic(value, url) and value not in pictures:
+                pictures.append(value)
+        image = next(iter(pictures), '')
         key = _web_price_url_key(url)
         row = {'link': url, 'title': title, 'source': host, 'thumbnail': image, 'image': image,
                'price': str(price or ''), 'currency': str(currency or ''),
                'collection_product': True, 'collection_url': page_url,
                'retrieval_sources': ['merchant_collection'], 'section': 'merchant_collection',
-               'price_source': 'local_collection', 'exact': False}
+               'price_source': 'local_collection', 'exact': False, 'image_candidates': pictures}
         if isinstance(availability, str) and availability:
             row['availability'] = availability
         if key in products:
             old = products[key]
-            if not old.get('image') and image:
-                old.update(image=image, thumbnail=image)
+            old.update(_web_merge_offer_images(old, row))
             if not old.get('price') and price:
                 old.update(price=str(price), currency=str(currency or ''))
         elif len(products) < COLLECTION_PRODUCTS_MAX:
@@ -5614,8 +5680,8 @@ def _web_collection_products(document, page_url):
                     or parent.get('itemtype', '').endswith('/Product')):
                 card = parent
                 break
-        pic = card.find('img')
-        if pic is None:
+        pics = card.find_all('img', limit=24)
+        if not pics:
             continue
         # Never borrow a picture/price from a wrapper spanning multiple products.
         links = {_web_price_url_key(absolute(a.get('href'))) for a in card.select('a[href]')
@@ -5623,11 +5689,15 @@ def _web_collection_products(document, page_url):
         if links - {_web_price_url_key(href)}:
             continue
         name = card.select_one('[itemprop="name"], [class*="product-title"], [class*="product-name"], h2, h3')
-        title = name.get_text(' ', strip=True) if name else pic.get('alt') or anchor.get('title') or anchor.get_text(' ', strip=True)
-        image = pic.get('data-src') or pic.get('data-original') or ''
-        if not image:
-            srcset = pic.get('data-srcset') or pic.get('srcset') or ''
-            image = srcset.split(',')[0].strip().split(' ')[0] if srcset else pic.get('src') or ''
+        images, picture_title = [], ''
+        for pic in pics:
+            sources = _web_product_image_element_urls(pic, page_url)
+            if sources and not picture_title:
+                picture_title = pic.get('alt') or ''
+            images.extend(u for u in sources if u not in images)
+            if len(images) >= 8:
+                break
+        title = name.get_text(' ', strip=True) if name else picture_title or anchor.get('title') or anchor.get_text(' ', strip=True)
         prices = []
         for tag in card.select('[itemprop="price"], [class*="price"]'):
             if tag.name in ('del', 's') or tag.find_parent(['del', 's']) or re.search(r'old|compare|original|regular', ' '.join(tag.get('class', [])), re.I):
@@ -5637,7 +5707,7 @@ def _web_collection_products(document, page_url):
                 prices.append(value)
         currency = card.select_one('[itemprop="priceCurrency"]')
         currency = (currency.get('content') or currency.get_text(' ', strip=True)) if currency else ''
-        add(href, title, image, prices[0] if len(prices) == 1 else '', currency)
+        add(href, title, images, prices[0] if len(prices) == 1 else '', currency)
     return list(products.values())
 
 
@@ -11548,7 +11618,7 @@ def _web_image_is_generic(image_url, page_url):
     low = str(image_url or '').lower()
     if not low:
         return True
-    if _WEB_GENERIC_IMAGE_PATTERN.search(low):
+    if _web_image_is_placeholder(low) or _WEB_GENERIC_IMAGE_PATTERN.search(low):
         return True
     # The same real picture may serve localized URLs or color/size variants.
     # Repetition alone is not evidence of a placeholder.
@@ -11627,7 +11697,7 @@ def _web_rescue_product_image(page_url):
         return ''
     cache_key = 'page:' + page_url
     cached = _web_image_cache_get(cache_key)
-    if cached:
+    if cached and not _web_image_is_placeholder(cached):
         return cached
     document = _web_merchant_document(page_url, headers=dict(HEADERS),
                     timeout=(2.0, WEB_IMAGE_PAGE_TIMEOUT_SECONDS), max_bytes=400000)
@@ -11652,7 +11722,7 @@ def _web_image_proxy_signature(raw_url, expires_at):
 
 def _web_public_image_url(raw_url):
     raw_url = _web_unproxy_image_url(raw_url)
-    if not _web_is_http_url(raw_url):
+    if not _web_is_http_url(raw_url) or _web_image_is_placeholder(raw_url):
         return ''
     if WEB_IMAGE_PROXY_ENABLED and PUBLIC_BASE_URL:
         expires_at = int(time.time()) + 7 * 86400
@@ -11670,7 +11740,7 @@ def _web_public_image_url(raw_url):
 def _web_best_card_image(primary_url='', page_url='', rescue_page=False):
     primary_url = str(primary_url or '').strip()
     page_url = str(page_url or '').strip()
-    if _web_is_http_url(primary_url):
+    if _web_is_http_url(primary_url) and not _web_image_is_placeholder(primary_url):
         return _web_public_image_url(primary_url)
     if rescue_page and _web_is_http_url(page_url):
         rescued = _web_rescue_product_image(page_url)
@@ -11681,7 +11751,7 @@ def _web_best_card_image(primary_url='', page_url='', rescue_page=False):
 def _web_enrich_text_result_image(row):
     row = dict(row or {})
     existing = str(row.get('image') or '').strip()
-    if existing and (not WEB_VERIFY_PRODUCT_IMAGE or _web_image_fetchable(existing)):
+    if existing and not _web_image_is_placeholder(existing) and (not WEB_VERIFY_PRODUCT_IMAGE or _web_image_fetchable(existing)):
         row['image'] = _web_public_image_url(_web_unproxy_image_url(existing)) if _web_is_http_url(_web_unproxy_image_url(existing)) else existing
         return row
     url = str(row.get('url') or row.get('link') or '').strip()
@@ -18465,9 +18535,7 @@ def _web_product_page_metadata(html, base_url):
         pictures = [data.get('image')] + data.get('image_candidates', [])
         # Only product-scoped galleries. Never pick a recommendation's first img.
         for el in soup.select('[itemtype$="/Product"] [itemprop="image"], #product-gallery img, #product-image img, .product-gallery img, [data-product-gallery] img')[:12]:
-            for field in ('data-zoom-image', 'data-large-image', 'data-original', 'data-src', 'content', 'src'):
-                image = _web_absolute_url(base_url, el.get(field) or '')
-                if image and not _web_image_is_generic(image, base_url): pictures.append(image)
+            pictures.extend(_web_product_image_element_urls(el, base_url))
         data['image_candidates'] = _web_offer_image_candidates({'images': pictures})[:8]
         data['image'] = next(iter(data['image_candidates']), '')
         if data['image']: data['is_product'] = True
@@ -18924,7 +18992,7 @@ def _web_unproxy_image_url(value):
 
 def _web_image_fetchable(value):
     raw = _web_unproxy_image_url(value)
-    if not _web_is_http_url(raw):
+    if not _web_is_http_url(raw) or _web_image_is_placeholder(raw):
         return False
     if _web_merchant_cooldown(raw, 'image'):
         return False
@@ -18950,7 +19018,7 @@ def _web_image_fetchable(value):
             _web_merchant_record_block(raw, 'image', reason, r.headers)
             return False
         ctype = (r.headers.get('content-type') or '').split(';', 1)[0].strip().lower()
-        if r.status_code < 400 and ctype.startswith('image/'):
+        if r.status_code < 400 and ctype.startswith('image/') and not _web_image_is_placeholder(r.url):
             # Only the first bounded chunk is needed for this reachability probe.
             first = next(r.iter_content(4096), b'')
             ok = bool(first)
@@ -18970,7 +19038,7 @@ def _web_choose_verified_product_image(row, snap):
         candidates.append(current)
     seen = set()
     for candidate in candidates:
-        if not candidate or candidate in seen:
+        if not candidate or candidate in seen or _web_image_is_placeholder(candidate):
             continue
         seen.add(candidate)
         if not WEB_VERIFY_PRODUCT_IMAGE or _web_image_fetchable(candidate):
@@ -24249,6 +24317,8 @@ async def web_api_img_proxy(request: Request):
         or not hmac.compare_digest(supplied_signature, _web_image_proxy_signature(raw_url, expires_at))
     ):
         return Response(content=b'', status_code=403)
+    if _web_image_is_placeholder(raw_url):
+        return Response(content=b'', status_code=422)
 
     def _raster_mime(body):
         if body.startswith(b'\xff\xd8\xff'):
@@ -24264,6 +24334,8 @@ async def web_api_img_proxy(request: Request):
         return ''
 
     def _fetch_image(target_url):
+        if _web_image_is_placeholder(target_url):
+            return (422, '', b'', '')
         path = urllib.parse.urlsplit(target_url).path.lower()
         picture_path = bool(re.search(r'\.(?:jpe?g|png|webp|gif|avif)(?:[^a-z]|$)', path))
         purpose = 'page' if not picture_path and _web_is_direct_product_page_url(target_url) else 'image'
@@ -24277,6 +24349,8 @@ async def web_api_img_proxy(request: Request):
             status = document['status'] if document['status'] >= 400 else 503
             return (status, '', b'', '')
         body = document['body']
+        if _web_image_is_placeholder(document['url']):
+            return (422, '', b'', '')
         detected_mime = _raster_mime(body)
         if detected_mime:
             if _web_raster_is_empty(body):
