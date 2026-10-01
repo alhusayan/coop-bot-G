@@ -1,4 +1,4 @@
-"""Findzia 156.7.13: embedded checkout, Apple Pay window and verified credits.
+"""Findzia 156.7.18: embedded Apple Pay on verified storefronts, verified credits.
 Disabled by default. Sandbox uses a separate key and an explicit email allowlist.
 No card data, browser prices, or redirect claims are accepted as payment proof.
 """
@@ -125,13 +125,19 @@ class MyFatoorahPack:
 
     def public(self, member):
         window = getattr(self, 'apple_window', None)
+        storefronts = getattr(self, 'apple_storefronts', {})
+        inline_origins = [host for host, registration in storefronts.items()
+                          if registration.ready and self.allowed(member)]
         return {'ok': True, 'enabled': self.enabled, 'environment': self.mode,
-                'checkout_mode': 'embedded', 'checkout_build': '156.7.13',
+                'checkout_mode': 'embedded', 'checkout_build': '156.7.18',
                 'checkout_available': self.allowed(member), 'plan_id': 'pack',
                 'embedded_available': self.embedded and self.allowed(member),
-                # The legacy flag is not domain verification. The Findzia
-                # Shopify parent must never offer the old, unverified wallet.
+                # The legacy env flag cannot enable Apple Pay. New clients
+                # require explicit registration of their exact page origin.
                 'apple_pay_domain_verified': False,
+                'apple_pay_inline': {'available': bool(inline_origins),
+                    'origins': inline_origins,
+                    'domains': {host: registration.state for host, registration in storefronts.items()}},
                 'apple_pay_window': window.public(member) if window else {'available': False}}
 
     def api(self, method, path, body=None, intent=None):
@@ -438,7 +444,8 @@ class MyFatoorahPack:
                 WHERE o.member=? AND o.mode=? AND o.state IN ('creating','pending','session_processing')""",
                 (intent,member['id'],self.mode))
         methods=['googlepay','card']
-        if getattr(getattr(self, 'apple_window', None), 'ready', False):
+        if (getattr(getattr(self, 'apple_window', None), 'ready', False) or
+                any(registration.ready for registration in getattr(self, 'apple_storefronts', {}).values())):
             methods.append('applepay')
         body={'PaymentMode':'COLLECT_DETAILS','OperationType':'PAY',
               'Order':{'Amount':4.99,'Currency':'USD'},'SupportedPaymentMethods':methods,
@@ -701,7 +708,7 @@ def install_myfatoorah(app, credits):
         return await asyncio.to_thread(service.accounts.member,service.accounts.token(request))
     @app.on_event('startup')
     async def startup():
-        LOG.warning('MF_CHECKOUT_BUILD version=156713 mode=embedded enabled=%s',service.embedded)
+        LOG.warning('MF_CHECKOUT_BUILD version=156718 mode=embedded enabled=%s',service.embedded)
         if service.ready: service.task=asyncio.create_task(service.worker())
     @app.on_event('shutdown')
     async def shutdown():
