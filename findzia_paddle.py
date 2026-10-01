@@ -1,4 +1,4 @@
-"""Findzia 156.5.0 Paddle adapter: isolated sandbox/live checkout and verification.
+"""Findzia 156.7.20 Paddle adapter: resumable, verified checkout transitions.
 
 Live checkout starts with an email allowlist; LIVE_OPEN explicitly opens it to members.
 A durable inbox survives
@@ -99,6 +99,8 @@ class PaddleSandbox:
                   event TEXT PRIMARY KEY, payload TEXT NOT NULL, state TEXT NOT NULL,
                   attempts INTEGER NOT NULL DEFAULT 0, next_try INTEGER NOT NULL DEFAULT 0,
                   error TEXT NOT NULL DEFAULT '');
+                CREATE TABLE IF NOT EXISTS {self.prefix}checkout_lock(
+                  member TEXT PRIMARY KEY, owner TEXT NOT NULL, expires INTEGER NOT NULL);
                 ''')
 
     def allowed(self, member):
@@ -198,13 +200,120 @@ class PaddleSandbox:
             print('PADDLE_CHECKOUT_RECOVERY mode=%s result=verification_incomplete' % self.mode, flush=True)
             raise HTTPException(503, 'paddle_recovery_unavailable') from exc
 
-    def checkout(self, member, plan):
+    def checkout(self, member, plan, resume_intent=None):
         self.require(member)
         if plan not in self.prices:
             raise HTTPException(400, 'invalid_plan')
+        if resume_intent is not None and (not isinstance(resume_intent, str) or not re.fullmatch(r'[a-f0-9]{48}', resume_intent)):
+            raise HTTPException(400, 'invalid_checkout_intent')
+        # Serialize transitions across tabs AND server workers without holding a
+        # SQLite transaction open during provider calls. A crash releases by TTL.
+        owner = secrets.token_hex(24)
+        now = int(time.time())
+        with self.accounts.connect() as db:
+            acquired = db.execute(f'''INSERT INTO {self.prefix}checkout_lock VALUES(?,?,?)
+                ON CONFLICT(member) DO UPDATE SET owner=excluded.owner,expires=excluded.expires
+                WHERE expires<=?''', (member['id'], owner, now+120, now)).rowcount
+        if not acquired:
+            with self.accounts.connect() as db:
+                pending = db.execute(f"SELECT * FROM {self.prefix}checkout WHERE member=? AND state IN ('creating','pending','uncertain') ORDER BY created DESC LIMIT 1", (member['id'],)).fetchone()
+            return self.pending_checkout(pending)
+        try:
+            return self._checkout(member, plan, resume_intent)
+        except HTTPException as exc:
+            if exc.detail == 'checkout_pending':
+                with self.accounts.connect() as db:
+                    pending = db.execute(f"SELECT * FROM {self.prefix}checkout WHERE member=? AND state IN ('creating','pending','uncertain') ORDER BY created DESC LIMIT 1", (member['id'],)).fetchone()
+                return self.pending_checkout(pending)
+            raise
+        finally:
+            with self.accounts.connect() as db:
+                db.execute(f'DELETE FROM {self.prefix}checkout_lock WHERE member=? AND owner=?', (member['id'], owner))
+
+    @staticmethod
+    def pending_checkout(row=None):
+        result = {'payment_pending': True, 'retry_after': 3}
+        if row is not None:
+            result['checkout_intent'] = row['intent']
+            if row['txn']:
+                result.update(transaction_id=row['txn'], pending_plan_id=row['plan'])
+        return result
+
+    def resolve_pending_checkout(self, member, row, plan):
+        """Reuse an unpaid checkout, or cancel it at Paddle before changing plans.
+
+        Closing a browser sheet is not payment evidence. Never replace a payment
+        that is authorized, processing, paid, or of unknown status.
+        """
+        if not row['txn']:
+            return self.pending_checkout(row)
+        tid = row['txn']
+        try:
+            txn = self.api('GET', '/transactions/' + tid)
+            items = txn.get('items') or []
+            if (txn.get('id') != tid or txn.get('origin') != 'api'
+                or txn.get('collection_mode') != 'automatic' or txn.get('currency_code') != 'USD'
+                or (txn.get('custom_data') or {}).get('findzia_intent') != row['intent']
+                or len(items) != 1 or items[0].get('quantity') != 1
+                or items[0].get('price', {}).get('id') != self.prices[row['plan']]):
+                raise ValueError('checkout_transaction_mismatch')
+            state = txn.get('status')
+            if state == 'completed':
+                if self.reconcile_transaction(tid):
+                    return {'confirmed': True, 'transaction_id': tid, 'completed_plan_id': row['plan']}
+                return self.pending_checkout(row)
+            if state == 'canceled':
+                with self.accounts.connect() as db:
+                    db.execute(f"UPDATE {self.prefix}checkout SET state='canceled' WHERE intent=? AND member=?",
+                               (row['intent'], member['id']))
+                return None
+            payments = txn.get('payments')
+            if state not in ('draft', 'ready') or not isinstance(payments, list):
+                return self.pending_checkout(row)
+            if any(not isinstance(p, dict) or p.get('status') not in ('error', 'canceled', 'dropped') for p in payments):
+                # Reopen the SAME checkout when bank authentication is needed.
+                if (row['plan'] == plan and payments
+                    and all(isinstance(p, dict) and p.get('status') in ('error', 'canceled', 'dropped', 'action_required') for p in payments)):
+                    return {'transaction_id': tid}
+                return self.pending_checkout(row)
+            if row['plan'] == plan:
+                return {'transaction_id': tid}
+            # Provider cancellation is the barrier: a local state change alone
+            # cannot invalidate a checkout still open in another browser tab.
+            canceled = self.api('PATCH', '/transactions/' + tid, {'status': 'canceled'})
+            if canceled.get('id') != tid or canceled.get('status') != 'canceled':
+                return self.pending_checkout(row)
+            with self.accounts.connect() as db:
+                db.execute(f"UPDATE {self.prefix}checkout SET state='canceled' WHERE intent=? AND member=?",
+                           (row['intent'], member['id']))
+            return None
+        except (PaddleAPIError, RuntimeError, ValueError, TypeError, AttributeError):
+            # A cancellation timeout may have succeeded. Re-read next time;
+            # never create a second chargeable transaction based on a timeout.
+            return self.pending_checkout(row)
+
+    def _checkout(self, member, plan, resume_intent=None):
         self.recover_unmapped_checkout(member)
         now = int(time.time())
-        # One pending checkout per account. Reuse it across tabs/retries.
+        # Automatic retries stay attached to their original intent even if a
+        # webhook completed it between requests. Never turn a poll into a new sale.
+        if resume_intent:
+            with self.accounts.connect() as db:
+                previous = db.execute(f'SELECT * FROM {self.prefix}checkout WHERE intent=? AND member=?', (resume_intent, member['id'])).fetchone()
+            if not previous:
+                raise HTTPException(404, 'transaction_not_found')
+            if previous['txn'] or previous['state'] in ('creating', 'pending', 'uncertain'):
+                resolved = self.resolve_pending_checkout(member, previous, plan)
+                if resolved is not None:
+                    return resolved
+        with self.accounts.connect() as db:
+            pending = db.execute(f"SELECT * FROM {self.prefix}checkout WHERE member=? AND state IN ('creating','pending','uncertain') ORDER BY created DESC LIMIT 1", (member['id'],)).fetchone()
+        if pending:
+            resolved = self.resolve_pending_checkout(member, pending, plan)
+            if resolved is not None:
+                return resolved
+        # One pending checkout per account. Previous cancellation must have
+        # succeeded at the provider before we reach this insertion.
         with self.accounts.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             if plan != 'pack' and db.execute(f"SELECT 1 FROM {self.prefix}subscription WHERE member=? AND status NOT IN ('canceled','paused')", (member['id'],)).fetchone():
@@ -449,7 +558,7 @@ def install_paddle(app, credits):
     @app.post('/api/billing/paddle/checkout')
     async def checkout(request:Request):
         m=await member(request);payload=await service.accounts.body(request)
-        return result({'ok':True,**await asyncio.to_thread(service.checkout,m,payload.get('plan_id'))})
+        return result({'ok':True,**await asyncio.to_thread(service.checkout,m,payload.get('plan_id'),payload.get('resume_intent'))})
     @app.post('/api/billing/paddle/confirm')
     async def confirm(request:Request):
         m=await member(request);service.require(m);payload=await service.accounts.body(request)
