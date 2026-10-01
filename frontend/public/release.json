@@ -1,0 +1,146 @@
+{
+  "version": "156.7.19",
+  "api": "https://api.findzia.com",
+  "section": "template--19963721449543__findzia_home_h4wBLq",
+  "apple_pay_file_sha256": "c15558d3e155e2031ef39b32775050c283b545d8575643181af3c3b9f03d46a3",
+  "routes": {
+    "/assets/findzia-account.d58d5b62fa61b1bf.js": {
+      "file": "assets/findzia-account.d58d5b62fa61b1bf.js",
+      "sha256": "d58d5b62fa61b1bfea1adcb5e4fff6531c8b5180f2e5af573572eebd51d3b7b8",
+      "type": "js",
+      "immutable": true
+    },
+    "/assets/findzia-billing.3b289901f0f17b33.js": {
+      "file": "assets/findzia-billing.3b289901f0f17b33.js",
+      "sha256": "3b289901f0f17b3307289473a839e0f7afe82134795a589def8c7f7138fc6a4a",
+      "type": "js",
+      "immutable": true
+    },
+    "/assets/findzia-filters.7a834a838c39cb84.js": {
+      "file": "assets/findzia-filters.7a834a838c39cb84.js",
+      "sha256": "7a834a838c39cb845917608ceebf1ddbf3d3a0975a4d4981fc83a70edf9c2dbd",
+      "type": "js",
+      "immutable": true
+    },
+    "/assets/findzia-i18n.872570d4766357fc.js": {
+      "file": "assets/findzia-i18n.872570d4766357fc.js",
+      "sha256": "872570d4766357fcde048feb48d5cf2c71f33f31c8e71e26210e93dbd7d07117",
+      "type": "js",
+      "immutable": true
+    },
+    "/assets/findzia-shell.0b9f9fee56285870.js": {
+      "file": "assets/findzia-shell.0b9f9fee56285870.js",
+      "sha256": "0b9f9fee56285870c601764dfa96d2dcf27a9ecc5ce0ef576072799197485276",
+      "type": "js",
+      "immutable": true
+    },
+    "/assets/findzia-product-details.ef88cac0b8d71309.css": {
+      "file": "assets/findzia-product-details.ef88cac0b8d71309.css",
+      "sha256": "ef88cac0b8d713094067bcc40909eeef9d896bb177142ab95c4cf03a247cdfbd",
+      "type": "css",
+      "immutable": true
+    },
+    "/assets/findzia-migration.a8122ab5c9567f5d.js": {
+      "file": "assets/findzia-migration.a8122ab5c9567f5d.js",
+      "sha256": "a8122ab5c9567f5dd9519b32266bd42e7a58357b4eeb0cfeefb32fba0820100b",
+      "type": "js",
+      "immutable": true
+    },
+    "/assets/findzia-standalone.ccb356ccc084d358.css": {
+      "file": "assets/findzia-standalone.ccb356ccc084d358.css",
+      "sha256": "ccb356ccc084d3583c5cb1501b28d77f4c2607ca2e6ea55e3cd7649781c3577e",
+      "type": "css",
+      "immutable": true
+    },
+    "/.well-known/apple-developer-merchantid-domain-association": {
+      "file": ".well-known/apple-developer-merchantid-domain-association",
+      "sha256": "c15558d3e155e2031ef39b32775050c283b545d8575643181af3c3b9f03d46a3",
+      "type": "txt",
+      "immutable": false
+    },
+    "/": {
+      "file": "index.html",
+      "sha256": "d873fda2c3d7d98d5c98040aaf0f8438fb5cd83352b29c5160e8f522eb6de4bc",
+      "type": "html",
+      "immutable": false
+    },
+    "/index.html": {
+      "file": "index.html",
+      "sha256": "d873fda2c3d7d98d5c98040aaf0f8438fb5cd83352b29c5160e8f522eb6de4bc",
+      "type": "html",
+      "immutable": false
+    },
+    "/pages/findzia": {
+      "file": "index.html",
+      "sha256": "d873fda2c3d7d98d5c98040aaf0f8438fb5cd83352b29c5160e8f522eb6de4bc",
+      "type": "html",
+      "immutable": false
+    },
+    "/policies/terms-of-service": {
+      "file": "policies/terms-of-service.html",
+      "sha256": "8c2cae6ce53797a5cea4bb8cf1d3fae89e7e95e05d72aa9bef1223e24f8bd710",
+      "type": "html",
+      "immutable": false
+    },
+    "/policies/terms-of-service/": {
+      "file": "policies/terms-of-service.html",
+      "sha256": "8c2cae6ce53797a5cea4bb8cf1d3fae89e7e95e05d72aa9bef1223e24f8bd710",
+      "type": "html",
+      "immutable": false
+    },
+    "/policies/privacy-policy": {
+      "file": "policies/privacy-policy.html",
+      "sha256": "2f430d173288d74f311c12711dbd94a01ffd3df67eac1aa9161ede80e50ddf00",
+      "type": "html",
+      "immutable": false
+    },
+    "/policies/privacy-policy/": {
+      "file": "policies/privacy-policy.html",
+      "sha256": "2f430d173288d74f311c12711dbd94a01ffd3df67eac1aa9161ede80e50ddf00",
+      "type": "html",
+      "immutable": false
+    },
+    "/policies/refund-policy": {
+      "file": "policies/refund-policy.html",
+      "sha256": "c57a8124fa66f26d26dee698ea87472851f67e6ee086e0ec36fb04f5db4b9262",
+      "type": "html",
+      "immutable": false
+    },
+    "/policies/refund-policy/": {
+      "file": "policies/refund-policy.html",
+      "sha256": "c57a8124fa66f26d26dee698ea87472851f67e6ee086e0ec36fb04f5db4b9262",
+      "type": "html",
+      "immutable": false
+    },
+    "/404.html": {
+      "file": "404.html",
+      "sha256": "27899a636fd07fed4ea93d406c2165a3956dbdf9f34503c84e26131f425aba50",
+      "type": "html",
+      "immutable": false
+    },
+    "/favicon.svg": {
+      "file": "favicon.svg",
+      "sha256": "4e45cbaf1c4d7da6ab1991eda70600a5e499b64f6d0c602049b1fefa94593c65",
+      "type": "svg",
+      "immutable": false
+    },
+    "/robots.txt": {
+      "file": "robots.txt",
+      "sha256": "6d46eeb919506edf5011b7dd01b6d1ba4762aa48609611e0ea3158c94be75ccd",
+      "type": "txt",
+      "immutable": false
+    },
+    "/sitemap.xml": {
+      "file": "sitemap.xml",
+      "sha256": "80b986b1e6397b531b80111c8f16dc714c2553da62dd64d069658e32cd1f2935",
+      "type": "xml",
+      "immutable": false
+    },
+    "/healthz": {
+      "file": "health.json",
+      "sha256": "12f930b94ce942e05f24686d2b8c8c43f580ab777bf6e341bc307d1b48ab9ed4",
+      "type": "json",
+      "immutable": false
+    }
+  }
+}
