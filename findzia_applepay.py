@@ -1,4 +1,4 @@
-"""Findzia 156.7.17: byte-exact provider verification file serving.
+"""Findzia 156.7.18: independently verified storefront Apple Pay registration.
 
 The parent storefront keeps its embedded card checkout. This top-level page
 uses MyFatoorah's SDK on an origin whose verification file we can actually
@@ -26,7 +26,7 @@ PAGE_PATH = '/findzia/apple-pay'
 API = '/api/billing/myfatoorah/apple-pay'
 HEADERS = {'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer',
            'X-Content-Type-Options': 'nosniff', 'X-Frame-Options': 'DENY'}
-DIAGNOSTIC_BUILD = '156717'
+DIAGNOSTIC_BUILD = '156718'
 
 
 # Hash of the unmodified provider attachment supplied by the merchant.
@@ -103,8 +103,9 @@ def origin(value):
 
 
 class ApplePayWindow:
-    def __init__(self, service, env):
+    def __init__(self, service, env, *, storefront_origin=None):
         self.s = service
+        self.scope = 'storefront' if storefront_origin is not None else 'payment_window'
         self.origin = ''
         self.ready = False
         self.state = 'missing_origin'
@@ -113,7 +114,10 @@ class ApplePayWindow:
         self.file = b''
         value = env.get('FINDZIA_APPLE_PAY_ORIGIN', '').strip()
         self.origin_source = 'FINDZIA_APPLE_PAY_ORIGIN' if value else 'unset'
-        if not value:
+        if storefront_origin is not None:
+            value = storefront_origin
+            self.origin_source = 'FINDZIA_STOREFRONT'
+        elif not value:
             domain = env.get('RAILWAY_PUBLIC_DOMAIN', '').strip()
             if domain:
                 value = domain if domain.startswith('https://') else 'https://' + domain
@@ -126,9 +130,12 @@ class ApplePayWindow:
             return
         try:
             self.origin = origin(value)
-            # A distinct top-level origin is intentional; an iframe under the
-            # unverified Shopify origin does not solve merchant validation.
-            if self.origin in ('https://findzia.com', 'https://www.findzia.com'):
+            # Registration is per origin. The independently verified API
+            # domain never proves that a storefront domain is registered.
+            storefront = self.origin in ('https://findzia.com', 'https://www.findzia.com')
+            if self.scope == 'storefront' and not storefront:
+                raise ValueError('Use an allowed storefront origin')
+            if self.scope == 'payment_window' and storefront:
                 raise ValueError('Use the independent payment server origin')
         except ValueError:
             self.origin = ''
@@ -172,7 +179,7 @@ class ApplePayWindow:
         if now < self.next_check:
             return
         self.next_check = now + 300
-        detail = {'build': DIAGNOSTIC_BUILD, 'domain': urlsplit(self.origin).hostname,
+        detail = {'build': DIAGNOSTIC_BUILD, 'scope': self.scope, 'domain': urlsplit(self.origin).hostname,
                   'stage': 'verification_file'}
         try:
             response = requests.get(self.origin + WELL_KNOWN, timeout=(3, 10), allow_redirects=False)
@@ -220,12 +227,15 @@ class ApplePayWindow:
                                     'tls' if isinstance(error, requests.exceptions.SSLError) else
                                     'connection' if isinstance(error, requests.ConnectionError) else 'request_failed')
         finally:
-            LOG.warning('MF_APPLE_PAY status=%s', self.state)
+            label = 'MF_APPLE_PAY_STOREFRONT' if self.scope == 'storefront' else 'MF_APPLE_PAY'
+            LOG.warning('%s domain=%s status=%s', label, urlsplit(self.origin).hostname, self.state)
             detail['status'] = self.state
             LOG.warning('MF_APPLE_PAY_DETAIL %s', json.dumps(detail, ensure_ascii=True, separators=(',', ':')))
 
     def open(self, member, intent, language='en', theme='light'):
         self.s.require(member)
+        if self.scope != 'payment_window':
+            raise HTTPException(409, 'apple_pay_inline_only')
         if not self.ready:
             raise HTTPException(503, 'apple_pay_not_registered')
         # Retire only an unused card form. It cannot subsequently be charged
@@ -299,6 +309,13 @@ class ApplePayWindow:
 def install_applepay(app, service, env, member):
     bridge = ApplePayWindow(service, env)
     service.apple_window = bridge
+    # Both are real, separately served storefront hosts. No arbitrary request
+    # header or browser-provided hostname can create a registration target.
+    service.apple_storefronts = {
+        host: ApplePayWindow(service, env, storefront_origin=host)
+        for host in ('https://findzia.com', 'https://www.findzia.com')
+    }
+    registrations = [bridge, *service.apple_storefronts.values()]
 
     def result(data):
         return JSONResponse({'ok': True, **data}, headers=HEADERS)
@@ -317,17 +334,24 @@ def install_applepay(app, service, env, member):
 
     @app.on_event('startup')
     async def startup():
-        LOG.warning('MF_APPLE_PAY status=%s source=%s domain=%s',
-                    bridge.state, bridge.origin_source, urlsplit(bridge.origin).hostname or 'unset')
-        if bridge.state == 'awaiting_registration':
-            bridge.task = asyncio.create_task(bridge.worker())
+        for registration in registrations:
+            label = 'MF_APPLE_PAY_STOREFRONT' if registration.scope == 'storefront' else 'MF_APPLE_PAY'
+            LOG.warning('%s status=%s source=%s domain=%s', label,
+                        registration.state, registration.origin_source,
+                        urlsplit(registration.origin).hostname or 'unset')
+            if registration.state == 'awaiting_registration':
+                registration.task = asyncio.create_task(registration.worker())
 
     @app.on_event('shutdown')
     async def shutdown():
-        if bridge.task:
-            bridge.task.cancel()
+        for registration in registrations:
+            if registration.task:
+                registration.task.cancel()
+        for registration in registrations:
+            if not registration.task:
+                continue
             try:
-                await bridge.task
+                await registration.task
             except asyncio.CancelledError:
                 pass
 
