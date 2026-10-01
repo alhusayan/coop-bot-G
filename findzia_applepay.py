@@ -1,4 +1,4 @@
-"""Findzia 156.7.14: registration diagnostics for the 156.7.13 Apple Pay window.
+"""Findzia 156.7.17: byte-exact provider verification file serving.
 
 The parent storefront keeps its embedded card checkout. This top-level page
 uses MyFatoorah's SDK on an origin whose verification file we can actually
@@ -26,7 +26,22 @@ PAGE_PATH = '/findzia/apple-pay'
 API = '/api/billing/myfatoorah/apple-pay'
 HEADERS = {'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer',
            'X-Content-Type-Options': 'nosniff', 'X-Frame-Options': 'DENY'}
-DIAGNOSTIC_BUILD = '156714'
+DIAGNOSTIC_BUILD = '156717'
+
+
+# Hash of the unmodified provider attachment supplied by the merchant.
+# Only repair editor-added final newlines when the remaining bytes match this
+# exact original. Future provider files and unknown contents stay untouched.
+_ORIGINAL_FILE_SHA256 = 'c15558d3e155e2031ef39b32775050c283b545d8575643181af3c3b9f03d46a3'
+
+
+def verification_file_bytes(raw):
+    candidate = raw.rstrip(b'\r\n')
+    if candidate != raw and hashlib.sha256(candidate).hexdigest() == _ORIGINAL_FILE_SHA256:
+        LOG.warning('MF_APPLE_PAY_FILE removed_trailing_newline=True source_bytes=%s served_bytes=%s sha256=%s',
+                    len(raw), len(candidate), _ORIGINAL_FILE_SHA256)
+        return candidate
+    return raw
 
 
 def diagnostic_text(value, secret_values=()):
@@ -120,7 +135,7 @@ class ApplePayWindow:
             self.state = 'invalid_origin'
             return
         try:
-            self.file = FILE.read_bytes()
+            self.file = verification_file_bytes(FILE.read_bytes())
             decoded = json.loads(bytes.fromhex(self.file.decode().strip()))
             if decoded.get('pspId') != 'C552A3D050E8C2C5F3D36AB26FCB8DBF0F085F2C8AFC29BB329A2071C4527C6B':
                 raise ValueError('wrong provider verification file')
@@ -162,7 +177,10 @@ class ApplePayWindow:
         try:
             response = requests.get(self.origin + WELL_KNOWN, timeout=(3, 10), allow_redirects=False)
             detail['http'] = response.status_code
-            if response.status_code != 200 or response.content.strip() != self.file.strip():
+            detail.update(expected_file_bytes=len(self.file), served_file_bytes=len(response.content),
+                          expected_file_sha256=hashlib.sha256(self.file).hexdigest(),
+                          file_matches_exactly=response.content == self.file)
+            if response.status_code != 200 or response.content != self.file:
                 self.ready = False
                 self.state = 'verification_file_mismatch'
                 return
@@ -318,7 +336,7 @@ def install_applepay(app, service, env, member):
         own_origin(request)
         if not bridge.file:
             raise HTTPException(404, 'not_found')
-        return Response(bridge.file, media_type='text/plain', headers={'Cache-Control': 'public, max-age=300', 'X-Content-Type-Options': 'nosniff'})
+        return Response(bridge.file, media_type='text/plain', headers={'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff'})
 
     @app.get(PAGE_PATH)
     async def page(request: Request):
