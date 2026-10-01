@@ -15,7 +15,7 @@ import re
 import threading
 import time
 
-VERSION = '156.7.10'
+VERSION = '156.7.15'
 LANGUAGES = {'en': 'English', 'ar': 'Arabic', 'de': 'German', 'fr': 'French',
              'it': 'Italian', 'es': 'Spanish', 'pt': 'Portuguese', 'tr': 'Turkish',
              'ru': 'Russian', 'ja': 'Japanese', 'zh': 'Simplified Chinese',
