@@ -1,4 +1,4 @@
-/* Findzia 156.7.18 — Apple Pay inside checkout on the exact verified storefront origin. */
+/* Findzia 156.7.20 — resumable checkout, safe plan changes and persistent payment UI. */
 (() => {
   'use strict';
   const searches = new Set(['/api/search','/api/search/stream','/api/search/image','/api/search/image/stream',
@@ -35,6 +35,7 @@
     let paddleConfig=null, paymentBusy=false, paymentMessage='', paymentTxn='', paymentRevision=0, walletDialog=null;
     let checkoutView=null, standardPreferred=false, mfConfig=null;
     let mfView=null, mfScriptPromise=null, paymentFlow=0;
+    let startingPayment=false, queuedPlan='', recoveryTimer=null, recoveryDeadline=0, pendingCheckoutIntent='';
     const mfReturnKey="findzia-mf-return-v1";
     const retiredCheckouts=new Set();
     const guestKey='findzia-guest-v1:'+new URL(api).origin, planKey='findzia-plan-intent-v1';
@@ -188,16 +189,36 @@
     function storePlan(value){memoryPlan=value;try{if(value)sessionStorage.setItem(planKey,JSON.stringify(value));else sessionStorage.removeItem(planKey);}catch(_){}}
     function resumePlan(){try{return JSON.parse(sessionStorage.getItem(planKey)||'null')?.resume===true;}catch(_){return memoryPlan?.resume===true;}}
     function choosePlan(id){
-      if(paymentBusy||mfView||checkoutView)return;
+      if(mfView||checkoutView||(paymentBusy&&!startingPayment))return;
       if(!(config?.plans||status?.plans||[]).some(p=>p.id===id))return;
+      clearTimeout(recoveryTimer);recoveryTimer=null;recoveryDeadline=0;
+      pendingCheckoutIntent='';
       storePlan({plan:id,at:Date.now(),resume:!account.member()});paymentMessage='';
+      // Let the customer change their selection during loading. Finish the
+      // outstanding request first; the server safely retires its unpaid order.
+      if(startingPayment){queuedPlan=id;account.render();return;}
       if(!account.member()){account.open('signin');return;}
       startPayment();
     }
-    async function startPayment(){
+    function resumePendingPayment(data,flow,id){
+      if(data.checkout_intent)pendingCheckoutIntent=data.checkout_intent;
+      if(data.transaction_id){paymentTxn=data.transaction_id;paymentRevision=revision;}
+      paymentMessage=tr('Checking your payment… This updates automatically.','نتحقق من حالة الدفع… تتحدث تلقائيًا.');
+      if(Date.now()>=recoveryDeadline){
+        paymentMessage=tr('Payment status is taking longer to confirm. You can keep browsing and check your payment here.','تأكيد حالة الدفع تأخر. تقدر تكمل التصفح وتتحقق من دفعتك هنا.');
+        return;
+      }
+      recoveryTimer=setTimeout(()=>{
+        recoveryTimer=null;
+        if(flow===paymentFlow&&id===selectedPlan()&&account.member())startPayment(true);
+      },Math.max(2,Math.min(8,Number(data.retry_after)||3))*1000);
+    }
+    async function startPayment(automatic=false){
       if(paymentBusy||mfView||checkoutView||!selectedPlan())return;
       if(!account.member()){account.open('signin');return;}
-      const rev=revision,flow=++paymentFlow,id=selectedPlan();paymentBusy=true;paymentMessage='';
+      clearTimeout(recoveryTimer);recoveryTimer=null;
+      if(automatic!==true)recoveryDeadline=Date.now()+150000;
+      const rev=revision,flow=++paymentFlow,id=selectedPlan();paymentBusy=true;startingPayment=true;paymentMessage='';
       storePlan({plan:id,at:Date.now(),resume:false});account.render();
       try{
         await paymentConfig(); // Domain registration may finish after page load.
@@ -209,12 +230,29 @@
           await openMF();return;
         }
         if(!paddleConfig?.checkout_available)throw Error('live_checkout_not_available');
-        const paddle=await loadPaddle();if(flow!==paymentFlow||rev!==revision)return;
-        const data=await json('/paddle/checkout',{plan_id:id},true,45000);if(flow!==paymentFlow||rev!==revision)return;
-        paymentTxn=data.transaction_id;paymentRevision=revision;account.close();
+        const paddle=await loadPaddle();if(flow!==paymentFlow||rev!==revision||id!==selectedPlan())return;
+        const data=await json('/paddle/checkout',{plan_id:id,...(pendingCheckoutIntent?{resume_intent:pendingCheckoutIntent}:{})},true,45000);if(flow!==paymentFlow||rev!==revision||id!==selectedPlan())return;
+        if(data.confirmed){
+          await refresh(true);if(flow!==paymentFlow||rev!==revision)return;
+          storePlan(null);paymentTxn='';pendingCheckoutIntent='';
+          paymentMessage=tr('Payment confirmed. Your search credits are ready.','تأكد الدفع. رصيد البحث جاهز.');account.open('checkout');return;
+        }
+        if(data.payment_pending){resumePendingPayment(data,flow,id);return;}
+        pendingCheckoutIntent='';paymentTxn=data.transaction_id;paymentRevision=revision;
+        // Keep the account surface until the next surface exists. Closing it
+        // first canceled our own flow and swallowed immediate provider errors.
         if(standardPreferred)openStandard(paddle,paymentTxn);else openWallet(paddle,paymentTxn);
-      }catch(e){if(flow===paymentFlow&&rev===revision){paymentMessage=paymentError(e);account.open('checkout');}}
-      finally{if(rev===revision){paymentBusy=false;account.render();}}
+        if(checkoutView)account.close();
+      }catch(e){if(flow===paymentFlow&&rev===revision&&id===selectedPlan()){
+        if(errorCode(e)==='checkout_pending')resumePendingPayment({},flow,id);
+        else paymentMessage=paymentError(e);
+        account.render();
+      }}
+      finally{if(rev===revision&&flow===paymentFlow){
+        paymentBusy=false;startingPayment=false;account.render();
+        const next=queuedPlan;queuedPlan='';
+        if(next&&next===selectedPlan()&&flow===paymentFlow&&!checkoutView&&!mfView)startPayment();
+      }}
     }
     function plan(){return (config?.plans||status?.plans||[]).find(p=>p.id===selectedPlan());}
     function planSummary(body){
@@ -234,6 +272,8 @@
       paddleConfig=results[1].status==='fulfilled'?results[1].value:null;
     }
     async function confirmMyFatoorah(){
+      // A stored return from the former provider must not interrupt Paddle.
+      if(!mfConfig?.enabled)return false;
       let record;try{record=JSON.parse(sessionStorage.getItem(mfReturnKey));}catch(_){}
       if(!record||Date.now()-record.at>86400000)return false;
       if(!account.member()){account.open('signin');return true;}
@@ -495,7 +535,7 @@
       if(view){clearTimeout(view.timer);if(view.id){retiredCheckouts.add(view.id);if(retiredCheckouts.size>40)retiredCheckouts.delete(retiredCheckouts.values().next().value);}}
       // Clear our state first: Paddle may emit checkout.closed synchronously.
       if(closeProvider&&(view||dialog))try{window.Paddle?.Checkout?.close();}catch(_){}
-      if(dialog){if(dialog.open)dialog.close();dialog.remove();}
+      if(dialog){window.FindziaModalScroll?.unlock(dialog);if(dialog.open)dialog.close();dialog.remove();}
     }
     function checkoutOptions(transactionId){
       // The selected search market is not the buyer's billing country.
@@ -578,12 +618,13 @@
         paddle_access_denied:tr('Payments are temporarily unavailable. Please contact support. (P02)','الدفع غير متاح مؤقتًا. تواصل مع الدعم. (P02)'),
         paddle_checkout_rejected:tr('Checkout could not be started. Please contact support. (P03)','تعذّر بدء الدفع. تواصل مع الدعم. (P03)'),
         paddle_recovery_unavailable:tr('We could not verify the previous checkout. Please contact support before paying again. (P04)','تعذّر التحقق من محاولة الدفع السابقة. تواصل مع الدعم قبل الدفع مجددًا. (P04)'),
-        checkout_pending:tr('We are checking your previous checkout. Wait two minutes, then reopen the same plan.','نتحقق من محاولة الدفع السابقة. انتظر دقيقتين، ثم افتح نفس الباقة.'),
+        checkout_pending:tr('Checking your payment… This updates automatically.','نتحقق من حالة الدفع… تتحدث تلقائيًا.'),
         checkout_limit:tr('Please wait before starting another checkout.','انتظر شوي قبل بدء عملية دفع ثانية.')
       })[code]||tr('Could not complete this step. Check your purchases before retrying.','تعذّر إكمال الخطوة. تحقق من مشترياتك قبل المحاولة مجددًا.');
     }
     async function confirmPayment(){
       if(paymentBusy||!paymentTxn||!account.member()||paymentRevision!==revision)return;
+      clearTimeout(recoveryTimer);recoveryTimer=null;
       paymentBusy=true;const rev=revision,tid=paymentTxn;
       paymentMessage=tr('Confirming payment…','نتحقق من الدفع…');account.open('checkout');
       try{
@@ -608,6 +649,8 @@
       const e=event.detail;if(!paymentTxn||paymentRevision!==revision)return;
       if(e?.name==='checkout.completed'&&e.data?.transaction_id===paymentTxn){closeWallet();confirmPayment();return;}
       const view=checkoutView;if(!view||!e)return;
+      if(retiredCheckouts.has(e.data?.id)||(e.data?.transaction_id&&e.data.transaction_id!==paymentTxn))return;
+      if(view.id&&e.data?.id&&view.id!==e.data.id)return;
       if(e.name==='checkout.error'){
         if(view.mode==='inline')checkoutHelp(tr('Express checkout could not load. Try the standard checkout.','تعذّر تحميل الدفع السريع. جرّب الدفع المعتاد.'));
         else if(!view.paying){closeWallet();paymentMessage=tr('Checkout could not load. Try again in a regular Safari or Chrome tab.','تعذّر تحميل الدفع. جرّب مرة ثانية بتبويب عادي في Safari أو Chrome.');account.open('checkout');}
@@ -648,9 +691,14 @@
     function renderCheckout(body){
       const msg=el('p','fza-payment-message',paymentMessage||tr('Payment','الدفع'));msg.setAttribute('role','status');body.append(msg);
       if(selectedPlan()&&!paymentBusy){const retry=button(tr('Try again','حاول مجددًا'),startPayment);retry.dataset.checkout='';body.append(retry);}
-      try{if(sessionStorage.getItem(mfReturnKey)){const check=button(tr('Check payment','تحقق من الدفع'),confirmMyFatoorah,'fza-text');check.disabled=paymentBusy;body.append(check);}}catch(_){}
-      if(paymentTxn){const check=button(tr('Check payment','تحقق من الدفع'),confirmPayment,'fza-text');check.disabled=paymentBusy;body.append(check);}
+      appendPaymentCheck(body);
       body.append(button(tr('Your search credits','رصيد البحث'),()=>account.open('usage'),'fza-text'),button(tr('Back to search','العودة للبحث'),()=>account.close(),'fza-text'));
+    }
+    function appendPaymentCheck(body){
+      let check=null;
+      if(paymentTxn)check=confirmPayment;
+      else try{if(mfConfig?.enabled&&sessionStorage.getItem(mfReturnKey))check=confirmMyFatoorah;}catch(_){}
+      if(check){const b=button(tr('Check payment','تحقق من الدفع'),check,'fza-text');b.disabled=paymentBusy;body.append(b);}
     }
     async function paidFetch(url,options={}){
       const target=new URL(url,location.href), allowed=new URL(api);
@@ -706,20 +754,27 @@
     function renderPlans(body){
       const plans=config?.plans||status?.plans||[];
       if(!plans.length){body.append(el('p','fza-caption',error?message(error):tr('Loading…','جاري التحميل…')));if(error)body.append(button(tr('Try again','حاول مجددًا'),()=>refresh(true)));return;}
+      if(paymentMessage){const msg=el('p','fza-payment-message',paymentMessage);msg.setAttribute('role','status');body.append(msg);appendPaymentCheck(body);}
       const list=el('div','fzb-plans');
       for(const plan of plans.filter(p=>!mfConfig?.enabled||p.id==='pack')){
         const card=el('article','fzb-plan');card.dataset.plan=plan.id;
         card.append(el('h3','',tf('{count} searches',{count:plan.credits},'{count} عملية بحث')));
         const price=el('p','fzb-price');price.dir='ltr';price.append(el('strong','',new Intl.NumberFormat(root.dataset.lang||'en',{style:'currency',currency:'USD'}).format(plan.amount_cents/100)),el('span','',plan.interval==='once'?'USD':tr('/ month','/ شهر')));card.append(price);
         card.append(el('p','fza-caption',plan.interval==='once'?tr('One payment. Credits do not expire.','دفعة واحدة. الرصيد لا ينتهي.'):tr('Renews monthly. Unused searches do not roll over.','تتجدد شهريًا. البحوث غير المستخدمة لا تترحّل.')));
-        const buy=button(paymentBusy&&selectedPlan()===plan.id?tr('Loading…','جاري التحميل…'):tr('Continue to payment','المتابعة للدفع'),()=>choosePlan(plan.id));buy.dataset.planBuy=plan.id;buy.disabled=paymentBusy||!!mfView||!!checkoutView;card.append(buy);list.append(card);
+        const loading=startingPayment&&selectedPlan()===plan.id;
+        const buy=button(loading?tr('Preparing payment…','نجهّز الدفع…'):tr('Continue to payment','المتابعة للدفع'),()=>choosePlan(plan.id));
+        buy.dataset.planBuy=plan.id;buy.disabled=(paymentBusy&&!startingPayment)||loading||!!mfView||!!checkoutView;
+        buy.setAttribute('aria-busy',String(loading));card.append(buy);list.append(card);
       }
       body.append(list);
       if(mfConfig?.environment==='sandbox'||paddleConfig?.paddle_environment==='sandbox')body.append(el('p','fza-footnote',tr('Test mode. No real payment is collected.','وضع التجربة، بدون تحصيل مبلغ حقيقي.')));
     }
     root.fzBilling={restorePurchases,fetch:paidFetch,beforeSearch,refresh,renderUsage,renderPlans,renderCheckout,planSummary,selectedPlan,beforeSignIn,handleSearchError,notice,status:()=>status,label:()=>status?tf('Searches remaining: {count}',{count:status.remaining},'عمليات البحث المتبقية: {count}'):tr('10 free searches','10 بحوث مجانية')};
-    root.addEventListener('fz:account-session',()=>{closeMF();closeWallet();revision++;status=null;stamp=0;error='';noticeCode='';paddleConfig=null;mfConfig=null;paymentBusy=false;paymentMessage='';paymentTxn='';standardPreferred=false;memoryPlan=null;paymentConfig().then(async()=>{account.render();if(await confirmMyFatoorah())return;if(account.member()&&selectedPlan()&&resumePlan())startPayment();});refresh(true);});
-    root.addEventListener('fz:account-closed',()=>{if(paymentBusy&&!mfView&&!checkoutView)paymentFlow++;});
+    root.addEventListener('fz:account-session',()=>{clearTimeout(recoveryTimer);recoveryTimer=null;queuedPlan='';pendingCheckoutIntent='';startingPayment=false;closeMF();closeWallet();revision++;status=null;stamp=0;error='';noticeCode='';paddleConfig=null;mfConfig=null;paymentBusy=false;paymentMessage='';paymentTxn='';standardPreferred=false;memoryPlan=null;paymentConfig().then(async()=>{account.render();if(await confirmMyFatoorah())return;if(account.member()&&selectedPlan()&&resumePlan())startPayment();});refresh(true);});
+    root.addEventListener('fz:account-closed',()=>{if(!mfView&&!checkoutView){
+      clearTimeout(recoveryTimer);recoveryTimer=null;queuedPlan='';paymentFlow++;
+      if(startingPayment){startingPayment=false;paymentBusy=false;}
+    }});
     const obs=new MutationObserver(paint);obs.observe(root,{attributes:true,attributeFilter:['data-lang','data-theme','data-home-state']});
     root.addEventListener('fz:search-state',paintNotice);
     window.addEventListener('focus',()=>refresh(true));
