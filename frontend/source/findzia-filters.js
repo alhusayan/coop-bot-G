@@ -254,7 +254,7 @@ function fzReadLocale(s) {
             _1k = null,
             _2k = null,
             _3d = "";
-        const _2w = new Map();
+        const _2w = new Map(), branchPlans = new Map();
         const _t = new Set(),
             _u = new Set();
         const _2c = {
@@ -372,8 +372,8 @@ function fzReadLocale(s) {
         }
         const _54 = {"en":{"all":"All filters","filters":"Filters","categories":"Browse categories","apply":"Show results","clear":"Clear all","any":"No preference","search":"Search filter options","from":"Min","to":"Max","price":"Price","back":"All categories","preparing":"Preparing categories and filters…","searching":"Searching with your choices…","empty":"No verified matches for these choices. Remove a filter or choose a broader category.","failed":"The search could not finish. Your previous results are still shown.","unavailable":"Some filters could not be loaded. Try again.","retry":"Try again","cancel":"Cancel","close":"Close","selected":"selected","invalid":"Enter a valid price range.","more":"More filters","remove":"Remove","preferences":"Choose preferences to search for. Availability and specifications are checked on each offer."},"ar":{"all":"كل الفلاتر","filters":"الفلاتر","categories":"تصفح الأقسام","apply":"عرض النتائج","clear":"مسح الفلاتر","any":"بدون تحديد","search":"ابحث داخل الخيارات","from":"من","to":"إلى","price":"السعر","back":"كل الأقسام","preparing":"نجهّز الأقسام والفلاتر…","searching":"نبحث حسب اختياراتك…","empty":"ما لقينا نتائج مؤكدة لهالاختيارات. شيل فلتر أو ارجع لقسم أشمل.","failed":"ما اكتمل البحث. المعروض نتائج بحثك السابق.","unavailable":"تعذّر تحميل بعض الفلاتر. حاول مجددًا.","retry":"حاول مجددًا","cancel":"إلغاء","close":"إغلاق","selected":"محدد","invalid":"أدخل نطاق سعر صحيح.","more":"فلاتر إضافية","remove":"إزالة","preferences":"اختَر المواصفات للبحث عنها. نتحقق من توفرها ومطابقتها لكل عرض."},"fr":{"all":"Tous les filtres","filters":"Filtres","categories":"Catégories","apply":"Voir les résultats","clear":"Tout effacer","any":"Sans préférence","search":"Rechercher une option","from":"Min","to":"Max","price":"Prix","back":"Toutes les catégories","remove":"Retirer"},"de":{"all":"Alle Filter","filters":"Filter","categories":"Kategorien","apply":"Ergebnisse anzeigen","clear":"Zurücksetzen","any":"Keine Präferenz","search":"Optionen suchen","from":"Min","to":"Max","price":"Preis","back":"Alle Kategorien","remove":"Entfernen"},"es":{"all":"Todos los filtros","filters":"Filtros","categories":"Categorías","apply":"Ver resultados","clear":"Borrar todo","any":"Sin preferencia","search":"Buscar opciones","from":"Mín","to":"Máx","price":"Precio","back":"Todas las categorías","remove":"Quitar"},"it":{"all":"Tutti i filtri","filters":"Filtri","categories":"Categorie","apply":"Mostra risultati","clear":"Cancella tutto","any":"Nessuna preferenza","search":"Cerca opzioni","from":"Min","to":"Max","price":"Prezzo","remove":"Rimuovi"},"pt":{"all":"Todos os filtros","filters":"Filtros","categories":"Categorias","apply":"Ver resultados","clear":"Limpar tudo","any":"Sem preferência","search":"Buscar opções","from":"Mín","to":"Máx","price":"Preço","remove":"Remover"},"tr":{"all":"Tüm filtreler","filters":"Filtreler","categories":"Kategoriler","apply":"Sonuçları göster","clear":"Tümünü temizle","any":"Tercih yok","search":"Seçenek ara","from":"Min","to":"Maks","price":"Fiyat","remove":"Kaldır"},"ru":{"all":"Все фильтры","filters":"Фильтры","categories":"Категории","apply":"Показать результаты","clear":"Сбросить","any":"Не важно","search":"Поиск вариантов","from":"От","to":"До","price":"Цена","remove":"Удалить"},"zh":{"all":"所有筛选","filters":"筛选","categories":"浏览分类","apply":"查看结果","clear":"清除筛选","any":"不限","search":"搜索选项","from":"最低","to":"最高","price":"价格","remove":"删除"},"ja":{"all":"すべての条件","filters":"絞り込み","categories":"カテゴリー","apply":"結果を表示","clear":"すべて解除","any":"指定なし","search":"条件を検索","from":"最低","to":"最高","price":"価格","remove":"削除"},"ko":{"all":"모든 필터","filters":"필터","categories":"카테고리","apply":"결과 보기","clear":"모두 지우기","any":"상관없음","search":"옵션 검색","from":"최소","to":"최대","price":"가격","remove":"삭제"},"hi":{"all":"सभी फ़िल्टर","filters":"फ़िल्टर","categories":"श्रेणियाँ","apply":"नतीजे देखें","clear":"फ़िल्टर हटाएँ","any":"कोई प्राथमिकता नहीं","search":"विकल्प खोजें","from":"न्यूनतम","to":"अधिकतम","price":"कीमत","remove":"हटाएँ"},"ur":{"all":"تمام فلٹرز","filters":"فلٹرز","categories":"زمرے","apply":"نتائج دکھائیں","clear":"فلٹرز ہٹائیں","any":"کوئی ترجیح نہیں","search":"اختیارات تلاش کریں","from":"کم از کم","to":"زیادہ سے زیادہ","price":"قیمت","remove":"ہٹائیں"},"id":{"all":"Semua filter","filters":"Filter","categories":"Kategori","apply":"Lihat hasil","clear":"Hapus filter","any":"Tanpa preferensi","search":"Cari opsi","from":"Min","to":"Maks","price":"Harga","remove":"Hapus"},"ms":{"all":"Semua penapis","filters":"Penapis","categories":"Kategori","apply":"Lihat hasil","clear":"Padam penapis","any":"Tiada pilihan","search":"Cari pilihan","from":"Min","to":"Maks","price":"Harga","remove":"Padam"}};
 
-        Object.assign(_54.en, {all:"Customize search", filters:"Search preferences", apply:"Search with these choices · 1 credit", search:"Find a specification or model", more:"More specifications", explainer:"Choose specifications to run a new search. Your selected choices appear in the search field."});
-        Object.assign(_54.ar, {all:"خصّص بحثك", filters:"مواصفات البحث", apply:"ابحث بهذه الاختيارات · رصيد واحد", search:"ابحث عن مواصفة أو موديل", more:"مواصفات أخرى", explainer:"اختر المواصفات لبدء بحث جديد. تظهر اختياراتك داخل حقل البحث."});
+        Object.assign(_54.en, {all:"Refine your search", filters:"Search words", apply:"Search · 1 credit", search:"Find a specification or model", more:"More specifications", explainer:"Choose what matters. We’ll add these words to your search."});
+        Object.assign(_54.ar, {all:"خصّص بحثك", filters:"كلمات تساعد بحثك", apply:"ابحث · رصيد واحد", search:"ابحث عن مواصفة أو موديل", more:"مواصفات أخرى", explainer:"اختر اللي يهمك، ونضيفه إلى بحثك الحالي."});
         function _4t() {
             return {
                 origin: null,
@@ -497,11 +497,7 @@ function fzReadLocale(s) {
             _g.hidden = !_1;
             if (_7) _4.append(_g);
             else _3f.append(_g);
-            _4.addEventListener("toggle", () => {
-                if (_4.open && !_i.value.trim()) _q.querySelectorAll("details").forEach(_4u => {
-                    if (_4u !== _4) _4u.open = false;
-                });
-            });
+
             return _4;
         }
 
@@ -572,11 +568,11 @@ function fzReadLocale(s) {
             _i.hidden = _c.length === 1 && _c[0].control === "range";
             el("dialog-title").textContent = all ? t("all") : _7 === "__categories" ? t("categories") : _c[0]?.label || t("filters");
             el("category").textContent = (_d || _0.plan).category || "Findzia";
-            el("explainer").textContent = t("explainer");
+            el("explainer").textContent = _0.origin?.kind==='image' ? (_1a()==='ar'?'نضيف اختياراتك إلى الصورة الحالية.':'Add your choices to this photo search.') : t("explainer");
             if (all || _7 === "__categories") _37();
             _c.forEach((_3, _4s) => {
                 const _4 = _36(_3.key, _3.label, _2f(_3, _y, _2));
-                _4.open = !!_7 || _59.has(_3.key);
+                _4.open = !!_7 || _59.has(_3.key) || (!_59.size && _4s<2) || !!_y[_3.key];
                 if (_7) {
                     _4.classList.add("fz-single-facet");
                     _4.querySelector("summary").hidden = true;
@@ -685,7 +681,18 @@ function fzReadLocale(s) {
             }
         }
 
+        function renderWordPreview() {
+            let preview=_18.querySelector('[data-refine-preview]');
+            if(!preview){preview=document.createElement('div');preview.dataset.refinePreview='';preview.className='fz-word-preview';_18.querySelector('.fz-refine-sheet-head').append(preview);}
+            preview.replaceChildren();
+            const plan=_d||_0.plan;
+            for(const f of plan?.facets||[]){const choice=f.options.find(o=>o.token===_y[f.key]);const range=_2[f.key];if(!choice&&!range)continue;
+                const label=choice?.label||_2f(f,_y,_2),chip=_28(label+' ×',()=>_3n(f.key),'fz-word-chip');chip.setAttribute('aria-label',t('remove')+' '+label);preview.append(chip);}
+            preview.hidden=!preview.children.length;
+            const category=el('category');category.title=_0.origin?.photoDescription||_0.origin?.query||'';
+        }
         function _15() {
+            renderWordPreview();
             _q.querySelectorAll("[data-filter-token]").forEach(b => b.setAttribute("aria-pressed", String((_y[b.dataset.facetKey] || "") === b.dataset.filterToken && !_2[b.dataset.facetKey])));
             _q.querySelectorAll("details[data-facet]").forEach(s => {
                 const f = (_d || _0.plan).facets.find(f => f.key === s.dataset.facet);
@@ -802,7 +809,7 @@ function fzReadLocale(s) {
             _e = true;
             _v = false;
             _15();
-            _2k = setTimeout(() => _3r(true), 160);
+            _2k = setTimeout(() => _3r(true), 40);
         }
         async function _3r(_2h) {
             if (!_18.open || !_0.origin || !_d || _m) return;
@@ -817,11 +824,14 @@ function fzReadLocale(s) {
             const _p = _1r("");
             delete _p.context_token;
             _p.plan_token = _1c.plan_token;
-            _p.quick_plan = false;
+            _p.quick_plan = !!_2h;
             _p.tokens = Object.values(_1);
             _p.ranges = _6;
             try {
-                const _o = await planRequest(_p,ctl,14500);
+                const cached=branchPlans.get(_47);
+                const _o = _2h && cached && Date.now()-cached.at<120000 ? cached.plan : await planRequest(_p,ctl,_2h ? 6000 : 14500);
+                branchPlans.set(_47,{at:Date.now(),plan:_o});
+                while(branchPlans.size>24)branchPlans.delete(branchPlans.keys().next().value);
                 if (id !== _1p || !_18.open || _m || _47 !== _j(_1c, _y, _2)) return;
                 const _a = _2b(_o, _0.origin.query, _1a());
                 const _51 = _22(_o, _a, _1c, _1);
@@ -922,7 +932,7 @@ function fzReadLocale(s) {
                 image_base64: c.image_base64 || now.image_base64,
                 mime_type: c.mime_type || now.mime_type,
                 base_query: c.photoDescription || now.photoDescription || c.query,
-                extra_specs: String(now.extra_specs || ""),
+                extra_specs: String(now.user_extra_specs ?? now.extra_specs ?? ""),
                 extra_intent: "filters"
             });
             return _o;
@@ -1008,7 +1018,7 @@ function fzReadLocale(s) {
             try {allowed=await window.FindziaBeforeSearch(_r,{});} catch (_) {say(t('failed'),true);}
             finally {_checking=false;_15();}
             const currentContext=_k.context();
-            if(_m||!_0.origin||['generation','query','country','lang','kind'].some(k=>submittedContext[k]!==currentContext[k])||(wasOpen&&!_18.open))return;
+            if(_m||!_0.origin||['generation','country','lang','kind',submittedContext.kind==='image'?'image_base64':'query'].some(k=>submittedContext[k]!==currentContext[k])||(wasOpen&&!_18.open))return;
             if(!allowed){_2x();return;}
             const _13 = _f.plan || _0.plan;
             _1w++;_19?.abort();_19=null;_2j=false;
@@ -1035,7 +1045,7 @@ function fzReadLocale(s) {
             const _9 = {
                 ..._0.origin,
                 query: _f.label || _29.query,
-                extra_specs: _f.extraSpecs !== undefined ? _f.extraSpecs : String(_29.extra_specs || "")
+                extra_specs: _f.extraSpecs !== undefined ? _f.extraSpecs : String(_29.user_extra_specs ?? _29.extra_specs ?? "")
             };
             if (_9.kind === "image") {
                 _9.image_base64 = _9.image_base64 || _29.image_base64;
@@ -1065,7 +1075,8 @@ function fzReadLocale(s) {
                 _38 = null,
                 _39 = false;
             const _4g = new Map();
-            const _3s = setTimeout(() => ctl.abort(), 75000);
+            let deadlineReached=false;
+            const _3s = setTimeout(() => {deadlineReached=true;ctl.abort();}, 65000);
             try {
                 const _12 = await window.FindziaBillingFetch(_r,_k.api + "/api/refine/search/stream", {
                     method: "POST",
@@ -1087,7 +1098,11 @@ function fzReadLocale(s) {
 
                 function _w(_o) {
                     if (id !== seq) return;
-                    if (_9.kind === "image" && typeof _o.extra_specs_applied === "string") _9.extra_specs = _o.extra_specs_applied;
+                    if (_9.kind === "image" && typeof _o.extra_specs_applied === "string") {
+                        _9.extra_specs = _o.extra_specs_applied;
+                        _9.user_extra_specs = _o.photo_extra_input ?? _p.extra_specs;
+                        _k.streamPhotoWords?.(_9.extra_specs, _9.user_extra_specs);
+                    }
                     _r.fzSearchProgress?.event(_o);
                     if (typeof _o.display_query === "string" && _o.display_query.trim()) {
                         _2q = _o.display_query;
@@ -1116,6 +1131,7 @@ function fzReadLocale(s) {
                     _2u = _4x.pop();
                     for (const _58 of _4x)
                         if (_58.trim()) _w(JSON.parse(_58));
+                    if (_49) break;
                     if (_4h.done) {
                         if (_2u.trim()) _w(JSON.parse(_2u));
                         break;
@@ -1127,7 +1143,7 @@ function fzReadLocale(s) {
                 const _1l = _27(() => _k.complete(_2q));
                 if (!_1l && _49.partial) {
                     if (_9.kind === "image") {
-                        _r.dataset.photoFiltersUnavailable = "true";
+                        delete _r.dataset.photoFiltersUnavailable;
                         queueMicrotask(() => _k.photoNotice?.(t("failed")));
                     }
                     _27(() => _k.restore(_1i));
@@ -1157,18 +1173,18 @@ function fzReadLocale(s) {
                     say("");
                     return;
                 }
-                if (_21.name === "AbortError") {
+                if (_21.name === "AbortError" && !deadlineReached) {
                     _27(() => _k.restore(_1i));
                     say("");
                     _1d = null;
                 } else {
                     try{await _k.prepare([..._4g.values()],ctl.signal);}catch(_){}
                     if(id!==seq||_m)return;
-                    if(ctl.signal.aborted){_27(()=>_k.restore(_1i));say('');_1d=null;return;}
+                    if(ctl.signal.aborted&&!deadlineReached){_27(()=>_k.restore(_1i));say('');_1d=null;return;}
                     const _1l = _27(() => _k.complete(_2q));
                     if (!_1l) {
                         if (_9.kind === "image") {
-                            _r.dataset.photoFiltersUnavailable = "true";
+                            delete _r.dataset.photoFiltersUnavailable;
                             queueMicrotask(() => _k.photoNotice?.(t("failed")));
                         }
                         _27(() => _k.restore(_1i));
@@ -1223,7 +1239,7 @@ function fzReadLocale(s) {
             _v = false;
             _d = null;
             _0 = _4t();
-            _2w.clear();
+            _2w.clear();branchPlans.clear();
             _1g = "";
             _1d = null;
             _2x();
@@ -1258,6 +1274,13 @@ function fzReadLocale(s) {
                     _0.origin.mime_type = c.mime_type || _0.origin.mime_type;
                     _0.origin.photoDescription = c.photoDescription || _0.origin.photoDescription;
                     _0.origin.extra_specs = c.extra_specs || "";
+                    _0.origin.user_extra_specs = c.user_extra_specs;
+                }
+                if (c.query !== _1g && c.kind === "image" && (_18.open || _3o())) {
+                    // Recognition can improve while the same photo is displayed.
+                    // It must not close the sheet or erase the shopper's choices.
+                    _1g=c.query;
+                    return;
                 }
                 if (c.query !== _1g) {
                     _3x();
@@ -1326,7 +1349,7 @@ function fzReadLocale(s) {
             if (_r.dataset.homeState === "empty") _3x();
             else if (_4p.some(c => c.attributeName === "data-lang")) {
                 if(_18.open)_2x();
-                _2w.clear();
+                _2w.clear();branchPlans.clear();
                 _2t();
                 if (_0.origin && !_1y) _2p(_0.nodeToken, true);
             }
@@ -1383,7 +1406,7 @@ function fzReadLocale(s) {
             });
             return true;
         };
-        _r.dataset.findziaFiltersMounted = "156.7.15";
+        _r.dataset.findziaFiltersMounted = "156.7.21";
         _1m();
     }
 
@@ -1413,7 +1436,7 @@ function fzReadLocale(s) {
         if (_3a && _3a.querySelectorAll) _3a.querySelectorAll(".fz-home").forEach(_1n);
     }
     window.FindziaFiltersV15620 = {
-        version: "156.7.15",
+        version: "156.7.21",
         mount: _1n,
         scan: _1t
     };
@@ -1450,7 +1473,7 @@ function icon(kind){const s=document.createElementNS('http://www.w3.org/2000/svg
 function mount(root){
  if(root.dataset.guideMounted||!root.fzRefineBridge||!root.dataset.findziaFiltersMounted)return;
  const bridge=root.fzRefineBridge,top=root.querySelector('.fz-refine-top'),refine=root.querySelector('[data-refine]');if(!top||!refine)return;
- root.dataset.guideMounted='156.7.15';const t=k=>window.FindziaI18n?.t(COPY.en[k]||k,COPY.ar[k],root)||COPY[root.dataset.lang==='ar'?'ar':'en'][k]||k;
+ root.dataset.guideMounted='156.7.21';const t=k=>window.FindziaI18n?.t(COPY.en[k]||k,COPY.ar[k],root)||COPY[root.dataset.lang==='ar'?'ar':'en'][k]||k;
  let origin=null,mode='',answers=[],turns=[],data=null,overview=null,busy=false,controller=null,serial=0,disposed=false,returnFocus=null,profile=loadProfile();
  const trigger=button('','fz-guide-open',open);trigger.dataset.guideOpen='';trigger.setAttribute('aria-haspopup','dialog');trigger.append(icon('discovery'));top.append(trigger);
  const fallback=node('div','fz-guide-fallback');fallback.hidden=true;refine.after(fallback);
@@ -1458,14 +1481,14 @@ function mount(root){
  const head=node('header','fz-guide-head'),title=node('h2','',t('title'));title.id=dialog.id+'-title';title.tabIndex=-1;
  const close=button('×','fz-guide-close',()=>dialog.close());head.append(title,close);
  const body=node('div','fz-guide-body'),footer=node('footer','fz-guide-footer'),form=node('form','fz-guide-form fz-guide-answer-form'),input=node('textarea','fz-guide-input'),send=node('button','fz-guide-primary');
- input.rows=2;input.maxLength=200;input.dir='auto';input.autocomplete='off';send.type='submit';form.append(input,send);footer.append(form);footer.hidden=true;dialog.append(head,body,footer);root.append(dialog);
+ input.rows=2;input.maxLength=200;input.dir='auto';input.autocomplete='off';send.type='submit';form.append(input,send);footer.hidden=true;dialog.append(head,body);root.append(dialog);
  form.addEventListener('submit',e=>{e.preventDefault();const answer=clean(input.value);if(!answer||busy)return;input.value='';answerWith(answer);});
- function sameContext(a,b){return a&&b&&['generation','query','country','lang','kind','extra_specs'].every(k=>(a[k]||'')===(b[k]||''));}
+ function sameContext(a,b){return a&&b&&['generation',a.kind==='image'?'image_base64':'query','country','lang','kind','extra_specs'].every(k=>(a[k]||'')===(b[k]||''));}
  function remember(answer){if(!profile.enabled||!origin||privateSearch.test(origin.query+' '+answer))return;const query=clean(origin.query,180),preference=clean(answer,180);if(!query||!preference)return;profile.entries=profile.entries.filter(e=>e.query!==query||e.preference!==preference);profile.entries.push({query,preference,at:Date.now()});profile.entries=profile.entries.slice(-20);persist(profile);}
  function answerWith(answer){if(busy||!origin)return;turns.push({question:data?.question||'',question_key:data?.question_key||'',answer:clean(answer),search_query:data?.search_query||''});turns=turns.slice(-6);answers=turns.map(t=>t.answer);remember(answer);data=null;discover();}
 
  function cancel(){serial++;controller?.abort();controller=null;busy=false;}
- function update(){if(disposed)return;const c=bridge.context();trigger.title=t('title');trigger.setAttribute('aria-label',t('title'));trigger.hidden=!c.query||root.dataset.homeState==='empty';trigger.disabled=!!c.busy;trigger.dataset.guideAvailable=String(!trigger.hidden&&!trigger.disabled);fallback.hidden=!refine.hidden||trigger.hidden;const host=refine.hidden?fallback:top;if(trigger.parentElement!==host)host.append(trigger);
+ function update(){if(disposed)return;const c=bridge.context();trigger.title=t('title');trigger.setAttribute('aria-label',t('title'));trigger.hidden=!c.query||root.dataset.homeState==='empty';trigger.disabled=!!c.busy&&!c.can_refine;trigger.dataset.guideAvailable=String(!trigger.hidden&&!trigger.disabled);fallback.hidden=!refine.hidden||trigger.hidden;const host=refine.hidden?fallback:top;if(trigger.parentElement!==host)host.append(trigger);
   if(origin&&!sameContext(origin,c)){cancel();origin=null;mode='';data=null;overview=null;if(dialog.open)dialog.close();}
  }
  function open(){update();if(trigger.hidden||trigger.disabled)return;const c=bridge.context();if(!sameContext(origin,c)){origin={...c};mode='';answers=[];turns=[];data=null;overview=null;input.value='';}returnFocus=document.activeElement;dialog.dir=['ar','ur'].includes(root.dataset.lang)?'rtl':'ltr';title.textContent=t('title');close.setAttribute('aria-label',t('close'));dialog.dataset.theme=root.dataset.theme;input.placeholder=t('needs');input.setAttribute('aria-label',t('needs'));send.textContent=t('send');if(!dialog.open)dialog.showModal();window.FindziaModalScroll.lock(dialog);render();title.focus({preventScroll:true});if(!mode&&!overview)loadOverview();else if(mode&&!data)discover();}
@@ -1506,7 +1529,7 @@ function mount(root){
   if(data?.search_query){const box=node('form','fz-guide-search'),label=node('label','',t('proposed')),query=node('textarea','fz-guide-proposed');query.rows=2;query.maxLength=240;query.value=data.search_query;query.dir='auto';query.setAttribute('aria-label',t('proposed'));label.append(query);const apply=node('button','fz-guide-primary',t('applyneeds'));apply.type='submit';apply.dataset.guideRefineSearch='';box.append(label,apply,node('p','fz-guide-note',t('credit')));box.addEventListener('submit',e=>{e.preventDefault();search(query.value,true);});body.append(box);}
   if(!data?.question&&!data?.search_query){body.append(node('p','fz-guide-note',t('unavailable')),button(t('retry'),'fz-guide-text',discover));const manual=node('form','fz-guide-form'),label=node('label','',t('edit')),q=node('input');q.value=origin.kind==='image'?(origin.extra_specs||answers.join(' ')):[origin.query,...answers].join(' ');q.maxLength=240;q.dir='auto';label.append(q);const go=node('button','fz-guide-primary',t('search'));go.type='submit';manual.append(label,go);manual.addEventListener('submit',e=>{e.preventDefault();search(q.value,true);});body.append(manual);}
   if(answers.length)body.append(button(t('editanswers'),'fz-guide-text',()=>{answers=[];turns=[];data=null;discover();}));
-  body.append(node('p','fz-guide-note',t('freeanswer')));renderPreferences();
+  const more=node('details','fz-guide-free-answer');more.append(node('summary','',t('freeanswer')),form);body.append(more);renderPreferences();
  }
  function renderPreferences(){const details=node('details','fz-guide-preferences');details.append(node('summary','',t('prefs')));const label=node('label','fz-guide-pref-toggle'),check=node('input');check.type='checkbox';check.checked=profile.enabled;check.dataset.guideRemember='';label.append(check,document.createTextNode(t('remember')));details.append(label,node('p','fz-guide-note',t('privacy')));const list=node('div');details.append(list);
   check.addEventListener('change',()=>{profile.enabled=check.checked;persist(profile);if(profile.enabled)answers.forEach(remember);renderList();});
