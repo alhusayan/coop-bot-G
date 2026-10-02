@@ -174,7 +174,9 @@ test('account navigation reveals actual sections and plans, including later body
   assert.ok(!f.animations.some(a=>a.target===field),'do not stack nested section reveals');
   const count=f.animations.length;f.notify(dialog,[{type:'childList',addedNodes:[]}]);assert.equal(f.animations.length,count);
   body.replaceChildren();const next=f.add(body,'section','fza-group');
-  f.notify(dialog,[{type:'childList',addedNodes:[next]}]);assert.ok(f.animations.some(a=>a.target===next),'same title, new content still animates');
+  f.notify(dialog,[{type:'childList',addedNodes:[next]}]);assert.ok(!f.animations.some(a=>a.target===next),'same view refresh must remain visible');
+  dialog.dataset.view='plans';f.notify(dialog,[{type:'attributes',target:dialog,attributeName:'data-view'}]);
+  assert.ok(f.animations.some(a=>a.target===next),'real navigation still reveals sections');
 });
 
 test('menu, preferences, product details, disclosure content and popovers have entry motion', () => {
@@ -208,4 +210,38 @@ test('menu entry is not overridden by a short open-state CSS transition', () => 
   const css=readFileSync(require('node:path').join(__dirname,'../source/findzia-motion.css'),'utf8');
   assert.match(css,/dialog\[data-dark-menu\]\[data-fz-motion-dialog\]\[open\]\{[^}]*transition:none/);
   assert.match(css,/display 160ms allow-discrete/,'native close stays synchronous with an optional visual exit');
+});
+
+test('login busy and balance updates do not replay equivalent sections', () => {
+ const f=fixture(),dialog=f.add(f.root,'dialog','fz-account'),header=f.add(dialog,'header','fza-header');
+ f.add(header,'h2','','My account');dialog.dataset.view='home';const body=f.add(dialog,'div','fza-body');
+ const paint=balance=>{body.replaceChildren();return [f.add(body,'section','fza-providers','Sign in'),f.add(body,'section','fzb-credit-card',balance),f.add(body,'section','fza-group','Details')];};
+ paint('—');f.notify(f.root,[{type:'childList',addedNodes:[dialog]}]);dialog.open=true;
+ f.notify(dialog,[{type:'attributes',target:dialog,attributeName:'open'}]);
+ for(const balance of ['—','28','28']){
+  const nodes=paint(balance);f.notify(dialog,[{type:'childList',addedNodes:nodes}]);
+  assert.ok(!f.animations.some(a=>nodes.includes(a.target)),'replacement DOM must stay visible');
+ }
+ assert.ok(f.animations.filter(a=>!a.target.isConnected).every(a=>a.canceled));
+});
+
+test('assistant rerenders preserve question and photo visibility', () => {
+ const f=fixture(),dialog=f.add(f.root,'dialog','fz-guide');
+ const paint=()=>{
+  dialog.replaceChildren();const q=f.add(dialog,'h2','fz-guide-question','Which colour?');
+  const choice=f.add(dialog,'button','fz-guide-choice','Black'),intro=f.add(dialog,'p','fz-guide-intro','Choose what matters');
+  const context=f.add(dialog,'div','fz-guide-context'),img=f.add(context,'img','');
+  img.complete=true;img.naturalWidth=100;img.attrs.src='speaker.jpg';return [q,choice,intro,img];
+ };
+ paint();f.notify(f.root,[{type:'childList',addedNodes:[dialog]}]);dialog.open=true;
+ f.notify(dialog,[{type:'attributes',target:dialog,attributeName:'open'}]);
+ const nodes=paint();f.notify(dialog,[{type:'childList',addedNodes:nodes}]);
+ f.notify(f.root,[{type:'childList',addedNodes:nodes}]);
+ assert.ok(!f.animations.some(a=>nodes.includes(a.target)));
+ nodes[0].textContent='Where will you use it?';f.notify(dialog,[{type:'childList',addedNodes:[]}]);
+ assert.ok(f.animations.some(a=>a.target===nodes[0]));assert.equal(nodes[0].children.length,0);
+});
+
+test('secure-login background transition cancels active effects', () => {
+ const f=fixture();f.doc.hidden=true;f.doc.emit('visibilitychange');assert.ok(f.animations.every(a=>a.canceled));
 });

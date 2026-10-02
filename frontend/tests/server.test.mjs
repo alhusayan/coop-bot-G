@@ -41,7 +41,7 @@ test('private files, API paths and unknown assets are never exposed or rewritten
  assert.equal((await fetch(origin+'/',{method:'POST',body:'x'})).status,405);
 });
 test('hashed assets revalidate, health responds, and WWW serves the file directly',async()=>{
- const h=await get('/healthz');assert.equal((await h.json()).version,'156.7.26');
+ const h=await get('/healthz');assert.equal((await h.json()).version,'156.7.27');
  const p=await get('/');const again=await fetch(origin+'/',{headers:{'If-None-Match':p.headers.get('etag')}});assert.equal(again.status,304);
 });
 test('existing guest credentials survive API hostname change and rollback; existing new credentials win',()=>{
