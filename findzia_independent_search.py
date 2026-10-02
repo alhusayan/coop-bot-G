@@ -161,6 +161,7 @@ class SearchClient:
         self.bing_enabled = _enabled(env, 'FINDZIA_BING_ENABLED')
         self.delay = _number(env, 'FINDZIA_INDEPENDENT_HEDGE_SECONDS', 2., 0., 5.)
         self.timeout = _number(env, 'FINDZIA_INDEPENDENT_TIMEOUT_SECONDS', 4.5, 1., 6.)
+        self.bing_timeout = _number(env, 'FINDZIA_BING_TIMEOUT_SECONDS', 8., 1., 12.)
         self.maximum = int(_number(env, 'FINDZIA_INDEPENDENT_MAX_CALLS', 6, 1, 8))
         self.minimum = int(_number(env, 'FINDZIA_INDEPENDENT_MIN_STORES', 4, 1, 10))
         self.get = get or requests.get
@@ -213,7 +214,8 @@ class SearchClient:
 
     def _request(self, engine, params, headers, deadline, cancel):
         response = None
-        remaining = min(self.timeout, deadline-self.clock())
+        remaining = min(self.timeout if engine == 'brave_search' else self.bing_timeout,
+                        deadline-self.clock())
         if remaining < .1 or cancel.is_set():
             return None, 0
         url = ('https://api.search.brave.com/res/v1/web/search' if engine == 'brave_search'
@@ -222,20 +224,39 @@ class SearchClient:
         try:
             response = self.get(url, params=params, headers=headers,
                 timeout=(connect, max(.05, remaining-connect)), allow_redirects=False, stream=True)
-            if response.status_code != 200:
-                return None, response.status_code
+            status = response.status_code
             body = bytearray()
             for chunk in response.iter_content(16384):
                 if cancel.is_set() or self.clock() >= deadline:
                     return None, 0
                 body.extend(chunk)
-                if len(body) > 2*1024*1024:
-                    return None, 0
-            data = json.loads(body)
-            return (data if isinstance(data, dict) else None), 200
+                if len(body) > (2*1024*1024 if status == 200 else 65536):
+                    return {'error': 'Response exceeded size limit'}, status
+            try:
+                data = json.loads(body)
+            except (ValueError, UnicodeError):
+                return {'error': 'Non-JSON provider response'}, status
+            return (data if isinstance(data, dict) else {'error': 'Unexpected response format'}), status
         finally:
             if response is not None:
                 response.close()
+
+    def _error_detail(self, raw, query, image_url):
+        """Only a bounded, redacted provider error; never the response body."""
+        error = _obj(raw).get('error')
+        if isinstance(error, dict):
+            error = error.get('message') or error.get('code')
+        if not isinstance(error, str):
+            return ''
+        # Some providers echo the failing URL, query, or credential in errors.
+        for private in (self.brave_key, self.serpapi_key, str(query or ''), image_url):
+            if private:
+                error = error.replace(private, '[redacted]')
+        error = re.sub(r'https?://\S+', '[url]', error)
+        error = re.sub(r'(?i)(api[_-]?key|token|authorization)\s*[=:]\s*\S+', r'\1=[redacted]', error)
+        error = re.sub(r'[A-Za-z0-9_+/=.-]{24,}', '[redacted]', error)
+        error = ' '.join(error.split())[:240]
+        return ' detail=' + json.dumps(error, ensure_ascii=True)
 
     def search(self, engine, query, country, lang, deadline, cancel, image_url=''):
         if not self.available(engine) or cancel.is_set() or deadline-self.clock() < .1:
@@ -247,7 +268,8 @@ class SearchClient:
             return None
         # Include language, market, query/image in deduplication; never store keys.
         cache_key = hashlib.sha256(json.dumps([engine, query, country, lang, image_url], ensure_ascii=False).encode()).hexdigest()
-        deadline = min(deadline, self.clock()+self.timeout)
+        timeout = self.timeout if engine == 'brave_search' else self.bing_timeout
+        deadline = min(deadline, self.clock()+timeout)
         with self.lock:
             cached = self.cache.get(cache_key)
             if cached and cached[0] > self.clock():
@@ -294,17 +316,19 @@ class SearchClient:
                     # Bing chooses best fit for markets it does not directly serve.
                     params['mkt'] = ('zh-CN' if country == 'cn' else f'{lang.split("-")[0]}-{country.upper()}')
                 else:
-                    params.update(q=str(query)[:400], cc=country.lower(), count=20)
+                    params.update(q=str(query)[:400], cc=country.lower())
             self.cost('independent_'+engine)
             began = self.clock()
             raw, status = self._request(engine, params, headers, deadline, cancel)
             success = isinstance(raw, dict) and not raw.get('error') and status == 200
             if not cancel.is_set():
                 self._record(engine, success, severe=status in (401, 403, 429))
-            self.log(f'INDEPENDENT SOURCE engine={engine} country={country} status={"returned" if success else "unavailable"} http={status} elapsed_ms={int((self.clock()-began)*1000)}')
+            detail = '' if success else self._error_detail(raw, query, image_url)
+            self.log(f'INDEPENDENT SOURCE engine={engine} country={country} status={"returned" if success else "unavailable"} http={status} elapsed_ms={int((self.clock()-began)*1000)}{detail}')
             if not success or cancel.is_set() or self.clock() >= deadline:
                 return None
             data = normalize_brave(raw) if engine == 'brave_search' else normalize_bing(raw, reverse)
+            self.log(f'INDEPENDENT RESULTS engine={engine} country={country} candidates={len(data.get("visual_matches" if reverse else "organic_results", []))}')
             with self.lock:
                 self.cache[cache_key] = (self.clock()+300., copy.deepcopy(data))
                 self.cache.move_to_end(cache_key)

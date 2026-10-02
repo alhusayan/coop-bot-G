@@ -394,7 +394,7 @@ from findzia_billing import CreditMiddleware, install_billing
 app.add_middleware(CreditMiddleware, owner=app)
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization', 'X-Findzia-Request-Id'], max_age=86400)
-BUILD_ID = 'v128.5.42.36-independent-search'
+BUILD_ID = 'v128.5.42.37-search-hotfix'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -6141,10 +6141,22 @@ def _is_fast_discovery_kind(kind):
 
 
 _PHOTO_SHOPPING_RECOVERY_LOCK = threading.Lock()
+_PHOTO_SHOPPING_RECOVERY_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix='photo-recovery')
 
-def _local_photo_shopping_recovery(data, query, market, hl, deadline):
+class _LocalDiscoveryBatch(list):
+    """Ready candidates plus optional later merchant-link recovery.
+
+    Futures stay outside market dictionaries and streamed JSON snapshots.
+    Only the coordinator consumes later rows, under its original deadline.
+    """
+    def __init__(self, rows, recovery_future=None):
+        super().__init__(rows)
+        self.recovery_future = recovery_future
+
+def _local_photo_shopping_recovery(data, query, market, hl, deadline, cancel_event=None):
     """At most three merchant lookups per image/market, within the existing lane."""
-    if not market.get('_image_discovery') or time.monotonic() >= deadline-.4:
+    if (not market.get('_image_discovery') or time.monotonic() >= deadline-.4
+            or (cancel_event is not None and cancel_event.is_set())):
         return []
     state = market.setdefault('_photo_shopping_recovery', {'seen':[]})
     selected = []
@@ -6167,7 +6179,7 @@ def _local_photo_shopping_recovery(data, query, market, hl, deadline):
     if not selected:
         return []
     finish = min(deadline,time.monotonic()+2.5)
-    cancel = threading.Event()
+    cancel = _IndependentCancel(cancel_event) if cancel_event is not None else threading.Event()
     spec = {'country':market['country'],'hl':hl,'role':'local'}
     jobs = [SHOPPING_MERCHANT_POOL.submit(_run_with_market,market,_web_text_shopping_lookup,card,spec,finish,cancel)
             for card in selected]
@@ -6187,7 +6199,7 @@ def _local_photo_shopping_recovery(data, query, market, hl, deadline):
     return rows
 
 
-def _local_discovery_request(query, market, kind, timeout_seconds):
+def _local_discovery_request(query, market, kind, timeout_seconds, cancel_event=None):
     started = time.monotonic()
     deadline = started + timeout_seconds
     cc = market['country']
@@ -6219,8 +6231,12 @@ def _local_discovery_request(query, market, kind, timeout_seconds):
         if not isinstance(data, dict):
             return []
         rows = _local_discovery_rows(data, query, market, 'local_' + kind)
-        if engine.endswith('_shopping'):
-            rows.extend(_local_photo_shopping_recovery(data,query,market,hl,deadline))
+        if (engine.endswith('_shopping') and market.get('_image_discovery')
+                and time.monotonic() < deadline-.4
+                and not (cancel_event is not None and cancel_event.is_set())):
+            recovery = _PHOTO_SHOPPING_RECOVERY_POOL.submit(_run_with_market, market,
+                _local_photo_shopping_recovery, data, query, market, hl, deadline, cancel_event)
+            return _LocalDiscoveryBatch(rows, recovery)
         return rows
     if kind == 'broad_en':
         spec = {'country': cc, 'role': 'local', 'engine': 'google', 'hl': 'en'}
@@ -6565,6 +6581,8 @@ def _local_market_discovery(query, market, limit=8, timeout_seconds=None, progre
     if timeout_seconds is not None and timeout_seconds <= 0:
         return []
     cancel_event = cancel_event if cancel_event is not None else threading.Event()
+    discovery_cancel = _IndependentCancel(cancel_event)
+    _INDEPENDENT.share_budget(cancel_event, discovery_cancel)
     q = re.sub(r'\s+', ' ', str(query or '')).strip()[:220]
     if not q:
         return []
@@ -6590,7 +6608,7 @@ def _local_market_discovery(query, market, limit=8, timeout_seconds=None, progre
         if cancelled() or remaining <= .01:
             return []
         began = time.monotonic()
-        values = _local_discovery_request(q, market, kind, remaining) or []
+        values = _local_discovery_request(q, market, kind, remaining, discovery_cancel)
         print(f'LOCAL PROVIDER country={cc} kind={kind} accepted={len(values)} elapsed={time.monotonic() - began:.2f}s')
         return values
     def launch(kind):
@@ -6601,7 +6619,14 @@ def _local_market_discovery(query, market, limit=8, timeout_seconds=None, progre
     def consume(future):
         nonlocal deadline
         try:
-            values = future.result() or []
+            result = future.result()
+            recovery = getattr(result, 'recovery_future', None)
+            if recovery is not None:
+                if cancelled() or time.monotonic() >= deadline:
+                    recovery.cancel()
+                else:
+                    pending[recovery] = 'serper_shopping_recovery'
+            values = result or []
         except Exception as exc:
             print(f'LOCAL DISCOVERY ERR {cc}: {type(exc).__name__}')
             return
@@ -6657,7 +6682,7 @@ def _local_market_discovery(query, market, limit=8, timeout_seconds=None, progre
         if independent_hedge.take(time.monotonic(), len(_local_ready_merchants(rows, cc)), primary_pending, deadline):
             for spec in _independent_text_specs(q, cc):
                 job = _INDEPENDENT_POOL.submit(_run_with_market, market,
-                    _independent_local_rows, q, market, spec, deadline, cancel_event)
+                    _independent_local_rows, q, market, spec, deadline, discovery_cancel)
                 pending[job] = spec['engine']
     maybe_launch_independent()
     try:
@@ -6685,6 +6710,7 @@ def _local_market_discovery(query, market, limit=8, timeout_seconds=None, progre
                 pending.pop(job)
                 consume(job)
     finally:
+        discovery_cancel.set()
         for job in pending:
             job.cancel()
     # Separate final quotas as well as stream quotas. A fast alternative must
@@ -14702,7 +14728,9 @@ def _web_visual_candidate_inline(row, force_refresh=False, cancel_event=None):
     primary = _web_unproxy_image_url(str((row or {}).get('image') or (row or {}).get('thumbnail') or ''))
     urls = list(dict.fromkeys([primary] + _web_offer_image_candidates(row)))
     urls = [url for url in urls if _web_is_http_url(url)][:3]
-    deadline = time.monotonic() + WEB_VISUAL_CLASSIFIER_FETCH_TIMEOUT_SECONDS
+    # Restore the primary image's full read allowance. Alternatives only use
+    # time left after a failed attempt; their count must not starve the primary.
+    deadline = time.monotonic() + WEB_VISUAL_CLASSIFIER_FETCH_TIMEOUT_SECONDS + .65
     failures = []
     for index, raw_url in enumerate(urls):
         if (cancel_event is not None and cancel_event.is_set()) or time.monotonic() >= deadline:
@@ -14721,7 +14749,7 @@ def _web_visual_candidate_inline(row, force_refresh=False, cancel_event=None):
                 failures.append('unsafe_host')
                 continue
             remaining = deadline - time.monotonic()
-            budget = remaining / max(1, len(urls)-index)
+            budget = remaining
             if budget < .1:
                 break
             connect = min(.65, budget / 3)
@@ -14729,7 +14757,7 @@ def _web_visual_candidate_inline(row, force_refresh=False, cancel_event=None):
             headers['Accept'] = 'image/webp,image/jpeg,image/png,image/*;q=0.8'
             headers['Referer'] = f'{parsed.scheme}://{parsed.netloc}/'
             response = _web_safe_get(raw_url, headers=headers,
-                timeout=(connect, max(.01,budget-connect)), stream=True)
+                timeout=(connect, max(.01, min(WEB_VISUAL_CLASSIFIER_FETCH_TIMEOUT_SECONDS, budget-connect))), stream=True)
             content_type = (response.headers.get('content-type') or '').split(';',1)[0].strip().lower()
             if response.status_code >= 400 or not content_type.startswith('image/'):
                 failures.append('http_'+str(response.status_code) if response.status_code >= 400 else 'not_image')
@@ -14841,7 +14869,7 @@ def _web_visual_collect_evidence(reference_image_b64, results, cancel_event=None
         # the background visual audit; the first streamed cards are unaffected.
         jobs[WEB_VISUAL_CLASSIFIER_POOL.submit(_web_visual_candidate_inline, row, True, cancel_event)] = classification_id
     if jobs:
-        done, pending = wait(set(jobs), timeout=WEB_VISUAL_CLASSIFIER_FETCH_TIMEOUT_SECONDS + 0.25)
+        done, pending = wait(set(jobs), timeout=WEB_VISUAL_CLASSIFIER_FETCH_TIMEOUT_SECONDS + 0.9)
         for future in done:
             try:
                 inline = future.result()
@@ -21759,7 +21787,7 @@ _INDEPENDENT = _IndependentSearchClient(reserve=_serpapi_budget_reserve,
     finish=_serpapi_budget_finish, cost=_api_cost_record)
 print(f'INDEPENDENT CONFIG enabled={_INDEPENDENT.enabled} brave={bool(_INDEPENDENT.brave_key)}'
       f' bing={_INDEPENDENT.available("bing_search")} hedge={_INDEPENDENT.delay}s'
-      f' timeout={_INDEPENDENT.timeout}s max_calls={_INDEPENDENT.maximum}')
+      f' timeout={_INDEPENDENT.timeout}s bing_timeout={_INDEPENDENT.bing_timeout}s max_calls={_INDEPENDENT.maximum}')
 
 
 def _independent_text_specs(query, country):
@@ -28033,7 +28061,7 @@ def _web_selected_market_search(query, country, lang, global_countries, *, image
                 # split the provider cache. Discover from the image alone in
                 # both roles. Keep q for textual rescue and identity checks.
                 return _serpapi_lens_request(public_url, 'all', cc, True, '')
-            return _local_discovery_request(q, target, kind, min(LOCAL_DISCOVERY_TIMEOUT, remaining))
+            return _local_discovery_request(q, target, kind, min(LOCAL_DISCOVERY_TIMEOUT, remaining), independent_cancel)
         job = SELECTED_MARKET_POOL.submit(_run_with_market, target, fetch)
         jobs[job] = (cc, kind)
         states[cc] = {'status': 'searching', 'count': by_market[cc]}
@@ -28147,7 +28175,14 @@ def _web_selected_market_search(query, country, lang, global_countries, *, image
             for job in done:
                 cc, kind = jobs.pop(job)
                 try:
-                    values = job.result() or []
+                    result = job.result()
+                    recovery = getattr(result, 'recovery_future', None)
+                    if recovery is not None:
+                        if cancelled() or time.monotonic() >= deadline:
+                            recovery.cancel()
+                        else:
+                            jobs[recovery] = (cc, 'serper_shopping_recovery')
+                    values = result or []
                 except Exception as exc:
                     states[cc] = {'status': 'partial', 'count': by_market[cc], 'reason': type(exc).__name__}
                     values = []
