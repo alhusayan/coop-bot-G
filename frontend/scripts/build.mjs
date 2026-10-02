@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 
 const base = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const src = resolve(base, 'source'), dest = resolve(base, 'public');
-const version = '156.7.24', api = 'https://api.findzia.com';
+const version = '156.7.25', api = 'https://api.findzia.com';
 // Preserve the live section scope to avoid unnecessary DOM/storage changes.
 const section = 'template--19963721449543__findzia_home_h4wBLq';
 const expected = 'c15558d3e155e2031ef39b32775050c283b545d8575643181af3c3b9f03d46a3';
@@ -19,7 +19,7 @@ function emit(url, file, bytes, type, immutable=false) {
   routes[url] = {file,sha256:hash(bytes),type,immutable}; return url;
 }
 const assets = new Map();
-for (const name of ['findzia-account.js','findzia-billing.js','findzia-filters.js','findzia-i18n.js','findzia-shell.js','findzia-product-details.css','findzia-migration.js','findzia-standalone.css']) {
+for (const name of ['findzia-account.js','findzia-billing.js','findzia-filters.js','findzia-i18n.js','findzia-shell.js','findzia-product-details.css','findzia-migration.js','findzia-standalone.css','findzia-motion.js','findzia-motion.css']) {
   const bytes=read(name), ext=name.split('.').at(-1), file='assets/'+name.replace('.'+ext,'.'+hash(bytes).slice(0,16)+'.'+ext);
   assets.set(name,emit('/'+file,file,bytes,ext,true));
 }
@@ -48,7 +48,7 @@ if (/\{[{%]/.test(home)) throw Error('Unresolved Liquid template expression');
 const baseline=`*,*::before,*::after{box-sizing:border-box}html{font-size:16px;-webkit-text-size-adjust:100%}body{margin:0;background:#f7f7f3;color:#24322c;font:16px/1.5 Arial,sans-serif}button,input,select,textarea{font:inherit}button{cursor:pointer}img,svg{vertical-align:middle}button:disabled{cursor:default}[hidden]{display:none!important}body:has(.fz-home[data-theme="dark"]){background:#101b17;color:#eef2ed}a{color:inherit}dialog{color:inherit}body>main{min-width:0}button:focus-visible,a:focus-visible{outline:2px solid #b97944;outline-offset:3px}`;
 const legalCSS=`.legal{max-width:820px;margin:auto;padding:32px 24px 64px;line-height:1.8}.legal header{display:flex;justify-content:space-between;align-items:center;gap:24px;margin-bottom:40px}.legal .brand{font-family:Georgia,serif;font-size:36px;text-decoration:none;letter-spacing:-1px}.legal article{overflow-wrap:anywhere}.legal h1{font-size:30px;line-height:1.25}.legal h2,.legal h3{line-height:1.4;margin-top:32px}.legal article a{color:#8b4f25}.legal footer{margin-top:40px;border-top:1px solid #dce1da;padding-top:20px}.legal footer nav{display:flex;flex-wrap:wrap;gap:16px;font-size:14px}@media(prefers-color-scheme:dark){body:has(.legal){background:#101b17;color:#eef2ed}.legal article a{color:#f5c291}.legal footer{border-color:#3c4a41}}`;
 function page(body,title,canonical,extraStyle='') {
-  return `<!doctype html>\n<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="description" content="Find products with a photo or a few words. Compare local and global stores with Findzia."><meta name="theme-color" content="#101b17"><title>${title}</title><link rel="canonical" href="https://findzia.com${canonical}"><link rel="icon" href="/favicon.svg" type="image/svg+xml"><link rel="preconnect" href="https://api.findzia.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><style>${baseline}${extraStyle}</style></head><body>${body}</body></html>\n`;
+  return `<!doctype html>\n<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="description" content="Find products with a photo or a few words. Compare local and global stores with Findzia."><meta name="theme-color" content="#101b17"><title>${title}</title><link rel="canonical" href="https://findzia.com${canonical}"><link rel="icon" href="/favicon.svg" type="image/svg+xml"><link rel="preconnect" href="https://api.findzia.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><style>${baseline}${extraStyle}</style><link rel="stylesheet" href="${assets.get('findzia-motion.css')}"><script src="${assets.get('findzia-motion.js')}" defer></script></head><body>${body}</body></html>\n`;
 }
 // The wrapper IDs match the original scoped CSS; no Shopify runtime is loaded.
 emit('/','index.html',page(`<link rel="stylesheet" href="${assets.get('findzia-standalone.css')}"><script src="${assets.get('findzia-migration.js')}"></script><main id="MainContent"><div class="shopify-section section-findzia-home" id="shopify-section-${section}">${home}</div></main>`,'Findzia — Find your product instantly','/'),'html');
