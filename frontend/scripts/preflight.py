@@ -5,21 +5,23 @@ import json
 import urllib.error
 import urllib.parse
 import urllib.request
+from pathlib import Path
 
 EXPECTED = 'c15558d3e155e2031ef39b32775050c283b545d8575643181af3c3b9f03d46a3'
 FILE = '/.well-known/apple-developer-merchantid-domain-association'
 API = 'https://api.findzia.com'
+VERSION = json.loads((Path(__file__).resolve().parents[1] / 'package.json').read_text())['version']
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, *args, **kwargs):
         return None
 
 def get(url, headers=None):
-    request = urllib.request.Request(url, headers={'User-Agent':'Findzia-Preflight/156.7.19', **(headers or {})})
+    request = urllib.request.Request(url, headers={'User-Agent':'Findzia-Preflight/'+VERSION, **(headers or {})})
     with urllib.request.build_opener(NoRedirect()).open(request, timeout=20) as response:
         return response.status, response.headers, response.read()
 
-def check(site):
+def check(site, expected_version=VERSION):
     failures = []
     def run(name, fn):
         try:
@@ -38,7 +40,8 @@ def check(site):
         assert b'/cdn/shop/' not in body, 'Homepage still depends on Shopify assets'
     def health_check():
         _, _, body = get(site+'/healthz')
-        assert json.loads(body).get('version') == '156.7.19', 'Wrong frontend build'
+        actual=json.loads(body).get('version')
+        assert actual == expected_version, f'Expected frontend {expected_version}, got {actual}'
     def api_check():
         _, headers, body = get(API+'/api/account/config', {'Origin':site})
         assert headers.get('Access-Control-Allow-Origin') == site, 'Add this exact origin to WEB_ALLOWED_ORIGINS on the API service'
@@ -55,6 +58,7 @@ if __name__ == '__main__':
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('origin', nargs='?', default='https://findzia.com')
     parser.add_argument('--production', action='store_true', help='Check both production storefront origins')
+    parser.add_argument('--expected-version', default=VERSION, help='Expected deployed frontend version (defaults to package.json)')
     args=parser.parse_args()
     sites=['https://findzia.com','https://www.findzia.com'] if args.production else [args.origin.rstrip('/')]
     for site in sites:
@@ -63,6 +67,6 @@ if __name__ == '__main__':
             parser.error('Use an HTTPS origin without a path or credentials')
     failed=[]
     for site in sites:
-        failed.extend(check(site))
+        failed.extend(check(site,args.expected_version))
     print('These checks do not verify merchant registration or a real Apple Pay transaction.')
     raise SystemExit(1 if failed else 0)
