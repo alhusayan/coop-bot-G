@@ -394,7 +394,7 @@ from findzia_billing import CreditMiddleware, install_billing
 app.add_middleware(CreditMiddleware, owner=app)
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization', 'X-Findzia-Request-Id'], max_age=86400)
-BUILD_ID = 'v128.5.42.31-search-words'
+BUILD_ID = 'v128.5.42.32-assistant-photo'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -28756,6 +28756,7 @@ def _refine_effective_base(context):
         base=re.sub(r'\d+(?:[.,]\d+)?\s*(?:GB|TB|جيجا(?:بايت)?|غيغا|قيقا|تيرا(?:بايت)?)\b',' ',base,flags=re.I)
     if 'size' in keys:
         base=re.sub(r'\d+(?:[.,]\d+)?\s*(?:cm|mm|inch(?:es)?|سم|ملم|بوصة)\b',' ',base,flags=re.I)
+        base=re.sub(r'(?i)(?:\bsize|مقاس)\s*[:：]?\s*(?:(?:EU|UK|US)\s*)?(?:\d+(?:[.,]\d+)?|XXXL|XXL|XL|XS|[SML])\b',' ',base)
     if 'material' in keys:
         base=re.sub(r'\b(?:wood(?:en)?|metal|plastic|cotton|linen|polyester|leather|steel|aluminium|fabric|خشب|خشبي|معدن|معدني|بلاستيك|قماش|جلد|قطن)\b',' ',base,flags=re.I)
     if 'condition' in keys:
@@ -30017,9 +30018,9 @@ def _photo_addition_steps(extra):
             role=(capacity[3] or '').upper();key='memory' if role=='RAM' else 'storage'
             add(key,capacity[1]+unit+(' '+role if role else ''),capacity.group().strip())
             remain=remain[:capacity.start()]+' '+remain[capacity.end():]
-        size=re.search(r'(?i)(?:\bsize|مقاس)\s*[:：]?\s*([A-Za-z0-9.]+)',remain)
+        size=re.search(r'(?i)(?:\bsize|مقاس)\s*[:：]?\s*((?:(?:EU|UK|US)\s*)?(?:\d+(?:[.,]\d+)?|XXXL|XXL|XL|XS|[SML]))\b',remain)
         if size:
-            add('size',size[1],size.group());remain=remain[:size.start()]+' '+remain[size.end():]
+            add('size','size '+size[1],size.group());remain=remain[:size.start()]+' '+remain[size.end():]
     # Never discard unknown modifiers (waterproof, natural diamond, allergy, etc).
     residue=re.sub(r'(?i)(?<!\w)(?:and|with|color|colour|باللون|لون|اللون|و)(?!\w)',' ',remain)
     residue=re.sub(r'[\s,+;،]+',' ',residue).strip()
@@ -30372,7 +30373,9 @@ def _classic_photo_lookup(context,image_b64,mime,caption,country,lang,progress_c
     def lens_job():
         if cancelled():return []
         if not SERPAPI_API_KEY:raise RuntimeError('lens_unavailable')
-        url=publish_image_for_lens(base64.b64decode(image_b64),mime)
+        # Publisher accepts base64 and decodes it exactly once. Passing decoded
+        # bytes here corrupted the image (or returned '') on every photo edit.
+        url=publish_image_for_lens(image_b64,mime)
         if cancelled():return []
         if not url:raise RuntimeError('lens_image_unavailable')
         # Plain 'products' is deliberate. Old .42 supports q for this value,
@@ -30548,7 +30551,7 @@ async def _classic_filter_source(response,context,request):
 
 @app.post('/api/refine/search/stream')
 async def web_api_refine_search(request: Request):
-    if not WEB_API_ENABLED or not CLASSIC_FILTERS_ENABLED:
+    if not WEB_API_ENABLED:
         return JSONResponse({'ok':False,'error':'refinement_unavailable'},status_code=503)
     try:
         payload=await request.json()
@@ -30684,7 +30687,8 @@ def _fz_filter_match(context,row):
     # Only actual listing content enters matching; never query text, domains,
     # source-country names, user selections, scores or AI-generated labels.
     text=_fz_listing_text(row)
-    if _findzia_hard_product_mismatch(context.get('base',''),text):return False,[]
+    reference=(_refine_effective_base(context) if context.get('kind')=='image' else context.get('base',''))
+    if _findzia_hard_product_mismatch(reference,text):return False,[]
     profile=_card_variant_facts(row).get('facts',{})
     aliases={'colour':'color','capacity':'storage','memory':'ram'}
     unknown=[]
@@ -31098,7 +31102,7 @@ def _fz_guide_words(text):
 
 def _fz_guide_repeated(value, context):
     if not value.get('question'): return False
-    if len(context.get('answers') or []) >= 3: return True
+    if len(context.get('answers') or []) >= (12 if context.get('guided_version')==2 else 3): return True
     key = _fz_guide_question_key(value.get('question_key'))
     words = _fz_guide_words(value['question'])
     for turn in context.get('turns') or []:
@@ -31113,7 +31117,7 @@ def _fz_guide_turns(payload):
     turns = payload.get('turns') or []
     if not isinstance(turns,list): raise ValueError('invalid_turns')
     out=[]
-    for turn in turns[-6:]:
+    for turn in turns[:12]:
         if not isinstance(turn,dict): continue
         answer=_card_text(turn.get('answer'),200)
         if not answer: continue
@@ -31987,10 +31991,14 @@ Use lang for all visible text. Understand colloquial wording and the whole need,
 Ask ONE useful question at a time with 2-4 concise choices, or accept the shopper's free-text answer.
 Ask only what materially changes the search: use, budget, fit, material, size, compatibility, etc.
 Do not force a fixed questionnaire. Do not ask about a topic already answered in query, extra_specs,
-answers or turns. Use a stable question_key. At most THREE questions total; stop sooner when useful.
+answers or turns. Use a stable question_key. Each next question is optional. Continue with a
+useful unasked detail when available, at most 12 questions; stop sooner when no useful detail remains.
 Current explicit answers override tentative history. History is optional and only from related searches.
 Do not infer sensitive traits or invent a preference, budget, size, model or specification.
-After any answer, provide a usable search_query even while asking an optional next question.
+Provide a usable search_query from the first step, including while asking an optional next question.
+The shopper can search at any step. Preserve ALL earlier answers; never silently discard the first ones.
+draft_query is the current editable search sentence. Retain manual additions in it when composing
+the next sentence, and use it to avoid asking about a detail the shopper already entered.
 For kind=text, search_query is a complete concise query in the original query language, retaining
 all explicit brand/model/identifier/variant constraints and adding the shopper's answered needs.
 For kind=image, search_query contains ONLY added specifications requested in extra_specs/answers;
@@ -32032,7 +32040,7 @@ def _fz_needs_query(context, proposed=''):
             # Preserve requested model numbers/capacities, including Arabic digits.
             numbers=lambda s:set(re.findall(r'\d+(?:[.,]\d+)?',_web_ascii_digits(s)))
             if not numbers(base)<=numbers(query):query=''
-    if not query:query=safe(fallback)
+    if not query:query=safe(context.get('draft_query')) or safe(fallback)
     return query if query and len(query)<=240 else ''
 
 
@@ -32042,19 +32050,18 @@ def _fz_needs_sync(context):
             'search_kind':context.get('kind','text'),'history_used':0}
     # The form remains usable even without model credentials, returned listings,
     # review evidence, or a complete automatic refinement.
-    if context.get('answers'):
-        result['search_query']=_fz_needs_query(context)
-        if result['search_query']:result['status']='ready'
+    result['search_query']=_fz_needs_query(context)
+    if result['search_query']:result['status']='ready'
     if _FZ_GUIDE_MEDICAL.search(context['query']):return result
-    final=len(context.get('answers') or [])>=3 or context.get('finish') is True
+    final=len(context.get('answers') or [])>=12 or context.get('finish') is True
     try:
         value=_refine_ai(_FZ_NEEDS_PROMPT,dict(context,no_more_questions=final),tokens=1400,timeout=7)
         if not isinstance(value,dict):return result
         result['intro']=_card_text(value.get('intro'),180)
         result['next_tip']=_card_text(value.get('next_tip'),180)
-        result['search_query']=_fz_needs_query(context,value.get('search_query')) if context.get('answers') or value.get('search_query') else ''
-        # No additional repair request: three answers or a repeated topic ends
-        # questioning and leaves the refined query available immediately.
+        result['search_query']=_fz_needs_query(context,value.get('search_query'))
+        # No second repair request or forced completion gate. A repeated topic
+        # leaves the current query available for searching or manual additions.
         if not final and not _fz_guide_repeated(value,context):
             choices=[];seen=set()
             for choice in (value.get('choices') or [])[:4]:
@@ -32102,7 +32109,7 @@ async def web_api_discover(request: Request):
     if not _web_rate_allowed(request,scope='shopping_guide'): return JSONResponse({'ok':False,'error':'rate_limit'},status_code=429)
     try:
         raw=await request.body()
-        if len(raw)>8000: raise ValueError('request_too_large')
+        if len(raw)>24000: raise ValueError('request_too_large')
         payload=json.loads(raw)
         query=_refine_safe_query(payload.get('query'))
         mode=str(payload.get('mode') or 'overall')
@@ -32117,7 +32124,8 @@ async def web_api_discover(request: Request):
                  'answers':[_card_text(x,160) for x in answers[:3] if isinstance(x,str)]}
         if mode=='guided' and payload.get('guided_version')==2:
             context.update(guided_version=2,turns=_fz_guide_turns(payload),finish=payload.get('finish') is True,
-                           answers=[_card_text(x,200) for x in answers[-6:] if isinstance(x,str)],history=[])
+                           answers=[_card_text(x,200) for x in answers[:12] if isinstance(x,str)],history=[],
+                           draft_query=_refine_safe_query(payload.get('draft_query') or ''))
             history=payload.get('history') or []
             if isinstance(history,list) and not _FZ_GUIDE_PRIVATE.search(query):
                 for entry in history[-20:]:
