@@ -4,15 +4,26 @@
   const searches = new Set(['/api/search','/api/search/stream','/api/search/image','/api/search/image/stream',
     '/api/search/more','/api/search/more/stream','/api/search/markets/stream','/api/refine/search/stream']);
   const uid = () => crypto.randomUUID().replace(/-/g,'');
+  function abortable(work, signal) {
+    if (!signal) return Promise.resolve(work);
+    return new Promise((resolve,reject)=>{
+      const abort=()=>reject(new DOMException('Aborted','AbortError'));
+      if(signal.aborted){Promise.resolve(work).catch(()=>{});abort();return;}
+      signal.addEventListener('abort',abort,{once:true});
+      Promise.resolve(work).then(resolve,reject).finally(()=>signal.removeEventListener('abort',abort));
+    });
+  }
   const el = (tag, cls, text) => {const n=document.createElement(tag);if(cls)n.className=cls;if(text!==undefined)n.textContent=text;return n;};
   async function waitFor(root) {
     for(let i=0;i<80;i++){if(root.fzBilling)return root.fzBilling;await new Promise(r=>setTimeout(r,50));}
     throw Error('credits_unavailable');
   }
-  window.FindziaBillingFetch = async (root, url, options) => (await waitFor(root)).fetch(url,options);
+  window.FindziaBillingFetch = async (root, url, options) => (await abortable(waitFor(root),options?.signal)).fetch(url,options);
   window.FindziaBeforeSearch = async (root, payload) => {
-    try{return await (await waitFor(root)).beforeSearch(payload);}
+    const ctl=new AbortController(),timer=setTimeout(()=>ctl.abort(),20000);
+    try{return await abortable((async()=>(await waitFor(root)).beforeSearch(payload))(),ctl.signal);}
     catch(_){root.fzRefineBridge?.accountNotice(root.dataset.lang==='ar'?'تعذّر التحقق من الرصيد. حاول مجددًا.':'Could not check your credits. Please try again.');return false;}
+    finally{clearTimeout(timer);}
   };
   function pendingStore(action, value) {
     return new Promise((resolve,reject)=>{
@@ -672,6 +683,7 @@
       }
       if(e.name==='checkout.payment.failed'||e.name==='checkout.payment.error'){
         view.paying=false;if(view.fallback)view.fallback.disabled=false;
+        checkoutHelp(tr('Payment was not completed. Try another card or use standard checkout.','ما اكتمل الدفع. جرّب بطاقة ثانية أو افتح الدفع المعتاد.'));
       }
       // Programmatic closes are cleared/retired before reaching this handler.
       if(e.name==='checkout.closed'&&view.id&&e.data.id===view.id){closeWallet(false);account.open('plans');}
@@ -684,7 +696,22 @@
       if(!account.member()){account.open('signin');return;}
       if(paymentBusy)return;
       const rev=revision;paymentBusy=true;paymentMessage=tr('Checking your purchases…','نتحقق من مشترياتك…');account.open('checkout');
-      try{await json(mfConfig?.enabled?'/myfatoorah/restore':'/paddle/restore',{});if(rev!==revision)return;await refresh(true);paymentMessage=tr('Your purchase records and search balance are up to date.','تم تحديث سجل مشترياتك ورصيد البحث.');}
+      try{
+        await paymentConfig();if(rev!==revision)return;
+        const paths=[];
+        if(mfConfig?.enabled&&mfConfig?.checkout_available)paths.push('/myfatoorah/restore');
+        if(paddleConfig?.restore_available)paths.push('/paddle/restore');
+        if(!paths.length)throw Error('credits_unavailable');
+        const results=await Promise.allSettled(paths.map(path=>json(path,{})));
+        if(rev!==revision)return;
+        const failures=results.filter(result=>result.status==='rejected');
+        const current=await refresh(true);if(rev!==revision)return;
+        if(!current)throw Error('credits_unavailable');
+        if(failures.length===results.length)throw failures[0].reason;
+        paymentMessage=failures.length
+          ?tr('Some purchases were checked. One payment provider is unavailable; please retry to check the rest.','تحققنا من بعض المشتريات. إحدى بوابات الدفع غير متاحة؛ أعد المحاولة للتحقق من الباقي.')
+          :tr('Your purchase records and search balance are up to date.','تم تحديث سجل مشترياتك ورصيد البحث.');
+      }
       catch(e){if(rev===revision)paymentMessage=paymentError(e);}
       finally{if(rev===revision){paymentBusy=false;account.render();}}
     }
@@ -703,10 +730,10 @@
     async function paidFetch(url,options={}){
       const target=new URL(url,location.href), allowed=new URL(api);
       if(target.origin!==allowed.origin||!target.pathname.startsWith('/api/'))throw Error('invalid_api_target');
-      await account.ready;
+      await abortable(account.ready,options.signal);
       if(options.signal?.aborted)throw new DOMException('Aborted','AbortError');
       const headers=new Headers(options.headers||{}), charge=searches.has(target.pathname),generation=bridge.context().generation,previous=allowedView;
-      if(!credential())await ensureGuest();
+      if(!credential())await abortable(ensureGuest(),options.signal);
       if(options.signal?.aborted)throw new DOMException('Aborted','AbortError');
       headers.set('Authorization','Bearer '+credential());
       if(charge){
