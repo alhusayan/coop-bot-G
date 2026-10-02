@@ -394,7 +394,7 @@ from findzia_billing import CreditMiddleware, install_billing
 app.add_middleware(CreditMiddleware, owner=app)
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization', 'X-Findzia-Request-Id'], max_age=86400)
-BUILD_ID = 'v128.5.42.32-assistant-photo'
+BUILD_ID = 'v128.5.42.33-photo-refinement'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -2642,7 +2642,7 @@ def _collect_lens_items(data, items, seen):
             items[-1]['retrieval_sources'] = ['google_lens']
     return items
 
-def _serpapi_lens_request(public_url, lens_type, country, auto_crop, query_hint):
+def _serpapi_lens_request(public_url, lens_type, country, auto_crop, query_hint, *, strict=False):
     params = {'engine': 'google_lens', 'url': public_url, 'api_key': SERPAPI_API_KEY, 'hl': country_search_hl(country), 'safe': 'active', 'output': 'json'}
     if lens_type:
         params['type'] = lens_type
@@ -2660,6 +2660,8 @@ def _serpapi_lens_request(public_url, lens_type, country, auto_crop, query_hint)
             timeout=(2, lens_read_timeout),
             label=f"GOOGLE LENS type={lens_type or 'all'} country={country or '-'}",
         )
+        if strict and (not isinstance(data, dict) or data.get('error')):
+            raise RuntimeError('lens_provider_unavailable')
         if data is None:
             return []
         items, seen = ([], set())
@@ -2670,6 +2672,8 @@ def _serpapi_lens_request(public_url, lens_type, country, auto_crop, query_hint)
         print(f"GOOGLE LENS PASS type={lens_type or 'all'} country={country or '-'} auto_crop={auto_crop} -> {len(items)} items")
         return items
     except Exception as e:
+        if strict:
+            raise
         print(f"GOOGLE LENS PASS EXCEPTION type={lens_type or 'all'}: {e}")
         return []
 
@@ -30099,6 +30103,8 @@ CLASSIC_FILTERS_ENABLED = env_bool('CLASSIC_FILTERS_ENABLED', True)
 CLASSIC_FILTER_AI_SECONDS = max(2., min(8., float(os.environ.get('CLASSIC_FILTER_AI_SECONDS','5'))))
 CLASSIC_FILTER_CATALOG_ENABLED = env_bool('CLASSIC_FILTER_CATALOG_ENABLED', True)
 CLASSIC_PHOTO_TEXT_SUPPLEMENT = env_bool('CLASSIC_PHOTO_TEXT_SUPPLEMENT', True)
+PHOTO_REFINE_RETRIEVAL_SECONDS = 20.0
+PHOTO_REFINE_TOTAL_SECONDS = 35.0
 _FZ_QUICK_PLAN_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix='filter-quick')
 _CLASSIC_PLAN_POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix='classic-filter-plan')
 _CLASSIC_PLAN_GATE = threading.BoundedSemaphore(4)
@@ -30357,8 +30363,41 @@ def _classic_photo_match(context,row):
     return True,unknown
 
 
+# Broad interview preferences are useful context, but poor Lens query terms.
+# Keep them in user_extra / display / unconfirmed attributes. Do not turn them
+# into product facts, and never remove negations or concrete specifications.
+_PHOTO_SEARCH_PREFERENCE_RE = re.compile(
+    r'(?i)\b(?:(?:the\s+)?(?:latest|newest)\s+(?:model|release|version|generation)|'
+    r'any\s+(?:available\s+)?model|(?:for\s+)?(?:indoor|outdoor)(?:s|\s+use)?)\b|'
+    r'(?:أحدث|احدث|آخر|اخر)\s+(?:موديل|إصدار|اصدار|نسخة|نسخه)|'
+    r'(?:داخل|خارج)\s+(?:المنزل|البيت)|'
+    r'\b(?:dernier\s+modèle|dernière\s+version|en\s+intérieur|en\s+extérieur|'
+    r'neuestes\s+modell|neueste\s+version|für\s+drinnen|für\s+draußen|'
+    r'último\s+modelo|en\s+interiores|en\s+exteriores)\b')
+
+
+def _photo_refinement_plan(context):
+    """Separate image identity, concrete edits and preference wording locally."""
+    focused=[]
+    for step in context.get('steps',[]):
+        term=str(step.get('term') or '')
+        if step.get('role')=='price':continue
+        if step.get('key')=='custom_request' and not _PHOTO_EXTRA_NEGATION.search(term):
+            term=_PHOTO_SEARCH_PREFERENCE_RE.sub(' ',term)
+            term=re.sub(r'[\s,;،]+',' ',term).strip()
+        if term:focused.append(term)
+    # OCR sometimes repeats a printed generation (e.g. "7 7"). This is not a
+    # request for a second model. Only adjacent equal numeric tokens collapse.
+    requested=context.get('query_en') or context['base']
+    query=re.sub(r'\b(\d+)\s+\1\b',r'\1',requested)
+    # The parallel text lane retains the entire requested use/preference.
+    # Only Lens gets the concise visual edit. We do not silently drop needs
+    # from both providers or claim that a general preference was verified.
+    return {'query':query,'lens_hint':' '.join(focused)[:120], 'requested_query':requested}
+
+
 def _classic_photo_lookup(context,image_b64,mime,caption,country,lang,progress_callback=None,classify_with_ai=False,cancel_event=None):
-    """Explicit photo refinement only: one Lens + optional original text engine.
+    """Explicit photo refinement: Lens, one bounded recovery, original text engine.
 
     Unfiltered image requests continue to call the untouched .42 photo pipeline.
     No raw text candidate is certified visually here; the original image-batch
@@ -30366,11 +30405,11 @@ def _classic_photo_lookup(context,image_b64,mime,caption,country,lang,progress_c
     """
     cancel=cancel_event or threading.Event()
     market=dict(_web_market(country), _image_discovery=True);MARKET_CTX.value=market
-    rows={};hint=' '.join(s.get('term','') for s in context.get('steps',[]) if s.get('role')!='price')[:120]
-    query=context.get('query_en') or caption
-    jobs={}; child_cancel=threading.Event(); failures=[]
-    def cancelled():return cancel.is_set()
-    def lens_job():
+    plan=_photo_refinement_plan(context); query=plan['query'];hint=plan['lens_hint']
+    rows={};jobs={};child_cancel=threading.Event();failures=[];completed=[]
+    started=time.monotonic();deadline=started+PHOTO_REFINE_RETRIEVAL_SECONDS
+    def cancelled():return cancel.is_set() or child_cancel.is_set()
+    def lens_job(kind):
         if cancelled():return []
         if not SERPAPI_API_KEY:raise RuntimeError('lens_unavailable')
         # Publisher accepts base64 and decodes it exactly once. Passing decoded
@@ -30380,14 +30419,12 @@ def _classic_photo_lookup(context,image_b64,mime,caption,country,lang,progress_c
         if not url:raise RuntimeError('lens_image_unavailable')
         # Plain 'products' is deliberate. Old .42 supports q for this value,
         # NOT for an invented value such as 'products:en'.
-        raw=_serpapi_lens_request(url,'products',country,False,hint)
-        built=[]
-        for candidate in raw[:48]:
-            if cancelled():break
-            if not is_lens_product_url(candidate.get('link') or '',candidate):continue
-            try:built.extend(_run_with_market(market,_web_build_lens_items,{'matches':[candidate]},lang,''))
-            except (TypeError,ValueError,KeyError):continue
-        return built
+        raw=_serpapi_lens_request(url,kind,country,False,hint,strict=True)
+        if cancelled():return []
+        candidates=[r for r in raw[:64] if isinstance(r,dict) and is_lens_product_url(r.get('link') or '',r)]
+        # One batch preserves merchant/market caps and avoids 48 serial stock,
+        # title and price passes before the first usable response is published.
+        return _web_build_lens_items({'matches':candidates},lang,'')
     def text_progress(data):
         if not isinstance(data,dict) or cancelled():return
         add(data.get('captured_results') or data.get('results') or [])
@@ -30396,30 +30433,45 @@ def _classic_photo_lookup(context,image_b64,mime,caption,country,lang,progress_c
         with lock:
             for row in batch:
                 if isinstance(row,dict) and row.get('url'):
-                    rows[row['url']]=dict(rows.get(row['url'],{}),**row)
+                    previous=rows.get(row['url'],{})
+                    merged=dict(previous,**row)
+                    merged['retrieval_sources']=list(dict.fromkeys((previous.get('retrieval_sources') or [])+(row.get('retrieval_sources') or [])))
+                    merged.update(_web_merge_offer_images(previous,row))
+                    if not _web_row_has_numeric_price(row) and _web_confirmable_price(previous):
+                        merged.update(_web_price_facts(previous))
+                    rows[row['url']]=merged
             snapshot=[dict(r) for r in rows.values()]
         if progress_callback and snapshot and not cancelled():
             progress_callback({'query':query,'results':snapshot,'classic_rows':True})
-    jobs[_CLASSIC_PHOTO_POOL.submit(lens_job)]='lens'
+    jobs[_CLASSIC_PHOTO_POOL.submit(_run_with_market,market,lens_job,'products')]='lens'
     # Avoid turning an unidentified photo + 'red' into a generic text search.
     meaningful=bool(query and _fz_facet_norm(context.get('base','')) not in ('product in photo','photo','image','منتج في الصوره'))
     if CLASSIC_PHOTO_TEXT_SUPPLEMENT and meaningful:
         jobs[_CLASSIC_PHOTO_POOL.submit(_run_with_market,market,_web_text_direct_search,query,country,lang,text_progress,child_cancel,
                                        TEXT_FAST_TIMEOUT_SECONDS,TEXT_FAST_EMPTY_EXTENSION_SECONDS)]='text'
-    pending=set(jobs);deadline=time.monotonic()+max(LENS_HTTP_TIMEOUT_SECONDS+3,TEXT_FAST_TIMEOUT_SECONDS+TEXT_FAST_EMPTY_EXTENSION_SECONDS+2)
+    pending=set(jobs);recovered=False
     try:
         while pending and not cancelled() and time.monotonic()<deadline:
             done,pending=wait(pending,timeout=.1,return_when=FIRST_COMPLETED)
             for f in done:
                 try:
                     value=f.result()
-                    add(value if isinstance(value,list) else (value.get('captured_results') or value.get('results') or []))
+                    if isinstance(value,dict) and value.get('ok') is False:raise RuntimeError('provider_unavailable')
+                    batch=value if isinstance(value,list) else (value.get('captured_results') or value.get('results') or [])
+                    add(batch);completed.append(jobs[f])
+                    if (jobs[f]=='lens' and not recovered and time.monotonic()<deadline-1
+                            and not any(_fz_filter_match(context,r)[0] for r in batch)):
+                        recovery=_CLASSIC_PHOTO_POOL.submit(_run_with_market,market,lens_job,'all')
+                        jobs[recovery]='lens_recovery';pending.add(recovery);recovered=True
                 except Exception as exc:
-                    failures.append(jobs[f]);print('CLASSIC PHOTO SOURCE lane='+jobs[f]+' failure='+type(exc).__name__+' reason='+str(exc)[:120])
-        if not rows:
-            failures.append('no_refined_evidence')
+                    failures.append(jobs[f]);print('PHOTO_REFINE_SOURCE lane='+jobs[f]+' failure='+type(exc).__name__)
+        diagnostics={'country':country,'source_rows':len(rows),'completed':completed,'failed':failures,
+                     'pending':[jobs[f] for f in pending],'lens_recovery':recovered,
+                     'elapsed_ms':int((time.monotonic()-started)*1000)}
+        print('PHOTO_REFINE_LOOKUP '+json.dumps(diagnostics))
         return {'ok':True,'type':'results','query':query,'market':market,'results':list(rows.values()),
-                'captured_results':list(rows.values()),'source':'classic42-photo-refinement','partial':bool(pending or failures)}
+                'captured_results':list(rows.values()),'source':'photo-refinement-v24',
+                'partial':bool(pending or failures),'photo_refinement':diagnostics}
     finally:
         child_cancel.set()
         for f in pending:f.cancel()
@@ -30431,15 +30483,16 @@ def _classic_photo_response(context,request):
         # Numeric-only refinement reuses the complete original photo route.
         return _web_image_stream_response(context['_image_base64'],context['_mime'],'',context['country'],context['lang'])
     async def stream():
-        cancel=threading.Event(); outcome={'partial':False}
+        cancel=threading.Event(); outcome={'partial':False,'photo_refinement':{}}
         def lookup(*args):
             value=_classic_photo_lookup(context,*args)
             outcome['partial']=bool(value.get('partial'))
+            outcome['photo_refinement']=value.get('photo_refinement') or {}
             return value
         def build(partial,lang,caption):return partial.get('results',[]) if partial.get('classic_rows') else _web_build_lens_items(partial,lang,caption)
         source=_web_stream_image_identity_batches(context['_image_base64'],context['_mime'],context['query_en'],
                     context['country'],context['lang'],cancel,search_fn=lookup,build_items_fn=build)
-        wrapped=_web_with_live_prices(source,context['lang'],context['country'])
+        wrapped=_web_with_live_prices(source,context['lang'],context['country'],max_seconds=PHOTO_REFINE_TOTAL_SECONDS)
         try:
             yield _web_stream_event({'event':'start','kind':'image','source':'classic42-photo-refinement'})
             async for event in wrapped:
@@ -30448,8 +30501,9 @@ def _classic_photo_response(context,request):
                 # failure/partial status across its terminal event.
                 try:
                     data=json.loads(event.decode() if isinstance(event,bytes) else event)
-                    if data.get('event')=='done' and outcome['partial']:
-                        event=_web_stream_event(dict(data,partial=True))
+                    if data.get('event')=='done':
+                        event=_web_stream_event(dict(data,partial=bool(data.get('partial') or outcome['partial']),
+                                                    photo_refinement=outcome['photo_refinement']))
                 except (ValueError,TypeError):pass
                 yield event
         finally:
@@ -31993,6 +32047,8 @@ Ask only what materially changes the search: use, budget, fit, material, size, c
 Do not force a fixed questionnaire. Do not ask about a topic already answered in query, extra_specs,
 answers or turns. Use a stable question_key. Each next question is optional. Continue with a
 useful unasked detail when available, at most 12 questions; stop sooner when no useful detail remains.
+If the photo/query already identifies a specific model, do not ask for its model or release again.
+Ask to change the model only when the shopper explicitly wants a different one.
 Current explicit answers override tentative history. History is optional and only from related searches.
 Do not infer sensitive traits or invent a preference, budget, size, model or specification.
 Provide a usable search_query from the first step, including while asking an optional next question.
@@ -32026,6 +32082,13 @@ def _fz_needs_query(context, proposed=''):
         try:return _refine_safe_query(value)
         except (ValueError,TypeError):return ''
     query=safe(proposed)
+    if image and query:
+        # Image identity is already carried separately. A generated rewrite
+        # must neither inject it into the edit nor silently lose an answer.
+        # The editable draft is authoritative when the shopper has changed it.
+        chosen=safe(context.get('draft_query')) or safe(fallback)
+        words=lambda value:set(re.findall(r'\w+',_fz_facet_norm(value)))
+        if words(query)!=words(chosen):query=chosen
     if query and not image:
         if _findzia_hard_product_mismatch(base,query) or _fz_product_form_conflict(base,query,preserve_model=True):query=''
         else:
