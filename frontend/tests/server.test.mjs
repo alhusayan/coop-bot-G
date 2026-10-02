@@ -22,7 +22,7 @@ test('the actual verification response is byte exact, uncached and has no redire
 test('homepage is standalone and all linked local assets load',async()=>{
  const r=await get('/');assert.equal(r.status,200);const s=await r.text();assert.ok(!s.includes('{{')&&!s.includes('{%'));
  assert.ok(s.includes('https://api.findzia.com'));assert.ok(!s.includes('asset_url'));assert.ok(!s.includes('/cdn/shop/'));
- const links=[...s.matchAll(/(?:src|href)="(\/assets\/[^" ]+)"/g)].map(m=>m[1]);assert.equal(links.length,8);
+ const links=[...s.matchAll(/(?:src|href)="(\/assets\/[^" ]+)"/g)].map(m=>m[1]);assert.equal(links.length,10);
  for(const link of links){const a=await get(link);assert.equal(a.status,200);assert.match(a.headers.get('cache-control'),/immutable/);}
  assert.match(r.headers.get('permissions-policy'),/payment=\*/);assert.ok(r.headers.get('content-security-policy').includes('frame-ancestors'));
 });
@@ -41,7 +41,7 @@ test('private files, API paths and unknown assets are never exposed or rewritten
  assert.equal((await fetch(origin+'/',{method:'POST',body:'x'})).status,405);
 });
 test('hashed assets revalidate, health responds, and WWW serves the file directly',async()=>{
- const h=await get('/healthz');assert.equal((await h.json()).version,'156.7.19');
+ const h=await get('/healthz');assert.equal((await h.json()).version,'156.7.25');
  const p=await get('/');const again=await fetch(origin+'/',{headers:{'If-None-Match':p.headers.get('etag')}});assert.equal(again.status,304);
 });
 test('existing guest credentials survive API hostname change and rollback; existing new credentials win',()=>{
