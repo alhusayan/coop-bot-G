@@ -1,0 +1,14 @@
+{
+  "name": "findzia-standalone",
+  "version": "156.7.26",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "start": "node server.mjs",
+    "test": "node --test tests/server.test.mjs tests/motion.test.cjs"
+  }
+}
