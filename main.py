@@ -394,7 +394,7 @@ from findzia_billing import CreditMiddleware, install_billing
 app.add_middleware(CreditMiddleware, owner=app)
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization', 'X-Findzia-Request-Id'], max_age=86400)
-BUILD_ID = 'v128.5.42.33-photo-refinement'
+BUILD_ID = 'v128.5.42.34-launch-review'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -4911,6 +4911,9 @@ def _query_is_generic(query):
     return len(lexical) <= 3
 
 
+from findzia_search_quality import explicit_text_conflict as _web_text_explicit_conflict
+
+
 def _web_serper_text_passthrough(item):
     """Typed provider relevance, including Shopping backup; never shopper photos."""
     if (not item.get('text_provider_passthrough') or item.get('search_origin') != 'text' or item.get('image_query_result')
@@ -4938,7 +4941,7 @@ def _local_discovery_candidate_ok(query, item, visual=False):
     reject them; the reference-image audit decides identity, never text overlap.
     """
     if not visual and _web_serper_text_passthrough(item):
-        return True
+        return not _web_text_explicit_conflict(query, item.get('raw_title') or item.get('title'))
     title = str(item.get('raw_title') or item.get('title') or '')
     if _fz_product_form_conflict(query, title):
         return False
@@ -17029,8 +17032,9 @@ def _web_attach_captured_result_sections(payload, lang, allow_ai=True, cancel_ev
         not reference_image_mime or reference_image_mime.startswith('image/')
     )
     user_photo = bool(has_reference_photo and text_reference is None)
-    results = [r for r in results if (not user_photo and _web_serper_text_passthrough(r))
-               or not _fz_product_form_conflict(identity, r.get('raw_title') or r.get('title'))]
+    results = [r for r in results if not (not user_photo and _web_text_explicit_conflict(identity, r.get('raw_title') or r.get('title')))
+               and ((not user_photo and _web_serper_text_passthrough(r))
+                    or not _fz_product_form_conflict(identity, r.get('raw_title') or r.get('title')))]
     if not user_photo:
         # Includes optional Lens expansion from a retailer photo for typed text.
         # Search wording/translation can use AI; result admission must not.

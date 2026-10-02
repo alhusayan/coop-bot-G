@@ -1,0 +1,11 @@
+{
+  "main.py": "47e5db98ac952635961c10fccfe6c0267100a04b1956fb1beb199799cf01367e",
+  "findzia_search_quality.py": "d1e4f7bfbb011fbc9a9ce51fa9fcc1029c11e32044131ccab4e106ea512cb1d2",
+  "tests/test_launch_review.py": "3a206faa16c12ffa6930c602383e117b09020e56304a8be326ef9587b53de082",
+  "frontend/source/findzia-billing.js": "7f0d10151a2b1458594584e8c69e769792545f2d6126ed99a73d3f06b9f88259",
+  "frontend/scripts/preflight.py": "8118c883039dd3acad3d6671aab2aa1af55e17ea5a1300465b501b9db0fa7b27",
+  "frontend/scripts/build.mjs": "4b1036827f5684f278757d4c2e5fcfb789c60ecc6c979e6fd5f59f08af54bd32",
+  "frontend/package.json": "aba1e4ca2658001b5a598661e7b1063dd7279bd2695cfcc85247fb0a0401b0a8",
+  "frontend/tests/server.test.mjs": "eee70e46a0bda39ed6e66b9443d1e8ccf6d436045e9281af326205dcd20bb777",
+  "frontend/tests/launch.test.cjs": "731026cd4b63afe674c2adcf9b901728ee294cb3a00d99dd2f6c5fc186783d2c"
+}
