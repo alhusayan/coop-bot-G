@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 
 const base = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const src = resolve(base, 'source'), dest = resolve(base, 'public');
-const version = '156.7.36', api = 'https://api.findzia.com';
+const version = '156.7.37', api = 'https://api.findzia.com';
 // Preserve the live section scope to avoid unnecessary DOM/storage changes.
 const section = 'template--19963721449543__findzia_home_h4wBLq';
 const expected = 'c15558d3e155e2031ef39b32775050c283b545d8575643181af3c3b9f03d46a3';
@@ -14,9 +14,10 @@ const read = p => readFileSync(resolve(src, p));
 const sourceReleases={home:read('findzia-home.liquid').toString().match(/FINDZIA_HOME_RELEASE=([0-9.]+)/)?.[1],shell:read('findzia-shell.js').toString().match(/FINDZIA_SHELL_RELEASE=([0-9.]+)/)?.[1]};
 sourceReleases.billing=read('findzia-billing.js').toString().match(/FINDZIA_BILLING_RELEASE=([0-9.]+)/)?.[1];
 sourceReleases.subscriptions=read('findzia-subscriptions.js').toString().match(/FINDZIA_SUBSCRIPTIONS_RELEASE=([0-9.]+)/)?.[1];
+sourceReleases.guide=read('findzia-filters.js').toString().match(/FINDZIA_GUIDE_RELEASE=([0-9.]+)/)?.[1];
 const packageVersion=JSON.parse(readFileSync(resolve(base,'package.json'),'utf8')).version;
 if(packageVersion!==version)throw Error('Release mismatch: replace frontend/package.json and frontend/scripts/build.mjs together.');
-for(const [key,file] of [['home','findzia-home.liquid'],['shell','findzia-shell.js'],['billing','findzia-billing.js'],['subscriptions','findzia-subscriptions.js']]){
+for(const [key,file] of [['home','findzia-home.liquid'],['shell','findzia-shell.js'],['billing','findzia-billing.js'],['subscriptions','findzia-subscriptions.js'],['guide','findzia-filters.js']]){
   if(sourceReleases[key]!==version)throw Error('Release mismatch: replace frontend/source/'+file+' with version '+version+'.');
 }
 const routes = {};
