@@ -394,7 +394,7 @@ from findzia_billing import CreditMiddleware, install_billing
 app.add_middleware(CreditMiddleware, owner=app)
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization', 'X-Findzia-Request-Id'], max_age=86400)
-BUILD_ID = 'v128.5.42.38-bing-alternatives'
+BUILD_ID = 'v128.5.42.39-photo-text'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -2446,14 +2446,13 @@ def publish_image_for_lens(image_b64, mime_type):
 def _web_result_group(row):
     sources = set(row.get('retrieval_sources') or [])
     origin = row.get('search_origin') or row.get('reference_search_kind')
-    if (origin != 'text' and row.get('image_query_result')
-            and 'bing_market_fallback' in sources and 'google_lens' not in sources):
-        # A provider fallback market is retrieval context, not local evidence
-        # or a visual approval. Apply the same pre-publication gate as Serper.
+    photo = origin == 'image' or (origin != 'text' and row.get('image_query_result'))
+    if photo and any('bing_' in s for s in sources):
+        # Every Bing photo candidate, including supported markets and merged
+        # duplicates, requires the shared Alternatives visual admission gate.
         return 'alternative'
-    if (origin != 'text' and row.get('image_query_result')
-            and not sources.intersection({'google_lens', 'bing_reverse_image'})
-            and any(s == 'serper' or any(tag in s for tag in ('serper_', 'brave_search', 'bing_search')) for s in sources)):
+    if (photo and 'google_lens' not in sources
+            and any(s == 'serper' or any(tag in s for tag in ('serper_', 'brave_search')) for s in sources)):
         return 'alternative'
     scope = str(row.get('market_scope') or row.get('market') or '').lower()
     if scope in ('local', 'global'):
@@ -2465,8 +2464,8 @@ def _web_set_result_group(row):
     row = dict(row)
     row['result_group'] = _web_result_group(row)
     if row['result_group'] == 'alternative':
-        row['alternative_reason'] = ('bing_unsupported_market'
-            if 'bing_market_fallback' in (row.get('retrieval_sources') or [])
+        row['alternative_reason'] = ('bing_image_search'
+            if any('bing_' in s for s in (row.get('retrieval_sources') or []))
             else 'image_description_search')
     else:
         row.pop('alternative_reason', None)
@@ -2650,7 +2649,7 @@ def _collect_lens_items(data, items, seen):
             items[-1]['retrieval_sources'] = ['google_lens']
     return items
 
-def _serpapi_lens_request(public_url, lens_type, country, auto_crop, query_hint, *, strict=False):
+def _serpapi_lens_request(public_url, lens_type, country, auto_crop, query_hint, *, strict=False, progress_callback=None):
     params = {'engine': 'google_lens', 'url': public_url, 'api_key': SERPAPI_API_KEY, 'hl': country_search_hl(country), 'safe': 'active', 'output': 'json'}
     if lens_type:
         params['type'] = lens_type
@@ -2674,6 +2673,11 @@ def _serpapi_lens_request(public_url, lens_type, country, auto_crop, query_hint,
             return []
         items, seen = ([], set())
         _collect_lens_items(data, items, seen)
+        if progress_callback:
+            direct = [dict(item, _lens_country=(country or '').lower()) for item in items
+                      if not _web_collection_url(item.get('link') or item.get('url'))]
+            if direct:
+                progress_callback(direct)
         items = _web_expand_collection_rows(items)
         for item in items:
             item['_lens_country'] = (country or '').lower()
@@ -3552,6 +3556,11 @@ def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=Fal
                 seen.add(sig)
                 merged.append(it)
                 merged_by_sig[sig] = it
+        local_updates, local_updates_lock = deque(), threading.Lock()
+        def local_progress(batch):
+            if not cancelled():
+                with local_updates_lock:
+                    local_updates.append([dict(item) for item in batch])
         passes = _lens_market_passes(user_country, USE_FAST_LENS_PIPELINE) if ENABLE_GOOGLE_LENS and SERPAPI_API_KEY else []
         # Keep the existing regional/type budget. One local lane searches the
         # whole product instead of repeating automatic crop on every pass.
@@ -3561,7 +3570,8 @@ def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=Fal
             if reference_context:
                 auto_crop = True
             image_url = public_url if auto_crop else full_frame
-            future = LENS_HTTP_POOL.submit(_serpapi_lens_request, image_url, lens_type, country, auto_crop, query_hint)
+            future = LENS_HTTP_POOL.submit(_serpapi_lens_request, image_url, lens_type, country, auto_crop, query_hint,
+                                           progress_callback=local_progress)
             future_map[future] = (lens_type, country, auto_crop)
         all_futures = set(future_map)
         visual_futures = tuple(all_futures)
@@ -3570,11 +3580,6 @@ def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=Fal
         lens_market_snapshot = dict(current_market(), _image_discovery=not bool(reference_context))
         local_rescue_future = None
         local_rescue_started = False
-        local_updates, local_updates_lock = deque(), threading.Lock()
-        def local_progress(batch):
-            if not cancelled():
-                with local_updates_lock:
-                    local_updates.append([dict(item) for item in batch])
         fast_started = time.monotonic()
         fast_deadline = fast_started + (LENS_TURBO_MAX_WAIT_SECONDS if USE_FAST_LENS_PIPELINE else min(LENS_FAST_READY_SECONDS, LENS_TOTAL_TIMEOUT_SECONDS))
         # Keep already purchased responses alive after the first cards paint.
@@ -3723,10 +3728,19 @@ def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=Fal
             if reference_context:
                 rescue_deadline = min(rescue_deadline, completion_deadline)
             while pending and not merged and time.monotonic() < rescue_deadline and not cancelled():
-                rescue_left = max(0.0, rescue_deadline - time.monotonic())
-                just_done, pending = wait(pending, timeout=rescue_left, return_when=FIRST_COMPLETED)
-                if not just_done:
+                with local_updates_lock:
+                    batches = list(local_updates)
+                    local_updates.clear()
+                for batch in batches:
+                    _merge(batch)
+                if batches:
+                    _emit_progress_snapshot('direct_offers_ready', allow_foreign_first=True)
+                if merged:
                     break
+                rescue_left = max(0.0, rescue_deadline - time.monotonic())
+                just_done, pending = wait(pending, timeout=min(.15, rescue_left), return_when=FIRST_COMPLETED)
+                if not just_done:
+                    continue
                 done_fast |= set(just_done)
                 for fut in just_done:
                     lens_type, country, auto_crop = future_map[fut]
@@ -5604,6 +5618,9 @@ def _web_collection_url(value):
             return False
         if _host_matches_any(host, tuple(NON_STORE_HOSTS) + ('google.com', 'bing.com', 'baidu.com', 'gstatic.com', 'googleusercontent.com')):
             return False
+        # Miinto department URLs use hyphens; only /p- is a product route.
+        if re.search(r'(?:^|\.)miinto\.(?:[a-z]{2,3}|co\.uk|com\.[a-z]{2})$', host):
+            return not path.startswith('/p-')
         if _host_matches_any(host, ('hm.com',)) and '/products/' in path:
             return True
         # Product routes can contain a collection prefix or search tracking.
@@ -5827,6 +5844,8 @@ def _web_expand_collection_rows(records, *, budget=COLLECTION_WAIT_SECONDS):
             # so its exact/visual claims cannot be transferred to each child.
             sources = [s for s in parent.get('retrieval_sources') or []
                        if 'serper' in s.lower() or s in ('bing_search', 'bing_market_fallback')]
+            if any('bing_' in s for s in parent.get('retrieval_sources') or []):
+                sources.append('bing_image_collection')
             row['retrieval_sources'] = sorted(set(row['retrieval_sources'] + sources))
             if parent.get('image_query_result'):
                 row['image_query_result'] = True
@@ -18883,7 +18902,12 @@ def _web_dom_price(soup, url, currency_hint, title):
             continue
         if el.find_parent(lambda tag: tag.name in ('s', 'del', 'strike')) is not None:
             continue
-        text = str(el.get('content') or el.get('data-price') or el.get('data-product-price') or '').strip() or el.get_text(' ', strip=True)
+        # Visible retail amounts win over internal data-price values, which
+        # can be minor units (51450) beside a displayed £514.50. Never /100 a
+        # guessed number: parse the actual displayed amount and currency.
+        visible = el.get_text(' ', strip=True)[:80]
+        visible_quote = _web_price_quote(visible, currency_hint) if visible else None
+        text = visible if visible_quote else str(el.get('content') or el.get('data-price') or el.get('data-product-price') or '').strip()
         text = text[:80]
         if not text or len(re.findall(r'\d[\d.,]*', text)) > 2:
             continue  # ranges / lists are not one price
@@ -18915,7 +18939,7 @@ def _web_dom_price(soup, url, currency_hint, title):
 
 def _web_fallback_page_price(html, url, metadata, country=''):
     """Store adapters -> inline JSON -> DOM price elements, all under the same guards."""
-    if _web_merchant_access_reason(200, {}, html, url):
+    if _web_collection_url(url) or _web_merchant_access_reason(200, {}, html, url):
         return {}
     if not WEB_PRICE_FALLBACK_TIERS or not html:
         return {}
@@ -18924,7 +18948,9 @@ def _web_fallback_page_price(html, url, metadata, country=''):
     if _fz_regional_price_store(url):
         return _fz_regional_visible_price(soup, url)
     currency_hint, hint_source = _web_page_currency_hint(soup, html, url, country)
-    for finder in (lambda: _web_amazon_page_price(soup, url), lambda: _web_next_data_price(soup, url, currency_hint)):
+    for finder in (lambda: _web_amazon_page_price(soup, url),
+                   lambda: _web_dom_price(soup, url, currency_hint, title) if currency_hint else None,
+                   lambda: _web_next_data_price(soup, url, currency_hint)):
         found = finder()
         if found and not _price_collides_with_product_spec(found['price'], title):
             return found
@@ -19157,6 +19183,9 @@ def _web_fetch_page_snapshot(url, country=''):
             return data
         status_code, page_text, final_url = document['status'], document['text'], document['url']
         data['url'] = final_url
+        if _web_collection_url(final_url):
+            data.update(is_product=False, price=None, currency='', page_fetch_reason='not_product_page')
+            return data
         if status_code < 400 and page_text:
             html = page_text
             metadata = _web_product_page_metadata(html, final_url)
@@ -19467,6 +19496,8 @@ def _web_exact_money(value, currency):
 
 def _web_extract_exact_page_price(html, url):
     """Read the current product's offer, never the first price anywhere in HTML."""
+    if _web_collection_url(url):
+        return {}
     if _web_merchant_access_reason(200, {}, html, url):
         return {}
     soup = BeautifulSoup(html or '', 'html.parser')
@@ -20278,6 +20309,8 @@ def _web_price_display_fields(row):
 
 def _web_confirmable_price(row):
     """Accept prices observed on the same listing; generated prose is a hint."""
+    if _web_collection_url(row.get("url") or row.get("link")):
+        return False
     source = str(row.get('price_source') or '').lower()
     if _fz_regional_price_store(row.get('url')) and source not in {
             'regional_page_dom','regional_listing_text','product_page','product_jsonld','jsonld',
@@ -20329,7 +20362,8 @@ async def _web_with_live_prices(source, lang, country, allow_paid=True, wait_sec
         async with gate:
             return await asyncio.wrap_future(WEB_LIVE_PRICE_POOL.submit(_web_live_page_image_only, row, dict(market)))
     def absorb(item):
-        if item.get('hidden') or _web_identity_offer_key(item) in rejected or not _market_offer_allowed(item, market):
+        if (_web_collection_url(item.get('url') or item.get('link')) or item.get('hidden')
+                or _web_identity_offer_key(item) in rejected or not _market_offer_allowed(item, market)):
             return None
         item = dict(item)
         if item.get('price') and not _web_confirmable_price(item):
@@ -26992,7 +27026,7 @@ async def web_api_search_stream(request: Request):
     force_specific = bool(payload.get('force_specific'))
     client_name = re.sub('[^a-z0-9_-]+', '', str(payload.get('client') or 'web').strip().lower())[:24] or 'web'
 
-    if TEXT_FAST_ENABLED:
+    if TEXT_FAST_ENABLED or payload.get("photo_text_refinement") is True:
         return StreamingResponse(_web_stream_text_fast(query, country, lang, selected_option, request, original_query, force_specific),
             media_type='application/x-ndjson',
             headers={'Cache-Control':'no-cache, no-transform','X-Accel-Buffering':'no'})
@@ -27882,9 +27916,9 @@ def _lens_consensus_terms(rows, limit=3):
     titles, seen = [], set()
     for row in rows:
         sources = set(row.get('retrieval_sources') or [])
-        if ('bing_market_fallback' in sources and 'google_lens' not in sources):
+        if any('bing_' in s for s in sources):
             continue
-        if sources and not sources.intersection({'google_lens', 'bing_reverse_image'}):
+        if sources and 'google_lens' not in sources:
             continue
         url = row.get('link') or row.get('url') or ''
         if not is_lens_product_url(url):
@@ -30452,6 +30486,9 @@ def _refine_free_image_context(payload):
     base=payload.get('base_query') or payload.get('query') or 'Product in photo'
     if not isinstance(base,str): raise ValueError('invalid_query')
     c=_refine_context(dict(payload,query=base,kind='image',token='',context_token=''))
+    base_en = payload.get('base_query_en')
+    if isinstance(base_en, str) and base_en.strip():
+        c['base_en'] = _refine_safe_query(base_en)
     return _photo_extra_context(c,payload['extra_specs'])
 
 def _intent_options_context(payload):
@@ -31000,7 +31037,8 @@ async def _classic_filter_source(response,context,request):
         print('CLASSIC FILTER RESULT '+json.dumps(dict(counters,published=len(published),query=context.get('query_en'),kind=context['kind']),ensure_ascii=False))
         yield _web_stream_event(dict(final,event='done',count=len(published),results=list(published.values()),
             display_query=display,context_token=_fz_context_token(context),extra_specs_applied=_photo_applied_words(context),photo_extra_input=context.get('user_extra',''),
-            filter_engine='classic42-query-builder',filter_stats=counters))
+            filter_engine='classic42-query-builder',filter_stats=counters,
+            photo_refinement='text_from_photo_description' if context.get('photo_text_refinement') else None))
     finally:
         if hasattr(iterator,'aclose'):await iterator.aclose()
 
@@ -31017,16 +31055,22 @@ async def web_api_refine_search(request: Request):
                 context=_photo_extra_context(_refine_selection_context(payload),payload['extra_specs'],prefer_filters=payload.get('extra_intent')=='filters')
             else:context=_refine_free_image_context(payload)
         else:context=_refine_selection_context(payload)
+        photo_refinement = context.get('kind') == 'image' and bool(
+            str(context.get('user_extra') or '').strip() or context.get('steps'))
         if context.get('kind')=='image':
-            if not _web_rate_allowed(request):return JSONResponse({'ok':False,'error':'rate_limit'},status_code=429)
+            if not photo_refinement and not _web_rate_allowed(request):
+                return JSONResponse({'ok':False,'error':'rate_limit'},status_code=429)
             context=_classic_image(context,payload)
         prepared=_refine_compose(context)
-        if prepared['kind']=='image':
+        prepared['photo_text_refinement'] = photo_refinement
+        if prepared['kind']=='image' and not photo_refinement:
             response=_classic_photo_response(prepared,request)
         else:
-            # Original route decides fast/Lens/legacy flags and rate checks.
+            # Only explicit photo refinements take the text route. The original
+            # recognition is its immutable base, not a new visual constraint.
             response=await web_api_search_stream(_RefineRequest(request,{'query':prepared['query_en'],
-                'country':prepared['country'],'lang':prepared['lang'],'client':'web','force_specific':True}))
+                'country':prepared['country'],'lang':prepared['lang'],'client':'web','force_specific':True,
+                'photo_text_refinement':photo_refinement}))
         if response.status_code>=400 or not hasattr(response,'body_iterator'):return response
         return StreamingResponse(_classic_filter_source(response,prepared,request),media_type='application/x-ndjson',
               headers={'Cache-Control':'no-cache, no-transform','X-Accel-Buffering':'no'})

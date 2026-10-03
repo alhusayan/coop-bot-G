@@ -1,94 +1,103 @@
-# Findzia Bing Alternatives — 156.7.32
+# Findzia Photo Search Update — 156.7.33
 
-Backend build: `v128.5.42.38-bing-alternatives`
+API build: `v128.5.42.39-photo-text`  
+Web version: `156.7.33`
 
-Backend-only update based on 156.7.31. Unsupported-country Bing photo results now use a valid fallback market and enter **Alternatives only after passing the existing Serper visual-accuracy check**.
+This is a patch for the existing Findzia application. It includes the API changes from 156.7.32 and updates the current standalone frontend. Merge the included files into their existing paths; do not replace the entire repository or delete the existing `frontend` directory.
 
-## Files to replace
+## Which files do I replace?
 
-This is an update package, not the complete application. Keep a backup before replacing files.
+Replace these seven runtime files together:
 
-| File | Action | Destination |
+| File inside this ZIP | Destination in GitHub | Purpose |
 | --- | --- | --- |
-| `main.py` | Replace | API repository root |
-| `findzia_independent_search.py` | Replace together with main.py | API repository root |
-| `findzia_search_quality.py` | Unchanged compatible copy included; keep the existing copy | API repository root |
-| `tests/` | Offline regression tests; optional to upload | Repository tests directory |
-| `README_EN.md`, `SHA256SUMS.txt` | Reference only | No runtime upload required |
+| `main.py` | Repository root, beside the current `main.py` | Search routing, early photo results, Bing grouping, product links and prices |
+| `findzia_independent_search.py` | Repository root | Compatible provider adapter from 156.7.32 |
+| `findzia_search_quality.py` | Repository root | Compatible shared search-quality helper |
+| `frontend/source/findzia-home.liquid` | `frontend/source/` | Photo customization, result counting, image loading and card eligibility |
+| `frontend/source/findzia-shell.js` | `frontend/source/` | Correct result counter during and after streaming |
+| `frontend/scripts/build.mjs` | `frontend/scripts/` | Version and frontend asset build |
+| `frontend/package.json` | `frontend/` | Web release version and existing commands |
 
-1. Extract the ZIP.
-2. In the API GitHub repository, open the directory containing the current `main.py`.
-3. Use **Add file → Upload files** and upload the extracted `main.py` and `findzia_independent_search.py`. Replace both in the same commit. Do not upload the ZIP or create an extra parent folder.
-4. Deploy the Railway **API service** and confirm `v128.5.42.38-bing-alternatives` in the startup log.
+The two Python helper modules are unchanged from 156.7.32 and are included to keep the API files compatible. The `tests/` and `frontend/tests/` files are regression tests, not extra runtime files. `README_EN.md` and `SHA256SUMS.txt` are reference files.
 
-No frontend files or new Railway variables are required. Do not put these files in `/frontend`. Payment and account files are not included or changed.
+## Installation
 
-## Behavior
+1. Extract the ZIP and retain the currently deployed version for rollback.
+2. In GitHub, open the repository root and use **Add file → Upload files** to replace the three Python runtime files listed above.
+3. Open `frontend/source/` and replace only `findzia-home.liquid` and `findzia-shell.js` there.
+4. Open `frontend/scripts/` and replace `build.mjs` there.
+5. Open `frontend/` and replace `package.json` there. Commit all changes before testing the deployment.
+6. Deploy both Railway services after the files are committed. The API service keeps its existing root directory. **Findzia Web** keeps **Root Directory = `/frontend`**. If the frontend has a separate repository, copy the contents of this ZIP's `frontend/` into that repository's root instead.
+7. Verify the API startup log contains `v128.5.42.39-photo-text`. Open `https://findzia.com/healthz` and verify the web version is `156.7.33`, then reload the site.
 
-### Supported country versus fallback market
+Upload the extracted files, not the ZIP. Do not put the two frontend source files beside `main.py`, and do not create `frontend/frontend/`. Existing payment, account, Dockerfile, server, policy and Apple Pay verification files stay in place. No Railway variable changes are required.
 
-Bing text search and reverse-image search have different market contracts. The supplied production log showed successful Saudi text results but rejected `ar-SA` and `ar-KW` reverse-image markets, and rejected the Kuwait text country `kw`.
+## Photo search and customization
 
-The adapter now chooses a valid route before making a request:
+The switch to text search happens **only after the customer adds a word or customization**, either manually or through the AI Shopping Assistant.
 
-| Requested country | Bing text route | Bing reverse-image route |
-| --- | --- | --- |
-| Saudi Arabia | Native `cc=sa` | Fallback `mkt=en-US` |
-| Kuwait | Fallback `mkt=en-US` | Fallback `mkt=en-US` |
-| Germany | Native `cc=de` | Native `mkt=de-DE`, even with an English interface |
-| France | Native `cc=fr` | Native `mkt=fr-FR` |
-| Other countries | Native country when supported; otherwise `en-US` | Native market when listed; otherwise `en-US` |
+| Customer action | Search behavior |
+| --- | --- |
+| Upload a photo with no added details | Original visual search, including Lens |
+| Add a word or specification to that photo | Pure text search built from the retained photo description plus the customer's details |
+| Choose specifications in the AI assistant | The same text route, with the original product identity retained |
+| Remove all added details and search again | Original visual search again |
+| Type a normal search without a photo | Existing text search |
 
-The request never sends both `cc` and `mkt`. UI language is not blindly combined with the country. The original photo and search wording are preserved. A fallback search market is not evidence of merchant location: existing URL, country, currency and price checks still apply. It does not label US merchants as local or convert their prices into local currency.
+The photo chip represents the retained base description. The search input shows the customer's additions. The base identity is kept across successive refinements, including an empty refinement response. Refinements do not rerun Lens or the original-photo visual comparison. Existing text-search relevance, product-link, price and requested-specification checks still apply.
 
-### Alternatives and accuracy
+## Earlier photo results
 
-- In photo searches, rows retrieved through a fallback Bing market carry provenance through ingestion, collection expansion, merging and price updates. Their display group is **Alternatives**, even if their merchant is local.
-- They use the **same visual admission function and configured threshold as Serper**. No separate weaker Bing threshold is introduced. The existing default minimum alternative confidence is 70/100, together with reference/candidate visual evidence and category agreement. Conflicting category, function, role or compatibility is rejected.
-- Pending, uncertain, rejected or unavailable visual reviews do not appear in public results or counts. A successful provider response alone does not admit a result.
-- Approval is bound to the listing, title and image. A price-only update preserves approval; a different listing, title or image requires review again.
-- Fallback candidates cannot change the inferred photo identity through majority product titles.
-- Native supported Bing reverse-image results retain their existing grouping. Typed text searches retain their normal grouping. Existing photo-description alternatives from Serper, Brave and Bing text remain alternatives.
-- If Google Lens independently retrieved the same listing, existing duplicate resolution preserves that Lens result's primary grouping. Merely adding a price or a Serper duplicate cannot promote a Bing fallback result into Local.
+- Direct product matches can enter the existing verification pipeline as soon as Lens returns them, without waiting for slower category-page expansion. Remaining work continues within the existing bounded search budget.
+- Candidate images start loading while prices are being resolved. Cards still require the existing display checks before appearing.
+- Provider caps, visual admission requirements and the final collection-expansion path are retained. This change removes unnecessary serial waiting; it does not promise a fixed response time from external providers.
 
-## Timing and request limits
+## Bing photo results
 
-This release retains the 156.7.31 image-download budget restoration and asynchronous shopping-link recovery. It adds no HTTP retries or extra provider requests. Existing cache, singleflight, cancellation, shared call cap, credit guard and circuit breaker remain in place. Bing's eight-second default allowance is still capped by the active search deadline; Brave retains its separate 4.5-second allowance.
+Every photo result with Bing provenance is assigned to **Alternatives**, including supported-country searches, fallback markets, Bing text supplements and products expanded from Bing collection pages. A duplicate independently found by Lens still remains in Alternatives when the merged result carries Bing provenance.
 
-Keep existing API service keys and settings. Bing uses `SERPAPI_API_KEY`; Brave remains optional through `BRAVE_SEARCH_API_KEY`.
+These results pass the same visual-admission function used for Serper alternatives. Pending or rejected candidates are not displayed or counted. Bing candidates do not influence the inferred identity of the original photo. Ordinary typed-text searches retain their normal grouping.
 
-## Deployment checks
+## Prices, product links and counts
 
-The following are expected log formats, not claims of live test results:
+- Miinto category/listing URLs are not accepted as individual product cards. Collection expansion must supply a separate product URL, image and price. A product URL that redirects to a collection is also rejected.
+- The price parser prefers a readable displayed price over internal DOM price attributes. For example, visible `£514.50` with `data-price="51450"` is read as `514.50`. It does not blindly divide every large price by 100.
+- The frontend also rejects stale Miinto collection cards already present in a result stream or local state.
+- The top result count comes from the same eligible visible cards as the grid. Progress messages cannot reset it to zero while cards remain visible, and completion keeps the count visible.
 
-```text
-INDEPENDENT ROUTE engine=bing_reverse_image country=sa provider_market=en-US market_fallback=True
-INDEPENDENT SOURCE engine=bing_reverse_image country=sa status=returned http=200 ...
-INDEPENDENT RESULTS engine=bing_reverse_image country=sa candidates=...
-```
+The screenshot alone does not establish how the original incorrect upstream price was produced. The included tests cover the decimal/minor-unit ambiguity and the collection-page acceptance failure separately.
 
-For Saudi text, the route should show `provider_market=sa market_fallback=False`. Candidate counts report retrieval, not the final number of approved cards.
+## Validation completed
 
-After deployment, search by photo in Kuwait or Saudi Arabia. Eligible Bing fallback results should appear only in Alternatives after review. Google Lens results should retain their existing sections. Repeat with photo details from the assistant and verify that unapproved results do not flash in Local while prices load.
+- **99 offline backend regression tests passed.** These include photo-only versus customized-photo routing, composition using the retained product identity, manual/assistant details, early direct-result delivery before blocked collection expansion, final result retention, all Bing photo groups, collection redirects and price parsing.
+- **31 frontend/server regression tests passed**, covering the existing build, server, motion and billing behavior.
+- **Two mobile browser flows passed** at 390px: English/light and Arabic/dark. They cover initial photo search, manual details, AI details, repeated refinements, clearing details, Bing approval/grouping, a matching visible counter, collection-card rejection and a simulated cancelled checkout.
 
-## Validation
+All search-provider and checkout responses in these tests were simulated. No paid provider calls, live card charges or production deployment were performed. These tests verify routing and earlier delivery order; they are not a production latency benchmark or a real-device Apple Pay test.
 
-**89 offline regression tests passed**, plus Python syntax compilation of the three runtime files. Tests cover actual request parameters, country-specific cache isolation, supported-market routing, fallback provenance, the shared Serper admission function, withheld public counts, price/image updates, duplicate arrival order, collection children and photo identity. The earlier image-recovery, photo-refinement, scheduling and search-quality regression tests are included.
+Run backend tests in the existing application Python environment:
 
 ```bash
 python -m unittest discover -s tests -p 'test_*.py' -q
-python -m py_compile main.py findzia_independent_search.py findzia_search_quality.py
 ```
 
-Use the application's Python environment, including `requests` and Pillow. Transport responses and coordinator dependencies are simulated; application startup is not run. No paid live provider calls were made and no production deployment was performed. Live provider availability, relevance and latency still need to be checked after deployment.
+Run frontend tests from `frontend/`:
+
+```bash
+npm test
+```
+
+The optional `frontend/tests/photo-browser.cjs` flow also needs Playwright available and a Chromium executable supplied through `FINDZIA_TEST_CHROME`.
+
+## After deployment
+
+1. Search with a photo alone and confirm normal visual results.
+2. Add one detail, such as a color. Confirm the thumbnail remains, the input shows the addition and fresh results use the retained product identity.
+3. Repeat through the AI assistant, then remove all details and confirm photo-only search works again.
+4. Check that the top number matches visible eligible cards and that Bing photo matches appear only in Alternatives.
+5. Open a displayed product and check its exact product page and current price. Measure real search timings with the deployed providers before making a speed claim.
 
 ## Rollback
 
-Restore the backed-up `main.py` and `findzia_independent_search.py` together. Keep the independent helper while `main.py` imports it. To temporarily disable Bing only, set `FINDZIA_BING_ENABLED=false` in the API service and redeploy.
-
-## Provider references
-
-- https://serpapi.com/bing-search-api
-- https://serpapi.com/bing-reverse-image-api
-- https://learn.microsoft.com/en-us/previous-versions/bing/search-apis/bing-web-search/reference/market-codes
-- https://learn.microsoft.com/en-us/previous-versions/bing/search-apis/bing-image-search/reference/market-codes
+Restore the previous versions of the seven runtime files to their same paths and redeploy both services. This patch changes no database schema, payment configuration or account credentials.
