@@ -1,4 +1,4 @@
-{% comment %} FINDZIA_HOME_RELEASE=156.7.41 {% endcomment %}
+{% comment %} FINDZIA_HOME_RELEASE=156.7.42 {% endcomment %}
 {% comment %}Findzia 156.7.15 · progressive filters + conversational guide from 156.3.0 · combined 156.7.14 payments preserved{% endcomment %}
 
 
@@ -210,8 +210,7 @@ try{localStorage.setItem(Se,JSON.stringify(a)),we=a;}catch(e){return we=t,void V
 Jr(),Qr(),Vr(n?Wr().removed:Wr().saved,!1);}(t.getAttribute(a?"data-saved-remove":"data-save-product"),a),a){var n=e.querySelector("[data-saved-remove]")||e.querySelector("[data-saved-products] summary");n&&n.focus();}}}),e.querySelector("[data-saved-products]").addEventListener("toggle",Qr),window.addEventListener("storage",Xr);var Ee=async function(){var e=null;if(!r)return o=!0,n;var t=window.AbortController?new AbortController:null;try{var a=async function(){var e=await fetch(r+"/api/geo",{method:"GET",headers:{Accept:"application/json"},cache:"no-store",signal:t?t.signal:void 0});return e.ok?await e.json():null;}(),i=await Promise.race([a,new Promise(function(r){e=setTimeout(function(){t&&t.abort(),r(null);},3200);})]);if(i&&i.ok&&"default"!==i.source&&Lt(i.country||i.country_code)){var s=String(i.country||i.country_code).toUpperCase();qt(s,(ue[s]||[i.country_name||s])[0]);}}catch(e){}finally{e&&clearTimeout(e),o=!0;}
 return n;}(),Ae=(new Map,null),Ce=null,Le=0,xe=new Set,qe=e.querySelector("[data-choice-nav]"),Pe=e.querySelector("[data-choice-back]"),Re=(e.querySelector("[data-choice-title]"),e.querySelector("[data-choice-retry]")),Ne="findzia-choices-{{ section.id }}",Te=window.history.scrollRestoration;"scrollRestoration"in window.history&&(window.history.scrollRestoration="manual"),Pe&&Pe.addEventListener("click",function(){if(Ae){var e=window.history.state&&window.history.state[Ne];e&&e.journeyId===Ae.id&&e.choiceId?window.history.back():(Ae&&(Ce?(Ce.view=Dt(),(ee||Y||"loading"===Ce.status)&&(Ce.status="interrupted")):X&&(Ae.parent=Dt())),function(e,r){Ue(!1,!1),Bt(),ur(!1),ft(),Ae=e,Ce=r||null;var t=r?r.view:e.parent;t=t||{query:e.data.query,input:e.data.query,items:[],scroll:0},U=Mt(t.items||[]),j={},H={},U.forEach(function(e,r){j[br(e)]=r,H[br(e)]=!0;}),K=t.query||"",W=Mt(t.lastSearch),g&&(g.value=fzShownQuery(t.input||K)),I=t.sort||"relevance",O=t.filter||"all",E=t.layout||"grid",F=t.arrival||U.length,$=!!t.moreExhausted,Z=!!t.moreError,Q=!1,X=r?null:e.data,_.classList.add("is-visible"),_.classList.toggle("is-comparing",!r),fr(!1),cr(),Tt(),w&&(w.hidden=!0),r?U.length?St():Et(t.message||ar("no_results"),"failed"===r.status):Ot(e.data),function(e,r){var t=B;requestAnimationFrame(function(){if(t===B){if(r)try{r.focus({preventScroll:!0});}catch(e){}
 window.scrollTo({top:e.scroll||0,behavior:"auto"});}});}(t,r?Pe:b.querySelector('[data-recommendation-index="'+e.focusIndex+'"]'));}(Ae,null),function(e){if(Ae){var r=Object.assign({},window.history.state||{});r[Ne]={journeyId:Ae.id,choiceId:Ce?Ce.id:null};try{window.history[e?"replaceState":"pushState"](r,"",window.location.href);}catch(e){}}}(!0));}}),Re&&Re.addEventListener("click",jt),window.addEventListener("popstate",Ht);var Me=e.querySelector("[data-home-link]");Me&&(Me.addEventListener("click",je),Me.addEventListener("keydown",function(e){"Enter"!==e.key&&" "!==e.key||(e.preventDefault(),je());})),h.forEach(function(e){e.addEventListener("click",function(){ea();});}),g&&g.addEventListener("keydown",function(e){"Enter"===e.key&&!e.shiftKey&&!e.isComposing&&e.keyCode!==229&&(e.preventDefault(),ea());}),v&&y&&(v.addEventListener("click",function(){y.click();}),y.addEventListener("change",function(){y.files&&y.files[0]&&async function(e){if(e){if(e.size>6291456){y.value="";g.closest(".fz-home").fzRefineBridge.accountNotice("ar"===tr()?"الصورة كبيرة. اختر صورة أقل من 6 ميغابايت.":"That image is over 6 MB. Choose a smaller one.");return;}if(!await window.FindziaBeforeSearch(g.closest(".fz-home"),{file:e})){y.value="";return;}Ue(!1,!0),Ut();var r=Bt(),t=Le,a=await Pt();if(t===Le){K="",g&&(g.value=""),fr(!0,ar("searching_image")),zt("image"),w&&(w.hidden=!1),cr();try{var n=await
-function(e){return new Promise(function(r,t){var a=new FileReader;a.onload=function(){var e=String(a.result),t=e.indexOf(",");r(t>=0?e.slice(t+1):e);},a.onerror=t,a.readAsDataURL(e);});}(e);if(r!==B)return;W={kind:"image",query:"",extraSpecs:"",country:a,image_base64:n,mime_type:e.type||"image/jpeg"},Ft();var i={image_base64:n,mime_type:e.type||"image/jpeg",caption:"",client:"web",country:a,lang:nr()};try{await Rt("/api/search/image/stream",i,async function(e){if(r===B&&e)
-if("remove"===e.event)At(e.url);else if(("recognition"===e.event&&e.profile)||("query"===e.event&&e.query))fzAcceptPhotoDescription(e);else if("result"===e.event||"upsert"===e.event)Ct(e.item||{});else if("snapshot"===e.event)(e.results||e.all_results||[]).forEach(Ct);else if("done"===e.event)fr(!1),!U.length&&Q&&(Q=!1,Et(ar("no_results"),!1));else if("error"===e.event)throw new Error(e.error||"image_search_failed");}),r===B&&(fr(!1),U.length||X||b.querySelector(".fz-empty")||Et(ar("no_results"),!1),Ke(K));}catch(e){if(r!==B||fzBillingFailure(e))return;if(U.length){fr(false);St();return;}var o=await Nt("/api/search/image",i);if(r!==B)return;fr(!1),function(e){if(at(e),e&&e.provider_passthrough&&!1===e.ok)nt(e.error);else{if(Q=!1,e&&"recommendations"===e.type)return Ot();e&&e.query&&W&&(K=e.query,W.query=e.query,fzAcceptPhotoDescription({event:"query",query:e.query})),Ft(),(Array.isArray(e&&e.results)?e.results:[]).forEach(Ct),U.length||Et(ar("no_results"),!1);}}(o),Ke(K);}}catch(e){if(r!==B||fzBillingFailure(e))return;fr(!1),Et(ar("error_image"),!0);}finally{y&&(y.value="");}}}}(y.files[0]);})),w&&w.addEventListener("click",function(e){var r=e.target.closest("[data-filter]");r&&(O=r.getAttribute("data-filter"),[].slice.call(w.querySelectorAll("button")).forEach(function(e){e.classList.toggle("is-active",e===r);}),St());}),m.forEach(function(e){e.addEventListener("click",function(){dr(e.getAttribute("data-lang-btn"));});}),rr(n),ce="en",ir();}
+function(e){return new Promise(function(r,t){var a=new FileReader;a.onload=function(){var e=String(a.result),t=e.indexOf(",");r(t>=0?e.slice(t+1):e);},a.onerror=t,a.readAsDataURL(e);});}(e);if(r!==B)return;W={kind:"image",query:"",extraSpecs:"",country:a,image_base64:n,mime_type:e.type||"image/jpeg"},Ft();var i={image_base64:n,mime_type:e.type||"image/jpeg",caption:"",client:"web",country:a,lang:nr()};await fzSearchPhoto(i,r);if(r===B){fr(false);St();Ke(K);}}catch(error){if(r!==B)return;fzPhotoSearchFailed(error);}finally{y&&(y.value="");}}}}(y.files[0]);})),w&&w.addEventListener("click",function(e){var r=e.target.closest("[data-filter]");r&&(O=r.getAttribute("data-filter"),[].slice.call(w.querySelectorAll("button")).forEach(function(e){e.classList.toggle("is-active",e===r);}),St());}),m.forEach(function(e){e.addEventListener("click",function(){dr(e.getAttribute("data-lang-btn"));});}),rr(n),ce="en",ir();}
 function De(){return u+"-"+String(n||t||"XX").toUpperCase();}
 function Be(e){return(oe[tr()]||oe.en)[e];}
 var fzPageTransition=null,fzPageSerial=0;
@@ -444,11 +443,12 @@ function fzMediaWindow(ms){
  if(fzMediaClosed)return;
  const until=Date.now()+ms;if(fzMediaDeadline&&fzMediaDeadline<=until)return;
  fzMediaDeadline=until;clearTimeout(fzMediaTimer);
- fzMediaTimer=setTimeout(()=>{
-  fzMediaTimer=null;fzMediaClosed=true;fzPictureQueue.length=0;fzMediaRecoveryQueue.length=0;
-  q.forEach(state=>{state.recovering=false;if(!state.winner)state.status='unavailable';Array.from(state.cancels).forEach(cancel=>cancel());});
-  fzMediaChanged();
- },ms);
+ fzMediaTimer=setTimeout(fzCloseMediaWindow,ms);
+}
+function fzCloseMediaWindow(){
+ clearTimeout(fzMediaTimer);fzMediaTimer=null;fzMediaClosed=true;fzPictureQueue.length=0;fzMediaRecoveryQueue.length=0;
+ q.forEach(state=>{state.recovering=false;if(!state.winner)state.status='unavailable';Array.from(state.cancels).forEach(cancel=>cancel());});
+ fzMediaChanged();
 }
 function ft(preserveReady) {
   const states=Array.from(q.values());
@@ -614,7 +614,7 @@ return map;}
 function fzResultMotion(before){if(window.FindziaMotion){window.FindziaMotion.results(b,before);return;}if(bt()||E==='cinema')return;let count=0;for(const node of b.querySelectorAll('.fz-card-shell')){const key=node.querySelector('[data-image-key]')?.getAttribute('data-image-key'),old=before.get(key),now=node.getBoundingClientRect();if(old)continue;if(now.bottom<0||now.top>innerHeight+60||count++>14)continue;const x=old?Math.max(-24,Math.min(24,old.left-now.left)):0,y=old?Math.max(-12,Math.min(12,old.top-now.top)):6;if(Math.abs(x)+Math.abs(y)<1||!node.animate)continue;node.animate([{transform:'translate3d('+x+'px,'+y+'px,0)',opacity:old?1:0},{transform:'none',opacity:1}],{duration:200,easing:'cubic-bezier(.2,0,0,1)'});}}
 function St(){if(W&&W.shopperEmpty){Q=false;b.innerHTML="";Ft();return;}
 if(W&&W.refinementEmpty&&!U.length){Et(W.refinementEmpty,false);Ft();return;}
-const before=fzCardRects();fzPaintResults();fzResultMotion(before);fzFitCinema();}
+const before=fzCardRects();fzPaintResults();if(W?.photoSearchIssue&&!fzUsableResults&&!fzMediaPending())fzRenderPhotoIssue();fzResultMotion(before);fzFitCinema();}
 function fzFitCinema(){if(E!=='cinema')return;const viewport=window.visualViewport,available=viewport?viewport.height:innerHeight;if(viewport&&viewport.scale>1.2)return;const header=e.querySelector('[data-fixed-header]')?.getBoundingClientRect().height||110;const toolbar=e.querySelector('.fz-results-tools');const tools=toolbar&&!toolbar.closest('[data-fixed-header]')?toolbar.getBoundingClientRect().height:0;const h=Math.max(260,Math.min(520,Math.floor(available-header-tools-90)));const width=b.getBoundingClientRect().width||innerWidth-32;e.style.setProperty('--fz-poster-h',h+'px');e.style.setProperty('--fz-poster-w',Math.min(width-36,Math.max(220,Math.min(360,Math.floor(h*.72))))+'px');}
 function wt(){if(Xt(),!G){G=!0;var e=B;requestAnimationFrame(function(){e===B&&(G=!1,St());});}}
 function zt(kind){ur(false);F=0;W=null;Y=false;$=false;Z=false;Ft();X=null;_.classList.remove("is-comparing");U=[];j={};H={};ft();_.classList.add("is-visible");gt(0);Q=true;b.innerHTML=fzSkeletonMarkup();fzFitCinema();}
@@ -643,13 +643,171 @@ async function Pt(){if(!o)try{await Ee;}catch(e){}
 return n||t||"KW";}
 function fzPaidFetch(url,options){return window.FindziaBillingFetch(e,url,options);}
 function fzBillingFailure(error){if(!e.fzBilling?.handleSearchError(error))return false;fr(false);e.fzSearchProgress?.stop();return true;}
-async function Rt(e,t,a){if(!r)throw new Error("API URL missing");if(['/api/search/stream','/api/search/image/stream'].includes(e))fzAccountStart(t);var n=B,i=new AbortController,deadline=setTimeout(()=>i.abort(),e==='/api/refine/search/stream'?40000:65000);xe.add(i);try{var o=await fzPaidFetch(r+e,{method:"POST",signal:i.signal,headers:{"Content-Type":"application/json",Accept:"application/x-ndjson"},body:JSON.stringify(t)});if(!o.ok)throw new Error(await o.text().catch(function(){return"HTTP "+o.status;}));if(!o.body||!o.body.getReader)throw new Error("stream_unsupported");var s=o.body.getReader(),c=new TextDecoder,l="",u=!1,d=!1;async function f(e){if(e.trim()){var r;try{r=JSON.parse(e);}catch(e){throw new Error("invalid_stream_response");}
-if(r&&r.event==='error'&&r.recoverable){if(W)W.partial=true;return;}await a(r),n===B&&Wt(r),r&&"done"===r.event&&(u=!0,n===B&&fzAccountDone());}}
-try{for(;;){var p=await s.read();if(p.done){d=!0;break;}
-var m=(l+=c.decode(p.value,{stream:!0})).split("\n");l=m.pop()||"";for(var h=0;h<m.length;h++){await f(m[h]);if(u)break;}if(u)break;}
-if(!u&&(l+=c.decode()).trim()&&await f(l),!u)throw new Error("stream_interrupted");}finally{if(!d)try{await s.cancel();}catch(g){}
-s.releaseLock();}}finally{clearTimeout(deadline);xe.delete(i);}}
-async function Nt(e,t){if(!r)throw new Error("API URL missing");var a=await fzPaidFetch(r+e,{method:"POST",headers:{"Content-Type":"application/json",Accept:"application/json"},body:JSON.stringify(t)}),n=await a.json().catch(function(){return{};});if(!a.ok)throw new Error(n.error||"HTTP "+a.status);return n;}
+// One deadline covers response headers, streaming, and the optional JSON body.
+function fzRequestLifetime(milliseconds) {
+  const controller = new AbortController(), started = performance.now();
+  const expires = started + milliseconds;
+  let timedOut = false, disposed = false;
+  const timeout = () => { timedOut = true; controller.abort(); };
+  const timer = setTimeout(timeout, milliseconds);
+  xe.add(controller);
+  function check() {
+    if (!controller.signal.aborted && performance.now() >= expires) timeout();
+    if (controller.signal.aborted) {
+      const error = new Error(timedOut ? 'image_search_timeout' : 'search_cancelled');
+      error.name = timedOut ? 'TimeoutError' : 'AbortError';
+      throw error;
+    }
+  }
+  function run(work) {
+    return new Promise((resolve, reject) => {
+      const aborted = () => { try { check(); } catch (error) { reject(error); } };
+      try { check(); } catch (error) { reject(error); return; }
+      controller.signal.addEventListener('abort', aborted, {once:true});
+      Promise.resolve().then(() => { check(); return work(); }).then(
+        value => { controller.signal.removeEventListener('abort', aborted); try { check(); resolve(value); } catch (error) { reject(error); } },
+        error => { controller.signal.removeEventListener('abort', aborted); reject(error); }
+      );
+    });
+  }
+  return {
+    signal:controller.signal, run, check,
+    remaining:() => Math.max(0, expires - performance.now()),
+    dispose() {
+      if (disposed) return;
+      disposed = true; clearTimeout(timer); xe.delete(controller); controller.abort();
+    }
+  };
+}
+async function Rt(path, payload, receive, sharedLifetime) {
+  if (!r) throw new Error('API URL missing');
+  if (['/api/search/stream','/api/search/image/stream'].includes(path)) fzAccountStart(payload);
+  const generation = B, lifetime = sharedLifetime || fzRequestLifetime(path === '/api/refine/search/stream' ? 40000 : 65000);
+  let reader, ended = false, done = false;
+  try {
+    const response = await lifetime.run(() => fzPaidFetch(r + path, {
+      method:'POST', signal:lifetime.signal,
+      headers:{'Content-Type':'application/json', Accept:'application/x-ndjson'}, body:JSON.stringify(payload)
+    }));
+    if (!response.ok) {
+      const error = new Error(await lifetime.run(() => response.text()) || 'HTTP ' + response.status);
+      error.status = response.status; throw error;
+    }
+    if (!response.body?.getReader) throw new Error('stream_unsupported');
+    reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let pending = '';
+    async function line(text) {
+      lifetime.check();
+      if (generation !== B || !text.trim()) return;
+      let event;
+      try { event = JSON.parse(text); } catch (_) { throw new Error('invalid_stream_response'); }
+      if (event?.event === 'error' && event.recoverable) { if (W) W.partial = true; return; }
+      await lifetime.run(() => receive(event));
+      if (generation !== B) return;
+      Wt(event);
+      if (event?.event === 'done') { done = true; fzAccountDone(); }
+    }
+    while (!done) {
+      const chunk = await lifetime.run(() => reader.read());
+      if (chunk.done) { ended = true; break; }
+      const lines = (pending + decoder.decode(chunk.value, {stream:true})).split('\n');
+      pending = lines.pop() || '';
+      for (const value of lines) { await line(value); if (done) break; }
+    }
+    if (!done && (pending += decoder.decode()).trim()) await line(pending);
+    if (!done) throw new Error('stream_interrupted');
+  } finally {
+    // A stalled reader.cancel() must not hold the UI open after done/timeout.
+    if (reader) {
+      if (!ended) { try { Promise.resolve(reader.cancel()).catch(() => {}); } catch (_) {} }
+      try { reader.releaseLock(); } catch (_) {}
+    }
+    if (!sharedLifetime) lifetime.dispose();
+  }
+}
+async function Nt(path, payload, lifetime) {
+  if (!r) throw new Error('API URL missing');
+  const response = await lifetime.run(() => fzPaidFetch(r + path, {
+    method:'POST', signal:lifetime.signal,
+    headers:{'Content-Type':'application/json', Accept:'application/json'}, body:JSON.stringify(payload)
+  }));
+  const data = await lifetime.run(() => response.json());
+  if (!response.ok) { const error = new Error(data.error || 'HTTP ' + response.status); error.status = response.status; throw error; }
+  return data;
+}
+var fzPhotoTrace = null;
+e.fzPhotoSearchDiagnostics = () => fzPhotoTrace ? {...fzPhotoTrace, phases:fzPhotoTrace.phases.map(row => ({...row}))} : null;
+async function fzSearchPhoto(payload, generation) {
+  const lifetime = fzRequestLifetime(65000), started = performance.now();
+  // A late first batch must not start a fresh 30s image-loading window.
+  fzMediaWindow(65000);
+  const trace = {generation, country:payload.country, startedAt:new Date().toISOString(),
+    started, budgetMs:65000, fallback:false, firstVisibleMs:null, elapsedMs:null, outcome:'running', phases:[]};
+  fzPhotoTrace = trace;
+  const phase = name => {
+    if (name && trace.phases.at(-1)?.name !== name && trace.phases.length < 24)
+      trace.phases.push({name, elapsedMs:Math.round(performance.now() - started)});
+  };
+  async function receive(event) {
+    if (generation !== B || !event) return;
+    phase(event.stage || event.phase || event.event);
+    if (event.event === 'recognition' || event.event === 'query') fzAcceptPhotoDescription(event);
+    else if (event.event === 'result' || event.event === 'upsert') Ct(event.item || {});
+    else if (event.event === 'snapshot') (event.results || event.all_results || []).forEach(Ct);
+    else if (event.event === 'remove') At(event.url);
+    else if (event.event === 'done') {
+      trace.outcome = event.completion_reason || (event.partial ? 'partial' : 'complete');
+      if (event.partial && W) W.partial = true;
+      if (event.completion_reason === 'time_budget' && W) W.photoSearchIssue = 'timeout';
+    } else if (event.event === 'error') {
+      const error = new Error(event.error || event.code || 'image_search_failed');
+      error.photoTerminal = true; throw error;
+    }
+  }
+  try {
+    try {
+      await Rt('/api/search/image/stream', payload, receive, lifetime);
+    } catch (error) {
+      lifetime.check();
+      // Retry a broken transport only, never a deadline, cancellation, provider
+      // rejection, partial result set, or HTTP/auth/credit/rate-limit failure.
+      const transport = error.name === 'TypeError' || ['stream_unsupported','stream_interrupted','invalid_stream_response'].includes(error.message);
+      if (generation !== B || U.length || error.status || error.photoTerminal || !transport || lifetime.remaining() < 5000) throw error;
+      trace.fallback = true; phase('json_fallback');
+      const data = await Nt('/api/search/image', payload, lifetime);
+      lifetime.check();
+      if (generation !== B) return;
+      if (data?.ok === false) throw new Error(data.error || 'image_search_failed');
+      if (!Array.isArray(data?.results)) throw new Error('invalid_image_response');
+      if (data.query) fzAcceptPhotoDescription({event:'query', query:data.query});
+      data.results.forEach(Ct); fzAccountDone(); trace.outcome = 'complete';
+    }
+  } catch (error) {
+    trace.outcome = generation !== B || error.name === 'AbortError' ? 'cancelled' : error.name === 'TimeoutError' ? 'timeout' : 'error';
+    throw error;
+  } finally {
+    trace.elapsedMs = Math.round(performance.now() - started);
+    lifetime.dispose();
+  }
+}
+function fzPhotoSearchFailed(error) {
+  if (fzBillingFailure(error)) return;
+  if (W) { W.partial = true; W.photoSearchIssue = error.name === 'TimeoutError' ? 'timeout' : 'connection'; }
+  if (error.name === 'TimeoutError') fzCloseMediaWindow();
+  Q = false; fr(false); e.fzSearchProgress?.stop(); St();
+  if (fzUsableResults) fzPhotoNotice(nr() === 'ar' ? 'توقف البحث. النتائج المتاحة أمامك.' : 'Search stopped. Your matches are ready to browse.');
+}
+function fzRenderPhotoIssue() {
+  const timeout = W?.photoSearchIssue === 'timeout';
+  Et(nr() === 'ar' ? (timeout ? 'تأخر البحث بالصورة. حاول مجددًا.' : 'انقطع بحث الصورة. حاول مجددًا.')
+    : (timeout ? 'Photo search took too long. Please try again.' : 'Photo search was interrupted. Please try again.'), true);
+  const retry = document.createElement('button');
+  retry.type = 'button'; retry.className = 'fz-shopping-retry'; retry.dataset.photoRetry = '';
+  retry.textContent = nr() === 'ar' ? 'حاول مجددًا' : 'Try again';
+  retry.addEventListener('click', () => { if (!ee && W?.image_base64) fzRunPhotoOriginal(W); });
+  b.querySelector('.fz-empty')?.append(retry);
+}
 function Tt(){qe&&(qe.hidden=!0),_.classList.remove("is-choice-layer");}
 function Mt(e){return null==e?e:JSON.parse(JSON.stringify(e));}
 function Dt(){return{query:K,input:g?g.value:K,lastSearch:Mt(W),items:Mt(U),sort:I,filter:O,layout:E,arrival:F,scroll:window.scrollY||0,moreExhausted:$,moreError:Z,message:!U.length&&b.querySelector(".fz-empty")?b.querySelector(".fz-empty").textContent:""};}
@@ -710,6 +868,8 @@ function fzAccountDone(){e.fzAccountComplete?.(B);}
 var Vt=null,Jt=!1,fzUsableResults=false;function Qt(count) {
     count = Math.max(0, Number(count) || 0);
     e.dataset.visibleResultCount = String(count);
+    if (count > 0 && fzPhotoTrace?.generation === B && fzPhotoTrace.firstVisibleMs === null)
+      fzPhotoTrace.firstVisibleMs = Math.round(performance.now() - fzPhotoTrace.started);
     const ready = count > 0;
     if (ready !== fzUsableResults) { fzUsableResults = ready; Yt('fz:search-state'); }
     e.dispatchEvent(new CustomEvent('fz:result-count', {detail:{count,busy:ee||Kt}}));
@@ -838,7 +998,23 @@ e.fzRefineBridge.commitEmpty = function (query, context, message) {
     Gt = false;
   }
 };function fzShownQuery(value){return W&&W.kind==='image'?String(W.extraSpecs||''):String(value||'');}
-async function fzRunPhotoOriginal(origin){if(!await window.FindziaBeforeSearch(e,origin))return;const id=Bt();const photo=Object.assign({},origin,{kind:'image',extraSpecs:'',extra_specs:'',refinement:false});fr(true,ar('searching_image'));zt('image');W=photo;W.query=photo.photoDescription||'';K=W.query;g.value='';cr();Ft();try{await Rt('/api/search/image/stream',{image_base64:photo.image_base64,mime_type:photo.mime_type,client:'web',caption:'',country:photo.country,lang:photo.lang||nr()},async(event)=>{if(id!==B||!event)return;if(event.event==='recognition'||event.event==='query')fzAcceptPhotoDescription(event);else if(event.event==='result'||event.event==='upsert')Ct(event.item||{});else if(event.event==='snapshot')(event.results||event.all_results||[]).forEach(Ct);else if(event.event==='remove')At(event.url);else if(event.event==='error')throw new Error(event.error||'image_search_failed');});if(id===B&&!U.length)Et(ar('no_results'),false);}catch(error){if(id===B&&!U.length&&!fzBillingFailure(error))fzPhotoNotice(nr()==='ar'?'تعذّر إكمال بحث الصورة. حاول مجددًا.':'Photo search could not finish. Try again.');}finally{if(id===B){fr(false);fzUpdatePhotoUI();Yt('fz:search-state');}}}
+async function fzRunPhotoOriginal(origin) {
+  if (!await window.FindziaBeforeSearch(e, origin)) return;
+  const id = Bt(), photo = Object.assign({}, origin, {
+    kind:'image', extraSpecs:'', extra_specs:'', refinement:false, photoSearchIssue:'', partial:false
+  });
+  fr(true, ar('searching_image')); zt('image'); W = photo;
+  W.query = photo.photoDescription || ''; K = W.query; g.value = ''; cr(); Ft();
+  try {
+    await fzSearchPhoto({image_base64:photo.image_base64, mime_type:photo.mime_type,
+      client:'web', caption:'', country:photo.country, lang:photo.lang || nr()}, id);
+    if (id === B) { fr(false); St(); Ke(K); }
+  } catch (error) {
+    if (id === B) fzPhotoSearchFailed(error);
+  } finally {
+    if (id === B) { fzUpdatePhotoUI(); Yt('fz:search-state'); }
+  }
+}
 function fzUpdatePhotoUI(){const wrap=e.querySelector('.fz-input-wrap');if(!wrap)return;const chip=wrap.querySelector('[data-image-query-chip]'),plus=wrap.querySelector('[data-image-query-plus]');const active=!!(W&&W.kind==='image'&&W.image_base64);wrap.dataset.imageMode=String(active);e.dataset.searchKind=active?'image':'text';if(chip){chip.hidden=!active;chip.setAttribute('aria-label',nr()==='ar'?'إزالة الصورة':'Remove photo');const img=chip.querySelector('img');if(active&&img&&chip._fzImage!==W.image_base64){img.src='data:'+(W.mime_type||'image/jpeg')+';base64,'+W.image_base64;chip._fzImage=W.image_base64;delete e.dataset.photoFiltersUnavailable;}
 if(!active&&img){img.removeAttribute('src');delete chip._fzImage;}}
 if(plus){plus.hidden=!active;plus.setAttribute('aria-label',nr()==='ar'?'إضافة مواصفات للصورة':'Add specifications to photo');}
@@ -1298,12 +1474,12 @@ return result;};}})();</script>
  border-top:0!important;padding:8px 0!important;margin:0 0 8px!important;
 }
 </style>
-<script data-fz-composer="156.7.41">
+<script data-fz-composer="156.7.42">
 (function(){
  'use strict';
  const root=document.getElementById('findzia-home-{{ section.id }}');
  if(!root||root.dataset.composerMounted)return;
- root.dataset.composerMounted='156.7.41';
+ root.dataset.composerMounted='156.7.42';
  const bindings=[],cleanups=[];
  const labels={en:'Clear search text',ar:'مسح كلمات البحث',fr:'Effacer la recherche',de:'Suchtext löschen',es:'Borrar búsqueda',it:'Cancella ricerca',pt:'Limpar pesquisa',tr:'Aramayı temizle',zh:'清除搜索文字',ja:'検索語を消去',ko:'검색어 지우기',ru:'Очистить запрос',hi:'खोज मिटाएँ',ur:'تلاش صاف کریں',id:'Hapus pencarian',ms:'Padam carian'};
  const listen=(node,type,fn,options)=>{if(!node)return;node.addEventListener(type,fn,options);cleanups.push(()=>node.removeEventListener(type,fn,options));};
@@ -1426,7 +1602,7 @@ return result;};}})();</script>
 </script>
 
 
-<style data-fz-query-polish="156.7.41">
+<style data-fz-query-polish="156.7.42">
 /* Focus opens the composer. Measuring never collapses the live input. */
 #findzia-home-{{ section.id }}[data-theme] [data-dark-form],#findzia-home-{{ section.id }}[data-theme] .fz-fixed-header .fz-search-row{box-sizing:border-box!important;overflow:hidden;transition:height .24s cubic-bezier(.22,1,.36,1),border-radius .24s ease,border-color .16s ease,box-shadow .16s ease!important}
 @media(prefers-reduced-motion:reduce){#findzia-home-{{ section.id }}[data-theme] [data-dark-form],#findzia-home-{{ section.id }}[data-theme] .fz-fixed-header .fz-search-row{transition:none!important}}
@@ -1511,7 +1687,7 @@ html[data-fz-page-transition]::view-transition-new(root){animation:fz-page-in 28
 @media(prefers-reduced-motion:reduce){#findzia-home-{{ section.id }} dialog.fz-refine-dialog[open] .fz-refine-option{transition:none!important}}
 </style>
 
-<style data-fz-main-menu="156.7.41">
+<style data-fz-main-menu="156.7.42">
 /* Keep this menu independent of the legacy all-descendants font override. */
 #findzia-home-{{ section.id }}[data-theme] [data-menu-design],#findzia-home-{{ section.id }}[data-theme] [data-menu-design] *{font-family:'Helvetica Neue',Helvetica,Arial,sans-serif!important}
 #findzia-home-{{ section.id }}[data-theme] [data-menu-design][dir=rtl],#findzia-home-{{ section.id }}[data-theme] [data-menu-design][dir=rtl] *{font-family:system-ui,-apple-system,'Segoe UI',Arial,sans-serif!important}
@@ -1542,8 +1718,8 @@ html[data-fz-page-transition]::view-transition-new(root){animation:fz-page-in 28
 @media(prefers-reduced-motion:reduce){#findzia-home-{{ section.id }}[data-theme] [data-clear-menu] .fza-nav-link{transition:none}}
 </style>
 
-<style data-fz-camera-composer="156.7.41">
-/* 156.7.41 — the search frame and its lens share one fixed, measured header.
+<style data-fz-camera-composer="156.7.42">
+/* 156.7.42 — the search frame and its lens share one fixed, measured header.
    The lens overlaps only the empty lower rim, never the text or photo chip.
    At focus the full control row detaches while the existing composer expands. */
 #findzia-home-{{ section.id }}[data-theme] .fz-fixed-header {
@@ -1696,6 +1872,6 @@ html[data-fz-page-transition]::view-transition-new(root){animation:fz-page-in 28
 
 </style>
 
-<style data-fz-search-launch="156.7.41">
+<style data-fz-search-launch="156.7.42">
 #findzia-home-{{ section.id }}[data-theme] .fz-launch-status{margin:8px 0 20px;padding:12px 4px;color:var(--fz-muted);font:inherit;font-size:14px;line-height:1.5}
 </style>

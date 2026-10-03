@@ -1,4 +1,4 @@
-/* FINDZIA_BILLING_RELEASE=156.7.41 */
+/* FINDZIA_BILLING_RELEASE=156.7.42 */
 /* Findzia 156.7.20 — resumable checkout, safe plan changes and persistent payment UI. */
 (() => {
   'use strict';
@@ -776,8 +776,10 @@
         if(!charge||!response.body)return response;
         // One reader; pass through chunks immediately. No tee buffering or second search.
         const reader=response.body.getReader();let finished=false;
-        const finish=()=>{if(finished)return;finished=true;active=Math.max(0,active-1);setTimeout(()=>refresh(true),100);};
-        const stream=new ReadableStream({async pull(controller){try{const chunk=await reader.read();if(chunk.done){controller.close();finish();}else controller.enqueue(chunk.value);}catch(e){controller.error(e);finish();}},async cancel(reason){try{await reader.cancel(reason);}finally{finish();}}});
+        const finish=()=>{if(finished)return;finished=true;options.signal?.removeEventListener('abort',finish);active=Math.max(0,active-1);setTimeout(()=>refresh(true),100);};
+        options.signal?.addEventListener('abort',finish,{once:true});
+        if(options.signal?.aborted)finish();
+        const stream=new ReadableStream({async pull(controller){try{const chunk=await reader.read();if(chunk.done){controller.close();finish();}else controller.enqueue(chunk.value);}catch(e){controller.error(e);finish();}},cancel(reason){finish();return reader.cancel(reason);}});
         return new Response(stream,{status:response.status,statusText:response.statusText,headers:response.headers});
       }catch(e){if(charge){active=Math.max(0,active-1);setTimeout(()=>refresh(true),300);}throw e;}
       finally{if(charge)setTimeout(()=>refresh(true),300);}

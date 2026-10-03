@@ -1,4 +1,4 @@
-/* FINDZIA_SUBSCRIPTIONS_RELEASE=156.7.41 */
+/* FINDZIA_SUBSCRIPTIONS_RELEASE=156.7.42 */
 /* Customer-owned billing data stays in memory and is cleared on sign-out. */
 (() => {
   'use strict';
