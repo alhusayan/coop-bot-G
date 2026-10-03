@@ -1,4 +1,4 @@
-/* FINDZIA_MOTION_RELEASE=156.7.40 — Findzia 156.7.40 — shared motion for live results, loaded images and navigation.
+/* FINDZIA_MOTION_RELEASE=156.7.41 — Findzia 156.7.41 — shared motion for live results, loaded images and navigation.
  * No router, fetch interception, search delay, or payment lifecycle changes.
  * All content is visible without this enhancement. */
 (function () {
@@ -347,7 +347,7 @@
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) for (const entry of [...active]) stop(entry.el);
   });
-  window.FindziaMotion = Object.freeze({ version: '156.7.40', timings, results, image, reveal, mount });
+  window.FindziaMotion = Object.freeze({ version: '156.7.41', timings, results, image, reveal, mount });
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot, { once: true });
   else boot();
 })();

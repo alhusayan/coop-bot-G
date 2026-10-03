@@ -1,4 +1,4 @@
-/* FINDZIA_BILLING_RELEASE=156.7.40 */
+/* FINDZIA_BILLING_RELEASE=156.7.41 */
 /* Findzia 156.7.20 — resumable checkout, safe plan changes and persistent payment UI. */
 (() => {
   'use strict';
@@ -21,10 +21,22 @@
   }
   window.FindziaBillingFetch = async (root, url, options) => (await abortable(waitFor(root),options?.signal)).fetch(url,options);
   window.FindziaBeforeSearch = async (root, payload) => {
-    const ctl=new AbortController(),timer=setTimeout(()=>ctl.abort(),20000);
-    try{return await abortable((async()=>(await waitFor(root)).beforeSearch(payload))(),ctl.signal);}
-    catch(_){root.fzRefineBridge?.accountNotice(root.dataset.lang==='ar'?'تعذّر التحقق من الرصيد. حاول مجددًا.':'Could not check your credits. Please try again.');return false;}
-    finally{clearTimeout(timer);}
+    // Paint the destination independently of account/bootstrap latency. Only
+    // beforeSearch authorizes retrieval; this launch ticket cannot spend credit.
+    const launch=root.fzRefineBridge?.startSearchLaunch?.(payload);
+    if(launch===false)return false;
+    const ctl=launch?.controller||new AbortController(),timer=setTimeout(()=>ctl.abort(),20000);
+    let allowed=false;
+    try{
+      allowed=await abortable((async()=>(await waitFor(root)).beforeSearch(payload,{signal:ctl.signal,previous:launch?.previous}))(),ctl.signal);
+      return !!allowed&&!ctl.signal.aborted&&!launch?.cancelled;
+    }catch(_){
+      if(!launch?.cancelled)root.fzRefineBridge?.accountNotice(root.dataset.lang==='ar'?'تعذّر التحقق من الرصيد. حاول مجددًا.':'Could not check your credits. Please try again.');
+      return false;
+    }finally{
+      clearTimeout(timer);
+      if(launch)root.fzRefineBridge?.finishSearchLaunch?.(launch,!!allowed&&!ctl.signal.aborted);
+    }
   };
   function pendingStore(action, value) {
     return new Promise((resolve,reject)=>{
@@ -134,7 +146,7 @@
       if(blockedSearch?.generation===bridge.context().generation){
         const previous=blockedSearch.previous;blockedSearch=null;
         if(previous?.snapshot.view?.items?.length)bridge.restore(previous.snapshot);
-        else if(previous?.homeState==='empty')root.dataset.homeState='empty';
+        else if(previous?.homeState==='empty')bridge.restoreHomeView();
       }
       notice(code);return true;
     }
@@ -177,11 +189,12 @@
       }catch(e){if(generation===revision)error=e.message;return null;}
       finally{flight=null;paint();}})();return flight;
     }
-    async function beforeSearch(){
+    async function beforeSearch(payload,launch={}){
       // The search endpoint atomically checks/reserves credit. A failed
       // informational status call must not block a valid authenticated search.
       // No client-side balance is invented, and 401/402 responses still block.
       const data=await refresh(false,true);
+      if(launch.signal?.aborted)return false;
       if(!data){
         const transient=!['session_expired','guest_session_expired','sign_in_required','trial_transfer_pending',
           'credits_exhausted','trial_daily_limit','trial_budget_reached','retry_limit'].includes(error);
@@ -190,7 +203,7 @@
       if(data?.trial_link_pending)return blockSearch('trial_transfer_pending');
       if(data&&data.remaining<=0)return blockSearch('credits_exhausted');
       noticeCode='';blockedSearch=null;paintNotice();
-      allowedView={snapshot:bridge.snapshot(),homeState:root.dataset.homeState};
+      allowedView=launch.previous||{snapshot:bridge.snapshot(),homeState:root.dataset.homeState};
       return true;
     }
     async function beforeSignIn(){
