@@ -1,6 +1,6 @@
 {
   "name": "findzia-standalone",
-  "version": "156.7.40",
+  "version": "156.7.41",
   "private": true,
   "type": "module",
   "engines": {
