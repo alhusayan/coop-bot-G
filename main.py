@@ -394,7 +394,7 @@ from findzia_billing import CreditMiddleware, install_billing
 app.add_middleware(CreditMiddleware, owner=app)
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization', 'X-Findzia-Request-Id'], max_age=86400)
-BUILD_ID = 'v128.5.42.39-photo-text'
+BUILD_ID = 'v128.5.42.40-price-stock'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -820,9 +820,11 @@ def detect_currency_code(text, fallback='', country_code=None):
     fallback = (fallback or '').upper().strip()
     if not hay:
         return fallback
-    m = re.search('\\b([A-Z]{3})\\b', hay.upper())
-    if m and m.group(1) in KNOWN_CURRENCY_CODES:
-        return m.group(1)
+    # Currency can touch the amount: 1.950KWD / KWD1.950. Word boundaries
+    # treat digits as letters and lose KWD's three-decimal precision.
+    for m in re.finditer(r'(?<![A-Z])([A-Z]{3})(?![A-Z])', hay.upper()):
+        if m.group(1) in KNOWN_CURRENCY_CODES:
+            return m.group(1)
     low = hay.lower()
     for sym in sorted(CURRENCY_SYMBOL_MAP, key=len, reverse=True):
         if sym in low or sym in hay:
@@ -8356,10 +8358,7 @@ def _authoritative_price_value(price_value, price_text='', currency_code=''):
     is authoritative. Otherwise retain the structured numeric value as fallback.
     """
     raw = _normalize_price_chars(price_text).replace('\xa0', ' ').replace('\u202f', ' ').strip()
-    explicit_currency = bool(re.search(
-        r'\b(?:USD|EUR|GBP|KWD|KD|SAR|AED|QAR|BHD|OMR|CNY|RMB|JPY|CAD|AUD|CHF|INR|KRW|TRY|RUB)\b|US\$|A\$|C\$|S\$|HK\$|NZ\$|NT\$|[$€£¥￥₹₩₺₽₪]|د\.ك|ر\.س|د\.إ|ر\.ق|ر\.ع|د\.ب',
-        raw, re.I
-    ))
+    explicit_currency = bool(detect_currency_code(raw, ''))
     if raw and (explicit_currency or str(currency_code or '').upper() in KNOWN_CURRENCY_CODES):
         parsed = _extract_numeric_price(raw, currency_code)
         if parsed is None:
@@ -17911,7 +17910,10 @@ def _card_offer_state(row):
         if re.search(pattern,condition,re.I):
             out['item_condition']=kind;break
     availability = str(row.get('availability') or '')
-    if re.search(r'OutOfStock|SoldOut|Discontinued|out\s+of\s+stock|sold\s+out|غير\s+متوفر|مباع|نفد|售罄|缺货',availability+' '+title,re.I) or row.get('in_stock') is False:
+    if row.get('stock_status') == 'out_of_stock':
+        out['stock_status'] = 'out_of_stock'
+        return out
+    if re.search(r'OutOfStock|SoldOut|Discontinued|out[_ -]+of[_ -]+stock|sold[_ -]+out|not\s+in\s+stock|unavailable|غير\s+(?:متوفر|متاح)|مباع|نفد|نافد|售罄|缺货',availability+' '+title,re.I) or row.get('in_stock') is False:
         out['stock_status']='out_of_stock'
     elif re.search(r'PreOrder|BackOrder|pre[- ]order',availability,re.I):
         out['stock_status']='preorder'
@@ -18722,6 +18724,103 @@ def _web_deep_json_price_scan(html, url=''):
     return (price, cur)
 _WEB_MOBILE_HEADERS = {'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1', 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8', 'Accept-Language': 'en-US,en;q=0.9,ar;q=0.8'}
 
+def _web_scoped_availability(soup, url, current=''):
+    """Product badges and schema; unknown stays unknown, unrelated cards ignored."""
+    def same(value):
+        return _web_price_url_key(urllib.parse.urljoin(url, str(value or ''))) == _web_price_url_key(url)
+    def state(value):
+        return _card_offer_state({'availability': value}).get('stock_status', '')
+    def inside_related(el):
+        for parent in [el] + list(el.parents):
+            if not getattr(parent, 'attrs', None):
+                continue
+            label = ' '.join(parent.get('class', [])) + ' ' + str(parent.get('id') or '')
+            if re.search(r'\b(?:related|recommendations?|upsells?|cross-sells?|reviews?|swatches|variations|variant-options)\b', label, re.I):
+                return True
+            if parent.has_attr('hidden') or parent.get('aria-hidden') == 'true' or re.search(r'display\s*:\s*none', parent.get('style', ''), re.I):
+                return True
+        return False
+    scopes = []
+    for scope in soup.select('[itemscope][itemtype$="/Product"]'):
+        link = scope.select_one('[itemprop="url"]')
+        if link and not same(link.get('href') or link.get('content')):
+            continue
+        if inside_related(scope):
+            continue
+        scopes.append(scope)
+    # Schema-less stores commonly have one main product detail container.
+    if not scopes:
+        scopes = [el for el in soup.select('#product, #product-detail, #product-details, .product-detail, .product-info-main, .single-product .summary') if not inside_related(el)]
+    observed = []
+    for scope in scopes:
+        for el in scope.select('[itemprop="availability"], .stock, .stock-status, .availability, [data-stock-status], .out-of-stock, .sold-out'):
+            if inside_related(el):
+                continue
+            # A nested product or another variant cannot settle this offer.
+            owner = el.find_parent(attrs={'itemtype': re.compile(r'/Product$')})
+            if owner is not None and owner is not scope and scope.get('itemtype'):
+                continue
+            owner_offer = el.find_parent(attrs={'itemprop': 'offers'})
+            offer_url = owner_offer.select_one('[itemprop="url"]') if owner_offer else None
+            if offer_url and not same(offer_url.get('href') or offer_url.get('content')):
+                continue
+            value = el.get('href') or el.get('content') or el.get('data-stock-status') or el.get_text(' ', strip=True)
+            found = state(value)
+            if found:
+                observed.append((found, value))
+    if not observed:
+        for name in ('product:availability', 'og:availability'):
+            el = soup.find('meta', property=name) or soup.find('meta', attrs={'name': name})
+            value = el.get('content', '') if el else ''
+            if state(value): observed.append((state(value), value))
+    states = {item[0] for item in observed}
+    if len(states) == 1:
+        return observed[0][1]
+    # Contradictory variants/badges are unresolved, not blanket sold-out.
+    return current if not states else None
+
+
+def _web_snapshot_ttl(snap):
+    ttl = WEB_LIVE_PRICE_CACHE_TTL if snap.get('price') else 15
+    return min(ttl, WEB_STOCK_CACHE_TTL) if snap.get('availability') else ttl
+
+
+def _web_stock_snapshot_facts(row, snap, market):
+    if (not snap.get('is_product') or snap.get('page_fetch_status') == 'blocked'
+            or _web_price_url_key(snap.get('url')) != _web_price_url_key(row.get('url'))):
+        return {}
+    original = str(row.get('raw_title') or row.get('title') or '')
+    if original and snap.get('title') and _findzia_hard_product_mismatch(original, snap['title']):
+        return {}
+    fields = {}
+    availability = str(snap.get('availability') or '')
+    stock = _card_offer_state({'availability': availability}).get('stock_status')
+    if stock:
+        fields.update(availability=availability, stock_status=stock,
+                      availability_checked_at=snap.get('price_checked_at') or time.time(),
+                      availability_source='product_page', in_stock=stock == 'in_stock' if stock != 'preorder' else None)
+    money = _web_exact_money(snap.get('price'), snap.get('currency'))
+    if money and not _price_collides_with_product_spec(money[0], original, snap.get('title') or ''):
+        fields.update(_web_live_quote_fields(_web_quote_from_fields(snap), market))
+        fields.update(price_source=snap.get('price_source') or 'product_page',
+                      price_source_url=snap['url'], price_checked_at=snap.get('price_checked_at'),
+                      price_verified=snap.get('price_confidence', 'high') == 'high',
+                      price_status='page', price_pending=False, price_unavailable=False)
+    return fields
+
+
+def _web_cached_stock_facts(row, market):
+    """No I/O on the first-result path. Same key and TTL as the shared page cache."""
+    country = str(row.get('country') or row.get('market_country') or '').lower()
+    key = (_web_price_url_key(row.get('url')), str(market.get('country') or ''), _web_market_currency(market), country)
+    with WEB_PRODUCT_VERIFY_LOCK:
+        hit = WEB_PRODUCT_VERIFY_CACHE.get(key)
+        if not hit or time.monotonic() - hit['ts'] >= _web_snapshot_ttl(hit['data']):
+            return {}
+        snap = dict(hit['data'])
+    return _web_stock_snapshot_facts(row, snap, market)
+
+
 def _web_product_page_metadata(html, base_url):
     """Select the current product, or its canonical OpenGraph image on a direct listing."""
     if _web_merchant_access_reason(200, {}, html, base_url):
@@ -18790,6 +18889,12 @@ def _web_product_page_metadata(html, base_url):
         data['image_candidates'] = _web_offer_image_candidates({'images': pictures})[:8]
         data['image'] = next(iter(data['image_candidates']), '')
         if data['image']: data['is_product'] = True
+    if page_ok and data['is_product']:
+        availability = _web_scoped_availability(soup, base_url, data.get('availability') or '')
+        if availability is None:
+            data.update(availability='', availability_ambiguous=True)
+        elif availability:
+            data['availability'] = availability
     return data
 
 _WEB_PRICE_ELEMENT_EXCLUDE = re.compile(
@@ -19213,7 +19318,7 @@ def _web_fetch_page_snapshot(url, country=''):
             data['currency'] = str(parsed_data.get('currency') or '').upper().strip()
             data['price_source'] = parsed_data.get('price_source') or ''
             data['price_confidence'] = parsed_data.get('price_confidence') or ('high' if data['price'] else '')
-            data['availability'] = parsed_data.get('availability') or metadata.get('availability') or ''
+            data['availability'] = '' if metadata.get('availability_ambiguous') else (metadata.get('availability') or parsed_data.get('availability') or '')
             if data['price']:
                 data['is_product'] = True
             data['image'] = data['product_image'] or parsed_data.get('image_url') or ''
@@ -19442,6 +19547,10 @@ WEB_LIVE_PRICE_WAIT = max(2.0, min(25.0, float(os.environ.get('WEB_LIVE_PRICE_WA
 WEB_LIVE_PRICE_CACHE_TTL = max(15, min(900, int(os.environ.get('WEB_LIVE_PRICE_CACHE_TTL', '300'))))
 WEB_LIVE_PRICE_POOL = ThreadPoolExecutor(max_workers=WEB_LIVE_PRICE_WORKERS, thread_name_prefix='price')
 _WEB_PAGE_FLIGHTS = {}
+WEB_STOCK_REFRESH_MAX = max(0, min(24, int(os.environ.get('WEB_STOCK_REFRESH_MAX', '12'))))
+WEB_STOCK_CACHE_TTL = max(15, min(300, int(os.environ.get('WEB_STOCK_CACHE_TTL', '120'))))
+_WEB_STOCK_POOL = ThreadPoolExecutor(max_workers=3, thread_name_prefix='stock')
+_WEB_STOCK_SLOTS = threading.BoundedSemaphore(3)
 WEB_LIVE_PAGE_IMAGES = env_bool('WEB_LIVE_PAGE_IMAGES', True)
 _WEB_PRICE_FIELDS = ('price', 'price_amount', 'currency', 'price_source', 'price_source_url',
                      'price_checked_at', 'price_verified', 'price_pending', 'price_status',
@@ -19602,7 +19711,7 @@ def _web_extract_exact_page_price(html, url):
         return {}
     if prices:
         if len({p[0] for p in prices}) == 1:
-            return result(prices[0][0], 'product_jsonld', prices[0][1])
+            return result(prices[0][0], 'product_jsonld', prices[0][1] if len({str(p[1]) for p in prices}) == 1 else '')
         # Multiple variants/offers with different prices need an explicit selection.
         return {}
     # Product-scoped OpenGraph metadata; never og:price guesses on category pages.
@@ -19673,7 +19782,7 @@ def _web_verified_page_snapshot(url, country=''):
     now = time.monotonic()
     with WEB_PRODUCT_VERIFY_LOCK:
         cached = WEB_PRODUCT_VERIFY_CACHE.get(key)
-        if cached and now - cached['ts'] < (WEB_LIVE_PRICE_CACHE_TTL if cached['data'].get('price') else 15):
+        if cached and now - cached['ts'] < _web_snapshot_ttl(cached['data']):
             return dict(cached['data'])
         flight = _WEB_PAGE_FLIGHTS.get(key)
         owner = flight is None
@@ -19866,7 +19975,7 @@ def _web_indexed_offer_money(item):
         joined = ' '.join(str(x) for x in extensions)
         if any(detected.get(k) is not None for k in ('price_from', 'price_to')) or re.search(r'\b(from|starting|up to)\b|ابتداء|\d\s*[-–—]\s*[$€£¥]?\s*\d', joined, re.I):
             continue
-        candidates.append((detected.get('price'), detected.get('currency') or ''))
+        displayed_price = False
         for extension in extensions:
             for piece in re.split(r'[|·]', str(extension)):
                 piece = piece.strip()
@@ -19874,7 +19983,14 @@ def _web_indexed_offer_money(item):
                 # counts sit next to prices in snippets and are never the price.
                 if _WEB_NOT_A_PRICE_PIECE.search(piece):
                     continue
-                candidates.append((piece, ''))
+                raw = _normalize_price_chars(piece)
+                if (any(pattern.search(raw) for pattern in _WEB_PRICE_PATS)
+                        or (detected.get('currency') and re.fullmatch(_WEB_PRICE_NUM, raw))):
+                    displayed_price = True
+                    candidates.append((piece, detected.get('currency') or ''))
+        # Non-price extensions (stock/delivery) do not discard a structured price.
+        if not displayed_price:
+            candidates.append((detected.get('price'), detected.get('currency') or ''))
     for value, currency in candidates:
         if value in (None, '') or isinstance(value, (dict, list, bool)):
             continue
@@ -20339,6 +20455,9 @@ async def _web_with_live_prices(source, lang, country, allow_paid=True, wait_sec
     token = _WEB_LIVE_PRICE_ACTIVE.set(True)
     market = _web_market(country)
     rows, facts, jobs, attempted = {}, {}, {}, set()
+    stock_jobs = {}
+    stock_started = 0
+    stock_gate = asyncio.Semaphore(3)
     shared = {}
     rejected = set()
     recovery_attempted, recovery_calls = set(), 0
@@ -20361,11 +20480,36 @@ async def _web_with_live_prices(source, lang, country, allow_paid=True, wait_sec
             return None
         async with gate:
             return await asyncio.wrap_future(WEB_LIVE_PRICE_POOL.submit(_web_live_page_image_only, row, dict(market)))
+    async def stock(row):
+        async with stock_gate:
+            if not _WEB_STOCK_SLOTS.acquire(blocking=False):
+                return None  # bounded globally as well as per search
+            def refresh():
+                try:
+                    MARKET_CTX.value = dict(market)
+                    snap = _web_verified_page_snapshot(row.get('url'), row.get('country') or row.get('market_country') or '') or {}
+                    return _web_stock_snapshot_facts(row, snap, market)
+                except Exception:
+                    return None  # optional refresh cannot fail the search
+                finally:
+                    _WEB_STOCK_SLOTS.release()
+            # Do not cancel a queued concurrent future: its finally owns the slot.
+            future = _WEB_STOCK_POOL.submit(refresh)
+            return await asyncio.shield(asyncio.wrap_future(future))
     def absorb(item):
+        nonlocal stock_started
         if (_web_collection_url(item.get('url') or item.get('link')) or item.get('hidden')
                 or _web_identity_offer_key(item) in rejected or not _market_offer_allowed(item, market)):
             return None
         item = dict(item)
+        item.update(_web_cached_stock_facts(item, market))
+        if _card_offer_state(item).get('stock_status') == 'out_of_stock':
+            key = _web_identity_offer_key(item)
+            rejected.add(key)
+            # Return a tombstone when replacing an already emitted card.
+            previous = rows.pop(key, None)
+            facts.pop(key, None)
+            return dict(item, hidden=True, removed_reason='out_of_stock') if previous else None
         if item.get('price') and not _web_confirmable_price(item):
             item.update(price_unconfirmed=str(item['price']),price='',price_amount=None,
                         price_verified=False,price_pending=True,price_status='loading')
@@ -20405,7 +20549,10 @@ async def _web_with_live_prices(source, lang, country, allow_paid=True, wait_sec
         if key not in attempted and _web_is_http_url(merged.get('url') or ''):
             attempted.add(key)
             if has_price and _web_is_http_url(_web_unproxy_image_url(merged.get('image') or '')):
-                pass  # nothing to fetch
+                if (not cooldown and stock_started < WEB_STOCK_REFRESH_MAX
+                        and not merged.get('availability_checked_at')):
+                    stock_started += 1
+                    stock_jobs[asyncio.create_task(stock(dict(merged)))] = key
             elif has_price:
                 jobs[asyncio.create_task(image_only(dict(merged)))] = key
             else:
@@ -20413,6 +20560,13 @@ async def _web_with_live_prices(source, lang, country, allow_paid=True, wait_sec
         return merged
     def update_event(key, data, phase):
         current = rows.get(key) or {}
+        if current and _card_offer_state(data).get('stock_status') == 'out_of_stock':
+            rejected.add(key)
+            rows.pop(key, None)
+            facts.pop(key, None)
+            return _web_stream_event({'event': 'upsert', 'phase': 'stock_removed',
+                'item': dict(current, hidden=True, stock_status='out_of_stock', removed_reason='out_of_stock'),
+                'market': current.get('market')})
         # A Kuwait card priced in rupees is not a Kuwait card: the merchant's own
         # page settled the market. Drop it rather than show a foreign price.
         live_currency = str((data or {}).get('currency') or '').upper()
@@ -20433,7 +20587,7 @@ async def _web_with_live_prices(source, lang, country, allow_paid=True, wait_sec
         access = _web_page_access_fields(data)
         if access:
             facts[key] = dict(facts.get(key) or {}, **access)
-        detail_facts = {k:data[k] for k in _CARD_FACT_FIELDS + ('condition','availability') if k in data}
+        detail_facts = {k:data[k] for k in _CARD_FACT_FIELDS + ('condition','availability','availability_checked_at','availability_source') if k in data}
         if detail_facts:
             facts[key] = dict(facts.get(key) or {}, **detail_facts)
         price_facts = _web_price_facts(data)
@@ -20461,7 +20615,10 @@ async def _web_with_live_prices(source, lang, country, allow_paid=True, wait_sec
                 # into accepted matches just because the time budget elapsed.
                 final_event.update(partial=True, completion_reason='time_budget')
                 break
-            waiting = set(jobs) | set(shared)
+            # Availability refresh never extends an otherwise complete search.
+            if next_event is None and not jobs and not shared:
+                break
+            waiting = set(jobs) | set(shared) | set(stock_jobs)
             if next_event is not None:
                 waiting.add(next_event)
             if finish_by is not None and loop.time() >= finish_by:
@@ -20505,6 +20662,14 @@ async def _web_with_live_prices(source, lang, country, allow_paid=True, wait_sec
                     else:
                         yield _web_stream_event(event)
                         next_event = asyncio.create_task(anext(source))
+            for task in (done | {t for t in stock_jobs if t.done()}) & set(stock_jobs):
+                key = stock_jobs.pop(task)
+                try:
+                    data = task.result()
+                except Exception:
+                    data = None
+                if data and key in rows:
+                    yield update_event(key, data, 'stock_refresh')
             for task in done & set(jobs):
                 key = jobs.pop(task)
                 page_finished.add(key)
@@ -20564,7 +20729,7 @@ async def _web_with_live_prices(source, lang, country, allow_paid=True, wait_sec
                 final_event['partial'] = True
             yield _web_stream_event(_web_live_snapshot(final_event, rows))
     finally:
-        tasks = list(jobs) + list(shared) + ([next_event] if next_event else [])
+        tasks = list(jobs) + list(shared) + list(stock_jobs) + ([next_event] if next_event else [])
         for task in tasks:
             task.cancel()
         if tasks:
@@ -21592,14 +21757,11 @@ def _fast_provider_supports_operators(provider):
     return not (provider == 'serper' and _FAST_PROVIDER_FLAGS.get('serper_no_operators'))
 
 
-def _fast_price_number(value):
-    m = re.search(r'\d[\d,]*(?:\.\d+)?', str(value or ''))
-    if not m:
-        return None
-    try:
-        return float(m.group(0).replace(',', ''))
-    except ValueError:
-        return None
+def _fast_price_number(value, currency=''):
+    # The same parser as the displayed card; never strip decimal commas or
+    # trust a provider's 1000x extracted amount ahead of its original text.
+    amount, code = _web_price_number_and_currency(value, currency)
+    return amount if code in KNOWN_CURRENCY_CODES else None
 
 
 def _fast_currency_code(value):
@@ -21615,7 +21777,7 @@ def _fast_currency_code(value):
 
 def _fast_rich_snippet(price_text, currency=''):
     """A SerpApi-style rich snippet block carrying an indexed price."""
-    amount = _fast_price_number(price_text)
+    amount = _fast_price_number(price_text, currency)
     if amount is None:
         return None
     code = str(currency or '').strip().upper() or _fast_currency_code(price_text)
@@ -21678,9 +21840,9 @@ def _serper_to_serpapi(kind, data):
                 continue
             item = {'position': i + 1, 'title': row['title'], 'link': row['link'], 'source': row.get('source') or '',
                     'price': str(row.get('price') or ''), 'thumbnail': row.get('imageUrl') or ''}
-            for field in ('direct_link','merchant_link','product_link','immersive_product_page_token','serpapi_immersive_product_api','currency','extracted_price','old_price','extracted_old_price'):
+            for field in ('direct_link','merchant_link','product_link','immersive_product_page_token','serpapi_immersive_product_api','currency','extracted_price','old_price','extracted_old_price','availability','in_stock'):
                 if row.get(field) is not None:item[field] = row[field]
-            amount = _fast_price_number(item['price'])
+            amount = _fast_price_number(item['price'], item.get('currency') or '')
             if amount is not None:
                 item['extracted_price'] = amount
             if row.get('delivery'):
