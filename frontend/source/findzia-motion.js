@@ -1,4 +1,4 @@
-/* Findzia 156.7.27 — shared motion for live results, loaded images and navigation.
+/* FINDZIA_MOTION_RELEASE=156.7.38 — Findzia 156.7.38 — shared motion for live results, loaded images and navigation.
  * No router, fetch interception, search delay, or payment lifecycle changes.
  * All content is visible without this enhancement. */
 (function () {
@@ -9,7 +9,7 @@
   const dialogs = new WeakSet(), popovers = new WeakSet(), details = new WeakSet();
   const cards = new WeakSet(), unreadyCards = new WeakSet(), waiting = new Map(), shown = new WeakMap();
   const ease = 'cubic-bezier(.25,0,.4,1)', quick = 'cubic-bezier(.22,1,.36,1)';
-  const timings = Object.freeze({ text: 680, line: 85, image: 280, card: 280, ui: 220, menu: 440, item: 45, close: 160 });
+  const timings = Object.freeze({ text: 680, line: 85, image: 280, card: 280, ui: 220, menu: 520, item: 45, close: 160 });
   const dialogSelector = '.fz-guide, .fz-account, .fz-insights, [data-dark-menu], [data-preferences]';
   const popoverSelector = '[data-sort-menu], [data-view-menu]';
   const imageSelector = '.fz-media-stage, .fza-product-image, .fz-saved-thumb';
@@ -175,7 +175,22 @@
   function openDialog(dialog) {
     cancelWithin(dialog);
     if (reduced()) return;
-    if (dialog.matches('[data-dark-menu]')) {
+    if (dialog.matches('[data-dark-menu]') && dialog.dataset.menuDesign) {
+      const r = dialog.getBoundingClientRect();
+      const candidate = trigger?.getBoundingClientRect();
+      const button = candidate?.width && candidate?.height ? candidate : null;
+      const x = button ? button.left + button.width / 2 - r.left - r.width / 2 : r.width * .34;
+      const y = button ? button.top + button.height / 2 - r.top - r.height / 2 : -r.height * .42;
+      animate(dialog, [
+        { opacity: .15, transform: `translate(${x}px, ${y}px) scale(.12)` },
+        { opacity: 1, transform: 'translate(0px, 0px) scale(1)' }
+      ], { duration: timings.menu, easing: 'cubic-bezier(.22,1,.36,1)' });
+      [...dialog.querySelectorAll('.fza-nav-link')].filter(visible).forEach((item, i) => {
+        animate(item, [{ opacity: 0, translate: '0 5px' }, { opacity: 1, translate: '0 0' }],
+          { duration: 260, delay: 80 + i * timings.item, easing: ease });
+      });
+      reveal(dialog.querySelector('.fza-nav-footer'), 310, 'ui');
+    } else if (dialog.matches('[data-dark-menu]')) {
       const start = menuOrigin(dialog);
       animate(dialog, [{ opacity: .3, clipPath: start }, { opacity: 1, clipPath: 'inset(0px round 16px)' }], { duration: timings.menu, easing: 'cubic-bezier(.22,.65,.35,1)' });
       const items = [...dialog.querySelectorAll('.fza-nav-label, .fza-nav-link, .fz-dark-menu-action:not([hidden]), .fza-nav-footer')].filter(visible);
@@ -332,7 +347,7 @@
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) for (const entry of [...active]) stop(entry.el);
   });
-  window.FindziaMotion = Object.freeze({ version: '156.7.27', timings, results, image, reveal, mount });
+  window.FindziaMotion = Object.freeze({ version: '156.7.38', timings, results, image, reveal, mount });
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot, { once: true });
   else boot();
 })();
