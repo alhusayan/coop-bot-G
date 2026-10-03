@@ -394,7 +394,7 @@ from findzia_billing import CreditMiddleware, install_billing
 app.add_middleware(CreditMiddleware, owner=app)
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization', 'X-Findzia-Request-Id'], max_age=86400)
-BUILD_ID = 'v128.5.42.40-price-stock'
+BUILD_ID = 'v128.5.42.41-price-integrity'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -5615,7 +5615,7 @@ _COLLECTION_JOBS = {}
 def _web_collection_url(value):
     try:
         u = urllib.parse.urlsplit(str(value or ''))
-        host, path = (u.hostname or '').lower(), u.path.lower()
+        host, path = (u.hostname or '').lower(), urllib.parse.unquote(u.path).lower()
         if u.scheme not in ('http', 'https') or not host or path in ('', '/') or u.username or u.password:
             return False
         if _host_matches_any(host, tuple(NON_STORE_HOSTS) + ('google.com', 'bing.com', 'baidu.com', 'gstatic.com', 'googleusercontent.com')):
@@ -5634,7 +5634,7 @@ def _web_collection_url(value):
                          or (_host_matches_any(host, ('macys.com',)) and path.startswith('/shop/'))
                          or (_host_matches_any(host, ('ebay.com',)) and path.startswith('/sch/'))
                          or (_host_matches_any(host, ('farfetch.com',)) and path.endswith('/items.aspx')))
-        return bool(platform_list or re.search(r'/(?:collections?|categor(?:y|ies)|catalog|browse|search(?:_result|_product)?|results|list|c|b|shop-all|all-products)(?:/|\.html?$|$)', path)
+        return bool(platform_list or re.search(r'/(?:product-category|product-tag|collections?|categor(?:y|ies)|catalog|browse|search(?:_result|_product)?|results|list|c|b|shop-all|all-products)(?:/|\.html?$|$)', path)
                     or re.search(r'/(?:men|women|shoes|mules|pyjamas|pajamas)/?$', path)
                     or (path == '/s' and 'k=' in u.query)
                     or re.search(r'/(?:brands?|designers)/[^/]+(?:/[^/]+)?/?$', path))
@@ -18215,6 +18215,11 @@ def _variant_facts_cached(key):
 
 def _web_card_fields(row):
     out=_web_set_result_group(row)
+    if _web_collection_url(out.get('url') or out.get('link')):
+        out.update(hidden=True, removed_reason='collection_page')
+    reason = _web_price_review_reason(out)
+    if reason:
+        _web_hold_price(out, reason)
     out.update(_web_offer_media_fields(row))
     out.pop('image_recovery_url', None)
     out['key_specs']=_card_key_specs(row)
@@ -19551,12 +19556,18 @@ WEB_STOCK_REFRESH_MAX = max(0, min(24, int(os.environ.get('WEB_STOCK_REFRESH_MAX
 WEB_STOCK_CACHE_TTL = max(15, min(300, int(os.environ.get('WEB_STOCK_CACHE_TTL', '120'))))
 _WEB_STOCK_POOL = ThreadPoolExecutor(max_workers=3, thread_name_prefix='stock')
 _WEB_STOCK_SLOTS = threading.BoundedSemaphore(3)
+# A small separate pool keeps uncertain offers from occupying retrieval/image
+# workers. The search stops awaiting each review after 3.5 seconds.
+_WEB_PRICE_REVIEW_POOL = ThreadPoolExecutor(max_workers=3, thread_name_prefix='price-review')
+_WEB_PRICE_REVIEW_SLOTS = threading.BoundedSemaphore(3)
+WEB_PRICE_REVIEW_SECONDS = 3.5
+WEB_PRICE_REVIEW_MAX = 6
 WEB_LIVE_PAGE_IMAGES = env_bool('WEB_LIVE_PAGE_IMAGES', True)
 _WEB_PRICE_FIELDS = ('price', 'price_amount', 'currency', 'price_source', 'price_source_url',
                      'price_checked_at', 'price_verified', 'price_pending', 'price_status',
                      'price_unavailable', 'availability', 'original_price', 'original_currency',
                      'price_estimated', 'price_compare_value', 'price_compare_currency',
-                     'price_confidence', 'price_suspect_value',
+                     'price_confidence', 'price_suspect_value', 'price_integrity_status', 'price_integrity_reason',
                      'price_contract', 'price_display_ready', 'price_display_major',
                      'price_display_minor', 'price_display_currency', 'price_raw','price_raw_currency',
                      'price_kind','price_min','price_max','price_unit',
@@ -20400,7 +20411,7 @@ def _web_price_display_fields(row):
              'price_display_major':'','price_display_minor':'','price_display_currency':'',
              'price_display_high_major':'','price_display_high_minor':'','price_kind':'exact',
              'price_min':None,'price_max':None,'price_unit':''}
-    if row.get('price_unavailable') or row.get('price_status') in ('suspect','unavailable'):
+    if row.get('price_integrity_status') == 'pending' or row.get('price_unavailable') or row.get('price_status') in ('suspect','unavailable'):
         return blank
     raw = str(row.get('price') or '').strip()
     quote = _web_price_quote(raw,str(row.get('currency') or ''),str(row.get('country') or ''))
@@ -20449,6 +20460,84 @@ def _web_confirmable_price(row):
     return bool(observed and (not bound or _web_price_url_key(bound)==_web_price_url_key(row.get('url'))))
 
 
+def _web_observed_currency(value):
+    """Unambiguous evidence only; searching Kuwait never supplies the currency."""
+    text = str(value or '')
+    codes = set(re.findall(r'(?<![A-Za-z])([A-Z]{3})(?![A-Za-z])', text.upper())) & KNOWN_CURRENCY_CODES
+    codes |= _arabic_explicit_currency_codes(text)
+    codes |= _arabic_short_currency_codes(text, lenient=True)
+    return next(iter(codes)) if len(codes) == 1 else ''
+
+
+def _web_price_source_currency(row):
+    raw = row.get('original_price') or row.get('price_raw') or str(row.get('price') or '').split(' (', 1)[0]
+    return (_web_observed_currency(raw) or str(row.get('original_currency') or
+            row.get('price_raw_currency') or row.get('currency') or '').upper())
+
+
+def _web_price_page_verified(row):
+    # Old rebasing code marked indexed prices as verified. Require page evidence
+    # bound to this exact product, rather than trusting that boolean alone.
+    return bool(row.get('price_verified') and row.get('price_source') in {
+        'product_page','product_jsonld','jsonld','product_meta','product_microdata',
+        'microdata','shopify_product_json','page_dom','page_json','regional_page_dom',
+        'jd_price_api','amazon_price_block','next_data'} and row.get('price_source_url')
+        and _web_price_url_key(row['price_source_url']) == _web_price_url_key(row.get('url')))
+
+
+def _web_local_currency_conflict(row, market):
+    local = str((market or {}).get('country') or row.get('country') or '').lower()
+    if not local or not (row.get('market') == 'local' or row.get('market_scope') == 'local' or row.get('market_rank') == 0):
+        return False
+    currency = _web_price_source_currency(row)
+    if not currency or currency in set(country_currency_codes(local)):
+        return False
+    # A real regional storefront may offer USD checkout. Search targeting and
+    # converted display currency alone do not prove a local storefront.
+    evidence = _merchant_url_market(row.get('url') or row.get('link'))
+    return not (evidence.get('country') == local or _selected_catalog_evidence(row, local))
+
+
+def _web_price_review_reason(row, market=None):
+    if row.get('price_integrity_status') == 'pending' and row.get('price_integrity_reason') and not _web_price_page_verified(row):
+        return row['price_integrity_reason']
+    if not _web_price_page_verified(row) and (row.get('price_status') == 'suspect' or row.get('price_suspect_value') is not None):
+        return 'price_outlier'
+    if not row.get('price'):
+        return ''
+    raw = row.get('original_price') or row.get('price_raw') or str(row['price']).split(' (', 1)[0]
+    observed = _web_observed_currency(raw)
+    claimed = str(row.get('original_currency') or row.get('price_raw_currency') or row.get('currency') or '').upper()
+    if observed and claimed and observed != claimed:
+        return 'currency_conflict'
+    if _web_local_currency_conflict(row, market or {'country': row.get('country')}):
+        return 'foreign_currency'
+    if _web_price_page_verified(row):
+        return ''
+    quote = _web_price_quote(raw, observed or claimed, str(row.get('country') or ''))
+    if not quote or quote['kind'] != 'exact':
+        return ''
+    if row.get('price_status') == 'suspect' or row.get('price_suspect_value') is not None:
+        return 'price_outlier'
+    # A token price on a full device is often a listing placeholder, not a sale.
+    # Accessories and genuinely cheap everyday goods have no price floor.
+    title = str(row.get('raw_title') or row.get('title') or '').lower()
+    device = re.search(r'\b(?:monitor|television|laptop|smartphone|iphone|macbook|screen|oled|qled)\b|شاش[ةه]|شاشات|لابتوب|ايفون|آيفون|تلفزيون', title)
+    accessory = re.search(r'\b(?:protector|protective|film|cable|case|cover|stand|mount|adapter|repair|replacement|broken|spare|parts)\b|واقي|حماية|حمايه|وصلة|وصله|كيبل|حامل|غطاء|جراب|تصليح|قطع غيار', title)
+    if device and not accessory and 0 < quote['min'] <= 1:
+        return 'placeholder_price'
+    return ''
+
+
+def _web_hold_price(row, reason):
+    row.update(price_unconfirmed=row.get('price_unconfirmed') or row.get('price') or '',
+        price='', price_amount=None, price_pending=True, price_unavailable=False,
+        price_verified=False, price_status='loading', price_display_ready=False,
+        price_display_major='', price_display_minor='', price_compare_value=None,
+        price_integrity_status='pending', price_integrity_reason=reason)
+    return row
+
+
 async def _web_with_live_prices(source, lang, country, allow_paid=True, wait_seconds=None, max_seconds=60):
     """Deliver rows immediately; interleave prices during retrieval AND AI review."""
     tail_wait = WEB_LIVE_PRICE_WAIT if wait_seconds is None else max(.5, float(wait_seconds))
@@ -20456,6 +20545,7 @@ async def _web_with_live_prices(source, lang, country, allow_paid=True, wait_sec
     market = _web_market(country)
     rows, facts, jobs, attempted = {}, {}, {}, set()
     stock_jobs = {}
+    review_jobs, review_attempted, review_pending = {}, set(), set()
     stock_started = 0
     stock_gate = asyncio.Semaphore(3)
     shared = {}
@@ -20496,6 +20586,35 @@ async def _web_with_live_prices(source, lang, country, allow_paid=True, wait_sec
             # Do not cancel a queued concurrent future: its finally owns the slot.
             future = _WEB_STOCK_POOL.submit(refresh)
             return await asyncio.shield(asyncio.wrap_future(future))
+    async def review(row):
+        if not _WEB_PRICE_REVIEW_SLOTS.acquire(blocking=False):
+            return None
+        def check():
+            try:
+                return _web_live_page_price(row, dict(market))
+            except Exception:
+                return None
+            finally:
+                _WEB_PRICE_REVIEW_SLOTS.release()
+        try:
+            future = _WEB_PRICE_REVIEW_POOL.submit(check)
+        except Exception:
+            _WEB_PRICE_REVIEW_SLOTS.release()
+            return None
+        try:
+            # Shield the concurrent worker: its finally must release its slot,
+            # even after the browser leaves or our short await budget expires.
+            return await asyncio.wait_for(asyncio.shield(asyncio.wrap_future(future)), WEB_PRICE_REVIEW_SECONDS)
+        except Exception:
+            return None
+    def hold_for_review(key, row, reason):
+        candidate = dict(row)
+        review_pending.add(key)
+        _web_hold_price(row, reason)
+        if (key not in review_attempted and len(review_attempted) < WEB_PRICE_REVIEW_MAX
+                and not _web_merchant_cooldown(row.get('url') or '')):
+            review_attempted.add(key)
+            review_jobs[asyncio.create_task(review(candidate))] = key
     def absorb(item):
         nonlocal stock_started
         if (_web_collection_url(item.get('url') or item.get('link')) or item.get('hidden')
@@ -20527,8 +20646,17 @@ async def _web_with_live_prices(source, lang, country, allow_paid=True, wait_sec
         if not _web_row_has_numeric_price(merged) and previous_price:
             merged.update(previous_price)
         if key in facts:
+            if _web_price_page_verified(item) and not _web_price_page_verified(dict(merged, **facts[key])):
+                facts[key].update(_web_price_facts(item))
             merged.update(facts[key])
             merged.update(_web_merge_offer_images(merged, image_fields))
+        reason = _web_price_review_reason(merged, market)
+        if not reason and _web_price_page_verified(merged):
+            review_pending.discard(key)
+            if merged.get('price_integrity_status') == 'pending':
+                merged.update(price_integrity_status='verified', price_integrity_reason='')
+        if key in review_pending or reason:
+            hold_for_review(key, merged, reason or merged.get('price_integrity_reason') or 'price_outlier')
         has_price = _web_row_has_numeric_price(merged)
         if has_price:
             merged['price_pending'] = False
@@ -20546,7 +20674,7 @@ async def _web_with_live_prices(source, lang, country, allow_paid=True, wait_sec
             page_finished.add(key)
         if not has_price or not _web_offer_image_candidates(merged):
             missing_since.setdefault(key, loop.time())
-        if key not in attempted and _web_is_http_url(merged.get('url') or ''):
+        if key not in review_pending and key not in attempted and _web_is_http_url(merged.get('url') or ''):
             attempted.add(key)
             if has_price and _web_is_http_url(_web_unproxy_image_url(merged.get('image') or '')):
                 if (not cooldown and stock_started < WEB_STOCK_REFRESH_MAX
@@ -20567,15 +20695,11 @@ async def _web_with_live_prices(source, lang, country, allow_paid=True, wait_sec
             return _web_stream_event({'event': 'upsert', 'phase': 'stock_removed',
                 'item': dict(current, hidden=True, stock_status='out_of_stock', removed_reason='out_of_stock'),
                 'market': current.get('market')})
-        # A Kuwait card priced in rupees is not a Kuwait card: the merchant's own
-        # page settled the market. Drop it rather than show a foreign price.
-        live_currency = str((data or {}).get('currency') or '').upper()
-        if (current and live_currency and str(current.get('market') or '') == 'local'
-                and _web_row_has_numeric_price(dict(current, **_web_price_facts(data)))):
-            cc = str(current.get('country') or (market or {}).get('country') or '').lower()
-            if (cc and live_currency not in set(country_currency_codes(cc))
-                    and not _selected_catalog_evidence(current, cc)
-                    and not _fz_regional_price_store(current.get('url'))):
+        checked = dict(current, **_web_price_facts(data))
+        live_currency = _web_price_source_currency(checked)
+        if current and _web_local_currency_conflict(checked, market) and _web_row_has_numeric_price(checked):
+            cc = str((market or {}).get('country') or current.get('country') or '').lower()
+            if phase in ('live_page_price', 'stock_refresh', 'price_review'):
                 rejected.add(key)
                 rows.pop(key, None)
                 facts.pop(key, None)
@@ -20594,6 +20718,11 @@ async def _web_with_live_prices(source, lang, country, allow_paid=True, wait_sec
         if _fz_regional_price_store(current.get('url')) and price_facts.get('price') and not _web_confirmable_price(dict(current, **price_facts)):
             price_facts = {}
         # A late indexed response cannot replace a verified/live price.
+        if key in review_pending and _web_price_page_verified(checked) and not _web_price_review_reason(checked, market):
+            review_pending.discard(key)
+            price_facts.update(price_integrity_status='verified', price_integrity_reason='')
+        if key in review_pending and phase != 'price_review':
+            price_facts = {}
         if price_facts and not (phase == 'live_index_price' and _web_row_has_numeric_price(current)):
             facts[key] = dict(facts.get(key) or {}, **price_facts)
         page_image = str((data or {}).get('page_image') or '').strip()
@@ -20603,6 +20732,9 @@ async def _web_with_live_prices(source, lang, country, allow_paid=True, wait_sec
             if page_image:
                 facts[key]['image_source'] = data.get('image_source') or 'product_page'
         rows[key] = dict(current, **(facts.get(key) or {}))
+        reason = _web_price_review_reason(rows[key], market)
+        if reason and phase not in ('price_review', 'price_unavailable'):
+            hold_for_review(key, rows[key], reason)
         rows[key].update(_web_price_display_fields(rows[key]))
         return _web_stream_event({'event': 'upsert', 'phase': phase, 'item': rows[key],
                                   'market': rows[key].get('market'),
@@ -20616,9 +20748,9 @@ async def _web_with_live_prices(source, lang, country, allow_paid=True, wait_sec
                 final_event.update(partial=True, completion_reason='time_budget')
                 break
             # Availability refresh never extends an otherwise complete search.
-            if next_event is None and not jobs and not shared:
+            if next_event is None and not jobs and not shared and not review_jobs:
                 break
-            waiting = set(jobs) | set(shared) | set(stock_jobs)
+            waiting = set(jobs) | set(shared) | set(stock_jobs) | set(review_jobs)
             if next_event is not None:
                 waiting.add(next_event)
             if finish_by is not None and loop.time() >= finish_by:
@@ -20651,9 +20783,11 @@ async def _web_with_live_prices(source, lang, country, allow_paid=True, wait_sec
                             next_event = asyncio.create_task(anext(source))
                             continue
                     if isinstance(event.get('results'), list):
-                        for item in event['results']:
-                            if isinstance(item, dict):
-                                absorb(item)
+                        candidates = {_web_identity_offer_key(item): dict(item)
+                                      for item in event['results'] if isinstance(item, dict)}
+                        _web_flag_price_outliers(candidates)
+                        for item in candidates.values():
+                            absorb(item)
                         event = _web_live_snapshot(event, rows)
                     if kind == 'done':
                         final_event = event
@@ -20662,6 +20796,25 @@ async def _web_with_live_prices(source, lang, country, allow_paid=True, wait_sec
                     else:
                         yield _web_stream_event(event)
                         next_event = asyncio.create_task(anext(source))
+            for task in (done | {t for t in review_jobs if t.done()}) & set(review_jobs):
+                key = review_jobs.pop(task)
+                try:
+                    data = task.result()
+                except Exception:
+                    data = None
+                if key not in rows or key not in review_pending:
+                    continue
+                candidate = dict(rows[key], **(data or {}))
+                if data and (_web_price_page_verified(candidate) or _card_offer_state(data).get('stock_status') == 'out_of_stock'):
+                    # Release only an actual page price, never an indexed retry.
+                    review_pending.discard(key)
+                    data = dict(data, price_integrity_status='verified', price_integrity_reason='')
+                    yield update_event(key, data, 'price_review')
+                else:
+                    # No price is safer than a fabricated local one. This hold
+                    # survives subsequent provider snapshots for this search.
+                    rows[key].update(price_pending=False, price_unavailable=True, price_status='unavailable')
+                    yield _web_stream_event({'event':'upsert','phase':'price_review_unavailable','item':rows[key]})
             for task in (done | {t for t in stock_jobs if t.done()}) & set(stock_jobs):
                 key = stock_jobs.pop(task)
                 try:
@@ -20682,7 +20835,7 @@ async def _web_with_live_prices(source, lang, country, allow_paid=True, wait_sec
                     yield update_event(key, data, 'live_page_price')
             # Hedge during retrieval, not after it. Coalesce listings into the
             # existing bounded batch budget; all normal API rate guards still apply.
-            eligible = {k: r for k, r in rows.items() if k not in recovery_attempted
+            eligible = {k: r for k, r in rows.items() if k not in recovery_attempted and k not in review_pending
                         and (not _web_row_has_numeric_price(r) or not _web_offer_image_candidates(r))
                         and (k in page_finished or loop.time() - missing_since.get(k, loop.time()) >= .75
                              or next_event is None)}
@@ -20729,7 +20882,7 @@ async def _web_with_live_prices(source, lang, country, allow_paid=True, wait_sec
                 final_event['partial'] = True
             yield _web_stream_event(_web_live_snapshot(final_event, rows))
     finally:
-        tasks = list(jobs) + list(shared) + list(stock_jobs) + ([next_event] if next_event else [])
+        tasks = list(jobs) + list(shared) + list(stock_jobs) + list(review_jobs) + ([next_event] if next_event else [])
         for task in tasks:
             task.cancel()
         if tasks:
@@ -20884,9 +21037,11 @@ async def _web_with_local_discovery(source, lang, country):
 
 
 async def _web_complete_result_prices(result, lang, country, discover_local=False):
-    if result.get('source') == 'google_web_products' and result.get('offers_ready'):
+    needs_review = any(_web_price_review_reason(row, _web_market(country))
+                       for row in (result.get('results') or []) if isinstance(row, dict))
+    if result.get('source') == 'google_web_products' and result.get('offers_ready') and not needs_review:
         return _web_card_payload(result)
-    if result.get('provider_passthrough') and result.get('source') == 'google_shopping_copy':
+    if result.get('provider_passthrough') and result.get('source') == 'google_shopping_copy' and not needs_review:
         return _web_card_payload(result)
     if not isinstance(result.get('results'), list):
         return _web_card_payload(result)

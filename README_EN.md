@@ -1,122 +1,86 @@
-# Findzia 156.7.35 — Manage subscription inside Findzia
+# Findzia 156.7.39 — search transition, expanding composer and price integrity
 
-This patch replaces the **Manage subscription** redirect with a native Findzia screen. Subscription and payment data come from Paddle through your authenticated Findzia API.
+This is a replacement-file update for the existing Findzia repository. It includes the seven-item main menu from 156.7.38. Frontend release: **156.7.39**. API build: **v128.5.42.41-price-integrity**.
 
-Apply it to the existing Findzia project with the 156.7.34 frontend. This is a patch, not a replacement repository. Keep the other project files.
+## What changed
 
-## What customers can do
+### A smoother first search
 
-- See their plan, status, start date, monthly search allowance and remaining searches.
-- See the next payment date, amount, products, discount and tax breakdown.
-- Browse Paddle payments, including one-time packs and subscription renewals, with older-payment pagination.
-- Open payment details, billing information and available payment-method details.
-- Download an available invoice PDF and correct eligible invoice details.
-- Cancel renewal at the end of the current billing period, with an explicit confirmation.
-- Undo a scheduled cancellation before it takes effect, when Paddle permits it.
-- Update the payment method using Paddle's secure inline checkout inside the Findzia screen.
+The home form used to blur (and collapse) its editor before switching screens. The next step immediately hid the homepage and animated three separate result-header elements with blur and staggered delays. This exposed two layout changes.
 
-The interface follows Findzia's light/dark appearance and supports English and Arabic, including right-to-left layout. Amounts, currencies and taxes are read from Paddle; they are not hardcoded from the screenshots.
+The home editor now stays intact until the page transition owns the switch. Supported browsers capture the outgoing screen and crossfade once, with no moving/scaling search controls or blurred fixed headers. Keyboard resizing and older browsers use a short coordinated fade. The API request starts independently of the animation; it does not wait for products, fonts or animation completion. Reduced-motion preferences switch immediately. A quick return home cancels the previous transition.
 
-## Files to install
+### A composer that opens on focus
 
-There are **8 application files**. Preserve these exact paths:
+Tapping or clicking the text area opens it immediately, including an empty field or a short query. It grows as more lines are typed, up to a bounded height, then scrolls internally. A separate hidden measuring element avoids repeatedly collapsing the real editor to measure it. The results header spacer follows the editor height. Action buttons stay below the expanded text. When focus leaves, the field collapses to a one-line preview; the full query remains intact. The clear button still removes text and keeps an attached photo.
 
-| Railway service | Repository path | Action |
+### Product pages, original currencies and suspicious prices
+
+The reported Kolshzin URL is a WooCommerce product category, not one monitor offer. The backend and frontend now reject this route type, including encoded paths and pagination. A parent category price or store logo cannot become an individual product card.
+
+Currency validation uses the merchant's original currency, even when a separate display amount has been converted. An Iraqi-dinar offer without evidence of a Kuwait storefront cannot be admitted as a local Kuwait offer. Explicit currency conflicts, token prices on complete devices, and detected outliers are held for verification. Cheap everyday goods and accessories have no general minimum-price rule.
+
+Only the suspect offer waits. Normal offers continue streaming. Verification reuses fresh page evidence when available; otherwise it uses a separate pool with at most three active reviews, at most six attempted reviews per search, and a 3.5-second await budget per review. A confirmed product-page price can replace the suspect amount. A blocked page, timeout or missing evidence leaves that offer hidden. Late indexed duplicates cannot restore the rejected amount. Batch outliers are checked before that batch is published.
+
+These checks detect evidence conflicts and known anomaly patterns; they cannot guarantee that every merchant's published price is accurate. No guessed price or invented currency is used to repair an offer.
+
+## Replace these 11 application files
+
+Paths are relative to the existing repository root (the level containing `main.py` and `frontend`).
+
+| File in this ZIP | Replace at this repository path | Railway service |
 | --- | --- | --- |
-| API | `findzia_paddle.py` | Replace |
-| API | `findzia_subscription_manager.py` | Add — new file |
-| Findzia Web | `frontend/source/findzia-home.liquid` | Replace |
-| Findzia Web | `frontend/source/findzia-shell.js` | Replace |
-| Findzia Web | `frontend/source/findzia-billing.js` | Replace |
-| Findzia Web | `frontend/source/findzia-subscriptions.js` | Add — new file |
-| Findzia Web | `frontend/scripts/build.mjs` | Replace |
-| Findzia Web | `frontend/package.json` | Replace |
+| `main.py` | `main.py` | API |
+| `frontend/package.json` | `frontend/package.json` | Findzia Web |
+| `frontend/scripts/build.mjs` | `frontend/scripts/build.mjs` | Findzia Web |
+| `frontend/source/findzia-home.liquid` | `frontend/source/findzia-home.liquid` | Findzia Web |
+| `frontend/source/findzia-shell.js` | `frontend/source/findzia-shell.js` | Findzia Web |
+| `frontend/source/findzia-account.js` | `frontend/source/findzia-account.js` | Findzia Web |
+| `frontend/source/findzia-billing.js` | `frontend/source/findzia-billing.js` | Findzia Web |
+| `frontend/source/findzia-subscriptions.js` | `frontend/source/findzia-subscriptions.js` | Findzia Web |
+| `frontend/source/findzia-filters.js` | `frontend/source/findzia-filters.js` | Findzia Web |
+| `frontend/source/findzia-motion.js` | `frontend/source/findzia-motion.js` | Findzia Web |
+| `frontend/source/findzia-motion.css` | `frontend/source/findzia-motion.css` | Findzia Web |
 
-The test files included under `tests/` and `frontend/tests/` are for verification. They are not additional production services.
+The release marker in every listed frontend source matches the build. Upload all ten frontend files together, including those changed only for the release marker. The build rejects a mixed upload before replacing the existing built site.
 
-### GitHub and Railway steps
+## Upload and deploy
 
 1. Extract the ZIP on your computer.
-2. In the existing GitHub repository, upload the two API Python files to the repository root, beside the current `findzia_paddle.py`. Commit them together. Let the **API** service deploy successfully.
-3. Upload the frontend files into their matching folders. In GitHub, open `frontend/source` before uploading the four source files; open `frontend/scripts` for `build.mjs`; put `package.json` directly in `frontend`. Commit these six frontend files together.
-4. Deploy **Findzia Web**, keeping its Root Directory as `/frontend`. Its existing Dockerfile runs the updated build script automatically.
-5. Open `https://findzia.com/healthz`. The `version` must be `156.7.35`, and `sourceReleases.home`, `shell`, `billing` and `subscriptions` must all be `156.7.35`.
-6. Reload Findzia, sign in, then open **Account → Subscription → Manage subscription**. Compare the plan, next payment and payment history with the corresponding Paddle account.
+2. Open the existing repository at its root. Replace `main.py` at the root. Replace the contents supplied inside `frontend` at their matching paths. If using GitHub's file-upload screen, drag the extracted `main.py` file and `frontend` folder from the ZIP root, and review the paths before committing.
+3. Confirm that the changed application files match the 11 paths above. Do not create `frontend/frontend`, and do not place the JavaScript files beside root `main.py`.
+4. Commit the files together. Suggested message: `Fix search transition, focused composer and price integrity (156.7.39)`.
+5. Let Railway deploy both API and Findzia Web from that commit. If one service does not start a deployment, redeploy that service. Findzia Web continues using its existing `/frontend` root directory.
+6. Open `https://findzia.com/healthz`. `version` and all eight `sourceReleases` entries should be `156.7.39`.
+7. Open `https://api.findzia.com/api/health`. `build` should be `v128.5.42.41-price-integrity`.
+8. Reload Findzia after both deployments complete, then try a fresh first search on your iPhone.
 
-If the frontend is in a separate repository, its root already represents `frontend`: upload `source/...`, `scripts/build.mjs` and `package.json` there, and keep that service's Root Directory as `/`.
+No environment-variable changes are required. Keep existing secrets, payment configuration, database and volume settings. The Apple Pay verification file is unchanged: 9094 bytes, SHA-256 `c15558d3e155e2031ef39b32775050c283b545d8575643181af3c3b9f03d46a3`.
 
-Upload the extracted files, not the ZIP. Do not create a second nested `frontend/frontend` folder. The build deliberately rejects mixed versions of the six frontend application files.
+## Quick acceptance check
 
-## Configuration
+- On a fresh homepage, tap the empty search field. It should open smoothly before you type. Try a short word, multiple lines and clearing the text.
+- Search once from the homepage with the keyboard open. The editor should no longer collapse separately before the page changes.
+- On results, tap the field again. Its buttons should remain below the text, and the camera/results should move with the header rather than being covered.
+- Search for `ASUS screen` in Kuwait. A product-category card such as the reported Kolshzin page must not appear as a 1 KWD product. Actual available offers vary by provider and merchant.
+- Test photo-only search, then add words manually or through the assistant. Only the added-word flow should use text refinement; clearing words should retain the photo.
 
-The patch uses the existing Paddle environment, API key, client token and webhook configuration in the **API service**. Keep payment secrets out of the frontend service.
+## Validation and limits
 
-No new environment variable is required. In particular, this patch does not require changing `FINDZIA_MYFATOORAH_ENABLED` or the current choice of purchase provider.
+The packaged regression fixtures use mocked merchants, search APIs and payment providers. Chromium checks cover English/light, Arabic/dark, 320px screens and reduced motion, plus cold first navigation under 4x CPU throttling, simulated keyboard resizing, an older-browser fallback and rapid return navigation. Focus height is sampled across animation frames to check that it grows progressively without bouncing. The native iPhone keyboard and real Safari compositor still need the post-deployment acceptance check above; Chromium emulation is not a device test.
 
-The Paddle API key must allow:
+Backend fixtures cover category rejection, Iraqi/Kuwaiti currency conflicts (including converted displays), fresh cached page evidence, valid cheap goods, outlier batches, immediate healthy offers while a suspect is held, bounded workers/timeouts, and late duplicate/snapshot protection. Existing decimal-price and stock fixtures are retained.
 
-- Reading and writing subscriptions, for subscription details and renewal changes.
-- Reading and writing transactions, for payment history, invoices and invoice corrections.
-- Reading customers, addresses and businesses, for expanded billing details.
+For optional developer checks, copy `verification/tests/` into the repository's `tests/` directory and `verification/frontend-tests/` into `frontend/tests/`, then run these commands from the complete repository:
 
-If the screen reports that billing access needs attention, check the existing key's permissions in Paddle. Provider authorization errors are reported as `management_permission_required`; secret values are never returned to the browser.
-
-Existing live customers can manage their subscriptions even if `FINDZIA_PADDLE_LIVE_OPEN=false` temporarily closes new purchases. Sandbox management retains the configured test-email restriction.
-
-## Supported behavior and provider limits
-
-**Payment-method update:** an active subscription uses Paddle's zero-value method-update transaction. It does not create a new Findzia purchase or grant search credits. For an overdue subscription, Paddle may collect the existing overdue transaction; the amount is disclosed before the secure form. Completion is checked on the server, not inferred from a browser event. Card and wallet availability still follows Paddle and the customer's device. Bank or wallet authentication may open its own system flow.
-
-**Cancellation:** the app requests cancellation at the next billing period. It does not issue refunds or cancel an active paid period immediately. Removing a scheduled cancellation resumes the existing renewal schedule. Ended subscriptions cannot be reinstated through this action. Paddle restricts changes for overdue subscriptions and close to the next billing time; the provider remains authoritative.
-
-**Invoices:** the correction form is available only for eligible, unrevised invoices. Paddle permits one revision. Customers can correct names, business/tax information and supported address fields; this flow does not change the email, country, postal code or purchase amount. Adding a valid tax identifier can trigger a tax refund calculated by Paddle. A tax-only refund preserves the purchased search credits. The existing handling of product refunds and chargebacks remains in place.
-
-**Downloads:** invoice PDFs use Paddle's short-lived download URL. Downloading a file may open a browser PDF view; it does not redirect the subscription-management screen to Paddle's portal.
-
-**Account matching:** history is limited to Paddle checkouts and subscriptions already mapped to the signed-in Findzia account. Email alone is never treated as proof of ownership. MyFatoorah purchases are not included in this Paddle history.
-
-## Data and deployment notes
-
-- The new module adds two small tables to the existing account database for action locks and method-update transaction ownership. It does not replace or clear the database.
-- Existing webhook processing remains responsible for credit reconciliation. The UI cannot grant credits by itself.
-- No API `main.py` change is needed. `install_paddle()` registers the new management routes.
-- The 156.7.34 photo/text search code is preserved. `findzia-shell.js` changes only its release marker so the frontend build stays consistent.
-- The Apple Pay verification file, DNS, frontend server, account module and search-provider configuration are not replaced by this patch.
-
-## Verification
-
-The update was tested locally with fake Paddle responses and disposable SQLite databases. No live payment, cancellation, invoice revision or customer-account change was performed.
-
-Passed checks include 22 subscription-management tests, 17 applicable checkout regression tests, 32 frontend/build tests, English/light and Arabic/dark mobile management flows, and the existing mobile photo-refinement flows. See `TEST_REPORT.txt` for scope and limits.
-
-After applying the patch to the full repository, the included API tests can be run with:
-
-```bash
-python3 -m unittest discover -s tests -p test_subscription_manager.py -v
-python3 -m unittest discover -s tests -p test_paddle_checkout_regression.py -v
-```
-
-The management tests use the project's existing FastAPI/requests dependencies and `httpx` for the local test client.
-
-Frontend checks:
-
-```bash
+```sh
+python3 -m unittest discover -s tests -p 'test_price_stock_36.py'
+python3 -m unittest discover -s tests -p 'test_price_integrity_39.py'
 cd frontend
 npm run build
 npm test
+node tests/photo-browser.cjs
+node tests/transition-browser.cjs
 ```
 
-The additional browser test requires Playwright and Chromium:
-
-```bash
-FINDZIA_TEST_CHROME=/path/to/chromium node tests/subscriptions-browser.cjs
-```
-
-## Official Paddle references
-
-- [Get subscription details](https://developer.paddle.com/api-reference/subscriptions/get-subscription/)
-- [Update subscription payment details](https://developer.paddle.com/build/subscriptions/update-payment-details/)
-- [Cancel subscriptions](https://developer.paddle.com/build/subscriptions/cancel-subscriptions/)
-- [List transactions](https://developer.paddle.com/api-reference/transactions/list-transactions/)
-- [Download an invoice](https://developer.paddle.com/api-reference/transactions/get-transaction-invoice/)
-- [Revise an invoice](https://developer.paddle.com/api-reference/transactions/revise-transaction/)
+The Python fixtures need Beautiful Soup. Browser checks need Playwright and `FINDZIA_TEST_CHROME` set to a Chromium executable. Browser screenshots use fixture products, not live merchant offers. `verification/`, `README_EN.md` and `SHA256SUMS.txt` are supporting material; they are not additional application replacements. This package has not been pushed or deployed automatically.
