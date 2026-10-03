@@ -5,12 +5,18 @@ import { fileURLToPath } from 'node:url';
 
 const base = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const src = resolve(base, 'source'), dest = resolve(base, 'public');
-const version = '156.7.28', api = 'https://api.findzia.com';
+const version = '156.7.34', api = 'https://api.findzia.com';
 // Preserve the live section scope to avoid unnecessary DOM/storage changes.
 const section = 'template--19963721449543__findzia_home_h4wBLq';
 const expected = 'c15558d3e155e2031ef39b32775050c283b545d8575643181af3c3b9f03d46a3';
 const hash = b => createHash('sha256').update(b).digest('hex');
 const read = p => readFileSync(resolve(src, p));
+const sourceReleases={home:read('findzia-home.liquid').toString().match(/FINDZIA_HOME_RELEASE=([0-9.]+)/)?.[1],shell:read('findzia-shell.js').toString().match(/FINDZIA_SHELL_RELEASE=([0-9.]+)/)?.[1]};
+const packageVersion=JSON.parse(readFileSync(resolve(base,'package.json'),'utf8')).version;
+if(packageVersion!==version)throw Error('Release mismatch: replace frontend/package.json and frontend/scripts/build.mjs together.');
+for(const [key,file] of [['home','findzia-home.liquid'],['shell','findzia-shell.js']]){
+  if(sourceReleases[key]!==version)throw Error('Release mismatch: replace frontend/source/'+file+' with version '+version+'.');
+}
 const routes = {};
 rmSync(dest, {recursive:true, force:true}); mkdirSync(dest, {recursive:true});
 function emit(url, file, bytes, type, immutable=false) {
@@ -66,6 +72,6 @@ emit('/404.html','404.html',page('<main class="legal"><h1>Page not found</h1><p>
 emit('/favicon.svg','favicon.svg','<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="15" fill="#20352a"/><text x="14" y="48" fill="#f7f7f3" font-family="Georgia,serif" font-size="49">F</text><circle cx="49" cy="16" r="4" fill="#ef9d57"/></svg>','svg');
 emit('/robots.txt','robots.txt','User-agent: *\nAllow: /\nDisallow: /healthz\nSitemap: https://findzia.com/sitemap.xml\n','txt');
 emit('/sitemap.xml','sitemap.xml','<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'+['/',...policies.map(([s])=>'/policies/'+s)].map(p=>'<url><loc>https://findzia.com'+p+'</loc></url>').join('')+'</urlset>','xml');
-emit('/healthz','health.json',JSON.stringify({ok:true,service:'findzia-frontend',version}),'json');
+emit('/healthz','health.json',JSON.stringify({ok:true,service:'findzia-frontend',version,sourceReleases}),'json');
 writeFileSync(resolve(dest,'release.json'),JSON.stringify({version,api,section,apple_pay_file_sha256:expected,routes},null,2)+'\n');
 console.log(`Built Findzia ${version}: ${Object.keys(routes).length} routes, original Apple Pay file ${association.length} bytes.`);
