@@ -1,4 +1,4 @@
-/* FINDZIA_BILLING_RELEASE=156.7.39 */
+/* FINDZIA_BILLING_RELEASE=156.7.40 */
 /* Findzia 156.7.20 — resumable checkout, safe plan changes and persistent payment UI. */
 (() => {
   'use strict';
@@ -95,7 +95,7 @@
         const data=await response.json();if(!response.ok||!data.ok)throw Object.assign(Error(data.error||data.detail||'credits_unavailable'),{code:response.status});return data;
       }finally{clearTimeout(timer);}
     }
-    // A limit card sits above the home composer or above the result tools in normal flow.
+    // A limit card sits above the home composer or above the results in normal flow.
     // Existing results stay in place; only a confirmed zero balance shows the purchase card.
     const hint=el('div','fzb-search-notice');hint.id=root.id+'-credit-notice';hint.hidden=true;
     hint.dataset.billingNotice='';hint.setAttribute('role','status');hint.setAttribute('aria-live','polite');hint.setAttribute('aria-atomic','true');
@@ -104,7 +104,7 @@
       const busy=active>0||bridge.context().busy||status?.reserved>0;
       const code=noticeCode||(!busy&&status?.remaining===0?'credits_exhausted':'');
       const home=root.dataset.homeState==='empty',limited=code==='credits_exhausted';
-      const anchor=home?root.querySelector('[data-dark-form]'):limited?root.querySelector('.fz-results-tools'):root.querySelector('[data-search-card]');
+      const anchor=home?root.querySelector('[data-dark-form]'):limited?root.querySelector('[data-results-body]'):root.querySelector('[data-search-card]');
       const before=home||limited;
       if(anchor&&(before?anchor.previousElementSibling:anchor.nextElementSibling)!==hint){if(before)anchor.before(hint);else anchor.after(hint);}
       const key=[code,root.dataset.lang].join('|');hint.dir=rtl()?'rtl':'ltr';
