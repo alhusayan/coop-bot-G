@@ -1,4 +1,4 @@
-/* FINDZIA_BILLING_RELEASE=156.7.36 */
+/* FINDZIA_BILLING_RELEASE=156.7.37 */
 /* Findzia 156.7.20 — resumable checkout, safe plan changes and persistent payment UI. */
 (() => {
   'use strict';
