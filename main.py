@@ -394,7 +394,7 @@ from findzia_billing import CreditMiddleware, install_billing
 app.add_middleware(CreditMiddleware, owner=app)
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization', 'X-Findzia-Request-Id'], max_age=86400)
-BUILD_ID = 'v128.5.42.37-search-hotfix'
+BUILD_ID = 'v128.5.42.38-bing-alternatives'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -2447,6 +2447,11 @@ def _web_result_group(row):
     sources = set(row.get('retrieval_sources') or [])
     origin = row.get('search_origin') or row.get('reference_search_kind')
     if (origin != 'text' and row.get('image_query_result')
+            and 'bing_market_fallback' in sources and 'google_lens' not in sources):
+        # A provider fallback market is retrieval context, not local evidence
+        # or a visual approval. Apply the same pre-publication gate as Serper.
+        return 'alternative'
+    if (origin != 'text' and row.get('image_query_result')
             and not sources.intersection({'google_lens', 'bing_reverse_image'})
             and any(s == 'serper' or any(tag in s for tag in ('serper_', 'brave_search', 'bing_search')) for s in sources)):
         return 'alternative'
@@ -2460,7 +2465,9 @@ def _web_set_result_group(row):
     row = dict(row)
     row['result_group'] = _web_result_group(row)
     if row['result_group'] == 'alternative':
-        row['alternative_reason'] = 'image_description_search'
+        row['alternative_reason'] = ('bing_unsupported_market'
+            if 'bing_market_fallback' in (row.get('retrieval_sources') or [])
+            else 'image_description_search')
     else:
         row.pop('alternative_reason', None)
     return row
@@ -5818,7 +5825,8 @@ def _web_expand_collection_rows(records, *, budget=COLLECTION_WAIT_SECONDS):
             row = dict(child)
             # Children have their own evidence. Lens matched the parent grid,
             # so its exact/visual claims cannot be transferred to each child.
-            sources = [s for s in parent.get('retrieval_sources') or [] if 'serper' in s.lower()]
+            sources = [s for s in parent.get('retrieval_sources') or []
+                       if 'serper' in s.lower() or s in ('bing_search', 'bing_market_fallback')]
             row['retrieval_sources'] = sorted(set(row['retrieval_sources'] + sources))
             if parent.get('image_query_result'):
                 row['image_query_result'] = True
@@ -27874,6 +27882,8 @@ def _lens_consensus_terms(rows, limit=3):
     titles, seen = [], set()
     for row in rows:
         sources = set(row.get('retrieval_sources') or [])
+        if ('bing_market_fallback' in sources and 'google_lens' not in sources):
+            continue
         if sources and not sources.intersection({'google_lens', 'bing_reverse_image'}):
             continue
         url = row.get('link') or row.get('url') or ''

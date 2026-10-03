@@ -1,75 +1,94 @@
-# Findzia Search Hotfix — 156.7.31
+# Findzia Bing Alternatives — 156.7.32
 
-Backend build: `v128.5.42.37-search-hotfix`
+Backend build: `v128.5.42.38-bing-alternatives`
 
-Backend-only update based on 156.7.30. It fixes two verified timing regressions inherited from 156.7.29 and improves Bing diagnostics. The supplied production log stops at the image endpoint's OPTIONS request, so it does not establish the cause of the entire reported image-search stall.
+Backend-only update based on 156.7.31. Unsupported-country Bing photo results now use a valid fallback market and enter **Alternatives only after passing the existing Serper visual-accuracy check**.
 
-## Installation
+## Files to replace
 
-Keep a backup. This ZIP is an update package, not the complete application.
+This is an update package, not the complete application. Keep a backup before replacing files.
 
 | File | Action | Destination |
 | --- | --- | --- |
 | `main.py` | Replace | API repository root |
-| `findzia_independent_search.py` | Replace | Beside main.py |
-| `findzia_search_quality.py` | Compatible copy included; unchanged | Beside main.py |
-| `tests/` | Optional offline regression tests | Repository tests directory |
+| `findzia_independent_search.py` | Replace together with main.py | API repository root |
+| `findzia_search_quality.py` | Unchanged compatible copy included; keep the existing copy | API repository root |
+| `tests/` | Offline regression tests; optional to upload | Repository tests directory |
 | `README_EN.md`, `SHA256SUMS.txt` | Reference only | No runtime upload required |
 
 1. Extract the ZIP.
-2. Open the API repository in GitHub where `main.py` already exists.
-3. Use **Add file → Upload files** to replace `main.py` and `findzia_independent_search.py` together. Keep the quality helper, or upload the included identical copy. Upload the extracted files, not the ZIP or its parent folder.
-4. Deploy the Railway **API service**. Confirm `v128.5.42.37-search-hotfix` in its startup log.
+2. In the API GitHub repository, open the directory containing the current `main.py`.
+3. Use **Add file → Upload files** and upload the extracted `main.py` and `findzia_independent_search.py`. Replace both in the same commit. Do not upload the ZIP or create an extra parent folder.
+4. Deploy the Railway **API service** and confirm `v128.5.42.38-bing-alternatives` in the startup log.
 
-No frontend, payment, authentication or DNS files are changed. Do not put these Python files in `/frontend`.
+No frontend files or new Railway variables are required. Do not put these files in `/frontend`. Payment and account files are not included or changed.
 
-## Changes
+## Behavior
 
-**Primary image download:** Previously the three-second allowance was divided among up to three URLs, leaving about 0.67 seconds of read time for the primary. A valid primary taking 1.1 seconds could fail because alternatives existed. The primary now receives approximately the full configured read allowance (three seconds by default), plus up to 0.65 seconds for connecting. Alternatives use only the remaining shared deadline after failure. Three URLs do not create three full timeouts. The collector wait allowance accommodates the restored download budget. Image validation, size limits, host checks and identity rules remain in place.
+### Supported country versus fallback market
 
-**Ready shopping candidates:** Previously merchant-link recovery could delay returning already-ready candidates by up to 2.5 seconds. Ready candidates now return immediately; local and selected-market coordinators separately consume recovery results under their existing overall deadline. Empty initial batches retain their recovery job. Recovery retains the three-lookups-per-image/market limit, uses a separate four-worker queue, and inherits search cancellation. The coordinator owns merging; late workers do not change already-published result lists.
+Bing text search and reverse-image search have different market contracts. The supplied production log showed successful Saudi text results but rejected `ar-SA` and `ar-KW` reverse-image markets, and rejected the Kuwait text country `kw`.
 
-**Bing:** Non-200 JSON errors now produce a short redacted explanation, with the HTTP status retained. The complete response, query, image URL and configured API keys are not logged. HTML/non-JSON content is omitted. Successful responses report normalized candidate counts. Bing receives a default eight-second request allowance, capped by the caller's remaining search deadline; Brave retains 4.5 seconds. Bing web requests use documented `engine`, `q`, `cc` and `api_key` parameters; the unlisted text-search `count` parameter was removed. This contract cleanup is not a confirmed explanation for the production HTTP 400.
+The adapter now chooses a valid route before making a request:
 
-Existing request caps, cache, singleflight, credit guard and circuit behavior are retained. There are no automatic HTTP retries. Candidates still pass product, market, currency, price and identity checks. Bing shares SerpApi's account/transport; Brave calls its own provider directly. This update does not bypass merchant or provider restrictions.
+| Requested country | Bing text route | Bing reverse-image route |
+| --- | --- | --- |
+| Saudi Arabia | Native `cc=sa` | Fallback `mkt=en-US` |
+| Kuwait | Fallback `mkt=en-US` | Fallback `mkt=en-US` |
+| Germany | Native `cc=de` | Native `mkt=de-DE`, even with an English interface |
+| France | Native `cc=fr` | Native `mkt=fr-FR` |
+| Other countries | Native country when supported; otherwise `en-US` | Native market when listed; otherwise `en-US` |
 
-## Production evidence and limits
+The request never sends both `cc` and `mkt`. UI language is not blindly combined with the country. The original photo and search wording are preserved. A fallback search market is not evidence of merchant location: existing URL, country, currency and price checks still apply. It does not label US merchants as local or convert their prices into local currency.
 
-The supplied 156.7.30 log shows `brave=False`, `bing=True`, a Kuwait Bing text request rejected with HTTP 400, and two US Bing requests timing out. There is no successful Bing response or Bing reverse-image request in that log. The old client discarded the error body, so the reason for HTTP 400 is unknown.
+### Alternatives and accuracy
 
-An enabled provider is not proof of successful retrieval. After deploying, look for `INDEPENDENT SOURCE ... status=returned http=200` and `INDEPENDENT RESULTS ... candidates=...`. If rejection continues, preserve the complete `INDEPENDENT SOURCE ... http=400 ... detail=...` line. These are format examples, not live test results from this update.
+- In photo searches, rows retrieved through a fallback Bing market carry provenance through ingestion, collection expansion, merging and price updates. Their display group is **Alternatives**, even if their merchant is local.
+- They use the **same visual admission function and configured threshold as Serper**. No separate weaker Bing threshold is introduced. The existing default minimum alternative confidence is 70/100, together with reference/candidate visual evidence and category agreement. Conflicting category, function, role or compatibility is rejected.
+- Pending, uncertain, rejected or unavailable visual reviews do not appear in public results or counts. A successful provider response alone does not admit a result.
+- Approval is bound to the listing, title and image. A price-only update preserves approval; a different listing, title or image requires review again.
+- Fallback candidates cannot change the inferred photo identity through majority product titles.
+- Native supported Bing reverse-image results retain their existing grouping. Typed text searches retain their normal grouping. Existing photo-description alternatives from Serper, Brave and Bing text remain alternatives.
+- If Google Lens independently retrieved the same listing, existing duplicate resolution preserves that Lens result's primary grouping. Merely adding a price or a Serper duplicate cannot promote a Bing fallback result into Local.
 
-If image search still stalls, capture the log from **POST `/api/search/image/stream`** through completion/error, including Lens, independent-source and image-fetch messages. An OPTIONS 200 only confirms preflight; it does not confirm that the photo search ran. Earlier text-search and media-recovery responses cannot diagnose that missing image request by themselves.
+## Timing and request limits
 
-## Railway variables
+This release retains the 156.7.31 image-download budget restoration and asynchronous shopping-link recovery. It adds no HTTP retries or extra provider requests. Existing cache, singleflight, cancellation, shared call cap, credit guard and circuit breaker remain in place. Bing's eight-second default allowance is still capped by the active search deadline; Brave retains its separate 4.5-second allowance.
 
-All settings belong in **API service → Variables**, not the frontend service. Keep existing valid keys.
+Keep existing API service keys and settings. Bing uses `SERPAPI_API_KEY`; Brave remains optional through `BRAVE_SEARCH_API_KEY`.
 
-| Variable | Default / action |
-| --- | --- |
-| `SERPAPI_API_KEY` | Existing key used for Bing and existing SerpApi paths. |
-| `BRAVE_SEARCH_API_KEY` | Optional Brave Search API key; empty skips Brave. Obtain it at https://api-dashboard.search.brave.com/ . |
-| `FINDZIA_BING_TIMEOUT_SECONDS` | New default: `8`; range 1–12 seconds, capped by the caller deadline. No manual addition needed for the default. |
-| `FINDZIA_INDEPENDENT_TIMEOUT_SECONDS` | `4.5`; now controls Brave only, range 1–6. |
-| `FINDZIA_INDEPENDENT_SEARCH_ENABLED` | `true`; master switch. |
-| `FINDZIA_BING_ENABLED` | `true`; requires SerpApi key. |
-| `FINDZIA_INDEPENDENT_HEDGE_SECONDS` | `2`; delay before supplementing insufficient pending primary results. |
-| `FINDZIA_INDEPENDENT_MAX_CALLS` | `6`; cap on independent attempts per shared search scope, additional to existing provider budgets. |
-| `FINDZIA_INDEPENDENT_MIN_STORES` | `4`; usable-store target. |
+## Deployment checks
+
+The following are expected log formats, not claims of live test results:
+
+```text
+INDEPENDENT ROUTE engine=bing_reverse_image country=sa provider_market=en-US market_fallback=True
+INDEPENDENT SOURCE engine=bing_reverse_image country=sa status=returned http=200 ...
+INDEPENDENT RESULTS engine=bing_reverse_image country=sa candidates=...
+```
+
+For Saudi text, the route should show `provider_market=sa market_fallback=False`. Candidate counts report retrieval, not the final number of approved cards.
+
+After deployment, search by photo in Kuwait or Saudi Arabia. Eligible Bing fallback results should appear only in Alternatives after review. Google Lens results should retain their existing sections. Repeat with photo details from the assistant and verify that unapproved results do not flash in Local while prices load.
 
 ## Validation
 
-73 offline regression tests passed, plus Python syntax compilation of all three runtime files. New tests reproduce the 1.1-second primary-image case, bound total alternative-image time, exercise immediate and deferred results in both real coordinator functions, retain recovery for empty batches, test cancellation, and verify redacted Bing errors and caller-limited timeouts. Earlier provider, photo-refinement and quality tests are included.
+**89 offline regression tests passed**, plus Python syntax compilation of the three runtime files. Tests cover actual request parameters, country-specific cache isolation, supported-market routing, fallback provenance, the shared Serper admission function, withheld public counts, price/image updates, duplicate arrival order, collection children and photo identity. The earlier image-recovery, photo-refinement, scheduling and search-quality regression tests are included.
 
 ```bash
 python -m unittest discover -s tests -p 'test_*.py' -q
 python -m py_compile main.py findzia_independent_search.py findzia_search_quality.py
 ```
 
-Tests simulate network responses and coordinator dependencies. No paid live provider requests were made. No production files were deployed. Live coverage, search quality and latency have not been verified for this release. Running socket reads may finish after cancellation; canceled results are not published as fresh results.
+Use the application's Python environment, including `requests` and Pillow. Transport responses and coordinator dependencies are simulated; application startup is not run. No paid live provider calls were made and no production deployment was performed. Live provider availability, relevance and latency still need to be checked after deployment.
 
 ## Rollback
 
-Restore backed-up `main.py` and `findzia_independent_search.py` together. Keep the independent module while a main file importing it remains deployed. To temporarily disable Bing only, set `FINDZIA_BING_ENABLED=false` in the API service and redeploy.
+Restore the backed-up `main.py` and `findzia_independent_search.py` together. Keep the independent helper while `main.py` imports it. To temporarily disable Bing only, set `FINDZIA_BING_ENABLED=false` in the API service and redeploy.
 
-Provider references: https://serpapi.com/bing-search-api and https://serpapi.com/bing-reverse-image-api .
+## Provider references
+
+- https://serpapi.com/bing-search-api
+- https://serpapi.com/bing-reverse-image-api
+- https://learn.microsoft.com/en-us/previous-versions/bing/search-apis/bing-web-search/reference/market-codes
+- https://learn.microsoft.com/en-us/previous-versions/bing/search-apis/bing-image-search/reference/market-codes

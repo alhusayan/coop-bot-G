@@ -20,6 +20,32 @@ from weakref import WeakKeyDictionary
 import requests
 
 
+# Markets and country codes are different contracts: SA is a supported text
+# country, but ar-SA is not a reverse-image market. Do not construct mkt by
+# concatenating the UI language and country. SerpApi links to this table:
+# https://learn.microsoft.com/en-us/previous-versions/bing/search-apis/bing-web-search/reference/market-codes
+# Production also confirmed rejection of ar-SA, ar-KW and cc=kw (2026-10-02).
+BING_MARKETS = tuple('''es-AR en-AU de-AT nl-BE fr-BE pt-BR en-CA fr-CA
+es-CL da-DK fi-FI fr-FR de-DE zh-HK en-IN en-ID it-IT ja-JP ko-KR en-MY
+es-MX nl-NL en-NZ no-NO zh-CN pl-PL en-PH ru-RU en-ZA es-ES sv-SE fr-CH
+de-CH zh-TW tr-TR en-GB en-US es-US'''.split())
+BING_TEXT_COUNTRIES = frozenset(m.split('-')[1].lower() for m in BING_MARKETS) | {'sa', 'pt'}
+BING_FALLBACK_SOURCE = 'bing_market_fallback'
+
+
+def bing_route(country, lang, reverse=False):
+    """Choose provider parameters without changing the shopper's market."""
+    country = str(country or '').lower()
+    if not reverse and country in BING_TEXT_COUNTRIES:
+        return {'cc': country}, False
+    candidates = [m for m in BING_MARKETS if m.split('-')[1].lower() == country]
+    language = str(lang or '').lower().split('-')[0]
+    if reverse and candidates:
+        market = next((m for m in candidates if m.split('-')[0] == language), candidates[0])
+        return {'mkt': market}, False
+    return {'mkt': 'en-US'}, True
+
+
 def _number(env, key, default, low, high):
     try:
         return max(low, min(high, float(env.get(key, default))))
@@ -123,7 +149,7 @@ def normalize_brave(data):
     return {'organic_results': rows, 'search_metadata': {'engine': 'brave_search'}}
 
 
-def normalize_bing(data, reverse=False):
+def normalize_bing(data, reverse=False, market_fallback=False):
     rows, seen = [], set()
     records = (_rows(data.get('related_content')) + _rows(data.get('pages_with_this_image'))
                if reverse else _rows(data.get('organic_results')))
@@ -139,12 +165,15 @@ def normalize_bing(data, reverse=False):
             public_url(_obj(raw.get('thumbnail')).get('src'))) if p))
         row = dict(title=title, link=link, source=urlsplit(link).hostname,
                    snippet=_text(raw.get('snippet')), position=len(rows)+1,
-                   thumbnail=next(iter(pictures), ''), image_candidates=pictures)
+                   thumbnail=next(iter(pictures), ''), image_candidates=pictures,
+                   retrieval_sources=['bing_reverse_image' if reverse else 'bing_search'])
+        if market_fallback:
+            row['retrieval_sources'].append(BING_FALLBACK_SOURCE)
         if not reverse and isinstance(raw.get('rich_snippet'), dict):
             row['rich_snippet'] = copy.deepcopy(raw['rich_snippet'])
         if reverse:
             row.update(image=row['thumbnail'], section='visual_matches', exact=False,
-                       retrieval_sources=['bing_reverse_image'], price='',
+                       search_origin='image', image_query_result=True, reference_search_kind='image', price='',
                        price_value=None, currency='', in_stock=None, condition='')
         rows.append(row)
     return {'visual_matches' if reverse else 'organic_results': rows,
@@ -266,8 +295,9 @@ class SearchClient:
             return None
         if not reverse and not str(query or '').strip():
             return None
+        route, market_fallback = bing_route(country, lang, reverse) if engine != 'brave_search' else ({}, False)
         # Include language, market, query/image in deduplication; never store keys.
-        cache_key = hashlib.sha256(json.dumps([engine, query, country, lang, image_url], ensure_ascii=False).encode()).hexdigest()
+        cache_key = hashlib.sha256(json.dumps([engine, query, country, lang, image_url, route], ensure_ascii=False).encode()).hexdigest()
         timeout = self.timeout if engine == 'brave_search' else self.bing_timeout
         deadline = min(deadline, self.clock()+timeout)
         with self.lock:
@@ -313,10 +343,11 @@ class SearchClient:
                 params = dict(engine='bing_reverse_image' if reverse else 'bing', api_key=self.serpapi_key)
                 if reverse:
                     params.update(image_url=image_url, count=35)
-                    # Bing chooses best fit for markets it does not directly serve.
-                    params['mkt'] = ('zh-CN' if country == 'cn' else f'{lang.split("-")[0]}-{country.upper()}')
                 else:
-                    params.update(q=str(query)[:400], cc=country.lower())
+                    params.update(q=str(query)[:400])
+                params.update(route)
+                self.log(f'INDEPENDENT ROUTE engine={engine} country={country} '
+                         f'provider_market={route.get("mkt") or route.get("cc")} market_fallback={market_fallback}')
             self.cost('independent_'+engine)
             began = self.clock()
             raw, status = self._request(engine, params, headers, deadline, cancel)
@@ -327,7 +358,7 @@ class SearchClient:
             self.log(f'INDEPENDENT SOURCE engine={engine} country={country} status={"returned" if success else "unavailable"} http={status} elapsed_ms={int((self.clock()-began)*1000)}{detail}')
             if not success or cancel.is_set() or self.clock() >= deadline:
                 return None
-            data = normalize_brave(raw) if engine == 'brave_search' else normalize_bing(raw, reverse)
+            data = normalize_brave(raw) if engine == 'brave_search' else normalize_bing(raw, reverse, market_fallback)
             self.log(f'INDEPENDENT RESULTS engine={engine} country={country} candidates={len(data.get("visual_matches" if reverse else "organic_results", []))}')
             with self.lock:
                 self.cache[cache_key] = (self.clock()+300., copy.deepcopy(data))
