@@ -1,4 +1,4 @@
-{% comment %} FINDZIA_HOME_RELEASE=156.7.38 {% endcomment %}
+{% comment %} FINDZIA_HOME_RELEASE=156.7.39 {% endcomment %}
 {% comment %}Findzia 156.7.15 · progressive filters + conversational guide from 156.3.0 · combined 156.7.14 payments preserved{% endcomment %}
 
 
@@ -203,23 +203,49 @@ function(e){return new Promise(function(r,t){var a=new FileReader;a.onload=funct
 if("remove"===e.event)At(e.url);else if(("recognition"===e.event&&e.profile)||("query"===e.event&&e.query))fzAcceptPhotoDescription(e);else if("result"===e.event||"upsert"===e.event)Ct(e.item||{});else if("snapshot"===e.event)(e.results||e.all_results||[]).forEach(Ct);else if("done"===e.event)fr(!1),!U.length&&Q&&(Q=!1,Et(ar("no_results"),!1));else if("error"===e.event)throw new Error(e.error||"image_search_failed");}),r===B&&(fr(!1),U.length||X||b.querySelector(".fz-empty")||Et(ar("no_results"),!1),Ke(K));}catch(e){if(r!==B||fzBillingFailure(e))return;if(U.length){fr(false);St();return;}var o=await Nt("/api/search/image",i);if(r!==B)return;fr(!1),function(e){if(at(e),e&&e.provider_passthrough&&!1===e.ok)nt(e.error);else{if(Q=!1,e&&"recommendations"===e.type)return Ot();e&&e.query&&W&&(K=e.query,W.query=e.query,fzAcceptPhotoDescription({event:"query",query:e.query})),Ft(),(Array.isArray(e&&e.results)?e.results:[]).forEach(Ct),U.length||Et(ar("no_results"),!1);}}(o),Ke(K);}}catch(e){if(r!==B||fzBillingFailure(e))return;fr(!1),Et(ar("error_image"),!0);}finally{y&&(y.value="");}}}}(y.files[0]);})),w&&w.addEventListener("click",function(e){var r=e.target.closest("[data-filter]");r&&(O=r.getAttribute("data-filter"),[].slice.call(w.querySelectorAll("button")).forEach(function(e){e.classList.toggle("is-active",e===r);}),St());}),m.forEach(function(e){e.addEventListener("click",function(){dr(e.getAttribute("data-lang-btn"));});}),rr(n),ce="en",ir();}
 function De(){return u+"-"+String(n||t||"XX").toUpperCase();}
 function Be(e){return(oe[tr()]||oe.en)[e];}
+var fzPageTransition=null,fzPageSerial=0;
 function Ue(home,withMotion){
  var state=home?"empty":"results";
- if(e.getAttribute("data-home-state")===state){er();return;}
+ if(e.dataset.pageTarget===state){er();return;}
+ if(!e.dataset.pageTarget&&e.getAttribute("data-home-state")===state){er();return;}
+ var serial=++fzPageSerial;
+ if(fzPageTransition){fzPageTransition.skipTransition();fzPageTransition=null;}
  re.forEach(function(a){a.cancel();});re=[];
- var allowed=withMotion!==false&&!(window.matchMedia&&window.matchMedia("(prefers-reduced-motion: reduce)").matches);
- // Reveal the destination in place. Controls never fly across the screen or
- // stretch while a request starts; retrieval does not wait for visual motion.
- if(e.contains(document.activeElement)&&document.activeElement.matches('input,textarea'))document.activeElement.blur();
- e.setAttribute("data-home-state",state);window.scrollTo({top:0,behavior:"auto"});if(home)We();er();
- var targets=home?[".fz-dark-header","[data-dark-form]"]:[".fz-topbar",".fz-search-row",".fz-results-tools"];
- if(allowed)targets.forEach(function(selector,index){var el=e.querySelector(selector);
-  if(!el?.animate||!el.getClientRects().length)return;
-  var a=el.animate([{opacity:.18,filter:"blur(4px)",translate:"0 8px"},{opacity:1,filter:"blur(0px)",translate:"0 0"}],{duration:420,delay:index*35,easing:"cubic-bezier(.25,0,.4,1)",fill:"backwards"});
-  var stop=function(){a.cancel();},done=function(){el.removeEventListener('focusin',stop);a.cancel();};
-  el.addEventListener('focusin',stop,{once:true});
-  a.id="fz-page-reveal";re.push(a);a.finished.then(done,done);
- });
+ var allowed=withMotion!==false&&!document.hidden&&!(window.matchMedia&&window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+ e.dataset.pageTarget=state;e.dataset.pageTransitioning=String(allowed);
+ function change(){
+  if(serial!==fzPageSerial)return;
+  if(e.contains(document.activeElement)&&document.activeElement.matches('input,textarea'))document.activeElement.blur();
+  e.setAttribute("data-home-state",state);
+  window.scrollTo({top:0,behavior:"instant"});if(home)We();er();
+ }
+ function finish(){
+  if(serial!==fzPageSerial)return;
+  delete e.dataset.pageTarget;delete e.dataset.pageTransitioning;
+  document.documentElement.removeAttribute('data-fz-page-transition');fzPageTransition=null;er();
+ }
+ if(!allowed){change();finish();return;}
+ // Capture the outgoing screen before changing layout. Retrieval proceeds
+ // independently, without waiting for this animation, products or fonts.
+ var keyboardOpen=!!(window.visualViewport&&visualViewport.height<innerHeight*.78);
+ // iOS keyboard resizing can cancel a captured transition. Use the short
+ // opacity fallback in that case; it hides the layout switch during dismissal.
+ if(typeof document.startViewTransition==='function'&&!keyboardOpen){
+  document.documentElement.setAttribute('data-fz-page-transition','');
+  try{
+   var transition=document.startViewTransition(change);fzPageTransition=transition;
+   transition.ready.catch(function(){});transition.finished.then(finish,finish);return;
+  }catch(_){document.documentElement.removeAttribute('data-fz-page-transition');}
+ }
+ // Older browsers get one coordinated fade, without staggered blurred headers.
+ var out=e.animate?.([{opacity:1},{opacity:0}],{duration:120,easing:'ease-out',fill:'forwards'});
+ function enter(){
+  if(serial!==fzPageSerial)return;
+  change();out?.cancel();
+  var incoming=e.animate?.([{opacity:0},{opacity:1}],{duration:220,easing:'ease-out'});
+  if(incoming){incoming.id='fz-page-reveal';re.push(incoming);incoming.finished.then(finish,finish);}else finish();
+ }
+ if(out){out.id='fz-page-reveal';re.push(out);out.finished.then(enter,function(){});}else enter();
 }
 
 function je(expired){
@@ -321,6 +347,7 @@ function et(row) {
     const url=row.provider_passthrough?Ar(row.url):or(row.url||'');
     if(!url)return '';
     try {const parsed=new URL(url);
+      if(/\/(?:product-category|product-tag|collections?|categor(?:y|ies)|catalog|browse|search|results)(?:\/|$)/i.test(decodeURIComponent(parsed.pathname))&&!/\/(?:products?|dp|item)\//i.test(parsed.pathname))return '';
       if(/(?:^|\.)miinto\.(?:[a-z]{2,3}|co\.uk|com\.[a-z]{2})$/i.test(parsed.hostname)&&!parsed.pathname.startsWith('/p-'))return '';
     }catch(_){return '';}
     return url;
@@ -655,7 +682,7 @@ function Xt() {
 }
 async function ea(e,r){var shopperContext={query:r&&r.freshText?"":W&&W.query||"",pending_question:r&&r.shopperQuestion||""};var t=((r=r||{}).selectedOption||e||g&&g.value||"").trim();if(t&&!r.freshText&&!r.selectedOption&&!r.choiceNavigation&&g){var pb=g.closest('.fz-home')?.fzRefineBridge;if(pb&&pb.resubmitUnchanged&&pb.resubmitUnchanged(t)){g.blur();return;}}
 if(W&&W.kind==="image"&&W.image_base64&&!r.selectedOption&&!r.freshText){g&&g.blur();return fzRunPhotoEdit(t);}
-if(t){if(!await window.FindziaBeforeSearch(g.closest(".fz-home"),{query:t,kind:"text",country:g.closest(".fz-home").fzRefineBridge.context().country}))return;g&&g.blur(),Ue(!1,!0),r.choiceNavigation||Ut();var a=Bt(),n=Le,i=await Pt();if(n===Le){g&&(g.value=t),K=t,fr(!0,ar("searching")),zt("text"),I="relevance",O="all",cr(),w&&(w.hidden=!0),W={kind:"text",query:t,country:i,providerCopy:!1,shoppingUrl:""},cr();var o={query:t,country:i,lang:nr(),force_specific:!0,shopping_context:shopperContext};r&&r.forceSpecific&&(o.force_specific=!0),r&&r.selectedOption&&(o.selected_option=r.selectedOption,o.original_query=r.originalQuery||"",o.force_specific=!0);try{await Rt("/api/search/stream",o,async function(e){if(a===B&&e)
+if(t){if(!await window.FindziaBeforeSearch(g.closest(".fz-home"),{query:t,kind:"text",country:g.closest(".fz-home").fzRefineBridge.context().country}))return;Ue(!1,!0),r.choiceNavigation||Ut();var a=Bt(),n=Le,i=await Pt();if(n===Le){g&&(g.value=t),K=t,fr(!0,ar("searching")),zt("text"),I="relevance",O="all",cr(),w&&(w.hidden=!0),W={kind:"text",query:t,country:i,providerCopy:!1,shoppingUrl:""},cr();var o={query:t,country:i,lang:nr(),force_specific:!0,shopping_context:shopperContext};r&&r.forceSpecific&&(o.force_specific=!0),r&&r.selectedOption&&(o.selected_option=r.selectedOption,o.original_query=r.originalQuery||"",o.force_specific=!0);try{await Rt("/api/search/stream",o,async function(e){if(a===B&&e)
 if(at(e),"reference_image"===e.event)W.image_reference=e.image_reference,W.textLens=!0,w&&(w.hidden=!1);else if("status"===e.event&&"finding_reference_image"===e.stage)fr(!0,"ar"===tr()?"نجهّز صورة المنتج…":"Finding the product photo…");else if("status"!==e.event||"preparing_offers"!==e.stage&&"identify"!==e.stage){if("status"===e.event&&"google_shopping_slow"===e.stage)fr(!0,"ar"===tr()?"البحث مستمر، المصدر متأخر قليلًا…":"Still searching — the provider is taking a little longer…");else if("remove"===e.event)At(e.url);else if("status"===e.event&&/^(understanding_request|researching_product)$/.test(e.stage))fr(!0,e.message||(tr()==="ar"?"أفهم طلبك وأبحث عن المنتج المناسب…":"Understanding your request and identifying the product…"));else if("query"===e.event&&e.query)fzSetDisplayQuery(e,t);else if("result"===e.event||"upsert"===e.event)Ct(e.item||{});else if("snapshot"===e.event)(e.results||e.all_results||[]).forEach(Ct);else if("recommendations"===e.event)Ot(e.data);else if("done"===e.event){if(W){W.partial=!!e.partial;W.shopperEmpty=e.shopper_empty_message||"";}
 fr(!1);if(e.shopper_answer)fzShopperAnswer(e.shopper_answer);if(e.shopper_empty_message)St();}else if("error"===e.event)throw new Error(e.error||"search_failed");}else fr(!0,ar("searching"));}),a===B&&(fr(!1),U.length||X||W&&W.shopperEmpty||b.querySelector(".fz-empty")||Et(ar("no_results"),!1),Ke(r.originalQuery||t));}catch(e){if(a!==B||fzBillingFailure(e))return;W&&W.providerCopy?nt(e.message||"shopping_provider_unavailable"):ot(e.message||"search_failed");}}}else g&&g.focus();}
 e.fzRefineBridge.begin = function (e) {
@@ -1214,39 +1241,56 @@ return result;};}})();</script>
  border-top:0!important;padding:8px 0!important;margin:0 0 8px!important;
 }
 </style>
-<script data-fz-composer="156.7.38">
+<script data-fz-composer="156.7.39">
 (function(){
  'use strict';
  const root=document.getElementById('findzia-home-{{ section.id }}');
  if(!root||root.dataset.composerMounted)return;
- root.dataset.composerMounted='156.7.38';
+ root.dataset.composerMounted='156.7.39';
  const bindings=[],cleanups=[];
  const labels={en:'Clear search text',ar:'مسح كلمات البحث',fr:'Effacer la recherche',de:'Suchtext löschen',es:'Borrar búsqueda',it:'Cancella ricerca',pt:'Limpar pesquisa',tr:'Aramayı temizle',zh:'清除搜索文字',ja:'検索語を消去',ko:'검색어 지우기',ru:'Очистить запрос',hi:'खोज मिटाएँ',ur:'تلاش صاف کریں',id:'Hapus pencarian',ms:'Padam carian'};
  const listen=(node,type,fn,options)=>{if(!node)return;node.addEventListener(type,fn,options);cleanups.push(()=>node.removeEventListener(type,fn,options));};
  function bind(input,box,home){
   if(!input||!box)return;
   const field=input.closest('.fz-query-field'),preview=field.querySelector('[data-query-preview]'),clear=box.querySelector('[data-query-clear]');
-  let composing=false;
+  let composing=false,lastActive=false,lastHeight=44;
+  const measure=document.createElement('textarea');
+  measure.tabIndex=-1;measure.setAttribute('aria-hidden','true');measure.inert=true;
+  measure.style.cssText='position:fixed;left:-10000px;top:0;visibility:hidden;pointer-events:none;height:0;min-height:0;max-height:none;overflow:hidden;resize:none;box-sizing:border-box;white-space:pre-wrap;overflow-wrap:anywhere;';
+  document.body.appendChild(measure);cleanups.push(()=>measure.remove());
   function sync(){
    const value=input.value||'',active=document.activeElement===input;
-   // CSS chooses how much fits at this viewport; all characters stay searchable.
    preview.textContent=value.replace(/\s+/g,' ');preview.title=value;
-   field.dataset.queryPreview=value&&!active?'true':'false';
-   field.dataset.queryEditing=String(active);
+   field.dataset.queryPreview=value&&!active?'true':'false';field.dataset.queryEditing=String(active);
    clear.hidden=!value;clear.setAttribute('aria-label',labels[root.dataset.lang]||labels.en);
-   const oldScroll=input.scrollTop;
-   box.dataset.composerExpanded='false';
-   field.style.setProperty('--fz-query-height','44px');
+   const before=box.getBoundingClientRect().height;
+   // Focus opens the composer, including an empty or one-word query.
+   box.dataset.composerExpanded=String(active);
    const cap=Math.max(68,Math.min(140,Math.floor((window.visualViewport?.height||innerHeight)*.3)));
-   const expanded=active&&input.scrollHeight>45;
-   box.dataset.composerExpanded=String(expanded);
-   // Measure again after controls move below the expanded, full-width editor.
-   const height=active?Math.max(expanded?68:44,Math.min(cap,input.scrollHeight)):44;
+   let contentHeight=44;
+   if(active){
+    const css=getComputedStyle(input);
+    for(const prop of ['fontFamily','fontSize','fontWeight','fontStyle','lineHeight','letterSpacing','paddingTop','paddingBottom','paddingLeft','paddingRight','borderTopWidth','borderBottomWidth'])measure.style[prop]=css[prop];
+    measure.style.width=input.getBoundingClientRect().width+'px';measure.value=value||' ';contentHeight=measure.scrollHeight;
+   }
+   const height=active?Math.max(68,Math.min(cap,contentHeight)):44;
    field.style.setProperty('--fz-query-height',height+'px');
-   field.style.setProperty('--fz-query-overflow',active&&input.scrollHeight>height+1?'auto':'hidden');
-   if(active)input.scrollTop=oldScroll;
+   field.style.setProperty('--fz-query-overflow',active&&contentHeight>height+1?'auto':'hidden');
+   if(height!==lastHeight||active!==lastActive){
+    box.style.setProperty('transition','none','important');box.style.removeProperty('height');
+    const after=box.getBoundingClientRect().height;
+    const motion=before>0&&after>0&&root.dataset.pageTransitioning!=='true'&&!matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if(motion&&Math.abs(after-before)>.5){
+     box.style.setProperty('height',before+'px','important');void box.offsetHeight;
+     box.style.removeProperty('transition');box.style.setProperty('height',after+'px','important');
+    }else{box.style.removeProperty('height');box.style.removeProperty('transition');}
+    lastHeight=height;lastActive=active;
+   }
    if(!active){input.scrollTop=0;input.scrollLeft=0;}
   }
+  listen(box,'transitionend',event=>{if(event.target===box&&event.propertyName==='height')box.style.removeProperty('height');});
+  // Keep the outgoing composer intact until the page snapshot is captured.
+  listen(box.querySelector(home?'[data-dark-submit]':'[data-search-btn]'),'pointerdown',event=>event.preventDefault());
   listen(input,'focus',sync);listen(input,'blur',sync);listen(input,'input',sync);
   listen(input,'compositionstart',()=>{composing=true;});listen(input,'compositionend',()=>{composing=false;sync();});
   listen(clear,'pointerdown',event=>event.preventDefault());
@@ -1312,8 +1356,17 @@ return result;};}})();</script>
 </script>
 
 
-<style data-fz-query-polish="156.7.38">
-/* Expand only while editing. At rest the full value has a one-line preview. */
+<style data-fz-query-polish="156.7.39">
+/* Focus opens the composer. Measuring never collapses the live input. */
+#findzia-home-{{ section.id }}[data-theme] [data-dark-form],#findzia-home-{{ section.id }}[data-theme] .fz-fixed-header .fz-search-row{box-sizing:border-box!important;overflow:hidden;transition:height .24s cubic-bezier(.22,1,.36,1),border-radius .24s ease,border-color .16s ease,box-shadow .16s ease!important}
+@media(prefers-reduced-motion:reduce){#findzia-home-{{ section.id }}[data-theme] [data-dark-form],#findzia-home-{{ section.id }}[data-theme] .fz-fixed-header .fz-search-row{transition:none!important}}
+html[data-fz-page-transition]::view-transition{pointer-events:none}
+html[data-fz-page-transition]::view-transition-group(root){animation-duration:280ms}
+html[data-fz-page-transition]::view-transition-old(root){animation:fz-page-out 180ms ease-out both;mix-blend-mode:normal}
+html[data-fz-page-transition]::view-transition-new(root){animation:fz-page-in 280ms cubic-bezier(.22,1,.36,1) both;mix-blend-mode:normal}
+@keyframes fz-page-out{from{opacity:1}to{opacity:0}}
+@keyframes fz-page-in{from{opacity:0}to{opacity:1}}
+/* At rest only the preview is shortened; the search stays complete. */
 #findzia-home-{{ section.id }}[data-theme] .fz-query-field{position:relative!important;flex:1 1 0!important;min-width:0!important;overflow:hidden!important}
 #findzia-home-{{ section.id }}[data-theme] .fz-fixed-header .fz-input-wrap{display:flex!important;align-items:center!important;gap:2px!important;padding:0 0 0 6px!important}
 #findzia-home-{{ section.id }}[data-theme] .fz-query-field textarea.fz-input.fz-compact-input,#findzia-home-{{ section.id }}[data-theme] .fz-query-field textarea.fz-dark-input{padding:10px 0!important;height:var(--fz-query-height,44px)!important;min-height:44px!important;max-height:140px!important;line-height:24px!important;white-space:nowrap!important;overflow:hidden!important;scrollbar-width:none;resize:none!important}
@@ -1388,7 +1441,7 @@ return result;};}})();</script>
 @media(prefers-reduced-motion:reduce){#findzia-home-{{ section.id }} dialog.fz-refine-dialog[open] .fz-refine-option{transition:none!important}}
 </style>
 
-<style data-fz-main-menu="156.7.38">
+<style data-fz-main-menu="156.7.39">
 /* Keep this menu independent of the legacy all-descendants font override. */
 #findzia-home-{{ section.id }}[data-theme] [data-menu-design],#findzia-home-{{ section.id }}[data-theme] [data-menu-design] *{font-family:'Helvetica Neue',Helvetica,Arial,sans-serif!important}
 #findzia-home-{{ section.id }}[data-theme] [data-menu-design][dir=rtl],#findzia-home-{{ section.id }}[data-theme] [data-menu-design][dir=rtl] *{font-family:system-ui,-apple-system,'Segoe UI',Arial,sans-serif!important}
