@@ -1,3 +1,4 @@
+/* FINDZIA_BILLING_RELEASE=156.7.35 */
 /* Findzia 156.7.20 — resumable checkout, safe plan changes and persistent payment UI. */
 (() => {
   'use strict';
@@ -688,9 +689,13 @@
       // Programmatic closes are cleared/retired before reaching this handler.
       if(e.name==='checkout.closed'&&view.id&&e.data.id===view.id){closeWallet(false);account.open('plans');}
     });
-    async function manageSubscription(){
-      try{const rev=revision,data=await json('/paddle/portal',{});if(rev===revision){const u=new URL(data.url);if(u.protocol==='https:'&&u.hostname===(paddleConfig?.paddle_environment==='live'?'customer-portal.paddle.com':'sandbox-customer-portal.paddle.com')&&!u.username&&!u.password&&!u.port)location.assign(u.href);}}
-      catch(e){paymentMessage=paymentError(e);account.open('checkout');}
+    function manageSubscription(){
+      const manager=window.FindziaSubscriptionManager?.mount(root,{
+        rpc:json,paddle:async()=>{await paymentConfig();return loadPaddle();},
+        refresh:()=>refresh(true),balance:()=>status
+      });
+      if(manager)return manager.open();
+      paymentMessage=tr('Please refresh the page to load subscription management.','حدّث الصفحة لتحميل إدارة الاشتراك.');account.open('checkout');
     }
     async function restorePurchases(){
       if(!account.member()){account.open('signin');return;}
@@ -772,7 +777,7 @@
       const group=el('div','fza-group');for(const [key,en,arabic] of [['subscription','Monthly plan','الباقة الشهرية'],['trial','Free trial','التجربة المجانية'],['pack','Top-up credits','رصيد الشحن']]){if(!Number(status.balances?.[key]))continue;const row=el('div','fza-metric');row.append(el('span','',tr(en,arabic)),el('strong','',String(status.balances[key])));group.append(row);}body.append(group);
       if(status.reserved)body.append(el('p','fza-caption',tf('Reserved for an active search: {count}',{count:status.reserved},'رصيد محجوز لبحث جارٍ: {count}')));
       if(status.subscription){const sub=status.subscription,date=new Intl.DateTimeFormat(root.dataset.lang||'en',{dateStyle:'medium'}).format(new Date(sub.period_end*1000));body.append(el('p','fza-caption',tf('Plan: Findzia {plan} · Current period ends {date}.',{plan:sub.plan,date},'الباقة: Findzia {plan} · تنتهي الفترة الحالية في {date}.')));}
-      if(account.member()&&paddleConfig?.checkout_available&&status.subscription)body.append(button(tr('Manage subscription','إدارة الاشتراك'),manageSubscription));
+      if(account.member()&&(paddleConfig?.management_available||paddleConfig?.checkout_available))body.append(button(tr('Manage subscription','إدارة الاشتراك'),manageSubscription));
       const details=el('details','fza-faq');details.append(el('summary','',tr('How credits work','كيف يُستخدم الرصيد')),
         el('p','',tr('Text or photo: 1 credit per new search. Technical failures and searches with no results are refunded. Up to 5 refunded attempts a day.','النص أو الصورة: رصيد واحد لكل بحث جديد. نرجع الرصيد للفشل التقني أو عدم وجود نتائج، بحد 5 محاولات مسترجعة باليوم.')));
       if(status.subscription)details.append(el('p','',tr('Your monthly allowance is used first and does not roll over. Pack credits do not expire.','نستخدم رصيد الاشتراك أولًا، ولا يترحّل للشهر التالي. رصيد الشحن بدون انتهاء.')));
@@ -796,7 +801,7 @@
       body.append(list);
       if(mfConfig?.environment==='sandbox'||paddleConfig?.paddle_environment==='sandbox')body.append(el('p','fza-footnote',tr('Test mode. No real payment is collected.','وضع التجربة، بدون تحصيل مبلغ حقيقي.')));
     }
-    root.fzBilling={restorePurchases,fetch:paidFetch,beforeSearch,refresh,renderUsage,renderPlans,renderCheckout,planSummary,selectedPlan,beforeSignIn,handleSearchError,notice,status:()=>status,label:()=>status?tf('Searches remaining: {count}',{count:status.remaining},'عمليات البحث المتبقية: {count}'):tr('10 free searches','10 بحوث مجانية')};
+    root.fzBilling={manageSubscription,restorePurchases,fetch:paidFetch,beforeSearch,refresh,renderUsage,renderPlans,renderCheckout,planSummary,selectedPlan,beforeSignIn,handleSearchError,notice,status:()=>status,label:()=>status?tf('Searches remaining: {count}',{count:status.remaining},'عمليات البحث المتبقية: {count}'):tr('10 free searches','10 بحوث مجانية')};
     root.addEventListener('fz:account-session',()=>{clearTimeout(recoveryTimer);recoveryTimer=null;queuedPlan='';pendingCheckoutIntent='';startingPayment=false;closeMF();closeWallet();revision++;status=null;stamp=0;error='';noticeCode='';paddleConfig=null;mfConfig=null;paymentBusy=false;paymentMessage='';paymentTxn='';standardPreferred=false;memoryPlan=null;paymentConfig().then(async()=>{account.render();if(await confirmMyFatoorah())return;if(account.member()&&selectedPlan()&&resumePlan())startPayment();});refresh(true);});
     root.addEventListener('fz:account-closed',()=>{if(!mfView&&!checkoutView){
       clearTimeout(recoveryTimer);recoveryTimer=null;queuedPlan='';paymentFlow++;

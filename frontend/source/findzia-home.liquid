@@ -1,4 +1,4 @@
-{% comment %} FINDZIA_HOME_RELEASE=156.7.34 {% endcomment %}
+{% comment %} FINDZIA_HOME_RELEASE=156.7.35 {% endcomment %}
 {% comment %}Findzia 156.7.15 · progressive filters + conversational guide from 156.3.0 · combined 156.7.14 payments preserved{% endcomment %}
 
 
@@ -898,6 +898,7 @@ return result;};}})();</script>
 
 <script>(function(){var root=document.getElementById('findzia-home-{{ section.id }}');if(!root||root.dataset.findziaResultHeader)return;root.dataset.findziaResultHeader='155.4.6';var trigger=root.querySelector('[data-results-menu-open]'),homeMenu=root.querySelector('[data-dark-menu-open]'),menu=root.querySelector('[data-dark-menu]');if(trigger&&homeMenu&&menu){function label(){trigger.setAttribute('aria-label',root.dataset.lang==='ar'?'القائمة':homeMenu.getAttribute('aria-label')||'Menu');}label();var observer=new MutationObserver(label);observer.observe(root,{attributes:true,attributeFilter:['data-lang']});document.addEventListener('shopify:section:unload',function cleanup(ev){if(ev.target&&ev.target.contains(root)){observer.disconnect();document.removeEventListener('shopify:section:unload',cleanup);}});trigger.addEventListener('click',function(){homeMenu.click();trigger.setAttribute('aria-expanded',String(menu.open));});menu.addEventListener('close',function(){trigger.setAttribute('aria-expanded','false');if(root.dataset.homeState!=='empty')trigger.focus({preventScroll:true});});}})();</script>
 <script src="{{ 'findzia-filters.js' | asset_url }}" defer></script>
+<script src="{{ 'findzia-subscriptions.js' | asset_url }}" defer></script>
 <script src="{{ 'findzia-billing.js' | asset_url }}" defer></script>
 <script src="{{ 'findzia-account.js' | asset_url }}" defer></script>
 
