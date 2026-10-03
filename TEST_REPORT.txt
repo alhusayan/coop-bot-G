@@ -1,0 +1,47 @@
+Findzia 156.7.35 — subscription manager verification
+
+Test environment
+Local Python/FastAPI/SQLite and Node/Chromium. Provider, store and billing
+traffic were mocked. No live customer action or payment was performed.
+
+PASS — 22 subscription-management API tests
+- Ownership checked against server-created account mappings.
+- Foreign-account and guessed-transaction access rejected.
+- Subscription preview and payment totals sourced from provider data.
+- Pack purchases and renewals combined, deduplicated and paginated.
+- End-of-period cancellation, undo, stale-version guards and worker locks.
+- Zero-value method update does not create or credit a purchase.
+- Overdue method update discloses the existing payable transaction.
+- Tax-only invoice refund preserves credits; product-refund policy remains.
+- Invoice URL validation, revision confirmation and once-only behavior.
+- Authentication, origin checks, no-store data responses and redacted errors.
+
+PASS — 17 deployed-checkout regression checks
+Existing transaction reuse, plan changes, cancellation before replacement,
+bank authorization guards, concurrent creation, timeout recovery, intent
+ownership and exactly-once grants for the 40/100-search subscription plans.
+
+PASS — 32 frontend/server/build checks
+Version guards, asset loading, security headers, account/policy routing,
+existing UI checks and the exact Apple Pay domain-association response.
+
+PASS — 2 mobile subscription-management flows
+English/light and Arabic/dark at 390px width. Native overview and history,
+cancel/keep confirmation, inline method update after a simulated decline,
+server confirmation without a new checkout, invoice revision and download,
+permission-error retry, rapid close/reopen, sign-out and session expiration.
+No unexpected external request, browser exception, CSP violation or detected
+horizontal overflow in these fixtures.
+
+PASS — 2 existing mobile photo-refinement flows
+Photo-only search, manual/AI refinements after prior search deadlines, early
+priced cards ahead of slow unpriced images, product identity preservation,
+Bing Alternatives grouping, result counts, collection URL rejection and
+checkout cancellation. Search API code and the 156.7.34 search implementation
+were also compared byte-for-byte (apart from the frontend release marker).
+
+Limits
+These checks verify application behavior against controlled fixtures. They do
+not validate the permissions of the live Paddle account, actual Apple Pay or
+bank authentication on iPhone, or a live invoice revision. This package has
+not been deployed to the production site.

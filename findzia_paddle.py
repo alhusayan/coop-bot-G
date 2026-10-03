@@ -1,4 +1,4 @@
-"""Findzia 156.7.20 Paddle adapter: resumable, verified checkout transitions.
+"""Findzia 156.7.35 Paddle adapter: in-site subscription management.
 
 Live checkout starts with an email allowlist; LIVE_OPEN explicitly opens it to members.
 A durable inbox survives
@@ -113,7 +113,14 @@ class PaddleSandbox:
 
     def public(self, member=None):
         return dict(checkout_available=self.allowed(member or {}), restore_available=self.allowed(member or {}),
+                    management_available=self.management_available(member or {}),
                     paddle_environment=self.mode, paddle_client_token=self.client_token)
+
+    def management_available(self, member):
+        prefix = 'pdl_live_apikey_' if self.mode == 'live' else 'pdl_sdbx_apikey_'
+        return bool(self.credits.available and self.mode in ('live','sandbox') and self.key.startswith(prefix)
+                    and member.get('id') and not member.get('guest')
+                    and (self.mode == 'live' or member.get('email','').lower() in self.test_emails))
 
     def api(self, method, path, body=None, *, envelope=False):
         # Fixed host; never follow provider/browser supplied pagination URLs.
@@ -392,6 +399,12 @@ class PaddleSandbox:
             return False
         if txn['status']!='completed':
             return False
+        # Updating a saved method produces a zero-value completed transaction.
+        # It is not a purchase and must neither mint credits nor retry forever.
+        update_totals = (txn.get('details') or {}).get('totals') or {}
+        if (txn.get('origin') == 'subscription_payment_method_change'
+            and str(update_totals.get('grand_total')) == '0' and str(update_totals.get('balance')) == '0'):
+            return False
         from findzia_billing import PLANS, fingerprint
         plan=next(p for p in PLANS if p['id']==plan_id)
         items=txn.get('items') or []
@@ -421,7 +434,13 @@ class PaddleSandbox:
                 if owner and owner['member']!=member:
                     raise ValueError('subscription_owner_conflict')
         adjustments=txn.get('adjustments') or []
-        blocked=any(a.get('status')=='approved' and a.get('action') in ('refund','credit','chargeback','chargeback_warning') for a in adjustments)
+        def revokes_access(a):
+            # Invoice corrections can refund tax only. The paid product remains
+            # valid; preserve its credits. Product refunds retain the old policy.
+            tax_only = (a.get('action') == 'refund' and bool(a.get('items'))
+                        and all(item.get('type') == 'tax' for item in a['items']))
+            return a.get('status')=='approved' and a.get('action') in ('refund','credit','chargeback','chargeback_warning') and not tax_only
+        blocked=any(revokes_access(a) for a in adjustments)
         # A refunded transaction that arrives before its payment event never grants.
         if not blocked:
             self.credits.apply_verified_purchase(provider=self.provider,event_id='txn:'+txn_id,
@@ -529,6 +548,8 @@ class PaddleSandbox:
 
 def install_paddle(app, credits):
     service=PaddleSandbox(credits);app.state.findzia_paddle=service
+    from findzia_subscription_manager import install_subscription_manager
+    install_subscription_manager(app, service)
     def result(data,code=200):
         return JSONResponse(data,status_code=code,headers={'Cache-Control':'no-store'})
     async def member(request):

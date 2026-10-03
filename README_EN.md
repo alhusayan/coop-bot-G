@@ -1,103 +1,122 @@
-# Findzia Photo Search Update — 156.7.33
+# Findzia 156.7.35 — Manage subscription inside Findzia
 
-API build: `v128.5.42.39-photo-text`  
-Web version: `156.7.33`
+This patch replaces the **Manage subscription** redirect with a native Findzia screen. Subscription and payment data come from Paddle through your authenticated Findzia API.
 
-This is a patch for the existing Findzia application. It includes the API changes from 156.7.32 and updates the current standalone frontend. Merge the included files into their existing paths; do not replace the entire repository or delete the existing `frontend` directory.
+Apply it to the existing Findzia project with the 156.7.34 frontend. This is a patch, not a replacement repository. Keep the other project files.
 
-## Which files do I replace?
+## What customers can do
 
-Replace these seven runtime files together:
+- See their plan, status, start date, monthly search allowance and remaining searches.
+- See the next payment date, amount, products, discount and tax breakdown.
+- Browse Paddle payments, including one-time packs and subscription renewals, with older-payment pagination.
+- Open payment details, billing information and available payment-method details.
+- Download an available invoice PDF and correct eligible invoice details.
+- Cancel renewal at the end of the current billing period, with an explicit confirmation.
+- Undo a scheduled cancellation before it takes effect, when Paddle permits it.
+- Update the payment method using Paddle's secure inline checkout inside the Findzia screen.
 
-| File inside this ZIP | Destination in GitHub | Purpose |
+The interface follows Findzia's light/dark appearance and supports English and Arabic, including right-to-left layout. Amounts, currencies and taxes are read from Paddle; they are not hardcoded from the screenshots.
+
+## Files to install
+
+There are **8 application files**. Preserve these exact paths:
+
+| Railway service | Repository path | Action |
 | --- | --- | --- |
-| `main.py` | Repository root, beside the current `main.py` | Search routing, early photo results, Bing grouping, product links and prices |
-| `findzia_independent_search.py` | Repository root | Compatible provider adapter from 156.7.32 |
-| `findzia_search_quality.py` | Repository root | Compatible shared search-quality helper |
-| `frontend/source/findzia-home.liquid` | `frontend/source/` | Photo customization, result counting, image loading and card eligibility |
-| `frontend/source/findzia-shell.js` | `frontend/source/` | Correct result counter during and after streaming |
-| `frontend/scripts/build.mjs` | `frontend/scripts/` | Version and frontend asset build |
-| `frontend/package.json` | `frontend/` | Web release version and existing commands |
+| API | `findzia_paddle.py` | Replace |
+| API | `findzia_subscription_manager.py` | Add — new file |
+| Findzia Web | `frontend/source/findzia-home.liquid` | Replace |
+| Findzia Web | `frontend/source/findzia-shell.js` | Replace |
+| Findzia Web | `frontend/source/findzia-billing.js` | Replace |
+| Findzia Web | `frontend/source/findzia-subscriptions.js` | Add — new file |
+| Findzia Web | `frontend/scripts/build.mjs` | Replace |
+| Findzia Web | `frontend/package.json` | Replace |
 
-The two Python helper modules are unchanged from 156.7.32 and are included to keep the API files compatible. The `tests/` and `frontend/tests/` files are regression tests, not extra runtime files. `README_EN.md` and `SHA256SUMS.txt` are reference files.
+The test files included under `tests/` and `frontend/tests/` are for verification. They are not additional production services.
 
-## Installation
+### GitHub and Railway steps
 
-1. Extract the ZIP and retain the currently deployed version for rollback.
-2. In GitHub, open the repository root and use **Add file → Upload files** to replace the three Python runtime files listed above.
-3. Open `frontend/source/` and replace only `findzia-home.liquid` and `findzia-shell.js` there.
-4. Open `frontend/scripts/` and replace `build.mjs` there.
-5. Open `frontend/` and replace `package.json` there. Commit all changes before testing the deployment.
-6. Deploy both Railway services after the files are committed. The API service keeps its existing root directory. **Findzia Web** keeps **Root Directory = `/frontend`**. If the frontend has a separate repository, copy the contents of this ZIP's `frontend/` into that repository's root instead.
-7. Verify the API startup log contains `v128.5.42.39-photo-text`. Open `https://findzia.com/healthz` and verify the web version is `156.7.33`, then reload the site.
+1. Extract the ZIP on your computer.
+2. In the existing GitHub repository, upload the two API Python files to the repository root, beside the current `findzia_paddle.py`. Commit them together. Let the **API** service deploy successfully.
+3. Upload the frontend files into their matching folders. In GitHub, open `frontend/source` before uploading the four source files; open `frontend/scripts` for `build.mjs`; put `package.json` directly in `frontend`. Commit these six frontend files together.
+4. Deploy **Findzia Web**, keeping its Root Directory as `/frontend`. Its existing Dockerfile runs the updated build script automatically.
+5. Open `https://findzia.com/healthz`. The `version` must be `156.7.35`, and `sourceReleases.home`, `shell`, `billing` and `subscriptions` must all be `156.7.35`.
+6. Reload Findzia, sign in, then open **Account → Subscription → Manage subscription**. Compare the plan, next payment and payment history with the corresponding Paddle account.
 
-Upload the extracted files, not the ZIP. Do not put the two frontend source files beside `main.py`, and do not create `frontend/frontend/`. Existing payment, account, Dockerfile, server, policy and Apple Pay verification files stay in place. No Railway variable changes are required.
+If the frontend is in a separate repository, its root already represents `frontend`: upload `source/...`, `scripts/build.mjs` and `package.json` there, and keep that service's Root Directory as `/`.
 
-## Photo search and customization
+Upload the extracted files, not the ZIP. Do not create a second nested `frontend/frontend` folder. The build deliberately rejects mixed versions of the six frontend application files.
 
-The switch to text search happens **only after the customer adds a word or customization**, either manually or through the AI Shopping Assistant.
+## Configuration
 
-| Customer action | Search behavior |
-| --- | --- |
-| Upload a photo with no added details | Original visual search, including Lens |
-| Add a word or specification to that photo | Pure text search built from the retained photo description plus the customer's details |
-| Choose specifications in the AI assistant | The same text route, with the original product identity retained |
-| Remove all added details and search again | Original visual search again |
-| Type a normal search without a photo | Existing text search |
+The patch uses the existing Paddle environment, API key, client token and webhook configuration in the **API service**. Keep payment secrets out of the frontend service.
 
-The photo chip represents the retained base description. The search input shows the customer's additions. The base identity is kept across successive refinements, including an empty refinement response. Refinements do not rerun Lens or the original-photo visual comparison. Existing text-search relevance, product-link, price and requested-specification checks still apply.
+No new environment variable is required. In particular, this patch does not require changing `FINDZIA_MYFATOORAH_ENABLED` or the current choice of purchase provider.
 
-## Earlier photo results
+The Paddle API key must allow:
 
-- Direct product matches can enter the existing verification pipeline as soon as Lens returns them, without waiting for slower category-page expansion. Remaining work continues within the existing bounded search budget.
-- Candidate images start loading while prices are being resolved. Cards still require the existing display checks before appearing.
-- Provider caps, visual admission requirements and the final collection-expansion path are retained. This change removes unnecessary serial waiting; it does not promise a fixed response time from external providers.
+- Reading and writing subscriptions, for subscription details and renewal changes.
+- Reading and writing transactions, for payment history, invoices and invoice corrections.
+- Reading customers, addresses and businesses, for expanded billing details.
 
-## Bing photo results
+If the screen reports that billing access needs attention, check the existing key's permissions in Paddle. Provider authorization errors are reported as `management_permission_required`; secret values are never returned to the browser.
 
-Every photo result with Bing provenance is assigned to **Alternatives**, including supported-country searches, fallback markets, Bing text supplements and products expanded from Bing collection pages. A duplicate independently found by Lens still remains in Alternatives when the merged result carries Bing provenance.
+Existing live customers can manage their subscriptions even if `FINDZIA_PADDLE_LIVE_OPEN=false` temporarily closes new purchases. Sandbox management retains the configured test-email restriction.
 
-These results pass the same visual-admission function used for Serper alternatives. Pending or rejected candidates are not displayed or counted. Bing candidates do not influence the inferred identity of the original photo. Ordinary typed-text searches retain their normal grouping.
+## Supported behavior and provider limits
 
-## Prices, product links and counts
+**Payment-method update:** an active subscription uses Paddle's zero-value method-update transaction. It does not create a new Findzia purchase or grant search credits. For an overdue subscription, Paddle may collect the existing overdue transaction; the amount is disclosed before the secure form. Completion is checked on the server, not inferred from a browser event. Card and wallet availability still follows Paddle and the customer's device. Bank or wallet authentication may open its own system flow.
 
-- Miinto category/listing URLs are not accepted as individual product cards. Collection expansion must supply a separate product URL, image and price. A product URL that redirects to a collection is also rejected.
-- The price parser prefers a readable displayed price over internal DOM price attributes. For example, visible `£514.50` with `data-price="51450"` is read as `514.50`. It does not blindly divide every large price by 100.
-- The frontend also rejects stale Miinto collection cards already present in a result stream or local state.
-- The top result count comes from the same eligible visible cards as the grid. Progress messages cannot reset it to zero while cards remain visible, and completion keeps the count visible.
+**Cancellation:** the app requests cancellation at the next billing period. It does not issue refunds or cancel an active paid period immediately. Removing a scheduled cancellation resumes the existing renewal schedule. Ended subscriptions cannot be reinstated through this action. Paddle restricts changes for overdue subscriptions and close to the next billing time; the provider remains authoritative.
 
-The screenshot alone does not establish how the original incorrect upstream price was produced. The included tests cover the decimal/minor-unit ambiguity and the collection-page acceptance failure separately.
+**Invoices:** the correction form is available only for eligible, unrevised invoices. Paddle permits one revision. Customers can correct names, business/tax information and supported address fields; this flow does not change the email, country, postal code or purchase amount. Adding a valid tax identifier can trigger a tax refund calculated by Paddle. A tax-only refund preserves the purchased search credits. The existing handling of product refunds and chargebacks remains in place.
 
-## Validation completed
+**Downloads:** invoice PDFs use Paddle's short-lived download URL. Downloading a file may open a browser PDF view; it does not redirect the subscription-management screen to Paddle's portal.
 
-- **99 offline backend regression tests passed.** These include photo-only versus customized-photo routing, composition using the retained product identity, manual/assistant details, early direct-result delivery before blocked collection expansion, final result retention, all Bing photo groups, collection redirects and price parsing.
-- **31 frontend/server regression tests passed**, covering the existing build, server, motion and billing behavior.
-- **Two mobile browser flows passed** at 390px: English/light and Arabic/dark. They cover initial photo search, manual details, AI details, repeated refinements, clearing details, Bing approval/grouping, a matching visible counter, collection-card rejection and a simulated cancelled checkout.
+**Account matching:** history is limited to Paddle checkouts and subscriptions already mapped to the signed-in Findzia account. Email alone is never treated as proof of ownership. MyFatoorah purchases are not included in this Paddle history.
 
-All search-provider and checkout responses in these tests were simulated. No paid provider calls, live card charges or production deployment were performed. These tests verify routing and earlier delivery order; they are not a production latency benchmark or a real-device Apple Pay test.
+## Data and deployment notes
 
-Run backend tests in the existing application Python environment:
+- The new module adds two small tables to the existing account database for action locks and method-update transaction ownership. It does not replace or clear the database.
+- Existing webhook processing remains responsible for credit reconciliation. The UI cannot grant credits by itself.
+- No API `main.py` change is needed. `install_paddle()` registers the new management routes.
+- The 156.7.34 photo/text search code is preserved. `findzia-shell.js` changes only its release marker so the frontend build stays consistent.
+- The Apple Pay verification file, DNS, frontend server, account module and search-provider configuration are not replaced by this patch.
+
+## Verification
+
+The update was tested locally with fake Paddle responses and disposable SQLite databases. No live payment, cancellation, invoice revision or customer-account change was performed.
+
+Passed checks include 22 subscription-management tests, 17 applicable checkout regression tests, 32 frontend/build tests, English/light and Arabic/dark mobile management flows, and the existing mobile photo-refinement flows. See `TEST_REPORT.txt` for scope and limits.
+
+After applying the patch to the full repository, the included API tests can be run with:
 
 ```bash
-python -m unittest discover -s tests -p 'test_*.py' -q
+python3 -m unittest discover -s tests -p test_subscription_manager.py -v
+python3 -m unittest discover -s tests -p test_paddle_checkout_regression.py -v
 ```
 
-Run frontend tests from `frontend/`:
+The management tests use the project's existing FastAPI/requests dependencies and `httpx` for the local test client.
+
+Frontend checks:
 
 ```bash
+cd frontend
+npm run build
 npm test
 ```
 
-The optional `frontend/tests/photo-browser.cjs` flow also needs Playwright available and a Chromium executable supplied through `FINDZIA_TEST_CHROME`.
+The additional browser test requires Playwright and Chromium:
 
-## After deployment
+```bash
+FINDZIA_TEST_CHROME=/path/to/chromium node tests/subscriptions-browser.cjs
+```
 
-1. Search with a photo alone and confirm normal visual results.
-2. Add one detail, such as a color. Confirm the thumbnail remains, the input shows the addition and fresh results use the retained product identity.
-3. Repeat through the AI assistant, then remove all details and confirm photo-only search works again.
-4. Check that the top number matches visible eligible cards and that Bing photo matches appear only in Alternatives.
-5. Open a displayed product and check its exact product page and current price. Measure real search timings with the deployed providers before making a speed claim.
+## Official Paddle references
 
-## Rollback
-
-Restore the previous versions of the seven runtime files to their same paths and redeploy both services. This patch changes no database schema, payment configuration or account credentials.
+- [Get subscription details](https://developer.paddle.com/api-reference/subscriptions/get-subscription/)
+- [Update subscription payment details](https://developer.paddle.com/build/subscriptions/update-payment-details/)
+- [Cancel subscriptions](https://developer.paddle.com/build/subscriptions/cancel-subscriptions/)
+- [List transactions](https://developer.paddle.com/api-reference/transactions/list-transactions/)
+- [Download an invoice](https://developer.paddle.com/api-reference/transactions/get-transaction-invoice/)
+- [Revise an invoice](https://developer.paddle.com/api-reference/transactions/revise-transaction/)
