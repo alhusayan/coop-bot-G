@@ -394,7 +394,7 @@ from findzia_billing import CreditMiddleware, install_billing
 app.add_middleware(CreditMiddleware, owner=app)
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization', 'X-Findzia-Request-Id'], max_age=86400)
-BUILD_ID = 'v128.5.42.49-social-strong'
+BUILD_ID = 'v128.5.42.50-ui'
 _SOCIAL = None
 
 def _fz_social_row(row):
@@ -32374,7 +32374,7 @@ def _fz_guide_turns(payload):
     turns = payload.get('turns') or []
     if not isinstance(turns,list): raise ValueError('invalid_turns')
     out=[]
-    for turn in turns[:12]:
+    for turn in turns[:4]:
         if not isinstance(turn,dict): continue
         answer=_card_text(turn.get('answer'),200)
         if not answer: continue
@@ -33249,7 +33249,7 @@ Ask ONE useful question at a time with 2-4 concise choices, or accept the shoppe
 Ask only what materially changes the search: use, budget, fit, material, size, compatibility, etc.
 Do not force a fixed questionnaire. Do not ask about a topic already answered in query, extra_specs,
 answers or turns. Use a stable question_key. Each next question is optional. Continue with a
-useful unasked detail when available, at most 12 questions; stop sooner when no useful detail remains.
+useful unasked detail when available, at most 4 questions; stop sooner when no useful detail remains.
 If the photo/query already identifies a specific model, do not ask for its model or release again.
 Ask to change the model only when the shopper explicitly wants a different one.
 Current explicit answers override tentative history. History is optional and only from related searches.
@@ -33319,7 +33319,9 @@ def _fz_needs_sync(context):
     result['search_query']=_fz_needs_query(context)
     if result['search_query']:result['status']='ready'
     if _FZ_GUIDE_MEDICAL.search(context['query']):return result
-    final=len(context.get('answers') or [])>=12 or context.get('finish') is True
+    final=max(len(context.get('answers') or []),len(context.get('turns') or []))>=4 or context.get('finish') is True
+    # Four answers finish locally; never bill for a fifth question.
+    if final:return result
     try:
         value=_refine_ai(_FZ_NEEDS_PROMPT,dict(context,no_more_questions=final),tokens=1400,timeout=7)
         if not isinstance(value,dict):return result
@@ -33390,7 +33392,7 @@ async def web_api_discover(request: Request):
                  'answers':[_card_text(x,160) for x in answers[:3] if isinstance(x,str)]}
         if mode=='guided' and payload.get('guided_version')==2:
             context.update(guided_version=2,turns=_fz_guide_turns(payload),finish=payload.get('finish') is True,
-                           answers=[_card_text(x,200) for x in answers[:12] if isinstance(x,str)],history=[],
+                           answers=[_card_text(x,200) for x in answers[:4] if isinstance(x,str)],history=[],
                            draft_query=_refine_safe_query(payload.get('draft_query') or ''))
             history=payload.get('history') or []
             if isinstance(history,list) and not _FZ_GUIDE_PRIVATE.search(query):
