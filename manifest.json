@@ -1,0 +1,35 @@
+{
+  "version": "156.7.47",
+  "backend": "v128.5.42.50-ui",
+  "base_commit": "d3f3c90aff518304615111979f938e98f234821a",
+  "files": {
+    "main.py": {
+      "sha256": "01a034d8d52a52324c3fb85c2f614507a9db7aaf663d323686be9424f11c5d3b",
+      "base_git_blob": "5e5c80479cd98c42837c3b0c04006c23a8b58eac"
+    },
+    "frontend/package.json": {
+      "sha256": "f05feb928152d42a9e4c33ca21e713a5178de96d568aab65bb6cdd962fe7f593",
+      "base_git_blob": "4100d08ae6eec2443ed352d08149943d4bd59be1"
+    },
+    "frontend/scripts/build.mjs": {
+      "sha256": "4a2de1bbbacf4d8df5ae9cec1de80ae57436ce7afca2d8c9d833de159a14b333",
+      "base_git_blob": "6ca8e5f91f08095e4a636f0265991cb68098836d"
+    },
+    "frontend/source/findzia-home.liquid": {
+      "sha256": "ec6605c3369fd40141f3477a4dc1bf5486b5c8cfbf481e7c6c87a3f1e4f60685",
+      "base_git_blob": "3d364386e7149be241ec55d8db5d6246f332b85f"
+    },
+    "frontend/source/findzia-shell.js": {
+      "sha256": "88b54fcd18d61cab0dc1f6d9e5f6f8fa066cae04332c331979eae0898f39bc86",
+      "base_git_blob": "3139bca59dbca34960c6865f60df07d6ebca000b"
+    },
+    "frontend/source/findzia-filters.js": {
+      "sha256": "628cefdcbe43070fd6f9c5704097f51377b3c86e81fafc83305514263bbb7bc4",
+      "base_git_blob": "12038e30e9c17f6060abf3f87e80da2a88d2aa65"
+    },
+    "frontend/source/findzia-billing.js": {
+      "sha256": "04f59038d3c6c1ecb7060f8e8d0a3cc1cda7a57dc2b591c02eac840e7f014dfc",
+      "base_git_blob": "187ff2c62db988a8c073df717a9c9d9ef3d82d91"
+    }
+  }
+}
