@@ -4,6 +4,9 @@ import os
 from pathlib import Path
 import threading
 import time
+import re
+import urllib.parse
+from types import SimpleNamespace
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
@@ -63,7 +66,8 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(args['headers'], {'Authorization': 'Bearer primary-secret'})
         self.assertNotIn('api_key', args['params'])
         self.assertFalse(args['allow_redirects'])
-        self.assertGreaterEqual(args['timeout'][1], 6)
+        self.assertEqual(self.router.threshold, 8)
+        self.assertGreaterEqual(args['timeout'][1], 8)
         self.assertEqual((args['params']['gl'], args['params']['hl']), ('kw', 'ar'))
 
     def test_errors_switch_once_without_retry(self):
@@ -112,10 +116,11 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(result['search_metadata']['provider'], 'serpapi')
         release.set()
         self.router.primary_pool.pool.shutdown(wait=True)
-        self.assertEqual(self.search()['organic_results'][0]['title'], 'Product')
+        self.assertEqual(self.search()['organic_results'][0]['title'], 'LATE')
+        self.assertIn('searchapi_late_cached', self.events)
 
     def test_total_deadline_bounds_stalled_backup(self):
-        self.router.threshold, self.router.total = .02, .12
+        self.router.threshold, self.router.total, self.router.backup_min = .02, .12, .01
         self.responses.append(Response(503))
         release = threading.Event()
         self.addCleanup(release.set)
@@ -178,6 +183,55 @@ class ProviderTests(unittest.TestCase):
         self.search()
         self.assertEqual(len(self.http), 2)
 
+
+    def test_eight_seconds_is_configurable_above_old_cap(self):
+        with patch.dict(os.environ, {'SEARCHAPI_FALLBACK_AFTER_SECONDS': '9'}):
+            router = SearchApiRouter(cache_get=self.cache.get, cache_put=lambda *a, **k: None,
+                                     cost=self.events.append, log=self.logs.append)
+        self.addCleanup(router.primary_pool.pool.shutdown)
+        self.addCleanup(router.backup_pool.pool.shutdown)
+        self.assertEqual(router.threshold, 9)
+
+    def test_short_tasks_keep_primary_time_and_do_not_damage_health(self):
+        waits = []
+        def primary(params, seconds):
+            waits.append(seconds)
+            return None, 'timeout', 0
+        self.router._primary = primary
+        for _ in range(4):
+            self.assertIsNone(self.router.search(self.params, 2, self.fallback))
+        self.assertTrue(all(1.9 < seconds <= 2 for seconds in waits))
+        self.assertFalse(self.backups)
+        self.assertFalse(self.router.snapshot()['open_circuits'])
+
+    def test_invalid_request_does_not_buy_backup_or_open_circuit(self):
+        for _ in range(4):
+            self.responses.append(Response(400))
+            self.assertIsNone(self.search())
+        self.assertFalse(self.backups)
+        self.assertFalse(self.router.snapshot()['open_circuits'])
+
+    def test_late_primary_reused_without_another_http_request(self):
+        entered, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+        calls = []
+        def get(*args, **kwargs):
+            calls.append(1); entered.set(); release.wait(1)
+            return Response()
+        self.router.get = get
+        self.router.threshold = .03
+        self.assertIsNone(self.router.search(self.params, .04, self.fallback))
+        self.router.threshold = .3
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            second = pool.submit(self.search)
+            limit = time.monotonic()+1
+            while 'searchapi_late_reused' not in self.events and time.monotonic()<limit:
+                threading.Event().wait(.002)
+            release.set()
+            self.assertEqual(second.result()['search_metadata']['provider'], 'searchapi')
+        self.assertEqual(len(calls), 1)
+        self.assertFalse(self.backups)
+        self.assertEqual(self.events.count('searchapi_http_200'), 1)
 
 class SchemaTests(unittest.TestCase):
     def test_baidu_language_codes_and_shopping_light(self):
@@ -254,7 +308,7 @@ class MainIntegrationTests(unittest.TestCase):
             return {'search_metadata': {'provider': 'searchapi'}, 'organic_results': []}
         ns = self.functions('_fast_provider_search', _SEARCHAPI_ROUTER=router,
             _serpapi_cached_json=request, SERPAPI_API_KEY='backup', COUNTRY_NAMES={'kw': 'Kuwait'},
-            _web_model_tokens_from_listing=lambda q: ['M3'])
+            _web_model_tokens_from_listing=lambda q: ['M3'], _shopping_gl_supported=lambda cc: True)
         for kind, expected in [('search', 'google'), ('images', 'google_images'), ('shopping', 'google_shopping')]:
             data = ns['_fast_provider_search']('serper_'+kind, 'MacBook M3', 'kw', 'ar', 8, page=2)
             self.assertEqual(calls[-1]['engine'], expected)
@@ -287,6 +341,73 @@ class MainIntegrationTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertGreater(sum(calls[0][-1]), 11)
 
+
+    def test_unsupported_shopping_is_skipped_before_paid_transport(self):
+        ns = self.functions('_fast_provider_search',
+            _SEARCHAPI_ROUTER=SimpleNamespace(enabled=True),
+            _shopping_gl_supported=lambda cc: cc != 'kw',
+            _log_unsupported_shopping_gl=lambda cc: None)
+        result = ns['_fast_provider_search']('serper_shopping', 'vase', 'kw', 'ar', 10)
+        self.assertEqual(result['shopping_results'], [])
+        self.assertEqual(result['search_metadata']['skipped'], 'unsupported_market')
+
+    def test_china_plan_keeps_two_languages_and_shein_images(self):
+        router = SimpleNamespace(enabled=True, economy=True)
+        ns = self.functions('_searchapi_global_catalog_kinds', _SEARCHAPI_ROUTER=router)
+        kinds = ns['_searchapi_global_catalog_kinds']('cn')
+        self.assertEqual(len(kinds), 4)
+        self.assertIn('global_fast::en', kinds)
+        self.assertIn('global_fast::zh-cn', kinds)
+        self.assertIn('global_fast_images:shein.com:en', kinds)
+        self.assertIn('global_fast_images:shein.com:zh-cn', kinds)
+        self.assertIsNone(ns['_searchapi_global_catalog_kinds']('us'))
+        router.economy = False
+        self.assertIsNone(ns['_searchapi_global_catalog_kinds']('cn'))
+
+    def test_china_grouped_query_keeps_all_approved_stores(self):
+        calls = []
+        stores = (('AliExpress','aliexpress.com'),('Temu','temu.com'),('SHEIN','shein.com'),('Alibaba','alibaba.com'))
+        def fast(*args):
+            calls.append(args)
+            return {'organic_results': []}
+        ns = self.functions('_global_discovery_request', GLOBAL_MARKET_STORES={'cn': stores},
+            FAST_PROVIDERS=['serper'], _fast_provider_supports_operators=lambda p: True,
+            _web_market=lambda cc: {'country':cc}, _web_catalog_scope=lambda d: 'site:'+d,
+            _market_query_wait=lambda *a: None, _market_query_cached=lambda *a: None,
+            _market_query_static=lambda q, hl: {'query': '花瓶' if hl=='zh-cn' else 'vase'},
+            _fast_provider_search=fast, TEXT_DIRECT_TRANSLATION_WAIT=1,
+            FAST_PROVIDER_TIMEOUT_SECONDS=8, _local_discovery_rows=lambda *a: [])
+        for hl in ('en', 'zh-cn'):
+            ns['_global_discovery_request']('vase', 'cn', 'global_fast::'+hl, 12)
+        self.assertEqual(len(calls), 2)
+        for call in calls:
+            for _, domain in stores:
+                self.assertIn('site:'+domain, call[1])
+        self.assertEqual(calls[0][3], 'en')
+        self.assertEqual(calls[1][3], 'zh-cn')
+        self.assertIn('花瓶', calls[1][1])
+
+    def test_recovery_batches_four_listings_into_one_paid_query(self):
+        calls=[]
+        router=SimpleNamespace(enabled=True,economy=True)
+        ns = self.functions('_web_targeted_price_updates', re=re, urllib=urllib,
+            ThreadPoolExecutor=ThreadPoolExecutor, MARKET_CTX=SimpleNamespace(),
+            _SEARCHAPI_ROUTER=router, _indexed_recovery_allowed=lambda: True,
+            _web_price_url_key=lambda url:url, _web_shein_product_id=lambda url:'',
+            _global_store_match=lambda *a:False, _web_row_has_numeric_price=lambda row:False,
+            country_search_hl=lambda cc:'ar', SERPAPI_API_KEY='fake', WEB_LIVE_PRICE_WAIT=10,
+            FAST_PROVIDERS=['serper'], _fast_provider_supports_operators=lambda p:True,
+            _fast_provider_search=lambda *a: calls.append(a) or {},
+            _web_indexed_media_records=lambda d:[])
+        entries={str(i):{'url':f'https://shop.example/product/{123456+i}',
+                 'title':f'Vase {i}', 'country':'kw'} for i in range(4)}
+        self.assertEqual(ns['_web_targeted_price_updates'](entries,'ar',{'country':'kw'}),{})
+        self.assertEqual(len(calls),1)
+        self.assertTrue(all(str(123456+i) in calls[0][1] for i in range(4)))
+        self.assertIn(' OR ',calls[0][1])
+        router.economy=False;calls.clear()
+        ns['_web_targeted_price_updates'](entries,'ar',{'country':'kw'})
+        self.assertEqual(len(calls),4)
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

@@ -1,21 +1,18 @@
 {
-  "base_repository": "alhusayan/coop-bot-G",
-  "base_commit": "482fa5d30c80c30aeafc9bc7f6c44e2e3b7ad80e",
-  "base_main_blob": "ffc85eda70acfbb1681c01f057dbaaf90c80fae8",
-  "build": "v128.5.42.42-searchapi-primary",
-  "deployed": false,
-  "provider_tests": 20,
-  "existing_quality_tests": 9,
-  "startup_check": "passed",
-  "integrated_lens_mock": "passed",
-  "new_paid_requests": 0,
+  "build": "v128.5.42.43-searchapi-credit-guard",
+  "base_commit": "3fa7681bf82bb72c479c11f44335d3a8eb964185",
+  "deployment_status": "not_deployed",
+  "validation": "28 adapter/integration tests + 9 existing quality tests + offline startup and actual China coordinator smoke",
+  "live_provider_tests": false,
+  "savings_measured_live": false,
   "sha256": {
-    "main.py": "2b25bf09e39f49af5669d7298d0fbba30190581fb5d2ec7caab67daae56c6da5",
-    "findzia_searchapi.py": "1381b6dab68b46a2b6b5924041738d02360ad731ce282bd42d3c5677200d59b4",
-    "test_searchapi.py": "65a2f7871f57bcda36f8f53bd85329e4496f4e3939d1374eed80b5197aef3b59",
-    "INSTALL_AR.txt": "5b7f5e56320ee44d88b9d45007a84b064eb0c7ce509f16fac3325fd8c23288b0",
-    "main.patch": "844cc8603f59478920c539f8e117002f974f1faeadd006ddb59b58d8db4214bf",
-    "verification/provider-tests.log": "6e2d9775d19874e1912f5e72df5798f96e85be0079ac34acca5230479610d3de",
-    "verification/startup-and-regression.log": "4c57d1fccd827104309b4d1e5060f86d8b22e987e44a286110fc9d85baaca134"
+    "main.py": "301e8a114c2b1c855b3f05dfc06911433fbfd08a30c99c1bcbc7d64bbdb624db",
+    "findzia_searchapi.py": "58ea277475f0bbf7a217dfb744224ae2c75e18f6d71377c1a710415604fcf01b",
+    "test_searchapi.py": "053f0f1c486dceeb633b265bc419a88c9766b3389fe9fce05287cbf9624e0563",
+    "INSTALL_AR.txt": "ee670f099c3e975d3b85c39c13a2b5b644b7f76fa7938d797bcc7b3fbf730788",
+    "main.patch": "ef1c4ecfb7dc6fb2f85100e557cf02c545ed8a49f924758177eb188ec0f26d48",
+    "findzia_searchapi.patch": "d401a28e30a184cff225c8a1d6c9d7299e0c3adef32c75a1d62996aee974e301",
+    "verification/provider-tests.log": "0b351b84e5867e19a9a18b5c31deb1abd4442da730ee9d63fe05e956436c24e0",
+    "verification/startup-and-regression.log": "3a83c7319d8669753df996293540cf102d1ef8531a7a7c28c1f36c309bcf8ea7"
   }
 }

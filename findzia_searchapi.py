@@ -179,8 +179,10 @@ class SearchApiRouter:
         self.backup_key = os.environ.get('SERPAPI_API_KEY', '').strip()
         self.enabled = bool(self.key and self.backup_key) and os.environ.get(
             'SEARCHAPI_PRIMARY_ENABLED', 'true').lower() in ('1', 'true', 'yes', 'on')
-        self.threshold = _number('SEARCHAPI_FALLBACK_AFTER_SECONDS', 6., .1, 6.)
+        self.threshold = _number('SEARCHAPI_FALLBACK_AFTER_SECONDS', 8., .1, 15.)
         self.total = _number('SEARCHAPI_TOTAL_TIMEOUT_SECONDS', 18., 1., 30.)
+        self.backup_min = _number('SEARCHAPI_BACKUP_MIN_SECONDS', 4., .1, 15.)
+        self.economy = os.environ.get('SEARCHAPI_ECONOMY_ENABLED', 'true').lower() in ('1', 'true', 'yes', 'on')
         self.cooldown = _number('SEARCHAPI_CIRCUIT_SECONDS', 30., 1., 300.)
         self.workers = int(_number('SEARCHAPI_MAX_INFLIGHT', 32., 2., 64.))
         self.cache_get, self.cache_put, self.cost = cache_get, cache_put, cost
@@ -188,7 +190,7 @@ class SearchApiRouter:
         self.primary_pool = _BoundedPool(self.workers, 'searchapi-http')
         self.backup_pool = _BoundedPool(self.workers, 'search-rescue')
         self.lock = threading.Lock()
-        self.inflight, self.circuits = {}, {}
+        self.inflight, self.circuits, self.late = {}, {}, {}
 
     def snapshot(self):
         with self.lock:
@@ -196,14 +198,19 @@ class SearchApiRouter:
             circuits = {k: round(max(0., v[1] - now), 2) for k, v in self.circuits.items() if v[1] > now}
         return {'enabled': self.enabled, 'primary': 'searchapi' if self.enabled else 'legacy',
                 'fallback': 'serpapi', 'fallback_after_seconds': self.threshold,
-                'total_timeout_seconds': self.total, 'open_circuits': circuits}
+                'total_timeout_seconds': self.total, 'backup_min_seconds': self.backup_min,
+                'economy_enabled': self.economy, 'open_circuits': circuits}
 
-    def _health(self, engine, ok, status=0):
+    def _health(self, engine, ok, status=0, *, short_deadline=False):
         with self.lock:
             count, until = self.circuits.get(engine, (0, 0.))
             if ok:
                 self.circuits[engine] = (0, 0.)
             else:
+                # A caller's short enrichment budget and invalid request options
+                # are not evidence that the engine is unavailable.
+                if status == 400 or (short_deadline and not status):
+                    return
                 count += 1
                 if count >= 3 or status in (401, 402, 403, 429):
                     until = time.monotonic() + self.cooldown
@@ -211,7 +218,10 @@ class SearchApiRouter:
 
     def _primary(self, params, seconds):
         response = None
+        started = time.monotonic()
         self.cost('searchapi_http_requests')
+        self.cost('searchapi_engine_' + params['engine'])
+        self.log('SEARCHAPI REQUEST engine=' + params['engine'] + ' wait_seconds=' + str(round(seconds, 2)))
         try:
             connect = min(1.5, seconds / 4)
             response = self.get('https://www.searchapi.io/api/v1/search', params=params,
@@ -220,6 +230,9 @@ class SearchApiRouter:
                                 allow_redirects=False)
             if response.status_code != 200:
                 return None, 'http_' + str(response.status_code), response.status_code
+            # Count provider HTTP successes, including those arriving after the
+            # caller stopped waiting. This is a diagnostic, not a billing claim.
+            self.cost('searchapi_http_200')
             data = normalize(response.json(), params['engine'])
             return (data, '', 200) if data is not None else (None, 'invalid_response', 200)
         except requests.exceptions.Timeout:
@@ -229,8 +242,34 @@ class SearchApiRouter:
         except Exception:
             return None, 'connection', 0
         finally:
+            self.log('SEARCHAPI RESPONSE engine=' + params['engine'] +
+                     ' status=' + str(response.status_code if response is not None else 0) +
+                     ' elapsed_ms=' + str(round((time.monotonic()-started)*1000)))
             if response is not None:
                 response.close()
+
+    def _retain_late(self, key, engine, future, bypass):
+        if bypass:
+            return
+        with self.lock:
+            if self.late.get(key) is future:
+                return
+            self.late[key] = future
+        def finished(done):
+            try:
+                data, _, _ = done.result()
+                if data is not None:
+                    # Save paid work for subsequent requests, without changing
+                    # the result already delivered to the current caller.
+                    self.cache_put(key, engine, data, ttl_seconds=None)
+                    self.cost('searchapi_late_cached')
+            except Exception:
+                pass
+            finally:
+                with self.lock:
+                    if self.late.get(key) is done:
+                        self.late.pop(key, None)
+        future.add_done_callback(finished)
 
     def search(self, params, timeout, fallback, *, label='', return_error=False):
         mapped = searchapi_params(params)
@@ -269,25 +308,32 @@ class SearchApiRouter:
             with self.lock:
                 circuit = self.circuits.get(mapped['engine'], (0, 0.))[1] > time.monotonic()
             remaining = deadline - time.monotonic()
-            # Full searches get the requested 6s threshold. Short enrichment
-            # tasks switch earlier, preserving their existing total deadline.
-            primary_seconds = self.threshold if remaining >= self.threshold + 1. else max(0., remaining * .6)
+            # Give short tasks their entire remaining budget, rather than
+            # cutting them at 60% and buying a rescue with only 1-2s to run.
+            primary_seconds = max(0., min(self.threshold, remaining))
             reason, status = ('circuit_open', 0) if circuit else ('capacity', 0)
             future = None
             if not circuit and primary_seconds > .01:
-                future = self.primary_pool.submit(self._primary, mapped, primary_seconds)
+                with self.lock:
+                    future = None if bypass else self.late.get(key)
+                if future is not None:
+                    self.cost('searchapi_late_reused')
+                else:
+                    future = self.primary_pool.submit(self._primary, mapped, primary_seconds)
             if future is not None:
                 try:
                     result, reason, status = future.result(timeout=primary_seconds)
                 except TimeoutError:
                     reason = 'deadline'
-                    future.cancel()  # Running HTTP may finish upstream; never publish it later.
+                    self._retain_late(key, mapped['engine'], future, bypass)
                 except Exception:
                     reason = 'connection'
-                self._health(mapped['engine'], result is not None, status)
+                self._health(mapped['engine'], result is not None, status,
+                             short_deadline=primary_seconds < self.threshold - .01)
             if result is None:
                 remaining = deadline - time.monotonic()
-                if remaining <= .05:
+                if status == 400 or remaining < self.backup_min:
+                    self.cost('searchapi_rescue_skipped')
                     return self._failure(return_error)
                 self.cost('searchapi_fallback_requests')
                 self.log('SEARCH FALLBACK primary=searchapi backup=serpapi engine=' + mapped['engine'] + ' reason=' + reason)

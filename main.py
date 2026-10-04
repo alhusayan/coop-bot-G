@@ -394,7 +394,7 @@ from findzia_billing import CreditMiddleware, install_billing
 app.add_middleware(CreditMiddleware, owner=app)
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization', 'X-Findzia-Request-Id'], max_age=86400)
-BUILD_ID = 'v128.5.42.42-searchapi-primary'
+BUILD_ID = 'v128.5.42.43-searchapi-credit-guard'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -6165,7 +6165,8 @@ def _local_fast_discovery_kinds(country, query):
             kinds.append(f'{provider}_search:{hl}')
             if FAST_PROVIDER_IMAGES:
                 kinds.append(f'{provider}_images:{hl}')
-            if provider == 'serper' and FAST_PROVIDER_SHOPPING and country != 'cn':
+            if (provider == 'serper' and FAST_PROVIDER_SHOPPING and country != 'cn'
+                and (not _SEARCHAPI_ROUTER.enabled or _shopping_gl_supported(country))):
                 kinds.append(f'serper_shopping:{hl}')
             if not _fast_provider_supports_operators(provider):
                 continue
@@ -6518,6 +6519,15 @@ def _global_discovery_request(query, country, kind, timeout_seconds, image_disco
     return rows
 
 
+def _searchapi_global_catalog_kinds(country):
+    if not (_SEARCHAPI_ROUTER.enabled and _SEARCHAPI_ROUTER.economy and country == 'cn'):
+        return None
+    # Every approved store remains in each organic query, in both languages.
+    # Retain SHEIN image lanes, instead of 2 paid organic queries per store.
+    return ('global_fast::en', 'global_fast::zh-cn',
+            'global_fast_images:shein.com:en', 'global_fast_images:shein.com:zh-cn')
+
+
 def _global_market_discovery(query, country, limit=32, timeout_seconds=None, progress_callback=None, cancel_event=None, image_discovery=False):
     """Legacy/WhatsApp global discovery shares the same whitelist and deadline."""
     if not (SERPAPI_API_KEY or FAST_PROVIDERS or _INDEPENDENT.available('brave_search')) or not query or country not in GLOBAL_MARKET_STORES:
@@ -6540,6 +6550,10 @@ def _global_market_discovery(query, country, limit=32, timeout_seconds=None, pro
         kinds = tuple('global2:' + domain + ':' + hl for _, domain in GLOBAL_MARKET_STORES[country] for hl in ('en', 'zh-cn')) + ('global:shein.com:en', 'global:shein.com:zh-cn')
     else:
         kinds = ('global', 'global2') + (('global_fast',) if FAST_PROVIDERS else ())
+    economic_kinds = _searchapi_global_catalog_kinds(country)
+    if economic_kinds is not None:
+        print(f'SEARCHAPI CATALOG PLAN country={country} before={len(kinds)} after={len(economic_kinds)} bilingual=True')
+        kinds = economic_kinds
     if not SERPAPI_API_KEY:
         kinds = tuple(kind for kind in kinds if kind.startswith('global_fast') and FAST_PROVIDERS)
     jobs = {LOCAL_DISCOVERY_POOL.submit(run, kind) for kind in kinds}
@@ -20154,9 +20168,11 @@ def _web_targeted_price_updates(entries, lang, market, *, image_only=False):
             print('EXACT-LISTING lookup_failed=' + type(exc).__name__)
             return {}
     lookup_terms = list(dict.fromkeys(terms))[:4]
+    if _SEARCHAPI_ROUTER.enabled and _SEARCHAPI_ROUTER.economy:
+        lookup_terms = ['(' + ' OR '.join(lookup_terms) + ')']
     if provider:
         params['engine'] = provider + ('_images' if image_source else '_search')
-    # At most four parallel requests per already bounded recovery batch.
+    # Economy mode uses one grouped lookup per already bounded batch.
     with ThreadPoolExecutor(max_workers=min(4, len(lookup_terms))) as pool:
         responses = list(pool.map(lookup, lookup_terms))
     data = {'organic_results': [item for response in responses for item in _web_indexed_media_records(response)]}
@@ -21901,6 +21917,8 @@ if SEARCH_PROVIDER_PRIMARY not in ('serper', 'serpapi', 'both') or (SEARCH_PROVI
 if _SEARCHAPI_ROUTER.enabled:
     FAST_PROVIDERS = ['serper']
     SEARCH_PROVIDER_PRIMARY = 'searchapi'
+    # Fast caller defaults must not silently reduce the new 8s primary window.
+    FAST_PROVIDER_TIMEOUT_SECONDS = max(FAST_PROVIDER_TIMEOUT_SECONDS, _SEARCHAPI_ROUTER.threshold)
 SERPAPI_BACKUP_ENABLED = True if _SEARCHAPI_ROUTER.enabled else env_bool('SERPAPI_BACKUP_ENABLED', True)
 SERPAPI_BACKUP_MIN_ROWS = max(0, min(20, int(os.environ.get('SERPAPI_BACKUP_MIN_ROWS', '4'))))
 SERPAPI_BACKUP_WINDOW_SECONDS = max(2., min(15., float(os.environ.get('SERPAPI_BACKUP_WINDOW_SECONDS', '6'))))
@@ -22126,6 +22144,9 @@ def _fast_provider_search(engine, wording, country, hl, timeout, page=1):
         mapped_engine = {'search': 'google', 'images': 'google_images', 'shopping': 'google_shopping'}.get(kind)
         if not mapped_engine:
             return None
+        if kind == 'shopping' and not _shopping_gl_supported(country):
+            _log_unsupported_shopping_gl(country)
+            return {'shopping_results': [], 'search_metadata': {'provider': 'searchapi', 'status': 'Success', 'skipped': 'unsupported_market'}}
         params = {'engine': mapped_engine, 'q': wording, 'gl': country, 'hl': hl,
                   'api_key': SERPAPI_API_KEY}
         if kind == 'search':
@@ -22280,7 +22301,8 @@ def _web_text_direct_specs(query, country):
             add(country, 'local', provider + '_search', hl, geo_cue=hl == 'en')
             if FAST_PROVIDER_IMAGES:
                 add(country, 'local', provider + '_images', hl, geo_cue=hl == 'en')
-            if provider == 'serper' and FAST_PROVIDER_SHOPPING and country != 'cn':
+            if (provider == 'serper' and FAST_PROVIDER_SHOPPING and country != 'cn'
+                and (not _SEARCHAPI_ROUTER.enabled or _shopping_gl_supported(country))):
                 add(country, 'local', 'serper_shopping', hl)
     if not primary_serper:
         for hl in languages:
@@ -22612,7 +22634,8 @@ def _web_preferred_text_specs(query, country):
         add(country, 'local', f'{provider}_search', native if country == 'cn' else 'en', True)
         if FAST_PROVIDER_IMAGES:
             add(country, 'local', f'{provider}_images', native if country == 'cn' else 'en', True)
-        if provider == 'serper' and FAST_PROVIDER_SHOPPING and country != 'cn':
+        if (provider == 'serper' and FAST_PROVIDER_SHOPPING and country != 'cn'
+                and (not _SEARCHAPI_ROUTER.enabled or _shopping_gl_supported(country))):
             # Google's shopping units exist for markets without a Shopping tab
             # (Kuwait shows KWD cards); the log's rows= says whether it pays.
             add(country, 'local', 'serper_shopping', 'en')
@@ -22650,9 +22673,13 @@ def _web_preferred_text_specs(query, country):
             if cc == country or cc not in GLOBAL_MARKET_STORES:
                 continue
             if cc == 'cn' and operators:
-                for _, domain in GLOBAL_MARKET_STORES[cc]:
-                    add(cc, 'global', 'serper_search', 'en')
-                    specs[-1]['catalog_domain'] = domain
+                if _SEARCHAPI_ROUTER.enabled and _SEARCHAPI_ROUTER.economy:
+                    for hl in ('en', 'zh-cn'):
+                        add(cc, 'global', 'serper_search', hl)
+                else:
+                    for _, domain in GLOBAL_MARKET_STORES[cc]:
+                        add(cc, 'global', 'serper_search', 'en')
+                        specs[-1]['catalog_domain'] = domain
             else:
                 if FAST_PROVIDER_SHOPPING:
                     add(cc, 'global', 'serper_shopping', 'en')
