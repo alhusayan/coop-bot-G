@@ -1,46 +1,22 @@
 {
-  "build": "v128.5.42.46-social",
-  "base_build": "v128.5.42.45-hybrid-quality",
-  "base_main_git_blob": "c322f97bc334564add00ddd55dea919c6c134af6",
-  "created_utc": "2026-10-04",
+  "build": "v128.5.42.45-hybrid-quality",
+  "base_commit": "974291f738d140d535698a21eee996d0ccefab70",
   "deployment_status": "not_deployed",
-  "live_provider_validation": false,
-  "markets": [
-    "SA",
-    "GB",
-    "ES",
-    "IT",
-    "FR",
-    "AE",
-    "KW"
-  ],
-  "platforms": [
-    "Instagram"
-  ],
-  "runtime_update_files": [
-    "main.py",
-    "findzia_social.py",
-    "findzia-social-sources.json"
-  ],
-  "requires_existing_findzia_repository": true,
-  "tests": {
-    "social": 41,
-    "existing_regressions": 67,
-    "provider_calls": "mocked",
-    "result": "passed"
-  },
+  "validation": "67 offline regression tests + full application routing/cache startup smoke with live HTTP blocked",
+  "fixtures": "Synthetic reproductions of errors observed in user logs, not captured provider response bodies",
+  "live_provider_tests": false,
+  "savings_measured_live": false,
   "sha256": {
-    "main.py": "88c360b9bacb44c645eae22c46efd0b2700faaeb54422bcd43d7003c92fcb5d6",
-    "findzia_social.py": "3e8947fb206d521f58bad6fe824e1a02e74fbb58eac1fbf924b96d5221db34f2",
-    "findzia-social-sources.json": "fedf2db90404b8f23bdbf2788be2763ec2bbf461cbc9494d03f1f9bbc6babd82",
-    "INSTALL_SOCIAL_AR.txt": "a96f835c2235a6eead17f5dc4c6c2f1d2f8760e9ffadae7216bc9cbab6160f4d",
-    "social.env.example": "6fbe048d40b1ce5ac3baa4f124e788f1b2703a07296fdc7abb79b38f50e9d121",
-    "social-main.patch": "bd28070bacae2442d05fdfe0962e226fe9b9171e3bb11906145f01986fa1dfca",
-    "test_social.py": "7dfd48495b26e0cedc7f64926bbd0232dbcf9460c7ef0aa3cf221bb97a3ead96",
+    "main.py": "b737d73c08e8820d9f4f46c84e7536f9c0825f9ef2f26622c0534a29b747d903",
+    "findzia_searchapi.py": "5004069edc063e424308a0ef2fad7a08122ea3af3213b3a72f2dddcc5af40903",
     "test_searchapi.py": "24886cf551b544083866f099874a8144733d4deefebe32afdac546434da9a992",
     "test_hybrid.py": "822b96c8535caad208e3ad259ebf7b199facafcaaaf881e8d940feb333cc47a3",
     "test_hybrid_quality.py": "63fed4fac78e4d94f76cb4a884da45850c8dce97f7afa941658e4fe32e7bb3ff",
     "test_launch_review.py": "fcb52668f50c6bf39e7f183c2ad377e7853a095ab071136327f6b42bd894746c",
-    "verify_social_update.py": "0f18422dbca33bc56768eb6df97dab42f8b33e8c1ebb9d6bfd5ab9adf7316f46"
+    "INSTALL_AR.txt": "4f7c5142176347dd04b074ff8872c2a681ad38081cf1d5d1e13ed51828937c23",
+    "main.patch": "a9de6bd6771b67bb02107f08528aa8ad7824ba05f21456be784c09bbee7961e0",
+    "findzia_searchapi.patch": "de0f2d71bf3b7da47a37813fa978bb6262018d76a795a4d5e353aa3ba9fb36bc",
+    "verification/run_hybrid_offline.py": "df23b11e940b4330614e3992878e8ca8927841d48db812f1c515215bb75e1e47",
+    "verification/hybrid-quality-validation.log": "533e900646d6984db2daa928d99e44de8dea950d3213c2352b9d8e526b214a6d"
   }
 }
