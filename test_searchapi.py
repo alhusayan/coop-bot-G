@@ -297,6 +297,7 @@ class MainIntegrationTests(unittest.TestCase):
     def functions(self, *names, **context):
         nodes = [n for n in self.tree.body if isinstance(n, ast.FunctionDef) and n.name in names]
         self.assertEqual(len(nodes), len(names))
+        context.setdefault('_HYBRID_SEARCH', False)  # Legacy all-SearchApi mode coverage.
         exec(compile(ast.Module(body=nodes, type_ignores=[]), '<actual main functions>', 'exec'), context)
         return context
 

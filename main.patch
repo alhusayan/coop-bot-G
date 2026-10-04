@@ -4,114 +4,265 @@
  app.add_middleware(CreditMiddleware, owner=app)
  _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
  app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization', 'X-Findzia-Request-Id'], max_age=86400)
--BUILD_ID = 'v128.5.42.42-searchapi-primary'
-+BUILD_ID = 'v128.5.42.43-searchapi-credit-guard'
+-BUILD_ID = 'v128.5.42.43-searchapi-credit-guard'
++BUILD_ID = 'v128.5.42.44-hybrid-search'
  print('=' * 70)
  print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
  print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
-@@ -6165,7 +6165,8 @@
-             kinds.append(f'{provider}_search:{hl}')
+@@ -1756,7 +1756,7 @@
+             for secret in (str((params or {}).get('api_key') or ''), str(SERPAPI_API_KEY or '')):
+                 if secret:
+                     message = message.replace(secret, '[redacted]')
+-            message = re.sub(r'https?://\S+', '[url]', message)
++            message = re.sub(r'https?://\S+', '[url]', message)[:120]
+             message = re.sub(r'(?i)api[_ -]?key\s*[:=]\s*\S+', 'api_key=[redacted]', message)
+             message = re.sub(r'\s+', ' ', message)[:200]
+             search_id = str((data.get('search_metadata') or {}).get('id') or '')
+@@ -1891,18 +1891,39 @@
+                     event.set()
+ 
+ # The legacy SerpApi transport retains its cache, budget and account guards.
+-from findzia_searchapi import SearchApiRouter
++from findzia_searchapi import SearchApiRouter, SerperTransport
+ _SEARCHAPI_ROUTER = SearchApiRouter(cache_get=_serpapi_cache_get,
+     cache_put=_serpapi_cache_put, cost=_api_cost_record)
++_HYBRID_SEARCH = _SEARCHAPI_ROUTER.enabled and env_bool('SEARCHAPI_HYBRID_ENABLED', True)
++_HYBRID_SERPER = SerperTransport(cache_get=_serpapi_cache_get,
++    cache_put=_serpapi_cache_put, cost=_api_cost_record)
++
++def _searchapi_policy_snapshot():
++    return dict(_SEARCHAPI_ROUTER.snapshot(), scope=('lens' if _HYBRID_SEARCH else 'all') if _SEARCHAPI_ROUTER.enabled else 'legacy',
++                text_primary=('serper' if _HYBRID_SEARCH else 'searchapi') if _SEARCHAPI_ROUTER.enabled else 'legacy',
++                hybrid=_HYBRID_SEARCH, serper_configured=bool(os.environ.get('SERPER_API_KEY', '').strip()))
+ 
+ def _serpapi_cached_json(params, timeout, label='SERPAPI', *, return_error=False, retry_connect=False):
++    if _HYBRID_SEARCH:
++        engine = str(params.get('engine') or '')
++        if engine == 'google_lens':
++            return _SEARCHAPI_ROUTER.search(params, timeout, _serpapi_only_cached_json,
++                                           label=label, return_error=return_error)
++        if engine in _HYBRID_SERPER_ENGINES:
++            return _hybrid_serper_request(params, timeout, return_error=return_error)
++        # Native Baidu and provider-owned product tokens have no Serper equivalent.
++        # Preserve these existing specialist lanes; never send them to SearchApi.
++        _api_cost_record('hybrid_specialist_' + engine)
++        print('HYBRID SPECIALIST provider=serpapi engine=' + engine)
++        return _serpapi_only_cached_json(params, timeout, label=label,
++                                        return_error=return_error, retry_connect=False)
+     if _SEARCHAPI_ROUTER.enabled:
+         return _SEARCHAPI_ROUTER.search(params, timeout, _serpapi_only_cached_json,
+                                        label=label, return_error=return_error)
+     return _serpapi_only_cached_json(params, timeout, label=label,
+                                     return_error=return_error, retry_connect=retry_connect)
+ 
+-print('SEARCHAPI POLICY ' + json.dumps(_SEARCHAPI_ROUTER.snapshot()))
++print('SEARCHAPI POLICY ' + json.dumps(_searchapi_policy_snapshot()))
+ _serpapi_cache_db_init()
+ print(f'SERPAPI COST GUARD cache={SERPAPI_RESULT_CACHE_ENABLED} ttl={SERPAPI_RESULT_CACHE_TTL_SECONDS}s singleflight={SERPAPI_SINGLEFLIGHT_ENABLED} wait={SERPAPI_SINGLEFLIGHT_WAIT_SECONDS}s budget={SERPAPI_BUDGET_ENABLED}@{SERPAPI_BUDGET_USE_PERCENT}% fallback_hour={SERPAPI_BUDGET_FALLBACK_HOURLY} stable_lens_url=True')
+ 
+@@ -6166,7 +6187,7 @@
              if FAST_PROVIDER_IMAGES:
                  kinds.append(f'{provider}_images:{hl}')
--            if provider == 'serper' and FAST_PROVIDER_SHOPPING and country != 'cn':
-+            if (provider == 'serper' and FAST_PROVIDER_SHOPPING and country != 'cn'
-+                and (not _SEARCHAPI_ROUTER.enabled or _shopping_gl_supported(country))):
+             if (provider == 'serper' and FAST_PROVIDER_SHOPPING and country != 'cn'
+-                and (not _SEARCHAPI_ROUTER.enabled or _shopping_gl_supported(country))):
++                and (_HYBRID_SEARCH or not _SEARCHAPI_ROUTER.enabled or _shopping_gl_supported(country))):
                  kinds.append(f'serper_shopping:{hl}')
              if not _fast_provider_supports_operators(provider):
                  continue
-@@ -6518,6 +6519,15 @@
-     return rows
+@@ -6521,6 +6542,8 @@
  
- 
-+def _searchapi_global_catalog_kinds(country):
-+    if not (_SEARCHAPI_ROUTER.enabled and _SEARCHAPI_ROUTER.economy and country == 'cn'):
+ def _searchapi_global_catalog_kinds(country):
+     if not (_SEARCHAPI_ROUTER.enabled and _SEARCHAPI_ROUTER.economy and country == 'cn'):
 +        return None
-+    # Every approved store remains in each organic query, in both languages.
-+    # Retain SHEIN image lanes, instead of 2 paid organic queries per store.
-+    return ('global_fast::en', 'global_fast::zh-cn',
-+            'global_fast_images:shein.com:en', 'global_fast_images:shein.com:zh-cn')
-+
-+
- def _global_market_discovery(query, country, limit=32, timeout_seconds=None, progress_callback=None, cancel_event=None, image_discovery=False):
-     """Legacy/WhatsApp global discovery shares the same whitelist and deadline."""
-     if not (SERPAPI_API_KEY or FAST_PROVIDERS or _INDEPENDENT.available('brave_search')) or not query or country not in GLOBAL_MARKET_STORES:
-@@ -6540,6 +6550,10 @@
-         kinds = tuple('global2:' + domain + ':' + hl for _, domain in GLOBAL_MARKET_STORES[country] for hl in ('en', 'zh-cn')) + ('global:shein.com:en', 'global:shein.com:zh-cn')
-     else:
-         kinds = ('global', 'global2') + (('global_fast',) if FAST_PROVIDERS else ())
-+    economic_kinds = _searchapi_global_catalog_kinds(country)
-+    if economic_kinds is not None:
-+        print(f'SEARCHAPI CATALOG PLAN country={country} before={len(kinds)} after={len(economic_kinds)} bilingual=True')
-+        kinds = economic_kinds
-     if not SERPAPI_API_KEY:
-         kinds = tuple(kind for kind in kinds if kind.startswith('global_fast') and FAST_PROVIDERS)
-     jobs = {LOCAL_DISCOVERY_POOL.submit(run, kind) for kind in kinds}
-@@ -20154,9 +20168,11 @@
-             print('EXACT-LISTING lookup_failed=' + type(exc).__name__)
-             return {}
-     lookup_terms = list(dict.fromkeys(terms))[:4]
-+    if _SEARCHAPI_ROUTER.enabled and _SEARCHAPI_ROUTER.economy:
-+        lookup_terms = ['(' + ' OR '.join(lookup_terms) + ')']
-     if provider:
-         params['engine'] = provider + ('_images' if image_source else '_search')
--    # At most four parallel requests per already bounded recovery batch.
-+    # Economy mode uses one grouped lookup per already bounded batch.
-     with ThreadPoolExecutor(max_workers=min(4, len(lookup_terms))) as pool:
-         responses = list(pool.map(lookup, lookup_terms))
-     data = {'organic_results': [item for response in responses for item in _web_indexed_media_records(response)]}
-@@ -21901,6 +21917,8 @@
- if _SEARCHAPI_ROUTER.enabled:
++    if _HYBRID_SEARCH and not _fast_provider_supports_operators('serper'):
+         return None
+     # Every approved store remains in each organic query, in both languages.
+     # Retain SHEIN image lanes, instead of 2 paid organic queries per store.
+@@ -21912,14 +21935,20 @@
+ if SEARCH_PROVIDER_PRIMARY not in ('serper', 'serpapi', 'both') or (SEARCH_PROVIDER_PRIMARY == 'serper' and 'serper' not in FAST_PROVIDERS):
+     SEARCH_PROVIDER_PRIMARY = 'both' if FAST_PROVIDERS else 'serpapi'
+ # Keep the existing serper_* lane identifiers and downstream verification
+-# contracts; _fast_provider_search routes these to SearchApi before any cache
+-# or Serper HTTP call. Actual provider is always recorded in search_metadata.
+-if _SEARCHAPI_ROUTER.enabled:
++# contracts; hybrid mode routes ordinary index calls to Serper and Lens to
++# SearchApi. Actual provider is always recorded in search_metadata.
++if _HYBRID_SEARCH:
++    FAST_PROVIDERS = ['serper'] if SERPER_API_KEY else []
++    SEARCH_PROVIDER_PRIMARY = 'serper'
++    if not SERPER_API_KEY:
++        print('HYBRID CONFIG ERROR missing=SERPER_API_KEY text_routes_unavailable=True')
++elif _SEARCHAPI_ROUTER.enabled:
      FAST_PROVIDERS = ['serper']
      SEARCH_PROVIDER_PRIMARY = 'searchapi'
-+    # Fast caller defaults must not silently reduce the new 8s primary window.
-+    FAST_PROVIDER_TIMEOUT_SECONDS = max(FAST_PROVIDER_TIMEOUT_SECONDS, _SEARCHAPI_ROUTER.threshold)
- SERPAPI_BACKUP_ENABLED = True if _SEARCHAPI_ROUTER.enabled else env_bool('SERPAPI_BACKUP_ENABLED', True)
+     # Fast caller defaults must not silently reduce the new 8s primary window.
+     FAST_PROVIDER_TIMEOUT_SECONDS = max(FAST_PROVIDER_TIMEOUT_SECONDS, _SEARCHAPI_ROUTER.threshold)
+-SERPAPI_BACKUP_ENABLED = True if _SEARCHAPI_ROUTER.enabled else env_bool('SERPAPI_BACKUP_ENABLED', True)
++# Lens rescue is owned by SearchApiRouter. Disable old text rescue planners in hybrid mode.
++SERPAPI_BACKUP_ENABLED = False if _HYBRID_SEARCH else (True if _SEARCHAPI_ROUTER.enabled else env_bool('SERPAPI_BACKUP_ENABLED', True))
  SERPAPI_BACKUP_MIN_ROWS = max(0, min(20, int(os.environ.get('SERPAPI_BACKUP_MIN_ROWS', '4'))))
  SERPAPI_BACKUP_WINDOW_SECONDS = max(2., min(15., float(os.environ.get('SERPAPI_BACKUP_WINDOW_SECONDS', '6'))))
-@@ -22126,6 +22144,9 @@
+ # A SerpApi search needs a few seconds; launching it into a nearly spent budget
+@@ -21940,18 +21969,19 @@
+     return bool(SERPAPI_API_KEY) and not serper_primary() and not serpapi_provider_degraded()
+ 
+ 
+-print(f'FAST PROVIDER CONFIG providers={["searchapi"] if _SEARCHAPI_ROUTER.enabled else (FAST_PROVIDERS or "none (SerpApi only)")} timeout={FAST_PROVIDER_TIMEOUT_SECONDS}s'
++print(f'FAST PROVIDER CONFIG providers={["searchapi"] if _SEARCHAPI_ROUTER.enabled and not _HYBRID_SEARCH else (FAST_PROVIDERS or "none (SerpApi only)")} timeout={FAST_PROVIDER_TIMEOUT_SECONDS}s'
+       f' num={FAST_PROVIDER_NUM} images={FAST_PROVIDER_IMAGES} shopping={FAST_PROVIDER_SHOPPING}')
+ print(f'SEARCH PROVIDER POLICY primary={SEARCH_PROVIDER_PRIMARY} serpapi_backup={SERPAPI_BACKUP_ENABLED}'
+       f' backup_min_rows={SERPAPI_BACKUP_MIN_ROWS} backup_window={SERPAPI_BACKUP_WINDOW_SECONDS}s lens={"searchapi" if _SEARCHAPI_ROUTER.enabled else "serpapi"}'
+-      f' serpapi_recovery={"off" if serper_primary() else "on"}')
++      f' serpapi_recovery={"off" if serper_primary() else "on"} hybrid={_HYBRID_SEARCH}'
++      f' lens_backup=serpapi lens_fallback_after={_SEARCHAPI_ROUTER.threshold}s')
+ 
+ 
+ _FAST_PROVIDER_FLAGS = {}
+ 
+ 
+ def _fast_provider_supports_operators(provider):
+-    return _SEARCHAPI_ROUTER.enabled or not (provider == 'serper' and _FAST_PROVIDER_FLAGS.get('serper_no_operators'))
++    return (_SEARCHAPI_ROUTER.enabled and not _HYBRID_SEARCH) or not (provider == 'serper' and _FAST_PROVIDER_FLAGS.get('serper_no_operators'))
+ 
+ 
+ def _fast_price_number(value, currency=''):
+@@ -21984,28 +22014,81 @@
+     return {'top': block}
+ 
+ 
++_HYBRID_SERPER_ENGINES = {
++    'google': 'search', 'google_light': 'search', 'serper_search': 'search',
++    'google_images': 'images', 'google_images_light': 'images', 'serper_images': 'images',
++    'google_shopping': 'shopping', 'google_shopping_light': 'shopping', 'serper_shopping': 'shopping',
++}
++
++
++def _hybrid_serper_request(params, timeout, *, return_error=False):
++    """Route every ordinary Google index lane through the same Serper cache."""
++    kind = _HYBRID_SERPER_ENGINES.get(params.get('engine'))
++    def failure(reason):
++        return {'error': reason, '_serpapi_failure': {'provider': 'serper', 'reason': reason}} if return_error else None
++    if not kind or not SERPER_API_KEY:
++        return failure('serper_not_configured' if not SERPER_API_KEY else 'unsupported_serper_engine')
++    wording = str(params.get('q') or '').strip()
++    if not wording:
++        return failure('empty_query')
++    if not _fast_provider_supports_operators('serper') and re.search(r'\bsite:', wording, re.I):
++        _api_cost_record('serper_operator_skipped')
++        return failure('serper_operators_unavailable')
++    body = {'q': wording, 'gl': params.get('gl') or 'us', 'hl': params.get('hl') or 'en',
++            'num': max(1, min(100, int(params.get('num') or FAST_PROVIDER_NUM)))}
++    page = max(1, int(params.get('page') or (int(params.get('start') or 0)//10 + 1)))
++    if page > 1:
++        body['page'] = page
++    location = params.get('location') or (COUNTRY_NAMES.get(body['gl']) if kind != 'images' else '')
++    if location:
++        body['location'] = location
++    exact = params.get('nfpr', bool(_web_model_tokens_from_listing(wording)))
++    if str(exact).lower() in ('1', 'true'):
++        body['autocorrect'] = False
++    if 'autocorrect' in params:
++        body['autocorrect'] = params['autocorrect']
++    if params.get('tbs'):
++        body['tbs'] = params['tbs']
++    data = _HYBRID_SERPER.search(kind, body, timeout, _serper_json, _serper_to_serpapi,
++        bypass=str(params.get('no_cache', '')).lower() in ('1', 'true'))
++    return data if isinstance(data, dict) else failure('serper_unavailable')
++
++
+ def _serper_json(path, body, timeout):
+     """POST to Serper.dev; returns the parsed JSON or None. Never logs the key."""
+     began = time.monotonic()
++    r = None
++    _api_cost_record('serper_http_requests')
++    _api_cost_record('serper_engine_' + path)
+     try:
+         r = requests.post(f'https://google.serper.dev/{path}', json=body, timeout=timeout,
+                           headers={'X-API-KEY': SERPER_API_KEY, 'Content-Type': 'application/json'})
+         status = r.status_code
+         data = r.json() if status < 500 else {}
+-        r.close()
+     except requests.exceptions.Timeout:
+         print(f'FAST PROVIDER FAILURE provider=serper path={path} reason=timeout elapsed_ms={int((time.monotonic()-began)*1000)}')
+         return None
+     except Exception as exc:
+         print(f'FAST PROVIDER FAILURE provider=serper path={path} reason={type(exc).__name__} elapsed_ms={int((time.monotonic()-began)*1000)}')
+         return None
++    finally:
++        if r is not None:
++            r.close()
+     if status != 200 or not isinstance(data, dict):
+-        message = re.sub(r'\s+', ' ', str((data or {}).get('message') or (data or {}).get('error') or ''))[:120] if isinstance(data, dict) else ''
++        message = re.sub(r'\s+', ' ', str((data or {}).get('message') or (data or {}).get('error') or '')) if isinstance(data, dict) else ''
++        if SERPER_API_KEY:
++            message = message.replace(SERPER_API_KEY, '[redacted]')
++        message = re.sub(r'https?://\S+', '[url]', message)
+         print(f'FAST PROVIDER FAILURE provider=serper path={path} reason=http_{status} elapsed_ms={int((time.monotonic()-began)*1000)} message={message!r}')
+         if status == 400 and 'pattern not allowed' in message.lower() and not _FAST_PROVIDER_FLAGS.get('serper_no_operators'):
+             _FAST_PROVIDER_FLAGS['serper_no_operators'] = True
+             print('FAST PROVIDER NOTE serper plan rejects search operators (site:) -> scoped global lane disabled for this process')
+         return None
++    _api_cost_record('serper_http_200')
++    credits = data.get('credits')
++    if type(credits) in (int, float) and credits >= 0 and credits < 10000 and float(credits).is_integer():
++        _api_cost_record('serper_reported_credits', int(credits))
++    print(f'SERPER RESPONSE kind={path} status=200 elapsed_ms={int((time.monotonic()-began)*1000)}')
+     return data
+ 
+ 
+@@ -22140,6 +22223,9 @@
+     """engine: serper_search|serper_images|serper_shopping|cse_search|cse_images."""
+     provider, kind = engine.split('_', 1)
+     page = max(1, min(2, int(page)))
++    if _HYBRID_SEARCH:
++        return _hybrid_serper_request({'engine': 'serper_'+kind, 'q': wording,
++            'gl': country, 'hl': hl, 'page': page}, timeout)
+     if _SEARCHAPI_ROUTER.enabled:
          mapped_engine = {'search': 'google', 'images': 'google_images', 'shopping': 'google_shopping'}.get(kind)
          if not mapped_engine:
-             return None
-+        if kind == 'shopping' and not _shopping_gl_supported(country):
-+            _log_unsupported_shopping_gl(country)
-+            return {'shopping_results': [], 'search_metadata': {'provider': 'searchapi', 'status': 'Success', 'skipped': 'unsupported_market'}}
-         params = {'engine': mapped_engine, 'q': wording, 'gl': country, 'hl': hl,
-                   'api_key': SERPAPI_API_KEY}
-         if kind == 'search':
-@@ -22280,7 +22301,8 @@
-             add(country, 'local', provider + '_search', hl, geo_cue=hl == 'en')
+@@ -22302,7 +22388,7 @@
              if FAST_PROVIDER_IMAGES:
                  add(country, 'local', provider + '_images', hl, geo_cue=hl == 'en')
--            if provider == 'serper' and FAST_PROVIDER_SHOPPING and country != 'cn':
-+            if (provider == 'serper' and FAST_PROVIDER_SHOPPING and country != 'cn'
-+                and (not _SEARCHAPI_ROUTER.enabled or _shopping_gl_supported(country))):
+             if (provider == 'serper' and FAST_PROVIDER_SHOPPING and country != 'cn'
+-                and (not _SEARCHAPI_ROUTER.enabled or _shopping_gl_supported(country))):
++                and (_HYBRID_SEARCH or not _SEARCHAPI_ROUTER.enabled or _shopping_gl_supported(country))):
                  add(country, 'local', 'serper_shopping', hl)
      if not primary_serper:
          for hl in languages:
-@@ -22612,7 +22634,8 @@
-         add(country, 'local', f'{provider}_search', native if country == 'cn' else 'en', True)
+@@ -22323,7 +22409,7 @@
+     elif country == 'us':
+         for offset in (0, 6):
+             add(country, 'local', scoped, 'en', domestic_scope=True, store_offset=offset)
+-    if SERPAPI_API_KEY and not degraded and ENABLE_GOOGLE_SHOPPING and _shopping_gl_supported(country):
++    if not _HYBRID_SEARCH and SERPAPI_API_KEY and not degraded and ENABLE_GOOGLE_SHOPPING and _shopping_gl_supported(country):
+         for hl in languages:
+             add(country, 'local', 'google_shopping', hl)
+     # First-wave local supplements run before the global catalogs.
+@@ -22635,7 +22721,7 @@
          if FAST_PROVIDER_IMAGES:
              add(country, 'local', f'{provider}_images', native if country == 'cn' else 'en', True)
--        if provider == 'serper' and FAST_PROVIDER_SHOPPING and country != 'cn':
-+        if (provider == 'serper' and FAST_PROVIDER_SHOPPING and country != 'cn'
-+                and (not _SEARCHAPI_ROUTER.enabled or _shopping_gl_supported(country))):
+         if (provider == 'serper' and FAST_PROVIDER_SHOPPING and country != 'cn'
+-                and (not _SEARCHAPI_ROUTER.enabled or _shopping_gl_supported(country))):
++                and (_HYBRID_SEARCH or not _SEARCHAPI_ROUTER.enabled or _shopping_gl_supported(country))):
              # Google's shopping units exist for markets without a Shopping tab
              # (Kuwait shows KWD cards); the log's rows= says whether it pays.
              add(country, 'local', 'serper_shopping', 'en')
-@@ -22650,9 +22673,13 @@
-             if cc == country or cc not in GLOBAL_MARKET_STORES:
-                 continue
-             if cc == 'cn' and operators:
--                for _, domain in GLOBAL_MARKET_STORES[cc]:
--                    add(cc, 'global', 'serper_search', 'en')
--                    specs[-1]['catalog_domain'] = domain
-+                if _SEARCHAPI_ROUTER.enabled and _SEARCHAPI_ROUTER.economy:
-+                    for hl in ('en', 'zh-cn'):
-+                        add(cc, 'global', 'serper_search', hl)
-+                else:
-+                    for _, domain in GLOBAL_MARKET_STORES[cc]:
-+                        add(cc, 'global', 'serper_search', 'en')
-+                        specs[-1]['catalog_domain'] = domain
-             else:
-                 if FAST_PROVIDER_SHOPPING:
-                     add(cc, 'global', 'serper_shopping', 'en')
+@@ -22657,7 +22743,7 @@
+             add(country, 'local', f'{provider}_search', native)
+             if FAST_PROVIDER_IMAGES:
+                 add(country, 'local', f'{provider}_images', native)
+-    if (country == 'us' and primary_serper and SERPAPI_API_KEY and not degraded
++    if (not _HYBRID_SEARCH and country == 'us' and primary_serper and SERPAPI_API_KEY and not degraded
+             and ENABLE_GOOGLE_SHOPPING and _shopping_gl_supported(country)):
+         add(country, 'local', 'google_shopping', 'en')
+     if country == 'cn' and primary_serper and SERPAPI_API_KEY and LOCAL_DISCOVERY_BAIDU:
+@@ -27390,7 +27476,8 @@
+                'provider': serpapi_health_snapshot(), 'fast_providers': FAST_PROVIDERS,
+                'policy': {'primary': SEARCH_PROVIDER_PRIMARY, 'serpapi_backup': SERPAPI_BACKUP_ENABLED,
+                           'backup_min_rows': SERPAPI_BACKUP_MIN_ROWS, 'lens': 'searchapi' if _SEARCHAPI_ROUTER.enabled else 'serpapi',
+-                          'searchapi': _SEARCHAPI_ROUTER.snapshot(),
++                          'searchapi': _searchapi_policy_snapshot(),
++                          'hybrid': _HYBRID_SEARCH, 'lens_backup': bool(_SEARCHAPI_ROUTER.backup_key),
+                           'serper_operators': _fast_provider_supports_operators('serper')},
+                'budget': serpapi_budget_snapshot(), 'cost_counters': api_cost_snapshot()}
+     return Response(content=json.dumps(payload, ensure_ascii=False, default=str), media_type='application/json',

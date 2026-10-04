@@ -91,3 +91,4 @@ class PhotoRefinement(unittest.TestCase):
         self.assertNotIn('7 7',result['query'])
 
 if __name__=='__main__':unittest.main()
+

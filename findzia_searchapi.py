@@ -173,6 +173,87 @@ class _BoundedPool:
         return future
 
 
+class SerperTransport:
+    """One Serper HTTP call per distinct body, shared across all hybrid lanes.
+
+    There is deliberately no provider fallback here. The Lens router below
+    owns the SearchApi -> SerpApi rescue; missing Serper results cannot fan out
+    to those more expensive engines. Late paid work is retained in the cache.
+    """
+    def __init__(self, *, cache_get, cache_put, cost):
+        self.cache_get, self.cache_put, self.cost = cache_get, cache_put, cost
+        self.total = _number('SERPER_TOTAL_TIMEOUT_SECONDS', 12., .1, 30.)
+        self.pool = _BoundedPool(32, 'hybrid-serper')
+        self.lock = threading.Lock()
+        self.inflight = {}
+
+    def search(self, kind, body, timeout, fetch, normalize, *, bypass=False):
+        seconds = min(self.total, _seconds(timeout))
+        if seconds <= .01 or kind not in ('search', 'images', 'shopping'):
+            return None
+        key = hashlib.sha256(('serper-hybrid-v1:' + json.dumps(
+            [kind, body], sort_keys=True, ensure_ascii=False)).encode()).hexdigest()
+        def cached():
+            return None if bypass else self.cache_get(key)
+        hit = cached()
+        if isinstance(hit, dict):
+            self.cost('serper_cache_hits')
+            return copy.deepcopy(hit)
+        def run():
+            connect = min(1.5, seconds / 4)
+            raw = fetch(kind, copy.deepcopy(body), (connect, seconds-connect))
+            if not isinstance(raw, dict) or raw.get('error'):
+                return None
+            sections = ('images',) if kind == 'images' else ('organic', 'shopping', 'knowledgeGraph', 'answerBox')
+            if not any(isinstance(raw.get(k), (list, dict)) for k in sections):
+                return None
+            data = normalize(kind, raw)
+            field = {'search': 'organic_results', 'images': 'images_results', 'shopping': 'shopping_results'}[kind]
+            data.setdefault(field, [])  # An explicit empty result is cacheable.
+            data.setdefault('search_metadata', {}).update(provider='serper', engine='serper_'+kind)
+            return data
+        with self.lock:
+            hit = cached()
+            if isinstance(hit, dict):
+                self.cost('serper_cache_hits')
+                return copy.deepcopy(hit)
+            future = None if bypass else self.inflight.get(key)
+            leader = future is None
+            if leader:
+                future = self.pool.submit(run)
+                if future is not None and not bypass:
+                    self.inflight[key] = future
+        if future is None:
+            self.cost('serper_capacity_skipped')
+            return None
+        if leader:
+            def finished(done):
+                try:
+                    data = done.result()
+                    if not bypass and isinstance(data, dict):
+                        has_rows = any(data.get(k) for k in ('organic_results', 'images_results',
+                                          'shopping_results', 'inline_shopping_results'))
+                        self.cache_put(key, 'serper_'+kind, data, ttl_seconds=None if has_rows else 120)
+                except Exception:
+                    pass
+                finally:
+                    if not bypass:
+                        with self.lock:
+                            if self.inflight.get(key) is done:
+                                self.inflight.pop(key, None)
+            future.add_done_callback(finished)
+        else:
+            self.cost('serper_shared_responses')
+        try:
+            data = future.result(timeout=seconds)
+            return copy.deepcopy(data) if isinstance(data, dict) else None
+        except TimeoutError:
+            self.cost('serper_wait_timeouts')
+            return None  # Leave the shared HTTP call available for other callers.
+        except Exception:
+            return None
+
+
 class SearchApiRouter:
     def __init__(self, *, cache_get, cache_put, cost, http_get=None, log=print):
         self.key = os.environ.get('SEARCHAPI_API_KEY', '').strip()
