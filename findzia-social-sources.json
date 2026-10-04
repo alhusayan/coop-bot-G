@@ -1,13 +1,146 @@
 {
   "schema_version": 1,
-  "note": "Starter sources, one per requested market. Expand after measuring usable offers. Account references were researched on 2026-10-04; the worker verifies ownerUsername on every post. These are account references, not promises of offer availability or a content licence.",
+  "note": "14 selected merchant accounts across 7 markets. New references checked 2026-10-04 via merchant websites or their own Instagram profile. Offers require matching owner, explicit supported currency, product evidence, full price and valid dates. Public account existence does not guarantee usable offers. Existing spend limits are unchanged.",
   "sources": [
-    {"username":"jarirbookstore","merchant":"Jarir","countries":["sa"],"enabled":true,"interval_seconds":3600,"reference_url":"https://www.instagram.com/jarirbookstore/"},
-    {"username":"currys","merchant":"Currys","countries":["gb"],"enabled":true,"interval_seconds":3600,"reference_url":"https://www.instagram.com/currys/"},
-    {"username":"mediamarkt_es","merchant":"MediaMarkt","countries":["es"],"enabled":true,"interval_seconds":3600,"reference_url":"https://linktr.ee/mediamarkt_es"},
-    {"username":"unieuro","merchant":"Unieuro","countries":["it"],"enabled":true,"interval_seconds":3600,"reference_url":"https://www.unieuro.it/online/social-network"},
-    {"username":"fnac_officiel","merchant":"Fnac","countries":["fr"],"enabled":true,"interval_seconds":3600,"reference_url":"https://play.google.com/store/apps/details?id=fr.fnac.com"},
-    {"username":"sharafdguae_official","merchant":"Sharaf DG","countries":["ae"],"enabled":true,"interval_seconds":3600,"reference_url":"https://www.instagram.com/SharafDGuae_official/"},
-    {"username":"xcitealghanim","merchant":"Xcite","countries":["kw"],"enabled":true,"interval_seconds":3600,"reference_url":"https://www.instagram.com/xcitealghanim/"}
+    {
+      "username": "jarirbookstore",
+      "merchant": "Jarir",
+      "countries": [
+        "sa"
+      ],
+      "enabled": true,
+      "interval_seconds": 3600,
+      "reference_url": "https://www.instagram.com/jarirbookstore/"
+    },
+    {
+      "username": "currys",
+      "merchant": "Currys",
+      "countries": [
+        "gb"
+      ],
+      "enabled": true,
+      "interval_seconds": 3600,
+      "reference_url": "https://www.instagram.com/currys/"
+    },
+    {
+      "username": "mediamarkt_es",
+      "merchant": "MediaMarkt",
+      "countries": [
+        "es"
+      ],
+      "enabled": true,
+      "interval_seconds": 3600,
+      "reference_url": "https://linktr.ee/mediamarkt_es"
+    },
+    {
+      "username": "unieuro",
+      "merchant": "Unieuro",
+      "countries": [
+        "it"
+      ],
+      "enabled": true,
+      "interval_seconds": 3600,
+      "reference_url": "https://www.unieuro.it/online/social-network"
+    },
+    {
+      "username": "fnac_officiel",
+      "merchant": "Fnac",
+      "countries": [
+        "fr"
+      ],
+      "enabled": true,
+      "interval_seconds": 3600,
+      "reference_url": "https://play.google.com/store/apps/details?id=fr.fnac.com"
+    },
+    {
+      "username": "sharafdguae_official",
+      "merchant": "Sharaf DG",
+      "countries": [
+        "ae"
+      ],
+      "enabled": true,
+      "interval_seconds": 3600,
+      "reference_url": "https://www.instagram.com/SharafDGuae_official/"
+    },
+    {
+      "username": "xcitealghanim",
+      "merchant": "Xcite",
+      "countries": [
+        "kw"
+      ],
+      "enabled": true,
+      "interval_seconds": 3600,
+      "reference_url": "https://www.instagram.com/xcitealghanim/"
+    },
+    {
+      "username": "eurekakuwait",
+      "merchant": "Eureka",
+      "countries": [
+        "kw"
+      ],
+      "enabled": true,
+      "interval_seconds": 10800,
+      "reference_url": "https://www.instagram.com/eurekakuwait/"
+    },
+    {
+      "username": "extrastores",
+      "merchant": "eXtra",
+      "countries": [
+        "sa"
+      ],
+      "enabled": true,
+      "interval_seconds": 10800,
+      "reference_url": "https://www.extra.com/ar-sa/contactus"
+    },
+    {
+      "username": "johnlewis",
+      "merchant": "John Lewis",
+      "countries": [
+        "gb"
+      ],
+      "enabled": true,
+      "interval_seconds": 10800,
+      "reference_url": "https://www.johnlewis.com/content/john-lewis-wisdom"
+    },
+    {
+      "username": "pccomponentes",
+      "merchant": "PcComponentes",
+      "countries": [
+        "es"
+      ],
+      "enabled": true,
+      "interval_seconds": 10800,
+      "reference_url": "https://www.pccomponentes.com/"
+    },
+    {
+      "username": "mediaworldit",
+      "merchant": "MediaWorld",
+      "countries": [
+        "it"
+      ],
+      "enabled": true,
+      "interval_seconds": 10800,
+      "reference_url": "https://www.mediaworld.it/"
+    },
+    {
+      "username": "boulanger",
+      "merchant": "Boulanger",
+      "countries": [
+        "fr"
+      ],
+      "enabled": true,
+      "interval_seconds": 10800,
+      "reference_url": "https://www.boulanger.com/"
+    },
+    {
+      "username": "carrefouruae",
+      "merchant": "Carrefour UAE",
+      "countries": [
+        "ae"
+      ],
+      "enabled": true,
+      "interval_seconds": 10800,
+      "reference_url": "https://www.instagram.com/carrefouruae/"
+    }
   ]
 }

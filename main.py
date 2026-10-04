@@ -394,7 +394,7 @@ from findzia_billing import CreditMiddleware, install_billing
 app.add_middleware(CreditMiddleware, owner=app)
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization', 'X-Findzia-Request-Id'], max_age=86400)
-BUILD_ID = 'v128.5.42.48-cost-fix'
+BUILD_ID = 'v128.5.42.49-social-strong'
 _SOCIAL = None
 
 def _fz_social_row(row):
@@ -2541,6 +2541,8 @@ def publish_image_for_lens(image_b64, mime_type):
 # v128.5.38: source-based alternatives are independent of geography and identity.
 # A price update must never turn a Serper description search into a Lens match.
 def _web_result_group(row):
+    if _fz_social_row(row):
+        return 'social'
     sources = set(row.get('retrieval_sources') or [])
     origin = row.get('search_origin') or row.get('reference_search_kind')
     photo = origin == 'image' or (origin != 'text' and row.get('image_query_result'))
@@ -2626,9 +2628,16 @@ def _web_alternative_fingerprint(row):
     return hashlib.sha256(json.dumps(values, ensure_ascii=False).encode()).hexdigest()
 
 
+def _web_requires_visual_admission(row):
+    group = _web_result_group(row)
+    origin = row.get('search_origin') or row.get('reference_search_kind')
+    return group == 'alternative' or (group == 'social' and
+        (origin == 'image' or (origin != 'text' and row.get('image_query_result'))))
+
+
 def _web_alternative_visible(row):
     """Description-search photos are private until a complete visual audit passes."""
-    return (_web_result_group(row) != 'alternative' or
+    return (not _web_requires_visual_admission(row) or
             (row.get('alternative_visual_status') == 'approved'
              and row.get('alternative_visual_policy') == '156.7.3'
              and row.get('alternative_visual_proof') == _web_alternative_fingerprint(row)))
@@ -2636,7 +2645,7 @@ def _web_alternative_visible(row):
 
 def _web_alternative_visual_gate(row, item=None, reference=None, *, complete=False):
     """Accept useful near alternatives, independently of exact identity scores."""
-    if _web_result_group(row) != 'alternative':
+    if not _web_requires_visual_admission(row):
         return row
     row = dict(row)
     item, reference = item or {}, reference or {}
@@ -2689,7 +2698,7 @@ def _web_merge_retrieval_evidence(existing, incoming):
 
 
 def _web_group_results(payload):
-    """Add three display groups without changing country/currency or match proof."""
+    """Add four display groups without changing country/currency or match proof."""
     out = dict(payload)
     if not isinstance(out.get('results'), list):
         return out
@@ -2705,11 +2714,11 @@ def _web_group_results(payload):
     if 'all_results' in out:
         out['all_results'] = rows
     groups = {name: [r for r in rows if r['result_group'] == name]
-              for name in ('local', 'alternative', 'global')}
+              for name in ('local', 'alternative', 'global', 'social')}
     for name, values in groups.items():
         out[name + '_results'] = values
         out[name + '_count'] = len(values)
-    out['result_group_order'] = ['local', 'alternative', 'global']
+    out['result_group_order'] = ['local', 'alternative', 'global', 'social']
     out['display_sections'] = [{'id': name, 'count': len(values), 'results_key': name + '_results'}
                                for name, values in groups.items()]
     # Keep the existing exact/similar contract, with disjoint subgroups too.
@@ -16704,7 +16713,7 @@ def _web_identity_candidates(results):
             'url': str((row or {}).get('url') or (row or {}).get('link') or '').strip()[:500],
             'price': str((row or {}).get('price') or '').strip()[:80],
             'current_scope_hint': 'local' if rank == 0 else 'global' if rank in (1, 2) else 'ambiguous',
-            'alternative_review': _web_result_group(row) == 'alternative',
+            'alternative_review': _web_requires_visual_admission(row),
             'locked_match': str((row or {}).get('_locked_match') or ''),
             'locked_market': str((row or {}).get('_locked_market') or ''),
             'fingerprint': _web_product_fingerprint(_web_result_classification_title(row)),
@@ -17442,6 +17451,8 @@ def _web_attach_captured_result_sections(payload, lang, allow_ai=True, cancel_ev
         not reference_image_mime or reference_image_mime.startswith('image/')
     )
     user_photo = bool(has_reference_photo and text_reference is None)
+    if user_photo:
+        results = [_web_image_retrieval_row(r) if _fz_social_row(r) else r for r in results]
     results = [r for r in results if not (not user_photo and _web_text_explicit_conflict(identity, r.get('raw_title') or r.get('title')))
                and ((not user_photo and _web_serper_text_passthrough(r))
                     or not _fz_product_form_conflict(identity, r.get('raw_title') or r.get('title')))]
@@ -18452,7 +18463,7 @@ def _web_card_payload(payload):
     out=dict(payload)
     if (out.get('url') or out.get('link')) and (out.get('title') or out.get('raw_title')) and ('price' in out or 'store' in out):
         return _web_card_fields(out)
-    for key in ('item','results','all_results','captured_results','exact_results','similar_results','local_results','alternative_results','global_results','result_sections'):
+    for key in ('item','results','all_results','captured_results','exact_results','similar_results','local_results','alternative_results','global_results','social_results','result_sections'):
         if key in out:
             out[key]=_web_card_payload(out[key])
     return _web_group_results(out)
@@ -28421,7 +28432,7 @@ async def _web_stream_image_identity_batches_core(image_b64, mime, caption, coun
                 final = search_task.result()
                 identity = str(final.get('query') or caption or '').strip()
                 market = final.get('market') or market
-                captured = list(final.get('captured_results') or final.get('results') or [])
+                captured = _fz_social_merge(list(final.get('captured_results') or final.get('results') or []), identity, market, lang)
                 captures = {_web_identity_offer_key(r): origin_row(r) for r in captured
                             if not _fz_product_form_conflict(identity, r.get('raw_title') or r.get('title'))}
                 rows = {}
@@ -28455,7 +28466,7 @@ async def _web_stream_image_identity_batches_core(image_b64, mime, caption, coun
                 if query and query != query_sent:
                     yield _web_stream_event({'event': 'query', 'query': query, 'market': market})
                     query_sent = query
-                preview = [origin_row(r) for r in preview if not _fz_product_form_conflict(query, r.get('raw_title') or r.get('title'))]
+                preview = [origin_row(r) for r in _fz_social_merge(preview, query, market, lang) if not _fz_product_form_conflict(query, r.get('raw_title') or r.get('title'))]
                 for original in preview:
                     key = _web_identity_offer_key(original)
                     token = _web_identity_capture_key(original, query)

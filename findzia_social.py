@@ -40,7 +40,7 @@ if not LOG.handlers:
     LOG.addHandler(_handler)
 LOG.setLevel(logging.INFO)
 LOG.propagate = False
-BUILD = "social-1.0.1"
+BUILD = "social-2.0.0"
 MARKETS = {
     "sa": {"currency": "SAR", "languages": ["ar", "en"], "zone": "Asia/Riyadh"},
     "gb": {"currency": "GBP", "languages": ["en"], "zone": "Europe/London"},
@@ -53,6 +53,13 @@ MARKETS = {
 DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
 STOPS = set("عرض عروض سعر اسعار أسعار شراء اشتري اريد ابي ابيها ابحث عن في من مع ال the a an for in with buy price prices offer offers deals sale de la le les un une des du pour el los las del en con di il lo gli per delle offerta offerte ofertas prix".split())
 PHRASES = {"ايفون": "iphone", "آيفون": "iphone", "اي فون": "iphone", "جالكسي": "galaxy", "جالاكسي": "galaxy", "سامسونج": "samsung", "ابل": "apple", "ماك بوك": "macbook", "بلايستيشن": "playstation", "سوني": "sony", "دايسون": "dyson", "جيجا": "gb", "جيجابايت": "gb", "تيرا": "tb"}
+PHRASES.update({'لاب توب':'laptop', 'لابتوب':'laptop', 'حاسوب محمول':'laptop', 'ordinateur portable':'laptop',
+                'portatil':'laptop', 'notebook':'laptop', 'تلفزيون':'tv', 'television':'tv', 'televisore':'tv',
+                'جوال':'smartphone', 'هاتف':'smartphone', 'telefono':'smartphone', 'تليفون':'smartphone',
+                'لينوفو':'lenovo', 'اسوس':'asus', 'شاومي':'xiaomi', 'هواوي':'huawei',
+                'برو':'pro', 'ماكس':'max', 'الترا':'ultra', 'بلس':'plus',
+                'اسود':'black', 'ابيض':'white', 'ازرق':'blue', 'احمر':'red', 'ذهبي':'gold', 'فضي':'silver',
+                'noir':'black', 'blanc':'white', 'negro':'black', 'blanco':'white', 'nero':'black', 'bianco':'white'})
 BAD_PRICE = re.compile(r"\b(?:per month|monthly|instalments?|installments?|cashback|save|saving|discount|deposit|down payment|trade.in|from|starting|up to|mensual|mensuales|cuota|al mese|mensili|par mois|a partir|a partire|desde)\b|قسط|شهري|وفر|خصم|استبدال|ابتداء|مقدم", re.I)
 CODE = re.compile(r"^[A-Za-z0-9_-]{1,100}$")
 USERNAME = re.compile(r"^[a-z0-9_.]{1,30}$")
@@ -67,7 +74,49 @@ def error_reason(exc):
     message = str(exc)
     if re.fullmatch(r'(?:apify|social_ai)_http_[0-9]{3}', message):
         return message
+    if message in {'invalid_apify_path', 'invalid_run_id', 'invalid_run_payload',
+                   'invalid_dataset_id', 'invalid_dataset', 'incomplete_extraction',
+                   'media_unavailable', 'media_deadline', 'media_too_large',
+                   'media_dimensions_too_large', 'no_usable_media', 'unapproved_media_host'}:
+        return message
+    if isinstance(exc, json.JSONDecodeError):
+        return 'invalid_json'
     return type(exc).__name__
+
+
+def dataset_error(item):
+    """Bounded, non-sensitive categories; never log a provider body or URL."""
+    code = str(item.get('error') or '').lower()
+    if code in {'no_items', 'no_posts', 'empty_dataset'}:
+        return 'no_items'
+    if code in {'private_profile', 'private_account', 'not_found', 'profile_not_found'}:
+        return 'profile_unavailable'
+    if code in {'rate_limit', 'rate_limited', 'blocked', 'access_denied'}:
+        return 'source_unavailable'
+    return 'provider_item_error'
+
+
+def query_tokens(query):
+    # Remove conversational choices, never product numbers, capacity or colour.
+    text = norm(query)
+    for phrase in ('any design', 'any brand', 'best price', 'ارخص سعر', 'افضل سعر', 'اي تصميم'):
+        text = text.replace(phrase, ' ')
+    return list(dict.fromkeys(t for t in text.split() if t not in STOPS))[:24]
+
+
+def relevance(tokens, row):
+    """Rank lexical evidence while retaining strict model/capacity/brand gates."""
+    words = set(norm(row.get('search_terms') or row.get('raw_title')).split())
+    required = {t for t in tokens if any(c.isdigit() for c in t)}
+    brands = set('apple samsung sony lg hp dell lenovo asus acer canon nikon huawei xiaomi oppo honor nokia dyson bosch philips gucci prada adidas nike'.split())
+    colours = set('black white red blue green silver gold pink اسود ابيض احمر ازرق اخضر ذهبي فضي'.split())
+    variants = set('pro max mini ultra plus lite برو ماكس ميني الترا بلس'.split())
+    required.update(set(tokens) & (brands | colours | variants))
+    if not required <= words:
+        return 0
+    matched = set(tokens) & words
+    threshold = len(tokens) if len(tokens) <= 3 else max(3, math.ceil(len(tokens) * .75))
+    return len(matched) / len(tokens) if len(matched) >= threshold else 0
 
 
 def norm(value):
@@ -165,7 +214,8 @@ class Config:
         self.monthly = max(0., float(env.get("FINDZIA_SOCIAL_MONTHLY_APIFY_USD", "20")))
         self.ai_daily = max(0, int(env.get("FINDZIA_SOCIAL_DAILY_AI_CALLS", "50")))
         self.max_images = max(1, min(10, int(env.get("FINDZIA_SOCIAL_IMAGES_PER_POST", "6"))))
-        self.max_rows = max(1, min(16, int(env.get("FINDZIA_SOCIAL_RESULTS", "8"))))
+        self.max_rows = max(1, min(48, int(env.get("FINDZIA_SOCIAL_RESULTS", "16"))))
+        self.lookback_days = max(3, min(30, int(env.get("FINDZIA_SOCIAL_LOOKBACK_DAYS", "7"))))
         self.media_bytes = max(16, min(2048, int(env.get("FINDZIA_SOCIAL_MEDIA_MB", "256")))) * 1024 * 1024
 
 
@@ -203,6 +253,9 @@ class Store:
                 CREATE TABLE IF NOT EXISTS lease(name TEXT PRIMARY KEY,owner TEXT NOT NULL,until INTEGER NOT NULL);
                 CREATE TABLE IF NOT EXISTS media(id TEXT PRIMARY KEY,mime TEXT NOT NULL,data BLOB NOT NULL,created INTEGER NOT NULL);
             """)
+            columns = {r[1] for r in db.execute('PRAGMA table_info(jobs)')}
+            if 'poll_errors' not in columns:
+                db.execute('ALTER TABLE jobs ADD COLUMN poll_errors INTEGER NOT NULL DEFAULT 0')
             db.execute("INSERT OR IGNORE INTO config VALUES('signing_key',?)", (secrets.token_hex(32),))
             self.key = db.execute("SELECT value FROM config WHERE key='signing_key'").fetchone()[0].encode()
         os.chmod(cfg.path, 0o600)
@@ -269,8 +322,9 @@ class Store:
             return False
         key = source['username'] + ':' + url.rstrip('/').rsplit('/', 1)[-1]
         children = raw.get('childPosts') or []
-        images = [(r.get('id') or '', r.get('displayUrl') or '') for r in children if isinstance(r, dict) and r.get('type') != 'Video']
-        if not children and raw.get('type') != 'Video':
+        # Video covers may carry a published offer; no video transcription is implied.
+        images = [(r.get('id') or '', r.get('displayUrl') or '') for r in children if isinstance(r, dict)]
+        if not images:
             images = [(raw.get('id') or '', raw.get('displayUrl') or '')]
         images = [(str(i), u) for i, u in images if media_url(u)]
         clean = dict(url=url, caption=str(raw.get('caption') or '')[:12000], timestamp=published,
@@ -318,7 +372,7 @@ class Store:
             for key in old:
                 self.remove_offers(db, key)
                 db.execute('DELETE FROM posts WHERE key=?', (key,))
-            db.execute('DELETE FROM jobs WHERE created<? AND state IN (\'done\',\'failed\')', (now-90*86400,))
+            db.execute('DELETE FROM jobs WHERE created<? AND state IN (\'done\',\'failed\',\'partial\')', (now-90*86400,))
             live = {json.loads(r[0])['source_image'].rsplit('/', 1)[-1].removesuffix('.jpg') for r in db.execute('SELECT data FROM offers WHERE expires>?', (now,))}
             for asset in db.execute('SELECT id FROM media WHERE created<?', (now-2*86400,)).fetchall():
                 if asset[0] not in live:
@@ -337,29 +391,33 @@ class Store:
 
     def search(self, query, market, lang='en', now=None):
         now = int(now or time.time())
-        tokens = list(dict.fromkeys(t for t in norm(query).split() if t not in STOPS))[:18]
+        tokens = query_tokens(query)
         if not tokens:
             return []
         local = str(market.get('country') or '').lower()
-        countries = [c for c in dict.fromkeys([local] + list(market.get('global_countries') or [])) if c in MARKETS]
+        countries = [local] if local in MARKETS else []
         if not countries:
             return []
-        expression = ' AND '.join('"' + token + '"' for token in tokens)
+        expression = ' OR '.join('"' + token + '"' for token in tokens)
         deadline = time.monotonic() + .045
         with self.db(timeout=.02) as db:
             db.set_progress_handler(lambda: int(time.monotonic() > deadline), 500)
             marks = ','.join('?' for _ in countries)
-            matches = db.execute(f"""SELECT o.data,p.source,s.config FROM offer_search f
+            matches = db.execute(f"""SELECT o.data,p.source,p.seen,s.config FROM offer_search f
                 JOIN offers o ON o.id=f.offer_id JOIN posts p ON p.key=o.post_key
                 JOIN sources s ON s.username=p.source
                 WHERE offer_search MATCH ? AND o.country IN ({marks}) AND o.expires>? AND o.starts<=?
-                AND p.state='ready' AND p.seen>? ORDER BY p.published DESC,rank LIMIT 64""", (expression, *countries, now, now, now - 36 * 3600)).fetchall()
+                AND p.state='ready' AND p.seen>? ORDER BY rank,p.published DESC LIMIT 128""", (expression, *countries, now, now, now - 36 * 3600)).fetchall()
+        matches = sorted(matches, key=lambda m: (relevance(tokens, json.loads(m['data'])), json.loads(m['data']).get('published_at', 0)), reverse=True)
         rows, seen = [], set()
         for match in matches:
             source = json.loads(match['config'])
             if not source.get('enabled'):
                 continue
             row = json.loads(match['data'])
+            score = relevance(tokens, row)
+            if not score:
+                continue
             if row['country'] not in source['countries']:
                 continue
             key = (match['source'], row['country'], row['identity'])
@@ -370,7 +428,9 @@ class Store:
             row.update(title=row.get('titles', {}).get(lang) or row['raw_title'],
                 market='local' if rank == 0 else 'global', market_scope='local' if rank == 0 else 'global',
                 market_rank=rank, market_country=row['country'],
-                store=source['merchant'] + ' · Instagram · ' + datetime.fromtimestamp(row['published_at'], timezone.utc).strftime('%d/%m'), source='instagram', source_badge='Instagram',
+                result_group='social', social_platform='instagram', social_relevance=score,
+                social_last_checked_at=match['seen'],
+                store=source['merchant'] + ' · Instagram', source='instagram', source_badge='Instagram',
                 merchant_name=source['merchant'], source_username=match['source'],
                 flag=''.join(chr(127397 + ord(c)) for c in row['country'].upper()),
                 price_source='social_post', price_source_url=row['source_url'], price_status='published',
@@ -489,6 +549,14 @@ class Worker:
         self.owner = secrets.token_hex(16)
         self.stop = threading.Event()
         self.cleaned = 0
+        self.budget_log_at = {}
+
+    def budget_wait(self, kind, now):
+        if now - self.budget_log_at.get(kind, 0) >= 900:
+            self.budget_log_at[kind] = now
+            LOG.info('SOCIAL budget_wait kind=%s daily_limit=%s monthly_limit=%s', kind,
+                     self.cfg.daily if kind == 'apify' else self.cfg.ai_daily,
+                     self.cfg.monthly if kind == 'apify' else 'not_applicable')
 
     def api(self, method, path, **kw):
         if not re.fullmatch(r"[A-Za-z0-9_~/-]+", path):
@@ -503,7 +571,7 @@ class Worker:
         source = json.loads(row['config'])
         # An unresolved launch timeout may have created a paid run. Do not repeat.
         with self.store.db() as db:
-            if db.execute("SELECT 1 FROM jobs WHERE source=? AND state IN ('starting','running','fetching','uncertain')", (source['username'],)).fetchone():
+            if db.execute("SELECT 1 FROM jobs WHERE source=? AND state IN ('starting','running','fetching','uncertain','retry_wait')", (source['username'],)).fetchone():
                 return False
             refresh = row['next_refresh'] <= now
             urls = [r[0] for r in db.execute("SELECT DISTINCT p.url FROM posts p JOIN offers o ON o.post_key=p.key WHERE p.source=? AND o.expires>? ORDER BY p.seen LIMIT ?", (source['username'], now, self.cfg.posts_per_run))] if refresh else []
@@ -511,9 +579,10 @@ class Worker:
         inp = {'username': urls or [source['username']], 'resultsLimit': self.cfg.posts_per_run,
                'skipPinnedPosts': True, 'dataDetailLevel': 'basicData'}
         if kind == 'new':
-            inp['onlyPostsNewerThan'] = iso(max(now - 3 * 86400, row['cursor'] - 1800))
+            inp['onlyPostsNewerThan'] = iso(max(now - self.cfg.lookback_days * 86400, row['cursor'] - 1800))
         ident = secrets.token_hex(16)
         if not self.store.reserve(ident, 'apify', self.cfg.max_run, now):
+            self.budget_wait('apify', now)
             return False
         with self.store.db() as db:
             db.execute("INSERT INTO jobs(id,source,kind,input,state,created,next_check,cost) VALUES(?,?,?,?,?,?,?,?)", (ident, source['username'], kind, compact(inp), 'starting', now, now, self.cfg.max_run))
@@ -535,7 +604,10 @@ class Worker:
         return True
 
     def poll(self, job, now):
-        run = self.api('GET', 'actor-runs/' + job['run_id'])['data']
+        payload = self.api('GET', 'actor-runs/' + job['run_id'])
+        if not isinstance(payload, dict) or not isinstance(payload.get('data'), dict):
+            raise ValueError('invalid_run_payload')
+        run = payload['data']
         status = run.get('status')
         if status in ('READY', 'RUNNING', 'TIMING-OUT', 'ABORTING'):
             with self.store.db() as db:
@@ -554,22 +626,42 @@ class Worker:
                 db.execute('UPDATE sources SET error=?,next_poll=? WHERE username=?', ('run_'+str(status), now+7200, job['source']))
             LOG.warning('SOCIAL run_failed source=%s status=%s apify_usd=%.5f', job['source'], status, cost)
             return
+        # Final run cost is known even when its dataset cannot be imported.
+        with self.store.db() as db:
+            db.execute('UPDATE jobs SET cost=? WHERE id=?', (cost, job['id']))
+            db.execute('UPDATE usage SET amount=? WHERE id=?', (cost, job['id']))
         dataset = str(run.get('defaultDatasetId') or '')
         if not CODE.fullmatch(dataset):
             raise ValueError('invalid_dataset_id')
         items = self.api('GET', 'datasets/' + dataset + '/items', params={'clean': 'true', 'format': 'json', 'limit': self.cfg.posts_per_run + 1})
         if not isinstance(items, list):
             raise ValueError('invalid_dataset')
-        if any(isinstance(item, dict) and item.get('error') for item in items):
-            # Do not advance the cursor for a blocked/private/missing profile.
-            raise ValueError('dataset_contains_errors')
+        errors = [dataset_error(item) for item in items if isinstance(item, dict) and item.get('error')]
+        valid_items = [item for item in items if isinstance(item, dict) and not item.get('error')]
+        malformed = len(items) - len(errors) - len(valid_items)
+        accepted = 0
         if source['enabled']:
-            for item in items:
-                if isinstance(item, dict):
-                    self.store.accept_post(item, source, now)
+            for item in valid_items:
+                try:
+                    accepted += bool(self.store.accept_post(item, source, now))
+                except (ValueError, TypeError, AttributeError, OverflowError):
+                    errors.append('invalid_post')
+        if errors or malformed:
+            # A completed dataset will not improve by polling the same run forever.
+            # Preserve good posts, preserve the cursor, and schedule a bounded fresh check.
+            reason = errors[0] if errors else 'invalid_dataset_item'
+            retry_after = 6 * 3600 if reason in {'no_items', 'profile_unavailable'} else 2 * 3600
+            with self.store.db() as db:
+                db.execute("UPDATE jobs SET state=?,dataset=?,cost=?,error=?,poll_errors=0 WHERE id=?",
+                           ('partial' if valid_items else 'failed', dataset, cost, reason, job['id']))
+                db.execute('UPDATE sources SET error=?,next_poll=? WHERE username=?',
+                           (reason, now + max(source['interval_seconds'], retry_after), job['source']))
+            LOG.warning('SOCIAL dataset_issue source=%s reason=%s usable_posts=%s new_posts=%s error_rows=%s apify_usd=%.5f retry_seconds=%s',
+                        job['source'], reason, len(valid_items), accepted, len(errors)+malformed, cost, retry_after)
+            return
         saturated = job['kind'] == 'new' and len(items) >= self.cfg.posts_per_run
         with self.store.db() as db:
-            db.execute("UPDATE jobs SET state='done',dataset=?,cost=?,error=? WHERE id=?", (dataset, cost, 'window_saturated' if saturated else '', job['id']))
+            db.execute("UPDATE jobs SET state='done',dataset=?,cost=?,error=?,poll_errors=0 WHERE id=?", (dataset, cost, 'window_saturated' if saturated else '', job['id']))
             db.execute('UPDATE usage SET amount=? WHERE id=?', (cost, job['id']))
             if job['kind'] == 'new' and not saturated:
                 db.execute('UPDATE sources SET cursor=?,error=? WHERE username=?', (job['created'], '', job['source']))
@@ -577,7 +669,7 @@ class Worker:
                 db.execute("UPDATE sources SET error='window_saturated_raise_limit',next_poll=? WHERE username=?", (now+86400, job['source']))
             if job['kind'] == 'refresh' or src['next_refresh'] == 0:
                 db.execute('UPDATE sources SET next_refresh=? WHERE username=?', (now+86400, job['source']))
-        LOG.info('SOCIAL run_done source=%s posts=%s apify_usd=%.5f', job['source'], len(items), cost)
+        LOG.info('SOCIAL run_done source=%s posts=%s new_posts=%s apify_usd=%.5f', job['source'], len(items), accepted, cost)
 
     def download_image(self, url):
         if not media_url(url):
@@ -605,15 +697,21 @@ class Worker:
     def extract(self, post, source, now):
         ident = 'ai:' + post['key'] + ':' + post['digest'] + ':' + str(post['attempts'])
         if not self.store.reserve(ident, 'ai', 1, now):
+            self.budget_wait('ai', now)
             return
         with self.store.db() as db:
             db.execute("UPDATE posts SET attempts=attempts+1,next_ai=? WHERE key=?", (now+900, post['key']))
         raw = json.loads(post['raw'])
         assets, parts = [], []
         for img in raw['images'][:self.cfg.max_images]:
-            data = self.download_image(img['url'])
-            assets.append(self.store.put_media(data, now))
-            parts.append({'inlineData': {'mimeType': 'image/jpeg', 'data': base64.b64encode(data).decode()}})
+            try:
+                data = self.download_image(img['url'])
+                assets.append(self.store.put_media(data, now))
+                parts.append({'inlineData': {'mimeType': 'image/jpeg', 'data': base64.b64encode(data).decode()}})
+            except (requests.RequestException, ValueError, OSError) as exc:
+                LOG.warning('SOCIAL image_skipped source=%s reason=%s', source['username'], error_reason(exc))
+        if not assets:
+            raise ValueError('no_usable_media')
         context = dict(caption=raw['caption'], published_at=iso(post['published']),
                        registered_markets={c:MARKETS[c] for c in source['countries']}, images_supplied=len(assets))
         parts.insert(0, {'text': compact(context)})
@@ -625,6 +723,13 @@ class Worker:
         if r.status_code != 200:
             raise RuntimeError('social_ai_http_' + str(r.status_code))
         data = r.json()
+        usage = data.get('usageMetadata') or {}
+        tokens = {target: usage[key] for key, target in [('promptTokenCount', 'prompt'),
+                  ('candidatesTokenCount', 'output'), ('thoughtsTokenCount', 'thoughts'),
+                  ('cachedContentTokenCount', 'cached'), ('totalTokenCount', 'total')]
+                  if isinstance(usage.get(key), int)}
+        LOG.info('GEMINI USAGE %s', compact(dict(model=self.cfg.model, purpose='social_extraction',
+                 complete=(data.get('candidates') or [{}])[0].get('finishReason') == 'STOP', reported=bool(tokens), tokens=tokens)))
         candidate = (data.get('candidates') or [{}])[0]
         if candidate.get('finishReason') != 'STOP':
             raise ValueError('incomplete_extraction')
@@ -642,15 +747,24 @@ class Worker:
             self.cleaned = now
         with self.store.db() as db:
             db.execute("UPDATE jobs SET state='uncertain',error='interrupted_start' WHERE state='starting' AND created<?", (now-300,))
-            jobs = db.execute("SELECT * FROM jobs WHERE state='running' AND next_check<=? ORDER BY next_check LIMIT 3", (now,)).fetchall()
+            jobs = db.execute("SELECT * FROM jobs WHERE state IN ('running','retry_wait') AND next_check<=? ORDER BY next_check LIMIT 3", (now,)).fetchall()
         for job in jobs:
             try:
                 self.poll(job, now)
             except Exception as exc:
+                reason = error_reason(exc)
+                attempts = int(job['poll_errors']) + 1
+                delay = 21600 if attempts >= 6 else min(3600, 300 * (2 ** min(attempts - 1, 4)))
                 with self.store.db() as db:
-                    # Keep polling the same run; never relaunch for a read failure.
-                    db.execute('UPDATE jobs SET next_check=?,error=? WHERE id=?', (now+300, error_reason(exc), job['id']))
-                LOG.warning('SOCIAL poll_failed source=%s reason=%s', job['source'], error_reason(exc))
+                    # Unknown run state must never create another paid launch.
+                    state = 'retry_wait' if attempts >= 6 else 'running'
+                    if reason in {'invalid_dataset_id', 'invalid_dataset'}:
+                        state, delay = 'failed', 7200
+                        db.execute('UPDATE sources SET next_poll=? WHERE username=?', (now+delay, job['source']))
+                    db.execute('UPDATE jobs SET state=?,next_check=?,error=?,poll_errors=? WHERE id=?',
+                               (state, now+delay, reason, attempts, job['id']))
+                    db.execute('UPDATE sources SET error=? WHERE username=?', (reason, job['source']))
+                LOG.warning('SOCIAL poll_failed source=%s reason=%s attempt=%s state=%s retry_seconds=%s', job['source'], reason, attempts, state, delay)
         with self.store.db() as db:
             post = db.execute("SELECT p.*,s.config FROM posts p JOIN sources s ON s.username=p.source WHERE p.state='pending' AND p.next_ai<=? AND p.attempts<3 AND json_extract(s.config,'$.enabled')=1 ORDER BY p.published DESC LIMIT 1", (now,)).fetchone()
         if post and json.loads(post['config']).get('enabled'):
@@ -658,7 +772,7 @@ class Worker:
                 self.extract(post, json.loads(post['config']), now)
             except Exception as exc:
                 with self.store.db() as db:
-                    db.execute("UPDATE posts SET error=?,state=CASE WHEN attempts>=3 THEN 'review' ELSE state END WHERE key=?", (type(exc).__name__, post['key']))
+                    db.execute("UPDATE posts SET error=?,state=CASE WHEN attempts>=3 THEN 'review' ELSE state END WHERE key=?", (error_reason(exc), post['key']))
                 LOG.warning('SOCIAL extraction_failed reason=%s', error_reason(exc))
         with self.store.db() as db:
             sources = db.execute('SELECT * FROM sources WHERE next_poll<=? ORDER BY next_poll,username', (now,)).fetchall()
@@ -696,8 +810,12 @@ class Service:
         if not self.store:
             return []
         try:
-            return self.store.search(query, market, lang)
+            rows = self.store.search(query, market, lang)
+            LOG.info('SOCIAL search country=%s tokens=%s matches=%s',
+                     str((market or {}).get('country') or '')[:2], len(query_tokens(query)), len(rows))
+            return rows
         except (sqlite3.Error, ValueError, TypeError):
+            LOG.warning('SOCIAL search_unavailable reason=index_unavailable')
             return []  # a missing/locked index never fails the core search
 
     def valid(self, row):
