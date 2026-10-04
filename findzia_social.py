@@ -8,6 +8,8 @@ from __future__ import annotations
 import argparse
 import base64
 import contextlib
+import copy
+from collections import Counter, OrderedDict
 import hashlib
 import hmac
 import io
@@ -40,7 +42,7 @@ if not LOG.handlers:
     LOG.addHandler(_handler)
 LOG.setLevel(logging.INFO)
 LOG.propagate = False
-BUILD = "social-2.0.0"
+BUILD = "social-2.1.0"
 MARKETS = {
     "sa": {"currency": "SAR", "languages": ["ar", "en"], "zone": "Asia/Riyadh"},
     "gb": {"currency": "GBP", "languages": ["en"], "zone": "Europe/London"},
@@ -63,6 +65,58 @@ PHRASES.update({'لاب توب':'laptop', 'لابتوب':'laptop', 'حاسوب �
 BAD_PRICE = re.compile(r"\b(?:per month|monthly|instalments?|installments?|cashback|save|saving|discount|deposit|down payment|trade.in|from|starting|up to|mensual|mensuales|cuota|al mese|mensili|par mois|a partir|a partire|desde)\b|قسط|شهري|وفر|خصم|استبدال|ابتداء|مقدم", re.I)
 CODE = re.compile(r"^[A-Za-z0-9_-]{1,100}$")
 USERNAME = re.compile(r"^[a-z0-9_.]{1,30}$")
+CURRENCY_MARKERS = {
+    'KWD': r'\b(?:KWD|KD)\b|د\s*\.?\s*ك|دينار\s+كويتي',
+    'SAR': r'\b(?:SAR|SR)\b|ر\s*\.?\s*س|ريال\s+سعودي|\u20c1',
+    'AED': r'\b(?:AED|DHS)\b|د\s*\.?\s*[إا]|درهم',
+    'GBP': r'£|\bGBP\b', 'EUR': r'€|\bEUR\b',
+}
+EMPTY_REASONS = {'no_product', 'no_full_price', 'conditional_only', 'unreadable',
+                 'no_currency', 'expired', 'not_an_offer'}
+
+
+def evidence_text(value):
+    """Normalize typography without translating product names or dropping currency."""
+    value = unicodedata.normalize('NFKC', str(value or '').translate(DIGITS)).lower()
+    value = ''.join(c for c in value if unicodedata.category(c) != 'Cf' and not unicodedata.combining(c))
+    return ' '.join(value.replace('ـ', '').split())
+
+
+def currency_visible(quote, currency):
+    # Ambiguous bare 'riyal', rial ligature or account country are not SAR proof.
+    return currency in CURRENCY_MARKERS and bool(re.search(CURRENCY_MARKERS[currency], evidence_text(quote), re.I))
+
+
+def media_items(raw):
+    """Accept both documented Apify carousel forms and keep attribution/order."""
+    children, urls = raw.get('childPosts') or [], raw.get('images') or []
+    if not isinstance(children, list) or not isinstance(urls, list):
+        raise ValueError('invalid_post_media')
+    candidates = [(str(r.get('id') or ''), r.get('displayUrl') or '')
+                  for r in children[:30] if isinstance(r, dict)]
+    candidates.extend(('', u) for u in urls[:30] if isinstance(u, str))
+    images, seen = [], set()
+    for ident, url in candidates:
+        if not media_url(url):
+            continue
+        stable = urlunparse(urlparse(url)._replace(query='', fragment=''))
+        if stable not in seen:
+            images.append(dict(id=ident or hashlib.sha256(stable.encode()).hexdigest()[:20], url=url))
+            seen.add(stable)
+    if not images and media_url(raw.get('displayUrl')):
+        images.append(dict(id=str(raw.get('id') or ''), url=raw['displayUrl']))
+    return images[:30]
+
+
+def index_error(exc):
+    code = getattr(exc, 'sqlite_errorcode', 0) & 255
+    if code == sqlite3.SQLITE_INTERRUPT or str(exc) == 'interrupted':
+        return 'query_deadline'
+    if code in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED} or str(exc) in {'locked', 'database is locked', 'database table is locked'}:
+        return 'database_busy'
+    if isinstance(exc, sqlite3.Error):
+        return 'database_error'
+    return 'invalid_index_row'
 
 
 def compact(value):
@@ -77,7 +131,8 @@ def error_reason(exc):
     if message in {'invalid_apify_path', 'invalid_run_id', 'invalid_run_payload',
                    'invalid_dataset_id', 'invalid_dataset', 'incomplete_extraction',
                    'media_unavailable', 'media_deadline', 'media_too_large',
-                   'media_dimensions_too_large', 'no_usable_media', 'unapproved_media_host'}:
+                   'media_dimensions_too_large', 'no_usable_media', 'unapproved_media_host',
+                   'invalid_post_media', 'invalid_extraction_shape', 'social_media_storage_limit'}:
         return message
     if isinstance(exc, json.JSONDecodeError):
         return 'invalid_json'
@@ -222,6 +277,8 @@ class Config:
 class Store:
     def __init__(self, cfg):
         self.cfg = cfg
+        self.search_cache = OrderedDict()
+        self.cache_lock = threading.Lock()
         if not cfg.path.is_absolute():
             raise ValueError("social_database_must_be_absolute")
         cfg.path.parent.mkdir(parents=True, exist_ok=True)
@@ -250,15 +307,38 @@ class Store:
                 CREATE TABLE IF NOT EXISTS usage(id TEXT PRIMARY KEY,kind TEXT NOT NULL,created INTEGER NOT NULL,
                     amount REAL NOT NULL);
                 CREATE INDEX IF NOT EXISTS usage_period ON usage(kind,created);
+                CREATE TABLE IF NOT EXISTS usage_sources(id TEXT PRIMARY KEY,source TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS lease(name TEXT PRIMARY KEY,owner TEXT NOT NULL,until INTEGER NOT NULL);
                 CREATE TABLE IF NOT EXISTS media(id TEXT PRIMARY KEY,mime TEXT NOT NULL,data BLOB NOT NULL,created INTEGER NOT NULL);
             """)
             columns = {r[1] for r in db.execute('PRAGMA table_info(jobs)')}
             if 'poll_errors' not in columns:
                 db.execute('ALTER TABLE jobs ADD COLUMN poll_errors INTEGER NOT NULL DEFAULT 0')
+            if 'media_revision' not in columns:
+                db.execute('ALTER TABLE jobs ADD COLUMN media_revision INTEGER NOT NULL DEFAULT 0')
+            columns = {r[1] for r in db.execute('PRAGMA table_info(posts)')}
+            if 'diagnostics' not in columns:
+                db.execute("ALTER TABLE posts ADD COLUMN diagnostics TEXT NOT NULL DEFAULT '{}'")
+            # Keep the original usage schema compatible with a rollback to social 2.0.
+            db.execute("INSERT OR IGNORE INTO usage_sources(id,source) SELECT id,substr(id,4,instr(substr(id,4),':')-1) FROM usage WHERE kind='ai' AND id LIKE 'ai:%:%'")
+            db.execute("INSERT OR IGNORE INTO config VALUES('index_revision','0')")
+            # Recheck only recent legacy rejections once, inside the same daily
+            # allowance. Do not reset attempts, usage, or already valid offers.
+            db.execute("""UPDATE posts SET state='pending',next_ai=0,diagnostics=?
+                       WHERE state='no_offer' AND diagnostics='{}' AND attempts<3 AND published>?""",
+                       (compact({'recheck': BUILD}), int(time.time())-48*3600))
             db.execute("INSERT OR IGNORE INTO config VALUES('signing_key',?)", (secrets.token_hex(32),))
             self.key = db.execute("SELECT value FROM config WHERE key='signing_key'").fetchone()[0].encode()
+            # Undo only the old one-day saturation hold; preserve true provider errors.
+            db.execute("""UPDATE sources SET next_poll=MIN(next_poll,?),error='recent_window_full',
+                       cursor=MAX(cursor,COALESCE((SELECT MAX(created) FROM jobs
+                          WHERE source=sources.username AND kind='new' AND state='done'),cursor))
+                       WHERE error='window_saturated_raise_limit'""",
+                       (int(time.time()),))
         os.chmod(cfg.path, 0o600)
+
+    def bump_index(self, db):
+        db.execute("UPDATE config SET value=CAST(value AS INTEGER)+1 WHERE key='index_revision'")
 
     @contextlib.contextmanager
     def db(self, timeout=2.):
@@ -285,6 +365,7 @@ class Store:
                 db.execute("UPDATE sources SET config=? WHERE username=?", (compact(prior), row['username']))
             for s in checked:
                 db.execute("INSERT INTO sources(username,config) VALUES(?,?) ON CONFLICT(username) DO UPDATE SET config=excluded.config", (s['username'], compact(s)))
+            self.bump_index(db)
 
     def acquire(self, owner, now):
         with self.db() as db:
@@ -292,7 +373,7 @@ class Store:
             db.execute("INSERT INTO lease VALUES('worker',?,?) ON CONFLICT(name) DO UPDATE SET owner=excluded.owner,until=excluded.until WHERE lease.until<? OR lease.owner=?", (owner, now + 300, now, owner))
             return db.execute("SELECT owner FROM lease WHERE name='worker'").fetchone()[0] == owner
 
-    def reserve(self, ident, kind, amount, now):
+    def reserve(self, ident, kind, amount, now, source=''):
         day = now - now % 86400
         dt = datetime.fromtimestamp(now, timezone.utc)
         month = int(dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0).timestamp())
@@ -305,7 +386,9 @@ class Store:
             total = db.execute("SELECT COALESCE(SUM(amount),0) FROM usage WHERE kind=? AND created>=?", (kind, month)).fetchone()[0]
             if used + amount > daily_limit + 1e-8 or (kind == 'apify' and total + amount > self.cfg.monthly + 1e-8):
                 return False
-            db.execute("INSERT INTO usage VALUES(?,?,?,?)", (ident, kind, now, amount))
+            db.execute("INSERT INTO usage(id,kind,created,amount) VALUES(?,?,?,?)", (ident, kind, now, amount))
+            if source:
+                db.execute('INSERT OR REPLACE INTO usage_sources(id,source) VALUES(?,?)', (ident, source))
             return True
 
     def remove_offers(self, db, key):
@@ -321,27 +404,24 @@ class Store:
         if not published or published > now + 300 or published < now - 30 * 86400:
             return False
         key = source['username'] + ':' + url.rstrip('/').rsplit('/', 1)[-1]
-        children = raw.get('childPosts') or []
-        # Video covers may carry a published offer; no video transcription is implied.
-        images = [(r.get('id') or '', r.get('displayUrl') or '') for r in children if isinstance(r, dict)]
-        if not images:
-            images = [(raw.get('id') or '', raw.get('displayUrl') or '')]
-        images = [(str(i), u) for i, u in images if media_url(u)]
+        images = media_items(raw)
         clean = dict(url=url, caption=str(raw.get('caption') or '')[:12000], timestamp=published,
-                     images=[dict(id=i, url=u) for i, u in images], ownerUsername=owner)
-        stable = dict(clean, images=[(i, urlunparse(urlparse(u)._replace(query='', fragment=''))) for i, u in images])
+                     images=images, ownerUsername=owner)
+        stable = dict(clean, images=[(i['id'], urlunparse(urlparse(i['url'])._replace(query='', fragment=''))) for i in images])
         digest = hashlib.sha256(compact(stable).encode()).hexdigest()
         with self.db() as db:
             old = db.execute("SELECT digest,state FROM posts WHERE key=?", (key,)).fetchone()
             if old and old['digest'] == digest:
                 db.execute("UPDATE posts SET seen=?,raw=? WHERE key=?", (now, compact(clean), key))
+                self.bump_index(db)
                 return False
             self.remove_offers(db, key)  # edited prices are hidden until extraction succeeds
             state = 'pending' if images else 'ignored'
-            db.execute("INSERT INTO posts(key,source,url,published,digest,raw,state,seen) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(key) DO UPDATE SET digest=excluded.digest,raw=excluded.raw,state=excluded.state,attempts=0,next_ai=0,seen=excluded.seen,error=''", (key, owner, url, published, digest, compact(clean), state, now))
+            db.execute("INSERT INTO posts(key,source,url,published,digest,raw,state,seen) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(key) DO UPDATE SET digest=excluded.digest,raw=excluded.raw,state=excluded.state,attempts=0,next_ai=0,seen=excluded.seen,error='',diagnostics='{}'", (key, owner, url, published, digest, compact(clean), state, now))
+            self.bump_index(db)
         return True
 
-    def save_offers(self, post, offers, now):
+    def save_offers(self, post, offers, now, diagnostics=None):
         with self.db() as db:
             current = db.execute("SELECT digest FROM posts WHERE key=?", (post['key'],)).fetchone()
             if not current or current[0] != post['digest']:
@@ -354,8 +434,30 @@ class Store:
                 db.execute("INSERT OR REPLACE INTO offers VALUES(?,?,?,?,?,?,?)", (ident, post['key'], offer['country'], offer['starts_at'], offer['expires_at'], offer['identity'], compact(offer)))
                 db.execute("DELETE FROM offer_search WHERE offer_id=?", (ident,))
                 db.execute("INSERT INTO offer_search VALUES(?,?)", (ident, offer['search_terms']))
-            db.execute("UPDATE posts SET state=?,error='' WHERE key=?", ('ready' if offers else 'no_offer', post['key']))
+            db.execute("UPDATE posts SET state=?,error='',diagnostics=? WHERE key=?", ('ready' if offers else 'no_offer', compact(diagnostics or {}), post['key']))
+            self.bump_index(db)
         return len(offers)
+
+    def restore_carousel(self, raw, source, now):
+        """Repair the saved media list from an existing dataset, not a fresh sighting."""
+        if not isinstance(raw, dict) or raw.get('error'):
+            return False
+        url = post_url(raw.get('url'))
+        with self.db() as db:
+            row = db.execute('SELECT * FROM posts WHERE source=? AND url=?', (source['username'], url)).fetchone()
+        if not row or row['state'] == 'ready':
+            # Preserve existing valid offers while today's AI allowance may be full.
+            # Their next normal source refresh can update media; recover empty posts first.
+            return False
+        saved = json.loads(row['raw'])
+        if (str(raw.get('ownerUsername') or '').lower() != source['username'] or
+                str(raw.get('caption') or '')[:12000] != saved['caption'] or
+                stamp(raw.get('timestamp')) != row['published']):
+            return False  # an older dataset may not undo a later price edit
+        if len(media_items(raw)) <= len(saved['images']):
+            return False
+        # accept_post uses this old sighting time, so a replay cannot renew freshness.
+        return self.accept_post(raw, source, row['seen'])
 
     def put_media(self, data, now):
         ident = hashlib.sha256(data).hexdigest()
@@ -377,6 +479,7 @@ class Store:
             for asset in db.execute('SELECT id FROM media WHERE created<?', (now-2*86400,)).fetchall():
                 if asset[0] not in live:
                     db.execute('DELETE FROM media WHERE id=?', (asset[0],))
+            self.bump_index(db)
 
     def signed(self, row):
         evidence = {k: row.get(k) for k in ('social_id', 'url', 'raw_title', 'price', 'currency', 'country', 'source_image', 'expires_at')}
@@ -390,6 +493,7 @@ class Store:
             return False
 
     def search(self, query, market, lang='en', now=None):
+        cache_enabled = now is None
         now = int(now or time.time())
         tokens = query_tokens(query)
         if not tokens:
@@ -399,9 +503,19 @@ class Store:
         if not countries:
             return []
         expression = ' OR '.join('"' + token + '"' for token in tokens)
-        deadline = time.monotonic() + .045
-        with self.db(timeout=.02) as db:
+        cache_key = (tuple(tokens), local, lang)
+        with self.db(timeout=.04) as db:
+            # Start the query allowance AFTER opening the connection. A busy Python
+            # worker should not use up the old 45ms before SQLite starts reading.
+            deadline = time.monotonic() + .120
             db.set_progress_handler(lambda: int(time.monotonic() > deadline), 500)
+            revision = db.execute("SELECT value FROM config WHERE key='index_revision'").fetchone()[0]
+            with self.cache_lock:
+                cached = self.search_cache.get(cache_key)
+                if cache_enabled and cached and cached[0] == revision and cached[1] > time.monotonic():
+                    self.search_cache.move_to_end(cache_key)
+                    return copy.deepcopy([r for r in cached[2] if r['starts_at'] <= now < r['expires_at']
+                                          and r['social_last_checked_at'] > now - 36*3600])
             marks = ','.join('?' for _ in countries)
             matches = db.execute(f"""SELECT o.data,p.source,p.seen,s.config FROM offer_search f
                 JOIN offers o ON o.id=f.offer_id JOIN posts p ON p.key=o.post_key
@@ -442,12 +556,32 @@ class Store:
             rows.append(row)
             if len(rows) == self.cfg.max_rows:
                 break
+        if cache_enabled:
+            with self.cache_lock:
+                self.search_cache[cache_key] = (revision, time.monotonic()+2., copy.deepcopy(rows))
+                self.search_cache.move_to_end(cache_key)
+                while len(self.search_cache) > 128:
+                    self.search_cache.popitem(last=False)
         return rows
 
     def status(self):
         now = int(time.time())
         with self.db() as db:
+            coverage = {cc: dict(pending=0, searchable=0) for cc in MARKETS}
+            rejected, empty = Counter(), Counter()
+            for row in db.execute("SELECT p.state,p.diagnostics,s.config FROM posts p JOIN sources s ON s.username=p.source WHERE json_extract(s.config,'$.enabled')=1"):
+                for cc in json.loads(row['config'])['countries']:
+                    if row['state'] == 'pending': coverage[cc]['pending'] += 1
+                diag = json.loads(row['diagnostics'])
+                rejected.update(diag.get('rejected', {}))
+                if diag.get('empty_reason'): empty[diag['empty_reason']] += 1
+            for row in db.execute("""SELECT o.country,COUNT(*) FROM offers o JOIN posts p ON p.key=o.post_key
+                    JOIN sources s ON s.username=p.source WHERE o.starts<=? AND o.expires>? AND p.seen>?
+                    AND p.state='ready' AND json_extract(s.config,'$.enabled')=1
+                    GROUP BY o.country""", (now, now, now-36*3600)):
+                coverage[row[0]]['searchable'] = row[1]
             return dict(build=BUILD, markets=list(MARKETS),
+                coverage=coverage, rejection_reasons=dict(rejected), empty_reasons=dict(empty),
                 sources=[dict(username=r['username'], countries=json.loads(r['config'])['countries'], enabled=json.loads(r['config'])['enabled'], next_poll=r['next_poll'], error=r['error']) for r in db.execute('SELECT * FROM sources')],
                 active_offers={r[0]:r[1] for r in db.execute('SELECT country,COUNT(*) FROM offers WHERE expires>? AND starts<=? GROUP BY country', (now, now))},
                 posts={r[0]:r[1] for r in db.execute('SELECT state,COUNT(*) FROM posts GROUP BY state')},
@@ -464,6 +598,9 @@ services, installments, deposits, trade-in, percentage discounts and price-free 
 Return only explicit unconditional FULL purchase prices. Conditions/coupons/member-only
 offers must be marked conditional=true. price_text is the literal number string as printed;
 price_quote and identity_quote are short verbatim evidence from caption or media_text.
+The price_quote must include the currency and FULL-price qualifier, excluding unrelated
+discount slogans elsewhere on the image. Transcribe all numbers/currency symbols exactly.
+The Saudi riyal symbol U+20C1 (⃁) means SAR; do not replace it in verbatim quotes with SAR.
 currency must be visibly identifiable, NEVER inferred just from account country. country
 must be explicitly stated if this is a multi-country account. Unknown: empty/null; no guesses.
 media_index is the zero-based image showing that exact product/price. caption evidence uses
@@ -473,56 +610,82 @@ registered market; resolve relative dates against published_at, not today. A dat
 means end of that day in that market. No stated expiry: empty string.
 Include faithful short titles in ar,en,es,it,fr and aliases in these languages to enable
 cross-language search. Preserve brand/model/storage/color/pack size; do not add specifications.
-Return JSON only: {media_text:[...],offers:[{title,brand,model,variant,titles:{ar,en,es,it,fr},
+If offers is empty, set no_offer_reason to one of: no_product, no_full_price,
+conditional_only, unreadable, no_currency, expired, not_an_offer. Do not invent an offer.
+Return JSON only: {no_offer_reason:'',media_text:[...],offers:[{title,brand,model,variant,titles:{ar,en,es,it,fr},
 aliases:[],price_text,currency,price_quote,identity_quote,evidence,media_index,countries:[],
 valid_from,valid_until,conditional,price_kind:'full',confidence}]}.
 """
 
 
-def normalize_offers(result, post, source, assets, base, now):
+def normalize_offers(result, post, source, assets, base, now, diagnostics=None):
     """Fail closed on price, market, evidence, expiry and carousel attribution."""
     raw = json.loads(post['raw'])
     offers = []
+    if not isinstance(result, dict) or not isinstance(result.get('offers'), list):
+        raise ValueError('invalid_extraction_shape')
     media_text = result.get('media_text') or []
-    for item in (result.get('offers') or [])[:30]:
+    if not isinstance(media_text, list):
+        raise ValueError('invalid_extraction_shape')
+    report = diagnostics if diagnostics is not None else {}
+    report.update(candidates=len(result['offers']), accepted=0, rejected={},
+                  empty_reason=(result.get('no_offer_reason') if isinstance(result.get('no_offer_reason'), str) and result.get('no_offer_reason') in EMPTY_REASONS
+                                else 'model_returned_no_offers') if not result['offers'] else '')
+    def reject(reason):
+        report['rejected'][reason] = report['rejected'].get(reason, 0) + 1
+    if len(result['offers']) > 30:
+        report['rejected']['candidate_limit'] = len(result['offers']) - 30
+    for item in result['offers'][:30]:
         try:
+            if not isinstance(item, dict):
+                reject('invalid_offer_shape'); continue
             idx = item.get('media_index')
             if isinstance(idx, bool) or not isinstance(idx, int) or not 0 <= idx < len(assets) or not assets[idx]:
-                continue
-            if item.get('conditional') is not False or item.get('price_kind') != 'full' or float(item.get('confidence') or 0) < .92:
-                continue
+                reject('invalid_media_index'); continue
+            if item.get('conditional') is not False:
+                reject('conditional_or_unknown'); continue
+            if item.get('price_kind') != 'full':
+                reject('not_full_price'); continue
+            confidence = float(item.get('confidence') or 0)
+            if not math.isfinite(confidence) or not .92 <= confidence <= 1:
+                reject('low_confidence'); continue
             title = str(item.get('title') or '').strip()[:220]
             quote = str(item.get('price_quote') or '').strip()[:300]
             identity_quote = str(item.get('identity_quote') or '').strip()[:300]
+            if item.get('evidence') not in {'caption', 'image'}:
+                reject('invalid_evidence_kind'); continue
             evidence = raw['caption'] if item.get('evidence') == 'caption' else str(media_text[idx]) if idx < len(media_text) else ''
-            if not title or len(identity_quote) < 3 or not quote or norm(quote) not in norm(evidence) or norm(identity_quote) not in norm(evidence) or BAD_PRICE.search(norm(quote)):
-                continue
+            if not title or len(identity_quote) < 3 or not quote:
+                reject('missing_evidence'); continue
+            if evidence_text(quote) not in evidence_text(evidence) or evidence_text(identity_quote) not in evidence_text(evidence):
+                reject('evidence_mismatch'); continue
+            if BAD_PRICE.search(norm(quote)):
+                reject('discount_or_installment'); continue
             currency = str(item.get('currency') or '').upper()
             amount = number(item.get('price_text'), currency)
-            if amount is None or norm(item.get('price_text')) not in norm(quote):
-                continue
-            markers = {'KWD': r'\b(?:KWD|KD)\b|د\s*\.?\s*ك|دينار كويتي',
-                       'SAR': r'\b(?:SAR|SR)\b|ر\s*\.?\s*س|ريال سعودي',
-                       'AED': r'\b(?:AED|DHS)\b|د\s*\.?\s*إ|درهم',
-                       'GBP': r'£|\bGBP\b', 'EUR': r'€|\bEUR\b'}
-            if currency not in markers or not re.search(markers[currency], quote, re.I):
-                continue
+            amount_quote = evidence_text(item.get('price_text'))
+            if amount is None or not re.search(r'(?<![\d.,٫٬])'+re.escape(amount_quote)+r'(?![\d.,٫٬])', evidence_text(quote)):
+                reject('invalid_price_number'); continue
+            if not currency_visible(quote, currency):
+                reject('currency_not_evidenced'); continue
             countries = [str(c).lower() for c in (item.get('countries') or [])]
             if not countries and len(source['countries']) == 1:
                 countries = source['countries']
             countries = [c for c in countries if c in source['countries'] and MARKETS[c]['currency'] == currency]
+            if not countries:
+                reject('country_currency_mismatch'); continue
             # A generous marketing caption can mention other models: identity must
             # appear in the same evidence segment chosen for this product.
             model = str(item.get('model') or '').strip()[:100]
-            if model and norm(model) not in norm(identity_quote):
-                continue
+            if model and not re.search(r'(?<!\w)'+re.escape(norm(model))+r'(?!\w)', norm(identity_quote)):
+                reject('model_evidence_mismatch'); continue
             start = stamp(item.get('valid_from')) if item.get('valid_from') else post['published']
             end = stamp(item.get('valid_until')) if item.get('valid_until') else post['published'] + 48 * 3600
-            if not start or not end or end <= now or start >= end:
-                continue
+            if not start or not end or start >= end:
+                reject('invalid_validity_dates'); continue
             end = min(end, post['published'] + 30 * 86400)
             if end <= now:
-                continue
+                reject('expired_explicit' if item.get('valid_until') else 'expired_default_48h'); continue
             titles = {k: str(v)[:220] for k,v in (item.get('titles') or {}).items() if k in {'ar','en','es','it','fr'} and isinstance(v,str)}
             aliases = [str(v)[:100] for v in (item.get('aliases') or [])[:25]]
             identity = norm(' '.join([str(item.get('brand') or ''), model, str(item.get('variant') or ''), title]))
@@ -537,8 +700,9 @@ def normalize_offers(result, post, source, assets, base, now):
                     starts_at=start, expires_at=end, expiry_explicit=bool(item.get('valid_until')),
                     price_evidence=quote, identity_evidence=identity_quote, evidence_kind=item.get('evidence'),
                     evidence_media_index=idx, availability_checked_at=None))
+            report['accepted'] += 1
         except (ValueError, TypeError, IndexError, AttributeError):
-            continue
+            reject('invalid_offer_shape')
     return offers
 
 
@@ -550,13 +714,14 @@ class Worker:
         self.stop = threading.Event()
         self.cleaned = 0
         self.budget_log_at = {}
+        self.health_at = 0
 
     def budget_wait(self, kind, now):
         if now - self.budget_log_at.get(kind, 0) >= 900:
             self.budget_log_at[kind] = now
-            LOG.info('SOCIAL budget_wait kind=%s daily_limit=%s monthly_limit=%s', kind,
+            LOG.info('SOCIAL budget_wait kind=%s daily_limit=%s monthly_limit=%s next_daily_reset=%s', kind,
                      self.cfg.daily if kind == 'apify' else self.cfg.ai_daily,
-                     self.cfg.monthly if kind == 'apify' else 'not_applicable')
+                     self.cfg.monthly if kind == 'apify' else 'not_applicable', iso(now-now%86400+86400))
 
     def api(self, method, path, **kw):
         if not re.fullmatch(r"[A-Za-z0-9_~/-]+", path):
@@ -585,7 +750,7 @@ class Worker:
             self.budget_wait('apify', now)
             return False
         with self.store.db() as db:
-            db.execute("INSERT INTO jobs(id,source,kind,input,state,created,next_check,cost) VALUES(?,?,?,?,?,?,?,?)", (ident, source['username'], kind, compact(inp), 'starting', now, now, self.cfg.max_run))
+            db.execute("INSERT INTO jobs(id,source,kind,input,state,created,next_check,cost,media_revision) VALUES(?,?,?,?,?,?,?,?,1)", (ident, source['username'], kind, compact(inp), 'starting', now, now, self.cfg.max_run))
             db.execute("UPDATE sources SET next_poll=? WHERE username=?", (now + source['interval_seconds'], source['username']))
         try:
             data = self.api('POST', 'acts/apify~instagram-post-scraper/runs',
@@ -663,13 +828,55 @@ class Worker:
         with self.store.db() as db:
             db.execute("UPDATE jobs SET state='done',dataset=?,cost=?,error=?,poll_errors=0 WHERE id=?", (dataset, cost, 'window_saturated' if saturated else '', job['id']))
             db.execute('UPDATE usage SET amount=? WHERE id=?', (cost, job['id']))
-            if job['kind'] == 'new' and not saturated:
-                db.execute('UPDATE sources SET cursor=?,error=? WHERE username=?', (job['created'], '', job['source']))
+            if job['kind'] == 'new':
+                db.execute('UPDATE sources SET cursor=?,error=? WHERE username=?', (job['created'], 'recent_window_full' if saturated else '', job['source']))
             if saturated:
-                db.execute("UPDATE sources SET error='window_saturated_raise_limit',next_poll=? WHERE username=?", (now+86400, job['source']))
+                LOG.info('SOCIAL window_full source=%s retained=%s next_poll_seconds=%s older_backfill=limited',
+                         job['source'], len(items), source['interval_seconds'])
             if job['kind'] == 'refresh' or src['next_refresh'] == 0:
                 db.execute('UPDATE sources SET next_refresh=? WHERE username=?', (now+86400, job['source']))
         LOG.info('SOCIAL run_done source=%s posts=%s new_posts=%s apify_usd=%.5f', job['source'], len(items), accepted, cost)
+
+    def repair_dataset(self, job, now):
+        """One bounded GET of an already completed dataset; never launches an Actor."""
+        with self.store.db() as db:
+            row = db.execute('SELECT config FROM sources WHERE username=?', (job['source'],)).fetchone()
+        source = json.loads(row[0]) if row else {}
+        changed = 0
+        if source.get('enabled') and CODE.fullmatch(str(job['dataset'] or '')):
+            items = self.api('GET', 'datasets/' + job['dataset'] + '/items', params={'clean':'true', 'format':'json', 'limit':51})
+            if not isinstance(items, list):
+                raise ValueError('invalid_dataset')
+            for raw in items:
+                try:
+                    changed += bool(self.store.restore_carousel(raw, source, now))
+                except (ValueError, TypeError, AttributeError, OverflowError):
+                    continue
+        with self.store.db() as db:
+            db.execute('UPDATE jobs SET media_revision=1 WHERE id=?', (job['id'],))
+        LOG.info('SOCIAL carousel_recovery source=%s updated_posts=%s actor_launched=false', job['source'], changed)
+
+    def next_post(self, now):
+        """Share the existing daily AI allowance across markets, then prioritize price hints."""
+        with self.store.db() as db:
+            used = list(db.execute("SELECT a.source,SUM(u.amount),s.config FROM usage u JOIN usage_sources a ON a.id=u.id JOIN sources s ON s.username=a.source WHERE u.kind='ai' AND u.created>=? GROUP BY a.source", (now-now%86400,)))
+            # Per-source candidates avoid a prolific merchant monopolizing the shortlist.
+            posts = db.execute("""SELECT * FROM (SELECT p.*,s.config,
+                ROW_NUMBER() OVER(PARTITION BY p.source ORDER BY p.published DESC) AS position
+                FROM posts p JOIN sources s ON s.username=p.source WHERE p.state='pending'
+                AND p.next_ai<=? AND p.attempts<3 AND json_extract(s.config,'$.enabled')=1)
+                WHERE position<=5""", (now,)).fetchall()
+        market_used = Counter()
+        for _, amount, config in used:
+            for cc in json.loads(config)['countries']: market_used[cc] += amount
+        def priority(post):
+            countries = json.loads(post['config'])['countries']
+            caption = json.loads(post['raw']).get('caption', '')
+            price_hint = bool(re.search(r'\d', caption.translate(DIGITS)) and
+                              any(currency_visible(caption, MARKETS[cc]['currency']) for cc in countries))
+            fresh = post['published'] > now-48*3600
+            return (min(market_used[cc] for cc in countries), not fresh, not price_hint, -post['published'])
+        return min(posts, key=priority) if posts else None
 
     def download_image(self, url):
         if not media_url(url):
@@ -696,7 +903,7 @@ class Worker:
 
     def extract(self, post, source, now):
         ident = 'ai:' + post['key'] + ':' + post['digest'] + ':' + str(post['attempts'])
-        if not self.store.reserve(ident, 'ai', 1, now):
+        if not self.store.reserve(ident, 'ai', 1, now, source=source['username']):
             self.budget_wait('ai', now)
             return
         with self.store.db() as db:
@@ -734,9 +941,16 @@ class Worker:
         if candidate.get('finishReason') != 'STOP':
             raise ValueError('incomplete_extraction')
         result = json.loads(''.join(p.get('text', '') for p in candidate.get('content', {}).get('parts', []) if not p.get('thought')))
-        offers = normalize_offers(result, post, source, assets, self.cfg.base, now)
-        count = self.store.save_offers(post, offers, now)
-        LOG.info('SOCIAL extracted source=%s offers=%s images=%s ai_tokens=%s', source['username'], count, len(assets), data.get('usageMetadata', {}).get('totalTokenCount', 0))
+        diagnostics = {}
+        offers = normalize_offers(result, post, source, assets, self.cfg.base, now, diagnostics)
+        diagnostics.update(images_available=len(raw['images']), images_used=len(assets),
+                           images_truncated=max(0, len(raw['images'])-self.cfg.max_images))
+        count = self.store.save_offers(post, offers, now, diagnostics)
+        LOG.info('SOCIAL extracted source=%s offers=%s images=%s ai_tokens=%s diagnostics=%s', source['username'], count, len(assets), data.get('usageMetadata', {}).get('totalTokenCount', 0), compact(diagnostics))
+        if count:
+            for offer in offers[:3]:
+                LOG.info('SOCIAL offer_ready %s', compact(dict(source=source['username'], country=offer['country'],
+                    query=offer['raw_title'], price=offer['price'], expires_at=iso(offer['expires_at']))))
 
     def tick(self, now=None):
         now = int(now or time.time())
@@ -766,7 +980,21 @@ class Worker:
                     db.execute('UPDATE sources SET error=? WHERE username=?', (reason, job['source']))
                 LOG.warning('SOCIAL poll_failed source=%s reason=%s attempt=%s state=%s retry_seconds=%s', job['source'], reason, attempts, state, delay)
         with self.store.db() as db:
-            post = db.execute("SELECT p.*,s.config FROM posts p JOIN sources s ON s.username=p.source WHERE p.state='pending' AND p.next_ai<=? AND p.attempts<3 AND json_extract(s.config,'$.enabled')=1 ORDER BY p.published DESC LIMIT 1", (now,)).fetchone()
+            repair = db.execute("""SELECT * FROM (SELECT j.*,
+                    ROW_NUMBER() OVER(PARTITION BY source ORDER BY created DESC) AS recent
+                    FROM jobs j WHERE state IN ('done','partial') AND dataset IS NOT NULL AND created>?)
+                    WHERE media_revision=0 AND recent<=3 AND next_check<=?
+                    ORDER BY created DESC LIMIT 1""", (now-7*86400, now)).fetchone()
+        if repair:
+            try:
+                self.repair_dataset(repair, now)
+            except Exception as exc:
+                attempts = repair['poll_errors'] + 1
+                with self.store.db() as db:
+                    db.execute('UPDATE jobs SET poll_errors=?,next_check=?,media_revision=? WHERE id=?',
+                               (attempts, now+3600, 1 if attempts >= 3 else 0, repair['id']))
+                LOG.warning('SOCIAL carousel_recovery_failed source=%s reason=%s attempt=%s', repair['source'], error_reason(exc), attempts)
+        post = self.next_post(now)
         if post and json.loads(post['config']).get('enabled'):
             try:
                 self.extract(post, json.loads(post['config']), now)
@@ -780,6 +1008,12 @@ class Worker:
             if json.loads(row['config']).get('enabled'):
                 if self.launch(row, now):
                     break
+        if now - self.health_at >= 900:
+            self.health_at = now
+            state = self.store.status()
+            LOG.info('SOCIAL coverage markets=%s rejected=%s empty=%s usage_today=%s',
+                     compact(state['coverage']), compact(state['rejection_reasons']),
+                     compact(state['empty_reasons']), compact(state['usage_today']))
 
     def run(self):
         while not self.stop.is_set():
@@ -814,8 +1048,8 @@ class Service:
             LOG.info('SOCIAL search country=%s tokens=%s matches=%s',
                      str((market or {}).get('country') or '')[:2], len(query_tokens(query)), len(rows))
             return rows
-        except (sqlite3.Error, ValueError, TypeError):
-            LOG.warning('SOCIAL search_unavailable reason=index_unavailable')
+        except (sqlite3.Error, ValueError, TypeError) as exc:
+            LOG.warning('SOCIAL search_unavailable reason=%s', index_error(exc))
             return []  # a missing/locked index never fails the core search
 
     def valid(self, row):
