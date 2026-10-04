@@ -394,7 +394,7 @@ from findzia_billing import CreditMiddleware, install_billing
 app.add_middleware(CreditMiddleware, owner=app)
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization', 'X-Findzia-Request-Id'], max_age=86400)
-BUILD_ID = 'v128.5.42.47-social-search-fix'
+BUILD_ID = 'v128.5.42.48-cost-fix'
 _SOCIAL = None
 
 def _fz_social_row(row):
@@ -601,6 +601,32 @@ def _api_cost_record(event, count=1):
 def api_cost_snapshot():
     with API_COST_STATS_LOCK:
         return dict(API_COST_STATS)
+
+
+def _gemini_usage_record(data, purpose, model, *, complete=True):
+    """Provider-reported tokens only; missing/interrupted usage is not zero cost.
+
+    Cached input is a subset of prompt tokens. Thoughts, candidates and totals
+    are recorded separately, never added together into an invented bill.
+    """
+    purpose = purpose if purpose in ('photo_identity', 'market_translation',
+        'visual_audit', 'text_audit', 'refinement', 'identity') else 'identity'
+    usage = data.get('usageMetadata') if isinstance(data, dict) else None
+    fields = {'promptTokenCount': 'prompt', 'candidatesTokenCount': 'output',
+              'thoughtsTokenCount': 'thoughts', 'cachedContentTokenCount': 'cached',
+              'toolUsePromptTokenCount': 'tool_input', 'totalTokenCount': 'total'}
+    values = {label: usage[name] for name, label in fields.items()
+              if isinstance(usage, dict) and type(usage.get(name)) is int
+              and 0 <= usage[name] < 1000000000}
+    prefix = 'gemini_' + purpose
+    _api_cost_record(prefix + ('_usage_reports' if values else '_usage_missing'))
+    if not complete:
+        _api_cost_record(prefix + '_usage_incomplete')
+    for label, value in values.items():
+        _api_cost_record(prefix + '_reported_' + label + '_tokens', value)
+    safe_model = re.sub(r'[^a-zA-Z0-9._-]', '', str(model))[:90]
+    print('GEMINI USAGE ' + json.dumps(dict(purpose=purpose, model=safe_model,
+          complete=bool(complete), reported=bool(values), tokens=values), sort_keys=True))
 
 PUBLIC_BASE_URL = os.environ.get('PUBLIC_BASE_URL', '').strip().rstrip('/')
 if not PUBLIC_BASE_URL:
@@ -1934,6 +1960,8 @@ def _searchapi_policy_snapshot():
                 hybrid=_HYBRID_SEARCH, serper_configured=bool(os.environ.get('SERPER_API_KEY', '').strip()))
 
 def _serpapi_cached_json(params, timeout, label='SERPAPI', *, return_error=False, retry_connect=False):
+    if not _HYBRID_SEARCH and '_purpose' in params:
+        params = {key: value for key, value in params.items() if key != '_purpose'}
     if _HYBRID_SEARCH:
         engine = str(params.get('engine') or '')
         if engine == 'google_lens':
@@ -3220,7 +3248,7 @@ def _photo_identity_request(image_b64, mime_type):
         GEMINI_STATS['plain_calls'] += 1
     try:
         data, error = _web_identity_stream_response(f'{GEMINI_BASE_URL}/{PHOTO_IDENTITY_MODEL}:generateContent',
-            payload, PHOTO_IDENTITY_TIMEOUT, on_text)
+            payload, PHOTO_IDENTITY_TIMEOUT, on_text, purpose='photo_identity')
         if error:
             print('PHOTO REFERENCE unavailable=' + error)
             return {}
@@ -4913,7 +4941,7 @@ def _market_query_translate_batch(query, languages):
     # thinking controls. https://ai.google.dev/api/generate-content#ThinkingConfig
     if MARKET_QUERY_TRANSLATION_MODEL in ('gemini-2.5-flash', 'gemini-2.5-flash-lite'):
         payload['generationConfig']['thinkingConfig'] = {'thinkingBudget': 0}
-    elif MARKET_QUERY_TRANSLATION_MODEL == 'gemini-3.5-flash':
+    elif MARKET_QUERY_TRANSLATION_MODEL in ('gemini-3.5-flash', 'gemini-3.5-flash-lite'):
         payload['generationConfig']['thinkingConfig'] = {'thinkingLevel': 'MINIMAL'}
     # No responseSchema: this helper's schema fallback cannot issue a retry.
     _api_cost_record('gemini_market_query_batches')
@@ -4921,7 +4949,7 @@ def _market_query_translate_batch(query, languages):
         GEMINI_STATS['plain_calls'] += 1
     data, error = _web_identity_stream_response(
         f'{GEMINI_BASE_URL}/{MARKET_QUERY_TRANSLATION_MODEL}:generateContent', payload,
-        MARKET_QUERY_TRANSLATION_TIMEOUT, lambda _: None)
+        MARKET_QUERY_TRANSLATION_TIMEOUT, lambda _: None, purpose='market_translation')
     if error:
         return {}
     candidate = (data.get('candidates') or [{}])[0]
@@ -6502,7 +6530,8 @@ def _web_shein_index_fetch(params, timeout_seconds, cancel_event=None):
         connect = min(.8, max(.02, budget * .15))
         if engine.startswith(('serper_', 'cse_')):
             return _fast_provider_search(engine, params['q'], params.get('gl', 'us'),
-                                         params.get('hl', 'en'), (connect, max(.02, budget-connect)))
+                                         params.get('hl', 'en'), (connect, max(.02, budget-connect)),
+                                         num=params.get('num'), purpose=params.get('_purpose', 'discovery'))
         request_params = dict(params, engine=engine, api_key=SERPAPI_API_KEY, output='json')
         if 'images' in engine:
             request_params.pop('num', None)
@@ -16433,7 +16462,7 @@ def _web_identity_partial_response(raw):
     return parsed if not error else {}
 
 
-def _web_identity_stream_response(gemini_url, payload, timeout, on_text, cancel_event=None):
+def _web_identity_stream_response(gemini_url, payload, timeout, on_text, cancel_event=None, *, purpose='identity'):
     """Same multimodal audit over SSE, with bounded reads and no blind retries."""
     deadline = time.monotonic() + timeout
     url = gemini_url.removesuffix(':generateContent') + ':streamGenerateContent'
@@ -16442,6 +16471,7 @@ def _web_identity_stream_response(gemini_url, payload, timeout, on_text, cancel_
     if schema and {'reference_profile', 'items'}.issubset(schema.get('properties', {})):
         schema['propertyOrdering'] = ['reference_profile', 'items']
     raw, finish_reason = '', ''
+    usage_metadata, usage_complete = {}, False
     response = None
     try:
         for attempt in range(2):
@@ -16471,6 +16501,8 @@ def _web_identity_stream_response(gemini_url, payload, timeout, on_text, cancel_
         def consume(lines):
             nonlocal raw, finish_reason
             event = json.loads('\n'.join(lines))
+            if isinstance(event.get('usageMetadata'), dict):
+                usage_metadata.update(event['usageMetadata'])
             if event.get('error'):
                 raise ValueError('identity_stream_provider_error')
             candidates = event.get('candidates') or []
@@ -16514,8 +16546,13 @@ def _web_identity_stream_response(gemini_url, payload, timeout, on_text, cancel_
                     raise ValueError('identity_stream_event_too_large')
         if event_lines:
             consume(event_lines)
-        return {'candidates': [{'content': {'parts': [{'text': raw}]}, 'finishReason': finish_reason}]}, ''
+        usage_complete = bool(finish_reason)
+        return {'candidates': [{'content': {'parts': [{'text': raw}]}, 'finishReason': finish_reason}],
+                'usageMetadata': usage_metadata}, ''
     finally:
+        if response is not None and response.status_code < 400:
+            _gemini_usage_record({'usageMetadata': usage_metadata}, purpose,
+                gemini_url.rsplit('/', 1)[-1].split(':', 1)[0], complete=usage_complete)
         _web_safe_response_close(response)
 
 
@@ -17253,7 +17290,7 @@ judge the product type and overall resemblance, not for ordinary design variants
             print(f'GEMINI CALL model={model} search=False purpose={purpose} images={1 + len(visual_evidence) if visual_mode else 0} totals={GEMINI_STATS}')
         if progress_callback is not None and visual_mode:
             data, error = _web_identity_stream_response(
-                gemini_url, payload, effective_timeout, on_text, cancel_event)
+                gemini_url, payload, effective_timeout, on_text, cancel_event, purpose='visual_audit')
             if error:
                 return _web_identity_review_failure(error, visual_mode, len(visual_evidence_ids))
         else:
@@ -17263,6 +17300,7 @@ judge the product type and overall resemblance, not for ordinary design variants
                 print(f'WEB IDENTITY REVIEW unavailable={error}')
                 return _web_identity_review_failure(error, visual_mode, len(visual_evidence_ids))
             data = response.json()
+            _gemini_usage_record(data, 'visual_audit' if visual_mode else 'text_audit', model)
         model_candidates = data.get('candidates') or []
         if not model_candidates:
             print('WEB IDENTITY REVIEW unavailable=no_candidates')
@@ -20282,6 +20320,7 @@ def _web_targeted_price_updates(entries, lang, market, *, image_only=False):
               'gl': search_cc,
               'hl': country_search_hl(search_cc), 'num': 10,
               'api_key': SERPAPI_API_KEY, 'output': 'json'}
+    params['_purpose'] = 'listing_image' if image_source else 'listing_price'
     if image_source:
         params.pop('num', None)
     # Runs asynchronously inside the existing live-enrichment window.
@@ -20297,7 +20336,9 @@ def _web_targeted_price_updates(entries, lang, market, *, image_only=False):
                 return _web_shein_index_fetch(request, budget) or {}
             if provider:
                 return _fast_provider_search(provider + ('_images' if image_source else '_search'), term,
-                    search_cc, params['hl'], (connect, budget-connect)) or {}
+                    search_cc, params['hl'], (connect, budget-connect),
+                    num=None if image_source else 10,
+                    purpose='listing_image' if image_source else 'listing_price') or {}
             request = dict(params, q=term)
             return _serpapi_cached_json(request, timeout=(connect, budget-connect), label='EXACT-LISTING') or {}
         except Exception as exc:
@@ -22186,17 +22227,22 @@ def _hybrid_serper_request(params, timeout, *, return_error=False):
         body['autocorrect'] = params['autocorrect']
     if params.get('tbs'):
         body['tbs'] = params['tbs']
-    data = _HYBRID_SERPER.search(kind, body, timeout, _serper_json, _serper_to_serpapi,
+    fetch = _serper_json
+    if params.get('_purpose'):
+        fetch = lambda kind, body, window: _serper_json(kind, body, window, purpose=params['_purpose'])
+    data = _HYBRID_SERPER.search(kind, body, timeout, fetch, _serper_to_serpapi,
         bypass=str(params.get('no_cache', '')).lower() in ('1', 'true'))
     return data if isinstance(data, dict) else failure('serper_unavailable')
 
 
-def _serper_json(path, body, timeout):
+def _serper_json(path, body, timeout, *, purpose='discovery'):
     """POST to Serper.dev; returns the parsed JSON or None. Never logs the key."""
     began = time.monotonic()
     r = None
     _api_cost_record('serper_http_requests')
     _api_cost_record('serper_engine_' + path)
+    purpose = purpose if purpose in ('discovery', 'listing_price', 'listing_image', 'shopping_link') else 'discovery'
+    _api_cost_record('serper_' + purpose + '_requests')
     try:
         r = requests.post(f'https://google.serper.dev/{path}', json=body, timeout=timeout,
                           headers={'X-API-KEY': SERPER_API_KEY, 'Content-Type': 'application/json'})
@@ -22225,7 +22271,14 @@ def _serper_json(path, body, timeout):
     credits = data.get('credits')
     if type(credits) in (int, float) and credits >= 0 and credits < 10000 and float(credits).is_integer():
         _api_cost_record('serper_reported_credits', int(credits))
-    print(f'SERPER RESPONSE kind={path} status=200 elapsed_ms={int((time.monotonic()-began)*1000)}')
+        _api_cost_record('serper_' + purpose + '_credits', int(credits))
+        _api_cost_record('serper_' + path + '_credits', int(credits))
+    else:
+        credits = 'unknown'
+        _api_cost_record('serper_credits_missing')
+    print(f'SERPER RESPONSE kind={path} status=200 purpose={purpose} credits={credits}'
+          f' num={body.get("num", "default")} gl={body.get("gl", "us")} hl={body.get("hl", "en")}'
+          f' elapsed_ms={int((time.monotonic()-began)*1000)}')
     return data
 
 
@@ -22360,13 +22413,17 @@ def _cse_to_serpapi(kind, data):
     return out
 
 
-def _fast_provider_search(engine, wording, country, hl, timeout, page=1):
+def _fast_provider_search(engine, wording, country, hl, timeout, page=1, *, num=None, purpose='discovery'):
     """engine: serper_search|serper_images|serper_shopping|cse_search|cse_images."""
     provider, kind = engine.split('_', 1)
     page = max(1, min(2, int(page)))
     if _HYBRID_SEARCH:
-        return _hybrid_serper_request({'engine': 'serper_'+kind, 'q': wording,
-            'gl': country, 'hl': hl, 'page': page}, timeout)
+        params = {'engine': 'serper_'+kind, 'q': wording, 'gl': country, 'hl': hl, 'page': page}
+        if num is not None:
+            params['num'] = num
+        if purpose != 'discovery':
+            params['_purpose'] = purpose
+        return _hybrid_serper_request(params, timeout)
     if _SEARCHAPI_ROUTER.enabled:
         mapped_engine = {'search': 'google', 'images': 'google_images', 'shopping': 'google_shopping'}.get(kind)
         if not mapped_engine:
@@ -22376,6 +22433,8 @@ def _fast_provider_search(engine, wording, country, hl, timeout, page=1):
             return {'shopping_results': [], 'search_metadata': {'provider': 'searchapi', 'status': 'Success', 'skipped': 'unsupported_market'}}
         params = {'engine': mapped_engine, 'q': wording, 'gl': country, 'hl': hl,
                   'api_key': SERPAPI_API_KEY}
+        if num is not None:
+            params['num'] = max(1, min(100, int(num)))
         if kind == 'search':
             params['nfpr'] = int(bool(_web_model_tokens_from_listing(wording)))
             if page > 1:
@@ -22389,6 +22448,8 @@ def _fast_provider_search(engine, wording, country, hl, timeout, page=1):
             data.setdefault('search_metadata', {})['engine'] = engine
         return data
     cache_params = {'engine': engine, 'q': wording, 'gl': country, 'hl': hl}
+    if num is not None:
+        cache_params['num'] = max(1, min(100, int(num)))
     if page > 1:
         cache_params['page'] = page
     key = _serpapi_cache_key(cache_params)
@@ -22401,14 +22462,14 @@ def _fast_provider_search(engine, wording, country, hl, timeout, page=1):
     began = time.monotonic()
     data = None
     if provider == 'serper':
-        body = {'q': wording, 'gl': country, 'hl': hl, 'num': FAST_PROVIDER_NUM}
+        body = {'q': wording, 'gl': country, 'hl': hl, 'num': max(1, min(100, int(num or FAST_PROVIDER_NUM)))}
         if page > 1:
             body['page'] = page
         if COUNTRY_NAMES.get(country) and kind != 'images':
             body['location'] = COUNTRY_NAMES[country]
         if _web_model_tokens_from_listing(wording):
             body['autocorrect'] = False  # keep SPS1000i as typed (SerpApi nfpr=1 equivalent)
-        raw = _serper_json(kind, body, timeout)
+        raw = _serper_json(kind, body, timeout, purpose=purpose)
         data = _serper_to_serpapi(kind, raw) if isinstance(raw, dict) else None
     elif provider == 'cse':
         params = {'q': wording, 'gl': country, 'hl': hl, 'num': 10, 'safe': 'off'}
@@ -22727,7 +22788,8 @@ def _web_text_shopping_lookup(card, spec, deadline, cancel):
     query = title[:220] + ' ' + merchant[:100]
     budget = min(3.5, remaining)
     data = _fast_provider_search('serper_search', query, spec['country'], spec['hl'],
-                                 (min(.6, budget/4), budget-min(.6, budget/4))) or {}
+                                 (min(.6, budget/4), budget-min(.6, budget/4)),
+                                 num=10, purpose='shopping_link') or {}
     rows = []
     for raw in data.get('organic_results') or []:
         url = _local_discovery_direct_link(raw)
@@ -29607,7 +29669,9 @@ def _refine_ai(system, data, tokens=2600, images=None, timeout=12):
         result = requests.post(f'{GEMINI_BASE_URL}/{REFINE_MODEL}:generateContent',
                                params={'key': GEMINI_API_KEY}, json=payload, timeout=(2, timeout))
         result.raise_for_status()
-        candidates = result.json().get('candidates') or []
+        response_data = result.json()
+        _gemini_usage_record(response_data, 'refinement', REFINE_MODEL)
+        candidates = response_data.get('candidates') or []
         parts = ((candidates[0].get('content') or {}).get('parts') or []) if candidates else []
         raw = ''.join(part.get('text', '') for part in parts if not part.get('thought'))
         raw = re.sub(r'^\s*```(?:json)?\s*|\s*```\s*$', '', raw).strip()
@@ -32144,32 +32208,69 @@ _FZ_MEDIA_GATE = threading.BoundedSemaphore(8)
 
 
 _FZ_MEDIA_LOOKUP_POOL = ThreadPoolExecutor(max_workers=4,thread_name_prefix='media-lookups')
+_FZ_MEDIA_PAGE_GRACE = max(0., min(1., float(os.environ.get('FINDZIA_MEDIA_PAGE_GRACE_SECONDS', '1.0'))))
+
+def _fz_media_cache_key(row):
+    # Proxy/direct aliases and ordering are the same exclusions. Keep listing,
+    # country and title identity separate; failed-image URLs are never fetched.
+    failed = tuple(sorted(set(_web_unproxy_image_url(x) for x in row.get('_failed_images', []))))
+    return (_web_price_url_key(row['url']), str(row.get('country') or 'us').lower(),
+            str(row.get('raw_title') or row.get('title') or ''), failed)
+
 
 def _fz_recover_media(row):
-    market=_web_market(row.get('country') or 'us')
-    original=set(_web_unproxy_image_url(x) for x in row.get('_failed_images',[]))
+    market = _web_market(row.get('country') or 'us')
+    original = set(_web_unproxy_image_url(x) for x in row.get('_failed_images', []))
     def page():
-        snap=_web_verified_page_snapshot(row['url'],row.get('country') or '') or {}
-        chosen=_web_live_page_image(row,snap)
-        return ([chosen] if chosen else [])+(snap.get('image_candidates') or [])
+        snap = _web_verified_page_snapshot(row['url'], row.get('country') or '') or {}
+        chosen = _web_live_page_image(row, snap)
+        # Only the validated product page may contribute alternative pictures.
+        return ([chosen] + (snap.get('image_candidates') or [])) if chosen else []
     def index():
-        found=_web_targeted_price_updates({'media':dict(row,image='',thumbnail='',images=[],image_candidates=[])},'en',market,image_only=True).get('media',{})
-        return [found.get('page_image')]+(found.get('image_candidates') or [])
-    jobs={_FZ_MEDIA_LOOKUP_POOL.submit(_run_with_market,market,fn) for fn in (page,index)}
-    deadline=time.monotonic()+8; urls=[]
+        _api_cost_record('media_index_needed')
+        found = _web_targeted_price_updates({'media': dict(row, image='', thumbnail='',
+            images=[], image_candidates=[])}, 'en', market, image_only=True).get('media', {})
+        return [found.get('page_image')] + (found.get('image_candidates') or [])
+    def usable(candidates):
+        urls, seen = [], set()
+        for url in _web_offer_image_candidates({'images': candidates}):
+            canonical = _web_unproxy_image_url(url)
+            if canonical not in original and canonical not in seen and not _web_image_is_generic(url, row['url']):
+                seen.add(canonical)
+                urls.append(url)
+        return urls
+    def result(urls):
+        urls = urls[:8]
+        return {'ok': True, 'images': urls,
+                'image_candidates': _web_merge_offer_images({}, {'images': urls}).get('image_candidates', urls)}
+    deadline = time.monotonic() + 8
+    page_job = _FZ_MEDIA_LOOKUP_POOL.submit(_run_with_market, market, page)
+    jobs = {page_job}
     try:
-        while jobs and time.monotonic()<deadline:
-            done,jobs=wait(jobs,timeout=max(0,deadline-time.monotonic()),return_when=FIRST_COMPLETED)
+        done, jobs = wait(jobs, timeout=_FZ_MEDIA_PAGE_GRACE, return_when=FIRST_COMPLETED)
+        if done:
+            try:
+                urls = usable(page_job.result())
+            except Exception:
+                urls = []
+            if urls:
+                _api_cost_record('media_index_avoided')
+                print('MEDIA RECOVERY source=product_page paid_lookup=False')
+                return result(urls)
+        jobs.add(_FZ_MEDIA_LOOKUP_POOL.submit(_run_with_market, market, index))
+        while jobs and time.monotonic() < deadline:
+            done, jobs = wait(jobs, timeout=max(0, deadline-time.monotonic()), return_when=FIRST_COMPLETED)
             for job in done:
-                try: candidates=job.result()
-                except Exception: continue
-                for url in _web_offer_image_candidates({'images':candidates}):
-                    if _web_unproxy_image_url(url) not in original and not _web_image_is_generic(url,row['url']) and url not in urls: urls.append(url)
-            if urls: break
+                try:
+                    urls = usable(job.result())
+                except Exception:
+                    continue
+                if urls:
+                    return result(urls)
+        return result([])
     finally:
-        for job in jobs: job.cancel()
-    urls=urls[:8]
-    return {'ok':True,'images':urls,'image_candidates':_web_merge_offer_images({}, {'images':urls}).get('image_candidates',urls)}
+        for job in jobs:
+            job.cancel()
 
 
 @app.post('/api/media/recover')
@@ -32189,7 +32290,7 @@ async def web_api_media_recover(request: Request):
         # No media job is launched for an aborted request body.
         return Response(status_code=204)
     except (ValueError,TypeError,AttributeError): return JSONResponse({'ok':False,'error':'invalid_request'},status_code=400)
-    key = (_web_price_url_key(row['url']),tuple(sorted(row.get('_failed_images',[]))))
+    key = _fz_media_cache_key(row)
     with _FZ_MEDIA_LOCK:
         cached = _FZ_MEDIA_CACHE.get(key)
         if cached and cached[0]>time.monotonic(): return cached[1]

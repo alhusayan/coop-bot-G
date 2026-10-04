@@ -1,0 +1,20 @@
+test_actual_http_records_provider_credits_and_closes_bad_json (test_hybrid.HttpAccountingTests.test_actual_http_records_provider_credits_and_closes_bad_json) ... ok
+test_all_index_aliases_share_serper_with_no_expensive_calls (test_hybrid.HybridTests.test_all_index_aliases_share_serper_with_no_expensive_calls) ... ok
+test_distinct_market_language_page_stay_separate_narrow_reuses_wide (test_hybrid.HybridTests.test_distinct_market_language_page_stay_separate_narrow_reuses_wide) ... ok
+test_fast_lane_and_google_lane_share_same_body (test_hybrid.HybridTests.test_fast_lane_and_google_lane_share_same_body) ... ok
+test_lens_primary_and_single_backup_on_failure (test_hybrid.HybridTests.test_lens_primary_and_single_backup_on_failure) ... ok
+test_missing_key_operator_rejection_and_empty_query_do_not_buy_fallback (test_hybrid.HybridTests.test_missing_key_operator_rejection_and_empty_query_do_not_buy_fallback) ... ok
+test_no_cache_really_bypasses_cache (test_hybrid.HybridTests.test_no_cache_really_bypasses_cache) ... ok
+test_parallel_aliases_share_one_physical_request (test_hybrid.HybridTests.test_parallel_aliases_share_one_physical_request) ... ok
+test_request_mapping_keeps_language_page_location_and_model (test_hybrid.HybridTests.test_request_mapping_keeps_language_page_location_and_model) ... ok
+test_rollback_restores_previous_routing (test_hybrid.HybridTests.test_rollback_restores_previous_routing) ... ok
+test_serper_error_does_not_trigger_searchapi_or_serpapi (test_hybrid.HybridTests.test_serper_error_does_not_trigger_searchapi_or_serpapi) ... ok
+test_serper_price_and_image_fields_survive_adapter (test_hybrid.HybridTests.test_serper_price_and_image_fields_survive_adapter) ... ok
+test_specialist_tokens_and_native_baidu_keep_owner (test_hybrid.HybridTests.test_specialist_tokens_and_native_baidu_keep_owner) ... ok
+test_timeout_retains_paid_work_for_next_caller (test_hybrid.HybridTests.test_timeout_retains_paid_work_for_next_caller) ... ok
+test_bilingual_local_and_global_coverage_without_duplicate_shopping (test_hybrid.PlannerTests.test_bilingual_local_and_global_coverage_without_duplicate_shopping) ... ok
+
+----------------------------------------------------------------------
+Ran 15 tests in 0.092s
+
+OK

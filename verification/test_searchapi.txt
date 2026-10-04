@@ -1,0 +1,33 @@
+test_actual_fast_route_uses_primary_adapter (test_searchapi.MainIntegrationTests.test_actual_fast_route_uses_primary_adapter) ... ok
+test_actual_lens_collector_accepts_searchapi (test_searchapi.MainIntegrationTests.test_actual_lens_collector_accepts_searchapi) ... ok
+test_china_grouped_query_keeps_all_approved_stores (test_searchapi.MainIntegrationTests.test_china_grouped_query_keeps_all_approved_stores) ... ok
+test_china_plan_keeps_two_languages_and_shein_images (test_searchapi.MainIntegrationTests.test_china_plan_keeps_two_languages_and_shein_images) ... ok
+test_recovery_batches_four_listings_into_one_paid_query (test_searchapi.MainIntegrationTests.test_recovery_batches_four_listings_into_one_paid_query) ... ok
+test_shein_does_not_shorten_or_duplicate_primary (test_searchapi.MainIntegrationTests.test_shein_does_not_shorten_or_duplicate_primary) ... ok
+test_unsupported_shopping_is_skipped_before_paid_transport (test_searchapi.MainIntegrationTests.test_unsupported_shopping_is_skipped_before_paid_transport) ... ok
+test_both_fail_returns_failure_only_when_requested (test_searchapi.ProviderTests.test_both_fail_returns_failure_only_when_requested) ... ok
+test_circuit_skips_primary_and_recovers (test_searchapi.ProviderTests.test_circuit_skips_primary_and_recovers) ... ok
+test_concurrent_identical_requests_share_primary_and_backup (test_searchapi.ProviderTests.test_concurrent_identical_requests_share_primary_and_backup) ... ok
+test_eight_seconds_is_configurable_above_old_cap (test_searchapi.ProviderTests.test_eight_seconds_is_configurable_above_old_cap) ... ok
+test_errors_switch_once_without_retry (test_searchapi.ProviderTests.test_errors_switch_once_without_retry) ... ok
+test_explicit_empty_is_not_outage (test_searchapi.ProviderTests.test_explicit_empty_is_not_outage) ... ok
+test_invalid_request_does_not_buy_backup_or_open_circuit (test_searchapi.ProviderTests.test_invalid_request_does_not_buy_backup_or_open_circuit) ... ok
+test_late_primary_reused_without_another_http_request (test_searchapi.ProviderTests.test_late_primary_reused_without_another_http_request) ... ok
+test_malformed_and_body_error_switch (test_searchapi.ProviderTests.test_malformed_and_body_error_switch) ... ok
+test_no_cache_bypasses_saved_result (test_searchapi.ProviderTests.test_no_cache_bypasses_saved_result) ... ok
+test_primary_success_cache_credentials_and_no_backup (test_searchapi.ProviderTests.test_primary_success_cache_credentials_and_no_backup) ... ok
+test_provider_tokens_stay_with_owner_and_rollback (test_searchapi.ProviderTests.test_provider_tokens_stay_with_owner_and_rollback) ... ok
+test_read_timeout_uses_rescue (test_searchapi.ProviderTests.test_read_timeout_uses_rescue) ... ok
+test_short_tasks_keep_primary_time_and_do_not_damage_health (test_searchapi.ProviderTests.test_short_tasks_keep_primary_time_and_do_not_damage_health) ... ok
+test_total_deadline_bounds_stalled_backup (test_searchapi.ProviderTests.test_total_deadline_bounds_stalled_backup) ... ok
+test_wall_deadline_does_not_wait_for_late_primary (test_searchapi.ProviderTests.test_wall_deadline_does_not_wait_for_late_primary) ... ok
+test_baidu_language_codes_and_shopping_light (test_searchapi.SchemaTests.test_baidu_language_codes_and_shopping_light) ... ok
+test_image_schema_matches_existing_parser (test_searchapi.SchemaTests.test_image_schema_matches_existing_parser) ... ok
+test_lens_mapping_and_currency (test_searchapi.SchemaTests.test_lens_mapping_and_currency) ... ok
+test_native_query_page_and_nfpr_preserved (test_searchapi.SchemaTests.test_native_query_page_and_nfpr_preserved) ... ok
+test_shopping_sale_installment_ads_and_group_fields (test_searchapi.SchemaTests.test_shopping_sale_installment_ads_and_group_fields) ... ok
+
+----------------------------------------------------------------------
+Ran 28 tests in 0.881s
+
+OK

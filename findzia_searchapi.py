@@ -191,10 +191,25 @@ class SerperTransport:
         seconds = min(self.total, _seconds(timeout))
         if seconds <= .01 or kind not in ('search', 'images', 'shopping'):
             return None
-        key = hashlib.sha256(('serper-hybrid-v2:' + json.dumps(
-            [kind, body], sort_keys=True, ensure_ascii=False)).encode()).hexdigest()
+        def request_key(value):
+            return hashlib.sha256(('serper-hybrid-v2:' + json.dumps(
+                [kind, value], sort_keys=True, ensure_ascii=False)).encode()).hexdigest()
+        key = request_key(body)
+        # A narrow first-page listing lookup can consume an already-paid
+        # broader response. Every other parameter must be identical. Do not
+        # reuse ten results for a discovery request that needs twenty, or
+        # reuse another page/market/language/autocorrect policy.
+        wider_key = (request_key(dict(body, num=20)) if kind == 'search'
+                     and body.get('num') == 10 and body.get('page', 1) == 1 else None)
         def cached():
-            return None if bypass else self.cache_get(key)
+            if bypass:
+                return None
+            hit = self.cache_get(key)
+            if not isinstance(hit, dict) and wider_key:
+                hit = self.cache_get(wider_key)
+                if isinstance(hit, dict):
+                    self.cost('serper_wider_cache_hits')
+            return hit
         hit = cached()
         if isinstance(hit, dict):
             self.cost('serper_cache_hits')
@@ -220,6 +235,10 @@ class SerperTransport:
                 self.cost('serper_cache_hits')
                 return copy.deepcopy(hit)
             future = None if bypass else self.inflight.get(key)
+            if future is None and not bypass and wider_key:
+                future = self.inflight.get(wider_key)
+                if future is not None:
+                    self.cost('serper_wider_shared_responses')
             leader = future is None
             if leader:
                 future = self.pool.submit(run)

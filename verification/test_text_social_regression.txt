@@ -1,0 +1,11 @@
+test_all_interface_languages_retain_text_results (test_text_social_regression.MerchantSocialRegression.test_all_interface_languages_retain_text_results) ... ok
+test_explicit_mismatch_and_untrusted_instagram_are_still_rejected (test_text_social_regression.MerchantSocialRegression.test_explicit_mismatch_and_untrusted_instagram_are_still_rejected) ... ok
+test_merchant_and_signed_social_offers_survive_together (test_text_social_regression.MerchantSocialRegression.test_merchant_and_signed_social_offers_survive_together) ... ok
+test_merchant_photo_is_still_prepared_for_visual_review (test_text_social_regression.MerchantSocialRegression.test_merchant_photo_is_still_prepared_for_visual_review) ... ok
+test_normalized_merchant_rows_survive_shared_classifier (test_text_social_regression.MerchantSocialRegression.test_normalized_merchant_rows_survive_shared_classifier) ... ok
+test_preferred_search_emits_regular_serper_results_progressively (test_text_social_regression.MerchantSocialRegression.test_preferred_search_emits_regular_serper_results_progressively) ... ok
+
+----------------------------------------------------------------------
+Ran 6 tests in 0.496s
+
+OK

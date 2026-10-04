@@ -1,0 +1,47 @@
+[
+  {
+    "suite": "test_cost_optimization",
+    "returncode": 0,
+    "tests": 17,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "passed": true
+  },
+  {
+    "suite": "test_hybrid",
+    "returncode": 0,
+    "tests": 15,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "passed": true
+  },
+  {
+    "suite": "test_hybrid_quality",
+    "returncode": 0,
+    "tests": 15,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "passed": true
+  },
+  {
+    "suite": "test_text_social_regression",
+    "returncode": 0,
+    "tests": 6,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "passed": true
+  },
+  {
+    "suite": "test_searchapi",
+    "returncode": 0,
+    "tests": 28,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "passed": true
+  }
+]

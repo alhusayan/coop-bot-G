@@ -1,0 +1,22 @@
+test_all_page_images_failed_still_recovers_with_index (test_cost_optimization.CostOptimizationTests.test_all_page_images_failed_still_recovers_with_index) ... ok
+test_failed_primary_can_use_validated_page_alternate (test_cost_optimization.CostOptimizationTests.test_failed_primary_can_use_validated_page_alternate) ... ok
+test_fast_verified_page_avoids_all_paid_work (test_cost_optimization.CostOptimizationTests.test_fast_verified_page_avoids_all_paid_work) ... ok
+test_interrupted_sse_is_marked_incomplete_and_closed (test_cost_optimization.CostOptimizationTests.test_interrupted_sse_is_marked_incomplete_and_closed) ... ok
+test_missing_usage_and_invalid_values_are_not_zero_bills (test_cost_optimization.CostOptimizationTests.test_missing_usage_and_invalid_values_are_not_zero_bills) ... ok
+test_page_error_still_uses_one_index_fallback (test_cost_optimization.CostOptimizationTests.test_page_error_still_uses_one_index_fallback) ... ok
+test_recovery_cache_normalizes_exclusions_but_keeps_identity (test_cost_optimization.CostOptimizationTests.test_recovery_cache_normalizes_exclusions_but_keeps_identity) ... ok
+test_requested_size_reaches_transport_and_general_search_stays_twenty (test_cost_optimization.CostOptimizationTests.test_requested_size_reaches_transport_and_general_search_stays_twenty) ... ok
+test_serper_counts_reported_credits_by_phase_and_engine (test_cost_optimization.CostOptimizationTests.test_serper_counts_reported_credits_by_phase_and_engine) ... ok
+test_shopping_link_lookup_uses_ten_and_preserves_matching_evidence (test_cost_optimization.CostOptimizationTests.test_shopping_link_lookup_uses_ten_and_preserves_matching_evidence) ... ok
+test_slow_page_does_not_block_index_recovery (test_cost_optimization.CostOptimizationTests.test_slow_page_does_not_block_index_recovery) ... ok
+test_sse_cumulative_metadata_is_counted_once_even_without_candidates (test_cost_optimization.CostOptimizationTests.test_sse_cumulative_metadata_is_counted_once_even_without_candidates) ... ok
+test_unverified_page_cannot_supply_images (test_cost_optimization.CostOptimizationTests.test_unverified_page_cannot_supply_images) ... ok
+test_different_market_language_variant_and_page_are_separate (test_cost_optimization.WiderCacheTests.test_different_market_language_variant_and_page_are_separate) ... ok
+test_narrow_inflight_shares_broader_paid_work (test_cost_optimization.WiderCacheTests.test_narrow_inflight_shares_broader_paid_work) ... ok
+test_narrow_lookup_reuses_paid_twenty_without_truncating_evidence (test_cost_optimization.WiderCacheTests.test_narrow_lookup_reuses_paid_twenty_without_truncating_evidence) ... ok
+test_ten_never_satisfies_twenty_and_bypass_still_fetches (test_cost_optimization.WiderCacheTests.test_ten_never_satisfies_twenty_and_bypass_still_fetches) ... ok
+
+----------------------------------------------------------------------
+Ran 17 tests in 0.351s
+
+OK
