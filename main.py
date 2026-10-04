@@ -394,11 +394,20 @@ from findzia_billing import CreditMiddleware, install_billing
 app.add_middleware(CreditMiddleware, owner=app)
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization', 'X-Findzia-Request-Id'], max_age=86400)
-BUILD_ID = 'v128.5.42.46-social'
+BUILD_ID = 'v128.5.42.47-social-search-fix'
 _SOCIAL = None
 
 def _fz_social_row(row):
     return bool(_SOCIAL is not None and _SOCIAL.valid(row or {}))
+
+def _fz_result_product_url(row):
+    """Validate normalized cards without applying raw-provider field checks."""
+    row = row or {}
+    if row.get('social_id'):
+        return _fz_social_row(row)
+    # Normalized merchant cards use store, not the raw provider's source field.
+    # Preserve the original URL gate for all existing merchant result paths.
+    return is_lens_product_url(str(row.get('url') or row.get('link') or ''))
 
 def _fz_social_merge(rows, query, market, lang):
     rows = list(rows or [])
@@ -14943,7 +14952,7 @@ def _web_prepare_identity_card(original, cancel_event=None):
     """Resolve the offer's own product image before its identity is audited."""
     row = dict(original or {})
     url = str(row.get('url') or row.get('link') or '')
-    if not is_lens_product_url(url, row) or (cancel_event is not None and cancel_event.is_set()):
+    if not _fz_result_product_url(row) or (cancel_event is not None and cancel_event.is_set()):
         return row
     inline = _web_visual_candidate_inline(row, True, cancel_event)
     if inline:
@@ -17388,7 +17397,7 @@ def _web_attach_captured_result_sections(payload, lang, allow_ai=True, cancel_ev
     if not out.pop('_social_no_expand', False):
         original_results = _fz_social_merge(original_results, out.get('query'), out.get('market') or current_market(), lang)
     results = [dict(row) for row in (original_results or [])
-               if is_lens_product_url(str(row.get('url') or row.get('link') or ''), row)
+               if _fz_result_product_url(row)
                and _market_offer_allowed(row, out.get('market') or current_market())]
     identity = str(out.get('query') or '').strip()
     has_reference_photo = bool(_web_visual_reference_digest(reference_image_b64)) and (
