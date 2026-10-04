@@ -298,6 +298,8 @@ class MainIntegrationTests(unittest.TestCase):
         nodes = [n for n in self.tree.body if isinstance(n, ast.FunctionDef) and n.name in names]
         self.assertEqual(len(nodes), len(names))
         context.setdefault('_HYBRID_SEARCH', False)  # Legacy all-SearchApi mode coverage.
+        context.setdefault('time', time)
+        context.setdefault('_fast_provider_timeouts', lambda engine, remaining: (1, max(.01, remaining-1)))
         exec(compile(ast.Module(body=nodes, type_ignores=[]), '<actual main functions>', 'exec'), context)
         return context
 
@@ -393,7 +395,7 @@ class MainIntegrationTests(unittest.TestCase):
         router=SimpleNamespace(enabled=True,economy=True)
         ns = self.functions('_web_targeted_price_updates', re=re, urllib=urllib,
             ThreadPoolExecutor=ThreadPoolExecutor, MARKET_CTX=SimpleNamespace(),
-            _SEARCHAPI_ROUTER=router, _indexed_recovery_allowed=lambda: True,
+            _SEARCHAPI_ROUTER=router, FINDZIA_GROUPED_RECOVERY_ENABLED=True, _indexed_recovery_allowed=lambda: True,
             _web_price_url_key=lambda url:url, _web_shein_product_id=lambda url:'',
             _global_store_match=lambda *a:False, _web_row_has_numeric_price=lambda row:False,
             country_search_hl=lambda cc:'ar', SERPAPI_API_KEY='fake', WEB_LIVE_PRICE_WAIT=10,

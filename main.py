@@ -394,7 +394,7 @@ from findzia_billing import CreditMiddleware, install_billing
 app.add_middleware(CreditMiddleware, owner=app)
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization', 'X-Findzia-Request-Id'], max_age=86400)
-BUILD_ID = 'v128.5.42.44-hybrid-search'
+BUILD_ID = 'v128.5.42.45-hybrid-quality'
 print('=' * 70)
 print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
 print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
@@ -1460,6 +1460,8 @@ def _fz_store_next_spec(spec, data, added, remaining):
 
 def _findzia_join_compounds(text):
     """Wi-Fi / wi fi / wifi are one token; TP-Link / tp link / tplink too."""
+    # Logitech's observed Logi wordmark names the same brand, not a model.
+    text = re.sub(r'(?i)\blogi\b', 'logitech', str(text or ''))
     for pattern, joined in _FINDZIA_COMPOUND_RES:
         text = pattern.sub(joined, text)
     return text
@@ -2949,7 +2951,7 @@ def _supplement_missing_markets(candidates, query, label='FIRST', prefetch=None)
     return seq
 
 def _photo_identity_text(value):
-    text = unicodedata.normalize('NFKD', normalize_ar(str(value or '')))
+    text = unicodedata.normalize('NFKD', normalize_ar(_findzia_join_compounds(str(value or ''))))
     text = ''.join(ch for ch in text if not unicodedata.combining(ch))
     return ' '.join(re.findall(r'[^\W_]+', text, flags=re.UNICODE))
 
@@ -3367,8 +3369,21 @@ def _lens_product_kinds(value):
         'footwear': r'\b(?:shoes?|slides?|slippers?|sandals?|mules?|clogs?|footwear|شبشب|شباشب|نعال|صندل)\b',
         'planter': r'\bplanter\b', 'headphones': r'\bheadphones\b',
         'keyboard': r'\bkeyboard\b', 'phone': r'\bphone\b', 'lamp': r'\blamp\b',
+        'mouse': r'\b(?:mouse|mice|فاره|ماوس)\b',
+        'calculator': r'\b(?:calculator|calculators|حاسبه)\b',
     }
     return {kind for kind, pattern in patterns.items() if re.search(pattern, text)}
+
+def _lens_reference_name_words(reference):
+    """Separate a named product line from an AI-generated category description."""
+    words = set(_photo_identity_text(reference.get('product_name')).split())
+    words -= set(_photo_identity_text(reference.get('brand')).split())
+    words -= set(_photo_identity_text(reference.get('product_type')).split())
+    words -= {'mask', 'masque', 'masks', 'masques', 'face', 'sos', 'cream', 'creme',
+              'spray', 'body', 'all', 'over', 'ماسك', 'قناع', 'كريم',
+              'wireless', 'bluetooth', 'desktop', 'digital', 'computer', 'mouse', 'calculator'}
+    return words
+
 
 def _lens_reference_priority(item, reference):
     """Retrieval evidence only; never publish this rank as a match percentage."""
@@ -3403,9 +3418,7 @@ def _lens_reference_priority(item, reference):
     # A known named line is stronger than a shared manufacturer. Do not fill
     # a market quota with other lines from the same brand. Non-Latin labels
     # with no Latin evidence remain eligible for the visual audit below.
-    name_words = set(_photo_identity_text(reference.get('product_name')).split())
-    name_words -= {'mask', 'masque', 'masks', 'masques', 'face', 'sos', 'cream', 'creme',
-                   'spray', 'body', 'all', 'over', 'ماسك', 'قناع', 'كريم'}
+    name_words = _lens_reference_name_words(reference)
     if name_words and not product_name and not model:
         if re.search(r'[a-z]', str(item.get('title') or '').lower()) or brand:
             return -1
@@ -3435,9 +3448,7 @@ def _lens_reference_fallback_eligible(item, reference):
     if expected and actual and expected.isdisjoint(actual):
         return False
     brand_words = set(_photo_identity_text(reference.get('brand')).split()) - {'al', 'the'}
-    name_words = set(_photo_identity_text(reference.get('product_name')).split())
-    name_words -= {'mask', 'masque', 'masks', 'masques', 'face', 'sos', 'cream', 'creme',
-                   'spray', 'body', 'all', 'over', 'ماسك', 'قناع', 'كريم'}
+    name_words = _lens_reference_name_words(reference)
     # Keep the named-line safeguard for a clearly recognized manufacturer.
     # A missed/uncertain brand spelling alone cannot reject all Lens images.
     if brand_words and brand_words.issubset(set(text.split())) and name_words and not name_words.issubset(set(text.split())):
@@ -3473,10 +3484,10 @@ def _lens_reference_rows(rows, reference):
             continue
         item['_reference_priority'] = priority
         output.append(item)
-    # Strict named matches stay first. Recovery is only for an otherwise
-    # empty set and still requires the same function plus a candidate image.
-    # These rows are unverified until the existing reference-image audit.
-    return output if output else uncertain
+    # Keep same-function candidates for the SAME image audit even when a
+    # named candidate exists. Text omission alone is not a visual mismatch.
+    # Priority keeps named matches first; uncertain rows never become Exact here.
+    return output + uncertain
 
 def _lens_market_passes(user_country, fast=True):
     """The same regional image protocol for every market, including US and CN."""
@@ -5250,7 +5261,8 @@ def _local_discovery_direct_link(row):
             if p.port not in (None, 80, 443):
                 continue
             google_host = bool(re.fullmatch(r'(?:[a-z0-9-]+\.)?google\.[a-z.]+', p.hostname))
-            if google_host and p.path in ('/url', '/imgres', '/aclk'):
+            tracker = google_host or _host_matches_any(p.hostname, ('googleadservices.com',))
+            if tracker:
                 params = urllib.parse.parse_qs(p.query)
                 values.extend(v for key in ('url', 'q', 'adurl', 'imgrefurl') for v in params.get(key, [])
                               if v.startswith(('https://', 'http://', '//')))
@@ -5554,10 +5566,38 @@ def _shopping_unit_merchant_matches(name, host, cc):
     return bool(tokens & labels)
 
 
+def _shopping_same_product(unit, row):
+    """Bind money/photos only to the same title facts, allowing word order/store suffixes."""
+    left, right = str(unit.get('title') or ''), _local_discovery_title(row)
+    if not left or not right or _web_text_explicit_conflict(left, right):
+        return False
+    if _findzia_hard_product_mismatch(left, right) or _findzia_hard_product_mismatch(right, left):
+        return False
+    if _web_identity_fact_conflicts(left, right):
+        return False
+    if _web_identity_model_codes(left) != _web_identity_model_codes(right):
+        return False
+    merchant = str(unit.get('source') or unit.get('merchant') or '')
+    def facts(title):
+        text = str(title)
+        for code in _web_identity_model_codes(title):
+            pattern = r'(?<![a-z0-9])' + r'[\s._-]*'.join(re.escape(c) for c in code) + r'(?![a-z0-9])'
+            text = re.sub(pattern, code, text, flags=re.I)
+        text = _photo_identity_text(text)
+        store = _photo_identity_text(merchant)
+        if store:
+            text = re.sub(r'(?<!\w)' + re.escape(store) + r'(?!\w)', ' ', text)
+        words = set(text.split()) - {'the', 'a', 'an', 'and', 'by', 'from', 'at', 'buy', 'online', 'shop', 'store'}
+        return words
+    same_literal = _shopping_store_key(left) == _shopping_store_key(right) and len(_shopping_store_key(left)) >= 12
+    return same_literal or (len(facts(left)) >= 3 and facts(left) == facts(right))
+
+
 def _shopping_unit_ledger_add(market, records, provider):
     """Keep merchant name + title + price of units whose link is a Google page."""
     ledger = market.setdefault('_shopping_units', [])
     added = 0
+    seen = {(x.get('merchant'), x.get('title'), x.get('price')) for x in ledger}
     for row in records:
         if not isinstance(row, dict):
             continue
@@ -5571,8 +5611,10 @@ def _shopping_unit_ledger_add(market, records, provider):
         price = row.get('price')
         price = price.get('value') if isinstance(price, dict) else price
         source, title = str(row.get('source') or '').strip(), _local_discovery_title(row)
-        if not (price and source and title):
+        key = (source, title, str(price)[:40])
+        if not (price and source and title) or key in seen:
             continue
+        seen.add(key)
         ledger.append({'merchant': source, 'title': title, 'price': str(price)[:40], 'thumbnail': str(row.get('thumbnail') or ''),
                        'provider': provider})
         added += 1
@@ -5603,8 +5645,7 @@ def _shopping_unit_price_for(row, market):
         unit_models = _web_model_tokens_from_listing(unit['title'])
         if row_models and unit_models and not (row_models & unit_models):
             continue  # same store, different model
-        score = max(_findzia_match_score(unit['title'], title), _findzia_match_score(title, unit['title']))
-        if score >= .90 and not _findzia_hard_product_mismatch(unit['title'], title):
+        if _shopping_same_product(unit, row):
             price_cc = 'us' if market.get('_retrieval_role') == 'global' else cc
             quote = _web_price_quote(unit['price'], '', price_cc)
             if quote and quote.get('kind') == 'exact' and (quote.get('min') or quote.get('max')):
@@ -6245,7 +6286,7 @@ def _local_photo_shopping_recovery(data, query, market, hl, deadline, cancel_eve
             break
     if not selected:
         return []
-    finish = min(deadline,time.monotonic()+2.5)
+    finish = min(deadline,time.monotonic()+4.0)
     cancel = _IndependentCancel(cancel_event) if cancel_event is not None else threading.Event()
     spec = {'country':market['country'],'hl':hl,'role':'local'}
     jobs = [SHOPPING_MERCHANT_POOL.submit(_run_with_market,market,_web_text_shopping_lookup,card,spec,finish,cancel)
@@ -6294,7 +6335,7 @@ def _local_discovery_request(query, market, kind, timeout_seconds, cancel_event=
             data = _web_shein_index_fetch(params, remaining)
         else:
             data = _fast_provider_search(engine, params['q'], params['gl'], hl,
-                                         (connect, max(.01, min(remaining - connect, FAST_PROVIDER_TIMEOUT_SECONDS))))
+                                         _fast_provider_timeouts(engine, remaining))
         if not isinstance(data, dict):
             return []
         rows = _local_discovery_rows(data, query, market, 'local_' + kind)
@@ -6470,6 +6511,7 @@ def _web_shein_index_fetch(params, timeout_seconds, cancel_event=None):
 
 def _global_discovery_request(query, country, kind, timeout_seconds, image_discovery=False):
     """Independent, bounded sources; all global China sources cover the allowlist."""
+    started = time.monotonic()
     pieces = kind.split(':')
     kind, requested_domain = pieces[0], pieces[1] if len(pieces) > 1 else ''
     hl = pieces[2] if len(pieces) > 2 else 'en'
@@ -6492,8 +6534,11 @@ def _global_discovery_request(query, country, kind, timeout_seconds, image_disco
             data = _web_shein_index_fetch({'engine': engine, 'q': f'{wording} ({scopes})',
                                            'gl': 'us', 'hl': hl}, max(.05, timeout_seconds - connect))
         else:
+            remaining = timeout_seconds - (time.monotonic()-started)
+            if remaining <= .05:
+                return []
             data = _fast_provider_search(engine, f'{wording} ({scopes})', 'us', hl,
-                                         (connect, max(1., min(timeout_seconds - connect, FAST_PROVIDER_TIMEOUT_SECONDS))))
+                                         _fast_provider_timeouts(engine, remaining))
         if not isinstance(data, dict):
             print(f'GLOBAL SOURCE country={country} provider=global_fast engine={engine} status=failed')
             return []
@@ -14416,7 +14461,7 @@ def _web_reference_has_printed_text(reference_profile):
     text = re.sub(r'\s+', ' ', str(profile.get('visible_text') or '')).strip()
     letters = re.findall(r'[A-Za-z\u0600-\u06ff\u3400-\u9fff]{2,}|\d{2,}', text)
     return len(letters) >= 1 and len(text) >= 3
-_WEB_MATCH_SCORE_VERSION = 'product_identity_family_ocr_v26_calibrated'
+_WEB_MATCH_SCORE_VERSION = 'product_identity_family_ocr_v27_complete_codes'
 _WEB_LEGACY_SIMILARITY_SCORE_KEYS = (
     'visual_match_score', 'visual_score', 'model_match_score', 'match_score',
 )
@@ -15019,7 +15064,7 @@ def _web_visual_normalize_profile(value):
     return profile
 
 def _web_profile_code(value):
-    value = normalize_ar(_web_ascii_digits(str(value or '').strip().lower()))
+    value = normalize_ar(_web_ascii_digits(_findzia_join_compounds(str(value or '').strip().lower())))
     value = re.sub(r'[^a-z0-9\u0600-\u06ff]+', '_', value).strip('_')
     if value in ('', 'unknown', 'uncertain', 'unclear', 'not_visible', 'not_applicable', 'n_a'):
         return ''
@@ -15124,10 +15169,32 @@ _WEB_TITLE_MARKING_SKIP = {
     'KB', 'MB', 'GB', 'TB', 'MAH', 'WH', 'W', 'KW', 'V', 'HZ', 'KHZ', 'MHZ', 'GHZ',
 }
 
+def _web_identity_model_codes(value):
+    """Remove generated suffix aliases; retain independently printed identifiers."""
+    raw = _web_profile_flat_value(value)
+    tokens = set(_web_model_tokens_from_listing(raw))
+    kept = set(tokens)
+    for token in tokens:
+        longer = [v for v in tokens if v != token and token in v]
+        if not longer:
+            continue
+        remaining = raw
+        for code in longer:
+            pattern = r'(?<![a-z0-9])' + r'[\s._-]*'.join(re.escape(c) for c in code) + r'(?![a-z0-9])'
+            remaining = re.sub(pattern, ' ', remaining, flags=re.I)
+        if not re.search(r'(?<![a-z0-9])' + re.escape(token) + r'(?![a-z0-9])', remaining, re.I):
+            kept.discard(token)
+    return kept
+
+
 def _web_title_named_markers(text, profile):
     """Extract label-like uppercase variant words without category rules."""
+    remaining = str(text or '')
+    for code in _web_identity_model_codes((profile or {}).get('model')):
+        pattern = r'(?<![a-z0-9])' + r'[\s._-]*'.join(re.escape(c) for c in code) + r'(?![a-z0-9])'
+        remaining = re.sub(pattern, ' ', remaining, flags=re.I)
     raw_tokens = {
-        token for token in re.findall(r'(?<![A-Za-z0-9])[A-Z][A-Z-]{1,24}(?![A-Za-z0-9])', str(text or ''))
+        token for token in re.findall(r'(?<![A-Za-z0-9])[A-Z][A-Z-]{1,24}(?![A-Za-z0-9])', remaining)
         if token not in _WEB_TITLE_MARKING_SKIP
     }
     known = _web_profile_words([
@@ -15152,9 +15219,9 @@ def _web_enrich_candidate_profile_from_text(profile, text):
             profile['product_role'] = code
             title_evidence_axes.add('product_role')
             break
-    models = sorted(_web_model_tokens_from_listing(text))[:10]
+    models = sorted(_web_identity_model_codes(text))[:10]
     if models:
-        profile['model'] = ' '.join(models)
+        profile['model'] = ' / '.join(models)
         title_evidence_axes.add('model')
     normalized_measure_text = _web_ascii_digits(text)
     title_measures = [
@@ -15380,8 +15447,8 @@ def _web_profile_model_state(reference_value, candidate_value):
     # Merchant titles are enriched using this extractor. Apply the SAME
     # normalization to reference models before comparing: "WHOOP 5.0"
     # and the enriched token "whoop5" must not become a hard mismatch.
-    reference_models = set(_web_model_tokens_from_listing(reference_text))
-    candidate_models = set(_web_model_tokens_from_listing(candidate_text))
+    reference_models = _web_identity_model_codes(reference_text)
+    candidate_models = _web_identity_model_codes(candidate_text)
     if reference_models and candidate_models:
         reference_names = {word for word in reference_words
                            if not word.isdigit() and not any(word in code for code in reference_models)}
@@ -15628,11 +15695,11 @@ def _web_visual_profile_states(reference_profile, candidate_profile):
     # too so a copied AI SKU cannot conceal a different title model.
     title_axes = set(candidate_profile.get('_title_evidence_axes') or [])
     if 'model' in title_axes or 'alphanumeric_identity' in title_axes:
-        reference_codes = _web_profile_identity_tokens(reference_profile.get('model'))
+        reference_codes = _web_identity_model_codes(reference_profile.get('model'))
         for values in _web_profile_typed_identity_tokens(reference_profile.get('identifiers')).values():
             reference_codes.update(values)
         title_model_codes = (
-            _web_profile_identity_tokens(candidate_profile.get('model'))
+            _web_identity_model_codes(candidate_profile.get('model'))
             if 'model' in title_axes else set()
         )
         title_identifier_codes = set()
@@ -20133,6 +20200,9 @@ def _web_same_index_listing(first, second):
     return bool(identity(a.path)) and identity(a.path) == identity(b.path)
 
 
+FINDZIA_GROUPED_RECOVERY_ENABLED = env_bool('FINDZIA_GROUPED_RECOVERY_ENABLED', False)
+
+
 def _web_targeted_price_updates(entries, lang, market, *, image_only=False):
     """Bounded independent listing lookups; recover image and money independently."""
     if not _indexed_recovery_allowed():
@@ -20155,7 +20225,7 @@ def _web_targeted_price_updates(entries, lang, market, *, image_only=False):
             term += ' ' + ' '.join('"' + re.sub(r'[^a-zA-Z0-9_-]', '', value) + '"' for value in (ids + path_ids)[:2])
         else:
             title = re.sub(r'["()\r\n]', ' ', str(row.get('raw_title') or row.get('title') or ''))
-            term += ' "' + title[:120].strip() + '"'
+            term += ' ' + title[:120].strip()
         terms.append('(' + term + ')')
     if not terms:
         return {}
@@ -20191,11 +20261,11 @@ def _web_targeted_price_updates(entries, lang, market, *, image_only=False):
             print('EXACT-LISTING lookup_failed=' + type(exc).__name__)
             return {}
     lookup_terms = list(dict.fromkeys(terms))[:4]
-    if _SEARCHAPI_ROUTER.enabled and _SEARCHAPI_ROUTER.economy:
+    if _SEARCHAPI_ROUTER.enabled and _SEARCHAPI_ROUTER.economy and FINDZIA_GROUPED_RECOVERY_ENABLED:
         lookup_terms = ['(' + ' OR '.join(lookup_terms) + ')']
     if provider:
         params['engine'] = provider + ('_images' if image_source else '_search')
-    # Economy mode uses one grouped lookup per already bounded batch.
+    # Per-listing queries preserve recall. Grouping is an explicit experiment.
     with ThreadPoolExecutor(max_workers=min(4, len(lookup_terms))) as pool:
         responses = list(pool.map(lookup, lookup_terms))
     data = {'organic_results': [item for response in responses for item in _web_indexed_media_records(response)]}
@@ -21927,6 +21997,7 @@ SERPER_API_KEY = os.environ.get('SERPER_API_KEY', '').strip()
 GOOGLE_CSE_KEY = os.environ.get('GOOGLE_CSE_KEY', '').strip()
 GOOGLE_CSE_CX = os.environ.get('GOOGLE_CSE_CX', '').strip()
 FAST_PROVIDER_TIMEOUT_SECONDS = max(2., min(15., float(os.environ.get('FAST_PROVIDER_TIMEOUT_SECONDS', '6'))))
+SERPER_IMAGE_TIMEOUT_SECONDS = max(2., min(12., float(os.environ.get('SERPER_IMAGE_TIMEOUT_SECONDS', '8'))))
 FAST_PROVIDER_NUM = max(10, min(20, int(os.environ.get('FAST_PROVIDER_NUM', '20'))))
 FAST_PROVIDER_IMAGES = env_bool('FAST_PROVIDER_IMAGES', True)
 FAST_PROVIDER_SHOPPING = env_bool('FAST_PROVIDER_SHOPPING', True)
@@ -21970,7 +22041,8 @@ def serpapi_recovery_allowed():
 
 
 print(f'FAST PROVIDER CONFIG providers={["searchapi"] if _SEARCHAPI_ROUTER.enabled and not _HYBRID_SEARCH else (FAST_PROVIDERS or "none (SerpApi only)")} timeout={FAST_PROVIDER_TIMEOUT_SECONDS}s'
-      f' num={FAST_PROVIDER_NUM} images={FAST_PROVIDER_IMAGES} shopping={FAST_PROVIDER_SHOPPING}')
+      f' num={FAST_PROVIDER_NUM} images={FAST_PROVIDER_IMAGES} shopping={FAST_PROVIDER_SHOPPING}'
+      f' image_timeout={SERPER_IMAGE_TIMEOUT_SECONDS}s grouped_recovery={FINDZIA_GROUPED_RECOVERY_ENABLED}')
 print(f'SEARCH PROVIDER POLICY primary={SEARCH_PROVIDER_PRIMARY} serpapi_backup={SERPAPI_BACKUP_ENABLED}'
       f' backup_min_rows={SERPAPI_BACKUP_MIN_ROWS} backup_window={SERPAPI_BACKUP_WINDOW_SECONDS}s lens={"searchapi" if _SEARCHAPI_ROUTER.enabled else "serpapi"}'
       f' serpapi_recovery={"off" if serper_primary() else "on"} hybrid={_HYBRID_SEARCH}'
@@ -21978,6 +22050,15 @@ print(f'SEARCH PROVIDER POLICY primary={SEARCH_PROVIDER_PRIMARY} serpapi_backup=
 
 
 _FAST_PROVIDER_FLAGS = {}
+
+
+def _fast_provider_timeouts(engine, remaining):
+    connect = min(1.5, max(.01, remaining*.15))
+    if _HYBRID_SEARCH and str(engine).endswith('_images'):
+        total = min(remaining, SERPER_IMAGE_TIMEOUT_SECONDS)
+        connect = min(connect, total/4)
+        return (connect, max(.01, total-connect))
+    return (connect, max(.01, min(remaining-connect, FAST_PROVIDER_TIMEOUT_SECONDS)))
 
 
 def _fast_provider_supports_operators(provider):
@@ -22120,8 +22201,12 @@ def _serper_to_serpapi(kind, data):
                 continue
             item = {'position': i + 1, 'title': row['title'], 'link': row['link'], 'source': row.get('source') or '',
                     'price': str(row.get('price') or ''), 'thumbnail': row.get('imageUrl') or ''}
-            for field in ('direct_link','merchant_link','product_link','immersive_product_page_token','serpapi_immersive_product_api','currency','extracted_price','old_price','extracted_old_price','availability','in_stock'):
+            for field in ('direct_link','merchant_link','product_link','original_link','product_id','immersive_product_page_token','serpapi_immersive_product_api','currency','extracted_price','old_price','extracted_old_price','availability','in_stock','rating','reviews'):
                 if row.get(field) is not None:item[field] = row[field]
+            if row.get('productId'):
+                item['product_id'] = str(row['productId'])
+            if row.get('ratingCount') is not None:
+                item['reviews'] = row['ratingCount']
             amount = _fast_price_number(item['price'], item.get('currency') or '')
             if amount is not None:
                 item['extracted_price'] = amount
@@ -22556,7 +22641,7 @@ def _web_text_direct_fetch(query, spec, deadline, cancel, page_token=''):
         return _web_shein_index_fetch(params, remaining, cancel)
     if params['engine'].startswith(('serper_', 'cse_')):
         data = _fast_provider_search(params['engine'], params['q'], params['gl'], params['hl'],
-                                     (connect, max(.05, min(remaining - connect, FAST_PROVIDER_TIMEOUT_SECONDS))), page=params.get('page', 1))
+                                     _fast_provider_timeouts(params['engine'], remaining), page=params.get('page', 1))
         print(f'TEXT SOURCE country={spec["country"]} role={spec["role"]} engine={params["engine"]}'
               f' hl={spec["hl"]} status={"returned" if isinstance(data, dict) else "unavailable"}'
               f' elapsed_ms={int((time.monotonic()-began)*1000)}')
@@ -22593,11 +22678,13 @@ def _web_text_shopping_lookup(card, spec, deadline, cancel):
         if not url or not _shopping_unit_merchant_matches(merchant, urllib.parse.urlsplit(url).hostname or '', spec['country']):
             continue
         row = dict(raw, link=url)
-        # Exact normalized title only: never price a related model from this unit.
-        if (_shopping_store_key(title) == _shopping_store_key(_local_discovery_title(raw))
-                and len(_shopping_store_key(title)) >= 12):
+        # Same merchant and product facts; a changed word order is not a new product.
+        if _shopping_same_product(card, raw):
             if not row.get('price') and card.get('price'):
                 row.update(price=card['price'], currency=card.get('currency') or '', _shopping_market_listing=True)
+                for field in ('old_price', 'extracted_old_price', 'in_stock', 'availability'):
+                    if card.get(field) is not None:
+                        row[field] = card[field]
             if not _web_offer_image_candidates(row):
                 row['image_candidates'] = _web_offer_image_candidates(card)
         rows.append(row)
@@ -22890,7 +22977,7 @@ def _web_preferred_text_fetch(query, spec, deadline, cancel, page_token=''):
         return _web_shein_index_fetch(params, remaining, cancel)
     if params['engine'].startswith(('serper_', 'cse_')):
         data = _fast_provider_search(params['engine'], params['q'], params['gl'], params['hl'],
-                                     (connect, max(.05, min(remaining - connect, FAST_PROVIDER_TIMEOUT_SECONDS))), page=params.get('page', 1))
+                                     _fast_provider_timeouts(params['engine'], remaining), page=params.get('page', 1))
         print(f'TEXT SOURCE country={spec["country"]} role={spec["role"]} engine={params["engine"]}'
               f' hl={spec["hl"]} status={"returned" if isinstance(data, dict) else "unavailable"}'
               f' elapsed_ms={int((time.monotonic()-began)*1000)}')
@@ -23997,7 +24084,7 @@ def _shopping_resolve_merchant(payload, deadline=None):
     token = payload.get('token') or ''
     # Old catalog-ID-only cards need a current immersive token. Recover only
     # that same product ID from Shopping, never a similarly named substitute.
-    if not token and payload.get('id') and payload.get('title'):
+    if not _HYBRID_SEARCH and not token and payload.get('id') and payload.get('title'):
         data = _serpapi_cached_json(_web_shopping_copy_params(payload['title'], payload['country'], payload['lang']),
             timeout=timeout(8), label='SHOPPING LINK TOKEN') or {}
         cards = list(data.get('shopping_results') or []) + list(data.get('inline_shopping_results') or [])
@@ -24014,6 +24101,12 @@ def _shopping_resolve_merchant(payload, deadline=None):
             if token:
                 break
     url = ''
+    if _HYBRID_SEARCH and not token and payload.get('title') and payload.get('source'):
+        finish = min(deadline, time.monotonic()+4) if deadline is not None else time.monotonic()+4
+        data = _web_text_shopping_lookup(payload, {'country': payload['country'], 'hl': payload['lang']},
+                                         finish, threading.Event()) or {}
+        url = next((_local_discovery_direct_link(row) for row in data.get('organic_results', [])
+                    if _shopping_same_product(payload, row)), '')
     if token:
         data = _serpapi_cached_json({'engine':'google_immersive_product', 'page_token':token,
             'more_stores':'true', 'api_key':SERPAPI_API_KEY}, timeout=timeout(10), label='SHOPPING MERCHANT LINK') or {}

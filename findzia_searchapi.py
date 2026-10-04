@@ -191,7 +191,7 @@ class SerperTransport:
         seconds = min(self.total, _seconds(timeout))
         if seconds <= .01 or kind not in ('search', 'images', 'shopping'):
             return None
-        key = hashlib.sha256(('serper-hybrid-v1:' + json.dumps(
+        key = hashlib.sha256(('serper-hybrid-v2:' + json.dumps(
             [kind, body], sort_keys=True, ensure_ascii=False)).encode()).hexdigest()
         def cached():
             return None if bypass else self.cache_get(key)
@@ -201,7 +201,9 @@ class SerperTransport:
             return copy.deepcopy(hit)
         def run():
             connect = min(1.5, seconds / 4)
-            raw = fetch(kind, copy.deepcopy(body), (connect, seconds-connect))
+            # The future bounds the caller's wall time. Image reads get the full
+            # window even when the connection was faster than its allowance.
+            raw = fetch(kind, copy.deepcopy(body), (connect, seconds if kind == 'images' else seconds-connect))
             if not isinstance(raw, dict) or raw.get('error'):
                 return None
             sections = ('images',) if kind == 'images' else ('organic', 'shopping', 'knowledgeGraph', 'answerBox')

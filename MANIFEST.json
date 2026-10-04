@@ -1,20 +1,22 @@
 {
-  "build": "v128.5.42.44-hybrid-search",
-  "base_commit": "2e816f07172e0b7969f09519cfee19d0cfd9294c",
+  "build": "v128.5.42.45-hybrid-quality",
+  "base_commit": "974291f738d140d535698a21eee996d0ccefab70",
   "deployment_status": "not_deployed",
-  "validation": "52 offline tests + full application startup/routing/cache smoke with all external network blocked",
+  "validation": "67 offline regression tests + full application routing/cache startup smoke with live HTTP blocked",
+  "fixtures": "Synthetic reproductions of errors observed in user logs, not captured provider response bodies",
   "live_provider_tests": false,
   "savings_measured_live": false,
   "sha256": {
-    "main.py": "0b2e0c4104f2db1d18d0dbd520cc2941757456bae6ffd875b71ded6af106abbf",
-    "findzia_searchapi.py": "edd22814099919d49e21a2754b2be0b9cd5bc90bc8e22be72d91c93a066a8552",
-    "test_searchapi.py": "a82d5a2cde4b0f24a46f1f0f3853eed65db9bf899201e5126f729b5286860589",
+    "main.py": "b737d73c08e8820d9f4f46c84e7536f9c0825f9ef2f26622c0534a29b747d903",
+    "findzia_searchapi.py": "5004069edc063e424308a0ef2fad7a08122ea3af3213b3a72f2dddcc5af40903",
+    "test_searchapi.py": "24886cf551b544083866f099874a8144733d4deefebe32afdac546434da9a992",
     "test_hybrid.py": "822b96c8535caad208e3ad259ebf7b199facafcaaaf881e8d940feb333cc47a3",
+    "test_hybrid_quality.py": "63fed4fac78e4d94f76cb4a884da45850c8dce97f7afa941658e4fe32e7bb3ff",
     "test_launch_review.py": "fcb52668f50c6bf39e7f183c2ad377e7853a095ab071136327f6b42bd894746c",
-    "INSTALL_AR.txt": "6109a75a745d8601202c2704a9ad5235f367623aa9d2b407bc833e96289637a0",
-    "main.patch": "9291263a6632028e7fb0074197554f7989e7a685a8de99a9d08681c3d87087a1",
-    "findzia_searchapi.patch": "067b7da97de7cf7d5aaca4fff1c30a3f6bbb87c913133a0b5b78b4511ec6fe20",
-    "verification/run_hybrid_offline.py": "e279d4c17bd1e0453f8ba43a89060489859793eb51d76c1dcd34ae2df096293e",
-    "verification/hybrid-validation.log": "44c4e65d3dcb6424e0e281a38890332d0179c8218b0d748da8052e380cfd6a52"
+    "INSTALL_AR.txt": "4f7c5142176347dd04b074ff8872c2a681ad38081cf1d5d1e13ed51828937c23",
+    "main.patch": "a9de6bd6771b67bb02107f08528aa8ad7824ba05f21456be784c09bbee7961e0",
+    "findzia_searchapi.patch": "de0f2d71bf3b7da47a37813fa978bb6262018d76a795a4d5e353aa3ba9fb36bc",
+    "verification/run_hybrid_offline.py": "df23b11e940b4330614e3992878e8ca8927841d48db812f1c515215bb75e1e47",
+    "verification/hybrid-quality-validation.log": "533e900646d6984db2daa928d99e44de8dea950d3213c2352b9d8e526b214a6d"
   }
 }
