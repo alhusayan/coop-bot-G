@@ -1,0 +1,171 @@
+--- a/main.py
++++ b/main.py
+@@ -394,7 +394,7 @@
+ app.add_middleware(CreditMiddleware, owner=app)
+ _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
+ app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization', 'X-Findzia-Request-Id'], max_age=86400)
+-BUILD_ID = 'v128.5.42.41-price-integrity'
++BUILD_ID = 'v128.5.42.42-searchapi-primary'
+ print('=' * 70)
+ print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
+ print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
+@@ -549,6 +549,9 @@
+             print(f'SERPAPI HEALTH RECOVERED family={family} timeouts={len(state["timeout"])} ok={len(state["ok"])}')
+ 
+ def serpapi_provider_degraded(family='search'):
++    # SerpApi health must not suppress healthy SearchApi primary lanes.
++    if globals().get('_SEARCHAPI_ROUTER') and _SEARCHAPI_ROUTER.enabled:
++        return False
+     with _SERPAPI_HEALTH_LOCK:
+         return bool(_serpapi_health_state(family)['degraded_since'])
+ 
+@@ -1724,7 +1727,7 @@
+             'last_block_reason': SERPAPI_BUDGET_STATE.get('last_block_reason') or '',
+         }
+ 
+-def _serpapi_cached_json(params, timeout, label='SERPAPI', *, return_error=False, retry_connect=False):
++def _serpapi_only_cached_json(params, timeout, label='SERPAPI', *, return_error=False, retry_connect=False):
+     """Coalesce one request wave; preserve failure reasons for opted-in callers.
+ 
+     ReadTimeout is ambiguous: upstream may already have spent a search credit.
+@@ -1887,6 +1890,19 @@
+                     SERPAPI_INFLIGHT.pop(key,None)
+                     event.set()
+ 
++# The legacy SerpApi transport retains its cache, budget and account guards.
++from findzia_searchapi import SearchApiRouter
++_SEARCHAPI_ROUTER = SearchApiRouter(cache_get=_serpapi_cache_get,
++    cache_put=_serpapi_cache_put, cost=_api_cost_record)
++
++def _serpapi_cached_json(params, timeout, label='SERPAPI', *, return_error=False, retry_connect=False):
++    if _SEARCHAPI_ROUTER.enabled:
++        return _SEARCHAPI_ROUTER.search(params, timeout, _serpapi_only_cached_json,
++                                       label=label, return_error=return_error)
++    return _serpapi_only_cached_json(params, timeout, label=label,
++                                    return_error=return_error, retry_connect=retry_connect)
++
++print('SEARCHAPI POLICY ' + json.dumps(_SEARCHAPI_ROUTER.snapshot()))
+ _serpapi_cache_db_init()
+ print(f'SERPAPI COST GUARD cache={SERPAPI_RESULT_CACHE_ENABLED} ttl={SERPAPI_RESULT_CACHE_TTL_SECONDS}s singleflight={SERPAPI_SINGLEFLIGHT_ENABLED} wait={SERPAPI_SINGLEFLIGHT_WAIT_SECONDS}s budget={SERPAPI_BUDGET_ENABLED}@{SERPAPI_BUDGET_USE_PERCENT}% fallback_hour={SERPAPI_BUDGET_FALLBACK_HOURLY} stable_lens_url=True')
+ 
+@@ -6404,7 +6420,9 @@
+                                    label='SHEIN INDEX ' + engine)
+     primary = params['engine']
+     fallback = ''
+-    if (primary.startswith(('serper_', 'cse_')) and SERPAPI_API_KEY and
++    if _SEARCHAPI_ROUTER.enabled:
++        pass  # The shared adapter already owns one rescue; keep its full budget.
++    elif (primary.startswith(('serper_', 'cse_')) and SERPAPI_API_KEY and
+             SERPAPI_BACKUP_ENABLED and not serpapi_provider_degraded()):
+         fallback = 'google_images' if image_lane else 'google'
+     elif not primary.startswith(('serper_', 'cse_')):
+@@ -21877,7 +21895,13 @@
+ SEARCH_PROVIDER_PRIMARY = (os.environ.get('SEARCH_PROVIDER_PRIMARY') or ('serper' if 'serper' in FAST_PROVIDERS else 'serpapi')).strip().lower()
+ if SEARCH_PROVIDER_PRIMARY not in ('serper', 'serpapi', 'both') or (SEARCH_PROVIDER_PRIMARY == 'serper' and 'serper' not in FAST_PROVIDERS):
+     SEARCH_PROVIDER_PRIMARY = 'both' if FAST_PROVIDERS else 'serpapi'
+-SERPAPI_BACKUP_ENABLED = env_bool('SERPAPI_BACKUP_ENABLED', True)
++# Keep the existing serper_* lane identifiers and downstream verification
++# contracts; _fast_provider_search routes these to SearchApi before any cache
++# or Serper HTTP call. Actual provider is always recorded in search_metadata.
++if _SEARCHAPI_ROUTER.enabled:
++    FAST_PROVIDERS = ['serper']
++    SEARCH_PROVIDER_PRIMARY = 'searchapi'
++SERPAPI_BACKUP_ENABLED = True if _SEARCHAPI_ROUTER.enabled else env_bool('SERPAPI_BACKUP_ENABLED', True)
+ SERPAPI_BACKUP_MIN_ROWS = max(0, min(20, int(os.environ.get('SERPAPI_BACKUP_MIN_ROWS', '4'))))
+ SERPAPI_BACKUP_WINDOW_SECONDS = max(2., min(15., float(os.environ.get('SERPAPI_BACKUP_WINDOW_SECONDS', '6'))))
+ # A SerpApi search needs a few seconds; launching it into a nearly spent budget
+@@ -21886,7 +21910,7 @@
+ 
+ 
+ def serper_primary():
+-    return SEARCH_PROVIDER_PRIMARY == 'serper'
++    return SEARCH_PROVIDER_PRIMARY in ('serper', 'searchapi')
+ 
+ 
+ def _indexed_recovery_allowed():
+@@ -21898,10 +21922,10 @@
+     return bool(SERPAPI_API_KEY) and not serper_primary() and not serpapi_provider_degraded()
+ 
+ 
+-print(f'FAST PROVIDER CONFIG providers={FAST_PROVIDERS or "none (SerpApi only)"} timeout={FAST_PROVIDER_TIMEOUT_SECONDS}s'
++print(f'FAST PROVIDER CONFIG providers={["searchapi"] if _SEARCHAPI_ROUTER.enabled else (FAST_PROVIDERS or "none (SerpApi only)")} timeout={FAST_PROVIDER_TIMEOUT_SECONDS}s'
+       f' num={FAST_PROVIDER_NUM} images={FAST_PROVIDER_IMAGES} shopping={FAST_PROVIDER_SHOPPING}')
+ print(f'SEARCH PROVIDER POLICY primary={SEARCH_PROVIDER_PRIMARY} serpapi_backup={SERPAPI_BACKUP_ENABLED}'
+-      f' backup_min_rows={SERPAPI_BACKUP_MIN_ROWS} backup_window={SERPAPI_BACKUP_WINDOW_SECONDS}s lens=serpapi'
++      f' backup_min_rows={SERPAPI_BACKUP_MIN_ROWS} backup_window={SERPAPI_BACKUP_WINDOW_SECONDS}s lens={"searchapi" if _SEARCHAPI_ROUTER.enabled else "serpapi"}'
+       f' serpapi_recovery={"off" if serper_primary() else "on"}')
+ 
+ 
+@@ -21909,7 +21933,7 @@
+ 
+ 
+ def _fast_provider_supports_operators(provider):
+-    return not (provider == 'serper' and _FAST_PROVIDER_FLAGS.get('serper_no_operators'))
++    return _SEARCHAPI_ROUTER.enabled or not (provider == 'serper' and _FAST_PROVIDER_FLAGS.get('serper_no_operators'))
+ 
+ 
+ def _fast_price_number(value, currency=''):
+@@ -22098,6 +22122,24 @@
+     """engine: serper_search|serper_images|serper_shopping|cse_search|cse_images."""
+     provider, kind = engine.split('_', 1)
+     page = max(1, min(2, int(page)))
++    if _SEARCHAPI_ROUTER.enabled:
++        mapped_engine = {'search': 'google', 'images': 'google_images', 'shopping': 'google_shopping'}.get(kind)
++        if not mapped_engine:
++            return None
++        params = {'engine': mapped_engine, 'q': wording, 'gl': country, 'hl': hl,
++                  'api_key': SERPAPI_API_KEY}
++        if kind == 'search':
++            params['nfpr'] = int(bool(_web_model_tokens_from_listing(wording)))
++            if page > 1:
++                params['start'] = (page - 1) * 10
++            if COUNTRY_NAMES.get(country):
++                params['location'] = COUNTRY_NAMES[country]
++        elif kind == 'shopping':
++            params['direct_link'] = 'true'
++        data = _serpapi_cached_json(params, timeout, label='SEARCHAPI FAST ' + kind)
++        if isinstance(data, dict):
++            data.setdefault('search_metadata', {})['engine'] = engine
++        return data
+     cache_params = {'engine': engine, 'q': wording, 'gl': country, 'hl': hl}
+     if page > 1:
+         cache_params['page'] = page
+@@ -22144,6 +22186,10 @@
+ _INDEPENDENT_POOL = ThreadPoolExecutor(max_workers=6, thread_name_prefix='independent-search')
+ _INDEPENDENT = _IndependentSearchClient(reserve=_serpapi_budget_reserve,
+     finish=_serpapi_budget_finish, cost=_api_cost_record)
++if _SEARCHAPI_ROUTER.enabled:
++    # The requested policy is sequential SearchApi -> SerpApi. Do not launch
++    # the older paid Bing/Brave hedge while SearchApi is still working.
++    _INDEPENDENT.enabled = False
+ print(f'INDEPENDENT CONFIG enabled={_INDEPENDENT.enabled} brave={bool(_INDEPENDENT.brave_key)}'
+       f' bing={_INDEPENDENT.available("bing_search")} hedge={_INDEPENDENT.delay}s'
+       f' timeout={_INDEPENDENT.timeout}s bing_timeout={_INDEPENDENT.bing_timeout}s max_calls={_INDEPENDENT.maximum}')
+@@ -22837,7 +22883,7 @@
+     try:
+         specs = _web_preferred_text_specs(query, country)
+         specs = [spec for spec in specs if
+-                 (spec['engine'].startswith('serper_') and SERPER_API_KEY)
++                 (spec['engine'].startswith('serper_') and (SERPER_API_KEY or _SEARCHAPI_ROUTER.enabled))
+                  or (spec['engine'].startswith('cse_') and GOOGLE_CSE_KEY and GOOGLE_CSE_CX)
+                  or (not spec['engine'].startswith(('serper_', 'cse_')) and SERPAPI_API_KEY)]
+         fast_lane_count = sum(1 for spec in specs if spec['engine'].startswith(('serper_', 'cse_')))
+@@ -23180,7 +23226,7 @@
+     try:
+         specs = _web_text_direct_specs(query, country)
+         specs = [spec for spec in specs if
+-                 (spec['engine'].startswith('serper_') and SERPER_API_KEY)
++                 (spec['engine'].startswith('serper_') and (SERPER_API_KEY or _SEARCHAPI_ROUTER.enabled))
+                  or (spec['engine'].startswith('cse_') and GOOGLE_CSE_KEY and GOOGLE_CSE_CX)
+                  or (not spec['engine'].startswith(('serper_', 'cse_')) and SERPAPI_API_KEY)]
+         fast_lane_count = sum(1 for spec in specs if spec['engine'].startswith(('serper_', 'cse_')))
+@@ -27316,7 +27362,8 @@
+                              'late_read_seconds': TEXT_DIRECT_LATE_READ_SECONDS},
+                'provider': serpapi_health_snapshot(), 'fast_providers': FAST_PROVIDERS,
+                'policy': {'primary': SEARCH_PROVIDER_PRIMARY, 'serpapi_backup': SERPAPI_BACKUP_ENABLED,
+-                          'backup_min_rows': SERPAPI_BACKUP_MIN_ROWS, 'lens': 'serpapi',
++                          'backup_min_rows': SERPAPI_BACKUP_MIN_ROWS, 'lens': 'searchapi' if _SEARCHAPI_ROUTER.enabled else 'serpapi',
++                          'searchapi': _SEARCHAPI_ROUTER.snapshot(),
+                           'serper_operators': _fast_provider_supports_operators('serper')},
+                'budget': serpapi_budget_snapshot(), 'cost_counters': api_cost_snapshot()}
+     return Response(content=json.dumps(payload, ensure_ascii=False, default=str), media_type='application/json',

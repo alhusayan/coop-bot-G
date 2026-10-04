@@ -1,0 +1,328 @@
+"""SearchApi primary transport; one bounded SerpApi rescue per logical request.
+
+Provider fields are adapted at the boundary. Product verification stays in main.
+No keys, search text, image URLs or upstream error messages enter logs.
+"""
+import copy
+import hashlib
+import json
+import math
+import os
+import threading
+import time
+from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError
+
+import requests
+
+SUPPORTED = frozenset(('google', 'google_light', 'google_images',
+                       'google_images_light', 'google_shopping', 'google_shopping_light', 'google_lens', 'baidu'))
+
+
+def _number(name, default, low, high):
+    try:
+        value = float(os.environ.get(name, default))
+        return min(high, max(low, value)) if math.isfinite(value) else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _seconds(timeout):
+    values = timeout if isinstance(timeout, (tuple, list)) else (timeout,)
+    try:
+        total = sum(max(0., float(v)) for v in values if v is not None)
+        return total if math.isfinite(total) else 18.
+    except (TypeError, ValueError):
+        return 18.
+
+
+def _url(value):
+    if isinstance(value, dict):
+        value = value.get('link') or value.get('url')
+    return value if isinstance(value, str) else ''
+
+
+def searchapi_params(params):
+    """Do not forward SerpApi credentials, tokens, or vendor-only controls."""
+    engine = params.get('engine')
+    if engine not in SUPPORTED:
+        return None
+    if engine == 'google_shopping_light':
+        engine = 'google_shopping'
+    if engine == 'google_lens':
+        if not params.get('url'):
+            return None  # SerpApi-owned image_id cannot be used at SearchApi.
+        allowed = ('url', 'q', 'country', 'hl', 'device', 'crop')
+        out = {k: params[k] for k in allowed if params.get(k) is not None}
+        out['search_type'] = params.get('type') or 'all'
+        if out['search_type'] == 'exact_matches':
+            out.pop('q', None)
+            out['safe_search'] = params.get('safe', 'active')
+        # SearchApi does not expose SerpApi's auto_crop switch. Preserve the
+        # original image URL; never silently add a guessed bounding box.
+    elif engine == 'baidu':
+        out = {k: params[k] for k in ('q', 'ct', 'gpc', 'num', 'page') if params.get(k) is not None}
+        if 'ct' in out:
+            # SerpApi: 1/all, 2/simplified, 3/traditional; SearchApi: 0/1/2.
+            out['ct'] = {1: 0, 2: 1, 3: 2}.get(int(out['ct']), 0)
+        if 'pn' in params:
+            out['page'] = max(1, int(params['pn']) // max(1, int(params.get('rn', 10))) + 1)
+        if 'rn' in params:
+            out['num'] = min(50, int(params['rn']))
+    else:
+        allowed = ('q', 'gl', 'hl', 'location', 'uule', 'device', 'google_domain',
+                   'nfpr', 'safe', 'filter', 'tbs', 'cr', 'lr', 'page')
+        if engine == 'google_shopping':
+            allowed = ('q', 'gl', 'hl', 'location', 'uule', 'page', 'shoprs')
+        out = {k: params[k] for k in allowed if params.get(k) is not None}
+        if 'start' in params:
+            out['page'] = max(1, int(params['start']) // 10 + 1)
+        if engine == 'google_shopping' and str(params.get('direct_link')).lower() == 'true':
+            out['link'] = 'resolved'
+    out['engine'] = engine
+    return out
+
+
+def _row(raw, lens=False):
+    row = copy.deepcopy(raw)
+    source = row.get('source')
+    if isinstance(source, dict):
+        row['link'] = row.get('link') or _url(source)
+        row['source'] = source.get('name') or ''
+    elif not source and isinstance(row.get('seller'), str):
+        row['source'] = row['seller']
+    for key in ('image', 'original', 'thumbnail'):
+        if isinstance(row.get(key), dict):
+            row[key] = _url(row[key])
+    row['thumbnail'] = row.get('thumbnail') or _url(row.get('image')) or _url(row.get('original'))
+    if not row.get('link') and row.get('product_link'):
+        row['link'] = row['product_link']  # Still a Google link; existing resolver validates it.
+    if row.get('original_price') is not None:
+        row.setdefault('old_price', row['original_price'])
+        row.pop('original_price', None)  # main uses original_price for the *current* raw price.
+    if row.get('extracted_original_price') is not None:
+        row.setdefault('extracted_old_price', row['extracted_original_price'])
+    if row.get('installment'):
+        row['installments_description'] = json.dumps(row['installment'], ensure_ascii=False)
+    if lens and not isinstance(row.get('price'), dict) and row.get('price') is not None:
+        row['price'] = {'value': row['price'], 'extracted_value': row.get('extracted_price'),
+                        'currency': row.get('currency') or ''}
+    if 'in_stock' not in row:
+        stock = str(row.get('stock_information') or '').strip().lower()
+        if stock in ('in stock', 'out of stock'):
+            row['in_stock'] = stock == 'in stock'
+    return row
+
+
+def normalize(data, engine):
+    if not isinstance(data, dict) or data.get('error') or data.get('errors'):
+        return None
+    metadata = data.get('search_metadata')
+    if isinstance(metadata, dict) and str(metadata.get('status', 'success')).lower() not in ('success', 'completed'):
+        return None
+    # A metadata-only success is malformed, but an explicit empty array is a
+    # legitimate no-result query and must not trigger a paid rescue by itself.
+    fields = ('visual_matches', 'exact_matches', 'products') if engine == 'google_lens' else (
+        ('images', 'images_results') if engine in ('google_images', 'google_images_light') else (
+            ('shopping_results', 'shopping_ads', 'categorized_shopping_results', 'popular_products')
+            if engine == 'google_shopping' else ('organic_results', 'shopping_ads', 'ads', 'knowledge_graph', 'answer_box')))
+    if not any(isinstance(data.get(k), (list, dict)) for k in fields):
+        return None
+    out = copy.deepcopy(data)
+    # Keep only diagnostic metadata, never echoed credentials/request URLs.
+    out['search_metadata'] = {'status': 'Success', 'provider': 'searchapi', 'engine': engine}
+    if isinstance(metadata, dict):
+        out['search_metadata']['id'] = str(metadata.get('id') or '')
+    out.pop('search_parameters', None)
+    for field in ('organic_results', 'images_results', 'shopping_results',
+                  'inline_shopping_results', 'visual_matches', 'exact_matches', 'products'):
+        values = out.get(field)
+        if isinstance(values, dict):
+            values = values.get('results')
+        if isinstance(values, list):
+            out[field] = [_row(r, engine == 'google_lens') for r in values if isinstance(r, dict)]
+    if engine in ('google_images', 'google_images_light'):
+        out['images_results'] = [_row(r) for r in data.get('images', data.get('images_results', [])) if isinstance(r, dict)]
+        out.pop('images', None)
+    if isinstance(data.get('shopping_ads'), list):
+        ads = [_row(r) for r in data['shopping_ads'] if isinstance(r, dict)]
+        target = 'shopping_results' if engine == 'google_shopping' else 'inline_shopping_results'
+        out[target] = out.get(target, []) + ads
+    if engine == 'google_shopping':
+        out['shopping_results'] = out.get('shopping_results', []) + [
+            _row(r) for r in data.get('popular_products', []) if isinstance(r, dict)]
+        for group in out.get('categorized_shopping_results', []):
+            if isinstance(group, dict):
+                group['shopping_results'] = [_row(r) for r in group.get('shopping_results', []) if isinstance(r, dict)]
+    return out
+
+
+class _BoundedPool:
+    def __init__(self, workers, name):
+        self.pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix=name)
+        self.slots = threading.BoundedSemaphore(workers)
+
+    def submit(self, fn, *args):
+        if not self.slots.acquire(blocking=False):
+            return None
+        try:
+            future = self.pool.submit(fn, *args)
+        except BaseException:
+            self.slots.release()
+            raise
+        future.add_done_callback(lambda _: self.slots.release())
+        return future
+
+
+class SearchApiRouter:
+    def __init__(self, *, cache_get, cache_put, cost, http_get=None, log=print):
+        self.key = os.environ.get('SEARCHAPI_API_KEY', '').strip()
+        self.backup_key = os.environ.get('SERPAPI_API_KEY', '').strip()
+        self.enabled = bool(self.key and self.backup_key) and os.environ.get(
+            'SEARCHAPI_PRIMARY_ENABLED', 'true').lower() in ('1', 'true', 'yes', 'on')
+        self.threshold = _number('SEARCHAPI_FALLBACK_AFTER_SECONDS', 6., .1, 6.)
+        self.total = _number('SEARCHAPI_TOTAL_TIMEOUT_SECONDS', 18., 1., 30.)
+        self.cooldown = _number('SEARCHAPI_CIRCUIT_SECONDS', 30., 1., 300.)
+        self.workers = int(_number('SEARCHAPI_MAX_INFLIGHT', 32., 2., 64.))
+        self.cache_get, self.cache_put, self.cost = cache_get, cache_put, cost
+        self.get, self.log = http_get or requests.get, log
+        self.primary_pool = _BoundedPool(self.workers, 'searchapi-http')
+        self.backup_pool = _BoundedPool(self.workers, 'search-rescue')
+        self.lock = threading.Lock()
+        self.inflight, self.circuits = {}, {}
+
+    def snapshot(self):
+        with self.lock:
+            now = time.monotonic()
+            circuits = {k: round(max(0., v[1] - now), 2) for k, v in self.circuits.items() if v[1] > now}
+        return {'enabled': self.enabled, 'primary': 'searchapi' if self.enabled else 'legacy',
+                'fallback': 'serpapi', 'fallback_after_seconds': self.threshold,
+                'total_timeout_seconds': self.total, 'open_circuits': circuits}
+
+    def _health(self, engine, ok, status=0):
+        with self.lock:
+            count, until = self.circuits.get(engine, (0, 0.))
+            if ok:
+                self.circuits[engine] = (0, 0.)
+            else:
+                count += 1
+                if count >= 3 or status in (401, 402, 403, 429):
+                    until = time.monotonic() + self.cooldown
+                self.circuits[engine] = (count, until)
+
+    def _primary(self, params, seconds):
+        response = None
+        self.cost('searchapi_http_requests')
+        try:
+            connect = min(1.5, seconds / 4)
+            response = self.get('https://www.searchapi.io/api/v1/search', params=params,
+                                headers={'Authorization': 'Bearer ' + self.key},
+                                timeout=(max(.01, connect), max(.01, seconds)),
+                                allow_redirects=False)
+            if response.status_code != 200:
+                return None, 'http_' + str(response.status_code), response.status_code
+            data = normalize(response.json(), params['engine'])
+            return (data, '', 200) if data is not None else (None, 'invalid_response', 200)
+        except requests.exceptions.Timeout:
+            return None, 'timeout', 0
+        except (ValueError, TypeError, KeyError):
+            return None, 'invalid_response', 0
+        except Exception:
+            return None, 'connection', 0
+        finally:
+            if response is not None:
+                response.close()
+
+    def search(self, params, timeout, fallback, *, label='', return_error=False):
+        mapped = searchapi_params(params)
+        if not self.enabled or mapped is None:
+            return fallback(params, timeout, label=label, return_error=return_error, retry_connect=False)
+        deadline = time.monotonic() + min(self.total, _seconds(timeout))
+        bypass = str(params.get('no_cache', '')).lower() in ('1', 'true')
+        # auto_crop is not a SearchApi option. Coalesce equivalent full-frame
+        # requests, including duplicate image branches with different crop flags.
+        key = hashlib.sha256(('searchapi-v1:' + json.dumps(mapped, sort_keys=True, ensure_ascii=False)).encode()).hexdigest()
+        cached = None if bypass else self.cache_get(key)
+        if cached is not None:
+            self.cost('searchapi_cache_hits')
+            return copy.deepcopy(cached)
+        with self.lock:
+            shared = None if bypass else self.inflight.get(key)
+            leader = shared is None
+            if leader:
+                shared = Future()
+                if not bypass:
+                    self.inflight[key] = shared
+        if not leader:
+            self.cost('searchapi_shared_responses')
+            try:
+                result = shared.result(timeout=max(0., deadline - time.monotonic()))
+                return copy.deepcopy(result) if result is not None else self._failure(return_error)
+            except TimeoutError:
+                return self._failure(return_error)
+        result = None
+        try:
+            # A previous leader may have just written its result and exited.
+            cached = None if bypass else self.cache_get(key)
+            if cached is not None:
+                result = cached
+                return copy.deepcopy(result)
+            with self.lock:
+                circuit = self.circuits.get(mapped['engine'], (0, 0.))[1] > time.monotonic()
+            remaining = deadline - time.monotonic()
+            # Full searches get the requested 6s threshold. Short enrichment
+            # tasks switch earlier, preserving their existing total deadline.
+            primary_seconds = self.threshold if remaining >= self.threshold + 1. else max(0., remaining * .6)
+            reason, status = ('circuit_open', 0) if circuit else ('capacity', 0)
+            future = None
+            if not circuit and primary_seconds > .01:
+                future = self.primary_pool.submit(self._primary, mapped, primary_seconds)
+            if future is not None:
+                try:
+                    result, reason, status = future.result(timeout=primary_seconds)
+                except TimeoutError:
+                    reason = 'deadline'
+                    future.cancel()  # Running HTTP may finish upstream; never publish it later.
+                except Exception:
+                    reason = 'connection'
+                self._health(mapped['engine'], result is not None, status)
+            if result is None:
+                remaining = deadline - time.monotonic()
+                if remaining <= .05:
+                    return self._failure(return_error)
+                self.cost('searchapi_fallback_requests')
+                self.log('SEARCH FALLBACK primary=searchapi backup=serpapi engine=' + mapped['engine'] + ' reason=' + reason)
+                # Keep the original SerpApi engine/options, never SearchApi tokens.
+                backup_params = dict(params, api_key=self.backup_key)
+                connect = min(1.5, remaining / 4)
+                def rescue():
+                    return fallback(backup_params, (connect, remaining-connect), label=label,
+                                    return_error=True, retry_connect=False)
+                rescue_future = self.backup_pool.submit(rescue)
+                if rescue_future is not None:
+                    try:
+                        result = rescue_future.result(timeout=max(0., deadline-time.monotonic()))
+                    except TimeoutError:
+                        rescue_future.cancel()
+                    except Exception:
+                        result = None
+                if not isinstance(result, dict) or result.get('error') or result.get('_serpapi_failure'):
+                    result = None
+                    return self._failure(return_error)
+                result = copy.deepcopy(result)
+                result.setdefault('search_metadata', {})['provider'] = 'serpapi'
+                result['search_metadata']['fallback_from'] = 'searchapi'
+            if not bypass:
+                # Backup cache is deliberately short; probe the primary again.
+                ttl = 30 if result.get('search_metadata', {}).get('fallback_from') else None
+                self.cache_put(key, mapped['engine'], result, ttl_seconds=ttl)
+            return copy.deepcopy(result)
+        finally:
+            shared.set_result(copy.deepcopy(result))
+            if not bypass:
+                with self.lock:
+                    if self.inflight.get(key) is shared:
+                        self.inflight.pop(key)
+
+    @staticmethod
+    def _failure(return_error):
+        return {'error': 'search_providers_unavailable', '_serpapi_failure': {'reason': 'providers_unavailable'}} if return_error else None

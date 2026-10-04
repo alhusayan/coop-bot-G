@@ -1,17 +1,21 @@
 {
-  "release": "156.7.12",
-  "files": {
-    "INSTALL_AR.md": "1f8ee7cf0495dd15d286b912beba6b9aa1dd5cba57b0f6088cd19d3559dde2ae",
-    "VERIFICATION.json": "c9b397d42ae97f1871050dfc286eedbbb46f530cda2b4177ffe0aa016a102d20",
-    "apple-developer-merchantid-domain-association": "c15558d3e155e2031ef39b32775050c283b545d8575643181af3c3b9f03d46a3",
-    "findzia-billing.js": "44f7becfd624ac803ecaaeadd21cc14c474f322ab948caabe42b8dd5b67eaad9",
-    "findzia_applepay.py": "f982d9c921df67b94765afc002fe665e0e3c3784add64bf14cb3a2346fb23cd2",
-    "findzia_myfatoorah.py": "1925de22e830c74a94b742c206266958ef9b49ec37e1977e1609f3352b87c7e6",
-    "tests/dom.cjs": "166a4feee267eefe1cdf32ebcfccacd32d5840e8c88e131e1fea09c2f8ff72cb",
-    "tests/fixtures.py": "d8dce4868b69f4e50a2ac191990560af22d8cbdae3d12fc0119e00e297833cfa",
-    "tests/test_applepay.py": "80fa088a8a1a1d7912b84e8452d83417479d8f1b50fc2ea6e32c90fd2a54792f",
-    "tests/test_applepay_page.cjs": "15155694038570b7e29484141a21db0c0f2aeb991790caa63083bef6b4bb2d59",
-    "tests/test_embedded_frontend.cjs": "d311b2b51ba8a060cb4659171bba507b6ec30fdde5f3db91155f35b8368f0995",
-    "tests/test_legacy_recovery.py": "6dd996b6b29050f09545b74ddcf13355b3ba5149c652f4baa8d505817ae41bc9"
+  "base_repository": "alhusayan/coop-bot-G",
+  "base_commit": "482fa5d30c80c30aeafc9bc7f6c44e2e3b7ad80e",
+  "base_main_blob": "ffc85eda70acfbb1681c01f057dbaaf90c80fae8",
+  "build": "v128.5.42.42-searchapi-primary",
+  "deployed": false,
+  "provider_tests": 20,
+  "existing_quality_tests": 9,
+  "startup_check": "passed",
+  "integrated_lens_mock": "passed",
+  "new_paid_requests": 0,
+  "sha256": {
+    "main.py": "2b25bf09e39f49af5669d7298d0fbba30190581fb5d2ec7caab67daae56c6da5",
+    "findzia_searchapi.py": "1381b6dab68b46a2b6b5924041738d02360ad731ce282bd42d3c5677200d59b4",
+    "test_searchapi.py": "65a2f7871f57bcda36f8f53bd85329e4496f4e3939d1374eed80b5197aef3b59",
+    "INSTALL_AR.txt": "5b7f5e56320ee44d88b9d45007a84b064eb0c7ce509f16fac3325fd8c23288b0",
+    "main.patch": "844cc8603f59478920c539f8e117002f974f1faeadd006ddb59b58d8db4214bf",
+    "verification/provider-tests.log": "6e2d9775d19874e1912f5e72df5798f96e85be0079ac34acca5230479610d3de",
+    "verification/startup-and-regression.log": "4c57d1fccd827104309b4d1e5060f86d8b22e987e44a286110fc9d85baaca134"
   }
 }
