@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 
 const base = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const src = resolve(base, 'source'), dest = resolve(base, 'public');
-const version = '156.7.46', api = 'https://api.findzia.com';
+const version = '156.7.47', api = 'https://api.findzia.com';
 // Preserve the live section scope to avoid unnecessary DOM/storage changes.
 const section = 'template--19963721449543__findzia_home_h4wBLq';
 const expected = 'c15558d3e155e2031ef39b32775050c283b545d8575643181af3c3b9f03d46a3';
@@ -23,7 +23,7 @@ const packageVersion=JSON.parse(readFileSync(resolve(base,'package.json'),'utf8'
 if(packageVersion!==version)throw Error('Release mismatch: replace frontend/package.json and frontend/scripts/build.mjs together.');
 if(sourceReleases.boot!=='156.7.43')throw Error('Release mismatch: expected frontend/source/findzia-boot.js version 156.7.43.');
 for(const [key,file] of [['home','findzia-home.liquid'],['shell','findzia-shell.js'],['billing','findzia-billing.js'],['subscriptions','findzia-subscriptions.js'],['guide','findzia-filters.js'],['account','findzia-account.js'],['motion','findzia-motion.js'],['motionCSS','findzia-motion.css']]){
-  const expectedVersion=key==='home'?version:key==='account'?'156.7.45':'156.7.43';
+  const expectedVersion=['home','shell','billing','guide'].includes(key)?version:key==='account'?'156.7.45':'156.7.43';
   if(sourceReleases[key]!==expectedVersion)throw Error('Release mismatch: replace frontend/source/'+file+' with version '+expectedVersion+'.');
 }
 const routes = {};
