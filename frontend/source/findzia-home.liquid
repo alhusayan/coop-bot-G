@@ -1,4 +1,4 @@
-{% comment %} FINDZIA_HOME_RELEASE=156.7.48 {% endcomment %}
+{% comment %} FINDZIA_HOME_RELEASE=156.7.49 {% endcomment %}
 {% comment %}Findzia 156.7.15 · progressive filters + conversational guide from 156.3.0 · combined 156.7.14 payments preserved{% endcomment %}
 
 
@@ -1522,6 +1522,10 @@ return result;};}})();</script>
   measure.style.cssText='position:fixed;left:-10000px;top:0;visibility:hidden;pointer-events:none;height:0;min-height:0;max-height:none;overflow:hidden;resize:none;box-sizing:border-box;white-space:pre-wrap;overflow-wrap:anywhere;';
   document.body.appendChild(measure);cleanups.push(()=>measure.remove());
   function sync(){
+   const photo=!home&&input.closest('.fz-input-wrap')?.dataset.imageMode==='true';
+   // Photo + details remain one line, including pasted text.
+   if(photo&&/[\r\n]/.test(input.value)){const caret=input.selectionStart;input.value=input.value.replace(/[\r\n]/g,' ');input.setSelectionRange(caret,caret);}
+   input.wrap=photo?'off':'soft';
    const value=input.value||'',active=document.activeElement===input;
    const direction=['ar','ur'].includes(root.dataset.lang)?'rtl':'ltr';
    box.dir=direction;input.dir=direction;preview.dir=direction;
@@ -1530,7 +1534,7 @@ return result;};}})();</script>
    clear.hidden=!value;clear.setAttribute('aria-label',labels[root.dataset.lang]||labels.en);
    const before=box.getBoundingClientRect().height;
    // Focus opens the composer, including an empty or one-word query.
-   box.dataset.composerExpanded=String(active);
+   box.dataset.composerExpanded=String(active&&!photo);
    if(!home){const viewport=window.visualViewport;box.closest('[data-camera-composer]')?.setAttribute('data-keyboard-compact',String(active&&!!viewport&&viewport.scale<1.2&&viewport.height<500));}
    const cap=Math.max(68,Math.min(140,Math.floor((window.visualViewport?.height||innerHeight)*.3)));
    let contentHeight=44;
@@ -1539,7 +1543,7 @@ return result;};}})();</script>
     for(const prop of ['fontFamily','fontSize','fontWeight','fontStyle','lineHeight','letterSpacing','paddingTop','paddingBottom','paddingLeft','paddingRight','borderTopWidth','borderBottomWidth'])measure.style[prop]=css[prop];
     measure.style.width=input.getBoundingClientRect().width+'px';measure.value=value||' ';contentHeight=measure.scrollHeight;
    }
-   const height=active?Math.max(68,Math.min(cap,contentHeight)):44;
+   const height=active&&!photo?Math.max(68,Math.min(cap,contentHeight)):44;
    field.style.setProperty('--fz-query-height',height+'px');
    field.style.setProperty('--fz-query-overflow',active&&contentHeight>height+1?'auto':'hidden');
    if(height!==lastHeight||active!==lastActive){
@@ -1928,24 +1932,23 @@ html[data-fz-page-transition]::view-transition-new(root){animation:fz-page-in 28
 #findzia-home-{{ section.id }}[data-theme] .fz-results-tools .fz-live-progress strong{font-size:inherit!important;font-weight:600!important;font-variant-numeric:tabular-nums}
 #findzia-home-{{ section.id }}[data-theme] .fz-results-shell{padding-top:8px!important}
 </style>
-<style data-fz-photo-field-fix="156.7.48">
-/* The textarea now lives inside .fz-query-field. Place that wrapper, never
-   the textarea, in the photo grid. No toolbar/header/result styles here. */
-#findzia-home-{{ section.id }}[data-theme] .fz-fixed-header .fz-search-row .fz-input-wrap[data-image-mode=true]{display:grid!important;grid-template-columns:56px minmax(0,1fr) 40px 40px!important;grid-template-rows:auto 40px!important;align-items:start!important;gap:4px 8px!important;padding:4px!important;direction:inherit!important;width:100%!important;min-width:0!important;box-sizing:border-box!important}
-#findzia-home-{{ section.id }}[data-theme] .fz-fixed-header .fz-search-row .fz-input-wrap[data-image-mode=true] .fz-query-field{grid-column:2 / -1!important;grid-row:1!important;width:auto!important;min-width:0!important;margin:0!important;padding:0 4px!important;align-self:start!important}
-#findzia-home-{{ section.id }}[data-theme] .fz-fixed-header .fz-search-row .fz-input-wrap[data-image-mode=true] .fz-query-field textarea.fz-input{display:block!important;position:relative!important;inset:auto!important;transform:none!important;grid-column:auto!important;grid-row:auto!important;box-sizing:border-box!important;width:100%!important;min-width:0!important;height:var(--fz-query-height,44px)!important;min-height:44px!important;margin:0!important;padding:10px 0!important;line-height:24px!important;direction:inherit!important;text-align:start!important}
-#findzia-home-{{ section.id }}[data-theme] .fz-fixed-header .fz-search-row .fz-input-wrap[data-image-mode=true] .fz-query-preview{inset:10px 4px!important;direction:inherit!important;text-align:start!important}
-#findzia-home-{{ section.id }}[data-theme] .fz-fixed-header .fz-search-row .fz-input-wrap[data-image-mode=true] .fz-image-query-chip{grid-column:1!important;grid-row:1 / span 2!important;position:relative!important;inset:auto!important;transform:none!important;align-self:start!important;width:56px!important;min-width:56px!important;height:80px!important;margin:4px 0 0!important;padding:0!important;border-radius:10px!important;overflow:visible!important}
-#findzia-home-{{ section.id }}[data-theme] .fz-fixed-header .fz-search-row .fz-input-wrap[data-image-mode=true] .fz-image-query-chip img{display:block!important;width:100%!important;height:100%!important;object-fit:contain!important;border-radius:10px!important}
-#findzia-home-{{ section.id }}[data-theme] .fz-fixed-header .fz-search-row .fz-input-wrap[data-image-mode=true] .fz-image-query-chip span{position:absolute!important;inset:-5px -5px auto auto!important;display:grid!important;place-items:center!important;width:22px!important;height:22px!important;line-height:1!important;border-radius:50%!important}
-#findzia-home-{{ section.id }}[data-theme] .fz-fixed-header .fz-search-row[dir=rtl] .fz-input-wrap[data-image-mode=true] .fz-image-query-chip span{inset:-5px auto auto -5px!important}
+<style data-fz-photo-field-fix="156.7.49">
+/* Compact single line: photo, plus, editable text, clear, submit. */
+#findzia-home-{{ section.id }}[data-theme] .fz-fixed-header [data-camera-composer] .fz-search-row:has(.fz-input-wrap[data-image-mode=true]){box-sizing:border-box!important;height:76px!important;min-height:76px!important;max-height:76px!important;padding:6px 6px 24px!important;align-items:center!important}
+#findzia-home-{{ section.id }}[data-theme] .fz-fixed-header .fz-search-row .fz-input-wrap[data-image-mode=true]{display:grid!important;grid-template-columns:36px 24px minmax(0,1fr) auto 36px!important;grid-template-rows:44px!important;align-items:center!important;gap:4px!important;padding:0 4px!important;direction:inherit!important;width:100%!important;min-width:0!important;box-sizing:border-box!important}
+#findzia-home-{{ section.id }}[data-theme] .fz-fixed-header .fz-search-row .fz-input-wrap[data-image-mode=true] .fz-query-field{grid-column:3!important;grid-row:1!important;width:auto!important;min-width:0!important;height:44px!important;margin:0!important;padding:0!important;align-self:center!important}
+#findzia-home-{{ section.id }}[data-theme] .fz-fixed-header .fz-search-row .fz-input-wrap[data-image-mode=true] .fz-query-field textarea.fz-input{display:block!important;position:relative!important;inset:auto!important;transform:none!important;grid-column:auto!important;grid-row:auto!important;box-sizing:border-box!important;width:100%!important;min-width:0!important;height:44px!important;min-height:44px!important;max-height:44px!important;margin:0!important;padding:10px 0!important;line-height:24px!important;white-space:pre!important;overflow-wrap:normal!important;word-break:normal!important;overflow-x:auto!important;overflow-y:hidden!important;direction:inherit!important;text-align:start!important}
+#findzia-home-{{ section.id }}[data-theme] .fz-fixed-header .fz-search-row .fz-input-wrap[data-image-mode=true] .fz-query-preview{inset:10px 0!important;direction:inherit!important;text-align:start!important}
+#findzia-home-{{ section.id }}[data-theme] .fz-fixed-header .fz-search-row .fz-input-wrap[data-image-mode=true] .fz-image-query-chip{grid-column:1!important;grid-row:1!important;position:relative!important;inset:auto!important;transform:none!important;align-self:center!important;width:36px!important;min-width:36px!important;height:40px!important;margin:0!important;padding:0!important;border-radius:7px!important;overflow:visible!important}
+#findzia-home-{{ section.id }}[data-theme] .fz-fixed-header .fz-search-row .fz-input-wrap[data-image-mode=true] .fz-image-query-chip img{display:block!important;width:100%!important;height:100%!important;object-fit:contain!important;border-radius:7px!important}
+#findzia-home-{{ section.id }}[data-theme] .fz-fixed-header .fz-search-row .fz-input-wrap[data-image-mode=true] .fz-image-query-chip span{position:absolute!important;inset:-4px -4px auto auto!important;display:grid!important;place-items:center!important;width:16px!important;height:16px!important;line-height:1!important;font-size:12px!important;border-radius:50%!important}
+#findzia-home-{{ section.id }}[data-theme] .fz-fixed-header .fz-search-row[dir=rtl] .fz-input-wrap[data-image-mode=true] .fz-image-query-chip span{inset:-4px auto auto -4px!important}
 #findzia-home-{{ section.id }}[data-theme] .fz-fixed-header .fz-search-row .fz-input-wrap[data-image-mode=true] .fz-image-query-plus,
 #findzia-home-{{ section.id }}[data-theme] .fz-fixed-header .fz-search-row .fz-input-wrap[data-image-mode=true] .fz-query-clear,
-#findzia-home-{{ section.id }}[data-theme] .fz-fixed-header .fz-search-row .fz-input-wrap[data-image-mode=true] .fz-text-submit{grid-row:2!important;position:static!important;inset:auto!important;transform:none!important;width:40px!important;min-width:40px!important;height:40px!important;min-height:40px!important;margin:0!important;padding:8px!important;align-self:center!important}
-#findzia-home-{{ section.id }}[data-theme] .fz-fixed-header .fz-search-row .fz-input-wrap[data-image-mode=true] .fz-image-query-plus{grid-column:2!important;justify-self:start!important}
-#findzia-home-{{ section.id }}[data-theme] .fz-fixed-header .fz-search-row .fz-input-wrap[data-image-mode=true] .fz-query-clear{grid-column:3!important}
-#findzia-home-{{ section.id }}[data-theme] .fz-fixed-header .fz-search-row .fz-input-wrap[data-image-mode=true] .fz-text-submit{grid-column:4!important}
-/* Restore the old full-width writing row when the photo is removed. The
-   selector includes the mode so a hidden photo cannot leave a narrow cell. */
+#findzia-home-{{ section.id }}[data-theme] .fz-fixed-header .fz-search-row .fz-input-wrap[data-image-mode=true] .fz-text-submit{grid-row:1!important;position:static!important;inset:auto!important;transform:none!important;width:36px!important;min-width:36px!important;height:40px!important;min-height:40px!important;margin:0!important;padding:8px!important;align-self:center!important}
+#findzia-home-{{ section.id }}[data-theme] .fz-fixed-header .fz-search-row .fz-input-wrap[data-image-mode=true] .fz-image-query-plus{grid-column:2!important;justify-self:center!important;width:24px!important;min-width:24px!important;padding:0!important;font-size:20px!important}
+#findzia-home-{{ section.id }}[data-theme] .fz-fixed-header .fz-search-row .fz-input-wrap[data-image-mode=true] .fz-query-clear{grid-column:4!important}
+#findzia-home-{{ section.id }}[data-theme] .fz-fixed-header .fz-search-row .fz-input-wrap[data-image-mode=true] .fz-text-submit{grid-column:5!important}
+/* Removing the image restores the existing full-width text composer. */
 #findzia-home-{{ section.id }}[data-theme] .fz-fixed-header .fz-search-row[data-composer-expanded=true] .fz-input-wrap[data-image-mode=false] .fz-query-field{grid-column:1 / -1!important;grid-row:1!important;min-width:0!important;width:auto!important;padding-inline:8px!important}
 </style>
