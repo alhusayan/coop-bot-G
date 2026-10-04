@@ -1,0 +1,50 @@
+Findzia API 156.7.44 validation
+
+21 new regression tests: PASS.
+Coverage: real SQLite write contention, guest and signed-in HTTP billing status,
+text/photo NDJSON completion, photo JSON response, empty-result refunds,
+reader cancellation at done, cancellation during queued admission, isolated
+credit executor with a saturated default executor, concurrent accounts/helpers,
+replay after restart, busy settlement retries, malformed journal fail-closed,
+storage fallback, duplicate request/settlement protection, exhausted-credit
+admission rejection, and connection rollback/closure.
+
+39 compatible payment regression tests: PASS using the updated production
+connection factory (17 checkout tests + 22 subscription-management tests).
+
+Baseline test-suite limitation: the locally retained full checkout suite also
+contains 10 return-flow tests expecting PaddleSandbox.confirm_checkout, which
+is absent from the retained Paddle module. Those cases produce the same 16
+errors including subtests BEFORE and AFTER this patch. They are not counted
+as passing or claimed fixed. Paddle code is not included in this update.
+
+All three shipped Python modules compile successfully.
+
+Artificial lock reproduction, same database/lock and 5-second connection timeout:
+{
+  "before_156_7_43": {
+    "elapsed_ms": 5007.79,
+    "result": "OperationalError: database is locked",
+    "remaining": null
+  },
+  "after_156_7_44": {
+    "elapsed_ms": 0.52,
+    "result": "ok",
+    "remaining": 10
+  }
+}
+These are local control-path timings, not production search latency claims.
+
+Source comparison: main.py, findzia_accounts.py and findzia_billing.py were
+byte-identical across the local 156.7.40, .41, .42 and .43 packages. The production
+log does not identify the original lock holder. Slow/busy connection diagnostics
+in this patch are intended to identify it if contention recurs.
+
+No provider requests, real charges, database migration, GitHub push, Railway
+deployment, or frontend changes were performed.
+
+Developer test command from the existing API repository with its dependencies:
+python -m unittest discover -s tests -p test_credit_stability.py -v
+The test suite additionally uses httpx, and the repository's existing Paddle
+module for route-installation mocks. Python standard-library runtime additions
+require no new production package dependency.

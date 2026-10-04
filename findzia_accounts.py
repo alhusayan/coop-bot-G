@@ -74,6 +74,44 @@ def apple_display_name(raw):
     parts=[display_name(name.get(key,'')) for key in ('firstName','lastName')]
     return display_name(' '.join(part for part in parts if part))
 
+class _AccountConnection(sqlite3.Connection):
+    """Close every scoped connection and report slow locks without SQL/PII."""
+    _write_started = None
+    _write_source = ''
+
+    def execute(self, sql, parameters=()):
+        import sys
+        operation = str(sql).lstrip().split(None, 1)[0].upper() if str(sql).strip() else ''
+        frame = sys._getframe(1)
+        source = Path(frame.f_code.co_filename).name + ':' + frame.f_code.co_name
+        del frame
+        started = time.monotonic()
+        try:
+            cursor = super().execute(sql, parameters)
+        except sqlite3.OperationalError as exc:
+            if 'locked' in str(exc).lower() or 'busy' in str(exc).lower():
+                print('ACCOUNT_DB busy source=%s operation=%s wait_ms=%d' %
+                      (source, operation, (time.monotonic()-started)*1000), flush=True)
+            raise
+        if self.in_transaction and self._write_started is None and (
+            operation in ('INSERT', 'UPDATE', 'DELETE', 'REPLACE') or
+            (operation == 'BEGIN' and any(word in sql.upper() for word in ('IMMEDIATE', 'EXCLUSIVE')))):
+            self._write_started = time.monotonic()
+            self._write_source = source
+        return cursor
+
+    def __exit__(self, *args):
+        try:
+            return super().__exit__(*args)
+        finally:
+            if self._write_started is not None:
+                elapsed = (time.monotonic()-self._write_started)*1000
+                if elapsed >= 250:
+                    print('ACCOUNT_DB slow_transaction source=%s elapsed_ms=%d' %
+                          (self._write_source, elapsed), flush=True)
+            self.close()
+
+
 class Accounts:
     def __init__(self, config=None):
         env=os.environ if config is None else config
@@ -98,7 +136,7 @@ class Accounts:
                 print('ACCOUNTS: persistent database unavailable; sign-in disabled')
 
     def connect(self):
-        db=sqlite3.connect(self.db_path,timeout=5)
+        db=sqlite3.connect(self.db_path,timeout=5,factory=_AccountConnection)
         db.row_factory=sqlite3.Row
         db.execute('PRAGMA foreign_keys=ON')
         return db
@@ -328,9 +366,13 @@ def install_accounts(app):
     @app.get('/api/account/me')
     async def me(request:Request):
         service.allow_request(request,False)
-        member=await asyncio.to_thread(service.member,service.token(request))
         credits=getattr(app.state,'findzia_credits',None)
-        balance=await asyncio.to_thread(credits.status,member['id']) if credits and credits.available else None
+        if credits and credits.available:
+            member=await credits.runtime.run(service.member,service.token(request))
+            balance=await credits.runtime.run(credits.status,member['id'])
+        else:
+            member=await asyncio.to_thread(service.member,service.token(request))
+            balance=None
         return result({'ok':True,'member':member,'credits':balance,
                        'subscription':balance.get('subscription') if balance else {'status':'unavailable'},
                        'limit':balance.get('remaining') if balance else None})

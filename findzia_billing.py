@@ -1,4 +1,4 @@
-"""Findzia 156.3.9: guest-first trials and server-owned search credits.
+"""Findzia 156.7.44: guest-first trials and non-blocking durable settlement.
 
 No public purchase-grant endpoint. Checkout remains unavailable until a payment
 adapter verifies payment, amount, currency and account ownership server-side.
@@ -16,6 +16,7 @@ import time
 
 from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse
+from findzia_credit_runtime import CreditRuntime
 
 PLANS = (
     dict(id='pack', name='Findzia Pack', amount_cents=499, currency='USD', credits=20, interval='once'),
@@ -44,6 +45,7 @@ class Credits:
         self.trial_budget = max(0, int(env.get('FINDZIA_TRIAL_BUDGET_CREDITS', '10000')))
         self.trial_daily_attempts = max(0, int(env.get('FINDZIA_TRIAL_DAILY_ATTEMPTS', '500')))
         self.available = accounts.available
+        self.runtime = CreditRuntime(self)
         if self.available:
             try:
                 with accounts.connect() as db:
@@ -78,19 +80,26 @@ class Credits:
                       device TEXT PRIMARY KEY,member TEXT NOT NULL UNIQUE REFERENCES fz_members(id),
                       token_hash TEXT NOT NULL UNIQUE,created INTEGER NOT NULL,
                       linked_member TEXT REFERENCES fz_members(id));
+                    CREATE INDEX IF NOT EXISTS fz_requests_state_created ON fz_credit_requests(state,created);
+                    CREATE INDEX IF NOT EXISTS fz_requests_grant_state ON fz_credit_requests(grant_id,state);
+                    CREATE INDEX IF NOT EXISTS fz_requests_member_state_created ON fz_credit_requests(member,state,created);
+                    CREATE INDEX IF NOT EXISTS fz_requests_created ON fz_credit_requests(created);
+                    CREATE INDEX IF NOT EXISTS fz_grants_kind ON fz_credit_grants(kind);
                     ''')
                     db.execute('INSERT OR IGNORE INTO fz_credit_config VALUES(?,?)',('guest_key',secrets.token_hex(32)))
                     self.guest_key=db.execute("SELECT value FROM fz_credit_config WHERE key='guest_key'").fetchone()[0]
             except (OSError, sqlite3.Error):
                 self.available = False
                 print('BILLING: database unavailable; protected requests fail closed')
+        if self.available:
+            print('FINDZIA_CREDITS build=156.7.44 balance=read_only completion=durable_journal executors=isolated', flush=True)
 
     def check(self):
         if not self.available:
             raise HTTPException(503, 'credits_unavailable')
 
     def public_config(self):
-        return dict(enabled=self.enabled, available=self.available, trial_credits=10,
+        return dict(build='156.7.44', enabled=self.enabled, available=self.available, trial_credits=10,
                     guest_trial=True,checkout_available=False, restore_available=False, plans=list(PLANS))
 
     def ledger(self, db, member, grant, request, delta, reason, now):
@@ -100,14 +109,29 @@ class Credits:
     def recover(self, db, now):
         # Middleware limits requests to 180 seconds. A crash lease lives 10 minutes;
         # recovery never races a still-authorized search in another worker.
-        for row in db.execute("SELECT * FROM fz_credit_requests WHERE state='reserved' AND created<?", (now-600,)).fetchall():
-            self._finish(db, row, False, now, 'interrupted')
+        for row in db.execute("SELECT * FROM fz_credit_requests WHERE state='reserved' AND created<? ORDER BY created LIMIT 64", (now-600,)).fetchall():
+            # A completed search awaiting a busy SQLite writer must not be
+            # refunded by crash recovery. Its server-owned outcome is durable.
+            record = self.runtime.journal.read(row['member'], row['request'])
+            self._finish(db, row, record['success'] if record else False, now, 'interrupted')
+
+    def recover_expired(self):
+        self.check(); now = int(time.time())
+        with self.accounts.connect() as db:
+            due = db.execute("SELECT 1 FROM fz_credit_requests WHERE state='reserved' AND created<? LIMIT 1", (now-600,)).fetchone()
+        if due:
+            with self.accounts.connect() as db:
+                db.execute('BEGIN IMMEDIATE')
+                self.recover(db, now)
 
     def claim(self, member, device):
         self.check()
         if not isinstance(device, str) or not REQUEST_ID.fullmatch(device):
             raise HTTPException(400, 'device_id_required')
         now = int(time.time()); key = fingerprint(device)
+        with self.accounts.connect() as db:
+            if db.execute('SELECT 1 FROM fz_trial_claims WHERE member=?', (member,)).fetchone():
+                return
         with self.accounts.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             self._claim(db,member,key,now)
@@ -144,6 +168,13 @@ class Credits:
         if not isinstance(device,str) or not REQUEST_ID.fullmatch(device):raise HTTPException(400,'device_id_required')
         now=int(time.time());key=fingerprint(device)
         token='fz_guest_'+hmac.new(self.guest_key.encode(),device.encode(),hashlib.sha256).hexdigest()
+        with self.accounts.connect() as db:
+            db.execute('BEGIN')
+            guest=db.execute('SELECT * FROM fz_guests WHERE device=?',(key,)).fetchone()
+            if guest:
+                data=self._snapshot(db,guest['member'],now)
+                data.update(guest=True,guest_token=token,trial_linked=bool(guest['linked_member']))
+                return data
         with self.accounts.connect() as db:
             db.execute('BEGIN IMMEDIATE');self.recover(db,now)
             guest=db.execute('SELECT * FROM fz_guests WHERE device=?',(key,)).fetchone()
@@ -192,6 +223,11 @@ class Credits:
         self.check();now=int(time.time())
         if not isinstance(token,str) or not re.fullmatch(r'fz_guest_[a-f0-9]{64}',token):raise HTTPException(401,'guest_session_expired')
         with self.accounts.connect() as db:
+            guest=db.execute('SELECT * FROM fz_guests WHERE token_hash=?',(fingerprint(token),)).fetchone()
+            if not guest:raise HTTPException(401,'guest_session_expired')
+            if guest['linked_member'] and db.execute('SELECT 1 FROM fz_trial_claims WHERE member=?',(member,)).fetchone():
+                return True
+        with self.accounts.connect() as db:
             db.execute('BEGIN IMMEDIATE');self.recover(db,now)
             guest=db.execute('SELECT * FROM fz_guests WHERE token_hash=?',(fingerprint(token),)).fetchone()
             if not guest:raise HTTPException(401,'guest_session_expired')
@@ -238,7 +274,8 @@ class Credits:
     def status(self, member):
         self.check(); now=int(time.time())
         with self.accounts.connect() as db:
-            db.execute('BEGIN IMMEDIATE'); self.recover(db,now)
+            # A consistent read snapshot; maintenance handles stale reservations.
+            db.execute('BEGIN')
             return self._snapshot(db,member,now)
 
     def reserve(self, member, request_id, path):
@@ -339,7 +376,7 @@ class Credits:
 
 class ResultEvidence:
     """Observe the existing response without buffering/delaying product cards."""
-    def __init__(self):self.buffer=b'';self.rows=set();self.status=200;self.streaming=False
+    def __init__(self):self.buffer=b'';self.rows=set();self.status=200;self.streaming=False;self.terminal=False
     def row(self,r):
         if isinstance(r,dict) and (r.get('url') or r.get('link')) and (r.get('title') or r.get('name') or r.get('product_name')):
             self.rows.add(r.get('url') or r.get('link'))
@@ -350,7 +387,9 @@ class ResultEvidence:
         for field in ('results','all_results','items'):
             if isinstance(d.get(field),list):
                 for r in d[field]:self.row(r)
-        if d.get('event')=='done' and d.get('count')==0:self.rows.clear()
+        if d.get('event')=='done':
+            self.terminal=True
+            if d.get('count')==0:self.rows.clear()
     def consume(self,chunk,final=False):
         self.buffer+=chunk
         if self.streaming:
@@ -376,7 +415,7 @@ class CreditMiddleware:
         if not is_search and not helper and not blocked:return await self.app(scope,receive,send)
         service=getattr(self.owner.state,'findzia_credits',None)
         if service and not service.enabled:return await self.app(scope,receive,send)
-        reserved=False;member=None;rid='';evidence=ResultEvidence();started=False;ended=False
+        reserved=False;member=None;rid='';evidence=ResultEvidence();started=False;ended=False;completion=None
         async def reply(code,error):
             await JSONResponse({'ok':False,'error':error},status_code=code,headers={'Cache-Control':'no-store'})(scope,receive,send)
         try:
@@ -386,59 +425,81 @@ class CreditMiddleware:
             service.check()
             request=Request(scope)
             if request.headers.get('origin') not in service.accounts.origins:raise HTTPException(403,'origin_not_allowed')
-            member=await asyncio.to_thread(service.actor,request)
+            member=await service.runtime.run(service.actor,request)
             if is_search:
                 rid=request.headers.get('x-findzia-request-id','')
-                await asyncio.to_thread(service.reserve,member['id'],rid,path);reserved=True
-            else:await asyncio.to_thread(service.helper,member['id'],*helper)
+                # Shield admission too: a disconnect must not orphan a queued
+                # reservation that later deducts a credit without retrieval.
+                admission=service.runtime.track(service.runtime.run(service.reserve,member['id'],rid,path,write=True))
+                try:
+                    await asyncio.shield(admission);reserved=True
+                except asyncio.CancelledError:
+                    async def cancel_admission():
+                        try:
+                            await admission
+                            await service.runtime.complete(member['id'],rid,False)
+                        except (HTTPException,OSError,sqlite3.Error):
+                            print('CREDITS_ADMISSION cancelled_recovery_pending',flush=True)
+                    service.runtime.track(cancel_admission())
+                    raise
+            else:await service.runtime.run(service.helper,member['id'],*helper,write=True)
         except HTTPException as exc:return await reply(exc.status_code,exc.detail)
         except (OSError,sqlite3.Error):return await reply(503,'credits_unavailable')
 
         async def observe(message):
-            nonlocal started,ended
+            nonlocal started,ended,completion
             if message['type']=='http.response.start':
                 evidence.status=message['status'];started=True
                 evidence.streaming=any(k.lower()==b'content-type' and b'ndjson' in v for k,v in message.get('headers',[]))
             if message['type']=='http.response.body':
                 evidence.consume(message.get('body',b''),not message.get('more_body',False))
-                # Commit before final bytes so a immediately-following balance read is correct.
-                if not message.get('more_body',False) and reserved:
-                    await asyncio.to_thread(service.finish,member['id'],rid,evidence.status<400 and bool(evidence.rows))
+                # Persist before the done event (clients cancel their reader at
+                # done). SQLite may then retry without holding the response open.
+                if reserved and (evidence.terminal or not message.get('more_body',False)):
+                    if completion is None:
+                        completion=service.runtime.track(service.runtime.complete(member['id'],rid,evidence.status<400 and bool(evidence.rows)))
+                    await asyncio.shield(completion)
                     ended=True
             await send(message)
         try:
             await asyncio.wait_for(self.app(scope,receive,observe),timeout=180)
         except asyncio.TimeoutError:
             if not started:await reply(504,'search_timeout')
-            else:await send({'type':'http.response.body','body':b'','more_body':False})
+            else:await observe({'type':'http.response.body','body':b'','more_body':False})
         finally:
             if reserved and not ended:
-                # Retained delivered cards count; an empty interrupted search is refunded.
-                task=asyncio.create_task(asyncio.to_thread(service.finish,member['id'],rid,evidence.status<400 and bool(evidence.rows)))
-                await asyncio.shield(task)
+                # One completion only, even when a client cancels at done. The
+                # runtime retains it until the outcome is durable.
+                if completion is None:
+                    completion=service.runtime.track(service.runtime.complete(member['id'],rid,evidence.status<400 and bool(evidence.rows)))
+                await asyncio.shield(completion)
 
 
 def install_billing(app, accounts):
     service=Credits(accounts);app.state.findzia_credits=service
+    @app.on_event('startup')
+    async def start_credit_maintenance():service.runtime.start()
+    @app.on_event('shutdown')
+    async def stop_credit_maintenance():await service.runtime.close()
     def result(data,status=200):return JSONResponse(data,status_code=status,headers={'Cache-Control':'no-store'})
     @app.get('/api/billing/config')
     async def billing_config():return result(dict(ok=True,**service.public_config()))
     @app.post('/api/billing/guest')
     async def guest(request:Request):
         accounts.allow_request(request);payload=await accounts.body(request)
-        return result(await asyncio.to_thread(service.guest,payload.get('device_id')))
+        return result(await service.runtime.run(service.guest,payload.get('device_id')))
     @app.post('/api/billing/status')
     async def status(request:Request):
         accounts.allow_request(request);payload=await accounts.body(request)
-        member=await asyncio.to_thread(service.actor,request)
+        member=await service.runtime.run(service.actor,request)
         if member.get('guest'):
-            data=await asyncio.to_thread(service.status,member['id']);data['guest']=True
+            data=await service.runtime.run(service.status,member['id']);data['guest']=True
             return result(data)
         linked=True
         if payload.get('guest_token'):
-            linked=await asyncio.to_thread(service.link_guest,member['id'],payload['guest_token'])
-        if linked:await asyncio.to_thread(service.claim,member['id'],payload.get('device_id'))
-        data=await asyncio.to_thread(service.status,member['id']);data.update(guest=False,trial_link_pending=not linked)
+            linked=await service.runtime.run(service.link_guest,member['id'],payload['guest_token'])
+        if linked:await service.runtime.run(service.claim,member['id'],payload.get('device_id'))
+        data=await service.runtime.run(service.status,member['id']);data.update(guest=False,trial_link_pending=not linked)
         return result(data)
     @app.post('/api/billing/checkout')
     async def checkout(request:Request):
