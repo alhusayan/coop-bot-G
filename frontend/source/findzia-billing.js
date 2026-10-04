@@ -1,4 +1,4 @@
-/* FINDZIA_BILLING_RELEASE=156.7.47 */
+/* FINDZIA_BILLING_RELEASE=156.7.43 */
 /* Findzia 156.7.20 — resumable checkout, safe plan changes and persistent payment UI. */
 (() => {
   'use strict';
@@ -56,7 +56,7 @@
     const rtl=()=>['ar','ur'].includes(root.dataset.lang);
     let status=null, config=null, error='', flight=null, stamp=0, active=0, revision=0, guestFlight=null, linkTimer=null;
     let noticeCode='', noticeKey='', allowedView=null, blockedSearch=null;
-    let paddleConfig=null, paymentBusy=false, paymentMessage='', paymentState='pending', paymentTxn='', paymentRevision=0, walletDialog=null;
+    let paddleConfig=null, paymentBusy=false, paymentMessage='', paymentTxn='', paymentRevision=0, walletDialog=null;
     let checkoutView=null, standardPreferred=false, mfConfig=null;
     let mfView=null, mfScriptPromise=null, paymentFlow=0;
     let startingPayment=false, queuedPlan='', recoveryTimer=null, recoveryDeadline=0, pendingCheckoutIntent='';
@@ -218,25 +218,19 @@
       if(!(config?.plans||status?.plans||[]).some(p=>p.id===id))return;
       clearTimeout(recoveryTimer);recoveryTimer=null;recoveryDeadline=0;
       pendingCheckoutIntent='';
-      storePlan({plan:id,at:Date.now(),resume:!account.member()});paymentMessage='';paymentState='pending';
+      storePlan({plan:id,at:Date.now(),resume:!account.member()});paymentMessage='';
       // Let the customer change their selection during loading. Finish the
       // outstanding request first; the server safely retires its unpaid order.
       if(startingPayment){queuedPlan=id;account.render();return;}
       if(!account.member()){account.open('signin');return;}
       startPayment();
     }
-    function paymentCopy(state,text){paymentState=state;return text;}
-    function paymentFailure(error){
-      const code=errorCode(error);
-      const uncertain=['checkout_pending','payment_creation_pending','paddle_recovery_unavailable'].includes(code);
-      return paymentCopy(uncertain?'pending':'error',paymentError(error));
-    }
     function resumePendingPayment(data,flow,id){
       if(data.checkout_intent)pendingCheckoutIntent=data.checkout_intent;
       if(data.transaction_id){paymentTxn=data.transaction_id;paymentRevision=revision;}
-      paymentMessage=paymentCopy('pending',tr('Checking your payment… This updates automatically.','نتحقق من حالة الدفع… تتحدث تلقائيًا.'));
+      paymentMessage=tr('Checking your payment… This updates automatically.','نتحقق من حالة الدفع… تتحدث تلقائيًا.');
       if(Date.now()>=recoveryDeadline){
-        paymentMessage=paymentCopy('pending',tr('Payment status is taking longer to confirm. You can keep browsing and check your payment here.','تأكيد حالة الدفع تأخر. تقدر تكمل التصفح وتتحقق من دفعتك هنا.'));
+        paymentMessage=tr('Payment status is taking longer to confirm. You can keep browsing and check your payment here.','تأكيد حالة الدفع تأخر. تقدر تكمل التصفح وتتحقق من دفعتك هنا.');
         return;
       }
       recoveryTimer=setTimeout(()=>{
@@ -249,7 +243,7 @@
       if(!account.member()){account.open('signin');return;}
       clearTimeout(recoveryTimer);recoveryTimer=null;
       if(automatic!==true)recoveryDeadline=Date.now()+150000;
-      const rev=revision,flow=++paymentFlow,id=selectedPlan();paymentBusy=true;startingPayment=true;paymentMessage='';paymentState='pending';
+      const rev=revision,flow=++paymentFlow,id=selectedPlan();paymentBusy=true;startingPayment=true;paymentMessage='';
       storePlan({plan:id,at:Date.now(),resume:false});account.render();
       try{
         await paymentConfig(); // Domain registration may finish after page load.
@@ -266,7 +260,7 @@
         if(data.confirmed){
           await refresh(true);if(flow!==paymentFlow||rev!==revision)return;
           storePlan(null);paymentTxn='';pendingCheckoutIntent='';
-          paymentMessage=paymentCopy('success',tr('Payment confirmed. Your search credits are ready.','تأكد الدفع. رصيد البحث جاهز.'));account.open('checkout');return;
+          paymentMessage=tr('Payment confirmed. Your search credits are ready.','تأكد الدفع. رصيد البحث جاهز.');account.open('checkout');return;
         }
         if(data.payment_pending){resumePendingPayment(data,flow,id);return;}
         pendingCheckoutIntent='';paymentTxn=data.transaction_id;paymentRevision=revision;
@@ -276,7 +270,7 @@
         if(checkoutView)account.close();
       }catch(e){if(flow===paymentFlow&&rev===revision&&id===selectedPlan()){
         if(errorCode(e)==='checkout_pending')resumePendingPayment({},flow,id);
-        else paymentMessage=paymentFailure(e);
+        else paymentMessage=paymentError(e);
         account.render();
       }}
       finally{if(rev===revision&&flow===paymentFlow){
@@ -310,7 +304,7 @@
       if(!account.member()){account.open('signin');return true;}
       if(record.owner&&account.member()?.id&&record.owner!==account.member().id)return false;
       const rev=revision;paymentBusy=true;
-      paymentMessage=paymentCopy('pending',tr('Confirming your payment…','نتحقق من دفعتك…'));account.open('checkout');
+      paymentMessage=tr('Confirming your payment…','نتحقق من دفعتك…');account.open('checkout');
       try{
         const hasPayment=typeof record.payment==='string'&&/^[A-Za-z0-9_-]{1,100}$/.test(record.payment);
         const data=hasPayment
@@ -320,9 +314,9 @@
         if(data.confirmed){
           sessionStorage.removeItem(mfReturnKey);sessionStorage.removeItem(planKey);memoryPlan=null;
           await refresh(true);if(rev!==revision)return true;
-          paymentMessage=paymentCopy('success',tr('Payment confirmed. Your 20 searches have been added.','تم تأكيد الدفع وإضافة 20 بحثًا لرصيدك.'));
-        }else paymentMessage=paymentCopy('pending',tr('Payment is not confirmed yet. You can check again shortly.','لم يتأكد الدفع بعد. تقدر تتحقق مرة ثانية بعد شوي.'));
-      }catch(e){if(rev===revision)paymentMessage=paymentCopy('pending',tr('We could not confirm this payment yet. Your receipt will be checked securely; please try again.','ما قدرنا نؤكد الدفعة حاليًا. جرّب التحقق مرة ثانية.'));}
+          paymentMessage=tr('Payment confirmed. Your 20 searches have been added.','تم تأكيد الدفع وإضافة 20 بحثًا لرصيدك.');
+        }else paymentMessage=tr('Payment is not confirmed yet. You can check again shortly.','لم يتأكد الدفع بعد. تقدر تتحقق مرة ثانية بعد شوي.');
+      }catch(e){if(rev===revision)paymentMessage=tr('We could not confirm this payment yet. Your receipt will be checked securely; please try again.','ما قدرنا نؤكد الدفعة حاليًا. جرّب التحقق مرة ثانية.');}
       finally{if(rev===revision){paymentBusy=false;account.render();}}
       return true;
     }
@@ -378,7 +372,7 @@
       const current=()=>mfView===view&&rev===revision&&!!account.member();
       const title=el('h2','',tr('Payment','الدفع'));title.id='fz-mf-title';dialog.setAttribute('aria-labelledby',title.id);
       const header=el('div','fzb-wallet-header');
-      const leave=()=>{closeMF();paymentMessage='';paymentState='pending';account.open('plans');};
+      const leave=()=>{closeMF();paymentMessage='';account.open('plans');};
       const close=button('×',leave,'fzb-wallet-close');close.setAttribute('aria-label',tr('Close','إغلاق'));
       header.append(title,close);
       const summary=el('p','fzb-wallet-status',tf('{count} searches · {price}',{count:20,price:'$4.99 USD'},'{count} عملية بحث · {price}'));
@@ -414,7 +408,7 @@
         if(!current())return;
         try{sessionStorage.removeItem(mfReturnKey);sessionStorage.removeItem(planKey);memoryPlan=null;}catch(_){}
         await refresh(true);if(!current())return;
-        closeMF();paymentMessage=paymentCopy('success',tr('Payment confirmed. Your 20 searches have been added.','تم تأكيد الدفع وإضافة 20 بحثًا لرصيدك.'));account.open('checkout');
+        closeMF();paymentMessage=tr('Payment confirmed. Your 20 searches have been added.','تم تأكيد الدفع وإضافة 20 بحثًا لرصيدك.');account.open('checkout');
       }
       async function checkPayment(){
         if(!current()||view.checking||view.reviewing)return;
@@ -580,7 +574,7 @@
       checkoutView={mode:'overlay',id:'',paying:false,loaded:false};
       try{paddle.Checkout.open({...checkoutOptions(transactionId),settings:{displayMode:'overlay',variant:'one-page',
         allowedPaymentMethods:['apple_pay','google_pay','card'],theme:'light'}});}
-      catch(e){closeWallet();paymentMessage=paymentFailure(e);account.open('checkout');}
+      catch(e){closeWallet();paymentMessage=paymentError(e);account.open('checkout');}
     }
     function checkoutHelp(text){
       const view=checkoutView;
@@ -657,7 +651,7 @@
       if(paymentBusy||!paymentTxn||!account.member()||paymentRevision!==revision)return;
       clearTimeout(recoveryTimer);recoveryTimer=null;
       paymentBusy=true;const rev=revision,tid=paymentTxn;
-      paymentMessage=paymentCopy('pending',tr('Confirming payment…','نتحقق من الدفع…'));account.open('checkout');
+      paymentMessage=tr('Confirming payment…','نتحقق من الدفع…');account.open('checkout');
       try{
         let confirmed=false;
         for(let i=0;i<8;i++){
@@ -669,11 +663,11 @@
         if(rev!==revision)return;
         await refresh(true);
         if(confirmed){
-          paymentMessage=paymentCopy('success',tr('Payment confirmed. Your search credits are ready.','تأكد الدفع. رصيد البحث جاهز.'));
+          paymentMessage=tr('Payment confirmed. Your search credits are ready.','تأكد الدفع. رصيد البحث جاهز.');
           try{sessionStorage.removeItem(planKey);memoryPlan=null;}catch(_){}
           paymentTxn='';
-        }else paymentMessage=paymentCopy('pending',tr('Payment is still being checked. Your credits will update after confirmation.','التحقق من الدفع مستمر. الرصيد يتحدث بعد التأكيد.'));
-      }catch(e){if(rev===revision)paymentMessage=paymentCopy('pending',paymentError(e));}
+        }else paymentMessage=tr('Payment is still being checked. Your credits will update after confirmation.','التحقق من الدفع مستمر. الرصيد يتحدث بعد التأكيد.');
+      }catch(e){if(rev===revision)paymentMessage=paymentError(e);}
       finally{if(rev===revision){paymentBusy=false;account.render();}}
     }
     document.addEventListener('findzia:paddle',event=>{
@@ -684,7 +678,7 @@
       if(view.id&&e.data?.id&&view.id!==e.data.id)return;
       if(e.name==='checkout.error'){
         if(view.mode==='inline')checkoutHelp(tr('Express checkout could not load. Try the standard checkout.','تعذّر تحميل الدفع السريع. جرّب الدفع المعتاد.'));
-        else if(!view.paying){closeWallet();paymentMessage=paymentCopy('error',tr('Checkout could not load. Try again in a regular Safari or Chrome tab.','تعذّر تحميل الدفع. جرّب مرة ثانية بتبويب عادي في Safari أو Chrome.'));account.open('checkout');}
+        else if(!view.paying){closeWallet();paymentMessage=tr('Checkout could not load. Try again in a regular Safari or Chrome tab.','تعذّر تحميل الدفع. جرّب مرة ثانية بتبويب عادي في Safari أو Chrome.');account.open('checkout');}
         return;
       }
       if(e.data?.transaction_id!==paymentTxn||retiredCheckouts.has(e.data?.id))return;
@@ -714,12 +708,12 @@
         refresh:()=>refresh(true),balance:()=>status
       });
       if(manager)return manager.open();
-      paymentMessage=paymentCopy('error',tr('Please refresh the page to load subscription management.','حدّث الصفحة لتحميل إدارة الاشتراك.'));account.open('checkout');
+      paymentMessage=tr('Please refresh the page to load subscription management.','حدّث الصفحة لتحميل إدارة الاشتراك.');account.open('checkout');
     }
     async function restorePurchases(){
       if(!account.member()){account.open('signin');return;}
       if(paymentBusy)return;
-      const rev=revision;paymentBusy=true;paymentMessage=paymentCopy('pending',tr('Checking your purchases…','نتحقق من مشترياتك…'));account.open('checkout');
+      const rev=revision;paymentBusy=true;paymentMessage=tr('Checking your purchases…','نتحقق من مشترياتك…');account.open('checkout');
       try{
         await paymentConfig();if(rev!==revision)return;
         const paths=[];
@@ -732,62 +726,18 @@
         const current=await refresh(true);if(rev!==revision)return;
         if(!current)throw Error('credits_unavailable');
         if(failures.length===results.length)throw failures[0].reason;
-        paymentState=failures.length?'pending':'restored';
         paymentMessage=failures.length
           ?tr('Some purchases were checked. One payment provider is unavailable; please retry to check the rest.','تحققنا من بعض المشتريات. إحدى بوابات الدفع غير متاحة؛ أعد المحاولة للتحقق من الباقي.')
           :tr('Your purchase records and search balance are up to date.','تم تحديث سجل مشترياتك ورصيد البحث.');
       }
-      catch(e){if(rev===revision)paymentMessage=paymentFailure(e);}
+      catch(e){if(rev===revision)paymentMessage=paymentError(e);}
       finally{if(rev===revision){paymentBusy=false;account.render();}}
     }
     function renderCheckout(body){
-      const state=paymentState,success=state==='success'||state==='restored';
-      const card=el('section','fzb-payment-result');card.dataset.paymentState=state;
-      const badge=el('div','fzb-payment-icon');badge.setAttribute('aria-hidden','true');
-      const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');
-      svg.setAttribute('viewBox','0 0 32 32');svg.setAttribute('fill','none');svg.setAttribute('stroke','currentColor');svg.setAttribute('stroke-width','1.8');svg.setAttribute('stroke-linecap','round');svg.setAttribute('stroke-linejoin','round');
-      svg.innerHTML=success?'<path d="m8 16 5 5 11-11"/>':state==='error'?'<path d="m11 11 10 10m0-10L11 21"/>':'<circle cx="16" cy="16" r="10"/><path d="M16 10v6l4 3"/>';
-      badge.append(svg);
-      const heading=el('h2','fzb-payment-title',paymentHeading(state));heading.id=root.id+'-payment-result';heading.dataset.noI18n='';card.setAttribute('aria-labelledby',heading.id);
-      const msg=el('p','fza-payment-message',paymentMessage||tr('Confirming payment…','نتحقق من الدفع…'));msg.setAttribute('role','status');msg.setAttribute('aria-live','polite');
-      const actions=el('div','fzb-payment-actions');
-      const primary=(label,fn)=>{const b=button(label,fn);b.classList.add('fzb-payment-primary');actions.append(b);return b;};
-      if(success){
-        primary(tr('Back to search','العودة للبحث'),()=>account.close());
-        actions.append(button(tr('Your search credits','رصيد البحث'),()=>account.open('usage'),'fza-text fzb-payment-secondary'));
-      }else{
-        let check=paymentTxn?confirmPayment:null;
-        try{if(!check&&mfConfig?.enabled&&sessionStorage.getItem(mfReturnKey))check=confirmMyFatoorah;}catch(_){}
-        if(check||state==='pending'){
-          const b=primary(tr('Check payment','تحقق من الدفع'),check||restorePurchases);b.disabled=paymentBusy;b.setAttribute('aria-busy',String(paymentBusy));
-        }else if(selectedPlan()){
-          const b=primary(tr('Try again','حاول مجددًا'),()=>startPayment());b.dataset.checkout='';b.disabled=paymentBusy;
-        }else primary(tr('Your search credits','رصيد البحث'),()=>account.open('usage'));
-        actions.append(button(tr('Back to search','العودة للبحث'),()=>account.close(),'fza-text fzb-payment-secondary'));
-        if(check||state==='pending'||selectedPlan())actions.append(button(tr('Your search credits','رصيد البحث'),()=>account.open('usage'),'fza-text fzb-payment-tertiary'));
-      }
-      card.append(badge,heading,msg,actions);body.append(card);
-    }
-    function paymentHeading(state){
-      const headings={
-        en:['Payment confirmed','Payment could not be completed','Checking your payment','Purchases updated'],
-        ar:['تم تأكيد الدفع','تعذّر إكمال الدفع','نتحقق من دفعتك','تم تحديث مشترياتك'],
-        fr:['Paiement confirmé','Le paiement n’a pas pu aboutir','Vérification du paiement','Achats mis à jour'],
-        de:['Zahlung bestätigt','Zahlung nicht abgeschlossen','Zahlung wird geprüft','Käufe aktualisiert'],
-        es:['Pago confirmado','No se pudo completar el pago','Verificando tu pago','Compras actualizadas'],
-        it:['Pagamento confermato','Impossibile completare il pagamento','Verifica del pagamento','Acquisti aggiornati'],
-        pt:['Pagamento confirmado','Não foi possível concluir o pagamento','Verificando seu pagamento','Compras atualizadas'],
-        tr:['Ödeme onaylandı','Ödeme tamamlanamadı','Ödemeniz kontrol ediliyor','Satın alımlar güncellendi'],
-        ru:['Оплата подтверждена','Не удалось завершить оплату','Проверяем оплату','Покупки обновлены'],
-        zh:['付款已确认','无法完成付款','正在核实付款','购买记录已更新'],
-        ja:['お支払いが確認されました','お支払いを完了できませんでした','お支払いを確認中','購入履歴を更新しました'],
-        ko:['결제가 확인되었습니다','결제를 완료할 수 없습니다','결제 확인 중','구매 내역이 업데이트되었습니다'],
-        hi:['भुगतान की पुष्टि हो गई','भुगतान पूरा नहीं हो सका','भुगतान की जाँच हो रही है','खरीदारी अपडेट हो गई'],
-        ur:['ادائیگی کی تصدیق ہو گئی','ادائیگی مکمل نہیں ہو سکی','ادائیگی کی جانچ ہو رہی ہے','خریداری اپ ڈیٹ ہو گئی'],
-        id:['Pembayaran dikonfirmasi','Pembayaran tidak dapat diselesaikan','Memeriksa pembayaran','Pembelian diperbarui'],
-        ms:['Pembayaran disahkan','Pembayaran tidak dapat diselesaikan','Menyemak pembayaran','Pembelian dikemas kini']
-      };
-      return (headings[root.dataset.lang]||headings.en)[state==='success'?0:state==='error'?1:state==='restored'?3:2];
+      const msg=el('p','fza-payment-message',paymentMessage||tr('Payment','الدفع'));msg.setAttribute('role','status');body.append(msg);
+      if(selectedPlan()&&!paymentBusy){const retry=button(tr('Try again','حاول مجددًا'),startPayment);retry.dataset.checkout='';body.append(retry);}
+      appendPaymentCheck(body);
+      body.append(button(tr('Your search credits','رصيد البحث'),()=>account.open('usage'),'fza-text'),button(tr('Back to search','العودة للبحث'),()=>account.close(),'fza-text'));
     }
     function appendPaymentCheck(body){
       let check=null;
@@ -867,7 +817,7 @@
       if(mfConfig?.environment==='sandbox'||paddleConfig?.paddle_environment==='sandbox')body.append(el('p','fza-footnote',tr('Test mode. No real payment is collected.','وضع التجربة، بدون تحصيل مبلغ حقيقي.')));
     }
     root.fzBilling={manageSubscription,restorePurchases,fetch:paidFetch,beforeSearch,refresh,renderUsage,renderPlans,renderCheckout,planSummary,selectedPlan,beforeSignIn,handleSearchError,notice,status:()=>status,label:()=>status?tf('Searches remaining: {count}',{count:status.remaining},'عمليات البحث المتبقية: {count}'):tr('10 free searches','10 بحوث مجانية')};
-    root.addEventListener('fz:account-session',()=>{clearTimeout(recoveryTimer);recoveryTimer=null;queuedPlan='';pendingCheckoutIntent='';startingPayment=false;closeMF();closeWallet();revision++;status=null;stamp=0;error='';noticeCode='';paddleConfig=null;mfConfig=null;paymentBusy=false;paymentMessage='';paymentState='pending';paymentTxn='';standardPreferred=false;memoryPlan=null;paymentConfig().then(async()=>{account.render();if(await confirmMyFatoorah())return;if(account.member()&&selectedPlan()&&resumePlan())startPayment();});refresh(true);});
+    root.addEventListener('fz:account-session',()=>{clearTimeout(recoveryTimer);recoveryTimer=null;queuedPlan='';pendingCheckoutIntent='';startingPayment=false;closeMF();closeWallet();revision++;status=null;stamp=0;error='';noticeCode='';paddleConfig=null;mfConfig=null;paymentBusy=false;paymentMessage='';paymentTxn='';standardPreferred=false;memoryPlan=null;paymentConfig().then(async()=>{account.render();if(await confirmMyFatoorah())return;if(account.member()&&selectedPlan()&&resumePlan())startPayment();});refresh(true);});
     root.addEventListener('fz:account-closed',()=>{if(!mfView&&!checkoutView){
       clearTimeout(recoveryTimer);recoveryTimer=null;queuedPlan='';paymentFlow++;
       if(startingPayment){startingPayment=false;paymentBusy=false;}
@@ -941,26 +891,6 @@
 .fzb-mf-dialog .fzb-mf-surface iframe{display:block;width:100%;max-width:100%;border:0;color-scheme:light}
 .fzb-mf-dialog .fzb-mf-actions .fza-text{color:var(--pay-ink)}
 @media(max-width:380px){.fzb-wallet-dialog.fzb-mf-dialog{padding:16px}.fzb-mf-dialog .fzb-mf-surface{padding:12px}}
-
-/* Deliberate result card, with one clear next action and no ambiguous success states. */
-.fz-account .fza-body:has(>.fzb-payment-result){display:flex;align-items:flex-start;justify-content:center;padding:32px 20px!important}
-.fz-account .fzb-payment-result{box-sizing:border-box;width:100%;max-width:440px;margin:auto 0;padding:32px 24px 24px;border:1px solid var(--a-line);border-radius:28px;background:var(--a-surface);text-align:center;box-shadow:0 16px 50px -32px #14271d40}
-.fz-account .fzb-payment-icon{display:grid;place-items:center;width:76px;height:76px;margin:0 auto 24px;border-radius:50%;border:1px solid var(--a-line);background:var(--a-soft);color:var(--a-ink)}
-.fz-account .fzb-payment-icon svg{width:40px;height:40px}
-.fz-account .fzb-payment-result[data-payment-state=success] .fzb-payment-icon,.fz-account .fzb-payment-result[data-payment-state=restored] .fzb-payment-icon{background:#e8f2e8;color:#345e45;border-color:#cbdccb}
-.fz-account .fzb-payment-result[data-payment-state=error] .fzb-payment-icon{background:#fff1e5;color:#9b552b;border-color:#efdbc9}
-.fz-account[data-theme=dark] .fzb-payment-result[data-payment-state=success] .fzb-payment-icon,.fz-account[data-theme=dark] .fzb-payment-result[data-payment-state=restored] .fzb-payment-icon{background:#294135;color:#d1ecd6;border-color:#486451}
-.fz-account[data-theme=dark] .fzb-payment-result[data-payment-state=error] .fzb-payment-icon{background:#44352a;color:#ffcda5;border-color:#6b4e39}
-.fz-account .fzb-payment-title{margin:0 0 12px!important;padding:0!important;font-size:27px!important;line-height:1.25!important;font-weight:650!important;letter-spacing:-.5px;color:var(--a-ink);overflow-wrap:anywhere}
-.fz-account .fzb-payment-result .fza-payment-message{margin:0!important;font-size:15px!important;line-height:1.7!important;color:var(--a-muted);overflow-wrap:anywhere}
-.fz-account .fzb-payment-actions{display:grid;gap:10px;margin-top:28px}
-.fz-account .fzb-payment-actions button{box-sizing:border-box;display:block;width:100%;min-height:50px!important;margin:0!important;padding:12px 16px!important;border-radius:15px!important;font-size:15px!important;line-height:1.5!important;text-align:center!important;text-decoration:none!important;font-weight:600!important}
-.fz-account .fzb-payment-actions .fzb-payment-primary{background:var(--a-accent)!important;color:var(--a-bg)!important;border:1px solid transparent!important}
-.fz-account .fzb-payment-actions .fzb-payment-secondary{border:1px solid var(--a-line)!important;background:transparent!important;color:var(--a-ink)!important}
-.fz-account .fzb-payment-actions .fzb-payment-tertiary{color:var(--a-muted)!important;background:none!important;border:0!important;font-weight:400!important}
-.fz-account .fzb-payment-actions button:focus-visible{outline:2px solid var(--a-accent);outline-offset:3px}
-.fz-account .fzb-payment-actions button:disabled{opacity:.55;cursor:default}
-@media(max-width:360px){.fz-account .fzb-payment-result{padding:28px 18px 18px}.fz-account .fzb-payment-title{font-size:24px!important}}
 `;document.head.append(style);
   const scan=()=>document.querySelectorAll('.fz-home').forEach(mount);scan();
   const timer=setInterval(scan,100);setTimeout(()=>clearInterval(timer),15000);
