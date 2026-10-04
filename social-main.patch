@@ -1,0 +1,180 @@
+--- a/main.py
++++ b/main.py
+@@ -394,7 +394,24 @@
+ app.add_middleware(CreditMiddleware, owner=app)
+ _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
+ app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization', 'X-Findzia-Request-Id'], max_age=86400)
+-BUILD_ID = 'v128.5.42.45-hybrid-quality'
++BUILD_ID = 'v128.5.42.46-social'
++_SOCIAL = None
++
++def _fz_social_row(row):
++    return bool(_SOCIAL is not None and _SOCIAL.valid(row or {}))
++
++def _fz_social_merge(rows, query, market, lang):
++    rows = list(rows or [])
++    if _SOCIAL is None:
++        return rows
++    known = {str(r.get('url') or '') for r in rows}
++    for row in _SOCIAL.search(query, market or {}, lang):
++        if row['url'] not in known and not _web_text_explicit_conflict(query, row['raw_title']):
++            row.update(_web_price_display_fields(row))
++            rows.append(row)
++            known.add(row['url'])
++    return rows
++
+ print('=' * 70)
+ print(f'STARTING COOP BOT BUILD: {BUILD_ID}')
+ print('GLOBAL GEO + IMAGE PROXY/RESCUE -> STRONG LOCAL + US + CHINA | 10 LANGS | WORLD CURRENCIES')
+@@ -1110,6 +1127,8 @@
+ 
+ 
+ def is_lens_product_url(url, item=None):
++    if item is not None and _fz_social_row(item) and url == item.get('url'):
++        return True
+     if _offer_is_editorial_url(url):
+         return False
+     if not url or not url.startswith(('http://', 'https://')):
+@@ -7432,6 +7451,11 @@
+ def _market_offer_allowed(item, market):
+     """Publication policy. A domestic market has no store allowlist."""
+     item = item or {}
++    if item.get('social_id') and not _fz_social_row(item):
++        return False
++    if _fz_social_row(item):
++        allowed = [str((market or {}).get('country') or DEFAULT_COUNTRY).lower()] + list((market or {}).get('global_countries') or [])
++        return item.get('country') in allowed
+     url = item.get('url') or item.get('link') or ''
+     if not url or is_blocked_store(item.get('store') or item.get('source') or '', url):
+         return False
+@@ -14851,6 +14875,10 @@
+     return b''.join(chunks)
+ 
+ def _web_visual_candidate_inline(row, force_refresh=False, cancel_event=None):
++    if _fz_social_row(row):
++        body = _SOCIAL.image_bytes(row)
++        inline = _web_visual_inline_from_bytes(body) if body else None
++        return dict(inline, source_url=row['source_image']) if inline else None
+     primary = _web_unproxy_image_url(str((row or {}).get('image') or (row or {}).get('thumbnail') or ''))
+     urls = list(dict.fromkeys([primary] + _web_offer_image_candidates(row)))
+     urls = [url for url in urls if _web_is_http_url(url)][:3]
+@@ -14915,7 +14943,7 @@
+     """Resolve the offer's own product image before its identity is audited."""
+     row = dict(original or {})
+     url = str(row.get('url') or row.get('link') or '')
+-    if not is_lens_product_url(url) or (cancel_event is not None and cancel_event.is_set()):
++    if not is_lens_product_url(url, row) or (cancel_event is not None and cancel_event.is_set()):
+         return row
+     inline = _web_visual_candidate_inline(row, True, cancel_event)
+     if inline:
+@@ -14925,7 +14953,7 @@
+             row['image'] = _web_public_image_url(inline['source_url'])
+             row['thumbnail'] = row['image']
+         return row
+-    if cancel_event is not None and cancel_event.is_set():
++    if _fz_social_row(row) or (cancel_event is not None and cancel_event.is_set()):
+         return row
+     snap = _web_verified_page_snapshot(url) or {}
+     if not (snap.get('ok') and snap.get('is_product') and snap.get('product_image')):
+@@ -17357,8 +17385,10 @@
+     text_reference = out.pop('_text_reference_context', None)
+     photo_changes = out.pop('_photo_requested_changes', None)
+     original_results = out.get('results')
++    if not out.pop('_social_no_expand', False):
++        original_results = _fz_social_merge(original_results, out.get('query'), out.get('market') or current_market(), lang)
+     results = [dict(row) for row in (original_results or [])
+-               if is_lens_product_url(str(row.get('url') or row.get('link') or ''))
++               if is_lens_product_url(str(row.get('url') or row.get('link') or ''), row)
+                and _market_offer_allowed(row, out.get('market') or current_market())]
+     identity = str(out.get('query') or '').strip()
+     has_reference_photo = bool(_web_visual_reference_digest(reference_image_b64)) and (
+@@ -18353,7 +18383,7 @@
+     if out.get('stock_status')=='out_of_stock':
+         out['best_price_eligible']=False
+     domain=_card_merchant_domain(row.get('url') or row.get('link'))
+-    if domain:
++    if domain and not _fz_social_row(row):
+         country=str(row.get('country') or row.get('search_country') or 'us').lower()
+         country=country if re.fullmatch(r'[a-z]{2}',country) else 'us'
+         out['merchant_domain']=domain
+@@ -18362,6 +18392,8 @@
+         out['evaluation_token'] = _fz_evaluation_token(out)
+     if not _web_alternative_visible(out):
+         out['hidden'] = True
++    if _fz_social_row(row):
++        out.update(best_price_eligible=False, price_verified=False, price_status='published', source_badge='Instagram')
+     return out
+ 
+ 
+@@ -19716,8 +19748,10 @@
+             if asin:
+                 path = '/dp/' + asin.group(1).upper()
+                 query = [(k, v) for k, v in query if k.lower() not in {'tag', 'ref', 'ref_', 'psc', 'th', 'linkcode', 'creative', 'creativeasin'}]
++        # Separate products in one carousel retain distinct card identities.
++        fragment = p.fragment if host == 'instagram.com' and re.fullmatch(r'findzia-[a-f0-9]{32}', p.fragment) else ''
+         return urllib.parse.urlunsplit(('https', host, path,
+-                                       urllib.parse.urlencode(sorted(query)), ''))
++                                       urllib.parse.urlencode(sorted(query)), fragment))
+     except ValueError:
+         return ''
+ 
+@@ -20565,6 +20599,8 @@
+     """Accept prices observed on the same listing; generated prose is a hint."""
+     if _web_collection_url(row.get("url") or row.get("link")):
+         return False
++    if _fz_social_row(row):
++        return True
+     source = str(row.get('price_source') or '').lower()
+     if _fz_regional_price_store(row.get('url')) and source not in {
+             'regional_page_dom','regional_listing_text','product_page','product_jsonld','jsonld',
+@@ -20748,6 +20784,17 @@
+                 or _web_identity_offer_key(item) in rejected or not _market_offer_allowed(item, market)):
+             return None
+         item = dict(item)
++        if _fz_social_row(item):
++            # Published social prices have their own freshness/expiry policy.
++            # Never fetch Instagram as a merchant page or spend recovery credits.
++            item.update(_web_offer_media_fields(item))
++            item.update(_web_price_display_fields(item))
++            item.update(best_price_eligible=False, price_verified=False, price_status='published')
++            key = _web_identity_offer_key(item)
++            rows[key] = item
++            attempted.add(key)
++            page_finished.add(key)
++            return item
+         item.update(_web_cached_stock_facts(item, market))
+         if _card_offer_state(item).get('stock_status') == 'out_of_stock':
+             key = _web_identity_offer_key(item)
+@@ -23092,6 +23139,14 @@
+         fast_unavailable = 0
+         for spec in specs:
+             submit(spec)
++        # External searches are already in flight; the social index is a bounded local read.
++        for row in _fz_social_merge([], query, market, lang):
++            rows[_web_price_url_key(row['url'])] = row
++            counts[row['country']] += 1
++        if rows:
++            first_ms = int((time.monotonic()-started)*1000)
++            if progress_callback:
++                progress_callback(snapshot())
+         def maybe_launch_backup():
+             """Serper-primary: SerpApi lanes exist only as a bounded backup, launched
+             once the primary lanes have answered and left too little on the page."""
+@@ -28227,7 +28282,7 @@
+                     pass
+         payload = {'ok': True, 'type': 'results', 'query': query, 'market': market,
+                    'results': [dict(r) for r in batch], 'source': 'whatsapp_direct_lens_exact',
+-                   '_reference_image_b64': image_b64, '_reference_image_mime': mime}
++                   '_reference_image_b64': image_b64, '_reference_image_mime': mime, '_social_no_expand': True}
+         if reference_context:
+             payload['_text_reference_context'] = dict(reference_context)
+         if requested_changes:
+@@ -33413,3 +33468,8 @@
+ # Shared UI localization is deliberately outside billing/search-credit middleware.
+ from findzia_locale import install as _install_findzia_locale
+ _findzia_locale = _install_findzia_locale(app, _refine_ai)
++
++
++# Background social ingestion is isolated from all request/credit provider paths.
++from findzia_social import install as _install_findzia_social
++_SOCIAL = _install_findzia_social(app)

@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "note": "Starter sources, one per requested market. Expand after measuring usable offers. Account references were researched on 2026-10-04; the worker verifies ownerUsername on every post. These are account references, not promises of offer availability or a content licence.",
+  "sources": [
+    {"username":"jarirbookstore","merchant":"Jarir","countries":["sa"],"enabled":true,"interval_seconds":3600,"reference_url":"https://www.instagram.com/jarirbookstore/"},
+    {"username":"currys","merchant":"Currys","countries":["gb"],"enabled":true,"interval_seconds":3600,"reference_url":"https://www.instagram.com/currys/"},
+    {"username":"mediamarkt_es","merchant":"MediaMarkt","countries":["es"],"enabled":true,"interval_seconds":3600,"reference_url":"https://linktr.ee/mediamarkt_es"},
+    {"username":"unieuro","merchant":"Unieuro","countries":["it"],"enabled":true,"interval_seconds":3600,"reference_url":"https://www.unieuro.it/online/social-network"},
+    {"username":"fnac_officiel","merchant":"Fnac","countries":["fr"],"enabled":true,"interval_seconds":3600,"reference_url":"https://play.google.com/store/apps/details?id=fr.fnac.com"},
+    {"username":"sharafdguae_official","merchant":"Sharaf DG","countries":["ae"],"enabled":true,"interval_seconds":3600,"reference_url":"https://www.instagram.com/SharafDGuae_official/"},
+    {"username":"xcitealghanim","merchant":"Xcite","countries":["kw"],"enabled":true,"interval_seconds":3600,"reference_url":"https://www.instagram.com/xcitealghanim/"}
+  ]
+}
