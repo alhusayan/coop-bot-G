@@ -1,4 +1,4 @@
-/* FINDZIA_GUIDE_RELEASE=156.7.43 */
+/* FINDZIA_GUIDE_RELEASE=156.7.48 */
 /* Shared modal ownership keeps the page fixed on touch browsers as well. */
 window.FindziaModalScroll=window.FindziaModalScroll||(()=>{
  const owners=new Set();let saved=null;
@@ -26,6 +26,8 @@ Object.assign(COPY.en,{step:'Step',optional:'Answer what matters, or search now.
 Object.assign(COPY.ar,{step:'الخطوة',optional:'جاوب على اللي يهمك، أو ابحث الحين.',explore:'استكشف الترشيحات',photoquery:'الصورة + تفاصيل البحث',photoplaceholder:'أضف اللون أو المقاس أو الخامة أو أي تفصيل',photosearch:'ابحث بهالصورة',change:'تعديل الإجابة',ready:'بحثك جاهز. تقدر تضيف تفاصيل أكثر إذا تبي.'});
 Object.assign(COPY.en,{applyneeds:'Search now',shortcredit:'1 credit',proposed:'Your search',photoquery:'Photo details',photoplaceholder:'Add a detail',freeanswer:'Write my own answer',ready:'Ready to search',moreoptions:'More options',needs:'What matters to you?',guideloading:'Choosing the next question…'});
 Object.assign(COPY.ar,{applyneeds:'ابحث الآن',shortcredit:'رصيد واحد',proposed:'بحثك',photoquery:'تفاصيل الصورة',photoplaceholder:'أضف تفصيلًا',freeanswer:'أكتب إجابتي',ready:'جاهز للبحث',moreoptions:'خيارات إضافية',needs:'شنو يهمك؟',guideloading:'نجهّز السؤال التالي…'});
+const MAX_QUESTIONS=4;
+const usedLabels={en:'AI has already been applied to this search',ar:'تم استخدام AI لهذا البحث',fr:'L’IA a déjà été appliquée à cette recherche',de:'KI wurde bereits für diese Suche verwendet',es:'La IA ya se ha aplicado a esta búsqueda',it:'L’IA è già stata applicata a questa ricerca',pt:'A IA já foi aplicada a esta pesquisa',tr:'Yapay zekâ bu aramada zaten kullanıldı',ru:'ИИ уже применён к этому поиску',zh:'此搜索已使用 AI',ja:'この検索にはすでに AI が適用されています',ko:'이 검색에는 이미 AI가 적용되었습니다',hi:'इस खोज में AI का उपयोग हो चुका है',ur:'اس تلاش میں AI پہلے ہی استعمال ہو چکا ہے',id:'AI sudah digunakan untuk pencarian ini',ms:'AI sudah digunakan untuk carian ini'};
 const PREF_KEY='findzia-shopping-preferences-v1';
 const privateSearch=/panadol|paracetamol|medicin|medicat|pain\s*relief|pregnan|diabet|antidepress|sexual|religio|politic|دواء|ادويه|أدوية|بنادول|بانادول|علاج|مسكن|حمل|جنس|سكري|اكتئاب|دين\b|سياس/i;
 function clean(s,n=200){return String(s||'').replace(/\s+/g,' ').trim().slice(0,n);}
@@ -38,7 +40,7 @@ function icon(kind){const s=document.createElementNS('http://www.w3.org/2000/svg
 function mount(root){
  if(root.dataset.guideMounted||!root.fzRefineBridge)return;
  const bridge=root.fzRefineBridge,top=root.querySelector('[data-assistant-tools]');if(!top)return;
- root.dataset.guideMounted='156.7.43';const t=k=>window.FindziaI18n?.t(COPY.en[k]||k,COPY.ar[k],root)||COPY[root.dataset.lang==='ar'?'ar':'en'][k]||k;
+ root.dataset.guideMounted='156.7.48';const t=k=>window.FindziaI18n?.t(COPY.en[k]||k,COPY.ar[k],root)||COPY[root.dataset.lang==='ar'?'ar':'en'][k]||k;
  let origin=null,mode='guided',answers=[],turns=[],frames=[],draft='',draftVersion=0,data=null,overview=null,busy=false,controller=null,serial=0,disposed=false,returnFocus=null,profile=loadProfile();
  const trigger=button('','fz-guide-open',open);trigger.dataset.guideOpen='';trigger.setAttribute('aria-haspopup','dialog');trigger.append(icon('discovery'));top.append(trigger);
  const dialog=node('dialog','fz-guide');dialog.id=root.id+'-guide';dialog.setAttribute('aria-modal','true');dialog.setAttribute('aria-labelledby',dialog.id+'-title');trigger.setAttribute('aria-controls',dialog.id);
@@ -51,12 +53,12 @@ function mount(root){
  function remember(answer){if(!profile.enabled||!origin||privateSearch.test(origin.query+' '+answer))return;const query=clean(origin.query,180),preference=clean(answer,180);if(!query||!preference)return;profile.entries=profile.entries.filter(e=>e.query!==query||e.preference!==preference);profile.entries.push({query,preference,at:Date.now()});profile.entries=profile.entries.slice(-20);persist(profile);}
  function joinQuery(base,answer){const a=clean(base,240),b=clean(answer);if(!b)return a;if(a.toLocaleLowerCase().includes(b.toLocaleLowerCase()))return a;if(b.toLocaleLowerCase().includes(a.toLocaleLowerCase()))return b;return [a,b].filter(Boolean).join(' ');}
  function baseDraft(){return origin?.kind==='image'?(origin.photo_edit_draft??origin.user_extra_specs??origin.extra_specs??''):(origin?.query||'');}
- function answerWith(answer){if(busy||!origin||turns.length>=12)return;answer=clean(answer);if(!answer)return;frames.push({data,draft,answers:[...answers],turns:[...turns]});turns.push({question:data?.question||'',question_key:data?.question_key||'',answer,search_query:draft});answers=turns.map(t=>t.answer);draft=joinQuery(draft,answer);draftVersion++;remember(answer);data=null;discover();}
+ function answerWith(answer){if(busy||!origin||turns.length>=MAX_QUESTIONS)return;answer=clean(answer);if(!answer)return;frames.push({data,draft,answers:[...answers],turns:[...turns]});turns.push({question:data?.question||'',question_key:data?.question_key||'',answer,search_query:draft});answers=turns.map(t=>t.answer);draft=joinQuery(draft,answer);draftVersion++;remember(answer);data=null;discover();}
  function backTo(index){const frame=frames[index];if(!frame)return;cancel();data=frame.data;draft=frame.draft;draftVersion++;answers=[...frame.answers];turns=[...frame.turns];frames=frames.slice(0,index);render();}
 
 
  function cancel(){serial++;controller?.abort();controller=null;busy=false;}
- function update(){if(disposed)return;const c=bridge.context();trigger.title=t('title');trigger.setAttribute('aria-label',t('title'));trigger.hidden=!c.query||root.dataset.homeState==='empty';trigger.disabled=!!c.busy&&!c.can_refine;trigger.dataset.guideAvailable=String(!trigger.hidden&&!trigger.disabled);
+ function update(){if(disposed)return;const c=bridge.context();trigger.title=c.ai_used?(usedLabels[root.dataset.lang]||usedLabels.en):t('title');trigger.setAttribute('aria-label',trigger.title);trigger.hidden=!c.query||root.dataset.homeState==='empty';trigger.disabled=c.ai_used===true||(!!c.busy&&!c.can_refine);trigger.dataset.guideUsed=String(c.ai_used===true);trigger.dataset.guideAvailable=String(!trigger.hidden&&!trigger.disabled);
   if(origin&&!sameContext(origin,c)){cancel();origin=null;mode='guided';data=null;overview=null;if(dialog.open)dialog.close();}
  }
  function open(){update();if(trigger.hidden||trigger.disabled)return;const c=bridge.context();if(!sameContext(origin,c)){origin={...c};mode='guided';answers=[];turns=[];frames=[];draft=baseDraft();draftVersion++;data=null;overview=null;input.value='';}returnFocus=document.activeElement;dialog.dir=['ar','ur'].includes(root.dataset.lang)?'rtl':'ltr';title.textContent=t('title');close.setAttribute('aria-label',t('close'));dialog.dataset.theme=root.dataset.theme;input.placeholder=t('needs');input.setAttribute('aria-label',t('needs'));send.textContent=t('send');if(!dialog.open)dialog.showModal();window.FindziaModalScroll.lock(dialog);render();title.focus({preventScroll:true});if(!mode&&!overview)loadOverview();else if(mode&&!data)discover();}
@@ -72,8 +74,8 @@ function mount(root){
  }
  async function loadOverview(){const result=await request('/api/guide/discover',{query:origin.query,kind:origin.kind,extra_specs:origin.extra_specs||'',country:origin.country,lang:root.dataset.lang,mode:'overview',answers:[]},24500);if(!result)return;overview=result;render();}
  async function choose(value){if(!origin)return;cancel();mode=value;answers=[];turns=[];frames=[];draft=baseDraft();draftVersion++;input.value='';data=null;if(overview?.groups?.[value]?.length){data={ok:true,suggestions:overview.groups[value]};render();return;}await discover();}
- async function discover(){const payload={query:origin.query,kind:origin.kind,extra_specs:origin.extra_specs||'',country:origin.country,lang:root.dataset.lang,mode,answers};if(mode==='guided')Object.assign(payload,{guided_version:2,turns,draft_query:draft.length<=240?draft:'',history:profile.enabled?loadProfile().entries:[]});const revision=draftVersion;const result=await request('/api/guide/discover',payload,mode==='guided'?12500:24500);if(!result)return;data=result;if(mode==='guided'&&revision===draftVersion&&result.search_query)draft=result.search_query;render();}
- function search(query,refinement=false){if(!origin||(!query?.trim()&&!(refinement&&origin.kind==='image')))return;const c=bridge.context();if(!sameContext(origin,c))return;const launch=refinement&&origin.kind==='image'?bridge.guideSearch:bridge.guideDiscoverSearch||bridge.accountSearch;if(typeof launch!=='function')return;cancel();if(launch(String(query||'').trim(),origin.country)!==false)dialog.close();}
+ async function discover(){if(!origin||bridge.context().ai_used)return;if(mode==='guided'&&turns.length>=MAX_QUESTIONS){cancel();data={ok:true,status:'ready',question:'',choices:[],search_query:draft};render();return;}const payload={query:origin.query,kind:origin.kind,extra_specs:origin.extra_specs||'',country:origin.country,lang:root.dataset.lang,mode,answers};if(mode==='guided')Object.assign(payload,{guided_version:2,turns,draft_query:draft.length<=240?draft:'',history:profile.enabled?loadProfile().entries:[]});const revision=draftVersion;const result=await request('/api/guide/discover',payload,mode==='guided'?12500:24500);if(!result)return;data=result;if(mode==='guided'&&revision===draftVersion&&result.search_query)draft=result.search_query;render();}
+ function search(query,refinement=false){if(!origin||(!query?.trim()&&!(refinement&&origin.kind==='image')))return;const c=bridge.context();if(!sameContext(origin,c)||c.ai_used)return;const launch=refinement&&origin.kind==='image'?bridge.guideSearch:bridge.guideDiscoverSearch||bridge.accountSearch;if(typeof launch!=='function')return;cancel();if(launch(String(query||'').trim(),origin.country)!==false)dialog.close();}
  function status(){const n=node('p','fz-guide-status',t(mode==='guided'?'guideloading':mode?'loading':'research'));n.setAttribute('role','status');n.setAttribute('aria-busy','true');body.append(n);}
  let renderedStep='';
  function render(){
@@ -91,11 +93,11 @@ function mount(root){
   if(!mode){
    body.append(node('h3','fz-guide-question',t('start')));if(busy)status();else if(!overview?.available_modes?.length)body.append(node('p','fz-guide-note',t('nomodes')));const grid=node('div','fz-guide-mode-grid');for(const key of [...['overall','quality','budget','discovery'].filter(k=>overview?.groups?.[k]?.length),'guided']){const b=button('','fz-guide-mode'+(key==='guided'?' fz-guide-mode-guided':''),()=>choose(key));b.dataset.guideMode=key;b.append(icon(key),node('span','',t(key==='budget'?'value':key)));if(key==='guided'){const arrow=icon('arrow');arrow.classList.add('fz-guide-mode-arrow');b.append(arrow);}grid.append(b);}body.append(grid);return;
   }
-  const nav=node('div','fz-guide-navigation');if(mode==='guided'){nav.append(node('span','fz-guide-step',t('step')+' '+(answers.length+1)));if(frames.length)nav.append(button(t('back'),'fz-guide-text',()=>backTo(frames.length-1)));}else nav.append(button(t('guided'),'fz-guide-text',()=>choose('guided')));body.append(nav);
+  const nav=node('div','fz-guide-navigation');if(mode==='guided'){nav.append(node('span','fz-guide-step',t('step')+' '+Math.min(MAX_QUESTIONS,answers.length+1)+' / '+MAX_QUESTIONS));if(frames.length)nav.append(button(t('back'),'fz-guide-text',()=>backTo(frames.length-1)));}else nav.append(button(t('guided'),'fz-guide-text',()=>choose('guided')));body.append(nav);
   if(mode==='guided'&&answers.length){const chips=node('div','fz-guide-answers');chips.setAttribute('aria-label',t('answers'));chips.setAttribute('data-no-i18n','');answers.forEach((a,i)=>{const chip=button(a,'fz-guide-answer',()=>backTo(i));chip.title=t('change');chip.setAttribute('aria-label',t('change')+': '+a);chips.append(chip);});body.append(chips);}
   if(mode==='guided'){renderGuided();return;}
   if(busy){status();return;}
-  if(data?.question&&data.choices?.length>=2){body.append(node('h3','fz-guide-question',data.question));const options=node('div','fz-guide-options');for(const choice of data.choices.slice(0,4))options.append(button(choice.label,'fz-guide-choice',()=>{if(busy)return;answers.push(choice.answer||choice.label);data=null;discover();}));body.append(options);return;}
+  if(answers.length<MAX_QUESTIONS&&data?.question&&data.choices?.length>=2){body.append(node('h3','fz-guide-question',data.question));const options=node('div','fz-guide-options');for(const choice of data.choices.slice(0,4))options.append(button(choice.label,'fz-guide-choice',()=>{if(busy)return;answers.push(choice.answer||choice.label);data=null;discover();}));body.append(options);return;}
   if(data?.suggestions?.length){body.append(node('h3','fz-guide-question',t(mode==='budget'?'value':mode)),node('p','fz-guide-note',data.suggestions.some(s=>s.basis==='review_inference')?t('basis'):t('fresh')));const list=node('div','fz-guide-suggestions');for(const suggestion of data.suggestions.slice(0,3)){
     const card=node('article','fz-guide-suggestion');card.append(node('h3','',suggestion.title));if(suggestion.reason)card.append(node('p','',suggestion.reason));if(suggestion.tradeoff)card.append(node('p','fz-guide-tradeoff',t('limitation')+': '+suggestion.tradeoff));const sources=node('div','fz-guide-sources');for(const source of suggestion.sources||[]){try{const url=new URL(source.url);if(!['https:','http:'].includes(url.protocol)||url.username||url.password)continue;const a=node('a','',url.hostname.replace(/^www\./,''));a.href=url.href;a.target='_blank';a.rel='noopener noreferrer';a.title=source.title||a.textContent;sources.append(a);}catch(_){}}if(sources.children.length){sources.setAttribute('aria-label',t('reviews'));card.append(sources);}const b=button(t(suggestion.basis==='review_inference'?'searchmodel':'search'),'fz-guide-primary',()=>search(suggestion.search_query));b.dataset.suggestionSearch=suggestion.search_query;card.append(b);list.append(card);
    }body.append(list,node('p','fz-guide-note',t('credit')));return;}
@@ -104,13 +106,13 @@ function mount(root){
  }
  function renderGuided(){
   if(busy)status();
-  else if(data?.question&&data.choices?.length>=2){
+  else if(answers.length<MAX_QUESTIONS&&data?.question&&data.choices?.length>=2){
    const question=node('h3','fz-guide-question',data.question);question.id=dialog.id+'-question';body.append(question);
    const options=node('div','fz-guide-options');options.setAttribute('role','group');options.setAttribute('aria-labelledby',question.id);
    for(const choice of data.choices.slice(0,4))options.append(button(choice.label,'fz-guide-choice',()=>answerWith(choice.answer||choice.label)));body.append(options);
   }else if(data?.ok===false)body.append(node('p','fz-guide-note',t('unavailable')),button(t('retry'),'fz-guide-text',discover));
   else if(data)body.append(node('h3','fz-guide-question',t('ready')));
-  if(turns.length<12){const more=node('details','fz-guide-free-answer');more.append(node('summary','',t('freeanswer')),form);body.append(more);}
+  if(turns.length<MAX_QUESTIONS){const more=node('details','fz-guide-free-answer');more.append(node('summary','',t('freeanswer')),form);body.append(more);}
   renderSearchDock();
   const extras=node('details','fz-guide-extras');extras.append(node('summary','',t('moreoptions')));
   const explore=button(t('explore'),'fz-guide-text',()=>{cancel();mode='';render();if(!overview)loadOverview();});extras.append(explore);
