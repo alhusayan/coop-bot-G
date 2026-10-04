@@ -1,4 +1,4 @@
-"""Findzia 156.7.44: guest-first trials and non-blocking durable settlement.
+"""Findzia 156.7.44-retry-fix: refunds never impose a daily search lockout.
 
 No public purchase-grant endpoint. Checkout remains unavailable until a payment
 adapter verifies payment, amount, currency and account ownership server-side.
@@ -92,14 +92,14 @@ class Credits:
                 self.available = False
                 print('BILLING: database unavailable; protected requests fail closed')
         if self.available:
-            print('FINDZIA_CREDITS build=156.7.44 balance=read_only completion=durable_journal executors=isolated', flush=True)
+            print('FINDZIA_CREDITS build=156.7.44-retry-fix balance=read_only completion=durable_journal executors=isolated refund_daily_lockout=False', flush=True)
 
     def check(self):
         if not self.available:
             raise HTTPException(503, 'credits_unavailable')
 
     def public_config(self):
-        return dict(build='156.7.44', enabled=self.enabled, available=self.available, trial_credits=10,
+        return dict(build='156.7.44-retry-fix', enabled=self.enabled, available=self.available, trial_credits=10,
                     guest_trial=True,checkout_available=False, restore_available=False, plans=list(PLANS))
 
     def ledger(self, db, member, grant, request, delta, reason, now):
@@ -288,8 +288,8 @@ class Credits:
             if previous:raise HTTPException(409,'search_in_progress' if previous['state']=='reserved' else 'search_already_processed')
             if db.execute("SELECT COUNT(*) FROM fz_credit_requests r JOIN fz_credit_grants g ON g.id=r.grant_id WHERE g.member=? AND r.state='reserved'",(member,)).fetchone()[0]>=2:
                 raise HTTPException(429,'search_in_progress')
-            if db.execute("SELECT COUNT(*) FROM fz_credit_requests r JOIN fz_credit_grants g ON g.id=r.grant_id WHERE g.member=? AND r.state='refunded' AND r.created>=?",(member,day)).fetchone()[0]>=5:
-                raise HTTPException(429,'retry_limit')
+            # Failed/empty searches restore credit without a daily lockout.
+            # Duplicate/in-flight guards above and endpoint rate limits remain.
             rows=db.execute('''SELECT * FROM fz_credit_grants WHERE member=? AND remaining>0 AND revoked=0
                 AND starts<=? AND (expires IS NULL OR expires>?) ORDER BY
                 CASE kind WHEN 'subscription' THEN 0 WHEN 'trial' THEN 1 ELSE 2 END,
