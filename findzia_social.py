@@ -19,6 +19,7 @@ from pathlib import Path
 import re
 import secrets
 import sqlite3
+import sys
 import threading
 import time
 import unicodedata
@@ -31,7 +32,15 @@ from PIL import Image, ImageOps
 from fastapi import Request
 
 LOG = logging.getLogger("findzia.social")
-BUILD = "social-1.0"
+# Uvicorn configures its own loggers, not the application's root logger.
+# Keep operational events visible without changing logging for other modules.
+if not LOG.handlers:
+    _handler = logging.StreamHandler(sys.stdout)
+    _handler.setFormatter(logging.Formatter('%(message)s'))
+    LOG.addHandler(_handler)
+LOG.setLevel(logging.INFO)
+LOG.propagate = False
+BUILD = "social-1.0.1"
 MARKETS = {
     "sa": {"currency": "SAR", "languages": ["ar", "en"], "zone": "Asia/Riyadh"},
     "gb": {"currency": "GBP", "languages": ["en"], "zone": "Europe/London"},
@@ -51,6 +60,14 @@ USERNAME = re.compile(r"^[a-z0-9_.]{1,30}$")
 
 def compact(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def error_reason(exc):
+    """Only expose known provider status codes; never request URLs or bodies."""
+    message = str(exc)
+    if re.fullmatch(r'(?:apify|social_ai)_http_[0-9]{3}', message):
+        return message
+    return type(exc).__name__
 
 
 def norm(value):
@@ -512,8 +529,9 @@ class Worker:
             LOG.info('SOCIAL run_started source=%s kind=%s run=%s cap=%.2f', source['username'], kind, run_id, self.cfg.max_run)
         except Exception as exc:
             with self.store.db() as db:
-                db.execute("UPDATE jobs SET state='uncertain',error=? WHERE id=?", (type(exc).__name__, ident))
+                db.execute("UPDATE jobs SET state='uncertain',error=? WHERE id=?", (error_reason(exc), ident))
                 db.execute("UPDATE sources SET error='launch_uncertain_check_apify' WHERE username=?", (source['username'],))
+            LOG.warning('SOCIAL launch_uncertain source=%s reason=%s', source['username'], error_reason(exc))
         return True
 
     def poll(self, job, now):
@@ -534,6 +552,7 @@ class Worker:
                 db.execute("UPDATE jobs SET state='failed',cost=?,error=? WHERE id=?", (cost, str(status)[:50], job['id']))
                 db.execute('UPDATE usage SET amount=? WHERE id=?', (cost, job['id']))
                 db.execute('UPDATE sources SET error=?,next_poll=? WHERE username=?', ('run_'+str(status), now+7200, job['source']))
+            LOG.warning('SOCIAL run_failed source=%s status=%s apify_usd=%.5f', job['source'], status, cost)
             return
         dataset = str(run.get('defaultDatasetId') or '')
         if not CODE.fullmatch(dataset):
@@ -630,7 +649,8 @@ class Worker:
             except Exception as exc:
                 with self.store.db() as db:
                     # Keep polling the same run; never relaunch for a read failure.
-                    db.execute('UPDATE jobs SET next_check=?,error=? WHERE id=?', (now+300, type(exc).__name__, job['id']))
+                    db.execute('UPDATE jobs SET next_check=?,error=? WHERE id=?', (now+300, error_reason(exc), job['id']))
+                LOG.warning('SOCIAL poll_failed source=%s reason=%s', job['source'], error_reason(exc))
         with self.store.db() as db:
             post = db.execute("SELECT p.*,s.config FROM posts p JOIN sources s ON s.username=p.source WHERE p.state='pending' AND p.next_ai<=? AND p.attempts<3 AND json_extract(s.config,'$.enabled')=1 ORDER BY p.published DESC LIMIT 1", (now,)).fetchone()
         if post and json.loads(post['config']).get('enabled'):
@@ -639,7 +659,7 @@ class Worker:
             except Exception as exc:
                 with self.store.db() as db:
                     db.execute("UPDATE posts SET error=?,state=CASE WHEN attempts>=3 THEN 'review' ELSE state END WHERE key=?", (type(exc).__name__, post['key']))
-                LOG.warning('SOCIAL extraction_failed type=%s', type(exc).__name__)
+                LOG.warning('SOCIAL extraction_failed reason=%s', error_reason(exc))
         with self.store.db() as db:
             sources = db.execute('SELECT * FROM sources WHERE next_poll<=? ORDER BY next_poll,username', (now,)).fetchall()
         for row in sources:
@@ -695,10 +715,34 @@ class Service:
             return None
 
     def start(self):
+        LOG.info('SOCIAL config build=%s enabled=%s available=%s worker_enabled=%s apify_configured=%s ai_configured=%s public_base_configured=%s',
+                 BUILD, self.cfg.enabled, bool(self.store), self.cfg.worker,
+                 bool(self.cfg.token), bool(self.cfg.ai_key), bool(self.cfg.base))
+        if self.worker:
+            return
+        if self.store:
+            try:
+                state = self.store.status()
+                states = [job['state'] for job in state['jobs']]
+                LOG.info('SOCIAL state sources=%s posts=%s active_offers=%s recent_jobs=%s usage_today=%s',
+                         len(state['sources']), compact(state['posts']), compact(state['active_offers']),
+                         compact({key: states.count(key) for key in sorted(set(states))}), compact(state['usage_today']))
+            except Exception as exc:
+                LOG.warning('SOCIAL state_unavailable reason=%s', error_reason(exc))
         if self.store and self.cfg.worker and self.cfg.token and self.cfg.ai_key and self.cfg.base:
             self.worker = Worker(self.cfg, self.store)
             threading.Thread(target=self.worker.run, name='social-ingest', daemon=True).start()
             LOG.info('SOCIAL worker_started markets=%s', ','.join(MARKETS))
+        elif not self.cfg.enabled:
+            LOG.info('SOCIAL worker_not_started reason=feature_disabled')
+        elif not self.store:
+            LOG.warning('SOCIAL worker_not_started reason=store_unavailable')
+        elif not self.cfg.worker:
+            LOG.info('SOCIAL worker_not_started reason=worker_disabled')
+        else:
+            missing = [name for name, value in (('APIFY_API_TOKEN', self.cfg.token),
+                       ('GEMINI_API_KEY', self.cfg.ai_key), ('PUBLIC_BASE_URL', self.cfg.base)) if not value]
+            LOG.warning('SOCIAL worker_not_started missing=%s', ','.join(missing))
 
 
 def install(app):
