@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 
 const base = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const src = resolve(base, 'source'), dest = resolve(base, 'public');
-const version = '156.7.59', api = 'https://api.findzia.com';
+const version = '156.7.61', api = 'https://api.findzia.com';
 // Preserve the live section scope to avoid unnecessary DOM/storage changes.
 const section = 'template--19963721449543__findzia_home_h4wBLq';
 const expected = '2de7b483319c713bf649352f7f158f1fedbda92f546bebfe576ae0a2d2c526c6';
@@ -23,7 +23,7 @@ const packageVersion=JSON.parse(readFileSync(resolve(base,'package.json'),'utf8'
 if(packageVersion!==version)throw Error('Release mismatch: replace frontend/package.json and frontend/scripts/build.mjs together.');
 if(sourceReleases.boot!=='156.7.43')throw Error('Release mismatch: expected frontend/source/findzia-boot.js version 156.7.43.');
 for(const [key,file] of [['home','findzia-home.liquid'],['shell','findzia-shell.js'],['billing','findzia-billing.js'],['subscriptions','findzia-subscriptions.js'],['guide','findzia-filters.js'],['account','findzia-account.js'],['motion','findzia-motion.js'],['motionCSS','findzia-motion.css']]){
-  const expectedVersion=key==='billing'?version:key==='account'?'156.7.58':['home','account','motion','motionCSS'].includes(key)?'156.7.53':key==='guide'?'156.7.48':'156.7.43';
+  const expectedVersion=key==='home'?version:['billing','account','subscriptions'].includes(key)?'156.7.60':['home','account','motion','motionCSS'].includes(key)?'156.7.53':key==='guide'?'156.7.48':'156.7.43';
   if(sourceReleases[key]!==expectedVersion)throw Error('Release mismatch: replace frontend/source/'+file+' with version '+expectedVersion+'.');
 }
 const routes = {};
@@ -69,7 +69,7 @@ function page(body,title,canonical,extraStyle='') {
 emit('/','index.html',page(`<link rel="stylesheet" href="${assets.get('findzia-standalone.css')}"><script src="${assets.get('findzia-migration.js')}"></script><main id="MainContent"><div class="shopify-section section-findzia-home" id="shopify-section-${section}">${home}</div></main>`,'Findzia — Find your product instantly','/'),'html');
 // Keep known landing links working; unknown routes remain a real 404.
 routes['/index.html']=routes['/']; routes['/pages/findzia']=routes['/'];
-const policies=[['terms-of-service','Terms of Service'],['privacy-policy','Privacy Policy'],['refund-policy','Refund and Cancellation Policy']];
+const policies=[['terms-of-service','Terms of Service'],['privacy-policy','Privacy Policy'],['refund-policy','Refund Policy']];
 const nav=policies.map(([slug,title])=>`<a href="/policies/${slug}">${title}</a>`).join('');
 for (const [slug,title] of policies) {
   const body=read('policies/'+slug+'.html').toString('utf8');
