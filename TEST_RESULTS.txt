@@ -1,43 +1,40 @@
-Findzia 156.7.56 — independent Paddle checkout
-Base deployed commit: 5080c9b336b0ce806d352f91c969453d4f367c43 (156.7.55)
+Findzia Paddle backend 156.7.57 — local validation, 2026-10-05
 
-PASS: 38 backend tests (24 prepaid tests + 14 new policy/reconciliation tests).
-PASS: 54 targeted browser assertions across English/Arabic and four recovery
-states: clear, blocking pending, nonblocking MyFatoorah pending, unavailable.
-PASS: frontend production build 156.7.56, 26 routes.
-PASS: all five base file Git blob hashes match the live source tree.
-PASS: exactly five existing production files changed. Search, Paddle core,
-home layout, motion and CSS are unchanged.
+Base: deployed 156.7.56. Original findzia_paddle.py fetched from repository main;
+Git blob SHA d834d6bd183bfdc1db59a94d5e57fcfa899fd419 matched local base exactly.
 
-Meaningful payment coverage:
-- MyFatoorah creating/pending/session_processing/abandoned records cannot
-  block a separate Paddle checkout and are preserved unchanged.
-- No MyFatoorah call is made when opening Paddle, even if its key/peer is absent.
-- Double clicks reuse the same Paddle transaction; a pending Paddle payment
-  continues to prevent a duplicate Paddle purchase.
-- Real late MyFatoorah and new Paddle payments each grant their correct credit
-  once, including duplicate webhook and reconciliation delivery.
-- Disabled new MyFatoorah sales do not disable signed payment/refund recovery.
-- Invalid signatures, missing webhook secret and incorrect amounts remain rejected.
-- Refund before payment creates a tombstone; late refund revokes remaining credit.
-- Restore reports pending truthfully, with blocks_checkout=false for the
-  merchant-approved Paddle policy. Existing same-provider guards remain intact.
-- Browser can open Paddle after nonblocking restore; no extra purchase is
-  created by Restore or by repeated button clicks.
+Production diff: findzia_paddle.py ONLY.
+Frontend remains 156.7.56. No migration, live database edit, remote config
+change, real Paddle transaction or real charge was performed by these tests.
 
-Provider APIs, invoices, webhooks and browser payment SDKs were mocked.
-No real charge was initiated, and no live account data was modified.
-Refund webhook fixture uses the documented string amount field:
-https://docs.myfatoorah.com/docs/webhook-v2-refund-data-model
+PASS: 48 backend unittest cases:
+- test_prepaid_packs: 24 existing catalog/finite-credit/payment tests.
+- test_payment_independence: 14 existing cross-provider and webhook tests.
+- test_paddle_access: 10 targeted regression tests with additional subcases.
+401/403 read, cancel and adjustment failures surface explicit errors while
+preserving the transaction and releasing checkout locks. A restored permission
+allows reuse or a single new checkout after provider-confirmed cancellation.
+Price refusal creates no local order; create refusal is locally rejected.
+Cancellation timeouts, unknown states and active payments remain protected.
+Diagnostic logs omit secrets, customer data, transaction IDs and request bodies.
 
-Deployment has NOT occurred. GitHub refused the write with HTTP 403
-(Resource not accessible by integration). The tested files must be uploaded
-and both Railway services deployed before the new behavior is live.
+PASS: 90 browser assertions across 12 scenarios:
+English and Arabic x 20/50/100 searches x immediate P02 / pending then P02.
+Existing frontend stops polling, does not open a checkout or another gateway,
+leaves credits unchanged, and retains a usable retry button.
+All API calls and payment SDKs mocked. No external charges.
 
-Backend test command on the source tree with its Python requirements:
-python3 -m unittest test_prepaid_packs test_payment_independence -q
-Copy the two verification Python files into the project root for testing only.
+PASS: unchanged frontend build produced 26 routes (156.7.56).
+PASS: byte comparison confirms only one existing production file differs.
 
-Browser check: copy payment-independent-browser.cjs into frontend/tests,
-build the frontend, install Playwright, set FINDZIA_TEST_CHROME to Chromium,
-and run node frontend/tests/payment-independent-browser.cjs.
+Reproduce from a complete 156.7.56 checkout with this adapter substituted:
+Copy verification/test_*.py to the repo root, and paddle-access-browser.cjs to
+frontend/tests/. Use the project's Python requirements and a Playwright runtime.
+python3 -m unittest test_prepaid_packs test_payment_independence test_paddle_access -q
+node frontend/scripts/build.mjs
+node frontend/tests/paddle-access-browser.cjs
+FINDZIA_TEST_CHROME may point to a local Chromium binary.
+
+Not verified: actual Paddle API-key grants, a live successful payment,
+production behavior after this patch (not deployed). Permission configuration
+must be corrected in the merchant account; this patch cannot grant access.
