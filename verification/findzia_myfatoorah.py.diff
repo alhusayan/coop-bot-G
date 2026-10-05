@@ -1,0 +1,186 @@
+--- a/findzia_myfatoorah.py
++++ b/findzia_myfatoorah.py
+@@ -19,6 +19,8 @@
+ import requests
+ from fastapi import HTTPException, Request
+ from fastapi.responses import JSONResponse
++from findzia_plans import purchase_plan, stored_prepaid
++from findzia_checkout_guard import initialize as initialize_checkout_guard, guarded
+ 
+ LOG = logging.getLogger('findzia.myfatoorah')
+ 
+@@ -79,6 +81,7 @@
+         self.base = 'https://apitest.myfatoorah.com' if self.mode == 'sandbox' else 'https://api.myfatoorah.com'
+         self.embedded = env.get('FINDZIA_MYFATOORAH_EMBEDDED_ENABLED','false').lower() == 'true'
+         self.apple_verified = env.get('FINDZIA_MYFATOORAH_APPLE_PAY_DOMAIN_VERIFIED','false').lower() == 'true'
++        initialize_checkout_guard(self)
+         self.task = None
+         if credits.available:
+             with self.accounts.connect() as db:
+@@ -106,6 +109,14 @@
+                   PRIMARY KEY(intent,previous_intent));
+                 ''')
+ 
++            # Additive migration: all existing invoices retain their original 20 searches.
++            # BEGIN IMMEDIATE serializes concurrent worker startup.
++            with self.accounts.connect() as db:
++                db.execute('BEGIN IMMEDIATE')
++                columns = {r[1] for r in db.execute('PRAGMA table_info(fz_mf_orders)')}
++                if 'plan' not in columns:
++                    db.execute("ALTER TABLE fz_mf_orders ADD COLUMN plan TEXT NOT NULL DEFAULT 'pack'")
++
+             # One-time retry of owned pending invoices rejected by the old
+             # USD-only rule. Every retry still runs the complete API verifier.
+             with self.accounts.connect() as db:
+@@ -129,8 +140,9 @@
+         inline_origins = [host for host, registration in storefronts.items()
+                           if registration.ready and self.allowed(member)]
+         return {'ok': True, 'enabled': self.enabled, 'environment': self.mode,
+-                'checkout_mode': 'embedded', 'checkout_build': '156.7.18',
++                'checkout_mode': 'embedded', 'checkout_build': '156.7.18', 'pricing_build': '156.7.54',
+                 'checkout_available': self.allowed(member), 'plan_id': 'pack',
++                'checkout_plan_ids': [p['id'] for p in self.credits.sale_plans if p['interval']=='once'],
+                 'embedded_available': self.embedded and self.allowed(member),
+                 # The legacy env flag cannot enable Apple Pay. New clients
+                 # require explicit registration of their exact page origin.
+@@ -249,7 +261,9 @@
+         paid=False
+         for source in rows:
+             row=dict(source)
+-            wait={'intent':row['intent'],'payment_pending':True,'can_start_new_purchase':True}
++            original_plan=stored_prepaid(row['plan'])
++            wait={'intent':row['intent'],'payment_pending':True,'can_start_new_purchase':True,
++                  'plan_id':row['plan'],'credits':original_plan['credits'],'amount_cents':original_plan['amount_cents']}
+             if row['payment']: wait['payment_id']=row['payment']
+             if not row['invoice']:
+                 # A submitted charge with a lost response is different from an
+@@ -369,15 +383,24 @@
+                            (intent,int(time.time())))
+         return None
+ 
++    @guarded
+     def checkout(self, member, plan, language='en', previous_intent=None, acknowledge_unconfirmed=False):
+         self.require(member)
+-        if plan != 'pack': raise HTTPException(400, 'pack_only')
++        selected = purchase_plan(plan, prepaid=self.credits.prepaid_enabled, once_only=True)
+         if previous_intent is not None:
+             if acknowledge_unconfirmed is not True: raise HTTPException(400,'acknowledgement_required')
+             previous=self.acknowledge_previous(member,previous_intent)
+             if previous: return previous
+         previous=self.review_unfinished(member,tolerate_unavailable=True,reuse_hosted=True)
+-        if previous: return previous
++        if previous:
++            previous_id = previous.get('intent')
++            if previous.get('url') and previous_id:
++                with self.accounts.connect() as db:
++                    old = db.execute('SELECT plan FROM fz_mf_orders WHERE intent=? AND member=? AND mode=?',
++                                     (previous_id,member['id'],self.mode)).fetchone()
++                if old and old['plan'] != plan:
++                    return {'intent':previous_id,'payment_pending':True}
++            return previous
+         now = int(time.time())
+         with self.accounts.connect() as db:
+             db.execute('BEGIN IMMEDIATE')
+@@ -390,8 +413,8 @@
+                 # No time-based automatic retry can create another purchase.
+                 return {'intent':row['intent'],'payment_pending':True,'can_start_new_purchase':True}
+             intent = 'fz_' + secrets.token_urlsafe(24)
+-            db.execute('INSERT INTO fz_mf_orders(intent,member,mode,state,created) VALUES(?,?,?,?,?)', (intent,member['id'],self.mode,'creating',now))
+-        body = {'Order':{'Amount':4.99,'Currency':'USD'}, 'OperationType':'PAY',
++            db.execute('INSERT INTO fz_mf_orders(intent,member,mode,state,created,plan) VALUES(?,?,?,?,?,?)', (intent,member['id'],self.mode,'creating',now,plan))
++        body = {'Order':{'Amount':selected['amount_cents']/100,'Currency':'USD'}, 'OperationType':'PAY',
+                 'NotificationOption':'LINK','Language':'AR' if str(language).lower()=='ar' else 'EN',
+                 'IntegrationUrls':{'Redirection':self.return_url+'?fz_mf_intent='+intent},
+                 'PaymentExpiry':datetime.fromtimestamp(now+1800,timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}
+@@ -410,10 +433,11 @@
+             LOG.warning('MF_HOSTED_CREATE status=unavailable reason=%s',diagnostic(exc))
+             return {'intent':intent,'payment_pending':True,'can_start_new_purchase':True}
+ 
++    @guarded
+     def embedded_session(self, member, plan, previous_intent=None, acknowledge_unconfirmed=False):
+         self.require(member)
+         if not self.embedded: raise HTTPException(403,'embedded_not_available')
+-        if plan != 'pack': raise HTTPException(400,'pack_only')
++        selected = purchase_plan(plan, prepaid=self.credits.prepaid_enabled, once_only=True)
+         if previous_intent is not None:
+             if acknowledge_unconfirmed is not True: raise HTTPException(400,'acknowledgement_required')
+             previous=self.acknowledge_previous(member,previous_intent)
+@@ -432,11 +456,11 @@
+                     raise HTTPException(409,'payment_creation_pending')
+                 if row['state']=='session_ready':
+                     session=db.execute('SELECT * FROM fz_mf_sessions WHERE intent=?',(row['intent'],)).fetchone()
+-                    if session and session['expires']>now+30:
++                    if session and session['expires']>now+30 and row['plan']==plan:
+                         return {'intent':row['intent'],'session_id':session['session']}
+             db.execute("UPDATE fz_mf_orders SET state='canceled' WHERE member=? AND mode=? AND state IN ('session_creating','session_ready')",(member['id'],self.mode))
+             intent='fz_'+secrets.token_urlsafe(24)
+-            db.execute('INSERT INTO fz_mf_orders(intent,member,mode,state,created) VALUES(?,?,?,?,?)',(intent,member['id'],self.mode,'session_creating',now))
++            db.execute('INSERT INTO fz_mf_orders(intent,member,mode,state,created,plan) VALUES(?,?,?,?,?,?)',(intent,member['id'],self.mode,'session_creating',now,plan))
+             # Scope the pre-charge recheck to unresolved attempts acknowledged
+             # before THIS form opened. A later purchase cannot waive its guard.
+             db.execute("""INSERT INTO fz_mf_session_reviews(intent,previous_intent)
+@@ -448,14 +472,14 @@
+                 any(registration.ready for registration in getattr(self, 'apple_storefronts', {}).values())):
+             methods.append('applepay')
+         body={'PaymentMode':'COLLECT_DETAILS','OperationType':'PAY',
+-              'Order':{'Amount':4.99,'Currency':'USD'},'SupportedPaymentMethods':methods,
++              'Order':{'Amount':selected['amount_cents']/100,'Currency':'USD'},'SupportedPaymentMethods':methods,
+               'Language':'EN','SessionExpiry':datetime.fromtimestamp(now+900,timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+               'IntegrationUrls':{'Redirection':self.return_url+'?fz_mf_intent='+intent}}
+         try:
+             data=self.api('POST','/v3/sessions',body,intent)
+             session=identifier(data.get('SessionId'))
+             order=data.get('Order',{})
+-            if order.get('Currency')!='USD' or Decimal(str(order.get('Amount'))) != Decimal('4.99'):
++            if order.get('Currency')!='USD' or Decimal(str(order.get('Amount'))) != Decimal(selected['amount_cents'])/100:
+                 raise ValueError('session_price_mismatch')
+             with self.accounts.connect() as db:
+                 db.execute('BEGIN IMMEDIATE')
+@@ -510,8 +534,9 @@
+                 AND state IN ('creating','pending','session_processing') LIMIT 1""",(member['id'],self.mode,intent,intent)).fetchone()
+             if other: return {'intent':other['intent'],'payment_pending':True,'can_start_new_purchase':True}
+             db.execute("UPDATE fz_mf_orders SET state='session_processing' WHERE intent=?",(intent,))
++        selected = stored_prepaid(row['plan'])
+         body={'SourceOfFund':{'SessionId':row['session']},'OperationType':'PAY',
+-              'Order':{'Amount':4.99,'Currency':'USD'},
++              'Order':{'Amount':selected['amount_cents']/100,'Currency':'USD'},
+               'IntegrationUrls':{'Redirection':self.return_url+'?fz_mf_intent='+intent},
+               'PaymentExpiry':datetime.fromtimestamp(int(time.time())+1800,timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}
+         try:
+@@ -548,6 +573,8 @@
+         with self.accounts.connect() as db:
+             order = db.execute('SELECT * FROM fz_mf_orders WHERE mode=? AND invoice=?',(self.mode,expected_invoice)).fetchone()
+         if not order or (member and order['member'] != member): raise HTTPException(404,'payment_not_found')
++        selected = stored_prepaid(order['plan'])
++        expected_amount = Decimal(selected['amount_cents'])/100
+         data = self.api('GET','/v3/payments/'+payment)
+         inv, txn, amt = data.get('Invoice',{}), data.get('Transaction',{}), data.get('Amount',{})
+         if str(inv.get('Id','')) != expected_invoice or str(txn.get('PaymentId','')) != payment:
+@@ -566,10 +593,10 @@
+             return value
+         paid = money('ValueInPayCurrency')
+         display_usd = amt.get('DisplayCurrency') == 'USD'
+-        if display_usd and money('ValueInDisplayCurrency') != Decimal('4.99'):
++        if display_usd and money('ValueInDisplayCurrency') != expected_amount:
+             raise HTTPException(409,'payment_currency_or_amount_mismatch')
+         if amt.get('PayCurrency') == 'USD':
+-            if paid != Decimal('4.99'):
++            if paid != expected_amount:
+                 raise HTTPException(409,'payment_currency_or_amount_mismatch')
+         elif (display_usd and amt.get('PayCurrency') == 'KWD'
+               and amt.get('BaseCurrency') == 'KWD'):
+@@ -587,11 +614,11 @@
+             refunded = db.execute('SELECT 1 FROM fz_mf_refunds WHERE mode=? AND invoice=?',(self.mode,expected_invoice)).fetchone()
+             if refunded: return False
+             prior = db.execute('SELECT * FROM fz_credit_grants WHERE id=?',(gid,)).fetchone()
+-            if prior and (prior['member'] != order['member'] or prior['plan'] != 'pack'):
++            if prior and (prior['member'] != order['member'] or prior['plan'] != order['plan'] or prior['quantity'] != selected['credits']):
+                 raise HTTPException(409,'purchase_conflict')
+             if not prior:
+-                db.execute('INSERT INTO fz_credit_grants VALUES(?,?,?,?,?,?,?,?,0)',(gid,order['member'],'pack','pack',20,20,now,None))
+-                self.credits.ledger(db,order['member'],gid,None,20,'verified_purchase',now)
++                db.execute('INSERT INTO fz_credit_grants VALUES(?,?,?,?,?,?,?,?,0)',(gid,order['member'],'pack',order['plan'],selected['credits'],selected['credits'],now,None))
++                self.credits.ledger(db,order['member'],gid,None,selected['credits'],'verified_purchase',now)
+             db.execute("UPDATE fz_mf_orders SET state='paid' WHERE intent=?",(order['intent'],))
+         return True
+ 

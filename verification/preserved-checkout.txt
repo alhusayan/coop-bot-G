@@ -1,0 +1,4 @@
+PASS preserved checkout en 390
+PASS preserved checkout ar 390
+PASS preserved checkout en 320
+PASS 81 preserved payment assertions (mocked provider)

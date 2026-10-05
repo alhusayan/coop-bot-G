@@ -1,0 +1,66 @@
+test_all_mf_packs_verified_once_and_no_expiry (test_prepaid_packs.PrepaidTests.test_all_mf_packs_verified_once_and_no_expiry) ... FINDZIA_CREDITS build=156.7.44-retry-fix balance=read_only completion=durable_journal executors=isolated refund_daily_lockout=False
+ok
+test_all_paddle_packs_verified_once_and_no_expiry (test_prepaid_packs.PrepaidTests.test_all_paddle_packs_verified_once_and_no_expiry) ... FINDZIA_CREDITS build=156.7.44-retry-fix balance=read_only completion=durable_journal executors=isolated refund_daily_lockout=False
+ok
+test_apple_pay_window_keeps_selected_plan (test_prepaid_packs.PrepaidTests.test_apple_pay_window_keeps_selected_plan) ... FINDZIA_CREDITS build=156.7.44-retry-fix balance=read_only completion=durable_journal executors=isolated refund_daily_lockout=False
+MF_APPLE_PAY_FILE removed_trailing_newline=True source_bytes=9096 served_bytes=9094 sha256=c15558d3e155e2031ef39b32775050c283b545d8575643181af3c3b9f03d46a3
+ok
+test_catalog_is_three_one_time_packs (test_prepaid_packs.PrepaidTests.test_catalog_is_three_one_time_packs) ... FINDZIA_CREDITS build=156.7.44-retry-fix balance=read_only completion=durable_journal executors=isolated refund_daily_lockout=False
+ok
+test_creation_lock_is_shared_across_providers (test_prepaid_packs.PrepaidTests.test_creation_lock_is_shared_across_providers) ... FINDZIA_CREDITS build=156.7.44-retry-fix balance=read_only completion=durable_journal executors=isolated refund_daily_lockout=False
+ok
+test_cross_gateway_pending_charge_blocks_second_provider (test_prepaid_packs.PrepaidTests.test_cross_gateway_pending_charge_blocks_second_provider) ... FINDZIA_CREDITS build=156.7.44-retry-fix balance=read_only completion=durable_journal executors=isolated refund_daily_lockout=False
+ok
+test_existing_mf_schema_migrates_without_changing_credits (test_prepaid_packs.PrepaidTests.test_existing_mf_schema_migrates_without_changing_credits) ... FINDZIA_CREDITS build=156.7.44-retry-fix balance=read_only completion=durable_journal executors=isolated refund_daily_lockout=False
+ok
+test_legacy_plus_renewal_still_verified (test_prepaid_packs.PrepaidTests.test_legacy_plus_renewal_still_verified) ... FINDZIA_CREDITS build=156.7.44-retry-fix balance=read_only completion=durable_journal executors=isolated refund_daily_lockout=False
+ok
+test_mf_completion_uses_persisted_plan_and_double_click_cannot_recharge (test_prepaid_packs.PrepaidTests.test_mf_completion_uses_persisted_plan_and_double_click_cannot_recharge) ... FINDZIA_CREDITS build=156.7.44-retry-fix balance=read_only completion=durable_journal executors=isolated refund_daily_lockout=False
+ok
+test_mf_kwd_settlement_and_refund_tombstone (test_prepaid_packs.PrepaidTests.test_mf_kwd_settlement_and_refund_tombstone) ... FINDZIA_CREDITS build=156.7.44-retry-fix balance=read_only completion=durable_journal executors=isolated refund_daily_lockout=False
+ok
+test_mf_selected_amount_session_reuse_and_switch (test_prepaid_packs.PrepaidTests.test_mf_selected_amount_session_reuse_and_switch) ... FINDZIA_CREDITS build=156.7.44-retry-fix balance=read_only completion=durable_journal executors=isolated refund_daily_lockout=False
+ok
+test_mf_wrong_amount_owner_or_pending_never_grants (test_prepaid_packs.PrepaidTests.test_mf_wrong_amount_owner_or_pending_never_grants) ... FINDZIA_CREDITS build=156.7.44-retry-fix balance=read_only completion=durable_journal executors=isolated refund_daily_lockout=False
+ok
+test_new_subscription_purchase_not_offered (test_prepaid_packs.PrepaidTests.test_new_subscription_purchase_not_offered) ... FINDZIA_CREDITS build=156.7.44-retry-fix balance=read_only completion=durable_journal executors=isolated refund_daily_lockout=False
+ok
+test_paddle_double_click_reuses_one_transaction (test_prepaid_packs.PrepaidTests.test_paddle_double_click_reuses_one_transaction) ... FINDZIA_CREDITS build=156.7.44-retry-fix balance=read_only completion=durable_journal executors=isolated refund_daily_lockout=False
+ok
+test_paddle_new_price_checked_before_transaction (test_prepaid_packs.PrepaidTests.test_paddle_new_price_checked_before_transaction) ... FINDZIA_CREDITS build=156.7.44-retry-fix balance=read_only completion=durable_journal executors=isolated refund_daily_lockout=False
+ok
+test_price_lookup_timeout_does_not_create_pending_purchase (test_prepaid_packs.PrepaidTests.test_price_lookup_timeout_does_not_create_pending_purchase) ... FINDZIA_CREDITS build=156.7.44-retry-fix balance=read_only completion=durable_journal executors=isolated refund_daily_lockout=False
+ok
+test_provider_setting_does_not_silently_fall_back (test_prepaid_packs.PrepaidTests.test_provider_setting_does_not_silently_fall_back) ... FINDZIA_CREDITS build=156.7.44-retry-fix balance=read_only completion=durable_journal executors=isolated refund_daily_lockout=False
+ok
+test_quantity_is_finite_not_unlimited (test_prepaid_packs.PrepaidTests.test_quantity_is_finite_not_unlimited) ... FINDZIA_CREDITS build=156.7.44-retry-fix balance=read_only completion=durable_journal executors=isolated refund_daily_lockout=False
+ok
+test_recurring_price_misconfiguration_cannot_charge (test_prepaid_packs.PrepaidTests.test_recurring_price_misconfiguration_cannot_charge) ... FINDZIA_CREDITS build=156.7.44-retry-fix balance=read_only completion=durable_journal executors=isolated refund_daily_lockout=False
+ok
+test_refund_before_or_after_payment_does_not_regrant (test_prepaid_packs.PrepaidTests.test_refund_before_or_after_payment_does_not_regrant) ... FINDZIA_CREDITS build=156.7.44-retry-fix balance=read_only completion=durable_journal executors=isolated refund_daily_lockout=False
+ok
+test_resumed_mf_payment_reports_its_original_pack (test_prepaid_packs.PrepaidTests.test_resumed_mf_payment_reports_its_original_pack) ... FINDZIA_CREDITS build=156.7.44-retry-fix balance=read_only completion=durable_journal executors=isolated refund_daily_lockout=False
+ok
+test_staging_flag_preserves_old_catalog (test_prepaid_packs.PrepaidTests.test_staging_flag_preserves_old_catalog) ... FINDZIA_CREDITS build=156.7.44-retry-fix balance=read_only completion=durable_journal executors=isolated refund_daily_lockout=False
+FINDZIA_CREDITS build=156.7.44-retry-fix balance=read_only completion=durable_journal executors=isolated refund_daily_lockout=False
+ok
+test_unused_mf_form_can_be_safely_retired_for_paddle (test_prepaid_packs.PrepaidTests.test_unused_mf_form_can_be_safely_retired_for_paddle) ... FINDZIA_CREDITS build=156.7.44-retry-fix balance=read_only completion=durable_journal executors=isolated refund_daily_lockout=False
+ok
+test_wrong_paddle_amount_currency_cycle_or_quantity_rejected (test_prepaid_packs.PrepaidTests.test_wrong_paddle_amount_currency_cycle_or_quantity_rejected) ... FINDZIA_CREDITS build=156.7.44-retry-fix balance=read_only completion=durable_journal executors=isolated refund_daily_lockout=False
+ok
+test_duplicate_request_and_duplicate_refund_do_not_grant_credit (test_credit_retries.CreditRetries.test_duplicate_request_and_duplicate_refund_do_not_grant_credit) ... FINDZIA_CREDITS build=156.7.44-retry-fix balance=read_only completion=durable_journal executors=isolated refund_daily_lockout=False
+ok
+test_existing_refund_history_does_not_require_database_reset (test_credit_retries.CreditRetries.test_existing_refund_history_does_not_require_database_reset) ... FINDZIA_CREDITS build=156.7.44-retry-fix balance=read_only completion=durable_journal executors=isolated refund_daily_lockout=False
+FINDZIA_CREDITS build=156.7.44-retry-fix balance=read_only completion=durable_journal executors=isolated refund_daily_lockout=False
+ok
+test_more_than_five_refunds_allow_text_and_photo_retry (test_credit_retries.CreditRetries.test_more_than_five_refunds_allow_text_and_photo_retry) ... FINDZIA_CREDITS build=156.7.44-retry-fix balance=read_only completion=durable_journal executors=isolated refund_daily_lockout=False
+ok
+test_successful_searches_still_spend_and_exhaust_credit (test_credit_retries.CreditRetries.test_successful_searches_still_spend_and_exhaust_credit) ... FINDZIA_CREDITS build=156.7.44-retry-fix balance=read_only completion=durable_journal executors=isolated refund_daily_lockout=False
+ok
+test_two_active_searches_still_block_third_until_completion (test_credit_retries.CreditRetries.test_two_active_searches_still_block_third_until_completion) ... FINDZIA_CREDITS build=156.7.44-retry-fix balance=read_only completion=durable_journal executors=isolated refund_daily_lockout=False
+ok
+
+----------------------------------------------------------------------
+Ran 29 tests in 0.361s
+
+OK

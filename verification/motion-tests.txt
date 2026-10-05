@@ -1,0 +1,4 @@
+PASS restored motion {"lang":"en","theme":"light","languageHeroReplays":0,"resizeMutations":0,"duplicateOpen":0,"staleCloseKeepsMotion":true,"accountPreserved":true,"planPreserved":{"same":true,"newEffects":0},"draft":"Keep this draft","resultFocus":{"collapsed":76,"expanded":128}}
+PASS restored motion {"lang":"ar","theme":"dark","languageHeroReplays":0,"resizeMutations":0,"duplicateOpen":0,"staleCloseKeepsMotion":true,"accountPreserved":true,"planPreserved":{"same":true,"newEffects":0},"draft":"Keep this draft","resultFocus":{"collapsed":76,"expanded":128}}
+PASS restored motion {"lang":"en","theme":"light","reduced":true,"languageHeroReplays":0,"resizeMutations":0,"duplicateOpen":0,"staleCloseKeepsMotion":false,"accountPreserved":true,"planPreserved":{"same":true,"newEffects":0},"draft":"Keep this draft","resultFocus":{"collapsed":76,"expanded":128}}
+PASS 63 checks; original motion timings and focus expansion retained.

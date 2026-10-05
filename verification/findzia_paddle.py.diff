@@ -1,0 +1,118 @@
+--- a/findzia_paddle.py
++++ b/findzia_paddle.py
+@@ -19,6 +19,8 @@
+ import requests
+ from fastapi import HTTPException, Request
+ from fastapi.responses import JSONResponse
++from findzia_plans import BY_ID, purchase_plan
++from findzia_checkout_guard import initialize as initialize_checkout_guard, guarded
+ 
+ PRICES = {
+     'pack': 'pri_01m3kc8m40ag25ec202rsg1v1c',
+@@ -73,6 +75,11 @@
+         self.mode = env.get('FINDZIA_PADDLE_ENV', 'sandbox').strip().lower()
+         self.live_open = env.get('FINDZIA_PADDLE_LIVE_OPEN', 'false').strip().lower() == 'true'
+         self.prices = dict(LIVE_PRICES if self.mode == 'live' else PRICES)
++        # New prices are mode-specific; existing Pack/Plus/Pro mappings stay intact.
++        for plan_id in ('pack50', 'pack100'):
++            value = env.get('FINDZIA_PADDLE_' + self.mode.upper() + '_' + plan_id.upper() + '_PRICE_ID', '').strip()
++            if re.fullmatch(r'pri_[a-z0-9]{26}', value) and value not in self.prices.values():
++                self.prices[plan_id] = value
+         self.client_token = LIVE_CLIENT_TOKEN if self.mode == 'live' else CLIENT_TOKEN
+         self.base = 'https://api.paddle.com' if self.mode == 'live' else 'https://sandbox-api.paddle.com'
+         self.portal_host = 'customer-portal.paddle.com' if self.mode == 'live' else 'sandbox-customer-portal.paddle.com'
+@@ -83,6 +90,7 @@
+         self.ready = bool(credits.available and self.mode in ('sandbox', 'live')
+                           and self.key.startswith(expected_key_prefix) and self.secret
+                           and (self.test_emails or (self.mode == 'live' and self.live_open)))
++        initialize_checkout_guard(self)
+         self.task = None
+         self.lock = asyncio.Lock()
+         if credits.available:
+@@ -114,7 +122,8 @@
+     def public(self, member=None):
+         return dict(checkout_available=self.allowed(member or {}), restore_available=self.allowed(member or {}),
+                     management_available=self.management_available(member or {}),
+-                    paddle_environment=self.mode, paddle_client_token=self.client_token)
++                    paddle_environment=self.mode, paddle_client_token=self.client_token,
++                    checkout_plan_ids=[p['id'] for p in self.credits.sale_plans if p['id'] in self.prices])
+ 
+     def management_available(self, member):
+         prefix = 'pdl_live_apikey_' if self.mode == 'live' else 'pdl_sdbx_apikey_'
+@@ -207,9 +216,10 @@
+             print('PADDLE_CHECKOUT_RECOVERY mode=%s result=verification_incomplete' % self.mode, flush=True)
+             raise HTTPException(503, 'paddle_recovery_unavailable') from exc
+ 
++    @guarded
+     def checkout(self, member, plan, resume_intent=None):
+         self.require(member)
+-        if plan not in self.prices:
++        if not isinstance(plan, str) or plan not in self.prices:
+             raise HTTPException(400, 'invalid_plan')
+         if resume_intent is not None and (not isinstance(resume_intent, str) or not re.fullmatch(r'[a-f0-9]{48}', resume_intent)):
+             raise HTTPException(400, 'invalid_checkout_intent')
+@@ -319,13 +329,28 @@
+             resolved = self.resolve_pending_checkout(member, pending, plan)
+             if resolved is not None:
+                 return resolved
++        purchase_plan(plan, prepaid=self.credits.prepaid_enabled)
++        # This read cannot create a payment. A failed price lookup must not
++        # leave a pending checkout or trigger transaction-recovery delays.
++        if plan in ('pack50', 'pack100'):
++            try:
++                price = self.api('GET', '/prices/' + self.prices[plan])
++                unit = price.get('unit_price') or {}
++                if (price.get('id') != self.prices[plan] or price.get('status') != 'active'
++                    or price.get('billing_cycle') is not None or price.get('trial_period') is not None
++                    or unit.get('currency_code') != 'USD' or str(unit.get('amount')) != str(BY_ID[plan]['amount_cents'])):
++                    raise PaddleAPIError(422, 'prepaid_price_mismatch')
++            except PaddleAPIError as exc:
++                raise HTTPException(503, exc.public_code()) from exc
++            except (RuntimeError, ValueError, TypeError, AttributeError) as exc:
++                raise HTTPException(503, 'paddle_configuration_invalid') from exc
+         # One pending checkout per account. Previous cancellation must have
+         # succeeded at the provider before we reach this insertion.
+         with self.accounts.connect() as db:
+             db.execute('BEGIN IMMEDIATE')
+-            if plan != 'pack' and db.execute(f"SELECT 1 FROM {self.prefix}subscription WHERE member=? AND status NOT IN ('canceled','paused')", (member['id'],)).fetchone():
++            if BY_ID[plan]['interval'] == 'month' and db.execute(f"SELECT 1 FROM {self.prefix}subscription WHERE member=? AND status NOT IN ('canceled','paused')", (member['id'],)).fetchone():
+                 raise HTTPException(409, 'subscription_exists')
+-            if plan != 'pack' and db.execute('SELECT 1 FROM fz_subscriptions WHERE member=? AND period_end>?', (member['id'],now)).fetchone():
++            if BY_ID[plan]['interval'] == 'month' and db.execute('SELECT 1 FROM fz_subscriptions WHERE member=? AND period_end>?', (member['id'],now)).fetchone():
+                 raise HTTPException(409, 'subscription_exists')
+             pending = db.execute(f"SELECT * FROM {self.prefix}checkout WHERE member=? AND state IN ('creating','pending','uncertain') ORDER BY created DESC LIMIT 1", (member['id'],)).fetchone()
+             if pending:
+@@ -414,7 +439,7 @@
+         if price['id']!=self.prices[plan_id] or int(unit['amount'])!=plan['amount_cents'] or unit['currency_code']!='USD' or txn.get('currency_code')!='USD' or txn.get('discount_id'):
+             raise ValueError('payment_mismatch')
+         cycle=price.get('billing_cycle')
+-        if (plan_id=='pack' and cycle is not None) or (plan_id!='pack' and cycle!={'interval':'month','frequency':1}):
++        if (plan['interval']=='once' and cycle is not None) or (plan['interval']=='month' and cycle!={'interval':'month','frequency':1}):
+             raise ValueError('billing_cycle_mismatch')
+         totals=txn.get('details',{}).get('totals',{})
+         if int(totals.get('grand_total','0'))<=0 or int(totals.get('balance','-1'))!=0 or int(totals.get('discount','0'))!=0:
+@@ -424,11 +449,11 @@
+         if gross!=amount and gross-tax!=amount:
+             raise ValueError('amount_mismatch')
+         period=txn.get('billing_period') or {}
+-        start=timestamp(period.get('starts_at')) if plan_id!='pack' else None
+-        end=timestamp(period.get('ends_at')) if plan_id!='pack' else None
+-        if plan_id!='pack' and (not re.fullmatch(r'sub_[a-z0-9]{26}',txn.get('subscription_id') or '') or not re.fullmatch(r'ctm_[a-z0-9]{26}',txn.get('customer_id') or '')):
++        start=timestamp(period.get('starts_at')) if plan['interval']=='month' else None
++        end=timestamp(period.get('ends_at')) if plan['interval']=='month' else None
++        if plan['interval']=='month' and (not re.fullmatch(r'sub_[a-z0-9]{26}',txn.get('subscription_id') or '') or not re.fullmatch(r'ctm_[a-z0-9]{26}',txn.get('customer_id') or '')):
+             raise ValueError('missing_subscription')
+-        if plan_id!='pack':
++        if plan['interval']=='month':
+             with self.accounts.connect() as db:
+                 owner=db.execute(f'SELECT member FROM {self.prefix}subscription WHERE id=?',(txn['subscription_id'],)).fetchone()
+                 if owner and owner['member']!=member:
+@@ -454,7 +479,7 @@
+                 if row and not row['revoked']:
+                     self.credits.ledger(db,member,gid,None,-row['remaining'],'paddle_refund',int(time.time()))
+                     db.execute('UPDATE fz_credit_grants SET revoked=1,remaining=0 WHERE id=?',(gid,))
+-            if plan_id!='pack':
++            if plan['interval']=='month':
+                 sid=txn.get('subscription_id');customer=txn.get('customer_id')
+                 if not sid or not customer:
+                     raise ValueError('missing_subscription')

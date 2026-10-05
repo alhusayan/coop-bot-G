@@ -1,0 +1,7 @@
+PASS paddle pack one purchase, correct balance
+PASS paddle pack50 one purchase, correct balance
+PASS paddle pack100 one purchase, correct balance
+PASS mf pack one purchase, correct balance
+PASS mf pack50 one purchase, correct balance
+PASS mf pack100 one purchase, correct balance
+PASS 211 prepaid browser assertions; all 16 languages and both payment gateways

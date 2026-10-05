@@ -1,0 +1,67 @@
+--- a/findzia_applepay.py
++++ b/findzia_applepay.py
+@@ -242,14 +242,14 @@
+         # while its replacement Apple Pay form is open on another origin.
+         with self.s.accounts.connect() as db:
+             db.execute('BEGIN IMMEDIATE')
+-            row = db.execute('SELECT state FROM fz_mf_orders WHERE intent=? AND member=? AND mode=?',
++            row = db.execute('SELECT state,plan FROM fz_mf_orders WHERE intent=? AND member=? AND mode=?',
+                 (intent, member['id'], self.s.mode)).fetchone()
+             if not row:
+                 raise HTTPException(404, 'payment_not_found')
+             if row['state'] != 'session_ready':
+                 raise HTTPException(409, 'payment_already_started')
+             db.execute("UPDATE fz_mf_orders SET state='canceled' WHERE intent=?", (intent,))
+-        data = self.s.embedded_session(member, 'pack')
++        data = self.s.embedded_session(member, row['plan'])
+         if not data.get('session_id'):
+             return data  # Already-paid / unresolved attempts retain the normal guard.
+         token = secrets.token_urlsafe(32)
+@@ -275,19 +275,22 @@
+ 
+     def session(self, row):
+         with self.s.accounts.connect() as db:
+-            payment = db.execute('''SELECT o.state,s.session,s.expires FROM fz_mf_orders o
++            payment = db.execute('''SELECT o.state,o.plan,s.session,s.expires FROM fz_mf_orders o
+                 JOIN fz_mf_sessions s ON s.intent=o.intent WHERE o.intent=? AND o.member=? AND o.mode=?''',
+                 (row['intent'], row['member'], self.s.mode)).fetchone()
+         if not payment or payment['state'] != 'session_ready' or payment['expires'] <= time.time() + 10:
+             raise HTTPException(409, 'payment_already_started')
++        from findzia_plans import stored_prepaid
++        plan = stored_prepaid(payment['plan'])
+         return {'intent': row['intent'], 'session_id': payment['session'],
++                'credits': plan['credits'], 'amount_cents': plan['amount_cents'],
+                 'language': row['language'], 'theme': row['theme']}
+ 
+     def cancel(self, member, intent):
+         self.s.require(member)
+         with self.s.accounts.connect() as db:
+             db.execute('BEGIN IMMEDIATE')
+-            row = db.execute('SELECT state FROM fz_mf_orders WHERE intent=? AND member=? AND mode=?',
++            row = db.execute('SELECT state,plan FROM fz_mf_orders WHERE intent=? AND member=? AND mode=?',
+                 (intent, member['id'], self.s.mode)).fetchone()
+             if not row:
+                 raise HTTPException(404, 'payment_not_found')
+@@ -415,7 +418,7 @@
+ #wallet{background:#fff;border-radius:12px;padding:8px;min-height:64px;color-scheme:light}#status{font-size:14px;margin:16px 0;min-height:21px;overflow-wrap:anywhere}
+ button,a{font:inherit;min-height:44px}button{width:100%;border:1px solid var(--line);background:transparent;color:var(--ink);border-radius:12px;padding:10px 16px;cursor:pointer}button:disabled{opacity:.55}a{display:block;text-align:center;color:var(--ink);padding:10px;text-underline-offset:4px}button:focus-visible,a:focus-visible{outline:3px solid #db9a52;outline-offset:3px}[hidden]{display:none!important}
+ </style></head><body><main><p class="brand">Findz<i>i</i>a</p><h1 id="title">Apple Pay</h1>
+-<div class="amount"><span id="quantity">20 searches</span><strong dir="ltr">$4.99 USD</strong></div>
++<div class="amount"><span id="quantity"></span><strong id="amount" dir="ltr"></strong></div>
+ <p id="once">One payment. No renewal.</p><div id="wallet"></div><p id="status" role="status" aria-live="polite">Loading…</p>
+ <button id="check" hidden>Check payment</button><a id="back">Back to Findzia</a></main>
+ <script nonce="__NONCE__">
+@@ -424,11 +427,11 @@
+ $('back').href=config.returnOrigin;let timer;
+ async function api(path){const ctrl=new AbortController(),timeout=setTimeout(()=>ctrl.abort(),35000);try{const r=await fetch(config.api+path,{method:'POST',headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},body:'{}',signal:ctrl.signal,credentials:'omit',cache:'no-store'});const d=await r.json();if(!r.ok)throw Error('payment_unavailable');return d;}finally{clearTimeout(timeout);}}
+ function notify(){try{window.opener?.postMessage({type:'fz:apple-pay-check',intent:state.intent},config.returnOrigin);}catch(_){}}
+-function done(){clearTimeout(timer);$('wallet').hidden=true;$('check').hidden=true;$('title').textContent=tr('Payment confirmed','تم تأكيد الدفع');$('status').textContent=tr('Your 20 searches have been added.','تمت إضافة 20 بحثًا لرصيدك.');notify();}
++function done(){clearTimeout(timer);$('wallet').hidden=true;$('check').hidden=true;$('title').textContent=tr('Payment confirmed','تم تأكيد الدفع');$('status').textContent=tr('Your search credits are ready.','رصيد البحث جاهز للاستخدام.');notify();}
+ function waiting(){ $('wallet').hidden=true;$('check').hidden=false;$('status').textContent=tr('Confirming your payment…','نتحقق من دفعتك…');notify();clearTimeout(timer);if(state.polls<12)timer=setTimeout(check,5000);else $('status').textContent=tr('Payment is still unconfirmed. Check again shortly.','لم يتأكد الدفع بعد. تحقق مرة ثانية بعد قليل.');}
+ async function check(){if(state.busy)return;state.busy=true;state.polls++;$('check').disabled=true;try{const d=await api('/status');if(d.confirmed)done();else if(d.ready_for_payment){$('status').textContent=tr('Payment did not complete. Return to Findzia to try again.','لم يكتمل الدفع. ارجع إلى Findzia للمحاولة مجددًا.');notify();}else waiting();}catch(_){$('status').textContent=tr('Could not confirm yet. Check again shortly.','تعذّر التأكيد حاليًا. تحقق مرة ثانية بعد قليل.');$('check').hidden=false;}finally{state.busy=false;$('check').disabled=false;}}
+ $('check').onclick=check;$('back').onclick=e=>{if(window.opener){e.preventDefault();notify();window.close();}};
+ async function complete(response){if(state.submitted)return;if(response?.isSuccess!==true){$('status').textContent=tr('Apple Pay was not completed. Try again.','لم يكتمل Apple Pay. حاول مرة ثانية.');return;}state.submitted=true;$('wallet').hidden=true;$('status').textContent=tr('Confirming your payment…','نتحقق من دفعتك…');try{const d=await api('/complete');if(d.confirmed){done();return;}if(d.url||d.authentication_url){const u=new URL(d.url||d.authentication_url);if(u.protocol!=='https:'||!['portal.myfatoorah.com','demo.myfatoorah.com','pay.myfatoorah.com','www.myfatoorah.com','myfatoorah.com'].includes(u.hostname)||u.username||u.password||u.port)throw Error();notify();location.assign(u.href);return;}waiting();}catch(_){waiting();}}
+-(async()=>{try{if(!/^[A-Za-z0-9_-]{43}$/.test(token))throw Error();const d=await api('/session');state.intent=d.intent;state.lang=d.language;document.documentElement.lang=d.language;document.documentElement.dir=d.language==='ar'?'rtl':'ltr';document.documentElement.dataset.theme=d.theme;$('quantity').textContent=tr('20 searches','20 عملية بحث');$('once').textContent=tr('One payment. No renewal.','دفعة واحدة، بدون تجديد.');$('back').textContent=tr('Back to Findzia','العودة إلى Findzia');$('check').textContent=tr('Check payment','تحقق من الدفع');const script=document.createElement('script');script.src=config.sdk;await new Promise((resolve,reject)=>{const deadline=setTimeout(()=>reject(Error()),12000);script.onload=()=>{clearTimeout(deadline);resolve();};script.onerror=()=>{clearTimeout(deadline);reject(Error());};document.head.append(script);});timer=setTimeout(()=>{$('status').textContent=tr('Apple Pay could not load. Return to Findzia and try again.','تعذّر تحميل Apple Pay. ارجع إلى Findzia وحاول مجددًا.');},15000);window.myfatoorah.init({sessionId:d.session_id,containerId:'wallet',shouldHandlePaymentUrl:false,subscribedEvents:['VIEW_READY','SESSION_STARTED','SESSION_CANCELED'],eventListener:e=>{if(e?.name==='VIEW_READY'){clearTimeout(timer);$('status').textContent=tr('Tap Apple Pay to continue.','اضغط Apple Pay للمتابعة.');}if(e?.name==='SESSION_STARTED')clearTimeout(timer);if(e?.name==='SESSION_CANCELED')$('status').textContent=tr('Payment canceled. You can try again.','تم إلغاء الدفع. تقدر تحاول مرة ثانية.');},settings:{applePay:{isEnabled:true,language:d.language,style:{frameWidth:'100%',frameHeight:'48px',button:{height:'48px',type:'pay',borderRadius:'10px'}}},googlePay:{isEnabled:false},card:{isEnabled:false}},callback:complete});}catch(_){$('wallet').hidden=true;$('status').textContent=tr('This payment window is unavailable or expired. Return to Findzia to retry.','نافذة الدفع غير متاحة أو انتهت صلاحيتها. ارجع إلى Findzia للمحاولة.');}})();
++(async()=>{try{if(!/^[A-Za-z0-9_-]{43}$/.test(token))throw Error();const d=await api('/session');state.intent=d.intent;state.lang=d.language;document.documentElement.lang=d.language;document.documentElement.dir=d.language==='ar'?'rtl':'ltr';document.documentElement.dataset.theme=d.theme;$('quantity').textContent=String(d.credits)+' '+tr('searches','عملية بحث');$('amount').textContent='$'+(d.amount_cents/100).toFixed(2)+' USD';$('once').textContent=tr('One payment. No renewal.','دفعة واحدة، بدون تجديد.');$('back').textContent=tr('Back to Findzia','العودة إلى Findzia');$('check').textContent=tr('Check payment','تحقق من الدفع');const script=document.createElement('script');script.src=config.sdk;await new Promise((resolve,reject)=>{const deadline=setTimeout(()=>reject(Error()),12000);script.onload=()=>{clearTimeout(deadline);resolve();};script.onerror=()=>{clearTimeout(deadline);reject(Error());};document.head.append(script);});timer=setTimeout(()=>{$('status').textContent=tr('Apple Pay could not load. Return to Findzia and try again.','تعذّر تحميل Apple Pay. ارجع إلى Findzia وحاول مجددًا.');},15000);window.myfatoorah.init({sessionId:d.session_id,containerId:'wallet',shouldHandlePaymentUrl:false,subscribedEvents:['VIEW_READY','SESSION_STARTED','SESSION_CANCELED'],eventListener:e=>{if(e?.name==='VIEW_READY'){clearTimeout(timer);$('status').textContent=tr('Tap Apple Pay to continue.','اضغط Apple Pay للمتابعة.');}if(e?.name==='SESSION_STARTED')clearTimeout(timer);if(e?.name==='SESSION_CANCELED')$('status').textContent=tr('Payment canceled. You can try again.','تم إلغاء الدفع. تقدر تحاول مرة ثانية.');},settings:{applePay:{isEnabled:true,language:d.language,style:{frameWidth:'100%',frameHeight:'48px',button:{height:'48px',type:'pay',borderRadius:'10px'}}},googlePay:{isEnabled:false},card:{isEnabled:false}},callback:complete});}catch(_){$('wallet').hidden=true;$('status').textContent=tr('This payment window is unavailable or expired. Return to Findzia to retry.','نافذة الدفع غير متاحة أو انتهت صلاحيتها. ارجع إلى Findzia للمحاولة.');}})();
+ })();
+ </script></body></html>'''

@@ -1,0 +1,1 @@
+PASS 4 assertions: pending payment keeps original 50-search amount while 100 was selected

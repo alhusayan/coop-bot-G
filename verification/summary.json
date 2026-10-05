@@ -1,47 +1,92 @@
-[
-  {
-    "suite": "test_cost_optimization",
-    "returncode": 0,
-    "tests": 17,
-    "failures": 0,
-    "errors": 0,
-    "skipped": 0,
-    "passed": true
-  },
-  {
-    "suite": "test_hybrid",
-    "returncode": 0,
-    "tests": 15,
-    "failures": 0,
-    "errors": 0,
-    "skipped": 0,
-    "passed": true
-  },
-  {
-    "suite": "test_hybrid_quality",
-    "returncode": 0,
-    "tests": 15,
-    "failures": 0,
-    "errors": 0,
-    "skipped": 0,
-    "passed": true
-  },
-  {
-    "suite": "test_text_social_regression",
-    "returncode": 0,
-    "tests": 6,
-    "failures": 0,
-    "errors": 0,
-    "skipped": 0,
-    "passed": true
-  },
-  {
-    "suite": "test_searchapi",
-    "returncode": 0,
-    "tests": 28,
-    "failures": 0,
-    "errors": 0,
-    "skipped": 0,
-    "passed": true
-  }
-]
+{
+  "version": "156.7.54",
+  "base_commit": "c90fa5b4af9683f42b471de51c2aa2d12f335e09",
+  "backend_tests_passed": 29,
+  "browser_assertions_passed": 362,
+  "gateways": "mocked; no live payments or search-provider calls",
+  "languages": [
+    "en",
+    "ar",
+    "de",
+    "fr",
+    "it",
+    "es",
+    "pt",
+    "tr",
+    "ru",
+    "ja",
+    "zh",
+    "ko",
+    "hi",
+    "ur",
+    "id",
+    "ms"
+  ],
+  "search_credit_functions_unchanged": true,
+  "search_streaming_functions_unchanged": true,
+  "billing_css_unchanged": true,
+  "unchanged_frontend_source_files": [
+    {
+      "path": "frontend/source/apple-developer-merchantid-domain-association",
+      "sha256": "2de7b483319c713bf649352f7f158f1fedbda92f546bebfe576ae0a2d2c526c6"
+    },
+    {
+      "path": "frontend/source/findzia-account.js",
+      "sha256": "2a366a4e4054db42972a9ef58cfc7d4cd5bbbfcb15505e89727091c438a4a447"
+    },
+    {
+      "path": "frontend/source/findzia-boot.js",
+      "sha256": "721323b7d929ae28a46287bef1d4e5057f63a403af17c581e39cceba715cc01c"
+    },
+    {
+      "path": "frontend/source/findzia-filters.js",
+      "sha256": "3791becd754c7958f2893a86d2fcbcf9deef742f2f2300330afa994cde724411"
+    },
+    {
+      "path": "frontend/source/findzia-home.liquid",
+      "sha256": "37db686420ccd6ba4aa2a8d2273c36432c91d792faa5f21d4ea3f6e1d964c0d8"
+    },
+    {
+      "path": "frontend/source/findzia-migration.js",
+      "sha256": "a8122ab5c9567f5dd9519b32266bd42e7a58357b4eeb0cfeefb32fba0820100b"
+    },
+    {
+      "path": "frontend/source/findzia-motion.css",
+      "sha256": "7e274888e251c3e69622ac07282faa99bd9eb76ed45e1083e9d532ae255e886e"
+    },
+    {
+      "path": "frontend/source/findzia-motion.js",
+      "sha256": "733519866606f7bd103f56d4535d5eb6a7641e16dc4917c5267ef99e128d889d"
+    },
+    {
+      "path": "frontend/source/findzia-product-details.css",
+      "sha256": "ef88cac0b8d713094067bcc40909eeef9d896bb177142ab95c4cf03a247cdfbd"
+    },
+    {
+      "path": "frontend/source/findzia-shell.js",
+      "sha256": "435dcdede84172c5230af801b2339f9362d9284ae4605ea09972b021589453c2"
+    },
+    {
+      "path": "frontend/source/findzia-standalone.css",
+      "sha256": "ccb356ccc084d3583c5cb1501b28d77f4c2607ca2e6ea55e3cd7649781c3577e"
+    },
+    {
+      "path": "frontend/source/findzia-subscriptions.js",
+      "sha256": "04fa89d5d3fc5ad75d8e38fda9a2abe5f04254a47c5d3f12f97695b9c2ca87fd"
+    },
+    {
+      "path": "frontend/source/policies/privacy-policy.html",
+      "sha256": "ae00d60f33c150af89daaa56d76c2ff64d36bb74f298a7da4e1e99c3fe93c3b5"
+    },
+    {
+      "path": "frontend/source/policies/refund-policy.html",
+      "sha256": "5b40f0e73f3d924ac2e3644f03777a8cfd7b4422e185de006f0382a71f9ea9b8"
+    },
+    {
+      "path": "frontend/source/policies/terms-of-service.html",
+      "sha256": "5b00efc8be14c50e611dc0e51796f240e53fabf28414b6f514096db0048a191b"
+    }
+  ],
+  "search_backend": "main.py and all search provider modules are excluded from the update",
+  "activation": "FINDZIA_PREPAID_PACKS_ENABLED defaults to false until provider prices/settings are ready"
+}
