@@ -1,13 +1,18 @@
 {
-  "release": "156.7.65",
-  "backend_build": "v128.5.42.54-audit-prices",
+  "release": "156.7.66",
+  "backend_build": "v128.5.42.55-audit-recovery",
   "frontend_version_unchanged": "156.7.64",
-  "base_commit": "407709a158f9c75ac5e8a247efa395cd54fd62a6",
-  "base_git_blob_main": "abd212d8459dcbfb597c3c7da2923d72ea7f0730",
+  "base_commit": "cdf73991112d157710aa189fa29b3ede06ccb2ac",
+  "base_git_blobs": {
+    "main.py": "d23030d2633b4bf8cfec5e6c5ddfc5d8810a0906",
+    "findzia_product_media.py": "5b53144bd14a312a04843856c5786986ec6c2946"
+  },
   "files_to_upload": [
-    "main.py"
+    "main.py",
+    "findzia_product_media.py"
   ],
   "sha256": {
-    "main.py": "edb9586065ba64cda5ad9e8c0e1e10b597adbd07054904f455c6199acde8ad90"
+    "main.py": "cfe81c7ee2f796f02d4f35749d50dc5ee076305f08733bcc4598105152c98e13",
+    "findzia_product_media.py": "1a96a2b218a9dcd1d724ad5523c55e05c570275701fd46ac3f99b77e4d4394eb"
   }
 }

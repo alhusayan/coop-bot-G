@@ -394,7 +394,7 @@ from findzia_billing import CreditMiddleware, install_billing
 app.add_middleware(CreditMiddleware, owner=app)
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization', 'X-Findzia-Request-Id'], max_age=86400)
-BUILD_ID = 'v128.5.42.54-audit-prices'
+BUILD_ID = 'v128.5.42.55-audit-recovery'
 _SOCIAL = None
 
 def _fz_social_row(row):
@@ -5554,6 +5554,25 @@ _LOCAL_SNIPPET_PRICE_NOISE = re.compile(
     r'|ابتداء|توفير|خصم|شهري|تقسيط|أقساط|اقساط', re.I)
 
 
+def _web_snippet_amount_is_fee(text, piece):
+    """Reject an amount labelled as delivery/tax/deposit, not a product price.
+
+    '12 USD. Free shipping' still qualifies; 'Shipping: 12 USD' does not.
+    Explicit structured product prices are handled before this fallback.
+    """
+    text = re.sub(r'\s+', ' ', str(text))
+    fee = r'(?:\b(?:shipping|delivery|postage|tax|vat|deposit|versand|livraison)\b|الشحن|التوصيل|ضريبة|شحن|توصيل)'
+    for found in re.finditer(re.escape(piece), text, re.I):
+        before, after = text[max(0,found.start()-100):found.start()], text[found.end():found.end()+40]
+        if re.search(fee + r'\s*(?:(?:fee|cost|charge|of|is|only)\s*){0,2}[:：=–-]?\s*$', before, re.I):
+            return True
+        if re.match(r'\s*(?:for\s+)?' + fee, after, re.I):
+            return True
+        if re.search(r'\b(?:shipping|delivery)\b[^.!?]{0,70}\b(?:orders?\s+(?:over|above)|minimum\s+(?:order|spend))\s*[:：]?\s*$', before, re.I):
+            return True
+    return False
+
+
 def _local_discovery_plain_snippet_price(row, country):
     """One unambiguous local-currency price in the indexed snippet text, else ''."""
     text = ' '.join(str(row.get(k) or '') for k in ('snippet', 'description') if isinstance(row.get(k), str))
@@ -5572,7 +5591,7 @@ def _local_discovery_plain_snippet_price(row, country):
     if len(pieces) != 1 or _LOCAL_SNIPPET_PRICE_NOISE.search(text):
         return ''
     piece = pieces[0]
-    if _WEB_NOT_A_PRICE_PIECE.search(piece):
+    if _WEB_NOT_A_PRICE_PIECE.search(piece) or _web_snippet_amount_is_fee(text, piece):
         return ''
     quote = _web_price_quote(piece, '', country)
     if not quote or quote.get('kind') != 'exact' or not (quote.get('min') or quote.get('max')):
@@ -16310,10 +16329,10 @@ def _web_identity_response_schema(candidate_count, alternative_review=False):
     optional product attribute and axis enum in the provider grammar made
     v107.47 vulnerable to schema rejection before any audit could run.
     """
-    strings = {'type': 'ARRAY', 'items': {'type': 'STRING'}}
+    strings = {'type': 'ARRAY', 'items': {'type': 'STRING'}, 'maxItems': 40}
     profile = {'type': 'ARRAY', 'items': {'type': 'OBJECT', 'properties': {
-        'field': {'type': 'STRING'}, 'values': strings,
-    }, 'required': ['field', 'values']}}
+        'field': {'type': 'STRING'}, 'values': {'type': 'ARRAY', 'items': {'type': 'STRING'}, 'maxItems': 8},
+    }, 'required': ['field', 'values']}, 'maxItems': len(_WEB_VISUAL_PROFILE_TEXT_FIELDS) + len(_WEB_VISUAL_PROFILE_LIST_FIELDS)}
     score = {'type': 'INTEGER'}
     item = {'type': 'OBJECT', 'properties': {
         'id': {'type': 'INTEGER'},
@@ -16322,14 +16341,16 @@ def _web_identity_response_schema(candidate_count, alternative_review=False):
         'confidence': score, 'identity_score': score, 'observation_quality': score,
         'candidate_profile': profile,
         'same_axes': strings, 'different_axes': strings, 'differences': strings,
-        'match_reason': {'type': 'STRING'}, 'market_reason': {'type': 'STRING'},
+        'match_reason': {'type': 'STRING', 'enum': ['same_product', 'different_variant', 'different_product', 'uncertain']},
+        'market_reason': {'type': 'STRING', 'enum': ['local_storefront', 'foreign_storefront', 'uncertain']},
+        'image_kind': {'type': 'STRING', 'enum': ['product', 'logo', 'text_only', 'placeholder', 'uncertain']},
     }}
     if alternative_review:
         item['properties'].update(alternative_fit={'type': 'STRING'},
                                   alternative_confidence=score)
     item['required'] = list(item['properties'])
     return {'type': 'OBJECT', 'properties': {
-        'reference_profile': profile, 'items': {'type': 'ARRAY', 'items': item},
+        'reference_profile': profile, 'items': {'type': 'ARRAY', 'items': item, 'minItems': max(1, int(candidate_count)), 'maxItems': max(1, int(candidate_count))},
     }, 'required': ['reference_profile', 'items']}
 
 def _web_identity_profile_from_wire(value):
@@ -16962,7 +16983,7 @@ def _web_ai_classifier_request(identity, results, market, visual_context=None, c
 
 
 
-def _web_ai_classifier_request_live(identity, results, market, visual_context=None, cancel_event=None, _prepared_evidence=None, progress_callback=None):
+def _web_ai_classifier_request_live(identity, results, market, visual_context=None, cancel_event=None, _prepared_evidence=None, progress_callback=None, *, _retry_truncated=True, _request_deadline=None):
     """Classify one captured batch with one text or multimodal Gemini request."""
     visual_context = _web_photo_match_context(visual_context)
     photo_evidence = (visual_context or {}).get('reference_photo_evidence') or {}
@@ -17066,7 +17087,9 @@ Include every supplied id exactly once. Confidence is an integer 0-100.'''
     if schema_prompt_start >= 0 and schema_prompt_end > schema_prompt_start:
         system = system[:schema_prompt_start] + 'Follow the supplied response schema. ' + system[schema_prompt_end:]
     system += '''\nWIRE FORMAT (overrides the object profile example above): Return ONE JSON object with reference_profile and items. Each profile is a sparse array of facts: [{"field":"brand","values":["observed brand"]},{"field":"components","values":["observed component"]}]. Use only the allowed profile fields below. Each text field has exactly one string in values; list fields can have multiple strings. Never repeat a field. Omit unknown facts; use [] for a wholly unknown profile. Do not copy example values. Each item must contain id, match (exact or similar), market (local or global), confidence, identity_score, observation_quality (integers 0-100), candidate_profile, same_axes, different_axes, differences (arrays), match_reason and market_reason (short strings). Include every supplied id exactly once. Do not return the reference_profile alone.\n'''
-    system += 'TEXT FIELDS: ' + ', '.join(_WEB_VISUAL_PROFILE_TEXT_FIELDS)
+    system += '''\nCOMPACT OUTPUT: Emit one minified JSON line, without indentation or prose. Profile values are short canonical facts, not sentences; normally use at most 80 characters per value, but preserve every character of a real model/SKU/identifier. Do not repeat an observed fact in several list values. Keep facts supporting every reported axis. match_reason must be same_product, different_variant, different_product or uncertain; market_reason must be local_storefront, foreign_storefront or uncertain. Every item also includes image_kind; use uncertain if no CANDIDATE_IMAGE is attached. Judge image_kind from that candidate's pixels alone, never its title, URL, reference image or identity score. The following image policy applies independently to each CANDIDATE_IMAGE (the enclosing response schema replaces its example output):\n'''
+    system += _FINDZIA_MEDIA_PIXEL_POLICY
+    system += '\nTEXT FIELDS: ' + ', '.join(_WEB_VISUAL_PROFILE_TEXT_FIELDS)
     system += '\nLIST FIELDS: ' + ', '.join(_WEB_VISUAL_PROFILE_LIST_FIELDS)
     if photo_evidence.get('text_search_reference'):
         system += '''
@@ -17159,6 +17182,13 @@ judge the product type and overall resemblance, not for ordinary design variants
         'generationConfig': {'temperature': 0, 'maxOutputTokens': _web_identity_output_budget(len(candidates), visual_mode), 'responseMimeType': 'application/json', 'responseSchema': _web_identity_response_schema(len(candidates), alternative_review)},
     }
     effective_timeout = WEB_VISUAL_CLASSIFIER_TIMEOUT_SECONDS if visual_mode else WEB_AI_CLASSIFIER_TIMEOUT_SECONDS
+    # One MAX_TOKENS recovery may use remaining time, never a new full window.
+    request_deadline = _request_deadline or (time.monotonic() + effective_timeout)
+    effective_timeout = min(effective_timeout, max(0.0, request_deadline - time.monotonic()))
+    if effective_timeout < .2:
+        return _web_identity_review_failure('timeout', visual_mode, len(visual_evidence_ids))
+    if not _retry_truncated:
+        payload['generationConfig']['maxOutputTokens'] = min(24000, int(payload['generationConfig']['maxOutputTokens'] * 1.5))
     def normalize(parsed):
         parsed_items = parsed.get('items') or []
         reference_profile = _web_visual_normalize_profile(parsed.get('reference_profile'))
@@ -17278,6 +17308,8 @@ judge the product type and overall resemblance, not for ordinary design variants
                 'identity_score': identity_score,
                 'observation_quality': observation_quality,
                 'visual_evidence': has_visual_evidence,
+                'image_kind': (item.get('image_kind') if candidate_input.get('image_attached')
+                               and item.get('image_kind') in ('product','logo','text_only','placeholder') else 'uncertain'),
                 'alternative_fit': (str(item.get('alternative_fit') or 'uncertain')
                                     if candidate_input.get('alternative_review') else 'not_requested'),
                 'alternative_confidence': item.get('alternative_confidence', 0),
@@ -17342,12 +17374,31 @@ judge the product type and overall resemblance, not for ordinary design variants
             return _web_identity_review_failure('no_candidates', visual_mode, len(visual_evidence_ids))
         finish_reason = str(model_candidates[0].get('finishReason') or '')
         if finish_reason == 'MAX_TOKENS':
-            print(f'WEB IDENTITY REVIEW truncated candidates={len(candidates)}')
+            remaining = request_deadline - time.monotonic()
+            retry = _retry_truncated and remaining >= 4.0 and not (cancel_event is not None and cancel_event.is_set())
+            print(f'WEB IDENTITY REVIEW truncated candidates={len(candidates)} retry={retry} remaining_ms={max(0,int(remaining*1000))}')
+            if retry:
+                _api_cost_record('gemini_identity_truncated_retries')
+                return _web_ai_classifier_request_live(identity, results, market, visual_context, cancel_event,
+                    _prepared_evidence=(reference_inline, visual_evidence), progress_callback=progress_callback,
+                    _retry_truncated=False, _request_deadline=request_deadline)
+            # Never repair a half-written identity or bypass duplicate guards.
+            return _web_identity_review_failure('output_truncated', visual_mode, len(visual_evidence_ids))
         raw = _web_identity_response_text(model_candidates[0])
-        if progress_callback is not None and visual_mode:
+        if visual_mode:
+            # Both streaming and ordinary visual replies must be unambiguous
+            # before their identity or pixel judgements can be reused.
             # A conflicting duplicate field/id must revoke any provisional score.
-            strict = json.loads(raw, object_pairs_hook=_web_identity_unique_object)
-            ids = [item.get('id') for item in strict.get('items', []) if isinstance(item, dict)]
+            try:
+                strict = json.loads(raw, object_pairs_hook=_web_identity_unique_object)
+            except json.JSONDecodeError:
+                print(f'WEB IDENTITY REVIEW unavailable=malformed_json response_chars={len(raw)}')
+                return _web_identity_review_failure('malformed_json', visual_mode, len(visual_evidence_ids))
+            except ValueError:
+                return _web_identity_review_failure('duplicate_identity_field', visual_mode, len(visual_evidence_ids))
+            if not isinstance(strict, dict) or not isinstance(strict.get('items'), list):
+                return _web_identity_review_failure('invalid_items', visual_mode, len(visual_evidence_ids))
+            ids = [item.get('id') for item in strict['items'] if isinstance(item, dict)]
             if any(type(cid) is not int for cid in ids) or len(ids) != len(set(ids)):
                 return _web_identity_review_failure('duplicate_or_invalid_ids', visual_mode, len(visual_evidence_ids))
         parsed, parse_error = _web_parse_identity_response(raw)
@@ -17360,6 +17411,19 @@ judge the product type and overall resemblance, not for ordinary design variants
             return value
         normalized = value['items']
         reference_profile = value['reference_profile']
+        # Share only a final, explicit image-kind judgement for these exact
+        # bytes. Identity scores/category guesses alone never admit a photo.
+        if visual_mode and finish_reason == 'STOP':
+            inspector = getattr(app.state, 'product_media_inspector', None)
+            if inspector is not None and hasattr(inspector, 'remember_audit'):
+                for item in normalized:
+                    inline = visual_evidence.get(item['id'])
+                    if inline and item.get('image_kind') in ('product','logo','text_only','placeholder'):
+                        try:
+                            inspector.remember_audit(inline, item['image_kind'])
+                        except Exception:
+                            # Cache reuse is an optimization, not an audit gate.
+                            _api_cost_record('media_audit_share_unavailable')
         # Failed/partial reviews never poison later searches. A cache hit still
         # goes through the existing local conflict and Exact-proof validators.
         cacheable = bool(reference_profile) and all(
@@ -20347,6 +20411,51 @@ def _web_same_index_listing(first, second):
 FINDZIA_GROUPED_RECOVERY_ENABLED = env_bool('FINDZIA_GROUPED_RECOVERY_ENABLED', False)
 
 
+def _web_indexed_price_present(item):
+    """Presence diagnostic only; this never accepts or invents a price."""
+    if any(item.get(k) not in (None, '') for k in ('price','extracted_price','price_value')):
+        return True
+    snippet = item.get('rich_snippet')
+    snippet = snippet if isinstance(snippet, dict) else {}
+    for side in ('top','bottom'):
+        block = snippet.get(side)
+        if not isinstance(block, dict):
+            continue
+        detected = block.get('detected_extensions')
+        if isinstance(detected, dict) and any(detected.get(k) is not None for k in ('price','price_from','price_to')):
+            return True
+        extensions = block.get('extensions')
+        if isinstance(extensions, list) and any(pat.search(str(piece)) for piece in extensions for pat in _WEB_PRICE_PATS):
+            return True
+    text = ' '.join(str(item.get(k) or '') for k in ('snippet','description'))
+    return any(pat.search(text) for pat in _WEB_PRICE_PATS)
+
+
+def _web_log_price_recovery(row, market, counts, returned, failed):
+    """Safe per-listing reasons; no query, title, URL, price or provider body."""
+    key = _web_price_url_key(row.get('url'))
+    if counts['accepted_price']:
+        reason = 'recovered'
+    elif counts['price_rejected'] or counts['price_policy_rejected']:
+        reason = 'price_rejected'
+    elif counts['no_price_evidence']:
+        reason = 'price_absent'
+    elif counts['title_conflict']:
+        reason = 'title_conflict'
+    elif counts['same_id_query_mismatch']:
+        reason = 'variant_or_query_mismatch'
+    elif counts['same_id_other_market']:
+        reason = 'other_storefront_only'
+    else:
+        reason = 'listing_not_returned' if returned else 'provider_unavailable' if failed else 'empty_index'
+    print('PRICE RECOVERY TRACE ' + json.dumps({
+        'offer': hashlib.sha256(key.encode()).hexdigest()[:12],
+        'host': (urllib.parse.urlsplit(key).hostname or '')[:120],
+        'market': _web_listing_price_country(row, market), 'reason': reason,
+        'batch_records': returned, 'batch_failed_lookups': failed,
+        'counts': dict(counts)}, sort_keys=True))
+
+
 def _web_targeted_price_updates(entries, lang, market, *, image_only=False):
     """Bounded independent listing lookups; recover image and money independently."""
     if not _indexed_recovery_allowed():
@@ -20396,14 +20505,16 @@ def _web_targeted_price_updates(entries, lang, market, *, image_only=False):
                 request['engine'] = provider + '_images' if provider else 'google_images'
                 return _web_shein_index_fetch(request, budget) or {}
             if provider:
-                return _fast_provider_search(provider + ('_images' if image_source else '_search'), term,
+                response = _fast_provider_search(provider + ('_images' if image_source else '_search'), term,
                     search_cc, request['hl'], (connect, budget-connect),
                     num=None if image_source else 10,
-                    purpose='listing_image' if image_source else 'listing_price') or {}
-            return _serpapi_cached_json(request, timeout=(connect, budget-connect), label='EXACT-LISTING') or {}
+                    purpose='listing_image' if image_source else 'listing_price')
+            else:
+                response = _serpapi_cached_json(request, timeout=(connect, budget-connect), label='EXACT-LISTING')
+            return response if isinstance(response, dict) and not response.get('error') else {'_findzia_lookup_failed': True}
         except Exception as exc:
             print('EXACT-LISTING lookup_failed=' + type(exc).__name__)
-            return {}
+            return {'_findzia_lookup_failed': True}
     lookup_terms = list(dict.fromkeys(terms))[:4]
     if _SEARCHAPI_ROUTER.enabled and _SEARCHAPI_ROUTER.economy and FINDZIA_GROUPED_RECOVERY_ENABLED:
         # Group only within one storefront market; never borrow another
@@ -20417,38 +20528,54 @@ def _web_targeted_price_updates(entries, lang, market, *, image_only=False):
     # Per-listing queries preserve recall. Grouping is an explicit experiment.
     with ThreadPoolExecutor(max_workers=min(4, len(lookup_terms))) as pool:
         responses = list(pool.map(lookup, lookup_terms))
-    data = {'organic_results': [item for response in responses for item in _web_indexed_media_records(response)]}
+    records = [item for response in responses for item in _web_indexed_media_records(response)]
+    diagnostics = {key: Counter() for key in entries}
     updates = {}
-    for item in _web_indexed_media_records(data):
+    for item in records:
         link = _local_discovery_direct_link(item)
         item_key = _web_price_url_key(link)
         if not item_key:
             continue
         for key, row in entries.items():
             same_listing = _web_same_index_listing(link, row.get('url'))
+            diag = diagnostics[key]
             if not same_listing and not (image_source and _fz_same_image_listing(link, row.get('url'))):
+                # Diagnostic only. A matching SHEIN ID never transfers money
+                # between stores/markets, query variants or currency options.
+                product_id = _web_shein_product_id(link)
+                if product_id and product_id == _web_shein_product_id(row.get('url')):
+                    a, b = urllib.parse.urlsplit(item_key), urllib.parse.urlsplit(_web_price_url_key(row.get('url')))
+                    diag['same_id_other_market' if a.netloc != b.netloc or a.path.rsplit('/',1)[0] != b.path.rsplit('/',1)[0]
+                         else 'same_id_query_mismatch'] += 1
                 continue
+            diag['matched_listing'] += 1
             title = _local_discovery_title(item)
             original = str(row.get('raw_title') or row.get('title') or '')
             if title and original and _findzia_hard_product_mismatch(original, title):
+                diag['title_conflict'] += 1
                 continue
             # The old parser ran before binding the listing and had no country:
             # every ambiguous $ / yuan symbol from this fallback was discarded.
             cc = _web_listing_price_country(row, market)
             evidence = dict(item, _shopping_gl=cc, _price_market=cc)
-            if not evidence.get('price'):
+            if not evidence.get('price') and not _web_indexed_offer_quote(evidence):
                 evidence['price'] = _local_discovery_plain_snippet_price(evidence, evidence.get('_price_market') or cc)
             quote = _web_indexed_offer_quote(evidence)
             regional = _fz_regional_price_store(row.get('url'))
             if regional:
                 quote = _fz_regional_index_quote(item, row.get('url'))
             money = ((quote['min'] or quote['max']),quote['currency']) if quote else None
+            if not money:
+                diag['price_rejected' if _web_indexed_price_present(item) else 'no_price_evidence'] += 1
             change = dict(updates.get(key) or {})
             if money and same_listing and not image_only and (quote['kind']!='exact' or not _host_matches_any(urllib.parse.urlsplit(link).hostname or '', ('1688.com',))):
                 change.update(_web_live_quote_fields(quote, market),
                     price_source='regional_listing_text' if regional else 'exact_listing_index', price_source_url=link,
                     price_checked_at=time.time(), price_verified=False,
                     price_status='indexed', price_pending=False, price_unavailable=False)
+                diag['accepted_price'] += 1
+            elif money and not image_only:
+                diag['price_policy_rejected'] += 1
             pictures = _web_offer_image_candidates(item)
             if pictures:
                 change['page_image'] = pictures[0]
@@ -20456,6 +20583,10 @@ def _web_targeted_price_updates(entries, lang, market, *, image_only=False):
                 change['image_source'] = 'exact_listing_index'
             if change:
                 updates[key] = change
+    if not image_source:
+        failed = sum(bool(response.get('_findzia_lookup_failed')) for response in responses)
+        for key, row in entries.items():
+            _web_log_price_recovery(row, market, diagnostics[key], len(records), failed)
     print(f'EXACT-LISTING RECOVERY engine={params["engine"]} requested={len(entries)}'
           f' lookups={len(lookup_terms)} recovered_images={sum(bool(value.get("page_image")) for value in updates.values())}'
           f' recovered_prices={sum(bool(value.get("price")) for value in updates.values())}')
@@ -22359,6 +22490,12 @@ def _serper_to_serpapi(kind, data):
             if row.get('imageUrl'):
                 item['thumbnail'] = row['imageUrl']
             if row.get('price'):
+                item['price'] = copy.deepcopy(row['price'])
+                if row.get('currency'):
+                    item['currency'] = row['currency']
+                for qualifier in ('installments_description', 'monthly_payment_duration', 'down_payment'):
+                    if row.get(qualifier) is not None:
+                        item[qualifier] = copy.deepcopy(row[qualifier])
                 snippet = _fast_rich_snippet(row.get('price'), row.get('currency'))
                 if snippet:
                     item['rich_snippet'] = snippet
@@ -33656,7 +33793,9 @@ _SOCIAL = _install_findzia_social(app)
 
 
 # 156.7.61: verify the exact display candidate, independently of search ranking.
-from findzia_product_media import install as _install_product_media
+import findzia_product_media as _findzia_media_module
+_install_product_media = _findzia_media_module.install
+_FINDZIA_MEDIA_PIXEL_POLICY = getattr(_findzia_media_module, 'PIXEL_POLICY', _findzia_media_module.PROMPT)
 _install_product_media(app,
     enabled=lambda: WEB_API_ENABLED,
     rate_allowed=lambda request: _web_rate_allowed(request, scope='media_check'),
