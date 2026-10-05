@@ -5,10 +5,10 @@ import { fileURLToPath } from 'node:url';
 
 const base = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const src = resolve(base, 'source'), dest = resolve(base, 'public');
-const version = '156.7.49', api = 'https://api.findzia.com';
+const version = '156.7.51', api = 'https://api.findzia.com';
 // Preserve the live section scope to avoid unnecessary DOM/storage changes.
 const section = 'template--19963721449543__findzia_home_h4wBLq';
-const expected = 'c15558d3e155e2031ef39b32775050c283b545d8575643181af3c3b9f03d46a3';
+const expected = '2de7b483319c713bf649352f7f158f1fedbda92f546bebfe576ae0a2d2c526c6';
 const hash = b => createHash('sha256').update(b).digest('hex');
 const read = p => readFileSync(resolve(src, p));
 const sourceReleases={home:read('findzia-home.liquid').toString().match(/FINDZIA_HOME_RELEASE=([0-9.]+)/)?.[1],shell:read('findzia-shell.js').toString().match(/FINDZIA_SHELL_RELEASE=([0-9.]+)/)?.[1]};
@@ -23,7 +23,7 @@ const packageVersion=JSON.parse(readFileSync(resolve(base,'package.json'),'utf8'
 if(packageVersion!==version)throw Error('Release mismatch: replace frontend/package.json and frontend/scripts/build.mjs together.');
 if(sourceReleases.boot!=='156.7.43')throw Error('Release mismatch: expected frontend/source/findzia-boot.js version 156.7.43.');
 for(const [key,file] of [['home','findzia-home.liquid'],['shell','findzia-shell.js'],['billing','findzia-billing.js'],['subscriptions','findzia-subscriptions.js'],['guide','findzia-filters.js'],['account','findzia-account.js'],['motion','findzia-motion.js'],['motionCSS','findzia-motion.css']]){
-  const expectedVersion=key==='home'?version:['billing','guide'].includes(key)?'156.7.48':key==='account'?'156.7.45':'156.7.43';
+  const expectedVersion=['home','billing','account','motion','motionCSS'].includes(key)?version:key==='guide'?'156.7.48':'156.7.43';
   if(sourceReleases[key]!==expectedVersion)throw Error('Release mismatch: replace frontend/source/'+file+' with version '+expectedVersion+'.');
 }
 const routes = {};
