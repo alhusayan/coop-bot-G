@@ -394,7 +394,7 @@ from findzia_billing import CreditMiddleware, install_billing
 app.add_middleware(CreditMiddleware, owner=app)
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization', 'X-Findzia-Request-Id'], max_age=86400)
-BUILD_ID = 'v128.5.42.50-ui'
+BUILD_ID = 'v128.5.42.51-media'
 _SOCIAL = None
 
 def _fz_social_row(row):
@@ -11896,7 +11896,7 @@ def _web_rate_allowed(request, *, scope='search'):
     # Auxiliary image repair must never spend the visitor's search allowance.
     # Each bucket remains bounded, including calls made by older frontends.
     key = (scope, _web_request_ip(request))
-    limit = 24 if scope == 'media' else WEB_API_RATE_PER_MINUTE
+    limit = 120 if scope == 'media_check' else 24 if scope == 'media' else WEB_API_RATE_PER_MINUTE
     now = time.time()
     with WEB_RATE_LOCK:
         q = WEB_RATE_BUCKETS[key]
@@ -31804,6 +31804,7 @@ async def web_api_health_classic():
             'china_local_strategy':'native_balanced_domestic_open_baidu','global_china_balanced':True,
             'indexed_listing_queries':'independent_id_or_title','image_empty_response_guard':PILImage is not None,
             'regional_price_binding':'explicit_currency_same_listing','media_recovery':'signed_exact_listing',
+            'product_media_release':'156.7.61','product_media_ai_configured':bool(GEMINI_API_KEY),
             'shopping_guide_enabled':True,'shopping_guide_ai_configured':bool(GEMINI_API_KEY),
             'shopping_guide_history':'device_opt_in_editable_90_days','refinement_toolbar':'selected_only'}
 
@@ -31834,6 +31835,7 @@ def _fz_evaluation_token(row):
             for k,v in data.items()}
     if len(data.get('url','')) > 2048:
         return ''
+    data['image_hashes']=[hashlib.sha256(u.encode()).hexdigest() for u in _web_offer_image_candidates(row)]
     data['key_specs']=[{'key':_card_text(x.get('key') or x.get('kind'),40),'value':_card_text(x.get('value'),140)}
                        for x in (row.get('key_specs') or [])[:8] if isinstance(x,dict) and x.get('value')]
     attributes=row.get('card_attributes')
@@ -32253,6 +32255,7 @@ def _fz_recover_media(row):
     def result(urls):
         urls = urls[:8]
         return {'ok': True, 'images': urls,
+                'media_token': _fz_evaluation_token(dict(row, images=urls)),
                 'image_candidates': _web_merge_offer_images({}, {'images': urls}).get('image_candidates', urls)}
     deadline = time.monotonic() + 8
     page_job = _FZ_MEDIA_LOOKUP_POOL.submit(_run_with_market, market, page)
@@ -33596,3 +33599,14 @@ _findzia_locale = _install_findzia_locale(app, _refine_ai)
 # Background social ingestion is isolated from all request/credit provider paths.
 from findzia_social import install as _install_findzia_social
 _SOCIAL = _install_findzia_social(app)
+
+
+# 156.7.61: verify the exact display candidate, independently of search ranking.
+from findzia_product_media import install as _install_product_media
+_install_product_media(app,
+    enabled=lambda: WEB_API_ENABLED,
+    rate_allowed=lambda request: _web_rate_allowed(request, scope='media_check'),
+    decode_row=_fz_evaluation_row,
+    normalize_url=lambda value: _web_unproxy_image_url(value) if isinstance(value,str) else '',
+    fetch_inline=lambda url: _web_visual_candidate_inline({'image':url}),
+    judge=_refine_ai)
