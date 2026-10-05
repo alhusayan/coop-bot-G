@@ -1,0 +1,63 @@
+--- a/findzia_paddle.py
++++ b/findzia_paddle.py
+@@ -1,4 +1,4 @@
+-"""Findzia 156.7.35 Paddle adapter: in-site subscription management.
++"""Findzia 156.7.57 Paddle adapter: explicit checkout access failures.
+ 
+ Live checkout starts with an email allowlist; LIVE_OPEN explicitly opens it to members.
+ A durable inbox survives
+@@ -121,7 +121,7 @@
+ 
+     def public(self, member=None):
+         return dict(checkout_available=self.allowed(member or {}), restore_available=self.allowed(member or {}),
+-                    recovery_build='156.7.55',
++                    recovery_build='156.7.57',
+                     management_available=self.management_available(member or {}),
+                     paddle_environment=self.mode, paddle_client_token=self.client_token,
+                     checkout_plan_ids=[p['id'] for p in self.credits.sale_plans if p['id'] in self.prices])
+@@ -133,6 +133,11 @@
+                     and (self.mode == 'live' or member.get('email','').lower() in self.test_emails))
+ 
+     def api(self, method, path, body=None, *, envelope=False):
++        # Diagnostics use fixed labels only: never log IDs, queries or request bodies.
++        operation = method if method in ('GET', 'POST', 'PATCH', 'DELETE') else 'other'
++        resource = path.split('?', 1)[0].strip('/').split('/')[0]
++        if resource not in ('prices', 'transactions', 'subscriptions', 'customers'):
++            resource = 'other'
+         # Fixed host; never follow provider/browser supplied pagination URLs.
+         try:
+             response = requests.request(method, self.base + path,
+@@ -147,13 +152,14 @@
+                 except (ValueError, AttributeError):
+                     exc = PaddleAPIError(response.status_code)
+                 # No response bodies, tokens, customer details, or URLs in logs.
+-                print('PADDLE_API_ERROR mode=%s status=%s code=%s request_id=%s' %
+-                      (self.mode, exc.status, exc.code, exc.request_id), flush=True)
++                print('PADDLE_API_ERROR build=156.7.57 mode=%s operation=%s resource=%s status=%s code=%s request_id=%s' %
++                      (self.mode, operation, resource, exc.status, exc.code, exc.request_id), flush=True)
+                 raise exc
+             payload = response.json()
+             return payload if envelope else payload['data']
+         except (requests.RequestException, KeyError, ValueError) as exc:
+-            print('PADDLE_API_ERROR mode=%s code=transport_or_response_error' % self.mode, flush=True)
++            print('PADDLE_API_ERROR build=156.7.57 mode=%s operation=%s resource=%s code=transport_or_response_error' %
++                  (self.mode, operation, resource), flush=True)
+             raise RuntimeError('paddle_unavailable') from exc
+ 
+     def recover_unmapped_checkout(self, member):
+@@ -305,7 +311,14 @@
+                 db.execute(f"UPDATE {self.prefix}checkout SET state='canceled' WHERE intent=? AND member=?",
+                            (row['intent'], member['id']))
+             return None
+-        except (PaddleAPIError, RuntimeError, ValueError, TypeError, AttributeError):
++        except PaddleAPIError as exc:
++            # Missing access is an actionable configuration error, not evidence
++            # that a payment is processing. Keep the saved transaction intact;
++            # stop automatic checkout polling until access has been restored.
++            if exc.status in (401, 403):
++                raise HTTPException(503, exc.public_code()) from exc
++            return self.pending_checkout(row)
++        except (RuntimeError, ValueError, TypeError, AttributeError):
+             # A cancellation timeout may have succeeded. Re-read next time;
+             # never create a second chargeable transaction based on a timeout.
+             return self.pending_checkout(row)
