@@ -1,4 +1,4 @@
-/* FINDZIA_MOTION_RELEASE=156.7.53 — Findzia 156.7.53 — shared motion for live results, loaded images and navigation.
+/* FINDZIA_MOTION_RELEASE=156.7.62 — Findzia 156.7.62 — shared motion for live results, loaded images and navigation.
  * No router, fetch interception, search delay, or payment lifecycle changes.
  * All content is visible without this enhancement. */
 (function () {
@@ -205,7 +205,7 @@
       const items = [...dialog.querySelectorAll('.fza-nav-label, .fza-nav-link, .fz-dark-menu-action:not([hidden]), .fza-nav-footer')].filter(visible);
       items.forEach((item, i) => reveal(item, 55 + Math.min(i, 5) * timings.item, 'ui'));
     } else {
-      animate(dialog, [{ opacity: 0, translate: '0 10px' }, { opacity: 1, translate: '0 0' }], { duration: 300, easing: quick });
+      animate(dialog, [{ opacity: 0, translate: '0 10px' }, { opacity: 1, translate: '0 0' }], { duration: dialog.matches('.fz-account') ? timings.menu : 300, easing: quick });
     }
   }
   function mountDialog(dialog) {
@@ -233,7 +233,7 @@
         if (nextView !== view) { view = nextView; token = { seen: new Set() }; }
         if (key !== signature) { signature = key; reveal(q, 0, 'ui'); }
         // Only Findzia-owned content. Never animate the checkout host or provider frames.
-        revealNodes(dialog, '.fza-page-intro, .fza-empty, .fza-identity, .fza-membership, .fza-group, .fza-tile, .fza-product, .fza-history-line, .fza-list-tools, .fza-usage-summary, .fza-faq, .fza-policy, .fza-plan-empty, .fza-providers, .fza-login-label, .fzb-plan, .fzb-credit-card, .fzb-payment-result', token);
+        revealNodes(dialog, '.fza-page-intro, .fza-empty, .fza-identity, .fza-membership, .fza-group, .fza-tile, .fza-product, .fza-history-line, .fza-list-tools, .fza-usage-summary, .fza-faq, .fza-policy, .fza-plan-empty, .fza-login, .fzb-plan, .fza-credit-card, .fzb-payment-result', token);
         dialog.querySelectorAll(imageSelector).forEach(image);
       } else if (dialog.matches('[data-preferences]')) {
         revealNodes(dialog, '.fz-preferences-head h2, .fz-preferences-field, .fz-setting-row', token);
@@ -369,7 +369,7 @@
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) for (const entry of [...active]) stop(entry.el);
   });
-  window.FindziaMotion = Object.freeze({ version: '156.7.53', timings, results, image, reveal, mount });
+  window.FindziaMotion = Object.freeze({ version: '156.7.62', timings, results, image, reveal, mount });
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot, { once: true });
   else boot();
 })();
