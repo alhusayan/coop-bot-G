@@ -45,13 +45,17 @@ def creation(service, member):
                 db.execute('BEGIN IMMEDIATE')
                 db.execute("UPDATE fz_mf_orders SET state='canceled' WHERE member=? AND mode=? AND state IN ('session_creating','session_ready')",
                            (member['id'], service.mode))
-                # 'abandoned' is an unused hosted invoice already reviewed by
-                # MyFatoorah's verifier, not an in-flight payment. Keep its mapping
-                # intact so a late paid webhook can still credit it exactly once.
-                row = db.execute('''SELECT 1 FROM fz_mf_orders o
+                previous = db.execute('''SELECT 1 FROM fz_mf_orders o
                     WHERE o.member=? AND o.mode=? AND
                     o.state IN ('creating','pending','session_processing') LIMIT 1''',
                     (member['id'], service.mode)).fetchone()
+                # Merchant-approved policy (156.7.56): historical MyFatoorah
+                # attempts do not block a separate Paddle purchase. Preserve
+                # their state and mappings; never treat them as failed or paid.
+                # No MyFatoorah request or recovery work runs in Paddle checkout.
+                if previous:
+                    print('CHECKOUT_GUARD build=156.7.56 gateway=paddle other=myfatoorah result=ignored_for_paddle', flush=True)
+                row = None
             elif gateway == 'myfatoorah':
                 table = 'fz_paddle_live_checkout' if service.mode == 'live' else 'fz_paddle_checkout'
                 row = db.execute(f"SELECT 1 FROM {table} WHERE member=? AND state IN ('creating','pending','uncertain') LIMIT 1",
@@ -67,7 +71,7 @@ def creation(service, member):
                 try:
                     resolved = reviewer(member)
                 except Exception:
-                    print('CHECKOUT_GUARD build=156.7.55 gateway=%s other=%s result=verification_unavailable' % (gateway, other), flush=True)
+                    print('CHECKOUT_GUARD build=156.7.56 gateway=%s other=%s result=verification_unavailable' % (gateway, other), flush=True)
                     raise HTTPException(409, 'other_payment_pending') from None
                 if resolved and resolved.get('confirmed'):
                     yield {'confirmed': True}
@@ -80,7 +84,7 @@ def creation(service, member):
                     row = db.execute(f"SELECT state FROM {table} WHERE member=? AND state IN ('creating','pending','uncertain') LIMIT 1",
                                      (member['id'],)).fetchone()
             if row:
-                print('CHECKOUT_GUARD build=156.7.55 gateway=%s other=%s state=%s result=still_pending' % (gateway, other, row['state']), flush=True)
+                print('CHECKOUT_GUARD build=156.7.56 gateway=%s other=%s state=%s result=still_pending' % (gateway, other, row['state']), flush=True)
                 raise HTTPException(409, 'other_payment_pending')
         yield None
     finally:

@@ -134,6 +134,12 @@ class MyFatoorahPack:
     def require(self, member):
         if not self.allowed(member): raise HTTPException(403, 'myfatoorah_not_available')
 
+    def can_reconcile(self):
+        # Disabling new sales must not discard signed late payments/refunds.
+        # Creation still requires self.ready and the selected payment provider.
+        return bool(self.credits.available and self.key and self.secret
+                    and self.mode in ('sandbox', 'live'))
+
     def can_restore(self, member):
         # Disabling new MyFatoorah sales must not disable owned payment recovery.
         return bool(self.credits.available and self.key and self.mode in ('sandbox', 'live')
@@ -166,7 +172,9 @@ class MyFatoorahPack:
         with self.accounts.connect() as db:
             pending = db.execute("SELECT 1 FROM fz_mf_orders WHERE member=? AND mode=? AND state IN ('creating','pending','session_processing') LIMIT 1",
                                  (member['id'], self.mode)).fetchone()
-        return {'payment_pending': bool(pending), 'confirmed': bool(review and review.get('confirmed'))}
+        blocks_checkout = bool(pending) and not (self.credits.prepaid_enabled and self.credits.payment_provider == 'paddle')
+        return {'payment_pending': bool(pending), 'blocks_checkout': blocks_checkout,
+                'confirmed': bool(review and review.get('confirmed'))}
 
     def public(self, member):
         window = getattr(self, 'apple_window', None)
@@ -174,7 +182,7 @@ class MyFatoorahPack:
         inline_origins = [host for host, registration in storefronts.items()
                           if registration.ready and self.allowed(member)]
         return {'ok': True, 'enabled': self.enabled, 'environment': self.mode,
-                'restore_available': self.can_restore(member), 'recovery_build': '156.7.55',
+                'restore_available': self.can_restore(member), 'recovery_build': '156.7.56',
                 'checkout_mode': 'embedded', 'checkout_build': '156.7.18', 'pricing_build': '156.7.54',
                 'checkout_available': self.allowed(member), 'plan_id': 'pack',
                 'checkout_plan_ids': [p['id'] for p in self.credits.sale_plans if p['interval']=='once'],
@@ -682,7 +690,7 @@ class MyFatoorahPack:
             raise
 
     def receive(self, raw, signature):
-        if not self.ready: raise HTTPException(503,'myfatoorah_not_ready')
+        if not self.can_reconcile(): raise HTTPException(503,'myfatoorah_not_ready')
         try:
             event = json.loads(raw); name = event['Event']['Name']; data = event['Data']
             fields = FIELDS[name]
@@ -712,7 +720,7 @@ class MyFatoorahPack:
             db.execute('INSERT OR IGNORE INTO fz_mf_jobs(id,mode,invoice,payment) VALUES(?,?,?,?)',(job,self.mode,invoice,payment))
 
     def process_jobs(self):
-        if not self.ready: return
+        if not self.can_reconcile(): return
         with self.accounts.connect() as db:
             jobs=db.execute("SELECT * FROM fz_mf_jobs WHERE mode=? AND state='pending' AND next_try<=? LIMIT 20",(self.mode,int(time.time()))).fetchall()
         for job in jobs:
@@ -736,7 +744,7 @@ class MyFatoorahPack:
         A separate purchase never discards an old invoice or authorizes a charge
         retry. Only reads run here; verified late payments retain their credits.
         """
-        if not self.ready: return
+        if not self.can_reconcile(): return
         now=int(time.time())
         with self.accounts.connect() as db:
             db.execute('BEGIN IMMEDIATE')
@@ -771,7 +779,7 @@ def install_myfatoorah(app, credits):
     @app.on_event('startup')
     async def startup():
         LOG.warning('MF_CHECKOUT_BUILD version=156718 mode=embedded enabled=%s',service.embedded)
-        if service.ready: service.task=asyncio.create_task(service.worker())
+        if service.can_reconcile(): service.task=asyncio.create_task(service.worker())
     @app.on_event('shutdown')
     async def shutdown():
         if service.task:
