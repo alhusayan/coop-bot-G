@@ -1,5 +1,5 @@
-/* FINDZIA_BILLING_RELEASE=156.7.59 */
-/* Findzia 156.7.59 — compact prepaid packs, immediate checkout feedback and direct Card. */
+/* FINDZIA_BILLING_RELEASE=156.7.60 */
+/* Findzia 156.7.60 — one-time search packs, purchase history and direct Card. */
 (() => {
   'use strict';
   const searches = new Set(['/api/search','/api/search/stream','/api/search/image','/api/search/image/stream',
@@ -229,7 +229,7 @@
     }
     function choosePlan(id){
       if(paymentBusy||startingPayment||mfView||checkoutView)return;
-      if(!(config?.plans||status?.plans||[]).some(p=>p.id===id))return;
+      if(!(config?.plans||status?.plans||[]).some(p=>p.id===id&&p.interval==='once'))return;
       clearTimeout(recoveryTimer);recoveryTimer=null;recoveryDeadline=0;
       pendingCheckoutIntent='';
       storePlan({plan:id,at:Date.now(),resume:!account.member()});paymentMessage='';paymentState='pending';standardPreferred=false;
@@ -288,6 +288,7 @@
       try{
         await paymentConfig(); // Domain registration may finish after page load.
         if(flow!==paymentFlow||rev!==revision||!account.member()||id!==selectedPlan())return;
+        if(plan()?.interval!=='once')throw Error('invalid_plan');
         const useMF=paymentProvider()==='myfatoorah';
         if(useMF){
           if(!mfConfig.checkout_available)throw Error('live_checkout_not_available');
@@ -326,12 +327,12 @@
     function paymentProvider(){
       return config?.prepaid_enabled?config.payment_provider:(mfConfig?.enabled?'myfatoorah':'paddle');
     }
-    function plan(){return (config?.plans||status?.plans||[]).find(p=>p.id===selectedPlan());}
+    function plan(){return (config?.plans||status?.plans||[]).find(p=>p.id===selectedPlan()&&p.interval==='once');}
     function planSummary(body){
       const p=plan();if(!p)return;
       const summary=el('div','fzb-selected-plan');summary.dataset.selectedPlan=p.id;
-      const amount=el('span','',`$${(p.amount_cents/100).toFixed(2)} USD`+(p.interval==='month'?tr(' / month',' / شهر'):tr(' once',' دفعة واحدة')));amount.dir='ltr';amount.style.display='inline-block';
-      summary.append(el('strong','',tf('{count} searches',{count:p.credits},'{count} عملية بحث')),amount,el('p','',tf('Searches: {count}',{count:p.credits},'عمليات البحث: {count}')+(p.interval==='month'?tr(' / month',' / شهر'):'')));body.append(summary);
+      const amount=el('span','',`$${(p.amount_cents/100).toFixed(2)} USD`+tr(' once',' دفعة واحدة'));amount.dir='ltr';amount.style.display='inline-block';
+      summary.append(el('strong','',tf('{count} searches',{count:p.credits},'{count} عملية بحث')),amount,el('p','',tf('Searches: {count}',{count:p.credits},'عمليات البحث: {count}')));body.append(summary);
     }
     async function paymentConfig(){
       if(paymentConfigFlight)return paymentConfigFlight;
@@ -652,8 +653,6 @@
       for(const [label,value] of [[tr('Subtotal','المجموع الفرعي'),totals.subtotal],[tr('Tax','الضريبة'),totals.tax],[tr('Total','الإجمالي'),totals.total]]){
         const row=el('div','fzb-checkout-total');row.append(el('span','',label),el('bdi','',money(value)));view.totals.append(row);
       }
-      const recurring=data.recurring_totals?.total;
-      if(plan()?.interval==='month'&&typeof recurring==='number'&&Number.isFinite(recurring))view.totals.append(el('p','fzb-wallet-note',tr('Renews monthly at '+money(recurring),'يتجدد شهريًا بقيمة '+money(recurring))));
       view.totals.hidden=false;
     }
     function openWallet(paddle,transactionId){
@@ -668,7 +667,7 @@
       header.append(title,close);
       const frame=el('div',walletFrame);frame.classList.add('fzb-wallet-frame');
       const summary=el('div','fzb-wallet-summary'),p=plan();
-      if(p){summary.append(el('strong','',tf('{count} searches',{count:p.credits},'{count} عملية بحث')),el('span','',p.interval==='month'?tr('Monthly subscription','اشتراك شهري'):tr('One-time payment. No subscription.','دفعة واحدة، بدون اشتراك.')));}
+      if(p){summary.append(el('strong','',tf('{count} searches',{count:p.credits},'{count} عملية بحث')),el('span','',tr('One-time payment','دفعة واحدة')));}
       const totals=el('div','fzb-checkout-totals');
       const status=el('p','fzb-wallet-status',tr('Loading secure checkout…','جاري تحميل الدفع الآمن…'));
       status.setAttribute('role','status');status.setAttribute('aria-live','polite');
@@ -702,7 +701,7 @@
         paddle_reload_required:tr('Please refresh the page to use the updated payment settings.','حدّث الصفحة لاستخدام إعدادات الدفع الجديدة.'),
         live_checkout_not_available:tr('Purchases are not available for this account yet.','الشراء غير متاح لهذا الحساب حاليًا.'),
         sandbox_test_account_required:tr('Test checkout is available only to approved test accounts.','الدفع التجريبي متاح لحسابات الاختبار فقط.'),
-        subscription_exists:tr('You already have a monthly plan. Manage it from Subscription.','عندك باقة شهرية. تقدر تديرها من الاشتراك.'),
+        subscription_exists:tr('This purchase is unavailable. Please choose a search pack.','هذه العملية غير متاحة. اختر باقة بحث.'),
         payment_creation_pending:tr('A payment is being checked. Please do not pay again. Check Restore purchases before retrying.','في عملية دفع قيد التحقق. لا تدفع مرة ثانية؛ تحقق من استعادة المشتريات أولًا.'),
         paddle_authentication_failed:tr('Payments are temporarily unavailable. Please contact support. (P01)','الدفع غير متاح مؤقتًا. تواصل مع الدعم. (P01)'),
         paddle_access_denied:tr('Payments are temporarily unavailable. Please contact support. (P02)','الدفع غير متاح مؤقتًا. تواصل مع الدعم. (P02)'),
@@ -775,13 +774,12 @@
         checkoutHelp(tr('Payment was not completed. Try another card or use standard checkout.','ما اكتمل الدفع. جرّب بطاقة ثانية أو افتح الدفع المعتاد.'));
       }
     });
-    function manageSubscription(){
-      const manager=window.FindziaSubscriptionManager?.mount(root,{
-        rpc:json,paddle:async()=>{await paymentConfig();return loadPaddle();},
-        refresh:()=>refresh(true),balance:()=>status
+    function viewPurchases(){
+      const manager=window.FindziaPurchaseManager?.mount(root,{
+        rpc:json
       });
       if(manager)return manager.open();
-      paymentMessage=paymentCopy('error',tr('Please refresh the page to load subscription management.','حدّث الصفحة لتحميل إدارة الاشتراك.'));account.open('checkout');
+      paymentMessage=paymentCopy('error',tr('Please refresh the page to load your purchases.','حدّث الصفحة لعرض مشترياتك.'));account.open('checkout');
     }
     async function restorePurchases(){
       if(!account.member()){account.open('signin');return;}
@@ -914,14 +912,14 @@
       if(!status&&!account.member()&&!error){body.append(el('p','fza-caption',tr('Your first 10 searches are ready. Search with text or a photo.','أول 10 بحوث جاهزة لك. ابحث بالنص أو الصورة.')),button(tr('Start searching','ابدأ البحث'),()=>account.close()));return;}
       if(!status){body.append(el('p','fza-caption',error?message(error):tr('Loading…','جاري التحميل…')),button(tr('Try again','حاول مجددًا'),()=>refresh(true)));return;}
       const summary=el('div','fza-usage-summary');summary.append(el('span','',tr('Searches remaining','البحوث المتبقية')),el('strong','',String(status.remaining)));body.append(summary);
-      const group=el('div','fza-group');for(const [key,en,arabic] of [['subscription','Monthly plan','الباقة الشهرية'],['trial','Free trial','التجربة المجانية'],['pack','Top-up credits','رصيد الشحن']]){if(!Number(status.balances?.[key]))continue;const row=el('div','fza-metric');row.append(el('span','',tr(en,arabic)),el('strong','',String(status.balances[key])));group.append(row);}body.append(group);
+      const group=el('div','fza-group');for(const [key,en,arabic] of [['subscription','Search credits','رصيد البحث'],['trial','Free trial','التجربة المجانية'],['pack','Top-up credits','رصيد الشحن']]){if(!Number(status.balances?.[key]))continue;const row=el('div','fza-metric');row.append(el('span','',tr(en,arabic)),el('strong','',String(status.balances[key])));group.append(row);}body.append(group);
       if(status.reserved)body.append(el('p','fza-caption',tf('Reserved for an active search: {count}',{count:status.reserved},'رصيد محجوز لبحث جارٍ: {count}')));
-      if(status.subscription){const sub=status.subscription,date=new Intl.DateTimeFormat(root.dataset.lang||'en',{dateStyle:'medium'}).format(new Date(sub.period_end*1000));body.append(el('p','fza-caption',tf('Plan: Findzia {plan} · Current period ends {date}.',{plan:sub.plan,date},'الباقة: Findzia {plan} · تنتهي الفترة الحالية في {date}.')));}
-      if(account.member()&&(paddleConfig?.management_available||paddleConfig?.checkout_available))body.append(button(tr('Manage subscription','إدارة الاشتراك'),manageSubscription));
       const details=el('details','fza-faq');details.append(el('summary','',tr('How credits work','كيف يُستخدم الرصيد')),
         el('p','',tr('Text or photo: 1 credit per new search. Technical failures and searches with no results are refunded. Up to 5 refunded attempts a day.','النص أو الصورة: رصيد واحد لكل بحث جديد. نرجع الرصيد للفشل التقني أو عدم وجود نتائج، بحد 5 محاولات مسترجعة باليوم.')));
-      if(status.subscription)details.append(el('p','',tr('Your monthly allowance is used first and does not roll over. Pack credits do not expire.','نستخدم رصيد الاشتراك أولًا، ولا يترحّل للشهر التالي. رصيد الشحن بدون انتهاء.')));
-      body.append(details,button(tr('Buy credits','شراء رصيد'),()=>account.open('plans')));
+      details.append(el('p','',tr('Purchased searches remain available until you use them.','عمليات البحث المشتراة تبقى متاحة إلى أن تستخدمها.')));
+      const actions=el('div','fzb-credit-actions');actions.append(button(tr('Search packs','باقات البحث'),()=>account.open('plans')));
+      if(account.member()&&(paddleConfig?.management_available||paddleConfig?.checkout_available))actions.append(button(tr('Purchase history','سجل المشتريات'),viewPurchases,'fza-text'));
+      body.append(details,actions);
     }
     function renderPlans(body){
       // Warm the SDK when the customer opens plans. Never create an order here.
@@ -932,8 +930,8 @@
       const intro=el('section','fzb-plans-intro');
       intro.append(el('h2','',tr('Find more. Choose better.','ابحث أكثر. اختَر أفضل.')),
         el('p','',tr('Search by photo or text.','ابحث بالصورة أو بالنص.')));
-      const promises=el('p','fzb-plan-promises');promises.append(el('span','',tr('No subscription','بدون اشتراك')),el('span','',tr('No expiry','بدون انتهاء')));intro.append(promises);body.append(intro);
-      const visible=plans.filter(p=>paymentProvider()!=='myfatoorah'||p.interval==='once');
+      const promises=el('p','fzb-plan-promises');promises.append(el('span','',tr('One-time payment','دفعة واحدة')),el('span','',tr('No expiry','بدون انتهاء')));intro.append(promises);body.append(intro);
+      const visible=plans.filter(p=>p.interval==='once');
       const base=visible.filter(p=>p.interval==='once'&&p.credits>0&&p.amount_cents>0).sort((a,b)=>a.credits-b.credits)[0];
       const maxCredits=Math.max(...visible.map(p=>p.credits));
       const list=el('div','fzb-plans');
@@ -976,7 +974,7 @@
       if(view==='checkout')return JSON.stringify([paymentMessage,paymentState,paymentBusy,selectedPlan(),paymentTxn,mfConfig?.enabled]);
       return JSON.stringify([status,error,paddleConfig?.management_available,paddleConfig?.checkout_available]);
     }
-    root.fzBilling={renderStamp,manageSubscription,restorePurchases,fetch:paidFetch,beforeSearch,refresh,renderUsage,renderPlans,renderCheckout,planSummary,selectedPlan,beforeSignIn,handleSearchError,notice,status:()=>status,label:()=>status?tf('Searches remaining: {count}',{count:status.remaining},'عمليات البحث المتبقية: {count}'):tr('10 free searches','10 بحوث مجانية')};
+    root.fzBilling={renderStamp,viewPurchases,restorePurchases,fetch:paidFetch,beforeSearch,refresh,renderUsage,renderPlans,renderCheckout,planSummary,selectedPlan,beforeSignIn,handleSearchError,notice,status:()=>status,label:()=>status?tf('Searches remaining: {count}',{count:status.remaining},'عمليات البحث المتبقية: {count}'):tr('10 free searches','10 بحوث مجانية')};
     root.addEventListener('fz:account-session',()=>{clearTimeout(recoveryTimer);recoveryTimer=null;queuedPlan='';pendingCheckoutIntent='';startingPayment=false;closePreparation();feedbackEpoch++;closeMF();closeWallet();revision++;status=null;stamp=0;error='';noticeCode='';paddleConfig=null;mfConfig=null;paymentConfigAt=0;paymentConfigFlight=null;paymentBusy=false;paymentMessage='';paymentState='pending';paymentTxn='';standardPreferred=false;memoryPlan=null;paymentConfig().then(async()=>{account.render();if(await confirmMyFatoorah())return;if(account.member()&&selectedPlan()&&resumePlan())startPayment();});refresh(true);});
     root.addEventListener('fz:account-view',e=>{if(e.detail.to!=='checkout')clearCompletedFeedback();});
     root.addEventListener('fz:account-closed',()=>{clearCompletedFeedback();if(!mfView&&!checkoutView){
@@ -1088,7 +1086,7 @@
 
 /* 156.7.59: compact, comparable prepaid packs in the existing Findzia palette. */
 .fz-account:has(.fzb-plans){width:min(920px,calc(100vw - 40px))}
-.fz-account .fzb-plans-intro{margin:0 0 24px;text-align:start}
+.fz-account .fzb-credit-actions{display:grid;gap:8px}.fzb-credit-actions .fza-text{justify-self:center}.fzb-plans-intro{margin:0 0 24px;text-align:start}
 .fz-account .fzb-plans-intro h2{margin:0 0 7px;font-size:28px;font-weight:650;line-height:1.25;text-wrap:balance;letter-spacing:-.8px;color:var(--a-ink)}
 .fz-account .fzb-plans-intro>p{margin:0;color:var(--a-muted);font-size:14px;line-height:1.5}
 .fz-account .fzb-plans-intro .fzb-plan-promises{display:flex;gap:16px;flex-wrap:wrap;margin-top:14px;font-size:12px;color:var(--a-ink)}

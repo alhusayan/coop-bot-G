@@ -1,4 +1,4 @@
-{% comment %} FINDZIA_HOME_RELEASE=156.7.53 {% endcomment %}
+{% comment %} FINDZIA_HOME_RELEASE=156.7.61 {% endcomment %}
 {% comment %}Findzia 156.7.15 · progressive filters + conversational guide from 156.3.0 · combined 156.7.14 payments preserved{% endcomment %}
 
 
@@ -447,6 +447,21 @@ function dt(row){
  for(const url of lt(row))if(!state.urls.some(old=>ut(old)===ut(url)))state.urls.push(url);
  return state;
 }
+var fzMediaChecks=new Map(),fzMediaCheckControllers=new Set();
+function fzCheckProductPicture(state,url){
+ let raw=url;try{const u=new URL(url);if(u.pathname.endsWith('/api/img-proxy'))raw=u.searchParams.get('u')||url;}catch(_){}
+ const known=fzMediaChecks.get(raw);if(known)return known;
+ const token=state.mediaToken||state.item.evaluation_token;
+ if(!token)return Promise.resolve(false);
+ const ctl=new AbortController();fzMediaCheckControllers.add(ctl);
+ const timeout=setTimeout(()=>ctl.abort(),10500);
+ const promise=fzPaidFetch(r.replace(/\/$/,'')+'/api/media/check',{
+  method:'POST',headers:{'Content-Type':'application/json'},credentials:'omit',signal:ctl.signal,
+  body:JSON.stringify({token,image:raw})
+ }).then(response=>response.ok?response.json():null).then(data=>data?.ok===true&&data.usable===true)
+ .catch(()=>false).finally(()=>{clearTimeout(timeout);fzMediaCheckControllers.delete(ctl);});
+ fzMediaChecks.set(raw,promise);return promise;
+}
 var fzPictureJobs=new Set();
 var fzPictureQueue=[],fzPictureActive=0,fzMediaRecoveryQueue=[],fzMediaRecoveryActive=0;
 var fzMediaRecoveryUsed=0,fzMediaCooldownUntil=0,fzMediaClosed=false,fzMediaDeadline=0,fzMediaTimer=null;
@@ -463,6 +478,7 @@ function fzCloseMediaWindow(){
  fzMediaChanged();
 }
 function ft(preserveReady) {
+  fzMediaCheckControllers.forEach(ctl=>ctl.abort());fzMediaCheckControllers.clear();fzMediaChecks.clear();
   const states=Array.from(q.values());
   q.clear();fzPictureQueue.length=0;fzMediaRecoveryQueue.length=0;
   clearTimeout(fzMediaTimer);fzMediaTimer=null;fzMediaDeadline=0;fzMediaClosed=false;fzMediaRecoveryUsed=0;
@@ -493,7 +509,7 @@ function fzPicturePump() {
   }
 }
 async function fzLoadPicture(state){
- const deadline=Date.now()+7000;
+ const deadline=Date.now()+11500;
  const winner=await new Promise(resolve=>{
   let ended=false,active=0,hedge=null;const attempts=new Set(),inflight=new Set();
   function finish(result){if(ended)return;ended=true;if(!result)inflight.forEach(key=>state.failed.add(key));clearTimeout(hedge);clearTimeout(total);resolve(result);Array.from(attempts).forEach(cancel=>cancel(false));}
@@ -503,6 +519,7 @@ async function fzLoadPicture(state){
    const url=state.urls.find(u=>!state.failed.has(ut(u))&&!inflight.has(ut(u)));
    if(!url){if(!active)finish(null);return;}
    const key=ut(url),img=new Image();inflight.add(key);active++;let settled=false;
+   const approved=fzCheckProductPicture(state,url);
    const cancel=ok=>{
     if(settled)return;settled=true;clearTimeout(timer);state.cancels.delete(cancel);attempts.delete(cancel);inflight.delete(key);active--;
     img.onload=img.onerror=null;
@@ -514,12 +531,12 @@ async function fzLoadPicture(state){
    attempts.add(cancel);state.cancels.add(cancel);
    const timer=setTimeout(()=>cancel(false),Math.min(3200,Math.max(1,deadline-Date.now())));
    img.decoding='async';img.referrerPolicy='no-referrer';img.loading='eager';
-   img.onload=()=>{const check=()=>cancel(fzPictureUsable(img));if(img.decode)img.decode().then(check,()=>cancel(false));else check();};
+   img.onload=()=>{clearTimeout(timer);const check=async()=>cancel(fzPictureUsable(img)&&await approved);if(img.decode)img.decode().then(check,()=>cancel(false));else check();};
    img.onerror=()=>cancel(false);
    // <img> supports third-party CDNs without requiring CORS or a blob fetch.
    img.src=url;
   }
-  const total=setTimeout(()=>finish(null),7000);
+  const total=setTimeout(()=>finish(null),11500);
   next();hedge=setTimeout(()=>{if(!ended&&active<2)next();},160);
  });
  if(q.get(state.key)!==state)return;
@@ -561,6 +578,7 @@ function fzMediaRecoveryPump(){
   .then(response=>{if(!response.ok){if(response.status===429||response.status===503)fzMediaCooldownUntil=Date.now()+60000;throw Error('media');}return response.json();})
   .then(data=>{
    if(q.get(state.key)!==state||state.winner||!data.ok)return;
+   if(data.media_token)state.mediaToken=data.media_token;
    for(const url of lt({url:state.item.url,images:data.images||[],image_candidates:data.image_candidates||[]}))if(!state.urls.some(old=>ut(old)===ut(url)))state.urls.push(url);
    pt(state);
   }).catch(()=>{}).finally(()=>{
@@ -914,7 +932,25 @@ function Xt() {
     }
   }
 }
-async function ea(e,r){var shopperContext={query:r&&r.freshText?"":W&&W.query||"",pending_question:r&&r.shopperQuestion||""};var t=((r=r||{}).selectedOption||e||g&&g.value||"").trim();if(t&&!r.freshText&&!r.selectedOption&&!r.choiceNavigation&&g){var pb=g.closest('.fz-home')?.fzRefineBridge;if(pb&&pb.resubmitUnchanged&&pb.resubmitUnchanged(t)){g.blur();return;}}
+var fzSearchViewportCancel=null;
+function fzCommitSearchView(){
+ if(fzSearchViewportCancel)fzSearchViewportCancel();
+ const root=g?.closest('.fz-home'),active=document.activeElement;
+ if(root?.contains(active)&&active.matches('input,textarea,[contenteditable=true]'))active.blur();
+ const viewport=window.visualViewport;
+ let done=false,frame=0,timer=0;
+ const top=()=>{if(!done)window.scrollTo({top:0,left:0,behavior:'instant'});};
+ const settle=()=>{cancelAnimationFrame(frame);frame=requestAnimationFrame(top);};
+ const stop=()=>{if(done)return;done=true;clearTimeout(timer);cancelAnimationFrame(frame);
+  viewport?.removeEventListener('resize',settle);
+  for(const event of ['touchstart','pointerdown','wheel','keydown','focusin'])window.removeEventListener(event,stop,true);
+  window.removeEventListener('pagehide',stop);fzSearchViewportCancel=null;
+ };
+ for(const event of ['touchstart','pointerdown','wheel','keydown','focusin'])window.addEventListener(event,stop,{capture:true,passive:true});
+ viewport?.addEventListener('resize',settle);window.addEventListener('pagehide',stop,{once:true});
+ fzSearchViewportCancel=stop;top();settle();timer=setTimeout(stop,700);
+}
+async function ea(e,r){var shopperContext={query:r&&r.freshText?"":W&&W.query||"",pending_question:r&&r.shopperQuestion||""};var t=((r=r||{}).selectedOption||e||g&&g.value||"").trim();if(!r.choiceNavigation&&(t||W?.kind==='image'))fzCommitSearchView();if(t&&!r.freshText&&!r.selectedOption&&!r.choiceNavigation&&g){var pb=g.closest('.fz-home')?.fzRefineBridge;if(pb&&pb.resubmitUnchanged&&pb.resubmitUnchanged(t)){g.blur();return;}}
 if(W&&W.kind==="image"&&W.image_base64&&!r.selectedOption&&!r.freshText){g&&g.blur();return fzRunPhotoEdit(t);}
 if(t){if(!await window.FindziaBeforeSearch(g.closest(".fz-home"),{query:t,kind:"text",country:g.closest(".fz-home").fzRefineBridge.context().country}))return;Ue(!1,!0),r.choiceNavigation||Ut();var a=Bt(),n=Le,i=await Pt();if(n===Le){g&&(g.value=t),K=t,fr(!0,ar("searching")),zt("text"),I="relevance",O="all",cr(),w&&(w.hidden=!0),W={kind:"text",query:t,country:i,aiUsed:r.aiUsed===true,providerCopy:!1,shoppingUrl:""},cr();var o={query:t,country:i,lang:nr(),force_specific:!0,shopping_context:shopperContext};r&&r.forceSpecific&&(o.force_specific=!0),r&&r.selectedOption&&(o.selected_option=r.selectedOption,o.original_query=r.originalQuery||"",o.force_specific=!0);try{await Rt("/api/search/stream",o,async function(e){if(a===B&&e)
 if(at(e),"reference_image"===e.event)W.image_reference=e.image_reference,W.textLens=!0,w&&(w.hidden=!1);else if("status"===e.event&&"finding_reference_image"===e.stage)fr(!0,"ar"===tr()?"نجهّز صورة المنتج…":"Finding the product photo…");else if("status"!==e.event||"preparing_offers"!==e.stage&&"identify"!==e.stage){if("status"===e.event&&"google_shopping_slow"===e.stage)fr(!0,"ar"===tr()?"البحث مستمر، المصدر متأخر قليلًا…":"Still searching — the provider is taking a little longer…");else if("remove"===e.event)At(e.url);else if("status"===e.event&&/^(understanding_request|researching_product)$/.test(e.stage))fr(!0,e.message||(tr()==="ar"?"أفهم طلبك وأبحث عن المنتج المناسب…":"Understanding your request and identifying the product…"));else if("query"===e.event&&e.query)fzSetDisplayQuery(e,t);else if("result"===e.event||"upsert"===e.event)Ct(e.item||{});else if("snapshot"===e.event)(e.results||e.all_results||[]).forEach(Ct);else if("recommendations"===e.event)Ot(e.data);else if("done"===e.event){if(W){W.partial=!!e.partial;W.shopperEmpty=e.shopper_empty_message||"";}
