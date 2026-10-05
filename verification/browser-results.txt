@@ -1,0 +1,3 @@
+PASS home/results submit, focus, scroll and verified/recovered media: en light
+PASS home/results submit, focus, scroll and verified/recovered media: ar dark
+PASSED 32 search focus, scroll and image admission assertions; providers mocked.

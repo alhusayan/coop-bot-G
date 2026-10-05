@@ -1,0 +1,16 @@
+/workspace/scratch/bba32a5901aa/test-deps61/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+  from starlette.testclient import TestClient as TestClient  # noqa
+test_batches_never_exceed_eight_images (test_product_media.ProductMediaTests.test_batches_never_exceed_eight_images) ... ok
+test_duplicate_urls_and_identical_bytes_share_one_judgement (test_product_media.ProductMediaTests.test_duplicate_urls_and_identical_bytes_share_one_judgement) ... ok
+test_endpoint_negative_decisions_and_large_request (test_product_media.ProductMediaTests.test_endpoint_negative_decisions_and_large_request) ... ok
+test_endpoint_only_fetches_signed_observed_images (test_product_media.ProductMediaTests.test_endpoint_only_fetches_signed_observed_images) ... ok
+test_exact_candidate_pixels_and_multiple_kinds (test_product_media.ProductMediaTests.test_exact_candidate_pixels_and_multiple_kinds) ... ok
+test_missing_duplicate_invalid_and_string_ids_do_not_pass (test_product_media.ProductMediaTests.test_missing_duplicate_invalid_and_string_ids_do_not_pass) ... ok
+test_transient_failure_can_retry_after_short_cache (test_product_media.ProductMediaTests.test_transient_failure_can_retry_after_short_cache) ... ok
+test_unavailable_model_or_unreadable_image_never_approved (test_product_media.ProductMediaTests.test_unavailable_model_or_unreadable_image_never_approved) ... ok
+test_work_queue_is_bounded (test_product_media.ProductMediaTests.test_work_queue_is_bounded) ... ok
+
+----------------------------------------------------------------------
+Ran 9 tests in 0.917s
+
+OK
