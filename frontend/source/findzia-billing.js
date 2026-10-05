@@ -1,4 +1,4 @@
-/* FINDZIA_BILLING_RELEASE=156.7.51 */
+/* FINDZIA_BILLING_RELEASE=156.7.53 */
 /* Findzia 156.7.20 — resumable checkout, safe plan changes and persistent payment UI. */
 (() => {
   'use strict';
@@ -872,7 +872,14 @@
       body.append(list);
       if(mfConfig?.environment==='sandbox'||paddleConfig?.paddle_environment==='sandbox')body.append(el('p','fza-footnote',tr('Test mode. No real payment is collected.','وضع التجربة، بدون تحصيل مبلغ حقيقي.')));
     }
-    root.fzBilling={manageSubscription,restorePurchases,fetch:paidFetch,beforeSearch,refresh,renderUsage,renderPlans,renderCheckout,planSummary,selectedPlan,beforeSignIn,handleSearchError,notice,status:()=>status,label:()=>status?tf('Searches remaining: {count}',{count:status.remaining},'عمليات البحث المتبقية: {count}'):tr('10 free searches','10 بحوث مجانية')};
+    function renderStamp(view){
+      // Exclude balances from plan/checkout stamps: a polling response must not
+      // replace the same cards halfway through their entrance animation.
+      if(view==='plans'||(view==='subscription'&&!account.member()))return JSON.stringify([config?.plans||status?.plans||[],error,mfConfig?.enabled,mfConfig?.environment,paddleConfig?.paddle_environment,paymentMessage,paymentState,paymentBusy,startingPayment,selectedPlan(),paymentTxn,!!mfView,!!checkoutView]);
+      if(view==='checkout')return JSON.stringify([paymentMessage,paymentState,paymentBusy,selectedPlan(),paymentTxn,mfConfig?.enabled]);
+      return JSON.stringify([status,error,paddleConfig?.management_available,paddleConfig?.checkout_available]);
+    }
+    root.fzBilling={renderStamp,manageSubscription,restorePurchases,fetch:paidFetch,beforeSearch,refresh,renderUsage,renderPlans,renderCheckout,planSummary,selectedPlan,beforeSignIn,handleSearchError,notice,status:()=>status,label:()=>status?tf('Searches remaining: {count}',{count:status.remaining},'عمليات البحث المتبقية: {count}'):tr('10 free searches','10 بحوث مجانية')};
     root.addEventListener('fz:account-session',()=>{clearTimeout(recoveryTimer);recoveryTimer=null;queuedPlan='';pendingCheckoutIntent='';startingPayment=false;closeMF();closeWallet();revision++;status=null;stamp=0;error='';noticeCode='';paddleConfig=null;mfConfig=null;paymentConfigAt=0;paymentConfigFlight=null;paymentBusy=false;paymentMessage='';paymentState='pending';paymentTxn='';standardPreferred=false;memoryPlan=null;paymentConfig().then(async()=>{account.render();if(await confirmMyFatoorah())return;if(account.member()&&selectedPlan()&&resumePlan())startPayment();});refresh(true);});
     root.addEventListener('fz:account-closed',()=>{if(!mfView&&!checkoutView){
       clearTimeout(recoveryTimer);recoveryTimer=null;queuedPlan='';paymentFlow++;

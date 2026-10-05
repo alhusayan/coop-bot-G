@@ -1,4 +1,4 @@
-/* FINDZIA_MOTION_RELEASE=156.7.51 — Findzia 156.7.51 — shared motion for live results, loaded images and navigation.
+/* FINDZIA_MOTION_RELEASE=156.7.53 — Findzia 156.7.53 — shared motion for live results, loaded images and navigation.
  * No router, fetch interception, search delay, or payment lifecycle changes.
  * All content is visible without this enhancement. */
 (function () {
@@ -9,23 +9,29 @@
   const dialogs = new WeakSet(), popovers = new WeakSet(), details = new WeakSet();
   const cards = new WeakSet(), unreadyCards = new WeakSet(), waiting = new Map(), shown = new WeakMap();
   const ease = 'cubic-bezier(.25,0,.4,1)', quick = 'cubic-bezier(.22,1,.36,1)';
-  const timings = Object.freeze({ text: 180, line: 0, image: 140, card: 140, ui: 160, menu: 180, item: 0, close: 120 });
+  const timings = Object.freeze({ text: 680, line: 85, image: 280, card: 280, ui: 220, menu: 520, item: 45, close: 160 });
   const dialogSelector = '.fz-guide, .fz-account, .fz-insights, [data-dark-menu], [data-preferences]';
   const popoverSelector = '[data-sort-menu], [data-view-menu]';
   const imageSelector = '.fz-media-stage, .fza-product-image, .fz-saved-thumb';
   const directImageSelector = '.fz-insights-hero img, .fz-guide-context img, .fz-for-you-item img';
   let trigger = null, viewportObserver;
+  const heroShown = new WeakSet();
   const reduced = () => !!media?.matches;
   const visible = el => !!(el?.isConnected && el.getClientRects().length && !el.closest('[hidden]') && (!el.closest('dialog') || el.closest('dialog').open));
   const inView = el => { const r = el.getBoundingClientRect(); return r.bottom > 0 && r.top < innerHeight + 24 && r.right > 0 && r.left < innerWidth; };
 
   function animate(el, frames, options = {}, cleanup) {
-    if (!el?.animate || reduced() || !visible(el)) { cleanup?.(); return null; }
+    // Callers measure visibility in batches. Do not force a fresh layout after
+    // every animation write (especially the individual words/menu links).
+    if (!el?.animate || reduced() || !el.isConnected || el.closest('[hidden]') || (el.closest('dialog') && !el.closest('dialog').open)) { cleanup?.(); return null; }
+    const signature=JSON.stringify([frames,options]);
+    const previous=running.get(el);
+    if(previous?.signature===signature)return previous.animation;
     stop(el);
     let animation;
     try { animation = el.animate(frames, { duration: timings.text, easing: ease, fill: 'backwards', ...options }); }
     catch (_) { cleanup?.(); return null; }
-    const entry = { el, animation, cleanup };
+    const entry = { el, animation, cleanup, signature };
     active.add(entry); running.set(el, entry);
     const done = () => {
       if (!active.delete(entry)) return;
@@ -38,29 +44,66 @@
   }
   function stop(el) { const e = running.get(el); if (e) { active.delete(e); running.delete(el); e.animation.cancel(); e.cleanup?.(); } }
   function reveal(el, delay = 0, type = 'text') {
-    // One compositor-only effect per surface, with no blur, word wrappers or stagger.
-    return animate(el, [{opacity: type === 'card' ? .75 : .5}, {opacity:1}],
-      {duration:type === 'card' ? timings.card : timings.ui, delay:0});
+    const image = type === 'image', card = type === 'card', ui = type === 'ui';
+    return animate(el, [
+      { opacity: 0, filter: `blur(${card || image || ui ? 0 : 8}px)`, translate: `0 ${image ? 0 : ui ? 4 : 8}px` },
+      { opacity: 1, filter: 'blur(0px)', translate: '0 0' }
+    ], { duration: card ? timings.card : ui ? timings.ui : image ? timings.image : timings.text, easing: ease, delay });
   }
-  function lines(el) { reveal(el); }
+
+  // Reveal rendered lines, keeping whole words (including Arabic joining) intact.
+  // Text is restored after playback; no permanent wrappers or fixed line breaks.
+  function lines(el, delay = 0) {
+    if (!visible(el) || reduced()) return;
+    stop(el);
+    if (el.children.length || el.textContent.length > 180) { reveal(el, delay); return; }
+    const text = el.textContent, parts = text.split(/(\s+)/), words = [];
+    if (parts.filter(p => p.trim()).length > 30 || !/\s/.test(text.trim())) { reveal(el, delay); return; }
+    const before = el.getBoundingClientRect(), fragment = document.createDocumentFragment();
+    for (const part of parts) {
+      if (!part.trim()) { fragment.append(document.createTextNode(part)); continue; }
+      const word = document.createElement('span'); word.className = 'fz-motion-word'; word.textContent = part;
+      words.push(word); fragment.append(word);
+    }
+    el.replaceChildren(fragment);
+    const restore = () => {
+      // Translation or a new assistant response may already have replaced this text.
+      if (el.textContent === text && words.every(w => w.parentNode === el)) el.replaceChildren(document.createTextNode(text));
+    };
+    const after = el.getBoundingClientRect();
+    if (Math.abs(after.height - before.height) > 1 || Math.abs(after.width - before.width) > 1) {
+      restore(); reveal(el, delay); return;
+    }
+    const tops = [], wordLines = words.map(word => {
+      const y = word.getBoundingClientRect().top;
+      let index = tops.findIndex(top => Math.abs(top - y) < 3);
+      if (index < 0) { index = tops.length; tops.push(y); }
+      return index;
+    });
+    let remaining = words.length;
+    const done = () => { if (--remaining === 0) restore(); };
+    words.forEach((word, i) => animate(word, [
+      { opacity: 0, filter: 'blur(8px)', translate: '0 8px' },
+      { opacity: 1, filter: 'blur(0px)', translate: '0 0' }
+    ], { delay: delay + Math.min(wordLines[i], 3) * timings.line }, done));
+  }
 
   function cancelWithin(parent) {
     for (const entry of [...active]) if (entry.el === parent || parent.contains(entry.el)) stop(entry.el);
     for (const [el] of waiting) if (el === parent || parent.contains(el)) { viewportObserver?.unobserve(el); waiting.delete(el); }
   }
-  function queue(el, index = 0, type = 'ui', token = 0) {
+  function queue(el, index = 0, type = 'ui', token = 0, rect = null) {
     // Do not consume a reveal while a newly inserted card/panel is still hidden.
-    if (!visible(el)) return false;
-    if (el.closest('dialog')) { shown.set(el, token); return true; }
+    if (!(rect ? el.isConnected && !el.closest('[hidden]') : visible(el))) return false;
     if (shown.get(el) === token || waiting.get(el)?.token === token) return true;
     if (reduced()) { shown.set(el, token); return true; }
-    if (inView(el)) {
+    if (rect ? rect.bottom>0 && rect.top<innerHeight+24 && rect.right>0 && rect.left<innerWidth : inView(el)) {
       shown.set(el, token); waiting.delete(el); viewportObserver?.unobserve(el);
       reveal(el, Math.min(index * 40, 160), type); return true;
     }
     if (!viewportObserver) { shown.set(el, token); return true; }
-    // Offscreen content is already readable; scrolling must not fade it out again.
-    shown.set(el, token); return true;
+    // No CSS opacity:0: content remains readable even if an observer fails.
+    waiting.set(el, { type, token }); viewportObserver.observe(el); return true;
   }
   if (window.IntersectionObserver) viewportObserver = new IntersectionObserver(entries => {
     let index = 0;
@@ -90,7 +133,7 @@
   function image(stage) {
     // Dialog content is painted repeatedly during auth/credit refreshes. Its
     // section owns the entrance; a cached image must not flash on each clone.
-    if (stage?.closest('dialog, .fz-card-shell')) return;
+    if (stage?.closest('dialog')) return;
     const img = stage?.matches('img') ? stage : stage?.querySelector('img');
     if (!img?.complete || !img.naturalWidth) return; // The load event will retry, including cloned/cached images.
     const source = img.currentSrc || img.getAttribute('src');
@@ -100,6 +143,7 @@
   function revealNodes(container, selector, token) {
     const nodes = [...container.querySelectorAll(selector)].filter(visible);
     const selected = new Set(nodes);
+    const geometry = new Map(nodes.map(el=>[el,el.getBoundingClientRect()]));
     let i = 0;
     const occurrences = new Map();
     for (const el of nodes) {
@@ -114,30 +158,60 @@
         occurrences.set(role, ordinal + 1);
         const key = role + ':' + ordinal;
         if (token.seen?.has(key)) continue;
-        if (queue(el, i++, el.matches('.fza-product, .fzb-plan') ? 'card' : 'ui', token)) token.seen?.add(key);
+        if (queue(el, i++, el.matches('.fza-product, .fzb-plan') ? 'card' : 'ui', token, geometry.get(el))) token.seen?.add(key);
       }
     }
   }
   function hero(root) {
-    // The first paint is the homepage. Never hide its title/camera after it is visible.
+    if (root.dataset.homeState !== 'empty' || reduced() || heroShown.has(root)) return;
+    heroShown.add(root);
+    lines(root.querySelector('.fz-dark-title'));
+    reveal(root.querySelector('[data-dark-photo]'), 140, 'image');
+    reveal(root.querySelector('.fz-dark-tap'), 200);
+    // Keep the search field visible and immediately focusable, like the anchored composer.
+  }
+
+  function menuOrigin(dialog) {
+    const r = dialog.getBoundingClientRect(), button = trigger?.getBoundingClientRect();
+    const right = button ? button.left + button.width / 2 > r.left + r.width / 2 : dialog.dir === 'rtl';
+    const top = Math.max(0, Math.min(r.height - 44, (button?.top ?? r.top) - r.top));
+    const left = right ? Math.max(0, r.width - 44) : 0;
+    const inset = `${top}px ${Math.max(0, r.width - left - 44)}px ${Math.max(0, r.height - top - 44)}px ${left}px round 22px`;
+    dialog.style.setProperty('--fz-motion-menu-origin', `inset(${inset})`);
+    return `inset(${inset})`;
   }
   function openDialog(dialog) {
     cancelWithin(dialog);
     if (reduced()) return;
-    animate(dialog, [{opacity:.5,translate:'0 4px'}, {opacity:1,translate:'0 0'}],
-      {duration:timings.menu,easing:quick});
-  }
-  function section(surface, direction = 1) {
-    // Only real navigation animates. Data refreshes leave the active page still.
-    if (!surface || surface.querySelector('iframe') || !surface.closest('dialog')?.open) return;
-    const parent=surface.closest('dialog');stop(parent);
-    return animate(surface,[{opacity:.65,translate:`${direction*8}px 0`},{opacity:1,translate:'0 0'}],
-      {duration:160,easing:quick});
+    if (dialog.matches('[data-dark-menu]') && dialog.dataset.menuDesign) {
+      const items=[...dialog.querySelectorAll('.fza-nav-link')].filter(visible);
+      const r = dialog.getBoundingClientRect();
+      const candidate = trigger?.getBoundingClientRect();
+      const button = candidate?.width && candidate?.height ? candidate : null;
+      const x = button ? button.left + button.width / 2 - r.left - r.width / 2 : r.width * .34;
+      const y = button ? button.top + button.height / 2 - r.top - r.height / 2 : -r.height * .42;
+      animate(dialog, [
+        { opacity: .15, transform: `translate(${x}px, ${y}px) scale(.12)` },
+        { opacity: 1, transform: 'translate(0px, 0px) scale(1)' }
+      ], { duration: timings.menu, easing: 'cubic-bezier(.22,1,.36,1)' });
+      items.forEach((item, i) => {
+        animate(item, [{ opacity: 0, translate: '0 5px' }, { opacity: 1, translate: '0 0' }],
+          { duration: 260, delay: 80 + i * timings.item, easing: ease });
+      });
+      reveal(dialog.querySelector('.fza-nav-footer'), 310, 'ui');
+    } else if (dialog.matches('[data-dark-menu]')) {
+      const start = menuOrigin(dialog);
+      animate(dialog, [{ opacity: .3, clipPath: start }, { opacity: 1, clipPath: 'inset(0px round 16px)' }], { duration: timings.menu, easing: 'cubic-bezier(.22,.65,.35,1)' });
+      const items = [...dialog.querySelectorAll('.fza-nav-label, .fza-nav-link, .fz-dark-menu-action:not([hidden]), .fza-nav-footer')].filter(visible);
+      items.forEach((item, i) => reveal(item, 55 + Math.min(i, 5) * timings.item, 'ui'));
+    } else {
+      animate(dialog, [{ opacity: 0, translate: '0 10px' }, { opacity: 1, translate: '0 0' }], { duration: 300, easing: quick });
+    }
   }
   function mountDialog(dialog) {
     if (dialogs.has(dialog) || !dialog.matches(dialogSelector)) return;
     dialogs.add(dialog); dialog.dataset.fzMotionDialog = '';
-    let signature = '', view = '', frame = 0, token = { seen: new Set() };
+    let signature = '', view = '', frame = 0, token = { seen: new Set() }, wasOpen=dialog.open;
     const content = () => {
       frame = 0;
       if (!dialog.open || reduced()) return;
@@ -153,8 +227,14 @@
         }
         revealNodes(dialog, '.fz-guide-mode, .fz-guide-intro, .fz-guide-tip, .fz-guide-free-answer, .fz-guide-preferences', token);
       } else if (dialog.matches('.fz-account')) {
-        // Account.open owns one navigation effect for the whole body. Never
-        // animate its heading, cards or balance separately on mutation.
+        const q = dialog.querySelector('.fza-header h2');
+        const key = q?.textContent || '';
+        const nextView = dialog.dataset.view || key;
+        if (nextView !== view) { view = nextView; token = { seen: new Set() }; }
+        if (key !== signature) { signature = key; reveal(q, 0, 'ui'); }
+        // Only Findzia-owned content. Never animate the checkout host or provider frames.
+        revealNodes(dialog, '.fza-page-intro, .fza-empty, .fza-identity, .fza-membership, .fza-group, .fza-tile, .fza-product, .fza-history-line, .fza-list-tools, .fza-usage-summary, .fza-faq, .fza-policy, .fza-plan-empty, .fza-providers, .fza-login-label, .fzb-plan, .fzb-credit-card, .fzb-payment-result', token);
+        dialog.querySelectorAll(imageSelector).forEach(image);
       } else if (dialog.matches('[data-preferences]')) {
         revealNodes(dialog, '.fz-preferences-head h2, .fz-preferences-field, .fz-setting-row', token);
       } else if (dialog.matches('.fz-insights')) {
@@ -164,22 +244,16 @@
     };
     const observer = new MutationObserver(records => {
       if (records.some(r => r.type === 'attributes' && r.target === dialog && r.attributeName === 'open')) {
-        if (dialog.open) { signature = ''; view = ''; token = { seen: new Set() }; openDialog(dialog); }
-        else { cancelWithin(dialog); return; }
+        if (dialog.open) {
+          const reopened=records.some(r=>r.target===dialog&&r.attributeName==='open'&&r.oldValue===null);
+          if(!wasOpen||reopened){signature = ''; view = ''; token = { seen: new Set() }; openDialog(dialog);}
+          wasOpen=true;
+        } else { wasOpen=false;cancelWithin(dialog);return; }
       }
       if (!frame && dialog.open) frame = requestAnimationFrame(content);
     });
-    observer.observe(dialog, { attributes: true, attributeFilter: ['open', 'hidden', 'data-view'], childList: true, subtree: true });
-    dialog.addEventListener('close', () => {
-      cancelWithin(dialog); signature = '';
-      // Native close removes the outgoing layer immediately, so no ghost menu
-      // covers the next screen. The return surface gets one very light reveal.
-      queueMicrotask(()=>{
-        if(document.querySelector('dialog[open]')||reduced())return;
-        const surface=dialog.closest('.fz-home');
-        if(surface&&surface.dataset.pageTransitioning!=='true')animate(surface,[{opacity:.85},{opacity:1}],{duration:120});
-      });
-    });
+    observer.observe(dialog, { attributes: true, attributeFilter: ['open', 'hidden', 'data-view'], attributeOldValue: true, childList: true, subtree: true });
+    dialog.addEventListener('close', () => { if(dialog.open)return;wasOpen=false;cancelWithin(dialog);signature = ''; });
     if (dialog.open) { openDialog(dialog); content(); }
   }
   function mountPopover(panel) {
@@ -232,12 +306,22 @@
     const flush = () => {
       frame = 0;
       for (const entry of [...active]) if (!entry.el.isConnected) stop(entry.el);
-      for (const el of pending) if (el.isConnected && ![...pending].some(parent => parent !== el && parent.contains(el))) scan(el);
+      for (const el of pending) if(el.isConnected){
+        let parent=el.parentElement;
+        while(parent&&!pending.has(parent))parent=parent.parentElement;
+        if(!parent)scan(el);
+      }
       pending.clear();
       for (const [el] of waiting) if (!el.isConnected) { viewportObserver?.unobserve(el); waiting.delete(el); }
     };
     const observer = new MutationObserver(records => {
-      if (records.some(r => r.type === 'attributes' && r.target === root && ['data-home-state', 'data-lang'].includes(r.attributeName) && r.oldValue !== root.getAttribute(r.attributeName))) { cancelWithin(root.querySelector('[data-dark-home]') || root); hero(root); }
+      if (records.some(r => r.type === 'attributes' && r.target === root && r.attributeName==='data-home-state' && r.oldValue !== root.getAttribute(r.attributeName))) {
+        cancelWithin(root.querySelector('[data-dark-home]') || root);
+        if(root.dataset.homeState!=='empty')heroShown.delete(root);else hero(root);
+      }
+      // Language/config updates change copy, not the user's navigation. They
+      // must never restart the already-playing hero entrance.
+
       for (const r of records) {
         if (r.type === 'attributes' && r.target === root && r.attributeName === 'data-home-state') pending.add(root);
         if (r.type === 'attributes' && r.attributeName === 'hidden' && !r.target.hidden) pending.add(r.target);
@@ -285,7 +369,7 @@
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) for (const entry of [...active]) stop(entry.el);
   });
-  window.FindziaMotion = Object.freeze({ version: '156.7.51', timings, results, image, reveal, section, mount });
+  window.FindziaMotion = Object.freeze({ version: '156.7.53', timings, results, image, reveal, mount });
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot, { once: true });
   else boot();
 })();
