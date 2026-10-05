@@ -1,0 +1,35 @@
+MEDIA AUDIT batch=1 elapsed_ms=5 unavailable=0
+MEDIA AUDIT batch=8 elapsed_ms=0 unavailable=0
+MEDIA AUDIT batch=8 elapsed_ms=0 unavailable=0
+MEDIA AUDIT batch=4 elapsed_ms=0 unavailable=0
+MEDIA AUDIT batch=1 elapsed_ms=4 unavailable=0
+MEDIA AUDIT batch=1 elapsed_ms=0 unavailable=0
+MEDIA REUSE source=identity_bytes
+MEDIA REUSE source=identity_bytes
+MEDIA AUDIT batch=1 elapsed_ms=0 unavailable=0
+test_duplicate_keys_or_ids_never_seed_or_pass (__main__.AuditRecoveryTests.test_duplicate_keys_or_ids_never_seed_or_pass) ... ok
+test_malformed_stop_is_rejected_without_blind_paid_retry (__main__.AuditRecoveryTests.test_malformed_stop_is_rejected_without_blind_paid_retry) ... ok
+test_media_cache_failure_does_not_discard_completed_identity_audit (__main__.AuditRecoveryTests.test_media_cache_failure_does_not_discard_completed_identity_audit) ... ok
+test_no_retry_when_original_deadline_has_less_than_four_seconds (__main__.AuditRecoveryTests.test_no_retry_when_original_deadline_has_less_than_four_seconds) ... ok
+test_nonstream_duplicate_ids_cannot_seed_a_media_decision (__main__.AuditRecoveryTests.test_nonstream_duplicate_ids_cannot_seed_a_media_decision) ... ok
+test_payload_has_bounded_item_count_and_shared_image_policy (__main__.AuditRecoveryTests.test_payload_has_bounded_item_count_and_shared_image_policy) ... ok
+test_second_truncation_does_not_retry_or_seed_half_response (__main__.AuditRecoveryTests.test_second_truncation_does_not_retry_or_seed_half_response) ... ok
+test_timeout_is_not_retried (__main__.AuditRecoveryTests.test_timeout_is_not_retried) ... ok
+test_truncation_retries_once_with_same_pixels_inside_original_deadline (__main__.AuditRecoveryTests.test_truncation_retries_once_with_same_pixels_inside_original_deadline) ... ok
+test_uncertain_or_unattached_image_never_seeds_cache (__main__.AuditRecoveryTests.test_uncertain_or_unattached_image_never_seeds_cache) ... ok
+test_busy_workers_batch_backlog_and_complete_all_images (__main__.MediaReuseTests.test_busy_workers_batch_backlog_and_complete_all_images) ... ok
+test_changed_bytes_and_uncertain_audits_require_independent_check (__main__.MediaReuseTests.test_changed_bytes_and_uncertain_audits_require_independent_check) ... ok
+test_completed_audit_reused_for_identical_bytes_on_different_url (__main__.MediaReuseTests.test_completed_audit_reused_for_identical_bytes_on_different_url) ... ok
+test_known_logo_stays_rejected (__main__.MediaReuseTests.test_known_logo_stays_rejected) ... ok
+test_seed_does_not_override_active_or_existing_independent_check (__main__.MediaReuseTests.test_seed_does_not_override_active_or_existing_independent_check) ... ok
+test_fourth_provider_response_is_not_discarded_after_30_rows (__main__.PriceRecoveryTests.test_fourth_provider_response_is_not_discarded_after_30_rows) ... ok
+test_organic_adapter_preserves_structured_price_and_installment_context (__main__.PriceRecoveryTests.test_organic_adapter_preserves_structured_price_and_installment_context) ... ok
+test_provider_unavailable_trace_is_distinct_from_empty_results (__main__.PriceRecoveryTests.test_provider_unavailable_trace_is_distinct_from_empty_results) ... ok
+test_rich_price_is_not_overwritten_by_unrelated_snippet_price (__main__.PriceRecoveryTests.test_rich_price_is_not_overwritten_by_unrelated_snippet_price) ... ok
+test_shipping_only_snippet_is_not_a_product_price (__main__.PriceRecoveryTests.test_shipping_only_snippet_is_not_a_product_price) ... ok
+test_trace_distinguishes_absent_rejected_and_other_market_without_private_data (__main__.PriceRecoveryTests.test_trace_distinguishes_absent_rejected_and_other_market_without_private_data) ... ok
+
+----------------------------------------------------------------------
+Ran 21 tests in 1.186s
+
+OK

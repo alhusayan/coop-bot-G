@@ -1,22 +1,31 @@
 {
-  "tests_passed": 17,
-  "test_transport": "Simulated; no live provider calls or purchases. Production parser/URL/audit functions loaded by AST.",
-  "baseline_selected_tests": 9,
-  "baseline_expected_failures": 7,
-  "production_latency_measured_after_change": false,
-  "changed_functions": [
-    "_web_identity_stream_response",
-    "_web_ai_classifier_request",
-    "_web_ai_classify_captured_batch",
-    "_web_listing_price_country",
-    "_web_automatic_price_batches",
-    "_web_targeted_price_updates",
-    "_web_confirmable_price"
+  "release": "156.7.66",
+  "tests": {
+    "audit_prices_regression": 17,
+    "media_endpoint_regression": 9,
+    "recovery_prices_media": 21,
+    "total": 47
+  },
+  "baseline_selected_cases": 5,
+  "baseline_expected_failures": 5,
+  "media_pressure_simulation": {
+    "images": 22,
+    "model_requests": 5,
+    "live_metric": false
+  },
+  "verified_unchanged": [
+    "Exact identity proof",
+    "merchant identity conflict guards",
+    "visual profile comparison",
+    "price quote parsers",
+    "same-listing URL binding",
+    "existing identity normalization apart from independent image_kind"
   ],
-  "preserved": "All other function ASTs match the deployed base, including classifier prompt/request/normalization and Exact thresholds.",
-  "known_limits": [
-    "Merchant blocks or absent indexed prices still leave prices unavailable.",
-    "Ambiguous SHEIN region/language/mobile hosts retain legacy export context.",
-    "Provider latency and billing are outside this change."
-  ]
+  "live_validation_pending": [
+    "Same-photo and same-market first visible card time",
+    "SHEIN per-listing price traces",
+    "Timeout and truncation counts",
+    "Actual image-check reuse/batching rate"
+  ],
+  "test_limits": "Production functions loaded by AST; mocked transport/providers and some surrounding normalization dependencies. No full application startup, paid calls or live deployment during verification."
 }

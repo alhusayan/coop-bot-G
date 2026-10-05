@@ -5,6 +5,7 @@ Price parsers, URL binding and the functions under test run unchanged.
 """
 import ast
 import copy
+import hashlib
 import io
 import json
 import math
@@ -15,6 +16,7 @@ import time
 import unittest
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
+from collections import Counter
 from contextlib import redirect_stdout
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -32,7 +34,7 @@ for node in TREE.body:
                 NODES[target.id] = node
 
 def scope(roots, overrides=None):
-    ns = dict(re=re, json=json, urllib=urllib, time=time, copy=copy, os=os, math=math,
+    ns = dict(re=re, json=json, urllib=urllib, time=time, copy=copy, os=os, math=math, hashlib=hashlib, Counter=Counter,
               threading=threading, Decimal=Decimal, InvalidOperation=InvalidOperation,
               ThreadPoolExecutor=ThreadPoolExecutor, __name__='findzia_test')
     ns.update(overrides or {})

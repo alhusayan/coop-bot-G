@@ -1,0 +1,21 @@
+MEDIA AUDIT batch=1 elapsed_ms=0 unavailable=0
+MEDIA AUDIT batch=1 elapsed_ms=0 unavailable=0
+MEDIA AUDIT batch=1 elapsed_ms=0 unavailable=0
+MEDIA AUDIT batch=1 elapsed_ms=0 unavailable=0
+MEDIA AUDIT batch=1 elapsed_ms=0 unavailable=0
+MEDIA AUDIT batch=1 elapsed_ms=0 unavailable=1
+MEDIA AUDIT batch=1 elapsed_ms=0 unavailable=1
+test_402_diagnostic_does_not_log_provider_body (__main__.MediaTests.test_402_diagnostic_does_not_log_provider_body) ... ok
+test_cached_success_survives_exhausted_quota (__main__.MediaTests.test_cached_success_survives_exhausted_quota) ... ok
+test_definitive_rejection_stays_rejected (__main__.MediaTests.test_definitive_rejection_stays_rejected) ... ok
+test_rate_limit_is_retryable_and_not_cached (__main__.MediaTests.test_rate_limit_is_retryable_and_not_cached) ... ok
+test_singleflight_spends_quota_once (__main__.MediaTests.test_singleflight_spends_quota_once) ... ok
+test_token_validation_before_cache (__main__.MediaTests.test_token_validation_before_cache) ... ok
+test_unavailable_retains_retry_metadata (__main__.MediaTests.test_unavailable_retains_retry_metadata) ... ok
+test_uncertain_is_retryable (__main__.MediaTests.test_uncertain_is_retryable) ... ok
+test_unobserved_url_does_not_spend_quota (__main__.MediaTests.test_unobserved_url_does_not_spend_quota) ... ok
+
+----------------------------------------------------------------------
+Ran 9 tests in 1.621s
+
+OK
