@@ -1,4 +1,4 @@
-/* FINDZIA_BILLING_RELEASE=156.7.55 */
+/* FINDZIA_BILLING_RELEASE=156.7.56 */
 /* Findzia 156.7.20 — resumable checkout, safe plan changes and persistent payment UI. */
 (() => {
   'use strict';
@@ -744,14 +744,17 @@
         if(rev!==revision)return;
         const failures=results.filter(result=>result.status==='rejected');
         const unresolved=results.some(result=>result.status==='fulfilled'&&result.value?.payment_pending);
+        const blocking=results.some(result=>result.status==='fulfilled'&&result.value?.payment_pending&&result.value?.blocks_checkout!==false);
         const current=await refresh(true);if(rev!==revision)return;
         if(!current)throw Error('credits_unavailable');
         if(failures.length===results.length)throw failures[0].reason;
         paymentState=failures.length||unresolved?'pending':'restored';
-        paymentMessage=unresolved
+        paymentMessage=blocking
           ?paymentError(Error('other_payment_pending'))
           :failures.length
           ?tr('Some purchases were checked. One payment provider is unavailable; please retry to check the rest.','تحققنا من بعض المشتريات. إحدى بوابات الدفع غير متاحة؛ أعد المحاولة للتحقق من الباقي.')
+          :unresolved
+          ?tr('Payment is still being checked. Your credits will update after confirmation.','التحقق من الدفع مستمر. الرصيد يتحدث بعد التأكيد.')
           :tr('Your purchase records and search balance are up to date.','تم تحديث سجل مشترياتك ورصيد البحث.');
       }
       catch(e){if(rev===revision)paymentMessage=paymentFailure(e);}
