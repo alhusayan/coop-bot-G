@@ -394,7 +394,7 @@ from findzia_billing import CreditMiddleware, install_billing
 app.add_middleware(CreditMiddleware, owner=app)
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization', 'X-Findzia-Request-Id'], max_age=86400)
-BUILD_ID = 'v128.5.42.51-media'
+BUILD_ID = 'v128.5.42.52-support'
 _SOCIAL = None
 
 def _fz_social_row(row):
@@ -31804,6 +31804,7 @@ async def web_api_health_classic():
             'china_local_strategy':'native_balanced_domestic_open_baidu','global_china_balanced':True,
             'indexed_listing_queries':'independent_id_or_title','image_empty_response_guard':PILImage is not None,
             'regional_price_binding':'explicit_currency_same_listing','media_recovery':'signed_exact_listing',
+            'support_release':'156.7.62','support_ai_configured':bool(GEMINI_API_KEY),
             'product_media_release':'156.7.61','product_media_ai_configured':bool(GEMINI_API_KEY),
             'shopping_guide_enabled':True,'shopping_guide_ai_configured':bool(GEMINI_API_KEY),
             'shopping_guide_history':'device_opt_in_editable_90_days','refinement_toolbar':'selected_only'}
@@ -33610,3 +33611,10 @@ _install_product_media(app,
     normalize_url=lambda value: _web_unproxy_image_url(value) if isinstance(value,str) else '',
     fetch_inline=lambda url: _web_visual_candidate_inline({'image':url}),
     judge=_refine_ai)
+
+
+# 156.7.62: site support is separate from product search and payment mutations.
+from findzia_support import install as _install_findzia_support
+_install_findzia_support(app, judge=_refine_ai,
+    plans=lambda: getattr(getattr(app.state, 'findzia_credits', None), 'sale_plans', ()),
+    request_ip=_web_request_ip, enabled=lambda: WEB_API_ENABLED)
