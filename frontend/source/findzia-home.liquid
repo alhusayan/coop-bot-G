@@ -1,4 +1,4 @@
-{% comment %} FINDZIA_HOME_RELEASE=156.7.49 {% endcomment %}
+{% comment %} FINDZIA_HOME_RELEASE=156.7.51 {% endcomment %}
 {% comment %}Findzia 156.7.15 · progressive filters + conversational guide from 156.3.0 · combined 156.7.14 payments preserved{% endcomment %}
 
 
@@ -1192,7 +1192,10 @@ var fzPhotoChip=e.querySelector('[data-image-query-chip]');var fzPhotoPlus=e.que
     photoRejected: U.filter(x => x.photo_match_status === 'rejected').length,
     imageUnavailable: [...q.values()].filter(x => x.status === 'unavailable').length
   };
-};function fzResizeStage(){fzFitCinema();if(e.dataset.homeState==='empty'&&!e.contains(document.activeElement?.closest('input,textarea'))){const h=window.visualViewport?.height||innerHeight;e.style.setProperty('--fz-home-h',Math.round(h)+'px');}}
+};function fzResizeStage(){fzFitCinema();}
+// Use the stable CSS viewport for the landing page. Safari's address bar and
+// keyboard resize the visual viewport continuously; following it moves the hero.
+e.style.removeProperty('--fz-home-h');
 window.addEventListener('resize',fzResizeStage);window.visualViewport?.addEventListener('resize',fzResizeStage);fzResizeStage();g?.setAttribute('dir','auto');if(g)g.addEventListener('input',function(){});document.addEventListener('shopify:section:unload',function fzUnloadStage(event){if(!event.target?.contains(e))return;window.removeEventListener('resize',fzResizeStage);window.visualViewport?.removeEventListener('resize',fzResizeStage);document.removeEventListener('shopify:section:unload',fzUnloadStage);});}();(function(){const root=document.getElementById('findzia-home-{{ section.id }}');if(!root||!root.fzRefineBridge)return;const b=root.fzRefineBridge,input=root.querySelector('[id^="fz-query-"]');if(!input)return;function clean(value){const words=String(value||'').trim().split(/\s+/);let change=true;while(change){change=false;const lower=words.map(w=>w.toLowerCase());for(let n=Math.floor(words.length/2);n>=2&&!change;n--){for(let i=0;i+n*2<=words.length;i++){if(lower.slice(i,i+n).join(' ')===lower.slice(i+n,i+n*2).join(' ')){words.splice(i+n,n);change=true;break;}}}}
 return words.join(' ');}
 let edited=false;input.addEventListener('input',()=>{edited=true;});root.addEventListener('fz:search-reset',()=>{edited=false;});for(const name of['streamQuery','stage','complete','commitEmpty','restore','replace']){const fn=b[name];if(typeof fn!=='function')continue;b[name]=function(...args){const protect=edited&&document.activeElement===input,value=input.value,start=input.selectionStart,end=input.selectionEnd;if((name==='streamQuery'||name==='complete'||name==='commitEmpty')&&typeof args[0]==='string')args[0]=clean(args[0]);const result=fn.apply(this,args);if(protect){input.value=value;try{input.setSelectionRange(start,end);}catch(_){}}
@@ -1532,9 +1535,7 @@ return result;};}})();</script>
    preview.textContent=value.replace(/\s+/g,' ');preview.title=value;
    field.dataset.queryPreview=value&&!active?'true':'false';field.dataset.queryEditing=String(active);
    clear.hidden=!value;clear.setAttribute('aria-label',labels[root.dataset.lang]||labels.en);
-   const before=box.getBoundingClientRect().height;
-   // Focus opens the composer, including an empty or one-word query.
-   box.dataset.composerExpanded=String(active&&!photo);
+   // Focusing a short query must not move its controls under the finger.
    if(!home){const viewport=window.visualViewport;box.closest('[data-camera-composer]')?.setAttribute('data-keyboard-compact',String(active&&!!viewport&&viewport.scale<1.2&&viewport.height<500));}
    const cap=Math.max(68,Math.min(140,Math.floor((window.visualViewport?.height||innerHeight)*.3)));
    let contentHeight=44;
@@ -1543,17 +1544,12 @@ return result;};}})();</script>
     for(const prop of ['fontFamily','fontSize','fontWeight','fontStyle','lineHeight','letterSpacing','paddingTop','paddingBottom','paddingLeft','paddingRight','borderTopWidth','borderBottomWidth'])measure.style[prop]=css[prop];
     measure.style.width=input.getBoundingClientRect().width+'px';measure.value=value||' ';contentHeight=measure.scrollHeight;
    }
-   const height=active&&!photo?Math.max(68,Math.min(cap,contentHeight)):44;
+   const height=active&&!photo?Math.max(44,Math.min(cap,contentHeight)):44;
+   box.dataset.composerExpanded=String(active&&!photo&&height>45);
    field.style.setProperty('--fz-query-height',height+'px');
    field.style.setProperty('--fz-query-overflow',active&&contentHeight>height+1?'auto':'hidden');
    if(height!==lastHeight||active!==lastActive){
-    box.style.setProperty('transition','none','important');box.style.removeProperty('height');
-    const after=box.getBoundingClientRect().height;
-    const motion=before>0&&after>0&&root.dataset.pageTransitioning!=='true'&&!matchMedia('(prefers-reduced-motion: reduce)').matches;
-    if(motion&&Math.abs(after-before)>.5){
-     box.style.setProperty('height',before+'px','important');void box.offsetHeight;
-     box.style.removeProperty('transition');box.style.setProperty('height',after+'px','important');
-    }else{box.style.removeProperty('height');box.style.removeProperty('transition');}
+    box.style.removeProperty('height');box.style.removeProperty('transition');
     lastHeight=height;lastActive=active;
    }
    if(!active){input.scrollTop=0;input.scrollLeft=0;}
@@ -1630,7 +1626,7 @@ return result;};}})();</script>
 
 <style data-fz-query-polish="156.7.43">
 /* Focus opens the composer. Measuring never collapses the live input. */
-#findzia-home-{{ section.id }}[data-theme] [data-dark-form],#findzia-home-{{ section.id }}[data-theme] .fz-fixed-header .fz-search-row{box-sizing:border-box!important;overflow:hidden;transition:height .24s cubic-bezier(.22,1,.36,1),border-radius .24s ease,border-color .16s ease,box-shadow .16s ease!important}
+#findzia-home-{{ section.id }}[data-theme] [data-dark-form],#findzia-home-{{ section.id }}[data-theme] .fz-fixed-header .fz-search-row{box-sizing:border-box!important;overflow:hidden;transition:border-color .16s ease,box-shadow .16s ease!important}
 @media(prefers-reduced-motion:reduce){#findzia-home-{{ section.id }}[data-theme] [data-dark-form],#findzia-home-{{ section.id }}[data-theme] .fz-fixed-header .fz-search-row{transition:none!important}}
 html[data-fz-page-transition]::view-transition{pointer-events:none}
 html[data-fz-page-transition]::view-transition-group(root){animation-duration:280ms}
