@@ -1,5 +1,5 @@
-/* FINDZIA_BILLING_RELEASE=156.7.60 */
-/* Findzia 156.7.60 — one-time search packs, purchase history and direct Card. */
+/* FINDZIA_BILLING_RELEASE=156.7.63 */
+/* Findzia 156.7.63 — prepared checkout reveal, natural frame sizing and coordinated themes. */
 (() => {
   'use strict';
   const searches = new Set(['/api/search','/api/search/stream','/api/search/image','/api/search/image/stream',
@@ -60,7 +60,7 @@
     let paddleConfig=null, paymentBusy=false, paymentMessage='', paymentState='pending', paymentTxn='', paymentRevision=0, walletDialog=null;
     let checkoutView=null, standardPreferred=false, mfConfig=null, paymentConfigFlight=null, paymentConfigAt=0;
     let mfView=null, mfScriptPromise=null, paymentFlow=0;
-    let preparationView=null, feedbackEpoch=0;
+    let feedbackEpoch=0;
     let startingPayment=false, queuedPlan='', recoveryTimer=null, recoveryDeadline=0, pendingCheckoutIntent='';
     const mfReturnKey="findzia-mf-return-v1";
     const guestKey='findzia-guest-v1:'+new URL(api).origin, planKey='findzia-plan-intent-v1';
@@ -259,24 +259,6 @@
       feedbackEpoch++;
       if(paymentState==='success'||paymentState==='restored'){paymentMessage='';paymentState='pending';}
     }
-    function closePreparation(){
-      const view=preparationView;preparationView=null;if(!view)return;
-      window.FindziaModalScroll?.unlock(view.dialog);view.dialog.close();view.dialog.remove();
-    }
-    function preparePaymentView(){
-      closePreparation();
-      const dialog=el('dialog','fzb-wallet-dialog fzb-preparing-dialog');
-      dialog.dir=rtl()?'rtl':'ltr';dialog.dataset.theme=root.dataset.theme;
-      const title=el('h2','',tr('Secure checkout','الدفع الآمن'));title.id='fzb-preparing-'+uid();dialog.setAttribute('aria-labelledby',title.id);
-      const leave=()=>{paymentFlow++;startingPayment=false;paymentBusy=false;clearTimeout(recoveryTimer);recoveryTimer=null;closePreparation();account.render();};
-      const header=el('div','fzb-wallet-header'),close=button('×',leave,'fzb-wallet-close');close.setAttribute('aria-label',tr('Close checkout','إغلاق الدفع'));header.append(title,close);
-      const content=el('div','fzb-preparing-content'),spinner=el('span','fzb-loading-ring');spinner.setAttribute('aria-hidden','true');
-      const summary=el('div','fzb-preparing-summary'),p=plan();
-      if(p)summary.append(el('strong','',tf('{count} searches',{count:p.credits},'{count} عملية بحث')),el('bdi','',new Intl.NumberFormat('en-US',{style:'currency',currency:'USD'}).format(p.amount_cents/100)));
-      const status=el('p','',tr('Preparing secure checkout…','نجهّز الدفع الآمن…'));status.setAttribute('role','status');status.setAttribute('aria-live','polite');
-      content.append(spinner,status);dialog.append(header,summary,content);document.body.append(dialog);preparationView={dialog};
-      dialog.addEventListener('cancel',e=>{e.preventDefault();leave();});dialog.showModal();window.FindziaModalScroll?.lock(dialog);close.focus({preventScroll:true});
-    }
     async function startPayment(automatic=false){
       if(paymentBusy||mfView||checkoutView||!selectedPlan())return;
       if(!account.member()){account.open('signin');return;}
@@ -284,7 +266,6 @@
       if(automatic!==true)recoveryDeadline=Date.now()+150000;
       const rev=revision,flow=++paymentFlow,id=selectedPlan();paymentBusy=true;startingPayment=true;paymentMessage='';paymentState='pending';
       storePlan({plan:id,at:Date.now(),resume:false});markStartingPayment(id);
-      if(automatic!==true&&paymentProvider()!=='myfatoorah')preparePaymentView();
       try{
         await paymentConfig(); // Domain registration may finish after page load.
         if(flow!==paymentFlow||rev!==revision||!account.member()||id!==selectedPlan())return;
@@ -293,7 +274,7 @@
         if(useMF){
           if(!mfConfig.checkout_available)throw Error('live_checkout_not_available');
           if(!mfConfig.embedded_available)throw Error('embedded_not_available');
-          closePreparation();await openMF();return;
+          await openMF();return;
         }
         if(!paddleConfig?.checkout_available)throw Error('live_checkout_not_available');
         if(Array.isArray(paddleConfig.checkout_plan_ids)&&!paddleConfig.checkout_plan_ids.includes(id))throw Error('paddle_configuration_invalid');
@@ -310,16 +291,16 @@
         pendingCheckoutIntent='';paymentTxn=data.transaction_id;paymentRevision=revision;
         // Keep the account surface until the next surface exists. Closing it
         // first canceled our own flow and swallowed immediate provider errors.
-        closePreparation();
+        
         if(standardPreferred)openStandard(paddle,paymentTxn);else openWallet(paddle,paymentTxn);
-        if(checkoutView)account.close();
+        if(checkoutView?.mode==='overlay')account.close();
       }catch(e){if(flow===paymentFlow&&rev===revision&&id===selectedPlan()){
         if(errorCode(e)==='checkout_pending')resumePendingPayment({},flow,id);
         else paymentMessage=paymentFailure(e);
         account.render();
       }}
       finally{if(rev===revision&&flow===paymentFlow){
-        closePreparation();paymentBusy=false;startingPayment=false;account.render();
+        paymentBusy=false;startingPayment=!!(checkoutView?.mode==='inline'&&!checkoutView.revealed);account.render();
         const next=queuedPlan;queuedPlan='';
         if(next&&next===selectedPlan()&&flow===paymentFlow&&!checkoutView&&!mfView)startPayment();
       }}
@@ -617,7 +598,12 @@
     }
     function closeWallet(closeProvider=true){
       const dialog=walletDialog,view=checkoutView;walletDialog=null;checkoutView=null;
-      if(view)clearTimeout(view.timer);
+      if(view){
+        clearTimeout(view.timer);clearTimeout(view.revealTimer);clearTimeout(view.dismissTimer);
+        view.resizeObserver?.disconnect();view.frameObserver?.disconnect();view.animation?.cancel();
+        view.frame?.removeEventListener('load',view.settle,true);
+      }
+      startingPayment=false;
       // Clear our state first: Paddle may emit checkout.closed synchronously.
       if(closeProvider&&(view||dialog))try{window.Paddle?.Checkout?.close();}catch(_){}
       if(dialog){window.FindziaModalScroll?.unlock(dialog);if(dialog.open)dialog.close();dialog.remove();}
@@ -639,9 +625,53 @@
     function checkoutHelp(text){
       const view=checkoutView;
       if(!view||view.mode!=='inline'||view.paying)return;
-      clearTimeout(view.timer);view.status.hidden=false;view.status.style.visibility='visible';view.status.textContent=text;
-      view.fallback.disabled=false;
-      view.dialog.dataset.checkoutState='delayed';
+      clearTimeout(view.timer);
+      if(!view.revealed){
+        // An incomplete provider frame is never presented as a payment form.
+        closeWallet();paymentBusy=false;
+        paymentMessage=paymentCopy('error',tr('Checkout could not load. Please try again.','تعذّر فتح الدفع. حاول مجددًا.'));
+        account.open('plans');return;
+      }
+      view.status.hidden=false;view.status.textContent=text;
+      view.fallback.disabled=false;view.dialog.dataset.checkoutState='delayed';
+    }
+    function revealWallet(view){
+      if(checkoutView!==view||view.revealed||!view.loaded||!view.totalsReady||view.closing)return;
+      const iframe=view.frame.querySelector('iframe');
+      if(!iframe||iframe.getBoundingClientRect().height<40)return;
+      clearTimeout(view.timer);clearTimeout(view.revealTimer);
+      view.revealed=true;startingPayment=false;
+      view.frameObserver?.disconnect();view.resizeObserver?.disconnect();
+      view.frame.removeEventListener('load',view.settle,true);
+      view.status.hidden=true;view.frame.inert=false;view.frame.setAttribute('aria-busy','false');
+      view.dialog.inert=false;view.dialog.removeAttribute('aria-hidden');
+      view.dialog.dataset.checkoutState='ready';view.fallback.disabled=false;
+      // Keep this exact iframe and transaction: moving/reopening it can reset a wallet.
+      view.dialog.showModal();window.FindziaModalScroll?.lock(view.dialog);account.close();
+      if(!window.matchMedia('(prefers-reduced-motion: reduce)').matches){
+        view.animation=view.dialog.animate([
+          {opacity:0,transform:'translateY(36px) scale(.955)'},
+          {opacity:1,transform:'translateY(-2px) scale(1.003)',offset:.76},
+          {opacity:1,transform:'translateY(0) scale(1)'}
+        ],{duration:480,easing:'cubic-bezier(.2,.8,.25,1)'});
+      }
+      view.title.focus({preventScroll:true});
+    }
+    function settleWallet(view){
+      if(checkoutView!==view||view.revealed||view.closing)return;
+      const iframe=view.frame.querySelector('iframe');
+      if(iframe&&iframe!==view.observedFrame){view.observedFrame=iframe;view.resizeObserver?.observe(iframe);}
+      clearTimeout(view.revealTimer);
+      if(view.loaded&&view.totalsReady&&iframe)view.revealTimer=setTimeout(()=>revealWallet(view),180);
+    }
+    function dismissWallet(view){
+      if(checkoutView!==view||view.closing)return;
+      view.closing=true;view.frame.inert=true;view.fallback.disabled=true;
+      const finish=()=>{if(checkoutView!==view)return;closeWallet();account.open('plans');};
+      if(!view.revealed||window.matchMedia('(prefers-reduced-motion: reduce)').matches){finish();return;}
+      view.animation?.cancel();view.dialog.dataset.checkoutState='closing';
+      view.animation=view.dialog.animate([{opacity:1,transform:'translateY(0) scale(1)'},{opacity:0,transform:'translateY(20px) scale(.98)'}],{duration:180,easing:'cubic-bezier(.4,0,1,1)',fill:'forwards'});
+      view.dismissTimer=setTimeout(finish,180);
     }
     function updateWalletTotals(data){
       const view=checkoutView;if(!view?.totals)return;
@@ -653,42 +683,49 @@
       for(const [label,value] of [[tr('Subtotal','المجموع الفرعي'),totals.subtotal],[tr('Tax','الضريبة'),totals.tax],[tr('Total','الإجمالي'),totals.total]]){
         const row=el('div','fzb-checkout-total');row.append(el('span','',label),el('bdi','',money(value)));view.totals.append(row);
       }
-      view.totals.hidden=false;
+      view.totals.hidden=false;view.totalsReady=true;
+      if(view.currency)view.currency.textContent=currency;
+      settleWallet(view);
     }
     function openWallet(paddle,transactionId){
-      closeWallet();
-      const walletFrame='fzb-wallet-frame-'+uid();
+      closeWallet();startingPayment=true;
+      const walletFrame='fzb-wallet-frame-'+uid(),theme=root.dataset.theme==='dark'?'dark':'light';
       const dialog=el('dialog','fzb-wallet-dialog');walletDialog=dialog;
-      dialog.dir=rtl()?'rtl':'ltr';dialog.dataset.theme=root.dataset.theme;dialog.dataset.checkoutState='loading';dialog.dataset.paddleWallet='';
-      const header=el('div','fzb-wallet-header'),title=el('h2','',tr('Complete your purchase','أكمل عملية الشراء'));
+      dialog.dir=rtl()?'rtl':'ltr';dialog.dataset.theme=theme;dialog.dataset.checkoutState='loading';dialog.dataset.paddleWallet='';
+      dialog.inert=true;dialog.setAttribute('aria-hidden','true');
+      const header=el('div','fzb-wallet-header'),title=el('h2','',tr('Secure checkout','الدفع الآمن'));
       title.id=walletFrame+'-title';title.tabIndex=-1;dialog.setAttribute('aria-labelledby',title.id);
-      const close=button('×',()=>{closeWallet();account.open('plans');},'fzb-wallet-close');
-      close.setAttribute('aria-label',tr('Close checkout','إغلاق الدفع'));
-      header.append(title,close);
+      const close=button('×',()=>dismissWallet(view),'fzb-wallet-close');
+      close.setAttribute('aria-label',tr('Close checkout','إغلاق الدفع'));header.append(title,close);
       const frame=el('div',walletFrame);frame.classList.add('fzb-wallet-frame');
-      const summary=el('div','fzb-wallet-summary'),p=plan();
-      if(p){summary.append(el('strong','',tf('{count} searches',{count:p.credits},'{count} عملية بحث')),el('span','',tr('One-time payment','دفعة واحدة')));}
+      const summary=el('div','fzb-wallet-summary'),p=plan(),currency=el('bdi','fzb-wallet-currency','USD');
+      if(p){summary.append(el('strong','',tf('{count} searches',{count:p.credits},'{count} عملية بحث')),el('span','',tr('One-time payment','دفعة واحدة')),currency);}
       const totals=el('div','fzb-checkout-totals');
-      const status=el('p','fzb-wallet-status',tr('Loading secure checkout…','جاري تحميل الدفع الآمن…'));
-      status.setAttribute('role','status');status.setAttribute('aria-live','polite');
-      const fallback=button(tr('Card','بطاقة'),()=>openStandard(paddle,transactionId,true),'fzb-wallet-alternative fzb-card-method');
-      fallback.dataset.paymentMethod='card';
+      const status=el('p','fzb-wallet-status');status.hidden=true;status.setAttribute('role','status');status.setAttribute('aria-live','polite');
+      const fallback=button(tr('Card','بطاقة'),()=>openStandard(paddle,transactionId,true),'fzb-wallet-alternative fzb-card-method');fallback.dataset.paymentMethod='card';
       const cardIcon=el('span','fzb-card-icon');cardIcon.setAttribute('aria-hidden','true');fallback.prepend(cardIcon);
       fallback.disabled=true;frame.inert=true;frame.setAttribute('aria-busy','true');
       dialog.append(header,summary,totals,status,frame,fallback);document.body.append(dialog);
-      const view={mode:'inline',id:'',dialog,status,totals,fallback,frame,loaded:false,paying:false,timer:null};checkoutView=view;
-      view.timer=setTimeout(()=>{if(checkoutView===view&&!view.loaded&&!view.paying)checkoutHelp(tr('Checkout is taking longer than expected. You can try the standard checkout.','الدفع تأخر في التحميل. تقدر تجرّب الدفع المعتاد.'));},12000);
-      dialog.addEventListener('cancel',e=>{e.preventDefault();closeWallet();account.open('plans');});
-      dialog.addEventListener('close',()=>{if(checkoutView===view&&!dialog.open){closeWallet();account.open('plans');}});
-      dialog.showModal();window.FindziaModalScroll?.lock(dialog);dialog.addEventListener('close',()=>window.FindziaModalScroll?.unlock(dialog),{once:true});title.focus({preventScroll:true});
-      // Express inherits enabled methods from Paddle. allowedPaymentMethods is
-      // incompatible with variant: 'express'; keep that option in openStandard only.
+      const view={mode:'inline',id:'',dialog,title,status,totals,currency,fallback,frame,loaded:false,revealed:false,totalsReady:false,paying:false,timer:null};checkoutView=view;
+      view.settle=()=>settleWallet(view);
+      view.frameObserver=new MutationObserver(view.settle);view.frameObserver.observe(frame,{childList:true,subtree:true,attributes:true,attributeFilter:['style','height','width']});
+      if(window.ResizeObserver)view.resizeObserver=new ResizeObserver(view.settle);
+      frame.addEventListener('load',view.settle,true);
+      view.timer=setTimeout(()=>{if(checkoutView===view&&!view.revealed&&!view.paying)checkoutHelp('');},15000);
+      dialog.addEventListener('cancel',e=>{e.preventDefault();dismissWallet(view);});
+      dialog.addEventListener('close',()=>{if(checkoutView===view&&view.revealed&&!dialog.open){closeWallet();account.open('plans');}});
+      // Theme is frozen for this transaction. SDK resizing owns the complete frame,
+      // including its footer; no cropping, iframe reload or CSS color inversion.
+      // Isolate the iframe element from the page color-scheme: browsers paint a
+      // white canvas for a dark parent/light-default transparent child. Paddle
+      // still gets theme=dark for its actual text/buttons, independent of this canvas.
       try{paddle.Checkout.open({...checkoutOptions(transactionId),
         settings:{displayMode:'inline',variant:'express',frameTarget:walletFrame,
-          frameInitialHeight:240,frameStyle:'width:100%;min-width:312px;background-color:transparent;border:none;',
-          showNonExpressPaymentMethods:false,theme:root.dataset.theme==='dark'?'dark':'light'}
+          frameInitialHeight:180,frameStyle:'width:100%;min-width:312px;background-color:'+(theme==='dark'?'#202923':'#ffffff')+';color-scheme:normal;border:none;display:block;',
+          showNonExpressPaymentMethods:false,theme,locale:['ar','en','fr','de','es','it','pt','tr','ru','ja','ko'].includes(root.dataset.lang)?root.dataset.lang:root.dataset.lang==='zh'?'zh-Hans':'en'}
       });}catch(e){closeWallet();throw e;}
     }
+
     function paymentError(e){
       const code=errorCode(e);
       return ({
@@ -760,9 +797,9 @@
         return;
       }
       if(e.name==='checkout.loaded'){
-        view.id=e.data.id||'';view.loaded=true;clearTimeout(view.timer);
-        if(view.status){view.status.hidden=true;view.dialog.dataset.checkoutState='ready';view.fallback.disabled=false;view.frame.inert=false;view.frame.setAttribute('aria-busy','false');}
+        view.id=e.data.id||'';view.loaded=true;
         updateWalletTotals(e.data);
+        if(view.mode==='inline')settleWallet(view);else clearTimeout(view.timer);
       }
       if(e.name==='checkout.updated')updateWalletTotals(e.data);
       if(e.name==='checkout.payment.initiated'){
@@ -953,7 +990,7 @@
         const loading=startingPayment&&selectedPlan()===plan.id;
         const buy=button(loading?tr('Preparing payment…','نجهّز الدفع…'):tf('Get {count} searches',{count:plan.credits},'احصل على {count} بحث'),()=>choosePlan(plan.id),'fza-primary fzb-plan-buy');
         buy.dataset.planBuy=plan.id;
-        // Only the selected card changes state; the immediate modal protects the single checkout flow.
+        // Keep the selected button busy until the fully prepared checkout is revealed.
         buy.disabled=loading||(paymentProvider()==='paddle'&&Array.isArray(paddleConfig?.checkout_plan_ids)&&!paddleConfig.checkout_plan_ids.includes(plan.id));
         buy.setAttribute('aria-busy',String(loading));
         card.addEventListener('click',event=>{if(!event.target.closest('button')&&!buy.disabled)choosePlan(plan.id);});
@@ -975,10 +1012,17 @@
       return JSON.stringify([status,error,paddleConfig?.management_available,paddleConfig?.checkout_available]);
     }
     root.fzBilling={renderStamp,viewPurchases,restorePurchases,fetch:paidFetch,beforeSearch,refresh,renderUsage,renderPlans,renderCheckout,planSummary,selectedPlan,beforeSignIn,handleSearchError,notice,status:()=>status,label:()=>status?tf('Searches remaining: {count}',{count:status.remaining},'عمليات البحث المتبقية: {count}'):tr('10 free searches','10 بحوث مجانية')};
-    root.addEventListener('fz:account-session',()=>{clearTimeout(recoveryTimer);recoveryTimer=null;queuedPlan='';pendingCheckoutIntent='';startingPayment=false;closePreparation();feedbackEpoch++;closeMF();closeWallet();revision++;status=null;stamp=0;error='';noticeCode='';paddleConfig=null;mfConfig=null;paymentConfigAt=0;paymentConfigFlight=null;paymentBusy=false;paymentMessage='';paymentState='pending';paymentTxn='';standardPreferred=false;memoryPlan=null;paymentConfig().then(async()=>{account.render();if(await confirmMyFatoorah())return;if(account.member()&&selectedPlan()&&resumePlan())startPayment();});refresh(true);});
-    root.addEventListener('fz:account-view',e=>{if(e.detail.to!=='checkout')clearCompletedFeedback();});
-    root.addEventListener('fz:account-closed',()=>{clearCompletedFeedback();if(!mfView&&!checkoutView){
-      closePreparation();
+    root.addEventListener('fz:account-session',()=>{clearTimeout(recoveryTimer);recoveryTimer=null;queuedPlan='';pendingCheckoutIntent='';startingPayment=false;feedbackEpoch++;closeMF();closeWallet();revision++;status=null;stamp=0;error='';noticeCode='';paddleConfig=null;mfConfig=null;paymentConfigAt=0;paymentConfigFlight=null;paymentBusy=false;paymentMessage='';paymentState='pending';paymentTxn='';standardPreferred=false;memoryPlan=null;paymentConfig().then(async()=>{account.render();if(await confirmMyFatoorah())return;if(account.member()&&selectedPlan()&&resumePlan())startPayment();});refresh(true);});
+    root.addEventListener('fz:account-view',e=>{
+      if(e.detail.to!=='checkout')clearCompletedFeedback();
+      if(e.detail.to!=='plans'&&startingPayment&&!checkoutView?.revealed&&!mfView){
+        paymentFlow++;paymentBusy=false;startingPayment=false;closeWallet();
+      }
+    });
+    root.addEventListener('fz:account-closed',()=>{clearCompletedFeedback();
+      if(checkoutView?.mode==='inline'&&!checkoutView.revealed)closeWallet();
+      if(!mfView&&!checkoutView){
+      
       clearTimeout(recoveryTimer);recoveryTimer=null;queuedPlan='';paymentFlow++;
       if(startingPayment){startingPayment=false;paymentBusy=false;}
     }});
@@ -987,7 +1031,7 @@
     window.addEventListener('pagehide',()=>{
       clearCompletedFeedback();clearTimeout(recoveryTimer);recoveryTimer=null;queuedPlan='';paymentFlow++;
       if(startingPayment){startingPayment=false;paymentBusy=false;}
-      closePreparation();closeMF();closeWallet();
+      closeMF();closeWallet();
     });
     window.addEventListener('pageshow',event=>{if(event.persisted){account.render();refresh(true);}});
     window.addEventListener('focus',()=>refresh(true));
@@ -1116,10 +1160,8 @@
 .fzb-wallet-dialog[data-paddle-wallet]>.fzb-wallet-status[hidden]{display:none!important}
 .fzb-wallet-dialog .fzb-card-method{display:flex;align-items:center;justify-content:center;gap:9px;width:100%;box-sizing:border-box;min-height:46px;margin:10px 0 0!important;padding:10px 16px;border:1px solid var(--pay-accent);border-radius:10px;background:transparent;color:var(--pay-ink);text-decoration:none;font-size:15px;font-weight:550}
 .fzb-card-icon{position:relative;display:inline-block;width:19px;height:13px;border:1.6px solid currentColor;border-radius:2px}.fzb-card-icon::before{content:'';position:absolute;top:3px;left:0;right:0;border-top:2px solid currentColor}
-.fzb-preparing-dialog{width:min(440px,calc(100vw - 24px));padding:20px}.fzb-preparing-summary{display:flex;justify-content:space-between;gap:16px;font-size:17px;margin:12px 0;padding-bottom:20px;border-bottom:1px solid var(--pay-line)}
-.fzb-preparing-content{min-height:146px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;color:var(--pay-muted)}.fzb-preparing-content p{font-size:13px;margin:0}.fzb-loading-ring{display:block;box-sizing:border-box;width:28px;height:28px;border:2px solid var(--pay-line);border-top-color:var(--pay-accent);border-radius:50%;animation:fzb-pay-spin .8s linear infinite}
 @keyframes fzb-pay-spin{to{transform:rotate(360deg)}}
-@media(prefers-reduced-motion:reduce){.fzb-loading-ring{animation:none;border-top-width:4px}}
+
 @media(min-width:800px){.fz-account .fzb-plans{grid-template-columns:repeat(3,minmax(0,1fr))!important;gap:16px}.fzb-plan-main{flex-direction:column;gap:22px}.fzb-plan-prices{text-align:start}.fz-account .fzb-plan .fzb-price{justify-content:flex-start}.fz-account .fzb-plan .fzb-price strong{font-size:36px!important}.fzb-plan-footer{flex-direction:column;align-items:stretch;margin-top:24px}.fz-account .fzb-plan .fzb-plan-buy{width:100%}.fzb-plan-value{min-height:18px}.fz-account .fzb-plans-intro{text-align:center;margin:8px 0 36px}.fz-account .fzb-plan-promises{justify-content:center}.fz-account .fzb-plans-intro h2{font-size:34px}.fz-account .fzb-plan{padding:24px!important}}
 @media(max-width:600px){.fz-account:has(.fzb-plans){width:100%}.fz-account .fza-body:has(.fzb-plans){padding:22px 18px!important}.fz-account .fzb-plan{padding:17px 15px!important}}
 @media(max-width:360px){.fz-account .fzb-plans-intro h2{font-size:25px}.fz-account .fzb-plan h3{font-size:18px!important}.fz-account .fzb-plan .fzb-price strong{font-size:24px!important}.fz-account .fzb-plan .fzb-plan-buy{min-width:130px;padding-inline:10px}.fzb-wallet-dialog[data-paddle-wallet][open]{padding:4px}}
@@ -1135,6 +1177,34 @@
  .fz-account .fzb-plan .fzb-plan-buy:not(:disabled):active{scale:.97}
 }
 @media(prefers-reduced-motion:reduce){.fz-account .fzb-plan,.fz-account .fzb-plan .fzb-plan-buy{transition:none}}
+
+/* 156.7.63: a single compact surface. The provider owns its complete frame height. */
+.fzb-wallet-dialog[data-paddle-wallet]{width:min(440px,calc(100vw - 24px));max-width:calc(100vw - 24px);min-width:0;box-sizing:border-box;padding:22px;border:1px solid var(--pay-line);border-radius:26px;box-shadow:0 24px 90px -28px #0008;text-align:start;transform-origin:50% 70%;color-scheme:light}
+.fzb-wallet-dialog[data-paddle-wallet][data-theme=dark]{color-scheme:dark;box-shadow:0 28px 100px -24px #000c}
+.fzb-wallet-dialog[data-paddle-wallet][open]{display:flex;flex-direction:column;height:fit-content;min-height:0;max-height:calc(100dvh - 32px);overflow:auto;padding:22px;gap:0}
+.fzb-wallet-dialog[data-paddle-wallet][data-checkout-state=loading]{display:flex;flex-direction:column;position:fixed;inset:0;margin:auto;height:fit-content;opacity:0;pointer-events:none;z-index:-1}
+.fzb-wallet-dialog[data-paddle-wallet]::backdrop{background:#0b191b59;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);animation:fzb-backdrop-in 260ms ease both}
+.fzb-wallet-dialog[data-paddle-wallet][data-checkout-state=closing]::backdrop{animation:fzb-backdrop-out 180ms ease both}
+.fzb-wallet-dialog[data-paddle-wallet]>.fzb-wallet-header{padding:0;margin:0 0 22px;gap:12px}
+.fzb-wallet-dialog[data-paddle-wallet] .fzb-wallet-header h2{font-size:18px!important;line-height:1.4;letter-spacing:-.3px;font-weight:600}
+.fzb-wallet-dialog[data-paddle-wallet] .fzb-wallet-close{width:36px;height:36px;min-width:36px;min-height:36px;border:0;background:color-mix(in srgb,var(--pay-ink) 6%,var(--pay-bg));font-size:25px}
+.fzb-wallet-dialog[data-paddle-wallet]>.fzb-wallet-summary{display:grid;grid-template-columns:1fr auto;gap:3px 12px;margin:0 0 18px;padding:0}
+.fzb-wallet-dialog[data-paddle-wallet] .fzb-wallet-summary strong{font-size:22px;line-height:1.3;font-weight:650;letter-spacing:-.5px}
+.fzb-wallet-dialog[data-paddle-wallet] .fzb-wallet-summary span{font-size:12px;grid-row:2}
+.fzb-wallet-dialog[data-paddle-wallet] .fzb-wallet-currency{grid-column:2;grid-row:1 / 3;align-self:center;color:var(--pay-muted);font-size:10px;letter-spacing:.7px;padding:4px 7px;border:1px solid var(--pay-line);border-radius:6px}
+.fzb-wallet-dialog[data-paddle-wallet]>.fzb-checkout-totals{gap:4px;margin:0 0 16px;padding:0 0 16px}
+.fzb-wallet-dialog[data-paddle-wallet] .fzb-checkout-total{font-size:12px;line-height:1.6;color:var(--pay-muted)}
+.fzb-wallet-dialog[data-paddle-wallet] .fzb-checkout-total:last-of-type{font-size:17px;font-weight:650;color:var(--pay-ink);margin-top:5px}
+.fzb-wallet-dialog[data-paddle-wallet]>.fzb-wallet-frame{flex:0 0 auto;min-height:0;min-width:0;width:100%;overflow:visible;background:var(--pay-bg);color-scheme:inherit}
+.fzb-wallet-dialog[data-paddle-wallet]>.fzb-wallet-frame iframe{display:block;max-width:100%;border:0;background:var(--pay-bg);color-scheme:normal}
+.fzb-wallet-dialog[data-paddle-wallet]>.fzb-card-method{flex:0 0 auto;min-height:44px;margin:10px 0 0!important;padding:10px 14px;border-color:var(--pay-line);border-radius:12px;font-size:13px;background:color-mix(in srgb,var(--pay-ink) 3%,var(--pay-bg))}
+.fzb-wallet-dialog[data-paddle-wallet]>.fzb-wallet-status:not([hidden]){margin:0 0 12px;font-size:12px}
+.fzb-plan-buy[aria-busy=true]::after{content:'';display:inline-block;box-sizing:border-box;width:12px;height:12px;margin-inline-start:8px;border:1.5px solid currentColor;border-inline-end-color:transparent;border-radius:50%;vertical-align:-1px;animation:fzb-pay-spin .8s linear infinite}
+@keyframes fzb-backdrop-in{from{background:#0b191b00;backdrop-filter:blur(0);-webkit-backdrop-filter:blur(0)}to{background:#0b191b59;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)}}
+@keyframes fzb-backdrop-out{from{background:#0b191b59;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)}to{background:#0b191b00;backdrop-filter:blur(0);-webkit-backdrop-filter:blur(0)}}
+@media(max-width:380px){.fzb-wallet-dialog[data-paddle-wallet],.fzb-wallet-dialog[data-paddle-wallet][open]{width:calc(100vw - 16px);max-width:calc(100vw - 16px);padding:14px;border-radius:22px}}
+@media(max-width:343px){.fzb-wallet-dialog[data-paddle-wallet],.fzb-wallet-dialog[data-paddle-wallet][open]{width:100vw;max-width:100vw;padding:3px;border-radius:18px}.fzb-wallet-dialog[data-paddle-wallet]>.fzb-wallet-header,.fzb-wallet-dialog[data-paddle-wallet]>.fzb-wallet-summary,.fzb-wallet-dialog[data-paddle-wallet]>.fzb-checkout-totals{margin-inline:10px}}
+@media(prefers-reduced-motion:reduce){.fzb-wallet-dialog[data-paddle-wallet]::backdrop,.fzb-plan-buy[aria-busy=true]::after{animation:none}}
 `;document.head.append(style);
   const scan=()=>document.querySelectorAll('.fz-home').forEach(mount);scan();
   const timer=setInterval(scan,100);setTimeout(()=>clearInterval(timer),15000);
