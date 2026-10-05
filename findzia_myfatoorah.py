@@ -134,12 +134,47 @@ class MyFatoorahPack:
     def require(self, member):
         if not self.allowed(member): raise HTTPException(403, 'myfatoorah_not_available')
 
+    def can_restore(self, member):
+        # Disabling new MyFatoorah sales must not disable owned payment recovery.
+        return bool(self.credits.available and self.key and self.mode in ('sandbox', 'live')
+                    and member and member.get('id') and not member.get('guest')
+                    and (self.mode == 'live' or member.get('email', '').lower() in self.test_emails))
+
+    def review_before_switch(self, member):
+        if not self.can_restore(member):
+            raise HTTPException(503, 'payment_verification_unavailable')
+        with self.accounts.connect() as db:
+            rows = db.execute("SELECT intent FROM fz_mf_orders WHERE member=? AND mode=? AND state IN ('creating','pending','session_processing') ORDER BY created DESC LIMIT 3",
+                              (member['id'], self.mode)).fetchall()
+        for row in rows:
+            result = self.review_unfinished(member, only_intent=row['intent'], tolerate_unavailable=True)
+            if result and (result.get('confirmed') or result.get('payment_pending')):
+                return result
+        return None
+
+    def restore(self, member):
+        if not self.can_restore(member):
+            raise HTTPException(403, 'myfatoorah_not_available')
+        review = self.review_before_switch(member)
+        # Pending invoices can exist before a payment webhook creates a job.
+        # Review them as well as previously recorded payment notifications.
+        with self.accounts.connect() as db:
+            rows = db.execute('SELECT j.payment,j.invoice FROM fz_mf_jobs j JOIN fz_mf_orders o ON o.mode=j.mode AND o.invoice=j.invoice WHERE o.member=? AND o.mode=? ORDER BY o.created DESC LIMIT 10',
+                              (member['id'], self.mode)).fetchall()
+        for row in rows:
+            self.verify(row['payment'], row['invoice'], member['id'])
+        with self.accounts.connect() as db:
+            pending = db.execute("SELECT 1 FROM fz_mf_orders WHERE member=? AND mode=? AND state IN ('creating','pending','session_processing') LIMIT 1",
+                                 (member['id'], self.mode)).fetchone()
+        return {'payment_pending': bool(pending), 'confirmed': bool(review and review.get('confirmed'))}
+
     def public(self, member):
         window = getattr(self, 'apple_window', None)
         storefronts = getattr(self, 'apple_storefronts', {})
         inline_origins = [host for host, registration in storefronts.items()
                           if registration.ready and self.allowed(member)]
         return {'ok': True, 'enabled': self.enabled, 'environment': self.mode,
+                'restore_available': self.can_restore(member), 'recovery_build': '156.7.55',
                 'checkout_mode': 'embedded', 'checkout_build': '156.7.18', 'pricing_build': '156.7.54',
                 'checkout_available': self.allowed(member), 'plan_id': 'pack',
                 'checkout_plan_ids': [p['id'] for p in self.credits.sale_plans if p['interval']=='once'],
@@ -749,13 +784,8 @@ def install_myfatoorah(app, credits):
         return result(service.public(None))
     @app.post('/api/billing/myfatoorah/restore')
     async def restore(request:Request):
-        m=await member(request); service.require(m)
-        # Only reconcile this member's server-mapped payments; no email matching.
-        with service.accounts.connect() as db:
-            rows=db.execute('SELECT j.payment,j.invoice FROM fz_mf_jobs j JOIN fz_mf_orders o ON o.mode=j.mode AND o.invoice=j.invoice WHERE o.member=? AND o.mode=? ORDER BY o.created DESC LIMIT 10',(m['id'],service.mode)).fetchall()
-        for row in rows:
-            await asyncio.to_thread(service.verify,row['payment'],row['invoice'],m['id'])
-        return result({})
+        m=await member(request)
+        return result(await asyncio.to_thread(service.restore,m))
     @app.post('/api/billing/myfatoorah/config')
     async def config(request:Request): return result(service.public(await member(request)))
     @app.post('/api/billing/myfatoorah/checkout')

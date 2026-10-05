@@ -1,0 +1,41 @@
+Findzia payment recovery 156.7.55
+Base: 156.7.54, deployed source commit 2aa4289c21bf86dbf2ae9e3bffbe6e5b04c7e958
+
+Passed offline verification:
+- 24 existing prepaid backend tests.
+- 16 new recovery backend tests (40 backend tests total).
+- 36 targeted browser assertions across English and Arabic:
+  clear restore, unresolved payment, unavailable gateway.
+- Frontend production build: 156.7.55, 26 routes.
+- Exactly six existing production files differ from the 156.7.54 working baseline.
+- Search, home, CSS and motion source files are byte-for-byte unchanged.
+- The baseline Git blob hashes of the three backend modules, frontend billing
+  module and package.json match the deployed source retrieved earlier.
+
+Coverage includes:
+- Reviewed unused MyFatoorah invoice does not indefinitely block Paddle.
+- Late verified payment still grants credit exactly once.
+- Paid previous checkout confirms without creating another purchase.
+- Active, unknown and unavailable payment states stay blocked.
+- Amount mismatch cannot grant credit or allow a second checkout.
+- Disabled new MyFatoorah sales do not disable owned payment recovery.
+- Pending paid invoices can be restored without a webhook job.
+- Guest/sandbox access and member ownership restrictions are preserved.
+- Provider reads do not hold SQLite write transactions.
+- Creation lease blocks concurrent checkout and is released after failure.
+- Paddle canceled/completed/ready transaction handling when switching gateway.
+- Restore checks both configured gateways without creating a purchase.
+- Browser pending/partial-success status is not reported as fully restored.
+
+All provider responses were mocked. No real payment was initiated.
+No live account database was inspected or modified by these tests.
+This ZIP has not been deployed. Real account recovery must be checked after
+deployment; genuinely pending payments or unavailable providers remain blocked.
+
+To run backend tests on the full source tree with its Python requirements:
+python3 -m unittest test_prepaid_packs test_payment_recovery -q
+Copy those two verification files into the source root for this test only.
+
+To run browser checks, copy payment-recovery-browser.cjs into frontend/tests,
+build frontend, and provide Playwright plus an installed Chromium executable
+through FINDZIA_TEST_CHROME. All external API and payment routes are intercepted.

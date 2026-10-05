@@ -121,6 +121,7 @@ class PaddleSandbox:
 
     def public(self, member=None):
         return dict(checkout_available=self.allowed(member or {}), restore_available=self.allowed(member or {}),
+                    recovery_build='156.7.55',
                     management_available=self.management_available(member or {}),
                     paddle_environment=self.mode, paddle_client_token=self.client_token,
                     checkout_plan_ids=[p['id'] for p in self.credits.sale_plans if p['id'] in self.prices])
@@ -569,6 +570,20 @@ class PaddleSandbox:
             for txn in txns:
                 self.reconcile_transaction(txn['id'])
             self.reconcile_subscription(sub['id'])
+
+    def review_before_switch(self, member):
+        if not self.management_available(member):
+            raise HTTPException(503, 'paddle_recovery_unavailable')
+        self.recover_unmapped_checkout(member)
+        with self.accounts.connect() as db:
+            rows = db.execute(f"SELECT * FROM {self.prefix}checkout WHERE member=? AND state IN ('creating','pending','uncertain') ORDER BY created DESC LIMIT 3",
+                              (member['id'],)).fetchall()
+        for row in rows:
+            # Same plan: only provider reads/reconciliation, never cancel or charge.
+            result = self.resolve_pending_checkout(member, row, row['plan'])
+            if result is not None:
+                return result
+        return None
 
 
 def install_paddle(app, credits):
