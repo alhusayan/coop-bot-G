@@ -1,57 +1,30 @@
 {
-  "version": "156.7.54",
-  "base_version": "156.7.53",
-  "base_commit": "c90fa5b4af9683f42b471de51c2aa2d12f335e09",
-  "production_files": [
-    {
-      "path": "findzia_plans.py",
-      "sha256": "e53487c9a322cbe6a6a0066eab0192fa5b46b1ecc02911ab98c2362007e9dcf4",
-      "base_git_blob": null
-    },
-    {
-      "path": "findzia_checkout_guard.py",
-      "sha256": "b070cf651469dc9a3a70babda0a242155b521d0f6629e58195288f43b2fe2b12",
-      "base_git_blob": null
-    },
-    {
-      "path": "findzia_billing.py",
-      "sha256": "c301a35041f0eff93c3127e90e14c240b4d88b888ab870b9f82b7aa29000ceaa",
-      "base_git_blob": "ad1d036b2982a310fcba3e588942069517769c03"
-    },
-    {
-      "path": "findzia_paddle.py",
-      "sha256": "fc684c64ee6ea93c1f0018f213f099254d481647e44435646298f8cc10fa55d1",
-      "base_git_blob": "428f6de6d0c12c671a4f60efb719a51733bf988f"
-    },
-    {
-      "path": "findzia_myfatoorah.py",
-      "sha256": "615b0a412480c13e4edb4ab507ed443c83c1dd3bd8125267b1e1599553d838cb",
-      "base_git_blob": "df97bb87f3ce7920472eb913ef3ddceee1effbc6"
-    },
-    {
-      "path": "findzia_applepay.py",
-      "sha256": "81e7d54aec3f94f1b670231cfdfe9c452921f8188237d7a3c00bfca506f1a592",
-      "base_git_blob": "95da754402d4f660181cf1a592e5f4ae3d04c6a4"
-    },
-    {
-      "path": "frontend/package.json",
-      "sha256": "dd7730358fe740a16708610c9c1b7a9575406121b1370f00adf93a87539d8244",
-      "base_git_blob": "7ff297b24225f908bdf610f15f0140f01d25e087"
-    },
-    {
-      "path": "frontend/scripts/build.mjs",
-      "sha256": "1185609f8385a4bbd3ce61fed5bd9d1614881874a8f5d2a6ddf62d244f625c2b",
-      "base_git_blob": "9967d37eef255ab66d2e2707ed6a892bdd79685d"
-    },
-    {
-      "path": "frontend/source/findzia-billing.js",
-      "sha256": "0588ffa215133ef4bee4a352c37760e7796f2d278766676024130843c3398063",
-      "base_git_blob": "d6521f137d8e4663a5f7e3ddd0a676cd4b2c086a"
-    },
-    {
-      "path": "frontend/source/findzia-i18n.js",
-      "sha256": "2848929a01ec6d7935708e8fc4796cbd4fa71f8991ac32cc10c42a2b40df6ee9",
-      "base_git_blob": "c96214abb0be6fb161ae91149f8204883d4d5fdf"
-    }
-  ]
+  "release": "156.7.58",
+  "base_commit": "06b3901efff4a8468fdc66fab4275da01960b1fb",
+  "deployed": false,
+  "runtime_files": [
+    "frontend/source/findzia-billing.js",
+    "frontend/source/findzia-account.js",
+    "frontend/source/findzia-i18n.js",
+    "frontend/package.json",
+    "frontend/scripts/build.mjs"
+  ],
+  "provider_brand_color_change_required": "#354E3F",
+  "checks": "verification/TEST_RESULTS.txt",
+  "files": {
+    "README_AR.txt": "87e55a94125cb1ec3a579c4af321e7e220ee363f7c325822ba8d752ed7e005d7",
+    "frontend/package.json": "0c96029384b2f91a0845e12c82c3cd3a30970119b2a5fdd214ec908a9a3eb740",
+    "frontend/scripts/build.mjs": "258d3262f4335bf5d69d5ed4399febed59534adaad315bb6108a9fe48085dd86",
+    "frontend/source/findzia-account.js": "7cf5f97980c5f560f0f955c66527083e07e28c5eef97069827db89a3cfd2a6f9",
+    "frontend/source/findzia-billing.js": "6f2f7b81ce3d0d3bc261c86e08e9ae29a5a81bf6b2f58e86bbbb2ae7a90280d3",
+    "frontend/source/findzia-i18n.js": "4779a0d9f6bcc14eb1627f1db1c4bc4a69d1fdeecc51ec8e80c7a8c24e0635cc",
+    "verification/TEST_RESULTS.txt": "9079cedd7ebe6723343ace16b8201909c4fa2d9a5635410d57f2c4b46e95b493",
+    "verification/checkout-ux.cjs": "ae375124a7ec71986bf0885d3f4b6ec6c6aef171da619de555c8410facdc4a4b",
+    "verification/plans-ar-dark-390.png": "3460cfbf17e996ff3be797b719473246e68f9ed43b7326ac7a239e931c057dee",
+    "verification/plans-ar-light-390.png": "ed824ae62b34b48978d5a66a94e4165145ed4450cef829b7463e10b6eeccf8aa",
+    "verification/plans-en-dark-390.png": "3da08ddb8e817928887c10fca40dc8d3bdde836fd2c7b06d37877d14e1b4da0e",
+    "verification/plans-en-light-1280.png": "8bf6fb8062fc8e4521295e24205fe229ff5e1272f8b440f0992a862ac0c9a9e1",
+    "verification/plans-en-light-390.png": "4301fb23ec50dc7bed4834cf10e8c4e5b74ed77a3952543d6202507849c19f8f",
+    "verification/source-changes.patch": "7d6174fa15486d9ba263451dabc759a343241cf1976dbb46d99b9cd26765b02c"
+  }
 }
