@@ -1,0 +1,110 @@
+test_nonterminal_stream_still_times_out (__main__.StreamTests.test_nonterminal_stream_still_times_out) ... ok
+test_terminal_answer_does_not_wait_for_connection_close (__main__.StreamTests.test_terminal_answer_does_not_wait_for_connection_close) ... ERROR
+test_truncation_is_preserved_for_existing_validator (__main__.StreamTests.test_truncation_is_preserved_for_existing_validator) ... ERROR
+test_unspecified_finish_is_not_completion (__main__.StreamTests.test_unspecified_finish_is_not_completion) ... ERROR
+test_cancel_duplicate_batch_stops_wait_without_cancelling_owner (__main__.AuditWaitTests.test_cancel_duplicate_batch_stops_wait_without_cancelling_owner) ... FAIL
+test_other_owner_finishing_within_window_is_preserved (__main__.AuditWaitTests.test_other_owner_finishing_within_window_is_preserved) ... ok
+test_overlap_has_one_wait_window_not_two (__main__.AuditWaitTests.test_overlap_has_one_wait_window_not_two) ... FAIL
+test_french_shein_euro_snippet_survives_recovery_and_final_gate (__main__.PriceTests.test_french_shein_euro_snippet_survives_recovery_and_final_gate) ... FAIL
+test_indexed_price_cannot_lose_binding_or_gain_verification (__main__.PriceTests.test_indexed_price_cannot_lose_binding_or_gain_verification) ... FAIL
+
+======================================================================
+ERROR: test_terminal_answer_does_not_wait_for_connection_close (__main__.StreamTests.test_terminal_answer_does_not_wait_for_connection_close)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/workspace/scratch/bb3264adcc10/search65/verification/test_audit_prices.py", line 95, in test_terminal_answer_does_not_wait_for_connection_close
+    result, updates, usage, response = self.run_stream([
+                                       ^^^^^^^^^^^^^^^^^
+  File "/workspace/scratch/bb3264adcc10/search65/verification/test_audit_prices.py", line 88, in run_stream
+    result = ns['_web_identity_stream_response']('https://test/models/model:generateContent', {}, 35, updates.append)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/scratch/bb3264adcc10/search64/main.py", line 16552, in _web_identity_stream_response
+    for line in response.iter_lines(chunk_size=256, decode_unicode=True):
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/scratch/bb3264adcc10/search65/verification/test_audit_prices.py", line 77, in lines
+    if trailing_failure: raise Timeout('connection did not close')
+                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+StreamTests.run_stream.<locals>.Timeout: connection did not close
+
+======================================================================
+ERROR: test_truncation_is_preserved_for_existing_validator (__main__.StreamTests.test_truncation_is_preserved_for_existing_validator)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/workspace/scratch/bb3264adcc10/search65/verification/test_audit_prices.py", line 105, in test_truncation_is_preserved_for_existing_validator
+    result, _, _, _ = self.run_stream([{'candidates':[{'content':{'parts':[{'text':'{"items":['}]},'finishReason':'MAX_TOKENS'}]}])
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/scratch/bb3264adcc10/search65/verification/test_audit_prices.py", line 88, in run_stream
+    result = ns['_web_identity_stream_response']('https://test/models/model:generateContent', {}, 35, updates.append)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/scratch/bb3264adcc10/search64/main.py", line 16552, in _web_identity_stream_response
+    for line in response.iter_lines(chunk_size=256, decode_unicode=True):
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/scratch/bb3264adcc10/search65/verification/test_audit_prices.py", line 77, in lines
+    if trailing_failure: raise Timeout('connection did not close')
+                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+StreamTests.run_stream.<locals>.Timeout: connection did not close
+
+======================================================================
+ERROR: test_unspecified_finish_is_not_completion (__main__.StreamTests.test_unspecified_finish_is_not_completion)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/workspace/scratch/bb3264adcc10/search65/verification/test_audit_prices.py", line 114, in test_unspecified_finish_is_not_completion
+    result, _, _, _ = self.run_stream([
+                      ^^^^^^^^^^^^^^^^^
+  File "/workspace/scratch/bb3264adcc10/search65/verification/test_audit_prices.py", line 88, in run_stream
+    result = ns['_web_identity_stream_response']('https://test/models/model:generateContent', {}, 35, updates.append)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/scratch/bb3264adcc10/search64/main.py", line 16552, in _web_identity_stream_response
+    for line in response.iter_lines(chunk_size=256, decode_unicode=True):
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/scratch/bb3264adcc10/search65/verification/test_audit_prices.py", line 77, in lines
+    if trailing_failure: raise Timeout('connection did not close')
+                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+StreamTests.run_stream.<locals>.Timeout: connection did not close
+
+======================================================================
+FAIL: test_cancel_duplicate_batch_stops_wait_without_cancelling_owner (__main__.AuditWaitTests.test_cancel_duplicate_batch_stops_wait_without_cancelling_owner)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/workspace/scratch/bb3264adcc10/search65/verification/test_audit_prices.py", line 179, in test_cancel_duplicate_batch_stops_wait_without_cancelling_owner
+    self.assertEqual(result[1],'cancelled')
+AssertionError: 'inflight_timeout' != 'cancelled'
+- inflight_timeout
++ cancelled
+
+
+======================================================================
+FAIL: test_overlap_has_one_wait_window_not_two (__main__.AuditWaitTests.test_overlap_has_one_wait_window_not_two)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/workspace/scratch/bb3264adcc10/search65/verification/test_audit_prices.py", line 153, in test_overlap_has_one_wait_window_not_two
+    self.assertLessEqual(clock.now,41.00001)
+AssertionError: 76.0 not less than or equal to 41.00001
+
+======================================================================
+FAIL: test_french_shein_euro_snippet_survives_recovery_and_final_gate (__main__.PriceTests.test_french_shein_euro_snippet_survives_recovery_and_final_gate)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/workspace/scratch/bb3264adcc10/search65/verification/test_audit_prices.py", line 225, in test_french_shein_euro_snippet_survives_recovery_and_final_gate
+    self.assertEqual(self.calls[0][1:3],('fr','fr'))
+AssertionError: Tuples differ: ('us', 'en') != ('fr', 'fr')
+
+First differing element 0:
+'us'
+'fr'
+
+- ('us', 'en')
++ ('fr', 'fr')
+
+======================================================================
+FAIL: test_indexed_price_cannot_lose_binding_or_gain_verification (__main__.PriceTests.test_indexed_price_cannot_lose_binding_or_gain_verification)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/workspace/scratch/bb3264adcc10/search65/verification/test_audit_prices.py", line 252, in test_indexed_price_cannot_lose_binding_or_gain_verification
+    self.assertFalse(self.ns['_web_confirmable_price'](row))
+AssertionError: True is not false
+
+----------------------------------------------------------------------
+Ran 9 tests in 0.438s
+
+FAILED (failures=4, errors=3)

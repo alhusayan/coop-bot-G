@@ -1,0 +1,22 @@
+test_cancel_duplicate_batch_stops_wait_without_cancelling_owner (__main__.AuditWaitTests.test_cancel_duplicate_batch_stops_wait_without_cancelling_owner) ... ok
+test_other_owner_finishing_within_window_is_preserved (__main__.AuditWaitTests.test_other_owner_finishing_within_window_is_preserved) ... ok
+test_overlap_has_one_wait_window_not_two (__main__.AuditWaitTests.test_overlap_has_one_wait_window_not_two) ... ok
+test_arabic_host_is_not_argentina_and_other_export_behavior_is_preserved (__main__.PriceTests.test_arabic_host_is_not_argentina_and_other_export_behavior_is_preserved) ... ok
+test_batches_and_optional_grouping_never_merge_storefront_countries (__main__.PriceTests.test_batches_and_optional_grouping_never_merge_storefront_countries) ... ok
+test_fallback_provider_receives_per_listing_country_and_query (__main__.PriceTests.test_fallback_provider_receives_per_listing_country_and_query) ... ok
+test_french_shein_euro_snippet_survives_recovery_and_final_gate (__main__.PriceTests.test_french_shein_euro_snippet_survives_recovery_and_final_gate) ... ok
+test_image_only_shein_recovery_keeps_image_engine_without_price_update (__main__.PriceTests.test_image_only_shein_recovery_keeps_image_engine_without_price_update) ... ok
+test_indexed_price_cannot_lose_binding_or_gain_verification (__main__.PriceTests.test_indexed_price_cannot_lose_binding_or_gain_verification) ... ok
+test_missing_ambiguous_or_discount_price_stays_missing (__main__.PriceTests.test_missing_ambiguous_or_discount_price_stays_missing) ... ok
+test_mixed_markets_use_independent_retrieval_and_currency_context (__main__.PriceTests.test_mixed_markets_use_independent_retrieval_and_currency_context) ... ok
+test_no_price_borrowed_from_another_storefront_or_variant (__main__.PriceTests.test_no_price_borrowed_from_another_storefront_or_variant) ... ok
+test_slug_change_still_requires_same_product_market_and_variant (__main__.PriceTests.test_slug_change_still_requires_same_product_market_and_variant) ... ok
+test_nonterminal_stream_still_times_out (__main__.StreamTests.test_nonterminal_stream_still_times_out) ... ok
+test_terminal_answer_does_not_wait_for_connection_close (__main__.StreamTests.test_terminal_answer_does_not_wait_for_connection_close) ... ok
+test_truncation_is_preserved_for_existing_validator (__main__.StreamTests.test_truncation_is_preserved_for_existing_validator) ... ok
+test_unspecified_finish_is_not_completion (__main__.StreamTests.test_unspecified_finish_is_not_completion) ... ok
+
+----------------------------------------------------------------------
+Ran 17 tests in 1.226s
+
+OK
