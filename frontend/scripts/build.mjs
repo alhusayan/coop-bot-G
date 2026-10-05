@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 
 const base = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const src = resolve(base, 'source'), dest = resolve(base, 'public');
-const version = '156.7.54', api = 'https://api.findzia.com';
+const version = '156.7.55', api = 'https://api.findzia.com';
 // Preserve the live section scope to avoid unnecessary DOM/storage changes.
 const section = 'template--19963721449543__findzia_home_h4wBLq';
 const expected = '2de7b483319c713bf649352f7f158f1fedbda92f546bebfe576ae0a2d2c526c6';
@@ -84,4 +84,3 @@ emit('/sitemap.xml','sitemap.xml','<?xml version="1.0" encoding="UTF-8"?><urlset
 emit('/healthz','health.json',JSON.stringify({ok:true,service:'findzia-frontend',version,sourceReleases}),'json');
 writeFileSync(resolve(dest,'release.json'),JSON.stringify({version,api,section,apple_pay_file_sha256:expected,routes},null,2)+'\n');
 console.log(`Built Findzia ${version}: ${Object.keys(routes).length} routes, original Apple Pay file ${association.length} bytes.`);
-
