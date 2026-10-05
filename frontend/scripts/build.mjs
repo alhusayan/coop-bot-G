@@ -84,4 +84,3 @@ emit('/sitemap.xml','sitemap.xml','<?xml version="1.0" encoding="UTF-8"?><urlset
 emit('/healthz','health.json',JSON.stringify({ok:true,service:'findzia-frontend',version,sourceReleases}),'json');
 writeFileSync(resolve(dest,'release.json'),JSON.stringify({version,api,section,apple_pay_file_sha256:expected,routes},null,2)+'\n');
 console.log(`Built Findzia ${version}: ${Object.keys(routes).length} routes, original Apple Pay file ${association.length} bytes.`);
-
