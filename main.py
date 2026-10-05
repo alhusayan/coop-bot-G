@@ -394,7 +394,7 @@ from findzia_billing import CreditMiddleware, install_billing
 app.add_middleware(CreditMiddleware, owner=app)
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization', 'X-Findzia-Request-Id'], max_age=86400)
-BUILD_ID = 'v128.5.42.52-support'
+BUILD_ID = 'v128.5.42.53-media-retry'
 _SOCIAL = None
 
 def _fz_social_row(row):
@@ -16369,6 +16369,25 @@ def _web_identity_profile_from_wire(value):
 def _web_identity_http_error(response):
     """Expose an operational category, never the provider body or credentials."""
     category = ''
+    if response.status_code == 402:
+        # Existing logs only retained the HTTP code. Record an allowlisted
+        # operational reason, never raw provider bodies, prompts or API keys.
+        reason = 'unspecified'
+        try:
+            data = response.json()
+            error = data.get('error', {}) if isinstance(data, dict) else {}
+            message = str(error.get('message', '') if isinstance(error, dict) else error).lower()
+            if any(term in message for term in ('insufficient credit', 'credit balance', 'insufficient balance', 'out of credits')):
+                reason = 'insufficient_credit'
+            elif any(term in message for term in ('billing', 'payment', 'paid tier')):
+                reason = 'billing_required'
+            elif any(term in message for term in ('quota', 'spending limit', 'budget')):
+                reason = 'quota_or_budget'
+            elif any(term in message for term in ('permission', 'not authorized', 'access denied')):
+                reason = 'access_denied'
+        except (ValueError, TypeError, AttributeError):
+            pass
+        print('AI UPSTREAM DENIED provider=gemini status=402 category=' + reason)
     if response.status_code == 400:
         try:
             message = str((response.json().get('error') or {}).get('message') or '').lower()

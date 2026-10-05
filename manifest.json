@@ -1,35 +1,26 @@
 {
-  "version": "156.7.47",
-  "backend": "v128.5.42.50-ui",
-  "base_commit": "d3f3c90aff518304615111979f938e98f234821a",
-  "files": {
-    "main.py": {
-      "sha256": "01a034d8d52a52324c3fb85c2f614507a9db7aaf663d323686be9424f11c5d3b",
-      "base_git_blob": "5e5c80479cd98c42837c3b0c04006c23a8b58eac"
-    },
-    "frontend/package.json": {
-      "sha256": "f05feb928152d42a9e4c33ca21e713a5178de96d568aab65bb6cdd962fe7f593",
-      "base_git_blob": "4100d08ae6eec2443ed352d08149943d4bd59be1"
-    },
-    "frontend/scripts/build.mjs": {
-      "sha256": "4a2de1bbbacf4d8df5ae9cec1de80ae57436ce7afca2d8c9d833de159a14b333",
-      "base_git_blob": "6ca8e5f91f08095e4a636f0265991cb68098836d"
-    },
-    "frontend/source/findzia-home.liquid": {
-      "sha256": "ec6605c3369fd40141f3477a4dc1bf5486b5c8cfbf481e7c6c87a3f1e4f60685",
-      "base_git_blob": "3d364386e7149be241ec55d8db5d6246f332b85f"
-    },
-    "frontend/source/findzia-shell.js": {
-      "sha256": "88b54fcd18d61cab0dc1f6d9e5f6f8fa066cae04332c331979eae0898f39bc86",
-      "base_git_blob": "3139bca59dbca34960c6865f60df07d6ebca000b"
-    },
-    "frontend/source/findzia-filters.js": {
-      "sha256": "628cefdcbe43070fd6f9c5704097f51377b3c86e81fafc83305514263bbb7bc4",
-      "base_git_blob": "12038e30e9c17f6060abf3f87e80da2a88d2aa65"
-    },
-    "frontend/source/findzia-billing.js": {
-      "sha256": "04f59038d3c6c1ecb7060f8e8d0a3cc1cda7a57dc2b591c02eac840e7f014dfc",
-      "base_git_blob": "187ff2c62db988a8c073df717a9c9d9ef3d82d91"
-    }
+  "release": "156.7.64",
+  "base_commit": "74449b368c4c5f60c4caf6309503c4ee0ff03005",
+  "base_git_blobs": {
+    "findzia_product_media.py": "e84b9683bd6cfd9725c46d45fbcdb8f17f3cf350",
+    "frontend/package.json": "f688e93c90c88fe7d5657933e353030e8ee12b61",
+    "frontend/scripts/build.mjs": "95a54d8f89a879a49c8884b1de179882523f14ee",
+    "frontend/source/findzia-home.liquid": "477c6b2ef04c4d1de4f8dcc78c86651bb21baf4c",
+    "main.py": "8d211840bef72a6a04ddd2e1e90babb886977914"
+  },
+  "files": [
+    "findzia_product_media.py",
+    "frontend/package.json",
+    "frontend/scripts/build.mjs",
+    "frontend/source/findzia-home.liquid",
+    "main.py"
+  ],
+  "known_open_issue": "Provider HTTP 402 root cause is not recorded in historical logs. Diagnostic categories added; provider billing/configuration unchanged.",
+  "sha256": {
+    "findzia_product_media.py": "44038405fdef44a6e986878a2f00bdfb8cb94f4464a8199fa22ad342b55fc2c3",
+    "frontend/package.json": "dcad04c8bdb380d642e3e68d89c9ce831ff3865ce050545c8766071902f20782",
+    "frontend/scripts/build.mjs": "4f2124e01a5625772a1500480c7faac2fffcac1bc2fd9ba718b06d7b9f3599d5",
+    "frontend/source/findzia-home.liquid": "44150a6692e8ec3cdf518c83451d0fe63b6d8a597dbd701cc81f01c8fc13e12e",
+    "main.py": "fea06c65f43dd33765c8c3b3c04dda011b487b625d064ea739cc14d2f2652021"
   }
 }
