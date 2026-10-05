@@ -394,7 +394,7 @@ from findzia_billing import CreditMiddleware, install_billing
 app.add_middleware(CreditMiddleware, owner=app)
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization', 'X-Findzia-Request-Id'], max_age=86400)
-BUILD_ID = 'v128.5.42.53-media-retry'
+BUILD_ID = 'v128.5.42.54-audit-prices'
 _SOCIAL = None
 
 def _fz_social_row(row):
@@ -16563,6 +16563,11 @@ def _web_identity_stream_response(gemini_url, payload, timeout, on_text, cancel_
                 if event_lines:
                     consume(event_lines)
                     event_lines, event_size = [], 0
+                    # A terminal candidate contains the last answer bytes.
+                    # Do not wait for a proxy to close an already complete SSE
+                    # response and turn valid evidence into a read timeout.
+                    if finish_reason and finish_reason != 'FINISH_REASON_UNSPECIFIED':
+                        break
                 continue
             if line.startswith('data:'):
                 data = line[5:].lstrip(' ')
@@ -16857,6 +16862,9 @@ def _web_ai_classifier_request(identity, results, market, visual_context=None, c
             published_hits.add(cid)
 
     live, direct = {}, {}
+    # Owners run concurrently. Time spent auditing our own rows already counts
+    # toward waiting for overlapping owners; never start a second full window.
+    wait_deadline = time.monotonic() + WEB_VISUAL_CLASSIFIER_TIMEOUT_SECONDS + 6.0
     try:
         publish_hits()
         if live_rows and not (cancel_event is not None and cancel_event.is_set()):
@@ -16903,7 +16911,6 @@ def _web_ai_classifier_request(identity, results, market, visual_context=None, c
                 event.set()
                 if WEB_IDENTITY_OFFER_INFLIGHT.get(key) is event:
                     WEB_IDENTITY_OFFER_INFLIGHT.pop(key, None)
-    wait_deadline = time.monotonic() + WEB_VISUAL_CLASSIFIER_TIMEOUT_SECONDS + 6.0
     retry_ids = set()
     for cid, key, event in waiting:
         while not event.is_set() and time.monotonic() < wait_deadline:
@@ -17391,7 +17398,14 @@ def _web_ai_classify_captured_batch(identity, results, market, visual_context=No
             owner = True
     if not owner:
         wait_timeout = WEB_VISUAL_CLASSIFIER_TIMEOUT_SECONDS if visual_context else WEB_AI_CLASSIFIER_TIMEOUT_SECONDS
-        completed = event.wait(wait_timeout + WEB_VISUAL_CLASSIFIER_FETCH_TIMEOUT_SECONDS + 5.5)
+        deadline = time.monotonic() + wait_timeout + WEB_VISUAL_CLASSIFIER_FETCH_TIMEOUT_SECONDS + 5.5
+        while not event.is_set() and time.monotonic() < deadline:
+            if cancel_event is not None and cancel_event.is_set():
+                return (_web_identity_review_failure('cancelled'), 'cancelled')
+            event.wait(min(0.1, max(0.0, deadline - time.monotonic())))
+        if cancel_event is not None and cancel_event.is_set():
+            return (_web_identity_review_failure('cancelled'), 'cancelled')
+        completed = event.is_set()
         if visual_context:
             # Share only this in-flight request's completed response, never an
             # older URL cache entry. Previously every duplicate lost its audit.
@@ -20147,12 +20161,31 @@ def _web_live_pool_prices(rows, rank, lang, market):
     return _web_shared_price_market_sync(rows, rank, lang, market)
 
 
+def _web_listing_price_country(row, market):
+    """Use an explicit SHEIN storefront before legacy global-lane defaults.
+
+    This selects retrieval/parser context, never supplies an absent price or
+    changes the exact-listing URL/currency/variant requirements.
+    """
+    host = (urllib.parse.urlsplit(str(row.get('url') or '')).hostname or '').lower()
+    if host.endswith('.shein.com'):
+        storefront = host[:-len('.shein.com')]
+        cc = 'gb' if storefront == 'uk' else storefront
+        # 'ar', 'eur', 'm' and 'www' are language/region/mobile hosts, not
+        # country evidence. Never infer Argentina from the Arabic storefront.
+        if storefront not in {'ar', 'eur', 'm', 'www'} and cc in COUNTRY_CURRENCY_CODES:
+            return cc
+    if row.get('export_store') or _global_store_match(row.get('url') or '', 'cn'):
+        return 'us'
+    return str(row.get('country') or row.get('market_country') or market.get('country') or 'us').lower()
+
+
 def _web_automatic_price_batches(rows):
     """One country/currency per query, balanced merchants, bounded call budget."""
     groups = {}
     for key, row in rows.items():
         exported = bool(row.get('export_store') or _global_store_match(row.get('url') or '', 'cn'))
-        cc = 'us' if exported else str(row.get('country') or row.get('market_country') or current_market().get('country') or 'us')
+        cc = _web_listing_price_country(row, current_market())
         group = groups.setdefault((cc, exported), {})
         group.setdefault(_more_result_domain(row.get('url')), []).append((key,row))
     ordered = sorted(groups, key=lambda k: (k[0] != current_market().get('country'), k[1]))
@@ -20337,18 +20370,14 @@ def _web_targeted_price_updates(entries, lang, market, *, image_only=False):
         else:
             title = re.sub(r'["()\r\n]', ' ', str(row.get('raw_title') or row.get('title') or ''))
             term += ' ' + title[:120].strip()
-        terms.append('(' + term + ')')
+        terms.append(('(' + term + ')', _web_listing_price_country(row, market)))
     if not terms:
         return {}
-    first = next(iter(entries.values()), {})
-    search_cc = 'us' if any(row.get('export_store') or _global_store_match(row.get('url'), 'cn') for row in entries.values()) else str(first.get('country') or first.get('market_country') or market.get('country') or 'us')
     # Price recovery needs organic snippets even when pictures are also missing.
     # Use the image index only when every listing already has a price.
     image_source = image_only or all(_web_row_has_numeric_price(row) and not _web_offer_image_candidates(row) for row in entries.values())
     params = {'engine': 'google_images' if image_source else 'google',
-              'q': '(' + ' OR '.join(dict.fromkeys(terms)) + ')',
-              'gl': search_cc,
-              'hl': country_search_hl(search_cc), 'num': 10,
+              'num': 10,
               'api_key': SERPAPI_API_KEY, 'output': 'json'}
     params['_purpose'] = 'listing_image' if image_source else 'listing_price'
     if image_source:
@@ -20358,25 +20387,31 @@ def _web_targeted_price_updates(entries, lang, market, *, image_only=False):
     budget = max(.2, min(7.0 if image_only else 10.0, WEB_LIVE_PRICE_WAIT))
     connect = min(1.0, budget * .15)
     provider = next((p for p in FAST_PROVIDERS if _fast_provider_supports_operators(p)), '')
-    def lookup(term):
+    def lookup(query):
+        term, search_cc = query
         MARKET_CTX.value = dict(market)
+        request = dict(params, q=term, gl=search_cc, hl=country_search_hl(search_cc))
         try:
             if image_only and all(_web_shein_product_id(row.get('url')) for row in entries.values()):
-                request = dict(params, q=term, engine=provider + '_images' if provider else 'google_images')
+                request['engine'] = provider + '_images' if provider else 'google_images'
                 return _web_shein_index_fetch(request, budget) or {}
             if provider:
                 return _fast_provider_search(provider + ('_images' if image_source else '_search'), term,
-                    search_cc, params['hl'], (connect, budget-connect),
+                    search_cc, request['hl'], (connect, budget-connect),
                     num=None if image_source else 10,
                     purpose='listing_image' if image_source else 'listing_price') or {}
-            request = dict(params, q=term)
             return _serpapi_cached_json(request, timeout=(connect, budget-connect), label='EXACT-LISTING') or {}
         except Exception as exc:
             print('EXACT-LISTING lookup_failed=' + type(exc).__name__)
             return {}
     lookup_terms = list(dict.fromkeys(terms))[:4]
     if _SEARCHAPI_ROUTER.enabled and _SEARCHAPI_ROUTER.economy and FINDZIA_GROUPED_RECOVERY_ENABLED:
-        lookup_terms = ['(' + ' OR '.join(lookup_terms) + ')']
+        # Group only within one storefront market; never borrow another
+        # listing's geo/currency context, even in the optional economy mode.
+        grouped = {}
+        for term, cc in lookup_terms:
+            grouped.setdefault(cc, []).append(term)
+        lookup_terms = [('(' + ' OR '.join(group) + ')', cc) for cc, group in grouped.items()]
     if provider:
         params['engine'] = provider + ('_images' if image_source else '_search')
     # Per-listing queries preserve recall. Grouping is an explicit experiment.
@@ -20399,10 +20434,8 @@ def _web_targeted_price_updates(entries, lang, market, *, image_only=False):
                 continue
             # The old parser ran before binding the listing and had no country:
             # every ambiguous $ / yuan symbol from this fallback was discarded.
-            cc = str(row.get('country') or row.get('market_country') or market.get('country') or '')
-            evidence = dict(item, _shopping_gl=cc)
-            if row.get('export_store') or _global_store_match(row.get('url'), 'cn'):
-                evidence['_price_market'] = 'us'
+            cc = _web_listing_price_country(row, market)
+            evidence = dict(item, _shopping_gl=cc, _price_market=cc)
             if not evidence.get('price'):
                 evidence['price'] = _local_discovery_plain_snippet_price(evidence, evidence.get('_price_market') or cc)
             quote = _web_indexed_offer_quote(evidence)
@@ -20688,9 +20721,10 @@ def _web_confirmable_price(row):
         return False
     if source in ('ai_text','search_structured_fast','search_structured_rebased'):
         return False
-    if source in ('lens_duplicate_pass', 'existing_lens_pool'):
-        # These two paths copy money only between the identical listing URL.
-        # Re-check the structured amount and keep it indexed, not page-verified.
+    if source in ('lens_duplicate_pass', 'existing_lens_pool', 'exact_listing_index'):
+        # Recovery already binds the product ID and storefront. A translated
+        # SHEIN/Temu name slug may differ; variant/currency/query and market
+        # must still match. Re-check the money and keep it index-observed only.
         bound = row.get('price_source_url')
         return bool(bound and _web_same_index_listing(bound, row.get('url')) and _web_indexed_offer_quote(row))
     if not source:

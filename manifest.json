@@ -1,26 +1,13 @@
 {
-  "release": "156.7.64",
-  "base_commit": "74449b368c4c5f60c4caf6309503c4ee0ff03005",
-  "base_git_blobs": {
-    "findzia_product_media.py": "e84b9683bd6cfd9725c46d45fbcdb8f17f3cf350",
-    "frontend/package.json": "f688e93c90c88fe7d5657933e353030e8ee12b61",
-    "frontend/scripts/build.mjs": "95a54d8f89a879a49c8884b1de179882523f14ee",
-    "frontend/source/findzia-home.liquid": "477c6b2ef04c4d1de4f8dcc78c86651bb21baf4c",
-    "main.py": "8d211840bef72a6a04ddd2e1e90babb886977914"
-  },
-  "files": [
-    "findzia_product_media.py",
-    "frontend/package.json",
-    "frontend/scripts/build.mjs",
-    "frontend/source/findzia-home.liquid",
+  "release": "156.7.65",
+  "backend_build": "v128.5.42.54-audit-prices",
+  "frontend_version_unchanged": "156.7.64",
+  "base_commit": "407709a158f9c75ac5e8a247efa395cd54fd62a6",
+  "base_git_blob_main": "abd212d8459dcbfb597c3c7da2923d72ea7f0730",
+  "files_to_upload": [
     "main.py"
   ],
-  "known_open_issue": "Provider HTTP 402 root cause is not recorded in historical logs. Diagnostic categories added; provider billing/configuration unchanged.",
   "sha256": {
-    "findzia_product_media.py": "44038405fdef44a6e986878a2f00bdfb8cb94f4464a8199fa22ad342b55fc2c3",
-    "frontend/package.json": "dcad04c8bdb380d642e3e68d89c9ce831ff3865ce050545c8766071902f20782",
-    "frontend/scripts/build.mjs": "4f2124e01a5625772a1500480c7faac2fffcac1bc2fd9ba718b06d7b9f3599d5",
-    "frontend/source/findzia-home.liquid": "44150a6692e8ec3cdf518c83451d0fe63b6d8a597dbd701cc81f01c8fc13e12e",
-    "main.py": "fea06c65f43dd33765c8c3b3c04dda011b487b625d064ea739cc14d2f2652021"
+    "main.py": "edb9586065ba64cda5ad9e8c0e1e10b597adbd07054904f455c6199acde8ad90"
   }
 }
