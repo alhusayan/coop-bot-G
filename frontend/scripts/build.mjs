@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 
 const base = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const src = resolve(base, 'source'), dest = resolve(base, 'public');
-const version = '156.7.62', api = 'https://api.findzia.com';
+const version = '156.7.63', api = 'https://api.findzia.com';
 // Preserve the live section scope to avoid unnecessary DOM/storage changes.
 const section = 'template--19963721449543__findzia_home_h4wBLq';
 const expected = '2de7b483319c713bf649352f7f158f1fedbda92f546bebfe576ae0a2d2c526c6';
@@ -21,12 +21,12 @@ sourceReleases.motion=read('findzia-motion.js').toString().match(/FINDZIA_MOTION
 sourceReleases.motionCSS=read('findzia-motion.css').toString().match(/FINDZIA_MOTION_CSS_RELEASE=([0-9.]+)/)?.[1];
 sourceReleases.support=read('findzia-support.js').toString().match(/FINDZIA_SUPPORT_RELEASE=([0-9.]+)/)?.[1];
 sourceReleases.focus=read('findzia-focus.js').toString().match(/FINDZIA_FOCUS_RELEASE=([0-9.]+)/)?.[1];
-if(JSON.parse(read('findzia-support.json').toString('utf8')).version!==version)throw Error('Support knowledge release mismatch.');
+if(JSON.parse(read('findzia-support.json').toString('utf8')).version!=='156.7.62')throw Error('Support knowledge release mismatch.');
 const packageVersion=JSON.parse(readFileSync(resolve(base,'package.json'),'utf8')).version;
 if(packageVersion!==version)throw Error('Release mismatch: replace frontend/package.json and frontend/scripts/build.mjs together.');
 if(sourceReleases.boot!=='156.7.43')throw Error('Release mismatch: expected frontend/source/findzia-boot.js version 156.7.43.');
 for(const [key,file] of [['support','findzia-support.js'],['focus','findzia-focus.js'],['home','findzia-home.liquid'],['shell','findzia-shell.js'],['billing','findzia-billing.js'],['subscriptions','findzia-subscriptions.js'],['guide','findzia-filters.js'],['account','findzia-account.js'],['motion','findzia-motion.js'],['motionCSS','findzia-motion.css']]){
-  const expectedVersion=['home','account','motion','support','focus'].includes(key)?version:['billing','subscriptions'].includes(key)?'156.7.60':key==='motionCSS'?'156.7.53':key==='guide'?'156.7.48':'156.7.43';
+  const expectedVersion=key==='billing'?version:['home','account','motion','support','focus'].includes(key)?'156.7.62':key==='subscriptions'?'156.7.60':key==='motionCSS'?'156.7.53':key==='guide'?'156.7.48':'156.7.43';
   if(sourceReleases[key]!==expectedVersion)throw Error('Release mismatch: replace frontend/source/'+file+' with version '+expectedVersion+'.');
 }
 const routes = {};
