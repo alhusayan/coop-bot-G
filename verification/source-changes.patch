@@ -1,0 +1,161 @@
+--- a/findzia_checkout_guard.py
++++ b/findzia_checkout_guard.py
+@@ -45,13 +45,17 @@
+                 db.execute('BEGIN IMMEDIATE')
+                 db.execute("UPDATE fz_mf_orders SET state='canceled' WHERE member=? AND mode=? AND state IN ('session_creating','session_ready')",
+                            (member['id'], service.mode))
+-                # 'abandoned' is an unused hosted invoice already reviewed by
+-                # MyFatoorah's verifier, not an in-flight payment. Keep its mapping
+-                # intact so a late paid webhook can still credit it exactly once.
+-                row = db.execute('''SELECT 1 FROM fz_mf_orders o
++                previous = db.execute('''SELECT 1 FROM fz_mf_orders o
+                     WHERE o.member=? AND o.mode=? AND
+                     o.state IN ('creating','pending','session_processing') LIMIT 1''',
+                     (member['id'], service.mode)).fetchone()
++                # Merchant-approved policy (156.7.56): historical MyFatoorah
++                # attempts do not block a separate Paddle purchase. Preserve
++                # their state and mappings; never treat them as failed or paid.
++                # No MyFatoorah request or recovery work runs in Paddle checkout.
++                if previous:
++                    print('CHECKOUT_GUARD build=156.7.56 gateway=paddle other=myfatoorah result=ignored_for_paddle', flush=True)
++                row = None
+             elif gateway == 'myfatoorah':
+                 table = 'fz_paddle_live_checkout' if service.mode == 'live' else 'fz_paddle_checkout'
+                 row = db.execute(f"SELECT 1 FROM {table} WHERE member=? AND state IN ('creating','pending','uncertain') LIMIT 1",
+@@ -67,7 +71,7 @@
+                 try:
+                     resolved = reviewer(member)
+                 except Exception:
+-                    print('CHECKOUT_GUARD build=156.7.55 gateway=%s other=%s result=verification_unavailable' % (gateway, other), flush=True)
++                    print('CHECKOUT_GUARD build=156.7.56 gateway=%s other=%s result=verification_unavailable' % (gateway, other), flush=True)
+                     raise HTTPException(409, 'other_payment_pending') from None
+                 if resolved and resolved.get('confirmed'):
+                     yield {'confirmed': True}
+@@ -80,7 +84,7 @@
+                     row = db.execute(f"SELECT state FROM {table} WHERE member=? AND state IN ('creating','pending','uncertain') LIMIT 1",
+                                      (member['id'],)).fetchone()
+             if row:
+-                print('CHECKOUT_GUARD build=156.7.55 gateway=%s other=%s state=%s result=still_pending' % (gateway, other, row['state']), flush=True)
++                print('CHECKOUT_GUARD build=156.7.56 gateway=%s other=%s state=%s result=still_pending' % (gateway, other, row['state']), flush=True)
+                 raise HTTPException(409, 'other_payment_pending')
+         yield None
+     finally:
+--- a/findzia_myfatoorah.py
++++ b/findzia_myfatoorah.py
+@@ -134,6 +134,12 @@
+     def require(self, member):
+         if not self.allowed(member): raise HTTPException(403, 'myfatoorah_not_available')
+ 
++    def can_reconcile(self):
++        # Disabling new sales must not discard signed late payments/refunds.
++        # Creation still requires self.ready and the selected payment provider.
++        return bool(self.credits.available and self.key and self.secret
++                    and self.mode in ('sandbox', 'live'))
++
+     def can_restore(self, member):
+         # Disabling new MyFatoorah sales must not disable owned payment recovery.
+         return bool(self.credits.available and self.key and self.mode in ('sandbox', 'live')
+@@ -166,7 +172,9 @@
+         with self.accounts.connect() as db:
+             pending = db.execute("SELECT 1 FROM fz_mf_orders WHERE member=? AND mode=? AND state IN ('creating','pending','session_processing') LIMIT 1",
+                                  (member['id'], self.mode)).fetchone()
+-        return {'payment_pending': bool(pending), 'confirmed': bool(review and review.get('confirmed'))}
++        blocks_checkout = bool(pending) and not (self.credits.prepaid_enabled and self.credits.payment_provider == 'paddle')
++        return {'payment_pending': bool(pending), 'blocks_checkout': blocks_checkout,
++                'confirmed': bool(review and review.get('confirmed'))}
+ 
+     def public(self, member):
+         window = getattr(self, 'apple_window', None)
+@@ -174,7 +182,7 @@
+         inline_origins = [host for host, registration in storefronts.items()
+                           if registration.ready and self.allowed(member)]
+         return {'ok': True, 'enabled': self.enabled, 'environment': self.mode,
+-                'restore_available': self.can_restore(member), 'recovery_build': '156.7.55',
++                'restore_available': self.can_restore(member), 'recovery_build': '156.7.56',
+                 'checkout_mode': 'embedded', 'checkout_build': '156.7.18', 'pricing_build': '156.7.54',
+                 'checkout_available': self.allowed(member), 'plan_id': 'pack',
+                 'checkout_plan_ids': [p['id'] for p in self.credits.sale_plans if p['interval']=='once'],
+@@ -682,7 +690,7 @@
+             raise
+ 
+     def receive(self, raw, signature):
+-        if not self.ready: raise HTTPException(503,'myfatoorah_not_ready')
++        if not self.can_reconcile(): raise HTTPException(503,'myfatoorah_not_ready')
+         try:
+             event = json.loads(raw); name = event['Event']['Name']; data = event['Data']
+             fields = FIELDS[name]
+@@ -712,7 +720,7 @@
+             db.execute('INSERT OR IGNORE INTO fz_mf_jobs(id,mode,invoice,payment) VALUES(?,?,?,?)',(job,self.mode,invoice,payment))
+ 
+     def process_jobs(self):
+-        if not self.ready: return
++        if not self.can_reconcile(): return
+         with self.accounts.connect() as db:
+             jobs=db.execute("SELECT * FROM fz_mf_jobs WHERE mode=? AND state='pending' AND next_try<=? LIMIT 20",(self.mode,int(time.time()))).fetchall()
+         for job in jobs:
+@@ -736,7 +744,7 @@
+         A separate purchase never discards an old invoice or authorizes a charge
+         retry. Only reads run here; verified late payments retain their credits.
+         """
+-        if not self.ready: return
++        if not self.can_reconcile(): return
+         now=int(time.time())
+         with self.accounts.connect() as db:
+             db.execute('BEGIN IMMEDIATE')
+@@ -771,7 +779,7 @@
+     @app.on_event('startup')
+     async def startup():
+         LOG.warning('MF_CHECKOUT_BUILD version=156718 mode=embedded enabled=%s',service.embedded)
+-        if service.ready: service.task=asyncio.create_task(service.worker())
++        if service.can_reconcile(): service.task=asyncio.create_task(service.worker())
+     @app.on_event('shutdown')
+     async def shutdown():
+         if service.task:
+--- a/frontend/source/findzia-billing.js
++++ b/frontend/source/findzia-billing.js
+@@ -1,4 +1,4 @@
+-/* FINDZIA_BILLING_RELEASE=156.7.55 */
++/* FINDZIA_BILLING_RELEASE=156.7.56 */
+ /* Findzia 156.7.20 — resumable checkout, safe plan changes and persistent payment UI. */
+ (() => {
+   'use strict';
+@@ -744,14 +744,17 @@
+         if(rev!==revision)return;
+         const failures=results.filter(result=>result.status==='rejected');
+         const unresolved=results.some(result=>result.status==='fulfilled'&&result.value?.payment_pending);
++        const blocking=results.some(result=>result.status==='fulfilled'&&result.value?.payment_pending&&result.value?.blocks_checkout!==false);
+         const current=await refresh(true);if(rev!==revision)return;
+         if(!current)throw Error('credits_unavailable');
+         if(failures.length===results.length)throw failures[0].reason;
+         paymentState=failures.length||unresolved?'pending':'restored';
+-        paymentMessage=unresolved
++        paymentMessage=blocking
+           ?paymentError(Error('other_payment_pending'))
+           :failures.length
+           ?tr('Some purchases were checked. One payment provider is unavailable; please retry to check the rest.','تحققنا من بعض المشتريات. إحدى بوابات الدفع غير متاحة؛ أعد المحاولة للتحقق من الباقي.')
++          :unresolved
++          ?tr('Payment is still being checked. Your credits will update after confirmation.','التحقق من الدفع مستمر. الرصيد يتحدث بعد التأكيد.')
+           :tr('Your purchase records and search balance are up to date.','تم تحديث سجل مشترياتك ورصيد البحث.');
+       }
+       catch(e){if(rev===revision)paymentMessage=paymentFailure(e);}
+--- a/frontend/package.json
++++ b/frontend/package.json
+@@ -1,6 +1,6 @@
+ {
+   "name": "findzia-standalone",
+-  "version": "156.7.55",
++  "version": "156.7.56",
+   "private": true,
+   "type": "module",
+   "engines": {
+--- a/frontend/scripts/build.mjs
++++ b/frontend/scripts/build.mjs
+@@ -5,7 +5,7 @@
+ 
+ const base = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+ const src = resolve(base, 'source'), dest = resolve(base, 'public');
+-const version = '156.7.55', api = 'https://api.findzia.com';
++const version = '156.7.56', api = 'https://api.findzia.com';
+ // Preserve the live section scope to avoid unnecessary DOM/storage changes.
+ const section = 'template--19963721449543__findzia_home_h4wBLq';
+ const expected = '2de7b483319c713bf649352f7f158f1fedbda92f546bebfe576ae0a2d2c526c6';
