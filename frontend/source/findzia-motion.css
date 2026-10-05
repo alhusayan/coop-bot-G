@@ -1,4 +1,29 @@
-/* FINDZIA_MOTION_CSS_RELEASE=156.7.51 */
-/* Entry belongs to WAAPI. Native close releases the top layer synchronously. */
-dialog[data-fz-motion-dialog]{transition:none!important}
-@media(prefers-reduced-motion:reduce){dialog[data-fz-motion-dialog]{animation:none!important}}
+/* FINDZIA_MOTION_CSS_RELEASE=156.7.43 */
+/* Native dialog exit keeps close/cancel/focus handlers synchronous. */
+.fz-motion-word{display:inline-block;white-space:pre;font:inherit;letter-spacing:inherit;line-height:inherit}
+@media(prefers-reduced-motion:no-preference){
+  @supports(transition-behavior:allow-discrete){
+    dialog[data-fz-motion-dialog]{
+      opacity:0;translate:0 6px;
+      transition:opacity 160ms ease,translate 160ms ease,display 160ms allow-discrete,overlay 160ms allow-discrete;
+    }
+    /* WAAPI owns entry. An open-state CSS transition would outrank it and
+       compress the menu expansion into the old 160ms opacity transition. */
+    dialog[data-fz-motion-dialog][open]{opacity:1;translate:0 0;transition:none}
+    dialog[data-dark-menu][data-fz-motion-dialog]{
+      translate:none;clip-path:var(--fz-motion-menu-origin,inset(0px round 16px));
+      transition:opacity 160ms ease,clip-path 160ms ease,display 160ms allow-discrete,overlay 160ms allow-discrete;
+    }
+    dialog[data-dark-menu][data-fz-motion-dialog][open]{clip-path:inset(0px round 16px);transition:none}
+    dialog[data-dark-menu][data-fz-motion-dialog][data-menu-design]{
+      clip-path:none;transform:scale(.97);transform-origin:center;
+      transition:opacity 160ms ease,transform 160ms ease,display 160ms allow-discrete,overlay 160ms allow-discrete;
+    }
+    dialog[data-dark-menu][data-fz-motion-dialog][data-menu-design][open]{clip-path:none;transform:none;transition:none}
+    dialog[data-fz-motion-dialog]::backdrop{
+      opacity:0;transition:opacity 160ms ease,display 160ms allow-discrete,overlay 160ms allow-discrete;
+    }
+    dialog[data-fz-motion-dialog][open]::backdrop{opacity:1}
+    @starting-style{dialog[data-fz-motion-dialog][open]::backdrop{opacity:0}}
+  }
+}
