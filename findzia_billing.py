@@ -18,11 +18,7 @@ from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse
 from findzia_credit_runtime import CreditRuntime
 
-PLANS = (
-    dict(id='pack', name='Findzia Pack', amount_cents=499, currency='USD', credits=20, interval='once'),
-    dict(id='plus', name='Findzia Plus', amount_cents=999, currency='USD', credits=40, interval='month'),
-    dict(id='pro', name='Findzia Pro', amount_cents=1999, currency='USD', credits=100, interval='month'),
-)
+from findzia_plans import PLANS, LEGACY_PLANS, PREPAID_PLANS
 SEARCH_PATHS = frozenset(('/api/search', '/api/search/stream', '/api/search/image',
     '/api/search/image/stream', '/api/search/more', '/api/search/more/stream',
     '/api/search/markets/stream', '/api/refine/search/stream'))
@@ -44,6 +40,13 @@ class Credits:
         self.enabled = str(env.get('FINDZIA_CREDITS_ENABLED', 'true')).lower() in ('true', '1', 'yes')
         self.trial_budget = max(0, int(env.get('FINDZIA_TRIAL_BUDGET_CREDITS', '10000')))
         self.trial_daily_attempts = max(0, int(env.get('FINDZIA_TRIAL_DAILY_ATTEMPTS', '500')))
+        self.prepaid_enabled = str(env.get('FINDZIA_PREPAID_PACKS_ENABLED', 'false')).lower() in ('true', '1', 'yes')
+        # Preserve the installed gateway unless explicitly changed by the owner.
+        default_provider = 'myfatoorah' if str(env.get('FINDZIA_MYFATOORAH_ENABLED','false')).lower() == 'true' else 'paddle'
+        self.payment_provider = str(env.get('FINDZIA_PAYMENT_PROVIDER', default_provider)).strip().lower()
+        if self.payment_provider not in ('paddle', 'myfatoorah'):
+            self.payment_provider = default_provider
+        self.sale_plans = PREPAID_PLANS if self.prepaid_enabled else LEGACY_PLANS
         self.available = accounts.available
         self.runtime = CreditRuntime(self)
         if self.available:
@@ -99,8 +102,8 @@ class Credits:
             raise HTTPException(503, 'credits_unavailable')
 
     def public_config(self):
-        return dict(build='156.7.44-retry-fix', enabled=self.enabled, available=self.available, trial_credits=10,
-                    guest_trial=True,checkout_available=False, restore_available=False, plans=list(PLANS))
+        return dict(build='156.7.44-retry-fix', pricing_build='156.7.54', enabled=self.enabled, available=self.available, trial_credits=10,
+                    guest_trial=True,prepaid_enabled=self.prepaid_enabled,payment_provider=self.payment_provider,checkout_available=False, restore_available=False, plans=list(self.sale_plans))
 
     def ledger(self, db, member, grant, request, delta, reason, now):
         db.execute('INSERT INTO fz_credit_ledger(member,grant_id,request,delta,reason,created) VALUES(?,?,?,?,?,?)',
@@ -268,7 +271,7 @@ class Credits:
         return dict(ok=True, remaining=sum(balances.values()), balances=balances, reserved=reserved,
                     used=counts, subscription=dict(active) if active else None,
                     trial_claimed=bool(db.execute('SELECT 1 FROM fz_trial_claims WHERE member=?',(member,)).fetchone()),
-                    plans=list(PLANS), checkout_available=False, restore_available=False,
+                    plans=list(self.sale_plans), checkout_available=False, restore_available=False,
                     helper_limits={'guide_per_search':4,'insights_per_search':5})
 
     def status(self, member):
