@@ -1,5 +1,5 @@
-/* FINDZIA_BILLING_RELEASE=156.7.58 */
-/* Findzia 156.7.58 — compact prepaid packs, immediate checkout feedback and direct Card. */
+/* FINDZIA_BILLING_RELEASE=156.7.59 */
+/* Findzia 156.7.59 — compact prepaid packs, immediate checkout feedback and direct Card. */
 (() => {
   'use strict';
   const searches = new Set(['/api/search','/api/search/stream','/api/search/image','/api/search/image/stream',
@@ -63,7 +63,6 @@
     let preparationView=null, feedbackEpoch=0;
     let startingPayment=false, queuedPlan='', recoveryTimer=null, recoveryDeadline=0, pendingCheckoutIntent='';
     const mfReturnKey="findzia-mf-return-v1";
-    const retiredCheckouts=new Set();
     const guestKey='findzia-guest-v1:'+new URL(api).origin, planKey='findzia-plan-intent-v1';
     let guestToken='';try{guestToken=localStorage.getItem(guestKey)||'';}catch(_){}
     const credential=()=>account.session()?.access_token||guestToken;
@@ -215,6 +214,19 @@
     let memoryPlan=null;
     function storePlan(value){memoryPlan=value;try{if(value)sessionStorage.setItem(planKey,JSON.stringify(value));else sessionStorage.removeItem(planKey);}catch(_){}}
     function resumePlan(){try{return JSON.parse(sessionStorage.getItem(planKey)||'null')?.resume===true;}catch(_){return memoryPlan?.resume===true;}}
+    function markStartingPayment(id){
+      const buy=[...document.querySelectorAll('.fz-account[open] [data-plan-buy]')].find(b=>b.dataset.planBuy===id);
+      if(!buy)return;
+      const card=buy.closest('.fzb-plan');
+      if(card){
+        card.dataset.checkoutSelected='true';
+        if(!window.matchMedia('(prefers-reduced-motion: reduce)').matches){
+          card.animate([{scale:'1'},{scale:'.985',offset:.3},{scale:'1'}],{duration:220,easing:'cubic-bezier(.2,.75,.3,1)'});
+        }
+      }
+      buy.disabled=true;buy.setAttribute('aria-busy','true');
+      buy.textContent=tr('Preparing payment…','نجهّز الدفع…');
+    }
     function choosePlan(id){
       if(paymentBusy||startingPayment||mfView||checkoutView)return;
       if(!(config?.plans||status?.plans||[]).some(p=>p.id===id))return;
@@ -271,7 +283,7 @@
       clearTimeout(recoveryTimer);recoveryTimer=null;
       if(automatic!==true)recoveryDeadline=Date.now()+150000;
       const rev=revision,flow=++paymentFlow,id=selectedPlan();paymentBusy=true;startingPayment=true;paymentMessage='';paymentState='pending';
-      storePlan({plan:id,at:Date.now(),resume:false});account.render();
+      storePlan({plan:id,at:Date.now(),resume:false});markStartingPayment(id);
       if(automatic!==true&&paymentProvider()!=='myfatoorah')preparePaymentView();
       try{
         await paymentConfig(); // Domain registration may finish after page load.
@@ -604,7 +616,7 @@
     }
     function closeWallet(closeProvider=true){
       const dialog=walletDialog,view=checkoutView;walletDialog=null;checkoutView=null;
-      if(view){clearTimeout(view.timer);if(view.id){retiredCheckouts.add(view.id);if(retiredCheckouts.size>40)retiredCheckouts.delete(retiredCheckouts.values().next().value);}}
+      if(view)clearTimeout(view.timer);
       // Clear our state first: Paddle may emit checkout.closed synchronously.
       if(closeProvider&&(view||dialog))try{window.Paddle?.Checkout?.close();}catch(_){}
       if(dialog){window.FindziaModalScroll?.unlock(dialog);if(dialog.open)dialog.close();dialog.remove();}
@@ -668,6 +680,7 @@
       const view={mode:'inline',id:'',dialog,status,totals,fallback,frame,loaded:false,paying:false,timer:null};checkoutView=view;
       view.timer=setTimeout(()=>{if(checkoutView===view&&!view.loaded&&!view.paying)checkoutHelp(tr('Checkout is taking longer than expected. You can try the standard checkout.','الدفع تأخر في التحميل. تقدر تجرّب الدفع المعتاد.'));},12000);
       dialog.addEventListener('cancel',e=>{e.preventDefault();closeWallet();account.open('plans');});
+      dialog.addEventListener('close',()=>{if(checkoutView===view&&!dialog.open){closeWallet();account.open('plans');}});
       dialog.showModal();window.FindziaModalScroll?.lock(dialog);dialog.addEventListener('close',()=>window.FindziaModalScroll?.unlock(dialog),{once:true});title.focus({preventScroll:true});
       // Express inherits enabled methods from Paddle. allowedPaymentMethods is
       // incompatible with variant: 'express'; keep that option in openStandard only.
@@ -728,17 +741,25 @@
       const e=event.detail;if(!paymentTxn||paymentRevision!==revision)return;
       if(e?.name==='checkout.completed'&&e.data?.transaction_id===paymentTxn){closeWallet();confirmPayment();return;}
       const view=checkoutView;if(!view||!e)return;
-      if(retiredCheckouts.has(e.data?.id)||(e.data?.transaction_id&&e.data.transaction_id!==paymentTxn))return;
-      if(view.id&&e.data?.id&&view.id!==e.data.id)return;
+      const data=e.data||{},mode=data.settings?.display_mode;
+      if(data.transaction_id&&data.transaction_id!==paymentTxn)return;
+      if(mode&&(mode==='inline')!==(view.mode==='inline'))return;
+      // A resumed transaction may use the same checkout ID. The ID is not a
+      // permanent blacklist entry: bind it to the currently opened surface.
+      if(e.name!=='checkout.loaded'&&view.id&&data.id&&view.id!==data.id)return;
       if(e.name==='checkout.error'){
         if(view.mode==='inline')checkoutHelp(tr('Express checkout could not load. Try the standard checkout.','تعذّر تحميل الدفع السريع. جرّب الدفع المعتاد.'));
         else if(!view.paying){closeWallet();paymentMessage=paymentCopy('error',tr('Checkout could not load. Try again in a regular Safari or Chrome tab.','تعذّر تحميل الدفع. جرّب مرة ثانية بتبويب عادي في Safari أو Chrome.'));account.open('checkout');}
         return;
       }
-      if(e.data?.transaction_id!==paymentTxn||retiredCheckouts.has(e.data?.id))return;
-      const mode=e.data?.settings?.display_mode;
-      if(mode&&(mode==='inline')!==(view.mode==='inline'))return;
-      if(view.id&&e.data?.id&&view.id!==e.data.id)return;
+      if(data.transaction_id!==paymentTxn)return;
+      if(e.name==='checkout.closed'){
+        // Inline close controls already clean up synchronously. Ignore delayed
+        // programmatic inline-close events after a new inline surface opens.
+        // An overlay can be dismissed before checkout.loaded supplies its ID.
+        if(view.mode==='overlay'){closeWallet(false);account.open('plans');}
+        return;
+      }
       if(e.name==='checkout.loaded'){
         view.id=e.data.id||'';view.loaded=true;clearTimeout(view.timer);
         if(view.status){view.status.hidden=true;view.dialog.dataset.checkoutState='ready';view.fallback.disabled=false;view.frame.inert=false;view.frame.setAttribute('aria-busy','false');}
@@ -753,8 +774,6 @@
         view.paying=false;if(view.fallback)view.fallback.disabled=false;
         checkoutHelp(tr('Payment was not completed. Try another card or use standard checkout.','ما اكتمل الدفع. جرّب بطاقة ثانية أو افتح الدفع المعتاد.'));
       }
-      // Programmatic closes are cleared/retired before reaching this handler.
-      if(e.name==='checkout.closed'&&view.id&&e.data.id===view.id){closeWallet(false);account.open('plans');}
     });
     function manageSubscription(){
       const manager=window.FindziaSubscriptionManager?.mount(root,{
@@ -938,7 +957,9 @@
         buy.dataset.planBuy=plan.id;
         // Only the selected card changes state; the immediate modal protects the single checkout flow.
         buy.disabled=loading||(paymentProvider()==='paddle'&&Array.isArray(paddleConfig?.checkout_plan_ids)&&!paddleConfig.checkout_plan_ids.includes(plan.id));
-        buy.setAttribute('aria-busy',String(loading));footer.append(buy);card.append(footer);list.append(card);
+        buy.setAttribute('aria-busy',String(loading));
+        card.addEventListener('click',event=>{if(!event.target.closest('button')&&!buy.disabled)choosePlan(plan.id);});
+        footer.append(buy);card.append(footer);list.append(card);
       }
       body.append(list);
       const details=el('section','fzb-plans-details');
@@ -965,7 +986,12 @@
     }});
     const obs=new MutationObserver(paint);obs.observe(root,{attributes:true,attributeFilter:['data-lang','data-theme','data-home-state']});
     root.addEventListener('fz:search-state',paintNotice);
-    window.addEventListener('pagehide',clearCompletedFeedback);
+    window.addEventListener('pagehide',()=>{
+      clearCompletedFeedback();clearTimeout(recoveryTimer);recoveryTimer=null;queuedPlan='';paymentFlow++;
+      if(startingPayment){startingPayment=false;paymentBusy=false;}
+      closePreparation();closeMF();closeWallet();
+    });
+    window.addEventListener('pageshow',event=>{if(event.persisted){account.render();refresh(true);}});
     window.addEventListener('focus',()=>refresh(true));
     window.addEventListener('storage',ev=>{if(ev.key===guestKey){guestToken=ev.newValue||'';revision++;stamp=0;refresh(true);}});
     configReady=json('/config',undefined,false).then(c=>{config=c;paint();}).catch(()=>{error='credits_unavailable';paint();});
@@ -1060,7 +1086,7 @@
 .fz-account .fzb-payment-actions button:disabled{opacity:.55;cursor:default}
 @media(max-width:360px){.fz-account .fzb-payment-result{padding:28px 18px 18px}.fz-account .fzb-payment-title{font-size:24px!important}}
 
-/* 156.7.58: compact, comparable prepaid packs in the existing Findzia palette. */
+/* 156.7.59: compact, comparable prepaid packs in the existing Findzia palette. */
 .fz-account:has(.fzb-plans){width:min(920px,calc(100vw - 40px))}
 .fz-account .fzb-plans-intro{margin:0 0 24px;text-align:start}
 .fz-account .fzb-plans-intro h2{margin:0 0 7px;font-size:28px;font-weight:650;line-height:1.25;text-wrap:balance;letter-spacing:-.8px;color:var(--a-ink)}
@@ -1099,6 +1125,18 @@
 @media(min-width:800px){.fz-account .fzb-plans{grid-template-columns:repeat(3,minmax(0,1fr))!important;gap:16px}.fzb-plan-main{flex-direction:column;gap:22px}.fzb-plan-prices{text-align:start}.fz-account .fzb-plan .fzb-price{justify-content:flex-start}.fz-account .fzb-plan .fzb-price strong{font-size:36px!important}.fzb-plan-footer{flex-direction:column;align-items:stretch;margin-top:24px}.fz-account .fzb-plan .fzb-plan-buy{width:100%}.fzb-plan-value{min-height:18px}.fz-account .fzb-plans-intro{text-align:center;margin:8px 0 36px}.fz-account .fzb-plan-promises{justify-content:center}.fz-account .fzb-plans-intro h2{font-size:34px}.fz-account .fzb-plan{padding:24px!important}}
 @media(max-width:600px){.fz-account:has(.fzb-plans){width:100%}.fz-account .fza-body:has(.fzb-plans){padding:22px 18px!important}.fz-account .fzb-plan{padding:17px 15px!important}}
 @media(max-width:360px){.fz-account .fzb-plans-intro h2{font-size:25px}.fz-account .fzb-plan h3{font-size:18px!important}.fz-account .fzb-plan .fzb-price strong{font-size:24px!important}.fz-account .fzb-plan .fzb-plan-buy{min-width:130px;padding-inline:10px}.fzb-wallet-dialog[data-paddle-wallet][open]{padding:4px}}
+
+/* 156.7.59 — immediate, subtle press feedback; no artificial payment delay. */
+.fz-account .fzb-plan{cursor:pointer;touch-action:manipulation;transition:border-color 120ms ease,box-shadow 140ms ease}
+.fz-account .fzb-plan[data-checkout-selected=true]{border-color:var(--a-accent);box-shadow:0 0 0 2px color-mix(in srgb,var(--a-accent) 18%,transparent)}
+.fz-account .fzb-plan .fzb-plan-buy{transition:scale 100ms ease,background-color 120ms ease}
+.fz-account .fzb-plan .fzb-plan-buy:focus-visible{outline-color:var(--a-accent)}
+@media(prefers-reduced-motion:no-preference){
+ .fz-account .fzb-plan:has(.fzb-plan-buy:not(:disabled)){transition:scale 100ms ease,border-color 120ms ease,box-shadow 140ms ease}
+ .fz-account .fzb-plan:has(.fzb-plan-buy:not(:disabled)):active{scale:.985;border-color:var(--a-accent)}
+ .fz-account .fzb-plan .fzb-plan-buy:not(:disabled):active{scale:.97}
+}
+@media(prefers-reduced-motion:reduce){.fz-account .fzb-plan,.fz-account .fzb-plan .fzb-plan-buy{transition:none}}
 `;document.head.append(style);
   const scan=()=>document.querySelectorAll('.fz-home').forEach(mount);scan();
   const timer=setInterval(scan,100);setTimeout(()=>clearInterval(timer),15000);
