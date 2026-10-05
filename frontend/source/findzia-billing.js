@@ -1,4 +1,4 @@
-/* FINDZIA_BILLING_RELEASE=156.7.54 */
+/* FINDZIA_BILLING_RELEASE=156.7.55 */
 /* Findzia 156.7.20 — resumable checkout, safe plan changes and persistent payment UI. */
 (() => {
   'use strict';
@@ -737,17 +737,20 @@
       try{
         await paymentConfig();if(rev!==revision)return;
         const paths=[];
-        if(mfConfig?.enabled&&mfConfig?.checkout_available)paths.push('/myfatoorah/restore');
+        if(mfConfig?.restore_available??(mfConfig?.enabled&&mfConfig?.checkout_available))paths.push('/myfatoorah/restore');
         if(paddleConfig?.restore_available)paths.push('/paddle/restore');
         if(!paths.length)throw Error('credits_unavailable');
         const results=await Promise.allSettled(paths.map(path=>json(path,{})));
         if(rev!==revision)return;
         const failures=results.filter(result=>result.status==='rejected');
+        const unresolved=results.some(result=>result.status==='fulfilled'&&result.value?.payment_pending);
         const current=await refresh(true);if(rev!==revision)return;
         if(!current)throw Error('credits_unavailable');
         if(failures.length===results.length)throw failures[0].reason;
-        paymentState=failures.length?'pending':'restored';
-        paymentMessage=failures.length
+        paymentState=failures.length||unresolved?'pending':'restored';
+        paymentMessage=unresolved
+          ?paymentError(Error('other_payment_pending'))
+          :failures.length
           ?tr('Some purchases were checked. One payment provider is unavailable; please retry to check the rest.','تحققنا من بعض المشتريات. إحدى بوابات الدفع غير متاحة؛ أعد المحاولة للتحقق من الباقي.')
           :tr('Your purchase records and search balance are up to date.','تم تحديث سجل مشترياتك ورصيد البحث.');
       }
