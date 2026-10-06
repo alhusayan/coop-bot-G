@@ -1,6 +1,6 @@
 {
   "name": "findzia-standalone",
-  "version": "156.7.70",
+  "version": "156.7.84",
   "private": true,
   "type": "module",
   "engines": {
@@ -12,3 +12,4 @@
     "test": "node --test tests/server.test.mjs tests/motion.test.cjs tests/launch.test.cjs tests/image-deadline.test.cjs"
   }
 }
+
