@@ -1,4 +1,4 @@
-{% comment %} FINDZIA_HOME_RELEASE=156.7.64 {% endcomment %}
+{% comment %} FINDZIA_HOME_RELEASE=156.7.67 {% endcomment %}
 {% comment %}Findzia 156.7.15 · progressive filters + conversational guide from 156.3.0 · combined 156.7.14 payments preserved{% endcomment %}
 
 
@@ -438,79 +438,130 @@ function lt(row){
    seen.add(ut(url.href));urls.push(url.href);
   }catch(_){}
  }
- ['serpapi_thumbnail','thumbnail','image','image_url','product_image','thumbnails','images','image_candidates'].forEach(key=>add(row[key]));
+ ['audited_image','serpapi_thumbnail','thumbnail','image','image_url','product_image','thumbnails','images','image_candidates'].forEach(key=>add(row[key]));
  const rank=url=>/\/api\/img-proxy\?/.test(url)?2:/^https?:\/\/[^/]*(?:gstatic\.com|googleusercontent\.com|serpapi\.com)\//.test(url)?0:1;
  return urls.sort((a,b)=>rank(a)-rank(b)).slice(0,16);
 }
 function ut(url){try{const u=new URL(url);if(u.pathname.endsWith('/api/img-proxy'))return 'proxy:'+u.searchParams.get('u');}catch(_){}return url;}
+function fzMediaRaw(url){
+ try{const u=new URL(url);if(u.pathname.endsWith('/api/img-proxy'))return u.searchParams.get('u')||url;}catch(_){}
+ return url;
+}
+function fzMediaKey(url){try{return new URL(fzMediaRaw(url)).href;}catch(_){return fzMediaRaw(url);}}
+function fzRegisterMedia(state,row,token){
+ if(!token)return;
+ state.mediaAuth=state.mediaAuth||new Map();state.invalidMedia=state.invalidMedia||new Map();
+ // These are the exact raw URLs signed by the server, before browser URL
+ // normalization. Retain each generation's authorization for its own images.
+ const urls=Array.isArray(row.media_images)?row.media_images:lt(row).map(fzMediaRaw);
+ for(const raw of urls){
+  if(typeof raw!=='string')continue;
+  const key=fzMediaKey(raw);state.mediaAuth.set(key,{raw,token});
+  if(state.invalidMedia.has(key)&&state.invalidMedia.get(key)!==token){
+   state.invalidMedia.delete(key);
+   state.urls.filter(u=>fzMediaKey(u)===key).forEach(u=>state.failed.delete(ut(u)));
+  }
+ }
+ while(state.mediaAuth.size>48)state.mediaAuth.delete(state.mediaAuth.keys().next().value);
+}
 function dt(row){
  const key=br(row);let state=q.get(key);
  if(!state){state={key,urls:[],failed:new Set(),winner:'',status:'idle',item:row,cancels:new Set(),node:null};q.set(key,state);}
- state.item=row;
+ state.item=row;fzRegisterMedia(state,row,row.evaluation_token);
  for(const url of lt(row))if(!state.urls.some(old=>ut(old)===ut(url)))state.urls.push(url);
+ if(row.audited_image&&!state.winner){
+  const preferred=fzMediaKey(row.audited_image);
+  state.urls.sort((a,b)=>Number(fzMediaKey(b)===preferred)-Number(fzMediaKey(a)===preferred));
+ }
  return state;
 }
-// 156.7.64: bounded, shared image checks. Transient failures are never verdicts.
+// 156.7.67: signed per-image authorization and bounded browser batches.
 var fzMediaChecks=new Map(),fzMediaVerdicts=new Map(),fzMediaCheckControllers=new Set();
-var fzCheckQueue=[],fzCheckActive=0,fzCheckTimer=null,fzCheckNext=0,fzCheckGate=0,fzCheckEpoch=0;
+var fzCheckQueue=[],fzCheckActive=0,fzCheckTimer=null,fzCheckNext=0,fzCheckGate=0,fzCheckEpoch=0,fzBatchChecks=true,fzCheckAdmissions=[];
 function fzRetryTime(response,data){
  const header=response.headers.get('Retry-After');
  const seconds=header&&/^\d+(?:\.\d+)?$/.test(header)?Number(header):Number(data?.retry_after);
  const date=header&&!/^\d+(?:\.\d+)?$/.test(header)?Date.parse(header):NaN;
+ const status=Number(data?.status)||response.status;
  return Date.now()+Math.max(1000,Math.min(120000,Number.isFinite(date)?date-Date.now():
-  Number.isFinite(seconds)&&seconds>0?seconds*1000:response.status===429?60000:8000));
+  Number.isFinite(seconds)&&seconds>0?seconds*1000:status===429?60000:8000));
 }
 function fzResetMediaChecks(){
  fzCheckEpoch++;clearTimeout(fzCheckTimer);fzCheckTimer=null;
  fzMediaCheckControllers.forEach(ctl=>ctl.abort());fzMediaCheckControllers.clear();
  fzCheckQueue.splice(0).forEach(job=>job.resolve({kind:'cancelled'}));fzMediaChecks.clear();
- // Keep verified verdicts and pacing across searches/language changes.
 }
 function fzCheckProductPicture(state,url){
- let raw=url;try{const u=new URL(url);if(u.pathname.endsWith('/api/img-proxy'))raw=u.searchParams.get('u')||url;}catch(_){}
+ if(!state.mediaAuth)fzRegisterMedia(state,state.item,state.item.evaluation_token);
+ const auth=state.mediaAuth?.get(fzMediaKey(url));
+ if(!auth)return Promise.resolve({kind:'invalid'});
+ const {raw,token}=auth,key=raw+'|'+token;
  const verdict=fzMediaVerdicts.get(raw);
  if(verdict&&verdict.until>Date.now())return Promise.resolve(verdict.result);
  fzMediaVerdicts.delete(raw);
- const known=fzMediaChecks.get(raw);if(known)return known;
- const token=state.mediaToken||state.item.evaluation_token;
- if(!token)return Promise.resolve({kind:'rejected'});
+ const known=fzMediaChecks.get(key);if(known)return known;
  const epoch=fzCheckEpoch;
- const promise=new Promise(resolve=>fzCheckQueue.push({raw,token,epoch,resolve}));
- fzMediaChecks.set(raw,promise);
- promise.finally(()=>{if(fzMediaChecks.get(raw)===promise)fzMediaChecks.delete(raw);});
+ const promise=new Promise(resolve=>fzCheckQueue.push({raw,token,epoch,resolve,state,ready:Date.now()+120}));
+ fzMediaChecks.set(key,promise);
+ promise.finally(()=>{if(fzMediaChecks.get(key)===promise)fzMediaChecks.delete(key);});
  fzCheckPump();return promise;
 }
 function fzCheckPump(){
  clearTimeout(fzCheckTimer);fzCheckTimer=null;
  if(!fzCheckQueue.length||fzCheckActive>=3)return;
- const wait=Math.max(fzCheckNext,fzCheckGate)-Date.now();
+ const wait=Math.max(fzCheckNext,fzCheckGate,fzCheckQueue[0].ready)-Date.now();
  if(wait>0){fzKeepMediaOpen(Date.now()+wait+15000);fzCheckTimer=setTimeout(fzCheckPump,wait);return;}
- const job=fzCheckQueue.shift();
- if(job.epoch!==fzCheckEpoch){job.resolve({kind:'cancelled'});fzCheckPump();return;}
- fzCheckActive++;fzCheckNext=Date.now()+600;
+ fzCheckAdmissions=fzCheckAdmissions.filter(at=>at>Date.now()-60000);
+ if(fzCheckAdmissions.length>=100){fzCheckTimer=setTimeout(fzCheckPump,Math.max(1,fzCheckAdmissions[0]+60000-Date.now()));return;}
+ const jobs=fzCheckQueue.splice(0,Math.min(fzBatchChecks?6:1,100-fzCheckAdmissions.length)).filter(job=>{
+  if(job.epoch===fzCheckEpoch)return true;job.resolve({kind:'cancelled'});return false;
+ });
+ if(!jobs.length){fzCheckPump();return;}
+ jobs.forEach(()=>fzCheckAdmissions.push(Date.now()));
+ const batch=fzBatchChecks&&jobs.length>1;
+ fzCheckActive++;fzCheckNext=Date.now()+jobs.length*600;
  const ctl=new AbortController();fzMediaCheckControllers.add(ctl);
  const timeout=setTimeout(()=>ctl.abort(),10500);
- (async()=>{
-  let result;
-  try{
-   const response=await fzPaidFetch(r.replace(/\/$/,'')+'/api/media/check',{
-    method:'POST',headers:{'Content-Type':'application/json'},credentials:'omit',signal:ctl.signal,
-    body:JSON.stringify({token:job.token,image:job.raw})});
-   const data=await response.json().catch(()=>null);
-   if(response.ok&&data?.ok===true&&data.usable===true)result={kind:'product'};
-   else if(response.ok&&data?.ok===true&&['logo','text_only','placeholder'].includes(data.decision))result={kind:'rejected'};
-   else if(response.status===400||response.status===403)result={kind:'invalid'};
-   else{
-    result={kind:'retry',at:fzRetryTime(response,data)};
-    if(response.status===429||response.status===503)fzCheckGate=Math.max(fzCheckGate,result.at);
-   }
-  }catch(_){result={kind:'retry',at:Date.now()+2000};}
+ function finish(job,result){
   if(job.epoch!==fzCheckEpoch)result={kind:'cancelled'};
   else if(result.kind==='product'||result.kind==='rejected'){
    fzMediaVerdicts.set(job.raw,{result,until:Date.now()+900000});
    while(fzMediaVerdicts.size>1024)fzMediaVerdicts.delete(fzMediaVerdicts.keys().next().value);
+  }else if(result.kind==='invalid'){
+   job.state.invalidMedia=job.state.invalidMedia||new Map();
+   job.state.invalidMedia.set(fzMediaKey(job.raw),job.token);
   }
   job.resolve(result);
+ }
+ (async()=>{
+  try{
+   const payload=job=>({token:job.token,image:job.raw});
+   const response=await fzPaidFetch(r.replace(/\/$/,'')+'/api/media/check'+(batch?'/batch':''),{
+    method:'POST',headers:{'Content-Type':'application/json'},credentials:'omit',signal:ctl.signal,
+    body:JSON.stringify(batch?{images:jobs.map(payload)}:payload(jobs[0]))});
+   if(batch&&[404,405].includes(response.status)){
+    // A rolling deployment can briefly serve the previous backend.
+    fzBatchChecks=false;
+    for(const job of jobs){if(job.epoch===fzCheckEpoch)fzCheckQueue.push(job);else finish(job,{kind:'cancelled'});}
+    return;
+   }
+   const data=await response.json().catch(()=>null);
+   const values=batch&&Array.isArray(data?.results)?data.results:[];
+   jobs.forEach((job,id)=>{
+    const matches=values.filter(v=>v?.id===id);
+    const value=batch?(matches.length===1?matches[0]:null):data;
+    const status=Number(value?.status)||response.status;
+    let result;
+    if(response.ok&&status===200&&value?.ok===true&&value.usable===true)result={kind:'product'};
+    else if(response.ok&&status===200&&value?.ok===true&&['logo','text_only','placeholder'].includes(value.decision))result={kind:'rejected'};
+    else if(status===400||status===403)result={kind:'invalid'};
+    else{
+     result={kind:'retry',at:fzRetryTime(response,value||data)};
+     if(job.epoch===fzCheckEpoch&&(status===429||status===503))fzCheckGate=Math.max(fzCheckGate,result.at);
+    }
+    finish(job,result);
+   });
+  }catch(_){jobs.forEach(job=>finish(job,{kind:'retry',at:Date.now()+2000}));}
  })().finally(()=>{clearTimeout(timeout);fzMediaCheckControllers.delete(ctl);fzCheckActive--;fzCheckPump();});
  fzCheckPump();
 }
@@ -659,7 +710,7 @@ function fzMediaRecoveryPump(){
   .then(response=>{if(!response.ok){if(response.status===429||response.status===503)fzMediaCooldownUntil=Date.now()+60000;throw Error('media');}return response.json();})
   .then(data=>{
    if(q.get(state.key)!==state||state.winner||!data.ok)return;
-   if(data.media_token)state.mediaToken=data.media_token;
+   fzRegisterMedia(state,data,data.media_token);
    for(const url of lt({url:state.item.url,images:data.images||[],image_candidates:data.image_candidates||[]}))if(!state.urls.some(old=>ut(old)===ut(url)))state.urls.push(url);
    pt(state);
   }).catch(()=>{}).finally(()=>{
