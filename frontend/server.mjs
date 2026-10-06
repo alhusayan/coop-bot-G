@@ -29,7 +29,24 @@ for (const [url, entry] of Object.entries(manifest.routes)) {
 }
 if (routes.get(association)?.hash !== manifest.apple_pay_file_sha256) throw Error('Verification file mismatch');
 
-export function createServer() {
+const applePayFiles = new Map();
+for (const provider of ['paddle','myfatoorah']) {
+  const entry = manifest.apple_pay_files?.[provider];
+  if (!entry || entry.file !== 'apple-pay/'+provider) throw Error('Missing Apple Pay file: '+provider);
+  const body = readFileSync(resolve(base,entry.file));
+  const hash = createHash('sha256').update(body).digest('hex');
+  if (hash !== entry.sha256) throw Error('Apple Pay file integrity mismatch: '+provider);
+  applePayFiles.set(provider,{body,hash,type:types.txt,immutable:false});
+}
+
+export function createServer(env=process.env) {
+  const provider = String(env.FINDZIA_PAYMENT_PROVIDER ?? 'paddle').trim().toLowerCase();
+  if (!applePayFiles.has(provider)) throw Error('FINDZIA_PAYMENT_PROVIDER must be paddle or myfatoorah');
+  const selectedFile = applePayFiles.get(provider);
+  const health = Buffer.from(JSON.stringify({...JSON.parse(routes.get('/healthz').body),
+    payment_provider:provider,apple_pay_file_sha256:selectedFile.hash,apple_pay_switch:'railway-variable-v1'}));
+  const healthEntry = {body:health,hash:createHash('sha256').update(health).digest('hex'),type:types.json,immutable:false};
+  console.log(`FINDZIA_APPLE_PAY_FILE provider=${provider} sha256=${selectedFile.hash}`);
   return http.createServer({maxHeaderSize: 16384, requestTimeout: 15000, headersTimeout: 10000}, (req, res) => {
     if (!['GET', 'HEAD'].includes(req.method)) {
       res.writeHead(405, {...common, Allow:'GET, HEAD', 'Cache-Control':'no-store'}); res.end(); return;
@@ -37,7 +54,7 @@ export function createServer() {
     // No canonical-domain, slash or HTTPS redirects here: the provider must
     // receive the file itself on each HTTPS host, not a redirected document.
     const path = (req.url || '/').split('?')[0];
-    const entry = routes.get(path);
+    const entry = path===association ? selectedFile : path==='/healthz' ? healthEntry : routes.get(path);
     if (!entry) {
       const page = routes.get('/404.html');
       res.writeHead(404, {...common, 'Content-Type':types.html, 'Cache-Control':'no-store', 'Content-Length':page.body.length});
