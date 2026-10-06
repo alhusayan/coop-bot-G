@@ -400,7 +400,7 @@ from findzia_billing import CreditMiddleware, install_billing
 app.add_middleware(CreditMiddleware, owner=app)
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization', 'X-Findzia-Request-Id', 'X-Findzia-Search-Trace'], max_age=86400)
-BUILD_ID = 'v128.5.42.67-structured-prices'
+BUILD_ID = 'v128.5.42.68-audit-deadline'
 _SOCIAL = None
 
 def _fz_social_row(row):
@@ -15192,7 +15192,7 @@ def _web_prepare_identity_card(original, cancel_event=None):
             row['raw_title'] = snap['title']
     return row
 
-def _web_prepare_identity_cards(results, cancel_event=None):
+def _web_prepare_identity_cards(results, cancel_event=None, *, _deadline=None):
     rows = [dict(row) for row in (results or [])]
     jobs = {}
     for index, row in enumerate(rows[:WEB_VISUAL_CLASSIFIER_MAX_RESULTS]):
@@ -15200,7 +15200,10 @@ def _web_prepare_identity_cards(results, cancel_event=None):
             break
         jobs[WEB_IDENTITY_PAGE_POOL.submit(_web_prepare_identity_card, row, cancel_event)] = index
     if jobs:
-        done, pending = wait(set(jobs), timeout=WEB_IDENTITY_PAGE_BUDGET_SECONDS)
+        budget = WEB_IDENTITY_PAGE_BUDGET_SECONDS
+        if _deadline is not None:
+            budget = min(budget, max(0.0, _deadline - time.monotonic()))
+        done, pending = wait(set(jobs), timeout=budget)
         for future in done:
             try:
                 prepared = future.result()
@@ -15214,7 +15217,7 @@ def _web_prepare_identity_cards(results, cancel_event=None):
     # cards after their scores have been computed from a different image.
     return rows
 
-def _web_visual_collect_evidence(reference_image_b64, results, cancel_event=None):
+def _web_visual_collect_evidence(reference_image_b64, results, cancel_event=None, *, _deadline=None):
     """Fetch card thumbnails concurrently under one strict aggregate deadline."""
     reference = _web_visual_reference_inline(reference_image_b64)
     if not reference:
@@ -15241,7 +15244,10 @@ def _web_visual_collect_evidence(reference_image_b64, results, cancel_event=None
         # the background visual audit; the first streamed cards are unaffected.
         jobs[WEB_VISUAL_CLASSIFIER_POOL.submit(_web_visual_candidate_inline, row, True, cancel_event)] = classification_id
     if jobs:
-        done, pending = wait(set(jobs), timeout=WEB_VISUAL_CLASSIFIER_FETCH_TIMEOUT_SECONDS + 0.9)
+        budget = WEB_VISUAL_CLASSIFIER_FETCH_TIMEOUT_SECONDS + 0.9
+        if _deadline is not None:
+            budget = min(budget, max(0.0, _deadline - time.monotonic()))
+        done, pending = wait(set(jobs), timeout=budget)
         for future in done:
             try:
                 inline = future.result()
@@ -17216,7 +17222,7 @@ def _web_identity_offer_cache_trim():
         print('IDENTITY OFFER CACHE TRIM unavailable=' + type(exc).__name__)
 
 
-def _web_ai_classifier_request(identity, results, market, visual_context=None, cancel_event=None, *, _retry_cancelled=True, progress_callback=None):
+def _web_ai_classifier_request(identity, results, market, visual_context=None, cancel_event=None, *, _retry_cancelled=True, progress_callback=None, _request_deadline=None):
     """Audit only new/changed proofs; keep the same model and Exact validators.
 
     This shares per-offer proofs even when previews/final snapshots split them
@@ -17224,12 +17230,17 @@ def _web_ai_classifier_request(identity, results, market, visual_context=None, c
     Owners publish before waiting for overlapping owners, preventing deadlocks.
     """
     visual_context = _web_photo_match_context(visual_context)
+    timeout = WEB_VISUAL_CLASSIFIER_TIMEOUT_SECONDS if visual_context else WEB_AI_CLASSIFIER_TIMEOUT_SECONDS
+    request_deadline = _request_deadline if _request_deadline is not None else time.monotonic() + timeout
+    if time.monotonic() >= request_deadline:
+        return _web_identity_review_failure('timeout', bool(visual_context), 0)
     progress_kw = {'progress_callback': progress_callback} if progress_callback is not None else {}
+    progress_kw['_request_deadline'] = request_deadline
     if not WEB_IDENTITY_OFFER_CACHE_ENABLED or not visual_context or not WEB_VISUAL_CLASSIFIER_ENABLED:
         return _web_ai_classifier_request_live(identity, results, market, visual_context, cancel_event, **progress_kw)
     if cancel_event is not None and cancel_event.is_set():
         return _web_identity_review_failure('cancelled')
-    reference, evidence = _web_visual_collect_evidence(visual_context.get('image_b64'), results, cancel_event)
+    reference, evidence = _web_visual_collect_evidence(visual_context.get('image_b64'), results, cancel_event, _deadline=request_deadline)
     if not reference:
         return _web_ai_classifier_request_live(identity, results, market, visual_context, cancel_event,
                                                _prepared_evidence=(reference, evidence), **progress_kw)
@@ -17290,7 +17301,7 @@ def _web_ai_classifier_request(identity, results, market, visual_context=None, c
     live, direct = {}, {}
     # Owners run concurrently. Time spent auditing our own rows already counts
     # toward waiting for overlapping owners; never start a second full window.
-    wait_deadline = time.monotonic() + WEB_VISUAL_CLASSIFIER_TIMEOUT_SECONDS + 6.0
+    wait_deadline = request_deadline
     try:
         publish_hits()
         if live_rows and not (cancel_event is not None and cancel_event.is_set()):
@@ -17351,7 +17362,7 @@ def _web_ai_classifier_request(identity, results, market, visual_context=None, c
         elif (_retry_cancelled and event.is_set() and getattr(event, '_findzia_cancelled', False)
               and not (cancel_event is not None and cancel_event.is_set())):
             retry_ids.add(cid)
-    if retry_ids:
+    if retry_ids and time.monotonic() < request_deadline:
         # One user's cancellation must not cancel another user's audit. Retry
         # only after that owner has stopped; the normal election shares this
         # recovery among remaining users. Never recursively retry twice.
@@ -17419,6 +17430,10 @@ def _web_share_media_audit(items, evidence):
 def _web_ai_classifier_request_live(identity, results, market, visual_context=None, cancel_event=None, _prepared_evidence=None, progress_callback=None, *, _retry_truncated=True, _request_deadline=None):
     """Classify one captured batch with one text or multimodal Gemini request."""
     visual_context = _web_photo_match_context(visual_context)
+    timeout = WEB_VISUAL_CLASSIFIER_TIMEOUT_SECONDS if visual_context else WEB_AI_CLASSIFIER_TIMEOUT_SECONDS
+    request_deadline = _request_deadline if _request_deadline is not None else time.monotonic() + timeout
+    if time.monotonic() >= request_deadline:
+        return _web_identity_review_failure('timeout', bool(visual_context), 0)
     photo_evidence = (visual_context or {}).get('reference_photo_evidence') or {}
     country = str((market or {}).get('country') or DEFAULT_COUNTRY).lower()
     country_name = str((market or {}).get('country_name') or COUNTRY_NAMES.get(country, country.upper()))
@@ -17437,6 +17452,7 @@ def _web_ai_classifier_request_live(identity, results, market, visual_context=No
             (visual_context or {}).get('image_b64'),
             results,
             cancel_event,
+            _deadline=request_deadline,
         )
     # A photo audit needs both sides. Missing candidate pixels cannot be
     # supplied by a title; retain those rows as unverified without paid work.
@@ -17627,7 +17643,6 @@ judge the product type and overall resemblance, not for ordinary design variants
     }
     effective_timeout = WEB_VISUAL_CLASSIFIER_TIMEOUT_SECONDS if visual_mode else WEB_AI_CLASSIFIER_TIMEOUT_SECONDS
     # One MAX_TOKENS recovery may use remaining time, never a new full window.
-    request_deadline = _request_deadline or (time.monotonic() + effective_timeout)
     effective_timeout = min(effective_timeout, max(0.0, request_deadline - time.monotonic()))
     if effective_timeout < .2:
         return _web_identity_review_failure('timeout', visual_mode, len(visual_evidence_ids))
@@ -17878,12 +17893,16 @@ judge the product type and overall resemblance, not for ordinary design variants
         print(f'WEB AI CLASSIFIER ERR: {e.__class__.__name__}: {e}')
         return _web_identity_review_failure('request_or_parse_error', visual_mode, len(visual_evidence_ids))
 
-def _web_ai_classify_captured_batch(identity, results, market, visual_context=None, cancel_event=None, progress_callback=None):
+def _web_ai_classify_captured_batch(identity, results, market, visual_context=None, cancel_event=None, progress_callback=None, *, _request_deadline=None):
     if not WEB_AI_CLASSIFIER_ENABLED or not GEMINI_API_KEY or not results or (cancel_event is not None and cancel_event.is_set()):
         reason = ('disabled' if not WEB_AI_CLASSIFIER_ENABLED else 'missing_api_key'
                   if not GEMINI_API_KEY else 'no_results' if not results else 'cancelled')
         return (_web_identity_review_failure(reason), reason)
     visual_context = _web_photo_match_context(visual_context)
+    timeout = WEB_VISUAL_CLASSIFIER_TIMEOUT_SECONDS if visual_context else WEB_AI_CLASSIFIER_TIMEOUT_SECONDS
+    deadline = _request_deadline if _request_deadline is not None else time.monotonic() + timeout
+    if time.monotonic() >= deadline:
+        return (_web_identity_review_failure('timeout'), 'error_timeout')
     key = _web_ai_classifier_cache_key(identity, results, market, visual_context)
     # Text classification is stable and may use the persistent cache. Visual
     # classification must inspect today's candidate bytes: merchant/CDN URLs
@@ -17899,8 +17918,6 @@ def _web_ai_classify_captured_batch(identity, results, market, visual_context=No
             WEB_AI_CLASSIFIER_INFLIGHT[key] = event
             owner = True
     if not owner:
-        wait_timeout = WEB_VISUAL_CLASSIFIER_TIMEOUT_SECONDS if visual_context else WEB_AI_CLASSIFIER_TIMEOUT_SECONDS
-        deadline = time.monotonic() + wait_timeout + WEB_VISUAL_CLASSIFIER_FETCH_TIMEOUT_SECONDS + 5.5
         while not event.is_set() and time.monotonic() < deadline:
             if cancel_event is not None and cancel_event.is_set():
                 return (_web_identity_review_failure('cancelled'), 'cancelled')
@@ -17919,7 +17936,7 @@ def _web_ai_classify_captured_batch(identity, results, market, visual_context=No
         return (cached or {}, 'singleflight-cache' if cached else 'singleflight-fallback')
     try:
         progress_kw = {'progress_callback': progress_callback} if progress_callback is not None else {}
-        value = _web_ai_classifier_request(identity, results, market, visual_context, cancel_event, **progress_kw)
+        value = _web_ai_classifier_request(identity, results, market, visual_context, cancel_event, _request_deadline=deadline, **progress_kw)
         if value.get('review_error'):
             result = (value, 'error_' + value['review_error'])
             event._findzia_identity_result = result
@@ -17971,6 +17988,7 @@ def _web_identity_result_sort_key(row):
 def _web_attach_captured_result_sections(payload, lang, allow_ai=True, cancel_event=None, progress_callback=None, *, _review_result=None):
     """Audit direct offers and rank their published identity evidence."""
     out = dict(payload or {})
+    request_deadline = out.pop('_identity_deadline', None)
     reference_image_b64 = str(out.pop('_reference_image_b64', '') or '').strip()
     reference_image_mime = str(out.pop('_reference_image_mime', '') or '').strip().lower()
     text_reference = out.pop('_text_reference_context', None)
@@ -17998,7 +18016,10 @@ def _web_attach_captured_result_sections(payload, lang, allow_ai=True, cancel_ev
         _review_result = None
         results = [_web_text_retrieval_row(row) for row in results]
     if allow_ai and user_photo and _review_result is None:
-        results = _web_prepare_identity_cards(results, cancel_event)
+        batch_deadline = time.monotonic() + WEB_VISUAL_CLASSIFIER_TIMEOUT_SECONDS
+        request_deadline = min(request_deadline, batch_deadline) if request_deadline is not None else batch_deadline
+        if time.monotonic() < request_deadline:
+            results = _web_prepare_identity_cards(results, cancel_event, _deadline=request_deadline)
     # Result-list consensus is useful for text search, but in an image search
     # it can amplify one wrong Lens guess across every card. Keep the original
     # Lens/OCR identity as a hint and let the reference photo remain primary.
@@ -18082,6 +18103,8 @@ def _web_attach_captured_result_sections(payload, lang, allow_ai=True, cancel_ev
         if visual_context is not None and isinstance(photo_changes, dict):
             visual_context['requested_changes'] = copy.deepcopy(photo_changes)
         progress_kw = {'progress_callback': publish_review} if progress_callback is not None else {}
+        if request_deadline is not None:
+            progress_kw['_request_deadline'] = request_deadline
         ai_result, ai_source = _web_ai_classify_captured_batch(classification_anchor, ai_candidates, market_snapshot, visual_context, cancel_event, **progress_kw)
     else:
         ai_result, ai_source = ({}, 'instant-rules' if not allow_ai else 'semantic-only')
@@ -29050,6 +29073,9 @@ async def _web_stream_image_identity_batches(image_b64, mime, caption, country, 
 
 WEB_IDENTITY_READY_LOCAL_MIN = 3
 WEB_IDENTITY_READY_TAIL_SECONDS = 8.0
+# One shared review window, including queued work. Retrieval keeps ownership
+# of the final result set; this cannot turn an unfinished audit into Exact.
+WEB_IDENTITY_AUDIT_BUDGET_SECONDS = 40.0
 
 
 def _web_identity_review_priority(row, market):
@@ -29107,6 +29133,8 @@ async def _web_stream_image_identity_batches_core(image_b64, mime, caption, coun
     first_results_ms = first_match_ms = None
     text_search = reference_context is not None
     enabled = not text_search and WEB_AI_CLASSIFIER_ENABLED and WEB_VISUAL_CLASSIFIER_ENABLED and bool(GEMINI_API_KEY)
+    audit_deadline = clock + WEB_IDENTITY_AUDIT_BUDGET_SECONDS if enabled else None
+    audit_budget_exhausted = False
     origin_row = _web_text_retrieval_row if text_search else _web_image_retrieval_row
 
     def elapsed():
@@ -29147,7 +29175,8 @@ async def _web_stream_image_identity_batches_core(image_b64, mime, caption, coun
                     pass
         payload = {'ok': True, 'type': 'results', 'query': query, 'market': market,
                    'results': [dict(r) for r in batch], 'source': 'whatsapp_direct_lens_exact',
-                   '_reference_image_b64': image_b64, '_reference_image_mime': mime, '_social_no_expand': True}
+                   '_reference_image_b64': image_b64, '_reference_image_mime': mime, '_social_no_expand': True,
+                   '_identity_deadline': audit_deadline}
         if reference_context:
             payload['_text_reference_context'] = dict(reference_context)
         if requested_changes:
@@ -29171,7 +29200,8 @@ async def _web_stream_image_identity_batches_core(image_b64, mime, caption, coun
         # Audit complete offers first; stable ordering preserves ties and the
         # local lane's priority without changing admission or identity rules.
         queued.sort(key=lambda pair: _web_identity_review_priority(pair[0], market))
-        while enabled and queued and len(reviews) < WEB_IDENTITY_BATCH_PARALLEL:
+        while (enabled and queued and len(reviews) < WEB_IDENTITY_BATCH_PARALLEL
+               and time.monotonic() < audit_deadline):
             batch = []
             size = WEB_IDENTITY_FIRST_BATCH if review_count == 0 else WEB_IDENTITY_BATCH_SIZE
             while queued and len(batch) < size:
@@ -29190,6 +29220,19 @@ async def _web_stream_image_identity_batches_core(image_b64, mime, caption, coun
             callback if search_fn or ANDROID_IMAGE_PROGRESSIVE else None, False, cancel_event,
             **({'ready_event': retrieval_ready} if retrieval_ready is not None else {})))
         while not cancel_event.is_set():
+            # Consume completed work before closing the window. Retrieval is
+            # still authoritative even if it finishes after the review budget.
+            completed_waiting = any(task.done() for task in reviews)
+            completed_waiting = completed_waiting or not review_updates.empty() or (
+                review_update_task is not None and review_update_task.done())
+            if (final_ready and audit_deadline is not None and time.monotonic() >= audit_deadline
+                    and (reviews or queued) and not completed_waiting):
+                audit_budget_exhausted = True
+                audit_cancel_event.set()
+                for task in reviews:
+                    task.cancel()
+                print(f'IDENTITY AUDIT DEADLINE pending_batches={len(reviews)} queued={len(queued)} elapsed_ms={elapsed()}')
+                break
             ready_local = (_web_identity_ready_local_count(rows.values(), identity, market)
                            if enabled else 0)
             if retrieval_ready is not None:
@@ -29229,8 +29272,11 @@ async def _web_stream_image_identity_batches_core(image_b64, mime, caption, coun
                 waiting.add(progress_task)
             if not waiting:
                 break
-            done, _ = await asyncio.wait(waiting, timeout=min(WEB_IDENTITY_HEARTBEAT_SECONDS,
-                max(.01, ready_tail_deadline - time.monotonic())) if ready_tail_deadline is not None else WEB_IDENTITY_HEARTBEAT_SECONDS,
+            wait_seconds = WEB_IDENTITY_HEARTBEAT_SECONDS
+            for deadline in (ready_tail_deadline, audit_deadline if final_ready else None):
+                if deadline is not None:
+                    wait_seconds = min(wait_seconds, max(.01, deadline - time.monotonic()))
+            done, _ = await asyncio.wait(waiting, timeout=wait_seconds,
                                          return_when=asyncio.FIRST_COMPLETED)
             if not done:
                 yield _web_stream_event({'event': 'status', 'stage': 'identity_review' if final_ready else 'whatsapp_image_engine',
@@ -29360,7 +29406,8 @@ async def _web_stream_image_identity_batches_core(image_b64, mime, caption, coun
         if cancel_event.is_set():
             return
         snapshot = _web_identity_stream_snapshot(rows.values(), identity, market, lang, True, elapsed(), not text_search)
-        completion_reason = ('ready_local_tail' if ready_tail_exhausted else
+        completion_reason = ('identity_audit_deadline' if audit_budget_exhausted else
+                             'ready_local_tail' if ready_tail_exhausted else
                              'ready_local_sources' if retrieval_completion == 'ready_local_sources' else None)
         if completion_reason:
             snapshot.update(partial=True, completion_reason=completion_reason)
