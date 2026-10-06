@@ -1,31 +1,28 @@
 {
-  "release": "156.7.66",
-  "tests": {
-    "audit_prices_regression": 17,
-    "media_endpoint_regression": 9,
-    "recovery_prices_media": 21,
-    "total": 47
-  },
-  "baseline_selected_cases": 5,
-  "baseline_expected_failures": 5,
-  "media_pressure_simulation": {
-    "images": 22,
-    "model_requests": 5,
-    "live_metric": false
-  },
-  "verified_unchanged": [
-    "Exact identity proof",
-    "merchant identity conflict guards",
-    "visual profile comparison",
-    "price quote parsers",
-    "same-listing URL binding",
-    "existing identity normalization apart from independent image_kind"
+  "release": "156.7.68",
+  "backend_build": "v128.5.42.57-audit-errors",
+  "base_commit": "72f89ad411cd63ca47cdfea3844ae2f9fc9be1f7",
+  "runtime_files": [
+    "main.py"
   ],
-  "live_validation_pending": [
-    "Same-photo and same-market first visible card time",
-    "SHEIN per-listing price traces",
-    "Timeout and truncation counts",
-    "Actual image-check reuse/batching rate"
-  ],
-  "test_limits": "Production functions loaded by AST; mocked transport/providers and some surrounding normalization dependencies. No full application startup, paid calls or live deployment during verification."
+  "python_tests": 80,
+  "new_tests": 18,
+  "reproduced_failures_on_base": 3,
+  "external_calls": "mocked",
+  "live_provider_rejection_reason": "not captured in original logs; live verification pending",
+  "sha256": {
+    "main.py": "376905f5af8565cb7aaee484bbb34c7f92bb2e79b8f891b8cbaa5b128ffefb51",
+    "README_AR.txt": "c4b17d38d03221e3df9e2fe9f5c166ef5379ef6e0e7182eeda69778ff29febf4",
+    "verification/changes.patch": "ee7880d7f44075d09d88e347a1a407debe355d925b28f0d3010ab1005bfdeb3f",
+    "verification/changed-functions.json": "f3ad784af345c6a41c1cca4cc8e9b9d16c172130235230d37b6cb51ee9c6c9e5",
+    "verification/baseline-regression.txt": "48d3c75bcbb2c039ee80895146c6897451c17633123d0e3cb15b79bb7d1b4977",
+    "verification/python-tests.txt": "52c75e8fb050c2970cda6f00c6a7c81ed51c9355e141dd8c3f8acdb1008915c3",
+    "verification/test_audit_errors_68.py": "3a605240b735f678c2e70366534ddbef189e5bcda0c9693aa1e705ca251b4903",
+    "verification/test_audit_prices.py": "dc6b6719dea9c4553f3daf8689ed4bc85486f2768ce70c9d669958695806ed3e",
+    "verification/test_media_backend.py": "63c75807c69c2b862b6ecb781bbcf6dacf516defd87c28d1496c084982903a32",
+    "verification/test_recovery_66.py": "3d9e5eb44af276c5106145614021dde72748381f35bab2af783e00de2d9f866c",
+    "verification/test_routing_67.py": "0fc2e37c441b1c3c3be0e8f5fb8888a997bd3e527ce6aae485cfe919a49c21cd",
+    "verification/findzia_product_media.fixture.py": "71684f4b2da192b0e2ffacb891b57087a1e309214ace19e666f1327723619e43",
+    "verification/README.txt": "af4f838ea0772a2b701a5283f33e812597cfce1f1adbce9b3ce026cd77854dd6"
+  }
 }

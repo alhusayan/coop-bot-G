@@ -141,6 +141,7 @@ class AuditWaitTests(unittest.TestCase):
             '_web_ai_classifier_cache_get':lambda k:None,
             '_web_ai_classifier_cache_put':lambda *a:None,
             '_web_identity_offer_cache_trim':lambda:None,
+            '_web_share_media_audit':lambda *a:None,
             '_api_cost_record':lambda *a:None,
             '_web_ai_classifier_request_live':live,
             '_web_is_http_url':lambda s:s.startswith('https://'), '_web_unproxy_image_url':lambda s:s,

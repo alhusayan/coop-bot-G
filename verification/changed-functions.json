@@ -1,10 +1,12 @@
-[
-  "_web_snippet_amount_is_fee",
-  "_local_discovery_plain_snippet_price",
-  "_web_identity_response_schema",
-  "_web_ai_classifier_request_live",
-  "_web_indexed_price_present",
-  "_web_log_price_recovery",
-  "_web_targeted_price_updates",
-  "_serper_to_serpapi"
-]
+{
+  "added": [
+    "_web_identity_compatible_payload",
+    "_web_identity_error_info"
+  ],
+  "modified": [
+    "_web_identity_http_error",
+    "_web_identity_post_response",
+    "_web_identity_stream_response"
+  ],
+  "deleted": []
+}

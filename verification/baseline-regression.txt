@@ -1,0 +1,41 @@
+test_array_wrapped_schema_error_is_not_lost (test_audit_errors_68.ErrorParsingTests.test_array_wrapped_schema_error_is_not_lost) ... FAIL
+test_generic_message_uses_field_violation_to_select_compatibility (test_audit_errors_68.ErrorParsingTests.test_generic_message_uses_field_violation_to_select_compatibility) ... FAIL
+test_array_error_recovers_using_same_images_contract_and_deadline (test_audit_errors_68.TransportTests.test_array_error_recovers_using_same_images_contract_and_deadline) ... FAIL
+
+======================================================================
+FAIL: test_array_wrapped_schema_error_is_not_lost (test_audit_errors_68.ErrorParsingTests.test_array_wrapped_schema_error_is_not_lost)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/workspace/scratch/bb3264adcc10/search68/verification/test_audit_errors_68.py", line 56, in test_array_wrapped_schema_error_is_not_lost
+    self.assertEqual(code, 'http_400_schema')
+AssertionError: 'http_400' != 'http_400_schema'
+- http_400
++ http_400_schema
+
+
+======================================================================
+FAIL: test_generic_message_uses_field_violation_to_select_compatibility (test_audit_errors_68.ErrorParsingTests.test_generic_message_uses_field_violation_to_select_compatibility)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/workspace/scratch/bb3264adcc10/search68/verification/test_audit_errors_68.py", line 60, in test_generic_message_uses_field_violation_to_select_compatibility
+    self.assertEqual(code, 'http_400_schema')
+AssertionError: 'http_400' != 'http_400_schema'
+- http_400
++ http_400_schema
+
+
+======================================================================
+FAIL: test_array_error_recovers_using_same_images_contract_and_deadline (test_audit_errors_68.TransportTests.test_array_error_recovers_using_same_images_contract_and_deadline)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/workspace/scratch/bb3264adcc10/search68/verification/test_audit_errors_68.py", line 156, in test_array_error_recovers_using_same_images_contract_and_deadline
+    self.assertEqual(error, ''); self.assertEqual(answer['candidates'][0]['finishReason'], 'STOP')
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: 'http_400' != ''
+- http_400
+
+
+----------------------------------------------------------------------
+Ran 3 tests in 0.013s
+
+FAILED (failures=3)

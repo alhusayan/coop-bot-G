@@ -9,6 +9,8 @@ class Json:
         self.data,self.status_code,self.headers=data,status_code,headers or {}
 class Disconnect(Exception):pass
 source=Path(__file__).parents[1]/'findzia_product_media.py'
+if not source.is_file():
+    source=Path(__file__).with_name('findzia_product_media.fixture.py')
 tree=ast.parse(source.read_text());tree.body=[n for n in tree.body if not(isinstance(n,ast.ImportFrom) and n.module.startswith(('fastapi','starlette')))]
 ns={'Request':object,'JSONResponse':Json,'Response':Json,'ClientDisconnect':Disconnect}
 exec(compile(tree,str(source),'exec'),ns)
@@ -60,8 +62,8 @@ class MediaTests(unittest.TestCase):
         b=inspector.inspect('same',lambda:admissions.append(1) or False)
         self.assertIs(a,b);gate.set();self.assertEqual(a.result(3),'product');self.assertEqual(admissions,[1])
     def test_402_diagnostic_does_not_log_provider_body(self):
-        tree=ast.parse((source.parent/'main.py').read_text());fn=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='_web_identity_http_error')
-        module=ast.Module(body=[fn],type_ignores=[]);scope={};exec(compile(module,'diagnostic','exec'),scope)
+        from test_audit_prices import scope as load_scope
+        scope=load_scope(['_web_identity_http_error'])
         for message,category in [('Insufficient credit balance secret-key','insufficient_credit'),('billing disabled secret-key','billing_required'),('quota secret-key','quota_or_budget'),('private account data','unspecified')]:
             with redirect_stdout(io.StringIO()) as output:
                 code=scope['_web_identity_http_error'](SimpleNamespace(status_code=402,json=lambda:{'error':{'message':message}}))
