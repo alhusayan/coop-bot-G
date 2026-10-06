@@ -1,3 +1,4 @@
+# v128.5.42.64: preserve Noon/SHEIN catalog and indexed offer prices.
 # v128.5.42.63: audited-local retrieval completion and useful price-recovery priority.
 # v128.5.42.62: ready-offer audit priority and bounded local-ready completion tail.
 # v128.5.42.61: send the compact visual-audit schema first, including cold starts.
@@ -399,7 +400,7 @@ from findzia_billing import CreditMiddleware, install_billing
 app.add_middleware(CreditMiddleware, owner=app)
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization', 'X-Findzia-Request-Id', 'X-Findzia-Search-Trace'], max_age=86400)
-BUILD_ID = 'v128.5.42.63-ready-sources'
+BUILD_ID = 'v128.5.42.64-catalog-prices'
 _SOCIAL = None
 
 def _fz_social_row(row):
@@ -5519,8 +5520,8 @@ def _web_image_search_records(data):
                'serpapi_thumbnail': item.get('serpapi_thumbnail') or '',
                'thumbnail': item.get('thumbnail') or '',
                'image': item.get('original') or ''}
-        for field in ('price', 'extracted_price', 'currency', 'rich_snippet',
-                      'monthly_payment_duration'):
+        for field in ('price', 'price_value', 'extracted_price', 'currency', 'rich_snippet',
+                      'monthly_payment_duration', 'installments_description', 'down_payment'):
             if field in item:
                 row[field] = item[field]
         records.append(row)
@@ -5833,11 +5834,68 @@ def _web_collection_url(value):
         return False
 
 
+
+def _web_catalog_document_limit(url):
+    # Noon puts its grid after a large navigation/filter tree. A 1.2 MB
+    # prefix contains only the price-less ItemList, before the visible cards.
+    host = urllib.parse.urlsplit(str(url or '')).hostname or ''
+    return 3000000 if _host_matches_any(host, ('noon.com', 'shein.com')) else 1200000
+
+
+def _web_catalog_card_quote(card, url):
+    """Read one card's displayed current price, excluding its old/coupon prices."""
+    host = urllib.parse.urlsplit(url).hostname or ''
+    if not _host_matches_any(host, ('noon.com', 'shein.com')):
+        return None
+    cc = _web_listing_price_country({'url': url}, {})
+    # Avoid interpreting CSS 'wrapper_' as a per-unit price label.
+    exclude = re.compile(_WEB_PRICE_ELEMENT_EXCLUDE.pattern.replace('per[-_ ]', '(?<![a-z])per[-_ ]'), re.I)
+    quotes = []
+    for el in card.select('[itemprop="price"], [class*="price" i], [data-qa*="price" i]')[:60]:
+        lineage = [el]
+        for parent in el.parents:
+            if parent is card:
+                break
+            lineage.append(parent)
+        labels = ' '.join(' '.join(n.get('class', [])) + ' ' + str(n.get('id') or '')
+                          + ' ' + str(n.get('data-qa') or '') for n in lineage)
+        if (exclude.search(labels)
+                or re.search(r'recommend|related|upsell|crosssell', labels, re.I)
+                or any(n.name in ('del', 's', 'strike', 'script', 'style') or n.has_attr('hidden')
+                       or n.get('aria-hidden') == 'true'
+                       or re.search(r'display\s*:\s*none', n.get('style', ''), re.I) for n in lineage)):
+            continue
+        text = el.get_text(' ', strip=True)
+        # Currency and amount can be siblings, but never climb out of this
+        # price block into the whole card or another product's wrapper.
+        if not any(p.search(_normalize_price_chars(text)) for p in _WEB_PRICE_PATS):
+            parent = el.parent
+            label = ' '.join(parent.get('class', [])) if parent is not None else ''
+            if parent is not None and parent is not card and 'price' in label.lower() and not exclude.search(label):
+                text = parent.get_text(' ', strip=True)
+        if not text or len(text) > 100 or not any(p.search(_normalize_price_chars(text)) for p in _WEB_PRICE_PATS):
+            continue  # Never turn a bare rating/specification into a price.
+        quote = _web_price_quote(text, '', cc)
+        if quote and quote['kind'] == 'exact' and not _WEB_NOT_A_PRICE_PIECE.search(text):
+            quotes.append(quote)
+    if quotes and len({(q['min'], q['currency']) for q in quotes}) == 1:
+        return quotes[0]
+    return None
+
+
 def _web_collection_products(document, page_url):
     """Extract each observed product's own URL/photo/offer, never parent facts."""
     if not _web_collection_url(page_url) or not document:
         return []
-    soup = BeautifulSoup(document[:1200000], 'html.parser')
+    prefix = document[:_web_catalog_document_limit(page_url)]
+    catalog_host = urllib.parse.urlsplit(page_url).hostname or ''
+    if _host_matches_any(catalog_host, ('noon.com', 'shein.com')) and not re.search(r'</(?:html|body)\s*>', prefix, re.I):
+        # A bounded network prefix may end halfway through an amount/card.
+        # BeautifulSoup repairs open tags; that repair is not price evidence.
+        closed = list(re.finditer(r'</a\s*>', prefix, re.I))
+        if closed:
+            prefix = prefix[:closed[-1].end()]
+    soup = BeautifulSoup(prefix, 'html.parser')
     host = (urllib.parse.urlsplit(page_url).hostname or '').lower().removeprefix('www.')
     products = {}
 
@@ -5886,6 +5944,17 @@ def _web_collection_products(document, page_url):
                'price_source': 'local_collection', 'exact': False, 'image_candidates': pictures}
         if isinstance(availability, str) and availability:
             row['availability'] = availability
+        if price and _host_matches_any(host, ('noon.com', 'shein.com')):
+            # The ItemList often omits the seller query present on the actual
+            # card (Noon's ?o=). Replace only its unpriced base placeholder with
+            # the observed full offer URL, never attach seller money to the base.
+            parsed = urllib.parse.urlsplit(key)
+            base = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, '', ''))
+            if parsed.query:
+                for old_key in list(products):
+                    if (not products[old_key].get('price') and not urllib.parse.urlsplit(old_key).query
+                            and _web_same_index_listing(base, old_key)):
+                        del products[old_key]
         if key in products:
             old = products[key]
             old.update(_web_merge_offer_images(old, row))
@@ -5935,8 +6004,13 @@ def _web_collection_products(document, page_url):
         price = offers.get('price') if 'AggregateOffer' not in types(offers) else ''
         url = item.get('url') or offers.get('url') or item.get('@id') or node.get('url')
         add(url, item.get('name') or node.get('name'), item.get('image'), price, offers.get('priceCurrency'), offers.get('availability'))
+    # Noon navigation can contain over 1800 links before the first product.
+    # Read its observed grid directly; retain the generic path for other markup.
+    anchors = soup.select('[data-qa="plp-grid"] a[href]') if _host_matches_any(host, ('noon.com',)) else []
+    if not anchors:
+        anchors = soup.select('a[href]')
     # Card-local fallback for stores that emit a grid without JSON-LD Products.
-    for anchor in soup.select('a[href]')[:1800]:
+    for anchor in anchors[:1800]:
         href = absolute(anchor.get('href'))
         if not href or _web_collection_url(href) or not _web_is_direct_product_page_url(href):
             continue
@@ -5978,13 +6052,19 @@ def _web_collection_products(document, page_url):
                 prices.append(value)
         currency = card.select_one('[itemprop="priceCurrency"]')
         currency = (currency.get('content') or currency.get_text(' ', strip=True)) if currency else ''
-        add(href, title, images, prices[0] if len(prices) == 1 else '', currency)
+        if _host_matches_any(host, ('noon.com', 'shein.com')):
+            quote = _web_catalog_card_quote(card, href)
+            # These stores mix old prices and discounts inside price wrappers.
+            # An ambiguous current block stays unpriced; don't use prices[0].
+            add(href, title, images, _web_format_quote(quote) if quote else '', quote['currency'] if quote else '')
+        else:
+            add(href, title, images, prices[0] if len(prices) == 1 else '', currency)
     return list(products.values())
 
 
 def _web_fetch_collection(url):
     page = _web_merchant_document(url, purpose='collection', headers=dict(HEADERS), timeout=(.8, 1.4),
-                                  max_bytes=1200000, max_redirects=2, html_prefix=True)
+                                  max_bytes=_web_catalog_document_limit(url), max_redirects=2, html_prefix=True)
     if page.get('reason') or not page.get('text'):
         return []
     # Login, redirected home pages and direct products are never grids.
@@ -20577,12 +20657,31 @@ def _web_live_pool_prices(rows, rank, lang, market):
     return _web_shared_price_market_sync(rows, rank, lang, market)
 
 
+
+def _web_noon_product_identity(url):
+    """Observed SKU and country; name/UI language may vary, seller query may not."""
+    try:
+        parsed = urllib.parse.urlsplit(str(url or ''))
+        if parsed.scheme not in ('http', 'https') or parsed.hostname not in ('noon.com', 'www.noon.com') or parsed.username or parsed.password:
+            return None
+        match = re.fullmatch(r'/(kuwait|saudi|uae|egypt|qatar|bahrain|oman)-(?:en|ar)/(?:[^/]+/)?([NZ][A-Z0-9]{5,})/p/?', parsed.path, re.I)
+        if match:
+            cc = {'kuwait':'kw', 'saudi':'sa', 'uae':'ae', 'egypt':'eg', 'qatar':'qa', 'bahrain':'bh', 'oman':'om'}[match.group(1).lower()]
+            return (cc, match.group(2).upper())
+    except ValueError:
+        pass
+    return None
+
+
 def _web_listing_price_country(row, market):
     """Use an explicit SHEIN storefront before legacy global-lane defaults.
 
     This selects retrieval/parser context, never supplies an absent price or
     changes the exact-listing URL/currency/variant requirements.
     """
+    noon = _web_noon_product_identity(row.get('url'))
+    if noon:
+        return noon[0]
     host = (urllib.parse.urlsplit(str(row.get('url') or '')).hostname or '').lower()
     if host.endswith('.shein.com'):
         storefront = host[:-len('.shein.com')]
@@ -20783,6 +20882,9 @@ def _web_same_index_listing(first, second):
     if a.netloc != b.netloc or a.query != b.query:
         return False
     host = a.hostname or ''
+    noon = _web_noon_product_identity(first)
+    if noon:
+        return noon == _web_noon_product_identity(second)
     marker = '-p-' if _host_matches_any(host, ('shein.com',)) else '-g-' if _host_matches_any(host, ('temu.com',)) else ''
     if not marker:
         return False
@@ -20859,6 +20961,10 @@ def _web_targeted_price_updates(entries, lang, market, *, image_only=False):
         ids = [v for k, v in urllib.parse.parse_qsl(parsed.query)
                if k.lower() in {'id', 'itemid', 'item_id', 'goods_id', 'goodsid', 'offerid', 'sku', 'skuid', 'sku_id'}]
         path_ids = re.findall(r'(?:/item/|/offer/|/product/|-p-|-g-|/)(\d{6,})(?=[./-]|$)', parsed.path)
+        noon = _web_noon_product_identity(key)
+        if noon:
+            term = 'site:' + parsed.netloc + '/' + parsed.path.strip('/').split('/')[0]
+            path_ids = [noon[1]]
         # Amazon's alphanumeric ASIN is more precise than a generic title.
         # This changes retrieval only; exact listing/variant/market binding below
         # still rejects every price belonging to a different offer.
@@ -20872,6 +20978,8 @@ def _web_targeted_price_updates(entries, lang, market, *, image_only=False):
         else:
             title = re.sub(r'["()\r\n]', ' ', str(row.get('raw_title') or row.get('title') or ''))
             term += ' ' + title[:120].strip()
+        if not image_only and not _web_row_has_numeric_price(row) and (noon or _web_shein_product_id(key)):
+            term += ' price'
         terms.append(('(' + term + ')', _web_listing_price_country(row, market)))
     if not terms:
         return {}
@@ -22877,6 +22985,23 @@ def _serper_json(path, body, timeout, *, purpose='discovery'):
     return data
 
 
+
+def _serper_offer_fields(row):
+    """Keep same-result money evidence through every provider index lane."""
+    fields = {k: copy.deepcopy(row[k]) for k in (
+        'price', 'currency', 'price_value', 'extracted_price', 'rich_snippet',
+        'installments_description', 'monthly_payment_duration', 'down_payment')
+        if row.get(k) is not None}
+    # Some result shapes put the displayed label under attributes.Price.
+    # Exact labels only; shipping, discounts and list prices are not candidates.
+    attrs = row.get('attributes')
+    if isinstance(attrs, dict) and not fields.get('price'):
+        values = [v for k, v in attrs.items() if str(k).strip().lower() == 'price' and isinstance(v, str)]
+        if len(values) == 1:
+            fields['price'] = values[0]
+    return fields
+
+
 def _serper_to_serpapi(kind, data):
     """Map Serper's organic/images/shopping arrays onto SerpApi keys."""
     out = {'search_metadata': {'status': 'Success', 'provider': 'serper'}}
@@ -22887,6 +23012,7 @@ def _serper_to_serpapi(kind, data):
                 continue
             item = {'position': i + 1, 'title': row.get('title') or '', 'link': row['link'],
                     'snippet': row.get('snippet') or '', 'displayed_link': row.get('domain') or urllib.parse.urlsplit(row['link']).hostname or ''}
+            item.update(_serper_offer_fields(row))
             if row.get('imageUrl'):
                 item['thumbnail'] = row['imageUrl']
             if row.get('price'):
@@ -22897,7 +23023,7 @@ def _serper_to_serpapi(kind, data):
                     if row.get(qualifier) is not None:
                         item[qualifier] = copy.deepcopy(row[qualifier])
                 snippet = _fast_rich_snippet(row.get('price'), row.get('currency'))
-                if snippet:
+                if snippet and not item.get('rich_snippet'):
                     item['rich_snippet'] = snippet
             children = row.get('sitelinks')
             if isinstance(children, list) and children:
@@ -22932,7 +23058,7 @@ def _serper_to_serpapi(kind, data):
                 continue
             images.append({'position': i + 1, 'title': row.get('title') or '', 'link': row['link'],
                            'original': row['imageUrl'], 'thumbnail': row.get('thumbnailUrl') or row['imageUrl'],
-                           'source': row.get('domain') or row.get('source') or ''})
+                           'source': row.get('domain') or row.get('source') or '', **_serper_offer_fields(row)})
         if images:
             out['images_results'] = images
     return out
