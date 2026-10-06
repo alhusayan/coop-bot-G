@@ -1,3 +1,4 @@
+# v128.5.42.59: evidence-first audits, bounded missing-image/index cooldowns, first-render telemetry.
 # v128.5.42.25: skip merchant spinner assets; read real card/gallery photos and keep bounded media recovery.
 # v128.5.42.23: photo-only alternatives admit useful nearby designs; typed searches bypass visual admission.
 # Marketplace repair: progressive media, open domestic retrieval, observed filters, on-demand insights.
@@ -393,8 +394,8 @@ app = FastAPI()
 from findzia_billing import CreditMiddleware, install_billing
 app.add_middleware(CreditMiddleware, owner=app)
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
-app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization', 'X-Findzia-Request-Id'], max_age=86400)
-BUILD_ID = 'v128.5.42.58-audit-compact-upload'
+app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization', 'X-Findzia-Request-Id', 'X-Findzia-Search-Trace'], max_age=86400)
+BUILD_ID = 'v128.5.42.59-evidence-first'
 _SOCIAL = None
 
 def _fz_social_row(row):
@@ -14940,6 +14941,29 @@ def _web_read_limited_response(response, max_bytes, cancel_event=None, deadline=
         chunks.append(chunk)
     return b''.join(chunks)
 
+_WEB_VISUAL_MISSING_UNTIL = {}
+
+
+def _web_visual_missing_recent(url, status=None):
+    """Only definitive 404/410 misses get a short cooldown, never 429/timeouts.
+
+    Positive pixels are still refreshed for every independent visual audit.
+    Query strings remain part of the key; signed/new images are independent.
+    """
+    key = hashlib.sha256(url.encode('utf-8')).hexdigest()
+    now = time.monotonic()
+    with WEB_VISUAL_IMAGE_CACHE_LOCK:
+        if status in (404, 410):
+            _WEB_VISUAL_MISSING_UNTIL[key] = now + 30
+            while len(_WEB_VISUAL_MISSING_UNTIL) > 256:
+                _WEB_VISUAL_MISSING_UNTIL.pop(next(iter(_WEB_VISUAL_MISSING_UNTIL)))
+        expires = _WEB_VISUAL_MISSING_UNTIL.get(key, 0)
+        if expires <= now:
+            _WEB_VISUAL_MISSING_UNTIL.pop(key, None)
+            return False
+        return True
+
+
 def _web_visual_candidate_inline(row, force_refresh=False, cancel_event=None):
     if _fz_social_row(row):
         body = _SOCIAL.image_bytes(row)
@@ -14955,6 +14979,9 @@ def _web_visual_candidate_inline(row, force_refresh=False, cancel_event=None):
     for index, raw_url in enumerate(urls):
         if (cancel_event is not None and cancel_event.is_set()) or time.monotonic() >= deadline:
             break
+        if _web_visual_missing_recent(raw_url):
+            failures.append('recent_missing')
+            continue
         cache_key = 'visual:' + hashlib.sha256(raw_url.encode('utf-8')).hexdigest()
         cached, value = _web_visual_cache_get(cache_key)
         if cached and not force_refresh:
@@ -14980,6 +15007,7 @@ def _web_visual_candidate_inline(row, force_refresh=False, cancel_event=None):
                 timeout=(connect, max(.01, min(WEB_VISUAL_CLASSIFIER_FETCH_TIMEOUT_SECONDS, budget-connect))), stream=True)
             content_type = (response.headers.get('content-type') or '').split(';',1)[0].strip().lower()
             if response.status_code >= 400 or not content_type.startswith('image/'):
+                _web_visual_missing_recent(raw_url, response.status_code)
                 failures.append('http_'+str(response.status_code) if response.status_code >= 400 else 'not_image')
                 continue
             body = _web_read_limited_response(response, WEB_VISUAL_CLASSIFIER_MAX_DOWNLOAD_BYTES, cancel_event, deadline)
@@ -14995,7 +15023,14 @@ def _web_visual_candidate_inline(row, force_refresh=False, cancel_event=None):
             except Exception:
                 pass
             if cancel_event is None or not cancel_event.is_set():
-                _web_visual_cache_set(cache_key, value)
+                if value:
+                    _web_visual_cache_set(cache_key, value)
+                else:
+                    # A failed refresh revokes old pixels. Only the explicit
+                    # 30-second 404/410 cooldown may suppress a later fetch;
+                    # transport/429 failures must not become five-minute misses.
+                    with WEB_VISUAL_IMAGE_CACHE_LOCK:
+                        WEB_VISUAL_IMAGE_CACHE.pop(cache_key, None)
         if value:
             if index:
                 print(f'VISUAL IMAGE FETCH status=recovered alternative={index} failed={failures}')
@@ -17073,9 +17108,14 @@ def _web_ai_classifier_request(identity, results, market, visual_context=None, c
     candidates = _web_identity_candidates(results)
     source_rows = list(results or [])[:WEB_AI_CLASSIFIER_MAX_RESULTS]
     entries, owned, waiting, hits, live_rows = [], {}, [], {}, []
+    missing_images = 0
     for candidate, row in zip(candidates, source_rows):
         cid = candidate['id']
         candidate['image_attached'] = cid in evidence
+        if cid not in evidence:
+            entries.append((cid, ''))
+            missing_images += 1
+            continue
         key = _web_identity_offer_content_key(candidate, market, reference, evidence.get(cid),
                                               visual_context.get('reference_photo_evidence'))
         entries.append((cid, key))
@@ -17099,6 +17139,10 @@ def _web_ai_classifier_request(identity, results, market, visual_context=None, c
                 live_rows.append(prepared)
             else:
                 waiting.append((cid, key, event))
+    if missing_images:
+        print(f'IDENTITY EVIDENCE candidates={len(candidates)} ready={len(candidates)-missing_images} skipped_missing_image={missing_images}')
+    if missing_images == len(candidates):
+        return _web_identity_review_failure('candidate_images_unavailable', True, 0)
     published_hits = set()
     def publish_hits():
         if progress_callback is None or (cancel_event is not None and cancel_event.is_set()):
@@ -17266,9 +17310,18 @@ def _web_ai_classifier_request_live(identity, results, market, visual_context=No
             results,
             cancel_event,
         )
-    # The reference photo is useful even if a merchant blocks its thumbnail.
-    # Candidate-image absence limits Exact proof, but must not discard the
-    # user's image or let result titles redefine the photographed product.
+    # A photo audit needs both sides. Missing candidate pixels cannot be
+    # supplied by a title; retain those rows as unverified without paid work.
+    if reference_inline:
+        ready = [c for c in candidates if c['id'] in visual_evidence]
+        if len(ready) != len(candidates):
+            print(f'IDENTITY EVIDENCE candidates={len(candidates)} ready={len(ready)} skipped_missing_image={len(candidates)-len(ready)}')
+            if not ready:
+                return _web_identity_review_failure('candidate_images_unavailable', True, 0)
+            ready_ids = {c['id'] for c in ready}
+            results = [dict(row, _classification_id=c['id']) for c, row in zip(candidates, results)
+                       if c['id'] in ready_ids]
+            candidates = ready
     visual_mode = bool(reference_inline)
     visual_evidence_ids = set(visual_evidence)
     alternative_review = any(c.get('alternative_review') for c in candidates)
@@ -20504,6 +20557,61 @@ def _web_listing_price_country(row, market):
     return str(row.get('country') or row.get('market_country') or market.get('country') or 'us').lower()
 
 
+_WEB_PRICE_INDEX_MISSES = {}
+_WEB_PRICE_INDEX_MISS_LOCK = threading.Lock()
+
+
+def _web_price_index_recent_miss(row, market, remember=False):
+    """Avoid repeating a successful-but-empty index lookup for 45 seconds.
+
+    Scoped to the exact URL (including variant/currency), market and title.
+    Page verification and newly discovered prices are never held by this cache.
+    Transport/provider failures do not enter it.
+    """
+    raw = [_web_price_url_key(row.get('url')), _web_listing_price_country(row, market),
+           str(row.get('raw_title') or row.get('title') or '')]
+    key = hashlib.sha256(json.dumps(raw, ensure_ascii=False).encode()).hexdigest()
+    now = time.monotonic()
+    with _WEB_PRICE_INDEX_MISS_LOCK:
+        if remember:
+            _WEB_PRICE_INDEX_MISSES[key] = now + 45
+            while len(_WEB_PRICE_INDEX_MISSES) > 512:
+                _WEB_PRICE_INDEX_MISSES.pop(next(iter(_WEB_PRICE_INDEX_MISSES)))
+        expires = _WEB_PRICE_INDEX_MISSES.get(key, 0)
+        if expires <= now:
+            _WEB_PRICE_INDEX_MISSES.pop(key, None)
+            return False
+        return True
+
+
+def _web_listing_lookup_term(row, image_only=False):
+    """One query tied to the observed listing, without broad title-only guesses."""
+    key = _web_price_url_key(row.get('url'))
+    if not key:
+        return ''
+    parsed = urllib.parse.urlsplit(key)
+    if parsed.path in ('', '/'):
+        return ''
+    host = 'shein.com' if image_only and _web_shein_product_id(key) else parsed.netloc
+    ids = [v for k, v in urllib.parse.parse_qsl(parsed.query)
+           if k.lower() in {'id', 'itemid', 'item_id', 'goods_id', 'goodsid', 'offerid', 'sku', 'skuid', 'sku_id'}]
+    ids += re.findall(r'(?:/item/|/offer/|/product/|-p-|-g-|/)(\d{6,})(?=[./-]|$)', parsed.path)
+    amazon = re.search(r'/(?:dp|gp/product)/([A-Z0-9]{10})(?:/|$)', parsed.path, re.I)
+    if amazon:
+        ids.insert(0, amazon.group(1))
+    ids = [re.sub(r'[^a-zA-Z0-9_-]', '', value)[:100] for value in ids[:2]]
+    ids = [value for value in ids if value]
+    if ids:
+        return 'site:' + host + ' ' + ' '.join('"' + value + '"' for value in ids)
+    # A stable product path is more specific than a long generic display title.
+    # Images retain the previous title strategy for cross-locale image recovery.
+    generic = parsed.path.rstrip('/').rsplit('/', 1)[-1].lower()
+    if not image_only and generic not in {'index.php','index.html','product.php','product.aspx','detail.aspx','default.aspx'}:
+        return 'site:' + host + parsed.path[:500]
+    title = re.sub(r'["()\r\n]', ' ', str(row.get('raw_title') or row.get('title') or ''))
+    return 'site:' + host + ' ' + title[:120].strip()
+
+
 def _web_automatic_price_batches(rows, attempted_rows=None):
     """Bounded, market-isolated queries; earlier local work cannot starve exports."""
     def group_key(row):
@@ -20518,6 +20626,9 @@ def _web_automatic_price_batches(rows, attempted_rows=None):
         merchant_use[(group, _more_result_domain(row.get('url')))] += 1
     groups = {}
     for key, row in rows.items():
+        if (not _web_row_has_numeric_price(row) and _web_offer_image_candidates(row)
+                and _web_price_index_recent_miss(row, current_market())):
+            continue
         group = group_key(row)
         groups.setdefault(group, {}).setdefault(_more_result_domain(row.get('url')), []).append((key,row))
     batches = []
@@ -20742,29 +20853,20 @@ def _web_targeted_price_updates(entries, lang, market, *, image_only=False):
         return {}
     MARKET_CTX.value = dict(market)
     terms = []
+    image_source = image_only or all(_web_row_has_numeric_price(row) and not _web_offer_image_candidates(row) for row in entries.values())
+    # A failed price lookup does not block an independent image-only repair.
+    if not image_only:
+        entries = {key: row for key, row in entries.items()
+                   if _web_row_has_numeric_price(row) or not _web_offer_image_candidates(row)
+                   or not _web_price_index_recent_miss(row, market)}
     for row in entries.values():
-        key = _web_price_url_key(row.get('url'))
-        if not key:
-            continue
-        parsed = urllib.parse.urlsplit(key)
-        if parsed.path in ('', '/'):
-            continue
-        # Keep the observed product ID while allowing mobile/locale image hits.
-        term = 'site:' + ('shein.com' if image_only and _web_shein_product_id(key) else parsed.netloc)
-        ids = [v for k, v in urllib.parse.parse_qsl(parsed.query)
-               if k.lower() in {'id', 'itemid', 'item_id', 'goods_id', 'goodsid', 'offerid', 'sku', 'skuid', 'sku_id'}]
-        path_ids = re.findall(r'(?:/item/|/offer/|/product/|-p-|-g-|/)(\d{6,})(?=[./-]|$)', parsed.path)
-        if ids or path_ids:
-            term += ' ' + ' '.join('"' + re.sub(r'[^a-zA-Z0-9_-]', '', value) + '"' for value in (ids + path_ids)[:2])
-        else:
-            title = re.sub(r'["()\r\n]', ' ', str(row.get('raw_title') or row.get('title') or ''))
-            term += ' ' + title[:120].strip()
-        terms.append(('(' + term + ')', _web_listing_price_country(row, market)))
+        term = _web_listing_lookup_term(row, image_source)
+        if term:
+            terms.append(('(' + term + ')', _web_listing_price_country(row, market)))
     if not terms:
         return {}
     # Price recovery needs organic snippets even when pictures are also missing.
     # Use the image index only when every listing already has a price.
-    image_source = image_only or all(_web_row_has_numeric_price(row) and not _web_offer_image_candidates(row) for row in entries.values())
     params = {'engine': 'google_images' if image_source else 'google',
               'num': 10,
               'api_key': SERPAPI_API_KEY, 'output': 'json'}
@@ -20867,6 +20969,8 @@ def _web_targeted_price_updates(entries, lang, market, *, image_only=False):
         failed = sum(bool(response.get('_findzia_lookup_failed')) for response in responses)
         for key, row in entries.items():
             _web_log_price_recovery(row, market, diagnostics[key], len(records), failed)
+            if not failed and not diagnostics[key]['accepted_price']:
+                _web_price_index_recent_miss(row, market, remember=True)
     print(f'EXACT-LISTING RECOVERY engine={params["engine"]} requested={len(entries)}'
           f' lookups={len(lookup_terms)} recovered_images={sum(bool(value.get("page_image")) for value in updates.values())}'
           f' recovered_prices={sum(bool(value.get("price")) for value in updates.values())}')
@@ -34096,18 +34200,69 @@ _install_findzia_support(app, judge=_refine_ai,
     request_ip=_web_request_ip, enabled=lambda: WEB_API_ENABLED)
 
 
+def _web_search_trace_id(value):
+    return value if isinstance(value, str) and re.fullmatch(r'[a-f0-9]{32}', value) else ''
+
+
+def _web_client_card_metric(data):
+    """Client-reported rendering measurement; never product/account evidence."""
+    if not isinstance(data, dict) or not _web_search_trace_id(data.get('search_trace')):
+        raise ValueError('invalid_metric')
+    if data.get('kind') not in ('image', 'text'):
+        raise ValueError('invalid_metric')
+    if data.get('version') != '156.7.70':
+        raise ValueError('invalid_metric')
+    cc = data.get('country')
+    if not isinstance(cc, str) or not re.fullmatch(r'[a-z]{2}', cc):
+        raise ValueError('invalid_metric')
+    result = {k: data[k] for k in ('search_trace', 'kind', 'version', 'country')}
+    for key, maximum in (('first_card_ms', 180000), ('visible_count', 1000)):
+        value = data.get(key)
+        if type(value) is not int or not 0 <= value <= maximum:
+            raise ValueError('invalid_metric')
+        result[key] = value
+    if not result['visible_count']:
+        raise ValueError('invalid_metric')
+    result['measurement'] = 'client_after_render'
+    return result
+
+
+@app.post('/api/search/metrics')
+async def web_api_search_metrics(request: Request):
+    if not _web_rate_allowed(request, scope='search_metrics'):
+        return Response(status_code=429)
+    try:
+        raw = bytearray()
+        async for chunk in request.stream():
+            if len(raw) + len(chunk) > 1024:
+                return Response(status_code=413)
+            raw.extend(chunk)
+        data = _web_client_card_metric(json.loads(raw))
+    except ClientDisconnect:
+        return Response(status_code=204)
+    except (ValueError, TypeError, AttributeError, UnicodeError):
+        return Response(status_code=400)
+    # Never log the submitted object: only allowlisted counters and random id.
+    print('CLIENT FIRST CARD ' + json.dumps(data, sort_keys=True), flush=True)
+    return Response(status_code=204)
+
+
 class _FindziaImageTiming:
     """Observe the original ASGI receive path, before credit/body middleware."""
     def __init__(self, app):
         self.app = app
 
     async def __call__(self, scope, receive, send):
-        paths = {'/api/search/image', '/api/search/image/stream', '/api/refine/search/stream'}
+        paths = {'/api/search/stream', '/api/search/image', '/api/search/image/stream', '/api/refine/search/stream'}
         if scope.get('type') != 'http' or scope.get('method') != 'POST' or scope.get('path') not in paths:
             return await self.app(scope, receive, send)
         started = time.monotonic()
         data = {'body_bytes': 0, 'body_complete_ms': None, 'headers_ms': None,
                 'first_body_ms': None, 'status': None}
+        headers = dict(scope.get('headers') or [])
+        trace = _web_search_trace_id(headers.get(b'x-findzia-search-trace', b'').decode('ascii', 'ignore'))
+        if trace:
+            data['search_trace'] = trace
         scope['findzia_image_timing'] = data
         def elapsed():
             return max(0, int((time.monotonic() - started) * 1000))
@@ -34130,7 +34285,8 @@ class _FindziaImageTiming:
         finally:
             data['total_ms'] = elapsed()
             data['route'] = scope['path']
-            print('IMAGE REQUEST TIMING ' + json.dumps(data, sort_keys=True), flush=True)
+            label = 'SEARCH REQUEST TIMING ' if scope['path'] == '/api/search/stream' else 'IMAGE REQUEST TIMING '
+            print(label + json.dumps(data, sort_keys=True), flush=True)
 
 
 async def _web_prepare_image_bytes(request, image_bytes, mime, client_meta=None):
