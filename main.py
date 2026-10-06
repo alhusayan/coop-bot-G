@@ -1,3 +1,4 @@
+# v128.5.42.60: restore release 69 price recovery; retain Gemini, image and first-card fixes.
 # v128.5.42.59: evidence-first audits, bounded missing-image/index cooldowns, first-render telemetry.
 # v128.5.42.25: skip merchant spinner assets; read real card/gallery photos and keep bounded media recovery.
 # v128.5.42.23: photo-only alternatives admit useful nearby designs; typed searches bypass visual admission.
@@ -395,7 +396,7 @@ from findzia_billing import CreditMiddleware, install_billing
 app.add_middleware(CreditMiddleware, owner=app)
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization', 'X-Findzia-Request-Id', 'X-Findzia-Search-Trace'], max_age=86400)
-BUILD_ID = 'v128.5.42.59-evidence-first'
+BUILD_ID = 'v128.5.42.60-price-recovery-69'
 _SOCIAL = None
 
 def _fz_social_row(row):
@@ -20557,61 +20558,6 @@ def _web_listing_price_country(row, market):
     return str(row.get('country') or row.get('market_country') or market.get('country') or 'us').lower()
 
 
-_WEB_PRICE_INDEX_MISSES = {}
-_WEB_PRICE_INDEX_MISS_LOCK = threading.Lock()
-
-
-def _web_price_index_recent_miss(row, market, remember=False):
-    """Avoid repeating a successful-but-empty index lookup for 45 seconds.
-
-    Scoped to the exact URL (including variant/currency), market and title.
-    Page verification and newly discovered prices are never held by this cache.
-    Transport/provider failures do not enter it.
-    """
-    raw = [_web_price_url_key(row.get('url')), _web_listing_price_country(row, market),
-           str(row.get('raw_title') or row.get('title') or '')]
-    key = hashlib.sha256(json.dumps(raw, ensure_ascii=False).encode()).hexdigest()
-    now = time.monotonic()
-    with _WEB_PRICE_INDEX_MISS_LOCK:
-        if remember:
-            _WEB_PRICE_INDEX_MISSES[key] = now + 45
-            while len(_WEB_PRICE_INDEX_MISSES) > 512:
-                _WEB_PRICE_INDEX_MISSES.pop(next(iter(_WEB_PRICE_INDEX_MISSES)))
-        expires = _WEB_PRICE_INDEX_MISSES.get(key, 0)
-        if expires <= now:
-            _WEB_PRICE_INDEX_MISSES.pop(key, None)
-            return False
-        return True
-
-
-def _web_listing_lookup_term(row, image_only=False):
-    """One query tied to the observed listing, without broad title-only guesses."""
-    key = _web_price_url_key(row.get('url'))
-    if not key:
-        return ''
-    parsed = urllib.parse.urlsplit(key)
-    if parsed.path in ('', '/'):
-        return ''
-    host = 'shein.com' if image_only and _web_shein_product_id(key) else parsed.netloc
-    ids = [v for k, v in urllib.parse.parse_qsl(parsed.query)
-           if k.lower() in {'id', 'itemid', 'item_id', 'goods_id', 'goodsid', 'offerid', 'sku', 'skuid', 'sku_id'}]
-    ids += re.findall(r'(?:/item/|/offer/|/product/|-p-|-g-|/)(\d{6,})(?=[./-]|$)', parsed.path)
-    amazon = re.search(r'/(?:dp|gp/product)/([A-Z0-9]{10})(?:/|$)', parsed.path, re.I)
-    if amazon:
-        ids.insert(0, amazon.group(1))
-    ids = [re.sub(r'[^a-zA-Z0-9_-]', '', value)[:100] for value in ids[:2]]
-    ids = [value for value in ids if value]
-    if ids:
-        return 'site:' + host + ' ' + ' '.join('"' + value + '"' for value in ids)
-    # A stable product path is more specific than a long generic display title.
-    # Images retain the previous title strategy for cross-locale image recovery.
-    generic = parsed.path.rstrip('/').rsplit('/', 1)[-1].lower()
-    if not image_only and generic not in {'index.php','index.html','product.php','product.aspx','detail.aspx','default.aspx'}:
-        return 'site:' + host + parsed.path[:500]
-    title = re.sub(r'["()\r\n]', ' ', str(row.get('raw_title') or row.get('title') or ''))
-    return 'site:' + host + ' ' + title[:120].strip()
-
-
 def _web_automatic_price_batches(rows, attempted_rows=None):
     """Bounded, market-isolated queries; earlier local work cannot starve exports."""
     def group_key(row):
@@ -20626,9 +20572,6 @@ def _web_automatic_price_batches(rows, attempted_rows=None):
         merchant_use[(group, _more_result_domain(row.get('url')))] += 1
     groups = {}
     for key, row in rows.items():
-        if (not _web_row_has_numeric_price(row) and _web_offer_image_candidates(row)
-                and _web_price_index_recent_miss(row, current_market())):
-            continue
         group = group_key(row)
         groups.setdefault(group, {}).setdefault(_more_result_domain(row.get('url')), []).append((key,row))
     batches = []
@@ -20853,20 +20796,29 @@ def _web_targeted_price_updates(entries, lang, market, *, image_only=False):
         return {}
     MARKET_CTX.value = dict(market)
     terms = []
-    image_source = image_only or all(_web_row_has_numeric_price(row) and not _web_offer_image_candidates(row) for row in entries.values())
-    # A failed price lookup does not block an independent image-only repair.
-    if not image_only:
-        entries = {key: row for key, row in entries.items()
-                   if _web_row_has_numeric_price(row) or not _web_offer_image_candidates(row)
-                   or not _web_price_index_recent_miss(row, market)}
     for row in entries.values():
-        term = _web_listing_lookup_term(row, image_source)
-        if term:
-            terms.append(('(' + term + ')', _web_listing_price_country(row, market)))
+        key = _web_price_url_key(row.get('url'))
+        if not key:
+            continue
+        parsed = urllib.parse.urlsplit(key)
+        if parsed.path in ('', '/'):
+            continue
+        # Keep the observed product ID while allowing mobile/locale image hits.
+        term = 'site:' + ('shein.com' if image_only and _web_shein_product_id(key) else parsed.netloc)
+        ids = [v for k, v in urllib.parse.parse_qsl(parsed.query)
+               if k.lower() in {'id', 'itemid', 'item_id', 'goods_id', 'goodsid', 'offerid', 'sku', 'skuid', 'sku_id'}]
+        path_ids = re.findall(r'(?:/item/|/offer/|/product/|-p-|-g-|/)(\d{6,})(?=[./-]|$)', parsed.path)
+        if ids or path_ids:
+            term += ' ' + ' '.join('"' + re.sub(r'[^a-zA-Z0-9_-]', '', value) + '"' for value in (ids + path_ids)[:2])
+        else:
+            title = re.sub(r'["()\r\n]', ' ', str(row.get('raw_title') or row.get('title') or ''))
+            term += ' ' + title[:120].strip()
+        terms.append(('(' + term + ')', _web_listing_price_country(row, market)))
     if not terms:
         return {}
     # Price recovery needs organic snippets even when pictures are also missing.
     # Use the image index only when every listing already has a price.
+    image_source = image_only or all(_web_row_has_numeric_price(row) and not _web_offer_image_candidates(row) for row in entries.values())
     params = {'engine': 'google_images' if image_source else 'google',
               'num': 10,
               'api_key': SERPAPI_API_KEY, 'output': 'json'}
@@ -20969,8 +20921,6 @@ def _web_targeted_price_updates(entries, lang, market, *, image_only=False):
         failed = sum(bool(response.get('_findzia_lookup_failed')) for response in responses)
         for key, row in entries.items():
             _web_log_price_recovery(row, market, diagnostics[key], len(records), failed)
-            if not failed and not diagnostics[key]['accepted_price']:
-                _web_price_index_recent_miss(row, market, remember=True)
     print(f'EXACT-LISTING RECOVERY engine={params["engine"]} requested={len(entries)}'
           f' lookups={len(lookup_terms)} recovered_images={sum(bool(value.get("page_image")) for value in updates.values())}'
           f' recovered_prices={sum(bool(value.get("price")) for value in updates.values())}')
