@@ -1,26 +1,63 @@
-....................................................................................................................
-----------------------------------------------------------------------
-Ran 116 tests in 8.183s
-
-OK
+...............................................................................................CACHE HIT (exact): Acme X100 blue
+SEARCH CACHE discarded=expired_or_invalid
+SEARCH CACHE discarded=expired_or_invalid
+SEARCH CACHE discarded=expired_or_invalid
+SEARCH CACHE discarded=expired_or_invalid
+SEARCH CACHE discarded=expired_or_invalid
+SEARCH CACHE discarded=expired_or_invalid
+COLLECTION EXPANSION pages=1 products=0 pending=0 elapsed_ms=0
+COLLECTION EXPANSION pages=1 products=0 pending=0 elapsed_ms=0
+STORE HOMEPAGE RESOLVED: 'Shop' -> NONE
+STORE HOMEPAGE RESOLVED: 'Shop' -> https://shop.example
+STORE HOMEPAGE RESOLVED: 'Shop' -> https://shop.example
+FINDZIA_CREDITS build=156.7.73-photo-retry balance=read_only completion=durable_journal executors=isolated refund_daily_lockout=False
+.FINDZIA_CREDITS build=156.7.73-photo-retry balance=read_only completion=durable_journal executors=isolated refund_daily_lockout=False
+FINDZIA_CREDITS build=156.7.73-photo-retry balance=read_only completion=durable_journal executors=isolated refund_daily_lockout=False
+.FINDZIA_CREDITS build=156.7.73-photo-retry balance=read_only completion=durable_journal executors=isolated refund_daily_lockout=False
+.FINDZIA_CREDITS build=156.7.73-photo-retry balance=read_only completion=durable_journal executors=isolated refund_daily_lockout=False
+.FINDZIA_CREDITS build=156.7.73-photo-retry balance=read_only completion=durable_journal executors=isolated refund_daily_lockout=False
+.................................MEDIA AUDIT batch=1 elapsed_ms=0 unavailable=0
 MEDIA AUDIT batch=1 elapsed_ms=0 unavailable=0
 MEDIA AUDIT batch=1 elapsed_ms=0 unavailable=0
-MEDIA AUDIT batch=1 elapsed_ms=0 unavailable=0
-MEDIA AUDIT batch=1 elapsed_ms=0 unavailable=0
+MEDIA AUDIT batch=1 elapsed_ms=2 unavailable=0
 MEDIA AUDIT batch=1 elapsed_ms=0 unavailable=0
 MEDIA REQUEST REJECT reason=invalid_request
 MEDIA AUDIT batch=1 elapsed_ms=0 unavailable=1
 MEDIA AUDIT batch=1 elapsed_ms=0 unavailable=1
 MEDIA REQUEST REJECT reason=unobserved_image
-MEDIA AUDIT batch=1 elapsed_ms=23 unavailable=0
+FINDZIA_CREDITS build=156.7.73-photo-retry balance=read_only completion=durable_journal executors=isolated refund_daily_lockout=False
+CREDITS_IMAGE_RETRY outcome=admitted_after_refund
+.FINDZIA_CREDITS build=156.7.73-photo-retry balance=read_only completion=durable_journal executors=isolated refund_daily_lockout=False
+.FINDZIA_CREDITS build=156.7.73-photo-retry balance=read_only completion=durable_journal executors=isolated refund_daily_lockout=False
+CREDITS_IMAGE_RETRY outcome=admitted_after_refund
+.FINDZIA_CREDITS build=156.7.73-photo-retry balance=read_only completion=durable_journal executors=isolated refund_daily_lockout=False
+CREDITS_IMAGE_RETRY outcome=admitted_after_refund
+.FINDZIA_CREDITS build=156.7.73-photo-retry balance=read_only completion=durable_journal executors=isolated refund_daily_lockout=False
+CREDITS_IMAGE_RETRY outcome=admitted_after_refund
+.FINDZIA_CREDITS build=156.7.73-photo-retry balance=read_only completion=durable_journal executors=isolated refund_daily_lockout=False
+CREDITS_IMAGE_RETRY outcome=admitted_after_refund
+.FINDZIA_CREDITS build=156.7.73-photo-retry balance=read_only completion=durable_journal executors=isolated refund_daily_lockout=False
+.FINDZIA_CREDITS build=156.7.73-photo-retry balance=read_only completion=durable_journal executors=isolated refund_daily_lockout=False
+CREDITS_IMAGE_RETRY outcome=original_still_running
+.FINDZIA_CREDITS build=156.7.73-photo-retry balance=read_only completion=durable_journal executors=isolated refund_daily_lockout=False
+.FINDZIA_CREDITS build=156.7.73-photo-retry balance=read_only completion=durable_journal executors=isolated refund_daily_lockout=False
+CREDITS_IMAGE_RETRY outcome=admitted_after_refund
+CREDITS_IMAGE_RETRY outcome=admitted_after_refund
+.FINDZIA_CREDITS build=156.7.73-photo-retry balance=read_only completion=durable_journal executors=isolated refund_daily_lockout=False
+...................................................................................................................
+----------------------------------------------------------------------
+Ran 257 tests in 29.363s
+
+OK
+MEDIA AUDIT batch=1 elapsed_ms=6 unavailable=0
 MEDIA AUDIT batch=8 elapsed_ms=0 unavailable=0
 MEDIA AUDIT batch=8 elapsed_ms=0 unavailable=0
 MEDIA AUDIT batch=4 elapsed_ms=0 unavailable=0
-MEDIA AUDIT batch=1 elapsed_ms=24 unavailable=0
+MEDIA AUDIT batch=1 elapsed_ms=6 unavailable=0
 MEDIA AUDIT batch=1 elapsed_ms=0 unavailable=0
 MEDIA REUSE source=identity_bytes
 MEDIA REUSE source=identity_bytes
-MEDIA AUDIT batch=1 elapsed_ms=0 unavailable=0
+MEDIA AUDIT batch=1 elapsed_ms=2 unavailable=0
 MEDIA REQUEST REJECT reason=invalid_evaluation_token
 MEDIA AUDIT batch=1 elapsed_ms=0 unavailable=0
 MEDIA REQUEST BATCH images=2 invalid=1

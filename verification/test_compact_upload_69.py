@@ -22,16 +22,17 @@ class CompactTests(unittest.TestCase):
         self.h.payload['generationConfig']['responseSchema'] = schema_ns['_web_identity_response_schema'](2)
         self.original = copy.deepcopy(self.h.payload)
 
-    def test_same_request_retries_with_only_array_bounds_changed_and_learns_acceptance(self):
+    def test_cold_start_sends_compact_schema_once_for_both_transports(self):
         for streaming in (True,False):
             self.setUp()
-            bad, good = transport.Response(data=GENERIC), self.h.ok()
-            self.h.replies = [bad, good]
+            good = self.h.ok()
+            self.h.replies = [good]
             result = self.h.invoke(streaming)
-            self.assertEqual(len(self.h.calls),2)
+            self.assertEqual(len(self.h.calls),1)
             if streaming:self.assertEqual(result[1],'')
-            before, after = [c['json'] for c in self.h.calls]
-            expected = copy.deepcopy(before)
+            expected = copy.deepcopy(self.original)
+            if streaming:
+                expected['generationConfig']['responseSchema']['propertyOrdering']=['reference_profile','items']
             def strip(v):
                 if isinstance(v,dict):
                     v.pop('minItems',None);v.pop('maxItems',None)
@@ -39,35 +40,41 @@ class CompactTests(unittest.TestCase):
                 elif isinstance(v,list):
                     for child in v:strip(child)
             strip(expected['generationConfig']['responseSchema'])
-            self.assertEqual(after,expected)
+            self.assertEqual(self.h.calls[0]['json'],expected)
             self.assertEqual(self.h.payload,self.original)
             self.assertIn('outcome=accepted_http',self.h.log)
-            self.assertIn('retry=array_bounds',self.h.log)
-            self.assertTrue(bad.closed)
+            self.assertIn('mode=direct',self.h.log)
+            self.assertNotIn('retry=',self.h.log)
+            self.assertEqual(self.h.costs.count('gemini_identity_http_requests'),1)
+            self.assertNotIn('gemini_identity_schema_retries',self.h.costs)
             self.h.replies = [self.h.ok()]
             self.h.invoke(streaming)
-            self.assertEqual(len(self.h.calls),3)
+            self.assertEqual(len(self.h.calls),2)
             self.assertEqual(self.h.calls[-1]['json'],expected)
+            self.assertNotIn('AI SCHEMA COMPAT',self.h.log)
 
-    def test_same_model_different_count_reuses_mode_but_another_model_does_not(self):
-        self.h.replies = [transport.Response(data=GENERIC),self.h.ok()];self.h.invoke()
+    def test_count_or_model_change_does_not_reintroduce_rejected_bounds(self):
+        self.h.replies = [self.h.ok()];self.h.invoke()
         config=self.h.payload['generationConfig']['responseSchema']['properties']['items']
         config.update(minItems=4,maxItems=4)
         self.h.replies=[self.h.ok()];self.h.invoke()
         self.assertNotIn('maxItems',self.h.calls[-1]['json']['generationConfig']['responseSchema']['properties']['items'])
-        payload,_,learned=self.h.ns['_web_audit_cached_payload']('https://other/models/new:streamGenerateContent',self.h.payload)
-        self.assertFalse(learned);self.assertIn('maxItems',payload['generationConfig']['responseSchema']['properties']['items'])
+        payload,_,compact=self.h.ns['_web_audit_cached_payload']('https://other/models/new:streamGenerateContent',self.h.payload)
+        self.assertTrue(compact);self.assertNotIn('maxItems',payload['generationConfig']['responseSchema']['properties']['items'])
 
-    def test_failed_comparison_stops_after_two_requests_and_does_not_learn(self):
-        self.h.replies=[transport.Response(data=GENERIC),transport.Response(data=GENERIC)]
+    def test_generic_rejection_of_compact_request_stops_without_blind_retry(self):
+        self.h.replies=[transport.Response(data=GENERIC)]
         self.assertEqual(self.h.invoke()[1],'http_400')
-        self.assertEqual(len(self.h.calls),2);self.assertFalse(self.h.ns['_WEB_AUDIT_SCHEMA_MODES'])
+        self.assertEqual(len(self.h.calls),1);self.assertFalse(self.h.ns['_WEB_AUDIT_SCHEMA_MODES'])
         self.assertIn('outcome=rejected',self.h.log)
 
-    def test_cached_rejection_invalidates_mode(self):
-        self.h.replies=[transport.Response(data=GENERIC),self.h.ok()];self.h.invoke()
+    def test_rejection_clears_acceptance_but_next_request_still_starts_compact(self):
+        self.h.replies=[self.h.ok()];self.h.invoke()
         self.h.replies=[transport.Response(data=GENERIC)];self.h.invoke()
-        self.assertEqual(len(self.h.calls),3);self.assertFalse(self.h.ns['_WEB_AUDIT_SCHEMA_MODES'])
+        self.assertEqual(len(self.h.calls),2);self.assertFalse(self.h.ns['_WEB_AUDIT_SCHEMA_MODES'])
+        self.h.replies=[self.h.ok()];self.h.invoke()
+        self.assertEqual(len(self.h.calls),3)
+        self.assertNotIn('maxItems',self.h.calls[-1]['json']['generationConfig']['responseSchema']['properties']['items'])
 
     def test_no_retry_for_image_configuration_credit_or_unknown_shape(self):
         for data,status in [({'error':{'message':'Invalid image','status':'INVALID_ARGUMENT'}},400),
@@ -78,26 +85,34 @@ class CompactTests(unittest.TestCase):
             self.h.invoke();self.assertEqual(len(self.h.calls),1)
 
     def test_original_deadline_and_cancellation_are_preserved(self):
-        self.h.elapsed=[8,2];self.h.replies=[transport.Response(data=GENERIC),self.h.ok()]
+        self.h.elapsed=[8,2];self.h.replies=[transport.Response(data=transport.SCHEMA_ERROR),self.h.ok()]
         self.h.invoke();self.assertEqual(self.h.calls[1]['timeout'],(5.,27.))
+        self.assertIn('retry=schema_compatibility',self.h.log)
         self.setUp();self.h.elapsed=[34.5];self.h.replies=[transport.Response(data=GENERIC)]
         self.h.invoke();self.assertEqual(len(self.h.calls),1)
         self.setUp();self.h.cancel.set()
         with self.assertRaisesRegex(RuntimeError,'cancelled'):self.h.invoke()
         self.assertEqual(self.h.calls,[])
 
-    def test_photo_understanding_and_text_requests_are_not_comparison_targets(self):
+    def test_photo_understanding_and_text_requests_keep_their_existing_schema(self):
         for payload in [dict(self.h.payload,contents=[]),
                 dict(self.h.payload,generationConfig={'responseSchema':{'properties':{'product_type':{}}}})]:
             self.assertIsNone(self.h.ns['_web_audit_compact_payload'](payload))
+            actual,key,compact=self.h.ns['_web_audit_cached_payload']('https://test/models/model:generateContent',payload)
+            self.assertEqual(actual,payload);self.assertEqual(key,'');self.assertFalse(compact)
 
-    def test_mode_expires_and_does_not_store_images_or_prompts(self):
-        self.h.replies=[transport.Response(data=GENERIC),self.h.ok()];self.h.invoke()
+    def test_expired_diagnostics_and_restart_never_restore_rejected_bounds(self):
+        self.h.replies=[self.h.ok()];self.h.invoke()
         cache=self.h.ns['_WEB_AUDIT_SCHEMA_MODES']
         self.assertTrue(all(len(key)==64 and isinstance(value,(int,float)) for key,value in cache.items()))
         self.h.clock.now+=3601
-        self.h.replies=[transport.Response(data=GENERIC),self.h.ok()];self.h.invoke()
-        self.assertIn('maxItems',self.h.calls[-2]['json']['generationConfig']['responseSchema']['properties']['items'])
+        self.h.replies=[self.h.ok()];self.h.invoke()
+        self.assertIn('mode=direct',self.h.log)
+        cache.clear()
+        self.h.replies=[self.h.ok()];self.h.invoke()
+        self.assertEqual(len(self.h.calls),3)
+        for call in self.h.calls:
+            self.assertNotIn('maxItems',call['json']['generationConfig']['responseSchema']['properties']['items'])
 
 class LocalBoundsTests(unittest.TestCase):
     def setUp(self):

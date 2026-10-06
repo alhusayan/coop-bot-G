@@ -1,0 +1,70 @@
+{
+  "base_commit": "90ded3b7ec8ea104bb6d6c00d57736cd0ceace64",
+  "build": "v128.5.42.69-cache-policy",
+  "runtime_files": [
+    "main.py",
+    "findzia_prices.py",
+    "findzia_searchapi.py",
+    "findzia_independent_search.py",
+    "findzia_cache.py"
+  ],
+  "tests_passed": 257,
+  "new_cache_regressions": 25,
+  "changed_definitions": {
+    "main.py": [
+      "_cache_db_get",
+      "_cache_db_put",
+      "_fz_research_sync",
+      "_google_web_page",
+      "_market_query_cached",
+      "_market_query_store",
+      "_refine_live_evidence",
+      "_serpapi_cache_get",
+      "_serpapi_cache_put",
+      "_text_lens_cache",
+      "_text_lens_prepare",
+      "_web_ai_classifier_cache_get",
+      "_web_ai_classifier_cache_put",
+      "_web_expand_collection_rows",
+      "_web_image_cache_get",
+      "_web_image_cache_set",
+      "_web_shared_price_candidates",
+      "_web_snapshot_ttl",
+      "_web_verified_page_snapshot",
+      "_web_visual_cache_get",
+      "_web_visual_cache_set",
+      "cache_get",
+      "cache_put",
+      "get_final_url",
+      "resolve_store_homepage",
+      "url_is_alive",
+      "web_api_evaluate",
+      "web_api_media_recover"
+    ],
+    "findzia_prices.py": [
+      "StructuredPrices"
+    ],
+    "findzia_searchapi.py": [
+      "SearchApiRouter",
+      "SerperTransport"
+    ],
+    "findzia_independent_search.py": [
+      "SearchClient"
+    ]
+  },
+  "production_deployed": false,
+  "verification": "Real SQLite and runtime functions, with fake clock/provider HTTP; no production search measurement.",
+  "base_sha256": {
+    "main.py": "8fbb044fb421e7cd0e7a264562efba79e9e8dd44de6fc895fe426b6146ea7b9a",
+    "findzia_prices.py": "cc7f0ec81509284509cd468fbd4e78a9575b3848960a666723391d3ce3d21664",
+    "findzia_searchapi.py": "17fb80857c1d41f25e40e95b6e01e3f756a235c966ea2dc4d02c347fd99c6317",
+    "findzia_independent_search.py": "652d61f44e699679413fe9e05f76acc8a129a26de9398b8a5c0b28057ac38bfd"
+  },
+  "runtime_sha256": {
+    "main.py": "cb957de84879a69c7f6d804bce845199d42a7ec130c559b01e434da93c5e9f86",
+    "findzia_prices.py": "8ed3173fcd15abba9b2ae7cf457bd7454e3ee512059637257b8797f9cd42c325",
+    "findzia_searchapi.py": "212a6a2c022ee86055f65fefbe2789745c8b3d4ab9970397059683895a3abfc6",
+    "findzia_independent_search.py": "9756e2a22f762d666225cf645649aff328fde328a5faaa97e3b95b1b65753c2f",
+    "findzia_cache.py": "54cc9311a2fbb0e3f34daaf03a0ac3562f84b6ce0b46091187b7dba377486dc8"
+  }
+}

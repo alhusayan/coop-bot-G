@@ -21,6 +21,8 @@ from contextlib import redirect_stdout
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from types import SimpleNamespace
+from findzia_prices import StructuredPrices, shein_params
+from findzia_cache import cache_ttl, cache_fresh, cache_success, provider_cacheable, analysis_cacheable, search_answer_cacheable
 
 SOURCE = Path(os.environ.get('FINDZIA_TEST_MAIN', Path(__file__).parents[1] / 'main.py'))
 TREE = ast.parse(SOURCE.read_text())
@@ -37,6 +39,11 @@ def scope(roots, overrides=None):
     ns = dict(re=re, json=json, urllib=urllib, time=time, copy=copy, os=os, math=math, hashlib=hashlib, Counter=Counter,
               threading=threading, Decimal=Decimal, InvalidOperation=InvalidOperation,
               ThreadPoolExecutor=ThreadPoolExecutor, __name__='findzia_test')
+    ns.update(StructuredPrices=StructuredPrices, shein_params=shein_params,
+              cache_ttl=cache_ttl, cache_fresh=cache_fresh, cache_success=cache_success,
+              provider_cacheable=provider_cacheable, analysis_cacheable=analysis_cacheable,
+              search_answer_cacheable=search_answer_cacheable,
+              _STRUCTURED_PRICES=StructuredPrices(key='', enabled=False))
     ns.update(overrides or {})
     loading = set()
     def load(name):
@@ -134,7 +141,7 @@ class AuditWaitTests(unittest.TestCase):
             'WEB_IDENTITY_CONTENT_CACHE_TTL':60,
             'WEB_IDENTITY_OFFER_INFLIGHT_LOCK':threading.Lock(), 'WEB_IDENTITY_OFFER_INFLIGHT':{'1':shared},
             '_web_photo_match_context':lambda x:x,
-            '_web_visual_collect_evidence':lambda *a:('reference',{0:'image0',1:'image1'}),
+            '_web_visual_collect_evidence':lambda *a,**k:('reference',{0:'image0',1:'image1'}),
             '_web_identity_candidates':lambda r:[{'id':x['_classification_id']} for x in r],
             '_web_identity_offer_content_key':lambda candidate,*a:str(candidate['id']),
             '_web_identity_offer_proof':lambda value:value if value and value.get('item') else None,
@@ -153,18 +160,18 @@ class AuditWaitTests(unittest.TestCase):
         clock, rows, ns = self.make()
         with redirect_stdout(io.StringIO()):
             result = ns['_web_ai_classifier_request']('',rows,{}, {'image_b64':'test'})
-        self.assertLessEqual(clock.now,41.00001)
+        self.assertLessEqual(clock.now,35.00001)
         self.assertEqual([x['id'] for x in result['items']],[0])
         self.assertEqual(result['review_error'],'partial_offer_review')
         self.assertNotIn('0',ns['WEB_IDENTITY_OFFER_INFLIGHT'])
 
     def test_other_owner_finishing_within_window_is_preserved(self):
-        clock, rows, ns = self.make(40)
+        clock, rows, ns = self.make(34)
         with redirect_stdout(io.StringIO()):
             result = ns['_web_ai_classifier_request']('',rows,{}, {'image_b64':'test'})
         self.assertEqual([x['id'] for x in result['items']],[0,1])
         self.assertNotIn('review_error',result)
-        self.assertAlmostEqual(clock.now,40)
+        self.assertAlmostEqual(clock.now,35)
 
     def test_cancel_duplicate_batch_stops_wait_without_cancelling_owner(self):
         clock, cancel = Clock(), threading.Event()

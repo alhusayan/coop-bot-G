@@ -25,12 +25,13 @@ class RoutingTests(unittest.TestCase):
         self.support=price_support.PriceTests();self.support.setUp();self.ns=self.support.ns
         self.ns['WEB_ASYNC_PRICE_SHARED_MARKETS']=2
 
-    def test_late_shein_gets_final_slot_after_early_local(self):
+    def test_late_shein_gets_final_slot_after_four_local_attempts(self):
         batch=self.ns['_web_automatic_price_batches']
         early={'local':{'url':'https://local.test/dress','country':'kw'}}
         self.assertEqual(list(batch(early)[0]),['local'])
         late={str(i):{'url':f'https://kw{i}.test/dress','country':'kw'} for i in range(20)}
         late['shein']={'url':'https://us.shein.com/Dress-p-1234567.html','export_store':True}
+        early.update({f'old{i}':{'url':f'https://old{i}.test/dress','country':'kw'} for i in range(3)})
         selected=batch(late,early)[:1]
         self.assertEqual(list(selected[0]),['shein'])
         # No extra batch/lookup allowance, and the exact regional binding still runs.

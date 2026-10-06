@@ -1,440 +1,840 @@
 --- a/main.py
 +++ b/main.py
-@@ -1,3 +1,4 @@
-+# v128.5.42.59: evidence-first audits, bounded missing-image/index cooldowns, first-render telemetry.
- # v128.5.42.25: skip merchant spinner assets; read real card/gallery photos and keep bounded media recovery.
- # v128.5.42.23: photo-only alternatives admit useful nearby designs; typed searches bypass visual admission.
- # Marketplace repair: progressive media, open domestic retrieval, observed filters, on-demand insights.
-@@ -393,8 +394,8 @@
- from findzia_billing import CreditMiddleware, install_billing
+@@ -377,6 +377,7 @@
+ from collections import Counter, deque, defaultdict
+ from concurrent.futures import Future, ThreadPoolExecutor, wait, FIRST_COMPLETED
+ from functools import lru_cache
++from findzia_cache import cache_ttl, cache_fresh, cache_success, provider_cacheable, analysis_cacheable, search_answer_cacheable
+ from fastapi import FastAPI, Request, Response, BackgroundTasks
+ from fastapi.responses import StreamingResponse, JSONResponse
+ from fastapi.middleware.cors import CORSMiddleware
+@@ -400,7 +401,7 @@
  app.add_middleware(CreditMiddleware, owner=app)
  _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
--app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization', 'X-Findzia-Request-Id'], max_age=86400)
--BUILD_ID = 'v128.5.42.58-audit-compact-upload'
-+app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization', 'X-Findzia-Request-Id', 'X-Findzia-Search-Trace'], max_age=86400)
-+BUILD_ID = 'v128.5.42.59-evidence-first'
+ app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization', 'X-Findzia-Request-Id', 'X-Findzia-Search-Trace'], max_age=86400)
+-BUILD_ID = 'v128.5.42.68-audit-deadline'
++BUILD_ID = 'v128.5.42.69-cache-policy'
  _SOCIAL = None
  
  def _fz_social_row(row):
-@@ -14940,6 +14941,29 @@
-         chunks.append(chunk)
-     return b''.join(chunks)
+@@ -464,7 +465,7 @@
+ MARKET_FALLBACK_TIMEOUT_SECONDS = max(4, int(os.environ.get('MARKET_FALLBACK_TIMEOUT_SECONDS', '6')))
+ WHATSAPP_TIMEOUT_SECONDS = max(5, int(os.environ.get('WHATSAPP_TIMEOUT_SECONDS', '10')))
+ RESOLVE_TIMEOUT_SECONDS = max(3, int(os.environ.get('RESOLVE_TIMEOUT_SECONDS', '7')))
+-FINAL_URL_CACHE_TTL = max(300, int(os.environ.get('FINAL_URL_CACHE_TTL_SECONDS', '3600')))
++FINAL_URL_CACHE_TTL = cache_ttl(max(300, int(os.environ.get('FINAL_URL_CACHE_TTL_SECONDS', '3600'))))
+ FINAL_URL_CACHE = {}
+ FINAL_URL_CACHE_LOCK = threading.Lock()
+ RESOLVER = ThreadPoolExecutor(max_workers=8)
+@@ -506,9 +507,9 @@
+ SEARCH_CACHE = {}
+ _PRODUCT_CACHE_CONFIG = int(os.environ.get('CACHE_TTL_HOURS', '12')) * 3600
+ _GROCERY_CACHE_CONFIG = int(os.environ.get('GROCERY_CACHE_TTL_HOURS', '4')) * 3600
+-CACHE_TTL = min(_PRODUCT_CACHE_CONFIG, max(300, int(os.environ.get('PRODUCT_PRICE_CACHE_MINUTES', '30')) * 60))
+-GROCERY_CACHE_TTL = min(_GROCERY_CACHE_CONFIG, max(300, int(os.environ.get('GROCERY_PRICE_CACHE_MINUTES', '15')) * 60))
+-SERVICE_CACHE_TTL = int(os.environ.get('SERVICE_CACHE_TTL_HOURS', '168')) * 3600
++CACHE_TTL = cache_ttl(min(_PRODUCT_CACHE_CONFIG, max(300, int(os.environ.get('PRODUCT_PRICE_CACHE_MINUTES', '30')) * 60)))
++GROCERY_CACHE_TTL = cache_ttl(min(_GROCERY_CACHE_CONFIG, max(300, int(os.environ.get('GROCERY_PRICE_CACHE_MINUTES', '15')) * 60)))
++SERVICE_CACHE_TTL = cache_ttl(int(os.environ.get('SERVICE_CACHE_TTL_HOURS', '168')) * 3600)
+ CACHE_MAX = int(os.environ.get('CACHE_MAX', '3000'))
+ CACHE_DB_PATH = os.environ.get('CACHE_DB_PATH', '/tmp/coop_search_cache.sqlite3')
+ CACHE_DB_LOCK = threading.Lock()
+@@ -751,7 +752,7 @@
+ ZERO_DECIMAL_CURRENCIES = {code for code, digits in CURRENCY_DECIMALS.items() if digits == 0}
+ FX_CACHE = {}
+ FX_CACHE_LOCK = threading.Lock()
+-FX_CACHE_TTL = max(3600, int(os.environ.get('FX_CACHE_TTL_HOURS', '12')) * 3600)
++FX_CACHE_TTL = cache_ttl(max(3600, int(os.environ.get('FX_CACHE_TTL_HOURS', '12')) * 3600))
+ FX_API_URL = os.environ.get('FX_API_URL', 'https://open.er-api.com/v6/latest/{base}')
+ CURRENCY_SYMBOL_MAP = {'us$': 'USD', '€': 'EUR', '₹': 'INR', '₩': 'KRW', '₺': 'TRY', '₽': 'RUB', 'r$': 'BRL', 'a$': 'AUD', 'c$': 'CAD', 'hk$': 'HKD', 's$': 'SGD', 'nz$': 'NZD', 'nt$': 'TWD', 'د.إ': 'AED', 'ر.س': 'SAR', 'ر.ق': 'QAR', 'ر.ع': 'OMR', 'د.ب': 'BHD', 'د.ك': 'KWD', 'ج.م': 'EGP', 'د.أ': 'JOD', '₪': 'ILS', '₴': 'UAH', '₸': 'KZT', '₾': 'GEL', '₼': 'AZN', '฿': 'THB', '₫': 'VND', '₱': 'PHP', '₦': 'NGN', '₵': 'GHS', '৳': 'BDT', '₲': 'PYG', '₭': 'LAK', '₮': 'MNT', 'zł': 'PLN', 'kč': 'CZK', 'ft': 'HUF'}
+ KNOWN_CURRENCY_CODES = set((code for codes in COUNTRY_CURRENCY_CODES.values() for code in codes)) | {'USD', 'EUR', 'GBP', 'JPY', 'CNY', 'INR', 'AED', 'SAR', 'QAR', 'OMR', 'BHD', 'KWD', 'TRY', 'EGP', 'JOD', 'AUD', 'CAD', 'CHF', 'SEK', 'NOK', 'DKK', 'PLN', 'RUB', 'BRL', 'MXN', 'ZAR', 'KRW', 'SGD', 'MYR', 'THB', 'IDR', 'PHP', 'VND', 'PKR', 'HKD', 'NZD', 'TWD'}
+@@ -1577,15 +1578,19 @@
+             if not row:
+                 return None
+             query, lang, txt, urls_json, ts, expires_at = row
+-            if expires_at <= time.time():
++            urls = json.loads(urls_json or '{}')
++            if not search_answer_cacheable(txt, urls) or not cache_fresh(ts, expires_at, time.time()):
+                 conn.execute('DELETE FROM search_cache WHERE cache_key=?', (key,))
+                 return None
+-            return {'query': query, 'lang': lang, 'txt': txt, 'urls': json.loads(urls_json or '{}'), 'ts': ts, 'expires_at': expires_at, 'tokens': norm_tokens(query)}
++            return {'query':query,'lang':lang,'txt':txt,'urls':urls,'ts':ts,'expires_at':expires_at,'tokens':norm_tokens(query)}
+     except Exception as e:
+-        print(f'CACHE DB GET ERR: {e}')
++        print(f'CACHE DB GET ERR: {type(e).__name__}')
+         return None
  
-+_WEB_VISUAL_MISSING_UNTIL = {}
-+
-+
-+def _web_visual_missing_recent(url, status=None):
-+    """Only definitive 404/410 misses get a short cooldown, never 429/timeouts.
-+
-+    Positive pixels are still refreshed for every independent visual audit.
-+    Query strings remain part of the key; signed/new images are independent.
-+    """
-+    key = hashlib.sha256(url.encode('utf-8')).hexdigest()
-+    now = time.monotonic()
-+    with WEB_VISUAL_IMAGE_CACHE_LOCK:
-+        if status in (404, 410):
-+            _WEB_VISUAL_MISSING_UNTIL[key] = now + 30
-+            while len(_WEB_VISUAL_MISSING_UNTIL) > 256:
-+                _WEB_VISUAL_MISSING_UNTIL.pop(next(iter(_WEB_VISUAL_MISSING_UNTIL)))
-+        expires = _WEB_VISUAL_MISSING_UNTIL.get(key, 0)
-+        if expires <= now:
-+            _WEB_VISUAL_MISSING_UNTIL.pop(key, None)
-+            return False
-+        return True
-+
-+
- def _web_visual_candidate_inline(row, force_refresh=False, cancel_event=None):
-     if _fz_social_row(row):
-         body = _SOCIAL.image_bytes(row)
-@@ -14955,6 +14979,9 @@
-     for index, raw_url in enumerate(urls):
-         if (cancel_event is not None and cancel_event.is_set()) or time.monotonic() >= deadline:
-             break
-+        if _web_visual_missing_recent(raw_url):
-+            failures.append('recent_missing')
-+            continue
-         cache_key = 'visual:' + hashlib.sha256(raw_url.encode('utf-8')).hexdigest()
-         cached, value = _web_visual_cache_get(cache_key)
-         if cached and not force_refresh:
-@@ -14980,6 +15007,7 @@
-                 timeout=(connect, max(.01, min(WEB_VISUAL_CLASSIFIER_FETCH_TIMEOUT_SECONDS, budget-connect))), stream=True)
-             content_type = (response.headers.get('content-type') or '').split(';',1)[0].strip().lower()
-             if response.status_code >= 400 or not content_type.startswith('image/'):
-+                _web_visual_missing_recent(raw_url, response.status_code)
-                 failures.append('http_'+str(response.status_code) if response.status_code >= 400 else 'not_image')
-                 continue
-             body = _web_read_limited_response(response, WEB_VISUAL_CLASSIFIER_MAX_DOWNLOAD_BYTES, cancel_event, deadline)
-@@ -14995,7 +15023,14 @@
-             except Exception:
-                 pass
-             if cancel_event is None or not cancel_event.is_set():
--                _web_visual_cache_set(cache_key, value)
-+                if value:
-+                    _web_visual_cache_set(cache_key, value)
-+                else:
-+                    # A failed refresh revokes old pixels. Only the explicit
-+                    # 30-second 404/410 cooldown may suppress a later fetch;
-+                    # transport/429 failures must not become five-minute misses.
-+                    with WEB_VISUAL_IMAGE_CACHE_LOCK:
-+                        WEB_VISUAL_IMAGE_CACHE.pop(cache_key, None)
-         if value:
-             if index:
-                 print(f'VISUAL IMAGE FETCH status=recovered alternative={index} failed={failures}')
-@@ -17073,9 +17108,14 @@
-     candidates = _web_identity_candidates(results)
-     source_rows = list(results or [])[:WEB_AI_CLASSIFIER_MAX_RESULTS]
-     entries, owned, waiting, hits, live_rows = [], {}, [], {}, []
-+    missing_images = 0
-     for candidate, row in zip(candidates, source_rows):
-         cid = candidate['id']
-         candidate['image_attached'] = cid in evidence
-+        if cid not in evidence:
-+            entries.append((cid, ''))
-+            missing_images += 1
-+            continue
-         key = _web_identity_offer_content_key(candidate, market, reference, evidence.get(cid),
-                                               visual_context.get('reference_photo_evidence'))
-         entries.append((cid, key))
-@@ -17099,6 +17139,10 @@
-                 live_rows.append(prepared)
-             else:
-                 waiting.append((cid, key, event))
-+    if missing_images:
-+        print(f'IDENTITY EVIDENCE candidates={len(candidates)} ready={len(candidates)-missing_images} skipped_missing_image={missing_images}')
-+    if missing_images == len(candidates):
-+        return _web_identity_review_failure('candidate_images_unavailable', True, 0)
-     published_hits = set()
-     def publish_hits():
-         if progress_callback is None or (cancel_event is not None and cancel_event.is_set()):
-@@ -17266,9 +17310,18 @@
-             results,
-             cancel_event,
+ def _cache_db_put(key, entry):
++    if not search_answer_cacheable(entry.get('txt'), entry.get('urls')) or not cache_fresh(entry.get('ts'), entry.get('expires_at'), time.time()):
++        return
++    entry = dict(entry, expires_at=min(entry['expires_at'], entry['ts'] + 86400))
+     try:
+         with CACHE_DB_LOCK, _cache_db_connect() as conn:
+             conn.execute('\n                INSERT INTO search_cache(cache_key, query, lang, txt, urls_json, ts, expires_at)\n                VALUES(?,?,?,?,?,?,?)\n                ON CONFLICT(cache_key) DO UPDATE SET\n                    query=excluded.query,\n                    lang=excluded.lang,\n                    txt=excluded.txt,\n                    urls_json=excluded.urls_json,\n                    ts=excluded.ts,\n                    expires_at=excluded.expires_at\n                ', (key, entry['query'], entry['lang'], entry['txt'], json.dumps(entry['urls'], ensure_ascii=False), entry['ts'], entry['expires_at']))
+@@ -1631,26 +1636,29 @@
+     try:
+         now = time.time()
+         with CACHE_DB_LOCK, _cache_db_connect() as conn:
+-            row = conn.execute(
+-                'SELECT response_json, expires_at FROM serpapi_response_cache WHERE cache_key=?',
+-                (key,),
+-            ).fetchone()
++            row = conn.execute('SELECT response_json, expires_at, created_at FROM serpapi_response_cache WHERE cache_key=?', (key,)).fetchone()
+             if not row:
+                 return None
+-            if float(row[1] or 0) <= now:
++            try:
++                data = json.loads(row[0] or '{}')
++            except (ValueError, TypeError):
++                data = None
++            if not cache_fresh(row[2], row[1], now) or not provider_cacheable(data):
+                 conn.execute('DELETE FROM serpapi_response_cache WHERE cache_key=?', (key,))
++                print('SEARCH CACHE discarded=expired_or_invalid')
+                 return None
+-        data = json.loads(row[0] or '{}')
+-        return data if isinstance(data, dict) else None
++            return data
+     except Exception as e:
+-        print(f'SERPAPI CACHE GET ERR: {e}')
++        print(f'SERPAPI CACHE GET ERR: {type(e).__name__}')
+         return None
+ 
+ def _serpapi_cache_put(key, engine, data, ttl_seconds=None):
+-    if not SERPAPI_RESULT_CACHE_ENABLED or not isinstance(data, dict):
++    if not SERPAPI_RESULT_CACHE_ENABLED or not provider_cacheable(data):
+         return
+     now = time.time()
+-    ttl = float(ttl_seconds or SERPAPI_RESULT_CACHE_TTL_SECONDS)
++    ttl = cache_ttl(ttl_seconds, SERPAPI_RESULT_CACHE_TTL_SECONDS)
++    if ttl <= 0:
++        return
+     try:
+         with CACHE_DB_LOCK, _cache_db_connect() as conn:
+             conn.execute('''
+@@ -1991,6 +1999,7 @@
+ 
+ print('SEARCHAPI POLICY ' + json.dumps(_searchapi_policy_snapshot()))
+ _serpapi_cache_db_init()
++print('SEARCH CACHE POLICY max_age_seconds=86400 invalid_entries=discard price_ttl=short')
+ print(f'SERPAPI COST GUARD cache={SERPAPI_RESULT_CACHE_ENABLED} ttl={SERPAPI_RESULT_CACHE_TTL_SECONDS}s singleflight={SERPAPI_SINGLEFLIGHT_ENABLED} wait={SERPAPI_SINGLEFLIGHT_WAIT_SECONDS}s budget={SERPAPI_BUDGET_ENABLED}@{SERPAPI_BUDGET_USE_PERCENT}% fallback_hour={SERPAPI_BUDGET_FALLBACK_HOURLY} stable_lens_url=True')
+ 
+ def load_user_preferences(phone):
+@@ -2027,43 +2036,26 @@
+ def cache_get(query, lang):
+     now = time.time()
+     key = cache_key(query, lang)
+-    hit = SEARCH_CACHE.get(key)
+-    if not hit:
+-        hit = _cache_db_get(key)
+-        if hit:
+-            SEARCH_CACHE[key] = hit
+-    if hit and now < hit.get('expires_at', 0):
++    hit = SEARCH_CACHE.get(key) or _cache_db_get(key)
++    if hit and search_answer_cacheable(hit.get('txt'), hit.get('urls')) and cache_fresh(hit.get('ts'), hit.get('expires_at'), now):
++        SEARCH_CACHE[key] = hit
+         print(f'CACHE HIT (exact): {query[:60]}')
+         return (hit['txt'], dict(hit['urls']))
+-    qt = norm_tokens(query)
+-    if not qt:
+-        return None
+-    best, best_score = (None, 0.0)
+-    for entry in SEARCH_CACHE.values():
+-        if entry.get('lang') != lang or now >= entry.get('expires_at', 0):
+-            continue
+-        et = entry.get('tokens') or set()
+-        if not et:
+-            continue
+-        inter = len(qt & et)
+-        score = inter / len(qt | et) if qt | et else 0
+-        if has_model_token(qt, et):
+-            score += 0.3
+-        if score > best_score:
+-            best, best_score = (entry, score)
+-    if best and best_score >= 0.68:
+-        print(f"CACHE HIT (fuzzy {best_score:.2f}): {query[:50]} ~ {best.get('query', '')[:50]}")
+-        return (best['txt'], dict(best['urls']))
++    SEARCH_CACHE.pop(key, None)
++    # Reuse only this exact product/query, language and country. A nearby model
++    # or another country's entry must never replace a fresh independent search.
+     return None
+ 
+ def cache_put(query, lang, txt, urls):
+-    if not txt:
++    if not search_answer_cacheable(txt, urls):
+         return
+     if len(SEARCH_CACHE) >= CACHE_MAX:
+         oldest = min(SEARCH_CACHE, key=lambda k: SEARCH_CACHE[k].get('ts', 0))
+         SEARCH_CACHE.pop(oldest, None)
+     now = time.time()
+-    ttl = cache_ttl_for(query, txt)
++    ttl = cache_ttl(cache_ttl_for(query, txt))
++    if ttl <= 0:
++        return
+     key = cache_key(query, lang)
+     entry = {'txt': txt, 'urls': dict(urls), 'ts': now, 'expires_at': now + ttl, 'tokens': norm_tokens(query), 'query': query, 'lang': lang}
+     SEARCH_CACHE[key] = entry
+@@ -4184,6 +4176,7 @@
+         if hit and now - hit['ts'] < FINAL_URL_CACHE_TTL:
+             return hit['url']
+     final = url
++    resolved = False
+     r = None
+     try:
+         r = _web_safe_get(
+@@ -4193,6 +4186,7 @@
+             stream=True,
          )
--    # The reference photo is useful even if a merchant blocks its thumbnail.
--    # Candidate-image absence limits Exact proof, but must not discard the
--    # user's image or let result titles redefine the photographed product.
-+    # A photo audit needs both sides. Missing candidate pixels cannot be
-+    # supplied by a title; retain those rows as unverified without paid work.
-+    if reference_inline:
-+        ready = [c for c in candidates if c['id'] in visual_evidence]
-+        if len(ready) != len(candidates):
-+            print(f'IDENTITY EVIDENCE candidates={len(candidates)} ready={len(ready)} skipped_missing_image={len(candidates)-len(ready)}')
-+            if not ready:
-+                return _web_identity_review_failure('candidate_images_unavailable', True, 0)
-+            ready_ids = {c['id'] for c in ready}
-+            results = [dict(row, _classification_id=c['id']) for c, row in zip(candidates, results)
-+                       if c['id'] in ready_ids]
-+            candidates = ready
-     visual_mode = bool(reference_inline)
-     visual_evidence_ids = set(visual_evidence)
-     alternative_review = any(c.get('alternative_review') for c in candidates)
-@@ -20504,6 +20557,61 @@
-     return str(row.get('country') or row.get('market_country') or market.get('country') or 'us').lower()
+         final = r.url or url
++        resolved = r.status_code < 400
+     except Exception as e:
+         print(f'resolve err {e} {url[:80]}')
+     finally:
+@@ -4202,7 +4196,8 @@
+             oldest = sorted(FINAL_URL_CACHE.items(), key=lambda kv: kv[1].get('ts', 0))[:1000]
+             for key, _ in oldest:
+                 FINAL_URL_CACHE.pop(key, None)
+-        FINAL_URL_CACHE[url] = {'url': final, 'ts': now}
++        if resolved:
++            FINAL_URL_CACHE[url] = {'url': final, 'ts': time.time()}
+     return final
+ 
+ def resolve_all(uris):
+@@ -4843,7 +4838,7 @@
+ def _market_query_cached(query, language):
+     with MARKET_QUERY_LOCK:
+         hit = MARKET_QUERY_CACHE.get(_market_query_key(query, language))
+-        if hit and time.monotonic() < hit[0]:
++        if hit and hit[1] and time.monotonic() < hit[0]:
+             return hit[1]
+     return None
+ 
+@@ -4854,7 +4849,8 @@
+         MARKET_QUERY_CACHE.pop(key, None)
+         while len(MARKET_QUERY_CACHE) >= 2000:
+             MARKET_QUERY_CACHE.pop(next(iter(MARKET_QUERY_CACHE)))
+-        MARKET_QUERY_CACHE[key] = (time.monotonic() + (86400 if record else 60), record)
++        if record:
++            MARKET_QUERY_CACHE[key] = (time.monotonic() + 86400, record)
  
  
-+_WEB_PRICE_INDEX_MISSES = {}
-+_WEB_PRICE_INDEX_MISS_LOCK = threading.Lock()
-+
-+
-+def _web_price_index_recent_miss(row, market, remember=False):
-+    """Avoid repeating a successful-but-empty index lookup for 45 seconds.
-+
-+    Scoped to the exact URL (including variant/currency), market and title.
-+    Page verification and newly discovered prices are never held by this cache.
-+    Transport/provider failures do not enter it.
-+    """
-+    raw = [_web_price_url_key(row.get('url')), _web_listing_price_country(row, market),
-+           str(row.get('raw_title') or row.get('title') or '')]
-+    key = hashlib.sha256(json.dumps(raw, ensure_ascii=False).encode()).hexdigest()
-+    now = time.monotonic()
-+    with _WEB_PRICE_INDEX_MISS_LOCK:
-+        if remember:
-+            _WEB_PRICE_INDEX_MISSES[key] = now + 45
-+            while len(_WEB_PRICE_INDEX_MISSES) > 512:
-+                _WEB_PRICE_INDEX_MISSES.pop(next(iter(_WEB_PRICE_INDEX_MISSES)))
-+        expires = _WEB_PRICE_INDEX_MISSES.get(key, 0)
-+        if expires <= now:
-+            _WEB_PRICE_INDEX_MISSES.pop(key, None)
-+            return False
-+        return True
-+
-+
-+def _web_listing_lookup_term(row, image_only=False):
-+    """One query tied to the observed listing, without broad title-only guesses."""
-+    key = _web_price_url_key(row.get('url'))
-+    if not key:
-+        return ''
-+    parsed = urllib.parse.urlsplit(key)
-+    if parsed.path in ('', '/'):
-+        return ''
-+    host = 'shein.com' if image_only and _web_shein_product_id(key) else parsed.netloc
-+    ids = [v for k, v in urllib.parse.parse_qsl(parsed.query)
-+           if k.lower() in {'id', 'itemid', 'item_id', 'goods_id', 'goodsid', 'offerid', 'sku', 'skuid', 'sku_id'}]
-+    ids += re.findall(r'(?:/item/|/offer/|/product/|-p-|-g-|/)(\d{6,})(?=[./-]|$)', parsed.path)
-+    amazon = re.search(r'/(?:dp|gp/product)/([A-Z0-9]{10})(?:/|$)', parsed.path, re.I)
-+    if amazon:
-+        ids.insert(0, amazon.group(1))
-+    ids = [re.sub(r'[^a-zA-Z0-9_-]', '', value)[:100] for value in ids[:2]]
-+    ids = [value for value in ids if value]
-+    if ids:
-+        return 'site:' + host + ' ' + ' '.join('"' + value + '"' for value in ids)
-+    # A stable product path is more specific than a long generic display title.
-+    # Images retain the previous title strategy for cross-locale image recovery.
-+    generic = parsed.path.rstrip('/').rsplit('/', 1)[-1].lower()
-+    if not image_only and generic not in {'index.php','index.html','product.php','product.aspx','detail.aspx','default.aspx'}:
-+        return 'site:' + host + parsed.path[:500]
-+    title = re.sub(r'["()\r\n]', ' ', str(row.get('raw_title') or row.get('title') or ''))
-+    return 'site:' + host + ' ' + title[:120].strip()
-+
-+
- def _web_automatic_price_batches(rows, attempted_rows=None):
-     """Bounded, market-isolated queries; earlier local work cannot starve exports."""
-     def group_key(row):
-@@ -20518,6 +20626,9 @@
-         merchant_use[(group, _more_result_domain(row.get('url')))] += 1
+ def _market_query_validate_edits(query, edits):
+@@ -6092,7 +6088,8 @@
+         with _COLLECTION_LOCK:
+             now = time.monotonic()
+             for old, (stamp, job) in list(_COLLECTION_JOBS.items()):
+-                if job.done() and (now-stamp > 90 or len(_COLLECTION_JOBS) > 96):
++                if job.done() and (job.cancelled() or job.exception() is not None or not job.result()
++                                   or now-stamp > 90 or len(_COLLECTION_JOBS) > 96):
+                     del _COLLECTION_JOBS[old]
+             cached = _COLLECTION_JOBS.get(key)
+             if cached:
+@@ -10659,8 +10656,9 @@
+     key = u.split('?')[0][:200]
+     with _URL_ALIVE_LOCK:
+         hit = _URL_ALIVE_CACHE.get(key)
+-        if hit and time.time() - hit['ts'] < 21600:
+-            return hit['ok']
++        if hit and hit.get('ok') and cache_fresh(hit.get('ts'), hit.get('ts',0)+21600, time.time()):
++            return True
++        _URL_ALIVE_CACHE.pop(key, None)
+     ok = False
+     r = None
+     try:
+@@ -10676,7 +10674,8 @@
+     with _URL_ALIVE_LOCK:
+         if len(_URL_ALIVE_CACHE) > 3000:
+             _URL_ALIVE_CACHE.clear()
+-        _URL_ALIVE_CACHE[key] = {'ok': ok, 'ts': time.time()}
++        if ok:
++            _URL_ALIVE_CACHE[key] = {'ok': True, 'ts': time.time()}
+     return ok
+ 
+ def resolve_store_homepage(name):
+@@ -10689,9 +10688,12 @@
+     key = normalize_name(normalize_ar(name))[:80]
+     if not key:
+         return ''
++    key = (str(current_market().get('country') or ''), key)
+     with _STORE_HOME_LOCK:
+-        if key in _STORE_HOME_CACHE:
+-            return _STORE_HOME_CACHE[key]
++        hit = _STORE_HOME_CACHE.get(key)
++        if isinstance(hit, dict) and hit.get('url') and cache_fresh(hit.get('ts'), hit.get('ts',0)+86400, time.time()):
++            return hit['url']
++        _STORE_HOME_CACHE.pop(key, None)
+     raw, _ = text77_call_gemini([{'text': f"المتجر: {name}\nالبلد: {current_market().get('country_name', 'Kuwait')}"}], system=STORE_DOMAIN_SYSTEM, use_search=False)
+     ans = (raw or '').strip().splitlines()[0].strip().lower() if raw else ''
+     ans = ans.replace('https://', '').replace('http://', '').strip('/ ')
+@@ -10705,7 +10707,8 @@
+     with _STORE_HOME_LOCK:
+         if len(_STORE_HOME_CACHE) > 2000:
+             _STORE_HOME_CACHE.clear()
+-        _STORE_HOME_CACHE[key] = url
++        if url:
++            _STORE_HOME_CACHE[key] = {'url':url, 'ts':time.time()}
+     print(f"STORE HOMEPAGE RESOLVED: {name!r} -> {url or 'NONE'}")
+     return url
+ 
+@@ -11869,14 +11872,14 @@
+ WEB_API_ENABLED = env_bool('WEB_API_ENABLED', True)
+ WEB_GEO_ENABLED = env_bool('WEB_GEO_ENABLED', True)
+ WEB_GEO_TIMEOUT_SECONDS = max(0.8, min(4.0, float(os.environ.get('WEB_GEO_TIMEOUT_SECONDS', '2.0'))))
+-WEB_GEO_CACHE_TTL_SECONDS = max(3600, int(os.environ.get('WEB_GEO_CACHE_TTL_SECONDS', '86400')))
++WEB_GEO_CACHE_TTL_SECONDS = cache_ttl(max(3600, int(os.environ.get('WEB_GEO_CACHE_TTL_SECONDS', '86400'))))
+ WEB_GEO_PROVIDER_URL = os.environ.get('WEB_GEO_PROVIDER_URL', 'https://ipwho.is/{ip}?fields=success,country_code').strip()
+ WEB_GEO_CACHE = {}
+ WEB_GEO_CACHE_LOCK = threading.Lock()
+ WEB_IMAGE_PROXY_ENABLED = env_bool('WEB_IMAGE_PROXY_ENABLED', True)
+ WEB_IMAGE_PROXY_TIMEOUT_SECONDS = max(3.0, min(12.0, float(os.environ.get('WEB_IMAGE_PROXY_TIMEOUT_SECONDS', '8'))))
+ WEB_IMAGE_PAGE_TIMEOUT_SECONDS = max(2.0, min(8.0, float(os.environ.get('WEB_IMAGE_PAGE_TIMEOUT_SECONDS', '4.5'))))
+-WEB_IMAGE_CACHE_TTL_SECONDS = max(3600, int(os.environ.get('WEB_IMAGE_CACHE_TTL_SECONDS', '86400')))
++WEB_IMAGE_CACHE_TTL_SECONDS = cache_ttl(max(3600, int(os.environ.get('WEB_IMAGE_CACHE_TTL_SECONDS', '86400'))))
+ WEB_IMAGE_PROXY_MAX_BYTES = max(512000, min(8 * 1024 * 1024, int(os.environ.get('WEB_IMAGE_PROXY_MAX_BYTES', str(4 * 1024 * 1024)))))
+ WEB_IMAGE_PROXY_RATE_PER_MINUTE = max(30, min(600, int(os.environ.get('WEB_IMAGE_PROXY_RATE_PER_MINUTE', '240'))))
+ WEB_IMAGE_CACHE = {}
+@@ -11889,7 +11892,7 @@
+ WEB_VERIFY_PRODUCT_IMAGE = env_bool('WEB_VERIFY_PRODUCT_IMAGE', True)
+ WEB_PRODUCT_IMAGE_VERIFY_TIMEOUT_SECONDS = max(2.0, min(8.0, float(os.environ.get('WEB_PRODUCT_IMAGE_VERIFY_TIMEOUT_SECONDS', '4.0'))))
+ WEB_PRODUCT_VERIFY_TIMEOUT_SECONDS = max(2.5, min(8.0, float(os.environ.get('WEB_PRODUCT_VERIFY_TIMEOUT_SECONDS', '5.5'))))
+-WEB_PRODUCT_VERIFY_CACHE_TTL_SECONDS = max(300, int(os.environ.get('WEB_PRODUCT_VERIFY_CACHE_TTL_SECONDS', '1800')))
++WEB_PRODUCT_VERIFY_CACHE_TTL_SECONDS = cache_ttl(max(300, int(os.environ.get('WEB_PRODUCT_VERIFY_CACHE_TTL_SECONDS', '1800'))))
+ WEB_PRODUCT_VERIFY_CACHE = {}
+ WEB_PRODUCT_VERIFY_LOCK = threading.Lock()
+ WEB_IDENTITY_PAGE_POOL = ThreadPoolExecutor(max_workers=8)
+@@ -11902,7 +11905,7 @@
+ # Separate identity-audit budgets from obsolete fast-classifier settings.
+ # Old Railway values (2/3.2 seconds) cannot silently disable the new audit.
+ WEB_AI_CLASSIFIER_TIMEOUT_SECONDS = max(10.0, min(45.0, float(os.environ.get('WEB_IDENTITY_TEXT_TIMEOUT_SECONDS', '20'))))
+-WEB_AI_CLASSIFIER_CACHE_TTL_SECONDS = max(3600, min(30 * 86400, int(os.environ.get('WEB_AI_CLASSIFIER_CACHE_TTL_SECONDS', '604800'))))
++WEB_AI_CLASSIFIER_CACHE_TTL_SECONDS = cache_ttl(max(3600, min(30 * 86400, int(os.environ.get('WEB_AI_CLASSIFIER_CACHE_TTL_SECONDS', '604800')))))
+ WEB_AI_CLASSIFIER_MAX_RESULTS = max(4, min(24, int(os.environ.get('WEB_AI_CLASSIFIER_MAX_RESULTS', str(LENS_DIRECT_MAX_CTA)))))
+ WEB_AI_CLASSIFIER_MIN_CONFIDENCE = max(50, min(95, int(os.environ.get('WEB_AI_CLASSIFIER_MIN_CONFIDENCE', '68'))))
+ WEB_AI_CLASSIFIER_INFLIGHT = {}
+@@ -12089,15 +12092,18 @@
+     now = time.time()
+     with WEB_IMAGE_CACHE_LOCK:
+         item = WEB_IMAGE_CACHE.get(key)
+-        ttl = 20 if item and item.get('value') in ('', '0') else WEB_IMAGE_CACHE_TTL_SECONDS
+-        if item and now - float(item.get('ts') or 0) < ttl:
+-            return item.get('value') or ''
++        if item and item.get('value') not in ('', '0', None) and cache_fresh(item.get('ts'), item.get('ts',0)+WEB_IMAGE_CACHE_TTL_SECONDS, now):
++            return item['value']
++        WEB_IMAGE_CACHE.pop(key, None)
+     return ''
+ 
+ def _web_image_cache_set(key, value):
+     now = time.time()
+     with WEB_IMAGE_CACHE_LOCK:
+-        WEB_IMAGE_CACHE[key] = {'value': str(value or ''), 'ts': now}
++        if not value or value == '0':
++            WEB_IMAGE_CACHE.pop(key, None)
++            return
++        WEB_IMAGE_CACHE[key] = {'value': str(value), 'ts': now}
+         if len(WEB_IMAGE_CACHE) > 5000:
+             stale = sorted(WEB_IMAGE_CACHE.items(), key=lambda kv: kv[1].get('ts', 0))[:1000]
+             for old_key, _ in stale:
+@@ -14748,14 +14754,17 @@
+     now = time.time()
+     with WEB_VISUAL_IMAGE_CACHE_LOCK:
+         item = WEB_VISUAL_IMAGE_CACHE.get(key)
+-        ttl = 300 if item and item.get('value') is None else WEB_IMAGE_CACHE_TTL_SECONDS
+-        if not item or now - float(item.get('ts') or 0) >= ttl:
+-            return (False, None)
+-        return (True, item.get('value'))
++        if item and item.get('value') and cache_fresh(item.get('ts'), item.get('ts',0)+WEB_IMAGE_CACHE_TTL_SECONDS, now):
++            return (True, item['value'])
++        WEB_VISUAL_IMAGE_CACHE.pop(key, None)
++        return (False, None)
+ 
+ def _web_visual_cache_set(key, value):
+     now = time.time()
+     with WEB_VISUAL_IMAGE_CACHE_LOCK:
++        if not value:
++            WEB_VISUAL_IMAGE_CACHE.pop(key, None)
++            return
+         WEB_VISUAL_IMAGE_CACHE[key] = {'ts': now, 'value': value}
+         # Compressed thumbnails are intentionally kept in a much smaller cache
+         # than URL strings so a busy worker cannot accumulate image megabytes.
+@@ -16450,22 +16459,25 @@
+     try:
+         now = time.time()
+         with CACHE_DB_LOCK, _cache_db_connect() as conn:
+-            row = conn.execute(
+-                'SELECT response_json, expires_at FROM ai_result_classification_cache WHERE cache_key=?',
+-                (key,),
+-            ).fetchone()
++            row = conn.execute('SELECT response_json, expires_at, created_at FROM ai_result_classification_cache WHERE cache_key=?', (key,)).fetchone()
+             if not row:
+                 return None
+-            if float(row[1] or 0) <= now:
++            try:
++                value = json.loads(row[0] or '{}')
++            except (ValueError, TypeError):
++                value = None
++            if not cache_fresh(row[2], row[1], now) or not analysis_cacheable(value):
+                 conn.execute('DELETE FROM ai_result_classification_cache WHERE cache_key=?', (key,))
+                 return None
+-        value = json.loads(row[0] or '{}')
+-        return value if isinstance(value, dict) else None
++            return value
+     except Exception as e:
+-        print(f'WEB AI CLASSIFIER CACHE GET ERR: {e}')
++        print(f'WEB AI CLASSIFIER CACHE GET ERR: {type(e).__name__}')
+         return None
+ 
+ def _web_ai_classifier_cache_put(key, value, ttl_seconds=None):
++    ttl = cache_ttl(ttl_seconds, WEB_AI_CLASSIFIER_CACHE_TTL_SECONDS)
++    if not analysis_cacheable(value) or ttl <= 0:
++        return
+     try:
+         now = time.time()
+         with CACHE_DB_LOCK, _cache_db_connect() as conn:
+@@ -16476,7 +16488,7 @@
+                     response_json=excluded.response_json,
+                     created_at=excluded.created_at,
+                     expires_at=excluded.expires_at
+-            ''', (key, json.dumps(value, ensure_ascii=False, separators=(',', ':')), now, now + (ttl_seconds or WEB_AI_CLASSIFIER_CACHE_TTL_SECONDS)))
++            ''', (key, json.dumps(value, ensure_ascii=False, separators=(',', ':')), now, now + ttl))
+     except Exception as e:
+         print(f'WEB AI CLASSIFIER CACHE PUT ERR: {e}')
+ 
+@@ -19559,7 +19571,11 @@
+ 
+ 
+ def _web_snapshot_ttl(snap):
+-    ttl = WEB_LIVE_PRICE_CACHE_TTL if snap.get('price') else 15
++    if not snap.get('ok') or not snap.get('is_product') or snap.get('page_fetch_status') == 'blocked' or snap.get('page_fetch_reason'):
++        return 0
++    if not (snap.get('price') or snap.get('image') or snap.get('product_image') or snap.get('availability')):
++        return 0
++    ttl = cache_ttl(WEB_LIVE_PRICE_CACHE_TTL if snap.get('price') else 15)
+     return min(ttl, WEB_STOCK_CACHE_TTL) if snap.get('availability') else ttl
+ 
+ 
+@@ -20583,7 +20599,8 @@
+         data = _web_fetch_page_snapshot(url, country) or {}
+         data['price_checked_at'] = time.time()
+         with WEB_PRODUCT_VERIFY_LOCK:
+-            WEB_PRODUCT_VERIFY_CACHE[key] = {'ts': time.monotonic(), 'data': dict(data)}
++            if _web_snapshot_ttl(data) > 0:
++                WEB_PRODUCT_VERIFY_CACHE[key] = {'ts': time.monotonic(), 'data': dict(data)}
+             while len(WEB_PRODUCT_VERIFY_CACHE) > 2000:
+                 WEB_PRODUCT_VERIFY_CACHE.pop(next(iter(WEB_PRODUCT_VERIFY_CACHE)))
+         flight['data'] = data
+@@ -22221,7 +22238,7 @@
+     now = time.time()
+     with WEB_ASYNC_PRICE_CACHE_LOCK:
+         cached = WEB_ASYNC_PRICE_CACHE.get(cache_key)
+-        if cached and now - float(cached.get('ts') or 0) < WEB_ASYNC_PRICE_CACHE_TTL_SECONDS:
++        if cached and cached.get('items') and now - float(cached.get('ts') or 0) < WEB_ASYNC_PRICE_CACHE_TTL_SECONDS:
+             print(f'WEB LIVE PRICE CACHE HIT rank={rank} query={q[:65]!r}')
+             return [dict(x) for x in cached.get('items') or []]
+     if rank == 0 and SHOPPING_GEO_GUARD and (not _shopping_gl_supported(gl)):
+@@ -22238,7 +22255,8 @@
+             if item and result_market_rank(item) == rank:
+                 rows.append(item)
+     with WEB_ASYNC_PRICE_CACHE_LOCK:
+-        WEB_ASYNC_PRICE_CACHE[cache_key] = {'ts': now, 'items': [dict(x) for x in rows]}
++        if rows:
++            WEB_ASYNC_PRICE_CACHE[cache_key] = {'ts': time.time(), 'items': [dict(x) for x in rows]}
+         if len(WEB_ASYNC_PRICE_CACHE) > 1000:
+             oldest = sorted(WEB_ASYNC_PRICE_CACHE.items(), key=lambda kv: kv[1].get('ts', 0))[:200]
+             for old_key, _ in oldest:
+@@ -25792,8 +25810,9 @@
+     key = _web_price_url_key(url)
+     with _GOOGLE_WEB_PAGE_LOCK:
+         entry = _GOOGLE_WEB_PAGE_CACHE.get(key)
+-        if entry and time.monotonic() < entry[0]:
++        if entry and time.monotonic() < entry[0] and cache_success(entry[1]):
+             return copy.deepcopy(entry[1])
++        _GOOGLE_WEB_PAGE_CACHE.pop(key, None)
+     remaining = min(4.5, deadline-time.monotonic())
+     if cancel.is_set() or remaining <= .15:
+         return {'error': 'expired'}
+@@ -25829,7 +25848,8 @@
+     with _GOOGLE_WEB_PAGE_LOCK:
+         if len(_GOOGLE_WEB_PAGE_CACHE) >= 1024:
+             _GOOGLE_WEB_PAGE_CACHE.pop(next(iter(_GOOGLE_WEB_PAGE_CACHE)), None)
+-        _GOOGLE_WEB_PAGE_CACHE[key] = (time.monotonic()+(300 if not result.get('error') else 20), copy.deepcopy(result))
++        if cache_success(result) and result.get('url') and (result.get('title') or result.get('price')):
++            _GOOGLE_WEB_PAGE_CACHE[key] = (time.monotonic()+300, copy.deepcopy(result))
+     return result
+ 
+ 
+@@ -27625,9 +27645,9 @@
+ TEXT_LENS_REFERENCE_TARGET_SECONDS = max(.5, min(3., float(os.environ.get('TEXT_LENS_REFERENCE_SECONDS', '2'))))
+ TEXT_LENS_REFERENCE_SECONDS = max(4., min(20., float(os.environ.get('TEXT_LENS_REFERENCE_HARD_SECONDS', '10'))))
+ print(f'TEXT LENS CONFIG target={TEXT_LENS_REFERENCE_TARGET_SECONDS}s hard_limit={TEXT_LENS_REFERENCE_SECONDS}s '
+-      'provider_requests=1 late_reply=continue photo_cache=7d')
++      'provider_requests=1 late_reply=continue photo_cache=1d')
+ TEXT_LENS_RESULTS_SECONDS = max(8., min(20., float(os.environ.get('TEXT_LENS_RESULTS_SECONDS', '10'))))
+-TEXT_LENS_REFERENCE_TTL = 7 * 86400
++TEXT_LENS_REFERENCE_TTL = 86400
+ TEXT_LENS_REFERENCE_MAX_BYTES = 512 * 1024
+ _TEXT_LENS_REFERENCES = {}
+ _TEXT_LENS_INFLIGHT = {}
+@@ -27643,11 +27663,14 @@
+     turn an image lookup into a ten-second lock wait. Persistence is optional.
+     """
+     now = time.time()
++    if save is not None and not (cache_success(save) and save.get('image_base64') and save.get('query_key') and save.get('reference')):
++        return None
+     with _TEXT_LENS_LOCK:
+         for key, value in list(_TEXT_LENS_REFERENCES.items()):
+-            if value['expires_at'] <= now:
++            if not cache_success(value) or not value.get('image_base64') or not cache_fresh(value.get('cached_at'), value.get('expires_at'), now):
+                 _TEXT_LENS_REFERENCES.pop(key, None)
+         if save:
++            save = dict(save, cached_at=now, expires_at=min(save.get('expires_at',now+86400), now+86400))
+             _TEXT_LENS_REFERENCES[save['query_key']] = save
+             while len(_TEXT_LENS_REFERENCES) > 64:
+                 _TEXT_LENS_REFERENCES.pop(next(iter(_TEXT_LENS_REFERENCES)))
+@@ -27674,6 +27697,10 @@
+                                '=? AND expires_at>?', (value, now)).fetchone()
+             if row:
+                 hit = json.loads(row[0])
++                if not cache_success(hit) or not hit.get('image_base64') or not cache_fresh(hit.get('cached_at'), hit.get('expires_at'), now):
++                    conn.execute('DELETE FROM text_lens_references WHERE '+field+'=?', (value,))
++                    conn.commit()
++                    return None
+                 with _TEXT_LENS_LOCK:
+                     _TEXT_LENS_REFERENCES[hit['query_key']] = hit
+                     while len(_TEXT_LENS_REFERENCES) > 64:
+@@ -28150,7 +28177,7 @@
+     began = time.monotonic()
+     with _TEXT_LENS_LOCK:
+         hit = _TEXT_LENS_REFERENCES.get(key)
+-        if hit and hit['expires_at'] > time.time():
++        if hit and cache_success(hit) and hit.get('image_base64') and cache_fresh(hit.get('cached_at'), hit.get('expires_at'), time.time()):
+             print(f'TEXT LENS reference_ms=0 cache=True status=ready country={country}')
+             return dict(hit, ok=True, cache_hit=True, reference_lookup_ms=0)
+         future = _TEXT_LENS_INFLIGHT.get(key)
+@@ -32141,7 +32168,7 @@
+     now = time.monotonic()
+     with _CLASSIC_EVIDENCE_LOCK:
+         cached = _CLASSIC_EVIDENCE_CACHE.get(key)
+-        if cached and cached[0] > now:
++        if cached and cached[0] > now and cached[1].get('records'):
+             return copy.deepcopy(cached[1])
+     records=[]
+     if CLASSIC_FILTER_CATALOG_ENABLED:
+@@ -32157,7 +32184,8 @@
+         for f in pending: f.cancel()
+     value=_refine_evidence_pack(records,'live_index' if records else 'unavailable',int(time.time()))
+     with _CLASSIC_EVIDENCE_LOCK:
+-        _CLASSIC_EVIDENCE_CACHE[key]=(now+(900 if records else 30),copy.deepcopy(value))
++        if records:
++            _CLASSIC_EVIDENCE_CACHE[key]=(time.monotonic()+900,copy.deepcopy(value))
+         while len(_CLASSIC_EVIDENCE_CACHE)>256: _CLASSIC_EVIDENCE_CACHE.pop(next(iter(_CLASSIC_EVIDENCE_CACHE)))
+     return value
+ 
+@@ -32964,7 +32992,7 @@
+     now=time.monotonic()
+     with _FZ_EVAL_LOCK:
+         entry=_FZ_EVAL_CACHE.get(key)
+-        if entry and entry[0]>now:return copy.deepcopy(entry[1])
++        if entry and entry[0]>now and entry[1].get('ai_status')=='ready':return copy.deepcopy(entry[1])
+         future=_FZ_EVAL_FLIGHTS.get(key)
+         if future is None:
+             if not _FZ_EVAL_GATE.acquire(blocking=False):return dict(_fz_eval_base(row,peers,lang),ai_status='busy')
+@@ -32972,7 +33000,8 @@
+                 try:
+                     value=_fz_evaluate_sync(row,peers,lang)
+                     with _FZ_EVAL_LOCK:
+-                        _FZ_EVAL_CACHE[key]=(time.monotonic()+(900 if value['ai_status']=='ready' else 20),copy.deepcopy(value))
++                        if value.get('ai_status')=='ready':
++                            _FZ_EVAL_CACHE[key]=(time.monotonic()+900,copy.deepcopy(value))
+                         while len(_FZ_EVAL_CACHE)>256:_FZ_EVAL_CACHE.pop(next(iter(_FZ_EVAL_CACHE)))
+                     return value
+                 finally:
+@@ -33175,7 +33204,7 @@
+     key = _fz_media_cache_key(row)
+     with _FZ_MEDIA_LOCK:
+         cached = _FZ_MEDIA_CACHE.get(key)
+-        if cached and cached[0]>time.monotonic(): return cached[1]
++        if cached and cached[0]>time.monotonic() and cached[1].get('images'): return cached[1]
+         future = _FZ_MEDIA_FLIGHTS.get(key)
+         if future is None:
+             if not _FZ_MEDIA_GATE.acquire(False): return JSONResponse({'ok':False,'error':'busy'},status_code=503)
+@@ -33183,7 +33212,8 @@
+                 try:
+                     value = _fz_recover_media(row)
+                     with _FZ_MEDIA_LOCK:
+-                        _FZ_MEDIA_CACHE[key]=(time.monotonic()+ (900 if value['images'] else 60),value)
++                        if value.get('images') and cache_success(value):
++                            _FZ_MEDIA_CACHE[key]=(time.monotonic()+900,value)
+                         while len(_FZ_MEDIA_CACHE)>256: _FZ_MEDIA_CACHE.pop(next(iter(_FZ_MEDIA_CACHE)))
+                     return value
+                 finally:
+@@ -34088,7 +34118,7 @@
+     key = json.dumps({k:context[k] for k in ('query','country','lang','kind','extra_specs','answers')},ensure_ascii=False,sort_keys=True)
+     with _FZ_GUIDE_LOCK:
+         hit = _FZ_RESEARCH_CACHE.get(key)
+-        if hit and hit[0]>time.monotonic(): return copy.deepcopy(hit[1])
++        if hit and hit[0]>time.monotonic() and hit[1].get('groups'): return copy.deepcopy(hit[1])
      groups = {}
-     for key, row in rows.items():
-+        if (not _web_row_has_numeric_price(row) and _web_offer_image_candidates(row)
-+                and _web_price_index_recent_miss(row, current_market())):
-+            continue
-         group = group_key(row)
-         groups.setdefault(group, {}).setdefault(_more_result_domain(row.get('url')), []).append((key,row))
-     batches = []
-@@ -20742,29 +20853,20 @@
-         return {}
-     MARKET_CTX.value = dict(market)
-     terms = []
-+    image_source = image_only or all(_web_row_has_numeric_price(row) and not _web_offer_image_candidates(row) for row in entries.values())
-+    # A failed price lookup does not block an independent image-only repair.
-+    if not image_only:
-+        entries = {key: row for key, row in entries.items()
-+                   if _web_row_has_numeric_price(row) or not _web_offer_image_candidates(row)
-+                   or not _web_price_index_recent_miss(row, market)}
-     for row in entries.values():
--        key = _web_price_url_key(row.get('url'))
--        if not key:
--            continue
--        parsed = urllib.parse.urlsplit(key)
--        if parsed.path in ('', '/'):
--            continue
--        # Keep the observed product ID while allowing mobile/locale image hits.
--        term = 'site:' + ('shein.com' if image_only and _web_shein_product_id(key) else parsed.netloc)
--        ids = [v for k, v in urllib.parse.parse_qsl(parsed.query)
--               if k.lower() in {'id', 'itemid', 'item_id', 'goods_id', 'goodsid', 'offerid', 'sku', 'skuid', 'sku_id'}]
--        path_ids = re.findall(r'(?:/item/|/offer/|/product/|-p-|-g-|/)(\d{6,})(?=[./-]|$)', parsed.path)
--        if ids or path_ids:
--            term += ' ' + ' '.join('"' + re.sub(r'[^a-zA-Z0-9_-]', '', value) + '"' for value in (ids + path_ids)[:2])
--        else:
--            title = re.sub(r'["()\r\n]', ' ', str(row.get('raw_title') or row.get('title') or ''))
--            term += ' ' + title[:120].strip()
--        terms.append(('(' + term + ')', _web_listing_price_country(row, market)))
-+        term = _web_listing_lookup_term(row, image_source)
-+        if term:
-+            terms.append(('(' + term + ')', _web_listing_price_country(row, market)))
-     if not terms:
-         return {}
-     # Price recovery needs organic snippets even when pictures are also missing.
-     # Use the image index only when every listing already has a price.
--    image_source = image_only or all(_web_row_has_numeric_price(row) and not _web_offer_image_candidates(row) for row in entries.values())
-     params = {'engine': 'google_images' if image_source else 'google',
-               'num': 10,
-               'api_key': SERPAPI_API_KEY, 'output': 'json'}
-@@ -20867,6 +20969,8 @@
-         failed = sum(bool(response.get('_findzia_lookup_failed')) for response in responses)
-         for key, row in entries.items():
-             _web_log_price_recovery(row, market, diagnostics[key], len(records), failed)
-+            if not failed and not diagnostics[key]['accepted_price']:
-+                _web_price_index_recent_miss(row, market, remember=True)
-     print(f'EXACT-LISTING RECOVERY engine={params["engine"]} requested={len(entries)}'
-           f' lookups={len(lookup_terms)} recovered_images={sum(bool(value.get("page_image")) for value in updates.values())}'
-           f' recovered_prices={sum(bool(value.get("price")) for value in updates.values())}')
-@@ -34096,18 +34200,69 @@
-     request_ip=_web_request_ip, enabled=lambda: WEB_API_ENABLED)
+     try:
+         try:
+@@ -34106,7 +34136,8 @@
+               'available_modes':[m for m in _FZ_RESEARCH_MODES if groups.get(m)], 'suggestions':[],
+               'question':'','choices':[], 'fresh_search':True,'build':BUILD_ID,'checked_at':int(time.time())}
+     with _FZ_GUIDE_LOCK:
+-        _FZ_RESEARCH_CACHE[key] = (time.monotonic()+(600 if groups else 12), copy.deepcopy(result))
++        if groups:
++            _FZ_RESEARCH_CACHE[key] = (time.monotonic()+600, copy.deepcopy(result))
+         while len(_FZ_RESEARCH_CACHE)>128: _FZ_RESEARCH_CACHE.pop(next(iter(_FZ_RESEARCH_CACHE)))
+     return result
+ 
+--- a/findzia_prices.py
++++ b/findzia_prices.py
+@@ -15,6 +15,7 @@
+ from urllib.parse import urlsplit, parse_qsl
+ 
+ import requests
++from findzia_cache import provider_cacheable
+ 
+ SHEIN_CURRENCIES = {
+     'us.shein.com': 'USD', 'roe.shein.com': 'EUR', 'eur.shein.com': 'EUR',
+@@ -185,7 +186,7 @@
+         began = self.clock()
+         with self.lock:
+             cached = self.cache.get(key)
+-            if cached and cached[0] > began:
++            if cached and cached[0] > began and provider_cacheable(cached[1]):
+                 self.cost('structured_price_cache_hits')
+                 return copy.deepcopy(cached[1])
+             pending = self.inflight.get(key)
+@@ -244,7 +245,8 @@
+                 self.cache = {k: v for k, v in self.cache.items() if v[0] > now}
+                 if len(self.cache) >= 512:
+                     self.cache.pop(next(iter(self.cache)))
+-                self.cache[key] = (now + ttl, copy.deepcopy(result))
++                if provider_cacheable(result):
++                    self.cache[key] = (now + ttl, copy.deepcopy(result))
+                 future = self.inflight.pop(key)
+                 future.set_result(copy.deepcopy(result))
+             self.slots.release()
+--- a/findzia_searchapi.py
++++ b/findzia_searchapi.py
+@@ -13,6 +13,7 @@
+ from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError
+ 
+ import requests
++from findzia_cache import provider_cacheable
+ 
+ SUPPORTED = frozenset(('google', 'google_light', 'google_images',
+                        'google_images_light', 'google_shopping', 'google_shopping_light', 'google_lens', 'baidu'))
+@@ -205,11 +206,11 @@
+             if bypass:
+                 return None
+             hit = self.cache_get(key)
+-            if not isinstance(hit, dict) and wider_key:
++            if not provider_cacheable(hit) and wider_key:
+                 hit = self.cache_get(wider_key)
+-                if isinstance(hit, dict):
++                if provider_cacheable(hit):
+                     self.cost('serper_wider_cache_hits')
+-            return hit
++            return hit if provider_cacheable(hit) else None
+         hit = cached()
+         if isinstance(hit, dict):
+             self.cost('serper_cache_hits')
+@@ -226,7 +227,7 @@
+                 return None
+             data = normalize(kind, raw)
+             field = {'search': 'organic_results', 'images': 'images_results', 'shopping': 'shopping_results'}[kind]
+-            data.setdefault(field, [])  # An explicit empty result is cacheable.
++            data.setdefault(field, [])  # Empty success is returned, never persisted.
+             data.setdefault('search_metadata', {}).update(provider='serper', engine='serper_'+kind)
+             return data
+         with self.lock:
+@@ -251,10 +252,8 @@
+             def finished(done):
+                 try:
+                     data = done.result()
+-                    if not bypass and isinstance(data, dict):
+-                        has_rows = any(data.get(k) for k in ('organic_results', 'images_results',
+-                                          'shopping_results', 'inline_shopping_results'))
+-                        self.cache_put(key, 'serper_'+kind, data, ttl_seconds=None if has_rows else 120)
++                    if not bypass and provider_cacheable(data):
++                        self.cache_put(key, 'serper_'+kind, data, ttl_seconds=None)
+                 except Exception:
+                     pass
+                 finally:
+@@ -360,7 +359,7 @@
+         def finished(done):
+             try:
+                 data, _, _ = done.result()
+-                if data is not None:
++                if provider_cacheable(data):
+                     # Save paid work for subsequent requests, without changing
+                     # the result already delivered to the current caller.
+                     self.cache_put(key, engine, data, ttl_seconds=None)
+@@ -383,7 +382,7 @@
+         # requests, including duplicate image branches with different crop flags.
+         key = hashlib.sha256(('searchapi-v1:' + json.dumps(mapped, sort_keys=True, ensure_ascii=False)).encode()).hexdigest()
+         cached = None if bypass else self.cache_get(key)
+-        if cached is not None:
++        if provider_cacheable(cached):
+             self.cost('searchapi_cache_hits')
+             return copy.deepcopy(cached)
+         with self.lock:
+@@ -404,7 +403,7 @@
+         try:
+             # A previous leader may have just written its result and exited.
+             cached = None if bypass else self.cache_get(key)
+-            if cached is not None:
++            if provider_cacheable(cached):
+                 result = cached
+                 return copy.deepcopy(result)
+             with self.lock:
+@@ -459,7 +458,7 @@
+                 result = copy.deepcopy(result)
+                 result.setdefault('search_metadata', {})['provider'] = 'serpapi'
+                 result['search_metadata']['fallback_from'] = 'searchapi'
+-            if not bypass:
++            if not bypass and provider_cacheable(result):
+                 # Backup cache is deliberately short; probe the primary again.
+                 ttl = 30 if result.get('search_metadata', {}).get('fallback_from') else None
+                 self.cache_put(key, mapped['engine'], result, ttl_seconds=ttl)
+@@ -474,4 +473,3 @@
+     @staticmethod
+     def _failure(return_error):
+         return {'error': 'search_providers_unavailable', '_serpapi_failure': {'reason': 'providers_unavailable'}} if return_error else None
+-
+--- a/findzia_independent_search.py
++++ b/findzia_independent_search.py
+@@ -18,6 +18,7 @@
+ from weakref import WeakKeyDictionary
+ 
+ import requests
++from findzia_cache import provider_cacheable
  
  
-+def _web_search_trace_id(value):
-+    return value if isinstance(value, str) and re.fullmatch(r'[a-f0-9]{32}', value) else ''
+ # Markets and country codes are different contracts: SA is a supported text
+@@ -302,7 +303,7 @@
+         deadline = min(deadline, self.clock()+timeout)
+         with self.lock:
+             cached = self.cache.get(cache_key)
+-            if cached and cached[0] > self.clock():
++            if cached and cached[0] > self.clock() and provider_cacheable(cached[1]):
+                 return copy.deepcopy(cached[1])
+             if not self.health.get(engine, (0, 0))[1] <= self.clock():
+                 return None
+@@ -314,9 +315,7 @@
+         if not leader:
+             while not cancel.is_set() and self.clock() < deadline:
+                 if event.wait(min(.05, max(0., deadline-self.clock()))):
+-                    with self.lock:
+-                        cached = self.cache.get(cache_key)
+-                        return copy.deepcopy(cached[1]) if cached and cached[0] > self.clock() else None
++                    return copy.deepcopy(getattr(event, 'result', None))
+             return None
+         reserved, success = False, False
+         try:
+@@ -360,11 +359,13 @@
+                 return None
+             data = normalize_brave(raw) if engine == 'brave_search' else normalize_bing(raw, reverse, market_fallback)
+             self.log(f'INDEPENDENT RESULTS engine={engine} country={country} candidates={len(data.get("visual_matches" if reverse else "organic_results", []))}')
+-            with self.lock:
+-                self.cache[cache_key] = (self.clock()+300., copy.deepcopy(data))
+-                self.cache.move_to_end(cache_key)
+-                while len(self.cache) > 256:
+-                    self.cache.popitem(last=False)
++            event.result = copy.deepcopy(data)
++            if provider_cacheable(data):
++                with self.lock:
++                    self.cache[cache_key] = (self.clock()+300., copy.deepcopy(data))
++                    self.cache.move_to_end(cache_key)
++                    while len(self.cache) > 256:
++                        self.cache.popitem(last=False)
+             return data
+         except Exception as exc:
+             if not cancel.is_set():
+@@ -377,4 +378,3 @@
+             with self.lock:
+                 self.inflight.pop(cache_key, None)
+                 event.set()
+-
+--- /dev/null
++++ b/findzia_cache.py
+@@ -0,0 +1,79 @@
++"""Search cache admission and absolute age limits; no network or app state."""
++import math
++
++MAX_CACHE_SECONDS = 86400.0
 +
 +
-+def _web_client_card_metric(data):
-+    """Client-reported rendering measurement; never product/account evidence."""
-+    if not isinstance(data, dict) or not _web_search_trace_id(data.get('search_trace')):
-+        raise ValueError('invalid_metric')
-+    if data.get('kind') not in ('image', 'text'):
-+        raise ValueError('invalid_metric')
-+    if data.get('version') != '156.7.70':
-+        raise ValueError('invalid_metric')
-+    cc = data.get('country')
-+    if not isinstance(cc, str) or not re.fullmatch(r'[a-z]{2}', cc):
-+        raise ValueError('invalid_metric')
-+    result = {k: data[k] for k in ('search_trace', 'kind', 'version', 'country')}
-+    for key, maximum in (('first_card_ms', 180000), ('visible_count', 1000)):
-+        value = data.get(key)
-+        if type(value) is not int or not 0 <= value <= maximum:
-+            raise ValueError('invalid_metric')
-+        result[key] = value
-+    if not result['visible_count']:
-+        raise ValueError('invalid_metric')
-+    result['measurement'] = 'client_after_render'
-+    return result
++def search_answer_cacheable(text, urls):
++    return (isinstance(text, str) and bool(text.strip()) and isinstance(urls, dict)
++            and bool(urls) and all(isinstance(url, str) and url.startswith(('https://','http://'))
++                                  for url in urls.values()))
 +
 +
-+@app.post('/api/search/metrics')
-+async def web_api_search_metrics(request: Request):
-+    if not _web_rate_allowed(request, scope='search_metrics'):
-+        return Response(status_code=429)
++def cache_ttl(requested, default=3600.0):
++    value = default if requested is None else requested
 +    try:
-+        raw = bytearray()
-+        async for chunk in request.stream():
-+            if len(raw) + len(chunk) > 1024:
-+                return Response(status_code=413)
-+            raw.extend(chunk)
-+        data = _web_client_card_metric(json.loads(raw))
-+    except ClientDisconnect:
-+        return Response(status_code=204)
-+    except (ValueError, TypeError, AttributeError, UnicodeError):
-+        return Response(status_code=400)
-+    # Never log the submitted object: only allowlisted counters and random id.
-+    print('CLIENT FIRST CARD ' + json.dumps(data, sort_keys=True), flush=True)
-+    return Response(status_code=204)
++        seconds = float(value)
++    except (TypeError, ValueError, OverflowError):
++        return 0.0
++    return min(MAX_CACHE_SECONDS, max(0.0, seconds)) if math.isfinite(seconds) else 0.0
 +
 +
- class _FindziaImageTiming:
-     """Observe the original ASGI receive path, before credit/body middleware."""
-     def __init__(self, app):
-         self.app = app
- 
-     async def __call__(self, scope, receive, send):
--        paths = {'/api/search/image', '/api/search/image/stream', '/api/refine/search/stream'}
-+        paths = {'/api/search/stream', '/api/search/image', '/api/search/image/stream', '/api/refine/search/stream'}
-         if scope.get('type') != 'http' or scope.get('method') != 'POST' or scope.get('path') not in paths:
-             return await self.app(scope, receive, send)
-         started = time.monotonic()
-         data = {'body_bytes': 0, 'body_complete_ms': None, 'headers_ms': None,
-                 'first_body_ms': None, 'status': None}
-+        headers = dict(scope.get('headers') or [])
-+        trace = _web_search_trace_id(headers.get(b'x-findzia-search-trace', b'').decode('ascii', 'ignore'))
-+        if trace:
-+            data['search_trace'] = trace
-         scope['findzia_image_timing'] = data
-         def elapsed():
-             return max(0, int((time.monotonic() - started) * 1000))
-@@ -34130,7 +34285,8 @@
-         finally:
-             data['total_ms'] = elapsed()
-             data['route'] = scope['path']
--            print('IMAGE REQUEST TIMING ' + json.dumps(data, sort_keys=True), flush=True)
-+            label = 'SEARCH REQUEST TIMING ' if scope['path'] == '/api/search/stream' else 'IMAGE REQUEST TIMING '
-+            print(label + json.dumps(data, sort_keys=True), flush=True)
- 
- 
- async def _web_prepare_image_bytes(request, image_bytes, mime, client_meta=None):
---- a/frontend/source/findzia-home.liquid
-+++ b/frontend/source/findzia-home.liquid
-@@ -1,4 +1,4 @@
--{% comment %} FINDZIA_HOME_RELEASE=156.7.69 {% endcomment %}
-+{% comment %} FINDZIA_HOME_RELEASE=156.7.70 {% endcomment %}
- {% comment %}Findzia 156.7.15 · progressive filters + conversational guide from 156.3.0 · combined 156.7.14 payments preserved{% endcomment %}
- 
- 
-@@ -876,12 +876,13 @@
- async function Rt(path, payload, receive, sharedLifetime) {
-   if (!r) throw new Error('API URL missing');
-   if (['/api/search/stream','/api/search/image/stream'].includes(path)) fzAccountStart(payload);
-+  if (['/api/search/stream','/api/search/image/stream'].includes(path)) fzStartCardMetric(path, payload);
-   const generation = B, lifetime = sharedLifetime || fzRequestLifetime(path === '/api/refine/search/stream' ? 40000 : 65000);
-   let reader, ended = false, done = false;
-   try {
-     const response = await lifetime.run(() => fzPaidFetch(r + path, {
-       method:'POST', signal:lifetime.signal,
--      headers:{'Content-Type':'application/json', Accept:'application/x-ndjson'}, body:JSON.stringify(payload)
-+      headers:{'Content-Type':'application/json', Accept:'application/x-ndjson', ...fzCardMetricHeaders()}, body:JSON.stringify(payload)
-     }));
-     if (!response.ok) {
-       const error = new Error(await lifetime.run(() => response.text()) || 'HTTP ' + response.status);
-@@ -924,12 +925,53 @@
-   if (!r) throw new Error('API URL missing');
-   const response = await lifetime.run(() => fzPaidFetch(r + path, {
-     method:'POST', signal:lifetime.signal,
--    headers:{'Content-Type':'application/json', Accept:'application/json'}, body:JSON.stringify(payload)
-+    headers:{'Content-Type':'application/json', Accept:'application/json', ...fzCardMetricHeaders()}, body:JSON.stringify(payload)
-   }));
-   const data = await lifetime.run(() => response.json());
-   if (!response.ok) { const error = new Error(data.error || 'HTTP ' + response.status); error.status = response.status; throw error; }
-   return data;
- }
-+// FINDZIA_FIRST_CARD_70_BEGIN
-+var fzCardMetric = null;
-+function fzStartCardMetric(path, payload) {
-+  const bytes = new Uint8Array(16); crypto.getRandomValues(bytes);
-+  fzCardMetric = {search_trace:Array.from(bytes, v=>v.toString(16).padStart(2,'0')).join(''),
-+    generation:B, kind:path.includes('/image/')?'image':'text', country:String(payload.country||n).toLowerCase(),
-+    started:performance.now(), sent:false, pending:false};
-+}
-+function fzCardMetricHeaders() {
-+  return fzCardMetric?.generation===B ? {'X-Findzia-Search-Trace':fzCardMetric.search_trace} : {};
-+}
-+function fzMeasureFirstCard() {
-+  const trace = fzCardMetric;
-+  if (!trace || trace.generation!==B || trace.sent || trace.pending || document.visibilityState!=='visible') return;
-+  trace.pending = true;
-+  // The count alone can precede DOM insertion. Wait through a paint opportunity
-+  // and confirm a loaded product image inside a currently admitted card.
-+  requestAnimationFrame(()=>requestAnimationFrame(()=>{
-+    trace.pending = false;
-+    if (trace!==fzCardMetric || trace.generation!==B || trace.sent || document.visibilityState!=='visible') return;
-+    const rows=tt(), keys=new Set(rows.map(br));
-+    const rendered=Array.from(b.querySelectorAll('[data-image-key]')).some(stage=>{
-+      const img=stage.querySelector('img'), rect=stage.getBoundingClientRect();
-+      return keys.has(stage.dataset.imageKey) && img?.complete && img.naturalWidth>=8 &&
-+        rect.width>0 && rect.height>0 && !stage.closest('[hidden]');
-+    });
-+    if (!rendered) return;
-+    trace.sent=true;
-+    const elapsed=Math.max(0,Math.round(performance.now()-trace.started));
-+    if(fzPhotoTrace?.generation===B)fzPhotoTrace.firstVisibleMs=elapsed;
-+    const metric={search_trace:trace.search_trace,kind:trace.kind,country:trace.country,
-+      version:'156.7.70',first_card_ms:elapsed,visible_count:rows.length};
-+    const controller=new AbortController(), timer=setTimeout(()=>controller.abort(),3000);
-+    // Best effort, no auth/credit flow, no retries, no user query or product data.
-+    fetch(r.replace(/\/$/,'')+'/api/search/metrics',{method:'POST',credentials:'omit',
-+      headers:{'Content-Type':'application/json'},body:JSON.stringify(metric),signal:controller.signal})
-+      .catch(()=>{}).finally(()=>clearTimeout(timer));
-+  }));
-+}
-+document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible')fzMeasureFirstCard();});
-+// FINDZIA_FIRST_CARD_70_END
- var fzPhotoTrace = null;
- e.fzPhotoSearchDiagnostics = () => fzPhotoTrace ? {...fzPhotoTrace, phases:fzPhotoTrace.phases.map(row => ({...row}))} : null;
- // FINDZIA_PHOTO_UPLOAD_69_BEGIN
-@@ -1123,8 +1165,7 @@
- var Vt=null,Jt=!1,fzUsableResults=false;function Qt(count) {
-     count = Math.max(0, Number(count) || 0);
-     e.dataset.visibleResultCount = String(count);
--    if (count > 0 && fzPhotoTrace?.generation === B && fzPhotoTrace.firstVisibleMs === null)
--      fzPhotoTrace.firstVisibleMs = Math.round(performance.now() - fzPhotoTrace.started);
-+    if (count > 0) fzMeasureFirstCard();
-     const ready = count > 0;
-     if (ready !== fzUsableResults) { fzUsableResults = ready; Yt('fz:search-state'); }
-     e.dispatchEvent(new CustomEvent('fz:result-count', {detail:{count,busy:ee||Kt}}));
---- a/frontend/scripts/build.mjs
-+++ b/frontend/scripts/build.mjs
-@@ -5,7 +5,7 @@
- 
- const base = resolve(dirname(fileURLToPath(import.meta.url)), '..');
- const src = resolve(base, 'source'), dest = resolve(base, 'public');
--const version = '156.7.69', api = 'https://api.findzia.com';
-+const version = '156.7.70', api = 'https://api.findzia.com';
- // Preserve the live section scope to avoid unnecessary DOM/storage changes.
- const section = 'template--19963721449543__findzia_home_h4wBLq';
- const expected = '2de7b483319c713bf649352f7f158f1fedbda92f546bebfe576ae0a2d2c526c6';
---- a/frontend/package.json
-+++ b/frontend/package.json
-@@ -1,6 +1,6 @@
- {
-   "name": "findzia-standalone",
--  "version": "156.7.69",
-+  "version": "156.7.70",
-   "private": true,
-   "type": "module",
-   "engines": {
++def cache_fresh(created, expires, now):
++    try:
++        created, expires, now = float(created), float(expires), float(now)
++        return (all(math.isfinite(v) for v in (created, expires, now))
++                and 0 <= now-created < MAX_CACHE_SECONDS and now < expires)
++    except (TypeError, ValueError, OverflowError):
++        return False
++
++
++def cache_success(data):
++    if not isinstance(data, dict) or not data:
++        return False
++    if data.get('ok') is False or data.get('partial') or data.get('cancelled'):
++        return False
++    if any(data.get(k) for k in ('error','errors','review_error','_serpapi_failure',
++                                '_findzia_lookup_failed','identity_review_error')):
++        return False
++    metadata = data.get('search_metadata')
++    if isinstance(metadata, dict) and str(metadata.get('status','success')).lower() not in ('success','completed'):
++        return False
++    return True
++
++
++def provider_cacheable(data):
++    """Successful nonempty evidence only; metadata/empty arrays are not hits."""
++    if not cache_success(data):
++        return False
++    for key in ('organic_results','images_results','shopping_results','inline_shopping_results',
++                'visual_matches','exact_matches','products','results','ads','inline_images',
++                'local_results','places','sellers_results','related_products','videos_results'):
++        rows = data.get(key)
++        if isinstance(rows, dict):
++            rows = rows.get('results') or rows.get('places')
++        if isinstance(rows, list) and any(_evidence_row(row) for row in rows):
++            return True
++    groups = data.get('categorized_shopping_results')
++    if isinstance(groups, list) and any(provider_cacheable(group) for group in groups if isinstance(group,dict)):
++        return True
++    # Non-search callers sharing the SQLite table use explicit known shapes.
++    return bool(_evidence_row(data.get('product_results')) or _evidence_row(data.get('product')) or
++                (data.get('domain') and data.get('rating')))
++
++
++def _evidence_row(row):
++    return cache_success(row) and any(row.get(k) for k in (
++        'title', 'name', 'link', 'url', 'product_link', 'product_id',
++        'image', 'thumbnail', 'original', 'position'))
++
++
++def analysis_cacheable(data):
++    if not cache_success(data):
++        return False
++    if 'items' in data:
++        return bool(isinstance(data['items'],list) and data['items']
++                    and all(cache_success(item) for item in data['items']))
++    if 'item' in data:
++        return cache_success(data['item'])
++    return any(data.get(k) for k in ('query','title','identity','reference_profile','product_name','observations','text_facts'))

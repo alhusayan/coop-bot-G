@@ -114,7 +114,7 @@ class EvidenceTests(unittest.TestCase):
             '_web_ai_classifier_cache_put':lambda *a:None,'_web_identity_offer_proof':lambda v:v,
             '_api_cost_record':lambda *a:None,
             'WEB_VISUAL_CLASSIFIER_ENABLED':True,
-            '_web_visual_collect_evidence':lambda *a:(INLINE,{}),
+            '_web_visual_collect_evidence':lambda *a,**k:(INLINE,{}),
             '_web_identity_candidates':lambda rows:[{'id':3,'title':'missing'}],
             'WEB_AI_CLASSIFIER_MAX_RESULTS':8,
             '_web_ai_classifier_request_live':lambda *a,**kw:self.fail('paid work without pixels'),
@@ -124,7 +124,7 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(result['review_error'],'candidate_images_unavailable')
 
 
-class PriceRecoveryTests(unittest.TestCase):
+class PriceRecoveryRollback71Tests(unittest.TestCase):
     def setUp(self):
         self.f=price_support.PriceTests();self.f.setUp();self.ns=self.f.ns
         self.ns['_web_offer_image_candidates']=lambda row:row.get('images',[])
@@ -136,38 +136,54 @@ class PriceRecoveryTests(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             return self.ns['_web_targeted_price_updates']({'a':row or self.row},'en',{'country':'kw'},**kwargs)
 
-    def test_query_targets_asin_or_product_path_not_generic_title(self):
+    def test_generic_queries_keep_merchant_title_and_amazon_uses_observed_asin(self):
         self.invoke()
-        self.assertEqual(self.f.calls[0][0],'(site:shop.test/products/woven-basket)')
+        self.assertEqual(self.f.calls[0][0],'(site:shop.test Woven basket)')
         row=dict(self.row,url='https://www.amazon.sg/dp/B012345678',country='sg')
         self.invoke(row)
-        self.assertIn('"B012345678"',self.f.calls[-1][0])
+        self.assertEqual(self.f.calls[-1][0],'(site:amazon.sg "B012345678")')
+        self.assertEqual(self.f.calls[-1][1],'sg')
 
-    def test_successful_empty_lookup_cools_down_then_recovers(self):
+    def test_empty_lookup_can_recover_on_immediate_next_search(self):
         self.invoke();self.invoke()
-        self.assertEqual(len(self.f.calls),1)
-        self.f.responses['kw']=[{'link':self.row['url'],'price':'10 KWD'}]
-        self.clock.now=46
-        self.assertEqual(self.invoke()['a']['price'],'10.0 KWD')
         self.assertEqual(len(self.f.calls),2)
+        self.f.responses['kw']=[{'link':self.row['url'],'price':'10 KWD'}]
+        self.assertEqual(self.invoke()['a']['price'],'10.0 KWD')
+        self.assertEqual(len(self.f.calls),3)
+        self.assertEqual(self.clock.now,0)
 
-    def test_provider_errors_do_not_enter_empty_index_cache(self):
+    def test_provider_failure_can_recover_immediately(self):
         self.ns['_fast_provider_search']=lambda *a,**k:{'error':'unavailable'}
         self.invoke()
         self.ns['_fast_provider_search']=lambda *a,**k:{'organic_results':[{'link':self.row['url'],'price':'10 KWD'}]}
         self.assertIn('a',self.invoke())
 
-    def test_variant_and_market_keep_separate_miss_keys(self):
+    def test_variant_and_market_get_independent_lookups(self):
         self.invoke()
         self.invoke(dict(self.row,url=self.row['url']+'?variant=1'))
         self.invoke(dict(self.row,country='de'))
         self.assertEqual(len(self.f.calls),3)
 
-    def test_queue_uses_budget_for_untried_listing_after_recent_miss(self):
+    def test_previous_miss_does_not_hide_listing_from_next_search_queue(self):
         self.invoke()
         other=dict(self.row,url='https://other.test/products/basket')
         batches=self.ns['_web_automatic_price_batches']({'miss':self.row,'fresh':other})
-        self.assertEqual(list(batches[0]),['fresh'])
+        self.assertEqual(list(batches[0]),['miss','fresh'])
+
+    def test_numeric_product_id_remains_in_query(self):
+        self.invoke(dict(self.row,url='https://shop.test/product/12345678'))
+        self.assertEqual(self.f.calls[-1][0],'(site:shop.test "12345678")')
+
+    def test_title_lookup_recovers_exact_listing_without_accepting_other_prices(self):
+        def indexed_search(engine,term,cc,hl,timeout,**kwargs):
+            self.f.calls.append((term,cc,hl))
+            return {'organic_results':[
+                {'link':'https://shop.test/products/different-basket','price':'1 KWD'},
+                {'link':self.row['url'],'price':'10 KWD'},
+            ] if term=='(site:shop.test Woven basket)' else []}
+        self.ns['_fast_provider_search']=indexed_search
+        result=self.invoke()
+        self.assertEqual(result['a']['price'],'10.0 KWD')
 
     def test_wrong_listing_and_wrong_variant_still_cannot_supply_price(self):
         self.f.responses['kw']=[{'link':self.row['url']+'?variant=OTHER','price':'10 KWD'},
