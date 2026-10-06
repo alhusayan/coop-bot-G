@@ -394,7 +394,7 @@ from findzia_billing import CreditMiddleware, install_billing
 app.add_middleware(CreditMiddleware, owner=app)
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization', 'X-Findzia-Request-Id'], max_age=86400)
-BUILD_ID = 'v128.5.42.57-audit-errors'
+BUILD_ID = 'v128.5.42.58-audit-compact-upload'
 _SOCIAL = None
 
 def _fz_social_row(row):
@@ -16523,9 +16523,114 @@ def _web_identity_http_error(response, *, deadline=None, payload=None, transport
     }, sort_keys=True))
     try:
         response._findzia_identity_http_error = code
+        response._findzia_identity_error_info = info
     except (AttributeError, TypeError):
         pass
     return code
+
+
+_WEB_AUDIT_SCHEMA_MODES = {}
+_WEB_AUDIT_SCHEMA_LOCK = threading.Lock()
+
+
+def _web_audit_compact_payload(payload):
+    """Keep the identity schema; enforce array lengths in the local validator.
+
+    Large nested array bounds can make Gemini's grammar reject a valid schema
+    with only INVALID_ARGUMENT. This changes no prompts, images or field types.
+    """
+    config = payload.get('generationConfig') or {}
+    schema = config.get('responseSchema')
+    if not isinstance(schema, dict) or not {'reference_profile', 'items'}.issubset(schema.get('properties', {})):
+        return None
+    if not any(part.get('inline_data') or part.get('inlineData')
+               for content in payload.get('contents', []) for part in content.get('parts', [])):
+        return None
+    compact = copy.deepcopy(payload)
+    def strip_bounds(value):
+        if isinstance(value, dict):
+            value.pop('minItems', None)
+            value.pop('maxItems', None)
+            for child in value.values():
+                strip_bounds(child)
+        elif isinstance(value, list):
+            for child in value:
+                strip_bounds(child)
+    strip_bounds(compact['generationConfig']['responseSchema'])
+    return compact if compact != payload else None
+
+
+def _web_audit_schema_key(url, payload):
+    compact = _web_audit_compact_payload(payload)
+    if compact is None:
+        return ''
+    schema = compact['generationConfig']['responseSchema']
+    return hashlib.sha256((url + json.dumps(schema, sort_keys=True)).encode()).hexdigest()
+
+
+def _web_audit_cached_payload(url, payload):
+    key = _web_audit_schema_key(url, payload)
+    with _WEB_AUDIT_SCHEMA_LOCK:
+        accepted_at = _WEB_AUDIT_SCHEMA_MODES.get(key)
+    if accepted_at is not None and time.monotonic() - accepted_at < 3600:
+        return _web_audit_compact_payload(payload), key, True
+    return payload, key, False
+
+
+def _web_audit_schema_result(key, compact, response, *, probe=False):
+    if not key or not compact:
+        return
+    accepted = 200 <= response.status_code < 300
+    with _WEB_AUDIT_SCHEMA_LOCK:
+        if accepted:
+            if len(_WEB_AUDIT_SCHEMA_MODES) >= 32:
+                oldest = min(_WEB_AUDIT_SCHEMA_MODES, key=_WEB_AUDIT_SCHEMA_MODES.get)
+                _WEB_AUDIT_SCHEMA_MODES.pop(oldest, None)
+            _WEB_AUDIT_SCHEMA_MODES[key] = time.monotonic()
+        elif response.status_code == 400:
+            _WEB_AUDIT_SCHEMA_MODES.pop(key, None)
+    if probe or not accepted:
+        # HTTP acceptance proves request compatibility, not product identity.
+        print('AI SCHEMA COMPAT change=array_bounds outcome=' + ('accepted_http' if accepted else 'rejected')
+              + ' status=' + str(response.status_code) + ' contract=' + key[:12])
+
+
+def _web_audit_retry_payload(response, error, payload):
+    compact = _web_audit_compact_payload(payload)
+    info = getattr(response, '_findzia_identity_error_info', {})
+    generic_argument = (error == 'http_400' and info.get('category') == 'invalid_argument'
+                        and info.get('api_status') == 'INVALID_ARGUMENT' and not info.get('fields'))
+    if compact is not None and (generic_argument or error == 'http_400_schema'):
+        return compact, 'array_bounds'
+    if error == 'http_400_schema':
+        return _web_identity_compatible_payload(payload), 'schema_compatibility'
+    return None, ''
+
+
+def _web_identity_local_array_bounds(value, candidate_count, *, complete=False):
+    """Mirror removed provider bounds before any normalized audit can be used."""
+    if not isinstance(value, dict) or not isinstance(value.get('items'), list):
+        return False
+    items = value['items']
+    if len(items) > candidate_count or (complete and len(items) != candidate_count):
+        return False
+    profile_max = len(_WEB_VISUAL_PROFILE_TEXT_FIELDS) + len(_WEB_VISUAL_PROFILE_LIST_FIELDS)
+    def profile_ok(profile):
+        if not isinstance(profile, (dict, list)) or len(profile) > profile_max:
+            return False
+        if isinstance(profile, dict):
+            return all(not isinstance(v, list) or len(v) <= 8 for v in profile.values())
+        return all(isinstance(f, dict) and isinstance(f.get('values'), list)
+                   and len(f['values']) <= 8 for f in profile)
+    if not profile_ok(value.get('reference_profile')):
+        return False
+    for item in items:
+        if not isinstance(item, dict) or not profile_ok(item.get('candidate_profile')):
+            return False
+        if any(not isinstance(item.get(k), list) or len(item[k]) > 40
+               for k in ('same_axes', 'different_axes', 'differences')):
+            return False
+    return True
 
 
 def _web_identity_compatible_payload(payload):
@@ -16626,6 +16731,8 @@ def _web_identity_partial_response(raw):
     complete = [item for item in items if required.issubset(item)
                 and all(type(item.get(k)) is int and 0 <= item[k] <= 100
                         for k in ('confidence', 'identity_score', 'observation_quality'))]
+    if not _web_identity_local_array_bounds({'reference_profile': profile, 'items': complete}, len(items)):
+        return {}
     parsed, error = _web_parse_identity_response({'reference_profile': profile, 'items': complete})
     return parsed if not error else {}
 
@@ -16638,6 +16745,7 @@ def _web_identity_stream_response(gemini_url, payload, timeout, on_text, cancel_
     schema = stream_payload.get('generationConfig', {}).get('responseSchema')
     if schema and {'reference_profile', 'items'}.issubset(schema.get('properties', {})):
         schema['propertyOrdering'] = ['reference_profile', 'items']
+    stream_payload, schema_key, compact_mode = _web_audit_cached_payload(url, stream_payload)
     raw, finish_reason = '', ''
     usage_metadata, usage_complete = {}, False
     response = None
@@ -16653,15 +16761,17 @@ def _web_identity_stream_response(gemini_url, payload, timeout, on_text, cancel_
                                      json=stream_payload, timeout=(min(5.0, remaining), remaining), stream=True)
             error = _web_identity_http_error(response, deadline=deadline,
                 payload=stream_payload, transport='sse') if response.status_code >= 400 else ''
-            if error != 'http_400_schema' or attempt or deadline - time.monotonic() <= 1:
+            _web_audit_schema_result(schema_key, compact_mode, response, probe=bool(attempt))
+            if not error or attempt or deadline - time.monotonic() <= 1:
                 break
-            compatible = _web_identity_compatible_payload(stream_payload)
+            compatible, change = _web_audit_retry_payload(response, error, stream_payload)
             if compatible is None:
                 break
+            compact_mode = change == 'array_bounds'
             _web_safe_response_close(response)
             response = None
             stream_payload = compatible
-            print('WEB IDENTITY REVIEW retry=schema_compatibility transport=sse attempts=2')
+            print('WEB IDENTITY REVIEW retry=' + change + ' transport=sse attempts=2')
             with GEMINI_STATS_LOCK:
                 GEMINI_STATS['plain_calls'] += 1
             _api_cost_record('gemini_identity_schema_retries')
@@ -16734,32 +16844,31 @@ def _web_identity_stream_response(gemini_url, payload, timeout, on_text, cancel_
 
 
 def _web_identity_post_response(gemini_url, payload, timeout, cancel_event=None):
-    """One bounded compatibility retry, only for an explicit schema rejection."""
-    if cancel_event is not None and cancel_event.is_set():
-        raise RuntimeError('identity_request_cancelled')
+    """At most one changed-schema request inside the original deadline."""
     deadline = time.monotonic() + timeout
-    _api_cost_record('gemini_identity_http_requests')
-    response = requests.post(gemini_url, params={'key': GEMINI_API_KEY},
-                             json=payload, timeout=(min(5.0, timeout), timeout))
-    if _web_identity_http_error(response, deadline=deadline, payload=payload, transport='rest') != 'http_400_schema':
-        return response
-    remaining = deadline - time.monotonic()
-    if remaining <= 1 or (cancel_event is not None and cancel_event.is_set()):
-        return response
-    compatible = _web_identity_compatible_payload(payload)
-    if compatible is None:
-        return response
-    _web_safe_response_close(response)
-    print('WEB IDENTITY REVIEW retry=schema_compatibility transport=rest attempts=2')
-    with GEMINI_STATS_LOCK:
-        GEMINI_STATS['plain_calls'] += 1
-    _api_cost_record('gemini_identity_http_requests')
-    _api_cost_record('gemini_identity_schema_retries')
-    response = requests.post(gemini_url, params={'key': GEMINI_API_KEY},
-                             json=compatible, timeout=(min(5.0, remaining), remaining))
-    if response.status_code >= 400:
-        _web_identity_http_error(response, deadline=deadline, payload=compatible, transport='rest')
-    return response
+    current, schema_key, compact_mode = _web_audit_cached_payload(gemini_url, payload)
+    for attempt in range(2):
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError('identity_request_cancelled')
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise requests.Timeout('identity_request_deadline')
+        _api_cost_record('gemini_identity_http_requests')
+        response = requests.post(gemini_url, params={'key': GEMINI_API_KEY},
+            json=current, timeout=(min(5.0, remaining), remaining))
+        error = _web_identity_http_error(response, deadline=deadline, payload=current, transport='rest') if response.status_code >= 400 else ''
+        _web_audit_schema_result(schema_key, compact_mode, response, probe=bool(attempt))
+        if not error or attempt or deadline - time.monotonic() <= 1 or (cancel_event is not None and cancel_event.is_set()):
+            return response
+        compatible, change = _web_audit_retry_payload(response, error, current)
+        if compatible is None:
+            return response
+        _web_safe_response_close(response)
+        current, compact_mode = compatible, change == 'array_bounds'
+        print('WEB IDENTITY REVIEW retry=' + change + ' transport=rest attempts=2')
+        with GEMINI_STATS_LOCK:
+            GEMINI_STATS['plain_calls'] += 1
+        _api_cost_record('gemini_identity_schema_retries')
 
 def _web_identity_response_text(candidate):
     """Read final answer text only, excluding optional thinking parts."""
@@ -17494,6 +17603,8 @@ judge the product type and overall resemblance, not for ordinary design variants
         parsed = _web_identity_partial_response(raw)
         if not parsed or not parsed.get('items'):
             return
+        if not _web_identity_local_array_bounds(parsed, len(candidates)):
+            return
         parsed['items'] = [item for item in parsed['items'] if item['id'] not in published]
         if not parsed['items']:
             return
@@ -17555,6 +17666,8 @@ judge the product type and overall resemblance, not for ordinary design variants
             ids = [item.get('id') for item in strict['items'] if isinstance(item, dict)]
             if any(type(cid) is not int for cid in ids) or len(ids) != len(set(ids)):
                 return _web_identity_review_failure('duplicate_or_invalid_ids', visual_mode, len(visual_evidence_ids))
+            if not _web_identity_local_array_bounds(strict, len(candidates), complete=True):
+                return _web_identity_review_failure('invalid_array_bounds', visual_mode, len(visual_evidence_ids))
         parsed, parse_error = _web_parse_identity_response(raw)
         parsed_items = parsed.get('items') if isinstance(parsed, dict) else None
         if not isinstance(parsed_items, list):
@@ -29425,7 +29538,7 @@ async def web_api_selected_markets_stream(request: Request):
             image_bytes = base64.b64decode(raw.split(',', 1)[-1] if raw.startswith('data:image/') else raw, validate=True)
             if not image_bytes or len(image_bytes) > WEB_API_RAW_IMAGE_MAX_BYTES:
                 raise ValueError('invalid_image')
-            image_bytes, mime = _web_normalize_uploaded_image_bytes(image_bytes, mime)
+            image_bytes, mime = await _web_prepare_image_bytes(request, image_bytes, mime, payload.get('image_upload'))
             if len(image_bytes) > WEB_API_MAX_IMAGE_BYTES:
                 return JSONResponse({'ok': False, 'error': 'image_too_large_after_convert'}, status_code=413)
             raw = base64.b64encode(image_bytes).decode('ascii')
@@ -29704,7 +29817,7 @@ async def web_api_image_search_stream(request: Request):
     if not image_bytes or len(image_bytes) > WEB_API_RAW_IMAGE_MAX_BYTES:
         return Response(content=json.dumps({'ok': False, 'error': 'image_too_large'}), media_type='application/json', status_code=413)
     try:
-        image_bytes, mime = _web_normalize_uploaded_image_bytes(image_bytes, mime)
+        image_bytes, mime = await _web_prepare_image_bytes(request, image_bytes, mime, payload.get('image_upload'))
     except ValueError as e:
         return Response(content=json.dumps({'ok': False, 'error': str(e)}), media_type='application/json', status_code=400)
     if len(image_bytes) > WEB_API_MAX_IMAGE_BYTES:
@@ -29821,7 +29934,7 @@ async def web_api_image_search(request: Request):
     if not image_bytes or len(image_bytes) > WEB_API_RAW_IMAGE_MAX_BYTES:
         return Response(content=json.dumps({'ok': False, 'error': 'image_too_large'}), media_type='application/json', status_code=413)
     try:
-        image_bytes, mime = _web_normalize_uploaded_image_bytes(image_bytes, mime)
+        image_bytes, mime = await _web_prepare_image_bytes(request, image_bytes, mime, payload.get('image_upload'))
     except ValueError as e:
         return Response(content=json.dumps({'ok': False, 'error': str(e)}), media_type='application/json', status_code=400)
     if len(image_bytes) > WEB_API_MAX_IMAGE_BYTES:
@@ -33981,3 +34094,59 @@ from findzia_support import install as _install_findzia_support
 _install_findzia_support(app, judge=_refine_ai,
     plans=lambda: getattr(getattr(app.state, 'findzia_credits', None), 'sale_plans', ()),
     request_ip=_web_request_ip, enabled=lambda: WEB_API_ENABLED)
+
+
+class _FindziaImageTiming:
+    """Observe the original ASGI receive path, before credit/body middleware."""
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        paths = {'/api/search/image', '/api/search/image/stream', '/api/refine/search/stream'}
+        if scope.get('type') != 'http' or scope.get('method') != 'POST' or scope.get('path') not in paths:
+            return await self.app(scope, receive, send)
+        started = time.monotonic()
+        data = {'body_bytes': 0, 'body_complete_ms': None, 'headers_ms': None,
+                'first_body_ms': None, 'status': None}
+        scope['findzia_image_timing'] = data
+        def elapsed():
+            return max(0, int((time.monotonic() - started) * 1000))
+        async def read():
+            message = await receive()
+            if message.get('type') == 'http.request':
+                data['body_bytes'] += len(message.get('body', b''))
+                if not message.get('more_body', False) and data['body_complete_ms'] is None:
+                    data['body_complete_ms'] = elapsed()
+            return message
+        async def write(message):
+            if message.get('type') == 'http.response.start':
+                data['headers_ms'] = elapsed()
+                data['status'] = message.get('status')
+            elif message.get('type') == 'http.response.body' and message.get('body') and data['first_body_ms'] is None:
+                data['first_body_ms'] = elapsed()
+            await send(message)
+        try:
+            await self.app(scope, read, write)
+        finally:
+            data['total_ms'] = elapsed()
+            data['route'] = scope['path']
+            print('IMAGE REQUEST TIMING ' + json.dumps(data, sort_keys=True), flush=True)
+
+
+async def _web_prepare_image_bytes(request, image_bytes, mime, client_meta=None):
+    started = time.monotonic()
+    prepared = await asyncio.to_thread(_web_normalize_uploaded_image_bytes, image_bytes, mime)
+    timing = request.scope.get('findzia_image_timing')
+    if isinstance(timing, dict):
+        timing['normalize_ms'] = max(0, int((time.monotonic() - started) * 1000))
+        timing['input_image_bytes'] = len(image_bytes)
+        timing['normalized_image_bytes'] = len(prepared[0])
+        if isinstance(client_meta, dict):
+            for key, maximum in (('original_bytes', 25000000), ('upload_bytes', 25000000), ('prepare_ms', 60000)):
+                value = client_meta.get(key)
+                if type(value) is int and 0 <= value <= maximum:
+                    timing['client_' + key] = value
+    return prepared
+
+
+app.add_middleware(_FindziaImageTiming)
