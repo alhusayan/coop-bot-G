@@ -8,7 +8,13 @@ const src = resolve(base, 'source'), dest = resolve(base, 'public');
 const version = '156.7.70', api = 'https://api.findzia.com';
 // Preserve the live section scope to avoid unnecessary DOM/storage changes.
 const section = 'template--19963721449543__findzia_home_h4wBLq';
-const expected = '2de7b483319c713bf649352f7f158f1fedbda92f546bebfe576ae0a2d2c526c6';
+// Both original PSP files are shipped. Runtime selects one using Railway's
+// FINDZIA_PAYMENT_PROVIDER; switching does not edit or rebuild certificate bytes.
+const applePayHashes = {
+  paddle: '2de7b483319c713bf649352f7f158f1fedbda92f546bebfe576ae0a2d2c526c6',
+  myfatoorah: 'c15558d3e155e2031ef39b32775050c283b545d8575643181af3c3b9f03d46a3',
+};
+const expected = applePayHashes.paddle;
 const hash = b => createHash('sha256').update(b).digest('hex');
 const read = p => readFileSync(resolve(src, p));
 const sourceReleases={home:read('findzia-home.liquid').toString().match(/FINDZIA_HOME_RELEASE=([0-9.]+)/)?.[1],shell:read('findzia-shell.js').toString().match(/FINDZIA_SHELL_RELEASE=([0-9.]+)/)?.[1]};
@@ -41,8 +47,18 @@ for (const name of ['findzia-support.js','findzia-focus.js','findzia-account.js'
   const bytes=name==='findzia-support.js'?Buffer.from(read(name).toString().replace('/* SUPPORT_KNOWLEDGE */ null',JSON.stringify(JSON.parse(read('findzia-support.json').toString('utf8'))))):read(name), ext=name.split('.').at(-1), file='assets/'+name.replace('.'+ext,'.'+hash(bytes).slice(0,16)+'.'+ext);
   assets.set(name,emit('/'+file,file,bytes,ext,true));
 }
-const association=read('apple-developer-merchantid-domain-association');
-if (association.length!==9094 || hash(association)!==expected) throw Error('Apple Pay file must match the original bytes. Do not trim or edit it.');
+const applePayFiles = {};
+for (const [provider, sha256] of Object.entries(applePayHashes)) {
+  const bytes = read('apple-pay/'+provider);
+  if (bytes.length!==9094 || hash(bytes)!==sha256) throw Error('Apple Pay original file mismatch: '+provider);
+  const file = 'apple-pay/'+provider;
+  mkdirSync(resolve(dest,'apple-pay'),{recursive:true});
+  writeFileSync(resolve(dest,file),bytes);
+  // These private build assets are not HTTP routes. Only the selected file
+  // is exposed at the official well-known path by server.mjs.
+  applePayFiles[provider] = {file,sha256};
+}
+const association=read('apple-pay/paddle');
 emit('/.well-known/apple-developer-merchantid-domain-association','.well-known/apple-developer-merchantid-domain-association',association,'txt');
 
 let home=read('findzia-home.liquid').toString('utf8');
@@ -85,5 +101,5 @@ emit('/favicon.svg','favicon.svg','<svg xmlns="http://www.w3.org/2000/svg" viewB
 emit('/robots.txt','robots.txt','User-agent: *\nAllow: /\nDisallow: /healthz\nSitemap: https://findzia.com/sitemap.xml\n','txt');
 emit('/sitemap.xml','sitemap.xml','<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'+['/',...policies.map(([s])=>'/policies/'+s)].map(p=>'<url><loc>https://findzia.com'+p+'</loc></url>').join('')+'</urlset>','xml');
 emit('/healthz','health.json',JSON.stringify({ok:true,service:'findzia-frontend',version,sourceReleases}),'json');
-writeFileSync(resolve(dest,'release.json'),JSON.stringify({version,api,section,apple_pay_file_sha256:expected,routes},null,2)+'\n');
-console.log(`Built Findzia ${version}: ${Object.keys(routes).length} routes, original Apple Pay file ${association.length} bytes.`);
+writeFileSync(resolve(dest,'release.json'),JSON.stringify({version,api,section,apple_pay_file_sha256:expected,apple_pay_files:applePayFiles,routes},null,2)+'\n');
+console.log(`Built Findzia ${version}: ${Object.keys(routes).length} routes, both original Apple Pay files verified.`);
