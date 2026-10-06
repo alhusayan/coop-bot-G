@@ -13,6 +13,7 @@ import time
 from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError
 
 import requests
+from findzia_cache import provider_cacheable
 
 SUPPORTED = frozenset(('google', 'google_light', 'google_images',
                        'google_images_light', 'google_shopping', 'google_shopping_light', 'google_lens', 'baidu'))
@@ -205,11 +206,11 @@ class SerperTransport:
             if bypass:
                 return None
             hit = self.cache_get(key)
-            if not isinstance(hit, dict) and wider_key:
+            if not provider_cacheable(hit) and wider_key:
                 hit = self.cache_get(wider_key)
-                if isinstance(hit, dict):
+                if provider_cacheable(hit):
                     self.cost('serper_wider_cache_hits')
-            return hit
+            return hit if provider_cacheable(hit) else None
         hit = cached()
         if isinstance(hit, dict):
             self.cost('serper_cache_hits')
@@ -226,7 +227,7 @@ class SerperTransport:
                 return None
             data = normalize(kind, raw)
             field = {'search': 'organic_results', 'images': 'images_results', 'shopping': 'shopping_results'}[kind]
-            data.setdefault(field, [])  # An explicit empty result is cacheable.
+            data.setdefault(field, [])  # Empty success is returned, never persisted.
             data.setdefault('search_metadata', {}).update(provider='serper', engine='serper_'+kind)
             return data
         with self.lock:
@@ -251,10 +252,8 @@ class SerperTransport:
             def finished(done):
                 try:
                     data = done.result()
-                    if not bypass and isinstance(data, dict):
-                        has_rows = any(data.get(k) for k in ('organic_results', 'images_results',
-                                          'shopping_results', 'inline_shopping_results'))
-                        self.cache_put(key, 'serper_'+kind, data, ttl_seconds=None if has_rows else 120)
+                    if not bypass and provider_cacheable(data):
+                        self.cache_put(key, 'serper_'+kind, data, ttl_seconds=None)
                 except Exception:
                     pass
                 finally:
@@ -360,7 +359,7 @@ class SearchApiRouter:
         def finished(done):
             try:
                 data, _, _ = done.result()
-                if data is not None:
+                if provider_cacheable(data):
                     # Save paid work for subsequent requests, without changing
                     # the result already delivered to the current caller.
                     self.cache_put(key, engine, data, ttl_seconds=None)
@@ -383,7 +382,7 @@ class SearchApiRouter:
         # requests, including duplicate image branches with different crop flags.
         key = hashlib.sha256(('searchapi-v1:' + json.dumps(mapped, sort_keys=True, ensure_ascii=False)).encode()).hexdigest()
         cached = None if bypass else self.cache_get(key)
-        if cached is not None:
+        if provider_cacheable(cached):
             self.cost('searchapi_cache_hits')
             return copy.deepcopy(cached)
         with self.lock:
@@ -404,7 +403,7 @@ class SearchApiRouter:
         try:
             # A previous leader may have just written its result and exited.
             cached = None if bypass else self.cache_get(key)
-            if cached is not None:
+            if provider_cacheable(cached):
                 result = cached
                 return copy.deepcopy(result)
             with self.lock:
@@ -459,7 +458,7 @@ class SearchApiRouter:
                 result = copy.deepcopy(result)
                 result.setdefault('search_metadata', {})['provider'] = 'serpapi'
                 result['search_metadata']['fallback_from'] = 'searchapi'
-            if not bypass:
+            if not bypass and provider_cacheable(result):
                 # Backup cache is deliberately short; probe the primary again.
                 ttl = 30 if result.get('search_metadata', {}).get('fallback_from') else None
                 self.cache_put(key, mapped['engine'], result, ttl_seconds=ttl)

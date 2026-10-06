@@ -18,6 +18,7 @@ from urllib.parse import urlsplit
 from weakref import WeakKeyDictionary
 
 import requests
+from findzia_cache import provider_cacheable
 
 
 # Markets and country codes are different contracts: SA is a supported text
@@ -302,7 +303,7 @@ class SearchClient:
         deadline = min(deadline, self.clock()+timeout)
         with self.lock:
             cached = self.cache.get(cache_key)
-            if cached and cached[0] > self.clock():
+            if cached and cached[0] > self.clock() and provider_cacheable(cached[1]):
                 return copy.deepcopy(cached[1])
             if not self.health.get(engine, (0, 0))[1] <= self.clock():
                 return None
@@ -314,9 +315,7 @@ class SearchClient:
         if not leader:
             while not cancel.is_set() and self.clock() < deadline:
                 if event.wait(min(.05, max(0., deadline-self.clock()))):
-                    with self.lock:
-                        cached = self.cache.get(cache_key)
-                        return copy.deepcopy(cached[1]) if cached and cached[0] > self.clock() else None
+                    return copy.deepcopy(getattr(event, 'result', None))
             return None
         reserved, success = False, False
         try:
@@ -360,11 +359,13 @@ class SearchClient:
                 return None
             data = normalize_brave(raw) if engine == 'brave_search' else normalize_bing(raw, reverse, market_fallback)
             self.log(f'INDEPENDENT RESULTS engine={engine} country={country} candidates={len(data.get("visual_matches" if reverse else "organic_results", []))}')
-            with self.lock:
-                self.cache[cache_key] = (self.clock()+300., copy.deepcopy(data))
-                self.cache.move_to_end(cache_key)
-                while len(self.cache) > 256:
-                    self.cache.popitem(last=False)
+            event.result = copy.deepcopy(data)
+            if provider_cacheable(data):
+                with self.lock:
+                    self.cache[cache_key] = (self.clock()+300., copy.deepcopy(data))
+                    self.cache.move_to_end(cache_key)
+                    while len(self.cache) > 256:
+                        self.cache.popitem(last=False)
             return data
         except Exception as exc:
             if not cancel.is_set():

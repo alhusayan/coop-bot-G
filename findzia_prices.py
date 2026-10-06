@@ -15,6 +15,7 @@ from decimal import Decimal, InvalidOperation
 from urllib.parse import urlsplit, parse_qsl
 
 import requests
+from findzia_cache import provider_cacheable
 
 SHEIN_CURRENCIES = {
     'us.shein.com': 'USD', 'roe.shein.com': 'EUR', 'eur.shein.com': 'EUR',
@@ -185,7 +186,7 @@ class StructuredPrices:
         began = self.clock()
         with self.lock:
             cached = self.cache.get(key)
-            if cached and cached[0] > began:
+            if cached and cached[0] > began and provider_cacheable(cached[1]):
                 self.cost('structured_price_cache_hits')
                 return copy.deepcopy(cached[1])
             pending = self.inflight.get(key)
@@ -244,7 +245,8 @@ class StructuredPrices:
                 self.cache = {k: v for k, v in self.cache.items() if v[0] > now}
                 if len(self.cache) >= 512:
                     self.cache.pop(next(iter(self.cache)))
-                self.cache[key] = (now + ttl, copy.deepcopy(result))
+                if provider_cacheable(result):
+                    self.cache[key] = (now + ttl, copy.deepcopy(result))
                 future = self.inflight.pop(key)
                 future.set_result(copy.deepcopy(result))
             self.slots.release()
