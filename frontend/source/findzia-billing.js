@@ -1,5 +1,5 @@
-/* FINDZIA_BILLING_RELEASE=156.7.82 */
-/* Findzia 156.7.82 — one-page Paddle payment panel; existing checkout summary preserved. */
+/* FINDZIA_BILLING_RELEASE=156.7.83 */
+/* Findzia 156.7.83 — restored express checkout; native method/footer order and contained loading. */
 (() => {
   'use strict';
   const searches = new Set(['/api/search','/api/search/stream','/api/search/image','/api/search/image/stream',
@@ -58,7 +58,7 @@
     let status=null, config=null, error='', flight=null, stamp=0, active=0, revision=0, guestFlight=null, linkTimer=null;
     let noticeCode='', noticeKey='', allowedView=null, blockedSearch=null;
     let paddleConfig=null, paymentBusy=false, paymentMessage='', paymentState='pending', paymentTxn='', paymentRevision=0, walletDialog=null;
-    let checkoutView=null, standardPreferred=false, mfConfig=null, paymentConfigFlight=null, paymentConfigAt=0;
+    let checkoutView=null, mfConfig=null, paymentConfigFlight=null, paymentConfigAt=0;
     let mfView=null, mfScriptPromise=null, paymentFlow=0;
     let feedbackEpoch=0;
     let startingPayment=false, queuedPlan='', recoveryTimer=null, recoveryDeadline=0, pendingCheckoutIntent='';
@@ -232,7 +232,7 @@
       if(!(config?.plans||status?.plans||[]).some(p=>p.id===id&&p.interval==='once'))return;
       clearTimeout(recoveryTimer);recoveryTimer=null;recoveryDeadline=0;
       pendingCheckoutIntent='';
-      storePlan({plan:id,at:Date.now(),resume:!account.member()});paymentMessage='';paymentState='pending';standardPreferred=false;
+      storePlan({plan:id,at:Date.now(),resume:!account.member()});paymentMessage='';paymentState='pending';
       if(!account.member()){account.open('signin');return;}
       startPayment();
     }
@@ -292,8 +292,7 @@
         // Keep the account surface until the next surface exists. Closing it
         // first canceled our own flow and swallowed immediate provider errors.
         
-        if(standardPreferred)openStandard(paddle,paymentTxn);else openWallet(paddle,paymentTxn);
-        if(checkoutView?.mode==='overlay')account.close();
+        openWallet(paddle,paymentTxn);
       }catch(e){if(flow===paymentFlow&&rev===revision&&id===selectedPlan()){
         if(errorCode(e)==='checkout_pending')resumePendingPayment({},flow,id);
         else paymentMessage=paymentFailure(e);
@@ -600,7 +599,7 @@
       const dialog=walletDialog,view=checkoutView;walletDialog=null;checkoutView=null;
       if(view){
         clearTimeout(view.timer);clearTimeout(view.revealTimer);clearTimeout(view.dismissTimer);
-        view.resizeObserver?.disconnect();view.frameObserver?.disconnect();view.animation?.cancel();
+        view.resizeObserver?.disconnect();view.frameObserver?.disconnect();view.loaderObserver?.disconnect();view.animation?.cancel();
         view.frame?.removeEventListener('load',view.settle,true);
       }
       startingPayment=false;
@@ -613,14 +612,19 @@
       const email=account.member()?.email;
       return {transactionId,...(email?{customer:{email}}:{})};
     }
-    function openStandard(paddle,transactionId,cardOnly=false){
-      if(paymentRevision!==revision||paymentTxn!==transactionId||!account.member()||checkoutView?.paying||checkoutView?.mode==='overlay')return;
-      // Reopen the exact transaction. Do not create another order or debit credits.
-      closeWallet();standardPreferred=!cardOnly;
-      checkoutView={mode:'overlay',id:'',paying:false,loaded:false};
-      try{paddle.Checkout.open({...checkoutOptions(transactionId),settings:{displayMode:'overlay',variant:'one-page',
-        allowedPaymentMethods:cardOnly?['card']:['apple_pay','google_pay','card'],theme:root.dataset.theme==='dark'?'dark':'light'}});}
-      catch(e){closeWallet();paymentMessage=paymentFailure(e);account.open('checkout');}
+    function retryWallet(paddle,transactionId){
+      if(paymentRevision!==revision||paymentTxn!==transactionId||!account.member()||checkoutView?.paying||checkoutView?.closing)return;
+      // Retry the same transaction inside the same checkout flow, never an overlay.
+      // Plans provide feedback while the replacement frame prepares out of sight.
+      account.open('plans');
+      try{openWallet(paddle,transactionId);account.render();}
+      catch(e){closeWallet();paymentMessage=paymentFailure(e);account.open('plans');}
+    }
+    function containPaddleLoader(view){
+      if(checkoutView!==view||view.closing)return;
+      // Paddle's SDK may append a page-wide loader to body. Keep that exact node
+      // inside our payment area; Paddle.Spinner.hide() can still remove it normally.
+      for(const loader of document.querySelectorAll('body > .paddle-loader'))view.frame.append(loader);
     }
     function checkoutHelp(text){
       const view=checkoutView;
@@ -702,27 +706,29 @@
       if(p){summary.append(el('strong','',tf('{count} searches',{count:p.credits},'{count} عملية بحث')),el('span','',tr('One-time payment','دفعة واحدة')),currency);}
       const totals=el('div','fzb-checkout-totals');
       const status=el('p','fzb-wallet-status');status.hidden=true;status.setAttribute('role','status');status.setAttribute('aria-live','polite');
-      const fallback=button(tr('Open secure checkout','فتح صفحة الدفع الآمنة'),()=>openStandard(paddle,transactionId),'fzb-wallet-alternative fzb-card-method');
+      const fallback=button(tr('Reload checkout','إعادة تحميل الدفع'),()=>retryWallet(paddle,transactionId),'fzb-wallet-alternative fzb-card-method');
       const cardIcon=el('span','fzb-card-icon');cardIcon.setAttribute('aria-hidden','true');fallback.prepend(cardIcon);
       fallback.hidden=true;fallback.disabled=true;frame.inert=true;frame.setAttribute('aria-busy','true');
-      dialog.append(header,summary,totals,status,frame,fallback);document.body.append(dialog);
+      // Normal method buttons and legal footer all belong to Paddle. Only a
+      // recovery action sits outside that frame, above it and hidden until needed.
+      dialog.append(header,summary,totals,status,fallback,frame);document.body.append(dialog);
       const view={mode:'inline',id:'',dialog,title,status,totals,currency,fallback,frame,loaded:false,revealed:false,totalsReady:false,paying:false,timer:null};checkoutView=view;
       view.settle=()=>settleWallet(view);
+      view.loaderObserver=new MutationObserver(()=>containPaddleLoader(view));view.loaderObserver.observe(document.body,{childList:true});
       view.frameObserver=new MutationObserver(view.settle);view.frameObserver.observe(frame,{childList:true,subtree:true,attributes:true,attributeFilter:['style','height','width']});
       if(window.ResizeObserver)view.resizeObserver=new ResizeObserver(view.settle);
       frame.addEventListener('load',view.settle,true);
       view.timer=setTimeout(()=>{if(checkoutView===view&&!view.revealed&&!view.paying)checkoutHelp('');},15000);
       dialog.addEventListener('cancel',e=>{e.preventDefault();dismissWallet(view);});
       dialog.addEventListener('close',()=>{if(checkoutView===view&&view.revealed&&!dialog.open){closeWallet();account.open('plans');}});
-      // Match the MyFatoorah light payment surface inside the unchanged site shell.
-      // Paddle owns every wallet/card field and the complete frame height, including
-      // its footer. Never crop, replace or reload this live secure form.
+      // Restore the original express surface and frozen site theme. Paddle's own
+      // alternate-method control keeps the footer after all payment choices.
+      // The complete provider frame, including its footer, always remains visible.
       try{paddle.Checkout.open({...checkoutOptions(transactionId),
-        settings:{displayMode:'inline',variant:'one-page',frameTarget:walletFrame,
-          allowedPaymentMethods:['apple_pay','google_pay','card'],
-          frameInitialHeight:'450',frameStyle:'width:100%;min-width:312px;background-color:#ffffff;color-scheme:light;border:none;border-radius:14px;display:block;',
-          theme:'light',locale:['ar','en','fr','de','es','it','pt','tr','ru','ja','ko'].includes(root.dataset.lang)?root.dataset.lang:root.dataset.lang==='zh'?'zh-Hans':'en'}
-      });}catch(e){closeWallet();throw e;}
+        settings:{displayMode:'inline',variant:'express',frameTarget:walletFrame,
+          frameInitialHeight:'180',frameStyle:'width:100%;min-width:312px;background-color:'+(theme==='dark'?'#202923':'#ffffff')+';color-scheme:normal;border:none;display:block;',
+          showNonExpressPaymentMethods:true,theme,locale:['ar','en','fr','de','es','it','pt','tr','ru','ja','ko'].includes(root.dataset.lang)?root.dataset.lang:root.dataset.lang==='zh'?'zh-Hans':'en'}
+      });containPaddleLoader(view);}catch(e){closeWallet();throw e;}
     }
 
     function paymentError(e){
@@ -783,7 +789,7 @@
       // permanent blacklist entry: bind it to the currently opened surface.
       if(e.name!=='checkout.loaded'&&view.id&&data.id&&view.id!==data.id)return;
       if(e.name==='checkout.error'){
-        if(view.mode==='inline')checkoutHelp(tr('The payment form could not load. Try opening secure checkout.','تعذّر تحميل نموذج الدفع. جرّب فتح صفحة الدفع الآمنة.'));
+        if(view.mode==='inline')checkoutHelp(tr('The payment form could not load. Try reloading checkout.','تعذّر تحميل نموذج الدفع. جرّب إعادة تحميله.'));
         else if(!view.paying){closeWallet();paymentMessage=paymentCopy('error',tr('Checkout could not load. Try again in a regular Safari or Chrome tab.','تعذّر تحميل الدفع. جرّب مرة ثانية بتبويب عادي في Safari أو Chrome.'));account.open('checkout');}
         return;
       }
@@ -807,7 +813,7 @@
       }
       if(e.name==='checkout.payment.failed'||e.name==='checkout.payment.error'){
         view.paying=false;if(view.fallback)view.fallback.disabled=false;
-        checkoutHelp(tr('Payment was not completed. Try another card or use standard checkout.','ما اكتمل الدفع. جرّب بطاقة ثانية أو افتح الدفع المعتاد.'));
+        checkoutHelp(tr('Payment was not completed. Try another card or reload checkout.','ما اكتمل الدفع. جرّب بطاقة ثانية أو أعد تحميل الدفع.'));
       }
     });
     function viewPurchases(){
@@ -1011,7 +1017,7 @@
       return JSON.stringify([status,error,paddleConfig?.management_available,paddleConfig?.checkout_available]);
     }
     root.fzBilling={renderStamp,viewPurchases,restorePurchases,fetch:paidFetch,beforeSearch,refresh,renderUsage,renderPlans,renderCheckout,planSummary,selectedPlan,beforeSignIn,handleSearchError,notice,status:()=>status,label:()=>status?tf('Searches remaining: {count}',{count:status.remaining},'عمليات البحث المتبقية: {count}'):tr('10 free searches','10 بحوث مجانية')};
-    root.addEventListener('fz:account-session',()=>{clearTimeout(recoveryTimer);recoveryTimer=null;queuedPlan='';pendingCheckoutIntent='';startingPayment=false;feedbackEpoch++;closeMF();closeWallet();revision++;status=null;stamp=0;error='';noticeCode='';paddleConfig=null;mfConfig=null;paymentConfigAt=0;paymentConfigFlight=null;paymentBusy=false;paymentMessage='';paymentState='pending';paymentTxn='';standardPreferred=false;memoryPlan=null;paymentConfig().then(async()=>{account.render();if(await confirmMyFatoorah())return;if(account.member()&&selectedPlan()&&resumePlan())startPayment();});refresh(true);});
+    root.addEventListener('fz:account-session',()=>{clearTimeout(recoveryTimer);recoveryTimer=null;queuedPlan='';pendingCheckoutIntent='';startingPayment=false;feedbackEpoch++;closeMF();closeWallet();revision++;status=null;stamp=0;error='';noticeCode='';paddleConfig=null;mfConfig=null;paymentConfigAt=0;paymentConfigFlight=null;paymentBusy=false;paymentMessage='';paymentState='pending';paymentTxn='';memoryPlan=null;paymentConfig().then(async()=>{account.render();if(await confirmMyFatoorah())return;if(account.member()&&selectedPlan()&&resumePlan())startPayment();});refresh(true);});
     root.addEventListener('fz:account-view',e=>{
       if(e.detail.to!=='checkout')clearCompletedFeedback();
       if(e.detail.to!=='plans'&&startingPayment&&!checkoutView?.revealed&&!mfView){
@@ -1194,8 +1200,10 @@
 .fzb-wallet-dialog[data-paddle-wallet]>.fzb-checkout-totals{gap:4px;margin:0 0 16px;padding:0 0 16px}
 .fzb-wallet-dialog[data-paddle-wallet] .fzb-checkout-total{font-size:12px;line-height:1.6;color:var(--pay-muted)}
 .fzb-wallet-dialog[data-paddle-wallet] .fzb-checkout-total:last-of-type{font-size:17px;font-weight:650;color:var(--pay-ink);margin-top:5px}
-.fzb-wallet-dialog[data-paddle-wallet]>.fzb-wallet-frame{flex:0 0 auto;min-height:0;min-width:0;width:100%;overflow:visible;background:#fff;color:#24332d;color-scheme:light;border-radius:14px;box-shadow:0 0 0 1px #dfe4df}
-.fzb-wallet-dialog[data-paddle-wallet]>.fzb-wallet-frame iframe{display:block;max-width:100%;border:0;border-radius:14px;background:#fff;color-scheme:light}
+.fzb-wallet-dialog[data-paddle-wallet]>.fzb-wallet-frame{position:relative;isolation:isolate;flex:0 0 auto;min-height:0;min-width:0;width:100%;overflow:visible;background:var(--pay-bg);color-scheme:inherit}
+.fzb-wallet-dialog[data-paddle-wallet]>.fzb-wallet-frame iframe{display:block;max-width:100%;border:0;background:var(--pay-bg);color-scheme:normal}
+body:has(.fzb-wallet-dialog[data-paddle-wallet])>.paddle-loader{visibility:hidden!important;pointer-events:none!important}
+.fzb-wallet-dialog[data-paddle-wallet]>.fzb-wallet-frame>.paddle-loader{position:absolute!important;inset:0!important;width:100%!important;height:100%!important;margin:0!important;padding:0!important;box-sizing:border-box;max-width:100%;max-height:100%;overflow:hidden;border-radius:10px;background:color-mix(in srgb,var(--pay-bg) 92%,transparent)!important;z-index:2!important}
 .fzb-wallet-dialog[data-paddle-wallet]>.fzb-card-method{flex:0 0 auto;min-height:44px;margin:10px 0 0!important;padding:10px 14px;border-color:var(--pay-line);border-radius:12px;font-size:13px;background:color-mix(in srgb,var(--pay-ink) 3%,var(--pay-bg))}
 .fzb-wallet-dialog[data-paddle-wallet]>.fzb-wallet-status:not([hidden]){margin:0 0 12px;font-size:12px}
 .fzb-plan-buy[aria-busy=true]::after{content:'';display:inline-block;box-sizing:border-box;width:12px;height:12px;margin-inline-start:8px;border:1.5px solid currentColor;border-inline-end-color:transparent;border-radius:50%;vertical-align:-1px;animation:fzb-pay-spin .8s linear infinite}
