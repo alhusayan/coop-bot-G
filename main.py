@@ -394,7 +394,7 @@ from findzia_billing import CreditMiddleware, install_billing
 app.add_middleware(CreditMiddleware, owner=app)
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization', 'X-Findzia-Request-Id'], max_age=86400)
-BUILD_ID = 'v128.5.42.56-media-routing'
+BUILD_ID = 'v128.5.42.57-audit-errors'
 _SOCIAL = None
 
 def _fz_social_row(row):
@@ -16387,38 +16387,157 @@ def _web_identity_profile_from_wire(value):
             profile[field] = normalized
     return profile
 
-def _web_identity_http_error(response):
-    """Expose an operational category, never the provider body or credentials."""
-    category = ''
-    if response.status_code == 402:
-        # Existing logs only retained the HTTP code. Record an allowlisted
-        # operational reason, never raw provider bodies, prompts or API keys.
-        reason = 'unspecified'
-        try:
+def _web_identity_error_info(data, http_status=None):
+    """Read known error envelopes; return only allowlisted operational facts.
+
+    Streaming errors can be wrapped in a JSON array. Field violations may be
+    the only useful explanation, with a generic top-level message. Neither
+    prompts nor arbitrary provider text belong in application logs.
+    """
+    texts, statuses, fields = [], [], set()
+    pending, visited = [(data, 0)], 0
+    while pending and visited < 64:
+        value, depth = pending.pop(0)
+        visited += 1
+        if depth > 6:
+            continue
+        if isinstance(value, list):
+            pending.extend((item, depth + 1) for item in value[:16])
+        elif isinstance(value, dict):
+            for key in ('message', 'description', 'field', 'reason'):
+                if isinstance(value.get(key), str):
+                    texts.append(value[key][:2048])
+            if isinstance(value.get('status'), str):
+                statuses.append(value['status'])
+            for key in ('error', 'errors', 'details', 'fieldViolations', 'field_violations'):
+                if key in value:
+                    pending.append((value[key], depth + 1))
+        elif isinstance(value, str):
+            texts.append(value[:2048])
+    message = '\n'.join(texts)[:16384].lower()
+    compact = re.sub(r'[^a-z0-9]', '', message)
+    for wire, label in (
+        ('responseschema', 'response_schema'), ('responsejsonschema', 'response_json_schema'),
+        ('propertyordering', 'property_ordering'), ('minitems', 'min_items'),
+        ('maxitems', 'max_items'), ('maxoutputtokens', 'max_output_tokens'),
+        ('responsemimetype', 'response_mime_type'), ('thinkingconfig', 'thinking_config'),
+        ('thinkingbudget', 'thinking_budget'), ('thinkinglevel', 'thinking_level'),
+        ('temperature', 'temperature'), ('inlinedata', 'inline_data'),
+        ('mimetype', 'mime_type'), ('systeminstruction', 'system_instruction')):
+        if wire in compact:
+            fields.add(label)
+    allowed_statuses = {'INVALID_ARGUMENT', 'FAILED_PRECONDITION', 'PERMISSION_DENIED',
+        'UNAUTHENTICATED', 'RESOURCE_EXHAUSTED', 'NOT_FOUND', 'INTERNAL', 'UNAVAILABLE'}
+    api_status = next((status for status in statuses if status in allowed_statuses), 'unknown')
+    reason = 'unspecified'
+    if any(term in message for term in ('insufficient credit', 'credit balance', 'insufficient balance', 'out of credits')):
+        reason = 'insufficient_credit'
+    elif any(term in message for term in ('api key not valid', 'api_key_invalid', 'invalid api key', 'api key expired')):
+        reason = 'invalid_api_key'
+    elif any(term in message for term in ('billing', 'payment', 'paid tier')):
+        reason = 'billing_required'
+    elif any(term in message for term in ('quota', 'spending limit')) or (http_status == 402 and 'budget' in message):
+        reason = 'quota_or_budget'
+    elif api_status in ('PERMISSION_DENIED', 'UNAUTHENTICATED') or any(term in message for term in ('permission', 'not authorized', 'access denied')):
+        reason = 'access_denied'
+    elif any(term in message for term in ('model not found', 'model is not supported', 'unsupported model')):
+        reason = 'model_unavailable'
+    elif any(term in message for term in ('request too large', 'payload too large', 'request payload size', 'input token count', 'input token limit')):
+        reason = 'request_size'
+    schema_error = any(term in compact for term in ('responseschema', 'responsejsonschema', 'propertyordering')) or any(
+        term in message for term in ('schema', 'too many states', 'grammar'))
+    image_error = bool(fields & {'inline_data'}) or any(term in message for term in (
+        'unable to process input image', 'image format', 'image is invalid', 'invalid image',
+        'unsupported mime', 'unsupported image', 'image decoding', 'decode image', 'mime type'))
+    if reason == 'unspecified':
+        if schema_error and image_error:
+            reason = 'multiple_invalid_fields'
+        elif schema_error:
+            reason = 'schema_complexity' if any(term in message for term in (
+                'too many states', 'too complex', 'too large', 'too deep', 'complexity', 'nesting', 'constraint')) else 'schema_invalid'
+        elif image_error:
+            reason = 'image_invalid'
+        elif fields & {'max_output_tokens', 'temperature', 'thinking_config', 'thinking_budget', 'thinking_level', 'response_mime_type'}:
+            reason = 'generation_config_invalid'
+        elif 'unknown name' in message or 'unknown field' in message:
+            reason = 'unknown_request_field'
+        elif 'invalid argument' in message:
+            reason = 'invalid_argument'
+    return {'category': reason, 'api_status': api_status, 'fields': sorted(fields)}
+
+
+def _web_identity_http_error(response, *, deadline=None, payload=None, transport='unknown'):
+    """Classify bounded error bodies once, including array-wrapped SSE errors."""
+    cached = getattr(response, '_findzia_identity_http_error', None)
+    if isinstance(cached, str):
+        return cached
+    code = 'http_' + str(response.status_code)
+    if response.status_code not in (400, 402):
+        return code
+    data, shape = None, 'unreadable'
+    try:
+        if callable(getattr(response, 'iter_content', None)):
+            body = bytearray()
+            for chunk in response.iter_content(chunk_size=4096):
+                if deadline is not None and time.monotonic() >= deadline:
+                    shape = 'deadline'
+                    break
+                if len(body) + len(chunk) > 16384:
+                    shape = 'too_large'
+                    break
+                body.extend(chunk)
+            else:
+                shape = 'non_json'
+                data = json.loads(body)
+        else:
             data = response.json()
-            error = data.get('error', {}) if isinstance(data, dict) else {}
-            message = str(error.get('message', '') if isinstance(error, dict) else error).lower()
-            if any(term in message for term in ('insufficient credit', 'credit balance', 'insufficient balance', 'out of credits')):
-                reason = 'insufficient_credit'
-            elif any(term in message for term in ('billing', 'payment', 'paid tier')):
-                reason = 'billing_required'
-            elif any(term in message for term in ('quota', 'spending limit', 'budget')):
-                reason = 'quota_or_budget'
-            elif any(term in message for term in ('permission', 'not authorized', 'access denied')):
-                reason = 'access_denied'
-        except (ValueError, TypeError, AttributeError):
-            pass
-        print('AI UPSTREAM DENIED provider=gemini status=402 category=' + reason)
+        if data is not None:
+            shape = 'array' if isinstance(data, list) else 'object' if isinstance(data, dict) else 'other'
+    except Exception:
+        # A failed error-body read must not replace the known HTTP status with
+        # a generic timeout and must never trigger an unchanged paid retry.
+        pass
+    info = _web_identity_error_info(data, response.status_code)
     if response.status_code == 400:
-        try:
-            message = str((response.json().get('error') or {}).get('message') or '').lower()
-        except (ValueError, TypeError, AttributeError):
-            message = ''
-        if any(word in message for word in ('schema', 'too many states', 'constraint')):
-            category = '_schema'
-        elif any(word in message for word in ('image', 'mime', 'inline_data', 'inline data')):
-            category = '_image'
-    return 'http_' + str(response.status_code) + category
+        if info['category'] in ('schema_invalid', 'schema_complexity'):
+            code += '_schema'
+        elif info['category'] == 'image_invalid':
+            code += '_image'
+    config = (payload or {}).get('generationConfig') or {}
+    images, image_chars = 0, 0
+    for content in (payload or {}).get('contents', []):
+        for part in content.get('parts', []):
+            inline = part.get('inline_data') or part.get('inlineData') or {}
+            if isinstance(inline.get('data'), str):
+                images += 1
+                image_chars += len(inline['data'])
+    # Only static categories/field names and numerical request metadata.
+    # No raw messages, image bytes, user text, URLs or credentials.
+    print('AI UPSTREAM DENIED provider=gemini status=' + str(response.status_code)
+        + ' category=' + info['category'] + ' details=' + json.dumps({
+        'api_status': info['api_status'], 'fields': info['fields'],
+        'body_shape': shape, 'transport': transport if transport in ('sse', 'rest') else 'unknown',
+        'schema': bool(config.get('responseSchema') or config.get('responseJsonSchema')),
+        'images': images, 'image_base64_chars': image_chars,
+        'max_output_tokens': config.get('maxOutputTokens') if type(config.get('maxOutputTokens')) is int else None,
+    }, sort_keys=True))
+    try:
+        response._findzia_identity_http_error = code
+    except (AttributeError, TypeError):
+        pass
+    return code
+
+
+def _web_identity_compatible_payload(payload):
+    """Remove only the rejected provider grammar, preserving all audit input."""
+    config = payload.get('generationConfig') or {}
+    if not (config.get('responseSchema') or config.get('responseJsonSchema')):
+        return None
+    compatible = copy.deepcopy(payload)
+    compatible['generationConfig'].pop('responseSchema', None)
+    compatible['generationConfig'].pop('responseJsonSchema', None)
+    return compatible
+
 
 def _web_identity_unique_object(pairs):
     """Ambiguous JSON cannot establish a streamed identity fact."""
@@ -16532,13 +16651,17 @@ def _web_identity_stream_response(gemini_url, payload, timeout, on_text, cancel_
             _api_cost_record('gemini_identity_http_requests')
             response = requests.post(url, params={'key': GEMINI_API_KEY, 'alt': 'sse'},
                                      json=stream_payload, timeout=(min(5.0, remaining), remaining), stream=True)
-            error = _web_identity_http_error(response) if response.status_code >= 400 else ''
-            if (error != 'http_400_schema' or attempt or deadline - time.monotonic() <= 1
-                    or not stream_payload.get('generationConfig', {}).get('responseSchema')):
+            error = _web_identity_http_error(response, deadline=deadline,
+                payload=stream_payload, transport='sse') if response.status_code >= 400 else ''
+            if error != 'http_400_schema' or attempt or deadline - time.monotonic() <= 1:
+                break
+            compatible = _web_identity_compatible_payload(stream_payload)
+            if compatible is None:
                 break
             _web_safe_response_close(response)
             response = None
-            stream_payload['generationConfig'].pop('responseSchema', None)
+            stream_payload = compatible
+            print('WEB IDENTITY REVIEW retry=schema_compatibility transport=sse attempts=2')
             with GEMINI_STATS_LOCK:
                 GEMINI_STATS['plain_calls'] += 1
             _api_cost_record('gemini_identity_schema_retries')
@@ -16617,26 +16740,26 @@ def _web_identity_post_response(gemini_url, payload, timeout, cancel_event=None)
     deadline = time.monotonic() + timeout
     _api_cost_record('gemini_identity_http_requests')
     response = requests.post(gemini_url, params={'key': GEMINI_API_KEY},
-                             json=payload, timeout=(5.0, timeout))
-    if _web_identity_http_error(response) != 'http_400_schema':
+                             json=payload, timeout=(min(5.0, timeout), timeout))
+    if _web_identity_http_error(response, deadline=deadline, payload=payload, transport='rest') != 'http_400_schema':
         return response
     remaining = deadline - time.monotonic()
     if remaining <= 1 or (cancel_event is not None and cancel_event.is_set()):
         return response
-    # Preserve the same images, candidates and explicit output contract.
-    # Only remove the provider grammar; the local decoder/identity gates stay.
-    compatible = dict(payload)
-    config = dict(payload['generationConfig'])
-    config.pop('responseSchema', None)
-    config.pop('responseJsonSchema', None)
-    compatible['generationConfig'] = config
-    print('WEB IDENTITY REVIEW retry=schema_compatibility attempts=2')
+    compatible = _web_identity_compatible_payload(payload)
+    if compatible is None:
+        return response
+    _web_safe_response_close(response)
+    print('WEB IDENTITY REVIEW retry=schema_compatibility transport=rest attempts=2')
     with GEMINI_STATS_LOCK:
         GEMINI_STATS['plain_calls'] += 1
     _api_cost_record('gemini_identity_http_requests')
     _api_cost_record('gemini_identity_schema_retries')
-    return requests.post(gemini_url, params={'key': GEMINI_API_KEY},
-                         json=compatible, timeout=(min(5.0, remaining), remaining))
+    response = requests.post(gemini_url, params={'key': GEMINI_API_KEY},
+                             json=compatible, timeout=(min(5.0, remaining), remaining))
+    if response.status_code >= 400:
+        _web_identity_http_error(response, deadline=deadline, payload=compatible, transport='rest')
+    return response
 
 def _web_identity_response_text(candidate):
     """Read final answer text only, excluding optional thinking parts."""
