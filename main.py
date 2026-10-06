@@ -394,7 +394,7 @@ from findzia_billing import CreditMiddleware, install_billing
 app.add_middleware(CreditMiddleware, owner=app)
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization', 'X-Findzia-Request-Id'], max_age=86400)
-BUILD_ID = 'v128.5.42.55-audit-recovery'
+BUILD_ID = 'v128.5.42.56-media-routing'
 _SOCIAL = None
 
 def _fz_social_row(row):
@@ -5427,7 +5427,7 @@ def _web_offer_image_candidates(row):
             if _web_is_http_url(raw) and raw not in seen and not _web_image_is_placeholder(raw):
                 seen.add(raw)
                 urls.append(raw)
-    for field in ('serpapi_thumbnail', 'thumbnail', 'image', 'image_url', 'original', 'product_image', 'thumbnails', 'images', 'image_candidates'):
+    for field in ('audited_image', 'serpapi_thumbnail', 'thumbnail', 'image', 'image_url', 'original', 'product_image', 'thumbnails', 'images', 'image_candidates'):
         add((row or {}).get(field))
     return urls
 
@@ -16877,6 +16877,7 @@ def _web_ai_classifier_request(identity, results, market, visual_context=None, c
             item = copy.deepcopy(proof['item'])
             item['id'] = cid
             item['_reference_profile'] = copy.deepcopy(proof['reference_profile'])
+            _web_share_media_audit([item], evidence)
             progress_callback({'items': [item], 'visual_mode': True,
                                'reference_profile': copy.deepcopy(proof['reference_profile']),
                                'visual_evidence_count': 1, 'content_cache_hit': True})
@@ -16966,6 +16967,8 @@ def _web_ai_classifier_request(identity, results, market, visual_context=None, c
             item['id'] = cid
             item['_reference_profile'] = copy.deepcopy(proof['reference_profile'])
             items.append(item)
+    if progress_callback is None:
+        _web_share_media_audit([item for item in items if item['id'] in hits], evidence)
     result = dict(live, items=items, visual_mode=True,
                   visual_requested_count=sum(1 for row in source_rows[:WEB_VISUAL_CLASSIFIER_MAX_RESULTS]
                                              if _web_is_http_url(_web_unproxy_image_url(str(
@@ -16981,6 +16984,32 @@ def _web_ai_classifier_request(identity, results, market, visual_context=None, c
     print(f'IDENTITY COST candidates={len(candidates)} reused={len(hits)} reviewed={len(direct)}')
     return result
 
+
+
+def _web_share_media_audit(items, evidence):
+    """Share completed pixel verdicts, including proofs reused by the audit cache."""
+    inspector = getattr(app.state, 'product_media_inspector', None)
+    if inspector is None or not hasattr(inspector, 'remember_audit'):
+        return
+    counts = Counter()
+    for item in items:
+        inline = evidence.get(item.get('id'))
+        kind = item.get('image_kind')
+        if not inline or kind not in ('product','logo','text_only','placeholder'):
+            counts['no_pixel_verdict'] += 1
+            continue
+        # A preferred URL never grants admission. /media/check still fetches
+        # its current normalized bytes and checks the exact-byte cache.
+        source = inline.get('source_url') or ''
+        if kind == 'product' and _web_is_http_url(source):
+            item['audited_image'] = source
+        try:
+            seeded = inspector.remember_audit(inline, kind)
+            counts['seeded' if seeded else 'busy_or_cached'] += 1
+        except Exception:
+            counts['unavailable'] += 1
+            _api_cost_record('media_audit_share_unavailable')
+    print('MEDIA AUDIT SHARE ' + json.dumps(dict(counts), sort_keys=True))
 
 
 def _web_ai_classifier_request_live(identity, results, market, visual_context=None, cancel_event=None, _prepared_evidence=None, progress_callback=None, *, _retry_truncated=True, _request_deadline=None):
@@ -17022,6 +17051,8 @@ def _web_ai_classifier_request_live(identity, results, market, visual_context=No
     if content_key:
         cached_content = _web_ai_classifier_cache_get(content_key)
         if cached_content and cached_content.get('items') and not cached_content.get('review_error'):
+            cached_content = copy.deepcopy(cached_content)
+            _web_share_media_audit(cached_content['items'], visual_evidence)
             return dict(cached_content, content_cache_hit=True)
 
     system = '''You are Findzia's universal, reference-first ecommerce product-identity auditor.
@@ -17411,19 +17442,9 @@ judge the product type and overall resemblance, not for ordinary design variants
             return value
         normalized = value['items']
         reference_profile = value['reference_profile']
-        # Share only a final, explicit image-kind judgement for these exact
-        # bytes. Identity scores/category guesses alone never admit a photo.
+        # No provisional stream item can populate the media verdict cache.
         if visual_mode and finish_reason == 'STOP':
-            inspector = getattr(app.state, 'product_media_inspector', None)
-            if inspector is not None and hasattr(inspector, 'remember_audit'):
-                for item in normalized:
-                    inline = visual_evidence.get(item['id'])
-                    if inline and item.get('image_kind') in ('product','logo','text_only','placeholder'):
-                        try:
-                            inspector.remember_audit(inline, item['image_kind'])
-                        except Exception:
-                            # Cache reuse is an optimization, not an audit gate.
-                            _api_cost_record('media_audit_share_unavailable')
+            _web_share_media_audit(normalized, visual_evidence)
         # Failed/partial reviews never poison later searches. A cache hit still
         # goes through the existing local conflict and Exact-proof validators.
         cacheable = bool(reference_profile) and all(
@@ -17670,6 +17691,8 @@ def _web_attach_captured_result_sections(payload, lang, allow_ai=True, cancel_ev
         except Exception:
             heuristic_rank = 99
         ai_item = ai_by_id.get(index) or {}
+        if _web_is_http_url(ai_item.get('audited_image') or ''):
+            row['audited_image'] = ai_item['audited_image']
         if isinstance(ai_item.get('candidate_profile'), dict):
             row['card_candidate_profile'] = ai_item['candidate_profile']
         match_guard = match_guard_by_id.get(index)
@@ -18544,6 +18567,7 @@ def _web_card_fields(row):
         out['merchant_domain']=domain
         out['merchant_rating_token']=_card_reputation_token(domain,country)
     if _web_is_http_url(out.get('url') or ''):
+        out['media_images'] = _web_offer_image_candidates(out)
         out['evaluation_token'] = _fz_evaluation_token(out)
     if not _web_alternative_visible(out):
         out['hidden'] = True
@@ -20244,30 +20268,50 @@ def _web_listing_price_country(row, market):
     return str(row.get('country') or row.get('market_country') or market.get('country') or 'us').lower()
 
 
-def _web_automatic_price_batches(rows):
-    """One country/currency per query, balanced merchants, bounded call budget."""
+def _web_automatic_price_batches(rows, attempted_rows=None):
+    """Bounded, market-isolated queries; earlier local work cannot starve exports."""
+    def group_key(row):
+        # A US SHEIN listing and a US domestic listing use the same query
+        # country. Splitting them by export_store created competing groups
+        # that consumed the final slot before SHEIN could be considered.
+        return _web_listing_price_country(row, current_market())
+    group_use, merchant_use = Counter(), Counter()
+    for row in (attempted_rows or {}).values():
+        group = group_key(row)
+        group_use[group] += 1
+        merchant_use[(group, _more_result_domain(row.get('url')))] += 1
     groups = {}
     for key, row in rows.items():
-        exported = bool(row.get('export_store') or _global_store_match(row.get('url') or '', 'cn'))
-        cc = _web_listing_price_country(row, current_market())
-        group = groups.setdefault((cc, exported), {})
-        group.setdefault(_more_result_domain(row.get('url')), []).append((key,row))
-    ordered = sorted(groups, key=lambda k: (k[0] != current_market().get('country'), k[1]))
-    batches=[]
-    # Round-robin countries and merchants; a second batch may belong to the
-    # same market. Previously only its first four listings could be recovered.
-    while ordered and len(batches)<WEB_ASYNC_PRICE_SHARED_MARKETS:
-        for group_key in list(ordered):
-            merchants=groups[group_key];batch={}
-            while merchants and len(batch)<4:
-                for host in list(merchants):
-                    key,row=merchants[host].pop(0);batch[key]=row
-                    if not merchants[host]:del merchants[host]
-                    if len(batch)>=4:break
-            if batch:batches.append(batch)
-            if not merchants:ordered.remove(group_key)
-            if len(batches)>=WEB_ASYNC_PRICE_SHARED_MARKETS:break
-    return batches[:WEB_ASYNC_PRICE_SHARED_MARKETS]
+        group = group_key(row)
+        groups.setdefault(group, {}).setdefault(_more_result_domain(row.get('url')), []).append((key,row))
+    batches = []
+    while groups and len(batches) < WEB_ASYNC_PRICE_SHARED_MARKETS:
+        # Prefer an unserved market, then local. Keep each batch within its
+        # own country/currency context; do not widen price matching rules.
+        group = min(groups, key=lambda k: (group_use[k], k != current_market().get('country')))
+        merchants, batch = groups[group], {}
+        while merchants and len(batch) < 4:
+            host = min(merchants, key=lambda h: (merchant_use[(group,h)], -len(merchants[h])))
+            key, row = merchants[host].pop(0)
+            batch[key] = row
+            group_use[group] += 1
+            merchant_use[(group,host)] += 1
+            if not merchants[host]: del merchants[host]
+        if batch: batches.append(batch)
+        if not merchants: del groups[group]
+    return batches
+
+
+def _web_log_price_queue(rows, attempted, review_pending, calls, country):
+    hosts = {}
+    for key, row in rows.items():
+        if _web_row_has_numeric_price(row): continue
+        host = _more_result_domain(row.get('url'))
+        bucket = hosts.setdefault(host, {'missing':0,'attempted':0,'held_for_review':0,'not_selected':0})
+        bucket['missing'] += 1
+        bucket['held_for_review' if key in review_pending else 'attempted' if key in attempted else 'not_selected'] += 1
+    print('PRICE RECOVERY QUEUE ' + json.dumps({'country':country, 'batches':calls,
+        'budget':WEB_ASYNC_PRICE_SHARED_MARKETS, 'hosts':hosts}, sort_keys=True))
 
 
 _WEB_NOT_A_PRICE_PIECE = re.compile(
@@ -21263,7 +21307,7 @@ async def _web_with_live_prices(source, lang, country, allow_paid=True, wait_sec
                 slots = WEB_ASYNC_PRICE_SHARED_MARKETS - recovery_calls
                 if next_event is not None:
                     slots = min(slots, max(0, WEB_ASYNC_PRICE_SHARED_MARKETS - 1 - recovery_calls))
-                for batch in _web_automatic_price_batches(eligible)[:slots]:
+                for batch in _web_automatic_price_batches(eligible, {k:rows[k] for k in recovery_attempted if k in rows})[:slots]:
                     recovery_attempted.update(batch)
                     task = asyncio.create_task(asyncio.to_thread(_web_targeted_price_updates, batch, lang, dict(market)))
                     shared[task] = recovery_calls
@@ -21291,6 +21335,7 @@ async def _web_with_live_prices(source, lang, country, allow_paid=True, wait_sec
             bucket = host_stats.setdefault(host, {'received':0,'priced':0,'missing_price':0})
             bucket['received'] += 1
             bucket['priced' if _web_row_has_numeric_price(row) else 'missing_price'] += 1
+        _web_log_price_queue(rows, recovery_attempted, review_pending, recovery_calls, country)
         print('OFFER VISIBILITY '+json.dumps({'country':country,'hosts':host_stats},ensure_ascii=False))
         final_event['offer_diagnostics'] = host_stats
         final_event.update(count=len(rows), priced_count=len(rows) - missing_count,
@@ -32446,7 +32491,10 @@ def _fz_recover_media(row):
     def result(urls):
         urls = urls[:8]
         return {'ok': True, 'images': urls,
-                'media_token': _fz_evaluation_token(dict(row, images=urls)),
+                'media_images': _web_offer_image_candidates({'images': urls}),
+                'media_token': _fz_evaluation_token(dict(row, audited_image='', image='', thumbnail='',
+                    serpapi_thumbnail='', image_url='', original='', product_image='', thumbnails=[],
+                    images=urls, image_candidates=[])),
                 'image_candidates': _web_merge_offer_images({}, {'images': urls}).get('image_candidates', urls)}
     deadline = time.monotonic() + 8
     page_job = _FZ_MEDIA_LOOKUP_POOL.submit(_run_with_market, market, page)
