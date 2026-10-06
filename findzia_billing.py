@@ -1,4 +1,4 @@
-"""Findzia 156.7.44-retry-fix: refunds never impose a daily search lockout.
+"""Findzia 156.7.73: one transport fallback after a confirmed photo refund.
 
 No public purchase-grant endpoint. Checkout remains unavailable until a payment
 adapter verifies payment, amount, currency and account ownership server-side.
@@ -29,6 +29,7 @@ HELPER_PATHS = {'/api/guide': ('guide', 4), '/api/evaluate': ('insight', 5),
     '/api/ai/price-history': ('insight', 5), '/api/ai/price-alert': ('insight', 5),
     '/api/ai/shopping': ('insight', 5)}
 REQUEST_ID = re.compile(r'^[A-Za-z0-9_-]{20,100}$')
+IMAGE_RETRY_WAIT_SECONDS = 6.0
 
 def fingerprint(value):
     return hashlib.sha256(str(value).encode()).hexdigest()
@@ -95,14 +96,14 @@ class Credits:
                 self.available = False
                 print('BILLING: database unavailable; protected requests fail closed')
         if self.available:
-            print('FINDZIA_CREDITS build=156.7.44-retry-fix balance=read_only completion=durable_journal executors=isolated refund_daily_lockout=False', flush=True)
+            print('FINDZIA_CREDITS build=156.7.73-photo-retry balance=read_only completion=durable_journal executors=isolated refund_daily_lockout=False', flush=True)
 
     def check(self):
         if not self.available:
             raise HTTPException(503, 'credits_unavailable')
 
     def public_config(self):
-        return dict(build='156.7.44-retry-fix', pricing_build='156.7.54', enabled=self.enabled, available=self.available, trial_credits=10,
+        return dict(build='156.7.73-photo-retry', pricing_build='156.7.54', enabled=self.enabled, available=self.available, trial_credits=10,
                     guest_trial=True,prepaid_enabled=self.prepaid_enabled,payment_provider=self.payment_provider,checkout_available=False, restore_available=False, plans=list(self.sale_plans))
 
     def ledger(self, db, member, grant, request, delta, reason, now):
@@ -306,6 +307,33 @@ class Credits:
             db.execute('INSERT INTO fz_credit_requests VALUES(?,?,?,?,?,?,?,NULL)',(member,request_id,row['id'],kind,path,'reserved',now))
             self.ledger(db,member,row['id'],request_id,-1,'reserve',now)
 
+    def reserve_image_retry(self, member, request_id):
+        """One child admission, only after the original stream was refunded.
+
+        Never reopen an old request or its durable outcome. The deterministic
+        child key keeps concurrent/replayed fallbacks behind normal admission.
+        A terminal parent cannot change state again, so no lock spans this read
+        and reserve(). All balance, concurrency and trial guards still apply.
+        """
+        self.check()
+        if not REQUEST_ID.fullmatch(request_id or ''):
+            raise HTTPException(400,'request_id_required')
+        with self.accounts.connect() as db:
+            previous=db.execute('''SELECT r.member,r.path,r.state FROM fz_credit_requests r
+                JOIN fz_credit_grants g ON g.id=r.grant_id
+                WHERE (r.member=? OR g.member=?) AND r.request=?''',
+                (member,member,request_id)).fetchone()
+        if not previous or previous['path']!='/api/search/image/stream':
+            raise HTTPException(409,'search_already_processed')
+        if previous['state']=='reserved':
+            return None
+        if previous['state']!='refunded':
+            raise HTTPException(409,'search_already_processed')
+        child=fingerprint('photo-transport-retry:'+previous['member']+':'+request_id)
+        self.reserve(member,child,'/api/search/image')
+        print('CREDITS_IMAGE_RETRY outcome=admitted_after_refund',flush=True)
+        return child
+
     def _finish(self, db, row, success, now, reason='empty_or_failed'):
         if row['state']!='reserved':return
         db.execute('UPDATE fz_credit_requests SET state=?,finished=? WHERE member=? AND request=?',
@@ -409,6 +437,26 @@ class ResultEvidence:
 
 class CreditMiddleware:
     def __init__(self, app, owner):self.app=app;self.owner=owner
+    async def _reserve_search(self, service, member, rid, path, cancelled):
+        try:
+            await service.runtime.run(service.reserve,member,rid,path,write=True)
+            return rid
+        except HTTPException as exc:
+            if path!='/api/search/image' or exc.status_code!=409:
+                raise
+        deadline=asyncio.get_running_loop().time()+IMAGE_RETRY_WAIT_SECONDS
+        while True:
+            if cancelled.is_set():
+                raise asyncio.CancelledError()
+            child=await service.runtime.run(service.reserve_image_retry,member,rid,write=True)
+            if child:
+                return child
+            remaining=deadline-asyncio.get_running_loop().time()
+            if remaining<=0:
+                print('CREDITS_IMAGE_RETRY outcome=original_still_running',flush=True)
+                raise HTTPException(409,'search_in_progress')
+            await asyncio.sleep(min(.2,remaining))
+
     async def __call__(self,scope,receive,send):
         if scope['type']!='http' or scope.get('method')=='OPTIONS':return await self.app(scope,receive,send)
         path=scope['path']; is_search=path in SEARCH_PATHS
@@ -433,14 +481,18 @@ class CreditMiddleware:
                 rid=request.headers.get('x-findzia-request-id','')
                 # Shield admission too: a disconnect must not orphan a queued
                 # reservation that later deducts a credit without retrieval.
-                admission=service.runtime.track(service.runtime.run(service.reserve,member['id'],rid,path,write=True))
+                admission_cancelled=asyncio.Event()
+                admission=service.runtime.track(self._reserve_search(service,member['id'],rid,path,admission_cancelled))
                 try:
-                    await asyncio.shield(admission);reserved=True
+                    rid=await asyncio.shield(admission);reserved=True
                 except asyncio.CancelledError:
+                    admission_cancelled.set()
                     async def cancel_admission():
                         try:
-                            await admission
-                            await service.runtime.complete(member['id'],rid,False)
+                            admitted_id=await admission
+                            await service.runtime.complete(member['id'],admitted_id,False)
+                        except asyncio.CancelledError:
+                            pass
                         except (HTTPException,OSError,sqlite3.Error):
                             print('CREDITS_ADMISSION cancelled_recovery_pending',flush=True)
                     service.runtime.track(cancel_admission())

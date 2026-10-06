@@ -1,3 +1,4 @@
+# v128.5.42.62: ready-offer audit priority and bounded local-ready completion tail.
 # v128.5.42.61: send the compact visual-audit schema first, including cold starts.
 # v128.5.42.60: restore release 69 price recovery; retain Gemini, image and first-card fixes.
 # v128.5.42.59: evidence-first audits, bounded missing-image/index cooldowns, first-render telemetry.
@@ -397,7 +398,7 @@ from findzia_billing import CreditMiddleware, install_billing
 app.add_middleware(CreditMiddleware, owner=app)
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization', 'X-Findzia-Request-Id', 'X-Findzia-Search-Trace'], max_age=86400)
-BUILD_ID = 'v128.5.42.61-direct-audit'
+BUILD_ID = 'v128.5.42.62-photo-retry-tail'
 _SOCIAL = None
 
 def _fz_social_row(row):
@@ -21557,7 +21558,8 @@ async def _web_with_live_prices(source, lang, country, allow_paid=True, wait_sec
                     if kind == 'done':
                         final_event = event
                         next_event = None
-                        finish_by = loop.time() + tail_wait
+                        finish_by = loop.time() + (min(tail_wait, 3.0)
+                            if event.get('completion_reason') == 'ready_local_tail' else tail_wait)
                     else:
                         yield _web_stream_event(event)
                         next_event = asyncio.create_task(anext(source))
@@ -28834,6 +28836,33 @@ async def _web_stream_image_identity_batches(image_b64, mime, caption, country, 
         await source.aclose()
 
 
+WEB_IDENTITY_READY_LOCAL_MIN = 3
+WEB_IDENTITY_READY_TAIL_SECONDS = 8.0
+
+
+def _web_identity_review_priority(row, market):
+    ready = _web_row_has_numeric_price(row) and bool(_web_offer_image_candidates(row))
+    local = (row.get('market_scope') == 'local' or row.get('market_rank') == 0
+             or str(row.get('country') or '').lower() == str(market.get('country') or '').lower())
+    return (not ready, not local)
+
+
+def _web_identity_ready_local_count(rows, query, market):
+    """Only final, admitted local offers with usable price/image evidence count."""
+    # The price coordinator checks the same group-level outliers on copies.
+    # Keep its rejected prices out of the readiness threshold as well.
+    candidates = {index: dict(row) for index, row in enumerate(rows) if not row.get('hidden')}
+    _web_flag_price_outliers(candidates)
+    return sum(1 for row in candidates.values()
+        if row.get('market_scope') == 'local' and row.get('classification_final')
+        and row.get('identity_review_status') == 'completed' and not row.get('hidden')
+        and _web_alternative_visible(row) and _market_offer_allowed(row, market)
+        and not _fz_product_form_conflict(query, row.get('raw_title') or row.get('title'))
+        and _web_row_has_numeric_price(row) and _web_confirmable_price(row)
+        and not _web_price_review_reason(row, market) and _web_offer_image_candidates(row)
+        and _card_offer_state(row).get('stock_status') != 'out_of_stock')
+
+
 async def _web_stream_image_identity_batches_core(image_b64, mime, caption, country, lang, cancel_event,
                                              *, search_fn=None, build_items_fn=None, market_snapshot=None, reference_context=None, requested_changes=None):
     """Stream the shared search set and independent, bounded identity audits.
@@ -28854,6 +28883,9 @@ async def _web_stream_image_identity_batches_core(image_b64, mime, caption, coun
     price_tasks, priced_keys = {}, set()
     identity, query_sent = str(caption or '').strip(), ''
     final_ready = False
+    ready_tail_deadline = None
+    ready_tail_exhausted = False
+    audit_cancel_event = threading.Event()
     progress_task = None
     review_update_task = None
     search_task = None
@@ -28894,7 +28926,7 @@ async def _web_stream_image_identity_batches_core(image_b64, mime, caption, coun
         nonlocal review_count
         pairs = [(dict(r), _web_identity_capture_key(r, query)) for r in batch]
         def review_callback(report):
-            if not cancel_event.is_set():
+            if not cancel_event.is_set() and not audit_cancel_event.is_set():
                 try:
                     loop.call_soon_threadsafe(review_updates.put_nowait, (pairs, report))
                 except RuntimeError:
@@ -28908,7 +28940,7 @@ async def _web_stream_image_identity_batches_core(image_b64, mime, caption, coun
             payload['_photo_requested_changes'] = copy.deepcopy(requested_changes)
         future = WEB_IDENTITY_REVIEW_POOL.submit(
             _run_with_market, market, _web_attach_captured_result_sections,
-            payload, lang, True, cancel_event, review_callback)
+            payload, lang, True, audit_cancel_event, review_callback)
         task = asyncio.wrap_future(future)
         reviews[task] = pairs
         review_count += 1
@@ -28922,6 +28954,9 @@ async def _web_stream_image_identity_batches_core(image_b64, mime, caption, coun
                 queued_tokens.add(token)
 
     def fill_review_slots():
+        # Audit complete offers first; stable ordering preserves ties and the
+        # local lane's priority without changing admission or identity rules.
+        queued.sort(key=lambda pair: _web_identity_review_priority(pair[0], market))
         while enabled and queued and len(reviews) < WEB_IDENTITY_BATCH_PARALLEL:
             batch = []
             size = WEB_IDENTITY_FIRST_BATCH if review_count == 0 else WEB_IDENTITY_BATCH_SIZE
@@ -28940,6 +28975,21 @@ async def _web_stream_image_identity_batches_core(image_b64, mime, caption, coun
             search_fn or _web_search_image_sync, image_b64, mime, caption, country, lang,
             callback if search_fn or ANDROID_IMAGE_PROGRESSIVE else None, False, cancel_event))
         while not cancel_event.is_set():
+            ready_local = (_web_identity_ready_local_count(rows.values(), identity, market)
+                           if enabled and final_ready else 0)
+            if ready_local < WEB_IDENTITY_READY_LOCAL_MIN:
+                ready_tail_deadline = None
+            elif ready_tail_deadline is None:
+                ready_tail_deadline = time.monotonic() + WEB_IDENTITY_READY_TAIL_SECONDS
+            if ready_tail_deadline is not None and time.monotonic() >= ready_tail_deadline and (reviews or queued):
+                ready_tail_exhausted = True
+                # Retrieval is complete and local cards passed every gate.
+                # Cancel unfinished audits; never promote their provisional rows.
+                audit_cancel_event.set()
+                for task in reviews:
+                    task.cancel()
+                print(f'IDENTITY READY TAIL local_ready={ready_local} pending_batches={len(reviews)} queued={len(queued)}')
+                break
             if not final_ready and progress_task is None:
                 progress_task = asyncio.create_task(progress.get())
             waiting = set(reviews)
@@ -28957,7 +29007,8 @@ async def _web_stream_image_identity_batches_core(image_b64, mime, caption, coun
                 waiting.add(progress_task)
             if not waiting:
                 break
-            done, _ = await asyncio.wait(waiting, timeout=WEB_IDENTITY_HEARTBEAT_SECONDS,
+            done, _ = await asyncio.wait(waiting, timeout=min(WEB_IDENTITY_HEARTBEAT_SECONDS,
+                max(.01, ready_tail_deadline - time.monotonic())) if ready_tail_deadline is not None else WEB_IDENTITY_HEARTBEAT_SECONDS,
                                          return_when=asyncio.FIRST_COMPLETED)
             if not done:
                 yield _web_stream_event({'event': 'status', 'stage': 'identity_review' if final_ready else 'whatsapp_image_engine',
@@ -29086,6 +29137,8 @@ async def _web_stream_image_identity_batches_core(image_b64, mime, caption, coun
         if cancel_event.is_set():
             return
         snapshot = _web_identity_stream_snapshot(rows.values(), identity, market, lang, True, elapsed(), not text_search)
+        if ready_tail_exhausted:
+            snapshot.update(partial=True, completion_reason='ready_local_tail')
         yield _web_stream_event(snapshot)
         yield _web_stream_event({'event': 'identity_review', 'build': BUILD_ID,
                                  'status': 'not_required' if text_search else 'completed' if all(r.get('identity_review_status') == 'completed' for r in rows.values()) and rows else 'partial' if snapshot['scored_count'] else 'unavailable',
@@ -29113,7 +29166,8 @@ async def _web_stream_image_identity_batches_core(image_b64, mime, caption, coun
                                  'alternative_count': snapshot['alternative_count'],
                                  'global_count': snapshot['global_count'], 'classification_engine': 'progressive_identity_batches',
                                  'first_results_ms': first_results_ms, 'first_match_ms': first_match_ms,
-                                 'identity_batch_count': review_count, 'elapsed_ms': elapsed()})
+                                 'identity_batch_count': review_count, 'elapsed_ms': elapsed(),
+                                 **({'partial': True, 'completion_reason': 'ready_local_tail'} if ready_tail_exhausted else {})})
         print(f'WEB IDENTITY STREAM captured={len(rows)} visible={len(snapshot["results"])} scored={snapshot["scored_count"]} batches={review_count} first_results_ms={first_results_ms} first_match_ms={first_match_ms}')
     except asyncio.CancelledError:
         raise
@@ -29126,6 +29180,7 @@ async def _web_stream_image_identity_batches_core(image_b64, mime, caption, coun
             yield _web_stream_event(snapshot)
         yield _web_stream_event({'event': 'done', 'count': len(snapshot['results']), 'partial': True, 'elapsed_ms': elapsed()})
     finally:
+        audit_cancel_event.set()
         cancel_event.set()
         tasks = list(reviews) + list(price_tasks.values())
         tasks += [t for t in (search_task, progress_task, review_update_task) if t is not None]
