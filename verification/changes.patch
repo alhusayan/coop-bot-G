@@ -4,257 +4,428 @@
  app.add_middleware(CreditMiddleware, owner=app)
  _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
  app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization', 'X-Findzia-Request-Id'], max_age=86400)
--BUILD_ID = 'v128.5.42.56-media-routing'
-+BUILD_ID = 'v128.5.42.57-audit-errors'
+-BUILD_ID = 'v128.5.42.57-audit-errors'
++BUILD_ID = 'v128.5.42.58-audit-compact-upload'
  _SOCIAL = None
  
  def _fz_social_row(row):
-@@ -16387,38 +16387,157 @@
-             profile[field] = normalized
-     return profile
- 
--def _web_identity_http_error(response):
--    """Expose an operational category, never the provider body or credentials."""
--    category = ''
--    if response.status_code == 402:
--        # Existing logs only retained the HTTP code. Record an allowlisted
--        # operational reason, never raw provider bodies, prompts or API keys.
--        reason = 'unspecified'
--        try:
-+def _web_identity_error_info(data, http_status=None):
-+    """Read known error envelopes; return only allowlisted operational facts.
+@@ -16523,9 +16523,114 @@
+     }, sort_keys=True))
+     try:
+         response._findzia_identity_http_error = code
++        response._findzia_identity_error_info = info
+     except (AttributeError, TypeError):
+         pass
+     return code
 +
-+    Streaming errors can be wrapped in a JSON array. Field violations may be
-+    the only useful explanation, with a generic top-level message. Neither
-+    prompts nor arbitrary provider text belong in application logs.
++
++_WEB_AUDIT_SCHEMA_MODES = {}
++_WEB_AUDIT_SCHEMA_LOCK = threading.Lock()
++
++
++def _web_audit_compact_payload(payload):
++    """Keep the identity schema; enforce array lengths in the local validator.
++
++    Large nested array bounds can make Gemini's grammar reject a valid schema
++    with only INVALID_ARGUMENT. This changes no prompts, images or field types.
 +    """
-+    texts, statuses, fields = [], [], set()
-+    pending, visited = [(data, 0)], 0
-+    while pending and visited < 64:
-+        value, depth = pending.pop(0)
-+        visited += 1
-+        if depth > 6:
-+            continue
-+        if isinstance(value, list):
-+            pending.extend((item, depth + 1) for item in value[:16])
-+        elif isinstance(value, dict):
-+            for key in ('message', 'description', 'field', 'reason'):
-+                if isinstance(value.get(key), str):
-+                    texts.append(value[key][:2048])
-+            if isinstance(value.get('status'), str):
-+                statuses.append(value['status'])
-+            for key in ('error', 'errors', 'details', 'fieldViolations', 'field_violations'):
-+                if key in value:
-+                    pending.append((value[key], depth + 1))
-+        elif isinstance(value, str):
-+            texts.append(value[:2048])
-+    message = '\n'.join(texts)[:16384].lower()
-+    compact = re.sub(r'[^a-z0-9]', '', message)
-+    for wire, label in (
-+        ('responseschema', 'response_schema'), ('responsejsonschema', 'response_json_schema'),
-+        ('propertyordering', 'property_ordering'), ('minitems', 'min_items'),
-+        ('maxitems', 'max_items'), ('maxoutputtokens', 'max_output_tokens'),
-+        ('responsemimetype', 'response_mime_type'), ('thinkingconfig', 'thinking_config'),
-+        ('thinkingbudget', 'thinking_budget'), ('thinkinglevel', 'thinking_level'),
-+        ('temperature', 'temperature'), ('inlinedata', 'inline_data'),
-+        ('mimetype', 'mime_type'), ('systeminstruction', 'system_instruction')):
-+        if wire in compact:
-+            fields.add(label)
-+    allowed_statuses = {'INVALID_ARGUMENT', 'FAILED_PRECONDITION', 'PERMISSION_DENIED',
-+        'UNAUTHENTICATED', 'RESOURCE_EXHAUSTED', 'NOT_FOUND', 'INTERNAL', 'UNAVAILABLE'}
-+    api_status = next((status for status in statuses if status in allowed_statuses), 'unknown')
-+    reason = 'unspecified'
-+    if any(term in message for term in ('insufficient credit', 'credit balance', 'insufficient balance', 'out of credits')):
-+        reason = 'insufficient_credit'
-+    elif any(term in message for term in ('api key not valid', 'api_key_invalid', 'invalid api key', 'api key expired')):
-+        reason = 'invalid_api_key'
-+    elif any(term in message for term in ('billing', 'payment', 'paid tier')):
-+        reason = 'billing_required'
-+    elif any(term in message for term in ('quota', 'spending limit')) or (http_status == 402 and 'budget' in message):
-+        reason = 'quota_or_budget'
-+    elif api_status in ('PERMISSION_DENIED', 'UNAUTHENTICATED') or any(term in message for term in ('permission', 'not authorized', 'access denied')):
-+        reason = 'access_denied'
-+    elif any(term in message for term in ('model not found', 'model is not supported', 'unsupported model')):
-+        reason = 'model_unavailable'
-+    elif any(term in message for term in ('request too large', 'payload too large', 'request payload size', 'input token count', 'input token limit')):
-+        reason = 'request_size'
-+    schema_error = any(term in compact for term in ('responseschema', 'responsejsonschema', 'propertyordering')) or any(
-+        term in message for term in ('schema', 'too many states', 'grammar'))
-+    image_error = bool(fields & {'inline_data'}) or any(term in message for term in (
-+        'unable to process input image', 'image format', 'image is invalid', 'invalid image',
-+        'unsupported mime', 'unsupported image', 'image decoding', 'decode image', 'mime type'))
-+    if reason == 'unspecified':
-+        if schema_error and image_error:
-+            reason = 'multiple_invalid_fields'
-+        elif schema_error:
-+            reason = 'schema_complexity' if any(term in message for term in (
-+                'too many states', 'too complex', 'too large', 'too deep', 'complexity', 'nesting', 'constraint')) else 'schema_invalid'
-+        elif image_error:
-+            reason = 'image_invalid'
-+        elif fields & {'max_output_tokens', 'temperature', 'thinking_config', 'thinking_budget', 'thinking_level', 'response_mime_type'}:
-+            reason = 'generation_config_invalid'
-+        elif 'unknown name' in message or 'unknown field' in message:
-+            reason = 'unknown_request_field'
-+        elif 'invalid argument' in message:
-+            reason = 'invalid_argument'
-+    return {'category': reason, 'api_status': api_status, 'fields': sorted(fields)}
-+
-+
-+def _web_identity_http_error(response, *, deadline=None, payload=None, transport='unknown'):
-+    """Classify bounded error bodies once, including array-wrapped SSE errors."""
-+    cached = getattr(response, '_findzia_identity_http_error', None)
-+    if isinstance(cached, str):
-+        return cached
-+    code = 'http_' + str(response.status_code)
-+    if response.status_code not in (400, 402):
-+        return code
-+    data, shape = None, 'unreadable'
-+    try:
-+        if callable(getattr(response, 'iter_content', None)):
-+            body = bytearray()
-+            for chunk in response.iter_content(chunk_size=4096):
-+                if deadline is not None and time.monotonic() >= deadline:
-+                    shape = 'deadline'
-+                    break
-+                if len(body) + len(chunk) > 16384:
-+                    shape = 'too_large'
-+                    break
-+                body.extend(chunk)
-+            else:
-+                shape = 'non_json'
-+                data = json.loads(body)
-+        else:
-             data = response.json()
--            error = data.get('error', {}) if isinstance(data, dict) else {}
--            message = str(error.get('message', '') if isinstance(error, dict) else error).lower()
--            if any(term in message for term in ('insufficient credit', 'credit balance', 'insufficient balance', 'out of credits')):
--                reason = 'insufficient_credit'
--            elif any(term in message for term in ('billing', 'payment', 'paid tier')):
--                reason = 'billing_required'
--            elif any(term in message for term in ('quota', 'spending limit', 'budget')):
--                reason = 'quota_or_budget'
--            elif any(term in message for term in ('permission', 'not authorized', 'access denied')):
--                reason = 'access_denied'
--        except (ValueError, TypeError, AttributeError):
--            pass
--        print('AI UPSTREAM DENIED provider=gemini status=402 category=' + reason)
-+        if data is not None:
-+            shape = 'array' if isinstance(data, list) else 'object' if isinstance(data, dict) else 'other'
-+    except Exception:
-+        # A failed error-body read must not replace the known HTTP status with
-+        # a generic timeout and must never trigger an unchanged paid retry.
-+        pass
-+    info = _web_identity_error_info(data, response.status_code)
-     if response.status_code == 400:
--        try:
--            message = str((response.json().get('error') or {}).get('message') or '').lower()
--        except (ValueError, TypeError, AttributeError):
--            message = ''
--        if any(word in message for word in ('schema', 'too many states', 'constraint')):
--            category = '_schema'
--        elif any(word in message for word in ('image', 'mime', 'inline_data', 'inline data')):
--            category = '_image'
--    return 'http_' + str(response.status_code) + category
-+        if info['category'] in ('schema_invalid', 'schema_complexity'):
-+            code += '_schema'
-+        elif info['category'] == 'image_invalid':
-+            code += '_image'
-+    config = (payload or {}).get('generationConfig') or {}
-+    images, image_chars = 0, 0
-+    for content in (payload or {}).get('contents', []):
-+        for part in content.get('parts', []):
-+            inline = part.get('inline_data') or part.get('inlineData') or {}
-+            if isinstance(inline.get('data'), str):
-+                images += 1
-+                image_chars += len(inline['data'])
-+    # Only static categories/field names and numerical request metadata.
-+    # No raw messages, image bytes, user text, URLs or credentials.
-+    print('AI UPSTREAM DENIED provider=gemini status=' + str(response.status_code)
-+        + ' category=' + info['category'] + ' details=' + json.dumps({
-+        'api_status': info['api_status'], 'fields': info['fields'],
-+        'body_shape': shape, 'transport': transport if transport in ('sse', 'rest') else 'unknown',
-+        'schema': bool(config.get('responseSchema') or config.get('responseJsonSchema')),
-+        'images': images, 'image_base64_chars': image_chars,
-+        'max_output_tokens': config.get('maxOutputTokens') if type(config.get('maxOutputTokens')) is int else None,
-+    }, sort_keys=True))
-+    try:
-+        response._findzia_identity_http_error = code
-+    except (AttributeError, TypeError):
-+        pass
-+    return code
-+
-+
-+def _web_identity_compatible_payload(payload):
-+    """Remove only the rejected provider grammar, preserving all audit input."""
 +    config = payload.get('generationConfig') or {}
-+    if not (config.get('responseSchema') or config.get('responseJsonSchema')):
++    schema = config.get('responseSchema')
++    if not isinstance(schema, dict) or not {'reference_profile', 'items'}.issubset(schema.get('properties', {})):
 +        return None
-+    compatible = copy.deepcopy(payload)
-+    compatible['generationConfig'].pop('responseSchema', None)
-+    compatible['generationConfig'].pop('responseJsonSchema', None)
-+    return compatible
++    if not any(part.get('inline_data') or part.get('inlineData')
++               for content in payload.get('contents', []) for part in content.get('parts', [])):
++        return None
++    compact = copy.deepcopy(payload)
++    def strip_bounds(value):
++        if isinstance(value, dict):
++            value.pop('minItems', None)
++            value.pop('maxItems', None)
++            for child in value.values():
++                strip_bounds(child)
++        elif isinstance(value, list):
++            for child in value:
++                strip_bounds(child)
++    strip_bounds(compact['generationConfig']['responseSchema'])
++    return compact if compact != payload else None
 +
++
++def _web_audit_schema_key(url, payload):
++    compact = _web_audit_compact_payload(payload)
++    if compact is None:
++        return ''
++    schema = compact['generationConfig']['responseSchema']
++    return hashlib.sha256((url + json.dumps(schema, sort_keys=True)).encode()).hexdigest()
++
++
++def _web_audit_cached_payload(url, payload):
++    key = _web_audit_schema_key(url, payload)
++    with _WEB_AUDIT_SCHEMA_LOCK:
++        accepted_at = _WEB_AUDIT_SCHEMA_MODES.get(key)
++    if accepted_at is not None and time.monotonic() - accepted_at < 3600:
++        return _web_audit_compact_payload(payload), key, True
++    return payload, key, False
++
++
++def _web_audit_schema_result(key, compact, response, *, probe=False):
++    if not key or not compact:
++        return
++    accepted = 200 <= response.status_code < 300
++    with _WEB_AUDIT_SCHEMA_LOCK:
++        if accepted:
++            if len(_WEB_AUDIT_SCHEMA_MODES) >= 32:
++                oldest = min(_WEB_AUDIT_SCHEMA_MODES, key=_WEB_AUDIT_SCHEMA_MODES.get)
++                _WEB_AUDIT_SCHEMA_MODES.pop(oldest, None)
++            _WEB_AUDIT_SCHEMA_MODES[key] = time.monotonic()
++        elif response.status_code == 400:
++            _WEB_AUDIT_SCHEMA_MODES.pop(key, None)
++    if probe or not accepted:
++        # HTTP acceptance proves request compatibility, not product identity.
++        print('AI SCHEMA COMPAT change=array_bounds outcome=' + ('accepted_http' if accepted else 'rejected')
++              + ' status=' + str(response.status_code) + ' contract=' + key[:12])
++
++
++def _web_audit_retry_payload(response, error, payload):
++    compact = _web_audit_compact_payload(payload)
++    info = getattr(response, '_findzia_identity_error_info', {})
++    generic_argument = (error == 'http_400' and info.get('category') == 'invalid_argument'
++                        and info.get('api_status') == 'INVALID_ARGUMENT' and not info.get('fields'))
++    if compact is not None and (generic_argument or error == 'http_400_schema'):
++        return compact, 'array_bounds'
++    if error == 'http_400_schema':
++        return _web_identity_compatible_payload(payload), 'schema_compatibility'
++    return None, ''
++
++
++def _web_identity_local_array_bounds(value, candidate_count, *, complete=False):
++    """Mirror removed provider bounds before any normalized audit can be used."""
++    if not isinstance(value, dict) or not isinstance(value.get('items'), list):
++        return False
++    items = value['items']
++    if len(items) > candidate_count or (complete and len(items) != candidate_count):
++        return False
++    profile_max = len(_WEB_VISUAL_PROFILE_TEXT_FIELDS) + len(_WEB_VISUAL_PROFILE_LIST_FIELDS)
++    def profile_ok(profile):
++        if not isinstance(profile, (dict, list)) or len(profile) > profile_max:
++            return False
++        if isinstance(profile, dict):
++            return all(not isinstance(v, list) or len(v) <= 8 for v in profile.values())
++        return all(isinstance(f, dict) and isinstance(f.get('values'), list)
++                   and len(f['values']) <= 8 for f in profile)
++    if not profile_ok(value.get('reference_profile')):
++        return False
++    for item in items:
++        if not isinstance(item, dict) or not profile_ok(item.get('candidate_profile')):
++            return False
++        if any(not isinstance(item.get(k), list) or len(item[k]) > 40
++               for k in ('same_axes', 'different_axes', 'differences')):
++            return False
++    return True
  
- def _web_identity_unique_object(pairs):
-     """Ambiguous JSON cannot establish a streamed identity fact."""
-@@ -16532,13 +16651,17 @@
-             _api_cost_record('gemini_identity_http_requests')
-             response = requests.post(url, params={'key': GEMINI_API_KEY, 'alt': 'sse'},
+ 
+ def _web_identity_compatible_payload(payload):
+@@ -16626,6 +16731,8 @@
+     complete = [item for item in items if required.issubset(item)
+                 and all(type(item.get(k)) is int and 0 <= item[k] <= 100
+                         for k in ('confidence', 'identity_score', 'observation_quality'))]
++    if not _web_identity_local_array_bounds({'reference_profile': profile, 'items': complete}, len(items)):
++        return {}
+     parsed, error = _web_parse_identity_response({'reference_profile': profile, 'items': complete})
+     return parsed if not error else {}
+ 
+@@ -16638,6 +16745,7 @@
+     schema = stream_payload.get('generationConfig', {}).get('responseSchema')
+     if schema and {'reference_profile', 'items'}.issubset(schema.get('properties', {})):
+         schema['propertyOrdering'] = ['reference_profile', 'items']
++    stream_payload, schema_key, compact_mode = _web_audit_cached_payload(url, stream_payload)
+     raw, finish_reason = '', ''
+     usage_metadata, usage_complete = {}, False
+     response = None
+@@ -16653,15 +16761,17 @@
                                       json=stream_payload, timeout=(min(5.0, remaining), remaining), stream=True)
--            error = _web_identity_http_error(response) if response.status_code >= 400 else ''
--            if (error != 'http_400_schema' or attempt or deadline - time.monotonic() <= 1
--                    or not stream_payload.get('generationConfig', {}).get('responseSchema')):
-+            error = _web_identity_http_error(response, deadline=deadline,
-+                payload=stream_payload, transport='sse') if response.status_code >= 400 else ''
-+            if error != 'http_400_schema' or attempt or deadline - time.monotonic() <= 1:
-+                break
-+            compatible = _web_identity_compatible_payload(stream_payload)
-+            if compatible is None:
+             error = _web_identity_http_error(response, deadline=deadline,
+                 payload=stream_payload, transport='sse') if response.status_code >= 400 else ''
+-            if error != 'http_400_schema' or attempt or deadline - time.monotonic() <= 1:
++            _web_audit_schema_result(schema_key, compact_mode, response, probe=bool(attempt))
++            if not error or attempt or deadline - time.monotonic() <= 1:
                  break
+-            compatible = _web_identity_compatible_payload(stream_payload)
++            compatible, change = _web_audit_retry_payload(response, error, stream_payload)
+             if compatible is None:
+                 break
++            compact_mode = change == 'array_bounds'
              _web_safe_response_close(response)
              response = None
--            stream_payload['generationConfig'].pop('responseSchema', None)
-+            stream_payload = compatible
-+            print('WEB IDENTITY REVIEW retry=schema_compatibility transport=sse attempts=2')
+             stream_payload = compatible
+-            print('WEB IDENTITY REVIEW retry=schema_compatibility transport=sse attempts=2')
++            print('WEB IDENTITY REVIEW retry=' + change + ' transport=sse attempts=2')
              with GEMINI_STATS_LOCK:
                  GEMINI_STATS['plain_calls'] += 1
              _api_cost_record('gemini_identity_schema_retries')
-@@ -16617,26 +16740,26 @@
+@@ -16734,32 +16844,31 @@
+ 
+ 
+ def _web_identity_post_response(gemini_url, payload, timeout, cancel_event=None):
+-    """One bounded compatibility retry, only for an explicit schema rejection."""
+-    if cancel_event is not None and cancel_event.is_set():
+-        raise RuntimeError('identity_request_cancelled')
++    """At most one changed-schema request inside the original deadline."""
      deadline = time.monotonic() + timeout
-     _api_cost_record('gemini_identity_http_requests')
-     response = requests.post(gemini_url, params={'key': GEMINI_API_KEY},
--                             json=payload, timeout=(5.0, timeout))
--    if _web_identity_http_error(response) != 'http_400_schema':
-+                             json=payload, timeout=(min(5.0, timeout), timeout))
-+    if _web_identity_http_error(response, deadline=deadline, payload=payload, transport='rest') != 'http_400_schema':
-         return response
-     remaining = deadline - time.monotonic()
-     if remaining <= 1 or (cancel_event is not None and cancel_event.is_set()):
-         return response
--    # Preserve the same images, candidates and explicit output contract.
--    # Only remove the provider grammar; the local decoder/identity gates stay.
--    compatible = dict(payload)
--    config = dict(payload['generationConfig'])
--    config.pop('responseSchema', None)
--    config.pop('responseJsonSchema', None)
--    compatible['generationConfig'] = config
--    print('WEB IDENTITY REVIEW retry=schema_compatibility attempts=2')
-+    compatible = _web_identity_compatible_payload(payload)
-+    if compatible is None:
-+        return response
-+    _web_safe_response_close(response)
-+    print('WEB IDENTITY REVIEW retry=schema_compatibility transport=rest attempts=2')
-     with GEMINI_STATS_LOCK:
-         GEMINI_STATS['plain_calls'] += 1
-     _api_cost_record('gemini_identity_http_requests')
-     _api_cost_record('gemini_identity_schema_retries')
--    return requests.post(gemini_url, params={'key': GEMINI_API_KEY},
--                         json=compatible, timeout=(min(5.0, remaining), remaining))
-+    response = requests.post(gemini_url, params={'key': GEMINI_API_KEY},
-+                             json=compatible, timeout=(min(5.0, remaining), remaining))
-+    if response.status_code >= 400:
-+        _web_identity_http_error(response, deadline=deadline, payload=compatible, transport='rest')
-+    return response
+-    _api_cost_record('gemini_identity_http_requests')
+-    response = requests.post(gemini_url, params={'key': GEMINI_API_KEY},
+-                             json=payload, timeout=(min(5.0, timeout), timeout))
+-    if _web_identity_http_error(response, deadline=deadline, payload=payload, transport='rest') != 'http_400_schema':
+-        return response
+-    remaining = deadline - time.monotonic()
+-    if remaining <= 1 or (cancel_event is not None and cancel_event.is_set()):
+-        return response
+-    compatible = _web_identity_compatible_payload(payload)
+-    if compatible is None:
+-        return response
+-    _web_safe_response_close(response)
+-    print('WEB IDENTITY REVIEW retry=schema_compatibility transport=rest attempts=2')
+-    with GEMINI_STATS_LOCK:
+-        GEMINI_STATS['plain_calls'] += 1
+-    _api_cost_record('gemini_identity_http_requests')
+-    _api_cost_record('gemini_identity_schema_retries')
+-    response = requests.post(gemini_url, params={'key': GEMINI_API_KEY},
+-                             json=compatible, timeout=(min(5.0, remaining), remaining))
+-    if response.status_code >= 400:
+-        _web_identity_http_error(response, deadline=deadline, payload=compatible, transport='rest')
+-    return response
++    current, schema_key, compact_mode = _web_audit_cached_payload(gemini_url, payload)
++    for attempt in range(2):
++        if cancel_event is not None and cancel_event.is_set():
++            raise RuntimeError('identity_request_cancelled')
++        remaining = deadline - time.monotonic()
++        if remaining <= 0:
++            raise requests.Timeout('identity_request_deadline')
++        _api_cost_record('gemini_identity_http_requests')
++        response = requests.post(gemini_url, params={'key': GEMINI_API_KEY},
++            json=current, timeout=(min(5.0, remaining), remaining))
++        error = _web_identity_http_error(response, deadline=deadline, payload=current, transport='rest') if response.status_code >= 400 else ''
++        _web_audit_schema_result(schema_key, compact_mode, response, probe=bool(attempt))
++        if not error or attempt or deadline - time.monotonic() <= 1 or (cancel_event is not None and cancel_event.is_set()):
++            return response
++        compatible, change = _web_audit_retry_payload(response, error, current)
++        if compatible is None:
++            return response
++        _web_safe_response_close(response)
++        current, compact_mode = compatible, change == 'array_bounds'
++        print('WEB IDENTITY REVIEW retry=' + change + ' transport=rest attempts=2')
++        with GEMINI_STATS_LOCK:
++            GEMINI_STATS['plain_calls'] += 1
++        _api_cost_record('gemini_identity_schema_retries')
  
  def _web_identity_response_text(candidate):
      """Read final answer text only, excluding optional thinking parts."""
+@@ -17494,6 +17603,8 @@
+         parsed = _web_identity_partial_response(raw)
+         if not parsed or not parsed.get('items'):
+             return
++        if not _web_identity_local_array_bounds(parsed, len(candidates)):
++            return
+         parsed['items'] = [item for item in parsed['items'] if item['id'] not in published]
+         if not parsed['items']:
+             return
+@@ -17555,6 +17666,8 @@
+             ids = [item.get('id') for item in strict['items'] if isinstance(item, dict)]
+             if any(type(cid) is not int for cid in ids) or len(ids) != len(set(ids)):
+                 return _web_identity_review_failure('duplicate_or_invalid_ids', visual_mode, len(visual_evidence_ids))
++            if not _web_identity_local_array_bounds(strict, len(candidates), complete=True):
++                return _web_identity_review_failure('invalid_array_bounds', visual_mode, len(visual_evidence_ids))
+         parsed, parse_error = _web_parse_identity_response(raw)
+         parsed_items = parsed.get('items') if isinstance(parsed, dict) else None
+         if not isinstance(parsed_items, list):
+@@ -29425,7 +29538,7 @@
+             image_bytes = base64.b64decode(raw.split(',', 1)[-1] if raw.startswith('data:image/') else raw, validate=True)
+             if not image_bytes or len(image_bytes) > WEB_API_RAW_IMAGE_MAX_BYTES:
+                 raise ValueError('invalid_image')
+-            image_bytes, mime = _web_normalize_uploaded_image_bytes(image_bytes, mime)
++            image_bytes, mime = await _web_prepare_image_bytes(request, image_bytes, mime, payload.get('image_upload'))
+             if len(image_bytes) > WEB_API_MAX_IMAGE_BYTES:
+                 return JSONResponse({'ok': False, 'error': 'image_too_large_after_convert'}, status_code=413)
+             raw = base64.b64encode(image_bytes).decode('ascii')
+@@ -29704,7 +29817,7 @@
+     if not image_bytes or len(image_bytes) > WEB_API_RAW_IMAGE_MAX_BYTES:
+         return Response(content=json.dumps({'ok': False, 'error': 'image_too_large'}), media_type='application/json', status_code=413)
+     try:
+-        image_bytes, mime = _web_normalize_uploaded_image_bytes(image_bytes, mime)
++        image_bytes, mime = await _web_prepare_image_bytes(request, image_bytes, mime, payload.get('image_upload'))
+     except ValueError as e:
+         return Response(content=json.dumps({'ok': False, 'error': str(e)}), media_type='application/json', status_code=400)
+     if len(image_bytes) > WEB_API_MAX_IMAGE_BYTES:
+@@ -29821,7 +29934,7 @@
+     if not image_bytes or len(image_bytes) > WEB_API_RAW_IMAGE_MAX_BYTES:
+         return Response(content=json.dumps({'ok': False, 'error': 'image_too_large'}), media_type='application/json', status_code=413)
+     try:
+-        image_bytes, mime = _web_normalize_uploaded_image_bytes(image_bytes, mime)
++        image_bytes, mime = await _web_prepare_image_bytes(request, image_bytes, mime, payload.get('image_upload'))
+     except ValueError as e:
+         return Response(content=json.dumps({'ok': False, 'error': str(e)}), media_type='application/json', status_code=400)
+     if len(image_bytes) > WEB_API_MAX_IMAGE_BYTES:
+@@ -33981,3 +34094,59 @@
+ _install_findzia_support(app, judge=_refine_ai,
+     plans=lambda: getattr(getattr(app.state, 'findzia_credits', None), 'sale_plans', ()),
+     request_ip=_web_request_ip, enabled=lambda: WEB_API_ENABLED)
++
++
++class _FindziaImageTiming:
++    """Observe the original ASGI receive path, before credit/body middleware."""
++    def __init__(self, app):
++        self.app = app
++
++    async def __call__(self, scope, receive, send):
++        paths = {'/api/search/image', '/api/search/image/stream', '/api/refine/search/stream'}
++        if scope.get('type') != 'http' or scope.get('method') != 'POST' or scope.get('path') not in paths:
++            return await self.app(scope, receive, send)
++        started = time.monotonic()
++        data = {'body_bytes': 0, 'body_complete_ms': None, 'headers_ms': None,
++                'first_body_ms': None, 'status': None}
++        scope['findzia_image_timing'] = data
++        def elapsed():
++            return max(0, int((time.monotonic() - started) * 1000))
++        async def read():
++            message = await receive()
++            if message.get('type') == 'http.request':
++                data['body_bytes'] += len(message.get('body', b''))
++                if not message.get('more_body', False) and data['body_complete_ms'] is None:
++                    data['body_complete_ms'] = elapsed()
++            return message
++        async def write(message):
++            if message.get('type') == 'http.response.start':
++                data['headers_ms'] = elapsed()
++                data['status'] = message.get('status')
++            elif message.get('type') == 'http.response.body' and message.get('body') and data['first_body_ms'] is None:
++                data['first_body_ms'] = elapsed()
++            await send(message)
++        try:
++            await self.app(scope, read, write)
++        finally:
++            data['total_ms'] = elapsed()
++            data['route'] = scope['path']
++            print('IMAGE REQUEST TIMING ' + json.dumps(data, sort_keys=True), flush=True)
++
++
++async def _web_prepare_image_bytes(request, image_bytes, mime, client_meta=None):
++    started = time.monotonic()
++    prepared = await asyncio.to_thread(_web_normalize_uploaded_image_bytes, image_bytes, mime)
++    timing = request.scope.get('findzia_image_timing')
++    if isinstance(timing, dict):
++        timing['normalize_ms'] = max(0, int((time.monotonic() - started) * 1000))
++        timing['input_image_bytes'] = len(image_bytes)
++        timing['normalized_image_bytes'] = len(prepared[0])
++        if isinstance(client_meta, dict):
++            for key, maximum in (('original_bytes', 25000000), ('upload_bytes', 25000000), ('prepare_ms', 60000)):
++                value = client_meta.get(key)
++                if type(value) is int and 0 <= value <= maximum:
++                    timing['client_' + key] = value
++    return prepared
++
++
++app.add_middleware(_FindziaImageTiming)
+--- a/frontend/source/findzia-home.liquid
++++ b/frontend/source/findzia-home.liquid
+@@ -1,4 +1,4 @@
+-{% comment %} FINDZIA_HOME_RELEASE=156.7.67 {% endcomment %}
++{% comment %} FINDZIA_HOME_RELEASE=156.7.69 {% endcomment %}
+ {% comment %}Findzia 156.7.15 · progressive filters + conversational guide from 156.3.0 · combined 156.7.14 payments preserved{% endcomment %}
+ 
+ 
+@@ -217,7 +217,7 @@
+ Jr(),Qr(),Vr(n?Wr().removed:Wr().saved,!1);}(t.getAttribute(a?"data-saved-remove":"data-save-product"),a),a){var n=e.querySelector("[data-saved-remove]")||e.querySelector("[data-saved-products] summary");n&&n.focus();}}}),e.querySelector("[data-saved-products]").addEventListener("toggle",Qr),window.addEventListener("storage",Xr);var Ee=async function(){var e=null;if(!r)return o=!0,n;var t=window.AbortController?new AbortController:null;try{var a=async function(){var e=await fetch(r+"/api/geo",{method:"GET",headers:{Accept:"application/json"},cache:"no-store",signal:t?t.signal:void 0});return e.ok?await e.json():null;}(),i=await Promise.race([a,new Promise(function(r){e=setTimeout(function(){t&&t.abort(),r(null);},3200);})]);if(i&&i.ok&&"default"!==i.source&&Lt(i.country||i.country_code)){var s=String(i.country||i.country_code).toUpperCase();qt(s,(ue[s]||[i.country_name||s])[0]);}}catch(e){}finally{e&&clearTimeout(e),o=!0;}
+ return n;}(),Ae=(new Map,null),Ce=null,Le=0,xe=new Set,qe=e.querySelector("[data-choice-nav]"),Pe=e.querySelector("[data-choice-back]"),Re=(e.querySelector("[data-choice-title]"),e.querySelector("[data-choice-retry]")),Ne="findzia-choices-{{ section.id }}",Te=window.history.scrollRestoration;"scrollRestoration"in window.history&&(window.history.scrollRestoration="manual"),Pe&&Pe.addEventListener("click",function(){if(Ae){var e=window.history.state&&window.history.state[Ne];e&&e.journeyId===Ae.id&&e.choiceId?window.history.back():(Ae&&(Ce?(Ce.view=Dt(),(ee||Y||"loading"===Ce.status)&&(Ce.status="interrupted")):X&&(Ae.parent=Dt())),function(e,r){Ue(!1,!1),Bt(),ur(!1),ft(),Ae=e,Ce=r||null;var t=r?r.view:e.parent;t=t||{query:e.data.query,input:e.data.query,items:[],scroll:0},U=Mt(t.items||[]),j={},H={},U.forEach(function(e,r){j[br(e)]=r,H[br(e)]=!0;}),K=t.query||"",W=Mt(t.lastSearch),g&&(g.value=fzShownQuery(t.input||K)),I=t.sort||"relevance",O=t.filter||"all",E=t.layout||"grid",F=t.arrival||U.length,$=!!t.moreExhausted,Z=!!t.moreError,Q=!1,X=r?null:e.data,_.classList.add("is-visible"),_.classList.toggle("is-comparing",!r),fr(!1),cr(),Tt(),w&&(w.hidden=!0),r?U.length?St():Et(t.message||ar("no_results"),"failed"===r.status):Ot(e.data),function(e,r){var t=B;requestAnimationFrame(function(){if(t===B){if(r)try{r.focus({preventScroll:!0});}catch(e){}
+ window.scrollTo({top:e.scroll||0,behavior:"auto"});}});}(t,r?Pe:b.querySelector('[data-recommendation-index="'+e.focusIndex+'"]'));}(Ae,null),function(e){if(Ae){var r=Object.assign({},window.history.state||{});r[Ne]={journeyId:Ae.id,choiceId:Ce?Ce.id:null};try{window.history[e?"replaceState":"pushState"](r,"",window.location.href);}catch(e){}}}(!0));}}),Re&&Re.addEventListener("click",jt),window.addEventListener("popstate",Ht);var Me=e.querySelector("[data-home-link]");Me&&(Me.addEventListener("click",je),Me.addEventListener("keydown",function(e){"Enter"!==e.key&&" "!==e.key||(e.preventDefault(),je());})),h.forEach(function(e){e.addEventListener("click",function(){ea();});}),g&&g.addEventListener("keydown",function(e){"Enter"===e.key&&!e.shiftKey&&!e.isComposing&&e.keyCode!==229&&(e.preventDefault(),ea());}),v&&y&&(v.addEventListener("click",function(){y.click();}),y.addEventListener("change",function(){y.files&&y.files[0]&&async function(e){if(e){if(e.size>6291456){y.value="";g.closest(".fz-home").fzRefineBridge.accountNotice("ar"===tr()?"الصورة كبيرة. اختر صورة أقل من 6 ميغابايت.":"That image is over 6 MB. Choose a smaller one.");return;}if(!await window.FindziaBeforeSearch(g.closest(".fz-home"),{file:e})){y.value="";return;}Ue(!1,!0),Ut();var r=Bt(),t=Le,a=await Pt();if(t===Le){K="",g&&(g.value=""),fr(!0,ar("searching_image")),zt("image"),w&&(w.hidden=!1),cr();try{var n=await
+-function(e){return new Promise(function(r,t){var a=new FileReader;a.onload=function(){var e=String(a.result),t=e.indexOf(",");r(t>=0?e.slice(t+1):e);},a.onerror=t,a.readAsDataURL(e);});}(e);if(r!==B)return;W={kind:"image",query:"",extraSpecs:"",country:a,image_base64:n,mime_type:e.type||"image/jpeg"},Ft();var i={image_base64:n,mime_type:e.type||"image/jpeg",caption:"",client:"web",country:a,lang:nr()};await fzSearchPhoto(i,r);if(r===B){fr(false);St();Ke(K);}}catch(error){if(r!==B)return;fzPhotoSearchFailed(error);}finally{y&&(y.value="");}}}}(y.files[0]);})),w&&w.addEventListener("click",function(e){var r=e.target.closest("[data-filter]");r&&(O=r.getAttribute("data-filter"),[].slice.call(w.querySelectorAll("button")).forEach(function(e){e.classList.toggle("is-active",e===r);}),St());}),m.forEach(function(e){e.addEventListener("click",function(){dr(e.getAttribute("data-lang-btn"));});}),rr(n),ce="en",ir();}
++fzPreparePhotoUpload(e,()=>r!==B);if(r!==B)return;W={kind:"image",query:"",extraSpecs:"",country:a,image_base64:n.image_base64,mime_type:n.mime_type},Ft();var i={image_base64:n.image_base64,mime_type:n.mime_type,image_upload:n.image_upload,caption:"",client:"web",country:a,lang:nr()};await fzSearchPhoto(i,r);if(r===B){fr(false);St();Ke(K);}}catch(error){if(r!==B)return;fzPhotoSearchFailed(error);}finally{y&&(y.value="");}}}}(y.files[0]);})),w&&w.addEventListener("click",function(e){var r=e.target.closest("[data-filter]");r&&(O=r.getAttribute("data-filter"),[].slice.call(w.querySelectorAll("button")).forEach(function(e){e.classList.toggle("is-active",e===r);}),St());}),m.forEach(function(e){e.addEventListener("click",function(){dr(e.getAttribute("data-lang-btn"));});}),rr(n),ce="en",ir();}
+ function De(){return u+"-"+String(n||t||"XX").toUpperCase();}
+ function Be(e){return(oe[tr()]||oe.en)[e];}
+ var fzPageTransition=null,fzPageSerial=0;
+@@ -932,6 +932,66 @@
+ }
+ var fzPhotoTrace = null;
+ e.fzPhotoSearchDiagnostics = () => fzPhotoTrace ? {...fzPhotoTrace, phases:fzPhotoTrace.phases.map(row => ({...row}))} : null;
++// FINDZIA_PHOTO_UPLOAD_69_BEGIN
++async function fzPreparePhotoUpload(file, cancelled = () => false) {
++  const started = performance.now();
++  const check = () => { if (cancelled()) throw new DOMException('Cancelled', 'AbortError'); };
++  const read = blob => new Promise((resolve, reject) => {
++    const reader = new FileReader();
++    reader.onerror = () => reject(new Error('image_read_failed'));
++    reader.onload = () => { try { check(); resolve(String(reader.result).split(',')[1] || ''); } catch (error) { reject(error); } };
++    reader.readAsDataURL(blob);
++  });
++  let upload = file;
++  check();
++  // Keep unsupported formats (including HEIC) on the server's existing path.
++  if (file.size > 500000 && /^image\/(jpeg|png|webp)$/i.test(file.type)) {
++    let url = '', image = null, canvas = null;
++    try {
++      url = URL.createObjectURL(file);
++      image = new Image();
++      await new Promise((resolve, reject) => {
++        const timer = setTimeout(() => { image.onload = image.onerror = null; image.src = ''; reject(new Error('image_decode_timeout')); }, 5000);
++        image.onload = () => { clearTimeout(timer); resolve(); };
++        image.onerror = () => { clearTimeout(timer); reject(new Error('image_decode_failed')); };
++        image.src = url;
++      });
++      check();
++      const w = image.naturalWidth, h = image.naturalHeight;
++      if (w && h && w * h <= 40000000 && Math.max(w, h) > 1600) {
++        const scale = Math.min(1, 1600 / Math.max(w, h));
++        canvas = document.createElement('canvas');
++        canvas.width = Math.max(1, Math.round(w * scale));
++        canvas.height = Math.max(1, Math.round(h * scale));
++        const ctx = canvas.getContext('2d', {alpha: false});
++        if (ctx) {
++          ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, canvas.width, canvas.height);
++          ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
++          ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
++          const blob = await new Promise(resolve => {
++            const timer = setTimeout(() => resolve(null), 2500);
++            canvas.toBlob(value => { clearTimeout(timer); resolve(value); }, 'image/jpeg', 0.94);
++          });
++          check();
++          if (blob && blob.type === 'image/jpeg' && blob.size < file.size * 0.9) upload = blob;
++        }
++      }
++    } catch (error) {
++      check(); // A decoding failure retains the original; cancellation does not.
++    } finally {
++      if (image) { image.onload = image.onerror = null; image.src = ''; }
++      if (url) URL.revokeObjectURL(url);
++      if (canvas) { canvas.width = 0; canvas.height = 0; }
++    }
++  }
++  check();
++  const image_base64 = await read(upload);
++  return {image_base64, mime_type: upload.type || file.type || 'image/jpeg',
++    image_upload: {original_bytes: file.size, upload_bytes: upload.size,
++      prepare_ms: Math.max(0, Math.round(performance.now() - started))}};
++}
++// FINDZIA_PHOTO_UPLOAD_69_END
++
+ async function fzSearchPhoto(payload, generation) {
+   const lifetime = fzRequestLifetime(65000), started = performance.now();
+   // A late first batch must not start a fresh 30s image-loading window.
+--- a/frontend/scripts/build.mjs
++++ b/frontend/scripts/build.mjs
+@@ -5,7 +5,7 @@
+ 
+ const base = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+ const src = resolve(base, 'source'), dest = resolve(base, 'public');
+-const version = '156.7.67', api = 'https://api.findzia.com';
++const version = '156.7.69', api = 'https://api.findzia.com';
+ // Preserve the live section scope to avoid unnecessary DOM/storage changes.
+ const section = 'template--19963721449543__findzia_home_h4wBLq';
+ const expected = '2de7b483319c713bf649352f7f158f1fedbda92f546bebfe576ae0a2d2c526c6';
+--- a/frontend/package.json
++++ b/frontend/package.json
+@@ -1,6 +1,6 @@
+ {
+   "name": "findzia-standalone",
+-  "version": "156.7.67",
++  "version": "156.7.69",
+   "private": true,
+   "type": "module",
+   "engines": {

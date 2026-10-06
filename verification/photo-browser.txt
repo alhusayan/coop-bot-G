@@ -1,0 +1,19 @@
+{
+  "checks": [
+    "large camera image retains framing at 1600 pixels",
+    "camera upload shrinks by more than half",
+    "encoded MIME matches transmitted JPEG",
+    "preparation telemetry contains actual sizes",
+    "corner detail and orientation are preserved",
+    "small images are not enlarged or reencoded",
+    "portrait aspect ratio is preserved",
+    "EXIF orientation is applied before resizing",
+    "HEIC retains the existing server decode path",
+    "failed browser decode falls back to original",
+    "cancelled search never produces an upload",
+    "failed canvas encoding falls back to original"
+  ],
+  "original_bytes": 11302867,
+  "upload_bytes": 1118560,
+  "prepare_ms": 225
+}

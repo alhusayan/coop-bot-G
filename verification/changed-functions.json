@@ -1,12 +1,23 @@
 {
   "added": [
-    "_web_identity_compatible_payload",
-    "_web_identity_error_info"
+    "_FindziaImageTiming",
+    "_web_audit_cached_payload",
+    "_web_audit_compact_payload",
+    "_web_audit_retry_payload",
+    "_web_audit_schema_key",
+    "_web_audit_schema_result",
+    "_web_identity_local_array_bounds",
+    "_web_prepare_image_bytes"
   ],
   "modified": [
+    "_web_ai_classifier_request_live",
     "_web_identity_http_error",
+    "_web_identity_partial_response",
     "_web_identity_post_response",
-    "_web_identity_stream_response"
+    "_web_identity_stream_response",
+    "web_api_image_search",
+    "web_api_image_search_stream",
+    "web_api_selected_markets_stream"
   ],
   "deleted": []
 }

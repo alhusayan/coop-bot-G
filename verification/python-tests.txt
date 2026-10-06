@@ -33,6 +33,21 @@ test_nonterminal_stream_still_times_out (test_audit_prices.StreamTests.test_nont
 test_terminal_answer_does_not_wait_for_connection_close (test_audit_prices.StreamTests.test_terminal_answer_does_not_wait_for_connection_close) ... ok
 test_truncation_is_preserved_for_existing_validator (test_audit_prices.StreamTests.test_truncation_is_preserved_for_existing_validator) ... ok
 test_unspecified_finish_is_not_completion (test_audit_prices.StreamTests.test_unspecified_finish_is_not_completion) ... ok
+test_cached_rejection_invalidates_mode (test_compact_upload_69.CompactTests.test_cached_rejection_invalidates_mode) ... ok
+test_failed_comparison_stops_after_two_requests_and_does_not_learn (test_compact_upload_69.CompactTests.test_failed_comparison_stops_after_two_requests_and_does_not_learn) ... ok
+test_mode_expires_and_does_not_store_images_or_prompts (test_compact_upload_69.CompactTests.test_mode_expires_and_does_not_store_images_or_prompts) ... ok
+test_no_retry_for_image_configuration_credit_or_unknown_shape (test_compact_upload_69.CompactTests.test_no_retry_for_image_configuration_credit_or_unknown_shape) ... ok
+test_original_deadline_and_cancellation_are_preserved (test_compact_upload_69.CompactTests.test_original_deadline_and_cancellation_are_preserved) ... ok
+test_photo_understanding_and_text_requests_are_not_comparison_targets (test_compact_upload_69.CompactTests.test_photo_understanding_and_text_requests_are_not_comparison_targets) ... ok
+test_same_model_different_count_reuses_mode_but_another_model_does_not (test_compact_upload_69.CompactTests.test_same_model_different_count_reuses_mode_but_another_model_does_not) ... ok
+test_same_request_retries_with_only_array_bounds_changed_and_learns_acceptance (test_compact_upload_69.CompactTests.test_same_request_retries_with_only_array_bounds_changed_and_learns_acceptance) ... ok
+test_array_limits_remain_local_even_if_provider_accepts_compact_schema (test_compact_upload_69.LocalBoundsTests.test_array_limits_remain_local_even_if_provider_accepts_compact_schema) ... ok
+test_oversized_answer_is_rejected_by_real_classifier_and_never_seeds_media (test_compact_upload_69.LocalBoundsTests.test_oversized_answer_is_rejected_by_real_classifier_and_never_seeds_media) ... ok
+test_oversized_wire_profile_never_publishes_a_provisional_item (test_compact_upload_69.LocalBoundsTests.test_oversized_wire_profile_never_publishes_a_provisional_item) ... ok
+test_valid_wire_and_sparse_profiles_pass (test_compact_upload_69.LocalBoundsTests.test_valid_wire_and_sparse_profiles_pass) ... ok
+test_disconnect_and_unrelated_routes_are_passed_through (test_compact_upload_69.TimingTests.test_disconnect_and_unrelated_routes_are_passed_through) ... ok
+test_normalization_runs_off_loop_and_only_numeric_metadata_is_logged (test_compact_upload_69.TimingTests.test_normalization_runs_off_loop_and_only_numeric_metadata_is_logged) ... ok
+test_upload_delay_is_distinct_from_time_to_first_response (test_compact_upload_69.TimingTests.test_upload_delay_is_distinct_from_time_to_first_response) ... ok
 test_402_diagnostic_does_not_log_provider_body (test_media_backend.MediaTests.test_402_diagnostic_does_not_log_provider_body) ... ok
 test_cached_success_survives_exhausted_quota (test_media_backend.MediaTests.test_cached_success_survives_exhausted_quota) ... ok
 test_definitive_rejection_stays_rejected (test_media_backend.MediaTests.test_definitive_rejection_stays_rejected) ... ok
@@ -80,7 +95,7 @@ test_completed_audit_can_satisfy_queued_but_not_running_work (test_routing_67.Sh
 test_identity_cache_hit_seeds_exact_pixels_without_new_model_call (test_routing_67.SharingTests.test_identity_cache_hit_seeds_exact_pixels_without_new_model_call) ... ok
 
 ----------------------------------------------------------------------
-Ran 80 tests in 3.410s
+Ran 95 tests in 6.325s
 
 OK
 MEDIA AUDIT batch=1 elapsed_ms=0 unavailable=0
@@ -92,11 +107,11 @@ MEDIA REQUEST REJECT reason=invalid_request
 MEDIA AUDIT batch=1 elapsed_ms=0 unavailable=1
 MEDIA AUDIT batch=1 elapsed_ms=0 unavailable=1
 MEDIA REQUEST REJECT reason=unobserved_image
-MEDIA AUDIT batch=1 elapsed_ms=4 unavailable=0
+MEDIA AUDIT batch=1 elapsed_ms=9 unavailable=0
 MEDIA AUDIT batch=8 elapsed_ms=0 unavailable=0
 MEDIA AUDIT batch=8 elapsed_ms=0 unavailable=0
 MEDIA AUDIT batch=4 elapsed_ms=0 unavailable=0
-MEDIA AUDIT batch=1 elapsed_ms=5 unavailable=0
+MEDIA AUDIT batch=1 elapsed_ms=8 unavailable=0
 MEDIA AUDIT batch=1 elapsed_ms=0 unavailable=0
 MEDIA REUSE source=identity_bytes
 MEDIA REUSE source=identity_bytes

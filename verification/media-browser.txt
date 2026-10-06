@@ -1,0 +1,5 @@
+PASS de light normal: four complete cards, 2 media requests, no invalid authorization.
+PASS ar dark normal: four complete cards, 2 media requests, no invalid authorization.
+PASS en light once: four complete cards, 3 media requests, no invalid authorization.
+PASS camera page upload: 3543659 → 1543568 bytes, four cards.
+PASS 26 browser checks, all external APIs mocked.
