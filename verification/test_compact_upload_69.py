@@ -134,7 +134,7 @@ class LocalBoundsTests(unittest.TestCase):
 class TimingTests(unittest.TestCase):
     def timing_class(self,clock):
         node=next(n for n in ast.parse(SOURCE.read_text()).body if isinstance(n,ast.ClassDef) and n.name=='_FindziaImageTiming')
-        ns={'time':clock,'json':json}
+        ns=scope(['_web_search_trace_id'], {'time':clock,'json':json})
         exec(compile(ast.Module(body=[node],type_ignores=[]),str(SOURCE),'exec'),ns)
         return ns['_FindziaImageTiming']
 

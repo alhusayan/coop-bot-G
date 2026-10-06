@@ -1,38 +1,25 @@
 {
-  "release": "156.7.69",
-  "base_commit": "bb7b525852414e50ac6bf811283b601dc0c1e1fd",
-  "backend_build": "v128.5.42.58-audit-compact-upload",
+  "release": "156.7.70",
+  "backend_build": "v128.5.42.59-evidence-first",
+  "base_commit": "abc1ecaf7c40bdd535bb1da0f7b8b304933c41a5",
   "runtime_files": [
     "main.py",
     "frontend/source/findzia-home.liquid",
     "frontend/scripts/build.mjs",
     "frontend/package.json"
   ],
-  "python_tests": 95,
-  "browser_upload_checks": 12,
-  "browser_page_checks": 26,
-  "live_gemini": "not run; key redacted by connector; conditional comparison awaits user deployment",
-  "sha256": {
-    "main.py": "340180cbc3ead481289d3dda58394ffa790e8a96dad42612fb99114700f47514",
-    "frontend/source/findzia-home.liquid": "613a0d3c31cccc3bb66daa493483acd6b9f6fe99a81515a3258f509e17e625c9",
-    "frontend/scripts/build.mjs": "9a95df822e9b15359fcd9ef15aed9963e4849fe3596c58acd7f8e46ef447ae56",
-    "frontend/package.json": "9bfc7af31089ff9025ea2e0ec9535d02d87b2c9825ba960231ac5ac8588188fd",
-    "README_AR.txt": "b3f5bd0fb5392354e4ddd3406610201c743cc61db69ab60809215b1f7979f2f7",
-    "frontend/tests/photo-upload-69.cjs": "7e0fb2dec4b5400623fb511a0b7f3c7914c4e460d3c9a64a775909b7204730c2",
-    "frontend/tests/media-routing.cjs": "5a9a7da3fe02c8268baa0d837e2288a79d4915bcc4c3b4f4fad8451596f580c9",
-    "verification/README.txt": "a1412043ecc1076ea487e07a0c55b0121c3393708a8b37526b5b533ca7cf4db8",
-    "verification/build.txt": "a379dc8ffad10f03f9d130b756686a6bf44cdc0eaa4fafa8dc41589c327001e9",
-    "verification/changed-functions.json": "4f4df027b86047730c0453f7e9362485181fc5a765f5f984a9d13c17ceff2ef7",
-    "verification/changes.patch": "b0458f1c3ab4e7cbaa3ef798705ac14fed4cbf5d4671c97c66a22fb5b7ddd4cd",
-    "verification/findzia_product_media.fixture.py": "71684f4b2da192b0e2ffacb891b57087a1e309214ace19e666f1327723619e43",
-    "verification/media-browser.txt": "b4a6dc2a76aaa1cddd58256ea3fd7b29a9546730b3105b53705152d7c2807b68",
-    "verification/photo-browser.txt": "825b101f1bb6b9c259b2a4a262bbe23ae28a1f19fa6e7a544de465e401c3b8b1",
-    "verification/python-tests.txt": "9c57ea7c8b993af9639f3af10ef1b982edbda4c5fab448fb380d7acb35ee9ece",
-    "verification/test_audit_errors_68.py": "3a605240b735f678c2e70366534ddbef189e5bcda0c9693aa1e705ca251b4903",
-    "verification/test_audit_prices.py": "dc6b6719dea9c4553f3daf8689ed4bc85486f2768ce70c9d669958695806ed3e",
-    "verification/test_compact_upload_69.py": "ba11c40e6c0575f89f2e15f624ca00a4ef5dbb9507be0c794f8b6e14d8e4dc35",
-    "verification/test_media_backend.py": "63c75807c69c2b862b6ecb781bbcf6dacf516defd87c28d1496c084982903a32",
-    "verification/test_recovery_66.py": "3d9e5eb44af276c5106145614021dde72748381f35bab2af783e00de2d9f866c",
-    "verification/test_routing_67.py": "0fc2e37c441b1c3c3be0e8f5fb8888a997bd3e527ce6aae485cfe919a49c21cd"
-  }
+  "python_tests": 116,
+  "browser_assertions": 43,
+  "build": "passed",
+  "py_compile": "passed",
+  "full_asgi_startup_tested": false,
+  "external_services": "mocked",
+  "live_paid_test": false,
+  "deployed": false,
+  "billing_blob_verified": "e1e7946303c50b969cf45d7937bfe059412566f0",
+  "limitations": [
+    "Live latency and price recall require post-deployment observation.",
+    "Main text/photo searches only; first-card latency starts at request preparation, excludes prior file picker/auth.",
+    "Rendering metric waits two animation frames and verifies a loaded admitted card; it is a client estimate."
+  ]
 }

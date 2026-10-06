@@ -1,23 +1,19 @@
 {
   "added": [
-    "_FindziaImageTiming",
-    "_web_audit_cached_payload",
-    "_web_audit_compact_payload",
-    "_web_audit_retry_payload",
-    "_web_audit_schema_key",
-    "_web_audit_schema_result",
-    "_web_identity_local_array_bounds",
-    "_web_prepare_image_bytes"
+    "_web_visual_missing_recent",
+    "_web_price_index_recent_miss",
+    "_web_listing_lookup_term",
+    "_web_search_trace_id",
+    "_web_client_card_metric",
+    "web_api_search_metrics"
   ],
-  "modified": [
+  "changed": [
+    "_web_visual_candidate_inline",
+    "_web_ai_classifier_request",
     "_web_ai_classifier_request_live",
-    "_web_identity_http_error",
-    "_web_identity_partial_response",
-    "_web_identity_post_response",
-    "_web_identity_stream_response",
-    "web_api_image_search",
-    "web_api_image_search_stream",
-    "web_api_selected_markets_stream"
+    "_web_automatic_price_batches",
+    "_web_targeted_price_updates",
+    "_FindziaImageTiming"
   ],
-  "deleted": []
+  "removed": []
 }
