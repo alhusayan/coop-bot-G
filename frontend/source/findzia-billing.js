@@ -1,5 +1,5 @@
-/* FINDZIA_BILLING_RELEASE=156.7.63 */
-/* Findzia 156.7.63 — prepared checkout reveal, natural frame sizing and coordinated themes. */
+/* FINDZIA_BILLING_RELEASE=156.7.82 */
+/* Findzia 156.7.82 — one-page Paddle payment panel; existing checkout summary preserved. */
 (() => {
   'use strict';
   const searches = new Set(['/api/search','/api/search/stream','/api/search/image','/api/search/image/stream',
@@ -632,8 +632,8 @@
         paymentMessage=paymentCopy('error',tr('Checkout could not load. Please try again.','تعذّر فتح الدفع. حاول مجددًا.'));
         account.open('plans');return;
       }
-      view.status.hidden=false;view.status.textContent=text;
-      view.fallback.disabled=false;view.dialog.dataset.checkoutState='delayed';
+      view.status.hidden=false;view.status.style.removeProperty('visibility');view.status.textContent=text;
+      view.fallback.hidden=false;view.fallback.disabled=false;view.dialog.dataset.checkoutState='delayed';
     }
     function revealWallet(view){
       if(checkoutView!==view||view.revealed||!view.loaded||!view.totalsReady||view.closing)return;
@@ -702,9 +702,9 @@
       if(p){summary.append(el('strong','',tf('{count} searches',{count:p.credits},'{count} عملية بحث')),el('span','',tr('One-time payment','دفعة واحدة')),currency);}
       const totals=el('div','fzb-checkout-totals');
       const status=el('p','fzb-wallet-status');status.hidden=true;status.setAttribute('role','status');status.setAttribute('aria-live','polite');
-      const fallback=button(tr('Card','بطاقة'),()=>openStandard(paddle,transactionId,true),'fzb-wallet-alternative fzb-card-method');fallback.dataset.paymentMethod='card';
+      const fallback=button(tr('Open secure checkout','فتح صفحة الدفع الآمنة'),()=>openStandard(paddle,transactionId),'fzb-wallet-alternative fzb-card-method');
       const cardIcon=el('span','fzb-card-icon');cardIcon.setAttribute('aria-hidden','true');fallback.prepend(cardIcon);
-      fallback.disabled=true;frame.inert=true;frame.setAttribute('aria-busy','true');
+      fallback.hidden=true;fallback.disabled=true;frame.inert=true;frame.setAttribute('aria-busy','true');
       dialog.append(header,summary,totals,status,frame,fallback);document.body.append(dialog);
       const view={mode:'inline',id:'',dialog,title,status,totals,currency,fallback,frame,loaded:false,revealed:false,totalsReady:false,paying:false,timer:null};checkoutView=view;
       view.settle=()=>settleWallet(view);
@@ -714,15 +714,14 @@
       view.timer=setTimeout(()=>{if(checkoutView===view&&!view.revealed&&!view.paying)checkoutHelp('');},15000);
       dialog.addEventListener('cancel',e=>{e.preventDefault();dismissWallet(view);});
       dialog.addEventListener('close',()=>{if(checkoutView===view&&view.revealed&&!dialog.open){closeWallet();account.open('plans');}});
-      // Theme is frozen for this transaction. SDK resizing owns the complete frame,
-      // including its footer; no cropping, iframe reload or CSS color inversion.
-      // Isolate the iframe element from the page color-scheme: browsers paint a
-      // white canvas for a dark parent/light-default transparent child. Paddle
-      // still gets theme=dark for its actual text/buttons, independent of this canvas.
+      // Match the MyFatoorah light payment surface inside the unchanged site shell.
+      // Paddle owns every wallet/card field and the complete frame height, including
+      // its footer. Never crop, replace or reload this live secure form.
       try{paddle.Checkout.open({...checkoutOptions(transactionId),
-        settings:{displayMode:'inline',variant:'express',frameTarget:walletFrame,
-          frameInitialHeight:180,frameStyle:'width:100%;min-width:312px;background-color:'+(theme==='dark'?'#202923':'#ffffff')+';color-scheme:normal;border:none;display:block;',
-          showNonExpressPaymentMethods:false,theme,locale:['ar','en','fr','de','es','it','pt','tr','ru','ja','ko'].includes(root.dataset.lang)?root.dataset.lang:root.dataset.lang==='zh'?'zh-Hans':'en'}
+        settings:{displayMode:'inline',variant:'one-page',frameTarget:walletFrame,
+          allowedPaymentMethods:['apple_pay','google_pay','card'],
+          frameInitialHeight:'450',frameStyle:'width:100%;min-width:312px;background-color:#ffffff;color-scheme:light;border:none;border-radius:14px;display:block;',
+          theme:'light',locale:['ar','en','fr','de','es','it','pt','tr','ru','ja','ko'].includes(root.dataset.lang)?root.dataset.lang:root.dataset.lang==='zh'?'zh-Hans':'en'}
       });}catch(e){closeWallet();throw e;}
     }
 
@@ -784,7 +783,7 @@
       // permanent blacklist entry: bind it to the currently opened surface.
       if(e.name!=='checkout.loaded'&&view.id&&data.id&&view.id!==data.id)return;
       if(e.name==='checkout.error'){
-        if(view.mode==='inline')checkoutHelp(tr('Express checkout could not load. Try the standard checkout.','تعذّر تحميل الدفع السريع. جرّب الدفع المعتاد.'));
+        if(view.mode==='inline')checkoutHelp(tr('The payment form could not load. Try opening secure checkout.','تعذّر تحميل نموذج الدفع. جرّب فتح صفحة الدفع الآمنة.'));
         else if(!view.paying){closeWallet();paymentMessage=paymentCopy('error',tr('Checkout could not load. Try again in a regular Safari or Chrome tab.','تعذّر تحميل الدفع. جرّب مرة ثانية بتبويب عادي في Safari أو Chrome.'));account.open('checkout');}
         return;
       }
@@ -1195,8 +1194,8 @@
 .fzb-wallet-dialog[data-paddle-wallet]>.fzb-checkout-totals{gap:4px;margin:0 0 16px;padding:0 0 16px}
 .fzb-wallet-dialog[data-paddle-wallet] .fzb-checkout-total{font-size:12px;line-height:1.6;color:var(--pay-muted)}
 .fzb-wallet-dialog[data-paddle-wallet] .fzb-checkout-total:last-of-type{font-size:17px;font-weight:650;color:var(--pay-ink);margin-top:5px}
-.fzb-wallet-dialog[data-paddle-wallet]>.fzb-wallet-frame{flex:0 0 auto;min-height:0;min-width:0;width:100%;overflow:visible;background:var(--pay-bg);color-scheme:inherit}
-.fzb-wallet-dialog[data-paddle-wallet]>.fzb-wallet-frame iframe{display:block;max-width:100%;border:0;background:var(--pay-bg);color-scheme:normal}
+.fzb-wallet-dialog[data-paddle-wallet]>.fzb-wallet-frame{flex:0 0 auto;min-height:0;min-width:0;width:100%;overflow:visible;background:#fff;color:#24332d;color-scheme:light;border-radius:14px;box-shadow:0 0 0 1px #dfe4df}
+.fzb-wallet-dialog[data-paddle-wallet]>.fzb-wallet-frame iframe{display:block;max-width:100%;border:0;border-radius:14px;background:#fff;color-scheme:light}
 .fzb-wallet-dialog[data-paddle-wallet]>.fzb-card-method{flex:0 0 auto;min-height:44px;margin:10px 0 0!important;padding:10px 14px;border-color:var(--pay-line);border-radius:12px;font-size:13px;background:color-mix(in srgb,var(--pay-ink) 3%,var(--pay-bg))}
 .fzb-wallet-dialog[data-paddle-wallet]>.fzb-wallet-status:not([hidden]){margin:0 0 12px;font-size:12px}
 .fzb-plan-buy[aria-busy=true]::after{content:'';display:inline-block;box-sizing:border-box;width:12px;height:12px;margin-inline-start:8px;border:1.5px solid currentColor;border-inline-end-color:transparent;border-radius:50%;vertical-align:-1px;animation:fzb-pay-spin .8s linear infinite}
