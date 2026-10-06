@@ -399,7 +399,7 @@ from findzia_billing import CreditMiddleware, install_billing
 app.add_middleware(CreditMiddleware, owner=app)
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization', 'X-Findzia-Request-Id', 'X-Findzia-Search-Trace'], max_age=86400)
-BUILD_ID = 'v128.5.42.65-photo-evidence'
+BUILD_ID = 'v128.5.42.66-local-recovery'
 _SOCIAL = None
 
 def _fz_social_row(row):
@@ -5340,7 +5340,7 @@ def _web_unescape_url(value):
 
 def _local_discovery_direct_link(row):
     """Use observed, complete links only; never invent a URL from a store name."""
-    values = [row.get(key) for key in ('direct_link', 'merchant_link', 'product_link', 'link', 'url', 'original_link')]
+    values = [row.get(key) for key in ('direct_link', 'merchant_link', 'product_link', 'directLink', 'merchantLink', 'productLink', 'link', 'url', 'original_link', 'originalLink')]
     try:
         p = urllib.parse.urlsplit(str(row.get('link') or ''))
         host = p.hostname or ''
@@ -5534,7 +5534,7 @@ def _web_image_search_records(data):
         url = _local_discovery_direct_link({'link': item.get('link')})
         if not url:
             continue
-        row = {'link': url, 'title': item.get('title') or '',
+        row = {'link': url, 'title': _local_discovery_title(item),
                'source': item.get('source') or '',
                'serpapi_thumbnail': item.get('serpapi_thumbnail') or '',
                'thumbnail': item.get('thumbnail') or '',
@@ -5653,7 +5653,7 @@ def _local_discovery_plain_snippet_price(row, country):
 
 def _local_discovery_title(row):
     """Provider rows do not always carry ``title``; fall back to other name fields."""
-    for key in ('title', 'name', 'product_title', 'heading', 'headline', 'label'):
+    for key in ('title', 'name', 'product_title', 'productTitle', 'heading', 'headline', 'label', 'alt'):
         value = row.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()
@@ -6394,6 +6394,114 @@ class _LocalDiscoveryBatch(list):
         super().__init__(rows)
         self.recovery_future = recovery_future
 
+
+_LOCAL_PHOTO_TITLE_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix='photo-title')
+_LOCAL_PHOTO_TITLE_SLOTS = threading.BoundedSemaphore(4)
+
+
+def _local_photo_title_recovery(data, query, market, provider, deadline, cancel_event=None):
+    """Recover at most four missing names from the SAME product pages, off-stream."""
+    def cancelled():
+        return cancel_event is not None and cancel_event.is_set()
+    if not market.get('_image_discovery') or cancelled() or deadline-time.monotonic() < .4:
+        return []
+    cc = str(market.get('country') or '')
+    candidates = []
+    for row in _local_discovery_records(data):
+        if not isinstance(row, dict) or _local_discovery_title(row) or not _web_offer_image_candidates(row):
+            continue
+        url = _local_discovery_direct_link(row)
+        if not url or _web_merchant_cooldown(url):
+            continue
+        geo = _merchant_url_market(url)
+        if geo.get('conflict') or (geo.get('country') and geo['country'] != cc):
+            continue
+        candidates.append((geo.get('country') != cc, dict(row, link=url)))
+    candidates.sort(key=lambda pair: pair[0])
+    jobs = {}
+    def recover(row):
+        try:
+            if cancelled() or time.monotonic() >= deadline:
+                return None
+            snap = _web_verified_page_snapshot(row['link'], cc) or {}
+            if (cancelled() or time.monotonic() >= deadline or not snap.get('ok')
+                    or not snap.get('is_product') or not snap.get('title')
+                    or snap.get('page_fetch_reason')
+                    or not _web_same_index_listing(snap.get('url'), row['link'])):
+                return None
+            recovered = dict(row, title=str(snap['title'])[:420])
+            recovered['image_candidates'] = _web_offer_image_candidates(row) + _web_offer_image_candidates(snap)
+            # A page quote stays on its original URL/currency; the usual local
+            # normalizer and later cached-page checks still own admission.
+            quote = _web_quote_from_fields(snap) if snap.get('price') else None
+            if quote:
+                recovered.update(price=_web_format_quote(quote), currency=quote['currency'])
+            return recovered
+        except Exception:
+            return None
+        finally:
+            _LOCAL_PHOTO_TITLE_SLOTS.release()
+    for _, row in candidates:
+        if cancelled() or deadline-time.monotonic() < .4:
+            break
+        key = _web_price_url_key(row['link'])
+        with _PHOTO_SHOPPING_RECOVERY_LOCK:
+            seen = market.setdefault('_photo_title_recovery', [])
+            if len(seen) >= 4:
+                break
+            if key in seen:
+                continue
+            if not _LOCAL_PHOTO_TITLE_SLOTS.acquire(blocking=False):
+                break
+            seen.append(key)
+        try:
+            job = _LOCAL_PHOTO_TITLE_POOL.submit(_run_with_market, market, recover, row)
+            jobs[job] = key
+        except Exception:
+            _LOCAL_PHOTO_TITLE_SLOTS.release()
+    finish = min(deadline, time.monotonic()+3.0)
+    pending, rows = set(jobs), []
+    while pending and not cancelled() and time.monotonic() < finish:
+        done, pending = wait(pending, timeout=min(.1, max(0., finish-time.monotonic())), return_when=FIRST_COMPLETED)
+        for job in done:
+            value = job.result()
+            if value:
+                rows.append(value)
+    # Never cancel these futures: each worker owns its acquired slot. Late
+    # page work can populate the shared cache, but cannot mutate streamed rows.
+    if cancelled():
+        return []
+    result = _local_discovery_rows({'organic_results': rows}, query, market, provider+'_title_recovery') if rows else []
+    print(f'PHOTO TITLE RECOVERY country={cc} attempted={len(jobs)} recovered={len(result)} pending={len(pending)}')
+    return result
+
+
+def _shopping_recovery_market_allowed(card, country):
+    """An explicitly foreign merchant label cannot become a local offer."""
+    merchant = str(card.get('source') or '').strip().casefold()
+    suffixes = {'us':'us', 'usa':'us', 'uk':'gb', 'uae':'ae', 'ksa':'sa', 'kuwait':'kw'}
+    for code, name in COUNTRY_NAMES.items():
+        suffixes[str(name).casefold()] = code
+    for label, code in sorted(suffixes.items(), key=lambda item: -len(item[0])):
+        if merchant == label or re.search(r'(?:[\s|,()/-])'+re.escape(label)+r'\)?$', merchant):
+            return code == country
+    return True
+
+
+def _shopping_recovery_domains(card, country):
+    """Configured merchant domains are search hints, never invented product URLs."""
+    merchant = str(card.get('source') or '').strip()
+    wanted = _shopping_unit_merchant_tokens(merchant)
+    if not wanted:
+        return []
+    domains = []
+    for name, domain in country_major_store_specs(country):
+        known = _shopping_unit_merchant_tokens(name)
+        if known and (wanted == known or wanted <= known or known <= wanted):
+            domains.append(domain)
+    return list(dict.fromkeys(domains))[:2]
+
+
 def _local_photo_shopping_recovery(data, query, market, hl, deadline, cancel_event=None):
     """At most three merchant lookups per image/market, within the existing lane."""
     if (not market.get('_image_discovery') or time.monotonic() >= deadline-.4
@@ -6401,8 +6509,11 @@ def _local_photo_shopping_recovery(data, query, market, hl, deadline, cancel_eve
         return []
     state = market.setdefault('_photo_shopping_recovery', {'seen':[]})
     selected = []
-    for card in _local_discovery_records(data):
-        if not isinstance(card,dict) or _local_discovery_direct_link(card):
+    cards = [card for card in _local_discovery_records(data) if isinstance(card,dict)]
+    cards.sort(key=lambda card: (not bool(_shopping_recovery_domains(card, market['country'])),
+                                 not bool(_web_offer_image_candidates(card))))
+    for card in cards:
+        if _local_discovery_direct_link(card) or not _shopping_recovery_market_allowed(card, market['country']):
             continue
         title, merchant = str(card.get('title') or ''), str(card.get('source') or '')
         if not title or not merchant or not _local_discovery_candidate_ok(query,dict(card,_image_discovery=True)):
@@ -6472,6 +6583,13 @@ def _local_discovery_request(query, market, kind, timeout_seconds, cancel_event=
         if not isinstance(data, dict):
             return []
         rows = _local_discovery_rows(data, query, market, 'local_' + kind)
+        if (engine.endswith('_images') and market.get('_image_discovery')
+                and any(not _local_discovery_title(row) for row in _local_discovery_records(data))
+                and time.monotonic() < deadline-.4
+                and not (cancel_event is not None and cancel_event.is_set())):
+            recovery = _PHOTO_SHOPPING_RECOVERY_POOL.submit(_run_with_market, market,
+                _local_photo_title_recovery, data, query, market, 'local_'+kind, deadline, cancel_event)
+            return _LocalDiscoveryBatch(rows, recovery)
         if (engine.endswith('_shopping') and market.get('_image_discovery')
                 and time.monotonic() < deadline-.4
                 and not (cancel_event is not None and cancel_event.is_set())):
@@ -6548,6 +6666,11 @@ def _local_discovery_request(query, market, kind, timeout_seconds, cancel_event=
                     rows.append(row)
         elif not rows and tokens:
             market['_shopping_recovery'] = {'query': query, 'token': tokens[0][0], 'thumbnail': tokens[0][1]}
+        if (not tokens and market.get('_image_discovery') and time.monotonic() < deadline-.4
+                and not (cancel_event is not None and cancel_event.is_set())):
+            recovery = _PHOTO_SHOPPING_RECOVERY_POOL.submit(_run_with_market, market,
+                _local_photo_shopping_recovery, {'shopping_results':cards}, query, market, hl, deadline, cancel_event)
+            return _LocalDiscoveryBatch(rows, recovery)
         return rows
     if kind == 'baidu':
         params = {'engine': 'baidu', 'q': f'{search_query} 价格 购买 -百科 -知道 -视频', 'ct': 2,
@@ -20626,7 +20749,7 @@ def _web_price_recovery_priority(row):
 
 
 def _web_automatic_price_batches(rows, attempted_rows=None):
-    """Bounded, market-isolated queries; earlier local work cannot starve exports."""
+    """Bounded market-isolated queries; reserve four listing attempts for local."""
     def group_key(row):
         # A US SHEIN listing and a US domestic listing use the same query
         # country. Splitting them by export_store created competing groups
@@ -20646,9 +20769,12 @@ def _web_automatic_price_batches(rows, attempted_rows=None):
             candidates.sort(key=lambda pair: _web_price_recovery_priority(pair[1]))
     batches = []
     while groups and len(batches) < WEB_ASYNC_PRICE_SHARED_MARKETS:
-        # Prefer an unserved market, then local. Keep each batch within its
-        # own country/currency context; do not widen price matching rules.
-        group = min(groups, key=lambda k: (group_use[k], k != current_market().get('country')))
+        # One early local listing does not consume the local market's share.
+        # Four local attempts satisfy the reservation; then unserved markets
+        # take priority. The caller still owns the same total batch budget.
+        local = current_market().get('country')
+        group = min(groups, key=lambda k: (not (k == local and group_use[k] < 4),
+                                           group_use[k], k != local))
         merchants, batch = groups[group], {}
         while merchants and len(batch) < 4:
             host = min(merchants, key=lambda h: (_web_price_recovery_priority(merchants[h][0][1]),
@@ -22974,7 +23100,7 @@ def _serper_to_serpapi(kind, data):
                 continue
             item = {'position': i + 1, 'title': row['title'], 'link': row['link'], 'source': row.get('source') or '',
                     'price': str(row.get('price') or ''), 'thumbnail': row.get('imageUrl') or ''}
-            for field in ('direct_link','merchant_link','product_link','original_link','product_id','immersive_product_page_token','serpapi_immersive_product_api','currency','extracted_price','old_price','extracted_old_price','availability','in_stock','rating','reviews'):
+            for field in ('direct_link','merchant_link','product_link','original_link','directLink','merchantLink','productLink','originalLink','product_id','immersive_product_page_token','serpapi_immersive_product_api','currency','extracted_price','old_price','extracted_old_price','availability','in_stock','rating','reviews'):
                 if row.get(field) is not None:item[field] = row[field]
             if row.get('productId'):
                 item['product_id'] = str(row['productId'])
@@ -22993,7 +23119,7 @@ def _serper_to_serpapi(kind, data):
         for i, row in enumerate(data.get('images') or []):
             if not isinstance(row, dict) or not row.get('link') or not row.get('imageUrl'):
                 continue
-            images.append({'position': i + 1, 'title': row.get('title') or '', 'link': row['link'],
+            images.append({'position': i + 1, 'title': _local_discovery_title(row), 'link': row['link'],
                            'original': row['imageUrl'], 'thumbnail': row.get('thumbnailUrl') or row['imageUrl'],
                            'source': row.get('domain') or row.get('source') or ''})
         if images:
@@ -23449,15 +23575,27 @@ def _web_text_shopping_lookup(card, spec, deadline, cancel):
     title, merchant = str(card.get('title') or '').strip(), str(card.get('source') or '').strip()
     if not title or not merchant:
         return None
-    query = title[:220] + ' ' + merchant[:100]
+    if spec.get('role') == 'local' and not _shopping_recovery_market_allowed(card, spec['country']):
+        return {'organic_results': []}
+    domains = _shopping_recovery_domains(card, spec['country'])
+    scope = ' OR '.join('site:'+domain for domain in domains) if _fast_provider_supports_operators('serper') else ''
+    query = title[:220] + (' ('+scope+')' if scope else ' '+merchant[:100])
+    if spec.get('role') == 'local' and COUNTRY_NAMES.get(spec['country']):
+        query += ' ' + COUNTRY_NAMES[spec['country']]
     budget = min(3.5, remaining)
     data = _fast_provider_search('serper_search', query, spec['country'], spec['hl'],
                                  (min(.6, budget/4), budget-min(.6, budget/4)),
                                  num=10, purpose='shopping_link') or {}
     rows = []
+    if cancel.is_set() or time.monotonic() >= deadline:
+        return {'organic_results': rows}
     for raw in data.get('organic_results') or []:
         url = _local_discovery_direct_link(raw)
         if not url or not _shopping_unit_merchant_matches(merchant, urllib.parse.urlsplit(url).hostname or '', spec['country']):
+            continue
+        geo = _merchant_url_market(url)
+        if (spec.get('role') == 'local' and (geo.get('conflict')
+                or (geo.get('country') and geo['country'] != spec['country']))):
             continue
         row = dict(raw, link=url)
         # Same merchant and product facts; a changed word order is not a new product.
