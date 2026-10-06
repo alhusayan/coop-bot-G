@@ -401,7 +401,7 @@ from findzia_billing import CreditMiddleware, install_billing
 app.add_middleware(CreditMiddleware, owner=app)
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization', 'X-Findzia-Request-Id', 'X-Findzia-Search-Trace'], max_age=86400)
-BUILD_ID = 'v128.5.42.69-cache-policy'
+BUILD_ID = 'v128.5.42.85-ready-images'
 _SOCIAL = None
 
 def _fz_social_row(row):
@@ -15207,6 +15207,8 @@ def _web_prepare_identity_cards(results, cancel_event=None, *, _deadline=None):
     for index, row in enumerate(rows[:WEB_VISUAL_CLASSIFIER_MAX_RESULTS]):
         if cancel_event is not None and cancel_event.is_set():
             break
+        if row.get('_identity_prepared_inline') or row.get('_identity_image_attempted'):
+            continue
         jobs[WEB_IDENTITY_PAGE_POOL.submit(_web_prepare_identity_card, row, cancel_event)] = index
     if jobs:
         budget = WEB_IDENTITY_PAGE_BUDGET_SECONDS
@@ -29145,6 +29147,13 @@ async def _web_stream_image_identity_batches_core(image_b64, mime, caption, coun
     rows, captures, reviews = {}, {}, {}
     completed_reviews, partial_reviews, queued = {}, {}, []
     queued_tokens = set()
+    # 156.7.85: prepare each image independently, then audit ready pixels.
+    # A slow/blocked merchant must not hold an entire ready audit batch.
+    preparing, prepared = {}, []
+    prepare_limit = min(8, max(4, WEB_IDENTITY_BATCH_PARALLEL * 2))
+    prepared_since = None
+    preparation_count = preparation_missing = 0
+    first_prepared_ms = None
     price_tasks, priced_keys = {}, set()
     identity, query_sent = str(caption or '').strip(), ''
     final_ready = False
@@ -29191,9 +29200,11 @@ async def _web_stream_image_identity_batches_core(image_b64, mime, caption, coun
         item['identity_review_status'] = 'pending' if enabled else 'unavailable'
         return item
 
-    def schedule(batch, query):
+    def schedule(batch, query, tokens):
         nonlocal review_count
-        pairs = [(dict(r), _web_identity_capture_key(r, query)) for r in batch]
+        # A recovered image/title may differ from the retrieval candidate.
+        # Membership checks still belong to the original captured evidence.
+        pairs = [(dict(row), token) for row, token in zip(batch, tokens)]
         def review_callback(report):
             if not cancel_event.is_set() and not audit_cancel_event.is_set():
                 try:
@@ -29217,29 +29228,48 @@ async def _web_stream_image_identity_batches_core(image_b64, mime, caption, coun
 
     def queue_rows(candidates):
         inflight = {token for pairs in reviews.values() for _, token in pairs}
+        inflight.update(token for _, token in preparing.values())
+        inflight.update(token for _, token in prepared)
         for original in candidates:
             token = _web_identity_capture_key(original, identity)
             if token not in completed_reviews and token not in inflight and token not in queued_tokens:
                 queued.append((dict(original), token))
                 queued_tokens.add(token)
 
+    def capture_current(original, token):
+        key = _web_identity_offer_key(original)
+        return (key in captures and _web_identity_capture_key(captures[key], identity) == token
+                and token not in completed_reviews)
+
     def fill_review_slots():
-        # Audit complete offers first; stable ordering preserves ties and the
-        # local lane's priority without changing admission or identity rules.
+        nonlocal prepared_since, preparation_count
+        if not enabled or time.monotonic() >= audit_deadline:
+            return
         queued.sort(key=lambda pair: _web_identity_review_priority(pair[0], market))
-        while (enabled and queued and len(reviews) < WEB_IDENTITY_BATCH_PARALLEL
-               and time.monotonic() < audit_deadline):
-            batch = []
+        # Bounded look-ahead overlaps network work with AI without creating
+        # more retrieval calls, raising AI concurrency or changing admission.
+        ready_capacity = WEB_IDENTITY_BATCH_PARALLEL * WEB_IDENTITY_BATCH_SIZE
+        while queued and len(preparing) < prepare_limit and len(prepared) < ready_capacity:
+            original, token = queued.pop(0)
+            queued_tokens.discard(token)
+            if not capture_current(original, token):
+                continue
+            future = WEB_IDENTITY_PAGE_POOL.submit(
+                _run_with_market, market, _web_prepare_identity_card, dict(original), audit_cancel_event)
+            preparing[asyncio.wrap_future(future)] = (original, token)
+            preparation_count += 1
+        prepared[:] = [pair for pair in prepared if capture_current(*pair)]
+        prepared.sort(key=lambda pair: _web_identity_review_priority(pair[0], market))
+        while prepared and len(reviews) < WEB_IDENTITY_BATCH_PARALLEL:
             size = WEB_IDENTITY_FIRST_BATCH if review_count == 0 else WEB_IDENTITY_BATCH_SIZE
-            while queued and len(batch) < size:
-                original, token = queued.pop(0)
-                queued_tokens.discard(token)
-                key = _web_identity_offer_key(original)
-                if (key in captures and _web_identity_capture_key(captures[key], identity) == token
-                        and token not in completed_reviews):
-                    batch.append(original)
-            if batch:
-                schedule(batch, identity)
+            # Keep the first card immediate; coalesce later near-simultaneous
+            # downloads briefly so this does not become one AI call per card.
+            if (review_count and len(prepared) < size and preparing
+                    and prepared_since is not None and time.monotonic() - prepared_since < .06):
+                break
+            batch, prepared[:] = prepared[:size], prepared[size:]
+            schedule([row for row, _ in batch], identity, [token for _, token in batch])
+            prepared_since = time.monotonic() if prepared else None
 
     try:
         search_task = asyncio.create_task(asyncio.to_thread(
@@ -29249,16 +29279,16 @@ async def _web_stream_image_identity_batches_core(image_b64, mime, caption, coun
         while not cancel_event.is_set():
             # Consume completed work before closing the window. Retrieval is
             # still authoritative even if it finishes after the review budget.
-            completed_waiting = any(task.done() for task in reviews)
+            completed_waiting = any(task.done() for task in set(reviews) | set(preparing))
             completed_waiting = completed_waiting or not review_updates.empty() or (
                 review_update_task is not None and review_update_task.done())
             if (final_ready and audit_deadline is not None and time.monotonic() >= audit_deadline
-                    and (reviews or queued) and not completed_waiting):
+                    and (reviews or queued or preparing or prepared) and not completed_waiting):
                 audit_budget_exhausted = True
                 audit_cancel_event.set()
                 for task in reviews:
                     task.cancel()
-                print(f'IDENTITY AUDIT DEADLINE pending_batches={len(reviews)} queued={len(queued)} elapsed_ms={elapsed()}')
+                print(f'IDENTITY AUDIT DEADLINE pending_batches={len(reviews)} queued={len(queued)} preparing={len(preparing)} ready={len(prepared)} elapsed_ms={elapsed()}')
                 break
             ready_local = (_web_identity_ready_local_count(rows.values(), identity, market)
                            if enabled else 0)
@@ -29273,18 +29303,19 @@ async def _web_stream_image_identity_batches_core(image_b64, mime, caption, coun
                 ready_tail_deadline = None
             elif ready_tail_deadline is None:
                 ready_tail_deadline = time.monotonic() + WEB_IDENTITY_READY_TAIL_SECONDS
-            if ready_tail_deadline is not None and time.monotonic() >= ready_tail_deadline and (reviews or queued):
+            if ready_tail_deadline is not None and time.monotonic() >= ready_tail_deadline and (reviews or queued or preparing or prepared):
                 ready_tail_exhausted = True
                 # Retrieval is complete and local cards passed every gate.
                 # Cancel unfinished audits; never promote their provisional rows.
                 audit_cancel_event.set()
                 for task in reviews:
                     task.cancel()
-                print(f'IDENTITY READY TAIL local_ready={ready_local} pending_batches={len(reviews)} queued={len(queued)}')
+                print(f'IDENTITY READY TAIL local_ready={ready_local} pending_batches={len(reviews)} queued={len(queued)} preparing={len(preparing)} ready={len(prepared)}')
                 break
             if not final_ready and progress_task is None:
                 progress_task = asyncio.create_task(progress.get())
-            waiting = set(reviews)
+            fill_review_slots()
+            waiting = set(reviews) | set(preparing)
             if review_update_task is None and (reviews or not review_updates.empty()):
                 review_update_task = asyncio.create_task(review_updates.get())
             if review_update_task is not None:
@@ -29300,6 +29331,8 @@ async def _web_stream_image_identity_batches_core(image_b64, mime, caption, coun
             if not waiting:
                 break
             wait_seconds = WEB_IDENTITY_HEARTBEAT_SECONDS
+            if prepared and len(reviews) < WEB_IDENTITY_BATCH_PARALLEL:
+                wait_seconds = min(wait_seconds, .06)
             for deadline in (ready_tail_deadline, audit_deadline if final_ready else None):
                 if deadline is not None:
                     wait_seconds = min(wait_seconds, max(.01, deadline - time.monotonic()))
@@ -29370,6 +29403,35 @@ async def _web_stream_image_identity_batches_core(image_b64, mime, caption, coun
                 if enabled and (query or search_fn is None):
                     queue_rows(preview)
                     fill_review_slots()
+
+            for task in [job for job in preparing if job in done]:
+                original, token = preparing.pop(task)
+                try:
+                    item = dict(task.result() or original)
+                except Exception:
+                    item = dict(original)
+                if not capture_current(original, token):
+                    continue
+                item['_identity_image_attempted'] = True
+                if item.get('_identity_prepared_inline'):
+                    if first_prepared_ms is None:
+                        first_prepared_ms = elapsed()
+                        print(f'IDENTITY FIRST IMAGE country={country} ready_ms={first_prepared_ms} preparing={len(preparing)}')
+                    prepared.append((item, token))
+                    if prepared_since is None:
+                        prepared_since = time.monotonic()
+                else:
+                    # No usable pixels is not permission to admit a card.
+                    preparation_missing += 1
+                    item = pending_row(original)
+                    item.update(classification_final=True, identity_review_status='unavailable',
+                                identity_review_error='candidate_images_unavailable')
+                    item = _web_identity_public_row(item)
+                    completed_reviews[token] = item
+                    rows[_web_identity_offer_key(original)] = dict(item)
+                    yield _web_stream_event({'event': 'upsert', 'phase': 'identity_image_unavailable',
+                                             'provisional': not final_ready, 'classification_final': True,
+                                             'market': item.get('market'), 'item': item, 'elapsed_ms': elapsed()})
 
             if review_update_task is not None and review_update_task in done:
                 inputs, report = review_update_task.result()
@@ -29460,6 +29522,7 @@ async def _web_stream_image_identity_batches_core(image_b64, mime, caption, coun
                 _web_spawn_price_enrich_task(price_tasks, key, item, lang, market)
         async for event in _web_drain_price_enrich_events(price_tasks, priced_keys, started):
             yield event
+        print(f'IDENTITY IMAGE PIPELINE country={country} prepared={preparation_count} missing={preparation_missing} first_image_ms={first_prepared_ms} first_match_ms={first_match_ms} elapsed_ms={elapsed()}')
         yield _web_stream_event({'event': 'done', 'count': len(snapshot['results']), 'exact_count': snapshot['exact_count'],
                                  'similar_count': snapshot['similar_count'], 'local_count': snapshot['local_count'],
                                  'alternative_count': snapshot['alternative_count'],
@@ -29481,7 +29544,7 @@ async def _web_stream_image_identity_batches_core(image_b64, mime, caption, coun
     finally:
         audit_cancel_event.set()
         cancel_event.set()
-        tasks = list(reviews) + list(price_tasks.values())
+        tasks = list(reviews) + list(preparing) + list(price_tasks.values())
         tasks += [t for t in (search_task, progress_task, review_update_task) if t is not None]
         for task in tasks:
             task.cancel()
