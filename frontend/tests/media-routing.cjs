@@ -28,7 +28,7 @@ offers[4].image='https://store.example.test/c2d3.png';
    const u=new URL(route.request().url()),p=u.pathname;
    if(u.origin==='https://findzia.com'){const r=await fetch(origin+p+u.search);return route.fulfill({status:r.status,headers:Object.fromEntries(r.headers),body:Buffer.from(await r.arrayBuffer())});}
    if(u.origin==='https://api.findzia.com'){
-    let data={ok:true};const payload=route.request().postData()?JSON.parse(route.request().postData()):{};calls.push({path:p,payload,at:Date.now()});
+    let data={ok:true};const payload=route.request().postData()?JSON.parse(route.request().postData()):{};calls.push({path:p,payload,at:Date.now(),headers:route.request().headers()});
     if(p==='/api/geo')Object.assign(data,{country:'DE',country_code:'DE',country_name:'Germany'});
     else if(p==='/api/account/config'){await new Promise(r=>setTimeout(r,configDelay));data.providers={google:true,apple:true};}
     else if(p==='/api/account/auth/start'){await new Promise(r=>setTimeout(r,250));return route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({ok:false})});}
@@ -39,6 +39,7 @@ offers[4].image='https://store.example.test/c2d3.png';
      Object.assign(data,{answer:payload.language==='ar'?'تقدر تختار الباقة من حسابي. محادثة المساعدة ما تخصم من رصيد البحث.':'Open My account to view your packs. Help conversations do not use search credits.',mode:'ai',sources:['credits'],actions:['plans','usage','javascript:alert(1)']});
      if(support.mode==='html')data.answer='<img src=x onerror=alert(1)> is plain text.';
     }
+    else if(p==='/api/search/metrics')return route.fulfill({status:204,body:''});
     else if(p==='/api/account/me')data.member={id:'test',email:'fixture@example.test',name:'Test',provider:'google'};
     else if(p==='/api/billing/config')Object.assign(data,{prepaid_enabled:true,payment_provider:payment==='mf'?'myfatoorah':'paddle',plans:[{id:'pack',name:'20 searches',credits:20,amount_cents:499,interval:'once'},{id:'pack50',name:'50 searches',credits:50,amount_cents:999,interval:'once',recommended:true},{id:'pack100',name:'100 searches',credits:100,amount_cents:1799,interval:'once'}]});
     else if(p==='/api/billing/status'||p==='/api/billing/guest')Object.assign(data,{remaining:20+paidCredits,balances:{trial:20,pack:paidCredits},guest_token:'test-token'});
@@ -118,6 +119,13 @@ offers[4].image='https://store.example.test/c2d3.png';
    const {page,context,calls,errors}=await fixture({lang,theme,mediaMode});
    await search(page);
    try{await page.waitForFunction(()=>document.querySelectorAll('[data-image-key] img.is-loaded').length===4,{},{timeout:22000});}catch(e){console.log(JSON.stringify({calls:calls.filter(c=>c.path.includes('/media/')),errors,dom:await page.evaluate(()=>({cards:document.querySelectorAll('[data-image-key] img.is-loaded').length,empty:document.querySelector('.fz-empty')?.textContent,body:document.querySelector('.fz-home')?.textContent.slice(-1500)}))},null,2));throw e;}
+   await page.waitForFunction(()=>document.querySelector('.fz-home').dataset.visibleResultCount==='4');
+   await page.waitForTimeout(80);
+   const metric=calls.find(c=>c.path==='/api/search/metrics');
+   check(!!metric&&metric.payload.kind==='text','Text first-card metric sent');
+   check(metric.payload.first_card_ms>=150,'Metric waits for media verdict and render');
+   check(metric.payload.search_trace===calls.find(c=>c.path==='/api/search/stream').headers['x-findzia-search-trace'],'Client/server trace correlation');
+   check(!JSON.stringify(metric.payload).includes('Wood'),'Metrics exclude shopper query');
    const checksBefore=calls.filter(c=>c.path.startsWith('/api/media/check'));
    check(checksBefore.some(c=>c.path.endsWith('/batch')),'Actual page sends a batch');
    check(checksBefore.every(c=>(c.payload.images||[c.payload]).length<=6),'Batch bound');
@@ -127,6 +135,9 @@ offers[4].image='https://store.example.test/c2d3.png';
    const count=checksBefore.length;
    await search(page,'Wooden door');
    await page.waitForFunction(()=>document.querySelectorAll('[data-image-key] img.is-loaded').length===4);
+   await page.waitForTimeout(100);
+   const metrics=calls.filter(c=>c.path==='/api/search/metrics');
+   check(metrics.length===2&&new Set(metrics.map(m=>m.payload.search_trace)).size===2,'Exactly one metric per search, new trace on repeat');
    check(calls.filter(c=>c.path.startsWith('/api/media/check')).length===count,'Cached images reused across a new search');
    check(errors.length===0,'No browser errors: '+errors.join('|'));
    if(lang==='ar')await page.screenshot({path:out+'/arabic-dark-media.png',fullPage:true});
@@ -144,6 +155,10 @@ offers[4].image='https://store.example.test/c2d3.png';
    const bytes=Buffer.from(base64,'base64');
    await page.locator('input[type=file]').first().setInputFiles({name:'camera.jpg',mimeType:'image/jpeg',buffer:bytes});
    await page.waitForFunction(()=>document.querySelectorAll('[data-image-key] img.is-loaded').length===4,{},{timeout:22000});
+   await page.waitForTimeout(80);
+   const photoMetric=calls.filter(c=>c.path==='/api/search/metrics');
+   check(photoMetric.length===1&&photoMetric[0].payload.kind==='image','One camera first-card metric');
+   check(photoMetric[0].payload.search_trace===calls.find(c=>c.path==='/api/search/image/stream').headers['x-findzia-search-trace'],'Camera client/server trace correlation');
    const payload=calls.find(c=>c.path==='/api/search/image/stream')?.payload;
    check(!!payload&&payload.mime_type==='image/jpeg','Actual camera flow sends prepared JPEG');
    check(payload.image_upload.original_bytes===bytes.length,'Camera telemetry preserves original byte count');
