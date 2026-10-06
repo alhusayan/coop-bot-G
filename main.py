@@ -1,3 +1,4 @@
+# v128.5.42.61: send the compact visual-audit schema first, including cold starts.
 # v128.5.42.60: restore release 69 price recovery; retain Gemini, image and first-card fixes.
 # v128.5.42.59: evidence-first audits, bounded missing-image/index cooldowns, first-render telemetry.
 # v128.5.42.25: skip merchant spinner assets; read real card/gallery photos and keep bounded media recovery.
@@ -396,7 +397,7 @@ from findzia_billing import CreditMiddleware, install_billing
 app.add_middleware(CreditMiddleware, owner=app)
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization', 'X-Findzia-Request-Id', 'X-Findzia-Search-Trace'], max_age=86400)
-BUILD_ID = 'v128.5.42.60-price-recovery-69'
+BUILD_ID = 'v128.5.42.61-direct-audit'
 _SOCIAL = None
 
 def _fz_social_row(row):
@@ -16605,30 +16606,41 @@ def _web_audit_schema_key(url, payload):
 
 
 def _web_audit_cached_payload(url, payload):
-    key = _web_audit_schema_key(url, payload)
-    with _WEB_AUDIT_SCHEMA_LOCK:
-        accepted_at = _WEB_AUDIT_SCHEMA_MODES.get(key)
-    if accepted_at is not None and time.monotonic() - accepted_at < 3600:
-        return _web_audit_compact_payload(payload), key, True
-    return payload, key, False
+    """Start visual audits with the compact schema, including after a restart.
+
+    The local validator enforces the removed array bounds. Acceptance history
+    only controls diagnostics; it must not gate the compatible request format.
+    Text, photo-understanding and other schemas are left to their own contracts.
+    """
+    compact = _web_audit_compact_payload(payload)
+    if compact is None:
+        return payload, '', False
+    schema = compact['generationConfig']['responseSchema']
+    key = hashlib.sha256((url + json.dumps(schema, sort_keys=True)).encode()).hexdigest()
+    return compact, key, True
 
 
 def _web_audit_schema_result(key, compact, response, *, probe=False):
+    """Record HTTP compatibility without changing the initial request policy."""
     if not key or not compact:
         return
     accepted = 200 <= response.status_code < 300
+    now = time.monotonic()
     with _WEB_AUDIT_SCHEMA_LOCK:
+        previous = _WEB_AUDIT_SCHEMA_MODES.get(key)
+        first_acceptance = accepted and (previous is None or now - previous >= 3600)
         if accepted:
-            if len(_WEB_AUDIT_SCHEMA_MODES) >= 32:
+            if key not in _WEB_AUDIT_SCHEMA_MODES and len(_WEB_AUDIT_SCHEMA_MODES) >= 32:
                 oldest = min(_WEB_AUDIT_SCHEMA_MODES, key=_WEB_AUDIT_SCHEMA_MODES.get)
                 _WEB_AUDIT_SCHEMA_MODES.pop(oldest, None)
-            _WEB_AUDIT_SCHEMA_MODES[key] = time.monotonic()
+            _WEB_AUDIT_SCHEMA_MODES[key] = now
         elif response.status_code == 400:
             _WEB_AUDIT_SCHEMA_MODES.pop(key, None)
-    if probe or not accepted:
+    if probe or not accepted or first_acceptance:
         # HTTP acceptance proves request compatibility, not product identity.
         print('AI SCHEMA COMPAT change=array_bounds outcome=' + ('accepted_http' if accepted else 'rejected')
-              + ' status=' + str(response.status_code) + ' contract=' + key[:12])
+              + ' status=' + str(response.status_code) + ' contract=' + key[:12]
+              + ' mode=' + ('retry' if probe else 'direct'))
 
 
 def _web_audit_retry_payload(response, error, payload):
