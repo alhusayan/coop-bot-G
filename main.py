@@ -1,9 +1,3 @@
-# v128.5.42.64: preserve Noon/SHEIN catalog and indexed offer prices.
-# v128.5.42.63: audited-local retrieval completion and useful price-recovery priority.
-# v128.5.42.62: ready-offer audit priority and bounded local-ready completion tail.
-# v128.5.42.61: send the compact visual-audit schema first, including cold starts.
-# v128.5.42.60: restore release 69 price recovery; retain Gemini, image and first-card fixes.
-# v128.5.42.59: evidence-first audits, bounded missing-image/index cooldowns, first-render telemetry.
 # v128.5.42.25: skip merchant spinner assets; read real card/gallery photos and keep bounded media recovery.
 # v128.5.42.23: photo-only alternatives admit useful nearby designs; typed searches bypass visual admission.
 # Marketplace repair: progressive media, open domestic retrieval, observed filters, on-demand insights.
@@ -377,7 +371,6 @@ import os, re, time, base64, requests, json, asyncio, urllib.parse, hashlib, hma
 from collections import Counter, deque, defaultdict
 from concurrent.futures import Future, ThreadPoolExecutor, wait, FIRST_COMPLETED
 from functools import lru_cache
-from findzia_cache import cache_ttl, cache_fresh, cache_success, provider_cacheable, analysis_cacheable, search_answer_cacheable
 from fastapi import FastAPI, Request, Response, BackgroundTasks
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -400,8 +393,8 @@ app = FastAPI()
 from findzia_billing import CreditMiddleware, install_billing
 app.add_middleware(CreditMiddleware, owner=app)
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
-app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization', 'X-Findzia-Request-Id', 'X-Findzia-Search-Trace'], max_age=86400)
-BUILD_ID = 'v128.5.42.69-cache-policy'
+app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization', 'X-Findzia-Request-Id'], max_age=86400)
+BUILD_ID = 'v128.5.42.58-audit-compact-upload'
 _SOCIAL = None
 
 def _fz_social_row(row):
@@ -465,7 +458,7 @@ SERPAPI_TIMEOUT_SECONDS = max(8, int(os.environ.get('SERPAPI_TIMEOUT_SECONDS', '
 MARKET_FALLBACK_TIMEOUT_SECONDS = max(4, int(os.environ.get('MARKET_FALLBACK_TIMEOUT_SECONDS', '6')))
 WHATSAPP_TIMEOUT_SECONDS = max(5, int(os.environ.get('WHATSAPP_TIMEOUT_SECONDS', '10')))
 RESOLVE_TIMEOUT_SECONDS = max(3, int(os.environ.get('RESOLVE_TIMEOUT_SECONDS', '7')))
-FINAL_URL_CACHE_TTL = cache_ttl(max(300, int(os.environ.get('FINAL_URL_CACHE_TTL_SECONDS', '3600'))))
+FINAL_URL_CACHE_TTL = max(300, int(os.environ.get('FINAL_URL_CACHE_TTL_SECONDS', '3600')))
 FINAL_URL_CACHE = {}
 FINAL_URL_CACHE_LOCK = threading.Lock()
 RESOLVER = ThreadPoolExecutor(max_workers=8)
@@ -507,9 +500,9 @@ ANDROID_IMAGE_PROGRESSIVE_MIN_LOCAL = max(0, min(4, int(os.environ.get('ANDROID_
 SEARCH_CACHE = {}
 _PRODUCT_CACHE_CONFIG = int(os.environ.get('CACHE_TTL_HOURS', '12')) * 3600
 _GROCERY_CACHE_CONFIG = int(os.environ.get('GROCERY_CACHE_TTL_HOURS', '4')) * 3600
-CACHE_TTL = cache_ttl(min(_PRODUCT_CACHE_CONFIG, max(300, int(os.environ.get('PRODUCT_PRICE_CACHE_MINUTES', '30')) * 60)))
-GROCERY_CACHE_TTL = cache_ttl(min(_GROCERY_CACHE_CONFIG, max(300, int(os.environ.get('GROCERY_PRICE_CACHE_MINUTES', '15')) * 60)))
-SERVICE_CACHE_TTL = cache_ttl(int(os.environ.get('SERVICE_CACHE_TTL_HOURS', '168')) * 3600)
+CACHE_TTL = min(_PRODUCT_CACHE_CONFIG, max(300, int(os.environ.get('PRODUCT_PRICE_CACHE_MINUTES', '30')) * 60))
+GROCERY_CACHE_TTL = min(_GROCERY_CACHE_CONFIG, max(300, int(os.environ.get('GROCERY_PRICE_CACHE_MINUTES', '15')) * 60))
+SERVICE_CACHE_TTL = int(os.environ.get('SERVICE_CACHE_TTL_HOURS', '168')) * 3600
 CACHE_MAX = int(os.environ.get('CACHE_MAX', '3000'))
 CACHE_DB_PATH = os.environ.get('CACHE_DB_PATH', '/tmp/coop_search_cache.sqlite3')
 CACHE_DB_LOCK = threading.Lock()
@@ -752,7 +745,7 @@ THREE_DECIMAL_CURRENCIES = {code for code, digits in CURRENCY_DECIMALS.items() i
 ZERO_DECIMAL_CURRENCIES = {code for code, digits in CURRENCY_DECIMALS.items() if digits == 0}
 FX_CACHE = {}
 FX_CACHE_LOCK = threading.Lock()
-FX_CACHE_TTL = cache_ttl(max(3600, int(os.environ.get('FX_CACHE_TTL_HOURS', '12')) * 3600))
+FX_CACHE_TTL = max(3600, int(os.environ.get('FX_CACHE_TTL_HOURS', '12')) * 3600)
 FX_API_URL = os.environ.get('FX_API_URL', 'https://open.er-api.com/v6/latest/{base}')
 CURRENCY_SYMBOL_MAP = {'us$': 'USD', '€': 'EUR', '₹': 'INR', '₩': 'KRW', '₺': 'TRY', '₽': 'RUB', 'r$': 'BRL', 'a$': 'AUD', 'c$': 'CAD', 'hk$': 'HKD', 's$': 'SGD', 'nz$': 'NZD', 'nt$': 'TWD', 'د.إ': 'AED', 'ر.س': 'SAR', 'ر.ق': 'QAR', 'ر.ع': 'OMR', 'د.ب': 'BHD', 'د.ك': 'KWD', 'ج.م': 'EGP', 'د.أ': 'JOD', '₪': 'ILS', '₴': 'UAH', '₸': 'KZT', '₾': 'GEL', '₼': 'AZN', '฿': 'THB', '₫': 'VND', '₱': 'PHP', '₦': 'NGN', '₵': 'GHS', '৳': 'BDT', '₲': 'PYG', '₭': 'LAK', '₮': 'MNT', 'zł': 'PLN', 'kč': 'CZK', 'ft': 'HUF'}
 KNOWN_CURRENCY_CODES = set((code for codes in COUNTRY_CURRENCY_CODES.values() for code in codes)) | {'USD', 'EUR', 'GBP', 'JPY', 'CNY', 'INR', 'AED', 'SAR', 'QAR', 'OMR', 'BHD', 'KWD', 'TRY', 'EGP', 'JOD', 'AUD', 'CAD', 'CHF', 'SEK', 'NOK', 'DKK', 'PLN', 'RUB', 'BRL', 'MXN', 'ZAR', 'KRW', 'SGD', 'MYR', 'THB', 'IDR', 'PHP', 'VND', 'PKR', 'HKD', 'NZD', 'TWD'}
@@ -1578,19 +1571,15 @@ def _cache_db_get(key):
             if not row:
                 return None
             query, lang, txt, urls_json, ts, expires_at = row
-            urls = json.loads(urls_json or '{}')
-            if not search_answer_cacheable(txt, urls) or not cache_fresh(ts, expires_at, time.time()):
+            if expires_at <= time.time():
                 conn.execute('DELETE FROM search_cache WHERE cache_key=?', (key,))
                 return None
-            return {'query':query,'lang':lang,'txt':txt,'urls':urls,'ts':ts,'expires_at':expires_at,'tokens':norm_tokens(query)}
+            return {'query': query, 'lang': lang, 'txt': txt, 'urls': json.loads(urls_json or '{}'), 'ts': ts, 'expires_at': expires_at, 'tokens': norm_tokens(query)}
     except Exception as e:
-        print(f'CACHE DB GET ERR: {type(e).__name__}')
+        print(f'CACHE DB GET ERR: {e}')
         return None
 
 def _cache_db_put(key, entry):
-    if not search_answer_cacheable(entry.get('txt'), entry.get('urls')) or not cache_fresh(entry.get('ts'), entry.get('expires_at'), time.time()):
-        return
-    entry = dict(entry, expires_at=min(entry['expires_at'], entry['ts'] + 86400))
     try:
         with CACHE_DB_LOCK, _cache_db_connect() as conn:
             conn.execute('\n                INSERT INTO search_cache(cache_key, query, lang, txt, urls_json, ts, expires_at)\n                VALUES(?,?,?,?,?,?,?)\n                ON CONFLICT(cache_key) DO UPDATE SET\n                    query=excluded.query,\n                    lang=excluded.lang,\n                    txt=excluded.txt,\n                    urls_json=excluded.urls_json,\n                    ts=excluded.ts,\n                    expires_at=excluded.expires_at\n                ', (key, entry['query'], entry['lang'], entry['txt'], json.dumps(entry['urls'], ensure_ascii=False), entry['ts'], entry['expires_at']))
@@ -1636,29 +1625,26 @@ def _serpapi_cache_get(key):
     try:
         now = time.time()
         with CACHE_DB_LOCK, _cache_db_connect() as conn:
-            row = conn.execute('SELECT response_json, expires_at, created_at FROM serpapi_response_cache WHERE cache_key=?', (key,)).fetchone()
+            row = conn.execute(
+                'SELECT response_json, expires_at FROM serpapi_response_cache WHERE cache_key=?',
+                (key,),
+            ).fetchone()
             if not row:
                 return None
-            try:
-                data = json.loads(row[0] or '{}')
-            except (ValueError, TypeError):
-                data = None
-            if not cache_fresh(row[2], row[1], now) or not provider_cacheable(data):
+            if float(row[1] or 0) <= now:
                 conn.execute('DELETE FROM serpapi_response_cache WHERE cache_key=?', (key,))
-                print('SEARCH CACHE discarded=expired_or_invalid')
                 return None
-            return data
+        data = json.loads(row[0] or '{}')
+        return data if isinstance(data, dict) else None
     except Exception as e:
-        print(f'SERPAPI CACHE GET ERR: {type(e).__name__}')
+        print(f'SERPAPI CACHE GET ERR: {e}')
         return None
 
 def _serpapi_cache_put(key, engine, data, ttl_seconds=None):
-    if not SERPAPI_RESULT_CACHE_ENABLED or not provider_cacheable(data):
+    if not SERPAPI_RESULT_CACHE_ENABLED or not isinstance(data, dict):
         return
     now = time.time()
-    ttl = cache_ttl(ttl_seconds, SERPAPI_RESULT_CACHE_TTL_SECONDS)
-    if ttl <= 0:
-        return
+    ttl = float(ttl_seconds or SERPAPI_RESULT_CACHE_TTL_SECONDS)
     try:
         with CACHE_DB_LOCK, _cache_db_connect() as conn:
             conn.execute('''
@@ -1962,8 +1948,6 @@ def _serpapi_only_cached_json(params, timeout, label='SERPAPI', *, return_error=
 
 # The legacy SerpApi transport retains its cache, budget and account guards.
 from findzia_searchapi import SearchApiRouter, SerperTransport
-from findzia_prices import StructuredPrices, shein_params
-_STRUCTURED_PRICES = StructuredPrices(cost=_api_cost_record)
 _SEARCHAPI_ROUTER = SearchApiRouter(cache_get=_serpapi_cache_get,
     cache_put=_serpapi_cache_put, cost=_api_cost_record)
 _HYBRID_SEARCH = _SEARCHAPI_ROUTER.enabled and env_bool('SEARCHAPI_HYBRID_ENABLED', True)
@@ -1999,7 +1983,6 @@ def _serpapi_cached_json(params, timeout, label='SERPAPI', *, return_error=False
 
 print('SEARCHAPI POLICY ' + json.dumps(_searchapi_policy_snapshot()))
 _serpapi_cache_db_init()
-print('SEARCH CACHE POLICY max_age_seconds=86400 invalid_entries=discard price_ttl=short')
 print(f'SERPAPI COST GUARD cache={SERPAPI_RESULT_CACHE_ENABLED} ttl={SERPAPI_RESULT_CACHE_TTL_SECONDS}s singleflight={SERPAPI_SINGLEFLIGHT_ENABLED} wait={SERPAPI_SINGLEFLIGHT_WAIT_SECONDS}s budget={SERPAPI_BUDGET_ENABLED}@{SERPAPI_BUDGET_USE_PERCENT}% fallback_hour={SERPAPI_BUDGET_FALLBACK_HOURLY} stable_lens_url=True')
 
 def load_user_preferences(phone):
@@ -2036,26 +2019,43 @@ def cache_pending_message(phone, message, bot_id):
 def cache_get(query, lang):
     now = time.time()
     key = cache_key(query, lang)
-    hit = SEARCH_CACHE.get(key) or _cache_db_get(key)
-    if hit and search_answer_cacheable(hit.get('txt'), hit.get('urls')) and cache_fresh(hit.get('ts'), hit.get('expires_at'), now):
-        SEARCH_CACHE[key] = hit
+    hit = SEARCH_CACHE.get(key)
+    if not hit:
+        hit = _cache_db_get(key)
+        if hit:
+            SEARCH_CACHE[key] = hit
+    if hit and now < hit.get('expires_at', 0):
         print(f'CACHE HIT (exact): {query[:60]}')
         return (hit['txt'], dict(hit['urls']))
-    SEARCH_CACHE.pop(key, None)
-    # Reuse only this exact product/query, language and country. A nearby model
-    # or another country's entry must never replace a fresh independent search.
+    qt = norm_tokens(query)
+    if not qt:
+        return None
+    best, best_score = (None, 0.0)
+    for entry in SEARCH_CACHE.values():
+        if entry.get('lang') != lang or now >= entry.get('expires_at', 0):
+            continue
+        et = entry.get('tokens') or set()
+        if not et:
+            continue
+        inter = len(qt & et)
+        score = inter / len(qt | et) if qt | et else 0
+        if has_model_token(qt, et):
+            score += 0.3
+        if score > best_score:
+            best, best_score = (entry, score)
+    if best and best_score >= 0.68:
+        print(f"CACHE HIT (fuzzy {best_score:.2f}): {query[:50]} ~ {best.get('query', '')[:50]}")
+        return (best['txt'], dict(best['urls']))
     return None
 
 def cache_put(query, lang, txt, urls):
-    if not search_answer_cacheable(txt, urls):
+    if not txt:
         return
     if len(SEARCH_CACHE) >= CACHE_MAX:
         oldest = min(SEARCH_CACHE, key=lambda k: SEARCH_CACHE[k].get('ts', 0))
         SEARCH_CACHE.pop(oldest, None)
     now = time.time()
-    ttl = cache_ttl(cache_ttl_for(query, txt))
-    if ttl <= 0:
-        return
+    ttl = cache_ttl_for(query, txt)
     key = cache_key(query, lang)
     entry = {'txt': txt, 'urls': dict(urls), 'ts': now, 'expires_at': now + ttl, 'tokens': norm_tokens(query), 'query': query, 'lang': lang}
     SEARCH_CACHE[key] = entry
@@ -3608,11 +3608,7 @@ def _photo_market_discovery(reference_future, query_hint, deadline, progress_cal
         progress_callback=progress_callback, cancel_event=cancel_event)
 
 
-LENS_READY_MIN_SECONDS = 8.0
-LENS_READY_GRACE_SECONDS = 1.0
-
-
-def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=False, progress_callback=None, cancel_event=None, *, reference_context=None, ready_event=None):
+def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=False, progress_callback=None, cancel_event=None, *, reference_context=None):
     if not PUBLIC_BASE_URL or not ((ENABLE_GOOGLE_LENS and SERPAPI_API_KEY) or _INDEPENDENT.available('bing_reverse_image')):
         print('GOOGLE LENS SKIPPED: missing SERPAPI_API_KEY or PUBLIC_BASE_URL')
         return {'aliases': [], 'matches': [], 'query': ''}
@@ -3677,7 +3673,7 @@ def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=Fal
                 merged_by_sig[sig] = it
         local_updates, local_updates_lock = deque(), threading.Lock()
         def local_progress(batch):
-            if not cancelled() and not independent_cancel.is_set():
+            if not cancelled():
                 with local_updates_lock:
                     local_updates.append([dict(item) for item in batch])
         passes = _lens_market_passes(user_country, USE_FAST_LENS_PIPELINE) if ENABLE_GOOGLE_LENS and SERPAPI_API_KEY else []
@@ -3711,7 +3707,7 @@ def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=Fal
         if USE_FAST_LENS_PIPELINE and LOCAL_DISCOVERY_ENABLED:
             cn_future = MARKET_SUPPLEMENT_POOL.submit(_run_with_market, _web_market('cn'),
                 _china_native_image_discovery, reference_future, query_hint,
-                completion_deadline, local_progress, independent_cancel, user_country, not bool(reference_context), visual_futures)
+                completion_deadline, local_progress, cancel_event, user_country, not bool(reference_context), visual_futures)
             future_map[cn_future] = ('native-discovery', 'cn', True)
             all_futures.add(cn_future)
             pending.add(cn_future)
@@ -3721,15 +3717,13 @@ def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=Fal
         if USE_FAST_LENS_PIPELINE and LOCAL_DISCOVERY_ENABLED and user_country == 'us':
             us_future = MARKET_SUPPLEMENT_POOL.submit(_run_with_market, lens_market_snapshot,
                 _photo_market_discovery, reference_future, query_hint, completion_deadline,
-                local_progress, independent_cancel, user_country, not bool(reference_context), visual_futures, 'us')
+                local_progress, cancel_event, user_country, not bool(reference_context), visual_futures, 'us')
             future_map[us_future] = ('native-discovery', 'us', True)
             all_futures.add(us_future)
             pending.add(us_future)
             local_rescue_started = True
             print('IMAGE LOCAL PRIMARY country=us identity_aware=True parallel_with_lens=True')
         enough_fast = False
-        ready_deadline = None
-        ready_completion = False
         last_progress_signature = None
 
         def _emit_progress_snapshot(reason, allow_foreign_first=False):
@@ -3781,7 +3775,7 @@ def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=Fal
                 rescue_query,
                 budget,
                 max(LENS_LOCAL_LANE_TARGET + 2, LENS_LOCAL_LANE_TARGET),
-                local_progress, independent_cancel,
+                local_progress, cancel_event,
             )
             print(f'LENS LOCAL LANE RESCUE START elapsed={elapsed:.1f}s country={user_country}')
             return local_rescue_future
@@ -3917,23 +3911,6 @@ def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=Fal
                             print(f'LENS COMPLETION ERR country={country} type={lens_type}: {type(exc).__name__}')
                 if just_done:
                     _emit_progress_snapshot('provider_completed', allow_foreign_first=True)
-                # Only the stream's completed visual audits may end retrieval.
-                # Give every market eight seconds and preserve already-ready
-                # provider responses before ending the remaining source wait.
-                ready = (light and not reference_context and ready_event is not None
-                         and ready_event.is_set() and bool(reference))
-                if not ready:
-                    ready_deadline = None
-                elif ready_deadline is None:
-                    ready_deadline = max(fast_started + LENS_READY_MIN_SECONDS,
-                                         time.monotonic() + LENS_READY_GRACE_SECONDS)
-                if ready_deadline is not None and time.monotonic() >= ready_deadline:
-                    ready_completion = bool(pending or local_rescue_future is not None)
-                    if ready_completion:
-                        independent_cancel.set()
-                        print(f'LENS READY COMPLETE country={user_country} pending={len(pending)}'
-                              f' elapsed={time.monotonic() - fast_started:.2f}s')
-                        break
             with local_updates_lock:
                 for batch in local_updates:
                     _merge(batch)
@@ -3984,7 +3961,7 @@ def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=Fal
         fallback_query = _reference_query()
         if not fallback_query and merged and reference_future is None:
             fallback_query = (merged[0].get('title') or '').strip()
-        if not ready_completion and LENS_LOCAL_LANE_RESCUE and reference.get('named') and not any(result_market_rank(m) == 0 and m.get('_reference_priority', 0) >= 3 for m in allowed) and not local_rescue_started:
+        if LENS_LOCAL_LANE_RESCUE and reference.get('named') and not any(result_market_rank(m) == 0 and m.get('_reference_priority', 0) >= 3 for m in allowed) and not local_rescue_started:
             local_rescue_started = True
             remaining = max(0.0, completion_deadline - time.monotonic())
             rescued = _single_local_lane_rescue(fallback_query, timeout_seconds=min(LOCAL_DISCOVERY_TIMEOUT, remaining), limit=6,
@@ -4067,8 +4044,7 @@ def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=Fal
                 stable_query = reference.get('query') or query_hint or chosen_title
                 return {'aliases': [stable_query] if stable_query else [], 'matches': matches, 'raw_match_count': len(merged),
                     'query': stable_query, 'visual_identity': reference.get('query', ''),
-                    'reference_identity': dict(reference), 'chosen': chosen, 'signature': {}, 'source': 'lens_turbo_reference',
-                    **({'retrieval_completion': 'ready_local_sources'} if ready_completion else {})}
+                    'reference_identity': dict(reference), 'chosen': chosen, 'signature': {}, 'source': 'lens_turbo_reference'}
             visual_identity = ''
             try:
                 id_system = 'Identify the physical product in the image for shopping search. Return one concise English commercial identity only: product type + brand/model if visibly supported. Do not guess a brand/model. Do not mention colors unless identity-critical. No explanation.'
@@ -4176,7 +4152,6 @@ def get_final_url(url: str):
         if hit and now - hit['ts'] < FINAL_URL_CACHE_TTL:
             return hit['url']
     final = url
-    resolved = False
     r = None
     try:
         r = _web_safe_get(
@@ -4186,7 +4161,6 @@ def get_final_url(url: str):
             stream=True,
         )
         final = r.url or url
-        resolved = r.status_code < 400
     except Exception as e:
         print(f'resolve err {e} {url[:80]}')
     finally:
@@ -4196,8 +4170,7 @@ def get_final_url(url: str):
             oldest = sorted(FINAL_URL_CACHE.items(), key=lambda kv: kv[1].get('ts', 0))[:1000]
             for key, _ in oldest:
                 FINAL_URL_CACHE.pop(key, None)
-        if resolved:
-            FINAL_URL_CACHE[url] = {'url': final, 'ts': time.time()}
+        FINAL_URL_CACHE[url] = {'url': final, 'ts': now}
     return final
 
 def resolve_all(uris):
@@ -4838,7 +4811,7 @@ def _market_query_key(query, language):
 def _market_query_cached(query, language):
     with MARKET_QUERY_LOCK:
         hit = MARKET_QUERY_CACHE.get(_market_query_key(query, language))
-        if hit and hit[1] and time.monotonic() < hit[0]:
+        if hit and time.monotonic() < hit[0]:
             return hit[1]
     return None
 
@@ -4849,8 +4822,7 @@ def _market_query_store(query, language, record):
         MARKET_QUERY_CACHE.pop(key, None)
         while len(MARKET_QUERY_CACHE) >= 2000:
             MARKET_QUERY_CACHE.pop(next(iter(MARKET_QUERY_CACHE)))
-        if record:
-            MARKET_QUERY_CACHE[key] = (time.monotonic() + 86400, record)
+        MARKET_QUERY_CACHE[key] = (time.monotonic() + (86400 if record else 60), record)
 
 
 def _market_query_validate_edits(query, edits):
@@ -5518,8 +5490,8 @@ def _web_image_search_records(data):
                'serpapi_thumbnail': item.get('serpapi_thumbnail') or '',
                'thumbnail': item.get('thumbnail') or '',
                'image': item.get('original') or ''}
-        for field in ('price', 'price_value', 'extracted_price', 'currency', 'rich_snippet',
-                      'monthly_payment_duration', 'installments_description', 'down_payment'):
+        for field in ('price', 'extracted_price', 'currency', 'rich_snippet',
+                      'monthly_payment_duration'):
             if field in item:
                 row[field] = item[field]
         records.append(row)
@@ -5832,68 +5804,11 @@ def _web_collection_url(value):
         return False
 
 
-
-def _web_catalog_document_limit(url):
-    # Noon puts its grid after a large navigation/filter tree. A 1.2 MB
-    # prefix contains only the price-less ItemList, before the visible cards.
-    host = urllib.parse.urlsplit(str(url or '')).hostname or ''
-    return 3000000 if _host_matches_any(host, ('noon.com', 'shein.com')) else 1200000
-
-
-def _web_catalog_card_quote(card, url):
-    """Read one card's displayed current price, excluding its old/coupon prices."""
-    host = urllib.parse.urlsplit(url).hostname or ''
-    if not _host_matches_any(host, ('noon.com', 'shein.com')):
-        return None
-    cc = _web_listing_price_country({'url': url}, {})
-    # Avoid interpreting CSS 'wrapper_' as a per-unit price label.
-    exclude = re.compile(_WEB_PRICE_ELEMENT_EXCLUDE.pattern.replace('per[-_ ]', '(?<![a-z])per[-_ ]'), re.I)
-    quotes = []
-    for el in card.select('[itemprop="price"], [class*="price" i], [data-qa*="price" i]')[:60]:
-        lineage = [el]
-        for parent in el.parents:
-            if parent is card:
-                break
-            lineage.append(parent)
-        labels = ' '.join(' '.join(n.get('class', [])) + ' ' + str(n.get('id') or '')
-                          + ' ' + str(n.get('data-qa') or '') for n in lineage)
-        if (exclude.search(labels)
-                or re.search(r'recommend|related|upsell|crosssell', labels, re.I)
-                or any(n.name in ('del', 's', 'strike', 'script', 'style') or n.has_attr('hidden')
-                       or n.get('aria-hidden') == 'true'
-                       or re.search(r'display\s*:\s*none', n.get('style', ''), re.I) for n in lineage)):
-            continue
-        text = el.get_text(' ', strip=True)
-        # Currency and amount can be siblings, but never climb out of this
-        # price block into the whole card or another product's wrapper.
-        if not any(p.search(_normalize_price_chars(text)) for p in _WEB_PRICE_PATS):
-            parent = el.parent
-            label = ' '.join(parent.get('class', [])) if parent is not None else ''
-            if parent is not None and parent is not card and 'price' in label.lower() and not exclude.search(label):
-                text = parent.get_text(' ', strip=True)
-        if not text or len(text) > 100 or not any(p.search(_normalize_price_chars(text)) for p in _WEB_PRICE_PATS):
-            continue  # Never turn a bare rating/specification into a price.
-        quote = _web_price_quote(text, '', cc)
-        if quote and quote['kind'] == 'exact' and not _WEB_NOT_A_PRICE_PIECE.search(text):
-            quotes.append(quote)
-    if quotes and len({(q['min'], q['currency']) for q in quotes}) == 1:
-        return quotes[0]
-    return None
-
-
 def _web_collection_products(document, page_url):
     """Extract each observed product's own URL/photo/offer, never parent facts."""
     if not _web_collection_url(page_url) or not document:
         return []
-    prefix = document[:_web_catalog_document_limit(page_url)]
-    catalog_host = urllib.parse.urlsplit(page_url).hostname or ''
-    if _host_matches_any(catalog_host, ('noon.com', 'shein.com')) and not re.search(r'</(?:html|body)\s*>', prefix, re.I):
-        # A bounded network prefix may end halfway through an amount/card.
-        # BeautifulSoup repairs open tags; that repair is not price evidence.
-        closed = list(re.finditer(r'</a\s*>', prefix, re.I))
-        if closed:
-            prefix = prefix[:closed[-1].end()]
-    soup = BeautifulSoup(prefix, 'html.parser')
+    soup = BeautifulSoup(document[:1200000], 'html.parser')
     host = (urllib.parse.urlsplit(page_url).hostname or '').lower().removeprefix('www.')
     products = {}
 
@@ -5942,17 +5857,6 @@ def _web_collection_products(document, page_url):
                'price_source': 'local_collection', 'exact': False, 'image_candidates': pictures}
         if isinstance(availability, str) and availability:
             row['availability'] = availability
-        if price and _host_matches_any(host, ('noon.com', 'shein.com')):
-            # The ItemList often omits the seller query present on the actual
-            # card (Noon's ?o=). Replace only its unpriced base placeholder with
-            # the observed full offer URL, never attach seller money to the base.
-            parsed = urllib.parse.urlsplit(key)
-            base = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, '', ''))
-            if parsed.query:
-                for old_key in list(products):
-                    if (not products[old_key].get('price') and not urllib.parse.urlsplit(old_key).query
-                            and _web_same_index_listing(base, old_key)):
-                        del products[old_key]
         if key in products:
             old = products[key]
             old.update(_web_merge_offer_images(old, row))
@@ -6002,13 +5906,8 @@ def _web_collection_products(document, page_url):
         price = offers.get('price') if 'AggregateOffer' not in types(offers) else ''
         url = item.get('url') or offers.get('url') or item.get('@id') or node.get('url')
         add(url, item.get('name') or node.get('name'), item.get('image'), price, offers.get('priceCurrency'), offers.get('availability'))
-    # Noon navigation can contain over 1800 links before the first product.
-    # Read its observed grid directly; retain the generic path for other markup.
-    anchors = soup.select('[data-qa="plp-grid"] a[href]') if _host_matches_any(host, ('noon.com',)) else []
-    if not anchors:
-        anchors = soup.select('a[href]')
     # Card-local fallback for stores that emit a grid without JSON-LD Products.
-    for anchor in anchors[:1800]:
+    for anchor in soup.select('a[href]')[:1800]:
         href = absolute(anchor.get('href'))
         if not href or _web_collection_url(href) or not _web_is_direct_product_page_url(href):
             continue
@@ -6050,19 +5949,13 @@ def _web_collection_products(document, page_url):
                 prices.append(value)
         currency = card.select_one('[itemprop="priceCurrency"]')
         currency = (currency.get('content') or currency.get_text(' ', strip=True)) if currency else ''
-        if _host_matches_any(host, ('noon.com', 'shein.com')):
-            quote = _web_catalog_card_quote(card, href)
-            # These stores mix old prices and discounts inside price wrappers.
-            # An ambiguous current block stays unpriced; don't use prices[0].
-            add(href, title, images, _web_format_quote(quote) if quote else '', quote['currency'] if quote else '')
-        else:
-            add(href, title, images, prices[0] if len(prices) == 1 else '', currency)
+        add(href, title, images, prices[0] if len(prices) == 1 else '', currency)
     return list(products.values())
 
 
 def _web_fetch_collection(url):
     page = _web_merchant_document(url, purpose='collection', headers=dict(HEADERS), timeout=(.8, 1.4),
-                                  max_bytes=_web_catalog_document_limit(url), max_redirects=2, html_prefix=True)
+                                  max_bytes=1200000, max_redirects=2, html_prefix=True)
     if page.get('reason') or not page.get('text'):
         return []
     # Login, redirected home pages and direct products are never grids.
@@ -6088,8 +5981,7 @@ def _web_expand_collection_rows(records, *, budget=COLLECTION_WAIT_SECONDS):
         with _COLLECTION_LOCK:
             now = time.monotonic()
             for old, (stamp, job) in list(_COLLECTION_JOBS.items()):
-                if job.done() and (job.cancelled() or job.exception() is not None or not job.result()
-                                   or now-stamp > 90 or len(_COLLECTION_JOBS) > 96):
+                if job.done() and (now-stamp > 90 or len(_COLLECTION_JOBS) > 96):
                     del _COLLECTION_JOBS[old]
             cached = _COLLECTION_JOBS.get(key)
             if cached:
@@ -6607,11 +6499,6 @@ def _local_discovery_request(query, market, kind, timeout_seconds, cancel_event=
                     rows.append(row)
         elif not rows and tokens:
             market['_shopping_recovery'] = {'query': query, 'token': tokens[0][0], 'thumbnail': tokens[0][1]}
-        elif not tokens and _STRUCTURED_PRICES.enabled and market.get('_image_discovery') and remaining > .4:
-            # Shares the same three attempts with the fast Shopping lanes.
-            recovery = _PHOTO_SHOPPING_RECOVERY_POOL.submit(_run_with_market, market,
-                _local_photo_shopping_recovery, {'shopping_results': cards}, query, market, hl, deadline, cancel_event)
-            return _LocalDiscoveryBatch(rows, recovery)
         return rows
     if kind == 'baidu':
         params = {'engine': 'baidu', 'q': f'{search_query} 价格 购买 -百科 -知道 -视频', 'ct': 2,
@@ -7697,9 +7584,7 @@ def _merchant_url_market(url):
     # Matsuya Ginza's /cn/ and /en/ choose UI language for its Japanese catalog.
     if _host_matches_any(host, ('matsuyaginza.com',)):
         return {'country': 'jp', 'evidence': 'merchant_domestic_catalog', 'kind': 'domestic_catalog'}
-    # Exact observed storefront alias; do not infer a country from arbitrary subdomains.
-    alias_cc = {'saudi.ounass.com': 'sa'}.get(host, '')
-    domain_cc = alias_cc or ('us' if host == 'us.shein.com' else _host_country_code(host))
+    domain_cc = 'us' if host == 'us.shein.com' else _host_country_code(host)
     storefront_cc = _storefront_country(url)
     if storefront_cc == 'conflict':
         return {'conflict': True}
@@ -10656,9 +10541,8 @@ def url_is_alive(url):
     key = u.split('?')[0][:200]
     with _URL_ALIVE_LOCK:
         hit = _URL_ALIVE_CACHE.get(key)
-        if hit and hit.get('ok') and cache_fresh(hit.get('ts'), hit.get('ts',0)+21600, time.time()):
-            return True
-        _URL_ALIVE_CACHE.pop(key, None)
+        if hit and time.time() - hit['ts'] < 21600:
+            return hit['ok']
     ok = False
     r = None
     try:
@@ -10674,8 +10558,7 @@ def url_is_alive(url):
     with _URL_ALIVE_LOCK:
         if len(_URL_ALIVE_CACHE) > 3000:
             _URL_ALIVE_CACHE.clear()
-        if ok:
-            _URL_ALIVE_CACHE[key] = {'ok': True, 'ts': time.time()}
+        _URL_ALIVE_CACHE[key] = {'ok': ok, 'ts': time.time()}
     return ok
 
 def resolve_store_homepage(name):
@@ -10688,12 +10571,9 @@ def resolve_store_homepage(name):
     key = normalize_name(normalize_ar(name))[:80]
     if not key:
         return ''
-    key = (str(current_market().get('country') or ''), key)
     with _STORE_HOME_LOCK:
-        hit = _STORE_HOME_CACHE.get(key)
-        if isinstance(hit, dict) and hit.get('url') and cache_fresh(hit.get('ts'), hit.get('ts',0)+86400, time.time()):
-            return hit['url']
-        _STORE_HOME_CACHE.pop(key, None)
+        if key in _STORE_HOME_CACHE:
+            return _STORE_HOME_CACHE[key]
     raw, _ = text77_call_gemini([{'text': f"المتجر: {name}\nالبلد: {current_market().get('country_name', 'Kuwait')}"}], system=STORE_DOMAIN_SYSTEM, use_search=False)
     ans = (raw or '').strip().splitlines()[0].strip().lower() if raw else ''
     ans = ans.replace('https://', '').replace('http://', '').strip('/ ')
@@ -10707,8 +10587,7 @@ def resolve_store_homepage(name):
     with _STORE_HOME_LOCK:
         if len(_STORE_HOME_CACHE) > 2000:
             _STORE_HOME_CACHE.clear()
-        if url:
-            _STORE_HOME_CACHE[key] = {'url':url, 'ts':time.time()}
+        _STORE_HOME_CACHE[key] = url
     print(f"STORE HOMEPAGE RESOLVED: {name!r} -> {url or 'NONE'}")
     return url
 
@@ -11872,14 +11751,14 @@ def process_location_message(message, bot_id):
 WEB_API_ENABLED = env_bool('WEB_API_ENABLED', True)
 WEB_GEO_ENABLED = env_bool('WEB_GEO_ENABLED', True)
 WEB_GEO_TIMEOUT_SECONDS = max(0.8, min(4.0, float(os.environ.get('WEB_GEO_TIMEOUT_SECONDS', '2.0'))))
-WEB_GEO_CACHE_TTL_SECONDS = cache_ttl(max(3600, int(os.environ.get('WEB_GEO_CACHE_TTL_SECONDS', '86400'))))
+WEB_GEO_CACHE_TTL_SECONDS = max(3600, int(os.environ.get('WEB_GEO_CACHE_TTL_SECONDS', '86400')))
 WEB_GEO_PROVIDER_URL = os.environ.get('WEB_GEO_PROVIDER_URL', 'https://ipwho.is/{ip}?fields=success,country_code').strip()
 WEB_GEO_CACHE = {}
 WEB_GEO_CACHE_LOCK = threading.Lock()
 WEB_IMAGE_PROXY_ENABLED = env_bool('WEB_IMAGE_PROXY_ENABLED', True)
 WEB_IMAGE_PROXY_TIMEOUT_SECONDS = max(3.0, min(12.0, float(os.environ.get('WEB_IMAGE_PROXY_TIMEOUT_SECONDS', '8'))))
 WEB_IMAGE_PAGE_TIMEOUT_SECONDS = max(2.0, min(8.0, float(os.environ.get('WEB_IMAGE_PAGE_TIMEOUT_SECONDS', '4.5'))))
-WEB_IMAGE_CACHE_TTL_SECONDS = cache_ttl(max(3600, int(os.environ.get('WEB_IMAGE_CACHE_TTL_SECONDS', '86400'))))
+WEB_IMAGE_CACHE_TTL_SECONDS = max(3600, int(os.environ.get('WEB_IMAGE_CACHE_TTL_SECONDS', '86400')))
 WEB_IMAGE_PROXY_MAX_BYTES = max(512000, min(8 * 1024 * 1024, int(os.environ.get('WEB_IMAGE_PROXY_MAX_BYTES', str(4 * 1024 * 1024)))))
 WEB_IMAGE_PROXY_RATE_PER_MINUTE = max(30, min(600, int(os.environ.get('WEB_IMAGE_PROXY_RATE_PER_MINUTE', '240'))))
 WEB_IMAGE_CACHE = {}
@@ -11892,7 +11771,7 @@ WEB_REQUIRE_PRODUCT_IMAGE = env_bool('WEB_REQUIRE_PRODUCT_IMAGE', True)
 WEB_VERIFY_PRODUCT_IMAGE = env_bool('WEB_VERIFY_PRODUCT_IMAGE', True)
 WEB_PRODUCT_IMAGE_VERIFY_TIMEOUT_SECONDS = max(2.0, min(8.0, float(os.environ.get('WEB_PRODUCT_IMAGE_VERIFY_TIMEOUT_SECONDS', '4.0'))))
 WEB_PRODUCT_VERIFY_TIMEOUT_SECONDS = max(2.5, min(8.0, float(os.environ.get('WEB_PRODUCT_VERIFY_TIMEOUT_SECONDS', '5.5'))))
-WEB_PRODUCT_VERIFY_CACHE_TTL_SECONDS = cache_ttl(max(300, int(os.environ.get('WEB_PRODUCT_VERIFY_CACHE_TTL_SECONDS', '1800'))))
+WEB_PRODUCT_VERIFY_CACHE_TTL_SECONDS = max(300, int(os.environ.get('WEB_PRODUCT_VERIFY_CACHE_TTL_SECONDS', '1800')))
 WEB_PRODUCT_VERIFY_CACHE = {}
 WEB_PRODUCT_VERIFY_LOCK = threading.Lock()
 WEB_IDENTITY_PAGE_POOL = ThreadPoolExecutor(max_workers=8)
@@ -11905,7 +11784,7 @@ WEB_AI_CLASSIFIER_ENABLED = env_bool('WEB_AI_CLASSIFIER_ENABLED', True)
 # Separate identity-audit budgets from obsolete fast-classifier settings.
 # Old Railway values (2/3.2 seconds) cannot silently disable the new audit.
 WEB_AI_CLASSIFIER_TIMEOUT_SECONDS = max(10.0, min(45.0, float(os.environ.get('WEB_IDENTITY_TEXT_TIMEOUT_SECONDS', '20'))))
-WEB_AI_CLASSIFIER_CACHE_TTL_SECONDS = cache_ttl(max(3600, min(30 * 86400, int(os.environ.get('WEB_AI_CLASSIFIER_CACHE_TTL_SECONDS', '604800')))))
+WEB_AI_CLASSIFIER_CACHE_TTL_SECONDS = max(3600, min(30 * 86400, int(os.environ.get('WEB_AI_CLASSIFIER_CACHE_TTL_SECONDS', '604800'))))
 WEB_AI_CLASSIFIER_MAX_RESULTS = max(4, min(24, int(os.environ.get('WEB_AI_CLASSIFIER_MAX_RESULTS', str(LENS_DIRECT_MAX_CTA)))))
 WEB_AI_CLASSIFIER_MIN_CONFIDENCE = max(50, min(95, int(os.environ.get('WEB_AI_CLASSIFIER_MIN_CONFIDENCE', '68'))))
 WEB_AI_CLASSIFIER_INFLIGHT = {}
@@ -12092,18 +11971,15 @@ def _web_image_cache_get(key):
     now = time.time()
     with WEB_IMAGE_CACHE_LOCK:
         item = WEB_IMAGE_CACHE.get(key)
-        if item and item.get('value') not in ('', '0', None) and cache_fresh(item.get('ts'), item.get('ts',0)+WEB_IMAGE_CACHE_TTL_SECONDS, now):
-            return item['value']
-        WEB_IMAGE_CACHE.pop(key, None)
+        ttl = 20 if item and item.get('value') in ('', '0') else WEB_IMAGE_CACHE_TTL_SECONDS
+        if item and now - float(item.get('ts') or 0) < ttl:
+            return item.get('value') or ''
     return ''
 
 def _web_image_cache_set(key, value):
     now = time.time()
     with WEB_IMAGE_CACHE_LOCK:
-        if not value or value == '0':
-            WEB_IMAGE_CACHE.pop(key, None)
-            return
-        WEB_IMAGE_CACHE[key] = {'value': str(value), 'ts': now}
+        WEB_IMAGE_CACHE[key] = {'value': str(value or ''), 'ts': now}
         if len(WEB_IMAGE_CACHE) > 5000:
             stale = sorted(WEB_IMAGE_CACHE.items(), key=lambda kv: kv[1].get('ts', 0))[:1000]
             for old_key, _ in stale:
@@ -14754,17 +14630,14 @@ def _web_visual_cache_get(key):
     now = time.time()
     with WEB_VISUAL_IMAGE_CACHE_LOCK:
         item = WEB_VISUAL_IMAGE_CACHE.get(key)
-        if item and item.get('value') and cache_fresh(item.get('ts'), item.get('ts',0)+WEB_IMAGE_CACHE_TTL_SECONDS, now):
-            return (True, item['value'])
-        WEB_VISUAL_IMAGE_CACHE.pop(key, None)
-        return (False, None)
+        ttl = 300 if item and item.get('value') is None else WEB_IMAGE_CACHE_TTL_SECONDS
+        if not item or now - float(item.get('ts') or 0) >= ttl:
+            return (False, None)
+        return (True, item.get('value'))
 
 def _web_visual_cache_set(key, value):
     now = time.time()
     with WEB_VISUAL_IMAGE_CACHE_LOCK:
-        if not value:
-            WEB_VISUAL_IMAGE_CACHE.pop(key, None)
-            return
         WEB_VISUAL_IMAGE_CACHE[key] = {'ts': now, 'value': value}
         # Compressed thumbnails are intentionally kept in a much smaller cache
         # than URL strings so a busy worker cannot accumulate image megabytes.
@@ -15067,29 +14940,6 @@ def _web_read_limited_response(response, max_bytes, cancel_event=None, deadline=
         chunks.append(chunk)
     return b''.join(chunks)
 
-_WEB_VISUAL_MISSING_UNTIL = {}
-
-
-def _web_visual_missing_recent(url, status=None):
-    """Only definitive 404/410 misses get a short cooldown, never 429/timeouts.
-
-    Positive pixels are still refreshed for every independent visual audit.
-    Query strings remain part of the key; signed/new images are independent.
-    """
-    key = hashlib.sha256(url.encode('utf-8')).hexdigest()
-    now = time.monotonic()
-    with WEB_VISUAL_IMAGE_CACHE_LOCK:
-        if status in (404, 410):
-            _WEB_VISUAL_MISSING_UNTIL[key] = now + 30
-            while len(_WEB_VISUAL_MISSING_UNTIL) > 256:
-                _WEB_VISUAL_MISSING_UNTIL.pop(next(iter(_WEB_VISUAL_MISSING_UNTIL)))
-        expires = _WEB_VISUAL_MISSING_UNTIL.get(key, 0)
-        if expires <= now:
-            _WEB_VISUAL_MISSING_UNTIL.pop(key, None)
-            return False
-        return True
-
-
 def _web_visual_candidate_inline(row, force_refresh=False, cancel_event=None):
     if _fz_social_row(row):
         body = _SOCIAL.image_bytes(row)
@@ -15105,9 +14955,6 @@ def _web_visual_candidate_inline(row, force_refresh=False, cancel_event=None):
     for index, raw_url in enumerate(urls):
         if (cancel_event is not None and cancel_event.is_set()) or time.monotonic() >= deadline:
             break
-        if _web_visual_missing_recent(raw_url):
-            failures.append('recent_missing')
-            continue
         cache_key = 'visual:' + hashlib.sha256(raw_url.encode('utf-8')).hexdigest()
         cached, value = _web_visual_cache_get(cache_key)
         if cached and not force_refresh:
@@ -15133,7 +14980,6 @@ def _web_visual_candidate_inline(row, force_refresh=False, cancel_event=None):
                 timeout=(connect, max(.01, min(WEB_VISUAL_CLASSIFIER_FETCH_TIMEOUT_SECONDS, budget-connect))), stream=True)
             content_type = (response.headers.get('content-type') or '').split(';',1)[0].strip().lower()
             if response.status_code >= 400 or not content_type.startswith('image/'):
-                _web_visual_missing_recent(raw_url, response.status_code)
                 failures.append('http_'+str(response.status_code) if response.status_code >= 400 else 'not_image')
                 continue
             body = _web_read_limited_response(response, WEB_VISUAL_CLASSIFIER_MAX_DOWNLOAD_BYTES, cancel_event, deadline)
@@ -15149,14 +14995,7 @@ def _web_visual_candidate_inline(row, force_refresh=False, cancel_event=None):
             except Exception:
                 pass
             if cancel_event is None or not cancel_event.is_set():
-                if value:
-                    _web_visual_cache_set(cache_key, value)
-                else:
-                    # A failed refresh revokes old pixels. Only the explicit
-                    # 30-second 404/410 cooldown may suppress a later fetch;
-                    # transport/429 failures must not become five-minute misses.
-                    with WEB_VISUAL_IMAGE_CACHE_LOCK:
-                        WEB_VISUAL_IMAGE_CACHE.pop(cache_key, None)
+                _web_visual_cache_set(cache_key, value)
         if value:
             if index:
                 print(f'VISUAL IMAGE FETCH status=recovered alternative={index} failed={failures}')
@@ -15201,7 +15040,7 @@ def _web_prepare_identity_card(original, cancel_event=None):
             row['raw_title'] = snap['title']
     return row
 
-def _web_prepare_identity_cards(results, cancel_event=None, *, _deadline=None):
+def _web_prepare_identity_cards(results, cancel_event=None):
     rows = [dict(row) for row in (results or [])]
     jobs = {}
     for index, row in enumerate(rows[:WEB_VISUAL_CLASSIFIER_MAX_RESULTS]):
@@ -15209,10 +15048,7 @@ def _web_prepare_identity_cards(results, cancel_event=None, *, _deadline=None):
             break
         jobs[WEB_IDENTITY_PAGE_POOL.submit(_web_prepare_identity_card, row, cancel_event)] = index
     if jobs:
-        budget = WEB_IDENTITY_PAGE_BUDGET_SECONDS
-        if _deadline is not None:
-            budget = min(budget, max(0.0, _deadline - time.monotonic()))
-        done, pending = wait(set(jobs), timeout=budget)
+        done, pending = wait(set(jobs), timeout=WEB_IDENTITY_PAGE_BUDGET_SECONDS)
         for future in done:
             try:
                 prepared = future.result()
@@ -15226,7 +15062,7 @@ def _web_prepare_identity_cards(results, cancel_event=None, *, _deadline=None):
     # cards after their scores have been computed from a different image.
     return rows
 
-def _web_visual_collect_evidence(reference_image_b64, results, cancel_event=None, *, _deadline=None):
+def _web_visual_collect_evidence(reference_image_b64, results, cancel_event=None):
     """Fetch card thumbnails concurrently under one strict aggregate deadline."""
     reference = _web_visual_reference_inline(reference_image_b64)
     if not reference:
@@ -15253,10 +15089,7 @@ def _web_visual_collect_evidence(reference_image_b64, results, cancel_event=None
         # the background visual audit; the first streamed cards are unaffected.
         jobs[WEB_VISUAL_CLASSIFIER_POOL.submit(_web_visual_candidate_inline, row, True, cancel_event)] = classification_id
     if jobs:
-        budget = WEB_VISUAL_CLASSIFIER_FETCH_TIMEOUT_SECONDS + 0.9
-        if _deadline is not None:
-            budget = min(budget, max(0.0, _deadline - time.monotonic()))
-        done, pending = wait(set(jobs), timeout=budget)
+        done, pending = wait(set(jobs), timeout=WEB_VISUAL_CLASSIFIER_FETCH_TIMEOUT_SECONDS + 0.9)
         for future in done:
             try:
                 inline = future.result()
@@ -16459,25 +16292,22 @@ def _web_ai_classifier_cache_get(key):
     try:
         now = time.time()
         with CACHE_DB_LOCK, _cache_db_connect() as conn:
-            row = conn.execute('SELECT response_json, expires_at, created_at FROM ai_result_classification_cache WHERE cache_key=?', (key,)).fetchone()
+            row = conn.execute(
+                'SELECT response_json, expires_at FROM ai_result_classification_cache WHERE cache_key=?',
+                (key,),
+            ).fetchone()
             if not row:
                 return None
-            try:
-                value = json.loads(row[0] or '{}')
-            except (ValueError, TypeError):
-                value = None
-            if not cache_fresh(row[2], row[1], now) or not analysis_cacheable(value):
+            if float(row[1] or 0) <= now:
                 conn.execute('DELETE FROM ai_result_classification_cache WHERE cache_key=?', (key,))
                 return None
-            return value
+        value = json.loads(row[0] or '{}')
+        return value if isinstance(value, dict) else None
     except Exception as e:
-        print(f'WEB AI CLASSIFIER CACHE GET ERR: {type(e).__name__}')
+        print(f'WEB AI CLASSIFIER CACHE GET ERR: {e}')
         return None
 
 def _web_ai_classifier_cache_put(key, value, ttl_seconds=None):
-    ttl = cache_ttl(ttl_seconds, WEB_AI_CLASSIFIER_CACHE_TTL_SECONDS)
-    if not analysis_cacheable(value) or ttl <= 0:
-        return
     try:
         now = time.time()
         with CACHE_DB_LOCK, _cache_db_connect() as conn:
@@ -16488,7 +16318,7 @@ def _web_ai_classifier_cache_put(key, value, ttl_seconds=None):
                     response_json=excluded.response_json,
                     created_at=excluded.created_at,
                     expires_at=excluded.expires_at
-            ''', (key, json.dumps(value, ensure_ascii=False, separators=(',', ':')), now, now + ttl))
+            ''', (key, json.dumps(value, ensure_ascii=False, separators=(',', ':')), now, now + (ttl_seconds or WEB_AI_CLASSIFIER_CACHE_TTL_SECONDS)))
     except Exception as e:
         print(f'WEB AI CLASSIFIER CACHE PUT ERR: {e}')
 
@@ -16739,41 +16569,30 @@ def _web_audit_schema_key(url, payload):
 
 
 def _web_audit_cached_payload(url, payload):
-    """Start visual audits with the compact schema, including after a restart.
-
-    The local validator enforces the removed array bounds. Acceptance history
-    only controls diagnostics; it must not gate the compatible request format.
-    Text, photo-understanding and other schemas are left to their own contracts.
-    """
-    compact = _web_audit_compact_payload(payload)
-    if compact is None:
-        return payload, '', False
-    schema = compact['generationConfig']['responseSchema']
-    key = hashlib.sha256((url + json.dumps(schema, sort_keys=True)).encode()).hexdigest()
-    return compact, key, True
+    key = _web_audit_schema_key(url, payload)
+    with _WEB_AUDIT_SCHEMA_LOCK:
+        accepted_at = _WEB_AUDIT_SCHEMA_MODES.get(key)
+    if accepted_at is not None and time.monotonic() - accepted_at < 3600:
+        return _web_audit_compact_payload(payload), key, True
+    return payload, key, False
 
 
 def _web_audit_schema_result(key, compact, response, *, probe=False):
-    """Record HTTP compatibility without changing the initial request policy."""
     if not key or not compact:
         return
     accepted = 200 <= response.status_code < 300
-    now = time.monotonic()
     with _WEB_AUDIT_SCHEMA_LOCK:
-        previous = _WEB_AUDIT_SCHEMA_MODES.get(key)
-        first_acceptance = accepted and (previous is None or now - previous >= 3600)
         if accepted:
-            if key not in _WEB_AUDIT_SCHEMA_MODES and len(_WEB_AUDIT_SCHEMA_MODES) >= 32:
+            if len(_WEB_AUDIT_SCHEMA_MODES) >= 32:
                 oldest = min(_WEB_AUDIT_SCHEMA_MODES, key=_WEB_AUDIT_SCHEMA_MODES.get)
                 _WEB_AUDIT_SCHEMA_MODES.pop(oldest, None)
-            _WEB_AUDIT_SCHEMA_MODES[key] = now
+            _WEB_AUDIT_SCHEMA_MODES[key] = time.monotonic()
         elif response.status_code == 400:
             _WEB_AUDIT_SCHEMA_MODES.pop(key, None)
-    if probe or not accepted or first_acceptance:
+    if probe or not accepted:
         # HTTP acceptance proves request compatibility, not product identity.
         print('AI SCHEMA COMPAT change=array_bounds outcome=' + ('accepted_http' if accepted else 'rejected')
-              + ' status=' + str(response.status_code) + ' contract=' + key[:12]
-              + ' mode=' + ('retry' if probe else 'direct'))
+              + ' status=' + str(response.status_code) + ' contract=' + key[:12])
 
 
 def _web_audit_retry_payload(response, error, payload):
@@ -17234,7 +17053,7 @@ def _web_identity_offer_cache_trim():
         print('IDENTITY OFFER CACHE TRIM unavailable=' + type(exc).__name__)
 
 
-def _web_ai_classifier_request(identity, results, market, visual_context=None, cancel_event=None, *, _retry_cancelled=True, progress_callback=None, _request_deadline=None):
+def _web_ai_classifier_request(identity, results, market, visual_context=None, cancel_event=None, *, _retry_cancelled=True, progress_callback=None):
     """Audit only new/changed proofs; keep the same model and Exact validators.
 
     This shares per-offer proofs even when previews/final snapshots split them
@@ -17242,31 +17061,21 @@ def _web_ai_classifier_request(identity, results, market, visual_context=None, c
     Owners publish before waiting for overlapping owners, preventing deadlocks.
     """
     visual_context = _web_photo_match_context(visual_context)
-    timeout = WEB_VISUAL_CLASSIFIER_TIMEOUT_SECONDS if visual_context else WEB_AI_CLASSIFIER_TIMEOUT_SECONDS
-    request_deadline = _request_deadline if _request_deadline is not None else time.monotonic() + timeout
-    if time.monotonic() >= request_deadline:
-        return _web_identity_review_failure('timeout', bool(visual_context), 0)
     progress_kw = {'progress_callback': progress_callback} if progress_callback is not None else {}
-    progress_kw['_request_deadline'] = request_deadline
     if not WEB_IDENTITY_OFFER_CACHE_ENABLED or not visual_context or not WEB_VISUAL_CLASSIFIER_ENABLED:
         return _web_ai_classifier_request_live(identity, results, market, visual_context, cancel_event, **progress_kw)
     if cancel_event is not None and cancel_event.is_set():
         return _web_identity_review_failure('cancelled')
-    reference, evidence = _web_visual_collect_evidence(visual_context.get('image_b64'), results, cancel_event, _deadline=request_deadline)
+    reference, evidence = _web_visual_collect_evidence(visual_context.get('image_b64'), results, cancel_event)
     if not reference:
         return _web_ai_classifier_request_live(identity, results, market, visual_context, cancel_event,
                                                _prepared_evidence=(reference, evidence), **progress_kw)
     candidates = _web_identity_candidates(results)
     source_rows = list(results or [])[:WEB_AI_CLASSIFIER_MAX_RESULTS]
     entries, owned, waiting, hits, live_rows = [], {}, [], {}, []
-    missing_images = 0
     for candidate, row in zip(candidates, source_rows):
         cid = candidate['id']
         candidate['image_attached'] = cid in evidence
-        if cid not in evidence:
-            entries.append((cid, ''))
-            missing_images += 1
-            continue
         key = _web_identity_offer_content_key(candidate, market, reference, evidence.get(cid),
                                               visual_context.get('reference_photo_evidence'))
         entries.append((cid, key))
@@ -17290,10 +17099,6 @@ def _web_ai_classifier_request(identity, results, market, visual_context=None, c
                 live_rows.append(prepared)
             else:
                 waiting.append((cid, key, event))
-    if missing_images:
-        print(f'IDENTITY EVIDENCE candidates={len(candidates)} ready={len(candidates)-missing_images} skipped_missing_image={missing_images}')
-    if missing_images == len(candidates):
-        return _web_identity_review_failure('candidate_images_unavailable', True, 0)
     published_hits = set()
     def publish_hits():
         if progress_callback is None or (cancel_event is not None and cancel_event.is_set()):
@@ -17313,7 +17118,7 @@ def _web_ai_classifier_request(identity, results, market, visual_context=None, c
     live, direct = {}, {}
     # Owners run concurrently. Time spent auditing our own rows already counts
     # toward waiting for overlapping owners; never start a second full window.
-    wait_deadline = request_deadline
+    wait_deadline = time.monotonic() + WEB_VISUAL_CLASSIFIER_TIMEOUT_SECONDS + 6.0
     try:
         publish_hits()
         if live_rows and not (cancel_event is not None and cancel_event.is_set()):
@@ -17374,7 +17179,7 @@ def _web_ai_classifier_request(identity, results, market, visual_context=None, c
         elif (_retry_cancelled and event.is_set() and getattr(event, '_findzia_cancelled', False)
               and not (cancel_event is not None and cancel_event.is_set())):
             retry_ids.add(cid)
-    if retry_ids and time.monotonic() < request_deadline:
+    if retry_ids:
         # One user's cancellation must not cancel another user's audit. Retry
         # only after that owner has stopped; the normal election shares this
         # recovery among remaining users. Never recursively retry twice.
@@ -17442,10 +17247,6 @@ def _web_share_media_audit(items, evidence):
 def _web_ai_classifier_request_live(identity, results, market, visual_context=None, cancel_event=None, _prepared_evidence=None, progress_callback=None, *, _retry_truncated=True, _request_deadline=None):
     """Classify one captured batch with one text or multimodal Gemini request."""
     visual_context = _web_photo_match_context(visual_context)
-    timeout = WEB_VISUAL_CLASSIFIER_TIMEOUT_SECONDS if visual_context else WEB_AI_CLASSIFIER_TIMEOUT_SECONDS
-    request_deadline = _request_deadline if _request_deadline is not None else time.monotonic() + timeout
-    if time.monotonic() >= request_deadline:
-        return _web_identity_review_failure('timeout', bool(visual_context), 0)
     photo_evidence = (visual_context or {}).get('reference_photo_evidence') or {}
     country = str((market or {}).get('country') or DEFAULT_COUNTRY).lower()
     country_name = str((market or {}).get('country_name') or COUNTRY_NAMES.get(country, country.upper()))
@@ -17464,20 +17265,10 @@ def _web_ai_classifier_request_live(identity, results, market, visual_context=No
             (visual_context or {}).get('image_b64'),
             results,
             cancel_event,
-            _deadline=request_deadline,
         )
-    # A photo audit needs both sides. Missing candidate pixels cannot be
-    # supplied by a title; retain those rows as unverified without paid work.
-    if reference_inline:
-        ready = [c for c in candidates if c['id'] in visual_evidence]
-        if len(ready) != len(candidates):
-            print(f'IDENTITY EVIDENCE candidates={len(candidates)} ready={len(ready)} skipped_missing_image={len(candidates)-len(ready)}')
-            if not ready:
-                return _web_identity_review_failure('candidate_images_unavailable', True, 0)
-            ready_ids = {c['id'] for c in ready}
-            results = [dict(row, _classification_id=c['id']) for c, row in zip(candidates, results)
-                       if c['id'] in ready_ids]
-            candidates = ready
+    # The reference photo is useful even if a merchant blocks its thumbnail.
+    # Candidate-image absence limits Exact proof, but must not discard the
+    # user's image or let result titles redefine the photographed product.
     visual_mode = bool(reference_inline)
     visual_evidence_ids = set(visual_evidence)
     alternative_review = any(c.get('alternative_review') for c in candidates)
@@ -17655,6 +17446,7 @@ judge the product type and overall resemblance, not for ordinary design variants
     }
     effective_timeout = WEB_VISUAL_CLASSIFIER_TIMEOUT_SECONDS if visual_mode else WEB_AI_CLASSIFIER_TIMEOUT_SECONDS
     # One MAX_TOKENS recovery may use remaining time, never a new full window.
+    request_deadline = _request_deadline or (time.monotonic() + effective_timeout)
     effective_timeout = min(effective_timeout, max(0.0, request_deadline - time.monotonic()))
     if effective_timeout < .2:
         return _web_identity_review_failure('timeout', visual_mode, len(visual_evidence_ids))
@@ -17905,16 +17697,12 @@ judge the product type and overall resemblance, not for ordinary design variants
         print(f'WEB AI CLASSIFIER ERR: {e.__class__.__name__}: {e}')
         return _web_identity_review_failure('request_or_parse_error', visual_mode, len(visual_evidence_ids))
 
-def _web_ai_classify_captured_batch(identity, results, market, visual_context=None, cancel_event=None, progress_callback=None, *, _request_deadline=None):
+def _web_ai_classify_captured_batch(identity, results, market, visual_context=None, cancel_event=None, progress_callback=None):
     if not WEB_AI_CLASSIFIER_ENABLED or not GEMINI_API_KEY or not results or (cancel_event is not None and cancel_event.is_set()):
         reason = ('disabled' if not WEB_AI_CLASSIFIER_ENABLED else 'missing_api_key'
                   if not GEMINI_API_KEY else 'no_results' if not results else 'cancelled')
         return (_web_identity_review_failure(reason), reason)
     visual_context = _web_photo_match_context(visual_context)
-    timeout = WEB_VISUAL_CLASSIFIER_TIMEOUT_SECONDS if visual_context else WEB_AI_CLASSIFIER_TIMEOUT_SECONDS
-    deadline = _request_deadline if _request_deadline is not None else time.monotonic() + timeout
-    if time.monotonic() >= deadline:
-        return (_web_identity_review_failure('timeout'), 'error_timeout')
     key = _web_ai_classifier_cache_key(identity, results, market, visual_context)
     # Text classification is stable and may use the persistent cache. Visual
     # classification must inspect today's candidate bytes: merchant/CDN URLs
@@ -17930,6 +17718,8 @@ def _web_ai_classify_captured_batch(identity, results, market, visual_context=No
             WEB_AI_CLASSIFIER_INFLIGHT[key] = event
             owner = True
     if not owner:
+        wait_timeout = WEB_VISUAL_CLASSIFIER_TIMEOUT_SECONDS if visual_context else WEB_AI_CLASSIFIER_TIMEOUT_SECONDS
+        deadline = time.monotonic() + wait_timeout + WEB_VISUAL_CLASSIFIER_FETCH_TIMEOUT_SECONDS + 5.5
         while not event.is_set() and time.monotonic() < deadline:
             if cancel_event is not None and cancel_event.is_set():
                 return (_web_identity_review_failure('cancelled'), 'cancelled')
@@ -17948,7 +17738,7 @@ def _web_ai_classify_captured_batch(identity, results, market, visual_context=No
         return (cached or {}, 'singleflight-cache' if cached else 'singleflight-fallback')
     try:
         progress_kw = {'progress_callback': progress_callback} if progress_callback is not None else {}
-        value = _web_ai_classifier_request(identity, results, market, visual_context, cancel_event, _request_deadline=deadline, **progress_kw)
+        value = _web_ai_classifier_request(identity, results, market, visual_context, cancel_event, **progress_kw)
         if value.get('review_error'):
             result = (value, 'error_' + value['review_error'])
             event._findzia_identity_result = result
@@ -18000,7 +17790,6 @@ def _web_identity_result_sort_key(row):
 def _web_attach_captured_result_sections(payload, lang, allow_ai=True, cancel_event=None, progress_callback=None, *, _review_result=None):
     """Audit direct offers and rank their published identity evidence."""
     out = dict(payload or {})
-    request_deadline = out.pop('_identity_deadline', None)
     reference_image_b64 = str(out.pop('_reference_image_b64', '') or '').strip()
     reference_image_mime = str(out.pop('_reference_image_mime', '') or '').strip().lower()
     text_reference = out.pop('_text_reference_context', None)
@@ -18028,10 +17817,7 @@ def _web_attach_captured_result_sections(payload, lang, allow_ai=True, cancel_ev
         _review_result = None
         results = [_web_text_retrieval_row(row) for row in results]
     if allow_ai and user_photo and _review_result is None:
-        batch_deadline = time.monotonic() + WEB_VISUAL_CLASSIFIER_TIMEOUT_SECONDS
-        request_deadline = min(request_deadline, batch_deadline) if request_deadline is not None else batch_deadline
-        if time.monotonic() < request_deadline:
-            results = _web_prepare_identity_cards(results, cancel_event, _deadline=request_deadline)
+        results = _web_prepare_identity_cards(results, cancel_event)
     # Result-list consensus is useful for text search, but in an image search
     # it can amplify one wrong Lens guess across every card. Keep the original
     # Lens/OCR identity as a hint and let the reference photo remain primary.
@@ -18115,8 +17901,6 @@ def _web_attach_captured_result_sections(payload, lang, allow_ai=True, cancel_ev
         if visual_context is not None and isinstance(photo_changes, dict):
             visual_context['requested_changes'] = copy.deepcopy(photo_changes)
         progress_kw = {'progress_callback': publish_review} if progress_callback is not None else {}
-        if request_deadline is not None:
-            progress_kw['_request_deadline'] = request_deadline
         ai_result, ai_source = _web_ai_classify_captured_batch(classification_anchor, ai_candidates, market_snapshot, visual_context, cancel_event, **progress_kw)
     else:
         ai_result, ai_source = ({}, 'instant-rules' if not allow_ai else 'semantic-only')
@@ -19571,11 +19355,7 @@ def _web_scoped_availability(soup, url, current=''):
 
 
 def _web_snapshot_ttl(snap):
-    if not snap.get('ok') or not snap.get('is_product') or snap.get('page_fetch_status') == 'blocked' or snap.get('page_fetch_reason'):
-        return 0
-    if not (snap.get('price') or snap.get('image') or snap.get('product_image') or snap.get('availability')):
-        return 0
-    ttl = cache_ttl(WEB_LIVE_PRICE_CACHE_TTL if snap.get('price') else 15)
+    ttl = WEB_LIVE_PRICE_CACHE_TTL if snap.get('price') else 15
     return min(ttl, WEB_STOCK_CACHE_TTL) if snap.get('availability') else ttl
 
 
@@ -20599,8 +20379,7 @@ def _web_verified_page_snapshot(url, country=''):
         data = _web_fetch_page_snapshot(url, country) or {}
         data['price_checked_at'] = time.time()
         with WEB_PRODUCT_VERIFY_LOCK:
-            if _web_snapshot_ttl(data) > 0:
-                WEB_PRODUCT_VERIFY_CACHE[key] = {'ts': time.monotonic(), 'data': dict(data)}
+            WEB_PRODUCT_VERIFY_CACHE[key] = {'ts': time.monotonic(), 'data': dict(data)}
             while len(WEB_PRODUCT_VERIFY_CACHE) > 2000:
                 WEB_PRODUCT_VERIFY_CACHE.pop(next(iter(WEB_PRODUCT_VERIFY_CACHE)))
         flight['data'] = data
@@ -20706,31 +20485,12 @@ def _web_live_pool_prices(rows, rank, lang, market):
     return _web_shared_price_market_sync(rows, rank, lang, market)
 
 
-
-def _web_noon_product_identity(url):
-    """Observed SKU and country; name/UI language may vary, seller query may not."""
-    try:
-        parsed = urllib.parse.urlsplit(str(url or ''))
-        if parsed.scheme not in ('http', 'https') or parsed.hostname not in ('noon.com', 'www.noon.com') or parsed.username or parsed.password:
-            return None
-        match = re.fullmatch(r'/(kuwait|saudi|uae|egypt|qatar|bahrain|oman)-(?:en|ar)/(?:[^/]+/)?([NZ][A-Z0-9]{5,})/p/?', parsed.path, re.I)
-        if match:
-            cc = {'kuwait':'kw', 'saudi':'sa', 'uae':'ae', 'egypt':'eg', 'qatar':'qa', 'bahrain':'bh', 'oman':'om'}[match.group(1).lower()]
-            return (cc, match.group(2).upper())
-    except ValueError:
-        pass
-    return None
-
-
 def _web_listing_price_country(row, market):
     """Use an explicit SHEIN storefront before legacy global-lane defaults.
 
     This selects retrieval/parser context, never supplies an absent price or
     changes the exact-listing URL/currency/variant requirements.
     """
-    noon = _web_noon_product_identity(row.get('url'))
-    if noon:
-        return noon[0]
     host = (urllib.parse.urlsplit(str(row.get('url') or '')).hostname or '').lower()
     if host.endswith('.shein.com'):
         storefront = host[:-len('.shein.com')]
@@ -20744,24 +20504,13 @@ def _web_listing_price_country(row, market):
     return str(row.get('country') or row.get('market_country') or market.get('country') or 'us').lower()
 
 
-def _web_price_recovery_priority(row):
-    """Spend the existing budget on offers closest to becoming usable cards."""
-    priced = _web_row_has_numeric_price(row)
-    pictured = bool(_web_offer_image_candidates(row))
-    missing = 0 if pictured and not priced else 1 if priced and not pictured else 2
-    reviewed = row.get('classification_final') and row.get('identity_review_status') in ('completed', 'not_required')
-    return (missing, not bool(reviewed))
-
-
-def _web_automatic_price_batches(rows, attempted_rows=None, market=None):
-    """Use request geography, not ambient thread state, within the fixed cap."""
-    market = dict(market if market is not None else current_market())
-    local = str(market.get("country") or "").lower()
+def _web_automatic_price_batches(rows, attempted_rows=None):
+    """Bounded, market-isolated queries; earlier local work cannot starve exports."""
     def group_key(row):
         # A US SHEIN listing and a US domestic listing use the same query
         # country. Splitting them by export_store created competing groups
         # that consumed the final slot before SHEIN could be considered.
-        return _web_listing_price_country(row, market)
+        return _web_listing_price_country(row, current_market())
     group_use, merchant_use = Counter(), Counter()
     for row in (attempted_rows or {}).values():
         group = group_key(row)
@@ -20771,19 +20520,14 @@ def _web_automatic_price_batches(rows, attempted_rows=None, market=None):
     for key, row in rows.items():
         group = group_key(row)
         groups.setdefault(group, {}).setdefault(_more_result_domain(row.get('url')), []).append((key,row))
-    for merchants in groups.values():
-        for candidates in merchants.values():
-            candidates.sort(key=lambda pair: _web_price_recovery_priority(pair[1]))
     batches = []
     while groups and len(batches) < WEB_ASYNC_PRICE_SHARED_MARKETS:
-        # A single early local attempt must not hand the final batch to
-        # exports when useful local rows arrive later. Four local attempts
-        # satisfy the reservation; country/currency binding stays unchanged.
-        group = min(groups, key=lambda k: (0 if k == local and group_use[k] < 4 else 1, group_use[k], k != local))
+        # Prefer an unserved market, then local. Keep each batch within its
+        # own country/currency context; do not widen price matching rules.
+        group = min(groups, key=lambda k: (group_use[k], k != current_market().get('country')))
         merchants, batch = groups[group], {}
         while merchants and len(batch) < 4:
-            host = min(merchants, key=lambda h: (_web_price_recovery_priority(merchants[h][0][1]),
-                                                  merchant_use[(group,h)], -len(merchants[h])))
+            host = min(merchants, key=lambda h: (merchant_use[(group,h)], -len(merchants[h])))
             key, row = merchants[host].pop(0)
             batch[key] = row
             group_use[group] += 1
@@ -20934,10 +20678,7 @@ def _web_same_index_listing(first, second):
     if a.netloc != b.netloc or a.query != b.query:
         return False
     host = a.hostname or ''
-    noon = _web_noon_product_identity(first)
-    if noon:
-        return noon == _web_noon_product_identity(second)
-    marker = '-p-' if _host_matches_any(host, ('shein.com', 'shein.co.uk', 'shein.se')) else '-g-' if _host_matches_any(host, ('temu.com',)) else ''
+    marker = '-p-' if _host_matches_any(host, ('shein.com',)) else '-g-' if _host_matches_any(host, ('temu.com',)) else ''
     if not marker:
         return False
     def identity(path):
@@ -21000,7 +20741,7 @@ def _web_targeted_price_updates(entries, lang, market, *, image_only=False):
     if not _indexed_recovery_allowed():
         return {}
     MARKET_CTX.value = dict(market)
-    terms, listing_queries = [], {}
+    terms = []
     for row in entries.values():
         key = _web_price_url_key(row.get('url'))
         if not key:
@@ -21013,28 +20754,12 @@ def _web_targeted_price_updates(entries, lang, market, *, image_only=False):
         ids = [v for k, v in urllib.parse.parse_qsl(parsed.query)
                if k.lower() in {'id', 'itemid', 'item_id', 'goods_id', 'goodsid', 'offerid', 'sku', 'skuid', 'sku_id'}]
         path_ids = re.findall(r'(?:/item/|/offer/|/product/|-p-|-g-|/)(\d{6,})(?=[./-]|$)', parsed.path)
-        noon = _web_noon_product_identity(key)
-        if noon:
-            term = 'site:' + parsed.netloc + '/' + parsed.path.strip('/').split('/')[0]
-            path_ids = [noon[1]]
-        # Amazon's alphanumeric ASIN is more precise than a generic title.
-        # This changes retrieval only; exact listing/variant/market binding below
-        # still rejects every price belonging to a different offer.
-        if not ids and not path_ids and re.fullmatch(
-                r'(?:[a-z]+\.)?amazon\.(?:com|ca|de|fr|it|es|sg|co\.uk|co\.jp|com\.au|ae|sa|in|com\.br|com\.mx)', parsed.netloc):
-            asin = re.search(r'/(?:dp|gp/product)/([A-Z0-9]{10})(?:/|$)', parsed.path, re.I)
-            if asin:
-                path_ids = [asin.group(1).upper()]
         if ids or path_ids:
             term += ' ' + ' '.join('"' + re.sub(r'[^a-zA-Z0-9_-]', '', value) + '"' for value in (ids + path_ids)[:2])
         else:
             title = re.sub(r'["()\r\n]', ' ', str(row.get('raw_title') or row.get('title') or ''))
             term += ' ' + title[:120].strip()
-        if not image_only and not _web_row_has_numeric_price(row) and (noon or _web_shein_product_id(key)):
-            term += ' price'
-        query_key = ('(' + term + ')', _web_listing_price_country(row, market))
-        terms.append(query_key)
-        listing_queries[query_key] = row
+        terms.append(('(' + term + ')', _web_listing_price_country(row, market)))
     if not terms:
         return {}
     # Price recovery needs organic snippets even when pictures are also missing.
@@ -21056,10 +20781,6 @@ def _web_targeted_price_updates(entries, lang, market, *, image_only=False):
         MARKET_CTX.value = dict(market)
         request = dict(params, q=term, gl=search_cc, hl=country_search_hl(search_cc))
         try:
-            if not image_source and query in listing_queries:
-                structured = _STRUCTURED_PRICES.shein(listing_queries[query], budget)
-                if structured is not None:
-                    return structured  # One provider request replaces this index lookup.
             if image_only and all(_web_shein_product_id(row.get('url')) for row in entries.values()):
                 request['engine'] = provider + '_images' if provider else 'google_images'
                 return _web_shein_index_fetch(request, budget) or {}
@@ -21075,9 +20796,7 @@ def _web_targeted_price_updates(entries, lang, market, *, image_only=False):
             print('EXACT-LISTING lookup_failed=' + type(exc).__name__)
             return {'_findzia_lookup_failed': True}
     lookup_terms = list(dict.fromkeys(terms))[:4]
-    if (_SEARCHAPI_ROUTER.enabled and _SEARCHAPI_ROUTER.economy and FINDZIA_GROUPED_RECOVERY_ENABLED
-            and not (_STRUCTURED_PRICES.enabled and _STRUCTURED_PRICES.key
-                     and any(shein_params(row) for row in listing_queries.values()))):
+    if _SEARCHAPI_ROUTER.enabled and _SEARCHAPI_ROUTER.economy and FINDZIA_GROUPED_RECOVERY_ENABLED:
         # Group only within one storefront market; never borrow another
         # listing's geo/currency context, even in the optional economy mode.
         grouped = {}
@@ -21131,8 +20850,8 @@ def _web_targeted_price_updates(entries, lang, market, *, image_only=False):
             change = dict(updates.get(key) or {})
             if money and same_listing and not image_only and (quote['kind']!='exact' or not _host_matches_any(urllib.parse.urlsplit(link).hostname or '', ('1688.com',))):
                 change.update(_web_live_quote_fields(quote, market),
-                    price_source='regional_listing_text' if regional else item.get('_structured_price_source') or 'exact_listing_index', price_source_url=link,
-                    price_checked_at=item.get('_structured_observed_at') or time.time(), price_verified=False,
+                    price_source='regional_listing_text' if regional else 'exact_listing_index', price_source_url=link,
+                    price_checked_at=time.time(), price_verified=False,
                     price_status='indexed', price_pending=False, price_unavailable=False)
                 diag['accepted_price'] += 1
             elif money and not image_only:
@@ -21413,7 +21132,7 @@ def _web_confirmable_price(row):
         return False
     if source in ('ai_text','search_structured_fast','search_structured_rebased'):
         return False
-    if source in ('lens_duplicate_pass', 'existing_lens_pool', 'exact_listing_index', 'searchapi_shein_product'):
+    if source in ('lens_duplicate_pass', 'existing_lens_pool', 'exact_listing_index'):
         # Recovery already binds the product ID and storefront. A translated
         # SHEIN/Temu name slug may differ; variant/currency/query and market
         # must still match. Re-check the money and keep it index-observed only.
@@ -21528,7 +21247,6 @@ async def _web_with_live_prices(source, lang, country, allow_paid=True, wait_sec
     finish_by = None
     final_event = {'event': 'done'}
     had_error = False
-    ready_source_closed = False
     next_event = None
     gate = asyncio.Semaphore(WEB_LIVE_PRICE_WORKERS)
     async def page(row):
@@ -21756,8 +21474,6 @@ async def _web_with_live_prices(source, lang, country, allow_paid=True, wait_sec
                     if isinstance(event.get('market'), dict):
                         market = event['market']
                     kind = event.get('event')
-                    if event.get('completion_reason') in ('ready_local_sources', 'ready_local_tail'):
-                        ready_source_closed = True
                     if kind == 'error':
                         had_error = True
                     if isinstance(event.get('item'), dict):
@@ -21775,8 +21491,7 @@ async def _web_with_live_prices(source, lang, country, allow_paid=True, wait_sec
                     if kind == 'done':
                         final_event = event
                         next_event = None
-                        finish_by = loop.time() + (min(tail_wait, 3.0)
-                            if ready_source_closed else tail_wait)
+                        finish_by = loop.time() + tail_wait
                     else:
                         yield _web_stream_event(event)
                         next_event = asyncio.create_task(anext(source))
@@ -21823,14 +21538,12 @@ async def _web_with_live_prices(source, lang, country, allow_paid=True, wait_sec
                         and (not _web_row_has_numeric_price(r) or not _web_offer_image_candidates(r))
                         and (k in page_finished or loop.time() - missing_since.get(k, loop.time()) >= .75
                              or next_event is None)}
-            # A ready-local stop drains work already in flight; it must not
-            # buy another ten-second lookup during a three-second final tail.
-            if eligible and not ready_source_closed and allow_paid and WEB_PRICE_ENRICH_SHOPPING_FALLBACK and _indexed_recovery_allowed():
+            if eligible and allow_paid and WEB_PRICE_ENRICH_SHOPPING_FALLBACK and _indexed_recovery_allowed():
                 # Hold the final budget slot for later lanes until retrieval ends.
                 slots = WEB_ASYNC_PRICE_SHARED_MARKETS - recovery_calls
                 if next_event is not None:
                     slots = min(slots, max(0, WEB_ASYNC_PRICE_SHARED_MARKETS - 1 - recovery_calls))
-                for batch in _web_automatic_price_batches(eligible, {k:rows[k] for k in recovery_attempted if k in rows}, market)[:slots]:
+                for batch in _web_automatic_price_batches(eligible, {k:rows[k] for k in recovery_attempted if k in rows})[:slots]:
                     recovery_attempted.update(batch)
                     task = asyncio.create_task(asyncio.to_thread(_web_targeted_price_updates, batch, lang, dict(market)))
                     shared[task] = recovery_calls
@@ -22238,7 +21951,7 @@ def _web_shared_price_candidates(query, rank, market_snapshot):
     now = time.time()
     with WEB_ASYNC_PRICE_CACHE_LOCK:
         cached = WEB_ASYNC_PRICE_CACHE.get(cache_key)
-        if cached and cached.get('items') and now - float(cached.get('ts') or 0) < WEB_ASYNC_PRICE_CACHE_TTL_SECONDS:
+        if cached and now - float(cached.get('ts') or 0) < WEB_ASYNC_PRICE_CACHE_TTL_SECONDS:
             print(f'WEB LIVE PRICE CACHE HIT rank={rank} query={q[:65]!r}')
             return [dict(x) for x in cached.get('items') or []]
     if rank == 0 and SHOPPING_GEO_GUARD and (not _shopping_gl_supported(gl)):
@@ -22255,8 +21968,7 @@ def _web_shared_price_candidates(query, rank, market_snapshot):
             if item and result_market_rank(item) == rank:
                 rows.append(item)
     with WEB_ASYNC_PRICE_CACHE_LOCK:
-        if rows:
-            WEB_ASYNC_PRICE_CACHE[cache_key] = {'ts': time.time(), 'items': [dict(x) for x in rows]}
+        WEB_ASYNC_PRICE_CACHE[cache_key] = {'ts': now, 'items': [dict(x) for x in rows]}
         if len(WEB_ASYNC_PRICE_CACHE) > 1000:
             oldest = sorted(WEB_ASYNC_PRICE_CACHE.items(), key=lambda kv: kv[1].get('ts', 0))[:200]
             for old_key, _ in oldest:
@@ -23046,23 +22758,6 @@ def _serper_json(path, body, timeout, *, purpose='discovery'):
     return data
 
 
-
-def _serper_offer_fields(row):
-    """Keep same-result money evidence through every provider index lane."""
-    fields = {k: copy.deepcopy(row[k]) for k in (
-        'price', 'currency', 'price_value', 'extracted_price', 'rich_snippet',
-        'installments_description', 'monthly_payment_duration', 'down_payment')
-        if row.get(k) is not None}
-    # Some result shapes put the displayed label under attributes.Price.
-    # Exact labels only; shipping, discounts and list prices are not candidates.
-    attrs = row.get('attributes')
-    if isinstance(attrs, dict) and not fields.get('price'):
-        values = [v for k, v in attrs.items() if str(k).strip().lower() == 'price' and isinstance(v, str)]
-        if len(values) == 1:
-            fields['price'] = values[0]
-    return fields
-
-
 def _serper_to_serpapi(kind, data):
     """Map Serper's organic/images/shopping arrays onto SerpApi keys."""
     out = {'search_metadata': {'status': 'Success', 'provider': 'serper'}}
@@ -23073,7 +22768,6 @@ def _serper_to_serpapi(kind, data):
                 continue
             item = {'position': i + 1, 'title': row.get('title') or '', 'link': row['link'],
                     'snippet': row.get('snippet') or '', 'displayed_link': row.get('domain') or urllib.parse.urlsplit(row['link']).hostname or ''}
-            item.update(_serper_offer_fields(row))
             if row.get('imageUrl'):
                 item['thumbnail'] = row['imageUrl']
             if row.get('price'):
@@ -23084,7 +22778,7 @@ def _serper_to_serpapi(kind, data):
                     if row.get(qualifier) is not None:
                         item[qualifier] = copy.deepcopy(row[qualifier])
                 snippet = _fast_rich_snippet(row.get('price'), row.get('currency'))
-                if snippet and not item.get('rich_snippet'):
+                if snippet:
                     item['rich_snippet'] = snippet
             children = row.get('sitelinks')
             if isinstance(children, list) and children:
@@ -23098,7 +22792,7 @@ def _serper_to_serpapi(kind, data):
                 continue
             item = {'position': i + 1, 'title': row['title'], 'link': row['link'], 'source': row.get('source') or '',
                     'price': str(row.get('price') or ''), 'thumbnail': row.get('imageUrl') or ''}
-            for field in ('direct_link','merchant_link','product_link','original_link','product_id','product_token','immersive_product_page_token','serpapi_immersive_product_api','currency','extracted_price','old_price','extracted_old_price','availability','in_stock','rating','reviews'):
+            for field in ('direct_link','merchant_link','product_link','original_link','product_id','immersive_product_page_token','serpapi_immersive_product_api','currency','extracted_price','old_price','extracted_old_price','availability','in_stock','rating','reviews'):
                 if row.get(field) is not None:item[field] = row[field]
             if row.get('productId'):
                 item['product_id'] = str(row['productId'])
@@ -23119,7 +22813,7 @@ def _serper_to_serpapi(kind, data):
                 continue
             images.append({'position': i + 1, 'title': row.get('title') or '', 'link': row['link'],
                            'original': row['imageUrl'], 'thumbnail': row.get('thumbnailUrl') or row['imageUrl'],
-                           'source': row.get('domain') or row.get('source') or '', **_serper_offer_fields(row)})
+                           'source': row.get('domain') or row.get('source') or ''})
         if images:
             out['images_results'] = images
     return out
@@ -23573,21 +23267,6 @@ def _web_text_shopping_lookup(card, spec, deadline, cancel):
     title, merchant = str(card.get('title') or '').strip(), str(card.get('source') or '').strip()
     if not title or not merchant:
         return None
-    # Expand the observed Google product identifier, preserving each offer's
-    # own merchant URL and price. This consumes the existing lookup slot.
-    structured = _STRUCTURED_PRICES.shopping(card, spec['country'], spec['hl'], min(3.5, remaining))
-    if structured is not None:
-        rows = []
-        if not cancel.is_set() and time.monotonic() < deadline:
-            for raw in structured.get('organic_results') or []:
-                url = _local_discovery_direct_link(raw)
-                if not url or not _shopping_same_product(card, raw):
-                    continue
-                row = dict(raw, link=url)
-                if not _web_offer_image_candidates(row):
-                    row['image_candidates'] = _web_offer_image_candidates(card)
-                rows.append(row)
-        return {'organic_results': rows}
     query = title[:220] + ' ' + merchant[:100]
     budget = min(3.5, remaining)
     data = _fast_provider_search('serper_search', query, spec['country'], spec['hl'],
@@ -25810,9 +25489,8 @@ def _google_web_page(url, country, deadline, cancel):
     key = _web_price_url_key(url)
     with _GOOGLE_WEB_PAGE_LOCK:
         entry = _GOOGLE_WEB_PAGE_CACHE.get(key)
-        if entry and time.monotonic() < entry[0] and cache_success(entry[1]):
+        if entry and time.monotonic() < entry[0]:
             return copy.deepcopy(entry[1])
-        _GOOGLE_WEB_PAGE_CACHE.pop(key, None)
     remaining = min(4.5, deadline-time.monotonic())
     if cancel.is_set() or remaining <= .15:
         return {'error': 'expired'}
@@ -25848,8 +25526,7 @@ def _google_web_page(url, country, deadline, cancel):
     with _GOOGLE_WEB_PAGE_LOCK:
         if len(_GOOGLE_WEB_PAGE_CACHE) >= 1024:
             _GOOGLE_WEB_PAGE_CACHE.pop(next(iter(_GOOGLE_WEB_PAGE_CACHE)), None)
-        if cache_success(result) and result.get('url') and (result.get('title') or result.get('price')):
-            _GOOGLE_WEB_PAGE_CACHE[key] = (time.monotonic()+300, copy.deepcopy(result))
+        _GOOGLE_WEB_PAGE_CACHE[key] = (time.monotonic()+(300 if not result.get('error') else 20), copy.deepcopy(result))
     return result
 
 
@@ -26435,7 +26112,7 @@ def _web_bounded_image_recovery(lens, country, lang, cancel_event=None):
     return dict(lens, matches=rows, query=query, visual_identity=query,
                 reference_identity=reference, source='lens_bounded_structured_recovery')
 
-def _web_search_image_sync(image_b64, mime, caption, country, lang, progress_callback=None, classify_with_ai=True, cancel_event=None, *, ready_event=None):
+def _web_search_image_sync(image_b64, mime, caption, country, lang, progress_callback=None, classify_with_ai=True, cancel_event=None):
     market = _web_market(country)
     MARKET_CTX.value = market
     caption = re.sub('\\s+', ' ', str(caption or '')).strip()[:WEB_API_MAX_QUERY_CHARS]
@@ -26455,7 +26132,7 @@ def _web_search_image_sync(image_b64, mime, caption, country, lang, progress_cal
     direct_attempted = False
     if LENS_DIRECT_MODE and ENABLE_GOOGLE_LENS and SERPAPI_API_KEY and PUBLIC_BASE_URL:
         direct_attempted = True
-        lens_direct = google_lens_lookup(image_b64, mime, lang, caption, light=True, progress_callback=progress_callback, cancel_event=cancel_event, ready_event=ready_event)
+        lens_direct = google_lens_lookup(image_b64, mime, lang, caption, light=True, progress_callback=progress_callback, cancel_event=cancel_event)
         if cancelled():
             return cancelled_result(lens_direct.get('query'))
         if lens_direct.get('matches'):
@@ -26464,7 +26141,7 @@ def _web_search_image_sync(image_b64, mime, caption, country, lang, progress_cal
                 identity = (lens_direct.get('visual_identity') or lens_direct.get('relevance_target') or lens_direct.get('query') or caption or '').strip()
                 if USE_V106_5_RESULT_PIPELINE or (WEB_MATCH_WHATSAPP_EXACT and (not WEB_TEXT_DENSE_PARITY)):
                     print(f'ANDROID IMAGE TRUE PARITY: direct WhatsApp Lens set -> {len(items)} result(s); no WEB v89 supplement')
-                    return _web_attach_captured_result_sections({'ok': True, 'type': 'results', 'query': identity, 'market': market, 'results': items, 'source': 'whatsapp_direct_lens_exact', 'retrieval_completion': lens_direct.get('retrieval_completion'), '_reference_image_b64': image_b64, '_reference_image_mime': mime}, lang, allow_ai=classify_with_ai, cancel_event=cancel_event)
+                    return _web_attach_captured_result_sections({'ok': True, 'type': 'results', 'query': identity, 'market': market, 'results': items, 'source': 'whatsapp_direct_lens_exact', '_reference_image_b64': image_b64, '_reference_image_mime': mime}, lang, allow_ai=classify_with_ai, cancel_event=cancel_event)
                 if WEB_IMAGE_SUPPLEMENT_WEAK_MARKETS and identity:
                     target = {0: WEB_IMAGE_TARGET_LOCAL, 1: WEB_IMAGE_TARGET_US, 2: WEB_IMAGE_TARGET_CN}
                     counts = {0: 0, 1: 0, 2: 0}
@@ -26520,7 +26197,7 @@ def _web_search_image_sync(image_b64, mime, caption, country, lang, progress_cal
                                     break
                         items.sort(key=lambda x: (int(x.get('market_rank', 99)), 0 if x.get('price') else 1))
                         print(f'WEB IMAGE v89 after supplement counts={counts} total={len(items)}')
-                return _web_attach_captured_result_sections({'ok': True, 'type': 'results', 'query': identity, 'market': market, 'results': items, 'source': 'lens_direct_plus_market_supplement', 'retrieval_completion': lens_direct.get('retrieval_completion'), '_reference_image_b64': image_b64, '_reference_image_mime': mime}, lang, allow_ai=classify_with_ai, cancel_event=cancel_event)
+                return _web_attach_captured_result_sections({'ok': True, 'type': 'results', 'query': identity, 'market': market, 'results': items, 'source': 'lens_direct_plus_market_supplement', '_reference_image_b64': image_b64, '_reference_image_mime': mime}, lang, allow_ai=classify_with_ai, cancel_event=cancel_event)
     if direct_attempted and USE_FAST_LENS_PIPELINE:
         # OCR uncertainty or a provider timeout cannot trigger 3 query attempts
         # in each of two legacy layers plus serial Shopping/immersive retries.
@@ -27645,9 +27322,9 @@ TEXT_LENS_ENABLED = env_bool('TEXT_LENS_ENABLED', True)
 TEXT_LENS_REFERENCE_TARGET_SECONDS = max(.5, min(3., float(os.environ.get('TEXT_LENS_REFERENCE_SECONDS', '2'))))
 TEXT_LENS_REFERENCE_SECONDS = max(4., min(20., float(os.environ.get('TEXT_LENS_REFERENCE_HARD_SECONDS', '10'))))
 print(f'TEXT LENS CONFIG target={TEXT_LENS_REFERENCE_TARGET_SECONDS}s hard_limit={TEXT_LENS_REFERENCE_SECONDS}s '
-      'provider_requests=1 late_reply=continue photo_cache=1d')
+      'provider_requests=1 late_reply=continue photo_cache=7d')
 TEXT_LENS_RESULTS_SECONDS = max(8., min(20., float(os.environ.get('TEXT_LENS_RESULTS_SECONDS', '10'))))
-TEXT_LENS_REFERENCE_TTL = 86400
+TEXT_LENS_REFERENCE_TTL = 7 * 86400
 TEXT_LENS_REFERENCE_MAX_BYTES = 512 * 1024
 _TEXT_LENS_REFERENCES = {}
 _TEXT_LENS_INFLIGHT = {}
@@ -27663,14 +27340,11 @@ def _text_lens_cache(query_key='', reference='', save=None):
     turn an image lookup into a ten-second lock wait. Persistence is optional.
     """
     now = time.time()
-    if save is not None and not (cache_success(save) and save.get('image_base64') and save.get('query_key') and save.get('reference')):
-        return None
     with _TEXT_LENS_LOCK:
         for key, value in list(_TEXT_LENS_REFERENCES.items()):
-            if not cache_success(value) or not value.get('image_base64') or not cache_fresh(value.get('cached_at'), value.get('expires_at'), now):
+            if value['expires_at'] <= now:
                 _TEXT_LENS_REFERENCES.pop(key, None)
         if save:
-            save = dict(save, cached_at=now, expires_at=min(save.get('expires_at',now+86400), now+86400))
             _TEXT_LENS_REFERENCES[save['query_key']] = save
             while len(_TEXT_LENS_REFERENCES) > 64:
                 _TEXT_LENS_REFERENCES.pop(next(iter(_TEXT_LENS_REFERENCES)))
@@ -27697,10 +27371,6 @@ def _text_lens_cache(query_key='', reference='', save=None):
                                '=? AND expires_at>?', (value, now)).fetchone()
             if row:
                 hit = json.loads(row[0])
-                if not cache_success(hit) or not hit.get('image_base64') or not cache_fresh(hit.get('cached_at'), hit.get('expires_at'), now):
-                    conn.execute('DELETE FROM text_lens_references WHERE '+field+'=?', (value,))
-                    conn.commit()
-                    return None
                 with _TEXT_LENS_LOCK:
                     _TEXT_LENS_REFERENCES[hit['query_key']] = hit
                     while len(_TEXT_LENS_REFERENCES) > 64:
@@ -28177,7 +27847,7 @@ async def _text_lens_prepare(query, country, lang, selected_option='', force_spe
     began = time.monotonic()
     with _TEXT_LENS_LOCK:
         hit = _TEXT_LENS_REFERENCES.get(key)
-        if hit and cache_success(hit) and hit.get('image_base64') and cache_fresh(hit.get('cached_at'), hit.get('expires_at'), time.time()):
+        if hit and hit['expires_at'] > time.time():
             print(f'TEXT LENS reference_ms=0 cache=True status=ready country={country}')
             return dict(hit, ok=True, cache_hit=True, reference_lookup_ms=0)
         future = _TEXT_LENS_INFLIGHT.get(key)
@@ -28688,7 +28358,7 @@ async def web_api_search_stream(request: Request):
                     _pending = {str(r.get('url') or ''): r for r in exact_rows if r.get('url') and not _web_row_has_numeric_price(r)}
                     if _pending and SERPAPI_API_KEY and WEB_PRICE_ENRICH_SHOPPING_FALLBACK:
                         _price_updates = {}
-                        for _batch in _web_automatic_price_batches(_pending, market=market):
+                        for _batch in _web_automatic_price_batches(_pending):
                             try:
                                 _price_updates.update(await asyncio.wait_for(
                                     asyncio.to_thread(_web_targeted_price_updates, _batch, lang, dict(market)), timeout=12) or {})
@@ -29098,36 +28768,6 @@ async def _web_stream_image_identity_batches(image_b64, mime, caption, country, 
         await source.aclose()
 
 
-WEB_IDENTITY_READY_LOCAL_MIN = 3
-WEB_IDENTITY_READY_TAIL_SECONDS = 8.0
-# One shared review window, including queued work. Retrieval keeps ownership
-# of the final result set; this cannot turn an unfinished audit into Exact.
-WEB_IDENTITY_AUDIT_BUDGET_SECONDS = 40.0
-
-
-def _web_identity_review_priority(row, market):
-    ready = _web_row_has_numeric_price(row) and bool(_web_offer_image_candidates(row))
-    local = (row.get('market_scope') == 'local' or row.get('market_rank') == 0
-             or str(row.get('country') or '').lower() == str(market.get('country') or '').lower())
-    return (not ready, not local)
-
-
-def _web_identity_ready_local_count(rows, query, market):
-    """Only final, admitted local offers with usable price/image evidence count."""
-    # The price coordinator checks the same group-level outliers on copies.
-    # Keep its rejected prices out of the readiness threshold as well.
-    candidates = {index: dict(row) for index, row in enumerate(rows) if not row.get('hidden')}
-    _web_flag_price_outliers(candidates)
-    return sum(1 for row in candidates.values()
-        if row.get('market_scope') == 'local' and row.get('classification_final')
-        and row.get('identity_review_status') == 'completed' and not row.get('hidden')
-        and _web_alternative_visible(row) and _market_offer_allowed(row, market)
-        and not _fz_product_form_conflict(query, row.get('raw_title') or row.get('title'))
-        and _web_row_has_numeric_price(row) and _web_confirmable_price(row)
-        and not _web_price_review_reason(row, market) and _web_offer_image_candidates(row)
-        and _card_offer_state(row).get('stock_status') != 'out_of_stock')
-
-
 async def _web_stream_image_identity_batches_core(image_b64, mime, caption, country, lang, cancel_event,
                                              *, search_fn=None, build_items_fn=None, market_snapshot=None, reference_context=None, requested_changes=None):
     """Stream the shared search set and independent, bounded identity audits.
@@ -29148,11 +28788,6 @@ async def _web_stream_image_identity_batches_core(image_b64, mime, caption, coun
     price_tasks, priced_keys = {}, set()
     identity, query_sent = str(caption or '').strip(), ''
     final_ready = False
-    retrieval_completion = None
-    retrieval_ready = threading.Event() if search_fn is None and reference_context is None else None
-    ready_tail_deadline = None
-    ready_tail_exhausted = False
-    audit_cancel_event = threading.Event()
     progress_task = None
     review_update_task = None
     search_task = None
@@ -29160,8 +28795,6 @@ async def _web_stream_image_identity_batches_core(image_b64, mime, caption, coun
     first_results_ms = first_match_ms = None
     text_search = reference_context is not None
     enabled = not text_search and WEB_AI_CLASSIFIER_ENABLED and WEB_VISUAL_CLASSIFIER_ENABLED and bool(GEMINI_API_KEY)
-    audit_deadline = clock + WEB_IDENTITY_AUDIT_BUDGET_SECONDS if enabled else None
-    audit_budget_exhausted = False
     origin_row = _web_text_retrieval_row if text_search else _web_image_retrieval_row
 
     def elapsed():
@@ -29195,22 +28828,21 @@ async def _web_stream_image_identity_batches_core(image_b64, mime, caption, coun
         nonlocal review_count
         pairs = [(dict(r), _web_identity_capture_key(r, query)) for r in batch]
         def review_callback(report):
-            if not cancel_event.is_set() and not audit_cancel_event.is_set():
+            if not cancel_event.is_set():
                 try:
                     loop.call_soon_threadsafe(review_updates.put_nowait, (pairs, report))
                 except RuntimeError:
                     pass
         payload = {'ok': True, 'type': 'results', 'query': query, 'market': market,
                    'results': [dict(r) for r in batch], 'source': 'whatsapp_direct_lens_exact',
-                   '_reference_image_b64': image_b64, '_reference_image_mime': mime, '_social_no_expand': True,
-                   '_identity_deadline': audit_deadline}
+                   '_reference_image_b64': image_b64, '_reference_image_mime': mime, '_social_no_expand': True}
         if reference_context:
             payload['_text_reference_context'] = dict(reference_context)
         if requested_changes:
             payload['_photo_requested_changes'] = copy.deepcopy(requested_changes)
         future = WEB_IDENTITY_REVIEW_POOL.submit(
             _run_with_market, market, _web_attach_captured_result_sections,
-            payload, lang, True, audit_cancel_event, review_callback)
+            payload, lang, True, cancel_event, review_callback)
         task = asyncio.wrap_future(future)
         reviews[task] = pairs
         review_count += 1
@@ -29224,11 +28856,7 @@ async def _web_stream_image_identity_batches_core(image_b64, mime, caption, coun
                 queued_tokens.add(token)
 
     def fill_review_slots():
-        # Audit complete offers first; stable ordering preserves ties and the
-        # local lane's priority without changing admission or identity rules.
-        queued.sort(key=lambda pair: _web_identity_review_priority(pair[0], market))
-        while (enabled and queued and len(reviews) < WEB_IDENTITY_BATCH_PARALLEL
-               and time.monotonic() < audit_deadline):
+        while enabled and queued and len(reviews) < WEB_IDENTITY_BATCH_PARALLEL:
             batch = []
             size = WEB_IDENTITY_FIRST_BATCH if review_count == 0 else WEB_IDENTITY_BATCH_SIZE
             while queued and len(batch) < size:
@@ -29244,44 +28872,8 @@ async def _web_stream_image_identity_batches_core(image_b64, mime, caption, coun
     try:
         search_task = asyncio.create_task(asyncio.to_thread(
             search_fn or _web_search_image_sync, image_b64, mime, caption, country, lang,
-            callback if search_fn or ANDROID_IMAGE_PROGRESSIVE else None, False, cancel_event,
-            **({'ready_event': retrieval_ready} if retrieval_ready is not None else {})))
+            callback if search_fn or ANDROID_IMAGE_PROGRESSIVE else None, False, cancel_event))
         while not cancel_event.is_set():
-            # Consume completed work before closing the window. Retrieval is
-            # still authoritative even if it finishes after the review budget.
-            completed_waiting = any(task.done() for task in reviews)
-            completed_waiting = completed_waiting or not review_updates.empty() or (
-                review_update_task is not None and review_update_task.done())
-            if (final_ready and audit_deadline is not None and time.monotonic() >= audit_deadline
-                    and (reviews or queued) and not completed_waiting):
-                audit_budget_exhausted = True
-                audit_cancel_event.set()
-                for task in reviews:
-                    task.cancel()
-                print(f'IDENTITY AUDIT DEADLINE pending_batches={len(reviews)} queued={len(queued)} elapsed_ms={elapsed()}')
-                break
-            ready_local = (_web_identity_ready_local_count(rows.values(), identity, market)
-                           if enabled else 0)
-            if retrieval_ready is not None:
-                if ready_local >= WEB_IDENTITY_READY_LOCAL_MIN:
-                    retrieval_ready.set()
-                else:
-                    retrieval_ready.clear()
-            if not final_ready:
-                ready_local = 0
-            if ready_local < WEB_IDENTITY_READY_LOCAL_MIN:
-                ready_tail_deadline = None
-            elif ready_tail_deadline is None:
-                ready_tail_deadline = time.monotonic() + WEB_IDENTITY_READY_TAIL_SECONDS
-            if ready_tail_deadline is not None and time.monotonic() >= ready_tail_deadline and (reviews or queued):
-                ready_tail_exhausted = True
-                # Retrieval is complete and local cards passed every gate.
-                # Cancel unfinished audits; never promote their provisional rows.
-                audit_cancel_event.set()
-                for task in reviews:
-                    task.cancel()
-                print(f'IDENTITY READY TAIL local_ready={ready_local} pending_batches={len(reviews)} queued={len(queued)}')
-                break
             if not final_ready and progress_task is None:
                 progress_task = asyncio.create_task(progress.get())
             waiting = set(reviews)
@@ -29299,11 +28891,7 @@ async def _web_stream_image_identity_batches_core(image_b64, mime, caption, coun
                 waiting.add(progress_task)
             if not waiting:
                 break
-            wait_seconds = WEB_IDENTITY_HEARTBEAT_SECONDS
-            for deadline in (ready_tail_deadline, audit_deadline if final_ready else None):
-                if deadline is not None:
-                    wait_seconds = min(wait_seconds, max(.01, deadline - time.monotonic()))
-            done, _ = await asyncio.wait(waiting, timeout=wait_seconds,
+            done, _ = await asyncio.wait(waiting, timeout=WEB_IDENTITY_HEARTBEAT_SECONDS,
                                          return_when=asyncio.FIRST_COMPLETED)
             if not done:
                 yield _web_stream_event({'event': 'status', 'stage': 'identity_review' if final_ready else 'whatsapp_image_engine',
@@ -29313,7 +28901,6 @@ async def _web_stream_image_identity_batches_core(image_b64, mime, caption, coun
             # Resolve membership first if retrieval and an old audit finish together.
             if not final_ready and search_task in done:
                 final = search_task.result()
-                retrieval_completion = final.get('retrieval_completion')
                 identity = str(final.get('query') or caption or '').strip()
                 market = final.get('market') or market
                 captured = _fz_social_merge(list(final.get('captured_results') or final.get('results') or []), identity, market, lang)
@@ -29433,11 +29020,6 @@ async def _web_stream_image_identity_batches_core(image_b64, mime, caption, coun
         if cancel_event.is_set():
             return
         snapshot = _web_identity_stream_snapshot(rows.values(), identity, market, lang, True, elapsed(), not text_search)
-        completion_reason = ('identity_audit_deadline' if audit_budget_exhausted else
-                             'ready_local_tail' if ready_tail_exhausted else
-                             'ready_local_sources' if retrieval_completion == 'ready_local_sources' else None)
-        if completion_reason:
-            snapshot.update(partial=True, completion_reason=completion_reason)
         yield _web_stream_event(snapshot)
         yield _web_stream_event({'event': 'identity_review', 'build': BUILD_ID,
                                  'status': 'not_required' if text_search else 'completed' if all(r.get('identity_review_status') == 'completed' for r in rows.values()) and rows else 'partial' if snapshot['scored_count'] else 'unavailable',
@@ -29465,8 +29047,7 @@ async def _web_stream_image_identity_batches_core(image_b64, mime, caption, coun
                                  'alternative_count': snapshot['alternative_count'],
                                  'global_count': snapshot['global_count'], 'classification_engine': 'progressive_identity_batches',
                                  'first_results_ms': first_results_ms, 'first_match_ms': first_match_ms,
-                                 'identity_batch_count': review_count, 'elapsed_ms': elapsed(),
-                                 **({'partial': True, 'completion_reason': completion_reason} if completion_reason else {})})
+                                 'identity_batch_count': review_count, 'elapsed_ms': elapsed()})
         print(f'WEB IDENTITY STREAM captured={len(rows)} visible={len(snapshot["results"])} scored={snapshot["scored_count"]} batches={review_count} first_results_ms={first_results_ms} first_match_ms={first_match_ms}')
     except asyncio.CancelledError:
         raise
@@ -29479,7 +29060,6 @@ async def _web_stream_image_identity_batches_core(image_b64, mime, caption, coun
             yield _web_stream_event(snapshot)
         yield _web_stream_event({'event': 'done', 'count': len(snapshot['results']), 'partial': True, 'elapsed_ms': elapsed()})
     finally:
-        audit_cancel_event.set()
         cancel_event.set()
         tasks = list(reviews) + list(price_tasks.values())
         tasks += [t for t in (search_task, progress_task, review_update_task) if t is not None]
@@ -32168,7 +31748,7 @@ def _refine_live_evidence(query, country):
     now = time.monotonic()
     with _CLASSIC_EVIDENCE_LOCK:
         cached = _CLASSIC_EVIDENCE_CACHE.get(key)
-        if cached and cached[0] > now and cached[1].get('records'):
+        if cached and cached[0] > now:
             return copy.deepcopy(cached[1])
     records=[]
     if CLASSIC_FILTER_CATALOG_ENABLED:
@@ -32184,8 +31764,7 @@ def _refine_live_evidence(query, country):
         for f in pending: f.cancel()
     value=_refine_evidence_pack(records,'live_index' if records else 'unavailable',int(time.time()))
     with _CLASSIC_EVIDENCE_LOCK:
-        if records:
-            _CLASSIC_EVIDENCE_CACHE[key]=(time.monotonic()+900,copy.deepcopy(value))
+        _CLASSIC_EVIDENCE_CACHE[key]=(now+(900 if records else 30),copy.deepcopy(value))
         while len(_CLASSIC_EVIDENCE_CACHE)>256: _CLASSIC_EVIDENCE_CACHE.pop(next(iter(_CLASSIC_EVIDENCE_CACHE)))
     return value
 
@@ -32992,7 +32571,7 @@ async def web_api_evaluate(request: Request):
     now=time.monotonic()
     with _FZ_EVAL_LOCK:
         entry=_FZ_EVAL_CACHE.get(key)
-        if entry and entry[0]>now and entry[1].get('ai_status')=='ready':return copy.deepcopy(entry[1])
+        if entry and entry[0]>now:return copy.deepcopy(entry[1])
         future=_FZ_EVAL_FLIGHTS.get(key)
         if future is None:
             if not _FZ_EVAL_GATE.acquire(blocking=False):return dict(_fz_eval_base(row,peers,lang),ai_status='busy')
@@ -33000,8 +32579,7 @@ async def web_api_evaluate(request: Request):
                 try:
                     value=_fz_evaluate_sync(row,peers,lang)
                     with _FZ_EVAL_LOCK:
-                        if value.get('ai_status')=='ready':
-                            _FZ_EVAL_CACHE[key]=(time.monotonic()+900,copy.deepcopy(value))
+                        _FZ_EVAL_CACHE[key]=(time.monotonic()+(900 if value['ai_status']=='ready' else 20),copy.deepcopy(value))
                         while len(_FZ_EVAL_CACHE)>256:_FZ_EVAL_CACHE.pop(next(iter(_FZ_EVAL_CACHE)))
                     return value
                 finally:
@@ -33204,7 +32782,7 @@ async def web_api_media_recover(request: Request):
     key = _fz_media_cache_key(row)
     with _FZ_MEDIA_LOCK:
         cached = _FZ_MEDIA_CACHE.get(key)
-        if cached and cached[0]>time.monotonic() and cached[1].get('images'): return cached[1]
+        if cached and cached[0]>time.monotonic(): return cached[1]
         future = _FZ_MEDIA_FLIGHTS.get(key)
         if future is None:
             if not _FZ_MEDIA_GATE.acquire(False): return JSONResponse({'ok':False,'error':'busy'},status_code=503)
@@ -33212,8 +32790,7 @@ async def web_api_media_recover(request: Request):
                 try:
                     value = _fz_recover_media(row)
                     with _FZ_MEDIA_LOCK:
-                        if value.get('images') and cache_success(value):
-                            _FZ_MEDIA_CACHE[key]=(time.monotonic()+900,value)
+                        _FZ_MEDIA_CACHE[key]=(time.monotonic()+ (900 if value['images'] else 60),value)
                         while len(_FZ_MEDIA_CACHE)>256: _FZ_MEDIA_CACHE.pop(next(iter(_FZ_MEDIA_CACHE)))
                     return value
                 finally:
@@ -34118,7 +33695,7 @@ def _fz_research_sync(context):
     key = json.dumps({k:context[k] for k in ('query','country','lang','kind','extra_specs','answers')},ensure_ascii=False,sort_keys=True)
     with _FZ_GUIDE_LOCK:
         hit = _FZ_RESEARCH_CACHE.get(key)
-        if hit and hit[0]>time.monotonic() and hit[1].get('groups'): return copy.deepcopy(hit[1])
+        if hit and hit[0]>time.monotonic(): return copy.deepcopy(hit[1])
     groups = {}
     try:
         try:
@@ -34136,8 +33713,7 @@ def _fz_research_sync(context):
               'available_modes':[m for m in _FZ_RESEARCH_MODES if groups.get(m)], 'suggestions':[],
               'question':'','choices':[], 'fresh_search':True,'build':BUILD_ID,'checked_at':int(time.time())}
     with _FZ_GUIDE_LOCK:
-        if groups:
-            _FZ_RESEARCH_CACHE[key] = (time.monotonic()+600, copy.deepcopy(result))
+        _FZ_RESEARCH_CACHE[key] = (time.monotonic()+(600 if groups else 12), copy.deepcopy(result))
         while len(_FZ_RESEARCH_CACHE)>128: _FZ_RESEARCH_CACHE.pop(next(iter(_FZ_RESEARCH_CACHE)))
     return result
 
@@ -34520,69 +34096,18 @@ _install_findzia_support(app, judge=_refine_ai,
     request_ip=_web_request_ip, enabled=lambda: WEB_API_ENABLED)
 
 
-def _web_search_trace_id(value):
-    return value if isinstance(value, str) and re.fullmatch(r'[a-f0-9]{32}', value) else ''
-
-
-def _web_client_card_metric(data):
-    """Client-reported rendering measurement; never product/account evidence."""
-    if not isinstance(data, dict) or not _web_search_trace_id(data.get('search_trace')):
-        raise ValueError('invalid_metric')
-    if data.get('kind') not in ('image', 'text'):
-        raise ValueError('invalid_metric')
-    if data.get('version') != '156.7.70':
-        raise ValueError('invalid_metric')
-    cc = data.get('country')
-    if not isinstance(cc, str) or not re.fullmatch(r'[a-z]{2}', cc):
-        raise ValueError('invalid_metric')
-    result = {k: data[k] for k in ('search_trace', 'kind', 'version', 'country')}
-    for key, maximum in (('first_card_ms', 180000), ('visible_count', 1000)):
-        value = data.get(key)
-        if type(value) is not int or not 0 <= value <= maximum:
-            raise ValueError('invalid_metric')
-        result[key] = value
-    if not result['visible_count']:
-        raise ValueError('invalid_metric')
-    result['measurement'] = 'client_after_render'
-    return result
-
-
-@app.post('/api/search/metrics')
-async def web_api_search_metrics(request: Request):
-    if not _web_rate_allowed(request, scope='search_metrics'):
-        return Response(status_code=429)
-    try:
-        raw = bytearray()
-        async for chunk in request.stream():
-            if len(raw) + len(chunk) > 1024:
-                return Response(status_code=413)
-            raw.extend(chunk)
-        data = _web_client_card_metric(json.loads(raw))
-    except ClientDisconnect:
-        return Response(status_code=204)
-    except (ValueError, TypeError, AttributeError, UnicodeError):
-        return Response(status_code=400)
-    # Never log the submitted object: only allowlisted counters and random id.
-    print('CLIENT FIRST CARD ' + json.dumps(data, sort_keys=True), flush=True)
-    return Response(status_code=204)
-
-
 class _FindziaImageTiming:
     """Observe the original ASGI receive path, before credit/body middleware."""
     def __init__(self, app):
         self.app = app
 
     async def __call__(self, scope, receive, send):
-        paths = {'/api/search/stream', '/api/search/image', '/api/search/image/stream', '/api/refine/search/stream'}
+        paths = {'/api/search/image', '/api/search/image/stream', '/api/refine/search/stream'}
         if scope.get('type') != 'http' or scope.get('method') != 'POST' or scope.get('path') not in paths:
             return await self.app(scope, receive, send)
         started = time.monotonic()
         data = {'body_bytes': 0, 'body_complete_ms': None, 'headers_ms': None,
                 'first_body_ms': None, 'status': None}
-        headers = dict(scope.get('headers') or [])
-        trace = _web_search_trace_id(headers.get(b'x-findzia-search-trace', b'').decode('ascii', 'ignore'))
-        if trace:
-            data['search_trace'] = trace
         scope['findzia_image_timing'] = data
         def elapsed():
             return max(0, int((time.monotonic() - started) * 1000))
@@ -34605,8 +34130,7 @@ class _FindziaImageTiming:
         finally:
             data['total_ms'] = elapsed()
             data['route'] = scope['path']
-            label = 'SEARCH REQUEST TIMING ' if scope['path'] == '/api/search/stream' else 'IMAGE REQUEST TIMING '
-            print(label + json.dumps(data, sort_keys=True), flush=True)
+            print('IMAGE REQUEST TIMING ' + json.dumps(data, sort_keys=True), flush=True)
 
 
 async def _web_prepare_image_bytes(request, image_bytes, mime, client_meta=None):
