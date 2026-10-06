@@ -32,7 +32,7 @@ const packageVersion=JSON.parse(readFileSync(resolve(base,'package.json'),'utf8'
 if(packageVersion!==version)throw Error('Release mismatch: replace frontend/package.json and frontend/scripts/build.mjs together.');
 if(sourceReleases.boot!=='156.7.43')throw Error('Release mismatch: expected frontend/source/findzia-boot.js version 156.7.43.');
 for(const [key,file] of [['support','findzia-support.js'],['focus','findzia-focus.js'],['home','findzia-home.liquid'],['shell','findzia-shell.js'],['billing','findzia-billing.js'],['subscriptions','findzia-subscriptions.js'],['guide','findzia-filters.js'],['account','findzia-account.js'],['motion','findzia-motion.js'],['motionCSS','findzia-motion.css']]){
-  const expectedVersion=key==='home'?version:key==='billing'?'156.7.82':['account','motion','support','focus'].includes(key)?'156.7.62':key==='subscriptions'?'156.7.60':key==='motionCSS'?'156.7.53':key==='guide'?'156.7.48':'156.7.43';
+  const expectedVersion=key==='home'?version:key==='billing'?'156.7.83':['account','motion','support','focus'].includes(key)?'156.7.62':key==='subscriptions'?'156.7.60':key==='motionCSS'?'156.7.53':key==='guide'?'156.7.48':'156.7.43';
   if(sourceReleases[key]!==expectedVersion)throw Error('Release mismatch: replace frontend/source/'+file+' with version '+expectedVersion+'.');
 }
 const routes = {};
