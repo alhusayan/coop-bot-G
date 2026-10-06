@@ -1,4 +1,4 @@
-{% comment %} FINDZIA_HOME_RELEASE=156.7.70 {% endcomment %}
+{% comment %} FINDZIA_HOME_RELEASE=156.7.69 {% endcomment %}
 {% comment %}Findzia 156.7.15 · progressive filters + conversational guide from 156.3.0 · combined 156.7.14 payments preserved{% endcomment %}
 
 
@@ -876,13 +876,12 @@ function fzRequestLifetime(milliseconds) {
 async function Rt(path, payload, receive, sharedLifetime) {
   if (!r) throw new Error('API URL missing');
   if (['/api/search/stream','/api/search/image/stream'].includes(path)) fzAccountStart(payload);
-  if (['/api/search/stream','/api/search/image/stream'].includes(path)) fzStartCardMetric(path, payload);
   const generation = B, lifetime = sharedLifetime || fzRequestLifetime(path === '/api/refine/search/stream' ? 40000 : 65000);
   let reader, ended = false, done = false;
   try {
     const response = await lifetime.run(() => fzPaidFetch(r + path, {
       method:'POST', signal:lifetime.signal,
-      headers:{'Content-Type':'application/json', Accept:'application/x-ndjson', ...fzCardMetricHeaders()}, body:JSON.stringify(payload)
+      headers:{'Content-Type':'application/json', Accept:'application/x-ndjson'}, body:JSON.stringify(payload)
     }));
     if (!response.ok) {
       const error = new Error(await lifetime.run(() => response.text()) || 'HTTP ' + response.status);
@@ -925,53 +924,12 @@ async function Nt(path, payload, lifetime) {
   if (!r) throw new Error('API URL missing');
   const response = await lifetime.run(() => fzPaidFetch(r + path, {
     method:'POST', signal:lifetime.signal,
-    headers:{'Content-Type':'application/json', Accept:'application/json', ...fzCardMetricHeaders()}, body:JSON.stringify(payload)
+    headers:{'Content-Type':'application/json', Accept:'application/json'}, body:JSON.stringify(payload)
   }));
   const data = await lifetime.run(() => response.json());
   if (!response.ok) { const error = new Error(data.error || 'HTTP ' + response.status); error.status = response.status; throw error; }
   return data;
 }
-// FINDZIA_FIRST_CARD_70_BEGIN
-var fzCardMetric = null;
-function fzStartCardMetric(path, payload) {
-  const bytes = new Uint8Array(16); crypto.getRandomValues(bytes);
-  fzCardMetric = {search_trace:Array.from(bytes, v=>v.toString(16).padStart(2,'0')).join(''),
-    generation:B, kind:path.includes('/image/')?'image':'text', country:String(payload.country||n).toLowerCase(),
-    started:performance.now(), sent:false, pending:false};
-}
-function fzCardMetricHeaders() {
-  return fzCardMetric?.generation===B ? {'X-Findzia-Search-Trace':fzCardMetric.search_trace} : {};
-}
-function fzMeasureFirstCard() {
-  const trace = fzCardMetric;
-  if (!trace || trace.generation!==B || trace.sent || trace.pending || document.visibilityState!=='visible') return;
-  trace.pending = true;
-  // The count alone can precede DOM insertion. Wait through a paint opportunity
-  // and confirm a loaded product image inside a currently admitted card.
-  requestAnimationFrame(()=>requestAnimationFrame(()=>{
-    trace.pending = false;
-    if (trace!==fzCardMetric || trace.generation!==B || trace.sent || document.visibilityState!=='visible') return;
-    const rows=tt(), keys=new Set(rows.map(br));
-    const rendered=Array.from(b.querySelectorAll('[data-image-key]')).some(stage=>{
-      const img=stage.querySelector('img'), rect=stage.getBoundingClientRect();
-      return keys.has(stage.dataset.imageKey) && img?.complete && img.naturalWidth>=8 &&
-        rect.width>0 && rect.height>0 && !stage.closest('[hidden]');
-    });
-    if (!rendered) return;
-    trace.sent=true;
-    const elapsed=Math.max(0,Math.round(performance.now()-trace.started));
-    if(fzPhotoTrace?.generation===B)fzPhotoTrace.firstVisibleMs=elapsed;
-    const metric={search_trace:trace.search_trace,kind:trace.kind,country:trace.country,
-      version:'156.7.70',first_card_ms:elapsed,visible_count:rows.length};
-    const controller=new AbortController(), timer=setTimeout(()=>controller.abort(),3000);
-    // Best effort, no auth/credit flow, no retries, no user query or product data.
-    fetch(r.replace(/\/$/,'')+'/api/search/metrics',{method:'POST',credentials:'omit',
-      headers:{'Content-Type':'application/json'},body:JSON.stringify(metric),signal:controller.signal})
-      .catch(()=>{}).finally(()=>clearTimeout(timer));
-  }));
-}
-document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible')fzMeasureFirstCard();});
-// FINDZIA_FIRST_CARD_70_END
 var fzPhotoTrace = null;
 e.fzPhotoSearchDiagnostics = () => fzPhotoTrace ? {...fzPhotoTrace, phases:fzPhotoTrace.phases.map(row => ({...row}))} : null;
 // FINDZIA_PHOTO_UPLOAD_69_BEGIN
@@ -1165,7 +1123,8 @@ function fzAccountDone(){e.fzAccountComplete?.(B);}
 var Vt=null,Jt=!1,fzUsableResults=false;function Qt(count) {
     count = Math.max(0, Number(count) || 0);
     e.dataset.visibleResultCount = String(count);
-    if (count > 0) fzMeasureFirstCard();
+    if (count > 0 && fzPhotoTrace?.generation === B && fzPhotoTrace.firstVisibleMs === null)
+      fzPhotoTrace.firstVisibleMs = Math.round(performance.now() - fzPhotoTrace.started);
     const ready = count > 0;
     if (ready !== fzUsableResults) { fzUsableResults = ready; Yt('fz:search-state'); }
     e.dispatchEvent(new CustomEvent('fz:result-count', {detail:{count,busy:ee||Kt}}));
