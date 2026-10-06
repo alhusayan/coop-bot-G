@@ -1,3 +1,4 @@
+# v128.5.42.63: audited-local retrieval completion and useful price-recovery priority.
 # v128.5.42.62: ready-offer audit priority and bounded local-ready completion tail.
 # v128.5.42.61: send the compact visual-audit schema first, including cold starts.
 # v128.5.42.60: restore release 69 price recovery; retain Gemini, image and first-card fixes.
@@ -398,7 +399,7 @@ from findzia_billing import CreditMiddleware, install_billing
 app.add_middleware(CreditMiddleware, owner=app)
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization', 'X-Findzia-Request-Id', 'X-Findzia-Search-Trace'], max_age=86400)
-BUILD_ID = 'v128.5.42.62-photo-retry-tail'
+BUILD_ID = 'v128.5.42.63-ready-sources'
 _SOCIAL = None
 
 def _fz_social_row(row):
@@ -3612,7 +3613,11 @@ def _photo_market_discovery(reference_future, query_hint, deadline, progress_cal
         progress_callback=progress_callback, cancel_event=cancel_event)
 
 
-def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=False, progress_callback=None, cancel_event=None, *, reference_context=None):
+LENS_READY_MIN_SECONDS = 8.0
+LENS_READY_GRACE_SECONDS = 1.0
+
+
+def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=False, progress_callback=None, cancel_event=None, *, reference_context=None, ready_event=None):
     if not PUBLIC_BASE_URL or not ((ENABLE_GOOGLE_LENS and SERPAPI_API_KEY) or _INDEPENDENT.available('bing_reverse_image')):
         print('GOOGLE LENS SKIPPED: missing SERPAPI_API_KEY or PUBLIC_BASE_URL')
         return {'aliases': [], 'matches': [], 'query': ''}
@@ -3677,7 +3682,7 @@ def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=Fal
                 merged_by_sig[sig] = it
         local_updates, local_updates_lock = deque(), threading.Lock()
         def local_progress(batch):
-            if not cancelled():
+            if not cancelled() and not independent_cancel.is_set():
                 with local_updates_lock:
                     local_updates.append([dict(item) for item in batch])
         passes = _lens_market_passes(user_country, USE_FAST_LENS_PIPELINE) if ENABLE_GOOGLE_LENS and SERPAPI_API_KEY else []
@@ -3711,7 +3716,7 @@ def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=Fal
         if USE_FAST_LENS_PIPELINE and LOCAL_DISCOVERY_ENABLED:
             cn_future = MARKET_SUPPLEMENT_POOL.submit(_run_with_market, _web_market('cn'),
                 _china_native_image_discovery, reference_future, query_hint,
-                completion_deadline, local_progress, cancel_event, user_country, not bool(reference_context), visual_futures)
+                completion_deadline, local_progress, independent_cancel, user_country, not bool(reference_context), visual_futures)
             future_map[cn_future] = ('native-discovery', 'cn', True)
             all_futures.add(cn_future)
             pending.add(cn_future)
@@ -3721,13 +3726,15 @@ def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=Fal
         if USE_FAST_LENS_PIPELINE and LOCAL_DISCOVERY_ENABLED and user_country == 'us':
             us_future = MARKET_SUPPLEMENT_POOL.submit(_run_with_market, lens_market_snapshot,
                 _photo_market_discovery, reference_future, query_hint, completion_deadline,
-                local_progress, cancel_event, user_country, not bool(reference_context), visual_futures, 'us')
+                local_progress, independent_cancel, user_country, not bool(reference_context), visual_futures, 'us')
             future_map[us_future] = ('native-discovery', 'us', True)
             all_futures.add(us_future)
             pending.add(us_future)
             local_rescue_started = True
             print('IMAGE LOCAL PRIMARY country=us identity_aware=True parallel_with_lens=True')
         enough_fast = False
+        ready_deadline = None
+        ready_completion = False
         last_progress_signature = None
 
         def _emit_progress_snapshot(reason, allow_foreign_first=False):
@@ -3779,7 +3786,7 @@ def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=Fal
                 rescue_query,
                 budget,
                 max(LENS_LOCAL_LANE_TARGET + 2, LENS_LOCAL_LANE_TARGET),
-                local_progress, cancel_event,
+                local_progress, independent_cancel,
             )
             print(f'LENS LOCAL LANE RESCUE START elapsed={elapsed:.1f}s country={user_country}')
             return local_rescue_future
@@ -3915,6 +3922,23 @@ def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=Fal
                             print(f'LENS COMPLETION ERR country={country} type={lens_type}: {type(exc).__name__}')
                 if just_done:
                     _emit_progress_snapshot('provider_completed', allow_foreign_first=True)
+                # Only the stream's completed visual audits may end retrieval.
+                # Give every market eight seconds and preserve already-ready
+                # provider responses before ending the remaining source wait.
+                ready = (light and not reference_context and ready_event is not None
+                         and ready_event.is_set() and bool(reference))
+                if not ready:
+                    ready_deadline = None
+                elif ready_deadline is None:
+                    ready_deadline = max(fast_started + LENS_READY_MIN_SECONDS,
+                                         time.monotonic() + LENS_READY_GRACE_SECONDS)
+                if ready_deadline is not None and time.monotonic() >= ready_deadline:
+                    ready_completion = bool(pending or local_rescue_future is not None)
+                    if ready_completion:
+                        independent_cancel.set()
+                        print(f'LENS READY COMPLETE country={user_country} pending={len(pending)}'
+                              f' elapsed={time.monotonic() - fast_started:.2f}s')
+                        break
             with local_updates_lock:
                 for batch in local_updates:
                     _merge(batch)
@@ -3965,7 +3989,7 @@ def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=Fal
         fallback_query = _reference_query()
         if not fallback_query and merged and reference_future is None:
             fallback_query = (merged[0].get('title') or '').strip()
-        if LENS_LOCAL_LANE_RESCUE and reference.get('named') and not any(result_market_rank(m) == 0 and m.get('_reference_priority', 0) >= 3 for m in allowed) and not local_rescue_started:
+        if not ready_completion and LENS_LOCAL_LANE_RESCUE and reference.get('named') and not any(result_market_rank(m) == 0 and m.get('_reference_priority', 0) >= 3 for m in allowed) and not local_rescue_started:
             local_rescue_started = True
             remaining = max(0.0, completion_deadline - time.monotonic())
             rescued = _single_local_lane_rescue(fallback_query, timeout_seconds=min(LOCAL_DISCOVERY_TIMEOUT, remaining), limit=6,
@@ -4048,7 +4072,8 @@ def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=Fal
                 stable_query = reference.get('query') or query_hint or chosen_title
                 return {'aliases': [stable_query] if stable_query else [], 'matches': matches, 'raw_match_count': len(merged),
                     'query': stable_query, 'visual_identity': reference.get('query', ''),
-                    'reference_identity': dict(reference), 'chosen': chosen, 'signature': {}, 'source': 'lens_turbo_reference'}
+                    'reference_identity': dict(reference), 'chosen': chosen, 'signature': {}, 'source': 'lens_turbo_reference',
+                    **({'retrieval_completion': 'ready_local_sources'} if ready_completion else {})}
             visual_identity = ''
             try:
                 id_system = 'Identify the physical product in the image for shopping search. Return one concise English commercial identity only: product type + brand/model if visibly supported. Do not guess a brand/model. Do not mention colors unless identity-critical. No explanation.'
@@ -20571,6 +20596,15 @@ def _web_listing_price_country(row, market):
     return str(row.get('country') or row.get('market_country') or market.get('country') or 'us').lower()
 
 
+def _web_price_recovery_priority(row):
+    """Spend the existing budget on offers closest to becoming usable cards."""
+    priced = _web_row_has_numeric_price(row)
+    pictured = bool(_web_offer_image_candidates(row))
+    missing = 0 if pictured and not priced else 1 if priced and not pictured else 2
+    reviewed = row.get('classification_final') and row.get('identity_review_status') in ('completed', 'not_required')
+    return (missing, not bool(reviewed))
+
+
 def _web_automatic_price_batches(rows, attempted_rows=None):
     """Bounded, market-isolated queries; earlier local work cannot starve exports."""
     def group_key(row):
@@ -20587,6 +20621,9 @@ def _web_automatic_price_batches(rows, attempted_rows=None):
     for key, row in rows.items():
         group = group_key(row)
         groups.setdefault(group, {}).setdefault(_more_result_domain(row.get('url')), []).append((key,row))
+    for merchants in groups.values():
+        for candidates in merchants.values():
+            candidates.sort(key=lambda pair: _web_price_recovery_priority(pair[1]))
     batches = []
     while groups and len(batches) < WEB_ASYNC_PRICE_SHARED_MARKETS:
         # Prefer an unserved market, then local. Keep each batch within its
@@ -20594,7 +20631,8 @@ def _web_automatic_price_batches(rows, attempted_rows=None):
         group = min(groups, key=lambda k: (group_use[k], k != current_market().get('country')))
         merchants, batch = groups[group], {}
         while merchants and len(batch) < 4:
-            host = min(merchants, key=lambda h: (merchant_use[(group,h)], -len(merchants[h])))
+            host = min(merchants, key=lambda h: (_web_price_recovery_priority(merchants[h][0][1]),
+                                                  merchant_use[(group,h)], -len(merchants[h])))
             key, row = merchants[host].pop(0)
             batch[key] = row
             group_use[group] += 1
@@ -20821,6 +20859,14 @@ def _web_targeted_price_updates(entries, lang, market, *, image_only=False):
         ids = [v for k, v in urllib.parse.parse_qsl(parsed.query)
                if k.lower() in {'id', 'itemid', 'item_id', 'goods_id', 'goodsid', 'offerid', 'sku', 'skuid', 'sku_id'}]
         path_ids = re.findall(r'(?:/item/|/offer/|/product/|-p-|-g-|/)(\d{6,})(?=[./-]|$)', parsed.path)
+        # Amazon's alphanumeric ASIN is more precise than a generic title.
+        # This changes retrieval only; exact listing/variant/market binding below
+        # still rejects every price belonging to a different offer.
+        if not ids and not path_ids and re.fullmatch(
+                r'(?:[a-z]+\.)?amazon\.(?:com|ca|de|fr|it|es|sg|co\.uk|co\.jp|com\.au|ae|sa|in|com\.br|com\.mx)', parsed.netloc):
+            asin = re.search(r'/(?:dp|gp/product)/([A-Z0-9]{10})(?:/|$)', parsed.path, re.I)
+            if asin:
+                path_ids = [asin.group(1).upper()]
         if ids or path_ids:
             term += ' ' + ' '.join('"' + re.sub(r'[^a-zA-Z0-9_-]', '', value) + '"' for value in (ids + path_ids)[:2])
         else:
@@ -21314,6 +21360,7 @@ async def _web_with_live_prices(source, lang, country, allow_paid=True, wait_sec
     finish_by = None
     final_event = {'event': 'done'}
     had_error = False
+    ready_source_closed = False
     next_event = None
     gate = asyncio.Semaphore(WEB_LIVE_PRICE_WORKERS)
     async def page(row):
@@ -21541,6 +21588,8 @@ async def _web_with_live_prices(source, lang, country, allow_paid=True, wait_sec
                     if isinstance(event.get('market'), dict):
                         market = event['market']
                     kind = event.get('event')
+                    if event.get('completion_reason') in ('ready_local_sources', 'ready_local_tail'):
+                        ready_source_closed = True
                     if kind == 'error':
                         had_error = True
                     if isinstance(event.get('item'), dict):
@@ -21559,7 +21608,7 @@ async def _web_with_live_prices(source, lang, country, allow_paid=True, wait_sec
                         final_event = event
                         next_event = None
                         finish_by = loop.time() + (min(tail_wait, 3.0)
-                            if event.get('completion_reason') == 'ready_local_tail' else tail_wait)
+                            if ready_source_closed else tail_wait)
                     else:
                         yield _web_stream_event(event)
                         next_event = asyncio.create_task(anext(source))
@@ -21606,7 +21655,9 @@ async def _web_with_live_prices(source, lang, country, allow_paid=True, wait_sec
                         and (not _web_row_has_numeric_price(r) or not _web_offer_image_candidates(r))
                         and (k in page_finished or loop.time() - missing_since.get(k, loop.time()) >= .75
                              or next_event is None)}
-            if eligible and allow_paid and WEB_PRICE_ENRICH_SHOPPING_FALLBACK and _indexed_recovery_allowed():
+            # A ready-local stop drains work already in flight; it must not
+            # buy another ten-second lookup during a three-second final tail.
+            if eligible and not ready_source_closed and allow_paid and WEB_PRICE_ENRICH_SHOPPING_FALLBACK and _indexed_recovery_allowed():
                 # Hold the final budget slot for later lanes until retrieval ends.
                 slots = WEB_ASYNC_PRICE_SHARED_MARKETS - recovery_calls
                 if next_event is not None:
@@ -26180,7 +26231,7 @@ def _web_bounded_image_recovery(lens, country, lang, cancel_event=None):
     return dict(lens, matches=rows, query=query, visual_identity=query,
                 reference_identity=reference, source='lens_bounded_structured_recovery')
 
-def _web_search_image_sync(image_b64, mime, caption, country, lang, progress_callback=None, classify_with_ai=True, cancel_event=None):
+def _web_search_image_sync(image_b64, mime, caption, country, lang, progress_callback=None, classify_with_ai=True, cancel_event=None, *, ready_event=None):
     market = _web_market(country)
     MARKET_CTX.value = market
     caption = re.sub('\\s+', ' ', str(caption or '')).strip()[:WEB_API_MAX_QUERY_CHARS]
@@ -26200,7 +26251,7 @@ def _web_search_image_sync(image_b64, mime, caption, country, lang, progress_cal
     direct_attempted = False
     if LENS_DIRECT_MODE and ENABLE_GOOGLE_LENS and SERPAPI_API_KEY and PUBLIC_BASE_URL:
         direct_attempted = True
-        lens_direct = google_lens_lookup(image_b64, mime, lang, caption, light=True, progress_callback=progress_callback, cancel_event=cancel_event)
+        lens_direct = google_lens_lookup(image_b64, mime, lang, caption, light=True, progress_callback=progress_callback, cancel_event=cancel_event, ready_event=ready_event)
         if cancelled():
             return cancelled_result(lens_direct.get('query'))
         if lens_direct.get('matches'):
@@ -26209,7 +26260,7 @@ def _web_search_image_sync(image_b64, mime, caption, country, lang, progress_cal
                 identity = (lens_direct.get('visual_identity') or lens_direct.get('relevance_target') or lens_direct.get('query') or caption or '').strip()
                 if USE_V106_5_RESULT_PIPELINE or (WEB_MATCH_WHATSAPP_EXACT and (not WEB_TEXT_DENSE_PARITY)):
                     print(f'ANDROID IMAGE TRUE PARITY: direct WhatsApp Lens set -> {len(items)} result(s); no WEB v89 supplement')
-                    return _web_attach_captured_result_sections({'ok': True, 'type': 'results', 'query': identity, 'market': market, 'results': items, 'source': 'whatsapp_direct_lens_exact', '_reference_image_b64': image_b64, '_reference_image_mime': mime}, lang, allow_ai=classify_with_ai, cancel_event=cancel_event)
+                    return _web_attach_captured_result_sections({'ok': True, 'type': 'results', 'query': identity, 'market': market, 'results': items, 'source': 'whatsapp_direct_lens_exact', 'retrieval_completion': lens_direct.get('retrieval_completion'), '_reference_image_b64': image_b64, '_reference_image_mime': mime}, lang, allow_ai=classify_with_ai, cancel_event=cancel_event)
                 if WEB_IMAGE_SUPPLEMENT_WEAK_MARKETS and identity:
                     target = {0: WEB_IMAGE_TARGET_LOCAL, 1: WEB_IMAGE_TARGET_US, 2: WEB_IMAGE_TARGET_CN}
                     counts = {0: 0, 1: 0, 2: 0}
@@ -26265,7 +26316,7 @@ def _web_search_image_sync(image_b64, mime, caption, country, lang, progress_cal
                                     break
                         items.sort(key=lambda x: (int(x.get('market_rank', 99)), 0 if x.get('price') else 1))
                         print(f'WEB IMAGE v89 after supplement counts={counts} total={len(items)}')
-                return _web_attach_captured_result_sections({'ok': True, 'type': 'results', 'query': identity, 'market': market, 'results': items, 'source': 'lens_direct_plus_market_supplement', '_reference_image_b64': image_b64, '_reference_image_mime': mime}, lang, allow_ai=classify_with_ai, cancel_event=cancel_event)
+                return _web_attach_captured_result_sections({'ok': True, 'type': 'results', 'query': identity, 'market': market, 'results': items, 'source': 'lens_direct_plus_market_supplement', 'retrieval_completion': lens_direct.get('retrieval_completion'), '_reference_image_b64': image_b64, '_reference_image_mime': mime}, lang, allow_ai=classify_with_ai, cancel_event=cancel_event)
     if direct_attempted and USE_FAST_LENS_PIPELINE:
         # OCR uncertainty or a provider timeout cannot trigger 3 query attempts
         # in each of two legacy layers plus serial Shopping/immersive retries.
@@ -28883,6 +28934,8 @@ async def _web_stream_image_identity_batches_core(image_b64, mime, caption, coun
     price_tasks, priced_keys = {}, set()
     identity, query_sent = str(caption or '').strip(), ''
     final_ready = False
+    retrieval_completion = None
+    retrieval_ready = threading.Event() if search_fn is None and reference_context is None else None
     ready_tail_deadline = None
     ready_tail_exhausted = False
     audit_cancel_event = threading.Event()
@@ -28973,10 +29026,18 @@ async def _web_stream_image_identity_batches_core(image_b64, mime, caption, coun
     try:
         search_task = asyncio.create_task(asyncio.to_thread(
             search_fn or _web_search_image_sync, image_b64, mime, caption, country, lang,
-            callback if search_fn or ANDROID_IMAGE_PROGRESSIVE else None, False, cancel_event))
+            callback if search_fn or ANDROID_IMAGE_PROGRESSIVE else None, False, cancel_event,
+            **({'ready_event': retrieval_ready} if retrieval_ready is not None else {})))
         while not cancel_event.is_set():
             ready_local = (_web_identity_ready_local_count(rows.values(), identity, market)
-                           if enabled and final_ready else 0)
+                           if enabled else 0)
+            if retrieval_ready is not None:
+                if ready_local >= WEB_IDENTITY_READY_LOCAL_MIN:
+                    retrieval_ready.set()
+                else:
+                    retrieval_ready.clear()
+            if not final_ready:
+                ready_local = 0
             if ready_local < WEB_IDENTITY_READY_LOCAL_MIN:
                 ready_tail_deadline = None
             elif ready_tail_deadline is None:
@@ -29018,6 +29079,7 @@ async def _web_stream_image_identity_batches_core(image_b64, mime, caption, coun
             # Resolve membership first if retrieval and an old audit finish together.
             if not final_ready and search_task in done:
                 final = search_task.result()
+                retrieval_completion = final.get('retrieval_completion')
                 identity = str(final.get('query') or caption or '').strip()
                 market = final.get('market') or market
                 captured = _fz_social_merge(list(final.get('captured_results') or final.get('results') or []), identity, market, lang)
@@ -29137,8 +29199,10 @@ async def _web_stream_image_identity_batches_core(image_b64, mime, caption, coun
         if cancel_event.is_set():
             return
         snapshot = _web_identity_stream_snapshot(rows.values(), identity, market, lang, True, elapsed(), not text_search)
-        if ready_tail_exhausted:
-            snapshot.update(partial=True, completion_reason='ready_local_tail')
+        completion_reason = ('ready_local_tail' if ready_tail_exhausted else
+                             'ready_local_sources' if retrieval_completion == 'ready_local_sources' else None)
+        if completion_reason:
+            snapshot.update(partial=True, completion_reason=completion_reason)
         yield _web_stream_event(snapshot)
         yield _web_stream_event({'event': 'identity_review', 'build': BUILD_ID,
                                  'status': 'not_required' if text_search else 'completed' if all(r.get('identity_review_status') == 'completed' for r in rows.values()) and rows else 'partial' if snapshot['scored_count'] else 'unavailable',
@@ -29167,7 +29231,7 @@ async def _web_stream_image_identity_batches_core(image_b64, mime, caption, coun
                                  'global_count': snapshot['global_count'], 'classification_engine': 'progressive_identity_batches',
                                  'first_results_ms': first_results_ms, 'first_match_ms': first_match_ms,
                                  'identity_batch_count': review_count, 'elapsed_ms': elapsed(),
-                                 **({'partial': True, 'completion_reason': 'ready_local_tail'} if ready_tail_exhausted else {})})
+                                 **({'partial': True, 'completion_reason': completion_reason} if completion_reason else {})})
         print(f'WEB IDENTITY STREAM captured={len(rows)} visible={len(snapshot["results"])} scored={snapshot["scored_count"]} batches={review_count} first_results_ms={first_results_ms} first_match_ms={first_match_ms}')
     except asyncio.CancelledError:
         raise
