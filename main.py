@@ -401,7 +401,7 @@ from findzia_billing import CreditMiddleware, install_billing
 app.add_middleware(CreditMiddleware, owner=app)
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization', 'X-Findzia-Request-Id', 'X-Findzia-Search-Trace'], max_age=86400)
-BUILD_ID = 'v128.5.42.85-ready-images'
+BUILD_ID = 'v128.5.42.86-flow'
 _SOCIAL = None
 
 def _fz_social_row(row):
@@ -17422,18 +17422,25 @@ def _web_share_media_audit(items, evidence):
         return
     counts = Counter()
     for item in items:
+        # Never accept a model-generated media capability. Only the local
+        # inspector can publish pixels backed by its completed product verdict.
+        item.pop('audited_media_path', None)
         inline = evidence.get(item.get('id'))
         kind = item.get('image_kind')
         if not inline or kind not in ('product','logo','text_only','placeholder'):
             counts['no_pixel_verdict'] += 1
             continue
-        # A preferred URL never grants admission. /media/check still fetches
-        # its current normalized bytes and checks the exact-byte cache.
+        # Merchant URLs still require /media/check. The optional capability
+        # serves immutable, already-judged pixels without another download.
         source = inline.get('source_url') or ''
         if kind == 'product' and _web_is_http_url(source):
             item['audited_image'] = source
         try:
             seeded = inspector.remember_audit(inline, kind)
+            if kind == 'product' and _web_is_http_url(source) and hasattr(inspector, 'publish_audited'):
+                path = inspector.publish_audited(inline)
+                if path:
+                    item['audited_media_path'] = path
             counts['seeded' if seeded else 'busy_or_cached'] += 1
         except Exception:
             counts['unavailable'] += 1
@@ -18145,8 +18152,12 @@ def _web_attach_captured_result_sections(payload, lang, allow_ai=True, cancel_ev
         except Exception:
             heuristic_rank = 99
         ai_item = ai_by_id.get(index) or {}
+        row.pop('audited_media_path', None)
         if _web_is_http_url(ai_item.get('audited_image') or ''):
             row['audited_image'] = ai_item['audited_image']
+            path = ai_item.get('audited_media_path')
+            if isinstance(path, str) and re.fullmatch(r'/api/media/verified/[A-Za-z0-9_-]{32}', path):
+                row['audited_media_path'] = path
         if isinstance(ai_item.get('candidate_profile'), dict):
             row['card_candidate_profile'] = ai_item['candidate_profile']
         match_guard = match_guard_by_id.get(index)
@@ -29165,7 +29176,7 @@ async def _web_stream_image_identity_batches_core(image_b64, mime, caption, coun
     progress_task = None
     review_update_task = None
     search_task = None
-    review_count = 0
+    review_count = review_candidates = 0
     first_results_ms = first_match_ms = None
     text_search = reference_context is not None
     enabled = not text_search and WEB_AI_CLASSIFIER_ENABLED and WEB_VISUAL_CLASSIFIER_ENABLED and bool(GEMINI_API_KEY)
@@ -29201,7 +29212,7 @@ async def _web_stream_image_identity_batches_core(image_b64, mime, caption, coun
         return item
 
     def schedule(batch, query, tokens):
-        nonlocal review_count
+        nonlocal review_count, review_candidates
         # A recovered image/title may differ from the retrieval candidate.
         # Membership checks still belong to the original captured evidence.
         pairs = [(dict(row), token) for row, token in zip(batch, tokens)]
@@ -29225,6 +29236,7 @@ async def _web_stream_image_identity_batches_core(image_b64, mime, caption, coun
         task = asyncio.wrap_future(future)
         reviews[task] = pairs
         review_count += 1
+        review_candidates += len(batch)
 
     def queue_rows(candidates):
         inflight = {token for pairs in reviews.values() for _, token in pairs}
@@ -29262,6 +29274,10 @@ async def _web_stream_image_identity_batches_core(image_b64, mime, caption, coun
         prepared.sort(key=lambda pair: _web_identity_review_priority(pair[0], market))
         while prepared and len(reviews) < WEB_IDENTITY_BATCH_PARALLEL:
             size = WEB_IDENTITY_FIRST_BATCH if review_count == 0 else WEB_IDENTITY_BATCH_SIZE
+            if review_count and review_candidates < 6:
+                # The opening six use short audits (normally 1, 2, 3), at the
+                # existing concurrency. Later cards keep efficient full batches.
+                size = min(size, review_count + 1, 6 - review_candidates)
             # Keep the first card immediate; coalesce later near-simultaneous
             # downloads briefly so this does not become one AI call per card.
             if (review_count and len(prepared) < size and preparing
@@ -34593,7 +34609,7 @@ def _web_client_card_metric(data):
         raise ValueError('invalid_metric')
     if data.get('kind') not in ('image', 'text'):
         raise ValueError('invalid_metric')
-    if data.get('version') != '156.7.70':
+    if not isinstance(data.get('version'), str) or not re.fullmatch(r'156\.7\.\d{1,4}', data['version']):
         raise ValueError('invalid_metric')
     cc = data.get('country')
     if not isinstance(cc, str) or not re.fullmatch(r'[a-z]{2}', cc):
@@ -34606,6 +34622,11 @@ def _web_client_card_metric(data):
         result[key] = value
     if not result['visible_count']:
         raise ValueError('invalid_metric')
+    if 'first_six_ms' in data:
+        value = data['first_six_ms']
+        if type(value) is not int or not result['first_card_ms'] <= value <= 180000 or result['visible_count'] < 6:
+            raise ValueError('invalid_metric')
+        result['first_six_ms'] = value
     result['measurement'] = 'client_after_render'
     return result
 
@@ -34626,7 +34647,8 @@ async def web_api_search_metrics(request: Request):
     except (ValueError, TypeError, AttributeError, UnicodeError):
         return Response(status_code=400)
     # Never log the submitted object: only allowlisted counters and random id.
-    print('CLIENT FIRST CARD ' + json.dumps(data, sort_keys=True), flush=True)
+    label = 'CLIENT FIRST SIX ' if 'first_six_ms' in data else 'CLIENT FIRST CARD '
+    print(label + json.dumps(data, sort_keys=True), flush=True)
     return Response(status_code=204)
 
 
