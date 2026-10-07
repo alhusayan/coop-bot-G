@@ -2,10 +2,11 @@ import { readFileSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { packLocales } from './locales.mjs';
 
 const base = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const src = resolve(base, 'source'), dest = resolve(base, 'public');
-const version = '156.7.87', api = 'https://api.findzia.com';
+const version = '156.7.88', api = 'https://api.findzia.com';
 // Preserve the live section scope to avoid unnecessary DOM/storage changes.
 const section = 'template--19963721449543__findzia_home_h4wBLq';
 // Both original PSP files are shipped. Runtime selects one using Railway's
@@ -26,13 +27,16 @@ sourceReleases.account=read('findzia-account.js').toString().match(/FINDZIA_ACCO
 sourceReleases.motion=read('findzia-motion.js').toString().match(/FINDZIA_MOTION_RELEASE=([0-9.]+)/)?.[1];
 sourceReleases.motionCSS=read('findzia-motion.css').toString().match(/FINDZIA_MOTION_CSS_RELEASE=([0-9.]+)/)?.[1];
 sourceReleases.support=read('findzia-support.js').toString().match(/FINDZIA_SUPPORT_RELEASE=([0-9.]+)/)?.[1];
+sourceReleases.i18n=read('findzia-i18n.js').toString().match(/FINDZIA_I18N_RELEASE=([0-9.]+)/)?.[1];
+const uiLocales = packLocales(JSON.parse(read('findzia-locales.json').toString('utf8')));
+if(uiLocales.version!==version || sourceReleases.i18n!==version)throw Error('UI translation release mismatch.');
 sourceReleases.focus=read('findzia-focus.js').toString().match(/FINDZIA_FOCUS_RELEASE=([0-9.]+)/)?.[1];
 if(JSON.parse(read('findzia-support.json').toString('utf8')).version!=='156.7.62')throw Error('Support knowledge release mismatch.');
 const packageVersion=JSON.parse(readFileSync(resolve(base,'package.json'),'utf8')).version;
 if(packageVersion!==version)throw Error('Release mismatch: replace frontend/package.json and frontend/scripts/build.mjs together.');
 if(sourceReleases.boot!=='156.7.43')throw Error('Release mismatch: expected frontend/source/findzia-boot.js version 156.7.43.');
 for(const [key,file] of [['support','findzia-support.js'],['focus','findzia-focus.js'],['home','findzia-home.liquid'],['shell','findzia-shell.js'],['billing','findzia-billing.js'],['subscriptions','findzia-subscriptions.js'],['guide','findzia-filters.js'],['account','findzia-account.js'],['motion','findzia-motion.js'],['motionCSS','findzia-motion.css']]){
-  const expectedVersion=key==='home'?'156.7.86':key==='billing'?version:['account','motion','support','focus'].includes(key)?'156.7.62':key==='subscriptions'?'156.7.60':key==='motionCSS'?'156.7.53':key==='guide'?'156.7.48':'156.7.43';
+  const expectedVersion=key==='home'?version:key==='billing'?'156.7.87':['account','motion','support','focus'].includes(key)?'156.7.62':key==='subscriptions'?'156.7.60':key==='motionCSS'?'156.7.53':key==='guide'?'156.7.48':'156.7.43';
   if(sourceReleases[key]!==expectedVersion)throw Error('Release mismatch: replace frontend/source/'+file+' with version '+expectedVersion+'.');
 }
 const routes = {};
@@ -44,7 +48,10 @@ function emit(url, file, bytes, type, immutable=false) {
 }
 const assets = new Map();
 for (const name of ['findzia-ads.js','findzia-support.js','findzia-focus.js','findzia-account.js','findzia-subscriptions.js','findzia-billing.js','findzia-filters.js','findzia-i18n.js','findzia-shell.js','findzia-product-details.css','findzia-migration.js','findzia-standalone.css','findzia-motion.js','findzia-motion.css']) {
-  const bytes=name==='findzia-support.js'?Buffer.from(read(name).toString().replace('/* SUPPORT_KNOWLEDGE */ null',JSON.stringify(JSON.parse(read('findzia-support.json').toString('utf8'))))):read(name), ext=name.split('.').at(-1), file='assets/'+name.replace('.'+ext,'.'+hash(bytes).slice(0,16)+'.'+ext);
+  let bytes=read(name);
+  if(name==='findzia-support.js')bytes=Buffer.from(bytes.toString().replace('/* SUPPORT_KNOWLEDGE */ null',()=>JSON.stringify(JSON.parse(read('findzia-support.json').toString('utf8')))));
+  if(name==='findzia-i18n.js')bytes=Buffer.from(bytes.toString().replace('/* UI_TRANSLATIONS */ null',()=>JSON.stringify(uiLocales)));
+  const ext=name.split('.').at(-1), file='assets/'+name.replace('.'+ext,'.'+hash(bytes).slice(0,16)+'.'+ext);
   assets.set(name,emit('/'+file,file,bytes,ext,true));
 }
 const applePayFiles = {};
