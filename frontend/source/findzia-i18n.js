@@ -1,8 +1,8 @@
-/* FINDZIA_LANGUAGE_PAINT_FIX=156.7.88.1 */
-/* FINDZIA_I18N_RELEASE=156.7.88 — complete static UI translations; reconcile dynamic copy before paint. */
+/* FINDZIA_LANGUAGE_PAINT_FIX=156.7.89.1 */
+/* FINDZIA_I18N_RELEASE=156.7.89 — static UI translations; reconcile dynamic copy before paint. */
 (() => {
  'use strict';
- if(window.FindziaI18n?.version==='156.7.88')return;
+ if(window.FindziaI18n?.version==='156.7.89')return;
  const DATA=/* UI_TRANSLATIONS */ null;
  // Build embeds all pretranslated languages; switching never contacts a translator.
  const catalog=Object.fromEntries(DATA.languages.map(lang=>[lang,Object.fromEntries(DATA.keys.map((key,i)=>[key,DATA.values[lang][i]]))]));

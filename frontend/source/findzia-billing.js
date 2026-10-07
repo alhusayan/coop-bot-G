@@ -1,5 +1,6 @@
-/* FINDZIA_BILLING_RELEASE=156.7.87 */
-/* Findzia 156.7.87 — wallet warmup and bounded payment recovery; native Paddle surface. */
+/* FINDZIA_BILLING_RELEASE=156.7.89 */
+/* FINDZIA_LAST_CREDIT_COMPLETION=156.7.89 */
+/* Final-credit completion; existing wallet warmup and payment recovery. */
 (() => {
   'use strict';
   const searches = new Set(['/api/search','/api/search/stream','/api/search/image','/api/search/image/stream',
@@ -114,8 +115,12 @@
     hint.dataset.billingNotice='';hint.setAttribute('role','status');hint.setAttribute('aria-live','polite');hint.setAttribute('aria-atomic','true');
     const inputs=[root.querySelector('[id^="fz-query-"]'),root.querySelector('[data-dark-input]')].filter(Boolean);
     function paintNotice(){
-      const busy=active>0||bridge.context().busy||status?.reserved>0;
-      const code=noticeCode||(!busy&&status?.remaining===0?'credits_exhausted':'');
+      const context=bridge.context();
+      // The final credit authorizes the entire search. A zero balance is only
+      // a limit on the NEXT search; wait for this stream and its photos/cards.
+      const busy=active>0||context.busy||context.media_pending||status?.reserved>0;
+      const requested=noticeCode||(status?.remaining===0?'credits_exhausted':'');
+      const code=busy&&requested==='credits_exhausted'?'':requested;
       const home=root.dataset.homeState==='empty',limited=code==='credits_exhausted';
       const anchor=home?root.querySelector('[data-dark-form]'):limited?root.querySelector('[data-results-body]'):root.querySelector('[data-search-card]');
       const before=home||limited;
@@ -982,7 +987,8 @@
           if(charge&&limitCodes.has(code)&&generation===bridge.context().generation){blockedSearch={generation,previous};notice(code);}
           return response;
         }
-        if(!charge||!response.body)return response;
+        if(!charge)return response;
+        if(!response.body){active=Math.max(0,active-1);return response;}
         // One reader; pass through chunks immediately. No tee buffering or second search.
         const reader=response.body.getReader();let finished=false;
         const finish=()=>{if(finished)return;finished=true;options.signal?.removeEventListener('abort',finish);active=Math.max(0,active-1);setTimeout(()=>refresh(true),100);};
@@ -1077,6 +1083,10 @@
     }});
     const obs=new MutationObserver(paint);obs.observe(root,{attributes:true,attributeFilter:['data-lang','data-theme','data-home-state']});
     root.addEventListener('fz:search-state',paintNotice);
+    // A stream can finish before product photos. Reconcile the notice during
+    // the card render and after media updates, once the pending work is clear.
+    root.addEventListener('fz:result-count',paintNotice);
+    root.addEventListener('fz:media-state',()=>requestAnimationFrame(paintNotice));
     window.addEventListener('pagehide',()=>{
       clearCompletedFeedback();clearTimeout(recoveryTimer);recoveryTimer=null;queuedPlan='';paymentFlow++;
       if(startingPayment){startingPayment=false;paymentBusy=false;}
