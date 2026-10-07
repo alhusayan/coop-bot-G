@@ -1,5 +1,5 @@
-/* FINDZIA_BILLING_RELEASE=156.7.83 */
-/* Findzia 156.7.83 — restored express checkout; native method/footer order and contained loading. */
+/* FINDZIA_BILLING_RELEASE=156.7.87 */
+/* Findzia 156.7.87 — wallet warmup and bounded payment recovery; native Paddle surface. */
 (() => {
   'use strict';
   const searches = new Set(['/api/search','/api/search/stream','/api/search/image','/api/search/image/stream',
@@ -626,9 +626,9 @@
       // inside our payment area; Paddle.Spinner.hide() can still remove it normally.
       for(const loader of document.querySelectorAll('body > .paddle-loader'))view.frame.append(loader);
     }
-    function checkoutHelp(text){
+    function checkoutHelp(text,checkPayment=false){
       const view=checkoutView;
-      if(!view||view.mode!=='inline'||view.paying)return;
+      if(!view||view.mode!=='inline'||view.closing||(view.paying&&!checkPayment))return;
       clearTimeout(view.timer);
       if(!view.revealed){
         // An incomplete provider frame is never presented as a payment form.
@@ -636,8 +636,19 @@
         paymentMessage=paymentCopy('error',tr('Checkout could not load. Please try again.','تعذّر فتح الدفع. حاول مجددًا.'));
         account.open('plans');return;
       }
+      // A stalled request is not proof of a declined payment. Keep the provider
+      // alive, and offer server verification rather than a second payment attempt.
+      view.recovery=checkPayment?'confirm':'reload';
+      view.fallbackLabel.textContent=checkPayment?tr('Check payment status','التحقق من حالة الدفع'):tr('Reload checkout','إعادة تحميل الدفع');
       view.status.hidden=false;view.status.style.removeProperty('visibility');view.status.textContent=text;
       view.fallback.hidden=false;view.fallback.disabled=false;view.dialog.dataset.checkoutState='delayed';
+    }
+    function watchWalletPayment(view,delay){
+      clearTimeout(view.timer);
+      view.timer=setTimeout(()=>{
+        if(checkoutView!==view||view.closing)return;
+        checkoutHelp(tr('Payment is taking longer than expected. Check its status before trying again.','الدفع أخذ وقت أطول من المتوقع. تحقق من حالته قبل المحاولة مرة ثانية.'),true);
+      },delay);
     }
     function revealWallet(view){
       if(checkoutView!==view||view.revealed||!view.loaded||!view.totalsReady||view.closing)return;
@@ -647,18 +658,25 @@
       view.revealed=true;startingPayment=false;
       view.frameObserver?.disconnect();view.resizeObserver?.disconnect();
       view.frame.removeEventListener('load',view.settle,true);
-      view.status.hidden=true;view.frame.inert=false;view.frame.setAttribute('aria-busy','false');
+      view.status.hidden=true;
       view.dialog.inert=false;view.dialog.removeAttribute('aria-hidden');
-      view.dialog.dataset.checkoutState='ready';view.fallback.disabled=false;
+      view.dialog.dataset.checkoutState='opening';
       // Keep this exact iframe and transaction: moving/reopening it can reset a wallet.
       view.dialog.showModal();window.FindziaModalScroll?.lock(view.dialog);account.close();
+      const enable=()=>{
+        if(checkoutView!==view||view.closing)return;
+        view.frame.inert=false;view.frame.setAttribute('aria-busy','false');
+        if(view.dialog.dataset.checkoutState==='opening')view.dialog.dataset.checkoutState='ready';
+        view.fallback.disabled=false;
+      };
       if(!window.matchMedia('(prefers-reduced-motion: reduce)').matches){
         view.animation=view.dialog.animate([
           {opacity:0,transform:'translateY(36px) scale(.955)'},
           {opacity:1,transform:'translateY(-2px) scale(1.003)',offset:.76},
           {opacity:1,transform:'translateY(0) scale(1)'}
         ],{duration:480,easing:'cubic-bezier(.2,.8,.25,1)'});
-      }
+        view.animation.finished.then(enable,()=>{});
+      }else enable();
       view.title.focus({preventScroll:true});
     }
     function settleWallet(view){
@@ -666,7 +684,13 @@
       const iframe=view.frame.querySelector('iframe');
       if(iframe&&iframe!==view.observedFrame){view.observedFrame=iframe;view.resizeObserver?.observe(iframe);}
       clearTimeout(view.revealTimer);
-      if(view.loaded&&view.totalsReady&&iframe)view.revealTimer=setTimeout(()=>revealWallet(view),180);
+      // checkout.loaded does not mean Apple Pay's asynchronous capability check
+      // has finished. A short grace period mitigates Paddle's early POPUP path;
+      // it is not a provider readiness signal or a guarantee against its fallback.
+      if(view.loaded&&view.totalsReady&&iframe){
+        const delay=Math.max(180,(view.interactiveAfter||0)-performance.now());
+        view.revealTimer=setTimeout(()=>revealWallet(view),delay);
+      }
     }
     function dismissWallet(view){
       if(checkoutView!==view||view.closing)return;
@@ -706,13 +730,18 @@
       if(p){summary.append(el('strong','',tf('{count} searches',{count:p.credits},'{count} عملية بحث')),el('span','',tr('One-time payment','دفعة واحدة')),currency);}
       const totals=el('div','fzb-checkout-totals');
       const status=el('p','fzb-wallet-status');status.hidden=true;status.setAttribute('role','status');status.setAttribute('aria-live','polite');
-      const fallback=button(tr('Reload checkout','إعادة تحميل الدفع'),()=>retryWallet(paddle,transactionId),'fzb-wallet-alternative fzb-card-method');
+      const fallback=button('',()=>{
+        if(checkoutView!==view||view.closing)return;
+        if(view.recovery==='confirm'){closeWallet();confirmPayment();}
+        else retryWallet(paddle,transactionId);
+      },'fzb-wallet-alternative fzb-card-method');
+      const fallbackLabel=el('span','',tr('Reload checkout','إعادة تحميل الدفع'));fallback.append(fallbackLabel);
       const cardIcon=el('span','fzb-card-icon');cardIcon.setAttribute('aria-hidden','true');fallback.prepend(cardIcon);
       fallback.hidden=true;fallback.disabled=true;frame.inert=true;frame.setAttribute('aria-busy','true');
       // Normal method buttons and legal footer all belong to Paddle. Only a
       // recovery action sits outside that frame, above it and hidden until needed.
       dialog.append(header,summary,totals,status,fallback,frame);document.body.append(dialog);
-      const view={mode:'inline',id:'',dialog,title,status,totals,currency,fallback,frame,loaded:false,revealed:false,totalsReady:false,paying:false,timer:null};checkoutView=view;
+      const view={mode:'inline',id:'',dialog,title,status,totals,currency,fallback,fallbackLabel,frame,loaded:false,revealed:false,totalsReady:false,paying:false,recovery:'reload',timer:null};checkoutView=view;
       view.settle=()=>settleWallet(view);
       view.loaderObserver=new MutationObserver(()=>containPaddleLoader(view));view.loaderObserver.observe(document.body,{childList:true});
       view.frameObserver=new MutationObserver(view.settle);view.frameObserver.observe(frame,{childList:true,subtree:true,attributes:true,attributeFilter:['style','height','width']});
@@ -788,9 +817,12 @@
       // A resumed transaction may use the same checkout ID. The ID is not a
       // permanent blacklist entry: bind it to the currently opened surface.
       if(e.name!=='checkout.loaded'&&view.id&&data.id&&view.id!==data.id)return;
-      if(e.name==='checkout.error'){
-        if(view.mode==='inline')checkoutHelp(tr('The payment form could not load. Try reloading checkout.','تعذّر تحميل نموذج الدفع. جرّب إعادة تحميله.'));
-        else if(!view.paying){closeWallet();paymentMessage=paymentCopy('error',tr('Checkout could not load. Try again in a regular Safari or Chrome tab.','تعذّر تحميل الدفع. جرّب مرة ثانية بتبويب عادي في Safari أو Chrome.'));account.open('checkout');}
+      // Paddle error events carry code/detail at the top level and may have no
+      // data or transaction_id. Handle them before the transaction-data guard.
+      if(e.name==='checkout.error'||e.name==='checkout.payment.error'){
+        if(view.paying){
+          checkoutHelp(tr('The payment service reported a problem. Check your payment status before trying again.','صار خطأ بخدمة الدفع. تحقق من حالة دفعتك قبل المحاولة مرة ثانية.'),true);
+        }else checkoutHelp(tr('The payment form could not load. Try reloading checkout.','تعذّر تحميل نموذج الدفع. جرّب إعادة تحميله.'));
         return;
       }
       if(data.transaction_id!==paymentTxn)return;
@@ -802,17 +834,29 @@
         return;
       }
       if(e.name==='checkout.loaded'){
+        if(!view.loaded)view.interactiveAfter=performance.now()+(window.ApplePaySession?2500:180);
         view.id=e.data.id||'';view.loaded=true;
         updateWalletTotals(e.data);
         if(view.mode==='inline')settleWallet(view);else clearTimeout(view.timer);
       }
       if(e.name==='checkout.updated')updateWalletTotals(e.data);
-      if(e.name==='checkout.payment.initiated'){
-        view.paying=true;clearTimeout(view.timer);if(view.fallback)view.fallback.disabled=true;
-        if(view.status)view.status.style.visibility='hidden';
+      if(e.name==='checkout.payment.selected'){
+        const method=data.payment?.method_details?.type;
+        if(method==='apple-pay'||method==='apple_pay'){
+          // Selecting Apple Pay can start a popup path without ever delivering
+          // payment.initiated. Bound that wait too, without declaring failure.
+          view.paying=true;view.fallback.hidden=true;view.fallback.disabled=true;
+          view.status.hidden=true;watchWalletPayment(view,45000);
+        }else if(method==='card'&&!view.submitted){
+          clearTimeout(view.timer);view.paying=false;
+        }
       }
-      if(e.name==='checkout.payment.failed'||e.name==='checkout.payment.error'){
-        view.paying=false;if(view.fallback)view.fallback.disabled=false;
+      if(e.name==='checkout.payment.initiated'){
+        view.paying=true;view.submitted=true;view.fallback.hidden=true;view.fallback.disabled=true;
+        view.status.hidden=true;watchWalletPayment(view,90000);
+      }
+      if(e.name==='checkout.payment.failed'){
+        view.paying=false;view.submitted=false;view.fallback.disabled=false;
         checkoutHelp(tr('Payment was not completed. Try another card or reload checkout.','ما اكتمل الدفع. جرّب بطاقة ثانية أو أعد تحميل الدفع.'));
       }
     });
