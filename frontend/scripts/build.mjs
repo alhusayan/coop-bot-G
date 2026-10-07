@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 
 const base = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const src = resolve(base, 'source'), dest = resolve(base, 'public');
-const version = '156.7.86', api = 'https://api.findzia.com';
+const version = '156.7.87', api = 'https://api.findzia.com';
 // Preserve the live section scope to avoid unnecessary DOM/storage changes.
 const section = 'template--19963721449543__findzia_home_h4wBLq';
 // Both original PSP files are shipped. Runtime selects one using Railway's
@@ -32,7 +32,7 @@ const packageVersion=JSON.parse(readFileSync(resolve(base,'package.json'),'utf8'
 if(packageVersion!==version)throw Error('Release mismatch: replace frontend/package.json and frontend/scripts/build.mjs together.');
 if(sourceReleases.boot!=='156.7.43')throw Error('Release mismatch: expected frontend/source/findzia-boot.js version 156.7.43.');
 for(const [key,file] of [['support','findzia-support.js'],['focus','findzia-focus.js'],['home','findzia-home.liquid'],['shell','findzia-shell.js'],['billing','findzia-billing.js'],['subscriptions','findzia-subscriptions.js'],['guide','findzia-filters.js'],['account','findzia-account.js'],['motion','findzia-motion.js'],['motionCSS','findzia-motion.css']]){
-  const expectedVersion=key==='home'?version:key==='billing'?'156.7.83':['account','motion','support','focus'].includes(key)?'156.7.62':key==='subscriptions'?'156.7.60':key==='motionCSS'?'156.7.53':key==='guide'?'156.7.48':'156.7.43';
+  const expectedVersion=key==='home'?'156.7.86':key==='billing'?version:['account','motion','support','focus'].includes(key)?'156.7.62':key==='subscriptions'?'156.7.60':key==='motionCSS'?'156.7.53':key==='guide'?'156.7.48':'156.7.43';
   if(sourceReleases[key]!==expectedVersion)throw Error('Release mismatch: replace frontend/source/'+file+' with version '+expectedVersion+'.');
 }
 const routes = {};
@@ -103,4 +103,3 @@ emit('/sitemap.xml','sitemap.xml','<?xml version="1.0" encoding="UTF-8"?><urlset
 emit('/healthz','health.json',JSON.stringify({ok:true,service:'findzia-frontend',version,sourceReleases}),'json');
 writeFileSync(resolve(dest,'release.json'),JSON.stringify({version,api,section,apple_pay_file_sha256:expected,apple_pay_files:applePayFiles,routes},null,2)+'\n');
 console.log(`Built Findzia ${version}: ${Object.keys(routes).length} routes, both original Apple Pay files verified.`);
-
