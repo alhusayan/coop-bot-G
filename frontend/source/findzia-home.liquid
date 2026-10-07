@@ -1,4 +1,4 @@
-{% comment %} FINDZIA_HOME_RELEASE=156.7.84 {% endcomment %}
+{% comment %} FINDZIA_HOME_RELEASE=156.7.86 {% endcomment %}
 {% comment %}Findzia 156.7.15 · progressive filters + conversational guide from 156.3.0 · combined 156.7.14 payments preserved{% endcomment %}
 
 
@@ -337,7 +337,7 @@ function br(e){return e&&e.provider_passthrough&&e.result_id?e.result_id:String(
 function kr(e){if("local"===e.market||"local"===e.market_scope)return n;var r=String(e.country||e.store_country||e.market_country||"").toUpperCase();return Lt(r)?r:"us"===e.market?"US":"china"===e.market?"CN":"";}
 function Sr(e,r){var t=kr(e),a=kr(r);if(t!==a){if(t===n)return-1;if(a===n)return 1;var i=de.indexOf(t),o=de.indexOf(a);return i!==o?(i<0?999:i)-(o<0?999:o):t.localeCompare(a);}
 return String(e.store||"").localeCompare(String(r.store||""),tr());}
-// 156.7.84: a missing SHEIN price is a store link, never a numeric quote.
+// 156.7.86: a missing SHEIN price is a store link, never a numeric quote.
 function fzSheinPriceLink(row){
  if(!row||_r(row)||row.hidden||row.in_stock===false||row.stock_status==='out_of_stock'||row.price_integrity_status==='pending')return false;
  if(['rejected','pending'].includes(row.photo_match_status)||fzAlternativePending(row))return false;
@@ -481,12 +481,19 @@ function fzRegisterMedia(state,row,token){
  }
  while(state.mediaAuth.size>48)state.mediaAuth.delete(state.mediaAuth.keys().next().value);
 }
+function fzVerifiedPictureURL(row){
+ if(typeof row?.audited_media_path!=='string'||!/^\/api\/media\/verified\/[A-Za-z0-9_-]{32}$/.test(row.audited_media_path)||!r)return '';
+ try{const base=new URL(r);if(!/^https?:$/.test(base.protocol)||base.username||base.password)return '';
+ return new URL(row.audited_media_path,base.origin).href;}catch(_){return '';}
+}
 function dt(row){
  const key=br(row);let state=q.get(key);
  if(!state){state={key,urls:[],failed:new Set(),winner:'',status:'idle',item:row,cancels:new Set(),node:null};q.set(key,state);}
  state.item=row;fzRegisterMedia(state,row,row.evaluation_token);
+ const verified=fzVerifiedPictureURL(row);
+ if(verified&&!state.urls.includes(verified))state.urls.unshift(verified);
  for(const url of lt(row))if(!state.urls.some(old=>ut(old)===ut(url)))state.urls.push(url);
- if(row.audited_image&&!state.winner){
+ if(row.audited_image&&!state.winner&&!verified){
   const preferred=fzMediaKey(row.audited_image);
   state.urls.sort((a,b)=>Number(fzMediaKey(b)===preferred)-Number(fzMediaKey(a)===preferred));
  }
@@ -655,6 +662,7 @@ async function fzLoadPicture(state){
    if(q.get(state.key)!==state||fzMediaClosed){finish(null);return;}
    const url=state.urls.find(u=>!state.failed.has(ut(u))&&!inflight.has(ut(u)));
    if(!url){if(!active)finish(null);return;}
+   const verified=url===fzVerifiedPictureURL(state.item);
    const key=ut(url),img=new Image();inflight.add(key);active++;let settled=false;
    const cancel=(ok,retry)=>{
     if(settled)return;settled=true;clearTimeout(timer);state.cancels.delete(cancel);attempts.delete(cancel);inflight.delete(key);active--;
@@ -666,13 +674,17 @@ async function fzLoadPicture(state){
     if(!ended){next();if(!active)finish(null);}
    };
    attempts.add(cancel);state.cancels.add(cancel);
-   const timer=setTimeout(()=>cancel(false,Date.now()+2000),Math.min(3200,Math.max(1,deadline-Date.now())));
+   const timer=setTimeout(()=>cancel(false,verified?0:Date.now()+2000),Math.min(verified?1000:3200,Math.max(1,deadline-Date.now())));
    img.decoding='async';img.referrerPolicy='no-referrer';img.loading='eager';
+   img.fetchPriority=verified&&(!fzCardMetric||!fzCardMetric.sixSent)?'high':'auto';
    img.onload=()=>{
     clearTimeout(timer);
     const check=async()=>{
      if(settled||ended||q.get(state.key)!==state)return;
      if(!fzPictureUsable(img)){cancel(false);return;}
+     // This endpoint serves the exact immutable bytes approved by the audit.
+     // Expired/evicted capabilities fail the image load and use normal fallbacks.
+     if(verified&&url===fzVerifiedPictureURL(state.item)){cancel(true);return;}
      // Do not spend a server check on images that never loaded in the browser.
      const verdict=await fzCheckProductPicture(state,url);
      if(verdict.kind==='cancelled'){finish(null);return;}
@@ -960,31 +972,33 @@ function fzCardMetricHeaders() {
   return fzCardMetric?.generation===B ? {'X-Findzia-Search-Trace':fzCardMetric.search_trace} : {};
 }
 function fzMeasureFirstCard() {
-  const trace = fzCardMetric;
-  if (!trace || trace.generation!==B || trace.sent || trace.pending || document.visibilityState!=='visible') return;
-  trace.pending = true;
-  // The count alone can precede DOM insertion. Wait through a paint opportunity
-  // and confirm a loaded product image inside a currently admitted card.
+  const trace=fzCardMetric;
+  if(!trace||trace.generation!==B||trace.sixSent||trace.pending||document.visibilityState!=='visible')return;
+  trace.pending=true;
   requestAnimationFrame(()=>requestAnimationFrame(()=>{
-    trace.pending = false;
-    if (trace!==fzCardMetric || trace.generation!==B || trace.sent || document.visibilityState!=='visible') return;
-    const rows=tt(), keys=new Set(rows.map(br));
-    const rendered=Array.from(b.querySelectorAll('[data-image-key]')).some(stage=>{
-      const img=stage.querySelector('img'), rect=stage.getBoundingClientRect();
-      return keys.has(stage.dataset.imageKey) && img?.complete && img.naturalWidth>=8 &&
-        rect.width>0 && rect.height>0 && !stage.closest('[hidden]');
-    });
-    if (!rendered) return;
-    trace.sent=true;
+    trace.pending=false;
+    if(trace!==fzCardMetric||trace.generation!==B||trace.sixSent||document.visibilityState!=='visible')return;
+    const rows=tt(),keys=new Set(rows.map(br)),rendered=new Set();
+    for(const stage of b.querySelectorAll('[data-image-key]')){
+      const img=stage.querySelector('img'),rect=stage.getBoundingClientRect(),key=stage.dataset.imageKey;
+      if(keys.has(key)&&img?.complete&&img.naturalWidth>=8&&rect.width>0&&rect.height>0&&!stage.closest('[hidden]'))rendered.add(key);
+    }
+    if(!rendered.size)return;
     const elapsed=Math.max(0,Math.round(performance.now()-trace.started));
-    if(fzPhotoTrace?.generation===B)fzPhotoTrace.firstVisibleMs=elapsed;
+    const first=!trace.sent,six=rendered.size>=6;
+    if(!first&&!six)return;
+    if(first){trace.sent=true;trace.firstElapsed=elapsed;if(fzPhotoTrace?.generation===B)fzPhotoTrace.firstVisibleMs=elapsed;}
+    if(six){trace.sixSent=true;if(fzPhotoTrace?.generation===B)fzPhotoTrace.firstSixMs=elapsed;}
     const metric={search_trace:trace.search_trace,kind:trace.kind,country:trace.country,
-      version:'156.7.84',first_card_ms:elapsed,visible_count:rows.length};
-    const controller=new AbortController(), timer=setTimeout(()=>controller.abort(),3000);
-    // Best effort, no auth/credit flow, no retries, no user query or product data.
-    fetch(r.replace(/\/$/,'')+'/api/search/metrics',{method:'POST',credentials:'omit',
-      headers:{'Content-Type':'application/json'},body:JSON.stringify(metric),signal:controller.signal})
-      .catch(()=>{}).finally(()=>clearTimeout(timer));
+      version:'156.7.86',first_card_ms:trace.firstElapsed,visible_count:rendered.size};
+    const send=body=>{
+      const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),3000);
+      fetch(r.replace(/\/$/,'')+'/api/search/metrics',{method:'POST',credentials:'omit',
+        headers:{'Content-Type':'application/json'},body:JSON.stringify(body),signal:controller.signal})
+        .catch(()=>{}).finally(()=>clearTimeout(timer));
+    };
+    if(first)send(metric);
+    if(six)send({...metric,first_six_ms:elapsed});
   }));
 }
 document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible')fzMeasureFirstCard();});
