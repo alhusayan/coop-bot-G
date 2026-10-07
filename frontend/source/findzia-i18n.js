@@ -1,4 +1,5 @@
-/* FINDZIA_I18N_RELEASE=156.7.88 — complete static UI translations in 16 languages. */
+/* FINDZIA_LANGUAGE_PAINT_FIX=156.7.88.1 */
+/* FINDZIA_I18N_RELEASE=156.7.88 — complete static UI translations; reconcile dynamic copy before paint. */
 (() => {
  'use strict';
  if(window.FindziaI18n?.version==='156.7.88')return;
@@ -52,7 +53,7 @@
   if(count){const label=sourceOf(count[2]);if(label){return count[1]+(catalog[lang]?.[label]||label)+count[3];}}
   return value;
  }
- function ignored(el){return !el||el.closest('script,style,textarea,input,code,pre,.fz-brand,[contenteditable="true"],[translate="no"],[data-no-i18n],[data-query-preview]');}
+ function ignored(el){return !el||el.closest('script,style,textarea,input,code,pre,.fz-brand,.fz-motion-word,[contenteditable="true"],[translate="no"],[data-no-i18n],[data-query-preview]');}
  function scan(scope,root){
   const lang=locale(root);
   if(scope.tagName==='DIALOG'){
@@ -63,18 +64,21 @@
   for(let node=walker.nextNode();node;node=walker.nextNode()){
    if(ignored(node.parentElement)||!node.data.trim())continue;
    const old=originals.get(node),value=node.data;
+   if(old?.lang===lang&&value===old.last)continue;
    const source=old&&value===old.last?old.source:value;
    const translated=translateValue(source,lang);
-   originals.set(node,{source,last:translated});
+   originals.set(node,{source,last:translated,lang});
    if(value!==translated)node.data=translated;
   }
   for(const el of [scope,...scope.querySelectorAll('[aria-label],[placeholder],[title]')]){
-   if(el.closest?.('iframe,script,style,.fz-brand,[contenteditable="true"],[translate="no"],[data-no-i18n],[data-query-preview]'))continue;
+   if(el.closest?.('iframe,script,style,.fz-brand,.fz-motion-word,[contenteditable="true"],[translate="no"],[data-no-i18n],[data-query-preview]'))continue;
    for(const name of ['aria-label','placeholder','title']){
     if(!el.hasAttribute(name))continue;
     let record=attributes.get(el);if(!record){record={};attributes.set(el,record);}
-    const value=el.getAttribute(name),old=record[name],source=old&&value===old.last?old.source:value;
-    const translated=translateValue(source,lang);record[name]={source,last:translated};
+    const value=el.getAttribute(name),old=record[name];
+    if(old?.lang===lang&&value===old.last)continue;
+    const source=old&&value===old.last?old.source:value;
+    const translated=translateValue(source,lang);record[name]={source,last:translated,lang};
     if(value!==translated)el.setAttribute(name,translated);
    }
   }
@@ -98,7 +102,8 @@
    if(trigger.title!==label)trigger.title=label;
   }
  }
- function schedule(){if(!scheduled){scheduled=true;requestAnimationFrame(refresh);}}
+ // Run after a DOM update in the same turn, before any animation frame is painted.
+ function schedule(){if(!scheduled){scheduled=true;queueMicrotask(refresh);}}
  function set(root,lang){
   lang=normalize(lang);
   if(root?.dataset.lang!==lang)root.dataset.lang=lang;
