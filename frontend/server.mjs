@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
+import { brotliCompressSync, gzipSync, constants as zlibConstants } from 'node:zlib';
 
 const base = resolve(dirname(fileURLToPath(import.meta.url)), 'public');
 const manifest = JSON.parse(readFileSync(resolve(base, 'release.json'), 'utf8'));
@@ -25,7 +26,12 @@ for (const [url, entry] of Object.entries(manifest.routes)) {
   if (!path.startsWith(base + '/')) throw Error('Invalid build manifest');
   const body = readFileSync(path), hash = createHash('sha256').update(body).digest('hex');
   if (hash !== entry.sha256) throw Error('Build integrity mismatch: ' + entry.file);
-  routes.set(url, {body, hash, type: types[entry.type], immutable: entry.immutable === true});
+  // Precompress the complete language bundle once, never on each visitor request.
+  const encoded = entry.type==='js' && entry.file.includes('findzia-i18n.') ? {
+    br: brotliCompressSync(body,{params:{[zlibConstants.BROTLI_PARAM_QUALITY]:5}}),
+    gzip: gzipSync(body),
+  } : null;
+  routes.set(url, {body, hash, encoded, type: types[entry.type], immutable: entry.immutable === true});
 }
 if (routes.get(association)?.hash !== manifest.apple_pay_file_sha256) throw Error('Verification file mismatch');
 
@@ -37,6 +43,17 @@ for (const provider of ['paddle','myfatoorah']) {
   const hash = createHash('sha256').update(body).digest('hex');
   if (hash !== entry.sha256) throw Error('Apple Pay file integrity mismatch: '+provider);
   applePayFiles.set(provider,{body,hash,type:types.txt,immutable:false});
+}
+
+function encodingFor(header) {
+  const accepted = new Map(String(header||'').toLowerCase().split(',').map(part=>{
+    const [name,...params]=part.trim().split(';');
+    const value=params.find(p=>p.trim().startsWith('q='));
+    const quality=value ? Number(value.trim().slice(2)) : 1;
+    return [name,Number.isFinite(quality) && quality>=0 && quality<=1 ? quality : 0];
+  }));
+  return ['br','gzip'].map(name=>({name,q:accepted.get(name)??accepted.get('*')??0}))
+    .filter(item=>item.q>0).sort((a,b)=>b.q-a.q)[0]?.name;
 }
 
 export function createServer(env=process.env) {
@@ -60,9 +77,13 @@ export function createServer(env=process.env) {
       res.writeHead(404, {...common, 'Content-Type':types.html, 'Cache-Control':'no-store', 'Content-Length':page.body.length});
       res.end(req.method === 'HEAD' ? undefined : page.body); return;
     }
-    const headers = {...common, 'Content-Type':entry.type, 'Content-Length':entry.body.length,
+    const encoding=entry.encoded && encodingFor(req.headers['accept-encoding']);
+    const body=encoding ? entry.encoded[encoding] : entry.body;
+    const headers = {...common, 'Content-Type':entry.type, 'Content-Length':body.length,
       'Cache-Control': path === association ? 'no-store' : entry.immutable ? 'public, max-age=31536000, immutable' : 'no-cache',
-      ETag:'"'+entry.hash+'"', 'X-Findzia-Build':manifest.version};
+      ETag:'"'+entry.hash+(encoding?'.'+encoding:'')+'"', 'X-Findzia-Build':manifest.version};
+    if(entry.encoded)headers.Vary='Accept-Encoding';
+    if(encoding)headers['Content-Encoding']=encoding;
     if (!['findzia.com','www.findzia.com'].includes((req.headers.host || '').toLowerCase().split(':')[0])) {
       headers['X-Robots-Tag'] = 'noindex, nofollow';
     }
@@ -70,7 +91,7 @@ export function createServer(env=process.env) {
     if (path !== association && req.headers['if-none-match'] === headers.ETag) {
       delete headers['Content-Length']; res.writeHead(304, headers); res.end(); return;
     }
-    res.writeHead(200, headers); res.end(req.method === 'HEAD' ? undefined : entry.body);
+    res.writeHead(200, headers); res.end(req.method === 'HEAD' ? undefined : body);
   });
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

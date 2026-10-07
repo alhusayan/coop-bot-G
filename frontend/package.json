@@ -1,6 +1,6 @@
 {
   "name": "findzia-standalone",
-  "version": "156.7.87",
+  "version": "156.7.88",
   "private": true,
   "type": "module",
   "engines": {
@@ -9,6 +9,7 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "start": "node server.mjs",
-    "test": "node --test tests/server.test.mjs tests/motion.test.cjs tests/launch.test.cjs tests/image-deadline.test.cjs"
+    "test": "node --test tests/server.test.mjs tests/motion.test.cjs tests/launch.test.cjs tests/image-deadline.test.cjs",
+    "test:locales": "node scripts/build.mjs && node --test tests/locales.test.mjs tests/locale-delivery.test.mjs"
   }
 }
