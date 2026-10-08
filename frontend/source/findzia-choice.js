@@ -1,4 +1,4 @@
-/* FINDZIA_CHOICE_RELEASE=157.0.3 — one real, signed-offer AI decision. */
+/* FINDZIA_CHOICE_RELEASE=157.0.4 — one real, signed-offer AI decision. */
 (() => {
   'use strict';
   const COPY = {
@@ -43,56 +43,91 @@
   const formatMoney=m=>{const p=parts(m);return p?p.major+(p.minor?'.'+p.minor:'')+' '+p.currency:'';};
   const currencyFor=c=>/^[A-Z]{3}$/.test(c.currency||'')?c.currency:({kw:'KWD',sa:'SAR',ae:'AED',qa:'QAR',bh:'BHD',om:'OMR',gb:'GBP',uk:'GBP',cn:'CNY',jp:'JPY',in:'INR',de:'EUR',fr:'EUR',es:'EUR',it:'EUR',pt:'EUR',us:'USD',ca:'CAD',au:'AUD'}[String(c.country||'').toLowerCase()]||'USD');
 
-  // Independent physical reels are a decorative searching state, not price quotes.
-  // Only land() assigns a price label, using the selected signed offer.
+  // Each digit is a split flap with its own clock and hinge, not a scrolling texture.
+  // Loading announces a search state. Only a signed offer can set the final price.
   class PriceReels {
-    constructor(node){this.node=node;this.animations=[];this.timer=0;this.spinning=false;this.cells=[];this.shape='';}
-    cancel(){clearTimeout(this.timer);this.animations.forEach(a=>a.cancel());this.animations=[];this.spinning=false;}
+    constructor(node){this.node=node;this.cells=[];this.shape='';this.spinning=false;this.epoch=0;this.canAnimate=true;}
+    cancel(){
+      this.epoch++;this.spinning=false;
+      for(const cell of this.cells){clearTimeout(cell.timer);cell.motions.forEach(a=>a.cancel());cell.motions=[];this.paint(cell,cell.next??cell.digit);}
+    }
     clear(){this.cancel();this.node.replaceChildren();this.cells=[];this.shape='';this.node.removeAttribute('aria-label');delete this.node.dataset.spinning;}
-    build(major,minor,currency,rolling){
+    paint(cell,digit){
+      cell.digit=digit;cell.next=null;cell.node.dataset.digit=String(digit);
+      for(const face of [cell.upper,cell.lower,cell.out,cell.into])face.firstElementChild.textContent=String(digit);
+      cell.out.hidden=true;cell.into.hidden=true;
+    }
+    build(major,minor,currency,rolling,positions=new Map()){
       this.node.replaceChildren();this.cells=[];
       const number=el('span','fz-one-number'),big=el('span','fz-one-major'),small=el('span','fz-one-fils');number.dir='ltr';number.setAttribute('aria-hidden','true');
       const add=(parent,char,place)=>{
         if(!/\d/.test(char)){parent.append(el('span','fz-one-punctuation',char));return;}
-        const cell=el('span','fz-one-reel'),track=el('span','fz-one-track');
-        for(let i=0;i<40;i++)track.append(el('span','fz-one-digit',String(i%10)));
-        const digit=Number(char);track.style.transform=`translateY(-${digit}em)`;cell.append(track);parent.append(cell);this.cells.push({cell,track,digit,place});
+        const node=el('span','fz-one-reel');node.dataset.place=place;
+        const face=(name)=>{const n=el('span','fz-one-face '+name);n.append(el('span','fz-one-glyph',char));node.append(n);return n;};
+        const cell={node,upper:face('fz-one-upper'),lower:face('fz-one-lower'),out:face('fz-one-flap-out'),into:face('fz-one-flap-in'),digit:Number(char),next:null,timer:0,motions:[]};
+        cell.place=place;cell.target=Number(char);cell.speed=132+(this.cells.length*37)%115;
+        this.paint(cell,positions.get(place)??cell.digit);parent.append(node);this.cells.push(cell);
       };
       let place=major.replace(/\D/g,'').length;
       for(const char of major)add(big,char,/\d/.test(char)?'major:'+ --place:'');number.append(big);
       if(minor){small.append(el('span','fz-one-punctuation','.'));let index=0;for(const char of minor)add(small,char,'minor:'+index++);number.append(small);}
-      // Long prices keep every digit inside the available width.
-      const units=major.replace(/\D/g,'').length*.62+(major.match(/,/g)||[]).length*.28+minor.length*.32+1.15;
-      number.style.fontSize=`clamp(22px,${Math.min(13,87/units)}vw,${Math.min(64,430/units)}px)`;
+      const units=major.replace(/\D/g,'').length*.64+(major.match(/,/g)||[]).length*.27+minor.length*.32+1.15;
+      number.style.fontSize=`clamp(22px,${Math.min(15,84/units)}vw,${Math.min(72,430/units)}px)`;
       this.node.append(number,el('span','fz-one-currency',currency));this.node.dataset.spinning=String(rolling);
+      this.canAnimate=typeof this.cells[0]?.out.animate==='function';
+    }
+    flip(cell,digit,duration,done){
+      const epoch=this.epoch;
+      cell.next=digit;
+      cell.upper.firstElementChild.textContent=String(digit);
+      cell.lower.firstElementChild.textContent=String(cell.digit);
+      cell.out.firstElementChild.textContent=String(cell.digit);
+      cell.into.firstElementChild.textContent=String(digit);
+      cell.out.hidden=false;cell.into.hidden=false;
+      cell.motions=[
+        cell.out.animate([{transform:'rotateX(0deg)',filter:'brightness(1)'},{transform:'rotateX(-90deg)',filter:'brightness(.35)'}],{duration:duration/2,easing:'cubic-bezier(.42,0,1,1)',fill:'both'}),
+        cell.into.animate([{transform:'rotateX(90deg)',filter:'brightness(.35)'},{transform:'rotateX(0deg)',filter:'brightness(1)'}],{duration:duration/2,delay:duration/2,easing:'cubic-bezier(0,0,.2,1)',fill:'both'})
+      ];
+      cell.timer=setTimeout(()=>{
+        if(epoch!==this.epoch)return;
+        this.paint(cell,digit);cell.motions.forEach(a=>a.cancel());cell.motions=[];done();
+      },duration);
     }
     spin(input={},label='Comparing prices'){
       const list=Array.isArray(input)?input:[input],money=list.find(parts),currency=money?.currency||input.currency||'KWD';
       const p=money?parts(money):{major:'000',minor:new Intl.NumberFormat('en-US',{style:'currency',currency}).formatToParts(0).find(p=>p.type==='fraction')?.value||'',currency};
       const major='0'.repeat(Math.max(3,p.major.replace(/\D/g,'').length)),shape=major.length+':'+p.minor.length+':'+currency;
       if(this.spinning&&shape===this.shape)return;
-      this.cancel();this.shape=shape;this.spinning=true;this.build(major,p.minor.replace(/\d/g,'0'),currency,true);this.node.setAttribute('aria-label',label);
-      if(reduced()){this.node.replaceChildren(el('span','fz-one-price-wait','···'),el('span','fz-one-currency',currency));return;}
+      const positions=new Map(this.cells.map(c=>[c.place,c.next??c.digit]));
+      this.cancel();this.shape=shape;this.spinning=true;this.build(major,p.minor.replace(/\d/g,'0'),currency,true,positions);this.node.setAttribute('aria-label',label);
+      if(reduced()||!this.canAnimate){this.node.replaceChildren(el('span','fz-one-price-wait','···'),el('span','fz-one-currency',currency));return;}
+      const epoch=this.epoch;
       this.cells.forEach((cell,i)=>{
-        const {track}=cell;
-        const start=(i*3+Math.floor(Math.random()*10))%10,duration=540+i*91+Math.floor(Math.random()*100);
-        cell.start=start;cell.duration=duration;
-        cell.motion=track.animate([{transform:`translateY(-${start}em)`},{transform:`translateY(-${start+10}em)`}],{duration,iterations:Infinity,easing:'linear'});
-        this.animations.push(cell.motion);
+        const next=()=>{if(epoch===this.epoch&&this.spinning)this.flip(cell,(cell.digit+1)%10,cell.speed,next);};
+        cell.timer=setTimeout(next,i*23);
       });
     }
     land(money,done=()=>{}){
       const p=parts(money);if(!p){this.clear();return;}
-      const positions=new Map(this.cells.map(cell=>[cell.place,cell.motion?
-        cell.start+((Number(cell.motion.currentTime)||0)%cell.duration)/cell.duration*10:cell.digit]));
-      this.cancel();this.shape='';this.build(p.major,p.minor,p.currency,false);this.node.setAttribute('aria-label',formatMoney(money));
-      if(reduced()){done();return;}
-      let finish=0;
-      this.cells.forEach(({track,digit,place},i)=>{
-        const start=positions.get(place)??(digit+3+i*2)%10,end=30+digit,duration=680+i*85+(i%3)*60;finish=Math.max(finish,duration);
-        this.animations.push(track.animate([{transform:`translateY(-${start}em)`},{transform:`translateY(-${end}em)`}],{duration,easing:'cubic-bezier(.12,.63,.19,1)',fill:'forwards'}));
+      const positions=new Map(this.cells.map(c=>[c.place,c.next??c.digit]));
+      this.cancel();this.shape='';this.build(p.major,p.minor,p.currency,false,positions);this.node.setAttribute('aria-label',formatMoney(money));
+      if(reduced()||!this.canAnimate){this.cells.forEach(c=>this.paint(c,c.target));done();return;}
+      const epoch=this.epoch;let remaining=this.cells.length;
+      this.node.dataset.spinning='true';
+      this.cells.forEach((cell,i)=>{
+        // Small independent steps decelerate into the exact target; no shared carry.
+        let steps=(cell.target-cell.digit+10)%10;
+        if(steps<3)steps+=10;
+        const total=660+(i*113)%410,weight=steps+.09*steps*(steps-1)/2;
+        let step=0;
+        const next=()=>{
+          if(epoch!==this.epoch)return;
+          if(step===steps){if(--remaining===0){this.node.dataset.spinning='false';done();}return;}
+          const digit=(cell.digit+1)%10;
+          const time=total*(1+step*.09)/weight;step++;this.flip(cell,digit,time,next);
+        };
+        cell.timer=setTimeout(next,i*29);
       });
-      this.timer=setTimeout(()=>{this.animations.forEach(a=>a.cancel());this.animations=[];done();},finish);
     }
   }
 
@@ -116,7 +151,8 @@
     const box=el('section','fz-one');box.hidden=true;box.setAttribute('aria-label','Findzia');body.before(box);
     const heading=el('h2','fz-one-heading'),stage=el('div','fz-one-stage'),aura=el('div','fz-one-aura'),image=el('img','fz-one-image'),scan=el('div','fz-one-scan');scan.setAttribute('aria-hidden','true');
     const placeholder=el('span','fz-one-image-placeholder','⌕');placeholder.setAttribute('aria-hidden','true');image.alt='';image.decoding='async';image.hidden=true;
-    const badge=el('span','fz-one-badge');stage.append(aura,placeholder,image,scan,badge);
+    const shade=el('div','fz-one-shade');shade.setAttribute('aria-hidden','true');
+    const badge=el('span','fz-one-badge');stage.append(aura,placeholder,image,shade,scan,heading,badge);
     const title=el('h3','fz-one-title'),specs=el('p','fz-one-specs'),price=el('div','fz-one-price');price.setAttribute('role','img');
     const merchant=el('div','fz-one-merchant'),store=el('p','fz-one-store'),shipping=el('p','fz-one-shipping');merchant.append(store,shipping);
     const question=el('div','fz-one-question'),open=el('a','fz-one-open');open.target='_blank';open.rel='noopener noreferrer';open.hidden=true;
@@ -131,7 +167,8 @@
     const dialogHead=el('div','fz-one-dialog-head'),dialogTitle=el('h2'),close=el('button','fz-one-icon','×');dialogTitle.id=panelId+'-title';close.type='button';dialogHead.append(dialogTitle,close);
     const reason=el('p','fz-one-reason'),offerList=el('div','fz-one-offers');dialog.append(dialogHead,reason,offerList);root.append(dialog);
     const live=el('p','fz-one-sr');live.setAttribute('role','status');live.setAttribute('aria-live','polite');
-    box.append(heading,stage,title,specs,price,merchant,question,open,retry,actions,logWrap,live);
+    const details=el('div','fz-one-details');details.append(title,specs,price,merchant,question,open,retry,logWrap);stage.append(details);
+    box.append(stage,actions,live);
     const reels=new PriceReels(price),log=new SearchLog(logLines);
     let generation=-1,requestId=0,controller=null,requestTimer=0,debounce=0,mediaTimer=0,retryTimer=0,doneAt=0;
     let selected=null,mode='best',answers=[],lastKey='',pending=false,disposed=false,celebrated=false,frozenSource='',autoRetries=0,dialogMode='results';
@@ -144,11 +181,12 @@
         const bounds=box.getBoundingClientRect(),picture=stage.getBoundingClientRect();
         const top=Math.max(headerHeight,bounds.top-(viewport?.offsetTop||0));
         const rest=Math.max(0,bounds.height-picture.height);
-        const imageHeight=Math.max(140,Math.min((window.innerWidth||390)>=900?470:360,Math.floor(height-top-rest-10)));
+        const imageHeight=Math.max(310,Math.min(820,Math.floor(height-top-rest-10)));
         box.style.setProperty('--one-image-height',imageHeight+'px');
-        stage.style.setProperty('--scan-travel',(imageHeight-4)+'px');
+        stage.style.setProperty('--scan-travel',Math.max(120,imageHeight*.66)+'px');
       }
     }
+
     function labels(){open.textContent=text('open');retry.textContent=text('retry');cheaper.textContent=text('cheaper');quality.textContent=text('quality');newSearch.textContent=text('newSearch');close.setAttribute('aria-label',text('close'));whyButton.setAttribute('aria-label',text('why'));whyButton.title=text('why');logCaption.textContent=text('log');}
     function cancel(){requestId++;controller?.abort();controller=null;clearTimeout(requestTimer);clearTimeout(retryTimer);pending=false;}
     function closeDialog(){dialog.close?.();logButton.setAttribute('aria-expanded','false');}
@@ -156,7 +194,7 @@
       cancel();clearTimeout(debounce);clearTimeout(mediaTimer);reels.clear();log.clear();selected=null;mode='best';answers=[];lastKey='';celebrated=false;doneAt=0;autoRetries=0;frozenSource='';
       box.hidden=true;box.dataset.state='pending';root.dataset.choiceActive='false';question.replaceChildren();image.hidden=true;image.removeAttribute('src');placeholder.hidden=false;closeDialog();
     }
-    function activate(){labels();box.hidden=false;root.dataset.choiceActive='true';badge.hidden=true;actions.hidden=true;open.hidden=true;retry.hidden=true;merchant.hidden=true;whyButton.hidden=true;question.replaceChildren();logWrap.hidden=false;fit();}
+    function activate(){labels();price.hidden=false;box.hidden=false;root.dataset.choiceActive='true';badge.hidden=true;actions.hidden=true;open.hidden=true;retry.hidden=true;merchant.hidden=true;whyButton.hidden=true;question.replaceChildren();logWrap.hidden=false;fit();}
     function setImage(source,alt){if(!source)return;image.src=source;image.alt=alt||'';image.hidden=false;placeholder.hidden=true;}
     function freezeImage(rows,c){
       if(frozenSource)return;
@@ -170,6 +208,7 @@
     }
     function pendingView(rows,c){
       activate();box.dataset.state='pending';heading.textContent=text('choosing');title.textContent='';specs.textContent='';store.textContent='';shipping.textContent='';
+      actions.hidden=false;cheaper.hidden=true;quality.hidden=true;
       freezeImage(rows,c);reels.spin(rows.length?rows.map(r=>r.money):{currency:currencyFor(c)},text('comparing'));
       fit();
     }
@@ -229,7 +268,7 @@
         if(disposed||id!==requestId||bridge.context().generation!==c.generation)return;
         autoRetries=0;
         if(value.status==='question'){
-          reels.clear();box.dataset.state='question';heading.textContent=text('clarify');title.textContent=value.question;logWrap.hidden=true;
+          reels.clear();box.dataset.state='question';price.hidden=true;heading.textContent=text('clarify');title.textContent=value.question;logWrap.hidden=true;
           for(const label of (value.choices||[]).slice(0,3)){const b=el('button','fz-one-answer',label);b.type='button';b.addEventListener('click',()=>{if(pending)return;answers=[String(label).slice(0,160)];lastKey='';selected=null;queue();});question.append(b);}return;
         }
         if(value.status!=='selected'){empty('noMatch');return;}
@@ -278,12 +317,12 @@
     root.addEventListener('fz:search-progress',progressEvent);
     root.addEventListener('fz:search-reset',resetEvent);
     const langObserver=new MutationObserver(()=>{cancel();selected=null;lastKey='';celebrated=false;autoRetries=0;log.clear();queue();});langObserver.observe(root,{attributes:true,attributeFilter:['data-lang']});
-    const sizeObserver=window.ResizeObserver?new ResizeObserver(fit):null;if(header)sizeObserver?.observe(header);
+    const sizeObserver=window.ResizeObserver?new ResizeObserver(fit):null;if(header)sizeObserver?.observe(header);sizeObserver?.observe(actions);
     window.addEventListener?.('resize',fit);window.visualViewport?.addEventListener('resize',fit);
     document.fonts?.ready?.then(()=>{if(!disposed)fit();});
     function destroy(){disposed=true;reset();langObserver.disconnect();sizeObserver?.disconnect();for(const name of ['fz:search-state','fz:choice-results'])root.removeEventListener(name,queue);root.removeEventListener('fz:search-progress',progressEvent);root.removeEventListener('fz:search-reset',resetEvent);window.removeEventListener?.('resize',fit);window.visualViewport?.removeEventListener('resize',fit);box.remove();dialog.remove();delete root.dataset.choiceMode;delete root.dataset.choiceActive;}
     document.addEventListener('shopify:section:unload',function unload(ev){if(ev.target?.contains(root)){destroy();document.removeEventListener('shopify:section:unload',unload);}});
-    root.fzOneChoice={update,destroy,release:'157.0.3'};labels();queue();
+    root.fzOneChoice={update,destroy,release:'157.0.4'};labels();queue();
   }
   window.FindziaChoice={mount,PriceReels,SearchLog,moneyParts:parts};
   const start=()=>document.querySelectorAll('.fz-home').forEach(mount);

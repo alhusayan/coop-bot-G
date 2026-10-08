@@ -50,14 +50,18 @@ test('independent reels start before any prices arrive and land on exact signed 
   reels.spin({currency:'KWD'},'Comparing prices');
   assert.equal(n.querySelectorAll('.fz-one-reel').length,6);
   assert.equal(n.getAttribute('aria-label'),'Comparing prices');
-  assert.equal(h.animations.length,6);
+  await h.tick(125);
+  assert.equal(h.animations.length,12);
   assert.ok(new Set(h.animations.map(a=>a.opts.duration)).size>3);
-  assert.ok(h.animations.every(a=>a.opts.iterations===Infinity));
-  const first=h.animations.slice();reels.spin({currency:'KWD'});assert.equal(h.animations.length,6);
+  assert.ok(h.animations.every(a=>a.frames.some(f=>f.transform.includes('rotateX('))));
+  const first=h.animations.slice();reels.spin({currency:'KWD'});assert.equal(h.animations.length,12);
   let done=0;reels.land({amount:8.125,currency:'KWD'},()=>done++);await h.tick(1600);
   assert.equal(done,1);assert.equal(n.getAttribute('aria-label'),'8.125 KWD');
   assert.ok(first.every(a=>a.cancelled));
-  assert.deepEqual(n.querySelectorAll('.fz-one-track').map(t=>t.style.transform),['translateY(-8em)','translateY(-1em)','translateY(-2em)','translateY(-5em)']);
+  assert.deepEqual(n.querySelectorAll('.fz-one-reel').map(t=>t.dataset.digit),['8','1','2','5']);
+  assert.equal(n.dataset.spinning,'false');
+  assert.ok(n.querySelectorAll('.fz-one-flap-out').every(t=>t.hidden));
+  assert.ok(n.querySelectorAll('.fz-one-flap-in').every(t=>t.hidden));
   reels.spin({currency:'JPY'});assert.equal(n.querySelectorAll('.fz-one-reel').length,3);reels.clear();
 });
 
@@ -179,7 +183,19 @@ test('phone viewport reserves measured content and header before sizing the phot
   const h=harness();h.state.busy=true;h.setRows([]);h.context.window.innerHeight=660;
   h.api.mount(h.root);await h.tick(100);
   const box=h.root.querySelector('.fz-one'),picture=h.root.querySelector('.fz-one-stage');
-  box.getBoundingClientRect=()=>({top:108,height:580});picture.getBoundingClientRect=()=>({height:300});
-  h.root.fzOneChoice.update();assert.equal(box.style['--one-image-height'],'262px');
-  h.context.window.innerHeight=540;h.root.fzOneChoice.update();assert.equal(box.style['--one-image-height'],'142px');h.root.fzOneChoice.destroy();
+  box.getBoundingClientRect=()=>({top:108,height:350});picture.getBoundingClientRect=()=>({height:300});
+  h.root.fzOneChoice.update();assert.equal(box.style['--one-image-height'],'492px');
+  h.context.window.innerHeight=540;h.root.fzOneChoice.update();assert.equal(box.style['--one-image-height'],'372px');h.root.fzOneChoice.destroy();
+});
+
+// Rapid currency/shape changes and reset must never leak old digit callbacks.
+test('a new final offer cancels the previous landing and retains all decimal places',async()=>{
+  const h=harness(),n=new h.Node(),reels=new h.api.PriceReels(n);let old=0,fresh=0;
+  reels.spin({currency:'USD'});await h.tick(250);
+  reels.land({amount:99999.99,currency:'USD'},()=>old++);await h.tick(120);
+  reels.land({amount:0.025,currency:'KWD'},()=>fresh++);await h.tick(1800);
+  assert.equal(old,0);assert.equal(fresh,1);
+  assert.equal(n.getAttribute('aria-label'),'0.025 KWD');
+  assert.deepEqual(n.querySelectorAll('.fz-one-reel').map(c=>c.dataset.digit),['0','0','2','5']);
+  reels.clear();assert.equal(h.timers.size,0);
 });
