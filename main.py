@@ -1,3 +1,4 @@
+# v128.5.42.92: stream the photo description first and start two bounded Serper lanes before Lens.
 # v128.5.42.64: preserve Noon/SHEIN catalog and indexed offer prices.
 # v128.5.42.63: audited-local retrieval completion and useful price-recovery priority.
 # v128.5.42.62: ready-offer audit priority and bounded local-ready completion tail.
@@ -401,7 +402,7 @@ from findzia_billing import CreditMiddleware, install_billing
 app.add_middleware(CreditMiddleware, owner=app)
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization', 'X-Findzia-Request-Id', 'X-Findzia-Search-Trace'], max_age=86400)
-BUILD_ID = 'v128.5.42.86-flow'
+BUILD_ID = 'v128.5.42.92-photo-description'
 _SOCIAL = None
 
 def _fz_social_row(row):
@@ -478,6 +479,7 @@ PHOTO_IDENTITY_LOCK = threading.Lock()
 PHOTO_IDENTITY_INFLIGHT = {}
 PHOTO_IDENTITY_FUTURES = {}
 PHOTO_IDENTITY_PREVIEWS = {}
+PHOTO_DESCRIPTION_SEARCH_ENABLED = os.environ.get('PHOTO_DESCRIPTION_SEARCH_ENABLED', 'true').lower() in ('1', 'true', 'yes')
 PHOTO_WHATSAPP_LATEST = {}
 PHOTO_UNDERSTANDING_ENABLED = os.environ.get('PHOTO_UNDERSTANDING_ENABLED', 'true').lower() in ('1', 'true', 'yes')
 PHOTO_IDENTITY_MODEL = os.environ.get('GEMINI_VISION_MODEL', GEMINI_FAST_MODEL)
@@ -3054,6 +3056,25 @@ def _photo_observation(value, limit=110):
     appearance_only = re.sub(r'(?i)\b(?:silver|gold)[ -]toned?\b|(?:ذهبي|فضي)\s*اللون', '', value)
     return '' if re.search(forbidden, appearance_only) else value
 
+def _photo_search_description(value):
+    """A visual retrieval hint, never a verified product identity or offer."""
+    if not isinstance(value, str) or len(value) > 180:
+        return ''
+    value = _photo_observation(value, 180)
+    if not value or re.search(r'(?i)https?://|www\.|\b(?:site|filetype|intitle|inurl)\s*:|[<>:{}\[\]"=]', value):
+        return ''
+    # Plain English words only: no query operators or model-written URLs.
+    value = re.sub(r"[^A-Za-z0-9' -]+", ' ', value)
+    value = re.sub(r'(?<!\w)-|-(?!\w)', ' ', value)
+    value = ' '.join(value.split())
+    words = value.split()
+    if not 2 <= len(words) <= 22 or not re.search(r'[A-Za-z]', value):
+        return ''
+    if value.lower() in ('unknown product', 'unknown item', 'unidentified product'):
+        return ''
+    return value
+
+
 def _photo_identity_validate(value):
     """Only literal, readable label facts can become named search constraints."""
     if not isinstance(value, dict):
@@ -3103,6 +3124,9 @@ def _photo_identity_validate(value):
             parts.append(text)
     profile['query'] = ' '.join(parts)[:240]
     profile['named'] = bool(profile.get('brand') or profile.get('model') or profile.get('product_name'))
+    description = _photo_search_description(value.get('search_description'))
+    if description:
+        profile['_search_description'] = description
     return profile if profile['query'] else {}
 
 def _photo_identity_public(profile, lang='en'):
@@ -3195,7 +3219,7 @@ def _photo_whatsapp_notice(future, phone, bot_id, lang, token):
 def _photo_identity_request(image_b64, mime_type):
     if not GEMINI_API_KEY:
         return {}
-    fields = ('visible_text', 'brand', 'product_name', 'model', 'variant', 'product_type')
+    fields = ('search_description', 'visible_text', 'brand', 'product_name', 'model', 'variant', 'product_type')
     pair = {'type': 'OBJECT', 'properties': {'en': {'type': 'STRING'}, 'ar': {'type': 'STRING'}}, 'required': ['en', 'ar']}
     schema = {'type': 'OBJECT', 'properties': {key: {'type': 'STRING'} for key in fields}, 'required': list(fields)}
     schema['properties'].update({
@@ -3207,10 +3231,14 @@ def _photo_identity_request(image_b64, mime_type):
             'kind': {'type': 'STRING', 'enum': ['price', 'material', 'quality', 'size', 'identifier']},
             'text': {'type': 'STRING'}}, 'required': ['kind', 'text']}}})
     schema['required'] = list(schema['properties'])
-    schema['propertyOrdering'] = ['product_type', 'type_ar', 'visible_text', 'brand_role',
+    schema['propertyOrdering'] = ['search_description', 'product_type', 'type_ar', 'visible_text', 'brand_role',
         'brand', 'product_name', 'model', 'variant', 'components', 'features', 'label_facts']
     system = ('Read ONLY the attached reference product photo. Ignore screen UI, people, background and retailer suggestions. '
-        'Return one JSON object with visible_text, brand, product_name, model, variant, product_type (all strings). '
+        'Return one JSON object. FIRST emit search_description: a short English shopping search phrase of 6-14 words '
+        'describing the visible product type and its most distinctive shape, colour, pattern or construction. '
+        'Do not include brand/model guesses, hidden materials, prices, authenticity claims, search operators or URLs. '
+        'Use an empty search_description if no physical product can be identified. This is a retrieval hint only. '
+        'Then emit product_type, type_ar, visible_text, brand_role, brand, product_name, model, variant, components, features, label_facts in schema order. '
         'Transcribe readable product label text verbatim into visible_text. brand, product_name, model and variant must be exact readable '
         'substrings of that text, not guesses or translations; otherwise use empty strings. Preserve named scent/flavour/edition '
         'and every model digit. product_name is the short commercial product name or line (one to four words), not the brand '
@@ -3244,12 +3272,20 @@ def _photo_identity_request(image_b64, mime_type):
         payload['generationConfig']['thinkingConfig'] = {'thinkingLevel': 'MINIMAL'}
     started = time.monotonic()
     key = _photo_identity_key(image_b64)
+    description_reported = False
     def on_text(raw):
+        nonlocal description_reported
         partial = _photo_partial_object(raw)
         # Prices/grades wait for a complete, normally finished response.
         partial.pop('label_facts', None)
         partial.setdefault('brand_role', 'unknown')
         preview = _photo_identity_validate(partial)
+        description = _photo_search_description(partial.get('search_description'))
+        if description:
+            preview['_search_description'] = description
+            if not description_reported:
+                description_reported = True
+                print(f'PHOTO DESCRIPTION READY elapsed_ms={int((time.monotonic()-started)*1000)}')
         if key and preview:
             with PHOTO_IDENTITY_LOCK:
                 PHOTO_IDENTITY_PREVIEWS[key] = preview
@@ -3608,6 +3644,23 @@ def _photo_market_discovery(reference_future, query_hint, deadline, progress_cal
         progress_callback=progress_callback, cancel_event=cancel_event)
 
 
+def _photo_description_request(query, market, kind, deadline, cancel_event, started):
+    """One bounded Serper request. Queue time consumes the same deadline."""
+    remaining = deadline - time.monotonic()
+    if remaining <= .05 or cancel_event.is_set():
+        return []
+    try:
+        market = dict(market, _collection_deadline=deadline)
+        rows = _local_discovery_request(query, market, kind, remaining, cancel_event) or []
+    except Exception as exc:
+        print(f'PHOTO DESCRIPTION RESULTS kind={kind} error={type(exc).__name__}')
+        return []
+    if cancel_event.is_set() or time.monotonic() > deadline:
+        return []
+    print(f'PHOTO DESCRIPTION RESULTS kind={kind} rows={len(rows)} elapsed_ms={int((time.monotonic()-started)*1000)}')
+    return rows
+
+
 LENS_READY_MIN_SECONDS = 8.0
 LENS_READY_GRACE_SECONDS = 1.0
 
@@ -3624,6 +3677,7 @@ def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=Fal
     independent_cancel = _IndependentCancel(cancel_event)
     _INDEPENDENT.share_budget(cancel_event, independent_cancel)
     independent_jobs = set()
+    description_jobs = set()
     try:
         user_country = current_market().get('country', DEFAULT_COUNTRY)
         def cancelled():
@@ -3727,6 +3781,40 @@ def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=Fal
             pending.add(us_future)
             local_rescue_started = True
             print('IMAGE LOCAL PRIMARY country=us identity_aware=True parallel_with_lens=True')
+        # Start from the first complete visual description in the EXISTING AI
+        # stream. No extra AI request, no wait for bilingual details or Lens.
+        description_enabled = (PHOTO_DESCRIPTION_SEARCH_ENABLED and USE_FAST_LENS_PIPELINE
+            and LOCAL_DISCOVERY_ENABLED and bool(SERPER_API_KEY) and not reference_context)
+        description_key = _photo_identity_key(image_b64) if description_enabled else ''
+        description_started = False
+
+        def _start_description_search():
+            nonlocal description_started
+            if (not description_enabled or description_started or independent_cancel.is_set()
+                    or time.monotonic() >= fast_deadline):
+                return
+            _refresh_reference()
+            with PHOTO_IDENTITY_LOCK:
+                preview = dict(PHOTO_IDENTITY_PREVIEWS.get(description_key) or {})
+            description = _photo_search_description(
+                reference.get('_search_description') or preview.get('_search_description'))
+            if not description and reference:
+                # Older cached identities remain useful without a paid reread.
+                description = _photo_search_description(_photo_discovery_query(reference, (), query_hint))
+            if not description:
+                return
+            description_started = True
+            deadline = min(completion_deadline, time.monotonic() + 6.0)
+            for kind in ('serper_search:en', 'serper_images:en'):
+                future = LOCAL_DISCOVERY_POOL.submit(_run_with_market, lens_market_snapshot,
+                    _photo_description_request, description, lens_market_snapshot, kind,
+                    deadline, independent_cancel, fast_started)
+                future_map[future] = ('description-' + kind, user_country, False)
+                description_jobs.add(future)
+                all_futures.add(future)
+                pending.add(future)
+            print(f'PHOTO DESCRIPTION SEARCH START country={user_country} calls_max=2 elapsed_ms={int((time.monotonic()-fast_started)*1000)}')
+
         enough_fast = False
         ready_deadline = None
         ready_completion = False
@@ -3800,8 +3888,10 @@ def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=Fal
                 independent_jobs.add(job)
                 pending.add(job)
         _start_independent_reverse()
+        _start_description_search()
 
         while pending and time.monotonic() < fast_deadline and not cancelled():
+            _start_description_search()
             _start_independent_reverse()
             with local_updates_lock:
                 batches = list(local_updates)
@@ -3811,7 +3901,10 @@ def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=Fal
             if batches:
                 _emit_progress_snapshot('native_discovery_batch', allow_foreign_first=True)
             remaining_fast = max(0.0, fast_deadline - time.monotonic())
-            just_done, pending = wait(pending, timeout=min(0.35, remaining_fast), return_when=FIRST_COMPLETED)
+            # Poll only while awaiting the description; provider futures wake
+            # the normal wait immediately once either Serper response arrives.
+            poll = .05 if description_enabled and not description_started else .35
+            just_done, pending = wait(pending, timeout=min(poll, remaining_fast), return_when=FIRST_COMPLETED)
             if not just_done:
                 _emit_progress_snapshot('reference_ready', allow_foreign_first=True)
                 _start_local_rescue_if_needed()
@@ -4098,7 +4191,7 @@ def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=Fal
         return {'aliases': [], 'matches': [], 'query': ''}
     finally:
         independent_cancel.set()
-        for job in independent_jobs:
+        for job in independent_jobs | description_jobs:
             job.cancel()
 
 def _meaningful_lens_tokens(text):
