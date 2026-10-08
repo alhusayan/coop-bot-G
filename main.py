@@ -402,7 +402,7 @@ from findzia_billing import CreditMiddleware, install_billing
 app.add_middleware(CreditMiddleware, owner=app)
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization', 'X-Findzia-Request-Id', 'X-Findzia-Search-Trace'], max_age=86400)
-BUILD_ID = 'v128.5.42.92-photo-description'
+BUILD_ID = 'v128.5.42.93-preview-audit'
 _SOCIAL = None
 
 def _fz_social_row(row):
@@ -479,6 +479,7 @@ PHOTO_IDENTITY_LOCK = threading.Lock()
 PHOTO_IDENTITY_INFLIGHT = {}
 PHOTO_IDENTITY_FUTURES = {}
 PHOTO_IDENTITY_PREVIEWS = {}
+PHOTO_PREVIEW_BEFORE_AUDIT_ENABLED = os.environ.get('PHOTO_PREVIEW_BEFORE_AUDIT_ENABLED', 'true').lower() in ('1', 'true', 'yes')
 PHOTO_DESCRIPTION_SEARCH_ENABLED = os.environ.get('PHOTO_DESCRIPTION_SEARCH_ENABLED', 'true').lower() in ('1', 'true', 'yes')
 PHOTO_WHATSAPP_LATEST = {}
 PHOTO_UNDERSTANDING_ENABLED = os.environ.get('PHOTO_UNDERSTANDING_ENABLED', 'true').lower() in ('1', 'true', 'yes')
@@ -2637,9 +2638,22 @@ def _web_requires_visual_admission(row):
         (origin == 'image' or (origin != 'text' and row.get('image_query_result'))))
 
 
+def _web_identity_preview_allowed(row):
+    """The photo stream may display a candidate while its audit is pending."""
+    return bool(PHOTO_PREVIEW_BEFORE_AUDIT_ENABLED
+        and (row.get('_preview_before_audit') or row.get('display_before_audit'))
+        and (row.get('search_origin') == 'image' or row.get('image_query_result'))
+        and not row.get('classification_final')
+        and row.get('identity_review_status') in ('pending', 'streaming')
+        and not row.get('hidden_reason')
+        and (not row.get('hidden') or row.get('alternative_visual_hidden'))
+        and row.get('photo_match_status') != 'rejected'
+        and row.get('alternative_visual_status') != 'rejected')
+
+
 def _web_alternative_visible(row):
-    """Description-search photos are private until a complete visual audit passes."""
-    return (not _web_requires_visual_admission(row) or
+    """Pending previews are display permission only, never a completed audit."""
+    return (_web_identity_preview_allowed(row) or not _web_requires_visual_admission(row) or
             (row.get('alternative_visual_status') == 'approved'
              and row.get('alternative_visual_policy') == '156.7.3'
              and row.get('alternative_visual_proof') == _web_alternative_fingerprint(row)))
@@ -29095,13 +29109,22 @@ def _web_identity_capture_key(row, query):
 def _web_identity_public_row(row):
     # Decoded image bytes and internal provider fields never belong on the wire.
     safe = {k: v for k, v in row.items() if not str(k).startswith('_')}
+    safe['display_before_audit'] = _web_identity_preview_allowed(row)
+    if safe['display_before_audit']:
+        safe.update(hidden=False, exact=False, is_exact=False, match='similar',
+            match_type='similar', result_section='similar', section='similar',
+            best_price_eligible=False, price_comparable=False,
+            match_percentage=None, identity_match_percentage=None, match_percentage_final=False)
     if not _web_alternative_visible(safe):
         safe['hidden'] = True
     return safe
 
 
 def _web_identity_stream_snapshot(rows, query, market, lang, completed, elapsed_ms, visual_review_required=True):
-    ordered = sorted((_web_identity_public_row(_web_apply_market_context(r, market)) for r in rows if not r.get("hidden") and _web_alternative_visible(r) and _market_offer_allowed(r, market) and not _fz_product_form_conflict(query, r.get('raw_title') or r.get('title'))), key=_web_identity_result_sort_key)
+    public = (_web_identity_public_row(_web_apply_market_context(r, market)) for r in rows)
+    ordered = sorted((r for r in public if not r.get('hidden') and _web_alternative_visible(r)
+        and _market_offer_allowed(r, market) and not _fz_product_form_conflict(query,
+            r.get('raw_title') or r.get('title'))), key=_web_identity_result_sort_key)
     exact = [r for r in ordered if r.get('match_type') == 'exact']
     similar = [r for r in ordered if r.get('match_type') != 'exact']
     local = [r for r in ordered if r.get('market_scope') == 'local']
@@ -29302,6 +29325,7 @@ async def _web_stream_image_identity_batches_core(image_b64, mime, caption, coun
         item = _web_fail_closed_visual_row(_web_apply_market_context(row, market), 'identity_review_pending')
         item['classification_final'] = False
         item['identity_review_status'] = 'pending' if enabled else 'unavailable'
+        item['_preview_before_audit'] = bool(enabled and PHOTO_PREVIEW_BEFORE_AUDIT_ENABLED)
         return item
 
     def schedule(batch, query, tokens):
@@ -29551,7 +29575,7 @@ async def _web_stream_image_identity_batches_core(image_b64, mime, caption, coun
                     if (token in completed_reviews or key not in outputs or key not in captures
                             or _web_identity_capture_key(captures[key], identity) != token):
                         continue
-                    item = _web_identity_public_row(outputs[key])
+                    item = dict(outputs[key])
                     if item.get('identity_match_percentage') is None:
                         continue
                     # A complete item's evidence is useful immediately. The
@@ -29560,7 +29584,9 @@ async def _web_stream_image_identity_batches_core(image_b64, mime, caption, coun
                     item.update(classification_final=False, match_percentage_final=False,
                                 identity_review_status='streaming', exact=False, is_exact=False,
                                 match='similar', section='similar', match_type='similar',
-                                result_section='similar', best_price_eligible=False, price_comparable=False)
+                                result_section='similar', best_price_eligible=False, price_comparable=False,
+                                _preview_before_audit=bool(PHOTO_PREVIEW_BEFORE_AUDIT_ENABLED and not text_search))
+                    item = _web_identity_public_row(item)
                     partial_reviews[token] = item
                     rows[key] = dict(item)
                     if first_match_ms is None:
@@ -34720,6 +34746,11 @@ def _web_client_card_metric(data):
         if type(value) is not int or not result['first_card_ms'] <= value <= 180000 or result['visible_count'] < 6:
             raise ValueError('invalid_metric')
         result['first_six_ms'] = value
+    if 'preview_count' in data:
+        value = data['preview_count']
+        if type(value) is not int or not 0 <= value <= result['visible_count']:
+            raise ValueError('invalid_metric')
+        result['preview_count'] = value
     result['measurement'] = 'client_after_render'
     return result
 
