@@ -1289,13 +1289,13 @@ function fzCancelSearchLaunch(){
  const launch=fzPendingLaunch;fzPendingLaunch=null;launch.cancelled=true;launch.controller.abort();
  delete e.dataset.searchLaunching;
 }
-// FINDZIA_ONE_RELEASE=157.0.6
+// FINDZIA_ONE_RELEASE=157.0.7
 // Expose reviewed offers to the one-result controller; prices remain source data.
 e.fzRefineBridge.choiceRows=function(){
  return U.filter(row=>{
   const photo=q.get(br(row)),money=_r(row);
-  return $t(row)&&!fzEarlyPhotoPreview(row)&&!row.price_estimated&&row.evaluation_token&&money&&money.kind==='exact'&&
-   photo?.winner&&photo.node?.complete&&photo.node.naturalWidth>=8&&!photo.previewPicture&&!photo.previewAuditPending;
+  return $t(row)&&!row.price_estimated&&row.evaluation_token&&money&&money.kind==='exact'&&
+   photo?.winner&&photo.node?.complete&&photo.node.naturalWidth>=8;
  }).map(row=>{
   const photo=q.get(br(row));
   let auth=photo.mediaAuth?.get(fzMediaKey(photo.winner));
@@ -1312,6 +1312,14 @@ e.fzRefineBridge.choiceRows=function(){
    store:row.store||'',image:photo.winner,vision_image:auth?.raw||'',media_token:auth?.token||'',
    money:{amount:_r(row).value,currency:_r(row).currency},key_specs:row.key_specs||[],match_type:row.match_type||''};
  });
+};
+// Retry retrieves a fresh result set instead of reselecting the same rejected IDs.
+e.fzRefineBridge.retryChoiceSearch=function(){
+ if(ee||Kt||fzPhotoEditChecking)return false;
+ if(W?.kind==='image'&&W.image_base64){fzRunPhotoEdit(W.photoUserExtra??W.extraSpecs??'');return true;}
+ const query=K||W?.query||g?.value||'';
+ if(!query)return false;
+ ea(query,{forceSpecific:true,freshText:true});return true;
 };
 // Stream real priced rows before image loading finishes; final selection still uses choiceRows.
 e.fzRefineBridge.choiceLogRows=function(){
@@ -2485,7 +2493,7 @@ html[data-fz-page-transition]::view-transition-new(root){animation:fz-page-in 28
 #findzia-home-{{ section.id }}[data-theme][data-choice-mode="one"] .fz-fixed-header [data-camera-composer] .fz-results-tools .fz-live-progress{display:none!important}
 </style>
 
-<style data-fz-one-compact="157.0.6">
+<style data-fz-one-compact="157.0.7">
 /* The trial alone has a compact search header once a search starts. */
 #findzia-home-{{ section.id }}[data-theme][data-choice-mode="one"][data-choice-active="true"] .fz-fixed-header{padding-top:0!important;padding-bottom:0!important}
 #findzia-home-{{ section.id }}[data-theme][data-choice-mode="one"][data-choice-active="true"] .fz-fixed-header-inner{padding:4px 12px 6px!important;max-width:980px!important;margin:auto!important}

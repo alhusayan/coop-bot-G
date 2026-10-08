@@ -195,11 +195,21 @@ class ChoiceTests(unittest.TestCase):
         p['offer_tokens']=[raw+'.'+hmac.new(SIGN['_REFINE_KEY'],raw.encode(),hashlib.sha256).hexdigest()]
         self.assertEqual(self.engine.prepare(p)[1],[])
 
-    def test_unreviewed_image_never_wins(self):
+    def test_pending_legacy_review_still_gets_direct_pixel_review(self):
         for update in ({'classification_final':False},{'identity_review_status':'unavailable'},
                        {'identity_review_status':'failed'},{'identity_review_status':'streaming'}):
             r=row();r.update(update)
-            self.assertEqual(self.pick([r],kind='image')['status'],'no_match')
+            self.s['_refine_ai'].side_effect=ai_response
+            self.assertEqual(self.pick([r],kind='image')['status'],'selected')
+            def reject(system,data,**kwargs):
+                self.assertTrue(kwargs.get('images'))
+                return dict(status='reviewed',items=[dict(id=c['id'],verdict='different',observation='Wrong product silhouette') for c in data['candidates']])
+            self.s['_refine_ai'].side_effect=reject
+            # Avoid reusing the positive verdict from the first half.
+            self.engine.visual_cache.clear()
+            context,candidates=self.engine.prepare(self.payload([r],kind='image'))
+            self.assertEqual(self.engine.choose(context,candidates)['status'],'no_match')
+            self.engine.visual_cache.clear()
 
     def test_reviewed_similar_candidate_can_be_chosen_without_exact_claim(self):
         r=row();r.update(match_type='similar',classification_reason='minor_colour_difference',

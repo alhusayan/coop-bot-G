@@ -1,9 +1,9 @@
-/* FINDZIA_CHOICE_RELEASE=157.0.6 — one real, signed-offer AI decision. */
+/* FINDZIA_CHOICE_RELEASE=157.0.7 — one real, signed-offer AI decision. */
 (() => {
   'use strict';
   const COPY = {
-    en:['Choosing for you…','Found it ✨','Findzia’s pick','Shipping at checkout','Shipping included','View offer','Why this one?','Try again','Couldn’t choose right now.','Add a detail or try another photo.','Cheaper','Higher quality','One quick question','New search','Less by','Offer details'],
-    ar:['أختار لك…','لقيناها لك ✨','اختيار Findzia','الشحن عند المتجر','الشحن مشمول','شوف العرض','ليش اخترته؟','حاول مجددًا','ما قدرت أحسم الحين.','أضف تفصيل أو جرّب صورة ثانية.','أرخص','جودة أعلى','سؤال سريع','بحث جديد','أقل بـ','تفاصيل العرض'],
+    en:['Choosing for you…','Found it ✨','Findzia’s pick','Shipping at checkout','Shipping included','View offer','Why this one?','Try again','Couldn’t choose right now.','No matching offer confirmed yet.','Cheaper','Higher quality','One quick question','New search','Less by','Offer details'],
+    ar:['أختار لك…','لقيناها لك ✨','اختيار Findzia','الشحن عند المتجر','الشحن مشمول','شوف العرض','ليش اخترته؟','حاول مجددًا','ما قدرت أحسم الحين.','ما تأكدنا من عرض مطابق للحين.','أرخص','جودة أعلى','سؤال سريع','بحث جديد','أقل بـ','تفاصيل العرض'],
     fr:['Je choisis pour vous…','Trouvé ✨','Choix Findzia','Livraison à vérifier','Livraison incluse','Voir l’offre','Pourquoi ce choix ?','Réessayer','Choix indisponible.','Précisez ou essayez une autre photo.','Moins cher','Meilleure qualité','Une question','Nouvelle recherche','Moins de','Détails'],
     de:['Ich wähle für dich…','Gefunden ✨','Findzia-Auswahl','Versand beim Händler','Versand enthalten','Angebot ansehen','Warum dieses?','Erneut versuchen','Auswahl nicht verfügbar.','Ergänze Details oder ein anderes Foto.','Günstiger','Höhere Qualität','Eine kurze Frage','Neue Suche','Weniger um','Angebotsdetails'],
     es:['Eligiendo para ti…','Encontrado ✨','Elección Findzia','Envío en la tienda','Envío incluido','Ver oferta','¿Por qué este?','Reintentar','No pude elegir ahora.','Añade detalles o prueba otra foto.','Más barato','Más calidad','Una pregunta','Nueva búsqueda','Menos por','Detalles'],
@@ -244,7 +244,7 @@
       fit();
     }
     function empty(key){
-      activate();box.dataset.state='empty';heading.textContent=text(key);reels.clear();title.textContent='';specs.textContent='';store.textContent='';shipping.textContent='';
+      activate();box.dataset.state='empty';box.dataset.emptyReason=key;heading.textContent=text(key);reels.clear();title.textContent='';specs.textContent='';store.textContent='';shipping.textContent='';
       retry.hidden=false;actions.hidden=false;cheaper.hidden=true;quality.hidden=true;whyButton.hidden=true;logWrap.hidden=true;live.textContent=heading.textContent;
     }
     function celebrate(){
@@ -379,7 +379,7 @@
 
     function preference(value){cancel();mode=value;selected=null;lastKey='';celebrated=false;autoRetries=0;earlyCalls=0;awaitingQuestion=false;queue();}
     cheaper.addEventListener('click',()=>preference('cheaper'));quality.addEventListener('click',()=>preference('quality'));
-    retry.addEventListener('click',()=>{lastKey='';autoRetries=0;earlyCalls=0;awaitingQuestion=false;queue();});newSearch.addEventListener('click',()=>bridge.newSearch());
+    retry.addEventListener('click',()=>{if(box.dataset.emptyReason==='noMatch'&&bridge.retryChoiceSearch?.())return;lastKey='';autoRetries=0;earlyCalls=0;awaitingQuestion=false;queue();});newSearch.addEventListener('click',()=>bridge.newSearch());
     logButton.addEventListener('click',()=>openDialog('results'));whyButton.addEventListener('click',()=>openDialog('reason'));close.addEventListener('click',closeDialog);
     dialog.addEventListener('close',()=>{logButton.setAttribute('aria-expanded','false');});
     dialog.addEventListener('click',event=>{if(event.target===dialog){const b=dialog.getBoundingClientRect();if(event.clientX<b.left||event.clientX>b.right||event.clientY<b.top||event.clientY>b.bottom)closeDialog();}});
@@ -406,7 +406,7 @@
     document.fonts?.ready?.then(()=>{if(!disposed)fit();});
     function destroy(){disposed=true;reset();langObserver.disconnect();sizeObserver?.disconnect();for(const name of ['fz:search-state','fz:choice-results'])root.removeEventListener(name,queue);root.removeEventListener('fz:search-progress',progressEvent);root.removeEventListener('fz:search-reset',resetEvent);window.removeEventListener?.('resize',fit);window.visualViewport?.removeEventListener('resize',fit);box.remove();dialog.remove();delete root.dataset.choiceMode;delete root.dataset.choiceActive;}
     document.addEventListener('shopify:section:unload',function unload(ev){if(ev.target?.contains(root)){destroy();document.removeEventListener('shopify:section:unload',unload);}});
-    root.fzOneChoice={update,destroy,release:'157.0.6'};labels();queue();
+    root.fzOneChoice={update,destroy,release:'157.0.7'};labels();queue();
   }
   window.FindziaChoice={mount,PriceReels,SearchLog,moneyParts:parts};
   const start=()=>document.querySelectorAll('.fz-home').forEach(mount);

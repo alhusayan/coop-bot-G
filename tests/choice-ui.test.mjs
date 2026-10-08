@@ -332,3 +332,15 @@ test('an early no-match waits for the full pool instead of flashing a failure',a
   assert.equal(calls,2);assert.equal(h.root.querySelector('.fz-one').dataset.state,'selected');
   h.root.fzOneChoice.destroy();
 });
+
+
+test('no-match retry starts fresh retrieval instead of repeating the same choice',async()=>{
+  const h=harness();let choices=0,searches=0;
+  h.context.window.FindziaBillingFetch=async()=>{choices++;return{ok:true,json:async()=>({ok:true,status:'no_match'})};};
+  h.root.fzRefineBridge.retryChoiceSearch=()=>{searches++;return true;};
+  h.api.mount(h.root);await h.tick(100);
+  assert.equal(h.root.querySelector('.fz-one').dataset.state,'empty');
+  h.root.querySelectorAll('.fz-one-open').find(n=>!n.hidden).dispatchEvent(new Event('click'));
+  await h.tick(100);
+  assert.equal(searches,1);assert.equal(choices,1);h.root.fzOneChoice.destroy();
+});

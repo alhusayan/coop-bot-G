@@ -15,7 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
-RELEASE = "157.0.6"
+RELEASE = "157.0.7"
 MAX_OFFERS = 48
 MAX_BODY = 10_000_000
 
@@ -163,11 +163,8 @@ class ChoiceEngine:
                     or row.get('photo_match_status') == 'rejected'
                     or row.get('alternative_visual_status') == 'rejected'):
                 continue
-            if kind == 'image':
-                if (row.get('classification_final') is not True
-                        or row.get('identity_review_status') not in ('completed', 'partial')
-                        or row.get('match_type') not in ('exact', 'similar')):
-                    continue
+            # Direct pixel review below is the authority; pending legacy review
+            # must not prevent a signed, priced candidate from being examined.
             evidence = self.s['_fz_listing_text'](row)[:2800]
             if kind == 'text' and self.s['_findzia_hard_product_mismatch'](query, evidence):
                 continue
@@ -321,7 +318,9 @@ class ChoiceEngine:
             candidates = self.visual_candidates(context, candidates)
         context = {k:v for k,v in context.items() if not k.startswith('_')}
         if not candidates:
-            return dict(ok=True, status='no_match', release=RELEASE)
+            reason = 'visual_mismatch' if evaluated_count else 'no_priced_offers'
+            print('CHOICE RESULT ' + json.dumps(dict(release=RELEASE, status='no_match', reason=reason, evaluated=evaluated_count)), flush=True)
+            return dict(ok=True, status='no_match', reason=reason, evaluated=evaluated_count, release=RELEASE)
         offers = []
         for c in candidates:
             row, money = c['row'], c['money']
