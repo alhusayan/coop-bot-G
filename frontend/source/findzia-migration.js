@@ -12,9 +12,10 @@
     }
     // Keep the original key so a DNS rollback does not discard the session.
   } catch (_) { /* Storage may be unavailable in private/restricted browsing. */ }
-  // The old section initializes in English. Re-apply the shopper's saved
-  // language through its own existing handler after deferred assets mount.
+  // Only older sections need saved-language replay. The current entry resolver
+  // distinguishes a Japan landing default from a deliberate language choice.
   document.addEventListener('DOMContentLoaded', () => {
+    if (window.FindziaLocale) return;
     const select = document.querySelector('[data-profile-language-select]');
     if (select && [...select.options].some(option => option.value === language)) {
       select.value = language;

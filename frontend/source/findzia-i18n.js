@@ -1,4 +1,5 @@
 /* FINDZIA_LANGUAGE_PAINT_FIX=156.7.89.1 */
+/* FINDZIA_JAPAN_ENTRY=1 */
 /* FINDZIA_I18N_RELEASE=156.7.89 — static UI translations; reconcile dynamic copy before paint. */
 (() => {
  'use strict';
@@ -11,6 +12,29 @@
  const templates=[];
  let scheduled=false;
  const normalize=lang=>{const code=String(lang||'en').toLowerCase().split(/[-_]/)[0];return supported.has(code)?code:'en';};
+ // Resolve before the section mounts, so the existing Japan ad opens in Japanese.
+ // Automatic per-market values are not explicit shopper language preferences.
+ const readLanguage=key=>{try{const value=localStorage.getItem(key);return supported.has(value)?value:'';}catch{return '';}};
+ const japanEntry=/^\/jp\/?$/.test(window.location?.pathname||'')||
+  (window.location?.search?new URLSearchParams(window.location.search).get('utm_campaign')?.toLowerCase()==='findzia_jp_search':false);
+ let chosenLanguage='';
+ window.FindziaLocale={
+  country:japanEntry?'JP':'',
+  resolve(country){
+   if(chosenLanguage)return chosenLanguage;
+   if(japanEntry)return readLanguage('findzia-language-choice-JP-v1')||'ja';
+   return readLanguage('findzia-lang')||(country==='JP'?'ja':readLanguage('findzia-lang-'+country)||'en');
+  },
+  choose(lang){
+   chosenLanguage=normalize(lang);
+   if(japanEntry)try{localStorage.setItem('findzia-language-choice-JP-v1',chosenLanguage);}catch{}
+  },
+  mount(root){
+   const lang=this.resolve(this.country);
+   root.dataset.lang=lang;root.dir=['ar','ur'].includes(lang)?'rtl':'ltr';
+   document.documentElement.lang=lang;document.documentElement.dir=root.dir;
+  }
+ };
  const main=()=>document.querySelector('.fz-home');
  const locale=root=>normalize(root?.dataset?.lang||main()?.dataset?.lang||document.documentElement.lang);
  const direction=lang=>['ar','ur'].includes(normalize(lang))?'rtl':'ltr';

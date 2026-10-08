@@ -28,6 +28,7 @@ sourceReleases.motion=read('findzia-motion.js').toString().match(/FINDZIA_MOTION
 sourceReleases.motionCSS=read('findzia-motion.css').toString().match(/FINDZIA_MOTION_CSS_RELEASE=([0-9.]+)/)?.[1];
 sourceReleases.support=read('findzia-support.js').toString().match(/FINDZIA_SUPPORT_RELEASE=([0-9.]+)/)?.[1];
 sourceReleases.i18n=read('findzia-i18n.js').toString().match(/FINDZIA_I18N_RELEASE=([0-9.]+)/)?.[1];
+sourceReleases.japanEntry=read('findzia-i18n.js').toString().match(/FINDZIA_JAPAN_ENTRY=([0-9.]+)/)?.[1];
 sourceReleases.choice=read('findzia-choice.js').toString().match(/FINDZIA_CHOICE_RELEASE=([0-9.]+)/)?.[1];
 if(sourceReleases.choice!=='157.0.7')throw Error('Findzia One release mismatch.');
 const uiLocales = packLocales(JSON.parse(read('findzia-locales.json').toString('utf8')));
@@ -111,6 +112,7 @@ routes[trialConfig.path].preview=true;
 routes[trialConfig.path+'/']=routes[trialConfig.path];
 // Keep known landing links working; unknown routes remain a real 404.
 routes['/index.html']=routes['/']; routes['/pages/findzia']=routes['/'];
+routes['/jp']=routes['/']; routes['/jp/']=routes['/'];
 const policies=[['terms-of-service','Terms of Service'],['privacy-policy','Privacy Policy'],['refund-policy','Refund Policy']];
 const nav=policies.map(([slug,title])=>`<a href="/policies/${slug}">${title}</a>`).join('');
 for (const [slug,title] of policies) {
