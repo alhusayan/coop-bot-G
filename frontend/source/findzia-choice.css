@@ -1,4 +1,4 @@
-/* FINDZIA_CHOICE_RELEASE=157.0.4 — scoped to the private trial. */
+/* FINDZIA_CHOICE_RELEASE=157.0.5 — scoped to the private trial. */
 .fz-home[data-choice-mode="one"][data-choice-active="true"] [data-results-body],
 .fz-home[data-choice-mode="one"][data-choice-active="true"] [data-results-title],
 .fz-home[data-choice-mode="one"][data-choice-active="true"] [data-filter-seg]{display:none!important}
@@ -76,3 +76,12 @@
 @media(max-width:370px){.fz-home[data-choice-mode="one"] .fz-one{padding-inline:7px;gap:4px}.fz-one-details{padding:16px 14px}.fz-one-small{padding-inline:5px;font-size:10px}.fz-one-title{font-size:18px!important}.fz-one-icon{min-width:40px}.fz-one-log-line{font-size:9px}.fz-one-price{height:64px;min-height:64px}}
 @media(max-height:620px){.fz-one-details{gap:5px;padding:12px 16px}.fz-one-price{height:55px;min-height:55px;margin:0}.fz-one-number{font-size:44px!important}.fz-one-title{font-size:18px!important}.fz-one-heading{top:12px}.fz-one-badge{top:13px}.fz-one-log-lines{height:105px}.fz-one-log-line{height:15px;min-height:15px;line-height:15px}.fz-one-open{min-height:44px;padding-block:8px}.fz-one-specs{display:none}}
 @media(prefers-reduced-motion:reduce){.fz-one *{animation:none!important;transition:none!important}.fz-one-spark{display:none}.fz-one[data-state="pending"] .fz-one-scan{top:35%;opacity:.6}.fz-one-log-line{animation:none!important}}
+/* Reverse the physical hinge when a live quote moves down in price. */
+.fz-one-reel[data-direction="up"] .fz-one-flap-out{top:auto;bottom:0;transform-origin:50% 0%;background:linear-gradient(#080b09,#0e120f)}
+.fz-one-reel[data-direction="up"] .fz-one-flap-out .fz-one-glyph{top:auto;bottom:0}
+.fz-one-reel[data-direction="up"] .fz-one-flap-in{bottom:auto;top:0;transform-origin:50% 100%;background:linear-gradient(#151a17,#111512)}
+.fz-one-reel[data-direction="up"] .fz-one-flap-in .fz-one-glyph{bottom:auto;top:0}
+.fz-one-price-source{font:10px/1.4 ui-monospace,SFMono-Regular,Consolas,monospace!important;color:#cce4d3!important;margin:0 0 1px!important;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;direction:ltr;unicode-bidi:plaintext;min-height:14px}
+.fz-one-log-line[data-active="true"]{background:#bce6ca12;border-radius:3px}.fz-one-log-line[data-active="true"] .fz-one-log-site{color:#e0fce9}
+.fz-one-price[data-quote="waiting"] .fz-one-price-wait{animation:fz-one-wait 1.3s ease-in-out infinite}
+@keyframes fz-one-wait{50%{opacity:.35;transform:translateY(-3px)}}

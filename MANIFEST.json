@@ -1,18 +1,18 @@
 {
-  "release": "157.0.4",
+  "release": "157.0.5",
   "base_git_tree": "95083b40f6e637a4e30c28ce31ccad4e329bd078",
   "trial_path": "/trial/one-55321448a0352f1ff18b",
-  "scope": "trial visual upgrade: large shaded image, bottom fade and independent 3D split-flap price digits",
+  "scope": "trial only: real streamed price flaps and early reviewed AI choice",
   "files": {
-    "INSTALL_TRIAL_AR.txt": "9b4a4643c5ff9739bf9602d6d7072abde91e8f2380f750594308e2230f4c94e6",
+    "INSTALL_TRIAL_AR.txt": "0a725fba46cdb9e7415d1d8e8ee8289a6bb30eeb65088525f9b5621431a56923",
     "findzia_choice.py": "f7e1694107ed1529e40c5645dbc3fdd32fc89705f3736c446a5b9ef6b8efda2c",
     "frontend/Dockerfile": "e7d6597953db216b6e940eeba89548dbcdb2e43096b1afd14a92d8f2bf0974a1",
-    "frontend/scripts/build.mjs": "7dc1b822925ca83e186b21047279f835597be304561e2f7b180483e3e0fd76af",
-    "frontend/source/findzia-choice.css": "b22de1a5ae36177f0d9a4468edbefecf1b0af53d599b8350a0c984098a44b056",
-    "frontend/source/findzia-choice.js": "c17b5f46aff708d3dc96438fabebb989961f9416fd29bb4ac4797f0f086b0b90",
-    "frontend/source/findzia-one.liquid": "4bc0709a7742b46824a3c3ef7d9126e3ae825f698a5323ce57096c3901ee3519",
-    "frontend/trial.json": "071fa85edd3050385d2ec29b69413feb4827de8d40e0ceeb9bc1a2a862c017fc",
-    "tests/choice-ui.test.mjs": "2b4f9529c56645094c25f08b2f91c0a607383615f11d363db32017665340019e",
+    "frontend/scripts/build.mjs": "5f4a3fcc583f5880b75297dd80091b9352dd11673b431861f930e6ff77ca3e2c",
+    "frontend/source/findzia-choice.css": "cd02d639c1b2bed5ce7262b5efc9033436c5c5d2b4c705f785a62a7405486f08",
+    "frontend/source/findzia-choice.js": "177b923cc1345bfaf3445c61d739d3055cb7db193737ec5575aa7b6eef585082",
+    "frontend/source/findzia-one.liquid": "dc1d8a9f042c7328dec7ead25118775827c82af86490fefe2fa371acc661a87a",
+    "frontend/trial.json": "5522b6134ae3a375275ca2261932e5d2462e19ba3b4ee1da36a6a37968f37021",
+    "tests/choice-ui.test.mjs": "27973472d25090547f5aa9a7415bfed5cea244b2fca00a77beb31f465da2341b",
     "tests/test_choice.py": "1f8153cd3dddd20a4d1db9a9544fb32dba6d2b99285fab851b201964e1051740",
     "tests/trial-page.test.mjs": "b42aa53bf51425e4cba69f11644fd731e14e443fae939adcfb22398ca25071bc"
   }

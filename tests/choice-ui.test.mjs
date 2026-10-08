@@ -43,31 +43,42 @@ function harness(){
   return {Node,root,context,state,row,response,animations,timers,tick,setRows:v=>rows=v,setReduced:v=>reduced=v,api:context.window.FindziaChoice};
 }
 
-test('independent reels start before any prices arrive and land on exact signed digits',async()=>{
-  const h=harness(),n=new h.Node(),reels=new h.api.PriceReels(n);
+test('streamed source prices are shown exactly, including independent flaps and final fils',async()=>{
+  const h=harness(),n=new h.Node(),seen=[],reels=new h.api.PriceReels(n,row=>seen.push(row?.money.amount));
   assert.equal(h.api.moneyParts({amount:12.345,currency:'KWD'}).minor,'345');
   assert.equal(h.api.moneyParts({amount:12,currency:'JPY'}).minor,'');
-  reels.spin({currency:'KWD'},'Comparing prices');
-  assert.equal(n.querySelectorAll('.fz-one-reel').length,6);
-  assert.equal(n.getAttribute('aria-label'),'Comparing prices');
-  await h.tick(125);
-  assert.equal(h.animations.length,12);
-  assert.ok(new Set(h.animations.map(a=>a.opts.duration)).size>3);
+  reels.spin([],'Searching');assert.equal(n.querySelectorAll('.fz-one-reel').length,0);
+  assert.equal(n.querySelector('.fz-one-price-wait').textContent,'—');
+  reels.spin([{...h.row,money:{amount:4.99,currency:'KWD'}}],'Searching');await h.tick(320);
+  assert.deepEqual(n.querySelectorAll('.fz-one-reel').map(t=>t.dataset.digit),['4','9','9','0']);
+  assert.match(n.getAttribute('aria-label'),/4.990 KWD/);
+  assert.deepEqual(seen.filter(Boolean),[4.99]);
+  assert.ok(new Set(h.animations.map(a=>a.opts.duration)).size>2);
   assert.ok(h.animations.every(a=>a.frames.some(f=>f.transform.includes('rotateX('))));
-  const first=h.animations.slice();reels.spin({currency:'KWD'});assert.equal(h.animations.length,12);
-  let done=0;reels.land({amount:8.125,currency:'KWD'},()=>done++);await h.tick(1600);
+  const first=h.animations.slice();let done=0;
+  reels.land({amount:8.125,currency:'KWD'},()=>done++);await h.tick(500);
   assert.equal(done,1);assert.equal(n.getAttribute('aria-label'),'8.125 KWD');
   assert.ok(first.every(a=>a.cancelled));
   assert.deepEqual(n.querySelectorAll('.fz-one-reel').map(t=>t.dataset.digit),['8','1','2','5']);
-  assert.equal(n.dataset.spinning,'false');
-  assert.ok(n.querySelectorAll('.fz-one-flap-out').every(t=>t.hidden));
-  assert.ok(n.querySelectorAll('.fz-one-flap-in').every(t=>t.hidden));
-  reels.spin({currency:'JPY'});assert.equal(n.querySelectorAll('.fz-one-reel').length,3);reels.clear();
+  assert.equal(n.dataset.spinning,'false');assert.equal(n.dataset.quote,'final');
+  assert.equal(h.timers.size,0);reels.clear();
 });
 
-test('reel loading state never announces an invented offer price',async()=>{
-  const h=harness(),n=new h.Node(),reels=new h.api.PriceReels(n);reels.spin(h.row.money,'Searching');
-  await h.tick(2200);assert.equal(n.getAttribute('aria-label'),'Searching');assert.equal(n.dataset.spinning,'true');reels.clear();
+test('idle movement stays close to the real quote, moves both ways, and yields to a new quote',async()=>{
+  const h=harness(),n=new h.Node(),reels=new h.api.PriceReels(n);const real={...h.row,money:{amount:4.99,currency:'KWD'}};
+  reels.spin([real],'Comparing');await h.tick(280);
+  let above=false,below=false;
+  for(let i=0;i<24;i++){
+    await h.tick(100);const value=reels.currentMoney.amount;
+    assert.ok(Math.abs(value-4.99)<.04,value);above||=value>4.99;below||=value<4.99;
+    if(n.dataset.quote==='between'&&n.dataset.spinning==='false')assert.equal(n.getAttribute('aria-label'),'Comparing');
+  }
+  assert.ok(above&&below);
+  const next={...h.row,url:'https://store.example/new',money:{amount:36.64,currency:'KWD'}};
+  reels.spin([real,next],'Comparing');await h.tick(800);
+  assert.equal(reels.activeOffer.money.amount,36.64);
+  assert.ok(Math.abs(reels.currentMoney.amount-36.64)<.3);
+  reels.clear();assert.equal(h.timers.size,0);
 });
 
 test('reduced motion settles immediately; cancelling suppresses celebration',async()=>{
@@ -156,6 +167,7 @@ test('persistent failure has a bounded retry and a recoverable results picker',a
   const h=harness();let calls=0;h.context.window.FindziaBillingFetch=async()=>{calls++;return{ok:false,status:503,json:async()=>({ok:false})};};
   h.api.mount(h.root);await h.tick(100);await h.tick(700);await h.tick(3000);
   assert.equal(calls,2);assert.equal(h.root.querySelector('.fz-one').dataset.state,'empty');
+  h.root.fzOneChoice.update();assert.equal(h.root.querySelector('.fz-one').dataset.state,'empty');
   h.root.querySelectorAll('.fz-one-icon')[1].dispatchEvent(new Event('click'));
   // The icon opens current offers; selecting one is explicitly a user selection.
   assert.equal(h.root.querySelector('.fz-one-dialog').open,true);
@@ -198,4 +210,88 @@ test('a new final offer cancels the previous landing and retains all decimal pla
   assert.equal(n.getAttribute('aria-label'),'0.025 KWD');
   assert.deepEqual(n.querySelectorAll('.fz-one-reel').map(c=>c.dataset.digit),['0','0','2','5']);
   reels.clear();assert.equal(h.timers.size,0);
+});
+
+
+test('the counter reads the same log offers before images are ready',async()=>{
+  const h=harness();h.state.busy=true;h.setRows([]);
+  const offer={...h.row,money:{amount:3,currency:'KWD'}};
+  h.root.fzRefineBridge.choiceLogRows=()=>[offer];
+  h.context.window.FindziaBillingFetch=()=>{throw Error('No reviewed candidates yet');};
+  h.api.mount(h.root);await h.tick(360);
+  assert.equal(h.root.querySelector('.fz-one-log-price').textContent,'3.000 KWD');
+  assert.equal(h.root.querySelector('.fz-one-price-source').textContent,'Store · 3.000 KWD');
+  assert.deepEqual(h.root.querySelectorAll('.fz-one-reel').map(n=>n.dataset.digit),['3','0','0','0']);
+  assert.equal(h.root.querySelector('.fz-one-log-line').dataset.active,'true');
+  h.root.fzOneChoice.destroy();
+});
+
+test('first ready offers start AI selection while retrieval is still busy',async()=>{
+  const h=harness();h.state.busy=true;h.state.media_pending=true;let calls=0;
+  h.context.window.FindziaBillingFetch=async()=>{calls++;return h.response();};
+  h.api.mount(h.root);await h.tick(200);assert.equal(calls,0);
+  await h.tick(180);assert.equal(calls,1);
+  assert.equal(h.root.querySelector('.fz-one-open').hidden,false);
+  assert.equal(h.root.querySelector('.fz-one-open').href,h.row.url);
+  assert.equal(h.root.querySelector('.fz-one-badge').textContent,'أفضل المتوفر حاليًا');
+  assert.equal(h.state.busy,true);h.root.fzOneChoice.destroy();
+});
+
+test('ready selection skips unrelated pending media without the old 4.5 second wait',async()=>{
+  const h=harness();h.state.media_pending=true;let calls=0;
+  h.context.window.FindziaBillingFetch=async()=>{calls++;return h.response();};
+  h.api.mount(h.root);await h.tick(100);assert.equal(calls,1);
+  assert.equal(h.root.querySelector('.fz-one-open').hidden,false);h.root.fzOneChoice.destroy();
+});
+
+test('later reviewed offers are considered without blanking the early usable result',async()=>{
+  const h=harness();h.state.busy=true;let calls=0,finish,usage=0;h.root.addEventListener('fz:usage',()=>usage++);
+  h.context.window.FindziaBillingFetch=async()=>{calls++;return h.response();};
+  h.api.mount(h.root);await h.tick(800);assert.equal(calls,1);
+  const newer={...h.row,url:'https://store.example/better',token:'signed-2',title:'Better camera',money:{amount:9.99,currency:'KWD'}};
+  h.setRows([h.row,newer]);h.root.fzOneChoice.update();await h.tick(100);assert.equal(calls,1);
+  h.state.busy=false;h.context.window.FindziaBillingFetch=()=>{calls++;return new Promise(r=>finish=r);};
+  h.root.fzOneChoice.update();await h.tick(0);assert.equal(calls,2);
+  assert.equal(h.root.querySelector('.fz-one-open').href,h.row.url);
+  assert.equal(h.root.querySelector('.fz-one-open').hidden,false);
+  finish(h.response(newer));await h.tick(600);
+  assert.equal(h.root.querySelector('.fz-one-open').href,newer.url);
+  assert.equal(h.root.querySelector('.fz-one-price').getAttribute('aria-label'),'9.990 KWD');
+  assert.equal(usage,1);
+  h.root.fzOneChoice.destroy();
+});
+
+test('manual selection remains selected after background search completion',async()=>{
+  const h=harness();h.state.busy=true;let calls=0;
+  h.context.window.FindziaBillingFetch=async()=>{calls++;return h.response();};
+  h.api.mount(h.root);await h.tick(800);
+  h.root.querySelectorAll('.fz-one-icon')[1].dispatchEvent(new Event('click'));
+  h.root.querySelector('.fz-one-offer-row').dispatchEvent(new Event('click'));
+  h.setRows([h.row,{...h.row,url:'https://store.example/other',token:'signed-2'}]);h.state.busy=false;h.root.fzOneChoice.update();await h.tick(600);
+  assert.equal(calls,1);assert.equal(h.root.querySelector('.fz-one-badge').textContent,'اختيارك');h.root.fzOneChoice.destroy();
+});
+
+test('removed or corrected quotes cannot reappear from the live-price queue',async()=>{
+  const h=harness(),n=new h.Node(),seen=[],reels=new h.api.PriceReels(n,row=>{if(row)seen.push(row.money.amount);});
+  const a={...h.row,money:{amount:3,currency:'KWD'}},b={...h.row,url:'https://store.example/b',money:{amount:9,currency:'KWD'}};
+  reels.spin([a,b]);await h.tick(280);
+  const corrected={...b,money:{amount:10,currency:'KWD'}};reels.spin([corrected]);await h.tick(500);
+  assert.equal(reels.activeOffer.money.amount,10);assert.ok(!seen.includes(9));
+  reels.land({amount:1200,currency:'JPY'});await h.tick(600);
+  assert.equal(n.getAttribute('aria-label'),'1,200 JPY');
+  assert.equal(n.querySelectorAll('.fz-one-fils').length,0);
+  assert.deepEqual(n.querySelectorAll('.fz-one-reel').map(c=>c.dataset.digit),['1','2','0','0']);
+  reels.clear();assert.equal(h.timers.size,0);
+});
+
+
+test('an early no-match waits for the full pool instead of flashing a failure',async()=>{
+  const h=harness();h.state.busy=true;let calls=0;
+  h.context.window.FindziaBillingFetch=async()=>{calls++;return {ok:true,json:async()=>({ok:true,status:'no_match'})};};
+  h.api.mount(h.root);await h.tick(500);assert.equal(calls,1);
+  assert.equal(h.root.querySelector('.fz-one').dataset.state,'pending');
+  h.state.busy=false;h.context.window.FindziaBillingFetch=async()=>{calls++;return h.response();};
+  h.root.fzOneChoice.update();await h.tick(500);
+  assert.equal(calls,2);assert.equal(h.root.querySelector('.fz-one').dataset.state,'selected');
+  h.root.fzOneChoice.destroy();
 });

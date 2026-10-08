@@ -1289,7 +1289,7 @@ function fzCancelSearchLaunch(){
  const launch=fzPendingLaunch;fzPendingLaunch=null;launch.cancelled=true;launch.controller.abort();
  delete e.dataset.searchLaunching;
 }
-// FINDZIA_ONE_RELEASE=157.0.4
+// FINDZIA_ONE_RELEASE=157.0.5
 // Expose reviewed offers to the one-result controller; prices remain source data.
 e.fzRefineBridge.choiceRows=function(){
  return U.filter(row=>{
@@ -2472,7 +2472,7 @@ html[data-fz-page-transition]::view-transition-new(root){animation:fz-page-in 28
 #findzia-home-{{ section.id }}[data-theme][data-choice-mode="one"] .fz-fixed-header [data-camera-composer] .fz-results-tools .fz-live-progress{display:none!important}
 </style>
 
-<style data-fz-one-compact="157.0.4">
+<style data-fz-one-compact="157.0.5">
 /* The trial alone has a compact search header once a search starts. */
 #findzia-home-{{ section.id }}[data-theme][data-choice-mode="one"][data-choice-active="true"] .fz-fixed-header{padding-top:0!important;padding-bottom:0!important}
 #findzia-home-{{ section.id }}[data-theme][data-choice-mode="one"][data-choice-active="true"] .fz-fixed-header-inner{padding:4px 12px 6px!important;max-width:980px!important;margin:auto!important}

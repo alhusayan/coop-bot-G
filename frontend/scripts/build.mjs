@@ -29,7 +29,7 @@ sourceReleases.motionCSS=read('findzia-motion.css').toString().match(/FINDZIA_MO
 sourceReleases.support=read('findzia-support.js').toString().match(/FINDZIA_SUPPORT_RELEASE=([0-9.]+)/)?.[1];
 sourceReleases.i18n=read('findzia-i18n.js').toString().match(/FINDZIA_I18N_RELEASE=([0-9.]+)/)?.[1];
 sourceReleases.choice=read('findzia-choice.js').toString().match(/FINDZIA_CHOICE_RELEASE=([0-9.]+)/)?.[1];
-if(sourceReleases.choice!=='157.0.4')throw Error('Findzia One release mismatch.');
+if(sourceReleases.choice!=='157.0.5')throw Error('Findzia One release mismatch.');
 const uiLocales = packLocales(JSON.parse(read('findzia-locales.json').toString('utf8')));
 if(uiLocales.version!==version || sourceReleases.i18n!==version)throw Error('UI translation release mismatch.');
 sourceReleases.focus=read('findzia-focus.js').toString().match(/FINDZIA_FOCUS_RELEASE=([0-9.]+)/)?.[1];
