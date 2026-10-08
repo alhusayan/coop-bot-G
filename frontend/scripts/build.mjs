@@ -28,6 +28,8 @@ sourceReleases.motion=read('findzia-motion.js').toString().match(/FINDZIA_MOTION
 sourceReleases.motionCSS=read('findzia-motion.css').toString().match(/FINDZIA_MOTION_CSS_RELEASE=([0-9.]+)/)?.[1];
 sourceReleases.support=read('findzia-support.js').toString().match(/FINDZIA_SUPPORT_RELEASE=([0-9.]+)/)?.[1];
 sourceReleases.i18n=read('findzia-i18n.js').toString().match(/FINDZIA_I18N_RELEASE=([0-9.]+)/)?.[1];
+sourceReleases.choice=read('findzia-choice.js').toString().match(/FINDZIA_CHOICE_RELEASE=([0-9.]+)/)?.[1];
+if(sourceReleases.choice!=='157.0.2')throw Error('Findzia One release mismatch.');
 const uiLocales = packLocales(JSON.parse(read('findzia-locales.json').toString('utf8')));
 if(uiLocales.version!==version || sourceReleases.i18n!==version)throw Error('UI translation release mismatch.');
 sourceReleases.focus=read('findzia-focus.js').toString().match(/FINDZIA_FOCUS_RELEASE=([0-9.]+)/)?.[1];
@@ -47,7 +49,7 @@ function emit(url, file, bytes, type, immutable=false) {
   routes[url] = {file,sha256:hash(bytes),type,immutable}; return url;
 }
 const assets = new Map();
-for (const name of ['findzia-ads.js','findzia-analytics.js','findzia-support.js','findzia-focus.js','findzia-account.js','findzia-subscriptions.js','findzia-billing.js','findzia-filters.js','findzia-i18n.js','findzia-shell.js','findzia-product-details.css','findzia-migration.js','findzia-standalone.css','findzia-motion.js','findzia-motion.css']) {
+for (const name of ['findzia-choice.js','findzia-choice.css','findzia-ads.js','findzia-analytics.js','findzia-support.js','findzia-focus.js','findzia-account.js','findzia-subscriptions.js','findzia-billing.js','findzia-filters.js','findzia-i18n.js','findzia-shell.js','findzia-product-details.css','findzia-migration.js','findzia-standalone.css','findzia-motion.js','findzia-motion.css']) {
   let bytes=read(name);
   if(name==='findzia-support.js')bytes=Buffer.from(bytes.toString().replace('/* SUPPORT_KNOWLEDGE */ null',()=>JSON.stringify(JSON.parse(read('findzia-support.json').toString('utf8')))));
   if(name==='findzia-i18n.js')bytes=Buffer.from(bytes.toString().replace('/* UI_TRANSLATIONS */ null',()=>JSON.stringify(uiLocales)));
@@ -93,6 +95,20 @@ function page(body,title,canonical,extraStyle='') {
 }
 // The wrapper IDs match the original scoped CSS; no Shopify runtime is loaded.
 emit('/','index.html',page(`<link rel="stylesheet" href="${assets.get('findzia-standalone.css')}"><script src="${assets.get('findzia-migration.js')}"></script><main id="MainContent"><div class="shopify-section section-findzia-home" id="shopify-section-${section}">${home}</div></main>`,'Findzia — Find your product instantly','/'),'html');
+// An unlisted trial uses a separate template; public home remains unchanged.
+const trialConfig=JSON.parse(readFileSync(resolve(base,'trial.json'),'utf8'));
+if(!/^\/trial\/one-[a-f0-9]{20}$/.test(trialConfig.path))throw Error('Invalid trial path');
+let trialHome=read('findzia-one.liquid').toString('utf8').replace(/{% comment %}[\s\S]*?{% endcomment %}/g,'').replace(/{% schema %}[\s\S]*?{% endschema %}/g,'');
+for(const [token,value] of values)trialHome=trialHome.split(token).join(value);
+trialHome=trialHome.replace(/{{ '([^']+)' \| asset_url }}/g,(_,name)=>{if(!assets.has(name))throw Error('Unknown trial asset '+name);return assets.get(name);});
+trialHome=trialHome.replace('class="fz-home"','class="fz-home" data-choice-preview="true"');
+if(!trialHome.includes('data-choice-preview="true"')||/\{[{%]/.test(trialHome))throw Error('Invalid trial template');
+let trialHTML=page(`<link rel="stylesheet" href="${assets.get('findzia-standalone.css')}"><script src="${assets.get('findzia-migration.js')}"></script><main id="MainContent"><div class="shopify-section section-findzia-home" id="shopify-section-${section}">${trialHome}</div></main>`,'Findzia — Test page','/');
+for(const name of ['findzia-ads.js','findzia-analytics.js'])trialHTML=trialHTML.replace(`<script src="${assets.get(name)}" defer></script>`,'');
+trialHTML=trialHTML.replace(/<link rel="canonical"[^>]*>/,'<meta name="robots" content="noindex, nofollow, noarchive"><meta name="referrer" content="no-referrer">');
+emit(trialConfig.path,'trial/one.html',trialHTML,'html');
+routes[trialConfig.path].preview=true;
+routes[trialConfig.path+'/']=routes[trialConfig.path];
 // Keep known landing links working; unknown routes remain a real 404.
 routes['/index.html']=routes['/']; routes['/pages/findzia']=routes['/'];
 const policies=[['terms-of-service','Terms of Service'],['privacy-policy','Privacy Policy'],['refund-policy','Refund Policy']];
@@ -105,7 +121,7 @@ for (const [slug,title] of policies) {
 }
 emit('/404.html','404.html',page('<main class="legal"><h1>Page not found</h1><p><a href="/">Back to Findzia</a></p></main>','Page not found — Findzia','/',legalCSS),'html');
 emit('/favicon.svg','favicon.svg','<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="15" fill="#20352a"/><text x="14" y="48" fill="#f7f7f3" font-family="Georgia,serif" font-size="49">F</text><circle cx="49" cy="16" r="4" fill="#ef9d57"/></svg>','svg');
-emit('/robots.txt','robots.txt','User-agent: *\nAllow: /\nDisallow: /healthz\nSitemap: https://findzia.com/sitemap.xml\n','txt');
+emit('/robots.txt','robots.txt','User-agent: *\nAllow: /\nDisallow: /healthz\nDisallow: /trial/\nSitemap: https://findzia.com/sitemap.xml\n','txt');
 emit('/sitemap.xml','sitemap.xml','<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'+['/',...policies.map(([s])=>'/policies/'+s)].map(p=>'<url><loc>https://findzia.com'+p+'</loc></url>').join('')+'</urlset>','xml');
 emit('/healthz','health.json',JSON.stringify({ok:true,service:'findzia-frontend',version,sourceReleases}),'json');
 writeFileSync(resolve(dest,'release.json'),JSON.stringify({version,api,section,apple_pay_file_sha256:expected,apple_pay_files:applePayFiles,routes},null,2)+'\n');
