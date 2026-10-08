@@ -516,7 +516,7 @@ function fzResetMediaChecks(){
  fzMediaCheckControllers.forEach(ctl=>ctl.abort());fzMediaCheckControllers.clear();
  fzCheckQueue.splice(0).forEach(job=>job.resolve({kind:'cancelled'}));fzMediaChecks.clear();
 }
-function fzCheckProductPicture(state,url){
+function fzCheckProductPicture(state,url,opening=false){
  if(!state.mediaAuth)fzRegisterMedia(state,state.item,state.item.evaluation_token);
  const auth=state.mediaAuth?.get(fzMediaKey(url));
  if(!auth)return Promise.resolve({kind:'invalid'});
@@ -526,7 +526,7 @@ function fzCheckProductPicture(state,url){
  fzMediaVerdicts.delete(raw);
  const known=fzMediaChecks.get(key);if(known)return known;
  const epoch=fzCheckEpoch;
- const promise=new Promise(resolve=>fzCheckQueue.push({raw,token,epoch,resolve,state,ready:Date.now()+120}));
+ const promise=new Promise(resolve=>fzCheckQueue.push({raw,token,epoch,resolve,state,opening,ready:Date.now()+120}));
  fzMediaChecks.set(key,promise);
  promise.finally(()=>{if(fzMediaChecks.get(key)===promise)fzMediaChecks.delete(key);});
  fzCheckPump();return promise;
@@ -544,7 +544,9 @@ function fzCheckPump(){
  if(!jobs.length){fzCheckPump();return;}
  jobs.forEach(()=>fzCheckAdmissions.push(Date.now()));
  const batch=fzBatchChecks&&jobs.length>1;
- fzCheckActive++;fzCheckNext=Date.now()+jobs.length*600;
+ // A bounded opening burst, with the same concurrency and rolling quota.
+ // Later cards retain normal pacing; 429/503 backoff remains authoritative.
+ fzCheckActive++;fzCheckNext=Date.now()+(jobs.every(job=>job.opening)?120:jobs.length*600);
  const ctl=new AbortController();fzMediaCheckControllers.add(ctl);
  const timeout=setTimeout(()=>ctl.abort(),10500);
  function finish(job,result){
@@ -577,7 +579,7 @@ function fzCheckPump(){
     const value=batch?(matches.length===1?matches[0]:null):data;
     const status=Number(value?.status)||response.status;
     let result;
-    if(response.ok&&status===200&&value?.ok===true&&value.usable===true)result={kind:'product'};
+    if(response.ok&&status===200&&value?.ok===true&&value.usable===true)result={kind:'product',verifiedPath:value.verified_path};
     else if(response.ok&&status===200&&value?.ok===true&&['logo','text_only','placeholder'].includes(value.decision))result={kind:'rejected'};
     else if(status===400||status===403)result={kind:'invalid'};
     else{
@@ -591,7 +593,9 @@ function fzCheckPump(){
  fzCheckPump();
 }
 var fzPictureJobs=new Set();
+// FINDZIA_MEDIA_RELEASE=156.7.90: bounded opening checks and audited-byte reuse.
 var fzPictureQueue=[],fzPictureActive=0,fzMediaRecoveryQueue=[],fzMediaRecoveryActive=0;
+var fzOpeningPictures=0;
 var fzMediaRecoveryUsed=0,fzMediaCooldownUntil=0,fzMediaClosed=false,fzMediaDeadline=0,fzMediaTimer=null;
 var fzMediaHoldUntil=0,fzMediaSessionUntil=Date.now()+120000;
 function fzKeepMediaOpen(until){
@@ -614,7 +618,7 @@ function fzCloseMediaWindow(){
 function ft(preserveReady) {
   fzResetMediaChecks();
   const states=Array.from(q.values());
-  q.clear();fzPictureQueue.length=0;fzMediaRecoveryQueue.length=0;
+  q.clear();fzPictureQueue.length=0;fzMediaRecoveryQueue.length=0;fzOpeningPictures=0;
   clearTimeout(fzMediaTimer);fzMediaTimer=null;fzMediaDeadline=0;fzMediaClosed=false;fzMediaRecoveryUsed=0;fzMediaHoldUntil=0;fzMediaSessionUntil=Date.now()+120000;
   // Keep painted images stable, but give the next request its own media budget.
   // New state objects prevent late callbacks from the previous request winning.
@@ -638,6 +642,11 @@ function fzPicturePump() {
     const index=fzPictureQueue.findIndex(state=>$t(state.item)||speculative<2);
     if(index<0)break;
     const state=fzPictureQueue.splice(index,1)[0];
+    // Complete offers keep priority; the existing two speculative slots may
+    // also overlap media inspection with an outstanding price lookup.
+    if(!state.openingAssigned&&fzOpeningPictures<6&&!fzVerifiedPictureURL(state.item)){
+      state.openingAssigned=true;state.openingPicture=true;fzOpeningPictures++;
+    }
     fzPictureActive++;fzPictureJobs.add(state);state.status='loading';
     fzLoadPicture(state).finally(()=>{fzPictureActive--;fzPictureJobs.delete(state);fzPicturePump();});
   }
@@ -663,7 +672,7 @@ async function fzLoadPicture(state){
    if(q.get(state.key)!==state||fzMediaClosed){finish(null);return;}
    const url=state.urls.find(u=>!state.failed.has(ut(u))&&!inflight.has(ut(u)));
    if(!url){if(!active)finish(null);return;}
-   const verified=url===fzVerifiedPictureURL(state.item);
+   const verified=url===fzVerifiedPictureURL(state.item)||state.verifiedUrls?.has(url);
    const key=ut(url),img=new Image();inflight.add(key);active++;let settled=false;
    const cancel=(ok,retry)=>{
     if(settled)return;settled=true;clearTimeout(timer);state.cancels.delete(cancel);attempts.delete(cancel);inflight.delete(key);active--;
@@ -675,7 +684,12 @@ async function fzLoadPicture(state){
     if(!ended){next();if(!active)finish(null);}
    };
    attempts.add(cancel);state.cancels.add(cancel);
-   const timer=setTimeout(()=>cancel(false,verified?0:Date.now()+2000),Math.min(verified?1000:3200,Math.max(1,deadline-Date.now())));
+   const timer=setTimeout(()=>{
+    if(openingCheck)openingCheck.then(verdict=>{
+     const approved=fzVerifiedPictureURL({audited_media_path:verdict.verifiedPath});
+     cancel(false,approved&&!state.failed.has(ut(approved))?0:Date.now()+2000);
+    });else cancel(false,verified?0:Date.now()+2000);
+   },Math.min(verified?1000:3200,Math.max(1,deadline-Date.now())));
    img.decoding='async';img.referrerPolicy='no-referrer';img.loading='eager';
    img.fetchPriority=verified&&(!fzCardMetric||!fzCardMetric.sixSent)?'high':'auto';
    img.onload=()=>{
@@ -685,15 +699,37 @@ async function fzLoadPicture(state){
      if(!fzPictureUsable(img)){cancel(false);return;}
      // This endpoint serves the exact immutable bytes approved by the audit.
      // Expired/evicted capabilities fail the image load and use normal fallbacks.
-     if(verified&&url===fzVerifiedPictureURL(state.item)){cancel(true);return;}
-     // Do not spend a server check on images that never loaded in the browser.
-     const verdict=await fzCheckProductPicture(state,url);
+     if(verified){cancel(true);return;}
+     // Later candidates are checked only after usable browser pixels load.
+     const verdict=await (openingCheck||fzCheckProductPicture(state,url));
      if(verdict.kind==='cancelled'){finish(null);return;}
      cancel(verdict.kind==='product',verdict.kind==='retry'?verdict.at:0);
     };
     if(img.decode)img.decode().then(check,()=>cancel(false));else check();
    };
-   img.onerror=()=>cancel(false);
+   img.onerror=()=>{
+    // A merchant can refuse the browser while its audited copy is available.
+    // Let the bounded opening check supply that copy before trying fallbacks.
+    if(openingCheck)openingCheck.then(()=>cancel(false));else cancel(false);
+   };
+   // Overlap the opening six checks with browser image loading. This spends
+   // at most one early check per offer; fallbacks keep the existing lazy path.
+   const openingCheck=state.openingPicture&&!state.openingStarted&&!verified
+    ? (state.openingStarted=true,fzCheckProductPicture(state,url,true)):null;
+   if(openingCheck)openingCheck.then(verdict=>{
+    if(settled||ended||q.get(state.key)!==state||fzMediaClosed)return;
+    if(verdict.kind==='cancelled'){finish(null);return;}
+    if(verdict.kind==='rejected'||verdict.kind==='invalid'){cancel(false);return;}
+    if(verdict.kind==='retry'){cancel(false,verdict.at);return;}
+    const approved=fzVerifiedPictureURL({audited_media_path:verdict.verifiedPath});
+    if(verdict.kind==='product'&&approved&&!state.failed.has(ut(approved))&&!inflight.has(ut(approved))){
+     state.verifiedUrls=state.verifiedUrls||new Set();state.verifiedUrls.add(approved);
+     if(!state.urls.includes(approved))state.urls.unshift(approved);
+     // Race the audited copy with the merchant download. Either winner still
+     // needs usable decoded pixels and a positive product verdict.
+     next();
+    }
+   });
    img.src=url;
   }
   // Queue waits and network timeouts leave the URL eligible for a later retry.
