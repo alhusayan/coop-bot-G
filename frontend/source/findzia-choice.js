@@ -1,4 +1,4 @@
-/* FINDZIA_CHOICE_RELEASE=157.0.5 — one real, signed-offer AI decision. */
+/* FINDZIA_CHOICE_RELEASE=157.0.6 — one real, signed-offer AI decision. */
 (() => {
   'use strict';
   const COPY = {
@@ -17,7 +17,7 @@
   const keys=['choosing','found','badge','shippingUnknown','shippingKnown','open','why','retry','unavailable','noMatch','cheaper','quality','clarify','newSearch','saving','details'];
   function el(tag,cls,text){const n=document.createElement(tag);if(cls)n.className=cls;if(text!==undefined)n.textContent=text;return n;}
   function safeURL(value){try{const u=new URL(value);return /^https?:$/.test(u.protocol)&&!u.username&&!u.password?u.href:'';}catch(_){return '';}}
-  function rowVersion(row){return JSON.stringify([row.url,row.title,row.image,row.money?.amount,row.money?.currency,row.key_specs,row.match_type]);}
+  function rowVersion(row){return JSON.stringify([row.url,row.title,row.image,row.vision_image,row.money?.amount,row.money?.currency,row.key_specs,row.match_type]);}
   function parts(money){
     const amount=Number(money?.amount),currency=String(money?.currency||'');
     if(!Number.isFinite(amount)||amount<=0||!/^[A-Z]{3}$/.test(currency))return null;
@@ -302,7 +302,8 @@
         const work=(async()=>{
           const response=await window.FindziaBillingFetch(root,bridge.api.replace(/\/$/,'')+'/api/choice',{
             method:'POST',signal:ctl.signal,headers:{'Content-Type':'application/json'},credentials:'omit',
-            body:JSON.stringify({query:c.query||c.photoDescription||'',kind:c.kind,country:c.country,lang:c.lang,extra_specs:c.extra_specs||'',mode,answers,offer_tokens:rows.map(r=>r.token)})
+            body:JSON.stringify({query:c.query||c.photoDescription||'',kind:c.kind,country:c.country,lang:c.lang,extra_specs:c.extra_specs||'',mode,answers,offer_tokens:rows.map(r=>r.token),
+              ...(c.kind==='image'?{image_base64:c.image_base64,offer_images:rows.map(r=>({token:r.token,image:r.vision_image,media_token:r.media_token}))}:{})})
           });const value=await response.json();if(!response.ok||!value.ok){const error=new Error('unavailable');error.retryable=response.status>=500;throw error;}return value;
         })();
         const value=await Promise.race([work,timeout]);
@@ -319,6 +320,7 @@
           for(const label of (value.choices||[]).slice(0,3)){const b=el('button','fz-one-answer',label);b.type='button';b.addEventListener('click',()=>{if(pending)return;awaitingQuestion=false;answers=[String(label).slice(0,160)];lastKey='';selected=null;earlyCalls=0;queue();});question.append(b);}return;
         }
         if(value.status!=='selected'){if(!selected)empty('noMatch');return;}
+        if(c.kind==='image'&&value.visual_verified!==true){const error=new Error('visual_review_required');error.retryable=false;throw error;}
         const current=currentRows.find(r=>r.url===value.url&&rowVersion(r)===rowVersion(rows.find(o=>o.token===value.token)||{}));
         if(!current){lastKey='';followUp=true;return;}
         if(selected?.version===rowVersion(current)){
@@ -404,7 +406,7 @@
     document.fonts?.ready?.then(()=>{if(!disposed)fit();});
     function destroy(){disposed=true;reset();langObserver.disconnect();sizeObserver?.disconnect();for(const name of ['fz:search-state','fz:choice-results'])root.removeEventListener(name,queue);root.removeEventListener('fz:search-progress',progressEvent);root.removeEventListener('fz:search-reset',resetEvent);window.removeEventListener?.('resize',fit);window.visualViewport?.removeEventListener('resize',fit);box.remove();dialog.remove();delete root.dataset.choiceMode;delete root.dataset.choiceActive;}
     document.addEventListener('shopify:section:unload',function unload(ev){if(ev.target?.contains(root)){destroy();document.removeEventListener('shopify:section:unload',unload);}});
-    root.fzOneChoice={update,destroy,release:'157.0.5'};labels();queue();
+    root.fzOneChoice={update,destroy,release:'157.0.6'};labels();queue();
   }
   window.FindziaChoice={mount,PriceReels,SearchLog,moneyParts:parts};
   const start=()=>document.querySelectorAll('.fz-home').forEach(mount);

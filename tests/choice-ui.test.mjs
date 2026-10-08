@@ -37,9 +37,9 @@ function harness(){
   const root=new Node();root.className='fz-home';root.dataset={lang:'ar',homeState:'results',choicePreview:'true'};document.append(root);
   const body=new Node();body.setAttribute('data-results-body','true');root.append(body);
   const state={generation:1,query:'camera',kind:'text',lang:'ar',country:'KW',busy:false};
-  const row={token:'signed-1',url:'https://store.example/item',image:'https://store.example/photo.jpg',title:'Camera',store:'Store',key_specs:[],money:{amount:12.345,currency:'KWD'}};
+  const row={token:'signed-1',vision_image:'https://store.example/photo.jpg',media_token:'media-signed-1',url:'https://store.example/item',image:'https://store.example/photo.jpg',title:'Camera',store:'Store',key_specs:[],money:{amount:12.345,currency:'KWD'}};
   let rows=[row];root.fzRefineBridge={api:'https://api.example',context:()=>({...state}),choiceRows:()=>rows,newSearch(){state.generation++;state.query='';root.dataset.homeState='empty';}};
-  const response=(r=row)=>({ok:true,json:async()=>({ok:true,status:'selected',token:r.token,url:r.url,store:r.store,money:r.money,reason:'Suitable'})});
+  const response=(r=row)=>({ok:true,json:async()=>({ok:true,status:'selected',visual_verified:true,token:r.token,url:r.url,store:r.store,money:r.money,reason:'Suitable'})});
   return {Node,root,context,state,row,response,animations,timers,tick,setRows:v=>rows=v,setReduced:v=>reduced=v,api:context.window.FindziaChoice};
 }
 
@@ -161,6 +161,43 @@ test('transient 503 retries automatically without showing Could not choose',asyn
   assert.equal(h.root.querySelector('.fz-one').dataset.state,'pending');assert.equal(h.root.querySelectorAll('.fz-one-open')[1].hidden,true);
   await h.tick(700);await h.tick(0);await h.tick(1500);
   assert.equal(calls,2);assert.equal(h.root.querySelector('.fz-one').dataset.state,'selected');h.root.fzOneChoice.destroy();
+});
+
+test('photo choice sends original pixels and the signed source behind the displayed image',async()=>{
+  const h=harness();h.state.kind='image';h.state.image_base64='original-base64';let payload;
+  h.context.window.FindziaBillingFetch=async(_,url,opts)=>{payload=JSON.parse(opts.body);return h.response();};
+  h.api.mount(h.root);await h.tick(100);await h.tick(0);
+  assert.equal(payload.image_base64,'original-base64');
+  assert.deepEqual(payload.offer_images,[{token:h.row.token,image:h.row.vision_image,media_token:h.row.media_token}]);
+  assert.equal(h.root.querySelector('.fz-one-open').href,h.row.url);h.root.fzOneChoice.destroy();
+});
+
+test('photo choice cannot display an old backend decision without visual verification',async()=>{
+  const h=harness();h.state.kind='image';h.state.image_base64='original-base64';let calls=0;
+  h.context.window.FindziaBillingFetch=async()=>{calls++;return {ok:true,json:async()=>({ok:true,status:'selected',token:h.row.token,url:h.row.url,money:h.row.money})};};
+  h.api.mount(h.root);await h.tick(100);await h.tick(1500);
+  assert.equal(calls,1);assert.equal(h.root.querySelector('.fz-one-open').hidden,true);
+  assert.equal(h.root.querySelector('.fz-one').dataset.state,'empty');h.root.fzOneChoice.destroy();
+});
+
+test('bridge retains authorization for original, audited and recovered displayed pictures',()=>{
+  const source=readFileSync(new URL('../frontend/source/findzia-one.liquid',import.meta.url),'utf8');
+  const start=source.indexOf('e.fzRefineBridge.choiceRows=function(){');
+  const end=source.indexOf('// Stream real priced rows',start);
+  const row={url:'https://store.example/item',evaluation_token:'offer-token',title:'Coat',audited_image:'https://img.example/a.jpg',audited_media_path:'/api/media/verified/abc'};
+  const photo={winner:row.audited_image,node:{complete:true,naturalWidth:400},mediaAuth:new Map([[row.audited_image,{raw:row.audited_image,token:'offer-token'}]])};
+  const env={e:{fzRefineBridge:{}},U:[row],q:new Map([[row.url,photo]]),br:r=>r.url,_r:()=>({kind:'exact',value:99,currency:'KWD'}),$t:()=>true,fzEarlyPhotoPreview:()=>false,
+    fzMediaKey:x=>x,fzVerifiedPictureURL:r=>r.audited_media_path?'https://api.example'+r.audited_media_path:'',fzMediaVerdicts:new Map()};
+  vm.runInNewContext(source.slice(start,end),env);
+  const read=()=>env.e.fzRefineBridge.choiceRows()[0];
+  assert.equal(read().vision_image,row.audited_image);
+  photo.winner='https://api.example'+row.audited_media_path;
+  assert.equal(read().vision_image,row.audited_image);
+  const raw='https://img.example/recovered.jpg';photo.mediaAuth.set(raw,{raw,token:'recovery-token'});
+  env.fzMediaVerdicts.set(raw,{result:{kind:'product',verifiedPath:'/api/media/verified/recovered'}});
+  photo.winner='https://api.example/api/media/verified/recovered';
+  assert.equal(read().vision_image,raw);assert.equal(read().media_token,'recovery-token');
+  photo.winner='https://unrelated.example/forged.jpg';assert.equal(read().vision_image,'');
 });
 
 test('persistent failure has a bounded retry and a recoverable results picker',async()=>{
