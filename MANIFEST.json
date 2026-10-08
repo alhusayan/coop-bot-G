@@ -1,20 +1,19 @@
 {
-  "release": "157.0.2",
-  "base_commit": "913a1f16e3ece3a470e71f62fc655df0fb254b98",
-  "trial_url_after_deploy": "https://findzia.com/trial/one-55321448a0352f1ff18b",
+  "release": "157.0.3",
+  "base_git_tree": "95083b40f6e637a4e30c28ce31ccad4e329bd078",
+  "trial_path": "/trial/one-55321448a0352f1ff18b",
+  "scope": "trial upgrade; public homepage unchanged",
   "files": {
-    "main.py": "6287ec16ce4438aaf342f7abfabd86bf4b119e39deb1cfc28ae6ccc08d261545",
-    "findzia_choice.py": "2ba637a8e1d0fd482440a5f8809266016d14083ba08cc14f908f9946d2aba108",
-    "frontend/server.mjs": "d1f63de374a41acd13d6442ffd5a97d290150e576be5c3822eec15853dbadf59",
-    "frontend/scripts/build.mjs": "032272c4e9be4e20029b8ac939257e6fd2cab7bcd5796c04df7aa5c47aec410f",
-    "frontend/trial.json": "10e561045ad3e063fbd8978536427919b9e048af6077f00b1a07de6a5e634368",
-    "frontend/source/findzia-home.liquid": "905571e32df856bea826715ead9e9b977b96ade47f18beae974320db4efd558f",
-    "frontend/source/findzia-one.liquid": "0019e69a1ee88b46336b7c76ddf73aa50b48952a0de856fad9c9e2ca4935ced9",
-    "frontend/source/findzia-choice.js": "c0dce314b99f4d6337c364bdf083f7acff5fd22846a880d9392a365ed4ee66e8",
-    "frontend/source/findzia-choice.css": "6fd4457bcfcd592a852e0098bafe25601b2d68573ffc650d8b2645f461d50842",
-    "tests/test_choice.py": "fa26d6f3af30e11e787898a7ff135cf5244d2cf1bf40fd4bf3c97b34089b84cd",
-    "tests/choice-ui.test.mjs": "3032a7a7865b62b14764f5ed828c53951f532bce398c20118650379a59e86b49",
-    "tests/trial-page.test.mjs": "b42aa53bf51425e4cba69f11644fd731e14e443fae939adcfb22398ca25071bc",
-    "INSTALL_TRIAL_AR.txt": "bd868cdf20fcdf736e9b2279ed7c247c3b45efe409a00266e63db5eaf4d79c57"
+    "findzia_choice.py": "f7e1694107ed1529e40c5645dbc3fdd32fc89705f3736c446a5b9ef6b8efda2c",
+    "frontend/Dockerfile": "e7d6597953db216b6e940eeba89548dbcdb2e43096b1afd14a92d8f2bf0974a1",
+    "frontend/scripts/build.mjs": "c2b303082dc288f697728e380033791b6f9d66da0d3bf02219c2f35bcaa31e8c",
+    "frontend/trial.json": "78d587f29a11084a51d7dda93ec03c26ec384a231cd690eeee6ea72f794c0d20",
+    "frontend/source/findzia-one.liquid": "77658aedbd83128820f53e8ecb8cc31c74f76cb432a5b8509ad35c7caeb5a9b3",
+    "frontend/source/findzia-choice.js": "fa2fd556372056d7fdcd669e932a5a37c98f706828998de7474f89b12a484e25",
+    "frontend/source/findzia-choice.css": "943b9058095b1b9fb92cd7840bb7f04ae24dab8915ac5d9894cf69cb6795f0e3",
+    "INSTALL_TRIAL_AR.txt": "85f945c8bd3c2e02ca2da10c1d414c917948b8a793d1f0f1b7b15523a5c347b4",
+    "tests/test_choice.py": "1f8153cd3dddd20a4d1db9a9544fb32dba6d2b99285fab851b201964e1051740",
+    "tests/choice-ui.test.mjs": "29e72e58dd91b7a556f4868dc4d96501ef90976a5e68eead3cdf6b0ebc66dca7",
+    "tests/trial-page.test.mjs": "b42aa53bf51425e4cba69f11644fd731e14e443fae939adcfb22398ca25071bc"
   }
 }

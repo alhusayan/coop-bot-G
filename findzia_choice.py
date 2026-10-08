@@ -15,7 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
-RELEASE = "157.0.1"
+RELEASE = "157.0.3"
 MAX_OFFERS = 48
 MAX_BODY = 850_000
 
@@ -46,13 +46,35 @@ observed features that benefit the stated use, not unsupported premium claims.
 If a missing preference materially prevents choosing, and answers is empty,
 you may ask ONE concise question with 2-3 short choices; don't ask routine
 questions when a reasonable choice is possible. Never ask again after an answer.
-Return JSON in requested language, no markdown:
-{status:"selected",id:"pN",match:"exact"|"suitable",
- reason:{text:"one short practical reason, <=25 words",
- evidence:["exact substring from selected offer evidence"],inference:true|false}}
-or {status:"question",question:"<=15 words",choices:["...","..."]}
-or {status:"no_match"}. Only select a listed ID. Don't manufacture facts.
+Return ONE complete JSON object, with double-quoted keys, no markdown or prose.
+Use one of these valid examples (replace example values with your decision):
+{"status":"selected","id":"p1","match":"exact",
+ "reason":{"text":"One short practical reason, at most 25 words",
+ "evidence":["exact substring from selected offer evidence"],"inference":false}}
+{"status":"question","question":"One question, at most 15 words","choices":["A","B"]}
+{"status":"no_match"}
+The selected match may be "exact" or "suitable". Text must use the requested
+language. Only select a listed ID. Don't manufacture facts. Keep output short.
 """
+
+
+def _response_object(raw):
+    """Read complete JSON only; never fabricate missing fields in truncated output."""
+    if isinstance(raw, dict):
+        return raw
+    if not isinstance(raw, str) or len(raw) > 32_000:
+        raise ValueError('invalid_choice_json')
+    decoder = json.JSONDecoder()
+    # Permit a provider's code fence or short prose wrapper. A second decision
+    # or a partial object is ambiguous and must be retried, not guessed.
+    start = raw.find('{')
+    if start < 0:
+        raise ValueError('invalid_choice_json')
+    value, end = decoder.raw_decode(raw[start:])
+    # Never mine a nested object from an incomplete outer decision.
+    if not isinstance(value, dict) or 'status' not in value or '{' in raw[start + end:]:
+        raise ValueError('invalid_choice_json')
+    return value
 
 
 def _number(value, *, zero=False):
@@ -140,6 +162,36 @@ class ChoiceEngine:
                 and a['money']['basis'] == b['money']['basis']
                 and self.s['_fz_eval_comparable'](a['row'], b['row']))
 
+    def decision(self, context, offers):
+        ids = {offer['id'] for offer in offers}
+        for attempt in range(2):
+            try:
+                try:
+                    raw = self.s['_refine_ai'](
+                        PROMPT + ('\nPrevious response was invalid. Return a complete, short JSON object only.' if attempt else ''),
+                        dict(request=context, offers=offers), tokens=2400, timeout=6)
+                except json.JSONDecodeError as exc:
+                    raw = exc.doc
+                value = _response_object(raw)
+                status = value.get('status')
+                if status == 'no_match':
+                    return value
+                if (status == 'selected' and value.get('id') in ids
+                        and value.get('match') in ('exact', 'suitable')):
+                    return value
+                choices = value.get('choices')
+                if (status == 'question' and not context['answers']
+                        and isinstance(value.get('question'), str) and value['question'].strip()
+                        and isinstance(choices, list)
+                        and len({c.strip() for c in choices[:3] if isinstance(c, str) and c.strip()}) >= 2):
+                    return value
+                raise ValueError('invalid_choice_contract')
+            except (ValueError, TypeError) as exc:
+                print('CHOICE RESPONSE ' + json.dumps(dict(release=RELEASE, attempt=attempt + 1,
+                      error=type(exc).__name__, retry=attempt == 0)), flush=True)
+                if attempt:
+                    raise ValueError('invalid_choice') from exc
+
     def choose(self, context, candidates):
         if not candidates:
             return dict(ok=True, status='no_match', release=RELEASE)
@@ -154,7 +206,7 @@ class ChoiceEngine:
                                          'visual_axes', 'unknown_attributes') if k in row},
                                comparison_amount=fx,
                                comparison_currency=row.get('price_compare_currency') if fx else None))
-        response = self.s['_refine_ai'](PROMPT, dict(request=context, offers=offers), tokens=1000, timeout=6)
+        response = self.decision(context, offers)
         if not isinstance(response, dict):
             raise ValueError('invalid_choice')
         if response.get('status') == 'question' and not context['answers']:
@@ -240,7 +292,7 @@ def install_choice(app, services):
             cached, future = engine.submit(context, candidates)
             if cached is not None:
                 return cached
-            return await asyncio.wait_for(asyncio.shield(asyncio.wrap_future(future)), timeout=10)
+            return await asyncio.wait_for(asyncio.shield(asyncio.wrap_future(future)), timeout=20)
         except Exception as exc:
             # Never label a price sort as an AI decision during an outage.
             print('CHOICE ERROR ' + type(exc).__name__, flush=True)
