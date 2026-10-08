@@ -32920,7 +32920,10 @@ def _fz_evaluation_token(row):
               'price_kind','price_min','price_max','price_unit','price_status','price_source',
               'price_source_url','price_verified','price_unavailable','price_tax_note',
               'price_compare_value','price_compare_currency','price_estimated','original_price','original_currency','card_model','card_brand',
-              'condition','item_condition','stock_status')
+              'condition','item_condition','stock_status','in_stock','hidden',
+              'classification_final','identity_review_status','display_before_audit','match_type',
+              'photo_match_status','alternative_visual_status','price_integrity_status',
+              'shipping_amount','shipping_currency','shipping_verified','shipping_country')
     data = {k:row[k] for k in fields if isinstance(row.get(k),(str,int,float,bool))}
     data = {k:(v[:600] if isinstance(v,str) and k not in ('url','price_source_url') else v)
             for k,v in data.items()}
@@ -34835,3 +34838,7 @@ async def _web_prepare_image_bytes(request, image_bytes, mime, client_meta=None)
 
 
 app.add_middleware(_FindziaImageTiming)
+
+# Findzia One 157.0: one evidence-backed AI choice, existing retrieval preserved.
+from findzia_choice import install_choice as _install_findzia_choice
+_FZ_ONE_CHOICE = _install_findzia_choice(app, globals())
