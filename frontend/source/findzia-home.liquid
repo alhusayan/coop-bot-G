@@ -549,7 +549,9 @@ function fzCheckPump(){
  fzCheckActive++;fzCheckNext=Date.now()+(jobs.every(job=>job.opening)?120:jobs.length*600);
  const ctl=new AbortController();fzMediaCheckControllers.add(ctl);
  const timeout=setTimeout(()=>ctl.abort(),10500);
+ const finished=new Set();
  function finish(job,result){
+  if(finished.has(job))return;finished.add(job);
   if(job.epoch!==fzCheckEpoch)result={kind:'cancelled'};
   else if(result.kind==='product'||result.kind==='rejected'){
    fzMediaVerdicts.set(job.raw,{result,until:Date.now()+900000});
@@ -564,7 +566,7 @@ function fzCheckPump(){
   try{
    const payload=job=>({token:job.token,image:job.raw});
    const response=await fzPaidFetch(r.replace(/\/$/,'')+'/api/media/check'+(batch?'/batch':''),{
-    method:'POST',headers:{'Content-Type':'application/json'},credentials:'omit',signal:ctl.signal,
+    method:'POST',headers:{'Content-Type':'application/json','Accept':batch?'application/x-ndjson, application/json':'application/json'},credentials:'omit',signal:ctl.signal,
     body:JSON.stringify(batch?{images:jobs.map(payload)}:payload(jobs[0]))});
    if(batch&&[404,405].includes(response.status)){
     // A rolling deployment can briefly serve the previous backend.
@@ -572,28 +574,55 @@ function fzCheckPump(){
     for(const job of jobs){if(job.epoch===fzCheckEpoch)fzCheckQueue.push(job);else finish(job,{kind:'cancelled'});}
     return;
    }
-   const data=await response.json().catch(()=>null);
-   const values=batch&&Array.isArray(data?.results)?data.results:[];
-   jobs.forEach((job,id)=>{
-    const matches=values.filter(v=>v?.id===id);
-    const value=batch?(matches.length===1?matches[0]:null):data;
+   function accept(job,value){
+    if(finished.has(job))return;
     const status=Number(value?.status)||response.status;
     let result;
     if(response.ok&&status===200&&value?.ok===true&&value.usable===true)result={kind:'product',verifiedPath:value.verified_path};
     else if(response.ok&&status===200&&value?.ok===true&&['logo','text_only','placeholder'].includes(value.decision))result={kind:'rejected'};
     else if(status===400||status===403)result={kind:'invalid'};
     else{
-     result={kind:'retry',at:fzRetryTime(response,value||data)};
+     result={kind:'retry',at:fzRetryTime(response,value)};
      if(job.epoch===fzCheckEpoch&&(status===429||status===503))fzCheckGate=Math.max(fzCheckGate,result.at);
     }
     finish(job,result);
-   });
+   }
+   if(batch&&response.ok&&response.headers.get('Content-Type')?.includes('application/x-ndjson')&&response.body?.getReader){
+    const reader=response.body.getReader(),decoder=new TextDecoder();let buffer='',bytes=0;
+    function line(text){
+     if(!text.trim())return;
+     const value=JSON.parse(text);
+     if(!Number.isInteger(value?.id)||value.id<0||value.id>=jobs.length)return;
+     accept(jobs[value.id],value);
+    }
+    try{
+     while(true){
+      const {value,done}=await reader.read();
+      if(done){buffer+=decoder.decode();if(buffer.trim())line(buffer);break;}
+      bytes+=value.byteLength;if(bytes>65536)throw Error('media_response_too_large');
+      buffer+=decoder.decode(value,{stream:true});
+      let newline;while((newline=buffer.indexOf('\n'))>=0){line(buffer.slice(0,newline));buffer=buffer.slice(newline+1);}
+      if(finished.size===jobs.length)break;
+     }
+    }finally{await reader.cancel().catch(()=>{});reader.releaseLock();}
+    // A dropped stream retries only unfinished images; completed verdicts stay
+    // valid and cannot be overwritten by the transport's catch/finally path.
+    jobs.forEach(job=>{if(!finished.has(job))finish(job,{kind:'retry',at:Date.now()+2000});});
+   }else{
+    // Old backend versions still return the original batch JSON envelope.
+    const data=await response.json().catch(()=>null);
+    const values=batch&&Array.isArray(data?.results)?data.results:[];
+    jobs.forEach((job,id)=>{
+     const matches=values.filter(v=>v?.id===id);
+     accept(job,batch?(matches.length===1?matches[0]:!response.ok?data:null):data);
+    });
+   }
   }catch(_){jobs.forEach(job=>finish(job,{kind:'retry',at:Date.now()+2000}));}
  })().finally(()=>{clearTimeout(timeout);fzMediaCheckControllers.delete(ctl);fzCheckActive--;fzCheckPump();});
  fzCheckPump();
 }
 var fzPictureJobs=new Set();
-// FINDZIA_MEDIA_RELEASE=156.7.90: bounded opening checks and audited-byte reuse.
+// FINDZIA_MEDIA_RELEASE=156.7.91: publish each completed media check immediately.
 var fzPictureQueue=[],fzPictureActive=0,fzMediaRecoveryQueue=[],fzMediaRecoveryActive=0;
 var fzOpeningPictures=0;
 var fzMediaRecoveryUsed=0,fzMediaCooldownUntil=0,fzMediaClosed=false,fzMediaDeadline=0,fzMediaTimer=null;
