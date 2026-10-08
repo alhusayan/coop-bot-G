@@ -951,7 +951,7 @@ function fzRenderMediaIssue(){
 }
 function St(){if(W&&W.shopperEmpty){Q=false;b.innerHTML="";Ft();return;}
 if(W&&W.refinementEmpty&&!U.length){Et(W.refinementEmpty,false);Ft();return;}
-const before=fzCardRects();fzPaintResults();if(W?.photoSearchIssue&&!fzUsableResults&&!fzMediaPending())fzRenderPhotoIssue();fzRenderMediaIssue();fzResultMotion(before);fzFitCinema();}
+const before=fzCardRects();fzPaintResults();if(W?.photoSearchIssue&&!fzUsableResults&&!fzMediaPending())fzRenderPhotoIssue();fzRenderMediaIssue();fzResultMotion(before);fzFitCinema();e.dispatchEvent(new CustomEvent('fz:choice-results'));}
 function fzFitCinema(){if(E!=='cinema')return;const viewport=window.visualViewport,available=viewport?viewport.height:innerHeight;if(viewport&&viewport.scale>1.2)return;const header=e.querySelector('[data-fixed-header]')?.getBoundingClientRect().height||110;const toolbar=e.querySelector('.fz-results-tools');const tools=toolbar&&!toolbar.closest('[data-fixed-header]')?toolbar.getBoundingClientRect().height:0;const h=Math.max(260,Math.min(520,Math.floor(available-header-tools-90)));const width=b.getBoundingClientRect().width||innerWidth-32;e.style.setProperty('--fz-poster-h',h+'px');e.style.setProperty('--fz-poster-w',Math.min(width-36,Math.max(220,Math.min(360,Math.floor(h*.72))))+'px');}
 function wt(){if(Xt(),!G){G=!0;var e=B;requestAnimationFrame(function(){e===B&&(G=!1,St());});}}
 function zt(kind){ur(false);F=0;W=null;Y=false;$=false;Z=false;Ft();X=null;_.classList.remove("is-comparing");U=[];j={};H={};ft();_.classList.add("is-visible");gt(0);Q=true;b.innerHTML=fzSkeletonMarkup();fzFitCinema();}
@@ -1289,6 +1289,17 @@ function fzCancelSearchLaunch(){
  const launch=fzPendingLaunch;fzPendingLaunch=null;launch.cancelled=true;launch.controller.abort();
  delete e.dataset.searchLaunching;
 }
+// FINDZIA_ONE_RELEASE=157.0.0
+// Expose reviewed offers to the one-result controller; prices remain source data.
+e.fzRefineBridge.choiceRows=function(){
+ return U.filter(row=>{
+  const photo=q.get(br(row)),money=_r(row);
+  return $t(row)&&!fzEarlyPhotoPreview(row)&&!row.price_estimated&&row.evaluation_token&&money&&money.kind==='exact'&&
+   photo?.winner&&photo.node?.complete&&photo.node.naturalWidth>=8&&!photo.previewPicture&&!photo.previewAuditPending;
+ }).map(row=>({token:row.evaluation_token,url:br(row),title:row.title||row.raw_title||row.product_name||'',
+  store:row.store||'',image:q.get(br(row)).winner,money:{amount:_r(row).value,currency:_r(row).currency},
+  key_specs:row.key_specs||[]}));
+};
 e.fzRefineBridge.startSearchLaunch=function(payload){
  payload=payload||{};
  window.FindziaScroll?.toTop();
@@ -1687,6 +1698,8 @@ return result;};}})();</script>
 <script src="{{ 'findzia-support.js' | asset_url }}" defer></script>
 <script src="{{ 'findzia-focus.js' | asset_url }}" defer></script>
 <script src="{{ 'findzia-account.js' | asset_url }}" defer></script>
+<link rel="stylesheet" href="{{ 'findzia-choice.css' | asset_url }}">
+<script src="{{ 'findzia-choice.js' | asset_url }}" defer></script>
 
 
 
