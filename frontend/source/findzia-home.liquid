@@ -866,7 +866,20 @@ return!0;}
 async function Pt(){if(!o)try{await Ee;}catch(e){}
 return n||t||"KW";}
 function fzPaidFetch(url,options){return window.FindziaBillingFetch(e,url,options);}
-function fzBillingFailure(error){if(!e.fzBilling?.handleSearchError(error))return false;fr(false);e.fzSearchProgress?.stop();return true;}
+function fzUsage(type,detail={}){try{e.dispatchEvent(new CustomEvent('fz:usage',{bubbles:true,detail:{type,generation:B,...detail}}));}catch(_){}}
+function fzUsageFailure(error){
+ let code='request_failed',message=String(error?.message||'');
+ if(error?.name==='TimeoutError'||/timeout|timed_out/.test(message))code='timeout';
+ else if(error?.name==='AbortError')code='cancelled';
+ else if(/credits_exhausted/.test(message))code='credits_exhausted';
+ else if(/credits_unavailable/.test(message))code='credits_unavailable';
+ else if(error?.status===429||/rate_limit/.test(message))code='rate_limit';
+ else if(error?.status===401||error?.status===403)code='auth';
+ else if(error?.name==='TypeError')code='network';
+ else if(message==='stream_interrupted')code='stream_interrupted';
+ fzUsage('failure',{code});
+}
+function fzBillingFailure(error){fzUsageFailure(error);if(!e.fzBilling?.handleSearchError(error))return false;fr(false);e.fzSearchProgress?.stop();return true;}
 // One deadline covers response headers, streaming, and the optional JSON body.
 function fzRequestLifetime(milliseconds) {
   const controller = new AbortController(), started = performance.now();
@@ -931,7 +944,7 @@ async function Rt(path, payload, receive, sharedLifetime) {
       await lifetime.run(() => receive(event));
       if (generation !== B) return;
       Wt(event);
-      if (event?.event === 'done') { done = true; fzAccountDone(); }
+      if (event?.event === 'done') { done = true; fzAccountDone(event); }
     }
     while (!done) {
       const chunk = await lifetime.run(() => reader.read());
@@ -988,7 +1001,7 @@ function fzMeasureFirstCard() {
     const elapsed=Math.max(0,Math.round(performance.now()-trace.started));
     const first=!trace.sent,six=rendered.size>=6;
     if(!first&&!six)return;
-    if(first){trace.sent=true;trace.firstElapsed=elapsed;if(fzPhotoTrace?.generation===B)fzPhotoTrace.firstVisibleMs=elapsed;}
+    if(first){fzUsage('visible',{count:rendered.size});trace.sent=true;trace.firstElapsed=elapsed;if(fzPhotoTrace?.generation===B)fzPhotoTrace.firstVisibleMs=elapsed;}
     if(six){trace.sixSent=true;if(fzPhotoTrace?.generation===B)fzPhotoTrace.firstSixMs=elapsed;}
     const metric={search_trace:trace.search_trace,kind:trace.kind,country:trace.country,
       version:'156.7.86',first_card_ms:trace.firstElapsed,visible_count:rendered.size};
@@ -1139,7 +1152,7 @@ function fzRenderPhotoIssue() {
 function Tt(){qe&&(qe.hidden=!0),_.classList.remove("is-choice-layer");}
 function Mt(e){return null==e?e:JSON.parse(JSON.stringify(e));}
 function Dt(){return{query:K,input:g?g.value:K,lastSearch:Mt(W),items:Mt(U),sort:I,filter:O,layout:E,arrival:F,scroll:window.scrollY||0,moreExhausted:$,moreError:Z,message:!U.length&&b.querySelector(".fz-empty")?b.querySelector(".fz-empty").textContent:""};}
-function Bt(){fzCancelSearchLaunch();return Yt("fz:search-reset"),++Le,++B,xe.forEach(function(e){e.abort();}),xe.clear(),G=!1,ee=!1,Y=!1,B;}
+function Bt(){fzUsage('reset');fzCancelSearchLaunch();return Yt("fz:search-reset"),++Le,++B,xe.forEach(function(e){e.abort();}),xe.clear(),G=!1,ee=!1,Y=!1,B;}
 function Ut(){Ae=null,Ce=null,Tt();}
 function jt(){if(Ce&&!ee){var e=Ce.row;Ce.status="loading",Tt(),ea(e.option,{choiceNavigation:!0,forceSpecific:!0,selectedOption:e.structured?"":e.option,originalQuery:Ae.data.query||""});}}
 function Ht(){}
@@ -1192,8 +1205,8 @@ e.fzRefineBridge.finishSearchLaunch=function(launch,allowed){
   e.fzRefineBridge.restoreHomeView();
  }
 };
-e.fzRefineBridge.billingResume=payload=>{if(payload.image_base64)fzRunPhotoOriginal(Object.assign({},payload,{kind:'image',query:'',photoDescription:''}));else if(payload.query)ea(payload.query,{forceSpecific:true});};e.fzRefineBridge.accountSaved=()=>Mt($r());e.fzRefineBridge.accountRemoveSaved=url=>{const next=$r().filter(row=>Yr(row)!==Yr({url}));localStorage.setItem(Se,JSON.stringify(next));we=next;Jr();Qr();};e.fzRefineBridge.accountSearch=(query,country)=>{if(ee)return false;if(country&&country!==n)Je(country);ea(query,{forceSpecific:true,freshText:true});return true;};e.fzRefineBridge.accountNotice=message=>Vr(message,false);function fzAccountStart(context){e.fzAccountRequest?.({id:B,query:context.query||context.caption||'',country:context.country||n,kind:context.image_base64?'image':context.kind||'text'});}
-function fzAccountDone(){e.fzAccountComplete?.(B);}
+e.fzRefineBridge.billingResume=payload=>{if(payload.image_base64)fzRunPhotoOriginal(Object.assign({},payload,{kind:'image',query:'',photoDescription:''}));else if(payload.query)ea(payload.query,{forceSpecific:true});};e.fzRefineBridge.accountSaved=()=>Mt($r());e.fzRefineBridge.accountRemoveSaved=url=>{const next=$r().filter(row=>Yr(row)!==Yr({url}));localStorage.setItem(Se,JSON.stringify(next));we=next;Jr();Qr();};e.fzRefineBridge.accountSearch=(query,country)=>{if(ee)return false;if(country&&country!==n)Je(country);ea(query,{forceSpecific:true,freshText:true});return true;};e.fzRefineBridge.accountNotice=message=>Vr(message,false);function fzAccountStart(context,mode='initial'){fzUsage('start',{method:context.image_base64?'image':context.kind||'text',mode});e.fzAccountRequest?.({id:B,query:context.query||context.caption||'',country:context.country||n,kind:context.image_base64?'image':context.kind||'text'});}
+function fzAccountDone(info){e.fzAccountComplete?.(B);fzUsage('received',{partial:!!info?.partial});}
 var Vt=null,Jt=!1,fzUsableResults=false;function Qt(count) {
     count = Math.max(0, Number(count) || 0);
     e.dataset.visibleResultCount = String(count);
@@ -1201,6 +1214,7 @@ var Vt=null,Jt=!1,fzUsableResults=false;function Qt(count) {
     const ready = count > 0;
     if (ready !== fzUsableResults) { fzUsableResults = ready; Yt('fz:search-state'); }
     e.dispatchEvent(new CustomEvent('fz:result-count', {detail:{count,busy:ee||Kt}}));
+    if(!Vt||Vt.started){fzUsage('count',{count});if(Vt?.started&&count)fzUsage('visible',{count});}
   }
 function Xt() {
   var e = Vt;
@@ -1259,7 +1273,7 @@ e.fzRefineBridge.begin = function (e) {
       published: new Map(),
       started: !1
     }, Qt(tt().length), Ft();
-    fzAccountStart(e);
+    fzAccountStart(e,'refinement');
   } finally {
     Gt = !1;
   }

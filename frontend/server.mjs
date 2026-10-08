@@ -10,7 +10,7 @@ const base = resolve(dirname(fileURLToPath(import.meta.url)), 'public');
 const manifest = JSON.parse(readFileSync(resolve(base, 'release.json'), 'utf8'));
 const association = '/.well-known/apple-developer-merchantid-domain-association';
 const routes = new Map();
-const csp = "default-src 'self'; script-src 'self' 'unsafe-inline' https://*.myfatoorah.com https://cdn.paddle.com https://www.googletagmanager.com https://www.googleadservices.com https://www.google.com https://googleads.g.doubleclick.net; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; connect-src 'self' https://api.findzia.com https://*.myfatoorah.com https://*.paddle.com https://www.googletagmanager.com https://www.googleadservices.com https://googleads.g.doubleclick.net https://pagead2.googlesyndication.com https://www.google.com https://www.google.com.kw https://www.google.com.sa https://ad.doubleclick.net; img-src 'self' https: data: blob:; frame-src https://*.myfatoorah.com https://*.paddle.com https://www.googletagmanager.com; media-src 'self' blob:; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self' https://*.myfatoorah.com https://*.paddle.com";
+const csp = "default-src 'self'; script-src 'self' 'unsafe-inline' https://*.myfatoorah.com https://cdn.paddle.com https://www.googletagmanager.com https://www.googleadservices.com https://www.google.com https://googleads.g.doubleclick.net; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; connect-src 'self' https://*.google-analytics.com https://analytics.google.com https://api.findzia.com https://*.myfatoorah.com https://*.paddle.com https://www.googletagmanager.com https://www.googleadservices.com https://googleads.g.doubleclick.net https://pagead2.googlesyndication.com https://www.google.com https://www.google.com.kw https://www.google.com.sa https://ad.doubleclick.net; img-src 'self' https: data: blob:; frame-src https://*.myfatoorah.com https://*.paddle.com https://www.googletagmanager.com; media-src 'self' blob:; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self' https://*.myfatoorah.com https://*.paddle.com";
 const common = {
   'X-Content-Type-Options': 'nosniff',
   'Referrer-Policy': 'strict-origin-when-cross-origin',
@@ -59,6 +59,10 @@ function encodingFor(header) {
 export function createServer(env=process.env) {
   const provider = String(env.FINDZIA_PAYMENT_PROVIDER ?? 'paddle').trim().toLowerCase();
   if (!applePayFiles.has(provider)) throw Error('FINDZIA_PAYMENT_PROVIDER must be paddle or myfatoorah');
+  const measurementId=String(env.FINDZIA_GA4_MEASUREMENT_ID||'').trim();
+  if(measurementId&&!/^G-[A-Z0-9]{5,20}$/.test(measurementId))throw Error('Invalid FINDZIA_GA4_MEASUREMENT_ID');
+  const analyticsBody=Buffer.from(JSON.stringify({measurement_id:measurementId}));
+  const analyticsEntry={body:analyticsBody,hash:createHash('sha256').update(analyticsBody).digest('hex'),type:types.json,immutable:false};
   const selectedFile = applePayFiles.get(provider);
   const health = Buffer.from(JSON.stringify({...JSON.parse(routes.get('/healthz').body),
     payment_provider:provider,apple_pay_file_sha256:selectedFile.hash,apple_pay_switch:'railway-variable-v1'}));
@@ -71,7 +75,7 @@ export function createServer(env=process.env) {
     // No canonical-domain, slash or HTTPS redirects here: the provider must
     // receive the file itself on each HTTPS host, not a redirected document.
     const path = (req.url || '/').split('?')[0];
-    const entry = path===association ? selectedFile : path==='/healthz' ? healthEntry : routes.get(path);
+    const entry = path==='/analytics-config.json' ? analyticsEntry : path===association ? selectedFile : path==='/healthz' ? healthEntry : routes.get(path);
     if (!entry) {
       const page = routes.get('/404.html');
       res.writeHead(404, {...common, 'Content-Type':types.html, 'Cache-Control':'no-store', 'Content-Length':page.body.length});
@@ -80,7 +84,7 @@ export function createServer(env=process.env) {
     const encoding=entry.encoded && encodingFor(req.headers['accept-encoding']);
     const body=encoding ? entry.encoded[encoding] : entry.body;
     const headers = {...common, 'Content-Type':entry.type, 'Content-Length':body.length,
-      'Cache-Control': path === association ? 'no-store' : entry.immutable ? 'public, max-age=31536000, immutable' : 'no-cache',
+      'Cache-Control': (path === association || path === '/analytics-config.json') ? 'no-store' : entry.immutable ? 'public, max-age=31536000, immutable' : 'no-cache',
       ETag:'"'+entry.hash+(encoding?'.'+encoding:'')+'"', 'X-Findzia-Build':manifest.version};
     if(entry.encoded)headers.Vary='Accept-Encoding';
     if(encoding)headers['Content-Encoding']=encoding;

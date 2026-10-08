@@ -3,6 +3,14 @@
   'use strict';
   if (window.FindziaAdsInstalled) return;
   window.FindziaAdsInstalled = true;
+  var internal=false;
+  try {
+    var test=new URL(window.location.href).searchParams.get('fz_test');
+    internal=test==='1'||(test!=='0'&&localStorage.getItem('findzia-internal-traffic')==='1');
+    if(test==='1'||test==='0')localStorage.setItem('findzia-internal-traffic',test);
+  } catch (_) {}
+  window.FindziaTraffic={internal:internal};
+  if(internal)return; // Owner tests never send Ads conversions or GA events.
   window.dataLayer = window.dataLayer || [];
   window.gtag = window.gtag || function () { window.dataLayer.push(arguments); };
   window.gtag('js', new Date());

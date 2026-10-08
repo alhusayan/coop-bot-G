@@ -36,6 +36,7 @@
       return false;
     }finally{
       clearTimeout(timer);
+      if(!allowed&&!launch?.cancelled)try{root.dispatchEvent(new CustomEvent('fz:usage',{bubbles:true,detail:{type:'blocked',method:payload.kind,code:root.fzBilling?.status?.()?.remaining===0?'credits_exhausted':'credits_unavailable'}}));}catch(_){}
       if(launch)root.fzRefineBridge?.finishSearchLaunch?.(launch,!!allowed&&!ctl.signal.aborted);
     }
   };
