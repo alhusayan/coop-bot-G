@@ -402,7 +402,7 @@ from findzia_billing import CreditMiddleware, install_billing
 app.add_middleware(CreditMiddleware, owner=app)
 _WEB_CORS_ORIGINS = [x.strip() for x in os.environ.get('WEB_ALLOWED_ORIGINS', 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_WEB_CORS_ORIGINS, allow_origin_regex=os.environ.get('WEB_ALLOWED_ORIGIN_REGEX', '^https://[a-z0-9-]+\\.myshopify\\.com$'), allow_credentials=False, allow_methods=['GET', 'POST', 'OPTIONS'], allow_headers=['Content-Type', 'Accept', 'Authorization', 'X-Findzia-Request-Id', 'X-Findzia-Search-Trace'], max_age=86400)
-BUILD_ID = 'v128.5.42.93-preview-audit'
+BUILD_ID = 'v128.5.42.94-early-lens'
 _SOCIAL = None
 
 def _fz_social_row(row):
@@ -1978,14 +1978,14 @@ def _searchapi_policy_snapshot():
                 text_primary=('serper' if _HYBRID_SEARCH else 'searchapi') if _SEARCHAPI_ROUTER.enabled else 'legacy',
                 hybrid=_HYBRID_SEARCH, serper_configured=bool(os.environ.get('SERPER_API_KEY', '').strip()))
 
-def _serpapi_cached_json(params, timeout, label='SERPAPI', *, return_error=False, retry_connect=False):
+def _serpapi_cached_json(params, timeout, label='SERPAPI', *, return_error=False, retry_connect=False, lens_hedge=False):
     if not _HYBRID_SEARCH and '_purpose' in params:
         params = {key: value for key, value in params.items() if key != '_purpose'}
     if _HYBRID_SEARCH:
         engine = str(params.get('engine') or '')
         if engine == 'google_lens':
             return _SEARCHAPI_ROUTER.search(params, timeout, _serpapi_only_cached_json,
-                                           label=label, return_error=return_error)
+                                           label=label, return_error=return_error, lens_hedge=lens_hedge)
         if engine in _HYBRID_SERPER_ENGINES:
             return _hybrid_serper_request(params, timeout, return_error=return_error)
         # Native Baidu and provider-owned product tokens have no Serper equivalent.
@@ -1996,7 +1996,7 @@ def _serpapi_cached_json(params, timeout, label='SERPAPI', *, return_error=False
                                         return_error=return_error, retry_connect=False)
     if _SEARCHAPI_ROUTER.enabled:
         return _SEARCHAPI_ROUTER.search(params, timeout, _serpapi_only_cached_json,
-                                       label=label, return_error=return_error)
+                                       label=label, return_error=return_error, lens_hedge=lens_hedge)
     return _serpapi_only_cached_json(params, timeout, label=label,
                                     return_error=return_error, retry_connect=retry_connect)
 
@@ -2771,7 +2771,7 @@ def _collect_lens_items(data, items, seen):
             items[-1]['retrieval_sources'] = ['google_lens']
     return items
 
-def _serpapi_lens_request(public_url, lens_type, country, auto_crop, query_hint, *, strict=False, progress_callback=None):
+def _serpapi_lens_request(public_url, lens_type, country, auto_crop, query_hint, *, strict=False, progress_callback=None, early_backup=False):
     params = {'engine': 'google_lens', 'url': public_url, 'api_key': SERPAPI_API_KEY, 'hl': country_search_hl(country), 'safe': 'active', 'output': 'json'}
     if lens_type:
         params['type'] = lens_type
@@ -2788,6 +2788,7 @@ def _serpapi_lens_request(public_url, lens_type, country, auto_crop, query_hint,
             params,
             timeout=(2, lens_read_timeout),
             label=f"GOOGLE LENS type={lens_type or 'all'} country={country or '-'}",
+            lens_hedge=early_backup,
         )
         if strict and (not isinstance(data, dict) or data.get('error')):
             raise RuntimeError('lens_provider_unavailable')
@@ -3758,7 +3759,8 @@ def google_lens_lookup(image_b64, mime_type, lang='ar', query_hint='', light=Fal
                 auto_crop = True
             image_url = public_url if auto_crop else full_frame
             future = LENS_HTTP_POOL.submit(_serpapi_lens_request, image_url, lens_type, country, auto_crop, query_hint,
-                                           progress_callback=local_progress)
+                                           progress_callback=local_progress,
+                                           early_backup=not reference_context and country == user_country and lens_type == 'products')
             future_map[future] = (lens_type, country, auto_crop)
         all_futures = set(future_map)
         visual_futures = tuple(all_futures)
@@ -32920,10 +32922,7 @@ def _fz_evaluation_token(row):
               'price_kind','price_min','price_max','price_unit','price_status','price_source',
               'price_source_url','price_verified','price_unavailable','price_tax_note',
               'price_compare_value','price_compare_currency','price_estimated','original_price','original_currency','card_model','card_brand',
-              'condition','item_condition','stock_status','in_stock','hidden',
-              'classification_final','identity_review_status','display_before_audit','match_type',
-              'photo_match_status','alternative_visual_status','price_integrity_status',
-              'shipping_amount','shipping_currency','shipping_verified','shipping_country')
+              'condition','item_condition','stock_status')
     data = {k:row[k] for k in fields if isinstance(row.get(k),(str,int,float,bool))}
     data = {k:(v[:600] if isinstance(v,str) and k not in ('url','price_source_url') else v)
             for k,v in data.items()}
@@ -34838,7 +34837,3 @@ async def _web_prepare_image_bytes(request, image_bytes, mime, client_meta=None)
 
 
 app.add_middleware(_FindziaImageTiming)
-
-# Findzia One 157.0: one evidence-backed AI choice, existing retrieval preserved.
-from findzia_choice import install_choice as _install_findzia_choice
-_FZ_ONE_CHOICE = _install_findzia_choice(app, globals())
