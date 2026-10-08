@@ -31,7 +31,7 @@ for (const [url, entry] of Object.entries(manifest.routes)) {
     br: brotliCompressSync(body,{params:{[zlibConstants.BROTLI_PARAM_QUALITY]:5}}),
     gzip: gzipSync(body),
   } : null;
-  routes.set(url, {body, hash, encoded, type: types[entry.type], immutable: entry.immutable === true});
+  routes.set(url, {body, hash, encoded, type: types[entry.type], immutable: entry.immutable === true, preview: entry.preview === true});
 }
 if (routes.get(association)?.hash !== manifest.apple_pay_file_sha256) throw Error('Verification file mismatch');
 
@@ -86,6 +86,7 @@ export function createServer(env=process.env) {
     const headers = {...common, 'Content-Type':entry.type, 'Content-Length':body.length,
       'Cache-Control': (path === association || path === '/analytics-config.json') ? 'no-store' : entry.immutable ? 'public, max-age=31536000, immutable' : 'no-cache',
       ETag:'"'+entry.hash+(encoding?'.'+encoding:'')+'"', 'X-Findzia-Build':manifest.version};
+    if(entry.preview){headers['X-Robots-Tag']='noindex, nofollow, noarchive';headers['Cache-Control']='no-store';headers['Referrer-Policy']='no-referrer';}
     if(entry.encoded)headers.Vary='Accept-Encoding';
     if(encoding)headers['Content-Encoding']=encoding;
     if (!['findzia.com','www.findzia.com'].includes((req.headers.host || '').toLowerCase().split(':')[0])) {
