@@ -10,7 +10,7 @@ import math
 import os
 import threading
 import time
-from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError, wait, FIRST_COMPLETED
+from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError
 
 import requests
 from findzia_cache import provider_cacheable
@@ -283,8 +283,6 @@ class SearchApiRouter:
         self.threshold = _number('SEARCHAPI_FALLBACK_AFTER_SECONDS', 8., .1, 15.)
         self.total = _number('SEARCHAPI_TOTAL_TIMEOUT_SECONDS', 18., 1., 30.)
         self.backup_min = _number('SEARCHAPI_BACKUP_MIN_SECONDS', 4., .1, 15.)
-        self.lens_hedge = os.environ.get('FINDZIA_LENS_EARLY_BACKUP', 'true').lower() in ('1', 'true', 'yes', 'on')
-        self.lens_hedge_after = _number('FINDZIA_LENS_BACKUP_AFTER_SECONDS', 1.5, .1, 8.)
         self.economy = os.environ.get('SEARCHAPI_ECONOMY_ENABLED', 'true').lower() in ('1', 'true', 'yes', 'on')
         self.cooldown = _number('SEARCHAPI_CIRCUIT_SECONDS', 30., 1., 300.)
         self.workers = int(_number('SEARCHAPI_MAX_INFLIGHT', 32., 2., 64.))
@@ -302,7 +300,6 @@ class SearchApiRouter:
         return {'enabled': self.enabled, 'primary': 'searchapi' if self.enabled else 'legacy',
                 'fallback': 'serpapi', 'fallback_after_seconds': self.threshold,
                 'total_timeout_seconds': self.total, 'backup_min_seconds': self.backup_min,
-                'lens_early_backup': self.lens_hedge, 'lens_backup_after_seconds': self.lens_hedge_after,
                 'economy_enabled': self.economy, 'open_circuits': circuits}
 
     def _health(self, engine, ok, status=0, *, short_deadline=False):
@@ -375,90 +372,7 @@ class SearchApiRouter:
                         self.late.pop(key, None)
         future.add_done_callback(finished)
 
-    def _race_lens(self, primary, params, mapped, deadline, primary_seconds, fallback, key, bypass, label):
-        """One nominated image lane; keep the primary alive while its rescue runs."""
-        started = time.monotonic()
-        primary_until = min(deadline, started + primary_seconds)
-        launch_at = min(primary_until, started + self.lens_hedge_after)
-        backup = None
-        backup_attempted = False
-        empty_result = None
-        active_primary = primary
-        try:
-            while time.monotonic() < deadline:
-                now = time.monotonic()
-                if active_primary is not None and active_primary.done():
-                    try:
-                        data, reason, status = active_primary.result()
-                    except Exception:
-                        data, reason, status = None, 'connection', 0
-                    active_primary = None
-                    self._health(mapped['engine'], data is not None, status,
-                                 short_deadline=primary_seconds < self.threshold - .01)
-                    if data is not None:
-                        if provider_cacheable(data) or backup is None:
-                            self.log('LENS FIRST RESPONSE winner=searchapi elapsed_ms=' + str(round((now-started)*1000)))
-                            return data
-                        empty_result = data
-                    elif status == 400 and backup is None:
-                        return None
-                    launch_at = now
-                if backup is not None and backup.done():
-                    try:
-                        data = backup.result()
-                    except Exception:
-                        data = None
-                    backup = None
-                    if isinstance(data, dict) and not data.get('_serpapi_failure') and normalize(data, 'google_lens') is not None:
-                        data = copy.deepcopy(data)
-                        data['search_metadata'] = dict(data.get('search_metadata') or {}, provider='serpapi', fallback_from='searchapi')
-                        if provider_cacheable(data):
-                            self.log('LENS FIRST RESPONSE winner=serpapi elapsed_ms=' + str(round((now-started)*1000)))
-                            return data
-                        empty_result = empty_result or data
-                if active_primary is not None and now >= primary_until:
-                    self._retain_late(key, mapped['engine'], active_primary, bypass)
-                    active_primary = None
-                    self._health(mapped['engine'], False, 0,
-                                 short_deadline=primary_seconds < self.threshold - .01)
-                if not backup_attempted and (now >= launch_at or active_primary is None):
-                    backup_attempted = True
-                    remaining = deadline - now
-                    if remaining >= self.backup_min:
-                        backup_params = dict(params, api_key=self.backup_key)
-                        def rescue():
-                            left = deadline - time.monotonic()
-                            if left <= .01:
-                                return None
-                            connect = min(1.5, left / 4)
-                            return fallback(backup_params, (connect, left-connect), label=label,
-                                            return_error=True, retry_connect=False)
-                        backup = self.backup_pool.submit(rescue)
-                        if backup is not None:
-                            self.cost('searchapi_fallback_requests')
-                            self.cost('lens_early_backup_requests')
-                            self.log('LENS EARLY BACKUP after_ms=' + str(round((now-started)*1000)))
-                    else:
-                        self.cost('searchapi_rescue_skipped')
-                pending = {job for job in (active_primary, backup) if job is not None}
-                if not pending:
-                    break
-                wake = deadline
-                if active_primary is not None:
-                    wake = min(wake, primary_until)
-                if not backup_attempted:
-                    wake = min(wake, launch_at)
-                wait(pending, timeout=max(0., wake-time.monotonic()), return_when=FIRST_COMPLETED)
-            return empty_result
-        finally:
-            # Purchased primary work is retained for later searches. The losing
-            # rescue uses the legacy transport's own cache and never updates UI.
-            if primary is not None and (not primary.done() or active_primary is not None):
-                self._retain_late(key, mapped['engine'], primary, bypass)
-            if backup is not None:
-                backup.cancel()
-
-    def search(self, params, timeout, fallback, *, label='', return_error=False, lens_hedge=False):
+    def search(self, params, timeout, fallback, *, label='', return_error=False):
         mapped = searchapi_params(params)
         if not self.enabled or mapped is None:
             return fallback(params, timeout, label=label, return_error=return_error, retry_connect=False)
@@ -507,13 +421,6 @@ class SearchApiRouter:
                     self.cost('searchapi_late_reused')
                 else:
                     future = self.primary_pool.submit(self._primary, mapped, primary_seconds)
-            if lens_hedge and self.lens_hedge and mapped['engine'] == 'google_lens':
-                result = self._race_lens(future, params, mapped, deadline, primary_seconds,
-                                         fallback, key, bypass, label)
-                if not bypass and provider_cacheable(result):
-                    ttl = 30 if result.get('search_metadata', {}).get('fallback_from') else None
-                    self.cache_put(key, mapped['engine'], result, ttl_seconds=ttl)
-                return copy.deepcopy(result) if result is not None else self._failure(return_error)
             if future is not None:
                 try:
                     result, reason, status = future.result(timeout=primary_seconds)

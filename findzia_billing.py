@@ -13,7 +13,6 @@ import re
 import secrets
 import sqlite3
 import time
-from collections import deque
 
 from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -31,38 +30,6 @@ HELPER_PATHS = {'/api/guide': ('guide', 4), '/api/evaluate': ('insight', 5),
     '/api/ai/shopping': ('insight', 5)}
 REQUEST_ID = re.compile(r'^[A-Za-z0-9_-]{20,100}$')
 IMAGE_RETRY_WAIT_SECONDS = 6.0
-IMAGE_ADMISSION_PREFETCH_BYTES = 2 * 1024 * 1024
-
-
-class _AdmissionBody:
-    """Overlap a bounded photo upload with admission; never start retrieval."""
-    def __init__(self, receive):
-        self.receive = receive
-        self.messages = deque()
-        self.bytes = 0
-        self.task = asyncio.create_task(self._prefetch())
-
-    async def _prefetch(self):
-        # Stop after a small prefix, including on many tiny/empty ASGI chunks.
-        for _ in range(32):
-            message = await self.receive()
-            self.messages.append(message)
-            self.bytes += len(message.get('body', b''))
-            if (message.get('type') != 'http.request' or not message.get('more_body', False)
-                    or self.bytes >= IMAGE_ADMISSION_PREFETCH_BYTES):
-                break
-
-    async def read(self):
-        if not self.messages:
-            # Only one coroutine owns the underlying receive at any time.
-            await self.task
-        return self.messages.popleft() if self.messages else await self.receive()
-
-    async def close(self):
-        if not self.task.done():
-            self.task.cancel()
-        await asyncio.gather(self.task, return_exceptions=True)
-        self.messages.clear()
 
 def fingerprint(value):
     return hashlib.sha256(str(value).encode()).hexdigest()
@@ -491,29 +458,6 @@ class CreditMiddleware:
             await asyncio.sleep(min(.2,remaining))
 
     async def __call__(self,scope,receive,send):
-        prefetch = None
-        headers = dict(scope.get('headers') or [])
-        service = getattr(self.owner.state, 'findzia_credits', None)
-        enabled = os.environ.get('FINDZIA_IMAGE_ADMISSION_PREFETCH', 'true').lower() in ('1','true','yes','on')
-        length = headers.get(b'content-length', b'')
-        if (enabled and scope.get('type') == 'http' and scope.get('method') == 'POST'
-                and scope.get('path') in ('/api/search/image', '/api/search/image/stream')
-                and service and service.enabled and service.available
-                and headers.get(b'origin', b'').decode('latin-1') in service.accounts.origins
-                and len(length) <= 10 and length.isdigit() and 0 < int(length) <= IMAGE_ADMISSION_PREFETCH_BYTES):
-            prefetch = _AdmissionBody(receive)
-        timing = scope.get('findzia_image_timing')
-        if isinstance(timing, dict):
-            timing['credits_body_prefetch'] = prefetch is not None
-        try:
-            return await self._call(scope, prefetch.read if prefetch else receive, send)
-        finally:
-            if prefetch is not None:
-                await prefetch.close()
-                if isinstance(timing, dict):
-                    timing['credits_body_prefetch_bytes'] = prefetch.bytes
-
-    async def _call(self,scope,receive,send):
         if scope['type']!='http' or scope.get('method')=='OPTIONS':return await self.app(scope,receive,send)
         path=scope['path']; is_search=path in SEARCH_PATHS
         helper=HELPER_PATHS.get(path)
@@ -532,9 +476,7 @@ class CreditMiddleware:
             service.check()
             request=Request(scope)
             if request.headers.get('origin') not in service.accounts.origins:raise HTTPException(403,'origin_not_allowed')
-            admission_started = time.monotonic()
             member=await service.runtime.run(service.actor,request)
-            actor_finished = time.monotonic()
             if is_search:
                 rid=request.headers.get('x-findzia-request-id','')
                 # Shield admission too: a disconnect must not orphan a queued
@@ -543,11 +485,6 @@ class CreditMiddleware:
                 admission=service.runtime.track(self._reserve_search(service,member['id'],rid,path,admission_cancelled))
                 try:
                     rid=await asyncio.shield(admission);reserved=True
-                    timing = scope.get('findzia_image_timing')
-                    if isinstance(timing, dict):
-                        timing.update(credits_actor_ms=round((actor_finished-admission_started)*1000),
-                                      credits_reserve_ms=round((time.monotonic()-actor_finished)*1000),
-                                      credits_admission_ms=round((time.monotonic()-admission_started)*1000))
                 except asyncio.CancelledError:
                     admission_cancelled.set()
                     async def cancel_admission():
