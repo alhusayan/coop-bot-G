@@ -15,7 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
-RELEASE = "157.0.0"
+RELEASE = "157.0.1"
 MAX_OFFERS = 48
 MAX_BODY = 850_000
 
@@ -30,8 +30,13 @@ material and colour. A cheap accessory, replacement part, wrong variant, bulk
 MOQ, instalment or incompatible product is NOT a bargain. Never downgrade an
 explicit specification to satisfy a cheaper preference. Price is important, but
 the best suitable model may be better value than an unsuitable cheaper model.
-For an image query, candidates have passed a visual audit; don't invent hidden
-specifications. Select only from them. For text, reject nonmatching categories.
+For an image query, candidates have completed visual review. An exact label is
+strong evidence, but a similar label can mean a minor colour/finish difference or
+unreadable detail, not a wrong product. Use the supplied identity evidence and
+the user's requirements. Prefer exact matches; when none suit, choose the closest
+useful reviewed candidate with match:"suitable". Reject actual category, shape,
+function or explicit requirement conflicts. Don't invent hidden specifications.
+For text, reject nonmatching categories.
 Prefer the lowest comparable cost of the SAME suitable product. Compare different
 currencies ONLY using comparison_amount values with the same comparison_currency.
 Unknown shipping/tax is unknown, never free. A listed price is not a delivered
@@ -106,9 +111,8 @@ class ChoiceEngine:
                 continue
             if kind == 'image':
                 if (row.get('classification_final') is not True
-                        or row.get('identity_review_status') in ('pending', 'unavailable')
-                        or row.get('display_before_audit') is True
-                        or row.get('match_type') != 'exact'):
+                        or row.get('identity_review_status') not in ('completed', 'partial')
+                        or row.get('match_type') not in ('exact', 'similar')):
                     continue
             evidence = self.s['_fz_listing_text'](row)[:2800]
             if kind == 'text' and self.s['_findzia_hard_product_mismatch'](query, evidence):
@@ -145,6 +149,9 @@ class ChoiceEngine:
             fx = _number(row.get('price_compare_value'))
             offers.append(dict(id=c['id'], evidence=c['evidence'], store=row.get('store', ''),
                                country=row.get('country'), money=money,
+                               identity={k:row[k] for k in ('match_type', 'classification_reason',
+                                         'identity_match_percentage', 'match_percentage', 'visual_differences',
+                                         'visual_axes', 'unknown_attributes') if k in row},
                                comparison_amount=fx,
                                comparison_currency=row.get('price_compare_currency') if fx else None))
         response = self.s['_refine_ai'](PROMPT, dict(request=context, offers=offers), tokens=1000, timeout=6)
@@ -175,7 +182,8 @@ class ChoiceEngine:
                     store=row.get('store', ''), money=money,
                     reason=reason['text'] if reason else '', reason_inference=bool(reason and reason.get('inference')),
                     savings=dict(amount=saving, currency=money['currency'], basis=money['basis']) if saving else None,
-                    evaluated_count=len(candidates), match='exact' if context['kind'] == 'image' else response['match'])
+                    evaluated_count=len(candidates), match=('exact' if row.get('match_type') == 'exact' else 'suitable')
+                    if context['kind'] == 'image' else response['match'])
 
     def submit(self, context, candidates):
         key = hashlib.sha256(json.dumps([context, candidates], sort_keys=True, ensure_ascii=False).encode()).hexdigest()
@@ -222,6 +230,10 @@ def install_choice(app, services):
                     return JSONResponse(dict(ok=False, error='request_too_large'), status_code=413)
             payload = json.loads(raw)
             context, candidates = engine.prepare(payload)
+            print('CHOICE INPUT ' + json.dumps(dict(release=RELEASE, kind=context['kind'],
+                  offers=len(payload.get('offer_tokens', [])), eligible=len(candidates),
+                  exact=sum(c['row'].get('match_type') == 'exact' for c in candidates),
+                  similar=sum(c['row'].get('match_type') == 'similar' for c in candidates))), flush=True)
         except (ValueError, TypeError, AttributeError):
             return JSONResponse(dict(ok=False, error='invalid_request'), status_code=400)
         try:
@@ -229,8 +241,9 @@ def install_choice(app, services):
             if cached is not None:
                 return cached
             return await asyncio.wait_for(asyncio.shield(asyncio.wrap_future(future)), timeout=10)
-        except (Exception, asyncio.TimeoutError):
+        except Exception as exc:
             # Never label a price sort as an AI decision during an outage.
+            print('CHOICE ERROR ' + type(exc).__name__, flush=True)
             return JSONResponse(dict(ok=False, status='unavailable', error='choice_unavailable'), status_code=503)
 
     return engine

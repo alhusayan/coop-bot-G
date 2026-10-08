@@ -32922,12 +32922,20 @@ def _fz_evaluation_token(row):
               'price_kind','price_min','price_max','price_unit','price_status','price_source',
               'price_source_url','price_verified','price_unavailable','price_tax_note',
               'price_compare_value','price_compare_currency','price_estimated','original_price','original_currency','card_model','card_brand',
-              'condition','item_condition','stock_status')
+              'condition','item_condition','stock_status','in_stock','hidden',
+              'classification_final','identity_review_status','display_before_audit','match_type',
+              'classification_reason','identity_match_percentage','match_percentage',
+              'photo_match_status','alternative_visual_status','price_integrity_status',
+              'shipping_amount','shipping_currency','shipping_verified','shipping_country')
     data = {k:row[k] for k in fields if isinstance(row.get(k),(str,int,float,bool))}
     data = {k:(v[:600] if isinstance(v,str) and k not in ('url','price_source_url') else v)
             for k,v in data.items()}
     if len(data.get('url','')) > 2048:
         return ''
+    for key in ('visual_differences', 'unknown_attributes'):
+        values = row.get(key)
+        if isinstance(values, list):
+            data[key] = [_card_text(value, 180) for value in values[:8] if isinstance(value, str)]
     data['image_hashes']=[hashlib.sha256(u.encode()).hexdigest() for u in _web_offer_image_candidates(row)]
     data['key_specs']=[{'key':_card_text(x.get('key') or x.get('kind'),40),'value':_card_text(x.get('value'),140)}
                        for x in (row.get('key_specs') or [])[:8] if isinstance(x,dict) and x.get('value')]
@@ -34837,3 +34845,8 @@ async def _web_prepare_image_bytes(request, image_bytes, mime, client_meta=None)
 
 
 app.add_middleware(_FindziaImageTiming)
+
+
+# Findzia One: selection used by the unlisted trial frontend only.
+from findzia_choice import install_choice as _install_findzia_choice
+_FZ_ONE_CHOICE = _install_findzia_choice(app, globals())

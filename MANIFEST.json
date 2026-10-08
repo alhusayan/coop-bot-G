@@ -1,15 +1,20 @@
 {
-  "release": "157.0.0",
-  "base_commit": "6dc3009ccd575c8e49dd9c5d5d705956d9ed19f5",
+  "release": "157.0.2",
+  "base_commit": "913a1f16e3ece3a470e71f62fc655df0fb254b98",
+  "trial_url_after_deploy": "https://findzia.com/trial/one-55321448a0352f1ff18b",
   "files": {
-    "main.py": "0eb7d7bb1ee3e609aa2c19760c2a51da54a1a0d45a4c66506f07edf31375fbb9",
-    "findzia_choice.py": "eed8deb10a143c4f7739fa9fe63ee390852bebc2a1eecd959fecf4e488a36905",
-    "frontend/scripts/build.mjs": "512051f1c6f89c737754716b9d70828efeb8a4b14c350e8cf99b26677dafdf43",
-    "frontend/source/findzia-home.liquid": "8bb7d593186bf153976f9855ff0a64c0ba2798a3fe1f6e1fdfa66ccc0ff61b0b",
-    "frontend/source/findzia-choice.js": "06ed37548cf716a4ec775e35e9776a113ed68173348fa07006987d5860e91c2f",
-    "frontend/source/findzia-choice.css": "7ebca8dc1f0e27b05811dae90e74eeddad49b4f68d5322f449b0267c52b7411e",
-    "tests/test_choice.py": "fbfac5736eaa87f6b39b6dc48360f34e5611da07b16aac719505431165f3abf3",
-    "tests/choice-ui.test.mjs": "1888490349b33cbb64f9300c83054229027356ac2b04d0784117d7336037c049",
-    "INSTALL_ONE_AR.txt": "c851656fecc0a40ee1bee8952c6f5d12b7d258dc5ba8ac0be5440a9363c34154"
+    "main.py": "6287ec16ce4438aaf342f7abfabd86bf4b119e39deb1cfc28ae6ccc08d261545",
+    "findzia_choice.py": "2ba637a8e1d0fd482440a5f8809266016d14083ba08cc14f908f9946d2aba108",
+    "frontend/server.mjs": "d1f63de374a41acd13d6442ffd5a97d290150e576be5c3822eec15853dbadf59",
+    "frontend/scripts/build.mjs": "032272c4e9be4e20029b8ac939257e6fd2cab7bcd5796c04df7aa5c47aec410f",
+    "frontend/trial.json": "10e561045ad3e063fbd8978536427919b9e048af6077f00b1a07de6a5e634368",
+    "frontend/source/findzia-home.liquid": "905571e32df856bea826715ead9e9b977b96ade47f18beae974320db4efd558f",
+    "frontend/source/findzia-one.liquid": "0019e69a1ee88b46336b7c76ddf73aa50b48952a0de856fad9c9e2ca4935ced9",
+    "frontend/source/findzia-choice.js": "c0dce314b99f4d6337c364bdf083f7acff5fd22846a880d9392a365ed4ee66e8",
+    "frontend/source/findzia-choice.css": "6fd4457bcfcd592a852e0098bafe25601b2d68573ffc650d8b2645f461d50842",
+    "tests/test_choice.py": "fa26d6f3af30e11e787898a7ff135cf5244d2cf1bf40fd4bf3c97b34089b84cd",
+    "tests/choice-ui.test.mjs": "3032a7a7865b62b14764f5ed828c53951f532bce398c20118650379a59e86b49",
+    "tests/trial-page.test.mjs": "b42aa53bf51425e4cba69f11644fd731e14e443fae939adcfb22398ca25071bc",
+    "INSTALL_TRIAL_AR.txt": "bd868cdf20fcdf736e9b2279ed7c247c3b45efe409a00266e63db5eaf4d79c57"
   }
 }
