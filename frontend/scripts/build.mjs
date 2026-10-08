@@ -28,8 +28,6 @@ sourceReleases.motion=read('findzia-motion.js').toString().match(/FINDZIA_MOTION
 sourceReleases.motionCSS=read('findzia-motion.css').toString().match(/FINDZIA_MOTION_CSS_RELEASE=([0-9.]+)/)?.[1];
 sourceReleases.support=read('findzia-support.js').toString().match(/FINDZIA_SUPPORT_RELEASE=([0-9.]+)/)?.[1];
 sourceReleases.i18n=read('findzia-i18n.js').toString().match(/FINDZIA_I18N_RELEASE=([0-9.]+)/)?.[1];
-sourceReleases.choice=read('findzia-choice.js').toString().match(/FINDZIA_CHOICE_RELEASE=([0-9.]+)/)?.[1];
-if(sourceReleases.choice!=='157.0.0')throw Error('Findzia One release mismatch.');
 const uiLocales = packLocales(JSON.parse(read('findzia-locales.json').toString('utf8')));
 if(uiLocales.version!==version || sourceReleases.i18n!==version)throw Error('UI translation release mismatch.');
 sourceReleases.focus=read('findzia-focus.js').toString().match(/FINDZIA_FOCUS_RELEASE=([0-9.]+)/)?.[1];
@@ -49,7 +47,7 @@ function emit(url, file, bytes, type, immutable=false) {
   routes[url] = {file,sha256:hash(bytes),type,immutable}; return url;
 }
 const assets = new Map();
-for (const name of ['findzia-choice.js','findzia-choice.css','findzia-ads.js','findzia-analytics.js','findzia-support.js','findzia-focus.js','findzia-account.js','findzia-subscriptions.js','findzia-billing.js','findzia-filters.js','findzia-i18n.js','findzia-shell.js','findzia-product-details.css','findzia-migration.js','findzia-standalone.css','findzia-motion.js','findzia-motion.css']) {
+for (const name of ['findzia-ads.js','findzia-analytics.js','findzia-support.js','findzia-focus.js','findzia-account.js','findzia-subscriptions.js','findzia-billing.js','findzia-filters.js','findzia-i18n.js','findzia-shell.js','findzia-product-details.css','findzia-migration.js','findzia-standalone.css','findzia-motion.js','findzia-motion.css']) {
   let bytes=read(name);
   if(name==='findzia-support.js')bytes=Buffer.from(bytes.toString().replace('/* SUPPORT_KNOWLEDGE */ null',()=>JSON.stringify(JSON.parse(read('findzia-support.json').toString('utf8')))));
   if(name==='findzia-i18n.js')bytes=Buffer.from(bytes.toString().replace('/* UI_TRANSLATIONS */ null',()=>JSON.stringify(uiLocales)));
