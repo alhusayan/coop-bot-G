@@ -54,6 +54,7 @@ const offers=Array.from({length:9},(_,i)=>({title:'Orange drink '+i,store:'Store
     await page.locator('input[type=file]').first().setInputFiles({name:'orange.png',mimeType:'image/png',buffer:Buffer.from(png,'base64')});await wait();
     await page.waitForFunction(()=>document.querySelector('.fz-search-wait img').src.startsWith('data:image/'));
    }else await start();
+   const headerGeometry=()=>page.evaluate(()=>Object.fromEntries(['.fz-fixed-header','.fz-brand-name','.fz-search-row','.fz-camera-hero','.fz-camera-hero>svg'].map(selector=>{const r=document.querySelector(selector).getBoundingClientRect();return[selector,{x:r.x,y:r.y,width:r.width,height:r.height}];})));
    const original=await page.locator('.fz-search-wait img').getAttribute('src');
    assert.equal(await page.locator('.fz-one-scan').evaluate(e=>getComputedStyle(e).display),'block');
    search.resolve();
@@ -61,11 +62,17 @@ const offers=Array.from({length:9},(_,i)=>({title:'Orange drink '+i,store:'Store
    await page.waitForFunction(()=>document.querySelectorAll('.fz-search-wait .fz-one-reel').length>0);
    if(variant.photo)assert.equal(await page.locator('.fz-search-wait img').getAttribute('src'),original,'original photo does not change to a merchant image');
    if(variant.lang==='ja')assert.match(await page.locator('.fz-one-heading').textContent(),/[\u3040-\u30ff]/,'Japanese labels preserved');
+   const waitingHeader=await headerGeometry();
+   assert.ok(waitingHeader['.fz-camera-hero'].width>=80,'full-size camera retained while searching');
+   assert.ok(Math.abs(waitingHeader['.fz-camera-hero'].x+waitingHeader['.fz-camera-hero'].width/2-variant.width/2)<2,'camera stays centered while searching');
    const geometry=await page.evaluate(()=>{const box=document.querySelector('.fz-search-wait').getBoundingClientRect();const image=document.querySelector('.fz-one-stage').getBoundingClientRect();return {bottom:box.bottom,width:document.documentElement.scrollWidth,viewport:innerWidth,height:innerHeight,imageHeight:image.height};});
-   assert.ok(geometry.bottom<=geometry.height+2,JSON.stringify(geometry));assert.ok(geometry.width<=geometry.viewport+1,'no horizontal overflow');assert.ok(geometry.imageHeight>=300,'large image area');
+   assert.ok(geometry.bottom<=geometry.height+2,JSON.stringify(geometry));assert.ok(geometry.width<=geometry.viewport+1,'no horizontal overflow');assert.ok(geometry.imageHeight>=250,'large image fits below the full results header');
    if(process.env.FINDZIA_TEST_OUTPUT){fs.mkdirSync(process.env.FINDZIA_TEST_OUTPUT,{recursive:true});await page.screenshot({path:path.join(process.env.FINDZIA_TEST_OUTPUT,`wait-${variant.width}-${variant.lang}.png`)});}
    media.resolve();await hidden();
    await page.waitForFunction(()=>document.querySelector('.fz-home').fzRefineBridge.context().can_refine);
+   const readyHeader=await headerGeometry();
+   for(const [selector,rect] of Object.entries(waitingHeader))for(const key of ['x','y','width','height'])assert.ok(Math.abs(rect[key]-readyHeader[selector][key])<2,selector+' '+key+' stays fixed between waiting and results: '+rect[key]+' -> '+readyHeader[selector][key]);
+   if(process.env.FINDZIA_TEST_OUTPUT)await page.screenshot({path:path.join(process.env.FINDZIA_TEST_OUTPUT,`ready-${variant.width}-${variant.lang}.png`)});
    assert.notEqual(await page.locator('[data-results-body]').evaluate(e=>getComputedStyle(e).display),'none','real grid is restored');
    assert.equal(await page.evaluate(()=>!!document.querySelector('.fz-home').fzOneChoice),false,'trial AI mode never mounts on public home');
    assert.equal(calls.some(p=>p.includes('/choice')),false,'no extra AI-choice request');
