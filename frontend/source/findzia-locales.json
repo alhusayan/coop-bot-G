@@ -919,7 +919,9 @@
       "Ready to search": "Ready to search",
       "More options": "More options",
       "Discount": "Discount",
-      "Credit applied": "Credit applied"
+      "Credit applied": "Credit applied",
+      "Choose your pack": "Choose your pack",
+      "Prices in USD. Tax calculated at checkout.": "Prices in USD. Tax calculated at checkout."
     },
     "ar": {
       "SHOP A BRIGHTER YOU": "تسوق لإطلالة أكثر إشراقاً",
@@ -1710,7 +1712,9 @@
       "Ready to search": "جاهز للبحث",
       "More options": "خيارات إضافية",
       "Discount": "الخصم",
-      "Credit applied": "رصيد مالي مستخدم"
+      "Credit applied": "رصيد مالي مستخدم",
+      "Choose your pack": "اختر باقتك",
+      "Prices in USD. Tax calculated at checkout.": "الأسعار بالدولار الأمريكي. تُحسب الضريبة عند الدفع."
     },
     "de": {
       "SHOP A BRIGHTER YOU": "ERLEBE EIN NEUES GLANZLICHT",
@@ -2501,7 +2505,9 @@
       "Ready to search": "Bereit für die Suche",
       "More options": "Weitere Optionen",
       "Discount": "Rabatt",
-      "Credit applied": "Angerechnetes Guthaben"
+      "Credit applied": "Angerechnetes Guthaben",
+      "Choose your pack": "Wähle dein Paket",
+      "Prices in USD. Tax calculated at checkout.": "Preise in USD. Steuern werden beim Bezahlen berechnet."
     },
     "fr": {
       "SHOP A BRIGHTER YOU": "MAGASINEZ UN VOUS PLUS ÉCLATANT",
@@ -3292,7 +3298,9 @@
       "Ready to search": "Prêt pour la recherche",
       "More options": "Plus d’options",
       "Discount": "Remise",
-      "Credit applied": "Avoir appliqué"
+      "Credit applied": "Avoir appliqué",
+      "Choose your pack": "Choisissez votre pack",
+      "Prices in USD. Tax calculated at checkout.": "Prix en USD. Taxes calculées au paiement."
     },
     "it": {
       "SHOP A BRIGHTER YOU": "ACQUISTA UN TUO LATO PIÙ LUMINOSO",
@@ -4083,7 +4091,9 @@
       "Ready to search": "Pronto per la ricerca",
       "More options": "Altre opzioni",
       "Discount": "Sconto",
-      "Credit applied": "Credito applicato"
+      "Credit applied": "Credito applicato",
+      "Choose your pack": "Scegli il tuo pacchetto",
+      "Prices in USD. Tax calculated at checkout.": "Prezzi in USD. Imposte calcolate al pagamento."
     },
     "es": {
       "SHOP A BRIGHTER YOU": "COMPRA UN TU MÁS BRILLANTE",
@@ -4874,7 +4884,9 @@
       "Ready to search": "Todo listo para buscar",
       "More options": "Más opciones",
       "Discount": "Descuento",
-      "Credit applied": "Saldo aplicado"
+      "Credit applied": "Saldo aplicado",
+      "Choose your pack": "Elige tu paquete",
+      "Prices in USD. Tax calculated at checkout.": "Precios en USD. Impuestos calculados al pagar."
     },
     "pt": {
       "SHOP A BRIGHTER YOU": "COMPRE UMA VERSÃO MAIS BRILHANTE DE SI",
@@ -5665,7 +5677,9 @@
       "Ready to search": "Pronto para buscar",
       "More options": "Mais opções",
       "Discount": "Desconto",
-      "Credit applied": "Crédito aplicado"
+      "Credit applied": "Crédito aplicado",
+      "Choose your pack": "Escolha seu pacote",
+      "Prices in USD. Tax calculated at checkout.": "Preços em USD. Impostos calculados no pagamento."
     },
     "tr": {
       "SHOP A BRIGHTER YOU": "DAHA PARLAK BİR SENİ KEŞFET",
@@ -6456,7 +6470,9 @@
       "Ready to search": "Aramaya hazır",
       "More options": "Diğer seçenekler",
       "Discount": "İndirim",
-      "Credit applied": "Kullanılan bakiye"
+      "Credit applied": "Kullanılan bakiye",
+      "Choose your pack": "Paketini seç",
+      "Prices in USD. Tax calculated at checkout.": "Fiyatlar USD cinsindedir. Vergiler ödeme sırasında hesaplanır."
     },
     "ru": {
       "SHOP A BRIGHTER YOU": "ПОКУПАЙТЕ С НОВЫМ СИЯНИЕМ",
@@ -7247,7 +7263,9 @@
       "Ready to search": "Всё готово к поиску",
       "More options": "Другие варианты",
       "Discount": "Скидка",
-      "Credit applied": "Зачтённые средства"
+      "Credit applied": "Зачтённые средства",
+      "Choose your pack": "Выберите пакет",
+      "Prices in USD. Tax calculated at checkout.": "Цены в USD. Налог рассчитывается при оплате."
     },
     "ja": {
       "SHOP A BRIGHTER YOU": "もっと輝く自分を見つけよう",
@@ -8038,7 +8056,9 @@
       "Ready to search": "検索の準備ができました",
       "More options": "その他のオプション",
       "Discount": "割引",
-      "Credit applied": "適用された残高"
+      "Credit applied": "適用された残高",
+      "Choose your pack": "パックを選ぶ",
+      "Prices in USD. Tax calculated at checkout.": "価格は米ドルです。税金はお支払い時に計算されます。"
     },
     "zh": {
       "SHOP A BRIGHTER YOU": "开启更亮丽的自己",
@@ -8829,7 +8849,9 @@
       "Ready to search": "可以开始搜索了",
       "More options": "更多选项",
       "Discount": "折扣",
-      "Credit applied": "已抵扣余额"
+      "Credit applied": "已抵扣余额",
+      "Choose your pack": "选择搜索套餐",
+      "Prices in USD. Tax calculated at checkout.": "价格以美元计，税费在结账时计算。"
     },
     "ko": {
       "SHOP A BRIGHTER YOU": "더 밝은 나를 쇼핑하세요",
@@ -9620,7 +9642,9 @@
       "Ready to search": "검색 준비 완료",
       "More options": "추가 옵션",
       "Discount": "할인",
-      "Credit applied": "적용된 잔액"
+      "Credit applied": "적용된 잔액",
+      "Choose your pack": "검색 팩 선택",
+      "Prices in USD. Tax calculated at checkout.": "가격은 미국 달러 기준이며 세금은 결제 시 계산됩니다."
     },
     "hi": {
       "SHOP A BRIGHTER YOU": "एक बेहतर रूप की खरीदारी करें",
@@ -10411,7 +10435,9 @@
       "Ready to search": "खोज के लिए तैयार",
       "More options": "और विकल्प",
       "Discount": "छूट",
-      "Credit applied": "इस्तेमाल की गई शेष राशि"
+      "Credit applied": "इस्तेमाल की गई शेष राशि",
+      "Choose your pack": "अपना पैक चुनें",
+      "Prices in USD. Tax calculated at checkout.": "कीमतें अमेरिकी डॉलर में हैं। कर का हिसाब भुगतान के समय होगा।"
     },
     "ur": {
       "SHOP A BRIGHTER YOU": "ایک روشن تر آپ کی خریداری",
@@ -11202,7 +11228,9 @@
       "Ready to search": "تلاش کے لیے تیار",
       "More options": "مزید اختیارات",
       "Discount": "رعایت",
-      "Credit applied": "استعمال شدہ بیلنس"
+      "Credit applied": "استعمال شدہ بیلنس",
+      "Choose your pack": "اپنا پیک منتخب کریں",
+      "Prices in USD. Tax calculated at checkout.": "قیمتیں امریکی ڈالر میں ہیں۔ ٹیکس ادائیگی کے وقت شمار ہوگا۔"
     },
     "id": {
       "SHOP A BRIGHTER YOU": "BELANJA UNTUK ANDA YANG LEBIH CERAH",
@@ -11993,7 +12021,9 @@
       "Ready to search": "Siap mencari",
       "More options": "Opsi lainnya",
       "Discount": "Diskon",
-      "Credit applied": "Saldo yang digunakan"
+      "Credit applied": "Saldo yang digunakan",
+      "Choose your pack": "Pilih paket Anda",
+      "Prices in USD. Tax calculated at checkout.": "Harga dalam USD. Pajak dihitung saat pembayaran."
     },
     "ms": {
       "SHOP A BRIGHTER YOU": "BELANJA UNTUK ANDA YANG LEBIH BERCAHAYA",
@@ -12784,7 +12814,9 @@
       "Ready to search": "Sedia untuk mencari",
       "More options": "Pilihan lain",
       "Discount": "Diskaun",
-      "Credit applied": "Baki yang digunakan"
+      "Credit applied": "Baki yang digunakan",
+      "Choose your pack": "Pilih pakej anda",
+      "Prices in USD. Tax calculated at checkout.": "Harga dalam USD. Cukai dikira semasa pembayaran."
     }
   }
 }
