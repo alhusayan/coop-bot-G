@@ -1,6 +1,6 @@
 /* FINDZIA_BILLING_RELEASE=156.7.89 */
 /* FINDZIA_LAST_CREDIT_COMPLETION=156.7.89 */
-/* FINDZIA_PACKS_DESIGN=1.0.0 */
+/* FINDZIA_PACKS_DESIGN=1.1.0 */
 /* Final-credit completion; existing wallet warmup and payment recovery. */
 (() => {
   'use strict';
@@ -232,7 +232,7 @@
         }
       }
       buy.disabled=true;buy.setAttribute('aria-busy','true');
-      buy.textContent=tr('Preparing payment…','نجهّز الدفع…');
+      buy.textContent=tr('Preparing payment…','نجهّز الدفع…');buy.setAttribute('aria-label',buy.textContent);
     }
     function choosePlan(id){
       if(paymentBusy||startingPayment||mfView||checkoutView)return;
@@ -1031,17 +1031,21 @@
         const card=el('article','fzb-plan'+(featured?' fzb-plan-featured':''));card.dataset.plan=plan.id;
         if(featured)card.append(el('span','fzb-plan-badge',tr('Recommended','نرشّحها لك')));
         const main=el('div','fzb-plan-main'),name=el('div','fzb-plan-name');
-        const heading=el('h3','',ar()?plan.credits+' بحث':tf('{count} searches',{count:plan.credits},'{count} بحث'));heading.dataset.noI18n='';
-        name.append(heading);
-        const prices=el('div','fzb-plan-prices'),price=el('p','fzb-price');
-        price.dir='ltr';price.append(el('strong','',new Intl.NumberFormat('en-US',{style:'currency',currency:'USD'}).format(plan.amount_cents/100)));
-        price.setAttribute('aria-label',price.textContent+' USD');
-        prices.append(price);main.append(name,prices);card.append(main);
+        const description=ar()?plan.credits+' بحث':tf('{count} searches',{count:plan.credits},'{count} بحث');
+        const heading=el('h3','');heading.dataset.noI18n='';heading.setAttribute('aria-label',description);
+        heading.append(el('span','fzb-plan-count',String(plan.credits)),el('span','fzb-plan-label',tr('Searches','عمليات البحث')));
+        name.append(heading);main.append(name);card.append(main);
         const footer=el('div','fzb-plan-footer');
         const loading=startingPayment&&selectedPlan()===plan.id;
-        const buy=button(loading?tr('Preparing payment…','نجهّز الدفع…'):tr('Choose plan','اختر الباقة'),()=>choosePlan(plan.id),'fza-primary fzb-plan-buy');
+        const amount=new Intl.NumberFormat('en-US',{style:'currency',currency:'USD'}).format(plan.amount_cents/100);
+        const buy=button(loading?tr('Preparing payment…','نجهّز الدفع…'):'',()=>choosePlan(plan.id),'fza-primary fzb-plan-buy');
+        if(!loading){
+          const price=el('bdi','fzb-plan-button-price',amount);price.dir='ltr';
+          const arrow=document.createElementNS('http://www.w3.org/2000/svg','svg');arrow.setAttribute('viewBox','0 0 24 24');arrow.setAttribute('fill','none');arrow.setAttribute('stroke','currentColor');arrow.setAttribute('stroke-width','1.6');arrow.setAttribute('stroke-linecap','round');arrow.setAttribute('stroke-linejoin','round');arrow.setAttribute('aria-hidden','true');
+          const path=document.createElementNS('http://www.w3.org/2000/svg','path');path.setAttribute('d','M5 12h14m-5-5 5 5-5 5');arrow.append(path);buy.append(price,arrow);
+        }
         buy.dataset.planBuy=plan.id;
-        buy.setAttribute('aria-label',buy.textContent+' · '+tf('Get {count} searches',{count:plan.credits},'احصل على {count} بحث')+' · '+price.getAttribute('aria-label'));
+        buy.setAttribute('aria-label',loading?buy.textContent:tf('Get {count} searches',{count:plan.credits},'احصل على {count} بحث')+' · '+amount+' USD');
         // Keep the selected button busy until the fully prepared checkout is revealed.
         buy.disabled=loading||(paymentProvider()==='paddle'&&Array.isArray(paddleConfig?.checkout_plan_ids)&&!paddleConfig.checkout_plan_ids.includes(plan.id));
         buy.setAttribute('aria-busy',String(loading));
@@ -1182,7 +1186,7 @@
 .fz-account .fzb-payment-actions button:disabled{opacity:.55;cursor:default}
 @media(max-width:360px){.fz-account .fzb-payment-result{padding:28px 18px 18px}.fz-account .fzb-payment-title{font-size:24px!important}}
 
-/* FINDZIA_PACKS_DESIGN=1.0.0: one clear choice per card. */
+/* FINDZIA_PACKS_DESIGN=1.1.0: one clear choice per card. */
 .fz-account:has(.fzb-plans){width:min(960px,calc(100vw - 40px))}
 .fz-account .fzb-credit-actions{display:grid;gap:8px}.fzb-credit-actions .fza-text{justify-self:center}
 .fz-account .fzb-plans-intro{margin:0 0 26px;text-align:start}
@@ -1190,17 +1194,18 @@
 .fz-account .fzb-plans-intro .fzb-plan-promises{display:flex;gap:8px 18px;flex-wrap:wrap;margin:10px 0 0;font-size:14px;line-height:1.5;color:var(--a-muted)}
 .fzb-plan-promises span::before{content:'✓';display:inline-block;margin-inline-end:6px;color:var(--a-accent);font-weight:650}
 .fz-account .fzb-plans{display:grid!important;grid-template-columns:1fr!important;gap:20px}
-.fz-account .fzb-plan{position:relative;display:flex;flex-direction:column;padding:18px!important;border:1px solid var(--a-line);border-radius:18px!important;background:var(--a-surface)!important;box-shadow:none}
+.fz-account .fzb-plan{position:relative;display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:18px;padding:22px!important;border:1px solid var(--a-line);border-radius:20px!important;background:var(--a-surface)!important;box-shadow:none}
 .fz-account .fzb-plan-featured{border-color:var(--a-accent);background:var(--a-soft)!important;box-shadow:inset 0 0 0 1px var(--a-accent)}
-.fzb-plan-badge{position:absolute;inset-inline-start:16px;top:-11px;max-width:calc(100% - 32px);padding:2px 10px;border-radius:99px;background:var(--a-accent);color:var(--a-bg);font-size:12px;font-weight:600;line-height:1.5}
-.fzb-plan-main{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:36px}
-.fzb-plan-name{min-width:0}.fz-account .fzb-plan h3{margin:0!important;font-size:22px!important;line-height:1.3;font-weight:600;letter-spacing:-.4px;overflow-wrap:anywhere}
-.fzb-plan-prices{text-align:end;flex:none}.fz-account .fzb-plan .fzb-price{display:flex;align-items:baseline;justify-content:flex-end;margin:0!important;gap:0!important}
-.fz-account .fzb-plan .fzb-price strong{font-size:30px!important;line-height:1.15!important;font-weight:650;letter-spacing:-1px!important;font-variant-numeric:tabular-nums}
-.fzb-plan-footer{margin-top:14px}
-.fz-account .fzb-plan .fzb-plan-buy{width:100%;min-height:46px;margin:0!important;padding:10px 16px;border:1px solid var(--a-line);background:var(--a-bg);color:var(--a-ink);border-radius:12px;font-size:15px;font-weight:600;line-height:1.4;white-space:normal}
+.fzb-plan-badge{position:absolute;inset-inline-start:20px;top:-11px;max-width:calc(100% - 40px);padding:2px 10px;border-radius:99px;background:var(--a-accent);color:var(--a-bg);font-size:12px;font-weight:600;line-height:1.5}
+.fzb-plan-main,.fzb-plan-name{min-width:0}.fz-account .fzb-plan h3{display:flex;flex-direction:column;gap:3px;margin:0!important;line-height:1.25;letter-spacing:normal}
+.fzb-plan-count{font-size:42px;font-weight:650;line-height:1.05;letter-spacing:-1.5px;font-variant-numeric:tabular-nums}
+.fzb-plan-label{font-size:15px;font-weight:500;line-height:1.4;color:var(--a-muted)}
+.fzb-plan-footer{min-width:0}
+.fz-account .fzb-plan .fzb-plan-buy{display:flex;align-items:center;justify-content:center;gap:12px;width:132px;min-height:56px;margin:0!important;padding:13px 14px;border:1px solid var(--a-line);background:var(--a-soft);color:var(--a-ink);border-radius:14px;font-size:15px;font-weight:600;line-height:1.4;white-space:normal}
+.fzb-plan-button-price{font-size:23px;font-weight:650;line-height:1.2;letter-spacing:-.5px;font-variant-numeric:tabular-nums}
+.fz-account .fzb-plan-buy svg{width:18px;height:18px;flex:none}.fz-account[dir=rtl] .fzb-plan-buy svg{transform:rotate(180deg)}
 .fz-account .fzb-plan-featured .fzb-plan-buy{background:var(--a-accent);color:var(--a-bg);border-color:transparent}
-.fz-account .fzb-plan .fzb-plan-buy[aria-busy=true]{opacity:1;cursor:progress;background:var(--a-accent);color:var(--a-bg)}
+.fz-account .fzb-plan .fzb-plan-buy[aria-busy=true]{opacity:1;cursor:progress;background:var(--a-accent);color:var(--a-bg);font-size:13px;gap:5px}
 .fzb-plans-details{text-align:center;margin-top:18px;color:var(--a-muted)}.fzb-plans-details p{font-size:13px;line-height:1.6;margin:0;text-wrap:balance}
 .fzb-wallet-dialog{--pay-bg:#fff;--pay-ink:#24332d;--pay-muted:#647267;--pay-line:#dfe4df;--pay-accent:#354e3f;background:var(--pay-bg);color:var(--pay-ink)}
 .fzb-wallet-dialog[data-theme=dark]{--pay-bg:#202923;--pay-ink:#f3f5ef;--pay-muted:#bdc8bf;--pay-line:#455249;--pay-accent:#b8cbaa;background:var(--pay-bg);color:var(--pay-ink);color-scheme:dark}
@@ -1214,9 +1219,9 @@
 @keyframes fzb-pay-spin{to{transform:rotate(360deg)}}
 
 @media(min-width:601px){.fz-account:has(.fzb-plans){height:fit-content;max-height:calc(100dvh - 48px)}}
-@media(min-width:800px){.fz-account .fzb-plans{grid-template-columns:repeat(3,minmax(0,1fr))!important;gap:18px}.fzb-plan-main{flex-direction:column;align-items:flex-start;gap:24px}.fzb-plan-prices{text-align:start}.fz-account .fzb-plan .fzb-price{justify-content:flex-start}.fz-account .fzb-plan .fzb-price strong{font-size:40px!important}.fzb-plan-footer{margin-top:28px}.fz-account .fzb-plans-intro{text-align:center;margin:8px 0 36px}.fz-account .fzb-plan-promises{justify-content:center}.fz-account .fzb-plans-intro h2{font-size:34px}.fz-account .fzb-plan{padding:26px 22px!important}}
-@media(max-width:600px){.fz-account:has(.fzb-plans){width:100%}.fz-account .fza-body:has(.fzb-plans){padding:24px 18px!important}.fz-account .fzb-plan{padding:17px 16px!important}}
-@media(max-width:360px){.fz-account .fzb-plans-intro h2{font-size:26px}.fz-account .fzb-plan h3{font-size:20px!important}.fz-account .fzb-plan .fzb-price strong{font-size:27px!important}.fz-account .fzb-plan{padding-inline:14px!important}.fzb-wallet-dialog[data-paddle-wallet][open]{padding:4px}}
+@media(min-width:800px){.fz-account .fzb-plans{grid-template-columns:repeat(3,minmax(0,1fr))!important;gap:18px}.fz-account .fzb-plan{grid-template-columns:1fr;gap:28px;padding:32px 24px 24px!important;text-align:center}.fz-account .fzb-plan h3{gap:8px}.fzb-plan-count{font-size:56px}.fzb-plan-label{font-size:16px}.fz-account .fzb-plan .fzb-plan-buy{width:100%;min-height:58px}.fzb-plan-button-price{font-size:25px}.fz-account .fzb-plans-intro{text-align:center;margin:8px 0 36px}.fz-account .fzb-plan-promises{justify-content:center}.fz-account .fzb-plans-intro h2{font-size:34px}}
+@media(max-width:600px){.fz-account:has(.fzb-plans){width:100%}.fz-account .fza-body:has(.fzb-plans){padding:24px 18px!important}.fz-account .fzb-plan{padding:22px 20px!important}}
+@media(max-width:360px){.fz-account .fzb-plans-intro h2{font-size:26px}.fz-account .fzb-plan{padding:22px 16px!important;gap:12px}.fz-account .fzb-plan .fzb-plan-buy{width:122px;gap:8px;padding-inline:12px}.fzb-wallet-dialog[data-paddle-wallet][open]{padding:4px}}
 
 /* 156.7.59 — immediate, subtle press feedback; no artificial payment delay. */
 .fz-account .fzb-plan{cursor:pointer;touch-action:manipulation;transition:border-color 120ms ease,box-shadow 140ms ease}
