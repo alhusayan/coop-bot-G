@@ -1,4 +1,4 @@
-/* FINDZIA_WAIT_RELEASE=1.1.0 — continuous camera-to-results presentation. */
+/* FINDZIA_WAIT_RELEASE=1.2.0 — quiet photo scan and live search log. */
 (() => {
   'use strict';
   const el=(tag,cls)=>{const node=document.createElement(tag);node.className=cls;return node;};
@@ -12,15 +12,12 @@
     const image=el('img','fz-one-image');image.hidden=true;image.alt='';
     const shade=el('div','fz-one-shade'),scan=el('div','fz-one-scan');scan.setAttribute('aria-hidden','true');
     const heading=el('h2','fz-one-heading');heading.setAttribute('role','status');
-    const details=el('div','fz-one-details'),price=el('div','fz-one-price');price.setAttribute('role','img');
-    const source=el('p','fz-one-price-source'),logBox=el('div','fz-one-log'),caption=el('div','fz-one-log-caption'),lines=el('div','fz-one-log-lines');
-    lines.setAttribute('aria-hidden','true');logBox.append(caption,lines);details.append(price,source,logBox);
+    const details=el('div','fz-one-details'),logBox=el('div','fz-one-log'),caption=el('div','fz-one-log-caption'),lines=el('div','fz-one-log-lines');
+    lines.setAttribute('aria-hidden','true');logBox.append(caption,lines);details.append(logBox);
     stage.append(aura,placeholder,image,shade,scan,heading,details);
     const actions=el('div','fz-one-actions'),cancel=el('button','fz-one-small');cancel.type='button';actions.append(cancel);
     box.append(stage,actions);body.before(box);
-    const log=new shared.SearchLog(lines),reels=new shared.PriceReels(price,row=>{
-      source.textContent=row?.store||'';log.highlight(row?.url||'');
-    });
+    const log=new shared.SearchLog(lines);
     const header=root.querySelector('.fz-fixed-header');
     let generation=null,handedOff=false,frozen='',frame=0,disposed=false,motion=null,exiting=false;
     const text=(en,ar)=>window.FindziaI18n?.t(en,ar,root)||(root.dataset.lang==='ar'?ar:en);
@@ -36,7 +33,6 @@
       stage.style.setProperty('--scan-travel',Math.max(120,room*.66)+'px');
     }
     function hide(smooth=false){
-      reels.cancel();
       if(exiting&&smooth)return;
       motion?.cancel();motion=null;exiting=false;
       const finish=()=>{box.hidden=true;delete root.dataset.waitActive;delete root.dataset.waitExiting;box.style.removeProperty('position');box.style.removeProperty('top');box.style.removeProperty('left');box.style.removeProperty('width');box.style.removeProperty('margin');exiting=false;};
@@ -59,7 +55,7 @@
       box.hidden=false;root.dataset.waitActive='true';
     }
     function reset(){
-      hide();reels.clear();log.clear();source.textContent='';frozen='';image.removeAttribute('src');image.hidden=true;placeholder.hidden=false;handedOff=false;
+      hide();log.clear();frozen='';image.removeAttribute('src');image.hidden=true;placeholder.hidden=false;handedOff=false;
     }
     function freeze(rows,c){
       if(frozen)return;
@@ -87,7 +83,7 @@
       caption.textContent=text('Checking product prices…','جارٍ التحقق من أسعار المنتجات…');
       cancel.textContent=text('New search','بحث جديد');
       const rows=bridge.searchWaitRows();
-      freeze(rows,c);log.sync(rows);reels.spin(rows,caption.textContent);fit();
+      freeze(rows,c);log.sync(rows);fit();
     }
     function queue(){if(!frame&&!disposed)frame=requestAnimationFrame(update);}
     function progress(event){
@@ -116,7 +112,7 @@
       window.removeEventListener('resize',fit);window.visualViewport?.removeEventListener('resize',fit);box.remove();delete root.fzSearchWait;
     }
     document.addEventListener('shopify:section:unload',function unload(event){if(event.target?.contains(root)){destroy();document.removeEventListener('shopify:section:unload',unload);}});
-    root.fzSearchWait={destroy,release:'1.1.0'};queue();
+    root.fzSearchWait={destroy,release:'1.2.0'};queue();
   }
   const start=()=>document.querySelectorAll('.fz-home').forEach(mount);
   if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',start,{once:true});else start();

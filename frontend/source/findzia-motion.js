@@ -45,6 +45,9 @@
   function stop(el) { const e = running.get(el); if (e) { active.delete(e); running.delete(el); e.animation.cancel(); e.cleanup?.(); } }
   function reveal(el, delay = 0, type = 'text') {
     const image = type === 'image', card = type === 'card', ui = type === 'ui';
+    // Result images own a fixed slot. A single opacity entrance avoids stacking
+    // a card translation with a second media reveal during progressive delivery.
+    if(card)return animate(el,[{opacity:0},{opacity:1}],{duration:200,easing:quick,delay:0});
     return animate(el, [
       { opacity: 0, filter: `blur(${card || image || ui ? 0 : 8}px)`, translate: `0 ${image ? 0 : ui ? 4 : 8}px` },
       { opacity: 1, filter: 'blur(0px)', translate: '0 0' }
@@ -119,18 +122,9 @@
   function results(container, before = new Map()) {
     // Called after card admission/painting. Never wait for a reveal before adding a result.
     const nodes=[...container.querySelectorAll('.fz-card-shell')];
-    const positions=before.size&&!reduced()?new Map(nodes.map(el=>[el,el.getBoundingClientRect()])):new Map();
     let index = 0;
     for (const el of nodes) {
       const key = el.querySelector('[data-image-key]')?.getAttribute('data-image-key');
-      const old=before.get(key),next=positions.get(el);
-      if(old?.width&&next?.width&&Math.max(old.bottom,next.bottom)>0&&Math.min(old.top,next.top)<innerHeight){
-        const x=old.left-next.left,y=old.top-next.top;
-        if(Math.abs(x)+Math.abs(y)>1){
-          animate(el,[{transform:`translate3d(${x}px,${y}px,0)`},{transform:'none'}],{id:'fz-result-move',duration:260,easing:quick});
-          cards.add(el);continue;
-        }
-      }
       if (cards.has(el)) continue;
       if (key && before.has(key) && !unreadyCards.has(el)) { cards.add(el); continue; }
       if (queue(el, index++, 'card')) { cards.add(el); unreadyCards.delete(el); }
@@ -140,15 +134,10 @@
     container.querySelectorAll(imageSelector).forEach(image);
     for (const [el] of waiting) if (!el.isConnected) { viewportObserver?.unobserve(el); waiting.delete(el); }
   }
-  function prepareResults(container){
-    // Snapshot the currently painted position before cancelling a previous move.
-    // The next batch continues from there instead of snapping to its old target.
-    for(const entry of [...active])if(entry.animation.id==='fz-result-move'&&container.contains(entry.el))stop(entry.el);
-  }
   function image(stage) {
     // Dialog content is painted repeatedly during auth/credit refreshes. Its
     // section owns the entrance; a cached image must not flash on each clone.
-    if (stage?.closest('dialog')) return;
+    if (stage?.closest('dialog, .fz-card-shell')) return;
     const img = stage?.matches('img') ? stage : stage?.querySelector('img');
     if (!img?.complete || !img.naturalWidth) return; // The load event will retry, including cloned/cached images.
     const source = img.currentSrc || img.getAttribute('src');
@@ -384,7 +373,7 @@
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) for (const entry of [...active]) stop(entry.el);
   });
-  window.FindziaMotion = Object.freeze({ version: '156.7.62', timings, results, prepareResults, image, reveal, mount });
+  window.FindziaMotion = Object.freeze({ version: '156.7.62', timings, results, image, reveal, mount });
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot, { once: true });
   else boot();
 })();

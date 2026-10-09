@@ -59,7 +59,7 @@ const offers=Array.from({length:9},(_,i)=>({title:'Orange drink '+i,store:'Store
    assert.equal(await page.locator('.fz-one-scan').evaluate(e=>getComputedStyle(e).display),'block');
    search.resolve();
    await page.waitForFunction(()=>document.querySelectorAll('.fz-search-wait .fz-one-log-line').length===7);
-   await page.waitForFunction(()=>document.querySelectorAll('.fz-search-wait .fz-one-reel').length>0);
+   assert.equal(await page.locator('.fz-search-wait .fz-one-reel,.fz-search-wait .fz-one-price').count(),0,'waiting screen has no price reels');
    if(variant.photo)assert.equal(await page.locator('.fz-search-wait img').getAttribute('src'),original,'original photo does not change to a merchant image');
    if(variant.lang==='ja')assert.match(await page.locator('.fz-one-heading').textContent(),/[\u3040-\u30ff]/,'Japanese labels preserved');
    const waitingHeader=await headerGeometry();
@@ -84,7 +84,7 @@ const offers=Array.from({length:9},(_,i)=>({title:'Orange drink '+i,store:'Store
    await page.evaluate(()=>document.querySelector('.fz-home').fzRefineBridge.resetSearchSession());
    search=gate();await start();await page.locator('.fz-search-wait button').click();await hidden();search.resolve();
    assert.equal(await page.locator('.fz-home').getAttribute('data-home-state'),'empty','cancel returns home');
-   assert.deepEqual(errors,[],'no JavaScript errors');console.log('PASS',variant,'wait, prices, seven-line log, first-card handoff, empty and cancel');
+   assert.deepEqual(errors,[],'no JavaScript errors');console.log('PASS',variant,'quiet wait, seven-line log, first-card handoff, empty and cancel');
    await context.close();
   }
  }finally{await browser.close();server.closeAllConnections();await new Promise(r=>server.close(r));}
