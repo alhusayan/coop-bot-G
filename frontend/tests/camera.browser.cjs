@@ -73,8 +73,10 @@ const {pathToFileURL}=require('node:url');
    assert.equal(await page.locator('.fz-camera-zoom-range').inputValue(),'1','camera switch resets magnification');
    await page.locator('[data-zoom="2"]').click();
    const cameraSize=await page.locator('.fz-camera-video').evaluate(n=>({width:n.videoWidth,height:n.videoHeight}));
+   await page.evaluate(()=>{window.__originalDataTransfer=window.DataTransfer;window.DataTransfer=class{constructor(){throw Error('Synthetic FileList unavailable');}};});
    await page.locator('.fz-camera-shutter').click();
    await page.waitForResponse(r=>new URL(r.url()).pathname==='/api/search/image/stream');await stopped();
+   await page.evaluate(()=>window.DataTransfer=window.__originalDataTransfer);
    assert.equal(searches.length,1,'one shutter tap runs one existing Lens search');assert.equal(searches[0].mime_type,'image/jpeg');assert.ok(searches[0].image_base64.length>1000);
    await closed();
    if(variant.lang!=='ja'){

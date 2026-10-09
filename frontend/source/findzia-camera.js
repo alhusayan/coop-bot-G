@@ -1,4 +1,4 @@
-/* FINDZIA_CAMERA_RELEASE=1.1.1 — camera opens only after a shopper taps it. */
+/* FINDZIA_CAMERA_RELEASE=1.1.2 — camera opens only after a shopper taps it. */
 (() => {
  'use strict';
  const COPY={
@@ -119,6 +119,9 @@
   }
   function submit(file){
    if(!file)return;
+   // Native camera Files go straight into the same upload flow as the gallery.
+   // Do not depend on Safari supporting synthetic FileList assignment.
+   if(root.fzRefineBridge?.searchPhoto){close();root.fzRefineBridge.searchPhoto(file);return;}
    try{const transfer=new DataTransfer();transfer.items.add(file);input.files=transfer.files;close();input.dispatchEvent(new Event('change',{bubbles:true}));}
    catch(_){showError();}
   }
@@ -157,7 +160,7 @@
   document.addEventListener('visibilitychange',visibility);window.addEventListener('pagehide',close);
   function destroy(){disposed=true;close();root.removeEventListener('click',cameraClick,true);document.removeEventListener('visibilitychange',visibility);window.removeEventListener('pagehide',close);dialog.remove();nativeInput.remove();delete root.fzCamera;}
   document.addEventListener('shopify:section:unload',function unload(event){if(event.target?.contains(root)){destroy();document.removeEventListener('shopify:section:unload',unload);}});
-  root.fzCamera={destroy,release:'1.1.1'};
+  root.fzCamera={destroy,release:'1.1.2'};
  }
  const start=()=>document.querySelectorAll('.fz-home').forEach(mount);
  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',start,{once:true});else start();

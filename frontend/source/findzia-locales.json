@@ -921,7 +921,10 @@
       "Discount": "Discount",
       "Credit applied": "Credit applied",
       "Choose your pack": "Choose your pack",
-      "Prices in USD. Tax calculated at checkout.": "Prices in USD. Tax calculated at checkout."
+      "Prices in USD. Tax calculated at checkout.": "Prices in USD. Tax calculated at checkout.",
+      "This photo could not be reduced. Choose a smaller copy.": "This photo could not be reduced. Choose a smaller copy.",
+      "Could not open this photo. Try again or choose another.": "Could not open this photo. Try again or choose another.",
+      "Choose photo": "Choose photo"
     },
     "ar": {
       "SHOP A BRIGHTER YOU": "تسوق لإطلالة أكثر إشراقاً",
@@ -1714,7 +1717,10 @@
       "Discount": "الخصم",
       "Credit applied": "رصيد مالي مستخدم",
       "Choose your pack": "اختر باقتك",
-      "Prices in USD. Tax calculated at checkout.": "الأسعار بالدولار الأمريكي. تُحسب الضريبة عند الدفع."
+      "Prices in USD. Tax calculated at checkout.": "الأسعار بالدولار الأمريكي. تُحسب الضريبة عند الدفع.",
+      "This photo could not be reduced. Choose a smaller copy.": "تعذّر تصغير الصورة. اختر نسخة أصغر.",
+      "Could not open this photo. Try again or choose another.": "تعذّر فتح الصورة. حاول مجددًا أو اختر صورة ثانية.",
+      "Choose photo": "اختر صورة"
     },
     "de": {
       "SHOP A BRIGHTER YOU": "ERLEBE EIN NEUES GLANZLICHT",
@@ -2507,7 +2513,10 @@
       "Discount": "Rabatt",
       "Credit applied": "Angerechnetes Guthaben",
       "Choose your pack": "Wähle dein Paket",
-      "Prices in USD. Tax calculated at checkout.": "Preise in USD. Steuern werden beim Bezahlen berechnet."
+      "Prices in USD. Tax calculated at checkout.": "Preise in USD. Steuern werden beim Bezahlen berechnet.",
+      "This photo could not be reduced. Choose a smaller copy.": "Dieses Foto konnte nicht verkleinert werden. Wähle eine kleinere Kopie.",
+      "Could not open this photo. Try again or choose another.": "Dieses Foto konnte nicht geöffnet werden. Versuche es erneut oder wähle ein anderes.",
+      "Choose photo": "Foto auswählen"
     },
     "fr": {
       "SHOP A BRIGHTER YOU": "MAGASINEZ UN VOUS PLUS ÉCLATANT",
@@ -3300,7 +3309,10 @@
       "Discount": "Remise",
       "Credit applied": "Avoir appliqué",
       "Choose your pack": "Choisissez votre pack",
-      "Prices in USD. Tax calculated at checkout.": "Prix en USD. Taxes calculées au paiement."
+      "Prices in USD. Tax calculated at checkout.": "Prix en USD. Taxes calculées au paiement.",
+      "This photo could not be reduced. Choose a smaller copy.": "Impossible de réduire cette photo. Choisissez une copie plus petite.",
+      "Could not open this photo. Try again or choose another.": "Impossible d’ouvrir cette photo. Réessayez ou choisissez-en une autre.",
+      "Choose photo": "Choisir une photo"
     },
     "it": {
       "SHOP A BRIGHTER YOU": "ACQUISTA UN TUO LATO PIÙ LUMINOSO",
@@ -4093,7 +4105,10 @@
       "Discount": "Sconto",
       "Credit applied": "Credito applicato",
       "Choose your pack": "Scegli il tuo pacchetto",
-      "Prices in USD. Tax calculated at checkout.": "Prezzi in USD. Imposte calcolate al pagamento."
+      "Prices in USD. Tax calculated at checkout.": "Prezzi in USD. Imposte calcolate al pagamento.",
+      "This photo could not be reduced. Choose a smaller copy.": "Impossibile ridurre questa foto. Scegli una copia più piccola.",
+      "Could not open this photo. Try again or choose another.": "Impossibile aprire questa foto. Riprova o scegline un’altra.",
+      "Choose photo": "Scegli foto"
     },
     "es": {
       "SHOP A BRIGHTER YOU": "COMPRA UN TU MÁS BRILLANTE",
@@ -4886,7 +4901,10 @@
       "Discount": "Descuento",
       "Credit applied": "Saldo aplicado",
       "Choose your pack": "Elige tu paquete",
-      "Prices in USD. Tax calculated at checkout.": "Precios en USD. Impuestos calculados al pagar."
+      "Prices in USD. Tax calculated at checkout.": "Precios en USD. Impuestos calculados al pagar.",
+      "This photo could not be reduced. Choose a smaller copy.": "No se pudo reducir esta foto. Elige una copia más pequeña.",
+      "Could not open this photo. Try again or choose another.": "No se pudo abrir esta foto. Inténtalo de nuevo o elige otra.",
+      "Choose photo": "Elegir foto"
     },
     "pt": {
       "SHOP A BRIGHTER YOU": "COMPRE UMA VERSÃO MAIS BRILHANTE DE SI",
@@ -5679,7 +5697,10 @@
       "Discount": "Desconto",
       "Credit applied": "Crédito aplicado",
       "Choose your pack": "Escolha seu pacote",
-      "Prices in USD. Tax calculated at checkout.": "Preços em USD. Impostos calculados no pagamento."
+      "Prices in USD. Tax calculated at checkout.": "Preços em USD. Impostos calculados no pagamento.",
+      "This photo could not be reduced. Choose a smaller copy.": "Não foi possível reduzir esta foto. Escolha uma cópia menor.",
+      "Could not open this photo. Try again or choose another.": "Não foi possível abrir esta foto. Tente novamente ou escolha outra.",
+      "Choose photo": "Escolher foto"
     },
     "tr": {
       "SHOP A BRIGHTER YOU": "DAHA PARLAK BİR SENİ KEŞFET",
@@ -6472,7 +6493,10 @@
       "Discount": "İndirim",
       "Credit applied": "Kullanılan bakiye",
       "Choose your pack": "Paketini seç",
-      "Prices in USD. Tax calculated at checkout.": "Fiyatlar USD cinsindedir. Vergiler ödeme sırasında hesaplanır."
+      "Prices in USD. Tax calculated at checkout.": "Fiyatlar USD cinsindedir. Vergiler ödeme sırasında hesaplanır.",
+      "This photo could not be reduced. Choose a smaller copy.": "Bu fotoğraf küçültülemedi. Daha küçük bir kopya seçin.",
+      "Could not open this photo. Try again or choose another.": "Bu fotoğraf açılamadı. Tekrar deneyin veya başka bir fotoğraf seçin.",
+      "Choose photo": "Fotoğraf seç"
     },
     "ru": {
       "SHOP A BRIGHTER YOU": "ПОКУПАЙТЕ С НОВЫМ СИЯНИЕМ",
@@ -7265,7 +7289,10 @@
       "Discount": "Скидка",
       "Credit applied": "Зачтённые средства",
       "Choose your pack": "Выберите пакет",
-      "Prices in USD. Tax calculated at checkout.": "Цены в USD. Налог рассчитывается при оплате."
+      "Prices in USD. Tax calculated at checkout.": "Цены в USD. Налог рассчитывается при оплате.",
+      "This photo could not be reduced. Choose a smaller copy.": "Не удалось уменьшить фото. Выберите копию меньшего размера.",
+      "Could not open this photo. Try again or choose another.": "Не удалось открыть фото. Повторите попытку или выберите другое.",
+      "Choose photo": "Выбрать фото"
     },
     "ja": {
       "SHOP A BRIGHTER YOU": "もっと輝く自分を見つけよう",
@@ -8058,7 +8085,10 @@
       "Discount": "割引",
       "Credit applied": "適用された残高",
       "Choose your pack": "パックを選ぶ",
-      "Prices in USD. Tax calculated at checkout.": "価格は米ドルです。税金はお支払い時に計算されます。"
+      "Prices in USD. Tax calculated at checkout.": "価格は米ドルです。税金はお支払い時に計算されます。",
+      "This photo could not be reduced. Choose a smaller copy.": "この写真を縮小できませんでした。サイズの小さい写真を選んでください。",
+      "Could not open this photo. Try again or choose another.": "この写真を開けませんでした。もう一度試すか、別の写真を選んでください。",
+      "Choose photo": "写真を選ぶ"
     },
     "zh": {
       "SHOP A BRIGHTER YOU": "开启更亮丽的自己",
@@ -8851,7 +8881,10 @@
       "Discount": "折扣",
       "Credit applied": "已抵扣余额",
       "Choose your pack": "选择搜索套餐",
-      "Prices in USD. Tax calculated at checkout.": "价格以美元计，税费在结账时计算。"
+      "Prices in USD. Tax calculated at checkout.": "价格以美元计，税费在结账时计算。",
+      "This photo could not be reduced. Choose a smaller copy.": "无法缩小这张照片。请选择较小的副本。",
+      "Could not open this photo. Try again or choose another.": "无法打开这张照片。请重试或选择另一张。",
+      "Choose photo": "选择照片"
     },
     "ko": {
       "SHOP A BRIGHTER YOU": "더 밝은 나를 쇼핑하세요",
@@ -9644,7 +9677,10 @@
       "Discount": "할인",
       "Credit applied": "적용된 잔액",
       "Choose your pack": "검색 팩 선택",
-      "Prices in USD. Tax calculated at checkout.": "가격은 미국 달러 기준이며 세금은 결제 시 계산됩니다."
+      "Prices in USD. Tax calculated at checkout.": "가격은 미국 달러 기준이며 세금은 결제 시 계산됩니다.",
+      "This photo could not be reduced. Choose a smaller copy.": "이 사진의 크기를 줄이지 못했어요. 더 작은 사진을 선택해 주세요.",
+      "Could not open this photo. Try again or choose another.": "이 사진을 열지 못했어요. 다시 시도하거나 다른 사진을 선택해 주세요.",
+      "Choose photo": "사진 선택"
     },
     "hi": {
       "SHOP A BRIGHTER YOU": "एक बेहतर रूप की खरीदारी करें",
@@ -10437,7 +10473,10 @@
       "Discount": "छूट",
       "Credit applied": "इस्तेमाल की गई शेष राशि",
       "Choose your pack": "अपना पैक चुनें",
-      "Prices in USD. Tax calculated at checkout.": "कीमतें अमेरिकी डॉलर में हैं। कर का हिसाब भुगतान के समय होगा।"
+      "Prices in USD. Tax calculated at checkout.": "कीमतें अमेरिकी डॉलर में हैं। कर का हिसाब भुगतान के समय होगा।",
+      "This photo could not be reduced. Choose a smaller copy.": "इस फ़ोटो का आकार कम नहीं किया जा सका। छोटी कॉपी चुनें।",
+      "Could not open this photo. Try again or choose another.": "यह फ़ोटो नहीं खुली। फिर से कोशिश करें या दूसरी फ़ोटो चुनें।",
+      "Choose photo": "फ़ोटो चुनें"
     },
     "ur": {
       "SHOP A BRIGHTER YOU": "ایک روشن تر آپ کی خریداری",
@@ -11230,7 +11269,10 @@
       "Discount": "رعایت",
       "Credit applied": "استعمال شدہ بیلنس",
       "Choose your pack": "اپنا پیک منتخب کریں",
-      "Prices in USD. Tax calculated at checkout.": "قیمتیں امریکی ڈالر میں ہیں۔ ٹیکس ادائیگی کے وقت شمار ہوگا۔"
+      "Prices in USD. Tax calculated at checkout.": "قیمتیں امریکی ڈالر میں ہیں۔ ٹیکس ادائیگی کے وقت شمار ہوگا۔",
+      "This photo could not be reduced. Choose a smaller copy.": "اس تصویر کا حجم کم نہیں ہو سکا۔ چھوٹی کاپی منتخب کریں۔",
+      "Could not open this photo. Try again or choose another.": "یہ تصویر نہیں کھل سکی۔ دوبارہ کوشش کریں یا دوسری تصویر منتخب کریں۔",
+      "Choose photo": "تصویر منتخب کریں"
     },
     "id": {
       "SHOP A BRIGHTER YOU": "BELANJA UNTUK ANDA YANG LEBIH CERAH",
@@ -12023,7 +12065,10 @@
       "Discount": "Diskon",
       "Credit applied": "Saldo yang digunakan",
       "Choose your pack": "Pilih paket Anda",
-      "Prices in USD. Tax calculated at checkout.": "Harga dalam USD. Pajak dihitung saat pembayaran."
+      "Prices in USD. Tax calculated at checkout.": "Harga dalam USD. Pajak dihitung saat pembayaran.",
+      "This photo could not be reduced. Choose a smaller copy.": "Foto ini tidak dapat diperkecil. Pilih salinan yang lebih kecil.",
+      "Could not open this photo. Try again or choose another.": "Foto ini tidak dapat dibuka. Coba lagi atau pilih foto lain.",
+      "Choose photo": "Pilih foto"
     },
     "ms": {
       "SHOP A BRIGHTER YOU": "BELANJA UNTUK ANDA YANG LEBIH BERCAHAYA",
@@ -12816,7 +12861,10 @@
       "Discount": "Diskaun",
       "Credit applied": "Baki yang digunakan",
       "Choose your pack": "Pilih pakej anda",
-      "Prices in USD. Tax calculated at checkout.": "Harga dalam USD. Cukai dikira semasa pembayaran."
+      "Prices in USD. Tax calculated at checkout.": "Harga dalam USD. Cukai dikira semasa pembayaran.",
+      "This photo could not be reduced. Choose a smaller copy.": "Foto ini tidak dapat dikecilkan. Pilih salinan yang lebih kecil.",
+      "Could not open this photo. Try again or choose another.": "Foto ini tidak dapat dibuka. Cuba lagi atau pilih foto lain.",
+      "Choose photo": "Pilih foto"
     }
   }
 }

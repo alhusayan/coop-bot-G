@@ -32,6 +32,7 @@ sourceReleases.japanEntry=read('findzia-i18n.js').toString().match(/FINDZIA_JAPA
 sourceReleases.storeScene=read('findzia-store-scene.js').toString().match(/FINDZIA_STORE_SCENE_RELEASE=([0-9.]+)/)?.[1];
 sourceReleases.camera=read('findzia-camera.js').toString().match(/FINDZIA_CAMERA_RELEASE=([0-9.]+)/)?.[1];
 sourceReleases.wait=read('findzia-wait.js').toString().match(/FINDZIA_WAIT_RELEASE=([0-9.]+)/)?.[1];
+sourceReleases.photoIntake=read('findzia-home.liquid').toString().match(/FINDZIA_PHOTO_INTAKE_RELEASE=([0-9.]+)/)?.[1];
 sourceReleases.choice=read('findzia-choice.js').toString().match(/FINDZIA_CHOICE_RELEASE=([0-9.]+)/)?.[1];
 if(sourceReleases.choice!=='157.0.7')throw Error('Findzia One release mismatch.');
 const uiLocales = packLocales(JSON.parse(read('findzia-locales.json').toString('utf8')));
