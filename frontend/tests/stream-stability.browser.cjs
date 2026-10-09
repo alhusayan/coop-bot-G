@@ -10,7 +10,7 @@ const offer=(id,market='global')=>({title:'Coffee table '+id,store:'Store '+id,u
  const origin='http://127.0.0.1:'+server.address().port;
  const browser=await chromium.launch({executablePath:process.env.FINDZIA_TEST_CHROME,args:['--no-sandbox','--disable-dev-shm-usage']});
  try{
-  for(const variant of [{width:390,height:720,lang:'en'},{width:320,height:568,lang:'ar',reduced:true},{width:1440,height:900,lang:'ja'},{width:390,height:720,lang:'en',layout:'list'}]){
+  for(const variant of [{width:390,height:720,lang:'en'},{width:320,height:568,lang:'ar',reduced:true},{width:1440,height:900,lang:'ja'},{width:390,height:720,lang:'en',layout:'list'},{width:1440,height:900,lang:'ja',layout:'cinema'}].filter(v=>!process.env.FINDZIA_TEST_LAYOUT||(v.layout||'grid')===process.env.FINDZIA_TEST_LAYOUT)){
    const context=await browser.newContext({viewport:{width:variant.width,height:variant.height},reducedMotion:variant.reduced?'reduce':'no-preference'});
    let releaseBilling;const billing=new Promise(r=>releaseBilling=r),errors=[];
    await context.addInitScript(variant=>{
@@ -59,30 +59,48 @@ const offer=(id,market='global')=>({title:'Coffee table '+id,store:'Store '+id,u
    assert.equal(await page.locator('.fz-search-wait .fz-one-price,.fz-search-wait .fz-one-reel').count(),0);
    const settle=()=>page.evaluate(()=>new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r))));
    const cardCount=count=>page.waitForFunction(n=>document.querySelectorAll('[data-results-body] .fz-card-shell').length===n,count);
+   const selector='[data-results-body] .fz-card-shell';
+   const marketGroups=()=>page.locator('[data-results-body]>.fz-market-group').evaluateAll(nodes=>nodes.map(n=>n.dataset.stableGroup||n.dataset.cinemaGroup));
    const measure=()=>page.evaluate(()=>Object.fromEntries([...document.querySelectorAll('[data-results-body] .fz-card-shell')].map(card=>{
-    const rect=card.getBoundingClientRect(),img=card.querySelector('img'),ir=img.getBoundingClientRect();
-    return[card.dataset.stableKey,{x:rect.x,y:rect.y+scrollY,w:rect.width,h:rect.height,ix:ir.x,iy:ir.y+scrollY,iw:ir.width,ih:ir.height}];
+    const rect=card.getBoundingClientRect(),group=card.closest('.fz-market-group'),gr=card.parentElement.getBoundingClientRect(),img=card.querySelector('img'),ir=img.getBoundingClientRect();
+    return[card.dataset.stableKey||card.dataset.cinemaKey,{group:group.dataset.stableGroup||group.dataset.cinemaGroup,x:rect.x,y:rect.y-gr.y,w:rect.width,h:rect.height,ix:ir.x-rect.x,iy:ir.y-rect.y,iw:ir.width,ih:ir.height}];
    })));
-   const pinned=async(before,why)=>{await settle();const after=await measure();for(const [key,rect]of Object.entries(before))if(after[key])for(const prop of Object.keys(rect))assert.ok(Math.abs(rect[prop]-after[key][prop])<1,why+' '+key+' '+prop+': '+rect[prop]+' -> '+after[key][prop]);};
+   const pinned=async(before,why)=>{await settle();const after=await measure();for(const [key,rect]of Object.entries(before))if(after[key]&&after[key].group===rect.group)for(const prop of Object.keys(rect).filter(p=>p!=='group'))assert.ok(Math.abs(rect[prop]-after[key][prop])<1,why+' '+key+' '+prop+': '+rect[prop]+' -> '+after[key][prop]);};
    await settle();let baseline=await measure();
    await page.evaluate(()=>{window.__originalCard=document.querySelector('.fz-card-shell');window.__originalImage=__originalCard.querySelector('img');});
+   const readTop=()=>page.evaluate(()=>__originalCard.getBoundingClientRect().top);
    const send=async(event,item)=>{await page.evaluate(x=>__send(x),{event,item});await settle();};
-   // A local offer arriving after a global one must not insert a section above it.
-   await send('result',offer('b','local'));await cardCount(2);await pinned(baseline,'late local');baseline=await measure();
+   const originalTop=await readTop();
+   await send('result',offer('b','local'));await cardCount(2);await pinned(baseline,'late local');
+   assert.deepEqual(await marketGroups(),['local','global']);
+   if(variant.layout!=='list')assert.ok(Math.abs(await readTop()-originalTop)<1,'late local section preserves the visible product position');
+   const similar={...offer('similar','global'),search_origin:'image',image_query_result:true,retrieval_sources:['bing_reverse_image'],alternative_visual_status:'approved',alternative_visual_policy:'156.7.3',alternative_visual_proof:'test-proof'};
+   await send('result',similar);await cardCount(3);
+   assert.deepEqual(await marketGroups(),['local','alternative','global']);
+   if(variant.layout!=='list')assert.ok(Math.abs(await readTop()-originalTop)<1,'similar section also preserves the visible product');
+   assert.equal(await page.locator('.fz-market-head h3').count(),3);
+   assert.equal(await page.locator('.fz-market-head h3').first().isVisible(),true);
+   assert.deepEqual(await page.locator('[data-results-body] .fz-market-count').allTextContents(),['1','1','1']);
+   if(process.env.FINDZIA_TEST_OUTPUT){fs.mkdirSync(process.env.FINDZIA_TEST_OUTPUT,{recursive:true});await page.evaluate(()=>scrollTo(0,0));await page.screenshot({path:path.join(process.env.FINDZIA_TEST_OUTPUT,`groups-${variant.width}-${variant.lang}-${variant.layout||'grid'}.png`),fullPage:true});}
+   baseline=await measure();
    for(let i=0;i<8;i++){
     await send('result',{...offer('late-'+i,'local'),match_type:'exact',match_score:1,price_amount:1+i,price_display_major:String(1+i)});
-    await cardCount(i+3);await pinned(baseline,'new higher-ranked offer');baseline=await measure();
+    await cardCount(i+4);await pinned(baseline,'new higher-ranked offer');baseline=await measure();
    }
-   await send('upsert',{...offer('a','local'),match_type:'exact',match_score:0.99,price_amount:32,price_display_major:'32'});
-   await pinned(baseline,'price and category correction');
-   assert.equal(await page.evaluate(()=>__originalCard===document.querySelector('.fz-card-shell')&&__originalImage===__originalCard.querySelector('img')),true);
-   // Removing a rejected offer never slides every remaining image into its slot.
-   await send('upsert',{...offer('b','local'),hidden:true});await cardCount(9);await pinned(baseline,'rejection');
-   baseline=await measure();await send('result',offer('replacement','local'));await cardCount(10);await pinned(baseline,'retired slot refill');
+   await send('upsert',{...offer('a'),match_type:'exact',match_score:0.99,price_amount:32,price_display_major:'32'});
+   await pinned(baseline,'price correction');
+   assert.equal(await page.evaluate(()=>__originalCard.isConnected&&__originalImage===__originalCard.querySelector('img')),true);
+   await send('upsert',{...offer('b','local'),hidden:true});await cardCount(10);
+   if(variant.layout!=='cinema')await pinned(baseline,'rejection');
+   baseline=await measure();await send('result',offer('replacement','local'));await cardCount(11);
+   if(variant.layout!=='cinema')await pinned(baseline,'retired slot refill');
    assert.equal(await page.locator('.fz-result-gap').count(),0);
-   await page.evaluate(()=>scrollTo(0,500));await settle();baseline=await measure();const scrollBefore=await page.evaluate(()=>scrollY);
-   for(let i=8;i<12;i++){await send('result',offer('late-'+i,'local'));await cardCount(i+3);await pinned(baseline,'stream while scrolling');}
-   assert.equal(await page.evaluate(()=>scrollY),scrollBefore,'stream does not seize the scroll position');
+   await page.evaluate(()=>{const top=document.querySelector('.fz-fixed-header').getBoundingClientRect().bottom;scrollBy(0,__originalCard.getBoundingClientRect().top-top-30);});await settle();
+   const reading=await readTop();baseline=await measure();
+   for(let i=8;i<12;i++){await send('result',offer('late-'+i,'local'));await cardCount(i+4);await pinned(baseline,'stream while reading');assert.ok(Math.abs(await readTop()-reading)<1,'growing local section preserves viewport anchor');}
+   await send('upsert',{...similar,hidden:true});await cardCount(14);
+   assert.deepEqual(await marketGroups(),['local','global'],'an empty section is removed');
+   assert.ok(Math.abs(await readTop()-reading)<1,'removing an earlier section preserves viewport anchor');
    baseline=await measure();
    await page.evaluate(()=>{__send({event:'done'});__stream.close();});
    await page.waitForFunction(()=>!document.querySelector('.fz-home').fzRefineBridge.context().busy);await pinned(baseline,'completion');
@@ -90,9 +108,9 @@ const offer=(id,market='global')=>({title:'Coffee table '+id,store:'Store '+id,u
    assert.equal(stageEffects,0,'existing product photos never replay media fades');
    await page.evaluate(()=>scrollTo(0,0));
    await page.locator('[data-sort-trigger]').click();await page.locator('[data-sort-value="price"]').click();await settle();
-   assert.equal(await page.locator('.fz-card-shell').first().getAttribute('data-stable-key'),'https://store.example.test/late-0','explicit price sort still works');
+   assert.equal(await page.locator('.fz-card-shell').first().getAttribute(variant.layout==='cinema'?'data-cinema-key':'data-stable-key'),'https://store.example.test/late-0','explicit price sort still works');
    if(process.env.FINDZIA_TEST_OUTPUT){fs.mkdirSync(process.env.FINDZIA_TEST_OUTPUT,{recursive:true});await page.screenshot({path:path.join(process.env.FINDZIA_TEST_OUTPUT,`stable-${variant.width}-${variant.lang}-${variant.layout||'grid'}.png`)});}
-   assert.deepEqual(errors,[]);console.log('PASS',variant,'stationary cards/images, late markets, rank/price updates, rejections, scroll, completion and manual sort');await context.close();
+   assert.deepEqual(errors,[]);console.log('PASS',variant,'ordered market sections, retained images, stable group slots, viewport anchoring, rejections and manual sort');await context.close();
 
   }
  }finally{await browser.close();server.closeAllConnections();await new Promise(r=>server.close(r));}

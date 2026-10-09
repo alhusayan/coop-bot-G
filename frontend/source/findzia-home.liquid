@@ -879,40 +879,44 @@ function fzMorphCard(node,fresh){if(node.nodeType!==fresh.nodeType||node.nodeNam
 if(node.nodeType===3){if(node.data!==fresh.data)node.data=fresh.data;return;}
 if(node.nodeType!==1)return;if(node.hasAttribute('data-image-key')&&node.getAttribute('data-image-key')===fresh.getAttribute('data-image-key'))return;Array.from(node.attributes).forEach(function(a){if(!fresh.hasAttribute(a.name)&&!['data-cinema-key','data-stable-key'].includes(a.name))node.removeAttribute(a.name);});Array.from(fresh.attributes).forEach(function(a){if(node.getAttribute(a.name)!==a.value)node.setAttribute(a.name,a.value);});Array.from(fresh.childNodes).forEach(function(child,index){if(node.childNodes[index])fzMorphCard(node.childNodes[index],child);else node.appendChild(child.cloneNode(true));});while(node.childNodes.length>fresh.childNodes.length)node.lastChild.remove();}
 function fzPatchCard(node,markup){if(node._fzHtml===markup)return;var template=document.createElement('template');template.innerHTML=markup;fzMorphCard(node,template.content.firstElementChild);node._fzHtml=markup;}
-// FINDZIA_STABLE_STREAM_RELEASE=1.0.0
-// Pin a result on its first painted admission, not its network arrival or AI score.
-// New rows fill retired slots or append. Only a shopper's sort/filter/view action
-// resets the order; completion and corrected classifications never reshuffle it.
+// FINDZIA_STABLE_STREAM_RELEASE=1.1.0
+// Pin each offer within its market on first paint. New rows reuse retired slots
+// or append; a shopper's sort/filter/view action resets the order. A corrected
+// classification moves the affected offer without rearranging its neighbours.
 var fzResultSlots=null;
 function fzResetResultSlots(){fzResultSlots=null;}
-function fzPinnedResults(rows){
+function fzPinnedGroups(rows){
  const signature=[B,I,O,E].join('|');
  if(!fzResultSlots||fzResultSlots.signature!==signature){
-  fzResultSlots={signature,keys:[]};
-  rows=Gr(rows).flatMap(group=>group.items);
+  fzResultSlots={signature,groups:new Map()};
  }
- const byKey=new Map(rows.map(row=>[br(row),row])),seen=new Set();
- fzResultSlots.keys=fzResultSlots.keys.map(key=>{if(key&&byKey.has(key)){seen.add(key);return key;}return null;});
- for(const row of rows){const key=br(row);if(seen.has(key))continue;seen.add(key);const hole=fzResultSlots.keys.indexOf(null);if(hole<0)fzResultSlots.keys.push(key);else fzResultSlots.keys[hole]=key;}
- while(fzResultSlots.keys.length&&!fzResultSlots.keys.at(-1))fzResultSlots.keys.pop();
- return fzResultSlots.keys.map(key=>key?byKey.get(key):null);
+ const groups=Gr(rows),active=new Set(groups.map(group=>group.id));
+ for(const id of fzResultSlots.groups.keys())if(!active.has(id))fzResultSlots.groups.delete(id);
+ return groups.map(group=>{
+  const byKey=new Map(group.items.map(row=>[br(row),row])),seen=new Set();
+  const keys=(fzResultSlots.groups.get(group.id)||[]).map(key=>{if(key&&byKey.has(key)){seen.add(key);return key;}return null;});
+  for(const row of group.items){const key=br(row);if(seen.has(key))continue;seen.add(key);const hole=keys.indexOf(null);if(hole<0)keys.push(key);else keys[hole]=key;}
+  while(keys.length&&!keys.at(-1))keys.pop();
+  fzResultSlots.groups.set(group.id,keys);
+  return {...group,slots:keys.map(key=>key?byKey.get(key):null)};
+ });
 }
 function fzStableGroups(rows){
- const layout=E==='list'?'list':'grid',slots=fzPinnedResults(rows);
- // One continuous surface keeps a late market or a classification correction
- // from inserting a whole section above products the shopper is already reading.
- // Country flags and market filters still identify each offer's actual market.
- let section=b.querySelector('[data-stable-stream]');
+ const layout=E==='list'?'list':'grid',groups=fzPinnedGroups(rows);
  const allCards=new Map(Array.from(b.querySelectorAll('[data-stable-key]')).map(node=>[node.dataset.stableKey,node]));
- if(!section||b.dataset.stableLayout!==layout){
-  section=document.createElement('section');section.className='fz-market-group';section.dataset.stableStream='true';section.dataset.stableGroup='all';
-  section.innerHTML=Kr({id:'all',label:ar('count_many'),items:rows})+'<div class="'+(layout==='list'?'fz-quick-list':'fz-grid')+'"></div>';
-  b.replaceChildren(section);b.dataset.stableLayout=layout;
+ if(b.dataset.stableLayout!==layout){b.replaceChildren();allCards.clear();b.dataset.stableLayout=layout;}
+ const sections=new Set();
+ groups.forEach((group,groupIndex)=>{
+ let section=b.querySelector('[data-stable-group="'+group.id+'"]');
+ if(!section){
+  section=document.createElement('section');section.className='fz-market-group';section.dataset.stableStream='true';section.dataset.stableGroup=group.id;
+  section.innerHTML=Kr(group)+'<div class="'+(layout==='list'?'fz-quick-list':'fz-grid')+'"></div>';
  }
- const markets=new Set(rows.map(Fr)),label=markets.size===1?Ir()[markets.values().next().value]:ar('count_many');
+ sections.add(section);
+ if(b.children[groupIndex]!==section)b.insertBefore(section,b.children[groupIndex]||null);
  const head=section.querySelector('.fz-market-head');
- head.querySelector('h3').textContent=label;head.querySelector('.fz-market-count').textContent=rows.length;
- const track=section.lastElementChild,old=Array.from(track.children),desired=[];
+ head.querySelector('h3').textContent=Ir()[group.id];head.querySelector('.fz-market-count').textContent=group.items.length;
+ const slots=group.slots,track=section.lastElementChild,old=Array.from(track.children),desired=[];
  // A rejected offer is removed immediately without dragging its neighbours into
  // another column. A new valid offer can reuse that reserved space.
  const retiredHeights=new Map(slots.flatMap((row,index)=>!row&&old[index]&&!old[index].classList.contains('fz-result-gap')?[[old[index],old[index].getBoundingClientRect().height]]:[]));
@@ -924,11 +928,12 @@ function fzStableGroups(rows){
   else fzPatchCard(card,markup);
   desired.push(card);
  });
- const keep=new Set(desired);for(const node of old)if(!keep.has(node))node.remove();
+ const keep=new Set(desired);for(const node of old)if(node.parentElement===track&&!keep.has(node))node.remove();
  desired.forEach((node,index)=>{if(track.children[index]!==node)track.insertBefore(node,track.children[index]||null);});
+ });
  let note=b.querySelector('.fz-loading-note');
  if(ee){if(!note){note=document.createElement('div');note.className='fz-loading-note';b.append(note);}note.textContent=ar(K?'searching':'searching_image');}else note?.remove();
- for(const node of Array.from(b.children))if(node!==section&&node!==note)node.remove();
+ for(const node of Array.from(b.children))if(!sections.has(node)&&node!==note)node.remove();
 }
 function ht(row){const state=dt(row);pt(state);return !!(et(row)&&state.winner&&state.node&&state.node.complete&&state.node.naturalWidth>=8);}
 function fzMediaPending(){return Array.from(q.values()).some(s=>s.status==='loading'||s.status==='queued'||s.status==='waiting'||s.recovering);}
@@ -955,7 +960,7 @@ if(e.addEventListener("pointerdown",function(r){"mouse"!==r.pointerType||0!==r.b
 l._fzHtml=i,l.classList.add("is-in"),a.children[r]!==l&&a.insertBefore(l,a.children[r]||null);}}),Array.from(a.children).forEach(function(e){s.has(e.dataset.cinemaKey)||e.remove();}),o&&Math.abs(a.scrollLeft)>2&&s.has(o.key)){var u=n.get(o.key).node;a.scrollLeft+=u.getBoundingClientRect().left-(u._fzSpring?u._fzSpring.x:0)-o.left;}
 if(window.FindziaMotion)window.FindziaMotion.results(a);else c.forEach(function(card){if(!bt()&&card.animate)card.animate([{opacity:0},{opacity:1}],{duration:140});});a._fzUpdateNav();}),ee){var a=document.createElement("div");a.className="fz-loading-note",a.textContent=ar(K?"searching":"searching_image"),b.appendChild(a);}
 Or(),mt(),Tr(e);}(e),yt(),void it();fzStableGroups(e);yt();Or();mt();Tr(e);it();}else{if(!ee&&W&&W.issueCode&&!U.length)return b.innerHTML="",void it();if(ee||fzMediaPending()){b.innerHTML=fzSkeletonMarkup();fzFitCinema();}else b.innerHTML='<div class="fz-empty">'+sr(O==="social"?fzSocialCopy()[1]:U.length&&!U.some(fzOfferCanDisplay)?"ar"===tr()?"وجدنا متاجر، لكن لم نتمكن من تأكيد أسعارها حالياً.":"Stores found, but their prices could not be confirmed right now.":U.length&&!U.some(function(e){var r=q.get(br(e));return r&&r.winner;})?"ar"===tr()?"تعذّر تحميل صور المنتجات المتاحة. جرّب البحث مرة أخرى.":"Product photos could not be loaded. Please try again.":U.length?ar("no_filter"):ar("no_results"))+"</div>";}}}
-function fzCinemaGroups(rows){const items=fzPinnedResults(rows).filter(Boolean);return items.length?[{id:'all',label:_t()[0],items}]:[];}
+function fzCinemaGroups(rows){return fzPinnedGroups(rows).map(group=>({id:group.id,items:group.slots.filter(Boolean)}));}
 function fzPosterCard(row){let markup=ct(row);if(!markup)return markup;const market=Fr(row);markup=markup.replace('class="fz-card-shell','data-result-market="'+market+'" class="fz-card-shell');markup=markup.replace('<div class="fz-tile-body">','<span class="fz-poster-kind">'+sr(Ir()[market])+'</span><div class="fz-tile-body">');return markup;}
 function fzSkeletonMarkup() {
   const loadingPhoto=U.some(row=>$t(row)&&!q.get(br(row))?.winner)&&fzMediaPending();
@@ -993,10 +998,27 @@ function fzRenderMediaIssue(){
   b.querySelector('[data-media-retry]').addEventListener('click',()=>{ft(true);wt();});
  }
 }
+function fzReadingAnchor(){
+ // New sections belong in market order. Preserve the product being read when
+ // a late local/similar section grows above it, without recreating its image.
+ if(fzResultSlots?.signature!==[B,I,O,E].join('|'))return null;
+ const top=Math.max(0,e.querySelector('[data-fixed-header]')?.getBoundingClientRect().bottom||0);
+ const height=window.visualViewport?.height||innerHeight;
+ for(const node of b.querySelectorAll('.fz-card-shell')){
+  const rect=node.getBoundingClientRect();
+  if(rect.bottom>top+24&&rect.top<height-24&&rect.right>0&&rect.left<innerWidth)return {node,top:rect.top};
+ }
+ return null;
+}
+function fzKeepReadingAnchor(anchor){
+ if(!anchor?.node.isConnected)return;
+ const delta=anchor.node.getBoundingClientRect().top-anchor.top;
+ if(Math.abs(delta)>.5)window.scrollBy({top:delta,behavior:'instant'});
+}
 function St(){if(W?.photoUploadIssue){fzRenderPhotoUploadIssue();return;}
 if(W&&W.shopperEmpty){Q=false;b.innerHTML="";Ft();return;}
 if(W&&W.refinementEmpty&&!U.length){Et(W.refinementEmpty,false);Ft();return;}
-const before=fzCardRects();fzPaintResults();if(W?.photoSearchIssue&&!fzUsableResults&&!fzMediaPending())fzRenderPhotoIssue();fzRenderMediaIssue();fzResultMotion(before);fzFitCinema();}
+const anchor=fzReadingAnchor(),before=fzCardRects();fzPaintResults();if(W?.photoSearchIssue&&!fzUsableResults&&!fzMediaPending())fzRenderPhotoIssue();fzRenderMediaIssue();fzResultMotion(before);fzFitCinema();fzKeepReadingAnchor(anchor);}
 function fzFitCinema(){if(E!=='cinema')return;const viewport=window.visualViewport,available=viewport?viewport.height:innerHeight;if(viewport&&viewport.scale>1.2)return;const header=e.querySelector('[data-fixed-header]')?.getBoundingClientRect().height||110;const toolbar=e.querySelector('.fz-results-tools');const tools=toolbar&&!toolbar.closest('[data-fixed-header]')?toolbar.getBoundingClientRect().height:0;const h=Math.max(260,Math.min(520,Math.floor(available-header-tools-90)));const width=b.getBoundingClientRect().width||innerWidth-32;e.style.setProperty('--fz-poster-h',h+'px');e.style.setProperty('--fz-poster-w',Math.min(width-36,Math.max(220,Math.min(360,Math.floor(h*.72))))+'px');}
 function wt(){if(Xt(),!G){G=!0;var e=B;requestAnimationFrame(function(){e===B&&(G=!1,St());});}}
 function zt(kind){fzResetResultSlots();ur(false);F=0;W=null;Y=false;$=false;Z=false;Ft();X=null;_.classList.remove("is-comparing");U=[];j={};H={};ft();_.classList.add("is-visible");gt(0);Q=true;b.innerHTML=fzSkeletonMarkup();fzFitCinema();}
