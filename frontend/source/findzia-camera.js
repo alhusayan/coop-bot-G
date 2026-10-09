@@ -1,4 +1,4 @@
-/* FINDZIA_CAMERA_RELEASE=1.1.2 — camera opens only after a shopper taps it. */
+/* FINDZIA_CAMERA_RELEASE=1.2.0 — camera opens only after a shopper taps it. */
 (() => {
  'use strict';
  const COPY={
@@ -38,7 +38,7 @@
   const foot=el('div','fz-camera-foot'),gallery=button('fz-camera-gallery','photos'),galleryLabel=el('span',''),shutter=button('fz-camera-shutter','shutter'),flip=button('fz-camera-icon fz-camera-flip','flip');gallery.append(galleryLabel);foot.append(gallery,shutter,flip);
   dialog.append(head,view,foot);document.body.append(dialog);
   const nativeInput=el('input','');nativeInput.type='file';nativeInput.accept='image/*';nativeInput.setAttribute('capture','environment');nativeInput.hidden=true;root.append(nativeInput);
-  let stream=null,epoch=0,facing='environment',origin=null,savedOverflow=null,disposed=false,shooting=false,timer=0;
+  let stream=null,epoch=0,facing='environment',origin=null,savedOverflow=null,disposed=false,shooting=false,timer=0,closeMotion=null,closing=false,still=null;
   let zoom=1,hardwareZoom=1,baseZoom=1,zoomCaps=null,zoomTask=null;
   const pointers=new Map();let pinchDistance=0,pinchZoom=1;
   const copy=i=>(COPY[root.dataset.lang]||COPY.en)[i];
@@ -80,11 +80,23 @@
    clearTimeout(timer);timer=0;epoch++;shutter.disabled=true;flip.disabled=true;range.disabled=true;pointers.clear();pinchDistance=0;zoomTask=null;
    stream?.getTracks().forEach(track=>track.stop());stream=null;video.pause();video.srcObject=null;dialog.dataset.ready='false';
   }
-  function close(){
+  function freeze(canvas){
+   if(still)still.remove();still=canvas;still.className='fz-camera-still';still.setAttribute('aria-hidden','true');view.insertBefore(still,frame);
+  }
+  function close(options={}){
+   if(closing&&!options.immediate)return;
+   closeMotion?.cancel();closeMotion=null;closing=false;
+   const smooth=dialog.open&&!options.immediate&&!document.hidden&&!matchMedia('(prefers-reduced-motion: reduce)').matches;
+   if(smooth&&!still&&stream){const canvas=document.createElement('canvas');try{if(crop(canvas))freeze(canvas);}catch(_){}}
    stop();shooting=false;
-   if(dialog.open)dialog.close();
-   if(savedOverflow){document.documentElement.style.overflow=savedOverflow.html;document.body.style.overflow=savedOverflow.body;savedOverflow=null;}
-   if(origin?.isConnected)origin.focus({preventScroll:true});origin=null;
+   const finish=()=>{
+    closing=false;if(dialog.open)dialog.close();still?.remove();still=null;
+    if(savedOverflow){document.documentElement.style.overflow=savedOverflow.html;document.body.style.overflow=savedOverflow.body;savedOverflow=null;}
+    if(options.restoreFocus!==false&&origin?.isConnected)origin.focus({preventScroll:true});origin=null;
+   };
+   if(!smooth){finish();return;}
+   closing=true;closeMotion=dialog.animate([{opacity:1},{opacity:0}],{duration:220,easing:'ease-out'});
+   closeMotion.finished.then(finish,()=>{});
   }
   function showError(denied=false){
    stop();status.textContent=copy(denied?5:6);fallback.hidden=false;
@@ -111,17 +123,22 @@
    }catch(error){if(request===epoch&&dialog.open)showError(['NotAllowedError','SecurityError'].includes(error.name));}
   }
   function open(trigger){
-   if(disposed||dialog.open)return;
+   if(disposed||dialog.open||closing)return;
    origin=trigger;facing='environment';labels();
    if(!navigator.mediaDevices?.getUserMedia){nativeInput.value='';nativeInput.click();return;}
    savedOverflow={html:document.documentElement.style.overflow,body:document.body.style.overflow};
    dialog.showModal();document.documentElement.style.overflow='hidden';document.body.style.overflow='hidden';start();
+   if(!matchMedia('(prefers-reduced-motion: reduce)').matches)dialog.animate([{opacity:0},{opacity:1}],{duration:180,easing:'ease-out'});
   }
   function submit(file){
    if(!file)return;
    // Native camera Files go straight into the same upload flow as the gallery.
    // Do not depend on Safari supporting synthetic FileList assignment.
-   if(root.fzRefineBridge?.searchPhoto){close();root.fzRefineBridge.searchPhoto(file);return;}
+   if(root.fzRefineBridge?.searchPhoto){
+    root.dataset.cameraHandoff='true';
+    try{root.fzRefineBridge.searchPhoto(file);}finally{delete root.dataset.cameraHandoff;}
+    close({restoreFocus:false});return;
+   }
    try{const transfer=new DataTransfer();transfer.items.add(file);input.files=transfer.files;close();input.dispatchEvent(new Event('change',{bubbles:true}));}
    catch(_){showError();}
   }
@@ -134,6 +151,7 @@
     const blob=await new Promise(resolve=>canvas.toBlob(resolve,'image/jpeg',.92));
     if(request!==epoch||!dialog.open)return;
     if(!blob)throw Error('capture_failed');
+    freeze(canvas);
     submit(new File([blob],'findzia-photo.jpg',{type:'image/jpeg'}));
    }catch(_){if(request===epoch){shooting=false;shutter.disabled=false;flip.disabled=false;status.textContent=common('Try again','حاول مجدداً');}}
   }
@@ -142,10 +160,10 @@
    if(!target||!root.contains(target)||target.disabled)return;
    event.preventDefault();event.stopImmediatePropagation();open(target);
   }
-  function galleryClick(){close();input.value='';input.click();}
-  function nativeClick(){close();nativeInput.value='';nativeInput.click();}
+  function galleryClick(){close({immediate:true});input.value='';input.click();}
+  function nativeClick(){close({immediate:true});nativeInput.value='';nativeInput.click();}
   function nativeChange(){const file=nativeInput.files?.[0];submit(file);nativeInput.value='';}
-  function visibility(){if(document.hidden)close();}
+  function visibility(){if(document.hidden)close({immediate:true});}
   function flipCamera(){if(flip.disabled)return;facing=facing==='environment'?'user':'environment';start();}
   function cancelled(event){event.preventDefault();close();}
   function pointerDown(event){if(event.target.closest('button,input')||dialog.dataset.ready!=='true')return;pointers.set(event.pointerId,{x:event.clientX,y:event.clientY});view.setPointerCapture(event.pointerId);if(pointers.size===2){const [a,b]=[...pointers.values()];pinchDistance=Math.hypot(a.x-b.x,a.y-b.y);pinchZoom=zoom;}}
@@ -157,10 +175,11 @@
   range.addEventListener('input',()=>setZoom(range.value));view.addEventListener('pointerdown',pointerDown);view.addEventListener('pointermove',pointerMove);view.addEventListener('pointerup',pointerEnd);view.addEventListener('pointercancel',pointerEnd);view.addEventListener('gesturestart',blockGesture,{passive:false});view.addEventListener('gesturechange',blockGesture,{passive:false});
   shutter.addEventListener('click',capture);flip.addEventListener('click',flipCamera);nativeInput.addEventListener('change',nativeChange);
   video.addEventListener('loadeddata',ready);video.addEventListener('playing',ready);root.addEventListener('click',cameraClick,true);
-  document.addEventListener('visibilitychange',visibility);window.addEventListener('pagehide',close);
-  function destroy(){disposed=true;close();root.removeEventListener('click',cameraClick,true);document.removeEventListener('visibilitychange',visibility);window.removeEventListener('pagehide',close);dialog.remove();nativeInput.remove();delete root.fzCamera;}
+  const pageHide=()=>close({immediate:true});
+  document.addEventListener('visibilitychange',visibility);window.addEventListener('pagehide',pageHide);
+  function destroy(){disposed=true;close({immediate:true});root.removeEventListener('click',cameraClick,true);document.removeEventListener('visibilitychange',visibility);window.removeEventListener('pagehide',pageHide);dialog.remove();nativeInput.remove();delete root.fzCamera;}
   document.addEventListener('shopify:section:unload',function unload(event){if(event.target?.contains(root)){destroy();document.removeEventListener('shopify:section:unload',unload);}});
-  root.fzCamera={destroy,release:'1.1.2'};
+  root.fzCamera={destroy,release:'1.2.0'};
  }
  const start=()=>document.querySelectorAll('.fz-home').forEach(mount);
  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',start,{once:true});else start();

@@ -73,12 +73,16 @@ const {pathToFileURL}=require('node:url');
    assert.equal(await page.locator('.fz-camera-zoom-range').inputValue(),'1','camera switch resets magnification');
    await page.locator('[data-zoom="2"]').click();
    const cameraSize=await page.locator('.fz-camera-video').evaluate(n=>({width:n.videoWidth,height:n.videoHeight}));
+   await page.evaluate(()=>{window.__captureFrames=[];window.__recordCapture=true;const sample=()=>{if(!window.__recordCapture)return;const root=document.querySelector('.fz-home'),dialog=document.querySelector('.fz-camera-dialog');__captureFrames.push({home:root.dataset.homeState,camera:dialog.open,photo:!!document.querySelector('.fz-search-wait img')?.getAttribute('src')});requestAnimationFrame(sample);};sample();});
    await page.evaluate(()=>{window.__originalDataTransfer=window.DataTransfer;window.DataTransfer=class{constructor(){throw Error('Synthetic FileList unavailable');}};});
    await page.locator('.fz-camera-shutter').click();
    await page.waitForResponse(r=>new URL(r.url()).pathname==='/api/search/image/stream');await stopped();
    await page.evaluate(()=>window.DataTransfer=window.__originalDataTransfer);
    assert.equal(searches.length,1,'one shutter tap runs one existing Lens search');assert.equal(searches[0].mime_type,'image/jpeg');assert.ok(searches[0].image_base64.length>1000);
    await closed();
+   const captureFrames=await page.evaluate(()=>{window.__recordCapture=false;return __captureFrames;});
+   assert.ok(captureFrames.every(f=>f.camera||f.home==='results'),'camera hands off without a homepage flash');
+   assert.ok(captureFrames.some(f=>f.photo),'selected photo appears during camera handoff');
    if(variant.lang!=='ja'){
     const captured=await page.evaluate(async b64=>{const im=new Image();im.src='data:image/jpeg;base64,'+b64;await im.decode();return{width:im.naturalWidth,height:im.naturalHeight};},searches[0].image_base64);
     assert.ok(captured.width<=cameraSize.width/2+1&&captured.height<=cameraSize.height/2+1,'search receives the zoomed crop');

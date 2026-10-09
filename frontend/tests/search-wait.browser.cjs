@@ -52,7 +52,7 @@ const offers=Array.from({length:9},(_,i)=>({title:'Orange drink '+i,store:'Store
    if(variant.photo){
     const png=await page.evaluate(()=>{const c=document.createElement('canvas');c.width=500;c.height=650;const x=c.getContext('2d');x.fillStyle='#e9e2d2';x.fillRect(0,0,500,650);x.fillStyle='#ed8d25';x.fillRect(130,90,240,470);return c.toDataURL('image/png').split(',')[1];});
     await page.locator('input[type=file]').first().setInputFiles({name:'orange.png',mimeType:'image/png',buffer:Buffer.from(png,'base64')});await wait();
-    await page.waitForFunction(()=>document.querySelector('.fz-search-wait img').src.startsWith('data:image/'));
+    await page.waitForFunction(()=>document.querySelector('.fz-search-wait img').src.startsWith('blob:')&&document.querySelector('.fz-search-wait img').naturalWidth>0);
    }else await start();
    const headerGeometry=()=>page.evaluate(()=>Object.fromEntries(['.fz-fixed-header','.fz-brand-name','.fz-search-row','.fz-camera-hero','.fz-camera-hero>svg'].map(selector=>{const r=document.querySelector(selector).getBoundingClientRect();return[selector,{x:r.x,y:r.y,width:r.width,height:r.height}];})));
    const original=await page.locator('.fz-search-wait img').getAttribute('src');

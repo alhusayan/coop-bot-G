@@ -1,4 +1,4 @@
-/* FINDZIA_WAIT_RELEASE=1.0.1 — public search presentation; retrieval stays unchanged. */
+/* FINDZIA_WAIT_RELEASE=1.1.0 — continuous camera-to-results presentation. */
 (() => {
   'use strict';
   const el=(tag,cls)=>{const node=document.createElement(tag);node.className=cls;return node;};
@@ -39,10 +39,16 @@
       reels.cancel();
       if(exiting&&smooth)return;
       motion?.cancel();motion=null;exiting=false;
-      const finish=()=>{box.hidden=true;delete root.dataset.waitActive;exiting=false;};
+      const finish=()=>{box.hidden=true;delete root.dataset.waitActive;delete root.dataset.waitExiting;box.style.removeProperty('position');box.style.removeProperty('top');box.style.removeProperty('left');box.style.removeProperty('width');box.style.removeProperty('margin');exiting=false;};
       if(!smooth||box.hidden||matchMedia('(prefers-reduced-motion: reduce)').matches){finish();return;}
+      // Lay out the received cards UNDER the outgoing photo in the same frame.
+      // display:none until the end produced a blank frame and a second entrance.
+      const rect=box.getBoundingClientRect();
+      Object.assign(box.style,{position:'fixed',top:rect.top+'px',left:rect.left+'px',width:rect.width+'px',margin:'0'});
+      root.dataset.waitExiting='true';delete root.dataset.waitActive;
+      window.FindziaMotion?.results(body);
       exiting=true;
-      motion=box.animate([{opacity:1,transform:'translateY(0)'},{opacity:0,transform:'translateY(-8px)'}],{duration:180,easing:'ease-out'});
+      motion=box.animate([{opacity:1},{opacity:0}],{duration:260,easing:'ease-out'});
       motion.finished.then(finish,()=>{});
     }
     function show(){
@@ -57,8 +63,8 @@
     }
     function freeze(rows,c){
       if(frozen)return;
-      const original=c.kind==='image'&&c.image_base64;
-      let url=original?'data:'+(c.mime_type||'image/jpeg')+';base64,'+original.replace(/^data:[^,]+,/,''):'';
+      const original=c.preview_image||(c.kind==='image'&&c.image_base64);
+      let url=c.preview_image||(original?'data:'+(c.mime_type||'image/jpeg')+';base64,'+original.replace(/^data:[^,]+,/,''):'');
       // Uploaded photos remain the reference throughout a photo search.
       if(!url&&c.kind!=='image')url=rows.find(row=>row.image)?.image||'';
       if(!url||(!original&&!/^https?:\/\//i.test(url)))return;
@@ -67,7 +73,12 @@
     function update(){
       frame=0;if(disposed)return;
       const c=bridge.context();
-      if(generation!==c.generation){reset();generation=c.generation;}
+      if(generation!==c.generation){
+        // Credit preflight and retrieval are two generations of the same photo.
+        // Preserve its painted frame when retrieval begins, even on a fast cache hit.
+        const continuing=!box.hidden&&!handedOff&&c.preview_image&&frozen===c.preview_image;
+        if(!continuing)reset();generation=c.generation;
+      }
       if(c.can_refine){handedOff=true;hide(true);return;}
       const results=(root.dataset.pageTarget||root.dataset.homeState)==='results';
       if(handedOff||!results||!(c.busy||c.media_pending||root.dataset.searchLaunching==='true')){hide(results);return;}
@@ -105,7 +116,7 @@
       window.removeEventListener('resize',fit);window.visualViewport?.removeEventListener('resize',fit);box.remove();delete root.fzSearchWait;
     }
     document.addEventListener('shopify:section:unload',function unload(event){if(event.target?.contains(root)){destroy();document.removeEventListener('shopify:section:unload',unload);}});
-    root.fzSearchWait={destroy,release:'1.0.1'};queue();
+    root.fzSearchWait={destroy,release:'1.1.0'};queue();
   }
   const start=()=>document.querySelectorAll('.fz-home').forEach(mount);
   if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',start,{once:true});else start();
