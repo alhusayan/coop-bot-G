@@ -34360,6 +34360,11 @@ Ask only what materially changes the search: use, budget, fit, material, size, c
 Do not force a fixed questionnaire. Do not ask about a topic already answered in query, extra_specs,
 answers or turns. Use a stable question_key. Each next question is optional. Continue with a
 useful unasked detail when available, at most 4 questions; stop sooner when no useful detail remains.
+locked_models contains literal model identifiers extracted from the shopper input. They are immutable.
+Never replace, upgrade, downgrade, or append a second model based on your training cutoff, history,
+assumed availability or familiarity. Unknown/future model numbers must remain exactly as typed.
+already_specified lists details that must not be asked again. Questions and EVERY choice must stay
+within the existing model. Ask only missing preferences; never invent model-specific colour/storage options.
 If the photo/query already identifies a specific model, do not ask for its model or release again.
 Ask to change the model only when the shopper explicitly wants a different one.
 Current explicit answers override tentative history. History is optional and only from related searches.
@@ -34385,11 +34390,17 @@ Return JSON only: {"intro":"one short sentence", "question":"or empty", "questio
 Keep intro <=180 characters, question <=180, answers <=160, query <=240 and tip <=180.'''
 
 
+from findzia_guide_identity import compatible as _fz_needs_identity_ok, models as _fz_needs_models, question_allowed as _fz_needs_question_allowed
+
+
 def _fz_needs_query(context, proposed=''):
     """Keep the reference and explicit identifiers; unavailable AI never erases input."""
     base=context['query']; extra=context.get('extra_specs','')
     answers=context.get('answers') or []
     image=context.get('kind')=='image'
+    if not image:
+        answers=[answer for answer in answers if _fz_needs_identity_ok(base,answer)]
+        if not _fz_needs_identity_ok(base,extra):extra=''
     fallback=' '.join(dict.fromkeys(x.strip() for x in ([extra] if image else [base,extra])+answers if x and x.strip()))
     def safe(value):
         try:return _refine_safe_query(value)
@@ -34402,6 +34413,7 @@ def _fz_needs_query(context, proposed=''):
         chosen=safe(context.get('draft_query')) or safe(fallback)
         words=lambda value:set(re.findall(r'\w+',_fz_facet_norm(value)))
         if words(query)!=words(chosen):query=chosen
+    if query and not image and not _fz_needs_identity_ok(base,query,require_model=True):query=''
     if query and not image:
         if _findzia_hard_product_mismatch(base,query) or _fz_product_form_conflict(base,query,preserve_model=True):query=''
         else:
@@ -34416,7 +34428,11 @@ def _fz_needs_query(context, proposed=''):
             # Preserve requested model numbers/capacities, including Arabic digits.
             numbers=lambda s:set(re.findall(r'\d+(?:[.,]\d+)?',_web_ascii_digits(s)))
             if not numbers(base)<=numbers(query):query=''
-    if not query:query=safe(context.get('draft_query')) or safe(fallback)
+    if not query:
+        draft=safe(context.get('draft_query'))
+        if draft and not image and not _fz_needs_identity_ok(base,draft,require_model=True):draft=''
+        query=draft or safe(fallback)
+    if query and not image and not _fz_needs_identity_ok(base,query,require_model=True):query=safe(base)
     return query if query and len(query)<=240 else ''
 
 
@@ -34432,15 +34448,18 @@ def _fz_needs_sync(context):
     final=max(len(context.get('answers') or []),len(context.get('turns') or []))>=4 or context.get('finish') is True
     # Four answers finish locally; never bill for a fifth question.
     if final:return result
+    profile=_intent_profile({'base':context['query'],'steps':[],'kind':context.get('kind','text')})
+    fixed=sorted(profile.get('fixed') or [])
+    locked=sorted(_fz_needs_models(context['query']))
     try:
-        value=_refine_ai(_FZ_NEEDS_PROMPT,dict(context,no_more_questions=final),tokens=1400,timeout=7)
+        value=_refine_ai(_FZ_NEEDS_PROMPT,dict(context,no_more_questions=final,locked_models=locked,already_specified=fixed),tokens=1400,timeout=7)
         if not isinstance(value,dict):return result
-        result['intro']=_card_text(value.get('intro'),180)
-        result['next_tip']=_card_text(value.get('next_tip'),180)
+        result['intro']=_card_text(value.get('intro'),180) if _fz_needs_identity_ok(context['query'],value.get('intro')) else ''
+        result['next_tip']=_card_text(value.get('next_tip'),180) if _fz_needs_identity_ok(context['query'],value.get('next_tip')) else ''
         result['search_query']=_fz_needs_query(context,value.get('search_query'))
         # No second repair request or forced completion gate. A repeated topic
         # leaves the current query available for searching or manual additions.
-        if not final and not _fz_guide_repeated(value,context):
+        if not final and not _fz_guide_repeated(value,context) and _fz_needs_question_allowed(context['query'],value,fixed):
             choices=[];seen=set()
             for choice in (value.get('choices') or [])[:4]:
                 if not isinstance(choice,dict):continue
