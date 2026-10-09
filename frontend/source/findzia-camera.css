@@ -1,0 +1,35 @@
+/* FINDZIA_CAMERA_RELEASE=1.0.0 */
+.fz-camera-dialog{position:fixed!important;inset:0!important;margin:0!important;width:100vw!important;max-width:none!important;height:100dvh!important;max-height:none!important;padding:0!important;border:0!important;border-radius:0!important;background:#101713!important;color:#fff!important;overflow:hidden!important;font:14px/1.45 Arial,sans-serif!important;box-sizing:border-box!important}
+.fz-camera-dialog[open]{display:grid!important;grid-template-rows:auto minmax(0,1fr) auto!important}
+.fz-camera-dialog::backdrop{background:#101713}
+.fz-camera-dialog *{box-sizing:border-box}
+.fz-camera-dialog [hidden]{display:none!important}
+.fz-camera-head{position:relative;display:flex;align-items:center;padding:calc(8px + env(safe-area-inset-top,0px)) 16px 8px;min-height:64px;background:#101713;z-index:2}
+.fz-camera-brand{position:absolute;left:50%;transform:translateX(-50%);font:30px/1 Georgia,serif;letter-spacing:-1px}
+.fz-camera-dialog button{font:inherit;color:inherit;cursor:pointer;-webkit-tap-highlight-color:transparent;touch-action:manipulation}
+.fz-camera-dialog button:focus-visible{outline:2px solid #ffad55;outline-offset:4px}
+.fz-camera-dialog svg{display:block;width:24px;height:24px;flex:none}
+.fz-camera-icon{display:grid;place-items:center;width:44px;height:44px;border:1px solid #ffffff2b;border-radius:50%;background:#ffffff0d}
+.fz-camera-view{position:relative;min-height:0;width:100%;overflow:hidden;background:#040705}
+.fz-camera-video{display:block;width:100%;height:100%;object-fit:cover;opacity:0;transition:opacity .18s ease}
+.fz-camera-dialog[data-ready=true] .fz-camera-video{opacity:1}
+.fz-camera-video[data-mirrored=true]{transform:scaleX(-1)}
+.fz-camera-frame{position:absolute;inset:12% 8% 17%;pointer-events:none;opacity:.85}
+.fz-camera-frame i{position:absolute;width:38px;height:38px;border:3px solid #fff}
+.fz-camera-frame i:nth-child(1){top:0;left:0;border-right:0;border-bottom:0;border-top-left-radius:22px}
+.fz-camera-frame i:nth-child(2){top:0;right:0;border-left:0;border-bottom:0;border-top-right-radius:22px}
+.fz-camera-frame i:nth-child(3){bottom:0;left:0;border-right:0;border-top:0;border-bottom-left-radius:22px}
+.fz-camera-frame i:nth-child(4){bottom:0;right:0;border-left:0;border-top:0;border-bottom-right-radius:22px}
+.fz-camera-status{position:absolute;bottom:16px;left:20px;right:20px;width:fit-content;max-width:calc(100% - 40px);margin:0 auto;padding:8px 15px;border-radius:24px;background:#07110cbc;text-align:center;font-size:13px;line-height:1.5;z-index:2;backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px)}
+.fz-camera-fallback{position:absolute;inset:0 24px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;background:#040705d9;z-index:1}
+.fz-camera-native,.fz-camera-retry{min-height:44px;padding:10px 18px;border:1px solid #ffffff40;border-radius:14px;background:#ffffff15;max-width:100%}
+.fz-camera-retry{border-color:transparent;background:transparent}
+.fz-camera-foot{display:grid;grid-template-columns:1fr auto 1fr;align-items:center;justify-items:center;gap:16px;padding:20px 24px calc(20px + env(safe-area-inset-bottom,0px));background:#101713}
+.fz-camera-gallery{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;min-width:56px;min-height:56px;padding:4px;border:0;background:transparent;font-size:11px!important}
+.fz-camera-shutter{display:grid;place-items:center;width:78px;height:78px;padding:0;border:4px solid #fff;border-radius:50%;background:#ff931f;box-shadow:inset 0 0 0 4px #101713}
+.fz-camera-shutter svg{width:30px;height:30px}
+.fz-camera-dialog button:disabled{opacity:.35;cursor:default}
+.fz-camera-shutter:active:not(:disabled){transform:scale(.94)}
+@media(min-width:800px){.fz-camera-view{max-width:820px;margin:auto}.fz-camera-foot{width:min(100%,520px);margin:auto}.fz-camera-frame{inset:10% 12% 18%}}
+@media(max-height:500px){.fz-camera-head{min-height:48px;padding-block:3px}.fz-camera-foot{padding-block:6px}.fz-camera-shutter{width:58px;height:58px}.fz-camera-frame{inset:6% 16% 25%}.fz-camera-status{bottom:6px;padding:4px 12px}}
+@media(prefers-reduced-motion:reduce){.fz-camera-dialog *{transition:none!important}}
