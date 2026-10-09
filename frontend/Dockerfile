@@ -1,11 +1,12 @@
-FROM node:22-alpine AS build
+# Docker Official Images on ECR avoid Docker Hub pull limits on shared builders.
+FROM public.ecr.aws/docker/library/node:22-alpine AS build
 WORKDIR /app
 COPY package.json trial.json ./
 COPY scripts ./scripts
 COPY source ./source
 RUN node scripts/build.mjs
 
-FROM node:22-alpine
+FROM public.ecr.aws/docker/library/node:22-alpine
 ENV NODE_ENV=production PORT=8080
 WORKDIR /app
 COPY --from=build --chown=node:node /app/public ./public
