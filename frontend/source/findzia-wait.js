@@ -1,4 +1,4 @@
-/* FINDZIA_WAIT_RELEASE=1.0.0 — public search presentation; retrieval stays unchanged. */
+/* FINDZIA_WAIT_RELEASE=1.0.1 — public search presentation; retrieval stays unchanged. */
 (() => {
   'use strict';
   const el=(tag,cls)=>{const node=document.createElement(tag);node.className=cls;return node;};
@@ -22,7 +22,7 @@
       source.textContent=row?.store||'';log.highlight(row?.url||'');
     });
     const header=root.querySelector('.fz-fixed-header');
-    let generation=null,handedOff=false,frozen='',frame=0,disposed=false;
+    let generation=null,handedOff=false,frozen='',frame=0,disposed=false,motion=null,exiting=false;
     const text=(en,ar)=>window.FindziaI18n?.t(en,ar,root)||(root.dataset.lang==='ar'?ar:en);
     function fit(){
       if(box.hidden||disposed)return;
@@ -35,7 +35,23 @@
       box.style.setProperty('--one-image-height',room+'px');
       stage.style.setProperty('--scan-travel',Math.max(120,room*.66)+'px');
     }
-    function hide(){box.hidden=true;delete root.dataset.waitActive;reels.cancel();}
+    function hide(smooth=false){
+      reels.cancel();
+      if(exiting&&smooth)return;
+      motion?.cancel();motion=null;exiting=false;
+      const finish=()=>{box.hidden=true;delete root.dataset.waitActive;exiting=false;};
+      if(!smooth||box.hidden||matchMedia('(prefers-reduced-motion: reduce)').matches){finish();return;}
+      exiting=true;
+      motion=box.animate([{opacity:1,transform:'translateY(0)'},{opacity:0,transform:'translateY(-8px)'}],{duration:180,easing:'ease-out'});
+      motion.finished.then(finish,()=>{});
+    }
+    function show(){
+      if(exiting){motion?.cancel();exiting=false;}
+      if(box.hidden&&!matchMedia('(prefers-reduced-motion: reduce)').matches){
+        motion=box.animate([{opacity:0,transform:'translateY(8px)'},{opacity:1,transform:'translateY(0)'}],{duration:280,easing:'cubic-bezier(.22,1,.36,1)'});
+      }
+      box.hidden=false;root.dataset.waitActive='true';
+    }
     function reset(){
       hide();reels.clear();log.clear();source.textContent='';frozen='';image.removeAttribute('src');image.hidden=true;placeholder.hidden=false;handedOff=false;
     }
@@ -52,10 +68,10 @@
       frame=0;if(disposed)return;
       const c=bridge.context();
       if(generation!==c.generation){reset();generation=c.generation;}
-      if(c.can_refine){handedOff=true;hide();return;}
+      if(c.can_refine){handedOff=true;hide(true);return;}
       const results=(root.dataset.pageTarget||root.dataset.homeState)==='results';
-      if(handedOff||!results||!(c.busy||c.media_pending||root.dataset.searchLaunching==='true')){hide();return;}
-      box.hidden=false;root.dataset.waitActive='true';
+      if(handedOff||!results||!(c.busy||c.media_pending||root.dataset.searchLaunching==='true')){hide(results);return;}
+      show();
       heading.textContent=text('Searching stores…','جارٍ البحث في المتاجر…');
       caption.textContent=text('Checking product prices…','جارٍ التحقق من أسعار المنتجات…');
       cancel.textContent=text('New search','بحث جديد');
@@ -89,7 +105,7 @@
       window.removeEventListener('resize',fit);window.visualViewport?.removeEventListener('resize',fit);box.remove();delete root.fzSearchWait;
     }
     document.addEventListener('shopify:section:unload',function unload(event){if(event.target?.contains(root)){destroy();document.removeEventListener('shopify:section:unload',unload);}});
-    root.fzSearchWait={destroy,release:'1.0.0'};queue();
+    root.fzSearchWait={destroy,release:'1.0.1'};queue();
   }
   const start=()=>document.querySelectorAll('.fz-home').forEach(mount);
   if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',start,{once:true});else start();

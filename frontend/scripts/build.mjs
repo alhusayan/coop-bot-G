@@ -52,7 +52,7 @@ function emit(url, file, bytes, type, immutable=false) {
   routes[url] = {file,sha256:hash(bytes),type,immutable}; return url;
 }
 const assets = new Map();
-for (const name of ['findzia-camera.js','findzia-camera.css','findzia-wait.js','findzia-choice.js','findzia-choice.css','findzia-ads.js','findzia-analytics.js','findzia-support.js','findzia-focus.js','findzia-account.js','findzia-subscriptions.js','findzia-billing.js','findzia-filters.js','findzia-i18n.js','findzia-shell.js','findzia-product-details.css','findzia-migration.js','findzia-standalone.css','findzia-motion.js','findzia-motion.css']) {
+for (const name of ['findzia-photo-history.js','findzia-camera.js','findzia-camera.css','findzia-wait.js','findzia-choice.js','findzia-choice.css','findzia-ads.js','findzia-analytics.js','findzia-support.js','findzia-focus.js','findzia-account.js','findzia-subscriptions.js','findzia-billing.js','findzia-filters.js','findzia-i18n.js','findzia-shell.js','findzia-product-details.css','findzia-migration.js','findzia-standalone.css','findzia-motion.js','findzia-motion.css']) {
   let bytes=read(name);
   if(name==='findzia-support.js')bytes=Buffer.from(bytes.toString().replace('/* SUPPORT_KNOWLEDGE */ null',()=>JSON.stringify(JSON.parse(read('findzia-support.json').toString('utf8')))));
   if(name==='findzia-i18n.js')bytes=Buffer.from(bytes.toString().replace('/* UI_TRANSLATIONS */ null',()=>JSON.stringify(uiLocales)));
