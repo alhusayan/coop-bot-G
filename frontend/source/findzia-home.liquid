@@ -405,6 +405,9 @@ function fzResultCategory(row){
 }
 function fzUpdateResultTabs(rows){
  if(!w)return;
+ // Text searches used to hide the old photo-only filter bar. Every result mode
+ // now owns these categories, including an empty selected category.
+ w.hidden=!!X;
  const copy={en:['All','Local','Similar','Global','Result categories'],ar:['الكل','محلي','مشابه','عالمي','تصنيف النتائج'],fr:['Tout','Local','Similaires','Monde','Catégories'],de:['Alle','Lokal','Ähnlich','Global','Kategorien'],es:['Todo','Local','Similares','Global','Categorías'],it:['Tutti','Locali','Simili','Globali','Categorie'],pt:['Todos','Local','Similares','Global','Categorias'],tr:['Tümü','Yerel','Benzer','Global','Kategoriler'],ru:['Все','Местные','Похожие','Мировые','Категории'],zh:['全部','本地','相似','全球','结果分类'],ja:['すべて','国内','類似','海外','結果の分類'],ko:['전체','현지','유사','글로벌','결과 분류'],hi:['सभी','स्थानीय','समान','वैश्विक','श्रेणियाँ'],ur:['سب','مقامی','مشابہ','عالمی','نتائج کی اقسام'],id:['Semua','Lokal','Serupa','Global','Kategori'],ms:['Semua','Tempatan','Serupa','Global','Kategori']};
  const labels=copy[tr()]||copy.en,keys=['all','local','alternative','global'];
  rows=rows||fzUpdateResultTabs.rows||[];fzUpdateResultTabs.rows=rows;const counts={all:rows.length,local:0,alternative:0,global:0};

@@ -28,19 +28,21 @@ function resultsFixture(){
  const buttons=['all','local','alternative','global'].map(key=>({dataset:{filter:key},attrs:{},label:{},count:{},classList:{toggle(){}},setAttribute(k,v){this.attrs[k]=v;},querySelector(s){return s==='[data-category-label]'?this.label:this.count;}}));
  const env={U:[{id:1,market:'local',ready:true},{id:2,market:'global',ready:true},{id:3,market:'local',photo_match_status:'similar',ready:true},{id:4,market:'global',photo_match_status:'rejected',ready:true},{id:5,market:'local',ready:false}],O:'all',I:'relevance',n:'KW',lang:'en',
   Fr:r=>r.market,kr:r=>r.country,ht:r=>!!r.ready,fzOfferCanDisplay:()=>true,fzEarlyPhotoPreview:()=>false,zr:()=>({tier:0,score:0}),Sr:()=>0,tr:()=>env.lang,
-  w:{setAttribute(){},querySelectorAll(){return buttons;}}};
+  X:null,w:{hidden:true,setAttribute(){},querySelectorAll(){return buttons;}}};
  vm.createContext(env);const start=home.indexOf('function fzResultCategory('),end=home.indexOf('function at(',start);vm.runInContext(home.slice(start,end),env);return {env,buttons};
 }
 test('All Local Similar Global filter real admitted rows and keep full category counts',()=>{
  const {env,buttons}=resultsFixture();assert.equal(env.tt().length,3);
  for(const [key,ids] of [['local',[1]],['alternative',[3]],['global',[2]],['all',[1,2,3]]]){
-  env.O=key;assert.deepEqual(Array.from(env.tt(),r=>r.id),ids);env.fzUpdateResultTabs(env.tt('all'));
+  env.O=key;assert.deepEqual(Array.from(env.tt(),r=>r.id),ids);env.w.hidden=true;env.fzUpdateResultTabs(env.tt('all'));
+  assert.equal(env.w.hidden,false,'text-result updates must reveal the category controls');
   assert.deepEqual(buttons.map(b=>b.count.textContent),[3,1,1,1]);
   assert.equal(buttons.filter(b=>b.attrs['aria-pressed']==='true')[0].dataset.filter,key);
  }
  env.lang='ar';env.fzUpdateResultTabs(env.tt('all'));assert.deepEqual(buttons.map(b=>b.label.textContent),['الكل','محلي','مشابه','عالمي']);
  env.O='local';env.U.push({id:6,market:'global',ready:true});env.fzUpdateResultTabs(env.tt('all'));assert.equal(buttons[3].count.textContent,2);assert.deepEqual(Array.from(env.tt(),r=>r.id),[1]);
  env.U=env.U.filter(r=>r.market!=='local');assert.equal(env.tt().length,0);assert.equal(env.tt('all').length,2);
+ env.fzUpdateResultTabs(env.tt('all'));assert.equal(env.w.hidden,false,'an empty category must keep navigation visible');
 });
 
 test('every built inline script parses',()=>{
