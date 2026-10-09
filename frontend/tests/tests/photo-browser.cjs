@@ -97,33 +97,30 @@ const offers=[1,2,3].map((n)=>({title:'Test chair '+n,store:'Test store '+n,url:
     await page.evaluate(()=>{const r=document.querySelector('.fz-home');r.dispatchEvent(new Event('fz:search-reset'));r.fzSearchProgress.set('verifying_prices');});
     assert.equal(await page.locator('[data-live-result-count]').textContent(),'4','late progress cannot reset visible cards to zero');
     const search=page.locator('[id^="fz-query-"]');
-    await search.fill('blue');await search.press('Enter');
-    await page.waitForFunction(()=>document.querySelector('.fz-home').fzRefineBridge.context().extra_specs==='blue'&&!document.querySelector('.fz-home').fzRefineBridge.context().busy);
-    await page.waitForFunction(()=>document.querySelector('[data-live-result-count]')?.textContent==='3');
-    assert.equal(refinements.length,1);assert.equal(refinements[0].base_query,'JBL Flip 7 Black Bluetooth speaker');
-    assert.equal(refinements[0].base_query_en,'JBL Flip 7 Black Bluetooth speaker');
-    assert.equal(refinements[0].photo_text_refinement,true);assert.equal(await search.inputValue(),'blue');
-    assert.equal(calls.filter(p=>p==='/api/search/image/stream').length,1,'manual words never rerun Lens');
-    // The assistant can launch at any step and uses the same refinement flow.
+    assert.equal(await search.inputValue(),'');
+    assert.equal(await page.locator('[data-image-query-chip],[data-image-query-plus]').count(),0);
+    // Both typed details and AI choices now belong to the photo composer.
     await page.locator('[data-guide-open]').click();
     await page.waitForFunction(()=>document.querySelector('dialog.fz-guide')?.open&&document.querySelectorAll('.fz-guide-choice').length>=2);
+    await page.locator('.fz-guide-proposed').fill('blue');
     await page.locator('.fz-guide-choice').first().click();
-    await page.waitForFunction(()=>!document.querySelector('.fz-guide-body')?.getAttribute('aria-busy')||document.querySelector('.fz-guide-body')?.getAttribute('aria-busy')==='false');
+    await page.waitForFunction(()=>document.querySelector('.fz-guide-body')?.getAttribute('aria-busy')==='false');
     const draft=await page.locator('.fz-guide-proposed').inputValue();
-    assert.match(draft,/blue/i);
+    assert.match(draft,/blue/i);assert.match(draft,/Home/i);
     await page.locator('.fz-guide-footer .fz-guide-primary').click();
     await page.waitForFunction(()=>{const c=document.querySelector('.fz-home').fzRefineBridge.context();return !c.busy&&c.extra_specs.includes('Home');});
-    assert.equal(refinements.length,2);assert.equal(refinements[1].base_query,'JBL Flip 7 Black Bluetooth speaker');
-    assert.equal(refinements[1].base_query_en,'JBL Flip 7 Black Bluetooth speaker');
-    assert.equal(calls.filter(p=>p==='/api/search/image/stream').length,1,'AI words never rerun Lens');
+    assert.equal(refinements.length,1);assert.equal(refinements[0].base_query,'JBL Flip 7 Black Bluetooth speaker');
+    assert.equal(refinements[0].base_query_en,'JBL Flip 7 Black Bluetooth speaker');
+    assert.equal(refinements[0].photo_text_refinement,true);assert.equal(await search.inputValue(),'');
+    assert.equal(calls.filter(p=>p==='/api/search/image/stream').length,1,'AI details never rerun Lens');
     await page.waitForFunction(()=>document.querySelector('[data-live-result-count]')?.textContent==='3');
     await page.waitForFunction(()=>!document.querySelector('dialog.fz-guide')?.open);
     await page.evaluate(()=>Promise.race([Promise.all(document.getAnimations().map(a=>a.finished.catch(()=>{}))),new Promise(r=>setTimeout(r,1500))]));
     await page.waitForTimeout(100);
     assert.equal(await page.locator('.fz-live-progress').isVisible(),true,'the completed result count remains visible');
     await page.screenshot({path:path.join(out,`photo-refined-${variant.lang}.png`),fullPage:true});
-    // Clearing additions explicitly restores the original visual search.
-    await search.fill('');await search.press('Enter');
+    // Uploading the reference starts a fresh visual search without additions.
+    await page.locator('input[type=file]').first().setInputFiles({name:'reference.png',mimeType:'image/png',buffer:Buffer.from(png,'base64')});
     await page.waitForFunction(()=>{const c=document.querySelector('.fz-home').fzRefineBridge.context();return !c.busy&&c.extra_specs==='';});
     assert.equal(calls.filter(p=>p==='/api/search/image/stream').length,2);
     assert.equal(await search.inputValue(),'');

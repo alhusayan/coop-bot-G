@@ -68,8 +68,9 @@ const offer=(id,market='global')=>({title:'Coffee table '+id,store:'Store '+id,u
    assert.deepEqual(await geometry(),ready,'completion keeps the same header geometry');
    await page.waitForFunction(()=>[...document.querySelectorAll('.fz-card-shell,.fz-market-head')].every(n=>n.getAnimations({subtree:true}).every(a=>a.playState!=='running')));
    if(process.env.FINDZIA_TEST_OUTPUT){fs.mkdirSync(process.env.FINDZIA_TEST_OUTPUT,{recursive:true});await page.screenshot({path:path.join(process.env.FINDZIA_TEST_OUTPUT,`handoff-${variant.width}-${variant.lang}.png`)});}
-   await page.locator('[data-image-query-chip]').click();
-   assert.equal(await page.locator('[data-image-query-chip]').isVisible(),false,'removing the photo releases the immediate preview too');
+   await page.evaluate(()=>document.querySelector('.fz-home').fzRefineBridge.resetSearchSession());
+   assert.equal(await page.locator('[data-image-query-chip]').count(),0,'the text header has no photo chip');
+   assert.equal(await page.evaluate(()=>document.querySelector('.fz-home').fzRefineBridge.context().preview_image),'','reset releases the immediate preview');
    assert.equal(await page.evaluate(()=>document.querySelector('.fz-home').fzRefineBridge.context().preview_image),'');
    assert.deepEqual(errors,[]);console.log('PASS',variant,'early photo, overlapping handoff, fixed header and stationary result identities');await context.close();
   }

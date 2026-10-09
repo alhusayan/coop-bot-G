@@ -73,8 +73,6 @@
 <div class="fz-search-card" data-search-card data-camera-composer>
 <div class="fz-search-row">
 <div class="fz-input-wrap">
-<button class="fz-image-query-chip" data-image-query-chip type="button" hidden aria-label="Remove photo and use text search"><img alt="Search reference"/><span aria-hidden="true">×</span></button>
-<button class="fz-image-query-plus" data-image-query-plus type="button" hidden aria-label="Add details to this photo">+</button>
 <div class="fz-query-field"><textarea class="fz-input fz-compact-input" id="fz-query-{{ section.id }}" rows="1" dir="auto"
 placeholder="Search products" aria-label="Search products" enterkeyhint="search" autocomplete="off"></textarea><span class="fz-query-preview" data-query-preview dir="auto" aria-hidden="true"></span></div><button class="fz-query-clear" type="button" data-query-clear aria-label="Clear search text" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"/></svg></button>
 <button class="fz-text-submit" type="button" data-search-btn aria-label="Search" title="Search">
@@ -1493,8 +1491,7 @@ function fzCommitSearchView(){
  viewport?.addEventListener('resize',settle);window.addEventListener('pagehide',stop,{once:true});
  fzSearchViewportCancel=stop;top();settle();timer=setTimeout(stop,700);
 }
-async function ea(e,r){var shopperContext={query:r&&r.freshText?"":W&&W.query||"",pending_question:r&&r.shopperQuestion||""};var t=((r=r||{}).selectedOption||e||g&&g.value||"").trim();if(!r.choiceNavigation&&(t||W?.kind==='image'))fzCommitSearchView();if(t&&!r.freshText&&!r.selectedOption&&!r.choiceNavigation&&g){var pb=g.closest('.fz-home')?.fzRefineBridge;if(pb&&pb.resubmitUnchanged&&pb.resubmitUnchanged(t)){g.blur();return;}}
-if(W&&W.kind==="image"&&W.image_base64&&!r.selectedOption&&!r.freshText){g&&g.blur();return fzRunPhotoEdit(t);}
+async function ea(e,r){var shopperContext={query:r&&r.freshText||W?.kind==='image'?"":W&&W.query||"",pending_question:r&&r.shopperQuestion||""};var t=((r=r||{}).selectedOption||e||g&&g.value||"").trim();if(!r.choiceNavigation&&t)fzCommitSearchView();if(t&&W?.kind!=='image'&&!r.freshText&&!r.selectedOption&&!r.choiceNavigation&&g){var pb=g.closest('.fz-home')?.fzRefineBridge;if(pb&&pb.resubmitUnchanged&&pb.resubmitUnchanged(t)){g.blur();return;}}
 if(t){fzClearPhotoPreview();if(!await window.FindziaBeforeSearch(g.closest(".fz-home"),{query:t,kind:"text",country:g.closest(".fz-home").fzRefineBridge.context().country}))return;Ue(!1,!0),r.choiceNavigation||Ut();var a=Bt(),n=Le,i=await Pt();if(n===Le){g&&(g.value=t),K=t,fr(!0,ar("searching")),zt("text"),I="relevance",O="all",cr(),w&&(w.hidden=!0),W={kind:"text",query:t,country:i,aiUsed:r.aiUsed===true,providerCopy:!1,shoppingUrl:""},cr();var o={query:t,country:i,lang:nr(),force_specific:!0,shopping_context:shopperContext};r&&r.forceSpecific&&(o.force_specific=!0),r&&r.selectedOption&&(o.selected_option=r.selectedOption,o.original_query=r.originalQuery||"",o.force_specific=!0);try{await Rt("/api/search/stream",o,async function(e){if(a===B&&e)
 if(at(e),"reference_image"===e.event)W.image_reference=e.image_reference,W.textLens=!0,w&&(w.hidden=!1);else if("status"===e.event&&"finding_reference_image"===e.stage)fr(!0,"ar"===tr()?"نجهّز صورة المنتج…":"Finding the product photo…");else if("status"!==e.event||"preparing_offers"!==e.stage&&"identify"!==e.stage){if("status"===e.event&&"google_shopping_slow"===e.stage)fr(!0,"ar"===tr()?"البحث مستمر، المصدر متأخر قليلًا…":"Still searching — the provider is taking a little longer…");else if("remove"===e.event)At(e.url);else if("status"===e.event&&/^(understanding_request|researching_product)$/.test(e.stage))fr(!0,e.message||(tr()==="ar"?"أفهم طلبك وأبحث عن المنتج المناسب…":"Understanding your request and identifying the product…"));else if("query"===e.event&&e.query)fzSetDisplayQuery(e,t);else if("result"===e.event||"upsert"===e.event)Ct(e.item||{});else if("snapshot"===e.event)(e.results||e.all_results||[]).forEach(Ct);else if("recommendations"===e.event)Ot(e.data);else if("done"===e.event){if(W){W.partial=!!e.partial;W.shopperEmpty=e.shopper_empty_message||"";}
 fr(!1);if(e.shopper_answer)fzShopperAnswer(e.shopper_answer);if(e.shopper_empty_message)St();}else if("error"===e.event)throw new Error(e.error||"search_failed");}else fr(!0,ar("searching"));}),a===B&&(fr(!1),U.length||X||W&&W.shopperEmpty||b.querySelector(".fz-empty")||Et(ar("no_results"),!1),Ke(r.originalQuery||t));}catch(e){if(a!==B||fzBillingFailure(e))return;W&&W.providerCopy?nt(e.message||"shopping_provider_unavailable"):ot(e.message||"search_failed");}}}else g&&g.focus();}
@@ -1524,7 +1521,7 @@ e.fzRefineBridge.begin = function (e) {
     Vt.published.delete(row.url);At(row.url);
   }
   pt(dt(merged));Xt();
-},e.fzRefineBridge.remove=function(e){Vt&&(Vt.rows.delete(e),Vt.published.delete(e),Vt.started&&At(e));},e.fzRefineBridge.complete=function(e){this.streamQuery(e),Xt();var r=Vt&&Vt.started?tt().length:0;return r&&St(),fzAccountDone(),r;},e.fzRefineBridge.streamPhotoWords=function(words,typed){if(!Vt)return;Vt.context.extra_specs=words;Vt.context.user_extra_specs=typed;if(Vt.started&&W?.kind==='image'){W.extraSpecs=words;W.photoUserExtra=typed;g.value=words;fzUpdatePhotoUI();}};
+},e.fzRefineBridge.remove=function(e){Vt&&(Vt.rows.delete(e),Vt.published.delete(e),Vt.started&&At(e));},e.fzRefineBridge.complete=function(e){this.streamQuery(e),Xt();var r=Vt&&Vt.started?tt().length:0;return r&&St(),fzAccountDone(),r;},e.fzRefineBridge.streamPhotoWords=function(words,typed){if(!Vt)return;Vt.context.extra_specs=words;Vt.context.user_extra_specs=typed;if(Vt.started&&W?.kind==='image'){W.extraSpecs=words;W.photoUserExtra=typed;g.value='';fzUpdatePhotoUI();}};
 e.fzRefineBridge.finish = function () {
   if (Vt?.started) Vt.rows.forEach((row, key) => {
     if (!Vt.published.has(key) && row.refinement_verified && $t(row)) Ct(row);
@@ -1594,7 +1591,7 @@ e.fzRefineBridge.commitEmpty = function (query, context, message) {
   } finally {
     Gt = false;
   }
-};function fzShownQuery(value){return W&&W.kind==='image'?String(W.extraSpecs||''):String(value||'');}
+};function fzShownQuery(value){return W&&W.kind==='image'?'':String(value||'');}
 async function fzRunPhotoOriginal(origin) {
   fzClearPhotoPreview();
   if (!await window.FindziaBeforeSearch(e, origin)) return;
@@ -1614,24 +1611,10 @@ async function fzRunPhotoOriginal(origin) {
   }
 }
 function fzUpdatePhotoUI(){
+ // Photo refinements live in the AI composer. The header is always text-only.
  const wrap=e.querySelector('.fz-input-wrap');if(!wrap)return;
- const text=(en,arabic)=>window.FindziaI18n?.t(en,arabic,e)||(nr()==='ar'?arabic:en);
- const attr=(node,name,value)=>{if(node&&node.getAttribute(name)!==value)node.setAttribute(name,value);};
- const chip=wrap.querySelector('[data-image-query-chip]'),plus=wrap.querySelector('[data-image-query-plus]');
- const source=fzPhotoPreviewURL||(W&&W.kind==='image'&&W.image_base64?'data:'+(W.mime_type||'image/jpeg')+';base64,'+W.image_base64:'');
- const active=!!source;
- wrap.dataset.imageMode=String(active);e.dataset.searchKind=active?'image':'text';
- if(chip){
-  chip.hidden=!active;attr(chip,'aria-label',text('Remove photo','إزالة الصورة'));
-  const img=chip.querySelector('img');
-  if(active&&img&&chip._fzImage!==source){img.src=source;chip._fzImage=source;delete e.dataset.photoFiltersUnavailable;}
-  if(!active&&img){img.removeAttribute('src');delete chip._fzImage;}
- }
- if(plus){plus.hidden=!active;attr(plus,'aria-label',text('Add specifications to photo','إضافة مواصفات للصورة'));}
- if(active&&g){
-  attr(g,'placeholder',text('Add details…','أضف مواصفات…'));
-  attr(g,'aria-label',text('Additional specifications for photo','مواصفات إضافية للصورة'));
- }
+ wrap.dataset.imageMode='false';
+ e.dataset.searchKind=fzPhotoPreviewURL||W?.kind==='image'?'image':'text';
 }
 function fzAcceptPhotoDescription(event){if(!W||W.kind!=='image')return;const profile=event.profile||{};if(profile.query_en)W.photoQueryEn=profile.query_en;if(profile.query_language)W.queryLanguage=profile.query_language;const fromPhoto=event.event==='recognition';if(fromPhoto&&(event.final!==true||event.status!=='ready'))return;if(!fromPhoto&&W.photoDescriptionReady)return;const description=String(fromPhoto?(profile.display_query||profile.search_description||profile.title||profile.query||''):(event.display_query||event.query||'')).replace(/\s+/g,' ').trim().slice(0,220);if(!description)return;W.photoDescription=description;W.photoDescriptionReady=fromPhoto||!!W.photoDescriptionReady;if(!W.extraSpecs){W.query=description;K=description;}
 fzUpdatePhotoUI();Yt('fz:search-state');}
@@ -1654,7 +1637,7 @@ let fzPhotoEditChecking=false,fzPhotoEditDiagnostics=null;e.fzPhotoRefinementDia
   if (!allowed || ['generation', 'kind', 'image_base64', 'country', 'lang'].some(k => origin[k] !== current[k])) return;
   const before = bridge.snapshot();
   W.photoEditDraft = extra;
-  g.value = extra;
+  g.value = '';
   fzPhotoEditDiagnostics = {
     status: 'searching',
     build: '156.7.34'
@@ -1740,7 +1723,7 @@ let fzPhotoEditChecking=false,fzPhotoEditDiagnostics=null;e.fzPhotoRefinementDia
       W.photoDescription = origin.photoDescription;
       W.photoQueryEn = origin.photo_query_en || origin.photoDescription;
       W.photoDescriptionReady = true;
-      g.value = W.extraSpecs;
+      g.value = '';
     }
     fzPhotoEditDiagnostics = {
       ...fzPhotoEditDiagnostics,
@@ -1754,7 +1737,7 @@ let fzPhotoEditChecking=false,fzPhotoEditDiagnostics=null;e.fzPhotoRefinementDia
       bridge.restore(before);
       generation = B;
       if (W) W.photoEditDraft = extra;
-      g.value = extra;
+      g.value = '';
     }
     fzPhotoEditDiagnostics = {
       ...fzPhotoEditDiagnostics,
@@ -1775,7 +1758,7 @@ let fzPhotoEditChecking=false,fzPhotoEditDiagnostics=null;e.fzPhotoRefinementDia
     }
   }
 }
-var fzPhotoChip=e.querySelector('[data-image-query-chip]');var fzPhotoPlus=e.querySelector('[data-image-query-plus]');if(fzPhotoChip)fzPhotoChip.addEventListener('click',function(){if(!fzPhotoPreviewURL&&(!W||W.kind!=='image'))return;fzClearPhotoPreview();var query=g.value||'';Bt();W={kind:'text',query:query,country:n,aiUsed:!!(W&&W.aiUsed)};K=query;g.value=query;delete e.dataset.photoFiltersUnavailable;delete g.dataset.autoPhotoDescription;fr(false);cr();fzUpdatePhotoUI();Yt('fz:search-state');g.focus();});if(fzPhotoPlus)fzPhotoPlus.addEventListener('click',function(){delete g.dataset.autoPhotoDescription;g.focus();g.setSelectionRange(g.value.length,g.value.length);});fzUpdatePhotoUI();e.fzRefineBridge.photoNotice=fzPhotoNotice;e.fzResultDiagnostics = function () {
+fzUpdatePhotoUI();e.fzRefineBridge.photoNotice=fzPhotoNotice;e.fzResultDiagnostics = function () {
   return {
     build: '156.7.34',
       mediaWindowClosed: fzMediaClosed,
