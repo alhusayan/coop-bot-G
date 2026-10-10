@@ -23,6 +23,36 @@
   const unknown = {ar:'بلد المتجر غير مؤكد',en:'Store country unconfirmed',fr:'Pays du vendeur non confirmé',de:'Händlerland unbestätigt',es:'País de la tienda sin confirmar',it:'Paese del negozio non confermato',pt:'País da loja não confirmado',tr:'Mağazanın ülkesi doğrulanmadı',zh:'商店所在国家未确认',ja:'ストアの国は未確認',ko:'스토어 국가 미확인',ru:'Страна магазина не подтверждена',hi:'स्टोर के देश की पुष्टि नहीं हुई',ur:'اسٹور کے ملک کی تصدیق نہیں ہوئی',id:'Negara toko belum dikonfirmasi',ms:'Negara kedai belum disahkan'};
   const shipping={ar:'التوصيل والسعر النهائي عند المتجر',en:'Confirm delivery and final price at store',fr:'Livraison et prix final à confirmer en boutique',de:'Lieferung und Endpreis im Shop prüfen',es:'Confirma entrega y precio final en la tienda',it:'Conferma consegna e prezzo finale nel negozio',pt:'Confirme entrega e preço final na loja',tr:'Teslimatı ve son fiyatı mağazada doğrulayın',zh:'请在商店确认配送与最终价格',ja:'配送と最終価格はストアで確認',ko:'배송 및 최종 가격은 스토어에서 확인',ru:'Уточните доставку и итоговую цену в магазине',hi:'स्टोर पर डिलीवरी और अंतिम कीमत जाँचें',ur:'اسٹور پر ترسیل اور حتمی قیمت کی تصدیق کریں',id:'Pastikan pengiriman dan harga akhir di toko',ms:'Sahkan penghantaran dan harga akhir di kedai'};
   const states = new WeakMap();
+  const photoGroupCopy = {
+    ar:['الأقرب لصورتك','خيارات مشابهة','بحث بصري بواسطة Google Lens'],
+    en:['Closest to your photo','Similar options','Visual search powered by Google Lens'],
+    fr:['Les plus proches de votre photo','Options similaires','Recherche visuelle avec Google Lens'],
+    de:['Am ähnlichsten zu deinem Foto','Ähnliche Optionen','Visuelle Suche mit Google Lens'],
+    es:['Lo más parecido a tu foto','Opciones similares','Búsqueda visual con Google Lens'],
+    it:['I più simili alla tua foto','Opzioni simili','Ricerca visiva con Google Lens'],
+    pt:['Os mais próximos da sua foto','Opções semelhantes','Pesquisa visual com Google Lens'],
+    tr:['Fotoğrafına en yakın olanlar','Benzer seçenekler','Google Lens ile görsel arama'],
+    zh:['最接近你的照片','相似选项','由 Google Lens 提供视觉搜索'],
+    ja:['写真に最も近い商品','似ている商品','Google Lens による画像検索'],
+    ko:['사진과 가장 비슷한 상품','비슷한 상품','Google Lens 이미지 검색'],
+    ru:['Самые похожие на ваше фото','Похожие варианты','Визуальный поиск с Google Lens'],
+    hi:['आपकी फ़ोटो से सबसे मिलते-जुलते','मिलते-जुलते विकल्प','Google Lens से विज़ुअल खोज'],
+    ur:['آپ کی تصویر سے قریب ترین','ملتے جلتے اختیارات','Google Lens کے ذریعے تصویری تلاش'],
+    id:['Paling mirip dengan fotomu','Pilihan serupa','Penelusuran visual dengan Google Lens'],
+    ms:['Paling hampir dengan foto anda','Pilihan serupa','Carian visual dengan Google Lens']
+  };
+  function photoCopy(language){return photoGroupCopy[language]||photoGroupCopy.en;}
+  function isLens(row){return row.source!=='shopify_catalog'&&(row.source==='google_lens'||Array.isArray(row.retrieval_sources)&&row.retrieval_sources.includes('google_lens'));}
+  function compareLens(a,b,compare){
+    const rank=row=>row.market_scope==='local'?0:row.market_scope==='global'?1:2;
+    return rank(a)-rank(b)||compare(a,b);
+  }
+  function photoGroups(rows,sort,compare,isSocial){
+    const groups=[{id:'lens',items:[]},{id:'photo_similar',items:[]},{id:'social',items:[]}];
+    for(const row of rows)groups[isSocial(row)?2:isLens(row)?0:1].items.push(row);
+    if(sort==='relevance')groups[0].items.sort((a,b)=>compareLens(a,b,compare));
+    return groups.filter(group=>group.items.length);
+  }
   const similar = {ar:'شبيه',en:'Similar',fr:'Similaire',de:'Ähnlich',es:'Similar',it:'Simile',pt:'Semelhante',tr:'Benzer',zh:'相似',ja:'類似',ko:'유사',ru:'Похожее',hi:'समान',ur:'مشابہ',id:'Serupa',ms:'Serupa'};
   function lang(root){return (root.fzRefineBridge?.context()?.lang||document.documentElement.lang||'en').split('-')[0];}
   function unknownLabel(root){return unknown[lang(root)]||unknown.en;}
@@ -158,6 +188,6 @@
     // A restored browser document must run a fresh search for catalog products.
     window.addEventListener('pagehide', clear);
   }
-  window.FindziaCatalog = {mount, combine, displayMarket, labels, unknownLabel, sameOffer, count:root => states.get(root)?.rows.length || 0};
+  window.FindziaCatalog = {mount, combine, displayMarket, labels, unknownLabel, sameOffer, photoCopy, isLens, compareLens, photoGroups, count:root => states.get(root)?.rows.length || 0};
   document.querySelectorAll('.fz-home').forEach(mount);
 })();

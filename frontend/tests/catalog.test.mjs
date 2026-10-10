@@ -21,6 +21,45 @@ function setup(lang='ar',preview=false,filters=false){
  return {window,root,send,row,api:window.FindziaCatalog,paints:()=>paints};
 }
 const event=items=>({event:'catalog',source:'shopify_catalog',items});
+test('photo groups contain only Lens provenance, local first, and keep every offer once',()=>{
+ const {api}=setup(),compare=(a,b)=>b.score-a.score;
+ const rows=[{url:'catalog',source:'shopify_catalog',retrieval_sources:['google_lens'],market_scope:'local',score:1},
+  {url:'web',source:'google',market_scope:'local',score:1},
+  {url:'global',retrieval_sources:['google_lens'],market_scope:'global',score:.99},
+  {url:'local-low',source:'google_lens',market_scope:'local',score:.5},
+  {url:'unknown',source:'google_lens',market_scope:'unknown',score:1},
+  {url:'local-high',source:'google_lens',market_scope:'local',score:.9},
+  {url:'social',source:'google_lens',social_id:'1',score:1}];
+ const groups=api.photoGroups(rows,'relevance',compare,r=>!!r.social_id);
+ assert.deepEqual(Array.from(groups,g=>g.id),['lens','photo_similar','social']);
+ assert.deepEqual(Array.from(groups[0].items,r=>r.url),['local-high','local-low','global','unknown']);
+ assert.deepEqual(Array.from(groups[1].items,r=>r.url),['catalog','web']);
+ assert.equal(new Set(groups.flatMap(g=>Array.from(g.items,r=>r.url))).size,rows.length);
+ assert.deepEqual(Array.from(api.photoGroups(rows,'price',compare,r=>!!r.social_id)[0].items,r=>r.url),['global','local-low','unknown','local-high']);
+ assert.equal(api.photoGroups([rows[0]],'relevance',compare,()=>false)[0].id,'photo_similar');
+ for(const lang of ['ar','en','fr','de','es','it','pt','tr','zh','ja','ko','ru','hi','ur','id','ms']){
+  const copy=api.photoCopy(lang);assert.equal(copy.length,3);assert.ok(copy.every(Boolean));assert.match(copy[2],/Google Lens/);
+ }
+});
+for(const file of ['findzia-home.liquid','findzia-one.liquid'])test(file+': Lens grouping is exclusive to image All and pinned arrivals keep local priority',()=>{
+ const {api}=setup(),source=readFileSync(new URL('../source/'+file,import.meta.url),'utf8');
+ const code=source.split('\n').filter(line=>/^function (Gr|Fr|fzIsSimilar|fzMatchesResultFilter|fzCompareMatch|zr)\(/.test(line)).join('\n');
+ const c={window:{FindziaCatalog:api},W:{kind:'image'},O:'all',I:'relevance',B:1,E:'grid',br:r=>r.url,fzIsSocial:()=>false,fzPhotoAlternative:()=>false};
+ vm.createContext(c);vm.runInContext(code,c);
+ const shop={url:'shop',source:'shopify_catalog',market_scope:'local',match_type:'visual_similarity'},
+  global={url:'global',source:'google_lens',market_scope:'global',match_type:'exact',match_score:.99},
+  local={url:'local',retrieval_sources:['google_lens'],market_scope:'local',match_type:'similar',match_score:.8};
+ assert.deepEqual(Array.from(c.Gr([shop,global,local]),g=>g.id),['lens','photo_similar']);
+ c.W.kind='text';assert.deepEqual(Array.from(c.Gr([shop,global,local]),g=>g.id),['local','global']);
+ c.W.kind='image';c.O='local';assert.equal(c.Gr([shop,local])[0].id,'local');
+ c.O='alternative';assert.equal(c.Gr([shop,local])[0].id,'alternative');c.O='all';
+ if(file==='findzia-home.liquid'){
+  vm.runInContext(source.slice(source.indexOf('var fzResultSlots=null;'),source.indexOf('function fzStableGroups(')),c);
+  assert.equal(c.fzPinnedGroups([shop])[0].id,'photo_similar');
+  assert.equal(c.fzPinnedGroups([shop,global])[0].id,'lens');
+  assert.deepEqual(Array.from(c.fzPinnedGroups([shop,global,local])[0].slots,r=>r?.url),['local','global']);
+ }
+});
 test('catalog has its own cap and preserves every primary result including duplicates',()=>{
  const {root,send,row,api}=setup();
  const primary=Array.from({length:60},(_,i)=>({...row,source:'google_lens',url:`https://lens.example/products/${i}`}));
