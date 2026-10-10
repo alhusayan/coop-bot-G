@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import vm from 'node:vm';
+import {spawnSync} from 'node:child_process';
 class Node extends EventTarget {
  constructor(){super();this.children=[];this.dataset={};this.textContent='';}
  append(...nodes){for(const n of nodes){n.parent=this;this.children.push(n);}}
@@ -185,6 +186,22 @@ for(const file of ['findzia-home.liquid','findzia-one.liquid']){
   assert.equal(new Set(all).size,4);assert.equal(local.length,3);assert.equal(global.length,1);
   assert.deepEqual(similar,all);assert.ok(local.every(url=>similar.includes(url)));
   assert.ok(global.every(url=>similar.includes(url)));assert.ok(local.every(url=>!global.includes(url)));
+ });
+ test(file+': raw shoe URLs survive Python market classification and both overlapping UI filters',()=>{
+  const script="import json; from findzia_market_evidence import MerchantMarkets; rows=json.load(open('tests/fixtures/kuwait_similar_storefronts.json')); m=MerchantMarkets(['kw','sa','ae','bh','qa','om','us']); print(json.dumps([m.classify(dict(r,source='google_lens',match_type='similar',price='55 KWD'), 'kw') for r in rows]))";
+  const run=spawnSync(process.env.FINDZIA_TEST_PYTHON||'python',['-c',script],{cwd:new URL('../../',import.meta.url),encoding:'utf8'});
+  assert.equal(run.status,0,run.stderr);
+  const primary=JSON.parse(run.stdout),{root,api}=setup();
+  const rows=api.combine(root,primary);
+  const code=source.split('\n').filter(line=>/^(function (Fr|Gr|fzIsSimilar|fzMatchesResultFilter)\()/.test(line)).join('\n');
+  const c={fzIsSocial:()=>false,fzPhotoAlternative:()=>false,O:'all'};vm.createContext(c);vm.runInContext(code,c);
+  const select=filter=>{c.O=filter;return rows.filter(c.fzMatchesResultFilter);};
+  assert.equal(select('local').length,9);
+  assert.equal(select('global').length,3);
+  assert.equal(select('alternative').length,13);
+  const all=select('all');assert.equal(new Set(all.map(r=>r.url)).size,13);
+  assert.deepEqual(Array.from(c.Gr(all),g=>g.id),['local','global','alternative']);
+  assert.equal(primary[0].market_scope,'local');
  });
  test(file+': empty filter after partial photo success cannot show timeout or media retry',()=>{
   const c={W:{photoSearchIssue:'timeout'},e:{dataset:{},dispatchEvent(){}},ee:false,Kt:false,Vt:null,Jt:false,fzUsableResults:true,

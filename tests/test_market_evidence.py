@@ -1,6 +1,7 @@
 import asyncio
 import json
 import unittest
+from pathlib import Path
 import httpx
 from findzia_market_evidence import MerchantMarkets
 from findzia_shopify_catalog import ShopifyCatalog, normalize_products
@@ -80,6 +81,64 @@ class DiscoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['status'],'ok');self.assertEqual(result['items'][0]['market_scope'],'unknown')
 
 class VerifiedStorefrontTests(unittest.TestCase):
+    def test_shoe_storefront_languages_and_national_branches_are_distinct(self):
+        markets=MerchantMarkets(['kw','sa','ae','bh','qa','om','us','gb','de','jp'])
+        for url,cc in (
+                ('https://ar-kw.6thstreet.com/p/1','kw'),
+                ('https://ar-kw.aivi.com/p/1','kw'),
+                ('https://ar-sa.aivi.com/p/1','sa'),
+                ('https://ar-kuwait.levelshoes.com/p/1','kw'),
+                ('https://en-saudi.levelshoes.com/p/1','sa'),
+                ('https://www.levelshoes.com/p/1','ae'),
+                ('https://us.levelshoes.com/p/1','us'),
+                ('https://ar-kw.sssports.com/p/1','kw'),
+                ('https://en-sa.sssports.com/p/1','sa'),
+                ('https://namshi.com/kuwait-ar/p/1','kw'),
+                ('https://namshi.com/oman-en/p/1','om'),
+                ('https://birkenstock.com/kw/p/1','kw'),
+                ('https://birkenstock.com/sa-ar/p/1','sa'),
+                ('https://birkenstock.com/de-en/p/1','de'),
+                ('https://birkenstock.com/jp/p/1','jp'),
+                ('https://shop.mango.com/sa/ar/p/1','sa')):
+            with self.subTest(url=url):
+                row=markets.classify(dict(url=url,price='1 KWD'),'kw')
+                self.assertEqual(row['market_country'],cc)
+                self.assertEqual(row['market_scope'],'local' if cc=='kw' else 'global')
+                self.assertEqual(markets.classify(row,cc)['market_scope'],'local')
+        for url in ('https://en-kw.6thstreet.com.evil.example/p/1',
+                    'https://en-kw-fake.6thstreet.com/p/1',
+                    'https://unknown.levelshoes.com/p/1',
+                    'https://en-kuwait.levelshoes.com.evil.example/p/1',
+                    'https://namshi.com/kuwait-en-fake/p/1',
+                    'https://namshi.com/p/1?country=KW',
+                    'https://birkenstock.com/kw-ar-fake/p/1',
+                    'https://birkenstock.com/ar/p/1?country=KW',
+                    'https://shop.mango.com/p/1?country=KW',
+                    'https://unknown.example/kw/en/p/1'):
+            with self.subTest(url=url):
+                self.assertEqual(markets.classify(dict(url=url,price='1 KWD'),'kw')['market_scope'],'unknown')
+
+    def test_shoe_results_keep_verified_country_at_every_stream_boundary(self):
+        fixtures=json.loads((Path(__file__).parent/'fixtures/kuwait_similar_storefronts.json').read_text())
+        markets=MerchantMarkets(['kw','sa','ae','bh','qa','om','us'])
+        rows=[dict(url=f['url'],store=f['store'],price='55.000 KWD',
+                   source='google_lens',match_type='similar',market_scope='local') for f in fixtures]
+        for destination in ('kw','sa','us'):
+            expected=[('local' if f['country']==destination else 'global') if f['country'] else 'unknown' for f in fixtures]
+            events=[dict(event='result',item=row) for row in rows]+[dict(event='upsert',item=row) for row in rows]
+            for key in ('results','all_results','items'):
+                events.append(dict(event='snapshot',**{key:rows}))
+            for event in events:
+                output=markets.event(event,destination)
+                actual=[output['item']] if 'item' in output else next(output[k] for k in ('results','all_results','items') if k in output)
+                for row in actual:
+                    i=next(i for i,f in enumerate(fixtures) if f['url']==row['url'])
+                    with self.subTest(destination=destination,url=row['url'],event=event['event']):
+                        self.assertEqual(row['market_scope'],expected[i])
+                        self.assertEqual(row['merchant_country'],fixtures[i]['country'].upper() or None)
+                        self.assertEqual(row['match_type'],'similar')
+                        self.assertEqual(row['price'],'55.000 KWD')
+
     def test_furniture_national_storefronts_survive_both_photo_filters(self):
         markets=MerchantMarkets(['kw','sa','ae','qa','eg','jp','de','gb','us','bh','om'])
         for host,cc,lang in [('ikea.com','kw','en'),('ikea.com','sa','ar'),

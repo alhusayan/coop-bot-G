@@ -13,8 +13,38 @@ VERIFIED_STORES = {'rullart.com': 'kw', 'karazonline.com': 'kw',
 # turn a different national storefront (or an unreviewed subdomain) into Kuwait.
 STOREFRONT_HOSTS = {
     'alnasser.net': {'alnasser.net': 'kw', 'ksa.alnasser.net': 'sa', 'bh.alnasser.net': 'bh'},
+    # Official national storefronts, including 6thStreet's AIVI redirect.
+    # https://en-kw.6thstreet.com/ -> https://en-kw.aivi.com/
+    **{domain: {f'{lang}-{cc}.{domain}': cc
+                for lang in ('en', 'ar') for cc in ('kw', 'sa', 'ae', 'bh', 'qa', 'om')}
+       for domain in ('6thstreet.com', 'aivi.com')},
+    # Country hosts from the official en-kuwait.levelshoes.com hreflang links.
+    'levelshoes.com': {'levelshoes.com': 'ae', 'us.levelshoes.com': 'us',
+                      **{f'{lang}-{market}.levelshoes.com': cc
+                         for market, cc in (('kuwait', 'kw'), ('saudi', 'sa'),
+                                            ('bahrain', 'bh'), ('qatar', 'qa'), ('oman', 'om'))
+                         for lang in ('en', 'ar')}},
+    # https://en-kw.sssports.com/about-us.html
+    'sssports.com': {f'{lang}-{cc}.sssports.com': cc
+                    for lang in ('en', 'ar') for cc in ('kw', 'sa', 'ae', 'qa')},
 }
 STOREFRONT_PATHS = {
+    # https://www.namshi.com/kuwait-en/ and its national country selector.
+    'namshi.com': {f'/{market}-{lang}/': cc for market, cc in
+                  (('kuwait', 'kw'), ('saudi', 'sa'), ('uae', 'ae'),
+                   ('bahrain', 'bh'), ('qatar', 'qa'), ('oman', 'om'))
+                  for lang in ('en', 'ar')},
+    # Explicit routes from https://www.birkenstock.com/kw/ hreflang links.
+    # /kw-ar is a Kuwait storefront, not a generic Arabic-language route.
+    'birkenstock.com': {f'/{route}/': route.split('-')[0] for route in
+                       ('ca ca-fr at be be-nl ch ch-fr ch-it de de-en dk dk-en '
+                        'es es-en fi-en fr gb gr-en hr-en hu hu-en ie it it-en '
+                        'lu lu-de lu-en nl nl-en no no-en pt pt-en se se-en pl '
+                        'pl-en cz-en jp kr ae ae-ar bh bh-ar kw kw-ar qa qa-ar '
+                        'sa sa-ar om om-ar hk my sg ph us').split()},
+    # https://shop.mango.com/kw/en (country first, language second).
+    'mango.com': {f'/{cc}/': cc for cc in
+                  ('kw', 'sa', 'ae', 'bh', 'qa', 'om', 'us', 'gb', 'fr', 'de', 'es', 'it')},
     'ikea.com': {f'/{cc}/': cc for cc in
                  ('ae', 'at', 'au', 'be', 'ca', 'ch', 'cn', 'cz', 'de', 'dk',
                   'eg', 'es', 'fi', 'fr', 'gb', 'hr', 'hu', 'ie', 'in', 'it',
