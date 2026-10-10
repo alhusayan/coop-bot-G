@@ -8,8 +8,18 @@ GENERIC_CCTLDS = {'ai', 'io', 'co', 'me', 'tv', 'cc', 'fm', 'ly', 'to', 'so', 'w
 # Independently verified storefronts, not currency/delivery-country guesses.
 # Evidence and review date are recorded in SHOPIFY_CATALOG.md.
 VERIFIED_STORES = {'rullart.com': 'kw', 'karazonline.com': 'kw'}
+# Country-specific hosts must be matched exactly: the Kuwait root must never
+# turn a different national storefront (or an unreviewed subdomain) into Kuwait.
+STOREFRONT_HOSTS = {
+    'alnasser.net': {'alnasser.net': 'kw', 'ksa.alnasser.net': 'sa', 'bh.alnasser.net': 'bh'},
+}
 STOREFRONT_PATHS = {
     'centrepointstores.com': {f'/{cc}/': cc for cc in ('kw', 'sa', 'ae', 'bh', 'qa', 'om')},
+    'azadea.com': {**{f'/{cc}/': cc for cc in ('kw', 'lb', 'qa', 'iq')},
+                   '/en/': 'ae', '/ar/': 'ae'},
+    'luluhypermarket.com': {f'/{lang}-{cc}/': cc
+                          for cc in ('kw', 'sa', 'ae', 'bh', 'qa', 'om')
+                          for lang in ('en', 'ar')},
     'noon.com': {f'/{market}-{lang}/': cc for market, cc in
                  (('kuwait', 'kw'), ('saudi', 'sa'), ('uae', 'ae'), ('egypt', 'eg'))
                  for lang in ('en', 'ar')},
@@ -42,6 +52,10 @@ class MerchantMarkets:
                 return '', ''
         except (ValueError, TypeError):
             return '', ''
+        for domain, hosts in STOREFRONT_HOSTS.items():
+            if host == domain or host.endswith('.' + domain):
+                country = hosts.get(host)
+                return (country, 'registered_storefront') if country in self.countries else ('', '')
         # Only registered hosts and complete route segments are accepted. A
         # /kw path on an arbitrary domain or ?country=KW never supplies proof.
         for domain, paths in STOREFRONT_PATHS.items():

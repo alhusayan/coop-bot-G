@@ -80,6 +80,48 @@ class DiscoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['status'],'ok');self.assertEqual(result['items'][0]['market_scope'],'unknown')
 
 class VerifiedStorefrontTests(unittest.TestCase):
+    def test_recording_photo_stores_recover_local_without_losing_similarity(self):
+        markets=MerchantMarkets(['kw','sa','ae','bh','qa','om','lb','iq'])
+        urls=('https://www.azadea.com/kw/en/buy-kipsta-volleyball/54_8972682_000.html',
+              'https://gcc.luluhypermarket.com/en-kw/volleyball-assorted/p/114752',
+              'https://alnasser.net/products/volleyball')
+        for source in ('google_lens','shopify_catalog'):
+            rows=[dict(url=url,source=source,match_type='visual_similarity',
+                       price='8.00 USD',market_scope='unknown') for url in urls]
+            for key in ('items','results','all_results'):
+                output=markets.event({'event':'snapshot',key:rows},'kw')[key]
+                self.assertEqual([r['market_scope'] for r in output],['local']*3)
+                self.assertTrue(all(r['match_type']=='visual_similarity' for r in output))
+                self.assertTrue(all(r['price']=='8.00 USD' for r in output))
+            self.assertTrue(all(r['market_scope']=='unknown' for r in rows))
+            self.assertTrue(all(markets.classify(r,'sa')['market_scope']=='global' for r in rows))
+
+    def test_national_branches_do_not_inherit_kuwait_or_buyer_destination(self):
+        markets=MerchantMarkets(['kw','sa','ae','bh','qa','om','lb','iq'])
+        for url,country in (
+                ('https://www.alnasser.net/ar/products/ball','kw'),
+                ('https://ksa.alnasser.net/products/ball','sa'),
+                ('https://bh.alnasser.net/products/ball','bh'),
+                ('https://azadea.com/en/product/ball','ae'),
+                ('https://azadea.com/lb/en/product/ball','lb'),
+                ('https://azadea.com/qa/en/product/ball','qa'),
+                ('https://azadea.com/iq/ar/product/ball','iq'),
+                *((f'https://gcc.luluhypermarket.com/{lang}-{cc}/ball/p/123',cc)
+                  for lang in ('en','ar') for cc in ('kw','sa','ae','bh','qa','om'))):
+            with self.subTest(url=url):
+                row=dict(url=url,price='3 KWD',match_type='similar')
+                self.assertEqual(markets.classify(row,country)['market_scope'],'local')
+                self.assertEqual(markets.classify(row,'kw')['market_country'],country)
+        for url in ('https://unknown.alnasser.net/products/ball',
+                    'https://ksa.alnasser.net.evil.example/products/ball',
+                    'https://gcc.luluhypermarket.com/en-kw-fake/p/123',
+                    'https://gcc.luluhypermarket.com/p/123?country=kw',
+                    'https://azadea.com/kw-fake/en/ball',
+                    'https://unknown.example/kw/en/ball',
+                    'https://azadea.com/product/ball?country=kw'):
+            with self.subTest(url=url):
+                self.assertEqual(markets.classify(dict(url=url),'kw')['market_scope'],'unknown')
+
     def test_known_local_stores_and_national_routes_ignore_currency(self):
         markets=MerchantMarkets(['kw','sa','ae','bh','qa','om','eg','us'])
         for url in ('https://rullart.com/en/products/rug',

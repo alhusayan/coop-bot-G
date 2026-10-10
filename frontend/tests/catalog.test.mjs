@@ -103,6 +103,22 @@ for(const file of ['findzia-home.liquid','findzia-one.liquid']){
    if(filter==='all'){assert.equal(c.Gr(selected)[0].id,'local');assert.equal(c.Gr(selected).flatMap(g=>g.items).length,4);}
   }
  });
+ test(file+': primary and catalog storefront evidence survives display normalization in both photo filters',()=>{
+  const {root,send,row,api}=setup();
+  const proof={market_policy:'merchant-evidence-v2',merchant_country_evidence:'registered_storefront',match_type:'visual_similarity'};
+  const primary=[{...row,...proof,source:'google_lens',url:'https://azadea.com/kw/en/buy-kipsta/54_8972682_000.html',merchant_country:'KW'},
+   {...row,...proof,source:'google_lens',url:'https://gcc.luluhypermarket.com/en-kw/volleyball-assorted/p/114752',merchant_country:'KW'}];
+  send(event([{...row,...proof,url:'https://alnasser.net/products/volleyball',merchant_country:'KW'},
+   {...row,...proof,url:'https://ksa.alnasser.net/products/volleyball',merchant_country:'SA'}]));
+  const rows=api.combine(root,primary);
+  const code=source.split('\n').filter(line=>/^(function (Fr|Gr|fzIsSimilar|fzMatchesResultFilter)\()/.test(line)).join('\n');
+  const c={fzIsSocial:()=>false,fzPhotoAlternative:()=>false,O:'all'};vm.createContext(c);vm.runInContext(code,c);
+  const select=filter=>{c.O=filter;return rows.filter(c.fzMatchesResultFilter).map(r=>r.url);};
+  const all=select('all'),local=select('local'),global=select('global'),similar=select('alternative');
+  assert.equal(new Set(all).size,4);assert.equal(local.length,3);assert.equal(global.length,1);
+  assert.deepEqual(similar,all);assert.ok(local.every(url=>similar.includes(url)));
+  assert.ok(global.every(url=>similar.includes(url)));assert.ok(local.every(url=>!global.includes(url)));
+ });
  test(file+': empty filter after partial photo success cannot show timeout or media retry',()=>{
   const c={W:{photoSearchIssue:'timeout'},e:{dataset:{},dispatchEvent(){}},ee:false,Kt:false,Vt:null,Jt:false,fzUsableResults:true,
    fzHasSearchResults:()=>true,fzMediaPending:()=>false,fzReadingAnchor:()=>null,fzCardRects:()=>new Map(),

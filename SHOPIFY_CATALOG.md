@@ -144,3 +144,30 @@ into a visible row above the integrated cards.
 
 - Live follow-up also excluded storefront homepages from product-card publication
   and counts. Valid product detail links are retained.
+
+## Photo market coverage follow-up (2026-10-10)
+
+The volleyball recording showed Azadea Kuwait, Al Nasser and Lulu Kuwait
+(displayed as `Gcc`) only in Similar. Overlapping filters already worked; missing
+storefront evidence kept their geography unknown. Added verified national routes
+for Azadea and Lulu, and exact national hosts for Al Nasser. A Saudi/Bahraini
+Al Nasser host cannot inherit Kuwait from the parent domain; unreviewed hosts and
+unrecognized route segments abstain. Classification is relative to any selected
+country, with no additional network request or currency-based inference. Text
+grouping and retrieval remain unchanged. Primary, cached and catalog photo rows
+retain similarity while receiving the same country evidence.
+
+Official evidence reviewed:
+- https://alnasser.net/pages/terms-conditions (Kuwait returns and storefront)
+- https://ksa.alnasser.net/pages/contact (KSA storefront)
+- https://bh.alnasser.net/pages/contact (Bahrain storefront and company registration)
+- https://www.azadea.com/kw/en/buy-kipsta-volleyball-vb100-yellow/54_8972682_000.html
+  (Kuwait storefront; country selector links Lebanon, Qatar, Iraq and UAE)
+- https://www.azadea.com/en/ (UAE default storefront)
+- https://gcc.luluhypermarket.com/en-kw/volleyball-assorted/p/114752
+  (Kuwait product and local contact)
+- https://gcc.luluhypermarket.com/en-sa
+- https://gcc.luluhypermarket.com/en-qa
+- https://gcc.luluhypermarket.com/en-bh
+- https://gcc.luluhypermarket.com/en-om
+- https://gcc.luluhypermarket.com/en-ae/contactus
