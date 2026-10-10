@@ -36,7 +36,7 @@
 <p class="fz-dark-description" data-dark-copy="1">Snap a photo. Compare prices locally and worldwide.</p>
 </div>
 <button class="fz-dark-camera" type="button" data-dark-photo aria-label="Search by photo"><svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 9h5l2-4h8l2 4h5a3 3 0 0 1 3 3v14a3 3 0 0 1-3 3H5a3 3 0 0 1-3-3V12a3 3 0 0 1 3-3Z"/><circle cx="16" cy="18" r="5"/></svg></button>
-<p class="fz-dark-tap" data-dark-copy="2">TAP TO SEARCH</p>
+<p class="fz-dark-tap" data-dark-copy="2" data-no-i18n>Try a photo</p>
 <div class="fz-dark-bottom">
 <p class="fz-dark-feedback" data-dark-feedback role="status" aria-live="polite"></p>
 <form class="fz-dark-dock" data-dark-form role="search">
@@ -2315,7 +2315,7 @@ html[data-fz-page-transition]::view-transition-new(root){animation:fz-page-in 28
 /* One calm heading and a short explanation, with type tailored to each script. */
 #findzia-home-{{ section.id }}[data-theme] .fz-home-intro{width:100%;max-width:620px;text-align:center;}
 #findzia-home-{{ section.id }}[data-theme] .fz-home-intro .fz-dark-title{font-family:"Findzia Editorial",Georgia,"Times New Roman",serif!important;font-size:clamp(38px,11.6vw,64px)!important;line-height:1.12;font-weight:400;letter-spacing:-.045em;font-synthesis:none;max-width:100%;margin:0;text-wrap:balance;}
-#findzia-home-{{ section.id }}[data-theme] .fz-home-intro .fz-dark-description{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif!important;font-size:clamp(16px,4.4vw,20px);font-weight:400;line-height:1.5;letter-spacing:-.012em;color:var(--fz-muted);max-width:34ch;margin:14px auto 0;padding:0 4px;text-wrap:balance;}
+#findzia-home-{{ section.id }}[data-theme] .fz-home-intro .fz-dark-description{font-family:"Findzia UI Latin",-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif!important;font-size:clamp(16px,4.4vw,20px);font-weight:300!important;font-synthesis:none;line-height:1.5;letter-spacing:-.012em;color:var(--fz-muted);max-width:34ch;margin:14px auto 0;padding:0 4px;text-wrap:balance;}
 #findzia-home-{{ section.id }}[data-theme]:is([data-lang=de],[data-lang=es],[data-lang=ru]) .fz-home-intro .fz-dark-title{font-size:clamp(32px,9.7vw,60px)!important;}
 #findzia-home-{{ section.id }}[data-theme]:is([data-lang=ar],[data-lang=ur]) .fz-home-intro{direction:rtl;}
 #findzia-home-{{ section.id }}[data-theme]:is([data-lang=ar],[data-lang=ur]) .fz-home-intro .fz-dark-title{font-family:"Findzia Editorial Arabic","Noto Naskh Arabic",Georgia,serif!important;font-size:clamp(40px,12vw,62px)!important;line-height:1.3;letter-spacing:0;}
@@ -2336,6 +2336,9 @@ html[data-fz-page-transition]::view-transition-new(root){animation:fz-page-in 28
 #findzia-home-{{ section.id }}[data-theme] .fz-home-intro .fz-dark-description{margin-top:10px;font-size:16px;}
 #findzia-home-{{ section.id }}[data-theme] .fz-home-intro+.fz-dark-camera{margin-top:24px;}
 }
+
+#findzia-home-{{ section.id }}[data-theme] .fz-dark-home .fz-dark-tap{font-size:12px;font-weight:400;letter-spacing:.03em;text-transform:none;}
+#findzia-home-{{ section.id }}[data-theme]:is([data-lang=ar],[data-lang=ur]) .fz-dark-home .fz-dark-tap{letter-spacing:0;}
 </style>
 {% schema %}
 {"name":"Findzia Classic 42.1","tag":"section","class":"section-findzia-home","settings":[{"type":"image_picker","id":"logo","label":"Findzia logo"},{"type":"text","id":"api_base_url","label":"Findzia API base URL","default":"https://coop-bot-g-production.up.railway.app"}],"presets":[{"name":"Findzia Classic 42.1"}]}
