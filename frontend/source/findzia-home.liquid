@@ -27,7 +27,7 @@
 <button class="fz-dark-round" type="button" data-dark-settings aria-label="Settings" aria-haspopup="dialog" aria-controls="fz-preferences-{{ section.id }}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="8" r="3.4"/><path d="M5.5 20v-2a6.5 6.5 0 0 1 13 0v2Z"/></svg></button>
 </header>
 <div class="fz-dark-main">
-<h1 class="fz-dark-title" data-dark-copy="0">Find your product instantly</h1>
+<h1 class="fz-dark-title" data-dark-copy="0" data-no-i18n><span class="fz-title-line">See it.</span><span class="fz-title-line"> Find it.</span></h1>
 <button class="fz-dark-camera" type="button" data-dark-photo aria-label="Search by photo"><svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 9h5l2-4h8l2 4h5a3 3 0 0 1 3 3v14a3 3 0 0 1-3 3H5a3 3 0 0 1-3-3V12a3 3 0 0 1 3-3Z"/><circle cx="16" cy="18" r="5"/></svg></button>
 <p class="fz-dark-tap" data-dark-copy="2">TAP TO SEARCH</p>
 <div class="fz-dark-bottom">
@@ -1839,7 +1839,7 @@ return result;};}})();</script>
 #findzia-home-{{ section.id }}[data-home-state=empty] .fz-dark-home{height:auto!important;min-height:100svh!important;min-height:var(--fz-home-h,100svh)!important;overflow:visible!important;padding:max(18px,env(safe-area-inset-top,0px)) 14px max(22px,env(safe-area-inset-bottom,0px))!important;}
 #findzia-home-{{ section.id }}[data-theme] .fz-dark-header{position:relative!important;top:auto!important;flex-shrink:0!important;}
 #findzia-home-{{ section.id }}[data-theme] .fz-dark-main{flex:1 0 auto!important;padding:clamp(28px,6svh,64px) 0 clamp(24px,4svh,42px)!important;min-height:0!important;}
-#findzia-home-{{ section.id }}[data-theme] .fz-title-line{white-space:normal!important;}
+#findzia-home-{{ section.id }}[data-theme] .fz-title-line{display:block;white-space:normal!important;}
 #findzia-home-{{ section.id }}[data-theme] .fz-dark-bottom{margin-top:12px!important;flex-shrink:0!important;}
 /* Calm loading templates: no moving light stripe and no decorative particles. */
 #findzia-home-{{ section.id }}[data-theme] :is(.fz-loading-glow,.fz-loading-orb,.fz-loading-orb2,.fz-loading-orb3){display:none!important;}
