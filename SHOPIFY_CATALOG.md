@@ -85,7 +85,7 @@ without running `node frontend/scripts/build.mjs`.
   empty `payment_handlers` and versioning its URL to replace the previously
   cached malformed profile. `FINDZIA_SHOPIFY_PROFILE_URL` in production is
   `https://api.findzia.com/.well-known/ucp?v=20261010-2`.
-- Integration update: 29 backend tests plus 18 subtests and 11 frontend tests
+- Integration update: 30 backend tests plus 18 subtests and 12 frontend tests
   pass. Live Kuwait query returned 6 positive local-origin cards and 6 unconfirmed
   origin cards in 7.41 s. Prices were preserved in their original currencies.
   Unknown countries are deliberately not guessed from currencies or absence.
@@ -106,3 +106,9 @@ Official references:
 
 Catalog terms prohibit caching results and downloading/caching catalog images.
 Preserve the ephemeral rendering boundary when extending this integration.
+
+Digital variants (`requires.shipping=false`) can bypass Shopify's origin filter.
+They never supply local-origin evidence and are excluded from image-neighbor
+results. Missing shipping requirements also cannot establish local origin.
+The common public filter buttons are moved out of the legacy hidden header
+into a visible row above the integrated cards.

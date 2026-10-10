@@ -99,6 +99,12 @@ def normalize_products(products, country, visual=False, origin_country=''):
         for variant in variants[:50]:
             if not isinstance(variant, dict) or (variant.get('availability') or {}).get('available') is not True:
                 continue
+            shipping = (variant.get('requires') or {}).get('shipping')
+            # Shopify documents that digital products can bypass ships_from.
+            # Only a physically shipped variant can supply local-origin proof.
+            if visual and shipping is False:
+                continue
+            proven_origin = origin_country if shipping is True else ''
             url = safe_url(variant.get('url') or product.get('url'))
             price = money(variant.get('price'))
             title = plain(product.get('title'))
@@ -120,9 +126,9 @@ def normalize_products(products, country, visual=False, origin_country=''):
                          'product_id': plain(product.get('id'), 200),
                          'variant_id': plain(variant.get('id'), 200),
                          'source': 'shopify_catalog', 'cacheable': False,
-                         'market_scope': 'local' if origin_country else 'unknown',
-                         'merchant_country': origin_country.upper() or None,
-                         'merchant_country_evidence': 'shopify_origin_filter' if origin_country else '',
+                         'market_scope': 'local' if proven_origin else 'unknown',
+                         'merchant_country': proven_origin.upper() or None,
+                         'merchant_country_evidence': 'shopify_origin_filter' if proven_origin else '',
                          'seller_id': plain(seller.get('id'), 200),
                          'destination_country': country.upper(),
                          'shipping_evidence': 'catalog_filter', 'shipping_cost_verified': False,

@@ -3,7 +3,7 @@ import json
 import unittest
 import httpx
 from findzia_market_evidence import MerchantMarkets
-from findzia_shopify_catalog import ShopifyCatalog
+from findzia_shopify_catalog import ShopifyCatalog, normalize_products
 from tests.test_shopify_catalog import product, reply
 
 class MarketTests(unittest.TestCase):
@@ -42,6 +42,17 @@ class MarketTests(unittest.TestCase):
             fixed=output.get('item') or output['results'][0]
             self.assertEqual(fixed['market_scope'],'unknown')
         self.assertEqual(row['market_scope'],'local')
+
+    def test_digital_products_cannot_supply_origin_filter_evidence(self):
+        for shipping in (False, None):
+            item=product()
+            item['variants'][0]['requires']={'shipping':shipping}
+            row=normalize_products([item],'kw',origin_country='KW')[0]
+            self.assertIsNone(row['merchant_country'])
+            self.assertEqual(row['market_scope'],'unknown')
+        item['variants'][0]['requires']={'shipping':False}
+        self.assertEqual(normalize_products([item],'kw',visual=True,origin_country='KW'),[])
+
 
 class DiscoveryTests(unittest.IsolatedAsyncioTestCase):
     async def test_local_filter_proves_origin_general_absence_does_not(self):

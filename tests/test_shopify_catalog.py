@@ -19,7 +19,7 @@ def product(currency='KWD', amount=12345, url='https://merchant.example/products
                 media=[dict(type='image', url='https://cdn.example/one.jpg')],
                 variants=[dict(id='gid://shopify/ProductVariant/1', url=url,
                     price=dict(amount=amount, currency=currency), availability=dict(available=True),
-                    seller=dict(name='Store'))], **extra)
+                    seller=dict(name='Store'), requires=dict(shipping=True))], **extra)
 
 
 def reply(products=None):
