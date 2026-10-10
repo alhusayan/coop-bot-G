@@ -100,7 +100,7 @@
         const header=root.querySelector('.fz-fixed-header-inner');
         if(header)header.append(nav);else body.before(nav);
         nav.append(filters);state.nav=nav;
-        const note=element('p','fz-catalog-context');note.hidden=true;body.before(note);state.note=note;
+        const note=element('p','fz-catalog-context');note.hidden=true;body.after(note);state.note=note;
       }
     }
     function updateNote(){

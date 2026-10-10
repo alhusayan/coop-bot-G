@@ -6,7 +6,7 @@ class Node extends EventTarget {
  constructor(){super();this.children=[];this.dataset={};this.textContent='';}
  append(...nodes){for(const n of nodes){n.parent=this;this.children.push(n);}}
  before(n){n.parent=this.parent;this.parent.children.splice(this.parent.children.indexOf(this),0,n);}
- after(n){this.parent.append(n);} remove(){if(this.parent)this.parent.children=this.parent.children.filter(n=>n!==this);}
+ after(n){n.parent=this.parent;this.parent.children.splice(this.parent.children.indexOf(this)+1,0,n);} remove(){if(this.parent)this.parent.children=this.parent.children.filter(n=>n!==this);}
  setAttribute(){} querySelector(s){return s==='[data-filter-seg]'?this.filters:s==='[data-results-body]'?this.body:s==='.fz-fixed-header-inner'?this.header:null;}
 }
 function setup(lang='ar',preview=false,filters=false){
@@ -91,8 +91,42 @@ test('public filter buttons are moved from hidden legacy header into visible flo
  root.dispatchEvent(new Event('fz:search-reset'));assert.equal(nav.hidden,true);
 });
 
+test('delivery and similarity note stays below all results and clears for a new search',()=>{
+ const {root,send,row}=setup('ar',false,true);
+ const note=root.children.find(n=>n.className==='fz-catalog-context');
+ assert.ok(root.children.indexOf(note)>root.children.indexOf(root.body));
+ send(event([{...row,match_type:'visual_similarity'}]));
+ assert.equal(note.hidden,false);assert.match(note.textContent,/التوصيل/);assert.match(note.textContent,/متشابهة/);
+ root.body.append(new Node(),new Node());
+ assert.ok(root.children.indexOf(note)>root.children.indexOf(root.body));
+ root.dispatchEvent(new Event('fz:search-reset'));assert.equal(note.hidden,true);
+});
+
 for(const file of ['findzia-home.liquid','findzia-one.liquid']){
  const source=readFileSync(new URL('../source/'+file,import.meta.url),'utf8');
+ test(file+': each new search resets the filter and its selected button before result events',()=>{
+  const buttons=['all','local','alternative','global','social'].map(value=>({value,active:false,pressed:null,
+   getAttribute(){return value;},setAttribute(name,v){this.pressed=v;},classList:{toggle(name,on){buttons.find(b=>b.value===value).active=on;}}}));
+  const observed=[];
+  const c={O:'global',w:{querySelectorAll:()=>buttons},fzUsage(){},fzCancelSearchLaunch(){},
+   Yt(){observed.push(c.O);},Le:0,B:0,xe:new Set(),G:true,ee:true,Y:true};
+  vm.createContext(c);vm.runInContext(source.split('\n').filter(line=>/^(function (fzSyncResultFilter|fzResetResultFilter|Bt)\()/.test(line)).join('\n'),c);
+  for(const filter of ['local','alternative','global','social']){
+   c.O=filter;c.fzSyncResultFilter();assert.equal(buttons.find(b=>b.active).value,filter);
+   c.Bt();assert.equal(c.O,'all');assert.equal(observed.at(-1),'all');
+   assert.deepEqual(buttons.filter(b=>b.active).map(b=>b.value),['all']);
+   assert.deepEqual(buttons.filter(b=>b.pressed==='true').map(b=>b.value),['all']);
+  }
+ });
+ test(file+': resubmitting the same text also returns to All',async()=>{
+  const c={O:'local',W:{kind:'text',query:'ball'},reset:0,paint:0,
+   g:{value:'ball',closest:()=>({fzRefineBridge:{resubmitUnchanged:()=>true}}),blur(){}},
+   fzCommitSearchView(){},fzResetResultFilter(){c.O='all';c.reset++;},St(){c.paint++;}};
+  vm.createContext(c);
+  const start=source.indexOf('async function ea('),end=source.indexOf('\nif(t){',start);
+  vm.runInContext(source.slice(start,end)+'}',c);await c.ea();
+  assert.equal(c.O,'all');assert.equal(c.reset,1);assert.equal(c.paint,1);
+ });
  test(file+': local/global and similarity overlap without hiding offers or duplicating All',()=>{
   const code=source.split('\n').filter(line=>/^(function (Fr|Gr|fzIsSimilar|fzMatchesResultFilter)\()/.test(line)).join('\n');
   const c={fzIsSocial:r=>!!r.social_id,fzPhotoAlternative:()=>false,O:'all'};vm.createContext(c);vm.runInContext(code,c);
@@ -135,7 +169,7 @@ for(const file of ['findzia-home.liquid','findzia-one.liquid']){
  });
 }
 test('primary results also reveal filters, and an empty filter keeps navigation available',()=>{
- const {root,send}=setup('en',false,true);const nav=root.children[0],note=root.children[1];
+ const {root,send}=setup('en',false,true);const nav=root.children[0],note=root.children.find(n=>n.className==='fz-catalog-context');
  const emit=count=>{const ev=new Event('fz:result-count');ev.detail={count};root.dispatchEvent(ev);};
  emit(57);assert.equal(nav.hidden,false);emit(0);assert.equal(nav.hidden,false);assert.equal(note.hidden,true);
  root.dispatchEvent(new Event('fz:search-reset'));assert.equal(nav.hidden,true);
