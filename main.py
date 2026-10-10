@@ -34873,4 +34873,4 @@ _FZ_CATALOG = _install_shopify_catalog(app, COUNTRY_NAMES, COUNTRY_MAJOR_STORE_D
 
 # Isolated live discovery trial, separate from paid search and photo results.
 from findzia_discover import install_discover as _install_findzia_discover
-_FZ_DISCOVER = _install_findzia_discover(app, COUNTRY_NAMES)
+_FZ_DISCOVER = _install_findzia_discover(app, COUNTRY_NAMES, globals())

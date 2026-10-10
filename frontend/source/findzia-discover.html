@@ -19,7 +19,11 @@
 </defs></svg>
 <header class="masthead"><a class="wordmark" href="/" aria-label="Findzia">Findzia<span>.</span></a><span class="trial-label" data-copy="trial">Discover / Preview</span><div class="settings"><button id="language" type="button">العربية</button><label class="market-label"><svg class="icon"><use href="#i-globe"/></svg><select id="country" aria-label="Shopping destination"><option value="KW">Kuwait</option></select></label></div></header>
 <div class="search-sticky"><form class="search-box" role="search"><svg class="icon"><use href="#i-search"/></svg><input id="query" type="search" maxlength="120" autocomplete="off" placeholder="What will you discover today?" aria-label="Search products"><button type="submit" class="search-submit" aria-label="Search"><svg class="icon"><use href="#i-arrow"/></svg></button></form></div>
-<main id="content"><nav class="category-chips" aria-label="Categories" id="chips"></nav>
+<main id="content"><section class="market-panel" aria-label="Shopping market">
+<div class="market-context"><div><p class="market-kicker" data-copy="marketKicker">YOUR MARKET. YOUR FINDS.</p><h1 id="market-name">Kuwait market</h1></div><span id="currency-badge" class="currency-badge">KWD</span></div>
+<div class="market-tabs" role="group" aria-label="Market scope"><button type="button" data-scope="local" aria-pressed="true" data-copy="localScope">Local market</button><button type="button" data-scope="global" aria-pressed="false" data-copy="globalScope">International</button></div>
+<p id="market-explainer"></p><p id="source-summary" class="source-summary"></p>
+</section><nav class="category-chips" aria-label="Categories" id="chips"></nav>
 <div id="status" role="status" aria-live="polite" class="loading-status"><span class="loading-dot"></span><span data-copy="loading">Finding your next favourites…</span></div>
 <div id="loading" aria-hidden="true"><div class="skeleton hero-skeleton"></div><div class="skeleton-title"></div><div class="skeleton-rail"><div class="skeleton"></div><div class="skeleton"></div></div></div>
 <div id="feed" hidden></div>
