@@ -141,3 +141,6 @@ into a visible row above the integrated cards.
   - https://www.karazonline.com/en/terms_cond (Kuwait storefront)
   - https://www.centrepointstores.com/kw/en/ (national storefront selector)
   - https://www.noon.com/kuwait-ar/ (national storefront)
+
+- Live follow-up also excluded storefront homepages from product-card publication
+  and counts. Valid product detail links are retained.

@@ -124,3 +124,13 @@ test('primary results also reveal filters, and an empty filter keeps navigation 
  emit(57);assert.equal(nav.hidden,false);emit(0);assert.equal(nav.hidden,false);assert.equal(note.hidden,true);
  root.dispatchEvent(new Event('fz:search-reset'));assert.equal(nav.hidden,true);
 });
+
+for(const file of ['findzia-home.liquid','findzia-one.liquid']){
+ const source=readFileSync(new URL('../source/'+file,import.meta.url),'utf8');
+ test(file+': storefront homepages cannot be published as priced product cards',()=>{
+  const c={URL,or:v=>v,Ar:v=>v};vm.createContext(c);
+  vm.runInContext(source.slice(source.indexOf('function et(row)'),source.indexOf('function fzHasSearchResults')),c);
+  for(const path of ['/','/en','/ar/','/en/home','/home/','/index.html'])assert.equal(c.et({url:'https://rullart.com'+path}),'');
+  const url='https://rullart.com/en/product/daily-prayer-set/prayer-set-pink-co-00076';assert.equal(c.et({url}),url);
+ });
+}
