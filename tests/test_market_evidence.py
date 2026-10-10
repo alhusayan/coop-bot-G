@@ -84,13 +84,15 @@ class VerifiedStorefrontTests(unittest.TestCase):
         markets=MerchantMarkets(['kw','sa','ae','bh','qa','om','lb','iq'])
         urls=('https://www.azadea.com/kw/en/buy-kipsta-volleyball/54_8972682_000.html',
               'https://gcc.luluhypermarket.com/en-kw/volleyball-assorted/p/114752',
-              'https://alnasser.net/products/volleyball')
+              'https://alnasser.net/products/volleyball',
+              'https://prosportskw.com/products/molten-v5m5000-volleyball-size-5',
+              'https://thebr.com/products/jh1273')
         for source in ('google_lens','shopify_catalog'):
             rows=[dict(url=url,source=source,match_type='visual_similarity',
                        price='8.00 USD',market_scope='unknown') for url in urls]
             for key in ('items','results','all_results'):
                 output=markets.event({'event':'snapshot',key:rows},'kw')[key]
-                self.assertEqual([r['market_scope'] for r in output],['local']*3)
+                self.assertEqual([r['market_scope'] for r in output],['local']*len(urls))
                 self.assertTrue(all(r['match_type']=='visual_similarity' for r in output))
                 self.assertTrue(all(r['price']=='8.00 USD' for r in output))
             self.assertTrue(all(r['market_scope']=='unknown' for r in rows))
@@ -106,6 +108,7 @@ class VerifiedStorefrontTests(unittest.TestCase):
                 ('https://azadea.com/lb/en/product/ball','lb'),
                 ('https://azadea.com/qa/en/product/ball','qa'),
                 ('https://azadea.com/iq/ar/product/ball','iq'),
+                ('https://letstango.com/products/mikasa-volley-ball','ae'),
                 *((f'https://gcc.luluhypermarket.com/{lang}-{cc}/ball/p/123',cc)
                   for lang in ('en','ar') for cc in ('kw','sa','ae','bh','qa','om'))):
             with self.subTest(url=url):

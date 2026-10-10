@@ -7,7 +7,8 @@ GENERIC_CCTLDS = {'ai', 'io', 'co', 'me', 'tv', 'cc', 'fm', 'ly', 'to', 'so', 'w
 
 # Independently verified storefronts, not currency/delivery-country guesses.
 # Evidence and review date are recorded in SHOPIFY_CATALOG.md.
-VERIFIED_STORES = {'rullart.com': 'kw', 'karazonline.com': 'kw'}
+VERIFIED_STORES = {'rullart.com': 'kw', 'karazonline.com': 'kw',
+                   'prosportskw.com': 'kw', 'thebr.com': 'kw', 'letstango.com': 'ae'}
 # Country-specific hosts must be matched exactly: the Kuwait root must never
 # turn a different national storefront (or an unreviewed subdomain) into Kuwait.
 STOREFRONT_HOSTS = {

@@ -171,3 +171,11 @@ Official evidence reviewed:
 - https://gcc.luluhypermarket.com/en-bh
 - https://gcc.luluhypermarket.com/en-om
 - https://gcc.luluhypermarket.com/en-ae/contactus
+
+Live photo follow-up additionally verified Pro Sports and The Boot Room as
+Kuwait storefronts and LetsTango as UAE, independently of their KWD prices:
+- https://www.prosportskw.com/pages/delivery-and-return-policy
+- https://thebr.com/pages/contact-us
+- https://www.letstango.com/pages/contact-us
+These storefronts now participate in their selected country's local filter and
+other countries' global filter while preserving the Similar view.
