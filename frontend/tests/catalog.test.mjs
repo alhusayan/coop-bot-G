@@ -5,11 +5,13 @@ import vm from 'node:vm';
 class Node extends EventTarget {
  constructor(){super();this.children=[];this.dataset={};this.textContent='';}
  append(...nodes){for(const n of nodes){n.parent=this;this.children.push(n);}}
+ before(n){n.parent=this.parent;this.parent.children.splice(this.parent.children.indexOf(this),0,n);}
  after(n){this.parent.append(n);} remove(){if(this.parent)this.parent.children=this.parent.children.filter(n=>n!==this);}
- setAttribute(){} querySelector(s){return s==='[data-results-body]'?this.body:null;}
+ setAttribute(){} querySelector(s){return s==='[data-filter-seg]'?this.filters:s==='[data-results-body]'?this.body:null;}
 }
-function setup(lang='ar',preview=false){
+function setup(lang='ar',preview=false,filters=false){
  const root=new Node();root.body=new Node();root.append(root.body);if(preview)root.dataset.choicePreview='true';
+ if(filters)root.filters=new Node();
  let paints=0;root.fzRefineBridge={context:()=>({lang,country:'KW'}),renderCatalog:()=>paints++};
  const window=new EventTarget(),document={createElement:()=>new Node(),documentElement:{lang},querySelectorAll:()=>[root]};
  vm.runInNewContext(readFileSync(new URL('../source/findzia-catalog.js',import.meta.url),'utf8'),{window,document,URL,WeakMap,Map,Set});
@@ -81,3 +83,10 @@ for(const file of ['findzia-home.liquid','findzia-one.liquid']){
   assert.match(source,/function ht\(row\)\{if\(row.source==='shopify_catalog'\)/);
  });
 }
+
+test('public filter buttons are moved from hidden legacy header into visible flow and reset with search',()=>{
+ const {root,send,row}=setup('ar',false,true);
+ const nav=root.children[0];assert.equal(nav.hidden,true);assert.equal(nav.children[0],root.filters);
+ send(event([row]));assert.equal(nav.hidden,false);
+ root.dispatchEvent(new Event('fz:search-reset'));assert.equal(nav.hidden,true);
+});

@@ -88,8 +88,14 @@
   }
   function mount(root) {
     if (states.has(root)) return;
-    const state = {section:null, cards:new Map(), seen:new Set(), rows:[]}; states.set(root, state);
-    function clear() { state.section?.remove(); state.section = null; state.cards.clear(); state.seen.clear(); state.rows=[]; root.fzRefineBridge?.renderCatalog?.(); }
+    const state = {section:null, cards:new Map(), seen:new Set(), rows:[], nav:null}; states.set(root, state);
+    // The current public header hides the old results-head container. Move the
+    // existing, already-bound filter buttons into the visible results flow.
+    if(root.dataset.choicePreview!=='true'){
+      const filters=root.querySelector('[data-filter-seg]'),body=root.querySelector('[data-results-body]');
+      if(filters&&body){const nav=element('div','fz-catalog-filters');nav.hidden=true;body.before(nav);nav.append(filters);state.nav=nav;}
+    }
+    function clear() { state.section?.remove(); state.section = null; state.cards.clear(); state.seen.clear(); state.rows=[]; if(state.nav)state.nav.hidden=true; root.fzRefineBridge?.renderCatalog?.(); }
     function prune(url) {
       const id = key(url); if (!id) return;
       state.seen.add(id); state.cards.get(id)?.remove(); state.cards.delete(id);
@@ -107,7 +113,7 @@
         if(!safeURL(row.url)||!safeURL(row.image)||!row.title||!row.price||state.rows.some(r=>sameOffer(r,row)))continue;
         state.rows.push({...row,source:'shopify_catalog',cacheable:false,_fzArrival:Date.now()});
       }
-      if(root.dataset.choicePreview!=='true'){root.fzRefineBridge?.renderCatalog?.();return;}
+      if(root.dataset.choicePreview!=='true'){if(state.nav)state.nav.hidden=!state.rows.length;root.fzRefineBridge?.renderCatalog?.();return;}
       state.section?.remove(); state.section = null; state.cards.clear();
       const body = root.querySelector('[data-results-body]'); if (!body) return;
       const language = (root.fzRefineBridge?.context()?.lang || document.documentElement.lang || 'en').split('-')[0];

@@ -14,3 +14,8 @@
 .fz-home .fz-catalog-meta span:first-child{font-weight:600}
 .fz-home .fz-cinema-track .fz-catalog-meta{font-size:10px;color:inherit}
 .fz-home [data-live-catalog-image]{width:100%;height:100%;object-fit:contain}
+
+.fz-home .fz-catalog-filters{margin:0 0 18px;padding:10px 0;overflow-x:auto}
+.fz-home .fz-catalog-filters[hidden]{display:none!important}
+.fz-home .fz-catalog-filters .fz-seg{display:flex;flex-wrap:wrap;gap:6px;width:fit-content;max-width:100%;margin:0 auto}
+.fz-home .fz-catalog-filters button{white-space:nowrap}
