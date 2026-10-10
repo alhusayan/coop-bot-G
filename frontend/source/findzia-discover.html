@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en" dir="ltr">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="robots" content="noindex, nofollow, noarchive"><meta name="referrer" content="no-referrer"><meta name="theme-color" content="#faf9f7">
+<title>Findzia — Discover</title><link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://api.findzia.com">
+<link rel="stylesheet" href="__DISCOVER_CSS__"><script src="__DISCOVER_JS__" defer></script>
+</head>
+<body>
+<svg class="icon-library" xmlns="http://www.w3.org/2000/svg"><defs>
+<symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></symbol>
+<symbol id="i-home" viewBox="0 0 24 24"><path d="m3 10 9-7 9 7v11h-6v-7H9v7H3Z"/></symbol>
+<symbol id="i-grid" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></symbol>
+<symbol id="i-camera" viewBox="0 0 24 24"><path d="M3 7h4l2-3h6l2 3h4v14H3Z"/><circle cx="12" cy="13" r="4"/></symbol>
+<symbol id="i-store" viewBox="0 0 24 24"><path d="M4 10v11h16V10M3 3h18l1 7c-2 3-5 3-7 0-2 3-5 3-7 0-2 3-5 3-7 0l2-7M9 21v-7h6v7"/></symbol>
+<symbol id="i-arrow" viewBox="0 0 24 24"><path d="m9 5 7 7-7 7"/></symbol>
+<symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><ellipse cx="12" cy="12" rx="4" ry="9"/><path d="M3 12h18"/></symbol>
+</defs></svg>
+<header class="masthead"><a class="wordmark" href="/" aria-label="Findzia">Findzia<span>.</span></a><span class="trial-label" data-copy="trial">Discover / Preview</span><div class="settings"><button id="language" type="button">العربية</button><label class="market-label"><svg class="icon"><use href="#i-globe"/></svg><select id="country" aria-label="Shopping destination"><option value="KW">Kuwait</option></select></label></div></header>
+<div class="search-sticky"><form class="search-box" role="search"><svg class="icon"><use href="#i-search"/></svg><input id="query" type="search" maxlength="120" autocomplete="off" placeholder="What will you discover today?" aria-label="Search products"><button type="submit" class="search-submit" aria-label="Search"><svg class="icon"><use href="#i-arrow"/></svg></button></form></div>
+<main id="content"><nav class="category-chips" aria-label="Categories" id="chips"></nav>
+<div id="status" role="status" aria-live="polite" class="loading-status"><span class="loading-dot"></span><span data-copy="loading">Finding your next favourites…</span></div>
+<div id="loading" aria-hidden="true"><div class="skeleton hero-skeleton"></div><div class="skeleton-title"></div><div class="skeleton-rail"><div class="skeleton"></div><div class="skeleton"></div></div></div>
+<div id="feed" hidden></div>
+<div id="empty" class="empty" hidden><svg class="icon"><use href="#i-search"/></svg><h1 data-copy="empty">A little quiet here.</h1><p data-copy="emptyText">We couldn’t load products right now. Try again in a moment.</p><button id="retry" type="button" data-copy="retry">Try again</button></div>
+</main>
+<footer><div class="footer-brand">Findzia<span>.</span></div><p data-copy="footer">A world of finds. A little more you.</p><a href="/" data-copy="back">Back to Findzia search</a><p class="price-note" data-copy="prices">Prices are shown in the store’s currency. Confirm the final price and delivery at the store.</p><small data-copy="liveNote">Live product discovery · New selections, every visit</small><div class="legal"><a href="/policies/privacy-policy" data-copy="privacy">Privacy</a><a href="/policies/terms-of-service" data-copy="terms">Terms</a><span>© 2026 Findzia</span></div></footer>
+<nav class="bottom-nav" aria-label="Explore"><button type="button" data-nav="home" class="active"><svg class="icon"><use href="#i-home"/></svg><span data-copy="discover">Discover</span></button><button type="button" data-nav="categories"><svg class="icon"><use href="#i-grid"/></svg><span data-copy="categories">Categories</span></button><a href="/" class="camera-nav"><svg class="icon"><use href="#i-camera"/></svg><span data-copy="photo">Photo search</span></a><button type="button" data-nav="stores"><svg class="icon"><use href="#i-store"/></svg><span data-copy="stores">Stores</span></button></nav>
+<noscript><p class="empty">Enable JavaScript to discover live products. <a href="/">Go to Findzia</a></p></noscript>
+</body></html>

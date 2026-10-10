@@ -54,7 +54,7 @@ function emit(url, file, bytes, type, immutable=false) {
   routes[url] = {file,sha256:hash(bytes),type,immutable}; return url;
 }
 const assets = new Map();
-for (const name of ['findzia-catalog.js','findzia-catalog.css','findzia-store-scene.js','findzia-store-scene.css','findzia-photo-history.js','findzia-camera.js','findzia-camera.css','findzia-wait.js','findzia-choice.js','findzia-choice.css','findzia-ads.js','findzia-analytics.js','findzia-support.js','findzia-focus.js','findzia-account.js','findzia-subscriptions.js','findzia-billing.js','findzia-filters.js','findzia-i18n.js','findzia-shell.js','findzia-product-details.css','findzia-hero-type.css','findzia-migration.js','findzia-standalone.css','findzia-motion.js','findzia-motion.css']) {
+for (const name of ['findzia-discover.js','findzia-discover.css','findzia-catalog.js','findzia-catalog.css','findzia-store-scene.js','findzia-store-scene.css','findzia-photo-history.js','findzia-camera.js','findzia-camera.css','findzia-wait.js','findzia-choice.js','findzia-choice.css','findzia-ads.js','findzia-analytics.js','findzia-support.js','findzia-focus.js','findzia-account.js','findzia-subscriptions.js','findzia-billing.js','findzia-filters.js','findzia-i18n.js','findzia-shell.js','findzia-product-details.css','findzia-hero-type.css','findzia-migration.js','findzia-standalone.css','findzia-motion.js','findzia-motion.css']) {
   let bytes=read(name);
   if(name==='findzia-store-scene.js'){const art=JSON.parse(read('findzia-store-art.json'));bytes=Buffer.from(bytes.toString().replace('/* STORE_ART */ null',()=>JSON.stringify(Object.fromEntries(Object.entries(art).map(([key,value])=>[key,value.src])))));}
   if(name==='findzia-support.js')bytes=Buffer.from(bytes.toString().replace('/* SUPPORT_KNOWLEDGE */ null',()=>JSON.stringify(JSON.parse(read('findzia-support.json').toString('utf8')))));
@@ -115,6 +115,16 @@ trialHTML=trialHTML.replace(/<link rel="canonical"[^>]*>/,'<meta name="robots" c
 emit(trialConfig.path,'trial/one.html',trialHTML,'html');
 routes[trialConfig.path].preview=true;
 routes[trialConfig.path+'/']=routes[trialConfig.path];
+
+// Independent discovery experiment, never included in the public home bundle.
+if(!/^\/trial\/discover-[a-f0-9]{20}$/.test(trialConfig.discover_path))throw Error('Invalid discovery trial path');
+const discoverHTML=read('findzia-discover.html').toString('utf8')
+  .replace('__DISCOVER_CSS__',assets.get('findzia-discover.css'))
+  .replace('__DISCOVER_JS__',assets.get('findzia-discover.js'));
+emit(trialConfig.discover_path,'trial/discover.html',discoverHTML,'html');
+routes[trialConfig.discover_path].preview=true;
+routes[trialConfig.discover_path+'/']=routes[trialConfig.discover_path];
+
 // Keep known landing links working; unknown routes remain a real 404.
 routes['/index.html']=routes['/']; routes['/pages/findzia']=routes['/'];
 routes['/jp']=routes['/']; routes['/jp/']=routes['/'];

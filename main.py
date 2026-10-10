@@ -34869,3 +34869,8 @@ _FZ_ONE_CHOICE = _install_findzia_choice(app, globals())
 # Official live catalog source: no separate request or additional credit charge.
 from findzia_shopify_catalog import install_catalog as _install_shopify_catalog
 _FZ_CATALOG = _install_shopify_catalog(app, COUNTRY_NAMES, COUNTRY_MAJOR_STORE_DOMAINS)
+
+
+# Isolated live discovery trial, separate from paid search and photo results.
+from findzia_discover import install_discover as _install_findzia_discover
+_FZ_DISCOVER = _install_findzia_discover(app, COUNTRY_NAMES)
