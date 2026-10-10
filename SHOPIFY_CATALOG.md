@@ -9,8 +9,9 @@ currently registered in `COUNTRY_META`. This is routing coverage, not a promise
 of merchant inventory or deliverability in every country. The source's
 `ships_to` filter is applied; shipping costs and checkout eligibility still need
 confirmation at the merchant. Currency, UI language, country query parameters and search targeting never
-establish merchant origin. A concurrent `ships_from` query supplies positive
-local-origin evidence, independent of price currency. Missing a merchant from
+establish merchant origin. A concurrent `ships_from` query supplies local candidates. It establishes
+positive local-origin evidence only when the returned variant also explicitly
+requires physical shipping, independent of price currency. Missing a merchant from
 this limited local page never proves it is foreign. Other results use a known
 national domain or an unambiguous existing store registry; otherwise they stay
 unknown. A national storefront identifies its market, not warehouse location,
@@ -86,9 +87,15 @@ without running `node frontend/scripts/build.mjs`.
   cached malformed profile. `FINDZIA_SHOPIFY_PROFILE_URL` in production is
   `https://api.findzia.com/.well-known/ucp?v=20261010-2`.
 - Integration update: 30 backend tests plus 18 subtests and 12 frontend tests
-  pass. Live Kuwait query returned 6 positive local-origin cards and 6 unconfirmed
-  origin cards in 7.41 s. Prices were preserved in their original currencies.
-  Unknown countries are deliberately not guessed from currencies or absence.
+  pass. Live Kuwait text and synthetic-image searches render in the public common
+  cards, with visible filters and original price currencies. An initial 7.41 s
+  probe returned 6 local-filter candidates and 6 broad candidates; origin labels
+  were subsequently tightened after discovering digital items bypass that filter.
+  Live search, lookup and product-detail responses omitted `requires.shipping`
+  for sampled physical products, so those candidates correctly remain unknown
+  unless independent storefront evidence exists. No extra lookup calls are added
+  to production latency. Unknown countries are never guessed from currencies
+  or absence from a limited result page.
 - `findzia_market_evidence.py` reclassifies stream output, including cached rows.
   Other publication paths attach the same evidence for the UI to consume.
   Legacy currency-based market guard/admission fallbacks were removed.
