@@ -20,6 +20,7 @@
 <script src="{{ 'findzia-i18n.js' | asset_url }}"></script>
 <section class="fz-home" id="findzia-home-{{ section.id }}" data-lang="en" dir="ltr" data-home-state="empty" data-theme="light" data-inline-filters="155.4">
 <script>window.FindziaAppearance?.apply(document.currentScript.parentElement);window.FindziaLocale?.mount(document.currentScript.parentElement);</script>
+<link rel="stylesheet" href="{{ 'findzia-hero-type.css' | asset_url }}">
 <div class="fz-dark-home" data-dark-home>
 <header class="fz-dark-header">
 <button class="fz-dark-round" type="button" data-dark-menu-open aria-label="Menu" aria-haspopup="dialog" aria-controls="fz-dark-menu-{{ section.id }}" aria-expanded="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M5 6h14M5 12h10M5 18h14"/></svg></button>
@@ -30,7 +31,10 @@
 </div>
 </header>
 <div class="fz-dark-main">
-<h1 class="fz-dark-title" data-dark-copy="0" data-no-i18n><span class="fz-title-line">See it.</span><span class="fz-title-line"> Find it.</span></h1>
+<div class="fz-home-intro" data-no-i18n>
+<h1 class="fz-dark-title" data-dark-copy="0">See it. Find it.</h1>
+<p class="fz-dark-description" data-dark-copy="1">Snap a photo. Compare prices locally and worldwide.</p>
+</div>
 <button class="fz-dark-camera" type="button" data-dark-photo aria-label="Search by photo"><svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 9h5l2-4h8l2 4h5a3 3 0 0 1 3 3v14a3 3 0 0 1-3 3H5a3 3 0 0 1-3-3V12a3 3 0 0 1 3-3Z"/><circle cx="16" cy="18" r="5"/></svg></button>
 <p class="fz-dark-tap" data-dark-copy="2">TAP TO SEARCH</p>
 <div class="fz-dark-bottom">
@@ -2306,6 +2310,33 @@ html[data-fz-page-transition]::view-transition-new(root){animation:fz-page-in 28
 
 </style>
 
+
+<style data-findzia-editorial-hero>
+/* One calm heading and a short explanation, with type tailored to each script. */
+#findzia-home-{{ section.id }}[data-theme] .fz-home-intro{width:100%;max-width:620px;text-align:center;}
+#findzia-home-{{ section.id }}[data-theme] .fz-home-intro .fz-dark-title{font-family:"Findzia Editorial",Georgia,"Times New Roman",serif!important;font-size:clamp(38px,11.6vw,64px)!important;line-height:1.12;font-weight:400;letter-spacing:-.045em;font-synthesis:none;max-width:100%;margin:0;text-wrap:balance;}
+#findzia-home-{{ section.id }}[data-theme] .fz-home-intro .fz-dark-description{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif!important;font-size:clamp(16px,4.4vw,20px);font-weight:400;line-height:1.5;letter-spacing:-.012em;color:var(--fz-muted);max-width:34ch;margin:14px auto 0;padding:0 4px;text-wrap:balance;}
+#findzia-home-{{ section.id }}[data-theme]:is([data-lang=de],[data-lang=es],[data-lang=ru]) .fz-home-intro .fz-dark-title{font-size:clamp(32px,9.7vw,60px)!important;}
+#findzia-home-{{ section.id }}[data-theme]:is([data-lang=ar],[data-lang=ur]) .fz-home-intro{direction:rtl;}
+#findzia-home-{{ section.id }}[data-theme]:is([data-lang=ar],[data-lang=ur]) .fz-home-intro .fz-dark-title{font-family:"Findzia Editorial Arabic","Noto Naskh Arabic",Georgia,serif!important;font-size:clamp(40px,12vw,62px)!important;line-height:1.3;letter-spacing:0;}
+#findzia-home-{{ section.id }}[data-theme]:is([data-lang=ar],[data-lang=ur]) .fz-home-intro .fz-dark-description{line-height:1.65;letter-spacing:0;}
+#findzia-home-{{ section.id }}[data-theme][data-lang=hi] .fz-home-intro .fz-dark-title{font-family:"Findzia Editorial Hindi","Noto Serif Devanagari",serif!important;line-height:1.4;letter-spacing:0;}
+#findzia-home-{{ section.id }}[data-theme][data-lang=zh] .fz-home-intro .fz-dark-title{font-family:"Findzia Editorial Chinese","Songti SC",serif!important;}
+#findzia-home-{{ section.id }}[data-theme][data-lang=ja] .fz-home-intro .fz-dark-title{font-family:"Findzia Editorial Japanese","Yu Mincho",serif!important;}
+#findzia-home-{{ section.id }}[data-theme][data-lang=ko] .fz-home-intro .fz-dark-title{font-family:"Findzia Editorial Korean","Batang",serif!important;}
+#findzia-home-{{ section.id }}[data-theme]:is([data-lang=zh],[data-lang=ja],[data-lang=ko]) .fz-home-intro .fz-dark-title{font-size:clamp(29px,8.4vw,48px)!important;line-height:1.4;letter-spacing:-.025em;word-break:keep-all;}
+#findzia-home-{{ section.id }}[data-theme] .fz-home-intro+.fz-dark-camera{margin-top:clamp(28px,4.8svh,44px);}
+
+#findzia-home-{{ section.id }}[data-theme]:is([data-lang=ar],[data-lang=ur]) .fz-home-intro .fz-dark-description{font-family:"Findzia UI Arabic",Tahoma,sans-serif!important;}
+#findzia-home-{{ section.id }}[data-theme][data-lang=hi] .fz-home-intro .fz-dark-description{font-family:"Findzia UI Hindi",sans-serif!important;}
+#findzia-home-{{ section.id }}[data-theme][data-lang=zh] .fz-home-intro .fz-dark-description{font-family:"Findzia UI Chinese",sans-serif!important;}
+#findzia-home-{{ section.id }}[data-theme][data-lang=ja] .fz-home-intro .fz-dark-description{font-family:"Findzia UI Japanese",sans-serif!important;}
+#findzia-home-{{ section.id }}[data-theme][data-lang=ko] .fz-home-intro .fz-dark-description{font-family:"Findzia UI Korean",sans-serif!important;}
+@media(max-height:640px){
+#findzia-home-{{ section.id }}[data-theme] .fz-home-intro .fz-dark-description{margin-top:10px;font-size:16px;}
+#findzia-home-{{ section.id }}[data-theme] .fz-home-intro+.fz-dark-camera{margin-top:24px;}
+}
+</style>
 {% schema %}
 {"name":"Findzia Classic 42.1","tag":"section","class":"section-findzia-home","settings":[{"type":"image_picker","id":"logo","label":"Findzia logo"},{"type":"text","id":"api_base_url","label":"Findzia API base URL","default":"https://coop-bot-g-production.up.railway.app"}],"presets":[{"name":"Findzia Classic 42.1"}]}
 {% endschema %}
