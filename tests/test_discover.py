@@ -67,6 +67,17 @@ class DiscoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(combined),1)
         self.assertEqual(combined[0]['discovery_sources'],['shopping_search','web_search'])
 
+    def test_sparse_groups_fill_after_giving_other_merchants_priority(self):
+        rows=[row(i,'web.com.kw',source='web_search') for i in range(12)]
+        rows += [row(i,f'catalog{i}.com.kw') for i in range(4)]
+        for r in rows:
+            r['display_money']=display_money(r['money'],'KWD',{})
+        chosen=select_rows(rows,'seed',set())
+        self.assertEqual(len(chosen),8)
+        self.assertEqual(sum(r['source']=='web_search' for r in chosen),4)
+        self.assertEqual(len({r['store'] for r in chosen}),5)
+        self.assertEqual(len(select_rows(rows[:12],'seed',set())),4)
+
     def test_currency_conversion_never_relabels_and_respects_precision(self):
         raw={'value':'32.50','currency':'USD'}
         converted=display_money(raw,'KWD',{'USD':'3.25'})

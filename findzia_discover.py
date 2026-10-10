@@ -20,12 +20,12 @@ from findzia_discover_sources import MarketSources
 
 EDITION_SECONDS = 600
 CATEGORIES = (
-    ('beauty', 'Beauty', 'الجمال', ('skin care', 'hair care', 'perfume')),
+    ('beauty', 'Beauty', 'الجمال', ('moisturizer', 'shampoo', 'perfume')),
     ('women', 'Women', 'النساء', ('women handbags', 'women dresses', 'women shoes')),
     ('men', 'Men', 'الرجال', ('men sneakers', 'men shirts', 'men watches')),
-    ('home', 'Home', 'المنزل', ('home decor', 'table lamps', 'ceramic dinnerware')),
-    ('tech', 'Tech', 'التقنية', ('wireless headphones', 'phone accessories', 'portable speakers')),
-    ('active', 'Active', 'الرياضة', ('fitness accessories', 'running shoes', 'yoga accessories')),
+    ('home', 'Home', 'المنزل', ('vase', 'table lamp', 'dinner set')),
+    ('tech', 'Tech', 'التقنية', ('wireless headphones', 'phone case', 'bluetooth speaker')),
+    ('active', 'Active', 'الرياضة', ('dumbbell', 'running shoes', 'yoga mat')),
 )
 HEADERS = {'Cache-Control': 'no-store, no-transform', 'X-Robots-Tag': 'noindex, nofollow'}
 
@@ -93,16 +93,19 @@ def select_rows(rows, seed, seen):
             if buckets[key]:
                 ordered.append(buckets[key].pop())
     chosen, stores = [], {}
-    for row in ordered:
-        key = url_key(row['url'])
-        store = urlsplit(row['url']).hostname
-        if not store or key in seen or stores.get(store, 0) >= 2:
-            continue
-        seen.add(key)
-        stores[store] = stores.get(store, 0) + 1
-        chosen.append(row)
-        if len(chosen) == 8:
-            break
+    # First give different merchants their slots, then fill sparse sections
+    # from the available stores without allowing one merchant to take all eight.
+    for limit in (2, 4):
+        for row in ordered:
+            key = url_key(row['url'])
+            store = urlsplit(row['url']).hostname
+            if not store or key in seen or stores.get(store, 0) >= limit:
+                continue
+            seen.add(key)
+            stores[store] = stores.get(store, 0) + 1
+            chosen.append(row)
+            if len(chosen) == 8:
+                return chosen
     return chosen
 
 
@@ -208,7 +211,7 @@ def install_discover(app, countries, services=None):
     # Separate admission/concurrency from the primary text and Lens pipelines.
     services = services or {}
     markets = MerchantMarkets(countries, services.get('COUNTRY_MAJOR_STORE_DOMAINS'))
-    sources = MarketSources(services) if services else None
+    sources = MarketSources(services, markets) if services else None
     discovery = Discovery(ShopifyCatalog(countries, markets=markets), countries, sources=sources,
                           currencies=services.get('COUNTRY_CURRENCIES'), markets=markets,
                           cross_border_domains=[domain for _, domain in services.get('GLOBAL_MARKET_STORES', {}).get('cn', ())])
