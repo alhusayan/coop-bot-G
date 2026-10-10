@@ -42,8 +42,19 @@ def _url(value):
     return value if isinstance(value, str) else ''
 
 
+def _current_lens_params(params):
+    # Google retired the Lens Products tab on 2026-10-07. Both providers now
+    # require visual_matches; keep the photo, country and optional user query.
+    # https://www.searchapi.io/docs/google-lens
+    # https://serpapi.com/google-lens-api
+    if params.get('engine') == 'google_lens' and params.get('type') == 'products':
+        return dict(params, type='visual_matches')
+    return params
+
+
 def searchapi_params(params):
     """Do not forward SerpApi credentials, tokens, or vendor-only controls."""
+    params = _current_lens_params(params)
     engine = params.get('engine')
     if engine not in SUPPORTED:
         return None
@@ -303,6 +314,7 @@ class SearchApiRouter:
                 'fallback': 'serpapi', 'fallback_after_seconds': self.threshold,
                 'total_timeout_seconds': self.total, 'backup_min_seconds': self.backup_min,
                 'lens_early_backup': self.lens_hedge, 'lens_backup_after_seconds': self.lens_hedge_after,
+                'lens_product_type': 'visual_matches',
                 'economy_enabled': self.economy, 'open_circuits': circuits}
 
     def _health(self, engine, ok, status=0, *, short_deadline=False):
@@ -323,9 +335,16 @@ class SearchApiRouter:
     def _primary(self, params, seconds):
         response = None
         started = time.monotonic()
+        # Allowlisted routing diagnostics only; never log image URLs or queries.
+        route = ''
+        if params['engine'] == 'google_lens':
+            kind = params.get('search_type', 'all')
+            country = str(params.get('country') or '').lower()
+            route = (' search_type=' + (kind if kind in ('all', 'visual_matches', 'exact_matches') else 'other')
+                     + ' country=' + (country if len(country) == 2 and country.isascii() and country.isalpha() else '-'))
         self.cost('searchapi_http_requests')
         self.cost('searchapi_engine_' + params['engine'])
-        self.log('SEARCHAPI REQUEST engine=' + params['engine'] + ' wait_seconds=' + str(round(seconds, 2)))
+        self.log('SEARCHAPI REQUEST engine=' + params['engine'] + route + ' wait_seconds=' + str(round(seconds, 2)))
         try:
             connect = min(1.5, seconds / 4)
             response = self.get('https://www.searchapi.io/api/v1/search', params=params,
@@ -346,7 +365,7 @@ class SearchApiRouter:
         except Exception:
             return None, 'connection', 0
         finally:
-            self.log('SEARCHAPI RESPONSE engine=' + params['engine'] +
+            self.log('SEARCHAPI RESPONSE engine=' + params['engine'] + route +
                      ' status=' + str(response.status_code if response is not None else 0) +
                      ' elapsed_ms=' + str(round((time.monotonic()-started)*1000)))
             if response is not None:
@@ -459,6 +478,9 @@ class SearchApiRouter:
                 backup.cancel()
 
     def search(self, params, timeout, fallback, *, label='', return_error=False, lens_hedge=False):
+        # Normalize before either dispatch, including a disabled primary or the
+        # early backup race. A fallback must not repeat the retired request.
+        params = _current_lens_params(params)
         mapped = searchapi_params(params)
         if not self.enabled or mapped is None:
             return fallback(params, timeout, label=label, return_error=return_error, retry_connect=False)

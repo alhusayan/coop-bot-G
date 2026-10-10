@@ -20,6 +20,39 @@ function setup(lang='ar',preview=false,filters=false){
  return {window,root,send,row,api:window.FindziaCatalog,paints:()=>paints};
 }
 const event=items=>({event:'catalog',source:'shopify_catalog',items});
+test('catalog has its own cap and preserves every primary result including duplicates',()=>{
+ const {root,send,row,api}=setup();
+ const primary=Array.from({length:60},(_,i)=>({...row,source:'google_lens',url:`https://lens.example/products/${i}`}));
+ const catalog=Array.from({length:18},(_,i)=>({...row,url:`https://catalog.example/products/${i}`}));
+ send(event(catalog));assert.equal(api.combine(root,primary).length,78);
+ send(event([{...primary[0],source:'shopify_catalog'},...catalog]));
+ const joined=api.combine(root,primary);
+ assert.equal(joined.filter(r=>r.source==='google_lens').length,60);
+ assert.equal(joined.filter(r=>r.url===primary[0].url).length,1);
+});
+test('catalog and Lens share a sequence for newest sorting',()=>{
+ const {root,send,row,api}=setup();let arrival=4;root.fzRefineBridge.nextArrival=()=>++arrival;
+ send(event([row]));assert.equal(api.combine(root,[])[0]._fzArrival,5);
+ const later={...row,source:'google_lens',url:'https://lens.example/products/later',_fzArrival:++arrival};
+ assert.equal(api.combine(root,[later]).sort((a,b)=>b._fzArrival-a._fzArrival)[0].source,'google_lens');
+});
+test('late stronger Lens matches outrank early catalog cards while ties, manual sorting and gaps stay stable',()=>{
+ const s=readFileSync(new URL('../source/findzia-home.liquid',import.meta.url),'utf8');
+ const funcs=s.split('\n').filter(l=>/^function (Gr|Fr|fzIsSimilar|fzMatchesResultFilter|zr|fzCompareMatch)\(/.test(l)).join('\n');
+ const c={B:1,I:'relevance',O:'all',E:'grid',br:r=>r.url,fzIsSocial:()=>false,fzPhotoAlternative:()=>false};
+ vm.createContext(c);vm.runInContext(funcs+'\n'+s.slice(s.indexOf('var fzResultSlots=null;'),s.indexOf('function fzStableGroups(')),c);
+ const shop={url:'shop',source:'shopify_catalog',market_scope:'local',match_type:'visual_similarity'};
+ const lens={url:'lens',source:'google_lens',market_scope:'local',match_type:'exact',match_score:.95};
+ const slots=rows=>Array.from(c.fzPinnedGroups(rows)[0].slots,r=>r?.url||null);
+ assert.deepEqual(slots([shop]),['shop']);assert.deepEqual(slots([lens,shop]),['lens','shop']);
+ const tie={...lens,url:'tie'};assert.deepEqual(slots([tie,lens,shop]),['lens','tie','shop']);
+ assert.deepEqual(slots([tie,shop]),[null,'tie','shop']);
+ const replacement={...lens,url:'replacement'};
+ assert.deepEqual(slots([tie,replacement,shop]),['replacement','tie','shop']);
+ c.I='price';assert.deepEqual(slots([shop,lens]),['shop','lens']);
+ c.O='alternative';assert.equal(c.Gr([shop,lens])[0].id,'alternative');
+ c.O='all';assert.deepEqual(Array.from(c.Gr([{...shop,market_scope:'unknown'},{...lens,market_scope:'global'}]),g=>g.id),['global','alternative']);
+});
 test('public catalog joins common rows, rejects unsafe URLs, never adds a separate section',()=>{
  const {root,send,row,api,paints}=setup();send(event([row,{...row,url:'javascript:alert(1)'}]));
  const rows=api.combine(root,[]);assert.equal(rows.length,1);assert.equal(root.children.length,1);assert.equal(paints(),1);

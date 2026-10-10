@@ -15,6 +15,13 @@ STOREFRONT_HOSTS = {
     'alnasser.net': {'alnasser.net': 'kw', 'ksa.alnasser.net': 'sa', 'bh.alnasser.net': 'bh'},
 }
 STOREFRONT_PATHS = {
+    'ikea.com': {f'/{cc}/': cc for cc in
+                 ('ae', 'at', 'au', 'be', 'ca', 'ch', 'cn', 'cz', 'de', 'dk',
+                  'eg', 'es', 'fi', 'fr', 'gb', 'hr', 'hu', 'ie', 'in', 'it',
+                  'jo', 'jp', 'kr', 'kw', 'ma', 'my', 'nl', 'no', 'ph', 'pl',
+                  'pt', 'qa', 'ro', 'rs', 'sa', 'se', 'sg', 'si', 'sk', 'th',
+                  'tr', 'ua', 'us')},
+    'homecentre.com': {f'/{cc}/': cc for cc in ('kw', 'sa', 'ae', 'bh', 'qa', 'om', 'eg')},
     'centrepointstores.com': {f'/{cc}/': cc for cc in ('kw', 'sa', 'ae', 'bh', 'qa', 'om')},
     'azadea.com': {**{f'/{cc}/': cc for cc in ('kw', 'lb', 'qa', 'iq')},
                    '/en/': 'ae', '/ar/': 'ae'},

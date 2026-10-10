@@ -127,7 +127,7 @@
       state.rows=[];
       for(const row of event.items.slice(0,18)){
         if(!safeURL(row.url)||!safeURL(row.image)||!row.title||!row.price||state.rows.some(r=>sameOffer(r,row)))continue;
-        state.rows.push({...row,source:'shopify_catalog',cacheable:false,_fzArrival:Date.now()});
+        state.rows.push({...row,source:'shopify_catalog',cacheable:false,_fzArrival:root.fzRefineBridge?.nextArrival?.()??Date.now()});
       }
       if(root.dataset.choicePreview!=='true'){state.hasResults=state.hasResults||state.rows.length>0;if(state.nav)state.nav.hidden=!state.hasResults;updateNote();root.fzRefineBridge?.renderCatalog?.();return;}
       state.section?.remove(); state.section = null; state.cards.clear();

@@ -73,6 +73,28 @@ class PricePriorityTests(unittest.TestCase):
         with redirect_stdout(io.StringIO()):self.ns['_web_targeted_price_updates']({'a':row},'en',{'country':'kw'})
         self.assertEqual(self.f.calls[0][0],'(site:amazon.example.com chair)')
 
+    def test_stronger_reviewed_matches_use_existing_recovery_slots_first(self):
+        rows={str(i):self.row(f'shop{i}.test',images=['photo'],classification_final=True,
+              identity_review_status='completed',match_type='similar',match_score=.3)
+              for i in range(8)}
+        rows['exact']=self.row('exact.test',images=['photo'],classification_final=True,
+              identity_review_status='completed',match_type='exact',match_score=.95)
+        self.assertEqual(next(iter(self.batch(rows)[0])),'exact')
+        self.assertLessEqual(sum(len(batch) for batch in self.batch(rows)),8)
+
+    def test_ikea_sku_query_stays_in_its_country_and_rejects_other_offer(self):
+        url='https://www.ikea.com/kw/en/p/poaeng-armchair-birch-veneer-s12345678/'
+        row=self.row(url=url,images=['photo'])
+        self.f.responses['kw']=[{'link':url,'title':'chair','price':'19 KWD'},
+            {'link':url.replace('/kw/','/sa/'),'title':'chair','price':'9 SAR'},
+            {'link':url.replace('12345678','99999999'),'title':'chair','price':'1 KWD'}]
+        with redirect_stdout(io.StringIO()):
+            result=self.ns['_web_targeted_price_updates']({'a':row},'en',{'country':'kw'})
+        self.assertEqual(self.f.calls,[('(site:ikea.com/kw "s12345678" price)','kw','ar')])
+        self.assertEqual(result['a']['price'],'19.0 KWD')
+        self.assertEqual(result['a']['price_source_url'],url)
+        self.assertFalse(result['a']['price_verified'])
+
 
 class ReadyPriceStopTests(unittest.TestCase):
     def test_ready_snapshot_does_not_start_new_paid_recovery_after_page_miss(self):

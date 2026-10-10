@@ -20875,7 +20875,13 @@ def _web_price_recovery_priority(row):
     pictured = bool(_web_offer_image_candidates(row))
     missing = 0 if pictured and not priced else 1 if priced and not pictured else 2
     reviewed = row.get('classification_final') and row.get('identity_review_status') in ('completed', 'not_required')
-    return (missing, not bool(reviewed))
+    match = str(row.get('result_section') or row.get('match_type') or '').lower()
+    tier = 2 if match == 'exact' else 1 if match == 'similar' else 0
+    score = next((float(row[k]) for k in ('identity_match_percentage', 'match_percentage')
+                  if type(row.get(k)) in (int, float) and 0 <= row[k] <= 100), -1.)
+    if score < 0 and type(row.get('match_score')) in (int, float) and 0 <= row['match_score'] <= 1:
+        score = 100 * row['match_score']
+    return (missing, not bool(reviewed), -tier, -score)
 
 
 def _web_automatic_price_batches(rows, attempted_rows=None, market=None):
@@ -21138,6 +21144,11 @@ def _web_targeted_price_updates(entries, lang, market, *, image_only=False):
         ids = [v for k, v in urllib.parse.parse_qsl(parsed.query)
                if k.lower() in {'id', 'itemid', 'item_id', 'goods_id', 'goodsid', 'offerid', 'sku', 'skuid', 'sku_id'}]
         path_ids = re.findall(r'(?:/item/|/offer/|/product/|-p-|-g-|/)(\d{6,})(?=[./-]|$)', parsed.path)
+        ikea = (parsed.hostname in ('ikea.com', 'www.ikea.com') and
+                re.search(r'^/[a-z]{2}/[a-z]{2}/p/.+-(s?\d{8})/?$', parsed.path, re.I))
+        if ikea:
+            term = 'site:' + parsed.netloc + '/' + parsed.path.strip('/').split('/')[0]
+            path_ids = [ikea.group(1)]
         noon = _web_noon_product_identity(key)
         if noon:
             term = 'site:' + parsed.netloc + '/' + parsed.path.strip('/').split('/')[0]
@@ -21155,7 +21166,7 @@ def _web_targeted_price_updates(entries, lang, market, *, image_only=False):
         else:
             title = re.sub(r'["()\r\n]', ' ', str(row.get('raw_title') or row.get('title') or ''))
             term += ' ' + title[:120].strip()
-        if not image_only and not _web_row_has_numeric_price(row) and (noon or _web_shein_product_id(key)):
+        if not image_only and not _web_row_has_numeric_price(row) and (noon or ikea or _web_shein_product_id(key)):
             term += ' price'
         query_key = ('(' + term + ')', _web_listing_price_country(row, market))
         terms.append(query_key)

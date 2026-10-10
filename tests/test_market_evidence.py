@@ -80,6 +80,29 @@ class DiscoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['status'],'ok');self.assertEqual(result['items'][0]['market_scope'],'unknown')
 
 class VerifiedStorefrontTests(unittest.TestCase):
+    def test_furniture_national_storefronts_survive_both_photo_filters(self):
+        markets=MerchantMarkets(['kw','sa','ae','qa','eg','jp','de','gb','us','bh','om'])
+        for host,cc,lang in [('ikea.com','kw','en'),('ikea.com','sa','ar'),
+                             ('ikea.com','jp','ja'),('ikea.com','de','de'),
+                             ('ikea.com','gb','en'),('homecentre.com','kw','en'),
+                             ('homecentre.com','qa','ar'),('homecentre.com','eg','en')]:
+            for source in ('google_lens','shopify_catalog'):
+                row=dict(url=f'https://www.{host}/{cc}/{lang}/p/chair-12345678/',
+                         source=source,match_type='similar',price='15 USD')
+                local=markets.classify(row,cc)
+                self.assertEqual(local['market_scope'],'local')
+                self.assertEqual(local['merchant_country'],cc.upper())
+                self.assertEqual(local['match_type'],'similar')
+                self.assertEqual(local['price'],'15 USD')
+                self.assertEqual(markets.classify(row,'us')['market_scope'],'global')
+        for url in ('https://ikea.com/global/en/p/chair',
+                    'https://ikea.com/kw-fake/en/p/chair',
+                    'https://ikea.com/p/chair?country=kw',
+                    'https://ikea.com.evil.example/kw/en/p/chair',
+                    'https://homecentre.com/en/p/chair?country=kw',
+                    'https://homecentre.com/kw-fake/en/p/chair'):
+            self.assertEqual(markets.classify(dict(url=url),'kw')['market_scope'],'unknown')
+
     def test_recording_photo_stores_recover_local_without_losing_similarity(self):
         markets=MerchantMarkets(['kw','sa','ae','bh','qa','om','lb','iq'])
         urls=('https://www.azadea.com/kw/en/buy-kipsta-volleyball/54_8972682_000.html',

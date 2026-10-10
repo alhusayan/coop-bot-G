@@ -1,5 +1,6 @@
 import ast
 import copy
+from collections import Counter
 import os
 from pathlib import Path
 import threading
@@ -85,6 +86,41 @@ class ProviderTests(unittest.TestCase):
                 self.assertTrue(response.closed)
         self.assertNotIn('secret', ' '.join(self.logs))
         self.assertNotIn('private-message', ' '.join(self.logs))
+
+    def test_retired_products_lane_succeeds_without_buying_backup(self):
+        self.params = {'engine': 'google_lens', 'type': 'products', 'country': 'kw',
+                       'hl': 'ar', 'url': 'https://example.com/private-photo.jpg'}
+        def current_api(url, **kwargs):
+            self.http.append((url, kwargs))
+            if kwargs['params'].get('search_type') == 'products':
+                return Response(400, {'error': 'Products discontinued'})
+            return Response(data={'visual_matches': [{'title': 'Chair', 'link': 'https://shop.example/chair'}]})
+        self.router.get = current_api
+        result = self.search()
+        self.assertEqual(len(result['visual_matches']), 1)
+        self.assertEqual(self.http[0][1]['params']['search_type'], 'visual_matches')
+        self.assertEqual(self.params['type'], 'products')  # Do not mutate caller.
+        self.assertFalse(self.backups)
+        self.assertIn('search_type=visual_matches country=kw', ' '.join(self.logs))
+        self.assertNotIn('private-photo', ' '.join(self.logs))
+
+    def test_retired_products_lane_uses_supported_type_in_every_backup_path(self):
+        for enabled, hedge in ((True, False), (True, True), (False, False)):
+            with self.subTest(enabled=enabled, hedge=hedge):
+                self.cache.clear(); self.router.circuits.clear(); self.backups.clear()
+                self.router.enabled = enabled
+                self.params = {'engine': 'google_lens', 'type': 'products', 'country': 'kw',
+                               'url': 'https://example.com/photo.jpg', 'q': 'black'}
+                if enabled:
+                    self.responses.append(Response(503))
+                def backup(params, timeout, **kwargs):
+                    self.backups.append(params)
+                    return {'visual_matches': [{'title': 'Chair', 'link': 'https://shop.example/chair'}]}
+                result = self.router.search(self.params, 10, backup, lens_hedge=hedge)
+                self.assertEqual(len(result['visual_matches']), 1)
+                self.assertEqual(len(self.backups), 1)
+                self.assertEqual(self.backups[0]['type'], 'visual_matches')
+                self.assertEqual(self.backups[0]['q'], 'black')
 
     def test_malformed_and_body_error_switch(self):
         for data in (ValueError('invalid JSON'), [], {}, {'error': 'bad'}, {'search_metadata': {'status': 'Processing'}}):
@@ -243,7 +279,7 @@ class SchemaTests(unittest.TestCase):
     def test_lens_mapping_and_currency(self):
         params = searchapi_params({'engine': 'google_lens', 'url': 'https://example.com/photo.jpg',
             'type': 'products', 'country': 'kw', 'hl': 'ar', 'q': 'black', 'auto_crop': True, 'api_key': 'secret'})
-        self.assertEqual(params['search_type'], 'products')
+        self.assertEqual(params['search_type'], 'visual_matches')
         self.assertEqual(params['country'], 'kw')
         self.assertNotIn('api_key', params)
         self.assertNotIn('auto_crop', params)
@@ -394,13 +430,17 @@ class MainIntegrationTests(unittest.TestCase):
         calls=[]
         router=SimpleNamespace(enabled=True,economy=True)
         ns = self.functions('_web_targeted_price_updates', re=re, urllib=urllib,
+            Counter=Counter, _web_noon_product_identity=lambda url:None,
+            _web_listing_price_country=lambda row,market:row.get('country',market['country']),
+            _STRUCTURED_PRICES=SimpleNamespace(enabled=False,key='',shein=lambda *a:None),
+            _web_log_price_recovery=lambda *a:None,
             ThreadPoolExecutor=ThreadPoolExecutor, MARKET_CTX=SimpleNamespace(),
             _SEARCHAPI_ROUTER=router, FINDZIA_GROUPED_RECOVERY_ENABLED=True, _indexed_recovery_allowed=lambda: True,
             _web_price_url_key=lambda url:url, _web_shein_product_id=lambda url:'',
             _global_store_match=lambda *a:False, _web_row_has_numeric_price=lambda row:False,
             country_search_hl=lambda cc:'ar', SERPAPI_API_KEY='fake', WEB_LIVE_PRICE_WAIT=10,
             FAST_PROVIDERS=['serper'], _fast_provider_supports_operators=lambda p:True,
-            _fast_provider_search=lambda *a: calls.append(a) or {},
+            _fast_provider_search=lambda *a, **kw: calls.append(a) or {},
             _web_indexed_media_records=lambda d:[])
         entries={str(i):{'url':f'https://shop.example/product/{123456+i}',
                  'title':f'Vase {i}', 'country':'kw'} for i in range(4)}
