@@ -18,7 +18,7 @@ const offer=(id,market='global')=>({title:'Coffee table '+id,store:'Store '+id,u
     localStorage.setItem('findzia-lang',variant.lang);localStorage.setItem('findzia-theme','light');
     const native=window.fetch.bind(window);
     window.fetch=(url,options)=>{
-     if(String(url).includes('/api/search/image/stream'))return Promise.resolve(new Response(new ReadableStream({start(c){window.__stream=c;}}),{headers:{'Content-Type':'application/x-ndjson'}}));
+     if(/\/api\/search\/(?:image\/)?stream/.test(String(url)))return Promise.resolve(new Response(new ReadableStream({start(c){window.__stream=c;window.__streamNumber=(window.__streamNumber||0)+1;}}),{headers:{'Content-Type':'application/x-ndjson'}}));
      return native(url,options);
     };
     window.__send=event=>window.__stream.enqueue(new TextEncoder().encode(JSON.stringify(event)+'\n'));
@@ -49,6 +49,8 @@ const offer=(id,market='global')=>({title:'Coffee table '+id,store:'Store '+id,u
    releaseBilling();await page.waitForFunction(()=>!!window.__stream);
    const geometry=()=>page.locator('.fz-fixed-header').evaluate(n=>({height:n.getBoundingClientRect().height,camera:n.querySelector('.fz-camera-hero').getBoundingClientRect().top}));
    const waiting=await geometry();
+   // A picker or keyboard can leave the waiting page below its beginning.
+   await page.evaluate(()=>scrollTo(0,document.documentElement.scrollHeight));
    await page.evaluate(()=>{window.__handoff=[];window.__recordHandoff=true;const sample=()=>{const root=document.querySelector('.fz-home'),body=root.querySelector('[data-results-body]');window.__handoff.push({waiting:root.dataset.waitActive==='true',exiting:root.dataset.waitExiting==='true',body:getComputedStyle(body).display});if(window.__recordHandoff)requestAnimationFrame(sample);};sample();});
    await page.evaluate(item=>__send({event:'result',item}),offer('a'));
    await page.waitForFunction(()=>{const r=document.querySelector('.fz-home');return r.fzRefineBridge.context().can_refine&&!r.dataset.waitActive&&!r.dataset.waitExiting;});
@@ -70,14 +72,14 @@ const offer=(id,market='global')=>({title:'Coffee table '+id,store:'Store '+id,u
    await page.evaluate(()=>{window.__originalCard=document.querySelector('.fz-card-shell');window.__originalImage=__originalCard.querySelector('img');});
    const readTop=()=>page.evaluate(()=>__originalCard.getBoundingClientRect().top);
    const send=async(event,item)=>{await page.evaluate(x=>__send(x),{event,item});await settle();};
-   const originalTop=await readTop();
+   assert.ok(await page.evaluate(()=>scrollY<=1),'first results start at the top');
    await send('result',offer('b','local'));await cardCount(2);await pinned(baseline,'late local');
    assert.deepEqual(await marketGroups(),['local','global']);
-   if(variant.layout!=='list')assert.ok(Math.abs(await readTop()-originalTop)<1,'late local section preserves the visible product position');
+   assert.ok(await page.evaluate(()=>scrollY<=1),'late local results keep an untouched page at the top');
    const similar={...offer('similar','global'),search_origin:'image',image_query_result:true,retrieval_sources:['bing_reverse_image'],alternative_visual_status:'approved',alternative_visual_policy:'156.7.3',alternative_visual_proof:'test-proof'};
    await send('result',similar);await cardCount(3);
    assert.deepEqual(await marketGroups(),['local','alternative','global']);
-   if(variant.layout!=='list')assert.ok(Math.abs(await readTop()-originalTop)<1,'similar section also preserves the visible product');
+   assert.ok(await page.evaluate(()=>scrollY<=1),'late similar results keep the first section visible');
    assert.equal(await page.locator('.fz-market-head h3').count(),3);
    assert.equal(await page.locator('.fz-market-head h3').first().isVisible(),true);
    assert.deepEqual(await page.locator('[data-results-body] .fz-market-count').allTextContents(),['1','1','1']);
@@ -110,6 +112,31 @@ const offer=(id,market='global')=>({title:'Coffee table '+id,store:'Store '+id,u
    await page.locator('[data-sort-trigger]').click();await page.locator('[data-sort-value="price"]').click();await settle();
    assert.equal(await page.locator('.fz-card-shell').first().getAttribute(variant.layout==='cinema'?'data-cinema-key':'data-stable-key'),'https://store.example.test/late-0','explicit price sort still works');
    if(process.env.FINDZIA_TEST_OUTPUT){fs.mkdirSync(process.env.FINDZIA_TEST_OUTPUT,{recursive:true});await page.screenshot({path:path.join(process.env.FINDZIA_TEST_OUTPUT,`stable-${variant.width}-${variant.lang}-${variant.layout||'grid'}.png`)});}
+   // New photo and text searches must reset an old position; modal dismissal
+   // must not restore that position after the new request has begun.
+   await page.evaluate(()=>scrollTo(0,document.documentElement.scrollHeight));
+   assert.ok(await page.evaluate(()=>scrollY>100),'previous search is scrolled down');
+   await page.locator('input[id^="fz-photo-"]').setInputFiles({name:'next-table.svg',mimeType:'image/svg+xml',buffer:Buffer.from(art)});
+   await page.waitForFunction(()=>__streamNumber===2);await settle();
+   assert.ok(await page.evaluate(()=>scrollY<=1),'new photo search resets the old position');
+   for(let i=0;i<18;i++)await send('result',offer('next-'+i,'local'));
+   await cardCount(18);
+   await page.waitForFunction(()=>!document.querySelector('.fz-home').dataset.waitExiting);
+   assert.ok(await page.evaluate(()=>scrollY<=1),'photo results begin at the top');
+   await page.evaluate(()=>{__send({event:'done'});__stream.close();});
+   await page.waitForFunction(()=>!document.querySelector('.fz-home').fzRefineBridge.context().busy);
+   await page.evaluate(()=>{
+    window.dispatchEvent(new Event('touchstart'));scrollTo(0,document.documentElement.scrollHeight);
+    const modal=document.createElement('dialog');modal.dataset.testScrollModal='';document.body.append(modal);modal.showModal();FindziaModalScroll.lock(modal);
+    document.querySelector('.fz-home').fzRefineBridge.accountSearch('Dining chair');
+    setTimeout(()=>{modal.close();FindziaModalScroll.unlock(modal);modal.remove();},30);
+   });
+   await page.waitForFunction(()=>__streamNumber===3&&!document.querySelector('[data-test-scroll-modal]'));await settle();
+   assert.ok(await page.evaluate(()=>scrollY<=1),'text search and modal dismissal reset the old position');
+   await send('result',offer('text-first','local'));await cardCount(1);
+   await page.waitForFunction(()=>!document.querySelector('.fz-home').dataset.waitExiting);
+   assert.ok(await page.evaluate(()=>scrollY<=1),'text results begin at the top');
+   await page.evaluate(()=>{__send({event:'done'});__stream.close();});
    assert.deepEqual(errors,[]);console.log('PASS',variant,'ordered market sections, retained images, stable group slots, viewport anchoring, rejections and manual sort');await context.close();
 
   }
