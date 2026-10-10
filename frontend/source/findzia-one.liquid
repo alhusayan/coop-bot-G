@@ -1034,6 +1034,7 @@ function fzRequestLifetime(milliseconds) {
   };
 }
 async function Rt(path, payload, receive, sharedLifetime) {
+  if (window.FindziaCatalog && ['/api/search/stream','/api/search/image/stream'].includes(path)) payload = {...payload, catalog_live:true, catalog_preview:e.dataset.choicePreview === 'true'};
   if (!r) throw new Error('API URL missing');
   if (['/api/search/stream','/api/search/image/stream'].includes(path)) fzAccountStart(payload);
   if (['/api/search/stream','/api/search/image/stream'].includes(path)) fzStartCardMetric(path, payload);
@@ -1418,7 +1419,7 @@ async function ea(e,r){var shopperContext={query:r&&r.freshText?"":W&&W.query||"
 if(W&&W.kind==="image"&&W.image_base64&&!r.selectedOption&&!r.freshText){g&&g.blur();return fzRunPhotoEdit(t);}
 if(t){if(!await window.FindziaBeforeSearch(g.closest(".fz-home"),{query:t,kind:"text",country:g.closest(".fz-home").fzRefineBridge.context().country}))return;Ue(!1,!0),r.choiceNavigation||Ut();var a=Bt(),n=Le,i=await Pt();if(n===Le){g&&(g.value=t),K=t,fr(!0,ar("searching")),zt("text"),I="relevance",O="all",cr(),w&&(w.hidden=!0),W={kind:"text",query:t,country:i,aiUsed:r.aiUsed===true,providerCopy:!1,shoppingUrl:""},cr();var o={query:t,country:i,lang:nr(),force_specific:!0,shopping_context:shopperContext};r&&r.forceSpecific&&(o.force_specific=!0),r&&r.selectedOption&&(o.selected_option=r.selectedOption,o.original_query=r.originalQuery||"",o.force_specific=!0);try{await Rt("/api/search/stream",o,async function(e){if(a===B&&e)
 if(at(e),"reference_image"===e.event)W.image_reference=e.image_reference,W.textLens=!0,w&&(w.hidden=!1);else if("status"===e.event&&"finding_reference_image"===e.stage)fr(!0,"ar"===tr()?"نجهّز صورة المنتج…":"Finding the product photo…");else if("status"!==e.event||"preparing_offers"!==e.stage&&"identify"!==e.stage){if("status"===e.event&&"google_shopping_slow"===e.stage)fr(!0,"ar"===tr()?"البحث مستمر، المصدر متأخر قليلًا…":"Still searching — the provider is taking a little longer…");else if("remove"===e.event)At(e.url);else if("status"===e.event&&/^(understanding_request|researching_product)$/.test(e.stage))fr(!0,e.message||(tr()==="ar"?"أفهم طلبك وأبحث عن المنتج المناسب…":"Understanding your request and identifying the product…"));else if("query"===e.event&&e.query)fzSetDisplayQuery(e,t);else if("result"===e.event||"upsert"===e.event)Ct(e.item||{});else if("snapshot"===e.event)(e.results||e.all_results||[]).forEach(Ct);else if("recommendations"===e.event)Ot(e.data);else if("done"===e.event){if(W){W.partial=!!e.partial;W.shopperEmpty=e.shopper_empty_message||"";}
-fr(!1);if(e.shopper_answer)fzShopperAnswer(e.shopper_answer);if(e.shopper_empty_message)St();}else if("error"===e.event)throw new Error(e.error||"search_failed");}else fr(!0,ar("searching"));}),a===B&&(fr(!1),U.length||X||W&&W.shopperEmpty||b.querySelector(".fz-empty")||Et(ar("no_results"),!1),Ke(r.originalQuery||t));}catch(e){if(a!==B||fzBillingFailure(e))return;W&&W.providerCopy?nt(e.message||"shopping_provider_unavailable"):ot(e.message||"search_failed");}}}else g&&g.focus();}
+fr(!1);if(e.shopper_answer)fzShopperAnswer(e.shopper_answer);if(e.shopper_empty_message)St();}else if("error"===e.event)throw new Error(e.error||"search_failed");}else fr(!0,ar("searching"));}),a===B&&(fr(!1),U.length||window.FindziaCatalog?.count(g.closest('.fz-home'))||X||W&&W.shopperEmpty||b.querySelector(".fz-empty")||Et(ar("no_results"),!1),Ke(r.originalQuery||t));}catch(e){if(a!==B||fzBillingFailure(e))return;W&&W.providerCopy?nt(e.message||"shopping_provider_unavailable"):ot(e.message||"search_failed");}}}else g&&g.focus();}
 e.fzRefineBridge.begin = function (e) {
   Gt = !0;
   try {
@@ -1727,6 +1728,8 @@ return result;};}})();</script>
 <script src="{{ 'findzia-account.js' | asset_url }}" defer></script>
 <link rel="stylesheet" href="{{ 'findzia-camera.css' | asset_url }}">
 <script src="{{ 'findzia-photo-history.js' | asset_url }}" defer></script>
+<link rel="stylesheet" href="{{ 'findzia-catalog.css' | asset_url }}">
+<script src="{{ 'findzia-catalog.js' | asset_url }}" defer></script>
 <script src="{{ 'findzia-camera.js' | asset_url }}" defer></script>
 <link rel="stylesheet" href="{{ 'findzia-choice.css' | asset_url }}">
 <script src="{{ 'findzia-choice.js' | asset_url }}" defer></script>

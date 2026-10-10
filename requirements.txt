@@ -6,3 +6,4 @@ lxml
 pillow
 pillow-heif
 PyJWT[crypto]>=2.13.0,<3
+httpx[socks]>=0.28.1,<1
