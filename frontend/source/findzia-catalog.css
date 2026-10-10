@@ -1,0 +1,11 @@
+.fz-home .fz-catalog{margin:32px 0 16px;padding-block-start:24px;border-top:1px solid var(--fz-line,#d6d8d4);color:var(--fz-text,#24322c)}
+.fz-home .fz-catalog-heading{margin:0 0 8px;font-size:20px;line-height:1.4}
+.fz-home .fz-catalog-note{margin:0 0 12px;font-size:13px;line-height:1.65;color:var(--fz-muted,#626b65)}
+.fz-home .fz-catalog-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,210px),1fr));gap:16px}
+.fz-home .fz-catalog-card{display:flex;flex-direction:column;gap:8px;min-width:0;border:1px solid var(--fz-line,#d6d8d4);border-radius:16px;padding:12px;background:var(--fz-surface,#fff);color:inherit;text-decoration:none;overflow:hidden}
+.fz-home .fz-catalog-image{display:block;width:100%;height:180px;object-fit:contain;border-radius:9px;background:#fff}
+.fz-home .fz-catalog-title{font-size:14px;line-height:1.5;overflow-wrap:anywhere}
+.fz-home .fz-catalog-store{font-size:12px;color:var(--fz-muted,#626b65)}
+.fz-home .fz-catalog-price{font-size:16px;margin-top:auto;direction:ltr;text-align:start}
+.fz-home .fz-catalog-card:focus-visible{outline:2px solid #b97944;outline-offset:3px}
+@media(max-width:500px){.fz-home .fz-catalog-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.fz-home .fz-catalog-card{padding:9px}.fz-home .fz-catalog-image{height:130px}}
