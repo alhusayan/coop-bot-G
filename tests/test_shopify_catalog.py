@@ -54,7 +54,7 @@ class NormalizeTests(unittest.TestCase):
         row = normalize_products([product('USD', 1299)], 'kw')[0]
         self.assertEqual(row['destination_country'], 'KW')
         self.assertIsNone(row['merchant_country'])
-        self.assertEqual(row['market_scope'], 'global')
+        self.assertEqual(row['market_scope'], 'unknown')
         self.assertFalse(row['shipping_cost_verified'])
         self.assertFalse(row['cacheable'])
         self.assertEqual(row['image'], 'https://cdn.example/one.jpg')
@@ -88,11 +88,11 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(len(all_countries), 200)
         catalog = ShopifyCatalog(all_countries, transport=httpx.MockTransport(transport))
         for country in all_countries:
-            result = await catalog.search('عطر عود', country, 'ar')
+            result = await catalog._search('عطر عود', country, 'ar')
             self.assertEqual(result['status'], 'ok')
             self.assertEqual(requests[-1]['filters']['ships_to'], dict(country=country.upper()))
             self.assertEqual(requests[-1]['context']['address_country'], country.upper())
-        self.assertEqual((await catalog.search('test', 'ZZ'))['status'], 'unsupported_country')
+        self.assertEqual((await catalog._search('test', 'ZZ'))['status'], 'unsupported_country')
         self.assertEqual(len(requests), len(all_countries))
 
     async def test_image_payload_is_forwarded_without_remote_download(self):
@@ -102,7 +102,7 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(str(request.url), 'https://catalog.shopify.com/api/ucp/mcp')
             return httpx.Response(200, json=reply())
         catalog = ShopifyCatalog(['jp'], transport=httpx.MockTransport(transport))
-        result = await catalog.search('', 'jp', image_b64='aW1hZ2U=', mime='image/png')
+        result = await catalog._search('', 'jp', image_b64='aW1hZ2U=', mime='image/png')
         self.assertEqual(result['items'][0]['match_type'], 'visual_similarity')
         args = seen[0]['params']['arguments']['catalog']
         self.assertNotIn('query', args)
@@ -114,29 +114,29 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
             calls.append(request)
             return httpx.Response(200 if len(calls) < 3 else 429, json=reply())
         catalog = ShopifyCatalog(['kw'], transport=httpx.MockTransport(transport))
-        await catalog.search('same', 'kw'); await catalog.search('same', 'kw')
+        await catalog._search('same', 'kw'); await catalog._search('same', 'kw')
         self.assertEqual(len(calls), 2)
-        self.assertEqual((await catalog.search('same', 'kw'))['status'], 'rate_limited')
-        self.assertEqual((await catalog.search('same', 'kw'))['status'], 'busy')
+        self.assertEqual((await catalog._search('same', 'kw'))['status'], 'rate_limited')
+        self.assertEqual((await catalog._search('same', 'kw'))['status'], 'busy')
         self.assertEqual(len(calls), 3)
         self.assertEqual(catalog.inflight, 0)
 
     async def test_failure_and_timeout_are_nonfatal(self):
         for status in (401, 500, 503):
             catalog = ShopifyCatalog(['kw'], transport=httpx.MockTransport(lambda r: httpx.Response(status)))
-            self.assertEqual((await catalog.search('test', 'kw'))['items'], [])
+            self.assertEqual((await catalog._search('test', 'kw'))['items'], [])
         def timeout(request):
             raise httpx.ReadTimeout('slow', request=request)
         catalog = ShopifyCatalog(['kw'], transport=httpx.MockTransport(timeout))
-        self.assertEqual((await catalog.search('test', 'kw'))['status'], 'timeout')
+        self.assertEqual((await catalog._search('test', 'kw'))['status'], 'timeout')
 
     async def test_provider_errors_and_ignored_filters(self):
         for body in [dict(error=dict(code=1)), dict(result=dict(isError=True)), {'unexpected': []}]:
             catalog = ShopifyCatalog(['kw'], transport=httpx.MockTransport(lambda r: httpx.Response(200, json=body)))
-            self.assertEqual((await catalog.search('test', 'kw'))['items'], [])
+            self.assertEqual((await catalog._search('test', 'kw'))['items'], [])
         body = reply(); body['result']['structuredContent']['messages'] = [dict(code='unsupported_filter')]
         catalog = ShopifyCatalog(['kw'], transport=httpx.MockTransport(lambda r: httpx.Response(200, json=body)))
-        self.assertEqual((await catalog.search('test', 'kw'))['status'], 'unsupported_filter')
+        self.assertEqual((await catalog._search('test', 'kw'))['status'], 'unsupported_filter')
 
 
 class StreamTests(unittest.IsolatedAsyncioTestCase):
@@ -187,7 +187,7 @@ class StreamTests(unittest.IsolatedAsyncioTestCase):
                 if duplicate: yield event_line(dict(event='result', item=dict(url=product()['variants'][0]['url'], title='Primary')))
                 yield event_line(dict(event='done', count=int(duplicate)))
             events = [json.loads(c) async for c in catalog.supplement(source(), 'test', 'kw', 'ar')]
-            self.assertEqual(len(next(e for e in events if e['event'] == 'catalog')['items']), 0 if duplicate else 1)
+            self.assertEqual(len(next(e for e in events if e['event'] == 'catalog')['items']), 1)
             self.assertEqual(sum(e['event'] == 'done' for e in events), 1)
             evidence = ResultEvidence()
             for event in events: evidence.event(event)

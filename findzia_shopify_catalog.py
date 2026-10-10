@@ -16,6 +16,7 @@ from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
 
 import httpx
 from fastapi.responses import JSONResponse
+from findzia_market_evidence import MerchantMarkets
 
 ENDPOINT = 'https://catalog.shopify.com/api/ucp/mcp'
 VERSION = '2026-08-25'
@@ -60,7 +61,7 @@ def url_key(value):
     try:
         p = urlsplit(value)
         query = [(k, v) for k, v in parse_qsl(p.query) if not k.lower().startswith('utm_')
-                 and k.lower() not in ('gclid', 'fbclid')]
+                 and k.lower() not in ('gclid', 'fbclid', 'srsltid', '_gsid')]
         return urlunsplit(('https', p.netloc.lower().removeprefix('www.'), p.path.rstrip('/'),
                            urlencode(sorted(query)), ''))
     except (TypeError, ValueError):
@@ -87,7 +88,7 @@ def money(value):
             'text': f'{display} {currency}'}
 
 
-def normalize_products(products, country, visual=False):
+def normalize_products(products, country, visual=False, origin_country=''):
     rows, seen = [], set()
     for product in products[:50]:
         if not isinstance(product, dict):
@@ -119,7 +120,10 @@ def normalize_products(products, country, visual=False):
                          'product_id': plain(product.get('id'), 200),
                          'variant_id': plain(variant.get('id'), 200),
                          'source': 'shopify_catalog', 'cacheable': False,
-                         'market_scope': 'global', 'merchant_country': None,
+                         'market_scope': 'local' if origin_country else 'unknown',
+                         'merchant_country': origin_country.upper() or None,
+                         'merchant_country_evidence': 'shopify_origin_filter' if origin_country else '',
+                         'seller_id': plain(seller.get('id'), 200),
                          'destination_country': country.upper(),
                          'shipping_evidence': 'catalog_filter', 'shipping_cost_verified': False,
                          'match_type': 'visual_similarity' if visual else 'catalog_search'})
@@ -134,9 +138,10 @@ def event_line(event):
 
 
 class ShopifyCatalog:
-    def __init__(self, countries, *, transport=None):
+    def __init__(self, countries, *, transport=None, markets=None):
         self.countries = frozenset(c.upper() for c in countries)
         self.transport = transport
+        self.markets = markets or MerchantMarkets(countries)
         self.inflight = 0
         self.retry_after = 0.0
 
@@ -145,6 +150,26 @@ class ShopifyCatalog:
         return mode in ('true', '1', 'yes') or (mode == 'preview' and preview)
 
     async def search(self, query, country, lang='en', *, image_b64='', mime='image/jpeg'):
+        # Concurrent local discovery gives positive origin evidence. Absence from
+        # a limited local result page never proves that another store is foreign.
+        calls = [asyncio.create_task(self._search(query, country, lang, image_b64=image_b64,
+                    mime=mime, origin_country=origin)) for origin in (str(country).upper(), '')]
+        try:
+            local, general = await asyncio.gather(*calls)
+            rows, seen = [], set()
+            for result in (local, general):
+                for row in result['items']:
+                    key = url_key(row['url'])
+                    if key not in seen:
+                        rows.append(self.markets.classify(row, country)); seen.add(key)
+            return {'status': 'ok' if rows or any(r['status'] == 'ok' for r in (local, general)) else general['status'],
+                    'items': rows[:18]}
+        finally:
+            for call in calls:
+                if not call.done(): call.cancel()
+            await asyncio.gather(*calls, return_exceptions=True)
+
+    async def _search(self, query, country, lang='en', *, image_b64='', mime='image/jpeg', origin_country=''):
         country = str(country).upper()
         if country not in self.countries:
             return {'status': 'unsupported_country', 'items': []}
@@ -155,7 +180,9 @@ class ShopifyCatalog:
             return {'status': 'unconfigured', 'items': []}
         catalog = {'context': {'address_country': country, 'language': lang},
                    'filters': {'ships_to': {'country': country}, 'available': True},
-                   'pagination': {'limit': 12}}
+                   'pagination': {'limit': 6 if origin_country else 12}}
+        if origin_country:
+            catalog['filters']['ships_from'] = [{'country': origin_country}]
         if query:
             catalog['query'] = str(query)[:1000]
         if image_b64:
@@ -199,7 +226,7 @@ class ShopifyCatalog:
             if any(isinstance(m, dict) and 'unsupported' in str(m.get('code', '')).lower()
                    for m in structured.get('messages', [])):
                 return {'status': 'unsupported_filter', 'items': []}
-            return {'status': 'ok', 'items': normalize_products(products, country, bool(image_b64))}
+            return {'status': 'ok', 'items': normalize_products(products, country, bool(image_b64), origin_country)}
         except (TimeoutError, httpx.TimeoutException):
             return {'status': 'timeout', 'items': []}
         except (httpx.HTTPError, ValueError, TypeError, AttributeError, ImportError):
@@ -246,7 +273,7 @@ class ShopifyCatalog:
                         for line in lines:
                             if not line.strip():
                                 continue
-                            data = json.loads(line)
+                            data = self.markets.event(json.loads(line), country)
                             if data.get('event') in ('result', 'upsert'):
                                 primary_urls.add(url_key((data.get('item') or {}).get('url', '')))
                             if data.get('event') == 'remove':
@@ -256,7 +283,7 @@ class ShopifyCatalog:
                             if data.get('event') == 'done':
                                 final = data
                             else:
-                                yield line + b'\n'
+                                yield event_line(data)
                             if data.get('event') == 'error' and not data.get('recoverable'):
                                 return
                             if data.get('event') == 'recommendations':
@@ -270,7 +297,7 @@ class ShopifyCatalog:
                         # A supplemental provider may never break the admitted
                         # primary search, even for an unexpected client failure.
                         result = {'status': 'provider_error', 'items': []}
-                    catalog_rows = [r for r in result['items'] if url_key(r['url']) not in primary_urls]
+                    catalog_rows = result['items']  # UI combines duplicates and retains positive merchant-origin proof.
                     yield event_line({'event': 'catalog', 'source': 'shopify_catalog',
                                       'status': result['status'], 'items': catalog_rows,
                                       'destination_country': str(country).upper(), 'cacheable': False})
@@ -294,8 +321,8 @@ class ShopifyCatalog:
                     await iterator.aclose()
 
 
-def install_catalog(app, countries):
-    catalog = ShopifyCatalog(countries)
+def install_catalog(app, countries, stores=None):
+    catalog = ShopifyCatalog(countries, markets=MerchantMarkets(countries, stores))
 
     @app.get('/.well-known/ucp')
     async def profile():

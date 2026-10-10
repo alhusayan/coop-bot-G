@@ -20,7 +20,53 @@
     id:['Toko lainnya · Shopify','Pengiriman berdasarkan katalog. Pastikan pengiriman, harga akhir, dan opsi produk di toko.','Produk yang mirip secara visual; kecocokan persis belum diverifikasi.'],
     ms:['Kedai lain · Shopify','Penghantaran mengikut katalog. Sahkan penghantaran, harga akhir dan pilihan produk di kedai.','Produk yang serupa secara visual; padanan tepat belum disahkan.']
   };
+  const unknown = {ar:'بلد المتجر غير مؤكد',en:'Store country unconfirmed',fr:'Pays du vendeur non confirmé',de:'Händlerland unbestätigt',es:'País de la tienda sin confirmar',it:'Paese del negozio non confermato',pt:'País da loja não confirmado',tr:'Mağazanın ülkesi doğrulanmadı',zh:'商店所在国家未确认',ja:'ストアの国は未確認',ko:'스토어 국가 미확인',ru:'Страна магазина не подтверждена',hi:'स्टोर के देश की पुष्टि नहीं हुई',ur:'اسٹور کے ملک کی تصدیق نہیں ہوئی',id:'Negara toko belum dikonfirmasi',ms:'Negara kedai belum disahkan'};
+  const shipping={ar:'التوصيل والسعر النهائي عند المتجر',en:'Confirm delivery and final price at store',fr:'Livraison et prix final à confirmer en boutique',de:'Lieferung und Endpreis im Shop prüfen',es:'Confirma entrega y precio final en la tienda',it:'Conferma consegna e prezzo finale nel negozio',pt:'Confirme entrega e preço final na loja',tr:'Teslimatı ve son fiyatı mağazada doğrulayın',zh:'请在商店确认配送与最终价格',ja:'配送と最終価格はストアで確認',ko:'배송 및 최종 가격은 스토어에서 확인',ru:'Уточните доставку и итоговую цену в магазине',hi:'स्टोर पर डिलीवरी और अंतिम कीमत जाँचें',ur:'اسٹور پر ترسیل اور حتمی قیمت کی تصدیق کریں',id:'Pastikan pengiriman dan harga akhir di toko',ms:'Sahkan penghantaran dan harga akhir di kedai'};
   const states = new WeakMap();
+  function lang(root){return (root.fzRefineBridge?.context()?.lang||document.documentElement.lang||'en').split('-')[0];}
+  function unknownLabel(root){return unknown[lang(root)]||unknown.en;}
+  function displayMarket(row,country){
+    const out={...row};
+    // Legacy prices, search lanes and locale paths are not origin evidence.
+    const proof=row.market_policy==='merchant-evidence-v2'&&
+      ['shopify_origin_filter','registered_storefront','country_domain'].includes(row.merchant_country_evidence);
+    const origin=proof?String(row.merchant_country||'').toUpperCase():'';
+    const valid=/^[A-Z]{2}$/.test(origin);
+    out.market_scope=valid?(origin===String(country).toUpperCase()?'local':'global'):'unknown';
+    out.market=out.market_scope;out.country=valid?origin.toLowerCase():'';
+    out.market_country=out.country;out.merchant_country=valid?origin:null;
+    out.flag=valid?Array.from(origin,c=>String.fromCodePoint(127397+c.charCodeAt(0))).join(''):'';
+    return out;
+  }
+  function labels(root,row){
+    if(row.source!=='shopify_catalog')return row.market_scope==='unknown'?[unknownLabel(root)]:[];
+    const language=lang(root),words=copy[language]||copy.en;
+    let origin=unknownLabel(root);
+    if(row.merchant_country){try{origin=new Intl.DisplayNames([language],{type:'region'}).of(row.merchant_country);}catch(_){origin=row.merchant_country;}}
+    return ['Shopify · '+origin,shipping[language]||shipping.en,...(row.match_type==='visual_similarity'?[words[2]]:[])];
+  }
+  function sameOffer(a,b){
+    const left=key(a.url),right=key(b.url);if(left===right)return true;
+    if(!left||!right)return false;
+    const x=new URL(left),y=new URL(right),xVariant=x.searchParams.get('variant'),yVariant=y.searchParams.get('variant');
+    if(xVariant&&yVariant&&xVariant!==yVariant)return false;
+    x.searchParams.delete('variant');y.searchParams.delete('variant');return x.href===y.href;
+  }
+  function combine(root,primary){
+    const country=root.fzRefineBridge?.context()?.country;
+    const rows=primary.map(row=>displayMarket(row,country));
+    if(root.dataset.choicePreview==='true')return rows;
+    for(const item of states.get(root)?.rows||[]){
+      const row=displayMarket(item,country),prior=rows.find(candidate=>sameOffer(candidate,row));
+      if(prior){
+        if(!prior.merchant_country&&row.merchant_country){
+          Object.assign(prior,{merchant_country:row.merchant_country,merchant_country_evidence:row.merchant_country_evidence,market_policy:row.market_policy});
+          Object.assign(prior,displayMarket(prior,country));
+        }
+      }else rows.push(row);
+    }
+    return rows;
+  }
   function safeURL(value) {
     try {
       const url = new URL(value);
@@ -31,7 +77,7 @@
     const safe = safeURL(value); if (!safe) return '';
     const url = new URL(safe); url.hash = ''; url.hostname = url.hostname.replace(/^www\./, '');
     url.pathname = url.pathname.replace(/\/$/, '');
-    Array.from(url.searchParams.keys()).forEach(k => { if (/^(utm_|gclid$|fbclid$)/i.test(k)) url.searchParams.delete(k); });
+    Array.from(url.searchParams.keys()).forEach(k => { if (/^(utm_|gclid$|fbclid$|srsltid$|_gsid$)/i.test(k)) url.searchParams.delete(k); });
     url.searchParams.sort(); return url.href;
   }
   function element(tag, className, text) {
@@ -42,8 +88,8 @@
   }
   function mount(root) {
     if (states.has(root)) return;
-    const state = {section:null, cards:new Map(), seen:new Set()}; states.set(root, state);
-    function clear() { state.section?.remove(); state.section = null; state.cards.clear(); state.seen.clear(); }
+    const state = {section:null, cards:new Map(), seen:new Set(), rows:[]}; states.set(root, state);
+    function clear() { state.section?.remove(); state.section = null; state.cards.clear(); state.seen.clear(); state.rows=[]; root.fzRefineBridge?.renderCatalog?.(); }
     function prune(url) {
       const id = key(url); if (!id) return;
       state.seen.add(id); state.cards.get(id)?.remove(); state.cards.delete(id);
@@ -54,7 +100,14 @@
       if (!event) return;
       if (event.event === 'result' || event.event === 'upsert') prune(event.item?.url);
       if (event.event === 'snapshot') (event.results || event.all_results || []).forEach(row => prune(row.url));
+      if (['result','upsert','snapshot','remove'].includes(event.event)&&state.rows.length)root.fzRefineBridge?.renderCatalog?.();
       if (event.event !== 'catalog' || event.source !== 'shopify_catalog' || !Array.isArray(event.items)) return;
+      state.rows=[];
+      for(const row of event.items.slice(0,18)){
+        if(!safeURL(row.url)||!safeURL(row.image)||!row.title||!row.price||state.rows.some(r=>sameOffer(r,row)))continue;
+        state.rows.push({...row,source:'shopify_catalog',cacheable:false,_fzArrival:Date.now()});
+      }
+      if(root.dataset.choicePreview!=='true'){root.fzRefineBridge?.renderCatalog?.();return;}
       state.section?.remove(); state.section = null; state.cards.clear();
       const body = root.querySelector('[data-results-body]'); if (!body) return;
       const language = (root.fzRefineBridge?.context()?.lang || document.documentElement.lang || 'en').split('-')[0];
@@ -83,6 +136,6 @@
     // A restored browser document must run a fresh search for catalog products.
     window.addEventListener('pagehide', clear);
   }
-  window.FindziaCatalog = {mount, count:root => states.get(root)?.cards.size || 0};
+  window.FindziaCatalog = {mount, combine, displayMarket, labels, unknownLabel, sameOffer, count:root => states.get(root)?.rows.length || 0};
   document.querySelectorAll('.fz-home').forEach(mount);
 })();

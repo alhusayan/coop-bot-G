@@ -7760,9 +7760,6 @@ def _market_offer_allowed(item, market):
         actual = 'cn'
     else:
         actual = evidence.get('country') or _explicit_market_country(item)
-    if not actual:
-        codes = _explicit_currency_codes(item)
-        actual = 'cn' if codes == {'CNY'} else 'us' if codes == {'USD'} else ''
     if not actual and (item.get('market_scope') == 'global' or item.get('market') in ('global', 'us', 'china')
                        or item.get('market_rank') in (1, 2)):
         return any(_global_catalog_evidence(item, cc) for cc in GLOBAL_MARKET_STORES)
@@ -7829,7 +7826,7 @@ def _merchant_url_market(url):
     return {}
 
 
-def _web_apply_market_context(row, market):
+def _web_capture_market_context(row, market):
     """Keep every card, but derive country/scope again at publication time."""
     row = dict(row or {})
     evidence = _merchant_url_market(row.get('url') or row.get('link'))
@@ -7856,6 +7853,18 @@ def _web_apply_market_context(row, market):
                market=('local' if rank == 0 else 'global') if selected else _web_market_label(rank),
                market_evidence=evidence['evidence'], catalog_kind=evidence['kind'])
     return row
+
+def _web_apply_market_context(row, market):
+    row = _web_capture_market_context(row, market)
+    # Preserve retrieval/pricing inputs. Attach independent merchant proof for
+    # the final response and every frontend path (including refinement/history).
+    catalog = globals().get('_FZ_CATALOG')
+    if catalog is not None:
+        verified = catalog.markets.classify(row, (market or {}).get('country', ''))
+        for key in ('merchant_country', 'merchant_country_evidence', 'market_policy'):
+            row[key] = verified[key]
+    return row
+
 
 def _explicit_market_country(item):
     for key in ('market_country', 'country'):
@@ -14580,12 +14589,6 @@ def _web_market_scope_guard(row, market_snapshot):
         return ('local', 'captured_local_lane', 99)
     if rank in (1, 2):
         return ('global', 'captured_global_lane', 99)
-    local_codes = set(COUNTRY_CURRENCY_CODES.get(cc, ()))
-    if local_codes and any(re.search(rf'\b{re.escape(code)}\b', price) for code in local_codes):
-        return ('local', 'local_currency', 98)
-    currency_codes = _explicit_currency_codes({'price': price, 'title': row.get('title'), 'source': store, 'link': url})
-    if currency_codes and not (currency_codes & local_codes):
-        return ('global', 'foreign_currency', 96)
     return None
 
 def _web_match_guard_conflict_axis(match_guard):
@@ -17660,8 +17663,8 @@ PRODUCT-IDENTITY VERIFICATION:
 AXES: category, subtype, intended_use, audience, function, product_role, mounting, installation, support_base, power_source, orientation, brand, product_name, model, variant, structure, components, form_factor, silhouette, proportions, shape_geometry, material, texture, finish, color, pattern, distinctive_features, size_class, dimensions, quantity_bundle, configuration, compatibility, condition, text_identity, visible_markings, alphanumeric_identity.
 
 MARKET:
-- local: a storefront/offer localized to the user's country by country domain/path, local currency/branch, or localized global storefront that sells there.
-- global: a foreign/default international storefront not localized to the user's country. A globally known merchant can still be local when its listing is localized.
+- local: merchant country established by authoritative merchant/storefront evidence. Currency, display language, search targeting and delivery destination never establish merchant country.
+- global: merchant country established to be outside the user's country. If uncertain, report market_reason=uncertain; publication applies an independent evidence gate.
 
 LOCKS:
 - A non-empty locked_match or locked_market is proven. Copy it exactly and classify only the unlocked axis.
@@ -34854,4 +34857,4 @@ _FZ_ONE_CHOICE = _install_findzia_choice(app, globals())
 
 # Official live catalog source: no separate request or additional credit charge.
 from findzia_shopify_catalog import install_catalog as _install_shopify_catalog
-_FZ_CATALOG = _install_shopify_catalog(app, COUNTRY_NAMES)
+_FZ_CATALOG = _install_shopify_catalog(app, COUNTRY_NAMES, COUNTRY_MAJOR_STORE_DOMAINS)
