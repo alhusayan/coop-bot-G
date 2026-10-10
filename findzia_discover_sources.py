@@ -34,6 +34,13 @@ class MarketSources:
         if kinds:
             search = next((k for k in kinds if '_search:en' in k), kinds[0])
             second = next((k for k in kinds if '_shopping:' in k), '')
+            if second and not self.s.get('_shopping_gl_supported', lambda _: True)(cc):
+                second = ''
+            # Some markets have no Shopping feed. Spend the same second lane
+            # on their existing merchant scopes rather than an empty request.
+            provider = search.split('_', 1)[0]
+            if not second and self.s.get('_fast_provider_supports_operators', lambda _: False)(provider):
+                second = search + ':scoped'
             if not second:
                 second = next((k for k in kinds if '_images:en' in k), '')
             return [('local', cc, k) for k in dict.fromkeys((search, second)) if k]

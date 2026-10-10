@@ -52,6 +52,10 @@ class SourceTests(unittest.IsolatedAsyncioTestCase):
         s=services();source=MarketSources(s)
         try:
             self.assertEqual([spec[2] for spec in source.specs('shoes','KW','local')],['serper_search:en','serper_shopping:en'])
+            s['_shopping_gl_supported'] = lambda cc: cc == 'us'
+            s['_fast_provider_supports_operators'] = lambda provider: provider == 'serper'
+            self.assertEqual([spec[2] for spec in source.specs('shoes','KW','local')],['serper_search:en','serper_search:en:scoped'])
+            self.assertEqual([spec[2] for spec in source.specs('shoes','US','local')],['serper_search:en','serper_shopping:en'])
             self.assertEqual(source.specs('shoes','US','global'),[('global','cn','global_fast')])
             rows=s['_local_discovery_request']('shoes',{'country':'kw'},'search',8,None)
             self.assertEqual(len(source.normalize(rows,'web_search')),1)
