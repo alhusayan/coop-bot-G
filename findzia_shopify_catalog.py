@@ -38,7 +38,7 @@ def agent_profile():
         'schema': f'https://shopify.dev/ucp/schemas/{VERSION}/shopify_catalog_global.json',
         'extends': list(capabilities),
     }]
-    return {'ucp': {'version': VERSION, 'capabilities': capabilities, 'services': {
+    return {'ucp': {'version': VERSION, 'capabilities': capabilities, 'payment_handlers': {}, 'services': {
         'dev.ucp.shopping': [{'version': VERSION, 'transport': 'mcp',
                              'spec': f'https://ucp.dev/{VERSION}/specification/overview',
                              'schema': f'https://ucp.dev/{VERSION}/services/shopping/mcp.openrpc.json'}]}}}

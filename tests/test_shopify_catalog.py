@@ -74,6 +74,7 @@ class NormalizeTests(unittest.TestCase):
             response = client.get('/.well-known/ucp')
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), agent_profile())
+        self.assertEqual(response.json()['ucp']['payment_handlers'], {})
         self.assertNotIn('dev.ucp.shopping.checkout', response.json()['ucp']['capabilities'])
 
 
