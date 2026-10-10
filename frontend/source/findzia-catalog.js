@@ -23,6 +23,7 @@
   const unknown = {ar:'بلد المتجر غير مؤكد',en:'Store country unconfirmed',fr:'Pays du vendeur non confirmé',de:'Händlerland unbestätigt',es:'País de la tienda sin confirmar',it:'Paese del negozio non confermato',pt:'País da loja não confirmado',tr:'Mağazanın ülkesi doğrulanmadı',zh:'商店所在国家未确认',ja:'ストアの国は未確認',ko:'스토어 국가 미확인',ru:'Страна магазина не подтверждена',hi:'स्टोर के देश की पुष्टि नहीं हुई',ur:'اسٹور کے ملک کی تصدیق نہیں ہوئی',id:'Negara toko belum dikonfirmasi',ms:'Negara kedai belum disahkan'};
   const shipping={ar:'التوصيل والسعر النهائي عند المتجر',en:'Confirm delivery and final price at store',fr:'Livraison et prix final à confirmer en boutique',de:'Lieferung und Endpreis im Shop prüfen',es:'Confirma entrega y precio final en la tienda',it:'Conferma consegna e prezzo finale nel negozio',pt:'Confirme entrega e preço final na loja',tr:'Teslimatı ve son fiyatı mağazada doğrulayın',zh:'请在商店确认配送与最终价格',ja:'配送と最終価格はストアで確認',ko:'배송 및 최종 가격은 스토어에서 확인',ru:'Уточните доставку и итоговую цену в магазине',hi:'स्टोर पर डिलीवरी और अंतिम कीमत जाँचें',ur:'اسٹور پر ترسیل اور حتمی قیمت کی تصدیق کریں',id:'Pastikan pengiriman dan harga akhir di toko',ms:'Sahkan penghantaran dan harga akhir di kedai'};
   const states = new WeakMap();
+  const similar = {ar:'شبيه',en:'Similar',fr:'Similaire',de:'Ähnlich',es:'Similar',it:'Simile',pt:'Semelhante',tr:'Benzer',zh:'相似',ja:'類似',ko:'유사',ru:'Похожее',hi:'समान',ur:'مشابہ',id:'Serupa',ms:'Serupa'};
   function lang(root){return (root.fzRefineBridge?.context()?.lang||document.documentElement.lang||'en').split('-')[0];}
   function unknownLabel(root){return unknown[lang(root)]||unknown.en;}
   function displayMarket(row,country){
@@ -38,12 +39,13 @@
     out.flag=valid?Array.from(origin,c=>String.fromCodePoint(127397+c.charCodeAt(0))).join(''):'';
     return out;
   }
-  function labels(root,row){
-    if(row.source!=='shopify_catalog')return row.market_scope==='unknown'?[unknownLabel(root)]:[];
-    const language=lang(root),words=copy[language]||copy.en;
-    let origin=unknownLabel(root);
-    if(row.merchant_country){try{origin=new Intl.DisplayNames([language],{type:'region'}).of(row.merchant_country);}catch(_){origin=row.merchant_country;}}
-    return ['Shopify · '+origin,shipping[language]||shipping.en,...(row.match_type==='visual_similarity'?[words[2]]:[])];
+  function labels(root,row,isSimilar=false){
+    // Keep the price and merchant prominent. Shared delivery/match guidance is
+    // shown once above the results, not repeated on every mobile card.
+    const parts=[];
+    if(row.source==='shopify_catalog')parts.push('Shopify');
+    if(isSimilar||row.match_type==='visual_similarity')parts.push(similar[lang(root)]||similar.en);
+    return parts.length?[parts.join(' · ')]:[];
   }
   function sameOffer(a,b){
     const left=key(a.url),right=key(b.url);if(left===right)return true;
@@ -88,20 +90,34 @@
   }
   function mount(root) {
     if (states.has(root)) return;
-    const state = {section:null, cards:new Map(), seen:new Set(), rows:[], nav:null}; states.set(root, state);
+    const state = {section:null, cards:new Map(), seen:new Set(), rows:[], nav:null,note:null,hasResults:false}; states.set(root, state);
     // The current public header hides the old results-head container. Move the
     // existing, already-bound filter buttons into the visible results flow.
     if(root.dataset.choicePreview!=='true'){
       const filters=root.querySelector('[data-filter-seg]'),body=root.querySelector('[data-results-body]');
-      if(filters&&body){const nav=element('div','fz-catalog-filters');nav.hidden=true;body.before(nav);nav.append(filters);state.nav=nav;}
+      if(filters&&body){
+        const nav=element('div','fz-catalog-filters');nav.hidden=true;
+        const header=root.querySelector('.fz-fixed-header-inner');
+        if(header)header.append(nav);else body.before(nav);
+        nav.append(filters);state.nav=nav;
+        const note=element('p','fz-catalog-context');note.hidden=true;body.before(note);state.note=note;
+      }
     }
-    function clear() { state.section?.remove(); state.section = null; state.cards.clear(); state.seen.clear(); state.rows=[]; if(state.nav)state.nav.hidden=true; root.fzRefineBridge?.renderCatalog?.(); }
+    function updateNote(){
+      if(!state.note)return;
+      const language=lang(root),words=copy[language]||copy.en;
+      state.note.hidden=!state.rows.length;
+      state.note.textContent=[shipping[language]||shipping.en,...(state.rows.some(row=>row.match_type==='visual_similarity')?[words[2]]:[])].join(' · ');
+    }
+    function clear() { state.section?.remove(); state.section = null; state.cards.clear(); state.seen.clear(); state.rows=[];state.hasResults=false; if(state.nav)state.nav.hidden=true;updateNote(); root.fzRefineBridge?.renderCatalog?.(); }
     function prune(url) {
       const id = key(url); if (!id) return;
       state.seen.add(id); state.cards.get(id)?.remove(); state.cards.delete(id);
       if (!state.cards.size) { state.section?.remove(); state.section = null; }
     }
     root.addEventListener('fz:search-reset', clear);
+    root.addEventListener('fz:search-state',updateNote);
+    root.addEventListener('fz:result-count',({detail})=>{state.hasResults=state.hasResults||detail?.count>0;if(state.nav)state.nav.hidden=!state.hasResults;});
     root.addEventListener('fz:search-progress', ({detail:event}) => {
       if (!event) return;
       if (event.event === 'result' || event.event === 'upsert') prune(event.item?.url);
@@ -113,7 +129,7 @@
         if(!safeURL(row.url)||!safeURL(row.image)||!row.title||!row.price||state.rows.some(r=>sameOffer(r,row)))continue;
         state.rows.push({...row,source:'shopify_catalog',cacheable:false,_fzArrival:Date.now()});
       }
-      if(root.dataset.choicePreview!=='true'){if(state.nav)state.nav.hidden=!state.rows.length;root.fzRefineBridge?.renderCatalog?.();return;}
+      if(root.dataset.choicePreview!=='true'){state.hasResults=state.hasResults||state.rows.length>0;if(state.nav)state.nav.hidden=!state.hasResults;updateNote();root.fzRefineBridge?.renderCatalog?.();return;}
       state.section?.remove(); state.section = null; state.cards.clear();
       const body = root.querySelector('[data-results-body]'); if (!body) return;
       const language = (root.fzRefineBridge?.context()?.lang || document.documentElement.lang || 'en').split('-')[0];

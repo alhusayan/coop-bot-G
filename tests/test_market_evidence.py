@@ -78,3 +78,27 @@ class DiscoveryTests(unittest.IsolatedAsyncioTestCase):
             return httpx.Response(200,json=reply())
         result=await ShopifyCatalog(['kw'],transport=httpx.MockTransport(transport)).search('p','kw')
         self.assertEqual(result['status'],'ok');self.assertEqual(result['items'][0]['market_scope'],'unknown')
+
+class VerifiedStorefrontTests(unittest.TestCase):
+    def test_known_local_stores_and_national_routes_ignore_currency(self):
+        markets=MerchantMarkets(['kw','sa','ae','bh','qa','om','eg','us'])
+        for url in ('https://rullart.com/en/products/rug',
+                    'https://www.karazonline.com/en/product/1',
+                    'https://www.centrepointstores.com/kw/en/p/1',
+                    'https://www.noon.com/kuwait-en/product/N1/p/'):
+            with self.subTest(url=url):
+                row=markets.classify(dict(url=url,price='20 USD'),'kw')
+                self.assertEqual(row['market_scope'],'local')
+                self.assertEqual(row['merchant_country_evidence'],'registered_storefront')
+                self.assertEqual(markets.classify(dict(url=url,price='20 KWD'),'sa')['market_scope'],'global')
+
+    def test_national_routes_require_registered_host_and_whole_path(self):
+        markets=MerchantMarkets(['kw','sa'])
+        for url in ('https://unknown.example/kw/en/p',
+                    'https://centrepointstores.com.evil.example/kw/en/p',
+                    'https://centrepointstores.com/kw-fake/en/p',
+                    'https://centrepointstores.com/p?country=kw',
+                    'https://noon.com/kuwait-en-fake/p',
+                    'https://rullart.com.evil.example/p'):
+            with self.subTest(url=url):
+                self.assertEqual(markets.classify(dict(url=url),'kw')['market_scope'],'unknown')

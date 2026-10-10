@@ -119,3 +119,25 @@ They never supply local-origin evidence and are excluded from image-neighbor
 results. Missing shipping requirements also cannot establish local origin.
 The common public filter buttons are moved out of the legacy hidden header
 into a visible row above the integrated cards.
+
+
+## Recording review fixes (2026-10-10)
+
+- Local/global filters now select merchant geography independently of similarity.
+  A local similar item participates in both views; All displays it once, with
+  local offers first. The Similar view keeps its explicit match label.
+- Empty filtered views no longer change search-wide success state or surface an
+  earlier photo timeout/media error. Genuine zero-result failures still retry.
+- Compact source/similarity labels replace repeated card paragraphs. Delivery
+  and visual-match guidance appears once above the results. Filters stay in the
+  fixed header and also work when the supplemental provider returns no cards.
+- Added independently verified storefront evidence for Rullart and Karaz, and
+  explicit national storefront routes on Centrepoint and Noon. These identify
+  the storefront market, not a guarantee about a seller's warehouse or speed.
+  Unknown hosts, arbitrary country paths and currency remain insufficient.
+  Official evidence reviewed on 2026-10-10:
+  - https://www.rullart.com/en/contact (Kuwait store addresses)
+  - https://www.rullart.com/en/shipping (local network and worldwide export)
+  - https://www.karazonline.com/en/terms_cond (Kuwait storefront)
+  - https://www.centrepointstores.com/kw/en/ (national storefront selector)
+  - https://www.noon.com/kuwait-ar/ (national storefront)

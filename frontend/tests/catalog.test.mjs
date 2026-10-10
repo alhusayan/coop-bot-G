@@ -7,7 +7,7 @@ class Node extends EventTarget {
  append(...nodes){for(const n of nodes){n.parent=this;this.children.push(n);}}
  before(n){n.parent=this.parent;this.parent.children.splice(this.parent.children.indexOf(this),0,n);}
  after(n){this.parent.append(n);} remove(){if(this.parent)this.parent.children=this.parent.children.filter(n=>n!==this);}
- setAttribute(){} querySelector(s){return s==='[data-filter-seg]'?this.filters:s==='[data-results-body]'?this.body:null;}
+ setAttribute(){} querySelector(s){return s==='[data-filter-seg]'?this.filters:s==='[data-results-body]'?this.body:s==='.fz-fixed-header-inner'?this.header:null;}
 }
 function setup(lang='ar',preview=false,filters=false){
  const root=new Node();root.body=new Node();root.append(root.body);if(preview)root.dataset.choicePreview='true';
@@ -55,7 +55,7 @@ test('new search and bfcache navigation discard ephemeral results',()=>{
 });
 test('visual similarity and uncertain country labels are available in all 16 languages',()=>{
  for(const language of ['ar','en','fr','de','es','it','pt','tr','zh','ja','ko','ru','hi','ur','id','ms']){
-  const {root,row,api}=setup(language);assert.equal(api.labels(root,{...row,match_type:'visual_similarity'}).length,3);
+  const {root,row,api}=setup(language);assert.equal(api.labels(root,{...row,match_type:'visual_similarity'}).length,1);assert.ok(!api.labels(root,{...row,match_type:'visual_similarity'})[0].includes('verified'));
   assert.ok(api.unknownLabel(root).length>5);
  }
 });
@@ -67,10 +67,10 @@ test('existing private One preview retains its live supplement',()=>{
 for(const file of ['findzia-home.liquid','findzia-one.liquid']){
  const source=readFileSync(new URL('../source/'+file,import.meta.url),'utf8');
  test(file+': common grouping keeps unknown geography out of local/global and photo neighbors in similar',()=>{
-  const code=source.split('\n').filter(line=>line.startsWith('function Fr(')||line.startsWith('function Gr(')).join('\n');
-  const c={fzIsSocial:()=>false,fzPhotoAlternative:()=>false,n:'KW',kr:()=>''};vm.createContext(c);vm.runInContext(code,c);
+  const code=source.split('\n').filter(line=>line.startsWith('function Fr(')||line.startsWith('function Gr(')||line.startsWith('function fzIsSimilar(')||line.startsWith('function fzMatchesResultFilter(')).join('\n');
+  const c={fzIsSocial:()=>false,fzPhotoAlternative:()=>false,n:'KW',kr:()=>'',O:'all'};vm.createContext(c);vm.runInContext(code,c);
   assert.equal(c.Fr({market_scope:'unknown'}),'unknown');assert.equal(c.Fr({market_scope:'local'}),'local');assert.equal(c.Fr({market_scope:'global'}),'global');
-  assert.equal(c.Fr({source:'shopify_catalog',market_scope:'local',match_type:'visual_similarity'}),'alternative');
+  assert.equal(c.Fr({source:'shopify_catalog',market_scope:'local',match_type:'visual_similarity'}),'local');
   assert.equal(c.Gr([{market_scope:'unknown'}])[0].id,'unknown');
  });
  test(file+': catalog rendering bypasses image processing and saving',()=>{
@@ -88,5 +88,39 @@ test('public filter buttons are moved from hidden legacy header into visible flo
  const {root,send,row}=setup('ar',false,true);
  const nav=root.children[0];assert.equal(nav.hidden,true);assert.equal(nav.children[0],root.filters);
  send(event([row]));assert.equal(nav.hidden,false);
+ root.dispatchEvent(new Event('fz:search-reset'));assert.equal(nav.hidden,true);
+});
+
+for(const file of ['findzia-home.liquid','findzia-one.liquid']){
+ const source=readFileSync(new URL('../source/'+file,import.meta.url),'utf8');
+ test(file+': local/global and similarity overlap without hiding offers or duplicating All',()=>{
+  const code=source.split('\n').filter(line=>/^(function (Fr|Gr|fzIsSimilar|fzMatchesResultFilter)\()/.test(line)).join('\n');
+  const c={fzIsSocial:r=>!!r.social_id,fzPhotoAlternative:()=>false,O:'all'};vm.createContext(c);vm.runInContext(code,c);
+  const rows=[{market_scope:'local',match_type:'similar'},{market_scope:'global',match_type:'visual_similarity'}, {market_scope:'unknown',match_type:'similar'},{market_scope:'global',match_type:'exact'}];
+  for(const [filter,count] of [['all',4],['local',1],['global',2],['alternative',3],['social',0]]){
+   c.O=filter;const selected=rows.filter(c.fzMatchesResultFilter);assert.equal(selected.length,count);
+   if(filter==='alternative'){const groups=c.Gr(selected);assert.equal(groups.length,1);assert.equal(groups[0].id,'alternative');}
+   if(filter==='all'){assert.equal(c.Gr(selected)[0].id,'local');assert.equal(c.Gr(selected).flatMap(g=>g.items).length,4);}
+  }
+ });
+ test(file+': empty filter after partial photo success cannot show timeout or media retry',()=>{
+  const c={W:{photoSearchIssue:'timeout'},e:{dataset:{},dispatchEvent(){}},ee:false,Kt:false,Vt:null,Jt:false,fzUsableResults:true,
+   fzHasSearchResults:()=>true,fzMediaPending:()=>false,fzReadingAnchor:()=>null,fzCardRects:()=>new Map(),
+   fzMeasureFirstCard(){},Yt(){},fzUsage(){},CustomEvent:class{},photoErrors:0,mediaErrors:0,
+   fzRenderPhotoIssue(){c.photoErrors++},fzRenderMediaIssue(){},fzResultMotion(){},fzFitCinema(){},fzKeepReadingAnchor(){},Ft(){}};
+  vm.createContext(c);
+  vm.runInContext(source.slice(source.indexOf('function Qt(count)'),source.indexOf('function Xt()')),c);
+  c.fzPaintResults=()=>c.Qt(0);
+  vm.runInContext(source.slice(source.indexOf('function St(){'),source.indexOf('function fzFitCinema(){')),c);
+  c.St();assert.equal(c.fzUsableResults,true);assert.equal(c.photoErrors,0);
+  c.fzHasSearchResults=()=>false;c.St();assert.equal(c.photoErrors,1);
+  assert.match(source,/O!=="all"&&fzHasSearchResults\(\)\?ar\("no_filter"\)/);
+  assert.doesNotMatch(source,/Search stopped\. Your matches are ready to browse/);
+ });
+}
+test('primary results also reveal filters, and an empty filter keeps navigation available',()=>{
+ const {root,send}=setup('en',false,true);const nav=root.children[0],note=root.children[1];
+ const emit=count=>{const ev=new Event('fz:result-count');ev.detail={count};root.dispatchEvent(ev);};
+ emit(57);assert.equal(nav.hidden,false);emit(0);assert.equal(nav.hidden,false);assert.equal(note.hidden,true);
  root.dispatchEvent(new Event('fz:search-reset'));assert.equal(nav.hidden,true);
 });

@@ -5,11 +5,24 @@ POLICY = 'merchant-evidence-v2'
 # These ccTLDs are commonly used as generic domains, not merchant locations.
 GENERIC_CCTLDS = {'ai', 'io', 'co', 'me', 'tv', 'cc', 'fm', 'ly', 'to', 'so', 'ws', 'la', 'sh', 'gg', 'tk'}
 
+# Independently verified storefronts, not currency/delivery-country guesses.
+# Evidence and review date are recorded in SHOPIFY_CATALOG.md.
+VERIFIED_STORES = {'rullart.com': 'kw', 'karazonline.com': 'kw'}
+STOREFRONT_PATHS = {
+    'centrepointstores.com': {f'/{cc}/': cc for cc in ('kw', 'sa', 'ae', 'bh', 'qa', 'om')},
+    'noon.com': {f'/{market}-{lang}/': cc for market, cc in
+                 (('kuwait', 'kw'), ('saudi', 'sa'), ('uae', 'ae'), ('egypt', 'eg'))
+                 for lang in ('en', 'ar')},
+}
+
 
 class MerchantMarkets:
     def __init__(self, countries, stores=None):
         self.countries = {str(c).lower() for c in countries}
         self.stores = {}
+        for host, country in VERIFIED_STORES.items():
+            if country in self.countries:
+                self.stores[host] = {country}
         for country, entries in (stores or {}).items():
             for _, domain in entries:
                 host = str(domain).lower().removeprefix('www.').strip('/')
@@ -29,6 +42,15 @@ class MerchantMarkets:
                 return '', ''
         except (ValueError, TypeError):
             return '', ''
+        # Only registered hosts and complete route segments are accepted. A
+        # /kw path on an arbitrary domain or ?country=KW never supplies proof.
+        for domain, paths in STOREFRONT_PATHS.items():
+            if host == domain or host.endswith('.' + domain):
+                path = url.path.lower().rstrip('/') + '/'
+                for prefix, country in paths.items():
+                    if path.startswith(prefix) and country in self.countries:
+                        return country, 'registered_storefront'
+                return '', ''
         # A registered national storefront can identify its market. Arbitrary
         # country query strings, language paths and subdomains cannot.
         suffix = host.rsplit('.', 1)[-1]
