@@ -8,7 +8,7 @@ const {pathToFileURL}=require('node:url');
  const browser=await chromium.launch({executablePath:process.env.FINDZIA_TEST_CHROME,headless:true,args:['--no-sandbox','--disable-dev-shm-usage','--use-fake-device-for-media-stream','--use-fake-ui-for-media-stream']});
  try{
   for(const variant of [{width:390,height:720,lang:'en'},{width:320,height:568,lang:'ar'},{width:1440,height:900,lang:'ja'}]){
-   const context=await browser.newContext({viewport:{width:variant.width,height:variant.height},hasTouch:true,reducedMotion:variant.lang==='ar'?'reduce':'no-preference'}),searches=[],errors=[],apiPaths=[];
+   const context=await browser.newContext({viewport:{width:variant.width,height:variant.height},hasTouch:true,reducedMotion:variant.lang==='ar'?'reduce':'no-preference'}),searches=[],errors=[];
    await context.addInitScript(lang=>{
     localStorage.setItem('findzia-lang',lang);window.__streams=[];window.__constraints=[];
     const original=navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
@@ -28,20 +28,20 @@ const {pathToFileURL}=require('node:url');
    },variant.lang);
    await context.route('**/*',async route=>{
     const u=new URL(route.request().url()),p=u.pathname;if(u.origin===origin)return route.continue();
-    if(u.origin==='https://api.findzia.com'){apiPaths.push(p);
+    if(u.origin==='https://api.findzia.com'){
      let data={ok:true};
      if(p==='/api/geo')Object.assign(data,{country:'KW',source:'ip'});
      else if(p==='/api/account/config')data.providers={};
      else if(p==='/api/billing/config')data.plans=[];
      else if(p==='/api/billing/status'||p==='/api/billing/guest')Object.assign(data,{remaining:20,balances:{trial:20,pack:0},guest_token:'test-guest'});
      else if(p.includes('/config'))data.checkout_available=false;
-     else if(p==='/api/search/image/stream'){searches.push(route.request().postDataJSON());await new Promise(r=>setTimeout(r,300));return route.fulfill({contentType:'application/x-ndjson',body:'{"event":"done"}\n'});}
+     else if(p==='/api/search/image/stream'){searches.push(route.request().postDataJSON());return route.fulfill({contentType:'application/x-ndjson',body:'{"event":"done"}\n'});}
      return route.fulfill({contentType:'application/json',body:JSON.stringify(data)});
     }
     return route.fulfill({contentType:u.hostname==='fonts.googleapis.com'?'text/css':'text/javascript',body:''});
    });
-   const page=await context.newPage();page.on('pageerror',e=>errors.push(e.message));page.on('console',m=>{if(m.text().includes('FINDZIA_CAMERA'))console.log(m.text());});
-   await page.goto(origin+(process.env.FINDZIA_CAMERA_TRIAL?JSON.parse(fs.readFileSync(path.join(__dirname,'../trial.json'))).path:''),{waitUntil:'networkidle'});
+   const page=await context.newPage();page.on('pageerror',e=>errors.push(e.message));
+   await page.goto(origin,{waitUntil:'networkidle'});
    await page.waitForFunction(()=>document.querySelector('.fz-home')?.fzCamera);
    assert.equal(await page.evaluate(()=>window.__constraints.length),0,'no camera access before a tap');
    const open=async()=>{await page.locator('[data-dark-photo]').click();await page.waitForFunction(()=>document.querySelector('.fz-camera-dialog').dataset.ready==='true');await page.waitForFunction(()=>getComputedStyle(document.querySelector('.fz-camera-video')).opacity==='1');};
@@ -73,11 +73,10 @@ const {pathToFileURL}=require('node:url');
    assert.equal(await page.locator('.fz-camera-zoom-range').inputValue(),'1','camera switch resets magnification');
    await page.locator('[data-zoom="2"]').click();
    const cameraSize=await page.locator('.fz-camera-video').evaluate(n=>({width:n.videoWidth,height:n.videoHeight}));
-   await page.evaluate(()=>{window.__captureFrames=[];window.__recordCapture=true;const sample=()=>{if(!window.__recordCapture)return;const root=document.querySelector('.fz-home'),dialog=document.querySelector('.fz-camera-dialog');__captureFrames.push({home:root.dataset.homeState,camera:dialog.open,photo:[...document.querySelectorAll('.fz-one-image')].some(n=>!!n.getAttribute('src'))});requestAnimationFrame(sample);};sample();});
+   await page.evaluate(()=>{window.__captureFrames=[];window.__recordCapture=true;const sample=()=>{if(!window.__recordCapture)return;const root=document.querySelector('.fz-home'),dialog=document.querySelector('.fz-camera-dialog');__captureFrames.push({home:root.dataset.homeState,camera:dialog.open,photo:!!document.querySelector('.fz-search-wait img')?.getAttribute('src')});requestAnimationFrame(sample);};sample();});
    await page.evaluate(()=>{window.__originalDataTransfer=window.DataTransfer;window.DataTransfer=class{constructor(){throw Error('Synthetic FileList unavailable');}};});
-   const capturedSearch=page.waitForResponse(r=>new URL(r.url()).pathname==='/api/search/image/stream',{timeout:5000});
    await page.locator('.fz-camera-shutter').click();
-   try{await capturedSearch;}catch(error){console.error('CAPTURE DEBUG',JSON.stringify({apiPaths,errors,state:await page.evaluate(()=>({status:document.querySelector('.fz-camera-status').textContent,open:document.querySelector('.fz-camera-dialog').open,text:document.body.innerText.slice(-1600)}))}));throw error;}await stopped();
+   await page.waitForResponse(r=>new URL(r.url()).pathname==='/api/search/image/stream');await stopped();
    await page.evaluate(()=>window.DataTransfer=window.__originalDataTransfer);
    assert.equal(searches.length,1,'one shutter tap runs one existing Lens search');assert.equal(searches[0].mime_type,'image/jpeg');assert.ok(searches[0].image_base64.length>1000);
    await closed();
@@ -104,23 +103,6 @@ const {pathToFileURL}=require('node:url');
    await page.locator('[data-dark-photo]').click();await page.locator('.fz-camera-native').waitFor({state:'visible'});
    const nativePicker=page.waitForEvent('filechooser');await page.locator('.fz-camera-native').click();const native=await nativePicker;
    assert.equal(await native.element().getAttribute('capture'),'environment','denied camera has explicit native capture fallback');await native.setFiles([]);await closed();assert.equal(searches.length,2);
-   if(process.env.FINDZIA_CAMERA_TRIAL){
-    await page.evaluate(()=>{window.__denyCamera=false;});await open();
-    const before=await page.evaluate(()=>__constraints.length);
-    assert.deepEqual(await page.evaluate(()=>Object.keys(__constraints.at(-1).video)),['facingMode'],'device owns native frame orientation');
-    await page.locator('[data-zoom="2"]').click();
-    await page.evaluate(()=>{Object.defineProperty(screen.orientation,'angle',{configurable:true,value:90});window.dispatchEvent(new Event('orientationchange'));screen.orientation.dispatchEvent(new Event('change'));});
-    assert.equal(await page.locator('.fz-camera-shutter').isDisabled(),true,'no capture during orientation transition');
-    await page.waitForFunction(n=>__constraints.length===n+1&&document.querySelector('.fz-camera-dialog').dataset.ready==='true',before);
-    assert.equal(await page.locator('.fz-camera-zoom-range').inputValue(),'2','orientation preserves requested zoom');
-    assert.equal(await page.evaluate(()=>__streams.filter(s=>s.getTracks().some(t=>t.readyState==='live')).length),1,'only the new orientation stream remains live');
-    await page.evaluate(()=>{window.dispatchEvent(new Event('resize'));window.dispatchEvent(new Event('orientationchange'));});
-    await page.waitForTimeout(300);assert.equal(await page.evaluate(()=>__constraints.length),before+1,'toolbar and duplicate events do not restart camera');
-    await page.evaluate(()=>{Object.defineProperty(screen.orientation,'angle',{configurable:true,value:180});window.dispatchEvent(new Event('orientationchange'));});
-    await page.locator('.fz-camera-head > button').first().click();await closed();await stopped();
-    await page.waitForTimeout(300);assert.equal(await page.evaluate(()=>__constraints.length),before+1,'close cancels queued orientation restart');
-    assert.equal(searches.length,2,'rotation never starts or spends a search');
-   }
    // A permission response arriving after close must immediately release tracks.
    await page.evaluate(()=>{window.__denyCamera=false;window.__delayCamera=true;});
    const count=await page.evaluate(()=>__streams.length);await page.locator('[data-dark-photo]').click();

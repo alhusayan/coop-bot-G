@@ -34,8 +34,7 @@ sourceReleases.camera=read('findzia-camera.js').toString().match(/FINDZIA_CAMERA
 sourceReleases.wait=read('findzia-wait.js').toString().match(/FINDZIA_WAIT_RELEASE=([0-9.]+)/)?.[1];
 sourceReleases.photoIntake=read('findzia-home.liquid').toString().match(/FINDZIA_PHOTO_INTAKE_RELEASE=([0-9.]+)/)?.[1];
 sourceReleases.choice=read('findzia-choice.js').toString().match(/FINDZIA_CHOICE_RELEASE=([0-9.]+)/)?.[1];
-sourceReleases.choiceTrial=read('findzia-choice-trial.js').toString().match(/FINDZIA_CHOICE_RELEASE=([0-9.]+)/)?.[1];
-if(sourceReleases.choiceTrial!=='157.0.15')throw Error('Findzia One release mismatch.');
+if(sourceReleases.choice!=='157.0.7')throw Error('Findzia One release mismatch.');
 const uiLocales = packLocales(JSON.parse(read('findzia-locales.json').toString('utf8')));
 if(uiLocales.version!==version || sourceReleases.i18n!==version)throw Error('UI translation release mismatch.');
 sourceReleases.focus=read('findzia-focus.js').toString().match(/FINDZIA_FOCUS_RELEASE=([0-9.]+)/)?.[1];
@@ -55,7 +54,7 @@ function emit(url, file, bytes, type, immutable=false) {
   routes[url] = {file,sha256:hash(bytes),type,immutable}; return url;
 }
 const assets = new Map();
-for (const name of ['findzia-store-scene.js','findzia-store-scene.css','findzia-photo-history.js','findzia-camera.js','findzia-camera-trial.js','findzia-camera.css','findzia-wait.js','findzia-choice.js','findzia-choice.css','findzia-choice-trial.js','findzia-choice-trial.css','findzia-ads.js','findzia-analytics.js','findzia-support.js','findzia-focus.js','findzia-account.js','findzia-subscriptions.js','findzia-billing.js','findzia-filters.js','findzia-i18n.js','findzia-shell.js','findzia-product-details.css','findzia-hero-type.css','findzia-migration.js','findzia-standalone.css','findzia-motion.js','findzia-motion.css']) {
+for (const name of ['findzia-store-scene.js','findzia-store-scene.css','findzia-photo-history.js','findzia-camera.js','findzia-camera.css','findzia-wait.js','findzia-choice.js','findzia-choice.css','findzia-ads.js','findzia-analytics.js','findzia-support.js','findzia-focus.js','findzia-account.js','findzia-subscriptions.js','findzia-billing.js','findzia-filters.js','findzia-i18n.js','findzia-shell.js','findzia-product-details.css','findzia-hero-type.css','findzia-migration.js','findzia-standalone.css','findzia-motion.js','findzia-motion.css']) {
   let bytes=read(name);
   if(name==='findzia-store-scene.js'){const art=JSON.parse(read('findzia-store-art.json'));bytes=Buffer.from(bytes.toString().replace('/* STORE_ART */ null',()=>JSON.stringify(Object.fromEntries(Object.entries(art).map(([key,value])=>[key,value.src])))));}
   if(name==='findzia-support.js')bytes=Buffer.from(bytes.toString().replace('/* SUPPORT_KNOWLEDGE */ null',()=>JSON.stringify(JSON.parse(read('findzia-support.json').toString('utf8')))));

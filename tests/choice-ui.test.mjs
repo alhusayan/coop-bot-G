@@ -29,12 +29,11 @@ function harness(){
   const document=new Node();document.createElement=t=>new Node(t);document.readyState='loading';
   const context={document,window:{},location:{search:''},URL,URLSearchParams,Intl,AbortController,
     CustomEvent:class extends Event{constructor(n,o={}){super(n);this.detail=o.detail;}},
-    Image:class{set src(value){this._src=value;Promise.resolve().then(()=>this.onload?.());}get src(){return this._src;}decode(){return Promise.resolve();}},
     MutationObserver:class{observe(){} disconnect(){}},matchMedia:()=>({matches:reduced}),
     Date:class extends Date{static now(){return clock;}},
     setTimeout(fn,delay){const id=++seq;timers.set(id,{at:clock+delay,fn});return id;},clearTimeout(id){timers.delete(id);}};
-  vm.runInNewContext(readFileSync(new URL('../frontend/source/findzia-choice-trial.js',import.meta.url),'utf8'),context);
-  async function tick(ms=0){const end=clock+ms;for(let i=0;i<1000;i++){await Promise.resolve();await Promise.resolve();const next=[...timers].filter(([,v])=>v.at<=end).sort((a,b)=>a[1].at-b[1].at)[0];if(!next){clock=end;for(let j=0;j<12;j++)await Promise.resolve();return;}clock=next[1].at;timers.delete(next[0]);next[1].fn();}throw Error('timer loop');}
+  vm.runInNewContext(readFileSync(new URL('../frontend/source/findzia-choice.js',import.meta.url),'utf8'),context);
+  async function tick(ms=0){const end=clock+ms;for(let i=0;i<100;i++){await Promise.resolve();await Promise.resolve();const next=[...timers].filter(([,v])=>v.at<=end).sort((a,b)=>a[1].at-b[1].at)[0];if(!next){clock=end;for(let j=0;j<12;j++)await Promise.resolve();return;}clock=next[1].at;timers.delete(next[0]);next[1].fn();}throw Error('timer loop');}
   const root=new Node();root.className='fz-home';root.dataset={lang:'ar',homeState:'results',choicePreview:'true'};document.append(root);
   const body=new Node();body.setAttribute('data-results-body','true');root.append(body);
   const state={generation:1,query:'camera',kind:'text',lang:'ar',country:'KW',busy:false};
@@ -55,9 +54,9 @@ test('streamed source prices are shown exactly, including independent flaps and 
   assert.match(n.getAttribute('aria-label'),/4.990 KWD/);
   assert.deepEqual(seen.filter(Boolean),[4.99]);
   assert.ok(new Set(h.animations.map(a=>a.opts.duration)).size>2);
-  assert.ok(h.animations.every(a=>a.frames.some(f=>f.transform?.includes('rotateX('))));
+  assert.ok(h.animations.every(a=>a.frames.some(f=>f.transform.includes('rotateX('))));
   const first=h.animations.slice();let done=0;
-  reels.land({amount:8.125,currency:'KWD'},()=>done++);await h.tick(1200);
+  reels.land({amount:8.125,currency:'KWD'},()=>done++);await h.tick(500);
   assert.equal(done,1);assert.equal(n.getAttribute('aria-label'),'8.125 KWD');
   assert.ok(first.every(a=>a.cancelled));
   assert.deepEqual(n.querySelectorAll('.fz-one-reel').map(t=>t.dataset.digit),['8','1','2','5']);
@@ -142,20 +141,17 @@ test('seven live log lines retain latest real offers and deduplicate refreshes',
   assert.equal(n.lastElementChild.querySelector('.fz-one-log-price').textContent,'2.000 KWD');log.clear();assert.equal(n.children.length,0);
 });
 
-test('original pixels remain the request while a decoded final image crossfades in',async()=>{
+test('image query stays frozen while incoming product pictures change',async()=>{
   const h=harness();h.state.kind='image';h.state.image_base64='cGhvdG8=';h.state.busy=true;h.setRows([]);
   h.context.window.FindziaBillingFetch=async()=>h.response();h.api.mount(h.root);await h.tick(100);
-  const picture=h.root.querySelectorAll('.fz-one-image').find(n=>n.dataset.active==='true'),original=picture.src;
+  const picture=h.root.querySelector('.fz-one-image'),original=picture.src;
   assert.equal(original,'data:image/jpeg;base64,cGhvdG8=');
   assert.equal(h.root.querySelector('.fz-one-price').dataset.spinning,'true');
   h.setRows([h.row]);h.root.fzOneChoice.update();assert.equal(picture.src,original);
   h.setRows([{...h.row,image:'https://store.example/other.jpg'}]);h.root.fzOneChoice.update();assert.equal(picture.src,original);
   h.setRows([h.row]);h.state.busy=false;h.root.fzOneChoice.update();await h.tick(0);await h.tick(0);
-  const final=h.root.querySelectorAll('.fz-one-image').find(n=>n.dataset.active==='true');
-  assert.equal(final.src,h.row.image);assert.equal(h.state.image_base64,'cGhvdG8=');
-  final.dispatchEvent(new Event('error'));assert.equal(final.hidden,true);
-  assert.equal(h.root.querySelector('.fz-one-image-placeholder').hidden,false);
-  assert.equal(h.root.querySelector('.fz-one-open').hidden,false);h.root.fzOneChoice.destroy();
+  assert.equal(picture.src,h.row.image);picture.dispatchEvent(new Event('error'));
+  assert.equal(picture.src,original);assert.equal(h.root.querySelector('.fz-one-open').hidden,false);h.root.fzOneChoice.destroy();
 });
 
 test('transient 503 retries automatically without showing Could not choose',async()=>{
@@ -184,25 +180,14 @@ test('photo choice cannot display an old backend decision without visual verific
   assert.equal(h.root.querySelector('.fz-one').dataset.state,'empty');h.root.fzOneChoice.destroy();
 });
 
-test('a price-less photo decision cannot become a final offer',async()=>{
-  const h=harness();h.state.kind='image';const unpriced={...h.row,money:null};h.setRows([unpriced]);
-  h.context.window.FindziaBillingFetch=async()=>h.response(unpriced);
-  h.api.mount(h.root);await h.tick(1500);
-  assert.equal(h.root.querySelector('.fz-one').dataset.state,'empty');
-  assert.equal(h.root.querySelector('.fz-one-open').hidden,true);
-  assert.equal(h.root.querySelector('.fz-one').dataset.emptyReason,'priceUnavailable');
-  assert.equal(h.root.querySelectorAll('.fz-one-reel').length,0);
-  h.root.fzOneChoice.destroy();
-});
-
 test('bridge retains authorization for original, audited and recovered displayed pictures',()=>{
   const source=readFileSync(new URL('../frontend/source/findzia-one.liquid',import.meta.url),'utf8');
   const start=source.indexOf('e.fzRefineBridge.choiceRows=function(){');
   const end=source.indexOf('// Stream real priced rows',start);
   const row={url:'https://store.example/item',evaluation_token:'offer-token',title:'Coat',audited_image:'https://img.example/a.jpg',audited_media_path:'/api/media/verified/abc'};
   const photo={winner:row.audited_image,node:{complete:true,naturalWidth:400},mediaAuth:new Map([[row.audited_image,{raw:row.audited_image,token:'offer-token'}]])};
-  const env={e:{fzRefineBridge:{}},W:{kind:'text'},U:[row],q:new Map([[row.url,photo]]),br:r=>r.url,_r:()=>({kind:'exact',value:99,currency:'KWD'}),$t:()=>true,fzEarlyPhotoPreview:()=>false,
-    et:r=>r.url,fzAlternativePending:()=>false,fzMediaKey:x=>x,fzVerifiedPictureURL:r=>r.audited_media_path?'https://api.example'+r.audited_media_path:'',fzMediaVerdicts:new Map()};
+  const env={e:{fzRefineBridge:{}},U:[row],q:new Map([[row.url,photo]]),br:r=>r.url,_r:()=>({kind:'exact',value:99,currency:'KWD'}),$t:()=>true,fzEarlyPhotoPreview:()=>false,
+    fzMediaKey:x=>x,fzVerifiedPictureURL:r=>r.audited_media_path?'https://api.example'+r.audited_media_path:'',fzMediaVerdicts:new Map()};
   vm.runInNewContext(source.slice(start,end),env);
   const read=()=>env.e.fzRefineBridge.choiceRows()[0];
   assert.equal(read().vision_image,row.audited_image);
@@ -213,12 +198,6 @@ test('bridge retains authorization for original, audited and recovered displayed
   photo.winner='https://api.example/api/media/verified/recovered';
   assert.equal(read().vision_image,raw);assert.equal(read().media_token,'recovery-token');
   photo.winner='https://unrelated.example/forged.jpg';assert.equal(read().vision_image,'');
-  // The exact same signed, decoded product must reach photo comparison when
-  // price extraction failed. Text models also survive for server price recovery.
-  photo.winner=row.audited_image;env._r=()=>null;env.$t=()=>false;
-  assert.equal(read().money,null);
-  env.W.kind='image';env.et=r=>r.url;env.fzAlternativePending=()=>false;
-  assert.equal(read().vision_image,row.audited_image);assert.equal(read().money,null);
 });
 
 test('persistent failure has a bounded retry and a recoverable results picker',async()=>{
@@ -333,9 +312,9 @@ test('removed or corrected quotes cannot reappear from the live-price queue',asy
   const h=harness(),n=new h.Node(),seen=[],reels=new h.api.PriceReels(n,row=>{if(row)seen.push(row.money.amount);});
   const a={...h.row,money:{amount:3,currency:'KWD'}},b={...h.row,url:'https://store.example/b',money:{amount:9,currency:'KWD'}};
   reels.spin([a,b]);await h.tick(280);
-  const corrected={...b,money:{amount:10,currency:'KWD'}};reels.spin([corrected]);await h.tick(1200);
+  const corrected={...b,money:{amount:10,currency:'KWD'}};reels.spin([corrected]);await h.tick(500);
   assert.equal(reels.activeOffer.money.amount,10);assert.ok(!seen.includes(9));
-  reels.land({amount:1200,currency:'JPY'});await h.tick(1200);
+  reels.land({amount:1200,currency:'JPY'});await h.tick(600);
   assert.equal(n.getAttribute('aria-label'),'1,200 JPY');
   assert.equal(n.querySelectorAll('.fz-one-fils').length,0);
   assert.deepEqual(n.querySelectorAll('.fz-one-reel').map(c=>c.dataset.digit),['1','2','0','0']);
@@ -346,10 +325,10 @@ test('removed or corrected quotes cannot reappear from the live-price queue',asy
 test('an early no-match waits for the full pool instead of flashing a failure',async()=>{
   const h=harness();h.state.busy=true;let calls=0;
   h.context.window.FindziaBillingFetch=async()=>{calls++;return {ok:true,json:async()=>({ok:true,status:'no_match'})};};
-  h.api.mount(h.root);await h.tick(1200);assert.equal(calls,1);
+  h.api.mount(h.root);await h.tick(500);assert.equal(calls,1);
   assert.equal(h.root.querySelector('.fz-one').dataset.state,'pending');
   h.state.busy=false;h.context.window.FindziaBillingFetch=async()=>{calls++;return h.response();};
-  h.root.fzOneChoice.update();await h.tick(1200);
+  h.root.fzOneChoice.update();await h.tick(500);
   assert.equal(calls,2);assert.equal(h.root.querySelector('.fz-one').dataset.state,'selected');
   h.root.fzOneChoice.destroy();
 });
@@ -366,26 +345,25 @@ test('no-match retry starts fresh retrieval instead of repeating the same choice
   assert.equal(searches,1);assert.equal(choices,1);h.root.fzOneChoice.destroy();
 });
 
-test('early photo selection refreshes comparison for later offers without restarting retrieval',async()=>{
+test('photo decision waits for retrieval and pending pictures, then stays on one offer',async()=>{
   const h=harness();h.state.kind='image';h.state.busy=true;let calls=0;
   h.context.window.FindziaBillingFetch=async()=>{calls++;return h.response();};
   h.api.mount(h.root);await h.tick(800);assert.equal(calls,0);
-  h.state.media_pending=true;h.root.fzOneChoice.update();await h.tick(1600);assert.equal(calls,1);
-  assert.equal(h.root.querySelector('.fz-one').dataset.state,'selected');
-  h.state.busy=false;h.state.media_pending=false;h.root.fzOneChoice.update();await h.tick(800);assert.equal(calls,1);
+  h.state.busy=false;h.state.media_pending=true;h.root.fzOneChoice.update();await h.tick(800);assert.equal(calls,0);
+  h.state.media_pending=false;h.root.fzOneChoice.update();await h.tick(800);assert.equal(calls,1);
   const extra={...h.row,token:'later',url:'https://store.example/later',money:{amount:8,currency:'KWD'}};
   h.setRows([h.row,extra]);h.root.fzOneChoice.update();await h.tick(800);
-  assert.equal(calls,2);assert.equal(h.root.querySelector('.fz-one-open').href,h.row.url);
+  assert.equal(calls,1);assert.equal(h.root.querySelector('.fz-one-open').href,h.row.url);
   h.setRows([{...h.row,image:'https://api.example/api/media/verified/new',match_type:'similar'},extra]);
-  h.root.fzOneChoice.update();await h.tick(800);assert.equal(calls,2);
+  h.root.fzOneChoice.update();await h.tick(800);assert.equal(calls,1);
   assert.equal(h.root.querySelector('.fz-one').dataset.state,'selected');h.root.fzOneChoice.destroy();
 });
 
-test('photo selection rejects a withdrawn candidate while new offers arrive',async()=>{
+test('photo selection does not reveal a decision based on an outdated pool',async()=>{
   const h=harness();h.state.kind='image';let finish,calls=0;
   h.context.window.FindziaBillingFetch=()=>{calls++;return new Promise(r=>finish=r);};
   h.api.mount(h.root);await h.tick(100);
-  const extra={...h.row,token:'later',url:'https://store.example/later'};h.setRows([extra]);
+  const extra={...h.row,token:'later',url:'https://store.example/later'};h.setRows([h.row,extra]);
   h.context.window.FindziaBillingFetch=async()=>{calls++;return h.response(extra);};
   finish(h.response());await h.tick(0);
   assert.equal(h.root.querySelector('.fz-one-open').hidden,true);
@@ -396,7 +374,7 @@ test('photo selection rejects a withdrawn candidate while new offers arrive',asy
 test('late photo offers can recover no-match without repeated AI calls for the same pool',async()=>{
   const h=harness();h.state.kind='image';h.state.media_pending=true;let calls=0;
   h.context.window.FindziaBillingFetch=async()=>{calls++;return{ok:true,json:async()=>({ok:true,status:'no_match'})};};
-  h.api.mount(h.root);for(let i=0;i<3;i++)await h.tick(1000);
+  h.api.mount(h.root);for(let i=0;i<9;i++)await h.tick(1000);
   assert.equal(calls,1);assert.equal(h.root.querySelector('.fz-one').dataset.state,'pending');
   const extra={...h.row,token:'late-picture',url:'https://store.example/late-picture'};
   h.setRows([h.row,extra]);h.state.media_pending=false;
@@ -414,171 +392,4 @@ test('finished photo no-match terminates and a withdrawn selected offer is not k
   const chosen=harness();chosen.state.kind='image';chosen.context.window.FindziaBillingFetch=async()=>chosen.response();
   chosen.api.mount(chosen.root);await chosen.tick(800);chosen.setRows([]);chosen.root.fzOneChoice.update();
   assert.equal(chosen.root.querySelector('.fz-one-open').hidden,true);chosen.root.fzOneChoice.destroy();
-});
-
-test('a helpful question keeps its context, submits once and offers a no-preference escape',async()=>{
-  for(const skip of [false,true]){
-    const h=harness(),calls=[];
-    h.context.window.FindziaBillingFetch=async(_,url,opts)=>{
-      calls.push(JSON.parse(opts.body));
-      return calls.length===1?{ok:true,json:async()=>({ok:true,status:'question',question:'شلون بتستخدمه؟',choices:['للرحلات','للعمل'],options:[{label:'للرحلات',detail:'تصميم قابل للحمل'}]})}:h.response();
-    };
-    h.api.mount(h.root);await h.tick(100);
-    assert.equal(h.root.querySelector('.fz-one').dataset.state,'question');
-    assert.equal(h.root.querySelector('.fz-one-answer-detail').textContent,'تصميم قابل للحمل');
-    const button=h.root.querySelector(skip?'.fz-one-question-skip':'.fz-one-answer');
-    button.dispatchEvent(new Event('click'));button.dispatchEvent(new Event('click'));
-    await h.tick(300);
-    assert.equal(calls.length,2);assert.equal(calls[1].skip_question,skip);
-    assert.equal(calls[1].answers[0],skip?'شلون بتستخدمه؟ — اختَر لي':'شلون بتستخدمه؟ — للرحلات');
-    assert.deepEqual(calls[1].offer_tokens,['signed-1']);h.root.fzOneChoice.destroy();
-  }
-});
-
-test('a question answer cannot leak into a newer search',async()=>{
-  const h=harness(),calls=[];
-  h.context.window.FindziaBillingFetch=async(_,url,opts)=>{
-    calls.push(JSON.parse(opts.body));return calls.length===1?{ok:true,json:async()=>({ok:true,status:'question',question:'Use?',choices:['A','B']})}:h.response();
-  };
-  h.api.mount(h.root);await h.tick(100);h.root.querySelector('.fz-one-answer').dispatchEvent(new Event('click'));
-  h.state.generation++;h.root.fzOneChoice.update();await h.tick(300);
-  assert.equal(calls.length,2);assert.deepEqual(calls[1].answers,[]);h.root.fzOneChoice.destroy();
-});
-
-test('search photos are paced, capped at four and stop at the final result',async()=>{
-  const h=harness(),a=new h.Node('img'),b=new h.Node('img'),placeholder=new h.Node();
-  const sequence=new h.api.PhotoSequence(a,b,placeholder);
-  const rows=Array.from({length:9},(_,i)=>({...h.row,image:'https://store.example/'+i+'.jpg'}));
-  sequence.preview(rows,'data:image/jpeg;base64,reference','Reference');await h.tick(0);
-  assert.equal(sequence.source,'data:image/jpeg;base64,reference');
-  for(let i=0;i<25;i++){sequence.preview(rows,'data:image/jpeg;base64,reference');await h.tick(200);}
-  assert.equal(sequence.count,1,'progress events cannot starve the next photo');
-  await h.tick(14000);assert.equal(sequence.count,4);
-  const sampled=sequence.source;await h.tick(10000);assert.equal(sequence.source,sampled);
-  sequence.settle('https://store.example/final.jpg','Final');await h.tick(0);await h.tick(1000);
-  assert.equal(sequence.source,'https://store.example/final.jpg');assert.equal(sequence.paused,true);
-  assert.equal([a,b].filter(n=>!n.hidden).length,1);sequence.reset();assert.equal(h.timers.size,0);
-});
-
-test('late image loads cannot replace a final image and failed images never flash',async()=>{
-  const h=harness(),loaders=[];h.context.Image=class{constructor(){loaders.push(this);}set src(v){this.url=v;}decode(){return Promise.resolve();}};
-  const a=new h.Node('img'),b=new h.Node('img'),placeholder=new h.Node(),sequence=new h.api.PhotoSequence(a,b,placeholder);
-  sequence.preview([h.row],'','');const stale=loaders[0].onload;
-  sequence.settle('https://store.example/final.jpg','Final');await stale();await h.tick(0);
-  assert.equal(sequence.source,'');loaders[1].onload();await h.tick(0);
-  assert.equal(sequence.source,'https://store.example/final.jpg');
-  sequence.settle('https://store.example/broken.jpg','Unavailable');loaders[2].onerror();await h.tick(0);
-  assert.equal(placeholder.hidden,false);assert.equal(a.hidden,true);assert.equal(b.hidden,true);
-  sequence.reset();assert.equal(h.timers.size,0);
-});
-
-test('reduced motion keeps the preview still but still reveals the final picture',async()=>{
-  const h=harness();h.setReduced(true);const sequence=new h.api.PhotoSequence(new h.Node('img'),new h.Node('img'),new h.Node());
-  sequence.preview([h.row],'data:image/jpeg;base64,reference');await h.tick(0);await h.tick(20000);
-  assert.equal(sequence.count,0);sequence.settle(h.row.image,h.row.title);await h.tick(0);
-  assert.equal(sequence.source,h.row.image);assert.equal(h.animations.length,0);sequence.reset();
-});
-
-
-test('a confirmed photo is not starved by unrelated pool changes during its decision',async()=>{
-  const h=harness();h.state.kind='image';let finish,calls=0;
-  h.context.window.FindziaBillingFetch=()=>{calls++;return new Promise(r=>finish=r);};
-  h.api.mount(h.root);await h.tick(100);
-  h.setRows([h.row,{...h.row,token:'late',url:'https://store.example/late'}]);
-  finish(h.response());await h.tick(1200);
-  assert.equal(calls,2);assert.equal(h.root.querySelector('.fz-one').dataset.state,'selected');
-  assert.equal(h.root.querySelector('.fz-one-open').href,h.row.url);h.root.fzOneChoice.destroy();
-});
-
-test('incomplete photo review stops visibly and does not automatically retry the same pool',async()=>{
-  const h=harness();h.state.kind='image';h.state.image_base64='original';let calls=0;
-  h.context.window.FindziaBillingFetch=async()=>{calls++;return{ok:true,json:async()=>({ok:true,status:'unavailable',reason:'visual_incomplete'})};};
-  h.api.mount(h.root);await h.tick(1200);
-  assert.equal(h.root.querySelector('.fz-one').dataset.state,'empty');
-  assert.equal(h.root.querySelector('.fz-one').dataset.emptyReason,'unavailable');
-  for(let i=0;i<10;i++){h.root.fzOneChoice.update();await h.tick(1000);}
-  assert.equal(calls,1);assert.equal(h.root.querySelector('.fz-one-price').children.length,0);
-  assert.ok(h.root.querySelectorAll('.fz-one-image').some(n=>n.dataset.active==='true'&&n.src.includes('original')));
-  h.root.fzOneChoice.destroy();
-});
-
-
-test('global/local toggle reuses two priced decisions with zero new requests',async()=>{
-  const h=harness();h.state.kind='image';let requests=0;
-  const global={...h.row,token:'signed-global',url:'https://global.example/item',country:'us',market_scope:'global',money:{amount:9,currency:'USD'}};
-  h.setRows([h.row,global]);
-  const decision=r=>({ok:true,status:'selected',visual_verified:true,token:r.token,url:r.url,money:r.money,store:r.store});
-  h.context.window.FindziaBillingFetch=async()=>{requests++;return {ok:true,json:async()=>({...decision(h.row),markets:{local:decision(h.row),global:decision(global)}})};};
-  h.api.mount(h.root);await h.tick(1500);
-  assert.equal(h.root.querySelector('.fz-one-open').href,h.row.url);
-  const toggle=h.root.querySelector('.fz-one-market');assert.equal(toggle.textContent,'السوق العالمي');
-  toggle.dispatchEvent(new Event('click'));await h.tick(1500);
-  assert.equal(h.root.querySelector('.fz-one-open').href,global.url);
-  assert.equal(h.root.querySelector('.fz-one-price').getAttribute('aria-label'),'9.00 USD');
-  assert.equal(toggle.textContent,'السوق المحلي');assert.equal(requests,1);
-  toggle.dispatchEvent(new Event('click'));await h.tick(1500);
-  assert.equal(h.root.querySelector('.fz-one-open').href,h.row.url);assert.equal(requests,1);
-  h.root.fzOneChoice.destroy();
-});
-
-test('recovered price is shown while the original signed candidate had no price',async()=>{
-  const h=harness();h.state.kind='image';h.setRows([{...h.row,money:null}]);
-  h.context.window.FindziaBillingFetch=async()=>h.response();h.api.mount(h.root);await h.tick(100);await h.tick(1500);
-  assert.equal(h.root.querySelector('.fz-one').dataset.state,'selected');
-  assert.equal(h.root.querySelector('.fz-one-price').getAttribute('aria-label'),'12.345 KWD');
-  h.root.fzOneChoice.destroy();
-});
-
-test('spec ordering and refreshed signatures do not restart the same photo decision',async()=>{
-  const h=harness();h.state.kind='image';let calls=0;
-  const specs=[{key:'color',value:'black'},{key:'model',value:'A1'}];
-  h.setRows([{...h.row,key_specs:specs}]);
-  h.context.window.FindziaBillingFetch=async()=>{calls++;return h.response();};
-  h.api.mount(h.root);await h.tick(800);
-  h.setRows([{...h.row,token:'renewed',key_specs:[...specs].reverse()}]);
-  h.root.fzOneChoice.update();await h.tick(800);
-  assert.equal(calls,1);assert.equal(h.root.querySelector('.fz-one').dataset.state,'selected');h.root.fzOneChoice.destroy();
-});
-
-test('continuously changing photo candidates cannot cause an unbounded decision loop',async()=>{
-  const h=harness();h.state.kind='image';let calls=0,active=h.row;
-  h.context.window.FindziaBillingFetch=async()=>{
-    calls++;const submitted=active;
-    active={...h.row,token:'signed-'+calls,url:'https://store.example/new-'+calls};
-    h.setRows([active]);return h.response(submitted);
-  };
-  h.api.mount(h.root);await h.tick(3000);
-  assert.equal(calls,2);assert.equal(h.root.querySelector('.fz-one').dataset.state,'empty');
-  assert.equal(h.root.querySelector('.fz-one-open').hidden,true);h.root.fzOneChoice.destroy();
-});
-
-test('price retry waits for failed-price cache to expire and does not launch a new search',async()=>{
-  const h=harness();let calls=0,searches=0;
-  h.root.fzRefineBridge.retryChoiceSearch=()=>{searches++;return true;};
-  h.context.window.FindziaBillingFetch=async()=>{calls++;return{ok:true,json:async()=>({ok:true,status:'price_unavailable',retry_after:5})};};
-  h.api.mount(h.root);await h.tick(100);
-  const retry=h.root.querySelectorAll('.fz-one-open').find(n=>!n.hidden);
-  assert.equal(retry.disabled,true);
-  retry.dispatchEvent(new Event('click'));await h.tick(2000);
-  h.root.fzOneChoice.update();await h.tick(100);
-  assert.equal(calls,1);assert.equal(searches,0);
-  await h.tick(3100);assert.equal(retry.disabled,false);
-  h.context.window.FindziaBillingFetch=async()=>{calls++;return h.response();};
-  retry.dispatchEvent(new Event('click'));await h.tick(1500);
-  assert.equal(calls,2);assert.equal(searches,0);assert.equal(h.root.querySelector('.fz-one').dataset.state,'selected');h.root.fzOneChoice.destroy();
-});
-
-test('answering a late photo question gets a fresh decision budget',async()=>{
-  const h=harness();h.state.kind='image';let calls=0;
-  const extra={...h.row,token:'late',url:'https://store.example/late'};
-  h.context.window.FindziaBillingFetch=async()=>{
-    calls++;
-    if(calls===1){h.setRows([h.row,extra]);return{ok:true,json:async()=>({ok:true,status:'no_match'})};}
-    if(calls===2)return{ok:true,json:async()=>({ok:true,status:'question',question:'لأي استخدام؟',choices:['للبيت','للعمل']})};
-    return h.response(extra);
-  };
-  h.api.mount(h.root);await h.tick(800);
-  assert.equal(calls,2);assert.equal(h.root.querySelector('.fz-one').dataset.state,'question');
-  h.root.querySelector('.fz-one-answer').dispatchEvent(new Event('click'));await h.tick(1800);
-  assert.equal(calls,3);assert.equal(h.root.querySelector('.fz-one').dataset.state,'selected');h.root.fzOneChoice.destroy();
 });
