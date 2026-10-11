@@ -17,7 +17,9 @@
   const keys=['choosing','found','badge','shippingUnknown','shippingKnown','open','why','retry','unavailable','noMatch','cheaper','quality','clarify','newSearch','saving','details'];
   function el(tag,cls,text){const n=document.createElement(tag);if(cls)n.className=cls;if(text!==undefined)n.textContent=text;return n;}
   function safeURL(value){try{const u=new URL(value);return /^https?:$/.test(u.protocol)&&!u.username&&!u.password?u.href:'';}catch(_){return '';}}
-  function rowVersion(row){return JSON.stringify([row.url,row.title,row.image,row.vision_image,row.money?.amount,row.money?.currency,row.key_specs,row.match_type]);}
+  // A refreshed image proxy or match label is not a different offer. Keep the
+  // signed source, identity, specifications and price in the decision key.
+  function rowVersion(row){return JSON.stringify([row.url,row.title,row.vision_image||row.image,row.money?.amount,row.money?.currency,row.key_specs]);}
   function parts(money){
     const amount=Number(money?.amount),currency=String(money?.currency||'');
     if(!Number.isFinite(amount)||amount<=0||!/^[A-Z]{3}$/.test(currency))return null;
@@ -201,7 +203,7 @@
     box.append(stage,actions,live);
     const log=new SearchLog(logLines),reels=new PriceReels(price,row=>{priceSource.hidden=!row;priceSource.textContent=row?((row.store||new URL(row.url).hostname)+' · '+formatMoney(row.money)):'';log.highlight(row?.url||'');});
     let generation=-1,requestId=0,controller=null,requestTimer=0,debounce=0,mediaTimer=0,retryTimer=0,earlyTimer=0,doneAt=0,eligibleAt=null,earlyCalls=0,finalRefreshes=0;
-    let selected=null,mode='best',answers=[],lastKey='',pending=false,disposed=false,celebrated=false,frozenSource='',autoRetries=0,dialogMode='results',awaitingQuestion=false,usageAnnounced=false;
+    let selected=null,mode='best',answers=[],lastKey='',deferredNoMatchKey='',pending=false,disposed=false,celebrated=false,frozenSource='',autoRetries=0,dialogMode='results',awaitingQuestion=false,usageAnnounced=false;
     const header=root.querySelector('[data-fixed-header]');
     function fit(){
       const viewport=window.visualViewport;if(viewport?.scale>1.2)return;
@@ -218,10 +220,10 @@
     }
 
     function labels(){open.textContent=text('open');retry.textContent=text('retry');cheaper.textContent=text('cheaper');quality.textContent=text('quality');newSearch.textContent=text('newSearch');close.setAttribute('aria-label',text('close'));whyButton.setAttribute('aria-label',text('why'));whyButton.title=text('why');logCaption.textContent=text('log');}
-    function cancel(){requestId++;controller?.abort();controller=null;clearTimeout(requestTimer);clearTimeout(retryTimer);clearTimeout(earlyTimer);earlyTimer=0;pending=false;}
+    function cancel(){requestId++;controller?.abort();controller=null;clearTimeout(requestTimer);clearTimeout(retryTimer);clearTimeout(earlyTimer);clearTimeout(mediaTimer);earlyTimer=0;pending=false;}
     function closeDialog(){dialog.close?.();logButton.setAttribute('aria-expanded','false');}
     function reset(){
-      cancel();clearTimeout(debounce);debounce=0;clearTimeout(mediaTimer);reels.clear();log.clear();selected=null;mode='best';answers=[];lastKey='';celebrated=false;doneAt=0;autoRetries=0;frozenSource='';eligibleAt=null;earlyCalls=0;finalRefreshes=0;awaitingQuestion=false;usageAnnounced=false;
+      cancel();clearTimeout(debounce);debounce=0;clearTimeout(mediaTimer);reels.clear();log.clear();selected=null;mode='best';answers=[];lastKey='';deferredNoMatchKey='';celebrated=false;doneAt=0;autoRetries=0;frozenSource='';eligibleAt=null;earlyCalls=0;finalRefreshes=0;awaitingQuestion=false;usageAnnounced=false;
       box.hidden=true;box.dataset.state='pending';root.dataset.choiceActive='false';question.replaceChildren();image.hidden=true;image.removeAttribute('src');placeholder.hidden=false;closeDialog();
     }
     function activate(){labels();price.hidden=false;priceSource.hidden=true;box.hidden=false;root.dataset.choiceActive='true';badge.hidden=true;actions.hidden=true;open.hidden=true;retry.hidden=true;merchant.hidden=true;whyButton.hidden=true;question.replaceChildren();logWrap.hidden=false;fit();}
@@ -285,7 +287,7 @@
     function choiceKey(rows,c){return JSON.stringify([c.generation,c.query,c.kind,c.country,c.lang,c.extra_specs||'',mode,answers,rows.slice(0,48).map(rowVersion).sort()]);}
     function selectionCaption(c){
       if(!selected)return;
-      const provisional=!!(c.busy||c.media_pending||pending);box.dataset.provisional=String(provisional);
+      const provisional=c.kind!=='image'&&!!(c.busy||c.media_pending||pending);box.dataset.provisional=String(provisional);
       badge.textContent=selected.manual?text('yourChoice'):provisional?(PROVISIONAL[(root.dataset.lang||'en').split('-')[0]]||PROVISIONAL.en):selected.value.match==='suitable'&&c.kind==='image'?(root.dataset.lang==='ar'?'أقرب لطلبك':'Closest match'):text('badge');
     }
     async function choose(rows,c){
@@ -310,7 +312,7 @@
         if(disposed||id!==requestId||bridge.context().generation!==c.generation)return;
         autoRetries=0;
         const now=bridge.context(),currentRows=candidates();
-        if(value.status!=='selected'&&(now.busy||choiceKey(currentRows,now)!==key)){
+        if((value.status!=='selected'||c.kind==='image')&&(now.busy||choiceKey(currentRows,now)!==key)){
           // Partial evidence must not flash an error or a premature question.
           lastKey='';followUp=!now.busy;return;
         }
@@ -319,7 +321,14 @@
           awaitingQuestion=true;reels.clear();priceSource.hidden=true;box.dataset.state='question';price.hidden=true;heading.textContent=text('clarify');title.textContent=value.question;logWrap.hidden=true;
           for(const label of (value.choices||[]).slice(0,3)){const b=el('button','fz-one-answer',label);b.type='button';b.addEventListener('click',()=>{if(pending)return;awaitingQuestion=false;answers=[String(label).slice(0,160)];lastKey='';selected=null;earlyCalls=0;queue();});question.append(b);}return;
         }
-        if(value.status!=='selected'){if(!selected)empty('noMatch');return;}
+        if(value.status!=='selected'){
+          // Images may finish after the bounded first decision. Do not declare
+          // no match until those offers have had their chance to be reviewed.
+          if(c.kind==='image'&&now.media_pending&&Date.now()-doneAt<18000){
+            deferredNoMatchKey=key;clearTimeout(mediaTimer);mediaTimer=setTimeout(update,250);return;
+          }
+          if(!selected)empty('noMatch');return;
+        }
         if(c.kind==='image'&&value.visual_verified!==true){const error=new Error('visual_review_required');error.retryable=false;throw error;}
         const current=currentRows.find(r=>r.url===value.url&&rowVersion(r)===rowVersion(rows.find(o=>o.token===value.token)||{}));
         if(!current){lastKey='';followUp=true;return;}
@@ -346,7 +355,9 @@
         const row=rows.find(r=>rowVersion(r)===selected.version);
         if(row){
           selected.token=row.token;selectionCaption(c);
-          if(selected.manual||pending||c.busy||retryTimer)return;
+          // One photo search reveals one settled decision. New arrivals stay
+          // in the offers list; removal or a real correction still invalidates it.
+          if(selected.manual||c.kind==='image'||pending||c.busy||retryTimer)return;
           // Refine once at stream completion, then once after outstanding media.
           // Keep the usable result visible during this background decision.
           if(choiceKey(rows,c)!==lastKey&&(!c.media_pending||finalRefreshes<1)){
@@ -360,6 +371,18 @@
       if(!c.busy&&!pending&&box.dataset.state==='empty'&&lastKey===choiceKey(rows,c))return;
       if(c.busy||rows.length||pending)pendingView(rows,c);
       if(pending||retryTimer)return;
+      if(c.kind==='image'){
+        if(c.busy)return;
+        if(!doneAt)doneAt=Date.now();
+        if(c.media_pending&&Date.now()-doneAt<6000){
+          pendingView(rows,c);clearTimeout(mediaTimer);mediaTimer=setTimeout(update,200);return;
+        }
+        if(deferredNoMatchKey===choiceKey(rows,c)){
+          if(c.media_pending&&Date.now()-doneAt<18000){clearTimeout(mediaTimer);mediaTimer=setTimeout(update,250);return;}
+          empty('noMatch');return;
+        }
+        deferredNoMatchKey='';
+      }
       if(rows.length){
         if(eligibleAt===null)eligibleAt=Date.now();
         // A fixed short collection window cannot be postponed by progress events.

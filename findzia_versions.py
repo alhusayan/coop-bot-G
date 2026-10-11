@@ -10,6 +10,12 @@ import importlib
 import main as original
 
 original.CACHE_DB_PATH += '.original-a332321'
+# main initializes these at import time, before the version-specific path above.
+# Initialize the same schemas on the isolated file before accepting any request.
+original._cache_db_init()
+original._serpapi_cache_db_init()
+original._web_ai_classifier_db_init()
+original._ai_db_init()
 
 
 class VersionRouter:
