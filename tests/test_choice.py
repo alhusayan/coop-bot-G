@@ -292,6 +292,36 @@ class ChoiceTests(unittest.TestCase):
             r=row();r.update(update)
             self.assertEqual(self.pick([r])['status'],'no_match')
 
+    def test_matching_photo_survives_unavailable_or_non_unit_price(self):
+        for change in ({'price_unavailable':True}, {'price_kind':'range'}, {'price_estimated':True},
+                       {'price_integrity_status':'pending'}, {'price_unit':'monthly'}):
+            with self.subTest(change=change):
+                r=row();r.update(change)
+                result=self.pick([r],kind='image')
+                self.assertEqual(result['status'],'selected')
+                self.assertIsNone(result['money'])
+                self.assertIsNone(result['savings'])
+                self.assertEqual(result['price_status'],'check_store')
+                self.assertTrue(result['visual_verified'])
+
+    def test_unpriced_photo_match_beats_priced_different_product(self):
+        def review(system,data,**kw):
+            return dict(status='reviewed',items=[dict(id=c['id'],verdict='match' if c['id']=='p1' else 'different',
+                observation='Same chair frame and lumbar detail' if c['id']=='p1' else 'Different wheeled chair') for c in data['candidates']])
+        self.s['_refine_ai'].side_effect=review
+        matched=row('photographed-chair');matched['price_unavailable']=True
+        result=self.pick([matched,row('wrong-chair',5)],kind='image')
+        self.assertEqual(result['url'],matched['url'])
+        self.assertIsNone(result['money'])
+
+    def test_unpriced_photo_does_not_bypass_visual_or_stock_checks(self):
+        self.s['_refine_ai'].side_effect=lambda system,data,**kw:dict(status='reviewed',items=[
+            dict(id=c['id'],verdict='different',observation='Different construction') for c in data['candidates']])
+        missing=row();missing['price_unavailable']=True
+        self.assertEqual(self.pick([missing],kind='image')['status'],'no_match')
+        missing['in_stock']=False
+        self.assertEqual(self.engine.prepare(self.payload([missing],kind='image'))[1],[])
+
     def test_ai_can_choose_a_suitable_model_over_cheapest(self):
         self.s['_refine_ai'].return_value.update(id='p2')
         result=self.pick([row('A1',10),row('B2',30)])

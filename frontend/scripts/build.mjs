@@ -35,7 +35,7 @@ sourceReleases.wait=read('findzia-wait.js').toString().match(/FINDZIA_WAIT_RELEA
 sourceReleases.photoIntake=read('findzia-home.liquid').toString().match(/FINDZIA_PHOTO_INTAKE_RELEASE=([0-9.]+)/)?.[1];
 sourceReleases.choice=read('findzia-choice.js').toString().match(/FINDZIA_CHOICE_RELEASE=([0-9.]+)/)?.[1];
 sourceReleases.choiceTrial=read('findzia-choice-trial.js').toString().match(/FINDZIA_CHOICE_RELEASE=([0-9.]+)/)?.[1];
-if(sourceReleases.choiceTrial!=='157.0.10')throw Error('Findzia One release mismatch.');
+if(sourceReleases.choiceTrial!=='157.0.12')throw Error('Findzia One release mismatch.');
 const uiLocales = packLocales(JSON.parse(read('findzia-locales.json').toString('utf8')));
 if(uiLocales.version!==version || sourceReleases.i18n!==version)throw Error('UI translation release mismatch.');
 sourceReleases.focus=read('findzia-focus.js').toString().match(/FINDZIA_FOCUS_RELEASE=([0-9.]+)/)?.[1];

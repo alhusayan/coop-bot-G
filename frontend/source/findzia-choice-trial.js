@@ -1,4 +1,4 @@
-/* FINDZIA_CHOICE_RELEASE=157.0.10 — verified early photo choice and finite recovery. */
+/* FINDZIA_CHOICE_RELEASE=157.0.12 — photo identity is independent of price availability. */
 (() => {
   'use strict';
   const COPY = {
@@ -53,6 +53,7 @@
   };
   const reduced=()=>matchMedia('(prefers-reduced-motion: reduce)').matches;
   const formatMoney=m=>{const p=parts(m);return p?p.major+(p.minor?'.'+p.minor:'')+' '+p.currency:'';};
+  const STORE_PRICE={en:'Check price at store',ar:'شوف السعر في المتجر',fr:'Prix en boutique',de:'Preis im Shop prüfen',es:'Consultar precio en tienda',pt:'Ver preço na loja',tr:'Mağazada fiyatı gör',ru:'Цена у продавца',zh:'到商店查看价格',hi:'स्टोर पर कीमत देखें',ur:'اسٹور پر قیمت دیکھیں'};
   const currencyFor=c=>/^[A-Z]{3}$/.test(c.currency||'')?c.currency:({kw:'KWD',sa:'SAR',ae:'AED',qa:'QAR',bh:'BHD',om:'OMR',gb:'GBP',uk:'GBP',cn:'CNY',jp:'JPY',in:'INR',de:'EUR',fr:'EUR',es:'EUR',it:'EUR',pt:'EUR',us:'USD',ca:'CAD',au:'AUD'}[String(c.country||'').toLowerCase()]||'USD');
 
   // Each digit is a split flap with its own clock and hinge, not a scrolling texture.
@@ -333,7 +334,7 @@
       retry.hidden=false;actions.hidden=false;cheaper.hidden=true;quality.hidden=true;whyButton.hidden=true;logWrap.hidden=true;live.textContent=heading.textContent;
     }
     function celebrate(){
-      if(celebrated||disposed)return;celebrated=true;box.dataset.state='selected';heading.textContent=text('found');live.textContent=text('found')+' '+title.textContent+' '+price.getAttribute('aria-label');fit();
+      if(celebrated||disposed)return;celebrated=true;box.dataset.state='selected';heading.textContent=text('found');live.textContent=text('found')+' '+title.textContent+' '+(price.getAttribute('aria-label')||'');fit();
       if(reduced())return;
       for(let i=0;i<14;i++){const s=el('i','fz-one-spark');s.setAttribute('aria-hidden','true');const a=i*Math.PI*2/14,r=60+i%4*16;s.style.setProperty('--spark-x',Math.cos(a)*r+'px');s.style.setProperty('--spark-y',Math.sin(a)*r+25+'px');s.style.setProperty('--spark-r',i*37+'deg');stage.append(s);setTimeout(()=>s.remove(),1300);}
     }
@@ -343,22 +344,23 @@
       photos.settle(row.image,row.title);title.textContent=row.title;title.title=row.title;
       specs.textContent=(row.key_specs||[]).slice(0,2).map(s=>s.value).filter(s=>s&&!row.title.toLowerCase().includes(String(s).toLowerCase())).join(' · ');
       store.textContent=value.store||row.store||new URL(link).hostname.replace(/^www\./,'');store.title=store.textContent;
-      shipping.textContent=value.money.shipping_known?(value.money.shipping===0?text('shippingKnown'):text('shippingKnown')+' · '+formatMoney({amount:value.money.shipping,currency:value.money.currency})):text('shippingUnknown');
+      shipping.textContent=value.money?.shipping_known?(value.money.shipping===0?text('shippingKnown'):text('shippingKnown')+' · '+formatMoney({amount:value.money.shipping,currency:value.money.currency})):text('shippingUnknown');
       merchant.hidden=false;open.href=link;open.hidden=false;badge.hidden=false;badge.textContent=manual?text('yourChoice'):value.match==='suitable'&&bridge.context().kind==='image'?(root.dataset.lang==='ar'?'أقرب لطلبك':'Closest match'):text('badge');
       actions.hidden=false;cheaper.hidden=false;quality.hidden=false;cheaper.disabled=false;quality.disabled=false;whyButton.hidden=!value.reason;
       reason.textContent=value.reason||'';logWrap.hidden=true;syncLog(candidates());
       if(!usageAnnounced){usageAnnounced=true;root.dispatchEvent(new CustomEvent('fz:usage',{bubbles:true,detail:{type:'visible',generation,count:1,source:manual?'offer-choice':'ai-choice'}}));}
-      reels.land(value.money,celebrate);
+      if(parts(value.money)){reels.land(value.money,celebrate);}
+      else{reels.clear();const label=STORE_PRICE[(root.dataset.lang||'en').split('-')[0]]||STORE_PRICE.en;price.append(el('span','fz-one-store-price',label));price.setAttribute('aria-label',label);celebrate();}
       fit();
     }
-    function candidates(){return bridge.choiceRows().filter(r=>r.token&&safeURL(r.url)&&safeURL(r.image)&&parts(r.money));}
+    function candidates(){const photo=bridge.context().kind==='image';return bridge.choiceRows().filter(r=>r.token&&safeURL(r.url)&&safeURL(r.image)&&(photo||parts(r.money)));}
     function renderOffers(rows=candidates()){
       offerList.replaceChildren();
       rows.forEach((row,i)=>{
         const b=el('button','fz-one-offer-row');b.type='button';b.dir='ltr';b.setAttribute('aria-label',row.title+' · '+(row.store||new URL(row.url).hostname)+' · '+formatMoney(row.money));
         b.setAttribute('aria-pressed',String(selected?.url===row.url));
         const info=el('span','fz-one-offer-info');info.append(el('bdi','fz-one-offer-site',row.store||new URL(row.url).hostname),el('bdi','fz-one-offer-title',row.title));
-        b.append(el('span','fz-one-offer-index',String(i+1).padStart(2,'0')),info,el('bdi','fz-one-offer-price',formatMoney(row.money)));
+        b.append(el('span','fz-one-offer-index',String(i+1).padStart(2,'0')),info,el('bdi','fz-one-offer-price',formatMoney(row.money)||(STORE_PRICE[(root.dataset.lang||'en').split('-')[0]]||STORE_PRICE.en)));
         b.addEventListener('click',()=>{
           const current=candidates().find(r=>r.url===row.url&&rowVersion(r)===rowVersion(row));if(!current){renderOffers();return;}
           cancel();closeDialog();celebrated=false;show({url:current.url,token:current.token,store:current.store,money:current.money,reason:'',match:current.match_type},current,true);
@@ -534,7 +536,7 @@
     document.fonts?.ready?.then(()=>{if(!disposed)fit();});
     function destroy(){disposed=true;reset();langObserver.disconnect();sizeObserver?.disconnect();for(const name of ['fz:search-state','fz:choice-results'])root.removeEventListener(name,queue);root.removeEventListener('fz:search-progress',progressEvent);root.removeEventListener('fz:search-reset',resetEvent);window.removeEventListener?.('resize',fit);window.visualViewport?.removeEventListener('resize',fit);box.remove();dialog.remove();delete root.dataset.choiceMode;delete root.dataset.choiceActive;}
     document.addEventListener('shopify:section:unload',function unload(ev){if(ev.target?.contains(root)){destroy();document.removeEventListener('shopify:section:unload',unload);}});
-    root.fzOneChoice={update,destroy,release:'157.0.10'};labels();queue();
+    root.fzOneChoice={update,destroy,release:'157.0.12'};labels();queue();
   }
   window.FindziaChoice={mount,PriceReels,PhotoSequence,SearchLog,moneyParts:parts};
   const start=()=>document.querySelectorAll('.fz-home').forEach(mount);

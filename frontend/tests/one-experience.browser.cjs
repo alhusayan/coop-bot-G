@@ -10,7 +10,7 @@ const offer=i=>({title:'Studio wireless headphones '+i,store:'Audio Store '+i,ur
  const origin='http://127.0.0.1:'+server.address().port,trial=JSON.parse(fs.readFileSync(path.join(__dirname,'../trial.json'))).path;
  const browser=await chromium.launch({executablePath:process.env.FINDZIA_TEST_CHROME,args:['--no-sandbox','--disable-dev-shm-usage']});
  try{
-  for(const variant of [{width:390,height:844,lang:'ar',theme:'dark'},{width:320,height:568,lang:'ar',theme:'light'},{width:1440,height:900,lang:'en',theme:'light'},{width:390,height:844,lang:'ar',theme:'light',photo:true},{width:390,height:844,lang:'ar',theme:'light',photo:true,unavailable:true}]){
+  for(const variant of [{width:390,height:844,lang:'ar',theme:'dark'},{width:320,height:568,lang:'ar',theme:'light'},{width:1440,height:900,lang:'en',theme:'light'},{width:390,height:844,lang:'ar',theme:'light',photo:true},{width:390,height:844,lang:'ar',theme:'light',photo:true,unavailable:true},{width:390,height:844,lang:'ar',theme:'light',photo:true,unpriced:true}]){
    const context=await browser.newContext({viewport:{width:variant.width,height:variant.height}}),errors=[],calls=[];
    await context.addInitScript(v=>{
     localStorage.setItem('findzia-lang',v.lang);localStorage.setItem('findzia-appearance-v1',v.theme);localStorage.setItem('findzia-theme',v.theme);
@@ -35,7 +35,7 @@ const offer=i=>({title:'Studio wireless headphones '+i,store:'Audio Store '+i,ur
       const body=route.request().postDataJSON();calls.push(body);
       if(variant.unavailable)Object.assign(data,{status:'unavailable',reason:'visual_incomplete'});
       else if(!variant.photo&&!body.answers.length){const ar=variant.lang==='ar';Object.assign(data,{status:'question',question:ar?'شنو الأهم لك بالسماعة؟':'What matters most in your headphones?',choices:ar?['الاستخدام اليومي','للألعاب','للسفر']:['Everyday listening','Gaming','Travel'],options:ar?[{label:'الاستخدام اليومي',detail:'لاسلكية وخفيفة'},{label:'للألعاب',detail:'ميكروفون مدمج'},{label:'للسفر',detail:'تصميم قابل للطي'}]:[{label:'Everyday listening',detail:'Lightweight and wireless'},{label:'Gaming',detail:'Built-in microphone'},{label:'Travel',detail:'Foldable design'}]});}
-      else Object.assign(data,{status:'selected',visual_verified:true,token:'test-2',url:offer(2).url,title:offer(2).title,store:offer(2).store,money:{amount:26.5,currency:'KWD'},reason:'Matches your preference.',match:'suitable'});
+      else Object.assign(data,{status:'selected',visual_verified:true,token:'test-2',url:offer(2).url,title:offer(2).title,store:offer(2).store,money:variant.unpriced?null:{amount:26.5,currency:'KWD'},reason:'Matches your preference.',match:'suitable'});
      }
      return route.fulfill({contentType:'application/json',body:JSON.stringify(data)});
     }
@@ -45,7 +45,7 @@ const offer=i=>({title:'Studio wireless headphones '+i,store:'Audio Store '+i,ur
    if(variant.photo)await page.evaluate(()=>{const c=document.createElement('canvas');c.width=c.height=32;c.getContext('2d').fillRect(0,0,32,32);document.querySelector('.fz-home').fzRefineBridge.billingResume({image_base64:c.toDataURL('image/png').split(',')[1],mime_type:'image/png',country:'KW'});});
    else await page.evaluate(()=>document.querySelector('.fz-home').fzRefineBridge.accountSearch('headphones'));
    await page.waitForFunction(()=>!!window.__stream);
-   await page.evaluate(items=>items.forEach(item=>__send({event:'result',item})),[0,1,2,3,4,5].map(offer));
+   await page.evaluate(items=>items.forEach(item=>__send({event:'result',item})),[0,1,2,3,4,5].map(i=>variant.unpriced?{...offer(i),price:'',price_amount:null,price_unavailable:true,price_display_ready:false,price_display_major:'',price_display_minor:''}:offer(i)));
    await page.waitForFunction(()=>document.querySelector('.fz-home').fzRefineBridge.choiceRows().length===6);
    await page.waitForFunction(()=>document.querySelector('.fz-one-image[data-active="true"]')?.naturalWidth>0);
    if(variant.photo){
@@ -63,8 +63,9 @@ const offer=i=>({title:'Studio wireless headphones '+i,store:'Audio Store '+i,ur
      assert.equal(await page.locator('.fz-one-open').first().getAttribute('href'),offer(2).url);
      assert.equal(calls.length,1,'no repeated photo reveal at stream end');
      assert.equal(calls[0].offer_images.length,6);
+     if(variant.unpriced){assert.equal(await page.locator('.fz-one-price').getAttribute('aria-label'),'شوف السعر في المتجر');assert.equal(await page.locator('.fz-one-reel').count(),0);}
     }
-    assert.deepEqual(errors,[]);console.log('PASS photo',variant.unavailable?'finite incomplete review':'early verified selection, stable at stream end');await context.close();continue;
+    assert.deepEqual(errors,[]);console.log('PASS photo',variant.unavailable?'finite incomplete review':variant.unpriced?'matching product without a confirmed price':'early verified selection, stable at stream end');await context.close();continue;
    }
    const initial=await page.locator('.fz-one-image[data-active="true"]').getAttribute('src');
    if(variant.width===390){

@@ -1,4 +1,5 @@
-/* FINDZIA_CHOICE_RELEASE=157.0.10 — scoped to the private trial. */
+/* FINDZIA_CHOICE_RELEASE=157.0.12 — scoped to the private trial. */
+.fz-home[data-choice-preview="true"] .fz-one-store-price{font-size:clamp(18px,4vw,24px);font-weight:600;line-height:1.4;padding:8px 4px;}
 .fz-home[data-choice-mode="one"][data-choice-active="true"] [data-results-body],
 .fz-home[data-choice-mode="one"][data-choice-active="true"] [data-results-title],
 .fz-home[data-choice-mode="one"][data-choice-active="true"] [data-filter-seg]{display:none!important}

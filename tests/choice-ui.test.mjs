@@ -184,13 +184,24 @@ test('photo choice cannot display an old backend decision without visual verific
   assert.equal(h.root.querySelector('.fz-one').dataset.state,'empty');h.root.fzOneChoice.destroy();
 });
 
+test('verified photo match without a price renders the product and store link, never a made-up amount',async()=>{
+  const h=harness();h.state.kind='image';const unpriced={...h.row,money:null};h.setRows([unpriced]);
+  h.context.window.FindziaBillingFetch=async()=>h.response(unpriced);
+  h.api.mount(h.root);await h.tick(1500);
+  assert.equal(h.root.querySelector('.fz-one').dataset.state,'selected');
+  assert.equal(h.root.querySelector('.fz-one-open').href,unpriced.url);
+  assert.equal(h.root.querySelector('.fz-one-price').getAttribute('aria-label'),'شوف السعر في المتجر');
+  assert.equal(h.root.querySelectorAll('.fz-one-reel').length,0);
+  h.root.fzOneChoice.destroy();
+});
+
 test('bridge retains authorization for original, audited and recovered displayed pictures',()=>{
   const source=readFileSync(new URL('../frontend/source/findzia-one.liquid',import.meta.url),'utf8');
   const start=source.indexOf('e.fzRefineBridge.choiceRows=function(){');
   const end=source.indexOf('// Stream real priced rows',start);
   const row={url:'https://store.example/item',evaluation_token:'offer-token',title:'Coat',audited_image:'https://img.example/a.jpg',audited_media_path:'/api/media/verified/abc'};
   const photo={winner:row.audited_image,node:{complete:true,naturalWidth:400},mediaAuth:new Map([[row.audited_image,{raw:row.audited_image,token:'offer-token'}]])};
-  const env={e:{fzRefineBridge:{}},U:[row],q:new Map([[row.url,photo]]),br:r=>r.url,_r:()=>({kind:'exact',value:99,currency:'KWD'}),$t:()=>true,fzEarlyPhotoPreview:()=>false,
+  const env={e:{fzRefineBridge:{}},W:{kind:'text'},U:[row],q:new Map([[row.url,photo]]),br:r=>r.url,_r:()=>({kind:'exact',value:99,currency:'KWD'}),$t:()=>true,fzEarlyPhotoPreview:()=>false,
     fzMediaKey:x=>x,fzVerifiedPictureURL:r=>r.audited_media_path?'https://api.example'+r.audited_media_path:'',fzMediaVerdicts:new Map()};
   vm.runInNewContext(source.slice(start,end),env);
   const read=()=>env.e.fzRefineBridge.choiceRows()[0];
@@ -202,6 +213,12 @@ test('bridge retains authorization for original, audited and recovered displayed
   photo.winner='https://api.example/api/media/verified/recovered';
   assert.equal(read().vision_image,raw);assert.equal(read().media_token,'recovery-token');
   photo.winner='https://unrelated.example/forged.jpg';assert.equal(read().vision_image,'');
+  // The exact same signed, decoded product must reach photo comparison when
+  // price extraction failed. Text shopping retains its priced-offer contract.
+  photo.winner=row.audited_image;env._r=()=>null;env.$t=()=>false;
+  assert.equal(env.e.fzRefineBridge.choiceRows().length,0);
+  env.W.kind='image';env.et=r=>r.url;env.fzAlternativePending=()=>false;
+  assert.equal(read().vision_image,row.audited_image);assert.equal(read().money,null);
 });
 
 test('persistent failure has a bounded retry and a recoverable results picker',async()=>{

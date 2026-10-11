@@ -1292,11 +1292,15 @@ function fzCancelSearchLaunch(){
 // FINDZIA_ONE_RELEASE=157.0.7
 // Expose reviewed offers to the one-result controller; prices remain source data.
 e.fzRefineBridge.choiceRows=function(){
+ const photoSearch=W?.kind==='image';
  return U.filter(row=>{
   const photo=q.get(br(row)),money=_r(row);
-  return $t(row)&&!row.price_estimated&&row.evaluation_token&&money&&money.kind==='exact'&&
+  // Product identity must not depend on a successfully extracted unit price.
+  const eligible=photoSearch?!!et(row)&&!row.hidden&&row.stock_status!=='out_of_stock'&&row.in_stock!==false&&
+   !fzAlternativePending(row)&&row.photo_match_status!=='rejected':$t(row)&&!row.price_estimated&&money&&money.kind==='exact';
+  return eligible&&row.evaluation_token&&
    photo?.winner&&photo.node?.complete&&photo.node.naturalWidth>=8;
- }).map(row=>{
+ }).sort((a,b)=>Number((b.retrieval_sources||[]).includes('google_lens')&&!b.collection_product)-Number((a.retrieval_sources||[]).includes('google_lens')&&!a.collection_product)).map(row=>{
   const photo=q.get(br(row));
   let auth=photo.mediaAuth?.get(fzMediaKey(photo.winner));
   if(!auth&&photo.winner===fzVerifiedPictureURL(row))auth=photo.mediaAuth?.get(fzMediaKey(row.audited_image||''));
@@ -1308,9 +1312,11 @@ e.fzRefineBridge.choiceRows=function(){
     if(verdict?.kind==='product'&&fzVerifiedPictureURL({audited_media_path:verdict.verifiedPath})===photo.winner){auth=candidate;break;}
    }
   }
+  const money=_r(row),confirmed=money?.kind==='exact'&&!row.price_estimated&&!row.price_unavailable&&!row.price_unit&&
+   !['pending','suspect'].includes(row.price_integrity_status)&&!['pending','suspect','unavailable'].includes(row.price_status);
   return {token:row.evaluation_token,url:br(row),title:row.title||row.raw_title||row.product_name||'',
    store:row.store||'',image:photo.winner,vision_image:auth?.raw||'',media_token:auth?.token||'',
-   money:{amount:_r(row).value,currency:_r(row).currency},key_specs:row.key_specs||[],match_type:row.match_type||''};
+   money:confirmed?{amount:money.value,currency:money.currency}:null,key_specs:row.key_specs||[],match_type:row.match_type||''};
  });
 };
 // Retry retrieves a fresh result set instead of reselecting the same rejected IDs.

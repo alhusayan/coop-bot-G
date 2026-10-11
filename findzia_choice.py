@@ -16,7 +16,7 @@ from concurrent.futures import ThreadPoolExecutor, wait
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
-RELEASE = "157.0.11"
+RELEASE = "157.0.12"
 MAX_OFFERS = 48
 MAX_BODY = 10_000_000
 
@@ -55,6 +55,11 @@ explicit specification to satisfy a cheaper preference. Price is important, but
 the best suitable model may be better value than an unsuitable cheaper model.
 For an image query, only candidates that passed direct pixel comparison are
 provided. Respect the attached visual observation and all explicit requirements.
+Finding the pictured product is independent of finding its current retail price.
+A null money field means the listing's price could not be confirmed. Such a
+visually matching product is still a valid selection; never invent its price,
+claim it is cheaper, or reject it merely for missing a price. Prefer a confirmed
+unit price only BETWEEN equivalent matching products, never over visual identity.
 The query may describe the image automatically; it cannot override the pixels.
 Prior exact/similar labels are hints, never authority over visual differences.
 Do not invent hidden specifications or claim exact identity from appearance alone.
@@ -177,9 +182,7 @@ class ChoiceEngine:
                 continue
             # This must be signed server evidence, not frontend flags.
             if (row.get('hidden') or row.get('stock_status') == 'out_of_stock'
-                    or row.get('in_stock') is False or row.get('price_unavailable')
-                    or row.get('price_integrity_status') in ('pending', 'suspect')
-                    or row.get('price_estimated') or row.get('price_unit')
+                    or row.get('in_stock') is False
                     or row.get('photo_match_status') == 'rejected'
                     or row.get('alternative_visual_status') == 'rejected'):
                 continue
@@ -189,17 +192,24 @@ class ChoiceEngine:
             if kind == 'text' and self.s['_findzia_hard_product_mismatch'](query, evidence):
                 continue
             money = self.s['_fz_eval_money'](row)
-            if not money or money.get('kind') != 'exact' or _number(money.get('amount')) is None:
-                continue
-            money = dict(amount=float(money['amount']), currency=money['currency'])
+            if (not money or money.get('kind') != 'exact' or _number(money.get('amount')) is None
+                    or row.get('price_unavailable') or row.get('price_estimated') or row.get('price_unit')
+                    or row.get('price_integrity_status') in ('pending', 'suspect')
+                    or row.get('price_status') in ('pending', 'suspect', 'unavailable')):
+                if kind != 'image':
+                    continue
+                money = None
+            else:
+                money = dict(amount=float(money['amount']), currency=money['currency'])
             shipping = _number(row.get('shipping_amount'), zero=True)
-            shipping_known = (row.get('shipping_verified') is True and shipping is not None
+            shipping_known = (money is not None and row.get('shipping_verified') is True and shipping is not None
                               and row.get('shipping_currency') == money['currency']
                               and str(row.get('shipping_country') or '').lower() == context['country'])
             # Taxes are never inferred; 'item_and_shipping' deliberately != total.
-            money.update(shipping_known=shipping_known, shipping=shipping if shipping_known else None,
-                         basis='item_and_shipping' if shipping_known else 'item',
-                         comparison_amount=money['amount'] + shipping if shipping_known else money['amount'])
+            if money:
+                money.update(shipping_known=shipping_known, shipping=shipping if shipping_known else None,
+                             basis='item_and_shipping' if shipping_known else 'item',
+                             comparison_amount=money['amount'] + shipping if shipping_known else money['amount'])
             candidate = dict(id='p' + str(len(candidates) + 1), row=row, token=token,
                              evidence=evidence, money=money)
             if kind == 'image':
@@ -333,7 +343,8 @@ class ChoiceEngine:
         return sorted(accepted, key=lambda c:int(c['id'][1:]))
 
     def comparable(self, a, b):
-        return (a['money']['currency'] == b['money']['currency']
+        return (a['money'] is not None and b['money'] is not None
+                and a['money']['currency'] == b['money']['currency']
                 and a['money']['basis'] == b['money']['basis']
                 and self.s['_fz_eval_comparable'](a['row'], b['row']))
 
@@ -389,13 +400,13 @@ class ChoiceEngine:
                 # Return a finite outcome, not a 503/retry cycle for the same pool.
                 return dict(ok=True, status='unavailable', reason='visual_incomplete',
                             evaluated=evaluated_count, **visual_summary, release=RELEASE)
-            reason = 'visual_mismatch' if evaluated_count else 'no_priced_offers'
+            reason = 'visual_mismatch' if evaluated_count else 'no_eligible_offers'
             print('CHOICE RESULT ' + json.dumps(dict(release=RELEASE, status='no_match', reason=reason, evaluated=evaluated_count)), flush=True)
             return dict(ok=True, status='no_match', reason=reason, evaluated=evaluated_count, release=RELEASE)
         offers = []
         for c in candidates:
             row, money = c['row'], c['money']
-            fx = _number(row.get('price_compare_value'))
+            fx = _number(row.get('price_compare_value')) if money else None
             offers.append(dict(id=c['id'], evidence=c['evidence'], store=row.get('store', ''),
                                country=row.get('country'), money=money,
                                visual=c.get('visual'),
@@ -448,17 +459,19 @@ class ChoiceEngine:
         # Once AI establishes the model, equivalent offers use arithmetic, not
         # an LLM's price calculation. Different variants never enter this group.
         equivalents = [c for c in candidates if c is chosen or self.comparable(chosen, c)]
-        selected = min(equivalents, key=lambda c: c['money']['comparison_amount'])
+        selected = min(equivalents, key=lambda c: c['money']['comparison_amount']) if chosen['money'] else chosen
         reason = self.s['_fz_eval_point'](response.get('reason'), selected['evidence'])
         row, money = selected['row'], selected['money']
         more = [c['money']['comparison_amount'] for c in equivalents
-                if c['money']['comparison_amount'] > money['comparison_amount']]
+                if money and c['money'] and c['money']['comparison_amount'] > money['comparison_amount']]
         saving = round(min(more) - money['comparison_amount'], 6) if more else None
         print('CHOICE RESULT ' + json.dumps(dict(release=RELEASE, status='selected', kind=context['kind'],
-              id=selected['id'], title=row.get('title', '')[:120], reviewed=evaluated_count)), flush=True)
+              id=selected['id'], title=row.get('title', '')[:120], reviewed=evaluated_count,
+              price_confirmed=money is not None)), flush=True)
         return dict(ok=True, status='selected', release=RELEASE, selection='ai',
                     url=row['url'], token=selected['token'], title=row.get('title') or row.get('raw_title', ''),
                     store=row.get('store', ''), money=money,
+                    price_status='confirmed' if money else 'check_store',
                     reason=reason['text'] if reason else '', reason_inference=bool(reason and reason.get('inference')),
                     savings=dict(amount=saving, currency=money['currency'], basis=money['basis']) if saving else None,
                     evaluated_count=len(candidates), match=('exact' if row.get('match_type') == 'exact' else 'suitable')
@@ -513,6 +526,7 @@ def install_choice(app, services):
             context, candidates = engine.prepare(payload)
             print('CHOICE INPUT ' + json.dumps(dict(release=RELEASE, kind=context['kind'],
                   offers=len(payload.get('offer_tokens', [])), eligible=len(candidates),
+                  without_price=sum(c['money'] is None for c in candidates),
                   exact=sum(c['row'].get('match_type') == 'exact' for c in candidates),
                   similar=sum(c['row'].get('match_type') == 'similar' for c in candidates))), flush=True)
         except (ValueError, TypeError, AttributeError):
