@@ -10,6 +10,7 @@ import re
 import time
 import unittest
 from unittest.mock import Mock
+from unittest.mock import patch
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -75,6 +76,7 @@ class ChoiceTests(unittest.TestCase):
         self.engine.pool.shutdown(wait=True)
         self.engine.media_pool.shutdown(wait=True)
         self.engine.visual_pool.shutdown(wait=True)
+        self.engine.price_pool.shutdown(wait=True)
 
     def payload(self, rows, **kw):
         if kw.get('kind') == 'image':
@@ -82,7 +84,7 @@ class ChoiceTests(unittest.TestCase):
                 r.setdefault('image',r['url']+'/photo.png')
             kw.setdefault('image_base64',base64.b64encode(b'reference-pixels').decode())
             kw.setdefault('offer_images',[dict(token=SIGN['_fz_evaluation_token'](r),image=r['image']) for r in rows])
-        return dict(query='headphones', country='kw', lang='en',
+        return dict(query=kw.pop('query', 'headphones'), country='kw', lang='en',
                     offer_tokens=[SIGN['_fz_evaluation_token'](r) for r in rows], **kw)
 
     def pick(self, rows, **kw):
@@ -118,14 +120,14 @@ class ChoiceTests(unittest.TestCase):
         result=self.pick([row('coat',99),row('coat',5)],kind='image')
         self.assertEqual(result['money']['amount'],99)
         self.assertIsNone(result['savings'])
-        self.assertEqual(len(self.s['_refine_ai'].call_args.args[1]['offers']),1)
+        self.assertEqual(self.s['_refine_ai'].call_count,1)  # sole pixel match needs no second decision
 
     def test_missing_or_unsigned_images_never_fall_back_to_text(self):
         p=self.payload([row()],kind='image');p.pop('image_base64')
         with self.assertRaises(ValueError):self.engine.prepare(p)
         p=self.payload([row()],kind='image');p['offer_images'][0]['image']='https://other.example/forged.jpg'
         self.s['_web_visual_candidate_inline']=Mock()
-        with self.assertRaises(RuntimeError):self.engine.choose(*self.engine.prepare(p))
+        self.assertEqual(self.engine.choose(*self.engine.prepare(p))['status'],'unavailable')
         self.s['_web_visual_candidate_inline'].assert_not_called()
         self.s['_refine_ai'].assert_not_called()
 
@@ -137,7 +139,7 @@ class ChoiceTests(unittest.TestCase):
         self.assertEqual(self.engine.choose(*self.engine.prepare(p))['status'],'selected')
         recovered['url']='https://other.example/item'
         p['offer_images'][0]['media_token']=SIGN['_fz_evaluation_token'](recovered)
-        with self.assertRaises(RuntimeError):self.engine.choose(*self.engine.prepare(p))
+        self.assertEqual(self.engine.choose(*self.engine.prepare(p))['status'],'unavailable')
 
     def test_all_candidates_beyond_eight_are_visually_reviewed(self):
         def ninth(system,data,**kw):
@@ -156,6 +158,8 @@ class ChoiceTests(unittest.TestCase):
         self.pick([row()],kind='image')
         calls=lambda:[c for c in self.s['_refine_ai'].call_args_list if c.kwargs.get('images')]
         self.assertEqual(len(calls()),1)
+        self.pick([row()],kind='image',query='Updated automatic photo description',mode='cheaper')
+        self.assertEqual(len(calls()),1, 'Generated text and price mode cannot overturn the same pixels')
         self.pick([row()],kind='image',image_base64=base64.b64encode(b'another-reference').decode())
         self.assertEqual(len(calls()),2)
         self.s['_web_visual_candidate_inline']=lambda r:dict(mime_type='image/png',data='changed-pixels')
@@ -165,8 +169,68 @@ class ChoiceTests(unittest.TestCase):
     def test_incomplete_visual_contract_cannot_select(self):
         self.s['_refine_ai'].return_value=dict(status='reviewed',items=[])
         p=self.payload([row()],kind='image')
-        with self.assertRaises(ValueError):self.engine.choose(*self.engine.prepare(p))
+        self.assertEqual(self.engine.choose(*self.engine.prepare(p))['status'],'unavailable')
         self.assertEqual(self.s['_refine_ai'].call_count,2)
+
+    def test_failed_picture_does_not_turn_reviewed_mismatches_into_503(self):
+        self.s['_web_visual_candidate_inline']=lambda r: None if 'missing' in r['image'] else dict(mime_type='image/png',data='pixels')
+        self.s['_refine_ai'].side_effect=lambda system,data,**kw: dict(status='reviewed',items=[dict(id=c['id'],verdict='different',observation='Wrong cup pattern') for c in data['candidates']])
+        result=self.pick([row('different'),row('missing')],kind='image')
+        self.assertEqual(result['status'],'unavailable')
+        self.assertEqual((result['reviewed'],result['unavailable']),(1,1))
+        self.assertNotIn('url',result)
+
+    def test_one_failed_batch_cannot_discard_another_verified_match(self):
+        def judge(system,data,**kw):
+            if data['candidates'][0]['id']=='p1': raise RuntimeError('upstream')
+            return ai_response(system,data,**kw)
+        self.s['_refine_ai'].side_effect=judge
+        result=self.pick([row('item'+str(i),i+1) for i in range(9)],kind='image')
+        self.assertEqual(result['money']['amount'],9)
+        self.assertTrue(result['visual_verified'])
+
+    def test_displayed_audited_bytes_are_reused_without_merchant_redownload(self):
+        inspector=Mock();inspector.verified_for_url.return_value='/api/media/verified/test'
+        inspector.read_audited.return_value=(b'jpeg-original-displayed-bytes',60)
+        self.engine.media_inspector=inspector
+        self.s['_web_visual_candidate_inline']=Mock(side_effect=RuntimeError('merchant offline'))
+        result=self.pick([row()],kind='image')
+        self.assertEqual(result['status'],'selected')
+        self.s['_web_visual_candidate_inline'].assert_not_called()
+        images=self.s['_refine_ai'].call_args.kwargs['images']
+        self.assertEqual(base64.b64decode(images[1][1]['data']),b'jpeg-original-displayed-bytes')
+
+    def test_explicit_photo_changes_still_require_preference_decision(self):
+        result=self.pick([row()],kind='image',extra_specs='must be blue')
+        self.assertEqual(result['status'],'selected')
+        self.assertEqual(self.s['_refine_ai'].call_count,2)
+        self.assertEqual(self.s['_refine_ai'].call_args.args[1]['request']['extra_specs'],'must be blue')
+
+    def test_valid_selection_with_missing_or_similar_label_is_conservative(self):
+        for label in (None,'similar','best_match'):
+            self.s['_refine_ai'].return_value=dict(status='selected',id='p1',match=label)
+            result=self.pick([row()])
+            self.assertEqual(result['status'],'selected')
+            self.assertEqual(result['match'],'suitable')
+        self.s['_refine_ai'].return_value=dict(status='selected',id='not-offered',match='similar')
+        with self.assertRaises(ValueError):self.pick([row()])
+
+    def test_sparse_filtered_ids_are_the_only_prompt_examples(self):
+        self.s['_refine_ai'].return_value=dict(status='selected',id='p19',match='suitable')
+        result=self.engine.decision(dict(answers=[],skip_question=False),[dict(id='p19'),dict(id='p24')])
+        self.assertEqual(result['id'],'p19')
+        prompt=self.s['_refine_ai'].call_args.args[0]
+        self.assertNotIn('"p1"',prompt)
+        self.assertIn('Allowed offer IDs: ["p19", "p24"]',prompt)
+
+    def test_negative_or_unavailable_results_are_not_cached(self):
+        context,rows=self.engine.prepare(self.payload([row()]))
+        for value in (dict(status='no_match',ok=True),dict(status='unavailable',ok=True)):
+            self.engine.choose=Mock(return_value=value)
+            _,future=self.engine.submit(context,rows);future.result(timeout=2)
+            cached,future=self.engine.submit(context,rows)
+            self.assertIsNone(cached);future.result(timeout=2)
+            self.assertEqual(self.engine.choose.call_count,2)
 
     def test_actual_refine_transport_serializes_two_inline_images(self):
         tree=ast.parse(Path(os.environ.get('FINDZIA_MAIN_FILE','main.py')).read_text())
@@ -217,8 +281,7 @@ class ChoiceTests(unittest.TestCase):
         result=self.pick([r],kind='image')
         self.assertEqual(result['status'],'selected')
         self.assertEqual(result['match'],'suitable')
-        offer=self.s['_refine_ai'].call_args.args[1]['offers'][0]
-        self.assertEqual(offer['visual']['verdict'],'match')
+        self.assertEqual(self.s['_refine_ai'].call_count,1)
         self.assertTrue(result['visual_verified'])
 
     def test_completed_audit_supersedes_retained_preview_flag(self):
@@ -230,6 +293,98 @@ class ChoiceTests(unittest.TestCase):
                        {'stock_status':'out_of_stock'},{'price_unavailable':True},{'price_unit':'monthly'}):
             r=row();r.update(update)
             self.assertEqual(self.pick([r])['status'],'no_match')
+
+    def test_matching_photo_survives_unavailable_or_non_unit_price(self):
+        for change in ({'price_unavailable':True}, {'price_kind':'range'}, {'price_estimated':True},
+                       {'price_integrity_status':'pending'}, {'price_unit':'monthly'}):
+            with self.subTest(change=change):
+                r=row();r.update(change)
+                result=self.pick([r],kind='image')
+                self.assertEqual(result['status'],'price_unavailable')
+                self.assertNotIn('url',result)
+                self.assertNotIn('money',result)
+
+    def test_unpriced_photo_match_beats_priced_different_product(self):
+        def review(system,data,**kw):
+            return dict(status='reviewed',items=[dict(id=c['id'],verdict='match' if c['id']=='p1' else 'different',
+                observation='Same chair frame and lumbar detail' if c['id']=='p1' else 'Different wheeled chair') for c in data['candidates']])
+        self.s['_refine_ai'].side_effect=review
+        matched=row('photographed-chair');matched['price_unavailable']=True
+        result=self.pick([matched,row('wrong-chair',5)],kind='image')
+        self.assertEqual(result['status'],'price_unavailable')
+        self.assertNotIn('url',result)
+
+    def test_unpriced_photo_does_not_bypass_visual_or_stock_checks(self):
+        self.s['_refine_ai'].side_effect=lambda system,data,**kw:dict(status='reviewed',items=[
+            dict(id=c['id'],verdict='different',observation='Different construction') for c in data['candidates']])
+        missing=row();missing['price_unavailable']=True
+        self.assertEqual(self.pick([missing],kind='image')['status'],'no_match')
+        missing['in_stock']=False
+        self.assertEqual(self.engine.prepare(self.payload([missing],kind='image'))[1],[])
+
+    def test_price_recovery_only_runs_on_visually_matching_product(self):
+        self.s['_refine_ai'].side_effect=lambda system,data,**kw:dict(status='reviewed',items=[
+            dict(id=c['id'],verdict='match' if c['id']=='p1' else 'different',observation='Same frame') for c in data['candidates']])
+        self.s['_web_choice_price_recovery']=Mock(side_effect=lambda r,*_:dict(r,price='38.500 KWD',price_amount=38.5,price_unavailable=False))
+        good=row('SINDAL',price_unavailable=True);wrong=row('wrong',price_unavailable=True)
+        result=self.pick([good,wrong],kind='image')
+        self.assertEqual(result['money']['amount'],38.5)
+        self.assertEqual(result['url'],good['url'])
+        self.assertEqual(self.s['_web_choice_price_recovery'].call_count,1)
+        self.pick([good,wrong],kind='image')
+        self.assertEqual(self.s['_web_choice_price_recovery'].call_count,1,'reuse recovered listing price')
+
+    def test_local_default_and_global_are_prepared_from_same_visual_review(self):
+        local=row('HP45',12,market_scope='local')
+        international=row('HP45',3,market_scope='global');international['country']='us'
+        result=self.pick([international,local],kind='image')
+        self.assertEqual(result['url'],local['url'])
+        self.assertEqual(result['markets']['global']['url'],international['url'])
+        self.assertEqual(result['markets']['local']['money']['amount'],12)
+        self.assertEqual(sum(bool(c.kwargs.get('images')) for c in self.s['_refine_ai'].call_args_list),1)
+
+    def test_missing_local_price_cannot_be_replaced_by_global_price(self):
+        local=row('HP45',12,price_unavailable=True)
+        international=row('HP45',3,market_scope='global')
+        result=self.pick([international,local],kind='image')
+        self.assertEqual(result['status'],'price_unavailable')
+        self.assertNotIn('url',result)
+        self.assertEqual(result['markets']['global']['money']['amount'],3)
+
+    def test_failed_price_retry_reuses_review_then_rechecks_after_short_cooldown(self):
+        clock=[100.0]
+        self.s['_web_choice_price_recovery']=Mock(return_value=None)
+        self.s['_refine_ai'].side_effect=ai_response
+        missing=row('HP45',12,price_unavailable=True)
+        payload=self.payload([missing],kind='image')
+        with patch('findzia_choice.time.monotonic',side_effect=lambda:clock[0]):
+            context,candidates=self.engine.prepare(payload)
+            cached,future=self.engine.submit(context,candidates)
+            first=future.result(timeout=3)
+            self.assertEqual(first['status'],'price_unavailable')
+            self.assertEqual(first['retry_after'],5)
+            context,candidates=self.engine.prepare(payload)
+            cached,future=self.engine.submit(context,candidates)
+            self.assertIsNone(future)
+            self.assertEqual(cached['status'],'price_unavailable')
+            self.assertEqual(self.s['_web_choice_price_recovery'].call_count,1)
+            clock[0]+=6
+            self.s['_web_choice_price_recovery'].side_effect=lambda r,*_:dict(r,price_unavailable=False)
+            context,candidates=self.engine.prepare(payload)
+            cached,future=self.engine.submit(context,candidates)
+            result=future.result(timeout=3)
+            self.assertEqual(result['status'],'selected')
+            self.assertEqual(result['money']['amount'],12)
+            self.assertEqual(self.s['_web_choice_price_recovery'].call_count,2)
+            self.assertEqual(sum(bool(c.kwargs.get('images')) for c in self.s['_refine_ai'].call_args_list),1)
+
+    def test_global_scope_is_signed_and_not_inferred_from_kwd(self):
+        global_row=row('HP45',3,market_scope='global',market_rank=1)
+        decoded=SIGN['_fz_evaluation_row'](SIGN['_fz_evaluation_token'](global_row))
+        self.assertEqual(decoded['market_scope'],'global')
+        result=self.pick([global_row],kind='image')
+        self.assertEqual(result['status'],'no_match')
+        self.assertEqual(result['markets']['global']['url'],global_row['url'])
 
     def test_ai_can_choose_a_suitable_model_over_cheapest(self):
         self.s['_refine_ai'].return_value.update(id='p2')
@@ -267,6 +422,25 @@ class ChoiceTests(unittest.TestCase):
         self.s['_refine_ai'].return_value=dict(status='question',question='Your budget?',choices=['20','50'])
         self.assertEqual(self.pick([row()])['status'],'question')
         with self.assertRaises(ValueError):self.pick([row()],answers=['50'])
+
+    def test_question_hints_require_existing_offer_evidence(self):
+        self.s['_refine_ai'].return_value=dict(status='question',question='Which style?',
+            choices=['Portable','At home'],choice_details=[
+                dict(choice='Portable',text='A1 headphones',offer_ids=['p1'],evidence=['A1 headphones']),
+                dict(choice='At home',text='Guaranteed professional performance',offer_ids=['p999'],evidence=['A1 headphones'])])
+        result=self.pick([row()])
+        self.assertEqual(result['options'],[
+            dict(label='Portable',detail='A1 headphones'),dict(label='At home',detail='')])
+        self.s['_refine_ai'].return_value['choice_details'][0]['evidence']=['invented feature']
+        self.assertEqual(self.pick([row()])['options'][0]['detail'],'')
+
+    def test_choose_for_me_cannot_trigger_another_question(self):
+        self.s['_refine_ai'].return_value=dict(status='question',question='Again?',choices=['A','B'])
+        with self.assertRaises(ValueError):self.pick([row()],skip_question=True)
+        self.s['_refine_ai'].return_value=dict(status='selected',id='p1',match='suitable',reason=None)
+        self.assertEqual(self.pick([row()],skip_question=True)['status'],'selected')
+        request=self.s['_refine_ai'].call_args.args[1]['request']
+        self.assertIs(request['skip_question'],True)
 
 
     def test_malformed_ai_json_retries_without_user_action(self):
