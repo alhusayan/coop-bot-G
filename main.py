@@ -21252,12 +21252,19 @@ def _web_targeted_price_updates(entries, lang, market, *, image_only=False, choi
             if not evidence.get('price') and not _web_indexed_offer_quote(evidence):
                 evidence['price'] = _local_discovery_plain_snippet_price(evidence, evidence.get('_price_market') or cc)
             quote = _web_indexed_offer_quote(evidence)
-            if not quote and choice_price and same_listing:
-                from findzia_choice_prices import labelled_current_quote
-                quote = labelled_current_quote(item, _web_price_quote, cc)
             regional = _fz_regional_price_store(row.get('url'))
             if regional:
                 quote = _fz_regional_index_quote(item, row.get('url'))
+            if not quote and choice_price and same_listing:
+                from findzia_choice_prices import labelled_current_quote
+                current = labelled_current_quote(item, _web_price_quote, cc)
+                # Regional policy must not erase an explicitly labelled sale
+                # price. Preserve its printed currency and storefront binding.
+                if current and (not regional or current['currency'] == _web_page_currency_default(row.get('url'))):
+                    quote = current
+                    diag['labelled_current_price'] += 1
+                elif current:
+                    diag['regional_currency_conflict'] += 1
             money = ((quote['min'] or quote['max']),quote['currency']) if quote else None
             if not money:
                 diag['price_rejected' if _web_indexed_price_present(item) else 'no_price_evidence'] += 1
@@ -32963,43 +32970,45 @@ def _fz_evaluation_token(row):
     return raw+'.'+hmac.new(_REFINE_KEY,raw.encode(),hashlib.sha256).hexdigest()
 
 
-_FZ_CHOICE_PRICE_PAGE_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="choice-merchant-price")
+_FZ_CHOICE_PRICE_PAGE_POOL = ThreadPoolExecutor(max_workers=8, thread_name_prefix="choice-merchant-price")
+_FZ_CHOICE_PRICE_INDEX_POOL = ThreadPoolExecutor(max_workers=8, thread_name_prefix="choice-index-price")
 
 
 def _web_choice_price_recovery(row, country, lang):
     """Recover money only after One has matched identity; never retrieve new products."""
+    from findzia_choice_prices import race_listing_prices
     cc = str(row.get('country') or country).lower()
     currency = COUNTRY_CURRENCIES.get(cc) or row.get('original_currency') or row.get('currency') or ''
     market = dict(country=cc, currency=currency, currencies=list(COUNTRY_CURRENCY_CODES.get(cc, (currency,))))
-    # A blocked merchant must not consume the entire price budget before the
-    # indexed listing lookup starts. Both sources remain bound to the same URL.
-    future = _FZ_CHOICE_PRICE_PAGE_POOL.submit(_web_live_page_price, row, market)
-    try:
-        page = future.result(timeout=.35) or {}
-    except Exception:
-        page = {}
-    update = page
-    if not page.get('price'):
-        key = _web_price_url_key(row['url'])
-        update = (_web_targeted_price_updates({key:row}, lang, market, choice_price=True) or {}).get(key) or {}
-        if future.done():
-            try:
-                page = future.result() or page
-            except Exception:
-                pass
-        if page.get('price'):
-            update = page
-    if not update.get('price'):
-        return None
-    result = dict(row, **_web_price_facts(update))
-    # Stale missing-price flags must not veto newly observed, exact-listing money.
-    result.update(price_pending=False, price_unavailable=False)
-    if _web_price_review_reason(result, market):
-        return None
-    result['price_integrity_status'] = 'verified' if update.get('price_verified') else 'indexed'
-    availability = str(page.get('availability') or '').lower()
-    if 'outofstock' in availability or 'out_of_stock' in availability or 'discontinued' in availability:
-        return None
+    key = _web_price_url_key(row['url'])
+    rejected = []
+    def accept(update):
+        result = dict(row, **_web_price_facts(update))
+        result.update(price_pending=False, price_unavailable=False)
+        reason = _web_price_review_reason(result, market)
+        if reason:
+            rejected.append(reason)
+            return None
+        native = result
+        if result.get('price_estimated') and result.get('original_price') and result.get('original_currency'):
+            native = dict(result, price=result['original_price'], currency=result['original_currency'])
+        money = _fz_eval_money(native)
+        if not money or money['kind'] != 'exact' or result.get('price_unit'):
+            rejected.append('not_exact_listing_price')
+            return None
+        result['price_integrity_status'] = 'verified' if update.get('price_verified') else 'indexed'
+        return result
+    def indexed():
+        return (_web_targeted_price_updates({key:row}, lang, market, choice_price=True) or {}).get(key) or {}
+    started = time.monotonic()
+    page = _FZ_CHOICE_PRICE_PAGE_POOL.submit(_web_live_page_price, row, market)
+    result, states = race_listing_prices(page, lambda: _FZ_CHOICE_PRICE_INDEX_POOL.submit(indexed), accept)
+    # No product text, full URLs, prices or provider bodies in diagnostics.
+    print('CHOICE PRICE SOURCES ' + json.dumps(dict(
+        offer=hashlib.sha256(key.encode()).hexdigest()[:12],
+        host=(urllib.parse.urlsplit(key).hostname or '')[:120], sources=states,
+        rejected=sorted(set(rejected)), elapsed_ms=round((time.monotonic()-started)*1000),
+        recovered=bool(result))), flush=True)
     return result
 
 

@@ -10,6 +10,7 @@ import re
 import time
 import unittest
 from unittest.mock import Mock
+from unittest.mock import patch
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -349,6 +350,33 @@ class ChoiceTests(unittest.TestCase):
         self.assertEqual(result['status'],'price_unavailable')
         self.assertNotIn('url',result)
         self.assertEqual(result['markets']['global']['money']['amount'],3)
+
+    def test_failed_price_retry_reuses_review_then_rechecks_after_short_cooldown(self):
+        clock=[100.0]
+        self.s['_web_choice_price_recovery']=Mock(return_value=None)
+        self.s['_refine_ai'].side_effect=ai_response
+        missing=row('HP45',12,price_unavailable=True)
+        payload=self.payload([missing],kind='image')
+        with patch('findzia_choice.time.monotonic',side_effect=lambda:clock[0]):
+            context,candidates=self.engine.prepare(payload)
+            cached,future=self.engine.submit(context,candidates)
+            first=future.result(timeout=3)
+            self.assertEqual(first['status'],'price_unavailable')
+            self.assertEqual(first['retry_after'],5)
+            context,candidates=self.engine.prepare(payload)
+            cached,future=self.engine.submit(context,candidates)
+            self.assertIsNone(future)
+            self.assertEqual(cached['status'],'price_unavailable')
+            self.assertEqual(self.s['_web_choice_price_recovery'].call_count,1)
+            clock[0]+=6
+            self.s['_web_choice_price_recovery'].side_effect=lambda r,*_:dict(r,price_unavailable=False)
+            context,candidates=self.engine.prepare(payload)
+            cached,future=self.engine.submit(context,candidates)
+            result=future.result(timeout=3)
+            self.assertEqual(result['status'],'selected')
+            self.assertEqual(result['money']['amount'],12)
+            self.assertEqual(self.s['_web_choice_price_recovery'].call_count,2)
+            self.assertEqual(sum(bool(c.kwargs.get('images')) for c in self.s['_refine_ai'].call_args_list),1)
 
     def test_global_scope_is_signed_and_not_inferred_from_kwd(self):
         global_row=row('HP45',3,market_scope='global',market_rank=1)

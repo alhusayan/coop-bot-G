@@ -17,6 +17,7 @@ import unittest
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 from collections import Counter
+from functools import lru_cache
 from contextlib import redirect_stdout
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -38,7 +39,7 @@ for node in TREE.body:
 def scope(roots, overrides=None):
     ns = dict(re=re, json=json, urllib=urllib, time=time, copy=copy, os=os, math=math, hashlib=hashlib, Counter=Counter,
               threading=threading, Decimal=Decimal, InvalidOperation=InvalidOperation,
-              ThreadPoolExecutor=ThreadPoolExecutor, __name__='findzia_test')
+              ThreadPoolExecutor=ThreadPoolExecutor, lru_cache=lru_cache, __name__='findzia_test')
     ns.update(StructuredPrices=StructuredPrices, shein_params=shein_params,
               cache_ttl=cache_ttl, cache_fresh=cache_fresh, cache_success=cache_success,
               provider_cacheable=provider_cacheable, analysis_cacheable=analysis_cacheable,

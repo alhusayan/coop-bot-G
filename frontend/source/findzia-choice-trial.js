@@ -1,4 +1,4 @@
-/* FINDZIA_CHOICE_RELEASE=157.0.14 — photo identity is independent of price availability. */
+/* FINDZIA_CHOICE_RELEASE=157.0.15 — photo identity is independent of price availability. */
 (() => {
   'use strict';
   const COPY = {
@@ -19,7 +19,7 @@
   function safeURL(value){try{const u=new URL(value);return /^https?:$/.test(u.protocol)&&!u.username&&!u.password?u.href:'';}catch(_){return '';}}
   // A refreshed image proxy or match label is not a different offer. Keep the
   // signed source, identity, specifications and price in the decision key.
-  function rowVersion(row){return JSON.stringify([row.url,row.title,row.vision_image||row.image,row.money?.amount,row.money?.currency,row.key_specs,row.country,row.market_scope]);}
+  function rowVersion(row){const specs=(row.key_specs||[]).map(s=>JSON.stringify([s.key||s.kind||'',s.value||''])).sort();return JSON.stringify([row.url,row.title,row.vision_image||row.image,row.money?.amount,row.money?.currency,specs,row.country,row.market_scope]);}
   function parts(money){
     const amount=Number(money?.amount),currency=String(money?.currency||'');
     if(!Number.isFinite(amount)||amount<=0||!/^[A-Z]{3}$/.test(currency))return null;
@@ -287,7 +287,7 @@
     box.append(stage,actions,live);
     const log=new SearchLog(logLines),reels=new PriceReels(price,row=>{priceSource.hidden=!row;priceSource.textContent=row?((row.store||new URL(row.url).hostname)+' · '+formatMoney(row.money)):'';log.highlight(row?.url||'');});
     let generation=-1,requestId=0,controller=null,requestTimer=0,debounce=0,mediaTimer=0,retryTimer=0,earlyTimer=0,answerTimer=0,doneAt=0,eligibleAt=null,earlyCalls=0,finalRefreshes=0;
-    let marketScope='local',marketChoices=null,marketRows=[];
+    let marketScope='local',marketChoices=null,marketRows=[],priceRetryTimer=0,retryReadyAt=0;
     let selected=null,mode='best',answers=[],questionSkipped=false,lastKey='',deferredNoMatchKey='',pending=false,disposed=false,celebrated=false,frozenSource='',autoRetries=0,dialogMode='results',awaitingQuestion=false,usageAnnounced=false;
     const header=root.querySelector('[data-fixed-header]');
     function fit(){
@@ -308,7 +308,7 @@
     function marketCopy(){return MARKETS[(root.dataset.lang||'en').split('-')[0]]||MARKETS.en;}
     function marketLabel(){marketButton.textContent=marketCopy()[marketScope==='local'?0:1];marketButton.setAttribute('aria-pressed',String(marketScope==='global'));marketButton.disabled=!marketChoices;box.dataset.market=marketScope;}
     function labels(){marketLabel();open.textContent=text('open');retry.textContent=text('retry');cheaper.textContent=text('cheaper');quality.textContent=text('quality');newSearch.textContent=text('newSearch');close.setAttribute('aria-label',text('close'));whyButton.setAttribute('aria-label',text('why'));whyButton.title=text('why');logCaption.textContent=text('log');}
-    function cancel(){requestId++;controller?.abort();controller=null;clearTimeout(requestTimer);clearTimeout(retryTimer);clearTimeout(earlyTimer);clearTimeout(mediaTimer);earlyTimer=0;pending=false;}
+    function cancel(){clearTimeout(priceRetryTimer);retryReadyAt=0;requestId++;controller?.abort();controller=null;clearTimeout(requestTimer);clearTimeout(retryTimer);clearTimeout(earlyTimer);clearTimeout(mediaTimer);earlyTimer=0;pending=false;}
     function closeDialog(){dialog.close?.();logButton.setAttribute('aria-expanded','false');}
     function reset(){
       cancel();clearTimeout(debounce);debounce=0;clearTimeout(mediaTimer);clearTimeout(answerTimer);photos.reset();reels.clear();log.clear();marketScope='local';marketChoices=null;marketRows=[];selected=null;mode='best';answers=[];questionSkipped=false;lastKey='';deferredNoMatchKey='';celebrated=false;doneAt=0;autoRetries=0;frozenSource='';eligibleAt=null;earlyCalls=0;finalRefreshes=0;awaitingQuestion=false;usageAnnounced=false;
@@ -337,6 +337,14 @@
       if(bridge.context().kind==='image'&&frozenSource)photos.settle(frozenSource,'');
       activate();box.dataset.state='empty';box.dataset.emptyReason=key;heading.textContent=key==='priceUnavailable'?marketCopy()[2]:key==='marketNoMatch'?marketCopy()[3]:text(key);reels.clear();title.textContent='';specs.textContent='';store.textContent='';shipping.textContent='';
       retry.hidden=false;actions.hidden=false;cheaper.hidden=true;quality.hidden=true;whyButton.hidden=true;logWrap.hidden=true;live.textContent=heading.textContent;
+      clearTimeout(priceRetryTimer);retry.disabled=false;
+      if(key==='priceUnavailable'){
+        // The server briefly caches failed price recovery. Do not offer a retry
+        // that can only replay the same failure or start a new billed search.
+        if(!retryReadyAt)retryReadyAt=Date.now()+Math.min(30,Math.max(1,Number(marketChoices?.[marketScope]?.retry_after)||5))*1000;
+        retry.disabled=Date.now()<retryReadyAt;
+        if(retry.disabled)priceRetryTimer=setTimeout(()=>{retry.disabled=false;},retryReadyAt-Date.now());
+      }else retryReadyAt=0;
     }
     function celebrate(){
       if(celebrated||disposed)return;celebrated=true;box.dataset.state='selected';heading.textContent=text('found');live.textContent=text('found')+' '+title.textContent+' '+(price.getAttribute('aria-label')||'');fit();
@@ -387,7 +395,7 @@
         marketChoices=null;marketRows=[];
         answers=[value.question.slice(0,157-picked.length)+' — '+picked];
         question.querySelectorAll('button').forEach(b=>{b.disabled=true;b.setAttribute('aria-pressed',String(b===button));});
-        live.textContent=label;lastKey='';selected=null;earlyCalls=0;
+        live.textContent=label;lastKey='';selected=null;earlyCalls=0;finalRefreshes=0;
         answerTimer=setTimeout(()=>{answerTimer=0;if(at!==generation||disposed)return;awaitingQuestion=false;queue();},reduced()?0:180);
       };
       for(const label of [...new Set(value.choices||[])].filter(s=>typeof s==='string'&&s.trim()).slice(0,3)){
@@ -411,7 +419,12 @@
     async function choose(rows,c){
       rows=rows.slice(0,48);
       const key=choiceKey(rows,c);
-      if(key===lastKey||pending)return;lastKey=key;pending=true;
+      if(key===lastKey||pending)return;
+      if(c.kind==='image'&&!c.busy&&finalRefreshes>=2){
+        if(!selected){const status=marketChoices?.[marketScope]?.status;empty(status==='price_unavailable'?'priceUnavailable':status==='no_match'?'noMatch':'unavailable');}
+        return;
+      }
+      clearTimeout(priceRetryTimer);retryReadyAt=0;lastKey=key;pending=true;
       if(c.busy)earlyCalls++;
       else if(c.kind==='image')finalRefreshes++;
       if(!selected)pendingView(rows,c);else selectionCaption(c);
@@ -532,7 +545,7 @@
     });
     function preference(value){cancel();marketChoices=null;marketRows=[];mode=value;selected=null;lastKey='';celebrated=false;autoRetries=0;earlyCalls=0;finalRefreshes=0;awaitingQuestion=false;queue();}
     cheaper.addEventListener('click',()=>preference('cheaper'));quality.addEventListener('click',()=>preference('quality'));
-    retry.addEventListener('click',()=>{if(box.dataset.emptyReason==='noMatch'&&bridge.retryChoiceSearch?.())return;lastKey='';autoRetries=0;earlyCalls=0;finalRefreshes=0;awaitingQuestion=false;queue();});newSearch.addEventListener('click',()=>bridge.newSearch());
+    retry.addEventListener('click',()=>{if(pending||Date.now()<retryReadyAt)return;if(box.dataset.emptyReason==='noMatch'&&bridge.retryChoiceSearch?.())return;lastKey='';autoRetries=0;earlyCalls=0;finalRefreshes=0;awaitingQuestion=false;queue();});newSearch.addEventListener('click',()=>bridge.newSearch());
     logButton.addEventListener('click',()=>openDialog('results'));whyButton.addEventListener('click',()=>openDialog('reason'));close.addEventListener('click',closeDialog);
     dialog.addEventListener('close',()=>{logButton.setAttribute('aria-expanded','false');});
     dialog.addEventListener('click',event=>{if(event.target===dialog){const b=dialog.getBoundingClientRect();if(event.clientX<b.left||event.clientX>b.right||event.clientY<b.top||event.clientY>b.bottom)closeDialog();}});
@@ -554,7 +567,7 @@
     document.fonts?.ready?.then(()=>{if(!disposed)fit();});
     function destroy(){disposed=true;reset();langObserver.disconnect();sizeObserver?.disconnect();for(const name of ['fz:search-state','fz:choice-results'])root.removeEventListener(name,queue);root.removeEventListener('fz:search-progress',progressEvent);root.removeEventListener('fz:search-reset',resetEvent);window.removeEventListener?.('resize',fit);window.visualViewport?.removeEventListener('resize',fit);box.remove();dialog.remove();delete root.dataset.choiceMode;delete root.dataset.choiceActive;}
     document.addEventListener('shopify:section:unload',function unload(ev){if(ev.target?.contains(root)){destroy();document.removeEventListener('shopify:section:unload',unload);}});
-    root.fzOneChoice={update,destroy,release:'157.0.14'};labels();queue();
+    root.fzOneChoice={update,destroy,release:'157.0.15'};labels();queue();
   }
   window.FindziaChoice={mount,PriceReels,PhotoSequence,SearchLog,moneyParts:parts};
   const start=()=>document.querySelectorAll('.fz-home').forEach(mount);

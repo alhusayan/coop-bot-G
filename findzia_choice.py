@@ -19,7 +19,7 @@ from findzia_choice_identity import model_evidence
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
-RELEASE = "157.0.14"
+RELEASE = "157.0.15"
 MAX_OFFERS = 48
 MAX_BODY = 10_000_000
 
@@ -144,7 +144,7 @@ class ChoiceEngine:
         self.gate = threading.BoundedSemaphore(6)
         self.cache, self.flights = {}, {}
         self.visual_cache = {}
-        self.price_pool = ThreadPoolExecutor(max_workers=6, thread_name_prefix="choice-price")
+        self.price_pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="choice-price")
         self.price_cache, self.price_flights = {}, {}
 
     def prepare(self, payload):
@@ -293,7 +293,7 @@ class ChoiceEngine:
                             return None
                         finally:
                             with self.lock:
-                                self.price_cache[cache_key] = (time.monotonic() + (240 if value else 30), value)
+                                self.price_cache[cache_key] = (time.monotonic() + (240 if value else 5), value)
                                 self.price_flights.pop(cache_key, None)
                                 while len(self.price_cache) > 128:
                                     self.price_cache.pop(next(iter(self.price_cache)))
@@ -501,7 +501,8 @@ class ChoiceEngine:
             priced = [c for c in matching if c['money']]
             if not priced:
                 markets[scope] = dict(ok=True, status='price_unavailable' if matching else 'no_match',
-                                      reason='price_missing' if matching else 'market_no_match', release=RELEASE)
+                                      reason='price_missing' if matching else 'market_no_match', release=RELEASE,
+                                      **({'retry_after':5} if matching else {}))
             else:
                 scoped = dict(context, market_scope=scope, skip_question=True if scope == 'global' else context.get('skip_question', False))
                 decisions[scope] = self.visual_pool.submit(self.select_priced, scoped, priced, evaluated_count)
@@ -610,8 +611,11 @@ class ChoiceEngine:
                 try:
                     value = self.choose(context, candidates)
                     with self.lock:
-                        if value.get('status') in ('selected', 'question'):
-                            self.cache[key] = (time.monotonic() + 240, copy.deepcopy(value))
+                        price_missing = any(v.get('status') == 'price_unavailable' for v in (value.get('markets') or {'local':value}).values())
+                        if value.get('status') in ('selected', 'question') or price_missing:
+                            # Deduplicate retries during the short failure cache;
+                            # do not freeze a missing market price for four minutes.
+                            self.cache[key] = (time.monotonic() + (5 if price_missing else 240), copy.deepcopy(value))
                         while len(self.cache) > 128:
                             self.cache.pop(next(iter(self.cache)))
                     return value

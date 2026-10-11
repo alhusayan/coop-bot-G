@@ -1,5 +1,51 @@
 """Conservative sale-price extraction for One's exact-listing recovery only."""
 import re
+import time
+from concurrent.futures import wait, FIRST_COMPLETED
+
+
+def race_listing_prices(page, start_index, accept, *, timeout=10, grace=.35):
+    """Wait for either exact-listing source to yield usable money within one deadline.
+
+    An empty/blocked/invalid result never cancels the other source. A fast page
+    avoids the index request altogether; a fast valid index need not wait for a
+    blocked page. Running requests still populate their normal shared caches.
+    """
+    deadline = time.monotonic() + timeout
+    pending = {page: 'page'}
+    states = {}
+    try:
+        done, _ = wait([page], timeout=min(grace, timeout))
+        while True:
+            for future in sorted(done, key=lambda f: pending[f] != 'page'):
+                source = pending.pop(future)
+                try:
+                    update = future.result() or {}
+                except Exception:
+                    states[source] = 'error'
+                    continue
+                availability = str(update.get('availability') or '').lower()
+                if source == 'page' and any(x in availability for x in ('outofstock', 'out_of_stock', 'discontinued')):
+                    states[source] = 'out_of_stock'
+                    return None, states
+                result = accept(update) if update.get('price') else None
+                status = update.get('page_fetch_status')
+                states[source] = 'accepted' if result else 'rejected' if update.get('price') else status if status in ('blocked', 'timeout', 'error') else 'price_missing'
+                if result:
+                    return result, states
+            if 'index' not in states and 'index' not in pending.values():
+                pending[start_index()] = 'index'
+            remaining = deadline - time.monotonic()
+            if not pending or remaining <= 0:
+                break
+            done, _ = wait(pending, timeout=remaining, return_when=FIRST_COMPLETED)
+            if not done:
+                break
+        return None, states
+    finally:
+        for future, source in pending.items():
+            states[source] = 'pending'
+            future.cancel()
 
 
 def labelled_current_quote(item, parse_quote, country=''):

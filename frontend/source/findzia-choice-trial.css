@@ -1,4 +1,4 @@
-/* FINDZIA_CHOICE_RELEASE=157.0.13 — scoped to the private trial. */
+/* FINDZIA_CHOICE_RELEASE=157.0.15 — scoped to the private trial. */
 .fz-home[data-choice-preview="true"] .fz-one-store-price{font-size:clamp(18px,4vw,24px);font-weight:600;line-height:1.4;padding:8px 4px;}
 .fz-home[data-choice-mode="one"][data-choice-active="true"] [data-results-body],
 .fz-home[data-choice-mode="one"][data-choice-active="true"] [data-results-title],
@@ -110,3 +110,5 @@
 .fz-home[data-choice-preview="true"] .fz-one-actions{flex-wrap:wrap;row-gap:2px}
 .fz-home[data-choice-preview="true"] .fz-one-market{font-weight:600}
 .fz-home[data-choice-preview="true"] .fz-one-market[aria-pressed="true"]{color:var(--fz-accent,#bd611f);text-decoration:underline;text-underline-offset:4px}
+
+.fz-one-open:disabled{opacity:.5;cursor:wait}
