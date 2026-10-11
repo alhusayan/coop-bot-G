@@ -16,7 +16,7 @@ from concurrent.futures import ThreadPoolExecutor, wait
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
-RELEASE = "157.0.9"
+RELEASE = "157.0.10"
 MAX_OFFERS = 48
 MAX_BODY = 10_000_000
 
@@ -347,8 +347,12 @@ class ChoiceEngine:
                 status = value.get('status')
                 if status == 'no_match':
                     return value
-                if (status == 'selected' and value.get('id') in ids
-                        and value.get('match') in ('exact', 'suitable')):
+                if status == 'selected' and value.get('id') in ids:
+                    # This label is presentation metadata, not identity proof.
+                    # Photo identity already comes from the direct pixel gate.
+                    # Missing/alternative labels must stay conservative, never
+                    # turn a valid chosen ID into a transport failure.
+                    value['match'] = 'exact' if value.get('match') == 'exact' else 'suitable'
                     return value
                 choices = value.get('choices')
                 if (status == 'question' and not context['answers'] and not context.get('skip_question')

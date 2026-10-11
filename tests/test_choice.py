@@ -202,6 +202,15 @@ class ChoiceTests(unittest.TestCase):
         self.assertEqual(self.s['_refine_ai'].call_count,2)
         self.assertEqual(self.s['_refine_ai'].call_args.args[1]['request']['extra_specs'],'must be blue')
 
+    def test_valid_selection_with_missing_or_similar_label_is_conservative(self):
+        for label in (None,'similar','best_match'):
+            self.s['_refine_ai'].return_value=dict(status='selected',id='p1',match=label)
+            result=self.pick([row()])
+            self.assertEqual(result['status'],'selected')
+            self.assertEqual(result['match'],'suitable')
+        self.s['_refine_ai'].return_value=dict(status='selected',id='not-offered',match='similar')
+        with self.assertRaises(ValueError):self.pick([row()])
+
     def test_sparse_filtered_ids_are_the_only_prompt_examples(self):
         self.s['_refine_ai'].return_value=dict(status='selected',id='p19',match='suitable')
         result=self.engine.decision(dict(answers=[],skip_question=False),[dict(id='p19'),dict(id='p24')])
