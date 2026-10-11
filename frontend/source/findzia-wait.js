@@ -75,7 +75,14 @@
         const continuing=!box.hidden&&!handedOff&&c.preview_image&&frozen===c.preview_image;
         if(!continuing)reset();generation=c.generation;
       }
-      if(c.can_refine){handedOff=true;hide(true);return;}
+      if(c.can_refine){
+        // A search starts at its first result, including a camera/modal handoff.
+        // Later stream updates must never drag the reader back to the top.
+        const firstReveal=!handedOff&&!box.hidden;
+        handedOff=true;hide(true);
+        if(firstReveal)bridge.revealSearchResults?.();
+        return;
+      }
       const results=(root.dataset.pageTarget||root.dataset.homeState)==='results';
       if(handedOff||!results||!(c.busy||c.media_pending||root.dataset.searchLaunching==='true')){hide(results);return;}
       show();
