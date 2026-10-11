@@ -118,14 +118,14 @@ class ChoiceTests(unittest.TestCase):
         result=self.pick([row('coat',99),row('coat',5)],kind='image')
         self.assertEqual(result['money']['amount'],99)
         self.assertIsNone(result['savings'])
-        self.assertEqual(len(self.s['_refine_ai'].call_args.args[1]['offers']),1)
+        self.assertEqual(self.s['_refine_ai'].call_count,1)  # sole pixel match needs no second decision
 
     def test_missing_or_unsigned_images_never_fall_back_to_text(self):
         p=self.payload([row()],kind='image');p.pop('image_base64')
         with self.assertRaises(ValueError):self.engine.prepare(p)
         p=self.payload([row()],kind='image');p['offer_images'][0]['image']='https://other.example/forged.jpg'
         self.s['_web_visual_candidate_inline']=Mock()
-        with self.assertRaises(RuntimeError):self.engine.choose(*self.engine.prepare(p))
+        self.assertEqual(self.engine.choose(*self.engine.prepare(p))['status'],'unavailable')
         self.s['_web_visual_candidate_inline'].assert_not_called()
         self.s['_refine_ai'].assert_not_called()
 
@@ -137,7 +137,7 @@ class ChoiceTests(unittest.TestCase):
         self.assertEqual(self.engine.choose(*self.engine.prepare(p))['status'],'selected')
         recovered['url']='https://other.example/item'
         p['offer_images'][0]['media_token']=SIGN['_fz_evaluation_token'](recovered)
-        with self.assertRaises(RuntimeError):self.engine.choose(*self.engine.prepare(p))
+        self.assertEqual(self.engine.choose(*self.engine.prepare(p))['status'],'unavailable')
 
     def test_all_candidates_beyond_eight_are_visually_reviewed(self):
         def ninth(system,data,**kw):
@@ -165,8 +165,59 @@ class ChoiceTests(unittest.TestCase):
     def test_incomplete_visual_contract_cannot_select(self):
         self.s['_refine_ai'].return_value=dict(status='reviewed',items=[])
         p=self.payload([row()],kind='image')
-        with self.assertRaises(ValueError):self.engine.choose(*self.engine.prepare(p))
+        self.assertEqual(self.engine.choose(*self.engine.prepare(p))['status'],'unavailable')
         self.assertEqual(self.s['_refine_ai'].call_count,2)
+
+    def test_failed_picture_does_not_turn_reviewed_mismatches_into_503(self):
+        self.s['_web_visual_candidate_inline']=lambda r: None if 'missing' in r['image'] else dict(mime_type='image/png',data='pixels')
+        self.s['_refine_ai'].side_effect=lambda system,data,**kw: dict(status='reviewed',items=[dict(id=c['id'],verdict='different',observation='Wrong cup pattern') for c in data['candidates']])
+        result=self.pick([row('different'),row('missing')],kind='image')
+        self.assertEqual(result['status'],'unavailable')
+        self.assertEqual((result['reviewed'],result['unavailable']),(1,1))
+        self.assertNotIn('url',result)
+
+    def test_one_failed_batch_cannot_discard_another_verified_match(self):
+        def judge(system,data,**kw):
+            if data['candidates'][0]['id']=='p1': raise RuntimeError('upstream')
+            return ai_response(system,data,**kw)
+        self.s['_refine_ai'].side_effect=judge
+        result=self.pick([row('item'+str(i),i+1) for i in range(9)],kind='image')
+        self.assertEqual(result['money']['amount'],9)
+        self.assertTrue(result['visual_verified'])
+
+    def test_displayed_audited_bytes_are_reused_without_merchant_redownload(self):
+        inspector=Mock();inspector.verified_for_url.return_value='/api/media/verified/test'
+        inspector.read_audited.return_value=(b'jpeg-original-displayed-bytes',60)
+        self.engine.media_inspector=inspector
+        self.s['_web_visual_candidate_inline']=Mock(side_effect=RuntimeError('merchant offline'))
+        result=self.pick([row()],kind='image')
+        self.assertEqual(result['status'],'selected')
+        self.s['_web_visual_candidate_inline'].assert_not_called()
+        images=self.s['_refine_ai'].call_args.kwargs['images']
+        self.assertEqual(base64.b64decode(images[1][1]['data']),b'jpeg-original-displayed-bytes')
+
+    def test_explicit_photo_changes_still_require_preference_decision(self):
+        result=self.pick([row()],kind='image',extra_specs='must be blue')
+        self.assertEqual(result['status'],'selected')
+        self.assertEqual(self.s['_refine_ai'].call_count,2)
+        self.assertEqual(self.s['_refine_ai'].call_args.args[1]['request']['extra_specs'],'must be blue')
+
+    def test_sparse_filtered_ids_are_the_only_prompt_examples(self):
+        self.s['_refine_ai'].return_value=dict(status='selected',id='p19',match='suitable')
+        result=self.engine.decision(dict(answers=[],skip_question=False),[dict(id='p19'),dict(id='p24')])
+        self.assertEqual(result['id'],'p19')
+        prompt=self.s['_refine_ai'].call_args.args[0]
+        self.assertNotIn('"p1"',prompt)
+        self.assertIn('Allowed offer IDs: ["p19", "p24"]',prompt)
+
+    def test_negative_or_unavailable_results_are_not_cached(self):
+        context,rows=self.engine.prepare(self.payload([row()]))
+        for value in (dict(status='no_match',ok=True),dict(status='unavailable',ok=True)):
+            self.engine.choose=Mock(return_value=value)
+            _,future=self.engine.submit(context,rows);future.result(timeout=2)
+            cached,future=self.engine.submit(context,rows)
+            self.assertIsNone(cached);future.result(timeout=2)
+            self.assertEqual(self.engine.choose.call_count,2)
 
     def test_actual_refine_transport_serializes_two_inline_images(self):
         tree=ast.parse(Path(os.environ.get('FINDZIA_MAIN_FILE','main.py')).read_text())
@@ -217,8 +268,7 @@ class ChoiceTests(unittest.TestCase):
         result=self.pick([r],kind='image')
         self.assertEqual(result['status'],'selected')
         self.assertEqual(result['match'],'suitable')
-        offer=self.s['_refine_ai'].call_args.args[1]['offers'][0]
-        self.assertEqual(offer['visual']['verdict'],'match')
+        self.assertEqual(self.s['_refine_ai'].call_count,1)
         self.assertTrue(result['visual_verified'])
 
     def test_completed_audit_supersedes_retained_preview_flag(self):

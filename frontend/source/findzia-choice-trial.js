@@ -1,4 +1,4 @@
-/* FINDZIA_CHOICE_RELEASE=157.0.8 — physical score flaps, quiet photo editorial, one helpful question. */
+/* FINDZIA_CHOICE_RELEASE=157.0.9 — verified early photo choice and finite recovery. */
 (() => {
   'use strict';
   const COPY = {
@@ -321,13 +321,14 @@
       if(dialog.open&&dialogMode==='results')renderOffers(rows);
     }
     function pendingView(rows,c){
-      activate();box.dataset.state='pending';heading.textContent=text('choosing');title.textContent='';specs.textContent='';store.textContent='';shipping.textContent='';
+      activate();box.dataset.state='pending';heading.textContent=text(c.kind==='image'?'checking':'choosing');title.textContent='';specs.textContent='';store.textContent='';shipping.textContent='';
       actions.hidden=false;cheaper.hidden=true;quality.hidden=true;
       freezeImage(rows,c);reels.spin(priceRows(rows),text('comparing'));priceSource.hidden=!reels.activeOffer;
       fit();
     }
     function empty(key){
       photos.stop();
+      if(bridge.context().kind==='image'&&frozenSource)photos.settle(frozenSource,'');
       activate();box.dataset.state='empty';box.dataset.emptyReason=key;heading.textContent=text(key);reels.clear();title.textContent='';specs.textContent='';store.textContent='';shipping.textContent='';
       retry.hidden=false;actions.hidden=false;cheaper.hidden=true;quality.hidden=true;whyButton.hidden=true;logWrap.hidden=true;live.textContent=heading.textContent;
     }
@@ -404,6 +405,7 @@
       const key=choiceKey(rows,c);
       if(key===lastKey||pending)return;lastKey=key;pending=true;
       if(c.busy)earlyCalls++;
+      else if(c.kind==='image')finalRefreshes++;
       if(!selected)pendingView(rows,c);else selectionCaption(c);
       log.add('decision',{site:'AI',title:text('deciding')});
       let followUp=false;
@@ -421,7 +423,7 @@
         if(disposed||id!==requestId||bridge.context().generation!==c.generation)return;
         autoRetries=0;
         const now=bridge.context(),currentRows=candidates();
-        if((value.status!=='selected'||c.kind==='image')&&(now.busy||choiceKey(currentRows,now)!==key)){
+        if(value.status!=='selected'&&(now.busy||(choiceKey(currentRows,now)!==key&&(c.kind!=='image'||finalRefreshes<2)))){
           // Partial evidence must not flash an error or a premature question.
           lastKey='';followUp=!now.busy;return;
         }
@@ -429,10 +431,13 @@
           if(selected)return;
           ask(value);return;
         }
+        if(value.status==='unavailable'){
+          if(!selected)empty('unavailable');return;
+        }
         if(value.status!=='selected'){
           // Images may finish after the bounded first decision. Do not declare
           // no match until those offers have had their chance to be reviewed.
-          if(c.kind==='image'&&now.media_pending&&Date.now()-doneAt<18000){
+          if(c.kind==='image'&&now.media_pending&&Date.now()-doneAt<4500){
             deferredNoMatchKey=key;clearTimeout(mediaTimer);mediaTimer=setTimeout(update,250);return;
           }
           if(!selected)empty('noMatch');return;
@@ -477,16 +482,13 @@
       }
       if(awaitingQuestion)return;
       if(!c.busy&&!pending&&box.dataset.state==='empty'&&lastKey===choiceKey(rows,c))return;
+      if(c.kind==='image'&&!c.busy&&!pending&&box.dataset.state==='empty'&&finalRefreshes>=2)return;
       if(c.busy||rows.length||pending)pendingView(rows,c);
       if(pending||retryTimer)return;
       if(c.kind==='image'){
-        if(c.busy)return;
-        if(!doneAt)doneAt=Date.now();
-        if(c.media_pending&&Date.now()-doneAt<6000){
-          pendingView(rows,c);clearTimeout(mediaTimer);mediaTimer=setTimeout(update,200);return;
-        }
+        if(!c.busy&&!doneAt)doneAt=Date.now();
         if(deferredNoMatchKey===choiceKey(rows,c)){
-          if(c.media_pending&&Date.now()-doneAt<18000){clearTimeout(mediaTimer);mediaTimer=setTimeout(update,250);return;}
+          if(c.busy||(c.media_pending&&Date.now()-doneAt<4500)){clearTimeout(mediaTimer);mediaTimer=setTimeout(update,250);return;}
           empty('noMatch');return;
         }
         deferredNoMatchKey='';
@@ -496,7 +498,7 @@
         // A fixed short collection window cannot be postponed by progress events.
         if(c.busy){
           if(earlyCalls)return;
-          const wait=220-(Date.now()-eligibleAt);
+          const wait=(c.kind==='image'?1200:220)-(Date.now()-eligibleAt);
           if(wait>0){if(!earlyTimer)earlyTimer=setTimeout(()=>{earlyTimer=0;update();},wait);return;}
         }
         clearTimeout(earlyTimer);earlyTimer=0;choose(rows,c);return;
@@ -508,9 +510,9 @@
       if(c.query||c.kind==='image')empty('noMatch');
     }
 
-    function preference(value){cancel();mode=value;selected=null;lastKey='';celebrated=false;autoRetries=0;earlyCalls=0;awaitingQuestion=false;queue();}
+    function preference(value){cancel();mode=value;selected=null;lastKey='';celebrated=false;autoRetries=0;earlyCalls=0;finalRefreshes=0;awaitingQuestion=false;queue();}
     cheaper.addEventListener('click',()=>preference('cheaper'));quality.addEventListener('click',()=>preference('quality'));
-    retry.addEventListener('click',()=>{if(box.dataset.emptyReason==='noMatch'&&bridge.retryChoiceSearch?.())return;lastKey='';autoRetries=0;earlyCalls=0;awaitingQuestion=false;queue();});newSearch.addEventListener('click',()=>bridge.newSearch());
+    retry.addEventListener('click',()=>{if(box.dataset.emptyReason==='noMatch'&&bridge.retryChoiceSearch?.())return;lastKey='';autoRetries=0;earlyCalls=0;finalRefreshes=0;awaitingQuestion=false;queue();});newSearch.addEventListener('click',()=>bridge.newSearch());
     logButton.addEventListener('click',()=>openDialog('results'));whyButton.addEventListener('click',()=>openDialog('reason'));close.addEventListener('click',closeDialog);
     dialog.addEventListener('close',()=>{logButton.setAttribute('aria-expanded','false');});
     dialog.addEventListener('click',event=>{if(event.target===dialog){const b=dialog.getBoundingClientRect();if(event.clientX<b.left||event.clientX>b.right||event.clientY<b.top||event.clientY>b.bottom)closeDialog();}});
@@ -532,7 +534,7 @@
     document.fonts?.ready?.then(()=>{if(!disposed)fit();});
     function destroy(){disposed=true;reset();langObserver.disconnect();sizeObserver?.disconnect();for(const name of ['fz:search-state','fz:choice-results'])root.removeEventListener(name,queue);root.removeEventListener('fz:search-progress',progressEvent);root.removeEventListener('fz:search-reset',resetEvent);window.removeEventListener?.('resize',fit);window.visualViewport?.removeEventListener('resize',fit);box.remove();dialog.remove();delete root.dataset.choiceMode;delete root.dataset.choiceActive;}
     document.addEventListener('shopify:section:unload',function unload(ev){if(ev.target?.contains(root)){destroy();document.removeEventListener('shopify:section:unload',unload);}});
-    root.fzOneChoice={update,destroy,release:'157.0.8'};labels();queue();
+    root.fzOneChoice={update,destroy,release:'157.0.9'};labels();queue();
   }
   window.FindziaChoice={mount,PriceReels,PhotoSequence,SearchLog,moneyParts:parts};
   const start=()=>document.querySelectorAll('.fz-home').forEach(mount);

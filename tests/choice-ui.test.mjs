@@ -349,12 +349,13 @@ test('no-match retry starts fresh retrieval instead of repeating the same choice
   assert.equal(searches,1);assert.equal(choices,1);h.root.fzOneChoice.destroy();
 });
 
-test('photo decision waits for retrieval and pending pictures, then stays on one offer',async()=>{
+test('verified photo selection starts before retrieval ends and then stays on one offer',async()=>{
   const h=harness();h.state.kind='image';h.state.busy=true;let calls=0;
   h.context.window.FindziaBillingFetch=async()=>{calls++;return h.response();};
   h.api.mount(h.root);await h.tick(800);assert.equal(calls,0);
-  h.state.busy=false;h.state.media_pending=true;h.root.fzOneChoice.update();await h.tick(800);assert.equal(calls,0);
-  h.state.media_pending=false;h.root.fzOneChoice.update();await h.tick(800);assert.equal(calls,1);
+  h.state.media_pending=true;h.root.fzOneChoice.update();await h.tick(1600);assert.equal(calls,1);
+  assert.equal(h.root.querySelector('.fz-one').dataset.state,'selected');
+  h.state.busy=false;h.state.media_pending=false;h.root.fzOneChoice.update();await h.tick(800);assert.equal(calls,1);
   const extra={...h.row,token:'later',url:'https://store.example/later',money:{amount:8,currency:'KWD'}};
   h.setRows([h.row,extra]);h.root.fzOneChoice.update();await h.tick(800);
   assert.equal(calls,1);assert.equal(h.root.querySelector('.fz-one-open').href,h.row.url);
@@ -363,11 +364,11 @@ test('photo decision waits for retrieval and pending pictures, then stays on one
   assert.equal(h.root.querySelector('.fz-one').dataset.state,'selected');h.root.fzOneChoice.destroy();
 });
 
-test('photo selection does not reveal a decision based on an outdated pool',async()=>{
+test('photo selection rejects a withdrawn candidate while new offers arrive',async()=>{
   const h=harness();h.state.kind='image';let finish,calls=0;
   h.context.window.FindziaBillingFetch=()=>{calls++;return new Promise(r=>finish=r);};
   h.api.mount(h.root);await h.tick(100);
-  const extra={...h.row,token:'later',url:'https://store.example/later'};h.setRows([h.row,extra]);
+  const extra={...h.row,token:'later',url:'https://store.example/later'};h.setRows([extra]);
   h.context.window.FindziaBillingFetch=async()=>{calls++;return h.response(extra);};
   finish(h.response());await h.tick(0);
   assert.equal(h.root.querySelector('.fz-one-open').hidden,true);
@@ -378,7 +379,7 @@ test('photo selection does not reveal a decision based on an outdated pool',asyn
 test('late photo offers can recover no-match without repeated AI calls for the same pool',async()=>{
   const h=harness();h.state.kind='image';h.state.media_pending=true;let calls=0;
   h.context.window.FindziaBillingFetch=async()=>{calls++;return{ok:true,json:async()=>({ok:true,status:'no_match'})};};
-  h.api.mount(h.root);for(let i=0;i<9;i++)await h.tick(1000);
+  h.api.mount(h.root);for(let i=0;i<3;i++)await h.tick(1000);
   assert.equal(calls,1);assert.equal(h.root.querySelector('.fz-one').dataset.state,'pending');
   const extra={...h.row,token:'late-picture',url:'https://store.example/late-picture'};
   h.setRows([h.row,extra]);h.state.media_pending=false;
@@ -459,4 +460,27 @@ test('reduced motion keeps the preview still but still reveals the final picture
   sequence.preview([h.row],'data:image/jpeg;base64,reference');await h.tick(0);await h.tick(20000);
   assert.equal(sequence.count,0);sequence.settle(h.row.image,h.row.title);await h.tick(0);
   assert.equal(sequence.source,h.row.image);assert.equal(h.animations.length,0);sequence.reset();
+});
+
+
+test('a confirmed photo is not starved by unrelated pool changes during its decision',async()=>{
+  const h=harness();h.state.kind='image';let finish,calls=0;
+  h.context.window.FindziaBillingFetch=()=>{calls++;return new Promise(r=>finish=r);};
+  h.api.mount(h.root);await h.tick(100);
+  h.setRows([h.row,{...h.row,token:'late',url:'https://store.example/late'}]);
+  finish(h.response());await h.tick(1200);
+  assert.equal(calls,1);assert.equal(h.root.querySelector('.fz-one').dataset.state,'selected');
+  assert.equal(h.root.querySelector('.fz-one-open').href,h.row.url);h.root.fzOneChoice.destroy();
+});
+
+test('incomplete photo review stops visibly and does not automatically retry the same pool',async()=>{
+  const h=harness();h.state.kind='image';h.state.image_base64='original';let calls=0;
+  h.context.window.FindziaBillingFetch=async()=>{calls++;return{ok:true,json:async()=>({ok:true,status:'unavailable',reason:'visual_incomplete'})};};
+  h.api.mount(h.root);await h.tick(1200);
+  assert.equal(h.root.querySelector('.fz-one').dataset.state,'empty');
+  assert.equal(h.root.querySelector('.fz-one').dataset.emptyReason,'unavailable');
+  for(let i=0;i<10;i++){h.root.fzOneChoice.update();await h.tick(1000);}
+  assert.equal(calls,1);assert.equal(h.root.querySelector('.fz-one-price').children.length,0);
+  assert.ok(h.root.querySelectorAll('.fz-one-image').some(n=>n.dataset.active==='true'&&n.src.includes('original')));
+  h.root.fzOneChoice.destroy();
 });

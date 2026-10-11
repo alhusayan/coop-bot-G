@@ -4,18 +4,19 @@ Retrieval, billing and visual audits remain owned by the existing search engine.
 The model can choose an ID, never create a price, URL, specification or offer.
 """
 import asyncio
+import base64
 import copy
 import hashlib
 import json
 import math
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
-RELEASE = "157.0.8"
+RELEASE = "157.0.9"
 MAX_OFFERS = 48
 MAX_BODY = 10_000_000
 
@@ -126,8 +127,9 @@ def _number(value, *, zero=False):
 
 
 class ChoiceEngine:
-    def __init__(self, services):
+    def __init__(self, services, media_inspector=None):
         self.s = services
+        self.media_inspector = media_inspector
         self.lock = threading.RLock()
         self.pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix="findzia-choice")
         self.media_pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="choice-image")
@@ -226,6 +228,8 @@ class ChoiceEngine:
         return dict(mimeType=mime, data=value['data'])
 
     def visual_candidates(self, context, candidates):
+        started = time.monotonic()
+        deadline = started + 14
         reference = self.inline(self.s['_web_visual_reference_inline'](context['_reference_image']))
         if not reference:
             raise ValueError('reference_image_unreadable')
@@ -235,22 +239,33 @@ class ChoiceEngine:
             if not candidate.get('image_source'):
                 return None
             try:
+                # Reuse the exact approved bytes already displayed by the UI.
+                # The URL has passed signed listing authorization in prepare().
+                if self.media_inspector:
+                    source = self.s.get('_web_unproxy_image_url', lambda url: url)(candidate['image_source'])
+                    path = self.media_inspector.verified_for_url(source)
+                    picture = self.media_inspector.read_audited(path.rsplit('/', 1)[-1]) if path else None
+                    if picture:
+                        return dict(mimeType='image/jpeg', data=base64.b64encode(picture[0]).decode('ascii'))
                 # Reuse the search engine's normalized image cache and safe fetcher.
                 # Never substitute a different picture when the displayed one fails.
                 return self.inline(self.s['_web_visual_candidate_inline']({'image':candidate['image_source']}))
             except Exception:
                 return None
         futures = [self.media_pool.submit(fetch, c) for c in candidates]
-        accepted, pending, unavailable = [], [], False
+        ready, _ = wait(futures, timeout=4)
+        accepted, pending, unavailable, reviewed = [], [], 0, 0
         for candidate, future in zip(candidates, futures):
-            inline = future.result()
+            inline = future.result() if future in ready else None
             if not inline:
-                unavailable = True
+                future.cancel()
+                unavailable += 1
                 continue
             key = hashlib.sha256((reference_key + candidate['evidence'] + json.dumps(inline, sort_keys=True)).encode()).hexdigest()
             with self.lock:
                 cached = self.visual_cache.get(key)
             if cached and cached[0] > time.monotonic():
+                reviewed += 1
                 if cached[1]['verdict'] == 'match':
                     accepted.append(dict(candidate, visual=cached[1]))
             else:
@@ -260,10 +275,13 @@ class ChoiceEngine:
             images = [('REFERENCE_IMAGE', reference)] + [('CANDIDATE_IMAGE ' + c['id'], inline) for c, inline, _ in batch]
             ids = {c['id'] for c, _, _ in batch}
             for attempt in range(2):
+                remaining = deadline - time.monotonic()
+                if remaining < .5:
+                    raise TimeoutError('visual_deadline')
                 try:
                     raw = self.s['_refine_ai'](VISUAL_PROMPT,
                         dict(request=request, candidates=[dict(id=c['id'], evidence=c['evidence']) for c, _, _ in batch]),
-                        images=images, tokens=2000, timeout=6)
+                        images=images, tokens=2000, timeout=min(5, remaining))
                     value = _response_object(raw)
                     items = value.get('items')
                     if (value.get('status') != 'reviewed' or not isinstance(items, list)
@@ -288,11 +306,22 @@ class ChoiceEngine:
                     if attempt:
                         raise
         # _refine_ai accepts at most 9 images: reference + 8 candidates.
-        jobs = [self.visual_pool.submit(review, pending[i:i+8]) for i in range(0, len(pending), 8)]
-        for job in jobs:
-            accepted.extend(job.result())
-        if not accepted and unavailable:
-            raise RuntimeError('candidate_images_unavailable')
+        jobs = {self.visual_pool.submit(review, pending[i:i+8]): len(pending[i:i+8]) for i in range(0, len(pending), 8)}
+        ready, _ = wait(jobs, timeout=max(0, deadline-time.monotonic())) if jobs else (set(), set())
+        for job, count in jobs.items():
+            if job not in ready:
+                job.cancel()
+                unavailable += count
+                continue
+            try:
+                accepted.extend(job.result())
+                reviewed += count
+            except Exception:
+                # A failed batch cannot discard a match verified in another one.
+                unavailable += count
+        context['_visual_summary'] = dict(reviewed=reviewed, unavailable=unavailable, matched=len(accepted))
+        print('CHOICE VISUAL ' + json.dumps(dict(release=RELEASE, **context['_visual_summary'],
+              elapsed_ms=round((time.monotonic()-started)*1000))), flush=True)
         return sorted(accepted, key=lambda c:int(c['id'][1:]))
 
     def comparable(self, a, b):
@@ -302,11 +331,15 @@ class ChoiceEngine:
 
     def decision(self, context, offers):
         ids = {offer['id'] for offer in offers}
+        # A filtered photo pool often starts at p17, not p1. All examples must
+        # use an offered ID so the model cannot copy a nonexistent example ID.
+        prompt = PROMPT.replace('"p1"', json.dumps(offers[0]['id']))
+        prompt += '\nAllowed offer IDs: ' + json.dumps(sorted(ids))
         for attempt in range(2):
             try:
                 try:
                     raw = self.s['_refine_ai'](
-                        PROMPT + ('\nPrevious response was invalid. Return a complete, short JSON object only.' if attempt else ''),
+                        prompt + ('\nPrevious response was invalid. Use status selected, question or no_match; selected.id MUST be one of the allowed IDs.' if attempt else ''),
                         dict(request=context, offers=offers), tokens=2400, timeout=6)
                 except json.JSONDecodeError as exc:
                     raw = exc.doc
@@ -323,6 +356,8 @@ class ChoiceEngine:
                         and isinstance(choices, list)
                         and len({c.strip() for c in choices[:3] if isinstance(c, str) and c.strip()}) >= 2):
                     return value
+                print('CHOICE CONTRACT ' + json.dumps(dict(status=str(status)[:32],
+                      id=str(value.get('id'))[:16], allowed=sorted(ids), answered=bool(context['answers']))), flush=True)
                 raise ValueError('invalid_choice_contract')
             except (ValueError, TypeError) as exc:
                 print('CHOICE RESPONSE ' + json.dumps(dict(release=RELEASE, attempt=attempt + 1,
@@ -334,8 +369,14 @@ class ChoiceEngine:
         evaluated_count = len(candidates)
         if context['kind'] == 'image' and candidates:
             candidates = self.visual_candidates(context, candidates)
+        visual_summary = context.get('_visual_summary', {})
         context = {k:v for k,v in context.items() if not k.startswith('_')}
         if not candidates:
+            if visual_summary.get('unavailable'):
+                # Transport uncertainty is distinct from a product mismatch.
+                # Return a finite outcome, not a 503/retry cycle for the same pool.
+                return dict(ok=True, status='unavailable', reason='visual_incomplete',
+                            evaluated=evaluated_count, **visual_summary, release=RELEASE)
             reason = 'visual_mismatch' if evaluated_count else 'no_priced_offers'
             print('CHOICE RESULT ' + json.dumps(dict(release=RELEASE, status='no_match', reason=reason, evaluated=evaluated_count)), flush=True)
             return dict(ok=True, status='no_match', reason=reason, evaluated=evaluated_count, release=RELEASE)
@@ -351,7 +392,13 @@ class ChoiceEngine:
                                          'visual_axes', 'unknown_attributes') if k in row},
                                comparison_amount=fx,
                                comparison_currency=row.get('price_compare_currency') if fx else None))
-        response = self.decision(context, offers)
+        if (context['kind'] == 'image' and len(candidates) == 1
+                and not context['extra_specs'] and not context['answers']):
+            # Direct pixel comparison already found the sole eligible product;
+            # a second model call cannot improve its price, URL or identity.
+            response = dict(status='selected', id=candidates[0]['id'], match='suitable')
+        else:
+            response = self.decision(context, offers)
         if not isinstance(response, dict):
             raise ValueError('invalid_choice')
         if response.get('status') == 'question' and not context['answers'] and not context.get('skip_question'):
@@ -419,7 +466,8 @@ class ChoiceEngine:
                 try:
                     value = self.choose(context, candidates)
                     with self.lock:
-                        self.cache[key] = (time.monotonic() + 240, copy.deepcopy(value))
+                        if value.get('status') in ('selected', 'question'):
+                            self.cache[key] = (time.monotonic() + 240, copy.deepcopy(value))
                         while len(self.cache) > 128:
                             self.cache.pop(next(iter(self.cache)))
                     return value
@@ -433,7 +481,7 @@ class ChoiceEngine:
 
 
 def install_choice(app, services):
-    engine = ChoiceEngine(services)
+    engine = ChoiceEngine(services, getattr(app.state, 'product_media_inspector', None))
 
     @app.post('/api/choice')
     async def select_one(request: Request):
@@ -462,7 +510,9 @@ def install_choice(app, services):
             return await asyncio.wait_for(asyncio.shield(asyncio.wrap_future(future)), timeout=20)
         except Exception as exc:
             # Never label a price sort as an AI decision during an outage.
-            print('CHOICE ERROR ' + type(exc).__name__, flush=True)
+            code = str(exc) if str(exc) in ('busy', 'refinement_unavailable', 'invalid_choice',
+                                          'reference_image_unreadable') else 'provider_or_timeout'
+            print('CHOICE ERROR ' + json.dumps(dict(error=type(exc).__name__, reason=code)), flush=True)
             return JSONResponse(dict(ok=False, status='unavailable', error='choice_unavailable'), status_code=503)
 
     return engine
