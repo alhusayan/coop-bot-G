@@ -4,7 +4,8 @@ WORKDIR /app
 COPY package.json trial.json ./
 COPY scripts ./scripts
 COPY source ./source
-RUN node scripts/build.mjs
+COPY test-version ./test-version
+RUN node scripts/build.mjs && node scripts/build-test.mjs
 
 FROM public.ecr.aws/docker/library/node:22-alpine
 ENV NODE_ENV=production PORT=8080

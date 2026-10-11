@@ -1,0 +1,150 @@
+{
+  "version": "156.7.62",
+  "topics": [
+    {
+      "id": "search",
+      "en": {
+        "question": "How do I search with a photo or text?",
+        "answer": "Tap the camera to take or choose a clear product photo. For a text search, type the product name, brand or model, then tap the magnifying glass or Search on your keyboard. You can add details to a photo search. Try one product at a time with a clear background. Each new text or photo search uses one search credit."
+      },
+      "ar": {
+        "question": "شلون أبحث بالصورة أو بالنص؟",
+        "answer": "اضغط الكاميرا وصوّر المنتج أو اختر صورة واضحة له. للبحث بالنص، اكتب اسم المنتج أو الماركة أو الموديل، ثم اضغط العدسة أو زر البحث بالكيبورد. تقدر تضيف تفاصيل للبحث بالصورة. الأفضل يكون منتج واحد وخلفية واضحة. كل بحث جديد بالنص أو الصورة يستخدم رصيد بحث واحد."
+      },
+      "actions": [
+        "new_search"
+      ]
+    },
+    {
+      "id": "credits",
+      "en": {
+        "question": "How do search credits work?",
+        "answer": "Your first 10 searches are available without an account, subject to trial availability. Sign in with Google or Apple to link eligible remaining trial credits to your account and buy more. Current one-time packs: {packs}. Purchased credits do not expire. Any applicable tax and the final total appear at checkout. Help conversations do not use search credits."
+      },
+      "ar": {
+        "question": "شلون يشتغل رصيد البحث؟",
+        "answer": "أول 10 بحوث متاحة بدون حساب، حسب توفر التجربة. سجّل بحساب Google أو Apple لربط الرصيد التجريبي المتبقي المؤهل بحسابك وشراء رصيد إضافي. الباقات الحالية بدفعة واحدة: {packs}. الرصيد المشترى ما تنتهي صلاحيته. الضريبة إن وجدت والمبلغ النهائي يظهران عند الدفع. محادثة المساعدة ما تخصم من رصيد البحث."
+      },
+      "actions": [
+        "plans",
+        "usage"
+      ]
+    },
+    {
+      "id": "payment",
+      "en": {
+        "question": "I paid. Where are my credits?",
+        "answer": "Sign in with the same Findzia account used for payment. Open My account and choose Restore purchases, then check Searches remaining. If payment is still being verified, wait for its status before paying again. For help, email info@findzia.com with your purchase reference and a description of the issue. The assistant cannot inspect a payment, add credits or confirm a refund."
+      },
+      "ar": {
+        "question": "دفعت وما وصلني الرصيد، شسوي؟",
+        "answer": "سجّل الدخول بنفس حساب Findzia اللي استخدمته وقت الدفع. افتح حسابي واضغط استعادة المشتريات، ثم راجع عمليات البحث المتبقية. إذا الدفع قيد التحقق، انتظر ظهور حالته قبل ما تدفع مرة ثانية. إذا احتجت مساعدة، راسل info@findzia.com برقم مرجع الشراء ووصف المشكلة. المساعد ما يقدر يفحص دفعتك أو يضيف رصيد أو يؤكد استرجاع المبلغ."
+      },
+      "actions": [
+        "home",
+        "contact"
+      ]
+    },
+    {
+      "id": "markets",
+      "en": {
+        "question": "How do I change my market or language?",
+        "answer": "Tap the country flag to choose your market, language and currency. You can also find these preferences in Settings. Findzia compares offers in your selected market and global markets when available. The store confirms delivery coverage, shipping, availability and the final price. A global listing does not guarantee delivery to your address."
+      },
+      "ar": {
+        "question": "شلون أغيّر السوق أو اللغة؟",
+        "answer": "اضغط علم الدولة لاختيار السوق واللغة والعملة، أو ادخل الإعدادات. Findzia تعرض عروض السوق اللي اخترته وأسواق عالمية حسب المتاح. المتجر هو اللي يؤكد الشحن والتوفر والسعر النهائي. ظهور عرض عالمي مو ضمان إنه يوصل إلى عنوانك."
+      },
+      "actions": [
+        "settings"
+      ]
+    },
+    {
+      "id": "saved",
+      "en": {
+        "question": "Where are my saved products and searches?",
+        "answer": "Tap the bookmark on a product to save it. Open Menu → My activity for Saved products and History. These are stored in this browser, not synced across devices. Clearing browser data can remove them. Search history can be turned off in Settings; a photo search in History asks you to choose the photo again."
+      },
+      "ar": {
+        "question": "وين ألقى المنتجات المحفوظة وسجل البحث؟",
+        "answer": "اضغط علامة الحفظ على بطاقة المنتج. من القائمة افتح نشاطي، وبتلقى المحفوظات والسجل. هالمعلومات محفوظة في نفس المتصفح وما تتزامن بين الأجهزة. مسح بيانات المتصفح ممكن يمسحها. تقدر توقف حفظ سجل البحث من الإعدادات، والبحث بالصورة من السجل يطلب تختار الصورة من جديد."
+      },
+      "actions": [
+        "activity"
+      ]
+    },
+    {
+      "id": "refunds",
+      "en": {
+        "question": "How do purchases and refunds work?",
+        "answer": "Buy products directly from the retailer linked on the product card. Contact that retailer about delivery, returns or product refunds. Findzia sells search-credit packs. For a Paddle credit purchase, use the support link in your Paddle receipt or paddle.net; the applicable Paddle policy and your consumer rights govern refunds. For other payment providers, email info@findzia.com with your purchase reference. Check Findzia’s Refund Policy for details. The assistant cannot issue or promise a refund."
+      },
+      "ar": {
+        "question": "شلون الشراء والاسترجاع؟",
+        "answer": "شراء المنتجات يتم لدى المتجر الموجود في البطاقة؛ تواصل مع المتجر عن التوصيل أو إرجاع المنتج. Findzia تبيع باقات رصيد البحث. إذا اشتريت الرصيد عبر Paddle، استخدم رابط الدعم في إيصال Paddle أو paddle.net؛ تنطبق سياسة Paddle وحقوق المستهلك. للدفعات عبر مزوّد آخر، راسل info@findzia.com بمرجع الشراء. تفاصيل أكثر في سياسة الاسترجاع. المساعد ما يقدر ينفّذ أو يضمن استرجاع مبلغ."
+      },
+      "actions": [
+        "refund",
+        "contact"
+      ]
+    },
+    {
+      "id": "assistant",
+      "en": {
+        "question": "Can Findzia help me choose a product?",
+        "answer": "The AI Shopping Assistant helps you explore product needs and suggestions. After a search, the AI/sparkle control can help refine what matters to you. This Help & support assistant explains Findzia itself; it does not place orders, open retailer accounts or access your private account records. Verify product specifications, price and availability with the retailer."
+      },
+      "ar": {
+        "question": "تقدر Findzia تساعدني أختار منتج؟",
+        "answer": "مساعد التسوّق الذكي يساعدك تستكشف احتياجك واقتراحات المنتجات. بعد البحث، زر AI أو اللمعة يساعدك تحدد التفاصيل المهمة لك. مساعد المساعدة هنا يشرح Findzia نفسها؛ ما ينفّذ طلبات شراء ولا يفتح حسابات لدى المتاجر ولا يطّلع على بيانات حسابك الخاصة. تأكد من المواصفات والسعر والتوفر لدى المتجر."
+      },
+      "actions": [
+        "new_search"
+      ]
+    },
+    {
+      "id": "account",
+      "en": {
+        "question": "How do I sign in or manage my account?",
+        "answer": "Open My account and choose Google or Apple. If sign-in is unavailable or the connection fails, retry when the connection is restored. Use Account details to edit your display name and optional phone number. Your verified sign-in email comes from the provider; Findzia does not receive your Google or Apple password. Use Your search credits for your balance, search packs and purchase history."
+      },
+      "ar": {
+        "question": "شلون أسجّل أو أعدّل حسابي؟",
+        "answer": "افتح حسابي واختر Google أو Apple. إذا تسجيل الدخول غير متاح أو الاتصال فشل، حاول بعد ما يرجع الاتصال. من بيانات الحساب تقدر تعدّل الاسم ورقم الهاتف الاختياري. بريد الدخول الموثّق يأتي من مزوّد الحساب، وكلمة مرور Google أو Apple ما تصل إلى Findzia. قسم رصيد البحث يعرض الرصيد والباقات وسجل المشتريات."
+      },
+      "actions": [
+        "home",
+        "usage"
+      ]
+    },
+    {
+      "id": "privacy",
+      "en": {
+        "question": "What happens to my data?",
+        "answer": "Saved products, search history and notification preferences stay in this browser. Guest trial access uses a random browser identifier and guest token; clearing browser data may lose that access. Eligible remaining trial credits link to your account on sign-in. Search requests and uploaded images are sent to Findzia to retrieve offers. Support questions and recent chat context are sent to Findzia’s AI provider to generate replies; this chat stays only in the current page session and clears on reload or account change. Do not send passwords, card details or verification codes. See Privacy Policy for details."
+      },
+      "ar": {
+        "question": "شلون تتعاملون مع بياناتي؟",
+        "answer": "المحفوظات وسجل البحث وتفضيلات الإشعارات تبقى في هالمتصفح. رصيد الضيف يستخدم معرّف متصفح عشوائي ومفتاح وصول؛ مسح بيانات المتصفح ممكن يفقدك الوصول له. عند الدخول نربط المتبقي المؤهل بحسابك. طلبات البحث والصور تُرسل إلى Findzia لجلب العروض. أسئلة الدعم وسياق المحادثة الأخير تُرسل إلى مزوّد الذكاء الاصطناعي لإعداد الرد. المحادثة تبقى في جلسة الصفحة الحالية وتنمسح عند تحديث الصفحة أو تغيير الحساب. لا ترسل كلمات مرور أو بيانات بطاقة أو رموز تحقق. راجع سياسة الخصوصية للتفاصيل."
+      },
+      "actions": [
+        "privacy"
+      ]
+    },
+    {
+      "id": "results",
+      "en": {
+        "question": "Why are some results or photos missing?",
+        "answer": "Results depend on the product, market, retailer and current availability. Try a clearer photo or a more specific product name and model, and check your chosen market. Findzia checks card images to avoid standalone logos and text-only pictures; a result can be withheld if no suitable product photo is verified. AI checks can make mistakes. Retailer pages have the final product details and current price. If search fails, check your connection and retry; contact info@findzia.com if the problem continues."
+      },
+      "ar": {
+        "question": "ليش بعض النتائج أو الصور ما تظهر؟",
+        "answer": "النتائج تختلف حسب المنتج والسوق والمتجر والتوفر. جرّب صورة أوضح أو اسمًا وموديلًا أدق، وراجع السوق المختار. Findzia تفحص صور البطاقات لاستبعاد الشعارات المنفصلة والصور اللي كلها كلام؛ ممكن ما تظهر نتيجة إذا ما تأكدت صورة مناسبة للمنتج. فحص الذكاء الاصطناعي ممكن يخطئ. تفاصيل المتجر وسعره الحالي هي المرجع. إذا البحث فشل، تأكد من الاتصال وحاول مجددًا، وإذا استمرت المشكلة تواصل مع info@findzia.com."
+      },
+      "actions": [
+        "new_search",
+        "contact"
+      ]
+    }
+  ]
+}

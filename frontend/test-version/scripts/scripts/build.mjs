@@ -1,0 +1,71 @@
+import { readFileSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { resolve, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const base = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const src = resolve(base, 'source'), dest = resolve(base, 'public');
+const version = '156.7.33', api = 'https://api.findzia.com';
+// Preserve the live section scope to avoid unnecessary DOM/storage changes.
+const section = 'template--19963721449543__findzia_home_h4wBLq';
+const expected = 'c15558d3e155e2031ef39b32775050c283b545d8575643181af3c3b9f03d46a3';
+const hash = b => createHash('sha256').update(b).digest('hex');
+const read = p => readFileSync(resolve(src, p));
+const routes = {};
+rmSync(dest, {recursive:true, force:true}); mkdirSync(dest, {recursive:true});
+function emit(url, file, bytes, type, immutable=false) {
+  bytes = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
+  const path = resolve(dest,file); mkdirSync(dirname(path),{recursive:true}); writeFileSync(path,bytes);
+  routes[url] = {file,sha256:hash(bytes),type,immutable}; return url;
+}
+const assets = new Map();
+for (const name of ['findzia-account.js','findzia-billing.js','findzia-filters.js','findzia-i18n.js','findzia-shell.js','findzia-product-details.css','findzia-migration.js','findzia-standalone.css','findzia-motion.js','findzia-motion.css']) {
+  const bytes=read(name), ext=name.split('.').at(-1), file='assets/'+name.replace('.'+ext,'.'+hash(bytes).slice(0,16)+'.'+ext);
+  assets.set(name,emit('/'+file,file,bytes,ext,true));
+}
+const association=read('apple-developer-merchantid-domain-association');
+if (association.length!==9094 || hash(association)!==expected) throw Error('Apple Pay file must match the original bytes. Do not trim or edit it.');
+emit('/.well-known/apple-developer-merchantid-domain-association','.well-known/apple-developer-merchantid-domain-association',association,'txt');
+
+let home=read('findzia-home.liquid').toString('utf8');
+home=home.replace(/{% comment %}[\s\S]*?{% endcomment %}/g,'').replace(/{% schema %}[\s\S]*?{% endschema %}/g,'');
+const values = new Map([
+  ['{{ section.id }}',section],
+  ["{{ section.settings.api_base_url | default: 'https://coop-bot-g-production.up.railway.app' | json }}",JSON.stringify(api)],
+  ['{{ localization.country.iso_code | json }}','""'],
+  ['{{ localization.country.name | json }}','""'],
+  ["{{ 'now' | date: '%Y' }}",'2026'],
+  ["{{ shop.terms_of_service.url | default: '/policies/terms-of-service' | escape }}",'/policies/terms-of-service'],
+  ["{{ shop.privacy_policy.url | default: '/policies/privacy-policy' | escape }}",'/policies/privacy-policy'],
+  ["{{ shop.refund_policy.url | default: '/policies/refund-policy' | escape }}",'/policies/refund-policy'],
+]);
+for (const [token,value] of values) home=home.split(token).join(value);
+home=home.replace(/{{ '([^']+)' \| asset_url }}/g,(_,name)=>{
+  if(!assets.has(name))throw Error('Unknown asset '+name); return assets.get(name);
+});
+if (/\{[{%]/.test(home)) throw Error('Unresolved Liquid template expression');
+
+const baseline=`*,*::before,*::after{box-sizing:border-box}html{font-size:16px;-webkit-text-size-adjust:100%}body{margin:0;background:#f7f7f3;color:#24322c;font:16px/1.5 Arial,sans-serif}button,input,select,textarea{font:inherit}button{cursor:pointer}img,svg{vertical-align:middle}button:disabled{cursor:default}[hidden]{display:none!important}body:has(.fz-home[data-theme="dark"]){background:#101b17;color:#eef2ed}a{color:inherit}dialog{color:inherit}body>main{min-width:0}button:focus-visible,a:focus-visible{outline:2px solid #b97944;outline-offset:3px}`;
+const legalCSS=`.legal{max-width:820px;margin:auto;padding:32px 24px 64px;line-height:1.8}.legal header{display:flex;justify-content:space-between;align-items:center;gap:24px;margin-bottom:40px}.legal .brand{font-family:Georgia,serif;font-size:36px;text-decoration:none;letter-spacing:-1px}.legal article{overflow-wrap:anywhere}.legal h1{font-size:30px;line-height:1.25}.legal h2,.legal h3{line-height:1.4;margin-top:32px}.legal article a{color:#8b4f25}.legal footer{margin-top:40px;border-top:1px solid #dce1da;padding-top:20px}.legal footer nav{display:flex;flex-wrap:wrap;gap:16px;font-size:14px}@media(prefers-color-scheme:dark){body:has(.legal){background:#101b17;color:#eef2ed}.legal article a{color:#f5c291}.legal footer{border-color:#3c4a41}}`;
+function page(body,title,canonical,extraStyle='') {
+  return `<!doctype html>\n<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="description" content="Find products with a photo or a few words. Compare local and global stores with Findzia."><meta name="theme-color" content="#101b17"><title>${title}</title><link rel="canonical" href="https://findzia.com${canonical}"><link rel="icon" href="/favicon.svg" type="image/svg+xml"><link rel="preconnect" href="https://api.findzia.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><style>${baseline}${extraStyle}</style><link rel="stylesheet" href="${assets.get('findzia-motion.css')}"><script src="${assets.get('findzia-motion.js')}" defer></script></head><body>${body}</body></html>\n`;
+}
+// The wrapper IDs match the original scoped CSS; no Shopify runtime is loaded.
+emit('/','index.html',page(`<link rel="stylesheet" href="${assets.get('findzia-standalone.css')}"><script src="${assets.get('findzia-migration.js')}"></script><main id="MainContent"><div class="shopify-section section-findzia-home" id="shopify-section-${section}">${home}</div></main>`,'Findzia — Find your product instantly','/'),'html');
+// Keep known landing links working; unknown routes remain a real 404.
+routes['/index.html']=routes['/']; routes['/pages/findzia']=routes['/'];
+const policies=[['terms-of-service','Terms of Service'],['privacy-policy','Privacy Policy'],['refund-policy','Refund and Cancellation Policy']];
+const nav=policies.map(([slug,title])=>`<a href="/policies/${slug}">${title}</a>`).join('');
+for (const [slug,title] of policies) {
+  const body=read('policies/'+slug+'.html').toString('utf8');
+  const html=page(`<main class="legal"><header><a class="brand" href="/">Findzia</a><a href="/">Back to search</a></header><article>${body}</article><footer><nav>${nav}</nav></footer></main>`,title+' — Findzia','/policies/'+slug,legalCSS);
+  emit('/policies/'+slug,'policies/'+slug+'.html',html,'html');
+  routes['/policies/'+slug+'/']=routes['/policies/'+slug];
+}
+emit('/404.html','404.html',page('<main class="legal"><h1>Page not found</h1><p><a href="/">Back to Findzia</a></p></main>','Page not found — Findzia','/',legalCSS),'html');
+emit('/favicon.svg','favicon.svg','<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="15" fill="#20352a"/><text x="14" y="48" fill="#f7f7f3" font-family="Georgia,serif" font-size="49">F</text><circle cx="49" cy="16" r="4" fill="#ef9d57"/></svg>','svg');
+emit('/robots.txt','robots.txt','User-agent: *\nAllow: /\nDisallow: /healthz\nSitemap: https://findzia.com/sitemap.xml\n','txt');
+emit('/sitemap.xml','sitemap.xml','<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'+['/',...policies.map(([s])=>'/policies/'+s)].map(p=>'<url><loc>https://findzia.com'+p+'</loc></url>').join('')+'</urlset>','xml');
+emit('/healthz','health.json',JSON.stringify({ok:true,service:'findzia-frontend',version}),'json');
+writeFileSync(resolve(dest,'release.json'),JSON.stringify({version,api,section,apple_pay_file_sha256:expected,routes},null,2)+'\n');
+console.log(`Built Findzia ${version}: ${Object.keys(routes).length} routes, original Apple Pay file ${association.length} bytes.`);

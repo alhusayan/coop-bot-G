@@ -7760,6 +7760,9 @@ def _market_offer_allowed(item, market):
         actual = 'cn'
     else:
         actual = evidence.get('country') or _explicit_market_country(item)
+    if not actual:
+        codes = _explicit_currency_codes(item)
+        actual = 'cn' if codes == {'CNY'} else 'us' if codes == {'USD'} else ''
     if not actual and (item.get('market_scope') == 'global' or item.get('market') in ('global', 'us', 'china')
                        or item.get('market_rank') in (1, 2)):
         return any(_global_catalog_evidence(item, cc) for cc in GLOBAL_MARKET_STORES)
@@ -7826,7 +7829,7 @@ def _merchant_url_market(url):
     return {}
 
 
-def _web_capture_market_context(row, market):
+def _web_apply_market_context(row, market):
     """Keep every card, but derive country/scope again at publication time."""
     row = dict(row or {})
     evidence = _merchant_url_market(row.get('url') or row.get('link'))
@@ -7853,18 +7856,6 @@ def _web_capture_market_context(row, market):
                market=('local' if rank == 0 else 'global') if selected else _web_market_label(rank),
                market_evidence=evidence['evidence'], catalog_kind=evidence['kind'])
     return row
-
-def _web_apply_market_context(row, market):
-    row = _web_capture_market_context(row, market)
-    # Preserve retrieval/pricing inputs. Attach independent merchant proof for
-    # the final response and every frontend path (including refinement/history).
-    catalog = globals().get('_FZ_CATALOG')
-    if catalog is not None:
-        verified = catalog.markets.classify(row, (market or {}).get('country', ''))
-        for key in ('merchant_country', 'merchant_country_evidence', 'market_policy'):
-            row[key] = verified[key]
-    return row
-
 
 def _explicit_market_country(item):
     for key in ('market_country', 'country'):
@@ -14589,6 +14580,12 @@ def _web_market_scope_guard(row, market_snapshot):
         return ('local', 'captured_local_lane', 99)
     if rank in (1, 2):
         return ('global', 'captured_global_lane', 99)
+    local_codes = set(COUNTRY_CURRENCY_CODES.get(cc, ()))
+    if local_codes and any(re.search(rf'\b{re.escape(code)}\b', price) for code in local_codes):
+        return ('local', 'local_currency', 98)
+    currency_codes = _explicit_currency_codes({'price': price, 'title': row.get('title'), 'source': store, 'link': url})
+    if currency_codes and not (currency_codes & local_codes):
+        return ('global', 'foreign_currency', 96)
     return None
 
 def _web_match_guard_conflict_axis(match_guard):
@@ -17663,8 +17660,8 @@ PRODUCT-IDENTITY VERIFICATION:
 AXES: category, subtype, intended_use, audience, function, product_role, mounting, installation, support_base, power_source, orientation, brand, product_name, model, variant, structure, components, form_factor, silhouette, proportions, shape_geometry, material, texture, finish, color, pattern, distinctive_features, size_class, dimensions, quantity_bundle, configuration, compatibility, condition, text_identity, visible_markings, alphanumeric_identity.
 
 MARKET:
-- local: merchant country established by authoritative merchant/storefront evidence. Currency, display language, search targeting and delivery destination never establish merchant country.
-- global: merchant country established to be outside the user's country. If uncertain, report market_reason=uncertain; publication applies an independent evidence gate.
+- local: a storefront/offer localized to the user's country by country domain/path, local currency/branch, or localized global storefront that sells there.
+- global: a foreign/default international storefront not localized to the user's country. A globally known merchant can still be local when its listing is localized.
 
 LOCKS:
 - A non-empty locked_match or locked_market is proven. Copy it exactly and classify only the unlocked axis.
@@ -19745,9 +19742,6 @@ def _web_product_page_metadata(html, base_url):
     if _web_merchant_access_reason(200, {}, html, base_url):
         return {'title': '', 'image': '', 'is_product': False}
     soup = BeautifulSoup(html or '', 'html.parser')
-    catalog = globals().get('_FZ_CATALOG')
-    if catalog is not None:
-        catalog.markets.observe_document(base_url, soup)
     data = {'title': '', 'image': '', 'is_product': False}
     def same(value):
         return bool(value) and _fz_same_image_listing(urllib.parse.urljoin(base_url, str(value)), base_url)
@@ -20878,13 +20872,7 @@ def _web_price_recovery_priority(row):
     pictured = bool(_web_offer_image_candidates(row))
     missing = 0 if pictured and not priced else 1 if priced and not pictured else 2
     reviewed = row.get('classification_final') and row.get('identity_review_status') in ('completed', 'not_required')
-    match = str(row.get('result_section') or row.get('match_type') or '').lower()
-    tier = 2 if match == 'exact' else 1 if match == 'similar' else 0
-    score = next((float(row[k]) for k in ('identity_match_percentage', 'match_percentage')
-                  if type(row.get(k)) in (int, float) and 0 <= row[k] <= 100), -1.)
-    if score < 0 and type(row.get('match_score')) in (int, float) and 0 <= row['match_score'] <= 1:
-        score = 100 * row['match_score']
-    return (missing, not bool(reviewed), -tier, -score)
+    return (missing, not bool(reviewed))
 
 
 def _web_automatic_price_batches(rows, attempted_rows=None, market=None):
@@ -21147,11 +21135,6 @@ def _web_targeted_price_updates(entries, lang, market, *, image_only=False):
         ids = [v for k, v in urllib.parse.parse_qsl(parsed.query)
                if k.lower() in {'id', 'itemid', 'item_id', 'goods_id', 'goodsid', 'offerid', 'sku', 'skuid', 'sku_id'}]
         path_ids = re.findall(r'(?:/item/|/offer/|/product/|-p-|-g-|/)(\d{6,})(?=[./-]|$)', parsed.path)
-        ikea = (parsed.hostname in ('ikea.com', 'www.ikea.com') and
-                re.search(r'^/[a-z]{2}/[a-z]{2}/p/.+-(s?\d{8})/?$', parsed.path, re.I))
-        if ikea:
-            term = 'site:' + parsed.netloc + '/' + parsed.path.strip('/').split('/')[0]
-            path_ids = [ikea.group(1)]
         noon = _web_noon_product_identity(key)
         if noon:
             term = 'site:' + parsed.netloc + '/' + parsed.path.strip('/').split('/')[0]
@@ -21169,7 +21152,7 @@ def _web_targeted_price_updates(entries, lang, market, *, image_only=False):
         else:
             title = re.sub(r'["()\r\n]', ' ', str(row.get('raw_title') or row.get('title') or ''))
             term += ' ' + title[:120].strip()
-        if not image_only and not _web_row_has_numeric_price(row) and (noon or ikea or _web_shein_product_id(key)):
+        if not image_only and not _web_row_has_numeric_price(row) and (noon or _web_shein_product_id(key)):
             term += ' price'
         query_key = ('(' + term + ')', _web_listing_price_country(row, market))
         terms.append(query_key)
@@ -28675,21 +28658,21 @@ async def web_api_search_stream(request: Request):
     client_name = re.sub('[^a-z0-9_-]+', '', str(payload.get('client') or 'web').strip().lower())[:24] or 'web'
 
     if TEXT_FAST_ENABLED or payload.get("photo_text_refinement") is True:
-        return _FZ_CATALOG.wrap_response(StreamingResponse(_web_stream_text_fast(query, country, lang, selected_option, request, original_query, force_specific),
+        return StreamingResponse(_web_stream_text_fast(query, country, lang, selected_option, request, original_query, force_specific),
             media_type='application/x-ndjson',
-            headers={'Cache-Control':'no-cache, no-transform','X-Accel-Buffering':'no'}), opted_in=payload.get('catalog_live') is True, preview=payload.get('catalog_preview') is True, query=(selected_option or query), country=country, lang=lang)
+            headers={'Cache-Control':'no-cache, no-transform','X-Accel-Buffering':'no'})
     if TEXT_LENS_ENABLED:
-        return _FZ_CATALOG.wrap_response(StreamingResponse(_web_stream_text_lens(query, country, lang, selected_option, request, force_specific),
+        return StreamingResponse(_web_stream_text_lens(query, country, lang, selected_option, request, force_specific),
             media_type='application/x-ndjson',
-            headers={'Cache-Control':'no-cache, no-transform','X-Accel-Buffering':'no'}), opted_in=payload.get('catalog_live') is True, preview=payload.get('catalog_preview') is True, query=(selected_option or query), country=country, lang=lang)
+            headers={'Cache-Control':'no-cache, no-transform','X-Accel-Buffering':'no'})
     if TEXT_GOOGLE_WEB_ENABLED:
-        return _FZ_CATALOG.wrap_response(StreamingResponse(_web_stream_google_text(query, country, lang, selected_option, request, original_query, force_specific),
+        return StreamingResponse(_web_stream_google_text(query, country, lang, selected_option, request, original_query, force_specific),
             media_type='application/x-ndjson',
-            headers={'Cache-Control':'no-cache, no-transform','X-Accel-Buffering':'no'}), opted_in=payload.get('catalog_live') is True, preview=payload.get('catalog_preview') is True, query=(selected_option or query), country=country, lang=lang)
+            headers={'Cache-Control':'no-cache, no-transform','X-Accel-Buffering':'no'})
     if TEXT_SHOPPING_COPY_ENABLED:
-        return _FZ_CATALOG.wrap_response(StreamingResponse(_web_stream_shopping_text(query, country, lang, selected_option, request, payload.get('sort_by'), original_query, force_specific),
+        return StreamingResponse(_web_stream_shopping_text(query, country, lang, selected_option, request, payload.get('sort_by'), original_query, force_specific),
             media_type='application/x-ndjson',
-            headers={'Cache-Control':'no-cache, no-transform','X-Accel-Buffering':'no'}), opted_in=payload.get('catalog_live') is True, preview=payload.get('catalog_preview') is True, query=(selected_option or query), country=country, lang=lang)
+            headers={'Cache-Control':'no-cache, no-transform','X-Accel-Buffering':'no'})
 
     async def _generator():
         started = time.time()
@@ -29007,7 +28990,7 @@ async def web_api_search_stream(request: Request):
                 yield _web_stream_event({'event': 'done', 'count': len(sent), 'partial': True, 'elapsed_ms': int((time.time() - started) * 1000)})
             else:
                 yield _web_stream_event({'event': 'error', 'error': 'search_failed', 'elapsed_ms': int((time.time() - started) * 1000)})
-    return _FZ_CATALOG.wrap_response(StreamingResponse(_web_with_live_prices(_web_with_local_discovery(_generator(), lang, country), lang, country), media_type='application/x-ndjson', headers={'Cache-Control': 'no-cache, no-transform', 'X-Accel-Buffering': 'no', 'Connection': 'keep-alive'}), opted_in=payload.get('catalog_live') is True, preview=payload.get('catalog_preview') is True, query=(selected_option or query), country=country, lang=lang)
+    return StreamingResponse(_web_with_live_prices(_web_with_local_discovery(_generator(), lang, country), lang, country), media_type='application/x-ndjson', headers={'Cache-Control': 'no-cache, no-transform', 'X-Accel-Buffering': 'no', 'Connection': 'keep-alive'})
 
 def _web_normalize_uploaded_image_bytes(image_bytes, mime):
     """Bound decoding and normalize orientation/colour without changing product detail."""
@@ -30464,7 +30447,7 @@ async def web_api_image_search_stream(request: Request):
     country, country_source = await asyncio.to_thread(_web_resolve_request_country, request, payload.get('country'))
     caption = _web_image_caption(payload)
 
-    return _FZ_CATALOG.wrap_response(_web_image_stream_response(image_b64, mime, caption, country, lang), opted_in=payload.get('catalog_live') is True, preview=payload.get('catalog_preview') is True, query=caption, country=country, lang=lang, image_b64=image_b64, mime=mime)
+    return _web_image_stream_response(image_b64, mime, caption, country, lang)
 
 @app.post('/api/prices/stream')
 async def web_api_prices_stream(request: Request):
@@ -34867,13 +34850,3 @@ app.add_middleware(_FindziaImageTiming)
 # Findzia One: selection used by the unlisted trial frontend only.
 from findzia_choice import install_choice as _install_findzia_choice
 _FZ_ONE_CHOICE = _install_findzia_choice(app, globals())
-
-
-# Official live catalog source: no separate request or additional credit charge.
-from findzia_shopify_catalog import install_catalog as _install_shopify_catalog
-_FZ_CATALOG = _install_shopify_catalog(app, COUNTRY_NAMES, COUNTRY_MAJOR_STORE_DOMAINS)
-
-
-# Isolated live discovery trial, separate from paid search and photo results.
-from findzia_discover import install_discover as _install_findzia_discover
-_FZ_DISCOVER = _install_findzia_discover(app, COUNTRY_NAMES, globals())

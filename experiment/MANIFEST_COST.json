@@ -1,0 +1,21 @@
+{
+  "build": "v128.5.42.48-cost-fix",
+  "date": "2026-10-04",
+  "repository": "alhusayan/coop-bot-G",
+  "branch": "main",
+  "base_commit": "f26a73fb3e78d79be18bc7ba164694820970ca75",
+  "deployed": false,
+  "tests_passed": 81,
+  "files": {
+    "main.py": {
+      "sha256": "6edf00576fa49d3e3b6144c5170ae55c6d90b2b2df68a005734e87a8dcd49c77",
+      "bytes": 2077382,
+      "base_git_blob": "b822f482c7012e4cd9fb3a8291dcfd2643d2ab9a"
+    },
+    "findzia_searchapi.py": {
+      "sha256": "fc1844cc81b25429b0fd1112e73963ce4be29e2285febe81090d98381f913fdb",
+      "bytes": 23898,
+      "base_git_blob": "f6b661dc006940dd0ef2ae114200aeef918e685e"
+    }
+  }
+}

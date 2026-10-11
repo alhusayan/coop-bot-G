@@ -1,0 +1,21 @@
+{
+  "release": "156.7.12",
+  "backend_tests_passed": 40,
+  "frontend_test_groups_passed": 10,
+  "previous_integration_groups_passed": 20,
+  "provider_calls": "simulated",
+  "apple_pay_live_tested": false,
+  "safari_live_tested": false,
+  "deployed": false,
+  "domain_file_check": {
+    "checked_on": "2026-09-30",
+    "domain": "findzia.com",
+    "matches_supplied_myfatoorah_file": false
+  },
+  "changes": [
+    "Embedded card checkout restored",
+    "Separate own-origin Apple Pay page with actual domain registration gate",
+    "Single-intent temporary credentials; no account token in URL",
+    "Retained existing invoice recovery, amount and credit-grant checks"
+  ]
+}
