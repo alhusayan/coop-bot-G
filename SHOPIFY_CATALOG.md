@@ -179,3 +179,23 @@ Kuwait storefronts and LetsTango as UAE, independently of their KWD prices:
 - https://www.letstango.com/pages/contact-us
 These storefronts now participate in their selected country's local filter and
 other countries' global filter while preserving the Similar view.
+
+## Original homepage merchant classification fix (2026-10-11 Kuwait)
+
+OZ offers were unknown geography, not excluded because of similarity. Both
+`ozfactory.net` and its verified redirect alias `orderozmeat.com` identify the
+Kuwait storefront. This covers all retrieval sources and output events, including
+previous server-cached rows, while preserving independent match labels. Verified:
+- https://www.ozfactory.net/pages/contact (Shuwaikh Industrial, Kuwait address)
+- https://orderozmeat.com/ (redirects to https://www.ozfactory.net/ar)
+
+Unknown product-page geography can additionally use the merchant's explicit
+structured address during existing product metadata validation. Only top-level
+store/organization entities tied to the same host qualify; nested product brands,
+manufacturers, reviews, and shipping destinations are excluded. Exact supported
+country names or ISO codes are accepted. National storefront rules take priority.
+Facts are bound to the exact page (including query) and expire after one day;
+conflicting countries abstain. The bounded in-memory registry retains only country
+facts, never product content. It adds no fetch, no wait, and no provider call.
+The frontend accepts this independent evidence across source and similarity tabs.
+Pages without qualifying evidence still remain unknown.

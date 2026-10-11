@@ -1,5 +1,9 @@
 """Display geography with evidence independent of currency and search targeting."""
-from urllib.parse import urlsplit
+import json
+import time
+from collections import OrderedDict
+from threading import RLock
+from urllib.parse import urlsplit, urljoin
 
 POLICY = 'merchant-evidence-v2'
 # These ccTLDs are commonly used as generic domains, not merchant locations.
@@ -8,7 +12,8 @@ GENERIC_CCTLDS = {'ai', 'io', 'co', 'me', 'tv', 'cc', 'fm', 'ly', 'to', 'so', 'w
 # Independently verified storefronts, not currency/delivery-country guesses.
 # Evidence and review date are recorded in SHOPIFY_CATALOG.md.
 VERIFIED_STORES = {'rullart.com': 'kw', 'karazonline.com': 'kw',
-                   'prosportskw.com': 'kw', 'thebr.com': 'kw', 'letstango.com': 'ae'}
+                   'prosportskw.com': 'kw', 'thebr.com': 'kw', 'letstango.com': 'ae',
+                   'ozfactory.net': 'kw', 'orderozmeat.com': 'kw'}
 # Country-specific hosts must be matched exactly: the Kuwait root must never
 # turn a different national storefront (or an unreviewed subdomain) into Kuwait.
 STOREFRONT_HOSTS = {
@@ -67,6 +72,14 @@ STOREFRONT_PATHS = {
 class MerchantMarkets:
     def __init__(self, countries, stores=None):
         self.countries = {str(c).lower() for c in countries}
+        self.country_codes = {c: c for c in self.countries}
+        if isinstance(countries, dict):
+            self.country_codes.update({str(name).strip().lower(): str(cc).lower()
+                                       for cc, name in countries.items()})
+        # Only small country facts from already-fetched merchant pages. Never
+        # retain product/catalog content or add a request to the search path.
+        self.addresses = OrderedDict()
+        self.address_lock = RLock()
         self.stores = {}
         for host, country in VERIFIED_STORES.items():
             if country in self.countries:
@@ -76,6 +89,80 @@ class MerchantMarkets:
                 host = str(domain).lower().removeprefix('www.').strip('/')
                 if '/' not in host:
                     self.stores.setdefault(host, set()).add(country.lower())
+
+    def observe_document(self, page_url, soup):
+        """Read explicit storefront addresses during existing page validation.
+
+        Bind evidence to the exact page: a headquarters address on one page
+        must not become proof for other national branches on the same host.
+        Manufacturer/brand, shipping destination and arbitrary nested addresses
+        are deliberately excluded. Missing/ambiguous evidence remains unknown.
+        """
+        key = self.page_key(page_url)
+        if not key:
+            return
+        host = urlsplit(key).hostname
+        found = set()
+        for script in soup.find_all('script', type='application/ld+json')[:12]:
+            try:
+                root = json.loads(script.string or script.get_text() or '')
+            except (ValueError, TypeError):
+                continue
+            queue = list(root) if isinstance(root, list) else [root]
+            position = 0
+            while position < len(queue) and position < 200:
+                node = queue[position]
+                position += 1
+                if not isinstance(node, dict):
+                    continue
+                graph = node.get('@graph')
+                if isinstance(graph, list):
+                    # Only top-level entities; never descend into brand,
+                    # manufacturer, reviews, shippingDetails or areaServed.
+                    queue.extend(graph[:200])
+                kinds = node.get('@type', [])
+                kinds = kinds if isinstance(kinds, list) else [kinds]
+                if not any(str(t).rsplit('/', 1)[-1] in
+                           ('Store', 'OnlineStore', 'LocalBusiness', 'GroceryStore',
+                            'FoodEstablishment', 'Organization') for t in kinds):
+                    continue
+                identity = self.page_key(urljoin(page_url, str(node.get('url') or node.get('@id') or '')))
+                if not (node.get('url') or node.get('@id')) or not identity or urlsplit(identity).hostname != host:
+                    continue
+                addresses = node.get('address', [])
+                addresses = addresses if isinstance(addresses, list) else [addresses]
+                for address in addresses:
+                    if not isinstance(address, dict):
+                        continue
+                    cc = address.get('addressCountry')
+                    if isinstance(cc, dict):
+                        cc = cc.get('identifier') or cc.get('name')
+                    cc = str(cc or '').strip().lower()
+                    cc = 'gb' if cc == 'uk' else cc
+                    # Exact ISO codes/country names from our country table;
+                    # no substring, AI, free-text or currency inference.
+                    if cc in self.country_codes:
+                        found.add(self.country_codes[cc])
+        if found:
+            with self.address_lock:
+                previous = self.addresses.get(key)
+                if previous and time.monotonic() - previous[1] < 86400:
+                    found.update(previous[0])
+                self.addresses[key] = (frozenset(found), time.monotonic())
+                self.addresses.move_to_end(key)
+                while len(self.addresses) > 2048:
+                    self.addresses.popitem(last=False)
+
+    @staticmethod
+    def page_key(value):
+        try:
+            parsed = urlsplit(value)
+            if parsed.scheme not in ('http', 'https') or not parsed.hostname or parsed.username or parsed.password:
+                return ''
+            host = parsed.hostname.lower().removeprefix('www.').rstrip('.')
+            return parsed._replace(netloc=host, fragment='').geturl()
+        except (ValueError, TypeError):
+            return ''
 
     def evidence(self, row):
         # This marker is assigned only by our provider adapter after a successful
@@ -115,6 +202,11 @@ class MerchantMarkets:
             _, values = max(matches, key=lambda x: len(x[0]))
             if len(values) == 1:
                 return next(iter(values)), 'registered_storefront'
+        key = self.page_key(row.get('url') or row.get('link') or '')
+        with self.address_lock:
+            address = self.addresses.get(key)
+            if address and time.monotonic() - address[1] < 86400 and len(address[0]) == 1:
+                return next(iter(address[0])), 'merchant_address'
         return '', ''
 
     def classify(self, row, destination):

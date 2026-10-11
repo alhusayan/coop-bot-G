@@ -19745,6 +19745,9 @@ def _web_product_page_metadata(html, base_url):
     if _web_merchant_access_reason(200, {}, html, base_url):
         return {'title': '', 'image': '', 'is_product': False}
     soup = BeautifulSoup(html or '', 'html.parser')
+    catalog = globals().get('_FZ_CATALOG')
+    if catalog is not None:
+        catalog.markets.observe_document(base_url, soup)
     data = {'title': '', 'image': '', 'is_product': False}
     def same(value):
         return bool(value) and _fz_same_image_listing(urllib.parse.urljoin(base_url, str(value)), base_url)

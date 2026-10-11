@@ -60,7 +60,7 @@
     const out={...row};
     // Legacy prices, search lanes and locale paths are not origin evidence.
     const proof=row.market_policy==='merchant-evidence-v2'&&
-      ['shopify_origin_filter','registered_storefront','country_domain'].includes(row.merchant_country_evidence);
+      ['shopify_origin_filter','registered_storefront','country_domain','merchant_address'].includes(row.merchant_country_evidence);
     const origin=proof?String(row.merchant_country||'').toUpperCase():'';
     const valid=/^[A-Z]{2}$/.test(origin);
     out.market_scope=valid?(origin===String(country).toUpperCase()?'local':'global'):'unknown';

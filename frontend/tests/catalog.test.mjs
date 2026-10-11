@@ -273,3 +273,25 @@ for(const file of ['findzia-home.liquid','findzia-one.liquid']){
   const url='https://rullart.com/en/product/daily-prayer-set/prayer-set-pink-co-00076';assert.equal(c.et({url}),url);
  });
 }
+
+test('original home: OZ from both sources stays in Kuwait and Similar, with one card in All',()=>{
+ const script="import json; from findzia_market_evidence import MerchantMarkets; m=MerchantMarkets(['kw','sa','us']); print(json.dumps([m.classify(dict(url=url,source=source,match_type='visual_similarity',price='2.750 KWD',title='OZ Burger',image='https://cdn.example/oz.jpg'),'kw') for url,source in [('https://www.ozfactory.net/products/burger','google_lens'),('https://orderozmeat.com/products/box','shopify_catalog')]]))";
+ const run=spawnSync(process.env.FINDZIA_TEST_PYTHON||'python',['-c',script],{cwd:new URL('../../',import.meta.url),encoding:'utf8'});
+ assert.equal(run.status,0,run.stderr);
+ const [lens,catalog]=JSON.parse(run.stdout),{root,send,api}=setup();
+ send(event([catalog,{...lens,source:'shopify_catalog'}]));
+ const address={...lens,url:'https://independent.example/products/1',merchant_country_evidence:'merchant_address'};
+ const rows=api.combine(root,[lens,address]);
+ const source=readFileSync(new URL('../source/findzia-home.liquid',import.meta.url),'utf8');
+ const c={fzIsSocial:()=>false,fzPhotoAlternative:()=>false,O:'all'};
+ vm.createContext(c);vm.runInContext(source.split('\n').filter(line=>/^function (fzIsSimilar|fzMatchesResultFilter)\(/.test(line)).join('\n'),c);
+ for(const filter of ['all','local','alternative']){
+  c.O=filter;assert.equal(rows.filter(c.fzMatchesResultFilter).length,3,filter);
+ }
+ c.O='global';assert.equal(rows.filter(c.fzMatchesResultFilter).length,0);
+ assert.equal(rows.filter(r=>r.url===lens.url).length,1);
+ assert.ok(rows.every(r=>r.merchant_country==='KW'));
+ const sa=rows.map(r=>api.displayMarket(r,'SA'));c.O='local';
+ assert.equal(sa.filter(c.fzMatchesResultFilter).length,0);
+ c.O='global';assert.equal(sa.filter(c.fzMatchesResultFilter).length,3);
+});
