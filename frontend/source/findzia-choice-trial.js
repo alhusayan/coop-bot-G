@@ -1,4 +1,4 @@
-/* FINDZIA_CHOICE_RELEASE=157.0.12 — photo identity is independent of price availability. */
+/* FINDZIA_CHOICE_RELEASE=157.0.13 — photo identity is independent of price availability. */
 (() => {
   'use strict';
   const COPY = {
@@ -19,7 +19,7 @@
   function safeURL(value){try{const u=new URL(value);return /^https?:$/.test(u.protocol)&&!u.username&&!u.password?u.href:'';}catch(_){return '';}}
   // A refreshed image proxy or match label is not a different offer. Keep the
   // signed source, identity, specifications and price in the decision key.
-  function rowVersion(row){return JSON.stringify([row.url,row.title,row.vision_image||row.image,row.money?.amount,row.money?.currency,row.key_specs]);}
+  function rowVersion(row){return JSON.stringify([row.url,row.title,row.vision_image||row.image,row.money?.amount,row.money?.currency,row.key_specs,row.country,row.market_scope]);}
   function parts(money){
     const amount=Number(money?.amount),currency=String(money?.currency||'');
     if(!Number.isFinite(amount)||amount<=0||!/^[A-Z]{3}$/.test(currency))return null;
@@ -53,6 +53,7 @@
   };
   const reduced=()=>matchMedia('(prefers-reduced-motion: reduce)').matches;
   const formatMoney=m=>{const p=parts(m);return p?p.major+(p.minor?'.'+p.minor:'')+' '+p.currency:'';};
+  const MARKETS={en:['Global market','Local market','Matched, but no confirmed price yet.','No priced match in this market.'],ar:['السوق العالمي','السوق المحلي','لقينا المطابق، لكن ما تأكد سعره.','ما لقينا مطابق بسعر مؤكد بهالسوق.'],fr:['Marché mondial','Marché local','Prix non confirmé.','Aucune offre avec prix confirmé.'],de:['Weltmarkt','Lokaler Markt','Preis noch nicht bestätigt.','Kein passendes Angebot mit Preis.'],es:['Mercado mundial','Mercado local','Precio aún no confirmado.','No hay ofertas con precio confirmado.'],pt:['Mercado global','Mercado local','Preço ainda não confirmado.','Nenhuma oferta com preço confirmado.'],tr:['Dünya pazarı','Yerel pazar','Fiyat henüz doğrulanmadı.','Fiyatı doğrulanan eşleşme yok.'],ru:['Мировой рынок','Местный рынок','Цена не подтверждена.','Нет совпадений с ценой.'],zh:['全球市场','本地市场','价格尚未确认。','暂无已确认价格的匹配。'],hi:['वैश्विक बाज़ार','स्थानीय बाज़ार','कीमत की पुष्टि नहीं हुई।','पुष्ट कीमत वाला विकल्प नहीं मिला।'],ur:['عالمی مارکیٹ','مقامی مارکیٹ','قیمت کی تصدیق نہیں ہوئی۔','تصدیق شدہ قیمت والا نتیجہ نہیں ملا۔']};
   const STORE_PRICE={en:'Check price at store',ar:'شوف السعر في المتجر',fr:'Prix en boutique',de:'Preis im Shop prüfen',es:'Consultar precio en tienda',pt:'Ver preço na loja',tr:'Mağazada fiyatı gör',ru:'Цена у продавца',zh:'到商店查看价格',hi:'स्टोर पर कीमत देखें',ur:'اسٹور پر قیمت دیکھیں'};
   const currencyFor=c=>/^[A-Z]{3}$/.test(c.currency||'')?c.currency:({kw:'KWD',sa:'SAR',ae:'AED',qa:'QAR',bh:'BHD',om:'OMR',gb:'GBP',uk:'GBP',cn:'CNY',jp:'JPY',in:'INR',de:'EUR',fr:'EUR',es:'EUR',it:'EUR',pt:'EUR',us:'USD',ca:'CAD',au:'AUD'}[String(c.country||'').toLowerCase()]||'USD');
 
@@ -272,10 +273,11 @@
     const question=el('div','fz-one-question'),open=el('a','fz-one-open');open.target='_blank';open.rel='noopener noreferrer';open.hidden=true;
     const retry=el('button','fz-one-open');retry.type='button';retry.hidden=true;
     const actions=el('div','fz-one-actions'),cheaper=el('button','fz-one-small'),quality=el('button','fz-one-small'),newSearch=el('button','fz-one-small');
+    const marketButton=el('button','fz-one-small fz-one-market');marketButton.type='button';
     const logButton=el('button','fz-one-icon'),whyButton=el('button','fz-one-icon','ⓘ');[cheaper,quality,newSearch,logButton,whyButton].forEach(b=>b.type='button');
     const logGlyph=el('span','fz-one-code-glyph','≡'),logCount=el('span','fz-one-log-count');logGlyph.setAttribute('aria-hidden','true');logButton.append(logGlyph,logCount);
     const panelId=(root.id||'findzia')+'-one-offers';logButton.setAttribute('aria-haspopup','dialog');logButton.setAttribute('aria-controls',panelId);logButton.setAttribute('aria-expanded','false');
-    actions.append(cheaper,quality,newSearch,whyButton,logButton);
+    actions.append(cheaper,marketButton,quality,newSearch,whyButton,logButton);
     const logWrap=el('div','fz-one-log'),logCaption=el('div','fz-one-log-caption'),logLines=el('div','fz-one-log-lines');logLines.setAttribute('aria-hidden','true');logWrap.append(logCaption,logLines);
     const dialog=el('dialog','fz-one-dialog');dialog.id=panelId;dialog.setAttribute('aria-labelledby',panelId+'-title');
     const dialogHead=el('div','fz-one-dialog-head'),dialogTitle=el('h2'),close=el('button','fz-one-icon','×');dialogTitle.id=panelId+'-title';close.type='button';dialogHead.append(dialogTitle,close);
@@ -285,6 +287,7 @@
     box.append(stage,actions,live);
     const log=new SearchLog(logLines),reels=new PriceReels(price,row=>{priceSource.hidden=!row;priceSource.textContent=row?((row.store||new URL(row.url).hostname)+' · '+formatMoney(row.money)):'';log.highlight(row?.url||'');});
     let generation=-1,requestId=0,controller=null,requestTimer=0,debounce=0,mediaTimer=0,retryTimer=0,earlyTimer=0,answerTimer=0,doneAt=0,eligibleAt=null,earlyCalls=0,finalRefreshes=0;
+    let marketScope='local',marketChoices=null,marketRows=[];
     let selected=null,mode='best',answers=[],questionSkipped=false,lastKey='',deferredNoMatchKey='',pending=false,disposed=false,celebrated=false,frozenSource='',autoRetries=0,dialogMode='results',awaitingQuestion=false,usageAnnounced=false;
     const header=root.querySelector('[data-fixed-header]');
     function fit(){
@@ -302,11 +305,13 @@
       }
     }
 
-    function labels(){open.textContent=text('open');retry.textContent=text('retry');cheaper.textContent=text('cheaper');quality.textContent=text('quality');newSearch.textContent=text('newSearch');close.setAttribute('aria-label',text('close'));whyButton.setAttribute('aria-label',text('why'));whyButton.title=text('why');logCaption.textContent=text('log');}
+    function marketCopy(){return MARKETS[(root.dataset.lang||'en').split('-')[0]]||MARKETS.en;}
+    function marketLabel(){marketButton.textContent=marketCopy()[marketScope==='local'?0:1];marketButton.setAttribute('aria-pressed',String(marketScope==='global'));marketButton.disabled=!marketChoices;box.dataset.market=marketScope;}
+    function labels(){marketLabel();open.textContent=text('open');retry.textContent=text('retry');cheaper.textContent=text('cheaper');quality.textContent=text('quality');newSearch.textContent=text('newSearch');close.setAttribute('aria-label',text('close'));whyButton.setAttribute('aria-label',text('why'));whyButton.title=text('why');logCaption.textContent=text('log');}
     function cancel(){requestId++;controller?.abort();controller=null;clearTimeout(requestTimer);clearTimeout(retryTimer);clearTimeout(earlyTimer);clearTimeout(mediaTimer);earlyTimer=0;pending=false;}
     function closeDialog(){dialog.close?.();logButton.setAttribute('aria-expanded','false');}
     function reset(){
-      cancel();clearTimeout(debounce);debounce=0;clearTimeout(mediaTimer);clearTimeout(answerTimer);photos.reset();reels.clear();log.clear();selected=null;mode='best';answers=[];questionSkipped=false;lastKey='';deferredNoMatchKey='';celebrated=false;doneAt=0;autoRetries=0;frozenSource='';eligibleAt=null;earlyCalls=0;finalRefreshes=0;awaitingQuestion=false;usageAnnounced=false;
+      cancel();clearTimeout(debounce);debounce=0;clearTimeout(mediaTimer);clearTimeout(answerTimer);photos.reset();reels.clear();log.clear();marketScope='local';marketChoices=null;marketRows=[];selected=null;mode='best';answers=[];questionSkipped=false;lastKey='';deferredNoMatchKey='';celebrated=false;doneAt=0;autoRetries=0;frozenSource='';eligibleAt=null;earlyCalls=0;finalRefreshes=0;awaitingQuestion=false;usageAnnounced=false;
       box.hidden=true;box.dataset.state='pending';root.dataset.choiceActive='false';question.replaceChildren();image.hidden=true;image.removeAttribute('src');placeholder.hidden=false;closeDialog();
     }
     function activate(){labels();price.hidden=false;priceSource.hidden=true;box.hidden=false;root.dataset.choiceActive='true';badge.hidden=true;actions.hidden=true;open.hidden=true;retry.hidden=true;merchant.hidden=true;whyButton.hidden=true;question.replaceChildren();logWrap.hidden=false;fit();}
@@ -330,7 +335,7 @@
     function empty(key){
       photos.stop();
       if(bridge.context().kind==='image'&&frozenSource)photos.settle(frozenSource,'');
-      activate();box.dataset.state='empty';box.dataset.emptyReason=key;heading.textContent=text(key);reels.clear();title.textContent='';specs.textContent='';store.textContent='';shipping.textContent='';
+      activate();box.dataset.state='empty';box.dataset.emptyReason=key;heading.textContent=key==='priceUnavailable'?marketCopy()[2]:key==='marketNoMatch'?marketCopy()[3]:text(key);reels.clear();title.textContent='';specs.textContent='';store.textContent='';shipping.textContent='';
       retry.hidden=false;actions.hidden=false;cheaper.hidden=true;quality.hidden=true;whyButton.hidden=true;logWrap.hidden=true;live.textContent=heading.textContent;
     }
     function celebrate(){
@@ -339,7 +344,7 @@
       for(let i=0;i<14;i++){const s=el('i','fz-one-spark');s.setAttribute('aria-hidden','true');const a=i*Math.PI*2/14,r=60+i%4*16;s.style.setProperty('--spark-x',Math.cos(a)*r+'px');s.style.setProperty('--spark-y',Math.sin(a)*r+25+'px');s.style.setProperty('--spark-r',i*37+'deg');stage.append(s);setTimeout(()=>s.remove(),1300);}
     }
     function show(value,row,manual=false){
-      const link=safeURL(row.url);if(!link){empty('unavailable');return;}
+      const link=safeURL(row.url);if(!link){empty('unavailable');return;}if(!parts(value.money)){empty('priceUnavailable');return;}
       selected={value,token:row.token,url:row.url,version:rowVersion(row),manual};activate();box.dataset.state='settling';heading.textContent=text('found');
       photos.settle(row.image,row.title);title.textContent=row.title;title.title=row.title;
       specs.textContent=(row.key_specs||[]).slice(0,2).map(s=>s.value).filter(s=>s&&!row.title.toLowerCase().includes(String(s).toLowerCase())).join(' · ');
@@ -349,21 +354,21 @@
       actions.hidden=false;cheaper.hidden=false;quality.hidden=false;cheaper.disabled=false;quality.disabled=false;whyButton.hidden=!value.reason;
       reason.textContent=value.reason||'';logWrap.hidden=true;syncLog(candidates());
       if(!usageAnnounced){usageAnnounced=true;root.dispatchEvent(new CustomEvent('fz:usage',{bubbles:true,detail:{type:'visible',generation,count:1,source:manual?'offer-choice':'ai-choice'}}));}
-      if(parts(value.money)){reels.land(value.money,celebrate);}
-      else{reels.clear();const label=STORE_PRICE[(root.dataset.lang||'en').split('-')[0]]||STORE_PRICE.en;price.append(el('span','fz-one-store-price',label));price.setAttribute('aria-label',label);celebrate();}
+      reels.land(value.money,celebrate);
       fit();
     }
     function candidates(){const photo=bridge.context().kind==='image';return bridge.choiceRows().filter(r=>r.token&&safeURL(r.url)&&safeURL(r.image)&&(photo||parts(r.money)));}
     function renderOffers(rows=candidates()){
       offerList.replaceChildren();
+      rows=rows.map(row=>{const cached=marketChoices?.[marketScope];return cached?.url===row.url&&parts(cached.money)?{...row,money:cached.money}:row;}).filter(row=>parts(row.money)&&rowScope(row)===marketScope);
       rows.forEach((row,i)=>{
         const b=el('button','fz-one-offer-row');b.type='button';b.dir='ltr';b.setAttribute('aria-label',row.title+' · '+(row.store||new URL(row.url).hostname)+' · '+formatMoney(row.money));
         b.setAttribute('aria-pressed',String(selected?.url===row.url));
         const info=el('span','fz-one-offer-info');info.append(el('bdi','fz-one-offer-site',row.store||new URL(row.url).hostname),el('bdi','fz-one-offer-title',row.title));
         b.append(el('span','fz-one-offer-index',String(i+1).padStart(2,'0')),info,el('bdi','fz-one-offer-price',formatMoney(row.money)||(STORE_PRICE[(root.dataset.lang||'en').split('-')[0]]||STORE_PRICE.en)));
         b.addEventListener('click',()=>{
-          const current=candidates().find(r=>r.url===row.url&&rowVersion(r)===rowVersion(row));if(!current){renderOffers();return;}
-          cancel();closeDialog();celebrated=false;show({url:current.url,token:current.token,store:current.store,money:current.money,reason:'',match:current.match_type},current,true);
+          const current=candidates().find(r=>r.url===row.url);if(!current){renderOffers();return;}const confirmed=marketChoices?.[marketScope];const money=confirmed?.url===current.url?confirmed.money:current.money;if(!parts(money)){renderOffers();return;}
+          cancel();closeDialog();celebrated=false;show({url:current.url,token:current.token,store:current.store,money,reason:'',match:current.match_type},current,true);
         });offerList.append(b);
       });
     }
@@ -379,6 +384,7 @@
         if(pending||!awaitingQuestion||answerTimer)return;
         const at=generation;questionSkipped=skip;
         const picked=label.slice(0,80);
+        marketChoices=null;marketRows=[];
         answers=[value.question.slice(0,157-picked.length)+' — '+picked];
         question.querySelectorAll('button').forEach(b=>{b.disabled=true;b.setAttribute('aria-pressed',String(b===button));});
         live.textContent=label;lastKey='';selected=null;earlyCalls=0;
@@ -399,7 +405,7 @@
     function choiceKey(rows,c){return JSON.stringify([c.generation,c.query,c.kind,c.country,c.lang,c.extra_specs||'',mode,answers,rows.slice(0,48).map(rowVersion).sort()]);}
     function selectionCaption(c){
       if(!selected)return;
-      const provisional=c.kind!=='image'&&!!(c.busy||c.media_pending||pending);box.dataset.provisional=String(provisional);
+      const provisional=!!(c.busy||c.media_pending||pending);box.dataset.provisional=String(provisional);
       badge.textContent=selected.manual?text('yourChoice'):provisional?(PROVISIONAL[(root.dataset.lang||'en').split('-')[0]]||PROVISIONAL.en):selected.value.match==='suitable'&&c.kind==='image'?(root.dataset.lang==='ar'?'أقرب لطلبك':'Closest match'):text('badge');
     }
     async function choose(rows,c){
@@ -412,7 +418,7 @@
       log.add('decision',{site:'AI',title:text('deciding')});
       let followUp=false;
       const id=++requestId,ctl=new AbortController();controller=ctl;
-      const timeout=new Promise((_,reject)=>{requestTimer=setTimeout(()=>{ctl.abort();reject(new Error('timeout'));},24000);});
+      const timeout=new Promise((_,reject)=>{requestTimer=setTimeout(()=>{ctl.abort();reject(new Error('timeout'));},40000);});
       try{
         const work=(async()=>{
           const response=await window.FindziaBillingFetch(root,bridge.api.replace(/\/$/,'')+'/api/choice',{
@@ -421,9 +427,11 @@
               ...(c.kind==='image'?{image_base64:c.image_base64,offer_images:rows.map(r=>({token:r.token,image:r.vision_image,media_token:r.media_token}))}:{})})
           });const value=await response.json();if(!response.ok||!value.ok){const error=new Error('unavailable');error.retryable=response.status>=500;throw error;}return value;
         })();
-        const value=await Promise.race([work,timeout]);
+        const result=await Promise.race([work,timeout]);
         if(disposed||id!==requestId||bridge.context().generation!==c.generation)return;
         autoRetries=0;
+        marketChoices=result.markets||{local:result,global:{status:'no_match'}};marketRows=rows;marketLabel();
+        const value=marketChoices[marketScope]||{status:'no_match'};
         const now=bridge.context(),currentRows=candidates();
         if(value.status!=='selected'&&(now.busy||(choiceKey(currentRows,now)!==key&&(c.kind!=='image'||finalRefreshes<2)))){
           // Partial evidence must not flash an error or a premature question.
@@ -439,15 +447,15 @@
         if(value.status!=='selected'){
           // Images may finish after the bounded first decision. Do not declare
           // no match until those offers have had their chance to be reviewed.
-          if(c.kind==='image'&&now.media_pending&&Date.now()-doneAt<4500){
+          if(value.status==='no_match'&&c.kind==='image'&&now.media_pending&&Date.now()-doneAt<4500){
             deferredNoMatchKey=key;clearTimeout(mediaTimer);mediaTimer=setTimeout(update,250);return;
           }
-          if(!selected)empty('noMatch');return;
+          if(!selected)empty(value.status==='price_unavailable'?'priceUnavailable':value.reason==='market_no_match'?'marketNoMatch':'noMatch');return;
         }
         if(c.kind==='image'&&value.visual_verified!==true){const error=new Error('visual_review_required');error.retryable=false;throw error;}
         const current=currentRows.find(r=>r.url===value.url&&rowVersion(r)===rowVersion(rows.find(o=>o.token===value.token)||{}));
         if(!current){lastKey='';followUp=true;return;}
-        if(selected?.version===rowVersion(current)){
+        if(selected?.version===rowVersion(current)&&formatMoney(selected.value.money)===formatMoney(value.money)){
           selected.value=value;selected.token=current.token;reason.textContent=value.reason||'';whyButton.hidden=!value.reason;
         }else{celebrated=false;show(value,current);}
         followUp=true;
@@ -470,13 +478,13 @@
         const row=rows.find(r=>rowVersion(r)===selected.version);
         if(row){
           selected.token=row.token;selectionCaption(c);
-          // One photo search reveals one settled decision. New arrivals stay
-          // in the offers list; removal or a real correction still invalidates it.
-          if(selected.manual||c.kind==='image'||pending||c.busy||retryTimer)return;
+          // Keep the priced result usable while retrieval completes. Then review
+          // later local offers once, so an earlier international/expensive row cannot win by arriving first.
+          if(selected.manual||pending||c.busy||retryTimer)return;
           // Refine once at stream completion, then once after outstanding media.
           // Keep the usable result visible during this background decision.
-          if(choiceKey(rows,c)!==lastKey&&(!c.media_pending||finalRefreshes<1)){
-            finalRefreshes++;choose(rows,c);
+          if(choiceKey(rows,c)!==lastKey&&finalRefreshes<2){
+            if(c.kind!=='image')finalRefreshes++;choose(rows,c);
           }
           return;
         }
@@ -512,7 +520,17 @@
       if(c.query||c.kind==='image')empty('noMatch');
     }
 
-    function preference(value){cancel();mode=value;selected=null;lastKey='';celebrated=false;autoRetries=0;earlyCalls=0;finalRefreshes=0;awaitingQuestion=false;queue();}
+    function rowScope(row){return row.market_scope==='global'||row.country&&String(row.country).toLowerCase()!==String(bridge.context().country).toLowerCase()?'global':'local';}
+    marketButton.addEventListener('click',()=>{
+      if(!marketChoices)return;marketScope=marketScope==='local'?'global':'local';marketLabel();selected=null;celebrated=false;closeDialog();
+      const value=marketChoices[marketScope]||{status:'no_match'};
+      const submitted=marketRows.find(r=>r.token===value.token);
+      const row=candidates().find(r=>r.url===value.url&&submitted&&rowVersion(r)===rowVersion(submitted));
+      if(value.status==='selected'&&row&&parts(value.money)&&(bridge.context().kind!=='image'||value.visual_verified===true))show(value,row);
+      else if(value.status==='question'){pendingView(candidates(),bridge.context());ask(value);}
+      else empty(value.status==='price_unavailable'?'priceUnavailable':'marketNoMatch');
+    });
+    function preference(value){cancel();marketChoices=null;marketRows=[];mode=value;selected=null;lastKey='';celebrated=false;autoRetries=0;earlyCalls=0;finalRefreshes=0;awaitingQuestion=false;queue();}
     cheaper.addEventListener('click',()=>preference('cheaper'));quality.addEventListener('click',()=>preference('quality'));
     retry.addEventListener('click',()=>{if(box.dataset.emptyReason==='noMatch'&&bridge.retryChoiceSearch?.())return;lastKey='';autoRetries=0;earlyCalls=0;finalRefreshes=0;awaitingQuestion=false;queue();});newSearch.addEventListener('click',()=>bridge.newSearch());
     logButton.addEventListener('click',()=>openDialog('results'));whyButton.addEventListener('click',()=>openDialog('reason'));close.addEventListener('click',closeDialog);
@@ -530,13 +548,13 @@
     for(const name of ['fz:search-state','fz:choice-results'])root.addEventListener(name,queue);
     root.addEventListener('fz:search-progress',progressEvent);
     root.addEventListener('fz:search-reset',resetEvent);
-    const langObserver=new MutationObserver(()=>{cancel();selected=null;lastKey='';celebrated=false;autoRetries=0;earlyCalls=0;awaitingQuestion=false;log.clear();queue();});langObserver.observe(root,{attributes:true,attributeFilter:['data-lang']});
+    const langObserver=new MutationObserver(()=>{cancel();marketChoices=null;marketRows=[];selected=null;lastKey='';celebrated=false;autoRetries=0;earlyCalls=0;awaitingQuestion=false;log.clear();queue();});langObserver.observe(root,{attributes:true,attributeFilter:['data-lang']});
     const sizeObserver=window.ResizeObserver?new ResizeObserver(fit):null;if(header)sizeObserver?.observe(header);sizeObserver?.observe(actions);sizeObserver?.observe(details);
     window.addEventListener?.('resize',fit);window.visualViewport?.addEventListener('resize',fit);
     document.fonts?.ready?.then(()=>{if(!disposed)fit();});
     function destroy(){disposed=true;reset();langObserver.disconnect();sizeObserver?.disconnect();for(const name of ['fz:search-state','fz:choice-results'])root.removeEventListener(name,queue);root.removeEventListener('fz:search-progress',progressEvent);root.removeEventListener('fz:search-reset',resetEvent);window.removeEventListener?.('resize',fit);window.visualViewport?.removeEventListener('resize',fit);box.remove();dialog.remove();delete root.dataset.choiceMode;delete root.dataset.choiceActive;}
     document.addEventListener('shopify:section:unload',function unload(ev){if(ev.target?.contains(root)){destroy();document.removeEventListener('shopify:section:unload',unload);}});
-    root.fzOneChoice={update,destroy,release:'157.0.12'};labels();queue();
+    root.fzOneChoice={update,destroy,release:'157.0.13'};labels();queue();
   }
   window.FindziaChoice={mount,PriceReels,PhotoSequence,SearchLog,moneyParts:parts};
   const start=()=>document.querySelectorAll('.fz-home').forEach(mount);

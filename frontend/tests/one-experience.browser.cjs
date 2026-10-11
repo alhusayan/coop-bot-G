@@ -35,8 +35,9 @@ const offer=i=>({title:'Studio wireless headphones '+i,store:'Audio Store '+i,ur
       const body=route.request().postDataJSON();calls.push(body);
       if(variant.unavailable)Object.assign(data,{status:'unavailable',reason:'visual_incomplete'});
       else if(!variant.photo&&!body.answers.length){const ar=variant.lang==='ar';Object.assign(data,{status:'question',question:ar?'شنو الأهم لك بالسماعة؟':'What matters most in your headphones?',choices:ar?['الاستخدام اليومي','للألعاب','للسفر']:['Everyday listening','Gaming','Travel'],options:ar?[{label:'الاستخدام اليومي',detail:'لاسلكية وخفيفة'},{label:'للألعاب',detail:'ميكروفون مدمج'},{label:'للسفر',detail:'تصميم قابل للطي'}]:[{label:'Everyday listening',detail:'Lightweight and wireless'},{label:'Gaming',detail:'Built-in microphone'},{label:'Travel',detail:'Foldable design'}]});}
-      else Object.assign(data,{status:'selected',visual_verified:true,token:'test-2',url:offer(2).url,title:offer(2).title,store:offer(2).store,money:variant.unpriced?null:{amount:26.5,currency:'KWD'},reason:'Matches your preference.',match:'suitable'});
+      else Object.assign(data,{status:'selected',visual_verified:true,token:'test-2',url:offer(2).url,title:offer(2).title,store:offer(2).store,money:{amount:26.5,currency:'KWD'},reason:'Matches your preference.',match:'suitable'});
      }
+     if(p==='/api/choice'&&data.status==='selected')data.markets={local:{...data},global:{...data,token:'test-5',url:offer(5).url,title:offer(5).title,store:offer(5).store,money:{amount:29.5,currency:'USD'}}};
      return route.fulfill({contentType:'application/json',body:JSON.stringify(data)});
     }
     return route.fulfill({contentType:u.hostname==='fonts.googleapis.com'?'text/css':'text/javascript',body:''});
@@ -63,9 +64,9 @@ const offer=i=>({title:'Studio wireless headphones '+i,store:'Audio Store '+i,ur
      assert.equal(await page.locator('.fz-one-open').first().getAttribute('href'),offer(2).url);
      assert.equal(calls.length,1,'no repeated photo reveal at stream end');
      assert.equal(calls[0].offer_images.length,6);
-     if(variant.unpriced){assert.equal(await page.locator('.fz-one-price').getAttribute('aria-label'),'شوف السعر في المتجر');assert.equal(await page.locator('.fz-one-reel').count(),0);}
+     if(variant.unpriced){assert.equal(await page.locator('.fz-one-price').getAttribute('aria-label'),'26.500 KWD');assert.ok(await page.locator('.fz-one-reel').count()>0);}
     }
-    assert.deepEqual(errors,[]);console.log('PASS photo',variant.unavailable?'finite incomplete review':variant.unpriced?'matching product without a confirmed price':'early verified selection, stable at stream end');await context.close();continue;
+    assert.deepEqual(errors,[]);console.log('PASS photo',variant.unavailable?'finite incomplete review':variant.unpriced?'matching product with recovered server price':'early verified selection, stable at stream end');await context.close();continue;
    }
    const initial=await page.locator('.fz-one-image[data-active="true"]').getAttribute('src');
    if(variant.width===390){
@@ -87,6 +88,15 @@ const offer=i=>({title:'Studio wireless headphones '+i,store:'Audio Store '+i,ur
    assert.equal(await page.locator('.fz-one-open').first().getAttribute('href'),offer(2).url);
    assert.equal(calls.at(-1).answers.length,1);
    if(process.env.FINDZIA_TEST_OUTPUT)await page.screenshot({path:path.join(process.env.FINDZIA_TEST_OUTPUT,`one-final-${variant.width}.png`),fullPage:true});
+   const callsBeforeSwitch=calls.length;
+   await page.locator('.fz-one-market').click();
+   await page.waitForFunction(()=>document.querySelector('.fz-one-price').getAttribute('aria-label')==='29.50 USD');
+   assert.equal(await page.locator('.fz-one-open').first().getAttribute('href'),offer(5).url);
+   assert.equal(calls.length,callsBeforeSwitch,'market switching never requests a new choice or search');
+   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),true,'market actions fit the viewport');
+   await page.locator('.fz-one-market').click();
+   assert.equal(await page.locator('.fz-one-open').first().getAttribute('href'),offer(2).url);
+   assert.equal(calls.length,callsBeforeSwitch);
    assert.deepEqual(errors,[]);console.log('PASS',variant,'decoded crossfade, question bounds, single answer, physical final price and no page errors');await context.close();
   }
  }finally{await browser.close();server.closeAllConnections();await new Promise(r=>server.close(r));}

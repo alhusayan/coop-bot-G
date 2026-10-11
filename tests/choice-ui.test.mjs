@@ -184,13 +184,13 @@ test('photo choice cannot display an old backend decision without visual verific
   assert.equal(h.root.querySelector('.fz-one').dataset.state,'empty');h.root.fzOneChoice.destroy();
 });
 
-test('verified photo match without a price renders the product and store link, never a made-up amount',async()=>{
+test('a price-less photo decision cannot become a final offer',async()=>{
   const h=harness();h.state.kind='image';const unpriced={...h.row,money:null};h.setRows([unpriced]);
   h.context.window.FindziaBillingFetch=async()=>h.response(unpriced);
   h.api.mount(h.root);await h.tick(1500);
-  assert.equal(h.root.querySelector('.fz-one').dataset.state,'selected');
-  assert.equal(h.root.querySelector('.fz-one-open').href,unpriced.url);
-  assert.equal(h.root.querySelector('.fz-one-price').getAttribute('aria-label'),'شوف السعر في المتجر');
+  assert.equal(h.root.querySelector('.fz-one').dataset.state,'empty');
+  assert.equal(h.root.querySelector('.fz-one-open').hidden,true);
+  assert.equal(h.root.querySelector('.fz-one').dataset.emptyReason,'priceUnavailable');
   assert.equal(h.root.querySelectorAll('.fz-one-reel').length,0);
   h.root.fzOneChoice.destroy();
 });
@@ -366,7 +366,7 @@ test('no-match retry starts fresh retrieval instead of repeating the same choice
   assert.equal(searches,1);assert.equal(choices,1);h.root.fzOneChoice.destroy();
 });
 
-test('verified photo selection starts before retrieval ends and then stays on one offer',async()=>{
+test('early photo selection refreshes comparison for later offers without restarting retrieval',async()=>{
   const h=harness();h.state.kind='image';h.state.busy=true;let calls=0;
   h.context.window.FindziaBillingFetch=async()=>{calls++;return h.response();};
   h.api.mount(h.root);await h.tick(800);assert.equal(calls,0);
@@ -375,9 +375,9 @@ test('verified photo selection starts before retrieval ends and then stays on on
   h.state.busy=false;h.state.media_pending=false;h.root.fzOneChoice.update();await h.tick(800);assert.equal(calls,1);
   const extra={...h.row,token:'later',url:'https://store.example/later',money:{amount:8,currency:'KWD'}};
   h.setRows([h.row,extra]);h.root.fzOneChoice.update();await h.tick(800);
-  assert.equal(calls,1);assert.equal(h.root.querySelector('.fz-one-open').href,h.row.url);
+  assert.equal(calls,2);assert.equal(h.root.querySelector('.fz-one-open').href,h.row.url);
   h.setRows([{...h.row,image:'https://api.example/api/media/verified/new',match_type:'similar'},extra]);
-  h.root.fzOneChoice.update();await h.tick(800);assert.equal(calls,1);
+  h.root.fzOneChoice.update();await h.tick(800);assert.equal(calls,2);
   assert.equal(h.root.querySelector('.fz-one').dataset.state,'selected');h.root.fzOneChoice.destroy();
 });
 
@@ -486,7 +486,7 @@ test('a confirmed photo is not starved by unrelated pool changes during its deci
   h.api.mount(h.root);await h.tick(100);
   h.setRows([h.row,{...h.row,token:'late',url:'https://store.example/late'}]);
   finish(h.response());await h.tick(1200);
-  assert.equal(calls,1);assert.equal(h.root.querySelector('.fz-one').dataset.state,'selected');
+  assert.equal(calls,2);assert.equal(h.root.querySelector('.fz-one').dataset.state,'selected');
   assert.equal(h.root.querySelector('.fz-one-open').href,h.row.url);h.root.fzOneChoice.destroy();
 });
 
@@ -499,5 +499,32 @@ test('incomplete photo review stops visibly and does not automatically retry the
   for(let i=0;i<10;i++){h.root.fzOneChoice.update();await h.tick(1000);}
   assert.equal(calls,1);assert.equal(h.root.querySelector('.fz-one-price').children.length,0);
   assert.ok(h.root.querySelectorAll('.fz-one-image').some(n=>n.dataset.active==='true'&&n.src.includes('original')));
+  h.root.fzOneChoice.destroy();
+});
+
+
+test('global/local toggle reuses two priced decisions with zero new requests',async()=>{
+  const h=harness();h.state.kind='image';let requests=0;
+  const global={...h.row,token:'signed-global',url:'https://global.example/item',country:'us',market_scope:'global',money:{amount:9,currency:'USD'}};
+  h.setRows([h.row,global]);
+  const decision=r=>({ok:true,status:'selected',visual_verified:true,token:r.token,url:r.url,money:r.money,store:r.store});
+  h.context.window.FindziaBillingFetch=async()=>{requests++;return {ok:true,json:async()=>({...decision(h.row),markets:{local:decision(h.row),global:decision(global)}})};};
+  h.api.mount(h.root);await h.tick(1500);
+  assert.equal(h.root.querySelector('.fz-one-open').href,h.row.url);
+  const toggle=h.root.querySelector('.fz-one-market');assert.equal(toggle.textContent,'السوق العالمي');
+  toggle.dispatchEvent(new Event('click'));await h.tick(1500);
+  assert.equal(h.root.querySelector('.fz-one-open').href,global.url);
+  assert.equal(h.root.querySelector('.fz-one-price').getAttribute('aria-label'),'9.00 USD');
+  assert.equal(toggle.textContent,'السوق المحلي');assert.equal(requests,1);
+  toggle.dispatchEvent(new Event('click'));await h.tick(1500);
+  assert.equal(h.root.querySelector('.fz-one-open').href,h.row.url);assert.equal(requests,1);
+  h.root.fzOneChoice.destroy();
+});
+
+test('recovered price is shown while the original signed candidate had no price',async()=>{
+  const h=harness();h.state.kind='image';h.setRows([{...h.row,money:null}]);
+  h.context.window.FindziaBillingFetch=async()=>h.response();h.api.mount(h.root);await h.tick(100);await h.tick(1500);
+  assert.equal(h.root.querySelector('.fz-one').dataset.state,'selected');
+  assert.equal(h.root.querySelector('.fz-one-price').getAttribute('aria-label'),'12.345 KWD');
   h.root.fzOneChoice.destroy();
 });

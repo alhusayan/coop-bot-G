@@ -1315,7 +1315,7 @@ e.fzRefineBridge.choiceRows=function(){
   const money=_r(row),confirmed=money?.kind==='exact'&&!row.price_estimated&&!row.price_unavailable&&!row.price_unit&&
    !['pending','suspect'].includes(row.price_integrity_status)&&!['pending','suspect','unavailable'].includes(row.price_status);
   return {token:row.evaluation_token,url:br(row),title:row.title||row.raw_title||row.product_name||'',
-   store:row.store||'',image:photo.winner,vision_image:auth?.raw||'',media_token:auth?.token||'',
+   store:row.store||'',country:row.market_country||row.country||'',market_scope:row.market_scope||(row.market_rank>0?'global':'local'),image:photo.winner,vision_image:auth?.raw||'',media_token:auth?.token||'',
    money:confirmed?{amount:money.value,currency:money.currency}:null,key_specs:row.key_specs||[],match_type:row.match_type||''};
  });
 };

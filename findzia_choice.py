@@ -16,7 +16,7 @@ from concurrent.futures import ThreadPoolExecutor, wait
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
-RELEASE = "157.0.12"
+RELEASE = "157.0.13"
 MAX_OFFERS = 48
 MAX_BODY = 10_000_000
 
@@ -55,11 +55,10 @@ explicit specification to satisfy a cheaper preference. Price is important, but
 the best suitable model may be better value than an unsuitable cheaper model.
 For an image query, only candidates that passed direct pixel comparison are
 provided. Respect the attached visual observation and all explicit requirements.
-Finding the pictured product is independent of finding its current retail price.
-A null money field means the listing's price could not be confirmed. Such a
-visually matching product is still a valid selection; never invent its price,
-claim it is cheaper, or reject it merely for missing a price. Prefer a confirmed
-unit price only BETWEEN equivalent matching products, never over visual identity.
+Only confirmed, exact unit prices are eligible for a final selection. All
+supplied offers belong to ONE market scope. Never substitute an international
+listing for a local offer. A visually matching listing without money is retained
+for price recovery, but is never presented as a purchasable priced result.
 The query may describe the image automatically; it cannot override the pixels.
 Prior exact/similar labels are hints, never authority over visual differences.
 Do not invent hidden specifications or claim exact identity from appearance alone.
@@ -142,6 +141,8 @@ class ChoiceEngine:
         self.gate = threading.BoundedSemaphore(6)
         self.cache, self.flights = {}, {}
         self.visual_cache = {}
+        self.price_pool = ThreadPoolExecutor(max_workers=6, thread_name_prefix="choice-price")
+        self.price_cache, self.price_flights = {}, {}
 
     def prepare(self, payload):
         if not isinstance(payload, dict):
@@ -191,25 +192,9 @@ class ChoiceEngine:
             evidence = self.s['_fz_listing_text'](row)[:2800]
             if kind == 'text' and self.s['_findzia_hard_product_mismatch'](query, evidence):
                 continue
-            money = self.s['_fz_eval_money'](row)
-            if (not money or money.get('kind') != 'exact' or _number(money.get('amount')) is None
-                    or row.get('price_unavailable') or row.get('price_estimated') or row.get('price_unit')
-                    or row.get('price_integrity_status') in ('pending', 'suspect')
-                    or row.get('price_status') in ('pending', 'suspect', 'unavailable')):
-                if kind != 'image':
-                    continue
-                money = None
-            else:
-                money = dict(amount=float(money['amount']), currency=money['currency'])
-            shipping = _number(row.get('shipping_amount'), zero=True)
-            shipping_known = (money is not None and row.get('shipping_verified') is True and shipping is not None
-                              and row.get('shipping_currency') == money['currency']
-                              and str(row.get('shipping_country') or '').lower() == context['country'])
-            # Taxes are never inferred; 'item_and_shipping' deliberately != total.
-            if money:
-                money.update(shipping_known=shipping_known, shipping=shipping if shipping_known else None,
-                             basis='item_and_shipping' if shipping_known else 'item',
-                             comparison_amount=money['amount'] + shipping if shipping_known else money['amount'])
+            money = self.money(row, context['country'])
+            if money is None and kind != 'image':
+                continue
             candidate = dict(id='p' + str(len(candidates) + 1), row=row, token=token,
                              evidence=evidence, money=money)
             if kind == 'image':
@@ -227,6 +212,90 @@ class ChoiceEngine:
             candidates.append(candidate)
             seen.add(url)
         return context, candidates
+
+    def money(self, row, country):
+        if row.get('price_estimated') and row.get('original_price') and row.get('original_currency'):
+            # Use signed merchant currency, never an approximate FX display as a final price.
+            row = dict(row, price=row['original_price'], currency=row['original_currency'], price_estimated=False)
+        money = self.s['_fz_eval_money'](row)
+        if (not money or money.get('kind') != 'exact' or _number(money.get('amount')) is None
+                or row.get('price_unavailable') or row.get('price_estimated') or row.get('price_unit')
+                or row.get('price_integrity_status') in ('pending', 'suspect')
+                or row.get('price_status') in ('pending', 'suspect', 'unavailable')):
+            return None
+        money = dict(amount=float(money['amount']), currency=money['currency'])
+        shipping = _number(row.get('shipping_amount'), zero=True)
+        known = (row.get('shipping_verified') is True and shipping is not None
+                 and row.get('shipping_currency') == money['currency']
+                 and str(row.get('shipping_country') or '').lower() == country)
+        money.update(shipping_known=known, shipping=shipping if known else None,
+                     basis='item_and_shipping' if known else 'item',
+                     comparison_amount=money['amount'] + shipping if known else money['amount'])
+        return money
+
+    @staticmethod
+    def scope(candidate, country):
+        row = candidate['row']
+        # Country is signed listing evidence, never inferred from display currency.
+        # Explicit global evidence takes priority over a viewer-country fallback.
+        if row.get('market_scope') == 'global' or row.get('market_rank') in (1, 2):
+            return 'global'
+        listing = str(row.get('market_country') or row.get('country') or '').lower()
+        return 'local' if listing and listing == country else 'global'
+
+    def recover_prices(self, context, candidates):
+        recover = self.s.get('_web_choice_price_recovery')
+        if not recover:
+            return candidates
+        missing = [c for c in candidates if not c['money']]
+        # Reserve work for both scopes; do not spend the budget on unrelated rows.
+        pending = []
+        for scope in ('local', 'global'):
+            pending += [c for c in missing if self.scope(c, context['country']) == scope][:4]
+        futures = {}
+        for c in pending:
+            key = (c['row']['url'], c['row'].get('country'), context['country'])
+            with self.lock:
+                cached = self.price_cache.get(key)
+                if cached and cached[0] > time.monotonic():
+                    futures[c['id']] = (None, cached[1]); continue
+                future = self.price_flights.get(key)
+                if future is None:
+                    def job(candidate=c, cache_key=key):
+                        value = None
+                        try:
+                            value = recover(candidate['row'], context['country'], context['language'])
+                            return value
+                        except Exception as exc:
+                            print('CHOICE PRICE error=' + type(exc).__name__, flush=True)
+                            return None
+                        finally:
+                            with self.lock:
+                                self.price_cache[cache_key] = (time.monotonic() + (240 if value else 30), value)
+                                self.price_flights.pop(cache_key, None)
+                                while len(self.price_cache) > 128:
+                                    self.price_cache.pop(next(iter(self.price_cache)))
+                    future = self.price_pool.submit(job)
+                    self.price_flights[key] = future
+                futures[c['id']] = (future, None)
+        jobs = [f for f, _ in futures.values() if f]
+        if jobs:
+            wait(jobs, timeout=11)
+        recovered = 0
+        for c in candidates:
+            future, row = futures.get(c['id'], (None, None))
+            if future and future.done():
+                row = future.result()
+            if row and row.get('url') == c['row']['url']:
+                money = self.money(row, context['country'])
+                if money:
+                    # Retain original token/image identity; response money is server-owned.
+                    c.update(row=dict(c['row'], **{k:v for k,v in row.items() if k.startswith(('price', 'original_')) or k == 'currency'}), money=money)
+                    recovered += 1
+        if missing:
+            print('CHOICE PRICE ' + json.dumps(dict(attempted=len(pending), recovered=recovered,
+                  unresolved=sum(not c['money'] for c in candidates))), flush=True)
+        return candidates
 
     @staticmethod
     def inline(value):
@@ -403,6 +472,32 @@ class ChoiceEngine:
             reason = 'visual_mismatch' if evaluated_count else 'no_eligible_offers'
             print('CHOICE RESULT ' + json.dumps(dict(release=RELEASE, status='no_match', reason=reason, evaluated=evaluated_count)), flush=True)
             return dict(ok=True, status='no_match', reason=reason, evaluated=evaluated_count, release=RELEASE)
+        candidates = self.recover_prices(context, candidates)
+        markets, decisions = {}, {}
+        for scope in ('local', 'global'):
+            matching = [c for c in candidates if self.scope(c, context['country']) == scope]
+            priced = [c for c in matching if c['money']]
+            if not priced:
+                markets[scope] = dict(ok=True, status='price_unavailable' if matching else 'no_match',
+                                      reason='price_missing' if matching else 'market_no_match', release=RELEASE)
+            else:
+                scoped = dict(context, market_scope=scope, skip_question=True if scope == 'global' else context.get('skip_question', False))
+                decisions[scope] = self.visual_pool.submit(self.select_priced, scoped, priced, evaluated_count)
+        for scope, future in decisions.items():
+            if scope == 'local':
+                markets[scope] = future.result()
+            else:
+                try:
+                    markets[scope] = future.result()
+                except Exception:
+                    markets[scope] = dict(ok=True, status='unavailable', release=RELEASE)
+        for scope in markets:
+            markets[scope]['market_scope'] = scope
+        # Both choices are prepared from the same retrieval and pixel review.
+        # The client switches instantly; no new search, quota or provider call.
+        return dict(markets['local'], markets=markets)
+
+    def select_priced(self, context, candidates, evaluated_count):
         offers = []
         for c in candidates:
             row, money = c['row'], c['money']
@@ -467,7 +562,7 @@ class ChoiceEngine:
         saving = round(min(more) - money['comparison_amount'], 6) if more else None
         print('CHOICE RESULT ' + json.dumps(dict(release=RELEASE, status='selected', kind=context['kind'],
               id=selected['id'], title=row.get('title', '')[:120], reviewed=evaluated_count,
-              price_confirmed=money is not None)), flush=True)
+              price_confirmed=money is not None, market_scope=context.get('market_scope'))), flush=True)
         return dict(ok=True, status='selected', release=RELEASE, selection='ai',
                     url=row['url'], token=selected['token'], title=row.get('title') or row.get('raw_title', ''),
                     store=row.get('store', ''), money=money,
@@ -535,7 +630,7 @@ def install_choice(app, services):
             cached, future = engine.submit(context, candidates)
             if cached is not None:
                 return cached
-            return await asyncio.wait_for(asyncio.shield(asyncio.wrap_future(future)), timeout=20)
+            return await asyncio.wait_for(asyncio.shield(asyncio.wrap_future(future)), timeout=36)
         except Exception as exc:
             # Never label a price sort as an AI decision during an outage.
             code = str(exc) if str(exc) in ('busy', 'refinement_unavailable', 'invalid_choice',

@@ -75,6 +75,7 @@ class ChoiceTests(unittest.TestCase):
         self.engine.pool.shutdown(wait=True)
         self.engine.media_pool.shutdown(wait=True)
         self.engine.visual_pool.shutdown(wait=True)
+        self.engine.price_pool.shutdown(wait=True)
 
     def payload(self, rows, **kw):
         if kw.get('kind') == 'image':
@@ -298,11 +299,9 @@ class ChoiceTests(unittest.TestCase):
             with self.subTest(change=change):
                 r=row();r.update(change)
                 result=self.pick([r],kind='image')
-                self.assertEqual(result['status'],'selected')
-                self.assertIsNone(result['money'])
-                self.assertIsNone(result['savings'])
-                self.assertEqual(result['price_status'],'check_store')
-                self.assertTrue(result['visual_verified'])
+                self.assertEqual(result['status'],'price_unavailable')
+                self.assertNotIn('url',result)
+                self.assertNotIn('money',result)
 
     def test_unpriced_photo_match_beats_priced_different_product(self):
         def review(system,data,**kw):
@@ -311,8 +310,8 @@ class ChoiceTests(unittest.TestCase):
         self.s['_refine_ai'].side_effect=review
         matched=row('photographed-chair');matched['price_unavailable']=True
         result=self.pick([matched,row('wrong-chair',5)],kind='image')
-        self.assertEqual(result['url'],matched['url'])
-        self.assertIsNone(result['money'])
+        self.assertEqual(result['status'],'price_unavailable')
+        self.assertNotIn('url',result)
 
     def test_unpriced_photo_does_not_bypass_visual_or_stock_checks(self):
         self.s['_refine_ai'].side_effect=lambda system,data,**kw:dict(status='reviewed',items=[
@@ -321,6 +320,43 @@ class ChoiceTests(unittest.TestCase):
         self.assertEqual(self.pick([missing],kind='image')['status'],'no_match')
         missing['in_stock']=False
         self.assertEqual(self.engine.prepare(self.payload([missing],kind='image'))[1],[])
+
+    def test_price_recovery_only_runs_on_visually_matching_product(self):
+        self.s['_refine_ai'].side_effect=lambda system,data,**kw:dict(status='reviewed',items=[
+            dict(id=c['id'],verdict='match' if c['id']=='p1' else 'different',observation='Same frame') for c in data['candidates']])
+        self.s['_web_choice_price_recovery']=Mock(side_effect=lambda r,*_:dict(r,price='38.500 KWD',price_amount=38.5,price_unavailable=False))
+        good=row('SINDAL',price_unavailable=True);wrong=row('wrong',price_unavailable=True)
+        result=self.pick([good,wrong],kind='image')
+        self.assertEqual(result['money']['amount'],38.5)
+        self.assertEqual(result['url'],good['url'])
+        self.assertEqual(self.s['_web_choice_price_recovery'].call_count,1)
+        self.pick([good,wrong],kind='image')
+        self.assertEqual(self.s['_web_choice_price_recovery'].call_count,1,'reuse recovered listing price')
+
+    def test_local_default_and_global_are_prepared_from_same_visual_review(self):
+        local=row('HP45',12,market_scope='local')
+        international=row('HP45',3,market_scope='global');international['country']='us'
+        result=self.pick([international,local],kind='image')
+        self.assertEqual(result['url'],local['url'])
+        self.assertEqual(result['markets']['global']['url'],international['url'])
+        self.assertEqual(result['markets']['local']['money']['amount'],12)
+        self.assertEqual(sum(bool(c.kwargs.get('images')) for c in self.s['_refine_ai'].call_args_list),1)
+
+    def test_missing_local_price_cannot_be_replaced_by_global_price(self):
+        local=row('HP45',12,price_unavailable=True)
+        international=row('HP45',3,market_scope='global')
+        result=self.pick([international,local],kind='image')
+        self.assertEqual(result['status'],'price_unavailable')
+        self.assertNotIn('url',result)
+        self.assertEqual(result['markets']['global']['money']['amount'],3)
+
+    def test_global_scope_is_signed_and_not_inferred_from_kwd(self):
+        global_row=row('HP45',3,market_scope='global',market_rank=1)
+        decoded=SIGN['_fz_evaluation_row'](SIGN['_fz_evaluation_token'](global_row))
+        self.assertEqual(decoded['market_scope'],'global')
+        result=self.pick([global_row],kind='image')
+        self.assertEqual(result['status'],'no_match')
+        self.assertEqual(result['markets']['global']['url'],global_row['url'])
 
     def test_ai_can_choose_a_suitable_model_over_cheapest(self):
         self.s['_refine_ai'].return_value.update(id='p2')

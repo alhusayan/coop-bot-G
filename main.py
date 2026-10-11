@@ -21117,7 +21117,7 @@ def _web_log_price_recovery(row, market, counts, returned, failed):
         'counts': dict(counts)}, sort_keys=True))
 
 
-def _web_targeted_price_updates(entries, lang, market, *, image_only=False):
+def _web_targeted_price_updates(entries, lang, market, *, image_only=False, choice_price=False):
     """Bounded independent listing lookups; recover image and money independently."""
     if not _indexed_recovery_allowed():
         return {}
@@ -21244,6 +21244,9 @@ def _web_targeted_price_updates(entries, lang, market, *, image_only=False):
             if not evidence.get('price') and not _web_indexed_offer_quote(evidence):
                 evidence['price'] = _local_discovery_plain_snippet_price(evidence, evidence.get('_price_market') or cc)
             quote = _web_indexed_offer_quote(evidence)
+            if not quote and choice_price and same_listing:
+                from findzia_choice_prices import labelled_current_quote
+                quote = labelled_current_quote(item, _web_price_quote, cc)
             regional = _fz_regional_price_store(row.get('url'))
             if regional:
                 quote = _fz_regional_index_quote(item, row.get('url'))
@@ -32918,7 +32921,7 @@ def _fz_listing_text(row):
 
 
 def _fz_evaluation_token(row):
-    fields = ('url','raw_title','title','store','country','currency','price','price_amount',
+    fields = ('url','raw_title','title','store','country','market_scope','market_rank','market_country','currency','price','price_amount',
               'price_kind','price_min','price_max','price_unit','price_status','price_source',
               'price_source_url','price_verified','price_unavailable','price_tax_note',
               'price_compare_value','price_compare_currency','price_estimated','original_price','original_currency','card_model','card_brand',
@@ -32950,6 +32953,46 @@ def _fz_evaluation_token(row):
     body={'purpose':'product-insights-v1','exp':(int(time.time())//600)*600+7200,'row':data}
     raw=base64.urlsafe_b64encode(json.dumps(body,ensure_ascii=False,separators=(',',':'),allow_nan=False).encode()).decode().rstrip('=')
     return raw+'.'+hmac.new(_REFINE_KEY,raw.encode(),hashlib.sha256).hexdigest()
+
+
+_FZ_CHOICE_PRICE_PAGE_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="choice-merchant-price")
+
+
+def _web_choice_price_recovery(row, country, lang):
+    """Recover money only after One has matched identity; never retrieve new products."""
+    cc = str(row.get('country') or country).lower()
+    currency = COUNTRY_CURRENCIES.get(cc) or row.get('original_currency') or row.get('currency') or ''
+    market = dict(country=cc, currency=currency, currencies=list(COUNTRY_CURRENCY_CODES.get(cc, (currency,))))
+    # A blocked merchant must not consume the entire price budget before the
+    # indexed listing lookup starts. Both sources remain bound to the same URL.
+    future = _FZ_CHOICE_PRICE_PAGE_POOL.submit(_web_live_page_price, row, market)
+    try:
+        page = future.result(timeout=.35) or {}
+    except Exception:
+        page = {}
+    update = page
+    if not page.get('price'):
+        key = _web_price_url_key(row['url'])
+        update = (_web_targeted_price_updates({key:row}, lang, market, choice_price=True) or {}).get(key) or {}
+        if future.done():
+            try:
+                page = future.result() or page
+            except Exception:
+                pass
+        if page.get('price'):
+            update = page
+    if not update.get('price'):
+        return None
+    result = dict(row, **_web_price_facts(update))
+    # Stale missing-price flags must not veto newly observed, exact-listing money.
+    result.update(price_pending=False, price_unavailable=False)
+    if _web_price_review_reason(result, market):
+        return None
+    result['price_integrity_status'] = 'verified' if update.get('price_verified') else 'indexed'
+    availability = str(page.get('availability') or '').lower()
+    if 'outofstock' in availability or 'out_of_stock' in availability or 'discontinued' in availability:
+        return None
+    return result
 
 
 def _fz_evaluation_row(token):
