@@ -9,7 +9,7 @@ test('trial is isolated from public home, not indexed, and served without cache'
   try{
     const home=await (await fetch(origin+'/')).text();
     assert.ok(!home.includes('data-choice-preview'));
-    assert.ok(!home.includes('findzia-choice.'));
+    assert.ok(!home.includes('findzia-choice-trial.'));
     assert.ok(!home.includes(config.path));
     const response=await fetch(origin+config.path,{headers:{Host:'findzia.com'}});
     assert.equal(response.status,200);
@@ -18,7 +18,7 @@ test('trial is isolated from public home, not indexed, and served without cache'
     assert.equal(response.headers.get('referrer-policy'),'no-referrer');
     const trial=await response.text();
     assert.ok(trial.includes('data-choice-preview="true"'));
-    assert.ok(trial.includes('findzia-choice.'));
+    assert.ok(trial.includes('findzia-choice-trial.'));
     assert.ok(!trial.includes('findzia-ads.'));
     assert.ok(!trial.includes('findzia-analytics.'));
     assert.ok(!trial.includes('rel="canonical"'));

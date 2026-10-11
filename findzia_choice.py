@@ -15,7 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
-RELEASE = "157.0.7"
+RELEASE = "157.0.8"
 MAX_OFFERS = 48
 MAX_BODY = 10_000_000
 
@@ -64,15 +64,32 @@ Unknown shipping/tax is unknown, never free. A listed price is not a delivered
 total. Don't claim cheapest anywhere or trustworthiness from a merchant name.
 Mode cheaper: reduce cost within the request's constraints. Mode quality: prefer
 observed features that benefit the stated use, not unsupported premium claims.
-If a missing preference materially prevents choosing, and answers is empty,
-you may ask ONE concise question with 2-3 short choices; don't ask routine
-questions when a reasonable choice is possible. Never ask again after an answer.
+If one missing preference materially changes the recommendation, and answers
+is empty and skip_question is false, you may ask ONE concise question. For a
+broad request, ask about intended use or an essential missing constraint. Make
+2-3 distinct choices understandable without technical expertise. Do not ask
+users to guess a technical rating (watts, processor codes, etc.) when a use-case
+question would work. Never ask for a brand, model, size, colour or requirement
+already stated in the request. Never replace an explicit model with another.
+Use only distinctions actually represented by supplied offers. Where useful,
+include choice_details with a short plain-language hint, supporting offer_ids,
+and exact evidence substrings. Hints must explain an observed feature; do not
+invent performance, compatibility, safety, suitability or capacity guarantees.
+The question and every choice/hint must use request.language, even if query or
+listing text is in another language. Keep labels under 6 words and hints under
+10 words. Do not include a 'choose for me' choice: the UI supplies it.
+Do not ask routine questions when a reasonable choice is possible. Never ask
+again after an answer. If skip_question is true, choose the best supported
+general option without inventing a preference. An answer is a requirement:
+reject incompatible variants; if none qualifies, return no_match.
 Return ONE complete JSON object, with double-quoted keys, no markdown or prose.
 Use one of these valid examples (replace example values with your decision):
 {"status":"selected","id":"p1","match":"exact",
  "reason":{"text":"One short practical reason, at most 25 words",
  "evidence":["exact substring from selected offer evidence"],"inference":false}}
-{"status":"question","question":"One question, at most 15 words","choices":["A","B"]}
+{"status":"question","question":"One question, at most 15 words",
+ "choices":["A","B"],"choice_details":[{"choice":"A","text":"Short helpful hint",
+ "offer_ids":["p1"],"evidence":["exact substring from offer evidence"]}]}
 {"status":"no_match"}
 The selected match may be "exact" or "suitable". Text must use the requested
 language. Only select a listed ID. Don't manufacture facts. Keep output short.
@@ -136,6 +153,7 @@ class ChoiceEngine:
                        language=self.s['_web_language'](payload.get('lang') or 'en'),
                        country=str(payload.get('country') or '').lower()[:2],
                        answers=[self.s['_card_text'](a, 160) for a in answers if isinstance(a, str)],
+                       skip_question=payload.get('skip_question') is True,
                        mode=payload.get('mode') if payload.get('mode') in ('cheaper', 'quality') else 'best',
                        extra_specs=self.s['_card_text'](payload.get('extra_specs'), 200))
         image_proofs = payload.get('offer_images', [])
@@ -300,7 +318,7 @@ class ChoiceEngine:
                         and value.get('match') in ('exact', 'suitable')):
                     return value
                 choices = value.get('choices')
-                if (status == 'question' and not context['answers']
+                if (status == 'question' and not context['answers'] and not context.get('skip_question')
                         and isinstance(value.get('question'), str) and value['question'].strip()
                         and isinstance(choices, list)
                         and len({c.strip() for c in choices[:3] if isinstance(c, str) and c.strip()}) >= 2):
@@ -336,12 +354,33 @@ class ChoiceEngine:
         response = self.decision(context, offers)
         if not isinstance(response, dict):
             raise ValueError('invalid_choice')
-        if response.get('status') == 'question' and not context['answers']:
+        if response.get('status') == 'question' and not context['answers'] and not context.get('skip_question'):
             question = self.s['_card_text'](response.get('question'), 160)
             choices = response.get('choices')
             choices = list(dict.fromkeys(self.s['_card_text'](c, 80) for c in choices[:3] if isinstance(c, str) and c.strip())) if isinstance(choices, list) else []
             if question and len(choices) >= 2:
-                return dict(ok=True, status='question', question=question, choices=choices, release=RELEASE)
+                # Extra hints are optional. Unsupported claims are omitted;
+                # short choices still work without another model round trip.
+                details = response.get('choice_details')
+                details = details[:3] if isinstance(details, list) else []
+                options = []
+                for label in choices:
+                    hint = ''
+                    detail = next((d for d in details if isinstance(d, dict)
+                                   and self.s['_card_text'](d.get('choice'), 80) == label), None)
+                    if detail and isinstance(detail.get('offer_ids'), list):
+                        ids = detail['offer_ids'][:MAX_OFFERS]
+                        scoped = [c for c in candidates if c['id'] in ids]
+                        evidence = detail.get('evidence')
+                        if (scoped and all(isinstance(i, str) for i in ids) and len(scoped) == len(set(ids))
+                                and isinstance(evidence, list) and evidence
+                                and all(isinstance(e, str) and e.strip() for e in evidence)):
+                            source = '\n'.join(c['evidence'] for c in scoped)
+                            if all(e in source for e in evidence):
+                                hint = self.s['_card_text'](detail.get('text'), 100)
+                    options.append(dict(label=label, detail=hint))
+                return dict(ok=True, status='question', question=question,
+                            choices=choices, options=options, release=RELEASE)
         if response.get('status') == 'no_match':
             return dict(ok=True, status='no_match', release=RELEASE)
         chosen = next((c for c in candidates if c['id'] == response.get('id')), None)

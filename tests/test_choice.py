@@ -268,6 +268,25 @@ class ChoiceTests(unittest.TestCase):
         self.assertEqual(self.pick([row()])['status'],'question')
         with self.assertRaises(ValueError):self.pick([row()],answers=['50'])
 
+    def test_question_hints_require_existing_offer_evidence(self):
+        self.s['_refine_ai'].return_value=dict(status='question',question='Which style?',
+            choices=['Portable','At home'],choice_details=[
+                dict(choice='Portable',text='A1 headphones',offer_ids=['p1'],evidence=['A1 headphones']),
+                dict(choice='At home',text='Guaranteed professional performance',offer_ids=['p999'],evidence=['A1 headphones'])])
+        result=self.pick([row()])
+        self.assertEqual(result['options'],[
+            dict(label='Portable',detail='A1 headphones'),dict(label='At home',detail='')])
+        self.s['_refine_ai'].return_value['choice_details'][0]['evidence']=['invented feature']
+        self.assertEqual(self.pick([row()])['options'][0]['detail'],'')
+
+    def test_choose_for_me_cannot_trigger_another_question(self):
+        self.s['_refine_ai'].return_value=dict(status='question',question='Again?',choices=['A','B'])
+        with self.assertRaises(ValueError):self.pick([row()],skip_question=True)
+        self.s['_refine_ai'].return_value=dict(status='selected',id='p1',match='suitable',reason=None)
+        self.assertEqual(self.pick([row()],skip_question=True)['status'],'selected')
+        request=self.s['_refine_ai'].call_args.args[1]['request']
+        self.assertIs(request['skip_question'],True)
+
 
     def test_malformed_ai_json_retries_without_user_action(self):
         self.s['_refine_ai'].side_effect=[json.JSONDecodeError('truncated','{"status":"selected",',20),
