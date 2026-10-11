@@ -1033,6 +1033,7 @@ function fzRequestLifetime(milliseconds) {
   };
 }
 async function Rt(path, payload, receive, sharedLifetime) {
+  if (['/api/search/stream','/api/search/image/stream'].includes(path)) payload={...payload,one_catalog:true};
   if (!r) throw new Error('API URL missing');
   if (['/api/search/stream','/api/search/image/stream'].includes(path)) fzAccountStart(payload);
   if (['/api/search/stream','/api/search/image/stream'].includes(path)) fzStartCardMetric(path, payload);
@@ -1739,6 +1740,7 @@ return result;};}})();</script>
 <script src="{{ 'findzia-photo-history.js' | asset_url }}" defer></script>
 <script src="{{ 'findzia-camera-trial.js' | asset_url }}" defer></script>
 <link rel="stylesheet" href="{{ 'findzia-choice-trial.css' | asset_url }}">
+<script src="{{ 'findzia-one-catalog.js' | asset_url }}" defer></script>
 <script src="{{ 'findzia-choice-trial.js' | asset_url }}" defer></script>
 
 

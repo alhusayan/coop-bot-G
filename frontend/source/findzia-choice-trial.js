@@ -1,4 +1,4 @@
-/* FINDZIA_CHOICE_RELEASE=157.0.15 — photo identity is independent of price availability. */
+/* FINDZIA_CHOICE_RELEASE=157.0.16 — photo identity is independent of price availability. */
 (() => {
   'use strict';
   const COPY = {
@@ -465,7 +465,7 @@
           }
           if(!selected)empty(value.status==='price_unavailable'?'priceUnavailable':value.reason==='market_no_match'?'marketNoMatch':'noMatch');return;
         }
-        if(c.kind==='image'&&value.visual_verified!==true){const error=new Error('visual_review_required');error.retryable=false;throw error;}
+        if(c.kind==='image'&&value.visual_verified!==true&&value.identity_basis!=='verified_model'){const error=new Error('visual_review_required');error.retryable=false;throw error;}
         const current=currentRows.find(r=>r.url===value.url&&rowVersion(r)===rowVersion(rows.find(o=>o.token===value.token)||{}));
         if(!current){lastKey='';followUp=true;return;}
         if(selected?.version===rowVersion(current)&&formatMoney(selected.value.money)===formatMoney(value.money)){
@@ -539,7 +539,7 @@
       const value=marketChoices[marketScope]||{status:'no_match'};
       const submitted=marketRows.find(r=>r.token===value.token);
       const row=candidates().find(r=>r.url===value.url&&submitted&&rowVersion(r)===rowVersion(submitted));
-      if(value.status==='selected'&&row&&parts(value.money)&&(bridge.context().kind!=='image'||value.visual_verified===true))show(value,row);
+      if(value.status==='selected'&&row&&parts(value.money)&&(bridge.context().kind!=='image'||value.visual_verified===true||value.identity_basis==='verified_model'))show(value,row);
       else if(value.status==='question'){pendingView(candidates(),bridge.context());ask(value);}
       else empty(value.status==='price_unavailable'?'priceUnavailable':'marketNoMatch');
     });
@@ -567,7 +567,7 @@
     document.fonts?.ready?.then(()=>{if(!disposed)fit();});
     function destroy(){disposed=true;reset();langObserver.disconnect();sizeObserver?.disconnect();for(const name of ['fz:search-state','fz:choice-results'])root.removeEventListener(name,queue);root.removeEventListener('fz:search-progress',progressEvent);root.removeEventListener('fz:search-reset',resetEvent);window.removeEventListener?.('resize',fit);window.visualViewport?.removeEventListener('resize',fit);box.remove();dialog.remove();delete root.dataset.choiceMode;delete root.dataset.choiceActive;}
     document.addEventListener('shopify:section:unload',function unload(ev){if(ev.target?.contains(root)){destroy();document.removeEventListener('shopify:section:unload',unload);}});
-    root.fzOneChoice={update,destroy,release:'157.0.15'};labels();queue();
+    root.fzOneChoice={update,destroy,release:'157.0.16'};labels();queue();
   }
   window.FindziaChoice={mount,PriceReels,PhotoSequence,SearchLog,moneyParts:parts};
   const start=()=>document.querySelectorAll('.fz-home').forEach(mount);

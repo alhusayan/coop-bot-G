@@ -14,12 +14,12 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, wait
 
-from findzia_choice_identity import model_evidence
+from findzia_choice_identity import model_evidence, normalized
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
-RELEASE = "157.0.15"
+RELEASE = "157.0.16"
 MAX_OFFERS = 48
 MAX_BODY = 10_000_000
 
@@ -56,8 +56,9 @@ material and colour. A cheap accessory, replacement part, wrong variant, bulk
 MOQ, instalment or incompatible product is NOT a bargain. Never downgrade an
 explicit specification to satisfy a cheaper preference. Price is important, but
 the best suitable model may be better value than an unsuitable cheaper model.
-For an image query, only candidates that passed direct pixel comparison are
-provided. Respect the attached visual observation and all explicit requirements.
+For an image query, candidates passed direct pixel comparison or have the same
+explicit model and variant as a pixel-verified offer. Respect the attached
+identity basis, visual observation and all explicit requirements.
 Only confirmed, exact unit prices are eligible for a final selection. All
 supplied offers belong to ONE market scope. Never substitute an international
 listing for a local offer. A visually matching listing without money is retained
@@ -185,6 +186,10 @@ class ChoiceEngine:
             url = row.get('url')
             if not url or url in seen:
                 continue
+            if row.get('source') == 'shopify_catalog' and (
+                    row.get('cacheable') is not False or not row.get('market_country')
+                    or row.get('market_scope') not in ('local', 'global')):
+                continue
             # This must be signed server evidence, not frontend flags.
             if (row.get('hidden') or row.get('stock_status') == 'out_of_stock'
                     or row.get('in_stock') is False
@@ -212,7 +217,8 @@ class ChoiceEngine:
                     rejected_identity['category'] += 1
                     continue
             money = self.money(row, context['country'])
-            if money is None and kind == 'text' and identity is not True:
+            if money is None and (row.get('source') == 'shopify_catalog'
+                                  or kind == 'text' and identity is not True):
                 continue
             candidate = dict(id='p' + str(len(candidates) + 1), row=row, token=token,
                              evidence=evidence, money=money)
@@ -239,7 +245,15 @@ class ChoiceEngine:
         if row.get('price_estimated') and row.get('original_price') and row.get('original_currency'):
             # Use signed merchant currency, never an approximate FX display as a final price.
             row = dict(row, price=row['original_price'], currency=row['original_currency'], price_estimated=False)
-        money = self.s['_fz_eval_money'](row)
+        if row.get('source') == 'shopify_catalog':
+            # The signed UCP amount belongs to this exact available variant.
+            # Generic web price-source allowlists do not cover this provider.
+            money = (dict(amount=row.get('price_amount'), currency=row.get('currency'), kind=row.get('price_kind'))
+                     if row.get('cacheable') is False and row.get('price_verified') is True
+                     and row.get('price_source_url') == row.get('url')
+                     and re.fullmatch(r'[A-Z]{3}', str(row.get('currency') or '')) else None)
+        else:
+            money = self.s['_fz_eval_money'](row)
         if (not money or money.get('kind') != 'exact' or _number(money.get('amount')) is None
                 or row.get('price_unavailable') or row.get('price_estimated') or row.get('price_unit')
                 or row.get('price_integrity_status') in ('pending', 'suspect')
@@ -269,7 +283,7 @@ class ChoiceEngine:
         recover = self.s.get('_web_choice_price_recovery')
         if not recover:
             return candidates
-        missing = [c for c in candidates if not c['money']]
+        missing = [c for c in candidates if not c['money'] and c['row'].get('source') != 'shopify_catalog']
         # Reserve work for both scopes; do not spend the budget on unrelated rows.
         pending = []
         for scope in ('local', 'global'):
@@ -437,7 +451,26 @@ class ChoiceEngine:
         return (a['money'] is not None and b['money'] is not None
                 and a['money']['currency'] == b['money']['currency']
                 and a['money']['basis'] == b['money']['basis']
-                and self.s['_fz_eval_comparable'](a['row'], b['row']))
+                and self.same_product(a['row'], b['row']))
+
+    def same_product(self, a, b):
+        if not self.s['_fz_eval_comparable'](a, b):
+            return False
+        for row, other in ((a, b), (b, a)):
+            if row.get('source') != 'shopify_catalog':
+                continue
+            specs = row.get('key_specs') or []
+            if other.get('source') == 'shopify_catalog':
+                if specs != (other.get('key_specs') or []) or row.get('variant_title') != other.get('variant_title'):
+                    return False
+            else:
+                evidence = normalized(self.s['_fz_listing_text'](other))
+                values = [s.get('value', '') for s in specs] or [row.get('variant_title', '')]
+                for value in values:
+                    value = normalized(value)
+                    if value and not re.search(r'(?<!\w)' + re.escape(value) + r'(?!\w)', evidence):
+                        return False
+        return True
 
     def decision(self, context, offers):
         ids = {offer['id'] for offer in offers}
@@ -482,7 +515,21 @@ class ChoiceEngine:
     def choose(self, context, candidates):
         evaluated_count = len(candidates)
         if context['kind'] == 'image' and candidates:
-            candidates = self.visual_candidates(context, candidates)
+            catalog = [c for c in candidates if c['row'].get('source') == 'shopify_catalog']
+            native = [c for c in candidates if c['row'].get('source') != 'shopify_catalog']
+            candidates = self.visual_candidates(context, native) if native else []
+            # Shopify images render only at the merchant listing in the browser.
+            # Never download/cache them or mistake catalog similarity for proof.
+            # An alternate offer may inherit identity ONLY from a pixel-verified
+            # explicit model with matching size, colour, condition and pack facts.
+            for candidate in catalog:
+                anchor = next((c for c in candidates
+                    if c['row'].get('source') != 'shopify_catalog'
+                    and model_evidence(c['row'].get('raw_title') or c['row'].get('title', ''), candidate['row']) is True
+                    and self.same_product(c['row'], candidate['row'])), None)
+                if anchor:
+                    candidates.append(dict(candidate, identity_basis='verified_model', visual=dict(
+                        verdict='model_match', observation='Same explicit model and variant as pixel-reviewed offer ' + anchor['id'])))
         visual_summary = context.get('_visual_summary', {})
         context = {k:v for k,v in context.items() if not k.startswith('_')}
         if not candidates:
@@ -584,7 +631,7 @@ class ChoiceEngine:
                 if money and c['money'] and c['money']['comparison_amount'] > money['comparison_amount']]
         saving = round(min(more) - money['comparison_amount'], 6) if more else None
         print('CHOICE RESULT ' + json.dumps(dict(release=RELEASE, status='selected', kind=context['kind'],
-              id=selected['id'], title=row.get('title', '')[:120], reviewed=evaluated_count,
+              id=selected['id'], title='' if row.get('source') == 'shopify_catalog' else row.get('title', '')[:120], reviewed=evaluated_count,
               price_confirmed=money is not None, market_scope=context.get('market_scope'))), flush=True)
         return dict(ok=True, status='selected', release=RELEASE, selection='ai',
                     url=row['url'], token=selected['token'], title=row.get('title') or row.get('raw_title', ''),
@@ -594,9 +641,12 @@ class ChoiceEngine:
                     savings=dict(amount=saving, currency=money['currency'], basis=money['basis']) if saving else None,
                     evaluated_count=len(candidates), match=('exact' if row.get('match_type') == 'exact' else 'suitable')
                     if context['kind'] == 'image' else response['match'],
-                    visual_verified=context['kind'] == 'image', reviewed_count=evaluated_count)
+                    visual_verified=context['kind'] == 'image' and selected.get('identity_basis') != 'verified_model',
+                    identity_basis=selected.get('identity_basis', 'pixels' if context['kind'] == 'image' else 'listing'),
+                    reviewed_count=evaluated_count)
 
     def submit(self, context, candidates):
+        cacheable = all(c['row'].get('source') != 'shopify_catalog' for c in candidates)
         key = hashlib.sha256(json.dumps([context, candidates], sort_keys=True, ensure_ascii=False).encode()).hexdigest()
         with self.lock:
             now = time.monotonic()
@@ -612,7 +662,7 @@ class ChoiceEngine:
                     value = self.choose(context, candidates)
                     with self.lock:
                         price_missing = any(v.get('status') == 'price_unavailable' for v in (value.get('markets') or {'local':value}).values())
-                        if value.get('status') in ('selected', 'question') or price_missing:
+                        if cacheable and (value.get('status') in ('selected', 'question') or price_missing):
                             # Deduplicate retries during the short failure cache;
                             # do not freeze a missing market price for four minutes.
                             self.cache[key] = (time.monotonic() + (5 if price_missing else 240), copy.deepcopy(value))
@@ -655,8 +705,9 @@ def install_choice(app, services):
         try:
             cached, future = engine.submit(context, candidates)
             if cached is not None:
-                return cached
-            return await asyncio.wait_for(asyncio.shield(asyncio.wrap_future(future)), timeout=36)
+                return JSONResponse(cached, headers={'Cache-Control': 'no-store'})
+            value = await asyncio.wait_for(asyncio.shield(asyncio.wrap_future(future)), timeout=36)
+            return JSONResponse(value, headers={'Cache-Control': 'no-store'})
         except Exception as exc:
             # Never label a price sort as an AI decision during an outage.
             code = str(exc) if str(exc) in ('busy', 'refinement_unavailable', 'invalid_choice',

@@ -28676,21 +28676,21 @@ async def web_api_search_stream(request: Request):
     client_name = re.sub('[^a-z0-9_-]+', '', str(payload.get('client') or 'web').strip().lower())[:24] or 'web'
 
     if TEXT_FAST_ENABLED or payload.get("photo_text_refinement") is True:
-        return StreamingResponse(_web_stream_text_fast(query, country, lang, selected_option, request, original_query, force_specific),
+        return _FZ_ONE_CATALOG.wrap_response(StreamingResponse(_web_stream_text_fast(query, country, lang, selected_option, request, original_query, force_specific),
             media_type='application/x-ndjson',
-            headers={'Cache-Control':'no-cache, no-transform','X-Accel-Buffering':'no'})
+            headers={'Cache-Control':'no-cache, no-transform','X-Accel-Buffering':'no'}), opted_in=payload.get('one_catalog') is True, country=country, lang=lang, preview=True, query=selected_option or query)
     if TEXT_LENS_ENABLED:
-        return StreamingResponse(_web_stream_text_lens(query, country, lang, selected_option, request, force_specific),
+        return _FZ_ONE_CATALOG.wrap_response(StreamingResponse(_web_stream_text_lens(query, country, lang, selected_option, request, force_specific),
             media_type='application/x-ndjson',
-            headers={'Cache-Control':'no-cache, no-transform','X-Accel-Buffering':'no'})
+            headers={'Cache-Control':'no-cache, no-transform','X-Accel-Buffering':'no'}), opted_in=payload.get('one_catalog') is True, country=country, lang=lang, preview=True, query=selected_option or query)
     if TEXT_GOOGLE_WEB_ENABLED:
-        return StreamingResponse(_web_stream_google_text(query, country, lang, selected_option, request, original_query, force_specific),
+        return _FZ_ONE_CATALOG.wrap_response(StreamingResponse(_web_stream_google_text(query, country, lang, selected_option, request, original_query, force_specific),
             media_type='application/x-ndjson',
-            headers={'Cache-Control':'no-cache, no-transform','X-Accel-Buffering':'no'})
+            headers={'Cache-Control':'no-cache, no-transform','X-Accel-Buffering':'no'}), opted_in=payload.get('one_catalog') is True, country=country, lang=lang, preview=True, query=selected_option or query)
     if TEXT_SHOPPING_COPY_ENABLED:
-        return StreamingResponse(_web_stream_shopping_text(query, country, lang, selected_option, request, payload.get('sort_by'), original_query, force_specific),
+        return _FZ_ONE_CATALOG.wrap_response(StreamingResponse(_web_stream_shopping_text(query, country, lang, selected_option, request, payload.get('sort_by'), original_query, force_specific),
             media_type='application/x-ndjson',
-            headers={'Cache-Control':'no-cache, no-transform','X-Accel-Buffering':'no'})
+            headers={'Cache-Control':'no-cache, no-transform','X-Accel-Buffering':'no'}), opted_in=payload.get('one_catalog') is True, country=country, lang=lang, preview=True, query=selected_option or query)
 
     async def _generator():
         started = time.time()
@@ -29008,7 +29008,7 @@ async def web_api_search_stream(request: Request):
                 yield _web_stream_event({'event': 'done', 'count': len(sent), 'partial': True, 'elapsed_ms': int((time.time() - started) * 1000)})
             else:
                 yield _web_stream_event({'event': 'error', 'error': 'search_failed', 'elapsed_ms': int((time.time() - started) * 1000)})
-    return StreamingResponse(_web_with_live_prices(_web_with_local_discovery(_generator(), lang, country), lang, country), media_type='application/x-ndjson', headers={'Cache-Control': 'no-cache, no-transform', 'X-Accel-Buffering': 'no', 'Connection': 'keep-alive'})
+    return _FZ_ONE_CATALOG.wrap_response(StreamingResponse(_web_with_live_prices(_web_with_local_discovery(_generator(), lang, country), lang, country), media_type='application/x-ndjson', headers={'Cache-Control': 'no-cache, no-transform', 'X-Accel-Buffering': 'no', 'Connection': 'keep-alive'}), opted_in=payload.get('one_catalog') is True, country=country, lang=lang, preview=True, query=selected_option or query)
 
 def _web_normalize_uploaded_image_bytes(image_bytes, mime):
     """Bound decoding and normalize orientation/colour without changing product detail."""
@@ -30465,7 +30465,7 @@ async def web_api_image_search_stream(request: Request):
     country, country_source = await asyncio.to_thread(_web_resolve_request_country, request, payload.get('country'))
     caption = _web_image_caption(payload)
 
-    return _web_image_stream_response(image_b64, mime, caption, country, lang)
+    return _FZ_ONE_CATALOG.wrap_response(_web_image_stream_response(image_b64, mime, caption, country, lang), opted_in=payload.get('one_catalog') is True, country=country, lang=lang, preview=True, query=caption, image_b64=image_b64, mime=mime)
 
 @app.post('/api/prices/stream')
 async def web_api_prices_stream(request: Request):
@@ -32944,7 +32944,8 @@ def _fz_evaluation_token(row):
               'classification_final','identity_review_status','display_before_audit','match_type',
               'classification_reason','identity_match_percentage','match_percentage',
               'photo_match_status','alternative_visual_status','price_integrity_status',
-              'shipping_amount','shipping_currency','shipping_verified','shipping_country')
+              'shipping_amount','shipping_currency','shipping_verified','shipping_country',
+              'source','cacheable','product_id','variant_id','variant_title','merchant_country_evidence')
     data = {k:row[k] for k in fields if isinstance(row.get(k),(str,int,float,bool))}
     data = {k:(v[:600] if isinstance(v,str) and k not in ('url','price_source_url') else v)
             for k,v in data.items()}
@@ -34908,5 +34909,9 @@ app.add_middleware(_FindziaImageTiming)
 
 
 # Findzia One: selection used by the unlisted trial frontend only.
+from findzia_one_catalog import OneCatalog as _OneCatalog
+_FZ_ONE_CATALOG = _OneCatalog(COUNTRY_NAMES, _fz_evaluation_token)
+print('ONE CATALOG enabled=' + str(_FZ_ONE_CATALOG.enabled(preview=True)), flush=True)
+
 from findzia_choice import install_choice as _install_findzia_choice
 _FZ_ONE_CHOICE = _install_findzia_choice(app, globals())

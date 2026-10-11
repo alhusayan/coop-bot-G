@@ -144,6 +144,8 @@ def event_line(event):
 
 
 class ShopifyCatalog:
+    normalize_products = staticmethod(normalize_products)
+
     def __init__(self, countries, *, transport=None, markets=None):
         self.countries = frozenset(c.upper() for c in countries)
         self.transport = transport
@@ -232,7 +234,7 @@ class ShopifyCatalog:
             if any(isinstance(m, dict) and 'unsupported' in str(m.get('code', '')).lower()
                    for m in structured.get('messages', [])):
                 return {'status': 'unsupported_filter', 'items': []}
-            return {'status': 'ok', 'items': normalize_products(products, country, bool(image_b64), origin_country)}
+            return {'status': 'ok', 'items': self.normalize_products(products, country, bool(image_b64), origin_country)}
         except (TimeoutError, httpx.TimeoutException):
             return {'status': 'timeout', 'items': []}
         except (httpx.HTTPError, ValueError, TypeError, AttributeError, ImportError):
