@@ -963,17 +963,18 @@
     }
     async function paidFetch(url,options={}){
       const target=new URL(url,location.href), allowed=new URL(api);
-      if(target.origin!==allowed.origin||!target.pathname.startsWith('/api/'))throw Error('invalid_api_target');
+      const prefix=allowed.pathname.replace(/\/$/,''), requestPath=target.pathname.startsWith(prefix+'/api/')?target.pathname.slice(prefix.length):'';
+      if(target.origin!==allowed.origin||!requestPath.startsWith('/api/'))throw Error('invalid_api_target');
       await abortable(account.ready,options.signal);
       if(options.signal?.aborted)throw new DOMException('Aborted','AbortError');
-      const headers=new Headers(options.headers||{}), charge=searches.has(target.pathname),generation=bridge.context().generation,previous=allowedView;
+      const headers=new Headers(options.headers||{}), charge=searches.has(requestPath),generation=bridge.context().generation,previous=allowedView;
       if(!credential())await abortable(ensureGuest(),options.signal);
       if(options.signal?.aborted)throw new DOMException('Aborted','AbortError');
       headers.set('Authorization','Bearer '+credential());
       if(charge){
         // A stream-to-JSON fallback or reconnect belongs to the same search.
         // A deliberate new search changes the renderer's generation.
-        const input=target.pathname.replace(/\/stream$/,'')+'|'+bridge.context().generation+'|'+(options.body||'');
+        const input=requestPath.replace(/\/stream$/,'')+'|'+bridge.context().generation+'|'+(options.body||'');
         const bytes=new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(input)));
         const key=Array.from(bytes,x=>x.toString(16).padStart(2,'0')).join('');
         if(!operations.has(key))operations.set(key,uid());
