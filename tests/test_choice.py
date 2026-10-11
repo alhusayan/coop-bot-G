@@ -82,7 +82,7 @@ class ChoiceTests(unittest.TestCase):
                 r.setdefault('image',r['url']+'/photo.png')
             kw.setdefault('image_base64',base64.b64encode(b'reference-pixels').decode())
             kw.setdefault('offer_images',[dict(token=SIGN['_fz_evaluation_token'](r),image=r['image']) for r in rows])
-        return dict(query='headphones', country='kw', lang='en',
+        return dict(query=kw.pop('query', 'headphones'), country='kw', lang='en',
                     offer_tokens=[SIGN['_fz_evaluation_token'](r) for r in rows], **kw)
 
     def pick(self, rows, **kw):
@@ -156,6 +156,8 @@ class ChoiceTests(unittest.TestCase):
         self.pick([row()],kind='image')
         calls=lambda:[c for c in self.s['_refine_ai'].call_args_list if c.kwargs.get('images')]
         self.assertEqual(len(calls()),1)
+        self.pick([row()],kind='image',query='Updated automatic photo description',mode='cheaper')
+        self.assertEqual(len(calls()),1, 'Generated text and price mode cannot overturn the same pixels')
         self.pick([row()],kind='image',image_base64=base64.b64encode(b'another-reference').decode())
         self.assertEqual(len(calls()),2)
         self.s['_web_visual_candidate_inline']=lambda r:dict(mime_type='image/png',data='changed-pixels')

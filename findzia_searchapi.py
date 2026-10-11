@@ -55,6 +55,10 @@ def searchapi_params(params):
         allowed = ('url', 'q', 'country', 'hl', 'device', 'crop')
         out = {k: params[k] for k in allowed if params.get(k) is not None}
         out['search_type'] = params.get('type') or 'all'
+        # Google removed the Products tab on 2026-10-07. Keep legacy callers
+        # working through the supported visual lane; products now returns 400.
+        if out['search_type'] == 'products':
+            out['search_type'] = 'visual_matches'
         if out['search_type'] == 'exact_matches':
             out.pop('q', None)
             out['safe_search'] = params.get('safe', 'active')

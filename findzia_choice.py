@@ -16,7 +16,7 @@ from concurrent.futures import ThreadPoolExecutor, wait
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
-RELEASE = "157.0.10"
+RELEASE = "157.0.11"
 MAX_OFFERS = 48
 MAX_BODY = 10_000_000
 
@@ -234,7 +234,11 @@ class ChoiceEngine:
         if not reference:
             raise ValueError('reference_image_unreadable')
         request = {k:v for k,v in context.items() if not k.startswith('_')}
-        reference_key = hashlib.sha256(json.dumps([reference, request], sort_keys=True).encode()).hexdigest()
+        # Generated descriptions, market and price preferences cannot change
+        # whether the same two pictures show the same product.
+        visual_request = {k:request[k] for k in ('language', 'extra_specs', 'answers')}
+        reference_key = hashlib.sha256(json.dumps([reference, visual_request], sort_keys=True).encode()).hexdigest()
+        context['_visual_trace'] = reference_key[:12]
         def fetch(candidate):
             if not candidate.get('image_source'):
                 return None
@@ -261,7 +265,7 @@ class ChoiceEngine:
                 future.cancel()
                 unavailable += 1
                 continue
-            key = hashlib.sha256((reference_key + candidate['evidence'] + json.dumps(inline, sort_keys=True)).encode()).hexdigest()
+            key = hashlib.sha256((reference_key + json.dumps(inline, sort_keys=True)).encode()).hexdigest()
             with self.lock:
                 cached = self.visual_cache.get(key)
             if cached and cached[0] > time.monotonic():
@@ -295,6 +299,9 @@ class ChoiceEngine:
                     result = []
                     for c, _, key in batch:
                         proof = by_id[c['id']]
+                        print('CHOICE COMPARISON ' + json.dumps(dict(release=RELEASE,
+                              reference=reference_key[:12], id=c['id'], title=c['row'].get('title', '')[:120],
+                              verdict=proof['verdict'], observation=proof['observation'][:300])), flush=True)
                         with self.lock:
                             self.visual_cache[key] = (time.monotonic() + 240, proof)
                             while len(self.visual_cache) > 1024:
@@ -321,6 +328,7 @@ class ChoiceEngine:
                 unavailable += count
         context['_visual_summary'] = dict(reviewed=reviewed, unavailable=unavailable, matched=len(accepted))
         print('CHOICE VISUAL ' + json.dumps(dict(release=RELEASE, **context['_visual_summary'],
+              reference=reference_key[:12],
               elapsed_ms=round((time.monotonic()-started)*1000))), flush=True)
         return sorted(accepted, key=lambda c:int(c['id'][1:]))
 
@@ -446,6 +454,8 @@ class ChoiceEngine:
         more = [c['money']['comparison_amount'] for c in equivalents
                 if c['money']['comparison_amount'] > money['comparison_amount']]
         saving = round(min(more) - money['comparison_amount'], 6) if more else None
+        print('CHOICE RESULT ' + json.dumps(dict(release=RELEASE, status='selected', kind=context['kind'],
+              id=selected['id'], title=row.get('title', '')[:120], reviewed=evaluated_count)), flush=True)
         return dict(ok=True, status='selected', release=RELEASE, selection='ai',
                     url=row['url'], token=selected['token'], title=row.get('title') or row.get('raw_title', ''),
                     store=row.get('store', ''), money=money,

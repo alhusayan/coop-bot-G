@@ -29,6 +29,14 @@ class Response:
 
 
 class ProviderTests(unittest.TestCase):
+    def test_removed_lens_products_tab_uses_visual_matches(self):
+        for query in ('', 'mesh chair'):
+            mapped = searchapi_params(dict(engine='google_lens', type='products',
+                url='https://api.example/photo.jpg', country='kw', q=query))
+            self.assertEqual(mapped['search_type'], 'visual_matches')
+            self.assertEqual(mapped['country'], 'kw')
+            self.assertEqual(mapped['q'], query)
+
     def setUp(self):
         self.env = patch.dict(os.environ, {'SEARCHAPI_API_KEY': 'primary-secret',
             'SERPAPI_API_KEY': 'backup-secret', 'SEARCHAPI_PRIMARY_ENABLED': 'true'}, clear=True)
@@ -243,7 +251,7 @@ class SchemaTests(unittest.TestCase):
     def test_lens_mapping_and_currency(self):
         params = searchapi_params({'engine': 'google_lens', 'url': 'https://example.com/photo.jpg',
             'type': 'products', 'country': 'kw', 'hl': 'ar', 'q': 'black', 'auto_crop': True, 'api_key': 'secret'})
-        self.assertEqual(params['search_type'], 'products')
+        self.assertEqual(params['search_type'], 'visual_matches')
         self.assertEqual(params['country'], 'kw')
         self.assertNotIn('api_key', params)
         self.assertNotIn('auto_crop', params)
