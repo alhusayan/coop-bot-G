@@ -147,7 +147,7 @@
     }
     root.addEventListener('fz:search-reset', clear);
     root.addEventListener('fz:search-state',updateNote);
-    root.addEventListener('fz:result-count',({detail})=>{state.hasResults=state.hasResults||detail?.count>0;if(state.nav)state.nav.hidden=!state.hasResults;});
+    root.addEventListener('fz:result-count',({detail})=>{state.hasResults=state.hasResults||detail?.count>0;if(state.nav){state.nav.hidden=!state.hasResults;const filters=state.nav.querySelector('[data-filter-seg]');if(filters)filters.hidden=!state.hasResults;}});
     root.addEventListener('fz:search-progress', ({detail:event}) => {
       if (!event) return;
       if (event.event === 'result' || event.event === 'upsert') prune(event.item?.url);

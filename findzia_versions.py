@@ -32,6 +32,11 @@ class VersionRouter:
 
     async def __call__(self, scope, receive, send):
         path = scope.get('path', '')
+        # The catalog provider validates this pre-existing public agent profile.
+        # Keep its registered URL while catalog retrieval itself stays in /test.
+        if scope['type'] == 'http' and path == '/.well-known/ucp':
+            selected = await self.test_app()
+            return await selected(scope, receive, send)
         if scope['type'] != 'http' or not (path == '/test' or path.startswith('/test/')):
             return await self.primary(scope, receive, send)
         target = path[5:] or '/'
