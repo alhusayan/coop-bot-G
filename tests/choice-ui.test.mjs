@@ -202,7 +202,7 @@ test('bridge retains authorization for original, audited and recovered displayed
   const row={url:'https://store.example/item',evaluation_token:'offer-token',title:'Coat',audited_image:'https://img.example/a.jpg',audited_media_path:'/api/media/verified/abc'};
   const photo={winner:row.audited_image,node:{complete:true,naturalWidth:400},mediaAuth:new Map([[row.audited_image,{raw:row.audited_image,token:'offer-token'}]])};
   const env={e:{fzRefineBridge:{}},W:{kind:'text'},U:[row],q:new Map([[row.url,photo]]),br:r=>r.url,_r:()=>({kind:'exact',value:99,currency:'KWD'}),$t:()=>true,fzEarlyPhotoPreview:()=>false,
-    fzMediaKey:x=>x,fzVerifiedPictureURL:r=>r.audited_media_path?'https://api.example'+r.audited_media_path:'',fzMediaVerdicts:new Map()};
+    et:r=>r.url,fzAlternativePending:()=>false,fzMediaKey:x=>x,fzVerifiedPictureURL:r=>r.audited_media_path?'https://api.example'+r.audited_media_path:'',fzMediaVerdicts:new Map()};
   vm.runInNewContext(source.slice(start,end),env);
   const read=()=>env.e.fzRefineBridge.choiceRows()[0];
   assert.equal(read().vision_image,row.audited_image);
@@ -214,9 +214,9 @@ test('bridge retains authorization for original, audited and recovered displayed
   assert.equal(read().vision_image,raw);assert.equal(read().media_token,'recovery-token');
   photo.winner='https://unrelated.example/forged.jpg';assert.equal(read().vision_image,'');
   // The exact same signed, decoded product must reach photo comparison when
-  // price extraction failed. Text shopping retains its priced-offer contract.
+  // price extraction failed. Text models also survive for server price recovery.
   photo.winner=row.audited_image;env._r=()=>null;env.$t=()=>false;
-  assert.equal(env.e.fzRefineBridge.choiceRows().length,0);
+  assert.equal(read().money,null);
   env.W.kind='image';env.et=r=>r.url;env.fzAlternativePending=()=>false;
   assert.equal(read().vision_image,row.audited_image);assert.equal(read().money,null);
 });

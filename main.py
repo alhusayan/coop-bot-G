@@ -5919,6 +5919,10 @@ def _web_collection_url(value):
             return False
         if _host_matches_any(host, tuple(NON_STORE_HOSTS) + ('google.com', 'bing.com', 'baidu.com', 'gstatic.com', 'googleusercontent.com')):
             return False
+        # A Noon department/brand grid is not a product offer. Expand its cards
+        # before binding any price or picture to a specific product.
+        if _host_matches_any(host, ('noon.com',)):
+            return _web_noon_product_identity(value) is None
         # Miinto department URLs use hyphens; only /p- is a product route.
         if re.search(r'(?:^|\.)miinto\.(?:[a-z]{2,3}|co\.uk|com\.[a-z]{2})$', host):
             return not path.startswith('/p-')
@@ -10480,6 +10484,10 @@ def _findzia_accessory_evidence(value):
     text = normalize_ar(str(value or ''))
     if re.search(r'\b(?:shirt|shirts|polo|poloshirt|dress|blouse|jacket|sweater|sweatshirt|hoodie)\b|قميص|تيشيرت|فستان', text, re.I):
         text = re.sub(r'\b(?:short|long|full|half|cap|raglan|puff|bell|three[ -]quarter)[ -]+sleeves?\b', '', text, flags=re.I)
+    # In personal-care listings, 'smooth skin' describes the result, not a
+    # phone skin/accessory. Retain actual covers, chargers and replacement parts.
+    if re.search(r'\b(?:ipl|lumea|epilator|hair[ -]+removal|skin[ -]?care)\b', text, re.I):
+        text = re.sub(r'\bskin\b', '', text, flags=re.I)
     return norm_tokens(text) & _FINDZIA_ACCESSORY_TOKENS
 
 

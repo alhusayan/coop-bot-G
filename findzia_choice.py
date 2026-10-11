@@ -9,14 +9,17 @@ import copy
 import hashlib
 import json
 import math
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, wait
 
+from findzia_choice_identity import model_evidence
+
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
-RELEASE = "157.0.13"
+RELEASE = "157.0.14"
 MAX_OFFERS = 48
 MAX_BODY = 10_000_000
 
@@ -173,6 +176,7 @@ class ChoiceEngine:
                 raise ValueError('reference_image_required')
             context['_reference_image'] = reference
         candidates, seen = [], set()
+        rejected_identity = dict(collection=0, model=0, category=0)
         for token in tokens:
             try:
                 row = self.s['_fz_evaluation_row'](token)
@@ -189,11 +193,26 @@ class ChoiceEngine:
                 continue
             # Direct pixel review below is the authority; pending legacy review
             # must not prevent a signed, priced candidate from being examined.
-            evidence = self.s['_fz_listing_text'](row)[:2800]
-            if kind == 'text' and self.s['_findzia_hard_product_mismatch'](query, evidence):
+            collection = self.s.get('_web_collection_url')
+            if collection and collection(url):
+                rejected_identity['collection'] += 1
                 continue
+            evidence = self.s['_fz_listing_text'](row)[:2800]
+            if kind == 'text':
+                identity = model_evidence(query, row)
+                if identity is False:
+                    rejected_identity['model'] += 1
+                    continue
+                # Positive model proof owns numeric identity. Keep category and
+                # accessory checks, without synthetic 'Series7000' vs 'Lumea7000'.
+                identity_query = query
+                if identity is True:
+                    identity_query = re.sub(r'\d+', ' ', query)
+                if self.s['_findzia_hard_product_mismatch'](identity_query, evidence):
+                    rejected_identity['category'] += 1
+                    continue
             money = self.money(row, context['country'])
-            if money is None and kind != 'image':
+            if money is None and kind == 'text' and identity is not True:
                 continue
             candidate = dict(id='p' + str(len(candidates) + 1), row=row, token=token,
                              evidence=evidence, money=money)
@@ -211,6 +230,9 @@ class ChoiceEngine:
                 candidate['image_source'] = source
             candidates.append(candidate)
             seen.add(url)
+        if any(rejected_identity.values()):
+            print('CHOICE IDENTITY ' + json.dumps(dict(release=RELEASE, kind=kind,
+                  rejected=rejected_identity, eligible=len(candidates))), flush=True)
         return context, candidates
 
     def money(self, row, country):

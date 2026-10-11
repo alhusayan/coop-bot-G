@@ -1,4 +1,4 @@
-/* FINDZIA_CHOICE_RELEASE=157.0.13 — photo identity is independent of price availability. */
+/* FINDZIA_CHOICE_RELEASE=157.0.14 — photo identity is independent of price availability. */
 (() => {
   'use strict';
   const COPY = {
@@ -357,7 +357,7 @@
       reels.land(value.money,celebrate);
       fit();
     }
-    function candidates(){const photo=bridge.context().kind==='image';return bridge.choiceRows().filter(r=>r.token&&safeURL(r.url)&&safeURL(r.image)&&(photo||parts(r.money)));}
+    function candidates(){return bridge.choiceRows().filter(r=>r.token&&safeURL(r.url)&&safeURL(r.image));}
     function renderOffers(rows=candidates()){
       offerList.replaceChildren();
       rows=rows.map(row=>{const cached=marketChoices?.[marketScope];return cached?.url===row.url&&parts(cached.money)?{...row,money:cached.money}:row;}).filter(row=>parts(row.money)&&rowScope(row)===marketScope);
@@ -554,7 +554,7 @@
     document.fonts?.ready?.then(()=>{if(!disposed)fit();});
     function destroy(){disposed=true;reset();langObserver.disconnect();sizeObserver?.disconnect();for(const name of ['fz:search-state','fz:choice-results'])root.removeEventListener(name,queue);root.removeEventListener('fz:search-progress',progressEvent);root.removeEventListener('fz:search-reset',resetEvent);window.removeEventListener?.('resize',fit);window.visualViewport?.removeEventListener('resize',fit);box.remove();dialog.remove();delete root.dataset.choiceMode;delete root.dataset.choiceActive;}
     document.addEventListener('shopify:section:unload',function unload(ev){if(ev.target?.contains(root)){destroy();document.removeEventListener('shopify:section:unload',unload);}});
-    root.fzOneChoice={update,destroy,release:'157.0.13'};labels();queue();
+    root.fzOneChoice={update,destroy,release:'157.0.14'};labels();queue();
   }
   window.FindziaChoice={mount,PriceReels,PhotoSequence,SearchLog,moneyParts:parts};
   const start=()=>document.querySelectorAll('.fz-home').forEach(mount);
