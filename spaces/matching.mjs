@@ -61,7 +61,7 @@ function candidateRows(rows,market,seen,limit){
  const batch=new Set();const list=rows.filter(x=>{const u=safeUrl(x.link);if(!u||seen.has(u)||batch.has(u)||excluded.test(new URL(u).hostname))return false;batch.add(u);return true;}).sort((a,b)=>Number(productPath(b.link))-Number(productPath(a.link))).slice(0,limit);
  list.forEach(x=>seen.add(safeUrl(x.link)));return list;
 }
-export async function searchItem(item,market,{env=process.env,search=serper,page=safePage,lensSearch=lens,judge=gemini,fetchImage=safeImage,target,lensUrl,onProgress=()=>{}}={}){
+export async function searchItem(item,market,{env=process.env,search=serper,page=safePage,lensSearch=lens,judge=gemini,fetchImage=safeImage,target,lensUrl,attempt=1,onProgress=()=>{}}={}){
  const m=MARKETS[market],seen=new Set(),all=[],alternatives=[];let attempted=0,failures=0;
  const started=Date.now();
  function rank(offers){return [...new Map(offers.map(o=>[o.link,o])).values()].sort((a,b)=>Number(a.availability==='out_of_stock')-Number(b.availability==='out_of_stock')||Number(b.market_scope==='local')-Number(a.market_scope==='local')||b.visual_score-a.visual_score).slice(0,4);}
@@ -74,7 +74,7 @@ export async function searchItem(item,market,{env=process.env,search=serper,page
    progress('checking');
  }
  async function inspect(rows){
-   const candidates=candidateRows(rows,market,seen,rows[0]?.channel==='lens'?8:5);attempted+=candidates.length;
+   const candidates=candidateRows(rows,market,seen,rows[0]?.channel==='lens'?(attempt>1?12:8):(attempt>1?8:5));attempted+=candidates.length;
    const products=(await pool(candidates,6,async row=>{
      let product=null;const image=safeUrl(row.imageUrl||row.thumbnailUrl||row.thumbnail||row.image);
      // Lens / indexed images can be checked immediately; pages are read only for missing images or confirmed pieces.
@@ -117,4 +117,25 @@ export async function searchItem(item,market,{env=process.env,search=serper,page
  progress('complete');
  console.log('SPACES_VISUAL_RESULT',item.id,JSON.stringify({checked:attempted,accepted:all.length,alternatives:alternatives.length,elapsed_ms:Date.now()-started,local:all.filter(o=>o.market_scope==='local').length,without_price:all.filter(o=>o.price==null).length}));
  return rank(all);
+}
+
+// An empty first pass is provisional. Retry once, without relaxing visual rules.
+export async function searchWithRecovery(item,market,{run=searchItem,onProgress=()=>{},...deps}={}){
+ let snapshot={offers:item.offers||[],alternatives:item.alternatives||[],checked:0},lastError;
+ const merge=(before,after)=>[...new Map([...before,...after].map(o=>[o.link,o])).values()].slice(0,4);
+ for(let attempt=1;attempt<=2;attempt++){
+   let finished=false;
+   onProgress({...snapshot,phase:attempt===1?'lens':'retrying',search_attempt:attempt});
+   if(attempt===2)console.log('SPACES_AUTO_RETRY',item.id);
+   try{
+     const offers=await run(item,market,{...deps,attempt,onProgress:update=>{
+       snapshot={...snapshot,...update,offers:merge(snapshot.offers,update.offers||[]),alternatives:merge(snapshot.alternatives,update.alternatives||[])};
+       // Do not expose an empty complete state while the automatic retry is pending.
+       onProgress({...snapshot,phase:update.phase==='complete'?'checking':attempt===2&&update.phase==='lens'?'retrying':update.phase,search_attempt:attempt});
+     }});
+     snapshot.offers=merge(snapshot.offers,offers);finished=true;lastError=null;
+   }catch(e){lastError=e;}
+   if(snapshot.offers.length||snapshot.alternatives.length){onProgress({...snapshot,phase:'complete',search_attempt:attempt});return snapshot.offers;}
+   if(attempt===2){if(!finished)throw lastError;onProgress({...snapshot,phase:'complete',search_attempt:attempt});return [];}
+ }
 }
