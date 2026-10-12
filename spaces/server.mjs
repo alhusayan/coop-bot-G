@@ -128,8 +128,8 @@ export function createServer(){return http.createServer({requestTimeout:30000,he
      const j=action==='select'?ownerJob(id,owner):mutateJob(id,owner),b=await body(req),i=Number(b.design),d=j.designs[i];if(!d)throw error('INVALID_INPUT');
      if(action==='select'){
        if(!d.image)throw error('DESIGN_NOT_READY',409);
-       if((!d.items.length||d.matching_version!==2)&&!tasks.has('shop:'+id+':'+i)){consume(owner,'select',12);launch('shop:'+id+':'+i,()=>identifyAndShop(j,i));}
-       else if((d.items.some(x=>x.status==='idle')||d.search_revision!==2)&&!tasks.has('shop:'+id+':'+i))launch('shop:'+id+':'+i,()=>resumeShopping(j,i));
+       if(!['searching','analyzing'].includes(d.status)&&(!d.items.length||d.matching_version!==2)&&!tasks.has('shop:'+id+':'+i)){consume(owner,'select',12);launch('shop:'+id+':'+i,()=>identifyAndShop(j,i));}
+       else if(!['searching','analyzing'].includes(d.status)&&(d.items.some(x=>x.status==='idle')||d.search_revision!==2)&&!tasks.has('shop:'+id+':'+i))launch('shop:'+id+':'+i,()=>resumeShopping(j,i));
        return send(res,202,publicJob(j));
      }
      if(action==='retry'){
