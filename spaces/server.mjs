@@ -1,9 +1,3 @@
-import {designFromCatalog} from './catalog-first.mjs';
-import {previewLimits,previewUsage,reservePreview,settlePreview} from './trial-quota.mjs';
-import {DETAILS_VERSION} from './product-data.mjs';
-import {recommendRoom} from './recommendation.mjs';
-import {createRoomPreview} from './room-preview.mjs';
-import {roomMeasurements,measuredLimits} from './dimensions.mjs';
 import {checkStock,refreshItemStock} from './stock.mjs';
 import {STOCK_VERSION,STOCK_TTL} from './availability.mjs';
 import http from 'node:http';
@@ -31,7 +25,7 @@ const secret=trial||'development-only';
 const secure=process.env.NODE_ENV==='production';
 function persist(){state.revision=(state.revision||0)+1;writeFileSync(STATE+'.tmp',JSON.stringify(state),{mode:0o600});renameSync(STATE+'.tmp',STATE);}
 function cleanup(){for(const [id,j] of Object.entries(state.jobs)){if(j.owner!=='demo'&&Date.now()-j.created>86400000){delete state.jobs[id];rmSync(resolve(DATA,id),{recursive:true,force:true});}}for(const k of Object.keys(state.quota)){if(!k.startsWith(new Date().toISOString().slice(0,10)))delete state.quota[k];}persist();}
-for(const j of Object.values(state.jobs))for(const d of j.designs||[]){if(['generating','analyzing','searching','adapting','finishing'].includes(d.status)){const wasFinishing=d.status==='finishing';settlePreview(state.quota,d.catalog_quota);delete d.catalog_quota;d.status=wasFinishing?'complete':d.image?(j.flow==='catalog-first-v1'?'complete':'ready'):'error';d.error=wasFinishing?null:'INTERRUPTED';if(d.finish){d.finish.status='error';d.finish.error='INTERRUPTED';}}for(const x of d.items||[]){if(x.status==='searching')x.status='idle';for(const o of [...(x.offers||[]),...(x.alternatives||[])])if(o.stock_version!==STOCK_VERSION&&o.availability!=='out_of_stock')o.availability='unknown';const before=(x.offers?.length||0)+(x.alternatives?.length||0);Object.assign(x,filterApprovedItem(x,j.options.market));if(before&&!x.offers.length&&!x.alternatives.length&&x.status!=='kept'){x.status='idle';x.phase='queued';}}}
+for(const j of Object.values(state.jobs))for(const d of j.designs||[]){if(['generating','analyzing','searching','adapting'].includes(d.status)){d.status=d.image?'ready':'error';d.error='INTERRUPTED';}for(const x of d.items||[]){if(x.status==='searching')x.status='idle';for(const o of [...(x.offers||[]),...(x.alternatives||[])])if(o.stock_version!==STOCK_VERSION&&o.availability!=='out_of_stock')o.availability='unknown';const before=(x.offers?.length||0)+(x.alternatives?.length||0);Object.assign(x,filterApprovedItem(x,j.options.market));if(before&&!x.offers.length&&!x.alternatives.length&&x.status!=='kept'){x.status='idle';x.phase='queued';}}}
 cleanup();
 setInterval(cleanup,3600000).unref();
 function sign(v){return createHmac('sha256',secret).update(v).digest('hex');}
@@ -44,7 +38,7 @@ function error(code,status=400){return Object.assign(Error(code),{status});}
 async function body(req){let size=0,chunks=[];for await(const b of req){size+=b.length;if(size>19*1024*1024)throw error('IMAGE_TOO_LARGE',413);chunks.push(b);}try{return JSON.parse(Buffer.concat(chunks));}catch{throw error('INVALID_INPUT');}}
 function ownerJob(id,owner){const j=state.jobs[id];if(!j||j.owner!==owner&&j.owner!=='demo')throw error('NOT_FOUND',404);return j;}
 function mutateJob(id,owner){const j=ownerJob(id,owner);if(j.owner==='demo')throw error('DEMO_READ_ONLY',403);return j;}
-function publicJob(j){return {id:j.id,revision:state.revision||0,created:j.created,flow:j.flow,room:/[\u0600-\u06ff]/.test(j.room)?'Your room':j.room,options:j.options,original:'/media/'+j.id+'/original.jpg',demo:j.owner==='demo',designs:j.designs.map(({catalog_work,catalog_quota,...d},i)=>({...d,finish:d.finish?{...d.finish,image:d.finish.image?'/media/'+j.id+'/'+d.finish.image:null}:null,title:j.flow==='catalog-first-v1'?d.title:STYLES[i].en,description:'',needs_rescan:d.matching_version!==3,items:d.matching_version===3?(d.items||[]).map(x=>preferLocalResults(filterApprovedItem(x,j.options.market))).map(x=>({...x,offers:(x.offers||[]).map(o=>({...o,purchase_unit:o.purchase_unit||(/pillow|cushion/i.test(x.name_en)&&/\b(?:cover|case)\b/i.test(o.title)?'Cover only · insert not included':null)})),occurrences:occurrences(x).map(v=>({...v,crop:v.crop?'/media/'+j.id+'/'+v.crop:null})),crop:x.crop?'/media/'+j.id+'/'+x.crop:null})):[],image:d.image?'/media/'+j.id+'/'+d.image:null}))};}
+function publicJob(j){return {id:j.id,revision:state.revision||0,created:j.created,room:/[\u0600-\u06ff]/.test(j.room)?'Your room':j.room,options:j.options,original:'/media/'+j.id+'/original.jpg',demo:j.owner==='demo',designs:j.designs.map((d,i)=>({...d,title:STYLES[i].en,description:'',needs_rescan:d.matching_version!==3,items:d.matching_version===3?(d.items||[]).map(x=>preferLocalResults(filterApprovedItem(x,j.options.market))).map(x=>({...x,offers:(x.offers||[]).map(o=>({...o,purchase_unit:o.purchase_unit||(/pillow|cushion/i.test(x.name_en)&&/\b(?:cover|case)\b/i.test(o.title)?'Cover only · insert not included':null)})),occurrences:occurrences(x).map(v=>({...v,crop:v.crop?'/media/'+j.id+'/'+v.crop:null})),crop:x.crop?'/media/'+j.id+'/'+x.crop:null})):[],image:d.image?'/media/'+j.id+'/'+d.image:null}))};}
 function consume(owner,key,max){const q=new Date().toISOString().slice(0,10)+':'+owner+':'+key;if((state.quota[q]||0)>=max)throw error('TRIAL_LIMIT',429);state.quota[q]=(state.quota[q]||0)+1;persist();}
 function fileImage(j,file){const bytes=readFileSync(resolve(DATA,j.id,file));return {inlineData:{mimeType:bytes[0]===137?'image/png':bytes[0]===255?'image/jpeg':'image/webp',data:bytes.toString('base64')}};}
 function launch(key,fn){if(tasks.has(key))return false;const p=Promise.resolve().then(fn).catch(e=>console.error('SPACES_TASK_FAILED',key,String(e.message).slice(0,80))).finally(()=>tasks.delete(key));tasks.set(key,p);return true;}
@@ -70,37 +64,11 @@ async function generateDesign(j,index){
  }catch(e){d.status='error';d.error=e.message;console.error('SPACES_DESIGN_ERROR',index,e.message);}persist();
 }
 async function generateJob(j){
- if(j.flow==='catalog-first-v1')return generateCatalogDesign(j,0);
  try{
  j.room_context=await detectRoom(fileImage(j,'original.jpg'));j.room=j.room_context.room_en;
  console.log('SPACES_ROOM_TYPE',j.id,JSON.stringify({type:j.room_context.type,label:j.room,confidence:j.room_context.confidence}));persist();
  await Promise.all(j.designs.map((_,i)=>generateDesign(j,i)));
  }catch(e){for(const d of j.designs){d.status='error';d.error=e.message;}persist();}
-}
-async function generateCatalogDesign(j,index=0,deps={}){
- const d=j.designs[index];d.status='generating';d.error=null;d.progress={stage:'understanding'};persist();
- const started=Date.now();
- try{
-  const result=await (deps.catalog||designFromCatalog)(fileImage(j,'original.jpg'),{...j.options,variation:d.redesign_count||0,previousProducts:(d.items||[]).flatMap(x=>x.offers||[]).map(o=>({title:o.title,link:o.link}))},{
-   checkpoint:d.catalog_work?{...d.catalog_work,render:d.catalog_work.render_file?{image:fileImage(j,d.catalog_work.render_file),correction:d.catalog_work.render_correction}:null}:null,onCheckpoint:work=>{d.catalog_work={...d.catalog_work,...work};persist();},
-   onDraft:(image,correction)=>{const filename='catalog-draft.'+(image.inlineData.mimeType==='image/png'?'png':'jpg');writeFileSync(resolve(DATA,j.id,filename),Buffer.from(image.inlineData.data,'base64'),{mode:0o600});d.catalog_work.render_file=filename;d.catalog_work.render_correction=correction;persist();},
-   onProgress:(stage,detail={})=>{d.progress={stage,...detail};persist();console.log('SPACES_CATALOG_STAGE',j.id,stage,JSON.stringify(detail));},
-   onItems:items=>{d.catalog_progress={total:items.length,completed:items.filter(x=>['done','empty','error'].includes(x.status)).length,found:items.filter(x=>x.offers?.length).length};persist();}
-  });
-  const revision=Date.now(),filename='design-'+index+'-r'+revision+(result.mimeType==='image/jpeg'?'.jpg':'.png');
-  writeFileSync(resolve(DATA,j.id,filename),result.output,{mode:0o600});
-  const items=await pool(result.plan.picks,3,async(p,n)=>{
-   const brief=result.items.find(x=>x.id===p.id),boxes=result.boxes[p.id];
-   if(!boxes||boxes.length!==p.quantity)throw Error('PLACEMENT_UNVERIFIED');
-   const views=await pool(boxes,3,async(box,k)=>{const ordinal=n*10+k+1,crop='crop-'+index+'-'+ordinal+'-r'+revision+'.jpg';writeFileSync(resolve(DATA,j.id,crop),await cropPiece(result.output,box),{mode:0o600});return {id:String(ordinal),box,crop};});
-   return {...brief,name_en:(p.name||brief.name_en).replace(/^./,c=>c.toUpperCase()),id:String(n+1),quantity:p.quantity,box:views[0].box,crop:views[0].crop,occurrences:views,identity_verified:true,status:'done',phase:'complete',offers:[p.offer],alternatives:[]};
-  });
-  // Publish image and its exact product list together; the previous room stays intact until now.
-  Object.assign(d,{image:filename,title:result.title,items,status:'complete',error:null,progress:{stage:'complete'},matching_version:3,search_revision:10,grouping_version:1,details_version:DETAILS_VERSION,stock_checked_at:Date.now(),inventory_revision:revision,finish:null,measurements:{room:result.plan.room,limits:{}},catalog_layout:result.plan.picks.map(p=>({id:p.id,quantity:p.quantity,positions:p.views.map(v=>v.position_cm)}))});
-  delete d.catalog_work;settlePreview(state.quota,d.catalog_quota,{success:true});delete d.catalog_quota;
-  j.room_context=result.context;j.room=result.context.room_en;j.selected_design=index;
-  console.log('SPACES_CATALOG_READY',JSON.stringify({room:j.id,pieces:items.length,quantity:items.reduce((n,x)=>n+x.quantity,0),elapsed_ms:Date.now()-started}));
- }catch(e){settlePreview(state.quota,d.catalog_quota);delete d.catalog_quota;if(e.draft?.inlineData&&d.catalog_work){const filename='catalog-draft.'+(e.draft.inlineData.mimeType==='image/png'?'png':'jpg');writeFileSync(resolve(DATA,j.id,filename),Buffer.from(e.draft.inlineData.data,'base64'),{mode:0o600});d.catalog_work.render_file=filename;d.catalog_work.render_correction=e.correction;}if(e.message==='STOCK_CHANGED')delete d.catalog_work;d.status=d.image?'complete':'error';d.error=e.message;d.progress={stage:'error'};console.error('SPACES_CATALOG_ERROR',j.id,e.message,JSON.stringify(e.details||{}));}persist();
 }
 function lensURL(j,item){
  const expires=Date.now()+20*60000,path='/lens-media/'+j.id+'/'+item.crop;
@@ -151,7 +119,7 @@ async function reconcilePieces(j,index){
 async function resumeShopping(j,i){
  const d=j.designs[i],refresh=d.search_revision!==10;await reconcilePieces(j,i);d.search_revision=10;d.status='searching';
  await pool(d.items.filter(x=>x.status!=='kept'),6,async x=>{const had=(x.offers?.length||0)+(x.alternatives?.length||0);Object.assign(x,await refreshItemStock(x,j.options.market));if(had&&!x.offers.length&&!x.alternatives.length)x.status='idle';});
- d.stock_checked_at=Date.now();d.details_version=DETAILS_VERSION;persist();
+ d.stock_checked_at=Date.now();persist();
  const pending=d.items.filter(x=>x.status==='idle'||refresh&&x.status!=='kept'&&!hasLocalOptions(filterApprovedItem(x,j.options.market)));
  pending.forEach(x=>{x.status='idle';x.phase='queued';});persist();
  await pool(pending,6,x=>d.status==='adapting'?null:findOne(j,d,x));
@@ -183,49 +151,11 @@ async function replacePiece(j,index,item,offer){
  }catch(e){d.status='complete';d.adaptation_error=e.message;persist();console.log('SPACES_PLACEMENT_FAILED',j.id,index,e.message);}
  if(d.items.some(x=>x.status==='idle'))launch('shop:'+j.id+':'+index,()=>resumeShopping(j,index));
 }
-async function finishRoom(j,index,finish,deps={}){
- const d=j.designs[index],valid=()=>d.finish===finish&&d.image===finish.source_image;
- try{
-  const progress=(status,detail={})=>{if(valid()){finish.status=status;finish.progress=detail;persist();}};
-  const plan=await (deps.recommend||recommendRoom)(d.items,fileImage(j,d.image),finish.room,j.options.market,{limits:finish.limits,preferred:finish.preferred,onProgress:progress,onChecked:(id,offer)=>{if(!valid())return;const item=d.items.find(x=>x.id===id);if(item)for(const field of ['offers','alternatives'])item[field]=(item[field]||[]).map(o=>o.link===offer.link?{...o,...offer}:o).filter(o=>o.availability!=='out_of_stock');persist();}});
-  if(!valid())return;
-  finish.plan=plan;
-  if(!plan.picks.length){console.log('SPACES_FINISH_NO_PICKS',j.id,index,JSON.stringify({reasons:plan.skipped.map(x=>({id:x.id,reason:x.reason_code||x.reason}))}));finish.status='needs_measurements';d.status='complete';persist();return;}
-  // Recheck before spending on rendering; a cached search hit is not proof of current stock.
-  for(const pick of plan.picks){const offer=await (deps.stock||checkStock)(pick.offer,j.options.market,{force:true});if(offer.availability!=='listed_available')throw Error('STOCK_CHANGED');if(JSON.stringify(offer.dimensions_cm)!==JSON.stringify(pick.offer.dimensions_cm))throw Error('CHOICE_NO_LONGER_FITS');pick.offer={...pick.offer,...offer};}
-  const result=await (deps.preview||createRoomPreview)(fileImage(j,finish.source_image),plan,{onProgress:progress});
-  if(!valid())return;
-  const revision=Date.now(),name='design-'+index+'-r'+revision+(result.mimeType==='image/jpeg'?'.jpg':'.png');
-  writeFileSync(resolve(DATA,j.id,name),result.output,{mode:0o600});
-  finish.image=name;finish.boxes=result.boxes;finish.status='preview';d.status='complete';persist();
-  console.log('SPACES_FINISH_PREVIEW',j.id,index,JSON.stringify({pieces:plan.picks.length,skipped:plan.skipped.length}));
- }catch(e){if(valid()){finish.status='error';finish.error=e.message;d.status='complete';persist();}console.log('SPACES_FINISH_FAILED',j.id,index,e.message);}
-}
-async function keepFinishedRoom(j,index,finish,deps={}){
- const d=j.designs[index];
- try{
-  const checked=await pool(finish.plan.picks,4,async pick=>({...pick,offer:{...pick.offer,...await (deps.stock||checkStock)(pick.offer,j.options.market,{force:true})}}));
-  if(checked.some(p=>p.offer.availability!=='listed_available'))throw Error('STOCK_CHANGED');
-  if(checked.some(p=>JSON.stringify(p.offer.dimensions_cm)!==JSON.stringify(finish.plan.picks.find(x=>x.id===p.id).offer.dimensions_cm)))throw Error('CHOICE_NO_LONGER_FITS');
-  if(d.finish!==finish||d.image!==finish.source_image)throw Error('PREVIEW_EXPIRED');
-  const bytes=readFileSync(resolve(DATA,j.id,finish.image)),revision=Date.now();
-  const updates=await pool(d.items,4,async piece=>{
-   const pick=checked.find(p=>p.id===piece.id);
-   const views=await pool(occurrences(piece),3,async(v,k)=>{const box=pick?finish.boxes[piece.id][k]:v.box,crop='crop-'+index+'-'+v.id+'-r'+revision+'.jpg';writeFileSync(resolve(DATA,j.id,crop),await cropPiece(bytes,box),{mode:0o600});return {...v,box,crop};});
-   return {piece,update:{box:views[0].box,crop:views[0].crop,occurrences:views,...(pick?{offers:[{...pick.offer,match_kind:'placed_product',size_verified:false}],alternatives:[],status:'done',description:pick.offer.title}:{})}};
-  });
-  // Publish the image, product choices and every duplicate occurrence together.
-  for(const {piece,update} of updates)Object.assign(piece,update);
-  d.image=finish.image;finish.status='kept';d.status='complete';d.stock_checked_at=Date.now();d.details_version=DETAILS_VERSION;persist();
-  console.log('SPACES_FINISH_KEPT',j.id,index,checked.length);
- }catch(e){finish.status='error';finish.error=e.message;d.status='complete';persist();}
-}
 function makeJob(owner,opt,buffer,idempotency=''){
  const id=randomBytes(12).toString('hex');mkdirSync(resolve(DATA,id),{recursive:true,mode:0o700});writeFileSync(resolve(DATA,id,'original.jpg'),buffer,{mode:0o600});
- let measured=null;try{measured={room:roomMeasurements(opt),limits:{}};}catch{}
- const j={id,owner,created:Date.now(),flow:'catalog-first-v1',idempotency,options:opt,room:opt.room==='auto'?'Your room':opt.room,designs:STYLES.slice(0,1).map(s=>({measurements:measured?structuredClone(measured):null,id:s.id,title:s.en,subtitle:s.en,description:s.description,palette:s.palette,status:'generating',image:null,items:[],retries:0}))};state.jobs[id]=j;persist();return j;
+ const j={id,owner,created:Date.now(),idempotency,options:opt,room:opt.room==='auto'?'Your room':opt.room,designs:STYLES.map(s=>({id:s.id,title:s.en,subtitle:s.en,description:s.description,palette:s.palette,status:'generating',image:null,items:[],retries:0}))};state.jobs[id]=j;persist();return j;
 }
-export function createServer(deps={}){return http.createServer({requestTimeout:30000,headersTimeout:15000,maxHeaderSize:16384},async(req,res)=>{
+export function createServer(){return http.createServer({requestTimeout:30000,headersTimeout:15000,maxHeaderSize:16384},async(req,res)=>{
  try{
  const u=new URL(req.url,'http://localhost');let path=u.pathname;
  const lensMedia=path.match(/^\/lens-media\/([a-f0-9]{24})\/(crop-[0-2]-\d{1,2}(?:-r\d{13})?\.jpg)$/);
@@ -236,7 +166,7 @@ export function createServer(deps={}){return http.createServer({requestTimeout:3
    res.writeHead(200,{...headers,'Content-Type':'image/jpeg','Cache-Control':'private, max-age=60'});return res.end(req.method==='HEAD'?undefined:readFileSync(f));
  }
 
- if(path==='/healthz')return send(res,200,{ok:true,version:'spaces-0.5.8',source_policy:SOURCE_POLICY_VERSION,lens:!!(process.env.SERPAPI_API_KEY||process.env.SEARCHAPI_API_KEY),generation:!!process.env.GEMINI_API_KEY,search:!!process.env.SERPER_API_KEY});
+ if(path==='/healthz')return send(res,200,{ok:true,version:'spaces-0.3.8',source_policy:SOURCE_POLICY_VERSION,lens:!!(process.env.SERPAPI_API_KEY||process.env.SEARCHAPI_API_KEY),generation:!!process.env.GEMINI_API_KEY,search:!!process.env.SERPER_API_KEY});
  if(path.startsWith('/trial/')){
    const supplied=path.slice(7);if(!['GET','HEAD'].includes(req.method)||!trial||!constantEqual(supplied,trial))throw error('NOT_FOUND',404);
    // Keep the invitation in the address when Safari opens an in-app browser's page.
@@ -252,59 +182,29 @@ export function createServer(deps={}){return http.createServer({requestTimeout:3
    if(!owner)throw error('TRIAL_LINK_REQUIRED',401);
    if(!['GET','HEAD'].includes(req.method)&&req.headers['sec-fetch-site']==='cross-site')throw error('FORBIDDEN',403);
  }
- if(path==='/api/config'&&req.method==='GET')return send(res,200,{previewLimits:previewUsage(state.quota,owner),markets:MARKETS,flow:'catalog-first-v1',designCount:1,styles:STYLES.slice(0,1).map(({prompt,...s})=>s),configured:!!process.env.GEMINI_API_KEY&&!!process.env.SERPER_API_KEY,demo:Object.values(state.jobs).find(j=>j.owner==='demo'&&j.designs.some(d=>d.image))?.id||null});
+ if(path==='/api/config'&&req.method==='GET')return send(res,200,{markets:MARKETS,styles:STYLES.map(({prompt,...s})=>s),configured:!!process.env.GEMINI_API_KEY&&!!process.env.SERPER_API_KEY,demo:Object.values(state.jobs).find(j=>j.owner==='demo'&&j.designs.some(d=>d.image))?.id||null});
  if(path==='/api/jobs'&&req.method==='GET')return send(res,200,{jobs:Object.values(state.jobs).filter(j=>j.owner===owner).sort((a,b)=>b.created-a.created).map(publicJob)});
  if(path==='/api/jobs'&&req.method==='POST'){
    const b=await body(req);const idem=String(req.headers['idempotency-key']||'').slice(0,100);
    const prior=idem&&Object.values(state.jobs).find(j=>j.owner===owner&&j.idempotency===idem);if(prior)return send(res,200,publicJob(prior));
    if(!process.env.GEMINI_API_KEY||!process.env.SERPER_API_KEY)throw error('NOT_CONFIGURED',503);
-   try{roomMeasurements(b);}catch(e){throw error(e.message);}
    if(tasks.size>8)throw error('PROVIDER_BUSY',429);
    const encoded=String(b.image||'');if(!/^data:image\/jpeg;base64,[A-Za-z0-9+/=]+$/.test(encoded))throw error('INVALID_IMAGE');
    const buffer=Buffer.from(encoded.split(',')[1],'base64');if(buffer.length>12*1024*1024||buffer.length<200||buffer[0]!==255||buffer[1]!==216||buffer[2]!==255)throw error('INVALID_IMAGE');
-   const reservation=reservePreview(state.quota,owner,'rooms');let j;
-   try{j=makeJob(owner,options(b),buffer,idem);j.designs[0].catalog_quota=reservation;persist();}catch(e){settlePreview(state.quota,reservation,{started:false});persist();throw e;}
-   launch('generate:'+j.id,()=>deps.generateJob?deps.generateJob(j):generateCatalogDesign(j,0,deps));return send(res,202,publicJob(j));
+   consume(owner,'rooms',6);consume('all','rooms',Number(process.env.SPACES_DAILY_ROOMS)||24);
+   const j=makeJob(owner,options(b),buffer,idem);launch('generate:'+j.id,()=>generateJob(j));return send(res,202,publicJob(j));
  }
- const match=path.match(/^\/api\/jobs\/([a-f0-9]{24})(?:\/(select|retry|redesign|search|replace|finish|keep-finish|discard-finish|measurements)(?:\/(\d+))?)?$/);
+ const match=path.match(/^\/api\/jobs\/([a-f0-9]{24})(?:\/(select|retry|search|replace)(?:\/(\d+))?)?$/);
  if(match){const [,id,action,itemIndex]=match;
    if(req.method==='GET'&&!action)return send(res,200,publicJob(ownerJob(id,owner)));
    if(req.method==='DELETE'&&!action){const j=mutateJob(id,owner);if([...tasks.keys()].some(k=>k.includes(j.id)))throw error('JOB_BUSY',409);delete state.jobs[id];rmSync(resolve(DATA,id),{recursive:true,force:true});persist();return send(res,200,{ok:true});}
    if(req.method==='POST'){
-     const j=action==='select'?ownerJob(id,owner):mutateJob(id,owner),b=await body(req),i=Number(b.design),d=j.designs[i];if(!d)throw error('INVALID_INPUT');if(['adapting','finishing'].includes(d.status))throw error('JOB_BUSY',409);
-     if(j.flow==='catalog-first-v1'&&['redesign','retry'].includes(action)){
-       const requestId=String(b.request_id||'').slice(0,100);
-       if(requestId&&d.redesign_request===requestId)return send(res,200,publicJob(j));
-       if(d.status==='generating'||[...tasks.keys()].some(k=>k.includes(j.id)))throw error('JOB_BUSY',409);
-       try{roomMeasurements(j.options);}catch(e){throw error(e.message);}
-       d.catalog_quota=reservePreview(state.quota,owner,'redesign');if(action==='redesign'){d.redesign_count=(d.redesign_count||0)+1;delete d.catalog_work;}d.redesign_request=requestId;d.status='generating';d.error=null;d.progress={stage:'understanding'};persist();
-       launch('catalog:'+id+':'+i,()=>generateCatalogDesign(j,i,deps));return send(res,202,publicJob(j));
-     }
-     if(j.flow==='catalog-first-v1'&&['finish','keep-finish','discard-finish','replace','search'].includes(action))throw error('CATALOG_AUTOMATIC',409);
-     if(action==='measurements'){
-       let room,limits;try{room=roomMeasurements(b);limits=measuredLimits(b.limits,d.items||[]);}catch(e){throw error(e.message);}
-       d.measurements={room,limits};if(j.flow==='catalog-first-v1'){j.options.width=room.width_cm/100;j.options.length=room.length_cm/100;}d.finish=null;persist();return send(res,200,publicJob(j));
-     }
-     if(['finish','keep-finish','discard-finish'].includes(action)){
-       if(!d.image||d.matching_version!==3||!d.items?.length||['searching','analyzing','generating'].includes(d.status)||tasks.has('shop:'+id+':'+i)||[...itemTasks.keys()].some(k=>k.startsWith(id+':'+i+':')))throw error('JOB_BUSY',409);
-       if(action==='discard-finish'){d.finish=null;persist();return send(res,200,publicJob(j));}
-       if(action==='keep-finish'){
-         const finish=d.finish;if(finish?.status!=='preview'||finish.token!==b.token||finish.source_image!==d.image)throw error('PREVIEW_EXPIRED',409);
-         d.status='finishing';finish.status='saving';persist();launch('finish:'+id+':'+i,()=>keepFinishedRoom(j,i,finish,deps));return send(res,202,publicJob(j));
-       }
-       let room,limits;try{room=roomMeasurements(b);limits=measuredLimits(b.limits,d.items);}catch(e){throw error(e.message);}
-       consume(owner,'room-previews',6);
-       const preferred={};for(const item of d.items)if(typeof b.preferred?.[item.id]==='string')preferred[item.id]=b.preferred[item.id];
-       const finish={token:randomBytes(12).toString('hex'),source_image:d.image,room,limits,preferred,status:'sizes',image:null,error:null};
-       d.measurements={room,limits};d.finish=finish;d.status='finishing';persist();launch('finish:'+id+':'+i,()=>finishRoom(j,i,finish,deps));return send(res,202,publicJob(j));
-     }
+     const j=action==='select'?ownerJob(id,owner):mutateJob(id,owner),b=await body(req),i=Number(b.design),d=j.designs[i];if(!d)throw error('INVALID_INPUT');if(d.status==='adapting')throw error('JOB_BUSY',409);
      if(action==='select'){
        d.shop_requested=true;j.selected_design=i;
-       if(j.flow==='catalog-first-v1')return send(res,200,publicJob(j));
-       if(d.finish?.status==='preview')return send(res,200,publicJob(j));
        if(!d.image)throw error('DESIGN_NOT_READY',409);
        if(!['searching','analyzing'].includes(d.status)&&(!d.items.length||d.matching_version!==3)&&!tasks.has('shop:'+id+':'+i)){consume(owner,'select',12);d.status='analyzing';d.items=[];persist();launch('shop:'+id+':'+i,()=>identifyAndShop(j,i));}
-       else if(!['searching','analyzing'].includes(d.status)&&(d.items.some(x=>x.status==='idle')||d.search_revision!==10||d.details_version!==DETAILS_VERSION||d.grouping_version!==1||Date.now()-(d.stock_checked_at||0)>STOCK_TTL)&&!tasks.has('shop:'+id+':'+i)){d.status='searching';d.items.filter(x=>['empty','error'].includes(x.status)&&!x.offers?.length&&!x.alternatives?.length).forEach(x=>x.status='idle');persist();launch('shop:'+id+':'+i,()=>resumeShopping(j,i));}
+       else if(!['searching','analyzing'].includes(d.status)&&(d.items.some(x=>x.status==='idle')||d.search_revision!==10||d.grouping_version!==1||Date.now()-(d.stock_checked_at||0)>STOCK_TTL)&&!tasks.has('shop:'+id+':'+i)){d.status='searching';d.items.filter(x=>['empty','error'].includes(x.status)&&!x.offers?.length&&!x.alternatives?.length).forEach(x=>x.status='idle');persist();launch('shop:'+id+':'+i,()=>resumeShopping(j,i));}
        return send(res,202,publicJob(j));
      }
      if(action==='retry'){
@@ -315,11 +215,11 @@ export function createServer(deps={}){return http.createServer({requestTimeout:3
        const item=d.items.find(x=>x.id===String(b.item)),offer=item?.alternatives?.find(x=>x.link===b.offer);
        if(!item||!offer||!sourceScope(offer.link,j.options.market))throw error('INVALID_INPUT');
        if(offer.availability!=='listed_available')throw error(offer.availability==='out_of_stock'?'OUT_OF_STOCK':'STOCK_UNCONFIRMED',409);
-       consume(owner,'placements',8);d.finish=null;d.status='adapting';d.adaptation_error=null;persist();launch('replace:'+id+':'+i,()=>replacePiece(j,i,item,offer));return send(res,202,publicJob(j));
+       consume(owner,'placements',8);d.status='adapting';d.adaptation_error=null;persist();launch('replace:'+id+':'+i,()=>replacePiece(j,i,item,offer));return send(res,202,publicJob(j));
      }
      if(action==='search'){
        const item=d.items.find(x=>x.id===String(itemIndex));if(!item||!['empty','error','idle'].includes(item.status))throw error('INVALID_INPUT');
-       consume(owner,'search',30);d.finish=null;const pending=findOne(j,d,item);launch('item:'+id+':'+i+':'+item.id,()=>pending);return send(res,202,publicJob(j));
+       consume(owner,'search',30);const pending=findOne(j,d,item);launch('item:'+id+':'+i+':'+item.id,()=>pending);return send(res,202,publicJob(j));
      }
    }
  }
@@ -342,34 +242,16 @@ async function selfTest(){
    }
  }
  persist();
- // Upgrade saved results independently of room analysis or another shopping search.
- // This refresh changes store evidence only; it never regenerates a room or spends image credits.
- const detailRooms=Object.values(state.jobs).filter(j=>j.flow!=='catalog-first-v1'&&j.owner!=='demo'&&Number.isInteger(j.selected_design)).sort((a,b)=>b.created-a.created).slice(0,4);
- for(const j of detailRooms){const i=j.selected_design,d=j.designs[i];if(!d?.items?.length||d.details_version===DETAILS_VERSION)continue;
-   await pool(d.items.filter(x=>x.status!=='kept'),3,async item=>{Object.assign(item,await refreshItemStock(item,j.options.market));persist();});
-   d.details_version=DETAILS_VERSION;d.stock_checked_at=Date.now();persist();
-   const rows=d.items.flatMap(x=>[...(x.offers||[]),...(x.alternatives||[])]);
-   console.log('SPACES_DETAILS_REFRESHED',JSON.stringify({room:j.id,design:i,products:rows.length,sized:rows.filter(o=>Object.keys(o.dimensions_cm||{}).length>=2).length,sofas:rows.filter(o=>/vivian/i.test(o.title)).map(o=>({title:o.title,size:o.dimensions_cm,stock:o.availability}))}));
- }
  await configureModels();
  if(process.env.SPACES_SELF_TEST!=='true')return;
- // Bounded repair of the two failed rooms reported by their owner on 12 October.
- for(const id of ['30f82c45a7e81ef9a8bdefc7','39d8b25d473ef606303db719']){
-  const j=state.jobs[id],d=j?.designs?.[0];
-  if(j?.flow==='catalog-first-v1'&&['INVALID_CATALOG_LAYOUT','PLACEMENT_UNVERIFIED'].includes(d?.error)&&!d.image&&d.layout_recovery!==7){
-   d.layout_recovery=7;persist();console.log('SPACES_CATALOG_RECOVERY',id);
-   await generateCatalogDesign(j,0);
-  }
- }
-
  // Repair the most recent previously selected failed room once during this migration.
- const recent=Object.values(state.jobs).filter(j=>j.flow!=='catalog-first-v1'&&j.owner!=='demo'&&j.designs.some(d=>(d.items?.length&&d.matching_version!==3)||(d.error&&d.image))).sort((a,b)=>b.created-a.created)[0];
+ const recent=Object.values(state.jobs).filter(j=>j.owner!=='demo'&&j.designs.some(d=>(d.items?.length&&d.matching_version!==3)||(d.error&&d.image))).sort((a,b)=>b.created-a.created)[0];
  if(recent){const index=Number.isInteger(recent.selected_design)?recent.selected_design:recent.designs.findIndex(d=>(d.items?.length&&d.matching_version!==3)||(d.error&&d.image));const d=recent.designs[index];if(d?.image&&(d.matching_version!==3||d.error)){d.status='analyzing';persist();launch('shop:'+recent.id+':'+index,async()=>{await identifyAndShop(recent,index);console.log('SPACES_ROOM_RECOVERED',JSON.stringify({room:recent.id,design:index,items:d.items.length,matched:d.items.filter(x=>x.offers?.length).length,with_options:d.items.filter(x=>x.alternatives?.length).length}));});}}
 
  // Resume the latest selected room's missed pieces once after the search upgrade.
- const latest=Object.values(state.jobs).filter(j=>j.flow!=='catalog-first-v1'&&j.owner!=='demo'&&Number.isInteger(j.selected_design)).sort((a,b)=>b.created-a.created)[0];
- if(latest){const i=latest.selected_design,d=latest.designs[i];if(d?.items?.length&&d.matching_version===3&&(d.search_revision!==10||d.details_version!==DETAILS_VERSION||d.items.some(x=>x.status==='idle'))&&!tasks.has('shop:'+latest.id+':'+i))await resumeShopping(latest,i);}
- const groupRepairs=Object.values(state.jobs).filter(j=>j.flow!=='catalog-first-v1'&&j.owner!=='demo'&&Number.isInteger(j.selected_design)).sort((a,b)=>b.created-a.created).slice(0,3);
+ const latest=Object.values(state.jobs).filter(j=>j.owner!=='demo'&&Number.isInteger(j.selected_design)).sort((a,b)=>b.created-a.created)[0];
+ if(latest){const i=latest.selected_design,d=latest.designs[i];if(d?.items?.length&&d.matching_version===3&&d.search_revision!==10&&!tasks.has('shop:'+latest.id+':'+i))await resumeShopping(latest,i);}
+ const groupRepairs=Object.values(state.jobs).filter(j=>j.owner!=='demo'&&Number.isInteger(j.selected_design)).sort((a,b)=>b.created-a.created).slice(0,3);
  for(const j of groupRepairs){const i=j.selected_design,d=j.designs[i];if(d?.items?.length&&d.matching_version===3&&d.grouping_version!==1&&!tasks.has('shop:'+j.id+':'+i)){
    d.status='analyzing';persist();await reconcilePieces(j,i);d.status='complete';persist();
    if(!j.room_context){try{j.room_context=await detectRoom(fileImage(j,'original.jpg'));j.room=j.room_context.room_en;persist();console.log('SPACES_ROOM_TYPE',j.id,JSON.stringify({type:j.room_context.type,label:j.room,confidence:j.room_context.confidence}));}catch(e){console.log('SPACES_ROOM_TYPE_UNAVAILABLE',j.id,e.message);}}
@@ -388,18 +270,18 @@ async function selfTest(){
  if((previous?.selftests||0)>=3)return;
  const hero=readFileSync(resolve(ROOT,'public','hero.webp'));
  // The demo uses the bundled WebP; image MIME is detected from its bytes.
- const j=previous||makeJob('demo',options({room:'Living room',market:'KW',scope:'decor',width:5,length:6,budget:1500}),hero);
+ const j=previous||makeJob('demo',options({room:'Living room',market:'KW',scope:'decor',budget:1500}),hero);
  j.selftests=(j.selftests||0)+1;persist();
  // The example goes through the same generation and shopping pipeline.
  console.log('SPACES_SELFTEST_START');
  await generateJob(j);
  const ready=j.designs.filter(d=>d.image).length;
  const index=j.designs.findIndex(d=>d.image);
- if(index>=0&&j.flow!=='catalog-first-v1')await identifyAndShop(j,index);
+ if(index>=0)await identifyAndShop(j,index);
  console.log('SPACES_SELFTEST_RESULT',JSON.stringify({designs:ready,items:index>=0?j.designs[index].items.length:0,priced_items:index>=0?j.designs[index].items.filter(x=>x.offers?.length).length:0,errors:j.designs.filter(d=>d.error).map(d=>d.error)}));
 }
 if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url)){
  if(secure&&!trial)throw Error('SPACES_TRIAL_TOKEN required in production');
- const server=createServer();server.listen(Number(process.env.PORT||8080),'0.0.0.0',()=>{console.log('SPACES_READY 0.5.8');console.log('SPACES_PREVIEW_LIMITS',JSON.stringify(previewLimits()));console.log('SPACES_SOURCE_POLICY',JSON.stringify({version:SOURCE_POLICY_VERSION,approved_global:APPROVED_GLOBAL_STORES.length,furniture:FURNITURE_STORES.map(x=>x.name)}));launch('selftest',selfTest);});
+ const server=createServer();server.listen(Number(process.env.PORT||8080),'0.0.0.0',()=>{console.log('SPACES_READY 0.3.8');console.log('SPACES_SOURCE_POLICY',JSON.stringify({version:SOURCE_POLICY_VERSION,approved_global:APPROVED_GLOBAL_STORES.length,furniture:FURNITURE_STORES.map(x=>x.name)}));launch('selftest',selfTest);});
  for(const sig of ['SIGINT','SIGTERM'])process.on(sig,()=>{persist();server.close(()=>process.exit(0));setTimeout(()=>process.exit(0),8000).unref();});
 }

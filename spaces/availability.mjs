@@ -14,13 +14,12 @@ const sameURL=(a,b)=>{try{const x=new URL(a,b),y=new URL(b);return x.hostname===
 function combine(values){const known=values.filter(x=>x!=='unknown');return known.length&&known.every(x=>x===known[0])?known[0]:'unknown';}
 export function availabilityFromPage(html,url){
  const products=[],states=[];
- const requested=new URL(url).searchParams.get('variant')||new URL(url).searchParams.get('sku');
- const sku=requested||new URL(url).pathname.match(/\/(?:p|dp|item|products)\/([^/]+)\/?$/)?.[1];
+ const sku=new URL(url).pathname.match(/\/(?:p|dp|item|products)\/([^/]+)\/?$/)?.[1];
  function walk(v,ld=false,depth=0){
    if(!v||typeof v!=='object'||depth>30)return;
    if(Array.isArray(v)){v.forEach(x=>walk(x,ld,depth+1));return;}
    const types=[v['@type']].flat();
-   if(ld&&types.includes('Product'))products.push(v);
+   if(types.includes('Product'))products.push(v);
    if(sku&&[v.code,v.sku,v.productId,v.id].some(x=>String(x||'')===sku))states.push(v);
    // Exclude reviews/recommendations from unscoped schema selection.
    if(ld){if(v['@graph'])walk(v['@graph'],true,depth+1);if(v.mainEntity)walk(v.mainEntity,true,depth+1);if(types.includes('ProductGroup'))walk(v.hasVariant,true,depth+1);}
@@ -31,8 +30,7 @@ export function availabilityFromPage(html,url){
    try{walk(JSON.parse(m[2]),a.type.toLowerCase()==='application/ld+json');}catch{}
  }
  const matched=products.filter(p=>sameURL(p.url||p['@id'],url)||sku&&String(p.sku||p.productID||'')===sku);
- const selected=matched.length===1?matched[0]:!requested&&products.length===1?products[0]:null;
- if(requested&&!selected&&!states.length)return {availability:'unknown',stock_evidence:'variant_unconfirmed'};
+ const selected=matched.length===1?matched[0]:products.length===1?products[0]:null;
  let schema='unknown';
  if(selected){
    const offers=[selected.offers||[]].flat();const exact=offers.filter(o=>o.url&&sameURL(o.url,url));
