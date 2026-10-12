@@ -1,5 +1,5 @@
 // Stock belongs to the selected product/variant, independently of its gallery image.
-export const STOCK_VERSION=2;
+export const STOCK_VERSION=3;
 export const STOCK_TTL=10*60*1000;
 const decode=s=>String(s||'').replace(/&quot;/g,'"').replace(/&#39;|&apos;/g,"'").replace(/&nbsp;|&#160;/g,' ').replace(/&amp;/g,'&');
 const plain=s=>decode(s).replace(/<[^>]*>/g,' ').replace(/[\u064b-\u065f\u0670]/g,'').replace(/[أإآ]/g,'ا').replace(/\s+/g,' ').trim();
@@ -49,10 +49,11 @@ export function availabilityFromPage(html,url){
  const sold=controls.some(x=>x.value==='out_of_stock'),buy=controls.some(x=>x.buy&&!x.disabled);
  if(sold&&!buy)return {availability:'out_of_stock',stock_evidence:'purchase_control'};
  if(hydrated!=='unknown')return {availability:hydrated,stock_evidence:'product_state'};
- if(schema!=='unknown'&&!(schema==='listed_available'&&/(?:^|\.)(?:homecentre|homeboxstores|centrepointstores)\.com$/.test(new URL(url).hostname)))return {availability:schema,stock_evidence:'product_schema'};
+ const unreliableSEO=/(?:^|\.)(?:homecentre|homeboxstores|centrepointstores)\.com$/.test(new URL(url).hostname);
+ if(schema!=='unknown'&&!(schema==='listed_available'&&unreliableSEO))return {availability:schema,stock_evidence:'product_schema'};
  for(const m of body.matchAll(/<(?:meta|link)\b[^>]*>/gi)){
    const a=attrs(m[0]);if(!/^(?:product:availability|availability)$/i.test(a.property||a.itemprop||''))continue;
-   const value=stockValue(a.content||a.href);if(value!=='unknown')return {availability:value,stock_evidence:'product_meta'};
+   const value=stockValue(a.content||a.href);if(value!=='unknown'&&!(unreliableSEO&&value==='listed_available'))return {availability:value,stock_evidence:'product_meta'};
  }
  if(buy&&!sold)return {availability:'listed_available',stock_evidence:'purchase_control'};
  return {availability:'unknown',stock_evidence:'unconfirmed'};

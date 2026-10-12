@@ -12,7 +12,11 @@ export async function checkStock(offer,market,{page=safePage,force=false}={}){
      const p=await page(offer.link,{timeout:5000});
      if(!sourceScope(p.url,market)||sourceScope(p.url,market)!==sourceScope(offer.link,market))return {...stamp,availability:'unknown',stock_evidence:'different_storefront'};
      const stock=availabilityFromPage(p.html,p.url);
-     if(/\/(166349668|168271753)$/.test(new URL(offer.link).pathname)&&!diagnosed.has(offer.link)){diagnosed.add(offer.link);console.log('SPACES_STOCK_DIAGNOSTIC',JSON.stringify({url:offer.link,length:p.html.length,scripts:[...p.html.matchAll(/<script\b([^>]*)>/gi)].map(x=>x[1]).filter(x=>!/\bsrc=/.test(x)).slice(0,15),signals:[...p.html.matchAll(/.{0,90}(?:stockLevel|stockStatus|inStock|out.of.stock|availability|sellable|purchasable).{0,150}/gi)].slice(0,24).map(x=>x[0])}));}
+     if(/\/(166349668|168271753)$/.test(new URL(offer.link).pathname)&&!diagnosed.has(offer.link)){
+       diagnosed.add(offer.link);const raw=p.html.match(/<script[^>]*id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/)?.[1];const nodes=[];
+       try{const data=JSON.parse(raw);function visit(v,path='',depth=0){if(!v||typeof v!=='object'||depth>15||nodes.length>75)return;for(const [k,x] of Object.entries(v)){const where=path+'.'+k;if(/product|sku|inventory|stock|avail|endpoint|baseurl|apiurl/i.test(k))nodes.push({path:where,value:typeof x==='object'?(Array.isArray(x)?'array '+x.length:Object.keys(x).slice(0,40)):String(x).slice(0,180)});if(typeof x==='object'&&!/translation|message|i18n/i.test(k))visit(x,where,depth+1);}}visit(data);}catch{}
+       console.log('SPACES_STOCK_STATE',JSON.stringify({url:offer.link,nodes}));
+     }
      let product;try{product=productFromPage(p.html,p.url,offer.currency);}catch{}
      console.log('SPACES_STOCK_CHECK',JSON.stringify({url:offer.link,status:stock.availability,evidence:stock.stock_evidence}));
      return {...stamp,...stock,product};
