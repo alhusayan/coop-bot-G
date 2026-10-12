@@ -26,7 +26,7 @@ export async function mountFindzia({getMarket,getMarkets,setMarket,openMarket,op
   document.dispatchEvent(new CustomEvent('spaces:locale',{detail:{language:code}}));sync();
  }
  language.addEventListener('change',()=>setLanguage(language.value));
- appearance.value=read('findzia-appearance-v1','auto');
+ appearance.value=read('findzia-appearance-v1','light');
  appearance.addEventListener('change',()=>{try{localStorage.setItem('findzia-appearance-v1',appearance.value);}catch{}window.FindziaAppearance.apply(root,window.FindziaAppearance.resolve(appearance.value));});
  const trigger=root.querySelector('[data-dark-menu-open]');
  trigger.addEventListener('click',()=>{if(!menu.open)menu.showModal();trigger.setAttribute('aria-expanded','true');});
@@ -35,8 +35,8 @@ export async function mountFindzia({getMarket,getMarkets,setMarket,openMarket,op
  menu.addEventListener('click',event=>{if(event.target===menu){const r=menu.getBoundingClientRect();if(event.clientX<r.left||event.clientX>r.right||event.clientY<r.top||event.clientY>r.bottom)menu.close();}});
  root.querySelector('[data-dark-market-open]').addEventListener('click',openMarket);
  root.querySelector('[data-home-link]').addEventListener('click',event=>{event.preventDefault();home();});
- for(const name of ['boot','i18n','motion','support','account','billing'])await import('./findzia/'+name+'.js');
- window.FindziaAppearance.apply(root);window.FindziaLocale.mount(root);language.value=root.dataset.lang;
+ for(const name of ['boot','i18n','motion','support','account','billing']){await import('./findzia/'+name+'.js');if(name==='boot')window.FindziaAppearance.apply(root,window.FindziaAppearance.resolve(appearance.value));}
+ window.FindziaLocale.mount(root);language.value=root.dataset.lang;
  sync();window.FindziaI18n.refresh();
  root.querySelectorAll('[data-shell-pending]').forEach(el=>{el.disabled=false;el.removeAttribute('data-shell-pending');});
  return {sync,setLanguage,languages,getLanguage:()=>root.dataset.lang||'en'};

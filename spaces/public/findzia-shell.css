@@ -1,5 +1,5 @@
 /* Only the shell's page-height container changes; header/menu/account use Findzia's original rules. */
-#shopify-section-spaces .fz-home[data-theme]{min-height:0;background:transparent}
+#shopify-section-spaces #findzia-home-spaces.fz-home[data-theme][data-home-state]{min-height:0!important;height:auto!important;background:transparent}
 #shopify-section-spaces .fz-home[data-home-state=empty] .fz-dark-home{min-height:0!important;height:auto!important;max-width:1500px;padding:24px 5%!important}
 #findzia-home-spaces .fz-dark-header{min-height:56px}
 #findzia-home-spaces .fz-brand{color:inherit;text-decoration:none;justify-self:center}

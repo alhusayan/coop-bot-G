@@ -153,3 +153,5 @@ init();
 
 
 mountFindzia({getMarket:()=>state.market,getMarkets:()=>state.config.markets,setMarket,openMarket,openDesigns:history,home:()=>{resetRoom();view('home');},notice:toast}).then(value=>{shell=value;syncMarket();}).catch(()=>toast('Couldn’t load the menu. Please refresh.'));
+
+document.addEventListener('spaces:locale',event=>{if(sheetMode==='market'){const names=new Intl.DisplayNames([event.detail.language],{type:'region'});for(const button of $$('.country-choice')){const code=button.dataset.id;button.textContent=state.config.markets[code].flag+' '+names.of(code);}}});
