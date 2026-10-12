@@ -1,3 +1,4 @@
+import {refreshItemStock} from './stock.mjs';
 import {rankProducts,preferLocalResults} from './public/product-order.js';
 export {rankProducts} from './public/product-order.js';
 import {filterApprovedItem} from './sourcing.mjs';
@@ -37,6 +38,7 @@ export async function groupIdenticalPieces(items,room,{judge=gemini}={}){
  return mergeIdentityGroups(items,result);
 }
 export async function searchAllViews(item,market,{views,run=searchWithRecovery,onProgress=()=>{},...deps}={}){
+ item=await refreshItemStock(item,market,deps.stockCheck?{check:deps.stockCheck}:{});
  const states=views.map(()=>({offers:[],alternatives:[],checked:0}));let failed=0;
  const snapshot=()=>({...preferLocalResults(combineResults([item,...states].map(x=>filterApprovedItem(x,market)))),checked:states.reduce((n,x)=>n+(x.checked||0),0),search_attempt:Math.max(1,...states.map(x=>x.search_attempt||1))});
  await pool(views,2,async(view,index)=>{

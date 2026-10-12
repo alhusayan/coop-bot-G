@@ -1,3 +1,5 @@
+import {stockValue} from './availability.mjs';
+import {checkStock} from './stock.mjs';
 import sharp from 'sharp';
 import {rankProducts,hasLocalOptions} from './public/product-order.js';
 import {sourceScope,sourceDetails,filterApprovedItem,requiresPurchaseCheck,hasPurchaseEvidence,globalQueries,localQueries} from './sourcing.mjs';
@@ -69,22 +71,15 @@ export async function searchItem(item,market,{env=process.env,search=serper,page
  const rank=offers=>rankProducts(offers,4);let searchScope='local';
  const progress=phase=>onProgress({offers:rank(all),alternatives:rank(alternatives),checked:attempted,phase,search_scope:searchScope});
  const localFound=()=>hasLocalOptions({offers:all,alternatives});
- async function enrich(o){
-   try{const p=await page(o.link,{timeout:5000});const product=productFromPage(p.html,p.url,m.currency);
-     // Keep the exact image that was compared. Never substitute a different default variant.
-     if(product&&sourceScope(product.link,market)&&product.image===o.image){Object.assign(o,product,sourceDetails(product.link,market),{image:o.image});}
-   }catch{}
-   progress('checking');
- }
  async function inspect(rows,scope){
    const candidates=candidateRows(rows,market,seen,rows[0]?.channel==='lens'?(attempt>1?12:8):(attempt>1?8:5),scope);attempted+=candidates.length;
    const products=(await pool(candidates,6,async row=>{
      let product=null;const image=safeUrl(row.imageUrl||row.thumbnailUrl||row.thumbnail||row.image);
      // Lens / indexed images can be checked immediately; pages are read only for missing images or confirmed pieces.
      if(row.title&&productPath(row.link)&&image&&!requiresPurchaseCheck(row.link)){
-       product={title:clean(row.title,180),link:safeUrl(row.link),image,...rowPrice(row,row.currency||m.currency),source:clean(row.source||new URL(row.link).hostname,90),description:clean(row.snippet,500),evidence:'search_index',availability:row.in_stock===false?'out_of_stock':'unknown',dimensions:''};
+       product={title:clean(row.title,180),link:safeUrl(row.link),image,...rowPrice(row,row.currency||m.currency),source:clean(row.source||new URL(row.link).hostname,90),description:clean(row.snippet,500),evidence:'search_index',availability:row.in_stock===false?'out_of_stock':stockValue(row.availability||row.stock),dimensions:''};
      }else if(productPath(row.link)){try{const p=await page(row.link,{timeout:5000});if(!(requiresPurchaseCheck(row.link)||requiresPurchaseCheck(p.url))||hasPurchaseEvidence(p.html))product=productFromPage(p.html,p.url,m.currency);}catch{}}
-     if(!product||!sourceScope(product.link,market)||(scope&&sourceScope(product.link,market)!==scope))return null;
+     if(!product||product.availability==='out_of_stock'||!sourceScope(product.link,market)||(scope&&sourceScope(product.link,market)!==scope))return null;
      if(/sofa|couch|sectional/i.test(item.name_en)&&!/armless|corner unit|module/i.test(item.name_en)&&/\b(?:armless|corner unit|single module|modular unit)\b/i.test(product.title))return null;
      if(/sofa|couch|chair|table|cabinet|wardrobe|bed frame/i.test(item.name_en)&&/\b(?:cover|slipcover|miniature|dollhouse|sample|swatch|replacement)\b/i.test(product.title))return null;
      const purchase_unit=/pillow|cushion/i.test(item.name_en)&&/\b(?:cover|case)\b/i.test(product.title)?'Cover only · insert not included':null;
@@ -92,8 +87,13 @@ export async function searchItem(item,market,{env=process.env,search=serper,page
      return {...product,purchase_unit,image_fallback:safeUrl(row.thumbnailUrl||row.thumbnail),channel:row.channel||'description',...sourcing,checked_at:new Date().toISOString()};
    })).filter(Boolean);
    const additions=[];
-   await auditVisual(item,products,target,{env,judge,fetchImage,onError:()=>failures++,onNear:o=>{alternatives.push(o);additions.push(o);progress('checking');},onMatch:o=>{all.push(o);additions.push(o);progress('checking');}});
-   await pool(additions.slice(0,3),3,enrich);
+   await auditVisual(item,products,target,{env,judge,fetchImage,onError:()=>failures++,onNear:o=>additions.push(o),onMatch:o=>additions.push(o)});
+   await pool(additions,4,async o=>{
+     const checked=await checkStock(o,market,{page});
+     if(checked.availability==='out_of_stock')return;
+     if(checked.match==='visual')all.push(checked);else alternatives.push(checked);
+     progress('checking');
+   });
  }
  async function discover(queries,scope){
    await Promise.allSettled(queries.map(async([query,country,opts])=>{

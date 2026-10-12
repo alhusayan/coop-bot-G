@@ -64,10 +64,21 @@ test('furniture catalogue pages need purchase evidence; missing price alone is a
 test('a suitable local replacement ends discovery before any foreign Lens audit or global query',async()=>{
  const local={link:'https://www.homecentre.com/sa/en/buy-bed/p/123',title:'Beige single bed',imageUrl:'https://shop.kw/local.jpg'},foreign={...local,link:'https://www.amazon.com/dp/123',imageUrl:'https://shop.kw/foreign.jpg'};
  const seenImages=[],countries=[];let latest;
- await searchItem(item,'SA',{...deps,lensSearch:async()=>[foreign,local],fetchImage:async url=>{seenImages.push(url);return {bytes:image};},search:async(_q,country)=>{countries.push(country);return {};},page:async()=>{throw Error('offline');},judge:async()=>({results:[{...pass,score:65,shape:'mismatch',adaptable:true,differences:['Different arms']}]}),onProgress:x=>latest=x});
+ await searchItem(item,'SA',{...deps,lensSearch:async()=>[foreign,local],fetchImage:async url=>{seenImages.push(url);return {bytes:image};},search:async(_q,country)=>{countries.push(country);return {};},page:async url=>({url,html:page(product)}),judge:async()=>({results:[{...pass,score:65,shape:'mismatch',adaptable:true,differences:['Different arms']}]}),onProgress:x=>latest=x});
  assert.ok(countries.every(x=>x==='SA'));assert.ok(!seenImages.includes(foreign.imageUrl));assert.equal(latest.alternatives[0].market_scope,'local');
 });
 test('local recovery finds a bed before approved international stores are called',async()=>{
- const calls=[],phases=[];const r=await searchItem({...item,name_en:'Single platform bed'},'SA',{...deps,lensSearch:async()=>[],page:async()=>{throw Error('offline');},search:async(q,country,opts)=>{calls.push([q,country]);return opts.source==='local-recovery'?{images:[{link:'https://www.homecentre.com/sa/en/buy-single-bed/p/123',title:'Single bed',imageUrl:product.image}]}:{};},onProgress:x=>phases.push(x.phase)});
+ const calls=[],phases=[];const r=await searchItem({...item,name_en:'Single platform bed'},'SA',{...deps,lensSearch:async()=>[],page:async url=>({url,html:page(product)}),search:async(q,country,opts)=>{calls.push([q,country]);return opts.source==='local-recovery'?{images:[{link:'https://www.homecentre.com/sa/en/buy-single-bed/p/123',title:'Single bed',imageUrl:product.image}]}:{};},onProgress:x=>phases.push(x.phase)});
  assert.equal(r[0].market_scope,'local');assert.equal(calls.length,4);assert.ok(calls.every(x=>x[1]==='SA'));assert.ok(phases.includes('local-recovery'));assert.ok(!phases.includes('global'));
+});
+
+test('a sold-out local item is never streamed even with a different gallery image, and global fallback continues',async()=>{
+ const sold='https://www.homecentre.com/kw/en/buy-chair/p/123',global='https://www.amazon.com/dp/123',updates=[],countries=[];
+ const r=await searchItem(item,'KW',{...deps,lensSearch:async()=>[{title:'Green chair',link:sold,imageUrl:'https://shop.kw/different-gallery.jpg'}],page:async url=>({url,html:page({...product,offers:{...product.offers,availability:url===sold?'https://schema.org/OutOfStock':'https://schema.org/InStock'}})}),search:async(q,country)=>{countries.push(country);return country==='US'?{images:[{title:'Green chair',link:global,imageUrl:product.image}]}:{};},onProgress:x=>updates.push(x)});
+ assert.ok(countries.includes('US'));assert.ok(updates.every(x=>![...x.offers,...x.alternatives].some(o=>o.link===sold)));assert.equal(r[0].link,global);
+});
+test('stock is checked for every accepted alternative, including the fourth result',async()=>{
+ const rows=Array.from({length:4},(_,i)=>({title:'Green chair',link:'https://shop.kw/products/chair'+i,imageUrl:product.image})),pages=[],updates=[];
+ await searchItem(item,'KW',{...deps,lensSearch:async()=>rows,search:async()=>({}),page:async url=>{pages.push(url);return {url,html:page({...product,offers:{...product.offers,availability:url.endsWith('3')?'https://schema.org/OutOfStock':'https://schema.org/InStock'}})};},judge:async()=>({results:rows.map((_,index)=>({...pass,index,score:65,shape:'mismatch',adaptable:true,differences:['Different legs']}))}),onProgress:x=>updates.push(x)});
+ assert.equal(pages.length,4);assert.equal(updates.at(-1).alternatives.length,3);assert.ok(updates.every(x=>!x.alternatives.some(o=>o.link.endsWith('3'))));
 });
