@@ -63,7 +63,8 @@ test('the original SHEIN store-price exception is retained only for a reviewed c
 test('wrong product, distant color, and upholstery changes cannot pass as similar',()=>{
  const approved={...row,search_origin:'image',retrieval_sources:['serper_images'],alternative_visual_status:'approved',alternative_visual_policy:'156.7.3',alternative_visual_proof:'proof'};
  for(const axes of [{category:'different'},{category:'same',color:'different'},{category:'same',material:'different'},{category:'same',shape_geometry:'different'}])assert.equal(originalOffer({...approved,visual_axes:axes},'US'),null);
- assert.equal(originalOffer({...row,identity_match_percentage:18},'US'),null);
+ assert.equal(originalOffer({...row,identity_match_percentage:18,visual_axes:{category:'different'}},'US'),null);
+ assert.ok(originalOffer({...row,identity_match_percentage:38,conflicts:['brand','model'],visual_axes:{category:'same',subtype:'same',color:'same',material:'same'}},'US'));
 });
 test('late classifier updates preserve original images, price and Lens evidence',()=>{
  const results=createOriginalResults('KW');const first={...row,search_origin:'image',retrieval_sources:['google_lens']};
@@ -89,4 +90,15 @@ test('shared client functions are verbatim originals, including sparse updates a
   let fn='';for(let end=original.indexOf('}',start);end>=0;end=original.indexOf('}',end+1)){const candidate=original.slice(start,end+1);try{new Script('('+candidate+')');fn=candidate;break;}catch{}}
   assert.ok(fn&&shared.includes(fn),'original '+name+' must not drift');
  }
+});
+
+
+test('an unresolved visual check gets at most one original-request retry, never an unchecked preview',async()=>{
+ let calls=0;const bodies=[];
+ const result=await searchOriginalPiece(Buffer.from('photo'),'KW',{room:'3'.repeat(24),env:{FINDZIA_SPACES_ENGINE_KEY:'s'.repeat(64)},fetcher:async(_url,options)=>{
+  bodies.push(options.body);calls++;
+  const item=calls===1?{...row,classification_final:false,identity_review_status:'pending',display_before_audit:true}:row;
+  return new Response([JSON.stringify({event:'result',item}),JSON.stringify({event:'done'})].join('\n'),{headers:{'Content-Type':'application/x-ndjson'}});
+ }});
+ assert.equal(calls,2);assert.equal(bodies[0],bodies[1]);assert.equal(result.alternatives.length,1);assert.equal(result.search_diagnostics.attempts,2);
 });

@@ -35,7 +35,7 @@ older English-interface rooms default to English rather than the market language
 
 Per the owner's follow-up, Spaces waits for completed original visual evidence
 before showing a product. Unreviewed previews, conflicting product types/forms,
-clearly different colors, and low-scoring distant matches are held. Original
+clearly different colors, and incompatible product forms are held. Original
 Similar alternatives additionally require the original approval proof and no
 known material/texture/pattern conflict. This is deliberately stricter than the
 original site's temporary early preview; retrieval and its prices are unchanged.
@@ -43,3 +43,11 @@ A real image comparison is not represented as an exact SKU identification.
 Diagnostics report original candidates, candidates with images, displayed rows,
 and reasons for withheld rows. Original retrieval variability and image crops
 mean independent searches cannot promise a fixed matching result count.
+
+
+0.4.2: exact-SKU identity scores are not a visual-distance score for generated
+furniture: brand/model disagreements alone do not remove a visually consistent
+piece. An empty search with still-pending original visual candidates gets at most
+one retry of exactly the same original image request. No unchecked preview is
+published to turn an empty result into a claimed match. Image-resize experiments
+did not reliably improve recall, so production crop pixels remain unchanged.

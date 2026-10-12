@@ -4,9 +4,9 @@ import {createHmac,randomBytes} from 'node:crypto';
 import {createFindziaClient} from './original-client.mjs';
 import {MARKETS,safeUrl} from './engine.mjs';
 export const SEARCH_ENGINE='findzia-original';
-export const SEARCH_REVISION=12;
+export const SEARCH_REVISION=13;
 let active=0;const queue=[];
-async function slot(fn){if(active>=1)await new Promise(resolve=>queue.push(resolve));else active++;try{return await fn();}finally{const next=queue.shift();if(next)next();else active--;}}
+async function slot(fn){if(active>=3)await new Promise(resolve=>queue.push(resolve));else active++;try{return await fn();}finally{const next=queue.shift();if(next)next();else active--;}}
 const clean=value=>String(value??'').replace(/[\u0000-\u001f]/g,' ').trim();
 
 // The same state reducer and display contract as the original website.
@@ -22,8 +22,8 @@ export function closeVisualDecision(row,group){
   if(row.alternative_visual_status!=='approved'||row.alternative_visual_policy!=='156.7.3'||!row.alternative_visual_proof)return {ok:false,reason:'alternative_unverified'};
   if(axes.material==='different'||axes.texture==='different'||axes.pattern==='different')return {ok:false,reason:'different_surface'};
  }
- const score=row.identity_match_percentage??row.match_percentage;
- if(typeof score==='number'&&score<70)return {ok:false,reason:'distant_visual_match'};
+ // SKU scores penalize unknown/different brands and models; a generated room
+ // has no proven SKU. Use the completed visual axes, never that identity score.
  if(axes.category!=='same'||!row.audited_media_path&&!row.audited_image)return {ok:false,reason:'visual_evidence_missing'};
  return {ok:true,reason:'original_visual_review'};
 }
@@ -68,6 +68,7 @@ export async function searchOriginalPiece(bytes,market,{room,language='en',env=p
  if(!MARKETS[market]||!Buffer.isBuffer(bytes)||!bytes.length||!(/^[a-f0-9]{24}$/).test(room||''))throw Error('INVALID_INPUT');
  const secret=env.FINDZIA_SPACES_ENGINE_KEY;if(!secret||secret.length<32)throw Error('ENGINE_UNAVAILABLE');
  return slot(async()=>{
+  for(let attempt=0;attempt<2;attempt++){
   const results=createOriginalResults(market,onProgress);
   const body=JSON.stringify({image_base64:bytes.toString('base64'),mime_type:'image/jpeg',country:market,lang:language,spaces_room:room});
   const stamp=String(Math.floor(Date.now()/1000)),nonce=randomBytes(16).toString('hex');
@@ -85,6 +86,13 @@ export async function searchOriginalPiece(bytes,market,{room,language='en',env=p
   }catch(error){if(!results.snapshot().length)throw error;}
   if(results.failed&&!results.snapshot().length)throw Error('SEARCH_FAILED');
   if(!results.complete&&!results.snapshot().length)throw Error('SEARCH_FAILED');
-  return {offers:[],alternatives:results.snapshot(),partial:!results.complete,search_diagnostics:results.diagnostics(),search_engine:SEARCH_ENGINE,search_market:market};
+  const diagnostics=results.diagnostics();
+  // One bounded retry of the exact original request only when it ended with
+  // no verified options but still had priced candidates awaiting image review.
+  if(attempt===0&&results.complete&&!results.failed&&!results.snapshot().length&&diagnostics.held.visual_review_pending){
+   onProgress({phase:'checking',search_scope:'findzia'});continue;
+  }
+  return {offers:[],alternatives:results.snapshot(),partial:!results.complete,search_diagnostics:{...diagnostics,attempts:attempt+1},search_engine:SEARCH_ENGINE,search_market:market};
+  }
  });
 }
