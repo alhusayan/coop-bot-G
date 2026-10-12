@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import sharp from 'sharp';
-import {designFromCatalog,validateCatalogPlan,catalogSize,sourceCatalogItem,renderCatalogRoom} from '../catalog-first.mjs';
+import {designFromCatalog,validateCatalogPlan,catalogSize,catalogSearchQueries,sourceCatalogItem,renderCatalogRoom} from '../catalog-first.mjs';
 const original={inlineData:{mimeType:'image/jpeg',data:'test'}},room={width_cm:400,length_cm:500};
 const offer={title:'Olive chair',link:'https://www.safathome.com/olive-chair/p',image:'https://example.com/chair.jpg',availability:'listed_available',dimensions_cm:{width:80,depth:85,height:90}};
 const item={id:'1',name_en:'Chair',essential:true,mounting:'floor',quantity:2,room,offers:[offer]};
@@ -38,4 +38,8 @@ test('renderer includes real product references and rejects a failed visual audi
  let imageCalls=0;const plan={...validateCatalogPlan(layout,[item],room),context,options:{notes:'Olive'}};
  const generate=async(parts,opts)=>{if(opts.image){imageCalls++;assert.equal(parts.filter(p=>p.inlineData).length,2);return {mimeType:'image/jpeg',data:out.toString('base64')};}return {room_geometry_unchanged:true,no_unselected_new_products:true,scale_plausible:true,items:[{id:'1',product_present:true,boxes:layout.choices[0].placements.map(x=>x.box)}]};};
  await assert.rejects(renderCatalogRoom(original,plan,{generate,fetchImage:async()=>({bytes}),verify:async()=>({ok:true}),audit:async()=>[]}),/PLACEMENT_UNVERIFIED/);assert.equal(imageCalls,2);
+});
+
+test('retrieval uses broad real-product categories across local stores before a style is rendered',()=>{
+ const q=catalogSearchQueries({name_en:'Curved Sectional Sofa',specs:{category:'sofa',color:'cream'}},'KW');assert.equal(q.query,'sofa cream');assert.ok(q.queries.some(([query])=>query.includes('safathome.com')));assert.ok(q.queries.some(([query])=>query.includes('ikea.com/kw/')));assert.equal(catalogSearchQueries({name_en:'Travertine Coffee Table',specs:{color:'white'}},'KW',true).query,'coffee table');
 });

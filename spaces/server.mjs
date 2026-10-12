@@ -90,7 +90,7 @@ async function generateCatalogDesign(j,index=0,deps={}){
    const brief=result.items.find(x=>x.id===p.id),boxes=result.boxes[p.id];
    if(!boxes||boxes.length!==p.quantity)throw Error('PLACEMENT_UNVERIFIED');
    const views=await pool(boxes,3,async(box,k)=>{const ordinal=n*10+k+1,crop='crop-'+index+'-'+ordinal+'-r'+revision+'.jpg';writeFileSync(resolve(DATA,j.id,crop),await cropPiece(result.output,box),{mode:0o600});return {id:String(ordinal),box,crop};});
-   return {...brief,id:String(n+1),quantity:p.quantity,box:views[0].box,crop:views[0].crop,occurrences:views,identity_verified:true,status:'done',phase:'complete',offers:[p.offer],alternatives:[]};
+   return {...brief,name_en:(p.name||brief.name_en).replace(/^./,c=>c.toUpperCase()),id:String(n+1),quantity:p.quantity,box:views[0].box,crop:views[0].crop,occurrences:views,identity_verified:true,status:'done',phase:'complete',offers:[p.offer],alternatives:[]};
   });
   // Publish image and its exact product list together; the previous room stays intact until now.
   Object.assign(d,{image:filename,title:result.title,items,status:'complete',error:null,progress:{stage:'complete'},matching_version:3,search_revision:10,grouping_version:1,details_version:DETAILS_VERSION,stock_checked_at:Date.now(),inventory_revision:revision,finish:null,measurements:{room:result.plan.room,limits:{}},catalog_layout:result.plan.picks.map(p=>({id:p.id,quantity:p.quantity,positions:p.views.map(v=>v.position_cm)}))});
