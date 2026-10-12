@@ -31,8 +31,9 @@ export function visualDecision(v){
 export async function auditVisual(item,offers,target,{env=process.env,judge=gemini,fetchImage=safeImage}={}){
  if(!target?.inlineData||!offers.length)return [];
  const loaded=(await pool(offers,5,async o=>{
-   try{const r=await fetchImage(o.image);const bytes=await sharp(r.bytes,{limitInputPixels:40e6}).resize({width:720,height:720,fit:'inside',withoutEnlargement:true}).jpeg({quality:83}).toBuffer();return {offer:o,inlineData:{mimeType:'image/jpeg',data:bytes.toString('base64')}};}catch{return null;}
+   for(const image of [...new Set([o.image,o.image_fallback].filter(Boolean))]){try{const r=await fetchImage(image);const bytes=await sharp(r.bytes,{limitInputPixels:40e6}).resize({width:720,height:720,fit:'inside',withoutEnlargement:true}).jpeg({quality:83}).toBuffer();return {offer:{...o,image},inlineData:{mimeType:'image/jpeg',data:bytes.toString('base64')}};}catch{}}return null;
  })).filter(Boolean);
+ console.log('SPACES_AUDIT_EVIDENCE',item.id,offers.length,loaded.length);
  const accepted=[];
  for(let start=0;start<loaded.length;start+=5){
    const group=loaded.slice(start,start+5);
@@ -40,6 +41,7 @@ export async function auditVisual(item,offers,target,{env=process.env,judge=gemi
    group.forEach((x,i)=>parts.push({text:'CANDIDATE '+i+' '+JSON.stringify({title:x.offer.title,description:x.offer.description,color:x.offer.color,material:x.offer.material,dimensions:x.offer.dimensions})},{inlineData:x.inlineData}));
    let verdict;try{verdict=await judge(parts,{env,json:true});}catch{continue;}
    const results=Array.isArray(verdict.results)?verdict.results:[];
+   console.log('SPACES_AUDIT_DECISION',item.id,JSON.stringify(results.slice(0,3).map(v=>({score:v.score,color:v.color,shape:v.shape,material:v.material,reason:clean(v.reason,180)}))));
    for(const v of results){if(Number.isInteger(v.index)&&group[v.index]&&visualDecision(v))accepted.push({...group[v.index].offer,match:'visual',visual_score:Math.min(100,Math.max(0,Number(v.score))),match_reason:clean(v.reason,240),size_verified:false});}
  }
  return accepted;
@@ -47,7 +49,8 @@ export async function auditVisual(item,offers,target,{env=process.env,judge=gemi
 function rowPrice(row,currency){const p=row.price;if(p&&typeof p==='object'){const c=String(p.currency||'').toUpperCase();return {price:c?numericPrice(p.extracted_value??p.value):null,currency:c||null};}return {price:priceText(p,currency),currency:priceText(p,currency)?currency:null};}
 const excluded=/pinterest|youtube|youtu\.be|facebook|instagram|tiktok|wikipedia|(?:^|\.)google\.[a-z.]+$/i;
 function candidateRows(rows,market,seen,limit){
- return rows.filter(x=>{const u=safeUrl(x.link);if(!u||seen.has(u)||excluded.test(new URL(u).hostname))return false;seen.add(u);return true;}).sort((a,b)=>Number(localEvidence(b.link,market))-Number(localEvidence(a.link,market))).slice(0,limit);
+ const batch=new Set();const list=rows.filter(x=>{const u=safeUrl(x.link);if(!u||seen.has(u)||batch.has(u)||excluded.test(new URL(u).hostname))return false;batch.add(u);return true;}).sort((a,b)=>Number(localEvidence(b.link,market))-Number(localEvidence(a.link,market))||Number(productPath(b.link))-Number(productPath(a.link))).slice(0,limit);
+ list.forEach(x=>seen.add(safeUrl(x.link)));return list;
 }
 export async function searchItem(item,market,{env=process.env,search=serper,page=safePage,lensSearch=lens,judge=gemini,fetchImage=safeImage,target,lensUrl,onProgress=()=>{}}={}){
  const m=MARKETS[market],seen=new Set();let all=[],attempted=0;
@@ -62,14 +65,14 @@ export async function searchItem(item,market,{env=process.env,search=serper,page
      }
      if(!product)return null;
      const local=localEvidence(product.link,market)||(product.currency===m.currency&&m.currency!=='EUR');
-     return {...product,channel:row.channel||'description',market:local?market:null,market_scope:local?'local':'international',checked_at:new Date().toISOString()};
+     return {...product,image_fallback:safeUrl(row.imageUrl||row.thumbnail),channel:row.channel||'description',market:local?market:null,market_scope:local?'local':'international',checked_at:new Date().toISOString()};
    })).filter(Boolean);
    const matches=await auditVisual(item,products,target,{env,judge,fetchImage});
    all.push(...matches);onProgress({offers:rank(all),checked:attempted,phase:'checking'});
  }
  function rank(offers){const unique=[...new Map(offers.map(o=>[o.link,o])).values()];return unique.sort((a,b)=>Number(a.availability==='out_of_stock')-Number(b.availability==='out_of_stock')||Number(b.market_scope==='local')-Number(a.market_scope==='local')||b.visual_score-a.visual_score||(a.price??Infinity)-(b.price??Infinity)).slice(0,6);}
  onProgress({phase:'lens'});
- if(lensUrl){const rows=await lensSearch(lensUrl,market,{env});await inspect(rows);}
+ if(lensUrl){try{const rows=await lensSearch(lensUrl,market,{env});await inspect(rows);if(!all.length&&rows.length>16)await inspect(rows);}catch(e){console.log('SPACES_LENS_RECOVERY',e.name);}}
  // Recover with detailed visual specifications when Lens is empty, mismatched or only overseas.
  if(!all.some(o=>o.market_scope==='local'&&o.availability!=='out_of_stock')){
    onProgress({phase:'description'});
