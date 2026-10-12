@@ -1,7 +1,7 @@
 import {availabilityFromPage,STOCK_VERSION,stockFresh} from './availability.mjs';
 import {safePage,productFromPage} from './engine.mjs';
 import {sourceScope} from './sourcing.mjs';
-const pending=new Map();
+const pending=new Map(),diagnosed=new Set();
 export async function checkStock(offer,market,{page=safePage,force=false}={}){
  if(!force&&stockFresh(offer))return {...offer};
  const key=market+':'+offer.link;
@@ -11,7 +11,9 @@ export async function checkStock(offer,market,{page=safePage,force=false}={}){
    try{
      const p=await page(offer.link,{timeout:5000});
      if(!sourceScope(p.url,market)||sourceScope(p.url,market)!==sourceScope(offer.link,market))return {...stamp,availability:'unknown',stock_evidence:'different_storefront'};
-     const stock=availabilityFromPage(p.html,p.url);let product;try{product=productFromPage(p.html,p.url,offer.currency);}catch{}
+     const stock=availabilityFromPage(p.html,p.url);
+     if(/\/(166349668|168271753)$/.test(new URL(offer.link).pathname)&&!diagnosed.has(offer.link)){diagnosed.add(offer.link);console.log('SPACES_STOCK_DIAGNOSTIC',JSON.stringify({url:offer.link,length:p.html.length,scripts:[...p.html.matchAll(/<script\b([^>]*)>/gi)].map(x=>x[1]).filter(x=>!/\bsrc=/.test(x)).slice(0,15),signals:[...p.html.matchAll(/.{0,90}(?:stockLevel|stockStatus|inStock|out.of.stock|availability|sellable|purchasable).{0,150}/gi)].slice(0,24).map(x=>x[0])}));}
+     let product;try{product=productFromPage(p.html,p.url,offer.currency);}catch{}
      console.log('SPACES_STOCK_CHECK',JSON.stringify({url:offer.link,status:stock.availability,evidence:stock.stock_evidence}));
      return {...stamp,...stock,product};
    }catch(e){
