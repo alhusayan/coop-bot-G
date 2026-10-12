@@ -24,7 +24,7 @@ setInterval(cleanup,3600000).unref();
 function sign(v){return createHmac('sha256',secret).update(v).digest('hex');}
 function constantEqual(a,b){const x=Buffer.from(a),y=Buffer.from(b);return x.length===y.length&&timingSafeEqual(x,y);}
 function session(req){const raw=String(req.headers.cookie||'').split(';').map(x=>x.trim()).find(x=>x.startsWith('spaces_session='))?.slice(15)||'';const [id,stamp,sig]=raw.split('.');if(!/^[a-f0-9]{32}$/.test(id||'')||Number(stamp)<Date.now()||!sig||!constantEqual(sign(id+'.'+stamp),sig))return null;return id;}
-function cookie(){const id=randomBytes(16).toString('hex'),stamp=Date.now()+7*86400000,value=id+'.'+stamp;return 'spaces_session='+value+'.'+sign(value)+'; Path=/; HttpOnly; SameSite=Lax; Max-Age=604800'+(secure?'; Secure':'');}
+function cookie(id=randomBytes(16).toString('hex')){const stamp=Date.now()+7*86400000,value=id+'.'+stamp;return 'spaces_session='+value+'.'+sign(value)+'; Path=/; HttpOnly; SameSite=Lax; Max-Age=604800'+(secure?'; Secure':'');}
 const headers={'X-Content-Type-Options':'nosniff','X-Frame-Options':'DENY','X-Robots-Tag':'noindex, nofollow, noarchive','Referrer-Policy':'no-referrer','Permissions-Policy':'camera=(self), microphone=(), geolocation=()', 'Content-Security-Policy':"default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com 'unsafe-inline'; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob: https:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"};
 function send(res,status,value,extra={}){res.writeHead(status,{...headers,'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store',...extra});res.end(typeof value==='string'?value:JSON.stringify(value));}
 function error(code,status=400){return Object.assign(Error(code),{status});}
@@ -88,7 +88,7 @@ function makeJob(owner,opt,buffer,idempotency=''){
 }
 export function createServer(){return http.createServer({requestTimeout:30000,headersTimeout:15000,maxHeaderSize:16384},async(req,res)=>{
  try{
- const u=new URL(req.url,'http://localhost'),path=u.pathname;
+ const u=new URL(req.url,'http://localhost');let path=u.pathname;
  const lensMedia=path.match(/^\/lens-media\/([a-f0-9]{24})\/(crop-[0-2]-\d{1,2}\.jpg)$/);
  if(lensMedia){
    const expires=Number(u.searchParams.get('expires')),sig=u.searchParams.get('sig')||'';
@@ -99,10 +99,15 @@ export function createServer(){return http.createServer({requestTimeout:30000,he
 
  if(path==='/healthz')return send(res,200,{ok:true,version:'spaces-0.2.0',lens:!!(process.env.SERPAPI_API_KEY||process.env.SEARCHAPI_API_KEY),generation:!!process.env.GEMINI_API_KEY,search:!!process.env.SERPER_API_KEY});
  if(path.startsWith('/trial/')){
-   const supplied=path.slice(7);if(!trial||!constantEqual(supplied,trial))throw error('NOT_FOUND',404);
-   res.writeHead(303,{...headers,'Set-Cookie':cookie(),'Location':'/','Cache-Control':'no-store'});return res.end();
+   const supplied=path.slice(7);if(!['GET','HEAD'].includes(req.method)||!trial||!constantEqual(supplied,trial))throw error('NOT_FOUND',404);
+   // Keep the invitation in the address when Safari opens an in-app browser's page.
+   // Reopening it renews this browser's session without changing room ownership.
+   res.setHeader('Set-Cookie',cookie(session(req)||undefined));path='/';
  }
  let owner=session(req);
+ if(u.pathname==='/'&&owner&&trial&&['GET','HEAD'].includes(req.method)){
+   res.writeHead(303,{...headers,'Location':'/trial/'+trial,'Cache-Control':'no-store'});return res.end();
+ }
  if(!secure&&!trial&&!owner){res.setHeader('Set-Cookie',cookie());owner='local-development';}
  if(path.startsWith('/api/')||path.startsWith('/media/')){
    if(!owner)throw error('TRIAL_LINK_REQUIRED',401);
@@ -145,8 +150,8 @@ export function createServer(){return http.createServer({requestTimeout:30000,he
  const media=path.match(/^\/media\/([a-f0-9]{24})\/(original\.jpg|design-[0-2]\.(?:jpg|png)|crop-[0-2]-\d{1,2}\.jpg)$/);
  if(media){ownerJob(media[1],owner);const f=resolve(DATA,media[1],media[2]);if(!existsSync(f))throw error('NOT_FOUND',404);const bytes=readFileSync(f);res.writeHead(200,{...headers,'Content-Type':bytes[0]===137?'image/png':bytes[0]===255?'image/jpeg':'image/webp','Cache-Control':'private, max-age=3600'});return res.end(bytes);}
  if(!['GET','HEAD'].includes(req.method))throw error('NOT_FOUND',404);
- const assets={'/':'index.html','/app.js':'app.js','/style.css':'style.css','/hero.webp':'hero.webp','/icon.svg':'icon.svg','/robots.txt':'robots.txt'};
- if(assets[path]){const file=resolve(ROOT,'public',assets[path]),mime={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.png':'image/png','.webp':'image/webp','.svg':'image/svg+xml','.txt':'text/plain'}[extname(file)];res.writeHead(200,{...headers,'Content-Type':mime,'Cache-Control':path==='/hero.webp'?'public, max-age=86400':'no-cache'});return res.end(req.method==='HEAD'?undefined:readFileSync(file));}
+ const assets={'/':'index.html','/app.js':'app.js','/request.js':'request.js','/style.css':'style.css','/hero.webp':'hero.webp','/icon.svg':'icon.svg','/robots.txt':'robots.txt'};
+ if(assets[path]){const file=resolve(ROOT,'public',assets[path]),mime={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.png':'image/png','.webp':'image/webp','.svg':'image/svg+xml','.txt':'text/plain'}[extname(file)];res.writeHead(200,{...headers,'Content-Type':mime,'Cache-Control':path==='/'?'no-store':path==='/hero.webp'?'public, max-age=86400':'no-cache'});return res.end(req.method==='HEAD'?undefined:readFileSync(file));}
  throw error('NOT_FOUND',404);
  }catch(e){if(!res.headersSent)send(res,e.status||500,{error:e.status?e.message:'UNEXPECTED_ERROR'});else res.end();if(!e.status)console.error('SPACES_HTTP_ERROR',e.message);}
 });}
