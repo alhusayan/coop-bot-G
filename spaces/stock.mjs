@@ -1,33 +1,33 @@
-import {availabilityFromPage,STOCK_VERSION,stockFresh} from './availability.mjs';
-import {safePage,productFromPage} from './engine.mjs';
-import {sourceScope} from './sourcing.mjs';
+import {readStoreDetails} from './store-details.mjs';
+import {DETAILS_VERSION,sameOfferProduct,productURL} from './product-data.mjs';
+import {STOCK_VERSION,stockFresh} from './availability.mjs';
+import {safePage} from './engine.mjs';
 const pending=new Map();
+let active=0;const queue=[];
+async function boundedRead(run){if(active>=6)await new Promise(resolve=>queue.push(resolve));else active++;try{return await run();}finally{const next=queue.shift();if(next)next();else active--;}}
 export async function checkStock(offer,market,{page=safePage,force=false}={}){
- if(!force&&stockFresh(offer))return {...offer};
- const key=market+':'+offer.link;
+ if(!force&&stockFresh(offer)&&offer.details_version===DETAILS_VERSION)return {...offer};
+ const key=market+':'+productURL(offer.link);
  // Only coalesce in-flight default fetches. Stored results carry their own short expiry.
  async function read(){
-   const stamp={stock_version:STOCK_VERSION,stock_checked_at:new Date().toISOString()};
+   const stamp={stock_version:STOCK_VERSION,details_version:DETAILS_VERSION,details_checked_at:new Date().toISOString(),stock_checked_at:new Date().toISOString()};
    try{
-     const p=await page(offer.link,{timeout:5000});
-     if(!sourceScope(p.url,market)||sourceScope(p.url,market)!==sourceScope(offer.link,market))return {...stamp,availability:'unknown',stock_evidence:'different_storefront'};
-     const stock=availabilityFromPage(p.html,p.url);
-     let product;try{product=productFromPage(p.html,p.url,offer.currency);}catch{}
-     console.log('SPACES_STOCK_CHECK',JSON.stringify({url:offer.link,status:stock.availability,evidence:stock.stock_evidence}));
+     const {pageData,product,stock}=await readStoreDetails(offer,market,{page});
+     if(!pageData&&!product&&offer.availability==='out_of_stock')stock.availability='out_of_stock';
+     console.log('SPACES_STOCK_CHECK',JSON.stringify({url:offer.link,status:stock.availability,evidence:stock.stock_evidence,dimensions:product?.dimensions_cm,details:product?.dimensions_status}));
      return {...stamp,...stock,product};
    }catch(e){
      console.log('SPACES_STOCK_UNCONFIRMED',JSON.stringify({url:offer.link,reason:e.message}));
-     return {...stamp,availability:offer.availability==='out_of_stock'?'out_of_stock':'unknown',stock_evidence:'unconfirmed'};
+     return {...stamp,availability:offer.availability==='out_of_stock'?'out_of_stock':'unknown',stock_evidence:'unconfirmed',details_status:'unconfirmed'};
    }
  }
  let task=page===safePage?pending.get(key):null;
- if(!task){task=read();if(page===safePage){pending.set(key,task);task.finally(()=>pending.delete(key));}}
+ if(!task){task=page===safePage?boundedRead(read):read();if(page===safePage){pending.set(key,task);task.finally(()=>pending.delete(key));}}
  const {product,...stock}=await task;
- // Prices/materials from another default gallery variant cannot replace audited data.
- const sameImage=product?.image===offer.image;
- const sku=new URL(offer.link).pathname.match(/\/(?:p|dp|item)\/([^/]+)\/?$/)?.[1];
- const exactSKU=product?.sku&&sku===String(product.sku);
- const size=(sameImage||exactSKU)&&product?.dimensions_cm?{dimensions_cm:product.dimensions_cm,dimensions:product.dimensions,dimensions_source:product.dimensions_source}:{};
+ // Stock and dimensions belong to the exact product, not the first gallery photo.
+ const identity=sameOfferProduct(offer,product),sameImage=identity&&product?.image===offer.image;
+ const size=identity?{sku:product.sku,dimensions_cm:product.dimensions_cm,dimensions:product.dimensions,dimensions_source:product.dimensions_source,dimensions_evidence:product.dimensions_evidence,dimensions_status:product.dimensions_status,details_status:product.dimensions_status}:{};
+ if(product&&!identity&&(productURL(offer.link)!==productURL(product.link)||offer.sku&&product.sku&&String(offer.sku)!==String(product.sku)))return {...offer,...stock,availability:'unknown',stock_evidence:'product_identity_unconfirmed',details_status:'unconfirmed'};
  return {...offer,...(sameImage?product:{}),...size,...stock,image:offer.image};
 }
 export async function refreshItemStock(item,market,{check=checkStock}={}){

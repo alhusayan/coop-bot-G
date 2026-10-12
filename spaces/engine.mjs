@@ -1,4 +1,5 @@
-import {dimensionsFromPage,dimensionLabel} from './dimensions.mjs';
+import {readProductData} from './product-data.mjs';
+import {dimensionDetails,dimensionLabel} from './dimensions.mjs';
 import {availabilityFromPage} from './availability.mjs';
 import https from 'node:https';
 import dns from 'node:dns/promises';
@@ -65,7 +66,7 @@ export async function safeResource(url,{image=false,depth=0,timeout=6500}={}){
  return new Promise((resolve,reject)=>{
    const req=https.get(u,{headers:{'User-Agent':'Mozilla/5.0 (compatible; FindziaSpaces/0.1)','Accept':image?'image/*':'text/html,application/xhtml+xml','Accept-Encoding':'identity'},lookup:(_h,opts,cb)=>opts.all?cb(null,[record]):cb(null,record.address,4),timeout},res=>{
      if([301,302,303,307,308].includes(res.statusCode)){res.resume();if(!res.headers.location)return reject(Error('redirect'));return safeResource(new URL(res.headers.location,u).href,{image,depth:depth+1,timeout}).then(resolve,reject);}
-     if(res.statusCode!==200||!(image?/^image\/(jpeg|png|webp)/i.test(String(res.headers['content-type'])):String(res.headers['content-type']).includes('text/html'))){res.resume();return reject(Error('no_page'));}
+     if(res.statusCode!==200||!(image?/^image\/(jpeg|png|webp)/i.test(String(res.headers['content-type'])):String(res.headers['content-type']).includes('text/html'))){res.resume();return reject(Error('no_page_'+res.statusCode));}
      let chunks=[],size=0;res.on('data',b=>{size+=b.length;if(size>(image?6000000:3000000)){req.destroy();reject(Error('page_large'));}else chunks.push(b);});
      res.on('end',()=>resolve({bytes:Buffer.concat(chunks),html:image?undefined:Buffer.concat(chunks).toString('utf8'),mime:String(res.headers['content-type']).split(';')[0],url:u.href}));res.on('error',reject);
    });req.on('error',reject);req.on('timeout',()=>req.destroy(Error('timeout')));
@@ -83,28 +84,22 @@ function meta(html,key){
 export function productPath(url){try{const u=new URL(url);return !/\/(?:collections|categories|search|blog|blogs|tag)(?:[/?]|$)/i.test(u.pathname)&&(/\/(?:products?|p|item|itm|listing|dp|pd|ip|goods|buy-[^/]+)(?:[/-]|$)|\.html$/i.test(u.pathname)||/(?:^|\.)1688\.com$/.test(u.hostname)&&/^\/offer\/\d+/.test(u.pathname)||/(?:^|\.)taobao\.com$/.test(u.hostname)&&u.pathname==='/item.htm'&&/^\d+$/.test(u.searchParams.get('id')||''));}catch{return false;}}
 function dimension(v){if(!v)return '';if(typeof v==='object')return clean([v.value,v.unitText||v.unitCode].filter(Boolean).join(' '),80);return clean(v,80);}
 export function productFromPage(html,url,currency){
- const candidates=[];
- function walk(v){if(!v||typeof v!=='object')return;if(Array.isArray(v)){v.forEach(walk);return;}
- const types=Array.isArray(v['@type'])?v['@type']:[v['@type']];if(types.includes('Product'))candidates.push(v);
- if(v['@graph'])walk(v['@graph']);if(v.mainEntity)walk(v.mainEntity);
- }
- for(const match of html.matchAll(/<script\b[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi)){try{walk(JSON.parse(match[1]));}catch{}}
- if(candidates.length>1)return null;
- const product=candidates[0];
+ const data=readProductData(html,url);if(data.ambiguous||data.variantUnconfirmed)return null;
+ const product=data.schema;
  if(!product&&!(productPath(url)&&(/product/i.test(meta(html,'og:type'))||/add to (?:cart|bag|basket)|buy now|أضف للسلة/i.test(html))))return null;
  const offers=product?(Array.isArray(product.offers)?product.offers:[product.offers]).filter(Boolean):[];
  // Keep a store listing with no price, but never make up a zero price or convert currencies.
  const offer=offers.find(o=>o.priceCurrency===currency)||offers[0]||{};
  const pageCurrency=String(offer.priceCurrency||meta(html,'product:price:currency')||'').toUpperCase();
  const price=numericPrice(offer.price||meta(html,'product:price:amount'));
- const img=product?(Array.isArray(product.image)?product.image[0]:product.image):meta(html,'og:image');
- const image=safeUrl(typeof img==='object'?img?.url:img);
- const title=clean(unescapeHTML(product?.name||meta(html,'og:title')),180);
+ const img=product?(Array.isArray(product.image)?product.image[0]:product.image):meta(html,'og:image')||data.primaryImage;
+ const image=safeUrl((typeof img==='object'?img?.url:img)||data.images[0]||data.primaryImage);
+ const title=clean(unescapeHTML(product?.name||meta(html,'og:title')||data.primaryTitle),180);
  if(!title||!image)return null;
  const props=Array.isArray(product?.additionalProperty)?product.additionalProperty:[];
  const dimensions=[['Width',product?.width],['Height',product?.height],['Depth',product?.depth],...props.filter(p=>/dimension|width|height|depth|length|diameter/i.test(p.name||'')).slice(0,4).map(p=>[p.name,p.value])].filter(x=>x[1]).map(([k,v])=>k+': '+dimension(v)).join(' · ');
- const dimensions_cm=dimensionsFromPage(html,product||{});
- return {title,dimensions_cm,dimensions_source:Object.keys(dimensions_cm).length?'store_product_page':null,price:pageCurrency&&price?price:null,currency:pageCurrency||null,link:url,image,source:new URL(url).hostname.replace(/^www\./,''),evidence:'product_page',...availabilityFromPage(html,url),description:clean(unescapeHTML(product?.description||meta(html,'og:description')).replace(/<[^>]+>/g,' '),1400),color:clean(product?.color,90),material:clean(product?.material,90),dimensions:clean(dimensionLabel(dimensions_cm)||dimensions,300),sku:clean(product?.sku,100)};
+ const details=dimensionDetails(html,product||{name:title},url,data),dimensions_cm=details.size;
+ return {title,product_images:data.images,variant_unconfirmed:data.variantUnconfirmed,dimensions_evidence:details.evidence,dimensions_status:details.status,dimensions_cm,dimensions_source:Object.keys(dimensions_cm).length?'store_product_page':null,price:pageCurrency&&price?price:null,currency:pageCurrency||null,link:url,image,source:new URL(url).hostname.replace(/^www\./,''),evidence:'product_page',...availabilityFromPage(html,url),description:clean(unescapeHTML(product?.description||meta(html,'og:description')).replace(/<[^>]+>/g,' '),1400),color:clean(product?.color||data.rows.find(x=>/^(?:colou?r)$/i.test(x.label))?.value,90),material:clean(product?.material||data.rows.find(x=>/^(?:materials?|material details)$/i.test(x.label))?.value,90),dimensions:clean(dimensionLabel(dimensions_cm)||dimensions,300),sku:clean(data.sku||product?.sku,100)};
 }
 export function sanitizeItems(data,{keep=''}={}){
  return (Array.isArray(data?.items)?data.items:[]).slice(0,28).map((x,i)=>{

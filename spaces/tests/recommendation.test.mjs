@@ -19,3 +19,8 @@ test('every repeated copy must fit and user choices cannot silently change',asyn
  const p=await recommendRoom([item],{},room,'KW',{stock,judge:narrow});assert.equal(p.picks.length,0);
  await assert.rejects(recommendRoom([item],{},room,'KW',{stock,judge,preferred:{'1':'https://evil.example'}}),/CHOICE_NO_LONGER_FITS/);
 });
+test('store enrichment is published back even when no piece can yet be placed',async()=>{
+ const published=[];
+ const p=await recommendRoom([{...item,alternatives:[{...local,dimensions_cm:{}}]}],{},room,'KW',{stock:async o=>({...o,dimensions_cm:size,availability:'unknown'}),judge,onChecked:(id,o)=>published.push({id,o})});
+ assert.equal(p.picks.length,0);assert.equal(published.length,1);assert.deepEqual(published[0].o.dimensions_cm,size);
+});

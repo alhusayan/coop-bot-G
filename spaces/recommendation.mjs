@@ -6,13 +6,14 @@ import {rankProducts} from './public/product-order.js';
 import {usableSize,fitSize} from './dimensions.mjs';
 import {occurrences} from './identity.mjs';
 
-export async function recommendRoom(items,roomImage,room,market,{judge=gemini,stock=checkStock,limits={},preferred={},onProgress=()=>{}}={}){
+export async function recommendRoom(items,roomImage,room,market,{judge=gemini,stock=checkStock,limits={},preferred={},onProgress=()=>{},onChecked=()=>{}}={}){
  const ready=items.filter(x=>x.mode==='ready'),options={},skipped=[],checkedByItem={};
  onProgress('sizes');
  // Bound I/O across the entire room, not one unconstrained Promise.all per item.
  const rows=ready.flatMap(item=>{const safe=filterApprovedItem(item,market);return rankProducts([...safe.offers,...safe.alternatives],6).map(offer=>({item,offer}));});
  await pool(rows,5,async({item,offer})=>{
    const checked=await stock(offer,market,{force:!usableSize(offer.dimensions_cm)});
+   onChecked(item.id,checked);
    (checkedByItem[item.id]??=[]).push(checked);
    if(checked.availability==='listed_available'&&usableSize(checked.dimensions_cm))(options[item.id]??=[]).push(checked);
  });
@@ -20,7 +21,7 @@ export async function recommendRoom(items,roomImage,room,market,{judge=gemini,st
  const candidates=ready.filter(x=>options[x.id]?.length);
  for(const item of items)if(!candidates.includes(item)){
    const checked=checkedByItem[item.id]||[],reason_code=item.mode==='keep'?'kept':item.mode!=='ready'?'custom':!checked.length?'no_options':checked.some(o=>o.availability==='listed_available')?'store_dimensions':'store_stock';
-   const reason={kept:'Keeping your piece',custom:'Needs measuring or custom work',no_options:'No store options to check yet',store_dimensions:'Store product dimensions are missing or incomplete',store_stock:'Store availability could not be confirmed'}[reason_code];
+   const reason={kept:'Keeping your piece',custom:'Needs measuring or custom work',no_options:'No store options to check yet',store_dimensions:'Store dimensions could not yet be confirmed',store_stock:'Store availability could not be confirmed'}[reason_code];
    skipped.push({id:item.id,name:item.name_en,reason_code,reason});
  }
  if(!candidates.length)return {room,picks:[],options:{},skipped,limits};

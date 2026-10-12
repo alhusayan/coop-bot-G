@@ -1,3 +1,4 @@
+import {DETAILS_VERSION} from './product-data.mjs';
 import {recommendRoom} from './recommendation.mjs';
 import {createRoomPreview} from './room-preview.mjs';
 import {roomMeasurements,measuredLimits} from './dimensions.mjs';
@@ -122,7 +123,7 @@ async function reconcilePieces(j,index){
 async function resumeShopping(j,i){
  const d=j.designs[i],refresh=d.search_revision!==10;await reconcilePieces(j,i);d.search_revision=10;d.status='searching';
  await pool(d.items.filter(x=>x.status!=='kept'),6,async x=>{const had=(x.offers?.length||0)+(x.alternatives?.length||0);Object.assign(x,await refreshItemStock(x,j.options.market));if(had&&!x.offers.length&&!x.alternatives.length)x.status='idle';});
- d.stock_checked_at=Date.now();persist();
+ d.stock_checked_at=Date.now();d.details_version=DETAILS_VERSION;persist();
  const pending=d.items.filter(x=>x.status==='idle'||refresh&&x.status!=='kept'&&!hasLocalOptions(filterApprovedItem(x,j.options.market)));
  pending.forEach(x=>{x.status='idle';x.phase='queued';});persist();
  await pool(pending,6,x=>d.status==='adapting'?null:findOne(j,d,x));
@@ -158,7 +159,7 @@ async function finishRoom(j,index,finish,deps={}){
  const d=j.designs[index],valid=()=>d.finish===finish&&d.image===finish.source_image;
  try{
   const progress=(status,detail={})=>{if(valid()){finish.status=status;finish.progress=detail;persist();}};
-  const plan=await (deps.recommend||recommendRoom)(d.items,fileImage(j,d.image),finish.room,j.options.market,{limits:finish.limits,preferred:finish.preferred,onProgress:progress});
+  const plan=await (deps.recommend||recommendRoom)(d.items,fileImage(j,d.image),finish.room,j.options.market,{limits:finish.limits,preferred:finish.preferred,onProgress:progress,onChecked:(id,offer)=>{if(!valid())return;const item=d.items.find(x=>x.id===id);if(item)for(const field of ['offers','alternatives'])item[field]=(item[field]||[]).map(o=>o.link===offer.link?{...o,...offer}:o).filter(o=>o.availability!=='out_of_stock');persist();}});
   if(!valid())return;
   finish.plan=plan;
   if(!plan.picks.length){console.log('SPACES_FINISH_NO_PICKS',j.id,index,JSON.stringify({reasons:plan.skipped.map(x=>({id:x.id,reason:x.reason_code||x.reason}))}));finish.status='needs_measurements';d.status='complete';persist();return;}
@@ -187,7 +188,7 @@ async function keepFinishedRoom(j,index,finish,deps={}){
   });
   // Publish the image, product choices and every duplicate occurrence together.
   for(const {piece,update} of updates)Object.assign(piece,update);
-  d.image=finish.image;finish.status='kept';d.status='complete';d.stock_checked_at=Date.now();persist();
+  d.image=finish.image;finish.status='kept';d.status='complete';d.stock_checked_at=Date.now();d.details_version=DETAILS_VERSION;persist();
   console.log('SPACES_FINISH_KEPT',j.id,index,checked.length);
  }catch(e){finish.status='error';finish.error=e.message;d.status='complete';persist();}
 }
@@ -207,7 +208,7 @@ export function createServer(deps={}){return http.createServer({requestTimeout:3
    res.writeHead(200,{...headers,'Content-Type':'image/jpeg','Cache-Control':'private, max-age=60'});return res.end(req.method==='HEAD'?undefined:readFileSync(f));
  }
 
- if(path==='/healthz')return send(res,200,{ok:true,version:'spaces-0.4.1',source_policy:SOURCE_POLICY_VERSION,lens:!!(process.env.SERPAPI_API_KEY||process.env.SEARCHAPI_API_KEY),generation:!!process.env.GEMINI_API_KEY,search:!!process.env.SERPER_API_KEY});
+ if(path==='/healthz')return send(res,200,{ok:true,version:'spaces-0.4.2',source_policy:SOURCE_POLICY_VERSION,lens:!!(process.env.SERPAPI_API_KEY||process.env.SEARCHAPI_API_KEY),generation:!!process.env.GEMINI_API_KEY,search:!!process.env.SERPER_API_KEY});
  if(path.startsWith('/trial/')){
    const supplied=path.slice(7);if(!['GET','HEAD'].includes(req.method)||!trial||!constantEqual(supplied,trial))throw error('NOT_FOUND',404);
    // Keep the invitation in the address when Safari opens an in-app browser's page.
@@ -264,7 +265,7 @@ export function createServer(deps={}){return http.createServer({requestTimeout:3
        if(d.finish?.status==='preview')return send(res,200,publicJob(j));
        if(!d.image)throw error('DESIGN_NOT_READY',409);
        if(!['searching','analyzing'].includes(d.status)&&(!d.items.length||d.matching_version!==3)&&!tasks.has('shop:'+id+':'+i)){consume(owner,'select',12);d.status='analyzing';d.items=[];persist();launch('shop:'+id+':'+i,()=>identifyAndShop(j,i));}
-       else if(!['searching','analyzing'].includes(d.status)&&(d.items.some(x=>x.status==='idle')||d.search_revision!==10||d.grouping_version!==1||Date.now()-(d.stock_checked_at||0)>STOCK_TTL)&&!tasks.has('shop:'+id+':'+i)){d.status='searching';d.items.filter(x=>['empty','error'].includes(x.status)&&!x.offers?.length&&!x.alternatives?.length).forEach(x=>x.status='idle');persist();launch('shop:'+id+':'+i,()=>resumeShopping(j,i));}
+       else if(!['searching','analyzing'].includes(d.status)&&(d.items.some(x=>x.status==='idle')||d.search_revision!==10||d.details_version!==DETAILS_VERSION||d.grouping_version!==1||Date.now()-(d.stock_checked_at||0)>STOCK_TTL)&&!tasks.has('shop:'+id+':'+i)){d.status='searching';d.items.filter(x=>['empty','error'].includes(x.status)&&!x.offers?.length&&!x.alternatives?.length).forEach(x=>x.status='idle');persist();launch('shop:'+id+':'+i,()=>resumeShopping(j,i));}
        return send(res,202,publicJob(j));
      }
      if(action==='retry'){
@@ -310,7 +311,7 @@ async function selfTest(){
 
  // Resume the latest selected room's missed pieces once after the search upgrade.
  const latest=Object.values(state.jobs).filter(j=>j.owner!=='demo'&&Number.isInteger(j.selected_design)).sort((a,b)=>b.created-a.created)[0];
- if(latest){const i=latest.selected_design,d=latest.designs[i];if(d?.items?.length&&d.matching_version===3&&d.search_revision!==10&&!tasks.has('shop:'+latest.id+':'+i))await resumeShopping(latest,i);}
+ if(latest){const i=latest.selected_design,d=latest.designs[i];if(d?.items?.length&&d.matching_version===3&&(d.search_revision!==10||d.details_version!==DETAILS_VERSION)&&!tasks.has('shop:'+latest.id+':'+i))await resumeShopping(latest,i);}
  const groupRepairs=Object.values(state.jobs).filter(j=>j.owner!=='demo'&&Number.isInteger(j.selected_design)).sort((a,b)=>b.created-a.created).slice(0,3);
  for(const j of groupRepairs){const i=j.selected_design,d=j.designs[i];if(d?.items?.length&&d.matching_version===3&&d.grouping_version!==1&&!tasks.has('shop:'+j.id+':'+i)){
    d.status='analyzing';persist();await reconcilePieces(j,i);d.status='complete';persist();
@@ -342,6 +343,6 @@ async function selfTest(){
 }
 if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url)){
  if(secure&&!trial)throw Error('SPACES_TRIAL_TOKEN required in production');
- const server=createServer();server.listen(Number(process.env.PORT||8080),'0.0.0.0',()=>{console.log('SPACES_READY 0.4.1');console.log('SPACES_SOURCE_POLICY',JSON.stringify({version:SOURCE_POLICY_VERSION,approved_global:APPROVED_GLOBAL_STORES.length,furniture:FURNITURE_STORES.map(x=>x.name)}));launch('selftest',selfTest);});
+ const server=createServer();server.listen(Number(process.env.PORT||8080),'0.0.0.0',()=>{console.log('SPACES_READY 0.4.2');console.log('SPACES_SOURCE_POLICY',JSON.stringify({version:SOURCE_POLICY_VERSION,approved_global:APPROVED_GLOBAL_STORES.length,furniture:FURNITURE_STORES.map(x=>x.name)}));launch('selftest',selfTest);});
  for(const sig of ['SIGINT','SIGTERM'])process.on(sig,()=>{persist();server.close(()=>process.exit(0));setTimeout(()=>process.exit(0),8000).unref();});
 }

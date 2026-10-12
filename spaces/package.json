@@ -1,6 +1,6 @@
 {
   "name": "findzia-spaces",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "private": true,
   "type": "module",
   "scripts": {
@@ -11,9 +11,7 @@
     "node": ">=22"
   },
   "dependencies": {
-    "sharp": "^0.34.5"
-  },
-  "devDependencies": {
+    "sharp": "^0.34.5",
     "linkedom": "^0.18.13"
   }
 }
