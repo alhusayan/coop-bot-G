@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+ <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+ <meta name="theme-color" content="#f8f7f3"><meta name="robots" content="noindex,nofollow">
+ <title>Findzia Spaces — مساحتك، بإحساس جديد</title>
+ <meta name="description" content="صوّر أي مساحة. اكتشف ثلاثة تصاميم لها، وابحث عن قطعها وأسعارها في سوقك.">
+ <link rel="icon" href="/icon.svg" type="image/svg+xml"><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+ <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Noto+Sans+Arabic:wght@400;500;600;700&display=swap" rel="stylesheet">
+ <link rel="stylesheet" href="/style.css"><script type="module" src="/app.js"></script>
+</head>
+<body>
+ <header class="header">
+  <button class="brand" data-action="home" aria-label="Findzia Spaces الرئيسية"><span class="brand-mark">f</span><span><b>findzia<span class="brand-dot">.</span></b><span class="brand-spaces">SPACES</span></span></button>
+  <nav aria-label="التنقل الرئيسي"><button class="text-btn" data-action="history">مساحاتي <span class="icon" data-icon="folder"></span></button><span class="nav-line"></span><button class="market-button" data-action="market"><span id="nav-market">🇰🇼 الكويت</span><span class="icon small" data-icon="chevron"></span></button><span class="trial-badge">نسخة تجريبية</span></nav>
+ </header>
+ <main id="main">
+  <section id="home" class="view home-view">
+   <div class="hero-grid">
+    <div class="hero-copy"><div class="eyebrow"><span class="tiny-spark">✧</span> مساحة تشبهك</div><h1>مساحتك.<br><span>بإحساس جديد.</span></h1><p class="hero-description">صوّر المكان. اكتشف ٣ تصاميم له.<br>ولاقِ القطع اللي تحبّها، بأسعار من سوقك.</p>
+     <div class="upload-box" id="drop-zone"><div class="upload-heading"><span class="upload-icon icon" data-icon="camera"></span><div><strong>كل تغيير يبدأ بصورة</strong><span>أي غرفة، أي مساحة، أي بداية.</span></div></div><div class="upload-actions"><button class="primary" data-action="photo"><span class="icon" data-icon="upload"></span>ارفع صورة مساحتك</button><button class="camera-btn" data-action="camera" aria-label="التقاط صورة بالكاميرا"><span class="icon" data-icon="camera"></span></button></div><small>أو اسحب الصورة هنا · JPG، PNG، WEBP</small></div>
+     <button class="example-link" data-action="demo">جرّب مثالاً جاهزاً <span class="icon small" data-icon="arrow"></span></button>
+     <div class="hero-tags"><span>صالة</span><span>مطبخ</span><span>حمام</span><span>غرفة نوم</span><span>وأي مساحة أخرى</span></div>
+    </div>
+    <div class="hero-visual"><img src="/hero.webp" alt="صالة معاصرة بألوان طبيعية وقطع متناسقة — مثال توضيحي للتصميم" fetchpriority="high"><div class="image-tag"><span class="tiny-spark">✧</span> تخيّل الإمكانيات</div><div class="visual-caption"><div><span class="caption-overline">A NEW PERSPECTIVE</span><strong>نفس المساحة.<br>حكاية مختلفة.</strong></div><span class="image-count">01 <i>/</i> 03</span></div><span class="sample-label">صورة توضيحية مولّدة</span></div>
+   </div>
+   <div class="process-strip"><div><span class="step-number">01</span><div><b>ابدأ بمساحتك</b><p>صورة واحدة تكفي للبداية</p></div></div><div><span class="step-number">02</span><div><b>اختر إحساسك</b><p>ثلاثة اتجاهات، لنفس المكان</p></div></div><div><span class="step-number">03</span><div><b>حوّل الفكرة لواقع</b><p>قطع، متاجر، وأسعار حقيقية</p></div></div></div>
+  </section>
+
+  <section id="setup" class="view hidden"><div class="section-top"><button class="back-btn" data-action="home"><span class="icon" data-icon="back"></span>العودة</button><span class="step-label">01 / مساحتك</span></div>
+   <div class="studio-grid"><div class="setup-photo"><img id="upload-preview" alt="الصورة التي اخترتها لمساحتك"><button class="glass-button" data-action="photo"><span class="icon small" data-icon="upload"></span>تغيير الصورة</button><div class="photo-note">نحافظ على شكل المكان، الأبواب والشبابيك.</div></div>
+   <form id="design-form" class="setup-form"><div class="eyebrow">بضع تفاصيل تصنع الفرق</div><h2>خلّها على ذوقك.</h2><p class="muted">اختر ما يهمّك، واترك الباقي لنا.</p>
+    <fieldset><legend>شنو نوع المساحة؟</legend><div class="room-options" id="room-options"></div></fieldset>
+    <fieldset><legend>شنو ودّك تغيّر؟</legend><div class="scope-options"><label class="option-radio"><input type="radio" name="scope" value="full" checked><span><b>تجديد كامل</b><small>الأثاث، الألوان والخامات</small></span><span class="radio-dot"></span></label><label class="option-radio"><input type="radio" name="scope" value="decor"><span><b>الأثاث والديكور</b><small>مع بقاء التشطيبات الحالية</small></span><span class="radio-dot"></span></label></div></fieldset>
+    <div class="field-row"><label>السوق<select id="market" name="market"></select></label><label>الميزانية <span class="optional">اختياري</span><div class="input-unit"><input type="number" id="budget" name="budget" min="0" max="10000000" step="any" inputmode="decimal" placeholder="بدون تحديد"><span id="currency-label">د.ك</span></div></label></div>
+    <label>أشياء تحب تحتفظ فيها <span class="optional">اختياري</span><input name="keep" maxlength="400" placeholder="مثلاً: الكنبة، الأرضية، أو خزائن المطبخ"></label>
+    <details class="more-options"><summary>تفاصيل إضافية <span class="icon small" data-icon="plus"></span></summary><div class="field-row"><label>العرض بالمتر<input type="number" name="width" min="0" max="100" step="0.1" inputmode="decimal" placeholder="اختياري"></label><label>الطول بالمتر<input type="number" name="length" min="0" max="100" step="0.1" inputmode="decimal" placeholder="اختياري"></label></div><label>تفضيلاتك<textarea name="notes" maxlength="400" rows="2" placeholder="ألوان تحبّها، احتياجات خاصة، أو فكرة في بالك"></textarea></label></details>
+    <p class="privacy-note"><span class="icon small" data-icon="lock"></span>تُستخدم الصورة لإنشاء تصاميمك، وتُحذف من هذه التجربة بعد ٢٤ ساعة.</p>
+    <button class="primary wide" type="submit" id="generate-button"><span class="icon" data-icon="spark"></span>صمّم مساحتي <span class="button-end">٣ تصاميم</span></button><p class="form-footnote">تصوّرات مبدئية. المقاسات والتنفيذ تحتاج تأكيداً.</p>
+   </form></div>
+  </section>
+
+  <section id="designs" class="view hidden"><div class="section-top"><button class="back-btn" data-action="setup"><span class="icon" data-icon="back"></span>مساحتك</button><span class="step-label">02 / اتجاهك</span></div><div class="results-heading"><div><div class="eyebrow" id="room-heading">ثلاثة اتجاهات. مساحة واحدة.</div><h2>أي إحساس يشبهك؟</h2><p class="muted" id="generation-status" role="status" aria-live="polite">نجهّز تصاميمك الآن…</p></div><button class="original-thumb" data-action="original"><img id="original-thumb" alt="المساحة الأصلية"><span>قبل التصميم</span></button></div><div id="design-grid" class="design-grid"></div><p class="subtle-note">الصور تصوّرات مولّدة. بعد اختيارك نبحث عن قطع مشابهة متاحة، ولا نفترض أن كل قطعة في الصورة لها منتج مطابق.</p></section>
+
+  <section id="shopping" class="view hidden"><div class="section-top"><button class="back-btn" data-action="designs"><span class="icon" data-icon="back"></span>التصاميم الثلاثة</button><span class="step-label">03 / من الفكرة إلى مساحتك</span></div><div class="shop-heading"><div><div class="eyebrow">التصميم اللي اخترته</div><h2 id="selected-title">هدوء معاصر</h2></div><button class="secondary compact" data-action="download"><span class="icon small" data-icon="download"></span>حفظ التصميم</button></div>
+   <div class="shop-grid"><div class="design-canvas-wrap"><div class="canvas-tools"><span id="shop-room">مساحتك الجديدة</span><button class="text-btn" data-action="compare"><span class="icon small" data-icon="compare"></span><span id="compare-label">قبل / بعد</span></button></div><div class="design-canvas" id="design-canvas"><img id="selected-image" alt="التصميم المختار"><div id="hotspots"></div><div class="canvas-label" id="canvas-label">التصميم المقترح</div></div><p class="canvas-hint">اضغط على أي نقطة لاستكشاف القطعة.</p><div class="materials" id="materials"></div></div>
+    <aside class="shopping-panel"><div class="panel-title"><h3>تفاصيل تصنع المكان</h3><span class="market-pill" id="shop-market"></span></div><p class="muted small-copy" id="shopping-status" role="status" aria-live="polite">نحدّد عناصر التصميم…</p><div class="items-list" id="items-list"></div><div class="summary-box" id="summary-box"><div><span>مجموع القطع المختارة</span><strong id="total">—</strong></div><p id="total-detail">يظهر المجموع عند وصول أسعار مؤكدة من مصادرها.</p><p id="budget-status"></p><small>الشحن والتركيب غير محسوبين. الخامات والتفصيل خارج المجموع.</small></div><button class="secondary wide" data-action="export" id="export-button"><span class="icon small" data-icon="download"></span>حفظ قائمة القطع</button></aside></div>
+  </section>
+
+  <section id="history" class="view hidden"><div class="section-top"><button class="back-btn" data-action="home"><span class="icon" data-icon="back"></span>الرئيسية</button></div><div class="eyebrow">أفكارك في مكان واحد</div><h2>مساحاتي.</h2><p class="muted">محفوظة مؤقتاً لهذا المتصفح لمدة ٢٤ ساعة.</p><div id="history-grid" class="history-grid"></div></section>
+ </main>
+ <footer><span class="footer-brand" dir="ltr">findzia spaces</span><span>من أول فكرة، إلى آخر تفصيلة.</span><span class="footer-version">تجربة 0.1</span></footer>
+ <input type="file" id="file-input" accept="image/jpeg,image/png,image/webp,image/heic,image/heif" hidden><input type="file" id="camera-input" accept="image/*" capture="environment" hidden>
+ <div id="toast" class="toast" role="status" aria-live="polite"></div>
+ <dialog id="preview-dialog"><button class="dialog-close" data-action="close-preview" aria-label="إغلاق"><span class="icon" data-icon="close"></span></button><img id="dialog-image" alt="معاينة المساحة"></dialog>
+ <dialog id="offers-dialog"><div class="dialog-top"><div><div class="eyebrow">بدائل قريبة من تصميمك</div><h3 id="offers-title"></h3></div><button class="circle-btn" data-action="close-offers" aria-label="إغلاق"><span class="icon" data-icon="close"></span></button></div><p class="muted small-copy">راجع اللون، المقاس والتوفّر في صفحة المتجر قبل الشراء.</p><div id="offers-list"></div></dialog>
+ <noscript>يرجى تفعيل JavaScript لاستخدام Findzia Spaces.</noscript>
+</body></html>
