@@ -37,7 +37,7 @@ test('renderer includes real product references and rejects a failed visual audi
  const out=await sharp({create:{width:600,height:500,channels:3,background:'#ccc'}}).jpeg().toBuffer();
  let imageCalls=0;const plan={...validateCatalogPlan(layout,[item],room),context,options:{notes:'Olive'}};
  const generate=async(parts,opts)=>{if(opts.image){imageCalls++;assert.equal(parts.filter(p=>p.inlineData).length,imageCalls===1?2:3);if(imageCalls>1)assert.match(parts[0].text,/EXACT CORRECTIONS REQUIRED/);return {mimeType:'image/jpeg',data:out.toString('base64')};}return {room_geometry_unchanged:true,no_unselected_new_products:true,scale_plausible:true,items:[{id:'1',product_present:true,boxes:layout.choices[0].placements.map(x=>x.box)}]};};
- await assert.rejects(renderCatalogRoom(original,plan,{generate,fetchImage:async()=>({bytes}),verify:async()=>({ok:true}),audit:async()=>[]}),/PLACEMENT_UNVERIFIED/);assert.equal(imageCalls,3);
+ await assert.rejects(renderCatalogRoom(original,plan,{generate,fetchImage:async()=>({bytes}),verify:async()=>({ok:true}),audit:async()=>[]}),/PLACEMENT_UNVERIFIED/);assert.equal(imageCalls,4);
 });
 
 test('retrieval uses broad real-product categories across local stores before a style is rendered',()=>{

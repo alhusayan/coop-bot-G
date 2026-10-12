@@ -81,7 +81,7 @@ async function generateCatalogDesign(j,index=0,deps={}){
  const started=Date.now();
  try{
   const result=await (deps.catalog||designFromCatalog)(fileImage(j,'original.jpg'),{...j.options,variation:d.redesign_count||0,previousProducts:(d.items||[]).flatMap(x=>x.offers||[]).map(o=>({title:o.title,link:o.link}))},{
-   checkpoint:d.catalog_work,onCheckpoint:work=>{d.catalog_work=work;persist();},
+   checkpoint:d.catalog_work?{...d.catalog_work,render:d.catalog_work.render_file?{image:fileImage(j,d.catalog_work.render_file),correction:d.catalog_work.render_correction}:null}:null,onCheckpoint:work=>{d.catalog_work={...d.catalog_work,...work};persist();},
    onProgress:(stage,detail={})=>{d.progress={stage,...detail};persist();console.log('SPACES_CATALOG_STAGE',j.id,stage,JSON.stringify(detail));},
    onItems:items=>{d.catalog_progress={total:items.length,completed:items.filter(x=>['done','empty','error'].includes(x.status)).length,found:items.filter(x=>x.offers?.length).length};persist();}
   });
@@ -98,7 +98,7 @@ async function generateCatalogDesign(j,index=0,deps={}){
   delete d.catalog_work;
   j.room_context=result.context;j.room=result.context.room_en;j.selected_design=index;
   console.log('SPACES_CATALOG_READY',JSON.stringify({room:j.id,pieces:items.length,quantity:items.reduce((n,x)=>n+x.quantity,0),elapsed_ms:Date.now()-started}));
- }catch(e){d.status=d.image?'complete':'error';d.error=e.message;d.progress={stage:'error'};console.error('SPACES_CATALOG_ERROR',j.id,e.message,JSON.stringify(e.details||{}));}persist();
+ }catch(e){if(e.draft?.inlineData&&d.catalog_work){const filename='catalog-draft.'+(e.draft.inlineData.mimeType==='image/png'?'png':'jpg');writeFileSync(resolve(DATA,j.id,filename),Buffer.from(e.draft.inlineData.data,'base64'),{mode:0o600});d.catalog_work.render_file=filename;d.catalog_work.render_correction=e.correction;}if(e.message==='STOCK_CHANGED')delete d.catalog_work;d.status=d.image?'complete':'error';d.error=e.message;d.progress={stage:'error'};console.error('SPACES_CATALOG_ERROR',j.id,e.message,JSON.stringify(e.details||{}));}persist();
 }
 function lensURL(j,item){
  const expires=Date.now()+20*60000,path='/lens-media/'+j.id+'/'+item.crop;
@@ -234,7 +234,7 @@ export function createServer(deps={}){return http.createServer({requestTimeout:3
    res.writeHead(200,{...headers,'Content-Type':'image/jpeg','Cache-Control':'private, max-age=60'});return res.end(req.method==='HEAD'?undefined:readFileSync(f));
  }
 
- if(path==='/healthz')return send(res,200,{ok:true,version:'spaces-0.5.3',source_policy:SOURCE_POLICY_VERSION,lens:!!(process.env.SERPAPI_API_KEY||process.env.SEARCHAPI_API_KEY),generation:!!process.env.GEMINI_API_KEY,search:!!process.env.SERPER_API_KEY});
+ if(path==='/healthz')return send(res,200,{ok:true,version:'spaces-0.5.4',source_policy:SOURCE_POLICY_VERSION,lens:!!(process.env.SERPAPI_API_KEY||process.env.SEARCHAPI_API_KEY),generation:!!process.env.GEMINI_API_KEY,search:!!process.env.SERPER_API_KEY});
  if(path.startsWith('/trial/')){
    const supplied=path.slice(7);if(!['GET','HEAD'].includes(req.method)||!trial||!constantEqual(supplied,trial))throw error('NOT_FOUND',404);
    // Keep the invitation in the address when Safari opens an in-app browser's page.
@@ -353,8 +353,8 @@ async function selfTest(){
  // Bounded repair of the two failed rooms reported by their owner on 12 October.
  for(const id of ['30f82c45a7e81ef9a8bdefc7','39d8b25d473ef606303db719']){
   const j=state.jobs[id],d=j?.designs?.[0];
-  if(j?.flow==='catalog-first-v1'&&['INVALID_CATALOG_LAYOUT','PLACEMENT_UNVERIFIED'].includes(d?.error)&&!d.image&&d.layout_recovery!==3){
-   d.layout_recovery=3;persist();console.log('SPACES_CATALOG_RECOVERY',id);
+  if(j?.flow==='catalog-first-v1'&&['INVALID_CATALOG_LAYOUT','PLACEMENT_UNVERIFIED'].includes(d?.error)&&!d.image&&d.layout_recovery!==4){
+   d.layout_recovery=4;persist();console.log('SPACES_CATALOG_RECOVERY',id);
    await generateCatalogDesign(j,0);
   }
  }
@@ -397,6 +397,6 @@ async function selfTest(){
 }
 if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url)){
  if(secure&&!trial)throw Error('SPACES_TRIAL_TOKEN required in production');
- const server=createServer();server.listen(Number(process.env.PORT||8080),'0.0.0.0',()=>{console.log('SPACES_READY 0.5.3');console.log('SPACES_SOURCE_POLICY',JSON.stringify({version:SOURCE_POLICY_VERSION,approved_global:APPROVED_GLOBAL_STORES.length,furniture:FURNITURE_STORES.map(x=>x.name)}));launch('selftest',selfTest);});
+ const server=createServer();server.listen(Number(process.env.PORT||8080),'0.0.0.0',()=>{console.log('SPACES_READY 0.5.4');console.log('SPACES_SOURCE_POLICY',JSON.stringify({version:SOURCE_POLICY_VERSION,approved_global:APPROVED_GLOBAL_STORES.length,furniture:FURNITURE_STORES.map(x=>x.name)}));launch('selftest',selfTest);});
  for(const sig of ['SIGINT','SIGTERM'])process.on(sig,()=>{persist();server.close(()=>process.exit(0));setTimeout(()=>process.exit(0),8000).unref();});
 }
