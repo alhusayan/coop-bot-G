@@ -2,11 +2,12 @@
 // retrieval, matching, stock and prices; Spaces must not re-audit its results.
 import {createHmac,randomBytes} from 'node:crypto';
 import {createFindziaClient} from './original-client.mjs';
+import {createSearchScheduler} from './search-scheduler.mjs';
 import {MARKETS,safeUrl} from './engine.mjs';
 export const SEARCH_ENGINE='findzia-original';
 export const SEARCH_REVISION=13;
-let active=0;const queue=[];
-async function slot(fn){if(active>=3)await new Promise(resolve=>queue.push(resolve));else active++;try{return await fn();}finally{const next=queue.shift();if(next)next();else active--;}}
+const scheduler=createSearchScheduler();
+export const prioritizeOriginalPiece=key=>scheduler.promote(key);
 const clean=value=>String(value??'').replace(/[\u0000-\u001f]/g,' ').trim();
 
 // The same state reducer and display contract as the original website.
@@ -64,35 +65,40 @@ export function createOriginalResults(market,onProgress=()=>{}){
  };
 }
 
-export async function searchOriginalPiece(bytes,market,{room,language='en',env=process.env,fetcher=fetch,onProgress=()=>{}}={}){
+export async function searchOriginalPiece(bytes,market,{room,language='en',taskKey=randomBytes(8).toString('hex'),interactive=false,env=process.env,fetcher=fetch,onProgress=()=>{}}={}){
  if(!MARKETS[market]||!Buffer.isBuffer(bytes)||!bytes.length||!(/^[a-f0-9]{24}$/).test(room||''))throw Error('INVALID_INPUT');
  const secret=env.FINDZIA_SPACES_ENGINE_KEY;if(!secret||secret.length<32)throw Error('ENGINE_UNAVAILABLE');
- return slot(async()=>{
-  for(let attempt=0;attempt<2;attempt++){
-  const results=createOriginalResults(market,onProgress);
+ return scheduler.run(taskKey,async({queue_ms})=>{
+  const started=Date.now(),timing={queue_ms,first_byte_ms:null,first_verified_ms:null,provider_first_verified_ms:null};
+  let providerElapsed=null;
+  onProgress({phase:'lens',search_timing:timing});
+  const results=createOriginalResults(market,update=>{
+   if(update.alternatives.length&&timing.first_verified_ms===null){timing.first_verified_ms=Date.now()-started;timing.provider_first_verified_ms=providerElapsed;}
+   onProgress({...update,search_timing:{...timing}});
+  });
+  const accept=event=>{providerElapsed=event.elapsed_ms??providerElapsed;results.accept(event);};
   const body=JSON.stringify({image_base64:bytes.toString('base64'),mime_type:'image/jpeg',country:market,lang:language,spaces_room:room});
   const stamp=String(Math.floor(Date.now()/1000)),nonce=randomBytes(16).toString('hex');
   const signature=createHmac('sha256',secret).update(stamp+'\n'+nonce+'\n'+body).digest('hex');
-  const response=await fetcher('https://api.findzia.com/internal/spaces/image/stream',{method:'POST',redirect:'error',headers:{'Content-Type':'application/json','X-Findzia-Spaces-Time':stamp,'X-Findzia-Spaces-Nonce':nonce,'X-Findzia-Spaces-Signature':signature},body,signal:AbortSignal.timeout(125000)});
+  // Compression can buffer small NDJSON updates until the entire search ends.
+  // Keep this stream uncompressed so reviewed cards arrive immediately.
+  const response=await fetcher('https://api.findzia.com/internal/spaces/image/stream',{method:'POST',redirect:'error',headers:{'Content-Type':'application/json','Accept-Encoding':'identity','X-Findzia-Spaces-Time':stamp,'X-Findzia-Spaces-Nonce':nonce,'X-Findzia-Spaces-Signature':signature},body,signal:AbortSignal.timeout(125000)});
   if(!response.ok)throw Error(response.status===429?'PROVIDER_BUSY':'SEARCH_FAILED');
   if(!response.headers.get('content-type')?.includes('ndjson'))throw Error('SEARCH_FAILED');
   const decoder=new TextDecoder();let buffer='',size=0;
   try{
    for await(const chunk of response.body){
+    if(timing.first_byte_ms===null)timing.first_byte_ms=Date.now()-started;
     size+=chunk.length;if(size>24e6)throw Error('SEARCH_FAILED');buffer+=decoder.decode(chunk,{stream:true});
-    let end;while((end=buffer.indexOf('\n'))>=0){const line=buffer.slice(0,end).trim();buffer=buffer.slice(end+1);if(line)results.accept(JSON.parse(line));}
+    let end;while((end=buffer.indexOf('\n'))>=0){const line=buffer.slice(0,end).trim();buffer=buffer.slice(end+1);if(line)accept(JSON.parse(line));}
    }
-   buffer+=decoder.decode();if(buffer.trim())results.accept(JSON.parse(buffer));
+   buffer+=decoder.decode();if(buffer.trim())accept(JSON.parse(buffer));
   }catch(error){if(!results.snapshot().length)throw error;}
   if(results.failed&&!results.snapshot().length)throw Error('SEARCH_FAILED');
   if(!results.complete&&!results.snapshot().length)throw Error('SEARCH_FAILED');
   const diagnostics=results.diagnostics();
-  // One bounded retry of the exact original request only when it ended with
-  // no verified options but still had priced candidates awaiting image review.
-  if(attempt===0&&results.complete&&!results.failed&&!results.snapshot().length&&diagnostics.held.visual_review_pending){
-   onProgress({phase:'checking',search_scope:'findzia'});continue;
-  }
-  return {offers:[],alternatives:results.snapshot(),partial:!results.complete,search_diagnostics:{...diagnostics,attempts:attempt+1},search_engine:SEARCH_ENGINE,search_market:market};
-  }
- });
+  // One original search, just like findzia.com. A hidden automatic second
+  // search doubled empty-search latency and blocked the rest of the room.
+  return {offers:[],alternatives:results.snapshot(),partial:!results.complete,search_timing:{...timing,total_ms:Date.now()-started},search_diagnostics:{...diagnostics,attempts:1},search_engine:SEARCH_ENGINE,search_market:market};
+ },{interactive});
 }

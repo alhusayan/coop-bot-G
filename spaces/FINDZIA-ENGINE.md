@@ -51,3 +51,19 @@ piece. An empty search with still-pending original visual candidates gets at mos
 one retry of exactly the same original image request. No unchecked preview is
 published to turn an empty result into a claimed match. Image-resize experiments
 did not reliably improve recall, so production crop pixels remain unchanged.
+
+
+## 0.4.3 streamed delivery and interactive priority
+
+Transport requests explicitly use `Accept-Encoding: identity` so compression
+cannot collect small NDJSON events until the stream closes. Reviewed cards are
+forwarded immediately; visual admission and all original retrieval stay unchanged.
+Timing separates queue, first byte, first verified card, original event time and
+completion.
+
+Two background searches can run at once, with a third slot reserved for an opened
+piece. Opening an idle/queued piece promotes the same task without a duplicate
+provider call. Existing ownership and quota checks still apply. One original
+request is made per piece; 0.4.2's automatic empty-search replay is removed. The
+customer can explicitly Search again. Search revision stays 13 because matching
+criteria did not change and a deployment must not restart every saved room.

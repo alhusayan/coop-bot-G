@@ -42,7 +42,7 @@ export function updateImage(node,src){
  pending.src=src;
 }
 export function pieceActivity(item){
- if(item.status==='idle')return 'Up next';
+ if(item.status==='idle'||item.status==='searching'&&item.phase==='queued')return 'Up next';
  if(item.status!=='searching')return '';
  if(item.search_attempt>1||item.phase==='retrying')return 'Looking further';
  if(item.phase==='checking')return item.search_scope==='local'?'Checking local options':'Checking matches';
@@ -50,3 +50,4 @@ export function pieceActivity(item){
  if(item.search_scope==='global')return 'International options';
  return 'Searching stores';
 }
+

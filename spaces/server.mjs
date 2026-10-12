@@ -1,5 +1,5 @@
 import {searchLocalCatalog} from './shopify.mjs';
-import {searchOriginalPiece,SEARCH_ENGINE,SEARCH_REVISION} from './findzia-engine.mjs';
+import {searchOriginalPiece,prioritizeOriginalPiece,SEARCH_ENGINE,SEARCH_REVISION} from './findzia-engine.mjs';
 import {checkStock,refreshItemStock} from './stock.mjs';
 import {STOCK_VERSION,STOCK_TTL} from './availability.mjs';
 import http from 'node:http';
@@ -86,18 +86,18 @@ function lensURL(j,item){
  const base=process.env.SPACES_PUBLIC_URL||'https://'+process.env.RAILWAY_PUBLIC_DOMAIN;
  return base+path+'?expires='+expires+'&sig='+sign(path+':'+expires);
 }
-function findOne(j,d,item){
+function findOne(j,d,item,{interactive=false}={}){
  const key=j.id+':'+j.designs.indexOf(d)+':'+item.id;
- if(itemTasks.has(key))return itemTasks.get(key);if(item.status==='done'&&item.phase==='complete')return Promise.resolve();
- const task=searchOne(j,d,item).finally(()=>itemTasks.delete(key));itemTasks.set(key,task);return task;
+ if(itemTasks.has(key)){if(interactive)prioritizeOriginalPiece(key);return itemTasks.get(key);}if(['done','empty'].includes(item.status)&&item.phase==='complete')return Promise.resolve();
+ const task=searchOne(j,d,item,{key,interactive}).finally(()=>itemTasks.delete(key));itemTasks.set(key,task);return task;
 }
-async function searchOne(j,d,item){
- item.status='searching';item.error=null;item.phase='lens';item.started_at=Date.now();item.first_result_at=null;item.offers=[];item.alternatives=[];persist();
+async function searchOne(j,d,item,{key,interactive}){
+ item.status='searching';item.error=null;item.phase='queued';item.search_engine=SEARCH_ENGINE;item.started_at=Date.now();item.first_result_at=null;item.offers=[];item.alternatives=[];persist();
  try{
  if(!item.crop){const bytes=await cropPiece(readFileSync(resolve(DATA,j.id,d.image)),item.box);item.crop='crop-'+j.designs.indexOf(d)+'-'+item.id+'-r'+(d.inventory_revision||Date.now())+'.jpg';writeFileSync(resolve(DATA,j.id,item.crop),bytes,{mode:0o600});}
  // Send the actual crop, without a generated description, to the same original
  // image endpoint used by findzia.com. Its event stream owns every result.
- Object.assign(item,await searchOriginalPiece(readFileSync(resolve(DATA,j.id,item.crop)),j.options.market,{room:j.id,language:searchLanguage(j.options.language),onProgress:update=>{Object.assign(item,update);if(!item.first_result_at&&item.alternatives?.length){item.first_result_at=Date.now();console.log('SPACES_FIRST_RESULT',j.id,j.designs.indexOf(d),item.id,item.first_result_at-item.started_at);}persist();}}));
+ Object.assign(item,await searchOriginalPiece(readFileSync(resolve(DATA,j.id,item.crop)),j.options.market,{room:j.id,language:searchLanguage(j.options.language),taskKey:key,interactive,onProgress:update=>{Object.assign(item,update);if(!item.first_result_at&&item.alternatives?.length){item.first_result_at=Date.now();console.log('SPACES_FIRST_RESULT',j.id,j.designs.indexOf(d),item.id,item.first_result_at-item.started_at,JSON.stringify(item.search_timing));}persist();}}));
  item.status=item.alternatives.length?'done':'empty';item.phase='complete';item.search_revision=SEARCH_REVISION;
  console.log('SPACES_ITEM_SEARCH',j.id,j.designs.indexOf(d),item.id,JSON.stringify({name:item.name_en,language:searchLanguage(j.options.language),diagnostics:item.search_diagnostics,matches:item.offers.length,alternatives:item.alternatives?.length||0,local:[...item.offers,...(item.alternatives||[])].filter(x=>x.market_scope==='local').length,stores:[...item.offers,...(item.alternatives||[])].slice(0,4).map(x=>x.source),elapsed_ms:Date.now()-item.started_at}));
  }catch(e){item.status='error';item.error=e.message;console.error('SPACES_SEARCH_ERROR',e.message);}persist();
@@ -179,7 +179,7 @@ export function createServer(){return http.createServer({requestTimeout:30000,he
    res.writeHead(200,{...headers,'Content-Type':'image/jpeg','Cache-Control':'private, max-age=60'});return res.end(req.method==='HEAD'?undefined:readFileSync(f));
  }
 
- if(path==='/healthz')return send(res,200,{ok:true,version:'spaces-0.4.2',source_policy:SOURCE_POLICY_VERSION,lens:!!(process.env.SERPAPI_API_KEY||process.env.SEARCHAPI_API_KEY),generation:!!process.env.GEMINI_API_KEY,search:!!process.env.SERPER_API_KEY});
+ if(path==='/healthz')return send(res,200,{ok:true,version:'spaces-0.4.3',source_policy:SOURCE_POLICY_VERSION,lens:!!(process.env.SERPAPI_API_KEY||process.env.SEARCHAPI_API_KEY),generation:!!process.env.GEMINI_API_KEY,search:!!process.env.SERPER_API_KEY});
  if(path.startsWith('/trial/')){
    const supplied=path.slice(7);if(!['GET','HEAD'].includes(req.method)||!trial||!constantEqual(supplied,trial))throw error('NOT_FOUND',404);
    // Keep the invitation in the address when Safari opens an in-app browser's page.
@@ -216,7 +216,7 @@ export function createServer(){return http.createServer({requestTimeout:30000,he
    const market=j.options.market,result=await searchLocalCatalog(item.query||item.name_en,market,{language:MARKETS[market].lang});
    return send(res,200,{market,...result});
  }
- const match=path.match(/^\/api\/jobs\/([a-f0-9]{24})(?:\/(select|retry|search|replace)(?:\/(\d+))?)?$/);
+ const match=path.match(/^\/api\/jobs\/([a-f0-9]{24})(?:\/(select|retry|search|focus|replace)(?:\/(\d+))?)?$/);
  if(match){const [,id,action,itemIndex]=match;
    if(req.method==='GET'&&!action)return send(res,200,publicJob(ownerJob(id,owner)));
    if(req.method==='DELETE'&&!action){const j=mutateJob(id,owner);if([...tasks.keys()].some(k=>k.includes(j.id)))throw error('JOB_BUSY',409);delete state.jobs[id];rmSync(resolve(DATA,id),{recursive:true,force:true});persist();return send(res,200,{ok:true});}
@@ -240,9 +240,18 @@ export function createServer(){return http.createServer({requestTimeout:30000,he
        if(offer.availability!=='listed_available')throw error(offer.availability==='out_of_stock'?'OUT_OF_STOCK':'STOCK_UNCONFIRMED',409);
        consume(owner,'placements',8);d.status='adapting';d.adaptation_error=null;persist();launch('replace:'+id+':'+i,()=>replacePiece(j,i,item,offer));return send(res,202,publicJob(j));
      }
+     if(action==='focus'){
+       const item=d.items.find(x=>x.id===String(itemIndex));if(!item||item.status==='kept')throw error('INVALID_INPUT');
+       if(['idle','searching'].includes(item.status)){
+         const key=id+':'+i+':'+item.id;
+         if(!itemTasks.has(key))consume(owner,'search',30);
+         const pending=findOne(j,d,item,{interactive:true});launch('item:'+key,()=>pending);
+       }
+       return send(res,202,publicJob(j));
+     }
      if(action==='search'){
        const item=d.items.find(x=>x.id===String(itemIndex));if(!item||item.status==='kept'||item.status==='searching')throw error('INVALID_INPUT');
-       consume(owner,'search',30);j.options.language=searchLanguage(b.language);item.status='idle';const pending=findOne(j,d,item);launch('item:'+id+':'+i+':'+item.id,()=>pending);return send(res,202,publicJob(j));
+       consume(owner,'search',30);j.options.language=searchLanguage(b.language);item.status='idle';const pending=findOne(j,d,item,{interactive:true});launch('item:'+id+':'+i+':'+item.id,()=>pending);return send(res,202,publicJob(j));
      }
    }
  }
@@ -309,7 +318,7 @@ async function selfTest(){
 }
 if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url)){
  if(secure&&!trial)throw Error('SPACES_TRIAL_TOKEN required in production');
- const server=createServer();server.listen(Number(process.env.PORT||8080),'0.0.0.0',()=>{console.log('SPACES_READY 0.4.2');console.log('SPACES_SOURCE_POLICY',JSON.stringify({version:SOURCE_POLICY_VERSION,approved_global:APPROVED_GLOBAL_STORES.length,furniture:FURNITURE_STORES.map(x=>x.name)}));launch('selftest',selfTest);});
+ const server=createServer();server.listen(Number(process.env.PORT||8080),'0.0.0.0',()=>{console.log('SPACES_READY 0.4.3');console.log('SPACES_SOURCE_POLICY',JSON.stringify({version:SOURCE_POLICY_VERSION,approved_global:APPROVED_GLOBAL_STORES.length,furniture:FURNITURE_STORES.map(x=>x.name)}));launch('selftest',selfTest);});
  for(const sig of ['SIGINT','SIGTERM'])process.on(sig,()=>{persist();server.close(()=>process.exit(0));setTimeout(()=>process.exit(0),8000).unref();});
 }
 

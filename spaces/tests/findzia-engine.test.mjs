@@ -31,6 +31,7 @@ test('same photo, country and original NDJSON transport, without invented search
  const secret='s'.repeat(64),bytes=Buffer.from('unchanged photo bytes');
  const result=await searchOriginalPiece(bytes,'US',{room:'1'.repeat(24),env:{FINDZIA_SPACES_ENGINE_KEY:secret},fetcher:async(url,options)=>{
   assert.equal(url,'https://api.findzia.com/internal/spaces/image/stream');
+  assert.equal(options.headers['Accept-Encoding'],'identity');
   const body=JSON.parse(options.body);assert.equal(body.image_base64,bytes.toString('base64'));assert.equal(body.country,'US');assert.equal(body.caption,undefined);assert.equal(body.query,undefined);
   assert.equal(options.headers['X-Findzia-Spaces-Signature'],createHmac('sha256',secret).update(options.headers['X-Findzia-Spaces-Time']+'\n'+options.headers['X-Findzia-Spaces-Nonce']+'\n'+options.body).digest('hex'));
   const text=[{event:'result',item:row},{event:'done'}].map(x=>JSON.stringify(x)).join('\n');
@@ -93,14 +94,22 @@ test('shared client functions are verbatim originals, including sparse updates a
 });
 
 
-test('an unresolved visual check gets at most one original-request retry, never an unchecked preview',async()=>{
+test('pending visual candidates do not trigger a second hidden search or unchecked previews',async()=>{
  let calls=0;const bodies=[];
  const result=await searchOriginalPiece(Buffer.from('photo'),'KW',{room:'3'.repeat(24),env:{FINDZIA_SPACES_ENGINE_KEY:'s'.repeat(64)},fetcher:async(_url,options)=>{
   bodies.push(options.body);calls++;
   const item=calls===1?{...row,classification_final:false,identity_review_status:'pending',display_before_audit:true}:row;
   return new Response([JSON.stringify({event:'result',item}),JSON.stringify({event:'done'})].join('\n'),{headers:{'Content-Type':'application/x-ndjson'}});
  }});
- assert.equal(calls,2);assert.equal(bodies[0],bodies[1]);assert.equal(result.alternatives.length,1);assert.equal(result.search_diagnostics.attempts,2);
+ assert.equal(calls,1);assert.equal(result.alternatives.length,0);assert.equal(result.search_diagnostics.attempts,1);
+});
+
+test('a reviewed card reaches the room while the original stream is still open',async()=>{
+ let stream,notify;const first=new Promise(resolve=>notify=resolve);let finished=false;
+ const pending=searchOriginalPiece(Buffer.from('photo'),'US',{room:'4'.repeat(24),env:{FINDZIA_SPACES_ENGINE_KEY:'s'.repeat(64)},onProgress:update=>{if(update.alternatives?.length)notify(update);},fetcher:async()=>new Response(new ReadableStream({start(controller){stream=controller;controller.enqueue(new TextEncoder().encode(JSON.stringify({event:'upsert',item:row,elapsed_ms:1000})+'\n'));}}),{headers:{'Content-Type':'application/x-ndjson'}})}).then(result=>{finished=true;return result;});
+ const update=await first;assert.equal(finished,false);assert.equal(update.alternatives.length,1);assert.equal(update.search_timing.provider_first_verified_ms,1000);
+ stream.enqueue(new TextEncoder().encode('{"event":"done"}\n'));stream.close();
+ const result=await pending;assert.equal(result.partial,false);assert.ok(result.search_timing.first_byte_ms!==null);assert.ok(result.search_timing.first_verified_ms!==null);
 });
 
 test('a store-price link can never become a zero-price room summary',async()=>{
