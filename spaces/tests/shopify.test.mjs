@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {catalogProducts,catalogMoney,catalogResponse,searchLocalCatalog} from '../shopify.mjs';
+import {catalogProducts,catalogMoney,catalogResponse,searchLocalCatalog,completeShippingEvidence} from '../shopify.mjs';
 const product={title:'Oak table',url:'https://merchant.example/products/table',media:[{type:'image',url:'https://merchant.example/table.jpg'}],variants:[{id:'gid://shopify/ProductVariant/123',requires:{shipping:true},availability:{available:true},price:{amount:120500,currency:'KWD'},seller:{name:'Local furniture'}}]};
 const response=products=>({jsonrpc:'2.0',id:1,result:{structuredContent:{products}}});
 test('country is sent as both merchant origin and shipping destination, never retried globally',async()=>{
@@ -34,4 +34,13 @@ test('every search is live, failures do not return a previous market response',a
  let calls=0;const fetcher=async()=>{calls++;return Response.json(response([product]));};
  await searchLocalCatalog('table','KW',{fetcher});await searchLocalCatalog('table','KW',{fetcher});assert.equal(calls,2);
  const result=await searchLocalCatalog('table','SA',{fetcher:async()=>{throw Error('provider down');}});assert.deepEqual(result.items,[]);
+});
+test('missing physical-shipping evidence is checked against the exact merchant variant only',async()=>{
+ const row=structuredClone(product);delete row.variants[0].requires;
+ let path;
+ await completeShippingEvidence([row],{metadata:async url=>{path=url;return {html:JSON.stringify({variants:[{id:123,requires_shipping:true,available:true},{id:456,requires_shipping:false}]})};}});
+ assert.equal(path,'https://merchant.example/products/table.js');assert.equal(catalogProducts([row],'KW').length,1);
+ for(const metadata of [async()=>{throw Error('unreachable');},async()=>({html:JSON.stringify({variants:[{id:456,requires_shipping:true}]})}),async()=>({html:JSON.stringify({variants:[{id:123,requires_shipping:false}]})})]){
+  const uncertain=structuredClone(product);delete uncertain.variants[0].requires;await completeShippingEvidence([uncertain],{metadata});assert.deepEqual(catalogProducts([uncertain],'KW'),[]);
+ }
 });

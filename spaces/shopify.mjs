@@ -1,6 +1,6 @@
 // Live-only supplement to Spaces. Never persist these results or download their
 // images: https://shopify.dev/docs/agents/catalog#usage-guidelines
-import {MARKETS} from './engine.mjs';
+import {MARKETS,safeResource} from './engine.mjs';
 const ENDPOINT='https://catalog.shopify.com/api/ucp/mcp';
 const PROFILE='https://api.findzia.com/.well-known/ucp';
 const zero=new Set('BIF CLP DJF GNF ISK JPY KMF KRW PYG RWF UGX VND VUV XAF XOF XPF'.split(' '));
@@ -42,7 +42,23 @@ export function catalogResponse(data,market){
  if((content.messages||[]).some(m=>/unsupported|ignored|invalid.*filter/i.test(String(m?.code||'')+' '+String(m?.message||''))))return {status:'unavailable',items:[]};
  return {status:'ok',items:catalogProducts(content.products,market)};
 }
-export async function searchLocalCatalog(query,market,{fetcher=fetch,language='en'}={}){
+export async function completeShippingEvidence(products,{metadata=url=>safeResource(url,{json:true,timeout:4000})}={}){
+ // Some current Catalog responses omit requires.shipping. Read only the exact
+ // variant's physical-shipping flag through Shopify's public Product Ajax API.
+ // No product images are downloaded, no price is replaced, and nothing is saved.
+ await Promise.all((products||[]).slice(0,8).map(async product=>{
+  const variant=product?.variants?.find(v=>v?.availability?.available===true);
+  if(!variant||typeof variant.requires?.shipping==='boolean')return;
+  const id=String(variant.id||'').match(/^gid:\/\/shopify\/ProductVariant\/(\d+)$/)?.[1];
+  const link=url(variant.url||product.url);if(!id||!link)return;
+  const target=new URL(link);if(!/\/products\/[^/]+\/?$/.test(target.pathname))return;
+  target.pathname=target.pathname.replace(/\/$/,'')+'.js';target.search='';target.hash='';
+  try{const response=await metadata(target.href),data=JSON.parse(response.html),exact=data.variants?.find(v=>String(v.id)===id);
+   if(exact?.requires_shipping===true){variant.requires={...variant.requires,shipping:true,selling_plan:exact.requires_selling_plan===true};if(exact.available===false)variant.availability={available:false};}
+  }catch{}
+ }));return products;
+}
+export async function searchLocalCatalog(query,market,{fetcher=fetch,language='en',metadata}={}){
  if(!MARKETS[market]||!text(query,400))return {status:'invalid_market',items:[]};
  if(inflight>=8||Date.now()<retryAt)return {status:'busy',items:[]};
  inflight++;
@@ -55,6 +71,9 @@ export async function searchLocalCatalog(query,market,{fetcher=fetch,language='e
   for await(const chunk of response.body){size+=chunk.length;if(size>2000000)return {status:'unavailable',items:[]};chunks.push(chunk);}
   const body=Buffer.concat(chunks).toString('utf8');
   const data=response.headers.get('content-type')?.includes('text/event-stream')?body.split(/\r?\n/).filter(x=>x.startsWith('data:')).map(x=>x.slice(5).trim()).filter(x=>x&&x!=='[DONE]').map(x=>JSON.parse(x)).find(x=>x.id===1):JSON.parse(body);
+  const preliminary=catalogResponse(data,market);
+  if(preliminary.status!=='ok')return preliminary;
+  await completeShippingEvidence(data.result.structuredContent.products,{metadata});
   return catalogResponse(data,market);
  }catch{return {status:'unavailable',items:[]};}finally{inflight--;}
 }

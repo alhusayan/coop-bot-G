@@ -55,19 +55,20 @@ export function publicIP(ip){
  // Fetch IPv4 only. Reject IPv6 and mapped IPv4 to avoid ambiguous routing.
  return false;
 }
-export async function safeResource(url,{image=false,depth=0,timeout=6500}={}){
+export async function safeResource(url,{image=false,json=false,depth=0,timeout=6500}={}){
  const target=safeUrl(url);if(!target||depth>3)throw Error('unsafe_url');
  const u=new URL(target);if(u.port&&u.port!=='443')throw Error('unsafe_port');
  const records=await dns.lookup(u.hostname,{all:true,family:4});
  if(!records.length||records.some(r=>!publicIP(r.address)))throw Error('unsafe_address');
  const record=records[0];
  return new Promise((resolve,reject)=>{
-   const req=https.get(u,{headers:{'User-Agent':'Mozilla/5.0 (compatible; FindziaSpaces/0.1)','Accept':image?'image/*':'text/html,application/xhtml+xml','Accept-Encoding':'identity'},lookup:(_h,opts,cb)=>opts.all?cb(null,[record]):cb(null,record.address,4),timeout},res=>{
-     if([301,302,303,307,308].includes(res.statusCode)){res.resume();if(!res.headers.location)return reject(Error('redirect'));return safeResource(new URL(res.headers.location,u).href,{image,depth:depth+1,timeout}).then(resolve,reject);}
-     if(res.statusCode!==200||!(image?/^image\/(jpeg|png|webp)/i.test(String(res.headers['content-type'])):String(res.headers['content-type']).includes('text/html'))){res.resume();return reject(Error('no_page'));}
+   const req=https.get(u,{headers:{'User-Agent':'Mozilla/5.0 (compatible; FindziaSpaces/0.1)','Accept':image?'image/*':json?'application/json':'text/html,application/xhtml+xml','Accept-Encoding':'identity'},lookup:(_h,opts,cb)=>opts.all?cb(null,[record]):cb(null,record.address,4),timeout},res=>{
+     if([301,302,303,307,308].includes(res.statusCode)){res.resume();if(!res.headers.location||json)return reject(Error('redirect'));return safeResource(new URL(res.headers.location,u).href,{image,depth:depth+1,timeout}).then(resolve,reject);}
+     if(res.statusCode!==200||!(image?/^image\/(jpeg|png|webp)/i.test(String(res.headers['content-type'])):json?/application\/(?:json|javascript)/i.test(String(res.headers['content-type'])):String(res.headers['content-type']).includes('text/html'))){res.resume();return reject(Error('no_page'));}
      let chunks=[],size=0;res.on('data',b=>{size+=b.length;if(size>(image?6000000:3000000)){req.destroy();reject(Error('page_large'));}else chunks.push(b);});
      res.on('end',()=>resolve({bytes:Buffer.concat(chunks),html:image?undefined:Buffer.concat(chunks).toString('utf8'),mime:String(res.headers['content-type']).split(';')[0],url:u.href}));res.on('error',reject);
    });req.on('error',reject);req.on('timeout',()=>req.destroy(Error('timeout')));
+   if(json){const deadline=setTimeout(()=>req.destroy(Error('timeout')),timeout);req.on('close',()=>clearTimeout(deadline));}
  });
 }
 export const safePage=(url,options)=>safeResource(url,options);
@@ -148,3 +149,4 @@ export async function serper(q,market,{shopping=false,images=false,lang='en',env
  const r=await fetch('https://google.serper.dev/'+(images?'images':shopping?'shopping':'search'),{method:'POST',headers:{'Content-Type':'application/json','X-API-KEY':env.SERPER_API_KEY},body:JSON.stringify({q,gl:market.toLowerCase(),hl:lang,num:10}),signal:AbortSignal.timeout(12000)});
  if(!r.ok)throw Error('SEARCH_PROVIDER_'+r.status);return r.json();
 }
+
