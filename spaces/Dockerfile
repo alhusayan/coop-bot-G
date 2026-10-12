@@ -1,6 +1,8 @@
 FROM node:24-alpine
 WORKDIR /app
-COPY package.json server.mjs engine.mjs ./
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
+COPY server.mjs engine.mjs matching.mjs ./
 COPY public ./public
 ENV NODE_ENV=production
 EXPOSE 8080

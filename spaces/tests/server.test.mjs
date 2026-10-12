@@ -15,7 +15,9 @@ test('private trial requires its invite, serves app assets, and does not reveal 
   const cookie=unlock.headers.get('set-cookie').split(';')[0];const config=await fetch(base+'/api/config',{headers:{cookie}});assert.equal(config.status,200);assert.equal((await config.json()).markets.KW.currency,'KWD');
   const other=await fetch(base+'/api/jobs/000000000000000000000000',{headers:{cookie}});assert.equal(other.status,404);
   const cross=await fetch(base+'/api/jobs',{method:'POST',headers:{cookie,'sec-fetch-site':'cross-site'},body:'{}'});assert.equal(cross.status,403);
-  const root=await fetch(base+'/');assert.match(await root.text(),/Findzia Spaces/);assert.equal(root.headers.get('x-robots-tag'),'noindex, nofollow, noarchive');
+  assert.equal((await fetch(base+'/lens-media/000000000000000000000000/crop-0-1.jpg?expires=9999999999999&sig=fake')).status,404);
+  assert.equal((await fetch(base+'/lens-media/000000000000000000000000/original.jpg')).status,404);
+  const root=await fetch(base+'/');const html=await root.text();assert.match(html,/Findzia Spaces/);assert.match(html,/<html lang="en" dir="ltr">/);assert.equal(root.headers.get('x-robots-tag'),'noindex, nofollow, noarchive');
   assert.equal((await fetch(base+'/style.css')).status,200);assert.equal((await fetch(base+'/app.js')).status,200);
  }finally{await new Promise(r=>s.close(r));rmSync(process.env.SPACES_DATA_DIR,{recursive:true,force:true});}
 });

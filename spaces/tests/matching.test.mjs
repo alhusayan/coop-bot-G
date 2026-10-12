@@ -1,0 +1,34 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import sharp from 'sharp';
+import {visualDecision,auditVisual,searchItem,cropPiece} from '../matching.mjs';
+const pass={index:0,score:99,category:'match',color:'match',shape:'match',material:'match',configuration:'match',proportions:'match',differences:[],reason:'Visible features agree'};
+const image=await sharp({create:{width:300,height:200,channels:3,background:'#aa9988'}}).jpeg().toBuffer();
+const target={inlineData:{mimeType:'image/jpeg',data:image.toString('base64')}};
+const item={id:'1',name_en:'Rounded dark green chair',query:'dark green rounded tub chair hidden base',specs:{color:'dark green',shape:'rounded',legs:'hidden'}};
+const product={'@type':'Product',name:'Rounded green chair',image:'https://shop.kw/chair.jpg',offers:{priceCurrency:'KWD',price:'99.000',availability:'https://schema.org/InStock'}};
+const page=p=>`<script type="application/ld+json">${JSON.stringify(p)}</script>`;
+const deps={target,lensUrl:'https://rooms.example/crop.jpg',lensSearch:async()=>[{link:'https://shop.kw/products/chair',title:'Rounded green chair'}],page:async url=>({url,html:page(product)}),fetchImage:async()=>({bytes:image}),judge:async()=>({results:[pass]})};
+test('a high score never overrides wrong colour, shape, configuration, proportions or visible differences',()=>{
+ assert.equal(visualDecision(pass),true);
+ for(const k of ['category','color','shape','material','configuration','proportions']){assert.equal(visualDecision({...pass,[k]:'mismatch'}),false,k);assert.equal(visualDecision({...pass,[k]:'unclear'}),false,k);}
+ assert.equal(visualDecision({...pass,differences:['Gold legs instead of concealed base']}),false);assert.equal(visualDecision({...pass,score:87}),false);
+});
+test('actual target and store images are required; title-only approval cannot leak into results',async()=>{
+ const o={title:'A chair',image:'https://shop.kw/a.jpg'};
+ assert.deepEqual(await auditVisual(item,[o],null,{judge:async()=>({results:[pass]})}),[]);
+ assert.deepEqual(await auditVisual(item,[o],target,{fetchImage:async()=>{throw Error('unavailable');},judge:async()=>({results:[pass]})}),[]);
+});
+test('Lens runs first and a checked local match retains the original store price',async()=>{
+ let textCalls=0;const r=await searchItem(item,'KW',{...deps,search:async()=>{textCalls++;return {};},judge:async parts=>{assert.equal(parts.filter(x=>x.inlineData).length,2);return {results:[{...pass,price:1}]};}});
+ assert.equal(textCalls,0);assert.equal(r[0].price,99);assert.equal(r[0].size_verified,false);assert.equal(r[0].match,'visual');
+});
+test('a visually checked local listing without a price is not discarded or assigned zero',async()=>{
+ const r=await searchItem(item,'KW',{...deps,page:async url=>({url,html:page({...product,offers:undefined})}),search:async()=>({})});assert.equal(r.length,1);assert.equal(r[0].price,null);
+});
+test('wrong-colour Lens result triggers detailed search, without showing the rejected item',async()=>{
+ let textCalls=0;const r=await searchItem(item,'KW',{...deps,judge:async()=>({results:[{...pass,color:'mismatch'}]}),search:async()=>{textCalls++;return {};}});assert.deepEqual(r,[]);assert.ok(textCalls>=3);
+});
+test('cropping keeps the selected object bounded to the room image',async()=>{
+ const bytes=await cropPiece(image,[-15,400,1100,1100]),m=await sharp(bytes).metadata();assert.equal(m.height,200);assert.ok(m.width>175&&m.width<190);assert.equal(m.format,'jpeg');
+});
