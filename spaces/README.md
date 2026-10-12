@@ -91,3 +91,9 @@ Room width and length are required immediately after photo upload, before paid g
 Only then does the renderer receive the room photo and actual store product photos. It produces one design, with a bounded corrective attempt. Room preservation, quantities, visual scale and product appearance are checked before publishing the image and shopping list atomically. Unverified essential pieces or failed render checks produce a retry state, never fabricated products or dimensions. Redesign keeps the previous result until a new one passes. Store measurements are evidence; room placement remains an approximate visual preview.
 
 Run `npm test` for catalog sequencing, source priority, footprint/quantity validation, failed stock/visual checks, the single-design UI and idempotent redesign, alongside legacy regressions.
+
+## 0.5.6 — isolated product corrections
+
+Product-only fidelity failures now edit a bounded room crop using that product's store photo, instead of repeatedly redrawing the whole room. Local edits must preserve framing, surrounding objects, quantity and exact visible product features; every copy receives the existing strict store-photo audit. Only accepted patches are composited, with unchanged pixels outside the repair rectangle. The full scene is then checked again before publication. Scene geometry failures get at most one fresh composition; local corrections are bounded.
+
+Private drafts and verified catalogue choices are checkpointed throughout generation. Retry inspects the saved draft first and can resume within the room's 24-hour retention period. Stock and published dimensions are freshly checked before any rendering; redesign invalidates the old catalogue. Unverified drafts never appear as finished designs.

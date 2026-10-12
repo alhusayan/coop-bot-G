@@ -125,10 +125,10 @@ export async function configureModels(env=process.env){
   console.log('SPACES_MODELS',JSON.stringify({text:env.SPACES_TEXT_MODEL,image:env.SPACES_IMAGE_MODEL,repair:env.SPACES_IMAGE_REPAIR_MODEL,available:models.filter(x=>/gemini/.test(x)).slice(0,35)}));
  }catch(e){console.error('SPACES_MODEL_LIST_FAILED',e.name);}
 }
-export async function gemini(parts,{image=false,env=process.env,json=false,timeout,maxTokens=14000,schema,jsonRetry=0}={}){
+export async function gemini(parts,{image=false,imageAspect,env=process.env,json=false,timeout,maxTokens=14000,schema,jsonRetry=0}={}){
  if(!env.GEMINI_API_KEY)throw Error('GEMINI_NOT_CONFIGURED');
  const model=image?(env.SPACES_IMAGE_MODEL||'gemini-nano-banana-2.1'):(env.SPACES_TEXT_MODEL||'gemini-3.8-flash');
- const config=image?{responseModalities:['TEXT','IMAGE']}:{temperature:0.2,maxOutputTokens:maxTokens,...(json?{responseMimeType:'application/json'}:{})};
+ const config=image?{responseModalities:['TEXT','IMAGE'],...(imageAspect?{imageConfig:{aspectRatio:imageAspect}}:{})}:{temperature:0.2,maxOutputTokens:maxTokens,...(json?{responseMimeType:'application/json'}:{})};
  // Keep the same vision model; bounded reasoning avoids spending the deadline on hidden thought tokens.
  if(!image&&/^gemini-3/.test(model))config.thinkingConfig={thinkingLevel:'low'};
  if(json&&schema){const convert=value=>{if(Array.isArray(value))return value.map(convert);if(!value||typeof value!=='object')return value;const result=Object.fromEntries(Object.entries(value).map(([k,v])=>[k,convert(v)]));if(Array.isArray(value.type)){result.type=value.type.find(x=>x!=='null').toUpperCase();result.nullable=value.type.includes('null');}else if(typeof value.type==='string')result.type=value.type.toUpperCase();return result;};config.responseSchema=convert(schema);}

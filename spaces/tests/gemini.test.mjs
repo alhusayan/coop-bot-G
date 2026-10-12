@@ -2,6 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {gemini} from '../engine.mjs';
 const env={GEMINI_API_KEY:'local-test-only',SPACES_TEXT_MODEL:'gemini-3.8-flash'};
+test('local image edits send the crop aspect ratio through the image API',async t=>{
+ let config;t.mock.method(globalThis,'fetch',async(_url,options)=>{config=JSON.parse(options.body).generationConfig;return Response.json({candidates:[{content:{parts:[{inlineData:{mimeType:'image/png',data:'test'}}]}}]});});
+ await gemini([{text:'edit'}],{env,image:true,imageAspect:'3:2'});assert.equal(config.imageConfig.aspectRatio,'3:2');
+});
 test('inventory recovers once from a provider schema rejection and then validates the JSON',async t=>{
  const configs=[];
  t.mock.method(globalThis,'fetch',async(_url,options)=>{configs.push(JSON.parse(options.body).generationConfig);return configs.length===1?Response.json({error:{message:'unsupported schema'}},{status:400}):Response.json({candidates:[{content:{parts:[{text:'{"items":[]}'}]}}]});});

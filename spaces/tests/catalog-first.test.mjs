@@ -33,11 +33,18 @@ test('confirmed local products stop the global fallback; unknown stock cannot qu
  const found=await sourceCatalogItem({...item,query:'Olive chair'},original,{market:'KW'},deps);assert.equal(found.length,1);assert.ok(queries.every(m=>m==='KW'));
  queries.length=0;const empty=await sourceCatalogItem({...item,query:'Olive chair'},original,{market:'KW'},{...deps,stock:async o=>({...o,availability:'unknown',dimensions_cm:offer.dimensions_cm})});assert.equal(empty.length,0);assert.ok(queries.includes('US'));
 });
-test('renderer includes real product references and rejects a failed visual audit',async()=>{
+test('failed product audit uses local repair without regenerating the whole room',async()=>{
  const out=await sharp({create:{width:600,height:500,channels:3,background:'#ccc'}}).jpeg().toBuffer();
- let imageCalls=0;const plan={...validateCatalogPlan(layout,[item],room),context,options:{notes:'Olive'}};
- const generate=async(parts,opts)=>{if(opts.image){imageCalls++;assert.equal(parts.filter(p=>p.inlineData).length,imageCalls===1?2:3);if(imageCalls>1)assert.match(parts[0].text,/EXACT CORRECTIONS REQUIRED/);return {mimeType:'image/jpeg',data:out.toString('base64')};}return {room_geometry_unchanged:true,no_unselected_new_products:true,scale_plausible:true,items:[{id:'1',product_present:true,boxes:layout.choices[0].placements.map(x=>x.box)}]};};
- await assert.rejects(renderCatalogRoom(original,plan,{generate,fetchImage:async()=>({bytes}),verify:async()=>({ok:true}),audit:async()=>[]}),/PLACEMENT_UNVERIFIED/);assert.equal(imageCalls,4);
+ let imageCalls=0,repairCalls=0;const plan={...validateCatalogPlan(layout,[item],room),context,options:{notes:'Olive'}};
+ const generate=async(parts,opts)=>{if(opts.image){imageCalls++;assert.equal(parts.filter(p=>p.inlineData).length,2);return {mimeType:'image/jpeg',data:out.toString('base64')};}return {room_geometry_unchanged:true,no_unselected_new_products:true,scale_plausible:true,items:[{id:'1',product_present:true,boxes:layout.choices[0].placements.map(x=>x.box)}]};};
+ await assert.rejects(renderCatalogRoom(original,plan,{generate,fetchImage:async()=>({bytes}),verify:async()=>({ok:true}),audit:async()=>[],repair:async()=>{repairCalls++;throw Error('LOCAL_REPAIR_UNVERIFIED');}}),e=>e.message==='PLACEMENT_UNVERIFIED'&&!!e.draft);
+ assert.equal(imageCalls,1);assert.equal(repairCalls,1);
+});
+test('a saved draft is checked before any generation and accepted patches are rechecked',async()=>{
+ const out=await sharp({create:{width:600,height:500,channels:3,background:'#ccc'}}).jpeg().toBuffer(),plan={...validateCatalogPlan(layout,[item],room),context,options:{}};
+ let checks=0,repairs=0,drafts=0;
+ const result=await renderCatalogRoom(original,plan,{resume:{image:{inlineData:{mimeType:'image/jpeg',data:out.toString('base64')}}},fetchImage:async()=>({bytes}),generate:async(_p,opts)=>{assert.ok(!opts.image);return {room_geometry_unchanged:true,no_unselected_new_products:true,scale_plausible:true,items:[{id:'1',product_present:++checks>1,boxes:layout.choices[0].placements.map(x=>x.box)}]};},audit:async()=>[offer],verify:async()=>({ok:true}),repair:async()=>{repairs++;return {output:out,mimeType:'image/jpeg'};},onDraft:()=>drafts++});
+ assert.equal(checks,2);assert.equal(repairs,1);assert.equal(drafts,1);assert.equal(result.boxes['1'].length,2);
 });
 
 test('retrieval uses broad real-product categories across local stores before a style is rendered',()=>{
@@ -61,6 +68,6 @@ test('retry resumes a sourced catalogue but refreshes stock before rendering',as
  let saved,searches=0,stocks=0,calls=0;
  const opts={width:4,length:5,market:'KW'},deps={detect:async()=>context,judge:async()=>++calls===1?brief:layout,source:async()=>{searches++;return [offer];},stock:async o=>{stocks++;return o;},onCheckpoint:c=>saved=structuredClone(c),render:async()=>{throw Error('PLACEMENT_UNVERIFIED');}};
  await assert.rejects(designFromCatalog(original,opts,deps),/PLACEMENT_UNVERIFIED/);
- await designFromCatalog(original,opts,{...deps,checkpoint:saved,detect:async()=>{throw Error('should reuse room');},render:async()=>({output:Buffer.from('ok')})});
+ await designFromCatalog(original,opts,{...deps,checkpoint:{...saved,created:Date.now()-60*60000},detect:async()=>{throw Error('should reuse room');},render:async()=>({output:Buffer.from('ok')})});
  assert.equal(searches,1);assert.equal(stocks,2);
 });
