@@ -18,6 +18,7 @@ for _name in ('FINDZIA_ACCOUNT_ORIGINS', 'WEB_ALLOWED_ORIGINS'):
     os.environ[_name] = ','.join(_origins)
 
 import main as original
+from findzia_spaces_gateway import SpacesImageGateway, PATH as SPACES_IMAGE_PATH
 
 original.CACHE_DB_PATH += '.original-a332321'
 # main initializes these at import time, before the version-specific path above.
@@ -31,6 +32,7 @@ original._ai_db_init()
 class VersionRouter:
     def __init__(self, primary):
         self.primary = primary
+        self.spaces = SpacesImageGateway(original)
         self.experimental = None
         self.lock = asyncio.Lock()
 
@@ -48,6 +50,8 @@ class VersionRouter:
 
     async def __call__(self, scope, receive, send):
         path = scope.get('path', '')
+        if scope['type'] == 'http' and path == SPACES_IMAGE_PATH:
+            return await self.spaces(scope, receive, send)
         # The catalog provider validates this pre-existing public agent profile.
         # Keep its registered URL while catalog retrieval itself stays in /test.
         if scope['type'] == 'http' and path == '/.well-known/ucp':
