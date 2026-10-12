@@ -1,5 +1,5 @@
 // One order for discovery, retries, grouped items, saved rooms and the UI.
-const tier=o=>(o.availability==='out_of_stock'?2:0)+(o.market_scope==='local'?0:1);
+const tier=o=>(o.availability==='listed_available'?0:2)+(o.market_scope==='local'?0:1);
 export function compareProducts(a,b){return tier(a)-tier(b)||Number(b.visual_score||0)-Number(a.visual_score||0)||Number(b.price!=null)-Number(a.price!=null);}
 export function rankProducts(rows,limit=6){
  const byURL=new Map();for(const row of rows){

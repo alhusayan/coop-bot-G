@@ -65,3 +65,7 @@ Strict visual matches remain separate from replacements. A replacement requires 
 ### 0.3.6 — Stock before recommendations
 
 Every visually accepted piece has a bounded product-page stock check before publication, independently of gallery-image equality. Sold-out matches and replacements are removed, and do not terminate local recovery or international fallback. Product schema, SKU-scoped hydration and English/Arabic purchase controls supply availability; ambiguous or inaccessible pages remain explicitly unconfirmed. Unknown stock cannot be placed into a design. Saved room results are rechecked on the stock migration and on reopen after ten minutes; placement rechecks stock immediately. Prices may still be absent without implying sold-out status.
+
+### 0.3.8 — Conflicting stock evidence
+
+Observed Home Centre schema and product meta both report InStock for the user’s sold-out examples. Landmark positive SEO availability is therefore unconfirmed unless actual purchase controls or SKU-scoped product state confirm stock; explicit negative evidence still excludes the listing. Confirmed local stock ranks first, then confirmed global stock, followed by unconfirmed listings. Unknown availability cannot crowd real purchasable options out of the capped result set.

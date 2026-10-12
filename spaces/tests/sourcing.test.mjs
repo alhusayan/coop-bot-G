@@ -29,7 +29,7 @@ test('new global furniture lane and eBay/Etsy product links are discoverable',()
 test('cached foreign results are pruned without changing approved prices or alternatives',async()=>{
  const approved={link:'https://amazon.com/dp/1',price:null,currency:null,match:'replacement'},blocked={link:'https://ajio.com/products/chair',market_scope:'local',match:'visual'};
  const filtered=filterApprovedOffers([approved,blocked],'KW');assert.equal(filtered.length,1);assert.equal(filtered[0].price,null);assert.equal(filtered[0].match,'replacement');
- let latest;await searchAllViews({offers:[blocked],alternatives:[approved]},'KW',{views:[{id:'1'}],run:async()=>[],onProgress:u=>latest=u});assert.equal(latest.offers.length,0);assert.equal(latest.alternatives.length,1);
+ let latest;await searchAllViews({offers:[blocked],alternatives:[approved]},'KW',{views:[{id:'1'}],stockCheck:async o=>o,run:async()=>[],onProgress:u=>latest=u});assert.equal(latest.offers.length,0);assert.equal(latest.alternatives.length,1);
 });
 
 test('local retrieval targets the selected country and simplifies bed retrieval without inventing dimensions',()=>{

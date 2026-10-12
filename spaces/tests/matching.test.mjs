@@ -64,11 +64,11 @@ test('furniture catalogue pages need purchase evidence; missing price alone is a
 test('a suitable local replacement ends discovery before any foreign Lens audit or global query',async()=>{
  const local={link:'https://www.homecentre.com/sa/en/buy-bed/p/123',title:'Beige single bed',imageUrl:'https://shop.kw/local.jpg'},foreign={...local,link:'https://www.amazon.com/dp/123',imageUrl:'https://shop.kw/foreign.jpg'};
  const seenImages=[],countries=[];let latest;
- await searchItem(item,'SA',{...deps,lensSearch:async()=>[foreign,local],fetchImage:async url=>{seenImages.push(url);return {bytes:image};},search:async(_q,country)=>{countries.push(country);return {};},page:async url=>({url,html:page(product)}),judge:async()=>({results:[{...pass,score:65,shape:'mismatch',adaptable:true,differences:['Different arms']}]}),onProgress:x=>latest=x});
+ await searchItem(item,'SA',{...deps,lensSearch:async()=>[foreign,local],fetchImage:async url=>{seenImages.push(url);return {bytes:image};},search:async(_q,country)=>{countries.push(country);return {};},page:async url=>({url,html:page(product)+'<button>Add to cart</button>'}),judge:async()=>({results:[{...pass,score:65,shape:'mismatch',adaptable:true,differences:['Different arms']}]}),onProgress:x=>latest=x});
  assert.ok(countries.every(x=>x==='SA'));assert.ok(!seenImages.includes(foreign.imageUrl));assert.equal(latest.alternatives[0].market_scope,'local');
 });
 test('local recovery finds a bed before approved international stores are called',async()=>{
- const calls=[],phases=[];const r=await searchItem({...item,name_en:'Single platform bed'},'SA',{...deps,lensSearch:async()=>[],page:async url=>({url,html:page(product)}),search:async(q,country,opts)=>{calls.push([q,country]);return opts.source==='local-recovery'?{images:[{link:'https://www.homecentre.com/sa/en/buy-single-bed/p/123',title:'Single bed',imageUrl:product.image}]}:{};},onProgress:x=>phases.push(x.phase)});
+ const calls=[],phases=[];const r=await searchItem({...item,name_en:'Single platform bed'},'SA',{...deps,lensSearch:async()=>[],page:async url=>({url,html:page(product)+'<button>Add to cart</button>'}),search:async(q,country,opts)=>{calls.push([q,country]);return opts.source==='local-recovery'?{images:[{link:'https://www.homecentre.com/sa/en/buy-single-bed/p/123',title:'Single bed',imageUrl:product.image}]}:{};},onProgress:x=>phases.push(x.phase)});
  assert.equal(r[0].market_scope,'local');assert.equal(calls.length,4);assert.ok(calls.every(x=>x[1]==='SA'));assert.ok(phases.includes('local-recovery'));assert.ok(!phases.includes('global'));
 });
 
