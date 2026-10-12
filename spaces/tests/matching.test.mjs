@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import sharp from 'sharp';
-import {visualDecision,auditVisual,searchItem,cropPiece} from '../matching.mjs';
+import {visualDecision,replacementDecision,auditVisual,searchItem,cropPiece} from '../matching.mjs';
 const pass={index:0,score:99,category:'match',color:'match',shape:'match',material:'match',configuration:'match',proportions:'match',differences:[],reason:'Visible features agree'};
 const image=await sharp({create:{width:300,height:200,channels:3,background:'#aa9988'}}).jpeg().toBuffer();
 const target={inlineData:{mimeType:'image/jpeg',data:image.toString('base64')}};
@@ -9,6 +9,20 @@ const item={id:'1',name_en:'Rounded dark green chair',query:'dark green rounded 
 const product={'@type':'Product',name:'Rounded green chair',image:'https://shop.kw/chair.jpg',offers:{priceCurrency:'KWD',price:'99.000',availability:'https://schema.org/InStock'}};
 const page=p=>`<script type="application/ld+json">${JSON.stringify(p)}</script>`;
 const deps={target,lensUrl:'https://rooms.example/crop.jpg',lensSearch:async()=>[{link:'https://shop.kw/products/chair',title:'Rounded green chair'}],page:async url=>({url,html:page(product)}),fetchImage:async()=>({bytes:image}),judge:async()=>({results:[pass]})};
+test('different real products are disclosed as replacements, never silently accepted as design matches',async()=>{
+ const alternative={...pass,score:35,shape:'mismatch',adaptable:true,differences:['Different leg shape']};
+ assert.equal(visualDecision(alternative),false);assert.equal(replacementDecision(alternative),true);
+ assert.equal(replacementDecision({...alternative,color:'mismatch'}),false);
+ let latest;
+ const matches=await searchItem(item,'KW',{...deps,judge:async()=>({results:[alternative]}),search:async()=>({}),onProgress:x=>latest=x});
+ assert.deepEqual(matches,[]);assert.equal(latest.alternatives.length,1);assert.equal(latest.alternatives[0].match,'replacement');
+});
+test('global sources run and publish checked results while another source is still pending',async()=>{
+ let finishSlow,shown;const slow=new Promise(resolve=>finishSlow=resolve),first=new Promise(resolve=>shown=resolve);const countries=[];
+ const running=searchItem(item,'KW',{...deps,lensSearch:async()=>[],page:async()=>{throw Error('page unavailable');},search:async(q,country)=>{countries.push(country);if(country==='KW')return slow;if(country==='US')return {images:[{title:'Green chair',link:'https://www.amazon.com/dp/B012345678',imageUrl:'https://shop.example/chair.jpg'}]};return {};},onProgress:x=>{if(x.offers?.length)shown(x);}});
+ const progress=await first;assert.equal(progress.offers[0].market_scope,'international');assert.equal(progress.offers[0].price,null);
+ assert.ok(countries.includes('US'));assert.ok(countries.includes('CN'));finishSlow({});await running;
+});
 test('a high score never overrides wrong colour, shape, configuration, proportions or visible differences',()=>{
  assert.equal(visualDecision(pass),true);
  for(const k of ['category','color','shape','material','configuration','proportions']){assert.equal(visualDecision({...pass,[k]:'mismatch'}),false,k);assert.equal(visualDecision({...pass,[k]:'unclear'}),false,k);}

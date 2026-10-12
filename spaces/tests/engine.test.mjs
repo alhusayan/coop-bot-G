@@ -1,6 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {numericPrice,priceText,localEvidence,publicIP,productFromPage,sanitizeItems,safeUrl} from '../engine.mjs';
+test('new furniture cannot be silently classified as already owned without keep notes',()=>{
+ const raw={items:[{name_en:'Nightstand',query_en:'oak nightstand',mode:'keep'}]};
+ assert.equal(sanitizeItems(raw)[0].status,'idle');
+ assert.equal(sanitizeItems(raw,{keep:'Keep the nightstand'})[0].status,'kept');
+});
 test('prices preserve thousands and Kuwaiti three decimals, rejecting ambiguous input',()=>{
  assert.equal(numericPrice('1,250.500'),1250.5);assert.equal(numericPrice('١٢٥٫٥٠٠'),125.5);assert.equal(numericPrice('1.299,99'),1299.99);assert.equal(numericPrice('1.2,9.0'),null);assert.equal(numericPrice('-4'),null);assert.equal(numericPrice(''),null);assert.equal(numericPrice(Infinity),null);
  assert.equal(priceText('KWD 129.950','KWD'),129.95);assert.equal(priceText('129.950 د.ك','KWD'),129.95);assert.equal(priceText('$129','KWD'),null);
