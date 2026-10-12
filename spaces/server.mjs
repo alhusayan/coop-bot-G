@@ -221,6 +221,15 @@ export function createServer(){return http.createServer({requestTimeout:30000,he
 });}
 
 async function selfTest(){
+ // Legacy inventories sometimes counted the pair on one row and the second chair again.
+ // Confirmed, separate physical boxes are the authoritative count after grouping.
+ for(const j of Object.values(state.jobs)){
+   if(j.room_context?.type==='office'&&/reception|waiting area|office lobby/i.test(j.room_context.room_en||''))j.room_context.type='reception';
+   for(const d of j.designs||[])for(const item of d.items||[])if(item.identity_verified&&item.occurrences?.length&&item.quantity!==item.occurrences.length){
+     item.quantity=item.occurrences.length;console.log('SPACES_GROUP_QUANTITY',j.id,JSON.stringify({id:item.id,quantity:item.quantity,views:item.occurrences.length}));
+   }
+ }
+ persist();
  await configureModels();
  if(process.env.SPACES_SELF_TEST!=='true')return;
  // Repair the most recent previously selected failed room once during this migration.

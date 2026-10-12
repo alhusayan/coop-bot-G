@@ -14,3 +14,5 @@ test('losing an essential function fails verification even when the general room
  const noDesk=await verifyRoomFunction(before,after,context,{judge:async parts=>{assert.equal(parts[1],before);assert.equal(parts[2],after);return {same_function:true,essential_functions_preserved:false,reason:'No workstation'};}});assert.equal(noDesk.ok,false);
  assert.equal((await verifyRoomFunction(before,after,context,{judge:async()=>({same_function:true,essential_functions_preserved:true})})).ok,true);
 });
+
+test('an office waiting area preserves reception seating without inventing a work desk',async()=>{const context=await detectRoom({}, {judge:async()=>({is_room:true,type:'office',room_en:'office reception / waiting area',confidence:.9})});assert.equal(context.type,'reception');assert.match(roomBrief(context),/Do not invent a workstation/);});

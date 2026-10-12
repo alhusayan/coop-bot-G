@@ -33,3 +33,5 @@ test('visual grouping requires the room evidence as well as the item inventory',
  const image={inlineData:{mimeType:'image/jpeg',data:'fixture'}};
  const grouped=await groupIdenticalPieces(chairs,image,{judge:async parts=>{assert.equal(parts[1],image);return verdict;}});assert.equal(grouped.length,1);
 });
+
+test('legacy pair quantity is not counted again when both physical copies have their own boxes',()=>{const [merged]=mergeIdentityGroups([{...chairs[0],quantity:2},chairs[1]],verdict);assert.equal(merged.quantity,2);assert.equal(merged.occurrences.length,2);});

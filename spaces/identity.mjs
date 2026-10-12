@@ -23,7 +23,8 @@ export function mergeIdentityGroups(items,verdict){
    const ids=[...new Set((group.ids||[]).map(String))],members=ids.map(id=>items.find(x=>x.id===id));
    if(ids.length<2||members.some(x=>!x||consumed.has(x.id)||x.mode!=='ready')||members.some((x,i)=>members.slice(i+1).some(y=>!separateBoxes(x.box,y.box))))continue;
    members.sort((a,b)=>items.indexOf(a)-items.indexOf(b));const first=members[0],views=members.flatMap(occurrences),results=combineResults(members);
-   const quantity=members.reduce((sum,x)=>sum+(x.quantity||1),0);
+   // Count verified physical locations, not legacy per-row quantities that may already include the other copy.
+   const quantity=views.length;
    const merged={...first,...results,quantity,occurrences:views,grouped_ids:members.flatMap(x=>x.grouped_ids||[x.id]),identity_verified:true};
    if(results.offers.length)merged.status='done';else if(results.alternatives.length)merged.status='empty';
    else merged.status=members.some(x=>x.status==='idle')?'idle':first.status;
