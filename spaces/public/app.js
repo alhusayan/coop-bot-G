@@ -1,3 +1,5 @@
+import {mountFindzia} from './findzia-shell.js';
+import {createLocalCatalog} from './local-catalog.js';
 import {request} from './request.js';
 import {patchHTML,updateImage,pieceActivity} from './live-view.js';
 import {createRoomContext,acceptsJob} from './room-state.js';
@@ -8,13 +10,28 @@ const icon=(name,small=false)=>`<span class="icon${small?' small':''}" aria-hidd
 $$('[data-icon]').forEach(el=>el.innerHTML=`<svg viewBox="0 0 24 24" aria-hidden="true"><path d="${paths[el.dataset.icon]||paths.spark}"/></svg>`);
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const safe=u=>{try{const a=new URL(u,location.origin);return (a.protocol==='https:'||a.origin===location.origin)&&!a.username&&!a.password?a.href:'';}catch{return '';}};
-const fallbackMarkets={KW:{en:'Kuwait',currency:'KWD',flag:'🇰🇼'},SA:{en:'Saudi Arabia',currency:'SAR',flag:'🇸🇦'},AE:{en:'UAE',currency:'AED',flag:'🇦🇪'}};
+const fallbackMarkets={
+  KW:{name:'الكويت',en:'Kuwait',currency:'KWD',symbol:'د.ك',flag:'🇰🇼',lang:'ar'},
+  SA:{name:'السعودية',en:'Saudi Arabia',currency:'SAR',symbol:'ر.س',flag:'🇸🇦',lang:'ar'},
+  AE:{name:'الإمارات',en:'United Arab Emirates',currency:'AED',symbol:'د.إ',flag:'🇦🇪',lang:'ar'},
+  QA:{name:'قطر',en:'Qatar',currency:'QAR',symbol:'ر.ق',flag:'🇶🇦',lang:'ar'},
+  BH:{name:'البحرين',en:'Bahrain',currency:'BHD',symbol:'د.ب',flag:'🇧🇭',lang:'ar'},
+  OM:{name:'عُمان',en:'Oman',currency:'OMR',symbol:'ر.ع',flag:'🇴🇲',lang:'ar'},
+  GB:{name:'بريطانيا',en:'United Kingdom',currency:'GBP',symbol:'£',flag:'🇬🇧',lang:'en'},
+  US:{name:'أمريكا',en:'United States',currency:'USD',symbol:'$',flag:'🇺🇸',lang:'en'},
+  DE:{name:'ألمانيا',en:'Germany',currency:'EUR',symbol:'€',flag:'🇩🇪',lang:'de'},
+  FR:{name:'فرنسا',en:'France',currency:'EUR',symbol:'€',flag:'🇫🇷',lang:'fr'},
+  JP:{name:'اليابان',en:'Japan',currency:'JPY',symbol:'¥',flag:'🇯🇵',lang:'ja'},
+};
 const state={view:'home',market:'KW',image:null,job:null,design:0,compare:false,config:{markets:fallbackMarkets},auth:null,selections:{},quantities:{},itemId:null};
 try{state.market=localStorage.getItem('spaces-market')||'KW';state.selections=JSON.parse(localStorage.getItem('spaces-v2-selections')||'{}');state.quantities=JSON.parse(localStorage.getItem('spaces-v2-quantities')||'{}');}catch{}
+let shell;
+const translate=(en,ar)=>window.FindziaI18n?.t(en,ar,document.querySelector('.fz-home'))||en;
+const localCatalog=createLocalCatalog({request,escape:esc,safe,money,translate,icon,context:item=>({key:[state.job?.id,state.design,state.job?.options?.market,item.id].join(':'),market:state.job?.options?.market,marketName:country().en,url:'/api/jobs/'+state.job?.id+'/catalog/'+state.design+'/'+item.id})});
 let pollTimer,toastTimer,renderKey='',shopKey='',submitting=false,sheetMode='',pollErrors=0,gestureDragged=false;
 const reduced=matchMedia('(prefers-reduced-motion: reduce)').matches;
 const messages={OUT_OF_STOCK:'This piece sold out. We’re finding another option.',STOCK_UNCONFIRMED:'Check availability at the store before choosing this piece.',TRIAL_LINK_REQUIRED:'Open your private preview link to start.',NOT_CONFIGURED:'Designs are temporarily unavailable. Please try again later.',MODEL_UNAVAILABLE:'The design service is temporarily unavailable.',GENERATION_FAILED:'We couldn’t create this design. Please try again.',NO_IMAGE:'The design didn’t arrive. Please try again.',PROVIDER_BUSY:'We’re busy right now. Please try again shortly.',TRIAL_LIMIT:'You’ve reached today’s preview limit. Come back tomorrow.',IMAGE_TOO_LARGE:'Choose a photo under 20 MB.',INVALID_IMAGE:'Please try a JPG, PNG or WebP photo.',NOT_A_ROOM:'Please use a clear photo of a room or outdoor space.',INTERRUPTED:'This design was interrupted. Try it again.',NO_ITEMS:'We couldn’t identify the pieces. Please try this design again.',SEARCH_FAILED:'The stores aren’t responding. Please try again.',DEMO_READ_ONLY:'Upload your own photo to customise a room.',NOT_FOUND:'This room has expired or belongs to another browser.',JOB_BUSY:'This room is still being prepared.',INVALID_CROP:'This piece is not clear enough to search.',ROOM_FUNCTION_MISMATCH:'This design changed the room’s purpose. Please try again.'};
-function toast(text){$('#toast').textContent=text;$('#toast').classList.add('show');clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('#toast').classList.remove('show'),5500);}
+function toast(text){$('#toast').textContent=translate(text);$('#toast').classList.add('show');clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('#toast').classList.remove('show'),5500);}
 async function api(path,opt={}){const r=await request(path,{...opt,headers:{'Content-Type':'application/json',...opt.headers}});let data;try{data=await r.json();}catch{throw Error('Connection interrupted. Please try again.');}if(!r.ok)throw Object.assign(Error(messages[data.error]||'Something went wrong. Please try again.'),{code:data.error});return data;}
 function resetRoom(){roomContext.begin();optionOrder.clear();clearTimeout(pollTimer);closeSheet();state.job=null;state.image=null;state.design=0;state.compare=false;state.itemId=null;updateImage($('#selected-image'),'');renderKey='';shopKey='';pollErrors=0;$('#items-list').innerHTML='';$('#hotspots').innerHTML='';}
 function applyJob(job,token){if(!roomContext.current(token)||!acceptsJob(state.job,job))return false;state.job=job;return true;}
@@ -22,7 +39,7 @@ async function changeJob(path,body){const token=roomContext.capture(),id=state.j
 function view(name){state.view=name;$$('.view').forEach(x=>x.classList.toggle('hidden',x.id!==name));window.scrollTo({top:0,behavior:'instant'});if(name==='designs')renderDesigns();if(name==='shopping')renderShop();}
 function country(){return state.config.markets[state.job?.options?.market||state.market]||fallbackMarkets.KW;}
 function money(n,currency=country().currency){if(n==null||!Number.isFinite(n))return 'Price at store';try{return new Intl.NumberFormat('en-US',{style:'currency',currency:currency||'USD',currencyDisplay:'code',maximumFractionDigits:['KWD','BHD','OMR'].includes(currency)?3:2}).format(n);}catch{return currency+' '+n;}}
-function syncMarket(){if(!state.config.markets[state.market])state.market='KW';const m=state.config.markets[state.market];$('#nav-market').textContent=m.flag+' '+m.en;$('#currency-label').textContent=m.currency;try{localStorage.setItem('spaces-market',state.market);}catch{}}
+function syncMarket(){if(!state.config.markets[state.market])state.market='KW';const m=state.config.markets[state.market];$('#currency-label').textContent=m.currency;try{localStorage.setItem('spaces-market',state.market);}catch{}shell?.sync();}
 let accessCheck;
 function init(){
  if(accessCheck)return accessCheck;
@@ -67,6 +84,8 @@ function renderShop(){const d=selected();if(!d)return;$('#selected-title').textC
  if($('#sheet').open&&sheetMode==='item'&&state.itemId){const current=items.find(x=>x.id===state.itemId),old=$('#sheet-content').dataset.itemKey,newKey=JSON.stringify([state.job.id,state.design,d.status,d.adaptation_error,current,state.selections[keyFor(current||{id:state.itemId})]]);if(current&&old!==newKey)renderItem(current);}
 }
 function showSheet(html,mode){
+ if(mode==='item'){const item=selected().items.find(x=>x.id===state.itemId);if(item)html=html.replace(/<\/div>$/,localCatalog.markup(item)+'</div>');}
+ else localCatalog.clear();
  const key=mode==='item'?`${state.job.id}:${state.design}:${state.itemId}`:mode;
  const preserve=$('#sheet').open&&sheetMode===mode&&$('#sheet-content').dataset.viewKey===key,top=$('#sheet').scrollTop;
  sheetMode=mode;
@@ -75,7 +94,7 @@ function showSheet(html,mode){
  if(!$('#sheet').open){$('#sheet').showModal();document.body.style.overflow='hidden';}
  $('#sheet').scrollTop=preserve?top:0;
 }
-function closeSheet(){if($('#sheet').open)$('#sheet').close();sheetMode='';state.itemId=null;$('#sheet').style.transform='';document.body.style.overflow='';}
+function closeSheet(){localCatalog.clear();if($('#sheet').open)$('#sheet').close();sheetMode='';state.itemId=null;$('#sheet').style.transform='';document.body.style.overflow='';}
 function renderItem(item){state.itemId=item.id;const o=chosen(item);$('#sheet-content').dataset.itemKey=JSON.stringify([state.job.id,state.design,selected().status,selected().adaptation_error,item,state.selections[keyFor(item)]]);if(!o){
  const busy=['searching','idle'].includes(item.status),adapting=selected().status==='adapting';
  const orderKey=keyFor(item),order=optionOrder.get(orderKey)||[];for(const a of item.alternatives||[])if(!order.includes(a.link))order.push(a.link);optionOrder.set(orderKey,order);
@@ -90,6 +109,8 @@ function renderItem(item){state.itemId=item.id;const o=chosen(item);$('#sheet-co
 function openItem(id){const item=selected()?.items.find(x=>x.id===id);if(!item)return;optionOrder.delete(keyFor(item));renderItem(item);if(item.status==='idle'&&!state.job.demo){const index=state.design;item.status='searching';renderItem(item);changeJob('/search/'+id,{design:index}).then(ok=>{if(ok){shopKey='';renderShop();poll();}}).catch(()=>{});}}
 function summary(){const t=total(),items=selected().items;showSheet(`<div class="sheet-body"><h2>Your shopping list</h2><div class="list-total">${t.count?esc(money(t.sum)):'No prices yet'}</div><p>${t.count} of ${t.items} pieces included in this total.</p><ul class="list-items">${items.map(x=>{const o=chosen(x);return `<li><span>${esc(x.name_en)}${x.mode==='ready'?' × '+qty(x):''}</span><span>${o?.price!=null?esc(money(o.price,o.currency)):x.mode==='keep'?'Keep':'—'}</span></li>`;}).join('')}</ul><p class="detail-note">Items without prices, international currencies, measured materials, custom work, delivery and installation are not included.</p><button class="primary wide" data-action="export">Save shopping list ${icon('download',true)}</button></div>`,'summary');}
 async function demo(button){resetRoom();const token=roomContext.capture();if(button)button.disabled=true;try{const c=await api('/api/config');if(!roomContext.current(token))return;if(c.demo){const job=await api('/api/jobs/'+c.demo);if(!applyJob(job,token))return;renderKey='';view('designs');if(active())poll();}else{const r=await fetch('/hero.webp');await loadFile(new File([await r.blob()],'example.webp',{type:'image/webp'}));}}catch(e){toast(e.message);}finally{if(button)button.disabled=false;}}
+function setMarket(id){if(!state.config.markets[id])return;localCatalog.clear();state.market=id;syncMarket();if(state.job&&state.view!=='home'&&state.view!=='setup')toast('This country will apply to your next room.');}
+function openMarket(){const language=shell?.getLanguage()||'en';const names=new Intl.DisplayNames([language],{type:'region'});showSheet(`<div class="sheet-body"><h2>Shop in</h2><div class="country-list">${Object.entries(state.config.markets).map(([k,m])=>`<button class="country-choice${k===state.market?' selected':''}" data-action="set-market" data-id="${k}" aria-pressed="${k===state.market}">${m.flag} ${esc(language==='en'?m.en:names.of(k))}</button>`).join('')}</div><div class="market-preferences"><label>${esc(translate('Language','اللغة'))}<select id="spaces-language">${Object.entries(shell?.languages||{en:'English',ar:'العربية'}).map(([k,v])=>`<option value="${k}"${language===k?' selected':''}>${esc(v)}</option>`).join('')}</select></label><label>${esc(translate('Currency','العملة'))}<select aria-label="Currency" disabled><option>${esc(state.config.markets[state.market].currency)}</option></select></label><p>Currency follows the selected market.</p></div></div>`,'market');$('#spaces-language').addEventListener('change',e=>shell?.setLanguage(e.target.value));}
 async function history(){resetRoom();const token=roomContext.capture();view('history');$('#history-list').innerHTML='<p>Loading your rooms…</p>';try{const data=await api('/api/jobs');if(!roomContext.current(token))return;$('#history-list').innerHTML=data.jobs.length?data.jobs.map(j=>`<button class="history-card" data-action="load-job" data-id="${j.id}"><img src="${esc(j.designs.find(d=>d.image)?.image||j.original)}" alt="${esc(j.room)}"><div><h3>${esc(j.room)}</h3><p>${new Date(j.created).toLocaleDateString('en-GB',{day:'numeric',month:'short'})}</p></div></button>`).join(''):'<div class="empty-items"><p>Your next room starts with a photo.</p><button class="primary" data-action="upload">Add your room</button></div>';}catch(e){$('#history-list').innerHTML=`<p>${esc(e.message)}</p>`;}}
 function downloadBlob(blob,name){const a=document.createElement('a'),u=URL.createObjectURL(blob);a.href=u;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(u),1500);}
 async function saveDesign(){try{const r=await fetch(selected().image);if(!r.ok)throw Error();const blob=await r.blob();downloadBlob(blob,'Findzia-'+selected().id+'.'+(blob.type.includes('jpeg')?'jpg':blob.type.includes('webp')?'webp':'png'));}catch{toast('The image couldn’t be saved. Please try again.');}}
@@ -99,8 +120,9 @@ document.addEventListener('click',async e=>{const el=e.target.closest('[data-act
  case 'upload':$('#file-input').click();break;
  case 'camera':$('#camera-input').click();break;
  case 'demo':await demo(el);break;
- case 'market':showSheet(`<div class="sheet-body"><h2>Shop in</h2><div class="country-list">${Object.entries(state.config.markets).map(([k,m])=>`<button class="country-choice${k===state.market?' selected':''}" data-action="set-market" data-id="${k}">${m.flag} ${esc(m.en)}</button>`).join('')}</div></div>`,'market');break;
- case 'set-market':state.market=id;syncMarket();closeSheet();if(state.job&&state.view!=='home'&&state.view!=='setup')toast('This country will apply to your next room.');break;
+ case 'market':openMarket();break;
+ case 'set-market':setMarket(id);closeSheet();break;
+ case 'local-stores':{const item=selected()?.items.find(x=>x.id===state.itemId);if(item)await localCatalog.load(item);break;}
  case 'designs':closeSheet();view('designs');break;
  case 'choose':await choose(index);break;
  case 'retry':el.disabled=true;if(await changeJob('/retry',{design:index})){renderKey='';renderDesigns();poll();}break;
@@ -122,9 +144,12 @@ document.addEventListener('click',async e=>{const el=e.target.closest('[data-act
  case 'close':closeSheet();break;
  }}catch(err){if(el)el.disabled=false;toast(err.message);}});
 $('#sheet').addEventListener('click',e=>{if(e.target===$('#sheet')){const b=e.target.getBoundingClientRect();if(e.clientX<b.left||e.clientX>b.right||e.clientY<b.top||e.clientY>b.bottom)closeSheet();}});
-$('#sheet').addEventListener('close',()=>{if(!$('#sheet').open){sheetMode='';state.itemId=null;document.body.style.overflow='';}});
+$('#sheet').addEventListener('close',()=>{if(!$('#sheet').open){sheetMode='';state.itemId=null;localCatalog.clear();document.body.style.overflow='';}});
 // Touch scrolling has native inertia. Add a small spring release to controls and drag-to-dismiss sheets.
 if(!reduced){document.addEventListener('pointerup',e=>{const el=e.target.closest('button:not(.hotspot):not(.hero-photo):not(.example-button)');if(el&&!el.disabled&&!gestureDragged)el.animate([{transform:'scale(.965)'},{transform:'scale(1.025)',offset:.55},{transform:'scale(1)'}],{duration:360,easing:'ease-out'});});}
 let dragStart=null;const handle=$('.sheet-handle');handle.addEventListener('pointerdown',e=>{dragStart={y:e.clientY,t:performance.now()};handle.setPointerCapture(e.pointerId);});handle.addEventListener('pointermove',e=>{if(dragStart){const y=Math.max(0,e.clientY-dragStart.y);$('#sheet').style.transform=`translateY(${y}px)`;}});handle.addEventListener('pointerup',e=>{if(!dragStart)return;const y=e.clientY-dragStart.y,v=y/(performance.now()-dragStart.t);dragStart=null;if(y>90||y>30&&v>.5)closeSheet();else{$('#sheet').style.transform='';if(!reduced)$('#sheet').animate([{transform:`translateY(${Math.max(0,y)}px)`},{transform:'translateY(-7px)',offset:.6},{transform:'translateY(0)'}],{duration:380,easing:'ease-out'});}});
 let carouselDrag=null;$('#design-grid').addEventListener('pointerdown',e=>{if(e.pointerType!=='mouse')return;carouselDrag={x:e.clientX,scroll:$('#design-grid').scrollLeft};gestureDragged=false;});$('#design-grid').addEventListener('pointermove',e=>{if(!carouselDrag)return;const dx=e.clientX-carouselDrag.x;if(Math.abs(dx)>8){gestureDragged=true;$('#design-grid').scrollLeft=carouselDrag.scroll-dx;}});document.addEventListener('pointerup',()=>{carouselDrag=null;setTimeout(()=>gestureDragged=false,50);});
 init();
+
+
+mountFindzia({getMarket:()=>state.market,getMarkets:()=>state.config.markets,setMarket,openMarket,openDesigns:history,home:()=>{resetRoom();view('home');},notice:toast}).then(value=>{shell=value;syncMarket();}).catch(()=>toast('Couldn’t load the menu. Please refresh.'));

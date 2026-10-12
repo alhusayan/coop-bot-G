@@ -1,3 +1,4 @@
+import {searchLocalCatalog} from './shopify.mjs';
 import {checkStock,refreshItemStock} from './stock.mjs';
 import {STOCK_VERSION,STOCK_TTL} from './availability.mjs';
 import http from 'node:http';
@@ -32,7 +33,7 @@ function sign(v){return createHmac('sha256',secret).update(v).digest('hex');}
 function constantEqual(a,b){const x=Buffer.from(a),y=Buffer.from(b);return x.length===y.length&&timingSafeEqual(x,y);}
 function session(req){const raw=String(req.headers.cookie||'').split(';').map(x=>x.trim()).find(x=>x.startsWith('spaces_session='))?.slice(15)||'';const [id,stamp,sig]=raw.split('.');if(!/^[a-f0-9]{32}$/.test(id||'')||Number(stamp)<Date.now()||!sig||!constantEqual(sign(id+'.'+stamp),sig))return null;return id;}
 function cookie(id=randomBytes(16).toString('hex')){const stamp=Date.now()+7*86400000,value=id+'.'+stamp;return 'spaces_session='+value+'.'+sign(value)+'; Path=/; HttpOnly; SameSite=Lax; Max-Age=604800'+(secure?'; Secure':'');}
-const headers={'X-Content-Type-Options':'nosniff','X-Frame-Options':'DENY','X-Robots-Tag':'noindex, nofollow, noarchive','Referrer-Policy':'no-referrer','Permissions-Policy':'camera=(self), microphone=(), geolocation=()', 'Content-Security-Policy':"default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com 'unsafe-inline'; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob: https:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"};
+const headers={'X-Content-Type-Options':'nosniff','X-Frame-Options':'DENY','X-Robots-Tag':'noindex, nofollow, noarchive','Referrer-Policy':'no-referrer','Permissions-Policy':'camera=(self), microphone=(), geolocation=(), payment=*', 'Content-Security-Policy':"default-src 'self'; script-src 'self' https://cdn.paddle.com https://*.myfatoorah.com; style-src 'self' https://fonts.googleapis.com 'unsafe-inline'; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: blob: https:; connect-src 'self' https://api.findzia.com https://*.paddle.com https://*.myfatoorah.com; frame-src https://*.paddle.com https://*.myfatoorah.com; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self' https://*.paddle.com https://*.myfatoorah.com"};
 function send(res,status,value,extra={}){res.writeHead(status,{...headers,'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store',...extra});res.end(typeof value==='string'?value:JSON.stringify(value));}
 function error(code,status=400){return Object.assign(Error(code),{status});}
 async function body(req){let size=0,chunks=[];for await(const b of req){size+=b.length;if(size>19*1024*1024)throw error('IMAGE_TOO_LARGE',413);chunks.push(b);}try{return JSON.parse(Buffer.concat(chunks));}catch{throw error('INVALID_INPUT');}}
@@ -174,7 +175,7 @@ export function createServer(){return http.createServer({requestTimeout:30000,he
    res.writeHead(200,{...headers,'Content-Type':'image/jpeg','Cache-Control':'private, max-age=60'});return res.end(req.method==='HEAD'?undefined:readFileSync(f));
  }
 
- if(path==='/healthz')return send(res,200,{ok:true,version:'spaces-0.3.8',source_policy:SOURCE_POLICY_VERSION,lens:!!(process.env.SERPAPI_API_KEY||process.env.SEARCHAPI_API_KEY),generation:!!process.env.GEMINI_API_KEY,search:!!process.env.SERPER_API_KEY});
+ if(path==='/healthz')return send(res,200,{ok:true,version:'spaces-0.3.9',source_policy:SOURCE_POLICY_VERSION,lens:!!(process.env.SERPAPI_API_KEY||process.env.SEARCHAPI_API_KEY),generation:!!process.env.GEMINI_API_KEY,search:!!process.env.SERPER_API_KEY});
  if(path.startsWith('/trial/')){
    const supplied=path.slice(7);if(!['GET','HEAD'].includes(req.method)||!trial||!constantEqual(supplied,trial))throw error('NOT_FOUND',404);
    // Keep the invitation in the address when Safari opens an in-app browser's page.
@@ -201,6 +202,15 @@ export function createServer(){return http.createServer({requestTimeout:30000,he
    const buffer=Buffer.from(encoded.split(',')[1],'base64');if(buffer.length>12*1024*1024||buffer.length<200||buffer[0]!==255||buffer[1]!==216||buffer[2]!==255)throw error('INVALID_IMAGE');
    reserveRoom(owner);
    const j=makeJob(owner,options(b),buffer,idem);launch('generate:'+j.id,()=>generateJob(j));return send(res,202,publicJob(j));
+ }
+ // Catalog market and query come from the owned room, never client country hints.
+ const catalogMatch=path.match(/^\/api\/jobs\/([a-f0-9]{24})\/catalog\/([0-2])\/(\d{1,2})$/);
+ if(catalogMatch&&req.method==='GET'){
+   const j=ownerJob(catalogMatch[1],owner),d=j.designs[Number(catalogMatch[2])],item=d?.items?.find(x=>String(x.id)===catalogMatch[3]);
+   if(!item||item.mode==='keep')throw error('NOT_FOUND',404);
+   consume(owner,'catalog',150);
+   const market=j.options.market,result=await searchLocalCatalog(item.query||item.name_en,market,{language:MARKETS[market].lang});
+   return send(res,200,{market,...result});
  }
  const match=path.match(/^\/api\/jobs\/([a-f0-9]{24})(?:\/(select|retry|search|replace)(?:\/(\d+))?)?$/);
  if(match){const [,id,action,itemIndex]=match;
@@ -234,7 +244,10 @@ export function createServer(){return http.createServer({requestTimeout:30000,he
  const media=path.match(/^\/media\/([a-f0-9]{24})\/(original\.jpg|design-[0-2](?:-r\d{13})?\.(?:jpg|png)|crop-[0-2]-\d{1,2}(?:-r\d{13})?\.jpg)$/);
  if(media){ownerJob(media[1],owner);const f=resolve(DATA,media[1],media[2]);if(!existsSync(f))throw error('NOT_FOUND',404);const bytes=readFileSync(f);res.writeHead(200,{...headers,'Content-Type':bytes[0]===137?'image/png':bytes[0]===255?'image/jpeg':'image/webp','Cache-Control':'private, max-age=3600'});return res.end(bytes);}
  if(!['GET','HEAD'].includes(req.method))throw error('NOT_FOUND',404);
+ if(/^\/policies\/(privacy-policy|terms-of-service|refund-policy)$/.test(path)){res.writeHead(302,{...headers,Location:'https://findzia.com'+path});return res.end();}
  const assets={'/':'index.html','/app.js':'app.js','/request.js':'request.js','/room-state.js':'room-state.js','/live-view.js':'live-view.js','/style.css':'style.css','/hero.webp':'hero.webp','/icon.svg':'icon.svg','/robots.txt':'robots.txt'};
+ for(const name of ['original.css','fonts.css','motion.css','boot.js','i18n.js','motion.js','support.js','account.js','billing.js'])assets['/findzia/'+name]='findzia/'+name;
+ for(const name of ['findzia-shell.js','findzia-shell.css','local-catalog.js'])assets['/'+name]=name;
  if(assets[path]){const file=resolve(ROOT,'public',assets[path]),mime={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.png':'image/png','.webp':'image/webp','.svg':'image/svg+xml','.txt':'text/plain'}[extname(file)];res.writeHead(200,{...headers,'Content-Type':mime,'Cache-Control':path==='/'?'no-store':path==='/hero.webp'?'public, max-age=86400':'no-cache'});return res.end(req.method==='HEAD'?undefined:readFileSync(file));}
  throw error('NOT_FOUND',404);
  }catch(e){if(!res.headersSent)send(res,e.status||500,{error:e.status?e.message:'UNEXPECTED_ERROR'});else res.end();if(!e.status)console.error('SPACES_HTTP_ERROR',e.message);}
@@ -290,6 +303,7 @@ async function selfTest(){
 }
 if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url)){
  if(secure&&!trial)throw Error('SPACES_TRIAL_TOKEN required in production');
- const server=createServer();server.listen(Number(process.env.PORT||8080),'0.0.0.0',()=>{console.log('SPACES_READY 0.3.8');console.log('SPACES_SOURCE_POLICY',JSON.stringify({version:SOURCE_POLICY_VERSION,approved_global:APPROVED_GLOBAL_STORES.length,furniture:FURNITURE_STORES.map(x=>x.name)}));launch('selftest',selfTest);});
+ const server=createServer();server.listen(Number(process.env.PORT||8080),'0.0.0.0',()=>{console.log('SPACES_READY 0.3.9');console.log('SPACES_SOURCE_POLICY',JSON.stringify({version:SOURCE_POLICY_VERSION,approved_global:APPROVED_GLOBAL_STORES.length,furniture:FURNITURE_STORES.map(x=>x.name)}));launch('selftest',selfTest);});
  for(const sig of ['SIGINT','SIGTERM'])process.on(sig,()=>{persist();server.close(()=>process.exit(0));setTimeout(()=>process.exit(0),8000).unref();});
 }
+

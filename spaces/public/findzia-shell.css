@@ -1,0 +1,26 @@
+/* Only the shell's page-height container changes; header/menu/account use Findzia's original rules. */
+#shopify-section-spaces .fz-home[data-theme]{min-height:0;background:transparent}
+#shopify-section-spaces .fz-home[data-home-state=empty] .fz-dark-home{min-height:0!important;height:auto!important;max-width:1500px;padding:24px 5%!important}
+#findzia-home-spaces .fz-dark-header{min-height:56px}
+#findzia-home-spaces .fz-brand{color:inherit;text-decoration:none;justify-self:center}
+#findzia-home-spaces [data-dark-menu] .fza-main-nav{display:grid;align-items:stretch;gap:0}
+#findzia-home-spaces .fza-nav-footer{display:block;max-width:none;margin:0;border:0}
+[hidden]{display:none!important}
+.market-preferences{margin-top:28px;display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.market-preferences label{display:grid;gap:8px;font-size:15px;color:var(--muted)}
+.market-preferences select{font-size:16px;min-width:0}
+.market-preferences p{grid-column:1/-1;font-size:14px}
+.shopify-discovery{border-top:1px solid var(--line);margin-top:24px;padding-top:22px}
+.shopify-discovery h3{margin:0 0 9px}
+.shopify-discovery .catalog-status{color:var(--muted);font-size:15px;margin:12px 0}
+.shopify-discovery>.secondary{margin-top:14px}
+.shopify-discovery .replacement-card:last-child{padding-bottom:0}
+.catalog-card .replacement-actions{margin-top:12px}
+@media(max-width:600px){#shopify-section-spaces .fz-home[data-home-state=empty] .fz-dark-home{padding:20px 14px 22px!important}}
+html[data-findzia-theme=dark]{--paper:#111917;--ink:#eef2ed;--muted:#b0bcb3;--green:#35634e;--light:#253b2f;--line:#34463d;color-scheme:dark}
+html[data-findzia-theme=dark] body{background:var(--paper)}
+html[data-findzia-theme=dark] :is(.history-card,.design-card,.item-card,#sheet,.country-choice,.original-chip,input,select,textarea){background:#1b2721;color:var(--ink);border-color:var(--line)}
+html[data-findzia-theme=dark] :is(.segments,.search-message.is-active,.search-progress){background:#24352c}
+html[data-findzia-theme=dark] .segments input:checked+span{background:#354c3b}
+html[data-findzia-theme=dark] .country-choice.selected{background:#314c3b;border-color:#95b6a1}
+[dir=rtl] .history-card{text-align:right}
