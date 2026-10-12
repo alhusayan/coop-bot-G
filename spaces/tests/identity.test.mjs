@@ -22,7 +22,7 @@ test('one product cannot be grouped twice, and custom/kept items are not merged 
 test('both camera angles contribute streamed results without turning alternatives into matches',async()=>{
  const calls=[],updates=[];
  const result=await searchAllViews(chairs[0],'KW',{views:[{...chairs[0],target:'left',lensUrl:'left-url'},{...chairs[1],target:'right',lensUrl:'right-url'}],onProgress:x=>updates.push(x),run:async(view,_market,deps)=>{
-   calls.push([deps.target,deps.lensUrl]);const row={link:'https://store.example/'+view.id,visual_score:view.id==='1'?40:90,match:'replacement'};deps.onProgress({offers:[],alternatives:[row],phase:'checking'});return [];
+   calls.push([deps.target,deps.lensUrl]);const row={link:'https://store.kw/'+view.id,visual_score:view.id==='1'?40:90,match:'replacement'};deps.onProgress({offers:[],alternatives:[row],phase:'checking'});return [];
  }});
  assert.deepEqual(calls,[['left','left-url'],['right','right-url']]);assert.deepEqual(result,[]);assert.equal(updates.at(-1).alternatives.length,2);assert.equal(updates.at(-1).alternatives[0].visual_score,90);
 });

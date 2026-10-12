@@ -1,3 +1,4 @@
+import {filterApprovedItem} from './sourcing.mjs';
 import {gemini} from './engine.mjs';
 import {pool,searchWithRecovery} from './matching.mjs';
 
@@ -40,7 +41,7 @@ export async function groupIdenticalPieces(items,room,{judge=gemini}={}){
 }
 export async function searchAllViews(item,market,{views,run=searchWithRecovery,onProgress=()=>{},...deps}={}){
  const states=views.map(()=>({offers:[],alternatives:[],checked:0}));let failed=0;
- const snapshot=()=>({...combineResults([item,...states]),checked:states.reduce((n,x)=>n+(x.checked||0),0),search_attempt:Math.max(1,...states.map(x=>x.search_attempt||1))});
+ const snapshot=()=>({...combineResults([item,...states].map(x=>filterApprovedItem(x,market))),checked:states.reduce((n,x)=>n+(x.checked||0),0),search_attempt:Math.max(1,...states.map(x=>x.search_attempt||1))});
  await pool(views,2,async(view,index)=>{
    try{states[index].offers=await run({...item,...view,offers:[],alternatives:[]},market,{...deps,target:view.target,lensUrl:view.lensUrl,onProgress:update=>{states[index]={...states[index],...update};onProgress({...snapshot(),phase:update.phase==='complete'?'checking':update.phase});}});}
    catch(e){failed++;console.log('SPACES_VIEW_SEARCH_ERROR',item.id,index,e.message);}

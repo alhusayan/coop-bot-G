@@ -78,7 +78,7 @@ function meta(html,key){
  if((attrs.property||attrs.name||'').toLowerCase()===key)return attrs.content||'';
  }return '';
 }
-export function productPath(url){try{const u=new URL(url);return !/\/(?:collections|categories|search|blog|blogs|tag)(?:[/?]|$)/i.test(u.pathname)&&(/\/(?:products?|p|item|dp|pd|ip|goods|buy-[^/]+)(?:[/-]|$)|\.html$/i.test(u.pathname)||/(?:^|\.)1688\.com$/.test(u.hostname)&&/^\/offer\/\d+/.test(u.pathname)||/(?:^|\.)taobao\.com$/.test(u.hostname)&&u.pathname==='/item.htm'&&/^\d+$/.test(u.searchParams.get('id')||''));}catch{return false;}}
+export function productPath(url){try{const u=new URL(url);return !/\/(?:collections|categories|search|blog|blogs|tag)(?:[/?]|$)/i.test(u.pathname)&&(/\/(?:products?|p|item|itm|listing|dp|pd|ip|goods|buy-[^/]+)(?:[/-]|$)|\.html$/i.test(u.pathname)||/(?:^|\.)1688\.com$/.test(u.hostname)&&/^\/offer\/\d+/.test(u.pathname)||/(?:^|\.)taobao\.com$/.test(u.hostname)&&u.pathname==='/item.htm'&&/^\d+$/.test(u.searchParams.get('id')||''));}catch{return false;}}
 function dimension(v){if(!v)return '';if(typeof v==='object')return clean([v.value,v.unitText||v.unitCode].filter(Boolean).join(' '),80);return clean(v,80);}
 export function productFromPage(html,url,currency){
  const candidates=[];

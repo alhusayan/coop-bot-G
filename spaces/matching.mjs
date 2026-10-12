@@ -1,5 +1,6 @@
 import sharp from 'sharp';
-import {MARKETS,gemini,serper,safePage,safeImage,safeUrl,productFromPage,productPath,localEvidence,numericPrice,priceText} from './engine.mjs';
+import {sourceScope,sourceDetails,filterApprovedItem,requiresPurchaseCheck,hasPurchaseEvidence,globalQueries} from './sourcing.mjs';
+import {MARKETS,gemini,serper,safePage,safeImage,safeUrl,productFromPage,productPath,numericPrice,priceText} from './engine.mjs';
 
 const clean=(v,n=240)=>String(v??'').replace(/[\u0000-\u001f]/g,' ').trim().slice(0,n);
 let activeAudits=0;const auditWaiters=[];
@@ -58,7 +59,7 @@ export function replacementDecision(v){return !!v&&v.adaptable===true&&v.categor
 function rowPrice(row,currency){const p=row.price;if(p&&typeof p==='object'){const c=String(p.currency||'').toUpperCase();return {price:c?numericPrice(p.extracted_value??p.value):null,currency:c||null};}return {price:priceText(p,currency),currency:priceText(p,currency)?currency:null};}
 const excluded=/pinterest|youtube|youtu\.be|facebook|instagram|tiktok|wikipedia|(?:^|\.)google\.[a-z.]+$/i;
 function candidateRows(rows,market,seen,limit){
- const batch=new Set();const list=rows.filter(x=>{const u=safeUrl(x.link);if(!u||seen.has(u)||batch.has(u)||excluded.test(new URL(u).hostname))return false;batch.add(u);return true;}).sort((a,b)=>Number(productPath(b.link))-Number(productPath(a.link))).slice(0,limit);
+ const batch=new Set();const list=rows.filter(x=>{const u=safeUrl(x.link);if(!u||!sourceScope(u,market)||seen.has(u)||batch.has(u)||excluded.test(new URL(u).hostname))return false;batch.add(u);return true;}).sort((a,b)=>Number(productPath(b.link))-Number(productPath(a.link))).slice(0,limit);
  list.forEach(x=>seen.add(safeUrl(x.link)));return list;
 }
 export async function searchItem(item,market,{env=process.env,search=serper,page=safePage,lensSearch=lens,judge=gemini,fetchImage=safeImage,target,lensUrl,attempt=1,onProgress=()=>{}}={}){
@@ -69,7 +70,7 @@ export async function searchItem(item,market,{env=process.env,search=serper,page
  async function enrich(o){
    try{const p=await page(o.link,{timeout:5000});const product=productFromPage(p.html,p.url,m.currency);
      // Keep the exact image that was compared. Never substitute a different default variant.
-     if(product&&product.image===o.image){Object.assign(o,product,{image:o.image});}
+     if(product&&sourceScope(product.link,market)&&product.image===o.image){Object.assign(o,product,sourceDetails(product.link,market),{image:o.image});}
    }catch{}
    progress('checking');
  }
@@ -78,15 +79,15 @@ export async function searchItem(item,market,{env=process.env,search=serper,page
    const products=(await pool(candidates,6,async row=>{
      let product=null;const image=safeUrl(row.imageUrl||row.thumbnailUrl||row.thumbnail||row.image);
      // Lens / indexed images can be checked immediately; pages are read only for missing images or confirmed pieces.
-     if(row.title&&productPath(row.link)&&image){
+     if(row.title&&productPath(row.link)&&image&&!requiresPurchaseCheck(row.link)){
        product={title:clean(row.title,180),link:safeUrl(row.link),image,...rowPrice(row,row.currency||m.currency),source:clean(row.source||new URL(row.link).hostname,90),description:clean(row.snippet,500),evidence:'search_index',availability:row.in_stock===false?'out_of_stock':'unknown',dimensions:''};
-     }else if(productPath(row.link)){try{const p=await page(row.link,{timeout:5000});product=productFromPage(p.html,p.url,m.currency);}catch{}}
-     if(!product)return null;
+     }else if(productPath(row.link)){try{const p=await page(row.link,{timeout:5000});if(!(requiresPurchaseCheck(row.link)||requiresPurchaseCheck(p.url))||hasPurchaseEvidence(p.html))product=productFromPage(p.html,p.url,m.currency);}catch{}}
+     if(!product||!sourceScope(product.link,market))return null;
      if(/sofa|couch|sectional/i.test(item.name_en)&&!/armless|corner unit|module/i.test(item.name_en)&&/\b(?:armless|corner unit|single module|modular unit)\b/i.test(product.title))return null;
      if(/sofa|couch|chair|table|cabinet|wardrobe|bed frame/i.test(item.name_en)&&/\b(?:cover|slipcover|miniature|dollhouse|sample|swatch|replacement)\b/i.test(product.title))return null;
      const purchase_unit=/pillow|cushion/i.test(item.name_en)&&/\b(?:cover|case)\b/i.test(product.title)?'Cover only · insert not included':null;
-     const local=localEvidence(product.link,market);
-     return {...product,purchase_unit,image_fallback:safeUrl(row.thumbnailUrl||row.thumbnail),channel:row.channel||'description',market:local?market:null,market_scope:local?'local':'international',checked_at:new Date().toISOString()};
+     const sourcing=sourceDetails(product.link,market);
+     return {...product,purchase_unit,image_fallback:safeUrl(row.thumbnailUrl||row.thumbnail),channel:row.channel||'description',...sourcing,checked_at:new Date().toISOString()};
    })).filter(Boolean);
    const additions=[];
    await auditVisual(item,products,target,{env,judge,fetchImage,onError:()=>failures++,onNear:o=>{alternatives.push(o);additions.push(o);progress('checking');},onMatch:o=>{all.push(o);additions.push(o);progress('checking');}});
@@ -103,14 +104,13 @@ export async function searchItem(item,market,{env=process.env,search=serper,page
    const queries=[
      [q+' '+m.en,market,{images:true}],
      [native+' '+m.name,market,{lang:m.lang}],
-     [short+' (site:amazon.com OR site:wayfair.com OR site:walmart.com)', 'US',{images:true}],
-     [zh+' (site:aliexpress.com OR site:temu.com OR site:shein.com OR site:alibaba.com OR site:made-in-china.com OR site:1688.com OR site:taobao.com)','CN',{images:true,lang:item.chinese_query?'zh-cn':'en'}]
+     ...globalQueries(short,zh,item,attempt)
    ];
    // Each source streams its checked results independently. The slowest source no longer holds all results.
    await Promise.allSettled([lensTask,...queries.map(async([query,country,opts])=>{
      let r;try{r=await search(query,country,{env,...opts});}catch(e){console.log('SPACES_SOURCE_ERROR',item.id,country,e.message);failures++;return;}
-     const rows=[...(r.images||[]),...(r.organic||[]),...(r.shopping||[])].map(x=>({...x,channel:country===market?'description':'global',currency:country==='US'?'USD':country==='CN'?'CNY':m.currency}));
-     console.log('SPACES_SOURCE_RESULT',item.id,country,opts.images?'images':'search',rows.length);await inspect(rows);
+     const rows=[...(r.images||[]),...(r.organic||[]),...(r.shopping||[])].map(x=>({...x,channel:opts.source||(country===market?'description':'global'),currency:country==='US'?'USD':country==='CN'?'CNY':m.currency}));
+     console.log('SPACES_SOURCE_RESULT',item.id,country,opts.source||(opts.images?'images':'search'),rows.length);await inspect(rows);
    })]);
  }else await lensTask;
  if(!all.length&&!alternatives.length&&failures)throw Error('SEARCH_FAILED');
@@ -121,7 +121,8 @@ export async function searchItem(item,market,{env=process.env,search=serper,page
 
 // An empty first pass is provisional. Retry once, without relaxing visual rules.
 export async function searchWithRecovery(item,market,{run=searchItem,onProgress=()=>{},...deps}={}){
- let snapshot={offers:item.offers||[],alternatives:item.alternatives||[],checked:0},lastError;
+ const approved=filterApprovedItem(item,market);
+ let snapshot={offers:approved.offers,alternatives:approved.alternatives,checked:0},lastError;
  const merge=(before,after)=>[...new Map([...before,...after].map(o=>[o.link,o])).values()].slice(0,4);
  for(let attempt=1;attempt<=2;attempt++){
    let finished=false;

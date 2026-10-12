@@ -46,3 +46,17 @@ test('wrong-colour Lens result triggers detailed search, without showing the rej
 test('cropping keeps the selected object bounded to the room image',async()=>{
  const bytes=await cropPiece(image,[-15,400,1100,1100]),m=await sharp(bytes).metadata();assert.equal(m.height,200);assert.ok(m.width>175&&m.width<190);assert.equal(m.format,'jpeg');
 });
+test('unapproved foreign Lens and local-query hits cannot take candidate slots or be audited',async()=>{
+ const foreign={link:'https://foreign.example/products/chair',title:'Green chair',imageUrl:'https://shop.kw/chair.jpg'};
+ const ebay={...foreign,link:'https://www.ebay.com/itm/123456789'};let audits=0;
+ const r=await searchItem(item,'KW',{...deps,lensSearch:async()=>[...Array.from({length:12},(_,i)=>({...foreign,link:foreign.link+i})),ebay],search:async()=>({images:[foreign]}),page:async()=>{throw Error('offline');},judge:async parts=>{audits++;assert.ok(!JSON.stringify(parts).includes('foreign.example'));return {results:[pass]};}});
+ assert.equal(audits,1);assert.equal(r.length,1);assert.equal(r[0].link,ebay.link);
+});
+test('an approved link redirecting to an unapproved foreign store is rejected',async()=>{
+ const r=await searchItem(item,'KW',{...deps,lensSearch:async()=>[{link:'https://www.amazon.com/dp/123',title:'Green chair'}],page:async()=>({url:'https://foreign.example/products/chair',html:page(product)}),search:async()=>({})});assert.deepEqual(r,[]);
+});
+test('furniture catalogue pages need purchase evidence; missing price alone is acceptable',async()=>{
+ const link='https://www.archiproducts.com/en/products/designer/armchair_123';const run=html=>searchItem(item,'KW',{...deps,lensSearch:async()=>[{link,title:'Green chair',imageUrl:product.image}],page:async()=>({url:link,html}),search:async()=>({})});
+ assert.deepEqual(await run(page({...product,offers:undefined})),[]);
+ const r=await run(page({...product,offers:undefined})+'<button>Add to cart</button>');assert.equal(r.length,1);assert.equal(r[0].price,null);assert.equal(r[0].market_scope,'international');
+});
