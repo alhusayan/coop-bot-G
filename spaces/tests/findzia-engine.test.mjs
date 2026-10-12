@@ -43,3 +43,11 @@ test('a chair and overlapping desk remain independently selectable; all pieces h
  const chair=points.find(x=>x.id==='2'),desk=points.find(x=>x.id==='1');assert.ok(Math.hypot((chair.x-desk.x)*.7,(chair.y-desk.y)*.5)>=34);
  for(const point of points){assert.ok(point.x>=point.box[1]&&point.x<=point.box[3]);assert.ok(point.y>=point.box[0]&&point.y<=point.box[2]);}
 });
+test('visibility matches the original client, including early preview and approved alternatives',()=>{
+ const preview={...row,search_origin:'image',photo_match_status:'pending',display_before_audit:true};
+ assert.ok(originalOffer(preview,'US'));
+ assert.equal(originalOffer({...preview,photo_match_status:'rejected'},'US'),null);
+ const alternative={...row,search_origin:'image',retrieval_sources:['serper_images']};
+ assert.equal(originalOffer(alternative,'US'),null);
+ assert.ok(originalOffer({...alternative,alternative_visual_status:'approved',alternative_visual_policy:'156.7.3',alternative_visual_proof:'original-proof'},'US'));
+});

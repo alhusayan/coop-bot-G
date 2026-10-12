@@ -8,8 +8,33 @@ let active=0;const queue=[];
 async function slot(fn){if(active>=3)await new Promise(resolve=>queue.push(resolve));else active++;try{return await fn();}finally{const next=queue.shift();if(next)next();else active--;}}
 const clean=value=>String(value??'').replace(/[\u0000-\u001f]/g,' ').trim();
 
+// Unchanged visibility helpers from frontend/source/findzia-home.liquid.
+// These are the original client's gates, not another Spaces visual classifier.
+function fzIsSocial(row){return !!(row&&row.social_id&&(row.result_group==='social'||row.price_source==='social_post'));}
+function fzEarlyPhotoPreview(row){
+ return !!(row?.display_before_audit===true&&!row.classification_final&&!row.hidden&&
+  (row.search_origin==='image'||row.image_query_result)&&row.photo_match_status!=='rejected'&&
+  row.alternative_visual_status!=='rejected');
+}
+function fzPhotoAlternative(row) {
+ if(fzIsSocial(row))return false;
+ const origin=row.search_origin||row.reference_search_kind;
+ if(origin==='text') return false;
+ const sources=row.retrieval_sources||[];
+ if(!(origin==='image'||row.image_query_result)) return false;
+ if(sources.some(s=>s.includes('bing_'))) return true;
+ if(sources.includes('google_lens')) return false;
+ return row.result_group==='alternative'||sources.some(s=>/^(?:serper|brave_search)(?:_|$)/.test(s));
+}
+function fzAlternativePending(row){
+ if(fzEarlyPhotoPreview(row))return false;
+ const origin=row.search_origin||row.reference_search_kind;
+ const socialPhoto=fzIsSocial(row)&&(origin==='image'||(origin!=='text'&&row.image_query_result));
+ return (fzPhotoAlternative(row)||socialPhoto)&&(row.alternative_visual_status!=='approved'||!['156.7.2','156.7.3'].includes(row.alternative_visual_policy)||!row.alternative_visual_proof);
+}
+
 export function originalOffer(row,market){
- if(!row||row.hidden||row.stock_status==='out_of_stock'||row.in_stock===false||row.price_unavailable||['suspect','unavailable'].includes(row.price_status)||row.price_integrity_status==='pending'||['rejected','pending'].includes(row.photo_match_status))return null;
+ if(!row||row.hidden||row.stock_status==='out_of_stock'||row.in_stock===false||row.price_unavailable||['suspect','unavailable'].includes(row.price_status)||row.price_integrity_status==='pending'||row.photo_match_status==='rejected'||row.photo_match_status==='pending'&&!fzEarlyPhotoPreview(row)||fzAlternativePending(row)||fzIsSocial(row)&&Number(row.expires_at)<=Date.now()/1000)return null;
  const link=safeUrl(row.url),images=[row.image,row.thumbnail,row.image_url,row.product_image,...(row.images||[]),...(row.image_candidates||[])];
  const image=images.map(x=>safeUrl(typeof x==='string'?x:x?.url)).find(Boolean);
  // Prices are already normalized by Findzia's money contract. Never re-parse
