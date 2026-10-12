@@ -2,6 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {request} from '../public/request.js';
 
+test('the default browser fetch retains its required global receiver',async t=>{
+ t.mock.method(globalThis,'fetch',function(){assert.equal(this,globalThis);return Promise.resolve(new Response(null,{status:200}));});
+ assert.equal((await request('/api/config')).status,200);
+});
+
 test('lost session renews through the current invitation, preserving a pending photo request',async()=>{
  const calls=[],statuses=[401,200,202];
  const options={method:'POST',headers:{'Idempotency-Key':'same-design'},body:'photo-and-preferences'};
