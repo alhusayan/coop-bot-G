@@ -21,3 +21,25 @@ preview room searches do not consume a customer's paid search balance.
 Old selected rooms migrate to search revision 11 without regenerating images.
 Overlapping objects retain separate selectable markers. Existing crop images,
 room history and 24-hour retention are preserved.
+
+
+## 0.4.1 client parity and completed visual evidence
+
+`original-client.mjs` contains the original website's verbatim pure price, image,
+visibility and stream-state functions. In particular, sparse classifier updates
+preserve the last price/image and retrieval sources, snapshots are additive as
+in the original photo client, and explicit remove/reject events are applied.
+The original SHEIN store-price link exception is preserved without making up a
+numeric price. The selected UI language is carried into the room search request;
+older English-interface rooms default to English rather than the market language.
+
+Per the owner's follow-up, Spaces waits for completed original visual evidence
+before showing a product. Unreviewed previews, conflicting product types/forms,
+clearly different colors, and low-scoring distant matches are held. Original
+Similar alternatives additionally require the original approval proof and no
+known material/texture/pattern conflict. This is deliberately stricter than the
+original site's temporary early preview; retrieval and its prices are unchanged.
+A real image comparison is not represented as an exact SKU identification.
+Diagnostics report original candidates, candidates with images, displayed rows,
+and reasons for withheld rows. Original retrieval variability and image crops
+mean independent searches cannot promise a fixed matching result count.

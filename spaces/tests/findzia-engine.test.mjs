@@ -6,7 +6,7 @@ import {filterApprovedItem} from '../sourcing.mjs';
 import {preferLocalResults} from '../public/product-order.js';
 import {pieceHotspots} from '../public/hotspots.js';
 
-const row={url:'https://danishdesignstore.com/products/green-chair',image:'https://images.example/chair.jpg',title:'Green chair',store:'Danishdesignstore',price:'1,150.00 USD',price_amount:1150,currency:'USD',price_contract:'findzia-money-v1',price_display_ready:true,price_display_currency:'USD',market_scope:'local',match_type:'similar'};
+const row={url:'https://danishdesignstore.com/products/green-chair',image:'https://images.example/chair.jpg',title:'Green chair',store:'Danishdesignstore',price:'1,150.00 USD',price_amount:1150,currency:'USD',price_contract:'findzia-money-v1',price_display_ready:true,price_display_currency:'USD',market_scope:'local',match_type:'similar',classification_final:true,identity_review_status:'completed',visual_axes:{category:'same',subtype:'same',color:'same'},audited_media_path:'/api/media/verified/test-chair',identity_match_percentage:85};
 
 test('original prices, decimals and stores survive without Spaces merchant/audit filters',()=>{
  const items=Array.from({length:14},(_,i)=>({...row,url:`https://store${i}.example/products/chair`,price_amount:134+i/100,price:`${134+i/100} USD`,market_scope:i<7?'local':'global'}));
@@ -16,13 +16,14 @@ test('original prices, decimals and stores survive without Spaces merchant/audit
  assert.equal(filterApprovedItem(result,'KW').alternatives.length,0);
  assert.equal(originalOffer({...row,price:'1.150,50 EUR',price_amount:1150.5,price_display_currency:'EUR'},'DE').price_label,'1.150,50 EUR');
 });
-test('prices arrive later; authoritative removal, invalid price and sold out are honored',()=>{
+test('prices survive sparse updates; snapshots merge and explicit removals are honored like original',()=>{
  const results=createOriginalResults('US');
  results.accept({event:'result',item:{...row,price_amount:null,price_display_ready:false}});assert.equal(results.snapshot().length,0);
  results.accept({event:'upsert',item:row});assert.equal(results.snapshot().length,1);
- results.accept({event:'upsert',item:{url:row.url,price_amount:129.99,price:'129.99 USD'}});assert.equal(results.snapshot()[0].price,129.99);
- results.accept({event:'snapshot',authoritative:true,results:[]});assert.equal(results.snapshot().length,0);
- results.accept({event:'result',item:row});results.accept({event:'upsert',item:{url:row.url,stock_status:'out_of_stock'}});assert.equal(results.snapshot().length,0);
+ results.accept({event:'upsert',item:{url:row.url,market_scope:'local',price_amount:129.99,price:'129.99 USD'}});assert.equal(results.snapshot()[0].price,129.99);
+ results.accept({event:'snapshot',authoritative:true,results:[]});assert.equal(results.snapshot().length,1);
+ results.accept({event:'upsert',item:{url:row.url,market_scope:'local',price:'',price_amount:null,price_display_ready:false,image:'',retrieval_sources:[]}});assert.equal(results.snapshot()[0].price,129.99);
+ results.accept({event:'result',item:row});results.accept({event:'upsert',item:{url:row.url,market_scope:'local',stock_status:'out_of_stock'}});assert.equal(results.snapshot().length,0);
  results.accept({event:'result',item:{...row,stock_status:'in_stock'}});results.accept({event:'remove',url:row.url});assert.equal(results.snapshot().length,0);
  for(const change of [{price_unavailable:true},{price_integrity_status:'pending'},{photo_match_status:'rejected'},{price_amount:0},{price_amount:'134'}])assert.equal(originalOffer({...row,...change},'US'),null);
 });
@@ -43,11 +44,49 @@ test('a chair and overlapping desk remain independently selectable; all pieces h
  const chair=points.find(x=>x.id==='2'),desk=points.find(x=>x.id==='1');assert.ok(Math.hypot((chair.x-desk.x)*.7,(chair.y-desk.y)*.5)>=34);
  for(const point of points){assert.ok(point.x>=point.box[1]&&point.x<=point.box[3]);assert.ok(point.y>=point.box[0]&&point.y<=point.box[2]);}
 });
-test('visibility matches the original client, including early preview and approved alternatives',()=>{
- const preview={...row,search_origin:'image',photo_match_status:'pending',display_before_audit:true};
- assert.ok(originalOffer(preview,'US'));
+test('Spaces waits for original visual evidence and withholds pending or distant alternatives',()=>{
+ const preview={...row,search_origin:'image',classification_final:false,identity_review_status:'pending',photo_match_status:'pending',display_before_audit:true};
+ assert.equal(originalOffer(preview,'US'),null);
  assert.equal(originalOffer({...preview,photo_match_status:'rejected'},'US'),null);
  const alternative={...row,search_origin:'image',retrieval_sources:['serper_images']};
  assert.equal(originalOffer(alternative,'US'),null);
  assert.ok(originalOffer({...alternative,alternative_visual_status:'approved',alternative_visual_policy:'156.7.3',alternative_visual_proof:'original-proof'},'US'));
+});
+
+
+test('the original SHEIN store-price exception is retained only for a reviewed close piece',()=>{
+ const shein={...row,url:'https://us.shein.com/Beige-Sofa-p-12345678.html',price:'',price_amount:null,price_display_ready:false,price_unavailable:true};
+ const offer=originalOffer(shein,'KW');assert.ok(offer);assert.equal(offer.price,null);assert.equal(offer.price_at_store,true);
+ assert.equal(filterApprovedItem({search_engine:'findzia-original',alternatives:[offer]},'KW').alternatives.length,1);
+ assert.equal(originalOffer({...shein,visual_axes:{category:'different'},identity_match_percentage:18},'KW'),null);
+});
+test('wrong product, distant color, and upholstery changes cannot pass as similar',()=>{
+ const approved={...row,search_origin:'image',retrieval_sources:['serper_images'],alternative_visual_status:'approved',alternative_visual_policy:'156.7.3',alternative_visual_proof:'proof'};
+ for(const axes of [{category:'different'},{category:'same',color:'different'},{category:'same',material:'different'},{category:'same',shape_geometry:'different'}])assert.equal(originalOffer({...approved,visual_axes:axes},'US'),null);
+ assert.equal(originalOffer({...row,identity_match_percentage:18},'US'),null);
+});
+test('late classifier updates preserve original images, price and Lens evidence',()=>{
+ const results=createOriginalResults('KW');const first={...row,search_origin:'image',retrieval_sources:['google_lens']};
+ results.accept({event:'result',item:first});
+ results.accept({event:'upsert',item:{...first,image:'',price:'',price_amount:null,price_display_ready:false,retrieval_sources:['serper_images'],alternative_visual_status:'approved',alternative_visual_policy:'156.7.3',alternative_visual_proof:'proof'}});
+ assert.equal(results.snapshot().length,1);assert.equal(results.snapshot()[0].price,1150);assert.equal(results.snapshot()[0].original_result_group,'local');
+});
+
+test('user language is sent unchanged instead of being replaced by the market language',async()=>{
+ await searchOriginalPiece(Buffer.from('photo'),'KW',{room:'2'.repeat(24),language:'en',env:{FINDZIA_SPACES_ENGINE_KEY:'s'.repeat(64)},fetcher:async(_url,options)=>{
+  const body=JSON.parse(options.body);assert.equal(body.lang,'en');assert.equal(body.country,'KW');
+  return new Response(JSON.stringify({event:'done'})+'\n',{headers:{'Content-Type':'application/x-ndjson'}});
+ }});
+});
+
+test('shared client functions are verbatim originals, including sparse updates and price exceptions',async t=>{
+ const {readFileSync,existsSync}=await import('node:fs');const {Script}=await import('node:vm');
+ const paths=[new URL('../../frontend/source/findzia-home.liquid',import.meta.url),new URL('../../main/frontend__source__findzia-home.liquid',import.meta.url),new URL('../../../frontend/source/findzia-home.liquid',import.meta.url)];
+ const path=paths.find(existsSync);if(!path)return t.skip('original checkout not present');
+ const original=readFileSync(path,'utf8'),shared=readFileSync(new URL('../original-client.mjs',import.meta.url),'utf8');
+ for(const name of ['_r','br','lt','fzSheinPriceLink','fzOfferCanDisplay','$t','Fr','Ct','At']){
+  const start=original.indexOf('function '+name+'(');assert.ok(start>=0);
+  let fn='';for(let end=original.indexOf('}',start);end>=0;end=original.indexOf('}',end+1)){const candidate=original.slice(start,end+1);try{new Script('('+candidate+')');fn=candidate;break;}catch{}}
+  assert.ok(fn&&shared.includes(fn),'original '+name+' must not drift');
+ }
 });

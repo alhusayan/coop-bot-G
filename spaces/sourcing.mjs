@@ -33,7 +33,7 @@ export function sourceDetails(url,market){
 export function filterApprovedOffers(rows,market){return rankProducts((rows||[]).flatMap(o=>{
  // Original Findzia already applied its source, market, stock and price rules.
  // Retain that classification instead of limiting it to Spaces' legacy list.
- if(o.search_engine==='findzia-original')return o.search_market===market&&safeUrl(o.link)&&o.price>0?[o]:[];
+ if(o.search_engine==='findzia-original')return o.search_market===market&&safeUrl(o.link)&&(o.price>0||o.price_at_store===true)?[o]:[];
  const details=sourceDetails(o.link,market);return details?[{...o,...details}]:[];
 }),Infinity);}
 export function filterApprovedItem(item,market){return {...item,offers:filterApprovedOffers(item.offers,market),alternatives:filterApprovedOffers(item.alternatives,market)};}
