@@ -54,3 +54,9 @@ test('secondary page extraction requires exact product evidence and retains unit
  assert.equal(detailsFromScrape(data,{...offer,link:url+'?variant=other'}),null);
  const unknown=detailsFromScrape({metadata:{title:sofa.name},markdown:'# '+sofa.name+'\nWidth (cm): 210\nAdd to cart'},offer);assert.equal(unknown.availability,'unknown');
 });
+test('product-first sourcing adopts the exact page photo and dimensions without inheriting an indexed crop',async()=>{
+ const offer={title:sofa.name,link:url,image:'https://example.com/indexed-crop.jpg'};
+ const legacy=await checkStock(offer,'KW',{page:async()=>({url,html})});assert.equal(legacy.dimensions_cm,undefined);
+ const catalog=await checkStock(offer,'KW',{catalog:true,page:async()=>({url,html})});assert.deepEqual(catalog.dimensions_cm,{width:210,depth:88,height:92});assert.equal(catalog.image,sofa.image);assert.equal(catalog.sku,'90042281');
+ const wrong=await checkStock({...offer,sku:'wrong' },'KW',{catalog:true,page:async()=>({url,html})});assert.equal(wrong.availability,'unknown');
+});

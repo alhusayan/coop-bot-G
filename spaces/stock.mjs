@@ -5,7 +5,7 @@ import {safePage} from './engine.mjs';
 const pending=new Map();
 let active=0;const queue=[];
 async function boundedRead(run){if(active>=6)await new Promise(resolve=>queue.push(resolve));else active++;try{return await run();}finally{const next=queue.shift();if(next)next();else active--;}}
-export async function checkStock(offer,market,{page=safePage,force=false}={}){
+export async function checkStock(offer,market,{page=safePage,force=false,catalog=false}={}){
  if(!force&&stockFresh(offer)&&offer.details_version===DETAILS_VERSION)return {...offer};
  const key=market+':'+productURL(offer.link);
  // Only coalesce in-flight default fetches. Stored results carry their own short expiry.
@@ -25,6 +25,13 @@ export async function checkStock(offer,market,{page=safePage,force=false}={}){
  if(!task){task=page===safePage?boundedRead(read):read();if(page===safePage){pending.set(key,task);task.finally(()=>pending.delete(key));}}
  const {product,...stock}=await task;
  // Stock and dimensions belong to the exact product, not the first gallery photo.
+ // Product-first sourcing adopts the product page's own photograph, never an unrelated indexed image.
+ // Legacy visual matching retains its stricter gallery identity requirement.
+ const normal=v=>String(v||'').toLowerCase().replace(/[^\p{L}\p{N}]+/gu,' ').trim();
+ const words=normal(offer.title).split(' ').filter(x=>x.length>2&&!/^(buy|shop|online|with|the|and|kuwait|homecentre|safathome)$/.test(x));
+ const sameTitle=words.length>=2&&words.filter(x=>normal(product?.title).split(' ').includes(x)).length/words.length>=.7;
+ const catalogIdentity=catalog&&product?.image&&!product.variant_unconfirmed&&productURL(offer.link)===productURL(product.link)&&(!offer.sku||!product.sku||String(offer.sku)===String(product.sku))&&(sameOfferProduct(offer,product)||sameTitle);
+ if(catalogIdentity)return {...offer,...product,...stock,catalog_score:offer.catalog_score};
  const identity=sameOfferProduct(offer,product),sameImage=identity&&product?.image===offer.image;
  const size=identity?{sku:product.sku,dimensions_cm:product.dimensions_cm,dimensions:product.dimensions,dimensions_source:product.dimensions_source,dimensions_evidence:product.dimensions_evidence,dimensions_status:product.dimensions_status,details_status:product.dimensions_status}:{};
  if(product&&!identity&&(productURL(offer.link)!==productURL(product.link)||offer.sku&&product.sku&&String(offer.sku)!==String(product.sku)))return {...offer,...stock,availability:'unknown',stock_evidence:'product_identity_unconfirmed',details_status:'unconfirmed'};
