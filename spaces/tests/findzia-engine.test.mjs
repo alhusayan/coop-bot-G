@@ -102,3 +102,13 @@ test('an unresolved visual check gets at most one original-request retry, never 
  }});
  assert.equal(calls,2);assert.equal(bodies[0],bodies[1]);assert.equal(result.alternatives.length,1);assert.equal(result.search_diagnostics.attempts,2);
 });
+
+test('a store-price link can never become a zero-price room summary',async()=>{
+ const {readFileSync}=await import('node:fs');const {runInNewContext}=await import('node:vm');
+ const source=readFileSync(new URL('../public/app.js',import.meta.url),'utf8');
+ const fn=source.split('\n').find(line=>line.startsWith('function itemStatus('));
+ const status=runInNewContext('('+fn+')',{country:()=>({currency:'KWD'}),money:n=>String(n),pieceActivity:()=>''});
+ const item={search_engine:'findzia-original',alternatives:[{currency:'KWD',price:null,price_at_store:true}]};
+ assert.equal(status(item),'1 store options');
+ item.alternatives.push({currency:'KWD',price:95});assert.equal(status(item),'2 store options · 95');
+});
