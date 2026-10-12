@@ -43,7 +43,7 @@ function error(code,status=400){return Object.assign(Error(code),{status});}
 async function body(req){let size=0,chunks=[];for await(const b of req){size+=b.length;if(size>19*1024*1024)throw error('IMAGE_TOO_LARGE',413);chunks.push(b);}try{return JSON.parse(Buffer.concat(chunks));}catch{throw error('INVALID_INPUT');}}
 function ownerJob(id,owner){const j=state.jobs[id];if(!j||j.owner!==owner&&j.owner!=='demo')throw error('NOT_FOUND',404);return j;}
 function mutateJob(id,owner){const j=ownerJob(id,owner);if(j.owner==='demo')throw error('DEMO_READ_ONLY',403);return j;}
-function publicJob(j){return {id:j.id,revision:state.revision||0,created:j.created,flow:j.flow,room:/[\u0600-\u06ff]/.test(j.room)?'Your room':j.room,options:j.options,original:'/media/'+j.id+'/original.jpg',demo:j.owner==='demo',designs:j.designs.map((d,i)=>({...d,finish:d.finish?{...d.finish,image:d.finish.image?'/media/'+j.id+'/'+d.finish.image:null}:null,title:j.flow==='catalog-first-v1'?d.title:STYLES[i].en,description:'',needs_rescan:d.matching_version!==3,items:d.matching_version===3?(d.items||[]).map(x=>preferLocalResults(filterApprovedItem(x,j.options.market))).map(x=>({...x,offers:(x.offers||[]).map(o=>({...o,purchase_unit:o.purchase_unit||(/pillow|cushion/i.test(x.name_en)&&/\b(?:cover|case)\b/i.test(o.title)?'Cover only · insert not included':null)})),occurrences:occurrences(x).map(v=>({...v,crop:v.crop?'/media/'+j.id+'/'+v.crop:null})),crop:x.crop?'/media/'+j.id+'/'+x.crop:null})):[],image:d.image?'/media/'+j.id+'/'+d.image:null}))};}
+function publicJob(j){return {id:j.id,revision:state.revision||0,created:j.created,flow:j.flow,room:/[\u0600-\u06ff]/.test(j.room)?'Your room':j.room,options:j.options,original:'/media/'+j.id+'/original.jpg',demo:j.owner==='demo',designs:j.designs.map(({catalog_work,...d},i)=>({...d,finish:d.finish?{...d.finish,image:d.finish.image?'/media/'+j.id+'/'+d.finish.image:null}:null,title:j.flow==='catalog-first-v1'?d.title:STYLES[i].en,description:'',needs_rescan:d.matching_version!==3,items:d.matching_version===3?(d.items||[]).map(x=>preferLocalResults(filterApprovedItem(x,j.options.market))).map(x=>({...x,offers:(x.offers||[]).map(o=>({...o,purchase_unit:o.purchase_unit||(/pillow|cushion/i.test(x.name_en)&&/\b(?:cover|case)\b/i.test(o.title)?'Cover only · insert not included':null)})),occurrences:occurrences(x).map(v=>({...v,crop:v.crop?'/media/'+j.id+'/'+v.crop:null})),crop:x.crop?'/media/'+j.id+'/'+x.crop:null})):[],image:d.image?'/media/'+j.id+'/'+d.image:null}))};}
 function consume(owner,key,max){const q=new Date().toISOString().slice(0,10)+':'+owner+':'+key;if((state.quota[q]||0)>=max)throw error('TRIAL_LIMIT',429);state.quota[q]=(state.quota[q]||0)+1;persist();}
 function fileImage(j,file){const bytes=readFileSync(resolve(DATA,j.id,file));return {inlineData:{mimeType:bytes[0]===137?'image/png':bytes[0]===255?'image/jpeg':'image/webp',data:bytes.toString('base64')}};}
 function launch(key,fn){if(tasks.has(key))return false;const p=Promise.resolve().then(fn).catch(e=>console.error('SPACES_TASK_FAILED',key,String(e.message).slice(0,80))).finally(()=>tasks.delete(key));tasks.set(key,p);return true;}
@@ -81,6 +81,7 @@ async function generateCatalogDesign(j,index=0,deps={}){
  const started=Date.now();
  try{
   const result=await (deps.catalog||designFromCatalog)(fileImage(j,'original.jpg'),{...j.options,variation:d.redesign_count||0,previousProducts:(d.items||[]).flatMap(x=>x.offers||[]).map(o=>({title:o.title,link:o.link}))},{
+   checkpoint:d.catalog_work,onCheckpoint:work=>{d.catalog_work=work;persist();},
    onProgress:(stage,detail={})=>{d.progress={stage,...detail};persist();console.log('SPACES_CATALOG_STAGE',j.id,stage,JSON.stringify(detail));},
    onItems:items=>{d.catalog_progress={total:items.length,completed:items.filter(x=>['done','empty','error'].includes(x.status)).length,found:items.filter(x=>x.offers?.length).length};persist();}
   });
@@ -94,9 +95,10 @@ async function generateCatalogDesign(j,index=0,deps={}){
   });
   // Publish image and its exact product list together; the previous room stays intact until now.
   Object.assign(d,{image:filename,title:result.title,items,status:'complete',error:null,progress:{stage:'complete'},matching_version:3,search_revision:10,grouping_version:1,details_version:DETAILS_VERSION,stock_checked_at:Date.now(),inventory_revision:revision,finish:null,measurements:{room:result.plan.room,limits:{}},catalog_layout:result.plan.picks.map(p=>({id:p.id,quantity:p.quantity,positions:p.views.map(v=>v.position_cm)}))});
+  delete d.catalog_work;
   j.room_context=result.context;j.room=result.context.room_en;j.selected_design=index;
   console.log('SPACES_CATALOG_READY',JSON.stringify({room:j.id,pieces:items.length,quantity:items.reduce((n,x)=>n+x.quantity,0),elapsed_ms:Date.now()-started}));
- }catch(e){d.status=d.image?'complete':'error';d.error=e.message;d.progress={stage:'error'};console.error('SPACES_CATALOG_ERROR',j.id,e.message);}persist();
+ }catch(e){d.status=d.image?'complete':'error';d.error=e.message;d.progress={stage:'error'};console.error('SPACES_CATALOG_ERROR',j.id,e.message,JSON.stringify(e.details||{}));}persist();
 }
 function lensURL(j,item){
  const expires=Date.now()+20*60000,path='/lens-media/'+j.id+'/'+item.crop;
@@ -232,7 +234,7 @@ export function createServer(deps={}){return http.createServer({requestTimeout:3
    res.writeHead(200,{...headers,'Content-Type':'image/jpeg','Cache-Control':'private, max-age=60'});return res.end(req.method==='HEAD'?undefined:readFileSync(f));
  }
 
- if(path==='/healthz')return send(res,200,{ok:true,version:'spaces-0.5.1',source_policy:SOURCE_POLICY_VERSION,lens:!!(process.env.SERPAPI_API_KEY||process.env.SEARCHAPI_API_KEY),generation:!!process.env.GEMINI_API_KEY,search:!!process.env.SERPER_API_KEY});
+ if(path==='/healthz')return send(res,200,{ok:true,version:'spaces-0.5.2',source_policy:SOURCE_POLICY_VERSION,lens:!!(process.env.SERPAPI_API_KEY||process.env.SEARCHAPI_API_KEY),generation:!!process.env.GEMINI_API_KEY,search:!!process.env.SERPER_API_KEY});
  if(path.startsWith('/trial/')){
    const supplied=path.slice(7);if(!['GET','HEAD'].includes(req.method)||!trial||!constantEqual(supplied,trial))throw error('NOT_FOUND',404);
    // Keep the invitation in the address when Safari opens an in-app browser's page.
@@ -272,7 +274,7 @@ export function createServer(deps={}){return http.createServer({requestTimeout:3
        if(requestId&&d.redesign_request===requestId)return send(res,200,publicJob(j));
        if(d.status==='generating'||[...tasks.keys()].some(k=>k.includes(j.id)))throw error('JOB_BUSY',409);
        try{roomMeasurements(j.options);}catch(e){throw error(e.message);}
-       consume(owner,'redesign',6);d.redesign_count=(d.redesign_count||0)+1;d.redesign_request=requestId;d.status='generating';d.error=null;d.progress={stage:'understanding'};persist();
+       consume(owner,'redesign',6);if(action==='redesign'){d.redesign_count=(d.redesign_count||0)+1;delete d.catalog_work;}d.redesign_request=requestId;d.status='generating';d.error=null;d.progress={stage:'understanding'};persist();
        launch('catalog:'+id+':'+i,()=>generateCatalogDesign(j,i,deps));return send(res,202,publicJob(j));
      }
      if(j.flow==='catalog-first-v1'&&['finish','keep-finish','discard-finish','replace','search'].includes(action))throw error('CATALOG_AUTOMATIC',409);
@@ -348,6 +350,15 @@ async function selfTest(){
  }
  await configureModels();
  if(process.env.SPACES_SELF_TEST!=='true')return;
+ // Bounded repair of the two failed rooms reported by their owner on 12 October.
+ for(const id of ['30f82c45a7e81ef9a8bdefc7','39d8b25d473ef606303db719']){
+  const j=state.jobs[id],d=j?.designs?.[0];
+  if(j?.flow==='catalog-first-v1'&&d?.error==='INVALID_CATALOG_LAYOUT'&&!d.image&&d.layout_recovery!==2){
+   d.layout_recovery=2;persist();console.log('SPACES_CATALOG_RECOVERY',id);
+   await generateCatalogDesign(j,0);
+  }
+ }
+
  // Repair the most recent previously selected failed room once during this migration.
  const recent=Object.values(state.jobs).filter(j=>j.flow!=='catalog-first-v1'&&j.owner!=='demo'&&j.designs.some(d=>(d.items?.length&&d.matching_version!==3)||(d.error&&d.image))).sort((a,b)=>b.created-a.created)[0];
  if(recent){const index=Number.isInteger(recent.selected_design)?recent.selected_design:recent.designs.findIndex(d=>(d.items?.length&&d.matching_version!==3)||(d.error&&d.image));const d=recent.designs[index];if(d?.image&&(d.matching_version!==3||d.error)){d.status='analyzing';persist();launch('shop:'+recent.id+':'+index,async()=>{await identifyAndShop(recent,index);console.log('SPACES_ROOM_RECOVERED',JSON.stringify({room:recent.id,design:index,items:d.items.length,matched:d.items.filter(x=>x.offers?.length).length,with_options:d.items.filter(x=>x.alternatives?.length).length}));});}}
@@ -386,6 +397,6 @@ async function selfTest(){
 }
 if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url)){
  if(secure&&!trial)throw Error('SPACES_TRIAL_TOKEN required in production');
- const server=createServer();server.listen(Number(process.env.PORT||8080),'0.0.0.0',()=>{console.log('SPACES_READY 0.5.1');console.log('SPACES_SOURCE_POLICY',JSON.stringify({version:SOURCE_POLICY_VERSION,approved_global:APPROVED_GLOBAL_STORES.length,furniture:FURNITURE_STORES.map(x=>x.name)}));launch('selftest',selfTest);});
+ const server=createServer();server.listen(Number(process.env.PORT||8080),'0.0.0.0',()=>{console.log('SPACES_READY 0.5.2');console.log('SPACES_SOURCE_POLICY',JSON.stringify({version:SOURCE_POLICY_VERSION,approved_global:APPROVED_GLOBAL_STORES.length,furniture:FURNITURE_STORES.map(x=>x.name)}));launch('selftest',selfTest);});
  for(const sig of ['SIGINT','SIGTERM'])process.on(sig,()=>{persist();server.close(()=>process.exit(0));setTimeout(()=>process.exit(0),8000).unref();});
 }

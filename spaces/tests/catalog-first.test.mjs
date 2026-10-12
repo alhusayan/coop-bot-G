@@ -43,3 +43,24 @@ test('renderer includes real product references and rejects a failed visual audi
 test('retrieval uses broad real-product categories across local stores before a style is rendered',()=>{
  const q=catalogSearchQueries({name_en:'Curved Sectional Sofa',specs:{category:'sofa',color:'cream'}},'KW');assert.equal(q.query,'sofa cream');assert.ok(q.queries.some(([query])=>query.includes('safathome.com')));assert.ok(q.queries.some(([query])=>query.includes('ikea.com/kw/')));assert.equal(catalogSearchQueries({name_en:'Travertine Coffee Table',specs:{color:'white'}},'KW',true).query,'coffee table');
 });
+
+
+test('opposite facing chairs have valid measured footprints; camera hints never block a feasible floor plan',()=>{
+ const x=structuredClone(layout);x.choices[0].placements[0].rotation=180;x.choices[0].placements[1].rotation='270';
+ delete x.choices[0].placements[0].box;x.choices[0].placements[1].box=[0,0,0,0];
+ const p=validateCatalogPlan(x,[item],room);assert.equal(p.picks[0].views[0].position_cm.rotation,180);assert.equal(p.picks[0].views[1].position_cm.rotation,270);
+ x.choices[0].placements[1].rotation=45;assert.throws(()=>validateCatalogPlan(x,[item],room),e=>e.details.reason.includes('rotation'));
+});
+test('layout failures identify the actual collision and remaining room instead of a generic retry',()=>{
+ const x=structuredClone(layout);x.choices[0].placements[1].x_cm=1;
+ assert.throws(()=>validateCatalogPlan(x,[item],room),e=>e.details.reason==='Overlapping floor footprints'&&e.details.conflict.copy===0);
+ x.choices[0].placements[1].x_cm=399;
+ assert.throws(()=>validateCatalogPlan(x,[item],room),e=>e.details.reason==='Footprint outside measured room'&&e.details.allowed.x[1]===315);
+});
+test('retry resumes a sourced catalogue but refreshes stock before rendering',async()=>{
+ let saved,searches=0,stocks=0,calls=0;
+ const opts={width:4,length:5,market:'KW'},deps={detect:async()=>context,judge:async()=>++calls===1?brief:layout,source:async()=>{searches++;return [offer];},stock:async o=>{stocks++;return o;},onCheckpoint:c=>saved=structuredClone(c),render:async()=>{throw Error('PLACEMENT_UNVERIFIED');}};
+ await assert.rejects(designFromCatalog(original,opts,deps),/PLACEMENT_UNVERIFIED/);
+ await designFromCatalog(original,opts,{...deps,checkpoint:saved,detect:async()=>{throw Error('should reuse room');},render:async()=>({output:Buffer.from('ok')})});
+ assert.equal(searches,1);assert.equal(stocks,2);
+});
