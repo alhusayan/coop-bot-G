@@ -5,7 +5,7 @@ export const DETAILS_VERSION=1;
 const arr=v=>v==null?[]:Array.isArray(v)?v:[v];
 export const plain=v=>String(v??'').replace(/<[^>]*>/g,' ').replace(/&nbsp;|&#160;/g,' ').replace(/&amp;/g,'&').replace(/[\u200e\u200f\u202a-\u202e]/g,'').replace(/\s+/g,' ').trim();
 export function productURL(value,base){
- try{const u=new URL(value,base);for(const k of [...u.searchParams.keys()])if(/^(?:utm_.+|srsltid|gclid|fbclid|ref|ref_)$/i.test(k))u.searchParams.delete(k);u.hash='';u.hostname=u.hostname.replace(/^www\./,'');u.pathname=u.pathname.replace(/\/$/,'');u.searchParams.sort();return u.href;}catch{return '';}
+ try{const u=new URL(value,base);for(const k of [...u.searchParams.keys()])if(/^(?:utm_.+|srsltid|gclid|fbclid|ref|ref_|TCID|AFID|CPNG|adgroup|spm|linkCode|tag)$/i.test(k))u.searchParams.delete(k);u.hash='';u.hostname=u.hostname.replace(/^www\./,'');u.pathname=u.pathname.replace(/\/$/,'');u.searchParams.sort();return u.href;}catch{return '';}
 }
 export function imageKey(value){try{const u=new URL(value);for(const k of [...u.searchParams.keys()])if(/^(?:w|h|width|height|qlt|quality|fmt|format|fit|crop|resize|sm|v)$/i.test(k))u.searchParams.delete(k);u.searchParams.sort();return u.href;}catch{return '';}}
 function urlSKU(url){try{return decodeURIComponent(new URL(url).pathname.match(/\/(?:p|dp|item|itm)\/([^/]+)\/?$/i)?.[1]||'').replace(/\.html$/,'');}catch{return '';}}

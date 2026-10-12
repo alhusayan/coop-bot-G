@@ -1,7 +1,7 @@
 import {safePage,productFromPage} from './engine.mjs';
 import {availabilityFromPage} from './availability.mjs';
 import {dimensionDetails,dimensionLabel,usableSize} from './dimensions.mjs';
-import {productURL,plain} from './product-data.mjs';
+import {productURL,plain,readProductData} from './product-data.mjs';
 import {sourceScope} from './sourcing.mjs';
 
 // Serper's public webpage endpoint; request format verified against its published playground.
@@ -12,12 +12,12 @@ function scopedText(text){return text.split(/(?:\n#{1,6}\s*(?:you may also|recom
 export function detailsFromScrape(data,offer){
  const text=scopedText(String(data.markdown||data.text||''));
  if(!text||/captcha|verify you are human|access denied|sign in to continue/i.test(text.slice(0,1500)))return null;
- const meta=data.metadata||{},url=meta.canonical||meta.canonicalUrl||meta['og:url']||data.url;
+ const meta=data.metadata||{},url=meta.canonical||meta.canonicalUrl||meta['og:url']||meta.ogUrl||data.url;
  if(url&&productURL(url,offer.link)!==productURL(offer.link))return null;
  // A requested option needs variant evidence; a generic page title cannot establish its size.
  const requested=new URL(offer.link).searchParams.get('variant');
  const sku=offer.sku||new URL(offer.link).pathname.match(/\/(?:p|dp|item|itm)\/([^/]+)\/?$/i)?.[1];
- const title=String(meta.title||data.title||text.match(/^#\s+(.+)$/m)?.[1]||'');
+ const title=String(meta.title||meta['og:title']||meta.ogTitle||data.title||text.match(/^#\s+(.+)$/m)?.[1]||'');
  const words=norm(offer.title).split(' ').filter(w=>w.length>2&&!/^(shop|buy|online|with|the|and|homecentre|kuwait|saudi|arabia|ksa)$/.test(w));
  const titleMatch=words.length>=3&&words.filter(w=>norm(title).split(' ').includes(w)).length/words.length>=.75;
  const skuMatch=sku&&new RegExp('(?:^|[^a-z0-9])'+String(sku).replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+'(?:$|[^a-z0-9])','i').test(text);
@@ -28,12 +28,17 @@ export function detailsFromScrape(data,offer){
   const label=line.match(/^\s*(?:[-*]\s*)?(?:\*\*)?((?:Overall |Product |Item )?(?:Width|Depth|Length|Height|Diameter|Dimensions|Size|ASIN|SKU)(?:\s*\([^)]*\))?)(?:\*\*)?\s*:\s*(.{1,250})$/i);
   if(table||label){const m=table||label;rows.push({label:m[1].replaceAll('**','').trim(),value:m[2].replaceAll('**','').trim(),source:'store_page_extraction'});}
  }
- const facts=dimensionDetails('',{name:offer.title},offer.link,{rows,texts:[text.replace(/\|/g,' ')],selected:null,schema:null,variantUnconfirmed:false});
+ const ld=Array.isArray(data.jsonld)?data.jsonld:data.jsonld?[data.jsonld]:[];
+ const schemaHTML=ld.map(x=>'<script type="application/ld+json">'+JSON.stringify(x)+'</script>').join('');
+ const parsed=readProductData(schemaHTML,offer.link);
+ const sameSchema=!offer.sku||!parsed.schema?.sku||String(offer.sku)===String(parsed.schema.sku);
+ const facts=dimensionDetails('',sameSchema&&parsed.schema||{name:offer.title},offer.link,{...parsed,rows:[...(sameSchema?parsed.rows:[]),...rows],texts:[text.replace(/\|/g,' ')]});
  const labels=text.split('\n').map(x=>plain(x.replace(/[*#]/g,'')).replace(/^\[([^\]]+)\]\([^)]*\)$/,'$1'));
+ const schemaStock=schemaHTML?availabilityFromPage(schemaHTML,offer.link):{availability:'unknown'};
  const sold=labels.some(x=>/^(?:out of stock|sold out|نفد المخزون|إنتهى من المخزن)$/i.test(x));
  // Positive stock requires the exact product identifier and an explicit purchase control.
  const buy=skuMatch&&labels.some(x=>/^(?:add to cart|add to bag|add to basket|أضف إلى السلة)$/i.test(x));
- return {dimensions_cm:facts.size,dimensions:dimensionLabel(facts.size),dimensions_evidence:facts.evidence,dimensions_status:facts.status,dimensions_source:Object.keys(facts.size).length?'store_page_extraction':null,availability:sold?'out_of_stock':buy?'listed_available':'unknown',stock_evidence:sold||buy?'extracted_purchase_control':'unconfirmed'};
+ return {dimensions_cm:facts.size,dimensions:dimensionLabel(facts.size),dimensions_evidence:facts.evidence,dimensions_status:facts.status,dimensions_source:Object.keys(facts.size).length?'store_page_extraction':null,availability:sold?'out_of_stock':buy?'listed_available':schemaStock.availability,stock_evidence:sold||buy?'extracted_purchase_control':schemaStock.stock_evidence||'unconfirmed'};
 }
 export async function scrapeDetails(offer,market,{fetcher=fetch,env=process.env}={}){
  if(!env.SERPER_API_KEY||!sourceScope(offer.link,market))return null;
@@ -44,7 +49,7 @@ export async function scrapeDetails(offer,market,{fetcher=fetch,env=process.env}
   if(!res.ok)throw Error('detail_provider_'+res.status);
   const raw=await res.text();if(raw.length>2000000)throw Error('details_too_large');const data=JSON.parse(raw);
   // Only content metadata is logged; never credentials or full product page contents.
-  console.log('SPACES_DETAIL_EXTRACT',JSON.stringify({host:new URL(offer.link).hostname,fields:Object.keys(data),chars:String(data.markdown||data.text||'').length}));
+  console.log('SPACES_DETAIL_EXTRACT',JSON.stringify({host:new URL(offer.link).hostname,fields:Object.keys(data),metadata:Object.keys(data.metadata||{}),chars:String(data.markdown||data.text||'').length}));
   if(cache.size>=100)cache.delete(cache.keys().next().value);cache.set(key,{time:Date.now(),data});return data;
  })();pending.set(key,task);task.finally(()=>pending.delete(key)).catch(()=>{});}
  return detailsFromScrape(await task,offer);

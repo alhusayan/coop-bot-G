@@ -40,6 +40,7 @@ export function dimensionDetails(html,product={},url='',data){
    const single=label.match(new RegExp('^(width|depth|length|height|diameter|w|d|l|h|عرض|العرض|عمق|العمق|طول|الطول|ارتفاع|الارتفاع|قطر)\\s*(?:\\(('+unit+')\\)|('+unit+'))?$', 'i'));
    if(single){accept(axisOf(single[1]),row.value,row.unit||single[2]||single[3],row);return;}
    if(!/dimension|measurement|size|أبعاد|ابعاد|مقاس/i.test(row.label))return;
+   row={...row,value:String(row.value).replace(/\(([LWDH])\)/gi,'$1')};
    // Examples: 30"L x 22"W; W80 x D85 x H90 cm. Each number must have an axis.
    const suffixUnit=row.value.match(new RegExp('('+unit+')\\s*$','i'))?.[1]||row.label.match(new RegExp('\\(('+unit+')\\)','i'))?.[1];
    const suffix=new RegExp('(\\d+(?:[.,]\\d+)?)\\s*("|″|'+unit+')?\\s*([LWDH])(?=\\s*(?:[x×]|$))','gi');

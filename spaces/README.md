@@ -1,6 +1,6 @@
 # Findzia Spaces — isolated trial
 
-English, touch-first private-invite experimental room redesign and shopping app. Supports all room types, three real photo edits, retained furniture preferences, budget/market selection, detected item hotspots, localized product-price searches, alternatives, quantities, partial totals, export and temporary history.
+English, touch-first private-invite experimental room redesign and shopping app. New rooms use a single automatic product-first design: required room measurements and visible wishes, local-first discovery, verified store size/stock, automatic product selection and one reference-based room render. Redesign repeats the process without requiring the customer to select products. Legacy rooms retain their original shopping flow.
 
 ## Deployment
 
@@ -8,7 +8,7 @@ Deploy this folder as an independent Railway service from branch `experiment/fin
 
 Set `GEMINI_API_KEY`, `SERPER_API_KEY`, `SERPAPI_API_KEY` and `SEARCHAPI_API_KEY` as references to the existing Railway backend variables, not copied into code. Set `SPACES_TRIAL_TOKEN` to a high-entropy random value; opening `/trial/<token>` establishes an HttpOnly signed session and keeps the invitation URL, so moving from an in-app browser to Safari can establish a separate session. Reopening the invitation preserves the current session owner. The client checks access before photo selection and renews an expired session through the invitation on a 401, without replaying timed-out design requests. Set `SPACES_DATA_DIR=/data` on an isolated volume. Set `SPACES_PUBLIC_URL` to the service HTTPS URL. No provider keys are exposed to the browser.
 
-Optional: `SPACES_IMAGE_MODEL` (default `gemini-nano-banana-2.1`), `SPACES_TEXT_MODEL` (default `gemini-3.8-flash`), `SPACES_DAILY_ROOMS` (24), `SPACES_SELF_TEST=true` to create one real example with three variants and a shoppable first design. Check the `SPACES_SELFTEST_RESULT` log; errors are not hidden. Real provider API calls are billable.
+Optional: `SPACES_IMAGE_MODEL` (default `gemini-nano-banana-2.1`), `SPACES_TEXT_MODEL` (default `gemini-3.8-flash`), `SPACES_DAILY_ROOMS` (24), `SPACES_SELF_TEST=true` for startup diagnostics and legacy-data recovery. New example photos use the same measured product-first flow as uploads. Check the `SPACES_SELFTEST_RESULT` log; errors are not hidden. Real provider API calls are billable.
 
 ## Verification
 
@@ -83,3 +83,11 @@ The image edit uses actual store photos and dimensions, checks room preservation
 ## 0.4.1 — Clear room-size step
 
 Room width and length are required immediately after photo upload, before paid generation or store search. These measurements initialize all three designs and are reused by Finish my room. Starting another room clears the previous dimensions. Older rooms can add room size during store search, including while the inventory is being identified. Saving measurements is independent of search and does not trigger a paid preview. Finish my room remains disabled until dimensions are saved and search completes. Existing measured attempts retain their room size. Empty recommendations now distinguish missing store dimensions, unconfirmed stock and a failed space check; finishing the search never claims that sizes have been checked. Editing measurements invalidates an older preview.
+
+## 0.5 — automatic product-first rooms
+
+`catalog-first.mjs` detects the room function, creates a grouped shopping brief, searches locally (including a recovery pass), then falls back to approved international sources only when suitable local products cannot be verified. Products must have confirmed stock and published dimensions. Flat items can use two explicit dimensions; furniture requires width, depth and height. The AI selects supplied products automatically. Numeric floor footprints are checked for room bounds and overlap; repeated copies use one product.
+
+Only then does the renderer receive the room photo and actual store product photos. It produces one design, with a bounded corrective attempt. Room preservation, quantities, visual scale and product appearance are checked before publishing the image and shopping list atomically. Unverified essential pieces or failed render checks produce a retry state, never fabricated products or dimensions. Redesign keeps the previous result until a new one passes. Store measurements are evidence; room placement remains an approximate visual preview.
+
+Run `npm test` for catalog sequencing, source priority, footprint/quantity validation, failed stock/visual checks, the single-design UI and idempotent redesign, alongside legacy regressions.
