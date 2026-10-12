@@ -64,7 +64,7 @@ function candidateRows(rows,market,seen,limit){
 export async function searchItem(item,market,{env=process.env,search=serper,page=safePage,lensSearch=lens,judge=gemini,fetchImage=safeImage,target,lensUrl,attempt=1,onProgress=()=>{}}={}){
  const m=MARKETS[market],seen=new Set(),all=[],alternatives=[];let attempted=0,failures=0;
  const started=Date.now();
- function rank(offers){return [...new Map(offers.map(o=>[o.link,o])).values()].sort((a,b)=>Number(a.availability==='out_of_stock')-Number(b.availability==='out_of_stock')||Number(b.market_scope==='local')-Number(a.market_scope==='local')||b.visual_score-a.visual_score).slice(0,4);}
+ function rank(offers){return [...new Map(offers.map(o=>[o.link,o])).values()].sort((a,b)=>Number(a.availability==='out_of_stock')-Number(b.availability==='out_of_stock')||b.visual_score-a.visual_score||Number(b.market_scope==='local')-Number(a.market_scope==='local')).slice(0,4);}
  const progress=phase=>onProgress({offers:rank(all),alternatives:rank(alternatives),checked:attempted,phase});
  async function enrich(o){
    try{const p=await page(o.link,{timeout:5000});const product=productFromPage(p.html,p.url,m.currency);

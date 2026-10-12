@@ -38,3 +38,9 @@ Strict visual matches remain separate from replacements. A replacement requires 
 - Per-piece activity and a real checked-piece counter show queued, searching, checking and second-pass states. No simulated completion percentage.
 - Room detection is automatic; the broken room selector is removed. Detailed replacement differences are expandable.
 - Regression coverage includes provisional empty states, bounded retries, retained options, DOM identity and out-of-order image loads.
+
+### 0.3.2 — product identity across views and room function
+- A room-level visual identity check groups repeated identical products into one purchase entry with the actual quantity. Different shapes, finishes, configurations, uncertain identities and overlapping detections cannot be merged.
+- All grouped crop locations remain available. Searches use up to three angles, combine checked results without duplicate URLs and rank visual strength before market proximity. Existing matching/alternative distinctions remain intact.
+- Replacing a grouped item edits every copy, verifies each store-product match and commits the scene only when all copies and the other room contents pass.
+- Room detection preserves functional evidence and mixed-use zones. Every generated concept must pass a post-generation function check; an office cannot be silently converted into a lounge. One corrective generation is allowed before a clear retry error.

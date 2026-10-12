@@ -40,3 +40,5 @@
 @media(prefers-reduced-motion:reduce){*,*:before,*:after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
 
 .search-progress.finished .pulse-dot{animation:none;opacity:1;transform:none}.search-progress.finished{position:relative;top:0;background:#f0f4ee;box-shadow:none}
+
+.item-quantity{position:absolute;top:10px;right:10px;min-width:37px;padding:5px 8px;border-radius:20px;background:#fffE;color:var(--green);font-size:14px;font-weight:600}.title-quantity{white-space:nowrap;color:var(--muted);font-weight:500;font-size:.75em}
