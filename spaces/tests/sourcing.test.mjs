@@ -38,3 +38,9 @@ test('local retrieval targets the selected country and simplifies bed retrieval 
  assert.ok(q.every(([query])=>!query.includes('platform')&&!query.includes('120')&&!query.includes('/kw/')));
  assert.equal(sourceScope('https://www.homecentre.com/sa/en/buy-bed/p/123','SA'),'local');assert.equal(sourceScope('https://www.homecentre.com/ae/en/buy-bed/p/123','SA'),null);
 });
+
+test('platform beds use real bed-base retail names instead of retrieving attached headboards',()=>{
+ const queries=localQueries({name_en:'Single platform bed',query:'single headboardless bed'},'SA',{recovery:true});
+ assert.ok(queries[0][0].includes('single bed base'));assert.ok(queries[1][0].includes('قاعدة سرير مفرد'));assert.equal(queries[1][2].lang,'ar');
+ const full=localQueries({name_en:'Upholstered single bed',query:'single bed with attached headboard'},'SA',{recovery:true});assert.ok(!full[0][0].includes('bed base'));
+});

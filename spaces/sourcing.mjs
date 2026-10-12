@@ -66,5 +66,14 @@ export function localQueries(item,market,{recovery=false}={}){
  let simple=String(item.name_en||item.specs?.category||q).replace(/\b(?:modern|contemporary|mid-century|platform)\b/gi,'').replace(/\s+/g,' ').trim();
  if(/\bbed\b/i.test(simple)&&!/\b(?:sofa|daybed|bunk)\b/i.test(simple))simple=simple.replace(/\bframe\b/gi,'').trim();
  if(!recovery)return [[q+' '+m.en,market,{images:true,source:'local'}],[native+' '+m.name+siteQuery,market,{images:true,lang:m.lang,source:'local'}]];
+ const evidence=[item.name_en,q,item.description,item.specs?.category,item.specs?.configuration].filter(Boolean).join(' ');
+ if(/\bbed\b/i.test(item.name_en||'')&&/platform|headboardless|(?:no|without|without an? attached) headboard|bed base|mattress base/i.test(evidence)){
+   // Retailers call a headboardless platform a bed base or mattress base, not a complete bed.
+   const size=evidence.match(/\b(single|twin|double|queen|king)\b/i)?.[0]?.toLowerCase()||'';
+   const sizeAr={single:'مفرد',twin:'مفرد',double:'مزدوج',queen:'كوين',king:'كينج'}[size]||'';
+   simple=[size,'bed base'].filter(Boolean).join(' ');
+   const localBase=m.lang==='ar'?['قاعدة سرير',sizeAr].filter(Boolean).join(' '):simple;
+   return [[simple+siteQuery+' '+m.en,market,{images:true,source:'local-recovery'}],[localBase+' '+m.name+siteQuery,market,{lang:m.lang,source:'local-recovery'}]];
+ }
  return [[simple+siteQuery+' '+m.en,market,{images:true,source:'local-recovery'}],[simple+' '+m.en+siteQuery,market,{source:'local-recovery'}]];
 }

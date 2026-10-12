@@ -56,5 +56,8 @@ Strict visual matches remain separate from replacements. A replacement requires 
 - Local Lens hits and English/native local queries are checked first. Foreign Lens hits are held without auditing or publishing. A second local pass uses simpler item names and explicit local furniture storefronts before global search is allowed.
 - Suitable, visually checked local replacements count as a successful local result. Out-of-stock locals do not block global recovery. Visual thresholds, differences, purchase unit and room-fit disclosures remain unchanged.
 - A common ranking function covers initial results, retries, grouped items and saved results. Local options cannot be displaced by higher-scoring global options before truncation. Cached foreign matches cannot hide suitable local alternatives in the product sheet.
-- Search revision 6 rechecks older items with no local options when reopened. The latest selected room is refreshed once on deployment. New logs include local check counts, global-fallback events and actual resulting store names for diagnosis.
+- Search revision 7 rechecks older items with no local options when reopened. The latest selected room is refreshed once on deployment. New logs include local check counts, global-fallback events and actual resulting store names for diagnosis.
 - Activity labels distinguish local discovery, local recovery and international fallback. Existing keyed image/scroll preservation is retained.
+
+### 0.3.5 — headboardless bed retrieval
+- Local recovery expands a platform/headboardless bed to the retailer purchase unit `bed base` / `mattress base`, including Arabic `قاعدة سرير`, while preserving any explicitly described single/twin/double/queen/king configuration. No dimensions are inferred. Candidate acceptance still uses the full original visual evidence.
