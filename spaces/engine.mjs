@@ -121,7 +121,8 @@ export async function configureModels(env=process.env){
   const text=textPreferences.find(x=>models.includes(x))||models.find(x=>/^gemini.*flash/.test(x)&&!/image|tts|live|audio|robot/.test(x));
   const image=imagePreferences.find(x=>models.includes(x))||models.find(x=>/^gemini.*image/.test(x));
   if(text)env.SPACES_TEXT_MODEL=text;if(image)env.SPACES_IMAGE_MODEL=image;
-  console.log('SPACES_MODELS',JSON.stringify({text:env.SPACES_TEXT_MODEL,image:env.SPACES_IMAGE_MODEL,available:models.filter(x=>/gemini/.test(x)).slice(0,35)}));
+  const repair=[env.SPACES_IMAGE_REPAIR_MODEL,'gemini-3-pro-image','gemini-3-pro-image-preview'].find(x=>models.includes(x));if(repair)env.SPACES_IMAGE_REPAIR_MODEL=repair;
+  console.log('SPACES_MODELS',JSON.stringify({text:env.SPACES_TEXT_MODEL,image:env.SPACES_IMAGE_MODEL,repair:env.SPACES_IMAGE_REPAIR_MODEL,available:models.filter(x=>/gemini/.test(x)).slice(0,35)}));
  }catch(e){console.error('SPACES_MODEL_LIST_FAILED',e.name);}
 }
 export async function gemini(parts,{image=false,env=process.env,json=false,timeout,maxTokens=14000,schema,jsonRetry=0}={}){

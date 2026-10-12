@@ -34,7 +34,7 @@ export function visualDecision(v){
  // A score can never override an explicit mismatch or missing visual evidence.
  return !!v&&Number(v.score)>=88&&['category','color','shape','material','configuration','proportions'].every(k=>v[k]==='match')&&Array.isArray(v.differences)&&v.differences.length===0;
 }
-export async function auditVisual(item,offers,target,{env=process.env,judge=gemini,fetchImage=safeImage,onNear=()=>{},onMatch=()=>{},onError=()=>{}}={}){
+export async function auditVisual(item,offers,target,{env=process.env,judge=gemini,fetchImage=safeImage,onNear=()=>{},onMatch=()=>{},onError=()=>{},onVerdict=()=>{}}={}){
  if(!target?.inlineData||!offers.length)return [];
  const loaded=(await pool(offers,5,async o=>{
    for(const image of [...new Set([o.image,o.image_fallback].filter(Boolean))]){try{const r=await fetchImage(image);const bytes=await sharp(r.bytes,{limitInputPixels:40e6}).resize({width:720,height:720,fit:'inside',withoutEnlargement:true}).jpeg({quality:83}).toBuffer();return {offer:{...o,image},inlineData:{mimeType:'image/jpeg',data:bytes.toString('base64')}};}catch{}}return null;
@@ -51,6 +51,7 @@ export async function auditVisual(item,offers,target,{env=process.env,judge=gemi
    for(const v of results){
      if(!Number.isInteger(v.index)||!group[v.index])continue;
      if(Number(v.score)>=88&&!visualDecision(v))console.log('SPACES_MATCH_REJECT',item.id,JSON.stringify({category:v.category,configuration:v.configuration,proportions:v.proportions,differences:v.differences}));
+     onVerdict({accepted:visualDecision(v),reason:clean(v.reason,400),differences:(v.differences||[]).map(x=>clean(x,220)).slice(0,6)});
      const o={...group[v.index].offer,visual_score:Number(v.score)||0,match_reason:clean(v.reason,240),size_verified:false};
      if(visualDecision(v)){const match={...o,match:'visual'};accepted.push(match);onMatch(match);}
      else if(replacementDecision(v))onNear({...o,match:'replacement',differences:v.differences.map(x=>clean(x,180)).slice(0,4)});
