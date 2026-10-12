@@ -78,3 +78,8 @@ Finish my room asks for measured room width/length and optionally a maximum spac
 The image edit uses actual store photos and dimensions, checks room preservation and verifies every repeated product against the final preview. Preview creation does not modify the saved design. Keep this design rechecks stock and publishes the image, choices and all occurrence crops together. Change a piece regenerates from the saved source.
 
 **Accuracy limits:** Photo-based scale and clearances are estimates, even with room width/length. Entered per-item limits check a rectangular envelope, not full 3D collisions, installation, delivery access or exact colour under different lighting. No output is labelled size_verified. Curtains, built-ins and products missing any required dimension need manual measurement; no dimensions are invented. This feature does not certify an installation plan.
+
+
+## 0.4.1 — Clear room-size step
+
+Room width and length are required immediately after photo upload, before paid generation or store search. These measurements initialize all three designs and are reused by Finish my room. Starting another room clears the previous dimensions. Older rooms can add room size during store search, including while the inventory is being identified. Saving measurements is independent of search and does not trigger a paid preview. Finish my room remains disabled until dimensions are saved and search completes. Existing measured attempts retain their room size. Empty recommendations now distinguish missing store dimensions, unconfirmed stock and a failed space check; finishing the search never claims that sizes have been checked. Editing measurements invalidates an older preview.

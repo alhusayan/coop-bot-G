@@ -12,7 +12,7 @@ test('local sized stock beats a higher scoring global result; invented AI links 
 });
 test('global fallback follows local fit and stock checks, and missing dimensions never qualify',async()=>{
  const p=await recommendRoom([{...item,alternatives:[{...local,dimensions_cm:{...size,width:200}},global]}],{},room,'KW',{stock,judge});assert.equal(p.picks[0].offer.link,global.link);
- const q=await recommendRoom([{...item,alternatives:[{...local,availability:'unknown'},{...global,dimensions_cm:{}}]}],{},room,'KW',{stock,judge});assert.equal(q.picks.length,0);assert.equal(q.skipped.length,1);
+ const q=await recommendRoom([{...item,alternatives:[{...local,availability:'unknown'},{...global,dimensions_cm:{}}]}],{},room,'KW',{stock,judge});assert.equal(q.picks.length,0);assert.equal(q.skipped.length,1);assert.equal(q.skipped[0].reason_code,'store_dimensions');
 });
 test('every repeated copy must fit and user choices cannot silently change',async()=>{
  const narrow=async parts=>parts[0].text.startsWith('Estimate')?{slots:[{id:'1',copy:0,confidence:90,space:size,target:size},{id:'1',copy:1,confidence:90,space:{...size,width:60},target:size}]}:judge(parts);

@@ -161,7 +161,7 @@ async function finishRoom(j,index,finish,deps={}){
   const plan=await (deps.recommend||recommendRoom)(d.items,fileImage(j,d.image),finish.room,j.options.market,{limits:finish.limits,preferred:finish.preferred,onProgress:progress});
   if(!valid())return;
   finish.plan=plan;
-  if(!plan.picks.length){finish.status='needs_measurements';d.status='complete';persist();return;}
+  if(!plan.picks.length){console.log('SPACES_FINISH_NO_PICKS',j.id,index,JSON.stringify({reasons:plan.skipped.map(x=>({id:x.id,reason:x.reason_code||x.reason}))}));finish.status='needs_measurements';d.status='complete';persist();return;}
   // Recheck before spending on rendering; a cached search hit is not proof of current stock.
   for(const pick of plan.picks){const offer=await (deps.stock||checkStock)(pick.offer,j.options.market,{force:true});if(offer.availability!=='listed_available')throw Error('STOCK_CHANGED');if(JSON.stringify(offer.dimensions_cm)!==JSON.stringify(pick.offer.dimensions_cm))throw Error('CHOICE_NO_LONGER_FITS');pick.offer={...pick.offer,...offer};}
   const result=await (deps.preview||createRoomPreview)(fileImage(j,finish.source_image),plan,{onProgress:progress});
@@ -193,7 +193,8 @@ async function keepFinishedRoom(j,index,finish,deps={}){
 }
 function makeJob(owner,opt,buffer,idempotency=''){
  const id=randomBytes(12).toString('hex');mkdirSync(resolve(DATA,id),{recursive:true,mode:0o700});writeFileSync(resolve(DATA,id,'original.jpg'),buffer,{mode:0o600});
- const j={id,owner,created:Date.now(),idempotency,options:opt,room:opt.room==='auto'?'Your room':opt.room,designs:STYLES.map(s=>({id:s.id,title:s.en,subtitle:s.en,description:s.description,palette:s.palette,status:'generating',image:null,items:[],retries:0}))};state.jobs[id]=j;persist();return j;
+ let measured=null;try{measured={room:roomMeasurements(opt),limits:{}};}catch{}
+ const j={id,owner,created:Date.now(),idempotency,options:opt,room:opt.room==='auto'?'Your room':opt.room,designs:STYLES.map(s=>({measurements:measured?structuredClone(measured):null,id:s.id,title:s.en,subtitle:s.en,description:s.description,palette:s.palette,status:'generating',image:null,items:[],retries:0}))};state.jobs[id]=j;persist();return j;
 }
 export function createServer(deps={}){return http.createServer({requestTimeout:30000,headersTimeout:15000,maxHeaderSize:16384},async(req,res)=>{
  try{
@@ -206,7 +207,7 @@ export function createServer(deps={}){return http.createServer({requestTimeout:3
    res.writeHead(200,{...headers,'Content-Type':'image/jpeg','Cache-Control':'private, max-age=60'});return res.end(req.method==='HEAD'?undefined:readFileSync(f));
  }
 
- if(path==='/healthz')return send(res,200,{ok:true,version:'spaces-0.4.0',source_policy:SOURCE_POLICY_VERSION,lens:!!(process.env.SERPAPI_API_KEY||process.env.SEARCHAPI_API_KEY),generation:!!process.env.GEMINI_API_KEY,search:!!process.env.SERPER_API_KEY});
+ if(path==='/healthz')return send(res,200,{ok:true,version:'spaces-0.4.1',source_policy:SOURCE_POLICY_VERSION,lens:!!(process.env.SERPAPI_API_KEY||process.env.SEARCHAPI_API_KEY),generation:!!process.env.GEMINI_API_KEY,search:!!process.env.SERPER_API_KEY});
  if(path.startsWith('/trial/')){
    const supplied=path.slice(7);if(!['GET','HEAD'].includes(req.method)||!trial||!constantEqual(supplied,trial))throw error('NOT_FOUND',404);
    // Keep the invitation in the address when Safari opens an in-app browser's page.
@@ -228,18 +229,23 @@ export function createServer(deps={}){return http.createServer({requestTimeout:3
    const b=await body(req);const idem=String(req.headers['idempotency-key']||'').slice(0,100);
    const prior=idem&&Object.values(state.jobs).find(j=>j.owner===owner&&j.idempotency===idem);if(prior)return send(res,200,publicJob(prior));
    if(!process.env.GEMINI_API_KEY||!process.env.SERPER_API_KEY)throw error('NOT_CONFIGURED',503);
+   try{roomMeasurements(b);}catch(e){throw error(e.message);}
    if(tasks.size>8)throw error('PROVIDER_BUSY',429);
    const encoded=String(b.image||'');if(!/^data:image\/jpeg;base64,[A-Za-z0-9+/=]+$/.test(encoded))throw error('INVALID_IMAGE');
    const buffer=Buffer.from(encoded.split(',')[1],'base64');if(buffer.length>12*1024*1024||buffer.length<200||buffer[0]!==255||buffer[1]!==216||buffer[2]!==255)throw error('INVALID_IMAGE');
    consume(owner,'rooms',6);consume('all','rooms',Number(process.env.SPACES_DAILY_ROOMS)||24);
-   const j=makeJob(owner,options(b),buffer,idem);launch('generate:'+j.id,()=>generateJob(j));return send(res,202,publicJob(j));
+   const j=makeJob(owner,options(b),buffer,idem);launch('generate:'+j.id,()=>(deps.generateJob||generateJob)(j));return send(res,202,publicJob(j));
  }
- const match=path.match(/^\/api\/jobs\/([a-f0-9]{24})(?:\/(select|retry|search|replace|finish|keep-finish|discard-finish)(?:\/(\d+))?)?$/);
+ const match=path.match(/^\/api\/jobs\/([a-f0-9]{24})(?:\/(select|retry|search|replace|finish|keep-finish|discard-finish|measurements)(?:\/(\d+))?)?$/);
  if(match){const [,id,action,itemIndex]=match;
    if(req.method==='GET'&&!action)return send(res,200,publicJob(ownerJob(id,owner)));
    if(req.method==='DELETE'&&!action){const j=mutateJob(id,owner);if([...tasks.keys()].some(k=>k.includes(j.id)))throw error('JOB_BUSY',409);delete state.jobs[id];rmSync(resolve(DATA,id),{recursive:true,force:true});persist();return send(res,200,{ok:true});}
    if(req.method==='POST'){
      const j=action==='select'?ownerJob(id,owner):mutateJob(id,owner),b=await body(req),i=Number(b.design),d=j.designs[i];if(!d)throw error('INVALID_INPUT');if(['adapting','finishing'].includes(d.status))throw error('JOB_BUSY',409);
+     if(action==='measurements'){
+       let room,limits;try{room=roomMeasurements(b);limits=measuredLimits(b.limits,d.items||[]);}catch(e){throw error(e.message);}
+       d.measurements={room,limits};d.finish=null;persist();return send(res,200,publicJob(j));
+     }
      if(['finish','keep-finish','discard-finish'].includes(action)){
        if(!d.image||d.matching_version!==3||!d.items?.length||['searching','analyzing','generating'].includes(d.status)||tasks.has('shop:'+id+':'+i)||[...itemTasks.keys()].some(k=>k.startsWith(id+':'+i+':')))throw error('JOB_BUSY',409);
        if(action==='discard-finish'){d.finish=null;persist();return send(res,200,publicJob(j));}
@@ -251,7 +257,7 @@ export function createServer(deps={}){return http.createServer({requestTimeout:3
        consume(owner,'room-previews',6);
        const preferred={};for(const item of d.items)if(typeof b.preferred?.[item.id]==='string')preferred[item.id]=b.preferred[item.id];
        const finish={token:randomBytes(12).toString('hex'),source_image:d.image,room,limits,preferred,status:'sizes',image:null,error:null};
-       d.finish=finish;d.status='finishing';persist();launch('finish:'+id+':'+i,()=>finishRoom(j,i,finish,deps));return send(res,202,publicJob(j));
+       d.measurements={room,limits};d.finish=finish;d.status='finishing';persist();launch('finish:'+id+':'+i,()=>finishRoom(j,i,finish,deps));return send(res,202,publicJob(j));
      }
      if(action==='select'){
        d.shop_requested=true;j.selected_design=i;
@@ -336,6 +342,6 @@ async function selfTest(){
 }
 if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url)){
  if(secure&&!trial)throw Error('SPACES_TRIAL_TOKEN required in production');
- const server=createServer();server.listen(Number(process.env.PORT||8080),'0.0.0.0',()=>{console.log('SPACES_READY 0.4.0');console.log('SPACES_SOURCE_POLICY',JSON.stringify({version:SOURCE_POLICY_VERSION,approved_global:APPROVED_GLOBAL_STORES.length,furniture:FURNITURE_STORES.map(x=>x.name)}));launch('selftest',selfTest);});
+ const server=createServer();server.listen(Number(process.env.PORT||8080),'0.0.0.0',()=>{console.log('SPACES_READY 0.4.1');console.log('SPACES_SOURCE_POLICY',JSON.stringify({version:SOURCE_POLICY_VERSION,approved_global:APPROVED_GLOBAL_STORES.length,furniture:FURNITURE_STORES.map(x=>x.name)}));launch('selftest',selfTest);});
  for(const sig of ['SIGINT','SIGTERM'])process.on(sig,()=>{persist();server.close(()=>process.exit(0));setTimeout(()=>process.exit(0),8000).unref();});
 }
