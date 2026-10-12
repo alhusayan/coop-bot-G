@@ -121,7 +121,7 @@ export function createServer(){return http.createServer({requestTimeout:30000,he
    }
  }
  const media=path.match(/^\/media\/([a-f0-9]{24})\/(original\.jpg|design-[0-2]\.(?:jpg|png))$/);
- if(media){ownerJob(media[1],owner);const f=resolve(DATA,media[1],media[2]);if(!existsSync(f))throw error('NOT_FOUND',404);res.writeHead(200,{...headers,'Content-Type':extname(f)==='.jpg'?'image/jpeg':'image/png','Cache-Control':'private, max-age=3600'});return res.end(readFileSync(f));}
+ if(media){ownerJob(media[1],owner);const f=resolve(DATA,media[1],media[2]);if(!existsSync(f))throw error('NOT_FOUND',404);const bytes=readFileSync(f);res.writeHead(200,{...headers,'Content-Type':bytes[0]===137?'image/png':bytes[0]===255?'image/jpeg':'image/webp','Cache-Control':'private, max-age=3600'});return res.end(bytes);}
  if(!['GET','HEAD'].includes(req.method))throw error('NOT_FOUND',404);
  const assets={'/':'index.html','/app.js':'app.js','/style.css':'style.css','/hero.webp':'hero.webp','/icon.svg':'icon.svg','/robots.txt':'robots.txt'};
  if(assets[path]){const file=resolve(ROOT,'public',assets[path]),mime={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.png':'image/png','.webp':'image/webp','.svg':'image/svg+xml','.txt':'text/plain'}[extname(file)];res.writeHead(200,{...headers,'Content-Type':mime,'Cache-Control':path==='/hero.webp'?'public, max-age=86400':'no-cache'});return res.end(req.method==='HEAD'?undefined:readFileSync(file));}
@@ -135,10 +135,10 @@ async function selfTest(){
  const previous=Object.values(state.jobs).find(j=>j.owner==='demo');
  if(previous?.designs.some(d=>d.image)||(previous?.selftests||0)>=3)return;
  const hero=readFileSync(resolve(ROOT,'public','hero.webp'));
- // Demo source is PNG; give it the correct extension/MIME for the image provider.
+ // The demo uses the bundled WebP; image MIME is detected from its bytes.
  const j=previous||makeJob('demo',options({room:'صالة',market:'KW',scope:'decor',budget:1500}),hero);
  j.selftests=(j.selftests||0)+1;persist();
- // fileImage uses magic detection below for this bundled sample only.
+ // The example goes through the same generation and shopping pipeline.
  console.log('SPACES_SELFTEST_START');
  await generateJob(j);
  const ready=j.designs.filter(d=>d.image).length;

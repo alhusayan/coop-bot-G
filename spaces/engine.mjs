@@ -108,7 +108,7 @@ export async function configureModels(env=process.env){
 }
 export async function gemini(parts,{image=false,env=process.env,json=false}={}){
  if(!env.GEMINI_API_KEY)throw Error('GEMINI_NOT_CONFIGURED');
- const model=image?(env.SPACES_IMAGE_MODEL||'gemini-2.5-flash-image'):(env.SPACES_TEXT_MODEL||'gemini-2.5-flash');
+ const model=image?(env.SPACES_IMAGE_MODEL||'gemini-nano-banana-2.1'):(env.SPACES_TEXT_MODEL||'gemini-3.8-flash');
  const config=image?{responseModalities:['TEXT','IMAGE']}:{temperature:0.2,maxOutputTokens:5000,...(json?{responseMimeType:'application/json'}:{})};
  const response=await fetch('https://generativelanguage.googleapis.com/v1beta/models/'+encodeURIComponent(model)+':generateContent',{method:'POST',headers:{'Content-Type':'application/json','x-goog-api-key':env.GEMINI_API_KEY},body:JSON.stringify({contents:[{role:'user',parts}],generationConfig:config}),signal:AbortSignal.timeout(image?170000:65000)});
  if(!response.ok){let detail='';try{const e=await response.json();detail=String(e.error?.message||'').replaceAll(env.GEMINI_API_KEY,'[redacted]').slice(0,220);}catch{}console.error('SPACES_GEMINI_HTTP',response.status,model,detail);throw Error(response.status===429?'PROVIDER_BUSY':response.status===400||response.status===404?'MODEL_UNAVAILABLE':'GENERATION_FAILED');}

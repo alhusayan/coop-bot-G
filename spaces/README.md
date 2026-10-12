@@ -8,7 +8,7 @@ Deploy this folder as an independent Railway service from branch `experiment/fin
 
 Set `GEMINI_API_KEY` and `SERPER_API_KEY` as references to the existing Railway backend variables, not copied into code. Set `SPACES_TRIAL_TOKEN` to a high-entropy random value; opening `/trial/<token>` establishes an HttpOnly signed session and redirects to `/`. Set `SPACES_DATA_DIR=/data` on an isolated volume. No provider keys are exposed to the browser.
 
-Optional: `SPACES_IMAGE_MODEL` (default `gemini-2.5-flash-image`), `SPACES_TEXT_MODEL` (default `gemini-2.5-flash`), `SPACES_DAILY_ROOMS` (24), `SPACES_SELF_TEST=true` to create one real example with three variants and a shoppable first design. Check the `SPACES_SELFTEST_RESULT` log; errors are not hidden. Real provider API calls are billable.
+Optional: `SPACES_IMAGE_MODEL` (default `gemini-nano-banana-2.1`), `SPACES_TEXT_MODEL` (default `gemini-3.8-flash`), `SPACES_DAILY_ROOMS` (24), `SPACES_SELF_TEST=true` to create one real example with three variants and a shoppable first design. Check the `SPACES_SELFTEST_RESULT` log; errors are not hidden. Real provider API calls are billable.
 
 ## Verification
 
