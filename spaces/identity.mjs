@@ -1,14 +1,11 @@
+import {rankProducts,preferLocalResults} from './public/product-order.js';
+export {rankProducts} from './public/product-order.js';
 import {filterApprovedItem} from './sourcing.mjs';
 import {gemini} from './engine.mjs';
 import {pool,searchWithRecovery} from './matching.mjs';
 
 const fields=['category','color','material','shape','configuration','legs'];
 export const occurrences=item=>item.occurrences?.length?item.occurrences:[Object.fromEntries(['id','box','crop','name_en','description','specs','query','native_query','chinese_query'].map(k=>[k,item[k]]))];
-export function rankProducts(rows,limit=6){
- const byURL=new Map();
- for(const row of rows){if(!row?.link)continue;const old=byURL.get(row.link);if(!old||Number(row.visual_score||0)>Number(old.visual_score||0))byURL.set(row.link,row);}
- return [...byURL.values()].sort((a,b)=>Number(a.availability==='out_of_stock')-Number(b.availability==='out_of_stock')||Number(b.visual_score||0)-Number(a.visual_score||0)||Number(b.market_scope==='local')-Number(a.market_scope==='local')||Number(b.price!=null)-Number(a.price!=null)).slice(0,limit);
-}
 export function combineResults(rows){
  const offers=rankProducts(rows.flatMap(x=>x.offers||[])),matched=new Set(offers.map(x=>x.link));
  return {offers,alternatives:rankProducts(rows.flatMap(x=>x.alternatives||[]).filter(x=>!matched.has(x.link)))};
@@ -41,7 +38,7 @@ export async function groupIdenticalPieces(items,room,{judge=gemini}={}){
 }
 export async function searchAllViews(item,market,{views,run=searchWithRecovery,onProgress=()=>{},...deps}={}){
  const states=views.map(()=>({offers:[],alternatives:[],checked:0}));let failed=0;
- const snapshot=()=>({...combineResults([item,...states].map(x=>filterApprovedItem(x,market))),checked:states.reduce((n,x)=>n+(x.checked||0),0),search_attempt:Math.max(1,...states.map(x=>x.search_attempt||1))});
+ const snapshot=()=>({...preferLocalResults(combineResults([item,...states].map(x=>filterApprovedItem(x,market)))),checked:states.reduce((n,x)=>n+(x.checked||0),0),search_attempt:Math.max(1,...states.map(x=>x.search_attempt||1))});
  await pool(views,2,async(view,index)=>{
    try{states[index].offers=await run({...item,...view,offers:[],alternatives:[]},market,{...deps,target:view.target,lensUrl:view.lensUrl,onProgress:update=>{states[index]={...states[index],...update};onProgress({...snapshot(),phase:update.phase==='complete'?'checking':update.phase});}});}
    catch(e){failed++;console.log('SPACES_VIEW_SEARCH_ERROR',item.id,index,e.message);}

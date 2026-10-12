@@ -4,10 +4,10 @@ import {mergeIdentityGroups,combineResults,searchAllViews,groupIdenticalPieces} 
 const chair=(id,box)=>({id,name_en:'Olive armchair',mode:'ready',quantity:1,box,crop:`crop-0-${id}.jpg`,offers:[],alternatives:[],status:'empty'});
 const chairs=[chair('1',[100,10,700,400]),chair('2',[100,600,700,990])];
 const verdict={groups:[{ids:['1','2'],identical:true,confidence:99,category:'match',color:'match',material:'match',shape:'match',configuration:'match',legs:'match',differences:[]}]};
-test('identical chairs merge quantities, keep both crops and combine the strongest results',()=>{
+test('identical chairs merge quantities and rank local options first without losing either crop',()=>{
  const weaker={link:'https://local.example/chair',visual_score:40,market_scope:'local'},stronger={link:'https://global.example/chair',visual_score:87,market_scope:'international'};
  const rows=[{...chairs[0],alternatives:[weaker]},{...chairs[1],alternatives:[stronger,weaker]}];
- const [merged]=mergeIdentityGroups(rows,verdict);assert.equal(merged.quantity,2);assert.equal(merged.occurrences.length,2);assert.equal(merged.alternatives.length,2);assert.equal(merged.alternatives[0].link,stronger.link);assert.deepEqual(rows.map(x=>x.quantity),[1,1]);
+ const [merged]=mergeIdentityGroups(rows,verdict);assert.equal(merged.quantity,2);assert.equal(merged.occurrences.length,2);assert.equal(merged.alternatives.length,2);assert.equal(merged.alternatives[0].link,weaker.link);assert.deepEqual(rows.map(x=>x.quantity),[1,1]);
 });
 test('same names alone, different legs, uncertainty or overlapping boxes cannot merge products',()=>{
  assert.equal(mergeIdentityGroups(chairs,{groups:[]}).length,2);

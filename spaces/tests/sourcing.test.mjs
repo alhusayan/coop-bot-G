@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {sourceScope,storePolicy,filterApprovedOffers,globalQueries,sourceDetails} from '../sourcing.mjs';
+import {sourceScope,storePolicy,filterApprovedOffers,globalQueries,sourceDetails,localQueries} from '../sourcing.mjs';
 import {productPath} from '../engine.mjs';
 import {searchAllViews} from '../identity.mjs';
 
@@ -30,4 +30,11 @@ test('cached foreign results are pruned without changing approved prices or alte
  const approved={link:'https://amazon.com/dp/1',price:null,currency:null,match:'replacement'},blocked={link:'https://ajio.com/products/chair',market_scope:'local',match:'visual'};
  const filtered=filterApprovedOffers([approved,blocked],'KW');assert.equal(filtered.length,1);assert.equal(filtered[0].price,null);assert.equal(filtered[0].match,'replacement');
  let latest;await searchAllViews({offers:[blocked],alternatives:[approved]},'KW',{views:[{id:'1'}],run:async()=>[],onProgress:u=>latest=u});assert.equal(latest.offers.length,0);assert.equal(latest.alternatives.length,1);
+});
+
+test('local retrieval targets the selected country and simplifies bed retrieval without inventing dimensions',()=>{
+ const q=localQueries({name_en:'Single platform bed',query:'single upholstered platform bed with straight headboard',native_query:'سرير مفرد مبطن'},'SA',{recovery:true});
+ assert.ok(q.every(([query,country])=>country==='SA'&&query.includes('site:homecentre.com/sa/')&&query.includes('site:ikea.com/sa/')));
+ assert.ok(q.every(([query])=>!query.includes('platform')&&!query.includes('120')&&!query.includes('/kw/')));
+ assert.equal(sourceScope('https://www.homecentre.com/sa/en/buy-bed/p/123','SA'),'local');assert.equal(sourceScope('https://www.homecentre.com/ae/en/buy-bed/p/123','SA'),null);
 });

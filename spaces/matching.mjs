@@ -1,5 +1,6 @@
 import sharp from 'sharp';
-import {sourceScope,sourceDetails,filterApprovedItem,requiresPurchaseCheck,hasPurchaseEvidence,globalQueries} from './sourcing.mjs';
+import {rankProducts,hasLocalOptions} from './public/product-order.js';
+import {sourceScope,sourceDetails,filterApprovedItem,requiresPurchaseCheck,hasPurchaseEvidence,globalQueries,localQueries} from './sourcing.mjs';
 import {MARKETS,gemini,serper,safePage,safeImage,safeUrl,productFromPage,productPath,numericPrice,priceText} from './engine.mjs';
 
 const clean=(v,n=240)=>String(v??'').replace(/[\u0000-\u001f]/g,' ').trim().slice(0,n);
@@ -58,15 +59,16 @@ export async function auditVisual(item,offers,target,{env=process.env,judge=gemi
 export function replacementDecision(v){return !!v&&v.adaptable===true&&v.category==='match'&&v.color==='match'&&v.material==='match'&&v.configuration==='match'&&Array.isArray(v.differences)&&v.differences.length>0;}
 function rowPrice(row,currency){const p=row.price;if(p&&typeof p==='object'){const c=String(p.currency||'').toUpperCase();return {price:c?numericPrice(p.extracted_value??p.value):null,currency:c||null};}return {price:priceText(p,currency),currency:priceText(p,currency)?currency:null};}
 const excluded=/pinterest|youtube|youtu\.be|facebook|instagram|tiktok|wikipedia|(?:^|\.)google\.[a-z.]+$/i;
-function candidateRows(rows,market,seen,limit){
- const batch=new Set();const list=rows.filter(x=>{const u=safeUrl(x.link);if(!u||!sourceScope(u,market)||seen.has(u)||batch.has(u)||excluded.test(new URL(u).hostname))return false;batch.add(u);return true;}).sort((a,b)=>Number(productPath(b.link))-Number(productPath(a.link))).slice(0,limit);
+function candidateRows(rows,market,seen,limit,scope){
+ const batch=new Set();const list=rows.filter(x=>{const u=safeUrl(x.link);if(!u||!sourceScope(u,market)||(scope&&sourceScope(u,market)!==scope)||seen.has(u)||batch.has(u)||excluded.test(new URL(u).hostname))return false;batch.add(u);return true;}).sort((a,b)=>Number(sourceScope(b.link,market)==='local')-Number(sourceScope(a.link,market)==='local')||Number(productPath(b.link))-Number(productPath(a.link))).slice(0,limit);
  list.forEach(x=>seen.add(safeUrl(x.link)));return list;
 }
 export async function searchItem(item,market,{env=process.env,search=serper,page=safePage,lensSearch=lens,judge=gemini,fetchImage=safeImage,target,lensUrl,attempt=1,onProgress=()=>{}}={}){
  const m=MARKETS[market],seen=new Set(),all=[],alternatives=[];let attempted=0,failures=0;
  const started=Date.now();
- function rank(offers){return [...new Map(offers.map(o=>[o.link,o])).values()].sort((a,b)=>Number(a.availability==='out_of_stock')-Number(b.availability==='out_of_stock')||b.visual_score-a.visual_score||Number(b.market_scope==='local')-Number(a.market_scope==='local')).slice(0,4);}
- const progress=phase=>onProgress({offers:rank(all),alternatives:rank(alternatives),checked:attempted,phase});
+ const rank=offers=>rankProducts(offers,4);let searchScope='local';
+ const progress=phase=>onProgress({offers:rank(all),alternatives:rank(alternatives),checked:attempted,phase,search_scope:searchScope});
+ const localFound=()=>hasLocalOptions({offers:all,alternatives});
  async function enrich(o){
    try{const p=await page(o.link,{timeout:5000});const product=productFromPage(p.html,p.url,m.currency);
      // Keep the exact image that was compared. Never substitute a different default variant.
@@ -74,15 +76,15 @@ export async function searchItem(item,market,{env=process.env,search=serper,page
    }catch{}
    progress('checking');
  }
- async function inspect(rows){
-   const candidates=candidateRows(rows,market,seen,rows[0]?.channel==='lens'?(attempt>1?12:8):(attempt>1?8:5));attempted+=candidates.length;
+ async function inspect(rows,scope){
+   const candidates=candidateRows(rows,market,seen,rows[0]?.channel==='lens'?(attempt>1?12:8):(attempt>1?8:5),scope);attempted+=candidates.length;
    const products=(await pool(candidates,6,async row=>{
      let product=null;const image=safeUrl(row.imageUrl||row.thumbnailUrl||row.thumbnail||row.image);
      // Lens / indexed images can be checked immediately; pages are read only for missing images or confirmed pieces.
      if(row.title&&productPath(row.link)&&image&&!requiresPurchaseCheck(row.link)){
        product={title:clean(row.title,180),link:safeUrl(row.link),image,...rowPrice(row,row.currency||m.currency),source:clean(row.source||new URL(row.link).hostname,90),description:clean(row.snippet,500),evidence:'search_index',availability:row.in_stock===false?'out_of_stock':'unknown',dimensions:''};
      }else if(productPath(row.link)){try{const p=await page(row.link,{timeout:5000});if(!(requiresPurchaseCheck(row.link)||requiresPurchaseCheck(p.url))||hasPurchaseEvidence(p.html))product=productFromPage(p.html,p.url,m.currency);}catch{}}
-     if(!product||!sourceScope(product.link,market))return null;
+     if(!product||!sourceScope(product.link,market)||(scope&&sourceScope(product.link,market)!==scope))return null;
      if(/sofa|couch|sectional/i.test(item.name_en)&&!/armless|corner unit|module/i.test(item.name_en)&&/\b(?:armless|corner unit|single module|modular unit)\b/i.test(product.title))return null;
      if(/sofa|couch|chair|table|cabinet|wardrobe|bed frame/i.test(item.name_en)&&/\b(?:cover|slipcover|miniature|dollhouse|sample|swatch|replacement)\b/i.test(product.title))return null;
      const purchase_unit=/pillow|cushion/i.test(item.name_en)&&/\b(?:cover|case)\b/i.test(product.title)?'Cover only · insert not included':null;
@@ -93,26 +95,29 @@ export async function searchItem(item,market,{env=process.env,search=serper,page
    await auditVisual(item,products,target,{env,judge,fetchImage,onError:()=>failures++,onNear:o=>{alternatives.push(o);additions.push(o);progress('checking');},onMatch:o=>{all.push(o);additions.push(o);progress('checking');}});
    await pool(additions.slice(0,3),3,enrich);
  }
- progress('lens');
- const lensTask=(async()=>{if(!lensUrl)return;try{await inspect(await lensSearch(lensUrl,market,{env}));}catch(e){console.log('SPACES_LENS_RECOVERY',e.name);}})();
- // Give Lens the first opportunity, but never let a slow provider delay global discovery.
- let timer;await Promise.race([lensTask,new Promise(resolve=>{timer=setTimeout(resolve,1800);})]);clearTimeout(timer);
- if(!all.some(o=>o.market_scope==='local')){
-   progress('global');
-   const q=clean(item.query,200),short=clean([item.specs?.color,item.specs?.material,item.specs?.category||item.name_en,item.specs?.shape].filter(Boolean).join(' '),160);
-   const native=item.native_query||q,zh=item.chinese_query||q;
-   const queries=[
-     [q+' '+m.en,market,{images:true}],
-     [native+' '+m.name,market,{lang:m.lang}],
-     ...globalQueries(short,zh,item,attempt)
-   ];
-   // Each source streams its checked results independently. The slowest source no longer holds all results.
-   await Promise.allSettled([lensTask,...queries.map(async([query,country,opts])=>{
+ async function discover(queries,scope){
+   await Promise.allSettled(queries.map(async([query,country,opts])=>{
      let r;try{r=await search(query,country,{env,...opts});}catch(e){console.log('SPACES_SOURCE_ERROR',item.id,country,e.message);failures++;return;}
      const rows=[...(r.images||[]),...(r.organic||[]),...(r.shopping||[])].map(x=>({...x,channel:opts.source||(country===market?'description':'global'),currency:country==='US'?'USD':country==='CN'?'CNY':m.currency}));
-     console.log('SPACES_SOURCE_RESULT',item.id,country,opts.source||(opts.images?'images':'search'),rows.length);await inspect(rows);
-   })]);
- }else await lensTask;
+     console.log('SPACES_SOURCE_RESULT',item.id,country,opts.source,rows.length);await inspect(rows,scope);
+   }));
+ }
+ progress('local');
+ let foreignLens=[];
+ // Lens and local retrieval start together. Foreign Lens hits wait until local checks finish.
+ const lensTask=(async()=>{if(!lensUrl)return;try{const rows=await lensSearch(lensUrl,market,{env});foreignLens=rows.filter(x=>sourceScope(x.link,market)==='international');await inspect(rows,'local');}catch(e){failures++;console.log('SPACES_LENS_RECOVERY',e.name);}})();
+ await Promise.allSettled([lensTask,discover(localQueries(item,market),'local')]);
+ if(!localFound()){
+   progress('local-recovery');
+   await discover(localQueries(item,market,{recovery:true}),'local');
+ }
+ console.log('SPACES_LOCAL_CHECK',item.id,JSON.stringify({market,name:item.name_en,matched:all.filter(x=>x.market_scope==='local').length,options:alternatives.filter(x=>x.market_scope==='local').length,elapsed_ms:Date.now()-started}));
+ if(!localFound()){
+   searchScope='global';progress('global');
+   console.log('SPACES_GLOBAL_FALLBACK',item.id,market);
+   const q=clean(item.query,200),short=clean([item.specs?.color,item.specs?.material,item.specs?.category||item.name_en,item.specs?.shape].filter(Boolean).join(' '),160);
+   await Promise.allSettled([inspect(foreignLens,'international'),discover(globalQueries(short,item.chinese_query||q,item,attempt),'international')]);
+ }
  if(!all.length&&!alternatives.length&&failures)throw Error('SEARCH_FAILED');
  progress('complete');
  console.log('SPACES_VISUAL_RESULT',item.id,JSON.stringify({checked:attempted,accepted:all.length,alternatives:alternatives.length,elapsed_ms:Date.now()-started,local:all.filter(o=>o.market_scope==='local').length,without_price:all.filter(o=>o.price==null).length}));
@@ -123,7 +128,7 @@ export async function searchItem(item,market,{env=process.env,search=serper,page
 export async function searchWithRecovery(item,market,{run=searchItem,onProgress=()=>{},...deps}={}){
  const approved=filterApprovedItem(item,market);
  let snapshot={offers:approved.offers,alternatives:approved.alternatives,checked:0},lastError;
- const merge=(before,after)=>[...new Map([...before,...after].map(o=>[o.link,o])).values()].slice(0,4);
+ const merge=(before,after)=>rankProducts([...before,...after],4);
  for(let attempt=1;attempt<=2;attempt++){
    let finished=false;
    onProgress({...snapshot,phase:attempt===1?'lens':'retrying',search_attempt:attempt});

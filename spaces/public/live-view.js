@@ -45,6 +45,8 @@ export function pieceActivity(item){
  if(item.status==='idle')return 'Up next';
  if(item.status!=='searching')return '';
  if(item.search_attempt>1||item.phase==='retrying')return 'Looking further';
- if(item.phase==='checking')return 'Checking matches';
+ if(item.phase==='checking')return item.search_scope==='local'?'Checking local options':'Checking matches';
+ if(item.search_scope==='local')return item.phase==='local-recovery'?'More local stores':'Searching locally';
+ if(item.search_scope==='global')return 'International options';
  return 'Searching stores';
 }
