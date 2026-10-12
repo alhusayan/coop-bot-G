@@ -275,7 +275,8 @@ async function selfTest(){
  if(recent){const index=Number.isInteger(recent.selected_design)?recent.selected_design:recent.designs.findIndex(d=>(d.items?.length&&d.matching_version!==3)||(d.error&&d.image));const d=recent.designs[index];if(d?.image&&(d.matching_version!==3||d.error)){d.status='analyzing';persist();launch('shop:'+recent.id+':'+index,async()=>{await identifyAndShop(recent,index);console.log('SPACES_ROOM_RECOVERED',JSON.stringify({room:recent.id,design:index,items:d.items.length,matched:d.items.filter(x=>x.offers?.length).length,with_options:d.items.filter(x=>x.alternatives?.length).length}));});}}
 
  // Resume the latest selected room's missed pieces once after the search upgrade.
- const latest=Object.values(state.jobs).filter(j=>j.owner!=='demo'&&Number.isInteger(j.selected_design)).sort((a,b)=>b.created-a.created)[0];
+ const selectedRooms=Object.values(state.jobs).filter(j=>j.owner!=='demo'&&Number.isInteger(j.selected_design)).sort((a,b)=>b.created-a.created);
+ const latest=selectedRooms.find(j=>j.id===process.env.SPACES_VERIFY_ROOM)||selectedRooms[0];
  if(latest){const i=latest.selected_design,d=latest.designs[i];if(d?.items?.length&&d.matching_version===3&&d.search_revision!==SEARCH_REVISION&&!tasks.has('shop:'+latest.id+':'+i))await resumeShopping(latest,i);}
  const groupRepairs=Object.values(state.jobs).filter(j=>j.owner!=='demo'&&Number.isInteger(j.selected_design)).sort((a,b)=>b.created-a.created).slice(0,3);
  for(const j of groupRepairs){const i=j.selected_design,d=j.designs[i];if(d?.items?.length&&d.matching_version===3&&d.grouping_version!==1&&!tasks.has('shop:'+j.id+':'+i)){

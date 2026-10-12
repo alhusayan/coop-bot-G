@@ -6,7 +6,7 @@ import {MARKETS,safeUrl} from './engine.mjs';
 export const SEARCH_ENGINE='findzia-original';
 export const SEARCH_REVISION=12;
 let active=0;const queue=[];
-async function slot(fn){if(active>=3)await new Promise(resolve=>queue.push(resolve));else active++;try{return await fn();}finally{const next=queue.shift();if(next)next();else active--;}}
+async function slot(fn){if(active>=1)await new Promise(resolve=>queue.push(resolve));else active++;try{return await fn();}finally{const next=queue.shift();if(next)next();else active--;}}
 const clean=value=>String(value??'').replace(/[\u0000-\u001f]/g,' ').trim();
 
 // The same state reducer and display contract as the original website.
