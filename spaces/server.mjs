@@ -40,6 +40,14 @@ function ownerJob(id,owner){const j=state.jobs[id];if(!j||j.owner!==owner&&j.own
 function mutateJob(id,owner){const j=ownerJob(id,owner);if(j.owner==='demo')throw error('DEMO_READ_ONLY',403);return j;}
 function publicJob(j){return {id:j.id,revision:state.revision||0,created:j.created,room:/[\u0600-\u06ff]/.test(j.room)?'Your room':j.room,options:j.options,original:'/media/'+j.id+'/original.jpg',demo:j.owner==='demo',designs:j.designs.map((d,i)=>({...d,title:STYLES[i].en,description:'',needs_rescan:d.matching_version!==3,items:d.matching_version===3?(d.items||[]).map(x=>preferLocalResults(filterApprovedItem(x,j.options.market))).map(x=>({...x,offers:(x.offers||[]).map(o=>({...o,purchase_unit:o.purchase_unit||(/pillow|cushion/i.test(x.name_en)&&/\b(?:cover|case)\b/i.test(o.title)?'Cover only · insert not included':null)})),occurrences:occurrences(x).map(v=>({...v,crop:v.crop?'/media/'+j.id+'/'+v.crop:null})),crop:x.crop?'/media/'+j.id+'/'+x.crop:null})):[],image:d.image?'/media/'+j.id+'/'+d.image:null}))};}
 function consume(owner,key,max){const q=new Date().toISOString().slice(0,10)+':'+owner+':'+key;if((state.quota[q]||0)>=max)throw error('TRIAL_LIMIT',429);state.quota[q]=(state.quota[q]||0)+1;persist();}
+function reserveRoom(owner){
+ const limit=(value,fallback)=>Number.isSafeInteger(Number(value))&&Number(value)>0?Math.min(1000,Number(value)):fallback;
+ const prefix=new Date().toISOString().slice(0,10)+':',ownerKey=prefix+owner+':rooms',totalKey=prefix+'all:rooms';
+ const ownerLimit=limit(process.env.SPACES_DAILY_ROOMS_PER_BROWSER,30),totalLimit=limit(process.env.SPACES_DAILY_ROOMS,100);
+ // Check both counters before consuming either allowance.
+ if((state.quota[ownerKey]||0)>=ownerLimit||(state.quota[totalKey]||0)>=totalLimit)throw error('TRIAL_LIMIT',429);
+ state.quota[ownerKey]=(state.quota[ownerKey]||0)+1;state.quota[totalKey]=(state.quota[totalKey]||0)+1;persist();
+}
 function fileImage(j,file){const bytes=readFileSync(resolve(DATA,j.id,file));return {inlineData:{mimeType:bytes[0]===137?'image/png':bytes[0]===255?'image/jpeg':'image/webp',data:bytes.toString('base64')}};}
 function launch(key,fn){if(tasks.has(key))return false;const p=Promise.resolve().then(fn).catch(e=>console.error('SPACES_TASK_FAILED',key,String(e.message).slice(0,80))).finally(()=>tasks.delete(key));tasks.set(key,p);return true;}
 function options(raw){return {market:MARKETS[raw.market]?raw.market:'KW',room:String(raw.room||'auto').slice(0,60),scope:['full','decor'].includes(raw.scope)?raw.scope:'full',keep:String(raw.keep||'').slice(0,400),notes:String(raw.notes||'').slice(0,400),budget:Math.min(1e7,Math.max(0,Number(raw.budget)||0)),width:Math.min(100,Math.max(0,Number(raw.width)||0)),length:Math.min(100,Math.max(0,Number(raw.length)||0))};}
@@ -191,7 +199,7 @@ export function createServer(){return http.createServer({requestTimeout:30000,he
    if(tasks.size>8)throw error('PROVIDER_BUSY',429);
    const encoded=String(b.image||'');if(!/^data:image\/jpeg;base64,[A-Za-z0-9+/=]+$/.test(encoded))throw error('INVALID_IMAGE');
    const buffer=Buffer.from(encoded.split(',')[1],'base64');if(buffer.length>12*1024*1024||buffer.length<200||buffer[0]!==255||buffer[1]!==216||buffer[2]!==255)throw error('INVALID_IMAGE');
-   consume(owner,'rooms',6);consume('all','rooms',Number(process.env.SPACES_DAILY_ROOMS)||24);
+   reserveRoom(owner);
    const j=makeJob(owner,options(b),buffer,idem);launch('generate:'+j.id,()=>generateJob(j));return send(res,202,publicJob(j));
  }
  const match=path.match(/^\/api\/jobs\/([a-f0-9]{24})(?:\/(select|retry|search|replace)(?:\/(\d+))?)?$/);
