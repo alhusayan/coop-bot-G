@@ -1,3 +1,6 @@
+import {recommendRoom} from './recommendation.mjs';
+import {createRoomPreview} from './room-preview.mjs';
+import {roomMeasurements,measuredLimits} from './dimensions.mjs';
 import {checkStock,refreshItemStock} from './stock.mjs';
 import {STOCK_VERSION,STOCK_TTL} from './availability.mjs';
 import http from 'node:http';
@@ -25,7 +28,7 @@ const secret=trial||'development-only';
 const secure=process.env.NODE_ENV==='production';
 function persist(){state.revision=(state.revision||0)+1;writeFileSync(STATE+'.tmp',JSON.stringify(state),{mode:0o600});renameSync(STATE+'.tmp',STATE);}
 function cleanup(){for(const [id,j] of Object.entries(state.jobs)){if(j.owner!=='demo'&&Date.now()-j.created>86400000){delete state.jobs[id];rmSync(resolve(DATA,id),{recursive:true,force:true});}}for(const k of Object.keys(state.quota)){if(!k.startsWith(new Date().toISOString().slice(0,10)))delete state.quota[k];}persist();}
-for(const j of Object.values(state.jobs))for(const d of j.designs||[]){if(['generating','analyzing','searching','adapting'].includes(d.status)){d.status=d.image?'ready':'error';d.error='INTERRUPTED';}for(const x of d.items||[]){if(x.status==='searching')x.status='idle';for(const o of [...(x.offers||[]),...(x.alternatives||[])])if(o.stock_version!==STOCK_VERSION&&o.availability!=='out_of_stock')o.availability='unknown';const before=(x.offers?.length||0)+(x.alternatives?.length||0);Object.assign(x,filterApprovedItem(x,j.options.market));if(before&&!x.offers.length&&!x.alternatives.length&&x.status!=='kept'){x.status='idle';x.phase='queued';}}}
+for(const j of Object.values(state.jobs))for(const d of j.designs||[]){if(['generating','analyzing','searching','adapting','finishing'].includes(d.status)){const wasFinishing=d.status==='finishing';d.status=wasFinishing?'complete':d.image?'ready':'error';d.error=wasFinishing?null:'INTERRUPTED';if(d.finish){d.finish.status='error';d.finish.error='INTERRUPTED';}}for(const x of d.items||[]){if(x.status==='searching')x.status='idle';for(const o of [...(x.offers||[]),...(x.alternatives||[])])if(o.stock_version!==STOCK_VERSION&&o.availability!=='out_of_stock')o.availability='unknown';const before=(x.offers?.length||0)+(x.alternatives?.length||0);Object.assign(x,filterApprovedItem(x,j.options.market));if(before&&!x.offers.length&&!x.alternatives.length&&x.status!=='kept'){x.status='idle';x.phase='queued';}}}
 cleanup();
 setInterval(cleanup,3600000).unref();
 function sign(v){return createHmac('sha256',secret).update(v).digest('hex');}
@@ -38,7 +41,7 @@ function error(code,status=400){return Object.assign(Error(code),{status});}
 async function body(req){let size=0,chunks=[];for await(const b of req){size+=b.length;if(size>19*1024*1024)throw error('IMAGE_TOO_LARGE',413);chunks.push(b);}try{return JSON.parse(Buffer.concat(chunks));}catch{throw error('INVALID_INPUT');}}
 function ownerJob(id,owner){const j=state.jobs[id];if(!j||j.owner!==owner&&j.owner!=='demo')throw error('NOT_FOUND',404);return j;}
 function mutateJob(id,owner){const j=ownerJob(id,owner);if(j.owner==='demo')throw error('DEMO_READ_ONLY',403);return j;}
-function publicJob(j){return {id:j.id,revision:state.revision||0,created:j.created,room:/[\u0600-\u06ff]/.test(j.room)?'Your room':j.room,options:j.options,original:'/media/'+j.id+'/original.jpg',demo:j.owner==='demo',designs:j.designs.map((d,i)=>({...d,title:STYLES[i].en,description:'',needs_rescan:d.matching_version!==3,items:d.matching_version===3?(d.items||[]).map(x=>preferLocalResults(filterApprovedItem(x,j.options.market))).map(x=>({...x,offers:(x.offers||[]).map(o=>({...o,purchase_unit:o.purchase_unit||(/pillow|cushion/i.test(x.name_en)&&/\b(?:cover|case)\b/i.test(o.title)?'Cover only · insert not included':null)})),occurrences:occurrences(x).map(v=>({...v,crop:v.crop?'/media/'+j.id+'/'+v.crop:null})),crop:x.crop?'/media/'+j.id+'/'+x.crop:null})):[],image:d.image?'/media/'+j.id+'/'+d.image:null}))};}
+function publicJob(j){return {id:j.id,revision:state.revision||0,created:j.created,room:/[\u0600-\u06ff]/.test(j.room)?'Your room':j.room,options:j.options,original:'/media/'+j.id+'/original.jpg',demo:j.owner==='demo',designs:j.designs.map((d,i)=>({...d,finish:d.finish?{...d.finish,image:d.finish.image?'/media/'+j.id+'/'+d.finish.image:null}:null,title:STYLES[i].en,description:'',needs_rescan:d.matching_version!==3,items:d.matching_version===3?(d.items||[]).map(x=>preferLocalResults(filterApprovedItem(x,j.options.market))).map(x=>({...x,offers:(x.offers||[]).map(o=>({...o,purchase_unit:o.purchase_unit||(/pillow|cushion/i.test(x.name_en)&&/\b(?:cover|case)\b/i.test(o.title)?'Cover only · insert not included':null)})),occurrences:occurrences(x).map(v=>({...v,crop:v.crop?'/media/'+j.id+'/'+v.crop:null})),crop:x.crop?'/media/'+j.id+'/'+x.crop:null})):[],image:d.image?'/media/'+j.id+'/'+d.image:null}))};}
 function consume(owner,key,max){const q=new Date().toISOString().slice(0,10)+':'+owner+':'+key;if((state.quota[q]||0)>=max)throw error('TRIAL_LIMIT',429);state.quota[q]=(state.quota[q]||0)+1;persist();}
 function fileImage(j,file){const bytes=readFileSync(resolve(DATA,j.id,file));return {inlineData:{mimeType:bytes[0]===137?'image/png':bytes[0]===255?'image/jpeg':'image/webp',data:bytes.toString('base64')}};}
 function launch(key,fn){if(tasks.has(key))return false;const p=Promise.resolve().then(fn).catch(e=>console.error('SPACES_TASK_FAILED',key,String(e.message).slice(0,80))).finally(()=>tasks.delete(key));tasks.set(key,p);return true;}
@@ -151,11 +154,48 @@ async function replacePiece(j,index,item,offer){
  }catch(e){d.status='complete';d.adaptation_error=e.message;persist();console.log('SPACES_PLACEMENT_FAILED',j.id,index,e.message);}
  if(d.items.some(x=>x.status==='idle'))launch('shop:'+j.id+':'+index,()=>resumeShopping(j,index));
 }
+async function finishRoom(j,index,finish,deps={}){
+ const d=j.designs[index],valid=()=>d.finish===finish&&d.image===finish.source_image;
+ try{
+  const progress=(status,detail={})=>{if(valid()){finish.status=status;finish.progress=detail;persist();}};
+  const plan=await (deps.recommend||recommendRoom)(d.items,fileImage(j,d.image),finish.room,j.options.market,{limits:finish.limits,preferred:finish.preferred,onProgress:progress});
+  if(!valid())return;
+  finish.plan=plan;
+  if(!plan.picks.length){finish.status='needs_measurements';d.status='complete';persist();return;}
+  // Recheck before spending on rendering; a cached search hit is not proof of current stock.
+  for(const pick of plan.picks){const offer=await (deps.stock||checkStock)(pick.offer,j.options.market,{force:true});if(offer.availability!=='listed_available')throw Error('STOCK_CHANGED');if(JSON.stringify(offer.dimensions_cm)!==JSON.stringify(pick.offer.dimensions_cm))throw Error('CHOICE_NO_LONGER_FITS');pick.offer={...pick.offer,...offer};}
+  const result=await (deps.preview||createRoomPreview)(fileImage(j,finish.source_image),plan,{onProgress:progress});
+  if(!valid())return;
+  const revision=Date.now(),name='design-'+index+'-r'+revision+(result.mimeType==='image/jpeg'?'.jpg':'.png');
+  writeFileSync(resolve(DATA,j.id,name),result.output,{mode:0o600});
+  finish.image=name;finish.boxes=result.boxes;finish.status='preview';d.status='complete';persist();
+  console.log('SPACES_FINISH_PREVIEW',j.id,index,JSON.stringify({pieces:plan.picks.length,skipped:plan.skipped.length}));
+ }catch(e){if(valid()){finish.status='error';finish.error=e.message;d.status='complete';persist();}console.log('SPACES_FINISH_FAILED',j.id,index,e.message);}
+}
+async function keepFinishedRoom(j,index,finish,deps={}){
+ const d=j.designs[index];
+ try{
+  const checked=await pool(finish.plan.picks,4,async pick=>({...pick,offer:{...pick.offer,...await (deps.stock||checkStock)(pick.offer,j.options.market,{force:true})}}));
+  if(checked.some(p=>p.offer.availability!=='listed_available'))throw Error('STOCK_CHANGED');
+  if(checked.some(p=>JSON.stringify(p.offer.dimensions_cm)!==JSON.stringify(finish.plan.picks.find(x=>x.id===p.id).offer.dimensions_cm)))throw Error('CHOICE_NO_LONGER_FITS');
+  if(d.finish!==finish||d.image!==finish.source_image)throw Error('PREVIEW_EXPIRED');
+  const bytes=readFileSync(resolve(DATA,j.id,finish.image)),revision=Date.now();
+  const updates=await pool(d.items,4,async piece=>{
+   const pick=checked.find(p=>p.id===piece.id);
+   const views=await pool(occurrences(piece),3,async(v,k)=>{const box=pick?finish.boxes[piece.id][k]:v.box,crop='crop-'+index+'-'+v.id+'-r'+revision+'.jpg';writeFileSync(resolve(DATA,j.id,crop),await cropPiece(bytes,box),{mode:0o600});return {...v,box,crop};});
+   return {piece,update:{box:views[0].box,crop:views[0].crop,occurrences:views,...(pick?{offers:[{...pick.offer,match_kind:'placed_product',size_verified:false}],alternatives:[],status:'done',description:pick.offer.title}:{})}};
+  });
+  // Publish the image, product choices and every duplicate occurrence together.
+  for(const {piece,update} of updates)Object.assign(piece,update);
+  d.image=finish.image;finish.status='kept';d.status='complete';d.stock_checked_at=Date.now();persist();
+  console.log('SPACES_FINISH_KEPT',j.id,index,checked.length);
+ }catch(e){finish.status='error';finish.error=e.message;d.status='complete';persist();}
+}
 function makeJob(owner,opt,buffer,idempotency=''){
  const id=randomBytes(12).toString('hex');mkdirSync(resolve(DATA,id),{recursive:true,mode:0o700});writeFileSync(resolve(DATA,id,'original.jpg'),buffer,{mode:0o600});
  const j={id,owner,created:Date.now(),idempotency,options:opt,room:opt.room==='auto'?'Your room':opt.room,designs:STYLES.map(s=>({id:s.id,title:s.en,subtitle:s.en,description:s.description,palette:s.palette,status:'generating',image:null,items:[],retries:0}))};state.jobs[id]=j;persist();return j;
 }
-export function createServer(){return http.createServer({requestTimeout:30000,headersTimeout:15000,maxHeaderSize:16384},async(req,res)=>{
+export function createServer(deps={}){return http.createServer({requestTimeout:30000,headersTimeout:15000,maxHeaderSize:16384},async(req,res)=>{
  try{
  const u=new URL(req.url,'http://localhost');let path=u.pathname;
  const lensMedia=path.match(/^\/lens-media\/([a-f0-9]{24})\/(crop-[0-2]-\d{1,2}(?:-r\d{13})?\.jpg)$/);
@@ -166,7 +206,7 @@ export function createServer(){return http.createServer({requestTimeout:30000,he
    res.writeHead(200,{...headers,'Content-Type':'image/jpeg','Cache-Control':'private, max-age=60'});return res.end(req.method==='HEAD'?undefined:readFileSync(f));
  }
 
- if(path==='/healthz')return send(res,200,{ok:true,version:'spaces-0.3.8',source_policy:SOURCE_POLICY_VERSION,lens:!!(process.env.SERPAPI_API_KEY||process.env.SEARCHAPI_API_KEY),generation:!!process.env.GEMINI_API_KEY,search:!!process.env.SERPER_API_KEY});
+ if(path==='/healthz')return send(res,200,{ok:true,version:'spaces-0.4.0',source_policy:SOURCE_POLICY_VERSION,lens:!!(process.env.SERPAPI_API_KEY||process.env.SEARCHAPI_API_KEY),generation:!!process.env.GEMINI_API_KEY,search:!!process.env.SERPER_API_KEY});
  if(path.startsWith('/trial/')){
    const supplied=path.slice(7);if(!['GET','HEAD'].includes(req.method)||!trial||!constantEqual(supplied,trial))throw error('NOT_FOUND',404);
    // Keep the invitation in the address when Safari opens an in-app browser's page.
@@ -194,14 +234,28 @@ export function createServer(){return http.createServer({requestTimeout:30000,he
    consume(owner,'rooms',6);consume('all','rooms',Number(process.env.SPACES_DAILY_ROOMS)||24);
    const j=makeJob(owner,options(b),buffer,idem);launch('generate:'+j.id,()=>generateJob(j));return send(res,202,publicJob(j));
  }
- const match=path.match(/^\/api\/jobs\/([a-f0-9]{24})(?:\/(select|retry|search|replace)(?:\/(\d+))?)?$/);
+ const match=path.match(/^\/api\/jobs\/([a-f0-9]{24})(?:\/(select|retry|search|replace|finish|keep-finish|discard-finish)(?:\/(\d+))?)?$/);
  if(match){const [,id,action,itemIndex]=match;
    if(req.method==='GET'&&!action)return send(res,200,publicJob(ownerJob(id,owner)));
    if(req.method==='DELETE'&&!action){const j=mutateJob(id,owner);if([...tasks.keys()].some(k=>k.includes(j.id)))throw error('JOB_BUSY',409);delete state.jobs[id];rmSync(resolve(DATA,id),{recursive:true,force:true});persist();return send(res,200,{ok:true});}
    if(req.method==='POST'){
-     const j=action==='select'?ownerJob(id,owner):mutateJob(id,owner),b=await body(req),i=Number(b.design),d=j.designs[i];if(!d)throw error('INVALID_INPUT');if(d.status==='adapting')throw error('JOB_BUSY',409);
+     const j=action==='select'?ownerJob(id,owner):mutateJob(id,owner),b=await body(req),i=Number(b.design),d=j.designs[i];if(!d)throw error('INVALID_INPUT');if(['adapting','finishing'].includes(d.status))throw error('JOB_BUSY',409);
+     if(['finish','keep-finish','discard-finish'].includes(action)){
+       if(!d.image||d.matching_version!==3||!d.items?.length||['searching','analyzing','generating'].includes(d.status)||tasks.has('shop:'+id+':'+i)||[...itemTasks.keys()].some(k=>k.startsWith(id+':'+i+':')))throw error('JOB_BUSY',409);
+       if(action==='discard-finish'){d.finish=null;persist();return send(res,200,publicJob(j));}
+       if(action==='keep-finish'){
+         const finish=d.finish;if(finish?.status!=='preview'||finish.token!==b.token||finish.source_image!==d.image)throw error('PREVIEW_EXPIRED',409);
+         d.status='finishing';finish.status='saving';persist();launch('finish:'+id+':'+i,()=>keepFinishedRoom(j,i,finish,deps));return send(res,202,publicJob(j));
+       }
+       let room,limits;try{room=roomMeasurements(b);limits=measuredLimits(b.limits,d.items);}catch(e){throw error(e.message);}
+       consume(owner,'room-previews',6);
+       const preferred={};for(const item of d.items)if(typeof b.preferred?.[item.id]==='string')preferred[item.id]=b.preferred[item.id];
+       const finish={token:randomBytes(12).toString('hex'),source_image:d.image,room,limits,preferred,status:'sizes',image:null,error:null};
+       d.finish=finish;d.status='finishing';persist();launch('finish:'+id+':'+i,()=>finishRoom(j,i,finish,deps));return send(res,202,publicJob(j));
+     }
      if(action==='select'){
        d.shop_requested=true;j.selected_design=i;
+       if(d.finish?.status==='preview')return send(res,200,publicJob(j));
        if(!d.image)throw error('DESIGN_NOT_READY',409);
        if(!['searching','analyzing'].includes(d.status)&&(!d.items.length||d.matching_version!==3)&&!tasks.has('shop:'+id+':'+i)){consume(owner,'select',12);d.status='analyzing';d.items=[];persist();launch('shop:'+id+':'+i,()=>identifyAndShop(j,i));}
        else if(!['searching','analyzing'].includes(d.status)&&(d.items.some(x=>x.status==='idle')||d.search_revision!==10||d.grouping_version!==1||Date.now()-(d.stock_checked_at||0)>STOCK_TTL)&&!tasks.has('shop:'+id+':'+i)){d.status='searching';d.items.filter(x=>['empty','error'].includes(x.status)&&!x.offers?.length&&!x.alternatives?.length).forEach(x=>x.status='idle');persist();launch('shop:'+id+':'+i,()=>resumeShopping(j,i));}
@@ -215,11 +269,11 @@ export function createServer(){return http.createServer({requestTimeout:30000,he
        const item=d.items.find(x=>x.id===String(b.item)),offer=item?.alternatives?.find(x=>x.link===b.offer);
        if(!item||!offer||!sourceScope(offer.link,j.options.market))throw error('INVALID_INPUT');
        if(offer.availability!=='listed_available')throw error(offer.availability==='out_of_stock'?'OUT_OF_STOCK':'STOCK_UNCONFIRMED',409);
-       consume(owner,'placements',8);d.status='adapting';d.adaptation_error=null;persist();launch('replace:'+id+':'+i,()=>replacePiece(j,i,item,offer));return send(res,202,publicJob(j));
+       consume(owner,'placements',8);d.finish=null;d.status='adapting';d.adaptation_error=null;persist();launch('replace:'+id+':'+i,()=>replacePiece(j,i,item,offer));return send(res,202,publicJob(j));
      }
      if(action==='search'){
        const item=d.items.find(x=>x.id===String(itemIndex));if(!item||!['empty','error','idle'].includes(item.status))throw error('INVALID_INPUT');
-       consume(owner,'search',30);const pending=findOne(j,d,item);launch('item:'+id+':'+i+':'+item.id,()=>pending);return send(res,202,publicJob(j));
+       consume(owner,'search',30);d.finish=null;const pending=findOne(j,d,item);launch('item:'+id+':'+i+':'+item.id,()=>pending);return send(res,202,publicJob(j));
      }
    }
  }
@@ -282,6 +336,6 @@ async function selfTest(){
 }
 if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url)){
  if(secure&&!trial)throw Error('SPACES_TRIAL_TOKEN required in production');
- const server=createServer();server.listen(Number(process.env.PORT||8080),'0.0.0.0',()=>{console.log('SPACES_READY 0.3.8');console.log('SPACES_SOURCE_POLICY',JSON.stringify({version:SOURCE_POLICY_VERSION,approved_global:APPROVED_GLOBAL_STORES.length,furniture:FURNITURE_STORES.map(x=>x.name)}));launch('selftest',selfTest);});
+ const server=createServer();server.listen(Number(process.env.PORT||8080),'0.0.0.0',()=>{console.log('SPACES_READY 0.4.0');console.log('SPACES_SOURCE_POLICY',JSON.stringify({version:SOURCE_POLICY_VERSION,approved_global:APPROVED_GLOBAL_STORES.length,furniture:FURNITURE_STORES.map(x=>x.name)}));launch('selftest',selfTest);});
  for(const sig of ['SIGINT','SIGTERM'])process.on(sig,()=>{persist();server.close(()=>process.exit(0));setTimeout(()=>process.exit(0),8000).unref();});
 }

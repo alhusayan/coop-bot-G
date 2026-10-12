@@ -69,3 +69,12 @@ Every visually accepted piece has a bounded product-page stock check before publ
 ### 0.3.8 — Conflicting stock evidence
 
 Observed Home Centre schema and product meta both report InStock for the user’s sold-out examples. Landmark positive SEO availability is therefore unconfirmed unless actual purchase controls or SKU-scoped product state confirm stock; explicit negative evidence still excludes the listing. Confirmed local stock ranks first, then confirmed global stock, followed by unconfirmed listings. Unknown availability cannot crowd real purchasable options out of the capped result set.
+
+
+## 0.4.0 — Measured product recommendations and room preview
+
+Finish my room asks for measured room width/length and optionally a maximum space per item. Store dimensions are parsed only with explicit axes and units. Only approved, listed-in-stock products with complete width/depth/height qualify for automatic selection. Every repeated occurrence must pass the space check; eligible local products precede international ones. The stylist cannot introduce URLs outside the screened set. Missing dimensions, uncertain scale and custom work remain unchanged for review.
+
+The image edit uses actual store photos and dimensions, checks room preservation and verifies every repeated product against the final preview. Preview creation does not modify the saved design. Keep this design rechecks stock and publishes the image, choices and all occurrence crops together. Change a piece regenerates from the saved source.
+
+**Accuracy limits:** Photo-based scale and clearances are estimates, even with room width/length. Entered per-item limits check a rectangular envelope, not full 3D collisions, installation, delivery access or exact colour under different lighting. No output is labelled size_verified. Curtains, built-ins and products missing any required dimension need manual measurement; no dimensions are invented. This feature does not certify an installation plan.

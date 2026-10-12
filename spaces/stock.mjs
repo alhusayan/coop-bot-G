@@ -25,7 +25,10 @@ export async function checkStock(offer,market,{page=safePage,force=false}={}){
  const {product,...stock}=await task;
  // Prices/materials from another default gallery variant cannot replace audited data.
  const sameImage=product?.image===offer.image;
- return {...offer,...(sameImage?product:{}),...stock,image:offer.image};
+ const sku=new URL(offer.link).pathname.match(/\/(?:p|dp|item)\/([^/]+)\/?$/)?.[1];
+ const exactSKU=product?.sku&&sku===String(product.sku);
+ const size=(sameImage||exactSKU)&&product?.dimensions_cm?{dimensions_cm:product.dimensions_cm,dimensions:product.dimensions,dimensions_source:product.dimensions_source}:{};
+ return {...offer,...(sameImage?product:{}),...size,...stock,image:offer.image};
 }
 export async function refreshItemStock(item,market,{check=checkStock}={}){
  const rows=[...(item.offers||[]),...(item.alternatives||[])];

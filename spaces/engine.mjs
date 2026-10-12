@@ -1,3 +1,4 @@
+import {dimensionsFromPage,dimensionLabel} from './dimensions.mjs';
 import {availabilityFromPage} from './availability.mjs';
 import https from 'node:https';
 import dns from 'node:dns/promises';
@@ -102,7 +103,8 @@ export function productFromPage(html,url,currency){
  if(!title||!image)return null;
  const props=Array.isArray(product?.additionalProperty)?product.additionalProperty:[];
  const dimensions=[['Width',product?.width],['Height',product?.height],['Depth',product?.depth],...props.filter(p=>/dimension|width|height|depth|length|diameter/i.test(p.name||'')).slice(0,4).map(p=>[p.name,p.value])].filter(x=>x[1]).map(([k,v])=>k+': '+dimension(v)).join(' · ');
- return {title,price:pageCurrency&&price?price:null,currency:pageCurrency||null,link:url,image,source:new URL(url).hostname.replace(/^www\./,''),evidence:'product_page',...availabilityFromPage(html,url),description:clean(unescapeHTML(product?.description||meta(html,'og:description')).replace(/<[^>]+>/g,' '),1400),color:clean(product?.color,90),material:clean(product?.material,90),dimensions:clean(dimensions,300),sku:clean(product?.sku,100)};
+ const dimensions_cm=dimensionsFromPage(html,product||{});
+ return {title,dimensions_cm,dimensions_source:Object.keys(dimensions_cm).length?'store_product_page':null,price:pageCurrency&&price?price:null,currency:pageCurrency||null,link:url,image,source:new URL(url).hostname.replace(/^www\./,''),evidence:'product_page',...availabilityFromPage(html,url),description:clean(unescapeHTML(product?.description||meta(html,'og:description')).replace(/<[^>]+>/g,' '),1400),color:clean(product?.color,90),material:clean(product?.material,90),dimensions:clean(dimensionLabel(dimensions_cm)||dimensions,300),sku:clean(product?.sku,100)};
 }
 export function sanitizeItems(data,{keep=''}={}){
  return (Array.isArray(data?.items)?data.items:[]).slice(0,28).map((x,i)=>{
