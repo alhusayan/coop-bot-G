@@ -98,8 +98,10 @@ async function replacePiece(j,index,item,offer){
    const result=await adaptPiece(fileImage(j,d.image),item,offer),revision=Date.now();
    const name='design-'+index+'-r'+revision+(result.mimeType==='image/jpeg'?'.jpg':'.png');
    writeFileSync(resolve(DATA,j.id,name),result.output,{mode:0o600});
-   item.box=result.box;item.offers=[result.offer];item.alternatives=[];item.status='done';item.description=offer.title;
-   for(const piece of d.items){const crop=await cropPiece(result.output,piece.box);piece.crop='crop-'+index+'-'+piece.id+'-r'+revision+'.jpg';writeFileSync(resolve(DATA,j.id,piece.crop),crop,{mode:0o600});}
+   const updates=await pool(d.items,4,async piece=>{const box=piece.id===item.id?result.box:piece.box,crop=await cropPiece(result.output,box),file='crop-'+index+'-'+piece.id+'-r'+revision+'.jpg';writeFileSync(resolve(DATA,j.id,file),crop,{mode:0o600});return {piece,box,crop:file};});
+   // Publish all pixels and item references together only after every crop is safely written.
+   for(const update of updates)Object.assign(update.piece,{box:update.box,crop:update.crop});
+   item.offers=[result.offer];item.alternatives=[];item.status='done';item.description=offer.title;
    d.image=name;d.status='complete';persist();console.log('SPACES_PLACEMENT_READY',j.id,index,item.id);
  }catch(e){d.status='complete';d.adaptation_error=e.message;persist();console.log('SPACES_PLACEMENT_FAILED',j.id,index,e.message);}
  if(d.items.some(x=>x.status==='idle'))launch('shop:'+j.id+':'+index,()=>resumeShopping(j,index));
@@ -154,7 +156,7 @@ export function createServer(){return http.createServer({requestTimeout:30000,he
    if(req.method==='POST'){
      const j=action==='select'?ownerJob(id,owner):mutateJob(id,owner),b=await body(req),i=Number(b.design),d=j.designs[i];if(!d)throw error('INVALID_INPUT');if(d.status==='adapting')throw error('JOB_BUSY',409);
      if(action==='select'){
-       d.shop_requested=true;
+       d.shop_requested=true;j.selected_design=i;
        if(!d.image)throw error('DESIGN_NOT_READY',409);
        if(!['searching','analyzing'].includes(d.status)&&(!d.items.length||d.matching_version!==3)&&!tasks.has('shop:'+id+':'+i)){consume(owner,'select',12);d.status='analyzing';d.items=[];persist();launch('shop:'+id+':'+i,()=>identifyAndShop(j,i));}
        else if(!['searching','analyzing'].includes(d.status)&&(d.items.some(x=>x.status==='idle')||d.search_revision!==4)&&!tasks.has('shop:'+id+':'+i)){d.status='searching';d.items.filter(x=>['empty','error'].includes(x.status)).forEach(x=>x.status='idle');persist();launch('shop:'+id+':'+i,()=>resumeShopping(j,i));}
@@ -187,6 +189,10 @@ export function createServer(){return http.createServer({requestTimeout:30000,he
 async function selfTest(){
  await configureModels();
  if(process.env.SPACES_SELF_TEST!=='true')return;
+ // Repair the most recent previously selected failed room once during this migration.
+ const recent=Object.values(state.jobs).filter(j=>j.owner!=='demo'&&j.designs.some(d=>d.items?.length&&d.matching_version!==3)).sort((a,b)=>b.created-a.created)[0];
+ if(recent){const index=Number.isInteger(recent.selected_design)?recent.selected_design:recent.designs.findIndex(d=>d.items?.length&&d.matching_version!==3);const d=recent.designs[index];if(d?.image&&d.matching_version!==3){d.status='analyzing';persist();launch('shop:'+recent.id+':'+index,async()=>{await identifyAndShop(recent,index);console.log('SPACES_ROOM_RECOVERED',JSON.stringify({room:recent.id,design:index,items:d.items.length,matched:d.items.filter(x=>x.offers?.length).length,with_options:d.items.filter(x=>x.alternatives?.length).length}));});}}
+
  const previous=Object.values(state.jobs).find(j=>j.owner==='demo');
  if(previous?.designs.some(d=>d.image)){
    const i=previous.designs.findIndex(d=>d.image);
