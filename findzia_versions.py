@@ -6,6 +6,16 @@ the same existing credit admission; their provider caches are separate.
 """
 import asyncio
 import importlib
+import os
+
+# Spaces is an owned Findzia frontend. Preserve all existing origins and add only
+# its exact production origin before the account and CORS services initialize.
+_spaces_origin = 'https://findzia-spaces-production.up.railway.app'
+for _name in ('FINDZIA_ACCOUNT_ORIGINS', 'WEB_ALLOWED_ORIGINS'):
+    _origins = [x.strip() for x in os.environ.get(_name, 'https://findzia.com,https://www.findzia.com').split(',') if x.strip()]
+    if _spaces_origin not in _origins:
+        _origins.append(_spaces_origin)
+    os.environ[_name] = ','.join(_origins)
 
 import main as original
 
@@ -67,3 +77,4 @@ class VersionRouter:
 
 
 app = VersionRouter(original.app)
+
