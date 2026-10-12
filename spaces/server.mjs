@@ -1,4 +1,5 @@
 import {designFromCatalog} from './catalog-first.mjs';
+import {previewLimits,previewUsage,reservePreview,settlePreview} from './trial-quota.mjs';
 import {DETAILS_VERSION} from './product-data.mjs';
 import {recommendRoom} from './recommendation.mjs';
 import {createRoomPreview} from './room-preview.mjs';
@@ -30,7 +31,7 @@ const secret=trial||'development-only';
 const secure=process.env.NODE_ENV==='production';
 function persist(){state.revision=(state.revision||0)+1;writeFileSync(STATE+'.tmp',JSON.stringify(state),{mode:0o600});renameSync(STATE+'.tmp',STATE);}
 function cleanup(){for(const [id,j] of Object.entries(state.jobs)){if(j.owner!=='demo'&&Date.now()-j.created>86400000){delete state.jobs[id];rmSync(resolve(DATA,id),{recursive:true,force:true});}}for(const k of Object.keys(state.quota)){if(!k.startsWith(new Date().toISOString().slice(0,10)))delete state.quota[k];}persist();}
-for(const j of Object.values(state.jobs))for(const d of j.designs||[]){if(['generating','analyzing','searching','adapting','finishing'].includes(d.status)){const wasFinishing=d.status==='finishing';d.status=wasFinishing?'complete':d.image?(j.flow==='catalog-first-v1'?'complete':'ready'):'error';d.error=wasFinishing?null:'INTERRUPTED';if(d.finish){d.finish.status='error';d.finish.error='INTERRUPTED';}}for(const x of d.items||[]){if(x.status==='searching')x.status='idle';for(const o of [...(x.offers||[]),...(x.alternatives||[])])if(o.stock_version!==STOCK_VERSION&&o.availability!=='out_of_stock')o.availability='unknown';const before=(x.offers?.length||0)+(x.alternatives?.length||0);Object.assign(x,filterApprovedItem(x,j.options.market));if(before&&!x.offers.length&&!x.alternatives.length&&x.status!=='kept'){x.status='idle';x.phase='queued';}}}
+for(const j of Object.values(state.jobs))for(const d of j.designs||[]){if(['generating','analyzing','searching','adapting','finishing'].includes(d.status)){const wasFinishing=d.status==='finishing';settlePreview(state.quota,d.catalog_quota);delete d.catalog_quota;d.status=wasFinishing?'complete':d.image?(j.flow==='catalog-first-v1'?'complete':'ready'):'error';d.error=wasFinishing?null:'INTERRUPTED';if(d.finish){d.finish.status='error';d.finish.error='INTERRUPTED';}}for(const x of d.items||[]){if(x.status==='searching')x.status='idle';for(const o of [...(x.offers||[]),...(x.alternatives||[])])if(o.stock_version!==STOCK_VERSION&&o.availability!=='out_of_stock')o.availability='unknown';const before=(x.offers?.length||0)+(x.alternatives?.length||0);Object.assign(x,filterApprovedItem(x,j.options.market));if(before&&!x.offers.length&&!x.alternatives.length&&x.status!=='kept'){x.status='idle';x.phase='queued';}}}
 cleanup();
 setInterval(cleanup,3600000).unref();
 function sign(v){return createHmac('sha256',secret).update(v).digest('hex');}
@@ -43,7 +44,7 @@ function error(code,status=400){return Object.assign(Error(code),{status});}
 async function body(req){let size=0,chunks=[];for await(const b of req){size+=b.length;if(size>19*1024*1024)throw error('IMAGE_TOO_LARGE',413);chunks.push(b);}try{return JSON.parse(Buffer.concat(chunks));}catch{throw error('INVALID_INPUT');}}
 function ownerJob(id,owner){const j=state.jobs[id];if(!j||j.owner!==owner&&j.owner!=='demo')throw error('NOT_FOUND',404);return j;}
 function mutateJob(id,owner){const j=ownerJob(id,owner);if(j.owner==='demo')throw error('DEMO_READ_ONLY',403);return j;}
-function publicJob(j){return {id:j.id,revision:state.revision||0,created:j.created,flow:j.flow,room:/[\u0600-\u06ff]/.test(j.room)?'Your room':j.room,options:j.options,original:'/media/'+j.id+'/original.jpg',demo:j.owner==='demo',designs:j.designs.map(({catalog_work,...d},i)=>({...d,finish:d.finish?{...d.finish,image:d.finish.image?'/media/'+j.id+'/'+d.finish.image:null}:null,title:j.flow==='catalog-first-v1'?d.title:STYLES[i].en,description:'',needs_rescan:d.matching_version!==3,items:d.matching_version===3?(d.items||[]).map(x=>preferLocalResults(filterApprovedItem(x,j.options.market))).map(x=>({...x,offers:(x.offers||[]).map(o=>({...o,purchase_unit:o.purchase_unit||(/pillow|cushion/i.test(x.name_en)&&/\b(?:cover|case)\b/i.test(o.title)?'Cover only · insert not included':null)})),occurrences:occurrences(x).map(v=>({...v,crop:v.crop?'/media/'+j.id+'/'+v.crop:null})),crop:x.crop?'/media/'+j.id+'/'+x.crop:null})):[],image:d.image?'/media/'+j.id+'/'+d.image:null}))};}
+function publicJob(j){return {id:j.id,revision:state.revision||0,created:j.created,flow:j.flow,room:/[\u0600-\u06ff]/.test(j.room)?'Your room':j.room,options:j.options,original:'/media/'+j.id+'/original.jpg',demo:j.owner==='demo',designs:j.designs.map(({catalog_work,catalog_quota,...d},i)=>({...d,finish:d.finish?{...d.finish,image:d.finish.image?'/media/'+j.id+'/'+d.finish.image:null}:null,title:j.flow==='catalog-first-v1'?d.title:STYLES[i].en,description:'',needs_rescan:d.matching_version!==3,items:d.matching_version===3?(d.items||[]).map(x=>preferLocalResults(filterApprovedItem(x,j.options.market))).map(x=>({...x,offers:(x.offers||[]).map(o=>({...o,purchase_unit:o.purchase_unit||(/pillow|cushion/i.test(x.name_en)&&/\b(?:cover|case)\b/i.test(o.title)?'Cover only · insert not included':null)})),occurrences:occurrences(x).map(v=>({...v,crop:v.crop?'/media/'+j.id+'/'+v.crop:null})),crop:x.crop?'/media/'+j.id+'/'+x.crop:null})):[],image:d.image?'/media/'+j.id+'/'+d.image:null}))};}
 function consume(owner,key,max){const q=new Date().toISOString().slice(0,10)+':'+owner+':'+key;if((state.quota[q]||0)>=max)throw error('TRIAL_LIMIT',429);state.quota[q]=(state.quota[q]||0)+1;persist();}
 function fileImage(j,file){const bytes=readFileSync(resolve(DATA,j.id,file));return {inlineData:{mimeType:bytes[0]===137?'image/png':bytes[0]===255?'image/jpeg':'image/webp',data:bytes.toString('base64')}};}
 function launch(key,fn){if(tasks.has(key))return false;const p=Promise.resolve().then(fn).catch(e=>console.error('SPACES_TASK_FAILED',key,String(e.message).slice(0,80))).finally(()=>tasks.delete(key));tasks.set(key,p);return true;}
@@ -96,10 +97,10 @@ async function generateCatalogDesign(j,index=0,deps={}){
   });
   // Publish image and its exact product list together; the previous room stays intact until now.
   Object.assign(d,{image:filename,title:result.title,items,status:'complete',error:null,progress:{stage:'complete'},matching_version:3,search_revision:10,grouping_version:1,details_version:DETAILS_VERSION,stock_checked_at:Date.now(),inventory_revision:revision,finish:null,measurements:{room:result.plan.room,limits:{}},catalog_layout:result.plan.picks.map(p=>({id:p.id,quantity:p.quantity,positions:p.views.map(v=>v.position_cm)}))});
-  delete d.catalog_work;
+  delete d.catalog_work;settlePreview(state.quota,d.catalog_quota,{success:true});delete d.catalog_quota;
   j.room_context=result.context;j.room=result.context.room_en;j.selected_design=index;
   console.log('SPACES_CATALOG_READY',JSON.stringify({room:j.id,pieces:items.length,quantity:items.reduce((n,x)=>n+x.quantity,0),elapsed_ms:Date.now()-started}));
- }catch(e){if(e.draft?.inlineData&&d.catalog_work){const filename='catalog-draft.'+(e.draft.inlineData.mimeType==='image/png'?'png':'jpg');writeFileSync(resolve(DATA,j.id,filename),Buffer.from(e.draft.inlineData.data,'base64'),{mode:0o600});d.catalog_work.render_file=filename;d.catalog_work.render_correction=e.correction;}if(e.message==='STOCK_CHANGED')delete d.catalog_work;d.status=d.image?'complete':'error';d.error=e.message;d.progress={stage:'error'};console.error('SPACES_CATALOG_ERROR',j.id,e.message,JSON.stringify(e.details||{}));}persist();
+ }catch(e){settlePreview(state.quota,d.catalog_quota);delete d.catalog_quota;if(e.draft?.inlineData&&d.catalog_work){const filename='catalog-draft.'+(e.draft.inlineData.mimeType==='image/png'?'png':'jpg');writeFileSync(resolve(DATA,j.id,filename),Buffer.from(e.draft.inlineData.data,'base64'),{mode:0o600});d.catalog_work.render_file=filename;d.catalog_work.render_correction=e.correction;}if(e.message==='STOCK_CHANGED')delete d.catalog_work;d.status=d.image?'complete':'error';d.error=e.message;d.progress={stage:'error'};console.error('SPACES_CATALOG_ERROR',j.id,e.message,JSON.stringify(e.details||{}));}persist();
 }
 function lensURL(j,item){
  const expires=Date.now()+20*60000,path='/lens-media/'+j.id+'/'+item.crop;
@@ -235,7 +236,7 @@ export function createServer(deps={}){return http.createServer({requestTimeout:3
    res.writeHead(200,{...headers,'Content-Type':'image/jpeg','Cache-Control':'private, max-age=60'});return res.end(req.method==='HEAD'?undefined:readFileSync(f));
  }
 
- if(path==='/healthz')return send(res,200,{ok:true,version:'spaces-0.5.7',source_policy:SOURCE_POLICY_VERSION,lens:!!(process.env.SERPAPI_API_KEY||process.env.SEARCHAPI_API_KEY),generation:!!process.env.GEMINI_API_KEY,search:!!process.env.SERPER_API_KEY});
+ if(path==='/healthz')return send(res,200,{ok:true,version:'spaces-0.5.8',source_policy:SOURCE_POLICY_VERSION,lens:!!(process.env.SERPAPI_API_KEY||process.env.SEARCHAPI_API_KEY),generation:!!process.env.GEMINI_API_KEY,search:!!process.env.SERPER_API_KEY});
  if(path.startsWith('/trial/')){
    const supplied=path.slice(7);if(!['GET','HEAD'].includes(req.method)||!trial||!constantEqual(supplied,trial))throw error('NOT_FOUND',404);
    // Keep the invitation in the address when Safari opens an in-app browser's page.
@@ -251,7 +252,7 @@ export function createServer(deps={}){return http.createServer({requestTimeout:3
    if(!owner)throw error('TRIAL_LINK_REQUIRED',401);
    if(!['GET','HEAD'].includes(req.method)&&req.headers['sec-fetch-site']==='cross-site')throw error('FORBIDDEN',403);
  }
- if(path==='/api/config'&&req.method==='GET')return send(res,200,{markets:MARKETS,flow:'catalog-first-v1',designCount:1,styles:STYLES.slice(0,1).map(({prompt,...s})=>s),configured:!!process.env.GEMINI_API_KEY&&!!process.env.SERPER_API_KEY,demo:Object.values(state.jobs).find(j=>j.owner==='demo'&&j.designs.some(d=>d.image))?.id||null});
+ if(path==='/api/config'&&req.method==='GET')return send(res,200,{previewLimits:previewUsage(state.quota,owner),markets:MARKETS,flow:'catalog-first-v1',designCount:1,styles:STYLES.slice(0,1).map(({prompt,...s})=>s),configured:!!process.env.GEMINI_API_KEY&&!!process.env.SERPER_API_KEY,demo:Object.values(state.jobs).find(j=>j.owner==='demo'&&j.designs.some(d=>d.image))?.id||null});
  if(path==='/api/jobs'&&req.method==='GET')return send(res,200,{jobs:Object.values(state.jobs).filter(j=>j.owner===owner).sort((a,b)=>b.created-a.created).map(publicJob)});
  if(path==='/api/jobs'&&req.method==='POST'){
    const b=await body(req);const idem=String(req.headers['idempotency-key']||'').slice(0,100);
@@ -261,8 +262,9 @@ export function createServer(deps={}){return http.createServer({requestTimeout:3
    if(tasks.size>8)throw error('PROVIDER_BUSY',429);
    const encoded=String(b.image||'');if(!/^data:image\/jpeg;base64,[A-Za-z0-9+/=]+$/.test(encoded))throw error('INVALID_IMAGE');
    const buffer=Buffer.from(encoded.split(',')[1],'base64');if(buffer.length>12*1024*1024||buffer.length<200||buffer[0]!==255||buffer[1]!==216||buffer[2]!==255)throw error('INVALID_IMAGE');
-   consume(owner,'rooms',6);consume('all','rooms',Number(process.env.SPACES_DAILY_ROOMS)||24);
-   const j=makeJob(owner,options(b),buffer,idem);launch('generate:'+j.id,()=>deps.generateJob?deps.generateJob(j):generateCatalogDesign(j,0,deps));return send(res,202,publicJob(j));
+   const reservation=reservePreview(state.quota,owner,'rooms');let j;
+   try{j=makeJob(owner,options(b),buffer,idem);j.designs[0].catalog_quota=reservation;persist();}catch(e){settlePreview(state.quota,reservation,{started:false});persist();throw e;}
+   launch('generate:'+j.id,()=>deps.generateJob?deps.generateJob(j):generateCatalogDesign(j,0,deps));return send(res,202,publicJob(j));
  }
  const match=path.match(/^\/api\/jobs\/([a-f0-9]{24})(?:\/(select|retry|redesign|search|replace|finish|keep-finish|discard-finish|measurements)(?:\/(\d+))?)?$/);
  if(match){const [,id,action,itemIndex]=match;
@@ -275,7 +277,7 @@ export function createServer(deps={}){return http.createServer({requestTimeout:3
        if(requestId&&d.redesign_request===requestId)return send(res,200,publicJob(j));
        if(d.status==='generating'||[...tasks.keys()].some(k=>k.includes(j.id)))throw error('JOB_BUSY',409);
        try{roomMeasurements(j.options);}catch(e){throw error(e.message);}
-       consume(owner,'redesign',6);if(action==='redesign'){d.redesign_count=(d.redesign_count||0)+1;delete d.catalog_work;}d.redesign_request=requestId;d.status='generating';d.error=null;d.progress={stage:'understanding'};persist();
+       d.catalog_quota=reservePreview(state.quota,owner,'redesign');if(action==='redesign'){d.redesign_count=(d.redesign_count||0)+1;delete d.catalog_work;}d.redesign_request=requestId;d.status='generating';d.error=null;d.progress={stage:'understanding'};persist();
        launch('catalog:'+id+':'+i,()=>generateCatalogDesign(j,i,deps));return send(res,202,publicJob(j));
      }
      if(j.flow==='catalog-first-v1'&&['finish','keep-finish','discard-finish','replace','search'].includes(action))throw error('CATALOG_AUTOMATIC',409);
@@ -398,6 +400,6 @@ async function selfTest(){
 }
 if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url)){
  if(secure&&!trial)throw Error('SPACES_TRIAL_TOKEN required in production');
- const server=createServer();server.listen(Number(process.env.PORT||8080),'0.0.0.0',()=>{console.log('SPACES_READY 0.5.7');console.log('SPACES_SOURCE_POLICY',JSON.stringify({version:SOURCE_POLICY_VERSION,approved_global:APPROVED_GLOBAL_STORES.length,furniture:FURNITURE_STORES.map(x=>x.name)}));launch('selftest',selfTest);});
+ const server=createServer();server.listen(Number(process.env.PORT||8080),'0.0.0.0',()=>{console.log('SPACES_READY 0.5.8');console.log('SPACES_PREVIEW_LIMITS',JSON.stringify(previewLimits()));console.log('SPACES_SOURCE_POLICY',JSON.stringify({version:SOURCE_POLICY_VERSION,approved_global:APPROVED_GLOBAL_STORES.length,furniture:FURNITURE_STORES.map(x=>x.name)}));launch('selftest',selfTest);});
  for(const sig of ['SIGINT','SIGTERM'])process.on(sig,()=>{persist();server.close(()=>process.exit(0));setTimeout(()=>process.exit(0),8000).unref();});
 }

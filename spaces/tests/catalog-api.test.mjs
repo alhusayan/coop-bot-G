@@ -19,10 +19,15 @@ test('new rooms finish automatically; redesign is isolated, idempotent and retai
   async function done(){for(let n=0;n<80;n++){j=await fetch(base+'/api/jobs/'+j.id).then(r=>r.json());if(j.designs[0].status!=='generating')return;await new Promise(r=>setTimeout(r,10));}throw Error('timeout');}
   await done();assert.equal(j.designs[0].status,'complete');assert.equal(j.designs[0].title,'Your real office');assert.equal(j.designs[0].items[0].offers.length,1);const saved=j.designs[0].image;
   assert.equal((await post('/api/jobs/'+j.id+'/finish',{design:0})).status,409);
+  const usage=()=>fetch(base+'/api/config').then(r=>r.json()).then(c=>c.previewLimits);
+  const before=(await usage()).redesignsRemaining;
+  assert.equal(Object.hasOwn(j.designs[0],'catalog_quota'),false);
   const path='/api/jobs/'+j.id+'/redesign';fail=true;
   assert.equal((await post(path,{design:0,request_id:'one'})).status,202);
   assert.equal((await post(path,{design:0,request_id:'one'})).status,200);
   assert.equal((await post(path,{design:0,request_id:'two'})).status,409);
+  assert.equal((await usage()).redesignsRemaining,before-1);
   assert.equal(calls,2);release();await done();assert.equal(j.designs[0].image,saved);assert.equal(j.designs[0].error,'STOCK_CHANGED');assert.equal(j.designs[0].items[0].offers.length,1);
+  assert.equal((await usage()).redesignsRemaining,before);
  }finally{await new Promise(r=>s.close(r));rmSync(data,{recursive:true,force:true});}
 });

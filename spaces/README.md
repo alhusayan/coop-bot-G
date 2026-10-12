@@ -8,7 +8,7 @@ Deploy this folder as an independent Railway service from branch `experiment/fin
 
 Set `GEMINI_API_KEY`, `SERPER_API_KEY`, `SERPAPI_API_KEY` and `SEARCHAPI_API_KEY` as references to the existing Railway backend variables, not copied into code. Set `SPACES_TRIAL_TOKEN` to a high-entropy random value; opening `/trial/<token>` establishes an HttpOnly signed session and keeps the invitation URL, so moving from an in-app browser to Safari can establish a separate session. Reopening the invitation preserves the current session owner. The client checks access before photo selection and renews an expired session through the invitation on a 401, without replaying timed-out design requests. Set `SPACES_DATA_DIR=/data` on an isolated volume. Set `SPACES_PUBLIC_URL` to the service HTTPS URL. No provider keys are exposed to the browser.
 
-Optional: `SPACES_IMAGE_MODEL` (default `gemini-nano-banana-2.1`), `SPACES_TEXT_MODEL` (default `gemini-3.8-flash`), `SPACES_DAILY_ROOMS` (24), `SPACES_SELF_TEST=true` for startup diagnostics and legacy-data recovery. New example photos use the same measured product-first flow as uploads. Check the `SPACES_SELFTEST_RESULT` log; errors are not hidden. Real provider API calls are billable.
+Optional: `SPACES_IMAGE_MODEL` (default `gemini-nano-banana-2.1`), `SPACES_TEXT_MODEL` (default `gemini-3.8-flash`), `SPACES_DAILY_ROOMS` (100 total provider attempts), `SPACES_DAILY_ROOMS_PER_BROWSER` (30), `SPACES_DAILY_REDESIGNS_PER_BROWSER` (30), `SPACES_SELF_TEST=true` for startup diagnostics and legacy-data recovery. New example photos use the same measured product-first flow as uploads. Check the `SPACES_SELFTEST_RESULT` log; errors are not hidden. Real provider API calls are billable.
 
 ## Verification
 
@@ -99,3 +99,7 @@ Product-only fidelity failures now edit a bounded room crop using that product's
 Private drafts and verified catalogue choices are checkpointed throughout generation. Retry inspects the saved draft first and can resume within the room's 24-hour retention period. Stock and published dimensions are freshly checked before any rendering; redesign invalidates the old catalogue. Unverified drafts never appear as finished designs.
 
 0.5.7 additionally checks each local edit against the entire previous room before compositing it into the saved draft. If a repeated group does not respond to a single correction, each nonmatching copy is corrected separately, with successful copies checkpointed. Target-position drift, collateral changes and duplicate furniture remain rejection conditions.
+
+## 0.5.8 — private trial allowance
+
+The private test allows 30 new rooms and 30 redesigns per browser daily. Admission reserves the browser allowance and the 100-attempt service ceiling atomically; a rejected request consumes neither. Failed or interrupted catalogue designs restore the browser allowance, while completed provider work still counts against the service cost ceiling. Successful designs remain counted. Reservations are private, survive restarts and settle once. Existing browser sessions and saved rooms are retained.
