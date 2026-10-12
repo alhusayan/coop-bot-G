@@ -3,7 +3,7 @@ import {readFileSync,writeFileSync,mkdirSync,existsSync,renameSync,rmSync} from 
 import {resolve,extname} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {randomBytes,createHmac,timingSafeEqual} from 'node:crypto';
-import {MARKETS,STYLES,gemini,searchItem,sanitizeItems} from './engine.mjs';
+import {MARKETS,STYLES,gemini,searchItem,sanitizeItems,configureModels} from './engine.mjs';
 
 const ROOT=fileURLToPath(new URL('.',import.meta.url));
 const DATA=resolve(process.env.SPACES_DATA_DIR||resolve(ROOT,'data'));
@@ -130,10 +130,14 @@ export function createServer(){return http.createServer({requestTimeout:30000,he
 });}
 
 async function selfTest(){
- if(process.env.SPACES_SELF_TEST!=='true'||Object.values(state.jobs).some(j=>j.owner==='demo'))return;
+ await configureModels();
+ if(process.env.SPACES_SELF_TEST!=='true')return;
+ const previous=Object.values(state.jobs).find(j=>j.owner==='demo');
+ if(previous?.designs.some(d=>d.image)||(previous?.selftests||0)>=3)return;
  const hero=readFileSync(resolve(ROOT,'public','hero.webp'));
  // Demo source is PNG; give it the correct extension/MIME for the image provider.
- const j=makeJob('demo',options({room:'صالة',market:'KW',scope:'decor',budget:1500}),hero);
+ const j=previous||makeJob('demo',options({room:'صالة',market:'KW',scope:'decor',budget:1500}),hero);
+ j.selftests=(j.selftests||0)+1;persist();
  // fileImage uses magic detection below for this bundled sample only.
  console.log('SPACES_SELFTEST_START');
  await generateJob(j);

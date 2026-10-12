@@ -92,12 +92,26 @@ export function sanitizeItems(data){
  return {id:String(i+1),name:clean(x.name_ar,70)||'قطعة '+(i+1),name_en:clean(x.name_en,70),query:clean(x.query_en,160),native_query:clean(x.query_native,160),description:clean(x.description_ar,180),mode,unit:mode==='measure'?'m²':'piece',quantity:mode==='ready'?Math.max(1,Math.min(12,Math.round(Number(x.quantity)||1))):null,box,status:mode==='keep'?'kept':mode==='quote'?'quote':'idle',offers:[]};
  }).filter(x=>x.name_en&&x.query);
 }
+export async function configureModels(env=process.env){
+ if(!env.GEMINI_API_KEY)return;
+ try{
+  const r=await fetch('https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000',{headers:{'x-goog-api-key':env.GEMINI_API_KEY},signal:AbortSignal.timeout(20000)});
+  if(!r.ok){console.error('SPACES_MODEL_LIST_HTTP',r.status);return;}
+  const data=await r.json();const models=(data.models||[]).filter(x=>x.supportedGenerationMethods?.includes('generateContent')).map(x=>x.name.replace(/^models\//,''));
+  const textPreferences=[env.SPACES_TEXT_MODEL,'gemini-3.8-flash','gemini-3.5-flash-lite','gemini-3-flash-preview','gemini-2.5-flash','gemini-2.0-flash'];
+  const imagePreferences=[env.SPACES_IMAGE_MODEL,'gemini-nano-banana-2.1','gemini-3.1-flash-image','gemini-3.1-flash-image-preview','gemini-3-pro-image','gemini-3-pro-image-preview','gemini-2.5-flash-image'];
+  const text=textPreferences.find(x=>models.includes(x))||models.find(x=>/^gemini.*flash/.test(x)&&!/image|tts|live|audio|robot/.test(x));
+  const image=imagePreferences.find(x=>models.includes(x))||models.find(x=>/^gemini.*image/.test(x));
+  if(text)env.SPACES_TEXT_MODEL=text;if(image)env.SPACES_IMAGE_MODEL=image;
+  console.log('SPACES_MODELS',JSON.stringify({text:env.SPACES_TEXT_MODEL,image:env.SPACES_IMAGE_MODEL,available:models.filter(x=>/gemini/.test(x)).slice(0,35)}));
+ }catch(e){console.error('SPACES_MODEL_LIST_FAILED',e.name);}
+}
 export async function gemini(parts,{image=false,env=process.env,json=false}={}){
  if(!env.GEMINI_API_KEY)throw Error('GEMINI_NOT_CONFIGURED');
  const model=image?(env.SPACES_IMAGE_MODEL||'gemini-2.5-flash-image'):(env.SPACES_TEXT_MODEL||'gemini-2.5-flash');
  const config=image?{responseModalities:['TEXT','IMAGE']}:{temperature:0.2,maxOutputTokens:5000,...(json?{responseMimeType:'application/json'}:{})};
  const response=await fetch('https://generativelanguage.googleapis.com/v1beta/models/'+encodeURIComponent(model)+':generateContent',{method:'POST',headers:{'Content-Type':'application/json','x-goog-api-key':env.GEMINI_API_KEY},body:JSON.stringify({contents:[{role:'user',parts}],generationConfig:config}),signal:AbortSignal.timeout(image?170000:65000)});
- if(!response.ok){console.error('SPACES_GEMINI_HTTP',response.status,model);throw Error(response.status===429?'PROVIDER_BUSY':response.status===400||response.status===404?'MODEL_UNAVAILABLE':'GENERATION_FAILED');}
+ if(!response.ok){let detail='';try{const e=await response.json();detail=String(e.error?.message||'').replaceAll(env.GEMINI_API_KEY,'[redacted]').slice(0,220);}catch{}console.error('SPACES_GEMINI_HTTP',response.status,model,detail);throw Error(response.status===429?'PROVIDER_BUSY':response.status===400||response.status===404?'MODEL_UNAVAILABLE':'GENERATION_FAILED');}
  const data=await response.json(),out=data.candidates?.[0]?.content?.parts||[];
  if(image){const img=out.find(x=>x.inlineData?.mimeType?.startsWith('image/'));if(!img)throw Error('NO_IMAGE');return img.inlineData;}
  const text=out.map(x=>x.text||'').join('');
