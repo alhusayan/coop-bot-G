@@ -13,6 +13,8 @@ export function rankProducts(rows,limit=6){
 }
 export function hasLocalOptions(item){return [...(item.offers||[]),...(item.alternatives||[])].some(o=>o.market_scope==='local'&&o.availability==='listed_available');}
 export function preferLocalResults(item){
+ if(item.search_engine==='findzia-original')return {...item,offers:rankProducts(item.offers||[],Infinity),alternatives:rankProducts(item.alternatives||[],Infinity)};
  const local=hasLocalOptions(item),keep=rows=>rankProducts((rows||[]).filter(o=>!local||o.market_scope==='local'),Infinity);
  return {...item,offers:keep(item.offers),alternatives:keep(item.alternatives)};
 }
+

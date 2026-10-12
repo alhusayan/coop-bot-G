@@ -30,7 +30,12 @@ export function sourceDetails(url,market){
  const scope=sourceScope(url,market);if(!scope)return null;const store=storePolicy(url);
  return {market_scope:scope,market:scope==='local'?market:null,source_policy:SOURCE_POLICY_VERSION,shipping_status:'check_at_store',shipping_policy:store?.shipping_policy||null,shipping_note:scope==='local'?'Confirm delivery at store':'Confirm delivery to your address at store'};
 }
-export function filterApprovedOffers(rows,market){return rankProducts((rows||[]).flatMap(o=>{const details=sourceDetails(o.link,market);return details?[{...o,...details}]:[];}),Infinity);}
+export function filterApprovedOffers(rows,market){return rankProducts((rows||[]).flatMap(o=>{
+ // Original Findzia already applied its source, market, stock and price rules.
+ // Retain that classification instead of limiting it to Spaces' legacy list.
+ if(o.search_engine==='findzia-original')return o.search_market===market&&safeUrl(o.link)&&o.price>0?[o]:[];
+ const details=sourceDetails(o.link,market);return details?[{...o,...details}]:[];
+}),Infinity);}
 export function filterApprovedItem(item,market){return {...item,offers:filterApprovedOffers(item.offers,market),alternatives:filterApprovedOffers(item.alternatives,market)};}
 export function requiresPurchaseCheck(url){return storePolicy(url)?.verify_purchase===true;}
 export function hasPurchaseEvidence(html){return /"(?:offers|Offer)"\s*[:\]]|add to (?:cart|bag|basket)|buy (?:now|online)|itemprop=["']offers/i.test(html);}
@@ -77,3 +82,4 @@ export function localQueries(item,market,{recovery=false}={}){
  }
  return [[simple+siteQuery+' '+m.en,market,{images:true,source:'local-recovery'}],[simple+' '+m.en+siteQuery,market,{source:'local-recovery'}]];
 }
+

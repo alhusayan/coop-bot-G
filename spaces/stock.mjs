@@ -3,6 +3,7 @@ import {safePage,productFromPage} from './engine.mjs';
 import {sourceScope} from './sourcing.mjs';
 const pending=new Map();
 export async function checkStock(offer,market,{page=safePage,force=false}={}){
+ if(!force&&offer.search_engine==='findzia-original')return {...offer};
  if(!force&&stockFresh(offer))return {...offer};
  const key=market+':'+offer.link;
  // Only coalesce in-flight default fetches. Stored results carry their own short expiry.
@@ -10,7 +11,7 @@ export async function checkStock(offer,market,{page=safePage,force=false}={}){
    const stamp={stock_version:STOCK_VERSION,stock_checked_at:new Date().toISOString()};
    try{
      const p=await page(offer.link,{timeout:5000});
-     if(!sourceScope(p.url,market)||sourceScope(p.url,market)!==sourceScope(offer.link,market))return {...stamp,availability:'unknown',stock_evidence:'different_storefront'};
+     if(offer.search_engine==='findzia-original'?new URL(p.url).origin!==new URL(offer.link).origin:!sourceScope(p.url,market)||sourceScope(p.url,market)!==sourceScope(offer.link,market))return {...stamp,availability:'unknown',stock_evidence:'different_storefront'};
      const stock=availabilityFromPage(p.html,p.url);
      let product;try{product=productFromPage(p.html,p.url,offer.currency);}catch{}
      console.log('SPACES_STOCK_CHECK',JSON.stringify({url:offer.link,status:stock.availability,evidence:stock.stock_evidence}));
@@ -33,3 +34,4 @@ export async function refreshItemStock(item,market,{check=checkStock}={}){
  const keep=rows=>(rows||[]).map(o=>checked.get(o.link)).filter(o=>o&&o.availability!=='out_of_stock');
  return {...item,offers:keep(item.offers),alternatives:keep(item.alternatives)};
 }
+
