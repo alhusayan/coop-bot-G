@@ -32,7 +32,7 @@ export function createOriginalLayer({request,getLanguage,onSaved,onStatus,onClos
   const clean={...view,lastSearch:{...view.lastSearch,image_base64:undefined}};
   const value=JSON.stringify(clean);if(value===session.saved)return;
   session.saving=true;
-  try{await request(session.path,{method:'POST',body:JSON.stringify({design:session.design,view:clean})});session.saved=value;session.view=clean;onSaved?.(session.key,clean);}
+  try{if(!session.readOnly)await request(session.path,{method:'POST',body:JSON.stringify({design:session.design,view:clean})});session.saved=value;session.view=clean;onSaved?.(session.key,clean);}
   catch{session.saveFailed=true;}finally{session.saving=false;}
  }
  function watch(session){
@@ -74,18 +74,23 @@ export function createOriginalLayer({request,getLanguage,onSaved,onStatus,onClos
   for(const type of ['fz:search-state','fz:result-count','fz:media-state','fz:usage'])root.addEventListener(type,()=>{watch(session);});
   session.timer=setInterval(()=>{watch(session);save(session);},1500);
   if(session.view){
-   root.dataset.homeState='results';root.fzRefineBridge.restore({view:session.view,photos:new Map()});
+   const response=await fetch(session.crop,{credentials:'same-origin'});
+   if(!response.ok)throw Error('Photo unavailable');
+   const blob=await response.blob();
+   const encoded=await new Promise((resolve,reject)=>{const reader=new win.FileReader();reader.onload=()=>resolve(String(reader.result).split(',')[1]);reader.onerror=reject;reader.readAsDataURL(blob);});
+   const view={...session.view,lastSearch:{...session.view.lastSearch,image_base64:encoded,mime_type:blob.type||'image/jpeg'}};
+   root.dataset.homeState='results';root.fzRefineBridge.restore({view,photos:new Map()});
    root.fzRefineBridge.revealSearchResults?.();paint(session);
   }else await run(session);
  }
- async function open({key,name,crop,market,room,design,item,view,legacy=false,newSearch=false}){
+ async function open({key,name,crop,market,room,design,item,view,legacy=false,newSearch=false,readOnly=false}){
   returnFocus=document.activeElement;
   let session=sessions.get(key);
   if(session?.error&&!session.root){session.frame.remove();sessions.delete(key);session=null;}
   const existing=!!session;
   if(!session){
    const frame=document.createElement('iframe');frame.title='Findzia — '+name;frame.className='original-results-frame';frame.allow='payment';
-   session={key,name,crop,market,design,view,legacy,frame,loading:true,busy:false,started:Date.now(),path:'/api/jobs/'+room+'/results/'+item};sessions.set(key,session);
+   session={key,name,crop,market,design,view,legacy,readOnly,frame,loading:true,busy:false,started:Date.now(),path:'/api/jobs/'+room+'/results/'+item};sessions.set(key,session);
    frame.addEventListener('load',()=>ready(session).catch(()=>{session.loading=false;session.error=text('Could not open Findzia. Close and try again.','تعذّر فتح Findzia. سكّر الطبقة وحاول مجددًا.');paint(session);} ),{once:true});
    frame.src='/api/findzia-results';body.append(frame);
   }

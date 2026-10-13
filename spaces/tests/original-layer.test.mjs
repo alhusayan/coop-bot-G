@@ -20,7 +20,7 @@ test('one original photo launch; closing/reopening preserves its live page and s
    snapshot:()=>({view:{items:[{url:'https://merchant.test/p',price:'95 KWD',result_group:'local'}],lastSearch:{country:market,kind:'image',image_base64:'private bytes'}}}),
    restore:()=>{restores++;},revealSearchResults(){}
   };
-  Object.defineProperty(frame,'contentDocument',{value:child.document});Object.defineProperty(frame,'contentWindow',{value:{Event:child.window.Event,File}});
+  Object.defineProperty(frame,'contentDocument',{value:child.document});Object.defineProperty(frame,'contentWindow',{value:{Event:child.window.Event,File,FileReader:class{readAsDataURL(){this.result='data:image/jpeg;base64,Y3JvcA==';this.onload();}}}});
   frame.dispatchEvent(new window.Event('load'));return root;
  }
  try{
@@ -31,6 +31,6 @@ test('one original photo launch; closing/reopening preserves its live page and s
   release();await new Promise(resolve=>setTimeout(resolve,5));assert.ok(saved.length);assert.equal(saved.at(-1).view.lastSearch.image_base64,undefined);
   layer.close();await layer.open(input);assert.equal(calls.length,1);
   await layer.open({...input,key:'room:0:2',item:'2',view:saved.at(-1).view});original([...document.querySelectorAll('iframe')][1]);
-  await new Promise(resolve=>setTimeout(resolve,5));assert.equal(restores,1);assert.equal(calls.length,1,'restoring never calls searchPhoto');assert.equal(crops,1);
+  await new Promise(resolve=>setTimeout(resolve,5));assert.equal(restores,1);assert.equal(calls.length,1,'restoring never calls searchPhoto');assert.equal(crops,2,'restoring reads only the saved photo, not a new search');
  }finally{layer.destroy();globalThis.document=beforeDocument;globalThis.fetch=beforeFetch;}
 });

@@ -194,7 +194,7 @@ async function openItem(id,{retry=false}={}){
  closeSheet();pointFocus={key:keyFor(item),id,marker:pointFocus?.key===keyFor(item)?pointFocus.marker:undefined,waiting:false};
  const saved=!!(item.original_view||item.phase==='complete'||item.offers?.length||item.alternatives?.length||state.job.demo);
  await originalLayer.open({key:keyFor(item),name:item.name_en,crop:item.crop,market:countryCode(),room:state.job.id,design:state.design,item:item.id,
-  newSearch:retry,view:retry?null:item.original_view||(saved?oldOriginalView(item):null),legacy:!item.original_view&&saved});renderShop();
+  readOnly:!!state.job.demo,newSearch:retry,view:retry?null:item.original_view||(saved?oldOriginalView(item):null),legacy:!item.original_view&&saved});renderShop();
 }
 
 function summary(){const t=total(),items=selected().items;showSheet(`<div class="sheet-body"><h2>Your shopping list</h2><div class="list-total">${t.count?esc(money(t.sum)):'No prices yet'}</div><p>${t.count} of ${t.items} pieces included in this total.</p><ul class="list-items">${items.map(x=>{const o=chosen(x);return `<li><span>${esc(x.name_en)}${x.mode==='ready'?' × '+qty(x):''}</span><span>${o?.price!=null?esc(money(o.price,o.currency)):x.mode==='keep'?'Keep':'—'}</span></li>`;}).join('')}</ul><p class="detail-note">Items without prices, international currencies, measured materials, custom work, delivery and installation are not included.</p><button class="primary wide" data-action="export">Save shopping list ${icon('download',true)}</button></div>`,'summary');}
