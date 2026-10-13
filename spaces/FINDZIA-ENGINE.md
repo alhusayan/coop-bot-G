@@ -104,3 +104,18 @@ are forwarded in memory, never written into room state.
 One customer credit is the retail price of one search, not one upstream provider
 API call. Original provider costs and completed visual-admission rules remain
 unchanged. The full-room automatic queue and all startup/demo searches are gone.
+
+## 0.5.1 unobstructed photo and visible search state
+
+All numbered markers are removed. A photo tap selects the smallest detected
+foreground box at that location, without a search or debit. Only the selected
+occurrence is outlined. Its crop and a labeled one-credit search button confirm
+the selection; All pieces provides a thumbnail list and keyboard access for
+small or overlapping objects. Existing merchant results open free.
+
+Loading is visible before wallet admission starts: an in-photo status pill,
+selected-area scan, elapsed seconds and a moving status track below the image.
+No percentage or provider progress is invented. Reduced-motion users keep text,
+elapsed time and a static indicator. Pending searches regain visible focus on
+room reopen; interrupted GET polling reconnects with bounded backoff and never
+replays the paid POST. Original retrieval and wallet accounting are unchanged.

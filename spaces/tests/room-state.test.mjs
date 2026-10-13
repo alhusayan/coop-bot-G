@@ -19,9 +19,20 @@ test('an older response after opening a piece does not permanently stop polling'
  const source=readFileSync(new URL('../public/app.js',import.meta.url),'utf8');
  const fn=source.split('\n').find(line=>line.startsWith('function poll()'));
  let callback,count=0;const context=createRoomContext();context.begin();
- const runtime={pollTimer:null,roomContext:context,state:{job:{id:'room'},view:'shopping'},clearTimeout(){},setTimeout(fn){callback=fn;count++;return count;},api:async()=>({id:'room',revision:1}),applyJob:()=>false,active:()=>true};
+ const runtime={pollTimer:null,pollErrors:0,roomContext:context,state:{job:{id:'room'},view:'shopping'},clearTimeout(){},setTimeout(fn){callback=fn;count++;return count;},api:async()=>({id:'room',revision:1}),applyJob:()=>false,active:()=>true};
  runInNewContext(fn+';poll();',runtime);assert.equal(count,1);
  await callback();assert.equal(count,2,'same-room stale response must schedule another poll');
  context.begin();await callback();assert.equal(count,2,'navigating away must stop the old loop');
 });
 
+
+test('a prolonged disconnect keeps visible status and resumes GET polling without replaying a search',async()=>{
+ const source=readFileSync(new URL('../public/app.js',import.meta.url),'utf8');
+ const fn=source.split('\n').find(line=>line.startsWith('function poll()'));
+ let callback,calls=0,paints=0,done=false;const delays=[],context=createRoomContext();context.begin();
+ const runtime={pollTimer:null,pollErrors:0,roomContext:context,state:{job:{id:'room'},view:'shopping'},clearTimeout(){},setTimeout(fn,ms){callback=fn;delays.push(ms);return delays.length;},
+ api:async(path,options)=>{assert.equal(path,'/api/jobs/room');assert.equal(options,undefined);if(++calls<=7)throw Error('offline');return {id:'room'};},
+ applyJob:()=>{done=true;return true;},active:()=>!done,renderShop:()=>paints++,toast(){},translate:x=>x};
+ runInNewContext(fn+';poll();',runtime);for(let i=0;i<8;i++)await callback();
+ assert.equal(calls,8);assert.equal(paints,8);assert.equal(runtime.pollErrors,0);assert.equal(done,true);assert.ok(delays.every(x=>x>=1500&&x<=10000));
+});
