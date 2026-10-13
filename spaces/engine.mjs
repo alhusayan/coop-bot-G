@@ -128,13 +128,13 @@ export async function configureModels(env=process.env){
   console.log('SPACES_MODELS',JSON.stringify({text:env.SPACES_TEXT_MODEL,image:env.SPACES_IMAGE_MODEL,available:models.filter(x=>/gemini/.test(x)).slice(0,35)}));
  }catch(e){console.error('SPACES_MODEL_LIST_FAILED',e.name);}
 }
-export async function gemini(parts,{image=false,env=process.env,json=false,timeout,maxTokens=14000,schema,jsonRetry=0}={}){
+export async function gemini(parts,{image=false,env=process.env,json=false,timeout,maxTokens=14000,schema,schemaFormat='openapi',jsonRetry=0}={}){
  if(!env.GEMINI_API_KEY)throw Error('GEMINI_NOT_CONFIGURED');
  const model=image?(env.SPACES_IMAGE_MODEL||'gemini-nano-banana-2.1'):(env.SPACES_TEXT_MODEL||'gemini-3.8-flash');
  const config=image?{responseModalities:['TEXT','IMAGE']}:{temperature:0.2,maxOutputTokens:maxTokens,...(json?{responseMimeType:'application/json'}:{})};
  // Keep the same vision model; bounded reasoning avoids spending the deadline on hidden thought tokens.
  if(!image&&/^gemini-3/.test(model))config.thinkingConfig={thinkingLevel:'low'};
- if(json&&schema){const convert=value=>{if(Array.isArray(value))return value.map(convert);if(!value||typeof value!=='object')return value;const result=Object.fromEntries(Object.entries(value).map(([k,v])=>[k,convert(v)]));if(Array.isArray(value.type)){result.type=value.type.find(x=>x!=='null').toUpperCase();result.nullable=value.type.includes('null');}else if(typeof value.type==='string')result.type=value.type.toUpperCase();return result;};config.responseSchema=convert(schema);}
+ if(json&&schema){if(schemaFormat==='json')config.responseJsonSchema=schema;else{const convert=value=>{if(Array.isArray(value))return value.map(convert);if(!value||typeof value!=='object')return value;const result=Object.fromEntries(Object.entries(value).map(([k,v])=>[k,convert(v)]));if(Array.isArray(value.type)){result.type=value.type.find(x=>x!=='null').toUpperCase();result.nullable=value.type.includes('null');}else if(typeof value.type==='string')result.type=value.type.toUpperCase();return result;};config.responseSchema=convert(schema);}}
  const response=await fetch('https://generativelanguage.googleapis.com/v1beta/models/'+encodeURIComponent(model)+':generateContent',{method:'POST',headers:{'Content-Type':'application/json','x-goog-api-key':env.GEMINI_API_KEY},body:JSON.stringify({contents:[{role:'user',parts}],generationConfig:config}),signal:AbortSignal.timeout(timeout||(image?170000:65000))});
  if(!response.ok){let detail='';try{const e=await response.json();detail=String(e.error?.message||'').replaceAll(env.GEMINI_API_KEY,'[redacted]').slice(0,220);}catch{}console.error('SPACES_GEMINI_HTTP',response.status,model,detail);if(response.status===400&&schema){console.log('SPACES_SCHEMA_FALLBACK');return gemini(parts,{image,env,json,timeout,maxTokens,jsonRetry});}throw Error(response.status===429?'PROVIDER_BUSY':response.status===400||response.status===404?'MODEL_UNAVAILABLE':'GENERATION_FAILED');}
  const data=await response.json(),out=data.candidates?.[0]?.content?.parts||[];
@@ -142,7 +142,7 @@ export async function gemini(parts,{image=false,env=process.env,json=false,timeo
  const text=out.filter(x=>!x.thought).map(x=>x.text||'').join('');
  if(!json)return text;
  try{return JSON.parse(text.replace(/^```(?:json)?\s*/,'').replace(/\s*```$/,''));}
- catch(e){console.log('SPACES_JSON_INCOMPLETE',JSON.stringify({finish:data.candidates?.[0]?.finishReason,characters:text.length,retry:jsonRetry}));if(jsonRetry<1)return gemini(parts,{image,env,json,timeout,maxTokens:Math.max(22000,maxTokens*2),schema,jsonRetry:1});throw Error('INCOMPLETE_ANALYSIS');}
+ catch(e){console.log('SPACES_JSON_INCOMPLETE',JSON.stringify({finish:data.candidates?.[0]?.finishReason,characters:text.length,retry:jsonRetry}));if(jsonRetry<1)return gemini(parts,{image,env,json,timeout,maxTokens:Math.max(22000,maxTokens*2),schema,schemaFormat,jsonRetry:1});throw Error('INCOMPLETE_ANALYSIS');}
 }
 export async function serper(q,market,{shopping=false,images=false,lang='en',env=process.env}={}){
  if(!env.SERPER_API_KEY)throw Error('SEARCH_NOT_CONFIGURED');

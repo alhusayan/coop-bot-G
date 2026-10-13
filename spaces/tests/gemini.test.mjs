@@ -13,3 +13,14 @@ test('truncated JSON gets one bounded retry with more output capacity',async t=>
  t.mock.method(globalThis,'fetch',async(_url,options)=>{configs.push(JSON.parse(options.body).generationConfig);return Response.json({candidates:[{finishReason:configs.length===1?'MAX_TOKENS':'STOP',content:{parts:[{text:configs.length===1?'{"items":[':'{"items":[]}'}]}}]});});
  assert.deepEqual(await gemini([{text:'inventory'}],{env,json:true}),{items:[]});assert.equal(configs.length,2);assert.ok(configs[1].maxOutputTokens>configs[0].maxOutputTokens);
 });
+
+test('native JSON Schema is sent unchanged with lowercase types and no legacy schema',async t=>{
+ const schema={type:'object',properties:{items:{type:'array',items:{type:'object',properties:{name_en:{type:'string'}},required:['name_en']}}},required:['items']};
+ t.mock.method(globalThis,'fetch',async(_url,options)=>{
+  const config=JSON.parse(options.body).generationConfig;
+  assert.deepEqual(config.responseJsonSchema,schema);assert.equal(config.responseSchema,undefined);
+  return Response.json({candidates:[{content:{parts:[{text:'{"items":[{"name_en":"Sofa"}]}'}]}}]});
+ });
+ assert.equal((await gemini([{text:'inventory'}],{env,json:true,schema,schemaFormat:'json'})).items.length,1);
+});
+

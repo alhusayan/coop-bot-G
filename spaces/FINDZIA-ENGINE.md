@@ -67,3 +67,19 @@ provider call. Existing ownership and quota checks still apply. One original
 request is made per piece; 0.4.2's automatic empty-search replay is removed. The
 customer can explicitly Search again. Search revision stays 13 because matching
 criteria did not change and a deployment must not restart every saved room.
+
+## 0.4.4 saved-design inventory recovery
+
+Inventory now uses a compact native JSON Schema (name, description, mode and
+crop box). Legacy generated shopping queries are no longer prerequisites for a
+visible object: the original search consumes pixels. The parser accepts the
+object list and standard label/box_2d detector shapes, validates real finite
+coordinates, and never invents a central fallback crop. One corrective pass is
+allowed for valid JSON without usable objects. Logs identify the room/design
+and report response shape/counts without dumping the photo or model response.
+The API format follows https://ai.google.dev/api/generate-content#v1beta.GenerationConfig.
+
+An explicit SPACES_REPAIR_ROOM / SPACES_REPAIR_DESIGN pair can repair one failed,
+empty saved inventory once. It preserves the generated image and checks its
+checksum, respects normal task deduplication, and does not enable self-tests or
+modify successful inventories. These operational selectors are cleared after use.
