@@ -13,7 +13,7 @@ export function createOriginalLayer({request,getLanguage,onSaved,onStatus,onClos
  const text=(en,ar)=>getLanguage()==='ar'?ar:en;
  function paint(session){
   if(current!==session)return;
-  back.textContent=text('← Room','الغرفة ←');title.textContent=session.name;
+  back.textContent='×';back.setAttribute('aria-label',text('Close results','إغلاق النتائج'));title.textContent=session.name;
   retry.textContent=text('Search again · 1 credit','بحث جديد · كردت واحد');retry.hidden=session.busy||session.loading;
   const elapsed=Math.max(0,Math.floor((Date.now()-session.started)/1000));
   status.classList.toggle('is-searching',session.busy||session.loading);

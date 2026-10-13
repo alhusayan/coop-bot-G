@@ -1,0 +1,35 @@
+/* This stylesheet is served only inside the Spaces results frame.
+   Keep Findzia's real cards, groups, media checks, dialogs and messages intact. */
+html[data-findzia-spaces-results] #MainContent .fz-home[data-theme] {
+  padding: 0 !important;
+  min-height: 0 !important;
+}
+html[data-findzia-spaces-results] #MainContent .fz-home[data-theme] > .fz-dark-home,
+html[data-findzia-spaces-results] #MainContent .fz-home[data-theme] > .fz-legal-footer,
+html[data-findzia-spaces-results] #MainContent .fz-home[data-theme] .fz-topbar,
+html[data-findzia-spaces-results] #MainContent .fz-home[data-theme] .fz-search-row,
+html[data-findzia-spaces-results] #MainContent .fz-home[data-theme] .fz-results-tools,
+html[data-findzia-spaces-results] #MainContent .fz-home[data-theme] .fz-home-only {
+  display: none !important;
+}
+/* Remove the fixed header and its reserved space, but retain the original
+   status/error message inside it. Controls remain available to the bridge. */
+html[data-findzia-spaces-results] #MainContent .fz-home[data-theme] .fz-header-slot,
+html[data-findzia-spaces-results] #MainContent .fz-home[data-theme] .fz-fixed-header,
+html[data-findzia-spaces-results] #MainContent .fz-home[data-theme] .fz-fixed-header-inner,
+html[data-findzia-spaces-results] #MainContent .fz-home[data-theme] .fz-search-card {
+  display: contents !important;
+  position: static !important;
+  height: auto !important;
+  min-height: 0 !important;
+  margin: 0 !important;
+  padding: 0 !important;
+}
+html[data-findzia-spaces-results] #MainContent .fz-home[data-theme] > .fz-container {
+  display: block !important;
+  padding-top: 0 !important;
+}
+html[data-findzia-spaces-results] #MainContent .fz-home[data-theme] .fz-results-shell {
+  margin-top: 0 !important;
+  min-height: 0 !important;
+}

@@ -1,10 +1,12 @@
-// Serve the current, complete Findzia document in a same-origin frame. Its own
+// Serve the current Findzia document in a same-origin results frame. Its own
 // scripts own search, billing, image validation, ranking and result rendering.
-// Only asset addresses change; no search/renderer source is copied or patched.
+// Only asset addresses and frame-only presentation change; scripts stay intact.
 let cached,flight;
 export function frameDocument(html){
  if(!html.includes('fzRefineBridge.searchPhoto=')||!html.includes('fzRefineBridge'))throw Error('ORIGINAL_PAGE_UNAVAILABLE');
- return html.replace(/((?:src|href)=["'])\/(assets\/[^"']+|favicon\.svg)(["'])/g,'$1https://findzia.com/$2$3');
+ return html.replace(/((?:src|href)=["'])\/(assets\/[^"']+|favicon\.svg)(["'])/g,'$1https://findzia.com/$2$3')
+  .replace(/<html\b/i,'<html data-findzia-spaces-results')
+  .replace(/<\/head>/i,'<link rel="stylesheet" href="/original-results-frame.css"></head>');
 }
 export async function originalPage(fetcher=fetch){
  if(cached&&Date.now()-cached.at<60000)return cached.html;

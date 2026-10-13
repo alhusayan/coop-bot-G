@@ -144,3 +144,12 @@ calls the search API or changes trusted inventory/prices for design adaptation.
 The older adapter documentation below describes the retired Spaces-rendered
 search flow; it no longer controls customer searches from this interface.
 
+
+## 0.6.1 results-only frame
+
+The embedded live page receives a frame-only stylesheet that hides the original
+site navigation, search composer, camera and footer, and removes the fixed
+header spacer. Original result groups, cards, Save/Info controls, status/error
+messages and payment dialogs are retained. All original inline scripts remain
+byte-for-byte unchanged. Spaces has only a compact title, close action, explicit
+new-search action and an animated search status above the frame.
