@@ -16,12 +16,13 @@ writeFileSync(join(root,'state.json'),JSON.stringify({quota:{},jobs:{[id]:{id,ow
 const {createServer}=await import('../server.mjs');
 
 test('room navigation is free; a point starts only its original search and replay cannot charge twice',async()=>{
- const server=createServer();await new Promise(r=>server.listen(0,'127.0.0.1',r));const base='http://127.0.0.1:'+server.address().port,nativeFetch=globalThis.fetch,calls=[];let stream;
+ const server=createServer();await new Promise(r=>server.listen(0,'127.0.0.1',r));const base='http://127.0.0.1:'+server.address().port,nativeFetch=globalThis.fetch,calls=[];let stream,rejectNext=false;
  globalThis.fetch=async(url,options)=>{
   assert.equal(url,'https://api.findzia.com/internal/spaces/image/stream');calls.push(options);
   assert.equal(options.headers.Authorization,authorization);assert.equal(options.headers.Origin,base);
   assert.match(options.headers['X-Findzia-Request-Id'],/^[a-f0-9]{32}$/);
   const payload=JSON.parse(options.body);assert.equal(payload.country,'US');assert.equal(payload.image_base64,Buffer.from('test pixels 1').toString('base64'));
+  if(rejectNext){rejectNext=false;return Response.json({error:'credits_exhausted'},{status:402});}
   return new Response(new ReadableStream({start(controller){stream=controller;}}),{headers:{'Content-Type':'application/x-ndjson'}});
  };
  const read=()=>nativeFetch(base+'/api/jobs/'+id,{headers:{cookie}}).then(r=>r.json());
@@ -41,6 +42,10 @@ test('room navigation is free; a point starts only its original search and repla
   assert.equal((await post('/focus/1')).status,200);await post('/select');await read();assert.equal(calls.length,1);
   await post('/search/1',{request_id:'4'.repeat(32)},searchHeaders);assert.equal(calls.length,2);assert.notEqual(calls[0].headers['X-Findzia-Request-Id'],calls[1].headers['X-Findzia-Request-Id']);
   finish();await waitComplete();await post('/search/1',{request_id:'4'.repeat(32)},searchHeaders);assert.equal(calls.length,2);
+  rejectNext=true;await post('/search/1',{request_id:'5'.repeat(32)},searchHeaders);
+  for(let n=0;n<100;n++){job=await read();if(job.designs[0].items[0].status==='error')break;await new Promise(r=>setTimeout(r,5));}
+  assert.equal(job.designs[0].items[0].error,'credits_exhausted');assert.equal(job.designs[0].items[0].alternatives.length,1);
+  await post('/focus/1');assert.equal(calls.length,3);
   const other=await nativeFetch(base+'/api/jobs/'+id,{headers:{cookie:cookie.replace(owner,'c'.repeat(32))}});assert.equal(other.status,401);
   const persisted=readFileSync(join(root,'state.json'),'utf8');assert.ok(!persisted.includes(authorization));assert.ok(!persisted.includes('test-customer-token'));assert.ok(!JSON.stringify(await read()).includes(authorization));
  }finally{globalThis.fetch=nativeFetch;try{stream?.close();}catch{}await new Promise(r=>server.close(r));rmSync(root,{recursive:true,force:true});}

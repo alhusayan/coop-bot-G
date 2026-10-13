@@ -99,7 +99,7 @@ function renderShop(){
  if(current&&pointFocus?.waiting&&!pointLaunches.has(keyFor(current))&&(current.alternatives?.length||current.offers?.length||!busy&&(current.phase==='complete'||current.status==='error'))){
   pointFocus.waiting=false;
   if(current.error&&/credits_|session_|sign_in|trial_/.test(current.error))document.querySelector('.fz-home')?.fzBilling?.notice(current.error);
-  renderItem(current);
+  else renderItem(current);
  }
  if($('#sheet').open&&sheetMode==='item'&&state.itemId){const item=items.find(x=>x.id===state.itemId),newKey=JSON.stringify([state.job.id,state.design,d.status,d.adaptation_error,item,state.selections[keyFor(item||{id:state.itemId})]]);if(item&&$('#sheet-content').dataset.itemKey!==newKey)renderItem(item);}
 }

@@ -93,6 +93,7 @@ function findOne(j,d,item,{interactive=false,billing}={}){
  const task=searchOne(j,d,item,{key,interactive,billing}).finally(()=>itemTasks.delete(key));itemTasks.set(key,task);return task;
 }
 async function searchOne(j,d,item,{key,interactive,billing}){
+ const saved={offers:item.offers||[],alternatives:item.alternatives||[]};
  item.status='searching';item.error=null;item.phase='queued';item.search_engine=SEARCH_ENGINE;item.started_at=Date.now();item.first_result_at=null;item.offers=[];item.alternatives=[];persist();
  try{
  if(!item.crop){const bytes=await cropPiece(readFileSync(resolve(DATA,j.id,d.image)),item.box);item.crop='crop-'+j.designs.indexOf(d)+'-'+item.id+'-r'+(d.inventory_revision||Date.now())+'.jpg';writeFileSync(resolve(DATA,j.id,item.crop),bytes,{mode:0o600});}
@@ -101,7 +102,7 @@ async function searchOne(j,d,item,{key,interactive,billing}){
  Object.assign(item,await searchOriginalPiece(readFileSync(resolve(DATA,j.id,item.crop)),j.options.market,{room:j.id,language:searchLanguage(j.options.language),taskKey:key,interactive,billing,onProgress:update=>{Object.assign(item,update);if(!item.first_result_at&&item.alternatives?.length){item.first_result_at=Date.now();console.log('SPACES_FIRST_RESULT',j.id,j.designs.indexOf(d),item.id,item.first_result_at-item.started_at,JSON.stringify(item.search_timing));}persist();}}));
  item.status=item.alternatives.length?'done':'empty';item.phase='complete';item.search_revision=SEARCH_REVISION;
  console.log('SPACES_ITEM_SEARCH',j.id,j.designs.indexOf(d),item.id,JSON.stringify({name:item.name_en,language:searchLanguage(j.options.language),diagnostics:item.search_diagnostics,matches:item.offers.length,alternatives:item.alternatives?.length||0,local:[...item.offers,...(item.alternatives||[])].filter(x=>x.market_scope==='local').length,stores:[...item.offers,...(item.alternatives||[])].slice(0,4).map(x=>x.source),elapsed_ms:Date.now()-item.started_at}));
- }catch(e){item.status='error';item.error=e.message;console.error('SPACES_SEARCH_ERROR',e.message);}persist();
+ }catch(e){if(!item.offers?.length&&!item.alternatives?.length)Object.assign(item,saved);item.status='error';item.error=e.message;console.error('SPACES_SEARCH_ERROR',e.message);}persist();
 }
 async function identifyAndShop(j,index){
  const d=j.designs[index];d.status='analyzing';d.error=null;d.items=[];d.inventory_revision=Date.now();d.matching_version=3;d.search_revision=SEARCH_REVISION;d.search_language=searchLanguage(j.options.language);d.grouping_version=0;persist();

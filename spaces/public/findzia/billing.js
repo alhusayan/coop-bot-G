@@ -75,6 +75,8 @@
     try{device=localStorage.getItem('findzia-device-v1');if(!/^[a-zA-Z0-9_-]{20,100}$/.test(device||'')){device=uid();localStorage.setItem('findzia-device-v1',device);}}
     catch(_){device=uid();}
     const notice=code=>{noticeCode=code;paint();
+      // Spaces has a photo stage instead of the original search composer.
+      if(!hint.isConnected){bridge.accountNotice?.(message(code));if(code==='credits_exhausted')account.open('plans');}
       if(code==='credits_exhausted')requestAnimationFrame(()=>{
         if(hint.hidden||!hint.isConnected)return;
         const header=root.dataset.homeState==='empty'?null:root.querySelector('[data-fixed-header]');
