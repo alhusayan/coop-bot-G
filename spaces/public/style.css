@@ -168,7 +168,7 @@
 
 /* One consistent surface while the original document boots behind the layer. */
 .original-results-frame:not([data-ready=true]){visibility:hidden}
-.design-pick-remove .icon svg{fill:#d75367;stroke:#d75367;width:22px;height:22px}
+.design-pick-remove .icon svg{fill:none;stroke:currentColor;width:24px;height:24px}
 .design-pick-remove{background:#fff;color:#23332b;border:1px solid #23332b15}
 .results-skeletons{display:none}
 .original-results-waiting{justify-content:flex-start;padding-top:50px}
@@ -200,3 +200,33 @@ html[data-findzia-theme=dark] :is(.original-results-status,.original-results-sub
 html[data-findzia-theme=dark] .original-results-back{background:#304739;color:var(--ink)}
 html[data-findzia-theme=dark] .original-results-retry{color:#c0e4cc}
 html[data-findzia-theme=dark] .original-results-status.is-searching::before{border-color:#5d7b67;border-top-color:#c0e4cc}
+
+/* Quiet, bounded search progress; completed cards need no status paragraph. */
+.original-results-back{display:grid;place-items:center}.original-results-back svg{width:23px;height:23px}
+.original-results-tools{position:relative;min-height:0;height:3px;padding:0!important;overflow:visible;border:0;flex:none}
+.original-results-tools.is-searching,.original-results-tools.has-error{height:auto;min-height:38px;padding:4px 18px 10px!important}
+.original-results-tools.is-complete:not(.has-error) .original-results-status{display:none}
+.original-results-tools::after,.original-results-status::before{display:none!important}
+.original-results-status{font-size:12px!important}.original-results-percent{font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums}
+.original-results-progress{position:absolute;inset:auto 0 0;height:3px;overflow:hidden;background:var(--line)}
+.original-results-progress>span{display:block;height:100%;background:#709d82;transition:width .25s linear;will-change:width}
+.original-results-tools.is-complete .original-results-progress{opacity:0;transition:opacity .3s .45s}
+.design-pick-remove[aria-pressed=true]{background:#2c604b;color:#fff;border-color:#2c604b}
+.design-pick-remove[aria-pressed=true] svg{fill:none;stroke:currentColor}
+html:has(body>dialog[open]){overflow:hidden}
+@media(max-width:760px){
+ html{scroll-padding-bottom:calc(96px + env(safe-area-inset-bottom,0px))}
+ body{min-height:100svh;overflow-x:clip}
+ main{min-height:calc(100svh - 180px);padding-bottom:32px}
+ body>footer{padding-bottom:calc(96px + env(safe-area-inset-bottom,0px))}
+ #generate-button,.piece-search-button{scroll-margin-block:24px 112px}
+ #shopping .room-stage{position:relative;top:auto}
+ #shopping .design-canvas>img{min-height:0;height:auto}
+ :root #sheet,:root .original-results-layer{max-height:calc(var(--spaces-viewport-height,100svh) - 12px);max-width:100%;top:var(--spaces-viewport-top,0px);bottom:auto;margin:8px auto 0}
+ :root .original-results-layer{height:calc(var(--spaces-viewport-height,100svh) - 12px)}
+ #sheet{overflow-y:auto;overscroll-behavior-y:contain;-webkit-overflow-scrolling:touch}
+ #sheet-content{padding-bottom:calc(80px + env(safe-area-inset-bottom,0px))}
+ .purchase-actions{bottom:0;padding-bottom:16px}
+ #toast{bottom:calc(92px + env(safe-area-inset-bottom,0px))}
+}
+@media(prefers-reduced-motion:reduce){.original-results-progress>span{transition:none}}

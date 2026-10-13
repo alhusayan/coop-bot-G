@@ -1,23 +1,26 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {parseHTML} from 'linkedom';
-import {accountDocument,frameDocument} from '../original-page.mjs';
-import {accountURL,accountReturnPath,bindAccountNavigation} from '../public/account-navigation.js';
-test('account presentation keeps original auth code, and room return cannot redirect elsewhere',()=>{
- const source='<html><head><script>e.fzRefineBridge.searchPhoto=fzAcceptPhoto;</script></head><body></body></html>';
- const page=accountDocument(frameDocument(source));
- assert.match(page,/data-findzia-spaces-account/);assert.doesNotMatch(page,/data-findzia-spaces-results|original-results-frame.css/);
- assert.match(page,/<script>e.fzRefineBridge.searchPhoto=fzAcceptPhoto;<\/script>/);
- assert.equal(accountURL('plans','SA','ar'),'/account?view=plans&country=SA&lang=ar');
+import {accountReturnPath,prepareAccountReturn,bindAccountNavigation,openAccountModal} from '../public/account-navigation.js';
+test('old account callbacks restore Spaces without losing the one-time auth fragment',()=>{
+ const calls=[],fragment='#findzia-login=test-only-code&flow=test-only-flow';
+ const result=prepareAccountReturn({location:{pathname:'/account',search:'?view=plans&country=KW&lang=ar&payment=returned',hash:fragment},history:{state:null,replaceState:(...args)=>calls.push(args)},storage:{getItem:()=>'/trial/abc123'}});
+ assert.deepEqual(result,{legacy:true,auth:true,view:'plans'});
+ assert.equal(calls[0][2],'/trial/abc123?payment=returned'+fragment);
  for(const invalid of ['https://evil.test/','//evil.test/','/account','/trial/abc?secret=123','javascript:alert(1)'])assert.equal(accountReturnPath(invalid),'/');
- assert.equal(accountReturnPath('/trial/abc123'),'/trial/abc123');
+ const ordinary=prepareAccountReturn({location:{pathname:'/trial/abc123',search:'',hash:fragment},history:{replaceState:()=>assert.fail('native account must consume its own fragment')},storage:{getItem:()=>null}});
+ assert.equal(ordinary.auth,true);assert.equal(ordinary.legacy,false);
 });
-test('account and credit prompts navigate out of the result frame; settings stay available',()=>{
- const {document,window}=parseHTML('<div id="root"><button data-dark-settings>Account</button><button data-main-nav="plans">Plans</button></div>');
- const root=document.querySelector('#root'),navigations=[],local=[];root.fzAccount={open:view=>local.push(view)};
- bindAccountNavigation(root,view=>navigations.push(view));
- root.querySelector('[data-dark-settings]').dispatchEvent(new window.Event('click',{bubbles:true}));
- root.querySelector('[data-main-nav="plans"]').dispatchEvent(new window.Event('click',{bubbles:true}));
- root.fzAccount.open('signin');root.fzAccount.open('checkout');root.fzAccount.open('settings');
- assert.deepEqual(navigations,['home','plans','signin','checkout']);assert.deepEqual(local,['settings']);
+test('a results account prompt closes its layer and opens the parent native account without navigation',()=>{
+ const {document,window}=parseHTML('<div id="frame"><button data-dark-settings>Account</button><button data-main-nav="plans">Plans</button><button data-account-provider="apple">Apple</button></div><div id="findzia-home-spaces"><dialog data-dark-menu></dialog></div>');
+ const before=globalThis.document;globalThis.document=document;
+ try{
+  const root=document.querySelector('#frame'),parent=document.querySelector('#findzia-home-spaces'),opens=[],local=[];
+  parent.querySelector('dialog').close=()=>{};parent.fzAccount={open:view=>opens.push(view)};
+  root.fzAccount={open:view=>local.push(view)};
+  bindAccountNavigation(root,openAccountModal);
+  for(const button of root.querySelectorAll('button'))button.dispatchEvent(new window.Event('click',{bubbles:true}));
+  root.fzAccount.open('signin');root.fzAccount.open('checkout');root.fzAccount.open('settings');
+  assert.deepEqual(opens,['home','plans','signin','signin','checkout']);assert.deepEqual(local,['settings']);
+ }finally{globalThis.document=before;}
 });

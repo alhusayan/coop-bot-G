@@ -26,3 +26,12 @@ html[data-findzia-theme=dark] .country-choice.selected{background:#314c3b;border
 [dir=rtl] .history-card{text-align:right}
 
 @media(max-width:600px){#shopify-section-spaces .fz-home[data-home-state=empty] .fz-dark-home{padding:14px 16px 16px!important}#findzia-home-spaces .fz-dark-header{min-height:54px}}
+/* One account sheet in the parent page, with its own reachable scrolling body. */
+#findzia-home-spaces .fz-account{max-height:calc(var(--spaces-viewport-height,100dvh) - 24px)}
+@media(max-width:760px){
+ #findzia-home-spaces .fz-account{width:calc(100vw - 16px);height:calc(var(--spaces-viewport-height,100svh) - 24px);max-height:calc(var(--spaces-viewport-height,100svh) - 24px);top:var(--spaces-viewport-top,0px);bottom:auto;margin:12px auto;border-radius:24px}
+ #findzia-home-spaces .fza-body{min-height:0;overflow-y:auto;padding-bottom:calc(88px + env(safe-area-inset-bottom,0px));-webkit-overflow-scrolling:touch}
+ #findzia-home-spaces .fza-header{padding:14px 18px;min-height:64px}
+ #findzia-home-spaces [data-dark-menu]{max-height:calc(var(--spaces-viewport-height,100svh) - 24px);overflow-y:auto;padding-bottom:calc(80px + env(safe-area-inset-bottom,0px))}
+ .fzb-wallet-dialog,.fzb-mf-dialog{max-height:calc(var(--spaces-viewport-height,100svh) - 24px)!important}
+}

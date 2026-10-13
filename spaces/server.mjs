@@ -15,7 +15,7 @@ import {adaptPiece} from './adaptation.mjs';
 import {groupIdenticalPieces,occurrences} from './identity.mjs';
 import {detectRoom,roomBrief,verifyRoomFunction} from './room-function.mjs';
 import {identifyPieces,inventoryRepairTarget} from './inventory.mjs';
-import {originalPage,savedOriginalView,accountDocument} from './original-page.mjs';
+import {originalPage,savedOriginalView} from './original-page.mjs';
 import {updateDesignPicks} from './public/design-picks.js';
 
 const ROOT=fileURLToPath(new URL('.',import.meta.url));
@@ -168,7 +168,7 @@ export function createServer(){return http.createServer({requestTimeout:30000,he
    res.writeHead(200,{...headers,'Content-Type':'image/jpeg','Cache-Control':'private, max-age=60'});return res.end(req.method==='HEAD'?undefined:readFileSync(f));
  }
 
-  if(path==='/healthz')return send(res,200,{ok:true,version:'spaces-0.7.1',source_policy:SOURCE_POLICY_VERSION,lens:!!(process.env.SERPAPI_API_KEY||process.env.SEARCHAPI_API_KEY),generation:!!process.env.GEMINI_API_KEY,search:!!process.env.SERPER_API_KEY});
+  if(path==='/healthz')return send(res,200,{ok:true,version:'spaces-0.7.2',source_policy:SOURCE_POLICY_VERSION,lens:!!(process.env.SERPAPI_API_KEY||process.env.SEARCHAPI_API_KEY),generation:!!process.env.GEMINI_API_KEY,search:!!process.env.SERPER_API_KEY});
  if(path.startsWith('/trial/')){
    const supplied=path.slice(7);if(!['GET','HEAD'].includes(req.method)||!trial||!constantEqual(supplied,trial))throw error('NOT_FOUND',404);
    // Keep the invitation in the address when Safari opens an in-app browser's page.
@@ -185,13 +185,16 @@ export function createServer(){return http.createServer({requestTimeout:30000,he
    if(!['GET','HEAD'].includes(req.method)&&req.headers['sec-fetch-site']==='cross-site')throw error('FORBIDDEN',403);
  }
  if(path==='/api/config'&&req.method==='GET')return send(res,200,{markets:MARKETS,styles:STYLES.map(({prompt,...s})=>s),configured:!!process.env.GEMINI_API_KEY&&!!process.env.SERPER_API_KEY,demo:Object.values(state.jobs).find(j=>j.owner==='demo'&&j.designs.some(d=>d.image))?.id||null});
-  if(['/api/findzia-results','/account'].includes(path)&&['GET','HEAD'].includes(req.method)){
-    const page=await originalPage(),isAccount=path==='/account',html=isAccount?accountDocument(page):page;
-   // Only this private, same-origin frame executes the original page's inline
-   // scripts. The public Findzia headers and all other Spaces routes stay intact.
+ // Old account callbacks retain their fragment and render the Spaces shell.
+ if(path==='/account'&&['GET','HEAD'].includes(req.method)){
+   res.writeHead(200,{...headers,'Content-Type':'text/html; charset=utf-8','Cache-Control':'no-store'});
+   return res.end(req.method==='HEAD'?undefined:readFileSync(resolve(ROOT,'public/index.html')));
+ }
+ if(path==='/api/findzia-results'&&['GET','HEAD'].includes(req.method)){
+   const page=await originalPage();
    const policy=headers['Content-Security-Policy'].replace("script-src 'self'", "script-src 'self' 'unsafe-inline' https://findzia.com").replace("style-src 'self'", "style-src 'self' https://findzia.com").replace("frame-ancestors 'none'", "frame-ancestors 'self'");
-    res.writeHead(200,{...headers,'X-Frame-Options':isAccount?'DENY':'SAMEORIGIN','Content-Security-Policy':isAccount?policy.replace("frame-ancestors 'self'","frame-ancestors 'none'"):policy,'Content-Type':'text/html; charset=utf-8','Cache-Control':'no-store'});
-   return res.end(req.method==='HEAD'?undefined:html);
+   res.writeHead(200,{...headers,'X-Frame-Options':'SAMEORIGIN','Content-Security-Policy':policy,'Content-Type':'text/html; charset=utf-8','Cache-Control':'no-store'});
+   return res.end(req.method==='HEAD'?undefined:page);
  }
  if(path==='/api/jobs'&&req.method==='GET')return send(res,200,{jobs:Object.values(state.jobs).filter(j=>j.owner===owner).sort((a,b)=>b.created-a.created).map(publicJob)});
  if(path==='/api/jobs'&&req.method==='POST'){
@@ -276,7 +279,7 @@ export function createServer(){return http.createServer({requestTimeout:30000,he
  if(/^\/policies\/(privacy-policy|terms-of-service|refund-policy)$/.test(path)){res.writeHead(302,{...headers,Location:'https://findzia.com'+path});return res.end();}
  const assets={'/':'index.html','/app.js':'app.js','/request.js':'request.js','/room-state.js':'room-state.js','/live-view.js':'live-view.js','/style.css':'style.css','/hero.webp':'hero.webp','/icon.svg':'icon.svg','/robots.txt':'robots.txt'};
  for(const name of ['original.css','fonts.css','motion.css','boot.js','i18n.js','motion.js','support.js','account.js','billing.js'])assets['/findzia/'+name]='findzia/'+name;
-  for(const name of ['markets.js','findzia-shell.js','findzia-shell.css','local-catalog.js','hotspots.js','original-results.js','original-results-frame.css','design-picks.js','similar-review.js','spaces-theme.js','account-navigation.js','account-page.js','account-page.css','search-budget.js'])assets['/'+name]=name;
+  for(const name of ['markets.js','findzia-shell.js','findzia-shell.css','local-catalog.js','hotspots.js','original-results.js','original-results-frame.css','design-picks.js','similar-review.js','spaces-theme.js','mobile-viewport.js','account-navigation.js','account-page.js','account-page.css','search-budget.js'])assets['/'+name]=name;
  if(assets[path]){const file=resolve(ROOT,'public',assets[path]),mime={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.png':'image/png','.webp':'image/webp','.svg':'image/svg+xml','.txt':'text/plain'}[extname(file)];res.writeHead(200,{...headers,'Content-Type':mime,'Cache-Control':path==='/'?'no-store':path==='/hero.webp'?'public, max-age=86400':'no-cache'});return res.end(req.method==='HEAD'?undefined:readFileSync(file));}
  throw error('NOT_FOUND',404);
  }catch(e){if(!res.headersSent)send(res,e.status||500,{error:e.status?e.message:'UNEXPECTED_ERROR'});else res.end();if(!e.status)console.error('SPACES_HTTP_ERROR',e.message);}

@@ -2,8 +2,8 @@
 // entry point, wallet, media checks, cards, groups and sorting. No offer adapter.
 import {productKey,hasSavedResults,savedPickImage} from './design-picks.js';
 import {reviewSimilarCards} from './similar-review.js';
-import {bindAccountNavigation,openAccountPage} from './account-navigation.js';
-import {searchBudget} from './search-budget.js';
+import {bindAccountNavigation,openAccountModal} from './account-navigation.js';
+import {searchBudget,SEARCH_BUDGET_MS} from './search-budget.js';
 export function createOriginalLayer({request,getLanguage,onSaved,onStatus,onClose,onPick}){
  const sessions=new Map();let current=null,returnFocus=null;
  const layer=document.createElement('dialog');layer.className='original-results-layer';layer.setAttribute('aria-label','Findzia results');
@@ -11,11 +11,13 @@ export function createOriginalLayer({request,getLanguage,onSaved,onStatus,onClos
  const back=document.createElement('button');back.type='button';back.className='original-results-back';
  const title=document.createElement('span');title.className='original-results-title';
  const status=document.createElement('span');status.className='original-results-status';status.setAttribute('role','status');
- const retry=document.createElement('button');retry.type='button';retry.className='original-results-retry';retry.hidden=true;
+ const progress=document.createElement('div');progress.className='original-results-progress';progress.setAttribute('role','progressbar');progress.setAttribute('aria-valuemin','0');progress.setAttribute('aria-valuemax','100');
+ const fill=document.createElement('span');progress.append(fill);
+ const percent=document.createElement('small');percent.className='original-results-percent';percent.setAttribute('aria-hidden','true');
  const thumbnail=document.createElement('img');thumbnail.className='original-results-thumb';thumbnail.alt='';
  const subtitle=document.createElement('small');subtitle.className='original-results-subtitle';
  const heading=document.createElement('div');heading.className='original-results-heading';heading.append(subtitle,title);
- const tools=document.createElement('div');tools.className='original-results-tools';tools.append(status,retry);
+ const tools=document.createElement('div');tools.className='original-results-tools';tools.append(status,percent,progress);
  const body=document.createElement('div');body.className='original-results-body';
  const waiting=document.createElement('div');waiting.className='original-results-waiting';waiting.setAttribute('aria-hidden','true');
  waiting.innerHTML='<span class="search-spinner"></span><span class="results-skeletons"><i></i><i></i></span>';body.append(waiting);
@@ -41,20 +43,25 @@ export function createOriginalLayer({request,getLanguage,onSaved,onStatus,onClos
   if(current!==session)return;
   layer.dir=['ar','ur'].includes(getLanguage())?'rtl':'ltr';
   if(thumbnail.getAttribute('src')!==session.crop)thumbnail.src=session.crop;subtitle.textContent=text('Store options','خيارات المتاجر');
-  back.textContent='×';back.setAttribute('aria-label',text('Close results','إغلاق النتائج'));title.textContent=session.name;
-  retry.textContent=text('Search again · 1 credit','بحث جديد · كردت واحد');retry.hidden=session.busy||session.loading;
-  const elapsed=Math.max(0,Math.floor((Date.now()-session.started)/1000));
-  status.classList.toggle('is-searching',session.busy||session.loading);
+  if(!back.firstChild)back.innerHTML='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>';
+  back.setAttribute('aria-label',text('Done','تم'));title.textContent=session.name;
+  const searching=!!(session.busy||session.loading);
   const visible=session.root?.querySelector('[data-results-body] .fz-card-shell:not([data-spaces-visual="held"])');
-  waiting.hidden=!!visible||!!session.error||!(session.busy||session.loading);
-  status.textContent=session.loading?text('Opening store options…','جاري فتح خيارات المتاجر…'):session.busy?(visible?text('Checking more options…','جاري فحص خيارات إضافية…'):text('Finding your piece…','جاري البحث عن قطعتك…')):session.error||text('Tap the heart to save to your design','اضغط القلب لحفظ القطعة بتصميمك');
-  status.setAttribute('aria-busy',String(session.busy||session.loading));
-  // Elapsed time is a secondary hint, not a constantly announced live region.
-  tools.dataset.elapsed=session.busy?elapsed+'s':'';
+  waiting.hidden=!!visible||!!session.error||!searching;
+  status.textContent=searching?text('Searching…','جاري البحث…'):!visible?(session.error||''):'';
+  status.setAttribute('aria-busy',String(searching));
+  const value=searching?(session.budget?Math.min(99,Math.floor((Date.now()-session.started)/SEARCH_BUDGET_MS*100)):0):100;
+  progress.setAttribute('aria-label',text('Search progress','تقدّم البحث'));
+  progress.setAttribute('aria-valuenow',String(value));
+  progress.setAttribute('aria-valuetext',searching?text('Searching','جاري البحث'):text('Finished','انتهى'));
+  fill.style.width=value+'%';percent.textContent=searching&&session.budget?value+'%':'';
+  tools.classList.toggle('is-searching',searching);tools.classList.toggle('is-complete',!searching);
+  tools.classList.toggle('has-error',!searching&&!visible&&!!session.error);
+
  }
- function close(){if(!layer.open)return;save(current);layer.close();document.body.style.overflow='';returnFocus?.focus?.({preventScroll:true});onClose?.();}
+ function close(){if(!layer.open)return;save(current);layer.close();returnFocus?.focus?.({preventScroll:true});onClose?.();}
  back.addEventListener('click',close);layer.addEventListener('cancel',event=>{event.preventDefault();close();});
- retry.addEventListener('click',()=>{if(current&&!current.busy&&!current.loading){if(current.root)run(current);else{const input={...current};current.frame.remove();sessions.delete(current.key);open(input);}}});
+
  function context(session){return session.root?.fzRefineBridge?.context();}
  async function save(session){
   if(!session||session.saving||session.busy||session.loading||!session.completed||!session.root)return;
@@ -91,13 +98,12 @@ export function createOriginalLayer({request,getLanguage,onSaved,onStatus,onClos
   for(const button of session.root?.querySelectorAll('[data-save-product]')||[]){
    const active=chosen.has(productKey(button.dataset.saveProduct)),label=active?text('Remove from this design','إزالة من هالتصميم'):text('Save to this design','احفظ لهالتصميم');
    button.setAttribute('aria-pressed',String(active));button.setAttribute('aria-label',label);button.title=label;
-   if(!button.querySelector('[data-design-heart]'))button.innerHTML='<svg data-design-heart viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.7l-1.1-1.1a5.5 5.5 0 0 0-7.8 7.8L12 21l8.8-8.6a5.5 5.5 0 0 0 0-7.8Z"/></svg>';
+   if(!button.querySelector('[data-design-check]'))button.innerHTML='<svg data-design-check viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m8 12 3 3 5-6"/></svg>';
   }
  }
  function bindPicks(session){
   const root=session.root;
   root.addEventListener('click',async event=>{
-   if(event.target.closest?.('[data-photo-retry]')){event.preventDefault();event.stopImmediatePropagation();if(!session.busy&&!session.loading)run(session);return;}
    const button=event.target.closest?.('[data-save-product]');if(!button||!root.contains(button))return;
    // Redirect only the bookmark's destination. Search, card rendering and
    // product details continue to run entirely in the original page.
@@ -119,7 +125,7 @@ export function createOriginalLayer({request,getLanguage,onSaved,onStatus,onClos
   syncPicks(session);
  }
  function beginBudget(session){
-  session.budget?.cancel();
+  session.budget?.cancel();clearInterval(session.progressTimer);
   session.budget=searchBudget(()=>{
    session.loading=false;session.launching=false;session.busy=false;
    // Native restore cancels its launch and request controllers, increments its
@@ -127,10 +133,11 @@ export function createOriginalLayer({request,getLanguage,onSaved,onStatus,onClos
    const bridge=session.root?.fzRefineBridge,snapshot=bridge?.snapshot();
    if(snapshot?.view){bridge.restore(snapshot);bridge.revealSearchResults?.();session.root.fzSearchProgress?.stop();session.completed=hasSavedResults(snapshot.view,session.market);}
    const visible=session.root?.querySelector('[data-results-body] .fz-card-shell:not([data-spaces-visual="held"])');
-   session.error=visible?text('Search ended at 16 seconds. These are the results received so far.','انتهى البحث عند ١٦ ثانية. هذه النتائج اللي وصلت حتى الآن.'):text('No confirmed results arrived within 16 seconds. No automatic retry.','ما وصلت نتائج مؤكدة خلال ١٦ ثانية. ما راح نعيد البحث تلقائيًا.');
+   clearInterval(session.progressTimer);session.error=visible?'':text('No close matches found.','ما لقينا نتائج قريبة.');
    onStatus?.(session.key,false);paint(session);save(session);
   });
   session.started=session.budget.started;
+  session.progressTimer=setInterval(()=>paint(session),200);
  }
  async function run(session,reuseBudget=false){
   if(session.loading||session.busy)return;
@@ -150,11 +157,11 @@ export function createOriginalLayer({request,getLanguage,onSaved,onStatus,onClos
    session.completed=result!==false;
    if(result===false&&!context(session)?.busy)session.startedSearch=!!context(session)?.kind&&context(session).kind==='image';
   }catch{if(session.budget===budget&&!budget.expired)session.error=text('Could not finish. Try again.','تعذّر إكمال البحث. حاول مرة ثانية.');}
-  finally{if(session.budget===budget){budget.finish();session.launching=false;watch(session);save(session);}}
+  finally{if(session.budget===budget){budget.finish();clearInterval(session.progressTimer);session.launching=false;watch(session);save(session);}}
  }
  async function ready(session){
   const start=Date.now();
-  while(Date.now()-start<16000&&!session.budget?.expired){
+  while(Date.now()-start<SEARCH_BUDGET_MS&&!session.budget?.expired){
    const root=session.frame.contentDocument?.querySelector('.fz-home');
    if(root?.fzRefineBridge?.searchPhoto&&root.fzBilling&&root.fzAccount){session.root=root;break;}
    await new Promise(resolve=>setTimeout(resolve,100));
@@ -162,7 +169,7 @@ export function createOriginalLayer({request,getLanguage,onSaved,onStatus,onClos
   if(session.budget?.expired)return;
   if(!session.root)throw Error('Original page unavailable');
   const win=session.frame.contentWindow,root=session.root;
-  bindAccountNavigation(root,view=>openAccountPage(view,session.market,getLanguage()));
+  bindAccountNavigation(root,view=>{close();openAccountModal(view);});
   const beforeSearch=win.FindziaBeforeSearch;
   if(beforeSearch)win.FindziaBeforeSearch=async(...args)=>{
    const budget=session.budget;
@@ -209,14 +216,14 @@ export function createOriginalLayer({request,getLanguage,onSaved,onStatus,onClos
    const frame=document.createElement('iframe');frame.title='Findzia — '+name;frame.className='original-results-frame';frame.allow='payment';
    session={key,name,crop,market,room,design,item,view,picks,readOnly,frame,loading:true,busy:false,started:Date.now(),path:'/api/jobs/'+room+'/results/'+item};sessions.set(key,session);
    if(!hasSavedResults(view,market))beginBudget(session);
-   frame.addEventListener('load',()=>ready(session).catch(()=>{session.budget?.finish();session.loading=false;session.error=text('Could not open Findzia. Close and try again.','تعذّر فتح Findzia. سكّر الطبقة وحاول مجددًا.');paint(session);} ),{once:true});
+   frame.addEventListener('load',()=>ready(session).catch(()=>{session.budget?.finish();clearInterval(session.progressTimer);session.loading=false;session.error=text('Could not open Findzia. Close and try again.','تعذّر فتح Findzia. سكّر الطبقة وحاول مجددًا.');paint(session);} ),{once:true});
    frame.src='/api/findzia-results';body.append(frame);
   }
   session.picks=picks;if(session.root){syncLanguage(session);resultsOnly(session);syncPicks(session);}
   current=session;for(const other of sessions.values())other.frame.hidden=other!==session;
-  paint(session);if(!layer.open){layer.showModal();document.body.style.overflow='hidden';}back.focus({preventScroll:true});
+  paint(session);if(!layer.open){layer.showModal();}back.focus({preventScroll:true});
   if(existing&&newSearch&&!session.busy&&!session.loading)await run(session);
  }
  return {open,close,refreshLanguage(){for(const session of sessions.values())if(session.root)syncLanguage(session);if(current)paint(current);},has:key=>sessions.has(key),busy:key=>sessions.get(key)?.busy===true,
-  destroy(){close();for(const session of sessions.values()){session.budget?.cancel();clearInterval(session.timer);clearTimeout(session.noticeTimer);session.pickObserver?.disconnect();session.frame.remove();}sessions.clear();layer.remove();}};
+  destroy(){close();for(const session of sessions.values()){session.budget?.cancel();clearInterval(session.progressTimer);clearInterval(session.timer);clearTimeout(session.noticeTimer);session.pickObserver?.disconnect();session.frame.remove();}sessions.clear();layer.remove();}};
 }

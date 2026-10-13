@@ -1,5 +1,5 @@
 import {marketLanguage} from './markets.js';
-import {bindAccountNavigation,openAccountPage} from './account-navigation.js';
+import {prepareAccountReturn,rememberAccountRoom} from './account-navigation.js';
 // Connect the original Findzia account, billing and menu to the Spaces screens.
 // The account API remains the single authority for identity, credits and payment.
 const languages={en:'English',nl:'Nederlands',ar:'العربية',de:'Deutsch',fr:'Français',it:'Italiano',es:'Español',pt:'Português',tr:'Türkçe',ru:'Русский',ja:'日本語',zh:'中文',ko:'한국어',hi:'हिन्दी',ur:'اردو',id:'Bahasa Indonesia',ms:'Bahasa Melayu'};
@@ -12,7 +12,7 @@ export async function mountFindzia({getMarket,getMarkets,setMarket,openMarket,op
   accountSaved:()=>{try{return JSON.parse(localStorage.getItem('findzia-saved-v1')||'[]');}catch{return [];}},
   accountRemoveSaved:url=>{const saved=root.fzRefineBridge.accountSaved().filter(x=>x.url!==url);localStorage.setItem('findzia-saved-v1',JSON.stringify(saved));},
   accountSearch:(query,country)=>{const url=new URL('https://findzia.com/');url.searchParams.set('q',query);url.searchParams.set('country',country||getMarket());location.assign(url.href);},
-  snapshot:()=>({view:{items:[]},recommendation:null}),restore:()=>{},restoreHomeView:home
+  snapshot:()=>({view:{items:[]},recommendation:null}),restore:()=>{root.dataset.homeState='empty';},restoreHomeView:home
  };
  function sync(){
   const markets=getMarkets();market.replaceChildren(...Object.entries(markets).map(([code,m])=>new Option(m.flag+' '+m.en,code)));market.value=getMarket();
@@ -39,11 +39,15 @@ export async function mountFindzia({getMarket,getMarkets,setMarket,openMarket,op
  menu.addEventListener('click',event=>{if(event.target===menu){const r=menu.getBoundingClientRect();if(event.clientX<r.left||event.clientX>r.right||event.clientY<r.top||event.clientY>r.bottom)menu.close();}});
  root.querySelector('[data-dark-market-open]').addEventListener('click',openMarket);
  root.querySelector('[data-home-link]').addEventListener('click',event=>{event.preventDefault();home();});
- // Capture header/menu navigation before the original modal handlers mount.
- bindAccountNavigation(root,view=>openAccountPage(view,getMarket(),root.dataset.lang||'en'));
+ const accountReturn=prepareAccountReturn();
+ root.addEventListener('click',event=>{
+  if(event.target.closest?.('[data-account-provider],[data-dark-settings],[data-profile-settings],.fz-account button'))rememberAccountRoom();
+ },true);
  for(const name of ['i18n','motion','support','account','billing'])await import('./findzia/'+name+'.js');
- const nativeOpen=root.fzAccount.open;
- root.fzAccount.open=(view='home',...args)=>['home','signin','plans','subscription','usage','checkout','profile'].includes(view)?openAccountPage(view,getMarket(),root.dataset.lang||'en'):nativeOpen(view,...args);
+ // resumeLogin opens its own status view and owns the original code exchange.
+ if(accountReturn.legacy&&!accountReturn.auth)root.fzAccount.open(accountReturn.view);
+ const done=root.querySelector('[data-account-close]');
+ if(done)done.innerHTML='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>';
  window.FindziaLocale.mount(root);setMarketLanguage();
  sync();window.FindziaI18n.refresh();
  root.querySelectorAll('[data-shell-pending]').forEach(el=>{el.disabled=false;el.removeAttribute('data-shell-pending');});

@@ -18,7 +18,7 @@ test('one original photo launch; closing/reopening preserves its live page and s
   root.fzStoreScene={destroy(){sceneStops++;delete root.fzStoreScene;}};root.fzSearchWait={destroy(){waitStops++;delete root.fzSearchWait;}};root.dataset.waitActive='true';root.dataset.searchLaunching='false';
   root.fzBilling={};root.fzAccount={};root.fzRefineBridge={
    context:()=>({country:market,kind:'image',busy,media_pending:true}),
-   prepare:async()=>frame.dataset.expired==='true'?[]:[{}],
+   prepare:async()=>{if(frame.dataset.expired==='true'){root.querySelector('[data-results-body]').replaceChildren();return [];}return [{}];},
    searchPhoto:async file=>{calls.push(file);busy=true;await new Promise(resolve=>release=resolve);busy=false;return true;},
    snapshot:()=>({view:{items:[{url:'https://merchant.test/p',price:'95 KWD',result_group:'local'}],lastSearch:{country:market,kind:'image',image_base64:'private bytes'}}}),
    restore:()=>{restores++;},revealSearchResults(){}
@@ -33,7 +33,7 @@ test('one original photo launch; closing/reopening preserves its live page and s
   layer.close();await layer.open(input);assert.equal(document.querySelector('iframe'),frame);assert.equal(calls.length,1);
   release();await new Promise(resolve=>setTimeout(resolve,5));assert.ok(saved.length);assert.equal(sceneStops,1);assert.equal(waitStops,1);assert.equal(root.dataset.waitActive,undefined);assert.equal(layer.busy(input.key),false,'false search-launching attribute is not a busy search');
   assert.deepEqual(themes,[{theme:'dark',source:'spaces'}],'theme uses the original object contract and does not repeatedly toggle');
-  assert.ok(root.querySelector('[data-design-heart]'));
+  assert.ok(root.querySelector('[data-design-check]'));
   const bookmark=root.querySelector('[data-save-product]');let globalSaves=0;root.addEventListener('click',()=>globalSaves++);
   bookmark.dispatchEvent(new window.Event('click',{bubbles:true,cancelable:true}));await new Promise(resolve=>setTimeout(resolve,5));
   assert.equal(picks.length,1);assert.equal(picks[0].key,input.key);assert.equal(picks[0].product.price,'95 KWD');assert.equal(globalSaves,0,'design bookmark must not write the original global saved list');assert.equal(bookmark.getAttribute('aria-pressed'),'true');assert.equal(saved.at(-1).view.lastSearch.image_base64,undefined);
