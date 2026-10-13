@@ -119,3 +119,28 @@ No percentage or provider progress is invented. Reduced-motion users keep text,
 elapsed time and a static indicator. Pending searches regain visible focus on
 room reopen; interrupted GET polling reconnects with bounded backoff and never
 replays the paid POST. Original retrieval and wallet accounting are unchanged.
+# 0.6.0 — live original results layer
+
+The active Spaces UI now opens the complete live Findzia home/results document
+inside a private same-origin dialog frame. `original-page.mjs` fetches only
+`https://findzia.com/` and resolves its versioned asset URLs to that origin.
+Inline scripts, search handling, billing, media validation, result groups,
+ranking, prices and cards are not copied or modified. The original site's
+existing `fzRefineBridge.searchPhoto(File)` receives the room's crop bytes.
+The Spaces `/focus` and `/search` paths are not called by this UI.
+
+The frame has the same origin as Spaces to share its existing account/guest
+wallet. No credentials are passed to an iframe URL or postMessage. Only the
+private frame route permits same-origin framing and original inline scripts;
+public Findzia and all other Spaces route headers remain unchanged.
+
+Each piece retains its live frame while the layer is closed. Reopening cannot
+start another search. The original page's view is saved under the owned room,
+without photo bytes or wallet credentials, and restored through the original
+view API. Legacy saved options remain a labeled previous search; a new original
+search requires an explicit one-credit action. Saving/restoring views never
+calls the search API or changes trusted inventory/prices for design adaptation.
+
+The older adapter documentation below describes the retired Spaces-rendered
+search flow; it no longer controls customer searches from this interface.
+

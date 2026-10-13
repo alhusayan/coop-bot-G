@@ -15,6 +15,7 @@ import {adaptPiece} from './adaptation.mjs';
 import {groupIdenticalPieces,occurrences} from './identity.mjs';
 import {detectRoom,roomBrief,verifyRoomFunction} from './room-function.mjs';
 import {identifyPieces,inventoryRepairTarget} from './inventory.mjs';
+import {originalPage,savedOriginalView} from './original-page.mjs';
 
 const ROOT=fileURLToPath(new URL('.',import.meta.url));
 const DATA=resolve(process.env.SPACES_DATA_DIR||resolve(ROOT,'data'));
@@ -35,7 +36,7 @@ function sign(v){return createHmac('sha256',secret).update(v).digest('hex');}
 function constantEqual(a,b){const x=Buffer.from(a),y=Buffer.from(b);return x.length===y.length&&timingSafeEqual(x,y);}
 function session(req){const raw=String(req.headers.cookie||'').split(';').map(x=>x.trim()).find(x=>x.startsWith('spaces_session='))?.slice(15)||'';const [id,stamp,sig]=raw.split('.');if(!/^[a-f0-9]{32}$/.test(id||'')||Number(stamp)<Date.now()||!sig||!constantEqual(sign(id+'.'+stamp),sig))return null;return id;}
 function cookie(id=randomBytes(16).toString('hex')){const stamp=Date.now()+7*86400000,value=id+'.'+stamp;return 'spaces_session='+value+'.'+sign(value)+'; Path=/; HttpOnly; SameSite=Lax; Max-Age=604800'+(secure?'; Secure':'');}
-const headers={'X-Content-Type-Options':'nosniff','X-Frame-Options':'DENY','X-Robots-Tag':'noindex, nofollow, noarchive','Referrer-Policy':'no-referrer','Permissions-Policy':'camera=(self), microphone=(), geolocation=(), payment=*', 'Content-Security-Policy':"default-src 'self'; script-src 'self' https://cdn.paddle.com https://*.myfatoorah.com; style-src 'self' https://fonts.googleapis.com 'unsafe-inline'; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: blob: https:; connect-src 'self' https://api.findzia.com https://*.paddle.com https://*.myfatoorah.com; frame-src https://*.paddle.com https://*.myfatoorah.com; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self' https://*.paddle.com https://*.myfatoorah.com"};
+const headers={'X-Content-Type-Options':'nosniff','X-Frame-Options':'DENY','X-Robots-Tag':'noindex, nofollow, noarchive','Referrer-Policy':'no-referrer','Permissions-Policy':'camera=(self), microphone=(), geolocation=(), payment=*', 'Content-Security-Policy':"default-src 'self'; script-src 'self' https://cdn.paddle.com https://*.myfatoorah.com; style-src 'self' https://fonts.googleapis.com 'unsafe-inline'; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: blob: https:; connect-src 'self' https://api.findzia.com https://*.paddle.com https://*.myfatoorah.com; frame-src 'self' https://*.paddle.com https://*.myfatoorah.com; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self' https://*.paddle.com https://*.myfatoorah.com"};
 function send(res,status,value,extra={}){res.writeHead(status,{...headers,'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store',...extra});res.end(typeof value==='string'?value:JSON.stringify(value));}
 function error(code,status=400){return Object.assign(Error(code),{status});}
 async function body(req){let size=0,chunks=[];for await(const b of req){size+=b.length;if(size>19*1024*1024)throw error('IMAGE_TOO_LARGE',413);chunks.push(b);}try{return JSON.parse(Buffer.concat(chunks));}catch{throw error('INVALID_INPUT');}}
@@ -166,7 +167,7 @@ export function createServer(){return http.createServer({requestTimeout:30000,he
    res.writeHead(200,{...headers,'Content-Type':'image/jpeg','Cache-Control':'private, max-age=60'});return res.end(req.method==='HEAD'?undefined:readFileSync(f));
  }
 
- if(path==='/healthz')return send(res,200,{ok:true,version:'spaces-0.5.1',source_policy:SOURCE_POLICY_VERSION,lens:!!(process.env.SERPAPI_API_KEY||process.env.SEARCHAPI_API_KEY),generation:!!process.env.GEMINI_API_KEY,search:!!process.env.SERPER_API_KEY});
+ if(path==='/healthz')return send(res,200,{ok:true,version:'spaces-0.6.0',source_policy:SOURCE_POLICY_VERSION,lens:!!(process.env.SERPAPI_API_KEY||process.env.SEARCHAPI_API_KEY),generation:!!process.env.GEMINI_API_KEY,search:!!process.env.SERPER_API_KEY});
  if(path.startsWith('/trial/')){
    const supplied=path.slice(7);if(!['GET','HEAD'].includes(req.method)||!trial||!constantEqual(supplied,trial))throw error('NOT_FOUND',404);
    // Keep the invitation in the address when Safari opens an in-app browser's page.
@@ -183,6 +184,14 @@ export function createServer(){return http.createServer({requestTimeout:30000,he
    if(!['GET','HEAD'].includes(req.method)&&req.headers['sec-fetch-site']==='cross-site')throw error('FORBIDDEN',403);
  }
  if(path==='/api/config'&&req.method==='GET')return send(res,200,{markets:MARKETS,styles:STYLES.map(({prompt,...s})=>s),configured:!!process.env.GEMINI_API_KEY&&!!process.env.SERPER_API_KEY,demo:Object.values(state.jobs).find(j=>j.owner==='demo'&&j.designs.some(d=>d.image))?.id||null});
+ if(path==='/api/findzia-results'&&['GET','HEAD'].includes(req.method)){
+   const html=await originalPage();
+   // Only this private, same-origin frame executes the original page's inline
+   // scripts. The public Findzia headers and all other Spaces routes stay intact.
+   const policy=headers['Content-Security-Policy'].replace("script-src 'self'", "script-src 'self' 'unsafe-inline' https://findzia.com").replace("style-src 'self'", "style-src 'self' https://findzia.com").replace("frame-ancestors 'none'", "frame-ancestors 'self'");
+   res.writeHead(200,{...headers,'X-Frame-Options':'SAMEORIGIN','Content-Security-Policy':policy,'Content-Type':'text/html; charset=utf-8','Cache-Control':'no-store'});
+   return res.end(req.method==='HEAD'?undefined:html);
+ }
  if(path==='/api/jobs'&&req.method==='GET')return send(res,200,{jobs:Object.values(state.jobs).filter(j=>j.owner===owner).sort((a,b)=>b.created-a.created).map(publicJob)});
  if(path==='/api/jobs'&&req.method==='POST'){
    const b=await body(req);const idem=String(req.headers['idempotency-key']||'').slice(0,100);
@@ -203,12 +212,17 @@ export function createServer(){return http.createServer({requestTimeout:30000,he
    const market=j.options.market,result=await searchLocalCatalog(item.query||item.name_en,market,{language:MARKETS[market].lang});
    return send(res,200,{market,...result});
  }
- const match=path.match(/^\/api\/jobs\/([a-f0-9]{24})(?:\/(select|retry|search|focus|replace)(?:\/(\d+))?)?$/);
+ const match=path.match(/^\/api\/jobs\/([a-f0-9]{24})(?:\/(select|retry|search|focus|replace|results)(?:\/(\d+))?)?$/);
  if(match){const [,id,action,itemIndex]=match;
    if(req.method==='GET'&&!action)return send(res,200,publicJob(ownerJob(id,owner)));
    if(req.method==='DELETE'&&!action){const j=mutateJob(id,owner);if([...tasks.keys()].some(k=>k.includes(j.id)))throw error('JOB_BUSY',409);delete state.jobs[id];rmSync(resolve(DATA,id),{recursive:true,force:true});persist();return send(res,200,{ok:true});}
    if(req.method==='POST'){
      const j=action==='select'?ownerJob(id,owner):mutateJob(id,owner),b=await body(req),i=Number(b.design),d=j.designs[i];if(!d)throw error('INVALID_INPUT');if(d.status==='adapting')throw error('JOB_BUSY',409);
+     if(action==='results'){
+       const item=d.items.find(x=>x.id===String(itemIndex));if(!item)throw error('INVALID_INPUT');
+       try{item.original_view=savedOriginalView(b.view,j.options.market);}catch{throw error('INVALID_INPUT');}
+       item.original_saved_at=Date.now();persist();return send(res,200,{ok:true});
+     }
      if(action==='select'){
        j.selected_design=i;
        if(!d.image)throw error('DESIGN_NOT_READY',409);
@@ -255,7 +269,7 @@ export function createServer(){return http.createServer({requestTimeout:30000,he
  if(/^\/policies\/(privacy-policy|terms-of-service|refund-policy)$/.test(path)){res.writeHead(302,{...headers,Location:'https://findzia.com'+path});return res.end();}
  const assets={'/':'index.html','/app.js':'app.js','/request.js':'request.js','/room-state.js':'room-state.js','/live-view.js':'live-view.js','/style.css':'style.css','/hero.webp':'hero.webp','/icon.svg':'icon.svg','/robots.txt':'robots.txt'};
  for(const name of ['original.css','fonts.css','motion.css','boot.js','i18n.js','motion.js','support.js','account.js','billing.js'])assets['/findzia/'+name]='findzia/'+name;
- for(const name of ['findzia-shell.js','findzia-shell.css','local-catalog.js','hotspots.js'])assets['/'+name]=name;
+ for(const name of ['findzia-shell.js','findzia-shell.css','local-catalog.js','hotspots.js','original-results.js'])assets['/'+name]=name;
  if(assets[path]){const file=resolve(ROOT,'public',assets[path]),mime={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.png':'image/png','.webp':'image/webp','.svg':'image/svg+xml','.txt':'text/plain'}[extname(file)];res.writeHead(200,{...headers,'Content-Type':mime,'Cache-Control':path==='/'?'no-store':path==='/hero.webp'?'public, max-age=86400':'no-cache'});return res.end(req.method==='HEAD'?undefined:readFileSync(file));}
  throw error('NOT_FOUND',404);
  }catch(e){if(!res.headersSent)send(res,e.status||500,{error:e.status?e.message:'UNEXPECTED_ERROR'});else res.end();if(!e.status)console.error('SPACES_HTTP_ERROR',e.message);}
